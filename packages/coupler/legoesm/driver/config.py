@@ -830,6 +830,10 @@ class ExperimentConfig(NamedTuple):
     # CAM RRTMG-style transported layer above the model top (see
     # ``RRTMGPConfig.overhead_layer``).  False = off (byte-identical).
     rrtmgp_overhead_layer: bool = False
+    # RRTMGP gas-optics table set: "reduced" (LW g128 / SW g112, the module
+    # default) or "full" (LW g256 / SW g224, the reference tables; RFMIP
+    # forcing error <=0.04 W/m2 vs up to 0.24).  Production AMIP selects "full".
+    rrtmgp_gas_tables: str = "reduced"
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
@@ -3064,6 +3068,19 @@ class ExperimentConfig(NamedTuple):
         # channel (an AMIP run with ``ozone_forcing="externl"`` runs the static
         # fallback profile).  Membership-check them here so the failure is
         # fail-early and loud (dispatch-hardening).
+        _valid_gas_tables = ("reduced", "full")
+        if self.rrtmgp_gas_tables not in _valid_gas_tables:
+            errors.append(
+                f"rrtmgp_gas_tables must be one of {_valid_gas_tables}, "
+                f"got {self.rrtmgp_gas_tables!r}"
+            )
+        elif (self.rrtmgp_gas_tables != "reduced"
+              and self.radiation not in ("rrtmg", "rrtmgp")):
+            errors.append(
+                f"rrtmgp_gas_tables={self.rrtmgp_gas_tables!r} is read only by "
+                f"the rrtmg/rrtmgp radiation; radiation={self.radiation!r} "
+                "would ignore it."
+            )
         _valid_ozone_forcing = ("inline", "external", "off")
         if self.ozone_forcing not in _valid_ozone_forcing:
             errors.append(
@@ -5395,6 +5412,7 @@ class ExperimentConfig(NamedTuple):
             volcanic_aerosol_lw=getattr(amip_cfg, 'volcanic_aerosol_lw', False),
             rrtmgp_overhead_layer=getattr(
                 amip_cfg, "rrtmgp_overhead_layer", False),
+            rrtmgp_gas_tables=getattr(amip_cfg, "rrtmgp_gas_tables", "reduced"),
             cloud_scheme=amip_cfg.cloud_scheme,
             microphysics=amip_cfg.microphysics,
             convection=getattr(amip_cfg, 'convection', 'sbm'),

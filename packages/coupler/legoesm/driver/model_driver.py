@@ -35,6 +35,7 @@ from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
     refuse_cap_floor_on_fv,
     rrtmgp_config_from_experiment,
+    solar_config_from_experiment,
     convection_config_for,
     build_physics_pipeline,
     gwd_config_for,
@@ -5339,21 +5340,13 @@ class ModelDriver:
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
         from legoesm.forcing.external import (
-            SolarConfig, OzoneConfig, AerosolConfig, GHGConfig,
+            OzoneConfig, AerosolConfig, GHGConfig,
             get_solar_forcing_at_time,
             get_ghg_at_time,
         )
 
         cfg = self.config
-        self._solar_config = SolarConfig(
-            S_0=cfg.S_0, source=cfg.solar_source,
-            path=cfg.solar_file, tsi_var=cfg.solar_tsi_var,
-            spectral_var=cfg.solar_spectral_var,
-            spectral_band_order=getattr(
-                cfg, "solar_spectral_band_order", "auto",
-            ),
-            start_year=cfg.start_year,
-        )
+        self._solar_config = solar_config_from_experiment(cfg)
         self._use_solar_spectral = (cfg.solar_source == "spectral_file")
 
         # Ozone external forcing

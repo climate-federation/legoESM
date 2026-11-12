@@ -761,6 +761,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "resolutions (C24/C48 L20) compile instead of stalling. "
                              "Numerically exact (columns are independent); must "
                              "divide the column count.")
+    parser.add_argument("--rrtmgp-gas-tables", choices=("reduced", "full"),
+                        default=_EXPERIMENT_DEFAULTS.rrtmgp_gas_tables,
+                        help="RRTMGP gas-optics tables: 'reduced' (LW g128 / SW "
+                             "g112) or 'full' (LW g256 / SW g224, the reference "
+                             "tables; about twice the radiation cost).")
     parser.add_argument("--rrtmgp-overhead-layer", action="store_true",
                         default=_EXPERIMENT_DEFAULTS.rrtmgp_overhead_layer,
                         help="CAM RRTMG-style transported layer from the model "
@@ -3042,6 +3047,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
         rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,
+        rrtmgp_gas_tables=args.rrtmgp_gas_tables,
         diurnal_cycle=args.diurnal_cycle,
         orbital_insolation=args.orbital_insolation,
         co2_ppmv=args.co2_ppmv,
