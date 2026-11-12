@@ -152,14 +152,28 @@ def _campaign_yamls():
                 yield path, doc
 
 
+# ``smoke_radiation`` is read only under --smoke (the trainer swaps it in for
+# a fast compile check); it never reaches a production run, so a gray value
+# there is allowed (3-way vote 2026-11-12, 3-0).
+_SMOKE_ONLY_KEYS = frozenset({"smoke_radiation"})
+
+
+def _gray_offenders(docs):
+    return [f"{name}:{key}" for name, doc in docs
+            for key, value in doc.items()
+            if key.endswith("radiation") and value == "gray"
+            and key not in _SMOKE_ONLY_KEYS]
+
+
 def test_no_campaign_config_selects_gray():
-    offenders = [
-        f"{path.relative_to(_REPO)}:{key}"
-        for path, doc in _campaign_yamls()
-        for key, value in doc.items()
-        if key.endswith("radiation") and value == "gray"
-    ]
+    offenders = _gray_offenders(
+        (str(path.relative_to(_REPO)), doc) for path, doc in _campaign_yamls())
     assert not offenders, f"gray radiation back in a campaign config: {offenders}"
+
+
+def test_the_smoke_exemption_does_not_admit_production_gray():
+    assert _gray_offenders([("x", {"radiation": "gray"})]) == ["x:radiation"]
+    assert _gray_offenders([("x", {"smoke_radiation": "gray"})]) == []
 
 
 def test_no_campaign_config_carries_the_removed_escape():

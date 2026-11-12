@@ -123,7 +123,8 @@ def test_val_window_decks_pass_trainer_key_check(deck):
     from legoesm.training import scale_build
     path = C._resolve_config_path(f"config/wb/campaign/{deck}")
     yml = C._load_campaign_yaml(path)
-    assert yml["n_val_windows"] == 6
+    # 24 windows since e611402c32 (2014 validation for every deck), as v9
+    assert yml["n_val_windows"] == 24
     scale_build.validate_wb_campaign_yaml(yml)
 
 
