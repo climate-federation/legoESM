@@ -1732,15 +1732,17 @@ def _step_multilayer_land_impl(
             _T_start = jnp.where(snow > 0.0, T_snow0,
                                  jnp.minimum(T_soil[:, 0], constants.T_freeze))
             _G_node = G_surface
-            if _thermal_kw.pop("surface_conductance") is not None:
+            _lam = _thermal_kw.pop("surface_conductance")
+            if _lam is not None:
                 # Semi-implicit surface (SimpleSEB): the flux that is consistent
                 # with the capped skin of the tentative node + soil solve on the
                 # start-of-step state (as the two-leaf Picard callback), applied
                 # explicitly below like the canopy's.  The Robin correction
-                # G - G_surface reaches the column only, not the atmosphere (as
-                # on the snow-free SimpleSEB path).
+                # G - G_surface reaches the column only, not the atmosphere's
+                # SH/LE -- the same as the snow-free SimpleSEB path's Robin term
+                # in its final solve (unbooked there too).
                 _G_node, _ = snow_node_robin_ground_flux(
-                    G_surface, surface_out.surface_conductance, T_surface,
+                    G_surface, _lam, T_surface,
                     T_snow0, snow, T_soil, theta, grid, config.hydraulics,
                     config.thermal, dt, snow_cover=f_snow,
                     empty_cover_swe=config.land_albedo.snow_depth_crit)

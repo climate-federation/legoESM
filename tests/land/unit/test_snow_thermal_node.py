@@ -967,12 +967,36 @@ def test_simple_seb_full_step_conserves_water(ft):
     assert np.all(np.isfinite(np.asarray(s.T_snow)))
 
 
-def test_simple_seb_final_solve_takes_the_consistent_flux(monkeypatch):
-    """The final node solve receives the explicit flux that closes SimpleSEB's
-    linearised balance with the capped skin of the start-of-step tentative
-    solve, and the column's enthalpy changes by exactly that flux."""
+def test_tentative_node_solve_is_affine_in_the_flux_with_freeze_thaw():
+    """The premise of snow_node_robin_ground_flux: one backward-Euler step with
+    start-of-step coefficients is affine in G, freeze/thaw included."""
+    T = jnp.full((2, 10), _TF - 0.2) + jnp.linspace(0.0, 0.4, 10)[None, :]
+    theta = jnp.full((2, 10), 0.3)
+    th = _TH._replace(enable_freeze_thaw=True)
+
+    def tent(G):
+        return solve_snow_node_soil_thermal(
+            jnp.array([_TF - 0.05, 265.0]), jnp.array([10.0, 30.0]), T, theta,
+            _GRID, _HYD, th, G, 1800.0, snow_cover=jnp.array([0.7, 1.0]),
+            empty_cover_swe=0.0)
+
+    (s0, g0), (s1, g1), (sg, gg) = (tent(jnp.full(2, x)) for x in (0.0, 1.0, 150.0))
+    np.testing.assert_allclose(np.asarray(sg), np.asarray(s0 + 150.0 * (s1 - s0)),
+                               atol=1e-9)
+    np.testing.assert_allclose(np.asarray(gg), np.asarray(g0 + 150.0 * (g1 - g0)),
+                               atol=1e-9)
+
+
+@pytest.mark.parametrize("ft", [False, True])
+def test_simple_seb_final_solve_takes_the_consistent_flux(monkeypatch, ft):
+    """The node takes SimpleSEB's own ground flux G_soil, corrected by its
+    lambda for the change of the capped skin over the start-of-step tentative
+    solve: G = G_soil - lambda*(skin(G) - skin_start), checked against an
+    independent tentative solve; the final solve gets that G explicitly and the
+    column enthalpy changes by exactly G (+ geothermal) over the step."""
+    from legoesm.land import multilayer_land
     from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
-    cfg = _seb_cfg()
+    cfg = _seb_cfg(ft=ft)
     st = init_multilayer_land_state(2, cfg, T_init=270.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([15.0, 40.0]),
                      T_snow=jnp.array([_TF - 0.03, 262.0]))
@@ -980,35 +1004,50 @@ def test_simple_seb_final_solve_takes_the_consistent_flux(monkeypatch):
     f = _forcing(2, 280.0, 0.0, 0.0)._replace(sw_down=500.0 * o,
                                                lw_down=320.0 * o,
                                                cos_zenith=0.7 * o)
-    calls, real = _spy_node_solves(monkeypatch)
+    robin = []
+    real_robin = multilayer_land.snow_node_robin_ground_flux
+
+    def spy_robin(*a, **k):
+        out = real_robin(*a, **k)
+        robin.append(out)
+        return out
+
+    monkeypatch.setattr(multilayer_land, "snow_node_robin_ground_flux", spy_robin)
+    calls, _ = _spy_node_solves(monkeypatch)
     out = step_multilayer_land_with_diagnostics(st, f, cfg, 1.0, 1800.0,
                                                 lat=jnp.full(2, 0.8))
     s2, sfc = out[0], out[-1]
-    assert len(calls) == 1                      # only the final solve
-    a, k, (Ts_fin, Tg_fin) = calls[0]
-    G_applied = a[7]
+    assert len(robin) == 1 and len(calls) == 1        # the final solve
+    G = robin[0][0]
+    a, k, _ = calls[0]
     assert "surface_conductance" not in k
-    lam = sfc.surface_conductance
+    np.testing.assert_allclose(np.asarray(a[7]), np.asarray(G), rtol=1e-13)
+    # Independent: the tentative solve at G and SimpleSEB's own G_soil.
     fc = snow_cover_fraction(st.snow_depth + f.precip_snow * 1800.0,
                              cfg.land_albedo)
-    ref = land_skin_temperature(st, cfg)
     Tn, Tg = solve_snow_node_soil_thermal(
         st.T_snow, st.snow_depth, st.T_soil, st.theta_soil, _GRID, _HYD,
-        cfg.thermal, G_applied, 1800.0, snow_cover=fc,
+        cfg.thermal, G, 1800.0, snow_cover=fc,
         empty_cover_swe=cfg.land_albedo.snow_depth_crit)
     skin = fc * snow_skin_cap(Tn, _W) + (1 - fc) * Tg[:, 0]
-    # G_applied = G_surface - lambda*(skin - ref); G_surface itself is not
-    # exported, so check the balance through its implied value instead.
-    G_surface = G_applied + lam * (skin - ref)
-    G2, r = snow_node_robin_ground_flux(
-        G_surface, lam, ref, st.T_snow, st.snow_depth, st.T_soil,
-        st.theta_soil, _GRID, _HYD, cfg.thermal, 1800.0, snow_cover=fc,
-        empty_cover_swe=cfg.land_albedo.snow_depth_crit)
-    np.testing.assert_allclose(np.asarray(G2), np.asarray(G_applied), atol=1e-8)
-    np.testing.assert_allclose(np.asarray(r), 0.0, atol=1e-9)
-    # Heating flux on both columns, and the node took it up.
-    assert np.all(np.asarray(G_applied) > 0.0)
-    assert np.all(np.asarray(s2.T_snow) > np.asarray(st.T_snow))
+    ref = land_skin_temperature(st, cfg)
+    np.testing.assert_allclose(
+        np.asarray(G),
+        np.asarray(sfc.G_soil - sfc.surface_conductance * (skin - ref)),
+        rtol=1e-10, atol=1e-8)
+    assert np.all(np.asarray(sfc.surface_conductance) > 0.0)
+    assert np.all(np.abs(np.asarray(G - sfc.G_soil)) > 1.0)  # a real correction
+    if not ft:
+        C0 = compute_heat_capacity(s2.theta_soil, _HYD, cfg.thermal)
+
+        def E(s):
+            return (jnp.sum(C0 * _GRID.dz * (s.T_soil - _TF), axis=-1)
+                    + constants.c_pi * s2.snow_depth * (s.T_snow - _TF))
+
+        dE = E(s2) - E(st)
+        np.testing.assert_allclose(
+            np.asarray(dE),
+            np.asarray((G + cfg.thermal.Q_geothermal) * 1800.0), rtol=1e-9)
 
 
 def test_simple_seb_full_step_jit_parity_and_gradient():
@@ -1036,7 +1075,7 @@ def test_simple_seb_full_step_jit_parity_and_gradient():
 @pytest.mark.parametrize("swe", [1e-8, 1e-3, 0.05])
 def test_simple_seb_trace_pack_stays_bounded(swe):
     """A dusting under a cold night sky: finite, the node within a few kelvin
-    of the soil top, the flux consistent (zero residual)."""
+    of the soil top."""
     cfg = _seb_cfg()
     st = init_multilayer_land_state(1, cfg, T_init=268.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([swe]), T_snow=jnp.array([266.0]))

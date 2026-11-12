@@ -812,14 +812,19 @@ def snow_node_robin_ground_flux(
     about the skin it was evaluated at.  The skin is the cover blend of the
     capped node and the top soil of the tentative node + soil solve
     (:func:`solve_snow_node_soil_thermal` on the start-of-step state, as the
-    two-leaf canopy's Picard callback).  That solve is linear in its explicit
-    ground flux, ``T_node = a + b G`` and ``T_soil0 = c + d G`` (two solves, at
-    ``G = 0`` and ``G = 1``, give all four), so the consistent flux is the root
-    of the scalar,
+    two-leaf canopy's Picard callback).  That solve is affine in its explicit
+    ground flux, ``T_node = a + b G`` and ``T_soil0 = c + d G`` (one backward-
+    Euler step whose coefficients, the apparent heat capacity with freeze/thaw
+    included, are evaluated at the start-of-step temperatures; two solves, at
+    ``G = 0`` and ``G = 1``, give all four), so the consistent flux is the
+    root of the scalar,
     ``F(G) = G - G0 + lambda * (skin(G) - skin_ref)``.  Start: the
     exact root of the hard cap (piecewise linear: unclamped, else the node
     pinned at ``T_freeze``); then ``n_newton`` Newton steps on the smooth cap.
-    The caller applies the returned flux EXPLICITLY in its final node solve.
+    ``lambda >= 0`` (SimpleSEB clamps each slope) and ``b, d >= 0`` give
+    ``F' >= 1``: one root, and both hard-cap pieces meet at the node reaching
+    ``T_freeze``.  The caller applies the returned flux EXPLICITLY in its
+    final node solve.
 
     Returns ``(G, residual)``, ``residual = F(G)`` [W/m2] (diagnostic).
     """
