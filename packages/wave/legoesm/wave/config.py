@@ -75,9 +75,9 @@ __param_spec__ = {
                 "reference": "GSE division floor", "shape": None,
             },
             "max_corner_extent": {
-                "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0,
+                "units": "1", "bounds": (1e-6, 1.0), "tunable_tier": 0,
                 "transform": "none", "category": "numerics",
-                "reference": "GSE corner-weight cap", "shape": None,
+                "reference": "GSE corner-weight cap (validate requires > 0)", "shape": None,
             },
         },
     },
@@ -147,6 +147,8 @@ class WaveTimeConfig(NamedTuple):
     dt_th_s: int = 3600
     dt_k_s: int = 3600
     dt_stot_s: int = 3600
+    # NeuralSWM's architecture metadata also carries 1800; the released GSE
+    # deck sets 3600, which this default follows.
     dt_gse_s: int = 3600
 
 
