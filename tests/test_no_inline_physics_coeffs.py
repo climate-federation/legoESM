@@ -84,7 +84,7 @@ _ROSTER_MIN_FILES: dict[str, int] = {
     "land": 15,
     "ice": 12,
     "coupler": 8,
-    "wave": 9,
+    "wave": 12,
 }
 
 # --- detector rules --------------------------------------------------------
