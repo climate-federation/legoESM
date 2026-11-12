@@ -679,38 +679,29 @@ def neumann_fill_cgrid(
         f_e = jnp.roll(filled, -1, axis=1)
         m_e = jnp.roll(m, -1, axis=1)
 
-        is_land = m < 0.5
-
         # Broadcast a LOWER-rank (2D) mask up to the field's level axis. A mask
         # whose rank already MATCHES the field (a 3D per-level ``is_active`` /
         # partial-cell mask, possibly with a singleton level axis) is used as-is
         # and broadcasts elementwise — this lets the fill clean dead cells at
         # TOPOGRAPHIC STEPS, not just lateral walls (#480 partial-cell coverage).
-        if f.ndim > 2 and m.ndim < f.ndim:
-            m_s_e = m_s[..., jnp.newaxis]
-            m_n_e = m_n[..., jnp.newaxis]
-            m_w_e = m_w[..., jnp.newaxis]
-            m_e_e = m_e[..., jnp.newaxis]
-            is_land_e = is_land[..., jnp.newaxis]
-        else:
-            m_s_e = m_s
-            m_n_e = m_n
-            m_w_e = m_w
-            m_e_e = m_e
-            is_land_e = is_land
+        ext = ((lambda a: a[..., jnp.newaxis]) if f.ndim > 2 and m.ndim < f.ndim
+               else (lambda a: a))
 
-        nbr_sum = f_s * m_s_e + f_n * m_n_e + f_w * m_w_e + f_e * m_e_e
-        nbr_count = m_s_e + m_n_e + m_w_e + m_e_e
-        nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
+        def mask_terms(m, m_s, m_n, m_w, m_e):
+            is_land = m < 0.5
+            nbr_count = ext(m_s) + ext(m_n) + ext(m_w) + ext(m_e)
+            has_any_nbr = (m_s + m_n + m_w + m_e) > 0.0
+            return (jnp.maximum(nbr_count, 1.0),
+                    ext(is_land) & ext(has_any_nbr),
+                    jnp.where(is_land & has_any_nbr, 1.0, m))
 
-        has_any_nbr = (m_s + m_n + m_w + m_e) > 0.0
-        if f.ndim > 2 and m.ndim < f.ndim:
-            has_any_nbr_e = has_any_nbr[..., jnp.newaxis]
-        else:
-            has_any_nbr_e = has_any_nbr
-
-        filled = jnp.where(is_land_e & has_any_nbr_e, nbr_avg, filled)
-        m = jnp.where(is_land & has_any_nbr, 1.0, m)
+        # Stored once per pass: otherwise XLA CPU re-evaluates these mask-only
+        # terms inside every consumer kernel, per level when the mask is 2-D
+        # (a compile-time-constant mask folds them, and the store with them).
+        den, fill, m = nemo_source_store(mask_terms, m, m_s, m_n, m_w, m_e)
+        nbr_sum = (f_s * ext(m_s) + f_n * ext(m_n) + f_w * ext(m_w)
+                   + f_e * ext(m_e))
+        filled = jnp.where(fill, nbr_sum / den, filled)
 
     return filled
 

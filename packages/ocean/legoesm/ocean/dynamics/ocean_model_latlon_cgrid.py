@@ -109,7 +109,7 @@ from legoesm.ocean.freshwater import (
     net_freshwater_flux,
     virtual_salt_flux,
 )
-from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.source_rounding import nemo_source_round, nemo_source_store
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
@@ -10999,12 +10999,21 @@ class LatLonCGridOceanModel:
             # rebuilds pFw before stage-3 FCT.  nn_conv=0 on ORCA2, so rn2 is
             # not an operand; provide the correctly shaped inert value.
             from legoesm.ocean.eos import make_eos_fn as _make_mle_eos
-            _mle_rhop = _make_mle_eos(
+            _mle_eos = _make_mle_eos(
                 eos=_cfg_b.eos,
                 eos_linear=_cfg_b.eos_linear,
                 eos_nemo_seos=_cfg_b.eos_nemo_seos,
                 rho0=_cfg_b.constants.rho_0,
-            )(_T_stage2, _S_stage2, jnp.zeros_like(_T_stage2))
+            )
+            # Stored once: otherwise XLA CPU re-evaluates this density inside
+            # each of the MLE depth/buoyancy reductions (5 grid copies, M10).
+            # Only the source-rounded NEMO polynomials keep their bits stored.
+            def _mle_rhop_fn(t, s):
+                return _mle_eos(t, s, jnp.zeros_like(t))
+            _mle_rhop = (
+                nemo_source_store(_mle_rhop_fn, _T_stage2, _S_stage2)
+                if _cfg_b.eos in ("nemo_eos80", "nemo_teos10")
+                else _mle_rhop_fn(_T_stage2, _S_stage2))
             _mle_n2 = jnp.zeros(
                 (*_T_stage2.shape[:-1], _T_stage2.shape[-1] - 1),
                 dtype=_T_stage2.dtype,
