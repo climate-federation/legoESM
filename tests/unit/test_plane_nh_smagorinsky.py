@@ -884,3 +884,72 @@ def test_centre_strain_mixed_shear_matches_analytic_a_plus_b():
     Smag_int = np.asarray(Smag)[:, 1:-1, :]
     np.testing.assert_allclose(S13_int, 0.5 * (a + b), rtol=1.0e-12)
     np.testing.assert_allclose(Smag_int, a + b, rtol=1.0e-12)
+
+
+def _vertical_K_diffusion_padded_reference(f, K, hc):
+    """The pre-rewrite jnp.pad form, kept here as the exactness reference."""
+    rho_iface = jnp.asarray(hc.rho_ref_half[1:-1])
+    K_iface = 0.5 * (K[..., :-1] + K[..., 1:])
+    flux = rho_iface * K_iface * (f[..., 1:] - f[..., :-1]) / jnp.asarray(hc.dz_half)
+    fp = jnp.pad(flux, ((0, 0),) * (flux.ndim - 1) + ((1, 1),))
+    return (fp[..., 1:] - fp[..., :-1]) / (
+        jnp.asarray(hc.rho_ref) * jnp.asarray(hc.dz))
+
+
+def test_vertical_sgs_diffusion_matches_padded_reference_exactly():
+    """The no-pad divergence equals the zero-padded-flux form exactly in
+    value (0 - F and F - 0 are exact), including both no-flux boundaries."""
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        vertical_K_diffusion_full,
+    )
+    _, grid, hc, _, _ = _setup()
+    rng = np.random.default_rng(15)
+    f = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
+    K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, grid.nlev))))
+    got = np.asarray(jax.jit(vertical_K_diffusion_full)(f, K, hc))
+    ref = np.asarray(jax.jit(_vertical_K_diffusion_padded_reference)(f, K, hc))
+    np.testing.assert_array_equal(got, ref)
+
+
+def test_vertical_sgs_diffusion_tracer_stack_matches_per_tracer_and_conserves():
+    """A trailing tracer axis is diffused exactly like separate per-tracer
+    calls (guards the vertical-axis/broadcast choice), and every column of
+    every tracer conserves its rho_ref*dz integral."""
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        vertical_K_diffusion_full,
+    )
+    _, grid, hc, _, _ = _setup()
+    rng = np.random.default_rng(16)
+    n_tr = 3
+    q = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev, n_tr)))
+    K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, grid.nlev))))
+    stacked = np.asarray(vertical_K_diffusion_full(q, K, hc))
+    for i in range(n_tr):
+        np.testing.assert_array_equal(
+            stacked[..., i],
+            np.asarray(vertical_K_diffusion_full(q[..., i], K, hc)))
+    mass = (np.asarray(hc.rho_ref) * np.asarray(hc.dz))[:, None]
+    col = np.abs(np.sum(stacked * mass, axis=-2))
+    scale = np.sum(np.abs(stacked * mass), axis=-2)
+    assert np.all(col <= 1.0e-12 * np.maximum(scale, 1.0e-30))
+    with pytest.raises(ValueError):
+        vertical_K_diffusion_full(q[..., 0, 0], K, hc)
+
+
+def test_vertical_sgs_diffusion_jitted_stack_matches_vmapped_padded_reference():
+    """Production form (one jitted call on the tracer stack) vs the old form
+    (jitted vmap of the padded stencil over the tracer axis): equal to
+    round-off; separately compiled programs may fuse differently."""
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        vertical_K_diffusion_full,
+    )
+    _, grid, hc, _, _ = _setup()
+    rng = np.random.default_rng(16)
+    q = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev, 3)))
+    K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, grid.nlev))))
+    got = np.asarray(jax.jit(vertical_K_diffusion_full)(q, K, hc))
+    ref = np.asarray(jax.jit(jax.vmap(
+        lambda f: _vertical_K_diffusion_padded_reference(f, K, hc),
+        in_axes=-1, out_axes=-1))(q))
+    assert np.max(np.abs(ref)) > 0.0
+    assert np.max(np.abs(got - ref)) <= 1.0e-12 * np.max(np.abs(ref))

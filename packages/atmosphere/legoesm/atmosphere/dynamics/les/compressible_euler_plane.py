@@ -818,22 +818,46 @@ def vertical_K_diffusion_full(
     F_bot = 0``. Dissipative: ``Σ_k f_k·tend_k·ρ_ref[k]·dz_full[k] = −Σ ρ_w·K·
     (f_{k+1}−f_k)²/dz_half ≤ 0`` for K≥0. (Uses the anelastic reference density
     ρ₀(z) like SAM; the ρ' part is second-order and absent from SAM's anelastic
-    SGS.) ``field_yxz``/``K_yxz`` are full-level ``(ny, nx, nlev)``.
+    SGS.) ``K_yxz`` is full-level ``(ny, nx, nlev)``; ``field_yxz`` is either
+    the same shape or carries extra TRAILING axes after ``nlev`` (e.g. the
+    tracer stack ``(ny, nx, nlev, n_tracers)``), all diffused with the same K.
+    Calling once on the stack replaces a ``vmap`` over the trailing axis, which
+    XLA compiled into a slow, materialised padded copy.
     """
-    dz_full = height_coord.dz                       # (nlev,) cell thickness
-    dz_half = height_coord.dz_half                  # (nlev-1,) full→full dist
-    rho_full = height_coord.rho_ref                 # (nlev,) cell ρ₀
+    n_extra = field_yxz.ndim - K_yxz.ndim
+    if n_extra < 0 or field_yxz.shape[:K_yxz.ndim] != K_yxz.shape:
+        raise ValueError(
+            f"field_yxz.shape={field_yxz.shape} must start with "
+            f"K_yxz.shape={K_yxz.shape}")
+    vert = K_yxz.ndim - 1                           # vertical axis of field
+
+    def col(a):  # (nlev or nlev-1,) profile -> broadcast over trailing axes
+        return a.reshape(a.shape + (1,) * n_extra)
+
+    def lev(a, sl):  # slice the vertical axis of field
+        return a[(slice(None),) * vert + (sl,)]
+
+    dz_full = col(height_coord.dz)                  # (nlev,) cell thickness
+    dz_half = col(height_coord.dz_half)             # (nlev-1,) full→full dist
+    rho_full = col(height_coord.rho_ref)            # (nlev,) cell ρ₀
     # interior interfaces sit at z_half[1..nlev-1] ⇒ rho_ref_half[1:-1].
-    rho_iface = height_coord.rho_ref_half[1:-1]     # (nlev-1,) interface ρ₀
+    rho_iface = col(height_coord.rho_ref_half[1:-1])  # (nlev-1,) interface ρ₀
     # K at the nlev-1 interior interfaces (average adjacent full-level K).
     K_iface = 0.5 * (K_yxz[..., :-1] + K_yxz[..., 1:])          # (..., nlev-1)
+    K_iface = K_iface.reshape(K_iface.shape + (1,) * n_extra)
     flux = rho_iface * K_iface * (
-        field_yxz[..., 1:] - field_yxz[..., :-1]) / dz_half
-    # No-flux at the top + bottom domain interfaces ⇒ pad the interface flux
-    # with a zero at each end before differencing back to full levels.
-    pad_axes = ((0, 0),) * (flux.ndim - 1)
-    flux_padded = jnp.pad(flux, (*pad_axes, (1, 1)))           # (..., nlev+1)
-    return (flux_padded[..., 1:] - flux_padded[..., :-1]) / (rho_full * dz_full)
+        lev(field_yxz, slice(1, None)) - lev(field_yxz, slice(None, -1))
+    ) / dz_half
+    # No-flux at the top + bottom domain interfaces: the divergence of the
+    # zero-padded flux, written without materialising the padded array
+    # (0 - F and F - 0 are exact, so the boundary levels equal the padded
+    # form in value; signed zeros may differ).
+    div = jnp.concatenate([
+        lev(flux, slice(None, 1)),
+        lev(flux, slice(1, None)) - lev(flux, slice(None, -1)),
+        -lev(flux, slice(-1, None)),
+    ], axis=vert)                                               # nlev levels
+    return div / (rho_full * dz_full)
 
 
 def vertical_K_diffusion_w(
@@ -2332,10 +2356,9 @@ def plane_compressible_euler_slow_tendencies(
                 in_axes=-1, out_axes=-1,
             )(state.tracers.data)
             if config.sgs_vertical_diffusion:
-                tracer_sgs_tend = tracer_sgs_tend + jax.vmap(
-                    lambda q: vertical_K_diffusion_full(q, K_h, height_coord),
-                    in_axes=-1, out_axes=-1,
-                )(state.tracers.data)
+                tracer_sgs_tend = tracer_sgs_tend + vertical_K_diffusion_full(
+                    state.tracers.data, K_h, height_coord,
+                )
         # ``K_m`` at full levels; interpolate to half levels for w
         # (rigid boundary K stays zero — no spurious tendency at top
         # / bottom interfaces).

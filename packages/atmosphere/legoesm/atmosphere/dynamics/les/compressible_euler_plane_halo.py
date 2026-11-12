@@ -876,10 +876,9 @@ def plane_compressible_euler_slow_tendencies_halo(
                 in_axes=-1, out_axes=-1,
             )(tracers_pad)
             if _sgs_vert:
-                tracer_sgs = tracer_sgs + jax.vmap(
-                    lambda q: vertical_K_diffusion_full(q, K_h_int, height_coord),
-                    in_axes=-1, out_axes=-1,
-                )(tracers)
+                tracer_sgs = tracer_sgs + vertical_K_diffusion_full(
+                    tracers, K_h_int, height_coord,
+                )
             dtracers_dt = dtracers_dt + tracer_sgs
     else:
         dtracers_dt = jnp.zeros_like(tracers)
