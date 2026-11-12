@@ -661,6 +661,11 @@ def main(argv=None) -> int:
             hydraulics=cfg_src.hydraulics._replace(vg_air_entry_m=h_a))
         h_src = init_land_surface_data(args.surfdata, src_grid, cfg_src,
                                        0.0)[0].hydraulics
+        if src_stamp.get("retention_curve") != h_src.retention_curve:
+            raise SystemExit(
+                f"the source's stamp names a {src_stamp.get('retention_curve')} "
+                f"retention curve; the rebuilt Cosby soil is "
+                f"{h_src.retention_curve}.")
         h_tgt = _target_hydraulics(args, dst_lat, dst_lon)
         shape_src = np.shape(src["theta_soil"])
         theta = out["theta_soil"]
@@ -671,6 +676,8 @@ def main(argv=None) -> int:
         check_above_dry_floor(theta_new, out["soil_dz"], lo_t)
         dz = np.asarray(out["soil_dz"], np.float64).reshape(1, -1)
         dw = ((theta_new - np.asarray(theta, np.float64)) * dz).sum(1)
+        t64 = np.asarray(theta, np.float64)    # donor water the [0, 1] clip set aside
+        clip_m = ((np.clip(t64, lo_s, sat_s) - t64) * dz).sum(1)
         out["theta_soil"] = theta_new
         out["psi_soil"] = np.asarray(jnp.maximum(
             psi_from_theta(jnp.asarray(theta_new), h_tgt), psi_dry_floor(h_tgt)),
@@ -687,6 +694,8 @@ def main(argv=None) -> int:
             "vg_air_entry_m": h_a,
             "precision": "float64",
             "n_layers_clipped": n_clipped,
+            "clipped_donor_water_mm_max_per_column": 1e3 * float(
+                np.abs(clip_m).max()),
             "column_water_change_mm": {
                 "min": 1e3 * float(dw.min()), "max": 1e3 * float(dw.max()),
                 "mean": 1e3 * float(dw.mean())},
