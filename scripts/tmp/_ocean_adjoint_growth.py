@@ -240,6 +240,155 @@ def make_loss(n_days, tg, W, kind):
     return loss
 
 
+if os.environ.get("PROBE_MODE") == "opsweep":
+    # Phase-1e: which operator makes the single-step adjoint jumps the stepsweep found (x40 at
+    # step 484, x8 at 494, x6 at 495, all at the T surface cell (128,9,0), 38.5N 9E).  Forward on
+    # the BASE config to each listed step; there, pull a one-hot T cotangent at (128,9,0) back
+    # through ONE step under config variants that each switch one operator off for that step
+    # only (same input state).  The variant whose growth collapses names the operator.
+    # Control: the same at steps without a jump.
+    STEPS = [int(x) for x in os.environ.get("OP_STEPS", "483:484:485:493:494:495").split(":")]
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    leaves, tdef = jax.tree_util.tree_flatten(state)
+    isf = [jnp.issubdtype(jnp.asarray(x).dtype, jnp.inexact) for x in leaves]
+
+    def split(s_):
+        lv = jax.tree_util.tree_leaves(s_)
+        return [x for x, f in zip(lv, isf) if f], [x for x, f in zip(lv, isf) if not f]
+
+    def merge(fl, ot):
+        fi, oi = iter(fl), iter(ot)
+        return jax.tree_util.tree_unflatten(tdef, [next(fi) if f else next(oi) for f in isf])
+
+    def step_cfg(c_):
+        def f(st):
+            n = model._step_impl(st, DT, surface_forcing=None, config=c_)
+            if c_.polar_filter.use_polar_filter:
+                n = model._apply_polar_filter(n, DT)
+            if c_.freeze_floor:
+                n = model._apply_freeze_floor(n)
+            if getattr(c_, "ew_cyclic_overlap", False):
+                n = model._apply_ew_cyclic_overlap(n)
+            return n
+        return f
+
+    ph = cfg.physics
+    variants = {"base": cfg,
+                "no_fixer": cfg.replace_flat(use_conservation_fixer=False),
+                "no_gm_redi": cfg.replace_flat(gm_redi=None),
+                "no_convection": cfg.replace_flat(physics=ph._replace(
+                    convection=OceanConvectionConfig(scheme="none"))),
+                "no_polar_filter": cfg._replace(
+                    polar_filter=cfg.polar_filter._replace(use_polar_filter=False)),
+                "no_freeze_floor": cfg.replace_flat(freeze_floor=False),
+                "vmix_constant": cfg.replace_flat(physics=ph._replace(
+                    vertical_mixing=ph.vertical_mixing._replace(scheme="constant")))}
+    if os.environ.get("OP_ONLY"):
+        variants = {k: variants[k] for k in os.environ["OP_ONLY"].split(":")}
+    print("variants:", {k: (v.use_conservation_fixer, v.gm_redi is not None,
+                            v.physics.convection.scheme, v.polar_filter.use_polar_filter,
+                            v.freeze_floor, v.physics.vertical_mixing.scheme)
+                        for k, v in variants.items()}, flush=True)
+    vjps = {name: jax.jit(lambda fl, ot, sd, _c=c_: jax.vjp(
+                lambda f_: split(step_cfg(_c)(merge(f_, ot)))[0], fl)[1](sd)[0])
+            for name, c_ in variants.items()}
+    f_base = jax.jit(step_fn(model))
+    s_ = state
+    for k in range(max(STEPS) + 1):
+        if k in STEPS:
+            fl, ot = split(s_)
+            seed = merge([jnp.zeros_like(x) for x in fl], ot)
+            seed = split(seed._replace(T=seed.T.replace(data=seed.T.data.at[128, 9, 0].set(1.0))))[0]
+            row = []
+            for name, c_ in variants.items():
+                g = vjps[name](fl, ot, seed)
+                gf = merge(g, ot)
+                nT = float(jnp.sqrt(jnp.sum(gf.T.data ** 2)))
+                nS = float(jnp.sqrt(jnp.sum(gf.S.data ** 2)))
+                row.append(f"{name} |T| {nT:.3e} |S| {nS:.3e}")
+            print(f"step {k}: " + " ; ".join(row), flush=True)
+            if os.environ.get("OP_FD"):
+                # Is the step's adjoint right?  <seed, J d> by central differences of the
+                # nonlinear step along d = the VJP output itself, vs the AD value <g, d> = |g|^2.
+                g = vjps["base"](fl, ot, seed)
+                gn = jnp.sqrt(sum(jnp.sum(x * x) for x in g))
+                d = [x / gn for x in g]
+                ad = float(gn)
+                for eps in (1e-2, 1e-4, 1e-6):
+                    fp = split(f_base(merge([a + eps * b for a, b in zip(fl, d)], ot)))[0]
+                    fm = split(f_base(merge([a - eps * b for a, b in zip(fl, d)], ot)))[0]
+                    fd = float(sum(jnp.sum(sd * (a - b)) for sd, a, b in zip(seed, fp, fm))) / (2 * eps)
+                    print(f"  FD step {k} eps {eps:g}: fd {fd:.6e} ad {ad:.6e} ratio {fd / ad:.6f}",
+                          flush=True)
+        s_ = f_base(s_)
+    print("OPSWEEP_DONE", flush=True)
+    raise SystemExit(0)
+
+
+if os.environ.get("PROBE_MODE") == "stepsweep":
+    # Phase-1d: localise the one-day adjoint jump the adjsweep found (day 11 -> 10, 1e-3 -> 5e5,
+    # at 38.5N 1-9E).  Forward to the start of day SWEEP_DAY, keep every step's state, seed a
+    # unit random cotangent on T (wet cells) at the end of that day and pull it back ONE STEP at
+    # a time: per step, cotangent L2/max/argmax per field, plus the forward state at the argmax
+    # column (T, S, |u|, eta, bottom level, partial-cell thickness) and the day's max T location.
+    SD = int(os.environ.get("SWEEP_DAY", "10"))
+    leaves, tdef = jax.tree_util.tree_flatten(state)
+    isf = [jnp.issubdtype(jnp.asarray(x).dtype, jnp.inexact) for x in leaves]
+
+    def split(s_):
+        lv = jax.tree_util.tree_leaves(s_)
+        return [x for x, f in zip(lv, isf) if f], [x for x, f in zip(lv, isf) if not f]
+
+    def merge(fl, ot):
+        fi, oi = iter(fl), iter(ot)
+        return jax.tree_util.tree_unflatten(tdef, [next(fi) if f else next(oi) for f in isf])
+
+    f_step = jax.jit(step_fn(model))
+    zc = model.z_coord
+    s_ = state
+    for k in range(SD * STEPS_PER_DAY):
+        s_ = f_step(s_)
+        if (k + 1) % STEPS_PER_DAY == 0:
+            T_ = np.asarray(s_.T.data)
+            print(f"fwd day {(k + 1) // STEPS_PER_DAY}: maxT {T_.max():.2f} @"
+                  f"{np.unravel_index(int(T_.argmax()), T_.shape)} minT {T_.min():.2f} @"
+                  f"{np.unravel_index(int(T_.argmin()), T_.shape)}", flush=True)
+    traj = [s_]
+    for k in range(STEPS_PER_DAY):
+        traj.append(f_step(traj[-1]))
+    FIELDS = ("T", "S", "u", "v", "eta")
+    rng = np.random.default_rng(1)
+    seed_T = rng.standard_normal(state.T.data.shape) * (wet3 > 0)
+    zero = merge([jnp.zeros_like(x) for x in split(traj[-1])[0]], split(traj[-1])[1])
+    cot = split(zero._replace(T=zero.T.replace(data=jnp.asarray(seed_T / np.linalg.norm(seed_T)))))[0]
+
+    def col(st, i, j):
+        bl = int(np.asarray(zc.bottom_level)[i, j]) if hasattr(zc, "bottom_level") else -9
+        hp = np.asarray(zc.h_partial)[i, j] if hasattr(zc, "h_partial") else None
+        return (f"col({i},{j}) bottom_level {bl} h_bottom "
+                f"{(hp[bl] if hp is not None and bl >= 0 else float('nan')):.3g} m H "
+                f"{float(np.asarray(st.H_bathy.data)[i, j]):.1f} eta {float(np.asarray(st.eta.data)[i, j]):.3f} "
+                f"T[{float(np.asarray(st.T.data)[i, j].min()):.2f},{float(np.asarray(st.T.data)[i, j].max()):.2f}] "
+                f"S[{float(np.asarray(st.S.data)[i, j].min()):.2f},{float(np.asarray(st.S.data)[i, j].max()):.2f}] "
+                f"|u|max {float(np.abs(np.asarray(st.u.data)[i, j:j + 2]).max()):.3f}")
+
+    vstep = jax.jit(lambda fl, ot, c: jax.vjp(lambda f_: split(f_step(merge(f_, ot)))[0], fl)[1](c)[0])
+    for k in range(STEPS_PER_DAY - 1, -1, -1):
+        fl, ot = split(traj[k])
+        cot = list(vstep(fl, ot, cot))
+        c_full = merge(cot, ot)
+        x = np.abs(np.asarray(c_full.T.data))
+        i, j, l = np.unravel_index(int(x.argmax()), x.shape)
+        rows = []
+        for nm in FIELDS:
+            y = np.asarray(getattr(c_full, nm).data)
+            rows.append(f"{nm} {float(np.sqrt((y * y).sum())):.2e}")
+        print(f"adj step {SD * STEPS_PER_DAY + k}: " + " ".join(rows)
+              + f" | T max {x.max():.2e} @({i},{j},{l}) | " + col(traj[k], i, j), flush=True)
+    print("STEPSWEEP_DONE", flush=True)
+    raise SystemExit(0)
+
+
 if os.environ.get("PROBE_MODE") == "adjsweep":
     # Phase-1c (forward-mode is impossible: the step contains custom_vjp ops).  Reverse sweep
     # day by day: cotangent of the day-N smooth loss (squared error vs ORAS5 day N) pulled back
