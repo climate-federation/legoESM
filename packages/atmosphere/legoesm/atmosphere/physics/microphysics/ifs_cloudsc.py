@@ -21,10 +21,11 @@ Levels: index 0 = model top (IFS JK=1).  Arrays are ``[ncol, nlev]``.
 Differentiability (user rule, vote V16a/V22a): every traced switch, clip,
 min/max uses ``legoesm.core.smooth`` -- min/max through the C1 positive part
 (exact outside a window of width ``w``), switches through the C1 cubic
-smoothstep centred on the threshold -- with ``w = 0.01*|threshold|`` for a
-nonzero threshold, ``0.01 K`` for every temperature threshold, and
-``0.01*class scale`` for a zero threshold (fractions/ratios 1, water mixing
-ratios ``RLMIN``).  ``hard=True`` (static) gives the oracle's exact
+smoothstep -- with ``w = 0.01 x`` a scale of the switched quantity (user rule;
+the ``_S_*`` block: 2nd percentile over the oracle profiles per class,
+0.01 x std(T) for temperature, 0.01*|threshold| for O(1) ratios).  Threshold
+gates on water and fraction quantities are one-sided on [thr, thr + w]
+(exact at and below the threshold).  ``hard=True`` (static) gives the oracle's exact
 discontinuous forms and is used ONLY by the oracle-match test.  Discrete
 inputs (convection flag, type) and level-index tests stay exact.  The
 species order of the sink truncation (5.2.1) stays the hard sort (V17a).
@@ -123,7 +124,19 @@ _RIME_POLY = (0.5, 2.0, 5.0)       # :3104, :3148, :3187 ((0.5*ZRAT+2)*ZRAT+5) c
 _SUBL_BETA_EXP = 0.5777            # :3281 ZBETA1**0.5777 (snow sublimation)
 _FZR_TEMP_CAP = 50.0               # :2908 MIN(RCL_FZRAB*(T-RTT), 50) EXP security
 _DEP_LIQ_OVERLAP = 0.65            # :2724 ZTERM2 = 0.65*RCL_CONST6S (snow deposition)
-_W_REL = 0.01                      # smooth-window width, relative to the threshold (user rule: 0.01)
+_W_REL = 0.01                      # smooth-window width = 0.01 x a scale (user rule)
+# --- smooth-window scales: the 2nd percentile of |x| > 1e-14 of the switched quantity over
+# the 49r1 oracle profiles (user rule 2026-11-04; VC47-VC60, VC66-VC67 in
+# oracle_audit/ifs_port/vote_1103/VOTES.md; probe cloudsc/port/pctsweep.py).  The
+# median (VC48) moved smooth-vs-oracle mean tendencies by 10-35%; at P2, with
+# detrainment its own class, every arm and tendency is within 1% (VC66/VC67). ---
+_S_COND = 2.61e-8                  # [kg/kg] condensate (q_l, q_i, q_s pooled) (VC49)
+_S_VAP = 2.85e-6                   # [kg/kg] water vapour (VC50)
+_S_FRAC = 6.78e-5                  # [-] cloud fraction (VC51)
+_S_TEMP = 21.5                     # [K] standard deviation of T (VC52; not a percentile)
+_S_EP = 6.11e-5                    # [-] e_liq/p, the saturation ratio the 0.5 cap acts on (VC53)
+_S_PFLX = 5.37e-8                  # [kg m-2 s-1] precipitation flux ZQPRETOT (VC60)
+_S_DET = 1.47e-14                  # [kg/kg] convective detrainment PLUDE*dt*g/dp (VC67)
 
 # --- 49r1 SUCLDP derived particle-size-distribution constants (sucldp.F90 at
 # 8f6f722, as dumped by the oracle: oracle_audit/ifs_port/cloudsc/out_base/
@@ -309,6 +322,20 @@ class _Sm:
     def le(self, a, b, w):
         return self._f(self._step(b - a, w, False), a)
 
+    def on(self, x, thr, w, strict=True):
+        """weight of (x > thr) [strict] or (x >= thr), one-sided (VC47): smooth only on
+        [thr, thr + w], exactly 0 for x <= thr (so a gated substitute never reaches an output)."""
+        if self.hard:
+            return self._f((x > thr) if strict else (x >= thr), x)
+        return _sm.smoothstep_cubic((x - thr) / w)
+
+    def off(self, x, thr, w, strict=True):
+        """weight of (x < thr) [strict] or (x <= thr), one-sided on [thr, thr + w] (VC47):
+        exactly 1 for x <= thr."""
+        if self.hard:
+            return self._f((x < thr) if strict else (x <= thr), x)
+        return 1.0 - _sm.smoothstep_cubic((x - thr) / w)
+
     def neg1(self, x, w):
         """weight of (x < 0), one-sided: smooth only on [-w, 0], exactly 0 for x >= 0."""
         if self.hard:
@@ -333,11 +360,10 @@ def _safe(x):
 
 
 def _safe_gate(x, thr):
-    """Inactive-operand substitute for a quantity gated by ``x > thr`` on the
-    _wt(thr) window: x where its smooth weight can be nonzero (x > thr - w/2, the
-    window's lower edge), else 1.0 (weight identically 0 there, so the substitute
-    never reaches an output; keeps fp32 power laws finite, review r4)."""
-    return jnp.where(x > thr - 0.5 * _wt(thr), x, 1.0)
+    """Inactive-operand substitute for a quantity gated by the one-sided ``sm.on(x, thr)``:
+    x where its weight can be nonzero (x > thr), else 1.0 (weight identically 0 there, so
+    the substitute never reaches an output; keeps fp32 power laws finite, review r4)."""
+    return jnp.where(x > thr, x, 1.0)
 
 
 def _wfloor(b, floor):
@@ -350,8 +376,14 @@ def _wt(thr):
     return _W_REL * abs(thr)
 
 
-_W_T = _W_REL    # every temperature threshold [K]
-_W_F = _W_REL    # zero threshold, fractions / ratios
+_W_Q = _W_REL * _S_COND    # condensate thresholds, zero tests and limiter floors
+_W_V = _W_REL * _S_VAP     # vapour
+_W_A = _W_REL * _S_FRAC    # cloud / precipitation fractions
+_W_T = _W_REL * _S_TEMP    # every temperature threshold [K]
+_W_EP = _W_REL * _S_EP     # e/p against _QSAT_CAP
+_W_P = _W_REL * _S_PFLX    # precipitation flux
+_W_DET = _W_REL * _S_DET   # convective detrainment
+_W_F = _W_REL              # O(1) ratios and rates (VC54: 0.01 x |threshold|)
 
 
 def _consts(th):
@@ -439,10 +471,11 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
     zrdcp = th.RD / th.RCPD
     zrg_r = 1.0 / th.RG
     zrldcp = 1.0 / (th.RALSDCP - th.RALVDCP)
-    wq = _W_REL * cfg.rlmin            # zero-threshold width for water mixing ratios
+    def wb(b):                       # limit against a traced condensate bound: 0.01*|bound|, floor _W_Q (V26a, VC55)
+        return _wfloor(b, _W_Q)
 
-    def wb(b):                       # limit against a traced bound: 0.01*|bound|, floor wq (V26a)
-        return _wfloor(b, wq)
+    def wbv(b):                      # same for a vapour / saturation bound, floor _W_V (VC55)
+        return _wfloor(b, _W_V)
 
     # ---------------- section 1: initial values (cloudsc.F90:963-1115) -------
     ztp1 = x.t + dt * x.tend_t
@@ -453,23 +486,23 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
     zaorig = za
 
     zfoealfa = _foealfa(sm, th, ztp1)
-    zfoeewm = sm.min(ew_mixed(th, zfoealfa, ztp1) / x.pap, _QSAT_CAP, _wt(_QSAT_CAP))
+    zfoeewm = sm.min(ew_mixed(th, zfoealfa, ztp1) / x.pap, _QSAT_CAP, _W_EP)
     zqsmix = zfoeewm / (1.0 - th.RETV * zfoeewm)
     e_liq = foeeliq(th, ztp1)
     e_ice = foeeice(th, ztp1)
     zalfa = _foedelta(sm, th, ztp1)
-    zfoeew = sm.min((zalfa * e_liq + (1.0 - zalfa) * e_ice) / x.pap, _QSAT_CAP, _wt(_QSAT_CAP))
-    zfoeew = sm.min(_QSAT_CAP, zfoeew, _wt(_QSAT_CAP))
+    zfoeew = sm.min((zalfa * e_liq + (1.0 - zalfa) * e_ice) / x.pap, _QSAT_CAP, _W_EP)
+    zfoeew = sm.min(_QSAT_CAP, zfoeew, _W_EP)
     zqsice = zfoeew / (1.0 - th.RETV * zfoeew)
-    zfoeeliqt = sm.min(e_liq / x.pap, _QSAT_CAP, _wt(_QSAT_CAP))
+    zfoeeliqt = sm.min(e_liq / x.pap, _QSAT_CAP, _W_EP)
     zqsliq = zfoeeliqt / (1.0 - th.RETV * zfoeeliqt)
 
     # ---------------- section 2: tidy up (:1127-1199) ------------------------
     tlq = jnp.zeros_like(x.t)
     tlt = jnp.zeros_like(x.t)
     zlneg = [jnp.zeros_like(x.t) for _ in range(4)]
-    w = 1.0 - ((1.0 - sm.lt(zqx[NCLDQL] + zqx[NCLDQI], cfg.rlmin, _wt(cfg.rlmin)))
-               * (1.0 - sm.lt(za, cfg.ramin, _wt(cfg.ramin))))
+    w = 1.0 - ((1.0 - sm.off(zqx[NCLDQL] + zqx[NCLDQI], cfg.rlmin, _W_Q))
+               * (1.0 - sm.off(za, cfg.ramin, _W_A)))
     for m, lat in ((NCLDQL, th.RALVDCP), (NCLDQI, th.RALSDCP)):
         zlneg[m] = zlneg[m] + w * zqx[m]
         zqadj = zqx[m] * zqtmst
@@ -479,7 +512,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         zqx[m] = sm.sel(w, 0.0 * zqx[m], zqx[m]) if hard else (1.0 - w) * zqx[m]
     za = sm.sel(w, 0.0 * za, za) if hard else (1.0 - w) * za
     for m in range(4):
-        w = sm.lt(zqx[m], cfg.rlmin, _wt(cfg.rlmin))
+        w = sm.off(zqx[m], cfg.rlmin, _W_Q)
         zlneg[m] = zlneg[m] + w * zqx[m]
         zqadj = zqx[m] * zqtmst
         tlq = tlq + w * zqadj
@@ -487,9 +520,9 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         tlt = tlt - w * (lat * zqadj)
         zqx[NCLDQV] = zqx[NCLDQV] + w * zqx[m]
         zqx[m] = sm.sel(w, 0.0 * zqx[m], zqx[m]) if hard else (1.0 - w) * zqx[m]
-    za = sm.max(0.0, sm.min(1.0, za, _W_F), _W_F)
+    za = sm.max(0.0, sm.min(1.0, za, _W_A), _W_A)
     zli = zqx[NCLDQL] + zqx[NCLDQI]
-    wli = sm.gt(zli, cfg.rlmin, _wt(cfg.rlmin))
+    wli = sm.on(zli, cfg.rlmin, _W_Q)
     zliqfrac = sm.sel(wli, zqx[NCLDQL] / _safe_gate(zli, cfg.rlmin), 0.0)
     zicefrac = sm.sel(wli, 1.0 - zliqfrac, 0.0)
 
@@ -591,24 +624,24 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         zcor = 1.0 / (1.0 - th.RETV * v["zfoeewm"])
         zdqsmixdt = zfac * zcor * zqsmix
         zcorqsmix = 1.0 + (zalfaw * th.RALVDCP + (1.0 - zalfaw) * th.RALSDCP) * zdqsmixdt
-        zevaplimmix = sm.pos((zqsmix - zqv) / zcorqsmix, wb(zqsmix))
-        zevaplimliq = sm.pos((zqsliq - zqv) / zcorqsliq, wb(zqsliq))
-        zevaplimice = sm.pos((zqsice - zqv) / zcorqsice, wb(zqsice))
-        ztmpa = 1.0 / sm.max(za_k, _A_INCLOUD_FLOOR, _wt(_A_INCLOUD_FLOOR))
+        zevaplimmix = sm.pos((zqsmix - zqv) / zcorqsmix, wbv(zqsmix))
+        zevaplimliq = sm.pos((zqsliq - zqv) / zcorqsliq, wbv(zqsliq))
+        zevaplimice = sm.pos((zqsice - zqv) / zcorqsice, wbv(zqsice))
+        ztmpa = 1.0 / sm.max(za_k, _A_INCLOUD_FLOOR, _W_A)
         zliqcld = zqx[:, NCLDQL] * ztmpa
         zicecld = zqx[:, NCLDQI] * ztmpa
         zlicld = zliqcld + zicecld
 
         for m in (NCLDQL, NCLDQI):     # :1332-1344 (overwrite, matrix still zero)
-            wv = sm.lt(zqx[:, m], cfg.rlmin, _wt(cfg.rlmin))
+            wv = sm.off(zqx[:, m], cfg.rlmin, _W_Q)
             zsolqa = zsolqa.at[:, NCLDQV, m].set(wv * zqx[:, m]).at[:, m, NCLDQV].set(wv * (-zqx[:, m]))
         snap("s1", zsolqa=zsolqa)
 
         # ---- 3.2 detrainment (:1362-1398), JK < KLEV ----
         plude_s = v["plude"] * zdtgdp
         plu_dn = v["plu_dn"]
-        wdet = nl * (x.ldcum.astype(T.dtype) * sm.gt(plude_s, _ZEPSEC, _wt(_ZEPSEC))
-                     * sm.gt(plu_dn, _ZEPSEC, _wt(_ZEPSEC)))
+        wdet = nl * (x.ldcum.astype(T.dtype) * sm.on(plude_s, _ZEPSEC, _W_DET)
+                     * sm.on(plu_dn, _ZEPSEC, _W_Q))
         zsolac = zsolac + wdet * (plude_s / _safe_gate(plu_dn, _ZEPSEC))
         for m, sl in ((NCLDQL, 0), (NCLDQI, 1)):
             src = v["pludeli"][:, sl] * zdtgdp
@@ -644,14 +677,14 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         zdqs = zanewm1 * zdtforc * zdqsmixdt
         for m in (NCLDQL, NCLDQI):
             zlfinal = sm.pos(zlcust[m] - zdqs, wb(zdqs))
-            zevap = sm.min(zlcust[m] - zlfinal, zevaplimmix, wb(zevaplimmix))
+            zevap = sm.min(zlcust[m] - zlfinal, zevaplimmix, wbv(zevaplimmix))
             zlfinal = zlcust[m] - zevap
             zlfinalsum = zlfinalsum + nf * zlfinal
             zsolqa = add(zsolqa, m, m, nf * zlcust[m])
             zsolqa = add(zsolqa, NCLDQV, m, nf * zevap)
             zsolqa = add(zsolqa, m, NCLDQV, -(nf * zevap))
         zsolac = zsolac + nf * zacust
-        zsolac = zsolac - nf * sm.lt(zlfinalsum, _ZEPSEC, _wt(_ZEPSEC)) * zacust
+        zsolac = zsolac - nf * sm.off(zlfinalsum, _ZEPSEC, _W_Q) * zacust
         zmfdn = sm.pos(v["pmfu_dn"] * zadvw + v["pmfd_dn"] * zadvwd, _mflux_w(zdp, v["dp_dn"])) * zdtgdp
         zsolab = zsolab + nl * zmfdn
         for m in (NCLDQL, NCLDQI):
@@ -662,19 +695,19 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         # ---- 3.4 erosion, ITURBEROSION = 3 (:1675-1754) ----
         zldifdt = cfg.rcldiff * dt
         kt = x.ktype
-        wp = sm.gt(plude, _ZEPSEC, _wt(_ZEPSEC))
+        wp = sm.on(plude, _ZEPSEC, _W_DET)
         w1 = (kt >= 2).astype(T.dtype) * wp * sm.lt(x.peis, _EROS_EIS_MAX, _wt(_EROS_EIS_MAX))
         w2 = (1.0 - w1) * (kt == 1).astype(T.dtype) * wp
         zldifdt = sm.sel(w1, _EROS_SHALLOW_FAC * cfg.rcldiff_convi * zldifdt,
                          sm.sel(w2, _EROS_DEEP_FAC * cfg.rcldiff_convi * zldifdt, zldifdt))
         zli = v["zli"]
-        weli = sm.gt(zli, _ZEPSEC, _wt(_ZEPSEC))
-        zqe = (zqv - za_k * zqsmix) / sm.max(_ZEPSEC, 1.0 - za_k, _wt(_ZEPSEC))
-        ze = sm.pos(zqsmix - zqe, wb(zqsmix))
+        weli = sm.on(zli, _ZEPSEC, _W_Q)
+        zqe = (zqv - za_k * zqsmix) / sm.max(_ZEPSEC, 1.0 - za_k, _W_A)
+        ze = sm.pos(zqsmix - zqe, wbv(zqsmix))
         zleros = _EROS_FAC * za_k * (1.0 - za_k) * zldifdt * ze
-        zleros = sm.min(zleros, zevaplimmix, wb(zevaplimmix))
+        zleros = sm.min(zleros, zevaplimmix, wbv(zevaplimmix))
         zleros = sm.min(zleros, zli, wb(zli))
-        zaeros = _EROS_A_FAC * zleros / jnp.where(zli > _ZEPSEC - 0.5 * _wt(_ZEPSEC), zlicld, 1.0)   # gate weli on zli
+        zaeros = _EROS_A_FAC * zleros / jnp.where(zli > _ZEPSEC, zlicld, 1.0)   # gate weli on zli
         zsolac = zsolac - weli * zaeros
         zsolqa = add(zsolqa, NCLDQV, NCLDQL, weli * (v["zliqfrac"] * zleros))
         zsolqa = add(zsolqa, NCLDQL, NCLDQV, -(weli * (v["zliqfrac"] * zleros)))
@@ -698,43 +731,43 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
              zfallsink=jnp.stack(zfallsink, -1))
 
         # ---- 4.2 precipitation fraction (:1898-1919) ----
-        wpr = sm.gt(zqpretot, _ZEPSEC, _wt(_ZEPSEC))
+        wpr = sm.on(zqpretot, _ZEPSEC, _W_P)
         za_up = v["za_up"]
-        cov = 1.0 - ((1.0 - zcovptot) * (1.0 - sm.max(za_k, za_up, _W_F))
+        cov = 1.0 - ((1.0 - zcovptot) * (1.0 - sm.max(za_k, za_up, _W_A))
                      / (1.0 - sm.min(za_up, _COVP_AMAX, _W_REL * (1.0 - _COVP_AMAX))))  # VC12a: gap-scale window
-        cov = sm.max(cov, cfg.rcovpmin, _wt(cfg.rcovpmin))
+        cov = sm.max(cov, cfg.rcovpmin, _W_A)
         covs = _safe(cov)
         zcovptot = sm.sel(wpr, cov, 0.0)
-        zcovpclr = sm.sel(wpr, sm.pos(cov - za_k, _W_F), 0.0)
+        zcovpclr = sm.sel(wpr, sm.pos(cov - za_k, _W_A), 0.0)
         zraincld = sm.sel(wpr, 0.5 * (zqx[:, NCLDQR] + v["zqr_up"]) / covs, 0.0)
         zraincldm1 = sm.sel(wpr, 0.5 * (zqx[:, NCLDQR] + zqxnm1[:, NCLDQR]) / covs, 0.0)
         zsnowcld = sm.sel(wpr, 0.5 * (zqx[:, NCLDQS] + v["zqs_up"]) / covs, 0.0)
-        zcovpmax = sm.sel(wpr, sm.max(cov, zcovpmax, _W_F), 0.0)
+        zcovpmax = sm.sel(wpr, sm.max(cov, zcovpmax, _W_A), 0.0)
         snap("s42", zcovptot=zcovptot, zcovpclr=zcovpclr, zraincld=zraincld,
              zraincldm1=zraincldm1, zsnowcld=zsnowcld, zcovpmax=zcovpmax)
 
         # ---- 4.3 warm rain, IWARMRAIN = 3, IRAINACC = 1 (:1930-2259) ----
-        wlc = sm.gt(zliqcld, _ZEPSEC, _wt(_ZEPSEC))
+        wlc = sm.on(zliqcld, _ZEPSEC, _W_Q)
         zrainaut = (cfg.rcl_inhomogaut * dt * cfg.rcl_kkaau * safe_pow(zliqcld, cfg.rcl_kkbauq - 1.0)
                     * zconst ** cfg.rcl_kkbaun)
         zsolqb = add(zsolqb, NCLDQR, NCLDQL, wlc * zrainaut)
-        wrc = sm.gt(zraincld, _ZEPSEC, _wt(_ZEPSEC))
+        wrc = sm.on(zraincld, _ZEPSEC, _W_Q)
         zrainacc = wrc * (cfg.rcl_inhomogacc * dt * cfg.rcl_kkaac
                           * safe_pow(zliqcld, cfg.rcl_kkbac - 1.0) * safe_pow(zraincld, cfg.rcl_kkbac))
         zsolqb = add(zsolqb, NCLDQR, NCLDQL, wlc * zrainacc)
         snap("s43", zsolqb=zsolqb)
 
         # ---- 4.4 rain evaporation (:2271-2378) ----
-        zzrh = cfg.rprecrhmax + (1.0 - cfg.rprecrhmax) * zcovpmax / sm.max(_ZEPSEC, 1.0 - za_k, _wt(_ZEPSEC))
+        zzrh = cfg.rprecrhmax + (1.0 - cfg.rprecrhmax) * zcovpmax / sm.max(_ZEPSEC, 1.0 - za_k, _W_A)
         zzrh = sm.min(sm.max(zzrh, cfg.rprecrhmax, _wt(cfg.rprecrhmax)), 1.0, _wt(1.0))
         zsigk = pap / psurf
         wsg = sm.gt(zsigk, _SIG_RHC, _wt(_SIG_RHC))
         zrhc = sm.sel(wsg, cfg.ramid + (1.0 - cfg.ramid) * ((zsigk - _SIG_RHC) / _SIG_RHC_SPAN) ** 2, cfg.ramid)
         zzrh = sm.min(zrhc, zzrh, _W_F)
         zzrh = sm.min(_RH_EVAP_CAP, zzrh, _wt(_RH_EVAP_CAP))
-        zqe = sm.max(0.0, sm.min(zqv, zqsliq, wb(zqsliq)), wq)
-        llo1 = (sm.gt(zcovpclr, _ZEPSEC, _wt(_ZEPSEC)) * sm.gt(zraincldm1, _ZEPSEC, _wt(_ZEPSEC))
-                * sm.lt(zqe, zzrh * zqsliq, wb(zzrh * zqsliq)))
+        zqe = sm.max(0.0, sm.min(zqv, zqsliq, wbv(zqsliq)), _W_V)
+        llo1 = (sm.on(zcovpclr, _ZEPSEC, _W_A) * sm.on(zraincldm1, _ZEPSEC, _W_Q)
+                * sm.lt(zqe, zzrh * zqsliq, wbv(zzrh * zqsliq)))
         zpreclr = _safe_gate(zraincldm1, _ZEPSEC)
         zfallcorr_sp = (cfg.rdensref / zrho) ** _FALLCORR_EXP_SP
         zesatliq = th.RV / th.RD * v["foeeliq"]
@@ -742,7 +775,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         zevap_denom = (cfg.rcl_cdenom1 * zesatliq - cfg.rcl_cdenom2 * T * zesatliq
                        + cfg.rcl_cdenom3 * T ** 3.0 * pap)
         zcorr2 = (T / _KA_T0) ** 1.5 * _KA_C / (T + _KA_T1)
-        zsubsat = sm.pos(zzrh * zqsliq - zqe, wb(zzrh * zqsliq))
+        zsubsat = sm.pos(zzrh * zqsliq - zqe, wbv(zzrh * zqsliq))
         zbeta = ((_EVAP_BETA_C / zqsliq) * T ** 2.0 * zesatliq * RCL_CONST1R * (zcorr2 / zevap_denom)
                  * (_EVAP_VENT_C / (zlambda ** RCL_CONST4R) + RCL_CONST2R * (zrho * zfallcorr_sp) ** 0.5
                     / (zcorr2 ** 0.5 * zlambda ** RCL_CONST3R)))
@@ -755,10 +788,10 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         snap("s44", zsolqa=zsolqa, zqxfg=jnp.stack(zqxfg, -1))
 
         # ---- 4.5 ice deposition, IDEPICE = 1 (:2401-2499) ----
-        wct = sm.lt(za_up, cfg.rcldtopcf, _wt(cfg.rcldtopcf)) * sm.ge(za_k, cfg.rcldtopcf, _wt(cfg.rcldtopcf))
+        wct = sm.off(za_up, cfg.rcldtopcf, _W_A) * sm.on(za_k, cfg.rcldtopcf, _W_A, strict=False)
         zcldtopdist = sm.sel(wct, 0.0 * zdp, c["zcldtopdist"] + zdp / (zrho * th.RG))
         zsupersatice = (zqsliq - zqsice) / zqsice
-        wdep = sm.lt(T, th.RTT - _DEPICE_DT, _W_T) * sm.gt(zqxfg[NCLDQL], cfg.rlmin, _wt(cfg.rlmin))
+        wdep = sm.lt(T, th.RTT - _DEPICE_DT, _W_T) * sm.on(zqxfg[NCLDQL], cfg.rlmin, _W_Q)
         zvpice = v["foeeice"] * th.RV / th.RD
         zicenuclei = _MEYERS_N0 * jnp.exp(_MEYERS_A * zsupersatice - _MEYERS_B)
         zadd = th.RLSTT * (th.RLSTT / (th.RV * T) - 1.0) / (_KAIR * T)
@@ -782,7 +815,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         zss_s = (zqv - zqsmix) / zqsmix
         zss = sm.pos(zss_s, _W_F)
         # gate on the SIGNED supersaturation (MAX(s,0) > 0 <=> s > 0), V29a
-        wsd = (sm.lt(T, th.RTT, _W_T) * sm.gt(zsnowcld, _ZEPSEC, _wt(_ZEPSEC))
+        wsd = (sm.lt(T, th.RTT, _W_T) * sm.on(zsnowcld, _ZEPSEC, _W_Q)
                * sm.gt(zss_s, 0.0, _W_F))
         zaplusb = cfg.rcl_apb1 * zvpice - cfg.rcl_apb2 * zvpice * T + pap * cfg.rcl_apb3 * T ** 3
         zcorrfac = (1.0 / zrho) ** 0.5
@@ -791,19 +824,19 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         zterm1 = zss * T ** 2 * zvpice * zcorrfac2 * 1.0 * RCL_CONST2S * 1.0 / (zrho * zaplusb)
         zterm2 = (_DEP_LIQ_OVERLAP * RCL_CONST6S * zpr02 ** RCL_CONST4S + RCL_CONST3S * zcorrfac ** 0.5 * zrho ** 0.5
                   * zpr02 ** RCL_CONST5S / zcorrfac2 ** 0.5)
-        zpsdep = sm.pos(zcovptot * zterm1 * zterm2 * dt, wq)
-        sup = sm.pos(zqv - zqsmix, wb(zqsmix))      # = ZQX-ZQSMIX on the active branch (V29a)
-        zpsdep = wsd * (sm.min(zpsdep, sup, wb(sup)) / zcorqsmix)
+        zpsdep = sm.pos(zcovptot * zterm1 * zterm2 * dt, _W_Q)
+        sup = sm.pos(zqv - zqsmix, wbv(zqsmix))      # = ZQX-ZQSMIX on the active branch (V29a)
+        zpsdep = wsd * (sm.min(zpsdep, sup, wbv(sup)) / zcorqsmix)
         zsolqa = add(zsolqa, NCLDQS, NCLDQV, zpsdep)
         zsolqa = add(zsolqa, NCLDQV, NCLDQS, -zpsdep)
         snap("s47", zsolqa=zsolqa)
 
-        ztmpa = 1.0 / sm.max(za_k, _A_INCLOUD_FLOOR, _wt(_A_INCLOUD_FLOOR))
+        ztmpa = 1.0 / sm.max(za_k, _A_INCLOUD_FLOOR, _W_A)
         zliqcld = zqxfg[NCLDQL] * ztmpa
         zicecld = zqxfg[NCLDQI] * ztmpa
 
         # ---- 4.8 ice -> snow (:2769-2800) ----
-        wis = sm.le(T, th.RTT, _W_T) * sm.gt(zicecld, _ZEPSEC, _wt(_ZEPSEC))
+        wis = sm.le(T, th.RTT, _W_T) * sm.on(zicecld, _ZEPSEC, _W_Q)
         zzco = dt * cfg.rsnowlin1 * jnp.exp(cfg.rsnowlin2 * (T - th.RTT))
         ztemp = -1.0 * (zicecld / cfg.rlcritsnow) ** 2     # <= 0: the "ZTEMP < 50" guard always holds
         zsnowaut = wis * (zzco * (1.0 - jnp.exp(ztemp)))
@@ -812,12 +845,12 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
 
         # ---- 4.12 melting of ice and snow (:2815-2862) ----
         zicetot = zqxfg[NCLDQI] + zqxfg[NCLDQS]
-        wm = sm.gt(zicetot, _ZEPSEC, _wt(_ZEPSEC)) * sm.gt(T, th.RTT, _W_T)
-        zsubsat = sm.pos(zqsice - zqv, wb(zqsice))
+        wm = sm.on(zicetot, _ZEPSEC, _W_Q) * sm.gt(T, th.RTT, _W_T)
+        zsubsat = sm.pos(zqsice - zqv, wbv(zqsice))
         ztdmtw0 = T - th.RTT - zsubsat * (_TW1 + _TW2 * (pap - _TW3) - _TW4 * (T - _TW5))
         zcons1 = sm.abs(dt * (1.0 + 0.5 * ztdmtw0) / cfg.rtaumel, _W_F)
         zmeltmax = wm * (sm.pos(ztdmtw0, _W_T) * zcons1 * zrldcp)
-        wmm = sm.gt(zmeltmax, _ZEPSEC, _wt(_ZEPSEC)) * sm.gt(zicetot, _ZEPSEC, _wt(_ZEPSEC))
+        wmm = sm.on(zmeltmax, _ZEPSEC, _W_Q) * sm.on(zicetot, _ZEPSEC, _W_Q)
         zicetot_s = _safe_gate(zicetot, _ZEPSEC)
         for m in (NCLDQI, NCLDQS):
             n = _IMELT[m]
@@ -831,21 +864,21 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
 
         # ---- 4.13 rain freezing (:2877-2933) ----
         qr = zqx[:, NCLDQR]
-        wr = sm.gt(qr, _ZEPSEC, _wt(_ZEPSEC))
+        wr = sm.on(qr, _ZEPSEC, _W_Q)
         wtop = wr * sm.le(T, th.RTT, _W_T) * sm.gt(v["ztp1_up"], th.RTT, _W_T)
-        zqpt = sm.max(zqx[:, NCLDQS] + qr, _ZEPSEC, _wt(_ZEPSEC))
+        zqpt = sm.max(zqx[:, NCLDQS] + qr, _ZEPSEC, _W_Q)
         rf = qr / zqpt
         prainfrac = sm.sel(wtop, rf, c["prainfrac"])
-        llrainliq = sm.sel(wtop, sm.gt(rf, _RAINFRAC_LIQ_SP, _wt(_RAINFRAC_LIQ_SP)), c["llrainliq"])
+        llrainliq = sm.sel(wtop, sm.on(rf, _RAINFRAC_LIQ_SP, _wt(_RAINFRAC_LIQ_SP)), c["llrainliq"])
         wcold = wr * sm.lt(T, th.RTT, _W_T)
         zlambda = (RCL_LAM1R / (zrho * _safe_gate(qr, _ZEPSEC))) ** RCL_LAM2R
         ztemp = sm.min(cfg.rcl_fzrab * (T - th.RTT), _FZR_TEMP_CAP, _wt(_FZR_TEMP_CAP))
         zfrz = dt * (RCL_CONST5R / zrho) * (jnp.exp(ztemp) - 1.0) * zlambda ** RCL_CONST6R
-        f_liq = sm.pos(zfrz, wq)
+        f_liq = sm.pos(zfrz, _W_Q)
         zcons1 = sm.abs(dt * (1.0 + 0.5 * (th.RTT - T)) / cfg.rtaumel, _W_F)
         f_ice = sm.pos(th.RTT - T, _W_T) * zcons1 * zrldcp
         zfrzmax = sm.sel(llrainliq, f_liq, f_ice)
-        wfz = wcold * sm.gt(zfrzmax, _ZEPSEC, _wt(_ZEPSEC))
+        wfz = wcold * sm.on(zfrzmax, _ZEPSEC, _W_Q)
         zfrz = wfz * sm.min(qr, zfrzmax, wb(zfrzmax))
         zsolqa = add(zsolqa, NCLDQS, NCLDQR, zfrz)
         zsolqa = add(zsolqa, NCLDQR, NCLDQS, -zfrz)
@@ -853,23 +886,23 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
 
         # ---- 4.14 freezing of cloud liquid (:2948-2960) ----
         zfrzmax = sm.pos(cfg.rthomo - T, _W_T) * zrldcp
-        wfl = sm.gt(zfrzmax, _ZEPSEC, _wt(_ZEPSEC)) * sm.gt(zqxfg[NCLDQL], _ZEPSEC, _wt(_ZEPSEC))
+        wfl = sm.on(zfrzmax, _ZEPSEC, _W_Q) * sm.on(zqxfg[NCLDQL], _ZEPSEC, _W_Q)
         zfrz = wfl * sm.min(zqxfg[NCLDQL], zfrzmax, wb(zfrzmax))
         zsolqa = add(zsolqa, NCLDQI, NCLDQL, zfrz)
         zsolqa = add(zsolqa, NCLDQL, NCLDQI, -zfrz)
         snap("s414", zsolqa=zsolqa)
 
         # ---- 4.9 riming, PSD slopes, PSACR, PIACR (:2973-3239) ----
-        wrim = (sm.le(T, th.RTT, _W_T) * sm.gt(zliqcld, _ZEPSEC, _wt(_ZEPSEC))
-                * sm.gt(zsnowcld, _ZEPSEC, _wt(_ZEPSEC))
-                * sm.gt(zcovptot, _RIMING_COVP_MIN, _wt(_RIMING_COVP_MIN)))
+        wrim = (sm.le(T, th.RTT, _W_T) * sm.on(zliqcld, _ZEPSEC, _W_Q)
+                * sm.on(zsnowcld, _ZEPSEC, _W_Q)
+                * sm.on(zcovptot, _RIMING_COVP_MIN, _W_A))
         zsnowrime = (cfg.rcl_effrime * zcovptot * dt * RCL_CONST7S * zfallcorr_sp
                      * safe_pow(zrho * zsnowcld * RCL_CONST1S, RCL_CONST8S))
         zsnowrime = wrim * sm.min(zsnowrime, 1.0, _wt(1.0))
         zsolqb = add(zsolqb, NCLDQS, NCLDQL, zsnowrime)
-        wrn = sm.gt(zraincld, _ZEPSEC, _wt(_ZEPSEC))
-        wsn = sm.gt(zsnowcld, _ZEPSEC, _wt(_ZEPSEC))
-        wic = sm.gt(zicecld, _ZEPSEC, _wt(_ZEPSEC))
+        wrn = sm.on(zraincld, _ZEPSEC, _W_Q)
+        wsn = sm.on(zsnowcld, _ZEPSEC, _W_Q)
+        wic = sm.on(zicecld, _ZEPSEC, _W_Q)
         # PSD slopes/intercepts unweighted (inactive operands substituted, V22b); the
         # activation weights multiply only the final transfer below -- weighting a
         # slope before its inversion made a near-zero weight a singular rate.
@@ -879,7 +912,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         zn0s = RCL_X1S
         zlami = (RCL_LAM1S / (zrho * _safe_gate(zicecld, _ZEPSEC))) ** RCL_LAM2S
         zn0i = RCL_X1S
-        wcl = sm.le(T, th.RTT, _W_T) * sm.lt(prainfrac, _ZEPSEC, _wt(_ZEPSEC)) * wrn
+        wcl = sm.le(T, th.RTT, _W_T) * sm.off(prainfrac, _ZEPSEC, _W_A) * wrn
         lr = zlamr
         for m, wsp, lam, n0, eff, src in ((NCLDQS, wsn, zlams, zn0s, _EFF_PSACR, NCLDQS),
                                           (NCLDQI, wic, zlami, zn0i, _EFF_PIACR, NCLDQI)):
@@ -897,17 +930,17 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         snap("s49", zsolqa=zsolqa, zsolqb=zsolqb)
 
         # ---- 4.15 snow sublimation, ISUBLSNOW = 1 (:3252-3318) ----
-        zzrh = cfg.rprecrhmax + (1.0 - cfg.rprecrhmax) * zcovpmax / sm.max(_ZEPSEC, 1.0 - za_k, _wt(_ZEPSEC))
+        zzrh = cfg.rprecrhmax + (1.0 - cfg.rprecrhmax) * zcovpmax / sm.max(_ZEPSEC, 1.0 - za_k, _W_A)
         zzrh = sm.min(sm.max(zzrh, cfg.rprecrhmax, _wt(cfg.rprecrhmax)), 1.0, _wt(1.0))
-        zqe = (zqv - za_k * zqsice) / sm.max(_ZEPSEC, 1.0 - za_k, _wt(_ZEPSEC))
-        zqe = sm.max(0.0, sm.min(zqe, zqsice, wb(zqsice)), wq)
-        llo1 = (sm.gt(zcovpclr, _ZEPSEC, _wt(_ZEPSEC)) * sm.gt(zqxfg[NCLDQS], _ZEPSEC, _wt(_ZEPSEC))
-                * sm.lt(zqe, zzrh * zqsice, wb(zzrh * zqsice)))
+        zqe = (zqv - za_k * zqsice) / sm.max(_ZEPSEC, 1.0 - za_k, _W_A)
+        zqe = sm.max(0.0, sm.min(zqe, zqsice, wbv(zqsice)), _W_V)
+        llo1 = (sm.on(zcovpclr, _ZEPSEC, _W_A) * sm.on(zqxfg[NCLDQS], _ZEPSEC, _W_Q)
+                * sm.lt(zqe, zzrh * zqsice, wbv(zzrh * zqsice)))
         xd = zcovptot * zdtgdp
         zpreclr = zqxfg[NCLDQS] * zcovpclr / (jnp.where(xd >= 0, 1.0, -1.0)
                                                * jnp.maximum(jnp.abs(xd), _ZEPSILON))
         zbeta1 = (jnp.sqrt(pap / psurf) / cfg.rvrfactor * zpreclr
-                  / sm.max(zcovpclr, _ZEPSEC, _wt(_ZEPSEC)))
+                  / sm.max(zcovpclr, _ZEPSEC, _W_A))
         zbeta = th.RG * cfg.rpecons * safe_pow(zbeta1, _SUBL_BETA_EXP)
         zdenom = 1.0 + zbeta * dt * zcorqsice
         zdpr = zcovpclr * zbeta * (zqsice - zqe) / zdenom * zdp * zrg_r
@@ -916,33 +949,33 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         zsolqa = add(zsolqa, NCLDQV, NCLDQS, zevap)
         zsolqa = add(zsolqa, NCLDQS, NCLDQV, -zevap)
         cnew = sm.max(cfg.rcovpmin, zcovptot - sm.pos((zcovptot - za_k) * zevap
-                                                      / _safe_gate(zqxfg[NCLDQS], _ZEPSEC), _W_F),
-                      _wt(cfg.rcovpmin))
+                                                      / _safe_gate(zqxfg[NCLDQS], _ZEPSEC), _W_A),
+                      _W_A)
         zcovptot = sm.sel(llo1, cnew, zcovptot)
         zqxfg[NCLDQS] = zqxfg[NCLDQS] - zevap
         for m in (NCLDQI, NCLDQR, NCLDQS):        # :3402-3412
-            ws = sm.lt(zqxfg[m], cfg.rlmin, _wt(cfg.rlmin))
+            ws = sm.off(zqxfg[m], cfg.rlmin, _W_Q)
             zsolqa = add(zsolqa, NCLDQV, m, ws * zqxfg[m])
             zsolqa = add(zsolqa, m, NCLDQV, -(ws * zqxfg[m]))
         snap("s415", zsolqa=zsolqa, zqxfg=jnp.stack(zqxfg, -1), zcovptot=zcovptot)
 
         # ---- 5.1 cloud cover (:3429-3438) ----
         zanew = (za_k + zsolac) / (1.0 + zsolab)
-        zanew = sm.min(zanew, 1.0, _wt(1.0))
-        zanew = sm.sel(sm.lt(zanew, cfg.ramin, _wt(cfg.ramin)), 0.0 * zanew, zanew)
+        zanew = sm.min(zanew, 1.0, _W_A)
+        zanew = sm.sel(sm.off(zanew, cfg.ramin, _W_A), 0.0 * zanew, zanew)
         zda = zanew - v["zaorig"]
 
         # ---- 5.2.1 truncate explicit sinks (:3455-3536) ----
-        def ratio_of(row_sum_neg, qv):
-            zmax = sm.max(qv, _ZEPSEC, _wt(_ZEPSEC))
-            return zmax / sm.max(row_sum_neg, zmax, wb(zmax))
+        def ratio_of(row_sum_neg, qv, wcls):     # wcls: class width of the species (VC55)
+            zmax = sm.max(qv, _ZEPSEC, wcls)
+            return zmax / sm.max(row_sum_neg, zmax, _wfloor(zmax, wcls))
 
         zratio = []
         for m in range(NCLV):
             s_ = zeros
             for n in range(NCLV):
                 s_ = s_ - zsolqa[:, m, n]
-            zratio.append(ratio_of(s_, zqx[:, m]))
+            zratio.append(ratio_of(s_, zqx[:, m], _W_V if m == NCLDQV else _W_Q))
         iorder = jnp.argsort(jax.lax.stop_gradient(jnp.stack(zratio, -1)), axis=-1, stable=True)
         ar = jnp.arange(NCLV)
         for jm in range(NCLV):
@@ -953,8 +986,9 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
             for n in range(NCLV):
                 s_ = s_ - row[:, n]
             qo = jnp.take_along_axis(zqx, jo[:, None], axis=1)[:, 0]
-            r = ratio_of(s_, qo)
-            neg = [sm.neg1(row[:, n], wq) for n in range(NCLV)]   # V28a one-sided
+            wjo = jnp.where(jo == NCLDQV, _W_V, _W_Q)
+            r = ratio_of(s_, qo, wjo)
+            neg = [sm.neg1(row[:, n], wjo) for n in range(NCLV)]   # V28a one-sided
             for n in range(NCLV):
                 cur = jnp.take_along_axis(zsolqa[:, :, n], jo[:, None], axis=1)[:, 0]
                 newv = sm.sel(neg[n], cur * r, cur)
@@ -995,7 +1029,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
                 zqxn[jn] = zqxn[jn] - lhs[jn][jm] * zqxn[jm]
             zqxn[jn] = zqxn[jn] / lhs[jn][jn]
         for jn in range(NCLV - 1):
-            ws = sm.lt(zqxn[jn], _ZEPSEC, _wt(_ZEPSEC))
+            ws = sm.off(zqxn[jn], _ZEPSEC, _W_Q)
             # VC1b/VC13a, conservation fix (departs from :3633-3639): the solve conserved
             # sum(ZQXN) + sum((ZFALLSINK + ZCONVSINK)*ZQXN), and the fall flux and the
             # subsidence outflow are taken from the tidied ZQXN, so the would-be
@@ -1007,7 +1041,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         # ---- 5.3 fluxes to the next level (:3658-3672) ----
         zpfplsx = jnp.stack([zfallsink[m] * zqxn[m] * zrdtgdp for m in range(NCLV)], -1)
         zqpretot = zpfplsx[:, NCLDQS] + zpfplsx[:, NCLDQR]
-        zcovptot = sm.sel(sm.lt(zqpretot, _ZEPSEC, _wt(_ZEPSEC)), 0.0 * zcovptot, zcovptot)
+        zcovptot = sm.sel(sm.off(zqpretot, _ZEPSEC, _W_P), 0.0 * zcovptot, zcovptot)
 
         # ---- 6 tendencies (:3713-3809) ----
         tlt = v["tlt"]
@@ -1024,7 +1058,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         q_upd = v["pq"] + dt * (tlq + v["tcq"])
         t_upd = v["pt"] + dt * (tlt + v["tct"])
         a_upd = v["pa"] + dt * (tla + v["tca"])
-        t_adj, q_adj, a_adj, l_adj, i_adj = _supersatcheck(sm, cfg, th, wq, t_upd, q_upd, a_upd, pap, psurf)
+        t_adj, q_adj, a_adj, l_adj, i_adj = _supersatcheck(sm, cfg, th, t_upd, q_upd, a_upd, pap, psurf)
         tlq = tlq + q_adj * zqtmst
         tlt = tlt + t_adj * zqtmst
         tla = tla + a_adj * zqtmst
@@ -1032,7 +1066,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         tlc[NCLDQI] = tlc[NCLDQI] + i_adj * zqtmst
         for m, lat in ((NCLDQL, th.RALVDCP), (NCLDQI, th.RALSDCP)):
             z = v["zqx0"][:, m] + tlc[m] * dt
-            wneg = sm.neg1(z, wq)
+            wneg = sm.neg1(z, _W_Q)
             tlc[m] = tlc[m] - wneg * (z * zqtmst)
             tlq = tlq + wneg * (z * zqtmst)
             tlt = tlt - wneg * (lat * z * zqtmst)
@@ -1094,33 +1128,33 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
     return out
 
 
-def _supersatcheck(sm, cfg, th, wq, pt, pq, pa, pp, psurf):
+def _supersatcheck(sm, cfg, th, pt, pq, pa, pp, psurf):
     """cloud_supersatcheck.F90 (49r1), KFTLIQICE = 1."""
-    def wb(b):
-        return _wfloor(b, wq)
+    def wbv(b):
+        return _wfloor(b, _W_V)
 
     zt = sm.max(pt, _SUPSAT_TMIN, _W_T)
-    za = sm.max(sm.min(pa, 1.0, _W_F), 0.0, _W_F)
+    za = sm.max(sm.min(pa, 1.0, _W_A), 0.0, _W_A)
     zp_r = 1.0 / pp
     zfoeeliq = sm.min(foeeliq(th, zt) * zp_r,
-                      _QSAT_CAP, _wt(_QSAT_CAP))
+                      _QSAT_CAP, _W_EP)
     zqsliq = zfoeeliq / (1.0 - th.RETV * zfoeeliq)
     d = _foedelta(sm, th, zt)
     foeew = th.R2ES * jnp.exp((th.R3LES * d + th.R3IES * (1.0 - d)) * (zt - th.RTT)
                               / (zt - (th.R4LES * d + th.R4IES * (1.0 - d))))
-    zfoeeice = sm.min(foeew * zp_r, _QSAT_CAP, _wt(_QSAT_CAP))
+    zfoeeice = sm.min(foeew * zp_r, _QSAT_CAP, _W_EP)
     zqsice = zfoeeice / (1.0 - th.RETV * zfoeeice)
-    zfokoop = sm.min(zfoeeice * (th.RKOOP1 - th.RKOOP2 * zt), zfoeeliq, wb(zfoeeliq))
+    zfokoop = sm.min(zfoeeice * (th.RKOOP1 - th.RKOOP2 * zt), zfoeeliq, _wfloor(zfoeeliq, _W_EP))
     zqsliqk = zfokoop / (1.0 - th.RETV * zfokoop)
     zfoealfa = _foealfa(sm, th, zt)
-    zfoeemix = sm.min(ew_mixed(th, zfoealfa, zt) * zp_r, _QSAT_CAP, _wt(_QSAT_CAP))
+    zfoeemix = sm.min(ew_mixed(th, zfoealfa, zt) * zp_r, _QSAT_CAP, _W_EP)
     zcor = 1.0 / (1.0 - th.RETV * zfoeemix)
     zqsmix = zfoeemix * zcor
     zcorqsmix = 1.0 + zqsmix * zcor * dem_mixed(th, zfoealfa, zt)
     zqsliqk = 0.5 * (zqsliqk + zqsmix)
     zqslim = za * zqsmix + (1.0 - za) * zqsliqk
-    zcond = sm.pos(pq - zqslim, wb(zqslim))
-    wc = sm.gt(zcond, _ZEPSEC, _wt(_ZEPSEC))
+    zcond = sm.pos(pq - zqslim, wbv(zqslim))
+    wc = sm.on(zcond, _ZEPSEC, _W_Q)
     zfaci = zfoealfa + (1.0 - zfoealfa) * cfg.rssicefactor
     zda_c = (1.0 - za) * zfaci
     za_upd = za + zda_c

@@ -144,7 +144,8 @@
     "sponge_shape": "sin2",
     "sponge_width_m": 10000.0,
     "time_integrator": "ssp_rk3",
-    "use_polar_filter": false
+    "use_polar_filter": false,
+    "vertical_form": "legacy"
   },
   "dynamic_albedo": false,
   "e3sm_cam_beres_variant": "e3sm",

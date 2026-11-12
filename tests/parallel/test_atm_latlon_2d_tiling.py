@@ -328,8 +328,7 @@ def _realistic_amplitude_state(model):
 def _serial_and_tile_tendency(state=None):
     """Serial tendencies and the (2,2)-tile shard_map body's tendencies,
     gathered to global (u as u_left, v as v_lower)."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        cgrid_latlon_hydrostatic_tendencies)
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
     from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
         _build_geometry_stacks_2d, atm_grid_array_field_names)
     from legoesm.parallel.latlon_spmd import (
@@ -343,8 +342,8 @@ def _serial_and_tile_tendency(state=None):
     state = default_state if state is None else state
     grid, sigma, cfg = model.grid, model.sigma_coord, model.config
 
-    du_s, dv_s, dT_s, dps_s, _ = cgrid_latlon_hydrostatic_tendencies(
-        state, grid, sigma, cfg)
+    du_s, dv_s, dT_s, dps_s, _ = cgrid_latlon_pe_tendencies(
+        state, grid, sigma, cfg, vertical_form="legacy")
     serial = tuple(np.asarray(x) for x in (du_s, dv_s, dT_s, dps_s))
 
     template, afn, stacks, stacks_spec = _build_geometry_stacks_2d(
@@ -355,8 +354,8 @@ def _serial_and_tile_tendency(state=None):
         tg = template._replace(**{n: st[n][0, 0] for n in afn})
         vf = reconstruct_vface_lower(sl.v, "lat", perm_north)
         uf = reconstruct_uface_left(sl.u, "lon", p_lon)
-        du, dv, dT, dps, _ = cgrid_latlon_hydrostatic_tendencies(
-            sl._replace(u=uf, v=vf), tg, sigma, cfg)
+        du, dv, dT, dps, _ = cgrid_latlon_pe_tendencies(
+            sl._replace(u=uf, v=vf), tg, sigma, cfg, vertical_form="legacy")
         return to_uface_left(du), to_vface_lower(dv), dT, dps
 
     sc = shard_state_atm_latlon_2d(state, mesh)

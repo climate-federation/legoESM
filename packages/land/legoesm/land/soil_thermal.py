@@ -52,7 +52,13 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.land.soil_grid import SoilGrid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
+from legoesm.thermo import latent_heat_fusion
 from legoesm.timestepping.tridiagonal import thomas_solve
+
+# Soil water freezes and snow melts at the freezing point, so every phase-change
+# and enthalpy term uses the fusion latent heat there (one reference throughout,
+# which the column enthalpy closure relies on).
+_L_F_FREEZE = latent_heat_fusion(constants.T_freeze)
 
 __param_spec__ = {
     "SoilThermalConfig": {
@@ -260,7 +266,7 @@ def moisture_fusion_heat_source(
     liq_new, _ = liquid_water_content(T_soil, theta_new, thermal_config)
     d_ice = (theta_new - liq_new) - (theta_old - liq_old)
     # Sign: freezing (d_ice > 0) releases latent heat into the layer.
-    return constants.rho_water * constants.L_f * d_ice * dz / dt
+    return constants.rho_water * _L_F_FREEZE * d_ice * dz / dt
 
 
 # Bisection steps of the enthalpy inversion: 40 halvings of a bracket up to a few
@@ -311,7 +317,7 @@ def soil_layer_enthalpy(
     sensible = ((A + dC * theta) * x
                 + dC * (theta - theta_min) * w
                 * (jax.nn.softplus(-x / w) - jnp.log(2.0)))
-    return (sensible + constants.rho_water * constants.L_f * theta_liq) * dz  # latent-ok: T_freeze reference (ice at T_freeze = 0)
+    return (sensible + constants.rho_water * _L_F_FREEZE * theta_liq) * dz
 
 
 def invert_soil_layer_enthalpy(
@@ -380,7 +386,7 @@ def compute_apparent_heat_capacity(
                   + theta_liq * thermal_config.C_water_vol
                   + theta_ice * thermal_config.C_ice_vol
                   + (theta_sat - theta) * thermal_config.C_air)
-    C_latent = constants.rho_water * constants.L_f * dtheta_liq_dT
+    C_latent = constants.rho_water * _L_F_FREEZE * dtheta_liq_dT
     return C_sensible + C_latent
 
 
@@ -678,10 +684,10 @@ def melt_snow_node_excess(snow_swe, T_snow):
     """
     tf = constants.T_freeze
     excess = constants.c_pi * snow_swe * jnp.maximum(T_snow - tf, 0.0)
-    melt = jnp.minimum(snow_swe, excess / constants.L_f)
+    melt = jnp.minimum(snow_swe, excess / _L_F_FREEZE)
     # Leftover only where the whole pack melted (exact zero elsewhere, not a
     # rounding residue of excess - melt*L_f).
-    heat = jnp.where(melt < snow_swe, 0.0, excess - melt * constants.L_f)
+    heat = jnp.where(melt < snow_swe, 0.0, excess - melt * _L_F_FREEZE)
     T_new = jnp.where(excess > 0.0, tf, T_snow)
     return snow_swe - melt, T_new, melt, heat
 

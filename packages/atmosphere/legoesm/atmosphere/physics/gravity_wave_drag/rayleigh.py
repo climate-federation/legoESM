@@ -33,6 +33,11 @@ ADDITIONS / DEPARTURES from HS94:
   * DEPARTURE (smoothing, RULE 5): ``max(0, (p_sb - p)/p_sb)`` uses the C1
     ``positive_part_c1`` at ``sponge_sharpness`` (width 1/sharpness = 0.01);
     ``sponge_sharpness = inf`` is Isca's hard form (oracle test).
+    KNOWN DIFFERENCE at the default (100): levels with ``0 < (p_sb - p)/p_sb
+    < 0.01`` get less drag than Isca's ``((p_sb - p)/p_sb)**2``; on the Isca
+    fixture (13 CAM L32 + 7 L60 columns) the worst per-column relative gap is
+    5.7e-7 (one L60 column), the rest fp64 round-off. ``sponge_sharpness = inf``
+    recovers Isca. Gaps pinned per column in the oracle test.
   * ``conserves = ["energy"]``: Rayleigh friction is a direct drag with no wave;
     the drag and sponge convert resolved KE to heat, both tracked. The heating
     returns the KE the step removes (time-centred in the sponge), so

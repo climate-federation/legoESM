@@ -3358,8 +3358,9 @@ def barotropic_substeps_latlon_cgrid(
         if _nemo_substep_trace_test_hook:
             _drag_r_t = _drag_values[4]
         if _with_top:
-            # zdfdrg.f90:276: rCdU_bot = -rCd0_bot*rn_Uc0, rCd0_bot masked by
-            # ssmask (:525, :546), so dry columns hold -0.
+            # zdfdrg.f90:276 (linear: rCdU_bot = -rCd0_bot*rn_Uc0) or
+            # zdfdrg.F90:186-190 (non-linear: -rCd0_bot*SQRT(...+rn_ke0));
+            # rCd0_bot masked by ssmask, so dry columns hold -0.
             _bot_rcdu_t = jnp.where(
                 z_coord.bottom_level >= 0, -_drag_values[4], -0.0)
         _drag_r_u = _r_u_bt.astype(_dt)

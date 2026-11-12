@@ -59,3 +59,76 @@ def test_nemo_source_round_has_identity_gradient_for_finite_inputs() -> None:
     gradient = jax.grad(lambda x: jnp.sum(nemo_source_round(x)))(values)
 
     np.testing.assert_array_equal(np.asarray(gradient), np.ones(5, dtype=np.float64))
+
+
+def _polynomial(t: jax.Array, s: jax.Array) -> jax.Array:
+    """An elementwise producer XLA would otherwise fuse into every consumer.
+
+    Source-rounded statement by statement, like the two production call sites:
+    an unrounded expression may be contracted differently once fused, so the
+    store's bit identity is a property of source-rounded producers only.
+    """
+    R = nemo_source_round
+    linear = R(R(1.0 + R(2.0e-4 * t)) + R(8.0e-4 * s))
+    quadratic = R(R(7.0e-6 * t) * t)
+    cross = R(1.0 - R(R(3.0e-5 * t) * s))
+    return R(R(linear - quadratic) * cross)
+
+
+def _consumers(rho: jax.Array) -> tuple[jax.Array, ...]:
+    # Three kernels reading the producer: i+1 and j+1 stencils, vertical difference.
+    return (jnp.roll(rho, -1, axis=0) - rho, jnp.roll(rho, -1, axis=1) - rho,
+            rho[..., 1:] - rho[..., :-1])
+
+
+def test_nemo_source_store_keeps_bits_and_gradient_and_compiles_a_stored_branch() -> None:
+    from legoesm.core.source_rounding import nemo_source_store
+
+    shape = (6, 8, 5)
+    t = jnp.linspace(-1.5, 29.0, np.prod(shape), dtype=jnp.float64).reshape(shape)
+    s = jnp.linspace(31.0, 37.5, np.prod(shape), dtype=jnp.float64).reshape(shape)[::-1]
+
+    def plain(t_, s_):
+        return _consumers(_polynomial(t_, s_))
+
+    def stored(t_, s_):
+        return _consumers(nemo_source_store(_polynomial, t_, s_))
+
+    reference = jax.jit(plain)(t, s)
+    for got in (jax.jit(stored)(t, s), stored(t, s)):
+        for a, b in zip(got, reference, strict=True):
+            np.testing.assert_array_equal(_bits(a), _bits(b))
+
+    def loss(fn):
+        return lambda t_, s_: sum(jnp.sum(r * r) for r in fn(t_, s_))
+
+    g_stored = jax.jit(jax.grad(loss(stored), argnums=(0, 1)))(t, s)
+    g_plain = jax.jit(jax.grad(loss(plain), argnums=(0, 1)))(t, s)
+    for a, b in zip(g_stored, g_plain, strict=True):
+        assert float(np.abs(np.asarray(a)).max()) > 0.0
+        np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12 * float(np.abs(b).max()))
+
+    # The store is a conditional on a runtime predicate; a plain call has none,
+    # so this fails if nemo_source_store degrades to fn(*operands).
+    assert "conditional" in jax.jit(stored).lower(t, s).compile().as_text()
+    assert "conditional" not in jax.jit(plain).lower(t, s).compile().as_text()
+
+
+def test_geometric_depth_pressure_density_is_stored() -> None:
+    """The NEMO EOS-80 geometric-depth density read by the pressure gradient goes
+    through nemo_source_store (ocean_pe_latlon_cgrid._bc_geometry_and_density);
+    without the store this compiled program has no conditional."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import compute_frozen_geom_density
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    grid = create_latlon_grid(12, 24)
+    z_coord = create_ocean_z_star(n_levels=6, H_max=4000.0)
+    cfg = LatLonCGridOceanConfig.from_flat(eos="nemo_eos80", eos_depth="geometric")
+    state = rest_state_latlon_cgrid_ocean(grid, z_coord)
+    text = jax.jit(
+        lambda st: compute_frozen_geom_density(st, grid, z_coord, cfg)[2:]
+    ).lower(state).compile().as_text()
+    assert "conditional" in text

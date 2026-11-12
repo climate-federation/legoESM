@@ -72,6 +72,36 @@ def test_goff_monotone_in_T():
     assert np.all(np.diff(gof) > 0)                      # warmer -> wetter
 
 
+def test_goff_nemo_source_exact_native_is_bit_identical_eager_and_jit():
+    """The NEMO-exact Goff branch source-rounds its all-constant pow(10, -4)
+    and pow(10, -3) bases so a compiled program evaluates them instead of
+    folding them with host libm (the folded value was one bit off the GPU's
+    eager value).  On CPU the folded and evaluated values agree, so the
+    discriminating check is structural: all five pow calls survive into the
+    compiled program (a revert folds two of them, leaving three)."""
+    import re
+
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prev_x64, prev_policy = jax.config.jax_enable_x64, get_policy()
+    jax.config.update("jax_enable_x64", True)
+    set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+    try:
+        T = jnp.linspace(233.0, 320.0, 4097, dtype=jnp.float64)
+
+        def fn(t):
+            return saturation_vapor_pressure_goff(t, nemo_source_exact=True)
+
+        eager = np.asarray(fn(T)).view(np.uint64)
+        jitted = np.asarray(jax.jit(fn)(T)).view(np.uint64)
+        compiled = jax.jit(fn).lower(T).compile().as_text()
+    finally:
+        set_policy(prev_policy)
+        jax.config.update("jax_enable_x64", prev_x64)
+    np.testing.assert_array_equal(jitted, eager)
+    assert len(re.findall(r"\bpower\(", compiled)) == 5
+
+
 def test_goff_differentiable():
     """Reverse-mode AD flows through the Goff q_sat (surface flux path)."""
     g = jax.grad(lambda t: saturation_mixing_ratio_goff(
@@ -284,3 +314,38 @@ def test_cam_qsat_reads_the_fp64_built_table_in_fp32(monkeypatch):
         q_fp32_table = np.asarray(thermo.saturation_specific_humidity_cam_table(T, p))
     np.testing.assert_array_equal(q, q_cast)
     assert np.any(q != q_fp32_table)
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+def test_smooth_cap_has_no_cancellation(dtype):
+    """The 1 kg/kg smooth cap min_20(q, 1) is evaluated without cancellation on
+    both sides of 1: error vs a long-double evaluation of the same formula, in
+    ulps of max(|q|, |result|) <= 32 for q < 1 (VC63), and in ulps of |result|
+    <= 32 for q >= 1 (VC64).
+    ``1 - softplus(20(1-q))/20`` alone fails q << 1 (~1e10 ulp in fp64) and
+    ``q - softplus(20(q-1))/20`` alone fails q >> 1 (~1.6e4 ulp in fp32).  The
+    conversion's denominator is >= 1, so the pre-cap value reached here stays
+    below epsilon * p ~ 6e4 (the q >= 1 half of the grid saturates there)."""
+    from legoesm import constants
+    if np.finfo(np.longdouble).eps > 1e-18:   # VC65: no extended-precision reference
+        pytest.skip("np.longdouble has no extra precision on this platform")
+    q = np.concatenate([np.logspace(-10, 0, 2001)[:-1], np.logspace(0, 8, 2001)]).astype(dtype)
+    p = np.full_like(q, 1.0e5)
+    e = (q * p / (constants.epsilon + q)).astype(dtype)
+    prev = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        got = np.asarray(_mixing_ratio_from_esat(jnp.asarray(e), jnp.asarray(p)))
+    finally:
+        jax.config.update("jax_enable_x64", prev)
+    assert got.dtype == dtype
+    got = got.astype(np.float64)
+    el, pl = e.astype(np.longdouble), p.astype(np.longdouble)
+    L = constants.epsilon * el / (np.logaddexp(0, pl - el - 1) + 1)
+    z = 20.0 * (L - 1.0)
+    ref = L - (np.maximum(z, 0) + np.log1p(np.exp(-np.abs(z)))) / 20.0
+    d = np.abs(got - ref)
+    lo = (d / np.spacing(np.maximum(np.abs(L), np.abs(ref)).astype(dtype)).astype(np.float64)).astype(np.float64)[q < 1]
+    hi = (d / np.spacing(np.abs(ref).astype(dtype)).astype(np.float64)).astype(np.float64)[q >= 1]
+    assert lo.max() <= 32, lo.max()
+    assert hi.max() <= 32, hi.max()

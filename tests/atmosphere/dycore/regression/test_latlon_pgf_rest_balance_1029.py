@@ -187,16 +187,16 @@ def _initial_pgf_residual(coord, *, stratified: bool, h_0: float = 2000.0,
                           n_lat: int = _N_LAT, n_lon: int = _N_LON) -> float:
     """max(|du/dt|, |dv/dt|) at t=0 from exact rest [m/s^2].
 
-    Calls ``cgrid_latlon_hydrostatic_tendencies`` directly, so no filter, mass
+    Calls ``cgrid_latlon_pe_tendencies`` (legacy form) directly, so no filter, mass
     fixer or time integration can add to or subtract from the answer.
     """
     import jax.numpy as jnp
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationConfig,
-        cgrid_latlon_hydrostatic_tendencies,
         hydrostatic_to_cgrid,
     )
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
     from tests.test_cases.dcmip2012.rest_state_topography import (
         lapse_rate_state_topography_init_latlon,
         rest_state_topography_init_latlon,
@@ -207,11 +207,11 @@ def _initial_pgf_residual(coord, *, stratified: bool, h_0: float = 2000.0,
             if stratified else
             rest_state_topography_init_latlon(grid, coord, h_0=h_0))
     state = hydrostatic_to_cgrid(init, grid)
-    du, dv, _dT, _dps, _dq = cgrid_latlon_hydrostatic_tendencies(
+    du, dv, _dT, _dps, _dq = cgrid_latlon_pe_tendencies(
         state, grid, coord,
         CGridLatLonPrimitiveEquationConfig(
             A_h=0.0, fix_mass=True, anchor_mass_to_initial=True,
-            use_polar_filter=True))
+            use_polar_filter=True), vertical_form="legacy")
     return float(jnp.maximum(jnp.max(jnp.abs(du)), jnp.max(jnp.abs(dv))))
 
 

@@ -96,3 +96,5 @@ convection: sbm
 # sbm ignores the bechtold/tiedtke knob, so null just avoids the
 # "requires --convection tiedtke/bechtold" guard without pinning an explicit 0.
 convective_precip_efficiency: null
+# The base pins the Bechtold snow top-up width; sbm refuses a Bechtold field.
+bechtold_snow_refill_width_kg_m2_s: null

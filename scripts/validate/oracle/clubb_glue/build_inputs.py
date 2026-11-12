@@ -125,7 +125,7 @@ mf[0, 20] = 1e-5            # deepcu below frac_limit
 # surface fluxes [W/m2, kg/m2/s, Pa], drag-negative stress convention
 shf = np.array([10., 8., 40., -20., -10., 15., 10., 0.])
 E = np.array([5e-5, 3e-5, 4e-5, 2e-6, 1e-6, 4e-5, 5e-5, 0.0])
-lhf = C.L_v * E
+lhf = C.L_v * E  # latent-ok: CAM6 CLUBB oracle constant
 taux = np.array([-0.05, -0.10, -0.20, -0.08, -0.12, -0.06, -0.05, 0.0])
 tauy = np.array([0.02, 0.03, -0.05, 0.01, 0.04, 0.0, 0.02, 0.0])
 

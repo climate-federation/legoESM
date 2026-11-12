@@ -731,7 +731,9 @@ def _step_ice_rheo_card_impl(
     """Traceable step body with a static NEMO sweep-parity selector."""
 
     forcing = _forcing_for_state(card, state, ice_step_index)
-    dynamics = si3_cgrid_aevp_solver(state.dynamics, forcing, card.metrics, card.dynamics_config)
+    dynamics = si3_cgrid_aevp_solver(
+        state.dynamics, forcing, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
+    )
     divergence, deformation = si3_lane_cgrid_deformation(
         dynamics, forcing, card.metrics, card.dynamics_config
     )
@@ -754,6 +756,7 @@ def _step_ice_rheo_card_impl(
         ice_volume_index=ICE_RHEO_TRACERS.index("v_i"),
         concentration_index=ICE_RHEO_TRACERS.index("a_i"),
         subcycles=card.subcycles,
+        limit_sharpness_scale=math.inf,
     )
     del ignored_subcycles
     contents = si3_prather_unpack_intensives(contents, cell_area, wet)

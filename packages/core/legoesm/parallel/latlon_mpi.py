@@ -55,7 +55,7 @@ Halo-exchange and padded-grid machinery (DONE):
 
 Per-step driver (DONE):
     make_latlon_mpi_step — wraps
-    ``cgrid_latlon_hydrostatic_tendencies`` and the RK driver inside a
+    ``cgrid_latlon_pe_tendencies`` and the RK driver inside a
     pad → step → strip cycle.  The pole-wall BC (``v=0`` at the global
     lat boundaries) is rank-aware so interior cuts are NOT zeroed.
 """

@@ -14,7 +14,10 @@ module supplies the lat-lon C-grid adapter (over the shared operators in
 :mod:`legoesm.grids.operators_latlon_cgrid`), the cubed-sphere C-D adapter (over
 :mod:`legoesm.core.operators_cdgrid`), and the MPAS edge-normal adapter (the
 :class:`~legoesm.grids.operator_protocol.EdgeOperators` sibling, over the TRiSK
-kernels in :mod:`legoesm.core.operators_voronoi`).
+kernels in :mod:`legoesm.core.operators_voronoi`), and the RBF-FD collocated
+adapter (the :class:`~legoesm.grids.operator_protocol.CollocatedOperators`
+sibling, over the neighbour sums of an
+:class:`~legoesm.grids.neighbour_connectivity.RBFFDMesh`).
 
 **Load-bearing status.**  The shared shallow-water core
 (:mod:`legoesm.atmosphere.dynamics.gcm.shallow_water_generic`, the tendency of the
@@ -36,6 +39,9 @@ expose neither differential contract.
 from __future__ import annotations
 
 from typing import Any
+
+import jax
+import jax.numpy as jnp
 
 from legoesm.core import neighbour_ops
 from legoesm.grids.neighbour_connectivity import (
@@ -369,3 +375,56 @@ def latlon_sw_grid_operators(grid: Any) -> LatLonCGridOperators:
 def mpas_neighbour_operators(mesh: Any) -> MPASNeighbourOperators:
     """Neighbour-sum :class:`EdgeOperators` for an MPAS/Voronoi mesh."""
     return MPASNeighbourOperators(mesh)
+
+
+class RBFFDOperators:
+    """:class:`CollocatedOperators` over an RBF-FD mesh: every operator is
+    the signed weighted neighbour sum of the mesh's one stencil table (one per
+    Cartesian component), plus the Laplace-Beltrami operator for
+    hyperviscosity.  ``divergence`` and ``laplacian_mass`` use the mesh's
+    conservatively corrected weights; ``gradient``, ``vorticity`` and
+    ``laplacian`` the uncorrected ones.
+
+    The sum is applied in the scatter-add form of arXiv 2610.25484 Listing 9
+    (gather, then ``segment_sum`` onto the target rows) rather than
+    :func:`~legoesm.core.neighbour_ops.neighbor_sum`'s axis reduction: XLA CPU
+    fuses nested gathers and recomputes them per output, so ``Lap**4`` took
+    550 ms vs 0.11 ms (642 nodes); results agree to 3.5e-16.
+    """
+
+    def __init__(self, mesh: Any) -> None:
+        self._mesh = mesh
+
+    @staticmethod
+    def _apply(conn: Any, field: Any) -> Any:
+        terms = conn.sign * conn.neighbours(field) * conn.weight * conn.mask
+        n_stencil, n_nodes = terms.shape
+        rows = jnp.broadcast_to(jnp.arange(n_nodes)[None, :], (n_stencil, n_nodes)).ravel()
+        return jax.ops.segment_sum(terms.ravel(), rows, num_segments=n_nodes)
+
+    def gradient(self, phi: Any) -> tuple:
+        return tuple(self._apply(c, phi) for c in self._mesh.grad)
+
+    def divergence(self, ux: Any, uy: Any, uz: Any) -> Any:
+        """Conservative: ``sum(area * div) = 0`` for tangent fields."""
+        dx, dy, dz = self._mesh.div
+        return self._apply(dx, ux) + self._apply(dy, uy) + self._apply(dz, uz)
+
+    def vorticity(self, ux: Any, uy: Any, uz: Any) -> Any:
+        dx, dy, dz = self._mesh.grad
+        nx, ny, nz = self._mesh.normal
+        d = self._apply
+        return (nx * (d(dy, uz) - d(dz, uy)) + ny * (d(dz, ux) - d(dx, uz))
+                + nz * (d(dx, uy) - d(dy, ux)))
+
+    def laplacian(self, phi: Any) -> Any:
+        return self._apply(self._mesh.lap, phi)
+
+    def laplacian_mass(self, phi: Any) -> Any:
+        """Conservative Laplacian: ``sum(area * lap) = 0`` for every field."""
+        return self._apply(self._mesh.lap_mass, phi)
+
+
+def rbffd_operators(mesh: Any) -> RBFFDOperators:
+    """Wrap an :class:`~legoesm.grids.neighbour_connectivity.RBFFDMesh`."""
+    return RBFFDOperators(mesh)

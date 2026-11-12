@@ -465,7 +465,7 @@ def test_inactive_column_guard_stops_h_ice_cotangent():
     active = jnp.asarray([False] * 8 + [True] * 56)
     h_ice = jnp.linspace(0.0, 2.0, 64, dtype=jnp.float64)
     gradient = jax.grad(
-        lambda h: jnp.sum(bl._guard_inactive_columns(h, active, h.dtype))
+        lambda h: jnp.sum(bl.guard_inactive_columns(h, active, h.dtype))
     )(h_ice)
     assert bool(jnp.all(gradient[:8] == 0.0)), gradient
     assert bool(jnp.all(gradient[8:] == 1.0)), gradient

@@ -272,3 +272,105 @@ def test_uniform_array_spacings_match_scalar_path():
     for a, b in zip(array[1], scalar[1]):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
     assert _kernel(3000.0, 3000.0, None)[2] == 1  # scalar CFL path unchanged
+
+
+def test_adv2d_recipe_selects_hard_negative_area_floor():
+    """The NEMO-replication ADV2D wrapper must run zapneg's hard
+    WHERE(pa_i < 0) pa_i = 0 (icevar.F90:836), not the smooth default: a cell
+    with 0 < a_i < ramp width keeps its value bitwise."""
+
+    from types import SimpleNamespace
+
+    from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import (
+        apply_ice_adv2d_source_corrections,
+    )
+
+    card = SimpleNamespace(dx_m=1.0, dy_m=1.0, nlay_i=3, nlay_s=3, halo_width=_HALO, ponds=False)
+    entry, transported = _tiny_area_case(0.3 * _RAMP_W)
+    out = np.asarray(
+        apply_ice_adv2d_source_corrections(
+            card,
+            jnp.asarray(entry),
+            jnp.asarray(transported),
+            entry_intensive_contents=jnp.asarray(entry),
+            contents_are_intensive=True,
+        )
+    )
+    np.testing.assert_array_equal(out[_IN], _correct(entry, transported, False, 0.0)[_IN])
+
+
+_GATED_CALLS = ("apply_si3_prather_source_corrections", "advect_si3_prather_with_cycle_corrections")
+# The one shared composition allowed to forward its own (per-call) ramp width to
+# the corrections helper; recipe calls of it are gated like the helper (vote V8 a).
+_FORWARDING_COMPOSITION = "advect_si3_prather_with_cycle_corrections"
+
+
+def _hard_floor_calls(source: str):
+    """(call name, line, ok) for every gated call in ``source``."""
+
+    import ast
+
+    out = []
+
+    def visit(node, enclosing):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            enclosing = enclosing + (node.name,)
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name in _GATED_CALLS:
+                width = {kw.arg: kw.value for kw in node.keywords}.get("negative_area_ramp_width")
+                literal_hard = isinstance(width, ast.Constant) and width.value == 0.0
+                forwarded = (
+                    name == "apply_si3_prather_source_corrections"
+                    and _FORWARDING_COMPOSITION in enclosing
+                    and isinstance(width, ast.Name)
+                    and width.id == "negative_area_ramp_width"
+                )
+                out.append((name, node.lineno, literal_hard or forwarded))
+        for child in ast.iter_child_nodes(node):
+            visit(child, enclosing)
+
+    visit(ast.parse(source), ())
+    return out
+
+
+def test_nemo_recipes_pass_hard_negative_area_floor():
+    """Every call of the shared Prather corrections in a NEMO-replication
+    recipe passes negative_area_ramp_width=0.0 explicitly (covers the rheology
+    recipe, whose card needs oracle data).  Only the shared per-cycle composition
+    may forward its own ``negative_area_ramp_width`` parameter (vote V8 a); every
+    recipe call of that composition must pass the literal 0.0 itself."""
+
+    from pathlib import Path
+
+    import legoesm.ice.fidelity as fidelity
+
+    calls = []
+    for path in sorted(Path(fidelity.__file__).parent.glob("nemo_*recipe*.py")):
+        calls += [(path.name, *c) for c in _hard_floor_calls(path.read_text())]
+    assert len(calls) >= 4, calls  # adv2d intensive + extensive paths, rheology, cycled composition
+    for fname, name, line, ok in calls:
+        assert ok, (fname, line, name)
+
+
+def test_hard_floor_gate_rejects_planted_forwarding():
+    """Rejection controls: forwarding outside the named composition, a smooth
+    width at a recipe call of the composition, and an omitted width all fail."""
+
+    planted = {
+        "def recipe(negative_area_ramp_width=0.25):\n"
+        "    apply_si3_prather_source_corrections(x, y, negative_area_ramp_width=negative_area_ramp_width)\n": False,
+        "def recipe():\n"
+        "    advect_si3_prather_with_cycle_corrections(x, negative_area_ramp_width=1e-12)\n": False,
+        "def recipe():\n"
+        "    apply_si3_prather_source_corrections(x, y)\n": False,
+        "def advect_si3_prather_with_cycle_corrections(negative_area_ramp_width=1e-12):\n"
+        "    def hook():\n"
+        "        apply_si3_prather_source_corrections(x, y, negative_area_ramp_width=negative_area_ramp_width)\n": True,
+        "def recipe():\n"
+        "    advect_si3_prather_with_cycle_corrections(x, negative_area_ramp_width=0.0)\n": True,
+    }
+    for source, expected in planted.items():
+        (call,) = _hard_floor_calls(source)
+        assert call[2] is expected, source

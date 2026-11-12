@@ -42,6 +42,21 @@ Departures from the oracle (all documented, measured where numeric):
 * ``limcnv``: CAM fixes the 40 hPa cap from the REFERENCE interface
   pressures once at init; hosts without a reference vertical coordinate
   (``pref_edge=None``) get it from each column's own interfaces instead.
+* Trigger (KNOWN DIFFERENCE, RULE 5): CAM convects where ``cape > capelmt``
+  at full closure mass flux.  ``zm_convr`` scales the closure ``mb`` (so every
+  mb-scaled output) by ``smoothstep_cubic((cape - capelmt)/trigger_width)``:
+  exactly 0 at and below ``capelmt`` (no convection is created there), exactly
+  CAM above ``capelmt + trigger_width``, C1 in ``cape`` at the threshold.
+  ``trigger_width = 0`` is CAM's hard switch.  Inside the band the mass flux
+  is the weight times CAM's.  The path selection on ``ideep`` (log-mean
+  interfaces, closure NaN guard) stays hard; the weight is 0 wherever it is
+  false.  Still hard on traced state: the integer level picks (``mx``,
+  ``lcl``, ``lel``, ``jt``, ``j0``, ``jd``; jumps), ``min(mb, cap)``, and
+  ``max(., 0)`` when ``dadt`` changes sign (a jump from the cap to 0).
+  Measured at the 10 J/kg default: 0 on all 15 compiled-CAM fixture columns
+  (every deep one has CAPE >= 90 J/kg); with capelmt 85, two columns inside
+  the ramp lose 30 % and 47 % of their mass flux (per-case table:
+  tests/atmosphere/test_zm_pblh_oracle.py, ``_GAP_IN_RAMP``).
 * ``closure``: a launch-level vapour pressure ``eb <= 0`` is ``log(0)`` in
   the Fortran; it stays NaN in a deep column and is 0 in a non-deep one
   (masked anyway; keeps the reverse-mode pass finite).
@@ -61,6 +76,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.smooth import smoothstep_cubic
 from legoesm.thermo import (
     saturation_specific_humidity_cam_table,
     saturation_specific_humidity_goff_gratch,
@@ -82,6 +98,7 @@ __all__ = (
     "convtran",
     "momtran",
     "q1q2_pjr",
+    "trigger_weight",
     "zm_conv_evap",
     "zm_convr",
 )
@@ -878,6 +895,14 @@ def q1q2_pjr(q, qs, qu, su, du, qhat, shat, dp, mu, md, sd, qd, ql, dsubcld,
 # ---------------------------------------------------------------------------
 # zm_convr (zm_conv.F90:142-1393)
 # ---------------------------------------------------------------------------
+def trigger_weight(cape, capelmt, ideep, width):
+    """RULE 5 trigger weight: ``smoothstep_cubic((cape - capelmt)/width)`` on
+    deep columns, 0 elsewhere.  The ramp's input is masked first so a NaN
+    CAPE in a non-deep column cannot reach the reverse pass."""
+    x = jnp.where(ideep, (cape - capelmt) / width, 0.0)
+    return jnp.where(ideep, smoothstep_cubic(x), 0.0)
+
+
 class ZMConvr(NamedTuple):
     dqdt: jax.Array      # kg/kg/s
     heat: jax.Array      # J/kg/s
@@ -887,6 +912,7 @@ class ZMConvr(NamedTuple):
     cape: jax.Array      # J/kg
     mb: jax.Array        # hPa/s
     ideep: jax.Array     # bool
+    deep_weight: jax.Array  # trigger weight in [0, 1]; == ideep at width 0
     mu: jax.Array        # hPa/s (scaled by mb)
     md: jax.Array
     du: jax.Array        # 1/s (scaled by mb)
@@ -906,8 +932,11 @@ class ZMConvr(NamedTuple):
 
 def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
              capelmt, tau, num_cin, dmpdz, tiedke_add, lwmax, c0_lnd, c0_ocn,
-             alfa, limcnv_p_pa, pref_edge=None):
+             alfa, limcnv_p_pa, trigger_width, pref_edge=None):
     """Port of ``zm_convr`` (``delt = 0.5*dt`` as in ``zm_conv_tend``).
+
+    ``trigger_width`` [J/kg] (static float) is the RULE 5 width of the CAPE
+    trigger (module docstring); 0 is CAM's hard switch.
 
     ``pblh`` is the PBL height [m] (``None`` raises: CAM always has one).
 
@@ -1001,6 +1030,11 @@ def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
     mb = jnp.where(mumax > 0.0,
                    jnp.minimum(mb, _safe_div(0.5, delt * mumax, mumax > 0.0)), 0.0)
     mb = jnp.where(ideep, mb, 0.0)
+    if trigger_width == 0:
+        deep_weight = ideep.astype(dtype)
+    else:
+        deep_weight = trigger_weight(cape, capelmt, ideep, trigger_width)
+        mb = mb * deep_weight
 
     scale = jnp.where(K >= msg1, mb[:, None], 0.0)
     mu, md, mc = cpz.mu * scale, cpz.md * scale, cpz.mc * scale
@@ -1018,7 +1052,7 @@ def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
     prec = jnp.maximum(-jnp.sum(jnp.where(K >= msg1, dpp * (dqdt + dlg), 0.0), axis=1),
                        0.0) / g
     return ZMConvr(dqdt=dqdt, heat=heat, dlf=dlg, rprd=rprdg, prec=prec, cape=cape,
-                   mb=mb, ideep=ideep, mu=mu, md=md, du=du, eu=eu, ed=ed, mc=mc,
+                   mb=mb, ideep=ideep, deep_weight=deep_weight, mu=mu, md=md, du=du, eu=eu, ed=ed, mc=mc,
                    cmeg=cmeg, pflx=pflx, dp=dp, dsubcld=dsubcld, jt=jt, maxg=maxg,
                    ql=cpz.ql, limcnv=limcnv, msg=msg)
 

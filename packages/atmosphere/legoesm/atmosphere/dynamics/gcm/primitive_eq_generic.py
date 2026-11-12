@@ -1,7 +1,9 @@
 """Hydrostatic primitive equations written once over the grid operator contract.
 
-One form per term, shared by the lat-lon C-grid and the MPAS / TRiSK mesh
-(test-only pilot: the models still run their own tendencies)::
+One form per term, shared by the lat-lon C-grid and the MPAS / TRiSK mesh.
+The lat-lon and MPAS primitive-equation models (serial, lat-band SPMD, MPI,
+sharded MPAS) compute their tendencies here, with the form named by their
+config's ``vertical_form``::
 
     dvel/dt = -grad(Phi + KE) - R_d T_face grad(L) + vorticity term
               + vertical momentum advection + dissipation
@@ -15,7 +17,8 @@ coordinate and ``ln p_s`` on sigma; the pressure gradient and ``vel.grad(L)``
 use differences of the SAME discrete ``L``.  ``omega_ps`` is the surface-pressure
 part of omega (``B_k dp_s/dt`` or ``sigma_k dp_s/dt``); the vertical-motion part
 sits inside the theta-form vertical term, so it is not counted twice.  There is
-no in-tendency temperature floor.
+no in-tendency temperature floor (the ``"legacy"`` lat-lon form keeps its
+50 K floor, below).
 
 Grid-specific numerics are plug-ins (:class:`PEOperators`): face interpolation,
 kinetic energy, the Coriolis / PV-flux term, ``vel.grad(L)`` (lat-lon averages
@@ -24,8 +27,9 @@ optional lat-lon PPM temperature flux, damping, tracers, the surface-pressure
 post-hook (lat-lon zero-mean, MPAS del-4) and the velocity boundary condition.
 Lat-lon SPMD packed exchanges are not used: the plain operators are called.
 
-Vertical form, chosen by ``vertical_form`` (default ``"as83"``, user decision
-2026-11-09; validated, raises on unknown):
+Vertical form, chosen by ``vertical_form``; when a caller passes none, the
+config's own ``vertical_form`` is used (user decision 2026-11-10; the model
+configs default to ``"legacy"``).  Validated, raises on unknown:
 
 * ``"sb81_theta"`` -- the form above (SB81 ``ln p_k`` PGF, theta-form vertical
   T, omega_ps split).  Not energy-conserving: the upwind theta transport
@@ -42,6 +46,15 @@ Vertical form, chosen by ``vertical_form`` (default ``"as83"``, user decision
   MPAS, 1.3e-5 lat-lon; the ``"sb81_theta"`` form: 2e-16 / 2e-15).
 * ``"as83_logmean"`` -- ``"as83"`` with the log-mean face theta (exact for
   isothermal pairs; same energy identity).
+* ``"legacy"`` -- TEMPORARY, kept so production runs stay comparable with past
+  ones; retired after the A/B of the forms above.  Each grid's pre-core body,
+  moved unchanged (``latlon_legacy_pe_tendencies``,
+  ``mpas_legacy_pe_tendencies``), with every parallel-lane option.  KNOWN
+  DEFECTS, fixes pending the A/B: #930 on lat-lon (split vertical temperature
+  transport: 2dz dry-adiabat residual 6.3e-3 K/s, 24 levels); #1029 on MPAS
+  (analytic ``B p_s / p`` factor: spurious max |du/dt| 5.9e-5 m/s^2 at rest
+  over the DCMIP mountain, hybrid L20); the lat-lon in-tendency ``T_min``
+  (50 K) floor, a hard clip that neither conserves nor is smooth.
 """
 
 from __future__ import annotations
@@ -104,8 +117,14 @@ class PEOperators(NamedTuple):
     face_pairs: Callable[[jax.Array], tuple]      # cell -> ((f1, f2) per face family)
 
 
-VERTICAL_FORMS = ("as83", "as83_logmean", "sb81_theta")
-DEFAULT_VERTICAL_FORM = "as83"
+VERTICAL_FORMS = ("as83", "as83_logmean", "sb81_theta", "legacy")
+
+
+def _resolve_form(vertical_form: str | None, config: Any) -> str:
+    """An explicit ``vertical_form`` wins; ``None`` means the config's own."""
+    form = config.vertical_form if vertical_form is None else vertical_form
+    _check_vertical_form(form)
+    return form
 
 
 def _check_vertical_form(vertical_form: str) -> None:
@@ -139,6 +158,9 @@ def primitive_equation_tendencies(
     R_d, kappa = constants.R_d, constants.kappa
     hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
     _check_vertical_form(ops.vertical_form)
+    if ops.vertical_form == "legacy":
+        raise ValueError("the legacy form has no shared skeleton; call "
+                         "cgrid_latlon_pe_tendencies / mpas_pe_tendencies")
     as83 = ops.vertical_form != "sb81_theta"
     if as83 and not hybrid:
         raise ValueError("the Arakawa-Suarez vertical form needs a hybrid coordinate; "
@@ -265,11 +287,11 @@ def latlon_face_metrics(grid: Any, gops: Any) -> tuple[jax.Array, ...]:
 
 
 def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = None, *,
-                        vertical_form: str = DEFAULT_VERTICAL_FORM) -> PEOperators:
+                        vertical_form: str | None = None) -> PEOperators:
     """Lat-lon C-grid plug-ins (fields ``(n_lat, n_lon(+1), nlev)``).  The
     Arakawa-Suarez forms use the TRiSK-form kinetic energy and the
     energy-neutral Coriolis term; ``"sb81_theta"`` keeps the current ones."""
-    _check_vertical_form(vertical_form)
+    vertical_form = _resolve_form(vertical_form, config)
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         latlon_dissipation,
         latlon_pole_bc,
@@ -385,17 +407,33 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
 
 
 def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
-                               config: Any = None, *, vertical_form: str = DEFAULT_VERTICAL_FORM,
+                               config: Any = None, *, vertical_form: str | None = None,
                                geom_pads: Any = None, dt: Any = None):
-    """Drop-in twin of ``cgrid_latlon_hydrostatic_tendencies`` on the shared core:
-    ``(du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends)``."""
-    if geom_pads is not None:
-        raise ValueError("the shared PE core does not take SPMD geometry pads")
+    """Lat-lon C-grid PE tendencies ``(du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends)``.
+
+    ``"legacy"`` runs the lane's pre-core body unchanged (geometry pads and the
+    packed exchange included).  The other forms ignore ``geom_pads`` (the pads
+    are value-identical to the in-operator ones) and refuse the packed
+    exchange; the Arakawa-Suarez forms also refuse the lat-band SPMD / MPI
+    lanes (their face metrics and vertex PV are not band-aware)."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationConfig,
+        latlon_legacy_pe_tendencies,
+    )
     if config is None:
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-            CGridLatLonPrimitiveEquationConfig,
-        )
         config = CGridLatLonPrimitiveEquationConfig()
+    vertical_form = _resolve_form(vertical_form, config)
+    if vertical_form == "legacy":
+        return latlon_legacy_pe_tendencies(state, grid, sigma_coord, config,
+                                           geom_pads=geom_pads, dt=dt)
+    from legoesm.grids.halo import get_halo_backend
+    from legoesm.parallel.latlon_spmd import packed_exchange_mesh
+    if packed_exchange_mesh() is not None:
+        raise ValueError(f"vertical_form={vertical_form!r} does not run the packed "
+                         "lat-lon exchange (LEGOESM_LATLON_PACKED_EXCHANGE=1)")
+    if vertical_form != "sb81_theta" and get_halo_backend() != "local":
+        raise ValueError(f"vertical_form={vertical_form!r} is not band-aware: the "
+                         "lat-band SPMD / MPI lanes take 'legacy' or 'sb81_theta'")
     ops = latlon_pe_operators(grid, config, state.tracers, dt, vertical_form=vertical_form)
     (du, dv), dT, dps, tt, _ = primitive_equation_tendencies(
         state.T, (state.u, state.v), state.p_s, state.phis, sigma_coord, ops)
@@ -407,8 +445,11 @@ def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
 # ============================================================================
 
 def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0.0, *,
-                      vertical_form: str = DEFAULT_VERTICAL_FORM) -> PEOperators:
-    """MPAS / TRiSK plug-ins (fields ``(nCells|nEdges, nlev)``)."""
+                      vertical_form: str | None = None,
+                      fence_pv_flux: bool = False) -> PEOperators:
+    """MPAS / TRiSK plug-ins (fields ``(nCells|nEdges, nlev)``).  ``fence_pv_flux``
+    puts the value-neutral optimization barrier of the sharded step on the
+    energy-conserving PV flux, as the legacy body does."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         mpas_momentum_dissipation,
         mpas_tracer_tendencies,
@@ -454,7 +495,10 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
         q = potential_vorticity_vertex_3d(u, h, mesh.fVertex, mesh)
         if config.apvm_scale > 0:
             q = apvm_correction_3d(q, u, mesh, config.apvm_scale * dt)
-        return (dvel[0] + pv_flux(u, h, q, mesh, h_edge_3d=h_edge),)
+        flux = pv_flux(u, h, q, mesh, h_edge_3d=h_edge)
+        if fence_pv_flux and config.pv_scheme == "energy":
+            flux = jax.lax.optimization_barrier(flux)
+        return (dvel[0] + flux,)
 
     def v_dot_grad_L(ctx):
         L = ctx["L"]
@@ -490,7 +534,7 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
         d4 = ps_del4(ctx)
         return dps if d4 is None else dps + d4
 
-    _check_vertical_form(vertical_form)
+    vertical_form = _resolve_form(vertical_form, config)
     c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
     return PEOperators(
         gops, lambda f: (cell_to_edge_avg_3d(f, mesh),),
@@ -501,19 +545,33 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
 
 
 def mpas_pe_tendencies(state: Any, mesh: Any, sigma_coord: Any, config: Any = None,
-                       physics_tendency: Any = None, dt: float = 0.0, *, vertical_form: str = DEFAULT_VERTICAL_FORM):
-    """Drop-in twin of ``mpas_hydrostatic_tendencies`` on the shared core."""
-    if physics_tendency is not None:
-        raise ValueError("the shared PE core does not add physics tendencies")
+                       physics_tendency: Any = None, dt: float = 0.0, *,
+                       vertical_form: str | None = None,
+                       return_thermo_terms: bool = False, fence_pv_flux: bool = False):
+    """MPAS PE tendencies.  ``"legacy"`` runs the lane's pre-core body unchanged
+    (physics tendency, thermo-term diagnostics and the PV-flux fence included);
+    the other forms refuse a physics tendency and the thermo-term diagnostics."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        MPASPrimitiveEquationConfig,
+        mpas_legacy_pe_tendencies,
+    )
     from legoesm.core.field import Field
     from legoesm.core.state import MPASHydrostaticTendencies
 
     if config is None:
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-            MPASPrimitiveEquationConfig,
-        )
         config = MPASPrimitiveEquationConfig()
-    ops = mpas_pe_operators(mesh, config, state.tracers, dt, vertical_form=vertical_form)
+    vertical_form = _resolve_form(vertical_form, config)
+    if vertical_form == "legacy":
+        return mpas_legacy_pe_tendencies(
+            state, mesh, sigma_coord, config, physics_tendency, dt,
+            return_thermo_terms=return_thermo_terms, fence_pv_flux=fence_pv_flux)
+    if physics_tendency is not None:
+        raise ValueError("the shared PE core does not add physics tendencies")
+    if return_thermo_terms:
+        raise ValueError(f"vertical_form={vertical_form!r} has no thermo-term "
+                         "diagnostics (legacy only)")
+    ops = mpas_pe_operators(mesh, config, state.tracers, dt, vertical_form=vertical_form,
+                            fence_pv_flux=fence_pv_flux)
     (du,), dT, dps, tt, _ = primitive_equation_tendencies(
         state.T.data, (state.u.data,), state.p_s.data, state.phis.data, sigma_coord, ops)
     return MPASHydrostaticTendencies(

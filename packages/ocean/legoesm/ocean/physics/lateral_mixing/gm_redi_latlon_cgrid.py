@@ -24,7 +24,7 @@ from jax import lax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.source_rounding import nemo_source_round, nemo_source_store
 from legoesm.core.transcendentals import sin as precision_sin
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.operators_latlon_cgrid import (
@@ -1275,9 +1275,13 @@ def compute_nemo_native_slopes(
             prd = nemo_seos_prd_literal(
                 _prd_T, _prd_S, _gdept_prd, _seos) * act
         else:
-            prd = nemo_roquet_density_anomaly_ratio(
-                _prd_T, _prd_S, jnp.zeros_like(_gdept_prd),
-                rho0=rho_0, geometric_depth_m=_gdept_prd, tmask=act)
+            # Stored once: otherwise XLA CPU re-evaluates this polynomial
+            # inside 9 consumer kernels of the ORCA2 step (round 351).
+            prd = nemo_source_store(
+                lambda t, s, depth, tmask: nemo_roquet_density_anomaly_ratio(
+                    t, s, jnp.zeros_like(depth),
+                    rho0=rho_0, geometric_depth_m=depth, tmask=tmask),
+                _prd_T, _prd_S, _gdept_prd, act)
     else:
         raise ValueError(
             "unknown GMRediConfig.slope_prd_evaluation "

@@ -1,7 +1,8 @@
-"""Shared hydrostatic PE core (``primitive_eq_generic``) vs the two old cores.
+"""Shared hydrostatic PE core (``primitive_eq_generic``): its forms vs the
+``"legacy"`` form (the two pre-core bodies, moved unchanged).
 
-(a) terms whose form did not change match the old lat-lon / MPAS tendencies;
-    the changed terms are measured (printed) against the old solver.
+(a) terms whose form did not change match the legacy lat-lon / MPAS tendencies;
+    the changed terms are measured (printed) against the legacy form.
 (b) #1029 rest over a mountain on a hybrid coordinate, and the #930 dry-adiabat
     vertical residual (a 2dz checkerboard), on BOTH grids.
 (c) JW baroclinic wave, old vs shared core in the SAME model time loop.
@@ -12,7 +13,6 @@ Run with ``JAX_ENABLE_X64=1``.
 
 from __future__ import annotations
 
-from functools import partial
 
 import numpy as np
 import jax
@@ -75,10 +75,7 @@ def _ll_state(grid, nlev=NLEV, seed=0):
 
 def _ll_pair(state, grid, coord, cfg, dt=600.0, form="sb81_theta"):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        cgrid_latlon_hydrostatic_tendencies,
-    )
-    return (cgrid_latlon_hydrostatic_tendencies(state, grid, coord, cfg, dt=dt),
+    return (cgrid_latlon_pe_tendencies(state, grid, coord, cfg, dt=dt, vertical_form="legacy"),
             cgrid_latlon_pe_tendencies(state, grid, coord, cfg, dt=dt, vertical_form=form))
 
 
@@ -112,8 +109,7 @@ def _mpas_state(mesh, nlev=NLEV, seed=0, tracers=True):
 
 def _mpas_pair(state, mesh, coord, cfg, dt=600.0, form="sb81_theta"):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
-    return (mpas_hydrostatic_tendencies(state, mesh, coord, cfg, dt=dt),
+    return (mpas_pe_tendencies(state, mesh, coord, cfg, dt=dt, vertical_form="legacy"),
             mpas_pe_tendencies(state, mesh, coord, cfg, dt=dt, vertical_form=form))
 
 
@@ -323,16 +319,13 @@ def _energy_ll(s, coord, area):
     return float(jnp.sum(e * area)), float(jnp.sum(s.p_s * area))
 
 
-def _run_ll(generic, n_steps, dt, monkeypatch):
+def _run_ll(generic, n_steps, dt):
     import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as pl
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
     from legoesm.grids.latlon import create_latlon_grid
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init_latlon
-    if generic:
-        monkeypatch.setattr(pl, "cgrid_latlon_hydrostatic_tendencies",
-                            partial(cgrid_latlon_pe_tendencies, vertical_form="sb81_theta"))
     grid, coord = create_latlon_grid(32, 64), _coord("sigma", 15)
-    cfg = pl.CGridLatLonPrimitiveEquationConfig(use_polar_filter=True)
+    cfg = pl.CGridLatLonPrimitiveEquationConfig(
+        use_polar_filter=True, vertical_form="sb81_theta" if generic else "legacy")
     model = pl.CGridLatLonPrimitiveEquationModel(grid, coord, cfg, dt=dt)
     s = pl.hydrostatic_to_cgrid(baroclinic_wave_init_latlon(grid, coord), grid)
     area = jnp.asarray(grid.area)
@@ -342,22 +335,18 @@ def _run_ll(generic, n_steps, dt, monkeypatch):
         s = model.step(s, dt)
         if (i + 1) % (n_steps // 6) == 0:
             vmax.append(float(jnp.abs(s.v).max()))
-    monkeypatch.undo()
     return s, e0, _energy_ll(s, coord, area), vmax
 
 
-def _run_mpas(generic, n_steps, dt, monkeypatch):
+def _run_mpas(generic, n_steps, dt):
     import legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas as pm
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     from legoesm.core.conservation import dycore_column_energy
     from legoesm.core.operators_voronoi import kinetic_energy_cell_3d
     from legoesm.grids.voronoi import create_voronoi_mesh
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
-    if generic:
-        monkeypatch.setattr(pm, "mpas_hydrostatic_tendencies",
-                            partial(mpas_pe_tendencies, vertical_form="sb81_theta"))
     mesh, coord = create_voronoi_mesh(4, lloyd_iterations=5), _coord("sigma", 15)
-    model = pm.MPASPrimitiveEquationModel(mesh, coord, pm.MPASPrimitiveEquationConfig(nu_del4=1e15))
+    model = pm.MPASPrimitiveEquationModel(mesh, coord, pm.MPASPrimitiveEquationConfig(
+        nu_del4=1e15, vertical_form="sb81_theta" if generic else "legacy"))
     s = baroclinic_wave_init_mpas(mesh, coord)
     area = jnp.asarray(mesh.areaCell)
 
@@ -373,19 +362,18 @@ def _run_mpas(generic, n_steps, dt, monkeypatch):
         s = model.step(s, dt)
         if (i + 1) % (n_steps // 6) == 0:
             umax.append(float(jnp.abs(s.u.data).max()))
-    monkeypatch.undo()
     return s, e0, en(s), umax
 
 
 @pytest.mark.slow
-def test_jw_baroclinic_latlon_old_vs_shared(monkeypatch):
+def test_jw_baroclinic_latlon_old_vs_shared():
     dt = 600.0
     n = int(_JW_DAYS * 86400 / dt)
-    so, e0o, e1o, vo = _run_ll(False, n, dt, monkeypatch)
-    sn, e0n, e1n, vn = _run_ll(True, n, dt, monkeypatch)
+    so, e0o, e1o, vo = _run_ll(False, n, dt)
+    sn, e0n, e1n, vn = _run_ll(True, n, dt)
     assert all(np.isfinite(vn))
     du = float(jnp.sqrt(jnp.mean((sn.u - so.u) ** 2)))
-    assert du > 0.0   # the monkeypatched core actually ran
+    assert du > 0.0   # the selected form actually ran
     dps = float(jnp.abs(sn.p_s - so.p_s).max())
     print(f"\nJW latlon {_JW_DAYS} d: max|v| old {vo} new {vn}; rms du {du:.3e} m/s, "
           f"max dps {dps:.3e} Pa; energy drift old {(e1o[0]-e0o[0])/e0o[0]:.3e} "
@@ -395,14 +383,14 @@ def test_jw_baroclinic_latlon_old_vs_shared(monkeypatch):
 
 
 @pytest.mark.slow
-def test_jw_baroclinic_mpas_old_vs_shared(monkeypatch):
+def test_jw_baroclinic_mpas_old_vs_shared():
     dt = 600.0
     n = int(_JW_DAYS * 86400 / dt)
-    so, e0o, e1o, uo = _run_mpas(False, n, dt, monkeypatch)
-    sn, e0n, e1n, un = _run_mpas(True, n, dt, monkeypatch)
+    so, e0o, e1o, uo = _run_mpas(False, n, dt)
+    sn, e0n, e1n, un = _run_mpas(True, n, dt)
     assert all(np.isfinite(un))
     du = float(jnp.sqrt(jnp.mean((sn.u.data - so.u.data) ** 2)))
-    assert du > 0.0   # the monkeypatched core actually ran
+    assert du > 0.0   # the selected form actually ran
     dps = float(jnp.abs(sn.p_s.data - so.p_s.data).max())
     print(f"\nJW MPAS {_JW_DAYS} d: max|u| old {uo} new {un}; rms du {du:.3e} m/s, "
           f"max dps {dps:.3e} Pa; energy drift old {(e1o[0]-e0o[0])/e0o[0]:.3e} "
@@ -529,9 +517,10 @@ def _mpas_fn(kind, form="sb81_theta"):
 
 
 @pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
-def test_default_vertical_form_is_as83(grid_kind):
-    """No ``vertical_form`` = ``"as83"`` bit-for-bit; on sigma the default raises
-    (no silent fallback to ``"sb81_theta"``)."""
+def test_no_form_reads_the_config_form(grid_kind):
+    """No ``vertical_form`` = the config's own form, bit-for-bit: sb81_theta from
+    an sb81_theta config (not the old as83 default: the two differ), legacy from
+    a default config, which therefore also runs on sigma."""
     from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
     if grid_kind == "latlon":
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
@@ -540,22 +529,28 @@ def test_default_vertical_form_is_as83(grid_kind):
         grid, cfg = _ll_grid(), CGridLatLonPrimitiveEquationConfig(use_ppm_transport=False)
         s0 = _ll_state(grid)
 
-        def run(coord, **kw):
-            return g.cgrid_latlon_pe_tendencies(s0, grid, coord, cfg, dt=600.0, **kw)[:3]
+        def run(coord, c, **kw):
+            return g.cgrid_latlon_pe_tendencies(s0, grid, coord, c, dt=600.0, **kw)[:3]
     else:
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
         mesh, cfg = _mesh(), MPASPrimitiveEquationConfig()
         s0 = _mpas_state(mesh)
 
-        def run(coord, **kw):
-            t = g.mpas_pe_tendencies(s0, mesh, coord, cfg, dt=600.0, **kw)
+        def run(coord, c, **kw):
+            t = g.mpas_pe_tendencies(s0, mesh, coord, c, dt=600.0, **kw)
             return t.du_dt.data, t.dT_dt.data, t.dp_s_dt.data
-    assert g.DEFAULT_VERTICAL_FORM == "as83"
-    for a, b in zip(jax.tree_util.tree_leaves(run(_coord("hybrid"))),
-                    jax.tree_util.tree_leaves(run(_coord("hybrid"), vertical_form="as83"))):
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
-    with pytest.raises(ValueError, match="hybrid coordinate"):
-        run(_coord("sigma"))
+
+    def same(a, b):
+        for x, y in zip(jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b)):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+    hyb = _coord("hybrid")
+    sb = cfg._replace(vertical_form="sb81_theta")
+    same(run(hyb, sb), run(hyb, sb, vertical_form="sb81_theta"))
+    assert _rel(run(hyb, sb)[1], run(hyb, sb, vertical_form="as83")[1]) > 1e-6
+    assert cfg.vertical_form == "legacy"
+    same(run(hyb, cfg), run(hyb, cfg, vertical_form="legacy"))
+    same(run(_coord("sigma"), cfg), run(_coord("sigma"), cfg, vertical_form="legacy"))
 
 
 _KIND_FORM = [("sigma", "sb81_theta"), ("hybrid", "sb81_theta"),
@@ -660,8 +655,9 @@ def _jw_case(grid_kind, form="sb81_theta", nlev=_E_NLEV):
         ops = g.latlon_pe_operators(grid, cfg, {}, 600.0, vertical_form=form)
 
         def old(T, vel, p_s):
-            o = pl.cgrid_latlon_hydrostatic_tendencies(
-                s._replace(T=T, u=vel[0], v=vel[1], p_s=p_s, tracers={}), grid, coord, cfg, dt=600.0)
+            o = g.cgrid_latlon_pe_tendencies(
+                s._replace(T=T, u=vel[0], v=vel[1], p_s=p_s, tracers={}), grid, coord, cfg, dt=600.0,
+                vertical_form="legacy")
             return o[2], (o[0], o[1]), o[3]
         return (ops, s.T, (s.u, s.v), s.p_s, s.phis, jnp.asarray(grid.area), coord, old,
                 (grid, cfg, s))
@@ -676,7 +672,7 @@ def _jw_case(grid_kind, form="sb81_theta", nlev=_E_NLEV):
     def old(T, vel, p_s):
         st = s._replace(T=s.T.replace(data=T), u=s.u.replace(data=vel[0]),
                         p_s=s.p_s.replace(data=p_s))
-        o = pm.mpas_hydrostatic_tendencies(st, mesh, coord, cfg, dt=600.0)
+        o = g.mpas_pe_tendencies(st, mesh, coord, cfg, dt=600.0, vertical_form="legacy")
         return o.dT_dt.data, (o.du_dt.data,), o.dp_s_dt.data
     return (ops, s.T.data, (s.u.data,), s.p_s.data, s.phis.data,
             jnp.asarray(mesh.areaCell), coord, old, (mesh, cfg, s))
@@ -873,39 +869,31 @@ def _jw_energy_trajectory(grid_kind, form, dt, days):
         dvel, dT, dps, _, _ = g.primitive_equation_tendencies(T, vel, p_s, phis, coord, ops)
         return dT, dvel, dps
     tend = jax.jit(old if form == "old" else new)
-    mp = pytest.MonkeyPatch()
+    model_form = "legacy" if form == "old" else form
     if grid_kind == "latlon":
         import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as pl
-        if form != "old":
-            mp.setattr(pl, "cgrid_latlon_hydrostatic_tendencies",
-                       partial(g.cgrid_latlon_pe_tendencies, vertical_form=form))
-        model = pl.CGridLatLonPrimitiveEquationModel(obj, coord, cfg._replace(use_polar_filter=False), dt=dt)
+        model = pl.CGridLatLonPrimitiveEquationModel(
+            obj, coord, cfg._replace(use_polar_filter=False, vertical_form=model_form), dt=dt)
         unpack = lambda st: (st.T, (st.u, st.v), st.p_s)
     else:
         import legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas as pm
-        if form != "old":
-            mp.setattr(pm, "mpas_hydrostatic_tendencies",
-                       partial(g.mpas_pe_tendencies, vertical_form=form))
-        model = pm.MPASPrimitiveEquationModel(obj, coord, cfg)
+        model = pm.MPASPrimitiveEquationModel(obj, coord, cfg._replace(vertical_form=model_form))
         unpack = lambda st: (st.T.data, (st.u.data,), st.p_s.data)
 
     def rate(st):
         x = unpack(st)
         return float(jax.jvp(E, x, tend(*x))[1])
-    try:
-        E0 = float(E(*unpack(s)))
-        n = int(round(days * 86400 / dt))
-        every = int(round(6 * 3600 / dt))
-        rates, integ = [rate(s)], 0.0
-        for i in range(n):
-            s = model.step(s, dt)
-            if (i + 1) % every == 0:
-                rates.append(rate(s))
-                integ += 0.5 * (rates[-1] + rates[-2]) * every * dt
-        x1 = unpack(s)
-        E1 = float(E(*x1))
-    finally:
-        mp.undo()
+    E0 = float(E(*unpack(s)))
+    n = int(round(days * 86400 / dt))
+    every = int(round(6 * 3600 / dt))
+    rates, integ = [rate(s)], 0.0
+    for i in range(n):
+        s = model.step(s, dt)
+        if (i + 1) % every == 0:
+            rates.append(rate(s))
+            integ += 0.5 * (rates[-1] + rates[-2]) * every * dt
+    x1 = unpack(s)
+    E1 = float(E(*x1))
     assert np.isfinite(E1)
     return E1 / E0 - 1.0, integ / E0, x1
 
@@ -927,3 +915,81 @@ def test_jw_energy_dt_halving(grid_kind, form, dt_factor):
         dps = float(jnp.abs(x1[2] - xo[2]).max())
         msg += f"; vs old at day {_JW_DAYS:g}: rms du {du:.3e} m/s, max dps {dps:.3e} Pa"
     print(msg)
+
+
+# ===========================================================================
+# (g) "legacy" form = the moved pre-core bodies; the models route via config
+# ===========================================================================
+
+@pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
+@pytest.mark.parametrize("kind", ["sigma", "hybrid"])
+def test_legacy_dispatch_and_model_routing(grid_kind, kind):
+    """``vertical_form="legacy"`` returns the moved body's arrays bit-for-bit,
+    and the model's tendency uses its config's form (legacy and, on hybrid,
+    as83)."""
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
+    coord = _coord(kind)
+    forms = ("legacy", "as83") if kind == "hybrid" else ("legacy", "sb81_theta")
+    if grid_kind == "latlon":
+        import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as pl
+        grid = _ll_grid()
+        s = _ll_state(grid)
+        cfg = pl.CGridLatLonPrimitiveEquationConfig()
+        body = pl.latlon_legacy_pe_tendencies(s, grid, coord, cfg, dt=600.0)
+        core = g.cgrid_latlon_pe_tendencies(s, grid, coord, cfg, dt=600.0,
+                                            vertical_form="legacy")
+        pairs = list(zip(jax.tree_util.tree_leaves(body), jax.tree_util.tree_leaves(core)))
+        for form in forms:
+            c = cfg._replace(vertical_form=form)
+            m = pl.CGridLatLonPrimitiveEquationModel(grid, coord, c, dt=600.0)
+            pairs += zip(jax.tree_util.tree_leaves(m.tendencies(s)), jax.tree_util.tree_leaves(
+                g.cgrid_latlon_pe_tendencies(s, grid, coord, c, dt=600.0, vertical_form=form)))
+    else:
+        import legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas as pm
+        mesh = _mesh()
+        s = _mpas_state(mesh)
+        cfg = pm.MPASPrimitiveEquationConfig()
+        body = pm.mpas_legacy_pe_tendencies(s, mesh, coord, cfg, dt=600.0)
+        core = g.mpas_pe_tendencies(s, mesh, coord, cfg, dt=600.0, vertical_form="legacy")
+        pairs = list(zip(jax.tree_util.tree_leaves(body), jax.tree_util.tree_leaves(core)))
+        for form in forms:
+            c = cfg._replace(vertical_form=form)
+            m = pm.MPASPrimitiveEquationModel(mesh, coord, c)
+            pairs += zip(jax.tree_util.tree_leaves(m.tendencies(s, dt=600.0)),
+                         jax.tree_util.tree_leaves(g.mpas_pe_tendencies(
+                             s, mesh, coord, c, dt=600.0, vertical_form=form)))
+    assert len(pairs) >= 12
+    for a, b in pairs:
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_non_legacy_refusals():
+    """Options only the legacy bodies implement are refused, not dropped."""
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
+    mesh, coord = _mesh(), _coord("hybrid")
+    s, cfg = _mpas_state(mesh), MPASPrimitiveEquationConfig()
+    with pytest.raises(ValueError, match="thermo-term"):
+        g.mpas_pe_tendencies(s, mesh, coord, cfg, vertical_form="as83",
+                             return_thermo_terms=True)
+    tend = g.mpas_pe_tendencies(s, mesh, coord, cfg, vertical_form="legacy")
+    with pytest.raises(ValueError, match="physics tendencies"):
+        g.mpas_pe_tendencies(s, mesh, coord, cfg, tend, vertical_form="as83")
+    ops = g.mpas_pe_operators(mesh, cfg, None, 0.0, vertical_form="legacy")
+    with pytest.raises(ValueError, match="no shared skeleton"):
+        g.primitive_equation_tendencies(s.T.data, (s.u.data,), s.p_s.data,
+                                        s.phis.data, coord, ops)
+
+
+@pytest.mark.parametrize("form", ["as83", "sb81_theta"])
+def test_mpas_pv_fence_is_value_neutral(form):
+    """The sharded step's PV-flux fence (an optimization barrier) leaves every
+    tendency bit-identical, as on the legacy body."""
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
+    mesh, coord = _mesh(), _coord("hybrid")
+    s, cfg = _mpas_state(mesh), MPASPrimitiveEquationConfig(pv_scheme="energy")
+    f = lambda fence: jax.jit(lambda st: g.mpas_pe_tendencies(
+        st, mesh, coord, cfg, dt=600.0, vertical_form=form, fence_pv_flux=fence))(s)
+    for a, b in zip(jax.tree_util.tree_leaves(f(True)), jax.tree_util.tree_leaves(f(False))):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))

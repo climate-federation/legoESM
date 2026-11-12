@@ -1343,6 +1343,9 @@ def _apply_hard_saturation_drain(state, hc, dt, threshold, max_heating_K=5.0):
         hard_saturation_drain,
     )
     T, p, _, _ = live_thermo(state, hc)
+    # This lane heats with constant L_v (documented convention); the drain solves
+    # and caps with the same coefficient.
+    lcp = constants.L_v / constants.c_pd
     tr = state.tracers.data
     if tr.shape[-1] < 2:
         # Nowhere to put the condensate: a single-tracer (vapour-only) state
@@ -1372,7 +1375,7 @@ def _apply_hard_saturation_drain(state, hc, dt, threshold, max_heating_K=5.0):
     dq = jnp.where(
         T >= constants.T_freeze,
         hard_saturation_drain(T, tr[..., 0], p, dt, hard_threshold=threshold,
-                              hard_max_heating_K=max_heating_K),
+                              hard_max_heating_K=max_heating_K, l_over_cp=lcp),
         0.0,
     ) * dt
     # Slot 1 is cloud water in every layout this driver builds (q_v, q_c, q_r
@@ -1385,8 +1388,7 @@ def _apply_hard_saturation_drain(state, hc, dt, threshold, max_heating_K=5.0):
     # c_pd*T + L_v*q_v. Swapping in exner_live moves that by ~2 %, not by 1.4;
     # real correction is a ~29 % cut to the latent heating, which is a lane
     # re-tuning and out of scope here. See the docstring.
-    theta_p = (state.theta_prime.data
-               + (constants.L_v / constants.c_pd) * dq / hc.exner_ref)
+    theta_p = (state.theta_prime.data + lcp * dq / hc.exner_ref)
     # Field.replace (dataclass-style), state._replace (NamedTuple) — the two
     # carry DIFFERENT APIs; mixing them up is an AttributeError at the first
     # jit call, not at trace time.

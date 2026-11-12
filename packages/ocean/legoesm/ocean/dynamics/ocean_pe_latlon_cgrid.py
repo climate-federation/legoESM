@@ -40,7 +40,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
-from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.source_rounding import nemo_source_round, nemo_source_store
 from legoesm.grids.latlon import LatLonGrid
 # Donor-cell upwind face reconstructions: PROMOTED to the core substrate so
 # the sea-ice C-grid transport can share them without an ice->ocean layering
@@ -1424,13 +1424,13 @@ def _bc_geometry_and_density(
         # the pre-existing behaviour for every non-NEMO-bridged recipe).
         eos_geometric_depth_1d=_eos_geometric_depth,
         density_anomaly_ratio_fn=(
-            (lambda t, s, p, **_kw: (
+            (lambda t, s, p, **_kw: nemo_source_store(lambda t, s: (
                 nemo_teos10_density_anomaly_ratio
                 if config.eos == "nemo_teos10"
                 else nemo_roquet_density_anomaly_ratio
             )(
                 t, s, p, rho0=rho_0,
-                geometric_depth_m=_eos_geometric_depth, tmask=_nemo_tmask3))
+                geometric_depth_m=_eos_geometric_depth, tmask=_nemo_tmask3), t, s))
             if (config.eos in ("nemo_eos80", "nemo_teos10")
                 and _eos_depth == "geometric")
             else None

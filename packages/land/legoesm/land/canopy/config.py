@@ -268,6 +268,14 @@ class CanopyConfig(NamedTuple):
     # 13.5 W/m2; at 10 the worst error is 0.25%.  Default 5 -> 10 (user
     # 2026-09-30).  Appended at the end of the tuple.
     most_n_iters: int = 10
+    # Columns per batch of the canopy Newton solve; 0 = every column of the
+    # call (one batch per GPU in the model).  A batch iterates until its
+    # slowest column stops, so small batches stop early but launch more
+    # kernels; with the step launch-bound, one batch is fastest (AMIP 4 A100:
+    # 64 -> 0.242 s/step, 1024 -> 0.148, one batch -> 0.138).  A positive value
+    # bounds the solve's memory.  Answers equal to rounding for every value.
+    # 64 -> 0 (user 2026-11-07).  Appended at the end of the tuple.
+    solve_group: int = 0
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -301,6 +309,9 @@ class CanopyConfig(NamedTuple):
         if not (isinstance(self.most_n_iters, int) and self.most_n_iters >= 1):
             raise ValueError("most_n_iters must be a positive int, got "
                              f"{self.most_n_iters!r}")
+        if not (isinstance(self.solve_group, int) and self.solve_group >= 0):
+            raise ValueError("solve_group must be an int >= 0 (0 = one batch), "
+                             f"got {self.solve_group!r}")
         return self
 
 
@@ -556,6 +567,16 @@ class CanopyLandParams(NamedTuple):
     SAI_dom: jax.Array | None = None
     hbot_dom: jax.Array | None = None
     pft_dom: jax.Array | None = None
+
+    # ---- Canopy band albedo and leaf emissivity (per-column; optional) ----
+    # Snow-free band albedo of the vegetation itself.  When set (with the
+    # soil-colour bounds), ``soil_albedo.rewet_soil_bands`` blends it with the
+    # wet soil bands by canopy cover, ``cov*CAN + (1-cov)*SOIL``.  ``None`` keeps
+    # the soil-colour bands alone (byte-identical to before these fields).
+    ALB_VIS_CAN: jax.Array | None = None
+    ALB_NIR_CAN: jax.Array | None = None
+    # Leaf longwave emissivity; ``None`` uses the scheme's scalar ``epsf``.
+    epsf: jax.Array | None = None
 
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface

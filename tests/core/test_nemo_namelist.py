@@ -55,3 +55,12 @@ def test_equals_and_slash_inside_quotes_stay_values(tmp_path):
     assert got[("oce", "nam", "cn_a")] == ["x=1, y/z"]
     assert got[("oce", "nam", "ln_b")] == [True]
     assert got[("oce", "nam", "cn_c")] == ["./a/b", "c=d"]
+
+
+def test_two_assignments_on_one_line_and_on_the_group_header(tmp_path):
+    nml = tmp_path / "namelist_cfg"
+    nml.write_text("&namsbc\n   nn_fsbc=5, ln_blk=T,\n/\n&namx rn_a=1.0\n/\n")
+    parsed = parse_namelist(nml, "oce")
+    assert parsed[("oce", "namsbc", "nn_fsbc")] == [5.0]
+    assert parsed[("oce", "namsbc", "ln_blk")] == [True]
+    assert parsed[("oce", "namx", "rn_a")] == [1.0]

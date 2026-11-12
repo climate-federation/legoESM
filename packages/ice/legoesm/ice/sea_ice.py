@@ -529,7 +529,8 @@ def _si3_step_with_trace(state: SI3ColumnState,
         state.S_layers.data,
         state.age_volume.data,
     )
-    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants)
+    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants,
+                                   switches=config.si3_switches)
     out = trace.exit
     new_state = SI3ColumnState(
         concentration=state.concentration.replace(data=out.concentration),
@@ -755,25 +756,34 @@ from legoesm.ice.si3_finalize import (  # noqa: E402
     si3_o15_step,
     si3_o16_step,
 )
+from legoesm.ice.si3_o17 import (  # noqa: E402
+    SI3O17LiveForcing,
+    SI3O17StepState,
+    SI3O17Trace,
+    si3_o17_step,
+)
 
 
 def _si3_orca2_o2_step_with_trace(
-    state: SI3State,
-    forcing: SI3ORCA2O2Forcing | SI3FinalizeForcing,
+    state: SI3State | SI3O17StepState,
+    forcing: SI3ORCA2O2Forcing | SI3FinalizeForcing | SI3O17LiveForcing,
     config: SeaIceConfig,
     dt: float,
-) -> tuple[SI3State, TileResponse | SI3FinalizeResponse]:
+) -> tuple[
+    SI3State | SI3O17StepState,
+    TileResponse | SI3FinalizeResponse | SI3O17Trace,
+]:
     """Execute the ORCA2 SI3 production entry, including its O15/O16 tail."""
 
-    if not isinstance(state, SI3State):
+    if not isinstance(state, (SI3State, SI3O17StepState)):
         raise ValueError(
             "thermo_scheme='si3_orca2_o2' requires SI3State with full ORCA2 "
             "5-category 10+5-layer enthalpies/salinities and Prather moments"
         )
-    if not isinstance(forcing, (SI3ORCA2O2Forcing, SI3FinalizeForcing)):
+    if not isinstance(forcing, (SI3ORCA2O2Forcing, SI3FinalizeForcing, SI3O17LiveForcing)):
         raise ValueError(
             "thermo_scheme='si3_orca2_o2' requires SI3ORCA2O2Forcing or "
-            "SI3FinalizeForcing"
+            "SI3FinalizeForcing, or SI3O17LiveForcing"
         )
     if config.si3_orca2 is None:
         raise ValueError(
@@ -785,6 +795,17 @@ def _si3_orca2_o2_step_with_trace(
             "thermo_scheme='si3_orca2_o2' requires dt == si3_orca2.rDt_ice "
             f"({float(dt)!r} != {float(config.si3_orca2.rDt_ice)!r})"
         )
+
+    if isinstance(forcing, SI3O17LiveForcing):
+        if not isinstance(state, SI3O17StepState):
+            raise ValueError("SI3O17LiveForcing requires typed SI3O17StepState")
+        card = getattr(config, "si3_o17", None)
+        if card is None:
+            raise ValueError("O17 production stepping requires the explicit config.si3_o17 card")
+        return si3_o17_step(state, forcing, card)
+
+    if not isinstance(state, SI3State):
+        raise ValueError("O2/finalize forcing requires SI3State, not SI3O17StepState")
 
     if isinstance(forcing, SI3FinalizeForcing):
         correction = si3_o15_step(
@@ -823,13 +844,11 @@ def _si3_orca2_o2_step_with_trace(
             stress=stress,
         )
 
-    # The earlier O2 initialization contract still has no heat/freshwater/salt
-    # response and remains fail-closed.  The typed late-stage forcing above is
-    # the only production continuation that owns that response.
     raise NotImplementedError(
-        "SI3 ORCA2 O2 initialization is available through si3_o2_step, but "
-        "step_sea_ice is refused until the NEMO ice_update_flx forcing and "
-        "heat/freshwater/salt TileResponse contract is implemented"
+        "ice_update_flx: SI3ORCA2O2Forcing is the initialization acquisition "
+        "boundary; use si3_o2_step directly. Production step_sea_ice requires "
+        "the complete typed SI3O17LiveForcing so no heat/freshwater/salt field "
+        "is invented."
     )
 
 
@@ -857,7 +876,8 @@ def _nemo_si3_ice_albedo(
     two sites as ``icealb.F90:179-182``, so land albedo is 0 as in NEMO.
     Switches (melt flag, thickness pieces) are C1 ramps of width
     ``switches.relative_width x scale``; ``relative_width=0.0`` is NEMO's hard
-    form.  The snow-free test stays hard unless ``snow_ramp_width_m > 0``.
+    form.  The snow-free test is hard in the forward pass; ``snow_ramp_width_m``
+    sets its straight-through surrogate gradient.
     """
     r = switches.relative_width
     t_freeze = constants.T_freeze
