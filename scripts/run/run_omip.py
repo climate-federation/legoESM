@@ -3610,11 +3610,10 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     Re-using the returned function across blocks reuses the JIT cache.
     """
     from legoesm import constants as _const
-    from legoesm.coupler.coupler import ocean_tile_response
-    from legoesm.coupler.ocean_forcing import omip_sea_ice_surface_forcing
+    from legoesm.coupler.ocean_forcing import (
+        omip_sea_ice_surface_forcing, open_water_bulk_forcing)
     from legoesm.core.coupling_fields import AtmToSurface
-    from legoesm.ocean.freshwater import FreshwaterForcing, net_freshwater_flux
-    from legoesm.ocean.state import OceanSurfaceForcing
+    from legoesm.ocean.freshwater import net_freshwater_flux
 
     coupler_cfg = jra55_state["coupler_cfg"]
     co2_ppmv = float(jra55_state["co2_ppmv"])
@@ -3799,43 +3798,19 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             )
 
             sst_K = state_in.T.data[..., 0] + _const.T_freeze
-            u_o = jnp.zeros_like(sst_K)
-            v_o = jnp.zeros_like(sst_K)
-            tile = ocean_tile_response(atm, sst_K, u_o, v_o, coupler_cfg)
+            # Shared open-water bulk arithmetic (also the ocean-WB ERA5 forcing).  Explicit
+            # --sw-penetration schemes take the post-albedo shortwave (FESOM2's
+            # 0.54*(1-albw)*SW); "auto" keeps the historical raw sw_down.
+            tile, fw, sf = open_water_bulk_forcing(
+                atm, sst_K, runoff_stack[idx], coupler_cfg,
+                sw_net_to_forcing=sw_net_to_forcing, chl=_chl)
 
             # Wind-stress spinup ramp (gated at compile time).
             if enable_ramp:
                 abs_step = block_start_step + idx
                 t_sim = abs_step.astype(jnp.float64) * dt
                 ramp = jnp.minimum(1.0, t_sim / T_ramp_seconds)
-                tau_x = tile.tau_x * ramp
-                tau_y = tile.tau_y * ramp
-            else:
-                tau_x = tile.tau_x
-                tau_y = tile.tau_y
-
-            sw_net = atm.sw_down * (1.0 - tile.albedo)
-            q_net = (sw_net + atm.lw_down
-                     - tile.lw_up - tile.shflx - tile.lhflx)
-
-            evap = tile.lhflx / _const.L_v
-            fw = FreshwaterForcing(
-                precip=atm.precip_total,
-                evap=evap,
-                runoff=runoff_stack[idx],
-                ice_fw=jnp.zeros_like(runoff_stack[idx]),
-            )
-            sf = OceanSurfaceForcing(
-                # Explicit --sw-penetration schemes take the post-albedo
-                # shortwave (FESOM2's 0.54*(1-albw)*SW); "auto" keeps the
-                # historical raw sw_down.
-                sw_down=sw_net if sw_net_to_forcing else atm.sw_down,
-                q_net=q_net,
-                tau_x=tau_x,
-                tau_y=tau_y,
-                freshwater=None,
-                chl=_chl,
-            )
+                sf = sf._replace(tau_x=tile.tau_x * ramp, tau_y=tile.tau_y * ramp)
             # Prognostic slab sea ice: advance the ice tile and partition the
             # surface forcing (open-ocean fluxes x f_ocean=(1-A) + the ice
             # tile's basal heat / melt-freeze freshwater / brine salt / stress).

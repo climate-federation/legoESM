@@ -8,6 +8,7 @@ Energy and enstrophy spectra use 2D FFT with isotropic wavenumber binning.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -366,6 +367,69 @@ def mixed_layer_depth(
     column_wet = jnp.any(wet > 0.5, axis=-1)
     mld = jnp.where(column_wet, mld, jnp.nan)
     return mld
+
+
+def isotherm_depth(
+    T: jnp.ndarray,
+    z_centers: jnp.ndarray,
+    *,
+    iso_C: float = 20.0,
+    width_K: float = 0.5,
+    wet_mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Depth [m] of the first warm-to-cold crossing of the ``iso_C`` isotherm (D20 at 20 C).
+
+    Smooth by default (RULE 5): with ``s_k = sigmoid((T_k - iso)/width)`` each bracket
+    ``(k, k+1)`` of two wet levels carries ``b_k = s_k (1 - s_{k+1})``, the FIRST crossing gets
+    ``q_k = b_k prod_{j<k} (1 - b_j)``, and inside a bracket the depth is the linear
+    interpolation ``z_k + (z_{k+1} - z_k) (T_k - iso) / dT_k`` (``dT_k = T_k - T_{k+1}``, smoothed
+    as ``(dT + sqrt(dT^2 + width^2))/2``); the crossing depth is the q-weighted MEAN of those.
+    A crossing exists with weight ``C = s(T_hi) (1 - s(T_lo))``, ``T_hi``/``T_lo`` the
+    softmax/softmin-weighted means of the wet T (weights ``exp(+-T/width)``: never beyond the
+    true max/min, the hard max/min at width 0); otherwise a warm column gives its deepest wet
+    centre, a cold one 0.
+
+    KNOWN DIFFERENCE vs the exact diagnostic: at ``width_K = 0`` (the hard limit, reachable only
+    through this argument) ``s`` is the step ``T > iso`` and the result is the exact
+    first-crossing linear interpolation (denominator floored at 1e-12 K, as
+    :func:`mixed_layer_depth`); at the default 0.5 K the crossing is blurred over roughly
+    +-1 K of the profile.  Votes 2026-11-11 (author/codex/GLM): form, 0.5 K, home, floor 3-0;
+    review round 1: weighted-mean T_hi/T_lo replacing the log-sum-exp max and the deepest-wet T
+    3-0 (an unnormalised first-passage form was measured +27 m off on a plain thermocline).
+
+    Parameters: ``T`` (..., nlev) [degC]; ``z_centers`` (nlev,) [m, positive down, increasing];
+    ``wet_mask`` (..., nlev) in {0, 1} or None.  Returns (...); NaN over fully dry columns.
+    """
+    z = jnp.asarray(z_centers, dtype=T.dtype)
+    wet = jnp.ones_like(T) if wet_mask is None else jnp.asarray(wet_mask, dtype=T.dtype)
+    T = jnp.where(wet > 0.5, T, 0.0)                  # dry values (NaN or not) never enter
+    big = jnp.asarray(1e4, T.dtype)                   # pushes dry levels out of the max/min
+    T_up, T_dn = jnp.where(wet > 0.5, T, T - big), jnp.where(wet > 0.5, T, T + big)
+    if width_K > 0:
+        step = lambda x: jax.nn.sigmoid(x / width_K)
+        T_hi = jnp.sum(jax.nn.softmax(T_up / width_K, axis=-1) * T, axis=-1)
+        T_lo = jnp.sum(jax.nn.softmax(-T_dn / width_K, axis=-1) * T, axis=-1)
+        dT = T[..., :-1] - T[..., 1:]
+        dT = 0.5 * (dT + jnp.sqrt(dT * dT + width_K * width_K))
+    elif width_K == 0:
+        step = lambda x: (x > 0).astype(T.dtype)
+        T_hi, T_lo = jnp.max(T_up, axis=-1), jnp.min(T_dn, axis=-1)
+        dT = jnp.maximum(T[..., :-1] - T[..., 1:], 1e-12)
+    else:
+        raise ValueError(f"width_K must be >= 0, got {width_K}")
+    s = step(T - iso_C) * wet
+    b = s[..., :-1] * (1.0 - s[..., 1:]) * wet[..., :-1] * wet[..., 1:]
+    before = jnp.cumprod(1.0 - b, axis=-1)
+    before = jnp.concatenate([jnp.ones_like(before[..., :1]), before[..., :-1]], axis=-1)
+    q = b * before
+    frac = jnp.clip((T[..., :-1] - iso_C) / dT, 0.0, 1.0)
+    z_star = z[:-1] + (z[1:] - z[:-1]) * frac
+    z_cross = jnp.sum(q * z_star, axis=-1) / jnp.maximum(jnp.sum(q, axis=-1), 1e-30)
+    warm_any = step(T_hi - iso_C)
+    crosses = warm_any * (1.0 - step(T_lo - iso_C))
+    z_bottom = jnp.max(jnp.where(wet > 0.5, z, 0.0), axis=-1)
+    d = crosses * z_cross + (1.0 - crosses) * warm_any * z_bottom
+    return jnp.where(jnp.any(wet > 0.5, axis=-1), d, jnp.nan)
 
 
 # ============================================================================

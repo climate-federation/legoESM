@@ -432,3 +432,42 @@ __all__ = [
     "ice_ocean_forcing_from_ice_response",
     "omip_sea_ice_surface_forcing",
 ]
+
+
+def open_water_bulk_forcing(atm, sst_K, runoff, coupler_cfg, *, sw_net_to_forcing=False,
+                            chl=None):
+    """Full-cell open-ocean bulk forcing from an :class:`AtmToSurface` (the OMIP JRA55 arithmetic).
+
+    ``ocean_tile_response`` with zero surface current (|u_o| << |u_a| at 1 deg), then
+    ``q_net = SW (1 - albedo) + LW_down - LW_up - SH - LH`` (positive into the ocean; SH/LH
+    positive up) and ``E = LH / L_v`` (positive up).  ``sw_net_to_forcing`` passes the
+    post-albedo shortwave to the penetration channel (explicit ``--sw-penetration`` schemes),
+    else the raw ``sw_down``.  Returns ``(tile, fw, sf)``; the caller adds ramps / ice blends.
+    Shared by ``run_omip``'s JRA55 scan block and the ocean-WB ERA5 forcing.
+    """
+    from legoesm import constants as _const
+    from legoesm.coupler.coupler import ocean_tile_response
+
+    u_o = jnp.zeros_like(sst_K)
+    v_o = jnp.zeros_like(sst_K)
+    tile = ocean_tile_response(atm, sst_K, u_o, v_o, coupler_cfg)
+    sw_net = atm.sw_down * (1.0 - tile.albedo)
+    q_net = (sw_net + atm.lw_down
+             - tile.lw_up - tile.shflx - tile.lhflx)
+    evap = tile.lhflx / _const.L_v
+    fw = FreshwaterForcing(
+        precip=atm.precip_total,
+        evap=evap,
+        runoff=runoff,
+        ice_fw=jnp.zeros_like(runoff),
+    )
+    sf = OceanSurfaceForcing(
+        sw_down=sw_net if sw_net_to_forcing else atm.sw_down,
+        q_net=q_net,
+        tau_x=tile.tau_x,
+        tau_y=tile.tau_y,
+        freshwater=None,
+        chl=chl,
+    )
+    return tile, fw, sf
+
