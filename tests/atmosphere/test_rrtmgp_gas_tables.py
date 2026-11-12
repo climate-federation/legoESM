@@ -81,9 +81,11 @@ def test_run_solar_config_expands_to_the_run_sw_table(tmp_path):
         spec = external.get_solar_forcing_at_time(cfg, 10.0)["solar_fraction_by_gpt"]
         out[t] = np.asarray(spec)
     assert out["reduced"].shape == (112,) and out["full"].shape == (224,)
+    import xarray as xr
     sw = rrtmgp_mod.gas_table_files("full")[1]
-    with netCDF4.Dataset(sw) as ds:
-        lims = np.asarray(ds["bnd_limits_gpt"][:], int)
+    ds = xr.open_zarr(sw) if sw.endswith(".zarr") else xr.open_dataset(sw)  # either store
+    lims = ds["bnd_limits_gpt"].values.astype(int)
+    ds.close()
     per_band = np.array([out["full"][a - 1:b].sum() for a, b in lims])
     np.testing.assert_allclose(per_band, bands, rtol=1e-12)
 
