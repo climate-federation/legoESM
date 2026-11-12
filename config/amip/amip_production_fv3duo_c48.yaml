@@ -28,6 +28,6 @@ rad_update_steps: 24        # CAM6 f09: radiation hourly at this dt
 # --era5-time 1979-01-01T00:00; stage 1 with --target-clm-surfdata: soil
 # water carried as relative wetness between dry floor and saturation, rebuilt
 # on this run's soil, user 2026-11-12); file md5
-# b98c145e2230df38f5b3bd6e37d07239; full provenance in the file's metadata.
+# 97e6b0fa3380b60a6f2b22b3797b67f7; full provenance in the file's metadata.
 # data/ is gitignored: stage the file in the launch directory.
 land_ic: data/lmip_soil_ic/soil_ic_fv3duo48_era5T_19790101.npz

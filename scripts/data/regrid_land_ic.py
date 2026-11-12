@@ -396,11 +396,12 @@ def main(argv=None) -> int:
     ap.add_argument("--target-clm-surfdata", default=None,
                     help="the CLM surfdata the RUN builds its soil hydraulics "
                          "from (its clm_surfdata_path).  A regridded column's "
-                         "water came from another soil; when its total is below "
-                         "this soil's Richards dry floor the run refuses to load "
-                         "it, so such columns are set to that floor (vote "
-                         "2026-11-12) and counted in the metadata.  Without this "
-                         "flag no column is checked and the metadata says so.")
+                         "water came from another soil, so each layer's "
+                         "wetness between the donor soil's dry floor and "
+                         "saturation is rebuilt on this soil (user "
+                         "2026-11-12); a column still below its dry floor is "
+                         "refused.  Without this flag the water is copied "
+                         "as is and the metadata says so.")
     ap.add_argument("--stamp-only", action="store_true",
                     help="do not regrid: write --source unchanged plus the "
                          "attested soil-hydraulics stamp to --out (for an IC "
