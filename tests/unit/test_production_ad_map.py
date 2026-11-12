@@ -342,3 +342,10 @@ def test_loop_census_ranks_the_scan_that_stacks_residuals(capsys):
     assert top["stacked_mib"] * 2**20 == 5 * 3 * 8
     assert top["src"].split(":")[0].endswith("test_production_ad_map.py")
     assert "LOOP " in capsys.readouterr().out
+
+
+def test_parser_round_trips_column_block_and_blockgap():
+    a = pam.build_parser().parse_args(
+        ["--stage", "blockgap", "--column-block", "2048"])
+    assert a.stage == "blockgap" and a.column_block == 2048
+    assert pam.build_parser().parse_args(["--stage", "step"]).column_block == 0

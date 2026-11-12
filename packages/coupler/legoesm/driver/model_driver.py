@@ -14120,13 +14120,17 @@ class ModelDriver:
         _mynn_col = getattr(cfg, "turbulence", "none") == "mynn25"
 
         def _build_physics(_cfg, need_rad=True,
-                           mynn_initflag=(False if _mynn_col else None)):
+                           mynn_initflag=(False if _mynn_col else None),
+                           column_block_size=0):
             """The lane's make_physics call (one copy for the full and the
             held-radiation variants; exported to mpas_diff_step so a caller
             can rebuild the SAME physics from a config with traced params).
             ``mynn_initflag``: turbulence='mynn25' only; True builds the
-            peeled cold-start step (votes M3/R3a)."""
+            peeled cold-start step (votes M3/R3a).  ``column_block_size``:
+            the gradient path's column blocks (``column_blocked_physics``);
+            the run loop never sets it."""
             return make_physics(_cfg, model_type="mpas", dt=DT_PHYS,
+                                column_block_size=column_block_size,
                                 mynn_initflag=mynn_initflag,
                                 cam6_activation=_cam6_act,
                                 cirrus_aerosol=_cirrus_setup,
