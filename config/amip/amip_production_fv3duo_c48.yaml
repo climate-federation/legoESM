@@ -25,7 +25,9 @@ rad_update_steps: 24        # CAM6 f09: radiation hourly at this dt
 # C48 duo column mesh; scripts/data/regrid_land_ic.py --target-grid fv3_duo
 # --target-resolution 48 (stage 1 from restart_1985_d000h00.npz md5
 # e619b555cf6bd018a19ac8a52f77b52a, stage 2 --era5-soil-t stl1-4 + lsm,
-# --era5-time 1979-01-01T00:00), built at 7aee08bb40; file md5
-# fa055a9ba26ea854b47e7c570fba71d2; full provenance in the file's metadata.
+# --era5-time 1979-01-01T00:00; stage 1 with --target-clm-surfdata, which
+# lifts 1 column (Taklimakan, +8.48 mm) to the run's dry floor, vote
+# 2026-11-12); file md5 b4eeee974d84b16da99dfda954d85c38; full provenance in
+# the file's metadata.
 # data/ is gitignored: stage the file in the launch directory.
 land_ic: data/lmip_soil_ic/soil_ic_fv3duo48_era5T_19790101.npz
