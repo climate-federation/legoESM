@@ -145,6 +145,12 @@ jobs:
         env:
           JAX_ENABLE_X64: "0"
         run: python -m pytest tests/wave/unit/ --timeout=300 --tb=short -q
+      - name: Wave coupling, KPP and CLI integration
+        run: |
+          python -m pytest tests/wave/integration/ \
+            tests/ocean/unit/test_kpp_langmuir.py \
+            tests/unit/test_run_coupled_wave_cli.py \
+            --timeout=600 --tb=short -q
     timeout-minutes: 30
 
   top-level-fidelity-tests:

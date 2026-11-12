@@ -77,6 +77,18 @@ def test_direction_grid_must_be_uniform():
         config.validate()
 
 
+def test_direction_grid_may_start_anywhere_on_the_circle():
+    """A uniform grid whose last spacing wraps through 0 is still uniform.
+
+    The archived WW3 cases store directions from 90 deg, so the straight
+    diff of the last pair is -270 deg; only the circular spacing is 90 deg.
+    """
+    theta = tuple(np.deg2rad(np.asarray([90.0, 180.0, 270.0, 0.0])))
+    config = WaveConfig(
+        grid=tiny_grid()._replace(theta_rad=theta), network=tiny_network())
+    config.validate()
+
+
 def test_direction_grid_must_cover_the_full_circle():
     half_circle = tuple(np.linspace(0.0, np.pi, 4, endpoint=False))
     config = WaveConfig(grid=tiny_grid()._replace(theta_rad=half_circle))

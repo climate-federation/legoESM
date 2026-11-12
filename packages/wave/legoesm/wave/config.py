@@ -268,7 +268,11 @@ class WaveConfig(NamedTuple):
         if np.any(np.diff(freq) <= 0):
             raise ValueError("wave freq_hz must be strictly increasing")
         theta = np.asarray(self.grid.theta_rad, dtype=float)
-        spacing = np.diff(theta)
+        # Circular spacing: an oracle grid stored as [90, 180, 270, 0]
+        # (degrees) is uniform on the circle even though a straight diff
+        # wraps by -270 deg at the last step.  The principal value keeps
+        # the sign of a descending grid.
+        spacing = np.angle(np.exp(1j * np.diff(theta)))
         if not np.allclose(spacing, spacing[0], rtol=1e-6, atol=0.0):
             raise ValueError("wave theta_rad must be uniformly spaced")
         if not np.isclose(abs(spacing[0]) * n_dir, 2.0 * np.pi, rtol=1e-6):
