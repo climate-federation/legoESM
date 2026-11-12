@@ -163,10 +163,13 @@ def test_diagnostic_closure_external_surface_stress(grid, z_coord):
         state, grid, z_coord, cfg, surface_forcing=forcing,
         diagnose_momentum=False,
     )
-    np.testing.assert_array_equal(np.asarray(plain.du_dt.data),
-                                  np.asarray(tendencies.du_dt.data))
-    np.testing.assert_array_equal(np.asarray(plain.dv_dt.data),
-                                  np.asarray(tendencies.dv_dt.data))
+    # KNOWN DIFFERENCE: diagnose_momentum=True runs the pre-core body, the
+    # plain call runs the shared ocean core; same terms, different summation
+    # order (measured max abs 5.2e-19). Scale-based bound, not bitwise.
+    for a, b in ((plain.du_dt, tendencies.du_dt), (plain.dv_dt, tendencies.dv_dt)):
+        b = np.asarray(b.data)
+        np.testing.assert_allclose(np.asarray(a.data), b, rtol=0,
+                                   atol=1e-12 * np.max(np.abs(b)))
 
 
 def test_default_signature_unchanged(grid, z_coord):
