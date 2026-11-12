@@ -7,11 +7,14 @@ The numerical reference is WADEN commit
 independent of atmosphere/ocean/land/ice; coupling belongs to the coupler.
 The validation protocol carries forward the original registered cases and bars.
 
-The source-free cases use WW3 6.07 archived output, identical initial fields,
+The source-free cases use WW3 6.07 archived output, the same t=0 separable
+reconstruction of the initial spectrum in the port and the WADEN reference,
 physical depths, prescribed boundaries, timesteps and scoring domains. Learned
-sources/transport, GSE and frequency tails are disabled explicitly in the
-resolved config. Only the initial reference field is used to construct the
-initial spectrum; future interior reference output is used for scoring only.
+sources/transport and GSE are disabled explicitly in the resolved config; the
+port selects no frequency-tail operator. Only the initial reference field is
+used to construct the initial spectrum; future interior reference output is
+used for scoring only. The bars are NeuralSWM's
+`test/direct/test_real.py` gates, unchanged.
 
 | Case | Coordinates | Active transport | SWH RMSE gate |
 | --- | --- | --- | --- |
@@ -36,21 +39,22 @@ float32, CPU, `JAX_ENABLE_X64=1`; the initial reference field only.
 | Case | SWH RMSE | SWH max abs | Gate | Result |
 | --- | --- | --- | --- | --- |
 | tp1.1 | 3.862e-06 m | 2.915e-04 m | < 1e-4 m | pass |
+| tp1.2 | 9.080e-03 m | 1.962e-01 m | < .01 m | pass |
 | tp1.4 | 2.149e-03 m | 8.959e-03 m | < .008 m | pass |
 | tp2.1 | 9.756e-06 m | 1.046e-03 m | < 2e-5 m / .002 m | pass |
 
 The direct WADEN public-rollout comparison is at float32 round-off over the
-full trajectory: tp1.1 is bit-identical, tp1.4 differs by 1.8e-08 (SWH
-relative L2) and 7.1e-08 (spectrum), tp2.1 by 2.2e-06 and 3.7e-08. These are
-descriptive; they carry no newly invented pass tolerance.
+full trajectory: tp1.1 is bit-identical, tp1.2 differs by 1.1e-07 (SWH
+relative L2) and 1.6e-07 (spectrum), tp1.4 by 1.8e-08 and 7.1e-08, tp2.1 by
+2.2e-06 and 3.7e-08. These are descriptive; they carry no newly invented
+pass tolerance. A float64 rerun closes tp1.2 and tp1.4 at 3e-16..9e-16
+relative. tp2.1 is 2.4e-08 (SWH) and 1.9e-14 (spectrum): the spectrum is at
+round-off, and the SWH residual is the `4 sqrt(m0)` diagnostic amplifying the
+lowest-m0 cells, not a trajectory divergence. No new gate is introduced.
 
-The committed manifests were produced on a clean code tree at commit
-`d3a79970b8`; the only recorded repository difference is one untracked local
-`.vscode/` directory (IDE state, not code).
-
-tp1.2 is not reproduced locally: its WW3 archive is absent on the machine used
-for this port. Its gate above is inherited and unverified in this run; do not
-describe it as passing until its archived inputs are available.
+The committed manifests record the code revision, environment (CPU, x64,
+default backend), resolved configuration with named fields, input SHA256s and
+the full scoring output.
 
 ## Hermetic CI lane
 
@@ -67,14 +71,16 @@ not claimed as GitHub CI results.
 ## External WW3 evidence lane: data access
 
 The reference files used for these measurements are author-supplied local
-inputs; a public downloadable copy has not been verified. Exact input SHA256s
-in the manifests identify the measured bytes. For review, request the bundle
-`legoesm-wave-ww3-inputs-20261111.tar.gz` (SHA256
+inputs; a public downloadable copy has not been verified. The tp1.1/tp1.4/
+tp2.1 archives were read from the local WW3 tree; tp1.2 was read from the
+NeuralSWM test archive at `~/NeuralSWM/test/data/ww3/ww3_tp1.2/input`.
+Exact input SHA256s in the manifests identify the measured bytes. For review,
+request the bundle `legoesm-wave-ww3-inputs-20261111.tar.gz` (SHA256
 `4d25b9c5410dbe9a11e3acf0815b209196d66c8852fddf1935e66409bdb80a77`). Verify
-that digest and extract it into an empty `ww3-inputs` directory; it contains
-the four `ww3_tp*/input` directories. A public redistribution location and
-data provenance/licensing record must be supplied before describing this as
-independently accessible public evidence.
+that digest and extract it into an empty `ww3-inputs` directory; a usable
+bundle must contain all four `ww3_tp*/input` directories. A public
+redistribution location and data provenance/licensing record must be supplied
+before describing this as independently accessible public evidence.
 
 From a checkout with the workspace installed:
 
@@ -82,10 +88,10 @@ From a checkout with the workspace installed:
 python scripts/experiment/install_federation.py --all --extras dev
 mkdir -p ww3-inputs
 tar -xzf /path/to/legoesm-wave-ww3-inputs-20261111.tar.gz -C ww3-inputs
-for case in tp1_1 tp1_4 tp2_1; do
+for case in tp1_1 tp1_2 tp1_4 tp2_1; do
   JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m scripts.validate.validate_wave_ww3 \
     --config "scripts/validate/wave_fidelity/configs/${case}.json" \
-    --data-root ww3-inputs --output "/tmp/wave-ww3/${case}"
+    --data-root "${WW3_ROOT}" --output "/tmp/wave-ww3/${case}"
 done
 ```
 
@@ -114,10 +120,12 @@ and forward/reverse finite-difference agreement away from switching surfaces
 (order 1, eps 1e-6, rtol 1e-4, atol 1e-6). Fixed masks are held fixed. This
 check gives no general guarantee at limiter switches or over long rollouts.
 
-The port keeps WADEN's hard TVD/positivity switches as the default; the
-differentiability-versus-oracle-fidelity trade-off is explicitly waived for
-this dynamics core. A globally smooth operator would change the numerical
-model and needs a separate proposal and scientific validation.
+The port keeps WADEN's hard TVD/positivity switches as the default. The
+project owner explicitly waived RULE 5 (differentiability versus oracle
+fidelity) for this dynamics core on 2026-11-12; the waiver is a deliberate
+decision, not a default chosen by the port. A globally smooth operator would
+change the numerical model and needs a separate proposal and scientific
+validation.
 
 ## Coupling and release review
 

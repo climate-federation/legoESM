@@ -59,6 +59,14 @@ def _load_demo(root: Path) -> dict[str, np.ndarray]:
     }
 
 
+def _score(predicted, observed, initial, valid):
+    """RMSE, bias, persistence RMSE and sample count on the valid mask."""
+    err = predicted[valid] - observed[valid]
+    persist_err = initial[valid] - observed[valid]
+    return (float(np.sqrt(np.mean(err**2))), float(np.mean(err)),
+            float(np.sqrt(np.mean(persist_err**2))), int(valid.sum()))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--neuralswm-root", default="~/NeuralSWM")
@@ -129,15 +137,9 @@ def main() -> None:
         predicted = np.asarray(wave_parameters(spectra, env)["swh"])[0]
         observed = data["swh"][step + 1]
         valid = interior & np.isfinite(observed)
-        err = predicted[valid] - observed[valid]
-        persist_err = initial_swh[valid] - observed[valid]
-        rows.append((
-            step + 1,
-            float(np.sqrt(np.mean(err**2))),
-            float(np.mean(err)),
-            float(np.sqrt(np.mean(persist_err**2))),
-            int(valid.sum()),
-        ))
+        rmse, bias, persist_rmse, count = _score(
+            predicted, observed, initial_swh, valid)
+        rows.append((step + 1, rmse, bias, persist_rmse, count))
 
     print(f"{'lead_h':>6} {'rmse_m':>9} {'bias_m':>9} {'persist_rmse_m':>15} {'n':>7}")
     for lead, rmse, bias, persist, n in rows:

@@ -2,7 +2,6 @@
 
 import numpy as np
 
-from legoesm.wave.constants import R_EARTH
 
 def errors(prediction, reference, valid):
     """Float64 reductions; an identically zero reference has no relative metric."""
@@ -26,19 +25,3 @@ def errors(prediction, reference, valid):
 def circular_errors(prediction, reference, valid):
     difference = (prediction - reference + 180) % 360 - 180
     return errors(difference, np.zeros_like(difference), valid)
-
-
-def centroid_trace(hs, case, coordinate, axis, periodic):
-    """Energy-weighted pulse centre; circular longitude is unwrapped in time."""
-    weights = np.where(case["wet"][None], hs**2, 0).astype(np.float64)
-    if coordinate == "Spherical":
-        weights *= np.cos(np.deg2rad(case["y"]))[None, None, :]
-    values = case["x"] if axis == "x" else case["y"]
-    marginal = weights.sum(axis=2 if axis == "x" else 1)
-    if periodic:
-        phase = np.deg2rad(values)
-        circular = marginal @ np.exp(1j * phase)
-        return np.unwrap(np.angle(circular)) * R_EARTH
-    total = marginal.sum(axis=1)
-    centre = np.divide(marginal @ values, total, out=np.full_like(total, np.nan), where=total > 0)
-    return centre * (np.pi / 180 * R_EARTH) if coordinate == "Spherical" else centre

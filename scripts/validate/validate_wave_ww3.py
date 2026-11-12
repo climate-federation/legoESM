@@ -10,6 +10,7 @@ from functools import partial
 import hashlib
 import importlib
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -30,8 +31,41 @@ from scripts.validate.wave_fidelity.case_io import load_case, moments, read_conf
 from scripts.validate.wave_fidelity.compare import errors, circular_errors
 
 WADEN_REVISION = "46aadc7834ad850442a535a08f94ca173e4b22e8"
-# Existing WADEN scientific regression bars (test/direct/test_real.py).
+# Inherited NeuralSWM scientific regression bars
+# (test/direct/test_real.py; the pinned WADEN checkout has no test tree).
 SWH_RMSE_BARS = {"tp1.1": 1e-4, "tp1.2": .01, "tp1.4": .008, "tp2.1": 2e-5}
+TP2_1_MAX_ABS_M = .002
+
+
+def _plain(value):
+    """Recursively turn NamedTuples into NAMED dicts for the manifest.
+
+    ``json.dumps(NamedTuple)`` serialises nested configs positionally, so a
+    field reorder would silently change the meaning of an old manifest.
+    """
+    if hasattr(value, "_asdict"):
+        return {key: _plain(item) for key, item in value._asdict().items()}
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if hasattr(value, "item"):
+        return value.item()
+    return value
+
+
+def free_mask(case):
+    """Scoring domain: wet cells that are not prescribed boundaries."""
+    return np.asarray(case["wet"], dtype=bool) & ~np.asarray(
+        case["boundary_mask"], dtype=bool)
+
+
+def case_passed(case_name, bulk):
+    """Apply the inherited case gate (plus tp2.1's max-absolute bound)."""
+    passed = bulk["rmse"] < SWH_RMSE_BARS[case_name]
+    if case_name == "tp2.1":
+        passed = passed and bulk["max_absolute"] < TP2_1_MAX_ABS_M
+    return bool(passed)
 
 
 def compare_waden(case, config, state, prediction, final_phase, root, output):
@@ -78,7 +112,7 @@ def compare_waden(case, config, state, prediction, final_phase, root, output):
         raise ValueError("Invalid direct WADEN trajectory")
     if int(phase) != int(final_phase):
         raise ValueError("Spatial phase differs between legoESM and WADEN")
-    wet = case["wet"] & ~case["boundary_mask"]
+    wet = free_mask(case)
     reference_bulk = moments(reference, case["theta"], case["freq"])
     np.savez_compressed(output/"waden_prediction.npz", spectra=reference,
                         time=case["times"].astype("datetime64[s]").astype(np.int64))
@@ -148,7 +182,7 @@ def run_case(config_path, data_root, output, dtype_name, waden_root=None):
     diagnostics = moments(spectra, case["theta"], case["freq"])
     integral = np.asarray(spectral_integral(jnp.asarray(spectra), env,
                          jnp.broadcast_to(state.mask, spectra.shape[:3])))
-    free = case["wet"] & ~case["boundary_mask"]
+    free = free_mask(case)
     bulk = errors(diagnostics["swh"], case["fields"]["swh"], free[None])
     common, pi, ri = np.intersect1d(case["times"], case["spectrum_times"], return_indices=True)
     station = spectra[pi][:, case["station_ix"], case["station_iy"]]
@@ -157,18 +191,19 @@ def run_case(config_path, data_root, output, dtype_name, waden_root=None):
     valid_direction = free[None] & (case["fields"]["swh"] >= config["direction_min_swh_m"])
     direction_score = circular_errors(diagnostics["mwd"], (case["fields"]["mwd_from"]+180)%360, valid_direction)
     period_score = errors(diagnostics["mwp"], case["fields"]["mwp"], valid_direction) if "mwp" in case["fields"] else None
-    passed = bulk["rmse"] < SWH_RMSE_BARS[config["case"]]
-    if config["case"] == "tp2.1":
-        passed = passed and bulk["max_absolute"] < .002
+    passed = case_passed(config["case"], bulk)
     root = Path(__file__).resolve().parents[2]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True).strip()
     inputs = sorted((Path(data_root)/config["data_directory"]/"input").glob("*"))
     hashes = {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs if p.is_file()}
-    manifest = dict(case=config["case"], config=config, resolved_config=wave_config._asdict(),
+    manifest = dict(case=config["case"], config=config, resolved_config=_plain(wave_config),
                     legoesm_revision=revision, tracked_or_untracked_changes=dirty,
                     waden_revision=WADEN_REVISION, reference=case["provenance"], input_sha256=hashes,
                     dtype=dtype_name, python=platform.python_version(), jax=jax.__version__,
+                    jax_enable_x64=bool(jax.config.read("jax_enable_x64")),
+                    jax_platforms=os.environ.get("JAX_PLATFORMS"),
+                    jax_default_backend=jax.default_backend(),
                     devices=[str(d) for d in jax.devices()], command=sys.argv,
                     wave_module=str(Path(sys.modules["legoesm.wave"].__file__).resolve()),
                     actual_dtypes=dict(spectra=str(state.spectra.dtype), frequency=str(env.freq.dtype), geometry=str(env.lon.dtype)),
