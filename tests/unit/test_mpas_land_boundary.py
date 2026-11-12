@@ -1167,3 +1167,30 @@ def test_spectral_multilayer_land_refused():
         dycore=DycoreConfig(dt=600.0, discretization="spectral"))
     with pytest.raises(ValueError, match="never stepped on the spectral lane"):
         cfg.validate_strict()
+
+
+def test_f_land_grid_reads_the_mesh_land_fraction(mpas_mesh, sigma_coord,
+                                                  mpas_state):
+    """``f_land="grid"`` (the column-block path) reads ``mesh.land_frac`` at
+    call time and is bit-identical to passing that same field as an array;
+    any other string is refused."""
+    ncell = mpas_state.T.data.shape[0]
+    f_land = jnp.asarray((np.arange(ncell) < ncell // 2).astype(np.float64))
+    mesh = mpas_mesh._replace(land_frac=f_land)
+    forcing = {"T_sfc": jnp.full((ncell,), 302.0)}
+    tc = TurbulenceConfig(scheme="louis")
+    out = [fn(mpas_state, mesh, sigma_coord, forcing=forcing)
+           for fn in (_make_mpas_turbulence(tc, 300.0, f_land=f_land, land_beta=0.4),
+                      _make_mpas_turbulence(tc, 300.0, f_land="grid", land_beta=0.4))]
+    out = [o[0] if isinstance(o, tuple) else o for o in out]
+    for a, b in zip(jax.tree_util.tree_leaves(out[0]),
+                    jax.tree_util.tree_leaves(out[1])):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    # non-vacuous: the land fraction changes the answer here
+    swamp = _make_mpas_turbulence(tc, 300.0)(mpas_state, mesh, sigma_coord,
+                                             forcing=forcing)
+    swamp = swamp[0] if isinstance(swamp, tuple) else swamp
+    assert not np.array_equal(np.asarray(swamp.tracer_tendencies["q_v"]),
+                              np.asarray(out[1].tracer_tendencies["q_v"]))
+    with pytest.raises(ValueError, match="'grid'"):
+        _make_mpas_turbulence(tc, 300.0, f_land="mesh")
