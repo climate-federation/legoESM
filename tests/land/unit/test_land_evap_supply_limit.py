@@ -216,8 +216,11 @@ def test_moist_subsoil_keeps_capillary_supply():
     # (a7df86db4, entering main at merge 9bfd029f3; most_n_iters=5 there restores
     # the old value to 1e-9, the stable-zeta cap smoothing d8ad48d29 adds the
     # last 8e-10) moved it to 0.957184700235781; the Richards damping and
-    # convergence stopping (3ca6d56ce) moved it to 0.9571858994891569.
-    assert abs(et - 0.9571858994891569) < 1e-6 * et, et
+    # convergence stopping (3ca6d56ce) moved it to 0.9571858994891569; the soil-
+    # water change (bc2f61141d: air-entry van Genuchten, dry-layer theta step,
+    # Clapp-Hornberger saturation head; its parent gives 0.9571858994891569)
+    # moved it to 1.0022837659687864.
+    assert abs(et - 1.0022837659687864) < 1e-6 * et, et
     assert np.abs(res).max() < 1e-10
 
 

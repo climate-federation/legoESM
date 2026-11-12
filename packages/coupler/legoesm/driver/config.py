@@ -1414,6 +1414,11 @@ class ExperimentConfig(NamedTuple):
     # multiplied by 10**(-e * ice fraction).  Active only with
     # land_soil_freeze_thaw; 6 = CLM5 (user 2026-09-28), 0 = no impedance.
     land_soil_ice_impedance_exponent: float = 6.0
+    # Soil-water numerics of the multilayer land (user 2026-10-14), stated here so
+    # the run records it: the air-entry head [m] of the modified van Genuchten
+    # retention curve (Vogel et al. 2001; <= 0, 0 = the classic curve).  Default is
+    # the land library's.
+    land_soil_vg_air_entry_m: float = -0.02
     # Two-leaf canopy (land_surface_scheme="two_leaf"): whether soil-moisture
     # stress also down-regulates the Ball-Berry intercept b0
     # (TwoLeafCanopyConfig.stress_b0). Library default True (both stressed);
@@ -2770,6 +2775,18 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "land_soil_ice_impedance_exponent must be finite in [0, 10] "
                 f"(its declared range), got {self.land_soil_ice_impedance_exponent}")
+        _f = "land_soil_vg_air_entry_m"
+        if getattr(self, _f) != type(self)._field_defaults[_f] and not self.use_multilayer_land:
+            errors.append(f"{_f} requires use_multilayer_land: only the multilayer "
+                          "soil solves Richards — the knob would be silently inert.")
+        # One legal range per parameter: the land library's own check.
+        from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, saturation_head
+        try:
+            saturation_head(SoilHydraulicsConfig(
+                retention_curve="van_genuchten",
+                vg_air_entry_m=self.land_soil_vg_air_entry_m))
+        except ValueError as exc:
+            errors.append(f"land_soil_vg_air_entry_m: {exc}")
         if ((self.land_canopy_interception or not self.land_canopy_stress_b0)
                 and not (self.use_multilayer_land
                          and self.land_surface_scheme == "two_leaf")):

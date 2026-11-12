@@ -12,6 +12,7 @@ Aerodynamic parameters from Ryu et al. (2011) / DifferBESS defaults.
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
@@ -361,6 +362,8 @@ __param_spec__ = {
                 "discretisation cadence, not a physical parameter — tuning it "
                 "changes the integration error, not the physics."
             ),
+            "dew_limit_smoothing_mol": "numerics: smoothing width of the "
+                                       "canopy-air dew-limit switch (RULE 5); 0 = hard",
         },
         "params": {
             "o2ref": {
@@ -883,6 +886,12 @@ class CLMMLCanopyConfig(NamedTuple):
     # wants the full CLM PFT parameterisation validated first.
     use_surfdata_pft: bool = False
 
+    # Canopy-air dew limit (legoESM deviation): width [mol/mol] of the smoothed
+    # complementarity "condense only where saturated" (RULE 5, CHKS smoothing in
+    # humidity units).  0.0 = the hard active-set switch.  Installed every step
+    # into the process-global backend control (one width per process).
+    dew_limit_smoothing_mol: float = 1e-6
+
     def validate(self) -> "CLMMLCanopyConfig":
         """Fail-early check of the static string-dispatch fields.
 
@@ -920,4 +929,9 @@ class CLMMLCanopyConfig(NamedTuple):
                 f"one of {VALID_CLM_ML_STOMATAL_MODELS} "
                 "('wue'=water-use-efficiency optimization (default), "
                 "'medlyn'=Medlyn 2011, 'ball_berry'=Ball-Berry)")
+        _eps = self.dew_limit_smoothing_mol
+        if isinstance(_eps, bool) or not (math.isfinite(_eps) and _eps >= 0.0):
+            raise ValueError(
+                "CLM-ML dew_limit_smoothing_mol is a humidity width and must be "
+                f"finite and >= 0; got {_eps!r}")
         return self

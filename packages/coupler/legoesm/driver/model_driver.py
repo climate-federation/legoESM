@@ -1956,7 +1956,9 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
         surfdata_file = surfdata_path
     else:
         surfdata_file = download_clm_surfdata()
-    surface_map = load_clm_surface(surfdata_file, lat_deg, lon_deg)
+    surface_map = load_clm_surface(
+        surfdata_file, lat_deg, lon_deg,
+        vg_air_entry_m=float(config.land_soil_vg_air_entry_m))
 
     # Non-spatial defaults from the config; clm_multilayer_setup overwrites only
     # hydraulics/thermal.  Thread the active snow-albedo + stomata features the
@@ -2060,6 +2062,13 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
             "land_soil_ice_impedance_exponent"]:
         logger.warning("  land soil ice impedance exponent set but soil "
                        "freeze/thaw is off: it has no effect")
+    # Soil-water numerics, same placement: the bake rebuilds ``hydraulics``
+    # from the CLM map with library defaults, so set them after it.
+    cfg = cfg._replace(
+        hydraulics=cfg.hydraulics._replace(
+            vg_air_entry_m=float(config.land_soil_vg_air_entry_m)))
+    logger.info("  land soil water: retention curve %s, air-entry head %g m",
+                cfg.hydraulics.retention_curve, cfg.hydraulics.vg_air_entry_m)
     # Canopy solver smoothing widths, same placement: the calibration above
     # replaces surface_scheme with a fresh TwoLeafCanopyConfig, so a deck
     # value set any earlier would be discarded.
@@ -4682,7 +4691,8 @@ class ModelDriver:
                 _lp = clm_surface_provider(
                     _lat_deg, _lon_deg,
                     surfdata_path=self.config.clm_surfdata_path,
-                    variant="multilayer")()
+                    variant="multilayer",
+                    vg_air_entry_m=float(self.config.land_soil_vg_air_entry_m))()
                 _alb = jnp.asarray(_lp.albedo_veg).reshape(
                     jnp.asarray(self.grid.grid_lat).shape)
                 # Defensive only: the provider floors/normalises PFT cover, so
@@ -16972,8 +16982,15 @@ class ModelDriver:
                     _n_mt = len(_mt.residual) if _mt is not None else 0
                     self._feed_mpas_cmip_accumulators(
                         START_DAY + elapsed_day, flux_only=True)
-                    if _mt is not None and len(_mt.residual) > _n_mt:
-                        _ts["moisture_residual"][-1] = float(_mt.residual[-1])
+                    # Publish the closure only if THIS feed recorded one; a
+                    # skipped window must not inherit the previous window's
+                    # number, and the next closure must not difference water
+                    # across the gap.
+                    if _mt is not None:
+                        if len(_mt.residual) > _n_mt:
+                            _ts["moisture_residual"][-1] = float(_mt.residual[-1])
+                        else:
+                            _mt.drop_baseline()
 
             # Coupling window (P5b): sum this step's net surface SW/LW [W/m2,
             # +into surface] and precip [kg/m2/s, +down] as RATES; the step
