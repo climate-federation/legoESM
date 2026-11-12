@@ -1195,6 +1195,20 @@ def clear_sky_pass_effective(
     return True, None
 
 
+
+@jax.jit
+def _sfc_accum_add(sums, xs):
+    """``sums[i] + float64(xs[i])`` for every slot, one compiled call."""
+    return {i: sums[i] + jnp.asarray(xs[i], dtype=jnp.float64) for i in sums}
+
+
+@jax.jit
+def _tree_add(a, b):
+    """Leafwise ``a + b`` of two like pytrees in one compiled call (the land
+    forcing window sum: one add per leaf, bit-identical to the eager adds)."""
+    return jax.tree_util.tree_map(jnp.add, a, b)
+
+
 class _MPASSfcFluxAccum:
     """Per-step accumulator for the MPAS eager loop's ``_sfc_diag`` flux
     slots so the CMOR feed hands INTERVAL MEANS to the accumulators instead
@@ -1291,21 +1305,27 @@ class _MPASSfcFluxAccum:
         self._steps += 1
         if not sfc_diag:
             return
-        for i in self.SLOTS:
-            if len(sfc_diag) > i and sfc_diag[i] is not None:
-                x = sfc_diag[i]
-                # Accumulate in float64 (codex-1 minor 6): an fp32 running
-                # sum over a long interval loses ~n*eps relative precision.
-                # Under a non-x64 JAX config this politely degrades to
-                # float32 — no worse than the source precision.
-                x = jnp.asarray(
-                    x.data if hasattr(x, "data") else x, dtype=jnp.float64)
-                if i in self._sum:
-                    self._sum[i] = self._sum[i] + x
-                    self._n[i] += 1
-                else:
-                    self._sum[i] = x
-                    self._n[i] = 1
+        present = [i for i in self.SLOTS
+                   if len(sfc_diag) > i and sfc_diag[i] is not None]
+        xs = {i: (sfc_diag[i].data if hasattr(sfc_diag[i], "data")
+                  else sfc_diag[i]) for i in present}
+        # Accumulate in float64 (codex-1 minor 6): an fp32 running sum over a
+        # long interval loses ~n*eps relative precision.  Under a non-x64 JAX
+        # config this politely degrades to float32 -- no worse than the
+        # source precision.  The slots already seeded are updated in ONE
+        # compiled call (convert + add per slot, the same two operations as
+        # before, so the sums are bit-identical); eagerly this was two
+        # device dispatches per slot per step.
+        seeded = {i: xs[i] for i in present if i in self._sum}
+        if seeded:
+            self._sum.update(_sfc_accum_add(
+                {i: self._sum[i] for i in seeded}, seeded))
+            for i in seeded:
+                self._n[i] += 1
+        for i in present:
+            if i not in seeded:
+                self._sum[i] = jnp.asarray(xs[i], dtype=jnp.float64)
+                self._n[i] = 1
 
     def mean(self, slot: int):
         """Interval-mean host array for *slot*, or None if never fed."""
@@ -16404,8 +16424,12 @@ class ModelDriver:
                         "the MPAS cell-partition MPI step; run serial")
                 _mstep = ((_mpi_step if _use_rad else _mpi_step_norad)
                           if _is_phys_step else _mpi_step_held)
+                _pt0 = time.perf_counter() if _PHASE_TIMERS else 0.0
                 self.state, _phys_state = _mstep(
                     self.state, DT, _forcing, _phys_state)
+                if _PHASE_TIMERS:
+                    jax.block_until_ready(self.state.T.data)
+                    _phase_t["model.step"] += time.perf_counter() - _pt0
                 if _budget_ledger_on:
                     _ls = getattr(self.model, "_step_ledger", None)
                     if _ls is not None:
@@ -16510,8 +16534,7 @@ class ModelDriver:
                     # daytime SW (GLM review, 2026-08-26).
                     _land_a2s_sum = (
                         _a2s if _land_a2s_sum is None
-                        else jax.tree_util.tree_map(
-                            jnp.add, _land_a2s_sum, _a2s))
+                        else _tree_add(_land_a2s_sum, _a2s))
                     _land_cz_w = _a2s.sw_down + 1.0
                     if _land_a2s_n == 0:
                         _land_cz_wsum = _a2s.cos_zenith * _land_cz_w
