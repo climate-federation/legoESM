@@ -628,3 +628,78 @@ def test_check_above_dry_floor_refuses_a_column_below_it_in_total():
     rg.check_above_dry_floor(np.array([[0.05, 0.12, 0.12], [0.1] * 3]), dz, lo)
     with pytest.raises(SystemExit):
         rg.check_above_dry_floor(np.array([[0.09] * 3, [0.1] * 3]), dz, lo)
+
+
+def _rebuild_setup(tmp_path, monkeypatch, curve="clapp_hornberger"):
+    """main() with --target-clm-surfdata on a 32-column source, a REVERSED
+    donor map, heterogeneous donor soil and a uniform target soil."""
+    import jax.numpy as jnp
+    import legoesm.coupler.grid_remap as gr
+    import legoesm.land.boundary_data as bd
+    import legoesm.land.clm_surface_map as cm
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_SURFDATA_COSBY, soil_hydraulics_stamp)
+    sd = tmp_path / "surf.nc"
+    sd.write_bytes(b"cosby")
+    clm = tmp_path / "clm.nc"
+    clm.write_bytes(b"clm")
+    ncol, nlay = 32, 10
+    h_src = SoilHydraulicsConfig(
+        retention_curve="clapp_hornberger", theta_r=0.0,
+        theta_sat=jnp.asarray(np.linspace(0.35, 0.50, ncol)[:, None]
+                              * np.ones((1, nlay))))
+    h_tgt = SoilHydraulicsConfig(theta_r=0.16, theta_sat=0.48)
+
+    class _Cfg:
+        hydraulics = h_src
+
+    mod = _load("scripts/data/regrid_land_ic.py", "_rg_main")
+    monkeypatch.setattr(mod, "_source_land_mask",
+                        lambda surfdata, grid, n: np.ones(n, dtype=bool))
+    monkeypatch.setattr(gr, "nearest_column_map",
+                        lambda *a, **k: np.arange(ncol)[::-1].copy())
+    monkeypatch.setattr(bd, "init_land_surface_data",
+                        lambda *a, **k: (_Cfg, None, None))
+    monkeypatch.setattr(cm, "load_clm_surface", lambda *a, **k: None)
+    monkeypatch.setattr(cm, "clm_hydraulics_config", lambda *a, **k: h_tgt)
+    stamp = soil_hydraulics_stamp(curve, HYDRAULICS_SOURCE_SURFDATA_COSBY, sd)
+    src = _source(tmp_path, stamp=stamp)
+    argv = ["--source", str(src), "--surfdata", str(sd),
+            "--target-grid", "latlon", "--target-resolution", "4",
+            "--out", str(tmp_path / "out.npz"),
+            "--source-soil-column", "10,3.0,2.0",
+            "--target-clm-surfdata", str(clm)]
+    return mod, argv, src, h_src, h_tgt, clm
+
+
+def test_main_rebuilds_donor_wetness_on_the_target_soil(tmp_path, monkeypatch):
+    import json
+    import jax.numpy as jnp
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_CLM_MAP, soil_hydraulics_stamp,
+        soil_hydraulics_stamps_match)
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import psi_from_theta
+    mod, argv, src, h_src, h_tgt, clm = _rebuild_setup(tmp_path, monkeypatch)
+    assert mod.main(argv) == 0
+    out = np.load(tmp_path / "out.npz")
+    theta_src = np.load(src)["theta_soil"]
+    nearest = np.arange(32)[::-1]
+    lo_s, sat_s = _floors(h_src, theta_src.shape)
+    lo_t, sat_t = _floors(h_tgt, theta_src.shape)
+    w = np.clip((theta_src - lo_s) / (sat_s - lo_s), 0.0, 1.0)[nearest]
+    np.testing.assert_allclose(out["theta_soil"], lo_t + w * (sat_t - lo_t),
+                               rtol=1e-12)
+    psi = jnp.maximum(psi_from_theta(jnp.asarray(out["theta_soil"]), h_tgt),
+                      psi_dry_floor(h_tgt))
+    np.testing.assert_allclose(out["psi_soil"], np.asarray(psi), rtol=1e-12)
+    assert soil_hydraulics_stamps_match(
+        json.loads(str(out["soil_hydraulics_json"])),
+        soil_hydraulics_stamp(h_tgt.retention_curve, HYDRAULICS_SOURCE_CLM_MAP,
+                              clm))
+
+
+def test_main_refuses_a_source_stamped_with_another_curve(tmp_path, monkeypatch):
+    mod, argv, *_ = _rebuild_setup(tmp_path, monkeypatch, curve="van_genuchten")
+    with pytest.raises(SystemExit, match="retention curve"):
+        mod.main(argv)
