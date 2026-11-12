@@ -567,3 +567,29 @@ def test_warm_era5_soil_is_ice_consistent_with_freeze_thaw_on():
         assert bool(jnp.all(liq >= cfg.theta_liq_residual_frac * theta - 1e-12))
         C = compute_apparent_heat_capacity(Tc, theta, hyd, cfg)
         assert bool(jnp.all(jnp.isfinite(C))) and bool(jnp.all(C >= sensible_floor))
+
+
+def test_lift_to_dry_floor_lifts_only_columns_below_the_floor_in_total():
+    """A column whose total water is below the run's dry floor is set to that
+    floor (the least water the loader accepts); a column above it in total,
+    even with one layer below the floor, is left for the loader's conform."""
+    import jax.numpy as jnp
+    from legoesm.land.restart import conform_soil_water
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import theta_from_psi
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg_lift")
+    hyd = SoilHydraulicsConfig(theta_r=jnp.asarray([[0.16], [0.16], [0.05]]),
+                               theta_sat=jnp.asarray([[0.45], [0.45], [0.40]]))
+    dz = np.array([0.1, 0.3, 0.6])
+    lo = np.asarray(theta_from_psi(psi_dry_floor(hyd), hyd), np.float64)[:, 0]
+    theta = np.array([[lo[0] - 0.01, lo[0] - 0.01, lo[0] - 0.01],   # below in total
+                      [lo[1] - 0.05, lo[1] + 0.05, lo[1] + 0.05],   # one layer below
+                      [0.20, 0.25, 0.30]])
+    with pytest.raises(ValueError):
+        conform_soil_water(theta, dz, hyd)
+    out, lifted, added = rg.lift_to_dry_floor(theta, dz, hyd)
+    np.testing.assert_array_equal(lifted, [True, False, False])
+    np.testing.assert_allclose(out[0], lo[0], rtol=0, atol=0)
+    np.testing.assert_array_equal(out[1:], theta[1:])
+    np.testing.assert_allclose(added[0], 0.01 * dz.sum(), rtol=1e-12)
+    conform_soil_water(out, dz, hyd)          # now loadable
