@@ -128,6 +128,8 @@ def test_rayleigh_sponge_check_grads_at_cutoff(fix):
     (asserted, non-vacuity)."""
     from jax.test_util import check_grads
 
+    from legoesm.core.smooth import positive_part_c1
+
     z = fix
     meta = json.loads(str(z["meta"]))
     j = {k: jnp.asarray(z[f"l60_{k}"][:1]) for k in _KEYS}
@@ -145,11 +147,15 @@ def test_rayleigh_sponge_check_grads_at_cutoff(fix):
             return o.du_dt[0, k] / (-sk * u_k)
         return f
 
+    sharp = RayleighConfig().sponge_sharpness
     x0 = jnp.asarray(0.005)                                # inside the 0.01 band
-    f = make(RayleighConfig().sponge_sharpness)
+    assert float(positive_part_c1(x0, sharp)) != float(x0)  # x0 really is in the band
+    f = make(sharp)
     check_grads(f, (x0,), order=2, modes=("fwd", "rev"), eps=1e-5)
     assert float(jax.grad(f)(x0)) != 0.0
     check_grads(f, (jnp.asarray(0.0),), order=2, modes=("fwd", "rev"), eps=1e-5)
+    # right seam x = 1/s: positive_part_c1 is C1 there, so order 1 only
+    check_grads(f, (jnp.asarray(1.0 / sharp),), order=1, modes=("fwd", "rev"), eps=1e-5)
     with pytest.raises(AssertionError):
         check_grads(make(math.inf), (jnp.asarray(0.0),), order=2, modes=("fwd", "rev"),
                     eps=1e-5)
