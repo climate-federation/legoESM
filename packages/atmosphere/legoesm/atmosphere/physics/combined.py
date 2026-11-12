@@ -182,6 +182,7 @@ def make_physics(
     surface_bulk_coeffs="default",
     cam6_activation=None,
     mynn_initflag=None,
+    column_block_size: int = 0,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -361,6 +362,12 @@ def make_physics(
     if config.cariolle.enabled and model_type != "mpas":
         raise ValueError("ifs_ozone_chem runs only on the MPAS column lane; "
                          f"got model_type={model_type!r}")
+    if column_block_size < 0:
+        raise ValueError(f"column_block_size must be >= 0, got {column_block_size}")
+    if column_block_size and model_type != "mpas":
+        raise ValueError(
+            f"column_block_size={column_block_size} runs the MPAS physics in "
+            f"column blocks; model_type={model_type!r} has no block wrapper")
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(
             config, dt, column_mesh=column_mesh, need_rad=need_rad,
@@ -389,7 +396,8 @@ def make_physics(
             budget_ledger_level_weight=budget_ledger_level_weight,
             surface_bulk_coeffs=surface_bulk_coeffs,
             cam6_activation=cam6_activation,
-            mynn_initflag=mynn_initflag)
+            mynn_initflag=mynn_initflag,
+            column_block_size=column_block_size)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -666,6 +674,113 @@ def _with_physics_cache(physics_fn, n_steps=1):
     return _copy_physics_fn_attrs(cached_physics_fn, physics_fn)
 
 
+def column_blocked_physics(physics_fn, block_size: int):
+    """MPAS ``physics_fn`` run as independent blocks of ``block_size`` columns,
+    each rematerialised in reverse mode: the gradient holds ONE block's
+    residuals instead of the whole mesh's, so its memory is set by
+    ``block_size``, not by the mesh.
+
+    The column view (the column-model contract of
+    :mod:`legoesm.grids.column_mesh`): the edge winds are reconstructed to
+    cell east/north winds once (Perot), every module sees cell winds and a
+    :class:`ColumnMesh` (its column path: no edge topology), and the summed
+    cell wind tendency is projected onto the edge normals ONCE (plain
+    two-cell average, :func:`legoesm.grids.voronoi.cell_vector_to_edge_normal`).
+    That is NOT the native call: natively each wind module projects its own
+    tendency (turbulence and GWD plain, ZM momentum transport mass-weighted)
+    and the macmic sub-steps re-reconstruct the winds from the updated edge
+    field, so the two differ by more than roundoff wherever winds change.
+
+    Blocks: every input leaf whose leading axis is the column count (state,
+    carries, forcing, mesh cell fields) is split; the last block is padded by
+    repeating the last column (discarded on reassembly, so it carries no
+    cotangent).  Other leaves are passed whole to every block.  Outputs: a
+    physics-state leaf is reassembled iff its input was a column leaf, else
+    taken from block 0 (identical across blocks unless the physics updates
+    it from column data -- e.g. a global reduction -- which this wrapper
+    cannot see); a carry leaf the physics creates, and every tendency leaf,
+    is reassembled iff its leading axis is ``block_size``.  A full-mesh
+    array captured inside the physics (not passed in) cannot be split and
+    fails on shape.
+    """
+    from legoesm import constants
+    from legoesm.grids.column_mesh import ColumnMesh
+    from legoesm.grids.voronoi import (
+        cell_vector_to_edge_normal,
+        reconstruct_cell_velocity,
+    )
+
+    def blocked(state, grid, sigma_coord, phys_state=None, forcing=None):
+        if not hasattr(grid, "cellsOnEdge") or state.v is not None:
+            raise ValueError("column_blocked_physics: needs the MPAS Voronoi "
+                             "mesh and its edge-wind state")
+        ncol = state.T.data.shape[0]
+        n_block = -(-ncol // block_size)
+        pad = n_block * block_size - ncol
+        u_c, v_c = reconstruct_cell_velocity(state.u.data, grid)
+        cstate = state._replace(u=state.u.replace(data=u_c),
+                                v=state.u.replace(data=v_c, name="v"))
+        cells = dict(latCell=grid.latCell, lonCell=grid.lonCell,
+                     areaCell=grid.areaCell,
+                     subgrid_topo_stddev=getattr(grid, "subgrid_topo_stddev", None),
+                     land_frac=getattr(grid, "land_frac", None))
+
+        def is_col(x):
+            return jnp.ndim(x) >= 1 and jnp.shape(x)[0] == ncol
+
+        def split(x):
+            if pad:
+                x = jnp.concatenate([x, jnp.repeat(x[-1:], pad, axis=0)])
+            return x.reshape((n_block, block_size) + x.shape[1:])
+
+        leaves, tdef = jax.tree_util.tree_flatten(
+            (cstate, phys_state, forcing, cells))
+        col = [is_col(x) for x in leaves]
+        xs = [split(x) for x, c in zip(leaves, col) if c]
+
+        @jax.checkpoint
+        def one(xs_b):
+            it = iter(xs_b)
+            s, p, f, c = jax.tree_util.tree_unflatten(
+                tdef, [next(it) if m else x for x, m in zip(leaves, col)])
+            mesh_b = ColumnMesh(
+                latCell=c["latCell"], lonCell=c["lonCell"],
+                areaCell=c["areaCell"], nCells=block_size,
+                grid_lat=c["latCell"], grid_lon=c["lonCell"],
+                grid_shape_2d=(block_size,), lat=c["latCell"],
+                lon=c["lonCell"], cornerLat=None, cornerLon=None,
+                radius=grid.radius, omega=constants.Omega,
+                subgrid_topo_stddev=c["subgrid_topo_stddev"],
+                land_frac=c["land_frac"])
+            out = physics_fn(s, mesh_b, sigma_coord, phys_state=p, forcing=f)
+            return out if type(out) is tuple else (out, None)
+
+        tend_b, ps_b = jax.lax.map(one, xs)
+
+        def join(x):
+            return x.reshape((n_block * block_size,) + x.shape[2:])[:ncol]
+        tend = jax.tree_util.tree_map(
+            lambda x: join(x) if jnp.shape(x)[1:2] == (block_size,) else x[0],
+            tend_b)
+        du_e = cell_vector_to_edge_normal(tend.du_dt.data, tend.dv_dt.data, grid)
+        tend = tend._replace(du_dt=tend.du_dt.replace(data=du_e), dv_dt=None)
+        if ps_b is None:
+            return tend
+        # match carry leaves by path: a leaf that was an input column leaf is
+        # reassembled; one the physics created (no input at that path) by
+        # its leading axis; anything else is taken from block 0
+        was_col = {k: is_col(x) for k, x in
+                   jax.tree_util.tree_flatten_with_path(phys_state)[0]}
+        o_paths, o_def = jax.tree_util.tree_flatten_with_path(ps_b)
+        ps = jax.tree_util.tree_unflatten(o_def, [
+            join(o) if was_col.get(k, jnp.shape(o)[1:2] == (block_size,))
+            else o[0] for k, o in o_paths])
+        return tend, ps
+
+    blocked.__dict__.update(getattr(physics_fn, "__dict__", {}))
+    return blocked
+
+
 def held_physics_variant(physics_fn):
     """The held-physics step: ``PhysicsState.held_physics`` with the STATE
     tendencies zeroed (the whole physics increment was applied on the physics
@@ -737,6 +852,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                cld_macmic_num_steps: int = 1,
                                surface_bulk_coeffs=None,
                                cam6_activation=None,
+                               column_block_size: int = 0,
                                mynn_initflag=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
@@ -1559,6 +1675,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         return combined, phys_state_out
 
     physics_fn = _attach_lifecycle_hooks(physics_fn, tagged_fns)
+    if column_block_size:
+        # inside the cadence cache: the cache sees the reassembled tendency
+        physics_fn = column_blocked_physics(physics_fn, column_block_size)
     if physics_cadence == "write":
         physics_fn = _with_physics_cache(physics_fn, physics_cadence_steps)
     return physics_fn

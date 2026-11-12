@@ -54,7 +54,7 @@ import jax
 import jax.numpy as jnp
 
 __all__ = ["mpas_cadence", "pick_physics_fn", "mpas_branch_index", "mpas_step",
-           "mpas_segment", "window_clocks"]
+           "mpas_segment", "window_clocks", "with_column_blocks"]
 
 
 def mpas_cadence(step: int, *, subcycle_rad: bool, rad_update_steps: int,
@@ -85,6 +85,23 @@ def mpas_branch_index(step: int, exp: dict) -> int:
 
 
 _VARIANT_KEYS = ("physics_fn", "physics_fn_norad", "physics_fn_held")
+
+
+def with_column_blocks(exp: dict, block_size: int) -> dict:
+    """``exp`` whose physics variants are rebuilt by the run loop's own
+    builder (``exp["build_physics"]``, the exported config) in column blocks
+    of ``block_size`` (:func:`legoesm.atmosphere.physics.combined.
+    column_blocked_physics`): the gradient's physics memory is one block's,
+    not the mesh's.  The held variant is re-derived from the new full one."""
+    from legoesm.atmosphere.physics.combined import held_physics_variant
+    build, cfg = exp["build_physics"], exp["phys_cfg"]
+    full = build(cfg, column_block_size=block_size)
+    norad = (build(cfg, need_rad=False, column_block_size=block_size)
+             if exp["physics_fn_norad"] is not None else None)
+    held = (held_physics_variant(full)
+            if exp["physics_fn_held"] is not None else None)
+    return dict(exp, physics_fn=full, physics_fn_norad=norad,
+                physics_fn_held=held)
 
 
 def _run_variant(exp: dict, pfn, state, phys_state, forcing, target_mass):
