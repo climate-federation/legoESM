@@ -36,3 +36,10 @@ def test_card_exits_with_the_driver_status(tmp_path, status):
     r = _run_card(tmp_path, status)
     assert f"=== card exit: {status} ===" in r.stdout
     assert r.returncode == status
+
+
+def test_an_unwritten_run_log_fails_the_card_even_when_the_driver_succeeds(tmp_path):
+    (tmp_path / "out" / "run.log").mkdir(parents=True)   # tee cannot open it
+    r = _run_card(tmp_path, 0)
+    assert r.returncode != 0
+    assert "=== card exit: 0 ===" not in r.stdout
