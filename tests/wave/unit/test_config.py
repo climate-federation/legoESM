@@ -28,6 +28,14 @@ def test_unknown_parameterization_raises():
         config.validate()
 
 
+def test_none_parameterization_requires_transport_networks_off():
+    config = WaveConfig(
+        grid=tiny_grid(), network=tiny_network(parameterization="none"))
+    assert config.network.use_transport_networks
+    with pytest.raises(ValueError, match="use_transport_networks"):
+        config.validate()
+
+
 def test_unknown_checkpoint_level_raises():
     from legoesm.wave.config import WavePhysicsConfig
 
