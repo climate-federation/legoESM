@@ -15,7 +15,9 @@ import numpy as np
 from jax.test_util import check_grads
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-    MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies)
+    MPASPrimitiveEquationConfig,
+)
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
 from legoesm.grids.vertical import create_sigma_coordinate
 
 
@@ -41,8 +43,8 @@ def test_barrier_only_when_fenced():
     assert cfg.pv_scheme == "energy"
 
     def jaxpr(fence):
-        return str(jax.make_jaxpr(lambda s: mpas_hydrostatic_tendencies(
-            s, mesh, sig, cfg, fence_pv_flux=fence))(state))
+        return str(jax.make_jaxpr(lambda s: mpas_pe_tendencies(
+            s, mesh, sig, cfg, fence_pv_flux=fence, vertical_form="legacy"))(state))
 
     assert "optimization_barrier" in jaxpr(True)
     assert "optimization_barrier" not in jaxpr(False)
@@ -61,8 +63,8 @@ def test_barrier_is_value_and_gradient_neutral_under_jit():
     cfg = MPASPrimitiveEquationConfig()
 
     def tend(s, fence=True):
-        return mpas_hydrostatic_tendencies(
-            s, mesh, sig, cfg, fence_pv_flux=fence).du_dt.data
+        return mpas_pe_tendencies(
+            s, mesh, sig, cfg, fence_pv_flux=fence, vertical_form="legacy").du_dt.data
 
     np.testing.assert_array_equal(np.asarray(tend(state)),
                                   np.asarray(tend(state, fence=False)))
@@ -85,8 +87,8 @@ def test_barrier_gradient_equals_unfenced_gradient_under_jit():
     def grad_u(fence):
         def loss(u):
             s = state._replace(u=state.u.replace(data=u))
-            return jnp.sum(mpas_hydrostatic_tendencies(
-                s, mesh, sig, cfg, fence_pv_flux=fence).du_dt.data ** 2)
+            return jnp.sum(mpas_pe_tendencies(
+                s, mesh, sig, cfg, fence_pv_flux=fence, vertical_form="legacy").du_dt.data ** 2)
         return np.asarray(jax.jit(jax.grad(loss))(state.u.data))
 
     fenced, unfenced = grad_u(True), grad_u(False)

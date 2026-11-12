@@ -1498,7 +1498,16 @@ def test_surface_tiled_unsupported_turbulence_rejected():
         cfg.validate_strict()
 
 
-@pytest.mark.parametrize("scheme", ["louis", "clubb_lite", "clubb"])
+def test_run_amip_refuses_retired_clubb_lite():
+    """clubb_lite is the LES-correction campaign's stand-in only."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "clubb_lite"]), parser)
+    with pytest.raises(ValueError, match="'clubb'"):
+        build_config_from_args(args)
+
+
+@pytest.mark.parametrize("scheme", ["louis", "clubb"])
 def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
     """--surface-tiled validates with EVERY kernel that accepts the injected
     tiled surface_flux=(tau_x, tau_y, shflx, lhflx, ustar) BC: louis and the
@@ -1826,17 +1835,16 @@ def test_aimip_classical_checkpoint_flag():
 
 
 def _serialise_aimip_defaults(tmp_path):
-    """Write a default AIMIPClassicalParams checkpoint for the override tests."""
+    """Write a default AIMIPClassicalParams checkpoint for the override tests,
+    with the knob-range record the loader requires (as the trainers write it)."""
     import equinox as eqx
+    from legoesm.ml.checkpoint_io import write_knob_record
     from legoesm.training.aimip_params import AIMIPClassicalParams
 
-    from legoesm.ml.checkpoint_io import write_knob_record
-
     ckpt = tmp_path / "epoch_defaults.eqx"
-    model = AIMIPClassicalParams.from_defaults()
-    eqx.tree_serialise_leaves(str(ckpt), model)
-    # the loader refuses a checkpoint without its knob record
-    write_knob_record(model, str(ckpt))
+    params = AIMIPClassicalParams.from_defaults()
+    eqx.tree_serialise_leaves(str(ckpt), params)
+    write_knob_record(params, ckpt)
     return str(ckpt)
 
 
@@ -2569,6 +2577,8 @@ def test_config_yaml_round_trips_authoritative_values():
     # the raw grid-mean path, which two_region (the old row) would thin.
     assert cfg.cloud_optics_inhomogeneity == "constant"
     assert cfg.cloud_inhomogeneity_factor == 1.0
+    # CAM6 McICA (user decision 2026-09-25): one sampled subcolumn per g-point.
+    assert cfg.cloud_vertical_overlap_optics == "mcica"
     _assert_optics_thinning(cfg, thinned=False)
 
 
@@ -2576,9 +2586,11 @@ def _assert_optics_thinning(cfg, *, thinned: bool):
     """Build the lane's cloud config from ``cfg`` and measure the thinning.
 
     A saturated, cloudy, warm column: with no inhomogeneity factor the liquid
-    water path handed to radiation is EXACTLY ``q_c * dp / g``; two_region at
-    fsd 1.0 thins it.  Asserting the effect, not the field, is what makes the
-    production pin non-vacuous against a renamed or ignored selector.
+    water path handed to radiation is EXACTLY ``q_c * dp / g``.  two_region
+    thins per subcolumn cell in the radiation lane, so here it must leave the
+    path raw and REFUSE a caller that does not apply that scaling.  Asserting
+    the effect, not the field, is what makes the production pin non-vacuous
+    against a renamed or ignored selector.
     """
     import jax.numpy as jnp
     from legoesm import constants
@@ -2601,20 +2613,25 @@ def _assert_optics_thinning(cfg, *, thinned: bool):
     q_v = jnp.full((1, 4), 8.0e-3)
     q_c = jnp.full((1, 4), 4.0e-4)
     p_half = jnp.array([[65000.0, 75000.0, 85000.0, 92500.0, 97500.0]])
-    props = compute_cloud_properties(
-        T=T, p_full=p_full, q_v=q_v, dp=dp, config=cloud_cfg, q_cloud=q_c,
-        q_ice=jnp.zeros_like(q_c),
-        cloud_fraction_override=jnp.full((1, 4), 0.5),
-        # cam6_clubb's tropopause switch needs these; harmless to the others.
-        lat=jnp.zeros((1,)), p_half=p_half,
-        # cam6_clubb's aist top cut reads the run's resolved CLUBB config.
-        clubb_config=resolved_clubb_config(turbulence_config_for(cfg)))
+    def props(**kw):
+        return compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp, config=cloud_cfg, q_cloud=q_c,
+            q_ice=jnp.zeros_like(q_c),
+            cloud_fraction_override=jnp.full((1, 4), 0.5),
+            # cam6_clubb's tropopause switch needs these; harmless to the others.
+            lat=jnp.zeros((1,)), p_half=p_half,
+            # cam6_clubb's aist top cut reads the run's resolved CLUBB config.
+            clubb_config=resolved_clubb_config(turbulence_config_for(cfg)), **kw)
     raw = q_c * dp / constants.g
-    ratio = float(jnp.sum(props.lwp) / jnp.sum(raw))
     if thinned:
-        assert ratio < 0.95, f"expected two_region thinning, got ratio {ratio}"
+        assert cloud_cfg.cloud_optics_inhomogeneity == "two_region"
+        with pytest.raises(ValueError, match="two_region"):
+            props()
+        p = props(subcolumn_inhomogeneity=True)
     else:
-        assert ratio == 1.0, f"expected NO thinning, got ratio {ratio}"
+        p = props()
+    ratio = float(jnp.sum(p.lwp) / jnp.sum(raw))
+    assert ratio == 1.0, f"expected the raw path, got ratio {ratio}"
 
 
 def test_sundqvist_l36_deck_still_round_trips():
@@ -2670,7 +2687,7 @@ def test_sundqvist_l36_deck_still_round_trips():
         turbulence_config_for(cfg)).liquid_partition is False
     assert _resolve_microphysics(cfg)[1].liquid_from_closure is False
     # Old configuration KEEPS the in-cloud inhomogeneity thinning (user
-    # decision 2026-09-25): two_region at fsd 1.0, and it measurably thins.
+    # decision 2026-09-25): two_region at fsd 1.0, now the subcolumn lane's.
     assert cfg.cloud_optics_inhomogeneity == "two_region"
     assert cfg.cloud_fsd == 1.0
     _assert_optics_thinning(cfg, thinned=True)
@@ -2699,6 +2716,7 @@ _SMOOTH_BECHTOLD_LEAF_PRE2249 = {
     'parcel_dq': 0.001, 'precip_efficiency': 0.8,
     'precip_split_scheme': 'constant', 'rain_vapor_sink': 'formation',
     'rhebc_land': 0.75, 'rhebc_land_deep': 0.7, 'rprcon': 0.0014,
+    'snow_refill_width_kg_m2_s': 1e-08,
     'stochastic_amplitude': 0.5, 'stochastic_decorrelation': 7200.0,
     'subcloud_evap_scale': 1.0, 'subsidence_solve': 'implicit_flux',
     'tau_M_u_relax': 1800.0, 'tau_bl': 3600.0, 'theta_implicit': 1.0,
@@ -3225,6 +3243,76 @@ def test_sb81_omega_conversion_flag_flows_to_dycore_config():
         "--dataset", "analytical", "--convection", "tiedtke", "--no-sb81-omega-conversion",
     ]), parser))
     assert cfg_off.dycore.sb81_omega_conversion is False
+
+
+def test_vertical_form_flag_flows_to_dycore_config():
+    """--vertical-form round-trips into DycoreConfig (default "legacy"); an
+    unknown form, or a non-legacy form off the lat-lon / MPAS hydrostatic
+    lanes, fails validate_strict."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
+    assert cfg_default.dycore.vertical_form == "legacy"
+    cfg_as83 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke", "--grid-type", "mpas", "--discretization",
+        "mpas", "--vertical-form", "as83",
+    ]), parser))
+    assert cfg_as83.dycore.vertical_form == "as83"
+    cfg_as83.validate_strict()
+    with pytest.raises(ValueError, match="vertical_form must be one of"):
+        cfg_as83._replace(dycore=cfg_as83.dycore._replace(
+            vertical_form="bogus")).validate_strict()
+    cube = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke", "--grid-type", "cubed_sphere",
+        "--discretization", "cdgrid", "--vertical-form", "as83",
+    ]), parser))
+    with pytest.raises(ValueError, match="vertical_form='as83' is only wired"):
+        cube.validate_strict()
+    sig = cfg_as83._replace(grid=cfg_as83.grid._replace(vertical_coord="sigma"))
+    with pytest.raises(ValueError, match="needs a hybrid"):
+        sig.validate_strict()
+    band = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke", "--grid-type", "latlon", "--discretization",
+        "latlon_cgrid", "--vertical-form", "as83",
+    ]), parser))
+    band.validate_strict()
+    with pytest.raises(ValueError, match="not band-aware"):
+        band._replace(enable_latlon_spmd=True).validate_strict()
+    with pytest.raises(ValueError, match="untested on the lat-lon MPI"):
+        band._replace(dycore=band.dycore._replace(vertical_form="sb81_theta"),
+                      enable_tiled_dycore=True).validate_strict()
+
+
+@pytest.mark.parametrize("grid_type,discretization,grid_args", [
+    ("latlon", "latlon_cgrid", ("latlon", 16)),
+    ("mpas", "mpas", ("mpas", 2)),
+])
+def test_factory_threads_vertical_form_into_the_dycore(grid_type, discretization,
+                                                       grid_args):
+    """--vertical-form reaches the built lat-lon / MPAS dycore's config."""
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    from legoesm.grids.factory import create_grid
+    from legoesm.grids.vertical import standard_hybrid_levels
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke", "--grid-type", grid_type, "--discretization",
+        discretization, "--vertical-form", "sb81_theta",
+    ]), parser))
+    model = create_atmosphere_dycore(cfg, create_grid(*grid_args), standard_hybrid_levels(8))
+    assert model.config.vertical_form == "sb81_theta"
+
+
+@pytest.mark.parametrize("deck", ["amip_production.yaml", "amip_production_latlon48.yaml"])
+def test_production_decks_select_legacy_vertical_form(deck):
+    """Both production AMIP decks set the PE vertical form to "legacy"
+    explicitly (the latlon deck by inclusion of the MPAS base), mapped onto the
+    parser dest that the flag test carries into DycoreConfig."""
+    from pathlib import Path
+
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    keys = load_yaml_config(
+        Path(__file__).resolve().parents[2] / "config" / "amip" / deck, build_arg_parser())
+    assert keys["vertical_form"] == "legacy"
 
 
 def test_budget_ledger_flag_flows_to_output_config():
@@ -5754,6 +5842,19 @@ def test_production_deck_names_both_canopy_smoothing_widths():
     assert cfg.land_canopy_rh_cap_smoothing_width == d.rh_cap_smoothing_width
     assert cfg.land_canopy_zeta_cap_smoothing_width == d.zeta_cap_smoothing_width
     assert cfg.land_canopy_most_n_iters == d.most_n_iters == 10
+    assert cfg.land_canopy_solve_group == d.solve_group == 0
+
+
+def test_land_canopy_solve_group_round_trip_and_validate():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land",
+        "--land-surface-scheme", "two_leaf", "--land-canopy-solve-group", "64"]), parser))
+    assert cfg.land_canopy_solve_group == 64
+    for bad, match in ((cfg._replace(land_canopy_solve_group=-1), "solve_group"),
+                       (cfg._replace(land_surface_scheme="simple_seb"), "inert")):
+        with pytest.raises(ValueError, match=match):
+            bad.validate_strict()
 
 
 def test_land_canopy_most_n_iters_round_trip_and_validate():
@@ -6192,3 +6293,76 @@ def test_sat_adjust_rh_width_flag_flows_to_config():
     cfg_hard = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "tiedtke", "--sat-adjust-rh-width", "0.0"]), parser))
     assert cfg_hard.sat_adjust_rh_width == 0.0
+
+
+def test_ifs_methox_round_trips():
+    """--ifs-methox reaches ExperimentConfig, the pipeline switch and the AMIP
+    flat round-trip."""
+    from legoesm.driver.config import ExperimentConfig
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke", "--ifs-methox"]), parser))
+    assert on.ifs_methox is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke"]), parser))
+    assert off.ifs_methox is False
+    for flag in (True, False):
+        cfg = ExperimentConfig(ifs_methox=flag)
+        assert ExperimentConfig.from_amip_config(cfg.to_amip_config()).ifs_methox is flag
+
+
+def test_ifs_ozone_chem_round_trips():
+    """--ifs-ozone-chem reaches ExperimentConfig and the AMIP round-trip."""
+    from legoesm.driver.config import ExperimentConfig
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke", "--ifs-ozone-chem"]), parser))
+    assert on.ifs_ozone_chem is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke"]), parser))
+    assert off.ifs_ozone_chem is False
+    for flag in (True, False):
+        cfg = ExperimentConfig(ifs_ozone_chem=flag)
+        assert ExperimentConfig.from_amip_config(
+            cfg.to_amip_config()).ifs_ozone_chem is flag
+
+
+def test_bechtold_snow_refill_width_round_trip():
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-snow-refill-width-kg-m2-s", "0.0"]), parser))
+    assert cfg.bechtold_snow_refill_width_kg_m2_s == 0.0
+    assert _resolve_convection(cfg)[1].snow_refill_width_kg_m2_s == 0.0
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_snow_refill_width_kg_m2_s is None
+    assert (_resolve_convection(d)[1].snow_refill_width_kg_m2_s
+            == BechtoldConfig().snow_refill_width_kg_m2_s)
+    for bad in (-1.0, float("nan"), 1.0e-40, True):
+        with pytest.raises(ValueError, match="bechtold_snow_refill_width_kg_m2_s"):
+            ExperimentConfig(convection="bechtold",
+                             bechtold_snow_refill_width_kg_m2_s=bad).validate_strict()
+    with pytest.raises(ValueError, match="bechtold_snow_refill_width_kg_m2_s"):
+        ExperimentConfig(convection="zhang_mcfarlane",
+                         bechtold_snow_refill_width_kg_m2_s=1e-8).validate_strict()
+
+
+def test_sundqvist_deck_names_the_snow_refill_width():
+    import pathlib
+    import yaml
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    path = (pathlib.Path(__file__).resolve().parents[2] / "config" / "amip"
+            / "amip_sundqvist_l36.yaml")
+    deck = yaml.safe_load(path.read_text())
+    assert (deck["bechtold_snow_refill_width_kg_m2_s"]
+            == BechtoldConfig().snow_refill_width_kg_m2_s)
+    # the row reaches the config through the real loader
+    p = build_arg_parser()
+    p.set_defaults(**load_yaml_config(path, p))
+    cfg = build_config_from_args(p.parse_args([]))
+    assert cfg.bechtold_snow_refill_width_kg_m2_s == 1.0e-8

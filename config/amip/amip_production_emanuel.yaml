@@ -37,3 +37,4 @@ zm_tau: null
 zm_capelmt: null
 zm_detrain_phase_width_K: null
 zm_detrain_number_width_kgkg_s: null
+zm_trigger_width_J_kg: null

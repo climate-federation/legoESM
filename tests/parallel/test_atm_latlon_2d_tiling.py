@@ -19,11 +19,10 @@ Merge-bar gates (4 virtual CPU devices, x64):
      pole fold.
 
 (2)  TENDENCY — the (2,2)-tile tendency is BIT-tight vs serial for momentum
-     + continuity; dT carries only the genuine limited-FV-PPM halo-2
-     truncation at cut-adjacent lat ROWS and lon COLUMNS: the outermost
-     ``ppm_edge_values`` edges on a halo-2 padded tile are 2nd-order and
-     couple into the ghost-cell parabolas' LIMITED face states (CW84), so
-     bit parity at a cut is impossible at halo 2.  The flux METRIC at cuts
+     + continuity, and round-off tight for dT on every cell: the limited FV
+     PPM pads halo=3, so cut-face states see the same 4th-order edges as
+     serial (at halo=2 the 2nd-order outermost edge fed the CW84 limiter and
+     broke parity and conservation at cuts).  The flux METRIC at cuts
      is exact (``lat_v_interfaces == grid.lat_v``, gated by the geometry
      test + the realistic-amplitude tendency gate — codex M3a findings 2/6:
      the pre-fix operator fabricated ±π/2 pole faces at every tile cut).
@@ -302,7 +301,7 @@ def _realistic_amplitude_state(model):
     ``v*hx*(q_face - q_c)/area`` — both factors 1e-3-scale there.  At
     realistic amplitude the pre-fix fabricated-pole metric (codex M3a
     findings 2/6) measures 8.5e-5 K/s = 7 K/day at cut rows (job 8970803),
-    20x the genuine halo-2 limiter truncation (4.3e-6)."""
+    6 orders above the dT gate's atol=1e-10."""
     grid = model.grid
     rng = np.random.default_rng(4242)
     lat = np.asarray(grid.lat)                      # (n_lat,)
@@ -313,9 +312,7 @@ def _realistic_amplitude_state(model):
     u0[:, -1] = u0[:, 0]
     # sin(lat): MAXIMUM meridional T gradient and ZERO curvature at the
     # equator — i.e. at the (2,2) lat-cut face — so the fabricated-pole
-    # metric defect signal (~ v*hx*(q_face - q_c)) is maximal there while
-    # the genuine PPM edge-order truncation (~ curvature) is minimal:
-    # the sharpest discrimination between the two.
+    # metric defect signal (~ v*hx*(q_face - q_c)) is maximal there.
     T0 = (250.0 + 40.0 * np.sin(lat)[:, None, None]
           + 0.5 * rng.standard_normal((N_LAT, N_LON, NLEV)))
     ps0 = 1.0e5 + 1.0e3 * rng.standard_normal((N_LAT, N_LON))
@@ -331,8 +328,7 @@ def _realistic_amplitude_state(model):
 def _serial_and_tile_tendency(state=None):
     """Serial tendencies and the (2,2)-tile shard_map body's tendencies,
     gathered to global (u as u_left, v as v_lower)."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        cgrid_latlon_hydrostatic_tendencies)
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
     from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
         _build_geometry_stacks_2d, atm_grid_array_field_names)
     from legoesm.parallel.latlon_spmd import (
@@ -346,8 +342,8 @@ def _serial_and_tile_tendency(state=None):
     state = default_state if state is None else state
     grid, sigma, cfg = model.grid, model.sigma_coord, model.config
 
-    du_s, dv_s, dT_s, dps_s, _ = cgrid_latlon_hydrostatic_tendencies(
-        state, grid, sigma, cfg)
+    du_s, dv_s, dT_s, dps_s, _ = cgrid_latlon_pe_tendencies(
+        state, grid, sigma, cfg, vertical_form="legacy")
     serial = tuple(np.asarray(x) for x in (du_s, dv_s, dT_s, dps_s))
 
     template, afn, stacks, stacks_spec = _build_geometry_stacks_2d(
@@ -358,8 +354,8 @@ def _serial_and_tile_tendency(state=None):
         tg = template._replace(**{n: st[n][0, 0] for n in afn})
         vf = reconstruct_vface_lower(sl.v, "lat", perm_north)
         uf = reconstruct_uface_left(sl.u, "lon", p_lon)
-        du, dv, dT, dps, _ = cgrid_latlon_hydrostatic_tendencies(
-            sl._replace(u=uf, v=vf), tg, sigma, cfg)
+        du, dv, dT, dps, _ = cgrid_latlon_pe_tendencies(
+            sl._replace(u=uf, v=vf), tg, sigma, cfg, vertical_form="legacy")
         return to_uface_left(du), to_vface_lower(dv), dT, dps
 
     sc = shard_state_atm_latlon_2d(state, mesh)
@@ -380,9 +376,8 @@ def _serial_and_tile_tendency(state=None):
 
 
 def test_2d_tendency_matches_serial():
-    """Momentum + continuity BIT-tight on the (2,2) tiling; dT carries only
-    the documented limited-FV-PPM halo-2 boundary-order truncation at
-    cut-adjacent lat rows AND lon columns."""
+    """Momentum + continuity BIT-tight on the (2,2) tiling; dT round-off
+    tight on every cell incl. cut rows, cut columns and the wrap seam."""
     (du_s, dv_s, dT_s, dps_s), (dul_b, dvl_b, dT_b, dps_b), (p_lat, p_lon) = (
         _serial_and_tile_tendency())
 
@@ -405,52 +400,11 @@ def test_2d_tendency_matches_serial():
                 f"u seam, Coriolis/vertex at cuts, geometry, or the "
                 f"('lat','lon') mass psum)."))
 
-    # dT: bit-tight away from cuts; bounded truncation at cut-adjacent lat
-    # rows and lon columns (the wrap cut cols {n_lon-1, 0} included — the
-    # tile reconstruction is halo-2 there while serial sees the full circle).
-    #
-    # WHY a residual is genuinely allowed at cuts (and only there): on the
-    # halo-2 padded tile the outermost ``ppm_edge_values`` edges are
-    # 2ND-order (a 4th-order edge needs 2 cells each side) and feed the
-    # GHOST-cell parabolas, whose CW84-limited a_R/a_L ARE the owned
-    # cut-face upwind states — a real one-sided-stencil truncation needing
-    # halo 3 to vanish, not a decomposition bug.  The cut-face flux METRIC
-    # carries NO residual: ``lat_v_interfaces`` returns the tile's owned
-    # ``grid.lat_v`` (codex M3a findings 2/6 — the pre-fix operator
-    # fabricated ±π/2 pole faces at every cut; gated bitwise below by
-    # test_lat_v_interfaces_owned_faces and at amplitude by
-    # test_2d_tendency_realistic_amplitude_cut_gate).
-    nl, w = N_LAT // p_lat, N_LON // p_lon
-    cut_rows = sorted({r * nl - 1 for r in range(1, p_lat)}
-                      | {r * nl for r in range(1, p_lat)})
-    cut_cols = sorted({(c * w - 1) % N_LON for c in range(p_lon)}
-                      | {c * w for c in range(p_lon)})
-    int_rows = [j for j in range(N_LAT) if j not in cut_rows]
-    int_cols = [j for j in range(N_LON) if j not in cut_cols]
+    # dT: the halo=3 PPM reconstructs every cut face (lat rows, lon columns,
+    # the wrap seam) from the same 4th-order inputs as serial: no exemption.
     np.testing.assert_allclose(
-        dT_b[np.ix_(int_rows, int_cols)], dT_s[np.ix_(int_rows, int_cols)],
-        rtol=1e-10, atol=1e-12,
-        err_msg="dT_dt diverged at an INTERIOR (non-cut) cell — real bug.")
-    resid = float(np.max(np.abs(dT_b - dT_s)))
-    assert resid < _DT_CUT_TRUNC_CAP_SMALL_AMP, (
-        f"cut-adjacent dT_dt residual {resid:.2e} exceeds the measured "
-        f"halo-2 limiter one-sided-edge truncation cap "
-        f"{_DT_CUT_TRUNC_CAP_SMALL_AMP:.1e} — a real cut defect (metric, "
-        f"halo, or reconstruction), not the boundary-order reduction.")
-
-
-# Measured post-fix (2,2) cut-adjacent dT truncation maxima on the CI CPU
-# lane (x64, 4 host devices), capped at ~4x:
-#   small-amp 1.399e-12 (job 8970746; PRE-fix fabricated-pole metric
-#     measured 4.13e-12 there — inside this cap, so the small-amp gate
-#     alone does NOT discriminate the metric defect: that is the realistic
-#     gate's job);
-#   realistic-amp 4.32e-6 with the sin(lat) profile (job 8970803; PRE-fix
-#     metric measured 8.51e-5 there — 4.7x above this cap and 20x the
-#     genuine truncation, so the realistic gate fails loudly on any
-#     pole-fabrication regression while tolerating the truncation).
-_DT_CUT_TRUNC_CAP_SMALL_AMP = 6e-12
-_DT_CUT_TRUNC_CAP_REALISTIC = 1.8e-5
+        dT_b, dT_s, rtol=1e-10, atol=1e-12,
+        err_msg="dT_dt diverged from serial — a tile-cut PPM or decomposition bug.")
 
 
 def test_2d_tendency_realistic_amplitude_cut_gate():
@@ -463,9 +417,8 @@ def test_2d_tendency_realistic_amplitude_cut_gate():
     transport wall.  The small-amplitude gate cannot see it (advective-form
     cancellation leaves ~4e-12, inside that gate's cap); at realistic
     amplitude it is an 8.5e-5 K/s = 7 K/day dT error at cut rows (measured
-    by re-injecting the fabricated metric, job 8970803) vs a genuine halo-2
-    limiter truncation of 4.3e-6 K/s.  The cap sits between them (4.2x the
-    truncation): a pole-fabrication regression fails it by ~5x."""
+    by re-injecting the fabricated metric, job 8970803), far above this
+    gate's atol=1e-10."""
     model, _ = _model_and_state()
     state = _realistic_amplitude_state(model)
     (du_s, dv_s, dT_s, dps_s), (dul_b, dvl_b, dT_b, dps_b), _ = (
@@ -480,14 +433,10 @@ def test_2d_tendency_realistic_amplitude_cut_gate():
             err_msg=f"realistic-amplitude '{name}' diverged from serial — "
                     f"a real tile-decomposition bug.")
 
-    resid = float(np.max(np.abs(dT_b - dT_s)))
-    assert resid < _DT_CUT_TRUNC_CAP_REALISTIC, (
-        f"realistic-amplitude cut-adjacent dT_dt residual {resid:.2e} "
-        f"exceeds the measured halo-2 truncation cap "
-        f"{_DT_CUT_TRUNC_CAP_REALISTIC:.1e}.  A fabricated-pole cut-face "
-        f"metric (codex M3a findings 2/6) measures 8.5e-5 here (job "
-        f"8970803) — this gate exists to fail on any such metric "
-        f"regression.")
+    np.testing.assert_allclose(
+        dT_b, dT_s, rtol=1e-10, atol=1e-10,
+        err_msg="realistic-amplitude dT_dt diverged from serial — a cut-face "
+                "metric (fabricated pole, 8.5e-5 here) or PPM cut bug.")
 
 
 def test_lat_v_interfaces_owned_faces_never_fabricated_poles():
@@ -581,9 +530,9 @@ def test_2d_step_matches_serial_with_seam_checks():
     for f in ("u", "v", "T", "p_s"):
         assert a[f].shape == b[f].shape, f"{f} {a[f].shape} vs {b[f].shape}"
         np.testing.assert_allclose(
-            a[f], b[f], rtol=1e-6, atol=1e-9,
+            a[f], b[f], rtol=1e-10, atol=1e-12,
             err_msg=f"2-D (2,2) step diverged from serial in '{f}' beyond "
-                    f"the FV-PPM cut-truncation bound.")
+                    f"fp64 round-off.")
 
     # Staggered-seam gate: the u periodic-seam column, the u columns at the
     # lon tile cut, the v rows at the lat tile cut, and the v pole rows —
@@ -595,12 +544,12 @@ def test_2d_step_matches_serial_with_seam_checks():
                 "u[:, n_lon] == u[:, 0].")
     for col in (0, w, N_LON):
         np.testing.assert_allclose(
-            a["u"][:, col], b["u"][:, col], rtol=1e-6, atol=1e-9,
+            a["u"][:, col], b["u"][:, col], rtol=1e-10, atol=1e-12,
             err_msg=f"u seam/cut column {col} diverged — u_left ownership / "
                     f"lon-ring reconstruction defect.")
     for row in (0, nl, N_LAT):
         np.testing.assert_allclose(
-            a["v"][row], b["v"][row], rtol=1e-6, atol=1e-9,
+            a["v"][row], b["v"][row], rtol=1e-10, atol=1e-12,
             err_msg=f"v cut/pole row {row} diverged — v_lower ownership / "
                     f"lat reconstruction defect.")
     np.testing.assert_array_equal(
@@ -610,11 +559,10 @@ def test_2d_step_matches_serial_with_seam_checks():
         a["v"][-1], np.zeros_like(a["v"][-1]),
         err_msg="north pole v wall is nonzero after the 2-D step.")
 
-    # Non-vacuity: the tiling genuinely ran (the PPM cut truncation makes the
-    # trajectory differ from serial above the fp64 floor).
-    assert float(np.max(np.abs(a["T"] - b["T"]))) > 1e-13, (
-        "2-D T is bit-identical to serial — sharding collapsed to "
-        "single-device; this gate would be vacuous.")
+    # Non-vacuity: the tiling genuinely ran on all four devices.
+    assert sc.T.sharding.num_devices == 4 and not sc.T.sharding.is_fully_replicated, (
+        f"2-D state on {sc.T.sharding.num_devices} devices != 4 — sharding "
+        f"collapsed; this gate would be vacuous.")
 
 
 def test_2d_state_layout_roundtrip():
@@ -655,7 +603,7 @@ def test_2d_step_with_held_suarez_matches_serial():
     for f in ("u", "v", "T", "p_s"):
         np.testing.assert_allclose(
             np.asarray(getattr(out, f)), np.asarray(getattr(serial_out, f)),
-            rtol=1e-6, atol=1e-9,
+            rtol=1e-10, atol=1e-12,
             err_msg=f"2-D Held-Suarez step diverged from serial in '{f}' — "
                     f"tile physics coupling bug.")
 
@@ -787,9 +735,9 @@ def test_2d_segment_matches_sequential_and_serial():
         "f64 compiled 2-D segment vs sequential 2-D steps")
     for f in ("u", "v", "T", "p_s"):
         np.testing.assert_allclose(
-            seg_g[f], serial_g[f], rtol=1e-6, atol=1e-8,
+            seg_g[f], serial_g[f], rtol=1e-10, atol=1e-12,
             err_msg=f"compiled 2-D segment diverged from serial in '{f}' "
-                    f"beyond the integrated FV-PPM cut-truncation bound.")
+                    f"beyond fp64 round-off.")
 
 
 def test_2d_segment_finite_scalar_detects_nan():
@@ -889,14 +837,14 @@ def test_chooser_counts_pole_fold_all_gathers():
     collective on EVERY tile (both ``jnp.where`` fold operands evaluate),
     so a perimeter-only score mis-ranks lon splits.  Wide grid, 4
     devices: perimeter-only scored (1,4) at nl=8 "beating" the band's 32
-    by 4x; the honest partner-fold volume is 8 + (8+16) = 32, TYING the
-    band -> the band keeps ties."""
-    assert choose_latlon_2d_topology(4, 8, 32) == (4, 1)
+    by 4x; the honest partner-fold volume is 12 + (8+24) = 44 > the band's
+    32 -> band."""
+    assert choose_latlon_2d_topology(4, 12, 32) == (4, 1)
     # Tall grid: the band is optimal under both models.
     assert choose_latlon_2d_topology(4, 32, 8) == (4, 1)
     # Square grid, 8 devices: perimeter-only claimed a crossover; honestly
-    # the best 2-D candidate is (2,4) = 4+8+(4+16) = 32 > 16 -> band.
-    assert choose_latlon_2d_topology(8, 16, 16) == (8, 1)
+    # the best 2-D candidate is (2,4) = 4+12+(4+24) = 44 > 16 -> band.
+    assert choose_latlon_2d_topology(8, 24, 16) == (8, 1)
     # Band precedence: feasible band always wins (see
     # test_chooser_band_precedence_survives_partner_fold).
     for n_dev, n_lat, n_lon in ((4, 16, 16), (8, 32, 32), (16, 64, 32)):
@@ -921,25 +869,28 @@ def test_chooser_2d_when_band_infeasible():
     """The 2-D lane is selected exactly in its raison-d'etre regime: the
     band infeasible (indivisible n_lat or sub-min_tile bands).  Ranking
     among the surviving p_lon > 1 candidates uses the honest per-path
-    fold costs (partner w+16 where the runtime takes the partner path,
+    fold costs (partner w+24 where the runtime takes the partner path,
     gather n_lon otherwise — codex r2 #2 doc fix)."""
-    # n_lat=6 % 4 != 0 -> band infeasible; (1,4) = 6 + (8+16) = 30 beats
-    # (2,2) = 16 + 3 + (16+16) = 51.
+    # n_lat=6 % 4 != 0 -> band infeasible; (1,4) = 6 + (8+24) = 38 beats
+    # (2,2) = 16 + 3 + (16+24) = 59.
     assert choose_latlon_2d_topology(4, 6, 32) == (1, 4)
-    # min_tile: p_lat=8 leaves 1-row bands -> infeasible.  (4,2) has w=4
-    # >= 2*h_ref so it is charged the forced partner fold (4+2+20=26);
-    # (2,4) has w=2 < 2*h_ref -> runtime gather fold (2+4+8=14) -> (2,4)
-    # wins (model == runtime decision, codex r1 #3).
-    assert choose_latlon_2d_topology(8, 8, 8) == (2, 4)
+    # n_lat=12 % 8 != 0 -> band infeasible.  (4,2) has w=6 >= 2*h_ref so it
+    # is charged the forced partner fold (6+3+30=39); (2,4) has w=3 < 2*h_ref
+    # -> runtime gather fold (3+6+12=21) -> (2,4) wins (model == runtime
+    # decision, codex r1 #3).
+    assert choose_latlon_2d_topology(8, 12, 12) == (2, 4)
 
 
 def test_chooser_feasibility_and_errors():
     # Indivisible longitude forces p_lon == 1.
     assert choose_latlon_2d_topology(4, 16, 17) == (4, 1)
-    # min_tile: n_lat=8 over p_lat=8 leaves 1-row tiles -> infeasible; the
-    # 2-D factorizations remain ((2,4) — see the infeasibility test above
-    # for the forced-partner-vs-gather scoring).
-    assert choose_latlon_2d_topology(8, 8, 8) == (2, 4)
+    # min_tile=3: (4,2) and (2,4) on 8x8 leave 2-cell tiles -> no
+    # factorization survives.
+    with pytest.raises(ValueError, match="no feasible"):
+        choose_latlon_2d_topology(8, 8, 8)
+    # Indivisible n_lat: the 2-D factorizations remain ((2,4) — see the
+    # infeasibility test above for the forced-partner-vs-gather scoring).
+    assert choose_latlon_2d_topology(8, 12, 12) == (2, 4)
     # No factorization at all -> loud error, never a silent fallback.
     with pytest.raises(ValueError, match="no feasible"):
         choose_latlon_2d_topology(3, 16, 16)
@@ -989,7 +940,7 @@ def test_2d_factory_refusals():
     # Indivisible tiling / too-thin tiles: loud.
     with pytest.raises(ValueError, match="% p_lat|% p_lon|uniform"):
         build_tile_grids_atm_2d(model.grid, 3, 1)
-    with pytest.raises(ValueError, match=">= 2 cells"):
+    with pytest.raises(ValueError, match=">= 3 cells"):
         build_tile_grids_atm_2d(model.grid, 16, 1)   # 1-row tiles
 
     # n_steps hardening on the segment factory.

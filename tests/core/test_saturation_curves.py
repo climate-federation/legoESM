@@ -72,6 +72,36 @@ def test_goff_monotone_in_T():
     assert np.all(np.diff(gof) > 0)                      # warmer -> wetter
 
 
+def test_goff_nemo_source_exact_native_is_bit_identical_eager_and_jit():
+    """The NEMO-exact Goff branch source-rounds its all-constant pow(10, -4)
+    and pow(10, -3) bases so a compiled program evaluates them instead of
+    folding them with host libm (the folded value was one bit off the GPU's
+    eager value).  On CPU the folded and evaluated values agree, so the
+    discriminating check is structural: all five pow calls survive into the
+    compiled program (a revert folds two of them, leaving three)."""
+    import re
+
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prev_x64, prev_policy = jax.config.jax_enable_x64, get_policy()
+    jax.config.update("jax_enable_x64", True)
+    set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+    try:
+        T = jnp.linspace(233.0, 320.0, 4097, dtype=jnp.float64)
+
+        def fn(t):
+            return saturation_vapor_pressure_goff(t, nemo_source_exact=True)
+
+        eager = np.asarray(fn(T)).view(np.uint64)
+        jitted = np.asarray(jax.jit(fn)(T)).view(np.uint64)
+        compiled = jax.jit(fn).lower(T).compile().as_text()
+    finally:
+        set_policy(prev_policy)
+        jax.config.update("jax_enable_x64", prev_x64)
+    np.testing.assert_array_equal(jitted, eager)
+    assert len(re.findall(r"\bpower\(", compiled)) == 5
+
+
 def test_goff_differentiable():
     """Reverse-mode AD flows through the Goff q_sat (surface flux path)."""
     g = jax.grad(lambda t: saturation_mixing_ratio_goff(

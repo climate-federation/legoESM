@@ -119,6 +119,10 @@ class AMIPExperimentConfig(NamedTuple):
     # Faithful CUMASTRN path (BechtoldConfig.use_ifs_ascent); flat schema so
     # the AMIP round-trip carries it across a restart.
     bechtold_use_ifs_ascent: bool = False
+    # OpenIFS 49r1 methane oxidation water source (flat schema, round-trip).
+    ifs_methox: bool = False
+    # OpenIFS 49r1 Cariolle ozone tracer (flat schema, round-trip).
+    ifs_ozone_chem: bool = False
     # IFS Kessler sub-cloud rain evaporation (cuflxn.F90; default ON
     # 2026-07-16) — in the flat schema so round-trips cannot drop it.
     bechtold_use_ifs_subcloud_evap: bool = True

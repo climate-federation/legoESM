@@ -439,13 +439,12 @@ STRONG_RESOLUTIONS_CS = [48, 96, 192]   # cubed-sphere: ~200, ~100, ~50 km
 STRONG_RESOLUTIONS_SP = [42, 85, 170]   # spectral: T42, T85, T170
 STRONG_RESOLUTIONS_ICO = [4, 5, 6, 7, 8]  # icosahedral: levels 4-8 (L8 = 655,362 cells, ~25 km; high levels need multi-GPU/multi-node)
 STRONG_RESOLUTIONS_LL = [64, 128, 256]  # lat-lon: n_lat
-# Lat-lon MPI halo width: the C-grid PPM / biharmonic operators pad
-# ``halo=2`` rows (primitive_eq_latlon_cgrid: pad_halo_latlon_3d(halo=2);
-# make_latlon_mpi_step default).  exchange_halo_latlon RAISES when a rank's
+# Lat-lon MPI halo width: the C-grid PPM operators pad ``halo=3`` rows
+# (operators_fv_latlon_3d: pad_halo_latlon_3d(halo=3)).  exchange_halo_latlon RAISES when a rank's
 # band has fewer than ``halo`` rows (``halo > n_lat_local``), so the MPI
 # band sweep skips a resolution whose smallest band would drop below it
 # instead of crashing before timing.
-_LATLON_MPI_HALO = 2
+_LATLON_MPI_HALO = 3
 
 # Minimum total timing duration target (seconds).  When step times are
 # sub-millisecond (e.g., I4 at ~0.5 ms/step), 100 steps yield only

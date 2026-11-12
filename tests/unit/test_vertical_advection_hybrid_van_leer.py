@@ -95,7 +95,7 @@ def test_mpas_hybrid_tracer_path_runs_the_conservative_operator(monkeypatch):
         return real(*a, **k)
 
     monkeypatch.setattr(pe, "vertical_advection_hybrid_van_leer", spy)
-    out = pe.mpas_hydrostatic_tendencies(
+    out = pe.mpas_model_tendencies(
         state, mesh, coord, pe.MPASPrimitiveEquationConfig(nu_del2=1.0e5))
     assert calls, "the MPAS hybrid tracer path no longer calls the conservative operator"
     assert np.all(np.isfinite(np.asarray(out.tracer_tendencies["q_v"].data)))

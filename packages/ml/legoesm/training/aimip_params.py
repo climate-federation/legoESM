@@ -1012,6 +1012,10 @@ def validate_classical_scheme_set(
     dict
         ``{family: scheme}``, so a caller can log exactly what it validated.
     """
+    from legoesm.atmosphere.physics.turbulence.config import (
+        refuse_retired_turbulence,
+    )
+    refuse_retired_turbulence(turbulence, "AIMIP classical scheme set")
     selected = {
         "convection": convection, "turbulence": turbulence, "cloud": cloud,
         "microphysics": microphysics, "radiation": radiation, "gwd": gwd,
@@ -1045,6 +1049,10 @@ def aimip_scheme_keys_for(
     Only the ``scheme`` selector and the active sub-config's TYPE are read, so
     the probe needs no tuned values.
     """
+    from legoesm.atmosphere.physics.turbulence.config import (
+        refuse_retired_turbulence,
+    )
+    refuse_retired_turbulence(turbulence, "AIMIP scheme keys")
     from legoesm.atmosphere.physics.combined import PhysicsConfig
     from legoesm.atmosphere.physics.microphysics.config import (
         MicrophysicsConfig,

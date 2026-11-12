@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.grids.operator_adapters import (
@@ -234,3 +235,81 @@ def test_mpas_edge_rejects_rank3_bundle() -> None:
         ops.gradient(tracers)
     with pytest.raises(ValueError, match="rank-3"):
         ops.cell_to_edge(tracers)
+
+
+# ---------------------------------------------------------------------------
+# Neighbour-sum adapters: same contracts, same operators (fp64)
+# ---------------------------------------------------------------------------
+
+def test_neighbour_adapters_satisfy_contracts_and_match() -> None:
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.operator_adapters import (
+        MPASEdgeOperators,
+        latlon_neighbour_operators,
+        mpas_neighbour_operators,
+    )
+    from legoesm.grids.operator_protocol import validate_edge_operators
+
+    prev = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        grid = create_latlon_grid(16, 32)
+        new, old = latlon_neighbour_operators(grid), LatLonCGridOperators(grid)
+        validate_grid_operators(new)
+        rng = np.random.default_rng(0)
+        nj, ni = grid.n_lat, grid.n_lon
+        scalar = jnp.asarray(rng.standard_normal((nj, ni)))
+        gx = jnp.asarray(rng.standard_normal((nj, ni)))
+        gx = jnp.concatenate([gx, gx[:, :1]], axis=1)
+        gy = jnp.asarray(rng.standard_normal((nj + 1, ni))).at[0].set(0.0).at[-1].set(0.0)
+
+        def rel(a, b):
+            return float(jnp.max(jnp.abs(a - b)) / jnp.max(jnp.abs(b)))
+
+        for a, b in zip(new.gradient(scalar), old.gradient(scalar)):
+            assert rel(a, b) <= 1e-13
+        assert rel(new.divergence(gx, gy), old.divergence(gx, gy)) <= 1e-13
+        assert rel(new.vorticity(gx, gy), old.vorticity(gx, gy)) <= 1e-13
+
+        mesh, mold = _mpas_mesh_and_ops()
+        mnew = mpas_neighbour_operators(mesh)
+        validate_edge_operators(mnew)
+        assert isinstance(mold, MPASEdgeOperators)
+        u_edge = jnp.sin(mesh.lonEdge) * jnp.cos(mesh.latEdge)
+        phi_cell = jnp.cos(mesh.lonCell) * jnp.sin(mesh.latCell)
+        assert _eq(mnew.divergence(u_edge), mold.divergence(u_edge))
+        assert _eq(mnew.gradient(phi_cell), mold.gradient(phi_cell))
+        assert _eq(mnew.vorticity(u_edge), mold.vorticity(u_edge))
+    finally:
+        jax.config.update("jax_enable_x64", prev)
+
+
+def test_mpas_neighbour_adapter_delegates_columns_to_parent() -> None:
+    from legoesm.grids.operator_adapters import mpas_neighbour_operators
+
+    mesh, parent = _mpas_mesh_and_ops()
+    ops = mpas_neighbour_operators(mesh)
+    sigma = jnp.linspace(0.1, 1.0, 4)
+    u3 = (jnp.sin(mesh.lonEdge) * jnp.cos(mesh.latEdge))[:, None] * sigma[None, :]
+    phi3 = (jnp.cos(mesh.lonCell) * jnp.sin(mesh.latCell))[:, None] * sigma[None, :]
+    assert _eq(ops.divergence(u3), parent.divergence(u3))
+    assert _eq(ops.gradient(phi3), parent.gradient(phi3))
+    assert _eq(ops.vorticity(u3), parent.vorticity(u3))
+    with pytest.raises(ValueError):
+        ops.divergence(u3[..., None])
+
+
+def test_latlon_neighbour_adapter_delegates_levels_to_parent() -> None:
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.operator_adapters import latlon_neighbour_operators
+
+    grid = create_latlon_grid(16, 32)
+    ops, parent = latlon_neighbour_operators(grid), LatLonCGridOperators(grid)
+    rng = np.random.default_rng(1)
+    s3 = jnp.asarray(rng.standard_normal((16, 32, 3)))
+    u3 = jnp.asarray(rng.standard_normal((16, 33, 3)))
+    v3 = jnp.asarray(rng.standard_normal((17, 32, 3)))
+    for a, b in zip(ops.gradient(s3), parent.gradient(s3)):
+        assert _eq(a, b)
+    assert _eq(ops.divergence(u3, v3), parent.divergence(u3, v3))
+    assert _eq(ops.vorticity(u3, v3), parent.vorticity(u3, v3))

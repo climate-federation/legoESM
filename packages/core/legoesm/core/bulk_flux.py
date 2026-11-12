@@ -313,6 +313,14 @@ def validate_stability_scheme(stability_scheme: str) -> None:
         )
 
 
+def _ly09_cdn_poly(w):
+    """LY09 Eq. 6 neutral drag polynomial ``1e3 * C_DN`` (no floor, clip or plateau);
+    the one copy every non-source-exact Large-Yeager drag branch evaluates (#2242)."""
+    w6 = w * w * w
+    w6 = w6 * w6
+    return 2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w6
+
+
 def large_yeager_neutral_cd(
     wind, *, nemo_parity: bool = False, nemo_source_exact: bool = False,
     cd_cutoff_width: float | None = None,
@@ -382,11 +390,7 @@ def large_yeager_neutral_cd(
     if nemo_parity:
         return _cd_n10_ncar(
             U, NCAR_CD_CUTOFF_WIDTH if cd_cutoff_width is None else cd_cutoff_width)
-    U = jnp.maximum(U, 0.5)
-    C_DN = (
-        2.7 / U + 0.142 + U / 13.09 - 3.14807e-10 * U ** 6
-    ) * 1e-3
-    return jnp.clip(C_DN, 0.5e-3, 3.0e-3)
+    return jnp.clip(1e-3 * _ly09_cdn_poly(jnp.maximum(U, 0.5)), 0.5e-3, 3.0e-3)
 
 
 # ============================================================================
@@ -1205,17 +1209,12 @@ def _cd_n10_ncar(w10, cutoff_width=NCAR_CD_CUTOFF_WIDTH):
     ``1 - s = 0`` reaches it above 33 m/s), so a huge wind cannot overflow
     its ``U**6`` term into ``0 * inf = NaN``.
     """
-    def _poly(w):
-        w6 = w * w * w
-        w6 = w6 * w6
-        return 2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w6
-
     if cutoff_width == 0.0:
-        cd = jnp.where(w10 >= _AB_NCAR_CD_CUTOFF_U, _AB_NCAR_CD_PLATEAU, _poly(w10))
+        cd = jnp.where(w10 >= _AB_NCAR_CD_CUTOFF_U, _AB_NCAR_CD_PLATEAU, _ly09_cdn_poly(w10))
     else:
         s = smoothstep_quintic((w10 - _AB_NCAR_CD_CUTOFF_U + cutoff_width) / cutoff_width)
         cd = (s * _AB_NCAR_CD_PLATEAU
-              + (1.0 - s) * _poly(jnp.minimum(w10, _AB_NCAR_CD_CUTOFF_U)))
+              + (1.0 - s) * _ly09_cdn_poly(jnp.minimum(w10, _AB_NCAR_CD_CUTOFF_U)))
     return jnp.maximum(1.0e-3 * cd, _AB_CX_MIN)
 
 

@@ -16,6 +16,7 @@ from legoesm.driver.config import (
     CLUBB_PROGNOSTIC_ONLY,
     CLUBB_SCALAR_FIELDS,
     ZM_SCALAR_FIELDS,
+    ZM_TRIGGER_FIELDS,
     ZM_WIDTH_FIELDS,
     ExperimentConfig,
 )
@@ -297,3 +298,56 @@ def test_widths_have_no_params_route():
     """Excluded from __param_spec__ (tier 0): --params must not reach them."""
     from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
     assert not set(ZM_WIDTH_FIELDS) & set(build_atm_scalar_param_map().values())
+
+
+# --- ZM trigger width (ZM_TRIGGER_FIELDS) ------------------------------------
+# Read wherever convection == zhang_mcfarlane.
+
+
+def test_trigger_width_cli_reaches_the_zm_config():
+    cfg = _mpas(_parse(["--convection", "zhang_mcfarlane",
+                        "--zm-trigger-width-J-kg", "25.0"]))
+    assert cfg.zm_trigger_width_J_kg == 25.0
+    cfg.validate_strict()
+    assert convection_config_for(cfg).zhang_mcfarlane.trigger_width_J_kg == 25.0
+    unset = _mpas(_parse(["--convection", "zhang_mcfarlane"]))
+    assert unset.zm_trigger_width_J_kg is None
+    assert (convection_config_for(unset).zhang_mcfarlane.trigger_width_J_kg
+            == ZhangMcFarlaneConfig().trigger_width_J_kg)
+
+
+def test_production_deck_names_the_trigger_width_at_its_default():
+    import yaml
+    deck = yaml.safe_load(_DECK.read_text())
+    for f, leaf in ZM_TRIGGER_FIELDS.items():
+        assert deck[f] == getattr(ZhangMcFarlaneConfig(), leaf), f
+    from scripts.run import run_amip
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    p = run_amip.build_arg_parser()
+    p.set_defaults(**load_yaml_config(_DECK, p))
+    cfg = run_amip.build_config_from_args(p.parse_args([]))
+    assert cfg.zm_trigger_width_J_kg == deck["zm_trigger_width_J_kg"]
+
+
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf"), 1.0e-40,
+                                   1.0e-320, 1.0e20, False, True])
+def test_trigger_width_out_of_range_refused(value):
+    cfg = _mpas(ExperimentConfig(convection="zhang_mcfarlane",
+                                 zm_trigger_width_J_kg=value))
+    with pytest.raises(ValueError, match="zm_trigger_width_J_kg"):
+        cfg.validate_strict()
+    with pytest.raises(ValueError, match="trigger_width_J_kg"):
+        convection_config_for(cfg)
+
+
+def test_trigger_width_refused_without_zm_and_zero_accepted():
+    with pytest.raises(ValueError, match="zm_trigger_width_J_kg"):
+        _mpas(ExperimentConfig(convection="bechtold",
+                               zm_trigger_width_J_kg=10.0)).validate_strict()
+    _mpas(ExperimentConfig(convection="zhang_mcfarlane",
+                           zm_trigger_width_J_kg=0.0)).validate_strict()
+
+
+def test_trigger_width_has_no_params_route():
+    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
+    assert not set(ZM_TRIGGER_FIELDS) & set(build_atm_scalar_param_map().values())

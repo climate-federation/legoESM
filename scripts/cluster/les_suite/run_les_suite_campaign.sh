@@ -48,7 +48,7 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 $PY \
 for f in "$ART"/cbl_nieuwstadt__lasd*.npz; do
   [ -f "$f" ] || continue
   base=$(basename "$f" .npz)
-  for s in smagorinsky louis holtslag_boville ysu tke mynn25 clubb_lite edmf; do
+  for s in smagorinsky louis holtslag_boville ysu tke mynn25 edmf; do
     out="$OUT/tuned/${base}__${s}__df.json"
     if [ -f "$out" ]; then say "skip tune $base $s (exists)"; continue; fi
     say "tune $base $s"

@@ -66,11 +66,6 @@
         "combo_name": "combo_turb_smagorinsky"
       },
       {
-        "scheme": "clubb_lite",
-        "score": 6.7134375640065675,
-        "combo_name": "combo_turb_clubb_lite"
-      },
-      {
         "scheme": "holtslag_boville",
         "score": 6.6790198593653685,
         "combo_name": "combo_turb_holtslag_boville"

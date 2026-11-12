@@ -39,12 +39,8 @@ import jax.numpy as jnp
 from legoesm.grids.operator_adapters import latlon_cgrid_operators
 from legoesm.grids.operators_latlon_cgrid import (
     get_band_mpi_cut_layout,
-    vector_laplacian_cgrid,
-    interp_cell_to_uface,
-    interp_cell_to_vface,
     pad_lon_cgrid,
 )
-from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
 from legoesm.core.williamson_sw_analytic import (
     W5_H0_M,
     W5_UBAR_MS,
@@ -57,6 +53,7 @@ from legoesm.grids.polar_filter import (
     compute_polar_filter_mask,
     fourier_filter,
 )
+from legoesm.atmosphere.dynamics.gcm.shallow_water_generic import cgrid_latlon_sw_tendencies
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.core.precision import cast_pytree
@@ -308,28 +305,6 @@ def absolute_vorticity_coriolis(
     return cor_u, cor_v
 
 
-def _kinetic_energy_cgrid(
-    u: jnp.ndarray,
-    v: jnp.ndarray,
-) -> jnp.ndarray:
-    """Kinetic energy at cell centers from C-grid face velocities.
-
-    KE = 0.5 * (ū² + v̄²) where ū, v̄ are averaged to cell centers.
-
-    Parameters
-    ----------
-    u : (n_lat, n_lon+1)  -- zonal velocity at lon interfaces
-    v : (n_lat+1, n_lon)  -- meridional velocity at lat interfaces
-
-    Returns
-    -------
-    KE : (n_lat, n_lon)
-    """
-    u_c = 0.5 * (u[:, :-1] + u[:, 1:])   # (n_lat, n_lon)
-    v_c = 0.5 * (v[:-1, :] + v[1:, :])   # (n_lat, n_lon)
-    return 0.5 * (u_c**2 + v_c**2)
-
-
 # ==============================================================================
 # Tendency computation
 # ==============================================================================
@@ -379,106 +354,6 @@ def nu_del4_row_profiles(
     nu_u = jnp.minimum(nu_del4, cfl_frac / (dt * lam_u ** 2))
     nu_v = jnp.minimum(nu_del4, cfl_frac / (dt * lam_v ** 2))
     return nu_u[:, None], nu_v[:, None]
-
-
-def cgrid_latlon_sw_tendencies(
-    state: CGridLatLonShallowWaterState,
-    grid: LatLonGrid,
-    config: CGridLatLonShallowWaterConfig = CGridLatLonShallowWaterConfig(),
-    dt=None,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Compute C-grid shallow water tendencies on the lat-lon grid.
-
-    Equations (vector-invariant form):
-        dh/dt = -∇·(h v)                           (mass conservation)
-        du/dt = -∂B/∂x + f v̄  + viscosity          (zonal momentum)
-        dv/dt = -∂B/∂y - f ū  + viscosity          (meridional momentum)
-
-    where B = g(h + h_s) + KE is the Bernoulli function.
-
-    Parameters
-    ----------
-    state : CGridLatLonShallowWaterState
-    grid : LatLonGrid
-    config : CGridLatLonShallowWaterConfig
-
-    Returns
-    -------
-    (dh_dt, du_dt, dv_dt) : tuple of jax.Array
-        Tendencies at (cell centers, lon faces, lat faces).
-    """
-    h, u, v, h_s = state
-    g = config.g
-
-    # The grid-dispatched operator interface (B2): the differential operators flow
-    # through ``ops.divergence``/``gradient``/``vorticity`` rather than the bare free
-    # functions, so the core calls operators without naming the grid (design L2).
-    # The adapter delegates to the same lat-lon C-grid operators, so this is
-    # byte-identical to the direct calls.  The cell->face interpolations stay direct:
-    # the adapter's ``interpolate(.., "vface")`` uses the grid-aware ``pad_ns_scalar``
-    # north/south form, whereas this SW dycore uses the legacy ``grid=None`` (pole-
-    # inert) form, so routing it would change the north-fold value on a tripolar grid.
-    ops = latlon_cgrid_operators(grid)
-
-    # --- 1. Mass flux divergence ---
-    if config.use_ppm_transport:
-        # PPM (4th-order) reconstruction of h at faces for upwind flux
-        dh_dt = cgrid_fv_flux_divergence_latlon(h, u, v, grid)
-    else:
-        # Simple 2nd-order averaging of h to faces (legacy grid=None pole handling)
-        h_u = interp_cell_to_uface(h)
-        h_v = interp_cell_to_vface(h)
-        F_u = h_u * u
-        F_v = h_v * v
-        dh_dt = -ops.divergence(F_u, F_v)
-
-    # --- 2. Bernoulli function at cell centers ---
-    KE = _kinetic_energy_cgrid(u, v)   # (n_lat, n_lon)
-    B = g * (h + h_s) + KE             # (n_lat, n_lon)
-
-    # --- 3. Pressure gradient + KE gradient (Bernoulli gradient) ---
-    grad_x, grad_y = ops.gradient(B)
-    du_dt = -grad_x   # (n_lat, n_lon+1)
-    dv_dt = -grad_y   # (n_lat+1, n_lon)
-
-    # --- 4. Coriolis using absolute vorticity (ζ+f) ---
-    cor_u, cor_v = absolute_vorticity_coriolis(u, v, grid)
-    du_dt = du_dt + cor_u
-    dv_dt = dv_dt + cor_v
-
-    # --- 5. Laplacian viscosity (optional) ---
-    # Sign convention: viscosity enters as +A_h*lap(u) (Laplacian of a
-    # local extremum is negative -> damping).
-    if config.A_h > 0.0:
-        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
-        du_dt = du_dt + config.A_h * lap_u
-        dv_dt = dv_dt + config.A_h * lap_v
-
-    # --- 5b. Biharmonic (del-4) viscosity (optional) ---
-    # Sign convention: biharmonic damping is -nu4*lap(lap(u)) — for a
-    # Fourier mode e^{ikx}, lap^2 -> +k^4, so the term is -nu4*k^4*u
-    # (decay).  A "+" here would be anti-diffusive and blow up at the
-    # grid scale.  Static Python branch on the config float (feature
-    # gating exception — not jnp.where).
-    if config.nu_del4 > 0.0:
-        if dt is None:
-            raise ValueError(
-                "cgrid_latlon_sw_tendencies: nu_del4 > 0 requires the "
-                "dt argument (per-row pole stability cap needs it).")
-        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
-        lap2_u, lap2_v = vector_laplacian_cgrid(lap_u, lap_v, grid)
-        nu_u, nu_v = nu_del4_row_profiles(
-            grid, config.nu_del4, config.nu_del4_cfl_frac, dt)
-        du_dt = du_dt - nu_u * lap2_u
-        dv_dt = dv_dt - nu_v * lap2_v
-
-    # Enforce zero tendency at poles (wall BC) so intermediate RK
-    # stages never see nonzero v at poles feeding into divergence/Coriolis.
-    # Single ``Pad`` HLO op replaces two ``ScatterUpdate`` ops on the
-    # lat axis — same per-RK-stage pattern as the lat-lon C-grid PE.
-    dv_dt = jnp.pad(dv_dt[1:-1, :], ((1, 1), (0, 0)))
-
-    return dh_dt, du_dt, dv_dt
 
 
 # ==============================================================================

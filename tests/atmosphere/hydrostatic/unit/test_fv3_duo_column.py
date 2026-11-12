@@ -509,7 +509,7 @@ def test_driver_column_lane_is_the_closed_lane_bitwise(tmp_path):
                       do_pert=True)["state"]["pt"])).max() > 0.0
 
 
-@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
+@pytest.mark.xfail(strict=True, reason="OPEN FINDING (#2405, measured x64 2026-11-11): with Kessler on, the column and closed lanes end 8.6e-8 (u, v), 1.9e-8 (pt), 2.1e-9 (delp) of peak apart, IDENTICALLY at the default and at the hard limit, so this is lane plumbing, not the smooth saturation switch; the docstring premise that Kessler is exactly zero on these columns no longer holds. Dry mass agrees to 1.6e-13.")
 def test_driver_column_lane_kessler_equals_the_closed_lane(tmp_path):
     """Kessler through the MPAS lane's own physics package on the column
     model vs the closed lane's bridge, same IC, same dt: the two runs
