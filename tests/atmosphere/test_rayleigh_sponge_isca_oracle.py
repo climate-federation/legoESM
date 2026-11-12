@@ -154,8 +154,9 @@ def test_rayleigh_sponge_check_grads_at_cutoff(fix):
     check_grads(f, (x0,), order=2, modes=("fwd", "rev"), eps=1e-5)
     assert float(jax.grad(f)(x0)) != 0.0
     check_grads(f, (jnp.asarray(0.0),), order=2, modes=("fwd", "rev"), eps=1e-5)
-    # right seam x = 1/s: positive_part_c1 is C1 there, so order 1 only
-    check_grads(f, (jnp.asarray(1.0 / sharp),), order=1, modes=("fwd", "rev"), eps=1e-5)
+    # right seam x = 1/s: positive_part_c1 is C1 there, so order 1 only; the f'' jump
+    # gives central-difference error ~eps there, hence eps 1e-7 (3e-5 at 1e-5)
+    check_grads(f, (jnp.asarray(1.0 / sharp),), order=1, modes=("fwd", "rev"), eps=1e-7)
     with pytest.raises(AssertionError):
         check_grads(make(math.inf), (jnp.asarray(0.0),), order=2, modes=("fwd", "rev"),
                     eps=1e-5)
