@@ -11,6 +11,12 @@ import jax.numpy as jnp
 g = 9.80616                     # Gravitational acceleration [m/s^2]
 Omega = 7.292e-5                # Earth rotation rate [rad/s]
 R_earth = 6.371229e6            # Earth mean radius [m]
+# NeuralSWM's released wave weights were trained with these distinct values.
+# Keep them centralized here so the wave port can preserve its reference grid
+# and dispersion relation without defining physical constants in a component.
+g_neuralswm = 9.806              # NeuralSWM dispersion gravity [m/s^2]
+R_earth_neuralswm = 6366197.7236758135  # NeuralSWM spherical radius [m]
+g_neuralswm_stokes = 9.81        # NeuralSWM Stokes diagnostic gravity [m/s^2]
 
 # ==============================================================================
 # Dry Air Thermodynamics

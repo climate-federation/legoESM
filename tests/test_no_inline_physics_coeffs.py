@@ -64,6 +64,7 @@ ROSTERS: dict[str, str] = {
     "land": "packages/land/legoesm/land/",
     "ice": "packages/ice/legoesm/ice/",
     "coupler": "packages/coupler/legoesm/coupler/",
+    "wave": "packages/wave/legoesm/wave/",
 }
 
 # One known production file per roster + a floor on the file count, so a
@@ -75,6 +76,7 @@ _ROSTER_SENTINELS: dict[str, str] = {
     "land": "packages/land/legoesm/land/soil_thermal.py",
     "ice": "packages/ice/legoesm/ice/dynamics.py",
     "coupler": "packages/coupler/legoesm/coupler/coupler.py",
+    "wave": "packages/wave/legoesm/wave/physics/dispersion.py",
 }
 _ROSTER_MIN_FILES: dict[str, int] = {
     "atmosphere": 100,
@@ -82,6 +84,7 @@ _ROSTER_MIN_FILES: dict[str, int] = {
     "land": 15,
     "ice": 12,
     "coupler": 8,
+    "wave": 9,
 }
 
 # --- detector rules --------------------------------------------------------

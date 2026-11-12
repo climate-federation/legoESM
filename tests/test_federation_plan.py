@@ -19,6 +19,7 @@ FEDERATION_MEMBERS: dict[str, tuple[str, ...]] = {
     "legoesm-ocean": ("ocean",),
     "legoesm-land": ("land",),
     "legoesm-ice": ("ice",),
+    "legoesm-wave": ("wave",),
     "legoesm-coupler": ("coupler", "driver"),
     "legoesm-ml": ("ml", "training", "da"),
     "legoesm-tools": ("forcing", "diagnostics", "experiments", "visualization"),
@@ -46,9 +47,9 @@ FEDERATION_LOOSE_MODULES: dict[str, tuple[str, ...]] = {
                 "scaling_preflight", "supported_matrix"),
 }
 
-#: The four mutually-independent Earth-system components (import-linter contract #2).
+#: The mutually-independent Earth-system components (import-linter contract #2).
 COMPONENT_MEMBERS = ("legoesm-atmosphere", "legoesm-ocean",
-                     "legoesm-land", "legoesm-ice")
+                     "legoesm-land", "legoesm-ice", "legoesm-wave")
 
 
 def _actual_subpackages() -> set[str]:
@@ -97,10 +98,26 @@ def test_loose_module_members_are_known_federation_members() -> None:
 
 def test_component_members_are_the_independent_earth_system_components() -> None:
     component_pkgs = {p for m in COMPONENT_MEMBERS for p in FEDERATION_MEMBERS[m]}
-    assert component_pkgs == {"atmosphere", "ocean", "land", "ice"}
+    assert component_pkgs == {"atmosphere", "ocean", "land", "ice", "wave"}
     # each component member bundles exactly one subpackage (so they carve apart)
     for m in COMPONENT_MEMBERS:
         assert len(FEDERATION_MEMBERS[m]) == 1
+
+
+def test_packaging_validator_covers_every_workspace_member() -> None:
+    from scripts.validate.validate_federation_packaging import MEMBERS, MEMBER_SUBPKGS
+
+    assert set(MEMBERS) == set(FEDERATION_MEMBERS)
+    assert MEMBER_SUBPKGS == {name: set(parts) for name, parts in FEDERATION_MEMBERS.items()}
+
+
+def test_release_matrix_covers_every_workspace_member() -> None:
+    from pathlib import Path
+    import yaml
+
+    workflow = yaml.safe_load((Path(__file__).parents[1]/".github/workflows/release.yml").read_text())
+    members = workflow["jobs"]["publish-members"]["strategy"]["matrix"]["member"]
+    assert {"legoesm-"+name for name in members} == set(FEDERATION_MEMBERS)
 
 
 def test_supported_matrix_lists_every_resolvable_atmosphere_solver() -> None:

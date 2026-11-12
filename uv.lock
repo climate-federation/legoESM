@@ -35,6 +35,7 @@ members = [
     "legoesm-ml",
     "legoesm-ocean",
     "legoesm-tools",
+    "legoesm-wave",
 ]
 
 [[package]]
@@ -1569,6 +1570,7 @@ dependencies = [
     { name = "legoesm-ml" },
     { name = "legoesm-ocean" },
     { name = "legoesm-tools" },
+    { name = "legoesm-wave" },
     { name = "matplotlib" },
     { name = "netcdf4" },
     { name = "numpy" },
@@ -1685,6 +1687,7 @@ requires-dist = [
     { name = "legoesm-ml", editable = "packages/ml" },
     { name = "legoesm-ocean", editable = "packages/ocean" },
     { name = "legoesm-tools", editable = "packages/tools" },
+    { name = "legoesm-wave", editable = "packages/wave" },
     { name = "matplotlib", specifier = ">=3.9" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.9" },
     { name = "mpi4jax", marker = "extra == 'mpi'", specifier = ">=0.8,<0.10" },
@@ -1799,6 +1802,7 @@ dependencies = [
     { name = "legoesm-ml" },
     { name = "legoesm-ocean" },
     { name = "legoesm-tools" },
+    { name = "legoesm-wave" },
 ]
 
 [package.metadata]
@@ -1810,6 +1814,7 @@ requires-dist = [
     { name = "legoesm-ml", editable = "packages/ml" },
     { name = "legoesm-ocean", editable = "packages/ocean" },
     { name = "legoesm-tools", editable = "packages/tools" },
+    { name = "legoesm-wave", editable = "packages/wave" },
 ]
 
 [[package]]
@@ -1928,6 +1933,27 @@ requires-dist = [
     { name = "legoesm-core", editable = "packages/core" },
     { name = "legoesm-coupler", editable = "packages/coupler" },
     { name = "legoesm-ocean", editable = "packages/ocean" },
+]
+
+[[package]]
+name = "legoesm-wave"
+version = "1.0.1"
+source = { editable = "packages/wave" }
+dependencies = [
+    { name = "equinox" },
+    { name = "jax" },
+    { name = "jaxlib" },
+    { name = "legoesm-core" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "equinox", specifier = ">=0.11" },
+    { name = "jax", specifier = ">=0.5.3" },
+    { name = "jaxlib", specifier = ">=0.5.3" },
+    { name = "legoesm-core", editable = "packages/core" },
+    { name = "numpy", specifier = ">=1.26" },
 ]
 
 [[package]]

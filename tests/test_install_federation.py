@@ -54,9 +54,9 @@ def test_core_depends_on_nothing():
 
 
 def test_component_closure_is_core_only():
-    # The four Earth-system components are mutually independent (contract #2):
+    # Earth-system components are mutually independent (contract #2):
     # standalone install pulls ONLY core.
-    for comp in ("atmosphere", "ocean", "land", "ice"):
+    for comp in ("atmosphere", "ocean", "land", "ice", "wave"):
         assert mod.transitive_closure([comp]) == ["core", comp]
 
 
