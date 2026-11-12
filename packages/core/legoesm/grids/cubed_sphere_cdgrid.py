@@ -619,8 +619,14 @@ def create_cubed_sphere_cdgrid(
     says, then cast back to 32-bit when x64 is off: built in float32, the
     corner gradient matrix is wrong at the polar face centre (off-diagonal
     2.7e-5 vs 7e-10 at C768) and the pole blows up within ~100 steps.
+    A base with traced leaves (grad/jit through grid construction) keeps the
+    float32 build, since autodiff cannot cross the scoped-x64 region: values
+    and gradients there are as before, polar error included. Differentiate
+    grid geometry with ``JAX_ENABLE_X64=1`` to avoid it.
     """
-    if jax.config.jax_enable_x64:
+    traced = any(isinstance(x, jax.core.Tracer)
+                 for x in jax.tree_util.tree_leaves(base))
+    if jax.config.jax_enable_x64 or traced:
         return _build_cubed_sphere_cdgrid(
             base, omega, metric_dtype, gnomonic, fv3_native_angles)
     with jax.enable_x64(True):
@@ -644,8 +650,7 @@ def _base_with_float64_positions(base):
     positions depend only on ``n`` and the gnomonic form, so they are rebuilt
     in float64 and checked against ``base`` (all six faces, or the one face a
     single-face panel matches); a base built another way (stretched, shifted)
-    is refused instead of silently upcast. Gradients still flow through the
-    caller's positions; the match check is skipped while they are traced.
+    is refused instead of silently upcast.
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
 
@@ -661,32 +666,22 @@ def _base_with_float64_positions(base):
     n_faces = base.lat.shape[0]
     candidates = [slice(0, 6)] if n_faces == 6 else (
         [slice(f, f + 1) for f in range(6)] if n_faces == 1 else [])
-    traced = any(isinstance(getattr(base, k), jax.core.Tracer)
-                 for k in _POSITION_FIELDS)
 
     def mismatch(faces):
         return max(float(jnp.max(jnp.abs(
             getattr(regen, k)[faces].astype(jnp.float32) - getattr(base, k))))
             for k in ("x_cart", "y_cart", "z_cart"))
 
-    if traced and n_faces == 6:
-        faces = slice(0, 6)
-    else:
-        errs = [(mismatch(f), f) for f in candidates] if not traced else []
-        if not errs or min(e for e, _ in errs) > _POSITION_MATCH_TOL:
-            raise ValueError(
-                f"create_cubed_sphere_cdgrid: the {n_faces}-face base grid "
-                f"does not match the standard C{base.n} {base.gnomonic_form} "
-                "grid (mismatch "
-                f"{min((e for e, _ in errs), default=float('nan')):.2e}), so "
-                "its positions cannot be rebuilt in float64. Build the C/D "
-                "grid with JAX_ENABLE_X64=1 for a non-standard or traced "
-                "single-face base.")
-        faces = min(errs, key=lambda t: t[0])[1]
-    return up._replace(**{
-        k: getattr(regen, k)[faces]
-        + (getattr(up, k) - jax.lax.stop_gradient(getattr(up, k)))
-        for k in _POSITION_FIELDS})
+    errs = [(mismatch(f), f) for f in candidates]
+    if not errs or min(e for e, _ in errs) > _POSITION_MATCH_TOL:
+        raise ValueError(
+            f"create_cubed_sphere_cdgrid: the {n_faces}-face base grid does "
+            f"not match the standard C{base.n} {base.gnomonic_form} grid "
+            f"(mismatch {min((e for e, _ in errs), default=float('nan')):.2e}), "
+            "so its positions cannot be rebuilt in float64. Build the C/D "
+            "grid with JAX_ENABLE_X64=1 for a non-standard base.")
+    faces = min(errs, key=lambda t: t[0])[1]
+    return up._replace(**{k: getattr(regen, k)[faces] for k in _POSITION_FIELDS})
 
 
 def _to_32bit(x):

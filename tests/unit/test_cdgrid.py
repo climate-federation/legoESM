@@ -3610,7 +3610,7 @@ def test_nonstandard_base_refused_with_x64_off():
 
 
 
-def test_metric_gradient_flows_through_base_positions_with_x64_off():
+def test_metric_gradient_through_traced_base_with_x64_off():
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 
