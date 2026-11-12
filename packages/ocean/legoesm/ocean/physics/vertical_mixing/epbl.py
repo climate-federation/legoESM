@@ -186,12 +186,20 @@ Every class alone, per case, is stored in ``test_epbl_smooth_switches.py``.  No
 smoothed site changes the column's conservation (ePBL returns diffusivities;
 the implicit solve conserves T and S).
 
-Still exact (issue #2180 groups D and E, by vote, pending a user decision):
-the column descent's branch selection (convectively unstable / enough energy /
-no energy / exhausted / revert, whose outputs differ across branches by
-design) and the two iterations (the Newton/false-position Kd solve and the
-boundary-layer depth bisection).  ``_find_pe_chg`` (the condensed kernel) is
-not called by the column and keeps its exact ``min(., 0)``.
+Exempt from RULE 5 smoothing, kept exact (issue #2180 groups D and E; user
+decision 2026-11-12: algorithm control, not physics switches): the column
+descent's branch selection (convectively unstable / enough energy / no energy
+/ energy-limited / exhausted and convectively stable / revert, with its
+``pe_chg_max <= 0`` guard; outputs differ across branches by design) and the
+two iterations (the Newton/false-position Kd solve and the boundary-layer
+depth bisection / false-position update).  MOM6 ``ePBL_column`` makes the same
+hard branch choices; the port uses the same update algorithms, implemented as
+fixed-trip loops with convergence freezing.  These controls are active in both
+the smooth and exact-switch results above; their contribution to the total gap
+has not been isolated.  Gradients through them are piecewise: traced arithmetic
+carries derivatives, branch and convergence decisions do not.
+``_find_pe_chg`` (the condensed kernel) is not called by the column and keeps
+its exact ``min(., 0)``.
 
 Faithfulness
 ------------
