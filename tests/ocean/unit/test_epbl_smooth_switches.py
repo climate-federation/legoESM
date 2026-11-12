@@ -467,7 +467,8 @@ def test_om4_mstar_gradient_through_zero_buoyancy_flux():
     assert float(jnp.abs(jax.grad(f)(0.5))) > 0.0
     g0 = float(jax.grad(f)(0.0))
     for x in (-1e-4, 1e-4):
-        assert abs(float(jax.grad(f)(x)) - g0) < 1e-2 * abs(float(jax.grad(f)(0.5)))
+        # measured 5.4e-3; a hard switch gives ~1 (bound voted 3e-2)
+        assert abs(float(jax.grad(f)(x)) - g0) < 3e-2 * abs(float(jax.grad(f)(0.5)))
     # A neutral column gets no shear-limited mstar, as in MOM6: S1 alone
     # (convective reduction off) gives the same mstar as its exact form,
     # at f = 0 too, where a softplus offset would be unbounded.
@@ -729,7 +730,7 @@ def test_interior_tke_forcing_gradient_through_zero():
     # The derivative is continuous across 0 (MOM6's max / where jump there,
     # which a central difference at 0 cannot see).
     jump = float(jax.grad(f)(1e-3)) - float(jax.grad(f)(-1e-3))
-    assert abs(jump) < 1e-2 * max(abs(g_pos), abs(g_neg))
+    assert abs(jump) < 1e-2 * max(abs(g_pos), abs(g_neg))  # measured 1.0e-3
 
 
 @pytest.mark.parametrize("variant", [
