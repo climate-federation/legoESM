@@ -373,6 +373,10 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
     # cond + static-length loops keep reverse-mode AD.
     n_run = jnp.max(nstep, initial=0)  # empty column batch: no passes
 
+    # Remat per chunk: reverse mode stores each chunk's input carry and
+    # recomputes its sub-steps, instead of stacking every sub-step's
+    # residuals up to the n_max cap (forward values unchanged).
+    @jax.checkpoint
     def chunk(c, carry):
         return jax.lax.cond(
             c * _SED_CHUNK < n_run,

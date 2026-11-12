@@ -31,6 +31,7 @@ from legoesm.driver.mpas_diff_step import (  # noqa: E402
     mpas_cadence,
     mpas_segment,
     pick_physics_fn,
+    window_clocks,
 )
 
 DT, N = 600.0, 4
@@ -367,3 +368,110 @@ def test_segment_refuses_schedule_arguments_it_would_ignore(runs):
         mpas_segment(exp, s0, ps0, 1, storage="host")
     with pytest.raises(ValueError, match="binomial budget"):
         mpas_segment(exp, s0, ps0, 1, schedule="uniform", checkpoints=4)
+
+
+def _take(tree, b):
+    return jax.tree_util.tree_map(lambda x: x[b], tree)
+
+
+def _stack(*trees):
+    return jax.tree_util.tree_map(lambda *x: jnp.stack(x), *trees)
+
+
+def _clock_live(exp):
+    """``exp`` whose physics variants see a surface temperature raised by
+    1 K per hour of ``seconds_of_day``: the fixture's gray radiation ignores
+    the clock, so without this a test of the clock path is vacuous."""
+    import functools
+
+    def wrap(pfn):
+        @functools.wraps(pfn)
+        def w(*a, forcing=None, **k):
+            if forcing is not None:
+                forcing = dict(forcing, T_sfc=forcing["T_sfc"]
+                               + forcing["seconds_of_day"] / 3600.0)
+            return pfn(*a, forcing=forcing, **k)
+        return w
+    return dict(exp, **{k: wrap(exp[k]) for k in (
+        "physics_fn", "physics_fn_norad", "physics_fn_held")})
+
+
+def test_vmapped_windows_match_separate_windows(runs):
+    """Two windows of one cadence phase (start steps 0 and 4, radiation every
+    4), distinct initial T, batched by jax.vmap over (state, phys_state,
+    forcing, clock), reproduce each window run alone: forward, and the
+    gradient of the summed loss w.r.t. each window's initial T."""
+    exp = _clock_live(runs[1])
+    s0, ps0 = exp["state"], exp["phys_state"]
+    forcing = dict(exp["forcing"] or {})
+    step0s, n = (0, 4), N_SCHED
+    states = _stack(s0, s0._replace(T=s0.T.replace(data=s0.T.data + 0.5)))
+    phys, forcings = _stack(ps0, ps0), _stack(forcing, forcing)
+    clocks = window_clocks(exp, forcing, step0s, n)
+    rng = np.random.default_rng(0)
+    # weights over the END state's RMS (the initial wind is zero here)
+    ws = [jnp.asarray(rng.standard_normal(np.shape(x))) / float(
+        jnp.sqrt(jnp.mean(jnp.square(x))))
+        for x in _fields(mpas_segment(exp, s0, ps0, n)[0])]
+
+    def run(s, p, f, c):
+        return mpas_segment(exp, s, p, n, forcing=f, step0=step0s[0],
+                            schedule="uniform", clock=c)[0]
+
+    def loss_one(s, p, f, c):
+        return sum(jnp.sum(w * x) for w, x in zip(ws, _fields(run(s, p, f, c))))
+
+    def with_t(states_, t):
+        return states_._replace(T=states_.T.replace(data=t))
+    out = jax.jit(jax.vmap(run))(states, phys, forcings, clocks)
+    g = jax.jit(jax.grad(lambda t: jnp.sum(jax.vmap(loss_one)(
+        with_t(states, t), phys, forcings, clocks))))(states.T.data)
+    for b, st in enumerate(step0s):
+        sb, pb = _take(states, b), _take(phys, b)
+
+        def alone(s, p, _st=st):
+            return mpas_segment(exp, s, p, n, forcing=forcing, step0=_st,
+                                schedule="uniform")[0]
+        ref = jax.jit(alone)(sb, pb)
+        for a, o, k in zip(_fields(ref), _fields(_take(out, b)),
+                           ("u", "T", "p_s", "q_v")):
+            a, o = np.asarray(a), np.asarray(o)
+            np.testing.assert_allclose(o, a, rtol=0.0,
+                                       atol=FWD_TOL * np.abs(a).max(),
+                                       err_msg=f"window {b} {k}")
+        g_ref = jax.jit(jax.grad(lambda t, _a=alone, _s=sb, _p=pb: sum(
+            jnp.sum(w * x) for w, x in zip(ws, _fields(_a(
+                _s._replace(T=_s.T.replace(data=t)), _p))))))(sb.T.data)
+        scale = float(jnp.abs(g_ref).max())
+        assert scale > 0.0
+        np.testing.assert_allclose(np.asarray(g[b]), np.asarray(g_ref),
+                                   rtol=0.0, atol=GRAD_TOL * scale,
+                                   err_msg=f"window {b} grad")
+    # the clock is live in this fixture: one state, the two windows' clocks
+    a0 = jax.jit(run)(s0, ps0, forcing, _take(clocks, 0))
+    a1 = jax.jit(run)(s0, ps0, forcing, _take(clocks, 1))
+    assert float(jnp.abs(a0.T.data - a1.T.data).max()) > 0.0
+
+
+def test_window_clocks_refuse_a_mixed_cadence_phase(runs):
+    _, exp = runs
+    forcing = dict(exp["forcing"] or {})
+    with pytest.raises(ValueError, match="cadence phase"):
+        window_clocks(exp, forcing, (0, 1), 4)
+    c = window_clocks(exp, forcing, (0, 4, 8), 3)
+    assert all(v.shape[:2] == (3, 3) for v in c.values())
+
+
+def test_segment_refuses_a_malformed_clock(runs):
+    _, exp = runs
+    s0, ps0 = exp["state"], exp["phys_state"]
+    forcing = dict(exp["forcing"] or {})
+    c = clock_tables(exp, forcing, range(3))
+    with pytest.raises(ValueError, match="unrolled loop builds"):
+        mpas_segment(exp, s0, ps0, 3, forcing=forcing, clock=c)
+    with pytest.raises(ValueError, match="leading axis"):
+        mpas_segment(exp, s0, ps0, 4, forcing=forcing, schedule="uniform",
+                     clock=c)
+    with pytest.raises(ValueError, match="leading axis"):
+        mpas_segment(exp, s0, ps0, 3, forcing=forcing, schedule="uniform",
+                     clock={"day_of_year": c["day_of_year"]})

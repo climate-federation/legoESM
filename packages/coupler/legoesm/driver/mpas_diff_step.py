@@ -54,7 +54,7 @@ import jax
 import jax.numpy as jnp
 
 __all__ = ["mpas_cadence", "pick_physics_fn", "mpas_branch_index", "mpas_step",
-           "mpas_segment"]
+           "mpas_segment", "window_clocks"]
 
 
 def mpas_cadence(step: int, *, subcycle_rad: bool, rad_update_steps: int,
@@ -130,10 +130,31 @@ def clock_tables(exp: dict, forcing, steps):
     return t
 
 
+def window_clocks(exp: dict, forcing, step0s, n_steps: int):
+    """:func:`clock_tables` of the ``n_steps`` windows starting at each of
+    ``step0s``, stacked on a leading window axis: the ``clock`` argument of a
+    ``jax.vmap`` of the scheduled :func:`mpas_segment` over windows (called
+    with ``step0=step0s[0]``).  The variant table is built once from that
+    ``step0`` and shared by every window, so start steps whose cadence
+    sequences differ are refused (a window would run another window's
+    physics variants)."""
+    step0s = [int(s) for s in step0s]
+    seqs = {tuple(mpas_branch_index(s, exp) for s in range(s0, s0 + n_steps))
+            for s0 in step0s}
+    if len(seqs) != 1:
+        raise ValueError(
+            f"window_clocks: start steps {step0s} differ in cadence phase "
+            "(physics/radiation variant sequence); batch windows that share it")
+    if forcing is None:
+        return None
+    tabs = [clock_tables(exp, forcing, range(s0, s0 + n_steps)) for s0 in step0s]
+    return jax.tree_util.tree_map(lambda *x: jnp.stack(x), *tabs)
+
+
 def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
                  step0: int = 0, checkpoint: bool = False,
                  schedule: str | None = None, checkpoints: int | None = None,
-                 storage: str = "recompute", tap=None):
+                 storage: str = "recompute", tap=None, clock=None):
     """Advance ``n_steps`` from job-local ``step0``; pure in (state, phys_state,
     forcing).  The forcing clock (``day_of_year`` / ``seconds_of_day``, and
     ``model_seconds`` when the run carries it) is
@@ -151,7 +172,13 @@ def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
     ``tap(step, state, phys_state) -> (state, phys_state)``: an identity hook
     applied to the state ENTERING each step of the unrolled loop (a
     ``custom_vjp`` identity whose backward pass records the cotangent is how
-    a probe reads the adjoint at every step); unrolled loop only."""
+    a probe reads the adjoint at every step); unrolled loop only.
+
+    ``clock``: the per-step clock tables (:func:`clock_tables` of this
+    window) passed in as arrays instead of built from ``step0``, so windows
+    at different dates can share one ``jax.vmap``ped call
+    (:func:`window_clocks`); ``step0`` still selects the variant table.
+    Scheduled loop only."""
     forcing = exp["forcing"] if forcing is None else forcing
     if schedule is None and (checkpoints is not None or storage != "recompute"):
         raise ValueError("mpas_segment: checkpoints/storage configure a "
@@ -160,6 +187,21 @@ def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
     if schedule == "uniform" and checkpoints is not None:
         raise ValueError("mpas_segment: checkpoints is the binomial budget; "
                          "the uniform schedule remats every step")
+    if clock is not None:
+        if schedule is None:
+            raise ValueError("mpas_segment: clock= feeds the scheduled loop's "
+                             "clock tables; the unrolled loop builds its own")
+        if forcing is None:
+            raise ValueError("mpas_segment: clock= without forcing (no "
+                             "forcing dict carries a clock)")
+        want = {"day_of_year", "seconds_of_day"} | (
+            {"model_seconds"} if "model_seconds" in forcing else set())
+        if set(clock) != want or any(jnp.shape(v)[:1] != (n_steps,)
+                                     for v in clock.values()):
+            raise ValueError(
+                f"mpas_segment: clock= must hold {sorted(want)}, each with a "
+                f"leading axis of n_steps={n_steps}; got "
+                f"{ {k: jnp.shape(v) for k, v in clock.items()} }")
     target_mass = exp["model"].mass_target(state)
     if schedule is not None:
         if tap is not None:
@@ -168,7 +210,7 @@ def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
                              "static step to hand it")
         return _scheduled_segment(exp, state, phys_state, n_steps, forcing,
                                   step0, target_mass, checkpoint, schedule,
-                                  checkpoints, storage)
+                                  checkpoints, storage, clock)
     for k in range(n_steps):
         step = step0 + k
         f = _clock(exp, forcing, step)
@@ -184,7 +226,8 @@ def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
 
 
 def _scheduled_segment(exp, state, phys_state, n_steps, forcing, step0,
-                       target_mass, checkpoint, schedule, checkpoints, storage):
+                       target_mass, checkpoint, schedule, checkpoints, storage,
+                       clock=None):
     from legoesm.training.checkpoint_schedule import checkpointed_loop
 
     if checkpoint:
@@ -200,7 +243,7 @@ def _scheduled_segment(exp, state, phys_state, n_steps, forcing, step0,
     branch = [mpas_branch_index(s, exp) for s in steps]
     used = sorted(set(branch))
     idx = jnp.asarray([used.index(b) for b in branch], dtype=jnp.int32)
-    tables = clock_tables(exp, forcing, steps)
+    tables = clock_tables(exp, forcing, steps) if clock is None else clock
 
     def _branch(key):
         pfn = exp[key]

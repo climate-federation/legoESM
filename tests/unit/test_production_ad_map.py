@@ -294,3 +294,51 @@ def test_code_provenance_names_the_imported_file():
     line = pam.code_provenance(("json",))
     assert line.startswith("json=") and "json" in line and "@" in line
     assert "UNIMPORTABLE" in pam.code_provenance(("no_such_module_xyz",))
+
+
+def test_memory_report_prints_xla_accounting_per_column(capsys):
+    # argument size is exact (n f64); the temp size is XLA's (fusion may
+    # elide the n*n buffer), so only its per-column arithmetic is checked
+    import json
+    n = 2048
+
+    def mem_outer(x):
+        o = jnp.outer(x, x)
+        return jnp.sum(jnp.sin(o), axis=0) + jnp.sum(jnp.cos(o), axis=1)
+    pam.memory_report("outer", mem_outer, (jnp.ones(n),), ncol=n)
+    line = [ln for ln in capsys.readouterr().out.splitlines()
+            if ln.startswith("MEMORY ")][-1]
+    rec = json.loads(line[len("MEMORY "):])
+    assert rec["label"] == "outer" and rec["ncol"] == n
+    assert rec["argument_gib"] * 2**30 == 8 * n
+    assert rec["temp_mb_per_col"] == rec["temp_gib"] * 2**30 / 1e6 / n
+
+
+def test_parser_accepts_the_memory_stage():
+    assert pam.build_parser().parse_args(["--stage", "memory"]).stage == "memory"
+
+
+def test_parser_round_trips_batch():
+    a = pam.build_parser().parse_args(
+        ["--stage", "timing", "--schedule", "uniform", "--batch", "4"])
+    assert a.batch == 4 and pam.build_parser().parse_args(
+        ["--stage", "timing"]).batch == 1
+
+
+def test_loop_census_ranks_the_scan_that_stacks_residuals(capsys):
+    # grad of a 5-step scan of sin stores the 5 carries (5x3 f64) for the
+    # reverse pass; a loop with no stacked output ranks below it
+    def body(c, _):
+        return jnp.sin(c) * 1.1, None
+
+    def f(x):
+        c, _ = jax.lax.scan(body, x, None, length=5)
+        y = jax.lax.fori_loop(0, 3, lambda i, v: v * 0.5, x)
+        return jnp.sum(c) + jnp.sum(y)
+    rows = pam.loop_census(jax.grad(f), jnp.ones(3))
+    top = rows[0]
+    assert top["prim"] == "scan" and top["length"] == 5
+    assert top["stacked"] == ["float64[5,3]"]
+    assert top["stacked_mib"] * 2**20 == 5 * 3 * 8
+    assert top["src"].split(":")[0].endswith("test_production_ad_map.py")
+    assert "LOOP " in capsys.readouterr().out

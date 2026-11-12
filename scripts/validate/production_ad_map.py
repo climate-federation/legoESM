@@ -37,6 +37,7 @@ import argparse
 import functools
 import importlib.util
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -515,6 +516,49 @@ def eqn_trace(f, x):
     return jax.tree_util.tree_unflatten(tdef, grad), rows
 
 
+def loop_census(f, x, top=20):
+    """Every scan / while loop in the jaxpr of ``f(x)`` (recursing into every
+    sub-jaxpr: jit, cond branches, loop bodies, remat, custom derivatives),
+    ranked by the bytes of its STACKED outputs -- a scan's ``ys`` with the
+    loop length as leading axis, i.e. what a traced ``jax.grad(g)`` stores per
+    iteration for the reverse pass (a while loop stacks nothing).  Prints ``LOOP {prim, length, stacked_mib,
+    stacked, n_seen, src}`` (identical loops reached through several call sites
+    are merged, ``n_seen`` counts them); returns the rows."""
+    from jax._src import core as jcore
+    from jax._src import source_info_util as siu
+    rows = {}
+
+    def subs(eqn):
+        for v in eqn.params.values():
+            for j in (v if isinstance(v, (tuple, list)) else (v,)):
+                if isinstance(j, jcore.ClosedJaxpr):
+                    yield j.jaxpr
+                elif isinstance(j, jcore.Jaxpr):
+                    yield j
+
+    def walk(jaxpr):
+        for e in jaxpr.eqns:
+            if e.primitive.name in ("scan", "while"):
+                n = e.params.get("length")
+                st = ([v.aval for v in e.outvars[e.params["num_carry"]:]]
+                      if e.primitive.name == "scan" else [])
+                key = (e.primitive.name, n, siu.summarize(e.source_info),
+                       tuple(a.str_short() for a in st))
+                r = rows.setdefault(key, dict(
+                    prim=e.primitive.name, length=n, src=key[2], n_seen=0,
+                    stacked_mib=sum(a.size * a.dtype.itemsize
+                                    for a in st) / 2**20,
+                    stacked=[a.str_short() for a in st][:6]))
+                r["n_seen"] += 1
+            for j in subs(e):
+                walk(j)
+    walk(jax.make_jaxpr(f)(x).jaxpr)
+    out = sorted(rows.values(), key=lambda r: -r["stacked_mib"])
+    for r in out[:top]:
+        print("LOOP " + json.dumps(r), flush=True)
+    return out
+
+
 def print_eqn_trace(rows, label, top=25):
     """The equations that multiplied the cotangent most (``EQN_GAIN``) and
     the ones whose input cotangent is largest (``EQN_MAX``)."""
@@ -634,6 +678,23 @@ def time_compiled(fn, args, repeats):
     return t_c, t_1, reps, out
 
 
+def memory_report(label, fn, args, ncol):
+    """Compile ``fn`` (named ``fn.__name__``, so an ``--xla_dump_hlo_module_re``
+    filter can select it) WITHOUT running it and print XLA's own buffer
+    accounting: ``MEMORY {label, temp/argument/output/alias/code GiB, temp
+    MB per column}``.  Compile-only, so a window that would OOM is still
+    measured."""
+    t0 = time.time()
+    c = jax.jit(fn).lower(*args).compile()
+    m = c.memory_analysis()
+    gib = {k: getattr(m, f"{k}_size_in_bytes") / 2**30
+           for k in ("temp", "argument", "output", "alias", "generated_code")}
+    print("MEMORY " + json.dumps(dict(
+        label=label, ncol=ncol, compile_s=time.time() - t0,
+        temp_mb_per_col=gib["temp"] * 2**30 / 1e6 / ncol,
+        **{f"{k}_gib": v for k, v in gib.items()})), flush=True)
+
+
 def peak_gib():
     """Peak memory so far, GiB: the device's peak_bytes_in_use where the
     backend reports it (GPU/TPU), else the process RSS high-water mark (CPU).
@@ -652,7 +713,8 @@ def build_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", required=True,
                     choices=("components", "physics", "params", "dycore",
-                             "step", "land", "eager", "eqns", "timing"))
+                             "step", "land", "eager", "eqns", "timing",
+                             "memory", "loops"))
     ap.add_argument("--module", default="microphysics",
                     help="eqns stage: the module whose calls are traced")
     ap.add_argument("--calls", default="1,2,3",
@@ -706,6 +768,9 @@ def build_parser():
                          "the forcing clock")
     ap.add_argument("--timing-steps", default="64,256",
                     help="timing stage: comma list of window lengths [steps]")
+    ap.add_argument("--batch", type=int, default=1,
+                    help="timing stage: B windows (one cadence period "
+                         "apart) in one jax.vmap call; needs --schedule")
     ap.add_argument("--repeats", type=int, default=3,
                     help="timing stage: steady-state calls timed per window")
     ap.add_argument("--stash-modules", action="store_true",
@@ -810,28 +875,112 @@ def main(argv=None):
                 print(f"GRADCHECK_FAIL {name}: {type(e).__name__}: {e}"[:2000],
                       flush=True)
     elif a.stage == "timing":
-        from legoesm.driver.mpas_diff_step import mpas_segment
+        from legoesm.driver.mpas_diff_step import mpas_segment, window_clocks
         sched = None if a.schedule == "none" else a.schedule
+        nb = a.batch
+        if nb > 1:
+            if sched is None:
+                raise SystemExit("--batch needs --schedule uniform|binomial "
+                                 "(the clock is vmapped into the scheduled loop)")
+            # nb consecutive windows one cadence period apart: window b
+            # starts from the state the forward reaches after b*period steps, at
+            # its own clock; the held forcing is window 0's (all nb copies)
+            period = math.lcm(exp["rad_update_steps"], exp["phys_update_steps"])
+            step0s = [a.at_step + b * period for b in range(nb)]
+            # eager per-step loop: compiled once per variant, not per start
+            starts = [(state0, ps0)]
+            for st in step0s[:-1]:
+                starts.append(mpas_segment(exp, *starts[-1], period, step0=st))
+            stack = lambda *t: jax.tree_util.tree_map(  # noqa: E731
+                lambda *v: jnp.stack(v), *t)
+            sb, pb = stack(*[s for s, _ in starts]), stack(*[p for _, p in starts])
+            fb = stack(*[exp["forcing"]] * nb)
+            xb = _state_x(sb)
         for n in (int(t) for t in a.timing_steps.split(",") if t.strip()):
             kw = (dict(checkpoint=True) if sched is None else
                   dict(schedule=sched, checkpoints=a.checkpoints,
                        storage=a.storage))
+            if nb == 1:
+                def fwd(x, _n=n):
+                    s, _ = mpas_segment(exp, _with_x(state0, x), ps0, _n, **kw)
+                    return _proj_loss(s)
+                args = (x0,)
+            else:
+                cb = window_clocks(exp, exp["forcing"], step0s, n)
 
-            def fwd(x, _n=n):
-                s, _ = mpas_segment(exp, _with_x(state0, x), ps0, _n, **kw)
-                return _proj_loss(s)
-            tf_c, tf_1, tf_r, _ = time_compiled(fwd, (x0,), a.repeats)
-            tg_c, tg_1, tg_r, g = time_compiled(jax.grad(fwd), (x0,), a.repeats)
+                def fwd(x, s, p, f, c, _n=n):
+                    def one(x_, s_, p_, f_, c_):
+                        out, _ = mpas_segment(exp, _with_x(s_, x_), p_, _n,
+                                              forcing=f_, step0=step0s[0],
+                                              clock=c_, **kw)
+                        return _proj_loss(out)
+                    return jnp.sum(jax.vmap(one)(x, s, p, f, c))
+                args = (xb, sb, pb, fb, cb)
+            tf_c, tf_1, tf_r, _ = time_compiled(fwd, args, a.repeats)
+            tg_c, tg_1, tg_r, g = time_compiled(jax.grad(fwd), args, a.repeats)
             fin = all(bool(jnp.all(jnp.isfinite(t)))
                       for t in jax.tree_util.tree_leaves(g))
             med_f, med_g = float(np.median(tf_r)), float(np.median(tg_r))
             print("TIMING " + json.dumps(dict(
                 n_steps=n, schedule=a.schedule, checkpoints=a.checkpoints,
-                ncol=int(state0.T.data.shape[0]), fwd_compile_s=tf_c,
+                ncol=int(state0.T.data.shape[0]), batch=nb,
+                grad_per_window_s=med_g / nb, fwd_compile_s=tf_c,
                 fwd_first_s=tf_1, fwd_s=tf_r, grad_compile_s=tg_c,
                 grad_first_s=tg_1, grad_s=tg_r, grad_per_step_s=med_g / n,
                 grad_over_fwd=med_g / med_f, grad_finite=fin,
                 peak_gib=peak_gib())), flush=True)
+    elif a.stage == "loops":
+        # trace-only: which loops stack per-iteration residuals in the
+        # gradient of one full-physics step (no compile, no device run)
+        tm = model.mass_target(state0)
+        pfn = exp["physics_fn" if a.physics_variant == "full" else
+                  "physics_fn_norad"]
+
+        def step_loss(x):
+            s = model.step_pure(_with_x(state0, x), exp["dt"], physics_fn=pfn,
+                                forcing=forcing0, phys_state=ps0,
+                                target_mass=tm)[0]
+            return _proj_loss(s)
+        loop_census(jax.grad(step_loss), x0)
+    elif a.stage == "memory":
+        # Compile-only buffer accounting of each piece of one production
+        # step, then the scheduled segment over --n-steps (forward), so the
+        # per-column forward buffer is attributed to a piece.
+        from legoesm.driver.mpas_diff_step import mpas_segment
+        ncol = int(state0.T.data.shape[0])
+        tm = model.mass_target(state0)
+
+        def mem_dycore(s):
+            return model.step_pure(s, exp["dt"], target_mass=tm)[0]
+        memory_report("dycore_step", mem_dycore, (state0,), ncol)
+        for key in ("physics_fn", "physics_fn_norad", "physics_fn_held"):
+            pfn = exp[key]
+            if pfn is None:
+                continue
+
+            def mem_physics(s, p, f, _p=pfn):
+                return _p(s, mesh, sigma, phys_state=p, forcing=f)
+
+            def mem_step(s, p, f, _p=pfn):
+                return model.step_pure(s, exp["dt"], physics_fn=_p, forcing=f,
+                                       phys_state=p, target_mass=tm)[:2]
+            memory_report(key, mem_physics, (state0, ps0, forcing0), ncol)
+            memory_report(f"step_{key}", mem_step, (state0, ps0, forcing0),
+                          ncol)
+        sched = "uniform" if a.schedule == "none" else a.schedule
+
+        def mem_segment(s, p):
+            return mpas_segment(exp, s, p, a.n_steps, step0=a.at_step,
+                                schedule=sched, checkpoints=a.checkpoints,
+                                storage=a.storage)
+        memory_report(f"segment_{sched}_{a.n_steps}_fwd", mem_segment,
+                      (state0, ps0), ncol)
+
+        def mem_segment_grad(x):
+            s, _ = mem_segment(_with_x(state0, x), ps0)
+            return _proj_loss(s)
+        memory_report(f"segment_{sched}_{a.n_steps}_grad",
+                      jax.grad(mem_segment_grad), (x0,), ncol)
     elif a.stage == "eqns":
         pfn = exp["physics_fn" if a.physics_variant == "full" else
                   "physics_fn_norad"]
