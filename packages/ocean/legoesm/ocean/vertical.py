@@ -1764,6 +1764,7 @@ def create_partial_cell_coordinate(
 def create_full_step_coordinate(
     z_coord: OceanZStarCoordinate,
     bottom_level,
+    bottom_thickness=None,
 ) -> OceanPartialCellCoordinate:
     """Build a NEMO ``ln_zco`` FULL-STEP-z coordinate from a z* reference
     grid + an explicit per-column deepest-wet-level index.
@@ -1790,6 +1791,12 @@ def create_full_step_coordinate(
         Index of the deepest WET level per column (NEMO ``k_bot - 1``).
         ``-1`` marks a dry column (no active cells), matching the
         :func:`create_partial_cell_coordinate` convention.
+    bottom_thickness : float array, shape (...), optional
+        NEMO ``ln_zps`` bottom-cell thickness ``e3t_0(k_bot)`` taken as
+        given, so the coordinate reproduces a ``domain_cfg`` exactly.  It may
+        EXCEED ``dz_ref`` there: eORCA1's deepest wet cell absorbs the level
+        below it (up to 2x ``e3t_1d``).  Must be finite and > 0 on wet
+        columns.  ``None`` keeps full cells.
 
     Returns
     -------
@@ -1810,6 +1817,17 @@ def create_full_step_coordinate(
 
     dz_ref_view = z_coord.dz_ref.reshape((1,) * n_lead + (nlev,))
     h_full = jnp.broadcast_to(dz_ref_view, bl.shape + (nlev,))
+    if bottom_thickness is not None:
+        bt = np.asarray(bottom_thickness, dtype=np.float64)
+        if bt.shape != bl.shape:
+            raise ValueError(
+                f"bottom_thickness shape {bt.shape} != bottom_level {bl.shape}")
+        wet = np.asarray(bl) >= 0
+        if not (np.all(np.isfinite(bt[wet])) and np.all(bt[wet] > 0.0)):
+            raise ValueError("bottom_thickness must be finite and > 0 on wet columns")
+        h_full = jnp.where(k_view == bottom_view,
+                           jnp.asarray(bt, dtype=h_full.dtype)[..., jnp.newaxis],
+                           h_full)
     h_partial = jnp.where(is_active, h_full, 0.0)
 
     return OceanPartialCellCoordinate(

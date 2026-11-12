@@ -211,6 +211,7 @@ def _load_legoesm(path, use_mean=False):
         "window_days": (float(s["flux_mean_window_s"]) / 86400.0) if use_mean else None,
         "H_bathy": np.asarray(s["H_bathy"]) if "H_bathy" in keys else None,
         "z_center_ref": np.asarray(s["z_center_ref"]) if "z_center_ref" in keys else None,
+        "bottom_level": np.asarray(s["bottom_level"]) if "bottom_level" in keys else None,
         "lat": np.asarray(s["lat_T"]),
         "lon": np.asarray(s["lon_T"]),
         "mask": np.asarray(s["land_mask"]),

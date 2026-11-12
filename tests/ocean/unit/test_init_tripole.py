@@ -258,3 +258,34 @@ def test_mask_to_nemo_domain_finds_another_offset_across_a_360_wrap(tmp_path):
     _write_domain_cfg(dc, lat[inner], lon[inner] - 360.0, top)
     out = mask_to_nemo_domain(tmaskutil, lat, lon, str(dc))
     assert np.argwhere(out != tmaskutil).tolist() == [[3, 5]]
+
+
+def test_read_domain_cfg_geometry_places_nemo_cells_in_the_mesh_frame(tmp_path):
+    import xarray as xr
+    from legoesm.ocean.init_tripole import read_domain_cfg_geometry
+
+    ny, nx, nz = 4, 6, 3
+    lat = np.repeat(np.linspace(-30.0, 30.0, ny)[:, None], nx, 1)
+    lon = np.repeat(np.linspace(0.0, 300.0, nx)[None], ny, 0)
+    inner = (slice(0, ny - 1), slice(1, nx - 1))   # drop fold row + halo cols
+    kb = np.array([[0, 1, 3, 2], [3, 3, 0, 1], [2, 1, 1, 3]])
+    e3t = np.stack([np.full((3, 4), 10.0), np.full((3, 4), 20.0),
+                    np.full((3, 4), 40.0)])
+    e3t[2, 0, 2] = 77.0                            # a thick bottom cell (kb=3)
+    e3t[1, 0, 3] = 13.0                            # a thin bottom cell (kb=2)
+    e3w_1d = np.array([9.0, 15.0, 30.0])
+    xr.Dataset({
+        "bottom_level": (("y", "x"), kb.astype(np.int32)),
+        "gphit": (("y", "x"), lat[inner]), "glamt": (("y", "x"), lon[inner]),
+        "e3t_0": (("z", "y", "x"), e3t),
+        "e3w_1d": (("z",), e3w_1d),
+    }).to_netcdf(tmp_path / "domain_cfg.nc", engine="scipy")
+
+    n_wet, bot, e1d = read_domain_cfg_geometry(
+        str(tmp_path / "domain_cfg.nc"), lat, lon)
+    np.testing.assert_array_equal(n_wet[inner], kb)
+    assert n_wet[:, 0].sum() == 0 and n_wet[-1].sum() == 0
+    assert bot[0, 3] == 77.0 and bot[0, 4] == 13.0   # inner (0,2),(0,3)
+    assert bot[0, 1] == 0.0                          # land
+    assert bot[1, 1] == 40.0                         # kb=3 -> e3t_0[2]
+    np.testing.assert_array_equal(e1d, e3w_1d)
