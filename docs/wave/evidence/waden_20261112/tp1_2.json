@@ -219,7 +219,7 @@
       "substeps": 1
     }
   },
-  "legoesm_revision": "f20d4aa0320cd31b7d130ed1ba159d8577e90807",
+  "legoesm_revision": "28748307322e82c39368b46bb694d47d578907cd",
   "tracked_or_untracked_changes": "?? .vscode/",
   "waden_revision": "46aadc7834ad850442a535a08f94ca173e4b22e8",
   "reference": {
@@ -236,27 +236,8 @@
     "station_coordinate_scale": 1
   },
   "input_sha256": {
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/1-D.depth": "df723e4aedc8f7803bf7440767442c92f17dfe96cef48f809149e0df919eb6ac",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/namelists_1-D.nml": "1c7992948c8c8267dbcb5b2cd14f481fa1d179ed600f82a7ac15aa779520ccc1",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/points.list": "a588403511847982d057f20fbf572eb19fa0331d5f5af8fc14b6c8ea8a41eb59",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/switch": "74bb2550287ed60b59d83ff5a804b09054ecbd2fa2dbe60d8c9732777605e062",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/switch_PR1": "4b46783069c2724bdc9648be759c2243e8b2bdca604476de38fb17f562f74632",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/switch_PR2_UNO": "e857b0bf7a3e1d56fef7092dc6b2b33470d528083f0ef4662d1acbf40fde412c",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/switch_PR2_UQ": "cc5481922d98c9e5a8d463068acc418b5a96d8484558eee7e6a8916d6beaf479",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/switch_PR3_UNO": "7b9b1fe7d43490687ebb35cd00f15de7db474ab0e29ab3196ffdecd58b21063a",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/switch_PR3_UQ": "74bb2550287ed60b59d83ff5a804b09054ecbd2fa2dbe60d8c9732777605e062",
     "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3.196806.nc": "323e0ac652e13ab2b6b2d2de9ff574f136828276d8264cb05af7157963daaf17",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3.Center_196806_spec.nc": "b2d1ec7e0375d5f8de5bc77adaa65f81d701444c6a9e96d58a5c171d2626626a",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3_grid.inp": "eb6a5176c3b3648be2c17c331dee36a37e0dfb1b700879233e9d4d3f23bfe1a2",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3_grid.nml": "2e0437a000aa474f7a59b03b1ef9191c0c1e40ecbcb3a2792ddda3e9c061b27b",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3_ounf.inp": "4379699925442acbf68d2d603717aa715d8e5ad6dd25d451ed7a52086e066155",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3_ounf.nml": "c974c0a9d373c08428f9d5f8d0b52dae7adcab2ad3b4567c7cbaa0cb2f8a6688",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3_ounp.inp": "96d6332d2b2c8872840df577b91318cac5a89f73a73c6fd70a788250a8281e1f",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3_ounp.nml": "f14f66d8b57d2169e57aece26d03b963b5785ad6a9d58bd14fa4b54dff57e63c",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3_outf.inp": "c3950ada2ec8a0c6633104a35c38db90449540f889c7e0f941e672c7f5f3ef85",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3_shel.inp": "e866a4bc0ce2f20292cec76cbb7ba2e3ecff3406738f71572ae018db5e6801ba",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3_shel.nml": "f001d56530748ce297820f9144e95b778ddb5d332809b6a491d0f76621ef6afe",
-    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3_strt.inp": "83023a62675e71254c5f0f35327c952908b5838e93e928e940bb34eed08007d8"
+    "/home/yanggy25/NeuralSWM/test/data/ww3/ww3_tp1.2/input/ww3.Center_196806_spec.nc": "b2d1ec7e0375d5f8de5bc77adaa65f81d701444c6a9e96d58a5c171d2626626a"
   },
   "dtype": "float32",
   "python": "3.13.13",
@@ -274,7 +255,7 @@
     "--data-root",
     "/home/yanggy25/NeuralSWM/test/data/ww3",
     "--output",
-    "/tmp/wave_ww3/final2_tp1_2",
+    "/tmp/wave_ww3/final3_tp1_2",
     "--dtype",
     "float32",
     "--waden-root",
