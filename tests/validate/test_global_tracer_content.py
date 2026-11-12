@@ -131,3 +131,72 @@ def test_native_3d_is_level_last_in_and_level_first_out():
     assert n[3, 10, 19] == 7.0            # column shifted by the i-overlap
     with pytest.raises(SystemExit):
         m._native(np.zeros((5, 332, 362)))  # level-first input must be refused
+
+
+def test_heat_bins_trade_under_vertical_redistribution_at_fixed_total():
+    """The heat counterpart of the salt redistribution test.
+
+    A surface warm bias sitting on top of a column whose TOTAL heat is
+    unchanged is vertical trapping, not a heat source -- the two have
+    different causes and different fixes, and only the per-bin split
+    separates them.
+    """
+    e1t, e2t, e3t, tmask = _mesh(nlev=4)
+    eta = np.zeros(e1t.shape)
+    S = np.full(e3t.shape, 35.0)
+    T0 = np.full(e3t.shape, 10.0)
+    # Move 1 C worth of content from the deep level up into the surface one:
+    # the column integral is untouched, the surface bin warms.
+    T1 = T0.copy()
+    T1[0] += 1.0
+    T1[3] -= 1.0
+    gdept = np.array([5.0, 15.0, 25.0, 35.0])
+    old_edges = m._DEPTH_BIN_EDGES_M
+    m._DEPTH_BIN_EDGES_M = (0.0, 10.0, 30.0, np.inf)
+    try:
+        r0 = m.tracer_content(T0, S, eta, e1t, e2t, e3t, tmask, gdept)
+        r1 = m.tracer_content(T1, S, eta, e1t, e2t, e3t, tmask, gdept)
+    finally:
+        m._DEPTH_BIN_EDGES_M = old_edges
+    assert r1["heat_content_C_m3"] == pytest.approx(
+        r0["heat_content_C_m3"], rel=1e-14)
+    h0, h1 = r0["heat_by_depth_bin_C_m3"], r1["heat_by_depth_bin_C_m3"]
+    assert h1["0-10m"] > h0["0-10m"]          # surface bin warmed
+    assert h1["30-infm"] < h0["30-infm"]      # deep bin paid for it
+
+
+def test_region_mask_restricts_every_integral_consistently():
+    """A region must shrink volume AND content together.
+
+    Guards the failure the region_mask branch exists to prevent: a mask
+    applied to the tracer sum but not to the volume would leave a mean that
+    looks plausible and is wrong.
+    """
+    e1t, e2t, e3t, tmask = _mesh(nlev=2, nj=4, ni=2)
+    eta = np.zeros(e1t.shape)
+    S = np.full(e3t.shape, 35.0)
+    T = np.zeros(e3t.shape)
+    T[:, :2, :] = 20.0           # warm half
+    T[:, 2:, :] = 0.0            # cold half
+    whole = m.tracer_content(T, S, eta, e1t, e2t, e3t, tmask)
+    warm = np.zeros((4, 2), dtype=bool)
+    warm[:2, :] = True
+    half = m.tracer_content(T, S, eta, e1t, e2t, e3t, tmask,
+                            region_mask=warm)
+    assert half["volume_m3"] == pytest.approx(whole["volume_m3"] / 2.0, rel=1e-14)
+    assert half["mean_T_C"] == pytest.approx(20.0, abs=1e-12)
+    assert whole["mean_T_C"] == pytest.approx(10.0, abs=1e-12)
+    # Salt is uniform, so the region changes the content but not the mean --
+    # the check that the mask reached the volume and the tracer sum alike.
+    assert half["salt_content_psu_m3"] == pytest.approx(
+        whole["salt_content_psu_m3"] / 2.0, rel=1e-14)
+    assert half["mean_S_psu"] == pytest.approx(whole["mean_S_psu"], rel=1e-14)
+
+
+def test_region_selecting_no_wet_cell_is_fatal():
+    e1t, e2t, e3t, tmask = _mesh(nlev=2, nj=3, ni=2)
+    eta = np.zeros(e1t.shape)
+    with pytest.raises(SystemExit):
+        m.tracer_content(np.zeros(e3t.shape), np.zeros(e3t.shape), eta,
+                         e1t, e2t, e3t, tmask,
+                         region_mask=np.zeros((3, 2), dtype=bool))

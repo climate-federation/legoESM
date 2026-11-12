@@ -125,6 +125,10 @@ class FesomOceanConfig(NamedTuple):
     # fesom's own closure left the Southern Ocean mixed layer at 18.6 m vs
     # NEMO's 41 m with SST +1.45 C where the other two grids sat at +0.2.
     vertical_mixing: str = "fesom"
+    # Vertical momentum advection: "fesom_flux" (fesom_jax's flux form on scalar
+    # control volumes) or "nemo_advective" (NEMO dynzad.F90 advective form on
+    # elements, the scheme the tripole lane runs).  Unknown raises in fesom_jax.
+    vertical_momentum_scheme: str = "fesom_flux"
 
 
 # =============================================================================
@@ -1493,8 +1497,12 @@ class FesomOceanModel:
     """
 
     def __init__(self, mesh: "Mesh", z_coord: Any, config: FesomOceanConfig,
-                 *, vmix_config=None, iwm_forcing=None):
+                 *, vmix_config=None, iwm_forcing=None, visc_nemo=None,
+                 evd_config=None):
         require_fesom_jax()
+        # (ahm_node, rn_shlat): NEMO's viscosity values on the element edges replace
+        # fesom's own viscosity (fesom_jax.momentum.visc_nemo_elem).
+        self._visc_nemo = visc_nemo
         from fesom_jax import config as fconfig
         from fesom_jax import ssh as fssh
         from fesom_jax.params import Params
@@ -1578,7 +1586,7 @@ class FesomOceanModel:
                 fesom_zgeom, make_tke_profiles_fesom,
             )
             self._tke_profiles_fn = make_tke_profiles_fesom(
-                vmix_config, iwm_fields=iwm_forcing)
+                vmix_config, iwm_fields=iwm_forcing, evd_config=evd_config)
             self._zgeom = fesom_zgeom(mesh)
         elif iwm_forcing is not None:
             raise ValueError(
@@ -1594,6 +1602,10 @@ class FesomOceanModel:
                 "vmix_config given but FesomOceanConfig.vertical_mixing='fesom' "
                 "— the legoESM closure would be silently ignored; select "
                 "vertical_mixing='legoesm_tke' or drop vmix_config.")
+        if evd_config is not None and self._tke_profiles_fn is None:
+            raise ValueError(
+                "evd_config (NEMO zdfevd) is applied on the legoESM TKE bridge "
+                "only; select vertical_mixing='legoesm_tke'.")
 
     def step(self, state: FesomOceanState, dt: float, *,
              surface_forcing=None, freshwater=None,
@@ -1695,6 +1707,8 @@ class FesomOceanModel:
             ale_cfg=self._ale_cfg,
             surface_fluxes=surface_fluxes,
             vertical_mixing=vertical_mixing,
+            visc_nemo=self._visc_nemo,
+            vertical_momentum=self.config.vertical_momentum_scheme,
         )
         if tke_nl is not None:
             new_inner = dataclasses.replace(new_inner, tke=tke_nl)

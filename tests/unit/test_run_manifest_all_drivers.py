@@ -252,7 +252,8 @@ def _fesom_lane_args(tmp_path):
     return _fesom_args(
         output=str(tmp_path), dt=1800.0, smoke=False, years=1.0 / 365.0,
         snapshot_every_days=0, forcing_path=None, forcing_ramp_days=0.0,
-        sss_restore=False, sw_rgb_chl=False, nemo_monthly_init=None)
+        sss_restore=False, sw_rgb_chl=False, nemo_monthly_init=None,
+        state_accumulate=False, mld_accumulate=False)
 
 
 class _SteppingModel:
@@ -294,6 +295,61 @@ def test_fesom_forced_writes_manifest_before_the_loop(tmp_path, monkeypatch):
         run_omip_core2.run_fesom_forced_loop(
             _fesom_lane_args(tmp_path), grid, None, _SteppingModel(), None)
     assert _manifest(tmp_path / "run_manifest.json")
+
+
+
+def test_fesom_forced_window_means_with_accumulation_on(tmp_path, monkeypatch):
+    """--state-accumulate on the fesom forced lane: each daily snapshot carries
+    the window means of T and S over its 48 steps, trimmed to the mesh's real
+    levels.  Step k sets T = k, S = 2k and thickness 10 (k odd) or 30 (k even),
+    so the plain and thickness-weighted means differ and a second window
+    checks the reset; all values are exact (integer sums, dyadic quotients)."""
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+    import numpy as np
+
+    import legoesm.ocean.coupler as coupler_mod
+    import legoesm.ocean.forcing as forcing_mod
+    import scripts.run.run_fesom_core2 as fesom_core2
+    from scripts.run import run_omip_core2
+
+    nod, nl = 3, 4
+    monkeypatch.setattr(forcing_mod, "load_core2_nyf", lambda **kw:
+                        SimpleNamespace(u10=np.zeros((4, nod))))
+    monkeypatch.setattr(coupler_mod, "compute_omip2_surface_forcing",
+                        lambda *a, **kw: SimpleNamespace())
+    monkeypatch.setattr(run_omip_core2, "_record_final_state_digest",
+                        lambda *a, **kw: None)
+    snaps = {}
+    monkeypatch.setattr(fesom_core2, "write_snapshot",
+                        lambda out, tag, inner, mesh, extra=None:
+                        snaps.__setitem__(tag, extra))
+
+    def _state(k):
+        return SimpleNamespace(inner=SimpleNamespace(
+            T=jnp.full((nod, nl), float(k)), S=jnp.full((nod, nl), 2.0 * k),
+            hnode=jnp.full((nod, nl), 10.0 if k % 2 else 30.0)))
+
+    model = _SteppingModel()
+    model.mesh = SimpleNamespace(
+        Z=-np.arange(1.0, nl), depth=-np.full(nod, 100.0), nl=nl,
+        node_layer_mask=np.ones((nod, nl - 1), dtype=bool))
+    counter = iter(range(1, 10_000))
+    model.step = lambda state, dt, **kw: _state(next(counter))
+    args = run_omip_core2._build_arg_parser().parse_args([
+        "--grid", "fesom", "--fesom-mesh-dir", "/m", "--output", str(tmp_path),
+        "--no-emp", "--dt", "1800", "--years", str(2.0 / 365.0),
+        "--snapshot-every-days", "1", "--forcing-ramp-days", "0",
+        "--state-accumulate"])
+    grid = SimpleNamespace(lat=np.zeros(nod), lon=np.zeros(nod))
+    run_omip_core2.run_fesom_forced_loop(args, grid, None, model, _state(0))
+    for day, wants in (("day0001", (24.5, 49.0, 24.75)),
+                       ("day0002", (72.5, 145.0, 72.75))):
+        for name, want in zip(("T_mean", "S_mean", "T_mean_hw"), wants):
+            got = snaps[day][name]
+            assert got.shape == (nod, nl - 1), (day, name)
+            np.testing.assert_array_equal(got, np.full((nod, nl - 1), want))
 
 
 def test_fesom_b1_records_the_final_state_digest(tmp_path, monkeypatch):

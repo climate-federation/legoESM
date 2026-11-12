@@ -271,6 +271,8 @@ def build_iwm_config_from_args(args) -> "IWMConfig":
         power_sho_wm2=args.iwm_power_sho,
         scale_bot_m=args.iwm_scale_bot,
         scale_cri_m=args.iwm_scale_cri,
+        n2_mode=getattr(args, "iwm_n2_mode", None) or _DEFAULT_IWM_CONFIG.n2_mode,
+        n2_eos_form=getattr(args, "iwm_n2_eos_form", None) or _DEFAULT_IWM_CONFIG.n2_eos_form,
     )
 
 
@@ -871,6 +873,12 @@ def parse_args(argv: list[str] | None = None):
                    help="Enable internal wave-driven mixing (NEMO zdfiwm; "
                         "additive avt/avm through the implicit vertical "
                         "solve; requires implicit vertical mixing).")
+    p.add_argument("--iwm-n2-mode", choices=("insitu", "nemo_bn2"), default=None,
+                   help="N^2 the zdfiwm formula reads: nemo_bn2 (default since "
+                        "2026-10-06; NEMO rn2, zdfiwm.F90:185-211) or insitu "
+                        "(old behaviour).")
+    p.add_argument("--iwm-n2-eos-form", choices=("seos", "teos10"), default=None,
+                   help="alpha/beta for nemo_bn2 (default teos10 = ORCA1).")
     p.add_argument("--iwm-mevar", action="store_true",
                    help="zdfiwm ln_mevar: variable mixing efficiency "
                         "(ORCA1 oracle: off).")
@@ -1751,6 +1759,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   forcing_mode: str = "restoring",
                   use_conservation_fixer: bool = True,
                   dz_ref_override=None, t_depth_ref_override=None,
+                  attach_nemo_ladders=False,
                   spmd_n_devices: int = 0,
                   mpas_lloyd: int = 50,
                   mpas_k_zeta_bih: float | None = None,
@@ -1793,6 +1802,23 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         z_coord = create_z_star_from_thicknesses(
             dz_ref_override, t_depth_ref_override,
             nemo_e3w_source="depth_difference")
+        if attach_nemo_ladders:
+            # The literal zdftke step reads raw NEMO gdept_0/gdepw_0/e3t_0 at
+            # step entry. Attach the coordinate's OWN 1-D ladders as those
+            # fields (T depths as built, W depths with the surface zero, the
+            # reference thicknesses) so the run's geometry is unchanged: the
+            # only difference from the same card without the flag is the TKE
+            # step. The vertical file carries no gdepw_1d, and reading the
+            # mesh's ladders instead would move every T point by 1-7 cm.
+            _t_ref = z_coord.t_depth_ref
+            _gdept = np.asarray(-z_coord.z_full_ref if _t_ref is None else _t_ref,
+                                dtype=np.float64)
+            z_coord = create_z_star_from_thicknesses(
+                dz_ref_override, t_depth_ref_override,
+                nemo_e3w_source="depth_difference",
+                nemo_gdept_0_m=_gdept,
+                nemo_gdepw_0_m=np.asarray(-z_coord.z_half_ref[:-1], dtype=np.float64),
+                nemo_e3t_0_m=np.asarray(z_coord.dz_ref, dtype=np.float64))
     elif use_bathymetry:
         # Partial cells with ETOPO: use the same vertical stretching
         # as the global-overturning production scripts (dz_surface=20,
@@ -7502,6 +7528,8 @@ def print_summary():
 
 def main():
     args = parse_args()
+    if (getattr(args, "iwm_n2_mode", None) or getattr(args, "iwm_n2_eos_form", None)) and not args.iwm:
+        raise SystemExit("--iwm-n2-mode/--iwm-n2-eos-form need --iwm")
 
     # Route-B multicontroller (jax.distributed cross-process NCCL): initialize
     # the federation BEFORE any device work (model build / device query), or

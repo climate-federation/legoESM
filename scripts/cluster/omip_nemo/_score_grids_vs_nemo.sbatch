@@ -48,7 +48,10 @@ snap() {  # run dir -> snapshot path for DAY
   echo "$f"
 }
 ST=$(snap "$TRP") || exit 1; SM=$(snap "$MPAS") || exit 1; SF=$(snap "$FESOM") || exit 1
-OUT=$R/score_grids_d${DAY}_${TRP#trp_}
+# TAGSUF keeps a re-score of the same tripole arm with a DIFFERENT partner
+# (e.g. an MPAS A/B arm) out of the directory that already holds the reference
+# scorecard, which must not be overwritten by the run being compared to it.
+OUT=$R/score_grids_d${DAY}_${TRP#trp_}${TAGSUF:+_$TAGSUF}
 mkdir -p "$OUT"
 echo "=== inputs; oracle record $REC (0-based) = days $((DAY-5))-$DAY ==="
 ls -l --time-style=+%Y-%m-%d_%H:%M "$ST" "$SM" "$SF"
