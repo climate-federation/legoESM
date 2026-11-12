@@ -123,3 +123,14 @@ def test_d20_mae_ignores_dry_nan_columns():
     m = np.array([[[[10.0, np.nan]]]]); o = np.array([[[[12.0, np.nan]]]])
     keep = np.array([[[[True, False]]]]); cosw = np.ones((1, 2))
     np.testing.assert_allclose(T.d20_mae(m, o, keep, cosw), [2.0])
+
+
+def test_level_without_oras5_data_copies_level_above_and_is_masked():
+    a = _day()
+    a[O.NLEV - 1] = np.nan                                   # deepest T level: no data anywhere
+    a[O.NLEV - 2] = 4.0
+    wet3 = np.ones((O.NLAT, O.NLON, O.NLEV))
+    um, vm = np.ones((O.NLAT, O.NLON + 1)), np.ones((O.NLAT + 1, O.NLON))
+    f, v = O.day_to_fields(a, wet3, um, vm)
+    assert np.isfinite(f["T"]).all() and np.allclose(f["T"][..., -1], f["T"][..., -2])
+    assert not v["T"][..., -1].any()

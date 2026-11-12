@@ -79,7 +79,15 @@ def day_to_fields(a, wet3, u_mask, v_mask):
     for k, name in enumerate(("T", "S", "u", "v")):
         f = a[NLEV * k:NLEV * (k + 1)]                       # (lev, lat, lon)
         ok = np.isfinite(f)
-        f = np.stack([_fill(f[l], ok[l], wet3[..., l]) for l in range(NLEV)], 0)
+        lv = []
+        for l in range(NLEV):
+            if ok[l].any():
+                lv.append(_fill(f[l], ok[l], wet3[..., l]))
+            elif l == 0:
+                raise ValueError(f"ORAS5 {name} has no valid surface cell")
+            else:          # no ORAS5 data on this level at all: IC copies the level above (user 2026-11-12)
+                lv.append(np.where(wet3[..., l], lv[-1], 0.0))
+        f = np.stack(lv, 0)
         out[name] = np.moveaxis(f, 0, -1)
         val[name] = np.moveaxis(ok, 0, -1) & wet3
     zos = a[4 * NLEV]
