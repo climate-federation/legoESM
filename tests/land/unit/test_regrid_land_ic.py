@@ -569,27 +569,62 @@ def test_warm_era5_soil_is_ice_consistent_with_freeze_thaw_on():
         assert bool(jnp.all(jnp.isfinite(C))) and bool(jnp.all(C >= sensible_floor))
 
 
-def test_lift_to_dry_floor_lifts_only_columns_below_the_floor_in_total():
-    """A column whose total water is below the run's dry floor is set to that
-    floor (the least water the loader accepts); a column above it in total,
-    even with one layer below the floor, is left for the loader's conform."""
+def _floors(hyd, shape):
+    from legoesm.land.richards import dry_floor
+    lo = np.broadcast_to(np.asarray(dry_floor(hyd)[1], np.float64), shape)
+    sat = np.broadcast_to(np.asarray(hyd.theta_sat, np.float64), shape)
+    return lo, sat
+
+
+def test_relative_wetness_lands_between_target_floor_and_saturation():
+    """Donor water copied into a soil with a higher dry floor: the absolute
+    copy is refused by the run's loader, the rebuild is accepted, and every
+    rebuilt layer lies in [target floor, target saturation] even for donor
+    layers below their own floor or above saturation (clipped)."""
     import jax.numpy as jnp
     from legoesm.land.restart import conform_soil_water
-    from legoesm.land.richards import psi_dry_floor
-    from legoesm.land.soil_hydraulics import theta_from_psi
-    rg = _load("scripts/data/regrid_land_ic.py", "_rg_lift")
-    hyd = SoilHydraulicsConfig(theta_r=jnp.asarray([[0.16], [0.16], [0.05]]),
-                               theta_sat=jnp.asarray([[0.45], [0.45], [0.40]]))
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg_rw")
+    shape = (3, 3)
+    src = SoilHydraulicsConfig(theta_r=jnp.full(shape, 0.02),
+                               theta_sat=jnp.full(shape, 0.40))
+    tgt = SoilHydraulicsConfig(theta_r=jnp.full(shape, 0.16),
+                               theta_sat=jnp.full(shape, 0.48))
     dz = np.array([0.1, 0.3, 0.6])
-    lo = np.asarray(theta_from_psi(psi_dry_floor(hyd), hyd), np.float64)[:, 0]
-    theta = np.array([[lo[0] - 0.01, lo[0] - 0.01, lo[0] - 0.01],   # below in total
-                      [lo[1] - 0.05, lo[1] + 0.05, lo[1] + 0.05],   # one layer below
+    lo_s, sat_s = _floors(src, shape)
+    lo_t, sat_t = _floors(tgt, shape)
+    theta = np.array([[lo_s[0, 0] + 1e-3] * 3,                 # dry donor
+                      [lo_s[1, 0] - 1e-6, 0.25, sat_s[1, 2] + 1e-6],  # out of range
                       [0.20, 0.25, 0.30]])
     with pytest.raises(ValueError):
-        conform_soil_water(theta, dz, hyd)
-    out, lifted, added = rg.lift_to_dry_floor(theta, dz, hyd)
-    np.testing.assert_array_equal(lifted, [True, False, False])
-    np.testing.assert_allclose(out[0], lo[0], rtol=0, atol=0)
-    np.testing.assert_array_equal(out[1:], theta[1:])
-    np.testing.assert_allclose(added[0], 0.01 * dz.sum(), rtol=1e-12)
-    conform_soil_water(out, dz, hyd)          # now loadable
+        conform_soil_water(theta, dz, tgt)            # the defect being fixed
+    out, n_clipped = rg.rebuild_relative_wetness(theta, lo_s, sat_s, lo_t, sat_t)
+    assert n_clipped == 2
+    assert np.all(out >= lo_t) and np.all(out <= sat_t)
+    w_in = (theta[2] - lo_s[2]) / (sat_s[2] - lo_s[2])
+    np.testing.assert_allclose((out[2] - lo_t[2]) / (sat_t[2] - lo_t[2]), w_in,
+                               rtol=1e-12)
+    rg.check_above_dry_floor(out, dz, lo_t)
+    conform_soil_water(out, dz, tgt)                  # loadable
+
+
+def test_relative_wetness_same_soil_is_bit_identical():
+    import jax.numpy as jnp
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg_same")
+    shape = (2, 4)
+    hyd = SoilHydraulicsConfig(theta_r=jnp.full(shape, 0.05),
+                               theta_sat=jnp.full(shape, 0.43))
+    lo, sat = _floors(hyd, shape)
+    theta = np.random.default_rng(0).uniform(lo, sat)
+    theta[0, 0] = lo[0, 0] - 1e-6        # kept as is: same soil is a pure copy
+    out, n_clipped = rg.rebuild_relative_wetness(theta, lo, sat, lo, sat)
+    assert n_clipped == 0
+    np.testing.assert_array_equal(out, theta)
+
+
+def test_check_above_dry_floor_refuses_a_column_below_it_in_total():
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg_chk")
+    lo = np.full((2, 3), 0.1)
+    dz = np.array([0.1, 0.3, 0.6])
+    rg.check_above_dry_floor(np.array([[0.05, 0.12, 0.12], [0.1] * 3]), dz, lo)
+    with pytest.raises(SystemExit):
+        rg.check_above_dry_floor(np.array([[0.09] * 3, [0.1] * 3]), dz, lo)

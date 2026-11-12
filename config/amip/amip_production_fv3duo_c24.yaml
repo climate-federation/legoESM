@@ -61,7 +61,10 @@ mpas_qv_smooth_del4_m4s: 0.0       # B5: OFF on the duo (no FV3 counterpart)
 # 2026-10-10) -- onto the duo column mesh (its six faces' A-grid centres,
 # face-major: the order the driver steps, NOT the generic cubed sphere, whose
 # centres differ and come in another order).  Built by
-# scripts/data/regrid_land_ic.py --target-grid fv3_duo --target-resolution 24;
+# scripts/data/regrid_land_ic.py --target-grid fv3_duo --target-resolution 24
+# --target-clm-surfdata <the run's CLM surfdata>: soil water carried as
+# relative wetness between dry floor and saturation, rebuilt on this run's
+# soil (user 2026-11-12); file md5 c3aed89a181558d2d5727657a724ad6e;
 # provenance is in the file's metadata.  data/ is gitignored: stage the file
 # in the launch directory.
 land_ic: data/lmip_soil_ic/soil_ic_fv3duo24_era5T_19790101.npz
