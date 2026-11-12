@@ -49,7 +49,7 @@ A physics-only run selects
 - `tests/wave/integration/test_coupled_wave_run.py` — short dynamic-ocean,
   KPP, wave and restart continuation run;
 - `scripts/validate/validate_wave_ww3.py` — archived WW3 propagation cases
-  (evidence in `docs/wave/results/waden_20261112/`);
+  (evidence in `docs/wave/evidence/waden_20261112/`);
 - `scripts/validate/validate_wave_parity.py` and
   `validate_wave_standalone.py` — optional NeuralSWM reference lanes.
 

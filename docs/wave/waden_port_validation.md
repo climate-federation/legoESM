@@ -30,7 +30,7 @@ conservation residual.
 ## Recorded results (2026-11-12)
 
 The three reproducible cases were rerun on the current legoESM stack at the
-revision recorded in each manifest (`docs/wave/results/waden_20261112/`).
+revision recorded in each manifest (`docs/wave/evidence/waden_20261112/`).
 float32, CPU, `JAX_ENABLE_X64=1`; the initial reference field only.
 
 | Case | SWH RMSE | SWH max abs | Gate | Result |
@@ -43,6 +43,10 @@ The direct WADEN public-rollout comparison is at float32 round-off over the
 full trajectory: tp1.1 is bit-identical, tp1.4 differs by 1.8e-08 (SWH
 relative L2) and 7.1e-08 (spectrum), tp2.1 by 2.2e-06 and 3.7e-08. These are
 descriptive; they carry no newly invented pass tolerance.
+
+The committed manifests were produced on a clean code tree at commit
+`d3a79970b8`; the only recorded repository difference is one untracked local
+`.vscode/` directory (IDE state, not code).
 
 tp1.2 is not reproduced locally: its WW3 archive is absent on the machine used
 for this port. Its gate above is inherited and unverified in this run; do not

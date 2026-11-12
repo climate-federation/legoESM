@@ -1,0 +1,320 @@
+{
+  "case": "tp1.4",
+  "config": {
+    "reference_revision": "b80fdce679414345134a25275421db439c185349",
+    "case": "tp1.4",
+    "data_directory": "ww3_tp1.4",
+    "coordinate_type": "Cartesian",
+    "grid_file": "ww3.196806.nc",
+    "spectrum_files": [
+      "ww3.196806_spec.nc"
+    ],
+    "station_coordinate_scale": 1000,
+    "x_stencil": "replicate",
+    "bathymetry": {
+      "x_profile_m": [
+        50,
+        50,
+        50,
+        45,
+        40,
+        35,
+        30,
+        25,
+        20,
+        15,
+        10,
+        5,
+        0
+      ]
+    },
+    "step_config": {
+      "dt_global": 300,
+      "dt_x": 300,
+      "dt_y": 0,
+      "dt_th": 300,
+      "dt_k": 0,
+      "dt_stot": 0,
+      "dt_gse": 0,
+      "yfirst": false,
+      "substeps": 1
+    },
+    "direction_min_swh_m": 0.01,
+    "outflow_ghost_edges": [
+      "x_high"
+    ]
+  },
+  "resolved_config": {
+    "grid": [
+      [
+        -5000.0,
+        0.0,
+        5000.0,
+        10000.0,
+        15000.0,
+        20000.0,
+        25000.0,
+        30000.0,
+        35000.0,
+        40000.0,
+        45000.0,
+        50000.0,
+        55000.0
+      ],
+      [
+        -5000.0,
+        0.0,
+        5000.0
+      ],
+      [
+        0.07999999821186066,
+        0.10000000149011612,
+        0.125
+      ],
+      [
+        1.5707963267948966,
+        1.3089969389957472,
+        1.0471975511965976,
+        0.7853981633974483,
+        0.5235987755982988,
+        0.2617993877991494,
+        0.0,
+        6.021385919380437,
+        5.759586531581287,
+        5.497787143782138,
+        5.235987755982989,
+        4.974188368183839,
+        4.71238898038469,
+        4.4505895925855405,
+        4.18879020478639,
+        3.926990816987241,
+        3.665191429188092,
+        3.4033920413889422,
+        3.141592653589793,
+        2.8797932657906435,
+        2.6179938779914944,
+        2.356194490192345,
+        2.0943951023931953,
+        1.8325957145940461
+      ],
+      "Cartesian",
+      "physical",
+      "replicate",
+      "replicate"
+    ],
+    "time": [
+      300,
+      300,
+      0,
+      300,
+      0,
+      0,
+      0
+    ],
+    "physics": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      false,
+      "none"
+    ],
+    "network": [
+      false,
+      "none",
+      2880,
+      128,
+      256,
+      256,
+      90,
+      128,
+      60,
+      1e-05,
+      1.0
+    ],
+    "gse": [
+      false,
+      1.0,
+      1.0,
+      true,
+      true,
+      true,
+      false,
+      1e-08,
+      1.0,
+      1
+    ]
+  },
+  "legoesm_revision": "d3a79970b81b6ff29f6440c9a78192c9915ad383",
+  "tracked_or_untracked_changes": "?? .vscode/",
+  "waden_revision": "46aadc7834ad850442a535a08f94ca173e4b22e8",
+  "reference": {
+    "ww3_version": "6.07",
+    "ww3_compiled_switches": "F90 NOGRB NC4 SCRIP SCRIPNC SHRD PR3 UQ FLX4 SEED ST6 STAB0 NL1 BT1 DB1 MLIM TR0 BS0 IC0 IS0 REF0 XX0 WNT1 WNX1 CRT1 CRX1 O0 O1 O2 O3 O4 O5 O6 O7",
+    "grid_file": "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3.196806.nc",
+    "spectrum_files": [
+      "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3.196806_spec.nc"
+    ],
+    "archived_revision": "b80fdce679414345134a25275421db439c185349",
+    "initial_condition": "t=0 hs envelope times common t=0 directional spectrum",
+    "boundary_condition": "constant t=0 spectrum at MAPSTA=2",
+    "outflow_ghost_edges": [
+      "x_high"
+    ],
+    "station_coordinate_scale": 1000
+  },
+  "input_sha256": {
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/1-D.depth": "6e027f616136cd54a733a6873794b86105a767a2d49ceaadcee53758408f1da0",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/log.ww3": "ba7708ca3de535f0254a91d3878b105e9586315d30740991bdb9a6cb1c8345e8",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/mod_def.ww3": "cebe44706dfa72d36ed576ce4decf8020f3d304c29d8cce09bb619cf7cd4d4da",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/namelists_1-D.nml": "b7b62b134ff843dbc42fa4ba5edc1de7e9a30eccecaba97f66b4ebfb4bcf860a",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/out_grd.ww3": "0f4bd8329ae07368bca29583197403e50adba0104a5da38d38a523d34ed78459",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/out_pnt.ww3": "a2a59d97d14f3bcdcbead18df3622d4ae4764afa985a199affe49ace32c7624b",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/points.list": "ae532b3c9b1d429affbc1decb97857b951d30b783dc2d9b0bc1552e48adaeeb4",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/restart.ww3": "aa1414cda3394e581cfe47142fd06f34404750345882af0e273186abaa85e486",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/run_ww3_tp1_4.sh": "6d606592f3082d6448d83e8ffd9056258088e79a1d61d2c92da764b298d03bab",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/switch": "74bb2550287ed60b59d83ff5a804b09054ecbd2fa2dbe60d8c9732777605e062",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/switch_PR1": "4b46783069c2724bdc9648be759c2243e8b2bdca604476de38fb17f562f74632",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/switch_PR2_UNO": "e857b0bf7a3e1d56fef7092dc6b2b33470d528083f0ef4662d1acbf40fde412c",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/switch_PR2_UQ": "cc5481922d98c9e5a8d463068acc418b5a96d8484558eee7e6a8916d6beaf479",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/switch_PR3_UNO": "7b9b1fe7d43490687ebb35cd00f15de7db474ab0e29ab3196ffdecd58b21063a",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/switch_PR3_UQ": "74bb2550287ed60b59d83ff5a804b09054ecbd2fa2dbe60d8c9732777605e062",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3.196806.nc": "4e30e30cace8a7ae2bc3221a94693498d92243f305efd3b26d2f0233a61a0d3c",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3.196806_spec.nc": "2d4622b279c32ebfcc2753c9729abc52e8276f66bc32180c80dd90e2183875d8",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_grid.inp": "561c4ccf0e8ed921164b604763ea439f5953c6ca3f34ab5bb6ebbbcb979e8a73",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_grid.nml": "fa374d4390a52290dbcb56575ef570e40b9a0411bdf04a4e23d6a49b4da615b9",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_grid.nml.log": "befcff7f4be92cb4feb51128242777563febca85c2dd26fc7ad79edcc957256d",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_ounf.inp": "306c726b8ff2734c8005976e66d888e8f29c91ca6a85595bc0c0d1a056754ae0",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_ounf.nml": "6fe0561aa8e356e6777d9072e71c19e100cbc79da7bcd6b41aad71179e5a1529",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_ounf.nml.log": "2927c91af9dd123ed10caa2cf7ef67c67e333c2981d0895ad86fe77940541379",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_ounp.inp": "73f1f5eba152383b417596687c25d8df29fcf991018c9de93fdd220f4547b329",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_ounp.nml": "46e34dea4e1b476d9c35a26870fa952d1c3d6e79eca9189f5f7bf8e22ad0ecd7",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_ounp.nml.log": "9b9322c5e0cda7e7851b24da6cba39b9025370ae02118d64456b9cbcfc134604",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_outf.inp": "266cc68cbe4f72e2da7802161c4c29f504816fa6a7b78b81f9005ef73669572e",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_outp_spec.inp": "cad75c285a31fc88db8366d924aee9205c407f23ad6dc9ce234ffff91b82ffe1",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_outp_tab50.inp": "37613aa94fbac1e2edd80830c4f2881dc64230e61f7a90bef38cfab73b625702",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_outp_tab51.inp": "9c0b8df8f5b2bc89d2ad37c5f7b38b758ca1fd0efc5c33eeb98a671375c1b510",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_shel.inp": "2ab4283bd74a1c3259133e3c4d3fccf1fc5ebbf559848adadc3a92567e9d3e02",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_shel.nml": "406ec5aee862c50cc2c08a3b6e2c1a83b09efeb613ca345ebebe99f96110e51a",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_shel.nml.log": "3a25f687992da83176ab93767f251bc49ac0a0f730143bde89ae82916853a7b8",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang/ww3_tp1.4/input/ww3_strt.inp": "04878a5fc3f817c990a7b513ba34849d144cc13eebb54e3849f6768693ea3e28"
+  },
+  "dtype": "float32",
+  "python": "3.13.13",
+  "jax": "0.9.2",
+  "devices": [
+    "TFRT_CPU_0"
+  ],
+  "command": [
+    "/home/yanggy25/DiffEarth/legoESM/scripts/validate/validate_wave_ww3.py",
+    "--config",
+    "scripts/validate/wave_fidelity/configs/tp1_4.json",
+    "--data-root",
+    "/home/yanggy25/WW3/.ww3/WW3-6.07.1/regtest_yang",
+    "--output",
+    "/tmp/wave_ww3/final_tp1_4",
+    "--dtype",
+    "float32",
+    "--waden-root",
+    "/home/yanggy25/waden"
+  ],
+  "wave_module": "/home/yanggy25/DiffEarth/legoESM/packages/wave/legoesm/wave/__init__.py",
+  "actual_dtypes": {
+    "spectra": "float32",
+    "frequency": "float32",
+    "geometry": "float32"
+  },
+  "source": "disabled",
+  "learned_transport": "disabled",
+  "gse": "disabled",
+  "frames": 145,
+  "station_common_frames": 145,
+  "spatial_phase": 0,
+  "swh": {
+    "count": 1450,
+    "relative_l2": 0.0024259172640366663,
+    "peak_normalized": 0.008845770638146564,
+    "rmse": 0.002148955796153231,
+    "max_absolute": 0.008959361166293922,
+    "max_absolute_index": [
+      39,
+      10,
+      1
+    ]
+  },
+  "station_spectrum": {
+    "count": 104400,
+    "relative_l2": 0.06203712625714524,
+    "peak_normalized": 0.1301683594487919,
+    "rmse": 0.02824532123253078,
+    "max_absolute": 0.5940530300140381,
+    "max_absolute_index": [
+      75,
+      10,
+      0,
+      1
+    ]
+  },
+  "direction": {
+    "count": 1377,
+    "relative_l2": null,
+    "peak_normalized": null,
+    "rmse": 0.33624173563741033,
+    "max_absolute": 1.165096606186296,
+    "max_absolute_index": [
+      66,
+      11,
+      1
+    ]
+  },
+  "period": {
+    "count": 1377,
+    "relative_l2": 4.623273221420275e-08,
+    "peak_normalized": 1.1026858231844117e-07,
+    "rmse": 4.6232732316665465e-07,
+    "max_absolute": 1.1026859283447266e-06,
+    "max_absolute_index": [
+      26,
+      3,
+      1
+    ]
+  },
+  "cumulative_clipping_mass": 2.350875539221267e-10,
+  "final_to_initial_integral": 9.610108375549316,
+  "rmse_bar": 0.008,
+  "passed": true,
+  "direct_waden": {
+    "revision": "46aadc7834ad850442a535a08f94ca173e4b22e8",
+    "dirty": "",
+    "module": "/home/yanggy25/waden/src/waden/__init__.py",
+    "phase": 0,
+    "spectrum": {
+      "count": 104400,
+      "relative_l2": 7.083231465635856e-08,
+      "peak_normalized": 2.140726202831239e-07,
+      "rmse": 3.191388657145846e-08,
+      "max_absolute": 9.5367431640625e-07,
+      "max_absolute_index": [
+        96,
+        11,
+        1,
+        23,
+        1
+      ]
+    },
+    "swh": {
+      "count": 1450,
+      "relative_l2": 1.798955708607624e-08,
+      "peak_normalized": 7.070521761584646e-08,
+      "rmse": 1.595304536583524e-08,
+      "max_absolute": 7.186704414907652e-08,
+      "max_absolute_index": [
+        17,
+        11,
+        1
+      ]
+    },
+    "verdict": "descriptive full-trajectory comparison; no new acceptance bar"
+  }
+}
