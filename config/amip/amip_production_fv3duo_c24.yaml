@@ -23,6 +23,7 @@ include: amip_production.yaml
 grid_type: cubed_sphere
 resolution: 24              # C24 L32: 462 km centre / 327 km corner cells (deck ledger A)
 discretization: fv3_duo
+vertical_form: legacy       # preserve this lane; as83 is selected for MPAS only
 fv3_duo_column_lane: true   # route A: the duo is the dynamics operator of the CAM6 loop
 dt: 300.0                   # decision A: MPAS's rule (0.82 of the printed CFL clamp, a divisor of 1800) -> C24 300 s; ladder 225/300/360 s
 physics_update_steps: 6     # CAM6: physics every 1800 s (6 x 300 s); ladder arms pass 1800/dt

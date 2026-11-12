@@ -3194,17 +3194,20 @@ def test_factory_threads_vertical_form_into_the_dycore(grid_type, discretization
     assert model.config.vertical_form == "sb81_theta"
 
 
-@pytest.mark.parametrize("deck", ["amip_production.yaml", "amip_production_latlon48.yaml"])
-def test_production_decks_select_legacy_vertical_form(deck):
-    """Both production AMIP decks set the PE vertical form to "legacy"
-    explicitly (the latlon deck by inclusion of the MPAS base), mapped onto the
-    parser dest that the flag test carries into DycoreConfig."""
+@pytest.mark.parametrize("deck,expected_form", [
+    ("amip_production.yaml", "as83"),
+    ("amip_production_latlon48.yaml", "legacy"),
+    ("amip_production_spectral_t31.yaml", "legacy"),
+    ("amip_production_fv3duo_c24.yaml", "legacy"),
+])
+def test_production_decks_select_vertical_form(deck, expected_form):
+    """Production selects as83 on MPAS and preserves legacy on other grids."""
     from pathlib import Path
 
     from legoesm.driver.run_config_yaml import load_yaml_config
     keys = load_yaml_config(
         Path(__file__).resolve().parents[2] / "config" / "amip" / deck, build_arg_parser())
-    assert keys["vertical_form"] == "legacy"
+    assert keys["vertical_form"] == expected_form
 
 
 def test_budget_ledger_flag_flows_to_output_config():
@@ -5290,6 +5293,7 @@ _DUO_DECK_OWN_ROWS = frozenset({
     # switched off because the duo's own sponge / damping replace them
     "grid.grid_type", "grid.resolution",
     "dycore.discretization", "dycore.dt", "dycore.column_lane",
+    "dycore.vertical_form",  # as83 adopted for MPAS only (user 2026-11-11)
     "dycore.fv3_duo_sponge_layers", "dycore.fv3_duo_sponge_factor",
     "dycore.fv3_duo_sponge_d2_top", "dycore.fv3_duo_nord",
     "dycore.fv3_duo_d4_bg", "dycore.fv3_duo_fill",
