@@ -623,7 +623,7 @@ def _lift_only_setup(tmp_path, monkeypatch):
     src = tmp_path / "ic.npz"
     np.savez(src, theta_soil=theta, psi_soil=-np.ones((3, 3)),
              T_soil=np.full((3, 3), 280.0), soil_dz=dz,
-             snow_depth=np.arange(3.0), metadata_json=np.str_('{"grid_type": "x"}'))
+             snow_depth=np.arange(3.0), metadata_json=np.str_('{"grid_type": "x", "resolution": 1}'))
     sd = tmp_path / "surf.nc"
     sd.write_bytes(b"surf")
     return rg, src, sd, lo, dz, seen, jnp
@@ -652,6 +652,12 @@ def test_lift_only_changes_only_the_lifted_column(tmp_path, monkeypatch):
     assert rep["n_lifted"] == 1 and rep["vg_air_entry_m"] == -0.02
     np.testing.assert_allclose(rep["lifted_columns_water_added_mm"]["0"],
                                1e3 * 0.01 * dz.sum(), rtol=1e-12)
+    import legoesm.land.clm_surface_map as csm
+    from legoesm.land.restart import conform_soil_water
+    hyd = csm.clm_hydraulics_config(
+        csm.load_clm_surface(sd, 0, 0, vg_air_entry_m=-0.02))._replace(
+            vg_air_entry_m=-0.02)
+    conform_soil_water(b["theta_soil"], dz, hyd)       # now loadable
 
 
 def test_lift_only_floor_moves_with_the_air_entry_head(tmp_path, monkeypatch):
@@ -659,6 +665,9 @@ def test_lift_only_floor_moves_with_the_air_entry_head(tmp_path, monkeypatch):
     hydraulics the floor is computed from (not only the surfdata loader)."""
     import json
     rg, src, sd, lo, dz, seen, _ = _lift_only_setup(tmp_path, monkeypatch)
+    import legoesm.land.clm_surface_map as csm
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import theta_from_psi
     added = {}
     for h in ("-0.02", "0.0"):
         out = tmp_path / f"out{h}.npz"
@@ -667,7 +676,31 @@ def test_lift_only_floor_moves_with_the_air_entry_head(tmp_path, monkeypatch):
                  "--target-clm-surfdata", str(sd), "--vg-air-entry-m", h])
         rep = json.loads(str(np.load(out)["metadata_json"]))["dry_floor_lift_only"]
         added[h] = rep["lifted_columns_water_added_mm"]["0"]
+        hyd = csm.clm_hydraulics_config(csm.load_clm_surface(
+            sd, 0, 0, vg_air_entry_m=float(h)))._replace(vg_air_entry_m=float(h))
+        lo_h = float(np.asarray(theta_from_psi(psi_dry_floor(hyd), hyd))[0, 0])
+        theta0 = np.load(src)["theta_soil"][0]
+        np.testing.assert_allclose(added[h], 1e3 * ((lo_h - theta0) * dz).sum(),
+                                   rtol=1e-12)
     assert added["-0.02"] != added["0.0"]
+
+
+@pytest.mark.parametrize("bad", ["sig", "f32", "grid"])
+def test_lift_only_refuses_unsafe_sources(tmp_path, monkeypatch, bad):
+    rg, src, sd, *_ = _lift_only_setup(tmp_path, monkeypatch)
+    a = dict(np.load(src))
+    if bad == "sig":
+        a["soil_hydraulics_column_sig"] = np.zeros(3)
+    elif bad == "f32":
+        a["theta_soil"] = a["theta_soil"].astype(np.float32)
+    else:
+        a["metadata_json"] = np.str_('{"grid_type": "y", "resolution": 1}')
+    np.savez(src, **a)
+    with pytest.raises(SystemExit):
+        rg.main(["--lift-only", "--source", str(src), "--out",
+                 str(tmp_path / "o.npz"), "--target-grid", "x",
+                 "--target-resolution", "1", "--target-clm-surfdata", str(sd),
+                 "--vg-air-entry-m", "-0.02"])
 
 
 @pytest.mark.parametrize("drop", ["--target-clm-surfdata", "--vg-air-entry-m"])

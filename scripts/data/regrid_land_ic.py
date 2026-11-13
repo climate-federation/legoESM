@@ -363,6 +363,21 @@ def main_lift_only(args) -> int:
     src = np.load(args.source, allow_pickle=False)
     if "soil_dz" not in src.files:
         raise SystemExit("source IC has no soil_dz stamp; regrid it first.")
+    if "soil_hydraulics_column_sig" in src.files:
+        # a matching signature lets the loader skip conversion, leaving psi
+        # stale on the lifted columns (codex)
+        raise SystemExit("source IC carries soil_hydraulics_column_sig; "
+                         "--lift-only would leave psi_soil stale on load.")
+    if src["theta_soil"].dtype != np.float64:
+        raise SystemExit("source theta_soil is not float64: the lifted floor "
+                         "would be rounded below the run's float64 floor.")
+    meta_src = json.loads(str(src["metadata_json"]))
+    if (meta_src.get("grid_type"), str(meta_src.get("resolution"))) != (
+            args.target_grid, str(args.target_resolution)):
+        raise SystemExit(
+            f"source IC is on {meta_src.get('grid_type')} "
+            f"{meta_src.get('resolution')}, not {args.target_grid} "
+            f"{args.target_resolution}.")
     lat, lon = _cols_rad(_ic_grid(args.target_grid, args.target_resolution))
     if lat.size != src["theta_soil"].shape[0]:
         raise SystemExit(f"grid has {lat.size} columns, the IC has "
@@ -378,7 +393,7 @@ def main_lift_only(args) -> int:
     except Exception:
         sha = "unknown"
     from legoesm.land.restart import file_md5
-    meta = json.loads(str(src["metadata_json"]))
+    meta = meta_src
     meta["dry_floor_lift_only"] = dict(
         report, from_ic=pathlib.Path(args.source).name,
         from_ic_md5=file_md5(args.source), git_sha=sha,
