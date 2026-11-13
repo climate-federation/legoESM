@@ -422,6 +422,16 @@ class DycoreConfig(NamedTuple):
     # Default ("q_v",) since 2026-10-15 (user decision after the 30/60-day pair
     # against the flux form); amip_production.yaml also pins it explicitly.
     mpas_vert4_log_form_tracers: tuple = ("q_v",)
+    # Multiplier on the MPAS hydrostatic dycore's fourth-order hyperdiffusion
+    # of SURFACE PRESSURE only (effective nu_del4_ps = hyperdiff coefficient *
+    # this scale; the momentum hyperdiffusion nu_del4 is untouched).  The term
+    # moves air mass between columns without moving tracers: at 1.0 an offline
+    # probe measured 0.071 mm/day of water removed from the global budget, and
+    # exactly zero with the term off (amip_runs/waterleak_1113).  1.0 = the
+    # behaviour before this switch existed, byte-identical, and is KEPT as the
+    # default pending the project owner's decision; 0.0 = term off.
+    # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION.
+    mpas_ps_hyperdiff_scale: float = 1.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -2681,6 +2691,13 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "dycore.mpas_div_damp4_scale must be a finite number >= 0, "
                 f"got {_dd4!r}")
+        # Same reason: this scale multiplies the surface-pressure tendency.
+        _psh = getattr(d, "mpas_ps_hyperdiff_scale", 1.0)
+        if (not isinstance(_psh, (int, float)) or isinstance(_psh, bool)
+                or not math.isfinite(_psh) or _psh < 0):
+            errors.append(
+                "dycore.mpas_ps_hyperdiff_scale must be a finite number >= 0, "
+                f"got {_psh!r}")
         # Dynamical-core axis membership.  Mirror the gate in
         # ``atmosphere.dynamics.resolve_solver_name`` so a typo fails here, at
         # config-validation time, instead of deep in the solver factory at JIT.
@@ -4318,6 +4335,17 @@ class ExperimentConfig(NamedTuple):
                 "and the lat-lon C-grid PE only; on "
                 f"discretization={d.discretization!r}/model_type={d.model_type!r}/"
                 f"grid_type={g.grid_type!r} it would be silently inert")
+        # Only the hydrostatic MPAS dycore has the surface-pressure
+        # hyperdiffusion this scales; 1.0 is the no-change default.
+        _pshs = getattr(d, "mpas_ps_hyperdiff_scale", 1.0)
+        if (isinstance(_pshs, (int, float)) and not isinstance(_pshs, bool)
+                and _pshs != 1.0
+                and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
+            errors.append(
+                "dycore.mpas_ps_hyperdiff_scale is wired into the hydrostatic MPAS "
+                "dycore only; on "
+                f"discretization={d.discretization!r}/model_type={d.model_type!r} "
+                "it would be silently inert")
         # Names must be known per-mass water/number tracers (typo guard; the
         # dycore skips a valid name its state does not carry).  No inertness
         # error: the default is non-empty and, like mpas_nu_vert4_T, simply

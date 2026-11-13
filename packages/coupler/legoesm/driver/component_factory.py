@@ -1153,7 +1153,9 @@ def create_atmosphere_dycore(
         cfg = MPASPrimitiveEquationConfig(
             nu_del2=diff.A_h,
             nu_del4=diff.hyperdiff,
-            nu_del4_ps=diff.hyperdiff,
+            # Surface-pressure hyperdiffusion: the momentum coefficient times
+            # its own scale (1.0 default = the same coefficient as before).
+            nu_del4_ps=diff.hyperdiff * dc.mpas_ps_hyperdiff_scale,
             K_h=diff.K_h_A,
             # conservation_fixer=False overrides fix_mass=True (lat-lon
             # contract; codex 2026-07-12 round 2 — this branch predates

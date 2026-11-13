@@ -6226,3 +6226,71 @@ def test_land_prescribed_channels_round_trip_and_membership():
         ["--dataset", "analytical"]), parser)).land_prescribed_channels == "ts_lh"
     with pytest.raises(ValueError, match="land_prescribed_channels"):
         cfg._replace(land_prescribed_channels="fluxes_only").validate_strict()
+
+
+def test_mpas_ps_hyperdiff_scale_cli_round_trip_and_validation():
+    """--mpas-ps-hyperdiff-scale reaches DycoreConfig; the default stays 1.0
+    (unchanged behaviour); non-finite / negative values and a non-default
+    value off the hydrostatic MPAS dycore are refused."""
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    assert DycoreConfig().mpas_ps_hyperdiff_scale == 1.0
+    parser = build_arg_parser()
+    assert build_config_from_args(
+        parser.parse_args([])).dycore.mpas_ps_hyperdiff_scale == 1.0
+    for text, want in (("0", 0.0), ("0.5", 0.5)):
+        args = parser.parse_args(["--mpas-ps-hyperdiff-scale", text])
+        assert build_config_from_args(args).dycore.mpas_ps_hyperdiff_scale == want
+    grid = GridConfig(grid_type="mpas", vertical_coord="sigma", nlev=36, resolution=6)
+    mpas = dict(discretization="mpas")
+    for ok in (0.0, 0.5, 1.0, 2.0):
+        ExperimentConfig(dycore=DycoreConfig(mpas_ps_hyperdiff_scale=ok, **mpas),
+                         grid=grid).validate_strict()
+    for bad in (-1.0, "1.0", True, float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="mpas_ps_hyperdiff_scale"):
+            ExperimentConfig(dycore=DycoreConfig(mpas_ps_hyperdiff_scale=bad, **mpas),
+                             grid=grid).validate_strict()
+    # Silently-inert refusal off the one lane that consumes it; the default
+    # 1.0 is accepted there.
+    for lane in (dict(discretization="cdgrid"),
+                 dict(**mpas, model_type="nonhydrostatic")):
+        with pytest.raises(ValueError, match="mpas_ps_hyperdiff_scale"):
+            ExperimentConfig(dycore=DycoreConfig(mpas_ps_hyperdiff_scale=0.0, **lane),
+                             grid=grid).validate_strict()
+
+    def _own_errors(dc):
+        try:
+            ExperimentConfig(dycore=dc, grid=grid).validate_strict()
+        except ValueError as exc:
+            return [ln for ln in str(exc).splitlines()
+                    if "mpas_ps_hyperdiff_scale" in ln]
+        return []
+    assert _own_errors(DycoreConfig(**mpas, model_type="nonhydrostatic")) == []
+
+
+def test_mpas_ps_hyperdiff_scale_reaches_the_dycore_and_only_surface_pressure():
+    """Production deck -> config -> the dycore the run steps: by default the
+    surface-pressure hyperdiffusion coefficient equals the momentum one (the
+    value before the switch existed); the scale multiplies it alone."""
+    from legoesm.driver.component_factory import (compute_diffusion,
+                                                  create_atmosphere_dycore)
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.grids.vertical import make_cam6_l32_levels
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    deck = _repo_root() / "config" / "amip" / "amip_production.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(deck), parser))
+    cfg = build_config_from_args(parser.parse_args([]))
+    assert cfg.dycore.mpas_ps_hyperdiff_scale == 1.0    # deck silent -> default
+    mesh = create_voronoi_mesh(2, lloyd_iterations=5)
+    nu4 = compute_diffusion(mesh, cfg.dycore).hyperdiff
+    assert nu4 > 0.0                                    # non-vacuous
+
+    def built(scale):
+        c = cfg._replace(dycore=cfg.dycore._replace(mpas_ps_hyperdiff_scale=scale))
+        return create_atmosphere_dycore(c, mesh, make_cam6_l32_levels()).config
+    default = create_atmosphere_dycore(cfg, mesh, make_cam6_l32_levels()).config
+    assert default.nu_del4 == default.nu_del4_ps == nu4
+    off, half = built(0.0), built(0.5)
+    assert off.nu_del4_ps == 0.0 and off.nu_del4 == nu4
+    assert half.nu_del4_ps == pytest.approx(0.5 * nu4, rel=1e-12)
+    assert half.nu_del4 == nu4

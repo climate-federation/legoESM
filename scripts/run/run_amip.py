@@ -571,6 +571,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "coefficient, so treat this as a calibration knob. "
                              "Unlike --div-damp-scale / the del2+del4 viscosities, this "
                              "damps only the curl-free mode and leaves balanced flow alone.")
+    parser.add_argument("--mpas-ps-hyperdiff-scale", type=float, default=None,
+                        dest="mpas_ps_hyperdiff_scale",
+                        help="Multiplier on the MPAS hydrostatic dycore's fourth-order "
+                             "hyperdiffusion of SURFACE PRESSURE only (momentum "
+                             "hyperdiffusion untouched; composes with --hyperdiff-scale). "
+                             "1.0 = unchanged behaviour (default), 0 = term off. The "
+                             "term moves air mass between columns without tracers "
+                             "(0.071 mm/day of water lost at 1.0, measured offline).")
     parser.add_argument("--energy-fixer",
                         action=argparse.BooleanOptionalAction,
                         default=_DYCORE_DEFAULTS.energy_fixer,
@@ -2962,6 +2970,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                                      if args.mpas_sponge_del2_top_factor is not None else 1.0),
         mpas_div_damp4_scale=(args.mpas_div_damp4_scale
                               if args.mpas_div_damp4_scale is not None else 0.0),
+        mpas_ps_hyperdiff_scale=(
+            args.mpas_ps_hyperdiff_scale
+            if args.mpas_ps_hyperdiff_scale is not None
+            else _DYCORE_DEFAULTS.mpas_ps_hyperdiff_scale),
         energy_fixer=args.energy_fixer,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
