@@ -2419,9 +2419,8 @@ def test_amip_sota_config_builds_valid_experiment_config():
 
 
 @pytest.mark.parametrize("deck", ["amip_sota.yaml", "amip_realism_c12.yaml"])
-def test_single_process_cube_decks_carry_persistent_dgrid(deck):
-    """The cube AMIP decks carry D-staggered winds between steps (#1028):
-    the per-step cell-centre round trip damps the eddies."""
+def test_historical_cube_decks_select_duo_and_refuse_legacy_setup(deck):
+    """Historical decks select duo and fail rather than run legacy physics."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
     parser.set_defaults(**load_yaml_config(
@@ -2430,12 +2429,14 @@ def test_single_process_cube_decks_carry_persistent_dgrid(deck):
         _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc",
                              "--land-mask-file", "/dummy/lsm.nc"]), parser)
     cfg = build_config_from_args(args)
-    # The lane ModelDriver._enter_persistent_dgrid accepts.
     assert cfg.grid.grid_type == "cubed_sphere"
     assert cfg.dycore.model_type == "hydrostatic"
-    assert cfg.dycore.discretization in ("cdgrid", "centered", "finite_volume")
+    assert cfg.dycore.discretization == "fv3_duo"
     assert cfg.ensemble_size in (None, 1) and not cfg.distributed
     assert cfg.dycore.persistent_dgrid is True
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    with pytest.raises(ValueError, match="fv3_duo"):
+        create_atmosphere_dycore(cfg, None, None)
 
 
 def test_config_yaml_round_trips_authoritative_values():
@@ -3214,7 +3215,7 @@ def test_vertical_form_flag_flows_to_dycore_config():
             vertical_form="bogus")).validate_strict()
     cube = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--grid-type", "cubed_sphere",
-        "--discretization", "cdgrid", "--vertical-form", "as83",
+        "--discretization", "fv3_duo", "--vertical-form", "as83",
     ]), parser))
     with pytest.raises(ValueError, match="vertical_form='as83' is only wired"):
         cube.validate_strict()
@@ -4088,7 +4089,6 @@ def test_bechtold_capdcycl_and_land_rhebc_round_trip():
         assert back.bechtold_use_ifs_land_rhebc is flag
 
 
-
 def test_bechtold_ifs_ascent_and_shallow_nosupply_round_trip():
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.physics_pipeline import _resolve_convection
@@ -4200,7 +4200,7 @@ def test_truncation_conflicting_grid_or_discretization_errors():
     args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
                              parser)
     assert args.grid_type == "cubed_sphere"
-    assert args.discretization == "centered"
+    assert args.discretization == "fv3_duo"
 
 
 def test_explicit_zero_p_top_and_stretching_survive():

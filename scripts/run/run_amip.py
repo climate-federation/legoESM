@@ -2878,12 +2878,14 @@ def dry_run_check_inputs(config: ExperimentConfig,
 
 def _default_discretization_for_grid(grid_type: str) -> str:
     """The dycore discretization to use when the user gave a grid but no
-    ``--discretization``.  The SCVT Voronoi mesh supports only 'mpas'; every
-    other grid defaults to 'centered'.  Shared by ``_postprocess_args`` and
+    ``--discretization``. Cube uses 'fv3_duo', the SCVT Voronoi mesh uses
+    'mpas', and other grids retain 'centered'. Shared by ``_postprocess_args`` and
     ``build_config_from_args`` so a caller that skips postprocess still resolves
     a supported (model_type, discretization, grid_type) triple (codex r2)."""
     if grid_type in ("voronoi", "mpas", "mpas_voronoi", "icosahedral"):
         return "mpas"
+    if grid_type == "cubed_sphere":
+        return "fv3_duo"
     return "centered"
 
 

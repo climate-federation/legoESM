@@ -38,10 +38,6 @@ from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.halo import set_halo_backend
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
-from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-    CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
-    fv3_hydrostatic_tendencies,
-)
 from legoesm.core.operators_cdgrid import (
     center_to_dgrid_vector, interp_corner_to_center)
 from legoesm.driver.compiled_segments import (
@@ -49,9 +45,6 @@ from legoesm.driver.compiled_segments import (
     fix_segment_dry_mass, segment_dry_mass, split_physics_single_rank,
     finalize_split_step, pack_carry)
 from legoesm.driver.sharded_operator_split_step import need_rad_and_time
-from legoesm.driver.tiled_operator_split_step import (
-    make_tiled_operator_split_step, pack_carry_tiled,
-    shard_tiled_split_carry, unpack_carry_tiled)
 
 N, NLEV, KT = 8, 4, 2
 NCOL = 6 * N * N
@@ -153,186 +146,14 @@ def _cc_state(u, v, T, p_s, phis):
         phis=Field(data=phis, name="phis", dims=d2, units="m^2/s^2"))
 
 
-def _build(seed=3):
-    grid = create_cubed_sphere(N)
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    coord = create_sigma_coordinate(NLEV)
-    cfg = CDGridPrimitiveEquationConfig()   # defaults incl. the sponge
-    model = CDGridPrimitiveEquationModel(grid, coord, cfg)
-    u, v, T, p_s, phis, q_v, q_c, q_r = _inputs(seed)
-    state = _cc_state(u, v, T, p_s, phis)
-    carry = pack_carry(
-        state, q_v, q_c, q_r,
-        conv_prog=jnp.zeros((NCOL,)),          # FLAT — exercises the pack
-        held_dT_rad=jnp.zeros_like(T),
-        held_sw_net_sfc=jnp.zeros_like(p_s),
-        held_lw_net_sfc=jnp.zeros_like(p_s),
-        held_sw_up_toa=jnp.zeros_like(p_s),
-        held_lw_up_toa=jnp.zeros_like(p_s),
-        held_sw_down_toa=jnp.zeros_like(p_s),
-        step_index=0,
-        target_mass=segment_dry_mass(
-            p_s, {"q_v": q_v, "q_c": q_c, "q_r": q_r}, grid, coord.dsigma),
-        target_moisture=_global_moisture(q_v, p_s, coord, grid))
-
-    # FLAT (ncol,) sst — the driver's per-column forcing layout; the tiled
-    # factory must pack it grid-shaped (codex round-2), and the SERIAL
-    # reference consumes the SAME packed layout (the column physics
-    # flattens either way; the pack is layout-only).
-    rng_f = np.random.default_rng(seed + 100)
-    sst_flat = jnp.asarray(290.0 + rng_f.standard_normal(NCOL))
-    o3_flat = jnp.asarray(np.abs(
-        1e-6 + 1e-7 * rng_f.standard_normal((NCOL, NLEV))))
-    forcing = SegmentForcing(**{
-        nm: (sst_flat if nm == "sst"
-             else o3_flat if nm == "o3_vmr" else None)
-        for nm in SegmentForcing._fields})
-    statics = build_operator_split_statics(
-        step_unified=_mock_step_unified, forcing=None,
-        lat=grid.grid_lat, lon=grid.grid_lon, dt=DT,
-        tau_equator=None, tau_pole=None, sbm_tau_c=None, sbm_RH_ref=None,
-        C_H=None, C_E=None, albedo_ice=None, albedo_ocean=None,
-        ghg_vmr_override=None, hs_newtonian_relax=None,
-        energy_consistent_moisture_clip=False,
-        do_sat_adjust=True, fix_moisture=True,
-        sigma_full=coord.sigma_full, dsigma=coord.dsigma, grid=grid,
-        owned_mask=None, qv_smooth_coeff=0.0, fric_decay=0.9999,
-        hyperdiffusion_3d=None)
-    return model, cdgrid, coord, cfg, carry, statics, forcing
-
-
-def _serial_split_step(carry, model, cdgrid, coord, cfg, statics):
-    """The serial operator-split composition (the compiled cube
-    ``_single_step`` semantics with the SAME base-cut dynamics the tiled
-    lane runs: cc->D -> RK3 -> corner->cc, fixers externalized)."""
-    u_d0, v_d0 = center_to_dgrid_vector(carry.u, carry.v, cdgrid)
-    d3 = ("face", "x", "y", "level")
-    d2 = ("face", "x", "y")
-    st = FV3HydrostaticState(
-        u_d=Field(data=u_d0, name="u_d", dims=d3, units="m/s"),
-        v_d=Field(data=v_d0, name="v_d", dims=d3, units="m/s"),
-        T=Field(data=carry.T, name="T", dims=d3, units="K"),
-        p_s=Field(data=carry.p_s, name="p_s", dims=d2, units="Pa"),
-        phis=Field(data=carry.phis, name="phis", dims=d2,
-                   units="m^2/s^2"))
-
-    def tendency_fn(s):
-        tend = fv3_hydrostatic_tendencies(s, cdgrid.base, coord, cdgrid, cfg)
-        return FV3HydrostaticState(
-            u_d=s.u_d.replace(data=tend.du_d_dt.data),
-            v_d=s.v_d.replace(data=tend.dv_d_dt.data),
-            T=s.T.replace(data=tend.dT_dt.data),
-            p_s=s.p_s.replace(data=tend.dp_s_dt.data),
-            phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)))
-
-    stepped = ssp_rk3_step(st, tendency_fn, DT)
-    T_new = stepped.T.data
-    u_new = interp_corner_to_center(stepped.u_d.data)
-    v_new = interp_corner_to_center(stepped.v_d.data)
-    p_s_new, _fxm = fix_segment_dry_mass(
-        stepped.p_s.data, carry_moist(carry), carry.target_mass,
-        cdgrid.base, coord.dsigma)
-    carry = carry._replace(**{k: v for k, v in _fxm.items() if v is not None})
-    need_rad, doy, sod = need_rad_and_time(
-        carry.step_index, START_DAY, DT, RAD_UPDATE_STEPS)
-    lz = split_physics_single_rank(
-        carry, T_new, u_new, v_new, p_s_new, need_rad, doy, sod, statics)
-    return finalize_split_step(carry, lz, statics)
-
-
 # ---------------------------------------------------------------------------
 # Pack/shard round-trip (the tile-aware carry/PhysicsState layout)
 # ---------------------------------------------------------------------------
-
-def test_pack_unpack_carry_roundtrip():
-    model, cdgrid, coord, cfg, carry, statics, forcing = _build()
-    assert carry.conv_prog.shape == (NCOL,)           # flattened per-column
-    packed = pack_carry_tiled(carry, N)
-    assert packed.conv_prog.shape == (6, N, N)        # grid-shaped
-    assert packed.T.shape == carry.T.shape            # grid-shaped untouched
-    back = unpack_carry_tiled(packed, N, carry)
-    for name in SegmentCarry._fields:
-        a, b = getattr(back, name), getattr(carry, name)
-        if a is None or not hasattr(a, "shape"):
-            continue
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b),
-                                      err_msg=name)
 
 
 # ---------------------------------------------------------------------------
 # np24 parity: tiled operator-split step vs the serial composition
 # ---------------------------------------------------------------------------
-
-def test_tiled_operator_split_matches_serial():
-    import dataclasses
-    import functools
-
-    mesh = _mesh()
-    model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
-
-    # Serial reference consumes the ORIGINAL (production, flat-per-column)
-    # forcing layout; the tile body re-flattens the column-format leaves,
-    # so BOTH sides feed the mock identical column arrays (see the mock's
-    # o3 layout assertion — the codex round-3 contract).
-    statics_ref = dataclasses.replace(statics, forcing=forcing)
-    ref = carry0
-    for _ in range(N_STEPS):
-        ref = _serial_split_step(ref, model, cdgrid, coord, cfg,
-                                 statics_ref)
-
-    step = make_tiled_operator_split_step(
-        model, mesh, statics, fix_mass=True,
-        rad_update_steps=RAD_UPDATE_STEPS, start_day=START_DAY, kt=KT)
-    tc = shard_tiled_split_carry(carry0, mesh, N)
-    for _ in range(N_STEPS):
-        tc = step(tc, forcing)
-    got = unpack_carry_tiled(tc, N, carry0)
-
-    def _abs(name):
-        a = np.asarray(getattr(got, name))
-        b = np.asarray(getattr(ref, name))
-        assert a.shape == b.shape, name
-        return float(np.max(np.abs(a - b)))
-
-    # Dynamics-affected fields: the documented tiled-vs-serial face-corner
-    # wind class (O(1e-6 abs), the blocked-loop gates' bound) propagated
-    # through the mock physics.  Everything else is column/pointwise and
-    # tracks to fp-reorder.
-    assert _abs("u") < 2e-5
-    assert _abs("v") < 2e-5
-    assert _abs("T") < 1e-4
-    assert _abs("p_s") < 0.06
-    for nm in ("q_v", "q_c", "q_r"):
-        assert _abs(nm) < 1e-9, nm
-    # Per-column physics carry + held-radiation cadence: mock updates are
-    # exact functions of carry/need_rad — bitwise-comparable classes.
-    assert _abs("conv_prog") < 1e-12
-    for nm in ("held_dT_rad", "held_sw_up_toa", "held_lw_up_toa"):
-        assert _abs(nm) < 1e-12, nm
-    assert int(got.step_index) == int(ref.step_index) == N_STEPS
-    # Accumulators (precip from q_r; flux from T) stay in the same classes.
-    # precip_accum carries the saturation adjustment's rain-out (F13):
-    # q-level roundoff scaled by p_s/g ~ 1e4 kg/m2.
-    assert _abs("precip_accum") < 1e-10
-    assert _abs("shflx_accum") < 1e-6
-
-    # Conservation: the tiled moisture fixer (tile-psum global_area_sum)
-    # held the target — global moisture equals the serial run's.
-    from legoesm.core.conservation import compute_global_moisture
-    m_t = float(compute_global_moisture(
-        got.q_v, got.p_s, coord.dsigma, cdgrid.base))
-    m_s = float(compute_global_moisture(
-        ref.q_v, ref.p_s, coord.dsigma, cdgrid.base))
-    assert abs(m_t - m_s) / abs(m_s) < 1e-9
-    # The dry-mass anchor survives on both layouts (F13).  The fixer's
-    # divisor is the grid's storage-dtype area sum while the integral sums
-    # fp64 areas (pre-existing; see test_segment_dry_mass), so the anchor
-    # holds to that mismatch times the per-step correction: measured 2.2e-12.
-    for c in (got, ref):
-        d = float(segment_dry_mass(c.p_s, carry_moist(c), cdgrid.base,
-                                   coord.dsigma))
-        assert abs(d - float(carry0.target_mass)) / float(carry0.target_mass) \
-            < 1e-11, d
 
 
 def test_tiled_psum_branch_requires_explicit_scope():
@@ -364,84 +185,6 @@ def test_tiled_psum_branch_requires_explicit_scope():
         set_halo_backend(prev[0], prev[1])
 
 
-def test_tiled_operator_split_refuses_land_ml():
-    mesh = _mesh()
-    model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
-    carry_land = carry0._replace(land_ml={"T_soil": jnp.zeros((NCOL, 4))})
-    with pytest.raises(NotImplementedError, match="land_ml"):
-        shard_tiled_split_carry(carry_land, mesh, N)
-    step = make_tiled_operator_split_step(
-        model, mesh, statics, fix_mass=True,
-        rad_update_steps=1, start_day=0.0, kt=KT)
-    with pytest.raises(NotImplementedError, match="land_ml"):
-        step(carry_land, forcing)
-
-
-def test_tiled_operator_split_envelope_refusals():
-    mesh = _mesh()
-    model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
-    import dataclasses
-    with pytest.raises(NotImplementedError, match="qv_smooth_coeff"):
-        make_tiled_operator_split_step(
-            model, mesh,
-            dataclasses.replace(statics, qv_smooth_coeff=1e4),
-            fix_mass=True, rad_update_steps=1, start_day=0.0, kt=KT)
-    with pytest.raises(NotImplementedError, match="owned_mask"):
-        make_tiled_operator_split_step(
-            model, mesh,
-            dataclasses.replace(statics,
-                                owned_mask=jnp.ones((6,))),
-            fix_mass=True, rad_update_steps=1, start_day=0.0, kt=KT)
-
-
-def test_tiled_operator_split_refuses_rad_update_steps_above_one():
-    """``rad_update_steps > 1`` must be refused, not silently ignored.
-
-    The step body computes the cadence predicate (``need_rad_and_time``) and
-    passes it to ``statics.step_unified``, but ``build_tile_step_unified`` pins
-    ``static_need_rad=True``, which DELETES the predicate and always takes the
-    radiation branch -- so the knob ran a denser cadence than configured, with
-    no error. Coupled tiled runs raise at the driver dispatch before reaching
-    here, so the silent path was the UNCOUPLED tiled cube run.
-
-    Non-vacuity: the identical call at ``rad_update_steps=1`` builds fine (the
-    sibling tests above all use it), so the refusal is keyed on the knob and
-    not on the fixture being unbuildable.
-    """
-    mesh = _mesh()
-    model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
-    with pytest.raises(NotImplementedError, match="rad_update_steps"):
-        make_tiled_operator_split_step(
-            model, mesh, statics,
-            fix_mass=True, rad_update_steps=2, start_day=0.0, kt=KT)
-    # Same call, cadence 1 -> builds.
-    assert make_tiled_operator_split_step(
-        model, mesh, statics,
-        fix_mass=True, rad_update_steps=1, start_day=0.0, kt=KT) is not None
-
-
-def test_build_tile_step_unified_refuses_column_sharding():
-    """shard_radiation_columns builds a GLOBAL column mesh against the
-    pipeline ncol — nested inside the per-tile shard_map it is wrong or
-    a false refusal (codex round-3 Medium)."""
-    from legoesm.driver.config import ExperimentConfig
-    from legoesm.driver.tiled_operator_split_step import (
-        build_tile_step_unified,
-    )
-
-    grid = create_cubed_sphere(N)
-    coord = create_sigma_coordinate(NLEV)
-    cfg = ExperimentConfig()
-    cfg = cfg._replace(
-        grid=cfg.grid._replace(grid_type="cubed_sphere"),
-        radiation="gray", convection="none", turbulence="none",
-        microphysics="none", gravity_wave_drag="none", cloud_scheme="none",
-        shard_radiation_columns=True)
-    with pytest.raises(NotImplementedError,
-                       match="shard_radiation_columns"):
-        build_tile_step_unified(grid, coord, cfg, KT)
-
-
 def _mock_area_step(*args, a0, **kwargs):
     """The column mock with an extra drying proportional to the cell area the
     lane hands in (Sundqvist's GFS area blend reads it the same way)."""
@@ -452,30 +195,3 @@ def _mock_area_step(*args, a0, **kwargs):
     extra = -1e-9 * (jnp.asarray(area).reshape(T.shape[:-1]) / a0)[..., None]
     out.dq_v_dt = out.dq_v_dt + extra
     return (out, *rest)
-
-
-def test_each_tile_gets_its_own_cell_areas():
-    """Item 9 (user 2026-10-27): the tiled cube shares ONE tile-ncol build, so
-    each tile must hand physics its OWN cell areas.  q_v (column-local) tracks
-    the serial run only if every tile received its own slice of grid.area."""
-    import dataclasses
-    import functools
-
-    mesh = _mesh()
-    model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
-    statics = dataclasses.replace(statics, step_unified=functools.partial(
-        _mock_area_step, a0=float(np.mean(np.asarray(statics.grid.area)))))
-    statics_ref = dataclasses.replace(statics, forcing=forcing,
-                                      cell_area=statics.grid.area)
-    ref = carry0
-    for _ in range(N_STEPS):
-        ref = _serial_split_step(ref, model, cdgrid, coord, cfg, statics_ref)
-    step = make_tiled_operator_split_step(
-        model, mesh, statics, fix_mass=True,
-        rad_update_steps=RAD_UPDATE_STEPS, start_day=START_DAY, kt=KT)
-    tc = shard_tiled_split_carry(carry0, mesh, N)
-    for _ in range(N_STEPS):
-        tc = step(tc, forcing)
-    got = unpack_carry_tiled(tc, N, carry0)
-    assert float(np.ptp(np.asarray(statics.grid.area))) > 0.0
-    assert float(np.max(np.abs(np.asarray(got.q_v) - np.asarray(ref.q_v)))) < 1e-9

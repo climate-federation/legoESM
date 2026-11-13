@@ -229,32 +229,3 @@ def test_mpas_step_positivity_global_residual_is_area_weighted():
     dp = jnp.full((nc,), 1.0e5, dtype=jnp.float64)[:, None] * jnp.asarray(
         sigma.dsigma, dtype=jnp.float64)
     _area_budget_check(qv, out.tracers["q_v"].data, dp, mesh.areaCell, dp)
-
-
-def test_cube_step_positivity_global_residual_is_area_weighted():
-    """codex 2026-10-02 P2: the cube (C-D grid) lane's own step."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationConfig, CDGridPrimitiveEquationModel)
-    from legoesm.core.state import FV3HydrostaticState
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    n, nlev = 8, 5
-    base = create_cubed_sphere(n)
-    sigma = create_sigma_coordinate(nlev)
-    model = CDGridPrimitiveEquationModel(
-        base, sigma, CDGridPrimitiveEquationConfig(fix_mass=False))
-    area = jnp.asarray(model.grid.grid_area)
-    f, i, j = (int(v) for v in jnp.unravel_index(jnp.argmin(area), area.shape))
-    qv = jnp.full((6, n, n, nlev), 5.0e-3,
-                  dtype=jnp.float64).at[f, i, j, :].set(-4.0e-3)
-    state = FV3HydrostaticState(
-        u_d=Field(jnp.zeros((6, n + 1, n + 1, nlev)), name="u_d"),
-        v_d=Field(jnp.zeros((6, n + 1, n + 1, nlev)), name="v_d"),
-        T=Field(jnp.full((6, n, n, nlev), 300.0), name="T"),
-        p_s=Field(jnp.full((6, n, n), 1.0e5), name="p_s"),
-        phis=Field(jnp.zeros((6, n, n)), name="phis"),
-        tracers={"q_v": Field(qv, name="q_v")},
-    )
-    out = model.step(state, 60.0)
-    dp = jnp.full((6, n, n), 1.0e5, dtype=jnp.float64)[..., None] * jnp.asarray(
-        sigma.dsigma, dtype=jnp.float64)
-    _area_budget_check(qv, out.tracers["q_v"].data, dp, area, dp)

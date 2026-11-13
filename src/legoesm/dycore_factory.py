@@ -19,7 +19,7 @@ from legoesm.registry import DYCORE_REGISTRY, UnknownRegistryEntryError
 def create_dycore(name: str, *args: Any, **kwargs: Any):
     """Resolve a dycore by *name*, instantiate it, and validate the contract.
 
-    ``create_dycore("cdgrid_shallow_water", grid, config)`` -> a validated dycore.
+    ``create_dycore("fv3_duo_primitive_equations", grid, config)`` -> a validated dycore.
     Extra args/kwargs are forwarded to the resolved factory (``Model(grid,
     config)``).
 

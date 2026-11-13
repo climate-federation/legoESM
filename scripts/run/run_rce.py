@@ -129,8 +129,8 @@ def main():
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon", "voronoi"],
                         help="Horizontal grid type")
-    parser.add_argument("--discretization", type=str, default="cdgrid",
-                        choices=["cdgrid", "centered", "spectral",
+    parser.add_argument("--discretization", type=str, default="fv3_duo",
+                        choices=["fv3_duo", "cdgrid", "centered", "spectral",
                                  "latlon_fv", "finite_volume",
                                  "latlon_cgrid", "mpas"],
                         help="Discretization method.  ``latlon_fv`` is a "
@@ -139,9 +139,9 @@ def main():
                              "C-grid solver); using it implies the "
                              "lat-lon grid.  ``finite_volume`` on its own "
                              "stays on whatever ``--grid-type`` is "
-                             "selected (e.g. cubed_sphere → CDGrid FV). "
-                             "``centered`` and ``latlon_cgrid`` are "
-                             "supported aliases on cubed_sphere/latlon "
+                             "selected. Cube requires fv3_duo and refuses the "
+                             "unported RCE adapter. ``centered`` and ``latlon_cgrid`` are "
+                             "supported on latlon "
                              "and latlon respectively.")
     parser.add_argument("--truncation", type=int, default=None,
                         help="Spectral truncation (T21, T42, etc.). Sets grid_type=gaussian.")

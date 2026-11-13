@@ -266,61 +266,6 @@ class TestMPASShallowWater:
 # 1b  Hydrostatic PE — CD-grid (C4, 5 levels)
 # ============================================================================
 
-class TestCDGridPE:
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationModel,
-        )
-        from legoesm.core.state import FV3HydrostaticState
-
-        n = 4
-        nlev = 5
-        base = create_cubed_sphere(n)
-        sigma = create_sigma_coordinate(nlev)
-        self.model = CDGridPrimitiveEquationModel(base, sigma)
-        self.dt = 60.0
-
-        # Isothermal at-rest state
-        T_data = 250.0 * jnp.ones((6, n, n, nlev))
-        key = jax.random.PRNGKey(10)
-        T_data = T_data + 1.0 * jax.random.normal(key, T_data.shape)
-        self.state = FV3HydrostaticState(
-            u_d=Field(jnp.zeros((6, n + 1, n + 1, nlev)), name="u_d"),
-            v_d=Field(jnp.zeros((6, n + 1, n + 1, nlev)), name="v_d"),
-            T=Field(T_data, name="T"),
-            p_s=Field(1e5 * jnp.ones((6, n, n)), name="p_s"),
-            phis=Field(jnp.zeros((6, n, n)), name="phis"),
-        )
-        self.n = n
-        self.nlev = nlev
-
-    def test_grad_single_step(self):
-        model, state, dt = self.model, self.state, self.dt
-
-        def loss(T_data):
-            s = state._replace(T=state.T.replace(data=T_data))
-            out = model.step(s, dt)
-            return jnp.sum(out.T.data ** 2)
-
-        grad = jax.grad(loss)(state.T.data)
-        assert_gradient_ok(grad, "CDGrid PE single step")
-
-    def test_grad_3_steps(self):
-        model, state, dt = self.model, self.state, self.dt
-
-        def loss(T_data):
-            s = state._replace(T=state.T.replace(data=T_data))
-            def body(carry, _):
-                return model.step(carry, dt), None
-            s_final, _ = jax.lax.scan(body, s, None, length=3)
-            return jnp.sum(s_final.T.data ** 2)
-
-        grad = jax.grad(loss)(state.T.data)
-        assert_gradient_ok(grad, "CDGrid PE 3 steps")
 
 
 # ============================================================================
@@ -389,64 +334,6 @@ class TestLatLonPE:
 # 1c  Nonhydrostatic Compressible Euler — CD-grid (C4, 5 levels)
 # ============================================================================
 
-class TestCompressibleEuler:
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.grids.vertical import create_height_coordinate, compute_terrain_metric
-        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
-            CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
-        )
-        from legoesm.core.state import NonHydrostaticState
-
-        n = 4
-        nlev = 5
-        H = 30000.0  # 30 km model top
-        base = create_cubed_sphere(n)
-        height = create_height_coordinate(nlev, H)
-        z_s = jnp.zeros((6, n, n))
-        terrain = compute_terrain_metric(z_s, height)
-        config = CDGridCompressibleEulerConfig(use_coriolis=False)
-        self.model = CDGridCompressibleEulerModel(base, height, terrain, config)
-        self.dt = 1.0  # small dt for compressible
-
-        key = jax.random.PRNGKey(20)
-        theta_prime = 0.5 * jax.random.normal(key, (6, n, n, nlev))
-        self.state = NonHydrostaticState(
-            u=Field(jnp.zeros((6, n, n, nlev)), name="u"),
-            v=Field(jnp.zeros((6, n, n, nlev)), name="v"),
-            w=Field(jnp.zeros((6, n, n, nlev + 1)), name="w"),
-            theta_prime=Field(theta_prime, name="theta_prime"),
-            rho_prime=Field(jnp.zeros((6, n, n, nlev)), name="rho_prime"),
-            phis=Field(jnp.zeros((6, n, n)), name="phis"),
-            tracers=Field(jnp.zeros((6, n, n, nlev, 0)), name="tracers"),
-        )
-
-    def test_grad_single_step(self):
-        model, state, dt = self.model, self.state, self.dt
-
-        def loss(theta_data):
-            s = state._replace(theta_prime=state.theta_prime.replace(data=theta_data))
-            out = model.step(s, dt)
-            return jnp.sum(out.theta_prime.data ** 2)
-
-        grad = jax.grad(loss)(state.theta_prime.data)
-        assert_gradient_ok(grad, "CompEuler single step")
-
-    def test_grad_3_steps(self):
-        model, state, dt = self.model, self.state, self.dt
-
-        def loss(theta_data):
-            s = state._replace(
-                theta_prime=state.theta_prime.replace(data=theta_data))
-            def body(carry, _):
-                return model.step(carry, dt), None
-            s_final, _ = jax.lax.scan(body, s, None, length=3)
-            return jnp.sum(s_final.theta_prime.data ** 2)
-
-        grad = jax.grad(loss)(state.theta_prime.data)
-        assert_gradient_ok(grad, "CompEuler 3 steps")
 
 
 # ============================================================================

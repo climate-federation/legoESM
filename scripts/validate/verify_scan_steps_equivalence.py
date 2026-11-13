@@ -98,34 +98,7 @@ def probe_icosahedral_i4():
 
 
 def probe_cubed_sphere_c24():
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-    from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
-        hydrostatic_to_fv3,
-    )
-    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
-    grid = create_cubed_sphere(24)
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    sigma = create_sigma_coordinate(8)
-    state_cc = held_suarez_init(grid, sigma, T_init=280.0)
-    state0 = hydrostatic_to_fv3(state_cc, cdgrid)
-    config = CDGridPrimitiveEquationConfig()
-    model = CDGridPrimitiveEquationModel(grid, sigma, config)
-    dt = 300.0
-    N = 8
-
-    state_loop = state0
-    for _ in range(N):
-        state_loop = model.step(state_loop, dt)
-    jax.block_until_ready(jax.tree.leaves(state_loop))
-
-    chunk = _make_scan_chunk(model, dt, N)
-    state_scan = chunk(state0)
-    jax.block_until_ready(jax.tree.leaves(state_scan))
-
-    return _diff_pytrees(state_loop, state_scan)
+    raise ValueError("fv3_duo replaces this retired cube atmosphere adapter; no duo equivalent is wired here.")
 
 
 def main():

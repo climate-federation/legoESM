@@ -161,41 +161,6 @@ class TestPhysicsStateThreading:
 # Task 3: Dycore step with target mass
 # ===========================================================================
 
-class TestDycoreTargetMass:
-
-    def test_pe_grad_with_mass_fixer(self, grid, sigma):
-        """PE dycore with mass fixer is differentiable."""
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
-        )
-
-        shape_3d = (6, N, N, NLEV)
-        shape_2d = (6, N, N)
-        dims_3d = ("face", "x", "y", "level")
-        dims_2d = ("face", "x", "y")
-        state = HydrostaticState(
-            u=Field(data=jnp.ones(shape_3d) * 5.0, name="u", dims=dims_3d, units="m/s"),
-            v=Field(data=jnp.ones(shape_3d) * 2.0, name="v", dims=dims_3d, units="m/s"),
-            T=Field(data=jnp.ones(shape_3d) * 280.0, name="T", dims=dims_3d, units="K"),
-            p_s=Field(data=jnp.ones(shape_2d) * 1e5, name="p_s", dims=dims_2d, units="Pa"),
-            phis=Field(data=jnp.zeros(shape_2d), name="phis", dims=dims_2d, units="m^2/s^2"),
-        )
-
-        config = CDGridPrimitiveEquationConfig(
-            hyperdiff_coeff=0.0,
-            use_conservation_fixer=False,
-        )
-        model = CDGridPrimitiveEquationModel(grid, sigma, config)
-
-        def loss(u_data):
-            s = state._replace(u=state.u.replace(data=u_data))
-            s = model.step(s, 60.0)
-            return jnp.mean(s.T.data ** 2)
-
-        grads = jax.grad(loss)(state.u.data)
-        assert jnp.all(jnp.isfinite(grads))
-        assert not jnp.allclose(grads, 0.0)
-
 
 # ===========================================================================
 # Task 4 & 5: Coupler differentiability

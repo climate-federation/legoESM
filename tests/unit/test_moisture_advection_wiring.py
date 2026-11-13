@@ -168,57 +168,6 @@ def test_segment_legacy_path_ignores_dycore_tracers():
 
 # --- seam 3: the real cdgrid dycore advects an attached tracer --------------
 
-def test_cdgrid_step_advects_attached_tracer():
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationModel,
-    )
-    from legoesm.grids.vertical import create_sigma_coordinate
-    n, nlev = 12, 8
-    grid = create_cubed_sphere(n)
-    model = CDGridPrimitiveEquationModel(grid, create_sigma_coordinate(nlev))
-
-    def mkstate(u0):
-        s3 = (6, n, n, nlev)
-        x = jnp.arange(n)
-        X, Y = jnp.meshgrid(x, x, indexing="ij")
-        blob = 1e-3 * jnp.exp(-((X - n / 2) ** 2 + (Y - n / 2) ** 2) / 8.0)
-        q = jnp.zeros(s3).at[0, :, :, -1].set(blob)
-        def F(d, nm, dims, un):
-            return Field(data=d, name=nm, dims=dims, units=un)
-        d3, d2 = ("face", "x", "y", "level"), ("face", "x", "y")
-        return HydrostaticState(
-            u=F(jnp.full(s3, u0), "u", d3, "m/s"),
-            v=F(jnp.zeros(s3), "v", d3, "m/s"),
-            T=F(jnp.full(s3, 280.0), "T", d3, "K"),
-            p_s=F(jnp.full((6, n, n), 1.0e5), "p_s", d2, "Pa"),
-            phis=F(jnp.zeros((6, n, n)), "phis", d2, "m2/s2"),
-            tracers={"q_v": F(q, "q_v", d3, "kg/kg")})
-
-    # Wind on: the blob moves (advection is wired).  Wind off: bit-exact no-op.
-    #
-    # We deliberately do NOT assert mass conservation here: the transport is
-    # ADVECTIVE form -(u·∇q), not discretely mass-conserving on the unequal-area
-    # cube, and a plain jnp.mean is neither the conserved integral (∫ q·δp·dA)
-    # nor area-weighted — a tight mean-tolerance check would be misleading (it
-    # passes trivially because one 150 s step moves the blob << a cell).  Budget
-    # closure is fix_moisture's job; a proper area+mass-weighted total-water
-    # closure test belongs with the flux-form follow-up (#771).  Here we assert
-    # only the wiring: the blob moved, and it stayed finite/bounded (no blow-up).
-    s = mkstate(20.0)
-    s1 = model.step(s, 150.0)
-    dq = jnp.abs(s1.tracers["q_v"].data - s.tracers["q_v"].data)
-    assert float(jnp.max(dq)) > 1e-8            # advection acted
-    q1 = s1.tracers["q_v"].data
-    assert bool(jnp.all(jnp.isfinite(q1)))      # no NaN/Inf blow-up
-    assert float(jnp.max(q1)) < 5.0 * float(jnp.max(s.tracers["q_v"].data))
-
-    s = mkstate(0.0)
-    s1 = model.step(s, 150.0)
-    # Zero wind: roundoff-only change (float32 default; ~1e-11 observed),
-    # >2 orders below the wind-on signal.
-    assert float(jnp.max(jnp.abs(
-        s1.tracers["q_v"].data - s.tracers["q_v"].data))) < 1e-9
-
 
 # --- driver gate -------------------------------------------------------------
 

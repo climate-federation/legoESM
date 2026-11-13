@@ -543,9 +543,9 @@ _LAND_TILE_ONLY = ("transient_land_cover", "land_cover_surfdata",
 
 # Grid -> hydrostatic-dycore discretization when the deck names none.  lat-lon
 # uses the Arakawa C-grid so the atm co-locates with the C-grid 3-D ocean
-# (--ocean dynamic); cube uses cdgrid; voronoi -> MPAS; gaussian -> spectral.  voronoi/gaussian couple to the (grid-agnostic) slab ocean.
+# (--ocean dynamic); cube uses fv3_duo; voronoi -> MPAS; gaussian -> spectral.  voronoi/gaussian couple to the (grid-agnostic) slab ocean.
 _COUPLED_DISCRETIZATION = {
-    "latlon": "latlon_cgrid", "cubed_sphere": "cdgrid", "gaussian": "spectral",
+    "latlon": "latlon_cgrid", "cubed_sphere": "fv3_duo", "gaussian": "spectral",
     "voronoi": "mpas",
 }
 

@@ -84,44 +84,7 @@ def _auto_dt(n_grid: int) -> float:
 
 
 def _build_model_and_state(n_grid: int, n_levels: int, dtype):
-    """Construct the C{n_grid}/L{n_levels} FV3 model + baroclinic-wave IC.
-
-    Mirrors the cubed-sphere branch of run_levante_gpu_scaling.run_benchmark
-    so we validate the production SPMD construction, not a bespoke one.
-    """
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-    from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationModel,
-        CDGridPrimitiveEquationConfig,
-        hydrostatic_to_fv3,
-    )
-    from tests.test_cases.baroclinic_wave import baroclinic_wave_init
-
-    grid = create_cubed_sphere(n_grid)
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    sigma = create_sigma_coordinate(n_levels)
-
-    # Conservation fixers ON: their global all-reduces are exactly the
-    # collective paths we want to stress under sharding.
-    config = CDGridPrimitiveEquationConfig(
-        use_conservation_fixer=True,
-        fix_mass=True,
-        anchor_mass_to_initial=True,
-        zero_mean_ps_tendency=False,
-    )
-    model = CDGridPrimitiveEquationModel(grid, sigma, config)
-    state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
-    state = hydrostatic_to_fv3(state_cc, cdgrid)
-
-    def _cast(x):
-        if isinstance(x, jnp.ndarray) and jnp.issubdtype(x.dtype, jnp.floating):
-            return x.astype(dtype)
-        return x
-
-    state = jax.tree.map(_cast, state)
-    return model, state, n_levels
+    raise ValueError("fv3_duo replaces this retired cube atmosphere adapter; no duo equivalent is wired here.")
 
 
 def _run_reference(n_grid, n_levels, dt, steps):

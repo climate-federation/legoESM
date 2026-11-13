@@ -12,10 +12,6 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-    CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
-    cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
-)
 from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterModel, CDGridShallowWaterConfig, CDGridShallowWaterState,
 )
@@ -68,29 +64,6 @@ def _sw_enstrophy(state, grid) -> jnp.ndarray:
     abs_vor = zeta + grid.f
     h = jnp.clip(state.h.data, 1.0, None)
     return jnp.sum(0.5 * abs_vor**2 / h * grid.area)
-
-
-class TestRestStateInvariance:
-    """Resting hydrostatic stratification should have near-zero dynamics."""
-
-    def test_zero_wind_hydrostatic_stratification_tendencies_near_zero(self):
-        grid = create_cubed_sphere(8)
-        sigma = create_sigma_coordinate(12)
-        state = _make_stratified_rest_state(grid, sigma)
-        config = PrimitiveEquationConfig(
-            hyperdiff_coeff=0.0,
-            hyperdiff_ps_coeff=0.0,
-            use_conservation_fixer=False,
-        )
-
-        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        cdgrid = create_cubed_sphere_cdgrid(grid)
-        tend = hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
-
-        assert float(jnp.max(jnp.abs(tend.du_dt.data))) < 1e-7
-        assert float(jnp.max(jnp.abs(tend.dv_dt.data))) < 1e-7
-        assert float(jnp.max(jnp.abs(tend.dT_dt.data))) < 1e-7
-        assert float(jnp.max(jnp.abs(tend.dp_s_dt.data))) < 1e-7
 
 
 class TestSolidBodyRotationBehavior:
