@@ -17,6 +17,10 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.precision import with_precision_override
+from legoesm.atmosphere.physics.microphysics.config import (
+    MICROPHYSICS_PRECISION_MODULE,
+)
 from legoesm.core.conservation import WATER_MASS_SPECIES
 from legoesm.core.state import (
     HydrostaticState,
@@ -76,6 +80,19 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 
+def _with_kernel_precision(select):
+    """Wrap the kernel ``select`` returns in :func:`with_precision_override`
+    for ``MICROPHYSICS_PRECISION_MODULE`` (None kept)."""
+    def get(config):
+        name, fn, scheme_config = select(config)
+        if fn is not None:
+            fn = with_precision_override(MICROPHYSICS_PRECISION_MODULE)(fn)
+        return name, fn, scheme_config
+    get.__doc__ = select.__doc__
+    return get
+
+
+@_with_kernel_precision
 def _get_microphysics_fn(config: MicrophysicsConfig):
     """Select the microphysics backend based on config.scheme.
 
@@ -83,6 +100,8 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
     -------
     scheme_name : str
     micro_fn : callable or None
+        wrapped by :func:`with_precision_override` for
+        ``MICROPHYSICS_PRECISION_MODULE``
     scheme_config : NamedTuple or None
     """
     if config.scheme == "kessler":

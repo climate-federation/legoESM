@@ -71,7 +71,7 @@ def _patch_land_loaders(monkeypatch):
 def _build_driver(tmpdir: str, days: float, *, turbulence: str = "none",
                   beta_soil: bool = False, radiation: str = "gray",
                   use_multilayer: bool = True, distributed: bool = False,
-                  **extra) -> ModelDriver:
+                  precision: str = "fp64", **extra) -> ModelDriver:
     # The default land scheme is the two-leaf canopy; it needs the real
     # per-PFT surfdata (soil hydraulics still come from the synthetic map).
     if use_multilayer and "land_surface_scheme" not in extra:
@@ -82,7 +82,7 @@ def _build_driver(tmpdir: str, days: float, *, turbulence: str = "none",
         dycore=DycoreConfig(discretization="mpas", dt=DT),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=1),
         days=days, dataset="analytical", radiation=radiation,
-        convection="none", turbulence=turbulence, precision="fp64",
+        convection="none", turbulence=turbulence, precision=precision,
         distributed=distributed,
         land_mask_path="synthetic.nc",      # truthy -> land block (loader patched)
         use_multilayer_land=use_multilayer,
@@ -832,3 +832,94 @@ def test_radiation_upward_lw_is_the_lw_the_land_lost(monkeypatch, tmp_path):
                                    atol=1e-9)
         checked += int(land.sum())
     assert checked > 0
+
+
+@pytest.mark.parametrize("land_prec, want", [("policy", jnp.float32),
+                                             ("fp64", jnp.float64)])
+def test_land_compute_precision_runs_land_in_fp64(monkeypatch, tmp_path,
+                                                  land_prec, want):
+    """In an fp32 run, land_compute_precision='fp64' hands the land step
+    float64 forcing (the atmosphere's lowest-level T is fp32 storage) and the
+    carried land state comes back at its own dtype."""
+    import legoesm.land.multilayer_land as ML
+    _patch_land_loaders(monkeypatch)
+    seen = []
+    real = ML.step_multilayer_land_with_diagnostics
+
+    def spy(state, forcing, *a, **k):
+        seen.append((forcing.T_lowest.dtype, state.T_soil.dtype))
+        return real(state, forcing, *a, **k)
+
+    monkeypatch.setattr(ML, "step_multilayer_land_with_diagnostics", spy)
+    # default land scheme = the production two-leaf canopy
+    d = _build_driver(str(tmp_path), TWO_STEPS_DAYS, precision="fp32",
+                      land_compute_precision=land_prec)
+    T_soil_dtype = d._land_ml_state.T_soil.dtype
+    assert d.run() == "COMPLETED"
+    assert seen, "land step never traced"
+    if want == jnp.float64:
+        assert all(f == want for f, _ in seen), seen
+    else:
+        # only the first trace: under JAX_ENABLE_X64 an fp32 MPAS run's
+        # atmosphere already turns float64 after step 1, switch or not
+        assert seen[0][0] == jnp.float32, seen
+    assert d._land_ml_state.T_soil.dtype == T_soil_dtype
+    assert np.all(np.isfinite(np.asarray(d._land_ml_state.T_soil)))
+
+
+def test_land_compute_precision_fp64_refused_without_multilayer_land():
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=MPAS_RES,
+                        nlev=MPAS_NLEV, vertical_coord="hybrid"),
+        dycore=DycoreConfig(discretization="mpas", dt=DT),
+        dataset="analytical", land_compute_precision="fp64")
+    with pytest.raises(ValueError, match="land_compute_precision"):
+        cfg.validate_strict()
+
+
+@pytest.mark.parametrize("micro_prec, want", [("policy", jnp.float32),
+                                              ("fp64", jnp.float64)])
+def test_microphysics_compute_precision_runs_microphysics_in_fp64(
+        monkeypatch, tmp_path, micro_prec, want):
+    """In an fp32 MPAS run, microphysics_compute_precision='fp64' hands the
+    microphysics kernel float64 inputs; the atmosphere stays float32."""
+    import legoesm.atmosphere.physics.microphysics.integration as MI
+    seen = []
+    real = MI.kessler_microphysics
+
+    def spy(*a, **k):
+        seen.append((a[0] if a else k["T"]).dtype)
+        return real(*a, **k)
+
+    monkeypatch.setattr(MI, "kessler_microphysics", spy)
+    _patch_land_loaders(monkeypatch)
+    d = _build_driver(str(tmp_path), TWO_STEPS_DAYS, use_multilayer=False,
+                      precision="fp32", microphysics="kessler",
+                      microphysics_compute_precision=micro_prec)
+    assert d.run() == "COMPLETED"
+    assert seen, "microphysics never traced"
+    assert all(t == want for t in seen), seen
+    assert np.all(np.isfinite(np.asarray(d.state.T.data)))
+
+
+def test_microphysics_compute_precision_fp64_refused_without_microphysics():
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=MPAS_RES,
+                        nlev=MPAS_NLEV, vertical_coord="hybrid"),
+        dycore=DycoreConfig(discretization="mpas", dt=DT),
+        dataset="analytical", microphysics_compute_precision="fp64")
+    with pytest.raises(ValueError, match="microphysics_compute_precision"):
+        cfg.validate_strict()
+
+
+def test_compute_precision_fp64_refused_on_backend_without_fp64(monkeypatch,
+                                                                tmp_path):
+    """A backend that cannot run float64 must refuse, not silently run the
+    'fp64' module in float32."""
+    import legoesm.core.precision as P
+    _patch_land_loaders(monkeypatch)
+    monkeypatch.setattr(P, "_clamp_to_backend", lambda dt: jnp.float32)
+    with pytest.raises(RuntimeError, match="microphysics compute precision"):
+        _build_driver(str(tmp_path), TWO_STEPS_DAYS, use_multilayer=False,
+                      precision="fp32", microphysics="kessler",
+                      microphysics_compute_precision="fp64")

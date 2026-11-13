@@ -2657,6 +2657,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--precision", type=str, default="fp32",
                         choices=["fp32", "fp64", "mixed"],
                         help="Precision mode: fp32, fp64, or mixed")
+    parser.add_argument("--land-compute-precision", type=str, default="policy",
+                        choices=["policy", "fp64"],
+                        help="'fp64' runs the MPAS multilayer land step in "
+                             "float64 inside a lower-precision run; 'policy' "
+                             "follows --precision")
+    parser.add_argument("--microphysics-compute-precision", type=str,
+                        default="policy", choices=["policy", "fp64"],
+                        help="'fp64' runs the microphysics in float64 inside "
+                             "a lower-precision run; 'policy' follows "
+                             "--precision")
     parser.add_argument("--gradient-checkpoint", action="store_true", default=False,
                         help="Enable gradient checkpointing for O(sqrt(N)) AD memory")
     parser.add_argument("--profile", type=int, default=0, metavar="N_STEPS",
@@ -3361,6 +3371,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         physics_parameterization_layers=args.physics_parameterization_layers,
         physics_parameterization_seed=args.physics_parameterization_seed,
         precision=args.precision,
+        land_compute_precision=args.land_compute_precision,
+        microphysics_compute_precision=args.microphysics_compute_precision,
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         distributed_mode=args.distributed_mode,
