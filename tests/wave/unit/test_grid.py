@@ -72,3 +72,12 @@ def test_spectral_integral_ignores_land(tiny_config, tiny_state):
     assert bool(jnp.all(total > 0))
     assert bool(jnp.all(spectral_integral(tiny_state.spectra, env, land) == 0))
     assert wave_cell_area(env).shape[:3] == tiny_state.mask.shape
+
+
+def test_two_cell_axes_have_positive_physical_spacing(tiny_config):
+    config = tiny_config._replace(grid=tiny_config.grid._replace(
+        lon_deg=(90.0, 270.0), lat_deg=(45.0, -45.0)))
+    env = prepare_env(config, jnp.full((1, 2, 2), 50.0))
+    np.testing.assert_allclose(np.asarray(env.dlon), np.pi, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(env.dlat), np.pi / 2, rtol=1e-6)
+    assert bool(jnp.all(wave_cell_area(env) > 0))

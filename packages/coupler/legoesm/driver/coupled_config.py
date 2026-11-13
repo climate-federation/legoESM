@@ -198,7 +198,7 @@ class CoupledConfig(NamedTuple):
     # --- Spectral wave component (optional) ---------------------------------
     # ``wave_mode`` is "off" (default; every existing run is byte-identical) or
     # "active".  Active requires a dynamic 3-D ocean (the depth/mask come from
-    # its H_bathy/land_mask), a WaveConfig, and converted NeuralSWM weights.
+    # its H_bathy/land_mask), a WaveConfig, and converted NeuralSWM weights when networks are enabled.
     # The component is stepped once per coupling_dt with the neutral 10 m wind
     # derived from the coupler's stress and roughness; its surface Stokes-drift
     # magnitude is remapped to the ocean grid and consumed by KPP when

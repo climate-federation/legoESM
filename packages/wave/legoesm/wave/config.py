@@ -167,6 +167,7 @@ class WavePhysicsConfig(NamedTuple):
 class WaveNetworkConfig(NamedTuple):
     """Learned-network shape and sampling settings."""
 
+    # parameterization="none" always selects analytic transport.
     use_transport_networks: bool = True
     parameterization: Literal["mlp", "none"] = "mlp"
     mlp_input_channels: int = 2880
@@ -230,6 +231,9 @@ class WaveConfig(NamedTuple):
         from pathlib import Path
 
         raw = json.loads(Path(path).read_text())
+        unknown = set(raw) - set(cls._fields)
+        if unknown:
+            raise TypeError(f"unknown WaveConfig keys: {sorted(unknown)}")
         grid = WaveGridConfig(**raw["grid"])
         time = WaveTimeConfig(**raw.get("time", {}))
         physics = WavePhysicsConfig(**raw.get("physics", {}))
@@ -277,19 +281,14 @@ class WaveConfig(NamedTuple):
             raise ValueError("wave theta_rad must be uniformly spaced")
         if not np.isclose(abs(spacing[0]) * n_dir, 2.0 * np.pi, rtol=1e-6):
             raise ValueError("wave theta_rad must cover the full circle")
-        if (self.network.parameterization == "none"
-                and self.network.use_transport_networks):
-            raise ValueError(
-                "parameterization 'none' requires use_transport_networks=False; "
-                "otherwise the step applies randomly initialised transport "
-                "networks and is not a physics-only run")
         if self.network.parameterization == "mlp":
             expected = n_dir * n_freq
             if self.network.mlp_input_channels != 4 * expected:
                 raise ValueError(
                     "mlp_input_channels must be 4 * n_directions * n_frequencies "
                     f"({4 * expected}); got {self.network.mlp_input_channels}")
-        if self.network.use_transport_networks:
+        if (self.network.parameterization != "none"
+                and self.network.use_transport_networks):
             if self.network.transport_output_vectors != 2 * n_freq:
                 raise ValueError(
                     "transport_output_vectors must be 2 * n_frequencies "

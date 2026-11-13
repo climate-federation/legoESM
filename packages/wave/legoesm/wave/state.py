@@ -36,4 +36,5 @@ def init_wave_state(
     mask = depth > 0
     spectra = jnp.zeros(
         (depth.shape[0], depth.shape[1], depth.shape[2], n_dir, n_freq), dtype=dtype)
-    return WaveState(spectra=spectra, depth=depth, mask=mask)
+    return WaveState(spectra=spectra, depth=depth, mask=mask,
+                     spatial_phase=jnp.asarray(0, dtype=jnp.int32))

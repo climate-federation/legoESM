@@ -64,7 +64,8 @@ class WaveModel(eqx.Module):
         else:
             raise ValueError(f"unknown wave parameterization {config.network.parameterization!r}")
 
-        if config.network.use_transport_networks:
+        if (config.network.parameterization != "none"
+                and config.network.use_transport_networks):
             self.theta_transport_network = MLP(
                 config.network.transport_input_channels,
                 config.network.transport_output_vectors,
@@ -164,6 +165,7 @@ class WaveModel(eqx.Module):
         return (output, clipped) if audit_clipping else output
 
 
+    @eqx.filter_jit
     def advance(self, state: WaveState, env: WaveEnv, wind_u: jax.Array, wind_v: jax.Array,
                 boundary_condition=None, *, boundary_mask=None, audit_clipping=False):
         """Advance spectrum and persistent spatial-order phase together."""
@@ -172,7 +174,8 @@ class WaveModel(eqx.Module):
                             spatial_phase=state.spatial_phase, audit_clipping=audit_clipping)
         if audit_clipping:
             spectra, clipped = spectra
-        phase = (state.spatial_phase+spatial_event_count(self.config.time)) % 2
+        phase = (jnp.asarray(state.spatial_phase)
+                 + spatial_event_count(self.config.time)) % 2
         result = state._replace(spectra=spectra, spatial_phase=phase)
         return (result, {"clipping_mass": clipped}) if audit_clipping else result
 

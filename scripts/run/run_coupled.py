@@ -727,7 +727,7 @@ def build_parser():
     parser.add_argument("--wave-mode", choices=["off", "active"], default="off",
                         help="Coupled spectral wave component "
                              "(CoupledConfig.wave_mode). Default off. 'active' "
-                             "requires --wave-config and --wave-weights and a "
+                             "requires --wave-config and a "
                              "dynamic 3-D ocean (depth/mask come from it).")
     parser.add_argument("--wave-config", default="",
                         help="JSON run deck for the wave component (grid, time "
@@ -735,7 +735,8 @@ def build_parser():
                              "legoesm.wave.WaveConfig.from_json.")
     parser.add_argument("--wave-weights", default="",
                         help="Converted NeuralSWM weights (.npz) from "
-                             "scripts/data/convert_neuralswm_checkpoint.py.")
+                             "scripts/data/convert_neuralswm_checkpoint.py. Required "
+                             "when the wave configuration enables neural networks.")
     parser.add_argument("--kpp-langmuir", action="store_true",
                         help="Enable the Langmuir enhancement on the dynamic "
                              "ocean's EXISTING KPP vertical-mixing stack, "
@@ -1334,12 +1335,14 @@ def main(argv=None, *, build_only=False):
     overrides["kpp_langmuir"] = args.kpp_langmuir
 
     if args.wave_mode != "off":
-        if not args.wave_config or not args.wave_weights:
-            parser.error(
-                "--wave-mode active requires --wave-config and --wave-weights")
+        if not args.wave_config:
+            parser.error("--wave-mode active requires --wave-config")
         from legoesm.wave import WaveConfig
+        wave_config = WaveConfig.from_json(args.wave_config)
+        if wave_config.network.parameterization != "none" and not args.wave_weights:
+            parser.error("--wave-weights is required when wave neural networks are enabled")
         overrides["wave_mode"] = args.wave_mode
-        overrides["wave_config"] = WaveConfig.from_json(args.wave_config)
+        overrides["wave_config"] = wave_config
         overrides["wave_weights_path"] = args.wave_weights
 
     coupled_cfg = PRESETS[args.preset](**overrides)

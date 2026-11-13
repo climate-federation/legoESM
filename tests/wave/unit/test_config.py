@@ -28,12 +28,14 @@ def test_unknown_parameterization_raises():
         config.validate()
 
 
-def test_none_parameterization_requires_transport_networks_off():
+def test_none_parameterization_ignores_transport_network_settings():
     config = WaveConfig(
         grid=tiny_grid(), network=tiny_network(parameterization="none"))
     assert config.network.use_transport_networks
-    with pytest.raises(ValueError, match="use_transport_networks"):
-        config.validate()
+    config.validate()
+    # Inactive network dimensions must not constrain a physics-only grid.
+    config._replace(network=config.network._replace(
+        transport_input_channels=1, transport_output_vectors=1)).validate()
 
 
 def test_unknown_checkpoint_level_raises():
@@ -147,3 +149,41 @@ def test_from_json_unknown_key_raises(tmp_path, tiny_config):
     path.write_text(json.dumps(deck))
     with pytest.raises(TypeError):
         WaveConfig.from_json(str(path))
+
+
+def test_from_json_rejects_unknown_top_level_keys(tmp_path, tiny_config):
+    deck = {"grid": tiny_config.grid._asdict(),
+            "network": tiny_config.network._asdict(),
+            "physic": {"facvx": 0.0}}
+    path = tmp_path / "typo.json"
+    path.write_text(json.dumps(deck))
+    with pytest.raises(TypeError, match="physic"):
+        WaveConfig.from_json(str(path))
+
+
+
+def test_json_config_advances_with_cached_jit(tmp_path, tiny_config, tiny_state):
+    import jax
+    import jax.numpy as jnp
+    from legoesm.wave import WaveModel, prepare_env
+
+    config = tiny_config._replace(gse=tiny_config.gse._replace(enabled=False))
+    path = tmp_path / "jit.json"
+    path.write_text(json.dumps({
+        name: value._asdict() for name, value in config._asdict().items()}))
+    loaded = WaveConfig.from_json(str(path))
+    model = WaveModel(loaded, key=jax.random.key(0))
+    env = prepare_env(loaded, tiny_state.depth)
+    wind = jnp.ones_like(tiny_state.depth)
+    expected = model.step(tiny_state.spectra, env, tiny_state.depth,
+                          tiny_state.mask, wind, wind)
+    actual = model.advance(tiny_state, env, wind, wind)
+    np.testing.assert_allclose(actual.spectra, expected, rtol=1e-5, atol=1e-7)
+    # Callers may construct WaveState with its Python-zero default. Preserve
+    # the scan carry dtype even when x64 promotes that zero to int64.
+    def advance(current, _):
+        return model.advance(current, env, wind, wind), None
+
+    final, _ = jax.lax.scan(advance, tiny_state._replace(spatial_phase=0),
+                           None, length=2)
+    assert final.spatial_phase.dtype == jnp.asarray(0).dtype

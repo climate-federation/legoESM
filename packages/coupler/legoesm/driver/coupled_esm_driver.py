@@ -433,7 +433,7 @@ class CoupledESMDriver:
         grid's depth and land mask come from the dynamic ocean state, and
         the wind comes from the coupler each coupling step.  Everything the
         component needs is explicit — an unknown ``wave_mode``, a missing
-        config/weights, a slab ocean, or a wave step size that disagrees
+        config or required weights, a slab ocean, or a wave step size that disagrees
         with ``coupling_dt`` is a hard error.
         """
         self.coupled_cfg.validate_strict()
@@ -442,7 +442,9 @@ class CoupledESMDriver:
         if self.coupled_cfg.wave_config is None:
             raise ValueError(
                 "wave_mode='active' requires CoupledConfig.wave_config")
-        if not self.coupled_cfg.wave_weights_path:
+        network = self.coupled_cfg.wave_config.network
+        needs_weights = network.parameterization != "none"
+        if needs_weights and not self.coupled_cfg.wave_weights_path:
             raise ValueError(
                 "wave_mode='active' requires CoupledConfig.wave_weights_path "
                 "(the converted NeuralSWM .npz)")
@@ -467,8 +469,9 @@ class CoupledESMDriver:
         config = self.coupled_cfg.wave_config
         config.validate()
         self._wave_config_hash = compute_config_hash(config, kind="coupled")
-        self._wave_weights_hash = file_sha256(
-            self.coupled_cfg.wave_weights_path)
+        # Empty string is the serializable identity of a weight-free run.
+        weights_path = self.coupled_cfg.wave_weights_path
+        self._wave_weights_hash = file_sha256(weights_path) if weights_path else ""
         if self._wave_weights_hash is None:
             raise ValueError(
                 "wave_mode='active': the weights file is not readable: "
@@ -507,11 +510,10 @@ class CoupledESMDriver:
         self._wave_env = prepare_env(config, self._wave_state.depth)
         from legoesm.wave.model import validate_wave_environment
         validate_wave_environment(config, self._wave_env)
-        # The seed only initialises leaves; load_wave_weights refuses a
-        # partial checkpoint, so every weight below is overwritten.
+        # Neural runs replace every initialized leaf; physics-only models
+        # have no network weights to load.
         model = WaveModel(config, key=jax.random.key(0))
-        self._wave_model = load_wave_weights(
-            model, self.coupled_cfg.wave_weights_path)
+        self._wave_model = load_wave_weights(model, weights_path) if weights_path else model
 
     def _step_wave(self, sfc_response, atm_forcing):
         """Advance the wave spectrum one coupling step and stage the Stokes drift.

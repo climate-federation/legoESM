@@ -13,6 +13,7 @@ output/
 .DS_Store
 Icon?
 .ipynb_checkpoints/
+.vscode/
 
 # LaTeX build artifacts
 *.aux

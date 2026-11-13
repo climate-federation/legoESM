@@ -40,7 +40,16 @@ state = model.advance(state, env, u10, v10)
 ```
 
 A physics-only run selects
-`WaveNetworkConfig(parameterization="none", use_transport_networks=False)`.
+`WaveNetworkConfig(parameterization="none")`. This always disables neural
+transport, including when `use_transport_networks=True`; the analytic theta
+and frequency tendencies are selected without constructing network weights.
+With this configuration, coupled runs omit `--wave-weights`; neural runs require
+it. Checkpoints record an empty weights hash for a run without weights.
+
+`WaveModel.advance` caches JIT compilation while accepting changing spectra,
+winds, environments and network weights as array inputs. GSE requires the
+concrete environment preflight `validate_wave_environment(config, env)` from
+`legoesm.wave.model` before advancing; the coupled driver performs this check.
 
 ## Validation
 

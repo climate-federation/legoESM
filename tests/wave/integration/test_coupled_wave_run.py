@@ -43,7 +43,8 @@ def _kpp_ocean_config():
         ))
 
 
-def test_dynamic_ocean_kpp_wave_run(tmp_path):
+@pytest.mark.parametrize("physics_only", [False, True])
+def test_dynamic_ocean_kpp_wave_run(tmp_path, physics_only):
     wave_cfg = _global_wave_config(lon_step=45.0, lat_step=45.0)._replace(
         time=WaveTimeConfig(
             dt_global_s=600, dt_x_s=600, dt_y_s=600,
@@ -51,6 +52,9 @@ def test_dynamic_ocean_kpp_wave_run(tmp_path):
         ),
         gse=WaveGSEConfig(enabled=False),
     )
+    if physics_only:
+        wave_cfg = wave_cfg._replace(network=wave_cfg.network._replace(
+            parameterization="none"))
     model = WaveModel(wave_cfg, key=jax.random.key(0))
     leaves, _ = jax.tree_util.tree_flatten_with_path(model)
     weights_path = tmp_path / "wave_weights.npz"
@@ -72,10 +76,16 @@ def test_dynamic_ocean_kpp_wave_run(tmp_path):
         ocean_mode="dynamic", ocean_nlev=3, ocean_dt_s=300.0,
         ocean_config=_kpp_ocean_config(),
         coupling_dt=600.0, wave_mode="active", wave_config=wave_cfg,
-        wave_weights_path=str(weights_path), kpp_langmuir=True,
+        wave_weights_path="" if physics_only else str(weights_path), kpp_langmuir=True,
     )
     driver = CoupledESMDriver(atmosphere, coupled, output_dir=tmp_path / "run")
     driver.setup()
+    if physics_only:
+        # Source-free transport needs a nonzero initial packet. No weight file
+        # is supplied; restart must preserve that weight-free identity too.
+        driver._wave_state = driver._wave_state._replace(
+            spectra=driver._wave_state.spectra.at[:, 3, 1, 0, :].set(0.01))
+        assert driver._wave_weights_hash == ""
     assert driver.run() == "COMPLETED"
     assert int(driver._wave_state.spatial_phase) == 1
     assert driver._wave_state.spectra.dtype == jnp.float32

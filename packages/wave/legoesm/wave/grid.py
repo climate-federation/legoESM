@@ -108,6 +108,13 @@ def build_wave_env(config: WaveConfig, dtype=jnp.float32) -> WaveEnv:
     dlat = dlat.at[:, :, 0].set(dlat[:, :, 1])
     dlat = dlat.at[:, :, -1].set(dlat[:, :, -2])
 
+    # The central-spacing stencil needs an interior cell. For two centres,
+    # the physical spacing is their sole difference on either axis.
+    if lon.shape[0] == 2:
+        dlon = jnp.broadcast_to(jnp.abs(lon_grid[:, 1:2] - lon_grid[:, :1]), dlon.shape)
+    if lat.shape[0] == 2:
+        dlat = jnp.broadcast_to(jnp.abs(lat_grid[:, :, 1:2] - lat_grid[:, :, :1]), dlat.shape)
+
     cos_lat = _round5(jnp.cos(lat_grid)) if spherical else jnp.ones_like(lat_grid)
     latitude_sign = 1 if config.grid.lat_deg[1] > config.grid.lat_deg[0] else -1
     longitude_sign = 1 if config.grid.lon_deg[1] > config.grid.lon_deg[0] else -1

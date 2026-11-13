@@ -187,3 +187,61 @@ def test_pure_physics_step_spectrum_and_depth_gradients_match_differences(tiny_c
             assert bool(jnp.any(derivative != 0))
         check_grads(loss, (spectra, depth), order=1, modes=("fwd","rev"),
                     eps=1e-6, rtol=1e-4, atol=1e-6)
+
+
+def test_advance_reuses_trace_with_changing_state_and_wind(
+        tiny_config, tiny_state, monkeypatch):
+    traces = []
+    original = WaveModel.step
+
+    def counted_step(self, *args, **kwargs):
+        traces.append(True)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(WaveModel, "step", counted_step)
+    config = tiny_config._replace(
+        time=WaveTimeConfig(dt_global_s=1, dt_x_s=1, dt_y_s=0,
+                            dt_th_s=0, dt_k_s=0, dt_stot_s=1, dt_gse_s=0),
+        gse=WaveGSEConfig(enabled=False))
+    model = WaveModel(config, key=jax.random.key(83))
+    env = prepare_env(config, tiny_state.depth)
+    state = tiny_state
+    wind = jnp.ones_like(state.depth)
+    for value in (1.0, 2.0, 3.0):
+        expected = original(
+            model, state.spectra, env, state.depth, state.mask,
+            wind * value, wind, spatial_phase=state.spatial_phase)
+        state = model.advance(state, env, wind * value, wind)
+        np.testing.assert_allclose(state.spectra, expected, rtol=1e-5, atol=1e-7)
+    # A changed network leaf must be read as a dynamic input, too.
+    model = eqx.tree_at(lambda m: m.parameterization.mlp.linear3.bias, model,
+                        model.parameterization.mlp.linear3.bias + 0.1)
+    expected = original(model, state.spectra, env, state.depth, state.mask,
+                        wind, wind, spatial_phase=state.spatial_phase)
+    actual = model.advance(state, env, wind, wind)
+    np.testing.assert_allclose(actual.spectra, expected, rtol=1e-5, atol=1e-7)
+    assert len(traces) == 1
+
+
+def test_none_always_uses_physics_transport(tiny_config, tiny_state):
+    from legoesm.wave.physics.tendencies import theta_tendency, k_tendency
+
+    config = tiny_config._replace(
+        network=tiny_config.network._replace(parameterization="none"),
+        gse=WaveGSEConfig(enabled=False))
+    model = WaveModel(config, key=jax.random.key(0))
+    assert config.network.use_transport_networks
+    assert model.theta_transport_network is None
+    assert model.k_transport_network is None
+    assert model.tendency_functions() == (theta_tendency, k_tendency)
+    assert not jax.tree_util.tree_leaves(model)
+    explicit = WaveModel(config._replace(network=config.network._replace(
+        use_transport_networks=False)), key=jax.random.key(1))
+    env = prepare_env(config, tiny_state.depth)
+    state = tiny_state._replace(
+        spectra=tiny_state.spectra.at[:, 2, 2, 0, :].set(0.1))
+    wind = jnp.ones_like(state.depth)
+    actual = model.advance(state, env, wind, wind)
+    expected = explicit.advance(state, env, wind, wind)
+    np.testing.assert_allclose(actual.spectra, expected.spectra, rtol=1e-6, atol=1e-8)
+    assert bool(jnp.any(actual.spectra != state.spectra))
