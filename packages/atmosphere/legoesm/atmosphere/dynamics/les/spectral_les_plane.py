@@ -40,7 +40,8 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.bulk_flux import psi_h, psi_m   # canonical MOST stability functions
+from legoesm.core.bulk_flux import (  # canonical MOST stability functions
+    MOST_ZETA_CAP_WIDTH, psi_h, psi_m)
 from legoesm.atmosphere.physics._shared import (
     brunt_vaisala_n_squared_from_gradient,
     lilly_buoyancy_factor,
@@ -201,6 +202,9 @@ class SpectralLESConfig(NamedTuple):
     #                                 moist monotone scalar path leaves water
     #                                 tracers unfiltered by default; set True only
     #                                 to reproduce the old filtered-tracer behavior.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH  # RULE 5 half-width of the
+    #                                 smooth |zeta| cap at 10 in the MOST surface
+    #                                 layer (most_surface_flux); 0 = hard clip.
 
 
 class SpectralLESLayout(NamedTuple):
@@ -665,7 +669,8 @@ def advection(u, v, w, g: SpectralLESGrid):
 # --------------------------------------------------------------------------- #
 # Coupled stable Monin–Obukhov surface layer (GABLS1 prescribed-cooling BC)     #
 # --------------------------------------------------------------------------- #
-def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10):
+def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10, *,
+                      zeta_cap_width):
     """Coupled Monin–Obukhov surface layer (planar-mean, GABLS1-faithful).
 
     Given the planar-mean first-level wind speed ``spd_mean=⟨|u₁|⟩`` and potential
@@ -679,8 +684,19 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
 
     The stability functions ``ψ_m, ψ_h`` are the SHARED canonical Businger–Dyer
     implementation (:func:`legoesm.core.bulk_flux.psi_m`/``psi_h``; stable branch
-    Dyer 1974 ``−5ζ``, unstable Businger–Dyer, both internally clipped to
-    ``ζ∈[−10,10]`` with safe-branch gradients) rather than a re-derived form.
+    Dyer 1974 ``−5ζ``, unstable Businger–Dyer, |ζ| capped at 10 with safe-branch
+    gradients) rather than a re-derived form.  ``zeta_cap_width`` (keyword,
+    required; the config's ``most_zeta_cap_width``) is the RULE 5 half-width of
+    the smooth cap; 0 is the former hard clip.
+
+    KNOWN DIFFERENCE vs the hard clip, at the default width 2 (cap ramp
+    |ζ| in (8, 12)), measured over 9600 states (wind 0.5-10 m/s, θ₁−T_s
+    0.05-10 K, z₁ 3.125 / 6.25 m, z0 0.1 m, θ_ref 263.5 K): 109 converge with
+    |ζ| inside the ramp, where the surface heat flux differs by up to 5.8 %
+    (ζ = 11.1); outside it the result is unchanged, incl. GABLS1-like states
+    (ζ ~ 0.003-0.01).  Per-state gaps pinned in
+    ``tests/unit/fixtures/les_most_zeta_cap_gap.npz``; ``zeta_cap_width=0``
+    reproduces the hard clip exactly.
     Thermal roughness ``z0h=z0`` (Beare et al. 2006 specify z0m=z0h=0.1 m).
 
     Returns ``(u_star, theta_star, q0, cd_eff)`` with the kinematic surface heat
@@ -701,8 +717,8 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     for _ in range(n_iter):
         inv_L = kappa * gacc * th_star / (u_star ** 2 * theta_ref + 1e-12)
         zeta = z1 * inv_L                         # +ve stable, −ve unstable
-        u_star = kappa * spd_mean / (lnz - psi_m(zeta, zeta_cap_width=0.0))
-        th_star = kappa * dth / (lnz - psi_h(zeta, zeta_cap_width=0.0))
+        u_star = kappa * spd_mean / (lnz - psi_m(zeta, zeta_cap_width=zeta_cap_width))
+        th_star = kappa * dth / (lnz - psi_h(zeta, zeta_cap_width=zeta_cap_width))
     q0 = -u_star * th_star
     cd_eff = (u_star / (spd_mean + 1e-12)) ** 2
     return u_star, th_star, q0, cd_eff
@@ -1139,7 +1155,8 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
         th1_mean = _planar_mean(theta[..., 0], g)
         _us, _ths, sfc_flux, cd_surf = most_surface_flux(
-            spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
+            spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0,
+            zeta_cap_width=g.cfg.most_zeta_cap_width)
     Fu, Fv, Fw, u_star = sgs_and_wall(u, v, w, nu_t, g, u_geo, cd_surf=cd_surf)
     ug, vg = u_geo
     Ru = Cu + Fu + f_cor * (v - vg) + force[0]

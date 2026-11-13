@@ -40,6 +40,7 @@ import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH  # noqa: E402
 from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -52,7 +53,8 @@ def build(args, dtype):
         z0=args.z0, dealias=True, c_s=args.cs,
         smagorinsky_dynamic=not args.static, sgs_model=args.sgs_model,
         time_scheme=args.time_scheme,
-        buoyancy=True, theta_ref0=args.theta0, pr_sgs=1.0, nu_floor=args.nu_floor)
+        buoyancy=True, theta_ref0=args.theta0, pr_sgs=1.0, nu_floor=args.nu_floor,
+        most_zeta_cap_width=args.most_zeta_cap_width)
     g = sl.make_grid(cfg, dtype=dtype)
     z = g.z_c
     # GABLS1 sounding: θ0 below 100 m, +0.01 K/m capping inversion above —
@@ -108,6 +110,9 @@ def main():
     p.add_argument("--Ly", type=float, default=400.0)
     p.add_argument("--Lz", type=float, default=400.0)
     p.add_argument("--z0", type=float, default=0.1)
+    p.add_argument("--most-zeta-cap-width", type=float, default=MOST_ZETA_CAP_WIDTH,
+                   help="half-width of the smooth |z/L| cap at 10 in the MOST "
+                        "surface layer (--cooling-rate > 0); 0 = hard clip")
     p.add_argument("--theta0", type=float, default=265.0)
     p.add_argument("--Ug", type=float, default=8.0)
     p.add_argument("--fcor", type=float, default=1.39e-4)
@@ -258,7 +263,8 @@ def main():
         spd1 = float(np.sqrt(um[0] ** 2 + vm[0] ** 2))
         u_s, th_s, q0, _cd = sl.most_surface_flux(
             spd1, float(thm[0]), float(args.theta0 - args.cooling_rate * (t / 3600.0)),
-            float(g.z_c[0]), args.z0, args.theta0)
+            float(g.z_c[0]), args.z0, args.theta0,
+            zeta_cap_width=args.most_zeta_cap_width)
         print(f"  MOST surface: T_sfc={float(args.theta0 - args.cooling_rate*(t/3600.0)):.2f} K"
               f"  w'θ'_0={float(q0):+.4f} K m/s (GABLS1 ref ~-0.012)  "
               f"u*_MOST={float(u_s):.3f} (ref ~0.27)")
