@@ -249,12 +249,14 @@ def test_wrapper_matches_wrf(fix, arm, cfg):
         assert _rel(np.asarray(out.cape)[f], fix[f"{arm}_abe"][f]) <= _TOL
 
 
+@pytest.mark.parametrize("cfg", [_WRF, _WRF_DEFAULT], ids=["hard", "default"])
 @pytest.mark.parametrize("arm", ["L_nat_w05", "L_nat_w0"])
-def test_column_water_closes_as_the_oracle(fix, arm):
+def test_column_water_closes_as_the_oracle(fix, arm, cfg):
     """Vapour + cloud + precipitation sources integrate to zero in each column
-    (the oracle's own moisture budget); measured residual is round-off."""
+    (the oracle's own moisture budget), hard and at the RULE 5 default widths;
+    measured residual is round-off."""
     m, x = _wrapper_inputs(fix, arm)
-    out, _ = kain_fritsch_convection(**x, config=_WRF)
+    out, _ = kain_fritsch_convection(**x, config=cfg)
     dp = fix["p_half"][:, 1:] - fix["p_half"][:, :-1]
     tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt)
            + np.asarray(out.dq_r_conv_dt)) * dp / constants.g

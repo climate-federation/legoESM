@@ -964,8 +964,7 @@ def kain_fritsch_convection(
         raise ValueError(
             f"KainFritschConfig.variant must be one of ('smooth', 'wrf_kfeta'), "
             f"got {config.variant!r}")
-    for name in ("wrf_lut_knot_width", "wrf_tpmix_width_kgkg", "wrf_condload_sqrt_width_m2s2",
-                 "wrf_wtw_floor_width_m2s2", "wrf_prof5_width"):
+    for name in (n for n in KainFritschConfig._fields if n.startswith("wrf_")):
         if getattr(config, name) != KainFritschConfig._field_defaults[name]:
             raise ValueError(
                 f"KainFritschConfig.{name} is read only by variant='wrf_kfeta'; "
