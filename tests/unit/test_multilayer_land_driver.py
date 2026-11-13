@@ -23,8 +23,12 @@ from legoesm.driver.config import (
 from legoesm.driver.model_driver import ModelDriver
 
 
-def _fake_surface_map(path, lat_deg, lon_deg):
+_LOADER_HEADS = []   # the air-entry head each load_clm_surface call received
+
+
+def _fake_surface_map(path, lat_deg, lon_deg, *, vg_air_entry_m):
     """A uniform-loam, all-bare-soil CLM map sized to the requested columns."""
+    _LOADER_HEADS.append(vg_air_entry_m)
     n = int(np.asarray(lat_deg).size)
     pft = np.zeros((n, 17)); pft[:, 0] = 1.0          # 100% bare soil
     o = np.ones(n)
@@ -874,7 +878,7 @@ def test_clm_ml_use_surfdata_pft_derives_mixed_pft_columns(monkeypatch, tmp_path
 
     import legoesm.land.clm_surface_map as _clm
 
-    def _mixed_pft_surface_map(path, lat_deg, lon_deg):
+    def _mixed_pft_surface_map(path, lat_deg, lon_deg, *, vg_air_entry_m):
         n = int(np.asarray(lat_deg).size)
         pft = np.zeros((n, 17))
         half = max(1, n // 2)
@@ -1137,6 +1141,42 @@ def test_soil_freeze_thaw_reaches_the_land_the_mpas_run_builds(monkeypatch, tmp_
     assert got == {False: False, True: True}
 
 
+def test_soil_water_numerics_reach_the_mpas_land_and_the_run_record(monkeypatch, tmp_path):
+    """The air-entry head must survive the bake (which rebuilds ``hydraulics``
+    from the CLM map with library defaults) and be written to the run's
+    resolved config."""
+    import json
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        land_beta_soil=True,
+        turbulence="louis",
+        land_calibrated_physics=True,
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+    )
+    cfg = base._replace(land_soil_vg_air_entry_m=-0.05)
+    cfg.validate_strict()
+    _LOADER_HEADS.clear()
+    drv = ModelDriver(cfg, output_dir=tmp_path / "arm")
+    drv.setup()
+    # the CLM map (soil wilting point / field capacity) is built on the run's head
+    assert _LOADER_HEADS and set(_LOADER_HEADS) == {-0.05}, _LOADER_HEADS
+    lc = drv.physics.land_ml_cfg
+    assert lc.hydraulics.retention_curve == "van_genuchten"
+    assert np.ndim(lc.hydraulics.alpha_vg) == 2          # the baked per-column map survives
+    assert lc.hydraulics.vg_air_entry_m == -0.05
+    rec = json.loads((tmp_path / "arm" / "experiment_config.json").read_text())
+    assert rec["land_soil_vg_air_entry_m"] == -0.05
+
+
 def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_path):
     """``land_canopy_stress_b0`` / ``land_canopy_interception`` must survive
     the calibration bake, which rebuilds the surface scheme at its library
@@ -1225,14 +1265,17 @@ def test_canopy_smoothing_widths_survive_the_calibration(monkeypatch, tmp_path):
         land_canopy_rh_cap_smoothing_width=0.02,
         land_canopy_zeta_cap_smoothing_width=0.03,
         land_canopy_most_n_iters=7,
+        land_canopy_solve_group=64,
     )
     d = CanopyConfig()
-    assert (d.rh_cap_smoothing_width, d.zeta_cap_smoothing_width, d.most_n_iters) != (0.02, 0.03, 7)
+    assert (d.rh_cap_smoothing_width, d.zeta_cap_smoothing_width, d.most_n_iters,
+            d.solve_group) != (0.02, 0.03, 7, 64)
     base.validate_strict()
     drv = ModelDriver(base, output_dir=tmp_path / "w")
     drv.setup()
     ss = drv.physics.land_ml_cfg.surface_scheme
-    assert (ss.rh_cap_smoothing_width, ss.zeta_cap_smoothing_width, ss.most_n_iters) == (0.02, 0.03, 7)
+    assert (ss.rh_cap_smoothing_width, ss.zeta_cap_smoothing_width, ss.most_n_iters,
+            ss.solve_group) == (0.02, 0.03, 7, 64)
 
 
 def test_pipeline_land_tile_gets_moist_lowest_level_density(monkeypatch, tmp_path):

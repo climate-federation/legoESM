@@ -371,3 +371,41 @@ def test_tas_2m_zero_land_fraction_collapses_to_the_ocean_branch():
     zero_land = _tas_land_for(T_land=jnp.full((2,), 240.0),
                               land_fraction=jnp.zeros((2,)))
     np.testing.assert_allclose(zero_land, legacy, rtol=0.0, atol=0.0)
+
+
+def _plev19_reference(dc, field_3d, p_s):
+    """The pre-split single-call formula, kept verbatim as an independent baseline."""
+    from legoesm.driver.diagnostics import CMIP6_PLEV19
+    p_s_np = np.asarray(p_s)
+    field_np = np.asarray(field_3d)
+    p_model = np.asarray(dc._p_full(p_s_np))
+    plev_target = np.sort(CMIP6_PLEV19)
+    log_p_model = np.log(np.maximum(p_model, 1e-10))
+    log_plev = np.log(plev_target)
+    n_target = len(plev_target)
+    idx_hi = np.sum(p_model[..., None] < plev_target, axis=-2)
+    idx_hi = np.clip(idx_hi, 1, p_model.shape[-1] - 1)
+    idx_lo = idx_hi - 1
+    f_lo = np.take_along_axis(field_np, idx_lo, axis=-1)
+    f_hi = np.take_along_axis(field_np, idx_hi, axis=-1)
+    lp_lo = np.take_along_axis(log_p_model, idx_lo, axis=-1)
+    lp_hi = np.take_along_axis(log_p_model, idx_hi, axis=-1)
+    log_pt = log_plev.reshape((1,) * p_s_np.ndim + (n_target,))
+    denom = np.where(lp_hi == lp_lo, 1.0, lp_hi - lp_lo)
+    alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
+    return f_lo + alpha * (f_hi - f_lo)
+
+
+@pytest.mark.parametrize("with_vcoord", [True, False])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_plev19_shared_bracket_matches_the_single_call_formula(with_vcoord, dtype):
+    coord = make_hybrid_levels(NLEV)
+    dc = _collector(coord, with_vcoord=with_vcoord)
+    rng = np.random.default_rng(1)
+    p_s = (5.0e4 + 5.2e4 * rng.random(64)).astype(dtype)
+    bracket = dc._plev19_bracket(p_s)
+    for _ in range(3):
+        field = rng.standard_normal((64, NLEV)).astype(dtype)
+        ref = _plev19_reference(dc, field, p_s)
+        np.testing.assert_array_equal(dc._interp_to_plev19(field, p_s, bracket), ref)
+        np.testing.assert_array_equal(dc._interp_to_plev19(field, p_s), ref)

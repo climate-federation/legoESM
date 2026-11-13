@@ -422,8 +422,15 @@ def _order_indices_ccw(center_xyz, neighbor_xyz):
 # Mesh connectivity and geometry building
 # ============================================================================
 
+def _mesh_float_dtype():
+    """Float dtype mesh geometry is stored in: the precision policy's storage role."""
+    from legoesm.core.precision import get_policy
+    return get_policy().storage
+
+
 def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
-                                triangles=None, periodic_L_rad=None):
+                                triangles=None, periodic_L_rad=None,
+                                host_float64=False):
     """Build complete MPAS mesh from generator points on the unit sphere.
 
     Parameters
@@ -784,15 +791,13 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
     fVertex = 2.0 * omega * np.sin(latVertex)
 
     # --- Convert all arrays to JAX ---
-    # Use float64 when x64 is enabled for geometry precision, float32 otherwise.
-    import jax
-    try:
-        from legoesm.core.precision import get_policy
-        _fdtype = get_policy().storage
-    except Exception:
-        _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    _fdtype = _mesh_float_dtype()
 
     def to_jax_f(arr):
+        # host_float64: numpy float64 regardless of jax_enable_x64, so a
+        # cache file never holds geometry rounded below float64.
+        if host_float64:
+            return np.asarray(arr, dtype=np.float64)
         return jnp.array(arr, dtype=_fdtype)
 
     def to_jax_i(arr):
@@ -1121,7 +1126,9 @@ _BIG_MESH_LOCK_STALE_S = 7200.0   # lloyd=50 at subdiv-9 ~ 5 h; lloyd=0 ~ min
 # unchanged args (e.g. edits to _lloyd_relaxation / _build_mesh_from_generators).
 # The schema check below only catches FIELD changes; a value-changing algorithm
 # edit must invalidate old caches via this token.
-_MESH_CACHE_VERSION = 1
+# v2: geometry stored float64, rounded once to the run dtype (#2381/#2382).
+# Bumping this also requires updating test_cache_version_in_name_separates_formats.
+_MESH_CACHE_VERSION = 2
 
 
 def _voronoi_cache_disabled() -> bool:
@@ -1176,13 +1183,23 @@ def _load_voronoi_cache(path: str):
                     and _files <= set(VoronoiMesh._fields)):
                 # Stale schema (fields added/removed) -> ignore, rebuild.
                 return None
+            target = np.dtype(_mesh_float_dtype())
             fields = {}
             for field_name in _files:
                 arr = data[field_name]
                 if arr.ndim == 0:
                     fields[field_name] = arr.item()        # scalar (nCells, radius, ...)
+                elif arr.dtype.kind == "f":
+                    # A fresh build rounds float64 geometry once, to the run's
+                    # dtype. Only a float64 file (cast once here) or a file
+                    # already in the run's dtype reproduces that; anything
+                    # else (legacy float32 file for a float64 or float16 run)
+                    # -> miss, rebuild, overwrite with float64.
+                    if arr.dtype not in (np.dtype(np.float64), target):
+                        return None
+                    fields[field_name] = jnp.asarray(arr, dtype=target)
                 else:
-                    fields[field_name] = jnp.asarray(arr)  # respects current x64
+                    fields[field_name] = jnp.asarray(arr)
         return VoronoiMesh(**fields)
     except Exception as exc:  # corrupt / truncated cache file -> rebuild
         warnings.warn(
@@ -1376,9 +1393,19 @@ def create_voronoi_mesh(
         cell_points = verts
 
     # Step 4: Build complete mesh
-    mesh = _build_mesh_from_generators(cell_points, radius, omega)
     if use_cache and cache_path is not None:
+        # The file serves every precision policy, so it is written in
+        # float64, then cast once for this run.
+        mesh = _build_mesh_from_generators(cell_points, radius, omega,
+                                           host_float64=True)
         _save_voronoi_cache(cache_path, mesh)
+        target = _mesh_float_dtype()
+        mesh = mesh._replace(**{
+            k: jnp.asarray(v, dtype=target) for k in mesh._fields
+            if getattr(v := getattr(mesh, k), "dtype", None) is not None
+            and v.dtype.kind == "f"})
+    else:
+        mesh = _build_mesh_from_generators(cell_points, radius, omega)
     if _lock_path is not None:
         # Release AFTER the atomic cache save: waiters poll the cache, so
         # the lock's job is done once the mesh is loadable.
@@ -1954,12 +1981,7 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
 
     radius = float(ds.sphere_radius) if hasattr(ds, 'sphere_radius') else constants.R_earth
 
-    import jax
-    try:
-        from legoesm.core.precision import get_policy
-        _fdtype = get_policy().storage
-    except Exception:
-        _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    _fdtype = _mesh_float_dtype()
 
     mesh_data = {
         'nCells': nCells, 'nEdges': nEdges, 'nVertices': nVertices,

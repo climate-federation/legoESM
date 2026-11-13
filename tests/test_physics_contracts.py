@@ -110,10 +110,8 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/output.py",
         # Shared microphysics primitive libraries (NOT single-tendency schemes):
         # _warm_rain = saturation-adjustment / autoconversion / accretion / rain-
-        # evap helpers reused by Kessler/SB/Morrison/Thompson/P3; _thompson_snow =
-        # Thompson-2008 snow process functions used by thompson.py. Like _shared.py.
+        # evap helpers reused by Kessler/SB/Morrison/P3. Like _shared.py.
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py",
         # WRF v4.8.0 Thompson init half (module PARAMETERs, gamma constants and
         # lookup tables); the scheme (thompson_wrf.py) carries the contract.
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson_wrf_tables.py",
@@ -128,7 +126,6 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/output.py",
         # ecRad 49r1 port: package docstring and the vendored RRTMG table loader (plumbing).
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/ecrad_ifs/__init__.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/ecrad_ifs/tables.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/ecrad_ifs/_libm.py",  # exp helper (V45)
         # ecRad lane run settings + pending-source container (vote L21a): config plumbing.
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/ecrad_ifs/config.py",
@@ -163,6 +160,8 @@ EXCLUDED: frozenset[str] = frozenset(
         # two-stream tree above), not a single-tendency parameterization. Its
         # energy-conservation invariant is gated analytically in
         # tests/unit/test_mc3d_raytracer.py, not via __physics_contract__.
+        # raytracer_lw.py is NOT excluded: it carries a contract recording that
+        # it has no reference implementation.
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/emulator.py",
@@ -172,7 +171,6 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/photon_walk.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/plane_adapter.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/qrng.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/raytracer_lw.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/raytracer_sw.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/sampling.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/tally.py",

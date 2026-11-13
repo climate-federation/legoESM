@@ -31,6 +31,7 @@ __all__ = [
     "census_cross_face_depth",
     "assert_ring_width_covers",
     "build_ring_comm",
+    "make_ring_barrier",
     "tile_spec",
     "build_tiled_ext_scalar_a_split",
     "build_tiled_ext_scalar_b_split",
@@ -573,6 +574,108 @@ def make_ring_ext_vector_sixface_allk(tab, grid: str, mesh, *,
 
 
 # ---------------------------------------------------------------------------
+# ring barriers -- the two edge blends on the face layout, O(edge) comm
+# ---------------------------------------------------------------------------
+#
+# The blends ``out[dst] = 0.5*(in[dst] + sign*in[src])`` read and write
+# only cells next to a face edge.  Left to GSPMD, the flat blend packs
+# all six faces into one buffer and the compiler moves whole arrays
+# between devices (measured: C96, 6 devices, ~2.7 s/step of summed
+# all-gather/permute/all-reduce kernel time at the blend sites).  Here
+# each device gathers only the width-w border bands of every face,
+# applies the SAME blend program on a compact border buffer whose
+# indices are the tables' own dst/src remapped one-to-one, and writes its
+# own faces' bands back.  Same operands, same arithmetic, destinations
+# unique (asserted by the table builders), so the result is the flat
+# blend's.
+
+def make_ring_barrier(tab, kind: str, mesh):
+    """shard_map'd edge blend for the face mesh.
+
+    ``kind``: ``"C"`` -- ``tab.avg_c`` on ``tab.lay_fx`` (fluxes
+    ``(6, npx, n, *T)`` / ``(6, n, npx, *T)``); ``"B"`` -- ``tab.avg_b``
+    on ``tab.lay_bb`` (``(6, npx, npx, *T)`` twice).  Any trailing axes
+    ``T`` (levels, slots) are batched elementwise.  Returns
+    ``(fn, w)`` with ``fn(x, y) -> (x, y)`` on global arrays sharded
+    ``P('face')`` and ``w`` the border width the tables need (1 + the
+    deepest dst/src cell, measured from the tables, never assumed).
+    """
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import PartitionSpec as P
+    from jax.experimental.shard_map import shard_map
+
+    if kind == "C":
+        lay, bl = tab.lay_fx, tab.avg_c
+    elif kind == "B":
+        lay, bl = tab.lay_bb, tab.avg_b
+    else:
+        raise ValueError(f"make_ring_barrier: kind {kind!r} (expected "
+                         f"'C' or 'B')")
+    (ax_name, ax_size), = ((n, s) for n, s in
+                          zip(mesh.axis_names, mesh.devices.shape))
+    if 6 % ax_size != 0:
+        raise ValueError(
+            f"mesh axis {ax_name!r} has {ax_size} devices; 6 faces "
+            f"require a divisor (1, 2, 3, 6)")
+    g = 6 // ax_size
+    _self_test(lay)
+    cells = np.concatenate([bl.dst, bl.src]).astype(np.int64)
+    k, f, i, j = _decode_fij(lay, cells)
+    m0k = np.asarray([s[0] for s in lay.shapes])[k]
+    m1k = np.asarray([s[1] for s in lay.shapes])[k]
+    depth = np.minimum(np.minimum(i, m0k - 1 - i), np.minimum(j, m1k - 1 - j))
+    w = int(depth.max()) + 1
+    bidx, pos = [], []
+    for (s0, s1) in lay.shapes:
+        bi = np.flatnonzero(_border_mask_rect(s0, s1, w).ravel())
+        p = np.full(s0 * s1, -1, dtype=np.int64)
+        p[bi] = np.arange(bi.size)
+        bidx.append(bi)
+        pos.append(p)
+    offs = np.cumsum([0] + [b.size for b in bidx])
+    nb = int(offs[-1])
+    comp = np.empty_like(cells)
+    for kk, (s0, s1) in enumerate(lay.shapes):
+        sel = k == kk
+        comp[sel] = (f[sel] * nb + offs[kk]
+                     + pos[kk][i[sel] * s1 + j[sel]])
+    if (comp < 0).any() or (comp >= 6 * nb).any():
+        raise AssertionError(
+            f"make_ring_barrier[{kind}]: a blend cell falls outside the "
+            f"width-{w} border -- the compact remap would misplace it")
+    cdst = comp[:bl.dst.size].astype(np.int32)
+    csrc = comp[bl.dst.size:].astype(np.int32)
+    sign = bl.sign
+    shapes = lay.shapes
+
+    def _body(x_local, y_local):
+        trail = x_local.shape[3:]
+        flat = [arr.reshape((g, s0 * s1, -1))
+                for arr, (s0, s1) in zip((x_local, y_local), shapes)]
+        tt = flat[0].shape[-1]
+        payload = jnp.concatenate(
+            [a[:, bi, :] for a, bi in zip(flat, bidx)], axis=1)  # (g,nb,T)
+        allb = jax.lax.all_gather(payload, ax_name)            # (d,g,nb,T)
+        c = allb.reshape(6 * nb, tt)
+        s = jnp.asarray(sign, c.dtype)[:, None]
+        c = c.at[cdst].set(0.5 * (c[cdst] + s * c[csrc]))
+        me = jax.lax.axis_index(ax_name)
+        own = jax.lax.dynamic_slice_in_dim(c.reshape(6, nb, tt), me * g, g,
+                                           axis=0)             # (g,nb,T)
+        out = []
+        for kk, (a, (s0, s1), bi) in enumerate(zip(flat, shapes, bidx)):
+            a = a.at[:, bi, :].set(own[:, offs[kk]:offs[kk + 1], :])
+            out.append(a.reshape((g, s0, s1) + trail))
+        return tuple(out)
+
+    return shard_map(_body, mesh=mesh,
+                     in_specs=(P(ax_name), P(ax_name)),
+                     out_specs=(P(ax_name), P(ax_name)),
+                     check_rep=False), w
+
+
+# ---------------------------------------------------------------------------
 # ring_comm -- the bundle the halo dispatchers route through (M3 wiring)
 # ---------------------------------------------------------------------------
 
@@ -589,7 +692,12 @@ class DuoRingComm:
 
     __slots__ = ("_scalar", "_dgrid", "_cgrid",
                  "_scalar_allk", "_dgrid_allk", "_cgrid_allk",
+                 "_avg_c", "_avg_b", "_allflux_slots", "_nq",
                  "ring_width", "depth", "mesh")
+
+    #: the edge-blend barriers run on gathered border bands
+    #: (:func:`make_ring_barrier`), not the flat six-face blend
+    handles_barriers = True
 
     def __hash__(self):
         return id(self)
@@ -632,6 +740,36 @@ class DuoRingComm:
 
     def ext_vector_cgrid_allk(self, uc6k, vc6k):
         return self._cgrid_allk(uc6k, vc6k)
+
+    def average_shared_edge_cgrid(self, fx6, fy6):
+        from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
+        require_uniform_float_jax("average_shared_edge_cgrid",
+                                  {"fx6": fx6, "fy6": fy6})
+        return self._avg_c(fx6, fy6)
+
+    def average_shared_edge_bgrid(self, xb6, yb6):
+        from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
+        require_uniform_float_jax("average_shared_edge_bgrid",
+                                  {"xb6": xb6, "yb6": yb6})
+        return self._avg_b(xb6, yb6)
+
+    def average_allflux_shared_edges(self, afx6, afy6):
+        """The C-grid blend over ``tab.allflux_slots`` only (delp, temp,
+        tracers); w and q_con (Fortran iq 2 and 3, slot indices 1 and 2)
+        come back untouched."""
+        from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
+        require_uniform_float_jax("average_allflux_shared_edges",
+                                  {"afx6": afx6, "afy6": afy6})
+        import jax.numpy as jnp
+        afx6, afy6 = jnp.asarray(afx6), jnp.asarray(afy6)
+        nslot = 4 + self._nq
+        if afx6.shape[-1] != nslot or afy6.shape[-1] != nslot:
+            raise ValueError(
+                f"average_allflux_shared_edges: slot axis "
+                f"{afx6.shape[-1]}/{afy6.shape[-1]} != 4+nq = {nslot}")
+        sel = self._allflux_slots
+        ax, ay = self._avg_c(afx6[..., sel], afy6[..., sel])
+        return afx6.at[..., sel].set(ax), afy6.at[..., sel].set(ay)
 
 
 def build_ring_comm(tab, mesh, *, ring_width: int = 8) -> DuoRingComm:
@@ -687,6 +825,10 @@ def build_ring_comm(tab, mesh, *, ring_width: int = 8) -> DuoRingComm:
         tab, "D", mesh, ring_width=ring_width)
     rc._cgrid_allk, _ = make_ring_ext_vector_sixface_allk(
         tab, "C", mesh, ring_width=ring_width)
+    rc._avg_c, _ = make_ring_barrier(tab, "C", mesh)
+    rc._avg_b, _ = make_ring_barrier(tab, "B", mesh)
+    rc._allflux_slots = np.asarray(tab.allflux_slots)
+    rc._nq = int(tab.nq)
     rc.ring_width = int(ring_width)
     rc.depth = int(depth)
     return rc

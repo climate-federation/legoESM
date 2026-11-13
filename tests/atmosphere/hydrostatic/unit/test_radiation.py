@@ -781,7 +781,7 @@ class TestRRTMGP:
         cloud_path = jnp.full((ncol, 1, nlev), 1e-3)
         cloud_reff = jnp.full((ncol, 1, nlev), 1e-5)
         with pytest.raises(ValueError, match="include_clouds=False"):
-            solver.optics_lib.compute_lw_optical_properties(
+            solver.optics_lib.with_all_gpts(True, p, T, mol, None).compute_lw_optical_properties(
                 p, T, mol, igpt=jnp.array(0),
                 cloud_path_liq=cloud_path,
                 cloud_r_eff_liq=cloud_reff,

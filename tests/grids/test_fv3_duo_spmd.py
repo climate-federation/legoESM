@@ -695,3 +695,211 @@ def test_build_ring_comm_wires_the_allk_closures(tab, monkeypatch):
     assert np.array_equal(got_s, ref_s)
     assert np.array_equal(np.asarray(got_u), ref_u, equal_nan=True)
     assert np.array_equal(np.asarray(got_v), ref_v, equal_nan=True)
+
+
+# ---- ring barriers: the two edge blends on gathered border bands ----
+
+_BARRIER_SHAPES = {"C": lambda t: ((6, t.npx, t.n), (6, t.n, t.npx)),
+                   "B": lambda t: ((6, t.npx, t.npx), (6, t.npx, t.npx))}
+
+
+def _barrier_ref(tab, kind, x, y):
+    """The flat six-face blend (no comm attached), vmapped over any
+    trailing axes exactly as the public dispatcher does."""
+    import jax
+    from legoesm.grids.fv3_duo_halos import (
+        average_shared_edge_bgrid_impl, average_shared_edge_cgrid_impl)
+    impl = (average_shared_edge_cgrid_impl if kind == "C"
+            else average_shared_edge_bgrid_impl)
+    fn = lambda a, b: impl(a, b, tab)                     # noqa: E731
+    for _ in range(x.ndim - 3):
+        fn = jax.vmap(fn, in_axes=-1, out_axes=-1)
+    return fn(x, y)
+
+
+def _barrier_fixture(tab, kind, trail, seed):
+    rng = np.random.default_rng(seed)
+    sx, sy = _BARRIER_SHAPES[kind](tab)
+    return (rng.standard_normal(sx + trail), rng.standard_normal(sy + trail))
+
+
+@pytest.fixture(scope="module", params=[False, True],
+                ids=["b_endpoints", "skip_b_endpoints"])
+def btab(duo_ctx, request):
+    from legoesm.grids.fv3_duo_halos import build_jax_duo_halo_tables
+    return build_jax_duo_halo_tables(duo_ctx["ectx"], duo_ctx["gs6"], nq=2,
+                                     skip_b_endpoints=request.param)
+
+
+@pytest.mark.parametrize("kind", ["C", "B"])
+def test_ring_barrier_band_is_the_face_edge(btab, kind):
+    """Every blend destination and source sits ON a face edge, so the
+    gathered band is one cell wide.  A wider band is a FINDING about the
+    tables (an off-edge read), not a width to accept silently."""
+    from jax.sharding import Mesh
+    from legoesm.grids.fv3_duo_spmd import make_ring_barrier
+
+    mesh = Mesh(np.array(_devices_or_skip(1)), ("face",))
+    _, w = make_ring_barrier(btab, kind, mesh)
+    assert w == 1
+
+
+@pytest.mark.parametrize("n_dev", [1, 2, 3, 6])
+@pytest.mark.parametrize("kind", ["C", "B"])
+@pytest.mark.parametrize("trail", [(), (5,)], ids=["2d", "levels"])
+def test_ring_barrier_matches_flat_blend_bitwise(btab, n_dev, kind, trail):
+    """Same operands, same arithmetic, unique destinations: own-face
+    outputs must equal the flat blend BITWISE (a tolerance would hide a
+    remap shift or a sign/component swap)."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+    from legoesm.grids.fv3_duo_spmd import make_ring_barrier
+
+    devs = _devices_or_skip(n_dev)
+    x, y = map(jnp.asarray, _barrier_fixture(btab, kind, trail, 61))
+    rx, ry = (np.asarray(a) for a in _barrier_ref(btab, kind, x, y))
+    mesh = Mesh(np.array(devs), ("face",))
+    sh = NamedSharding(mesh, P("face"))
+    fn, _ = make_ring_barrier(btab, kind, mesh)
+    gx, gy = fn(jax.device_put(x, sh), jax.device_put(y, sh))
+    assert not np.array_equal(rx, np.asarray(x))       # the blend moved
+    assert np.array_equal(np.asarray(gx), rx)
+    assert np.array_equal(np.asarray(gy), ry)
+
+
+@pytest.mark.parametrize("kind", ["C", "B"])
+def test_ring_barrier_poison_interior_never_read(btab, kind):
+    """NaN in every cell off the face edge: the ring output must equal
+    the flat blend on the same input with NaN masks identical, and every
+    blended edge cell must be finite -- an interior read would spread
+    NaN into an edge."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+    from legoesm.grids.fv3_duo_spmd import make_ring_barrier
+
+    devs = _devices_or_skip(6)
+    x, y = _barrier_fixture(btab, kind, (3,), 67)
+    for a in (x, y):
+        a[:, 1:-1, 1:-1] = np.nan
+    x, y = jnp.asarray(x), jnp.asarray(y)
+    rx, ry = (np.asarray(a) for a in _barrier_ref(btab, kind, x, y))
+    mesh = Mesh(np.array(devs), ("face",))
+    sh = NamedSharding(mesh, P("face"))
+    fn, _ = make_ring_barrier(btab, kind, mesh)
+    gx, gy = (np.asarray(a) for a in
+              fn(jax.device_put(x, sh), jax.device_put(y, sh)))
+    assert np.array_equal(gx, rx, equal_nan=True)
+    assert np.array_equal(gy, ry, equal_nan=True)
+    for g in (gx, gy):
+        assert np.isfinite(g[:, 0, :]).all() and np.isfinite(g[:, -1, :]).all()
+        assert np.isfinite(g[:, :, 0]).all() and np.isfinite(g[:, :, -1]).all()
+
+
+@pytest.mark.parametrize("n_dev", [2, 6])
+def test_ring_allflux_matches_flat_blend_bitwise(btab, n_dev, monkeypatch):
+    """The public allflux barrier with the ring attached equals the flat
+    path bitwise; slots w and q_con (indices 1, 2) come back unchanged."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    import legoesm.grids.fv3_duo_halos as halos
+    from legoesm.grids.fv3_duo_spmd import build_ring_comm
+
+    devs = _devices_or_skip(n_dev)
+    nslot = 4 + btab.nq
+    rng = np.random.default_rng(71)
+    afx = jnp.asarray(rng.standard_normal((6, btab.npx, btab.n, 4, nslot)))
+    afy = jnp.asarray(rng.standard_normal((6, btab.n, btab.npx, 4, nslot)))
+    rx, ry = (np.asarray(a) for a in
+              halos.average_allflux_shared_edges(afx, afy, btab))
+    mesh = Mesh(np.array(devs), ("face",))
+    sh = NamedSharding(mesh, P("face"))
+    monkeypatch.setattr(btab, "ring_comm", build_ring_comm(btab, mesh))
+    gx, gy = (np.asarray(a) for a in halos.average_allflux_shared_edges(
+        jax.device_put(afx, sh), jax.device_put(afy, sh), btab))
+    assert np.array_equal(gx, rx) and np.array_equal(gy, ry)
+    assert np.array_equal(gx[..., 1:3], np.asarray(afx)[..., 1:3])
+
+
+def test_public_barriers_route_to_the_ring(btab, monkeypatch):
+    """With the face ring attached, all three public barriers must run
+    the ring's border-band blend, not the flat six-face blend (the
+    measured GSPMD all-gather path).  Fails if DuoRingComm stops
+    claiming the barriers."""
+    import jax.numpy as jnp
+    from jax.sharding import Mesh
+
+    import legoesm.grids.fv3_duo_halos as halos
+    from legoesm.grids.fv3_duo_spmd import build_ring_comm
+
+    mesh = Mesh(np.array(_devices_or_skip(2)), ("face",))
+    rc = build_ring_comm(btab, mesh)
+    calls = []
+    for name in ("_avg_c", "_avg_b"):
+        real = getattr(rc, name)
+
+        def spy(a, b, _real=real, _name=name):
+            calls.append(_name)
+            return _real(a, b)
+        setattr(rc, name, spy)
+    monkeypatch.setattr(btab, "ring_comm", rc)
+    for kind, pub in (("C", halos.average_shared_edge_cgrid),
+                      ("B", halos.average_shared_edge_bgrid)):
+        x, y = map(jnp.asarray, _barrier_fixture(btab, kind, (2,), 73))
+        pub(x, y, btab)
+    nslot = 4 + btab.nq
+    afx = jnp.ones((6, btab.npx, btab.n, 2, nslot))
+    afy = jnp.ones((6, btab.n, btab.npx, 2, nslot))
+    halos.average_allflux_shared_edges(afx, afy, btab)
+    assert calls == ["_avg_c", "_avg_b", "_avg_c"]
+
+
+@pytest.mark.parametrize("kind", ["C", "B"])
+def test_ring_barrier_vjp_matches_flat_blend(btab, kind):
+    """Reverse mode through the ring (all_gather transposes to a
+    sum-scatter) must give the flat blend's input cotangent for a
+    NON-uniform output cotangent, so a missing or doubled contribution
+    shows.  Bitwise: every input cell receives at most two terms, from
+    the same products in both paths."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+    from legoesm.grids.fv3_duo_spmd import make_ring_barrier
+
+    devs = _devices_or_skip(6)
+    x, y = map(jnp.asarray, _barrier_fixture(btab, kind, (3,), 79))
+    cx, cy = map(jnp.asarray, _barrier_fixture(btab, kind, (3,), 83))
+    _, vref = jax.vjp(lambda a, b: _barrier_ref(btab, kind, a, b), x, y)
+    rgx, rgy = (np.asarray(a) for a in vref((cx, cy)))
+    mesh = Mesh(np.array(devs), ("face",))
+    sh = NamedSharding(mesh, P("face"))
+    fn, _ = make_ring_barrier(btab, kind, mesh)
+    _, vring = jax.vjp(fn, jax.device_put(x, sh), jax.device_put(y, sh))
+    ggx, ggy = (np.asarray(a) for a in
+                vring((jax.device_put(cx, sh), jax.device_put(cy, sh))))
+    assert np.array_equal(ggx, rgx), np.abs(ggx - rgx).max()
+    assert np.array_equal(ggy, rgy), np.abs(ggy - rgy).max()
+
+
+def test_ring_allflux_accepts_numpy_operands(btab, monkeypatch):
+    """The flat allflux blend takes NumPy operands; the ring path must
+    too (it updates the selected slots with .at, a jax-only method)."""
+    from jax.sharding import Mesh
+
+    import legoesm.grids.fv3_duo_halos as halos
+    from legoesm.grids.fv3_duo_spmd import build_ring_comm
+
+    nslot = 4 + btab.nq
+    rng = np.random.default_rng(89)
+    afx = rng.standard_normal((6, btab.npx, btab.n, nslot))
+    afy = rng.standard_normal((6, btab.n, btab.npx, nslot))
+    rx, ry = (np.asarray(a) for a in
+              halos.average_allflux_shared_edges(afx, afy, btab))
+    mesh = Mesh(np.array(_devices_or_skip(2)), ("face",))
+    monkeypatch.setattr(btab, "ring_comm", build_ring_comm(btab, mesh))
+    gx, gy = (np.asarray(a) for a in
+              halos.average_allflux_shared_edges(afx, afy, btab))
+    assert np.array_equal(gx, rx) and np.array_equal(gy, ry)

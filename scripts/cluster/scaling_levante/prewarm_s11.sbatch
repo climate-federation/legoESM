@@ -42,4 +42,4 @@ cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 df -h /work | tail -1
 "$PY" scripts/data/prewarm_voronoi_mesh.py --level 11 --lloyd 0
 echo "=== cache now ==="; du -sh "$LEGOESM_MESH_CACHE_DIR"
-ls -la "$LEGOESM_MESH_CACHE_DIR"/scvt_v1_lvl11_* 2>/dev/null || echo "no level-11 file was written"
+ls -la "$LEGOESM_MESH_CACHE_DIR"/scvt_v2_lvl11_* 2>/dev/null || echo "no level-11 file was written"

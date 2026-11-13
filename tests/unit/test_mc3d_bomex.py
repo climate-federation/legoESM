@@ -174,7 +174,7 @@ def test_bomex_broken_cloud_concentrates_sw_heating():
   g = jnp.where(k_ext > 1e-3, 0.85, 0.0)
 
   res = solve_sw_monochromatic(
-      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.1,
+      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.1, diffuse_frac=0.0,
       config=MC3DRadiationConfig(photons_per_pixel=4000),
       key=jax.random.PRNGKey(1))
 
@@ -185,5 +185,6 @@ def test_bomex_broken_cloud_concentrates_sw_heating():
   assert sfc[col_cloudy].mean() < 0.7 * sfc[~col_cloudy].mean()
   # Conservation still exact.
   tot = (float(res.vol_abs_total) + float(res.sfc_abs_total)
-         + float(res.tod_up_frac))
+         + float(res.tod_up_frac)
+           + float(res.residual_frac))
   assert abs(tot - 1.0) < 1e-12

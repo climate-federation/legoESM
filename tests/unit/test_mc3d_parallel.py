@@ -41,7 +41,7 @@ def test_sharded_matches_single_run():
   H = float(geom.z_faces[-1])
   tau = 1.0
   k_ext, ssa, g = _fields(geom, tau / H, 0.0, 0.0)
-  base = dict(mu0=1.0, azimuth=0.0, albedo=0.0)
+  base = dict(mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=0.0)
   sharded = solve_sw_sharded(
       k_ext, ssa, g, geom, **base,
       config=MC3DRadiationConfig(photons_per_pixel=1500),
@@ -57,7 +57,8 @@ def test_sharded_matches_single_run():
   assert abs(float(sharded.sfc_abs_total) - float(single.sfc_abs_total)) < 6 * stderr
   # Combined fractions still conserve exactly (mean of per-shard exact-1 sums).
   tot = (float(sharded.vol_abs_total) + float(sharded.sfc_abs_total)
-         + float(sharded.tod_up_frac))
+         + float(sharded.tod_up_frac)
+           + float(sharded.residual_frac))
   assert abs(tot - 1.0) < 1e-12
 
 
@@ -67,13 +68,14 @@ def test_sharded_variance_shrinks_with_shards():
   H = float(geom.z_faces[-1])
   k_ext, ssa, g = _fields(geom, 1.0 / H, 0.0, 0.0)
   exact = np.exp(-1.0)
-  base = dict(mu0=1.0, azimuth=0.0, albedo=0.0,
+  base = dict(mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=0.0,
               config=MC3DRadiationConfig(photons_per_pixel=800))
-  e1 = abs(float(solve_sw_sharded(k_ext, ssa, g, geom, **base,
-           key=jax.random.PRNGKey(3), n_shards=1).sfc_abs_total) - exact)
-  e8 = abs(float(solve_sw_sharded(k_ext, ssa, g, geom, **base,
-           key=jax.random.PRNGKey(3), n_shards=8).sfc_abs_total) - exact)
-  assert e8 < e1 + 1e-6   # more photons should not be worse (usually tighter)
+  def rms(n_shards):
+    f = jax.jit(lambda key: solve_sw_sharded(
+        k_ext, ssa, g, geom, **base, key=key, n_shards=n_shards).sfc_abs_total)
+    e = [float(f(jax.random.PRNGKey(3 + s))) - exact for s in range(16)]
+    return np.sqrt(np.mean(np.square(e)))
+  assert rms(1) / rms(8) > 1.6   # expected sqrt(8) ~ 2.8 over seeds
 
 
 
@@ -82,7 +84,7 @@ def test_solve_sw_sharded_guard():
   geom = _geom(nx=2, ny=2, nz=2)
   k_ext, ssa, g = _fields(geom, 1e-3, 0.0, 0.0)
   with pytest.raises(ValueError, match="n_shards"):
-    solve_sw_sharded(k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0,
+    solve_sw_sharded(k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=0.0,
                      config=MC3DRadiationConfig(photons_per_pixel=16),
                      key=jax.random.PRNGKey(0), n_shards=0)
 
@@ -98,13 +100,14 @@ def test_pmean_result_over_devices():
 
   def per_device(key):
     res = solve_sw_monochromatic(k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0,
-                                 albedo=0.0, config=cfg, key=key)
+                                 albedo=0.0, diffuse_frac=0.0, config=cfg, key=key)
     return pmean_result(res, "d")
 
   out = jax.pmap(per_device, axis_name="d")(keys)
   # All devices hold the combined (identical) result; finite + conserves.
   tot = (float(out.vol_abs_total[0]) + float(out.sfc_abs_total[0])
-         + float(out.tod_up_frac[0]))
+         + float(out.tod_up_frac[0])
+           + float(out.residual_frac[0]))
   assert abs(tot - 1.0) < 1e-9
 
 

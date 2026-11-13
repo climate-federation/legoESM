@@ -42,8 +42,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 )
 from legoesm.grids.gaussian import (
     sh_analysis_3d,
-    sh_analysis_oc2_3d,
-    sh_analysis_dmu_3d,
+    vordiv_from_uv_exact_3d,
 )
 from legoesm.atmosphere.physics.turbulence.smagorinsky import smagorinsky_turbulence
 from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
@@ -109,6 +108,9 @@ _ENERGY_FIELD_BY_SCHEME = {
     "clubb": "tke",
     "edmf": "tke",
     "mynn25": "qke",
+    # WRF surface-layer state carried by YSU (sfclayrev ust/mol/znt/hfx/qfx +
+    # YSU pblh), shape (ncol, 6), not an energy profile (R4 vote J3).
+    "ysu": "sfclay",
 }
 
 
@@ -159,6 +161,21 @@ def resolved_clubb_config(config: TurbulenceConfig):
     ice-stratus cut in radiation, MG2 and the CMOR cloud diagnostics) read it
     from here, so they see the same config the closure runs with."""
     return materialize_sub_config(config).clubb if config.scheme == "clubb" else None
+
+
+def _smagorinsky_condensate_kwargs(scheme_name, tracers, shape) -> dict:
+    """``{"q_c": .., "q_i": ..}`` columns for the WRF km_opt=3 Smagorinsky
+    buoyancy (its ``qv + qc + qi`` term and ``qc`` moist test), for whichever of
+    the two the state carries; other schemes get ``{}``.  A missing species
+    stays zero inside the scheme (a declared departure)."""
+    if scheme_name != "smagorinsky" or tracers is None:
+        return {}
+    out = {}
+    for name in ("q_c", "q_i"):
+        if name in tracers:
+            raw = tracers[name]
+            out[name] = (raw.data if hasattr(raw, "data") else raw).reshape(shape)
+    return out
 
 
 def get_turbulence_fn(config: TurbulenceConfig):
@@ -232,6 +249,8 @@ def turbulence_carry_field(scheme_name: str, scheme_config) -> str:
     """
     if scheme_name == "mynn25":
         return "qke"
+    if scheme_name == "ysu":
+        return "sfclay"
     if scheme_name == "clubb" and getattr(scheme_config, "prognostic", False):
         return "clubb_moments"
     return "tke"
@@ -244,6 +263,19 @@ def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
     TKE/qke, or the packed CLUBB moments ``(ncol, 15, nlev+1)`` for prognostic
     CLUBB. Re-seeds when ``phys_state`` is absent or the stored slot has the wrong
     shape (e.g. a minimal placeholder from a non-clubb init / scheme switch)."""
+    if carry_field == "sfclay":
+        # No floor reseed for the WRF surface-layer state (vote X5/J3): a
+        # missing or wrong-shape carry is a caller that dropped it.
+        from legoesm.atmosphere.physics.turbulence.ysu import SFCLAY_FIELDS
+        stored = getattr(phys_state, "sfclay", None) if phys_state else None
+        want = (ncol, len(SFCLAY_FIELDS))
+        if stored is None or tuple(stored.shape) != want:
+            raise ValueError(
+                f"turbulence=ysu needs PhysicsState.sfclay of shape {want} (the "
+                "WRF surface-layer carry); got "
+                f"{None if stored is None else tuple(stored.shape)}. Seed it with "
+                "init_physics_state for turbulence=ysu and thread the physics state.")
+        return stored
     if carry_field == "clubb_moments":
         from legoesm.atmosphere.physics.turbulence.clubb import (
             init_clubb_moments,
@@ -379,6 +411,18 @@ from legoesm.atmosphere.physics._shared import (
     compute_rho as _compute_rho,
     exner_function as _exner_function,
 )
+
+
+def _ysu_lane_kwargs(carry_field, ncol, *, land_fraction=None, cell_area=None):
+    """``{"land_fraction": ..., "cell_area": ...}`` (ncol,) for turbulence=ysu
+    (the WRF surface layer's xland and grid spacing, from what the lane owns;
+    votes X7/X13/J5), else ``{}``.  ``None`` entries are dropped so the kernel
+    requires the explicit YSUConfig fields instead (and raises when unset)."""
+    if carry_field != "sfclay":
+        return {}
+    kw = {"land_fraction": land_fraction, "cell_area": cell_area}
+    return {k: jnp.reshape(jnp.asarray(v), (ncol,)) for k, v in kw.items()
+            if v is not None}
 
 
 def _resolve_T_sfc(T_col, phys_state):
@@ -858,6 +902,8 @@ def _make_hydrostatic_turbulence(
                 **_prognostic_clubb_lat_kwargs(
                     carry_field, lambda: jnp.reshape(grid.lat, (ncol,))),
                 **_mynn_kw,
+                **_ysu_lane_kwargs(carry_field, ncol, land_fraction=grid.land_frac,
+                                   cell_area=grid.grid_area),
             )
             tke_out = tke_new
         else:
@@ -868,6 +914,8 @@ def _make_hydrostatic_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config,
+                **_smagorinsky_condensate_kwargs(
+                    scheme_name, state.tracers, (ncol, nlev)),
             )
 
         du_dt = turb_out.du_dt.reshape(shape_3d)
@@ -1319,6 +1367,21 @@ def _make_mpas_turbulence(
         if needs_tke:
             tke_in = _read_turb_carry(
                 phys_state, carry_field, nCells, nlev, scheme_config, _state_dtype)
+            if carry_field == "sfclay" and (
+                    getattr(_surf, "ocean_q_sfc_saline", False)
+                    or (_qsfc_traced is None and (
+                        _beta_traced is not None
+                        or (f_land is not None and land_beta != 1.0)))):
+                # votes X10/X11: the WRF surface layer takes the lane's land
+                # humidity (incl. the land model's solved q_sfc_land) with
+                # moisture availability 1, and computes its own saline water
+                # humidity; a beta or ocean_q_sfc_saline would be a second,
+                # unported surface-humidity model.
+                raise ValueError(
+                    "turbulence=ysu runs the WRF surface layer with moisture "
+                    "availability 1 and its own water-surface humidity; a land "
+                    "beta / ocean_q_sfc_saline would be a second, unported "
+                    "surface-humidity model and is refused.")
             _mynn_kw = {}
             if scheme_name == "mynn25":
                 # xland from the mesh's own land fraction, the one canonical
@@ -1333,6 +1396,8 @@ def _make_mpas_turbulence(
                 **_sfc_kw,
                 **_prognostic_clubb_lat_kwargs(carry_field, _mesh_lat),
                 **_mynn_kw,
+                **_ysu_lane_kwargs(carry_field, nCells, land_fraction=f_land,
+                                   cell_area=mesh.grid_area),
             )
             tke_out = tke_new
         else:
@@ -1341,6 +1406,8 @@ def _make_mpas_turbulence(
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config,
                 **_sfc_kw,
+                **_smagorinsky_condensate_kwargs(
+                    scheme_name, state.tracers, (nCells, nlev)),
             )
         if _liquid_partition and turb_out.dq_c_dt is None:
             raise ValueError(
@@ -1724,6 +1791,14 @@ def _make_nonhydrostatic_turbulence(
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
+    if carry_field == "sfclay":
+        # R4 vote J4: this driver drops the returned PhysicsState, so the WRF
+        # surface-layer carry would re-initialise every step.
+        raise NotImplementedError(
+            "YSU turbulence (WRF surface layer + YSU) carries the surface-layer "
+            "state in PhysicsState.sfclay, which the nonhydrostatic CD-grid "
+            "driver discards after every physics call. Use "
+            "model_type='hydrostatic', 'mpas' or 'spectral_pe'.")
     if carry_field in ("qke", "clubb_moments"):
         # Phase C codex iter-3 high: the nonhydrostatic CD-grid dynamics
         # driver drops the returned ``PhysicsState`` after every
@@ -2047,6 +2122,9 @@ def _make_spectral_pe_turbulence(
                 # Gaussian latitudes [rad] (n_lat,), lat-major like the columns.
                 **_prognostic_clubb_lat_kwargs(
                     carry_field, lambda: jnp.repeat(grid.lat, n_lon)),
+                # lat-major (n_lat*n_lon,) like the columns (vote J5)
+                **_ysu_lane_kwargs(carry_field, ncol, land_fraction=grid.land_frac,
+                                   cell_area=grid.grid_area),
             )
             tke_out = tke_new
         else:
@@ -2056,6 +2134,8 @@ def _make_spectral_pe_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config, **_liq_kw,
+                **_smagorinsky_condensate_kwargs(
+                    scheme_name, state.tracers, (ncol, nlev)),
             )
 
         # Reshape tendencies to grid space
@@ -2063,27 +2143,10 @@ def _make_spectral_pe_turbulence(
         dv_dt = turb_out.dv_dt.reshape(n_lat, n_lon, nlev)
         dT_dt = turb_out.dT_dt.reshape(n_lat, n_lon, nlev)
 
-        # Project wind tendencies to spectral vorticity/divergence
-        # (same pattern as held_suarez_forcing_spectral)
-        a = grid.radius
-        im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-        one_over_a = 1.0 / a
-
-        cos_lat_3d = grid.cos_lat[:, None, None]  # (n_lat, 1, 1)
-        du_cos = du_dt * cos_lat_3d
-        dv_cos = dv_dt * cos_lat_3d
-
-        # curl(du, dv) -> vorticity tendency
-        dvor_hat = (
-            im_over_a[:, None] * sh_analysis_oc2_3d(grid, dv_cos)
-            + one_over_a * sh_analysis_dmu_3d(grid, du_cos)
-        )
-
-        # div(du, dv) -> divergence tendency
-        ddiv_hat = (
-            im_over_a[:, None] * sh_analysis_oc2_3d(grid, du_cos)
-            - one_over_a * sh_analysis_dmu_3d(grid, dv_cos)
-        )
+        # Exact left-inverse of the dycore's wind synthesis: the plain
+        # Bourke oc2/dmu analysis amplifies a pole-row tendency ~6x per
+        # pass, which the macmic sub-cycle compounds into a blow-up (#976).
+        dvor_hat, ddiv_hat = vordiv_from_uv_exact_3d(grid, du_dt, dv_dt)
 
         # Temperature tendency to spectral
         dT_hat = sh_analysis_3d(grid, dT_dt)

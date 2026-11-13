@@ -174,7 +174,8 @@ def main():
     lat_rad = np.asarray(ad.flatten_2d(driver.grid.lat)).reshape(-1)
     lon_rad = np.asarray(ad.flatten_2d(driver.grid.lon)).reshape(-1)
     lat_deg, lon_deg = np.degrees(lat_rad), np.degrees(lon_rad)
-    cmap = load_clm_surface(download_clm_surfdata(), lat_deg, lon_deg)
+    cmap = load_clm_surface(download_clm_surfdata(), lat_deg, lon_deg,
+                            vg_air_entry_m=pipe.land_ml_cfg.hydraulics.vg_air_entry_m)
     pft = jnp.asarray(cmap["pft_fractions"])                     # (ncol, 17)
     skt_target = jnp.asarray(load_era5_skt_columns(lat_deg, lon_deg, args.era5_npz),
                              dtype=jnp.float32)

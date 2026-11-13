@@ -176,7 +176,7 @@ provenance, inventory, and identity selection.
 Targeted test command ended with:
 
 ```text
-tests/ocean/fidelity/test_nemo_si3_bulk_flux_gate.py ....... [100%]
+tests/ocean/fidelity/test_nemo_si3_o7_lane_bulk_flux_gate.py ....... [100%]
 7 passed
 ```
 
@@ -194,7 +194,7 @@ claim is made.
 |---|---|
 | config-local `sbcblk.F90` | `087e551a49e5bb0aefe93e80f1bca817365b1f68d84dc59b4178eff87c010cea` |
 | config-local `icesbc.F90` | `75cdaaeec423f27c79983730828cb6a9978f1d0dbbfac9a671a7e083a95ea74e` |
-| `nemo_si3_bulk_flux_gate.py` | `1adb464da63d0264fb24221e4a358982260a4e114afa3f8319f621bc75da0985` |
+| `nemo_si3_o7_lane_bulk_flux_gate.py` | `1adb464da63d0264fb24221e4a358982260a4e114afa3f8319f621bc75da0985` |
 | gate tests | `f11e5f099369f5373fedbc67fee6ada40fc4fbf3b5977c7730e193b25b9a8326` |
 | `constants.py` | `ac6c447e28fbcff5b0d37386e69328315088809a0b13cb7b35a2c9173793a1ce` |
 | `thermo.py` | `41eafe070c883cce1504117082b3545338308cb412e090a24782829ba8e46407` |

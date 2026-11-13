@@ -68,7 +68,11 @@ BASELINE_EXEMPT = frozenset({"sdm", "fast_sbm", "none", "seifert_beheng",
                              # faithful ESCOMP kessler_run port (no guard)
                              "kessler",
                              # faithful OpenIFS 49r1 CLOUDSC (own supersatcheck)
-                             "ifs_cloudsc"})
+                             "ifs_cloudsc",
+                             # faithful WRF Thompson (own saturation adjustment)
+                             "thompson",
+                             # ccpp zhaocarr_gscond port (2026-11-04, no guard)
+                             "sundqvist"})
 
 _FACTORY_FN = "_get_microphysics_fn"
 _MIN_SCHEMES = 8  # discovery sanity floor (10 today)
@@ -316,6 +320,8 @@ def test_exempt_reasons_name_symbols_that_actually_run() -> None:
                 ("sdm/condensation.py", "saturation_vapor_pressure_erf"),
                 ("sdm/column.py", "relative_humidity")],
         "seifert_beheng": [("seifert_beheng.py", "saturation_adjustment_gsam")],
+        "sundqvist": [("sundqvist.py", "zhao_carr_gscond"),
+                      ("sundqvist.py", "_check_no_surrogate_guard")],
         "fast_sbm": [
             ("fast_sbm/supersaturation.py", "integrate_supersaturation"),
             ("fast_sbm/condensation_driver.py", "integrate_supersaturation"),

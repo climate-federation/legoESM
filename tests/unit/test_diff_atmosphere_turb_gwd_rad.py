@@ -1205,6 +1205,15 @@ def _run_turb(scheme, col, **override):
     fn, cfg, carries = _turb_leaf(scheme)
     c = dict(col)
     c.update(override)
+    if scheme == "ysu":
+        # WRF surface layer + YSU: carries the surface-layer state (ncol, 6),
+        # needs the land/water flag and grid spacing on a bare column
+        from legoesm.atmosphere.physics.turbulence.ysu import init_sfclay_carry
+        cfg = cfg._replace(surface_type="land", dx_m=1.0e5)
+        return fn(c["u"], c["v"], c["T"], c["q_v"],
+                  init_sfclay_carry(c["T"].shape[0], cfg, c["T"].dtype),
+                  c["p_full"], c["p_half"], c["z_full"], c["z_half"],
+                  c["T_sfc"], c["q_sfc"], c["rho"], 300.0, cfg)
     if carries:
         out, carry_new = fn(
             c["u"], c["v"], c["T"], c["q_v"], c["tke"],

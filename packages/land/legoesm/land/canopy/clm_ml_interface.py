@@ -1059,7 +1059,7 @@ def _build_stubs(
     forc_po2 = _pad1(o2_pa)
     forc_solad_col = swskyb_col_jax   # (np_, 3)  direct SW
     forc_solai_grc = swskyd_grc_jax   # (np_, 3)  diffuse SW
-    # CLM MLGetAtmForcing computes thref = tref + (g/cp)*zref itself.
+    # CLM MLGetAtmForcing computes thref = tref + lapse_rate*zref itself.
     # Keep physical T here so that paired correction is applied exactly once.
     forc_t = _pad1(forcing.T_lowest)
     forc_pbot = _pad1(forcing.p_surface)
@@ -2282,6 +2282,9 @@ def compute_clm_ml_canopy_fluxes(
     # Process-global like the turbulence tables; "medlyn" activates the traced
     # vcmaxpft_jax injection path below.
     _apply_stomatal_model(canopy_config)
+    # Dew-limit smoothing width, process-global like gs_type (read at trace time).
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl as _ml_ctl
+    _ml_ctl.dew_limit_smoothing_mol = float(canopy_config.dew_limit_smoothing_mol)
 
     # ---- Build GridInfo for the traceable (jax.jit / jax.grad) path ----
     # Structural ints must be concrete Python ints extracted BEFORE tracing (int()

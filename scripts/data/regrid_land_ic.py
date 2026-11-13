@@ -308,6 +308,31 @@ def main_era5_soil_t(args) -> int:
     return 0
 
 
+def lift_to_dry_floor(theta, soil_dz, hydraulics):
+    """Columns whose TOTAL water is below the run's Richards dry floor (the
+    loader refuses them rather than create water) are set to that floor in
+    every layer: the least water that makes them loadable.  Every other column
+    is returned unchanged.  The floor is the loader's own
+    (``theta_from_psi(psi_dry_floor(h), h)``).  Returns ``(theta, lifted,
+    added_m)``: lifted column mask and water added per column [m]."""
+    import jax
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import theta_from_psi
+    if not jax.config.jax_enable_x64:
+        # a float32 floor sits below the float64 run's and is refused there
+        raise SystemExit("lift_to_dry_floor needs JAX_ENABLE_X64=1: the run "
+                         "computes its dry floor in float64.")
+    theta = np.asarray(theta, dtype=np.float64)
+    dz = np.asarray(soil_dz, dtype=np.float64).reshape(1, -1)
+    lo = np.broadcast_to(np.asarray(
+        theta_from_psi(psi_dry_floor(hydraulics), hydraulics),
+        dtype=np.float64), theta.shape)
+    added = (lo * dz).sum(1) - (theta * dz).sum(1)
+    lifted = added > 0.0
+    return (np.where(lifted[:, None], lo, theta), lifted,
+            np.where(lifted, added, 0.0))
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -348,6 +373,14 @@ def main(argv=None) -> int:
                          "data/legoesm_surfdata_c260716.nc. Refused when the "
                          "source already carries a stamp. Recorded as attested, "
                          "with the source's md5.")
+    ap.add_argument("--target-clm-surfdata", default=None,
+                    help="the CLM surfdata the RUN builds its soil hydraulics "
+                         "from (its clm_surfdata_path).  A regridded column's "
+                         "water came from another soil; when its total is below "
+                         "this soil's Richards dry floor the run refuses to load "
+                         "it, so such columns are set to that floor (vote "
+                         "2026-11-12) and counted in the metadata.  Without this "
+                         "flag no column is checked and the metadata says so.")
     ap.add_argument("--stamp-only", action="store_true",
                     help="do not regrid: write --source unchanged plus the "
                          "attested soil-hydraulics stamp to --out (for an IC "
@@ -456,6 +489,25 @@ def main(argv=None) -> int:
             f"says {attested.n_layers}.")
     out["soil_dz"] = np.asarray(make_soil_grid(cal_grid).dz, dtype=np.float64)
 
+    if args.target_clm_surfdata:
+        from legoesm.land.clm_surface_map import (
+            clm_hydraulics_config, load_clm_surface)
+        hyd = clm_hydraulics_config(load_clm_surface(
+            args.target_clm_surfdata, np.degrees(dst_lat), np.degrees(dst_lon)))
+        out["theta_soil"], lifted, added = lift_to_dry_floor(
+            out["theta_soil"], out["soil_dz"], hyd)
+        floor_report = {
+            "checked_against": pathlib.Path(args.target_clm_surfdata).name,
+            "checked_against_md5": file_md5(args.target_clm_surfdata),
+            "n_lifted": int(lifted.sum()),
+            "floor_precision": "float64",
+            "lifted_columns_water_added_mm": {
+                str(int(i)): 1e3 * float(added[i]) for i in np.flatnonzero(lifted)},
+        }
+    else:
+        floor_report = "not checked (no --target-clm-surfdata)"
+    print(f"dry-floor lift: {floor_report}")
+
     try:
         sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
                              text=True, check=True).stdout.strip()
@@ -471,6 +523,7 @@ def main(argv=None) -> int:
         "regrid_git_sha": sha,
         "regrid_n_source_land": n_land,
         "source_soil_column_attested": args.source_soil_column,
+        "dry_floor_lift": floor_report,
     })
     out["metadata_json"] = np.str_(json.dumps(meta))
 

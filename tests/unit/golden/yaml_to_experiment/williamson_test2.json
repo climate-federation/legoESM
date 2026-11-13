@@ -144,7 +144,8 @@
     "sponge_shape": "sin2",
     "sponge_width_m": 10000.0,
     "time_integrator": "ssp_rk3",
-    "use_polar_filter": false
+    "use_polar_filter": false,
+    "vertical_form": "legacy"
   },
   "dynamic_albedo": false,
   "e3sm_cam_beres_variant": "e3sm",
@@ -199,9 +200,8 @@
   "hard_saturation_adjustment": false,
   "hb_kvf_min": null,
   "held_suarez_forcing": false,
-  "hines_Fmax": 0.1,
   "hines_launch_p": 70000.0,
-  "hines_total_rms_wind": 2.0,
+  "hines_total_rms_wind": 1.0,
   "homogeneous_ice_nucleation": false,
   "ic": "default",
   "ic_path": "",

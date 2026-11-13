@@ -102,8 +102,9 @@ __param_spec__ = {
     "E3SMOrographicConfig": {
         "scheme_key": "atm.gwd.E3SMOrographicConfig",
         "excluded": {
-            "oro_min_wind": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "oro_min_wind": "E3SM orovmin launch threshold, held at the oracle value; with oro_wind_ramp_width > 0 the drag is smooth in it, but it is a protocol constant, not a trained closure",
             "oro_min_h": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "oro_wind_ramp_width": "numerics: smooth-switch width of the U > oro_min_wind launch gate (RULE 5, #2241), same value as LindzenConfig",
             "sgh_default": "default subgrid-orography stddev (default 0 = no oro waves); a per-column boundary input supplied by the dataset, not a trained scalar",
         },
         "params": {
@@ -122,18 +123,17 @@ __param_spec__ = {
     "HinesConfig": {
         "scheme_key": "atm.gwd.HinesConfig",
         "excluded": {
-            "U_mag_floor": "wind-magnitude floor for the direction projection; a divide-by-zero safety floor, not a closure",
-            "doppler_sharpness": "sigmoid sharpness of the smooth saturation gate; a differentiability/smoothing width, not a closure",
             "launch_p": "selects a launch level INDEX by argmin, so the drag is piecewise-constant in it and not usefully differentiable (E3SM selects kbotbg statically at init)",
+            "f1": "Hines/McLandress closure constant, fixed by the reference (LMDZ hines_setup)",
+            "f2": "Hines/McLandress closure constant, fixed by the reference (LMDZ hines_setup)",
+            "f3": "Hines/McLandress closure constant, fixed by the reference (LMDZ hines_setup)",
+            "kstar_min": "Hines/McLandress horizontal-wavenumber constant, fixed by the reference (LMDZ hines_setup)",
+            "kstar_max": "Hines/McLandress horizontal-wavenumber constant, fixed by the reference (LMDZ hines_setup)",
+            "smooth_sharpness": "smoothing width of the differentiable switch forms; numerics, not a closure",
         },
         "params": {
             # --- launch source spectrum (Hines 1997) ---
-            "total_rms_wind": {"units": "m/s", "bounds": (0.5, 10.0), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Hines (1997) launch rms wind", "shape": None},
-            # --- saturation / momentum-flux cap ---
-            "Fmax": {"units": "Pa", "bounds": (0.01, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Hines (1997) saturation momentum-flux cap", "shape": None},
-            # --- tendency limiters ---
-            "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common tendency ceiling", "shape": None},
-            "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common umcfac no-reversal limiter", "shape": None},
+            "total_rms_wind": {"units": "m/s", "bounds": (0.25, 4.0), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Hines (1997) launch rms wind; LMDZ rmscon = 1.0", "shape": None},
         },
     },
     "LindzenConfig": {
@@ -160,7 +160,7 @@ __param_spec__ = {
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "min_wind_sharpness": "sigmoid sharpness of the smooth min-wind activation; a differentiability/smoothing width, not a closure",
-            "softmin_sharpness": "p of the p-norm smooth min of the saturation cap min(taudmp, tausat); a differentiability/smoothing width, not a closure",
+            "softmin_sharpness": "p of the p-norm smooth min of the saturation cap min(taudmp, tausat) and of the umcfac / tndmax tendency limiters; a differentiability/smoothing width, not a closure",
         },
         "params": {
             # --- orographic launch amplitude / efficiency ---
@@ -209,6 +209,8 @@ __param_spec__ = {
     },
 }
 
+
+from legoesm.atmosphere.physics.gravity_wave_drag.ifs_wms import IFSWMSConfig
 
 class RayleighConfig(NamedTuple):
     """Configuration for Rayleigh friction drag.
@@ -333,7 +335,8 @@ class McFarlaneConfig(NamedTuple):
         Exponent p of the p-norm smooth min (default 50.0): the smooth form
         of CAM's ``tau = min(taudmp, tausat)``,
         ``(taudmp^-p + tausat^-p)^(-1/p)`` (the Lindzen form, #2241); never
-        above either stress, exact ``min`` as p -> inf.
+        above either stress, exact ``min`` as p -> inf.  The same p smooths
+        the ``umcfac`` and ``tndmax`` tendency limiters (#2241).
     fcrit2 : float
         Critical Froude number squared (default 1.0, CAM ``fcrit2``).  Used in
         the McFarlane (1987) / E3SM ``gw_oro_src`` displacement-height cap
@@ -424,44 +427,38 @@ class McFarlaneConfig(NamedTuple):
 
 
 class HinesConfig(NamedTuple):
-    """Configuration for Hines (1997) Doppler-spread parameterization.
+    """Configuration for the Hines (1997) Doppler-spread scheme (LMDZ r5891
+    ``hines_gwd.f90`` port; defaults = LMDZ ``hines_setup`` / driver values).
 
     Fields
     ------
-    m_star : float
-        Characteristic vertical wavenumber [1/m] (default 2*pi/2e3).
     total_rms_wind : float
-        Total RMS gravity wave wind [m/s] (default 2.0).
-    Fmax : float
-        Saturation momentum flux cap [Pa] (default 0.1).
-    doppler_sharpness : float
-        Sigmoid sharpness for Doppler saturation (default 50.0).
-    tndmax_per_day : float
-        Absolute ceiling on ``|du/dt|`` [m/s/day] (default 400.0, CAM
-        ``tndmax`` for spectral/non-orographic sources; gw_common.F90:158).
-        Caps the ``Fmax/(rho*dz)`` accelerations that blow up in thin,
-        low-density upper layers where a fixed momentum-flux cap is divided
-        by a tiny ``rho*dz``.
-    umcfac : float
-        Maximum fraction of the local wind magnitude the deposition may
-        remove per step (default 0.5, CAM ``umcfac``; gw_common.F90:642), so
-        the single-step drag cannot reverse the wind.
+        Total rms gravity-wave wind at the launch level [m/s] (LMDZ
+        ``rmscon = 1.0``).
+    f1, f2, f3 : float
+        Hines closure factors (LMDZ 1.5, 0.3, 1.0): Doppler-spread cutoff
+        (f1), turbulent cutoff (f2), molecular cutoff (f3).
+    kstar_min, kstar_max : float
+        Horizontal wavenumber ``k* = kstar_min / (cos(lat) + kstar_min /
+        kstar_max)`` [1/m] (LMDZ 1e-5, 1e-4).
+    smooth_sharpness : float
+        Sharpness of the smooth forms of the oracle's hard switches, on
+        dimensionless ratios (100 = 0.01 relative width); ``math.inf`` = the
+        oracle's exact hard forms.
+    launch_p : float
+        Launch pressure [Pa], default 700 hPa, legal range
+        ``HINES_LAUNCH_P_RANGE_PA``: the spectrum is launched at the level
+        nearest ``launch_p`` in each column (LMDZ launches at the fixed level
+        third from the bottom; a near-surface launch is not offered).  A
+        column whose nearest level is its lowest level gets no source.
     """
-    m_star: float = 2.0 * math.pi / 2e3
-    total_rms_wind: float = 2.0
-    Fmax: float = 0.1
-    doppler_sharpness: float = 50.0
-    U_mag_floor: float = 0.1  # Wind-magnitude floor for projection [m/s]
-    tndmax_per_day: float = 400.0
-    umcfac: float = 0.5
-    # Launch pressure [Pa], default 700 hPa, legal range
-    # ``HINES_LAUNCH_P_RANGE_PA``.  There is no surface launch: a
-    # non-orographic wave launched at the surface is born SUPERSATURATED
-    # wherever the launch amplitude exceeds ``sigma_sat = N/m_star``, and N is
-    # SMALLEST in the well-mixed boundary layer (2.5 deg AMIP state: 2.0 m/s
-    # exceeds the 1.25 m/s sigma_sat at 140 m over 78.5% of the area), so it
-    # broke at its own launch level and deposited 55% of its momentum below
-    # 1 km.  No drag is deposited at or below the launch level.
+    total_rms_wind: float = 1.0
+    f1: float = 1.5
+    f2: float = 0.3
+    f3: float = 1.0
+    kstar_min: float = 1.0e-5
+    kstar_max: float = 1.0e-4
+    smooth_sharpness: float = 100.0
     launch_p: float = 7.0e4
 
 
@@ -528,10 +525,16 @@ class E3SMOrographicConfig(NamedTuple):
     oro_min_wind : float
         Minimum source-level wind for orographic waves [m/s]
         (``orovmin`` in oracle, default 2).
+    oro_wind_ramp_width : float
+        Width [m/s] of the smooth ``U > oro_min_wind`` launch gate (default
+        0.5, RULE 5, #2241; the LindzenConfig form): launch stress times
+        ``smoothstep_quintic((U - oro_min_wind)/w)``.  ``0.0`` is E3SM's hard
+        gate.  The mountain-height gate stays hard (static orography).
     """
     sgh_default: float = 0.0
     oro_min_h: float = 10.0
     oro_min_wind: float = 2.0
+    oro_wind_ramp_width: float = 0.5
 
 
 class E3SMFrontalConfig(NamedTuple):
@@ -932,7 +935,7 @@ class GravityWaveDragConfig(NamedTuple):
     ------
     scheme : str
         Active GWD scheme: "rayleigh", "lindzen", "mcfarlane",
-        "hines", "prognostic_spectral", "e3sm_cam", "ml_emulator",
+        "hines", "prognostic_spectral", "e3sm_cam", "ml_emulator", "ifs_wms",
         or "none".
     rayleigh : RayleighConfig
         Configuration for Rayleigh friction scheme.
@@ -948,6 +951,8 @@ class GravityWaveDragConfig(NamedTuple):
         Configuration for the faithful E3SM/CAM gw_drag_prof scheme.
     ml_emulator : GWDMLEmulatorConfig
         Configuration for ML emulator scheme.
+    ifs_wms : IFSWMSConfig
+        Configuration for the OpenIFS 49r1 WMS non-orographic scheme.
     """
     scheme: str = "none"
     rayleigh: RayleighConfig = RayleighConfig()
@@ -957,3 +962,4 @@ class GravityWaveDragConfig(NamedTuple):
     prognostic_spectral: PrognosticSpectralConfig = PrognosticSpectralConfig()
     e3sm_cam: E3SMCAMConfig = E3SMCAMConfig()
     ml_emulator: GWDMLEmulatorConfig = GWDMLEmulatorConfig()
+    ifs_wms: IFSWMSConfig = IFSWMSConfig()

@@ -32,19 +32,19 @@ def _perim(n_lat, n_lon, pl, pc):
 
 
 @pytest.mark.parametrize("n_ranks,n_lat,n_lon", [
-    (4, 8, 16), (8, 8, 16), (16, 8, 16), (8, 16, 32), (6, 12, 24), (12, 24, 48),
+    (4, 8, 16), (8, 8, 16), (16, 12, 48), (8, 16, 32), (6, 12, 24), (12, 24, 48),
 ])
 def test_factor_valid_and_min_perimeter(n_ranks, n_lat, n_lon):
     pl, pc = _factor(n_ranks, n_lat, n_lon)
     # exact factor pair
     assert pl * pc == n_ranks
-    # per-block constraints (>=2 lat rows for halo=2; >=2 lon cols)
-    assert n_lat // pl >= 2 and n_lon // pc >= 2
+    # per-block constraints (>=3 lat rows and lon cols for the PPM halo=3)
+    assert n_lat // pl >= 3 and n_lon // pc >= 3
     # minimal halo perimeter among ALL valid factor pairs
     valid = [
         (q, n_ranks // q) for q in range(1, n_ranks + 1)
         if n_ranks % q == 0
-        and n_lat // q >= 2 and n_lon // (n_ranks // q) >= 2
+        and n_lat // q >= 3 and n_lon // (n_ranks // q) >= 3
     ]
     best = min(_perim(n_lat, n_lon, q, r) for q, r in valid)
     assert _perim(n_lat, n_lon, pl, pc) == pytest.approx(best)
@@ -57,7 +57,7 @@ def test_factor_balanced_block_for_square_friendly_counts():
 
 
 def test_factor_raises_when_too_many_ranks():
-    # 64 ranks can't keep >=2 rows AND >=2 cols on an 8x16 grid.
+    # 64 ranks can't keep >=3 rows AND >=3 cols on an 8x16 grid.
     with pytest.raises(ValueError, match="no 2-D factorisation"):
         _factor(64, 8, 16)
 

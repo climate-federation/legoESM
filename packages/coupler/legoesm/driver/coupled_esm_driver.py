@@ -1065,7 +1065,8 @@ class CoupledESMDriver:
             lat = self._atm._grid_lat; lon = self._atm._grid_lon
             lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
             lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
-            smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d)
+            smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d,
+                                    vg_air_entry_m=land_cfg.hydraulics.vg_air_entry_m)
             # per-cell calibrated soil hydraulics (van-Genuchten), thermal inertia
             # (C_soil/k_solid -> seasonal cycle) and bulk exchange Ch.  Cast to the
             # storage dtype so the (float64) PFT-table matmuls do not silently down-
@@ -1083,7 +1084,10 @@ class CoupledESMDriver:
                    @ jnp.asarray(TUNED_PFT_SNOWMASK_MULTILAYER))
                 + jnp.asarray(smap["glacier_frac"])).astype(_sd)
             land_cfg = land_cfg._replace(
-                hydraulics=cast(clm_hydraulics_config(smap)),
+                # keep the configured air-entry head: the map's wilting point /
+                # field capacity above were built on it (user 2026-10-18)
+                hydraulics=cast(clm_hydraulics_config(smap)._replace(
+                    vg_air_entry_m=land_cfg.hydraulics.vg_air_entry_m)),
                 thermal=cast(clm_multilayer_thermal_config(smap)),
                 land_albedo=land_cfg.land_albedo._replace(
                     snow_cover_scale=_mask_cell),
@@ -1314,6 +1318,11 @@ class CoupledESMDriver:
             # surface-energy params against a different soil forward).
             variant = ("multilayer" if self.coupled_cfg.land_mode == "multilayer"
                        else "slab")
+            # Air-entry head for the map's soil wilting point / field capacity: the
+            # multilayer land's own; the slab land solves no van Genuchten soil
+            # water, so the classic curve (0.0) as before (user 2026-10-18).
+            head = (self._land_cfg.hydraulics.vg_air_entry_m if variant == "multilayer"
+                    else 0.0)
             # Transient land-use cover (opt-in): the vegetation params re-weight per
             # segment from a transient legoesm_surfdata cover; soil frozen.  Base +
             # per-year both go through clm_provider_rebuild so their albedo treatment
@@ -1325,7 +1334,7 @@ class CoupledESMDriver:
                     load_transient_cover_on_columns, TransientCoverProvider)
                 clm_path = getattr(self.coupled_cfg, "clm_surfdata_path", "") \
                     or download_clm_surfdata()
-                m = load_clm_surface(clm_path, lat_deg, lon_deg)
+                m = load_clm_surface(clm_path, lat_deg, lon_deg, vg_air_entry_m=head)
                 # Match the non-transient coupled provider (clm_surface_provider omits
                 # the soil-colour albedo) so an unchanged cover slice is a no-op.
                 rebuild = clm_provider_rebuild(m, variant=variant,
@@ -1344,7 +1353,8 @@ class CoupledESMDriver:
                     f"{cover.shape[0]} years {int(years[0])}-{int(years[-1])}, "
                     f"{variant} tuning), {lat_deg.size} columns")
                 return provider
-            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant)
+            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant,
+                                            vg_air_entry_m=head)
             logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
                         f"reference soil, {variant} tuning), {lat_deg.size} columns")
             return provider
@@ -1726,7 +1736,7 @@ class CoupledESMDriver:
             q_low = (_qgd[..., -1] if _qgd is not None
                      else jnp.zeros_like(T_low))
         else:
-            q_v = self._atm.q_v
+            q_v = self._atm.current_tracer("q_v")
             p_s = state.p_s.data
             T_low = state.T.data[..., -1]
             if state.v is not None:
@@ -2710,7 +2720,7 @@ class CoupledESMDriver:
                 _qv = (jnp.zeros_like(_f["T"]) if _qv is None
                        else getattr(_qv, "data", _qv))
             else:
-                _ps, _qv = _st.p_s.data, self._atm.q_v
+                _ps, _qv = _st.p_s.data, self._atm.current_tracer("q_v")
             cwv_now = column_water_vapor(
                 _qv, _ps, jnp.asarray(self._atm.sigma.dsigma),
             )
@@ -2767,9 +2777,9 @@ class CoupledESMDriver:
                     # W_atm = column vapour + any CARRIED condensate tracers
                     # (same (1/g) INT q dp mass weighting); each accessor is
                     # None when that species is not carried (dry/kessler).
-                    w_atm = column_water_vapor(self._atm.q_v, p_s, dsig)
+                    w_atm = column_water_vapor(self._atm.current_tracer("q_v"), p_s, dsig)
                     for _qn in ("q_c", "q_r", "q_i", "q_s", "q_g"):
-                        _qx = getattr(self._atm, _qn, None)
+                        _qx = self._atm.current_tracer(_qn)
                         if _qx is not None:
                             w_atm = w_atm + column_water_vapor(_qx, p_s, dsig)
                     # Whole-cell tile weights on the ATM grid: the ice-tile
@@ -2865,8 +2875,8 @@ class CoupledESMDriver:
 
     @property
     def q_v(self):
-        """Atmospheric specific humidity ``q_v`` (stored outside the dycore state)."""
-        return self._atm.q_v
+        """Atmospheric specific humidity ``q_v`` as the running lane holds it."""
+        return self._atm.current_tracer("q_v")
 
     @property
     def ocean_state(self):

@@ -1,0 +1,31 @@
+! Harness namelist for ifs49_driver.x, AEROSOL ARM (NAERMACC=1; votes A1-A14, B1-B6).
+! Identical to ifs49_harness.nam except the HARNESS_AER and RADIATION groups.
+! Every value here is a HARNESS choice; each carries the vote that set it
+! (IVxx, recorded in the harness report). Everything else is a 49r1 code default.
+&HARNESS
+NINDAT_H   = 20200115,  ! IV8: start date (McICA seed day term NDD = 15)
+NSTEP_H    = 4,         ! IV8: radiation call at step 4 (seed minute term 4*900/60 = 60)
+TSTEP_H    = 900.0,     ! IV8: model/physics timestep (s)
+NSTEPS     = 4,         ! IV12: RADHEATN steps 0..3 after the radiation call
+DMU0       = 0.02,      ! IV12: per-step mu0 increment (day columns only, capped at 1)
+DTS        = 0.5,       ! IV12: per-step skin-temperature increment (K)
+CCN_LAND_MIN = 100.0,   ! IV7: column-varying CCN, land field 100..1500 (linear over the 8 columns)
+CCN_LAND_MAX = 1500.0,
+CCN_SEA_MIN  = 10.0,    ! IV7: sea field 10..300
+CCN_SEA_MAX  = 300.0,
+LANDSEA    = 'alt',     ! IV6: odd column index land, even sea
+FULL_LEVEL = 'mean',    ! IV2r: arithmetic mean of half levels (LAPRXPK/non-VFE GPHPRE value; NOT the VFE value)
+SURF_THL   = 'skin',    ! IV3: surface half-level T = skin T, as IFS passes
+CONTROL    = 'none',    ! run49 controls override this (none|nan_unused|big_unused|nan_thf)
+/
+&HARNESS_AER
+NAERMACC = 1,           ! 49r1 default (suecrad.F90:778): CAMS climatology arm
+CAERCLIM = 'CAMS_CLIM', ! A2a: 48r1 aerosol_cams_climatology_43R3a.nc (LAER3D=F, declared departure); set by the run script
+MMR_SCALE = 1.0,        ! B6 control multiplier on the aerosol inputs (1 = none)
+/
+&NAMSCEN
+/
+&NAMDYNCORE
+/
+&RADIATION
+/

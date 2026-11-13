@@ -135,13 +135,20 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # RRTMGP gas-table set: an unknown name must raise, never fall back
+        # to the reduced tables.
+        ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py",
+         "gas_table_files"),
         # SI3 aEVP lateral boundary: an unknown north_fold / lbc point type
         # must raise, never fall back to the doubly periodic halo.
         ("packages/ice/legoesm/ice/dynamics.py", "_si3_halo"),
-        ("packages/ice/legoesm/ice/dynamics.py", "_si3_orca_f_pivot_halo"),
+        ("packages/ice/legoesm/ice/dynamics.py", "si3_orca_f_pivot_halo"),
         # Richards post-solve psi update: retention curve -> shift (PDI/Lu) or
         # exact reset; an unknown curve must raise, never pick one silently.
         ("packages/land/legoesm/land/richards.py", "solve_richards"),
+        # SI3 column port release selector ("5.0.1" | "5.0.2"): an unknown
+        # release must raise, never run the other release's order silently.
+        ("packages/ice/legoesm/ice/bitz_lipscomb.py", "_check_nemo_version"),
         # Distributed PCG preconditioner selection ("jacobi" | "poly"):
         # an unknown name must raise, never fall back to Jacobi.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_mpas.py", "barotropic_implicit_mpas"),
@@ -157,11 +164,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # MPAS atm dycore pv_scheme guards (hardened 2026-06-22; previously a
         # bare ``else`` silently fell back to the energy-conserving PV flux).
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler_mpas.py", "mpas_compressible_euler_slow_tendencies"),
-        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "mpas_hydrostatic_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "mpas_legacy_pe_tendencies"),
         # Vertical-filter form selection: a misspelled tracer name raises even
         # with the filter off, never sits silently unused.
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "validate_vert4_flux_form_tracers"),
-        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/shallow_water_mpas.py", "mpas_shallow_water_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/shallow_water_generic.py", "mpas_sw_operators"),
         ("packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py", "compute_cloud_properties"),
         ("packages/atmosphere/legoesm/atmosphere/physics/combined.py", "make_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py", "dca_convection"),
@@ -195,9 +202,6 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "_get_microphysics_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "make_microphysics_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py", "morrison_microphysics"),
-        # thompson snow_scheme guard (hardened 2026-06-22; previously a bare
-        # ``else`` silently used the bulk power-law fall speed on a typo).
-        ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson.py", "thompson_microphysics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py", "_get_radiation_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py", "make_radiation_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/optics.py", "optics_factory"),
@@ -383,7 +387,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # after-SSH slot when wzv reads it (stprk3.F90:225 against ssh_nxt),
         # so an unknown form must raise rather than silently run one of them.
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "nemo_qco_wzv_operands"),
-        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_baroclinic_tendencies"),
+        # pv_scheme guard: pure-moved out of mpas_ocean_baroclinic_tendencies
+        # with the PV-flux block (shared ocean core plug-in), both paths call it.
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_pv_flux"),
         # (nemo_drag_r_from_speed_sq's internal legacy-rejection raise is not
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)
         ("packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py", "validate_bottom_drag_scheme"),

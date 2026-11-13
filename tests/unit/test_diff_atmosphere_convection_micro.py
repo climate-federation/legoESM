@@ -571,7 +571,7 @@ class TestConvectionLeafGrad:
 # Microphysics — gradients w.r.t. the state
 # ===========================================================================
 
-_MICRO_SCHEMES = ("thompson", "sundqvist", "p3")
+_MICRO_SCHEMES = ("sundqvist", "p3")  # thompson: needs w (vote K1a)
 
 
 def _call_microphysics(scheme, col, *, T=None, q_v=None, hyd=None):
@@ -580,12 +580,6 @@ def _call_microphysics(scheme, col, *, T=None, q_v=None, hyd=None):
     hyd = _hydrometeors(col) if hyd is None else hyd
     args = (T, q_v, hyd, col.p_full, col.p_half, col.rho, col.dz, _DT)
 
-    if scheme == "thompson":
-        from legoesm.atmosphere.physics.microphysics.config import ThompsonConfig
-        from legoesm.atmosphere.physics.microphysics.thompson import (
-            thompson_microphysics,
-        )
-        return thompson_microphysics(*args, ThompsonConfig())
     if scheme == "sundqvist":
         from legoesm.atmosphere.physics.microphysics.config import (
             SundqvistConfig,
@@ -599,7 +593,12 @@ def _call_microphysics(scheme, col, *, T=None, q_v=None, hyd=None):
         nlev = T.shape[1]
         dry = jnp.where(jnp.arange(nlev) >= nlev - nlev // 4, 0.6, 1.0)
         args = (T, q_v * dry, *args[2:])
-        return sundqvist_microphysics(*args, SundqvistConfig(), cell_area=1.0e10)
+        from legoesm.atmosphere.physics.microphysics.sundqvist import (
+            sundqvist_carry_init,
+        )
+        prev = sundqvist_carry_init(*T.shape, T.dtype)
+        return sundqvist_microphysics(*args, SundqvistConfig(), cell_area=1.0e10,
+                                      prev_state=prev)
     if scheme == "p3":
         from legoesm.atmosphere.physics.microphysics.config import P3Config
         from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
@@ -653,7 +652,7 @@ class TestMicrophysicsLeafGrad:
         grad = jax.grad(loss)(hyd0.q_r)
         assert_gradient_ok(grad, f"microphysics({scheme}) w.r.t. q_r")
 
-    @pytest.mark.parametrize("scheme", ("thompson", "p3"))
+    @pytest.mark.parametrize("scheme", ("p3",))
     def test_grad_wrt_qi(self, scheme, col):
         """Ice phase: depositional growth ``N_i**(1/3)`` + ice fall speeds."""
         hyd0 = _hydrometeors(col)
@@ -665,7 +664,7 @@ class TestMicrophysicsLeafGrad:
         grad = jax.grad(loss)(hyd0.q_i)
         assert_gradient_ok(grad, f"microphysics({scheme}) w.r.t. q_i")
 
-    @pytest.mark.parametrize("scheme", ("thompson", "p3"))
+    @pytest.mark.parametrize("scheme", ("p3",))
     def test_grad_wrt_Ni(self, scheme, col):
         """Ice NUMBER — the second moment, per-mass [1/kg] by convention."""
         hyd0 = _hydrometeors(col)

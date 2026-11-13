@@ -2322,12 +2322,44 @@ def pad_halo_vector(
 # Padded grid angle computation
 # ==============================================================================
 
+def fv3_cell_angle_from_corners(lon_k, lat_k, lon_c, lat_c):
+    """Grid angle at cell centres, FV3 ``get_center_vect`` (non-OLD_VECT):
+    ``e1 = pc x (p2 x p1)`` with ``p1``/``p2`` the west/east edge midpoints
+    (``mid_pt3_cart``) and ``pc`` the corner-mean centre (``cell_center3``),
+    projected on east/north at the centre (lon_c, lat_c);
+    angle = atan2(e1.north, e1.east).
+
+    Cartesian throughout: no longitude difference, so it avoids the
+    longitude singularity next to the pole (the lat/lon centred-difference form was 13.7 deg off there at
+    every resolution).  ``lon_k/lat_k``: corners ``(6, M+1, M+1)``;
+    ``lon_c/lat_c``: centres ``(6, M, M)``; axis 1 = i.
+    """
+    def xyz(lo, la):
+        return jnp.stack([jnp.cos(la) * jnp.cos(lo), jnp.cos(la) * jnp.sin(lo),
+                          jnp.sin(la)], axis=-1)
+
+    def unit(v):
+        return v / jnp.linalg.norm(v, axis=-1, keepdims=True)
+
+    pk = xyz(lon_k, lat_k)
+    sw, se = pk[:, :-1, :-1], pk[:, 1:, :-1]
+    nw, ne = pk[:, :-1, 1:], pk[:, 1:, 1:]
+    pc = unit(sw + se + nw + ne)
+    p1 = unit(sw + nw)                      # west edge midpoint
+    p2 = unit(se + ne)                      # east edge midpoint
+    e1 = jnp.cross(pc, jnp.cross(p2, p1))
+    east = jnp.stack([-jnp.sin(lon_c), jnp.cos(lon_c), 0.0 * lon_c], axis=-1)
+    north = jnp.stack([-jnp.sin(lat_c) * jnp.cos(lon_c),
+                       -jnp.sin(lat_c) * jnp.sin(lon_c), jnp.cos(lat_c)], axis=-1)
+    return jnp.arctan2(jnp.sum(e1 * north, -1), jnp.sum(e1 * east, -1))
+
+
 def compute_padded_angle(n: int, halo: int = 1) -> jax.Array:
     """Compute grid angle on extended (n+2*halo) x (n+2*halo) grid per face.
 
-    Uses a further-extended gnomonic grid internally so that centred
-    differences are available at every point of the output grid,
-    matching the approach in ``compute_padded_half_metrics``.
+    FV3 ``get_center_vect`` form (:func:`fv3_cell_angle_from_corners`) on the
+    extended gnomonic corners: Cartesian, avoids the longitude singularity
+    next to the pole.
 
     Parameters
     ----------
@@ -2343,36 +2375,20 @@ def compute_padded_angle(n: int, halo: int = 1) -> jax.Array:
     angle_padded : jax.Array, shape (6, n+2*halo, n+2*halo)
     """
     dalpha = jnp.pi / (2 * n)
-
-    # Need (n+2*halo+2) internal grid so centred diffs yield (n+2*halo) output
-    n_big = n + 2 * halo + 2
-    ext = halo + 1  # cells beyond interior on each side
-    alpha_big = jnp.linspace(
-        -jnp.pi / 4 - ext * dalpha,
-        jnp.pi / 4 + ext * dalpha,
-        n_big,
-        endpoint=False,
-    )
-    alpha_big = alpha_big + dalpha / 2.0
-    alpha_bx, alpha_by = jnp.meshgrid(alpha_big, alpha_big, indexing='ij')
-
-    all_angle = []
+    # cells -halo..n+halo-1 (n+2*halo); corners one more
+    m = n + 2 * halo
+    alpha_k = -jnp.pi / 4 - halo * dalpha + dalpha * jnp.arange(m + 1)
+    alpha_c = alpha_k[:-1] + dalpha / 2.0
+    akx, aky = jnp.meshgrid(alpha_k, alpha_k, indexing='ij')
+    acx, acy = jnp.meshgrid(alpha_c, alpha_c, indexing='ij')
+    lon_k, lat_k, lon_c, lat_c = [], [], [], []
     for face in range(6):
-        lon, lat = face_gnomonic_to_lonlat(face, alpha_bx, alpha_by)
-
-        # Centred differences on (n_big) → (n_big-2) = (n+2*halo) output
-        dlon_dx = lon[2:, 1:-1] - lon[:-2, 1:-1]
-        dlat_dx = lat[2:, 1:-1] - lat[:-2, 1:-1]
-
-        # Handle longitude wrapping
-        dlon_dx = jnp.where(dlon_dx > jnp.pi, dlon_dx - 2 * jnp.pi, dlon_dx)
-        dlon_dx = jnp.where(dlon_dx < -jnp.pi, dlon_dx + 2 * jnp.pi, dlon_dx)
-
-        cos_lat_ext = jnp.cos(lat[1:-1, 1:-1])
-        face_angle = jnp.arctan2(dlat_dx, dlon_dx * cos_lat_ext)
-        all_angle.append(face_angle)
-
-    return jnp.stack(all_angle, axis=0)
+        lo, la = face_gnomonic_to_lonlat(face, akx, aky)
+        lon_k.append(lo); lat_k.append(la)
+        lo, la = face_gnomonic_to_lonlat(face, acx, acy)
+        lon_c.append(lo); lat_c.append(la)
+    return fv3_cell_angle_from_corners(
+        jnp.stack(lon_k), jnp.stack(lat_k), jnp.stack(lon_c), jnp.stack(lat_c))
 
 
 def face_gnomonic_to_lonlat(

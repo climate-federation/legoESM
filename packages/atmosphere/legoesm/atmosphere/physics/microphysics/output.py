@@ -139,6 +139,9 @@ class MicrophysicsOutput(NamedTuple):
     # it back to its advected cloud-fraction tracer.  None = the scheme has
     # no prognostic cloud fraction.
     cloud_fraction_new: jax.Array | None = None
+    # Scheme state the next call reads (Sundqvist: the gscond previous-step
+    # state, keyed by PhysicsState field name); None for stateless schemes.
+    carry: dict | None = None
 
 
 def make_zero_hydrometeors(

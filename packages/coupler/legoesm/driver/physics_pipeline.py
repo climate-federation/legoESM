@@ -1156,6 +1156,31 @@ class PhysicsPipeline:
             return_water=return_water,
         )
 
+    def _resolved_omega(self, u, v, p_s, ncol, nlev, winds_on_t_grid, who):
+        """Resolved omega [Pa/s, (ncol, nlev)] by full sigma continuity, for
+        the WRF ports (Tiedtke's omega, Thompson's w); refuses what it cannot
+        diagnose (staggered winds, hybrid coordinate, grid without a
+        divergence operator)."""
+        from legoesm.atmosphere.physics.convection.integration import (
+            diagnose_omega_columns_hydrostatic,
+        )
+        from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+        if not winds_on_t_grid:
+            raise ValueError(f"{who} needs cell-centre winds (omega)")
+        if isinstance(self._sigma_coord, HybridSigmaPressureCoordinate):
+            raise ValueError(
+                f"{who} needs omega, which is diagnosed by PURE-sigma "
+                "continuity; a hybrid coordinate would get a wrong omega")
+        omega = (None if self._grid is None else
+                 diagnose_omega_columns_hydrostatic(
+                     u, v, p_s, self._grid, self._sigma_coord, ncol, nlev,
+                     full_continuity=True))
+        if omega is None:
+            raise ValueError(
+                f"{who} needs the resolved pressure velocity, diagnosed on "
+                "the cubed-sphere and lat-lon grids only")
+        return omega
+
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
                             sw_up_toa, lw_up_toa, sw_down_toa,
@@ -1278,7 +1303,6 @@ class PhysicsPipeline:
         # factories so the two call paths cannot drift).
         from legoesm.atmosphere.physics.convection.integration import (
             convection_scheme_traits,
-            diagnose_omega_columns_hydrostatic,
             diagnose_w_grid_columns_hydrostatic,
         )
         from legoesm.atmosphere.physics._shared import (
@@ -1286,7 +1310,6 @@ class PhysicsPipeline:
             compute_moisture_convergence,
             moisture_convergence_supported,
         )
-        from legoesm.grids.vertical import HybridSigmaPressureCoordinate
 
         _ctr = convection_scheme_traits(self._conv_scheme)
 
@@ -1596,24 +1619,9 @@ class PhysicsPipeline:
                         "supplies "
                         f"{[n for n, v in (('dq_v_dt_dyn', dq_v_dt_dyn), ('turb_dq_v_prev', turb_dq_v_prev), ('evap_sfc_prev', evap_sfc_prev)) if v is None]} "
                         "as None")
-                if not _winds_on_t_grid:
-                    raise ValueError(
-                        "convection='tiedtke' needs cell-centre winds "
-                        "(cumulus friction, omega)")
-                if isinstance(self._sigma_coord, HybridSigmaPressureCoordinate):
-                    raise ValueError(
-                        "convection='tiedtke' needs omega, which is diagnosed "
-                        "by PURE-sigma continuity; a hybrid coordinate would "
-                        "get a wrong omega")
-                _omega = (None if self._grid is None else
-                          diagnose_omega_columns_hydrostatic(
-                              u, v, p_s, self._grid, self._sigma_coord,
-                              ad.ncol, nlev, full_continuity=True))
-                if _omega is None:
-                    raise ValueError(
-                        "convection='tiedtke' needs the resolved pressure "
-                        "velocity, diagnosed on the cubed-sphere and lat-lon "
-                        "grids only")
+                _omega = self._resolved_omega(
+                    u, v, p_s, ad.ncol, nlev, _winds_on_t_grid,
+                    "convection='tiedtke'")
                 _z_full, _ = compute_heights_from_sigma(
                     T_col, p_half_col, q_v_col)
                 conv_out, conv_prog_out = self.convection_fn(
@@ -1746,9 +1754,14 @@ class PhysicsPipeline:
             from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
             q_c_col = ad.flatten_3d(q_c)
             q_r_col = ad.flatten_3d(q_r)
-            rho_col = p_full_col / (constants.R_d * T_col)
-            dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-            dz_col = dp_col / (rho_col * constants.g)
+            # the column bridges' moist (virtual-temperature) density and
+            # layer thickness (vote U1a; this lane used the dry p/(R_d T))
+            from legoesm.atmosphere.physics._shared import (
+                compute_layer_dz,
+                compute_rho,
+            )
+            rho_col = compute_rho(T_col, p_full_col, q_v_col)
+            dz_col = compute_layer_dz(T_col, p_half_col, q_v_col)
             _z = jnp.zeros_like(q_c_col)
             # Aerosol-CCN specified droplet number: under specified-Nc
             # (``predict_Nc=False`` — the N_c carry slot exists for
@@ -1835,12 +1848,50 @@ class PhysicsPipeline:
                 )
             else:
                 _sq_kw = self._sundqvist_kwargs(ad, q_i, cell_area)
+                from legoesm.atmosphere.physics._shared import (
+                    diagnose_grid_w_from_omega,
+                )
+                from legoesm.atmosphere.physics.microphysics.config import (
+                    ThompsonConfig,
+                )
+                from legoesm.atmosphere.physics.microphysics.integration import (
+                    number_per_mass_to_per_volume,
+                    number_per_volume_to_per_mass,
+                    require_thompson_tracers,
+                )
+                if isinstance(self.micro_config, ThompsonConfig):
+                    # the column bridges' full-registry refusal (vote W1a/Y2a)
+                    require_thompson_tracers("thompson", [
+                        k for k, x in (("q_v", q_v), ("q_c", q_c),
+                                       ("q_r", q_r), ("q_i", q_i),
+                                       ("q_s", q_s), ("q_g", q_g),
+                                       ("N_c", N_c), ("N_r", N_r),
+                                       ("N_i", N_i)) if x is not None])
+                    # WRF Thompson reads the resolved w (votes H2/J6)
+                    _sq_kw["w"] = diagnose_grid_w_from_omega(
+                        self._resolved_omega(
+                            u, v, p_s, ad.ncol, nlev, _winds_on_t_grid,
+                            "microphysics='thompson'"),
+                        T_col, p_full_col, q_v_col)
+                # The per-mass N_c/N_r carry <-> every scheme's per-volume
+                # numbers, with the column bridges' moist density (the
+                # bridges always did this; this lane fed the carry raw to
+                # every scheme but thompson).  The aerosol-CCN N_c is
+                # already per volume (as the bridges' activated field).
+                _rho_n = rho_col
+                hydrometeors = hydrometeors._replace(
+                    N_c=(hydrometeors.N_c if _nc_aer_specified else
+                         number_per_mass_to_per_volume(hydrometeors.N_c, _rho_n)),
+                    N_r=number_per_mass_to_per_volume(hydrometeors.N_r, _rho_n))
                 micro_out = self.micro_fn(
                     T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
                     p_full=p_full_col, p_half=p_half_col,
                     rho=rho_col, dz=dz_col, dt=dt,
                     config=self.micro_config, **_sq_kw,
                 )
+                micro_out = micro_out._replace(
+                    dN_c_dt=number_per_volume_to_per_mass(micro_out.dN_c_dt, _rho_n),
+                    dN_r_dt=number_per_volume_to_per_mass(micro_out.dN_r_dt, _rho_n))
             dT_dt_micro = ad.unflatten_3d(micro_out.dT_dt)
             dq_v_dt_micro = ad.unflatten_3d(micro_out.dq_v_dt)
             dq_c_dt = ad.unflatten_3d(micro_out.dq_c_dt)
@@ -3902,7 +3953,11 @@ def rrtmgp_config_from_experiment(config, **lane_fields):
     ``use_scan`` None defers to ``rte_utils.recurrent_op_with_halos``, which
     picks scan on GPU/TPU and the unrolled loop on CPU/Metal (issue #273)."""
     from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import gas_table_files
+    lw_gas, sw_gas = gas_table_files(getattr(config, 'rrtmgp_gas_tables', 'reduced'))
     return RRTMGPConfig(
+        lw_gas_file=lw_gas,
+        sw_gas_file=sw_gas,
         co2_ppmv=config.co2_ppmv,
         ch4_ppbv=config.ch4_ppbv,
         n2o_ppbv=config.n2o_ppbv,
@@ -3913,6 +3968,22 @@ def rrtmgp_config_from_experiment(config, **lane_fields):
         column_chunk_size=getattr(config, 'rrtmgp_column_chunk_size', 0),
         overhead_layer=bool(getattr(config, 'rrtmgp_overhead_layer', False)),
         **lane_fields,
+    )
+
+
+def solar_config_from_experiment(config):
+    """The external-solar config for a run.  Its per-band spectrum is expanded
+    to the g-points of the SW table the radiation runs (``rrtmgp_gas_tables``),
+    taken from the same map the RRTMGP builder above uses."""
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import gas_table_files
+    from legoesm.forcing.external import SolarConfig
+    return SolarConfig(
+        S_0=config.S_0, source=config.solar_source,
+        path=config.solar_file, tsi_var=config.solar_tsi_var,
+        spectral_var=config.solar_spectral_var,
+        spectral_band_order=getattr(config, "solar_spectral_band_order", "auto"),
+        start_year=config.start_year,
+        sw_gas_file=gas_table_files(getattr(config, "rrtmgp_gas_tables", "reduced"))[1],
     )
 
 
@@ -4265,9 +4336,11 @@ def mean_grid_spacing_m(grid):
 def _zm_overrides(config):
     """ZM leaf overrides from the flat zm_* scalars; refuses them when the run
     does not select zhang_mcfarlane (they would be silently inert)."""
-    from legoesm.driver.config import ZM_SCALAR_FIELDS, ZM_WIDTH_FIELDS
+    from legoesm.driver.config import (
+        ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS, ZM_WIDTH_FIELDS,
+    )
 
-    table = {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS}
+    table = {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS}
     given = [f for f in table if getattr(config, f, None) is not None]
     if given and config.convection != "zhang_mcfarlane":
         raise ValueError(
@@ -4288,6 +4361,14 @@ def _zm_overrides(config):
         validate_detrain_widths(*(widths.get(leaf, getattr(
             ZhangMcFarlaneConfig(), leaf)) for leaf in ZM_WIDTH_FIELDS.values()))
         out.update({k: float(v) for k, v in widths.items()})
+    for f in given:
+        if f in ZM_TRIGGER_FIELDS:
+            from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+                validate_trigger_width,
+            )
+            v = getattr(config, f)
+            validate_trigger_width(v)
+            out[ZM_TRIGGER_FIELDS[f]] = float(v)
     return out
 
 
@@ -4420,6 +4501,11 @@ def _resolve_convection(config):
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
+        _w = config.bechtold_snow_refill_width_kg_m2_s
+        if _w is not None:
+            from legoesm.core.smooth import validate_smoothing_width
+            validate_smoothing_width("bechtold_snow_refill_width_kg_m2_s", _w)
+            _bechtold_kwargs["snow_refill_width_kg_m2_s"] = float(_w)
         conv_config = BechtoldConfig(**_bechtold_kwargs)
     else:
         cc = ConvectionConfig(scheme=scheme)
@@ -5349,11 +5435,10 @@ def gwd_config_for(config):
         effgw_oro=float(getattr(config, "mcfarlane_effgw_oro",
                                 gc.mcfarlane.effgw_oro)),
     )
-    # Hines (non-orographic) launch amplitude + saturation flux cap.
+    # Hines (non-orographic) launch rms wind + launch pressure.
     hn = gc.hines._replace(
         total_rms_wind=float(getattr(config, "hines_total_rms_wind",
                                      gc.hines.total_rms_wind)),
-        Fmax=float(getattr(config, "hines_Fmax", gc.hines.Fmax)),
         launch_p=float(config.hines_launch_p),
     )
     fr = gc.e3sm_cam.frontal._replace(
@@ -5805,6 +5890,15 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
     pipeline._turb_energy_field = turbulence_scheme_traits(
         getattr(config, 'turbulence', 'none'),
     ).energy_field
+    if pipeline._turb_energy_field == "sfclay":
+        # R4 vote J4: this pipeline threads only tke/qke through its step and
+        # segment carry; the WRF surface-layer state of turbulence=ysu would
+        # be dropped every step.
+        raise ValueError(
+            "turbulence='ysu' (WRF surface layer + YSU) carries the surface-layer "
+            "state PhysicsState.sfclay, which the driver physics pipeline does "
+            "not thread; select ysu on a lane that threads PhysicsState "
+            "(hydrostatic / MPAS / spectral_pe physics factories).")
     # A GWD scheme threads the prognostic wave-action spectrum when it is
     # ``prognostic_spectral`` OR a '+'-composite that contains it (issue #834).
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (

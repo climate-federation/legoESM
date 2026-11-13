@@ -1,5 +1,10 @@
 """Longwave 3D Monte-Carlo radiative transfer by forward thermal-emission MC.
 
+NO REFERENCE IMPLEMENTATION: legoESM's own forward thermal-emission Monte
+Carlo (microhh rte-rrtmgp-cpp has no longwave Monte Carlo; its longwave is
+two-stream). Validated only against analytic limits and the RRTMGP two-stream
+(tests/unit/test_mc3d_lw.py), never against an oracle.
+
 LW scattering is neglected (the dominant LW process is absorption/emission), so
 the transport reduces to: emit photons from the volumetric Planck source
 (``4pi k_abs B dV`` per cell) and the surface (``pi emissivity B_sfc dA``), walk
@@ -34,6 +39,49 @@ from legoesm.atmosphere.physics.radiation.mc3d.photon_walk import (
 )
 
 Array: TypeAlias = jax.Array
+
+__physics_contract__ = {
+    "summary": (
+        "3D longwave Monte Carlo on a doubly-periodic plane: photons emitted "
+        "from the volumetric (4 pi k B) and surface (pi emissivity B) Planck "
+        "sources, walked by null-collision tracking to their first absorption, "
+        "the surface or the top of the domain; no longwave scattering."
+    ),
+    "inputs": {
+        "abs_optical_depth": "1 (per g-point layer absorption optical depth; spectral entry)",
+        "k_abs": "1/m (absorption coefficient; monochromatic entry)",
+        "planck_src": "W/m^2/sr (cell Planck radiance)",
+        "planck_src_lower": "W/m^2/sr (optional lower-face radiance; with upper, linear-in-z emission)",
+        "planck_src_upper": "W/m^2/sr (optional upper-face radiance)",
+        "planck_src_sfc": "W/m^2/sr (surface Planck radiance)",
+        "emissivity": "1 (surface longwave emissivity)",
+    },
+    "outputs": {
+        "net_flux": "W/m^2 (absorbed minus emitted per cell, per ground area)",
+        "sfc_net": "W/m^2 (surface absorbed minus emitted)",
+        "olr": "W/m^2 (escaping through the top of the domain)",
+        "maxiter_frac": "1 (photons stopped by the step cap; their energy is the unresolved budget term)",
+    },
+    "sign_convention": (
+        "z positive up; net_flux and sfc_net are absorbed minus emitted, so "
+        "a positive value warms the cell or surface; olr is positive upward."
+    ),
+    "conserves": ["energy"],
+    "differentiable": False,
+    "reference": (
+        "NO REFERENCE IMPLEMENTATION: legoESM's own forward thermal-emission "
+        "Monte Carlo (microhh rte-rrtmgp-cpp has no longwave Monte Carlo; its "
+        "longwave is two-stream). Validated only against analytic limits and "
+        "the RRTMGP two-stream (tests/unit/test_mc3d_lw.py), never against an "
+        "oracle."
+    ),
+    "idealized_test": (
+        "tests/unit/test_mc3d_lw.py -- optically thin isothermal cooling "
+        "-4 k sigma T^4 dz, emitted = absorbed + escaped (net_atmos + net_sfc "
+        "+ OLR + unresolved = 0), and an OLR scale check against the RRTMGP "
+        "two-stream (ratio within 0.6-1.5, a normalization check, not agreement)."
+    ),
+}
 
 # Solid-angle emission factors: isotropic volume emission integrates 4*pi over
 # the sphere; a Lambertian surface integrates pi over the upward hemisphere.

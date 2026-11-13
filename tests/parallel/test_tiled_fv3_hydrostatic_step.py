@@ -162,12 +162,13 @@ def test_tiled_step_matches_global(cdg, KT, hybrid, monkeypatch):
 
 def test_tiled_step_rejects_bad_dt(cdg):
     """Fail-loud factory guard on dt."""
-    if len(jax.devices()) < 6:
-        pytest.skip("guard test builds a (6,1,1) mesh -> needs 6 host devices")
+    if len(jax.devices()) < 24:
+        pytest.skip("guard test uses valid kt=2 -> needs 24 host devices")
     from jax.sharding import Mesh
-    dev = np.array(jax.devices()[:6]).reshape(6, 1, 1)
+    # A validated kt is needed to reach the timestep guard.
+    dev = np.array(jax.devices()[:24]).reshape(6, 2, 2)
     mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
     coord = create_sigma_coordinate(NLEV)
     with pytest.raises(ValueError, match="dt must be"):
         make_tiled_fv3_hydrostatic_step_stage_2d(
-            mesh, cdg, coord, N, 1, NLEV, p_floor=P_FLOOR, dt=0.0)
+            mesh, cdg, coord, N, 2, NLEV, p_floor=P_FLOOR, dt=0.0)

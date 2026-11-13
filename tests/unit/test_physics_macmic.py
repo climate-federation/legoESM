@@ -7,7 +7,8 @@ Contract under test (CAM ``tphysbc`` macmic loop, physpkg.F90):
     an intermediate state first, then N turbulence->microphysics sub-steps at
     dt/N on the running state (each increment applied before the next), the
     sub-cycled tendencies / precip / carries averaged (CAM's 1/N scaling),
-    radiation and GWD once on the pre-physics state;
+    then radiation and GWD once, each on the state the loop (and the module
+    before it) left (CAM tphysbc/tphysac);
   * the sub-cycle is NOT a rate re-scaling: N=3 differs from N=1 (the
     intermediate state matters), jit parity, finite gradient;
   * the held-radiation variant, the cadence cache and the ledger rows all

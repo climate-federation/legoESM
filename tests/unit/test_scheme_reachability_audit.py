@@ -326,7 +326,7 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
             # MOST schemes carry a documented CROSS-FIELD contract (they need
             # turbulence != "none" so the atmosphere runs the same bulk-flux
             # algorithm as the ocean tile), so satisfy it rather than trip it.
-            if axis == "surface_bulk_scheme" and scheme != "constant":
+            if axis == "surface_bulk_scheme" and scheme not in ("constant", "none"):
                 kwargs["turbulence"] = "louis"
             # CAM6's cloud fraction IS the CLUBB PDF fraction plus the carry
             # routing, and is wired on the MPAS lane only (documented
@@ -343,11 +343,15 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
                 kwargs.update(convection="bechtold", bechtold_use_ifs_ascent=True,
                               cld_macmic_num_steps=1,
                               dycore=DycoreConfig(discretization="mpas"))
-            # ecRad 49r1 runs on the MPAS column lane only, with aerosols off
-            # (votes L2a/L20a, documented cross-field contract).
+            # ecRad 49r1 runs on the MPAS column lane only, with the lane's
+            # aerosols off and the input4MIPs TSI/ozone/GHG (votes L2a/L20a/
+            # M7a, documented cross-field contract).
             if axis == "radiation" and scheme == "ecrad_ifs":
                 from legoesm.driver.config import DycoreConfig
-                kwargs["dycore"] = DycoreConfig(discretization="mpas")
+                kwargs.update(dycore=DycoreConfig(discretization="mpas"),
+                              ozone_forcing="external", ghg_forcing="external",
+                              solar_source="spectral_file",
+                              ecrad_ifs_aerosol_file="cams.nc")
             # WRF Tiedtke reads the turbulence scheme's lagged q_v tendency
             # and surface water flux (cross-field contract, vote V21).
             if axis == "convection" and scheme == "tiedtke":

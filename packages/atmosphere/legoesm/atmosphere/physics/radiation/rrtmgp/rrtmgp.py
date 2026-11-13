@@ -105,8 +105,25 @@ def _default_data_path(basename_nc: str) -> str:
 
 _DEFAULT_LW_GAS = _default_data_path("rrtmgp-gas-lw-g128.nc")
 DEFAULT_SW_GAS = _default_data_path("rrtmgp-gas-sw-g112.nc")
-_DEFAULT_LW_CLOUD = _default_data_path("cloudysky_lw.nc")
-_DEFAULT_SW_CLOUD = _default_data_path("cloudysky_sw.nc")
+_DEFAULT_LW_CLOUD = _default_data_path("rrtmgp-clouds-lw-bnd.nc")
+# Gas-optics table sets, selected per run by ``ExperimentConfig.rrtmgp_gas_tables``.
+# "reduced" = the module defaults above (LW g128 / SW g112): (lw, sw) are "" so
+# RRTMGPConfig keeps its defaults and reduced runs stay byte-identical.  "full" =
+# the reference tables (LW g256 / SW g224), content-identical to rrtmgp-data.
+GAS_TABLE_FILES = {
+    "reduced": ("", ""),
+    "full": (_default_data_path("rrtmgp-gas-lw-g256.nc"),
+             _default_data_path("rrtmgp-gas-sw-g224.nc")),
+}
+
+
+def gas_table_files(tables: str) -> tuple[str, str]:
+    """``(lw_gas_file, sw_gas_file)`` for a table set; raises on an unknown one."""
+    if tables not in GAS_TABLE_FILES:
+        raise ValueError(f"unknown RRTMGP radiation gas-table set: rrtmgp_gas_tables "
+                         f"must be one of {tuple(GAS_TABLE_FILES)}, got {tables!r}")
+    return GAS_TABLE_FILES[tables]
+_DEFAULT_SW_CLOUD = _default_data_path("rrtmgp-clouds-sw-bnd.nc")
 
 # Module-level optics cache (shared across RRTMGP instances)
 _legoesm_optics_cache: dict = {}

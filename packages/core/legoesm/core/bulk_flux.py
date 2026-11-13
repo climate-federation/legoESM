@@ -70,12 +70,14 @@ from __future__ import annotations
 import functools
 import math
 import numbers
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round as sr
 from legoesm.core.smooth import (
     positive_part_c1, sigmoid_switch, smooth_max, smoothstep_quintic,
 )
@@ -407,8 +409,17 @@ def validate_unstable_scheme(unstable_scheme: str) -> None:
         )
 
 
+def _ly09_cdn_poly(w):
+    """LY09 Eq. 6 neutral drag polynomial ``1e3 * C_DN`` (no floor, clip or plateau);
+    the one copy every non-source-exact Large-Yeager drag branch evaluates (#2242)."""
+    w6 = w * w * w
+    w6 = w6 * w6
+    return 2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w6
+
+
 def large_yeager_neutral_cd(
-    wind, *, nemo_parity: bool = False, nemo_source_exact: bool = False
+    wind, *, nemo_parity: bool = False, nemo_source_exact: bool = False,
+    cd_cutoff_width: float | None = None,
 ):
     """Large & Yeager (2009) Eq. 6 neutral 10-m drag coefficient ``C_DN``.
 
@@ -424,13 +435,15 @@ def large_yeager_neutral_cd(
     winds.  The canonical drag law shared by the MOST flux solver and the OMIP-2
     air-sea bulk formulas (no per-component re-derivation).
 
-    ``nemo_parity=True`` reproduces NEMO/aerobulk ``cd_n10_ncar`` EXACTLY
-    (sbcblk_algo_ncar.F90): the same polynomial, but (a) a constant cyclone
-    plateau ``2.34e-3`` for ``U >= 33 m/s`` instead of letting the ``U⁶`` term
-    pull the polynomial down, and (b) ONLY the NEMO floor ``Cx_min = 1e-4`` —
+    ``nemo_parity=True`` reproduces NEMO/aerobulk ``cd_n10_ncar``
+    (sbcblk_algo_ncar.F90) at ``cd_cutoff_width=0``: the same polynomial, but
+    (a) a constant cyclone plateau ``2.34e-3`` for ``U >= 33 m/s`` instead of
+    letting the ``U⁶`` term pull the polynomial down (RULE 5 default: blended
+    into the plateau over [32.5, 33] m/s, KNOWN DIFFERENCE up to 7.2e-4
+    relative at 32.9 m/s, #2241), and (b) ONLY the NEMO floor ``Cx_min = 1e-4`` —
     no upper clip, so the calm-wind ``2.7/U`` enhancement (up to ``5.54e-3``
     at the 0.5 m/s floor) is kept.  The two conventions differ only for
-    ``U < ~0.97 m/s`` (where the 3.0e-3 clip binds) and ``U > 33 m/s``.
+    ``U < ~0.97 m/s`` (where the 3.0e-3 clip binds) and ``U > 32.5 m/s``.
 
     ``nemo_parity=True`` applies NO wind floor: NEMO's ``cd_n10_ncar``
     (sbcblk_algo_ncar.F90:242-255) has none, and its caller ``turb_ncar``
@@ -440,6 +453,12 @@ def large_yeager_neutral_cd(
     ORCA1 audit BLK D1: Cd 86% off on 67 cells).  Callers passing
     ``nemo_parity=True`` MUST therefore supply a positive, already-floored
     wind (both ``ncar_transfer_coefficients`` call sites do).
+
+    ``cd_cutoff_width`` (``nemo_parity=True`` only; ``None`` =
+    ``NCAR_CD_CUTOFF_WIDTH``): RULE 5 width [m/s] of the one-sided quintic
+    blend into the 33 m/s plateau, shared with :func:`_cd_n10_ncar` (#2241);
+    ``0.0`` is NEMO's hard switch.  ``nemo_source_exact=True`` keeps the hard
+    switch: that branch exists to reproduce NEMO's rounding bit for bit.
     """
     if nemo_source_exact:
         if not nemo_parity:
@@ -464,15 +483,10 @@ def large_yeager_neutral_cd(
         return R(jnp.maximum(C_DN, 0.1e-3))
 
     U = jnp.asarray(wind)
-    if not nemo_parity:
-        U = jnp.maximum(U, 0.5)
-    C_DN = (
-        2.7 / U + 0.142 + U / 13.09 - 3.14807e-10 * U ** 6
-    ) * 1e-3
     if nemo_parity:
-        C_DN = jnp.where(U >= 33.0, 2.34e-3, C_DN)
-        return jnp.maximum(C_DN, 0.1e-3)
-    return jnp.clip(C_DN, 0.5e-3, 3.0e-3)
+        return _cd_n10_ncar(
+            U, NCAR_CD_CUTOFF_WIDTH if cd_cutoff_width is None else cd_cutoff_width)
+    return jnp.clip(1e-3 * _ly09_cdn_poly(jnp.maximum(U, 0.5)), 0.5e-3, 3.0e-3)
 
 
 # ============================================================================
@@ -1666,17 +1680,12 @@ def _cd_n10_ncar(w10, cutoff_width=NCAR_CD_CUTOFF_WIDTH):
     ``1 - s = 0`` reaches it above 33 m/s), so a huge wind cannot overflow
     its ``U**6`` term into ``0 * inf = NaN``.
     """
-    def _poly(w):
-        w6 = w * w * w
-        w6 = w6 * w6
-        return 2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w6
-
     if cutoff_width == 0.0:
-        cd = jnp.where(w10 >= _AB_NCAR_CD_CUTOFF_U, _AB_NCAR_CD_PLATEAU, _poly(w10))
+        cd = jnp.where(w10 >= _AB_NCAR_CD_CUTOFF_U, _AB_NCAR_CD_PLATEAU, _ly09_cdn_poly(w10))
     else:
         s = smoothstep_quintic((w10 - _AB_NCAR_CD_CUTOFF_U + cutoff_width) / cutoff_width)
         cd = (s * _AB_NCAR_CD_PLATEAU
-              + (1.0 - s) * _poly(jnp.minimum(w10, _AB_NCAR_CD_CUTOFF_U)))
+              + (1.0 - s) * _ly09_cdn_poly(jnp.minimum(w10, _AB_NCAR_CD_CUTOFF_U)))
     return jnp.maximum(1.0e-3 * cd, _AB_CX_MIN)
 
 
@@ -2876,6 +2885,95 @@ def compute_sam_oceflx_fluxes(
     return (tau_x, tau_y, shflx, lhflx, u_star, tref) + _wind_out
 
 
+@jax.custom_jvp
+def sqrt_zero_subgradient(value):
+    """Exact ``SQRT`` primal; finite zero subgradient at 0 (gradient-only guard)."""
+    return jnp.sqrt(value)
+
+
+@sqrt_zero_subgradient.defjvp
+def _sqrt_zero_subgradient_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    root = jnp.sqrt(value)
+    safe = jnp.where(value > 0.0, root, 1.0)
+    return root, jnp.where(value > 0.0, 0.5 * value_dot / safe, 0.0)
+
+
+class NemoSI3BlkIce1(NamedTuple):
+    wndm_ice: jax.Array
+    zsipt: jax.Array
+    Cd_ice: jax.Array
+    Ch_ice: jax.Array
+    Ce_ice: jax.Array
+    theta_zu_i: jax.Array
+    q_zu_i: jax.Array
+    utau_ice: jax.Array   # putaui, interior (before icesbc's lbc_lnk)
+    vtau_ice: jax.Array
+
+
+def nemo_si3_blk_ice_1_cst(pwndi, pwndj, ptair, pqair, pslp, ptsui, rhoa, rn_Cd_ia, rn_Ch_ia, rn_Ce_ia):
+    """``blk_ice_1``, constant-coefficient arm with ``ln_blk`` (``sbcblk.f90:1081-1098,1136-1139``).
+
+    NEMO source order with source-order barriers.  ``zsipt`` (``:1086``) is
+    returned although this arm never reads it (only the AN05/LU12/LG15 arms,
+    ``:1102,1107,1112``, do).  Stress is NEMO's air-to-ice sign.
+    """
+    from legoesm.thermo import nemo_theta_exner
+
+    wndm = sqrt_zero_subgradient(sr(sr(pwndi * pwndi) + sr(pwndj * pwndj)))   # :1082
+    zsipt = nemo_theta_exner(ptsui, pslp)                                       # :1086
+    cd = jnp.full_like(wndm, rn_Cd_ia)                                          # :1093
+    ch = jnp.full_like(wndm, rn_Ch_ia)                                          # :1094
+    ce = jnp.full_like(wndm, rn_Ce_ia)                                          # :1095
+    zztmp = sr(sr(rhoa * cd) * wndm)                                            # :1137
+    return NemoSI3BlkIce1(
+        wndm_ice=wndm, zsipt=zsipt, Cd_ice=cd, Ch_ice=ch, Ce_ice=ce,
+        theta_zu_i=jnp.asarray(ptair), q_zu_i=jnp.asarray(pqair),              # :1097-1098
+        utau_ice=sr(zztmp * pwndi), vtau_ice=sr(zztmp * pwndj),                 # :1138-1139
+    )
+
+
+class NemoSI3IceTurbulent(NamedTuple):
+    zsq: jax.Array
+    zsipt: jax.Array
+    dq_sat: jax.Array
+    z_qsb: jax.Array
+    z_dqsb: jax.Array
+    qla_ice: jax.Array
+    dqla_ice: jax.Array
+
+
+def nemo_si3_ice_turbulent(
+    ptsu, pslp, rhoa, wndm_ice, Ch_ice, Ce_ice, theta_zu_i, q_zu_i, goff_floor_width_K=0.0,
+):
+    """``blk_ice_2`` saturation and turbulent statements (``sbcblk.f90:1224-1225,1246-1256``).
+
+    Elementwise; a category axis is carried by broadcasting the caller's arrays.
+    ``goff_floor_width_K > 0`` smooths the 180 K saturation floor; 0 is NEMO's source order.
+    """
+    from legoesm.thermo import (
+        nemo_si3_dq_sat_dt_ice,
+        nemo_si3_q_sat_ice,
+        nemo_si3_saturation_over_ice,
+        nemo_theta_exner,
+    )
+
+    if goff_floor_width_K > 0.0:
+        zsq, dq_sat = nemo_si3_saturation_over_ice(ptsu, pslp, goff_floor_width_K)
+    else:
+        zsq = nemo_si3_q_sat_ice(ptsu, pslp)                                    # :1224
+        dq_sat = nemo_si3_dq_sat_dt_ice(ptsu, pslp)
+    zsipt = nemo_theta_exner(ptsu, pslp)                                        # :1225
+    zzblk = sr(rhoa * wndm_ice)                                                 # :1246
+    zztmp1 = sr(sr(zzblk * constants.c_p_air_ice_nemo) * Ch_ice)                # :1249
+    z_qsb = sr(zztmp1 * sr(zsipt - theta_zu_i))                                 # :1250
+    z_dqsb = zztmp1                                                             # :1251
+    zztmp1 = sr(sr(zzblk * constants.L_sub_nemo) * Ce_ice)                      # :1254
+    qla = sr(zztmp1 * sr(zsq - q_zu_i))                                         # :1255
+    dqla = sr(zztmp1 * dq_sat)                                                  # :1256
+    return NemoSI3IceTurbulent(zsq=zsq, zsipt=zsipt, dq_sat=dq_sat, z_qsb=z_qsb, z_dqsb=z_dqsb, qla_ice=qla, dqla_ice=dqla)
+
+
 def nemo_si3_constant_fluxes(
     u_air: jnp.ndarray,
     v_air: jnp.ndarray,
@@ -2887,6 +2985,7 @@ def nemo_si3_constant_fluxes(
     Cd: float,
     Ch: float,
     Ce: float,
+    goff_floor_width_K: float,
 ) -> tuple[jnp.ndarray, ...]:
     """Executing constant-coefficient SI3 air--ice bulk core.
 
@@ -2905,7 +3004,9 @@ def nemo_si3_constant_fluxes(
     theta_ice = T_ice * (
         constants.p_ref / p_surface
     ) ** (constants.R_gas_molar / (constants.M_dry_air * constants.c_p_dry_air_nemo))
-    q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(T_ice, p_surface)
+    q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(
+        T_ice, p_surface, floor_width_K=goff_floor_width_K
+    )
     rho_wind = rho_air * wind
     stress_scale = rho_wind * Cd
     tau_x = stress_scale * u_air

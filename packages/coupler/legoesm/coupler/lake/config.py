@@ -18,6 +18,7 @@ __param_spec__ = {
             "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
             "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
             "most_zeta_cap_width": "numerics: RULE 5 half-width of the smooth |zeta| cap at 10 (0 = hard clip)",
+            "freeze_switch_width_K": "numerics: RULE 5 smoothing band of the frozen/open-water switch above T_freeze [K]",
         },
         "params": {
             "h_epi": {
@@ -90,6 +91,10 @@ class LakeConfig(NamedTuple):
     Cd_lake: float = 1.5e-3         # Drag coefficient (constant scheme)
     Ch_lake: float = 1.5e-3         # Heat transfer coefficient (constant)
     T_freeze: float = constants.T_freeze
+    # RULE 5 band [K] above T_freeze over which albedo, surface q_sat and latent
+    # heat ramp from the frozen to the open-water value (C1 cubic).  0.0 = the
+    # hard ``T_epi <= T_freeze`` switch.
+    freeze_switch_width_K: float = 0.01
     # Freshwater EOS parameters (T_freshwater_max_density and
     # rho_freshwater_curvature) live in legoesm.constants and are not
     # repeated here — physical constants belong in the constants

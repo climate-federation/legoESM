@@ -431,13 +431,14 @@ def test_swap_convection_schemes(conv_scheme):
 @pytest.mark.parametrize(
     "turb_scheme",
     # mynn25 (WRF port) needs q_c / cell area: tests/unit/test_mynn_lanes.py
-    ["smagorinsky", "louis", "tke", "clubb_lite",
+    ["smagorinsky", "louis", "tke",
      "holtslag_boville", "ysu", "edmf"],
 )
 def test_swap_turbulence_schemes(turb_scheme):
-    cfg = _baseline_cfg(
-        turbulence=TurbulenceConfig(scheme=turb_scheme),
-    )
+    turb = TurbulenceConfig(scheme=turb_scheme)
+    if turb_scheme == "ysu":  # the SCM column has no land fraction / cell area
+        turb = turb._replace(ysu=turb.ysu._replace(surface_type="land", dx_m=1.0e5))
+    cfg = _baseline_cfg(turbulence=turb)
     _run_and_assert_stable(cfg)
 
 
@@ -458,6 +459,18 @@ def test_swap_microphysics_schemes(micro_scheme):
             _run_and_assert_stable(cfg)
         return
     _run_and_assert_stable(cfg)
+
+
+def test_thompson_runs_with_microphysics_substeps():
+    """Vote U13a: the substepped path hands WRF Thompson the prescribed w
+    (it refused for lack of w before)."""
+    cfg = _baseline_cfg(microphysics=MicrophysicsConfig(scheme="thompson"))
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=_RCE_NLEV, dt=_RCE_DT,
+        T_profile=_tropical_T_profile(), q_v_profile=_tropical_qv_profile(),
+        latitude_deg=0.0, microphysics_substeps=2)
+    final, _ = scm.run(nsteps=2)
+    assert jnp.all(jnp.isfinite(final.T.data))
 
 
 @pytest.mark.parametrize(

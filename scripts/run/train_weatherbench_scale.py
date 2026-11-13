@@ -67,6 +67,8 @@ class ScaleConfig(NamedTuple):
     adjoint_steps: int = 0
     # Scenes the start-of-run reachability freeze probes (None = every one).
     probe_scenes: int | None = None
+    # Rolling mid-epoch checkpoint every n training steps (0 = epoch ends only).
+    checkpoint_every_steps: int = 20
 
 
 # Scenes used for the POST-TRAINING reachability report.  A subsample, not the
@@ -97,6 +99,94 @@ def _checkpoint_paths(out_dir, epoch):
 
     base = os.path.join(out_dir, f"epoch_{epoch:04d}")
     return base + ".eqx", base + ".opt.eqx", base + ".frozen.json"
+
+
+def _partial_manifest_path(out_dir):
+    import os
+
+    return os.path.join(out_dir, "partial.json")
+
+
+def _save_partial(out_dir, manifest, write_params, write_opt,
+                  write_record=None):
+    """Write one rolling mid-epoch checkpoint generation.
+
+    The state files carry the epoch and step in their names and the manifest,
+    replaced last, names them; the previous generation is deleted only after
+    that.  A kill at any point leaves a manifest whose files exist, so it never
+    costs more than the steps since the previous save.
+    """
+    import glob
+    import json as _json
+    import os
+    import pathlib as _pathlib
+
+    tag = f"partial.e{int(manifest['epoch']):04d}.s{int(manifest['step']):06d}"
+    names = {"params_file": tag + ".eqx", "opt_file": tag + ".opt.eqx"}
+    pfile = os.path.join(out_dir, names["params_file"])
+    _atomic_write(pfile, write_params)
+    if write_record is not None:
+        write_record(pfile)
+    _atomic_write(os.path.join(out_dir, names["opt_file"]), write_opt)
+    payload = _json.dumps({**manifest, **names})
+    _atomic_write(_partial_manifest_path(out_dir),
+                  lambda t: _pathlib.Path(t).write_text(payload))
+    keep = {*names.values(), tag + ".knobs.json"}
+    for f in (glob.glob(os.path.join(out_dir, "partial.e*.eqx"))
+              + glob.glob(os.path.join(out_dir, "partial.e*.knobs.json"))):
+        if os.path.basename(f) not in keep:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+
+def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
+    """``(manifest, params_path, opt_path)`` of a mid-epoch checkpoint that
+    continues ``epoch``, or None.  One for another epoch is stale (that epoch
+    completed, or never started) and is ignored; one written by a differently
+    configured run, or on different samples, is a hard error, as for an epoch
+    checkpoint."""
+    import json as _json
+    import math
+    import os
+
+    mp = _partial_manifest_path(out_dir)
+    try:
+        with open(mp) as fh:
+            obj = _json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"resume: {mp} is unreadable ({exc}); it may hold "
+                           "this epoch's progress, so it is not skipped. "
+                           "Remove it to restart the epoch.") from exc
+    if not (isinstance(obj, dict) and obj.get("epoch") == epoch):
+        return None
+    if not (_manifest_is_valid(obj, expect_keys=expect_fp)
+            and obj["fingerprint"] == expect_fp
+            and _content_matches(obj, content)):
+        raise RuntimeError(
+            f"resume: {mp} continues epoch {epoch} but was written by a run "
+            "configured differently or on different samples. Start a fresh "
+            "output directory, or re-run with the original settings.")
+    step, losses, skipped = obj.get("step"), obj.get("losses"), obj.get("skipped")
+    pf, of = obj.get("params_file"), obj.get("opt_file")
+    if (isinstance(step, bool) or not isinstance(step, int)
+            or not 0 < step < n_samples
+            or not isinstance(losses, list)
+            or not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                       and math.isfinite(x) for x in losses)
+            or isinstance(skipped, bool) or not isinstance(skipped, int)
+            or skipped < 0
+            or len(losses) + skipped != step
+            or not (isinstance(pf, str) and isinstance(of, str))
+            or os.path.basename(pf) != pf or os.path.basename(of) != of
+            or not (os.path.exists(os.path.join(out_dir, pf))
+                    and os.path.exists(os.path.join(out_dir, of)))):
+        raise RuntimeError(f"resume: {mp} is malformed or its state files "
+                           "are missing")
+    return obj, os.path.join(out_dir, pf), os.path.join(out_dir, of)
 
 
 def _manifest_is_valid(obj, expect_keys=None):
@@ -202,6 +292,17 @@ def print_latest_complete_signature(root):
         except OSError:
             continue
         path = _checkpoint_paths(d, ep)[2]
+        cand = (st.st_mtime_ns, f"{path}:{st.st_mtime_ns}:{st.st_size}")
+        if best is None or cand[0] > best[0]:
+            best = cand
+    # A mid-epoch checkpoint is resumable progress too, or an epoch longer
+    # than one link would stop the chain despite saved steps.
+    for d in [root] + [os.path.join(root, x) for x in children]:
+        path = _partial_manifest_path(d)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
         cand = (st.st_mtime_ns, f"{path}:{st.st_mtime_ns}:{st.st_size}")
         if best is None or cand[0] > best[0]:
             best = cand
@@ -685,7 +786,15 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
                    dest="probe_scenes",
                    help="Scenes the start-of-run reachability probe reads "
                         "(spread evenly over the shard). Default: all.")
+    p.add_argument("--checkpoint-every-steps", type=int, default=20,
+                   dest="checkpoint_every_steps",
+                   help="Save a rolling mid-epoch checkpoint every n steps so "
+                        "a walltime kill loses at most n steps (0 = only at "
+                        "epoch ends). Single logical trainer only.")
     a = p.parse_args(argv)
+    if a.checkpoint_every_steps < 0:
+        raise SystemExit("--checkpoint-every-steps must be >= 0, got "
+                         f"{a.checkpoint_every_steps}")
     if a.adjoint_steps < 0:
         raise SystemExit(f"--adjoint-steps must be >= 0, got {a.adjoint_steps}")
     if a.probe_scenes is not None and a.probe_scenes < 1:
@@ -710,6 +819,7 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
         training_core=a.training_core, n_days=a.n_days,
         column_devices=a.column_devices,
         adjoint_steps=a.adjoint_steps, probe_scenes=a.probe_scenes,
+        checkpoint_every_steps=a.checkpoint_every_steps,
     )
 
 
@@ -811,6 +921,12 @@ def _column_placers(mesh, n_lat: int, ncol: int):
 # per-leaf relative difference, owner-approved 2026-09-28 (measured value is
 # logged on every run).
 _SAMPLE_AGREE_RTOL = 1e-9
+
+
+def _file_crc(path) -> int:
+    import zlib
+    with open(path, "rb") as fh:
+        return zlib.crc32(fh.read())
 
 
 def _crc_names(names) -> int:
@@ -1093,7 +1209,7 @@ def _main(argv=None):
              len(local))
 
     # --- data-parallel loss over Equinox array-leaves ---
-    from legoesm.training.losses import combined_loss
+    from legoesm.training.losses import combined_loss, combined_loss_terms
     from legoesm.training.scale_build import rollout_hours
     sigma_full = jnp.asarray(sigma.sigma_full)
 
@@ -1125,13 +1241,16 @@ def _main(argv=None):
                  "leaf reachable only before the window is frozen.",
                  roll_steps, cfg.adjoint_steps)
 
-    def _loss(trainable, sample):
+    def _loss(trainable, sample, terms=False):
         if _in_trace_rep is not None:
             trainable = _in_trace_rep(trainable)
         ic, target, forcing = sample
         # Only the spectral segment takes the kwarg (checked above).
         _kw = {"adjoint_steps": cfg.adjoint_steps} if cfg.adjoint_steps else {}
         pred = make_run_seg(trainable).raw(ic, roll_steps, forcing, **_kw)
+        if terms:
+            return combined_loss_terms(pred, target, sigma_full, grid=grid,
+                                       config=loss_config)
         return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
 
     # Sized here rather than next to the optimizer because the resume check
@@ -1240,6 +1359,46 @@ def _main(argv=None):
                 log.info("resume: already at the requested %d epochs -- "
                          "nothing to do", cfg.n_epochs)
 
+    # Mid-epoch resume: a rolling checkpoint that continues ``start_epoch``
+    # replaces the epoch-end state.  Single logical trainer only: under MPI
+    # data parallelism each rank holds its own running losses.
+    # Every process reads the files on its own; a failure is held until the
+    # processes have compared outcomes, so one cannot raise while the rest
+    # wait in a collective.
+    start_step, start_losses, start_skipped, _partial_opt = 0, [], 0, None
+    _partial_err, _partial_crc = None, (0, 0, 0)
+    if cfg.resume and nproc == 1 and start_epoch < cfg.n_epochs:
+        try:
+            _part = _read_partial(
+                cfg.out_dir, start_epoch, len(local),
+                _run_fingerprint(cfg, yml, warmup, roll_steps,
+                                 len(local) * nproc, nproc), _probe_content)
+        except RuntimeError as _e:
+            _part, _partial_err = None, _e
+        if _part is not None:
+            _pm_, _ppath, _partial_opt = _part
+            try:
+                if (resumed_frozen is not None
+                        and set(_pm_["frozen"]) != resumed_frozen):
+                    raise RuntimeError(
+                        "resume: the mid-epoch checkpoint's frozen set "
+                        "differs from the epoch checkpoint's")
+                from legoesm.ml.checkpoint_io import deserialise_knob_aware
+                params = deserialise_knob_aware(_ppath, params)
+                import zlib as _zlib
+                _partial_crc = (
+                    _file_crc(_ppath), _file_crc(_partial_opt),
+                    _zlib.crc32(json.dumps(_pm_, sort_keys=True).encode()))
+                resumed_frozen = set(_pm_["frozen"])
+                start_step = int(_pm_["step"])
+                start_losses = [float(x) for x in _pm_["losses"]]
+                start_skipped = int(_pm_["skipped"])
+                log.info("resume: epoch %d continues after step %d/%d from "
+                         "%s", start_epoch, start_step, len(local), _ppath)
+            except Exception as _e:   # noqa: BLE001 -- re-raised after agreement
+                _partial_err = RuntimeError(
+                    f"resume: cannot restore {_ppath}: {_e}")
+
     # A reachability probe longer than one job link continues where the last
     # link stopped (single logical trainer only: under MPI data parallelism
     # each rank would need its own saved partial measurement).
@@ -1254,16 +1413,22 @@ def _main(argv=None):
         log.info("resume: reachability probe continues after %d of %d scenes",
                  _probe_resume[0], len(local))
 
+    if _partial_err is not None and place_rep is None:
+        raise _partial_err
     if place_rep is not None:
         params = place_rep(params)
         # Every process read the checkpoint/probe files and built its sample
         # list on its own. Agree BEFORE the first collective (the freeze
         # probe), or a disagreeing process would hang the others.
         _assert_processes_agree(
-            [start_epoch, -1 if resumed_frozen is None else len(resumed_frozen),
+            [start_epoch, start_step, int(_partial_err is not None),
+             *_partial_crc,
+             -1 if resumed_frozen is None else len(resumed_frozen),
              _crc_names(resumed_frozen or ()),
              -1 if _probe_resume is None else _probe_resume[0]],
             "resume point, restored frozen set or probe progress")
+        if _partial_err is not None:
+            raise _partial_err
         _rel = _assert_samples_agree(local, "training samples",
                                      _SAMPLE_AGREE_RTOL)
         log.info("training samples agree across processes (largest relative "
@@ -1425,6 +1590,9 @@ def _main(argv=None):
     def loss_fn(arr_leaves, sample):
         return _loss(eqx.combine(arr_leaves, static), sample)
 
+    def loss_terms_fn(arr_leaves, sample):
+        return _loss(eqx.combine(arr_leaves, static), sample, terms=True)
+
     optimizer = create_optimizer(TrainingConfig(
         lr=cfg.lr, optimizer=cfg.optimizer,
         warmup_steps=warmup, total_steps=total_steps,
@@ -1433,12 +1601,24 @@ def _main(argv=None):
     _fingerprint = _run_fingerprint(cfg, yml, warmup, roll_steps,
                                     len(local) * nproc, nproc)
     opt_state = optimizer.init(arr)
-    if start_epoch > 0:
+    _opt_err = None
+    if _partial_opt is not None:
+        try:
+            opt_state = eqx.tree_deserialise_leaves(_partial_opt, opt_state)
+        except Exception as _e:   # noqa: BLE001 -- re-raised after agreement
+            _opt_err = RuntimeError(f"resume: cannot load {_partial_opt}: {_e}")
+    elif start_epoch > 0:
         # The moments AND the schedule step live here; restoring parameters
         # without this is a cold restart wearing a resumed run's name.
         opt_state = eqx.tree_deserialise_leaves(
             _checkpoint_paths(cfg.out_dir, start_epoch - 1)[1], opt_state)
+    if _opt_err is not None and place_rep is None:
+        raise _opt_err
     if place_rep is not None:
+        _assert_processes_agree([int(_opt_err is not None)],
+                                "mid-epoch optimizer state restore")
+        if _opt_err is not None:
+            raise _opt_err
         opt_state = place_rep(opt_state)
         _assert_processes_agree([len(frozen_names), _crc_names(frozen_names)],
                                 "frozen parameter set")
@@ -1474,8 +1654,10 @@ def _main(argv=None):
 
     # Sharded: the same placement as training, and one compiled forward (an
     # eager rollout of this deck does not fit on the mesh).
-    _val_loss = (loss_fn if column_mesh is None
-                 else eqx.filter_jit(loss_fn))
+    # Same forward as the training loss, returning each weighted term too, so
+    # the per-term curves add up to the validation loss.
+    _val_loss = (loss_terms_fn if column_mesh is None
+                 else eqx.filter_jit(loss_terms_fn))
     _val_place = _device_sample if column_mesh is None else place_sample
 
     def _validation_loss(cur_arr):
@@ -1484,26 +1666,35 @@ def _main(argv=None):
         # blocked in the allreduce for the rest of the walltime (GLM). The
         # per-rank sum and count are reduced together, so the mean is over the
         # samples that exist rather than over the ranks that have any.
+        # Returns (mean loss, {term: mean}).
         if not val_samples and nproc <= 1:
-            return None
-        total = 0.0
+            return None, {}
+        total, sums = 0.0, {}
         for _s in val_samples:
-            total += float(_val_loss(cur_arr, _val_place(_s)))
+            _l, _t = _val_loss(cur_arr, _val_place(_s))
+            total += float(_l)
+            for _k, _v in _t.items():
+                sums[_k] = sums.get(_k, 0.0) + float(_v)
         if nproc <= 1:
-            return total / len(val_samples)
+            return (total / len(val_samples),
+                    {k: v / len(val_samples) for k, v in sums.items()})
         from mpi4py import MPI
         g_total = float(MPI.COMM_WORLD.allreduce(total, op=MPI.SUM))
         g_count = int(MPI.COMM_WORLD.allreduce(len(val_samples), op=MPI.SUM))
         if g_count == 0:
-            return None
-        return g_total / g_count
+            return None, {}
+        # A rank with an empty shard has no keys of its own: take the union.
+        _names = sorted(set().union(*MPI.COMM_WORLD.allgather(sorted(sums))))
+        g_sums = {k: float(MPI.COMM_WORLD.allreduce(sums.get(k, 0.0), op=MPI.SUM))
+                  for k in _names}
+        return g_total / g_count, {k: v / g_count for k, v in g_sums.items()}
 
     _history_path = os.path.join(cfg.out_dir, "training_history.jsonl")
     _static_h = static if column_mesh is None else jax.device_get(static)
 
     def on_epoch(epoch, mean_loss, cur_arr, cur_opt_state):
         # Every rank runs the validation pass: it ends in a collective.
-        val_loss = _validation_loss(cur_arr)
+        val_loss, val_terms = _validation_loss(cur_arr)
         if column_mesh is not None:
             # Host copies: rank 0 alone must not launch computations on
             # arrays that span every process.
@@ -1519,9 +1710,28 @@ def _main(argv=None):
             # without loading a checkpoint and inverting the transforms.
             _row = {"epoch": int(epoch), "train_loss": float(mean_loss),
                     "val_loss": None if val_loss is None else float(val_loss),
+                    "val_terms": val_terms,
                     "params": _physical_params(eqx.combine(cur_arr, _static_h))}
-            with open(_history_path, "a") as _fh:
-                _fh.write(json.dumps(_row) + "\n")
+            # A link killed after this row but before the manifest replays the
+            # epoch, so the row is replaced rather than appended twice.
+            _rows = []
+            if os.path.exists(_history_path):
+                with open(_history_path) as _fh:
+                    for ln in (x for x in _fh if x.strip()):
+                        try:
+                            _obj = json.loads(ln)
+                            if not isinstance(_obj, dict):
+                                raise ValueError("not an object")
+                            _ep_ln = _obj.get("epoch")
+                        except ValueError:
+                            log.warning("history: dropping unreadable line "
+                                        "%r", ln[:80])
+                            continue
+                        if _ep_ln != int(epoch):
+                            _rows.append(ln if ln.endswith("\n") else ln + "\n")
+            _rows.append(json.dumps(_row) + "\n")
+            _atomic_write(_history_path, lambda t: pathlib.Path(t).write_text(
+                "".join(_rows)))
             ppath, opath, fpath = _checkpoint_paths(cfg.out_dir, epoch)
             # Parameters, optimizer state and the trainable set together --
             # any one of them missing makes the other two unresumable.
@@ -1547,10 +1757,35 @@ def _main(argv=None):
                             "frozen": frozen_names,
                             "fingerprint": _fingerprint})))
 
+    _every = int(cfg.checkpoint_every_steps)
+
+    def on_step(epoch, n_done, losses, n_skipped, cur_arr, cur_opt_state):
+        if (nproc != 1 or not _every or n_done % _every
+                or n_done >= len(local)):
+            return
+        if column_mesh is not None:
+            cur_arr, cur_opt_state = jax.device_get((cur_arr, cur_opt_state))
+        if rank != 0:
+            return
+        from legoesm.ml.checkpoint_io import write_knob_record
+        from legoesm.ml.training import checkpoint_view
+        _save_partial(
+            cfg.out_dir,
+            {"schema": _MANIFEST_SCHEMA, "frozen": frozen_names,
+             "fingerprint": _fingerprint, "epoch": int(epoch),
+             "step": int(n_done), "losses": [float(x) for x in losses],
+             "skipped": int(n_skipped), **_content_payload(_probe_content)},
+            lambda t: eqx.tree_serialise_leaves(
+                t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
+            lambda t: eqx.tree_serialise_leaves(t, cur_opt_state),
+            lambda p: write_knob_record(eqx.combine(cur_arr, _static_h), p))
+
     arr, opt_state, history = mpi_data_parallel_training_loop(
         loss_fn, arr, opt_state, optimizer, local, cfg.n_epochs, nproc,
         on_epoch=on_epoch, start_epoch=start_epoch,
-        place=None if column_mesh is None else place_sample)
+        place=None if column_mesh is None else place_sample,
+        on_step=on_step, start_step=start_step, start_losses=start_losses,
+        start_skipped=start_skipped)
     params = eqx.combine(arr, static)
     log.info("training done: final loss=%.6f", history[-1] if history else float("nan"))
 

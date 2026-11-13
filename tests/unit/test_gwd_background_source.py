@@ -173,14 +173,14 @@ def test_legacy_composite_tendencies_are_unchanged():
     du = np.asarray(tend.du_dt.data, dtype=np.float64)
     dv = np.asarray(tend.dv_dt.data, dtype=np.float64)
     dT = np.asarray(tend.dT_dt.data, dtype=np.float64)
-    # Re-recorded 2026-10-29 on the fixture below, x64, after the deliberate
-    # McFarlane smooth-min change to the p-norm (#2241; before: 2026-10-19,
-    # CAM6 gw_oro port).  A deliberate change to McFarlane or Hines
+    # Re-recorded 2026-11-04 on the fixture below, x64, after the deliberate
+    # Hines port to LMDZ r5891 hines_gwd (before: 2026-10-29, McFarlane
+    # p-norm smooth-min #2241; 2026-10-19, CAM6 gw_oro port).  A deliberate change to McFarlane or Hines
     # re-records these; an accidental one goes red.
     for name, arr, total, peak in (
-            ("du", du, -4.411696559436201e-02, 3.027422354831738e-04),
-            ("dv", dv, -6.617544839154301e-03, 4.541133532247607e-05),
-            ("dT", dT, +8.980250787339393e-04, 4.492668072013536e-06)):
+            ("du", du, -3.471316485431198e-02, 2.047863696679937e-04),
+            ("dv", dv, -5.206973615418808e-03, 3.071827696890573e-05),
+            ("dT", dT, +7.066055369356762e-04, 4.4926693308656386e-06)):
         np.testing.assert_allclose(arr.sum(), total, rtol=1e-12, err_msg=name)
         np.testing.assert_allclose(np.abs(arr).max(), peak, rtol=1e-12, err_msg=name)
 
