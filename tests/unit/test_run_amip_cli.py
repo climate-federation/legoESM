@@ -2660,7 +2660,8 @@ _SMOOTH_BECHTOLD_LEAF_PRE2249 = {
     'downdraft_rh_sharpness': 10.0, 'downdraft_transport': False, 'dx_m': 0.0,
     'enable_cmt': False, 'enable_downdraft': True, 'enable_stochastic': False,
     'epsilon_deep': 0.00175, 'epsilon_midlevel': 0.0001,
-    'epsilon_shallow': 0.0035, 'ifs_shallow_nosupply': 'zero',
+    'epsilon_shallow': 0.0035, 'ifs_hard_switches': False,
+    'ifs_shallow_nosupply': 'zero',
     'ifs_shallow_supply_width_w_m2': 1.0, 'lcl_membership_sharpness': 2.0,
     'mc_normalize_scale': 0.05, 'p_conv_top_pa': 15000.0, 'parcel_dT': 0.5,
     'parcel_dq': 0.001, 'precip_efficiency': 0.8,
@@ -4114,6 +4115,26 @@ def test_bechtold_ifs_ascent_and_shallow_nosupply_round_trip():
     bad = ExperimentConfig(convection="bechtold", bechtold_ifs_shallow_nosupply="typo")
     with pytest.raises(ValueError, match="bechtold_ifs_shallow_nosupply"):
         bad.validate_strict()
+
+def test_bechtold_ifs_hard_switches_round_trip():
+    """#2281: the faithful chain's smooth/exact switch selection reaches
+    BechtoldConfig from the CLI and survives the AMIP config round trip."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--convection", "bechtold", "--bechtold-use-ifs-ascent"]
+    d = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert d.bechtold_ifs_hard_switches is False
+    assert _resolve_convection(d)[1].ifs_hard_switches is False
+    h = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--bechtold-ifs-hard-switches"]), parser))
+    assert _resolve_convection(h)[1].ifs_hard_switches is True
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold", bechtold_use_ifs_ascent=True,
+                             bechtold_ifs_hard_switches=flag)
+        back = ExperimentConfig.from_amip_config(e.to_amip_config())
+        assert back.bechtold_ifs_hard_switches is flag
+
 
 def test_bechtold_use_ifs_snow_melt_round_trip():
     from legoesm.driver.config import ExperimentConfig

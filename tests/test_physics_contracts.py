@@ -81,6 +81,9 @@ EXCLUDED: frozenset[str] = frozenset(
     {
         "packages/atmosphere/legoesm/atmosphere/physics/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/_shared.py",
+        # Not a tendency scheme: the hard/smooth (RULE 5) switch forms shared by
+        # the IFS CLOUDSC and CUMASTRN ports.
+        "packages/atmosphere/legoesm/atmosphere/physics/_ifs_smooth.py",
         # Not a tendency scheme: loads the LES-calibrated coefficients from the
         # tracked YAML and splices them into an existing TurbulenceConfig.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/les_tuned.py",
