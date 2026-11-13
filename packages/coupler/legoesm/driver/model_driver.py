@@ -4398,6 +4398,10 @@ class ModelDriver:
                 f"  IC: loading ERA5 from {cfg.ic_path} "
                 f"(year={cfg.start_year})"
             )
+            # seed-state dtypes: the ERA5 IC is built in float64 and is cast
+            # back to them once, below (an fp32 run must start in fp32)
+            _seed_state = self.state
+            _seed_qv = self.tracers.get("q_v")
             era5_slice = load_era5_ic(cfg.ic_path, cfg.start_year,
                                       allow_flat_phis=cfg.era5_allow_flat_phis)
 
@@ -4562,6 +4566,21 @@ class ModelDriver:
                 f"q_v={_h2[0]*1000:.2f} g/kg, "
                 f"CWV={_h2[1]:.1f} kg/m2"
             )
+
+            # One cast of the IC to the seed state's per-leaf dtypes (no-op
+            # when they agree, e.g. every fp64 run).  p_s goes to
+            # promote_types(seed p_s dtype, policy accumulate), as the MPAS
+            # mass fixer stores it ('mixed' keeps a float64 p_s, #1675).
+            from legoesm.core.precision import resolve_dtype
+            _ic_ps = getattr(self.state, "p_s", None)
+            self.state = match_leaf_dtypes(self.state, _seed_state)
+            if _ic_ps is not None and getattr(_seed_state, "p_s", None) is not None:
+                _ps_dt = jnp.promote_types(_seed_state.p_s.data.dtype,
+                                           resolve_dtype(None, "accumulate"))
+                self.state = self.state._replace(
+                    p_s=self.state.p_s.replace(data=_ic_ps.data.astype(_ps_dt)))
+            if _seed_qv is not None and "q_v" in self.tracers:
+                self.tracers["q_v"] = self.tracers["q_v"].astype(_seed_qv.dtype)
 
             # ERA5 phis is kept for dynamics — substituting ETOPO phis at t=0
             # while keeping ERA5 winds creates a pressure-gradient imbalance
