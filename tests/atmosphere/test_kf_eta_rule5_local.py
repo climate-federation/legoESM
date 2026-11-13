@@ -1,4 +1,4 @@
-"""RULE 5 tests of the KF-Eta port's local switches (#2280, PR 2/7).
+"""RULE 5 tests of the KF-Eta port's local and source-geometry switches (#2280, PRs 2-3/7).
 
 Smoothed here, each by one ``KFSmoothing`` width (0 = the oracle):
 
@@ -7,7 +7,14 @@ Smoothed here, each by one ``KFSmoothing`` width (0 = the oracle):
 * ``tpmix_width_kgkg``: D7a (TPMIX2 condense / evaporate / deficit split);
 * ``condload_sqrt_width_m2s2``: D7b and the CONDLOAD square roots (E11 there);
 * ``wtw_floor_width_m2s2``: D7d (the |WTW| < 1e-4 floor);
-* ``prof5_width``: D7e (PROF5's two polynomial branches).
+* ``prof5_width``: D7e (PROF5's two polynomial branches);
+* PR 3/7, source geometry: ``lcl_gather_width_m`` (C-KLCLg, TENV/QENV/WKL/QSLCL/
+  PLCL at ZLCL), ``l5_gather_width_pa`` (C-L5g, the L5 wind speed),
+  ``q0_clip_width_kgkg`` / ``q0_floor_width_kgkg`` (E1) and
+  ``tlcl_cap_width_k`` (E2).  The level indices themselves stay hard, and so
+  do the mixed-layer averages (their source-layer extraction profile is hard;
+  smoothing one without the other breaks the water budget, so both go with
+  PR 7).
 
 The three tests per switch: the hard limit is the oracle (the oracle suite in
 test_kain_fritsch_oracle.py runs ``KF_HARD``); the per-case gap at the default,
@@ -139,8 +146,10 @@ def test_default_gap_per_case_matches_record(fix, stored, case):
 # Widths whose switch no fixture column reaches (their gap equals the hard gap
 # everywhere): the CONDLOAD root bridge needs 0 < G1 < 1e-4 m2/s2 and the floor
 # ramp |WTW| near 1e-4, both only at an updraft's last level.  Covered instead by
-# the synthetic unit tests below (both sides of each switch).
-_UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2"}
+# the synthetic unit tests below (both sides of each switch).  Likewise the Q0
+# clip / floor and L5 widths leave every fixture gap at the hard gap (measured).
+_UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_width_kgkg",
+                "q0_floor_width_kgkg", "l5_gather_width_pa"}
 
 
 def _moved(stored, case):
@@ -321,6 +330,90 @@ def test_tpmix2_smooth_keeps_vapour_and_condensate_nonnegative():
     # supersaturated with a little condensate: nothing evaporates
     _, _, ql2, qi2, _, _ = _tp2(_LUT_TP, qs + 5 * w, 0.35 * w, 0.15 * w)
     assert float(ql2) == 0.35 * w and float(qi2) == 0.15 * w
+
+
+# --- source geometry (PR 3) ------------------------------------------------------
+
+def _col(n=12):
+    """1-based padded column: heights rising, pressures falling, one smooth field."""
+    rng = np.random.default_rng(3)
+    dz = np.concatenate([[200.0], 300.0 + 1200.0 * rng.random(n - 1)])
+    z = np.concatenate([[0.0], np.cumsum(dz) - 0.5 * dz, [0.0]])
+    z[-1] = z[-2]
+    p = 1.0e5 * np.exp(-z / 8000.0)
+    kk = jnp.arange(n + 2)
+    valid = (kk >= 1) & (kk <= n)
+    f = 290.0 - 6.5e-3 * z + 2.0 * np.sin(z / 700.0)
+    return jnp.asarray(z), jnp.asarray(p), kk, valid, jnp.asarray(f)
+
+
+def _hard_gather(f, z0, z, lc):
+    """The oracle's KLCL search and interpolation (concrete z)."""
+    hit = (z <= np.asarray(z0[1:-1])) & (np.arange(1, len(z0) - 1) >= lc)
+    k = int(np.argmax(hit)) + 1 if hit.any() else len(z0) - 2
+    return f[k - 1] + (f[k] - f[k - 1]) * (z - z0[k - 1]) / (z0[k] - z0[k - 1])
+
+
+def test_cap_c1_is_one_sided_exact_outside_band_and_differentiable():
+    w = 1.0e-6
+    x = jnp.linspace(-5 * w, 5 * w, 1001)
+    c = kfe._cap_c1(x, 0.0, w)
+    assert float(jnp.max(c)) <= 0.0
+    np.testing.assert_array_equal(c[x <= -w], x[x <= -w])
+    np.testing.assert_array_equal(kfe._cap_c1(x, 0.0, 0.0), jnp.minimum(x, 0.0))
+    check_grads(lambda v: kfe._cap_c1(v, 0.0, w), (-0.3 * w,), order=1, modes=("fwd", "rev"),
+                eps=1e-9)
+    g = jax.grad(lambda v: kfe._cap_c1(v, 0.0, w))
+    assert 0.0 < float(g(-0.3 * w)) < 1.0 and float(g(0.5 * w)) == 0.0
+
+
+def test_gather_weights_sum_to_one_reproduce_lines_and_match_oracle_off_levels():
+    z0, _, kk, valid, f = _col()
+    w, lc = _DEFAULT.lcl_gather_width_m, 3
+    g = lambda fld, z: kfe._gather_at_height(fld, z0, z, kk, valid, lc, w)  # noqa: E731
+    for z in np.linspace(-500.0, float(z0[-2]) + 500.0, 157):
+        np.testing.assert_allclose(g(jnp.ones_like(f), z), 1.0, rtol=1e-14)
+        np.testing.assert_allclose(g(3.0 + 0.01 * z0, z), 3.0 + 0.01 * z, rtol=1e-13)
+        if np.min(np.abs(z - np.asarray(z0[lc:-1]))) > w / 2:
+            np.testing.assert_allclose(g(f, z), _hard_gather(f, z0, z, lc), rtol=1e-13)
+
+
+def test_gather_from_the_first_level_extrapolates_like_the_oracle():
+    z0, _, kk, valid, f = _col()
+    w = _DEFAULT.lcl_gather_width_m
+    for z in (0.0, 0.5 * float(z0[1]), float(z0[1]) + 0.6 * w, float(z0[3]) - 0.6 * w):
+        np.testing.assert_allclose(kfe._gather_at_height(f, z0, z, kk, valid, 1, w),
+                                   _hard_gather(f, z0, z, 1), rtol=1e-13)
+
+
+def test_gather_is_c1_across_a_level_where_the_oracle_kinks():
+    z0, _, kk, valid, f = _col()
+    w, lc, zk = _DEFAULT.lcl_gather_width_m, 3, float(z0[6])
+    g = jax.grad(lambda z: kfe._gather_at_height(f, z0, z, kk, valid, lc, w))
+    gh = jax.grad(lambda z: jnp.interp(z, z0[lc - 1:-1], f[lc - 1:-1]))  # oracle, inside
+    eps = 1e-6
+    assert abs(float(g(zk - eps) - g(zk + eps))) < 1e-6 * abs(float(g(zk)))
+    assert abs(float(gh(zk - eps) - gh(zk + eps))) > 1e-3 * abs(float(gh(zk)))
+    check_grads(lambda z, fld: kfe._gather_at_height(fld, z0, z, kk, valid, lc, w),
+                (zk + 0.2 * w, f), order=1, modes=("fwd", "rev"), eps=1e-4)
+
+
+def test_l5_weights_one_hot_off_band_sum_to_one_and_differentiable():
+    _, p, kk, valid, _ = _col()
+    w = _DEFAULT.l5_gather_width_pa
+    wt = kfe._l5_weights(p, kk, valid, w)
+    pc = kfe._L5_FRAC * float(p[1])
+    l5 = int(np.max(np.where(np.asarray(valid) & (np.asarray(p) >= pc), np.asarray(kk), 0)))
+    np.testing.assert_allclose(float(wt.sum()), 1.0, rtol=1e-14)
+    if np.min(np.abs(np.asarray(p[1:-1]) - pc)) > w / 2:
+        np.testing.assert_array_equal(wt, (np.asarray(kk) == l5).astype(float))
+    # move the level just above L5 into the band: two levels share the weight
+    p2 = p.at[l5 + 1].set(pc - 0.1 * w)
+    wt2 = kfe._l5_weights(p2, kk, valid, w)
+    assert 0.0 < float(wt2[l5 + 1]) < 1.0
+    np.testing.assert_allclose(float(wt2.sum()), 1.0, rtol=1e-14)
+    check_grads(lambda q: kfe._l5_weights(q, kk, valid, w)[l5 + 1], (p2,), order=1,
+                modes=("fwd", "rev"), eps=1e-2)
 
 
 def test_widths_are_validated():
