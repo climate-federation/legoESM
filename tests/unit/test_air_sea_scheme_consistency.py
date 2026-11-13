@@ -407,3 +407,26 @@ def test_validator_accepts_matching_explicit_gustiness():
     validate_air_sea_consistency(
         cfg, CouplerConfig(bulk_scheme="coare3",
                            gustiness_w_zi=300.0))  # must not raise
+
+
+def test_zeta_cap_width_splits_a_most_interface():
+    atm = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis",
+                           surface_most_zeta_cap_width=0.0)
+    with pytest.raises(ValueError, match="most_zeta_cap_width"):
+        validate_air_sea_consistency(atm, CouplerConfig(bulk_scheme="coare3"))
+    validate_air_sea_consistency(
+        atm, CouplerConfig(bulk_scheme="coare3", most_zeta_cap_width=0.0))
+
+
+def test_gfs_join_width_compared_only_when_gfs_is_selected():
+    atm = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis",
+                           surface_gfs_unstable_join_width=0.0)
+    # neither side runs the GFS unstable form: the width is inert on both
+    validate_air_sea_consistency(atm, CouplerConfig(bulk_scheme="coare3"))
+    atm_gfs = atm._replace(surface_unstable_scheme="gfs")
+    with pytest.raises(ValueError, match="gfs_unstable_join_width"):
+        validate_air_sea_consistency(
+            atm_gfs, CouplerConfig(bulk_scheme="coare3", unstable_scheme="gfs"))
+    validate_air_sea_consistency(
+        atm_gfs, CouplerConfig(bulk_scheme="coare3", unstable_scheme="gfs",
+                               gfs_unstable_join_width=0.0))

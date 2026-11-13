@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
 
-from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
+from legoesm.core.bulk_flux import GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH
 from legoesm.diagnostics.cloud_overlap import maximum_random_overlap
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import (
@@ -302,6 +302,7 @@ class DiagnosticCollector:
         surface_bulk_scheme: str = "constant",
         surface_unstable_scheme: str = "native",
         surface_most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
+        surface_gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH,
         clubb_config=None,
         cmip_drs_tree: bool = False,
         cmip_institution_id: str = "CU",
@@ -322,6 +323,7 @@ class DiagnosticCollector:
         self.surface_stability_scheme = surface_stability_scheme
         self.surface_unstable_scheme = surface_unstable_scheme
         self.surface_most_zeta_cap_width = surface_most_zeta_cap_width
+        self.surface_gfs_unstable_join_width = surface_gfs_unstable_join_width
         # surface_bulk_scheme="none": no surface layer exists, so the 2 m
         # temperature (and its daily extremes) is not produced at all rather
         # than published from a profile of an exchange that never happens.
@@ -895,6 +897,7 @@ class DiagnosticCollector:
                 stability_scheme=self.surface_stability_scheme,
                 unstable_scheme=self.surface_unstable_scheme,
                 most_zeta_cap_width=self.surface_most_zeta_cap_width,
+                gfs_unstable_join_width=self.surface_gfs_unstable_join_width,
             )
             return T_2m
 

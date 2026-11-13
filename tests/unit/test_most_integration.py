@@ -67,6 +67,21 @@ def test_coare_width_guard_and_finite_values(u):
             bf.psi_h_coare(z, "dyer1974", 0.05, unstable_scheme=u)
 
 
+@pytest.mark.parametrize("s", sorted(bf._STABLE_ZETA_MIN))
+def test_coare_stable_side_width_guard(s):
+    """The COARE blend evaluates the stable form down to -neutral_width; a width
+    past that form's domain gave NaN (gfs at 0.1) and now raises."""
+    zmin = bf._STABLE_ZETA_MIN[s]
+    zn = jnp.linspace(0.999 * zmin, 0.0, 1001)
+    for st in (bf._stable_psi_m, bf._stable_psi_h):
+        assert np.all(np.isfinite(st(zn, s)))
+    z = jnp.asarray([-1.0, 0.0, 1.0])
+    for f in (bf.psi_m_coare, bf.psi_h_coare):
+        assert np.all(np.isfinite(f(z, s, 0.99 * -zmin)))
+        with pytest.raises(ValueError, match="neutral_width"):
+            f(z, s, -zmin)
+
+
 def test_every_pair_phi_continuous_at_zero_and_finite():
     eps = jnp.asarray([-1e-7, 1e-7])
     zz = jnp.linspace(-14.0, 14.0, 2801)
@@ -129,11 +144,15 @@ def test_cap_default_gap_is_the_recorded_one(s):
 
 
 def test_cap_gradient_at_default():
-    for z0 in (-11.0, -9.0, 9.0, 11.0):
+    for z0 in (-11.0, -10.0, -9.0, 9.0, 10.0, 11.0):
         check_grads(lambda z: bf.psi_m(z, "beljaars_holtslag1991"), (jnp.asarray(z0),),
                     order=2, modes=["rev"])
         check_grads(lambda z: bf.psi_h(z, "dyer1974"), (jnp.asarray(z0),),
                     order=2, modes=["rev"])
+    # Non-vacuity: the hard clip (width 0) has a kink at |zeta| = 10.
+    with pytest.raises(AssertionError):
+        check_grads(lambda z: bf.psi_h(z, "dyer1974", zeta_cap_width=0.0),
+                    (jnp.asarray(10.0),), order=2, modes=["rev"])
 
 
 def test_cap_width_validated_and_threaded_by_the_solver(monkeypatch):
@@ -357,3 +376,8 @@ def test_cesm_lane_width_reaches_surface_layer_coupler_and_tas(monkeypatch):
     assert kws == ["self.surface_most_zeta_cap_width"] * 2, kws
     drv = (REPO / "packages/coupler/legoesm/driver/model_driver.py").read_text()
     assert '"surface_most_zeta_cap_width", MOST_ZETA_CAP_WIDTH)' in drv
+    gfs = [ast.unparse(k.value) for c in ast.walk(diag) if isinstance(c, ast.Call)
+           and getattr(c.func, "id", None) == "compute_most_fluxes"
+           for k in c.keywords if k.arg == "gfs_unstable_join_width"]
+    assert gfs == ["self.surface_gfs_unstable_join_width"], gfs
+    assert '"surface_gfs_unstable_join_width", GFS_UNSTABLE_JOIN_WIDTH)' in drv

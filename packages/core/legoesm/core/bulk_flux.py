@@ -1223,6 +1223,28 @@ def _check_coare_unstable_width(unstable_scheme, neutral_width):
         )
 
 
+# Most negative zeta at which each stable form is finite (tighter of momentum
+# and heat); the COARE neutral blend evaluates it down to zeta = -neutral_width.
+# Forms not listed are finite for every zeta >= -cap.
+_STABLE_ZETA_MIN = {
+    "gfs": -1.0 / _GFS_ALPHA4,  # sqrt(1 + alpha4 zeta)
+    "grachev2007_sheba": max(-1.0 / _GRACHEV_B_M,  # cbrt(1+z) + B_m > 0
+                             -(_GRACHEV_C_H - math.sqrt(_GRACHEV_C_H ** 2 - 4.0)) / 2.0),
+    "gryanik2020": -1.0 / _GRYANIK_B_H,  # log1p(b_h zeta)
+}
+
+
+def _check_coare_stable_width(stability_scheme, neutral_width):
+    """Refuse a COARE neutral_width that reaches below the stable form's domain
+    (static check, twin of :func:`_check_coare_unstable_width`)."""
+    zmin = _STABLE_ZETA_MIN.get(stability_scheme)
+    if zmin is not None and neutral_width >= -zmin:
+        raise ValueError(
+            f"stability_scheme={stability_scheme!r} on coare3 needs neutral_width < "
+            f"{-zmin}, got {neutral_width!r}"
+        )
+
+
 def psi_m_coare(zeta, stability_scheme="dyer1974", neutral_width=COARE_NEUTRAL_WIDTH,
                 *, unstable_scheme="native",
                 gfs_unstable_join_width=GFS_UNSTABLE_JOIN_WIDTH):
@@ -1260,6 +1282,7 @@ def psi_m_coare(zeta, stability_scheme="dyer1974", neutral_width=COARE_NEUTRAL_W
     validate_stability_scheme(stability_scheme)
     validate_unstable_scheme(unstable_scheme)
     _check_coare_unstable_width(unstable_scheme, neutral_width)
+    _check_coare_stable_width(stability_scheme, neutral_width)
 
     def unstable(zn):
         if unstable_scheme == "native":
@@ -1295,6 +1318,7 @@ def psi_h_coare(zeta, stability_scheme="dyer1974", neutral_width=COARE_NEUTRAL_W
     validate_stability_scheme(stability_scheme)
     validate_unstable_scheme(unstable_scheme)
     _check_coare_unstable_width(unstable_scheme, neutral_width)
+    _check_coare_stable_width(stability_scheme, neutral_width)
 
     def unstable(zn):
         if unstable_scheme == "native":

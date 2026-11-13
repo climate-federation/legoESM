@@ -3991,7 +3991,9 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
     surface (anemic evaporation over a calm warm ocean).
 
     This re-applies the previously-resolved surface ``bulk_scheme`` +
-    ``gustiness_w_zi`` + ``stability_scheme`` and the two run-resolved surface
+    ``gustiness_w_zi`` + ``stability_scheme`` / ``unstable_scheme`` with their
+    RULE 5 widths (``most_zeta_cap_width``, ``gfs_unstable_join_width``) and the
+    two run-resolved surface
     switches (``z_ref_model_level``, ``ocean_q_sfc_saline``) onto the trained
     Louis config, keeping the trained ``Cd_neutral``/``Ch_neutral``/``z0``
     (the MOST/COARE schemes ignore the neutral ``Cd``/``Ch`` but DO use
@@ -4008,6 +4010,8 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
             gustiness_w_zi=prev_surf.gustiness_w_zi,
             stability_scheme=prev_surf.stability_scheme,
             unstable_scheme=prev_surf.unstable_scheme,
+            most_zeta_cap_width=prev_surf.most_zeta_cap_width,
+            gfs_unstable_join_width=prev_surf.gfs_unstable_join_width,
             z_ref_model_level=prev_surf.z_ref_model_level,
             ocean_q_sfc_saline=prev_surf.ocean_q_sfc_saline))
 

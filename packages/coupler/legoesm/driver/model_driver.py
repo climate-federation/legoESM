@@ -22,7 +22,7 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.forcing.time_utils import daily_forcing_bucket, day_to_calendar
 
-from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
+from legoesm.core.bulk_flux import GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH
 from legoesm.core.conservation import (
     compute_global_moisture, fix_moisture_hydrostatic,
     energy_consistent_moisture_floor,
@@ -5839,6 +5839,8 @@ class ModelDriver:
                 self.config, "surface_unstable_scheme", "native"),
             surface_most_zeta_cap_width=getattr(
                 self.config, "surface_most_zeta_cap_width", MOST_ZETA_CAP_WIDTH),
+            surface_gfs_unstable_join_width=getattr(
+                self.config, "surface_gfs_unstable_join_width", GFS_UNSTABLE_JOIN_WIDTH),
         )
         # Register per-cell horizontal areas so every global-mean diagnostic
         # (<R_TOA>, <SST>, <CWV>, ...) is area-weighted.  On a lat-lon grid an

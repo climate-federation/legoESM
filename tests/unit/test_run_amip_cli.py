@@ -2808,6 +2808,13 @@ def test_aimip_louis_preserves_resolved_surface_scheme():
     assert trained_real.surface.z_ref_model_level is False
     resolved_default = LouisConfig(surface=SurfaceLayerConfig(bulk_scheme="coare3"))
     assert _louis_with_preserved_surface(trained_real, resolved_default).surface.z_ref_model_level is True
+    # the RULE 5 widths survive too (a requested 0 = hard limit was reset)
+    resolved_w = LouisConfig(surface=SurfaceLayerConfig(
+        bulk_scheme="coare3", unstable_scheme="gfs",
+        most_zeta_cap_width=0.0, gfs_unstable_join_width=0.0))
+    out_w = _louis_with_preserved_surface(trained, resolved_w).surface
+    assert out_w.most_zeta_cap_width == 0.0
+    assert out_w.gfs_unstable_join_width == 0.0
 
 
 def test_aimip_louis_preserve_surface_noop_without_prev():
