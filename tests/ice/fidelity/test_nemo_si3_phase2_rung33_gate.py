@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from tests._nemo_si3_oracle import needs_oracle
+
 _GATE_PATH = Path(__file__).parents[3] / (
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_phase2_rung33_gate.py"
 )
@@ -40,6 +42,7 @@ def test_status_and_exit_inputs_are_derived_from_rows_and_coverage():
     assert gate._status_from_rows(debt, {"later": "UNMEASURED"}) == "DEBT"
 
 
+@needs_oracle(gate.ROOT)
 def test_partial_gate_has_exact_registry_and_loud_unmeasured_boundary():
     report, code = gate.run_gate()
     assert code == 1
@@ -59,6 +62,7 @@ def test_partial_gate_has_exact_registry_and_loud_unmeasured_boundary():
     assert report["unmeasured"]
 
 
+@needs_oracle(gate.ROOT)
 def test_geometry_plant_goes_red_and_registry_omission_is_fatal():
     report, _ = gate.run_gate(plant_geometry=True)
     row = next(item for item in report["rows"] if item["name"] == "geometry.e1t")
@@ -88,6 +92,7 @@ def test_existing_a_grid_solver_is_byte_identical_to_preregister_boundary():
         assert result["before_sha256"] == result["after_sha256"]
 
 
+@needs_oracle(replay.ROOT)
 def test_source_rounded_replay_is_bit_exact_from_oracle_entry():
     report, code = replay.run_replay()
     assert code == 0
@@ -104,6 +109,7 @@ def test_source_rounded_replay_is_bit_exact_from_oracle_entry():
     )
 
 
+@needs_oracle(gate.ROOT)
 def test_rung33_restart_requires_stresses_and_moments_with_fp64_dtype():
     from legoesm.ice.fidelity.nemo_adv2d_rhg_testcase_recipe import (
         build_ice_adv2d_rhg_card,

@@ -25,6 +25,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
+from jax.test_util import check_grads  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
@@ -146,6 +147,105 @@ def test_standalone_k0_config_requires_every_explicit_selector():
     finally:
         bfo.nemo_blk_oce_ncar = real_blk
     assert seen_nn_ice == [1]
+
+
+def test_k0_compiled_programs_trace_once_per_branch(monkeypatch):
+    """The K0 surface program traces once per nn_fsbc branch and the fraqsr
+    program once, however the per-step values change.  The physics they call
+    is stubbed with trace-time counters; dropping either ``eqx.filter_jit``
+    (running the uncompiled glue) calls the stub on every step and fails."""
+    from typing import NamedTuple
+
+    import legoesm.ocean.bulk_flux_omip as bfo
+    import legoesm.ocean.eos as eos
+    import legoesm.ocean.physics.shortwave_penetration as swp
+    from legoesm.core.precision import get_policy
+
+    traces = {"surface": 0, "fraqsr": 0}
+
+    class K0(NamedTuple):
+        nn_ice: int
+
+    class Card(NamedTuple):
+        albedo: float
+        precip_factor: float
+        evap_factor: float
+        nb_iter: int
+        k0: K0
+
+    class Z(NamedTuple):
+        nemo_e3t_0: jax.Array
+        z_half_ref: jax.Array
+        is_active: jax.Array
+
+    class S0(NamedTuple):
+        kt: jax.Array
+        u_before: jax.Array
+        v_before: jax.Array
+        temperature_now: jax.Array
+        salinity_now: jax.Array
+        ssh_now: jax.Array
+        e3t_reference: jax.Array
+        r3t_now: jax.Array
+        surface_mask: jax.Array
+
+    class IceIf(NamedTuple):
+        ts_surface: jax.Array
+        clock: jax.Array
+
+    class S2(NamedTuple):
+        runoff_now: jax.Array
+        sss_target: jax.Array
+        surface_mask: jax.Array
+
+    class Clock(NamedTuple):
+        seconds: jax.Array
+
+    class Surface(NamedTuple):
+        ice_if: IceIf
+
+    def s0f_stub(s0f):
+        traces["surface"] += 1
+        field = s0f.seconds * jnp.ones((3, 4))
+        return (field,) * 9, field, field
+
+    def fraqsr_stub(qsr, *_args):
+        traces["fraqsr"] += 1
+        return qsr
+
+    monkeypatch.setattr(bfo, "nemo_orca2_k0_s0f", s0f_stub)
+    monkeypatch.setattr(
+        bfo, "_nemo_blk_oce_ncar", lambda *a, **kw: Surface(kw["ice_if"]))
+    monkeypatch.setattr(eos, "nemo_r3t_stretch", lambda z, ssh, hb, **kw: 1.0 + ssh)
+    monkeypatch.setattr(
+        eos, "nemo_r3t_rk3_stage1_stretch", lambda z, a, b, hb, **kw: 1.0 + a + b)
+    monkeypatch.setattr(swp, "nemo_fraqsr_1lev", fraqsr_stub)
+
+    ny, nx, nz = 3, 4, 2
+    z = Z(jnp.ones((ny, nx, nz)), jnp.asarray([0.0, -1.0, -2.0]),
+          jnp.ones((ny, nx, nz)))
+    card = Card(0.066, 1.0, 1.0, 5, K0(1))
+    T = jnp.ones((ny, nx, nz))
+    zeros2 = jnp.zeros((ny, nx))
+    s0 = S0(*(jnp.zeros((ny, nx)) for _ in range(9)))
+    s2 = S2(zeros2, zeros2, zeros2)
+    prior = None
+    for kt in range(1, 5):
+        forcing_update = (kt - 1) % 2 == 0
+        _, prior, _, _ = bfo._nemo_orca2_k0_surface_compiled(
+            card, z, get_policy(), T + kt, T, jnp.ones((ny, nx + 1, nz)),
+            jnp.ones((ny + 1, nx, nz)), zeros2 + kt, zeros2, zeros2 + 1.0,
+            s0f=Clock(jnp.asarray(kt * 5400, dtype=jnp.int64)),
+            ice_if=IceIf(zeros2, jnp.asarray(kt, dtype=jnp.int64)),
+            s0=s0._replace(kt=jnp.asarray(kt, dtype=jnp.int64)), s2=s2,
+            chl=zeros2, geothermal_heat_flux_mwm2=zeros2,
+            prior_surface=None if forcing_update else prior,
+            forcing_update=forcing_update,
+        )
+        bfo._nemo_orca2_k0_next_fraqsr_compiled(
+            z, get_policy(), "stub", zeros2 + kt, zeros2 - kt, zeros2,
+            zeros2 + 1.0, zeros2 + kt, zeros2)
+    assert traces == {"surface": 2, "fraqsr": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -380,9 +480,11 @@ def _random_marine_inputs(n=4096, seed=7):
 def test_ncar_coefficients_match_independent_numpy_mirror():
     theta, q, sst, ssq, wind, _slp = _random_marine_inputs()
     Cd_np, Ch_np, Ce_np, Ub_np = _np_turb_ncar(theta, q, sst, ssq, wind)
+    # The NumPy mirror is NEMO's hard 33 m/s plateau: compare at the hard
+    # limit (cd_cutoff_width=0); the default's gap is pinned in the #2241 tests.
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
         jnp.asarray(theta), jnp.asarray(q), jnp.asarray(sst),
-        jnp.asarray(ssq), jnp.asarray(wind))
+        jnp.asarray(ssq), jnp.asarray(wind), cd_cutoff_width=0.0)
     assert np.allclose(np.asarray(Ub), Ub_np, rtol=0, atol=0)
     assert np.allclose(np.asarray(Cd), Cd_np, rtol=1e-12, atol=1e-15)
     assert np.allclose(np.asarray(Ch), Ch_np, rtol=1e-12, atol=1e-15)
@@ -813,3 +915,75 @@ def test_legacy_requires_q_sfc():
             u10=jnp.asarray(1.0), v10=jnp.asarray(0.0),
             T_air_K=jnp.asarray(280.0), q_air=jnp.asarray(0.005),
             T_sfc_K=jnp.asarray(281.0), algo="ly09_2coeff")
+
+
+# --- #2241 RULE 5: the NEMO-parity 33 m/s neutral-drag plateau -------------
+# The production OMIP path (air_sea_fluxes -> ncar_transfer_coefficients ->
+# large_yeager_neutral_cd(nemo_parity=True)) blends the LY09 polynomial into
+# the 2.34e-3 plateau over [33 - w, 33] m/s, w = cd_cutoff_width (default
+# NCAR_CD_CUTOFF_WIDTH = 0.5); 0.0 is NEMO's hard switch.
+
+def test_nemo_parity_cd_hard_limit_matches_nemo_source_exact():
+    """Width 0 reproduces NEMO's cd_n10_ncar (the rounding-exact branch,
+    itself pinned to NEMO) to round-off, eager and under jit, on both sides
+    of U = 33 (the bit-exact claim belongs to nemo_source_exact only)."""
+    from legoesm.core.bulk_flux import large_yeager_neutral_cd as cd
+    U = jnp.asarray([0.25, 5.0, 30.0, 32.5, 32.75, 33.0 - 1e-12, 33.0, 35.0])
+    ref = np.asarray(cd(U, nemo_parity=True, nemo_source_exact=True))
+    hard = lambda u: cd(u, nemo_parity=True, cd_cutoff_width=0.0)  # noqa: E731
+    for got in (hard(U), jax.jit(hard)(U)):
+        np.testing.assert_allclose(np.asarray(got), ref, rtol=1e-15, atol=0.0)
+
+
+# Relative gap of the default vs the hard plateau, (Cd(0.5) - Cd(0)) / Cd(0),
+# per neutral wind [m/s].  Measured 2026-11-07 (#2241); 0 outside the band.
+_CD_GAP = {32.5: 0.0, 32.6: 6.452073249229509e-05, 32.75: 0.0004441758241635477,
+           32.9: 0.0007216142895876101, 33.0: 0.0}
+
+
+@pytest.mark.parametrize("U", sorted(_CD_GAP))
+def test_nemo_parity_cd_default_gap_per_wind(U):
+    from legoesm.core.bulk_flux import large_yeager_neutral_cd as cd
+    u = jnp.asarray(U)
+    hard = cd(u, nemo_parity=True, cd_cutoff_width=0.0)
+    gap = float((cd(u, nemo_parity=True) - hard) / hard)
+    np.testing.assert_allclose(gap, _CD_GAP[U], rtol=1e-6, atol=1e-12)
+
+
+def test_check_grads_omip_drag_through_the_plateau_at_default():
+    """Scheme level: Cd of ncar_transfer_coefficients vs wind in a neutral
+    column (air = sea theta and q, so zeta = 0 and UN10 = wind in every
+    iteration): the hard switch jumps at 33 m/s; the default is C2 there
+    (order 1 at the join, as for the core helper), smooth mid-band."""
+    def cd(u, width=None):
+        return ncar_transfer_coefficients(
+            jnp.asarray([290.0]), jnp.asarray([0.010]), jnp.asarray([290.0]),
+            jnp.asarray([0.010]), jnp.atleast_1d(u), cd_cutoff_width=width)[0][0]
+    check_grads(cd, (jnp.asarray(33.0),), order=1, modes=("fwd", "rev"), eps=1e-4)
+    check_grads(cd, (jnp.asarray(32.75),), order=2, modes=("fwd", "rev"), eps=1e-4)
+    assert float(jax.grad(cd)(jnp.asarray(32.75))) != 0.0
+    with pytest.raises(AssertionError):          # the hard limit is not smooth
+        check_grads(lambda u: cd(u, 0.0), (jnp.asarray(33.0),), order=1,
+                    modes=("rev",), eps=1e-4)
+
+
+def test_omip_cd_cutoff_width_reaches_the_drag():
+    """The keyword is not inert: inside the band the two widths differ."""
+    args = (jnp.asarray([32.75]), jnp.zeros(1), jnp.asarray([290.0]),
+            jnp.asarray([0.010]), jnp.asarray([291.0]))
+    assert float(air_sea_fluxes(*args)[0][0]) != float(
+        air_sea_fluxes(*args, cd_cutoff_width=0.0)[0][0])
+
+
+def test_every_large_yeager_drag_branch_shares_one_polynomial(monkeypatch):
+    """#2242: the legacy (clipped) and NEMO-parity drag branches evaluate the
+    same LY09 polynomial, so a change to it reaches both."""
+    from legoesm.core import bulk_flux as bf
+    U = jnp.array([5.0, 20.0])
+    base_legacy = bf.large_yeager_neutral_cd(U)
+    base_parity = bf.large_yeager_neutral_cd(U, nemo_parity=True)
+    monkeypatch.setattr(bf, "_ly09_cdn_poly", lambda w: jnp.full_like(w, 1.5))
+    np.testing.assert_allclose(bf.large_yeager_neutral_cd(U), 1.5e-3, rtol=1e-15)
+    np.testing.assert_allclose(
+        bf.large_yeager_neutral_cd(U, nemo_parity=True), 1.5e-3, rtol=1e-15)
+    assert not np.allclose(base_legacy, 1.5e-3) and not np.allclose(base_parity, 1.5e-3)

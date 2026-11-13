@@ -16,13 +16,13 @@ loop cache key contains the packaged C-source, GCC version, glibc version from
 `gnu_get_libc_version`, and compile flags in one composite digest. The per-user
 cache and each keyed directory must be owner-only mode
 0700; every shared object has a sidecar SHA-256 that is checked before load
-(`packages/core/legoesm/core/transcendentals.py:36-239`). The C loops call the
+(`packages/core/legoesm/core/transcendentals.py:36-242`). The C loops call the
 double-precision scalar symbols once per element in ascending order; float32
 also calls the double symbol and converts only the stored result
 (`packages/core/legoesm/core/_scalar_libm.c:4-38`). The existing Python ctypes
 loops remain only as the test oracle. The callbacks still use
 `jax.pure_callback`, `vmap_method="broadcast_all"`, and the existing custom
-JVPs (`packages/core/legoesm/core/transcendentals.py:249-494`).
+JVPs (`packages/core/legoesm/core/transcendentals.py:252-500`).
 
 The round-342 year driver accepts only `libm` or `native`, defaults to `libm`,
 checks output emptiness and clean provenance before card construction, and
@@ -64,7 +64,7 @@ the NEMO recipe, shortwave penetration, lateral mixing, and vertical mixing.
 All enter the eight public functions. Those functions have exactly two libm
 callback sinks: unary `_scalar_libm` and binary `_scalar_libm_binary`; native
 mode enters the corresponding JAX primitive
-(`packages/core/legoesm/core/transcendentals.py:431-556`). Therefore the
+(`packages/core/legoesm/core/transcendentals.py:434-562`). Therefore the
 million-value equality tests cover every function routed by every caller.
 
 ## Verification
@@ -119,18 +119,18 @@ first-round items were dispositioned:
 
 - **Sonnet + Argon — power dtype:** the libm callback now casts both operands to
   JAX's weak-type-aware result dtype before crossing the callback; native mode
-  remains unchanged (`packages/core/legoesm/core/transcendentals.py:367-379`
-  and `:521-532`).
+  remains unchanged (`packages/core/legoesm/core/transcendentals.py:370-382`
+  and `:527-538`).
 - **Sonnet — routing hook:** the round-16 control now poisons the compiled loop
   result and counts routed elements; its no-op plant fails the test
   (`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round16_discriminator.py:353-407`).
 - **Sonnet + Argon — cache:** compile flags now enter the cache key; the default
   is per-user; ownership, permissions, build/load failures, temporary cleanup,
   corrupt binaries, and SHA mismatches fail closed
-  (`packages/core/legoesm/core/transcendentals.py:91-239`).
+  (`packages/core/legoesm/core/transcendentals.py:91-242`).
 - **Argon — non-contiguous reference:** the Python oracle writes to a
   C-contiguous result and is tested with a transpose
-  (`packages/core/legoesm/core/transcendentals.py:286-300`).
+  (`packages/core/legoesm/core/transcendentals.py:289-303`).
 - **Sonnet + Argon — manifest/driver/wrapper:** the manifest records the
   resolved policy and compiled-library provenance; both launch layers refuse
   occupied output, and clean provenance is checked before model setup. The old
@@ -157,14 +157,14 @@ new claim was measured on `4d86c20135` and `08bc33f0f8` before this follow-up:
   are now strongly cast to the weak-type-aware floating result before the
   custom JVP; integer libm operands are promoted, and the native branch is
   unchanged. Float32/float64, Python-scalar, integer, `grad`, and `jvp` cases
-  are covered (`packages/core/legoesm/core/transcendentals.py:367-379` and
-  `:474-532`; `tests/unit/test_transcendentals.py:147-219`).
+  are covered (`packages/core/legoesm/core/transcendentals.py:370-382` and
+  `:477-538`; `tests/unit/test_transcendentals.py:147-219`).
 - **Argon 3 — REAL, direct-helper scope:** HEAD's public callback path already
   pre-cast its operands, so the callback could not receive the reported mixed
   dtype through that path. Direct calls to both the compiled helper and its
   reference did promote float32-array plus Python scalar to float64 after
   broadcasting. Result type is now chosen before broadcasting, with direct
-  tests for both helpers (`packages/core/legoesm/core/transcendentals.py:316-364`;
+  tests for both helpers (`packages/core/legoesm/core/transcendentals.py:319-367`;
   `tests/unit/test_transcendentals.py:216-219`).
 - **Both reviewers' test finding — REAL:** the old test called the resolver and
   manifest writer directly, leaked global policy, and source-grepped wrapper
@@ -177,7 +177,7 @@ new claim was measured on `4d86c20135` and `08bc33f0f8` before this follow-up:
   non-glibc module skip, a trailing slash placed `.log` inside the output
   directory, and glibc version was absent from both cache identity and manifest
   provenance. All three are restored and behaviorally covered
-  (`tests/unit/test_transcendentals.py:20-25`; `packages/core/legoesm/core/transcendentals.py:91-239`;
+  (`tests/unit/test_transcendentals.py:20-25`; `packages/core/legoesm/core/transcendentals.py:91-242`;
   `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh:58-108`).
 
 Operator choices explicitly preserved: compare both libm and native arms;

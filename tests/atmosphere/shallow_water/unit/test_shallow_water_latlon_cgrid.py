@@ -9,13 +9,12 @@ from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     CGridLatLonShallowWaterModel,
     CGridLatLonShallowWaterConfig,
     CGridLatLonShallowWaterState,
-    cgrid_latlon_sw_tendencies,
     williamson_test2_cgrid,
     williamson_test2_exact_cgrid,
     williamson_test5_cgrid,
     compute_error_norms_cgrid,
-    _kinetic_energy_cgrid,
 )
+from legoesm.atmosphere.dynamics.gcm.shallow_water_generic import cgrid_latlon_sw_tendencies, kinetic_energy_cgrid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     interp_cell_to_uface,
     interp_cell_to_vface,
@@ -244,7 +243,7 @@ class TestKineticEnergy:
 
     def test_ke_zero_for_rest_state(self, grid):
         n_lat, n_lon = grid.n_lat, grid.n_lon
-        ke = _kinetic_energy_cgrid(
+        ke = kinetic_energy_cgrid(
             jnp.zeros((n_lat, n_lon + 1)), jnp.zeros((n_lat + 1, n_lon)),
         )
         assert jnp.allclose(ke, 0.0)
@@ -252,7 +251,7 @@ class TestKineticEnergy:
     def test_ke_uniform_zonal(self, grid):
         n_lat, n_lon = grid.n_lat, grid.n_lon
         u0 = 10.0
-        ke = _kinetic_energy_cgrid(
+        ke = kinetic_energy_cgrid(
             jnp.full((n_lat, n_lon + 1), u0), jnp.zeros((n_lat + 1, n_lon)),
         )
         assert jnp.allclose(ke, 0.5 * u0**2, rtol=1e-10)

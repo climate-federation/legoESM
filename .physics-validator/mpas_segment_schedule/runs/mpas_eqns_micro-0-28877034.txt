@@ -1,0 +1,283 @@
+force_cpu=0 jax_platforms= gpus=0 repo=/home/b/b384341/projects/legoESM pythonpath= extra=--checkpoint-days 0 stash=0 stage=eqns flags=--at-step 16 --load-state /scratch/b/b384341/mpas_segment_schedule/states/state16_gpu.npz --physics-variant norad --x-tracers q_v,q_i,N_s --module microphysics --calls 1,2,3 arm=none res=3 n_steps=16 K=12 rad_fp64=1 tridiag=default host=l50036.lvt.dkrz.de date=2026-11-10T16:12:42+01:00 ERA5_IC=/work/bb1596/b309178/diffESM/legoesm_ap_main/data/era5_ic_1979-01-01.zarr
+stage=eqns res=3 n_steps=16 x64=True backend=gpu schedule=none checkpoints=None storage=recompute sha=f5bc44b5df6b
+TF32 matmul precision enabled (compute capability >= 8.0)
+GPU vendor: nvidia (1 device(s))
+JAX persistent JIT cache: dir=/home/b/b384341/.cache/legoesm/jit_cache, min_compile_secs=1.0
+Configured XLA for gpu backend
+legoESM: single-device mode (GPU)
+Runtime bootstrapped: backend=gpu, x64=True, precision=fp64, devices=1, distributed=False
+  Runtime: backend=gpu, precision=fp64, x64=True, distributed=False
+  Sea-ice albedo scheme: maykut_untersteiner (ice skin ON: explicit)
+  Grid: mpas 3, 32 levels (cam_l32)
+  Land-sea mask: /work/bb1596/b309178/diffESM/legoesm_ap/data/clm/sftlf_clm_1.9x2.5.nc (land fraction mean=0.315)
+  Subgrid orography: /work/bb1596/b309178/diffESM/legoesm_ap/data/orography/sso_stdh_2deg_from1deg_seamfix.nc (stddev max=786 m, mean=38.8 m)
+Atmosphere: model_type=hydrostatic, discretization=mpas, grid=mpas -> mpas_primitive_equations
+  CFL check: dx_min=758 km, c_max=390 m/s, CFL(dt=112s)=0.08, dt_max=1099s
+  CFL OK: dt=112s is within stability limit
+  NOTE (mpas): advective/GW CFL is necessary but not sufficient — hydrostatic TRiSK PE can still blow up inside this limit (cold-start radiative transient, hyperdiffusion). Keep a margin on a cold start.
+  Dycore: hydrostatic/mpas on mpas, dt=112.5s
+  State init: T=300.0K, q_v=6.70 g/kg, CWV=84.6 kg/m2
+  MPAS moisture ON: dycore advects ['N_c', 'N_i', 'N_r', 'N_s', 'q_c', 'q_g', 'q_i', 'q_r', 'q_s', 'q_v'] (q_v mean 6.70 g/kg)
+  IC: loading ERA5 from /work/bb1596/b309178/diffESM/legoesm_ap_main/data/era5_ic_1979-01-01.zarr (year=1979)
+/home/b/b384341/projects/legoESM/packages/ml/legoesm/training/era5_to_state.py:112: RuntimeWarning: divide by zero encountered in divide
+  p_s_per_level = _np.where(dB > 0, (dp_floor - dA * p_ref) / dB, 0.0)
+  ERA5->MPAS IC: T=[186,306]K u_n=[-101,97]m/s p_s=[73967,103908]Pa phis=[0,23016]m2/s2
+  State init (ERA5 1979): T_mean=242.8K, q_v=2.20 g/kg, CWV=22.7 kg/m2
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc lacks ['CCl4', 'CF4', 'CFC_22']: RRTMGP keeps its FIXED present-day global means for those species (not transient).
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CO2 has unrecognised/empty units '1.e-6'; assuming scale 1e-06 to mole fraction (max=414.39). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CH4 has unrecognised/empty units '1.e-9'; assuming scale 1e-09 to mole fraction (max=1910.97). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable N2O has unrecognised/empty units '1.e-9'; assuming scale 1e-09 to mole fraction (max=332.068). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CFC_11 has unrecognised/empty units '1.e-12'; assuming scale 1e-12 to mole fraction (max=271.169). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CFC_12 has unrecognised/empty units '1.e-12'; assuming scale 1e-12 to mole fraction (max=543.656). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+  GHG external: CO2=336.6ppmv, CH4=1566ppbv, N2O=300.4ppbv, CFC11=158pptv, CFC12=286pptv
+  Physics: radiation=rrtmg, convection=zhang_mcfarlane
+  Land albedo: SURFDATA (/work/bb1596/b309178/diffESM/legoesm_ap/data/legoesm_surfdata_c260716.nc); 324 land cells, on-land albedo range [0.090, 0.600]
+  Land tile: ACTIVE (slab land, C_land=2.0e+05 J/m2/K, f_land mean=0.315, interface_flux=legacy_dual, tiled_surface=False)
+  land snow-albedo age e-folding: 150 days (overrides the calibration)
+  land soil freeze/thaw: ON
+  land canopy snow masking (trees hide snow): off
+  land snowpack: bulk (snow emissivity 0.970)
+  land soil thermal sub-steps per land step: 6
+  land soil ice impedance exponent: 6 (active only with freeze/thaw ON)
+  land canopy smoothing widths: RH cap 0.01, zeta cap 0.05; MOST iterations 10
+  land snow thermal node: off
+  land soil freeze/thaw ON with the calibrated land tables, which were fitted with it OFF
+  land canopy b0 soil-moisture stress: ON
+  Land tile: CanopyConfig on per-PFT CANOPY parameters from /work/bb1596/b309178/diffESM/legoesm_ap/data/legoesm_surfdata_c260716.nc (canopy height 0.10-36.72 m, roughness ratio 0.010-0.120). NOTE emissivity is a single constant in this builder and the canopy computes its own radiation from soil colour + leaf optics, so the tuned per-PFT emissivity and vegetation albedo do NOT apply to it — those are re-fit items, not wiring.
+  Land stomata: FARQUHAR (prescribed carbon state, LAI = C_fol/LCMA from C_fol=200 gC/m2) — the baked Vc_max25/g1/LCMA are ACTIVE
+  Land tile: IC soil water converted to this run's hydraulics (clapp_hornberger -> van_genuchten, regridded): dry layers lifted 45 in 34 columns (max 0.721 mm moved), wet layers 3 in 3 columns, 0 columns overflow to surface water (max 0 mm); psi_soil re-derived.
+  Land tile: MULTILAYER IC from spin-up restart /scratch/b/b384341/mpas_segment_schedule/data/lmip_soil_ic/soil_ic_mpas3_era5T_19790101.npz (10 soil layers, 642 columns; t_end=315360000 s, cold-start seed SKIPPED)
+CMIP6 CV: institution_id, source_id (institution_id='CU', source_id='legoESM-1-0') are legoESM placeholders and are NOT in the CMIP6 controlled vocabulary. Output is CF-valid but WILL be rejected at ESGF publication until both are registered via a PR to WCRP-CMIP/CMIP6_CVs. Pass registered values to CFWriter(institution_id=..., model_id=...) once that lands.
+  RRTMGP compute_fp32: optics tables + RTE solve in float32 (dycore stays fp64)
+  MPAS land boundary: lapse=6.50 K/km, beta=0.60 (f_land mean=0.315)
+  CAM macmic sub-cycle: turbulence + microphysics run 3 x at 600.0 s inside each physics step, after the convective increment
+  Physics cadence: full physics every 16 steps (physics timestep 1800.0 s = 30.0 min); the whole physics increment (u, v, T, p_s, tracers) is applied on the physics step (CAM-FV physics_update), zero in between; cached precip / surface / TOA rates re-published every step
+  Radiation sub-cycle: RRTMGP solved every 32 steps (cadence 1.00 h); held heating reused in between
+  MPAS q_v del4 smoothing ON: nu4=3.64e+14 m^4/s (nu4*dt*g_max^2=0.0000 of 0.5 stability bound)
+  MPAS ice skin ON (Semtner zero-layer, h=2.00 m): seeded at T_freeze_ocean; conductive relaxation C/g ~ 3 weeks (fresh-run spin-up ~2 months)
+  AMIP SST surface forcing (time-varying): day 0.0 T_sfc=[256.1,302.9] mean=288.6 K
+  Surface albedo: ocean=0.060 ice=0.800 land=[0.090,0.600] mean=0.196 (f_land mean=0.315)
+  Non-land surface fluxes evaluated on: OCEAN/ICE surface (ocean_flux_on_ocean_surface=True)
+  Land surface stress to the boundary layer: LAND MODEL (land_stress_from_land=True)
+  land_beta_soil: traced per-cell beta_soil REPLACES the static land_beta=0.60 over land
+  Interactive multilayer land (MPAS): 642 columns, f_land mean=0.315 — skin T -> forcing['T_sfc'] blend, one-step-lag explicit coupling; packed=True (324 land columns solved), cadence every 16 step(s) (DT_land=1800.0 s)
+Starting MPAS: 16 steps, 0.021484375 days (from day 0.0)
+Calling optical depth graph.
+Calling cloud optical properties graph.
+Calling Planck fraction graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling optical depth graph.
+Calling Rayleigh scattering graph.
+Calling cloud optical properties graph.
+built+exported in 194.2 s; ncol=(642, 32), physics every 16 steps, radiation every 32, land_k=16
+LOADED_STATE /scratch/b/b384341/mpas_segment_schedule/states/state16_gpu.npz from {'at_step': 16, 'backend': 'gpu', 'sha': 'f5bc44b5df6b', 'digest': 'c112e53439b759bf'}
+STATE_DIGEST c112e53439b759bf at_step=16 backend=gpu
+EQN_CALLS microphysics: 3 concrete calls recorded
+GRADCHECK {"name": "microphysics_call1", "finite": true, "grad_absmax": 6.433996776604722e+92, "ad": 856.6041565816256, "fd": 849.2171035341016, "ratio": 0.9913763516196292, "t_grad_s": 27.064745903015137}
+EQN_SELFCHECK microphysics_call1 T max|eqn-grad|=7.938e-09 (scale 8.885e+04)
+EQN_SELFCHECK microphysics_call1 q_v max|eqn-grad|=9.651e-04 (scale 2.214e+10)
+EQN_SELFCHECK microphysics_call1 q_i max|eqn-grad|=1.600e+01 (scale 5.786e+16)
+EQN_SELFCHECK microphysics_call1 N_s max|eqn-grad|=5.790e+76 (scale 6.434e+92)
+EQN_TIME microphysics_call1 58.2 s
+EQN_COUNT microphysics_call1 3424 equations on the reverse path
+EQN_GAIN microphysics_call1 eqn=52 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=4.952727e-03 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py:165:26 (number_per_volume_to_per_mass)
+EQN_GAIN microphysics_call1 eqn=91 select_n gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call1 eqn=92 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+02 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call1 eqn=93 reduce_max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+02 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call1 eqn=111 select_n gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call1 eqn=112 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=-2.680170e-15 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call1 eqn=113 reduce_max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=-1.000000e+02 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call1 eqn=127 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=128 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=132 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=133 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=154 add gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=5.669260e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2633:16 (morrison_microphysics)
+EQN_GAIN microphysics_call1 eqn=155 mul gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=-8.094261e-06 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2633:37 (morrison_microphysics)
+EQN_GAIN microphysics_call1 eqn=156 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=157 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=181 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=182 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=186 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=187 add gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2549:15 (morrison_microphysics)
+EQN_GAIN microphysics_call1 eqn=188 mul gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2549:36 (morrison_microphysics)
+EQN_GAIN microphysics_call1 eqn=189 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=190 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=192 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=193 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call1 eqn=217 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=6.000000e+02 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2497:35 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=747 div gain=3.154e+00 ct_out=1.544e+96 ct_in=4.871e+96 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2139:22 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=809 mul gain=1.000e+00 ct_out=4.871e+96 ct_in=4.871e+96 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2095:31 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=1121 div gain=3.154e+00 ct_out=1.544e+96 ct_in=4.871e+96 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1859:32 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=137 mul gain=6.000e+02 ct_out=2.879e+93 ct_in=1.728e+96 primal=9.939098e-226 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2664:34 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=403 sub gain=1.000e+00 ct_out=1.728e+96 ct_in=1.728e+96 primal=9.939098e-226 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2399:23 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=469 add gain=1.000e+00 ct_out=1.728e+96 ct_in=1.728e+96 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2387:19 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=568 scan gain=1.000e+00 ct_out=1.728e+96 ct_in=1.728e+96 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/output.py:381:23 (_sedimentation_substepped)
+EQN_MAX microphysics_call1 eqn=746 add gain=1.000e+00 ct_out=1.544e+96 ct_in=1.544e+96 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2138:20 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=750 add gain=1.000e+00 ct_out=1.544e+96 ct_in=1.544e+96 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2138:20 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=1111 div gain=1.140e+27 ct_out=1.355e+69 ct_in=1.544e+96 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1863:12 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=1116 add gain=1.000e+00 ct_out=1.544e+96 ct_in=1.544e+96 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1863:13 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=1120 add gain=1.000e+00 ct_out=1.544e+96 ct_in=1.544e+96 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1859:16 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=739 mul gain=6.000e+02 ct_out=1.272e+93 ct_in=7.631e+95 primal=2.250111e-225 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2142:37 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=134 div gain=1.000e+04 ct_out=2.879e+89 ct_in=2.879e+93 primal=5.963459e-223 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2664:16 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=135 max gain=1.000e+00 ct_out=2.879e+93 ct_in=2.879e+93 primal=5.963459e-223 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2664:16 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=136 add gain=1.000e+00 ct_out=2.879e+93 ct_in=2.879e+93 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2664:28 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=404 div gain=1.667e-03 ct_out=1.728e+96 ct_in=2.879e+93 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2399:34 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=1117 div gain=1.667e-03 ct_out=1.544e+96 ct_in=2.574e+93 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1863:13 (morrison_microphysics)
+EQN_MAX microphysics_call1 eqn=1118 max gain=7.471e-01 ct_out=2.574e+93 ct_in=1.923e+93 primal=0.000000e+00 src=
+EQN_MAX microphysics_call1 eqn=1119 convert_element_type gain=1.000e+00 ct_out=1.923e+93 ct_in=1.923e+93 primal=0.000000e+00 src=
+EQN_MAX microphysics_call1 eqn=3178 select_n gain=1.000e+00 ct_out=1.287e+93 ct_in=1.287e+93 primal=0.000000e+00 src=
+EQN_MAX microphysics_call1 eqn=573 max gain=5.201e-01 ct_out=2.445e+93 ct_in=1.272e+93 primal=1.350066e-222 src=
+EQN_MAX microphysics_call1 eqn=575 max gain=1.000e+00 ct_out=1.272e+93 ct_in=1.272e+93 primal=1.350066e-222 src=
+EQN_MAX microphysics_call1 eqn=641 select_n gain=1.000e+00 ct_out=1.272e+93 ct_in=1.272e+93 primal=1.350066e-222 src=
+EQN_MAX microphysics_call1 eqn=737 max gain=1.000e+00 ct_out=1.272e+93 ct_in=1.272e+93 primal=1.350066e-222 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2142:19 (morrison_microphysics)
+GRADCHECK {"name": "microphysics_call2", "finite": true, "grad_absmax": 1.1985905189187207e+122, "ad": -619.3301260731392, "fd": -619.3114594763927, "ratio": 0.9999698600213993, "t_grad_s": 25.614109754562378}
+EQN_SELFCHECK microphysics_call2 T max|eqn-grad|=2.439e-09 (scale 1.196e+04)
+EQN_SELFCHECK microphysics_call2 q_v max|eqn-grad|=1.583e-03 (scale 2.644e+09)
+EQN_SELFCHECK microphysics_call2 q_i max|eqn-grad|=1.371e-01 (scale 1.990e+12)
+EQN_SELFCHECK microphysics_call2 N_s max|eqn-grad|=9.174e+106 (scale 1.199e+122)
+EQN_TIME microphysics_call2 43.5 s
+EQN_COUNT microphysics_call2 3424 equations on the reverse path
+EQN_GAIN microphysics_call2 eqn=52 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=4.952727e-03 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py:165:26 (number_per_volume_to_per_mass)
+EQN_GAIN microphysics_call2 eqn=91 select_n gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call2 eqn=92 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+02 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call2 eqn=93 reduce_max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+02 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call2 eqn=111 select_n gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call2 eqn=112 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=-0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call2 eqn=113 reduce_max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=-1.000000e+02 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call2 eqn=127 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=128 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=132 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=133 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=154 add gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=5.031632e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2633:16 (morrison_microphysics)
+EQN_GAIN microphysics_call2 eqn=155 mul gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2633:37 (morrison_microphysics)
+EQN_GAIN microphysics_call2 eqn=156 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=157 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=181 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=182 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=186 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=187 add gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2549:15 (morrison_microphysics)
+EQN_GAIN microphysics_call2 eqn=188 mul gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2549:36 (morrison_microphysics)
+EQN_GAIN microphysics_call2 eqn=189 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=190 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=192 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=193 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call2 eqn=217 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=6.000000e+02 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2497:35 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=739 mul gain=6.000e+02 ct_out=2.397e+122 ct_in=1.438e+125 primal=2.122163e-291 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2142:37 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=746 add gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=2.122163e-291 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2138:20 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=750 add gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=2.122163e-291 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2138:20 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=1106 mul gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1861:20 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=1196 div gain=2.507e+13 ct_out=5.737e+111 ct_in=1.438e+125 primal=2.122184e-291 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:2382:23 (mg2_qi_conservation_ratio)
+EQN_MAX microphysics_call2 eqn=1200 add gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:2382:24 (mg2_qi_conservation_ratio)
+EQN_MAX microphysics_call2 eqn=1204 add gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=2.122184e-291 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1820:22 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=1208 add gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=2.122184e-291 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1820:22 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=1260 mul gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=2.122184e-291 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:2363:36 (mg2_deposition_limiter)
+EQN_MAX microphysics_call2 eqn=2361 add gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=2.122184e-291 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1111:19 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=2509 select_n gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=0.000000e+00 src=
+EQN_MAX microphysics_call2 eqn=2510 broadcast_in_dim gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=0.000000e+00 src=
+EQN_MAX microphysics_call2 eqn=2511 convert_element_type gain=1.000e+00 ct_out=1.438e+125 ct_in=1.438e+125 primal=0.000000e+00 src=
+EQN_MAX microphysics_call2 eqn=747 div gain=9.089e-01 ct_out=1.438e+125 ct_in=1.307e+125 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2139:22 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=809 mul gain=1.000e+00 ct_out=1.307e+125 ct_in=1.307e+125 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2095:31 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=1205 div gain=9.089e-01 ct_out=1.438e+125 ct_in=1.307e+125 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1821:24 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=2541 mul gain=1.133e-02 ct_out=1.438e+125 ct_in=1.630e+123 primal=1.872357e-289 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:856:8 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=2547 max gain=1.000e+00 ct_out=1.630e+123 ct_in=1.630e+123 primal=1.872357e-289 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:849:15 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=735 div gain=1.000e+04 ct_out=2.397e+118 ct_in=2.397e+122 primal=1.273298e-288 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2144:38 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=737 max gain=1.000e+00 ct_out=2.397e+122 ct_in=2.397e+122 primal=1.273298e-288 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2142:19 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=738 add gain=1.000e+00 ct_out=2.397e+122 ct_in=2.397e+122 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2142:31 (morrison_microphysics)
+EQN_MAX microphysics_call2 eqn=3178 select_n gain=1.000e+00 ct_out=2.397e+122 ct_in=2.397e+122 primal=0.000000e+00 src=
+EQN_MAX microphysics_call2 eqn=1201 div gain=1.667e-03 ct_out=1.438e+125 ct_in=2.397e+122 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:2382:24 (mg2_qi_conservation_ratio)
+EQN_MAX microphysics_call2 eqn=3379 max gain=5.000e-01 ct_out=2.397e+122 ct_in=1.199e+122 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py:587:23 (_make_hydrostatic_microphysics.<locals>.physics_fn.<locals>._get_tracer)
+EQN_MAX microphysics_call2 eqn=1202 max gain=5.000e-01 ct_out=2.397e+122 ct_in=1.199e+122 primal=0.000000e+00 src=
+GRADCHECK {"name": "microphysics_call3", "finite": true, "grad_absmax": 1.9227164675331125e+99, "ad": 112.97183602817594, "fd": 112.9862096992369, "ratio": 1.0001272323400796, "t_grad_s": 27.214683294296265}
+EQN_SELFCHECK microphysics_call3 T max|eqn-grad|=4.285e-10 (scale 7.695e+02)
+EQN_SELFCHECK microphysics_call3 q_v max|eqn-grad|=1.559e-05 (scale 1.987e+08)
+EQN_SELFCHECK microphysics_call3 q_i max|eqn-grad|=8.743e-03 (scale 4.381e+11)
+EQN_SELFCHECK microphysics_call3 N_s max|eqn-grad|=2.428e+84 (scale 1.923e+99)
+EQN_TIME microphysics_call3 43.6 s
+EQN_COUNT microphysics_call3 3424 equations on the reverse path
+EQN_GAIN microphysics_call3 eqn=52 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=4.952727e-03 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py:165:26 (number_per_volume_to_per_mass)
+EQN_GAIN microphysics_call3 eqn=91 select_n gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call3 eqn=92 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+02 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call3 eqn=93 reduce_max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+02 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call3 eqn=111 select_n gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call3 eqn=112 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=-0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call3 eqn=113 reduce_max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=-1.000000e+02 src=/home/b/b384341/projects/legoESM/packages/core/legoesm/core/smooth.py:88:11 (smooth_max)
+EQN_GAIN microphysics_call3 eqn=127 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=128 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=132 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=133 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=1.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=154 add gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=5.031633e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2633:16 (morrison_microphysics)
+EQN_GAIN microphysics_call3 eqn=155 mul gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2633:37 (morrison_microphysics)
+EQN_GAIN microphysics_call3 eqn=156 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=157 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=166 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=181 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=182 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=186 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=187 add gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2549:15 (morrison_microphysics)
+EQN_GAIN microphysics_call3 eqn=188 mul gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2549:36 (morrison_microphysics)
+EQN_GAIN microphysics_call3 eqn=189 max gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=190 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=192 broadcast_in_dim gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_GAIN microphysics_call3 eqn=193 convert_element_type gain=inf ct_out=0.000e+00 ct_in=0.000e+00 primal=0.000000e+00 src=
+EQN_MAX microphysics_call3 eqn=747 div gain=1.232e+00 ct_out=4.614e+102 ct_in=5.685e+102 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2139:22 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=809 mul gain=1.000e+00 ct_out=5.685e+102 ct_in=5.685e+102 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2095:31 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=1121 div gain=1.232e+00 ct_out=4.614e+102 ct_in=5.685e+102 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1859:32 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=739 mul gain=6.000e+02 ct_out=7.691e+99 ct_in=4.614e+102 primal=2.604948e-228 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2142:37 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=746 add gain=1.000e+00 ct_out=4.614e+102 ct_in=4.614e+102 primal=2.604948e-228 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2138:20 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=750 add gain=1.000e+00 ct_out=4.614e+102 ct_in=4.614e+102 primal=2.604948e-223 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2138:20 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=1111 div gain=1.212e+28 ct_out=3.808e+74 ct_in=4.614e+102 primal=2.604948e-223 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1863:12 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=1116 add gain=1.000e+00 ct_out=4.614e+102 ct_in=4.614e+102 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1863:13 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=1120 add gain=1.000e+00 ct_out=4.614e+102 ct_in=4.614e+102 primal=2.604948e-223 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1859:16 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=735 div gain=1.000e+04 ct_out=7.691e+95 ct_in=7.691e+99 primal=1.562969e-225 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2144:38 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=737 max gain=1.000e+00 ct_out=7.691e+99 ct_in=7.691e+99 primal=1.562969e-225 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2142:19 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=738 add gain=1.000e+00 ct_out=7.691e+99 ct_in=7.691e+99 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:2142:31 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=1117 div gain=1.667e-03 ct_out=4.614e+102 ct_in=7.691e+99 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1863:13 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=3178 select_n gain=1.000e+00 ct_out=3.845e+99 ct_in=3.845e+99 primal=0.000000e+00 src=
+EQN_MAX microphysics_call3 eqn=1118 max gain=5.000e-01 ct_out=7.691e+99 ct_in=3.845e+99 primal=0.000000e+00 src=
+EQN_MAX microphysics_call3 eqn=1119 convert_element_type gain=1.000e+00 ct_out=3.845e+99 ct_in=3.845e+99 primal=0.000000e+00 src=
+EQN_MAX microphysics_call3 eqn=3379 max gain=5.000e-01 ct_out=3.845e+99 ct_in=1.923e+99 primal=0.000000e+00 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py:587:23 (_make_hydrostatic_microphysics.<locals>.physics_fn.<locals>._get_tracer)
+EQN_MAX microphysics_call3 eqn=1171 mul gain=1.000e+00 ct_out=4.614e+97 ct_in=4.614e+97 primal=2.604948e-223 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1822:28 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=731 mul gain=7.854e+02 ct_out=9.792e+92 ct_in=7.691e+95 primal=1.562969e-221 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:1510:27 (_mg2_size_dist_basic)
+EQN_MAX microphysics_call3 eqn=1968 mul gain=1.000e-04 ct_out=4.614e+97 ct_in=4.614e+93 primal=2.604948e-219 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py:1244:28 (morrison_microphysics)
+EQN_MAX microphysics_call3 eqn=1970 select_n gain=1.000e+00 ct_out=4.614e+93 ct_in=4.614e+93 primal=2.604948e-219 src=
+EQN_MAX microphysics_call3 eqn=1973 mul gain=1.000e+00 ct_out=4.614e+93 ct_in=4.614e+93 primal=2.604948e-219 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:2419:58 (ice_autoconversion_mg2)
+EQN_MAX microphysics_call3 eqn=730 div gain=2.592e+14 ct_out=3.777e+78 ct_in=9.792e+92 primal=1.227553e-218 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:1510:27 (_mg2_size_dist_basic)
+EQN_MAX microphysics_call3 eqn=1978 mul gain=3.656e-02 ct_out=4.614e+93 ct_in=1.687e+92 primal=7.124576e-218 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:2418:12 (ice_autoconversion_mg2)
+EQN_MAX microphysics_call3 eqn=726 pow gain=8.933e+81 ct_out=4.229e-04 ct_in=3.777e+78 primal=3.182252e-204 src=/home/b/b384341/projects/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:113:31 (safe_pow)
+PROBE_DONE
+exit=0 arm=none
+
+********************************************************************************
+*                                                                              *
+*  This is the automated job summary provided by DKRZ.                         *
+*  If you encounter problems, need assistance or have any suggestion, please   *
+*  write an email to                                                           *
+*                                                                              *
+*  --  support@dkrz.de --                                                      *
+*                                                                              *
+*                       We hope you enjoyed the DKRZ supercomputer LEVANTE ... *
+*
+* JobID            : 28877034
+* JobName          : mpas_eqns_micro                                   
+* Account          : bb1596_gpu
+* User             : b384341 (203805), bb1596 (203649)                 
+* Partition        : gpu
+* QOS              : normal
+* Nodelist         : l50036 (1)                                                
+* Submit date      : 2026-11-10T16:09:32
+* Start time       : 2026-11-10T16:12:34
+* End time         : 2026-11-10T16:21:09
+* Elapsed time     : 00:08:35 (Timelimit=04:00:00)                     
+* Command          : /home/b/b384341/projects/legoESM/scripts/cluster/levante/
+*                    mpas_segment_schedule_receipt.sbatch
+* WorkDir          : /home/b/b384341/projects/legoESM
+*
+* StepID | JobName      NodeHours    MaxRSS [Byte] (@task)
+* ------------------------------------------------------------------------------
+* batch  | batch            0.018
+* extern | extern           0.018                       ()
+* ------------------------------------------------------------------------------
+

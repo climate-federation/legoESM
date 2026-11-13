@@ -68,3 +68,95 @@ def test_rayleigh_sponge_matches_isca(fix, cset):
             "dv_dt": _rel(o.dv_dt, z[f"{cset}_vdt"]),
             "dT_dt": _rel(o.dT_dt, z[f"{cset}_tdt"])}
     assert max(errs.values()) <= _TOL, errs
+
+
+# RULE 5 recorded gap: default ``sponge_sharpness`` (100, cutoff width 0.01 of p_sb)
+# vs the Isca fixture, per column, worst of the level profile (same metric as _rel).
+# Measured 2026-11-12 on main 7aee08bb40 (fp64, CPU).  Only l60 column 5 has a level
+# inside the cutoff band; every other entry is fp64 round-off.  A change to the smooth
+# form or its default sharpness re-measures these (CLAUDE.md RULE 5).
+_DEFAULT_GAP = {
+    "l32": {
+        "du_dt": [1.4489827874e-16, 2.3183724599e-16, 1.4489827874e-16, 2.3183724599e-16,
+                  1.9319770499e-16, 1.4489827874e-16, 1.4489827874e-16, 1.4489827874e-16,
+                  1.4489827874e-16, 2.3183724599e-16, 1.9319770499e-16, 1.9319770499e-16, 0.0],
+        "dv_dt": [0.0] * 13,
+        "dT_dt": [1.1469249718e-16, 1.4680639639e-16, 1.1469249718e-16, 1.4680639639e-16,
+                  2.0389777276e-16, 1.1469249718e-16, 1.1469249718e-16, 1.1469249718e-16,
+                  1.1469249718e-16, 1.4680639639e-16, 2.0389777276e-16, 2.0389777276e-16, 0.0],
+    },
+    "l60": {
+        "du_dt": [1.1857255442e-16, 1.9866908926e-16, 1.736635719e-16, 2.602238286e-16,
+                  2.8175885734e-16, 3.147407158e-07, 9.8024177415e-17],
+        "dv_dt": [1.3602731946e-16, 2.9537235757e-16, 1.7551103362e-16, 1.6109676601e-16,
+                  1.5142598683e-16, 5.7195728446e-07, 1.4033272464e-16],
+        "dT_dt": [1.5144475149e-16, 2.3556374483e-16, 3.6772939148e-16, 1.9145386481e-16,
+                  2.5085854221e-16, 1.9228283592e-07, 5.8202475473e-17],
+    },
+}
+
+
+def _per_column(ours, ref):
+    ref = np.asarray(ref, np.float64)
+    ref = ref.reshape(ref.shape[0], -1)
+    ours = np.asarray(ours, np.float64).reshape(ref.shape)
+    num, den = np.max(np.abs(ours - ref), axis=1), np.max(np.abs(ref), axis=1)
+    return np.where(den > 0, num / np.where(den > 0, den, 1.0), num)
+
+
+@pytest.mark.parametrize("cset", ["l32", "l60"])
+def test_rayleigh_sponge_default_gap_per_column(fix, cset):
+    """RULE 5: the default smooth cutoff departs from Isca by the recorded per-column gap."""
+    z = fix
+    meta = json.loads(str(z["meta"]))
+    cfg = RayleighConfig(k_max=0.0, sponge_k=meta["sponge_k_per_s"],
+                         sponge_pbottom_Pa=float(z[f"{cset}_p_sb"]))
+    j = {k: jnp.asarray(z[f"{cset}_{k}"]) for k in _KEYS}
+    o = rayleigh_gwd(j["u"], j["v"], j["T"], j["p_full"], j["p_half"], j["z_full"],
+                     j["z_half"], j["rho"], j["lat"], meta["dt"], cfg)
+    for name, ref in (("du_dt", "udt"), ("dv_dt", "vdt"), ("dT_dt", "tdt")):
+        got = _per_column(getattr(o, name), z[f"{cset}_{ref}"])
+        np.testing.assert_allclose(got, _DEFAULT_GAP[cset][name], rtol=1e-6, atol=1e-12,
+                                   err_msg=name)
+
+
+def test_rayleigh_sponge_check_grads_at_cutoff(fix):
+    """RULE 5 gradient test: check_grads (order 2) through the sponge cutoff of one
+    fixture level, parametrised by x = (p_sb - p_k)/p_sb so the checked quantity is
+    the cutoff profile itself, du_dt[k] / (-sponge_k u[k]) = frac(x)**2.  At x = 0 the
+    hard form max(x, 0)**2 has a second-derivative jump and fails the same check
+    (asserted, non-vacuity)."""
+    from jax.test_util import check_grads
+
+    from legoesm.core.smooth import positive_part_c1
+
+    z = fix
+    meta = json.loads(str(z["meta"]))
+    j = {k: jnp.asarray(z[f"l60_{k}"][:1]) for k in _KEYS}
+    p0 = np.asarray(z["l60_p_full"][0])
+    k = int(np.argmax(np.where(p0 < float(z["l60_p_sb"]), p0, -np.inf)))
+    p_k, u_k, sk = float(p0[k]), float(z["l60_u"][0, k]), meta["sponge_k_per_s"]
+    assert u_k != 0.0
+
+    def make(s):
+        def f(x):
+            cfg = RayleighConfig(k_max=0.0, sponge_k=sk, sponge_pbottom_Pa=p_k / (1.0 - x),
+                                 sponge_sharpness=s)
+            o = rayleigh_gwd(j["u"], j["v"], j["T"], j["p_full"], j["p_half"], j["z_full"],
+                             j["z_half"], j["rho"], j["lat"], meta["dt"], cfg)
+            return o.du_dt[0, k] / (-sk * u_k)
+        return f
+
+    sharp = RayleighConfig().sponge_sharpness
+    x0 = jnp.asarray(0.005)                                # inside the 0.01 band
+    assert float(positive_part_c1(x0, sharp)) != float(x0)  # x0 really is in the band
+    f = make(sharp)
+    check_grads(f, (x0,), order=2, modes=("fwd", "rev"), eps=1e-5)
+    assert float(jax.grad(f)(x0)) != 0.0
+    check_grads(f, (jnp.asarray(0.0),), order=2, modes=("fwd", "rev"), eps=1e-5)
+    # right seam x = 1/s: positive_part_c1 is C1 there, so order 1 only; the f'' jump
+    # gives central-difference error ~eps there, hence eps 1e-7 (3e-5 at 1e-5)
+    check_grads(f, (jnp.asarray(1.0 / sharp),), order=1, modes=("fwd", "rev"), eps=1e-7)
+    with pytest.raises(AssertionError):
+        check_grads(make(math.inf), (jnp.asarray(0.0),), order=2, modes=("fwd", "rev"),
+                    eps=1e-5)

@@ -60,8 +60,8 @@ reproducibility before any full-year candidate comparison.
 
 The driver runs the landed standalone K0 composed card
 (`build_nemo_orca2_k0_ocean_card` and `nemo_orca2_k0_ocean_step` at
-`packages/ocean/legoesm/ocean/bulk_flux_omip.py:1128-1149` and
-`packages/ocean/legoesm/ocean/bulk_flux_omip.py:1172-1215`) with explicit
+`packages/ocean/legoesm/ocean/bulk_flux_omip.py:1132-1153` and
+`packages/ocean/legoesm/ocean/bulk_flux_omip.py:1176-1219`) with explicit
 `NemoStandaloneK0Config(nn_ice=1, ln_drgice_imp=False, ln_mxl0=True,
 nn_mxlice=0, ln_icebergs=False, initial_state='nemo_k0_istate')` verified by
 `validate_nemo_standalone_k0` and `_validate_k0_ocean_card`. It extends the

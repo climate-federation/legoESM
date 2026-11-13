@@ -71,6 +71,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.thermo import latent_heat_fusion, latent_heat_vaporization
 from legoesm.thermo import saturation_specific_humidity as _saturation_specific_humidity
 from legoesm.thermo import saturation_specific_humidity_goff_gratch as _qsat_water_goff_gratch
 from legoesm.core.smooth import smooth_min
@@ -113,6 +114,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     mg2_ice_lambda_bounds,
     mg2_ice_slope,
     mg2_qi_conservation_ratio,
+    div_gated_tangent,
     mg2_size_dist_liq,
     mg2_inprecip_snow,
     mg2_snow_slope,
@@ -573,6 +575,7 @@ def morrison_microphysics(
         hard_threshold=config.hard_sat_adjust_threshold,
         hard_max_heating_K=config.hard_sat_max_heating_K,
         sat_fn=qsat_water_fn,
+        l_v=latent_heat_vaporization(constants.T_freeze),  # = L_v, the host's heating
     )
     # CAM6 arrangement: when the turbulence closure already diagnosed this
     # layer's cloud liquid and handed it to the host, MG2 carries NO
@@ -992,8 +995,8 @@ def morrison_microphysics(
         # saturation curve itself. The rh_homo allowance shifts the TARGET the
         # vapour relaxes toward, not dq_sat/dT, and gSAM's M2005 likewise builds
         # ABI from the unscaled qvi (module_mp_graupel.f90).
-        dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
-        abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
+        dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)  # latent-ok: Morrison/MG2 oracle constant
+        abi = 1.0 + dqsidt * constants.L_s / constants.c_pd  # latent-ok: Morrison/MG2 oracle constant
         epsi = (
             2.0 * jnp.pi / cons12_cbrt
             * rho * dv_vap
@@ -1314,7 +1317,7 @@ def morrison_microphysics(
     # 2026-10-20 4a)
     _T_cap = T - constants.L_f * minstsm / constants.c_pd if mg2_snow else T  # latent-ok: MG2 oracle constant (xlf)
     heat_avail = (constants.c_pd * jnp.maximum(_T_cap - constants.T_freeze, 0.0)
-                  / (constants.L_f * jnp.maximum(dt, 1.0e-12)))
+                  / (latent_heat_fusion(constants.T_freeze) * jnp.maximum(dt, 1.0e-12)))
     if mg2_snow:
         # Under the switch only graupel melts at a rate: melt_ice and
         # melt_snow are zeroed above (ice and snow melt instantly, MG2), so this
@@ -1819,6 +1822,13 @@ def morrison_microphysics(
             # approved smooth min at sharpness 100.  nsubi = 0.
             _nisrc = (dN_i_nuc + nsacwi
                       + freeze_N_to_ice / jnp.clip(rho, _RHO_FLOOR))
+            # Gradient gate keys on the stock N_i (a number) against the mass
+            # threshold, so it practically never closes here: keying it on
+            # q_i instead was MEASURED to bring the physics-call adjoint back
+            # to 1e75 (stopping only the factor's derivative breaks the exact
+            # sink x (stock/sink) cancellation and exposes nprci's own
+            # derivative at near-zero q_i; .physics-validator/
+            # mg2_absent_gradient_gate/README.md, section 5).
             dN_i_autoconv = nprci_ferrier * mg2_qi_conservation_ratio(
                 jnp.clip(N_i, 0.0), _nisrc, nprci_ferrier, dt, _MG2_OMSM,
                 width=1.0 / MG2_CAP_SHARPNESS)
@@ -1858,10 +1868,13 @@ def morrison_microphysics(
                      if config.do_snow_aggregation else jnp.zeros_like(q_s))
         _nsrc = dN_i_autoconv + freeze_N_to_snow / jnp.clip(rho, _RHO_FLOOR)
         _nlim = (-nsagg_mg2 - _nsrc) * dt > jnp.clip(N_s, 0.0)
+        # gradient only: no factor derivative where snow is absent (forward
+        # unchanged; see div_gated_tangent)
         nsagg_mg2 = nsagg_mg2 * jnp.where(
             _nlim,
-            (jnp.clip(N_s, 0.0) / dt + _nsrc)
-            / jnp.where(_nlim, -nsagg_mg2, 1.0) * _MG2_OMSM, 1.0)
+            div_gated_tangent(jnp.clip(N_s, 0.0) / dt + _nsrc,
+                              jnp.where(_nlim, -nsagg_mg2, 1.0),
+                              q_s >= MG2_QSMALL) * _MG2_OMSM, 1.0)
     if config.warm_rain_incloud:
         # MG2 limit on rain evaporation + snow and ice sublimation, after every
         # conservation limiter (micro_mg2_0.F90:1805-1850): none of them may
@@ -2260,9 +2273,9 @@ def morrison_microphysics(
 
 
     # === LATENT HEATING ===
-    L_v = constants.L_v
-    L_s = constants.L_s
-    L_f = constants.L_f
+    L_v = constants.L_v  # latent-ok: Morrison/MG2 oracle constant
+    L_s = constants.L_s  # latent-ok: Morrison/MG2 oracle constant
+    L_f = constants.L_f  # latent-ok: Morrison/MG2 oracle constant
     c_pd = constants.c_pd
 
     dT_dt = (
@@ -2458,7 +2471,7 @@ def morrison_microphysics(
             _chg, (_q_i_end - (q_i + dq_i_dt * dt)) / dt, 0.0)
         dN_i_dt = dN_i_dt + jnp.where(
             _chg, (_N_i_end - (N_i + dN_i_dt * dt)) / dt, 0.0)
-        dT_dt = dT_dt + constants.L_f * (_frz - _melt) / (constants.c_pd * dt)
+        dT_dt = dT_dt + constants.L_f * (_frz - _melt) / (constants.c_pd * dt)  # latent-ok: Morrison/MG2 oracle constant
         _qc_ice_melt = _melt / dt
         _qc_homog = _dqc - _qc_ice_melt
     if _prog_nc:

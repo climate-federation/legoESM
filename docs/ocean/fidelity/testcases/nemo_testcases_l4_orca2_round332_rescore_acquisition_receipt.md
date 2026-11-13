@@ -21,7 +21,7 @@ The original first-owner assignment is **REFUTED as a required NEMO flip**.
 In the executing record build, the EEN loop computes `zva` and adds it to `pv_rhs` at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90:796-802`.
 legoesm computes the corresponding EEN contribution and adds it to `dv_dt` at
-`ocean_pe_latlon_cgrid.py:3098`.  The admitted round-40 source-order record
+`ocean_pe_latlon_cgrid.py:3096`.  The admitted round-40 source-order record
 shows instead that NEMO already has positive zero after HPG and changes no `v`
 word at LDF, VOR, KEG, or ZAD on either rank.  The 2,032 stage-output
 differences therefore do not establish a NEMO `vor_een` flip.  The new record
@@ -228,7 +228,7 @@ every word.  The exclusion is therefore **CONFIRMED but vacuous**: the add
 could not have changed any word.
 Thus the literal EEN add at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90:796-802`, and the
-legoesm add at `ocean_pe_latlon_cgrid.py:3098`, are **CONFIRMED excluded** as
+legoesm add at `ocean_pe_latlon_cgrid.py:3096`, are **CONFIRMED excluded** as
 the first owner.
 
 The earlier fold-owner claim is **REFUTED/unsupported**.  The executing call
@@ -471,7 +471,7 @@ in its generic tendency boundary.  That upstream multiply was therefore the
 first owning statement.
 
 The fix changes only the `rk3_vector_raw_vmask` arm at
-`ocean_pe_latlon_cgrid.py:6484-6504`: it no longer writes a prematurely masked
+`ocean_pe_latlon_cgrid.py:6559-6579`: it no longer writes a prematurely masked
 `dv_dt`, leaving NEMO's later stage-update product to determine the dry sign.
 The production-call-site AST test fails on the exact one-line revert, and the
 real stage-update-plus-fold test checks both signed-zero directions and a

@@ -37,9 +37,14 @@ import pytest
 
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
+import functools
+
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
-    saturation_adjustment,
+    saturation_adjustment as _saturation_adjustment,
 )
+
+# constant-L host (the legacy liquid convention these tests were written for)
+saturation_adjustment = functools.partial(_saturation_adjustment, l_v=constants.L_v)
 
 _L_V = constants.L_v
 _C_PD = constants.c_pd
@@ -447,6 +452,7 @@ def test_mpas_poststep_hook_conserves_and_rate_limits():
     """Driver post-step hook ``_mpas_hard_saturation_poststep`` on a fabricated
     supersaturated column: conservation of c_pd*T + L_v*q_v AND total water,
     per-step heating <= cap, pure drain, donor-consistent q_v->q_c."""
+    from legoesm.atmosphere.physics.microphysics._warm_rain import drain_l_over_cp
     from legoesm.driver.model_driver import _mpas_hard_saturation_poststep
     ncol, nlev = 2, 5
     T = jnp.array([[200.0, 237.0, 260.0, 290.0, 312.8],   # cold pool + hot cell
@@ -460,12 +466,13 @@ def test_mpas_poststep_hook_conserves_and_rate_limits():
     T_new, q_v_new, q_c_new, _qi_unused, dq = _mpas_hard_saturation_poststep(
         T, q_v, q_c, p_s[:, None] * sigma_full[None, :], dt, 1.1, 5.0)
     assert jnp.all(dq >= 0.0)                           # pure drain
-    dT = _L_V * dq / _C_PD
+    l_v = drain_l_over_cp(T, False) * _C_PD            # Kirchhoff L_v(T0) per cell
+    dT = l_v * dq / _C_PD
     assert jnp.all(dT <= 5.0 + 1e-6)                    # per-step heating <= cap
-    # conservation of c_pd*T + L_v*q_v
+    # conservation of c_pd*T + L_v(T0)*q_v
     np.testing.assert_allclose(
-        np.asarray(_C_PD * T_new + _L_V * q_v_new),
-        np.asarray(_C_PD * T + _L_V * q_v), rtol=1e-12, atol=1e-6)
+        np.asarray(_C_PD * T_new + l_v * q_v_new),
+        np.asarray(_C_PD * T + l_v * q_v), rtol=1e-12, atol=1e-6)
     # total water q_v + q_c conserved; q_c gains exactly what q_v loses
     np.testing.assert_allclose(np.asarray(q_v_new + q_c_new),
                                np.asarray(q_v + q_c), rtol=1e-12, atol=1e-15)
@@ -534,15 +541,17 @@ def test_experiment_float_overrides_thread_and_raise():
 
 
 def test_all_guarded_configs_carry_the_fields():
-    """Every scheme in HARD_SAT_GUARD_SCHEMES -- now including the Sundqvist
-    diagnostic scheme and the ML emulator -- carries the three fields with the
-    SAME defaults.  seifert_beheng left the list: it runs gSAM's exact
-    satadj_liquid (HARD_SAT_GUARD_EXEMPT) and refuses the fields."""
+    """Every scheme in HARD_SAT_GUARD_SCHEMES carries the three fields with the
+    SAME defaults.  seifert_beheng and sundqvist left the list for
+    HARD_SAT_GUARD_EXEMPT: they run their oracle's exact condensation (gSAM
+    satadj_liquid; ccpp zhaocarr_gscond) and refuse the fields."""
     from legoesm.atmosphere.physics.microphysics.config import (
-        HARD_SAT_GUARD_SCHEMES, MicrophysicsConfig,
+        HARD_SAT_GUARD_EXEMPT, HARD_SAT_GUARD_SCHEMES, MicrophysicsConfig,
     )
     top = MicrophysicsConfig()
-    assert len(HARD_SAT_GUARD_SCHEMES) == 4   # kessler, seifert_beheng, thompson: exempt (faithful ports)
+    # kessler, seifert_beheng, thompson, sundqvist: exempt (faithful ports)
+    assert set(HARD_SAT_GUARD_SCHEMES) == {"ml_emulator", "morrison", "p3"}
+    assert {"kessler", "seifert_beheng", "thompson", "sundqvist"} <= set(HARD_SAT_GUARD_EXEMPT)
     for name in HARD_SAT_GUARD_SCHEMES:
         cfg = getattr(top, name)
         assert cfg.hard_saturation_adjustment is False, name
@@ -583,7 +592,7 @@ def test_mpas_poststep_hook_jit_matches_eager_and_compiles_once(ice_curve):
     import inspect
     from jax import monitoring
     from legoesm.atmosphere.physics.microphysics._warm_rain import (
-        mixed_phase_l_over_cp,
+        drain_l_over_cp,
     )
     from legoesm.driver.model_driver import (
         ModelDriver,
@@ -618,7 +627,7 @@ def test_mpas_poststep_hook_jit_matches_eager_and_compiles_once(ice_curve):
     water = q_v_new + q_c_new + (q_i_new if q_i_new is not None else 0.0)
     np.testing.assert_allclose(np.asarray(water), np.asarray(q_v + q_c),
                                rtol=1e-12, atol=1e-15)
-    l_cp = mixed_phase_l_over_cp(T) if ice_curve else _L_V / _C_PD
+    l_cp = drain_l_over_cp(T, ice_curve)
     np.testing.assert_allclose(np.asarray(T_new + l_cp * q_v_new),
                                np.asarray(T + l_cp * q_v), rtol=1e-12, atol=1e-9)
 

@@ -24,7 +24,7 @@ __param_spec__ = {
             "mg2_drop_number_cap_log_width": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-27",
             "mg2_drop_slope_log_width": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-27",
             "mg2_ice_cap_log_width": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-27",
-            "cloud_optics_asymmetry_g": "numerics: scattering asymmetry g of the two-region inhomogeneity two-stream reflectance (shapes the reduction; the real per-band g lives in RRTMGP, not trained here)",
+            "cloud_optics_asymmetry_g": "numerics: scattering asymmetry g of the partial-coverage two-stream reflectance (shapes the reduction; the real per-band g lives in RRTMGP, not trained here)",
             "clubb_cf_override_p_min_pa": "structural: BL-top pressure [Pa] above which the diagnostic-CLUBB cloud-fraction override applies (a level/regime gate, not a trained closure coefficient); 0 => full-column override",
             "clubb_cf_override_ramp_pa": "numerics: smoothing width [Pa] of the override level gate (linear blend over [p_min-ramp, p_min] to avoid a cloud/heating discontinuity); a regulariser, not a trained coefficient; 0 => sharp step",
             # Defaults sit on a HARD physical bound (1.0 = full / neutral, 0.0 =
@@ -66,7 +66,7 @@ __param_spec__ = {
             # (clubb_cf_override_strength / clubb_cf_override_floor: excluded —
             #  opt-in marine-Sc levers whose defaults sit on a hard bound.)
             # --- condensate: diagnostic in-cloud water + resolved-cf condensate scale [kg/kg] ---
-            "q_c_diagnostic": {"units": "kg/kg", "bounds": (1.0e-6, 1.0e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "condensate", "reference": "diagnostic-cloud scheme default", "shape": None},
+            "q_c_diagnostic": {"units": "kg/kg", "bounds": (1.0e-6, 1.5e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "condensate", "reference": "diagnostic-cloud scheme default", "shape": None},
             "q_cloud_resolved_ref": {"units": "kg/kg", "bounds": (1.0e-7, 1.0e-5), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "resolved (CRM/SAM) cloud-fraction scheme default", "shape": None},
             # --- ice_fraction: temperature below which all condensate is ice [K] ---
             "T_ice_only": {"units": "K", "bounds": (220.0, 268.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_fraction", "reference": "linear ice-fraction ramp scheme default", "shape": None},
@@ -326,15 +326,15 @@ class CloudConfig(NamedTuple):
     # --- Sub-grid cloud-optics inhomogeneity (appended at the END of the
     # NamedTuple so positional / checkpoint callers keep their field order) ---
     # Scheme: "constant" (Cahalan scalar cloud_inhomogeneity_factor above;
-    # legacy, byte-identical default) or "two_region" (tau-DEPENDENT
-    # Shonk & Hogan 2008 factor chi_eff = 1 - fsd^2 tau/(gamma0+tau) that reduces
-    # a THICK cloud more than a thin one; asymptote 1-fsd^2).  Unknown => raise.
+    # legacy, byte-identical default) or "two_region" (ecRad 49r1 McICA gamma-PDF
+    # scaling of each max_random subcolumn cell's optical depth, IFS overlap of
+    # inhomogeneities; needs max_random, raises elsewhere).  Unknown => raise.
     cloud_optics_inhomogeneity: str = "constant"
     # Fractional standard deviation of in-cloud water for two_region (Shonk &
-    # Hogan 2010 global mean ~0.75; broken marine Sc -> ~1).  fsd -> 0 is
-    # homogeneous (chi_eff -> 1); higher fsd => larger reduction (floor 1-fsd^2).
+    # Hogan 2010 global mean ~0.75; broken marine Sc -> ~1); the width of the
+    # gamma PDF the subcolumn cells are drawn from (fsd -> 0 is homogeneous).
     cloud_fsd: float = 0.75
-    # Scattering asymmetry g of the two_region conservative two-stream
+    # Scattering asymmetry g of the partial-coverage conservative two-stream
     # reflectance R(t) = t/(t + 2/(1-g)).  ~0.85 for liquid clouds (Mie, SW).
     # A numerics constant of the optic (the real per-band g lives in RRTMGP).
     cloud_optics_asymmetry_g: float = 0.85

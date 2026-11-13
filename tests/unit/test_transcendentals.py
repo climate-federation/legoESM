@@ -425,6 +425,36 @@ def test_compile_error_removes_all_temporary_files(
     assert not list(cache.rglob("scalar_libm-*.sha256"))
 
 
+def test_crash_between_publishes_does_not_wedge_the_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A build that dies after its first publish must leave a cache the next
+    build can complete; publishing the .so first left a checksum-less .so that
+    raised "checksum is unavailable" on every later call."""
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+    cache.chmod(0o700)
+    monkeypatch.setenv("LEGOESM_SCALAR_LIBM_CACHE", str(cache))
+    _clear_build_caches()
+    real_replace = tx.os.replace
+    calls = []
+
+    def die_on_second_publish(src, dst):
+        calls.append(dst)
+        if len(calls) == 2:
+            raise OSError("planted crash between the two publishes")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(tx.os, "replace", die_on_second_publish)
+    with pytest.raises(OSError, match="planted crash"):
+        tx._compiled_libm_path()
+    monkeypatch.setattr(tx.os, "replace", real_replace)
+    _clear_build_caches()
+    shared_object = tx._compiled_libm_path()
+    assert len(tx._verify_shared_object(shared_object)) == 64
+
+
 def test_corrupt_shared_object_with_matching_sha_fails_to_load(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -501,3 +531,12 @@ def test_default_cache_root_uses_xdg_not_shared_tmp(
     monkeypatch.delenv("LEGOESM_SCALAR_LIBM_CACHE", raising=False)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
     assert tx._cache_root() == tmp_path / "xdg" / "legoesm" / "scalar-libm"
+
+
+@pytest.mark.parametrize("base,exponent,slope", [(0.0, 1.0, 1.0), (-2.0, 2.0, -4.0)])
+def test_libm_pow_gradient_at_zero_and_negative_bases(base, exponent, slope):
+    from legoesm.core.transcendentals import pow as libm_pow
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    grad = jax.grad(lambda x: libm_pow(x, exponent))(jnp.asarray(base, dtype=jnp.float64))
+    assert float(grad) == slope

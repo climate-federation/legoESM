@@ -140,9 +140,13 @@ def _validate_tiled_envelope(cfg, cdgrid, *, inner_fix_mass_ok: bool) -> None:
             "moisture_flux_form tracer transport")
 
 
-def make_tiled_cc_step(model, mesh, kt: int, dt: float):
+def make_tiled_cc_step(model, mesh, kt: int, dt: float, *,
+                       halo_grouping="bundled"):
     """Build ``step(state) -> state`` running one ``dt`` of the cube
     hydrostatic dycore sub-face-tiled on a ``(6, kt, kt)`` mesh.
+
+    ``halo_grouping="bundled"`` (default) groups independently ready scalar
+    halos and geographic vector components, bit-identically to ``"current"``.
 
     Parameters
     ----------
@@ -180,6 +184,7 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
     tiled = make_tiled_fv3_hydrostatic_step_stage_2d(
         mesh, cdgrid, model.sigma_coord, n, kt, nlev,
         p_floor=float(cfg.p_floor), dt=float(dt),
+        halo_grouping=halo_grouping,
         # The (default-ON) non-implicit Rayleigh sponge: the serial
         # tendencies apply it in-tendency (step 13); the tiled bodies take
         # it from these knobs (measured 6.2e-6 u drift without, job 8689100).
@@ -248,8 +253,12 @@ _TILED_TRACERS = ("q_v", "q_c", "q_r")
 
 
 def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
-                       column_physics_fn=None, surface_fn=None):
+                       column_physics_fn=None, surface_fn=None, *,
+                       halo_grouping="bundled"):
     """Closed-loop tiled stepping: state stays TILE-SHARDED across steps.
+
+    ``halo_grouping="bundled"`` (default) groups independently ready scalar
+    halos and geographic vector components, bit-identically to ``"current"``.
 
     The single-shot ``make_tiled_cc_step`` re-replicates per call (its exit
     dedup is a full-cube gather) — valid for one-step parity/bench probes,
@@ -328,6 +337,7 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
     tiled = make_tiled_fv3_hydrostatic_step_blocked_2d(
         mesh, cdgrid, model.sigma_coord, n, kt, nlev,
         p_floor=float(cfg.p_floor), dt=float(dt),
+        halo_grouping=halo_grouping,
         sponge_sigma=float(getattr(cfg, "sponge_sigma", 0.0)),
         sponge_tau_sec=float(getattr(cfg, "sponge_tau_sec", 0.0)),
         column_physics_fn=column_physics_fn,

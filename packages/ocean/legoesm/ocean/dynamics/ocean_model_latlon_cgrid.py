@@ -109,7 +109,7 @@ from legoesm.ocean.freshwater import (
     net_freshwater_flux,
     virtual_salt_flux,
 )
-from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.source_rounding import nemo_source_round, nemo_source_store
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
@@ -5235,8 +5235,8 @@ class LatLonCGridOceanModel:
                     'barotropic_solver="explicit_substep" or leave the flag '
                     "False.")
         # ORCA2 G5's ln_drgice_imp path: the four consumers form one atomic
-        # composition (no cavity).  With bottom drag too (G7) only NEMO's
-        # linear law is transcribed: the substeps take the one combined
+        # composition (no cavity).  With bottom drag too (G7) NEMO's linear or
+        # non-linear law (ORCA1) is transcribed: the substeps take the one combined
         # coefficient (dynspg_ts.f90:1431-1432), the residual and dyn_zdf run
         # bottom then top (:1462/:1487; dynzdf.f90:166/:175, :306/:312).
         # nn_ice=0 decks: zdfdrg.f90:380 forces ln_drgice_imp=F, so only G7's
@@ -5269,15 +5269,21 @@ class LatLonCGridOceanModel:
                     "frozen top-drag consumer")
             _bot_matrix = getattr(config, "zdf_drag_in_matrix", False)
             _bot_substep = getattr(config, "barotropic_drag_substep", False)
+            # Every consumer reads the bottom law only through the cell rate
+            # of nemo_bottom_drag_rate_faces (rCdU_bot), so NEMO's non-linear
+            # law (ORCA1: ln_non_lin + ln_drgimp + ln_drgice_imp) composes the
+            # same way as the linear one; the log-layer law is not oracle-tested
+            # with the top drag and stays refused.
             if (_bot_matrix or _bot_substep) and not (
                     _bot_matrix and _bot_substep
-                    and config.bottom_drag.bottom_drag_scheme == "nemo_linear"):
+                    and config.bottom_drag.bottom_drag_scheme in (
+                        "nemo_linear", "nemo_quadratic")):
                 raise ValueError(
                     "implicit_ice_ocean_top_drag transcribes no bottom drag "
-                    "(G5) or the full linear bundle (G7: bottom_drag_scheme="
-                    "'nemo_linear' with zdf_drag_in_matrix and "
-                    "barotropic_drag_substep); bottom and top face pairs must "
-                    "not be independently reassociated")
+                    "(G5) or the full bundle (G7: bottom_drag_scheme="
+                    "'nemo_linear' or 'nemo_quadratic' with zdf_drag_in_matrix "
+                    "and barotropic_drag_substep); bottom and top face pairs "
+                    "must not be independently reassociated")
             if getattr(config.barotropic, "barotropic_wide_halo", False):
                 raise ValueError(
                     "implicit_ice_ocean_top_drag is not wired into the "
@@ -10993,12 +10999,21 @@ class LatLonCGridOceanModel:
             # rebuilds pFw before stage-3 FCT.  nn_conv=0 on ORCA2, so rn2 is
             # not an operand; provide the correctly shaped inert value.
             from legoesm.ocean.eos import make_eos_fn as _make_mle_eos
-            _mle_rhop = _make_mle_eos(
+            _mle_eos = _make_mle_eos(
                 eos=_cfg_b.eos,
                 eos_linear=_cfg_b.eos_linear,
                 eos_nemo_seos=_cfg_b.eos_nemo_seos,
                 rho0=_cfg_b.constants.rho_0,
-            )(_T_stage2, _S_stage2, jnp.zeros_like(_T_stage2))
+            )
+            # Stored once: otherwise XLA CPU re-evaluates this density inside
+            # each of the MLE depth/buoyancy reductions (5 grid copies, M10).
+            # Only the source-rounded NEMO polynomials keep their bits stored.
+            def _mle_rhop_fn(t, s):
+                return _mle_eos(t, s, jnp.zeros_like(t))
+            _mle_rhop = (
+                nemo_source_store(_mle_rhop_fn, _T_stage2, _S_stage2)
+                if _cfg_b.eos in ("nemo_eos80", "nemo_teos10")
+                else _mle_rhop_fn(_T_stage2, _S_stage2))
             _mle_n2 = jnp.zeros(
                 (*_T_stage2.shape[:-1], _T_stage2.shape[-1] - 1),
                 dtype=_T_stage2.dtype,

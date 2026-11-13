@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import hashlib
 import json
 from pathlib import Path
@@ -13,12 +15,15 @@ from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.core.smooth import positive_part_c1
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.ice.transport import (
+    SI3_PRA_DEFAULT_LIMIT_SHARPNESS_SCALE,
+    SI3_PRA_OPEN_WATER_FLOOR_SHARPNESS,
     SI3_PRATHER_MOMENT_NAMES,
     SI3PratherMoments,
     advect_si3_prather_2d,
     si3_hbig_pra,
     si3_hsnow_pra,
     si3_icemax2d_pra,
+    si3_prather_open_water,
     si3_prather_pack_intensives,
     si3_prather_unpack_intensives,
     si3_var_zapneg,
@@ -426,8 +431,16 @@ def apply_si3_prather_source_corrections(
     negative_area_ramp_width: float = _SI3_NEGATIVE_AREA_RAMP_WIDTH,
     dt_s: float | None = None,
     return_residual_fluxes: bool = False,
+    cap_entry_intensive: jnp.ndarray | None = None,
+    refresh_halo: bool = True,
 ) -> jnp.ndarray | tuple[jnp.ndarray, SI3PratherResidualFluxes]:
     """Apply SI3's active Hbig/Hsnow/zapneg Prather corrections.
+
+    ``cap_entry_intensive`` (intensive, same layout) is the state at the start
+    of the current advection cycle, the source of the specific enthalpy/salt
+    maxima under subcycling; ``None`` (default) = the step entry, which is the
+    same state when ``icycle == 1``.  ``refresh_halo=False`` skips the final
+    bi-periodic halo copy so a per-cycle caller can apply its own lbc.
 
     This shared implementation is the single-category, option-4-salinity
     composition in ``icedyn_adv_pra.F90:156-180,405-421,946-1142`` and
@@ -490,6 +503,18 @@ def apply_si3_prather_source_corrections(
     def ratio(numerator: jnp.ndarray, denominator: jnp.ndarray, valid: jnp.ndarray) -> jnp.ndarray:
         safe_denominator = jnp.where(valid, denominator, 1.0)
         return jnp.where(valid, numerator / safe_denominator, 0.0)
+
+    def cap_specific(name: str, volume_name: str, entry_volume: jnp.ndarray) -> jnp.ndarray:
+        # Specific (per-volume) enthalpy/salt maxima.  NEMO forms them from the
+        # CURRENT pe/pv at the start of every cycle jt (icedyn_adv_pra.F90:168-195,
+        # inside DO jt = 1, icycle at :142), whereas the thickness maxima use the
+        # INTENT(in) step-entry ph_i/ph_s/ph_ip (:72-74,158-165).
+        if cap_entry_intensive is None:
+            return ratio(intensive(entry_contents, name), entry_volume, entry_volume >= _ICE_ADV2D_SMALL)
+        if cap_entry_intensive.shape != entry_contents.shape:
+            raise ValueError("Prather cycle-entry/entry shapes differ")
+        volume = cap_entry_intensive[..., index(volume_name)]
+        return ratio(cap_entry_intensive[..., index(name)], volume, volume >= _ICE_ADV2D_SMALL)
 
     entry_v_i = entry_intensive("v_i")
     entry_v_s = entry_intensive("v_s")
@@ -578,9 +603,7 @@ def apply_si3_prather_source_corrections(
     # Option-4 layer salt and all layer enthalpy maxima (:1020-1069).
     low_concentration = a_i < _ICE_ADV2D_HBIG_CONCENTRATION
     for name in salt_layers:
-        entry_specific = ratio(
-            intensive(entry_contents, name), entry_v_i, entry_v_i >= _ICE_ADV2D_SMALL
-        )
+        entry_specific = cap_specific(name, "v_i", entry_v_i)
         value = intensive(contents, name)
         specific = ratio(value, v_i, v_i > 0.0)
         cap = _max9(entry_specific)
@@ -595,9 +618,7 @@ def apply_si3_prather_source_corrections(
             0.0,
         )
     for name in ice_layers:
-        entry_specific = ratio(
-            intensive(entry_contents, name), entry_v_i, entry_v_i >= _ICE_ADV2D_SMALL
-        )
+        entry_specific = cap_specific(name, "v_i", entry_v_i)
         value = intensive(contents, name)
         specific = ratio(value, v_i, v_i > 0.0)
         cap = _max9(entry_specific)
@@ -610,9 +631,7 @@ def apply_si3_prather_source_corrections(
             correct, value * (1.0 - ratio(cap, specific, correct)) * z1_dt, 0.0
         )
     for name in snow_layers:
-        entry_specific = ratio(
-            intensive(entry_contents, name), entry_v_s, entry_v_s >= _ICE_ADV2D_SMALL
-        )
+        entry_specific = cap_specific(name, "v_s", entry_v_s)
         value = intensive(contents, name)
         specific = ratio(value, v_s, v_s > 0.0)
         cap = _max9(entry_specific)
@@ -730,7 +749,7 @@ def apply_si3_prather_source_corrections(
     # NEMO corrects physical cells, then lbc_lnk refreshes the bi-periodic
     # halos (`icedyn_adv_pra.F90:405-479`).  Never feed independently corrected
     # halo values into the next split step.
-    corrected = _periodic_halo(contents, halo_width)
+    corrected = _periodic_halo(contents, halo_width) if refresh_halo else contents
     if not return_residual_fluxes:
         return corrected
     inner = jnp.zeros(wfx_res.shape, dtype=bool)
@@ -741,6 +760,154 @@ def apply_si3_prather_source_corrections(
         sfx_res=jnp.where(inner, sfx_res, 0.0),
     )
 
+
+
+class SI3PratherCycledStep(NamedTuple):
+    """Outputs of :func:`advect_si3_prather_with_cycle_corrections`."""
+
+    intensives: jnp.ndarray  # corrected intensive state (x, y, tracer)
+    moments: SI3PratherMoments
+    subcycles: int
+    open_water: jnp.ndarray  # ato_i
+    residual_fluxes: SI3PratherResidualFluxes  # summed over the cycles
+
+
+def advect_si3_prather_with_cycle_corrections(
+    entry_intensives: jnp.ndarray,
+    moments: SI3PratherMoments,
+    open_water: jnp.ndarray,
+    u_ice: jnp.ndarray,
+    v_ice: jnp.ndarray,
+    cell_area: jnp.ndarray,
+    wet: jnp.ndarray,
+    dt_s: float,
+    *,
+    dx: jnp.ndarray | float,
+    dy: jnp.ndarray | float,
+    ice_step_index: int,
+    nn_fsbc: int,
+    halo_width: int,
+    subcycles: int,
+    north_fold: str,
+    tracer_names: tuple[str, ...],
+    nlay_i: int,
+    nlay_s: int,
+    ponds_active: bool,
+    limit_sharpness_scale: float = SI3_PRA_DEFAULT_LIMIT_SHARPNESS_SCALE,
+    negative_area_ramp_width: float = _SI3_NEGATIVE_AREA_RAMP_WIDTH,
+    open_water_floor_sharpness: float = SI3_PRA_OPEN_WATER_FLOOR_SHARPNESS,
+) -> SI3PratherCycledStep:
+    """One SI3 Prather ice step with NEMO 5.0.1's corrections inside every cycle.
+
+    NEMO 5.0.1 ``ice_dyn_adv_pra`` (called once per ice step from
+    ``icedyn_adv.F90:90``) splits the step into ``icycle`` cycles
+    (``icedyn_adv_pra.F90:124-132``, ``zdt = rDt_ice / icycle``) and, inside
+    ``DO jt = 1, icycle`` (:142), runs in this order: record ``zati1`` (:145),
+    advect (:253-351), recover intensives (:355-381), ``Hbig_pra`` (:407) and
+    ``Hsnow_pra`` (:411), ``ice_var_zapneg`` (:421), open water with ``zdt``
+    (:424-429), then ``lbc_lnk`` (:435-525).  The thickness maxima come from the
+    step-entry ``ph_i/ph_s/ph_ip`` (``INTENT(in)``, :72-74,158-165); the
+    enthalpy/salt maxima from the cycle-start ``pe/pv`` (:168-195).  Each cycle
+    corrects NEMO's active ring ``ihls`` (``DO_2D(ihls, ...)``, :147-149) and
+    books its residuals with ``pdt = rDt_ice`` (:407,411,421).
+
+    Composition only: the advection loop, its fold cadence and ice-thickness
+    Hbig are :func:`advect_si3_prather_2d`; the other corrections and ledgers are
+    :func:`apply_si3_prather_source_corrections`; open water is
+    :func:`si3_prather_open_water`.  ``entry_intensives`` is the carried
+    intensive state (layout ``tracer_names``).
+    """
+
+    h = halo_width
+    nx, ny = u_ice.shape
+    ii = jnp.arange(nx)[:, None]
+    jj = jnp.arange(ny)[None, :]
+
+    def ring(width: int) -> jnp.ndarray:
+        return (ii >= h - width) & (ii < nx - h + width) & (jj >= h - width) & (jj < ny - h + width)
+
+    inner = ring(0)
+    a_index = tracer_names.index("a_i")
+    zero = jnp.zeros_like(u_ice)
+
+    def hook(cycle_entry, transported, carry, *, subcycle_index, subcycle_dt, ihls):
+        state, ato, wfx, hfx, sfx = carry
+        # Cycle-start intensives: the previous cycle's corrected intensives wherever
+        # the halo refresh left the packed value untouched (NEMO keeps pv/pe), else
+        # the refreshed (folded) value recovered from the packed array.
+        unpacked_entry = si3_prather_unpack_intensives(cycle_entry, cell_area, wet)
+        same = cycle_entry == si3_prather_pack_intensives(state, cell_area)
+        cycle_start = jnp.where(same, state, unpacked_entry)
+        raw = si3_prather_unpack_intensives(transported, cell_area, wet)
+        corrected, res = apply_si3_prather_source_corrections(
+            entry_intensives,
+            raw,
+            tracer_names=tracer_names,
+            nlay_i=nlay_i,
+            nlay_s=nlay_s,
+            cell_area_m2=1.0,
+            halo_width=h,
+            ponds_active=ponds_active,
+            entry_intensive_contents=entry_intensives,
+            contents_are_intensive=True,
+            negative_area_ramp_width=negative_area_ramp_width,
+            dt_s=dt_s,
+            return_residual_fluxes=True,
+            cap_entry_intensive=cycle_start,
+            refresh_halo=False,
+        )
+        corrected = jnp.where(ring(ihls)[..., None], corrected, raw)
+        # Open water on the inner domain only (DO_2D(0,0,0,0), :424-429).
+        ato = jnp.where(
+            inner,
+            si3_prather_open_water(
+                ato,
+                cycle_start[..., a_index],
+                corrected[..., a_index],
+                u_ice,
+                v_ice,
+                dy_u=dy,
+                dx_v=dx,
+                cell_area=cell_area,
+                dt=subcycle_dt,
+                floor_sharpness=open_water_floor_sharpness,
+            ),
+            ato,
+        )
+        carry = (corrected, ato, wfx + res.wfx_res, hfx + res.hfx_res, sfx + res.sfx_res)
+        return si3_prather_pack_intensives(corrected, cell_area), carry
+
+    contents, moments_out, n, carry = advect_si3_prather_2d(
+        si3_prather_pack_intensives(entry_intensives, cell_area),
+        moments,
+        u_ice,
+        v_ice,
+        cell_area,
+        wet,
+        dt_s,
+        dx=dx,
+        dy=dy,
+        ice_step_index=ice_step_index,
+        nn_fsbc=nn_fsbc,
+        halo_width=h,
+        ice_volume_index=tracer_names.index("v_i"),
+        concentration_index=a_index,
+        subcycles=subcycles,
+        north_fold=north_fold,
+        limit_sharpness_scale=limit_sharpness_scale,
+        cycle_hook=hook,
+        cycle_carry=(entry_intensives, open_water, zero, zero, zero),
+    )
+    state, ato, wfx, hfx, sfx = carry
+    same = contents == si3_prather_pack_intensives(state, cell_area)
+    final = jnp.where(same, state, si3_prather_unpack_intensives(contents, cell_area, wet))
+    return SI3PratherCycledStep(
+        intensives=final,
+        moments=moments_out,
+        subcycles=n,
+        open_water=ato,
+        residual_fluxes=SI3PratherResidualFluxes(wfx_res=wfx, hfx_res=hfx, sfx_res=sfx),
+    )
 
 
 def apply_si3_prather_source_corrections_lane(
@@ -1006,6 +1173,7 @@ def apply_ice_adv2d_source_corrections(
             ponds_active=card.ponds,
             entry_intensive_contents=entry_intensives,
             contents_are_intensive=True,
+            negative_area_ramp_width=0.0,  # NEMO hard WHERE(pa_i<0) (icevar.F90:836)
         )
         return si3_prather_pack_intensives(corrected, cell_area)
 
@@ -1020,6 +1188,7 @@ def apply_ice_adv2d_source_corrections(
         ponds_active=card.ponds,
         entry_intensive_contents=entry_intensive_contents,
         contents_are_intensive=contents_are_intensive,
+        negative_area_ramp_width=0.0,  # NEMO hard WHERE(pa_i<0) (icevar.F90:836)
     )
 
 
@@ -1050,6 +1219,7 @@ def step_ice_adv2d_card(
         ice_volume_index=ICE_ADV2D_TRACERS.index("v_i"),
         concentration_index=ICE_ADV2D_TRACERS.index("a_i"),
         subcycles=card.subcycles,
+        limit_sharpness_scale=math.inf,
     )
     if _use_legacy_extensive_correction_order:
         contents = apply_ice_adv2d_source_corrections(

@@ -1,0 +1,157 @@
+gpus=0 arm=binomial res=3 n_steps=32 K=2 rad_fp64=0 tridiag=default host=l50039.lvt.dkrz.de date=2026-11-05T11:07:28+01:00 ERA5_IC=/work/bb1596/b309178/diffESM/legoesm_ap_main/data/era5_ic_1979-01-01.zarr
+stage=step res=3 n_steps=32 x64=True backend=gpu schedule=binomial checkpoints=2 storage=recompute sha=f5bc44b5df6b
+TF32 matmul precision enabled (compute capability >= 8.0)
+GPU vendor: nvidia (1 device(s))
+JAX persistent JIT cache: dir=/home/b/b384341/.cache/legoesm/jit_cache, min_compile_secs=1.0
+Configured XLA for gpu backend
+legoESM: single-device mode (GPU)
+Runtime bootstrapped: backend=gpu, x64=True, precision=fp64, devices=1, distributed=False
+  Runtime: backend=gpu, precision=fp64, x64=True, distributed=False
+  Sea-ice albedo scheme: maykut_untersteiner (ice skin ON: explicit)
+  Grid: mpas 3, 32 levels (cam_l32)
+  Land-sea mask: /work/bb1596/b309178/diffESM/legoesm_ap/data/clm/sftlf_clm_1.9x2.5.nc (land fraction mean=0.315)
+  Subgrid orography: /work/bb1596/b309178/diffESM/legoesm_ap/data/orography/sso_stdh_2deg_from1deg_seamfix.nc (stddev max=786 m, mean=38.8 m)
+Atmosphere: model_type=hydrostatic, discretization=mpas, grid=mpas -> mpas_primitive_equations
+  CFL check: dx_min=758 km, c_max=390 m/s, CFL(dt=112s)=0.08, dt_max=1099s
+  CFL OK: dt=112s is within stability limit
+  NOTE (mpas): advective/GW CFL is necessary but not sufficient — hydrostatic TRiSK PE can still blow up inside this limit (cold-start radiative transient, hyperdiffusion). Keep a margin on a cold start.
+  Dycore: hydrostatic/mpas on mpas, dt=112.5s
+  State init: T=300.0K, q_v=6.70 g/kg, CWV=84.6 kg/m2
+  MPAS moisture ON: dycore advects ['N_c', 'N_i', 'N_r', 'N_s', 'q_c', 'q_g', 'q_i', 'q_r', 'q_s', 'q_v'] (q_v mean 6.70 g/kg)
+  IC: loading ERA5 from /work/bb1596/b309178/diffESM/legoesm_ap_main/data/era5_ic_1979-01-01.zarr (year=1979)
+/home/b/b384341/projects/legoESM/packages/ml/legoesm/training/era5_to_state.py:112: RuntimeWarning: divide by zero encountered in divide
+  p_s_per_level = _np.where(dB > 0, (dp_floor - dA * p_ref) / dB, 0.0)
+  ERA5->MPAS IC: T=[186,306]K u_n=[-101,97]m/s p_s=[73967,103908]Pa phis=[0,23016]m2/s2
+  State init (ERA5 1979): T_mean=242.8K, q_v=2.20 g/kg, CWV=22.7 kg/m2
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc lacks ['CCl4', 'CF4', 'CFC_22']: RRTMGP keeps its FIXED present-day global means for those species (not transient).
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CO2 has unrecognised/empty units '1.e-6'; assuming scale 1e-06 to mole fraction (max=414.39). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CH4 has unrecognised/empty units '1.e-9'; assuming scale 1e-09 to mole fraction (max=1910.97). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable N2O has unrecognised/empty units '1.e-9'; assuming scale 1e-09 to mole fraction (max=332.068). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CFC_11 has unrecognised/empty units '1.e-12'; assuming scale 1e-12 to mole fraction (max=271.169). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CFC_12 has unrecognised/empty units '1.e-12'; assuming scale 1e-12 to mole fraction (max=543.656). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+  GHG external: CO2=336.6ppmv, CH4=1566ppbv, N2O=300.4ppbv, CFC11=158pptv, CFC12=286pptv
+  Physics: radiation=rrtmg, convection=zhang_mcfarlane
+  Land albedo: SURFDATA (/work/bb1596/b309178/diffESM/legoesm_ap/data/legoesm_surfdata_c260716.nc); 324 land cells, on-land albedo range [0.090, 0.600]
+  Land tile: ACTIVE (slab land, C_land=2.0e+05 J/m2/K, f_land mean=0.315, interface_flux=legacy_dual, tiled_surface=False)
+  land snow-albedo age e-folding: 150 days (overrides the calibration)
+  land soil freeze/thaw: ON
+  land canopy snow masking (trees hide snow): off
+  land snowpack: bulk (snow emissivity 0.970)
+  land soil thermal sub-steps per land step: 6
+  land soil ice impedance exponent: 6 (active only with freeze/thaw ON)
+  land canopy smoothing widths: RH cap 0.01, zeta cap 0.05; MOST iterations 10
+  land snow thermal node: off
+  land soil freeze/thaw ON with the calibrated land tables, which were fitted with it OFF
+  land canopy b0 soil-moisture stress: ON
+  Land tile: CanopyConfig on per-PFT CANOPY parameters from /work/bb1596/b309178/diffESM/legoesm_ap/data/legoesm_surfdata_c260716.nc (canopy height 0.10-36.72 m, roughness ratio 0.010-0.120). NOTE emissivity is a single constant in this builder and the canopy computes its own radiation from soil colour + leaf optics, so the tuned per-PFT emissivity and vegetation albedo do NOT apply to it — those are re-fit items, not wiring.
+  Land stomata: FARQUHAR (prescribed carbon state, LAI = C_fol/LCMA from C_fol=200 gC/m2) — the baked Vc_max25/g1/LCMA are ACTIVE
+  Land tile: IC soil water converted to this run's hydraulics (clapp_hornberger -> van_genuchten, regridded): dry layers lifted 45 in 34 columns (max 0.721 mm moved), wet layers 3 in 3 columns, 0 columns overflow to surface water (max 0 mm); psi_soil re-derived.
+  Land tile: MULTILAYER IC from spin-up restart /scratch/b/b384341/mpas_segment_schedule/data/lmip_soil_ic/soil_ic_mpas3_era5T_19790101.npz (10 soil layers, 642 columns; t_end=315360000 s, cold-start seed SKIPPED)
+CMIP6 CV: institution_id, source_id (institution_id='CU', source_id='legoESM-1-0') are legoESM placeholders and are NOT in the CMIP6 controlled vocabulary. Output is CF-valid but WILL be rejected at ESGF publication until both are registered via a PR to WCRP-CMIP/CMIP6_CVs. Pass registered values to CFWriter(institution_id=..., model_id=...) once that lands.
+  RRTMGP compute_fp32: optics tables + RTE solve in float32 (dycore stays fp64)
+  MPAS land boundary: lapse=6.50 K/km, beta=0.60 (f_land mean=0.315)
+  CAM macmic sub-cycle: turbulence + microphysics run 3 x at 600.0 s inside each physics step, after the convective increment
+  Physics cadence: full physics every 16 steps (physics timestep 1800.0 s = 30.0 min); the whole physics increment (u, v, T, p_s, tracers) is applied on the physics step (CAM-FV physics_update), zero in between; cached precip / surface / TOA rates re-published every step
+  Radiation sub-cycle: RRTMGP solved every 32 steps (cadence 1.00 h); held heating reused in between
+  MPAS q_v del4 smoothing ON: nu4=3.64e+14 m^4/s (nu4*dt*g_max^2=0.0000 of 0.5 stability bound)
+  MPAS ice skin ON (Semtner zero-layer, h=2.00 m): seeded at T_freeze_ocean; conductive relaxation C/g ~ 3 weeks (fresh-run spin-up ~2 months)
+  AMIP SST surface forcing (time-varying): day 0.0 T_sfc=[256.1,302.9] mean=288.6 K
+  Surface albedo: ocean=0.060 ice=0.800 land=[0.090,0.600] mean=0.196 (f_land mean=0.315)
+  Non-land surface fluxes evaluated on: OCEAN/ICE surface (ocean_flux_on_ocean_surface=True)
+  Land surface stress to the boundary layer: LAND MODEL (land_stress_from_land=True)
+  land_beta_soil: traced per-cell beta_soil REPLACES the static land_beta=0.60 over land
+  Interactive multilayer land (MPAS): 642 columns, f_land mean=0.315 — skin T -> forcing['T_sfc'] blend, one-step-lag explicit coupling; packed=True (324 land columns solved), cadence every 16 step(s) (DT_land=1800.0 s)
+Starting MPAS: 32 steps, 0.042317708333333336 days (from day 0.0)
+Calling optical depth graph.
+Calling cloud optical properties graph.
+Calling Planck fraction graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling optical depth graph.
+Calling Rayleigh scattering graph.
+Calling cloud optical properties graph.
+built+exported in 180.5 s; ncol=(642, 32), physics every 16 steps, radiation every 32, land_k=16
+Calling optical depth graph.
+Calling cloud optical properties graph.
+Calling Planck fraction graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling optical depth graph.
+Calling Rayleigh scattering graph.
+Calling cloud optical properties graph.
+E1105 11:21:27.491834  508026 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_f for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E1105 11:26:28.034823  507845 slow_operation_alarm.cc:140] The operation took 7m0.54306538s
+
+********************************
+[Compiling module jit_f for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+GRADCHECK {"name": "segment_1_steps", "finite": true, "grad_absmax": 23291038121506.875, "ad": -6472115.646154824, "fd": -6474347.68166393, "ratio": 1.0003448695343435, "t_grad_s": 971.2511067390442}
+PEAK_GIB segment_1_steps 10.88
+NONFINITE ['T'] shape=(642, 32) count=20544/20544 ncols=642 cols=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+NONFINITE ['q_v'] shape=(642, 32) count=20544/20544 ncols=642 cols=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+GRADCHECK {"name": "segment_32_steps", "finite": false, "grad_absmax": NaN, "ad": NaN, "fd": -7992141.435093246, "ratio": NaN, "t_grad_s": 3374.186669588089}
+PEAK_GIB segment_32_steps 14.88
+Calling optical depth graph.
+Calling cloud optical properties graph.
+Calling Planck fraction graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling optical depth graph.
+Calling Rayleigh scattering graph.
+Calling cloud optical properties graph.
+E1105 12:38:35.330583  508026 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E1105 12:39:18.781869  507845 slow_operation_alarm.cc:140] The operation took 2m43.451362534s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+SCHED_VS_UNROLLED T max|diff| = 4.434e-05 (scale 3.051e+02)
+SCHED_VS_UNROLLED u max|diff| = 3.807e-06 (scale 8.904e+01)
+SCHED_VS_UNROLLED p_s max|diff| = 1.146e-05 (scale 1.030e+05)
+SCHED_VS_UNROLLED q_v max|diff| = 4.559e-09
+PROBE_DONE
+exit=0 arm=binomial
+
+********************************************************************************
+*                                                                              *
+*  This is the automated job summary provided by DKRZ.                         *
+*  If you encounter problems, need assistance or have any suggestion, please   *
+*  write an email to                                                           *
+*                                                                              *
+*  --  support@dkrz.de --                                                      *
+*                                                                              *
+*                       We hope you enjoyed the DKRZ supercomputer LEVANTE ... *
+*
+* JobID            : 28747193
+* JobName          : mpas_seg_disc_a                                   
+* Account          : bb1596_gpu
+* User             : b384341 (203805), bb1596 (203649)                 
+* Partition        : gpu
+* QOS              : normal
+* Nodelist         : l50039 (1)                                                
+* Submit date      : 2026-11-05T10:59:45
+* Start time       : 2026-11-05T11:07:20
+* End time         : 2026-11-05T12:39:39
+* Elapsed time     : 01:32:19 (Timelimit=08:00:00)                     
+* Command          : /home/b/b384341/projects/legoESM/scripts/cluster/levante/
+*                    mpas_segment_schedule_receipt.sbatch
+* WorkDir          : /home/b/b384341/projects/legoESM
+*
+* StepID | JobName      NodeHours    MaxRSS [Byte] (@task)
+* ------------------------------------------------------------------------------
+* batch  | batch             0.19
+* extern | extern            0.19                       ()
+* ------------------------------------------------------------------------------
+

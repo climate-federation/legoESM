@@ -47,7 +47,7 @@ thickness ratio import and evaluation at
 `ocean_model_latlon_cgrid.py:7315-7325`. It replaces a ratio formed after SSH
 interpolation with `nemo_r3t_rk3_stage1_stretch`. Reversing the complete
 introducing commit `a0b2f7a5da06f416e530361355df8603b7826a3d`, including its
-helper in `eos.py:1004-1035`, restores every saved bit through day 17. Reversing
+helper in `eos.py:1021-1052`, restores every saved bit through day 17. Reversing
 the nearby source-order commit `938f41892f7a0f917e09f55bd525782ec6eb22ae`
 does not move the first difference by a bit, so that frozen hypothesis is
 **REFUTED**.

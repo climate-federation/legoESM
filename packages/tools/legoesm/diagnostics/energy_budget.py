@@ -670,6 +670,15 @@ class MoistureBudgetTracker:
         self._prev_water: float | None = None
         self._prev_time: float | None = None
 
+    def drop_baseline(self) -> None:
+        """Forget the last water sample, so the next update reports NaN.
+
+        Call when a window was not recorded: the next closure's dW/dt would
+        otherwise span the gap while its E and P cover only the latest window.
+        """
+        self._prev_water = None
+        self._prev_time = None
+
     def update(
         self,
         q_v: jax.Array,

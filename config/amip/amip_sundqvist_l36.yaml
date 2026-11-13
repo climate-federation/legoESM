@@ -165,6 +165,9 @@ convection: bechtold        # mass-flux (IFS lineage), water-conserving by
 # before #2249: the convection config now resolves field for field to the one
 # built at fec6aacafe^1 (pinned by test_run_amip_cli.py).
 bechtold_use_ifs_ascent: false
+# Snow refill width (RULE 5; value = the scheme default; 0 = the oracle's hard
+# switch): an overdrawn sub-cloud snow flux is topped up from the rain smoothly.
+bechtold_snow_refill_width_kg_m2_s: 1.0e-8
 # Convective momentum transport PINNED OFF (review 2026-10-10 F22, majority
 # vote Claude+GLM): the unset default is now ON on every lane, but it resolved
 # OFF on MPAS when this deck's results were produced; this deck exists so

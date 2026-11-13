@@ -32,9 +32,14 @@ _EXPECTED_DIFF = {
     "cloud_cam6_rhmaxis",
     "zm_c0_lnd", "zm_c0_ocn", "zm_ke", "zm_dmpdz", "zm_tau", "zm_capelmt",
     "zm_detrain_phase_width_K", "zm_detrain_number_width_kgkg_s",
-    # ecRad 49r1 radiation (votes L1, L18, L20): the scheme, its aerosols-off
-    # forcing row, and the RRTMGP-only overhead layer that errors under it
+    "zm_trigger_width_J_kg",
+    # ecRad 49r1 radiation (votes L1, L18, L20, C2/C3): the scheme, the lane
+    # aerosol row it never reads, the RRTMGP-only overhead layer that errors
+    # under it, and ecRad's own CAMS aerosol climatology
     "radiation", "aerosol_forcing", "rrtmgp_overhead_layer",
+    "ecrad_ifs_aerosol_file",
+    # WMS non-orographic drag + METHOX (wms_ozone votes G1, M1-M2)
+    "gravity_wave_drag", "ifs_methox", "ifs_ozone_chem",
 }
 
 
@@ -75,9 +80,10 @@ def test_deck_resolves_to_the_ifs_lane_and_validates():
     assert cfg.cloud_scheme == "resolved"
     assert cfg.dycore.discretization == "mpas"
     assert cfg.radiation == "ecrad_ifs" and cfg.aerosol_forcing == "off"
+    assert cfg.ecrad_ifs_aerosol_file.endswith("aerosol_cams_climatology_43R3a.nc")
     # the launcher supplies the land/IC files both decks need; with them
     # absent, the IFS deck raises no error production does not raise
-    # (aerosols off: it may raise fewer)
+    # (lane aerosols off: it may raise fewer)
     assert _strict_errors(cfg) <= _strict_errors(_cfg(_PROD))
 
 
@@ -105,3 +111,11 @@ def test_run_amip_refuses_resolved_clouds_without_cloudsc(micro):
                       "--microphysics", micro])
     with pytest.raises(SystemExit):
         run_amip._postprocess_args(a, p, [])
+
+
+def test_deck_selects_wms_drag_and_methox():
+    """Votes G1a/M2a: composite CAM6 orographic + 49r1 WMS, METHOX on."""
+    cfg = _cfg(_IFS)
+    assert cfg.gravity_wave_drag == "mcfarlane+ifs_wms"
+    assert cfg.ifs_methox is True
+    assert cfg.ifs_ozone_chem is True

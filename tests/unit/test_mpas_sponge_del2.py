@@ -71,7 +71,7 @@ def test_tendency_applies_the_profile_only_to_the_top_layers(nu_del4):
     del4 term."""
     import importlib.util
     import pathlib
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     from legoesm.grids.vertical import create_sigma_coordinate
     helpers_path = pathlib.Path(__file__).with_name("test_mpas_atmosphere.py")
     spec = importlib.util.spec_from_file_location("_mpas_atm_helpers", helpers_path)
@@ -87,7 +87,7 @@ def test_tendency_applies_the_profile_only_to_the_top_layers(nu_del4):
     off = MPASPrimitiveEquationConfig(nu_del2=1.0e5, nu_del4=nu_del4)
 
     def du(cfg):
-        return np.asarray(mpas_hydrostatic_tendencies(state, mesh, sig, cfg).du_dt.data)
+        return np.asarray(mpas_pe_tendencies(state, mesh, sig, cfg, vertical_form="legacy").du_dt.data)
 
     du_on, du_off = du(on), du(off)
     increment = du_on - du_off

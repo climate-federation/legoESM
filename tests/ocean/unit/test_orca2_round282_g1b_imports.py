@@ -87,7 +87,9 @@ def test_npcrv_selector_is_bound_at_the_executing_call_site():
     import inspect
     from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
 
-    source = inspect.getsource(pe.latlon_cgrid_ocean_baroclinic_tendencies)
+    # main 91de5d578 moved the NEMO-path body (the executing call site) out of
+    # the public wrapper into _latlon_tendencies_outside_core.
+    source = inspect.getsource(pe._latlon_tendencies_outside_core)
     assert "een_nemo_zeta=config.een_nemo_relative_vorticity" in source
     assert "een_nemo_top_f_u_halo=config.een_nemo_top_f_u_halo" in source
 

@@ -19,6 +19,8 @@ from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import (
     step_ice_adv2d_card,
 )
 
+from tests._nemo_si3_oracle import needs_oracle
+
 GATE_PATH = Path(__file__).parents[3] / (
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_phase2_adv2d_gate.py"
 )
@@ -49,6 +51,7 @@ def _normalized_error(oracle: np.ndarray, candidate: np.ndarray) -> float:
     return float(np.max(np.abs(oracle - candidate))) / max(1.0, float(np.max(np.abs(oracle))))
 
 
+@needs_oracle(gate.ROOT)
 def test_card_is_fp64_and_resolves_the_pinned_oracle_selectors():
     card = _build_card()
     assert card.jpl == 1
@@ -61,6 +64,7 @@ def test_card_is_fp64_and_resolves_the_pinned_oracle_selectors():
     assert len(ICE_ADV2D_TRACERS) == 16
 
 
+@needs_oracle(gate.ROOT)
 def test_complete_card_step_jits_and_has_a_finite_nonzero_gradient():
     card = _build_card()
     state = card.initial_state
@@ -74,6 +78,7 @@ def test_complete_card_step_jits_and_has_a_finite_nonzero_gradient():
     assert float(jnp.max(jnp.abs(gradient))) > 0.0
 
 
+@needs_oracle(gate.ROOT)
 def test_kt1_and_first_completed_step_clear_the_pointwise_bar_for_all_tracers():
     card = _build_card()
     _, first = gate.oracle_gate.read_frame(gate.ROOT / "oracle_ice_step_entry_kt00000001.bin")
@@ -102,6 +107,7 @@ def test_kt1_and_first_completed_step_clear_the_pointwise_bar_for_all_tracers():
         )
 
 
+@needs_oracle(gate.ROOT)
 def test_even_step_uses_y_then_x_and_wrong_parity_goes_red():
     card = _build_card()
     after_one = step_ice_adv2d_card(card, completed_steps=0)
@@ -247,6 +253,7 @@ def test_source_rounding_changes_compiled_prather_association() -> None:
     )
 
 
+@needs_oracle(gate.ROOT)
 def test_nemo_intensive_correction_order_is_default_and_old_order_is_private() -> None:
     """Decision 13 keeps the former association only as an ablation."""
 
@@ -275,6 +282,7 @@ def test_nemo_intensive_correction_order_is_default_and_old_order_is_private() -
     assert np.asarray(corrected_default).tobytes() != np.asarray(corrected_legacy).tobytes()
 
 
+@needs_oracle(gate.ROOT)
 def test_hsnow_and_pond_caps_are_non_vacuous():
     card = _build_card()
     area = card.dx_m * card.dy_m
@@ -296,6 +304,7 @@ def test_hsnow_and_pond_caps_are_non_vacuous():
     assert float(corrected[center + (e_s_index,)]) < before_energy
 
 
+@needs_oracle(gate.ROOT)
 def test_maximum_floor_has_finite_gradient_and_zapneg_uses_updated_concentration():
     card = _build_card()
     area = card.dx_m * card.dy_m
@@ -341,6 +350,7 @@ def test_maximum_floor_has_finite_gradient_and_zapneg_uses_updated_concentration
     assert float(corrected[center + (index("v_s"),)]) == 0.0
 
 
+@needs_oracle(gate.ROOT)
 def test_restart_carries_all_eighty_moments_and_controls_go_red():
     card = _build_card()
     assert gate.restart_control(card) == {
@@ -356,6 +366,7 @@ def test_restart_carries_all_eighty_moments_and_controls_go_red():
         gate.restart_control(card, retype=True)
 
 
+@needs_oracle(gate.ROOT)
 def test_restart_loader_rejects_a_retyped_moment():
     card = _build_card()
     with tempfile.TemporaryDirectory() as directory:
@@ -369,6 +380,7 @@ def test_restart_loader_rejects_a_retyped_moment():
             load_ice_adv2d_restart(path, card)
 
 
+@needs_oracle(gate.ROOT)
 def test_restart_loader_rejects_extra_key_and_selector_clock_velocity_changes():
     card = _build_card()
     with tempfile.TemporaryDirectory() as directory:
@@ -398,6 +410,7 @@ def test_restart_loader_rejects_extra_key_and_selector_clock_velocity_changes():
             load_ice_adv2d_restart(path, card)
 
 
+@needs_oracle(gate.ROOT)
 def test_geometry_state_and_coverage_plants_go_red():
     card = _build_card()
     rows: list[dict] = []
@@ -419,6 +432,7 @@ def test_geometry_state_and_coverage_plants_go_red():
         gate.candidate_frame_contract(plant=True)
 
 
+@needs_oracle(gate.ROOT)
 def test_frame_header_and_row_roster_controls_go_red():
     card = _build_card()
     provenance = gate.frame_provenance(gate.ROOT, card)
@@ -434,6 +448,7 @@ def test_frame_header_and_row_roster_controls_go_red():
         gate._validate_row_registry(gate.ROOT, card, rows)
 
 
+@needs_oracle(gate.ROOT)
 def test_real_gate_has_the_corrected_row_count_and_loud_first_divergence():
     report, code = gate.run_gate(gate.ROOT)
     assert code == 1

@@ -76,10 +76,12 @@ def test_selector_is_single_orca1_identity() -> None:
 def test_positive_subnormal_snow_uses_nemo_nonzero_branch(monkeypatch) -> None:
     from legoesm import constants
     from legoesm.ice import si3_surface
+    from legoesm.ice.config import SI3_HARD_SWITCHES
 
     data = Path(__file__).parents[2] / "ice/unit/data"
     cfg = si3_surface.SI3SurfaceConfig.from_resolved_namelists(
-        data / "c1d_omip_l3_v2_output.namelist.dyn", data / "c1d_omip_l3_v2_output.namelist.ice")
+        data / "c1d_omip_l3_v2_output.namelist.dyn", data / "c1d_omip_l3_v2_output.namelist.ice",
+    )._replace(switches=SI3_HARD_SWITCHES)
     assert not cfg.ld_pnd_alb
     tiny = jnp.asarray([[np.nextafter(np.float64(0.0), np.float64(1.0))]])
     one = jnp.ones((1, 1))
@@ -147,3 +149,30 @@ def test_full_year_gate_and_all_plants() -> None:
     ):
         with pytest.raises(gate.GateError):
             gate.evaluate(plant=plant)
+
+
+def test_ice_albedo_default_has_a_gradient_across_freezing() -> None:
+    # RULE 5 gradient test at the default.  On the committed C1D namelist, bare
+    # 2 m ice under full cloud stepped 0.64 -> 0.53 across T_freeze with zero
+    # gradient.  The default melt ramp now spans T_freeze - 0.01 K .. T_freeze
+    # (relative width 0.01 x 1 K); its C1 slope is 0 at both ends, so the test
+    # evaluates mid-ramp, where the old hard switch had zero slope.
+    from jax.test_util import check_grads
+    from legoesm import constants
+    from legoesm.ice import si3_surface
+
+    data = Path(__file__).parents[2] / "ice/unit/data"
+    cfg = si3_surface.SI3SurfaceConfig.from_resolved_namelists(
+        data / "c1d_omip_l3_v2_output.namelist.dyn", data / "c1d_omip_l3_v2_output.namelist.ice")
+    one = jnp.ones((1, 1))
+
+    def albedo(t_su):
+        return si3_surface.si3_ice_alb(
+            t_su=one * t_su, h_i=one * 2.0, h_s=one * 0.0, a_ip_eff=one * 0.0,
+            h_ip=one * 0.0, h_il=one * 0.0, cloud_fra=jnp.asarray([1.0]),
+            smask0=jnp.asarray([1.0]), config=cfg)[0, 0]
+
+    t0 = jnp.asarray(constants.T_freeze - 0.005, dtype=jnp.float64)
+    slope = float(jax.grad(albedo)(t0))
+    assert np.isfinite(slope) and slope != 0.0
+    check_grads(albedo, (t0,), order=1, modes=("rev",), eps=1e-6)

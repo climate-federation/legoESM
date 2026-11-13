@@ -237,3 +237,15 @@ def test_cache_rounds_geometry_once_for_half_precision(cache_dir, monkeypatch, p
     _save_voronoi_cache(path, fresh32)
     _mesh_fields_equal(_mesh(fp16, precision), fresh16)
     assert np.load(path)["xCell"].dtype == np.float64
+
+
+def test_cache_version_in_name_separates_formats(cache_dir, monkeypatch):
+    """A format bump must change the file name, so old and new code never share a file."""
+    import legoesm.grids.voronoi as vor
+
+    new = vor._voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 0.0)
+    assert os.path.basename(new).startswith("scvt_v2_")
+    monkeypatch.setattr(vor, "_MESH_CACHE_VERSION", 1)
+    old = vor._voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 0.0)
+    assert os.path.basename(old).startswith("scvt_v1_")
+    assert old != new

@@ -1,6 +1,6 @@
 """The diagnostic split of the MPAS thermodynamic tendency.
 
-``mpas_hydrostatic_tendencies(..., return_thermo_terms=True)`` hands back the
+``mpas_pe_tendencies(..., return_thermo_terms=True, vertical_form="legacy")`` hands back the
 three arrays the dycore itself sums into dT/dt.  The split exists so a heating
 budget can attribute the "dynamics" residual without re-deriving anything from
 the state; it must be inert unless it is asked for.
@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-    MPASPrimitiveEquationConfig, ThermoTerms, mpas_hydrostatic_tendencies,
-    vertical_del4_T_tendency)
+    MPASPrimitiveEquationConfig, ThermoTerms, vertical_del4_T_tendency)
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.grids.voronoi import create_voronoi_mesh
 
@@ -52,8 +52,8 @@ def _fixture(nu_vert4_T=0.0, spin=3, K_h=0.0):
 
 def test_terms_sum_to_the_thermodynamic_tendency():
     mesh, coord, cfg, state = _fixture()
-    tend, terms = mpas_hydrostatic_tendencies(
-        state, mesh, coord, cfg, None, 0.0, return_thermo_terms=True)
+    tend, terms = mpas_pe_tendencies(
+        state, mesh, coord, cfg, None, 0.0, return_thermo_terms=True, vertical_form="legacy")
     assert isinstance(terms, ThermoTerms)
     parts = (terms.horiz_adv + terms.horiz_diff + terms.vert_adv
              + terms.adiabatic_ps)
@@ -79,17 +79,17 @@ def test_horizontal_diffusion_is_reported_separately():
     """
     K_h = 1.0e5                                   # production-scale value
     mesh, coord, cfg, state = _fixture(K_h=K_h)
-    tend, terms = mpas_hydrostatic_tendencies(
-        state, mesh, coord, cfg, None, 0.0, return_thermo_terms=True)
+    tend, terms = mpas_pe_tendencies(
+        state, mesh, coord, cfg, None, 0.0, return_thermo_terms=True, vertical_form="legacy")
     assert float(jnp.max(jnp.abs(terms.horiz_diff))) > 0.0
     parts = (terms.horiz_adv + terms.horiz_diff + terms.vert_adv
              + terms.adiabatic_ps)
     np.testing.assert_allclose(np.asarray(parts), np.asarray(tend.dT_dt.data),
                                rtol=0.0, atol=0.0)
     # and the advection term must be the K_h = 0 advection, unchanged
-    _, terms0 = mpas_hydrostatic_tendencies(
+    _, terms0 = mpas_pe_tendencies(
         state, mesh, coord, cfg._replace(K_h=0.0), None, 0.0,
-        return_thermo_terms=True)
+        return_thermo_terms=True, vertical_form="legacy")
     np.testing.assert_allclose(np.asarray(terms.horiz_adv),
                                np.asarray(terms0.horiz_adv),
                                rtol=0.0, atol=0.0)
@@ -100,8 +100,8 @@ def test_split_excludes_the_vertical_filter():
     so a budget can report the filter as its own row without double counting."""
     nu4 = 2.0e-6
     mesh, coord, cfg, state = _fixture(nu_vert4_T=nu4)
-    tend, terms = mpas_hydrostatic_tendencies(
-        state, mesh, coord, cfg, None, 0.0, return_thermo_terms=True)
+    tend, terms = mpas_pe_tendencies(
+        state, mesh, coord, cfg, None, 0.0, return_thermo_terms=True, vertical_form="legacy")
     parts = (terms.horiz_adv + terms.horiz_diff + terms.vert_adv
              + terms.adiabatic_ps)
     filt = vertical_del4_T_tendency(state.T.data, nu4, coord.dsigma)
@@ -115,18 +115,18 @@ def test_production_call_is_unchanged():
     """Omitting the flag returns the tendencies object itself, not a tuple, and
     the same numbers; the flag is a static Python bool so jit sees neither."""
     mesh, coord, cfg, state = _fixture()
-    plain = mpas_hydrostatic_tendencies(state, mesh, coord, cfg, None, 0.0)
+    plain = mpas_pe_tendencies(state, mesh, coord, cfg, None, 0.0, vertical_form="legacy")
     # the tendencies object is itself a NamedTuple, so "not a tuple" is the
     # wrong check — what matters is that no ThermoTerms came back with it
     assert not (len(plain) == 2 and isinstance(plain[1], ThermoTerms))
     assert hasattr(plain, "dT_dt")
-    with_terms, _ = mpas_hydrostatic_tendencies(
-        state, mesh, coord, cfg, None, 0.0, return_thermo_terms=True)
+    with_terms, _ = mpas_pe_tendencies(
+        state, mesh, coord, cfg, None, 0.0, return_thermo_terms=True, vertical_form="legacy")
     np.testing.assert_allclose(np.asarray(plain.dT_dt.data),
                                np.asarray(with_terms.dT_dt.data),
                                rtol=0.0, atol=0.0)
-    jitted = jax.jit(lambda s: mpas_hydrostatic_tendencies(
-        s, mesh, coord, cfg, None, 0.0).dT_dt.data)
+    jitted = jax.jit(lambda s: mpas_pe_tendencies(
+        s, mesh, coord, cfg, None, 0.0, vertical_form="legacy").dT_dt.data)
     np.testing.assert_allclose(np.asarray(jitted(state)),
                                np.asarray(plain.dT_dt.data),
                                rtol=1e-12, atol=0.0)
