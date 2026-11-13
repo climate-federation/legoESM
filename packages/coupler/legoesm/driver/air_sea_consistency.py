@@ -73,7 +73,10 @@ _SCHEME_AXIS = "bulk_scheme"
 # inert under the default constant closure.  Verified: an earlier draft of this
 # module compared them unconditionally and did exactly that.
 _MOST_ONLY_AXES = ("thermo_convention", "stability_scheme", "unstable_scheme", "z_ref",
-                   "bulk_n_iter", "most_zeta_cap_width")
+                   "bulk_n_iter")
+# The |zeta| cap width is read by the MOST solver AND by the CESM
+# (large_yeager_cesm) solver on both sides.
+_ZETA_CAP_AXIS = "most_zeta_cap_width"
 # Read only by the GFS unstable form: compared only when a side selects it.
 _GFS_ONLY_AXES = ("gfs_unstable_join_width",)
 
@@ -179,6 +182,8 @@ def validate_air_sea_consistency(atm_config, coupler_config) -> None:
         )
 
     axes = [_SCHEME_AXIS]
+    if atm_scheme in _ATM_MOST_SCHEMES + ("large_yeager_cesm",):
+        axes.append(_ZETA_CAP_AXIS)
     if atm_scheme in _ATM_MOST_SCHEMES:
         axes += list(_MOST_ONLY_AXES)
         if "gfs" in (getattr(surf, "unstable_scheme", None),

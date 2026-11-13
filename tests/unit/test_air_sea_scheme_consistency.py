@@ -409,13 +409,14 @@ def test_validator_accepts_matching_explicit_gustiness():
                            gustiness_w_zi=300.0))  # must not raise
 
 
-def test_zeta_cap_width_splits_a_most_interface():
-    atm = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis",
+@pytest.mark.parametrize("scheme", ["coare3", "large_yeager_cesm"])
+def test_zeta_cap_width_splits_the_interface(scheme):
+    atm = ExperimentConfig(surface_bulk_scheme=scheme, turbulence="louis",
                            surface_most_zeta_cap_width=0.0)
     with pytest.raises(ValueError, match="most_zeta_cap_width"):
-        validate_air_sea_consistency(atm, CouplerConfig(bulk_scheme="coare3"))
+        validate_air_sea_consistency(atm, CouplerConfig(bulk_scheme=scheme))
     validate_air_sea_consistency(
-        atm, CouplerConfig(bulk_scheme="coare3", most_zeta_cap_width=0.0))
+        atm, CouplerConfig(bulk_scheme=scheme, most_zeta_cap_width=0.0))
 
 
 def test_gfs_join_width_compared_only_when_gfs_is_selected():
