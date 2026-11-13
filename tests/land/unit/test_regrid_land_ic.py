@@ -623,7 +623,8 @@ def _lift_only_setup(tmp_path, monkeypatch):
     src = tmp_path / "ic.npz"
     np.savez(src, theta_soil=theta, psi_soil=-np.ones((3, 3)),
              T_soil=np.full((3, 3), 280.0), soil_dz=dz,
-             snow_depth=np.arange(3.0), metadata_json=np.str_('{"grid_type": "x", "resolution": 1}'))
+             snow_depth=np.arange(3.0), soil_hydraulics_json=np.str_("{}"),
+             metadata_json=np.str_('{"grid_type": "x", "resolution": 1}'))
     sd = tmp_path / "surf.nc"
     sd.write_bytes(b"surf")
     return rg, src, sd, lo, dz, seen, jnp
@@ -685,7 +686,7 @@ def test_lift_only_floor_moves_with_the_air_entry_head(tmp_path, monkeypatch):
     assert added["-0.02"] != added["0.0"]
 
 
-@pytest.mark.parametrize("bad", ["sig", "f32", "grid"])
+@pytest.mark.parametrize("bad", ["sig", "f32", "grid", "nostamp"])
 def test_lift_only_refuses_unsafe_sources(tmp_path, monkeypatch, bad):
     rg, src, sd, *_ = _lift_only_setup(tmp_path, monkeypatch)
     a = dict(np.load(src))
@@ -693,8 +694,10 @@ def test_lift_only_refuses_unsafe_sources(tmp_path, monkeypatch, bad):
         a["soil_hydraulics_column_sig"] = np.zeros(3)
     elif bad == "f32":
         a["theta_soil"] = a["theta_soil"].astype(np.float32)
-    else:
+    elif bad == "grid":
         a["metadata_json"] = np.str_('{"grid_type": "y", "resolution": 1}')
+    else:
+        del a["soil_hydraulics_json"]
     np.savez(src, **a)
     with pytest.raises(SystemExit):
         rg.main(["--lift-only", "--source", str(src), "--out",

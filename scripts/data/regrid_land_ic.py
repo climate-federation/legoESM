@@ -363,6 +363,9 @@ def main_lift_only(args) -> int:
     src = np.load(args.source, allow_pickle=False)
     if "soil_dz" not in src.files:
         raise SystemExit("source IC has no soil_dz stamp; regrid it first.")
+    if "soil_hydraulics_json" not in src.files:
+        raise SystemExit("source IC has no soil-hydraulics stamp; the loader "
+                         "would refuse the output (stamp it first).")
     if "soil_hydraulics_column_sig" in src.files:
         # a matching signature lets the loader skip conversion, leaving psi
         # stale on the lifted columns (codex)
