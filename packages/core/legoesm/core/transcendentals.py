@@ -31,6 +31,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.core.numerics_mode import current_numerics
 from legoesm.core.precision import get_policy
 
 _LIBM_SONAME = "libm.so.6"
@@ -431,10 +432,16 @@ def _libm_cos_jvp(primals, tangents):
     return result, -_libm_sin(value) * value_dot
 
 
+def _native() -> bool:
+    """Native XLA under ``"nemo_fast"`` whatever the policy, else the policy."""
+    return (current_numerics() == "nemo_fast"
+            or get_policy().transcendentals == "native")
+
+
 def exp(value) -> jax.Array:
     """Evaluate exponential under the active precision policy."""
     array = jnp.asarray(value)
-    if get_policy().transcendentals == "native":
+    if _native():
         return jnp.exp(array)
     return _libm_exp(array)
 
@@ -503,7 +510,7 @@ def _libm_pow_jvp(primals, tangents):
 def log(value) -> jax.Array:
     """Evaluate natural logarithm under the active precision policy."""
     array = jnp.asarray(value)
-    if get_policy().transcendentals == "native":
+    if _native():
         return jnp.log(array)
     return _libm_log(array)
 
@@ -511,7 +518,7 @@ def log(value) -> jax.Array:
 def log10(value) -> jax.Array:
     """Evaluate base-10 logarithm under the active precision policy."""
     array = jnp.asarray(value)
-    if get_policy().transcendentals == "native":
+    if _native():
         return jnp.log10(array)
     return _libm_log10(array)
 
@@ -519,7 +526,7 @@ def log10(value) -> jax.Array:
 def atan(value) -> jax.Array:
     """Evaluate arctangent under the active precision policy."""
     array = jnp.asarray(value)
-    if get_policy().transcendentals == "native":
+    if _native():
         return jnp.arctan(array)
     return _libm_atan(array)
 
@@ -527,7 +534,7 @@ def atan(value) -> jax.Array:
 def pow(left, right) -> jax.Array:
     """Evaluate binary power under the active precision policy."""
     left_array, right_array = jnp.broadcast_arrays(jnp.asarray(left), jnp.asarray(right))
-    if get_policy().transcendentals == "native":
+    if _native():
         return jnp.power(left_array, right_array)
     dtype = jnp.result_type(left, right)
     if not jnp.issubdtype(dtype, jnp.inexact):
@@ -541,7 +548,7 @@ def pow(left, right) -> jax.Array:
 def tanh(value) -> jax.Array:
     """Evaluate hyperbolic tangent under the active precision policy."""
     array = jnp.asarray(value)
-    if get_policy().transcendentals == "native":
+    if _native():
         return jnp.tanh(array)
     return _libm_tanh(array)
 
@@ -549,7 +556,7 @@ def tanh(value) -> jax.Array:
 def sin(value) -> jax.Array:
     """Evaluate sine under the active precision policy."""
     array = jnp.asarray(value)
-    if get_policy().transcendentals == "native":
+    if _native():
         return jnp.sin(array)
     return _libm_sin(array)
 
@@ -557,7 +564,7 @@ def sin(value) -> jax.Array:
 def cos(value) -> jax.Array:
     """Evaluate cosine under the active precision policy."""
     array = jnp.asarray(value)
-    if get_policy().transcendentals == "native":
+    if _native():
         return jnp.cos(array)
     return _libm_cos(array)
 

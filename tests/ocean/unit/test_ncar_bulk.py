@@ -172,6 +172,7 @@ def test_k0_compiled_programs_trace_once_per_branch(monkeypatch):
         evap_factor: float
         nb_iter: int
         k0: K0
+        numerics: object = None
 
     class Z(NamedTuple):
         nemo_e3t_0: jax.Array
@@ -243,9 +244,26 @@ def test_k0_compiled_programs_trace_once_per_branch(monkeypatch):
             forcing_update=forcing_update,
         )
         bfo._nemo_orca2_k0_next_fraqsr_compiled(
-            z, get_policy(), "stub", zeros2 + kt, zeros2 - kt, zeros2,
-            zeros2 + 1.0, zeros2 + kt, zeros2)
+            z, get_policy(), card.numerics, "stub", zeros2 + kt, zeros2 - kt,
+            zeros2, zeros2 + 1.0, zeros2 + kt, zeros2)
     assert traces == {"surface": 2, "fraqsr": 1}
+
+    # The card's ``numerics`` alone keys both programs: with no scope open and
+    # the trace-time assertion stubbed out, each new value traces each once.
+    monkeypatch.setattr(bfo, "require_numerics", lambda expected: None)
+    for numerics in ("nemo_exact", "nemo_fast", "nemo_exact"):
+        bfo._nemo_orca2_k0_surface_compiled(
+            card._replace(numerics=numerics), z, get_policy(), T, T,
+            jnp.ones((ny, nx + 1, nz)), jnp.ones((ny + 1, nx, nz)), zeros2,
+            zeros2, zeros2 + 1.0, s0f=Clock(jnp.asarray(5400, dtype=jnp.int64)),
+            ice_if=IceIf(zeros2, jnp.asarray(1, dtype=jnp.int64)),
+            s0=s0._replace(kt=jnp.asarray(1, dtype=jnp.int64)), s2=s2,
+            chl=zeros2, geothermal_heat_flux_mwm2=zeros2, prior_surface=None,
+            forcing_update=True)
+        bfo._nemo_orca2_k0_next_fraqsr_compiled(
+            z, get_policy(), numerics, "stub", zeros2, zeros2, zeros2,
+            zeros2 + 1.0, zeros2, zeros2)
+    assert traces == {"surface": 4, "fraqsr": 3}
 
 
 # ---------------------------------------------------------------------------
