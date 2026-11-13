@@ -25,6 +25,7 @@ from legoesm.core.bulk_flux import (
     compute_most_fluxes,
     large_yeager_widths,
     compute_sam_oceflx_fluxes,
+    resolve_gustiness_w_zi,
     simple_bulk_fluxes,
     validate_bulk_scheme,
 )
@@ -211,6 +212,8 @@ def compute_surface_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
             variant="cesm", t_bot=t_bot, **_ws,
+            gustiness_w_zi=resolve_gustiness_w_zi(
+                getattr(config, "gustiness_w_zi", None), config.bulk_scheme),
         )
         return _apply_prescribed_scalar_fluxes(
             config, tau_x, tau_y, shflx, lhflx, ustar, rho) + tuple(_w)
@@ -628,6 +631,8 @@ def _single_tile_flux(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
             variant="cesm", t_bot=t_bot,
+            gustiness_w_zi=resolve_gustiness_w_zi(
+                getattr(config, "gustiness_w_zi", None), config.bulk_scheme),
         )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(
