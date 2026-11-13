@@ -1703,6 +1703,39 @@ def test_prognostic_clubb_runs_in_float32_no_dtype_promotion():
         assert jnp.all(jnp.isfinite(arr))
 
 
+def test_prognostic_clubb_float32_carry_survives_float64_inputs():
+    """Under JAX_ENABLE_X64 an fp32 AMIP run hands the prognostic scheme some
+    float64 inputs (grid, density, surface fluxes) next to its float32 moment
+    carry.  The scheme must work in the carry's dtype: float32 carry and
+    tendencies out, no scan carry-dtype error."""
+    f32, f64 = jnp.float32, jnp.float64
+    ncol, nlev = 2, 16
+    rng = np.random.default_rng(1)
+    p_half = jnp.asarray(
+        np.linspace(2e4, 1e5, nlev + 1)[None, :] * np.ones((ncol, nlev + 1)), dtype=f64)
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    z_half = jnp.asarray(
+        np.tile(np.linspace(16000.0, 0.0, nlev + 1), (ncol, 1)), dtype=f64)
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    exner = (p_full / constants.p_ref) ** constants.kappa
+    T = (jnp.asarray(290.0 + 4e-3 * np.asarray(z_full)) * exner).astype(f32)
+    u = jnp.asarray(8.0 + 4.0 * rng.standard_normal((ncol, nlev)), dtype=f32)
+    v = jnp.asarray(2.0 * rng.standard_normal((ncol, nlev)), dtype=f32)
+    q_v = jnp.asarray(2e-3 + 4e-3 * rng.random((ncol, nlev)), dtype=f32)
+    rho = (p_full / (constants.R_d * T * (1.0 + 0.61 * q_v))).astype(f64)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
+    carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg, dtype=f32))
+    flux = tuple(jnp.full((ncol,), x, f64) for x in (0.05, 0.0, 10.0, 80.0, 0.3))
+    out, carry_new = clubb_turbulence_prognostic(
+        u, v, T, q_v, carry, p_full, p_half, z_full, z_half,
+        np.asarray(T[:, -1], np.float64), q_v[:, -1].astype(f64), rho,
+        jnp.asarray(600.0, f64), cfg, surface_flux=flux)
+    for arr in (out.du_dt, out.dT_dt, out.dq_v_dt, out.Kh, carry_new):
+        assert arr.dtype == f32
+        assert jnp.all(jnp.isfinite(arr))
+
+
 def test_clubb_mixing_length_no_promotion_on_mixed_dtype_grid():
     """``compute_mixing_length`` must not promote on a MIXED-dtype column.
 
