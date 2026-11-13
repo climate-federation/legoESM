@@ -236,8 +236,8 @@ def test_experiment_config_widths_reach_the_surface_layer():
 
 
 def test_non_most_psi_callers_keep_the_hard_clip_omip_ncar_threads_the_width(monkeypatch):
-    """CLM canopy and LES surface keep the former +-10 clip (width 0); the
-    OMIP NCAR routine forwards its zeta_cap_width (default = the shared one).
+    """CLM canopy keeps the former +-10 clip (width 0); the LES surface layer and
+    the OMIP NCAR routine forward their zeta_cap_width (default = the shared one).
     (The NEMO-exact lane returns before the cap.)"""
     from legoesm.atmosphere.dynamics.les import spectral_les_plane as les
     from legoesm.land.canopy import stability as canopy
@@ -251,7 +251,8 @@ def test_non_most_psi_callers_keep_the_hard_clip_omip_ncar_threads_the_width(mon
                               jnp.asarray([0.9]), jnp.asarray([2.0]))
     assert seen and all(w == 0.0 for w in seen), seen
     src = Path(les.__file__).read_text()
-    assert src.count("zeta_cap_width=0.0") == 2
+    assert "zeta_cap_width=0.0" not in src
+    assert src.count("zeta_cap_width=zeta_cap_width") == 2
     wind = jnp.asarray([0.5, 1.0, 4.0])
     for kw, want in (({}, bf.MOST_ZETA_CAP_WIDTH), ({"zeta_cap_width": 0.0}, 0.0)):
         seen.clear()
