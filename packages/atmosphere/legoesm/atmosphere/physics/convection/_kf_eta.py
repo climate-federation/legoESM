@@ -51,8 +51,17 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.atmosphere.physics.convection.config import KainFritschConfig
+from legoesm.core.smooth import (
+    positive_part_c1,
+    smooth_max_c1,
+    smoothstep_cubic,
+    sqrt_c1,
+    validate_smoothing_width,
+)
 
-__all__ = ("KFConstants", "kf_eta_para", "kf_lookup_tables", "prof5")
+__all__ = ("KF_HARD", "KFConstants", "KFSmoothing", "kf_eta_para", "kf_lookup_tables",
+           "kf_smoothing", "prof5")
 
 __physics_contract__ = {
     "summary": (
@@ -118,11 +127,11 @@ KF_SWITCHES = {
     "D4": ("D", "hard", "entrainment selection cold / vb / tiny (ee2, ud2, eqfrc)"),
     "D5": ("D", "hard", "shear sign SHSIGN"),
     "D6": ("D", "hard", "RCBH polynomial / constant splice at CBH 3 and 25 kft"),
-    "D7a": ("D", "hard", "TPMIX2 saturated / enough condensate / dry branches"),
-    "D7b": ("D", "hard", "CONDLOAD g1 < 0 set to 0"),
+    "D7a": ("D", "smooth", "TPMIX2 saturated / enough condensate / dry branches"),
+    "D7b": ("D", "smooth", "CONDLOAD g1 < 0 set to 0"),
     "D7c": ("D", "hard", "CONDLOAD mean vertical velocity zero guard"),
-    "D7d": ("D", "hard", "CONDLOAD |WTW| < 1e-4 floor"),
-    "D7e": ("D", "hard", "PROF5 y >= 0 polynomial branch and |y|"),
+    "D7d": ("D", "smooth", "CONDLOAD |WTW| < 1e-4 floor"),
+    "D7e": ("D", "smooth", "PROF5 y >= 0 polynomial branch and |y|"),
     "D7f": ("D", "hard", "PROF5 eqf == 0 / eqf == 1 exact-equality overrides"),
     "D7g": ("D", "hard", "glaciation: freezing (frz) and partial (part) ramps, DTFRZNEW"),
     "D7h": ("D", "hard", "downdraft RH adjustment: low (qsrh < qd) and adj (rhh < 1)"),
@@ -139,7 +148,8 @@ KF_SWITCHES = {
     "E8": ("E", "hard", "ee2 >= 0.5"),
     "E9": ("E", "hard", "CHMIN temperature ramp between 273 and 293 K"),
     "E10": ("E", "hard", "upstream direction OMG <= 0 in the subsidence advection"),
-    "E11": ("E", "hard", "square root kink at zero: WTW, g1, GDT, wind speed, shear"),
+    "E11": ("E", "hard", "square root kink at zero: GDT, wind speed, shear"),
+    "E11c": ("E", "smooth", "CONDLOAD square roots of WTW and G1"),
     "E12": ("E", "hard", "TIMEC = DX/VCONV clamped to [timec_min, timec_max], VCONV > 0"),
     "E13": ("E", "hard", "PEF clamped to [0.2, 0.9]"),
     "E14": ("E", "hard", "PEFCBH <= 0.9"),
@@ -148,8 +158,8 @@ KF_SWITCHES = {
     "E17": ("E", "hard", "closure qmix >= 0"),
     "E18": ("E", "hard", "DABE >= 0.1 ABE"),
     "E19": ("E", "hard", "new AINC capped at AINCMX"),
-    "F1": ("F", "hard", "ALU log table: coordinate clamp and interval index"),
-    "F2": ("F", "hard", "TTAB/QSTAB tables: coordinate clamps and interval indices"),
+    "F1": ("F", "smooth", "ALU log table: coordinate clamp and interval index"),
+    "F2": ("F", "smooth", "TTAB/QSTAB tables: coordinate clamps and interval indices"),
     "S": ("S", "static", "static level index, static pad mask, Python-level option dispatch"),
     "H": ("S", "static", "inside a masking/rounding helper; the switch is tagged at each call"),
 }
@@ -286,6 +296,76 @@ _PCT = 100.0
 _MAX_SUBSTEPS = 256
 
 
+class KFSmoothing(NamedTuple):
+    """RULE 5 widths of the port's smoothed switches (#2280).  0 = the oracle's
+    hard switch (the transcribed code runs unchanged); defaults are the
+    ``KainFritschConfig.wrf_*`` fields.  Static Python floats, never traced.
+
+    * ``lut_knot_width`` [table index units, 0 or (0, 1]]: half-width of the
+      box kernel convolved with the piecewise-(bi)linear ALU, THE0K and
+      TTAB/QSTAB interpolants; smooths the knots and the edge clamps (F1, F2).
+    * ``tpmix_width_kgkg``: band of the C1 positive parts of TPMIX2's
+      condensation / evaporation / deficit split (D7a).
+    * ``condload_sqrt_width_m2s2``: bridge of the C1 square roots of WTW and of
+      the clipped G1 in CONDLOAD (D7b, E11 there).
+    * ``wtw_floor_width_m2s2``: cubic ramps outside the |WTW| < 1e-4 floor
+      (D7d).
+    * ``prof5_width``: half-width in PROF5's ``y`` of the blend between its
+      two polynomial branches (D7e).
+    """
+
+    lut_knot_width: float
+    tpmix_width_kgkg: float
+    condload_sqrt_width_m2s2: float
+    wtw_floor_width_m2s2: float
+    prof5_width: float
+
+
+KF_HARD = KFSmoothing(0.0, 0.0, 0.0, 0.0, 0.0)
+# Largest PROF5 blend half-width: entrainment and detrainment fractions stay
+# non-negative on eq in [0, 1] (tested); wider blends reach the far branch's
+# negative values (ud < 0 at width 3).
+_PROF5_WIDTH_MAX = 0.1
+# kfsw: S
+assert _PROF5_WIDTH_MAX < 1.0 / _P5_P  # the branch continuations' pole stays outside the blend
+
+
+def kf_smoothing(config: KainFritschConfig) -> KFSmoothing:
+    """The widths a ``KainFritschConfig`` selects (its ``wrf_*`` fields)."""
+    return KFSmoothing(
+        config.wrf_lut_knot_width, config.wrf_tpmix_width_kgkg,
+        config.wrf_condload_sqrt_width_m2s2, config.wrf_wtw_floor_width_m2s2,
+        config.wrf_prof5_width)
+
+
+def validate_kf_smoothing(sm: KFSmoothing) -> None:
+    for name, w in sm._asdict().items():  # kfsw: S
+        validate_smoothing_width(f"KFSmoothing.{name}", w)  # kfsw: S
+    for name, hi in (("lut_knot_width", 1.0), ("prof5_width", _PROF5_WIDTH_MAX)):
+        if getattr(sm, name) > hi:  # kfsw: S
+            raise ValueError(f"KFSmoothing.{name} must be 0 or in (0, {hi}]; "
+                             f"got {getattr(sm, name)!r}")  # kfsw: S
+
+
+class _KFTables(NamedTuple):
+    """KF_LUTAB tables (the first seven are the oracle's), their padded copies
+    for the smoothed lookups (node -1 = linear extrapolation of the first
+    interval, as the oracle's INT truncation does on (-1, 0)), and the widths."""
+
+    ttab: jax.Array
+    qstab: jax.Array
+    the0k: jax.Array
+    alu: jax.Array
+    plutop: jax.Array
+    rdpr: jax.Array
+    rdthk: jax.Array
+    ttab_pad: jax.Array
+    qstab_pad: jax.Array
+    the0k_pad: jax.Array
+    alu_pad: jax.Array
+    sm: KFSmoothing
+
+
 class KFConstants(NamedTuple):
     """The constants KF_eta_PARA receives through its argument list."""
 
@@ -372,12 +452,59 @@ def kf_lookup_tables(svp1: float, svp2: float, svp3: float, svpt0: float):
     return ttab, qstab, the0k, alu, plutop, rdpr, rdthk
 
 
+def _pad1(a):
+    return np.concatenate([[2.0 * a[0] - a[1]], a])
+
+
+def _pad2(a):
+    b = np.concatenate([(2.0 * a[0] - a[1])[None, :], a], axis=0)  # kfsw: S
+    return np.concatenate([(2.0 * b[:, 0] - b[:, 1])[:, None], b], axis=1)  # kfsw: S
+
+
+def _kf_tables(kc: KFConstants, dtype, sm: KFSmoothing) -> _KFTables:
+    """The oracle's tables, their padded copies (one leading node per axis, the
+    linear extrapolation of the first interval, bilinear at the corner) and
+    the widths."""
+    ttab, qstab, the0k, alu, plutop, rdpr, rdthk = kf_lookup_tables(
+        float(kc.svp1), float(kc.svp2), float(kc.svp3), float(kc.svpt0))  # kfsw: S
+    return _KFTables(*(jnp.asarray(x, dtype) for x in (
+        ttab, qstab, the0k, alu, plutop, rdpr, rdthk, _pad2(ttab), _pad2(qstab),
+        _pad1(the0k), _pad1(alu))), sm)
+
+
 # --------------------------------------------------------------------------
 # Callees (scalars; the column driver vmaps)
 # --------------------------------------------------------------------------
 
-def _tlog_lookup(alu, a1):
+def _hat_c1(t, w):
+    """The linear-interpolation hat convolved with a box of half-width ``w``:
+    C1, compact support |t| < 1 + w, the hats sum to 1 (and reproduce linear
+    functions) at every point."""
+    return (smooth_max_c1(t + 1.0, 0.0, 2.0 * w) - 2.0 * smooth_max_c1(t, 0.0, 2.0 * w)
+            + smooth_max_c1(t - 1.0, 0.0, 2.0 * w))  # kfsw: F1,F2
+
+
+def _stencil_c1(x, n_nodes, w):
+    """Padded-table indices (node -1 .. n_nodes-1 -> 0 .. n_nodes, clamped:
+    constant beyond both ends) and weights of the 4 nodes around ``x``."""
+    x = jnp.asarray(x)
+    i0 = jnp.floor(x).astype(jnp.int32)  # kfsw: F1,F2
+    j = i0[..., None] + jnp.arange(-1, 3, dtype=jnp.int32)  # kfsw: F1,F2
+    wt = _hat_c1(x[..., None] - j.astype(x.dtype), w)  # kfsw: F1,F2
+    return jnp.clip(j, -1, n_nodes - 1) + 1, wt  # kfsw: F1,F2
+
+
+def _interp_c1(pad, x, w):
+    """1-D lookup on the padded table, knots and edges smoothed (width ``w``)."""
+    idx, wt = _stencil_c1(x, pad.shape[0] - 1, w)
+    return jnp.sum(pad[idx] * wt, axis=-1)  # kfsw: F1,F2
+
+
+def _tlog_lookup(lut, a1):
     """TLOG = ln(a1) from the ALU table (l.919-926, l.3067-3074)."""
+    if lut.sm.lut_knot_width:  # kfsw: S
+        return _interp_c1(lut.alu_pad, (a1 - _ALU_ASTRT) / _ALU_AINC, lut.sm.lut_knot_width)
+    alu = lut.alu
     # Outside the coordinates where the oracle reads inside ALU (-1 < tp < N-1)
     # WRF reads out of bounds; clamp the coordinate there (edge-continuous).
     a1 = jnp.clip(a1, _ALU_ASTRT - _ALU_AINC, _ALU_ASTRT + (_ALU_N - 1) * _ALU_AINC)  # kfsw: F1
@@ -400,11 +527,11 @@ def _thetae_bolton(t, p, q, tsat):
     return t * _exner(p, q) * jnp.exp((_THE_C1 / tsat - _THE_C2) * q * (1.0 + _THE_C3 * q))
 
 
-def _envirtht(alu, ab, p1, t1, q1):
+def _envirtht(lut, ab, p1, t1, q1):
     """ENVIRTHT (l.3044-3081)."""
     aliq, bliq, cliq, dliq = ab
     ee = q1 * p1 / (_EPS_KF + q1)
-    tlog = _tlog_lookup(alu, ee / aliq)
+    tlog = _tlog_lookup(lut, ee / aliq)
     tdpt = (cliq - dliq * tlog) / (bliq - tlog)
     tsat = _tsat_from_dewpoint(tdpt, t1)
     tht = t1 * _exner(p1, q1)
@@ -413,7 +540,17 @@ def _envirtht(alu, ab, p1, t1, q1):
 
 def _tab_interp(lut, p, thes):
     """Bilinear TTAB/QSTAB lookup shared by TPMIX2 and TPMIX2DD."""
-    ttab, qstab, the0k, _alu, plutop, rdpr, rdthk = lut
+    ttab, qstab, the0k, _alu, plutop, rdpr, rdthk = lut[:7]
+    w = lut.sm.lut_knot_width
+    if w:  # kfsw: S
+        xp = (p - plutop) * rdpr
+        xt = (thes - _interp_c1(lut.the0k_pad, xp, w)) * rdthk
+        ip, wp = _stencil_c1(xp, _KFNP, w)
+        it, wt = _stencil_c1(xt, _KFNT, w)
+        wgt = wt[..., :, None] * wp[..., None, :]  # kfsw: F2
+        it, ip = it[..., :, None], ip[..., None, :]  # kfsw: F2
+        return (jnp.sum(lut.ttab_pad[it, ip] * wgt, axis=(-2, -1)),  # kfsw: F2
+                jnp.sum(lut.qstab_pad[it, ip] * wgt, axis=(-2, -1)))  # kfsw: F2
     # The oracle reads inside its tables for -1 < coordinate < N-1 (Fortran INT
     # truncates toward zero, so (-1, 0) extrapolates from the first interval);
     # beyond that WRF reads out of bounds.  There the coordinate is clamped
@@ -435,9 +572,42 @@ def _tab_interp(lut, p, thes):
 
 
 def _tpmix2(lut, p, thes, qu, qliq, qice, xlv0, xlv1):
-    """TPMIX2 (l.2695-2815): returns tu, qu, qliq, qice, qnewlq, qnewic."""
+    """TPMIX2 (l.2695-2815): returns tu, qu, qliq, qice, qnewlq, qnewic.
+
+    Smooth form (``tpmix_width_kgkg`` > 0): condensation ``C = (-dq)+``,
+    evaporation ``E = min(max(dq, 0), qtot)`` (a C1 form never above it and
+    zero while supersaturated) and
+    deficit ``D = (dq - qtot)+`` with one-sided C1 positive parts (exact beyond
+    the width); the oracle's three branches are its hard limit.
+    Water is conserved exactly: the vapour gains the condensate lost.  KNOWN
+    DIFFERENCE, all at the oracle's 1e-10 kg/kg guard: the oracle's enough
+    branch creates ``E*1e-10/(qtot+1e-10)`` of water (qu reaches qs while the
+    condensate loses only ``E*qtot/(qtot+1e-10)``), so the smooth qu sits that
+    much below qs; where the oracle evaporates all condensate the smooth form
+    keeps ``qliq*1e-10/(qtot+1e-10)`` of it; the dry branch (qtot < 1e-10 keeps
+    qu) has no counterpart."""
     temp, qs = _tab_interp(lut, p, thes)
     dq = qs - qu
+    w = lut.sm.tpmix_width_kgkg
+    if w:  # kfsw: S
+        qtot = qliq + qice
+        # p = one-sided C1 positive part (0 below 0, <= max(y, 0), exact beyond
+        # w); smooth_max_c1(y, 0, w) >= max(y, 0), exact for |y| >= w/2.
+        # Condensation p(-dq) <= the excess vapour.  Evaporation
+        # p(a - smooth_max_c1(a - qtot)), a = p(dq), lies in [0, min(a, qtot)]:
+        # none while supersaturated, never more than the condensate; hard
+        # limit min(max(dq, 0), qtot).  Vapour and condensate stay >= 0.
+        s = 1.0 / w
+        cond = positive_part_c1(-dq, s)  # kfsw: D7a
+        dfc = positive_part_c1(dq - qtot, s)  # kfsw: D7a
+        a = positive_part_c1(dq, s)  # kfsw: D7a
+        evap = positive_part_c1(a - smooth_max_c1(a - qtot, 0.0, w), s)  # kfsw: D7a
+        rll = xlv0 - xlv1 * temp
+        cpp = _TPMIX_CP * (1.0 + _TPMIX_CPQ * qu)
+        lost = evap / (qtot + _TPMIX_QEPS)  # fraction of the condensate evaporated
+        # vapour gains exactly the condensate lost: water is conserved
+        return (temp + rll * (dfc / (1.0 + dfc)) / cpp, qu + qtot * lost - cond,
+                qliq * (1.0 - lost), qice * (1.0 - lost), cond, jnp.zeros_like(cond))
     sat = dq <= 0.0  # kfsw: D7a
     qnew_sat = qu - qs
     qtot = qliq + qice
@@ -489,14 +659,23 @@ def _safe_sqrt(x):
     return jnp.where(ok, jnp.sqrt(jnp.where(ok, x, 1.0)), 0.0)  # kfsw: H
 
 
-def _condload(qliq, qice, wtw, dz, boterm, enterm, qnewlq, qnewic, g):
-    """CONDLOAD (l.2863-2927): returns qliq, qice, wtw, qlqout, qicout."""
+def _condload(qliq, qice, wtw, dz, boterm, enterm, qnewlq, qnewic, g, sm):
+    """CONDLOAD (l.2863-2927): returns qliq, qice, wtw, qlqout, qicout.
+
+    Smooth form: C1 square roots (``condload_sqrt_width_m2s2``; the G1 clip is
+    the root's zero below 0) and cubic ramps outside the WTW floor
+    (``wtw_floor_width_m2s2``).  KNOWN DIFFERENCE: the ``wavg != 0`` guard stays
+    hard; it cannot bind (the updraft exits before WTW drops below 1e-3)."""
     qtot = qliq + qice
     qnew = qnewlq + qnewic
     qest = 0.5 * (qtot + qnew)
     g1 = wtw + boterm - enterm - 2.0 * g * dz * qest / _KE_DIV
-    g1 = jnp.where(g1 < 0.0, 0.0, g1)  # kfsw: D7b
-    wavg = 0.5 * (_safe_sqrt(wtw) + _safe_sqrt(g1))  # kfsw: E11
+    ws = sm.condload_sqrt_width_m2s2
+    if ws:  # kfsw: S
+        wavg = 0.5 * (sqrt_c1(wtw, ws) + sqrt_c1(g1, ws))  # kfsw: E11c
+    else:
+        g1 = jnp.where(g1 < 0.0, 0.0, g1)  # kfsw: D7b
+        wavg = 0.5 * (_safe_sqrt(wtw) + _safe_sqrt(g1))  # kfsw: E11c
     conv = _RATE * dz / jnp.where(wavg != 0.0, wavg, 1.0)  # kfsw: D7c
     ratio3 = qnewlq / (qnew + _CL_EPS)
     qtot = qtot + _CL_FRESH * qnew
@@ -508,14 +687,25 @@ def _condload(qliq, qice, wtw, dz, boterm, enterm, qnewlq, qnewic, g):
     qicout = (1.0 - ratio4) * dq
     pptdrg = 0.5 * (oldq + qtot - _CL_DRAG_EXCL * qnew)
     wtw = wtw + boterm - enterm - 2.0 * g * dz * pptdrg / _KE_DIV
-    wtw = jnp.where(jnp.abs(wtw) < _WTW_FLOOR, _WTW_FLOOR, wtw)  # kfsw: D7d
+    wf = sm.wtw_floor_width_m2s2
+    if wf:  # kfsw: S
+        inside = 1.0 - smoothstep_cubic((jnp.abs(wtw) - _WTW_FLOOR) / wf)  # kfsw: D7d
+        wtw = wtw + (_WTW_FLOOR - wtw) * inside
+    else:
+        wtw = jnp.where(jnp.abs(wtw) < _WTW_FLOOR, _WTW_FLOOR, wtw)  # kfsw: D7d
     qliq = ratio4 * qtot + ratio3 * _CL_RETAIN * qnew
     qice = (1.0 - ratio4) * qtot + (1.0 - ratio3) * _CL_RETAIN * qnew
     return qliq, qice, wtw, qlqout, qicout
 
 
-def prof5(eq):
-    """PROF5 (l.2930-2974): Gaussian-mixing entrainment/detrainment fractions."""
+def prof5(eq, width=0.0):
+    """PROF5 (l.2930-2974): Gaussian-mixing entrainment/detrainment fractions.
+
+    ``width`` > 0: the two polynomial branches (``y >= 0`` / ``y < 0``, which
+    differ by ~1e-5 at ``y = 0``) are each continued analytically through 0
+    and blended by a cubic smoothstep over ``|y| < width``; 0 is the oracle."""
+    if width:  # kfsw: S
+        return _prof5_c1(eq, width)
     x = (eq - 0.5) / _P5_SIGMA  # noqa: F841  (computed but unused in the oracle)
     y = _P5_Y_SCALE * eq - _P5_Y_OFF
     ey = jnp.exp(y * y / (-2))
@@ -533,6 +723,29 @@ def prof5(eq):
     ee = jnp.where(pos, ee_pos, ee_neg)  # kfsw: D7e
     ud = jnp.where(pos, ud_pos, ud_neg)  # kfsw: D7e
     return ee / _P5_FE, ud / _P5_FE
+
+
+def _prof5_c1(eq, width):
+    y = _P5_Y_SCALE * eq - _P5_Y_OFF
+    ey = jnp.exp(y * y / (-2))
+    e45 = jnp.exp(jnp.asarray(_P5_E45_ARG, eq.dtype))
+    t1 = _P5_T1
+    c1 = _P5_A1 * t1 + _P5_A2 * t1 * t1 + _P5_A3 * t1 * t1 * t1
+    s = _P5_SIGMA
+
+    def c2(yy):  # |y| replaced by the branch's own sign, clamped clear of the pole
+        t2 = 1.0 / (1.0 + _P5_P * yy)
+        return _P5_A1 * t2 + _P5_A2 * t2 * t2 + _P5_A3 * t2 * t2 * t2
+
+    c2p = c2(jnp.maximum(y, -width))  # kfsw: D7e
+    c2n = c2(jnp.maximum(-y, -width))  # kfsw: D7e
+    ee_pos = s * (0.5 * (_P5_SQRT2P - e45 * c1 - ey * c2p) + s * (e45 - ey)) - e45 * eq * eq / 2.0
+    ud_pos = s * (0.5 * (ey * c2p - e45 * c1) + s * (e45 - ey)) - e45 * (0.5 + eq * eq / 2.0 - eq)
+    ee_neg = s * (0.5 * (ey * c2n - e45 * c1) + s * (e45 - ey)) - e45 * eq * eq / 2.0
+    ud_neg = (s * (0.5 * (_P5_SQRT2P - e45 * c1 - ey * c2n) + s * (e45 - ey))
+              - e45 * (0.5 + eq * eq / 2.0 - eq))
+    b = smoothstep_cubic((y + width) / (2.0 * width))  # kfsw: D7e
+    return (ee_neg + b * (ee_pos - ee_neg)) / _P5_FE, (ud_neg + b * (ud_pos - ud_neg)) / _P5_FE
 
 
 # --------------------------------------------------------------------------
@@ -589,7 +802,6 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
     CLIQ = kc.svp2 * kc.svpt0
     DLIQ = kc.svp3
     ab = (ALIQ, BLIQ, CLIQ, DLIQ)
-    alu = lut[3]
     GDRY = -G / CP
     DXSQ = dx * dx
     DPMIN = prm["dpmin"]
@@ -671,7 +883,7 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         ZMIX = ZS / DPTHMX_s
         PMIX = PS / DPTHMX_s
         EMIX = QMIX * PMIX / (_EPS_KF + QMIX)
-        tlog = _tlog_lookup(alu, EMIX / ALIQ)
+        tlog = _tlog_lookup(lut, EMIX / ALIQ)
         TDPT = (CLIQ - DLIQ * tlog) / (BLIQ - tlog)
         TLCL = _tsat_from_dewpoint(TDPT, TMIX)
         TLCL = jnp.minimum(TLCL, TMIX)  # kfsw: E2
@@ -709,7 +921,7 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         go = go0 & trig  # updraft computed for this candidate
 
         # --- updraft initialisation (l.1034-1121) ---
-        th_k = _envirtht(alu, ab, PMIX, TMIX, QMIX)
+        th_k = _envirtht(lut, ab, PMIX, TMIX, QMIX)
         DTTOT = DTLCL + DTRH
         big = DTTOT > _DTTOT_MIN_K  # kfsw: D3
         GDT = 2.0 * G * DTTOT * _GDT_DEPTH_M / TVEN
@@ -783,10 +995,10 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
             dzz = jnp.where(first, Z0[NK1] - ZLCL, DZA[NK])  # kfsw: C-KLCL
             enterm = 2.0 * u["REI"] * u["WTW"] / u["UPOLD"]
             qliq, qice, wtw, qlqout, qicout = _condload(qliq, qice, u["WTW"], dzz, boterm,
-                                                        enterm, qnl, qni, G)
+                                                        enterm, qnl, qni, G, lut.sm)
             stop1 = wtw < _WTW_STOP  # kfsw: C-LTOP
             a2 = a & ~stop1
-            thetee = _envirtht(alu, ab, P0[NK1], T0[NK1], Q0[NK1])  # kfsw: S
+            thetee = _envirtht(lut, ab, P0[NK1], T0[NK1], Q0[NK1])  # kfsw: S
             rei = u_vmf * DP[NK1] * prm["entrain_const"] / RAD  # kfsw: S
             tvqu = tu * (1.0 + _TV_COEF * qu - qliq - qice)
             # kfsw: C-KLCL
@@ -815,7 +1027,7 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
             eqf = (TV0[NK1] - tvqu) * _F1_LO / _sd(tu10 - tvqu, ~tiny)  # kfsw: D4
             eqf = jnp.maximum(0.0, eqf)  # kfsw: E7
             eqf = jnp.minimum(1.0, eqf)  # kfsw: E7
-            ee_p, ud_p = prof5(eqf)
+            ee_p, ud_p = prof5(eqf, lut.sm.prof5_width)
             ee_s = jnp.where(eqf == 1, 1.0, jnp.where(eqf == 0.0, 0.0, ee_p))  # kfsw: D7f
             ud_s = jnp.where(eqf == 1, 0.0, jnp.where(eqf == 0.0, 1.0, ud_p))  # kfsw: D7f
             ee2 = jnp.where(cold, 0.5, jnp.where(vb | tiny, 1.0, ee_s))  # kfsw: D4
@@ -979,7 +1191,6 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     zero = jnp.zeros((), dtype)
     G, CP, R, XLV0, XLV1 = kc.g, kc.cp, kc.r, kc.xlv0, kc.xlv1
     ALIQ, BLIQ, CLIQ, DLIQ = ab
-    alu = lut[3]
     fired0 = sc["done"] & ~sc["ret"]
     ISHALL = sc["ISHALL"]
     sh = ISHALL == 1  # kfsw: B1
@@ -1066,7 +1277,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     for_zero = (UDR, QDT, QLIQ, QICE, QLQOUT, QICOUT, PPTLIQ, PPTICE, DETLQ, DETIC, RATIO2)
     (UDR, QDT, QLIQ, QICE, QLQOUT, QICOUT, PPTLIQ, PPTICE, DETLQ, DETIC, RATIO2) = (
         jnp.where(blw, 0.0, a) for a in for_zero)  # kfsw: C-KLCL,C-KPBL
-    THETEE = jnp.where(blw, _envirtht(alu, ab, P0, T0, Q0), THETEE)  # kfsw: C-KLCL,C-KPBL
+    THETEE = jnp.where(blw, _envirtht(lut, ab, P0, T0, Q0), THETEE)  # kfsw: C-KLCL,C-KPBL
     EQFRC = jnp.where(blw, 1.0, EQFRC)  # kfsw: C-KLCL,C-KPBL
     above = valid & (kk >= LTOP + 1)  # kfsw: C-LTOP
     above2 = valid & (kk > LTOP + 1)  # kfsw: C-LTOP
@@ -1339,7 +1550,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         qmix_s = qmix - dq
         qmix_u = jnp.maximum(qmix, 0.0)  # kfsw: E17
         emix = qmix_u * PMIX / (_EPS_KF + qmix_u)
-        tlog = _tlog_lookup(alu, emix / ALIQ)
+        tlog = _tlog_lookup(lut, emix / ALIQ)
         tdpt = (CLIQ - DLIQ * tlog) / (BLIQ - tlog)
         tlcl_u = jnp.minimum(_tsat_from_dewpoint(tdpt, tmix), tmix)  # kfsw: E2
         tmix = jnp.where(sup, tmix_s, tmix)  # kfsw: D7j
@@ -1372,7 +1583,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
                               ((tvlcl + tvqu) / (tven + TVG[NK1]) - 1.0) * (Z0[klcl] - zlcl),
                               ((tvq[NK] + tvqu) / (TVG[NK] + TVG[NK1]) - 1.0) * DZA[NK])
             abeg = jnp.where(b & (dilbe > 0.0), abeg + dilbe * G, abeg)  # kfsw: E6
-            thteeg = _envirtht(alu, ab, P0[NK1], TG[NK1], QG[NK1])  # kfsw: S
+            thteeg = _envirtht(lut, ab, P0[NK1], TG[NK1], QG[NK1])  # kfsw: S
             th_new = thn * DDILFRC[NK1] + thteeg * (1.0 - DDILFRC[NK1])  # kfsw: S
             return (_put(th, NK1, th_new, b), _put(tvq, NK1, tvqu, b), abeg)  # kfsw: C-KLCL2
 
@@ -1540,13 +1751,15 @@ KF_ORACLE_PARAMS = dict(
 
 def kf_eta_para(u, v, t, qv, p, dzq, w0avg, rhoe, *, dt, dx, constants: KFConstants,
                 params=None, trigger: int = 3, warm_rain: bool = True, f_qi: bool = False,
-                f_qs: bool = False, cudt: float = 0.0):
+                f_qs: bool = False, cudt: float = 0.0, smoothing: KFSmoothing | None = None):
     """KF_eta_PARA on a batch of columns.
 
     All profile inputs have shape ``(ncol, nlev)``, levels BOTTOM-UP, ``qv`` a
     mixing ratio.  ``trigger`` is the WRF ``kf_trigger`` option (1 or 3);
     ``warm_rain``/``f_qi``/``f_qs`` select the oracle's hydrometeor-feedback
     branch.  ``cudt`` [min] only sets ``nca`` for shallow convection.
+    ``smoothing`` holds the RULE 5 widths; ``None`` = the smooth defaults of
+    ``KainFritschConfig`` (:func:`kf_smoothing`), ``KF_HARD`` = the oracle.
     Returns a dict of the oracle outputs (and end-of-routine diagnostics), each
     with a leading column axis.
     """
@@ -1572,9 +1785,10 @@ def kf_eta_para(u, v, t, qv, p, dzq, w0avg, rhoe, *, dt, dx, constants: KFConsta
     constants = KFConstants(*(float(x) for x in constants))
     prm = {k: num(x) for k, x in prm.items()}
     dt, dx = num(dt), num(dx)
-    lut = tuple(jnp.asarray(x, dtype) for x in kf_lookup_tables(
-        float(constants.svp1), float(constants.svp2), float(constants.svp3),
-        float(constants.svpt0)))
+    sm = kf_smoothing(KainFritschConfig()) if smoothing is None else KFSmoothing(*smoothing)
+    validate_kf_smoothing(sm)
+    sm = KFSmoothing(*(float(w) for w in sm))
+    lut = _kf_tables(constants, dtype, sm)
     col = functools.partial(
         _column, dt=dt, dx=dx, kc=constants, lut=lut, prm=prm, trigger=trigger,
         warm_rain=warm_rain, f_qi=f_qi, f_qs=f_qs, cudt=cudt)
