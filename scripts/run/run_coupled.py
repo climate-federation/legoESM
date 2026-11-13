@@ -723,6 +723,14 @@ def build_parser():
                              "off. Closes the air-sea budget only with the "
                              "prognostic 3D ocean; the slab/two-layer ocean "
                              "computes its own fluxes.")
+    parser.add_argument("--atm-owns-surface",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="The atmosphere owns the land and open-water "
+                             "surface fluxes (CoupledConfig.atm_owns_surface, "
+                             "MPAS column loop only): the coupler steps only "
+                             "sea ice and lakes and hands their fluxes back; "
+                             "the ocean is forced by the atmosphere's "
+                             "open-water exchange. Default off.")
     # SLAB-only (LandConfig.runoff_scheme). topmodel = SIMTOP sub-grid saturated
     # fraction + topographic baseflow (Niu 2005 / CLM4.5); it is implemented and
     # param-spec'd but was unreachable -- land_scheme_overrides built
@@ -1146,7 +1154,8 @@ def main(argv=None, *, build_only=False):
     # so make_grid_remapper hits the regular-lat-lon overlap branch.  A
     # co-located spectral 3-D ocean stays idealized; cubed_sphere / latlon /
     # voronoi(MPAS) support the dynamic ocean too.
-    overrides = {"couple_surface_fluxes": args.couple_surface_fluxes}
+    overrides = {"couple_surface_fluxes": args.couple_surface_fluxes,
+                 "atm_owns_surface": args.atm_owns_surface}
     ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
     # A cubed-sphere OR gaussian(spectral) atmosphere drives a 3-D ocean ONLY on
     # a DISTINCT lat-lon ocean grid (--ocean-grid latlon:<res>), coupled via the

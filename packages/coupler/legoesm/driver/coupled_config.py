@@ -170,6 +170,15 @@ class CoupledConfig(NamedTuple):
     # (explicit coupling), exactly like ``couple_surface_radiation``.
     couple_surface_fluxes: bool = False
 
+    # The atmosphere owns the land and open-water surface fluxes (P5c, design
+    # D4; MPAS column loop only).  The coupler steps only sea ice and lakes,
+    # with the radiation the atmosphere booked for them, and hands their
+    # fluxes back; the ocean is forced by the atmosphere's open-water
+    # exchange, the rivers by the atmosphere land's runoff.  False keeps the
+    # coupler owning every tile (its own second land model and ocean bulk
+    # flux), under which water and energy cannot close on the column lane.
+    atm_owns_surface: bool = False
+
     # Warm-start the land soil at the atmosphere's lat-structured near-surface
     # air temperature (t=0) instead of the uniform 280 K default.  The uniform
     # default makes tropical land soil start ~18 K too cold, and the (slow)

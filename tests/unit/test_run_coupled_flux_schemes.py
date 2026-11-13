@@ -337,6 +337,31 @@ def test_couple_surface_fluxes_reaches_the_driver_config(monkeypatch, argv, want
     assert captured["args"][1].couple_surface_fluxes is want
 
 
+@pytest.mark.parametrize("argv,want", [
+    ([], False),
+    (["--atm-owns-surface"], True),
+])
+def test_atm_owns_surface_reaches_the_driver_config(monkeypatch, argv, want):
+    """--atm-owns-surface reaches the CoupledConfig the driver gets; unset
+    keeps the library default off."""
+    import legoesm.driver.coupled_esm_driver as ced
+
+    captured = {}
+
+    class _StopError(Exception):
+        pass
+
+    def _recorder(*a, **kw):
+        captured["args"] = a
+        raise _StopError
+
+    monkeypatch.setattr(ced, "CoupledESMDriver", _recorder)
+    monkeypatch.setattr(sys, "argv", ["run_coupled", "--days", "1"] + argv)
+    with pytest.raises(_StopError):
+        mod.main()
+    assert captured["args"][1].atm_owns_surface is want
+
+
 def test_land_runoff_cli_rejects_unknown():
     with pytest.raises(SystemExit):
         mod.build_parser().parse_args(["--land-runoff-scheme", "garbage"])
