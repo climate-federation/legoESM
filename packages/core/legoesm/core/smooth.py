@@ -246,6 +246,22 @@ def _straight_through_jvp(primals, tangents):
     return primals[0], tangents[1]
 
 
+def sqrt_c1(x: jax.Array, width: float) -> jax.Array:
+    """C1 ``sqrt(max(x, 0))``: exactly 0 for ``x <= 0``, exactly ``sqrt(x)`` for
+    ``x >= width``, and the monotone cubic Hermite bridge
+    ``sqrt(width) * (2.5 t**2 - 1.5 t**3)``, ``t = x/width``, between (value and
+    slope match at both joins).  ``width = 0`` is the hard ``sqrt(max(x, 0))``
+    with a zero gradient at ``x <= 0``.  The square root is evaluated only on
+    ``x >= width`` (masked argument), so its gradient stays finite."""
+    if width == 0:
+        ok = x > 0.0
+        return jnp.where(ok, jnp.sqrt(jnp.where(ok, x, 1.0)), 0.0)
+    t = jnp.clip(x / width, 0.0, 1.0)
+    bridge = math.sqrt(width) * t * t * (2.5 - 1.5 * t)
+    above = x >= width
+    return jnp.where(above, jnp.sqrt(jnp.where(above, x, width)), bridge)
+
+
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
     """Smooth approximation to |x|.
 
