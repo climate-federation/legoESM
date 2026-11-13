@@ -49,7 +49,8 @@ p = 50), ``crit_level_sharpness`` / ``crit_level_floor``
 (the sign-agreement test of ``ubi`` across the layer).  ``crit_level_floor``
 defaults to CAM's ``c = 0``.  ``softmin_sharpness`` is also p of the same
 p-norm smooth min for the ``umcfac`` and ``tndmax`` tendency limiters (#2241,
-2026-11-07; one knob: GLM + Claude majority, codex preferred a separate field).  The ``hdsp > 10 m`` gate (static
+2026-11-07; one knob: GLM + Claude majority, codex preferred a separate field), and of the
+launch Froude cap ``min(hdsp^2, fcrit2 (U/N)^2)`` (#2241, 2026-11-12).  The ``hdsp > 10 m`` gate (static
 orography), ``n2min``, ``taumin`` (a 1e-10 Pa jump) and ``ubmc2mn`` are hard,
 as in CAM (piecewise smooth; finite gradients).  The production smoothing values are NOT the hard limit.
 KNOWN DIFFERENCE at the defaults (vs the CAM6 oracle, 14 columns, pinned per
@@ -57,7 +58,9 @@ column in the oracle test): field max-norm relative 3.7e-3 in du/dt, 4.5e-3 in
 dT/dt, 3.4e-5 in dq/dt; per column up to 2.9e-2 in du/dt and 2.7e-2 in dT/dt
 (column 11).  Re-measured 2026-11-07 with the smooth limiters (#2241): only
 the limiter column 10 moved (du/dt 3.52e-3 -> 3.66e-3, dT/dt 4.23e-3 ->
-4.46e-3; field max-norm was 3.5e-3 / 4.2e-3).  Measured 2026-10-29 when the smooth min became the p-norm
+4.46e-3; field max-norm was 3.5e-3 / 4.2e-3); re-measured 2026-11-12 with the
+smooth Froude cap: columns 0, 9 and 10 move only in the 6th-7th digit (field
+max-norm unchanged).  Measured 2026-10-29 when the smooth min became the p-norm
 (#2241), re-measured on the #2238 merge (``crit_level_floor = 0`` among its
 changes; dq/dt was 1.3e-4 before it, du/dt and dT/dt unchanged); the earlier sigmoid blend, not C1 at taudmp = tausat, gave field
 max-norm 1.2e-2 in du/dt.  The hard limit is every sharpness -> inf (1e12)
@@ -215,6 +218,8 @@ def _mcfarlane_launch_stress(
     (CAM ``hdsp = 2*sgh``) when the resolved ``use_e3sm_hdsp`` is True, else
     the legacy ``h``.  Returned BEFORE ``directional_spread`` and the
     ``hdsp > 10 m`` gate.  ``h_topo_sq`` is the (land-scaled) ``sgh**2``.
+    RULE 5 (#2241): the Froude cap ``min`` is the p-norm smooth min with
+    p = ``config.softmin_sharpness`` (exact ``min`` as p -> inf).
     """
     froude_h_sq = config.fcrit2 * safe_divide(
         U_activated ** 2, N_sfc ** 2, eps=1e-30,
@@ -224,7 +229,7 @@ def _mcfarlane_launch_stress(
     # passing an unresolved ``"auto"`` (truthy) config on the legacy branch
     # instead of silently doubling.
     h_disp_sq = 4.0 * h_topo_sq if config.use_e3sm_hdsp is True else h_topo_sq
-    h_eff_sq = jnp.minimum(h_disp_sq, froude_h_sq)
+    h_eff_sq = pnorm_smooth_min(h_disp_sq, froude_h_sq, config.softmin_sharpness, 0.0)
     return config.G_0 * rho_sfc * N_sfc * config.k_wave * h_eff_sq * U_activated
 
 
