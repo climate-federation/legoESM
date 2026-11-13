@@ -16,17 +16,24 @@ damping target RECORDED from a forward run of the full composed K0 step
 fluxes are therefore fixed: the bulk-formula feedback is absent; the ocean
 step, which dominates the cost, is the production one.
 
-Reported per run: XLA's compiled memory estimate, the device's peak bytes in
-use before and after the gradient, compile and run wall time, loss, gradient
-norm and finiteness.  ``--parity`` additionally compares the loop's forward
-final state with an eager chain of ``model.step`` calls (production path).
-A RESOURCE_EXHAUSTED error is recorded as ``"oom": true``, not raised.
+Reported per run: XLA's compiled memory estimate; the device's bytes in use,
+peak bytes and allocator limit just before the gradient and after it (peak is
+since process start, so the gradient's own share is peak-after minus
+in-use-before); compile time and first-call run time; loss, gradient norm and
+finiteness.  Only the stacked inputs stay on the device during the gradient (a
+damping rate that is the same every step is held once).  ``--parity``, run
+before the gradient, compares the loop's forward final state with an eager
+chain of ``model.step`` calls (production path).  Step 1 runs eagerly, so
+``--steps N`` differentiates N - 1 steps.  A RESOURCE_EXHAUSTED error is
+recorded as ``"oom": true``, not raised.
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -53,6 +60,8 @@ def stack_inputs(inputs):
     ``inputs`` are the kwargs of steps 2..N (step 1 runs eagerly).  The stamp is
     checked on the host, then cleared so the stacked pytree holds arrays only;
     the loop body re-stamps it with the traced counter (as ``integrate_scan``).
+    A damping rate identical on every step is returned once, not stacked.
+    Returns ``(stacked, gamma)``; ``gamma`` is None when the rate varies.
     """
     clean = []
     for i, kw in enumerate(inputs):
@@ -60,20 +69,27 @@ def stack_inputs(inputs):
         if kt != i + 2:
             raise ValueError(f"damping target for loop step {i} has kt={kt!r}, expected {i + 2}")
         clean.append(dict(kw, sponge=kw["sponge"]._replace(nemo_kt=None)))
-    return jax.tree.map(lambda *xs: jnp.stack(xs), *clean)
+    g0 = np.asarray(clean[0]["sponge"].gamma)
+    gamma = None
+    if all(np.array_equal(g0, np.asarray(kw["sponge"].gamma)) for kw in clean):
+        gamma = clean[0]["sponge"].gamma
+        clean = [dict(kw, sponge=kw["sponge"]._replace(gamma=None)) for kw in clean]
+    return jax.tree.map(lambda *xs: jnp.stack(xs), *clean), gamma
 
 
-def make_rollout(model, state1, dt, n_loop, schedule, checkpoints=None):
-    """``(dT, stacked) -> state`` after ``n_loop`` steps from ``state1`` with T += dT."""
+def make_rollout(model, dt, n_loop, schedule, checkpoints=None):
+    """``(dT, stacked, gamma, state1) -> state`` after ``n_loop`` steps from
+    ``state1`` with T += dT (every array an operand, none a closure constant)."""
 
-    def rollout(dT, stacked):
+    def rollout(dT, stacked, gamma, state1):
         st = state1._replace(T=state1.T.replace(data=state1.T.data + dT))
 
         def body(carry):
             i, s = carry
             kw = jax.tree.map(lambda a: a[i], stacked)
             kt = i + 2  # one traced object for both: step() checks identity
-            kw["sponge"] = kw["sponge"]._replace(nemo_kt=kt)
+            sponge = kw["sponge"]._replace(nemo_kt=kt)
+            kw["sponge"] = sponge if gamma is None else sponge._replace(gamma=gamma)
             return i + 1, model.step(s, dt, nemo_kt=kt, **kw)
 
         _, final = checkpointed_loop(body, (jnp.asarray(0, jnp.int32), st), n_loop,
@@ -90,9 +106,9 @@ def volume_mean_t2(model, z_coord):
     return lambda state: jnp.sum(w * state.T.data ** 2) / jnp.sum(w)
 
 
-def _peak_bytes():
+def _mem():
     stats = jax.devices()[0].memory_stats() or {}
-    return stats.get("peak_bytes_in_use")
+    return {k: stats.get(k) for k in ("bytes_in_use", "peak_bytes_in_use", "bytes_limit")}
 
 
 def _is_oom(error: Exception) -> bool:
@@ -159,50 +175,30 @@ def measure(steps, schedule, checkpoints, parity, save_grad):
     if get_policy().transcendentals != "native":
         raise SystemExit("native transcendental policy is not active")
 
-    out = {"steps": steps, "schedule": schedule, "checkpoints": checkpoints,
-           "backend": jax.default_backend(), "device": str(jax.devices()[0]),
+    out = {"steps": steps, "differentiated_steps": steps - 1, "schedule": schedule,
+           "checkpoints": checkpoints, "backend": jax.default_backend(),
+           "device": str(jax.devices()[0]),
+           "env": {k: os.environ.get(k) for k in ("XLA_PYTHON_CLIENT_PREALLOCATE",
+                                                  "XLA_PYTHON_CLIENT_MEM_FRACTION",
+                                                  "XLA_PYTHON_CLIENT_ALLOCATOR")},
            "legoesm_ocean_file": __import__("legoesm.ocean").ocean.__file__}
     t0 = time.perf_counter()
     card, model, state0, inputs = record_forced_inputs(steps)
     dt = card.ocean.dt_s
     state1 = _state_of(model.step(state0, dt, nemo_kt=1, **inputs[0]))
     state1 = model.seed_scan_carry(state1, dt, nemo_kt=2, **inputs[1])
-    stacked = stack_inputs(inputs[1:])
+    del state0
+    stacked, gamma = stack_inputs(inputs[1:])
     out["setup_s"] = time.perf_counter() - t0
     out["dt_s"] = dt
-    out["stacked_input_bytes"] = int(sum(a.nbytes for a in jax.tree.leaves(stacked)))
+    out["stacked_input_bytes"] = int(sum(a.nbytes for a in jax.tree.leaves((stacked, gamma))))
+    out["damping_rate_shared"] = gamma is not None
     out["state_bytes"] = int(sum(np.asarray(a).nbytes for a in jax.tree.leaves(state1)))
-    out["peak_bytes_before_grad"] = _peak_bytes()
 
-    rollout = make_rollout(model, state1, dt, steps - 1, schedule, checkpoints)
-    loss_fn = volume_mean_t2(model, card.ocean.recipe.z_coord)
-    vg = jax.jit(jax.value_and_grad(lambda dT, xs: loss_fn(rollout(dT, xs))))
+    rollout = make_rollout(model, dt, steps - 1, schedule, checkpoints)
     dT0 = jnp.zeros_like(state1.T.data)
-    try:
-        t0 = time.perf_counter()
-        compiled = vg.lower(dT0, stacked).compile()
-        out["compile_s"] = time.perf_counter() - t0
-        mem = compiled.memory_analysis()
-        if mem is not None:
-            out["xla_temp_bytes"] = int(mem.temp_size_in_bytes)
-            out["xla_argument_bytes"] = int(mem.argument_size_in_bytes)
-            out["xla_output_bytes"] = int(mem.output_size_in_bytes)
-        t0 = time.perf_counter()
-        loss, grad = jax.block_until_ready(compiled(dT0, stacked))
-        out["grad_run_s"] = time.perf_counter() - t0
-    except Exception as error:  # noqa: BLE001 - recorded, see docstring
-        if not _is_oom(error):
-            raise
-        out.update(oom=True, error=str(error)[:2000])
-        return out
-    g = np.asarray(grad)
-    out.update(oom=False, loss=float(loss), grad_l2=float(np.sqrt(np.sum(g * g))),
-               grad_max_abs=float(np.max(np.abs(g))), grad_nonfinite=int((~np.isfinite(g)).sum()),
-               peak_bytes_after_grad=_peak_bytes())
-    if save_grad is not None:
-        np.save(save_grad, g)
-    if parity:
-        loop_final = jax.jit(rollout)(dT0, stacked)
+    if parity:  # before the gradient, so an OOM there cannot lose it
+        loop_final = jax.jit(rollout)(dT0, stacked, gamma, state1)
         st = state1
         for kt in range(2, steps + 1):
             st = _state_of(model.step(st, dt, nemo_kt=kt, **inputs[kt - 1]))
@@ -210,6 +206,36 @@ def measure(steps, schedule, checkpoints, parity, save_grad):
             name: float(np.max(np.abs(np.asarray(getattr(loop_final, name).data)
                                       - np.asarray(getattr(st, name).data))))
             for name in ("T", "S", "eta", "u", "v")}
+        del loop_final, st
+    del inputs  # the gradient holds only the stacked copy
+    gc.collect()
+    out["mem_before_grad"] = _mem()
+
+    loss_fn = volume_mean_t2(model, card.ocean.recipe.z_coord)
+    vg = jax.jit(jax.value_and_grad(lambda dT, *ops: loss_fn(rollout(dT, *ops))))
+    try:
+        t0 = time.perf_counter()
+        compiled = vg.lower(dT0, stacked, gamma, state1).compile()
+        out["compile_s"] = time.perf_counter() - t0
+        mem = compiled.memory_analysis()
+        if mem is not None:
+            out["xla_temp_bytes"] = int(mem.temp_size_in_bytes)
+            out["xla_argument_bytes"] = int(mem.argument_size_in_bytes)
+            out["xla_output_bytes"] = int(mem.output_size_in_bytes)
+        t0 = time.perf_counter()
+        loss, grad = jax.block_until_ready(compiled(dT0, stacked, gamma, state1))
+        out["grad_run_s_first_call"] = time.perf_counter() - t0
+    except Exception as error:  # noqa: BLE001 - recorded, see docstring
+        if not _is_oom(error):
+            raise
+        out.update(oom=True, error=str(error)[:2000], mem_at_oom=_mem())
+        return out
+    g = np.asarray(grad)
+    out.update(oom=False, loss=float(loss), grad_l2=float(np.sqrt(np.sum(g * g))),
+               grad_max_abs=float(np.max(np.abs(g))), grad_nonfinite=int((~np.isfinite(g)).sum()),
+               mem_after_grad=_mem())
+    if save_grad is not None:
+        np.save(save_grad, g)
     return out
 
 
