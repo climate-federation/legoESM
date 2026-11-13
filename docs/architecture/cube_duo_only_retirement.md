@@ -1,98 +1,228 @@
-# Cubed-sphere atmosphere retirement (2026-11-13)
+# Cubed-sphere atmosphere retirement
 
-The user selected FV3 duo as the only cubed-sphere atmosphere dynamical core.
-Legacy selectors raise ValueError naming fv3_duo; they do not alias to duo or
-fall back to another core. Atmospheric registry entries and re-exports are
-removed. Non-cube dispatch and numerical implementations are preserved.
+User decision: 2026-11-13. FV3 duo is the only supported cubed-sphere
+atmosphere dynamical core. Retired selectors raise ValueError naming fv3_duo,
+including registered plugins using the twelve retired flat names. Other plugin
+names retain their existing registry precedence. Passive tracer transport is
+retained: it prescribes winds rather than implementing an atmosphere dycore.
 
-## Defaults
+## Defaults changed
 
-- Driver DycoreConfig: cdgrid -> fv3_duo.
-- AMIP cube grid resolver: centered -> fv3_duo.
-- Coupled cube grid resolver: cdgrid -> fv3_duo.
-- Nested YAML cube default and fallback: cdgrid -> fv3_duo.
-- Experiment-template cube resolver: cdgrid -> fv3_duo.
-- RCE cube CLI default: cdgrid -> fv3_duo.
-- amip_sota.yaml: cdgrid -> fv3_duo.
-- amip_realism_c12.yaml: implicit legacy default -> explicit fv3_duo.
-- Atmosphere matrix cube selector: production/FB -> fv3_duo; the old matrix
-  adapters refuse execution because they have no duo implementation.
+| Entry point | Old cube selection | New cube selection |
+| --- | --- | --- |
+| driver DycoreConfig | cdgrid | fv3_duo |
+| AMIP grid resolver | centered | fv3_duo |
+| Coupled grid resolver | cdgrid | fv3_duo |
+| Nested YAML default/fallback | cdgrid | fv3_duo |
+| Experiment-template resolver | cdgrid | fv3_duo |
+| RCE grid-aware default | cdgrid | fv3_duo |
+| Levante segment benchmark resolver | cdgrid | fv3_duo |
+| Held-Suarez/RRTMGP all-grids deck | cdgrid | fv3_duo |
+| AMIP all-grids smoke cube labels | centered / finite_volume / cdgrid | fv3_duo |
+| amip_sota.yaml | cdgrid | fv3_duo |
+| amip_realism_c12.yaml | implicit legacy default | explicit fv3_duo |
+| Atmosphere matrix cube adapters | legacy model constructors / production / FB | fv3_duo; unsupported adapters refuse |
 
-## Parity backlog
+Non-cube resolver rows and numerical implementations are preserved. The RCE
+parser uses a sentinel to change only the cube default; its old non-cube
+fallback remains cdgrid. Historical smoke labels are retained as labels, with
+all cube labels explicitly selecting fv3_duo.
 
-These configurations now fail rather than execute the retired atmosphere:
+## Parity backlog: configurations that now refuse
 
-- Cube shallow-water atmosphere, including Williamson, cosine bell, modons,
-  CLI test/benchmark, legacy SW benchmarks and visual-regression adapters.
-  Shared ocean SW remains available through its ocean registry.
-- The existing cube atmosphere matrix adapters (Held-Suarez, baroclinic/AMIP,
-  moist and nonhydrostatic cases), legacy cube benchmark/scaling adapters,
-  and the old cube scan-equivalence validator. Their non-cube branches remain.
+- Cube shallow-water atmosphere: Williamson, cosine bell, modons, CLI
+  test/benchmark, legacy SW benchmarks and visual-regression adapters.
+- Existing cube atmosphere matrix adapters: Held-Suarez, baroclinic/AMIP,
+  moist and nonhydrostatic cases. Legacy cube benchmark, scaling, profiler,
+  and scan-equivalence adapters also have no duo port in this change.
 - Main-path full-physics AMIP/RCE and coupled setups requiring that path.
-  The existing hydrostatic duo column lane retains its existing physics;
-  no physics coupling is ported here. The two historical AMIP decks still
-  carry incompatible main-path physics/levels/options and deliberately fail.
-- fp32/float32 and mixed precision with fp32 storage. Existing uniform fp64
-  (including mixed_fp64_storage) behavior remains.
-- MPI/mpi4jax atmosphere decomposition. The supported distributed duo lane
-  remains SPMD, including its existing window layout.
-- Unsupported vertical counts: main lane outside 5/10; column lane outside
-  5/10/32. The column 32-level lane keeps the existing CAM6 table.
-- Height-coordinate compressible Euler; the dry duo NH pressure-coordinate
-  arm remains a distinct supported lane within its existing restrictions.
-- Semi-implicit/selectable time integrators and implicit-gravity-wave knobs.
-- Legacy persistent_dgrid and tiled C/D-grid atmosphere step/operator-split
-  adapters, plus non-default options already refused by duo's default-deny
-  contract. Held-Suarez plus Kessler, NH Held-Suarez/Kessler, and NH column
-  physics remain refused under their existing contracts.
+  The two historical AMIP decks still carry incompatible main-path
+  physics/levels/options and deliberately fail. The existing hydrostatic
+  duo column physics remains available under its existing contract.
+- fp32/float32 and mixed precision with fp32 storage. Existing uniform fp64,
+  including mixed_fp64_storage, remains supported.
+- MPI/mpi4jax atmosphere decomposition. Distributed duo retains its existing
+  SPMD and window-layout policies.
+- Vertical counts outside 5/10 on the main lane or 5/10/32 on the column lane.
+  The existing CAM6 L32 table is retained; no vertical table is added.
+- Height-coordinate compressible Euler, semi-implicit/selectable time
+  integrators, and implicit-gravity-wave switches. The existing dry native
+  pressure-coordinate duo NH arm remains supported.
+- Main-path dycore energy-fixer use where it is not wired; the existing
+  factory refuses rather than accepting an open energy sink silently.
+- Legacy persistent_dgrid, enable_tiled_dycore, moisture_advection and
+  GridConfig.use_duogrid switches. Both duo lanes refuse these retired
+  switches. Native duo winds, halos and tracer transport remain valid.
+- Other legacy customizations rejected by the duo default-deny wall. Existing
+  HS+Kessler, NH HS/Kessler, and NH column-physics restrictions remain.
+
+No physics, numerics, tolerance, non-cube production default, forcing, or
+vertical table is ported or changed.
 
 ## Shared and ambiguous modules retained
 
-- atmosphere/dynamics/gcm/shallow_water_fv3_cdgrid.py: OceanModel uses its
-  fv3sw/fv3edge registry builders, including both model classes. Its module
-  and shared tests stay; atmosphere dispatch and re-exports are removed.
-- core/fv3_sw_core.py, core/fv3_del6_vt_flux.py, core/_fv3_divergence_corner.py:
-  shared SW/ocean dependencies.
+- atmosphere/dynamics/gcm/shallow_water_fv3_cdgrid.py, including its classes:
+  OceanModel uses its fv3sw/fv3edge provider builders. Atmosphere dispatch and
+  re-exports are removed; explicit ocean provider imports remain.
+- core/fv3_sw_core.py, core/fv3_del6_vt_flux.py and
+  core/_fv3_divergence_corner.py: shared SW/ocean dependencies.
 - atmosphere/_future/_fv3_lin_pgf.py: quarantined research helper with separate
-  tests; retained as ambiguous rather than expanding the retirement scope.
-- All shared cubed-sphere/CD-grid/duogrid grids, halo code, native FV3 kernels,
+  tests, retained as ambiguous rather than expanding the retirement scope.
+- Shared cubed-sphere/CD-grid/duogrid grids, halos, native FV3 kernels,
   operators, vertical coordinates, precision, field/state and reductions.
 
 ## Side decisions
 
-- ASKED: retire rather than silently alias the old cube selections; use
-  ValueError naming fv3_duo, as explicitly requested.
-- ASKED: preserve shared/ambiguous modules; the ocean SW registry is the
-  concrete reason the shallow-water module is retained.
-- ASKED: refuse unported matrix/benchmark adapters instead of inventing ports.
-- Existing validation's accumulated-error behavior is retained; the driver
-  lookup refuses immediately before construction. No physics, numerics,
-  tolerance, non-cube default or allow-list budget is changed.
-- Two independent read-only reviewers approved dispatch and deletion scope.
-  The named Claude/GLM tools were unavailable; reviewers were independent
-  Codex agents. Their runtime checks were not independent reruns.
+- User-directed: reject retired selections instead of aliasing them silently.
+- User-directed: retain shared/ambiguous modules; the ocean registry is the
+  measured import dependency requiring the shallow-water module to stay.
+- User-directed: refuse unported matrix/benchmark adapters instead of adding
+  physics coupling, vertical tables or numerical ports.
+- Preserve existing accumulated config diagnostics; factory lookup refuses
+  before constructing a retired solver.
+- Preserve generic test coverage by using the existing lat-lon pipeline for
+  manifest/replay bookkeeping and the existing Gaussian branch for generic
+  numeric CLI validation. Scientific inputs and tolerances stay unchanged.
+- Reject only the twelve exact retired plugin names; custom plugin names
+  retain their existing behavior. Tests include a registered retired-name
+  sentinel and a valid custom plugin control.
+- Two independent read-only Codex reviewers approved dispatch and deletion
+  scope, including the test-fixture and exact-name registry choices. The
+  named Claude/GLM review pair in CLAUDE.md was not run. A disputed claim
+  about the RCE file was checked against actual source: all three non-cube
+  smoke cases and three non-cube nightly cases remain; the HOLD was withdrawn.
 
-## Validation
+## Validation environment and mutation controls
 
-All Python execution and tests use SLURM CPU, account bb1596, partition compute,
-JAX_ENABLE_X64=1, and the specified virtualenv. A namespace guard restricts
-legoesm to this worktree and prints imported paths; subprocess checks inherit
-that guard. No tests execute on the login node.
+All Python execution and tests ran via SLURM CPU, account bb1596, partition
+compute, JAX_ENABLE_X64=1, using the requested virtualenv. The namespace guard
+restricts legoesm to this worktree, prints imported paths and is inherited by
+subprocesses. No tests ran on the login node.
 
-- Initial corrected core suites: 194 passed, 2 warnings in 77.52s (0:01:17).
-- Updated AMIP CLI suite: 367 passed, 1 warning in 34.20s.
-- Affected-file collection: 6625 tests collected in 34.58s.
-- Inline-import ratchet on original HEAD sources/budgets: 25 failed, 41 passed,
-  1 warning in 11.74s. Current tree: 23 failed, 41 passed, 1 warning in 13.05s.
-  The removed entries were both failing legacy modules. Every surviving
-  over-budget module's count is unchanged or reduced; no budget is increased.
+Implementation commit before the first controls: e137cbf996.
 
-Final validation, mutation controls and commit identifiers are recorded below
-once their SLURM runs finish.
+- Driver-selector mutation: restored the original driver_solver_name function
+  from 296752ec11117e42eb055e3c9bf5e9767e0b9f80. The tool printed MUTATION APPLIED;
+  the legacy-selection test produced `1 failed, 1 warning in 13.22s`.
+- Default mutation: restored DycoreConfig.discretization=cdgrid. The tool
+  printed MUTATION APPLIED; the defaults test produced
+  `1 failed, 1 warning in 0.95s`.
+- Each mutation restored saved bytes in finally and asserted a clean tracked
+  status. The restored check produced `177 passed, 2 warnings in 59.54s`.
+- Final controls on the completed implementation are recorded after their run.
+
+Local raw logs and control scripts are retained, ignored, under
+`.pytest_cache/cube-retirement/`.
+
+## Decisive pytest summaries
+
+- Initial core/factory/federation/dispatch/validation suites:
+  `194 passed, 2 warnings in 77.52s (0:01:17)`.
+- AMIP CLI: `367 passed, 1 warning in 34.20s`.
+- Latest retirement/plugin/legacy-option controls plus corrected bookkeeping
+  predicates and shrunk-import minimality:
+  `22 passed, 1 warning in 15.53s`.
+- RCE CLI validation: `19 passed, 1 warning in 76.95s (0:01:16)`.
+- Existing duo grid/factory/refusal/default-deny suites:
+  `29 passed, 1 warning in 235.62s (0:03:55)`.
+- Retained duo Kessler, lat-lon wind, coupled guard, standard-IC, and import
+  minimality coverage: `43 passed, 1 warning in 51.18s`.
+- Grid-independent bookkeeping/replay suite after fixture correction:
+  `1 failed, 29 passed, 3 skipped, 1 warning in 116.12s (0:01:56)`.
+  The sole failure is the independently reproduced original Kessler hard-guard
+  fixture; all surviving generic bookkeeping/replay checks pass.
+- Retained vapour-floor warning cases: `5 passed, 1 warning in 1.91s`.
+- CLI/driver/tracer/ratchet sweep before the final allowance shrink:
+  `3 failed, 6386 passed, 2 skipped, 4 warnings in 186.89s (0:03:06)`.
+  The stale-allowance failure was subsequently corrected by removing existing
+  allowances only; its minimality test passed in the focused checks. The
+  remaining import and literal failures reproduce on original tests/sources.
+- Affected-file collection before the supplementary cleanup:
+  `6625 tests collected in 34.58s`.
+- Remaining RCE smoke/nightly collection:
+  `3/6 tests collected (3 deselected) in 0.08s` under the repository's default
+  slow-test selection. The three nightly cases remain in source.
+
+### Inherited failures: verified against original tests/sources
+
+No allowance or tolerance is increased for these failures.
+
+- Inline-import ratchet, original HEAD sources/budgets:
+  `25 failed, 41 passed, 1 warning in 11.74s`.
+  Current tree: `23 failed, 41 passed, 1 warning in 13.05s`.
+  Both removed entries were failing retired modules; surviving over-budget
+  counts are unchanged or reduced.
+- Original-test replays each reproduced the same failure and restored a clean
+  tree: shared vector-lift roughness; spectral PE first-mass snapshot inside
+  grad; two conservation-pattern ratchets in unchanged ocean probes; the
+  lake-freeze fixture's hardcoded constant; production test imports in five
+  unchanged scripts; and module-top arrays in the unchanged land canopy solver.
+- Idealized Kessler recording test: original test and unchanged recording/config
+  functions reproduced `1 failed, 1 warning in 2.50s`. It asks for hard
+  saturation adjustment that Kessler already refuses; this is not ported here.
+
+### Unverified
+
+- Full repository suite, GPU scaling, and non-cube nightly integrations were
+  not run. The existing one-day Gaussian/slab coupled test timed out at its
+  unchanged 600-second limit; no timeout was increased.
+- Named Claude/GLM review pair was not run; the two available independent
+  reviewers were Codex agents.
+
+### Per-file mixed checks on the retired tree
+
+Each file ran in a fresh Python process to avoid the compiler limit encountered
+in the initial combined run. Failing checks below are covered by the original
+baseline replays above; their numerical code is unchanged.
+
+- `tests/atmosphere/dycore/regression/test_nh_rayleigh_fast_iter448.py`: `2 passed, 1 warning in 2.08s`.
+- `tests/atmosphere/dycore/unit/test_fv3_naming_phase5.py`: `2 passed, 1 warning in 0.48s`.
+- `tests/atmosphere/hydrostatic/unit/test_gw_oro_cam6_followups.py`: `15 passed, 3 warnings in 45.84s`.
+- `tests/atmosphere/nonhydrostatic/integration/test_nh_mass_conservation_anchored.py`: `4 passed, 1 warning in 30.01s`.
+- `tests/atmosphere/test_cube_moist_tracer_advection.py`: `1 passed, 1 warning in 17.99s`.
+- `tests/parallel/test_cube_tile_native_segment.py`: `1 passed, 1 warning in 0.65s`.
+- `tests/parallel/test_tiled_fv3_hydrostatic_tracer.py`: `1 passed, 1 warning in 27.76s`.
+- `tests/unit/test_diff_atmosphere_dynamics.py`: `12 passed, 1 warning in 95.36s (0:01:35)`.
+- `tests/unit/test_moisture_advection_wiring.py`: `8 passed, 1 warning in 13.78s`.
+- `tests/unit/test_pr_f_fixes.py`: `1 passed, 1 warning in 2.99s`.
+- `tests/validation/test_differentiability_regression.py`: `8 passed, 1 warning in 186.15s (0:03:06)`.
+- `tests/atmosphere/dycore/regression/test_smagorinsky_grad_at_zero_iter181.py`: `3 passed, 1 warning in 28.80s`.
+- `tests/atmosphere/hydrostatic/integration/test_amip_rrtmg.py`: `3 passed, 1 warning in 0.53s`.
+- `tests/atmosphere/hydrostatic/unit/test_primitive_eq.py`: `29 passed, 1 warning in 27.80s`.
+- `tests/atmosphere/nonhydrostatic/integration/test_nh_terrain_jacobian_mass.py`: `3 passed, 1 warning in 10.30s`.
+- `tests/distributed/test_cube_face_scatter_mpi.py`: `1 passed, 1 warning in 72.03s (0:01:12)`.
+- `tests/parallel/test_sharded_step_sharding_tripwire.py`: `1 passed, 1 skipped, 1 warning in 0.54s`.
+- `tests/parallel/test_tiled_halo_grouping.py`: `1 passed, 1 skipped, 1 warning in 0.83s`.
+- `tests/test_vector_cc_to_dgrid_wind_lift.py`: `1 failed, 1 warning in 29.59s`.
+- `tests/unit/test_diff_coupled_system.py`: `8 passed, 1 warning in 220.81s (0:03:40)`.
+- `tests/unit/test_no_module_top_jax_alloc.py`: `1 failed, 53 passed, 1 warning in 30.22s`.
+- `tests/unit/test_precision_leaf_dtypes.py`: `6 passed, 2 warnings in 56.35s`.
+- `tests/validation/validation_differentiability_all.py`: `1 xfailed, 1 warning in 25.42s`.
+- `tests/atmosphere/dycore/regression/test_te_drift_iter599.py`: `2 passed, 1 warning in 15.63s`.
+- `tests/atmosphere/hydrostatic/unit/test_atmosphere_invariants.py`: `4 passed, 1 warning in 49.21s`.
+- `tests/atmosphere/hydrostatic/validation/test_mass_conservation_anchored.py`: `6 passed, 1 warning in 29.26s`.
+- `tests/atmosphere/nonhydrostatic/unit/test_compressible_euler.py`: `25 passed, 1 warning in 27.16s`.
+- `tests/distributed/test_mpi_driver.py`: `2 passed, 1 warning in 1.88s`.
+- `tests/parallel/test_tiled_center_to_dgrid_vector.py`: `1 passed, 1 warning in 27.62s`.
+- `tests/unit/test_conservation_drift.py`: `2 failed, 60 passed, 1 warning in 16.90s`.
+- `tests/unit/test_dycore_energy_fixer.py`: `17 passed, 1 warning in 104.32s (0:01:44)`.
+- `tests/unit/test_physical_balances.py`: `4 passed, 1 warning in 43.85s`.
+- `tests/validation/test_cross_grid_nh_consistency.py`: `8 passed, 1 warning in 11.61s`.
+- `tests/atmosphere/dycore/test_persistent_dgrid_1028.py`: `3 passed, 1 warning in 29.30s`.
+- `tests/atmosphere/hydrostatic/unit/test_cross_grid_water_positivity.py`: `5 passed, 1 warning in 10.23s`.
+- `tests/atmosphere/hydrostatic/validation/test_pe_flux_form_continuity.py`: `6 passed, 1 warning in 37.86s`.
+- `tests/atmosphere/test_anchor_mass_api.py`: `1 failed, 20 passed, 1 warning in 41.35s`.
+- `tests/parallel/test_cube_face_scatter.py`: `4 passed, 1 warning in 25.20s`.
+- `tests/parallel/test_tiled_fv3_hydrostatic_momentum.py`: `2 passed, 1 warning in 33.13s`.
+- `tests/parallel/test_tiled_vertical_pe_stage.py`: `1 passed, 1 warning in 2.92s`.
+- `tests/unit/test_convection_config_for.py`: `7 passed, 1 warning in 13.34s`.
+- `tests/unit/test_issue_fixes.py`: `12 passed, 1 warning in 37.82s`.
+- `tests/unit/test_physics_state_carry.py`: `39 passed, 2 warnings in 187.58s (0:03:07)`.
+- `tests/validation/test_cross_grid_rce_smoke.py`: `3 passed, 1 warning in 25.95s`.
 
 ## Deleted files
 
-94 files:
+96 files: six implementation modules, eleven scripts, and 79 exclusive tests.
 
 - `packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler_cdgrid.py`
 - `packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_cdgrid.py`
@@ -103,6 +233,7 @@ once their SLURM runs finish.
 - `scripts/bench/bench_cube_shardmap_halo.py`
 - `scripts/bench/bench_cube_tiled_step_scaling.py`
 - `scripts/bench/bench_fv3_sw_fb_vs_production.py`
+- `scripts/bench/profile_cs_dycore.py`
 - `scripts/run/example_fv3_clip_helper.py`
 - `scripts/run/run_w2_w5_cosine_bell_iter1030.py`
 - `scripts/validate/cg_helmholtz_mixed_precision_1675.py`
@@ -155,6 +286,7 @@ once their SLURM runs finish.
 - `tests/distributed/test_mpi_fv3_step_fidelity.py`
 - `tests/parallel/test_cube_moist_spmd_parity.py`
 - `tests/parallel/test_cubed_sphere_spmd_step.py`
+- `tests/parallel/test_operator_split_tiled_cube_driver_parity.py`
 - `tests/parallel/test_tiled_3d_velocity.py`
 - `tests/parallel/test_tiled_al_gradient.py`
 - `tests/parallel/test_tiled_blocked_loop.py`

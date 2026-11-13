@@ -1099,6 +1099,17 @@ def create_atmosphere_dycore(
 
     # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
     if solver_name == "fv3_duo_primitive_equations":
+        retired_options = [name for name, active in (
+            ("dycore.persistent_dgrid", dc.persistent_dgrid),
+            ("enable_tiled_dycore", config.enable_tiled_dycore),
+            ("moisture_advection (legacy switch)", config.moisture_advection),
+            ("grid.use_duogrid (legacy halo switch)", gc.use_duogrid),
+        ) if active]
+        if retired_options:
+            raise ValueError(
+                "fv3_duo refuses retired C/D-grid atmosphere options: "
+                + ", ".join(retired_options)
+                + ". Its native winds, halos and tracer transport use the duo lane's own contract.")
         if (dc.time_integrator not in ("auto", DycoreConfig().time_integrator)
                 or dc.implicit_grav_wave_use_pcg
                 or dc.implicit_grav_wave_damping != 0):

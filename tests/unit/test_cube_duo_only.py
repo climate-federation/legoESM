@@ -1,5 +1,7 @@
 """The retired atmosphere cube selectors cannot reach shared ocean C/D cores."""
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -13,7 +15,16 @@ from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
 
 @pytest.mark.parametrize('dynamics', ['shallow_water', 'hydrostatic', 'nonhydrostatic'])
 @pytest.mark.parametrize('discretization', ['cdgrid', 'centered', 'finite_volume', 'cgrid', 'fv'])
-def test_every_legacy_cube_atmosphere_selection_raises(dynamics, discretization):
+def test_every_legacy_cube_atmosphere_selection_raises(dynamics, discretization, monkeypatch):
+    from types import SimpleNamespace
+    from legoesm import dycore_factory
+    from legoesm.registry import Registry
+
+    plugins = Registry('retirement_test')
+    plugin = SimpleNamespace(step=lambda state, dt: state)
+    plugins.register('custom_plugin', lambda: plugin)
+    monkeypatch.setattr(dycore_factory, 'DYCORE_REGISTRY', plugins)
+    assert dycore_factory.create_dycore('custom_plugin') is plugin
     if dynamics == 'hydrostatic' and discretization == 'cdgrid':
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         grid = create_cubed_sphere(2)
@@ -21,6 +32,13 @@ def test_every_legacy_cube_atmosphere_selection_raises(dynamics, discretization)
                      'ucast_primitive_equations'):
             with pytest.raises(ValueError, match='fv3_duo'):
                 create_model(name, grid=grid)
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parents[2]
+                                 / 'scripts/run/run_rce.py'),
+             '--grid-type', 'cubed_sphere', '--discretization', 'cdgrid'],
+            capture_output=True, text=True, timeout=120)
+        assert result.returncode != 0
+        assert 'ValueError' in result.stderr and 'fv3_duo' in result.stderr
         for column_lane in (False, True):
             for integrator in ('leapfrog_si', 'semi_implicit'):
                 unsupported = ExperimentConfig(
@@ -29,6 +47,18 @@ def test_every_legacy_cube_atmosphere_selection_raises(dynamics, discretization)
                                         energy_fixer=False,
                                         time_integrator=integrator))
                 with pytest.raises(ValueError, match='fv3_duo.*semi-implicit'):
+                    create_atmosphere_dycore(unsupported, grid, None)
+            base = ExperimentConfig(
+                grid=GridConfig(resolution=2, nlev=5),
+                dycore=DycoreConfig(column_lane=column_lane, energy_fixer=False))
+            retired = (
+                base._replace(dycore=base.dycore._replace(persistent_dgrid=True)),
+                base._replace(enable_tiled_dycore=True),
+                base._replace(moisture_advection=True),
+                base._replace(grid=base.grid._replace(use_duogrid=True)),
+            )
+            for unsupported in retired:
+                with pytest.raises(ValueError, match='fv3_duo.*retired'):
                     create_atmosphere_dycore(unsupported, grid, None)
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type='cubed_sphere'),
@@ -43,8 +73,10 @@ def test_every_legacy_cube_atmosphere_selection_raises(dynamics, discretization)
               'nonhydrostatic': 'compressible_euler'}[dynamics]
     for prefix in ('cdgrid_', 'cgrid_', 'fv_', ''):
         name = prefix + suffix
+        plugins.register(name, lambda: plugin)
         for call in (lambda: create_model(name), lambda: get_solver_class(name),
-                     lambda: resolve_solver_name(equations=name)):
+                     lambda: resolve_solver_name(equations=name),
+                     lambda: dycore_factory.create_dycore(name)):
             with pytest.raises(ValueError, match='fv3_duo'):
                 call()
 

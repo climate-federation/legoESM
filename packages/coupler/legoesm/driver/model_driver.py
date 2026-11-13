@@ -8744,31 +8744,21 @@ class ModelDriver:
                 f"in-progress month): {exc}")
 
     def _moisture_advection_active(self) -> bool:
-        """True iff resolved-wind moisture advection is on (issue #771).
-
-        Config-gated to the tracer-capable dycore: cubed_sphere + cdgrid
-        (the only PE step whose RHS advects ``state.tracers``).  Other
-        grid/discretization combos keep the legacy column-locked moisture
-        and log a notice once so the gap is visible, not silent.
-        """
+        """The retired C/D-grid moisture switch cannot select duo transport."""
         cfg = self.config
         if not getattr(cfg, "moisture_advection", False):
             return False
-        # ``centered``/``finite_volume`` resolve to the cdgrid PE dycore (see
-        # atmosphere.dynamics DISPATCH), so they are tracer-capable too — the
-        # gate must accept them or an opt-in run on those aliases would drop to
-        # the legacy column-locked path despite running a cdgrid step (#771).
-        supported = (cfg.grid.grid_type == "cubed_sphere"
-                     and cfg.dycore.discretization
-                     in ("cdgrid", "centered", "finite_volume"))
-        if not supported and not getattr(self, "_warned_no_advection", False):
+        if cfg.grid.grid_type == "cubed_sphere":
+            raise ValueError(
+                "fv3_duo: legacy moisture_advection switch is retired; "
+                "native duo tracer transport follows its own lane contract.")
+        if not getattr(self, "_warned_no_advection", False):
             self._warned_no_advection = True
             logger.info(
-                "  moisture_advection: not available on %s/%s (tracer "
-                "advection is wired for cubed_sphere+cdgrid only, #771) — "
-                "running legacy column-locked moisture.",
+                "  legacy moisture_advection switch is unavailable on %s/%s; "
+                "the lane's native transport is unchanged.",
                 cfg.grid.grid_type, cfg.dycore.discretization)
-        return supported
+        return False
 
     def _is_spmd_multiprocess(self) -> bool:
         """True iff this run is multi-controller SPMD across >1 process
@@ -18292,11 +18282,7 @@ class ModelDriver:
         logger.info("lat-lon SPMD run: %s (%.1fs)", status, time.time() - t0)
         return status
 
-    def _tiled_cube_column_physics_fn(self):
-        raise ValueError('fv3_duo is the only cubed-sphere atmosphere core; this legacy driver adapter has no duo equivalent.')
 
-    def _tiled_cube_unified_active(self) -> bool:
-        raise ValueError('fv3_duo is the only cubed-sphere atmosphere core; this legacy driver adapter has no duo equivalent.')
 
     def _run_operator_split_tiled_cube(self, start_step, start_day,
                                        mesh, kt: int) -> str:

@@ -129,7 +129,7 @@ def main():
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon", "voronoi"],
                         help="Horizontal grid type")
-    parser.add_argument("--discretization", type=str, default="fv3_duo",
+    parser.add_argument("--discretization", type=str, default=None,
                         choices=["fv3_duo", "cdgrid", "centered", "spectral",
                                  "latlon_fv", "finite_volume",
                                  "latlon_cgrid", "mpas"],
@@ -154,6 +154,9 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.discretization is None:
+        args.discretization = ("fv3_duo" if args.grid_type == "cubed_sphere"
+                               else "cdgrid")
 
     # iter-71 (mirrors iter-67/70 on run_rce_mpi_long.py): validate
     # numeric CLI args reject NaN/inf + out-of-range values with
@@ -250,8 +253,12 @@ def main():
     # front so the spectral adapter is never paired with a non-spectral
     # state, etc.  Driver factory would catch this too, but the message
     # here is more direct for a user who wired the script wrong.
+    if args.grid_type == "cubed_sphere" and args.discretization != "fv3_duo":
+        raise ValueError(
+            "Cubed-sphere atmosphere requires fv3_duo; "
+            f"retired or unsupported discretization {args.discretization!r}.")
     _expected_disc = {
-        "cubed_sphere": {"cdgrid", "centered", "finite_volume"},
+        "cubed_sphere": {"fv3_duo"},
         "gaussian": {"spectral"},
         "latlon": {"finite_volume", "centered", "latlon_cgrid"},
         "voronoi": {"mpas"},

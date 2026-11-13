@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.driver.compiled_segments import (
@@ -181,18 +182,8 @@ def _fake_driver(grid_type, discretization, flag=True):
     return fake
 
 
-def test_gate_on_for_cube_cdgrid():
-    assert ModelDriver._moisture_advection_active(
-        _fake_driver("cubed_sphere", "cdgrid")) is True
 
 
-def test_gate_on_for_cube_cdgrid_aliases():
-    # "centered"/"finite_volume" resolve to the cdgrid PE dycore, so they are
-    # tracer-capable and must gate ON too (else an opt-in run on those aliases
-    # silently drops to the legacy column-locked path, #771).
-    for alias in ("centered", "finite_volume"):
-        assert ModelDriver._moisture_advection_active(
-            _fake_driver("cubed_sphere", alias)) is True
 
 
 def test_gate_off_when_disabled_or_unsupported():
@@ -200,9 +191,9 @@ def test_gate_off_when_disabled_or_unsupported():
         _fake_driver("cubed_sphere", "cdgrid", flag=False)) is False
     assert ModelDriver._moisture_advection_active(
         _fake_driver("latlon", "latlon_cgrid")) is False
-    # spectral on a cube is NOT tracer-capable here -> legacy path.
-    assert ModelDriver._moisture_advection_active(
-        _fake_driver("cubed_sphere", "spectral")) is False
+    with pytest.raises(ValueError, match="fv3_duo"):
+        ModelDriver._moisture_advection_active(
+            _fake_driver("cubed_sphere", "spectral"))
 
 
 def test_every_water_species_is_advected_now_that_all_are_per_mass():

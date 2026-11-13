@@ -977,7 +977,7 @@ def _grid_config_name(grid_type: str) -> str:
 def _disc_name(grid_type: str) -> str:
     """Map CLI grid name to ExperimentConfig discretization."""
     return {
-        "cubed-sphere": "cdgrid",
+        "cubed-sphere": "fv3_duo",
         "latlon": "finite_volume",
     }.get(grid_type, grid_type)
 

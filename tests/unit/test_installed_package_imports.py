@@ -129,11 +129,7 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
     'scripts/bench/run_levante_gpu_scaling.py': frozenset({
         'tests.test_cases.baroclinic_wave',
     }),
-    'scripts/bench/run_scaling_diagnosis.py': frozenset({
-        'tests.test_cases.baroclinic_wave',
-    }),
     'scripts/matrix/check_conservation_all.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
         'tests.atmosphere.shallow_water.test_cases.williamson_mpas',
     }),
     'scripts/matrix/run_atmosphere_test_matrix.py': frozenset({
@@ -147,9 +143,7 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
         'tests.test_cases.dcmip2008',
         'tests.test_cases.dcmip2008.jablonowski_rotated',
         'tests.test_cases.dcmip2012.rest_state_topography',
-        'tests.test_cases.dcmip2025',
         'tests.test_cases.dcmip_transport',
-        'tests.test_cases.williamson',
         'tests.test_cases.williamson_extended',
     }),
     'scripts/run/run_baroclinic_wave_benchmark.py': frozenset({
@@ -157,15 +151,6 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
     }),
     'scripts/run/run_w2_mpas_convergence.py': frozenset({
         'tests.atmosphere.shallow_water.test_cases.williamson_mpas',
-    }),
-    'scripts/validate/validate_tpu_emulation_sharding.py': frozenset({
-        'tests.test_cases.baroclinic_wave',
-    }),
-    'scripts/validate/visual_regression.py': frozenset({
-        'tests.williamson_diagnostic',
-    }),
-    'src/legoesm/cli.py': frozenset({
-        'tests.test_cases.williamson',
     }),
 }
 

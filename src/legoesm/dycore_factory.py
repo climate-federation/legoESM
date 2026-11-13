@@ -15,6 +15,12 @@ from typing import Any
 
 from legoesm.registry import DYCORE_REGISTRY, UnknownRegistryEntryError
 
+_RETIRED_CUBE_SOLVERS = frozenset(
+    prefix + suffix
+    for prefix in ("cdgrid_", "cgrid_", "fv_", "")
+    for suffix in ("shallow_water", "primitive_equations", "compressible_euler")
+)
+
 
 def create_dycore(name: str, *args: Any, **kwargs: Any):
     """Resolve a dycore by *name*, instantiate it, and validate the contract.
@@ -23,12 +29,15 @@ def create_dycore(name: str, *args: Any, **kwargs: Any):
     Extra args/kwargs are forwarded to the resolved factory (``Model(grid,
     config)``).
 
-    Resolution order: an explicitly-registered factory or entry-point plugin
+    Retired cube names are rejected before registry lookup. For other names,
+    resolution order is an explicitly-registered factory or entry-point plugin
     first (so a plugin can override or add a dycore), then the **built-in**
     atmosphere solvers.  The built-in lookup is a deferred import.  Raises
     ``ValueError`` for an unknown name and ``TypeError`` for a factory whose
     product is not a valid dycore.
     """
+    if name in _RETIRED_CUBE_SOLVERS:
+        raise ValueError(f"Retired cubed-sphere atmosphere solver {name!r}; use fv3_duo.")
     from legoesm.components import validate_dycore
 
     try:

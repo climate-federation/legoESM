@@ -44,12 +44,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #   gaussian/spectral
 #   voronoi/mpas (currently fails — pre-existing dycore stability issue)
 _GRID_RESOLUTIONS = {
+    # Historical cube labels all select the sole cube core. The unported
+    # main-path full-physics smoke setup is refused by fv3_duo.
     "cubed_sphere":     dict(grid_type="cubed_sphere",   resolution=12,
-                              discretization="centered", extra=[]),
+                              discretization="fv3_duo", extra=[]),
     "cubed_sphere_fv":  dict(grid_type="cubed_sphere",   resolution=12,
-                              discretization="finite_volume", extra=[]),
+                              discretization="fv3_duo", extra=[]),
     "cubed_sphere_cd":  dict(grid_type="cubed_sphere",   resolution=12,
-                              discretization="cdgrid",   extra=[]),
+                              discretization="fv3_duo",   extra=[]),
     "latlon":           dict(grid_type="latlon",         resolution=24,
                               discretization="centered", extra=[]),
     "latlon_fv":        dict(grid_type="latlon",         resolution=24,
