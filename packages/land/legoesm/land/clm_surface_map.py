@@ -348,13 +348,15 @@ def soil_color_albedo(color_class):
     return _SOIL_ALB_SAT[idx]
 
 
-def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
+def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg, *, vg_air_entry_m) -> dict:
     """Map a CLM surfdata file to the target columns.
 
     Parameters
     ----------
     path : str — CLM surfdata NetCDF (see :func:`download_clm_surfdata`).
     tgt_lat_deg, tgt_lon_deg : 1-D arrays — target column centres [deg].
+    vg_air_entry_m : float — the run's van Genuchten air-entry head [m] (<= 0; 0 =
+        classic curve), for the soil wilting point / field capacity.  No default.
 
     Returns
     -------
@@ -452,7 +454,7 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
 
     tex = soil_texture.usda_texture_index(jnp.asarray(sand_c), jnp.asarray(clay_c))
     vg = soil_texture.vg_params_from_index(tex)
-    wp, fc = soil_texture.wilting_field_capacity(vg)
+    wp, fc = soil_texture.wilting_field_capacity(vg, vg_air_entry_m=vg_air_entry_m)
     return dict(pft_fractions=jnp.asarray(fr), texture_index=np.asarray(tex),
                 glacier_frac=jnp.asarray(np.clip(glac_c / 100.0, 0.0, 1.0)),
                 # per-cell %sand/%clay (root-zone mean) -> per-cell soil thermal props
@@ -613,14 +615,16 @@ def clm_multilayer_ch(surface_map: dict):
 
 
 def clm_surface_provider(tgt_lat_deg, tgt_lon_deg, surfdata_path: str | None = None,
-                         variant: str = "slab") -> CLMSurfaceParamProvider:
+                         variant: str = "slab", *,
+                         vg_air_entry_m) -> CLMSurfaceParamProvider:
     """Build the default CLM PFT + reference-soil parameter provider for the given
     target columns (downloads the surfdata file if ``surfdata_path`` is None).
 
     ``variant`` selects the baked tuned set: ``"slab"`` (default, 1-layer slab land)
-    or ``"multilayer"`` (8-layer Richards land)."""
+    or ``"multilayer"`` (8-layer Richards land).  ``vg_air_entry_m`` is passed to
+    :func:`load_clm_surface` (the run's air-entry head; no default)."""
     path = surfdata_path or download_clm_surfdata()
-    m = load_clm_surface(path, tgt_lat_deg, tgt_lon_deg)
+    m = load_clm_surface(path, tgt_lat_deg, tgt_lon_deg, vg_air_entry_m=vg_air_entry_m)
     return CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
                                    m["glacier_frac"], variant=variant, lai=m.get("lai"))
 

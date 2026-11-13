@@ -24,7 +24,9 @@ import numpy as np
 import pytest
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-    MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies)
+    MPASPrimitiveEquationConfig,
+)
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
 from legoesm.core.operators_voronoi import (
     curl_vertex_3d, div_damp_del4_3d, divergence_cell_3d)
 from legoesm.driver.component_factory import compute_diffusion
@@ -121,7 +123,7 @@ def test_off_state_is_byte_identical_and_on_state_moves_only_the_wind():
     base = MPASPrimitiveEquationConfig(nu_del2=1.0e5, nu_del4=1.0e17)
 
     def tend(cfg):
-        return mpas_hydrostatic_tendencies(state, mesh, sig, cfg)
+        return mpas_pe_tendencies(state, mesh, sig, cfg, vertical_form="legacy")
 
     off, on = tend(base), tend(base._replace(nu_div4=1.0e16))
     assert MPASPrimitiveEquationConfig().nu_div4 == 0.0
@@ -256,15 +258,15 @@ def test_conservative_hybrid_transport_is_selectable_and_conserves():
 
     def dT(scheme, crd):
         cfg = base._replace(vert_advection_scheme=scheme)
-        return np.asarray(mpas_hydrostatic_tendencies(state, mesh, crd, cfg).dT_dt.data)
+        return np.asarray(mpas_pe_tendencies(state, mesh, crd, cfg, vertical_form="legacy").dT_dt.data)
 
     assert not np.array_equal(dT("upwind", coord), dT("sb", coord))
     assert MPASPrimitiveEquationConfig().vert_advection_scheme == "upwind"
     with pytest.raises(ValueError, match="sb"):
         s8 = h._add_perturbation_hydro(h._make_hydrostatic_state(mesh, 8), mesh, 8)
-        mpas_hydrostatic_tendencies(
+        mpas_pe_tendencies(
             s8, mesh, create_sigma_coordinate(8, dtype=jnp.float64),
-            base._replace(vert_advection_scheme="sb"))
+            base._replace(vert_advection_scheme="sb"), vertical_form="legacy")
 
 
 def test_production_deck_selects_both_levers_and_no_other_deck_does():

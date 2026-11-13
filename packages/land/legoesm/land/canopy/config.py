@@ -12,6 +12,7 @@ Aerodynamic parameters from Ryu et al. (2011) / DifferBESS defaults.
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
@@ -268,6 +269,14 @@ class CanopyConfig(NamedTuple):
     # 13.5 W/m2; at 10 the worst error is 0.25%.  Default 5 -> 10 (user
     # 2026-09-30).  Appended at the end of the tuple.
     most_n_iters: int = 10
+    # Columns per batch of the canopy Newton solve; 0 = every column of the
+    # call (one batch per GPU in the model).  A batch iterates until its
+    # slowest column stops, so small batches stop early but launch more
+    # kernels; with the step launch-bound, one batch is fastest (AMIP 4 A100:
+    # 64 -> 0.242 s/step, 1024 -> 0.148, one batch -> 0.138).  A positive value
+    # bounds the solve's memory.  Answers equal to rounding for every value.
+    # 64 -> 0 (user 2026-11-07).  Appended at the end of the tuple.
+    solve_group: int = 0
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -301,6 +310,9 @@ class CanopyConfig(NamedTuple):
         if not (isinstance(self.most_n_iters, int) and self.most_n_iters >= 1):
             raise ValueError("most_n_iters must be a positive int, got "
                              f"{self.most_n_iters!r}")
+        if not (isinstance(self.solve_group, int) and self.solve_group >= 0):
+            raise ValueError("solve_group must be an int >= 0 (0 = one batch), "
+                             f"got {self.solve_group!r}")
         return self
 
 
@@ -350,6 +362,8 @@ __param_spec__ = {
                 "discretisation cadence, not a physical parameter — tuning it "
                 "changes the integration error, not the physics."
             ),
+            "dew_limit_smoothing_mol": "numerics: smoothing width of the "
+                                       "canopy-air dew-limit switch (RULE 5); 0 = hard",
         },
         "params": {
             "o2ref": {
@@ -872,6 +886,12 @@ class CLMMLCanopyConfig(NamedTuple):
     # wants the full CLM PFT parameterisation validated first.
     use_surfdata_pft: bool = False
 
+    # Canopy-air dew limit (legoESM deviation): width [mol/mol] of the smoothed
+    # complementarity "condense only where saturated" (RULE 5, CHKS smoothing in
+    # humidity units).  0.0 = the hard active-set switch.  Installed every step
+    # into the process-global backend control (one width per process).
+    dew_limit_smoothing_mol: float = 1e-6
+
     def validate(self) -> "CLMMLCanopyConfig":
         """Fail-early check of the static string-dispatch fields.
 
@@ -909,4 +929,9 @@ class CLMMLCanopyConfig(NamedTuple):
                 f"one of {VALID_CLM_ML_STOMATAL_MODELS} "
                 "('wue'=water-use-efficiency optimization (default), "
                 "'medlyn'=Medlyn 2011, 'ball_berry'=Ball-Berry)")
+        _eps = self.dew_limit_smoothing_mol
+        if isinstance(_eps, bool) or not (math.isfinite(_eps) and _eps >= 0.0):
+            raise ValueError(
+                "CLM-ML dew_limit_smoothing_mol is a humidity width and must be "
+                f"finite and >= 0; got {_eps!r}")
         return self

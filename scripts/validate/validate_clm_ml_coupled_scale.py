@@ -71,7 +71,7 @@ def assess_o1(rows):
 # ---------------------------------------------------------------------------
 # Synthetic coupled-driver setup (benchmark only) + measurement
 # ---------------------------------------------------------------------------
-def _fake_surface_map(path, lat_deg, lon_deg):
+def _fake_surface_map(path, lat_deg, lon_deg, *, vg_air_entry_m):
     """Uniform-loam, all-bare-soil CLM map sized to the requested columns."""
     n = int(np.asarray(lat_deg).size)
     pft = np.zeros((n, 17))

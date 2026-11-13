@@ -1,0 +1,204 @@
+gpus=none repo=/home/b/b384341/projects/legoESM pythonpath= extra= stash=1 stage=step flags= arm=none res=3 n_steps=32 K=12 rad_fp64=1 tridiag=default host=l40148.lvt.dkrz.de date=2026-11-07T19:19:30+01:00 ERA5_IC=/work/bb1596/b309178/diffESM/legoesm_ap_main/data/era5_ic_1979-01-01.zarr
+Jax plugin configuration error: Exception when calling jax_plugins.xla_cuda12.initialize()
+Traceback (most recent call last):
+  File "/home/b/b384341/projects/legoESM/.venv/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 487, in discover_pjrt_plugins
+    plugin_module.initialize()
+  File "/home/b/b384341/projects/legoESM/.venv/lib/python3.12/site-packages/jax_plugins/xla_cuda12/__init__.py", line 370, in initialize
+    _check_cuda_versions(raise_on_first_error = True)
+  File "/home/b/b384341/projects/legoESM/.venv/lib/python3.12/site-packages/jax_plugins/xla_cuda12/__init__.py", line 274, in _check_cuda_versions
+    for d in range(cuda_versions.cuda_device_count())
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: jaxlib/cuda/versions_helpers.cc:135: operation cuInit(0) failed: Unknown CUDA error 303; cuGetErrorName failed. This probably means that JAX was unable to load the CUDA libraries.
+stage=step res=3 n_steps=32 x64=True backend=cpu schedule=none checkpoints=None storage=recompute sha=f5bc44b5df6b
+JAX persistent JIT cache OFF on the CPU backend (key is not CPU-microarch-specific); set LEGOESM_ALLOW_CPU_COMPILE_CACHE=1 on a homogeneous CPU pool.
+Configured XLA for cpu backend
+legoESM: single-device mode (CPU)
+Runtime bootstrapped: backend=cpu, x64=True, precision=fp64, devices=1, distributed=False
+  Runtime: backend=cpu, precision=fp64, x64=True, distributed=False
+  Sea-ice albedo scheme: maykut_untersteiner (ice skin ON: explicit)
+  Grid: mpas 3, 32 levels (cam_l32)
+  Land-sea mask: /work/bb1596/b309178/diffESM/legoesm_ap/data/clm/sftlf_clm_1.9x2.5.nc (land fraction mean=0.315)
+  Subgrid orography: /work/bb1596/b309178/diffESM/legoesm_ap/data/orography/sso_stdh_2deg_from1deg_seamfix.nc (stddev max=786 m, mean=38.8 m)
+Atmosphere: model_type=hydrostatic, discretization=mpas, grid=mpas -> mpas_primitive_equations
+  CFL check: dx_min=758 km, c_max=390 m/s, CFL(dt=112s)=0.08, dt_max=1099s
+  CFL OK: dt=112s is within stability limit
+  NOTE (mpas): advective/GW CFL is necessary but not sufficient — hydrostatic TRiSK PE can still blow up inside this limit (cold-start radiative transient, hyperdiffusion). Keep a margin on a cold start.
+  Dycore: hydrostatic/mpas on mpas, dt=112.5s
+  State init: T=300.0K, q_v=6.70 g/kg, CWV=84.6 kg/m2
+  MPAS moisture ON: dycore advects ['N_c', 'N_i', 'N_r', 'N_s', 'q_c', 'q_g', 'q_i', 'q_r', 'q_s', 'q_v'] (q_v mean 6.70 g/kg)
+  IC: loading ERA5 from /work/bb1596/b309178/diffESM/legoesm_ap_main/data/era5_ic_1979-01-01.zarr (year=1979)
+/home/b/b384341/projects/legoESM/packages/ml/legoesm/training/era5_to_state.py:112: RuntimeWarning: divide by zero encountered in divide
+  p_s_per_level = _np.where(dB > 0, (dp_floor - dA * p_ref) / dB, 0.0)
+  ERA5->MPAS IC: T=[186,306]K u_n=[-101,97]m/s p_s=[73967,103908]Pa phis=[0,23016]m2/s2
+  State init (ERA5 1979): T_mean=242.8K, q_v=2.20 g/kg, CWV=22.7 kg/m2
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc lacks ['CCl4', 'CF4', 'CFC_22']: RRTMGP keeps its FIXED present-day global means for those species (not transient).
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CO2 has unrecognised/empty units '1.e-6'; assuming scale 1e-06 to mole fraction (max=414.39). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CH4 has unrecognised/empty units '1.e-9'; assuming scale 1e-09 to mole fraction (max=1910.97). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable N2O has unrecognised/empty units '1.e-9'; assuming scale 1e-09 to mole fraction (max=332.068). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CFC_11 has unrecognised/empty units '1.e-12'; assuming scale 1e-12 to mole fraction (max=271.169). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+GHG file /pool/data/ICON/grids/public/mpim/independent/greenhouse_gases/greenhouse_historical_plus.nc: variable CFC_12 has unrecognised/empty units '1.e-12'; assuming scale 1e-12 to mole fraction (max=543.656). Set a CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to remove this guess.
+  GHG external: CO2=336.6ppmv, CH4=1566ppbv, N2O=300.4ppbv, CFC11=158pptv, CFC12=286pptv
+  Physics: radiation=rrtmg, convection=zhang_mcfarlane
+  Land albedo: SURFDATA (/work/bb1596/b309178/diffESM/legoesm_ap/data/legoesm_surfdata_c260716.nc); 324 land cells, on-land albedo range [0.090, 0.600]
+  Land tile: ACTIVE (slab land, C_land=2.0e+05 J/m2/K, f_land mean=0.315, interface_flux=legacy_dual, tiled_surface=False)
+  land snow-albedo age e-folding: 150 days (overrides the calibration)
+  land soil freeze/thaw: ON
+  land canopy snow masking (trees hide snow): off
+  land snowpack: bulk (snow emissivity 0.970)
+  land soil thermal sub-steps per land step: 6
+  land soil ice impedance exponent: 6 (active only with freeze/thaw ON)
+  land canopy smoothing widths: RH cap 0.01, zeta cap 0.05; MOST iterations 10
+  land snow thermal node: off
+  land soil freeze/thaw ON with the calibrated land tables, which were fitted with it OFF
+  land canopy b0 soil-moisture stress: ON
+  Land tile: CanopyConfig on per-PFT CANOPY parameters from /work/bb1596/b309178/diffESM/legoesm_ap/data/legoesm_surfdata_c260716.nc (canopy height 0.10-36.72 m, roughness ratio 0.010-0.120). NOTE emissivity is a single constant in this builder and the canopy computes its own radiation from soil colour + leaf optics, so the tuned per-PFT emissivity and vegetation albedo do NOT apply to it — those are re-fit items, not wiring.
+  Land stomata: FARQUHAR (prescribed carbon state, LAI = C_fol/LCMA from C_fol=200 gC/m2) — the baked Vc_max25/g1/LCMA are ACTIVE
+  Land tile: IC soil water converted to this run's hydraulics (clapp_hornberger -> van_genuchten, regridded): dry layers lifted 45 in 34 columns (max 0.721 mm moved), wet layers 3 in 3 columns, 0 columns overflow to surface water (max 0 mm); psi_soil re-derived.
+  Land tile: MULTILAYER IC from spin-up restart /scratch/b/b384341/mpas_segment_schedule/data/lmip_soil_ic/soil_ic_mpas3_era5T_19790101.npz (10 soil layers, 642 columns; t_end=315360000 s, cold-start seed SKIPPED)
+CMIP6 CV: institution_id, source_id (institution_id='CU', source_id='legoESM-1-0') are legoESM placeholders and are NOT in the CMIP6 controlled vocabulary. Output is CF-valid but WILL be rejected at ESGF publication until both are registered via a PR to WCRP-CMIP/CMIP6_CVs. Pass registered values to CFWriter(institution_id=..., model_id=...) once that lands.
+  RRTMGP compute_fp32: optics tables + RTE solve in float32 (dycore stays fp64)
+  MPAS land boundary: lapse=6.50 K/km, beta=0.60 (f_land mean=0.315)
+  CAM macmic sub-cycle: turbulence + microphysics run 3 x at 600.0 s inside each physics step, after the convective increment
+  Physics cadence: full physics every 16 steps (physics timestep 1800.0 s = 30.0 min); the whole physics increment (u, v, T, p_s, tracers) is applied on the physics step (CAM-FV physics_update), zero in between; cached precip / surface / TOA rates re-published every step
+  Radiation sub-cycle: RRTMGP solved every 32 steps (cadence 1.00 h); held heating reused in between
+  MPAS q_v del4 smoothing ON: nu4=3.64e+14 m^4/s (nu4*dt*g_max^2=0.0000 of 0.5 stability bound)
+  MPAS ice skin ON (Semtner zero-layer, h=2.00 m): seeded at T_freeze_ocean; conductive relaxation C/g ~ 3 weeks (fresh-run spin-up ~2 months)
+  AMIP SST surface forcing (time-varying): day 0.0 T_sfc=[256.1,302.9] mean=288.6 K
+  Surface albedo: ocean=0.060 ice=0.800 land=[0.090,0.600] mean=0.196 (f_land mean=0.315)
+  Non-land surface fluxes evaluated on: OCEAN/ICE surface (ocean_flux_on_ocean_surface=True)
+  Land surface stress to the boundary layer: LAND MODEL (land_stress_from_land=True)
+  land_beta_soil: traced per-cell beta_soil REPLACES the static land_beta=0.60 over land
+  Interactive multilayer land (MPAS): 642 columns, f_land mean=0.315 — skin T -> forcing['T_sfc'] blend, one-step-lag explicit coupling; packed=True (324 land columns solved), cadence every 16 step(s) (DT_land=1800.0 s)
+Starting MPAS: 32 steps, 0.042317708333333336 days (from day 0.0)
+Calling optical depth graph.
+Calling cloud optical properties graph.
+Calling Planck fraction graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling optical depth graph.
+Calling Rayleigh scattering graph.
+Calling cloud optical properties graph.
+built+exported in 133.3 s; ncol=(642, 32), physics every 16 steps, radiation every 32, land_k=16
+Calling optical depth graph.
+Calling cloud optical properties graph.
+Calling Planck fraction graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling Planck source graph.
+Calling optical depth graph.
+Calling Rayleigh scattering graph.
+Calling cloud optical properties graph.
+E1107 19:25:10.807750  188657 slow_operation_alarm.cc:73] Constant folding an instruction is taking > 1s:
+
+  %reduce.1428 = (f64[], s64[]) reduce(%reshape.2339, %iota.3330, %constant.47150, %constant.47151), dimensions={0}, to_apply=%region_6258.7536.clone, metadata={op_name="jit(f)/transpose(jvp(jit(f)))/mpas_segment/reduce" stack_frame_id=24699}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+E1107 19:25:11.226396  188591 slow_operation_alarm.cc:140] The operation took 1.418756283s
+Constant folding an instruction is taking > 1s:
+
+  %reduce.1428 = (f64[], s64[]) reduce(%reshape.2339, %iota.3330, %constant.47150, %constant.47151), dimensions={0}, to_apply=%region_6258.7536.clone, metadata={op_name="jit(f)/transpose(jvp(jit(f)))/mpas_segment/reduce" stack_frame_id=24699}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+E1107 19:30:53.046778  188657 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_f for CPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E1107 19:34:01.690139  188591 slow_operation_alarm.cc:140] The operation took 5m8.643435827s
+
+********************************
+[Compiling module jit_f for CPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+GRADCHECK {"name": "segment_1_steps", "finite": true, "grad_absmax": 23291054331780.145, "ad": -6472168.417210606, "fd": -6474400.417132303, "ratio": 1.0003448612239079, "t_grad_s": 716.7527277469635}
+PEAK_GIB segment_1_steps 36.04
+ADJOINT segment_1_steps step=0 max=5.032e+18 leaf=[0].tracers['q_i'][<flat index 0>] at=(504, 13) primal=0.000000e+00 
+E1107 19:41:44.281943  188657 slow_operation_alarm.cc:73] Constant folding an instruction is taking > 2s:
+
+  %reduce.23366 = (f64[], s64[]) reduce(%reshape.31326, %iota.17093, %constant.182394, %constant.182395), dimensions={0}, to_apply=%region_5756.7795, metadata={op_name="jit(f)/transpose(jvp(jit(f)))/mpas_segment/reduce" stack_frame_id=22584}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+E1107 19:41:49.981616  188591 slow_operation_alarm.cc:140] The operation took 7.699773992s
+Constant folding an instruction is taking > 2s:
+
+  %reduce.23366 = (f64[], s64[]) reduce(%reshape.31326, %iota.17093, %constant.182394, %constant.182395), dimensions={0}, to_apply=%region_5756.7795, metadata={op_name="jit(f)/transpose(jvp(jit(f)))/mpas_segment/reduce" stack_frame_id=22584}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+GRADCHECK {"name": "segment_32_steps", "finite": true, "grad_absmax": 20991733202930.766, "ad": -7983042.788803432, "fd": -7989388.372632675, "ratio": 1.0007948828532076, "t_grad_s": 4433.298975229263}
+PEAK_GIB segment_32_steps 90.40
+ADJOINT segment_32_steps step=0 max=7.589e+18 leaf=[0].tracers['q_i'][<flat index 0>] at=(452, 20) primal=0.000000e+00 
+ADJOINT segment_32_steps step=1 max=3.528e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=1.274806e-31 
+ADJOINT segment_32_steps step=2 max=3.540e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=7.854808e-21 
+ADJOINT segment_32_steps step=3 max=3.553e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=6.488327e-20 
+ADJOINT segment_32_steps step=4 max=3.567e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=2.020363e-19 
+ADJOINT segment_32_steps step=5 max=3.580e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=4.546278e-19 
+ADJOINT segment_32_steps step=6 max=3.593e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=8.616356e-19 
+ADJOINT segment_32_steps step=7 max=3.606e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=1.465702e-18 
+ADJOINT segment_32_steps step=8 max=3.618e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=2.312505e-18 
+ADJOINT segment_32_steps step=9 max=3.631e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=3.450345e-18 
+ADJOINT segment_32_steps step=10 max=3.643e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=4.929826e-18 
+ADJOINT segment_32_steps step=11 max=3.655e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=6.803643e-18 
+ADJOINT segment_32_steps step=12 max=3.668e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=9.126296e-18 
+ADJOINT segment_32_steps step=13 max=3.680e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=1.195387e-17 
+ADJOINT segment_32_steps step=14 max=3.692e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=1.534388e-17 
+ADJOINT segment_32_steps step=15 max=3.704e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(66, 29) primal=1.935501e-17 
+ADJOINT segment_32_steps step=16 max=9.651e+15 leaf=[0].tracers['q_i'][<flat index 0>] at=(420, 22) primal=0.000000e+00 
+ADJOINT segment_32_steps step=17 max=5.301e+03 leaf=[0].T[<flat index 0>] at=(216, 16) primal=2.397386e+02 
+ADJOINT segment_32_steps step=18 max=4.789e+03 leaf=[0].T[<flat index 0>] at=(216, 16) primal=2.397324e+02 
+ADJOINT segment_32_steps step=19 max=4.285e+03 leaf=[0].T[<flat index 0>] at=(216, 16) primal=2.397263e+02 
+ADJOINT segment_32_steps step=20 max=3.792e+03 leaf=[0].T[<flat index 0>] at=(216, 16) primal=2.397202e+02 
+ADJOINT segment_32_steps step=21 max=3.312e+03 leaf=[0].T[<flat index 0>] at=(216, 16) primal=2.397142e+02 
+ADJOINT segment_32_steps step=22 max=2.848e+03 leaf=[0].T[<flat index 0>] at=(216, 16) primal=2.397082e+02 
+ADJOINT segment_32_steps step=23 max=2.426e+03 leaf=[0].u[<flat index 0>] at=(1383, 14) primal=1.037350e+00 
+ADJOINT segment_32_steps step=24 max=2.297e+03 leaf=[0].u[<flat index 0>] at=(1383, 14) primal=1.058287e+00 
+ADJOINT segment_32_steps step=25 max=2.148e+03 leaf=[0].u[<flat index 0>] at=(1383, 14) primal=1.080434e+00 
+ADJOINT segment_32_steps step=26 max=1.976e+03 leaf=[0].u[<flat index 0>] at=(1383, 14) primal=1.103600e+00 
+ADJOINT segment_32_steps step=27 max=1.773e+03 leaf=[0].u[<flat index 0>] at=(1383, 14) primal=1.127618e+00 
+ADJOINT segment_32_steps step=28 max=1.534e+03 leaf=[0].u[<flat index 0>] at=(1383, 14) primal=1.152334e+00 
+ADJOINT segment_32_steps step=29 max=1.251e+03 leaf=[0].u[<flat index 0>] at=(1383, 14) primal=1.177612e+00 
+ADJOINT segment_32_steps step=30 max=9.106e+02 leaf=[0].u[<flat index 0>] at=(1383, 14) primal=1.203334e+00 
+ADJOINT segment_32_steps step=31 max=5.004e+02 leaf=[0].u[<flat index 0>] at=(1383, 14) primal=1.229392e+00 
+ADJOINT_JUMP segment_32_steps step=16 ratio=1.820e+12 (entering 9.651e+15, leaving 5.301e+03)
+PROBE_DONE
+exit=0 arm=none
+
+********************************************************************************
+*                                                                              *
+*  This is the automated job summary provided by DKRZ.                         *
+*  If you encounter problems, need assistance or have any suggestion, please   *
+*  write an email to                                                           *
+*                                                                              *
+*  --  support@dkrz.de --                                                      *
+*                                                                              *
+*                       We hope you enjoyed the DKRZ supercomputer LEVANTE ... *
+*
+* JobID            : 28782505
+* JobName          : mpas_seg_stashloc_cpu                             
+* Account          : bb1596
+* User             : b384341 (203805), bb1596 (203649)                 
+* Partition        : compute
+* QOS              : normal
+* Nodelist         : l40148 (1)                                                
+* Submit date      : 2026-11-06T14:37:25
+* Start time       : 2026-11-07T19:19:25
+* End time         : 2026-11-07T20:54:45
+* Elapsed time     : 01:35:20 (Timelimit=04:00:00)                     
+* Command          : /home/b/b384341/projects/legoESM/scripts/cluster/levante/
+*                    mpas_segment_schedule_receipt.sbatch
+* WorkDir          : /home/b/b384341/projects/legoESM
+*
+* StepID | JobName      NodeHours    MaxRSS [Byte] (@task)
+* ------------------------------------------------------------------------------
+* batch  | batch              1.6
+* extern | extern             1.6                       ()
+* ------------------------------------------------------------------------------
+

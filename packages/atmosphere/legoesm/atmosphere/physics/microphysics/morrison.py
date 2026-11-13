@@ -114,6 +114,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     mg2_ice_lambda_bounds,
     mg2_ice_slope,
     mg2_qi_conservation_ratio,
+    div_gated_tangent,
     mg2_size_dist_liq,
     mg2_inprecip_snow,
     mg2_snow_slope,
@@ -1821,6 +1822,13 @@ def morrison_microphysics(
             # approved smooth min at sharpness 100.  nsubi = 0.
             _nisrc = (dN_i_nuc + nsacwi
                       + freeze_N_to_ice / jnp.clip(rho, _RHO_FLOOR))
+            # Gradient gate keys on the stock N_i (a number) against the mass
+            # threshold, so it practically never closes here: keying it on
+            # q_i instead was MEASURED to bring the physics-call adjoint back
+            # to 1e75 (stopping only the factor's derivative breaks the exact
+            # sink x (stock/sink) cancellation and exposes nprci's own
+            # derivative at near-zero q_i; .physics-validator/
+            # mg2_absent_gradient_gate/README.md, section 5).
             dN_i_autoconv = nprci_ferrier * mg2_qi_conservation_ratio(
                 jnp.clip(N_i, 0.0), _nisrc, nprci_ferrier, dt, _MG2_OMSM,
                 width=1.0 / MG2_CAP_SHARPNESS)
@@ -1860,10 +1868,13 @@ def morrison_microphysics(
                      if config.do_snow_aggregation else jnp.zeros_like(q_s))
         _nsrc = dN_i_autoconv + freeze_N_to_snow / jnp.clip(rho, _RHO_FLOOR)
         _nlim = (-nsagg_mg2 - _nsrc) * dt > jnp.clip(N_s, 0.0)
+        # gradient only: no factor derivative where snow is absent (forward
+        # unchanged; see div_gated_tangent)
         nsagg_mg2 = nsagg_mg2 * jnp.where(
             _nlim,
-            (jnp.clip(N_s, 0.0) / dt + _nsrc)
-            / jnp.where(_nlim, -nsagg_mg2, 1.0) * _MG2_OMSM, 1.0)
+            div_gated_tangent(jnp.clip(N_s, 0.0) / dt + _nsrc,
+                              jnp.where(_nlim, -nsagg_mg2, 1.0),
+                              q_s >= MG2_QSMALL) * _MG2_OMSM, 1.0)
     if config.warm_rain_incloud:
         # MG2 limit on rain evaporation + snow and ice sublimation, after every
         # conservation limiter (micro_mg2_0.F90:1805-1850): none of them may

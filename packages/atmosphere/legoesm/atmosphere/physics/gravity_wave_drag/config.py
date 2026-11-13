@@ -210,6 +210,8 @@ __param_spec__ = {
 }
 
 
+from legoesm.atmosphere.physics.gravity_wave_drag.ifs_wms import IFSWMSConfig
+
 class RayleighConfig(NamedTuple):
     """Configuration for Rayleigh friction drag.
 
@@ -933,7 +935,7 @@ class GravityWaveDragConfig(NamedTuple):
     ------
     scheme : str
         Active GWD scheme: "rayleigh", "lindzen", "mcfarlane",
-        "hines", "prognostic_spectral", "e3sm_cam", "ml_emulator",
+        "hines", "prognostic_spectral", "e3sm_cam", "ml_emulator", "ifs_wms",
         or "none".
     rayleigh : RayleighConfig
         Configuration for Rayleigh friction scheme.
@@ -949,6 +951,8 @@ class GravityWaveDragConfig(NamedTuple):
         Configuration for the faithful E3SM/CAM gw_drag_prof scheme.
     ml_emulator : GWDMLEmulatorConfig
         Configuration for ML emulator scheme.
+    ifs_wms : IFSWMSConfig
+        Configuration for the OpenIFS 49r1 WMS non-orographic scheme.
     """
     scheme: str = "none"
     rayleigh: RayleighConfig = RayleighConfig()
@@ -958,3 +962,4 @@ class GravityWaveDragConfig(NamedTuple):
     prognostic_spectral: PrognosticSpectralConfig = PrognosticSpectralConfig()
     e3sm_cam: E3SMCAMConfig = E3SMCAMConfig()
     ml_emulator: GWDMLEmulatorConfig = GWDMLEmulatorConfig()
+    ifs_wms: IFSWMSConfig = IFSWMSConfig()

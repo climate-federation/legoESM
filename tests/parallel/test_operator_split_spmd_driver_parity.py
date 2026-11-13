@@ -187,7 +187,7 @@ def test_band_physics_takes_bechtold_dx_from_global_grid(tmp_path, monkeypatch):
     from legoesm.driver.physics_pipeline import mean_grid_spacing_m
     from legoesm.grids.factory import create_grid
 
-    n_dev = 4
+    n_dev = 2  # n_lat=8 -> 4-row bands (>= 3 for the PPM halo=3 exchange)
     if len(jax.devices()) < n_dev:
         pytest.skip(f"needs --xla_force_host_platform_device_count={n_dev}")
     built = []

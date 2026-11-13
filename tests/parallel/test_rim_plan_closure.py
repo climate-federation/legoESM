@@ -74,13 +74,14 @@ def _sub_state(state, part, plan):
 
 def _tendency(state, mesh, sigma):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies,
-    )
+        MPASPrimitiveEquationConfig,
+        )
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     cfg = MPASPrimitiveEquationConfig(
         nu_del4=1e16, nu_del4_ps=1e16, fix_mass=False,
         pv_scheme="energy", time_integrator="ssp_rk3",
     )
-    return mpas_hydrostatic_tendencies(state, mesh, sigma, cfg, dt=600.0)
+    return mpas_pe_tendencies(state, mesh, sigma, cfg, dt=600.0, vertical_form="legacy")
 
 
 def _max_rim_err(depth, global_setup):

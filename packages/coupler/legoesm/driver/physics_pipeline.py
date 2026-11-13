@@ -3954,7 +3954,11 @@ def rrtmgp_config_from_experiment(config, **lane_fields):
     ``use_scan`` None defers to ``rte_utils.recurrent_op_with_halos``, which
     picks scan on GPU/TPU and the unrolled loop on CPU/Metal (issue #273)."""
     from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import gas_table_files
+    lw_gas, sw_gas = gas_table_files(getattr(config, 'rrtmgp_gas_tables', 'reduced'))
     return RRTMGPConfig(
+        lw_gas_file=lw_gas,
+        sw_gas_file=sw_gas,
         co2_ppmv=config.co2_ppmv,
         ch4_ppbv=config.ch4_ppbv,
         n2o_ppbv=config.n2o_ppbv,
@@ -3965,6 +3969,22 @@ def rrtmgp_config_from_experiment(config, **lane_fields):
         column_chunk_size=getattr(config, 'rrtmgp_column_chunk_size', 0),
         overhead_layer=bool(getattr(config, 'rrtmgp_overhead_layer', False)),
         **lane_fields,
+    )
+
+
+def solar_config_from_experiment(config):
+    """The external-solar config for a run.  Its per-band spectrum is expanded
+    to the g-points of the SW table the radiation runs (``rrtmgp_gas_tables``),
+    taken from the same map the RRTMGP builder above uses."""
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import gas_table_files
+    from legoesm.forcing.external import SolarConfig
+    return SolarConfig(
+        S_0=config.S_0, source=config.solar_source,
+        path=config.solar_file, tsi_var=config.solar_tsi_var,
+        spectral_var=config.solar_spectral_var,
+        spectral_band_order=getattr(config, "solar_spectral_band_order", "auto"),
+        start_year=config.start_year,
+        sw_gas_file=gas_table_files(getattr(config, "rrtmgp_gas_tables", "reduced"))[1],
     )
 
 
@@ -4317,9 +4337,11 @@ def mean_grid_spacing_m(grid):
 def _zm_overrides(config):
     """ZM leaf overrides from the flat zm_* scalars; refuses them when the run
     does not select zhang_mcfarlane (they would be silently inert)."""
-    from legoesm.driver.config import ZM_SCALAR_FIELDS, ZM_WIDTH_FIELDS
+    from legoesm.driver.config import (
+        ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS, ZM_WIDTH_FIELDS,
+    )
 
-    table = {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS}
+    table = {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS}
     given = [f for f in table if getattr(config, f, None) is not None]
     if given and config.convection != "zhang_mcfarlane":
         raise ValueError(
@@ -4340,6 +4362,14 @@ def _zm_overrides(config):
         validate_detrain_widths(*(widths.get(leaf, getattr(
             ZhangMcFarlaneConfig(), leaf)) for leaf in ZM_WIDTH_FIELDS.values()))
         out.update({k: float(v) for k, v in widths.items()})
+    for f in given:
+        if f in ZM_TRIGGER_FIELDS:
+            from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+                validate_trigger_width,
+            )
+            v = getattr(config, f)
+            validate_trigger_width(v)
+            out[ZM_TRIGGER_FIELDS[f]] = float(v)
     return out
 
 
@@ -4472,6 +4502,11 @@ def _resolve_convection(config):
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
+        _w = config.bechtold_snow_refill_width_kg_m2_s
+        if _w is not None:
+            from legoesm.core.smooth import validate_smoothing_width
+            validate_smoothing_width("bechtold_snow_refill_width_kg_m2_s", _w)
+            _bechtold_kwargs["snow_refill_width_kg_m2_s"] = float(_w)
         conv_config = BechtoldConfig(**_bechtold_kwargs)
     else:
         cc = ConvectionConfig(scheme=scheme)

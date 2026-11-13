@@ -6,7 +6,7 @@ former solver (10 undamped Picard iterations, last iterate accepted) cycled
 there without converging and returned a top-layer head of 3e4-6e4 m, theta
 1.5-2.6 (theta_sat 0.39), creating 4-7 mm of water in one step.  On current
 code the post-solve water take-back removes that water again (from the layers
-below), but the spike in the top layer remains.
+below).  Stepping in theta with the hydrostatic ceiling removes the spike too.
 """
 
 from __future__ import annotations
@@ -30,6 +30,9 @@ _DZ = (0.002932551319648094, 0.005865102639296188, 0.011730205278592375,
 _DT = 1800.0
 _HYDRO = SoilHydraulicsConfig(theta_r=0.1, theta_sat=0.39, alpha_vg=5.9,
                               n_vg=1.48, K_sat=3.64e-06)
+# The unconverged-column path is exercised by capping the Picard iterations;
+# ``converged`` is asserted False as the control.
+_N_UNCONVERGED = 2
 
 # Converges in 15 damped iterations.
 _COL_A = dict(
@@ -64,10 +67,10 @@ _COL_B = dict(
     flux_top=2.772393189929857e-08)
 
 
-def _solve(col, richards_config):
+def _solve(col, richards_config, hydro=_HYDRO):
     grid = make_soil_grid_custom(_DZ)
     out = solve_richards(
-        jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), grid, _HYDRO,
+        jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), grid, hydro,
         richards_config, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]),
         _DT, surface_water=jnp.zeros(1))
     dz = np.asarray(_DZ)
@@ -81,9 +84,8 @@ def _solve(col, richards_config):
 
 
 def _former():
-    # Former iteration settings (10 undamped iterations).  Main's post-loop
-    # water take-back still runs, so this is not the historical solver; the
-    # spike survives it on these columns.
+    # Former iteration settings (10 undamped iterations) on the current
+    # theta-stepping core: not the historical solver.
     return MultiLayerLandConfig().richards._replace(max_iter=10, max_dse_per_iter=1e9)
 
 
@@ -160,3 +162,82 @@ def test_float32_gradient_finite_with_no_room_below_saturation():
 
     g = jax.grad(loss)(jnp.zeros(2, dtype=jnp.float32))
     assert bool(jnp.all(jnp.isfinite(g)))
+
+
+# Ponded, saturated column recorded from the same production day (rank 9): the
+# last unconverged iterate lost 7.8 mm, the unsaturated room took back 3.7 mm,
+# and the remaining 4.15 mm was left unbooked in water_created.
+_COL_C = dict(
+    psi=(0.0023566209578574585, -3.2026816784060446e-05, -3.2026816784060446e-05,
+         -3.2026816784060446e-05, -3.2026816784060446e-05, 0.0067904783601186874,
+         0.02089967221276129, 0.049126764102415066, 0.011893385860325506,
+         -3.2026816784060446e-05),
+    theta=(0.3900000919082174, 0.39, 0.39, 0.39, 0.39, 0.3900002648286561,
+           0.3900008150872163, 0.3900019159438, 0.39000046384204856, 0.39),
+    sink=(5.250675370930875e-08, 2.6025238833471116e-08, 1.2787446511059473e-08,
+          6.174361291360322e-09, 2.878978695216838e-09, 1.251875879574599e-09,
+          4.734094347261932e-10, 1.3539984859767316e-10, 2.215188632460956e-11,
+          1.1858391396658656e-12),
+    flux_top=-9.869970764942571e-09,
+    pond=0.004164217237920083)
+
+
+def _solve_ponded(col, rc, hydro=_HYDRO):
+    # Recorded water content; on another curve the head is that curve's own
+    # (psi_from_theta inverts the elastic branch above theta_sat too).
+    theta = np.asarray(col["theta"])
+    psi = (np.asarray(col["psi"]) if hydro is _HYDRO
+           else np.asarray(psi_from_theta(jnp.asarray(theta), hydro)))
+    out = solve_richards(
+        jnp.asarray([psi]), jnp.asarray([theta]), make_soil_grid_custom(_DZ),
+        hydro, rc, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]), _DT,
+        surface_water=jnp.asarray([col["pond"]]))
+    dz = np.asarray(_DZ)
+    # in - out - d(storage) over soil + pond, drainage and overland runoff [m],
+    # from the outputs alone (independent of the solver's own water_created).
+    residual = (np.asarray(out.theta_new[0]) @ dz - theta @ dz
+                + float(out.surface_water[0]) - col["pond"]
+                - (col["flux_top"] - np.asarray(col["sink"]) @ dz) * _DT
+                + (float(out.runoff_surface[0]) + float(out.runoff_subsurface[0]))
+                / constants.rho_water * _DT
+                - float(out.refill[0]))
+    return out, residual
+
+
+def test_unconverged_ponded_column_closes_its_budget_on_the_theta_path():
+    """Main's theta-stepping update conserves every iterate (its excess cascade
+    moves water into the pond iterate), so an unconverged column closes without
+    the post-solve deficit return (measured: the return is <= 3e-17 m here)."""
+    rc = MultiLayerLandConfig().richards._replace(max_iter=_N_UNCONVERGED)
+    out, residual = _solve_ponded(_COL_C, rc)
+    assert not bool(out.converged[0])
+    assert abs(residual) < 1e-12
+    assert abs(float(out.water_created[0])) < 1e-12
+
+
+# PDI keeps the psi update (approximate inverse, no per-iterate cascade): there an
+# unconverged ponded column loses ~0.8 mm that only the post-solve deficit return
+# puts back.  Removing the return or counting it twice moves the residual by that
+# amount, so these tests fail on either.
+_PDI = _HYDRO._replace(retention_curve="pdi")
+
+
+def test_unreturnable_deficit_goes_back_to_the_pond():
+    rc = MultiLayerLandConfig().richards._replace(max_iter=_N_UNCONVERGED)
+    out, residual = _solve_ponded(_COL_C, rc, _PDI)
+    assert not bool(out.converged[0])
+    assert abs(residual) < 1e-12
+    assert abs(float(out.water_created[0])) < 1e-12
+    assert 0.0 < float(out.surface_water[0]) <= rc.pond_max
+
+
+def test_returned_deficit_above_pond_max_spills_to_runoff():
+    # Measured: the pond ends at 3.33 mm without the return and 4.15 mm with it,
+    # so a 4 mm cap spills only because of the returned deficit.
+    rc = MultiLayerLandConfig().richards._replace(max_iter=_N_UNCONVERGED, pond_max=0.004)
+    out, residual = _solve_ponded(_COL_C, rc, _PDI)
+    assert not bool(out.converged[0])
+    assert abs(float(out.surface_water[0]) - rc.pond_max) < 1e-15   # pond held at the cap
+    assert float(out.runoff_surface[0]) > 0.0
+    assert abs(residual) < 1e-12
+    assert abs(float(out.water_created[0])) < 1e-12

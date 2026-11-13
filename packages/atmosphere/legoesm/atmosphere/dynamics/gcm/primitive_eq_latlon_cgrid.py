@@ -54,6 +54,9 @@ from legoesm.grids.operators_latlon_cgrid import (
     cell_to_cgrid_winds,
     pad_lon_cgrid,
 )
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import (
+    cgrid_latlon_pe_tendencies,
+)
 from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
     nu_del4_row_profiles,
@@ -254,6 +257,11 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # the poles, built from the pole cell it is ~1000x too weak.  0.0
     # (default) is OFF and byte-identical; needs ``dt`` in the tendency.
     nu_div4_scale: float = 0.0
+    # Shared PE core vertical form (``primitive_eq_generic.VERTICAL_FORMS``).
+    # "legacy" (default) runs :func:`latlon_legacy_pe_tendencies`, this lane's
+    # pre-core body, unchanged; the driver fills it from
+    # ``DycoreConfig.vertical_form``.  Appended at the tuple END.
+    vertical_form: str = "legacy"
 
 
 # CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
@@ -435,7 +443,209 @@ def cgrid_to_hydrostatic(
 # Tendency computation
 # ==============================================================================
 
-def cgrid_latlon_hydrostatic_tendencies(
+def latlon_tracer_tendencies(tracers, u, v, u_c, v_c, dp_u, dp_v, div_dp, dp,
+                              vert_vel, p_s, grid, sigma_coord, config, _hybrid):
+    """Tracer tendencies (mass-weighted flux form); ``vert_vel`` is the hybrid
+    mass flux or the sigma-dot."""
+
+    # --- 12. Tracer transport (mass-weighted flux form) ---
+    # Uses the same mass fluxes (dp_u*u, dp_v*v) as the continuity
+    # equation for discrete consistency.  The mixing-ratio tendency is:
+    #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp - vert_advection
+    # This conserves ∫ q·dp·dA (tracer mass) to machine precision.
+    #
+    # All tracers share the same u, v, dp, div_dp.  Stack along a trailing
+    # tracer axis and fold it into the level axis so the operator's
+    # halo-pad + PPM reconstruction runs once instead of n_tracers times.
+    # ``pad_halo_latlon_3d`` only touches axes 0 and 1, so the trailing
+    # ``nlev * n_tracers`` axis is passively carried through.
+    tracer_tends = {}
+    if tracers:
+        tracer_names = list(tracers.keys())
+        n_tracers = len(tracer_names)
+        tracer_stack = jnp.stack(
+            [tracers[n] for n in tracer_names], axis=-1
+        )  # (n_lat, n_lon, nlev, n_tracers)
+        n_lat_t, n_lon_t, nlev_t, _ = tracer_stack.shape
+        tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
+
+        if config.use_ppm_transport:
+            # Mass-weighted flux-form horizontal transport.
+            u_mass = dp_u * u  # (n_lat, n_lon+1, nlev)
+            v_mass = dp_v * v  # (n_lat+1, n_lon, nlev)
+            if n_tracers == 1:
+                u_mass_b, v_mass_b = u_mass, v_mass
+            else:
+                # ``tracer_flat`` reshape interleaves levels and tracers as
+                # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]`` — each level
+                # has all tracers consecutive.  ``jnp.repeat`` builds a
+                # matching velocity broadcast where every level value is
+                # duplicated ``n_tracers`` times.  ``jnp.tile`` would instead
+                # concatenate the whole array and mis-align tracer ↔ level.
+                u_mass_b = jnp.repeat(u_mass, n_tracers, axis=-1)
+                v_mass_b = jnp.repeat(v_mass, n_tracers, axis=-1)
+            flux_flat = cgrid_fv_flux_divergence_latlon_3d(
+                tracer_flat, u_mass_b, v_mass_b, grid)
+            flux_stack = flux_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
+            horiz_q_stack = (
+                flux_stack + tracer_stack * div_dp[..., None]
+            ) / (dp[..., None] + 1e-10)
+        else:
+            # Pre-pad the stacked tracer field once so both gradients
+            # share the halo pad — saves one redundant pad_halo_latlon_3d
+            # call per timestep.
+            _q_pad_h2 = pad_halo_latlon_3d(tracer_flat, halo=2)
+            # iter-169: aliased import (line 92-93).
+            dq_dx_flat = _fv_gradient_lon_3d(tracer_flat, grid, padded=_q_pad_h2)
+            dq_dy_flat = _fv_gradient_lat_3d(tracer_flat, grid, padded=_q_pad_h2)
+            dq_dx_stack = dq_dx_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
+            dq_dy_stack = dq_dy_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
+            horiz_q_stack = -(
+                u_c[..., None] * dq_dx_stack + v_c[..., None] * dq_dy_stack
+            )
+
+        # Vertical advection batched across all tracers — both
+        # ``vertical_advection_hybrid`` and ``vertical_advection``
+        # operate on ``axis=-1`` for the vertical, so move the tracer
+        # axis to leading where the velocity-independent shared work
+        # (``F_full`` / ``p_full`` for hybrid, ``F`` for sigma) is
+        # computed *once* and the upwind ``jnp.diff(field, axis=-1)``
+        # broadcasts across the (n_tracers,) axis.  Replaces a Python
+        # for-loop that called the operator ``n_tracers`` times.
+        # Same leading-axis batching as the (u, v) vertical advection
+        # in CD-grid CE/PE (Loop 142).
+        tracers_lead = jnp.moveaxis(
+            tracer_stack, -1, 0,
+        )  # (n_tracers, n_lat, n_lon, nlev)
+        if _hybrid:
+            vert_q_lead = vertical_advection_hybrid(
+                tracers_lead, vert_vel, p_s, sigma_coord,
+            )
+        else:
+            vert_q_lead = vertical_advection(
+                tracers_lead, vert_vel, sigma_coord,
+            )
+        for i, name in enumerate(tracer_names):
+            tracer_tends[name] = horiz_q_stack[..., i] + vert_q_lead[i]
+
+    return tracer_tends
+
+
+def latlon_dissipation(du_dt, dv_dt, dT_dt, u, v, T, p_s, grid, sigma_coord,
+                        config, dt, _hybrid, lat_pad=None):
+    """Add the optional del-2 / del-4 / div-4 damping and the top sponge."""
+    _lat_pad = lat_pad
+    # --- 13. Diffusion (optional) ---
+    if config.A_h > 0.0:
+        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
+        du_dt = du_dt + config.A_h * lap_u
+        dv_dt = dv_dt + config.A_h * lap_v
+        lap_T = laplacian_cgrid(T, grid)
+        dT_dt = dT_dt + config.A_h * lap_T
+
+    # --- 13a. Biharmonic hyperdiffusion (optional) ---
+    # SIGN: lap(lap) of a Fourier mode is +k^4, so -nu*lap(lap(f)) decays it.
+    # T uses the layer-mass-weighted form -(1/dp) lap(dp * nu * lap(T)):
+    # sum(dp * dT * area) telescopes to zero (global heat conserved) and
+    # sum(dp * T * dT * area) = -sum(dp * nu * lap(T)^2 * area) <= 0.
+    if config.nu_del4 > 0.0:
+        if dt is None:
+            raise ValueError(
+                "latlon_legacy_pe_tendencies: nu_del4 > 0 requires "
+                "the dt argument (the per-row pole stability cap needs it).")
+        nu_u, nu_v = nu_del4_row_profiles(
+            grid, config.nu_del4, config.nu_del4_cfl_frac, dt)
+        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
+        lap2_u, lap2_v = vector_laplacian_cgrid(lap_u, lap_v, grid)
+        du_dt = du_dt - nu_u[..., None] * lap2_u
+        dv_dt = dv_dt - nu_v[..., None] * lap2_v
+        dp_T = dp_from_hybrid(sigma_coord, p_s) if _hybrid else (
+            p_s[..., None] * sigma_coord.dsigma.astype(p_s.dtype))
+        flux_T = dp_T * nu_u[..., None] * laplacian_cgrid(T, grid)
+        dT_dt = dT_dt - laplacian_cgrid(flux_T, grid) / dp_T
+
+    # --- 13a'. Divergence-selective del-4 damping (CAM-FV ldiv4) ---
+    # SIGN: (du, dv) -= grad(nu * lap(D)), D = div(u, v).  The divergence of
+    # that increment is -lap(nu lap D); for constant nu a Fourier mode of D
+    # (lap -> -k^2) decays at nu k^4.  Non-divergent flow (D = 0) gets
+    # exactly zero.  nu is per latitude ROW (cell area squared), inside the
+    # final gradient as in CAM.  It runs at every RK stage, so the polar
+    # filter of du/dv covers it (without the filter the pole rows are
+    # unstable).  Off (0.0) adds nothing: byte-identical.
+    if config.nu_div4_scale > 0.0:
+        if dt is None:
+            raise ValueError(
+                "latlon_legacy_pe_tendencies: nu_div4_scale > 0 "
+                "requires the dt argument (the coefficient is 0.01*area^2/dt).")
+        D = divergence_cgrid(u, v, grid, lat_pad=_lat_pad)
+        nu_row = (config.nu_div4_scale * CAM_DIV4_RATE
+                  * grid.area[:, 0] ** 2 / dt).astype(D.dtype)   # (n_lat,)
+        psi = nu_row[:, None, None] * laplacian_cgrid(D, grid)
+        du_dt = du_dt - gradient_x_cgrid(psi, grid)
+        dv_dt = dv_dt - gradient_y_cgrid(psi, grid)
+
+    # --- 13b. Top sponge (Rayleigh damping increasing toward the lid, #836) ---
+    # Absorb upward-propagating gravity-wave / convective energy that would else
+    # reflect off the rigid model lid and contaminate the upper levels.  Gated on
+    # config.sponge_coeff (0 -> OFF, byte-identical).  Reuse the SHARED
+    # sponge_profile (no re-derivation): it ramps 0 -> sponge_coeff over the top
+    # sponge_width_m metres, so feed it a log-pressure height proxy
+    # z = -H_scale * ln(sigma_full), which increases UPWARD (small sigma = high
+    # altitude).  SIGN: du/dt gets a -k*u term with k >= 0 -> damps u toward REST
+    # (an absorbing sponge, matching the compressible core's -sponge*w); level-
+    # only profile broadcasts over the horizontal (u/v have level as the last
+    # axis).  OFF path adds nothing, so production stays bit-for-bit unchanged.
+    if config.sponge_coeff > 0.0:
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
+            sponge_profile,
+        )
+        z_full = -config.sponge_scale_height_m * jnp.log(
+            jnp.clip(sigma_coord.sigma_full, 1e-30, None))  # (nlev,), up = large z
+        H_top = z_full[0]   # top level has the smallest sigma -> the largest z
+        spge = sponge_profile(
+            z_full, H_top, config.sponge_width_m, config.sponge_coeff,
+            shape=config.sponge_shape,
+        ).astype(du_dt.dtype)   # (nlev,), 0 below the sponge base
+        du_dt = du_dt - spge * u
+        dv_dt = dv_dt - spge * v
+    return du_dt, dv_dt, dT_dt
+
+
+def latlon_pole_bc(dv_dt, config):
+    """Zero the meridional tendency on the physical-pole v faces."""
+
+    # Enforce zero tendency at poles (wall BC) so that intermediate RK
+    # stages never see nonzero v at poles feeding into divergence/Coriolis.
+    # Rank-aware via config.pole_v_bc — under latitude-band MPI, only the
+    # boundary ranks zero the actual global poles; interior ranks pass
+    # through unchanged (their band-edge v-faces are shared with the
+    # neighbour rank and kept consistent by halo exchange).
+    #
+    # Under single-program lat-band SPMD the SAME compiled body runs on every
+    # band, so config.pole_v_bc is (True, True) on ALL bands — the static
+    # _zero_v_at_pole would then zero every INTERIOR band cut's v-row (the
+    # SPMD-blind bug: the cut v-tendency was wrong by ~1e-3 while interior
+    # rows were machine-exact).  Select the physical-pole zeroing per band via
+    # the traced axis_index masks; interior cuts pass through so their cut row
+    # keeps the cross-band meridional v-tendency (function-scope import:
+    # atmosphere -> core.parallel; returns None off the SPMD backend).
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
+    if _spmd_pm is not None:
+        from legoesm.parallel.latlon_spmd import apply_pole_end_masks
+        dv_dt = apply_pole_end_masks(
+            dv_dt, _spmd_pm, offset=config.pole_v_bc_offset)
+    else:
+        dv_dt = _zero_v_at_pole(
+            dv_dt,
+            south=config.pole_v_bc[0],
+            north=config.pole_v_bc[1],
+            offset=config.pole_v_bc_offset,
+        )
+    return dv_dt
+
+
+def latlon_legacy_pe_tendencies(
     state: CGridLatLonHydrostaticState,
     grid: LatLonGrid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
@@ -445,6 +655,13 @@ def cgrid_latlon_hydrostatic_tendencies(
     dt=None,
 ):
     """Compute hydrostatic PE tendencies on the lat-lon C-grid.
+
+    The shared PE core's ``"legacy"`` vertical form on this grid (call it
+    through ``primitive_eq_generic.cgrid_latlon_pe_tendencies``); TEMPORARY,
+    kept for comparability, retired after the A/B.  KNOWN DEFECTS: #930 (the
+    split vertical temperature transport leaves a 2dz dry-adiabat residual)
+    and the in-tendency ``T_min`` floor (a hard clip: not conserving, not
+    smooth).
 
     Supports both pure sigma and hybrid sigma-pressure vertical coordinates.
 
@@ -549,7 +766,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     # ``LEGOESM_LATLON_PACKED_EXCHANGE=1``, armed 1-D lat-band SPMD mesh
     # only).  Merges the three per-stage exchanges whose operands are all
     # live here — P1 the ``[B|ln p]`` gradient-stack fold pad (halo 1,
-    # gradient_y_cgrid), P4 the PPM T-advection fold pad (halo 2), and P2
+    # gradient_y_cgrid), P4 the PPM T-advection fold pad (halo 3), and P2
     # the fused wall-BC entry pad (T, u, dp[, p_s], halo 1) — into ONE
     # north+south ppermute pair per RK stage: raw un-lon-padded edge rows
     # ride one buffer per dtype group; wall constants / pole folds / lon
@@ -579,7 +796,9 @@ def cgrid_latlon_hydrostatic_tendencies(
             # ghost rows ride this epoch.
             dp = p_s[..., jnp.newaxis] * sigma_coord.dsigma.astype(p_s.dtype)
             _wall_ins = (T, u, dp)
-        _packed_specs = (("fold", 1, False), ("fold", 2, False)) + (
+        # PPM T advection needs halo 3; the gradient fallback reads halo 2.
+        _T_halo = 3 if config.use_ppm_transport else 2
+        _packed_specs = (("fold", 1, False), ("fold", _T_halo, False)) + (
             ("wall", 1, 0.0, 0.0),) * len(_wall_ins)
         _packed_out = make_latlon_band_packed_pad_body(
             _packed_mesh, _packed_specs)(_Bln_stack, T, *_wall_ins)
@@ -770,7 +989,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     # --- 11. Temperature equation ---
     if config.use_ppm_transport:
         # C-grid PPM advection of T (4th-order, shared operator).
-        # ``q_pad``: the packed epoch's halo-2 fold pad of T (None off the
+        # ``q_pad``: the packed epoch's halo-3 fold pad of T (None off the
         # packed path — the operator pads internally, byte-identical).
         horiz_adv_T = cgrid_fv_scalar_advection_latlon_3d(
             T, u, v, grid, q_pad=_T_ppm_pad)
@@ -840,189 +1059,16 @@ def cgrid_latlon_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt = horiz_adv_T + vert_adv_T + adiabatic
+    tracer_tends = latlon_tracer_tendencies(
+        tracers, u, v, u_c, v_c, dp_u, dp_v, div_dp, dp,
+        mass_flux if _hybrid else sigma_dot, p_s, grid, sigma_coord,
+        config, _hybrid)
 
-    # --- 12. Tracer transport (mass-weighted flux form) ---
-    # Uses the same mass fluxes (dp_u*u, dp_v*v) as the continuity
-    # equation for discrete consistency.  The mixing-ratio tendency is:
-    #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp - vert_advection
-    # This conserves ∫ q·dp·dA (tracer mass) to machine precision.
-    #
-    # All tracers share the same u, v, dp, div_dp.  Stack along a trailing
-    # tracer axis and fold it into the level axis so the operator's
-    # halo-pad + PPM reconstruction runs once instead of n_tracers times.
-    # ``pad_halo_latlon_3d`` only touches axes 0 and 1, so the trailing
-    # ``nlev * n_tracers`` axis is passively carried through.
-    tracer_tends = {}
-    if tracers:
-        tracer_names = list(tracers.keys())
-        n_tracers = len(tracer_names)
-        tracer_stack = jnp.stack(
-            [tracers[n] for n in tracer_names], axis=-1
-        )  # (n_lat, n_lon, nlev, n_tracers)
-        n_lat_t, n_lon_t, nlev_t, _ = tracer_stack.shape
-        tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
+    du_dt, dv_dt, dT_dt = latlon_dissipation(
+        du_dt, dv_dt, dT_dt, u, v, T, p_s, grid, sigma_coord, config, dt,
+        _hybrid, lat_pad=_lat_pad)
 
-        if config.use_ppm_transport:
-            # Mass-weighted flux-form horizontal transport.
-            u_mass = dp_u * u  # (n_lat, n_lon+1, nlev)
-            v_mass = dp_v * v  # (n_lat+1, n_lon, nlev)
-            if n_tracers == 1:
-                u_mass_b, v_mass_b = u_mass, v_mass
-            else:
-                # ``tracer_flat`` reshape interleaves levels and tracers as
-                # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]`` — each level
-                # has all tracers consecutive.  ``jnp.repeat`` builds a
-                # matching velocity broadcast where every level value is
-                # duplicated ``n_tracers`` times.  ``jnp.tile`` would instead
-                # concatenate the whole array and mis-align tracer ↔ level.
-                u_mass_b = jnp.repeat(u_mass, n_tracers, axis=-1)
-                v_mass_b = jnp.repeat(v_mass, n_tracers, axis=-1)
-            flux_flat = cgrid_fv_flux_divergence_latlon_3d(
-                tracer_flat, u_mass_b, v_mass_b, grid)
-            flux_stack = flux_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
-            horiz_q_stack = (
-                flux_stack + tracer_stack * div_dp[..., None]
-            ) / (dp[..., None] + 1e-10)
-        else:
-            # Pre-pad the stacked tracer field once so both gradients
-            # share the halo pad — saves one redundant pad_halo_latlon_3d
-            # call per timestep.
-            _q_pad_h2 = pad_halo_latlon_3d(tracer_flat, halo=2)
-            # iter-169: aliased import (line 92-93).
-            dq_dx_flat = _fv_gradient_lon_3d(tracer_flat, grid, padded=_q_pad_h2)
-            dq_dy_flat = _fv_gradient_lat_3d(tracer_flat, grid, padded=_q_pad_h2)
-            dq_dx_stack = dq_dx_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
-            dq_dy_stack = dq_dy_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
-            horiz_q_stack = -(
-                u_c[..., None] * dq_dx_stack + v_c[..., None] * dq_dy_stack
-            )
-
-        # Vertical advection batched across all tracers — both
-        # ``vertical_advection_hybrid`` and ``vertical_advection``
-        # operate on ``axis=-1`` for the vertical, so move the tracer
-        # axis to leading where the velocity-independent shared work
-        # (``F_full`` / ``p_full`` for hybrid, ``F`` for sigma) is
-        # computed *once* and the upwind ``jnp.diff(field, axis=-1)``
-        # broadcasts across the (n_tracers,) axis.  Replaces a Python
-        # for-loop that called the operator ``n_tracers`` times.
-        # Same leading-axis batching as the (u, v) vertical advection
-        # in CD-grid CE/PE (Loop 142).
-        tracers_lead = jnp.moveaxis(
-            tracer_stack, -1, 0,
-        )  # (n_tracers, n_lat, n_lon, nlev)
-        if _hybrid:
-            vert_q_lead = vertical_advection_hybrid(
-                tracers_lead, mass_flux, p_s, sigma_coord,
-            )
-        else:
-            vert_q_lead = vertical_advection(
-                tracers_lead, sigma_dot, sigma_coord,
-            )
-        for i, name in enumerate(tracer_names):
-            tracer_tends[name] = horiz_q_stack[..., i] + vert_q_lead[i]
-
-    # --- 13. Diffusion (optional) ---
-    if config.A_h > 0.0:
-        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
-        du_dt = du_dt + config.A_h * lap_u
-        dv_dt = dv_dt + config.A_h * lap_v
-        lap_T = laplacian_cgrid(T, grid)
-        dT_dt = dT_dt + config.A_h * lap_T
-
-    # --- 13a. Biharmonic hyperdiffusion (optional) ---
-    # SIGN: lap(lap) of a Fourier mode is +k^4, so -nu*lap(lap(f)) decays it.
-    # T uses the layer-mass-weighted form -(1/dp) lap(dp * nu * lap(T)):
-    # sum(dp * dT * area) telescopes to zero (global heat conserved) and
-    # sum(dp * T * dT * area) = -sum(dp * nu * lap(T)^2 * area) <= 0.
-    if config.nu_del4 > 0.0:
-        if dt is None:
-            raise ValueError(
-                "cgrid_latlon_hydrostatic_tendencies: nu_del4 > 0 requires "
-                "the dt argument (the per-row pole stability cap needs it).")
-        nu_u, nu_v = nu_del4_row_profiles(
-            grid, config.nu_del4, config.nu_del4_cfl_frac, dt)
-        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
-        lap2_u, lap2_v = vector_laplacian_cgrid(lap_u, lap_v, grid)
-        du_dt = du_dt - nu_u[..., None] * lap2_u
-        dv_dt = dv_dt - nu_v[..., None] * lap2_v
-        dp_T = dp_from_hybrid(sigma_coord, p_s) if _hybrid else (
-            p_s[..., None] * sigma_coord.dsigma.astype(p_s.dtype))
-        flux_T = dp_T * nu_u[..., None] * laplacian_cgrid(T, grid)
-        dT_dt = dT_dt - laplacian_cgrid(flux_T, grid) / dp_T
-
-    # --- 13a'. Divergence-selective del-4 damping (CAM-FV ldiv4) ---
-    # SIGN: (du, dv) -= grad(nu * lap(D)), D = div(u, v).  The divergence of
-    # that increment is -lap(nu lap D); for constant nu a Fourier mode of D
-    # (lap -> -k^2) decays at nu k^4.  Non-divergent flow (D = 0) gets
-    # exactly zero.  nu is per latitude ROW (cell area squared), inside the
-    # final gradient as in CAM.  It runs at every RK stage, so the polar
-    # filter of du/dv covers it (without the filter the pole rows are
-    # unstable).  Off (0.0) adds nothing: byte-identical.
-    if config.nu_div4_scale > 0.0:
-        if dt is None:
-            raise ValueError(
-                "cgrid_latlon_hydrostatic_tendencies: nu_div4_scale > 0 "
-                "requires the dt argument (the coefficient is 0.01*area^2/dt).")
-        D = divergence_cgrid(u, v, grid, lat_pad=_lat_pad)
-        nu_row = (config.nu_div4_scale * CAM_DIV4_RATE
-                  * grid.area[:, 0] ** 2 / dt).astype(D.dtype)   # (n_lat,)
-        psi = nu_row[:, None, None] * laplacian_cgrid(D, grid)
-        du_dt = du_dt - gradient_x_cgrid(psi, grid)
-        dv_dt = dv_dt - gradient_y_cgrid(psi, grid)
-
-    # --- 13b. Top sponge (Rayleigh damping increasing toward the lid, #836) ---
-    # Absorb upward-propagating gravity-wave / convective energy that would else
-    # reflect off the rigid model lid and contaminate the upper levels.  Gated on
-    # config.sponge_coeff (0 -> OFF, byte-identical).  Reuse the SHARED
-    # sponge_profile (no re-derivation): it ramps 0 -> sponge_coeff over the top
-    # sponge_width_m metres, so feed it a log-pressure height proxy
-    # z = -H_scale * ln(sigma_full), which increases UPWARD (small sigma = high
-    # altitude).  SIGN: du/dt gets a -k*u term with k >= 0 -> damps u toward REST
-    # (an absorbing sponge, matching the compressible core's -sponge*w); level-
-    # only profile broadcasts over the horizontal (u/v have level as the last
-    # axis).  OFF path adds nothing, so production stays bit-for-bit unchanged.
-    if config.sponge_coeff > 0.0:
-        from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
-            sponge_profile,
-        )
-        z_full = -config.sponge_scale_height_m * jnp.log(
-            jnp.clip(sigma_coord.sigma_full, 1e-30, None))  # (nlev,), up = large z
-        H_top = z_full[0]   # top level has the smallest sigma -> the largest z
-        spge = sponge_profile(
-            z_full, H_top, config.sponge_width_m, config.sponge_coeff,
-            shape=config.sponge_shape,
-        ).astype(du_dt.dtype)   # (nlev,), 0 below the sponge base
-        du_dt = du_dt - spge * u
-        dv_dt = dv_dt - spge * v
-
-    # Enforce zero tendency at poles (wall BC) so that intermediate RK
-    # stages never see nonzero v at poles feeding into divergence/Coriolis.
-    # Rank-aware via config.pole_v_bc — under latitude-band MPI, only the
-    # boundary ranks zero the actual global poles; interior ranks pass
-    # through unchanged (their band-edge v-faces are shared with the
-    # neighbour rank and kept consistent by halo exchange).
-    #
-    # Under single-program lat-band SPMD the SAME compiled body runs on every
-    # band, so config.pole_v_bc is (True, True) on ALL bands — the static
-    # _zero_v_at_pole would then zero every INTERIOR band cut's v-row (the
-    # SPMD-blind bug: the cut v-tendency was wrong by ~1e-3 while interior
-    # rows were machine-exact).  Select the physical-pole zeroing per band via
-    # the traced axis_index masks; interior cuts pass through so their cut row
-    # keeps the cross-band meridional v-tendency (function-scope import:
-    # atmosphere -> core.parallel; returns None off the SPMD backend).
-    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
-    _spmd_pm = spmd_pole_end_masks()
-    if _spmd_pm is not None:
-        from legoesm.parallel.latlon_spmd import apply_pole_end_masks
-        dv_dt = apply_pole_end_masks(
-            dv_dt, _spmd_pm, offset=config.pole_v_bc_offset)
-    else:
-        dv_dt = _zero_v_at_pole(
-            dv_dt,
-            south=config.pole_v_bc[0],
-            north=config.pole_v_bc[1],
-            offset=config.pole_v_bc_offset,
-        )
+    dv_dt = latlon_pole_bc(dv_dt, config)
 
     return du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends
 
@@ -1159,8 +1205,9 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         return jnp.sum(ps_dry.astype(acc) * _grid.area.astype(acc))
 
     def tendencies(self, state: CGridLatLonHydrostaticState):
-        return cgrid_latlon_hydrostatic_tendencies(
+        return cgrid_latlon_pe_tendencies(
             state, self.grid, self.sigma_coord, self.config, dt=self.dt,
+            vertical_form=self.config.vertical_form,
         )
 
     # ------------------------------------------------------------------
@@ -1258,7 +1305,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
         ``geom_pads``: optional ``(lat_pad, lat_pad_pole, cos_lat_pad)``
         precomputed stage-invariant geometry pads for the band grid,
-        forwarded to :func:`cgrid_latlon_hydrostatic_tendencies` (SPMD
+        forwarded to :func:`cgrid_latlon_pe_tendencies` (SPMD
         band step only; ``None`` everywhere else — byte-identical).
 
         OPERATOR-SPLIT physics (user decision 2026-09-28, the MPAS-lane
@@ -1292,9 +1339,9 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         state_c = cast_pytree(state, None, "compute")
 
         def tendency_fn(s):
-            du, dv, dT, dps, dq = cgrid_latlon_hydrostatic_tendencies(
+            du, dv, dT, dps, dq = cgrid_latlon_pe_tendencies(
                 s, grid, sigma_coord, self.config, geom_pads=geom_pads,
-                dt=dt,
+                dt=dt, vertical_form=self.config.vertical_form,
             )
 
             # Polar filter: damp high-frequency modes near poles for

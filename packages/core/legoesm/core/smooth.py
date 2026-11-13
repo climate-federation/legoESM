@@ -185,6 +185,19 @@ def smooth_min_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     return jnp.where(y <= 0.0, a, jnp.where(y >= width, b + 0.0 * a, inside))
 
 
+def validate_smoothing_width(name: str, w) -> None:
+    """One legal range for a RULE 5 width that selects a static branch: 0 (the
+    reference's hard switch) or in [sqrt(t), 1/sqrt(t)], t = finfo(float32).tiny
+    (below it the ramp's slope overflows float32 and the gradient turns NaN).
+    Booleans and non-numbers are refused (a YAML ``false`` would read as 0)."""
+    lo = math.sqrt(float(jnp.finfo(jnp.float32).tiny))
+    if (isinstance(w, bool) or not isinstance(w, (int, float))
+            or not (w == 0 or lo <= w <= 1.0 / lo)):
+        raise ValueError(
+            f"{name} must be 0 (the reference's hard switch) or in "
+            f"[{lo:.3e}, {1.0 / lo:.3e}]; got {w!r}.")
+
+
 def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
     if width == 0:
@@ -231,6 +244,22 @@ def straight_through(hard: jax.Array, soft: jax.Array) -> jax.Array:
 @straight_through.defjvp
 def _straight_through_jvp(primals, tangents):
     return primals[0], tangents[1]
+
+
+def sqrt_c1(x: jax.Array, width: float) -> jax.Array:
+    """C1 ``sqrt(max(x, 0))``: exactly 0 for ``x <= 0``, exactly ``sqrt(x)`` for
+    ``x >= width``, and the monotone cubic Hermite bridge
+    ``sqrt(width) * (2.5 t**2 - 1.5 t**3)``, ``t = x/width``, between (value and
+    slope match at both joins).  ``width = 0`` is the hard ``sqrt(max(x, 0))``
+    with a zero gradient at ``x <= 0``.  The square root is evaluated only on
+    ``x >= width`` (masked argument), so its gradient stays finite."""
+    if width == 0:
+        ok = x > 0.0
+        return jnp.where(ok, jnp.sqrt(jnp.where(ok, x, 1.0)), 0.0)
+    t = jnp.clip(x / width, 0.0, 1.0)
+    bridge = math.sqrt(width) * t * t * (2.5 - 1.5 * t)
+    above = x >= width
+    return jnp.where(above, jnp.sqrt(jnp.where(above, x, width)), bridge)
 
 
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
