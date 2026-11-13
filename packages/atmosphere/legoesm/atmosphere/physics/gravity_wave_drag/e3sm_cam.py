@@ -1206,10 +1206,12 @@ def gw_drag_prof(
             scale = jnp.maximum(cfg.dback, jnp.max(x, axis=1, keepdims=True))
             ok = scale > 0.0
             safe = jnp.where(ok, scale, 1.0)
-            d = jnp.where(ok, safe * (
-                (cfg.dback / safe) ** softmin_sharpness
-                + jnp.sum((x / safe) ** softmin_sharpness, axis=1, keepdims=True)
-            ) ** (1.0 / softmin_sharpness), 0.0)
+            # the power's argument is >= 1 where ok (the max term is 1); 1.0
+            # elsewhere keeps 0**(1/p) and its infinite derivative out of AD.
+            inner = jnp.where(ok, (cfg.dback / safe) ** softmin_sharpness
+                              + jnp.sum((x / safe) ** softmin_sharpness, axis=1, keepdims=True),
+                              1.0)
+            d = jnp.where(ok, safe * inner ** (1.0 / softmin_sharpness), 0.0)
 
         # stress this interface: min(taudmp, tausat).
         # E3SM: wrk = -2*mi*rog*t(k+1)*(piln(k+1)-piln(k)) where t(k+1) is the
@@ -1289,7 +1291,8 @@ def gw_drag_prof(
                 ubtl = jnp.minimum(ubtl, limit)
             else:
                 # The same p-norm smooth min as the stress cap (#2241, the
-                # mcfarlane.py limiter form) on the positive part; a negative
+                # mcfarlane.py limiter form) on the positive part, applied in
+                # sequence like E3SM's mins (not one joint p-norm); a negative
                 # divergence is below every (non-negative) limit, as in E3SM.
                 ubtl = jnp.where(
                     ubtl > 0.0,

@@ -10,6 +10,7 @@ A static ``sharpness = math.inf`` returns the discontinuous function exactly
 (``x >= 0``, ``jnp.maximum``, ...): the hard limit of a RULE 5 smooth switch.
 """
 
+import functools
 import math
 import numbers
 
@@ -118,11 +119,32 @@ def pnorm_smooth_min(a: jax.Array, b: jax.Array, p: float, eps: float) -> jax.Ar
     symmetric, so either pick is the same smooth function.
     """
     first = a <= b
-    lo = jnp.where(first, a, b)
-    hi = jnp.where(first, b, a)
+    return _pnorm_lo_hi(jnp.where(first, a, b), jnp.where(first, b, a), p, eps)
+
+
+def _pnorm_ratio(lo, hi, eps):
     ok = hi > eps
-    ratio = jnp.where(ok, lo / jnp.where(ok, hi, jnp.ones_like(hi)), jnp.zeros_like(lo))
+    return ok, jnp.where(ok, lo / jnp.where(ok, hi, jnp.ones_like(hi)), jnp.zeros_like(lo))
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(2, 3))
+def _pnorm_lo_hi(lo, hi, p, eps):
+    _, ratio = _pnorm_ratio(lo, hi, eps)
     return lo * (1.0 + ratio ** p) ** (-1.0 / p)
+
+
+@_pnorm_lo_hi.defjvp
+def _pnorm_lo_hi_jvp(p, eps, primals, tangents):
+    # Analytic, bounded partials: d/dlo = (1+r^p)^(-1/p-1), d/dhi =
+    # r^(p+1) (1+r^p)^(-1/p-1) with r = lo/hi <= 1.  Differentiating lo/hi
+    # instead overflows hi^-2 in fp32 for tiny hi (NaN gradient at lo = 0).
+    lo, hi = primals
+    dlo, dhi = tangents
+    ok, ratio = _pnorm_ratio(lo, hi, eps)
+    rp = ratio ** p
+    w = (1.0 + rp) ** (-1.0 / p - 1.0)
+    out = lo * (1.0 + rp) ** (-1.0 / p)
+    return out, w * dlo + jnp.where(ok, ratio ** (p + 1.0) * w, 0.0) * dhi
 
 
 def smooth_clamp(

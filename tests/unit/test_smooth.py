@@ -152,6 +152,15 @@ def test_pnorm_smooth_min_tie_curvature_and_zero_inputs():
                                3.0, rtol=1e-12)
 
 
+def test_pnorm_smooth_min_tiny_inputs_have_finite_gradients_in_fp32():
+    """#2241 review: with eps = 0 a tiny hi (1e-20) gave a NaN d/dhi in fp32
+    (lo/hi differentiated through hi^-2); the analytic JVP keeps it finite."""
+    for a, b in ((0.0, 1e-20), (1e-30, 1e-20), (0.0, 1e-30), (1e-25, 1e-20)):
+        a, b = jnp.asarray(a, jnp.float32), jnp.asarray(b, jnp.float32)
+        ga, gb = jax.grad(lambda x, y: pnorm_smooth_min(x, y, 50.0, 0.0), (0, 1))(a, b)
+        assert bool(jnp.isfinite(ga)) and bool(jnp.isfinite(gb)), (a, b, ga, gb)
+
+
 def test_positive_part_c1_is_zero_below_and_c1():
     """Exactly 0 for x <= 0 (softplus is not), exactly x at and above 1/s,
     never above max(x, 0), and value and slope continuous at both joins."""
