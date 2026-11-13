@@ -3954,7 +3954,11 @@ def rrtmgp_config_from_experiment(config, **lane_fields):
     ``use_scan`` None defers to ``rte_utils.recurrent_op_with_halos``, which
     picks scan on GPU/TPU and the unrolled loop on CPU/Metal (issue #273)."""
     from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import gas_table_files
+    lw_gas, sw_gas = gas_table_files(getattr(config, 'rrtmgp_gas_tables', 'reduced'))
     return RRTMGPConfig(
+        lw_gas_file=lw_gas,
+        sw_gas_file=sw_gas,
         co2_ppmv=config.co2_ppmv,
         ch4_ppbv=config.ch4_ppbv,
         n2o_ppbv=config.n2o_ppbv,
@@ -3965,6 +3969,22 @@ def rrtmgp_config_from_experiment(config, **lane_fields):
         column_chunk_size=getattr(config, 'rrtmgp_column_chunk_size', 0),
         overhead_layer=bool(getattr(config, 'rrtmgp_overhead_layer', False)),
         **lane_fields,
+    )
+
+
+def solar_config_from_experiment(config):
+    """The external-solar config for a run.  Its per-band spectrum is expanded
+    to the g-points of the SW table the radiation runs (``rrtmgp_gas_tables``),
+    taken from the same map the RRTMGP builder above uses."""
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import gas_table_files
+    from legoesm.forcing.external import SolarConfig
+    return SolarConfig(
+        S_0=config.S_0, source=config.solar_source,
+        path=config.solar_file, tsi_var=config.solar_tsi_var,
+        spectral_var=config.solar_spectral_var,
+        spectral_band_order=getattr(config, "solar_spectral_band_order", "auto"),
+        start_year=config.start_year,
+        sw_gas_file=gas_table_files(getattr(config, "rrtmgp_gas_tables", "reduced"))[1],
     )
 
 

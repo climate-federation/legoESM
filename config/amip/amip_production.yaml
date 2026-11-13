@@ -131,6 +131,9 @@ cld_macmic_num_steps: 3     # CAM6 namelist_defaults_cam.xml:1254 (mg2 + clubb_s
 
 # ---- radiation / clouds / microphysics --------------------------------------
 radiation: rrtmg            # rrtmgp builder (CAM6 uses RRTMG; same k-lineage)
+rrtmgp_gas_tables: full     # reference RRTMGP tables (LW g256 / SW g224): RFMIP
+                            # forcing error <=0.04 W/m2 vs up to 0.24 with the
+                            # reduced g128/g112 set (user approval 2026-11-12)
 rrtmgp_overhead_layer: true # CAM RRTMG extra layer above the model top (ozone
                             # column above p_top absorbs; ~2 W/m2 leaves budget)
 # Saturation curve the cloud-cover diagnosis measures RH against.  NAMED, not

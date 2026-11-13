@@ -135,6 +135,10 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # RRTMGP gas-table set: an unknown name must raise, never fall back
+        # to the reduced tables.
+        ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py",
+         "gas_table_files"),
         # SI3 aEVP lateral boundary: an unknown north_fold / lbc point type
         # must raise, never fall back to the doubly periodic halo.
         ("packages/ice/legoesm/ice/dynamics.py", "_si3_halo"),
