@@ -960,7 +960,8 @@ class TestAuxiliaryMixingSchemes:
         assert float(jnp.max(jnp.abs(gs[1]))) > 0.0, "ddm d/dalpha_dTdz dead"
         assert float(jnp.max(jnp.abs(gs[2]))) > 0.0, "ddm d/dbeta_dSdz dead"
 
-    def test_grad_internal_wave_mixing(self):
+    @pytest.mark.parametrize("with_unstable", [False, True])
+    def test_grad_internal_wave_mixing(self, with_unstable):
         from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
             compute_iwm_diffusivity, uniform_iwm_forcing, IWMConfig,
         )
@@ -975,7 +976,13 @@ class TestAuxiliaryMixingSchemes:
                             (n_lat, n_lon, nlev)).copy())
         dz_w = jnp.full((n_lat, n_lon, nlev - 1), 80.0, dtype=jnp.float64)
         H = jnp.full((n_lat, n_lon), 400.0, dtype=jnp.float64)
-        N2 = jnp.asarray(1e-5 + 1e-6 * rng.random((n_lat, n_lon, nlev - 1)))
+        N2 = 1e-5 + 1e-6 * rng.random((n_lat, n_lon, nlev - 1))
+        if with_unstable:
+            # zero and statically unstable interfaces, clipped to 0 inside the
+            # scheme: sqrt(0) there once made the whole gradient NaN
+            N2[:, :, 1] = 0.0
+            N2[0, :, 2] = -3e-6
+        N2 = jnp.asarray(N2)
 
         def loss(N2_in):
             out = compute_iwm_diffusivity(
