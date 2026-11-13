@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.core.smooth import (
@@ -124,6 +125,31 @@ def test_pnorm_smooth_min():
     assert float(out[3]) == 0.0 and float(out[4]) == 0.0
     g = jax.grad(lambda x: pnorm_smooth_min(x, jnp.array(2.0), 50.0, 1e-10))(jnp.array(2.0))
     assert bool(jnp.isfinite(g)) and 0.0 < float(g) < 1.0
+
+
+def test_pnorm_smooth_min_tie_curvature_and_zero_inputs():
+    """#2241: exact second derivative at a tie (min/max-based AD zeroed it);
+    exact min and finite gradients at zero inputs with eps = 0, at the
+    default and at the hard limit."""
+    if not jax.config.jax_enable_x64:
+        pytest.skip("curvature checked in fp64 (JAX_ENABLE_X64=1)")
+    from jax.test_util import check_grads
+    p = 50.0
+    f = lambda a, b: pnorm_smooth_min(a, b, p, 0.0)  # noqa: E731
+    two = jnp.array(2.0)
+    check_grads(lambda a: f(a, two), (two,), order=2, modes=("fwd", "rev"), eps=1e-4)
+    check_grads(f, (two, two), order=2, modes=("fwd", "rev"), eps=1e-4)
+    want = -(p + 1.0) * 2.0 ** (-1.0 / p) / (4.0 * 2.0)
+    got = jax.grad(jax.grad(lambda a: f(a, two)))(two)
+    np.testing.assert_allclose(float(got), want, rtol=1e-10)
+    for a, b in ((0.0, 3.0), (3.0, 0.0), (0.0, 0.0)):
+        a, b = jnp.array(a), jnp.array(b)
+        for pp in (p, 1e12):
+            assert float(pnorm_smooth_min(a, b, pp, 0.0)) == 0.0
+            ga, gb = jax.grad(lambda x, y: pnorm_smooth_min(x, y, pp, 0.0), (0, 1))(a, b)
+            assert bool(jnp.isfinite(ga)) and bool(jnp.isfinite(gb))
+    np.testing.assert_allclose(float(pnorm_smooth_min(jnp.array(3.0), jnp.array(5.0), 1e12, 0.0)),
+                               3.0, rtol=1e-12)
 
 
 def test_positive_part_c1_is_zero_below_and_c1():

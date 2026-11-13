@@ -105,14 +105,21 @@ def pnorm_smooth_min(a: jax.Array, b: jax.Array, p: float, eps: float) -> jax.Ar
     elementwise min/max); the ratio is 0 where ``hi <= eps`` (where-before-
     divide, AD-safe), so there the result is the exact ``min`` and it jumps
     (from ``eps`` to ``2^(-1/p)*eps`` where ``a = b``) as ``hi`` crosses
-    ``eps``: callers zero inputs ``<= eps`` first (both GWD callers zero
-    stresses ``<= taumin = eps``).  Above ``eps``: scale-free (unlike the
+    ``eps``: callers with ``eps > 0`` zero inputs ``<= eps`` first (the GWD
+    stress caps zero stresses ``<= taumin = eps``).  Above ``eps``: scale-free (unlike the
     additive :func:`smooth_min`), C-infinity, never above ``min(a, b)``,
     equal to ``2^(-1/p)*a`` where ``a = b``; exact ``min`` as ``p -> inf``.
-    Used for the GWD stress cap ``min(taudmp, tausat)`` (Lindzen, McFarlane).
+    Used for the GWD stress cap ``min(taudmp, tausat)`` (Lindzen, McFarlane,
+    E3SM-CAM), the GWD tendency limiters and the launch Froude cap; callers
+    with ``eps = 0`` pass non-negative inputs (``hi = 0`` then means both are
+    0 and the exact 0 is returned with finite gradients).  ``lo``/``hi`` are
+    picked with one ``where`` (not ``minimum``/``maximum``, whose AD splits
+    the tangent at a tie and zeroes the curvature there); the formula is
+    symmetric, so either pick is the same smooth function.
     """
-    lo = jnp.minimum(a, b)
-    hi = jnp.maximum(a, b)
+    first = a <= b
+    lo = jnp.where(first, a, b)
+    hi = jnp.where(first, b, a)
     ok = hi > eps
     ratio = jnp.where(ok, lo / jnp.where(ok, hi, jnp.ones_like(hi)), jnp.zeros_like(lo))
     return lo * (1.0 + ratio ** p) ** (-1.0 / p)
