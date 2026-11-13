@@ -565,7 +565,9 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
     is the core TURB_NCAR blend :func:`ncar_stable_weight`, half-width
     ``dthv_width`` [K] on the first-guess ``dTv`` (None = ``NCAR_DTHV_WIDTH``,
     1e-2) and ``neutral_width`` on ``zeta`` in the iteration (None =
-    ``NCAR_NEUTRAL_WIDTH``, 1e-3).  ``0.0`` is NEMO's hard ``> 0`` step.
+    ``NCAR_NEUTRAL_WIDTH``, 1e-3).  ``0.0`` is NEMO's hard ``> 0`` step,
+    kept local: the core helper's width-0 branch is AeroBulk's ``>= 0``, which
+    differs at exactly 0.  Widths are static Python floats.
     KNOWN DIFFERENCE (measured 2026-11-12, SST 290 K, q_air = q_sfc,
     theta_air - SST in [-0.03, 0.03] K, wind 3/8/15 m/s): only states with
     ``|dTv| < dthv_width`` or ``|zeta| < neutral_width`` move; Ch by up to

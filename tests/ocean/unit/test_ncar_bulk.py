@@ -1071,11 +1071,25 @@ def test_check_grads_omip_stanton_at_default():
             jnp.atleast_1d(th), *a[1:], dthv_width=dthv_width,
             neutral_width=neutral_width)[1][0]
     th0 = jnp.asarray(290.003)
+    # both blends are live at th0 (each width alone moves Ch there)
+    assert float(ch(th0)) != float(ch(th0, dthv_width=0.0))
+    assert float(ch(th0)) != float(ch(th0, neutral_width=0.0))
     check_grads(ch, (th0,), order=2, modes=("fwd", "rev"), eps=1e-5)
     assert float(jax.grad(ch)(th0)) != 0.0
     with pytest.raises(AssertionError):          # the hard limit is not smooth
         check_grads(lambda t: ch(t, 0.0, 0.0), (jnp.asarray(290.0),), order=1,
                     modes=("rev",), eps=1e-4)
+
+
+@pytest.mark.parametrize("U", (3.0, 8.0, 15.0))
+def test_omip_stanton_default_is_continuous_at_neutral(U):
+    """The hard step jumps Ch by ~1.8x across theta_air = SST; the default
+    blend is continuous there (fails if the blend is reverted)."""
+    def ch(dth, **w):
+        return float(ncar_transfer_coefficients(*_stanton_args(U, (dth,)), **w)[1][0])
+    hard = ch(1e-9, dthv_width=0.0, neutral_width=0.0) / ch(-1e-9, dthv_width=0.0, neutral_width=0.0)
+    assert abs(hard - 18.0 / 32.7) < 1e-3
+    np.testing.assert_allclose(ch(1e-9), ch(-1e-9), rtol=1e-5)
 
 
 def test_omip_stanton_widths_reach_the_fluxes(monkeypatch):
