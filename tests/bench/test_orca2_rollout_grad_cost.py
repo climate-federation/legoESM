@@ -139,3 +139,26 @@ def test_checkpointing_schedules_shrink_compiled_memory():
     # measured on CPU, in units of one state: none ~65, uniform ~33, binomial ~8
     assert temp["none"] > 1.5 * temp["uniform"] > 0
     assert temp["uniform"] > 2 * temp["binomial"]
+
+
+def test_fd_check_agrees_with_the_gradient_and_catches_a_wrong_one():
+    from orca2_rollout_grad_cost import fd_check
+
+    class Z(NamedTuple):
+        is_active: jax.Array
+
+    model, n = ToyModel(), 6
+    inputs = _inputs(n, constant_gamma=False)
+    state1 = _state1()
+    rollout = make_rollout(model, DT, n, "uniform")
+    stacked, gamma = stack_inputs(inputs)
+
+    def loss_fn(s):
+        return jnp.sum(s.T.data ** 2)
+
+    g = jax.grad(lambda d: loss_fn(rollout(d, stacked, gamma, state1)))(jnp.zeros(4))
+    z = Z(is_active=jnp.ones(4))
+    good = fd_check(loss_fn, rollout, state1, stacked, gamma, g, z, (1e-4, 1e-5))
+    assert max(r["rel_err"] for r in good) < 1e-6, good
+    bad = fd_check(loss_fn, rollout, state1, stacked, gamma, -g, z, (1e-4,))
+    assert bad[0]["rel_err"] > 0.5, bad

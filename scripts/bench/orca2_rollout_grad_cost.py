@@ -170,7 +170,7 @@ def _state_of(result):
     return result.state_after if hasattr(result, "state_after") else result
 
 
-def measure(steps, schedule, checkpoints, parity, save_grad, card_mode="normal"):
+def measure(steps, schedule, checkpoints, parity, save_grad, card_mode="normal", fd_eps=()):
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
     if not jax.config.jax_enable_x64:
@@ -247,7 +247,29 @@ def measure(steps, schedule, checkpoints, parity, save_grad, card_mode="normal")
                mem_after_grad=_mem())
     if save_grad is not None:
         np.save(save_grad, g)
+    if fd_eps and out["grad_nonfinite"] == 0:
+        out["fd_check"] = fd_check(loss_fn, rollout, state1, stacked, gamma, g,
+                                   card.ocean.recipe.z_coord, fd_eps)
     return out
+
+
+def fd_check(loss_fn, rollout, state1, stacked, gamma, grad, z_coord, eps_list):
+    """Central differences of the same loss along round 315's unit-RMS wet
+    direction, against <grad, d>, for each epsilon [K]."""
+    from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round315_nan_locate import (  # noqa: E501
+        probe_direction,
+    )
+
+    d = probe_direction(state1, jnp.asarray(z_coord.is_active, dtype=jnp.float64))
+    f = jax.jit(lambda dT, *ops: loss_fn(rollout(dT, *ops)))
+    ad = float(jnp.vdot(jnp.asarray(grad), d))
+    rows = []
+    for eps in eps_list:
+        fd = float((f(eps * d, stacked, gamma, state1) - f(-eps * d, stacked, gamma, state1))
+                   / (2.0 * eps))
+        rows.append({"eps": eps, "fd": fd, "ad": ad,
+                     "rel_err": abs(fd - ad) / max(abs(fd), abs(ad), 1e-300)})
+    return rows
 
 
 def locate_nan(card_mode):
@@ -291,6 +313,8 @@ def main(argv=None) -> int:
     parser.add_argument("--parity", action="store_true",
                         help="also compare the loop's forward state with eager model.step")
     parser.add_argument("--save-grad", type=Path, default=None)
+    parser.add_argument("--fd-eps", type=float, nargs="*", default=(),
+                        help="central-difference check of the gradient at these step sizes [K]")
     parser.add_argument("--card", choices=("normal", "exact"), default="normal",
                         help="normal-mode K0 card (native maths) or the certified exact "
                              "card (scalar libm, CPU only)")
@@ -309,7 +333,7 @@ def main(argv=None) -> int:
     if args.steps is None or args.schedule is None:
         parser.error("--steps and --schedule are required unless --locate-nan")
     result = measure(args.steps, args.schedule, args.checkpoints, args.parity, args.save_grad,
-                     args.card)
+                     args.card, tuple(args.fd_eps))
     result["provenance"] = stamp
     result["argv"] = sys.argv
     args.output.write_text(json.dumps(result, indent=1, sort_keys=True, default=str) + "\n")
