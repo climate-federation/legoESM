@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.numerics_mode import current_numerics
 
 
 def nemo_source_round(value: jax.Array) -> jax.Array:
@@ -17,8 +18,15 @@ def nemo_source_round(value: jax.Array) -> jax.Array:
     XLA strips ``optimization_barrier`` from optimized HLO.  The surviving
     ``isfinite``/``select``/``copysign`` chain is the operative contraction
     guard.  It is an IEEE identity, including signed infinities and NaNs, and
-    remains differentiable for finite physical inputs.
+    remains differentiable for finite physical inputs.  Under the
+    ``"nemo_fast"`` numerics mode a floating input comes back unguarded as a
+    JAX array; any other input keeps the guard, so it is promoted exactly as
+    under ``"nemo_exact"`` (an integer comes back as a float).
     """
+    if current_numerics() == "nemo_fast":
+        value = jnp.asarray(value)
+        if jnp.issubdtype(value.dtype, jnp.inexact):
+            return value
     value = jax.lax.optimization_barrier(value)
     return jnp.where(
         jnp.isfinite(value),

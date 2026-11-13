@@ -81,6 +81,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.core import transcendentals as tx
+from legoesm.core.numerics_mode import NUMERICS_MODES, require_numerics
 from legoesm.core.precision import get_policy
 from legoesm.core.smooth import positive_part_c1
 from legoesm.core.source_rounding import (
@@ -882,7 +883,13 @@ class NemoStandaloneK0Config(NamedTuple):
 
 
 class NemoStandaloneK0OceanCard(NamedTuple):
-    """The certified rung-10 ocean plus explicit standalone K0 selectors."""
+    """The certified rung-10 ocean plus explicit standalone K0 selectors.
+
+    ``numerics`` is the run-wide numerics mode the card was built for
+    (:mod:`legoesm.core.numerics_mode`): ``None`` runs as before the mode
+    existed; ``"nemo_exact"`` or ``"nemo_fast"`` must equal the mode of the
+    driver's ``numerics_scope``.
+    """
 
     ocean: object
     k0: NemoStandaloneK0Config
@@ -890,6 +897,7 @@ class NemoStandaloneK0OceanCard(NamedTuple):
     precip_factor: object
     evap_factor: object
     nb_iter: int
+    numerics: str | None = None
 
 
 class NemoStandaloneK0StepResult(NamedTuple):
@@ -917,6 +925,10 @@ def validate_nemo_standalone_k0(config: NemoStandaloneK0Config) -> None:
 def _validate_k0_ocean_card(card: NemoStandaloneK0OceanCard) -> None:
     """Bind Decision 175 and K0 istate to the real rung-10 card that consumes them."""
 
+    if card.numerics not in (None, *NUMERICS_MODES):
+        raise ValueError(
+            "standalone K0 card numerics must be None or one of "
+            f"{NUMERICS_MODES}, got {card.numerics!r}")
     validate_nemo_standalone_k0(card.k0)
     ocean = card.ocean
     config = ocean.recipe.model_config
@@ -1042,6 +1054,7 @@ def nemo_orca2_k0_ocean_step(
     """
 
     _validate_k0_ocean_card(card)
+    require_numerics(card.numerics)
     # sbc(kstp,Nbb,Nbb) reads the live rung-10 state.  The caller owns only
     # the explicit controls/carry; it cannot shadow S0-M or S3 with stale
     # state arrays.
@@ -1093,7 +1106,7 @@ def nemo_orca2_k0_ocean_step(
     stepped = model.step(state, card.ocean.dt_s, **kwargs)
     state_after = stepped.state_after if hasattr(stepped, "state_after") else stepped
     next_shortwave_fraction = _nemo_orca2_k0_next_fraqsr_compiled(
-        z_coord, get_policy(),
+        z_coord, get_policy(), card.numerics,
         card.ocean.recipe.model_config.physics.shortwave_penetration,
         state.eta.data, state_after.eta.data, state.H_bathy.data,
         state.land_mask.data, surface.s2.penetrative_qsr, chl,
@@ -1125,10 +1138,12 @@ def _nemo_orca2_k0_surface_compiled(
     It makes :func:`nemo_orca2_k0_surface_card`'s call with the ``nn_fsbc``
     branch static.  Arrays are traced and other leaves static, so each branch
     compiles once (forcing steps never read, and are not passed, the carry);
-    ``policy`` keys the cache because tracing picks the transcendental arm.
-    Per-step integers (``kt``, clock seconds) arrive as arrays.
+    ``policy`` keys the cache because tracing picks the transcendental arm;
+    ``card.numerics`` keys it alongside the numerics-mode context and must
+    equal it.  Per-step integers (``kt``, clock seconds) arrive as arrays.
     """
     del policy
+    require_numerics(card.numerics)
     temperature = jnp.asarray(temperature, dtype=jnp.float64)
     salinity = jnp.asarray(salinity, dtype=jnp.float64)
     u_before = jnp.asarray(u_level, dtype=jnp.float64)[:, 1:, 0]
@@ -1174,11 +1189,15 @@ def _nemo_orca2_k0_surface_compiled(
 
 @eqx.filter_jit
 def _nemo_orca2_k0_next_fraqsr_compiled(
-    z_coord, policy, shortwave_penetration, ssh_before, ssh_after, h_bathy,
-    land_mask, penetrative_qsr, chl,
+    z_coord, policy, numerics, shortwave_penetration, ssh_before, ssh_after,
+    h_bathy, land_mask, penetrative_qsr, chl,
 ):
-    """The K0 step's carried ``fraqsr_1lev`` as one program."""
+    """The K0 step's carried ``fraqsr_1lev`` as one program.
+
+    ``numerics`` (the card's) keys the cache and must equal the active mode.
+    """
     del policy
+    require_numerics(numerics)
     # traqsr.f90:327-402 replaces fraqsr_1lev during stage 3 with Kmm = Nnn
     # (stage-2 exit r1_2 * (r3t(Kbb) + r3ta), stprk3_stg.f90:215,525),
     # gdepw_1d(2) * (1 + r3t(Kmm)), e3t_3d(1) * (1 + r3t(Kmm) * tmask(1)),
