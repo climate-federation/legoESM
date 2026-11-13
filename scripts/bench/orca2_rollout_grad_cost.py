@@ -115,9 +115,10 @@ def _is_oom(error: Exception) -> bool:
     return "RESOURCE_EXHAUSTED" in str(error) or "Out of memory" in str(error)
 
 
-def record_forced_inputs(steps: int):
-    """Normal-mode K0 card, its ocean model and initial state, and the per-step
-    ocean ``step`` kwargs of a forward composed-K0 run over ``steps`` steps."""
+def record_forced_inputs(steps: int, card_mode: str = "normal"):
+    """K0 card (``normal`` mode, or the certified ``exact`` card), its ocean model
+    and initial state, and the per-step ocean ``step`` kwargs of a forward
+    composed-K0 run over ``steps`` steps."""
     from legoesm.ocean import bulk_flux_omip as bulk
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -125,7 +126,12 @@ def record_forced_inputs(steps: int):
     )
 
     base = bulk.build_nemo_orca2_k0_ocean_card(r343.DEFAULT_DECK_ROOT)
-    card = r343.build_normal_mode_orca2_k0_card(base, variant="cat_a_plus_b")
+    if card_mode == "exact":
+        card = base
+    elif card_mode == "normal":
+        card = r343.build_normal_mode_orca2_k0_card(base, variant="cat_a_plus_b")
+    else:
+        raise ValueError(f"unknown card mode {card_mode!r}; expected 'normal' or 'exact'")
     controls = r343.precompute_step_controls(
         card, r343.DEFAULT_DECK_ROOT, r343.DEFAULT_CORE_MANIFEST,
         r343.DEFAULT_ICE_COVER_PATH, steps)
@@ -164,18 +170,23 @@ def _state_of(result):
     return result.state_after if hasattr(result, "state_after") else result
 
 
-def measure(steps, schedule, checkpoints, parity, save_grad):
+def measure(steps, schedule, checkpoints, parity, save_grad, card_mode="normal"):
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
     if not jax.config.jax_enable_x64:
         raise SystemExit("needs JAX_ENABLE_X64=1")
     if steps < 2:
         raise SystemExit("--steps must be >= 2 (step 1 runs outside the loop)")
-    set_policy(PrecisionPolicy.fp64(transcendentals="native"))
-    if get_policy().transcendentals != "native":
-        raise SystemExit("native transcendental policy is not active")
+    # the exact card's scalar-libm path is CPU-only (transcendentals.py refuses others)
+    transcendentals = "libm" if card_mode == "exact" else "native"
+    if card_mode == "exact" and jax.default_backend() != "cpu":
+        raise SystemExit("--card exact runs on CPU only")
+    set_policy(PrecisionPolicy.fp64(transcendentals=transcendentals))
+    if get_policy().transcendentals != transcendentals:
+        raise SystemExit(f"{transcendentals} transcendental policy is not active")
 
     out = {"steps": steps, "differentiated_steps": steps - 1, "schedule": schedule,
+           "card": card_mode, "transcendentals": transcendentals,
            "checkpoints": checkpoints, "backend": jax.default_backend(),
            "device": str(jax.devices()[0]),
            "env": {k: os.environ.get(k) for k in ("XLA_PYTHON_CLIENT_PREALLOCATE",
@@ -183,7 +194,7 @@ def measure(steps, schedule, checkpoints, parity, save_grad):
                                                   "XLA_PYTHON_CLIENT_ALLOCATOR")},
            "legoesm_ocean_file": __import__("legoesm.ocean").ocean.__file__}
     t0 = time.perf_counter()
-    card, model, state0, inputs = record_forced_inputs(steps)
+    card, model, state0, inputs = record_forced_inputs(steps, card_mode)
     dt = card.ocean.dt_s
     state1 = _state_of(model.step(state0, dt, nemo_kt=1, **inputs[0]))
     state1 = model.seed_scan_carry(state1, dt, nemo_kt=2, **inputs[1])
@@ -248,12 +259,16 @@ def main(argv=None) -> int:
     parser.add_argument("--parity", action="store_true",
                         help="also compare the loop's forward state with eager model.step")
     parser.add_argument("--save-grad", type=Path, default=None)
+    parser.add_argument("--card", choices=("normal", "exact"), default="normal",
+                        help="normal-mode K0 card (native maths) or the certified exact "
+                             "card (scalar libm, CPU only)")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
     stamp = worktree_stamp(repo=REPO_ROOT)
-    result = measure(args.steps, args.schedule, args.checkpoints, args.parity, args.save_grad)
+    result = measure(args.steps, args.schedule, args.checkpoints, args.parity, args.save_grad,
+                     args.card)
     result["provenance"] = stamp
     result["argv"] = sys.argv
     args.output.write_text(json.dumps(result, indent=1, sort_keys=True, default=str) + "\n")
