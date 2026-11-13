@@ -45,7 +45,7 @@ from legoesm.core.bulk_flux import (  # noqa: E402
     NCAR_NEUTRAL_WIDTH,
     _AB_RCTV0,
     _cd_n10_ncar,
-    _ncar_stable_weight,
+    ncar_stable_weight,
     compute_most_fluxes,
 )
 
@@ -204,7 +204,7 @@ def test_check_grads_stable_weight_at_default(width):
     """Helper level: the hard step jumps at 0 (fails check_grads there); the
     default quintic blend is smooth at 0 and mid-band (coverage).  eps = w/1e4."""
     def f(x):
-        return _ncar_stable_weight(x, width)
+        return ncar_stable_weight(x, width)
     for x in (0.0, 0.5 * width):
         check_grads(f, (jnp.asarray(x),), order=2, modes=("fwd", "rev"), eps=1e-4 * width)
         assert float(jax.grad(f)(jnp.asarray(x))) != 0.0

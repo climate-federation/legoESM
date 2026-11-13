@@ -1184,7 +1184,7 @@ def large_yeager_widths(config) -> dict:
     return {k: getattr(config, k) for k in LARGE_YEAGER_WIDTH_DEFAULTS}
 
 
-def _ncar_stable_weight(x, width):
+def ncar_stable_weight(x, width):
     """Weight of the stable neutral Stanton number (18) in TURB_NCAR.
 
     ``x`` is ``zeta_u`` in the iteration or ``dthv`` [K] in the first guess.
@@ -1240,7 +1240,7 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
     log_zt_zu = jnp.log(z_t / z_u)
     log_zu_10 = jnp.log(z_u / 10.0)
     dthv = t_zt * (1.0 + _AB_RCTV0 * q_zt) - T_s * (1.0 + _AB_RCTV0 * q_s)
-    stab = _ncar_stable_weight(dthv, dthv_width)
+    stab = ncar_stable_weight(dthv, dthv_width)
     CdN = _cd_n10_ncar(Ub, cd_cutoff_width)
     sqrt_CdN = jnp.sqrt(CdN)
     Cd = CdN
@@ -1324,7 +1324,7 @@ def _ncar_body(c, *, T_s, q_s, Ub, t_zt, q_zt, z_u, z_t, equal, log_zt_zu,
     sqrt_Cd = jnp.sqrt(Cd)
     tmp = (log_zu_10 - psih_u) / KAPPA / sqrt_CdN
     tmp2 = sqrt_Cd / sqrt_CdN
-    stab = _ncar_stable_weight(zeta_u, neutral_width)
+    stab = ncar_stable_weight(zeta_u, neutral_width)
     ChN = 1.0e-3 * sqrt_CdN * (_AB_NCAR_CHN_STABLE * stab
                                + _AB_NCAR_CHN_UNSTABLE * (1.0 - stab))
     CeN = 1.0e-3 * (_AB_NCAR_CEN * sqrt_CdN)
@@ -1538,7 +1538,7 @@ def compute_most_fluxes(
         gap 3.9e-5 in stress, 2.7e-5 in heat fluxes, 3.1e-5 in u*.
     large_yeager_neutral_width : float
         ``large_yeager`` only: half-width in zeta_u of the compact quintic blend
-        (:func:`_ncar_stable_weight`) of the stable/unstable neutral Stanton
+        (:func:`ncar_stable_weight`) of the stable/unstable neutral Stanton
         numbers (18 vs 32.7) inside the iteration (static Python float).
         Default ``NCAR_NEUTRAL_WIDTH`` = 1e-3 (RULE 5); ``0.0`` is AeroBulk's
         hard ``zeta_u >= 0`` switch.  KNOWN DIFFERENCE (#2241, measured

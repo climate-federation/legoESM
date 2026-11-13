@@ -163,7 +163,8 @@ def test_omip_ncar_matches_aerobulk(oracle):
     out = air_sea_fluxes(
         u10=jnp.asarray(inp["u"]), v10=jnp.asarray(inp["v"]),
         T_air_K=jnp.asarray(inp["t_air"]), q_air=jnp.asarray(inp["q_air"]),
-        T_sfc_K=jnp.asarray(inp["sst"]), slp_Pa=jnp.asarray(inp["slp"]))
+        T_sfc_K=jnp.asarray(inp["sst"]), slp_Pa=jnp.asarray(inp["slp"]),
+        dthv_width=0.0, neutral_width=0.0)   # NEMO's hard Stanton step (#2241)
     allpts = np.ones_like(oracle["W"], dtype=bool)
     # OMIP port keeps NEMO conventions: heat positive-down (= aerobulk),
     # stress = ocean reaction (-aerobulk), evap positive when evaporating
