@@ -250,10 +250,42 @@ def measure(steps, schedule, checkpoints, parity, save_grad, card_mode="normal")
     return out
 
 
+def locate_nan(card_mode):
+    """Every backward operation of ONE in-loop step (kt = 2) whose cotangent turns
+    non-finite, via round 315's ``walk_pullback`` (fused: non-T cotangents enter
+    as symbolic zeros, as in ``jax.grad`` of the T loss); raw and sanitized."""
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round315_nan_locate import (  # noqa: E501
+        walk_pullback,
+    )
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm" if card_mode == "exact" else "native"))
+    card, model, state0, inputs = record_forced_inputs(3, card_mode)
+    dt = card.ocean.dt_s
+    state1 = _state_of(model.step(state0, dt, nemo_kt=1, **inputs[0]))
+    loss_fn = volume_mean_t2(model, card.ocean.recipe.z_coord)
+    st2, vjp_fn = jax.vjp(lambda st: _state_of(model.step(st, dt, nemo_kt=2, **inputs[1])),
+                          state1)
+    ct = jax.vjp(loss_fn, st2)[1](jnp.float64(1.0))[0]
+    paths = [jax.tree_util.keystr(k) for k, _ in jax.tree_util.tree_leaves_with_path(st2)]
+    zeros = tuple(q for q in paths if not (q == ".T" or q.startswith(".T[")))
+    jit_dT = np.asarray(vjp_fn(ct)[0].T.data)
+    out = {"card": card_mode, "step_kt": 2,
+           "jit_dT_nonfinite": int((~np.isfinite(jit_dT)).sum()), "runs": {}}
+    for sanitize in (False, True):
+        g, events = walk_pullback(vjp_fn, ct, zeros, sanitize)
+        dT = np.asarray(g[0].T.data)
+        out["runs"]["sanitized" if sanitize else "raw"] = {
+            "dT_nonfinite": int((~np.isfinite(dT)).sum()), "events": events}
+    return out
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--steps", type=int, required=True, help="total steps N (dt = 3 h)")
-    parser.add_argument("--schedule", choices=VALID_SCHEDULES, required=True)
+    parser.add_argument("--locate-nan", action="store_true",
+                        help="instead of costing: list the one-step backward NaN sources")
+    parser.add_argument("--steps", type=int, help="total steps N (dt = 3 h)")
+    parser.add_argument("--schedule", choices=VALID_SCHEDULES)
     parser.add_argument("--checkpoints", type=int, default=None,
                         help="binomial budget K (default ceil(sqrt(N-1)))")
     parser.add_argument("--parity", action="store_true",
@@ -267,6 +299,15 @@ def main(argv=None) -> int:
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
     stamp = worktree_stamp(repo=REPO_ROOT)
+    if args.locate_nan:
+        result = locate_nan(args.card)
+        result.update(provenance=stamp, argv=sys.argv)
+        args.output.write_text(json.dumps(result, indent=1, default=str) + "\n")
+        print(f"STATUS LOCATED card={args.card} "
+              f"sources={len(result['runs']['sanitized']['events'])}")
+        return 0
+    if args.steps is None or args.schedule is None:
+        parser.error("--steps and --schedule are required unless --locate-nan")
     result = measure(args.steps, args.schedule, args.checkpoints, args.parity, args.save_grad,
                      args.card)
     result["provenance"] = stamp
