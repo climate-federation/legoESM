@@ -483,11 +483,13 @@ def _random_marine_inputs(n=4096, seed=7):
 def test_ncar_coefficients_match_independent_numpy_mirror():
     theta, q, sst, ssq, wind, _slp = _random_marine_inputs()
     Cd_np, Ch_np, Ce_np, Ub_np = _np_turb_ncar(theta, q, sst, ssq, wind)
-    # The NumPy mirror is NEMO's hard 33 m/s plateau: compare at the hard
-    # limit (cd_cutoff_width=0); the default's gap is pinned in the #2241 tests.
+    # The NumPy mirror is NEMO's hard 33 m/s plateau and hard stable/unstable
+    # Stanton step: compare at the hard limit (all three widths 0); the
+    # default's gaps are pinned in the #2241 tests.
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
         jnp.asarray(theta), jnp.asarray(q), jnp.asarray(sst),
-        jnp.asarray(ssq), jnp.asarray(wind), cd_cutoff_width=0.0)
+        jnp.asarray(ssq), jnp.asarray(wind), cd_cutoff_width=0.0,
+        dthv_width=0.0, neutral_width=0.0)
     assert np.allclose(np.asarray(Ub), Ub_np, rtol=0, atol=0)
     assert np.allclose(np.asarray(Cd), Cd_np, rtol=1e-12, atol=1e-15)
     assert np.allclose(np.asarray(Ch), Ch_np, rtol=1e-12, atol=1e-15)
@@ -516,7 +518,7 @@ def test_full_flux_path_matches_independent_numpy_mirror():
     out = air_sea_fluxes(
         u10=jnp.asarray(u), v10=jnp.asarray(v), T_air_K=jnp.asarray(T_air),
         q_air=jnp.asarray(q), T_sfc_K=jnp.asarray(sst),
-        slp_Pa=jnp.asarray(slp))
+        slp_Pa=jnp.asarray(slp), dthv_width=0.0, neutral_width=0.0)
     names = ("tau_x", "tau_y", "sh", "lh", "evap")
     theta_sst = _np_theta_exner(sst, slp)
     l_ratio = np.asarray(latent_heat_vaporization(jnp.asarray(theta_sst))) / _np_nemo_l_vap(theta_sst)
@@ -557,7 +559,9 @@ def test_near_neutral_reduces_to_neutral_coefficients():
     ssq = seawater_q_sat(sst)
     # tiny UNSTABLE offset (exact zero sits on the Fortran SIGN() knife edge)
     theta = sst - 1e-7
-    Cd, Ch, Ce, Ub = ncar_transfer_coefficients(theta, ssq, sst, ssq, wind)
+    # NEMO's hard stable/unstable step (#2241 widths 0): the limit is one-sided.
+    Cd, Ch, Ce, Ub = ncar_transfer_coefficients(theta, ssq, sst, ssq, wind,
+                                                dthv_width=0.0, neutral_width=0.0)
     CdN = large_yeager_neutral_cd(Ub, nemo_parity=True)
     assert np.allclose(np.asarray(Cd), np.asarray(CdN), rtol=1e-5)
     assert np.allclose(np.asarray(Ce),
@@ -998,3 +1002,94 @@ def test_every_large_yeager_drag_branch_shares_one_polynomial(monkeypatch):
     np.testing.assert_allclose(
         bf.large_yeager_neutral_cd(U, nemo_parity=True), 1.5e-3, rtol=1e-15)
     assert not np.allclose(base_legacy, 1.5e-3) and not np.allclose(base_parity, 1.5e-3)
+
+
+# --- #2241 RULE 5: the stable/unstable neutral Stanton select ---------------
+# ncar_transfer_coefficients blends the stable (18) and unstable (32.7)
+# neutral Stanton numbers with core's ncar_stable_weight: half-width
+# dthv_width [K] on the first-guess dTv, neutral_width on zeta in the
+# iteration; 0.0 is NEMO's hard ``> 0`` step.  States: theta_air - SST in K
+# below, q_air = q_sfc (so dTv ~ that difference), SST 290 K.
+_STANTON_DTH = (-0.03, -0.008, -0.002, 0.0, 0.002, 0.008, 0.03)
+
+
+def _stanton_args(U, dth=_STANTON_DTH):
+    th = jnp.asarray([290.0 + d for d in dth])
+    n = th.shape
+    return (th, jnp.full(n, 0.010), jnp.full(n, 290.0), jnp.full(n, 0.010),
+            jnp.full(n, U))
+
+
+@pytest.mark.parametrize("U", (3.0, 8.0, 15.0))
+def test_omip_stanton_hard_limit_matches_numpy_mirror(U):
+    """Widths 0 reproduce the independent NumPy NEMO mirror on near-neutral
+    states on both sides of the switch, eager and under jit."""
+    args = _stanton_args(U)
+    ref = _np_turb_ncar(*(np.asarray(a) for a in args))
+    hard = lambda *a: ncar_transfer_coefficients(  # noqa: E731
+        *a, dthv_width=0.0, neutral_width=0.0)
+    for got in (hard(*args), jax.jit(hard)(*args)):
+        for a, b in zip(got, ref):
+            np.testing.assert_allclose(np.asarray(a), b, rtol=1e-12, atol=1e-15)
+
+
+# Relative gap of the default vs the hard step, (X(default) - X(0)) / X(0),
+# per state of _STANTON_DTH.  Measured 2026-11-12 (#2241); a change to the
+# blend or its widths re-measures these (CLAUDE.md RULE 5).
+_STANTON_GAP = {
+    (3.0, 'Cd'): [0.0, 0.0, -2.3366027648952347e-06, 0.0, -2.770797659503093e-05, 0.0, 0.0],
+    (3.0, 'Ch'): [0.0, 0.0, -0.005800862717823097, -0.2247706422018349, 0.0988916791323193, 0.0, 0.0],
+    (3.0, 'Ce'): [0.0, 0.0, -4.244781781660209e-06, 0.0, -3.2117140483581586e-05, 0.0, 0.0],
+    (8.0, 'Cd'): [0.0, -1.9180640298511565e-05, -1.7064710272036337e-05, 0.0, -2.1862356180547596e-05, -4.52598206322089e-05, 0.0],
+    (8.0, 'Ch'): [0.0, -0.05118353832474979, -0.18138513554341992, -0.22477064220183487, 0.3372789370783426, 0.17467753279580744, 0.0],
+    (8.0, 'Ce'): [0.0, -2.7433526968469796e-05, -2.4418183235609444e-05, 0.0, -2.1109609184077847e-05, -4.3702571816134735e-05, 0.0],
+    (15.0, 'Cd'): [-3.35668016405842e-05, -2.0440278195622704e-05, -5.865839852003554e-06, 0.0, -7.340718352222034e-06, -2.599836026475332e-05, -5.950613098510515e-05],
+    (15.0, 'Ch'): [-0.08271099527959236, -0.1882409494939306, -0.21590828040781762, -0.22477064220183499, 0.39257013656989764, 0.34756020090464396, 0.2121875520336049],
+    (15.0, 'Ce'): [-3.971561625183429e-05, -2.4192601948759753e-05, -6.943256850536766e-06, 0.0, -6.179842313426353e-06, -2.1887155530135814e-05, -5.0097896816933336e-05],
+}
+
+
+@pytest.mark.parametrize("U,name", sorted(_STANTON_GAP))
+def test_omip_stanton_default_gap_per_state(U, name):
+    args = _stanton_args(U)
+    i = ("Cd", "Ch", "Ce").index(name)
+    d = np.asarray(ncar_transfer_coefficients(*args)[i])
+    h = np.asarray(ncar_transfer_coefficients(
+        *args, dthv_width=0.0, neutral_width=0.0)[i])
+    np.testing.assert_allclose((d - h) / h, _STANTON_GAP[(U, name)],
+                               rtol=1e-6, atol=1e-12)
+
+
+def test_check_grads_omip_stanton_at_default():
+    """Ch vs theta_air: the hard step jumps at the neutral point; the default
+    is smooth (order 2, non-zero derivative) inside both blends.  The point
+    is 3 mK on the stable side, off the psi_m / psi_h zeta = 0 kink that
+    stays hard (as in the core TURB_NCAR port)."""
+    def ch(th, dthv_width=None, neutral_width=None):
+        a = _stanton_args(8.0, (0.0,))
+        return ncar_transfer_coefficients(
+            jnp.atleast_1d(th), *a[1:], dthv_width=dthv_width,
+            neutral_width=neutral_width)[1][0]
+    th0 = jnp.asarray(290.003)
+    check_grads(ch, (th0,), order=2, modes=("fwd", "rev"), eps=1e-5)
+    assert float(jax.grad(ch)(th0)) != 0.0
+    with pytest.raises(AssertionError):          # the hard limit is not smooth
+        check_grads(lambda t: ch(t, 0.0, 0.0), (jnp.asarray(290.0),), order=1,
+                    modes=("rev",), eps=1e-4)
+
+
+def test_omip_stanton_widths_reach_the_fluxes(monkeypatch):
+    """air_sea_fluxes forwards both widths to the coefficient solve."""
+    import legoesm.ocean.bulk_flux_omip as bfo
+    seen = {}
+    real = bfo.ncar_transfer_coefficients
+
+    def spy(*a, **k):
+        seen.update(k)
+        return real(*a, **k)
+
+    monkeypatch.setattr(bfo, "ncar_transfer_coefficients", spy)
+    bfo.air_sea_fluxes(jnp.asarray([8.0]), jnp.zeros(1), jnp.asarray([290.0]),
+                       jnp.asarray([0.008]), jnp.asarray([290.0]),
+                       dthv_width=0.03, neutral_width=0.004)
+    assert (seen["dthv_width"], seen["neutral_width"]) == (0.03, 0.004)
