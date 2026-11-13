@@ -111,9 +111,11 @@ KF_SWITCHES = {
     "B5": ("B", "hard", "melting below the freezing level: LC < ML"),
     "C-KCHECK": ("C", "hard", "15 hPa source-layer candidates, candidate base LC = KCHECK(NU)"),
     "C-KLCL": ("C", "hard", "LCL level KLCL / K = KLCL-1 and the masks built on it"),
+    "C-KLCLg": ("C", "smooth", "first-pass gathers at ZLCL: TENV, QENV, WKL, QSLCL, PLCL"),
     "C-KLCL2": ("C", "hard", "closure re-search of the LCL level on the adjusted sounding"),
     "C-KPBL": ("C", "hard", "mixed-layer top KPBL and the masks built on it"),
     "C-L5": ("C", "hard", "L5 and LLFC pressure levels"),
+    "C-L5g": ("C", "smooth", "wind speed at L5 in VCONV"),
     "C-LDB": ("C", "hard", "downdraft base LDB and the downdraft level masks"),
     "C-LET": ("C", "hard", "equilibrium-temperature level LET and the cloud-top detrainment layer"),
     "C-LFS": ("C", "hard", "level of free sink LFS (KLFS) and LDT"),
@@ -138,8 +140,8 @@ KF_SWITCHES = {
     "D7i": ("D", "hard", "subsidence moisture borrow where QG < 0"),
     "D7j": ("D", "hard", "closure mixed-layer supersaturation adjustment (sup)"),
     "D7k": ("D", "hard", "CPR > 0 guard of the precipitation feedback ratio FRC2"),
-    "E1": ("E", "hard", "Q0 clipped to [1e-6, QES]"),
-    "E2": ("E", "hard", "TLCL <= TMIX (first pass and closure)"),
+    "E1": ("E", "smooth", "Q0 clipped to [1e-6, QES]"),
+    "E2": ("E", "smooth", "TLCL <= TMIX (first pass and closure)"),
     "E3": ("E", "hard", "WKLCL linear ramp capped at wklcl_ref"),
     "E4": ("E", "hard", "WLCL <= 3 m/s"),
     "E5": ("E", "hard", "RAD ramp clipped to [rad_min, rad_max]"),
@@ -312,6 +314,16 @@ class KFSmoothing(NamedTuple):
       (D7d).
     * ``prof5_width``: half-width in PROF5's ``y`` of the blend between its
       two polynomial branches (D7e).
+    * ``lcl_gather_width_m``: band in height around each level of the soft
+      interval weights that interpolate TENV, QENV, WKL, QSLCL and PLCL at ZLCL
+      (C-KLCLg).  KLCL and K stay hard.
+    * ``l5_gather_width_pa``: band in pressure around 0.5 P0(1) of the soft
+      level weights of the L5 wind speed in VCONV (C-L5g).  L5 and LLFC stay hard.
+    * ``q0_clip_width_kgkg`` / ``q0_floor_width_kgkg``: bands of the one-sided
+      C1 forms of Q0 = min(QES, QV0) (never above QES) and Q0 = max(1e-6, Q0)
+      (never below 1e-6) (E1).
+    * ``tlcl_cap_width_k``: band of the one-sided C1 TLCL <= TMIX (E2), first
+      pass and closure.
     """
 
     lut_knot_width: float
@@ -319,9 +331,14 @@ class KFSmoothing(NamedTuple):
     condload_sqrt_width_m2s2: float
     wtw_floor_width_m2s2: float
     prof5_width: float
+    lcl_gather_width_m: float
+    l5_gather_width_pa: float
+    q0_clip_width_kgkg: float
+    q0_floor_width_kgkg: float
+    tlcl_cap_width_k: float
 
 
-KF_HARD = KFSmoothing(0.0, 0.0, 0.0, 0.0, 0.0)
+KF_HARD = KFSmoothing(*(0.0 for _ in KFSmoothing._fields))
 # Largest PROF5 blend half-width: entrainment and detrainment fractions stay
 # non-negative on eq in [0, 1] (tested); wider blends reach the far branch's
 # negative values (ud < 0 at width 3).
@@ -335,7 +352,10 @@ def kf_smoothing(config: KainFritschConfig) -> KFSmoothing:
     return KFSmoothing(
         config.wrf_lut_knot_width, config.wrf_tpmix_width_kgkg,
         config.wrf_condload_sqrt_width_m2s2, config.wrf_wtw_floor_width_m2s2,
-        config.wrf_prof5_width)
+        config.wrf_prof5_width,
+        config.wrf_lcl_gather_width_m, config.wrf_l5_gather_width_pa,
+        config.wrf_q0_clip_width_kgkg, config.wrf_q0_floor_width_kgkg,
+        config.wrf_tlcl_cap_width_k)
 
 
 def validate_kf_smoothing(sm: KFSmoothing) -> None:
@@ -492,6 +512,43 @@ def _stencil_c1(x, n_nodes, w):
     j = i0[..., None] + jnp.arange(-1, 3, dtype=jnp.int32)  # kfsw: F1,F2
     wt = _hat_c1(x[..., None] - j.astype(x.dtype), w)  # kfsw: F1,F2
     return jnp.clip(j, -1, n_nodes - 1) + 1, wt  # kfsw: F1,F2
+
+
+def _step_c(x, w):
+    """C1 step centred on 0, band |x| < w/2: 0 below, 1 above (RULE 5)."""
+    return smoothstep_cubic(0.5 + x / w)  # kfsw: C-KLCLg,C-L5g
+
+
+def _cap_c1(x, cap, w):
+    """min(x, cap) (w = 0, the oracle) or its one-sided C1 form: never above
+    ``cap``, exactly ``x`` below ``cap - w`` (E1 Q0 <= QES and, negated, Q0 >=
+    1e-6; E2 TLCL <= TMIX)."""
+    if w:  # kfsw: S
+        return cap - positive_part_c1(cap - x, 1.0 / w)  # kfsw: E1,E2
+    return jnp.minimum(x, cap)  # kfsw: E1,E2
+
+
+def _gather_at_height(f, Z0, z, kk, valid, LC, w):
+    """f at height z on the 1-based padded column (C-KLCLg): soft interval
+    weights of the oracle's linear interpolants on segments (Z0[k-1], Z0[k]],
+    k = LC..KX, which sum to 1; the first segment extends down and the last up,
+    as the oracle extrapolates.  Width ``w`` > 0 [m]."""
+    KX = kk.shape[0] - 2
+    seg = valid & (kk >= LC)  # kfsw: C-KLCLg
+    zlo = jnp.concatenate([Z0[:1], Z0[:-1]])
+    lo = jnp.where(kk == LC, 1.0, _step_c(z - zlo, w))  # kfsw: C-KLCLg
+    hi = jnp.where(kk == KX, 0.0, _step_c(z - Z0, w))  # kfsw: S
+    frac = (z - zlo) / _sd(Z0 - zlo, seg & (Z0 != zlo))  # kfsw: C-KLCLg
+    fl = jnp.concatenate([f[:1], f[:-1]])
+    return jnp.sum(jnp.where(seg, lo - hi, 0.0) * (fl + (f - fl) * frac))  # kfsw: C-KLCLg
+
+
+def _l5_weights(P0, kk, valid, w):
+    """Soft one-hot of L5, the last level with P0 >= 0.5 P0(1) (C-L5g); sums to
+    1 on a pressure-decreasing column.  Width ``w`` > 0 [Pa]."""
+    KX = kk.shape[0] - 2
+    on = _step_c(P0 - _L5_FRAC * P0[1], w)
+    return jnp.where(valid, on - jnp.where(kk == KX, 0.0, jnp.roll(on, -1)), 0.0)  # kfsw: C-L5g
 
 
 def _interp_c1(pad, x, w):
@@ -811,8 +868,9 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
     # --- sounding (l.761-797) ---
     ES = ALIQ * jnp.exp((BLIQ * T0 - CLIQ) / (T0 - DLIQ))
     QES = _EPS_KF * ES / (P0 - ES)
-    Q0 = jnp.minimum(QES, QV0)  # kfsw: E1
-    Q0 = jnp.maximum(_Q0_FLOOR, Q0)  # kfsw: E1
+    sm = lut.sm
+    Q0 = _cap_c1(QV0, QES, sm.q0_clip_width_kgkg)
+    Q0 = -_cap_c1(-Q0, -_Q0_FLOOR, sm.q0_floor_width_kgkg)
     RH = Q0 / QES
     TV0 = T0 * (1.0 + _TV_COEF * Q0)
     DP = RHOE * G * DZQ
@@ -886,7 +944,7 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         tlog = _tlog_lookup(lut, EMIX / ALIQ)
         TDPT = (CLIQ - DLIQ * tlog) / (BLIQ - tlog)
         TLCL = _tsat_from_dewpoint(TDPT, TMIX)
-        TLCL = jnp.minimum(TLCL, TMIX)  # kfsw: E2
+        TLCL = _cap_c1(TLCL, TMIX, sm.tlcl_cap_width_k)
         TVLCL = TLCL * (1.0 + _TV_COEF * QMIX)
         ZLCL = ZMIX + (TLCL - TMIX) / GDRY
         hitz = valid & (kk >= LC) & (ZLCL <= Z0)  # kfsw: C-KLCL,C-KCHECK
@@ -895,17 +953,24 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         ret2 = ZLCL > Z0[KL]  # kfsw: A3
         K = KLCL - 1
         DLP = (ZLCL - Z0[K]) / _sd(Z0[KLCL] - Z0[K], Z0[KLCL] != Z0[K])  # kfsw: C-KLCL
-        TENV = T0[K] + (T0[KLCL] - T0[K]) * DLP  # kfsw: C-KLCL
-        QENV = Q0[K] + (Q0[KLCL] - Q0[K]) * DLP  # kfsw: C-KLCL
+        wz = sm.lcl_gather_width_m
+        if wz:  # kfsw: S
+            def gz(f):
+                return _gather_at_height(f, Z0, ZLCL, kk, valid, LC, wz)
+        else:
+            def gz(f):
+                return f[K] + (f[KLCL] - f[K]) * DLP  # kfsw: C-KLCLg
+        TENV = gz(T0)
+        QENV = gz(Q0)
         TVEN = TENV * (1.0 + _TV_COEF * QENV)
         WKLCL = jnp.where(ZLCL < prm["wklcl_zref"], prm["wklcl_ref"] * ZLCL / prm["wklcl_zref"],
                           prm["wklcl_ref"])  # kfsw: E3
-        WKL = (W0A[K] + (W0A[KLCL] - W0A[K]) * DLP) * dx / _WKL_DX_REF_M - WKLCL  # kfsw: C-KLCL
+        WKL = gz(W0A) * dx / _WKL_DX_REF_M - WKLCL
         small = WKL < _WKL_MIN  # kfsw: D1
         # kfsw: D1
         DTLCL = jnp.where(small, 0.0, prm["dtlcl_coeff"] * _sd(WKL, ~small) ** prm["dtlcl_exponent"])
         if trigger == 3:  # kfsw: S
-            QSLCL = QES[K] + (QES[KLCL] - QES[K]) * DLP  # kfsw: C-KLCL
+            QSLCL = gz(QES)
             RHLCL = QENV / QSLCL
             DQSSDT = QMIX * (CLIQ - BLIQ * DLIQ) / ((TLCL - DLIQ) * (TLCL - DLIQ))
             mid = (RHLCL >= prm["rh_u00"]) & (RHLCL <= prm["rh_max"])  # kfsw: D2
@@ -927,7 +992,7 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         GDT = 2.0 * G * DTTOT * _GDT_DEPTH_M / TVEN
         # kfsw: D3,E4,E11
         WLCL = jnp.where(big, jnp.minimum(1.0 + 0.5 * _safe_sqrt(GDT), _WLCL_MAX), 1.0)
-        PLCL = P0[K] + (P0[KLCL] - P0[K]) * DLP  # kfsw: C-KLCL
+        PLCL = gz(P0)
         WTW = WLCL * WLCL
         TVLCL = TLCL * (1.0 + _TV_COEF * QMIX)
         RHOLCL = PLCL / (R * TVLCL)
@@ -1297,7 +1362,12 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     def wspd(k):
         return _safe_sqrt(U0[k] * U0[k] + V0[k] * V0[k])  # kfsw: E11
 
-    WS_KLCL, WS_L5, WS_LTOP = wspd(KLCL), wspd(L5), wspd(LTOP)
+    WS_KLCL, WS_LTOP = wspd(KLCL), wspd(LTOP)
+    if lut.sm.l5_gather_width_pa:  # kfsw: S
+        wl5 = _l5_weights(P0, kk, valid, lut.sm.l5_gather_width_pa)
+        WS_L5 = jnp.sum(wl5 * wspd(kk))  # kfsw: C-L5g
+    else:
+        WS_L5 = wspd(L5)
     VCONV = 0.5 * (WS_KLCL + WS_L5)
     vok = VCONV > 0.0  # kfsw: E12
     TIMEC = jnp.where(vok, dx / _sd(VCONV, vok), jnp.inf)  # kfsw: E12
@@ -1552,7 +1622,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         emix = qmix_u * PMIX / (_EPS_KF + qmix_u)
         tlog = _tlog_lookup(lut, emix / ALIQ)
         tdpt = (CLIQ - DLIQ * tlog) / (BLIQ - tlog)
-        tlcl_u = jnp.minimum(_tsat_from_dewpoint(tdpt, tmix), tmix)  # kfsw: E2
+        tlcl_u = _cap_c1(_tsat_from_dewpoint(tdpt, tmix), tmix, lut.sm.tlcl_cap_width_k)
         tmix = jnp.where(sup, tmix_s, tmix)  # kfsw: D7j
         qmix = jnp.where(sup, qmix_s, qmix_u)  # kfsw: D7j
         tlcl = jnp.where(sup, tmix_s, tlcl_u)  # kfsw: D7j
