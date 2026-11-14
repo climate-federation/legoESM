@@ -15,6 +15,9 @@ Smoothed here, each by one ``KFSmoothing`` width (0 = the oracle):
   do the mixed-layer averages (their source-layer extraction profile is hard;
   smoothing one without the other breaks the water budget, so both go with
   PR 7).
+* PR 4/7, updraft level-local switches: E3, D1, D3, E4, E5, D4, E7, E8, D7g,
+  E6, E9 (``KFSmoothing`` docstring).  Cloud top LTOP, LET, the A4 test and
+  the D7f PROF5 endpoint overrides stay hard.
 
 The three tests per switch: the hard limit is the oracle (the oracle suite in
 test_kain_fritsch_oracle.py runs ``KF_HARD``); the per-case gap at the default,
@@ -147,9 +150,13 @@ def test_default_gap_per_case_matches_record(fix, stored, case):
 # everywhere): the CONDLOAD root bridge needs 0 < G1 < 1e-4 m2/s2 and the floor
 # ramp |WTW| near 1e-4, both only at an updraft's last level.  Covered instead by
 # the synthetic unit tests below (both sides of each switch).  Likewise the Q0
-# clip / floor and L5 widths leave every fixture gap at the hard gap (measured).
+# clip / floor, L5 and (PR 4) WKLCL cap, DTLCL onset, entrainment tiny weight,
+# eqf clip and CHMIN clamp widths leave every fixture gap at the hard gap
+# (measured); their unit tests below cover both sides.
 _UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_width_kgkg",
-                "q0_floor_width_kgkg", "l5_gather_width_pa"}
+                "q0_floor_width_kgkg", "l5_gather_width_pa", "wklcl_cap_width_m",
+                "dtlcl_onset_width_ms", "entrain_tiny_width_k", "eqf_clip_width",
+                "chmin_clip_width_k"}
 
 
 def _moved(stored, case):
@@ -416,11 +423,155 @@ def test_l5_weights_one_hot_off_band_sum_to_one_and_differentiable():
                 modes=("fwd", "rev"), eps=1e-2)
 
 
+# --- updraft (PR 4) -----------------------------------------------------------------
+
+def _sm(**kw):
+    return kfe.KF_HARD._replace(**{k: getattr(_DEFAULT, k) for k in kw})
+
+
+def _grad_nonzero(f, x, eps):
+    check_grads(f, (x,), order=1, modes=("fwd", "rev"), eps=eps)
+    assert float(jax.grad(f)(x)) != 0.0
+
+
+def test_clip_c1_exact_outside_bands_and_c1_inside():
+    w = 0.05
+    x = jnp.linspace(-0.5, 1.5, 2001)
+    far = (jnp.abs(x) >= w / 2) & (jnp.abs(x - 1.0) >= w / 2)
+    np.testing.assert_array_equal(kfe._clip_c1(x, 0.0, 1.0, w)[far], jnp.clip(x, 0.0, 1.0)[far])
+    np.testing.assert_array_equal(kfe._clip_c1(x, 0.0, 1.0, 0.0), jnp.clip(x, 0.0, 1.0))
+    for x0 in (0.3 * w, 1.0 - 0.3 * w):
+        _grad_nonzero(lambda v: kfe._clip_c1(v, 0.0, 1.0, w), x0, 1e-6)
+
+
+def test_abe_increment_positive_part_shared_by_accumulation_and_rollback():
+    w = _DEFAULT.abe_pos_width_m
+    d = jnp.linspace(-3 * w, 3 * w, 601)
+    pos_h, inc_h = kfe._abe_increment(d, constants.g, 0.0)
+    pos_s, inc_s = kfe._abe_increment(d, constants.g, w)
+    hard = jnp.where(pos_h, inc_h, 0.0)
+    soft = jnp.where(pos_s, inc_s, 0.0)
+    assert float(jnp.min(soft)) >= 0.0 and bool(jnp.all(soft <= hard + 1e-15))
+    np.testing.assert_array_equal(soft[d >= w], hard[d >= w])
+    _grad_nonzero(lambda v: kfe._abe_increment(v, constants.g, w)[1], 0.3 * w, 1e-6 * w)
+
+
+def test_dtlcl_ramps_in_above_the_oracle_jump():
+    w, c, e = _DEFAULT.dtlcl_onset_width_ms, 4.64, 0.33
+    hard = lambda v: kfe._dtlcl(v, c, e, 0.0)  # noqa: E731
+    soft = lambda v: kfe._dtlcl(v, c, e, w)  # noqa: E731
+    lo, hi = kfe._WKL_MIN, kfe._WKL_MIN + w
+    assert float(hard(lo)) > 0.2 and float(hard(lo * (1 - 1e-9))) == 0.0  # the oracle jump
+    for v in (-1.0, 0.5 * lo, lo * (1 - 1e-9), hi * (1 + 1e-9), 0.05):
+        np.testing.assert_allclose(soft(v), hard(v), rtol=1e-14)
+    _grad_nonzero(soft, lo + 0.3 * w, 1e-3 * w)
+    assert abs(float(soft(lo + 1e-12 * w))) < 1e-10  # continuous at the threshold
+
+
+def test_wlcl_ramps_in_above_the_oracle_jump():
+    w = _DEFAULT.wlcl_onset_width_k
+    k = 2.0 * constants.g * kfe._GDT_DEPTH_M / 300.0
+    f = lambda dt, ww: kfe._wlcl(dt, k * dt, k * kfe._DTTOT_MIN_K, ww)  # noqa: E731
+    lo = kfe._DTTOT_MIN_K
+    for v in (0.0, 0.5 * lo, lo + 1.01 * w, 2.0):
+        np.testing.assert_allclose(f(v, w), f(v, 0.0), rtol=1e-14)
+    assert float(f(lo * (1 + 1e-9), 0.0)) - float(f(lo, 0.0)) > 0.02  # the oracle jump
+    _grad_nonzero(lambda v: f(v, w), lo + 0.3 * w, 1e-4 * w)
+    # E4 cap on top: one-sided, never above 3 m/s
+    cap = kfe._cap_c1(jnp.linspace(2.0, 4.0, 401), kfe._WLCL_MAX, _DEFAULT.wlcl_cap_width_ms)
+    assert float(jnp.max(cap)) <= kfe._WLCL_MAX
+
+
+def _sel(dcold, dvb, tvdiff, ws, wt, ee_s=0.3, ud_s=0.6, eqf=0.4):
+    a = [jnp.asarray(x) for x in (dcold, dvb, tvdiff, ee_s, ud_s, eqf)]
+    return kfe._entrain_select(a[0] >= 0.0, a[1] > 0.0, a[2] < kfe._TVDIFF_MIN, a[0], a[1],
+                               a[2], a[3], a[4], a[5], ws, wt)
+
+
+def test_entrain_select_matches_oracle_outside_bands_and_is_c1():
+    ws, wt = _DEFAULT.entrain_select_width_k, _DEFAULT.entrain_tiny_width_k
+    rng = np.random.default_rng(5)
+    for _ in range(300):
+        dc, dv = rng.choice([-1, 1], 2) * (0.5 * ws + rng.random(2))
+        td = rng.choice([0.5e-3, 2.5e-3 + rng.random()])
+        np.testing.assert_allclose(_sel(dc, dv, td, ws, wt), _sel(dc, dv, td, 0.0, 0.0),
+                                   rtol=1e-14, atol=0)
+    for i in range(3):
+        _grad_nonzero(lambda v, i=i: _sel(v, -1.0, 0.1, ws, wt)[i], 0.2 * ws, 1e-4 * ws)
+        _grad_nonzero(lambda v, i=i: _sel(-1.0, v, 0.1, ws, wt)[i], 0.2 * ws, 1e-4 * ws)
+        _grad_nonzero(lambda v, i=i: _sel(-1.0, -1.0, v, ws, wt)[i], 1.4e-3, 1e-3 * wt)
+    # every value stays a convex blend of the three branches
+    ee, ud, eqfrc = _sel(0.01, 0.02, 1.5e-3, ws, wt)
+    assert 0.3 <= float(ee) <= 1.0 and 0.0 <= float(ud) <= 1.0 and 0.0 <= float(eqfrc) <= 1.0
+
+
+def _glac(tu, sm, ttemp=kfe._TTFRZ_K):
+    kc = _lego_constants()
+    ab = (kc.svp1 * kfe._KPA_TO_PA, kc.svp2, kc.svp2 * kc.svpt0, kc.svp3)
+    qs = float(kfe._tpmix2dd(_LUT_H, 5.0e4, 330.0)[1])
+    return kfe._glaciate(ab, 5.0e4, tu, 330.0, qs, 1e-3, 2e-4, 3e-4, 1e-4, ttemp, sm)
+
+
+def test_glaciate_conserves_water_and_matches_oracle_outside_bands():
+    smf = _sm(freeze_onset_width_k=1, frc_clip_width=1)
+    wf = _DEFAULT.freeze_onset_width_k
+    water = lambda o: o[2] + o[3] + o[4] + o[5] + o[6]  # noqa: E731
+    for tu in (kfe._TTFRZ_K + 1.0, kfe._TTFRZ_K - 0.3 * wf, kfe._TTFRZ_K - wf - 0.5,
+               kfe._TBFRZ_K - 3.0):
+        o = _glac(tu, smf)
+        np.testing.assert_allclose(water(o), water(_glac(tu, kfe.KF_HARD)), rtol=1e-14)
+        if abs(tu - kfe._TTFRZ_K) > wf and abs(tu - kfe._TBFRZ_K) > 1.0:
+            np.testing.assert_allclose(o[:7], _glac(tu, kfe.KF_HARD)[:7], rtol=1e-13)
+    for i in (0, 4):  # tu and qice through the freezing-onset blend
+        _grad_nonzero(lambda t, i=i: _glac(t, smf)[i], kfe._TTFRZ_K - 0.3 * wf, 1e-4)
+    # the frozen-fraction cap near TBFRZ (ttemp0 = 260 K, frc reaches 1 at TBFRZ)
+    _grad_nonzero(lambda t: _glac(t, smf, 260.0)[4], kfe._TBFRZ_K + 0.002, 1e-5)
+
+
+def test_wklcl_cap_is_c1_at_zref_and_exact_outside():
+    w, ref, zref = _DEFAULT.wklcl_cap_width_m, 0.02, 2.0e3
+    for z in (500.0, zref - 0.6 * w, zref + 0.6 * w, 5.0e3):
+        np.testing.assert_allclose(kfe._wklcl(z, ref, zref, w), kfe._wklcl(z, ref, zref, 0.0),
+                                   rtol=1e-14)
+    assert float(kfe._wklcl(zref, ref, zref, w)) < float(kfe._wklcl(zref, ref, zref, 0.0))
+    _grad_nonzero(lambda z: kfe._wklcl(z, ref, zref, w), zref + 0.2 * w, 1e-3)
+    g = jax.grad(lambda z: kfe._wklcl(z, ref, zref, w))
+    gh = jax.grad(lambda z: kfe._wklcl(z, ref, zref, 0.0))
+    assert abs(float(g(zref - 1e-6) - g(zref + 1e-6))) < 1e-3 * ref / zref  # C1 at zref
+    assert abs(float(gh(zref - 1e-6) - gh(zref + 1e-6))) > 0.5 * ref / zref  # oracle kink
+
+
+def test_chmin_clamp_is_c1_at_both_kinks():
+    w, lo, hi = _DEFAULT.chmin_clip_width_k, kfe._CHMIN_TCOLD_K, kfe._CHMIN_TWARM_K
+    for t in (lo, hi):
+        assert float(kfe._clip_c1(t, lo, hi, w)) != float(kfe._clip_c1(t, lo, hi, 0.0))
+        _grad_nonzero(lambda v: kfe._clip_c1(v, lo, hi, w), t + 0.2 * w, 1e-4)
+        g = jax.grad(lambda v: kfe._clip_c1(v, lo, hi, w))
+        assert abs(float(g(t - 1e-7) - g(t + 1e-7))) < 1e-5
+
+
+def test_chmin_and_rad_clamps_hit_the_oracle_ends():
+    w = _DEFAULT.rad_clip_width
+    for x in (-0.5, -0.6 * w, 0.5, 1.0 + 0.6 * w, 3.0):
+        np.testing.assert_array_equal(kfe._clip_c1(x, 0.0, 1.0, w),
+                                      kfe._clip_c1(x, 0.0, 1.0, 0.0))
+    assert float(jnp.min(kfe._clip_c1(jnp.linspace(-1.0, 2.0, 3001), 0.0, 1.0, w))) >= 0.0
+    assert kfe._CHMIN_DEEP_M == kfe._CHMIN_SHALLOW_M + kfe._CHMIN_SLOPE_M_PER_K * (
+        kfe._CHMIN_TWARM_K - kfe._CHMIN_TCOLD_K)
+    w = _DEFAULT.chmin_clip_width_k
+    for t in (kfe._CHMIN_TCOLD_K - w, kfe._CHMIN_TWARM_K + w):
+        np.testing.assert_array_equal(
+            kfe._clip_c1(t, kfe._CHMIN_TCOLD_K, kfe._CHMIN_TWARM_K, w),
+            kfe._clip_c1(t, kfe._CHMIN_TCOLD_K, kfe._CHMIN_TWARM_K, 0.0))
+
+
 def test_widths_are_validated():
     with pytest.raises(ValueError, match="lut_knot_width"):
         kfe.validate_kf_smoothing(_DEFAULT._replace(lut_knot_width=1.5))
     with pytest.raises(ValueError, match="prof5_width"):
         kfe.validate_kf_smoothing(_DEFAULT._replace(prof5_width=3.0))
+    with pytest.raises(ValueError, match="entrain_tiny_width_k"):
+        kfe.validate_kf_smoothing(_DEFAULT._replace(entrain_tiny_width_k=-1.0))
     with pytest.raises(ValueError, match="tpmix_width_kgkg"):
         kfe.validate_kf_smoothing(_DEFAULT._replace(tpmix_width_kgkg=-1.0))
     with pytest.raises(ValueError, match="prof5_width"):
