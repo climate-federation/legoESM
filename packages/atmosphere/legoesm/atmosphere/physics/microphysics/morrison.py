@@ -48,7 +48,12 @@ KNOWN, DELIBERATE departures (documented where they occur)
   (``MorrisonConfig.sed_cfl_substeps``) ports only the loop, not this order.
   EXCEPTION: under ``warm_rain_incloud`` (the CAM6 MG2 mode) RAIN mass and
   number sediment the post-source state as MG2 does; ice, snow and graupel
-  keep the pre-source order.
+  keep the pre-source order.  In that mode cloud ice also carries MG2's
+  accretion by snow (``mg2_snow_accretes_ice``, prai/nprai) and MG2's
+  sublimation of the ice flux entering a less cloudy layer
+  (``mg2_ice_sed_clear_air_sublimation``); because ice still sediments the
+  pre-source state, the sublimated share is taken from that flux, not from
+  MG2's post-source one.
 - Default (no prognostic N_s/N_g): bulk q-power snow fall speed and the
   fixed-N0G Marshall-Palmer graupel closure — outside the SAM oracle
   scope, which is inherently two-moment (departure #5 of the fall-speed
@@ -91,7 +96,9 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     mg2_presence,
     mg2_frozen_rain_ice_fraction,
     mg2_size_bounded_nc,
+    mg2_accrete_cloud_ice_snow,
     mg2_cloud_sedimentation,
+    mg2_cloudy_inflow_fraction,
     mg2_instant_ice_melt_homog_freeze,
     mg2_droplet_number_readjust,
     mg2_phase_change_fraction,
@@ -1254,6 +1261,22 @@ def morrison_microphysics(
             f"(E3SM MG), or 'heuristic'."
         )
 
+    # 5b. CAM6 MG2 accretion of cloud ice by snow (accrete_cloud_ice_snow,
+    #     micro_mg2_0.F90:1514): in-cloud ice (MG2's slope-adjusted niic) on
+    #     the in-precip snow PSD, grid = prai*icldm (:1885, :1894, :1959).  Ice
+    #     mass moves to snow; the collected crystals are lost (nprai is an N_i
+    #     sink only, snow number unchanged).  Static gate.
+    if mg2_snow and config.mg2_snow_accretes_ice:
+        # (_ni_mg2: the CAM6 mode always runs ice_to_snow_scheme="mg_ferrier",
+        # refused otherwise at entry on both droplet-number lanes)
+        prai, nprai = mg2_accrete_cloud_ice_snow(
+            T, rho, q_iic, _ni_mg2, q_sic, lams_ic, n0s_ic, config,
+            RAMP_WIDTH_PER_SHARPNESS / config.melt_sharpness)
+        prai = prai * cf_eff
+        nprai = nprai * cf_eff
+    else:
+        prai = nprai = jnp.zeros_like(q_i)
+
     # 6. Melting near T_freeze: ice/snow -> rain (clipped to available mass)
     melt_frac = jax.nn.sigmoid(config.melt_sharpness * (T - T_freeze))
     melt_ice = jnp.minimum(
@@ -1793,17 +1816,18 @@ def morrison_microphysics(
         # and rain limiters: ice autoconversion + sublimation may take q_i
         # (less the donor-clamped melt_ice) plus this step's ice sources,
         # x omsm, where they would overdraw.  Grid-mean rates, so MG2's
-        # lcldm/icldm/precip_frac weights are already folded in.  MG2's prai
-        # (ice accreted by snow) has no counterpart here.
+        # lcldm/icldm/precip_frac weights are already folded in.  prai (ice
+        # accreted by snow) shares the ratio with prci, as in MG2.
         _isrc = (jnp.maximum(dq_i_dep, 0.0) + dq_i_nuc + bergeron + riming_i
                  + homo_freeze_c + freeze_to_ice)
         if mg2_snow:
             _isrc = _isrc + msacwi
-        _isnk = aggregation + jnp.maximum(-dq_i_dep, 0.0)
+        _isnk = aggregation + prai + jnp.maximum(-dq_i_dep, 0.0)
         _iav = jnp.clip(jnp.clip(q_i, 0.0) - melt_ice * dt, 0.0)
         qi_scale = mg2_qi_conservation_ratio(
             _iav, _isrc, _isnk, dt, _MG2_OMSM, width=config.mg2_qi_limit_width)
         aggregation = aggregation * qi_scale
+        prai = prai * qi_scale
         dq_i_dep = jnp.where(dq_i_dep < 0.0, dq_i_dep * qi_scale, dq_i_dep)
     # Ice-number transfer of the ice->snow autoconversion (an N_i sink and,
     # under double-moment snow, the N_s source), from the FINAL (clamped)
@@ -1814,14 +1838,16 @@ def morrison_microphysics(
         # the Ferrier mass rate is active, scaled with it by the q_i donor
         # clamp, capped at N_i/dt like the other branches.
         if mg2_snow:
-            # MG2 conservation of ni (micro_mg2_0.F90:1749-1761): nprci may
-            # take N_i plus this step's ice-number sources, x omsm; the
-            # approved smooth min at sharpness 100.  nsubi = 0.
+            # MG2 conservation of ni (micro_mg2_0.F90:1749-1761): nprci +
+            # nprai may take N_i plus this step's ice-number sources, x omsm;
+            # the approved smooth min at sharpness 100.  nsubi = 0.
             _nisrc = (dN_i_nuc + nsacwi
                       + freeze_N_to_ice / jnp.clip(rho, _RHO_FLOOR))
-            dN_i_autoconv = nprci_ferrier * mg2_qi_conservation_ratio(
-                jnp.clip(N_i, 0.0), _nisrc, nprci_ferrier, dt, _MG2_OMSM,
-                width=1.0 / MG2_CAP_SHARPNESS)
+            _ni_ratio = mg2_qi_conservation_ratio(
+                jnp.clip(N_i, 0.0), _nisrc, nprci_ferrier + nprai, dt,
+                _MG2_OMSM, width=1.0 / MG2_CAP_SHARPNESS)
+            dN_i_autoconv = nprci_ferrier * _ni_ratio
+            nprai = nprai * _ni_ratio
         else:
             dN_i_autoconv = jnp.minimum(nprci_ferrier * qi_scale,
                                         jnp.clip(N_i, 0.0) / jnp.clip(dt, 1.0))
@@ -1841,7 +1867,8 @@ def morrison_microphysics(
         # MG2 conservation of snow mixing ratio (micro_mg2_0.F90:1769-1781):
         # sublimation may take q_s plus this step's snow sources, x omsm, where
         # it would overdraw and the in-precip sublimation is >= qsmall.
-        _ssrc = (aggregation + (riming_s - msacwi if mg2_snow else riming_s) + bergs
+        _ssrc = (aggregation + prai
+                 + (riming_s - msacwi if mg2_snow else riming_s) + bergs
                  + freeze_to_snow)
         _slim = (((-prds - _ssrc) * dt > jnp.clip(q_s, 0.0))
                  & (-prds / precip_frac >= MG2_QSMALL))
@@ -2137,7 +2164,7 @@ def morrison_microphysics(
         # and sinks are already in it.
         dN_s_src = (dN_i_autoconv + nsagg_mg2
                     + freeze_N_to_snow / jnp.clip(rho, _RHO_FLOOR))
-        q_s_sed = q_s + (aggregation + riming_s + bergs + prds
+        q_s_sed = q_s + (aggregation + prai + riming_s + bergs + prds
                          + freeze_to_snow) * dt
         _ns_post = jnp.maximum(N_s + dN_s_src * dt, 0.0)
         _, _lams_sed = mg2_snow_slope(q_s_sed / precip_frac,
@@ -2178,11 +2205,25 @@ def morrison_microphysics(
         extra_sink=rain_sed_reserve,
         n_substeps_max=_nsub, cfl_speed=V_n_r, return_substeps=True,
     )
-    sed_i, precip_i, _req_i = sedimentation_tendency(
+    # CAM6 MG2: cloud ice falling into a less cloudy layer sublimates at once
+    # (micro_mg2_0.F90:2270-2296): the layer keeps min(icldm(k)/icldm(k-1), 1)
+    # of the flux from above, the rest goes to vapour with L_s cooling; the
+    # number falls with the same share and the remainder is lost (:2280).
+    # icldm = lcldm = cf_eff here.  Static gate.
+    _ice_clear_subl = mg2_snow and config.mg2_ice_sed_clear_air_sublimation
+    _ice_inflow = mg2_cloudy_inflow_fraction(cf_eff) if _ice_clear_subl else None
+    _sed_i_out = sedimentation_tendency(
         q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
-        extra_sink=aggregation + melt_ice + jnp.maximum(-dq_i_dep, 0.0),
+        extra_sink=(aggregation + prai + melt_ice
+                    + jnp.maximum(-dq_i_dep, 0.0)),
         n_substeps_max=_nsub, cfl_speed=V_n_i, return_substeps=True,
+        inflow_fraction=_ice_inflow,
     )
+    if _ice_clear_subl:
+        sed_i, precip_i, sed_i_subl, _req_i = _sed_i_out
+    else:
+        sed_i, precip_i, _req_i = _sed_i_out
+        sed_i_subl = jnp.zeros_like(q_i)
     sed_s, precip_s, _req_s = sedimentation_tendency(
         q_s_sed, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
         extra_sink=snow_sed_reserve,
@@ -2245,8 +2286,11 @@ def morrison_microphysics(
     # (dN_i_autoconv: defined after the q_i donor clamp, above.)
     sed_N_i = sedimentation_tendency(
         jnp.clip(N_i, 0.0), rho, V_n_i, dz, dt=dt,
-        extra_sink=dN_i_melt + dN_i_subl + dN_i_autoconv,
-        n_substeps_max=_nsub, cfl_speed=V_t_i)
+        extra_sink=dN_i_melt + dN_i_subl + dN_i_autoconv + nprai,
+        n_substeps_max=_nsub, cfl_speed=V_t_i,
+        inflow_fraction=_ice_inflow)
+    if _ice_clear_subl:
+        sed_N_i = sed_N_i[0]    # crystals entering clear air are lost
     if snow_double_moment:
         # N_s is per-mass ⇒ same flux form as q (UNS number-weighted speed).
         sed_N_s = sedimentation_tendency(
@@ -2286,9 +2330,12 @@ def morrison_microphysics(
     if mg2_snow:
         # MG2 instantaneous snow melt at the start of the call (tlat, :1159)
         dT_dt = dT_dt - L_f * minstsm / dt / c_pd
+    # sedimenting cloud ice sublimated in clear air (MG2 tlat, xxls, :2296)
+    dT_dt = dT_dt - L_s * sed_i_subl / c_pd
 
     # === COMBINE TENDENCIES ===
-    dq_v_dt = -condensation + evaporation - dq_i_dep - dq_i_nuc - prds - prdg
+    dq_v_dt = (-condensation + evaporation - dq_i_dep - dq_i_nuc - prds - prdg
+               + sed_i_subl)
     dq_c_dt = (
         condensation - dq_c_au - dq_c_ac - bergeron - riming_i - riming_s
         - riming_g - homo_freeze_c - bergs
@@ -2298,12 +2345,12 @@ def morrison_microphysics(
         - freeze_rain - pracg + sed_r
     )
     dq_i_dt = (
-        dq_i_dep + dq_i_nuc + bergeron + riming_i - aggregation
+        dq_i_dep + dq_i_nuc + bergeron + riming_i - aggregation - prai
         - melt_ice + homo_freeze_c + sed_i + freeze_to_ice
     )
     # Snow riming grows snow EXCEPT the portion PGSACW that converts to graupel.
-    dq_s_dt = (aggregation + (riming_s - pgsacw) - melt_snow + freeze_to_snow
-               + prds + bergs + sed_s)
+    dq_s_dt = (aggregation + prai + (riming_s - pgsacw) - melt_snow
+               + freeze_to_snow + prds + bergs + sed_s)
     if mg2_snow:
         dq_i_dt = dq_i_dt + msacwi      # splinters leave the snow's rime share
         dq_s_dt = dq_s_dt - msacwi
@@ -2377,7 +2424,7 @@ def morrison_microphysics(
     # measured as century5's residual Ni^max growth engine (argmax at
     # 277 K, surface level: +4 C "ice number" with no melting sink,
     # 2026-07-28; the same surface pile ended century3 at N_i=1e193).
-    dN_i_dt = (dN_i_nuc - dN_i_autoconv + homo_freeze_N + sed_N_i
+    dN_i_dt = (dN_i_nuc - dN_i_autoconv - nprai + homo_freeze_N + sed_N_i
                - dN_i_melt - dN_i_subl
                + freeze_N_to_ice / jnp.clip(rho, _RHO_FLOOR))
     if mg2_snow:

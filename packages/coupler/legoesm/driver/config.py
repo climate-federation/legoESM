@@ -2296,6 +2296,12 @@ class ExperimentConfig(NamedTuple):
     # droplet size reset in the sedimentation fall speeds (prognostic droplet
     # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_sed_reset_log_width: float = 0.01
+    # MorrisonConfig.mg2_snow_accretes_ice / mg2_ice_sed_clear_air_sublimation:
+    # two CAM6 MG2 cloud-ice sinks (snow collects cloud ice; cloud ice falling
+    # into a less cloudy layer sublimates), read only in the CAM6 MG2 mode
+    # (morrison_warm_rain_incloud).  Defaults equal the leaf (True = MG2).
+    morrison_mg2_snow_accretes_ice: bool = True
+    morrison_mg2_ice_sed_clear_air_sublimation: bool = True
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -4692,7 +4698,9 @@ class ExperimentConfig(NamedTuple):
                     errors.append(f"land_canopy_*: {exc}")
         for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
                     "morrison_do_graupel", "morrison_warm_rain_incloud",
-                    "morrison_prognostic_droplet_number"):
+                    "morrison_prognostic_droplet_number",
+                    "morrison_mg2_snow_accretes_ice",
+                    "morrison_mg2_ice_sed_clear_air_sublimation"):
             _v = getattr(self, _nm)
             if not isinstance(_v, bool):
                 errors.append(f"{_nm} must be a bool, got {_v!r}")

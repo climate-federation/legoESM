@@ -1153,6 +1153,16 @@ def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top, *
     return fc, fnc
 
 
+def mg2_cloudy_inflow_fraction(cldm):
+    """MG2 share of the sedimentation flux from the layer above that lands in
+    cloud, ``dum = min(cldm(k)/cldm(k-1), 1)`` (micro_mg2_0.F90:2275-2276 ice,
+    :2333-2334 droplets), (ncol, nlev); the rest ``1 - dum`` enters clear air
+    and evaporates / sublimates at once.  Level 0 (model top) has no layer
+    above: 0."""
+    ratio = jnp.minimum(cldm[:, 1:] / cldm[:, :-1], 1.0)
+    return jnp.concatenate([jnp.zeros_like(cldm[:, :1]), ratio], axis=1)
+
+
 def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_max, *,
                             presence_top, **widths):
     """CAM6 MG2 cloud-droplet sedimentation (micro_mg2_0.F90:2056-2120,
@@ -1184,8 +1194,7 @@ def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_m
     nstep_req = 1 + jnp.floor(courant).astype(jnp.int32)
     nsub = jnp.clip(nstep_req, 1, n_substeps_max)[:, None]
     inv = 1.0 / nsub.astype(q_c.dtype)
-    ratio = jnp.minimum(lcldm[:, 1:] / lcldm[:, :-1], 1.0)
-    d = jnp.concatenate([jnp.zeros_like(ratio[:, :1]), ratio], axis=1)
+    d = mg2_cloudy_inflow_fraction(lcldm)
 
     def _shift(x):  # value of the level above; nothing enters the top
         return jnp.concatenate([jnp.zeros_like(x[:, :1]), x[:, :-1]], axis=1)
@@ -2417,6 +2426,37 @@ def ice_autoconversion_mg2(q_i, N_i, lami, dcs, T, cold_width_K):
             * (((d_rat + 3.0) * d_rat + 6.0) * d_rat + 6.0))
     nprci = jnp.clip(N_i, 0.0) / _MG2_ICE_AC_TIME_S * jnp.exp(-d_rat)
     return jnp.where(on, cold * prci, 0.0), jnp.where(on, cold * nprci, 0.0)
+
+
+def mg2_accrete_cloud_ice_snow(T, rho, q_iic, N_iic, q_sic, lams, n0s, config,
+                               cold_width_K):
+    """MG2 ``accrete_cloud_ice_snow`` (micro_mg_utils.F90:1356-1414): cloud ice
+    collected by snow, in-cloud ``(prai [kg/kg/s], nprai)``::
+
+        rate = pi/4 eii asn rho n0s Gamma(bs+3)/lams^(bs+3)
+        prai = rate qiic,  nprai = rate niic
+
+    where ``qsic >= qsmall`` and ``qiic >= qsmall``; ``eii`` (:186) is
+    ``config.snow_aggregation_eii``, the one MG2 constant shared with
+    :func:`mg2_snow_self_aggregation`.  MG2's hard ``T <= T_freeze`` is the C2
+    step of the other MG2 snow collection (:func:`mg2_accrete_cloud_water_snow`),
+    0 at 0 C and full by -``cold_width_K``.  ``N_iic`` in whatever units the
+    caller wants ``nprai`` in.
+
+    KNOWN DIFFERENCE (RULE 5): the step is exactly 0 AT T_freeze at every
+    width, where MG2 (``T <= T_freeze``) collects, and within ``cold_width_K``
+    below 0 C the rate is reduced (2 K in production); ``melt_sharpness ->
+    inf`` recovers MG2 below T_freeze (tests/atmosphere/microphysics/unit/
+    test_mg2_ice_sinks.py)."""
+    active = (q_sic >= MG2_QSMALL) & (q_iic >= MG2_QSMALL)
+    cold = smoothstep_quintic((constants.T_freeze - T) / cold_width_K)
+    ls = jnp.where(active, lams, 1.0)
+    _, asn = mg2_snow_rhof_asn(rho, config)
+    bs = config.fall_b_s
+    rate = (jnp.pi / 4.0 * config.snow_aggregation_eii * asn * rho * n0s
+            * math.gamma(bs + 3.0) / ls ** (bs + 3.0))
+    return (jnp.where(active, cold * rate * q_iic, 0.0),
+            jnp.where(active, cold * rate * N_iic, 0.0))
 
 
 def bigg_cold_step(T, config):

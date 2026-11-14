@@ -277,7 +277,8 @@ def test_no_ice_number_lost_to_sublimation(monkeypatch):
     monkeypatch.setattr(M, "sedimentation_tendency", spy_sed)
     zero_ac = _spy(monkeypatch, "ice_autoconversion_mg2",
                    lambda o: (jnp.zeros_like(o[0]), jnp.zeros_like(o[1])))
-    A._run(fx, cfg=_cfg(do_snow_to_graupel=False), T=T, hyd_kw=hyd)
+    # (snow collecting cloud ice, nprai, is its own crystal sink: off here)
+    A._run(fx, cfg=_cfg(do_snow_to_graupel=False, mg2_snow_accretes_ice=False), T=T, hyd_kw=hyd)
     assert zero_ac and (np.asarray(s_dep["out"][1])[np.asarray(c)] < 0).all()
     ni = [e for x, e in calls if e is not None
           and np.array_equal(x, np.clip(np.asarray(hyd["N_i"]), 0.0, None))]

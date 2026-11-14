@@ -2458,6 +2458,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "MG2 has no graupel; --no-morrison-do-graupel "
                              "routes frozen rain to snow and removes the "
                              "graupel riming sink of cloud water.")
+    parser.add_argument("--morrison-mg2-snow-accretes-ice",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_snow_accretes_ice"],
+                        dest="morrison_mg2_snow_accretes_ice",
+                        help="CAM6 MG2 mode only: snow collects cloud ice "
+                             "(MG2 accrete_cloud_ice_snow; ice mass moves to "
+                             "snow). --no-morrison-mg2-snow-accretes-ice "
+                             "removes that sink.")
+    parser.add_argument("--morrison-mg2-ice-sed-clear-air-sublimation",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_ice_sed_clear_air_sublimation"],
+                        dest="morrison_mg2_ice_sed_clear_air_sublimation",
+                        help="CAM6 MG2 mode only: cloud ice falling into a "
+                             "layer with a smaller cloud fraction sublimates "
+                             "the clear-air share at once (MG2 sedimentation). "
+                             "--no-morrison-mg2-ice-sed-clear-air-sublimation "
+                             "keeps all of the falling ice.")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -3261,6 +3280,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_do_graupel=args.morrison_do_graupel,
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
         morrison_prognostic_droplet_number=args.morrison_prognostic_droplet_number,
+        morrison_mg2_snow_accretes_ice=args.morrison_mg2_snow_accretes_ice,
+        morrison_mg2_ice_sed_clear_air_sublimation=(
+            args.morrison_mg2_ice_sed_clear_air_sublimation),
         cam6_aerosol_dir=args.cam6_aerosol_dir,
         cam6_aerosol_number_scale=args.cam6_aerosol_number_scale,
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,

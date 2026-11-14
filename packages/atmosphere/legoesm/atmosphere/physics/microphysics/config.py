@@ -1192,6 +1192,20 @@ class MorrisonConfig(NamedTuple):
     # (#2216, user 2026-11-01; KNOWN DIFFERENCE in
     # _warm_rain.mg2_droplet_fall_coefficients).
     mg2_drop_sed_reset_log_width: float = 0.01
+    # APPENDED AT THE TUPLE END (positional ABI).
+    # Two CAM6 MG2 cloud-ice sinks, read ONLY in the CAM6 MG2 mode
+    # (warm_rain_incloud=True with a prognostic snow number); every other
+    # mode ignores them.  Static gates; True = MG2, False = the port as it
+    # was before 2026-11-14 (no such sink).
+    # mg2_snow_accretes_ice: accrete_cloud_ice_snow (micro_mg_utils.F90:
+    # 1356-1414, prai/nprai): snow collects cloud ice (mass to snow, the
+    # collected crystals lost), collection efficiency snow_aggregation_eii.
+    mg2_snow_accretes_ice: bool = True
+    # mg2_ice_sed_clear_air_sublimation: cloud ice sedimenting into a layer
+    # with a smaller cloud fraction sublimates the share 1 - min(icldm(k)/
+    # icldm(k-1), 1) of the flux at once, vapour source with L_s cooling
+    # (micro_mg2_0.F90:2270-2296); the crystals of that share are lost.
+    mg2_ice_sed_clear_air_sublimation: bool = True
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
@@ -1361,6 +1375,8 @@ def apply_microphysics_experiment_flags(
     morrison_warm_rain_scheme: str | None = None,
     morrison_warm_rain_incloud: bool | None = None,
     morrison_prognostic_droplet_number: bool | None = None,
+    morrison_mg2_snow_accretes_ice: bool | None = None,
+    morrison_mg2_ice_sed_clear_air_sublimation: bool | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1553,6 +1569,20 @@ def apply_microphysics_experiment_flags(
                 f"scheme (got {scheme!r}).")
         scheme_config = scheme_config._replace(
             prognostic_droplet_number=morrison_prognostic_droplet_number)
+    for _name, _val, _leaf in (
+            ("morrison_mg2_snow_accretes_ice", morrison_mg2_snow_accretes_ice,
+             "mg2_snow_accretes_ice"),
+            ("morrison_mg2_ice_sed_clear_air_sublimation",
+             morrison_mg2_ice_sed_clear_air_sublimation,
+             "mg2_ice_sed_clear_air_sublimation")):
+        if _val is None:
+            continue
+        if not isinstance(_val, bool):
+            raise TypeError(f"{_name} must be a bool, got {_val!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                f"{_name} is only read by the morrison scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(**{_leaf: _val})
     if morrison_warm_rain_scheme is not None:
         if scheme != "morrison":
             raise ValueError(

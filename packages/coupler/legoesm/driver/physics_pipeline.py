@@ -4758,7 +4758,14 @@ def thread_morrison_scalars(config, scheme, micro_config):
                        _ExpCfg._field_defaults["morrison_warm_rain_incloud"])
     _prog_nc = getattr(config, "morrison_prognostic_droplet_number",
                        _ExpCfg._field_defaults["morrison_prognostic_droplet_number"])
+    _acc_ice = getattr(config, "morrison_mg2_snow_accretes_ice",
+                       _ExpCfg._field_defaults["morrison_mg2_snow_accretes_ice"])
+    _ice_subl = getattr(
+        config, "morrison_mg2_ice_sed_clear_air_sublimation",
+        _ExpCfg._field_defaults["morrison_mg2_ice_sed_clear_air_sublimation"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
+                    ("morrison_mg2_snow_accretes_ice", _acc_ice),
+                    ("morrison_mg2_ice_sed_clear_air_sublimation", _ice_subl),
                     ("morrison_sed_cfl_substeps_strict", _sed_strict),
                     ("morrison_do_graupel", _graupel),
                     ("morrison_warm_rain_incloud", _incloud),
@@ -4787,9 +4794,15 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _prog_nc = (None if _prog_nc
                 is _ExpCfg._field_defaults["morrison_prognostic_droplet_number"]
                 else _prog_nc)
+    _acc_ice = (None if _acc_ice
+                is _ExpCfg._field_defaults["morrison_mg2_snow_accretes_ice"]
+                else _acc_ice)
+    _ice_subl = (None if _ice_subl is _ExpCfg._field_defaults[
+        "morrison_mg2_ice_sed_clear_air_sublimation"] else _ice_subl)
     if (not _touched and _flavor is None and _sed_sub is None
             and _sed_strict is None and _sed_max is None and _graupel is None
-            and _wrs is None and _incloud is None and _prog_nc is None):
+            and _wrs is None and _incloud is None and _prog_nc is None
+            and _acc_ice is None and _ice_subl is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4801,7 +4814,9 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_sed_cfl_substeps_strict=_sed_strict,
         morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs,
         morrison_warm_rain_incloud=_incloud,
-        morrison_prognostic_droplet_number=_prog_nc)
+        morrison_prognostic_droplet_number=_prog_nc,
+        morrison_mg2_snow_accretes_ice=_acc_ice,
+        morrison_mg2_ice_sed_clear_air_sublimation=_ice_subl)
 
 
 def _resolve_microphysics(config):
