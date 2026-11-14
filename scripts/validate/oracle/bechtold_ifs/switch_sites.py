@@ -25,14 +25,11 @@ import sys
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
+import numpy as np
 
-jax.config.update("jax_enable_x64", True)
-
-import jax.numpy as jnp  # noqa: E402
-import numpy as np  # noqa: E402
-
-from legoesm.atmosphere.physics import _ifs_smooth  # noqa: E402
-from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M  # noqa: E402
+from legoesm.atmosphere.physics import _ifs_smooth
+from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
 
 FIXTURE = (Path(__file__).resolve().parents[4] / "tests" / "atmosphere"
            / "oracle_fixtures" / "bechtold_ifs.npz")
@@ -60,7 +57,7 @@ _KEYS = ("T", "q", "p_full", "p_half", "u", "v", "shf_up", "lhf_up", "land", "dT
 
 def sites():
     """{(stripped line, method)} of every IfsSmooth switch call in MODULES (AST)."""
-    out = set()
+    out, n = set(), 0
     for mod in MODULES:
         src = inspect.getsource(mod)
         lines = src.splitlines()
@@ -69,6 +66,10 @@ def sites():
                     and isinstance(node.func.value, ast.Name) and node.func.value.id == "sm"
                     and node.func.attr in _SITE_METHODS):
                 out.add((lines[node.lineno - 1].strip(), node.func.attr))
+                n += 1
+    if n != len(out):
+        raise ValueError(f"{n} switch calls but {len(out)} site keys: put each "
+                         "same-method call on its own source line")
     return out
 
 
@@ -211,11 +212,11 @@ def _bisect(line, site, e, a, b, fa, n=80):
 
 
 def _fd_step(line, site, e, s):
-    """A finite-difference step 1e-3 x the window's extent in the perturbation
+    """A finite-difference step 1e-4 x the window's extent in the perturbation
     (the window spans one unit of d), so check_grads resolves the ramp."""
     h = max(abs(s), 1.0) * 1.0e-9
     dd = (line.positions(s + h)[site][e] - line.positions(s - h)[site][e]) / (2.0 * h)
-    return float(1.0e-3 / abs(dd)) if dd != 0.0 and np.isfinite(dd) else float(h)
+    return float(1.0e-4 / abs(dd)) if dd != 0.0 and np.isfinite(dd) else float(h)
 
 
 def search(fix, todo, cols, n_grid=24):
@@ -275,6 +276,7 @@ def main(argv):
     --col, search that column only for the sites not yet in the state file
     and update it (one process per column: XLA's CPU JIT runs out of code
     memory after a few hundred compilations in one process)."""
+    jax.config.update("jax_enable_x64", True)   # the oracle fixture is fp64
     import json
 
     args = argv[1:]

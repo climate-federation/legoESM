@@ -19,15 +19,12 @@ from collections import defaultdict
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
+import numpy as np
 
-jax.config.update("jax_enable_x64", True)
-
-import jax.numpy as jnp  # noqa: E402
-import numpy as np  # noqa: E402
-
-from legoesm.atmosphere.physics import _ifs_smooth  # noqa: E402
-from legoesm.atmosphere.physics._ifs_thermo import lego_thermo, satur_qsat  # noqa: E402
-from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M  # noqa: E402
+from legoesm.atmosphere.physics import _ifs_smooth
+from legoesm.atmosphere.physics._ifs_thermo import lego_thermo, satur_qsat
+from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
 
 FIXTURE = (Path(__file__).resolve().parents[4] / "tests" / "atmosphere"
            / "oracle_fixtures" / "bechtold_ifs.npz")
@@ -117,6 +114,7 @@ def p2(samples):
 
 
 def main(argv):
+    jax.config.update("jax_enable_x64", True)   # the oracle fixture is fp64
     fix = dict(np.load(argv[1] if len(argv) > 1 else FIXTURE))
     for c, (s, n) in sorted(p2(measure(fix)).items()):
         print(f"_S_{c} = {s:.3g}  (n = {n})")

@@ -26,7 +26,8 @@ the closure's floors, caps and branch selections -- take the C1 forms of
 :class:`legoesm.atmosphere.physics._ifs_smooth.IfsSmooth`, window 0.01 x a
 scale of the switched quantity (``_S_*`` below); True gives OpenIFS's exact
 switches (the oracle match).  Division guards and safety floors
-(RMFCMIN, ZEPS_MF, ZMFS_MIN) stay hard.
+(RMFCMIN, ZEPS_MF, ZMFS_MIN, ZDQMIN_FLOOR) stay hard.  #2281 part 1 smooths
+the closure; the ascent thermodynamics and the fluxes follow.
 KNOWN DIFFERENCE, kept hard in both modes: the level/flag structure.  Cloud
 base and top, departure level, downdraught top and base, the cloud type
 KTYPE, LDCUM/LDDRAF and every level mask built from them are chosen from
@@ -764,7 +765,9 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     ikb = kcbot
     zmfmax = (kget(paph, ikb) - kget(paph, ikb - 1)) * zcons2
     zqumqe = kget(b["pqu"], ikb) + kget(b["plu"], ikb) - kget(zqenh, ikb)
-    zdqmin = sm.max(ZDQMIN_FRAC * kget(zqenh, ikb), ZDQMIN_FLOOR, _W_VAP)
+    # ZDQMIN_FLOOR (1e-10) guards the first-guess ZDH denominator: a hard
+    # safety floor (vote 2026-11-14), never approached by 0.01 q
+    zdqmin = jnp.maximum(ZDQMIN_FRAC * kget(zqenh, ikb), ZDQMIN_FLOOR)
     zdh = rcpd * (kget(b["ptu"], ikb) - kget(ztenh, ikb)) + rlvtt * zqumqe
     zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)
     # sh_ok stays hard: its False side removes the shallow cloud (A4, below)
@@ -889,7 +892,8 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     m2 = sm.min(m2, zmfmax, _W_MF)
     m3 = sm.max(ZMID_MF * zkhfl / kget(pgeoh, ikb), zmfub, w_mfub) * (1.0 + zeps)
     m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),
-                sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF), sm.min(m3, zmfmax, _W_MF))
+                sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),
+                sm.min(m3, zmfmax, _W_MF))
     zmfub1 = jnp.where(ldcum & (ktype == 2), m2, zmfub1)
     zmfub1 = jnp.where(ldcum & (ktype == 3), m3, zmfub1)
     # rescale DD fluxes, :940-953
@@ -915,6 +919,8 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
             # chained C1 min over levels (vote V5-l); window 0.01 x the traced
             # bound.  ZMFS_MIN stays a hard safety floor, applied only where
             # the hard path would apply it (min(zm, floor) keeps zm below it).
+            # mk > 0 is a division guard, value- and C1-continuous: as mk -> 0+
+            # the bound r grows without limit and min(zm, r) is exactly zm
             ok = on & (mk > 0.0)
             r = sdiv(zmfmx, mk, ok)
             zm = jnp.where(ok, jnp.maximum(sm.min(zm, r, _W_REL * r),

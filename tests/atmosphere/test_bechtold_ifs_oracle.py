@@ -699,67 +699,65 @@ def _probe(name):
 # site held mid-window, so the switch reaches the output.
 _SITE_POINTS = {
     ('* (1.0 - sm.lt(kget(pvervel, njkt5), ZOMEGA_RES, _W_OMEGA)))', 'lt'):
-        ('L32', 1, 'inject', 'q', 1.0586956521739133, 0.001, ()),
+        ('L32', 1, 'inject', 'q', 1.0586956521739133, 0.0001, ()),
     ('* sm.lt(zdh, ZSHAL_DH * rg * rcpd, rg * _W_DH))', 'lt'):
-        ('L32', 9, 'inject', None, 0.0, 0.001, (('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'),)),
+        ('L32', 9, 'inject', None, 0.0, 0.0001, (('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'),)),
     ('/ ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)', 'min'):
-        ('L32', 9, 'input', 'q', 1.1985054347826085, 1.9621876652955543e-07, ()),
+        ('L32', 9, 'input', 'q', 1.1985054347826085, 1.9621876652955546e-08, ()),
     ('br = 1.0 - ((1.0 - sm.le(zsatfr, ZSATFR_MAX, _W_SATFR))', 'le'):
-        ('L32', 1, 'input', 'q', 1.0586956521739133, 1.0612271223959325e-05, ()),
+        ('L32', 1, 'input', 'q', 1.0586956521739133, 1.0612271223959327e-06, ()),
     ('llo1 = sm.lt(paph[K + 1] - kget(paph, ikd), ZPBL_DP, _W_PRES)', 'lt'):
-        ('L32', 0, 'inject', None, 0.0, 0.001, ()),
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('m2 = sm.min(m2, zmfmax, _W_MF)', 'min'):
-        ('L137', 0, 'inject', None, 0.0, 0.001, ()),
+        ('L137', 0, 'inject', None, 0.0, 0.0001, ()),
     ('m3 = sm.max(ZMID_MF * zkhfl / kget(pgeoh, ikb), zmfub, w_mfub) * (1.0 + zeps)', 'max'):
-        ('L32', 12, 'inject', None, 0.0, 0.001, ()),
+        ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
     ('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'):
-        ('L32', 12, 'inject', None, 0.0, 0.001, (('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF), sm.min(m3, zmfmax, _W_MF))', 'min'),)),
+        ('L32', 12, 'inject', None, 0.0, 0.0001, (('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),', 'min'),)),
     ('sm.max(zcape - zcapdcycl, RMINCAPE * zcape, _W_CAPE))', 'max'):
-        ('L32', 2, 'input', 'tend', 1.2927139945652173, 3.797791073757312e-08, ()),
-    ('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF), sm.min(m3, zmfmax, _W_MF))', 'min'):
-        ('L32', 12, 'inject', None, 0.0, 0.001, ()),
+        ('L32', 2, 'input', 'tend', 1.2927139945652173, 3.797791073757312e-09, ()),
+    ('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),', 'min'):
+        ('L32', 12, 'inject', None, 0.0, 0.0001, (('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'),)),
+    ('sm.min(m3, zmfmax, _W_MF))', 'min'):
+        ('L32', 12, 'inject', None, 0.0, 0.0001, (('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'),)),
     ('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'):
-        ('L137', 0, 'inject', None, 0.0, 0.001, ()),
+        ('L137', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)', 'max'):
-        ('L32', 1, 'inject', None, 0.0, 0.001, ()),
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
     ('zcape_c = sm.min(zcape_c, ZCAPE_MAX, _W_CAPE)', 'min'):
-        ('L32', 10, 'inject', None, 0.0, 0.001, ()),
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
     ('zcape_c = sm.sel(br, sm.max(zcape2 - zcapdcycl + zdqcv, RMINCAPE * zcape, _W_CAPE),', 'max'):
-        ('L32', 2, 'input', 'tend', 1.2927139945652173, 3.797791073757312e-08, ()),
-    ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
-        ('L32', 15, 'inject', None, 0.0, 0.001, ()),
-    ('zeps = (sm.pos(-pmfd_b, w_mfub)', 'pos'):
-        ('L32', 9, 'inject', None, 0.0, 0.001, ()),
-    ('zheat = jnp.sum(jnp.where(llo3, sm.pos(', 'pos'):
-        ('L32', 2, 'input', 'T', -3.776377802309783, 4.298203146027789e-09, ()),
-    ('zm = jnp.where(ok, jnp.maximum(sm.min(zm, r, _W_REL * r),', 'min'):
-        ('L32', 12, 'input', 'omega', -11.82065217391305, 0.0001174562223262157, ()),
-    ('zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.001, (('zm = jnp.where(ok, jnp.maximum(sm.min(zm, r, _W_REL * r),', 'min'),)),
-    ('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'):
-        ('L32', 10, 'inject', None, 0.0, 0.001, ()),
-    ('zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1', 'max'):
-        ('L32', 0, 'inject', None, 0.0, 0.001, ()),
-    ('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'):
-        ('L137', 0, 'input', 'tend', 2.4479025135869565, 2.6530436890377744e-08, ()),
-    ('ztaupbl = sm.min(kget(pgeoh, ikb) - pgeoh[K + 1], ZDCYC_DZ, _W_GEO) / (rg * zduten)', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.001, ()),
-    ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'max'):
-        ('L32', 2, 'input', 'sflux', 3.5652173913043477, 0.00012682412999266034, ()),
-    ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.001, ()),
+        ('L32', 2, 'input', 'tend', 1.2927139945652173, 3.797791073757312e-09, ()),
     ('zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)', 'max'):
-        ('L32', 15, 'inject', None, 0.0, 0.001, (('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'),)),
+        ('L32', 15, 'inject', None, 0.0, 0.0001, (('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'),)),
+    ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
+        ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
+    ('zeps = (sm.pos(-pmfd_b, w_mfub)', 'pos'):
+        ('L32', 9, 'inject', None, 0.0, 0.0001, ()),
+    ('zheat = jnp.sum(jnp.where(llo3, sm.pos(', 'pos'):
+        ('L32', 2, 'input', 'T', -3.776377802309783, 4.298203146027789e-10, ()),
     ('zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)', 'max'):
-        ('L32', 10, 'inject', None, 0.0, 0.001, (('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'),)),
+        ('L32', 10, 'inject', None, 0.0, 0.0001, (('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'),)),
+    ('zm = jnp.where(ok, jnp.maximum(sm.min(zm, r, _W_REL * r),', 'min'):
+        ('L32', 12, 'input', 'omega', -11.82065217391305, 1.1745622232621571e-05, ()),
+    ('zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, (('zm = jnp.where(ok, jnp.maximum(sm.min(zm, r, _W_REL * r),', 'min'),)),
+    ('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'):
+        ('L137', 0, 'input', 'tend', 2.4479025135869565, 2.6530436890377746e-09, ()),
+    ('ztaupbl = sm.min(kget(pgeoh, ikb) - pgeoh[K + 1], ZDCYC_DZ, _W_GEO) / (rg * zduten)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'max'):
+        ('L32', 2, 'input', 'sflux', 3.5652173913043477, 1.2682412999266035e-05, ()),
+    ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
 }
 
 
-# Sites without a gradient point yet (search in progress, #2281): each one's
-# smoothing is covered only by the hard-limit and per-column gap tests.
-_SITE_PENDING = {
-    ("zdqmin = sm.max(ZDQMIN_FRAC * kget(zqenh, ikb), ZDQMIN_FLOOR, _W_VAP)", "max"),
-}
+_SITE_PENDING: set = set()   # sites without a gradient point yet (none)
 
 
 def test_every_switch_site_has_a_gradient_point():
@@ -768,8 +766,16 @@ def test_every_switch_site_has_a_gradient_point():
     assert not set(_SITE_POINTS) & _SITE_PENDING
 
 
+@pytest.fixture
+def _fresh_jit():
+    """Each per-site test compiles a fresh instrumented scheme; drop the
+    compiled code after it (XLA's CPU JIT runs out of code memory otherwise)."""
+    yield
+    jax.clear_caches()
+
+
 @pytest.mark.parametrize("site", sorted(_SITE_POINTS), ids=lambda t: f"{t[1]}:{t[0][:60]}")
-def test_switch_site_gradient_at_default(fix, site):
+def test_switch_site_gradient_at_default(fix, site, _fresh_jit):
     """RULE 5 gradient test, per switch site, at the default (smooth): at the
     site's point it is inside its window, check_grads (order 2, reverse)
     passes on the scheme's heating + drying + mass flux with respect to the

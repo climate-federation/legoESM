@@ -1638,8 +1638,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.bechtold_ifs_hard_switches,
                         help="Faithful IFS chain: OpenIFS's exact elementwise "
-                             "switches (closure, ascent thermodynamics, fluxes) "
-                             "instead of their RULE 5 smooth forms; the cloud "
+                             "switches (so far the closure) instead of their "
+                             "RULE 5 smooth forms; the cloud "
                              "levels are exact either way. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_hard_switches}.")
     parser.add_argument("--bechtold-use-ifs-land-rhebc",
