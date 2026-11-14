@@ -117,8 +117,11 @@ def make_k0_rollout(card, model, split: SplitControls, *,
     from legoesm.ocean import bulk_flux_omip as bulk
 
     treedef, kinds, kt0, n_steps = split.treedef, split.kinds, split.kt0, split.n_steps
-    if kt0 < 1 or kt0 % 2 != 1:
-        raise ValueError(f"a pair starts on a forcing-update (odd) step, got kt0={kt0}")
+    if kt0 < 3 or kt0 % 2 != 1:
+        # odd: a pair starts on a forcing-update step; >= 3: step 1 is the cold
+        # start, which fills carry fields (barotropic history, before-levels)
+        # that are None at the initial state, so it runs eagerly before the loop
+        raise ValueError(f"the loop starts on an odd step >= 3, got kt0={kt0}")
     if n_steps < 2 or n_steps % 2:
         raise ValueError(f"the loop runs whole pairs; got {n_steps} steps")
     n_pairs = n_steps // 2

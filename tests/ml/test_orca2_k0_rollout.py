@@ -75,8 +75,10 @@ def test_structure_change_is_refused():
 
 
 def test_rollout_must_start_on_a_forcing_step_and_run_whole_pairs():
-    with pytest.raises(ValueError, match="odd"):
+    with pytest.raises(ValueError, match="odd step >= 3"):
         make_k0_rollout(None, None, split_controls(_controls(2, kt0=4), kt0=4))
+    with pytest.raises(ValueError, match="odd step >= 3"):   # the cold-start step
+        make_k0_rollout(None, None, split_controls(_controls(2, kt0=1), kt0=1))
     with pytest.raises(ValueError, match="whole pairs"):
         make_k0_rollout(None, None, split_controls(_controls(3), kt0=3))
 
