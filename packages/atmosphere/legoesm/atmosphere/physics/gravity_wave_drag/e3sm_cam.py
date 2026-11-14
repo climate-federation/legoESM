@@ -115,9 +115,10 @@ deliberate departures / version choices (canaries in
   Lindzen passes its own ``Fr_sharpness``/``crit_level_*``).  Sharpness 1e12
   is E3SM's hard switch and matches the E3SM v3.0.1 oracle to <= 5e-14.
   KNOWN DIFFERENCE at the defaults (measured 2026-11-12, per column, pinned
-  in ``test_gw_spec_e3sm_oracle.py``): spectral arms up to 3.4e-3 in du/dt
-  and 4.7e-3 in the dT field (the p-norm diffusivity max); the orographic
-  member of the spectral suite up to 3.6e-2 du/dt, 2.1e-2 dT.  Kept hard: the
+  in ``test_gw_spec_e3sm_oracle.py``): spectral arms up to 3.4e-3 in du/dt,
+  4.7e-3 in the dT field and 9.0e-3 in a single flat column's dT (the p-norm
+  diffusivity max); the orographic member of the spectral suite up to 3.6e-2
+  du/dt, 2.1e-2 dT.  Kept hard: the
   ``taumin``/``ubmc2mn`` floors, the static mountain-height gate and the
   defensive clamps (e.g. ``mi>=0``) that bind only for pathological inputs
   (see below).  The ``taumin`` zeroing leaves derivative kinks at the

@@ -159,6 +159,17 @@ def test_pnorm_smooth_min_tiny_inputs_have_finite_gradients_in_fp32():
         a, b = jnp.asarray(a, jnp.float32), jnp.asarray(b, jnp.float32)
         ga, gb = jax.grad(lambda x, y: pnorm_smooth_min(x, y, 50.0, 0.0), (0, 1))(a, b)
         assert bool(jnp.isfinite(ga)) and bool(jnp.isfinite(gb)), (a, b, ga, gb)
+        f = lambda x, y: pnorm_smooth_min(x, y, 50.0, 0.0)  # noqa: E731
+        for x, y in ((a, b), (b, a)):
+            hess = jax.hessian(f, (0, 1))(x, y)
+            assert all(bool(jnp.isfinite(h)) for row in hess for h in row), (x, y, hess)
+            fwd = jax.jacfwd(jax.jacfwd(f, (0, 1)), (0, 1))(x, y)
+            assert all(bool(jnp.isfinite(h)) for row in fwd for h in row), (x, y, fwd)
+        if float(a) == 0.0:          # lo = 0: exactly the min's gradient
+            ga, gb = jax.grad(f, (0, 1))(a, b)
+            assert (float(ga), float(gb)) == (1.0, 0.0)
+            gb2, ga2 = jax.grad(f, (0, 1))(b, a)
+            assert (float(gb2), float(ga2)) == (0.0, 1.0)
 
 
 def test_positive_part_c1_is_zero_below_and_c1():
