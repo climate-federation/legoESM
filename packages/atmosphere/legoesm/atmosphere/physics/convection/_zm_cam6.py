@@ -1251,17 +1251,24 @@ def convtran(const, mu, md, du, eu, ed, dp, jt, mx, msg):
     maxc = jnp.maximum(const_km1, const)
     cdifr = jnp.where(minc < 0.0, 0.0,
                       jnp.abs(const - const_km1) / jnp.maximum(maxc, _CONVTRAN_SMALL))
-    cabv = jnp.maximum(const_km1, maxc * _CHAT_FLOOR_FRAC)
-    cbel = jnp.maximum(const, maxc * _CHAT_FLOOR_FRAC)
-    # Log-mean only where both floored values are positive: in float32 the
-    # floor maxc*1e-12 underflows to 0 for maxc below ~1e-26 (flush-to-zero)
-    # or 1.4e-33, and log(0/cbel)*0 is NaN; such interfaces take the
-    # arithmetic mean.  In float64 the floor cannot underflow for any
-    # maxc > 1e-296, so float64 results are unchanged.
-    geo = (cdifr > _LOGMEAN_TOL) & (cabv > 0.0) & (cbel > 0.0)
+    # Interface log-mean chat = log(cabv/cbel)/(cabv-cbel)*cabv*cbel, cabv/cbel
+    # floored at maxc*1e-12.  chat is homogeneous of degree 1 in the two
+    # tracer values, so it is evaluated on values scaled by maxc and scaled
+    # back: in float32 the unscaled floor flushes to zero below maxc ~1e-26
+    # (log(0)*0 = NaN) and cabv*cbel and the gradient's (cabv-cbel)**-2
+    # under/overflow for amounts ~1e-30.  The scale is stop-gradient'd and
+    # maxc/scale keeps its derivative, so the gradient is the unscaled one
+    # (degree-0 homogeneity, exact in exact arithmetic; fp64 moves by ~1e-14
+    # relative).  Where maxc <= 0, cdifr == 0 (minc < 0 or both zero), the arithmetic
+    # mean is taken and the scale 1 only keeps the unused branch finite.
+    scale = jax.lax.stop_gradient(jnp.where(maxc > 0.0, maxc, 1.0))
+    floor = (maxc / scale) * _CHAT_FLOOR_FRAC
+    cabv = jnp.maximum(const_km1 / scale, floor)
+    cbel = jnp.maximum(const / scale, floor)
+    geo = cdifr > _LOGMEAN_TOL
     cabv_s = jnp.where(geo, cabv, 1.0)
     cbel_s = jnp.where(geo, cbel, 2.0)
-    chat = jnp.where(geo, jnp.log(cabv_s / cbel_s) / (cabv_s - cbel_s) * cabv_s * cbel_s,
+    chat = jnp.where(geo, scale * (jnp.log(cabv_s / cbel_s) / (cabv_s - cbel_s) * cabv_s * cbel_s),
                      0.5 * (const + const_km1))
 
     def up(carry, xk):
