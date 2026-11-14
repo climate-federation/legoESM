@@ -916,14 +916,16 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
             zm = jnp.where(hit, jnp.maximum(jnp.minimum(zm, sdiv(zmfmx, mk, hit)), ZMFS_MIN), zm)
         else:
             # chained C1 min over levels (vote V5-l); window 0.01 x the traced
-            # bound.  ZMFS_MIN stays a hard safety floor, applied only where
-            # the hard path would apply it (min(zm, floor) keeps zm below it).
-            # mk > 0 is a division guard, value- and C1-continuous: as mk -> 0+
-            # the bound r grows without limit and min(zm, r) is exactly zm
+            # bound.  mk > 0 and the RMFCMIN floor on the divisor are division
+            # guards (an fp32 overflow of the bound would turn the window and
+            # the gradient into inf/NaN); below RMFCMIN the bound is far above
+            # zm, so min(zm, r) is exactly zm.  ZMFS_MIN stays a hard safety
+            # floor, applied where the cap is engaged (m < zm), as the hard
+            # path applies it where the cap is hit.
             ok = on & (mk > 0.0)
-            r = sdiv(zmfmx, mk, ok)
-            zm = jnp.where(ok, jnp.maximum(sm.min(zm, r, _W_REL * r),
-                                           jnp.minimum(zm, ZMFS_MIN)), zm)
+            r = zmfmx / jnp.maximum(mk, RMFCMIN)
+            m = sm.min(zm, r, _W_REL * r)
+            zm = jnp.where(ok & (m < zm), jnp.maximum(m, ZMFS_MIN), zm)
         return mu, zm
 
     pmfu, zmfs = jax.lax.fori_loop(0, K - 1, lim, (pmfu, zmfs0))
