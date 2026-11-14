@@ -748,15 +748,17 @@ _SITE_POINTS = {
         ('L32', 2, 'input', 'sflux', 3.5652173913043477, 0.00012682412999266034, ()),
     ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.001, ()),
+    ('zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)', 'max'):
+        ('L32', 15, 'inject', None, 0.0, 0.001, (('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'),)),
+    ('zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)', 'max'):
+        ('L32', 10, 'inject', None, 0.0, 0.001, (('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'),)),
 }
 
 
 # Sites without a gradient point yet (search in progress, #2281): each one's
 # smoothing is covered only by the hard-limit and per-column gap tests.
 _SITE_PENDING = {
-    ("zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)", "max"),
     ("zdqmin = sm.max(ZDQMIN_FRAC * kget(zqenh, ikb), ZDQMIN_FLOOR, _W_VAP)", "max"),
-    ("zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)", "max"),
 }
 
 
