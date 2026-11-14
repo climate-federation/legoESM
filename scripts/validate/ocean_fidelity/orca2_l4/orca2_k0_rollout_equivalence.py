@@ -12,7 +12,9 @@ the loop.  ``--card exact`` (CPU, libm) or ``normal`` (native maths).
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -110,6 +112,18 @@ def main(argv=None) -> int:
     final = carry_from_result(ref[-1])
     diffs = max_diffs(final, looped)
     worst = sorted(diffs.items(), key=lambda kv: -kv[1])[:8]
+    result = {
+        "card": args.card, "steps": args.steps, "looped_steps": args.steps - 2,
+        "schedule": args.schedule, "kinds": {k: kinds.count(k) for k in set(kinds)},
+        "bitwise_equal_leaves": sum(v == 0.0 for v in diffs.values()),
+        "leaves": len(diffs), "worst_leaves": worst,
+        "provenance": stamp, "backend": jax.default_backend(),
+        "env": {k: os.environ.get(k) for k in ("XLA_PYTHON_CLIENT_ALLOCATOR",
+                                               "XLA_PYTHON_CLIENT_MEM_FRACTION")},
+    }
+    args.output.write_text(json.dumps(result, indent=1, default=str) + "\n")  # forward first
+    del ref, final, looped, controls
+    gc.collect()
 
     z = card.ocean.recipe.z_coord
     w = (jnp.asarray(model.grid.area)[..., None] * jnp.asarray(z.h_partial)
@@ -121,16 +135,14 @@ def main(argv=None) -> int:
         out = rollout(c, vals).state
         return jnp.sum(w * out.T.data ** 2) / jnp.sum(w)
 
-    g = np.asarray(jax.jit(jax.grad(loss))(jnp.zeros_like(start.state.T.data), values, start))
-    result = {
-        "card": args.card, "steps": args.steps, "looped_steps": args.steps - 2,
-        "schedule": args.schedule, "kinds": {k: kinds.count(k) for k in set(kinds)},
-        "bitwise_equal_leaves": sum(v == 0.0 for v in diffs.values()),
-        "leaves": len(diffs), "worst_leaves": worst,
-        "grad_nonfinite": int((~np.isfinite(g)).sum()),
-        "grad_l2": float(np.sqrt(np.nansum(g * g))),
-        "provenance": stamp, "backend": jax.default_backend(),
-    }
+    try:
+        g = np.asarray(jax.jit(jax.grad(loss))(jnp.zeros_like(start.state.T.data), values, start))
+        result.update(grad_nonfinite=int((~np.isfinite(g)).sum()),
+                      grad_l2=float(np.sqrt(np.nansum(g * g))))
+    except Exception as error:  # noqa: BLE001 - an OOM is a recorded outcome
+        if "RESOURCE_EXHAUSTED" not in str(error):
+            raise
+        result.update(grad_oom=str(error)[:500], grad_nonfinite=None, grad_l2=None)
     args.output.write_text(json.dumps(result, indent=1, default=str) + "\n")
     print(json.dumps({k: result[k] for k in ("card", "bitwise_equal_leaves", "leaves",
                                              "worst_leaves", "grad_nonfinite", "grad_l2")},
