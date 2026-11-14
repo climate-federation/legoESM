@@ -173,7 +173,6 @@ NJKT5_P, NJKT6_P, NJKT7_P = 500.0e2, 700.0e2, 100.0e2
 # O(1) ratios against a traced bound use 0.01 x the bound.  The P2 includes
 # values of lanes the scheme discards (as the CLOUDSC scales do). ---
 _W_REL = 0.01
-_S_VAP = 1.97e-8       # [kg/kg] vapour (0.01 q at cloud base vs its floor)
 _S_MF = 1.0e-3         # [kg m-2 s-1] mass flux
 _S_DH = 95.6           # [J/kg] cloud-base moist static energy excess
 _S_HEAT = 4.71e-8      # [kg m-1 s-3] ZHEAT summand (buoyancy x g x mass flux)
@@ -184,8 +183,8 @@ _S_GEO = 812.0         # [m2 s-2] geopotential depth
 _S_PRES = 354.0        # [Pa] departure-level pressure depth
 # omega is 0 in every fixture column (no sample): 0.01 x |ZOMEGA_RES| instead
 _S_OMEGA = abs(ZOMEGA_RES)   # [Pa/s]
-_W_VAP, _W_MF, _W_DH, _W_HEAT, _W_CAPE, _W_TIME, _W_VEL, _W_GEO, _W_PRES, _W_OMEGA = (
-    _W_REL * x for x in (_S_VAP, _S_MF, _S_DH, _S_HEAT, _S_CAPE, _S_TIME, _S_VEL,
+_W_MF, _W_DH, _W_HEAT, _W_CAPE, _W_TIME, _W_VEL, _W_GEO, _W_PRES, _W_OMEGA = (
+    _W_REL * x for x in (_S_MF, _S_DH, _S_HEAT, _S_CAPE, _S_TIME, _S_VEL,
                          _S_GEO, _S_PRES, _S_OMEGA))
 _W_SATFR = _W_REL * ZSATFR_MAX  # O(1) ratio: 0.01 x |threshold|
 
