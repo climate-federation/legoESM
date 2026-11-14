@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
 from legoesm.ocean.bulk_flux_omip import air_sea_fluxes, blk_oce_2
 from legoesm.ocean.eos import VALID_FREEZE_SCHEMES, freezing_point
 
@@ -797,7 +798,8 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
                                      rho_air: float = constants.rho_air,
                                      u_oce=None, v_oce=None,
                                      wind_current_feedback_vfac: float = 0.0,
-                                     forcing_remap: str = "bilinear"):
+                                     forcing_remap: str = "bilinear",
+                                     zeta_cap_width: float = MOST_ZETA_CAP_WIDTH):
     """Build a :class:`FreshwaterForcing` (P, E, runoff) for the OMIP-2 run.
 
     Delivered to the ocean via the in-core channel
@@ -865,6 +867,7 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
         T_sfc_K=jnp.asarray(T_sfc_K),
         slp_Pa=None if slp is None else jnp.asarray(slp),
         u_oce=u_oce, v_oce=v_oce, vfac=wind_current_feedback_vfac,
+        zeta_cap_width=zeta_cap_width,
     )
     if emp:
         precip = np.asarray(forc["precip"], dtype=np.float64)
@@ -1065,7 +1068,8 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   dm2dc_window=None,
                                   u_oce=None, v_oce=None,
                                   wind_current_feedback_vfac: float = 0.0,
-                                  forcing_remap: str = "bilinear"):
+                                  forcing_remap: str = "bilinear",
+                                  zeta_cap_width: float = MOST_ZETA_CAP_WIDTH):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
@@ -1146,6 +1150,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         T_sfc_K=jnp.asarray(T_sfc_K),
         slp_Pa=None if slp is None else jnp.asarray(slp),
         u_oce=u_oce, v_oce=v_oce, vfac=wind_current_feedback_vfac,
+        zeta_cap_width=zeta_cap_width,
     )
     # Non-solar open-water heat flux, assembled EXACTLY like NEMO blk_oce_2:
     #   qns = eps_w*(LW_down - sigma*T_s^4)            net LW (Kirchhoff: the
@@ -1283,7 +1288,7 @@ def build_core2_forcing_device_stack(forcing, grid, grid_type: str):
 
 def compute_omip2_surface_forcing_jax(
     state, *, forcing_stack, nn_i, nn_j, grid_shape, idx_t, rho_air=constants.rho_air,
-    nn_w=None,
+    nn_w=None, zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
 ):
     """Pure-JAX, ``lax.scan``-traceable form of
     :func:`compute_omip2_surface_forcing` for the tripole grid (issue #354).
@@ -1329,7 +1334,7 @@ def compute_omip2_surface_forcing_jax(
     T_sfc_K = state.T.data[..., 0] + T_freeze
     tau_x, tau_y, sh, lh, evap = air_sea_fluxes(
         u10=u10, v10=v10, T_air_K=T_air, q_air=q_air,
-        T_sfc_K=T_sfc_K, slp_Pa=slp,
+        T_sfc_K=T_sfc_K, slp_Pa=slp, zeta_cap_width=zeta_cap_width,
     )
     # Non-solar assembly: EXACT jnp mirror of the host
     # ``compute_omip2_surface_forcing`` (NEMO blk_oce_2 form) -- net-LW
@@ -1349,6 +1354,7 @@ def compute_omip2_surface_forcing_jax(
 
 def build_omip2_scan_block_fn(
     model, dt, grid_shape, *, rho_air=constants.rho_air, ramp_s=0.0,
+    zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
 ):
     """Build a JIT-compiled ``lax.scan`` block-step function for the tripole
     OMIP time loop (issue #354).
@@ -1385,6 +1391,7 @@ def build_omip2_scan_block_fn(
                 st, forcing_stack=forcing_stack, nn_i=nn_i, nn_j=nn_j,
                 nn_w=nn_w,
                 grid_shape=grid_shape, idx_t=idx_t, rho_air=rho_air,
+                zeta_cap_width=zeta_cap_width,
             )
             if apply_ramp:
                 ramp = jnp.minimum(

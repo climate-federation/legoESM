@@ -964,6 +964,11 @@ def kain_fritsch_convection(
         raise ValueError(
             f"KainFritschConfig.variant must be one of ('smooth', 'wrf_kfeta'), "
             f"got {config.variant!r}")
+    for name in (n for n in KainFritschConfig._fields if n.startswith("wrf_")):
+        if getattr(config, name) != KainFritschConfig._field_defaults[name]:
+            raise ValueError(
+                f"KainFritschConfig.{name} is read only by variant='wrf_kfeta'; "
+                f"the smooth surrogate would ignore {getattr(config, name)!r}")
     del u, v  # the smooth surrogate has no wind dependence
     ncol, nlev = T.shape
     del conv_prog_profile  # KF is diagnostic; we only emit a fresh profile.

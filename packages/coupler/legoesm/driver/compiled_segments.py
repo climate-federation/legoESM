@@ -3759,10 +3759,7 @@ def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False,
     # keying off it would silently rebuild a cell-centre state around corner
     # arrays (found by the #1028 gate).
     if persistent_dgrid:
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            FV3HydrostaticState,
-        )
-        StateType = FV3HydrostaticState
+        raise ValueError("fv3_duo replaces the retired persistent_dgrid atmosphere state.")
     if persistent_cgrid:
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             LatLonFaceWindState,

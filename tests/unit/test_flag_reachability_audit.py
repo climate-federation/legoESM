@@ -163,6 +163,7 @@ _STRING_ALTS = {
     "surface_bulk_scheme": "coare3",
     "surface_thermo_convention": "aerobulk",
     "surface_stability_scheme": "grachev2007_sheba",
+    "surface_unstable_scheme": "coare3",
     "convective_precip_split": "autoconversion",
     "bechtold_subsidence_solve": "advective",
     "morrison_flavor": "sam",

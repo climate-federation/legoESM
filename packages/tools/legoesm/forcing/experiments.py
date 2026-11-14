@@ -492,7 +492,7 @@ def create_experiment_config(
     # Auto-select a valid discretization for the chosen grid_type
     # when the user hasn't explicitly overridden it.
     _GRID_DEFAULT_DISCRETIZATION = {
-        "cubed_sphere": "cdgrid",
+        "cubed_sphere": "fv3_duo",
         "latlon": "latlon_cgrid",
         "gaussian": "spectral",
         "mpas": "mpas",

@@ -135,6 +135,10 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # RRTMGP gas-table set: an unknown name must raise, never fall back
+        # to the reduced tables.
+        ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py",
+         "gas_table_files"),
         # SI3 aEVP lateral boundary: an unknown north_fold / lbc point type
         # must raise, never fall back to the doubly periodic halo.
         ("packages/ice/legoesm/ice/dynamics.py", "_si3_halo"),
@@ -151,7 +155,6 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "create_model"),
         # kt whitelist: an unvalidated 6*kt^2 tile count must raise, not
         # silently replicate the global state per device (#1360).
-        ("packages/core/legoesm/parallel/tiled_production_cdgrid.py", "_validate_tiled_step_factory_args"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "get_solver_class"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "resolve_solver_name"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py", "plane_compressible_euler_slow_tendencies"),
@@ -223,6 +226,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/core/bulk_flux.py", "validate_stability_scheme"),
         ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_m"),
         ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_h"),
+        # Unstable-regime MOST form selector (unstable_scheme): unknown raises.
+        ("packages/core/legoesm/core/bulk_flux.py", "validate_unstable_scheme"),
         ("packages/core/legoesm/core/tracers.py", "index"),
         ("packages/core/legoesm/grids/capability.py", "instantiate"),
         ("packages/core/legoesm/grids/capability.py", "validate_runtime"),

@@ -1652,15 +1652,24 @@ def _fix_mass_mpas_hydro(
             local = global_sum_mpi(local)
         mass_old, mass_new = local[0], local[1]
     correction = (mass_old - mass_new) / total_area
-    # iter-11: drop ``.astype(p_s.data.dtype)`` — fp64 correction
-    # promotes the add, matches ``fix_ps_mass`` cubed-sphere convention.
+    # iter-11: the add is done in float64 (the correction's dtype).  The
+    # corrected p_s is then carried at the policy ACCUMULATE dtype (#1675),
+    # never below the incoming p_s dtype: float64 in 'mixed' and 'fp64' (no-op
+    # cast there), float32 in an fp32 run with a float32 p_s -- without this
+    # an fp32 run under JAX_ENABLE_X64 got a float64 p_s that promoted the
+    # whole state.  The float64 reductions above stay.
+    from legoesm.core.precision import resolve_dtype
+    ps_dtype = jnp.promote_types(state_new.p_s.data.dtype,
+                                 resolve_dtype(None, "accumulate"))
     if sigma_coord is not None:
         # the added/removed mass is DRY air: tracers re-weighted so
         # their column masses are untouched (exact dry correction)
         from legoesm.core.conservation import shift_ps_keep_tracer_mass
         ps_new, tr_new = shift_ps_keep_tracer_mass(
-            state_new.p_s.data, state_new.tracers, sigma_coord, correction)
+            state_new.p_s.data, state_new.tracers, sigma_coord, correction,
+            p_s_dtype=ps_dtype)
         return state_new._replace(p_s=state_new.p_s.replace(data=ps_new),
                                   tracers=tr_new)
-    p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
+    p_s_fixed = state_new.p_s.replace(
+        data=(state_new.p_s.data + correction).astype(ps_dtype))
     return state_new._replace(p_s=p_s_fixed)

@@ -52,6 +52,7 @@ from legoesm import constants
 from legoesm.atmosphere.dynamics.les import plane_fd_advection as _adv
 from legoesm.atmosphere.dynamics.les import pseudo_incompressible_poisson as _poisson
 from legoesm.atmosphere.dynamics.les.spectral_les_plane import most_surface_flux
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
 from legoesm.atmosphere.physics.turbulence.vreman import (
     VREMAN_BBETA_GUARD_WIDTH, vreman_nu_t)
 from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2
@@ -139,6 +140,8 @@ class PseudoIncompressibleConfig(NamedTuple):
     sfc_theta_flux: float = 0.0      # prescribed kinematic heat flux ⟨w'θ'⟩₀ [K m/s]
     sfc_qv_flux: float = 0.0         # prescribed kinematic moisture flux ⟨w'q_v'⟩₀ [m/s]
     #                                  into tracer slot 0 (BOMEX LHF). 0 ⇒ off.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH  # RULE 5 half-width of the smooth
+    #                                  |zeta| cap at 10 (most_cooling surface); 0 = hard clip.
 
 
 class PseudoIncompressibleForcing(NamedTuple):
@@ -506,7 +509,8 @@ def _surface_state(u, v, theta, g: PseudoIncompressibleGrid, forcing, sfc_means=
         spd_mean = jnp.mean(jnp.sqrt(uc[..., 0] ** 2 + vc[..., 0] ** 2 + 1e-12))
         th1_mean = jnp.mean(theta[..., 0])
     _us, _ths, q0, cd_eff = most_surface_flux(
-        spd_mean, th1_mean, forcing.t_sfc, g.z_c[0], cfg.z0, cfg.theta_ref0)
+        spd_mean, th1_mean, forcing.t_sfc, g.z_c[0], cfg.z0, cfg.theta_ref0,
+        zeta_cap_width=cfg.most_zeta_cap_width)
     return q0, cd_eff
 
 
