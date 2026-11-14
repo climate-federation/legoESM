@@ -57,6 +57,7 @@ from legoesm.core.smooth import (
     smooth_max_c1,
     smooth_min_c1,
     smoothstep_cubic,
+    smoothstep_quintic,
     sqrt_c1,
     validate_smoothing_width,
 )
@@ -121,6 +122,8 @@ KF_SWITCHES = {
     "C-LET": ("C", "hard", "equilibrium-temperature level LET and the cloud-top detrainment layer"),
     "C-LFS": ("C", "hard", "level of free sink LFS (KLFS) and LDT"),
     "C-LTOP": ("C", "hard", "updraft exits (WTW, UMF-UDR), cloud top LTOP and its masks"),
+    "C-LTOPs": ("C", "smooth", "cloud top by the updraft's survival weights and its converted readers"),
+    "C-LETs": ("C", "smooth", "soft LET given the top: joint (LET, LTOP) survival weights"),
     "C-ML": ("C", "hard", "melting level ML (T0 > T00 below LTOP)"),
     "C-NIC": ("C", "hard", "TIMEC rounded to NINT(TIMEC/DT) steps, NCA"),
     "C-NSTEP": ("C", "hard", "subsidence sub-step count NSTEP and its step mask"),
@@ -342,6 +345,13 @@ class KFSmoothing(NamedTuple):
       positive part of dilbe, updraft, its stop2 rollback and the closure),
       ``chmin_clip_width_k`` (E9 CHMIN clamp in TLCL).  D7f (PROF5 endpoint
       overrides, a 2e-11 jump where eqf is constant) stays hard.
+    * Cloud top (PR 5a): ``top_stop_wtw_width_m2s2`` / ``top_stop_umf_width_kgs``
+      are the bands of the stop1 (WTW < 1e-3) and stop2 (UMF - UDR < 10)
+      hazards of the updraft's survival; either nonzero runs the updraft to
+      the model top and replaces the hard LTOP/LET by their joint survival
+      weights (the LET cold weight is D4's, width ``entrain_select_width_k``).
+      Interim: the downdraft, the melting level and the closure re-ascent
+      still read the hard LTOP/LET of the same scan.
     """
 
     lut_knot_width: float
@@ -367,6 +377,8 @@ class KFSmoothing(NamedTuple):
     freeze_onset_width_k: float
     abe_pos_width_m: float
     chmin_clip_width_k: float
+    top_stop_wtw_width_m2s2: float
+    top_stop_umf_width_kgs: float
 
 
 KF_HARD = KFSmoothing(*(0.0 for _ in KFSmoothing._fields))
@@ -386,7 +398,11 @@ def kf_smoothing(config: KainFritschConfig) -> KFSmoothing:
 def validate_kf_smoothing(sm: KFSmoothing) -> None:
     for name, w in sm._asdict().items():  # kfsw: S
         validate_smoothing_width(f"KFSmoothing.{name}", w)  # kfsw: S
-    for name, hi in (("lut_knot_width", 1.0), ("prof5_width", _PROF5_WIDTH_MAX)):
+    # the stop1 band stays at WTW >= 0; the stop2 band stays above the
+    # continuation floor (identity from _CONT_HI_KGS up)
+    for name, hi in (("lut_knot_width", 1.0), ("prof5_width", _PROF5_WIDTH_MAX),
+                     ("top_stop_wtw_width_m2s2", 2.0 * _WTW_STOP),
+                     ("top_stop_umf_width_kgs", 2.0 * (_UMF_DETR_MIN - _CONT_HI_KGS))):
         if getattr(sm, name) > hi:  # kfsw: S
             raise ValueError(f"KFSmoothing.{name} must be 0 or in (0, {hi}]; "
                              f"got {getattr(sm, name)!r}")  # kfsw: S
@@ -541,7 +557,130 @@ def _stencil_c1(x, n_nodes, w):
 
 def _step_c(x, w):
     """C1 step centred on 0, band |x| < w/2: 0 below, 1 above (RULE 5)."""
-    return smoothstep_cubic(0.5 + x / w)  # kfsw: C-KLCLg,C-L5g,D4
+    return smoothstep_cubic(0.5 + x / w)  # kfsw: C-KLCLg,C-L5g
+
+
+def _step_c2(x, w):
+    """C2 (quintic) step centred on 0, band |x| < w/2 (w > 0): 0 below, 1
+    above (D4 weights, cloud-top survival hazards and the soft LET)."""
+    return smoothstep_quintic(0.5 + x / w)  # kfsw: D4,C-LTOPs,C-LETs
+
+
+# Continuation floor of the updraft's mass fluxes past a likely stop2 exit
+# (RULE 5 survival): identity above _CONT_HI, C2 quintic join down to _CONT_LO,
+# constant below; it only acts where the stop2 hazard is already 1.
+_CONT_LO_KGS = 1.0
+_CONT_HI_KGS = 5.0
+
+
+def _cont_floor(x):
+    """Keeps the continuing plume finite and smooth below the stop2 band."""
+    t = (x - _CONT_LO_KGS) / (_CONT_HI_KGS - _CONT_LO_KGS)
+    return _CONT_LO_KGS + (x - _CONT_LO_KGS) * smoothstep_quintic(t)  # kfsw: C-LTOPs
+
+
+def _conv_abe(dabe, ptop):
+    """ABE summed over the accepted members: the increment of level k counts
+    for the members whose top lies above k (a stop2 top rolls its own back)."""
+    return jnp.sum(dabe[:-1] * jnp.cumsum(ptop[::-1])[::-1][1:])  # kfsw: C-LTOPs
+
+
+def _top_hazards(wtw, upold, sm):
+    """Exit probabilities of the continuing updraft at a level: stop1 (WTW
+    below 1e-3) and stop2 (UMF - UDR below 10 kg/s); a zero width is the
+    oracle's step."""
+    h = []
+    for x, w in ((_WTW_STOP - jnp.asarray(wtw), sm.top_stop_wtw_width_m2s2),
+                 (_UMF_DETR_MIN - jnp.asarray(upold), sm.top_stop_umf_width_kgs)):
+        if w:  # kfsw: S
+            h.append(_step_c2(x, w))  # kfsw: C-LTOPs
+        else:
+            h.append((x > 0.0).astype(jnp.result_type(x)))  # kfsw: C-LTOPs
+    return h
+
+
+def _top_weights(E1, E2, s_ex, CW, kk, K, LCL, KX, KPBL, let_fixed=None):
+    """Joint weights W[j, t] of (LET = j, LTOP = t) from the survival of the
+    continuing updraft (C-LTOP, C-LET).  ``E1``/``E2`` [NP]: stop1/stop2 exit
+    masses at level t; ``s_ex``: survival past the last level (oracle LTOP = KX);
+    ``CW`` [NP]: soft cold weight of level j (LET is the last non-cold level
+    <= t, else the initial LET = LCL); stop2 puts LET at t.  ``let_fixed``
+    (traced index or None) overrides LET (the shallow branch).  A member the
+    oracle's no-convection test rejects (LTOP <= max(LCL, KPBL) or
+    LET + 1 <= KPBL) has zero weight, so the weights sum to P(convection)."""
+    j, t = kk[:, None], kk[None, :]  # kfsw: S
+    # levels below K hold an earlier candidate's values: no top there
+    E1, E2 = (jnp.where(kk >= K, x, 0.0) for x in (E1, E2))  # kfsw: S
+    p1 = E1 + jnp.where(kk == KX, s_ex, 0.0)  # kfsw: S
+    # P[j, t] = prod_{j < i <= t} CW[i]
+    M = jnp.where((kk[:, None] > kk[None, :]), CW[:, None], 1.0)  # kfsw: S
+    P = jnp.cumprod(M, axis=0)  # kfsw: C-LETs
+    P = P.T  # [j, t]
+    cand = (j >= K + 1) & (j <= t)  # kfsw: S
+    r = jnp.where(cand, (1.0 - CW[:, None]) * P, 0.0)  # kfsw: C-LETs
+    r = r + jnp.where(j == LCL, P[K, :][None, :], 0.0)  # kfsw: S
+    W = p1[None, :] * r + jnp.where(j == t, E2[None, :], 0.0)  # kfsw: S
+    conv = (t > jnp.maximum(LCL, KPBL)) & (j + 1 > KPBL)  # kfsw: C-LTOPs,C-LETs
+    W = jnp.where(conv, W, 0.0)  # kfsw: C-LTOPs
+    if let_fixed is None:  # kfsw: S
+        return W
+    # the override follows the no-convection test: rejected members stay out
+    return jnp.where(j == let_fixed, jnp.sum(W, axis=0)[None, :], 0.0)  # kfsw: S
+
+
+def _expected_top_profile(W, UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE, QLIQ, QICE,
+                          DILFRC, QLQOUT, QICOUT, UPO, UPN, DP, kk):
+    """Expectation over the (LET = j, LTOP = t) members, weights ``W`` [j, t],
+    of the oracle's cloud-top post-processing (l.1421-1475, LET..LTOP block)
+    applied to the continuing plume arrays (C-LTOP, C-LET).  Member (j, t):
+    levels below j keep the plume (j > t is treated as j = t); j < k < t
+    taper UMF linearly in pressure from UMF[j] to 0 at t, with UER/UDR/DET and
+    the precipitation from j + 2 recomputed; t keeps its stored UMF and
+    detrains UMF[t-1]; j = t detrains everything at t (UPN/UPO of t - 1);
+    above t is zero.  Plume states do not depend on the member, so every
+    flux the downstream uses is an expectation of fluxes.  Returns expected
+    UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE."""
+    j, t = kk[:, None], kk[None, :]  # kfsw: S
+    cdp = jnp.cumsum(DP)  # kfsw: C-LTOPs
+    djt = cdp[None, :] - cdp[:, None]  # kfsw: S
+    # a member with LET above its top (only where the oracle would not
+    # convect) detrains everything at the top, so every member closes its mass
+    lt, eq = j < t, j >= t  # kfsw: S
+    dsafe = jnp.where(lt, djt, 1.0)  # kfsw: S
+    upo1 = jnp.concatenate([UPO[:1], UPO[:-1]])  # UPO at t - 1
+    upn1 = jnp.concatenate([UPN[:1], UPN[:-1]])
+
+    def umf_m(k):  # taper / plume value of member (j, t) at level k <= t (k < t when tapered)
+        taper = UMF[:, None] * (1.0 - (cdp[k] - cdp[:, None]) / dsafe)  # kfsw: S
+        return jnp.where(lt & (k > j), taper, UMF[k])  # kfsw: S
+
+    def level(_, k):
+        on = k <= t  # kfsw: S
+        top = k == t  # kfsw: S
+        um = umf_m(k)
+        um1 = umf_m(jnp.maximum(k - 1, 0))  # kfsw: C-LTOPs (level 0: padding, unused)
+        mid = lt & (k > j) & (k < t)  # kfsw: S
+        uer_mid = um * (1.0 - 1.0 / DILFRC[k])  # kfsw: S
+        umf = jnp.where(top & eq, 0.0, jnp.where(mid, um, UMF[k]))  # kfsw: S
+        uer = jnp.where(top, 0.0, jnp.where(mid, uer_mid, UER[k]))  # kfsw: S
+        udr_eq = UMF[k] + UDR[k] - UER[k]  # kfsw: S
+        udr = jnp.where(top & eq, udr_eq, jnp.where(top & lt, um1, jnp.where(
+            mid, um1 - um + uer_mid, UDR[k])))  # kfsw: S
+        upo_s = jnp.where(upo1 == 0.0, 1.0, upo1)  # kfsw: C-LTOPs
+        rat = jnp.where(top & eq, (upn1 / upo_s)[None, :], DILFRC[k])  # kfsw: S
+        new = (top & eq) | (lt & (k > j))  # kfsw: S
+        detlq = jnp.where(new, udr * QLIQ[k] * rat, DETLQ[k])  # kfsw: S
+        detic = jnp.where(new, udr * QICE[k] * rat, DETIC[k])  # kfsw: S
+        rec = lt & (k >= j + 2)  # kfsw: S
+        pl = jnp.where(rec, um1 * QLQOUT[k], PPTLIQ[k])  # kfsw: S
+        pi_ = jnp.where(rec, um1 * QICOUT[k], PPTICE[k])  # kfsw: S
+        # kfsw: S
+        out = tuple(jnp.sum(jnp.where(on, W * x, 0.0))
+                    for x in (umf, uer, udr, detlq, detic, pl, pi_))
+        return None, out
+
+    _, outs = jax.lax.scan(level, None, kk)
+    return outs
 
 
 def _cap_c1(x, cap, w):
@@ -643,7 +782,7 @@ def _entrain_select(cold, vb, tiny, dcold, dvb, tvdiff, ee_s, ud_s, eqf, ws, wt)
         eqfrc = jnp.where(cold, 0.0, jnp.where(vb | tiny, 1.0, eqf))  # kfsw: D4
         return ee2, ud2, eqfrc
     if ws:  # kfsw: S
-        c, svb = _step_c(dcold, ws), _step_c(dvb, ws)
+        c, svb = _step_c2(dcold, ws), _step_c2(dvb, ws)
     else:
         c, svb = cold.astype(eqf.dtype), vb.astype(eqf.dtype)  # kfsw: D4
     if wt:  # kfsw: S
@@ -1014,6 +1153,8 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
     ES = ALIQ * jnp.exp((BLIQ * T0 - CLIQ) / (T0 - DLIQ))
     QES = _EPS_KF * ES / (P0 - ES)
     sm = lut.sm
+    # RULE 5 survival of the updraft (soft cloud top, PR 5a)
+    sv = bool(sm.top_stop_wtw_width_m2s2 or sm.top_stop_umf_width_kgs)  # kfsw: S
     Q0 = _cap_c1(QV0, QES, sm.q0_clip_width_kgkg)
     Q0 = -_cap_c1(-Q0, -_Q0_FLOOR, sm.q0_floor_width_kgkg)
     RH = Q0 / QES
@@ -1047,7 +1188,7 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         THETEU=zf, WU=zf, UMF=zf, RATIO2=zf, UER=zf, TU=zf, TVU=zf, QU=zf, EQFRC=zf,
         QLIQ=zf, QICE=zf, QLQOUT=zf, QICOUT=zf, DETLQ=zf, DETIC=zf, PPTLIQ=zf,
         PPTICE=zf, THETEE=zf, TVQU=zf, UDR=zf, DILFRC=jnp.ones(NP, dtype), QDT=zf,
-        CLDHGT=zf,
+        CLDHGT=zf, E1=zf, E2=zf, CW=zf, UPO=zf, UPN=zf, DABE=zf,
     )
     sc = dict(
         NU=jnp.asarray(0, i32), NUCHM=jnp.asarray(0, i32), ISHALL=jnp.asarray(0, i32),
@@ -1058,7 +1199,7 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         TVEN=one, WKL=zero, WKLCL=zero, DTLCL=zero, DTRH=zero, WLCL=one, PLCL=one,
         LCL=jnp.asarray(2, i32), LET=jnp.asarray(2, i32), RAD=one, AU0=one,
         VMFLCL=one, UPOLD=one, UPNEW=one, ABE=zero, TRPPT=zero,
-        LTOP=jnp.asarray(2, i32), CHMIN=zero, IFLAG=jnp.asarray(0, i32),
+        LTOP=jnp.asarray(2, i32), CHMIN=zero, IFLAG=jnp.asarray(0, i32), SEX=zero,
     )  # kfsw: S
 
     def evaluate(S, sc, NU, act, sc_nuchm):
@@ -1164,7 +1305,15 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         u = dict(WTW=WTW, REI=zero, UPOLD=VMFLCL, UPNEW=VMFLCL, ABE=zero, TRPPT=zero,
                  EE1=one, UD1=zero, DILBE=zero, TTEMP=jnp.asarray(_TTFRZ_K, dtype),
                  IFLAG=jnp.asarray(0, i32), LET=LCL, exited=jnp.asarray(False),
-                 LTOP=jnp.asarray(KL, i32))  # kfsw: S
+                 LTOP=jnp.asarray(KL, i32), SV=one, ABES=zero)  # kfsw: S
+        if sv:  # kfsw: S
+            # this candidate's survival arrays and precipitation start empty
+            # (levels it never reaches must not keep an earlier candidate's
+            # values: the expectations sum the whole column)
+            for nm in ("E1", "E2", "CW", "UPO", "UPN", "DABE", "PPTLIQ", "PPTICE"):
+                A[nm] = jnp.where(go, 0.0, A[nm])  # kfsw: C-LTOPs
+            A["UPO"] = _put(A["UPO"], K - 1, VMFLCL, go)  # kfsw: C-LTOPs
+            A["UPN"] = _put(A["UPN"], K - 1, VMFLCL, go)  # kfsw: C-LTOPs
 
         def ubody(c, NK):
             A, u = c
@@ -1242,9 +1391,26 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
             let = jnp.where(stop2, NK, let)  # kfsw: C-LET
             upold = A["UMF"][NK] - udr  # kfsw: S
             upnew = upold + uer
-            ups = _sd(upold, a3)  # kfsw: C-LTOP
-            upns = _sd(upnew, a3)  # kfsw: C-LTOP
-            dilfrc = upnew / ups
+            if sv:  # kfsw: S
+                # the plume continues past every exit while it has survival;
+                # once the survival is exactly 0 (every later weight is 0 with
+                # zero derivative) it freezes, so no NaN enters the backward pass.
+                # A write past an exit with zero surviving mass is skipped, as the
+                # oracle skips it: later candidates and the closure read the stale arrays.
+                h1, h2 = _top_hazards(wtw, upold, sm)
+                sv0 = u["SV"]
+                snew = sv0 * (1.0 - h1) * (1.0 - h2)
+                wa = go & (NK >= K) & (sv0 > 0.0)  # kfsw: C-LTOPs
+                wa2 = wa & (sv0 * (1.0 - h1) > 0.0)  # kfsw: C-LTOPs
+                wa3 = wa & (snew > 0.0)  # kfsw: C-LTOPs
+                ups = upk = _cont_floor(upold)
+                upns = ups + uer
+                dilfrc = upns / ups
+            else:
+                wa, wa2, wa3, upk = a, a2, a3, upold
+                ups = _sd(upold, a3)  # kfsw: C-LTOP
+                upns = _sd(upnew, a3)  # kfsw: C-LTOP
+                dilfrc = upnew / ups
             detlq = qliq * udr
             detic = qice * udr
             qdt = qu
@@ -1258,44 +1424,60 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
 
             # writes before the WTW exit
             B = dict(A)
-            B["RATIO2"] = _put(B["RATIO2"], NK1, ratio2, a)  # kfsw: C-LTOP
-            B["TU"] = _put(B["TU"], NK1, tu, a)  # kfsw: C-LTOP
-            B["QLQOUT"] = _put(B["QLQOUT"], NK1, qlqout, a)  # kfsw: C-LTOP
-            B["QICOUT"] = _put(B["QICOUT"], NK1, qicout, a)  # kfsw: C-LTOP
-            B["TVU"] = _put(B["TVU"], NK1, tvu, a)  # kfsw: C-LTOP
+            B["RATIO2"] = _put(B["RATIO2"], NK1, ratio2, wa)  # kfsw: C-LTOP
+            B["TU"] = _put(B["TU"], NK1, tu, wa)  # kfsw: C-LTOP
+            B["QLQOUT"] = _put(B["QLQOUT"], NK1, qlqout, wa)  # kfsw: C-LTOP
+            B["QICOUT"] = _put(B["QICOUT"], NK1, qicout, wa)  # kfsw: C-LTOP
+            B["TVU"] = _put(B["TVU"], NK1, tvu, wa)  # kfsw: C-LTOP
             # THETEU/QU/QLIQ/QICE(NK1): pre-mix values, then mixed if accepted
-            B["THETEU"] = _put(B["THETEU"], NK1, _w(a3, theteu_m, theteu), a)  # kfsw: C-LTOP
-            B["QU"] = _put(B["QU"], NK1, _w(a3, qu_m, qu), a)  # kfsw: C-LTOP
-            B["QLIQ"] = _put(B["QLIQ"], NK1, _w(a3, qliq_m, qliq), a)  # kfsw: C-LTOP
-            B["QICE"] = _put(B["QICE"], NK1, _w(a3, qice_m, qice), a)  # kfsw: C-LTOP
+            B["THETEU"] = _put(B["THETEU"], NK1, _w(wa3, theteu_m, theteu), wa)  # kfsw: C-LTOP
+            B["QU"] = _put(B["QU"], NK1, _w(wa3, qu_m, qu), wa)  # kfsw: C-LTOP
+            B["QLIQ"] = _put(B["QLIQ"], NK1, _w(wa3, qliq_m, qliq), wa)  # kfsw: C-LTOP
+            B["QICE"] = _put(B["QICE"], NK1, _w(wa3, qice_m, qice), wa)  # kfsw: C-LTOP
             # writes between the two exits
-            B["WU"] = _put(B["WU"], NK1, _safe_sqrt(wtw), a2)  # kfsw: C-LTOP,E11
-            B["THETEE"] = _put(B["THETEE"], NK1, thetee, a2)  # kfsw: C-LTOP
-            B["TVQU"] = _put(B["TVQU"], NK1, tvqu, a2)  # kfsw: C-LTOP
-            B["EQFRC"] = _put(B["EQFRC"], NK1, eqfrc, a2)  # kfsw: C-LTOP
-            B["UER"] = _put(B["UER"], NK1, _w(a3, uer_m, uer), a2)  # kfsw: C-LTOP
-            B["UDR"] = _put(B["UDR"], NK1, udr, a2)  # kfsw: C-LTOP
+            B["WU"] = _put(B["WU"], NK1, _safe_sqrt(wtw), wa2)  # kfsw: C-LTOP,E11
+            B["THETEE"] = _put(B["THETEE"], NK1, thetee, wa2)  # kfsw: C-LTOP
+            B["TVQU"] = _put(B["TVQU"], NK1, tvqu, wa2)  # kfsw: C-LTOP
+            B["EQFRC"] = _put(B["EQFRC"], NK1, eqfrc, wa2)  # kfsw: C-LTOP
+            B["UER"] = _put(B["UER"], NK1, _w(wa3, uer_m, uer), wa2)  # kfsw: C-LTOP
+            B["UDR"] = _put(B["UDR"], NK1, udr, wa2)  # kfsw: C-LTOP
             # accepted level
-            B["UMF"] = _put(B["UMF"], NK1, upnew, a3)  # kfsw: C-LTOP
-            B["DILFRC"] = _put(B["DILFRC"], NK1, dilfrc, a3)  # kfsw: C-LTOP
-            B["DETLQ"] = _put(B["DETLQ"], NK1, detlq, a3)  # kfsw: C-LTOP
-            B["DETIC"] = _put(B["DETIC"], NK1, detic, a3)  # kfsw: C-LTOP
-            B["QDT"] = _put(B["QDT"], NK1, qdt, a3)  # kfsw: C-LTOP
-            B["PPTLIQ"] = _put(B["PPTLIQ"], NK1, pptliq, a3)  # kfsw: C-LTOP
-            B["PPTICE"] = _put(B["PPTICE"], NK1, pptice, a3)  # kfsw: C-LTOP
+            B["UMF"] = _put(B["UMF"], NK1, upnew, wa3)  # kfsw: C-LTOP
+            B["DILFRC"] = _put(B["DILFRC"], NK1, dilfrc, wa3)  # kfsw: C-LTOP
+            B["DETLQ"] = _put(B["DETLQ"], NK1, detlq, wa3)  # kfsw: C-LTOP
+            B["DETIC"] = _put(B["DETIC"], NK1, detic, wa3)  # kfsw: C-LTOP
+            B["QDT"] = _put(B["QDT"], NK1, qdt, wa3)  # kfsw: C-LTOP
+            B["PPTLIQ"] = _put(B["PPTLIQ"], NK1, pptliq, wa3)  # kfsw: C-LTOP
+            B["PPTICE"] = _put(B["PPTICE"], NK1, pptice, wa3)  # kfsw: C-LTOP
             v = dict(u)
-            v["WTW"] = _w(a, wtw, u["WTW"])  # kfsw: C-LTOP
-            v["TTEMP"] = _w(a, ttemp, u["TTEMP"])  # kfsw: C-LTOP
-            v["IFLAG"] = _w(a, iflag, u["IFLAG"])  # kfsw: C-LTOP
-            v["REI"] = _w(a2, rei, u["REI"])  # kfsw: C-LTOP
-            v["DILBE"] = _w(a2, dilbe, u["DILBE"])  # kfsw: C-LTOP
+            v["WTW"] = _w(wa, wtw, u["WTW"])  # kfsw: C-LTOP
+            v["TTEMP"] = _w(wa, ttemp, u["TTEMP"])  # kfsw: C-LTOP
+            v["IFLAG"] = _w(wa, iflag, u["IFLAG"])  # kfsw: C-LTOP
+            v["REI"] = _w(wa2, rei, u["REI"])  # kfsw: C-LTOP
+            v["DILBE"] = _w(wa2, dilbe, u["DILBE"])  # kfsw: C-LTOP
             v["ABE"] = _w(a2, abe, u["ABE"])  # kfsw: C-LTOP
             v["LET"] = _w(a2, let, u["LET"])  # kfsw: C-LET
-            v["EE1"] = _w(a3, ee2, u["EE1"])  # kfsw: C-LTOP
-            v["UD1"] = _w(a3, ud2, u["UD1"])  # kfsw: C-LTOP
-            v["UPOLD"] = _w(a3, upold, u["UPOLD"])  # kfsw: C-LTOP
-            v["UPNEW"] = _w(a3, upnew, u["UPNEW"])  # kfsw: C-LTOP
-            v["TRPPT"] = _w(a3, u["TRPPT"] + pptliq + pptice, u["TRPPT"])  # kfsw: C-LTOP
+            v["EE1"] = _w(wa3, ee2, u["EE1"])  # kfsw: C-LTOP
+            v["UD1"] = _w(wa3, ud2, u["UD1"])  # kfsw: C-LTOP
+            v["UPOLD"] = _w(wa3, upk, u["UPOLD"])  # kfsw: C-LTOP
+            v["UPNEW"] = _w(wa3, upnew, u["UPNEW"])  # kfsw: C-LTOP
+            v["TRPPT"] = _w(wa3, u["TRPPT"] + pptliq + pptice, u["TRPPT"])  # kfsw: C-LTOP
+            if sv:  # kfsw: S
+                # survival: stop1 / stop2 exit masses at this level, then the
+                # accepted-step weight of the ABE increment (stop2 rolls back)
+                B["E1"] = _put(B["E1"], NK, sv0 * h1, wa)  # kfsw: C-LTOPs
+                B["E2"] = _put(B["E2"], NK, sv0 * (1.0 - h1) * h2, wa)  # kfsw: C-LTOPs
+                B["UPO"] = _put(B["UPO"], NK, upold, wa)  # kfsw: C-LTOPs
+                B["UPN"] = _put(B["UPN"], NK, upnew, wa)  # kfsw: C-LTOPs
+                if sm.entrain_select_width_k:  # kfsw: S
+                    cw = _step_c2(TV0[NK1] - tvqu, sm.entrain_select_width_k)  # kfsw: S
+                else:
+                    cw = cold.astype(dtype)  # kfsw: C-LETs
+                B["CW"] = _put(B["CW"], NK1, cw, wa)  # kfsw: C-LETs
+                v["SV"] = _w(wa, snew, sv0)  # kfsw: C-LTOPs
+                # kfsw: C-LTOPs
+                v["ABES"] = u["ABES"] + jnp.where(wa, snew * jnp.where(pos_b, dinc, 0.0), 0.0)
+                B["DABE"] = _put(B["DABE"], NK, jnp.where(pos_b, dinc, 0.0), wa)  # kfsw: C-LTOPs
             ex = a & (stop1 | stop2)
             v["LTOP"] = _w(ex, NK, u["LTOP"])  # kfsw: C-LTOP
             v["exited"] = u["exited"] | ex
@@ -1303,7 +1485,19 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
 
         A, u = _scan_levels(ubody, (A, u), 1, KX - 1)
         LTOP = u["LTOP"]
-        cldhgt = Z0[LTOP] - ZLCL  # kfsw: C-LTOP
+        if sv:  # kfsw: S
+            # cloud top, LET, depth and ABE given convection (the weights carry
+            # only members the no-convection test accepts; with none, e_top = 0)
+            Wt = _top_weights(A["E1"], A["E2"], u["SV"], A["CW"], kk, K, LCL, KX, KPBL)
+            ptop = jnp.sum(Wt, axis=0)  # kfsw: C-LTOPs
+            pc = jnp.sum(ptop)  # kfsw: C-LTOPs
+            pcd = _sd(pc, pc > 0.0)  # kfsw: C-LTOPs
+            e_top = jnp.sum(ptop * kk) / pcd  # kfsw: C-LTOPs
+            e_let = jnp.sum(jnp.sum(Wt, axis=1) * kk) / pcd  # kfsw: C-LETs
+            cldhgt = jnp.sum(ptop * Z0) / pcd - ZLCL  # kfsw: C-LTOPs
+        else:
+            e_top, e_let = LTOP, u["LET"]
+            cldhgt = Z0[LTOP] - ZLCL  # kfsw: C-LTOP
         if sm.chmin_clip_width_k:  # kfsw: S
             CHMIN = _CHMIN_SHALLOW_M + _CHMIN_SLOPE_M_PER_K * (_clip_c1(
                 TLCL, _CHMIN_TCOLD_K, _CHMIN_TWARM_K, sm.chmin_clip_width_k) - _CHMIN_TCOLD_K)
@@ -1313,13 +1507,16 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
                                         _CHMIN_SHALLOW_M
                                         + _CHMIN_SLOPE_M_PER_K * (TLCL - _CHMIN_TCOLD_K),
                                         _CHMIN_SHALLOW_M))  # kfsw: E9
-        noconv = (LTOP <= KLCL) | (LTOP <= KPBL) | (u["LET"] + 1 <= KPBL)  # kfsw: A4
-        deep = ~noconv & (cldhgt > CHMIN) & (u["ABE"] > _ABE_MIN)  # kfsw: B1
+        noconv = (e_top <= KLCL) | (e_top <= KPBL) | (e_let + 1 <= KPBL)  # kfsw: A4
+        abe_out = u["ABES"] if sv else u["ABE"]  # kfsw: S
+        abe_b = _conv_abe(A["DABE"], ptop) / pcd if sv else abe_out  # kfsw: S
+        deep = ~noconv & (cldhgt > CHMIN) & (abe_b > _ABE_MIN)  # kfsw: B1
         shallow = ~noconv & ~deep
         exit_sh = shallow & (NU == sc_nuchm)  # kfsw: B2
         zero_cols = noconv | (shallow & ~exit_sh)
         A["CLDHGT"] = _put(A["CLDHGT"], LC, jnp.where(noconv, 0.0, cldhgt), go)  # kfsw: A4,C-KCHECK
-        zr = go & zero_cols & (kk >= K) & (kk <= LTOP)  # kfsw: B2,C-LTOP
+        # kfsw: B2,C-LTOP
+        zr = go & zero_cols & (kk >= K) & ((kk <= LTOP) | sv)
         for nm in ("UMF", "UDR", "UER", "DETLQ", "DETIC", "PPTLIQ", "PPTICE"):
             A[nm] = jnp.where(zr, 0.0, A[nm])  # kfsw: B2,C-LTOP
         out = dict(
@@ -1327,8 +1524,8 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
             TLCL=TLCL, TVLCL=TVLCL, ZLCL=ZLCL, KLCL=KLCL, K=K, DLP=DLP, TENV=TENV,
             QENV=QENV, TVEN=TVEN, WKL=WKL, WKLCL=WKLCL, DTLCL=DTLCL, DTRH=DTRH, WLCL=WLCL,
             PLCL=PLCL, LCL=LCL, LET=u["LET"], RAD=RAD, AU0=AU0, VMFLCL=VMFLCL,
-            UPOLD=u["UPOLD"], UPNEW=u["UPNEW"], ABE=u["ABE"], TRPPT=u["TRPPT"], LTOP=LTOP,
-            CHMIN=CHMIN, IFLAG=u["IFLAG"],
+            UPOLD=u["UPOLD"], UPNEW=u["UPNEW"], ABE=abe_out,
+            TRPPT=u["TRPPT"], LTOP=LTOP, CHMIN=CHMIN, IFLAG=u["IFLAG"], SEX=u["SV"],
         )
         return A, out, ret, go, deep, shallow, exit_sh
 
@@ -1414,57 +1611,76 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
 
     # --- shallow LET; total detrainment at cloud top (l.1421-1475) ---
     LET = jnp.where(sh, jnp.maximum(KPBL, KLCL), sc["LET"])  # kfsw: C-LET
-    eq = LET == LTOP  # kfsw: C-LET
-    udr_t = UMF[LTOP] + UDR[LTOP] - UER[LTOP]  # kfsw: C-LTOP
-    detlq_t = QLIQ[LTOP] * udr_t * UPNEW / UPOLD  # kfsw: C-LTOP
-    detic_t = QICE[LTOP] * udr_t * UPNEW / UPOLD  # kfsw: C-LTOP
-    UDR = _put(UDR, LTOP, udr_t, eq)  # kfsw: C-LET
-    DETLQ = _put(DETLQ, LTOP, detlq_t, eq)  # kfsw: C-LET
-    DETIC = _put(DETIC, LTOP, detic_t, eq)  # kfsw: C-LET
-    UER = _put(UER, LTOP, zero, eq)  # kfsw: C-LET
-    UMF = _put(UMF, LTOP, zero, eq)  # kfsw: C-LET
-    nb = ~eq
+    sm = lut.sm
+    sv = bool(sm.top_stop_wtw_width_m2s2 or sm.top_stop_umf_width_kgs)  # kfsw: S
+    if sv:  # kfsw: S
+        # expectation over the joint survival weights of (LET, LTOP) of the
+        # oracle's cloud-top detrainment applied to the continuing plume
+        Wn = _top_weights(S["E1"], S["E2"], sc["SEX"], S["CW"], kk, K, LCL, KX, KPBL)
+        Ws = _top_weights(S["E1"], S["E2"], sc["SEX"], S["CW"], kk, K, LCL, KX, KPBL,
+                          let_fixed=jnp.maximum(KPBL, KLCL))  # kfsw: C-LETs
+        Wtop = jnp.where(sh, Ws, Wn)  # kfsw: B1
+        PTOP = jnp.sum(Wtop, axis=0)  # kfsw: C-LTOPs
+        PGE = jnp.cumsum(PTOP[::-1])[::-1]  # kfsw: C-LTOPs
+        UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE = _expected_top_profile(
+            Wtop, UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE, QLIQ, QICE, DILFRC,
+            QLQOUT, QICOUT, S["UPO"], S["UPN"], DP, kk)
+        TRPPT = jnp.sum(PPTLIQ + PPTICE)  # kfsw: C-LTOPs
+    else:
+        eq = LET == LTOP  # kfsw: C-LET
+        udr_t = UMF[LTOP] + UDR[LTOP] - UER[LTOP]  # kfsw: C-LTOP
+        detlq_t = QLIQ[LTOP] * udr_t * UPNEW / UPOLD  # kfsw: C-LTOP
+        detic_t = QICE[LTOP] * udr_t * UPNEW / UPOLD  # kfsw: C-LTOP
+        UDR = _put(UDR, LTOP, udr_t, eq)  # kfsw: C-LET
+        DETLQ = _put(DETLQ, LTOP, detlq_t, eq)  # kfsw: C-LET
+        DETIC = _put(DETIC, LTOP, detic_t, eq)  # kfsw: C-LET
+        UER = _put(UER, LTOP, zero, eq)  # kfsw: C-LET
+        UMF = _put(UMF, LTOP, zero, eq)  # kfsw: C-LET
+        nb = ~eq
 
-    def dptt_body(c, k):
-        return _w(nb & (k >= LET + 1) & (k <= LTOP), c + DP[k], c)  # kfsw: C-LET
+        def dptt_body(c, k):
+            return _w(nb & (k >= LET + 1) & (k <= LTOP), c + DP[k], c)  # kfsw: C-LET
 
-    DPTT = _scan_levels(dptt_body, zero, 1, KX)
-    DUMFDP = UMF[LET] / _sd(DPTT, nb & (DPTT != 0.0))  # kfsw: C-LET
+        DPTT = _scan_levels(dptt_body, zero, 1, KX)
+        DUMFDP = UMF[LET] / _sd(DPTT, nb & (DPTT != 0.0))  # kfsw: C-LET
 
-    def let_body(c, NK):
-        umf, uer, udr, detlq, detic, pl, pi_, trppt = c
-        a = nb & (NK >= LET + 1) & (NK <= LTOP)  # kfsw: C-LET
-        top = NK == LTOP  # kfsw: C-LET
-        umf_n = umf[NK - 1] - DP[NK] * DUMFDP  # kfsw: S
-        uer_n = umf_n * (1.0 - 1.0 / DILFRC[NK])  # kfsw: S
-        udr_n = umf[NK - 1] - umf_n + uer_n  # kfsw: S
-        udr_k = jnp.where(top, umf[NK - 1], udr_n)  # kfsw: C-LET
-        uer_k = jnp.where(top, 0.0, uer_n)  # kfsw: C-LET
-        umf_k = jnp.where(top, umf[NK], umf_n)  # kfsw: C-LET
-        detlq_k = udr_k * QLIQ[NK] * DILFRC[NK]  # kfsw: S
-        detic_k = udr_k * QICE[NK] * DILFRC[NK]  # kfsw: S
-        b = a & (NK >= LET + 2)  # kfsw: C-LET
-        trppt_b = trppt - pl[NK] - pi_[NK]  # kfsw: S
-        pl_k = umf[NK - 1] * QLQOUT[NK]  # kfsw: S
-        pi_k = umf[NK - 1] * QICOUT[NK]  # kfsw: S
-        trppt_b = trppt_b + pl_k + pi_k
-        return (_put(umf, NK, umf_k, a), _put(uer, NK, uer_k, a), _put(udr, NK, udr_k, a),
-                _put(detlq, NK, detlq_k, a), _put(detic, NK, detic_k, a),
-                _put(pl, NK, pl_k, b), _put(pi_, NK, pi_k, b), _w(b, trppt_b, trppt))  # kfsw: C-LET
+        def let_body(c, NK):
+            umf, uer, udr, detlq, detic, pl, pi_, trppt = c
+            a = nb & (NK >= LET + 1) & (NK <= LTOP)  # kfsw: C-LET
+            top = NK == LTOP  # kfsw: C-LET
+            umf_n = umf[NK - 1] - DP[NK] * DUMFDP  # kfsw: S
+            uer_n = umf_n * (1.0 - 1.0 / DILFRC[NK])  # kfsw: S
+            udr_n = umf[NK - 1] - umf_n + uer_n  # kfsw: S
+            udr_k = jnp.where(top, umf[NK - 1], udr_n)  # kfsw: C-LET
+            uer_k = jnp.where(top, 0.0, uer_n)  # kfsw: C-LET
+            umf_k = jnp.where(top, umf[NK], umf_n)  # kfsw: C-LET
+            detlq_k = udr_k * QLIQ[NK] * DILFRC[NK]  # kfsw: S
+            detic_k = udr_k * QICE[NK] * DILFRC[NK]  # kfsw: S
+            b = a & (NK >= LET + 2)  # kfsw: C-LET
+            trppt_b = trppt - pl[NK] - pi_[NK]  # kfsw: S
+            pl_k = umf[NK - 1] * QLQOUT[NK]  # kfsw: S
+            pi_k = umf[NK - 1] * QICOUT[NK]  # kfsw: S
+            trppt_b = trppt_b + pl_k + pi_k
+            return (_put(umf, NK, umf_k, a), _put(uer, NK, uer_k, a), _put(udr, NK, udr_k, a),
+                    _put(detlq, NK, detlq_k, a), _put(detic, NK, detic_k, a),
+                    _put(pl, NK, pl_k, b), _put(pi_, NK, pi_k, b), _w(b, trppt_b, trppt))  # kfsw: C-LET
 
-    UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE, TRPPT = _scan_levels(
-        let_body, (UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE, TRPPT), 1, KX)
+        UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE, TRPPT = _scan_levels(
+            let_body, (UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE, TRPPT), 1, KX)
 
     # --- below cloud base / above cloud top (l.1479-1577) ---
     ML = jnp.max(jnp.where(valid & (kk <= LTOP) & (T0 > _T00_K), kk, 0))  # kfsw: C-ML
+
+    # the source feeds only the convecting members
+    vmf_src = VMFLCL * jnp.sum(PTOP) if sv else VMFLCL  # kfsw: S
 
     def below_body(c, NK):
         umf, uer = c
         a = NK <= K  # kfsw: C-KLCL,C-KPBL
         isLC = NK == LC  # kfsw: C-KLCL,C-KPBL,C-KCHECK
-        uer_v = VMFLCL * DP[NK] / DPTHMX  # kfsw: S
+        uer_v = vmf_src * DP[NK] / DPTHMX  # kfsw: S
         # kfsw: C-KLCL,C-KPBL,C-KCHECK
-        umf_v = jnp.where(isLC, uer_v, jnp.where(NK <= KPBL, umf[NK - 1] + uer_v, VMFLCL))
+        umf_v = jnp.where(isLC, uer_v, jnp.where(NK <= KPBL, umf[NK - 1] + uer_v, vmf_src))
         uer_k = jnp.where(isLC | (NK <= KPBL), uer_v, 0.0)  # kfsw: C-KLCL,C-KPBL,C-KCHECK
         inlc = NK >= LC  # kfsw: C-KLCL,C-KPBL,C-KCHECK
         return (_put(umf, NK, jnp.where(inlc, umf_v, 0.0), a),
@@ -1482,14 +1698,19 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         jnp.where(blw, 0.0, a) for a in for_zero)  # kfsw: C-KLCL,C-KPBL
     THETEE = jnp.where(blw, _envirtht(lut, ab, P0, T0, Q0), THETEE)  # kfsw: C-KLCL,C-KPBL
     EQFRC = jnp.where(blw, 1.0, EQFRC)  # kfsw: C-KLCL,C-KPBL
-    above = valid & (kk >= LTOP + 1)  # kfsw: C-LTOP
-    above2 = valid & (kk > LTOP + 1)  # kfsw: C-LTOP
-    # kfsw: C-LTOP
-    (UMF, UDR, UER, QDT, QLIQ, QICE, QLQOUT, QICOUT, DETLQ, DETIC, PPTLIQ, PPTICE) = (
-        jnp.where(above, 0.0, a) for a in
-        (UMF, UDR, UER, QDT, QLIQ, QICE, QLQOUT, QICOUT, DETLQ, DETIC, PPTLIQ, PPTICE))
-    TU, QU, WU = (jnp.where(above2, 0.0, a) for a in (TU, QU, WU))  # kfsw: C-LTOP
-    inc = valid & (kk <= LTOP)  # kfsw: C-LTOP
+    if sv:  # kfsw: S
+        # the expected fluxes vanish above every possible top; the plume
+        # states stay (they only multiply those fluxes); domain = column
+        inc, LTOPD = valid, KX
+    else:
+        above = valid & (kk >= LTOP + 1)  # kfsw: C-LTOP
+        above2 = valid & (kk > LTOP + 1)  # kfsw: C-LTOP
+        # kfsw: C-LTOP
+        (UMF, UDR, UER, QDT, QLIQ, QICE, QLQOUT, QICOUT, DETLQ, DETIC, PPTLIQ, PPTICE) = (
+            jnp.where(above, 0.0, a) for a in
+            (UMF, UDR, UER, QDT, QLIQ, QICE, QLQOUT, QICOUT, DETLQ, DETIC, PPTLIQ, PPTICE))
+        TU, QU, WU = (jnp.where(above2, 0.0, a) for a in (TU, QU, WU))  # kfsw: C-LTOP
+        inc, LTOPD = valid & (kk <= LTOP), LTOP  # kfsw: C-LTOP
     EMS = jnp.where(inc, DP * DXSQ / G, 0.0)  # kfsw: C-LTOP
     EMSD = jnp.where(inc, 1.0 / _sd(EMS, inc), 0.0)  # kfsw: C-LTOP
     THTAU = jnp.where(inc, TU * _exner(P0, QDT), 0.0)  # kfsw: C-LTOP
@@ -1500,7 +1721,14 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     def wspd(k):
         return _safe_sqrt(U0[k] * U0[k] + V0[k] * V0[k])  # kfsw: E11
 
-    WS_KLCL, WS_LTOP = wspd(KLCL), wspd(LTOP)
+    if sv:  # kfsw: S
+        # top scalars given convection (members with a top above KLCL)
+        pc = _sd(jnp.sum(PTOP), jnp.sum(PTOP) > 0.0)  # kfsw: C-LTOPs
+        WS_KLCL, WS_LTOP = wspd(KLCL), jnp.sum(PTOP * wspd(kk)) / pc  # kfsw: C-LTOPs
+        U_T, V_T, Z_T = (jnp.sum(PTOP * x) / pc for x in (U0, V0, Z0))  # kfsw: C-LTOPs
+    else:
+        WS_KLCL, WS_LTOP = wspd(KLCL), wspd(LTOP)
+        U_T, V_T, Z_T = U0[LTOP], V0[LTOP], Z0[LTOP]  # kfsw: C-LTOP
     if lut.sm.l5_gather_width_pa:  # kfsw: S
         wl5 = _l5_weights(P0, kk, valid, lut.sm.l5_gather_width_pa)
         WS_L5 = jnp.sum(wl5 * wspd(kk))  # kfsw: C-L5g
@@ -1516,10 +1744,10 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     NIC = _nint(TIMEC / dt)  # kfsw: C-NIC
     TIMEC = NIC.astype(dtype) * dt  # kfsw: C-NIC
     SHSIGN = jnp.where(WS_LTOP > WS_KLCL, 1.0, -1.0)  # kfsw: D5
-    du = U0[LTOP] - U0[KLCL]  # kfsw: C-LTOP,C-KLCL
-    dv = V0[LTOP] - V0[KLCL]  # kfsw: C-LTOP,C-KLCL
+    du = U_T - U0[KLCL]  # kfsw: C-KLCL
+    dv = V_T - V0[KLCL]  # kfsw: C-KLCL
     VWS = du * du + dv * dv
-    dzc = Z0[LTOP] - Z0[LCL]  # kfsw: C-LTOP
+    dzc = Z_T - Z0[LCL]  # kfsw: C-KLCL
     VWS = _VWS_SCALE * SHSIGN * _safe_sqrt(VWS) / _sd(dzc, dzc != 0.0)  # kfsw: E11,C-LTOP
     PEF = _PEF_C0 + VWS * (_PEF_C1 + VWS * (_PEF_C2 - VWS * _PEF_C3))
     PEF = jnp.minimum(jnp.maximum(PEF, _PEF_MIN), _PEF_MAX)  # kfsw: E13
@@ -1572,7 +1800,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     DMFFRC = _DMFFRC_COEF * (1.0 - RHBAR)
 
     def mlt_body(c, k):
-        return _w((k >= KLCL) & (k <= LTOP), c + PPTICE[k], c)  # kfsw: C-KLCL,C-LTOP
+        return _w((k >= KLCL) & ((k <= LTOP) | sv), c + PPTICE[k], c)  # kfsw: C-KLCL,C-LTOP
 
     PPTMLT = _scan_levels(mlt_body, zero, 1, KX)
     mel = LC < ML  # kfsw: B5,C-KCHECK
@@ -1670,7 +1898,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     def advect(X, src, OMG, FXM, nstep, dtime):
         def step(c, s):
             # kfsw: C-NSTEP
-            return jnp.where(s < nstep, _upstream_step(c, OMG, FXM, inc, LTOP, kk, src, dtime, EMSD), c), None
+            return jnp.where(s < nstep, _upstream_step(c, OMG, FXM, inc, LTOPD, kk, src, dtime, EMSD), c), None
         X, _ = jax.lax.scan(step, X, jnp.arange(_MAX_SUBSTEPS, dtype=i32))  # kfsw: S
         return X
 
@@ -1691,7 +1919,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
 
         def omg_body(cc, NK):
             omg, dtt = cc
-            b = (NK >= 2) & (NK <= LTOP)  # kfsw: C-LTOP
+            b = (NK >= 2) & (NK <= LTOPD)  # kfsw: C-LTOP
             o = omg[NK - 1] - DP[NK - 1] * DOMGDP[NK - 1]  # kfsw: S
             ab_ = jnp.abs(o)  # kfsw: E16
             frdp = _FRDP * DP[NK - 1]  # kfsw: S
@@ -1713,11 +1941,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         KLCL_c = c["KLCL"]
 
         # borrow moisture where QG < 0 (l.2028-2059)
-        def neg_body(cc, NK):
-            qg, fatal = cc
-            b = (NK <= LTOP) & (qg[NK] < 0.0)  # kfsw: D7i
-            fatal = fatal | (b & (NK == 1))  # kfsw: D7i,A6
-            nk1 = jnp.where(NK == LTOP, KLCL_c, NK + 1)  # kfsw: D7i,C-LTOP
+        def borrow(qg, b, NK, nk1):
             tma = qg[nk1] * EMS[nk1]  # kfsw: D7i,C-LTOP
             tmb = qg[NK - 1] * EMS[NK - 1]  # kfsw: S
             tmm = (qg[NK] - _QG_FLOOR) * EMS[NK]  # kfsw: S
@@ -1728,12 +1952,33 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
             tma = tma * (1.0 - aco)
             qg = _put(qg, NK, jnp.asarray(_QG_FLOOR, dtype), b)  # kfsw: D7i
             qg = _put(qg, nk1, tma * EMSD[nk1], b)  # kfsw: D7i
-            qg = _put(qg, NK - 1, tmb * EMSD[NK - 1], b)  # kfsw: D7i
+            return _put(qg, NK - 1, tmb * EMSD[NK - 1], b)  # kfsw: D7i
+
+        def neg_body(cc, NK):
+            qg, fatal = cc
+            b = (NK <= LTOPD) & (qg[NK] < 0.0)  # kfsw: D7i
+            if sv:  # kfsw: S
+                # no borrow above every possible top (the oracle stops at LTOP)
+                pge = PGE[NK]  # kfsw: S
+                live = pge > 0.0  # kfsw: C-LTOPs
+                b = b & live
+            fatal = fatal | (b & (NK == 1))  # kfsw: D7i,A6
+            if sv:  # kfsw: S
+                # the donor above is the next level while the cloud continues,
+                # the cloud base when the top is here (probability-weighted)
+                pup = jnp.where(live, PGE[NK + 1] / jnp.where(live, pge, 1.0), 0.0)  # kfsw: C-LTOPs
+                q_up = borrow(qg, b, NK, NK + 1)
+                q_wr = borrow(qg, b, NK, KLCL_c)
+                qg = q_wr + pup * (q_up - q_wr)
+            else:
+                nk1 = jnp.where(NK == LTOP, KLCL_c, NK + 1)  # kfsw: D7i,C-LTOP
+                qg = borrow(qg, b, NK, nk1)
             return (qg, fatal)
 
         QG, fatal = _scan_levels(neg_body, (QG, c["fatal"]), 1, KX)
-        TOPOMG = (F["UDR"][LTOP] - F["UER"][LTOP]) * DP[LTOP] * EMSD[LTOP]  # kfsw: A6,C-LTOP
-        istop = jnp.abs(TOPOMG - OMG[LTOP]) > _TOPOMG_TOL  # kfsw: A6
+        # kfsw: A6,C-LTOP
+        TOPOMG = (F["UDR"][LTOPD] - F["UER"][LTOPD]) * DP[LTOPD] * EMSD[LTOPD]
+        istop = jnp.abs(TOPOMG - OMG[LTOPD]) > _TOPOMG_TOL  # kfsw: A6
         TG = jnp.where(inc, THTAG / _exner(P0, QG), T0)  # kfsw: C-LTOP
         TVG = TG * (1.0 + _TV_COEF * QG)
         stop_here = istop | sh
