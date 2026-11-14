@@ -4857,7 +4857,12 @@ def _resolve_microphysics(config):
     )
 
     scheme = config.microphysics
-    micro_fn = resolve_kernel(MICROPHYSICS_REGISTRY, scheme)
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MICROPHYSICS_PRECISION_MODULE,
+    )
+    from legoesm.core.precision import with_precision_override
+    micro_fn = with_precision_override(MICROPHYSICS_PRECISION_MODULE)(
+        resolve_kernel(MICROPHYSICS_REGISTRY, scheme))
     mc = MicrophysicsConfig(scheme=scheme)
     micro_config = getattr(mc, scheme)
     required_microphysics_tracer_slots(scheme, micro_config)

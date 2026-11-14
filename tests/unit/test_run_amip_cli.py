@@ -6339,3 +6339,39 @@ def test_sundqvist_deck_names_the_snow_refill_width():
     p.set_defaults(**load_yaml_config(path, p))
     cfg = build_config_from_args(p.parse_args([]))
     assert cfg.bechtold_snow_refill_width_kg_m2_s == 1.0e-8
+
+
+def test_land_compute_precision_flag_flows_to_config():
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.land_compute_precision == "policy"
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-compute-precision", "fp64"]), parser))
+    assert cfg_on.land_compute_precision == "fp64"
+
+
+def test_microphysics_compute_precision_flag_flows_to_config():
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.microphysics_compute_precision == "policy"
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--microphysics-compute-precision", "fp64"]), parser))
+    assert cfg_on.microphysics_compute_precision == "fp64"
+
+
+def test_fp32_land64_micro64_deck_selects_fp64_land_and_micro():
+    from pathlib import Path
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    deck = (Path(__file__).resolve().parents[2] / "config" / "amip"
+            / "amip_production_fp32_land64_micro64.yaml")
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(deck, parser))
+    args = parser.parse_args([])
+    assert args.precision == "fp32"
+    assert args.land_compute_precision == "fp64"
+    assert args.microphysics_compute_precision == "fp64"
+    assert args.use_multilayer_land is True
+    assert args.microphysics != "none"

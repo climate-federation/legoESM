@@ -1847,6 +1847,17 @@ class ExperimentConfig(NamedTuple):
 
     # Performance
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
+    # "fp64": the MPAS-lane multilayer land step runs in float64 inside a
+    # lower-precision run (inputs up-cast, outputs back to the carry/storage
+    # dtype; x64 enabled).  The two-leaf canopy solver's convergence test sits
+    # at the fp32 rounding floor: in fp32, 43% of land columns never converge.
+    # "policy": land follows ``precision``.
+    land_compute_precision: str = "policy"
+    # "fp64": every microphysics kernel runs in float64 inside a
+    # lower-precision run (inputs up-cast, tendencies back to the storage
+    # dtype; x64 enabled).  User ruling 2026-08: microphysics stays fp64.
+    # "policy": microphysics follows ``precision``.
+    microphysics_compute_precision: str = "policy"
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
 
     # Reproducibility (Stage A1).  Master RNG seed for the run: every random key
@@ -2668,6 +2679,26 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"precision must be one of {_valid_precisions}, got {self.precision!r}"
             )
+        if self.land_compute_precision not in ("policy", "fp64"):
+            errors.append(
+                "land_compute_precision must be one of ('policy', 'fp64'), "
+                f"got {self.land_compute_precision!r}")
+        elif (self.land_compute_precision == "fp64"
+              and not (self.column_loop_lane and self.use_multilayer_land)):
+            errors.append(
+                "land_compute_precision='fp64' acts only on the MPAS-lane "
+                "multilayer land step (column_loop_lane and "
+                "use_multilayer_land); this run has neither, so it would be "
+                "ignored")
+        if self.microphysics_compute_precision not in ("policy", "fp64"):
+            errors.append(
+                "microphysics_compute_precision must be one of "
+                f"('policy', 'fp64'), got {self.microphysics_compute_precision!r}")
+        elif (self.microphysics_compute_precision == "fp64"
+              and self.microphysics == "none"):
+            errors.append(
+                "microphysics_compute_precision='fp64' with microphysics="
+                "'none' would be ignored")
         _valid_distributed_modes = ("mpi", "spmd")
         if self.distributed_mode not in _valid_distributed_modes:
             errors.append(
