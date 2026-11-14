@@ -1030,7 +1030,7 @@ def nemo_orca2_k0_surface_card(
 def nemo_orca2_k0_ocean_step(
     card, state, *, s0f, ice_if, s0, s2, chl,
     geothermal_heat_flux_mwm2, prior_surface=None, model=None, sponge=None,
-    nemo_kt=None,
+    nemo_kt=None, forcing_update=None,
 ):
     """Run S0-F -> S0-M -> S1 -> S3 -> S2, then the rung-10 ocean step.
 
@@ -1039,18 +1039,34 @@ def nemo_orca2_k0_ocean_step(
     production ``step`` with forcing made by the shared literal surface path.
     The atmospheric input is the card's own pair of physical file records;
     no NEMO exchange record is accepted by this API.
+
+    ``nemo_kt`` may be a traced step counter (a loop over steps); the
+    ``nn_fsbc`` phase must then be given as a static ``forcing_update`` and the
+    damping target is stamped with that counter, so the caller must have
+    checked the targets' host stamps (as ``integrate_scan`` does).  With an
+    integer ``nemo_kt``, an explicit ``forcing_update`` must agree with it.
     """
 
     _validate_k0_ocean_card(card)
     # sbc(kstp,Nbb,Nbb) reads the live rung-10 state.  The caller owns only
     # the explicit controls/carry; it cannot shadow S0-M or S3 with stale
     # state arrays.
-    if (isinstance(nemo_kt, bool) or not isinstance(nemo_kt, (int, np.integer))
+    traced_kt = isinstance(nemo_kt, jax.core.Tracer)
+    if traced_kt:
+        if not isinstance(forcing_update, bool):
+            raise ValueError(
+                "a traced nemo_kt needs a static forcing_update=<bool>")
+    elif (isinstance(nemo_kt, bool) or not isinstance(nemo_kt, (int, np.integer))
             or nemo_kt < 1):
         raise ValueError("standalone ORCA2 requires nemo_kt=<positive step>")
     if int(s0.forcing_stride) != 2:
         raise ValueError("standalone ORCA2 K0 requires nn_fsbc=2")
-    forcing_update = (int(nemo_kt) - 1) % int(s0.forcing_stride) == 0
+    if not traced_kt:
+        phase = (int(nemo_kt) - 1) % int(s0.forcing_stride) == 0
+        if forcing_update is not None and forcing_update != phase:
+            raise ValueError(
+                f"forcing_update={forcing_update!r} disagrees with nemo_kt={nemo_kt}")
+        forcing_update = phase
     u_level = state.u if state.u_before is None else state.u_before
     v_level = state.v if state.v_before is None else state.v_before
     z_coord = card.ocean.recipe.z_coord
@@ -1070,7 +1086,7 @@ def nemo_orca2_k0_ocean_step(
         prior_surface=None if forcing_update else prior_surface,
         forcing_update=forcing_update,
     )
-    s0 = s0._replace(kt=int(nemo_kt))
+    s0 = s0._replace(kt=nemo_kt if traced_kt else int(nemo_kt))
     if forcing_update:
         state = state._replace(T=state.T.replace(data=temperature))
     if model is None:
@@ -1088,8 +1104,9 @@ def nemo_orca2_k0_ocean_step(
         "surface_forcing": surface.surface_forcing,
     }
     if sponge is not None:
-        kwargs["sponge"] = sponge
-    kwargs["nemo_kt"] = int(nemo_kt)
+        # model.step checks a traced counter's target by identity
+        kwargs["sponge"] = sponge._replace(nemo_kt=nemo_kt) if traced_kt else sponge
+    kwargs["nemo_kt"] = nemo_kt if traced_kt else int(nemo_kt)
     stepped = model.step(state, card.ocean.dt_s, **kwargs)
     state_after = stepped.state_after if hasattr(stepped, "state_after") else stepped
     next_shortwave_fraction = _nemo_orca2_k0_next_fraqsr_compiled(
