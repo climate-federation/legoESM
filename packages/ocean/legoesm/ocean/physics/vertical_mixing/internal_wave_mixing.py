@@ -55,7 +55,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.profile_metrics import safe_sqrt
+from legoesm.core.profile_metrics import safe_sqrt, safe_sqrt_nan
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.transcendentals import exp as precision_exp
 from legoesm.core.transcendentals import log10 as precision_log10
@@ -327,7 +327,9 @@ def compute_iwm_diffusivity(
 
     # --- 'nsq' / 'sho' components: N² and N weighting ----------------------
     N2_pos = jnp.maximum(N2, 0.0)
-    N_pos = jnp.sqrt(N2_pos)
+    # sqrt's derivative is infinite where N2 is clipped to 0 and poisoned every
+    # reverse-mode gradient; NaN passes through so the forward is unchanged.
+    N_pos = safe_sqrt_nan(N2_pos)
     sum_n2 = jnp.sum(dz_w * N2_pos, axis=-1, keepdims=True)   # (F90:184-186)
     sum_n = jnp.sum(dz_w * N_pos, axis=-1, keepdims=True)
     zfact3 = jnp.where(

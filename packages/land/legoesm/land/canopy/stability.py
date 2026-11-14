@@ -248,7 +248,7 @@ def _friction_velocity(zldis: jax.Array, z0m: jax.Array,
     # is finite for the negative arguments of the discarded (obu < 0) branch.
     ustar3 = constants.kappa_von_karman * um / (
         jnp.log(zldis / z0m)
-        - psi_m(zeta, _STABLE_SCHEME) + psi_m(z0m / obu, _STABLE_SCHEME))
+        - psi_m(zeta, _STABLE_SCHEME, zeta_cap_width=0.0) + psi_m(z0m / obu, _STABLE_SCHEME, zeta_cap_width=0.0))
 
     ustar = jnp.where(zeta < -zetam, ustar1,
             jnp.where(zeta < 0.0,    ustar2, ustar3))
@@ -279,7 +279,7 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
     # finite for the negative arguments of the discarded (obu < 0) branch.
     ch3 = constants.kappa_von_karman / (
         jnp.log(zldis / z0h)
-        - psi_h(zeta, _STABLE_SCHEME) + psi_h(z0h / obu, _STABLE_SCHEME))
+        - psi_h(zeta, _STABLE_SCHEME, zeta_cap_width=0.0) + psi_h(z0h / obu, _STABLE_SCHEME, zeta_cap_width=0.0))
 
     ch = jnp.where(zeta < -zetat, ch1,
          jnp.where(zeta < 0.0,    ch2, ch3))

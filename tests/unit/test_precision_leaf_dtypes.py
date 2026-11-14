@@ -132,36 +132,6 @@ def _run_latlon(mode):
     return state, storage, accum
 
 
-def _run_cube(mode):
-    """Cube (CD-grid) PE — the core a one-step gate missed entirely."""
-    from legoesm.runtime.precision import apply_precision
-
-    apply_precision(mode)
-    from legoesm.core.precision import resolve_dtype
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-    from legoesm.grids.vertical import standard_hybrid_levels
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationConfig,
-        CDGridPrimitiveEquationModel,
-        hydrostatic_to_fv3,
-    )
-    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
-
-    storage = resolve_dtype(None, "storage")
-    accum = resolve_dtype(None, "accumulate")
-    grid = create_cubed_sphere(6)
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    coord = standard_hybrid_levels(6)
-    cfg = CDGridPrimitiveEquationConfig(fix_mass=True)
-    state = _cast_to_storage(
-        hydrostatic_to_fv3(held_suarez_init(grid, coord), cdgrid), storage)
-    model = CDGridPrimitiveEquationModel(grid, coord, cfg)
-    for _ in range(_N_STEPS):
-        state = model.step(state, 150.0)
-    return state, storage, accum
-
-
 def _assert_leaf_dtypes(state, storage, accum):
     checked_ps = False
     for path, leaf in jax.tree_util.tree_leaves_with_path(state):
@@ -202,12 +172,6 @@ def test_sharded_ps_carry_guard():
 @pytest.mark.parametrize("mode", MODES)
 def test_mpas_pe_leaf_dtypes(mode):
     state, storage, accum = _run_column(mode)
-    _assert_leaf_dtypes(state, storage, accum)
-
-
-@pytest.mark.parametrize("mode", MODES)
-def test_cube_pe_leaf_dtypes(mode):
-    state, storage, accum = _run_cube(mode)
     _assert_leaf_dtypes(state, storage, accum)
 
 

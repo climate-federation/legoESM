@@ -17,6 +17,8 @@ Strategy
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -26,6 +28,8 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
+
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
@@ -489,7 +493,7 @@ def test_ncar_coefficients_match_independent_numpy_mirror():
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
         jnp.asarray(theta), jnp.asarray(q), jnp.asarray(sst),
         jnp.asarray(ssq), jnp.asarray(wind), cd_cutoff_width=0.0,
-        dthv_width=0.0, neutral_width=0.0)
+        zeta_cap_width=0.0, dthv_width=0.0, neutral_width=0.0)  # NEMO's hard switches
     assert np.allclose(np.asarray(Ub), Ub_np, rtol=0, atol=0)
     assert np.allclose(np.asarray(Cd), Cd_np, rtol=1e-12, atol=1e-15)
     assert np.allclose(np.asarray(Ch), Ch_np, rtol=1e-12, atol=1e-15)
@@ -518,7 +522,8 @@ def test_full_flux_path_matches_independent_numpy_mirror():
     out = air_sea_fluxes(
         u10=jnp.asarray(u), v10=jnp.asarray(v), T_air_K=jnp.asarray(T_air),
         q_air=jnp.asarray(q), T_sfc_K=jnp.asarray(sst),
-        slp_Pa=jnp.asarray(slp), dthv_width=0.0, neutral_width=0.0)
+        slp_Pa=jnp.asarray(slp), zeta_cap_width=0.0, dthv_width=0.0,
+        neutral_width=0.0)  # NEMO's hard switches
     names = ("tau_x", "tau_y", "sh", "lh", "evap")
     theta_sst = _np_theta_exner(sst, slp)
     l_ratio = np.asarray(latent_heat_vaporization(jnp.asarray(theta_sst))) / _np_nemo_l_vap(theta_sst)
@@ -932,6 +937,49 @@ def test_legacy_requires_q_sfc():
             T_sfc_K=jnp.asarray(281.0), algo="ly09_2coeff")
 
 
+# --- smooth |z/L| cap (RULE 5): NEMO's +-10 clip is psi's cap here -----------
+_CAP_GAP_FILE = Path(__file__).parent / "fixtures" / "omip_ncar_zeta_cap_gap.npz"
+# Air 290 K over a warmer sea, q = qs = 5 g/kg, 0.56 m/s: unstable, |z/L| from
+# below to past the cap's ramp (largest change at 293.92 K, 0.58 % in Ch;
+# scripts/tmp/probe_cap_states4.py).  Stable states never settled inside the
+# ramp over a (wind, SST) scan (probe_cap_states3.py).
+_CAP_SST = np.array([290.5, 292.0, 293.0, 293.92, 295.0, 300.0])
+
+
+def _cap_case(width):
+    n = _CAP_SST.size
+    return ncar_transfer_coefficients(
+        jnp.full(n, 290.0), jnp.full(n, 0.005), jnp.asarray(_CAP_SST),
+        jnp.full(n, 0.005), jnp.full(n, 0.56), zeta_cap_width=width)[:3]
+
+
+def _cap_gaps():
+    return {k: np.asarray(d) - np.asarray(h) for k, d, h in
+            zip(("Cd", "Ch", "Ce"), _cap_case(MOST_ZETA_CAP_WIDTH), _cap_case(0.0))}
+
+
+def test_zeta_cap_gap_per_case():
+    """KNOWN DIFFERENCE of the smooth cap vs NEMO's clip, pinned per case."""
+    stored = np.load(_CAP_GAP_FILE)
+    gaps = _cap_gaps()
+    assert sorted(gaps) == sorted(stored.files)
+    for k, g in gaps.items():
+        np.testing.assert_allclose(g, stored[k], rtol=1e-6, atol=1e-12, err_msg=k)
+    assert max(np.abs(g).max() for g in gaps.values()) > 1e-8
+
+
+def test_check_grads_zeta_cap_at_default():
+    def f(sst):
+        cd, ch, ce, _ = ncar_transfer_coefficients(
+            jnp.asarray(290.0), jnp.asarray(0.005), sst, jnp.asarray(0.005),
+            jnp.asarray(0.56))
+        return cd + ch + ce
+    s0 = jnp.asarray(_CAP_SST[np.argmax(np.abs(_cap_gaps()["Ch"]))])  # inside the ramp
+    check_grads(f, (s0,), order=2, modes=("fwd", "rev"), eps=1e-6)
+    assert float(jax.grad(f)(s0)) != 0.0
+
+
+
 # --- #2241 RULE 5: the NEMO-parity 33 m/s neutral-drag plateau -------------
 # The production OMIP path (air_sea_fluxes -> ncar_transfer_coefficients ->
 # large_yeager_neutral_cd(nemo_parity=True)) blends the LY09 polynomial into
@@ -1027,7 +1075,7 @@ def test_omip_stanton_hard_limit_matches_numpy_mirror(U):
     args = _stanton_args(U)
     ref = _np_turb_ncar(*(np.asarray(a) for a in args))
     hard = lambda *a: ncar_transfer_coefficients(  # noqa: E731
-        *a, dthv_width=0.0, neutral_width=0.0)
+        *a, dthv_width=0.0, neutral_width=0.0, zeta_cap_width=0.0)
     for got in (hard(*args), jax.jit(hard)(*args)):
         for a, b in zip(got, ref):
             np.testing.assert_allclose(np.asarray(a), b, rtol=1e-12, atol=1e-15)
@@ -1107,3 +1155,8 @@ def test_omip_stanton_widths_reach_the_fluxes(monkeypatch):
                        jnp.asarray([0.008]), jnp.asarray([290.0]),
                        dthv_width=0.03, neutral_width=0.004)
     assert (seen["dthv_width"], seen["neutral_width"]) == (0.03, 0.004)
+
+
+if __name__ == "__main__":
+    np.savez_compressed(_CAP_GAP_FILE, **_cap_gaps())
+    print("wrote", _CAP_GAP_FILE)

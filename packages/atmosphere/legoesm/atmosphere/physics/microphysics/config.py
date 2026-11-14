@@ -406,6 +406,12 @@ __param_spec__ = {
 }
 
 
+# precision-override module name of every microphysics kernel: with a
+# ``compute`` override set (ExperimentConfig.microphysics_compute_precision),
+# the kernel runs at that dtype and returns the run's storage dtype.
+MICROPHYSICS_PRECISION_MODULE = "microphysics"
+
+
 class KesslerConfig(NamedTuple):
     """Configuration for Kessler warm-rain microphysics."""
     autoconversion_threshold: float = 1.0e-3   # q_c threshold [kg/kg]

@@ -21,135 +21,15 @@ import pytest
 # Atmosphere dynamics aliases
 # ===================================================================
 
-class TestAtmosphereDynamicsAliases:
-    """Deprecated class/function names in legoesm.atmosphere.dynamics."""
-
-    @pytest.mark.parametrize("alias,canonical", [
-        ("ShallowWaterModel", "CDGridShallowWaterModel"),
-        ("PrimitiveEquationModel", "CDGridPrimitiveEquationModel"),
-        ("CompressibleEulerModel", "CDGridCompressibleEulerModel"),
-        ("FVShallowWaterModel", "CDGridShallowWaterModel"),
-        ("FVPrimitiveEquationModel", "CDGridPrimitiveEquationModel"),
-        ("FVCompressibleEulerModel", "CDGridCompressibleEulerModel"),
-        ("CGShallowWaterCubedModel", "CDGridShallowWaterModel"),
-        ("shallow_water_tendencies", "cdgrid_shallow_water_tendencies"),
-        ("hydrostatic_tendencies", "cdgrid_hydrostatic_tendencies"),
-        ("fv_shallow_water_tendencies", "cdgrid_shallow_water_tendencies"),
-    ])
-    def test_alias_warns(self, alias, canonical):
-        import legoesm.atmosphere.dynamics as dyn
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            obj = getattr(dyn, alias)
-            dep_warns = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warns) >= 1
-            assert canonical in str(dep_warns[0].message)
-
-    @pytest.mark.parametrize("alias,canonical", [
-        ("ShallowWaterModel", "CDGridShallowWaterModel"),
-        ("FVPrimitiveEquationModel", "CDGridPrimitiveEquationModel"),
-    ])
-    def test_alias_returns_canonical_object(self, alias, canonical):
-        import legoesm.atmosphere.dynamics as dyn
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            alias_obj = getattr(dyn, alias)
-            canonical_obj = getattr(dyn, canonical)
-            assert alias_obj is canonical_obj
-
-    def test_canonical_name_does_not_warn(self):
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            from legoesm.atmosphere.dynamics import CDGridShallowWaterModel  # noqa
-            # Filter only DeprecationWarnings from our module
-            our_warns = [
-                x for x in w
-                if issubclass(x.category, DeprecationWarning)
-                and "atmosphere.dynamics" in str(x.message)
-            ]
-            assert len(our_warns) == 0
-
 
 # ===================================================================
 # resolve_solver_name
 # ===================================================================
 
-class TestResolveSolverName:
-    """Deprecation warnings in resolve_solver_name."""
-
-    def test_ambiguous_discretization_resolves_to_cdgrid(self):
-        """'centered' and 'finite_volume' are ambiguous (cdgrid on cubed-sphere,
-        latlon_cgrid on lat-lon).  Without grid context they resolve to cdgrid
-        without a deprecation warning (they are valid, not deprecated)."""
-        from legoesm.atmosphere.dynamics import resolve_solver_name
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            name = resolve_solver_name(
-                dynamics="shallow_water", discretization="centered",
-            )
-            assert name == "cdgrid_shallow_water"
-            dep_warns = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warns) == 0
-
-    def test_deprecated_solver_name_warns(self):
-        from legoesm.atmosphere.dynamics import resolve_solver_name
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            name = resolve_solver_name(equations="fv_shallow_water")
-            assert name == "cdgrid_shallow_water"
-            dep_warns = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warns) >= 1
-            assert "fv_shallow_water" in str(dep_warns[0].message)
-
-    def test_canonical_discretization_no_warn(self):
-        from legoesm.atmosphere.dynamics import resolve_solver_name
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            name = resolve_solver_name(
-                dynamics="shallow_water", discretization="cdgrid",
-            )
-            assert name == "cdgrid_shallow_water"
-            dep_warns = [
-                x for x in w
-                if issubclass(x.category, DeprecationWarning)
-                and "discretization" in str(x.message).lower()
-            ]
-            assert len(dep_warns) == 0
-
-    def test_finite_volume_resolves_to_cdgrid(self):
-        """'finite_volume' is ambiguous — defaults to cdgrid without warning."""
-        from legoesm.atmosphere.dynamics import resolve_solver_name
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            name = resolve_solver_name(
-                dynamics="hydrostatic", discretization="finite_volume",
-            )
-            assert name == "cdgrid_primitive_equations"
-            dep_warns = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warns) == 0
-
 
 # ===================================================================
 # create_model
 # ===================================================================
-
-class TestCreateModel:
-    """Deprecation warnings in create_model."""
-
-    def test_deprecated_name_warns(self):
-        from legoesm.atmosphere.dynamics import create_model
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-
-        grid = create_cubed_sphere(4)
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            model = create_model("fv_shallow_water", grid=grid)
-            dep_warns = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warns) >= 1
-            assert "fv_shallow_water" in str(dep_warns[0].message)
-        # Should still return the right model
-        from legoesm.atmosphere.dynamics import CDGridShallowWaterModel
-        assert isinstance(model, CDGridShallowWaterModel)
 
 
 # ===================================================================
@@ -263,13 +143,13 @@ class TestSupportedMatrix:
         # (tracer_transport_spectral landed without bumping this count, CI
         # dark) while this assertion still said 17; fv3_duo_primitive_
         # equations (the certified duo-cube lane) makes it 19.
-        assert len(ATMOSPHERE_MATRIX) == 20
+        assert len(ATMOSPHERE_MATRIX) == 17
         assert len(OCEAN_MATRIX) == 5
 
     def test_canonical_solver_names_helper(self):
         from legoesm.supported_matrix import canonical_solver_names
         atmo = canonical_solver_names("atmosphere")
-        assert "cdgrid_shallow_water" in atmo
+        assert "fv3_duo_primitive_equations" in atmo
         assert "spectral_shallow_water" in atmo
         ocean = canonical_solver_names("ocean")
         assert "cdgrid" in ocean

@@ -40,6 +40,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
 from legoesm.core.bulk_flux import (  # noqa: E402
+    MOST_ZETA_CAP_WIDTH,
     NCAR_CD_CUTOFF_WIDTH,
     NCAR_DTHV_WIDTH,
     NCAR_NEUTRAL_WIDTH,
@@ -53,10 +54,12 @@ from legoesm import constants  # noqa: E402
 
 _FIXTURE = Path(__file__).parent / "oracle_fixtures" / "aerobulk_ncar.npz"
 _GAP_FILE = Path(__file__).parent / "oracle_fixtures" / "aerobulk_ncar_default_gap.npz"
+# |zeta| cap alone at its default (every other RULE 5 width hard).
+_CAP_GAP_FILE = Path(__file__).parent / "oracle_fixtures" / "aerobulk_ncar_zeta_cap_gap.npz"
 _RTOL = 1e-10
 # The #2241 RULE 5 widths at their hard limit (AeroBulk's switches).
 _HARD = dict(large_yeager_neutral_width=0.0, large_yeager_dthv_width=0.0,
-             large_yeager_cd_cutoff_width=0.0)
+             large_yeager_cd_cutoff_width=0.0, most_zeta_cap_width=0.0)
 _HEIGHTS = {"z10": 10.0, "z2": 2.0}
 
 
@@ -286,6 +289,40 @@ def test_2241_widths_validated(width):
         compute_most_fluxes(*x, scheme="large_yeager", large_yeager_cd_cutoff_width=33.5)
 
 
+_CAP_ONLY = _HARD | dict(most_zeta_cap_width=MOST_ZETA_CAP_WIDTH)
+# Fixture state 0 (z = 10 m): 0.03 m/s over a 2.6 K warmer sea, |z/L| inside
+# the cap's ramp; the largest cap-only change of the fixture
+# (scripts/tmp/probe_cap_states3.py).  On the stable side the solver never
+# settled inside the ramp over a (wind, SST) scan (probe_cap_states2.py).
+_CAP_STATE = 0
+
+
+def test_zeta_cap_only_gap_per_state():
+    """RULE 5 KNOWN DIFFERENCE of the smooth |zeta| cap alone (other widths
+    hard), pinned per fixture state."""
+    stored = np.load(_CAP_GAP_FILE)
+    gaps = _default_gaps(_fixture(), **_CAP_ONLY)
+    assert sorted(gaps) == sorted(stored.files)
+    for k, g in gaps.items():
+        np.testing.assert_allclose(g, stored[k], rtol=1e-6, atol=1e-12, err_msg=k)
+    hard = _default_gaps(_fixture(), **_HARD)
+    assert max(np.abs(gaps[k] - hard[k]).max() for k in gaps) > 1e-6
+
+
+def test_check_grads_zeta_cap_scheme_level_at_default():
+    """In the cap's ramp the default is smooth (C2) in the sea temperature."""
+    x = {k: v[_CAP_STATE:_CAP_STATE + 1] for k, v in _inputs(_fixture(), "z10").items()}
+
+    def f(ts, **kw):
+        out = _ours(x | {"th_s": jnp.atleast_1d(ts)}, 10.0, **kw)
+        return jnp.sum(out["taux"] + out["sen"] + out["lat"] + out["ustar"])
+    t0 = x["th_s"][0]
+    assert float(f(t0)) != float(f(t0, most_zeta_cap_width=0.0))
+    check_grads(f, (t0,), order=2, modes=("fwd", "rev"), eps=1e-6)
+    assert float(jax.grad(f)(t0)) != 0.0
+
+
 if __name__ == "__main__":
     np.savez_compressed(_GAP_FILE, **_default_gaps(_fixture()))
-    print("wrote", _GAP_FILE)
+    np.savez_compressed(_CAP_GAP_FILE, **_default_gaps(_fixture(), **_CAP_ONLY))
+    print("wrote", _GAP_FILE, _CAP_GAP_FILE)

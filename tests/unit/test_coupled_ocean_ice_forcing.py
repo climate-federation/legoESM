@@ -257,7 +257,9 @@ class TestSlabOceanUnderIce(unittest.TestCase):
         )
         cfg = SimpleOceanConfig(mode="slab")
         st0 = init_slab_state(shape, T_sfc_init=290.0)
+        from legoesm.driver.coupled_config import CoupledConfig
         stub = types.SimpleNamespace(
+            coupled_cfg=CoupledConfig(),
             _is_dynamic_ocean=False,
             _ocean_step=make_ocean(cfg),
             _ocean_state=st0,
