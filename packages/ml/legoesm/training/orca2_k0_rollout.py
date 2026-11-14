@@ -100,6 +100,16 @@ def rollout_operands(split: SplitControls) -> list:
     return [None if k == _STATIC else v for k, v in zip(split.kinds, split.values)]
 
 
+def same_static(a: SplitControls, b: SplitControls) -> bool:
+    """True if a rollout built from split ``a`` may be fed ``rollout_operands(b)``:
+    same structure, leaf kinds, start step, length and static values."""
+    def static(s):
+        return [v for k, v in zip(s.kinds, s.values) if k == _STATIC]
+
+    return (a.treedef == b.treedef and a.kinds == b.kinds and a.kt0 == b.kt0
+            and a.n_steps == b.n_steps and static(a) == static(b))
+
+
 def _controls_at(treedef, kinds, values, i):
     leaves = [v[i] if k == _STACKED else v for k, v in zip(kinds, values)]
     return jax.tree_util.tree_unflatten(treedef, leaves)
@@ -113,6 +123,11 @@ def make_k0_rollout(card, model, split: SplitControls, *,
     ``operands`` is :func:`rollout_operands` of the split (or arrays of the same
     shapes, e.g. under ``jax.grad``).  Static entries are baked in here and
     never pass through jit, so values the step needs as Python stay Python.
+
+    The rollout is BOUND to ``split``: its static values (e.g. record clocks
+    that happen to be constant over the window) and start step are fixed.
+    Feed it the operands of another window only if :func:`same_static` holds;
+    otherwise build a new rollout.  Nothing inside jit can detect the mismatch.
     """
     from legoesm.ocean import bulk_flux_omip as bulk
 

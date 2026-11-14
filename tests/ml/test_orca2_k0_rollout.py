@@ -20,6 +20,7 @@ from legoesm.training.orca2_k0_rollout import (
     carry_from_result,
     make_k0_rollout,
     rollout_operands,
+    same_static,
     split_controls,
 )
 
@@ -188,3 +189,13 @@ def test_traced_step_number_needs_a_static_phase_and_a_cleared_stamp(monkeypatch
         jax.eval_shape(lambda k: call(k, clean._replace(nemo_kt=3), True), 3)
     with pytest.raises(ValueError, match="disagrees"):
         call(3, clean._replace(nemo_kt=3), False)        # integer step 3 is a forcing step
+
+
+def test_same_static_tells_whether_a_rollout_can_be_reused():
+    a = split_controls(_controls(4, kt0=3), kt0=3)
+    b = split_controls(_controls(4, kt0=3), kt0=3)
+    assert same_static(a, b)
+    later = _controls(4, kt0=7)                         # another window: start step differs
+    assert not same_static(a, split_controls(later, kt0=7))
+    other = [dict(c, s0f=c["s0f"]._replace(stride=4)) for c in _controls(4, kt0=3)]
+    assert not same_static(a, split_controls(other, kt0=3))   # a static value differs
