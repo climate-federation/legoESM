@@ -488,12 +488,13 @@ def test_ncar_coefficients_match_independent_numpy_mirror():
     theta, q, sst, ssq, wind, _slp = _random_marine_inputs()
     Cd_np, Ch_np, Ce_np, Ub_np = _np_turb_ncar(theta, q, sst, ssq, wind)
     # The NumPy mirror is NEMO's hard 33 m/s plateau and hard stable/unstable
-    # Stanton step: compare at the hard limit (all three widths 0); the
+    # Stanton step: compare at the hard limit (all smoothing widths 0); the
     # default's gaps are pinned in the #2241 tests.
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
         jnp.asarray(theta), jnp.asarray(q), jnp.asarray(sst),
         jnp.asarray(ssq), jnp.asarray(wind), cd_cutoff_width=0.0,
-        zeta_cap_width=0.0, dthv_width=0.0, neutral_width=0.0)  # NEMO's hard switches
+        zeta_cap_width=0.0, dthv_width=0.0, neutral_width=0.0,
+        zu_floor_rel_width=0.0)  # NEMO's hard switches
     assert np.allclose(np.asarray(Ub), Ub_np, rtol=0, atol=0)
     assert np.allclose(np.asarray(Cd), Cd_np, rtol=1e-12, atol=1e-15)
     assert np.allclose(np.asarray(Ch), Ch_np, rtol=1e-12, atol=1e-15)
@@ -523,7 +524,8 @@ def test_full_flux_path_matches_independent_numpy_mirror():
         u10=jnp.asarray(u), v10=jnp.asarray(v), T_air_K=jnp.asarray(T_air),
         q_air=jnp.asarray(q), T_sfc_K=jnp.asarray(sst),
         slp_Pa=jnp.asarray(slp), zeta_cap_width=0.0, dthv_width=0.0,
-        neutral_width=0.0)  # NEMO's hard switches
+        neutral_width=0.0, cd_cutoff_width=0.0,
+        zu_floor_rel_width=0.0)  # NEMO's hard switches
     names = ("tau_x", "tau_y", "sh", "lh", "evap")
     theta_sst = _np_theta_exner(sst, slp)
     l_ratio = np.asarray(latent_heat_vaporization(jnp.asarray(theta_sst))) / _np_nemo_l_vap(theta_sst)
@@ -1075,7 +1077,8 @@ def test_omip_stanton_hard_limit_matches_numpy_mirror(U):
     args = _stanton_args(U)
     ref = _np_turb_ncar(*(np.asarray(a) for a in args))
     hard = lambda *a: ncar_transfer_coefficients(  # noqa: E731
-        *a, dthv_width=0.0, neutral_width=0.0, zeta_cap_width=0.0)
+        *a, dthv_width=0.0, neutral_width=0.0, zeta_cap_width=0.0,
+        cd_cutoff_width=0.0, zu_floor_rel_width=0.0)
     for got in (hard(*args), jax.jit(hard)(*args)):
         for a, b in zip(got, ref):
             np.testing.assert_allclose(np.asarray(a), b, rtol=1e-12, atol=1e-15)
