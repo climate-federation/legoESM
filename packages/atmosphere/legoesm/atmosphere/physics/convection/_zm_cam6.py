@@ -1251,9 +1251,14 @@ def convtran(const, mu, md, du, eu, ed, dp, jt, mx, msg):
     maxc = jnp.maximum(const_km1, const)
     cdifr = jnp.where(minc < 0.0, 0.0,
                       jnp.abs(const - const_km1) / jnp.maximum(maxc, _CONVTRAN_SMALL))
-    geo = cdifr > _LOGMEAN_TOL
     cabv = jnp.maximum(const_km1, maxc * _CHAT_FLOOR_FRAC)
     cbel = jnp.maximum(const, maxc * _CHAT_FLOOR_FRAC)
+    # Log-mean only where both floored values are positive: in float32 the
+    # floor maxc*1e-12 underflows to 0 for maxc below ~1e-26 (flush-to-zero)
+    # or 1.4e-33, and log(0/cbel)*0 is NaN; such interfaces take the
+    # arithmetic mean.  In float64 the floor cannot underflow for any
+    # maxc > 1e-296, so float64 results are unchanged.
+    geo = (cdifr > _LOGMEAN_TOL) & (cabv > 0.0) & (cbel > 0.0)
     cabv_s = jnp.where(geo, cabv, 1.0)
     cbel_s = jnp.where(geo, cbel, 2.0)
     chat = jnp.where(geo, jnp.log(cabv_s / cbel_s) / (cabv_s - cbel_s) * cabv_s * cbel_s,
