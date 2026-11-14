@@ -129,8 +129,10 @@ def _div(x, y):
 
 @_div.defjvp
 def _div_jvp(primals, tangents):
-    # d(x/y) = (dx - (x/y) dy) / y through _div again, so no order of AD forms
-    # y^-2 (which underflows to 0 for tiny y in fp32 and gives 0*inf = NaN).
+    # d(x/y) = (dx - (x/y) dy) / y through _div again, so forward-mode AD never
+    # forms y^-2 (it underflows to 0 for tiny y in fp32: 0*inf = NaN).  Measured
+    # in fp32 at y ~ 1e-20: first and second derivatives (fwd-fwd, fwd-rev,
+    # rev-rev) finite; third-order reverse is NaN (transposition divides plainly).
     x, y = primals
     dx, dy = tangents
     out = _div(x, y)

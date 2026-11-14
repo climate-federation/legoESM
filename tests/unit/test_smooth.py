@@ -165,6 +165,8 @@ def test_pnorm_smooth_min_tiny_inputs_have_finite_gradients_in_fp32():
             assert all(bool(jnp.isfinite(h)) for row in hess for h in row), (x, y, hess)
             fwd = jax.jacfwd(jax.jacfwd(f, (0, 1)), (0, 1))(x, y)
             assert all(bool(jnp.isfinite(h)) for row in fwd for h in row), (x, y, fwd)
+            rr = jax.jacrev(jax.jacrev(f, (0, 1)), (0, 1))(x, y)
+            assert all(bool(jnp.isfinite(h)) for row in rr for h in row), (x, y, rr)
         if float(a) == 0.0:          # lo = 0: exactly the min's gradient
             ga, gb = jax.grad(f, (0, 1))(a, b)
             assert (float(ga), float(gb)) == (1.0, 0.0)
