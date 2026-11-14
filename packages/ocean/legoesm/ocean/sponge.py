@@ -136,3 +136,32 @@ def compute_sponge_gamma_mpas(
     return compute_sponge_gamma(
         lat_deg, lat_south, lat_north, width_deg, timescale_days,
     )
+
+
+def deep_restoring_gamma(level_depth_m, tmask, depth_m: float, timescale_s: float) -> np.ndarray:
+    """Full-rank rate [1/s] restoring the deep ocean only: ``1/timescale_s`` on wet
+    cells of every level whose reference centre depth exceeds ``depth_m``, 0 above.
+
+    The edge is sharp: the first level centred below ``depth_m`` gets the full
+    rate. ``level_depth_m`` has one entry per level (the last axis of ``tmask``).
+    """
+    level_depth_m = np.asarray(level_depth_m, dtype=np.float64)
+    wet = np.asarray(tmask) > 0
+    if level_depth_m.shape != wet.shape[-1:]:
+        raise ValueError(
+            f"{level_depth_m.shape[0]} level depths for {wet.shape[-1]} levels")
+    if not (depth_m > 0.0 and timescale_s > 0.0):
+        raise ValueError("depth_m and timescale_s must be positive")
+    return np.where(wet & (level_depth_m > depth_m), 1.0 / timescale_s, 0.0)
+
+
+def with_deep_restoring(sponge: SpongeForcing, deep_gamma) -> SpongeForcing:
+    """``sponge`` with the stronger of its own rate and ``deep_gamma`` at every
+    cell (a full-rank rate; tracer relaxation only, as for any full-rank gamma)."""
+    gamma = jnp.asarray(sponge.gamma)
+    if gamma.shape != np.shape(deep_gamma):
+        raise ValueError(
+            f"deep restoring needs a full-rank sponge rate: {gamma.shape} vs "
+            f"{np.shape(deep_gamma)}")
+    return sponge._replace(
+        gamma=jnp.maximum(gamma, jnp.asarray(deep_gamma, dtype=gamma.dtype)))

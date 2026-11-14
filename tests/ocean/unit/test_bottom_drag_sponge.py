@@ -253,3 +253,56 @@ class TestSharedSpongeKernel:
             g1d[:, None], (grid.n_lat, grid.n_lon)))
 
 
+
+
+class TestDeepRestoring:
+    """Deep-only restoring: sharp edge at a depth, combined by the stronger rate."""
+
+    DEPTHS = np.array([10.0, 742.0, 1042.0, 1412.0])  # level centres [m]
+
+    def _tmask(self):
+        tmask = np.ones((2, 3, 4))
+        tmask[0, 0, 3] = 0.0  # a dry deep cell
+        return tmask
+
+    def test_rate_is_full_below_the_edge_zero_above_and_on_land(self):
+        from legoesm.ocean.sponge import deep_restoring_gamma
+
+        tau = 5 * 365 * 86400.0
+        g = deep_restoring_gamma(self.DEPTHS, self._tmask(), 1000.0, tau)
+        assert np.all(g[..., :2] == 0.0)
+        assert g[1, 2, 2] == 1.0 / tau and g[1, 2, 3] == 1.0 / tau
+        assert g[0, 0, 3] == 0.0
+
+    def test_level_count_and_signs_are_checked(self):
+        from legoesm.ocean.sponge import deep_restoring_gamma
+
+        with pytest.raises(ValueError, match="level depths"):
+            deep_restoring_gamma(self.DEPTHS[:3], self._tmask(), 1000.0, 1.0)
+        with pytest.raises(ValueError, match="positive"):
+            deep_restoring_gamma(self.DEPTHS, self._tmask(), 1000.0, 0.0)
+
+    def test_combination_keeps_the_stronger_rate(self):
+        from legoesm.ocean.sponge import deep_restoring_gamma, with_deep_restoring
+
+        tau = 5 * 365 * 86400.0
+        regional = np.zeros((2, 3, 4))
+        regional[1, 1, :] = 1.0 / 86400.0      # a strong shallow-to-deep regional damping
+        regional[0, 1, 3] = 0.1 / tau           # weaker than the deep rate
+        sponge = SpongeForcing(gamma=jnp.asarray(regional), T_ref=jnp.zeros((2, 3, 4)),
+                               S_ref=jnp.zeros((2, 3, 4)), nemo_kt=7)
+        out = with_deep_restoring(
+            sponge, deep_restoring_gamma(self.DEPTHS, self._tmask(), 1000.0, tau))
+        g = np.asarray(out.gamma)
+        assert np.all(g[1, 1, :] == 1.0 / 86400.0)   # regional wins where stronger
+        assert g[0, 1, 3] == 1.0 / tau                # deep wins where stronger
+        assert g[0, 2, 1] == 0.0                      # neither: untouched
+        assert out.nemo_kt == 7 and out.T_ref is sponge.T_ref
+
+    def test_horizontal_sponge_is_refused(self):
+        from legoesm.ocean.sponge import with_deep_restoring
+
+        sponge = SpongeForcing(gamma=jnp.zeros((2, 3)), T_ref=jnp.zeros((2, 3, 4)),
+                               S_ref=jnp.zeros((2, 3, 4)))
+        with pytest.raises(ValueError, match="full-rank"):
+            with_deep_restoring(sponge, np.zeros((2, 3, 4)))
