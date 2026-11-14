@@ -30,6 +30,15 @@ S2_CARRY = ("prior_runoff_mass", "prior_runoff_temperature_content",
             "prior_restoring_heat_flux", "prior_restoring_coefficient")
 
 
+class SplitControls(NamedTuple):
+    """Per-step controls of steps kt0 .. kt0 + n_steps - 1, split for the loop."""
+    treedef: Any
+    kinds: tuple
+    values: list
+    kt0: int
+    n_steps: int
+
+
 class K0Carry(NamedTuple):
     """What one K0 step hands the next besides its controls."""
     state: Any
@@ -50,8 +59,8 @@ def _is_array(x) -> bool:
     return isinstance(x, (np.ndarray, jax.Array))
 
 
-def split_controls(controls, kt0: int):
-    """``(treedef, kinds, values)`` for per-step controls of steps kt0, kt0+1, ...
+def split_controls(controls, kt0: int) -> SplitControls:
+    """Split per-step controls of steps kt0, kt0+1, ... for :func:`make_k0_rollout`.
 
     ``values[j]`` is the Python value (static), the single array (shared) or
     the stacked array (stacked) for leaf ``j``.  Raises on a stale damping
@@ -83,7 +92,12 @@ def split_controls(controls, kt0: int):
         else:
             kinds.append(_STACKED)
             values.append(jnp.stack([jnp.asarray(v) for v in leaves]))
-    return treedef, tuple(kinds), values
+    return SplitControls(treedef, tuple(kinds), values, kt0, len(clean))
+
+
+def rollout_operands(split: SplitControls) -> list:
+    """The array operands of a split (static positions are None, baked into the loop)."""
+    return [None if k == _STATIC else v for k, v in zip(split.kinds, split.values)]
 
 
 def _controls_at(treedef, kinds, values, i):
@@ -91,17 +105,23 @@ def _controls_at(treedef, kinds, values, i):
     return jax.tree_util.tree_unflatten(treedef, leaves)
 
 
-def make_k0_rollout(card, model, n_pairs: int, kt0: int, treedef, kinds, *,
+def make_k0_rollout(card, model, split: SplitControls, *,
                     schedule: str = "uniform", checkpoints: int | None = None):
-    """``(carry, values) -> carry`` after ``2 * n_pairs`` K0 steps from odd ``kt0``.
+    """``(carry, operands) -> carry`` after all ``split.n_steps`` K0 steps from
+    ``split.kt0``, one pair per iteration.
 
-    ``values`` are the array operands from :func:`split_controls` (static
-    entries are baked in from ``kinds``/``treedef`` at construction).
+    ``operands`` is :func:`rollout_operands` of the split (or arrays of the same
+    shapes, e.g. under ``jax.grad``).  Static entries are baked in here and
+    never pass through jit, so values the step needs as Python stay Python.
     """
     from legoesm.ocean import bulk_flux_omip as bulk
 
+    treedef, kinds, kt0, n_steps = split.treedef, split.kinds, split.kt0, split.n_steps
     if kt0 < 1 or kt0 % 2 != 1:
         raise ValueError(f"a pair starts on a forcing-update (odd) step, got kt0={kt0}")
+    if n_steps < 2 or n_steps % 2:
+        raise ValueError(f"the loop runs whole pairs; got {n_steps} steps")
+    n_pairs = n_steps // 2
 
     def one_step(carry: K0Carry, ctrl, kt, forcing_update, prior_surface):
         s0 = ctrl["s0_base"]._replace(prior=carry.s0_prior,
@@ -114,7 +134,14 @@ def make_k0_rollout(card, model, n_pairs: int, kt0: int, treedef, kinds, *,
             prior_surface=prior_surface, sponge=ctrl["sponge"])
         return carry_from_result(res), res.surface
 
-    def rollout(carry: K0Carry, values):
+    static_values = split.values
+
+    def rollout(carry: K0Carry, operands):
+        values = [static_values[j] if k == _STATIC else operands[j] for j, k in enumerate(kinds)]
+        lengths = {np.shape(v)[0] for k, v in zip(kinds, values) if k == _STACKED}
+        if lengths - {n_steps}:
+            raise ValueError(f"stacked controls have {sorted(lengths)} steps, expected {n_steps}")
+
         def body(c):
             p, carry = c
             i = 2 * p

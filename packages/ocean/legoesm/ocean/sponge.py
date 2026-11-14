@@ -147,12 +147,17 @@ def deep_restoring_gamma(level_depth_m, tmask, depth_m: float, timescale_s: floa
     """
     level_depth_m = np.asarray(level_depth_m, dtype=np.float64)
     wet = np.asarray(tmask) > 0
-    if level_depth_m.shape != wet.shape[-1:]:
+    if level_depth_m.ndim != 1 or level_depth_m.shape != wet.shape[-1:]:
         raise ValueError(
-            f"{level_depth_m.shape[0]} level depths for {wet.shape[-1]} levels")
+            f"level depths of shape {level_depth_m.shape} for {wet.shape[-1]} levels")
+    if not (np.all(level_depth_m > 0.0) and np.all(np.diff(level_depth_m) > 0.0)):
+        raise ValueError("level depths must be positive and increase downward (z-down, m)")
     if not (depth_m > 0.0 and timescale_s > 0.0):
         raise ValueError("depth_m and timescale_s must be positive")
-    return np.where(wet & (level_depth_m > depth_m), 1.0 / timescale_s, 0.0)
+    restored = wet & (level_depth_m > depth_m)
+    if not restored.any():
+        raise ValueError(f"no wet cell is centred below {depth_m} m: nothing would be restored")
+    return np.where(restored, 1.0 / timescale_s, 0.0)
 
 
 def with_deep_restoring(sponge: SpongeForcing, deep_gamma) -> SpongeForcing:

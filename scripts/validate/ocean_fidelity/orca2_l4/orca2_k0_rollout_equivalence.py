@@ -86,7 +86,8 @@ def max_diffs(a, b) -> dict:
 
 def main(argv=None) -> int:
     from legoesm.ocean.fidelity.provenance import worktree_stamp
-    from legoesm.training.orca2_k0_rollout import carry_from_result, make_k0_rollout, split_controls
+    from legoesm.training.orca2_k0_rollout import (
+        carry_from_result, make_k0_rollout, rollout_operands, split_controls)
 
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--card", choices=("normal", "exact"), required=True)
@@ -102,9 +103,9 @@ def main(argv=None) -> int:
     card, model, controls = build(args.card, args.steps)
     ref = eager(card, model, controls, card.ocean.recipe.initial_state)
     start = carry_from_result(ref[1])                       # after kt = 2
-    treedef, kinds, values = split_controls(controls[2:], kt0=3)
-    rollout = make_k0_rollout(card, model, (args.steps - 2) // 2, 3, treedef, kinds,
-                              schedule=args.schedule)
+    split = split_controls(controls[2:], kt0=3)
+    kinds, values = split.kinds, rollout_operands(split)
+    rollout = make_k0_rollout(card, model, split, schedule=args.schedule)
     looped = jax.jit(rollout)(start, values)
     final = carry_from_result(ref[-1])
     diffs = max_diffs(final, looped)

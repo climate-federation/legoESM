@@ -281,6 +281,20 @@ class TestDeepRestoring:
             deep_restoring_gamma(self.DEPTHS[:3], self._tmask(), 1000.0, 1.0)
         with pytest.raises(ValueError, match="positive"):
             deep_restoring_gamma(self.DEPTHS, self._tmask(), 1000.0, 0.0)
+        with pytest.raises(ValueError, match="level depths of shape"):
+            deep_restoring_gamma(1000.0, self._tmask(), 1000.0, 1.0)
+        # legoESM's z-up reference centres are negative: refused, not silently all-zero
+        with pytest.raises(ValueError, match="increase downward"):
+            deep_restoring_gamma(-self.DEPTHS, self._tmask(), 1000.0, 1.0)
+        with pytest.raises(ValueError, match="nothing would be restored"):
+            deep_restoring_gamma(self.DEPTHS, self._tmask(), 5000.0, 1.0)
+
+    def test_edge_is_strict(self):
+        from legoesm.ocean.sponge import deep_restoring_gamma
+
+        depths = np.array([10.0, 500.0, 1000.0, 1412.0])  # a level centred exactly at the edge
+        g = deep_restoring_gamma(depths, np.ones((1, 1, 4)), 1000.0, 1.0)
+        assert g[0, 0, 2] == 0.0 and g[0, 0, 3] == 1.0
 
     def test_combination_keeps_the_stronger_rate(self):
         from legoesm.ocean.sponge import deep_restoring_gamma, with_deep_restoring

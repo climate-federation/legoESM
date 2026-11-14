@@ -1056,6 +1056,12 @@ def nemo_orca2_k0_ocean_step(
         if not isinstance(forcing_update, bool):
             raise ValueError(
                 "a traced nemo_kt needs a static forcing_update=<bool>")
+        if sponge is not None and sponge.nemo_kt is not None:
+            # the loop re-stamps the target below; only a target whose host
+            # stamp was already checked and cleared may be re-stamped
+            raise ValueError(
+                "a traced nemo_kt needs damping targets with nemo_kt=None "
+                "(host stamps checked and cleared, e.g. by split_controls)")
     elif (isinstance(nemo_kt, bool) or not isinstance(nemo_kt, (int, np.integer))
             or nemo_kt < 1):
         raise ValueError("standalone ORCA2 requires nemo_kt=<positive step>")
