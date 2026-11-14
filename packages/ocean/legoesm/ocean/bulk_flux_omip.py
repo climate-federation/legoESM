@@ -81,6 +81,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.core import transcendentals as tx
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
 from legoesm.core.precision import get_policy
 from legoesm.core.smooth import positive_part_c1
 from legoesm.core.source_rounding import (
@@ -551,13 +552,21 @@ def nemo_zu_air_state(theta_air_K, q_air, *,
 def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
                                wind_speed, *, nb_iter: int = _NB_ITER_NCAR,
                                zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH,
+                               zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
                                cd_cutoff_width: float | None = None):
     """Legacy/public coefficient interface.
 
     The first-guess stability uses the RAW ``theta``/``q`` (NEMO ``t_zt``/
     ``q_zt``); the iteration uses the floored :func:`nemo_zu_air_state`.
     ``cd_cutoff_width`` (None = ``NCAR_CD_CUTOFF_WIDTH``, 0 = NEMO's hard
-    switch): RULE 5 width of the 33 m/s drag-plateau blend (#2241)."""
+    switch): RULE 5 width of the 33 m/s drag-plateau blend (#2241).
+
+    NEMO clips zeta to +-10 before psi; here that clip is psi's smooth |zeta|
+    cap (``zeta_cap_width``; 0 = NEMO's hard clip).  KNOWN DIFFERENCE
+    (RULE 5, user-approved), measured: near-calm unstable states (0.56 m/s
+    over a 2-4 K warmer sea) change by up to 0.58 % in Ch; the stable states
+    of a (wind, SST) scan never settle inside the cap's ramp (per-case gaps:
+    tests/ocean/unit/fixtures/omip_ncar_zeta_cap_gap.npz)."""
     from legoesm.core.bulk_flux import large_yeager_neutral_cd, psi_m, psi_h
 
     k = constants.kappa_von_karman
@@ -585,8 +594,8 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
         inv_L = _one_on_obukhov(
             theta_zu, q_zu, u_star, theta_star, q_star
         )
-        zeta = jnp.clip(_ZU_M * inv_L, -_ZETA_ABS_MAX, _ZETA_ABS_MAX)
-        psim = psi_m(zeta)
+        zeta = _ZU_M * inv_L
+        psim = psi_m(zeta, zeta_cap_width=zeta_cap_width)
         UN10 = jnp.maximum(
             _UN10_FLOOR_M_S, Ub * (1.0 + sqrt_Cd / k * psim)
         )
@@ -596,7 +605,7 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
         denom = 1.0 - sqrt_CdN / k * psim
         Cd = jnp.maximum(CdN / (denom * denom), _CX_MIN)
         sqrt_Cd = jnp.sqrt(Cd)
-        zh = -psi_h(zeta) / k / sqrt_CdN
+        zh = -psi_h(zeta, zeta_cap_width=zeta_cap_width) / k / sqrt_CdN
         ratio = sqrt_Cd / sqrt_CdN
         stable = jnp.where(zeta > 0.0, 1.0, 0.0)
         ChN = _ch_n10(sqrt_CdN, stable)
@@ -1643,6 +1652,7 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
                    nb_iter: int = _NB_ITER_NCAR, L_latent=None,
                    u_oce=None, v_oce=None, vfac: float = 0.0,
                    zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH,
+                   zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
                    cd_cutoff_width: float | None = None):
     """Open-ocean bulk fluxes ``(tau_x, tau_y, shflx, lhflx, evap)``.
 
@@ -1751,7 +1761,8 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     theta_sst = exner_potential_temperature(sst, slp_for_sst)
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
         theta_air, q_a, theta_sst, ssq, wind_speed, nb_iter=nb_iter,
-        zu_floor_rel_width=zu_floor_rel_width, cd_cutoff_width=cd_cutoff_width,
+        zu_floor_rel_width=zu_floor_rel_width, zeta_cap_width=zeta_cap_width,
+        cd_cutoff_width=cd_cutoff_width,
     )
     rho = rho_air_moist(T_air, q_a, p10) if rho_air is None else jnp.asarray(
         rho_air, dtype=jnp.float64)

@@ -41,8 +41,7 @@ from legoesm.forcing.surface_utils import (
     blend_surface_temperature,
     blended_surface_albedo,
 )
-from legoesm.core.bulk_flux import (LARGE_YEAGER_WIDTH_DEFAULTS, NCAR_CD_CUTOFF_WIDTH,
-                                    NCAR_DTHV_WIDTH, NCAR_NEUTRAL_WIDTH)
+from legoesm.core.bulk_flux import SURFACE_FLUX_WIDTH_DEFAULTS
 from legoesm.core.grid_adapters import SingleColumnGrid, make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
@@ -5005,18 +5004,25 @@ def apply_surface_flux_config(tc, config):
     gzi = getattr(config, "surface_gustiness_zi", None)
     stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
+    sus = getattr(config, "surface_unstable_scheme", "native")
     zml = getattr(config, "surface_z_ref_model_level", None)
-    # Large-Yeager smooth-switch widths (#2241): only values that differ from
-    # the shared default are injected, so a default run keeps the fast path.
+    # RULE 5 surface-flux widths (Large-Yeager #2241, zeta cap, GFS join): only
+    # values that differ from the shared default are injected, so a default run
+    # keeps the fast path.
+    wd = SURFACE_FLUX_WIDTH_DEFAULTS
     lyw = {
         "large_yeager_neutral_width": getattr(
-            config, "surface_large_yeager_neutral_width", NCAR_NEUTRAL_WIDTH),
+            config, "surface_large_yeager_neutral_width", wd["large_yeager_neutral_width"]),
         "large_yeager_dthv_width": getattr(
-            config, "surface_large_yeager_dthv_width", NCAR_DTHV_WIDTH),
+            config, "surface_large_yeager_dthv_width", wd["large_yeager_dthv_width"]),
         "large_yeager_cd_cutoff_width": getattr(
-            config, "surface_large_yeager_cd_cutoff_width", NCAR_CD_CUTOFF_WIDTH),
+            config, "surface_large_yeager_cd_cutoff_width", wd["large_yeager_cd_cutoff_width"]),
+        "most_zeta_cap_width": getattr(
+            config, "surface_most_zeta_cap_width", wd["most_zeta_cap_width"]),
+        "gfs_unstable_join_width": getattr(
+            config, "surface_gfs_unstable_join_width", wd["gfs_unstable_join_width"]),
     }
-    lyw = {k: v for k, v in lyw.items() if v != LARGE_YEAGER_WIDTH_DEFAULTS[k]}
+    lyw = {k: v for k, v in lyw.items() if v != SURFACE_FLUX_WIDTH_DEFAULTS[k]}
 
     _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
     # None = "on wherever the lane can honour it".  CAPABILITY, not grid: the
@@ -5044,7 +5050,8 @@ def apply_surface_flux_config(tc, config):
             "mosaic surface); this run has neither. Grid is "
             f"{getattr(getattr(config, 'grid', None), 'grid_type', '?')!r}")
     if (sbs == "constant" and gzi is None and stc == "legoesm"
-            and sss == "dyer1974" and zml is None and _qsal_req is None
+            and sss == "dyer1974" and sus == "native" and zml is None
+            and _qsal_req is None
             and not qsal and not lyw):
         # The two surface switches gate this fast path on whether they have
         # anything to SAY, not on whether they are true:
@@ -5106,6 +5113,9 @@ def apply_surface_flux_config(tc, config):
         # driven by the one --surface-stability-scheme flag) so the
         # interface cannot split Dyer-vs-SHEBA across its two sides.
         surf = surf._replace(stability_scheme=sss)
+    if sus != "native":
+        # Unstable-regime MOST form, same single flag for both interface sides.
+        surf = surf._replace(unstable_scheme=sus)
     if lyw:
         surf = surf._replace(**lyw)
     return tc._replace(**{tc.scheme: sub._replace(surface=surf)})

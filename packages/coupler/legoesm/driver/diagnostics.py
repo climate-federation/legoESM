@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm.core.bulk_flux import GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH
 from legoesm.diagnostics.cloud_overlap import maximum_random_overlap
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import (
@@ -299,6 +300,9 @@ class DiagnosticCollector:
         vcoord=None,
         surface_stability_scheme: str = "dyer1974",
         surface_bulk_scheme: str = "constant",
+        surface_unstable_scheme: str = "native",
+        surface_most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
+        surface_gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH,
         clubb_config=None,
         cmip_drs_tree: bool = False,
         cmip_institution_id: str = "CU",
@@ -317,6 +321,9 @@ class DiagnosticCollector:
         # similarity profile, so it keeps the historical coare3 profile —
         # which also keeps the default byte-identical.
         self.surface_stability_scheme = surface_stability_scheme
+        self.surface_unstable_scheme = surface_unstable_scheme
+        self.surface_most_zeta_cap_width = surface_most_zeta_cap_width
+        self.surface_gfs_unstable_join_width = surface_gfs_unstable_join_width
         # surface_bulk_scheme="none": no surface layer exists, so the 2 m
         # temperature (and its daily extremes) is not produced at all rather
         # than published from a profile of an exchange that never happens.
@@ -878,7 +885,7 @@ class DiagnosticCollector:
                 *_, T_2m = compute_sam_oceflx_fluxes(
                     u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
                     z_bot=10.0, variant="cesm", return_2m=True,
-                    t_bot=T_low,
+                    t_bot=T_low, zeta_cap_width=self.surface_most_zeta_cap_width,
                 )
                 return T_2m
             *_, T_2m = compute_most_fluxes(
@@ -888,6 +895,9 @@ class DiagnosticCollector:
                         else "large_yeager"),
                 return_2m=True,
                 stability_scheme=self.surface_stability_scheme,
+                unstable_scheme=self.surface_unstable_scheme,
+                most_zeta_cap_width=self.surface_most_zeta_cap_width,
+                gfs_unstable_join_width=self.surface_gfs_unstable_join_width,
             )
             return T_2m
 

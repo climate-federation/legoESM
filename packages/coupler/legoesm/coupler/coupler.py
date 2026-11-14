@@ -17,7 +17,7 @@ from legoesm import constants
 from legoesm.core.precision import get_policy
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes, compute_most_fluxes, compute_sam_oceflx_fluxes,
-    large_yeager_widths,
+    surface_flux_widths,
     surface_reference_state,
     apply_gustiness,
     ocean_surface_q_sat,
@@ -499,6 +499,7 @@ def ocean_tile_response(
             forcing.u_lowest - ocean_u, forcing.v_lowest - ocean_v,
             T_air, forcing.q_lowest, ocean_sst, q_sfc, rho,
             z_bot=z_air, variant="cesm", t_bot=forcing.T_lowest,
+            zeta_cap_width=config.most_zeta_cap_width,
         )
     elif _is_most:
         # Use wind relative to ocean surface current
@@ -522,7 +523,8 @@ def ocean_tile_response(
             gustiness_w_zi=config.gustiness_w_zi,
             thermo_convention=_thermo_conv,
             stability_scheme=config.stability_scheme,
-            **large_yeager_widths(config),
+            unstable_scheme=config.unstable_scheme,
+            **surface_flux_widths(config),
         )
     else:
         # Constant neutral coefficients (original behavior).  Sub-grid

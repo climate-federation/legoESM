@@ -56,11 +56,11 @@ def _port(fx, **kw):
         jnp.asarray(fx["tair"]), q, slp)
     Cd, Ch, Ce, _ = bf.ncar_transfer_coefficients(
         theta_air, q, bf.exner_potential_temperature(T_sfc, slp), ssq,
-        jnp.asarray(fx["wndm"]), **kw)
+        jnp.asarray(fx["wndm"]), zeta_cap_width=0.0, **kw)  # NEMO's hard clip
     _, _, sh, _, ev = bf.air_sea_fluxes(
         jnp.asarray(fx["wndi"]), jnp.asarray(fx["wndj"]),
         jnp.asarray(fx["tair"]), q, T_sfc, rho_air=jnp.asarray(fx["rhoa"]),
-        slp_Pa=slp, **kw)
+        slp_Pa=slp, zeta_cap_width=0.0, **kw)
     return dict(Cd=Cd, Ch=Ch, Ce=Ce, psen=sh, pevp=ev,
                 theta_air_zt=theta_air, zpre_zt=p10)
 

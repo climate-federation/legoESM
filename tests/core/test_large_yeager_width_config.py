@@ -18,8 +18,9 @@ import pytest
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.surface_layer import compute_surface_fluxes
 from legoesm.core.bulk_flux import (LARGE_YEAGER_WIDTH_DEFAULTS, NCAR_CD_CUTOFF_WIDTH,
+                                    SURFACE_FLUX_WIDTH_DEFAULTS,
                                     NCAR_DTHV_WIDTH, NCAR_NEUTRAL_WIDTH,
-                                    compute_most_fluxes, large_yeager_widths)
+                                    compute_most_fluxes, surface_flux_widths)
 from legoesm.coupler.config import CouplerConfig
 from legoesm.coupler.lake.config import LakeConfig
 from legoesm.ice.config import SeaIceConfig
@@ -32,7 +33,7 @@ jax.config.update("jax_enable_x64", True)
 ROOT = Path(__file__).resolve().parents[2]
 CONFIGS = (SurfaceLayerConfig, CouplerConfig, LakeConfig, SeaIceConfig, LandConfig,
            MultiLayerLandConfig, BulkFormulaConfig, SimpleOceanConfig)
-_HARD = dict.fromkeys(LARGE_YEAGER_WIDTH_DEFAULTS, 0.0)
+_HARD = dict.fromkeys(SURFACE_FLUX_WIDTH_DEFAULTS, 0.0)
 # The 2 m temperature diagnostic takes its scheme from a diagnostics argument,
 # not a component config; threading it is an open question on #2241.
 _UNTHREADED = {"packages/coupler/legoesm/driver/diagnostics.py"}
@@ -48,15 +49,18 @@ def test_defaults_are_the_shared_constants():
 
 @pytest.mark.parametrize("cls", CONFIGS, ids=lambda c: c.__name__)
 def test_every_bulk_config_carries_the_widths(cls):
-    assert large_yeager_widths(cls()) == LARGE_YEAGER_WIDTH_DEFAULTS
-    cfg = cls()._replace(**_HARD)
-    assert large_yeager_widths(cfg) == _HARD
+    # the GFS join width only on configs that can select unstable_scheme
+    keys = [k for k in SURFACE_FLUX_WIDTH_DEFAULTS
+            if k != "gfs_unstable_join_width" or "unstable_scheme" in cls._fields]
+    assert surface_flux_widths(cls()) == {k: SURFACE_FLUX_WIDTH_DEFAULTS[k] for k in keys}
+    hard = {k: 0.0 for k in keys}
+    assert surface_flux_widths(cls()._replace(**hard)) == hard
 
 
 def test_experiment_config_mirrors_the_widths():
     from legoesm.driver.config import ExperimentConfig
     cfg = ExperimentConfig()
-    for k, d in LARGE_YEAGER_WIDTH_DEFAULTS.items():
+    for k, d in SURFACE_FLUX_WIDTH_DEFAULTS.items():
         assert getattr(cfg, "surface_" + k) == d
 
 
@@ -70,7 +74,7 @@ def _calls_compute_most_fluxes(tree):
 
 def test_every_package_call_site_passes_the_config_widths():
     """Each ``compute_most_fluxes(...)`` call under ``packages/`` carries
-    ``**large_yeager_widths(<config>)`` (except the recorded diagnostic)."""
+    ``**surface_flux_widths(<config>)`` (except the recorded diagnostic)."""
     files = [p for p in (ROOT / "packages").rglob("*.py")
              if "compute_most_fluxes(" in p.read_text()]
     seen, missing = 0, []
@@ -79,7 +83,7 @@ def test_every_package_call_site_passes_the_config_widths():
         for call in _calls_compute_most_fluxes(ast.parse(p.read_text())):
             seen += 1
             ok = any(kw.arg is None and isinstance(kw.value, ast.Call)
-                     and getattr(kw.value.func, "id", None) == "large_yeager_widths"
+                     and getattr(kw.value.func, "id", None) == "surface_flux_widths"
                      for kw in call.keywords)
             if not ok and rel not in _UNTHREADED:
                 missing.append(f"{rel}:{call.lineno}")
@@ -128,10 +132,10 @@ def test_experiment_widths_reach_the_surface_layer_config():
                             discretization="finite_volume"),
         radiation="gray", turbulence="louis", surface_bulk_scheme="large_yeager")
     surf = turbulence_config_for(base).louis.surface
-    assert large_yeager_widths(surf) == LARGE_YEAGER_WIDTH_DEFAULTS
+    assert surface_flux_widths(surf) == SURFACE_FLUX_WIDTH_DEFAULTS
     cfg = base._replace(**{"surface_" + k: v for k, v in _HARD.items()})
-    assert large_yeager_widths(turbulence_config_for(cfg).louis.surface) == _HARD
+    assert surface_flux_widths(turbulence_config_for(cfg).louis.surface) == _HARD
     # one width alone: only it moves, the other two keep the default
     one = base._replace(surface_large_yeager_dthv_width=0.0)
-    got = large_yeager_widths(turbulence_config_for(one).louis.surface)
-    assert got == {**LARGE_YEAGER_WIDTH_DEFAULTS, "large_yeager_dthv_width": 0.0}
+    got = surface_flux_widths(turbulence_config_for(one).louis.surface)
+    assert got == {**SURFACE_FLUX_WIDTH_DEFAULTS, "large_yeager_dthv_width": 0.0}

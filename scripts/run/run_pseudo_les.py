@@ -43,6 +43,7 @@ import jax.numpy as jnp  # noqa: E402
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pip  # noqa: E402
 from legoesm.atmosphere.dynamics.les.spectral_les_plane import most_surface_flux  # noqa: E402
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH  # noqa: E402
 
 # --- dry-ABL cases -----------------------------------------------------------
 # theta0 [K], Ug [m/s], fcor [1/s], z0 [m], Lz [m], cooling_rate [K/hr],
@@ -57,7 +58,8 @@ _CASES = {
                   surface="flux", nu_floor=0.0, dt=0.4, hours=1.0),
     "gabls1": dict(theta0=265.0, Ug=8.0, fcor=1.39e-4, z0=0.1, Lz=400.0,
                    cooling_rate=0.25, Q0=0.0, zi=100.0, gamma=0.01,
-                   surface="most_cooling", nu_floor=0.05, dt=0.2, hours=1.0),
+                   surface="most_cooling", nu_floor=0.05, dt=0.2, hours=1.0,
+                   most_zeta_cap_width=MOST_ZETA_CAP_WIDTH),
     "wangara": dict(theta0=290.0, Ug=5.0, fcor=1.0e-4, z0=0.1, Lz=1500.0,
                     cooling_rate=0.0, Q0=0.06, zi=200.0, gamma=0.003,
                     surface="flux", nu_floor=0.0, dt=0.4, hours=1.0),
@@ -79,6 +81,10 @@ def build(case, args, dtype):
     if getattr(args, "dt", None) is not None:
         c["dt"] = args.dt
     nx, ny, nz = args.nx, args.ny, args.nz
+    cap_w = getattr(args, "most_zeta_cap_width", None)
+    if cap_w is None:
+        cap_w = c.get("most_zeta_cap_width")
+    cap_kw = {} if cap_w is None else {"most_zeta_cap_width": cap_w}
     cfg = pip.PseudoIncompressibleConfig(
         nx=nx, ny=ny, nz=nz, Lx=args.Lx, Ly=args.Lx, Lz=c["Lz"],
         theta_ref0=c["theta0"], scheme=getattr(args, "scheme", "weno5"),
@@ -92,7 +98,7 @@ def build(case, args, dtype):
         momentum_shapiro_order=getattr(args, "momentum_shapiro_order", 1),
         f_cor=c["fcor"], ug=c["Ug"], vg=0.0,
         surface=c["surface"], z0=c["z0"], sfc_theta_flux=c["Q0"],
-        poisson_maxiter=args.maxiter)
+        poisson_maxiter=args.maxiter, **cap_kw)
     g = pip.make_grid(cfg, dtype=dtype)
     z = g.z_c
     sh = (ny, nx, nz)
@@ -133,7 +139,7 @@ def diagnose(st, g, cfg, t_sfc_final=None):
         # (neutral drag over-reads under the stable GABLS1 surface layer).
         ustar_wall = float(most_surface_flux(
             spd1, float(thm[0]), float(t_sfc_final), float(z[0]), cfg.z0,
-            cfg.theta_ref0)[0])
+            cfg.theta_ref0, zeta_cap_width=cfg.most_zeta_cap_width)[0])
     else:
         # neutral drag law Cd=(kappa/log(z_c0/z0))^2 (neutral/flux cases)
         cd = (constants.kappa_von_karman / np.log(z[0] / cfg.z0)) ** 2
@@ -227,6 +233,10 @@ def main():
                    "weno7/weno9 are "
                    "sharper (less upwind diffusion) than weno5 and stay stable; "
                    "'central' is non-dissipative (sharpest) but needs SGS 2Δ control")
+    p.add_argument("--most-zeta-cap-width", type=float, default=None,
+                   help="override the case's half-width of the smooth |z/L| cap at "
+                        "10 in the MOST surface layer (most_cooling cases); 0 = "
+                        "hard clip")
     p.add_argument("--nu-floor", type=float, default=None,
                    help="background eddy-viscosity floor [m2/s] (default: per-case)")
     p.add_argument("--hyperdiff", type=float, default=0.0,

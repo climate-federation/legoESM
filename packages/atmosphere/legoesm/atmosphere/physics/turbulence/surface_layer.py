@@ -23,7 +23,7 @@ from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.core.bulk_flux import (
     surface_reference_state,
     compute_most_fluxes,
-    large_yeager_widths,
+    surface_flux_widths,
     compute_sam_oceflx_fluxes,
     simple_bulk_fluxes,
     validate_bulk_scheme,
@@ -211,6 +211,7 @@ def compute_surface_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
             variant="cesm", t_bot=t_bot, **_ws,
+            zeta_cap_width=config.most_zeta_cap_width,
         )
         return _apply_prescribed_scalar_fluxes(
             config, tau_x, tau_y, shflx, lhflx, ustar, rho) + tuple(_w)
@@ -224,10 +225,11 @@ def compute_surface_fluxes(
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
+            unstable_scheme=config.unstable_scheme,
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
-            **large_yeager_widths(config),
+            **surface_flux_widths(config),
         )
         # The prescribed-flux override applies on THIS branch too. Returning
         # early without it would let a config that sets both a MOST scheme and
@@ -647,6 +649,7 @@ def _single_tile_flux(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
             variant="cesm", t_bot=t_bot,
+            zeta_cap_width=config.most_zeta_cap_width,
         )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(
@@ -658,10 +661,11 @@ def _single_tile_flux(
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
+            unstable_scheme=config.unstable_scheme,
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
-            **large_yeager_widths(config),
+            **surface_flux_widths(config),
         )
 
     # Constant neutral coefficients.
