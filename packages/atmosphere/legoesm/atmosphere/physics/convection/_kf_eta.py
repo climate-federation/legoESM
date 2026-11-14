@@ -571,6 +571,9 @@ def _step_c2(x, w):
 # constant below; it only acts where the stop2 hazard is already 1.
 _CONT_LO_KGS = 1.0
 _CONT_HI_KGS = 5.0
+# offset of the downdraft mixture's conditional-mean divisor (finite gradients
+# for shares down to 0 in fp32)
+_QSHARE_FLOOR = 1.0e-15
 
 
 def _cont_floor(x):
@@ -1622,9 +1625,11 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         Wtop = jnp.where(sh, Ws, Wn)  # kfsw: B1
         PTOP = jnp.sum(Wtop, axis=0)  # kfsw: C-LTOPs
         PGE = jnp.cumsum(PTOP[::-1])[::-1]  # kfsw: C-LTOPs
-        UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE = _expected_top_profile(
-            Wtop, UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE, QLIQ, QICE, DILFRC,
-            QLQOUT, QICOUT, S["UPO"], S["UPN"], DP, kk)
+        raw = (UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE, QLIQ, QICE, DILFRC,
+               QLQOUT, QICOUT, S["UPO"], S["UPN"], DP, kk)
+        # a member's mass flux at KLCL (its LET block lies above)
+        umf_klcl = UMF[KLCL]  # kfsw: B3
+        UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE = _expected_top_profile(Wtop, *raw)
         TRPPT = jnp.sum(PPTLIQ + PPTICE)  # kfsw: C-LTOPs
     else:
         eq = LET == LTOP  # kfsw: C-LET
@@ -1669,7 +1674,10 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
             let_body, (UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE, TRPPT), 1, KX)
 
     # --- below cloud base / above cloud top (l.1479-1577) ---
-    ML = jnp.max(jnp.where(valid & (kk <= LTOP) & (T0 > _T00_K), kk, 0))  # kfsw: C-ML
+    warm = valid & (T0 > _T00_K)  # kfsw: C-ML
+    ML = jnp.max(jnp.where(warm & (kk <= LTOP), kk, 0))  # kfsw: C-ML
+    # melting (LC < ML) given the cloud top t: a warm level in (LC, t]
+    mel_t = jnp.cumsum(warm & (kk > LC)) > 0  # kfsw: B5,C-KCHECK
 
     # the source feeds only the convecting members
     vmf_src = VMFLCL * jnp.sum(PTOP) if sv else VMFLCL  # kfsw: S
@@ -1763,119 +1771,166 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     zf = jnp.zeros(NP, dtype)
     KSTART = KPBL + 1
     cand = valid & (kk >= KSTART + 1) & (P0[KSTART] - P0 > _LFS_DEPTH_PA)  # kfsw: C-LFS
-    KLFS = jnp.where(jnp.any(cand), jnp.argmax(cand).astype(i32), LET - 1)  # kfsw: C-LFS
-    KLFS = jnp.minimum(KLFS, LET - 1)  # kfsw: C-LFS
+    kl0 = jnp.where(jnp.any(cand), jnp.argmax(cand).astype(i32), KX)  # kfsw: C-LFS
+    KLFS = jnp.minimum(kl0, LET - 1)  # kfsw: C-LFS
     LFS = jnp.where(sh, jnp.asarray(1, i32), KLFS)  # kfsw: B1
-    dd_ok = ~sh & (P0[KSTART] - P0[LFS] > _DD_MIN_DEPTH_PA)  # kfsw: B3
-    tz_l, qss_l = _tpmix2dd(lut, P0[LFS], THETEE[LFS])  # kfsw: C-LFS
-    thtad_l = tz_l * _exner(P0[LFS], qss_l)  # kfsw: C-LFS
-    tvd_l = tz_l * (1.0 + _TV_COEF * qss_l)
-    rdd = P0[LFS] / (R * tvd_l)  # kfsw: C-LFS
-    dmf_l = -((1.0 - PEFF) * AU0) * rdd
-    THETED = _put(zf, LFS, THETEE[LFS], dd_ok)  # kfsw: B3
-    QD = _put(zf, LFS, Q0[LFS], dd_ok)  # kfsw: B3
-    TZ = _put(zf, LFS, tz_l, dd_ok)  # kfsw: B3
-    THTAD = _put(zf, LFS, thtad_l, dd_ok)  # kfsw: B3
-    DMF = _put(zf, LFS, dmf_l, dd_ok)  # kfsw: B3
-    DER = _put(zf, LFS, dmf_l, dd_ok)  # kfsw: B3
-    DDR = zf
-    QSD = zf
-
-    def dd1_body(c, ND):
-        dmf, der, thd, qd, dptt, rhbar = c
-        a = dd_ok & (ND <= LFS - 1) & (ND >= KSTART)  # kfsw: B3,C-LFS
-        der_k = der[LFS] * EMS[ND] / _sd(EMS[LFS], a)  # kfsw: B3,C-LFS
-        dmf_k = dmf[ND + 1] + der_k  # kfsw: S
-        dmfs = _sd(dmf_k, a)  # kfsw: B3,C-LFS
-        thd_k = (thd[ND + 1] * dmf[ND + 1] + THETEE[ND] * der_k) / dmfs  # kfsw: S
-        qd_k = (qd[ND + 1] * dmf[ND + 1] + Q0[ND] * der_k) / dmfs  # kfsw: S
-        return (_put(dmf, ND, dmf_k, a), _put(der, ND, der_k, a), _put(thd, ND, thd_k, a),
-                _put(qd, ND, qd_k, a), _w(a, dptt + DP[ND], dptt),
-                _w(a, rhbar + RH[ND] * DP[ND], rhbar))  # kfsw: B3,C-LFS
-
-    # kfsw: C-LFS
-    DMF, DER, THETED, QD, DPTT2, RHBAR = _scan_levels(
-        dd1_body, (DMF, DER, THETED, QD, DP[LFS], RH[LFS] * DP[LFS]), 1, KX, reverse=True)
-    RHBAR = RHBAR / _sd(DPTT2, dd_ok)  # kfsw: B3
-    DMFFRC = _DMFFRC_COEF * (1.0 - RHBAR)
 
     def mlt_body(c, k):
-        return _w((k >= KLCL) & ((k <= LTOP) | sv), c + PPTICE[k], c)  # kfsw: C-KLCL,C-LTOP
+        return _w((k >= KLCL) & (k <= LTOP), c + PPTICE[k], c)  # kfsw: C-KLCL,C-LTOP
 
-    PPTMLT = _scan_levels(mlt_body, zero, 1, KX)
-    mel = LC < ML  # kfsw: B5,C-KCHECK
-    DTMELT = jnp.where(mel, _RLF * PPTMLT / (CP * _sd(UMF[KLCL], mel & dd_ok)), 0.0)  # kfsw: B5
-    LDT = jnp.minimum(LFS - 1, KSTART - 1)  # kfsw: C-LFS
-    tzk, _ = _tpmix2dd(lut, P0[KSTART], THETED[KSTART])  # kfsw: C-KPBL
-    tzk = tzk - DTMELT
-    es = ALIQ * jnp.exp((BLIQ * tzk - CLIQ) / (tzk - DLIQ))
-    qssk = _EPS_KF * es / (P0[KSTART] - es)  # kfsw: C-KPBL
-    thd_k = tzk * (_P00_PA / P0[KSTART]) ** (_EXN_KAPPA * (1.0 - _EXN_Q * qssk)) * jnp.exp(
-        (_THE_C1 / tzk - _THE_C2) * qssk * (1.0 + _THE_C3 * qssk))  # kfsw: C-KPBL
-    TZ = _put(TZ, KSTART, tzk, dd_ok)  # kfsw: B3
-    THETED = _put(THETED, KSTART, thd_k, dd_ok)  # kfsw: B3
+    def downdraft(LFS, mel, PPTMLT, TRPPT, UMF_KLCL):
+        """The oracle's downdraft and its acceptance for one source level LFS,
+        melting flag/ice precipitation, updraft precipitation and base flux."""
+        dd_ok = ~sh & (P0[KSTART] - P0[LFS] > _DD_MIN_DEPTH_PA)  # kfsw: B3
+        tz_l, qss_l = _tpmix2dd(lut, P0[LFS], THETEE[LFS])  # kfsw: C-LFS
+        thtad_l = tz_l * _exner(P0[LFS], qss_l)  # kfsw: C-LFS
+        tvd_l = tz_l * (1.0 + _TV_COEF * qss_l)
+        rdd = P0[LFS] / (R * tvd_l)  # kfsw: C-LFS
+        dmf_l = -((1.0 - PEFF) * AU0) * rdd
+        THETED = _put(zf, LFS, THETEE[LFS], dd_ok)  # kfsw: B3
+        QD = _put(zf, LFS, Q0[LFS], dd_ok)  # kfsw: B3
+        TZ = _put(zf, LFS, tz_l, dd_ok)  # kfsw: B3
+        THTAD = _put(zf, LFS, thtad_l, dd_ok)  # kfsw: B3
+        DMF = _put(zf, LFS, dmf_l, dd_ok)  # kfsw: B3
+        DER = _put(zf, LFS, dmf_l, dd_ok)  # kfsw: B3
+        DDR = zf
+        QSD = zf
 
-    def dd2_body(c, ND):
-        tz, qsd, thd, qd, dpdd, ldb, ex = c
-        a = dd_ok & (ND <= LDT) & ~ex  # kfsw: B3,C-LDB
-        dpdd_n = dpdd + DP[ND]  # kfsw: S
-        thd_n = THETED[KSTART]  # kfsw: C-KPBL
-        qd_n = qd[KSTART]  # kfsw: C-KPBL
-        t_n, qss = _tpmix2dd(lut, P0[ND], thd_n)  # kfsw: S
-        rhh = 1.0 - _RHH_DECR / _RHH_PER_M * (Z0[KSTART] - Z0[ND])  # kfsw: C-KPBL
-        dssdt = (CLIQ - BLIQ * DLIQ) / ((t_n - DLIQ) * (t_n - DLIQ))
-        rl = XLV0 - XLV1 * t_n
-        dtmp = rl * qss * (1.0 - rhh) / (CP + rl * rhh * qss * dssdt)
-        t1rh = t_n + dtmp
-        es_r = rhh * ALIQ * jnp.exp((BLIQ * t1rh - CLIQ) / (t1rh - DLIQ))
-        qsrh = _EPS_KF * es_r / (P0[ND] - es_r)  # kfsw: S
-        low = qsrh < qd_n  # kfsw: D7h
-        qsrh = jnp.where(low, qd_n, qsrh)  # kfsw: D7h
-        t1rh = jnp.where(low, t_n + (qss - qsrh) * rl / CP, t1rh)  # kfsw: D7h
-        adj = rhh < 1.0  # kfsw: D7h
-        t_n = jnp.where(adj, t1rh, t_n)  # kfsw: D7h
-        qsd_n = jnp.where(adj, qsrh, qss)  # kfsw: D7h
-        tvd = t_n * (1.0 + _TV_COEF * qsd_n)
-        stop = (tvd > TV0[ND]) | (ND == 1)  # kfsw: B3,C-LDB
+        def dd1_body(c, ND):
+            dmf, der, thd, qd, dptt, rhbar = c
+            a = dd_ok & (ND <= LFS - 1) & (ND >= KSTART)  # kfsw: B3,C-LFS
+            der_k = der[LFS] * EMS[ND] / _sd(EMS[LFS], a)  # kfsw: B3,C-LFS
+            dmf_k = dmf[ND + 1] + der_k  # kfsw: S
+            dmfs = _sd(dmf_k, a)  # kfsw: B3,C-LFS
+            thd_k = (thd[ND + 1] * dmf[ND + 1] + THETEE[ND] * der_k) / dmfs  # kfsw: S
+            qd_k = (qd[ND + 1] * dmf[ND + 1] + Q0[ND] * der_k) / dmfs  # kfsw: S
+            return (_put(dmf, ND, dmf_k, a), _put(der, ND, der_k, a), _put(thd, ND, thd_k, a),
+                    _put(qd, ND, qd_k, a), _w(a, dptt + DP[ND], dptt),
+                    _w(a, rhbar + RH[ND] * DP[ND], rhbar))  # kfsw: B3,C-LFS
+
+        # kfsw: C-LFS
+        DMF, DER, THETED, QD, DPTT2, RHBAR = _scan_levels(
+            dd1_body, (DMF, DER, THETED, QD, DP[LFS], RH[LFS] * DP[LFS]), 1, KX, reverse=True)
+        RHBAR = RHBAR / _sd(DPTT2, dd_ok)  # kfsw: B3
+        DMFFRC = _DMFFRC_COEF * (1.0 - RHBAR)
+
+        DTMELT = jnp.where(mel, _RLF * PPTMLT / (CP * _sd(UMF_KLCL, mel & dd_ok)), 0.0)  # kfsw: B5
+        LDT = jnp.minimum(LFS - 1, KSTART - 1)  # kfsw: C-LFS
+        tzk, _ = _tpmix2dd(lut, P0[KSTART], THETED[KSTART])  # kfsw: C-KPBL
+        tzk = tzk - DTMELT
+        es = ALIQ * jnp.exp((BLIQ * tzk - CLIQ) / (tzk - DLIQ))
+        qssk = _EPS_KF * es / (P0[KSTART] - es)  # kfsw: C-KPBL
+        thd_k = tzk * (_P00_PA / P0[KSTART]) ** (_EXN_KAPPA * (1.0 - _EXN_Q * qssk)) * jnp.exp(
+            (_THE_C1 / tzk - _THE_C2) * qssk * (1.0 + _THE_C3 * qssk))  # kfsw: C-KPBL
+        TZ = _put(TZ, KSTART, tzk, dd_ok)  # kfsw: B3
+        THETED = _put(THETED, KSTART, thd_k, dd_ok)  # kfsw: B3
+
+        def dd2_body(c, ND):
+            tz, qsd, thd, qd, dpdd, ldb, ex = c
+            a = dd_ok & (ND <= LDT) & ~ex  # kfsw: B3,C-LDB
+            dpdd_n = dpdd + DP[ND]  # kfsw: S
+            thd_n = THETED[KSTART]  # kfsw: C-KPBL
+            qd_n = qd[KSTART]  # kfsw: C-KPBL
+            t_n, qss = _tpmix2dd(lut, P0[ND], thd_n)  # kfsw: S
+            rhh = 1.0 - _RHH_DECR / _RHH_PER_M * (Z0[KSTART] - Z0[ND])  # kfsw: C-KPBL
+            dssdt = (CLIQ - BLIQ * DLIQ) / ((t_n - DLIQ) * (t_n - DLIQ))
+            rl = XLV0 - XLV1 * t_n
+            dtmp = rl * qss * (1.0 - rhh) / (CP + rl * rhh * qss * dssdt)
+            t1rh = t_n + dtmp
+            es_r = rhh * ALIQ * jnp.exp((BLIQ * t1rh - CLIQ) / (t1rh - DLIQ))
+            qsrh = _EPS_KF * es_r / (P0[ND] - es_r)  # kfsw: S
+            low = qsrh < qd_n  # kfsw: D7h
+            qsrh = jnp.where(low, qd_n, qsrh)  # kfsw: D7h
+            t1rh = jnp.where(low, t_n + (qss - qsrh) * rl / CP, t1rh)  # kfsw: D7h
+            adj = rhh < 1.0  # kfsw: D7h
+            t_n = jnp.where(adj, t1rh, t_n)  # kfsw: D7h
+            qsd_n = jnp.where(adj, qsrh, qss)  # kfsw: D7h
+            tvd = t_n * (1.0 + _TV_COEF * qsd_n)
+            stop = (tvd > TV0[ND]) | (ND == 1)  # kfsw: B3,C-LDB
+            # kfsw: B3,C-LDB
+            return (_put(tz, ND, t_n, a), _put(qsd, ND, qsd_n, a), _put(thd, ND, thd_n, a),
+                    _put(qd, ND, qd_n, a), _w(a, dpdd_n, dpdd), _w(a & stop, ND, ldb), ex | (a & stop))
+
+        TZ, QSD, THETED, QD, DPDD, LDB, _ = _scan_levels(
+            dd2_body, (TZ, QSD, THETED, QD, zero, LFS, jnp.asarray(False)), 1, KX, reverse=True)
+        deep_dd = dd_ok & (P0[LDB] - P0[LFS] > _DD_MIN_DEPTH_PA)  # kfsw: B3
+
+        def dd3_body(c, ND):
+            ddr, der, dmf, tder, qd, thtad = c
+            a = deep_dd & (ND <= LDT) & (ND >= LDB)  # kfsw: B3,C-LDB
+            ddr_k = -dmf[KSTART] * DP[ND] / _sd(DPDD, a)  # kfsw: B3,C-LDB
+            dmf_k = dmf[ND + 1] + ddr_k  # kfsw: S
+            tder_n = tder + (QSD[ND] - qd[ND]) * ddr_k  # kfsw: S
+            thtad_k = TZ[ND] * _exner(P0[ND], QSD[ND])  # kfsw: S
+            # kfsw: B3,C-LDB
+            return (_put(ddr, ND, ddr_k, a), _put(der, ND, zero, a), _put(dmf, ND, dmf_k, a),
+                    _w(a, tder_n, tder), _put(qd, ND, QSD[ND], a), _put(thtad, ND, thtad_k, a))
+
+        DDR, DER, DMF, TDER, QD, THTAD = _scan_levels(
+            dd3_body, (DDR, DER, DMF, zero, QD, THTAD), 1, KX, reverse=True)
+
+        # --- downdraft acceptance (l.1789-1873) ---
+        nodd = TDER < _TDER_MIN  # kfsw: B3
+        ddinc = -DMFFRC * UMF_KLCL / _sd(DMF[KSTART], ~nodd)  # kfsw: B3
+        big = TDER * ddinc > TRPPT  # kfsw: B3
+        ddinc = jnp.where(big, TRPPT / _sd(TDER, ~nodd), ddinc)  # kfsw: B3
+        TDER = jnp.where(nodd, 0.0, TDER * ddinc)  # kfsw: B3
+        PPTFLX = jnp.where(nodd, TRPPT, TRPPT - TDER)  # kfsw: B3
+        LDB = jnp.where(nodd, LFS, LDB)  # kfsw: B3,C-LDB
+        scl = ~nodd & (kk >= LDB) & (kk <= LFS)  # kfsw: B3,C-LDB
+        DMF, DER, DDR = (jnp.where(scl, a * ddinc, a) for a in (DMF, DER, DDR))  # kfsw: B3,C-LDB
+        # the downdraft arrays are zero above LFS < LET <= LTOP: the oracle's
+        # NK <= LTOP bound on this zeroing is the whole column
+        z_nodd = nodd & valid
+        z_dd = ~nodd & valid & ((kk <= LDB - 1) | (kk >= LFS + 1))  # kfsw: B3,C-LDB
+        z_mid = ~nodd & (kk >= LDT + 1) & (kk <= LFS - 1)  # kfsw: B3,C-LDB
+        DMF, DER, DDR = (jnp.where(z_nodd | z_dd, 0.0, a) for a in (DMF, DER, DDR))  # kfsw: B3,C-LDB
         # kfsw: B3,C-LDB
-        return (_put(tz, ND, t_n, a), _put(qsd, ND, qsd_n, a), _put(thd, ND, thd_n, a),
-                _put(qd, ND, qd_n, a), _w(a, dpdd_n, dpdd), _w(a & stop, ND, ldb), ex | (a & stop))
+        THTAD, TZ, QD = (jnp.where(z_nodd | z_dd | z_mid, 0.0, a) for a in (THTAD, TZ, QD))
 
-    TZ, QSD, THETED, QD, DPDD, LDB, _ = _scan_levels(
-        dd2_body, (TZ, QSD, THETED, QD, zero, LFS, jnp.asarray(False)), 1, KX, reverse=True)
-    deep_dd = dd_ok & (P0[LDB] - P0[LFS] > _DD_MIN_DEPTH_PA)  # kfsw: B3
+        return (DMF, DER, DDR, THTAD, TZ, QD, TDER, PPTFLX, LDB)
 
-    def dd3_body(c, ND):
-        ddr, der, dmf, tder, qd, thtad = c
-        a = deep_dd & (ND <= LDT) & (ND >= LDB)  # kfsw: B3,C-LDB
-        ddr_k = -dmf[KSTART] * DP[ND] / _sd(DPDD, a)  # kfsw: B3,C-LDB
-        dmf_k = dmf[ND + 1] + ddr_k  # kfsw: S
-        tder_n = tder + (QSD[ND] - qd[ND]) * ddr_k  # kfsw: S
-        thtad_k = TZ[ND] * _exner(P0[ND], QSD[ND])  # kfsw: S
-        # kfsw: B3,C-LDB
-        return (_put(ddr, ND, ddr_k, a), _put(der, ND, zero, a), _put(dmf, ND, dmf_k, a),
-                _w(a, tder_n, tder), _put(qd, ND, QSD[ND], a), _put(thtad, ND, thtad_k, a))
+    if sv:  # kfsw: S
+        # mixture over the downdraft source levels l the (LET, top) members
+        # give (LFS = min(KLFS, LET - 1)); each run gets its members'
+        # conditional melting ice and precipitation; fluxes average, the
+        # states the closure multiplies by DDR average DDR-weighted
+        lfs_j = jnp.minimum(kl0, kk - 1)  # kfsw: C-LETs (a shallow column has no downdraft)
 
-    DDR, DER, DMF, TDER, QD, THTAD = _scan_levels(
-        dd3_body, (DDR, DER, DMF, zero, QD, THTAD), 1, KX, reverse=True)
+        def member(l):
+            Wl = jnp.where((lfs_j == l)[:, None], Wtop, 0.0)  # kfsw: C-LETs
+            ql = jnp.sum(Wl)  # kfsw: C-LETs
+            # conditional means: the offset keeps the reverse pass of the
+            # division finite for tiny shares; it biases a mean by
+            # eps / (q_l + eps), so only shares near eps lose weight in it
+            qd = ql + _QSHARE_FLOOR
+            prof = _expected_top_profile(jnp.where(mel_t[None, :], Wl, 0.0), *raw)  # kfsw: C-LTOPs
+            mlt = _scan_levels(lambda c, k: _w(k >= KLCL, c + prof[6][k], c),  # kfsw: C-LTOPs
+                               zero, 1, KX)
+            plq = _expected_top_profile(Wl, *raw)[5:7]
+            trp = jnp.sum(plq[0] + plq[1])  # kfsw: C-LTOPs
+            # a level no member selects still runs (fixed cost): run it at the
+            # column's own LFS so its (zero-weight) values and gradients stay finite
+            lr = jnp.where(ql > 0.0, l, LFS)  # kfsw: C-LETs
+            out = downdraft(lr, True, mlt / qd, trp / qd, umf_klcl)
+            return (ql,) + out
 
-    # --- downdraft acceptance (l.1789-1873) ---
-    nodd = TDER < _TDER_MIN  # kfsw: B3
+        ql, DMFs, DERs, DDRs, THTADs, _, QDs, TDERs, _, LDBs = jax.vmap(member)(kk)  # kfsw: C-LETs
+        mix = lambda x: jnp.tensordot(ql, x, axes=1)  # kfsw: C-LETs  # noqa: E731
+        DMF, DER, DDR, TDER = mix(DMFs), mix(DERs), mix(DDRs), mix(TDERs)  # kfsw: C-LETs
+        # precipitation flux keeps the exact moments: E[TRPPT] - E[TDER]
+        PPTFLX = TRPPT - TDER
+        # the closure multiplies the downdraft states only by DDR: it reads the
+        # mixture's DDR*THTAD and DDR*QD moments directly (no division)
+        DDRTH, DDRQ = mix(DDRs * THTADs), mix(DDRs * QDs)  # kfsw: C-LETs
+        THTAD = QD = TZ = None
+        LDB = LDBs[LFS]  # kfsw: C-LETs (diagnostic: the run at the hard-LET LFS)
+    else:
+        PPTMLT = _scan_levels(mlt_body, zero, 1, KX)
+        mel = LC < ML  # kfsw: B5,C-KCHECK
+        DMF, DER, DDR, THTAD, TZ, QD, TDER, PPTFLX, LDB = downdraft(  # kfsw: B5
+            LFS, mel, PPTMLT, TRPPT, UMF[KLCL])
     CPR = TRPPT
-    ddinc = -DMFFRC * UMF[KLCL] / _sd(DMF[KSTART], ~nodd)  # kfsw: B3
-    big = TDER * ddinc > TRPPT  # kfsw: B3
-    ddinc = jnp.where(big, TRPPT / _sd(TDER, ~nodd), ddinc)  # kfsw: B3
-    TDER = jnp.where(nodd, 0.0, TDER * ddinc)  # kfsw: B3
-    PPTFLX = jnp.where(nodd, TRPPT, TRPPT - TDER)  # kfsw: B3
-    LDB = jnp.where(nodd, LFS, LDB)  # kfsw: B3,C-LDB
-    scl = ~nodd & (kk >= LDB) & (kk <= LFS)  # kfsw: B3,C-LDB
-    DMF, DER, DDR = (jnp.where(scl, a * ddinc, a) for a in (DMF, DER, DDR))  # kfsw: B3,C-LDB
-    z_nodd = nodd & valid & (kk <= LTOP)  # kfsw: B3,C-LDB
-    z_dd = ~nodd & valid & ((kk <= LDB - 1) | (kk >= LFS + 1))  # kfsw: B3,C-LDB
-    z_mid = ~nodd & (kk >= LDT + 1) & (kk <= LFS - 1)  # kfsw: B3,C-LDB
-    DMF, DER, DDR = (jnp.where(z_nodd | z_dd, 0.0, a) for a in (DMF, DER, DDR))  # kfsw: B3,C-LDB
-    # kfsw: B3,C-LDB
-    THTAD, TZ, QD = (jnp.where(z_nodd | z_dd | z_mid, 0.0, a) for a in (THTAD, TZ, QD))
 
     # --- inflow limit and closure (l.1879-2281) ---
     LMAX = jnp.maximum(KLCL, LFS)  # kfsw: C-KLCL,C-LFS
@@ -1886,6 +1941,8 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     AINC = jnp.where(AINCMX < 1.0, AINCMX, 1.0)  # kfsw: E15
     TDER2, PPTFL2 = TDER, PPTFLX
     base = dict(UMF=UMF, DMF=DMF, DETLQ=DETLQ, DETIC=DETIC, UDR=UDR, UER=UER, DER=DER, DDR=DDR)
+    if sv:  # kfsw: S
+        base.update(DDRTH=DDRTH, DDRQ=DDRQ)  # kfsw: C-LETs
     EVAC = _EVAC_FRAC * _TKEMAX * _EVAC_TKE
     ainc_sh = EVAC * DPTHMX * DXSQ / (_sd(VMFLCL, fired0) * G * TIMEC)  # kfsw: A0
     AINC = jnp.where(sh, ainc_sh, AINC)  # kfsw: B1
@@ -1932,8 +1989,12 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         DTIME = TIMEC / NSTEP.astype(dtype)  # kfsw: C-NSTEP
         FXM = jnp.where(inc, OMG * DXSQ / G, 0.0)  # kfsw: C-LTOP
         overflow = c["overflow"] | (a & (NSTEP > _MAX_SUBSTEPS))  # kfsw: A6
-        th_src = lambda fin, fout: fin + F["UDR"] * THTAU + F["DDR"] * THTAD - fout - (F["UER"] - F["DER"]) * THTA0  # noqa: E731
-        q_src = lambda fin, fout: fin + F["UDR"] * QDT + F["DDR"] * QD - fout - (F["UER"] - F["DER"]) * Q0  # noqa: E731
+        if sv:  # kfsw: S
+            dd_th, dd_q = F["DDRTH"], F["DDRQ"]
+        else:
+            dd_th, dd_q = F["DDR"] * THTAD, F["DDR"] * QD
+        th_src = lambda fin, fout: fin + F["UDR"] * THTAU + dd_th - fout - (F["UER"] - F["DER"]) * THTA0  # noqa: E731
+        q_src = lambda fin, fout: fin + F["UDR"] * QDT + dd_q - fout - (F["UER"] - F["DER"]) * Q0  # noqa: E731
         THPA = advect(jnp.where(inc, THTA0, 0.0), th_src, OMG, FXM, NSTEP, DTIME)  # kfsw: C-LTOP
         QPA = advect(jnp.where(inc, Q0, 0.0), q_src, OMG, FXM, NSTEP, DTIME)  # kfsw: C-LTOP
         THTAG = THPA
