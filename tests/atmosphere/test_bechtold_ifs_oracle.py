@@ -676,44 +676,131 @@ def test_smooth_switches_are_the_default():
         cumastrn(None, 1.0, *([None] * 21), tun=IfsTunables(hard_switches=1))
 
 
-# (group, column, tendency scale, surface-flux scale) where a closure switch
-# sits inside its smooth window.  The windows are narrow (0.01 x a 2nd
-# percentile), so the fixture columns themselves sit outside every window; a
-# 41 x 41 scan of the two scales over [0, 4] on every column found this one
-# (deep L32 column 2, relative mass-flux gap 1.9e-4 smooth vs exact).
-_GRAD_POINTS = (("L32", 2, 1.0, 3.6),)
+def _probe(name):
+    import importlib.util
+
+    path = (Path(__file__).resolve().parents[2] / "scripts" / "validate" / "oracle"
+            / "bechtold_ifs" / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
-@pytest.mark.parametrize("point", _GRAD_POINTS)
-def test_smooth_switches_gradient_at_default(fix, point):
-    """check_grads (order 2, reverse) at the default of the column's summed
-    heating + drying + mass flux with respect to a scale on the
-    pre-convection tendencies and a scale on the surface fluxes, at a point
-    where a switch is inside its window; the value and the derivative differ
-    from the exact switches', and the derivative is finite and nonzero."""
+# Per switch SITE (stripped source line, IfsSmooth method):
+# (group, column, mode, direction, value, fd step, partners), found by
+# scripts/validate/oracle/bechtold_ifs/switch_sites.py.  mode "input": the
+# input perturbation ``direction`` at ``value`` puts the site inside its
+# window and the test variable is that perturbation.  mode "inject" (sites no
+# input perturbation reached: floors and caps real columns rarely hit; vote
+# 2026-11-14): the column (optionally perturbed by ``direction``/``value``)
+# with only this site's switched operand moved to mid-window at s = 1 (offset
+# under stop_gradient; s spans the window in units of 1) and each ``partners``
+# site held mid-window, so the switch reaches the output.
+_SITE_POINTS = {
+    ('* (1.0 - sm.lt(kget(pvervel, njkt5), ZOMEGA_RES, _W_OMEGA)))', 'lt'):
+        ('L32', 1, 'inject', 'q', 1.0586956521739133, 0.001, ()),
+    ('* sm.lt(zdh, ZSHAL_DH * rg * rcpd, rg * _W_DH))', 'lt'):
+        ('L32', 9, 'inject', None, 0.0, 0.001, (('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'),)),
+    ('/ ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)', 'min'):
+        ('L32', 9, 'input', 'q', 1.1985054347826085, 1.9621876652955543e-07, ()),
+    ('br = 1.0 - ((1.0 - sm.le(zsatfr, ZSATFR_MAX, _W_SATFR))', 'le'):
+        ('L32', 1, 'input', 'q', 1.0586956521739133, 1.0612271223959325e-05, ()),
+    ('llo1 = sm.lt(paph[K + 1] - kget(paph, ikd), ZPBL_DP, _W_PRES)', 'lt'):
+        ('L32', 0, 'inject', None, 0.0, 0.001, ()),
+    ('m2 = sm.min(m2, zmfmax, _W_MF)', 'min'):
+        ('L137', 0, 'inject', None, 0.0, 0.001, ()),
+    ('m3 = sm.max(ZMID_MF * zkhfl / kget(pgeoh, ikb), zmfub, w_mfub) * (1.0 + zeps)', 'max'):
+        ('L32', 12, 'inject', None, 0.0, 0.001, ()),
+    ('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'):
+        ('L32', 12, 'inject', None, 0.0, 0.001, (('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF), sm.min(m3, zmfmax, _W_MF))', 'min'),)),
+    ('sm.max(zcape - zcapdcycl, RMINCAPE * zcape, _W_CAPE))', 'max'):
+        ('L32', 2, 'input', 'tend', 1.2927139945652173, 3.797791073757312e-08, ()),
+    ('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF), sm.min(m3, zmfmax, _W_MF))', 'min'):
+        ('L32', 12, 'inject', None, 0.0, 0.001, ()),
+    ('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'):
+        ('L137', 0, 'inject', None, 0.0, 0.001, ()),
+    ('zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)', 'max'):
+        ('L32', 1, 'inject', None, 0.0, 0.001, ()),
+    ('zcape_c = sm.min(zcape_c, ZCAPE_MAX, _W_CAPE)', 'min'):
+        ('L32', 10, 'inject', None, 0.0, 0.001, ()),
+    ('zcape_c = sm.sel(br, sm.max(zcape2 - zcapdcycl + zdqcv, RMINCAPE * zcape, _W_CAPE),', 'max'):
+        ('L32', 2, 'input', 'tend', 1.2927139945652173, 3.797791073757312e-08, ()),
+    ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
+        ('L32', 15, 'inject', None, 0.0, 0.001, ()),
+    ('zeps = (sm.pos(-pmfd_b, w_mfub)', 'pos'):
+        ('L32', 9, 'inject', None, 0.0, 0.001, ()),
+    ('zheat = jnp.sum(jnp.where(llo3, sm.pos(', 'pos'):
+        ('L32', 2, 'input', 'T', -3.776377802309783, 4.298203146027789e-09, ()),
+    ('zm = jnp.where(ok, jnp.maximum(sm.min(zm, r, _W_REL * r),', 'min'):
+        ('L32', 12, 'input', 'omega', -11.82065217391305, 0.0001174562223262157, ()),
+    ('zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.001, (('zm = jnp.where(ok, jnp.maximum(sm.min(zm, r, _W_REL * r),', 'min'),)),
+    ('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'):
+        ('L32', 10, 'inject', None, 0.0, 0.001, ()),
+    ('zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.001, ()),
+    ('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'):
+        ('L137', 0, 'input', 'tend', 2.4479025135869565, 2.6530436890377744e-08, ()),
+    ('ztaupbl = sm.min(kget(pgeoh, ikb) - pgeoh[K + 1], ZDCYC_DZ, _W_GEO) / (rg * zduten)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.001, ()),
+    ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'max'):
+        ('L32', 2, 'input', 'sflux', 3.5652173913043477, 0.00012682412999266034, ()),
+    ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.001, ()),
+}
+
+
+# Sites without a gradient point yet (search in progress, #2281): each one's
+# smoothing is covered only by the hard-limit and per-column gap tests.
+_SITE_PENDING = {
+    ("zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)", "max"),
+    ("zdqmin = sm.max(ZDQMIN_FRAC * kget(zqenh, ikb), ZDQMIN_FLOOR, _W_VAP)", "max"),
+    ("zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)", "max"),
+}
+
+
+def test_every_switch_site_has_a_gradient_point():
+    """A new or edited smooth switch in CUMASTRN must get its own point."""
+    assert _probe("switch_sites").sites() == set(_SITE_POINTS) | _SITE_PENDING
+    assert not set(_SITE_POINTS) & _SITE_PENDING
+
+
+@pytest.mark.parametrize("site", sorted(_SITE_POINTS), ids=lambda t: f"{t[1]}:{t[0][:60]}")
+def test_switch_site_gradient_at_default(fix, site):
+    """RULE 5 gradient test, per switch site, at the default (smooth): at the
+    site's point it is inside its window, check_grads (order 2, reverse)
+    passes on the scheme's heating + drying + mass flux with respect to the
+    test variable, and the derivative changes when only this site is exact."""
     from jax.test_util import check_grads
-    from legoesm.atmosphere.physics.convection._ifs_faithful import ifs_faithful_convection
-    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
-    from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 
-    g, c, st0, sf0 = point
-    a = lambda k: jnp.asarray(fix[f"{g}_{k}"])[c:c + 1]  # noqa: E731
+    sp = _probe("switch_sites")
+    g, c, mode, direction, value, h, partners = _SITE_POINTS[site]
+    if mode == "input":
+        s0 = value
+        x_of = lambda s: sp.point_value(fix, g, c, direction, s)  # noqa: E731
+        inj_of = lambda s: {}  # noqa: E731
+    else:
+        s0 = 1.0
+        base = sp.column(fix, g, c) if direction is None else sp.point_value(
+            fix, g, c, direction, value)
+        x_of = lambda s: base  # noqa: E731
+        inj_of = lambda s: {**{p: jnp.asarray(1.0) for p in partners}, site: s}  # noqa: E731
 
-    def f(st, sf, hard):
-        cfg = BechtoldConfig(use_ifs_ascent=True, dx_m=_DX, ifs_hard_switches=hard)
-        out, mu = ifs_faithful_convection(
-            a("T"), a("q"), a("p_full"), a("p_half"), a("u"), a("v"), float(fix["dt"]),
-            cfg, sf * a("shf_up"), sf * a("lhf_up"), a("land"), a("dT_adv"), a("dq_adv"),
-            st * a("dT_other"), st * a("dq_other"), a("omega"), ConvectionOutput)
-        return (jnp.sum(out.dT_dt) * 1.0e4 + jnp.sum(out.dq_v_dt) * 1.0e7
-                + jnp.sum(mu) * 1.0e1)
+    def run(s, hard=()):
+        with sp.instrument(hard_sites=hard, inject=inj_of(s)):
+            return sp.output(fix, x_of(s))
 
-    x0 = (jnp.asarray(st0), jnp.asarray(sf0))
-    assert float(f(*x0, False)) != float(f(*x0, True))   # inside a window
-    check_grads(lambda st, sf: f(st, sf, False), x0, order=2, modes=("rev",), eps=1e-6)
-    gs = np.asarray(jax.grad(lambda st, sf: f(st, sf, False), argnums=(0, 1))(*x0))
-    gh = np.asarray(jax.grad(lambda st, sf: f(st, sf, True), argnums=(0, 1))(*x0))
-    assert np.all(np.isfinite(gs)) and np.any(gs != 0.0) and np.any(gs != gh)
+    x0 = jnp.asarray(s0)
+    pos = {}
+    with sp.instrument(lambda k, d: pos.setdefault(k, []).append(d.ravel()), inject=inj_of(x0)):
+        sp.output(fix, x_of(x0))
+        jax.effects_barrier()
+    assert np.any(sp.in_window(site, np.concatenate(pos[site])))
+    check_grads(run, (x0,), order=2, modes=("rev",), eps=h)
+    gs = float(jax.grad(run)(x0))
+    gh = float(jax.grad(lambda s: run(s, hard=[site]))(x0))
+    assert np.isfinite(gs) and gs != gh
 
 
 def test_switch_scales_probe_covers_every_class(fix):
