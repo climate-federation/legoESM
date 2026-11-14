@@ -115,6 +115,10 @@ Implementation commit before the first controls: e137cbf996.
   clean, and the restored suite produced
   `177 passed, 2 warnings in 59.56s` (`POST-MUTATION CHECK PASSED`).
 
+The two historical `1 failed` legacy-selector results above selected only
+`[cdgrid-hydrostatic]`; they did **not** exercise all fifteen cases. The
+full-case follow-up below supersedes them as evidence of parameter coverage.
+
 Local raw logs and control scripts are retained, ignored, under
 `.pytest_cache/cube-retirement/`.
 
@@ -333,3 +337,107 @@ baseline replays above; their numerical code is unchanged.
 - `tests/unit/test_matrix_sw_core_cli.py`
 - `tests/unit/test_tiled_dycore_driver_dispatch.py`
 - `tests/unit/test_validate_tiled_dycore_parity_cli.py`
+
+
+## Review follow-up: stale jobs and full-case mutation (2026-11-14)
+
+Audit base: `296752ec11117e42eb055e3c9bf5e9767e0b9f80`; starting HEAD:
+`5f6da142ece0860ca01fdabf73624239ebf64a76`. The worktree started clean.
+The initial deletion list came from
+`git diff --name-only --diff-filter=D 296752ec11..HEAD`.
+Searching every exact deleted path under `scripts/` found seventeen cluster
+jobs plus one historical profiler docstring. A basename and dotted-module
+search additionally found the cross-node halo job's
+`-m scripts.bench.bench_cube_shardmap_halo` invocation. Removing the Derecho
+ladder also required removing its submit wrapper.
+
+The surviving `bench_fv3_duo_spmd_scaling.py` is unchanged but is not an
+unchanged replacement: it uses different CLI arguments, topology, vertical
+levels and output contracts. No physics or benchmark adapter was invented.
+The user's explicit fallback was applied to mixed-purpose jobs too: delete
+when the missing target has no unchanged equivalent. This removes their
+non-cube arms along with their retired cube arms.
+
+| File | Action and reason |
+| --- | --- |
+| `scripts/cluster/scaling_levante/cube_trace_attrib.sbatch` | Delete. Legacy tiled-core scaling/profiling job; no unchanged duo equivalent. |
+| `scripts/cluster/scaling_levante/cube_c768_ladder.sbatch` | Delete. Legacy tiled-core scaling/profiling job; no unchanged duo equivalent. |
+| `scripts/cluster/scaling_levante/cube_tiled_step.sbatch` | Delete. Legacy tiled-core scaling/profiling job; no unchanged duo equivalent. |
+| `scripts/cluster/scaling_levante/cube_placement_ab.sbatch` | Delete. Legacy tiled-core scaling/profiling job; no unchanged duo equivalent. |
+| `scripts/cluster/scaling_levante/strong_ladder_cube.sbatch` | Delete. Legacy tiled-core scaling/profiling job; no unchanged duo equivalent. |
+| `scripts/cluster/scaling_levante/cube_nsys_capture.sbatch` | Delete. Legacy tiled-core scaling/profiling job; no unchanged duo equivalent. |
+| `scripts/cluster/scaling_levante/cube_bound_anchor.sbatch` | Delete. Legacy tiled-core scaling/profiling job; no unchanged duo equivalent. |
+| `scripts/cluster/scaling_levante/nature_ladder.sbatch` | Delete. Mixed-grid job: legacy cube benchmark has no unchanged equivalent; delete whole job per user rule. |
+| `scripts/cluster/scaling_levante/cube_kt_trace_ab.sbatch` | Delete. Legacy tiled-core scaling/profiling job; no unchanged duo equivalent. |
+| `scripts/cluster/scaling_levante/cube_c384_anchor_recheck.sbatch` | Delete. Legacy tiled-core scaling/profiling job; no unchanged duo equivalent. |
+| `scripts/cluster/scaling_derecho/nature_ladder.pbs` | Delete. Mixed-grid job: legacy cube benchmark has no unchanged equivalent; delete whole job per user rule. |
+| `scripts/cluster/scaling_derecho/blocker1_cube_shardmap.pbs` | Delete. Legacy halo benchmark job; no unchanged equivalent. |
+| `scripts/cluster/scaling_derecho/blocker1_cube_shardmap_xnode.pbs` | Delete. Legacy halo benchmark job (including module-style invocation); no unchanged equivalent. |
+| `scripts/cluster/scaling_derecho/cube_tiled_step.pbs` | Delete. Legacy tiled-core scaling/profiling job; no unchanged duo equivalent. |
+| `scripts/cluster/scaling_derecho/submit_nature_ladder.sh` | Delete. Only submits the deleted Derecho ladder; remove orphan launcher. |
+| `scripts/cluster/les_scm/ab_preexisting_failures.sbatch` | Delete. Mixed regression job: retired semi-implicit test has no unchanged equivalent; delete whole job. |
+| `scripts/cluster/issue_sweep_0923/cg_metrics_1675.sbatch` | Delete. Retired Helmholtz probe and semi-implicit test; no unchanged equivalent. |
+| `scripts/cluster/precision_1675/mixed_lift_suite.sbatch` | Delete. Mixed precision job: mutation reads retired cube module; no unchanged equivalent. |
+| `scripts/cluster/cmip6_coupled/coupling_fix_gates.sbatch` | Delete. Mixed coupling job: retired tiled-cube parity test has no unchanged equivalent. |
+| `scripts/bench/profile_crm_step.py` | Edit docstring: remove reference to deleted cube profiler; executable code unchanged. |
+| `scripts/README.md` | Remove advertised retired cube validator. |
+| `scripts/cluster/scaling_derecho/README.md` | Replace retired ladder/launcher commands with retirement notice. |
+| `docs/architecture/cube_duo_only_retirement.md` | Correct mutation coverage claim and record follow-up evidence/actions. |
+
+Basename-only historical producer descriptions in the matrix and receipt
+aggregator remain: they do not invoke the retired scripts. Existing receipt
+readers and shared numerical code are retained.
+
+### Full-case mutation evidence
+
+SLURM job `28980362`, account `bb1596`, partition `compute`, CPU,
+`JAX_ENABLE_X64=1`, requested virtualenv and existing namespace guard.
+The guard printed the imported config module under this worktree and
+restricted all inherited namespace paths to this worktree.
+The existing ignored mutation tool was reused, replacing its single-case
+selector with the **whole module** `tests/unit/test_cube_duo_only.py`;
+no `-k`, parameter-case selector or early-stop option was used.
+This runs all fifteen legacy cases and the independent defaults case.
+
+```text
+MUTATION APPLIED: driver_solver_name reverted to 296752ec11117e42eb055e3c9bf5e9767e0b9f80
+15 failed, 1 passed, 1 warning in 16.63s
+MUTATION CONFIRMED: legacy-selection test FAILS on revert
+MUTATION APPLIED: DycoreConfig.discretization reverted to cdgrid
+1 failed, 1 warning in 1.44s
+MUTATION CONFIRMED: defaults test FAILS on revert
+RESTORED: tracked git status clean at 5f6da142ece0860ca01fdabf73624239ebf64a76
+177 passed, 2 warnings in 75.80s (0:01:15)
+POST-MUTATION CHECK PASSED
+```
+
+All fifteen failure IDs were present (five discretizations times three model
+types), each at the expected exception assertion. Both mutations restored
+saved source bytes in `finally` before the cleanup edits began.
+Raw tool, module-path output, individual failures and restored-suite output:
+`.pytest_cache/cube-retirement/mutations.py` and
+`.pytest_cache/cube-retirement/mutation.28980362.log` (ignored local artifacts).
+SLURM accounting records `COMPLETED`, exit `0:0`.
+
+After cleanup, the exact-path scan over the expanded deletion list (including
+the deleted jobs) returned no hits under `scripts/`; dotted-module invocation
+searches also returned no retired script calls. `git diff --check` passed.
+
+### SIDE DECISIONS
+
+- User-directed: delete the complete mixed-purpose jobs when no unchanged
+  equivalent exists; do not remove selected arms or invent adapters.
+- Detail: run the entire existing test module, including its defaults case,
+  to guarantee all fifteen parameter cases execute without filtering.
+- Detail: search basenames and module-style invocations in addition to exact
+  paths; delete the orphan submit wrapper; remove obsolete advertised commands
+  and the profiler docstring pointer. Retain historical receipt descriptions.
+- Two independent read-only Codex reviewers agreed with these choices and
+  checked the mutation coverage and deletion scope. The named Claude/GLM
+  pair was unavailable and was not run. No defaults, numerics or tolerances
+  changed; no new scripts were added; no push or PR is authorized here.
+
+### UNVERIFIED
+
+Full repository suite and actual cluster scaling/coupling jobs were not run.
+Named Claude/GLM review remains unperformed; Claude owns opening the PR.
