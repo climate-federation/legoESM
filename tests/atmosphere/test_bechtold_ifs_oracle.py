@@ -726,7 +726,7 @@ _SITE_POINTS = {
         ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
     ('zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)', 'max'):
         ('L32', 10, 'inject', None, 0.0, 0.0001, (('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'),)),
-    ('zm = jnp.where(ok, jnp.maximum(sm.min(zm, r, _W_REL * r),', 'min'):
+    ('m = sm.min(zm, r, _W_REL * r)', 'min'):
         ('L32', 12, 'input', 'omega', -11.82065217391305, 1.1745622232621571e-05, ()),
     ('zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1', 'max'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
