@@ -171,6 +171,107 @@ def blended_surface_albedo(
     return f_land * albedo_land + (1.0 - f_land) * albedo
 
 
+def handback_surface_boundary(
+    f_land: jnp.ndarray,
+    f_ice: jnp.ndarray,
+    f_lake: jnp.ndarray,
+    T_land: jnp.ndarray,
+    sst: jnp.ndarray,
+    emissivity: "float | jnp.ndarray",
+    emissivity_land: "float | jnp.ndarray",
+    lw_emit_ice_lake: jnp.ndarray,
+    emissivity_ice: jnp.ndarray,
+    emissivity_lake: jnp.ndarray,
+    albedo_land: "float | jnp.ndarray",
+    albedo_ocean: "float | jnp.ndarray",
+    albedo_ice: jnp.ndarray,
+    albedo_lake: jnp.ndarray,
+) -> dict:
+    """Radiative surface boundary of a cell whose land and open water belong
+    to the atmosphere and whose ice and lake belong to the coupler (P5c L2').
+
+    Open water is what the four tiles leave, ``f_ow = 1 - f_land - f_ice -
+    f_lake``.  Albedo and emissivity are area blends; the emitted longwave is
+    the land emission at its radiating pair ``(T_land, emissivity_land)`` (the
+    multilayer land's radiating surface, tier-5 U11-1) and the open-water
+    emission at the SST this step, plus the ice
+    and lake emission the coupler debits for this window (``lw_emit_ice_lake``,
+    per grid cell).  ``T_rad`` is the single temperature with
+    ``eps_eff * sigma * T_rad^4`` equal to that emission, so a solver given
+    ``(eps_eff, T_rad)`` emits exactly it and reflects ``(1 - eps_eff)`` of
+    the downward longwave, the blend of the tiles' reflection.
+
+    Returns a dict with ``f_ow``, ``sfc_albedo``, ``sfc_emissivity`` and
+    ``T_sfc_rad``.  The root is guarded so a cell with no emission would get
+    ``T_rad = 0`` with a finite, zero derivative (vote V5); RRTMGP clips its
+    Planck tables at 160 K, so such a cell would still emit, which is why the
+    ice/lake emission is never zero (vote V15).
+    """
+    f_ow = 1.0 - f_land - f_ice - f_lake
+    eps_eff = (emissivity_land * f_land + emissivity * f_ow
+               + f_ice * emissivity_ice + f_lake * emissivity_lake)
+    sb = constants.sigma_sb
+    emit = (sb * (emissivity_land * f_land * T_land ** 4
+                  + emissivity * f_ow * sst ** 4)
+            + lw_emit_ice_lake)
+    x = emit / (sb * eps_eff)
+    pos = x > 0.0
+    return dict(
+        f_ow=f_ow,
+        sfc_albedo=(f_land * albedo_land + f_ow * albedo_ocean
+                    + f_ice * albedo_ice + f_lake * albedo_lake),
+        sfc_emissivity=eps_eff,
+        T_sfc_rad=jnp.where(pos, jnp.where(pos, x, 1.0) ** 0.25, 0.0),
+    )
+
+
+def handback_tile_radiation(
+    sw_down: jnp.ndarray,
+    lw_down: jnp.ndarray,
+    sw_net: jnp.ndarray,
+    lw_net: jnp.ndarray,
+    f_land: jnp.ndarray,
+    f_ice: jnp.ndarray,
+    f_lake: jnp.ndarray,
+    albedo_land: "float | jnp.ndarray",
+    T_land: jnp.ndarray,
+    emissivity: "float | jnp.ndarray",
+    emissivity_land: "float | jnp.ndarray",
+    lw_emit_ice_lake: jnp.ndarray,
+    albedo_ice: jnp.ndarray,
+    albedo_lake: jnp.ndarray,
+    emissivity_ice: jnp.ndarray,
+    emissivity_lake: jnp.ndarray,
+) -> dict:
+    """Per-tile split of one radiation solve's surface fluxes [W/m2, + into
+    the surface] for the boundary ``handback_surface_boundary`` built (same
+    fractions, albedos, emissivities, land skin and ice/lake emission).
+
+    ``booked_*``: what the ice and lake absorb per unit TILE area (SW, and
+    LW excluding their own emission) -- the coupler's ``OwnedTileForcing``;
+    their albedo, like the land's, is the same for both beams.
+    ``ow_sw_net``/``ow_lw_net``: the open-water share per grid cell area, the
+    solved net minus the land, ice and lake shares (plus the ice/lake
+    emission the coupler debits), so the tiles sum to the net the atmosphere
+    applied exactly -- also when the open-water direct beam sees a
+    zenith-dependent albedo the diffuse blend does not carry (vote K3-V10).
+    """
+    sb = constants.sigma_sb
+    sw_ice, sw_lake = sw_down * (1.0 - albedo_ice), sw_down * (1.0 - albedo_lake)
+    lw_ice, lw_lake = emissivity_ice * lw_down, emissivity_lake * lw_down
+    return dict(
+        ow_sw_net=(sw_net - f_land * sw_down * (1.0 - albedo_land)
+                   - f_ice * sw_ice - f_lake * sw_lake),
+        ow_lw_net=(lw_net
+                   - f_land * emissivity_land * (lw_down - sb * T_land ** 4)
+                   - f_ice * lw_ice - f_lake * lw_lake + lw_emit_ice_lake),
+        booked_sw_net_ice=sw_ice,
+        booked_lw_abs_ice=lw_ice,
+        booked_sw_net_lake=sw_lake,
+        booked_lw_abs_lake=lw_lake,
+    )
+
+
 def surface_temperature_for_lw_boundary(
     radiation: str,
     *,

@@ -135,6 +135,10 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # RRTMGP gas-table set: an unknown name must raise, never fall back
+        # to the reduced tables.
+        ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py",
+         "gas_table_files"),
         # SI3 aEVP lateral boundary: an unknown north_fold / lbc point type
         # must raise, never fall back to the doubly periodic halo.
         ("packages/ice/legoesm/ice/dynamics.py", "_si3_halo"),
@@ -151,7 +155,6 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "create_model"),
         # kt whitelist: an unvalidated 6*kt^2 tile count must raise, not
         # silently replicate the global state per device (#1360).
-        ("packages/core/legoesm/parallel/tiled_production_cdgrid.py", "_validate_tiled_step_factory_args"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "get_solver_class"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "resolve_solver_name"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py", "plane_compressible_euler_slow_tendencies"),
@@ -223,6 +226,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/core/bulk_flux.py", "validate_stability_scheme"),
         ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_m"),
         ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_h"),
+        # Unstable-regime MOST form selector (unstable_scheme): unknown raises.
+        ("packages/core/legoesm/core/bulk_flux.py", "validate_unstable_scheme"),
         ("packages/core/legoesm/core/tracers.py", "index"),
         ("packages/core/legoesm/grids/capability.py", "instantiate"),
         ("packages/core/legoesm/grids/capability.py", "validate_runtime"),
@@ -381,7 +386,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # after-SSH slot when wzv reads it (stprk3.F90:225 against ssh_nxt),
         # so an unknown form must raise rather than silently run one of them.
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "nemo_qco_wzv_operands"),
-        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_baroclinic_tendencies"),
+        # pv_scheme guard: pure-moved out of mpas_ocean_baroclinic_tendencies
+        # with the PV-flux block (shared ocean core plug-in), both paths call it.
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_pv_flux"),
         # (nemo_drag_r_from_speed_sq's internal legacy-rejection raise is not
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)
         ("packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py", "validate_bottom_drag_scheme"),

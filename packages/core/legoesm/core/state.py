@@ -193,6 +193,15 @@ class HydrostaticTendencies(NamedTuple):
     # when a precipitating module does not (the sum would be incomplete).
     # Appended LAST so no field index moves.
     precip_frozen: Field | None = None
+    # Open-water share of the surface turbulent exchange when the coupler's
+    # ice/lake handback is consumed (P5c): f_ow x the bulk law on the SST,
+    # per grid cell area -- SH/LH [W/m2, +up], water [kg/m2/s, +up], stress
+    # [Pa, on the atmosphere].  The ocean's forcing.  None otherwise.
+    shflx_ow: Field | None = None
+    lhflx_ow: Field | None = None
+    evap_ow: Field | None = None
+    taux_ow: Field | None = None
+    tauy_ow: Field | None = None
 
 
 # Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
@@ -231,6 +240,9 @@ MPAS_SFC_DIAG_EXTRA_KEYS = (
     # slot 14: the FROZEN part of the slot-2 precip [kg/m2/s] (F29): the
     # interactive land's snowfall.  Appended at the END, no index moves.
     "precip_frozen",
+    # slots 15-19: the open-water share of the turbulent exchange under the
+    # coupler ice/lake handback (P5c), None otherwise.  Appended at the END.
+    "shflx_ow", "lhflx_ow", "evap_ow", "taux_ow", "tauy_ow",
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their

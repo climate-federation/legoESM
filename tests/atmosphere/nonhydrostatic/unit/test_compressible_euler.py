@@ -30,11 +30,6 @@ from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
     compute_exner_perturbation,
 )
-from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
-    CDGridCompressibleEulerModel as CompressibleEulerModel,
-    CDGridCompressibleEulerConfig,
-    cdgrid_compressible_euler_slow_tendencies,
-)
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm import constants
 
@@ -233,49 +228,6 @@ class TestNonHydrostaticState:
 # Compressible Euler tendency tests
 # ==============================================================================
 
-class TestCompressibleEulerTendencies:
-    """Tests for C-D grid tendency computation."""
-
-    def test_rest_state_tendencies_small(self, grid, height_coord, terrain_metric, cdgrid):
-        """Rest state should produce near-zero tendencies."""
-        state = _make_nh_state(grid, height_coord)
-        config = CDGridCompressibleEulerConfig(hyperdiff_coeff=0.0, sponge_coeff=0.0)
-        tend = cdgrid_compressible_euler_slow_tendencies(
-            state, grid, height_coord, terrain_metric, cdgrid, config,
-        )
-        # u, v tendencies should be zero for rest state
-        assert float(jnp.max(jnp.abs(tend.du_dt.data))) < 1e-6
-        assert float(jnp.max(jnp.abs(tend.dv_dt.data))) < 1e-6
-
-    def test_tendencies_finite(self, grid, height_coord, terrain_metric, cdgrid):
-        """All tendencies should be finite."""
-        state = _make_nh_state(grid, height_coord)
-        # Add some non-zero wind
-        state = state._replace(
-            u=state.u.replace(data=jnp.ones_like(state.u.data) * 10.0),
-        )
-        config = CDGridCompressibleEulerConfig()
-        tend = cdgrid_compressible_euler_slow_tendencies(
-            state, grid, height_coord, terrain_metric, cdgrid, config,
-        )
-        assert jnp.all(jnp.isfinite(tend.du_dt.data))
-        assert jnp.all(jnp.isfinite(tend.dv_dt.data))
-        assert jnp.all(jnp.isfinite(tend.dw_dt.data))
-        assert jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data))
-        assert jnp.all(jnp.isfinite(tend.drho_prime_dt.data))
-
-    def test_tendency_shapes(self, grid, height_coord, terrain_metric, cdgrid):
-        """Tendency shapes match state shapes."""
-        state = _make_nh_state(grid, height_coord)
-        config = CDGridCompressibleEulerConfig()
-        tend = cdgrid_compressible_euler_slow_tendencies(
-            state, grid, height_coord, terrain_metric, cdgrid, config,
-        )
-        assert tend.du_dt.data.shape == state.u.data.shape
-        assert tend.dv_dt.data.shape == state.v.data.shape
-        assert tend.dw_dt.data.shape == state.w.data.shape
-        assert tend.dtheta_prime_dt.data.shape == state.theta_prime.data.shape
-
 
 # ==============================================================================
 # Exner function tests
@@ -316,35 +268,6 @@ class TestExnerPerturbation:
 # ==============================================================================
 # CompressibleEulerModel tests
 # ==============================================================================
-
-class TestCompressibleEulerModel:
-    """Tests for the model class."""
-
-    def test_single_step(self, grid, height_coord, terrain_metric):
-        """Model can take a single time step."""
-        config = CDGridCompressibleEulerConfig(
-            hyperdiff_coeff=0.0,
-            n_acoustic_substeps=2,
-        )
-        model = CompressibleEulerModel(grid, height_coord, terrain_metric, config)
-        state = _make_nh_state(grid, height_coord)
-        new_state = model.step(state, dt=1.0)
-        assert jnp.all(jnp.isfinite(new_state.u.data))
-        assert jnp.all(jnp.isfinite(new_state.w.data))
-
-    def test_multi_step_stability(self, grid, height_coord, terrain_metric):
-        """Model is stable for a few time steps from rest."""
-        config = CDGridCompressibleEulerConfig(
-            hyperdiff_coeff=0.0,
-            n_acoustic_substeps=2,
-            sponge_coeff=0.0,
-        )
-        model = CompressibleEulerModel(grid, height_coord, terrain_metric, config)
-        state = _make_nh_state(grid, height_coord)
-        for _ in range(5):
-            state = model.step(state, dt=1.0)
-        assert jnp.all(jnp.isfinite(state.u.data))
-        assert jnp.all(jnp.isfinite(state.theta_prime.data))
 
 
 # ==============================================================================
@@ -436,49 +359,10 @@ class TestKesslerMicrophysics:
 # Differentiability tests
 # ==============================================================================
 
-class TestDifferentiability:
-    """Tests that the NH model is differentiable through JAX."""
-
-    def test_grad_through_tendencies(self, grid, height_coord, terrain_metric, cdgrid):
-        """jax.grad works through C-D grid tendency computation."""
-        config = CDGridCompressibleEulerConfig(hyperdiff_coeff=0.0, sponge_coeff=0.0)
-        state = _make_nh_state(grid, height_coord)
-
-        def loss_fn(theta_p_data):
-            s = state._replace(
-                theta_prime=state.theta_prime.replace(data=theta_p_data),
-            )
-            tend = cdgrid_compressible_euler_slow_tendencies(
-                s, grid, height_coord, terrain_metric, cdgrid, config,
-            )
-            return jnp.sum(tend.drho_prime_dt.data ** 2)
-
-        grad = jax.grad(loss_fn)(state.theta_prime.data)
-        assert jnp.all(jnp.isfinite(grad))
-
 
 # ==============================================================================
 # Small-Earth scaling tests
 # ==============================================================================
-
-class TestSmallEarthFactor:
-    """Tests for small_earth_factor wiring."""
-
-    def test_small_earth_factor_scales_grid(self, grid, height_coord, terrain_metric):
-        """small_earth_factor=10 should scale grid radius and Coriolis."""
-        config = CDGridCompressibleEulerConfig(small_earth_factor=10.0)
-        model = CompressibleEulerModel(grid, height_coord, terrain_metric, config)
-        expected_radius = constants.R_earth / 10.0
-        assert abs(model.grid.radius - expected_radius) / expected_radius < 1e-6
-        # Coriolis should be scaled by factor
-        assert float(jnp.max(jnp.abs(model.grid.f))) > float(jnp.max(jnp.abs(grid.f))) * 9.0
-
-    def test_small_earth_factor_1_no_change(self, grid, height_coord, terrain_metric):
-        """Default small_earth_factor=1.0 should preserve original grid."""
-        config = CDGridCompressibleEulerConfig(small_earth_factor=1.0)
-        model = CompressibleEulerModel(grid, height_coord, terrain_metric, config)
-        assert model.grid.radius == grid.radius
-        assert jnp.allclose(model.grid.f, grid.f)
 
 
 class TestMassConservation:

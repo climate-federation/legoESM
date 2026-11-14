@@ -61,3 +61,27 @@ def test_unknown_case_rejected(monkeypatch):
     monkeypatch.setattr("sys.argv", ["run_pseudo_les.py", "--case", "bogus"])
     with pytest.raises(SystemExit):
         m.main()
+
+
+def test_gabls1_names_the_cap_width_and_the_flag_overrides_it():
+    """RULE 3: the MOST-surface case names the zeta-cap width; --most-zeta-cap-width
+    overrides it (0 = hard clip) and reaches the config."""
+    from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
+    m = _load()
+    assert m._CASES["gabls1"]["most_zeta_cap_width"] == MOST_ZETA_CAP_WIDTH
+
+    class A:
+        nx = ny = 4
+        nz = 6
+        Lx = 400.0
+        sgs = "vreman"
+        nu_floor = None
+        ic_amp = 0.1
+        maxiter = 2
+        hours = None
+        most_zeta_cap_width = 0.0
+    cfg, *_ = m.build("gabls1", A(), jnp.float64)
+    assert cfg.most_zeta_cap_width == 0.0
+    A.most_zeta_cap_width = None
+    cfg, *_ = m.build("gabls1", A(), jnp.float64)
+    assert cfg.most_zeta_cap_width == MOST_ZETA_CAP_WIDTH

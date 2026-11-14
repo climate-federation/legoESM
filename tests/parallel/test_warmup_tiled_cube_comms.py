@@ -30,7 +30,6 @@ import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.shard_map_compat import shard_map
-from legoesm.parallel.tiled_production_cdgrid import warmup_tiled_cube_comms
 from legoesm.parallel.cubesphere_exchange import (
     get_tiled_tables, tiled_diag_perms, tiled_guard_perms,
 )
@@ -45,25 +44,6 @@ def _mesh(kt=KT):
                     f"(XLA_FLAGS=--xla_force_host_platform_device_count).")
     dev = np.array(jax.devices()[:6 * kt * kt]).reshape(6, kt, kt)
     return Mesh(dev, axis_names=AXES)
-
-
-def test_warmup_self_skips_single_process():
-    # process_count() == 1 in the test harness -> no cross-process rendezvous,
-    # so the warmup is a no-op (single-device / CPU-virtual runs unaffected).
-    assert warmup_tiled_cube_comms(_mesh(), KT) is False
-
-
-def test_warmup_runs_under_force():
-    # force=True exercises the real warmup executables on the tiled mesh: if any
-    # perm table or axis name were wrong the ppermute/psum would raise here.
-    assert warmup_tiled_cube_comms(_mesh(), KT, force=True) is True
-
-
-def test_warmup_rejects_wrong_mesh_shape():
-    bad = Mesh(np.array(jax.devices()[:6]).reshape(6, 1, 1),
-               axis_names=AXES)
-    with pytest.raises(ValueError, match=r"\(6, kt, kt\)"):
-        warmup_tiled_cube_comms(bad, KT, force=True)
 
 
 def test_warmup_executables_split_the_two_clique_kinds():

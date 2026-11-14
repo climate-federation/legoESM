@@ -19,7 +19,8 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+from legoesm.core.bulk_flux import (MOST_ZETA_CAP_WIDTH,
+                                      NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH, apply_gustiness,
                                       ocean_surface_q_sat)
 from legoesm.ocean.eos import FreezingPointConfig, slab_freeze_point_K
@@ -107,6 +108,8 @@ class SimpleOceanConfig(NamedTuple):
     large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
     large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
     large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10); bulk_flux constant.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
 
 
 # ============================================================================
@@ -201,7 +204,7 @@ def _ocean_turbulent_fluxes(
         # "most" = generic iterative MOST with fixed roughness (no Charnock);
         # "coare3"/"large_yeager" = ocean-specific stability-dependent MOST.
         from legoesm.core.bulk_flux import (
-            compute_most_fluxes, large_yeager_widths, surface_reference_state)
+            compute_most_fluxes, surface_flux_widths, surface_reference_state)
         # Model-level forcing: surface-referenced T at its own height (#1818);
         # observed forcing keeps the solver's default reference height.
         T_air, z_kw = forcing.T_lowest, {}
@@ -216,7 +219,7 @@ def _ocean_turbulent_fluxes(
             scheme=config.bulk_scheme,
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
-            **large_yeager_widths(config),
+            **surface_flux_widths(config),
         )
         return shflx, lhflx
     raise ValueError(
@@ -232,6 +235,7 @@ def _slab_step(
     dt: float,
     q_flux: jnp.ndarray | None = None,
     open_water_frac: jnp.ndarray | float = 1.0,
+    surface_flux: jnp.ndarray | None = None,
 ) -> tuple[SlabOceanState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single mixed-layer energy balance step.
 
@@ -272,7 +276,11 @@ def _slab_step(
     # The atmospheric surface terms act only on the ice-free fraction
     # ``open_water_frac`` (1 = full cell); q_flux is ocean heat transport and
     # applies under ice too.
-    q_sfc_net = open_water_frac * (sw_net + lw_net - shflx - lhflx)
+    # ``surface_flux`` [W/m2 per unit water area, + into the layer]: the
+    # atmosphere's own open-water exchange (it owns the open-water fluxes)
+    # replaces this slab's bulk/radiation estimate.
+    q_sfc_net = (open_water_frac * (sw_net + lw_net - shflx - lhflx)
+                 if surface_flux is None else surface_flux)
     dT_dt = (q_sfc_net + q_flux_eff) / C_mix
     T_sfc_trial = T_sfc + dt * dT_dt
 
@@ -313,6 +321,7 @@ def _two_layer_step(
     dt: float,
     q_flux: jnp.ndarray | None = None,
     open_water_frac: jnp.ndarray | float = 1.0,
+    surface_flux: jnp.ndarray | None = None,
 ) -> tuple[SlabOceanState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Two-layer slab ocean: mixed layer + deep layer.
 
@@ -352,7 +361,8 @@ def _two_layer_step(
     q_flux_eff = config.Q_flux if q_flux is None else q_flux
     C_mix = config.rho_ocean * config.c_ocean * config.h_mix
     # Atmospheric surface terms on the ice-free fraction only (see _slab_step).
-    q_sfc_net = open_water_frac * (sw_net + lw_net - shflx - lhflx)
+    q_sfc_net = (open_water_frac * (sw_net + lw_net - shflx - lhflx)
+                 if surface_flux is None else surface_flux)
     dT_sfc_dt = (q_sfc_net + q_flux_eff - F_mix) / C_mix
     T_sfc_trial = T_sfc + dt * dT_sfc_dt
 
@@ -415,7 +425,8 @@ def make_ocean(config: SimpleOceanConfig, sst_map=None):
     # climatology and passes it in each coupling interval (eager path, no
     # recompile); a caller that never sets it is unchanged.
     if mode == "fixed":
-        def step_fixed(state, forcing, dt, q_flux=None, open_water_frac=1.0):
+        def step_fixed(state, forcing, dt, q_flux=None, open_water_frac=1.0,
+                       surface_flux=None):
             if sst_map is not None:
                 sst = sst_map
             else:
@@ -428,15 +439,19 @@ def make_ocean(config: SimpleOceanConfig, sst_map=None):
         return step_fixed
 
     elif mode == "slab":
-        def step_slab(state, forcing, dt, q_flux=None, open_water_frac=1.0):
+        def step_slab(state, forcing, dt, q_flux=None, open_water_frac=1.0,
+                       surface_flux=None):
             return _slab_step(state, forcing, config, dt, q_flux=q_flux,
-                              open_water_frac=open_water_frac)
+                              open_water_frac=open_water_frac,
+                              surface_flux=surface_flux)
         return step_slab
 
     elif mode == "two_layer":
-        def step_two_layer(state, forcing, dt, q_flux=None, open_water_frac=1.0):
+        def step_two_layer(state, forcing, dt, q_flux=None, open_water_frac=1.0,
+                       surface_flux=None):
             return _two_layer_step(state, forcing, config, dt, q_flux=q_flux,
-                                   open_water_frac=open_water_frac)
+                                   open_water_frac=open_water_frac,
+                                   surface_flux=surface_flux)
         return step_two_layer
 
     else:

@@ -51,6 +51,10 @@ the ``make_clm_ml_forward`` factory before calling physics routines."""
 # ---------------------------------------------------------------------------
 
 gs_type: int = 2  # Stomatal conductance: Medlyn (0), Ball-Berry (1), WUE optimization (2)
+# legoESM: smoothing width [mol/mol] of the canopy-air dew limit (0 = hard switch).
+# Set every step by clm_ml_interface from CLMMLCanopyConfig.dew_limit_smoothing_mol;
+# read at trace time, so one width per process.
+dew_limit_smoothing_mol: float = 1e-6
 gspot_type: int = 1  # Use potential conductance (0) or water-stressed conductance (1)
 gs_solver: int = 2  # WUE solver: Brent (1) or bisection (2)
 colim_type: int = 1  # Photosynthesis: minimum rate (0) or co-limited rate (1)

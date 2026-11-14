@@ -288,8 +288,9 @@ def test_zeta_clip_saturates():
     # otherwise pass unnoticed).
     for sc in _SCHEMES:
         for fn in (psi_m, psi_h):
-            _close(float(fn(_a([50.0]), sc)[0]), float(fn(_a([10.0]), sc)[0]))
-            _close(float(fn(_a([-50.0]), sc)[0]), float(fn(_a([-10.0]), sc)[0]))
+            for w in (0.0, 2.0):  # hard clip and default smooth cap saturate alike
+                _close(float(fn(_a([50.0]), sc, zeta_cap_width=w)[0]), float(fn(_a([10.0]), sc, zeta_cap_width=0.0)[0]))
+                _close(float(fn(_a([-50.0]), sc, zeta_cap_width=w)[0]), float(fn(_a([-10.0]), sc, zeta_cap_width=0.0)[0]))
     # AeroBulk's psi_m_coare/psi_h_coare carry no clip (TURB_COARE3P0 clips
     # zeta at +-50 before calling them): beyond 10 they keep changing.
     for fn in (psi_m_coare, psi_h_coare):

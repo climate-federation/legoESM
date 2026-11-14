@@ -205,18 +205,10 @@ DEFAULT_CONFIG = {
     "atmosphere": {
         # --- Two-axis solver selection ---
         # dynamics:       "shallow_water" | "hydrostatic" | "nonhydrostatic"
-        # discretization: "cdgrid" | "spectral" | "sfno" | "latlon_fv" | "mpas"
-        #
-        # Mapping to solver implementations:
-        #   shallow_water  + cdgrid   → CDGridShallowWaterModel
-        #   shallow_water  + spectral → SpectralShallowWaterModel
-        #   hydrostatic    + cdgrid   → CDGridPrimitiveEquationModel
-        #   hydrostatic    + spectral → SpectralPrimitiveEquationModel
-        #   nonhydrostatic + cdgrid   → CDGridCompressibleEulerModel
-        #   nonhydrostatic + spectral → SpectralCompressibleEulerModel
-        #
-        # Legacy aliases "centered", "finite_volume", "cgrid" are accepted
-        # and normalized to "cdgrid" at the boundary.
+        # Cubed-sphere dynamics use fv3_duo only. Shallow-water atmosphere
+        # has no duo driver lane; selecting it fails explicitly. Noncube
+        # spectral/latlon_cgrid/mpas solvers retain their existing dispatch.
+        # centered/finite_volume are resolved only with lat-lon grid context.
         #
         # NOTE: every key declared here MUST be mapped in
         # ``to_experiment_config`` and listed in ``_ATMOSPHERE_KEYS``.  A key
@@ -226,7 +218,7 @@ DEFAULT_CONFIG = {
         # ``nonhydrostatic`` entries were exactly that: declared, documented,
         # and wired to nothing.
         "dynamics": "shallow_water",
-        "discretization": "cdgrid",
+        "discretization": "fv3_duo",
         # Mirrors DycoreConfig.time_integrator's default so an unset config
         # keeps resolving the integrator grid-aware.  It was "ssp_rk3" while the
         # key was never mapped -- i.e. inert; mapping it with that stale default
@@ -420,7 +412,7 @@ class Config:
             "dycore": {
                 "model_type": _normalize_dynamics(atm.get("dynamics", "hydrostatic")),
                 "discretization": _normalize_discretization(
-                    atm.get("discretization", "cdgrid")
+                    atm.get("discretization", "fv3_duo" if grid.get("type", "cubed_sphere") == "cubed_sphere" else "cdgrid")
                 ),
                 "dt": float(atm.get("dt_seconds", 600)),  # dt_seconds -> dt
                 "hyperdiff_scale": float(atm.get(

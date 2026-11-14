@@ -1356,6 +1356,56 @@ def _div_tangent_safe_jvp(primals, tangents):
     return r, (dx - r * dy) / y
 
 
+@jax.custom_jvp
+def div_gated_tangent(x, y, live):
+    """``x / y``, forward bitwise identical to the division; the tangent is
+    ``(dx - (x/y) dy)/y`` where ``live`` and exactly 0 elsewhere.
+
+    For the MG2 conservation limiters (factor = available / sink): where the
+    conserved hydrometeor is absent (below ``MG2_QSMALL``) the sink and the
+    stock can both sit at 1e-220 .. 1e-290 inside a macmic sub-step, the
+    factor's local derivative ~ 1/sink reaches 1e28 per operation and the
+    compounded adjoint of a physics call reaches 1e75 against a finite
+    difference of 1e3 (.physics-validator/mg2_absent_gradient_gate/README.md).
+    Gating the tangent there treats the factor as constant in those cells:
+    the limited sink keeps the derivative ``factor * d(sink)``, bounded by
+    the factor, and the forward model is unchanged.  ``live`` is not
+    differentiated."""
+    return x / y
+
+
+@div_gated_tangent.defjvp
+def _div_gated_tangent_jvp(primals, tangents):
+    (x, y, live), (dx, dy, _) = primals, tangents
+    r = x / y
+    # the tangent's own derivative (second order) must not see 1/y at a gated
+    # tiny y either: divide by 1 there, the select then discards it
+    ys = jnp.where(live, y, jnp.ones_like(y))
+    t = (dx - (x / ys) * dy) / ys
+    return r, jnp.where(live, t, jnp.zeros_like(t))
+
+
+def mg2_absent_gradient_gate(x, mass):
+    """``x`` unchanged in value; held constant for the gradient where the
+    hydrometeor ``mass`` [kg/kg] is below ``MG2_QSMALL`` (MG2's own "absent"
+    threshold).
+
+    KNOWN DIFFERENCE (gradient only, forward bitwise): MG2 switches its
+    processes off below qsmall but keeps computing with the sub-threshold
+    amounts in a few places (conservation limiters, size-distribution
+    slopes), where the derivative of an O(1) ratio of two 1e-220 .. 1e-290
+    amounts is ~1/amount.  Those derivatives compounded to a physics-call
+    adjoint of 1e75 against a finite difference of 1e3
+    (.physics-validator/mg2_absent_gradient_gate/README.md).  Gated, the
+    gradient carries no sensitivity to an amount the scheme treats as
+    absent; it is discontinuous at ``MG2_QSMALL`` and does not cover tiny
+    intermediates created inside one call.  Holding an input constant also
+    moves, rather than removes, sensitivity: where the scheme deletes a
+    sub-threshold amount, d(q_new)/d(q_old) reads 1 instead of 0.  ``jnp.where`` (a select) keeps a
+    non-finite cotangent in a gated cell from leaking as NaN."""
+    return jnp.where(mass < MG2_QSMALL, jax.lax.stop_gradient(x), x)
+
+
 def mg2_droplet_effective_radius(q_c_ic, N_c_ic, rho, **widths):
     """CAM6 radiation droplet effective radius REL [m] (micro_mg_cam.F90:
     2534-2554): ``(pgam+3)/lambda/2`` from :func:`mg2_droplet_psd` where the
@@ -2369,7 +2419,9 @@ def mg2_deposition_limiter(q_v, T, qvi, q_c, qcrat, vap_dep, mnuccd, nnuccd, dt,
     cap = jnp.maximum((q_v - qvi) / (
         1.0 + constants.L_s ** 2 * qvi  # latent-ok: MG2 oracle constant (xxls_squared)
         / (constants.c_pd * constants.R_v * T ** 2)), 0.0)
-    # max(., 0): the smooth min of 1 and 0 is -3.7e-46, not 0
+    # max(., 0): the smooth min of 1 and 0 is -3.7e-46, not 0.  The stock here
+    # is the vapour excess over ice saturation, so the default gradient gate
+    # (cap >= MG2_QSMALL) only bites at the cap = 0 kink of max(., 0).
     f = jnp.maximum(mg2_qi_conservation_ratio(cap, jnp.zeros_like(cap), vap_dep + mnuccd,
                                               dt, 1.0, width=width), 0.0)
     return vap_dep * f, mnuccd * f, nnuccd * f
@@ -2387,11 +2439,21 @@ def mg2_qi_conservation_ratio(q_avail, src, snk, dt, omsm, width=0.0):
     ``min(1, ratio)``, so q_i still cannot go negative; it trims the sinks by
     up to ``width ln 2`` where the ratio is near 1 and is 1 to rounding far
     from it (measured gaps: test_mg2_ice_snow_oracle.py).  ``width = 0`` is
-    MG2's hard form exactly.  Default width 0.01 approved by user 2026-10-21."""
+    MG2's hard form exactly.  Default width 0.01 approved by user 2026-10-21.
+
+    Gradient only (forward unchanged): the factor's derivative is gated where
+    ``q_avail < MG2_QSMALL`` (:func:`div_gated_tangent`).  Gating the FACTOR
+    removes its half of the ``snk * (q_avail/snk)`` cancellation, so the
+    limited sink keeps ``factor * d(snk)``: safe only where ``snk``'s own
+    derivative is benign (measured, see the call sites)."""
     # sinks below 1e-30 kg/kg/s: ratio >= q/dt/1e-30 >> 1 either way, so the
     # sentinel keeps fp32 r finite without changing the factor (1).
     has = snk > 1.0e-30
-    r = jnp.where(has, (q_avail / dt + src) / jnp.where(has, snk, 1.0) * omsm,
+    # gradient only: no factor derivative where the stock is absent (forward
+    # unchanged; see div_gated_tangent)
+    r = jnp.where(has, div_gated_tangent(q_avail / dt + src,
+                                         jnp.where(has, snk, 1.0),
+                                         q_avail >= MG2_QSMALL) * omsm,
                   1.0e30)
     if width > 0.0:
         return smooth_min(jnp.ones_like(r), r, 1.0 / width)

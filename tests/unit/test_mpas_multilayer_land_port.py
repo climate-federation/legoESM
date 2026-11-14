@@ -38,7 +38,7 @@ FOUR_STEPS_DAYS = 1201.0 / 86400.0      # int(1201/300) = 4 steps
 TWO_STEPS_DAYS = 601.0 / 86400.0
 
 
-def _fake_surface_map(path, lat_deg, lon_deg):
+def _fake_surface_map(path, lat_deg, lon_deg, *, vg_air_entry_m):
     """Uniform-loam, all-bare-soil CLM map sized to the requested columns
     (same synthetic map as test_multilayer_land_driver)."""
     n = int(np.asarray(lat_deg).size)

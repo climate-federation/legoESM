@@ -1,0 +1,33 @@
+# =============================================================================
+# legoESM AMIP -- the CAM6 production deck on the FV3 DUO column lane, C48 L32
+# =============================================================================
+# This deck IS config/amip/amip_production_fv3duo_c24.yaml (itself the MPAS
+# production deck plus the duo's grid/dycore rows), included below, with ONLY
+# the rows that depend on resolution changed.  Every physics, land, forcing,
+# output and duo-dycore knob is inherited, so the deck cannot drift from the
+# C24 duo deck or from MPAS.
+# tests/unit/test_run_amip_cli.py resolves this deck against the C24 duo deck
+# and fails if any field outside the resolution rows differs.
+#
+# User 2026-11-11: the FV3 duo is the ONLY cubed-sphere dycore for production;
+# the cubed-sphere C48 production deck is this one (CAM6 physics, same as every
+# grid).  config/amip/amip_sota.yaml (cdgrid dycore, its own physics set) is
+# historical.
+include: amip_production_fv3duo_c24.yaml
+
+# ---- resolution-dependent rows ----------------------------------------------
+resolution: 48
+dt: 150.0                   # MPAS rule (deck ledger A): largest stable 1800-s divisor below the printed CFL clamp
+physics_update_steps: 12    # CAM6: physics every 1800 s at this dt
+rad_update_steps: 24        # CAM6 f09: radiation hourly at this dt
+# Same recipe as the C24 file (Zenodo 21986853 LMIP spin-up regridded by
+# nearest land neighbour, soil T from ERA5 1979-01-01 00 UTC stl1-4) on the
+# C48 duo column mesh; scripts/data/regrid_land_ic.py --target-grid fv3_duo
+# --target-resolution 48 (stage 1 from restart_1985_d000h00.npz md5
+# e619b555cf6bd018a19ac8a52f77b52a, stage 2 --era5-soil-t stl1-4 + lsm,
+# --era5-time 1979-01-01T00:00; stage 1 with --target-clm-surfdata, which
+# lifts 1 column (Taklimakan, +8.48 mm) to the run's dry floor, vote
+# 2026-11-12); file md5 b4eeee974d84b16da99dfda954d85c38; full provenance in
+# the file's metadata.
+# data/ is gitignored: stage the file in the launch directory.
+land_ic: data/lmip_soil_ic/soil_ic_fv3duo48_era5T_19790101.npz

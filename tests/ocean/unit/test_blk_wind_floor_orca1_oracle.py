@@ -56,7 +56,8 @@ def _coefficients(fx):
         jnp.asarray(fx["tair"]), q, slp)
     theta_sst = bf.exner_potential_temperature(T_sfc, slp)
     return bf.ncar_transfer_coefficients(
-        theta_air, q, theta_sst, ssq, jnp.asarray(fx["wndm"]))
+        theta_air, q, theta_sst, ssq, jnp.asarray(fx["wndm"]),
+        zeta_cap_width=0.0)  # NEMO's hard clip
 
 
 @pytest.mark.parametrize("name, idx", [("Cd", 0), ("Ch", 1), ("Ce", 2)])

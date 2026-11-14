@@ -230,6 +230,29 @@ __param_spec__ = {
             "cape_or_sharpness": "numerics: sigmoid sharpness on the CAPE-OR fallback trigger",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
             "cape_threshold": "default 0 = disabled/off (KF gates on the trigger function, not CAPE)",
+            "wrf_lut_knot_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_tpmix_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_condload_sqrt_width_m2s2": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wtw_floor_width_m2s2": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_prof5_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_lcl_gather_width_m": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_l5_gather_width_pa": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_q0_clip_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_q0_floor_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_tlcl_cap_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wklcl_cap_width_m": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_dtlcl_onset_width_ms": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wlcl_onset_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wlcl_cap_width_ms": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_rad_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_entrain_select_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_entrain_tiny_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_eqf_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_ee2_floor_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_frc_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_freeze_onset_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_abe_pos_width_m": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_chmin_clip_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "cloud_depth_min": "trigger: fixed shallow/deep cloud-depth split (not sigmoid-tunable, fix via config)",
             "cloud_depth_sharpness": "numerics: sigmoid sharpness on the deep/shallow blend",
             "cloud_top_detrainment_fraction": "fixed KF-Eta cloud-top detrainment-level fraction (structural detrainment profile, not a tunable closure rate)",
@@ -977,6 +1000,32 @@ class KainFritschConfig(NamedTuple):
     # KF-Eta port (kain_fritsch_wrf.py), OPT-IN and NOT RULE 5 compliant (its
     # traced-state switches are hard; #2280).  Any other value raises.
     variant: str = "smooth"
+    # RULE 5 widths of the variant="wrf_kfeta" port (#2280; forms and values
+    # voted author/GLM/codex); 0 = the oracle's hard switch.  Read only by that
+    # variant (kain_fritsch_wrf.py -> _kf_eta.KFSmoothing).
+    wrf_lut_knot_width: float = 0.25  # table index units, 0 or (0, 1]
+    wrf_tpmix_width_kgkg: float = 1.0e-6
+    wrf_condload_sqrt_width_m2s2: float = 1.0e-4
+    wrf_wtw_floor_width_m2s2: float = 1.0e-4
+    wrf_prof5_width: float = 0.05
+    wrf_lcl_gather_width_m: float = 50.0
+    wrf_l5_gather_width_pa: float = 500.0
+    wrf_q0_clip_width_kgkg: float = 1.0e-6
+    wrf_q0_floor_width_kgkg: float = 1.0e-7
+    wrf_tlcl_cap_width_k: float = 0.1
+    wrf_wklcl_cap_width_m: float = 100.0
+    wrf_dtlcl_onset_width_ms: float = 1.0e-4
+    wrf_wlcl_onset_width_k: float = 0.01
+    wrf_wlcl_cap_width_ms: float = 0.1
+    wrf_rad_clip_width: float = 0.05
+    wrf_entrain_select_width_k: float = 0.1
+    wrf_entrain_tiny_width_k: float = 1.0e-3
+    wrf_eqf_clip_width: float = 0.02
+    wrf_ee2_floor_width: float = 0.02
+    wrf_frc_clip_width: float = 0.02
+    wrf_freeze_onset_width_k: float = 0.5
+    wrf_abe_pos_width_m: float = 0.01
+    wrf_chmin_clip_width_k: float = 1.0
 
 
 class EmanuelConfig(NamedTuple):

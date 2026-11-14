@@ -28,12 +28,6 @@ from legoesm.core.operators import global_integral
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-    CDGridPrimitiveEquationModel,
-    CDGridPrimitiveEquationConfig,
-    fv3_hydrostatic_tendencies,
-    hydrostatic_to_fv3,
-)
 from legoesm.atmosphere.forcing.idealized.kessler_forcing import make_kessler_forcing_cube
 from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
@@ -62,31 +56,6 @@ def test_moist_ic_attaches_tracers():
     assert jnp.all(wet.tracers["q_r"].data == 0.0)
 
 
-def test_fv3_tendencies_carry_tracer_tendencies():
-    """fv3_hydrostatic_tendencies must return advective tracer tendencies for a
-    moist state (and None for a dry one)."""
-    grid, sigma = _grid_sigma()
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    config = CDGridPrimitiveEquationConfig()
-
-    dry = hydrostatic_to_fv3(
-        baroclinic_wave_init(grid, sigma, perturbed=True), cdgrid)
-    tend_dry = fv3_hydrostatic_tendencies(dry, grid, sigma, cdgrid, config)
-    assert tend_dry.tracer_tendencies is None
-
-    wet = hydrostatic_to_fv3(
-        baroclinic_wave_init(grid, sigma, perturbed=True, moist=True), cdgrid)
-    tend = fv3_hydrostatic_tendencies(wet, grid, sigma, cdgrid, config)
-    assert tend.tracer_tendencies is not None
-    assert set(tend.tracer_tendencies) == {"q_v", "q_c", "q_r"}
-    for k in ("q_v", "q_c", "q_r"):
-        assert tend.tracer_tendencies[k].data.shape == (6, _N, _N, _NLEV)
-        assert jnp.all(jnp.isfinite(tend.tracer_tendencies[k].data))
-    # q_v has a horizontal gradient (RH-tapered + perturbed jet) so its
-    # advective tendency must be nonzero somewhere.
-    assert jnp.any(jnp.abs(tend.tracer_tendencies["q_v"].data) > 0.0)
-
-
 def _total_tracer_mass(state, sigma, grid):
     # mass-weighted, area-weighted global tracer integral (advective-form proxy).
     # Reuses the model's own area weighting via global_integral.
@@ -96,58 +65,3 @@ def _total_tracer_mass(state, sigma, grid):
     col = jnp.sum(tw * dsigma[None, None, None, :], axis=-1) * state.p_s.data
     field = Field(data=col, name="tw_col", dims=("face", "x", "y"), units="kg/m^2")
     return float(global_integral(field, grid))
-
-
-def test_dycore_advects_tracers_and_mass_bounded():
-    """Pure advection (physics_fn=None): tracers change, stay finite + >=0, and
-    global tracer mass drifts only slowly (advective form, like T)."""
-    grid, sigma = _grid_sigma()
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    config = CDGridPrimitiveEquationConfig(
-        use_conservation_fixer=True, fix_mass=True,
-        anchor_mass_to_initial=True, zero_mean_ps_tendency=True,
-    )
-    model = CDGridPrimitiveEquationModel(grid, sigma, config)
-    state = hydrostatic_to_fv3(
-        baroclinic_wave_init(grid, sigma, perturbed=True, moist=True), cdgrid)
-
-    qv0 = state.tracers["q_v"].data
-    m0 = _total_tracer_mass(state, sigma, grid)
-    # CDGrid model.step returns the new state only (the physics carry is stashed
-    # on the model); FV3HydrostaticState is a NamedTuple, so do NOT unpack it.
-    for _ in range(15):
-        state = model.step(state, _DT, physics_fn=None)
-    qv1 = state.tracers["q_v"].data
-    m1 = _total_tracer_mass(state, sigma, grid)
-
-    for k in ("q_v", "q_c", "q_r"):
-        arr = state.tracers[k].data
-        assert jnp.all(jnp.isfinite(arr)), f"{k} non-finite"
-        assert float(jnp.min(arr)) >= -1e-12, f"{k} below floor"
-    assert float(jnp.max(jnp.abs(qv1 - qv0))) > 0.0, "q_v never advected"
-    rel = abs(m1 - m0) / max(m0, 1e-30)
-    assert rel < 0.05, f"tracer mass drifted too much (advective): {rel}"
-
-
-def test_moist_step_with_kessler_runs():
-    """A full moist step with the cube Kessler forcing runs and stays finite;
-    q_v changes (advection + condensation active)."""
-    grid, sigma = _grid_sigma()
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    config = CDGridPrimitiveEquationConfig(
-        use_conservation_fixer=True, fix_mass=True,
-        anchor_mass_to_initial=True, zero_mean_ps_tendency=True,
-    )
-    model = CDGridPrimitiveEquationModel(grid, sigma, config)
-    state = hydrostatic_to_fv3(
-        baroclinic_wave_init(grid, sigma, perturbed=True, moist=True), cdgrid)
-    phys = make_kessler_forcing_cube(_DT)
-
-    qv0 = state.tracers["q_v"].data
-    for _ in range(5):
-        state = model.step(state, _DT, physics_fn=phys)
-    for k in ("q_v", "q_c", "q_r"):
-        arr = state.tracers[k].data
-        assert jnp.all(jnp.isfinite(arr)), f"{k} non-finite"
-        assert float(jnp.min(arr)) >= -1e-12, f"{k} below floor"
-    assert float(jnp.max(jnp.abs(state.tracers["q_v"].data - qv0))) > 0.0

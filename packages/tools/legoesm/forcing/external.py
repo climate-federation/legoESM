@@ -2451,6 +2451,10 @@ class SolarConfig(NamedTuple):
     spectral_band_order: str = "auto"
     normalize_spectral: bool = True
     start_year: int = 1979
+    # SW gas-optics table whose g-points the per-band spectrum is expanded to;
+    # "" = the radiation's default SW table.  Must be the table the radiation
+    # runs (``RRTMGPConfig.sw_gas_file``), else the fractions have the wrong length.
+    sw_gas_file: str = ""
 
 
 def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
@@ -2520,7 +2524,8 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
                 "SolarConfig.spectral_band_order must be 'auto', 'as_is' "
                 f"or 'rrtmg_sw'; got {config.spectral_band_order!r}",
             )
-        _n_bands, _n_gpt = _rrtmg_sw_band_counts(DEFAULT_SW_GAS)
+        _sw_table = config.sw_gas_file or DEFAULT_SW_GAS
+        _n_bands, _n_gpt = _rrtmg_sw_band_counts(_sw_table)
         if spec_series.shape[1] == _n_bands and _n_bands != _n_gpt:
             # A per-band (14-band) file may need reordering to the
             # RRTMGP-SW g-point table order before index-based expansion.
@@ -2556,7 +2561,7 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
                         "override.", config.path, config.spectral_var,
                     )
                 spec = _cmip_sw_band_order_to_rrtmgp(spec)
-            spec = _expand_bands_to_gpoints(spec, DEFAULT_SW_GAS)
+            spec = _expand_bands_to_gpoints(spec, _sw_table)
         if config.normalize_spectral:
             denom = float(np.sum(spec))
             if denom <= 0.0:

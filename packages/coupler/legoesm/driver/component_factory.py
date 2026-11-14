@@ -41,19 +41,6 @@ logger = logging.getLogger("legoesm.driver.factory")
 # other combination fails fast with a precise diagnostic message.
 
 _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
-    # --- Cubed-sphere C-D grid ---
-    ("shallow_water", "centered",       "cubed_sphere"): "cdgrid_shallow_water",
-    ("shallow_water", "cdgrid",         "cubed_sphere"): "cdgrid_shallow_water",
-    ("hydrostatic",   "centered",       "cubed_sphere"): "cdgrid_primitive_equations",
-    ("hydrostatic",   "cdgrid",         "cubed_sphere"): "cdgrid_primitive_equations",
-    ("nonhydrostatic","centered",       "cubed_sphere"): "cdgrid_compressible_euler",
-    ("nonhydrostatic","cdgrid",         "cubed_sphere"): "cdgrid_compressible_euler",
-
-    # --- Cubed-sphere finite-volume (alias) ---
-    ("shallow_water", "finite_volume",  "cubed_sphere"): "cdgrid_shallow_water",
-    ("hydrostatic",   "finite_volume",  "cubed_sphere"): "cdgrid_primitive_equations",
-    ("nonhydrostatic","finite_volume",  "cubed_sphere"): "cdgrid_compressible_euler",
-
     # --- Spectral (Gaussian grid) ---
     ("shallow_water", "spectral",       "gaussian"):     "spectral_shallow_water",
     ("hydrostatic",   "spectral",       "gaussian"):     "spectral_primitive_equations",
@@ -246,18 +233,9 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
 # their own implicit-stable hyperdiff (and zero the FV one); the plane dycore
 # zeroes hyperdiff; lat-lon clamps A_h itself — none belong here, so the guard
 # never cries wolf about a coefficient the selected solver discards.
-# NB: cube SW (``cdgrid_shallow_water``) is intentionally ABSENT — it now
-# builds FV3EdgeShallowWaterModel with a validated FIXED preset
-# (williamson_cli_calibration) that owns its own hyperdiff/div_damp, so the
-# generic ``diff.hyperdiff`` guard would cry wolf about a coefficient the
-# model discards (codex M2 review).  The cube-SW factory branch rejects
-# non-default diffusion scales directly instead.
 _EXPLICIT_HYPERDIFF_SOLVERS = frozenset({
-    "cdgrid_primitive_equations",
-    "cdgrid_compressible_euler",
     "mpas_primitive_equations",
 })
-_EXPLICIT_DIVDAMP_SOLVERS = frozenset({"cdgrid_primitive_equations"})
 # Largest |z| on the negative real axis with |R(z)| <= 1 for the Shu-Osher
 # SSP-RK(5,4) tableau in timestepping/ssp_rk54.py (computed from it, 1e-5 grid).
 _SSP_RK54_REAL_AXIS_LIMIT = 5.33
@@ -288,8 +266,6 @@ def warn_if_diffusion_unstable(solver_name: str, diff: DiffusionCoeffs,
     checks = []
     if solver_name in _EXPLICIT_HYPERDIFF_SOLVERS:
         checks.append(("hyperdiff (biharmonic)", diff.hyperdiff, 4))
-    if solver_name in _EXPLICIT_DIVDAMP_SOLVERS:
-        checks.append(("div_damp", diff.div_damp, 2))
     for name, coeff, order in checks:
         coeff_max = adaptive_hyperdiff_coeff(dx_min, dt, order=order, safety=1.0)
         if coeff > coeff_max:
@@ -749,6 +725,13 @@ def driver_solver_name(config: ExperimentConfig) -> str | None:
     when the combination is unsupported).  Gate on this, not on one
     discretization spelling: several spellings build the same solver."""
     from legoesm.driver.config import normalize_grid_type
+    if normalize_grid_type(config.grid.grid_type) == "cubed_sphere":
+        if config.dycore.discretization != "fv3_duo":
+            raise ValueError(
+                "Unsupported atmosphere on cubed_sphere: only fv3_duo is supported; "
+                f"retired or unsupported selection {config.dycore.discretization!r}.")
+        if config.dycore.model_type == "shallow_water":
+            raise ValueError("fv3_duo has no atmosphere shallow-water driver lane.")
     return _DRIVER_SUPPORTED.get((
         config.dycore.model_type, config.dycore.discretization,
         normalize_grid_type(config.grid.grid_type)))
@@ -759,9 +742,7 @@ def energy_fixer_wired(config: ExperimentConfig, solver_name: str) -> bool:
     (the CAM-style global total-energy fixer, review 2026-10-10 F15): the
     MPAS hydrostatic core (serial ``_step_jit`` + MPI ``voronoi_mpi._step``),
     the FV3-duo COLUMN lane, the lat-lon C-grid hydrostatic core (every lane
-    runs ``_step_cgrid_impl``) and the cube C-D grid hydrostatic core
-    (``_step_fv3``; the sub-face-TILED dynamics lanes do not run it and are
-    refused at their driver entry).  Every other solver does not run it."""
+    runs ``_step_cgrid_impl``). Every other solver does not run it."""
     return (solver_name in _ENERGY_FIXER_SOLVERS
             or (solver_name in ("fv3_duo_primitive_equations",
                                 "spectral_primitive_equations")
@@ -771,7 +752,6 @@ def energy_fixer_wired(config: ExperimentConfig, solver_name: str) -> bool:
 _ENERGY_FIXER_SOLVERS = frozenset({
     "mpas_primitive_equations",
     "latlon_cgrid_primitive_equations",
-    "cdgrid_primitive_equations",
 })
 
 
@@ -784,7 +764,7 @@ def refuse_unwired_energy_fixer(config: ExperimentConfig,
                                                              solver_name):
         raise ValueError(
             f"DycoreConfig.energy_fixer=True, but the dycore total-energy "
-            f"fixer is wired only on the MPAS, lat-lon C-grid and cube C-D grid "
+            f"fixer is wired only on the MPAS, lat-lon C-grid "
             f"hydrostatic and FV3-duo / spectral column lanes; {solver_name!r} would run WITHOUT it and leave the "
             f"damping/numerical energy sink open.  Set energy_fixer=False "
             f"(run_amip/run_coupled --no-energy-fixer) to accept that sink "
@@ -797,7 +777,6 @@ def refuse_unwired_energy_fixer(config: ExperimentConfig,
 _HARD_VAPOUR_FLOOR_SOLVERS = frozenset({
     "mpas_primitive_equations",
     "latlon_cgrid_primitive_equations",
-    "cdgrid_primitive_equations",
 })
 
 
@@ -922,123 +901,6 @@ def create_atmosphere_dycore(
                 f"dycore.time_integrator={dc.time_integrator!r}. Use 'auto' "
                 f"(the default), or select a solver that supports it."
             )
-
-    # ----- Cubed-sphere C-D grid solvers -----
-    if solver_name == "cdgrid_shallow_water":
-        # FV3 single-implementation program M2 (2026-07-13, codex-reviewed):
-        # the FV3-faithful cube SW core is `FV3EdgeShallowWaterModel`
-        # (edge-midpoint split-D winds + `fv3_sw_tendencies`) — the model the
-        # Williamson matrix validates.  The legacy corner-corner
-        # `CDGridShallowWaterModel` is a DIFFERENT discretization that cannot
-        # stabilize the cube W5/W6 wave class (it lacks the `damp_v`
-        # del6_vt_flux vorticity sink, which needs edge-midpoint winds; W5
-        # peaks 550+ m/s at every supported tuning while Edge stays ~45 m/s).
-        # So the driver now advertises the validated core + its
-        # resolution-robust preset (`williamson_cli_calibration`: matched
-        # hyperdiff + div_damp + damp_v, stable C24-C48).  See
-        # docs/architecture/fv3_single_implementation_program.md (Phase-1 M2).
-        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
-            FV3EdgeShallowWaterModel, CDGridShallowWaterConfig,
-            williamson_cli_calibration,
-        )
-        # The cube SW core ships a VALIDATED fixed damping preset
-        # (williamson_cli_calibration).  The generic driver diffusion knobs
-        # do NOT apply here: FV3EdgeShallowWaterModel has no A_h consumer, and
-        # hyperdiff/div_damp are owned by the preset.  Reject non-default
-        # scales LOUDLY rather than silently ignoring them (codex M2 review).
-        for _knob, _val in (("hyperdiff_scale", dc.hyperdiff_scale),
-                            ("a_h_scale", dc.a_h_scale),
-                            ("div_damp_scale", dc.div_damp_scale)):
-            if _val != 1.0:
-                raise ValueError(
-                    f"cube shallow-water uses the validated fixed preset "
-                    f"`williamson_cli_calibration`; dycore.{_knob}={_val!r} "
-                    f"(non-default) would be silently ignored.  Remove it, or "
-                    f"tune the preset coefficients directly.")
-        # Calibrate on the ACTUAL grid resolution (grid.n), not the config
-        # field, and refuse a grid/config mismatch (codex M2 review): a direct
-        # caller passing a C48 grid with gc.resolution=24 would otherwise get
-        # C24 damping on a C48 grid.
-        n = int(grid.n)
-        if n != gc.resolution:
-            raise ValueError(
-                f"cube SW grid resolution (grid.n={n}) does not match config "
-                f"resolution (gc.resolution={gc.resolution}); refusing to "
-                f"build a model with mismatched damping calibration.")
-        cfg = williamson_cli_calibration(n)._replace(
-            use_conservation_fixer=dc.conservation_fixer,
-            fix_mass=dc.fix_mass,
-            # "auto" -> this dycore's own default; explicit names verbatim.
-            time_integrator=(CDGridShallowWaterConfig().time_integrator
-                             if dc.time_integrator == "auto"
-                             else dc.time_integrator),
-        )
-        return FV3EdgeShallowWaterModel(grid, cfg)
-
-    if solver_name == "cdgrid_primitive_equations":
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
-        )
-        cfg = CDGridPrimitiveEquationConfig(
-            A_h=diff.A_h,
-            hyperdiff_coeff=diff.hyperdiff, hyperdiff_ps_coeff=diff.hyperdiff,
-            div_damp_coeff=diff.div_damp,
-            use_conservation_fixer=dc.conservation_fixer,
-            fix_mass=dc.fix_mass,
-            conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,  # #1354/#1515 borrow (grid-general knob)
-            energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (hard-floor path only)
-            # Issue #273 Phase 3: forward the implicit gravity-wave
-            # damping switches from the canonical driver config.
-            # Default off (both 0/False) keeps the explicit path
-            # bit-exact for existing call sites.
-            implicit_grav_wave_use_pcg=dc.implicit_grav_wave_use_pcg,
-            implicit_grav_wave_damping=dc.implicit_grav_wave_damping,
-            # "auto" -> this dycore's own default; explicit names verbatim.
-            time_integrator=(CDGridPrimitiveEquationConfig().time_integrator
-                             if dc.time_integrator == "auto"
-                             else dc.time_integrator),
-            # #771: flux-form moisture transport (needs moisture attached via
-            # ExperimentConfig.moisture_advection; default off = advective).
-            moisture_flux_form=getattr(dc, "moisture_flux_form", False),
-            # CAM-style dycore total-energy fixer (F15; DycoreConfig).
-            energy_fixer=dc.energy_fixer,
-        )
-        return CDGridPrimitiveEquationModel(grid, sigma, cfg)
-
-    if solver_name == "cdgrid_compressible_euler":
-        _reject_unselectable_time_integrator("cubed-sphere non-hydrostatic (compressible Euler)")
-        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
-            CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
-        )
-        # Forward the driver-level mass fixer (mirrors the plane / NH
-        # branches).  Previously dropped: DycoreConfig.fix_mass=True was
-        # silently ignored on the cubed-sphere NH path.
-        # conservation_fixer=False overrides fix_mass=True (same contract
-        # as the lat-lon branch below).
-        _nh_fix_mass = dc.fix_mass and dc.conservation_fixer
-        cfg = CDGridCompressibleEulerConfig(
-            A_h=diff.A_h,
-            hyperdiff_coeff=diff.hyperdiff,
-            fix_mass=_nh_fix_mass,
-            anchor_mass_to_initial=_nh_fix_mass,
-        )
-        # Non-hydrostatic requires height coordinate and terrain metric.
-        # Expect grid to provide these or construct defaults.
-        height_coord = getattr(grid, "height_coord", None)
-        terrain_metric = getattr(grid, "terrain_metric", None)
-        if height_coord is None or terrain_metric is None:
-            from legoesm.grids.vertical import (
-                create_height_coordinate, compute_terrain_metric,
-            )
-            if height_coord is None:
-                # Build flat (zero topography) height coordinate.
-                nlev = sigma.sigma_full.shape[0] if hasattr(sigma, "sigma_full") else 40
-                H_top = 30_000.0  # metres
-                height_coord = create_height_coordinate(nlev, H_top)
-            if terrain_metric is None:
-                z_s = jnp.zeros_like(grid.lat)
-                terrain_metric = compute_terrain_metric(z_s, height_coord)
-        return CDGridCompressibleEulerModel(grid, height_coord, terrain_metric, cfg)
 
     # ----- Spectral solvers (Gaussian grid) -----
     if solver_name == "spectral_shallow_water":
@@ -1236,6 +1098,24 @@ def create_atmosphere_dycore(
         return MPASCompressibleEulerModel(grid, height_coord, terrain_metric, nh_cfg)
 
     # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
+    if solver_name == "fv3_duo_primitive_equations":
+        retired_options = [name for name, active in (
+            ("dycore.persistent_dgrid", dc.persistent_dgrid),
+            ("enable_tiled_dycore", config.enable_tiled_dycore),
+            ("moisture_advection (legacy switch)", config.moisture_advection),
+            ("grid.use_duogrid (legacy halo switch)", gc.use_duogrid),
+        ) if active]
+        if retired_options:
+            raise ValueError(
+                "fv3_duo refuses retired C/D-grid atmosphere options: "
+                + ", ".join(retired_options)
+                + ". Its native winds, halos and tracer transport use the duo lane's own contract.")
+        if (dc.time_integrator not in ("auto", DycoreConfig().time_integrator)
+                or dc.implicit_grav_wave_use_pcg
+                or dc.implicit_grav_wave_damping != 0):
+            raise ValueError("fv3_duo does not implement semi-implicit or selectable time integration.")
+        if config.distributed and config.distributed_mode != "spmd":
+            raise ValueError("fv3_duo distributed runs are SPMD-only; MPI is not wired.")
     if (solver_name == "fv3_duo_primitive_equations"
             and config.dycore.column_lane):
         return _create_fv3_duo_column_model(config, gc, model_type,

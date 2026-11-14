@@ -58,6 +58,7 @@ from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
+from legoesm.atmosphere.physics.microphysics._warm_rain import mg2_absent_gradient_gate
 from legoesm.atmosphere.physics.clouds.cloud_fraction import cam6_ice_stratus_fraction
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
@@ -640,21 +641,38 @@ def _make_hydrostatic_microphysics(
                 "snow number tracer N_s in the state; it is absent.")
         # Extract actual hydrometeor state from tracers (fall back to zero
         # for any species not present in the tracer registry).
+        _q = {k: _get_tracer(k) for k in ("q_c", "q_r", "q_i", "q_s", "q_g")}
+        _n = {k: _get_tracer(k) for k in ("N_c", "N_r", "N_i")}
+        _n["N_s"] = (_get_tracer("N_s") if state.tracers is not None
+                     and "N_s" in state.tracers else None)
+        # stored per MASS, used per VOLUME — see _PER_MASS_NUMBER_SPECIES
+        _nv = {k: number_per_mass_to_per_volume(_n[k], rho) for k in ("N_c", "N_r")}
+        if scheme_name == "morrison":
+            # Gradient-only gate (forward bitwise): no sensitivity to a
+            # hydrometeor below MG2's absent threshold, nor to its number
+            # (see mg2_absent_gradient_gate).  Numbers are keyed on their own
+            # mass (N_c->q_c, N_r->q_r, N_i->q_i, N_s->q_s); the per-volume
+            # ones are gated AFTER the density conversion so the absent
+            # number cannot reach T, p or q_v through rho either.
+            _absent = {k: _q["q_" + k[2]] for k in ("N_c", "N_r", "N_i", "N_s")}
+            _n = {k: (None if v is None else
+                      mg2_absent_gradient_gate(v, _absent[k]))
+                  for k, v in _n.items()}
+            _nv = {k: mg2_absent_gradient_gate(v, _absent[k]) for k, v in _nv.items()}
+            _q = {k: mg2_absent_gradient_gate(v, v) for k, v in _q.items()}
         hydrometeors = HydrometeorState(
-            q_c=_get_tracer("q_c"),
-            q_r=_get_tracer("q_r"),
-            q_i=_get_tracer("q_i"),
-            q_s=_get_tracer("q_s"),
-            q_g=_get_tracer("q_g"),
-            # stored per MASS, used per VOLUME — see _PER_MASS_NUMBER_SPECIES
-            N_c=number_per_mass_to_per_volume(_get_tracer("N_c"), rho),
-            N_r=number_per_mass_to_per_volume(_get_tracer("N_r"), rho),
-            N_i=_get_tracer("N_i"),
+            q_c=_q["q_c"],
+            q_r=_q["q_r"],
+            q_i=_q["q_i"],
+            q_s=_q["q_s"],
+            q_g=_q["q_g"],
+            N_c=_nv["N_c"],
+            N_r=_nv["N_r"],
+            N_i=_n["N_i"],
             # Prognostic snow number [1/kg] when the state carries it (the
             # CAM6 MG2 mode's two-moment snow, required there, see above);
             # absent outside that mode => None => single-moment snow.
-            N_s=(_get_tracer("N_s") if state.tracers is not None
-                 and "N_s" in state.tracers else None),
+            N_s=_n["N_s"],
         )
 
         # Aerosol-CCN specified-Nc fill.  Override the (dead-zeros, never
@@ -734,7 +752,7 @@ def _make_hydrostatic_microphysics(
                 # decision 2026-10-24, 2), on this sub-step's post-CLUBB state.
                 _ast = _kw["cloud_fraction"]
                 _npccn = cam6_activation_npccn(
-                    T_col, q_v_col, p_full_col, p_half_col, _get_tracer("N_c"),
+                    T_col, q_v_col, p_full_col, p_half_col, _n["N_c"],
                     hydrometeors.q_c, hydrometeors.q_i, _ast, phys_state, forcing,
                     cam6_activation, dt)
                 _kw["npccn"] = number_per_mass_to_per_volume(_npccn, rho)

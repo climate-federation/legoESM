@@ -153,6 +153,7 @@ from legoesm.driver.config import (
 from legoesm.driver.run_status import status_to_exit_code
 
 from legoesm import constants
+from legoesm.core.bulk_flux import VALID_UNSTABLE_SCHEMES
 from legoesm.grids.halo import CORNER_FILL_MODES
 
 _DYCORE_DEFAULTS = DycoreConfig()
@@ -761,6 +762,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "resolutions (C24/C48 L20) compile instead of stalling. "
                              "Numerically exact (columns are independent); must "
                              "divide the column count.")
+    parser.add_argument("--rrtmgp-gas-tables", choices=("reduced", "full"),
+                        default=_EXPERIMENT_DEFAULTS.rrtmgp_gas_tables,
+                        help="RRTMGP gas-optics tables: 'reduced' (LW g128 / SW "
+                             "g112) or 'full' (LW g256 / SW g224, the reference "
+                             "tables; about twice the radiation cost).")
     parser.add_argument("--rrtmgp-overhead-layer", action="store_true",
                         default=_EXPERIMENT_DEFAULTS.rrtmgp_overhead_layer,
                         help="CAM RRTMG-style transported layer from the model "
@@ -973,7 +979,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--surface-stability-scheme", type=str,
                         dest="surface_stability_scheme", default="dyer1974",
                         choices=["dyer1974", "beljaars_holtslag1991",
-                                 "grachev2007_sheba", "gryanik2020"],
+                                 "grachev2007_sheba", "gryanik2020", "gfs",
+                                 "wrf_revmm5", "mynn_sfc"],
                         help="Stable-branch (zeta>0) Monin-Obukhov similarity "
                              "functions for the surface layer (bulk_flux psi_m/"
                              "psi_h). dyer1974 (default) is byte-identical: "
@@ -984,6 +991,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "a rounding-level change on coare3, and the "
                              "genuinely different strong-stable tails there "
                              "are grachev2007_sheba/gryanik2020.")
+    parser.add_argument("--surface-unstable-scheme", type=str,
+                        dest="surface_unstable_scheme", default="native",
+                        choices=list(VALID_UNSTABLE_SCHEMES),
+                        help="Unstable-branch (zeta<0) Monin-Obukhov form, "
+                             "independent of --surface-stability-scheme. native "
+                             "(default, byte-identical) = each bulk scheme's own "
+                             "form (Businger-Dyer on large_yeager, Fairall blend "
+                             "on coare3); businger_dyer or coare3 force that form "
+                             "(with gryanik2020 an explicit choice scales the "
+                             "unstable heat function by Pr0=0.98 so phi_h is "
+                             "continuous at z/L=0; native keeps the bulk scheme's "
+                             "own unscaled form). Needs coare3 or large_yeager.")
     # Large-Yeager (--surface-bulk-scheme large_yeager) RULE 5 smooth-switch
     # widths (#2241).  Defaults = the ExperimentConfig values (bit-identical);
     # 0 = AeroBulk's hard switch.  Read only by large_yeager.
@@ -1006,6 +1025,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Large-Yeager smoothing band of the 33 m/s drag "
                              "cutoff [m/s]. 0 = AeroBulk hard cutoff. Read only "
                              "by large_yeager.")
+    parser.add_argument("--surface-most-zeta-cap-width",
+                        dest="surface_most_zeta_cap_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_most_zeta_cap_width,
+                        help="Half-width of the smooth cap on |z/L| at 10 in the "
+                             "Monin-Obukhov stability functions (identity below "
+                             "10 - width). 0 = the hard clip.")
+    parser.add_argument("--surface-gfs-unstable-join-width",
+                        dest="surface_gfs_unstable_join_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_gfs_unstable_join_width,
+                        help="Width in z/L of the smooth join of the GFS unstable "
+                             "branches at z/L = -0.5. 0 = the exact GFS step. "
+                             "Read only with --surface-unstable-scheme gfs.")
     parser.add_argument("--hb-kvf-min", dest="hb_kvf_min", type=float,
                         default=None,
                         help="Free-atmosphere diffusivity floor override "
@@ -1248,6 +1279,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "soil conductivity x 10**(-e * ice fraction). Active "
                              "only with --land-soil-freeze-thaw. Default 6 (CLM5); "
                              "0 = no impedance; range 0..10.")
+    parser.add_argument("--land-soil-vg-air-entry-m", dest="land_soil_vg_air_entry_m",
+                        type=float, default=_EXPERIMENT_DEFAULTS.land_soil_vg_air_entry_m,
+                        help="Air-entry head [m] of the modified van Genuchten soil "
+                             "retention curve (Vogel et al. 2001); <= 0, 0 = the "
+                             "classic curve. Default -0.02.")
     parser.add_argument("--land-canopy-stress-b0", dest="land_canopy_stress_b0",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_canopy_stress_b0,
@@ -2878,12 +2914,14 @@ def dry_run_check_inputs(config: ExperimentConfig,
 
 def _default_discretization_for_grid(grid_type: str) -> str:
     """The dycore discretization to use when the user gave a grid but no
-    ``--discretization``.  The SCVT Voronoi mesh supports only 'mpas'; every
-    other grid defaults to 'centered'.  Shared by ``_postprocess_args`` and
+    ``--discretization``. Cube uses 'fv3_duo', the SCVT Voronoi mesh uses
+    'mpas', and other grids retain 'centered'. Shared by ``_postprocess_args`` and
     ``build_config_from_args`` so a caller that skips postprocess still resolves
     a supported (model_type, discretization, grid_type) triple (codex r2)."""
     if grid_type in ("voronoi", "mpas", "mpas_voronoi", "icosahedral"):
         return "mpas"
+    if grid_type == "cubed_sphere":
+        return "fv3_duo"
     return "centered"
 
 
@@ -3047,6 +3085,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
         rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,
+        rrtmgp_gas_tables=args.rrtmgp_gas_tables,
         diurnal_cycle=args.diurnal_cycle,
         orbital_insolation=args.orbital_insolation,
         co2_ppmv=args.co2_ppmv,
@@ -3103,10 +3142,13 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_stability_scheme=args.surface_stability_scheme,
+        surface_unstable_scheme=args.surface_unstable_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
         surface_large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
         surface_large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
         surface_large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
+        surface_most_zeta_cap_width=args.surface_most_zeta_cap_width,
+        surface_gfs_unstable_join_width=args.surface_gfs_unstable_join_width,
         surface_z_ref_model_level=args.surface_z_ref_model_level,
         surface_ocean_q_sfc_saline=args.surface_ocean_q_sfc_saline,
         hb_kvf_min=args.hb_kvf_min,
@@ -3141,6 +3183,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_snow_scheme=args.land_snow_scheme,
         land_snow_emissivity=args.land_snow_emissivity,
         land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
+        land_soil_vg_air_entry_m=args.land_soil_vg_air_entry_m,
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
         land_canopy_snow_masking=args.land_canopy_snow_masking,
@@ -3962,7 +4005,9 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
     surface (anemic evaporation over a calm warm ocean).
 
     This re-applies the previously-resolved surface ``bulk_scheme`` +
-    ``gustiness_w_zi`` + ``stability_scheme`` and the two run-resolved surface
+    ``gustiness_w_zi`` + ``stability_scheme`` / ``unstable_scheme`` with their
+    RULE 5 widths (``most_zeta_cap_width``, ``gfs_unstable_join_width``) and the
+    two run-resolved surface
     switches (``z_ref_model_level``, ``ocean_q_sfc_saline``) onto the trained
     Louis config, keeping the trained ``Cd_neutral``/``Ch_neutral``/``z0``
     (the MOST/COARE schemes ignore the neutral ``Cd``/``Ch`` but DO use
@@ -3978,6 +4023,9 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
             bulk_scheme=prev_surf.bulk_scheme,
             gustiness_w_zi=prev_surf.gustiness_w_zi,
             stability_scheme=prev_surf.stability_scheme,
+            unstable_scheme=prev_surf.unstable_scheme,
+            most_zeta_cap_width=prev_surf.most_zeta_cap_width,
+            gfs_unstable_join_width=prev_surf.gfs_unstable_join_width,
             z_ref_model_level=prev_surf.z_ref_model_level,
             ocean_q_sfc_saline=prev_surf.ocean_q_sfc_saline))
 

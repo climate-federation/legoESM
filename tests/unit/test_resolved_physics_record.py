@@ -167,11 +167,11 @@ def test_config_from_record_is_strict() -> None:
 
 # --- lanes --------------------------------------------------------------------
 
-def _cube(tmp: Path, **kw) -> "ModelDriver":
+def _pipeline(tmp: Path, **kw) -> "ModelDriver":
     from legoesm.driver.model_driver import ModelDriver
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
-        dycore=DycoreConfig(energy_fixer=False, dt=1800.0),
+        grid=GridConfig(grid_type="latlon", resolution=4, nlev=5),
+        dycore=DycoreConfig(discretization="latlon_cgrid", energy_fixer=False, dt=1800.0),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=0),
         days=3601.0 / 86400.0, dataset="analytical", radiation="gray",
         microphysics="none", convection="none", turbulence="louis",
@@ -184,7 +184,7 @@ def _cube(tmp: Path, **kw) -> "ModelDriver":
 
 def test_pipeline_lane_records_at_run_start_including_the_override(
         tmp_path: Path) -> None:
-    d = _cube(tmp_path, turbulence_override=_turb(l_mix_max=137.0))
+    d = _pipeline(tmp_path, turbulence_override=_turb(l_mix_max=137.0))
     m = read_run_manifest(tmp_path)
     rec = m["config"]["resolved_physics"]
     assert set(rec) == set(RESOLVED_PHYSICS_KEYS)
@@ -346,11 +346,14 @@ def test_reproduce_refuses_a_field_filled_from_todays_default(
     (dict(dycore=DycoreConfig(discretization="fv3_duo",
                               column_lane=True)), True),
     (dict(dycore=DycoreConfig(discretization="fv3_duo")), True),
-    (dict(grid=GridConfig(grid_type="latlon"), enable_latlon_spmd=True,
+    (dict(grid=GridConfig(grid_type="latlon"),
+          dycore=DycoreConfig(discretization="latlon_cgrid"), enable_latlon_spmd=True,
           turbulence="louis"), True),
-    (dict(grid=GridConfig(grid_type="latlon"), enable_latlon_spmd=True,
+    (dict(grid=GridConfig(grid_type="latlon"),
+          dycore=DycoreConfig(discretization="latlon_cgrid"), enable_latlon_spmd=True,
           held_suarez_forcing=True), True),
-    (dict(grid=GridConfig(grid_type="latlon")), False),
+    (dict(grid=GridConfig(grid_type="latlon"),
+          dycore=DycoreConfig(discretization="latlon_cgrid")), False),
 ])
 def test_lanes_that_build_their_own_physics(cfg, own) -> None:
     """The setup pipeline is recorded only where it is what the kernels use;
@@ -417,17 +420,6 @@ def test_lat_band_lane_records_its_band_pipeline(tmp_path: Path,
         discretization="latlon_cgrid"), built)
 
 
-def test_tiled_cube_lane_records_its_tile_pipeline(tmp_path: Path,
-                                                   monkeypatch) -> None:
-    import jax
-    import legoesm.driver.physics_pipeline as pp   # tile builder imports it locally
-    if len(jax.devices()) < 24:
-        pytest.skip("needs --xla_force_host_platform_device_count=24")
-    built = _spy_pipelines(monkeypatch, pp)
-    _assert_records_lane_pipeline(tmp_path, _sharded_cfg(
-        GridConfig(grid_type="cubed_sphere", resolution=8, nlev=4), 24,
-        discretization="cdgrid", energy_fixer=False, hyperdiff_scale=0.0,
-        div_damp_scale=0.0, a_h_scale=0.0), built)
 
 
 def test_idealized_lanes_record_the_kessler_config_they_run(
@@ -454,7 +446,7 @@ def test_a_lane_that_records_nothing_fails_the_run(tmp_path: Path,
     monkeypatch.setattr(ModelDriver, "_lane_builds_own_physics",
                         lambda self: True)
     with pytest.raises(RuntimeError, match="without recording its resolved"):
-        _cube(tmp_path)
+        _pipeline(tmp_path)
 
 
 def test_reproduce_refuses_an_untagged_override(tmp_path: Path,
@@ -527,8 +519,8 @@ def test_pipeline_records_the_cloud_config_its_radiation_builds(
     radiation path builds (knobs + library defaults), and the orbit."""
     from legoesm.driver.model_driver import ModelDriver
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
-        dycore=DycoreConfig(energy_fixer=False, dt=1800.0),
+        grid=GridConfig(grid_type="latlon", resolution=4, nlev=5),
+        dycore=DycoreConfig(discretization="latlon_cgrid", energy_fixer=False, dt=1800.0),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=0),
         days=1, dataset="analytical", radiation="rrtmgp",
         cloud_scheme="sundqvist", cloud_rh_crit=0.85, orbital_insolation=True,
@@ -571,8 +563,8 @@ def test_run_tells_the_record_whether_conv_precip_reaches_radiation(
         return real(self, pipeline, conv_precip_threaded, **kw)
     monkeypatch.setattr(ModelDriver, "_record_pipeline_physics", spy)
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
-        dycore=DycoreConfig(energy_fixer=False, dt=1800.0),
+        grid=GridConfig(grid_type="latlon", resolution=4, nlev=5),
+        dycore=DycoreConfig(discretization="latlon_cgrid", energy_fixer=False, dt=1800.0),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=0),
         days=3601.0 / 86400.0, dataset="analytical", radiation="gray",
         microphysics="none", convection="none", turbulence="louis",
@@ -592,8 +584,8 @@ def test_reproduce_reruns_the_rollout_and_reapplies_post_setup_schemes(
     closure check passes."""
     from legoesm.driver.model_driver import ModelDriver
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
-        dycore=DycoreConfig(energy_fixer=False, dt=1800.0),
+        grid=GridConfig(grid_type="latlon", resolution=4, nlev=5),
+        dycore=DycoreConfig(discretization="latlon_cgrid", energy_fixer=False, dt=1800.0),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=0),
         days=3601.0 / 86400.0, dataset="analytical", radiation="gray",
         microphysics="none", convection="none", turbulence="louis",

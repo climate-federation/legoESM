@@ -977,7 +977,7 @@ def _grid_config_name(grid_type: str) -> str:
 def _disc_name(grid_type: str) -> str:
     """Map CLI grid name to ExperimentConfig discretization."""
     return {
-        "cubed-sphere": "cdgrid",
+        "cubed-sphere": "fv3_duo",
         "latlon": "finite_volume",
     }.get(grid_type, grid_type)
 
@@ -1616,61 +1616,7 @@ def run_benchmark(
             model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
             dev_config = create_latlon_mesh(n_devices=n_gpus)
     else:
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationModel,
-            CDGridPrimitiveEquationConfig,
-            hydrostatic_to_fv3,
-        )
-        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
-
-        grid = create_cubed_sphere(n_grid)
-        cdgrid = create_cubed_sphere_cdgrid(grid)
-        hd = hyperdiff_coeff(n_grid, grid_type)
-        # When mass anchoring (``fix_mass_hydrostatic_target``) is active
-        # we already get exact mass conservation via a single post-step
-        # allreduce.  The per-stage ``zero_mean_ps_tendency`` correction
-        # adds 3 allreduces per RK3 step (one per ``tendency_fn`` call)
-        # for what is, with ``anchor_mass_to_initial=True``, a redundant
-        # safety net at the cost of three extra latency-gated round-trips
-        # per step.  Disable it in the scaling benchmark — the comment
-        # in ``CDGridPrimitiveEquationConfig`` explicitly recommends this
-        # for "pure performance benchmarks".
-        config = CDGridPrimitiveEquationConfig(
-            hyperdiff_coeff=hd,
-            hyperdiff_ps_coeff=hd,
-            use_conservation_fixer=not no_conservation,
-            fix_mass=not no_conservation,
-            anchor_mass_to_initial=not no_conservation,
-            zero_mean_ps_tendency=False,
-        )
-        model = CDGridPrimitiveEquationModel(grid, sigma, config)
-        state_cc = baroclinic_wave_init(grid, sigma, perturbed=True, moist=_moist)
-        state = hydrostatic_to_fv3(state_cc, cdgrid)
-
-        total_cells = 6 * n_grid * n_grid * n_levels
-
-        # MPI distributed: use per-rank local device count, not total
-        from legoesm.parallel.mesh import get_active_config
-        active_cfg = get_active_config()
-        if active_cfg is not None and active_cfg.is_distributed:
-            dev_config = active_cfg
-        else:
-            dev_config = create_device_mesh(n_devices=n_gpus)
-            # Tripwire (codex ppermute-multiface review): the row below is
-            # labeled with n_gpus, so the mesh MUST actually have that many
-            # devices.  create_device_mesh silently clamps when fewer
-            # devices are visible (e.g. CUDA_VISIBLE_DEVICES mishap) — the
-            # old behavior recorded "2-GPU" rows from de-facto 1-device
-            # (replicated) programs without complaint.
-            if dev_config.n_devices != n_gpus:
-                raise RuntimeError(
-                    f"requested n_gpus={n_gpus} but the device mesh "
-                    f"resolved to {dev_config.n_devices} device(s) — "
-                    f"refusing to record a mislabeled scaling row "
-                    f"(visible devices: {len(jax.devices())})"
-                )
+        raise ValueError("fv3_duo replaces this retired cube atmosphere adapter; no duo equivalent is wired here.")
 
     backend = dev_config.backend
 

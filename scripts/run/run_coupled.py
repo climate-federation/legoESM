@@ -167,7 +167,8 @@ def build_sea_ice_config(args):
             changed[sub] = getattr(base, sub)._replace(enabled=True)
     for flag, field in (("ice_shortwave_scheme", "shortwave_scheme"),
                         ("ice_bulk_scheme", "bulk_scheme"),
-                        ("ice_stability_scheme", "stability_scheme")):
+                        ("ice_stability_scheme", "stability_scheme"),
+                        ("ice_unstable_scheme", "unstable_scheme")):
         v = getattr(args, flag, None)
         if v is not None and v != getattr(base, field):
             changed[field] = v
@@ -214,6 +215,12 @@ def _reject_unreachable_sea_ice_options(args, changed, base) -> None:
     that cannot run.
     """
     bulk = changed.get("bulk_scheme", base.bulk_scheme)
+    if getattr(args, "ice_unstable_scheme", None) and bulk not in _ICE_MOST_SCHEMES:
+        raise SystemExit(
+            f"--ice-unstable-scheme is only read by the MOST bulk branch; "
+            f"--ice-bulk-scheme {bulk!r} uses simple_bulk_fluxes and never "
+            f"consults stability functions. Use one of {_ICE_MOST_SCHEMES}."
+        )
     if getattr(args, "ice_stability_scheme", None) and bulk not in _ICE_MOST_SCHEMES:
         raise SystemExit(
             f"--ice-stability-scheme is only read by the MOST bulk branch; "
@@ -256,7 +263,8 @@ def build_coupler_config(args):
     enforces consistency, and it applies the same MOST gating.
     """
     if (args.surface_bulk_scheme == "constant"
-            and args.surface_stability_scheme == "dyer1974"):
+            and args.surface_stability_scheme == "dyer1974"
+            and args.surface_unstable_scheme == "native"):
         return None
     from legoesm.coupler.config import CouplerConfig
 
@@ -289,9 +297,12 @@ def build_coupler_config(args):
         gustiness_w_zi=args.surface_gustiness_zi,
         thermo_convention=args.bulk_thermo_convention,
         stability_scheme=args.surface_stability_scheme,
+        unstable_scheme=args.surface_unstable_scheme,
         large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
         large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
         large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
+        most_zeta_cap_width=args.surface_most_zeta_cap_width,
+        gfs_unstable_join_width=args.surface_gfs_unstable_join_width,
     )
 
 def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
@@ -543,9 +554,9 @@ _LAND_TILE_ONLY = ("transient_land_cover", "land_cover_surfdata",
 
 # Grid -> hydrostatic-dycore discretization when the deck names none.  lat-lon
 # uses the Arakawa C-grid so the atm co-locates with the C-grid 3-D ocean
-# (--ocean dynamic); cube uses cdgrid; voronoi -> MPAS; gaussian -> spectral.  voronoi/gaussian couple to the (grid-agnostic) slab ocean.
+# (--ocean dynamic); cube uses fv3_duo; voronoi -> MPAS; gaussian -> spectral.  voronoi/gaussian couple to the (grid-agnostic) slab ocean.
 _COUPLED_DISCRETIZATION = {
-    "latlon": "latlon_cgrid", "cubed_sphere": "cdgrid", "gaussian": "spectral",
+    "latlon": "latlon_cgrid", "cubed_sphere": "fv3_duo", "gaussian": "spectral",
     "voronoi": "mpas",
 }
 
@@ -629,6 +640,7 @@ def _find_latest_checkpoint(output_dir):
 def build_parser():
     """Build the run_coupled argument parser (exposed for CLI round-trip tests)."""
 
+    from legoesm.core.bulk_flux import VALID_UNSTABLE_SCHEMES
     parser = _run_amip().build_arg_parser()
     parser.description = "Run a fully coupled ESM simulation"
     # Coupled defaults where they differ from run_amip's: committed decks and
@@ -723,6 +735,14 @@ def build_parser():
                              "off. Closes the air-sea budget only with the "
                              "prognostic 3D ocean; the slab/two-layer ocean "
                              "computes its own fluxes.")
+    parser.add_argument("--atm-owns-surface",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="The atmosphere owns the land and open-water "
+                             "surface fluxes (CoupledConfig.atm_owns_surface, "
+                             "MPAS column loop only): the coupler steps only "
+                             "sea ice and lakes and hands their fluxes back; "
+                             "the ocean is forced by the atmosphere's "
+                             "open-water exchange. Default off.")
     # SLAB-only (LandConfig.runoff_scheme). topmodel = SIMTOP sub-grid saturated
     # fraction + topographic baseflow (Niu 2005 / CLM4.5); it is implemented and
     # param-spec'd but was unreachable -- land_scheme_overrides built
@@ -768,12 +788,20 @@ def build_parser():
                              "scheme, like the land and slab tiles.")
     parser.add_argument("--ice-stability-scheme",
                         choices=["dyer1974", "beljaars_holtslag1991",
-                                 "grachev2007_sheba", "gryanik2020"],
+                                 "grachev2007_sheba", "gryanik2020", "gfs",
+                                 "wrf_revmm5", "mynn_sfc"],
                         default=None,
                         help="Stable-regime MOST functions for the ice tile "
                              "(grachev2007_sheba is the Arctic sea-ice "
                              "reference). Requires a MOST --ice-bulk-scheme "
                              "(most/coare3/large_yeager).")
+    parser.add_argument("--ice-unstable-scheme",
+                        choices=list(VALID_UNSTABLE_SCHEMES),
+                        default=None,
+                        help="Unstable-regime MOST form for the ice tile, "
+                             "independent of --ice-stability-scheme (native = "
+                             "the bulk scheme's own form). Requires a MOST "
+                             "--ice-bulk-scheme (most/coare3/large_yeager).")
     parser.add_argument("--land-runoff-scheme", choices=_LAND_RUNOFF_SCHEMES,
                         default=None,
                         help="Slab-land runoff partitioning: 'bucket' (default, "
@@ -1146,7 +1174,8 @@ def main(argv=None, *, build_only=False):
     # so make_grid_remapper hits the regular-lat-lon overlap branch.  A
     # co-located spectral 3-D ocean stays idealized; cubed_sphere / latlon /
     # voronoi(MPAS) support the dynamic ocean too.
-    overrides = {"couple_surface_fluxes": args.couple_surface_fluxes}
+    overrides = {"couple_surface_fluxes": args.couple_surface_fluxes,
+                 "atm_owns_surface": args.atm_owns_surface}
     ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
     # A cubed-sphere OR gaussian(spectral) atmosphere drives a 3-D ocean ONLY on
     # a DISTINCT lat-lon ocean grid (--ocean-grid latlon:<res>), coupled via the
