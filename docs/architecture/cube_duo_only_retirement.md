@@ -75,7 +75,7 @@ vertical table is ported or changed.
 
 - User-directed: reject retired selections instead of aliasing them silently.
 - User-directed: retain shared/ambiguous modules; the ocean registry is the
-  measured import dependency requiring the shallow-water module to stay.
+  verified source dependency requiring the shallow-water module to stay.
 - User-directed: refuse unported matrix/benchmark adapters instead of adding
   physics coupling, vertical tables or numerical ports.
 - Preserve existing accumulated config diagnostics; factory lookup refuses
@@ -109,7 +109,11 @@ Implementation commit before the first controls: e137cbf996.
   `1 failed, 1 warning in 0.95s`.
 - Each mutation restored saved bytes in finally and asserted a clean tracked
   status. The restored check produced `177 passed, 2 warnings in 59.54s`.
-- Final controls on the completed implementation are recorded after their run.
+- Final controls on c9bdc40c26 repeated both applied reversions: the legacy
+  test produced `1 failed, 1 warning in 14.15s`; the defaults test produced
+  `1 failed, 1 warning in 0.88s`. Saved bytes were restored, git status was
+  clean, and the restored suite produced
+  `177 passed, 2 warnings in 59.56s` (`POST-MUTATION CHECK PASSED`).
 
 Local raw logs and control scripts are retained, ignored, under
 `.pytest_cache/cube-retirement/`.
@@ -169,9 +173,16 @@ No allowance or tolerance is increased for these failures.
 - Named Claude/GLM review pair was not run; the two available independent
   reviewers were Codex agents.
 
+### Local commits
+
+- e137cbf996: primary retirement implementation and initial controls.
+- c9bdc40c26: completed entrypoint, legacy-option, plugin and shared-test audit.
+- The final documentation-only commit records the completed controls. No push
+  or PR was performed.
+
 ### Per-file mixed checks on the retired tree
 
-Each file ran in a fresh Python process to avoid the compiler limit encountered
+Each file ran in a fresh Python process after a JAX symbol-materialization error
 in the initial combined run. Failing checks below are covered by the original
 baseline replays above; their numerical code is unchanged.
 
@@ -182,6 +193,7 @@ baseline replays above; their numerical code is unchanged.
 - `tests/atmosphere/test_cube_moist_tracer_advection.py`: `1 passed, 1 warning in 17.99s`.
 - `tests/parallel/test_cube_tile_native_segment.py`: `1 passed, 1 warning in 0.65s`.
 - `tests/parallel/test_tiled_fv3_hydrostatic_tracer.py`: `1 passed, 1 warning in 27.76s`.
+- `tests/parallel/test_warmup_tiled_cube_comms.py`: `1 skipped, 1 warning in 0.48s`.
 - `tests/unit/test_diff_atmosphere_dynamics.py`: `12 passed, 1 warning in 95.36s (0:01:35)`.
 - `tests/unit/test_moisture_advection_wiring.py`: `8 passed, 1 warning in 13.78s`.
 - `tests/unit/test_pr_f_fixes.py`: `1 passed, 1 warning in 2.99s`.
@@ -204,6 +216,7 @@ baseline replays above; their numerical code is unchanged.
 - `tests/atmosphere/nonhydrostatic/unit/test_compressible_euler.py`: `25 passed, 1 warning in 27.16s`.
 - `tests/distributed/test_mpi_driver.py`: `2 passed, 1 warning in 1.88s`.
 - `tests/parallel/test_tiled_center_to_dgrid_vector.py`: `1 passed, 1 warning in 27.62s`.
+- `tests/parallel/test_tiled_operator_split_step.py`: `1 skipped, 1 warning in 0.47s`.
 - `tests/unit/test_conservation_drift.py`: `2 failed, 60 passed, 1 warning in 16.90s`.
 - `tests/unit/test_dycore_energy_fixer.py`: `17 passed, 1 warning in 104.32s (0:01:44)`.
 - `tests/unit/test_physical_balances.py`: `4 passed, 1 warning in 43.85s`.
