@@ -751,9 +751,79 @@ def test_updraft_mass_closes_with_a_rejected_top(monkeypatch):
     assert bool(o["fired"][0])
     uer, udr = np.asarray(o["uer"][0]), np.asarray(o["udr"][0])
     assert abs(uer.sum() - udr.sum()) <= 1e-12 * uer.sum()
+    der, ddr = np.asarray(o["der"][0]), np.asarray(o["ddr"][0])
+    assert np.abs(der).sum() > 0.0
+    assert abs(der.sum() + ddr.sum()) <= 1e-12 * np.abs(der).sum()
     _, x = _wrapper_inputs(fx, "L_nat_w0")
     out, _ = kain_fritsch_convection(
         **x, config=_WRF_DEFAULT._replace(wrf_top_stop_umf_width_kgs=2.000001))
+    dp = fx["p_half"][:, 1:] - fx["p_half"][:, :-1]
+    tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt)
+           + np.asarray(out.dq_r_conv_dt)) * dp / constants.g
+    scale = np.sum(np.abs(np.asarray(out.dq_v_dt)) * dp / constants.g, axis=1)
+    f = fx["L_nat_w0_fired"] == 1
+    assert np.all(np.asarray(out.convective_mask)[f] == 1.0)
+    assert np.all(np.abs(tot.sum(axis=1))[f] <= 1.0e-9 * scale[f])
+
+
+def _sweep_column(fx, i, T=None, smoothing=_DEFAULT, dtype=jnp.float64):
+    cs, trig, warm, fqi, fqs = fx["sweep_combos"][fx["sweep_combo"][i]]
+    a = [jnp.asarray(fx[f"sweep_{k}"][i], dtype)[None]
+         for k in ("u", "v", "T", "q", "p", "dz", "w", "rhoe")]
+    if T is not None:
+        a[2] = T
+    return kfe.kf_eta_para(*a, dt=fx["sweep_dt"][i], dx=fx["sweep_dx"][i], constants=_consts(fx, cs),
+                           trigger=int(trig), warm_rain=warm == "1", f_qi=fqi == "1",
+                           f_qs=fqs == "1", cudt=float(fx["cudt"]), smoothing=smoothing), a[2]
+
+
+def _split_weights(monkeypatch, share):
+    top_weights = kfe._top_weights
+
+    def split(E1, E2, s_ex, CW, kk, K, LCL, KX, KPBL, let_fixed=None):
+        W = top_weights(E1, E2, s_ex, CW, kk, K, LCL, KX, KPBL, let_fixed)
+        m = jnp.maximum(LCL, KPBL)
+        low = (kk == m + 1)[:, None] * jnp.sum(W, axis=0)[None, :]
+        return (1.0 - share) * W + share * jnp.where(kk[None, :] > m, low, 0.0)
+
+    monkeypatch.setattr(kfe, "_top_weights", split)
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+def test_downdraft_mixture_gradient_is_finite_for_a_tiny_share(monkeypatch, dtype):
+    """A LET member carrying 1e-20 of the weight (its own downdraft source
+    level) keeps the temperature gradient finite."""
+    fx = dict(np.load(_FIX))
+    _split_weights(monkeypatch, 1e-20)
+    sm = _DEFAULT._replace(top_stop_umf_width_kgs=2.0000011)
+    _, T = _sweep_column(fx, 90, smoothing=sm, dtype=dtype)
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, 90, T, sm, dtype)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_downdraft_mixes_over_the_source_levels_of_the_let_members(monkeypatch):
+    """Half of each top's weight moved to the lowest accepted LET puts those
+    members' downdraft source one level below it, under the column's own LFS
+    (a downdraft deep enough to run): the downdraft is the mixture of both
+    runs (its normalised profile changes shape, not only amplitude), its mass
+    closes, the column's water closes, and the temperature gradient stays
+    finite.  The base run's width differs by 2e-7 kg/s only to get its own
+    trace; the top widths move no fixture case (1.6e-15)."""
+    fx = dict(np.load(_FIX))
+    base, _ = _sweep_column(fx, 90, smoothing=_DEFAULT._replace(top_stop_umf_width_kgs=2.0000007))
+    _split_weights(monkeypatch, 0.5)
+    sm = _DEFAULT._replace(top_stop_umf_width_kgs=2.0000009)
+    o, T = _sweep_column(fx, 90, smoothing=sm)
+    assert bool(o["fired"][0])
+    der, ddr = np.asarray(o["der"][0]), np.asarray(o["ddr"][0])
+    assert abs(der.sum() + ddr.sum()) <= 1e-12 * np.abs(der).sum()
+    d0 = np.asarray(base["der"][0])
+    assert float(np.abs(der / der.sum() - d0 / d0.sum()).max()) > 1e-6
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, 90, T, sm)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g)))
+    _, x = _wrapper_inputs(fx, "L_nat_w0")
+    out, _ = kain_fritsch_convection(
+        **x, config=_WRF_DEFAULT._replace(wrf_top_stop_umf_width_kgs=2.0000009))
     dp = fx["p_half"][:, 1:] - fx["p_half"][:, :-1]
     tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt)
            + np.asarray(out.dq_r_conv_dt)) * dp / constants.g
