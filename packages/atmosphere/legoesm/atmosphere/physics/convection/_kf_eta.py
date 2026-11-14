@@ -55,6 +55,7 @@ from legoesm.atmosphere.physics.convection.config import KainFritschConfig
 from legoesm.core.smooth import (
     positive_part_c1,
     smooth_max_c1,
+    smooth_min_c1,
     smoothstep_cubic,
     sqrt_c1,
     validate_smoothing_width,
@@ -123,10 +124,10 @@ KF_SWITCHES = {
     "C-ML": ("C", "hard", "melting level ML (T0 > T00 below LTOP)"),
     "C-NIC": ("C", "hard", "TIMEC rounded to NINT(TIMEC/DT) steps, NCA"),
     "C-NSTEP": ("C", "hard", "subsidence sub-step count NSTEP and its step mask"),
-    "D1": ("D", "hard", "DTLCL = 0 for WKL < 1e-4"),
+    "D1": ("D", "smooth", "DTLCL = 0 for WKL < 1e-4"),
     "D2": ("D", "hard", "DTRH three-way split on RHLCL"),
-    "D3": ("D", "hard", "WLCL = 1 unless DTTOT > 1e-4"),
-    "D4": ("D", "hard", "entrainment selection cold / vb / tiny (ee2, ud2, eqfrc)"),
+    "D3": ("D", "smooth", "WLCL = 1 unless DTTOT > 1e-4"),
+    "D4": ("D", "smooth", "entrainment selection cold / vb / tiny (ee2, ud2, eqfrc)"),
     "D5": ("D", "hard", "shear sign SHSIGN"),
     "D6": ("D", "hard", "RCBH polynomial / constant splice at CBH 3 and 25 kft"),
     "D7a": ("D", "smooth", "TPMIX2 saturated / enough condensate / dry branches"),
@@ -135,20 +136,20 @@ KF_SWITCHES = {
     "D7d": ("D", "smooth", "CONDLOAD |WTW| < 1e-4 floor"),
     "D7e": ("D", "smooth", "PROF5 y >= 0 polynomial branch and |y|"),
     "D7f": ("D", "hard", "PROF5 eqf == 0 / eqf == 1 exact-equality overrides"),
-    "D7g": ("D", "hard", "glaciation: freezing (frz) and partial (part) ramps, DTFRZNEW"),
+    "D7g": ("D", "smooth", "glaciation: freezing (frz) and partial (part) ramps, DTFRZNEW"),
     "D7h": ("D", "hard", "downdraft RH adjustment: low (qsrh < qd) and adj (rhh < 1)"),
     "D7i": ("D", "hard", "subsidence moisture borrow where QG < 0"),
     "D7j": ("D", "hard", "closure mixed-layer supersaturation adjustment (sup)"),
     "D7k": ("D", "hard", "CPR > 0 guard of the precipitation feedback ratio FRC2"),
     "E1": ("E", "smooth", "Q0 clipped to [1e-6, QES]"),
     "E2": ("E", "smooth", "TLCL <= TMIX (first pass and closure)"),
-    "E3": ("E", "hard", "WKLCL linear ramp capped at wklcl_ref"),
-    "E4": ("E", "hard", "WLCL <= 3 m/s"),
-    "E5": ("E", "hard", "RAD ramp clipped to [rad_min, rad_max]"),
-    "E6": ("E", "hard", "ABE accumulates only positive dilbe"),
-    "E7": ("E", "hard", "eqf clipped to [0, 1]"),
-    "E8": ("E", "hard", "ee2 >= 0.5"),
-    "E9": ("E", "hard", "CHMIN temperature ramp between 273 and 293 K"),
+    "E3": ("E", "smooth", "WKLCL linear ramp capped at wklcl_ref"),
+    "E4": ("E", "smooth", "WLCL <= 3 m/s"),
+    "E5": ("E", "smooth", "RAD ramp clipped to [rad_min, rad_max]"),
+    "E6": ("E", "smooth", "ABE accumulates only positive dilbe"),
+    "E7": ("E", "smooth", "eqf clipped to [0, 1]"),
+    "E8": ("E", "smooth", "ee2 >= 0.5"),
+    "E9": ("E", "smooth", "CHMIN temperature ramp between 273 and 293 K"),
     "E10": ("E", "hard", "upstream direction OMG <= 0 in the subsidence advection"),
     "E11": ("E", "hard", "square root kink at zero: GDT, wind speed, shear"),
     "E11c": ("E", "smooth", "CONDLOAD square roots of WTW and G1"),
@@ -246,6 +247,10 @@ _CHMIN_TCOLD_K = 273.0
 _CHMIN_DEEP_M = 4.0e3
 _CHMIN_SHALLOW_M = 2.0e3
 _CHMIN_SLOPE_M_PER_K = 100.0
+# the C1 CHMIN clamps the ramp, so its top must be the oracle's deep value
+# kfsw: S
+assert _CHMIN_DEEP_M == _CHMIN_SHALLOW_M + _CHMIN_SLOPE_M_PER_K * (_CHMIN_TWARM_K
+                                                                  - _CHMIN_TCOLD_K)
 _ABE_MIN = 1.0  # deep convection needs ABE > 1
 _TIMEC_SHALLOW_S = 2400.0
 _VWS_SCALE = 1.0e3
@@ -324,6 +329,19 @@ class KFSmoothing(NamedTuple):
       (never below 1e-6) (E1).
     * ``tlcl_cap_width_k``: band of the one-sided C1 TLCL <= TMIX (E2), first
       pass and closure.
+    * Updraft (PR 4; cloud top LTOP, LET and the A4 test stay hard):
+      ``wklcl_cap_width_m`` (E3 WKLCL ramp cap, symmetric), ``dtlcl_onset_width_ms``
+      (D1, DTLCL ramps in above WKL = 1e-4), ``wlcl_onset_width_k`` (D3, WLCL
+      ramps in above DTTOT = 1e-4 K), ``wlcl_cap_width_ms`` (E4, one-sided
+      WLCL <= 3), ``rad_clip_width`` (E5, RAD ramp clip, in WKL/rad_wkl_ref),
+      ``entrain_select_width_k`` (D4 cold and vb weights, centred) and
+      ``entrain_tiny_width_k`` (D4 tiny weight, above tvdiff = 1e-3 K),
+      ``eqf_clip_width`` (E7), ``ee2_floor_width`` (E8), ``frc_clip_width``
+      (D7g frozen-fraction cap at 1) and ``freeze_onset_width_k`` (D7g blend
+      of the frozen and unfrozen states below TTFRZ), ``abe_pos_width_m`` (E6
+      positive part of dilbe, updraft, its stop2 rollback and the closure),
+      ``chmin_clip_width_k`` (E9 CHMIN clamp in TLCL).  D7f (PROF5 endpoint
+      overrides, a 2e-11 jump where eqf is constant) stays hard.
     """
 
     lut_knot_width: float
@@ -336,6 +354,19 @@ class KFSmoothing(NamedTuple):
     q0_clip_width_kgkg: float
     q0_floor_width_kgkg: float
     tlcl_cap_width_k: float
+    wklcl_cap_width_m: float
+    dtlcl_onset_width_ms: float
+    wlcl_onset_width_k: float
+    wlcl_cap_width_ms: float
+    rad_clip_width: float
+    entrain_select_width_k: float
+    entrain_tiny_width_k: float
+    eqf_clip_width: float
+    ee2_floor_width: float
+    frc_clip_width: float
+    freeze_onset_width_k: float
+    abe_pos_width_m: float
+    chmin_clip_width_k: float
 
 
 KF_HARD = KFSmoothing(*(0.0 for _ in KFSmoothing._fields))
@@ -348,14 +379,8 @@ assert _PROF5_WIDTH_MAX < 1.0 / _P5_P  # the branch continuations' pole stays ou
 
 
 def kf_smoothing(config: KainFritschConfig) -> KFSmoothing:
-    """The widths a ``KainFritschConfig`` selects (its ``wrf_*`` fields)."""
-    return KFSmoothing(
-        config.wrf_lut_knot_width, config.wrf_tpmix_width_kgkg,
-        config.wrf_condload_sqrt_width_m2s2, config.wrf_wtw_floor_width_m2s2,
-        config.wrf_prof5_width,
-        config.wrf_lcl_gather_width_m, config.wrf_l5_gather_width_pa,
-        config.wrf_q0_clip_width_kgkg, config.wrf_q0_floor_width_kgkg,
-        config.wrf_tlcl_cap_width_k)
+    """The widths a ``KainFritschConfig`` selects (its ``wrf_<field>`` fields)."""
+    return KFSmoothing(*(getattr(config, f"wrf_{f}") for f in KFSmoothing._fields))  # kfsw: S
 
 
 def validate_kf_smoothing(sm: KFSmoothing) -> None:
@@ -516,16 +541,136 @@ def _stencil_c1(x, n_nodes, w):
 
 def _step_c(x, w):
     """C1 step centred on 0, band |x| < w/2: 0 below, 1 above (RULE 5)."""
-    return smoothstep_cubic(0.5 + x / w)  # kfsw: C-KLCLg,C-L5g
+    return smoothstep_cubic(0.5 + x / w)  # kfsw: C-KLCLg,C-L5g,D4
 
 
 def _cap_c1(x, cap, w):
     """min(x, cap) (w = 0, the oracle) or its one-sided C1 form: never above
     ``cap``, exactly ``x`` below ``cap - w`` (E1 Q0 <= QES and, negated, Q0 >=
-    1e-6; E2 TLCL <= TMIX)."""
+    1e-6; E2 TLCL <= TMIX; E4 WLCL <= 3 m/s)."""
     if w:  # kfsw: S
-        return cap - positive_part_c1(cap - x, 1.0 / w)  # kfsw: E1,E2
-    return jnp.minimum(x, cap)  # kfsw: E1,E2
+        return cap - positive_part_c1(cap - x, 1.0 / w)  # kfsw: E1,E2,E4
+    return jnp.minimum(x, cap)  # kfsw: E1,E2,E4
+
+
+def _glaciate(ab, p, tu, theteu, qu, qliq, qice, qnl, qni, ttemp_prev, sm):
+    """Updraft glaciation at one level (l.1141-1161, DTFRZNEW).  Returns the
+    state, the TTEMP memory and the all-frozen flag (IFLAG).  Smooth (D7g): the
+    frozen fraction's cap at 1 (``frc_clip_width``) and the frozen/unfrozen
+    states blended over ``freeze_onset_width_k`` below TTFRZ (one transfer,
+    a convex combination, so water is conserved exactly)."""
+    frz = tu <= _TTFRZ_K  # kfsw: D7g
+    part = tu > _TBFRZ_K  # kfsw: D7g
+    ttemp0 = jnp.where(part & (ttemp_prev > _TTFRZ_K), _TTFRZ_K, ttemp_prev)  # kfsw: D7g
+    if sm.frc_clip_width:  # kfsw: S
+        # the oracle's frc1 = 1 below TBFRZ is the cap of the ramp at 1.
+        # KNOWN DIFFERENCE: with the TTEMP memory already at or below TBFRZ
+        # and tu warmed back above it, the oracle divides by ttemp0 - TBFRZ
+        # <= 0 (frc1 > 1, inf at equality); this form freezes all (frc1 = 1).
+        pos = ttemp0 > _TBFRZ_K  # kfsw: D7g
+        ramp = (ttemp0 - tu) / _sd(ttemp0 - _TBFRZ_K, pos)  # kfsw: D7g
+        frc1 = jnp.where(pos, smooth_min_c1(ramp, 1.0, sm.frc_clip_width), 1.0)  # kfsw: D7g
+    else:
+        # kfsw: D7g
+        frc1 = jnp.where(part, (ttemp0 - tu) / _sd(ttemp0 - _TBFRZ_K, part & frz), 1.0)
+    if sm.freeze_onset_width_k:  # kfsw: S
+        # frozen and unfrozen states blended below TTFRZ (exact above it)
+        bf = smoothstep_cubic((_TTFRZ_K - tu) / sm.freeze_onset_width_k)  # kfsw: D7g
+    else:
+        frc1 = jnp.where(frz, frc1, 0.0)  # kfsw: D7g
+    ttemp = jnp.where(frz, tu, ttemp_prev)  # kfsw: D7g
+    qfrz = (qliq + qnl) * frc1
+    qni_f = qni + qnl * frc1
+    qnl_f = qnl - qnl * frc1
+    qice_f = qice + qliq * frc1
+    qliq_f = qliq - qliq * frc1
+    tu_f, theteu_f, qu_f, qice_f2 = _dtfrznew(ab, tu, p, qu, qfrz, qice_f)
+    if sm.freeze_onset_width_k:  # kfsw: S
+        tu, theteu, qu, qice, qliq, qnl, qni = (
+            old + bf * (new - old) for new, old in (
+                (tu_f, tu), (theteu_f, theteu), (qu_f, qu), (qice_f2, qice),
+                (qliq_f, qliq), (qnl_f, qnl), (qni_f, qni)))
+    else:
+        tu = _w(frz, tu_f, tu)  # kfsw: D7g
+        theteu = _w(frz, theteu_f, theteu)  # kfsw: D7g
+        qu = _w(frz, qu_f, qu)  # kfsw: D7g
+        qice = _w(frz, qice_f2, qice)  # kfsw: D7g
+        qliq = _w(frz, qliq_f, qliq)  # kfsw: D7g
+        qnl = _w(frz, qnl_f, qnl)  # kfsw: D7g
+        qni = _w(frz, qni_f, qni)  # kfsw: D7g
+    return tu, theteu, qu, qliq, qice, qnl, qni, ttemp, frz & ~part
+
+
+def _wklcl(zlcl, ref, zref, w):
+    """WKLCL (E3): ref*ZLCL/zref capped at ref above zref (w = 0); the C1 form
+    caps ZLCL with smooth_min_c1 over |ZLCL - zref| < w/2."""
+    if w:  # kfsw: S
+        return smooth_min_c1(zlcl, zref, w) * ref / zref  # kfsw: E3
+    return jnp.where(zlcl < zref, ref * zlcl / zref, ref)  # kfsw: E3
+
+
+def _dtlcl(wkl, coeff, expo, w):
+    """DTLCL (D1): the oracle's 0 below WKL = 1e-4 m/s and coeff*WKL**expo
+    above, a 0.2 K jump (w = 0); the C1 form ramps it in over (1e-4, 1e-4 + w)."""
+    if w:  # kfsw: S
+        on = smoothstep_cubic((wkl - _WKL_MIN) / w)  # kfsw: D1
+        return on * coeff * jnp.maximum(wkl, _WKL_MIN) ** expo  # kfsw: D1
+    small = wkl < _WKL_MIN  # kfsw: D1
+    return jnp.where(small, 0.0, coeff * _sd(wkl, ~small) ** expo)  # kfsw: D1
+
+
+def _wlcl(dttot, gdt, gdt0, w):
+    """WLCL before its 3 m/s cap (D3): the oracle's 1 below DTTOT = 1e-4 K and
+    1 + sqrt(GDT)/2 above, a 0.03 m/s jump (w = 0); the C1 form ramps the
+    excess in over (1e-4, 1e-4 + w) K (``gdt0`` = GDT at 1e-4 K)."""
+    if w:  # kfsw: S
+        on = smoothstep_cubic((dttot - _DTTOT_MIN_K) / w)  # kfsw: D3
+        return 1.0 + on * 0.5 * jnp.sqrt(jnp.maximum(gdt, gdt0))  # kfsw: D3
+    big = dttot > _DTTOT_MIN_K  # kfsw: D3
+    return jnp.where(big, 1.0 + 0.5 * _safe_sqrt(gdt), 1.0)  # kfsw: D3,E11
+
+
+def _entrain_select(cold, vb, tiny, dcold, dvb, tvdiff, ee_s, ud_s, eqf, ws, wt):
+    """(ee2, ud2, eqfrc) before the ee2 floor and the 1.5 detrainment scaling
+    (D4): the oracle's cold (TV0 >= tvqu: 0.5, 1, 0) / vb or tiny (1, 0, 1) /
+    PROF5 branches (ws = wt = 0); the C1 form weighs them with centred steps
+    of ``dcold`` = TV0 - tvqu and ``dvb`` = tu95 - TV0 (width ws) and a tiny
+    weight that ramps out over tvdiff in (1e-3, 1e-3 + wt) K, so PROF5 only
+    weighs where the eqf divisor is at least 1e-3 K."""
+    if not (ws or wt):  # kfsw: S
+        ee2 = jnp.where(cold, 0.5, jnp.where(vb | tiny, 1.0, ee_s))  # kfsw: D4
+        ud2 = jnp.where(cold, 1.0, jnp.where(vb | tiny, 0.0, ud_s))  # kfsw: D4
+        eqfrc = jnp.where(cold, 0.0, jnp.where(vb | tiny, 1.0, eqf))  # kfsw: D4
+        return ee2, ud2, eqfrc
+    if ws:  # kfsw: S
+        c, svb = _step_c(dcold, ws), _step_c(dvb, ws)
+    else:
+        c, svb = cold.astype(eqf.dtype), vb.astype(eqf.dtype)  # kfsw: D4
+    if wt:  # kfsw: S
+        sti = 1.0 - smoothstep_cubic((tvdiff - _TVDIFF_MIN) / wt)  # kfsw: D4
+    else:
+        sti = tiny.astype(eqf.dtype)  # kfsw: D4
+    s = 1.0 - (1.0 - svb) * (1.0 - sti)
+    return (0.5 * c + (1.0 - c) * (s + (1.0 - s) * ee_s),
+            c + (1.0 - c) * (1.0 - s) * ud_s,
+            (1.0 - c) * (s + (1.0 - s) * eqf))
+
+
+def _abe_increment(dilbe, g, w):
+    """(mask, increment) of ABE from one layer: the oracle adds g*dilbe where
+    dilbe > 0 (w = 0); the C1 form adds g*positive_part_c1(dilbe) everywhere,
+    the same in the updraft, its stop2 rollback and the closure (E6)."""
+    if w:  # kfsw: S
+        return True, g * positive_part_c1(dilbe, 1.0 / w)  # kfsw: E6
+    return dilbe > 0.0, dilbe * g  # kfsw: E6
+
+
+def _clip_c1(x, lo, hi, w):
+    """clip(x, lo, hi) (w = 0, the oracle's max-then-min) or its C1 form, exact
+    outside the bands |x - lo|, |x - hi| < w/2 (E5, E7, E9)."""
+    if w:  # kfsw: S
+        return smooth_min_c1(smooth_max_c1(x, lo, w), hi, w)  # kfsw: E5,E7,E9
+    return jnp.minimum(jnp.maximum(x, lo), hi)  # kfsw: E5,E7,E9
 
 
 def _gather_at_height(f, Z0, z, kk, valid, LC, w):
@@ -963,12 +1108,9 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         TENV = gz(T0)
         QENV = gz(Q0)
         TVEN = TENV * (1.0 + _TV_COEF * QENV)
-        WKLCL = jnp.where(ZLCL < prm["wklcl_zref"], prm["wklcl_ref"] * ZLCL / prm["wklcl_zref"],
-                          prm["wklcl_ref"])  # kfsw: E3
+        WKLCL = _wklcl(ZLCL, prm["wklcl_ref"], prm["wklcl_zref"], sm.wklcl_cap_width_m)
         WKL = gz(W0A) * dx / _WKL_DX_REF_M - WKLCL
-        small = WKL < _WKL_MIN  # kfsw: D1
-        # kfsw: D1
-        DTLCL = jnp.where(small, 0.0, prm["dtlcl_coeff"] * _sd(WKL, ~small) ** prm["dtlcl_exponent"])
+        DTLCL = _dtlcl(WKL, prm["dtlcl_coeff"], prm["dtlcl_exponent"], sm.dtlcl_onset_width_ms)
         if trigger == 3:  # kfsw: S
             QSLCL = gz(QES)
             RHLCL = QENV / QSLCL
@@ -988,19 +1130,23 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         # --- updraft initialisation (l.1034-1121) ---
         th_k = _envirtht(lut, ab, PMIX, TMIX, QMIX)
         DTTOT = DTLCL + DTRH
-        big = DTTOT > _DTTOT_MIN_K  # kfsw: D3
         GDT = 2.0 * G * DTTOT * _GDT_DEPTH_M / TVEN
-        # kfsw: D3,E4,E11
-        WLCL = jnp.where(big, jnp.minimum(1.0 + 0.5 * _safe_sqrt(GDT), _WLCL_MAX), 1.0)
+        gdt0 = 2.0 * G * _DTTOT_MIN_K * _GDT_DEPTH_M / TVEN  # GDT at the D3 threshold
+        WLCL = _cap_c1(_wlcl(DTTOT, GDT, gdt0, sm.wlcl_onset_width_k), _WLCL_MAX,
+                       sm.wlcl_cap_width_ms)
         PLCL = gz(P0)
         WTW = WLCL * WLCL
         TVLCL = TLCL * (1.0 + _TV_COEF * QMIX)
         RHOLCL = PLCL / (R * TVLCL)
         LCL = KLCL
-        RAD = jnp.where(WKL < 0.0, prm["rad_min"],
-                        jnp.where(WKL > prm["rad_wkl_ref"], prm["rad_max"],
-                                  prm["rad_min"] + (prm["rad_max"] - prm["rad_min"]) * WKL
-                                  / prm["rad_wkl_ref"]))  # kfsw: E5
+        if sm.rad_clip_width:  # kfsw: S
+            RAD = prm["rad_min"] + (prm["rad_max"] - prm["rad_min"]) * _clip_c1(
+                WKL / prm["rad_wkl_ref"], 0.0, 1.0, sm.rad_clip_width)
+        else:
+            RAD = jnp.where(WKL < 0.0, prm["rad_min"],
+                            jnp.where(WKL > prm["rad_wkl_ref"], prm["rad_max"],
+                                      prm["rad_min"] + (prm["rad_max"] - prm["rad_min"]) * WKL
+                                      / prm["rad_wkl_ref"]))  # kfsw: E5
         AU0 = _AU0_FRAC * DXSQ
         VMFLCL = RHOLCL * AU0
         u_vmf = VMFLCL
@@ -1030,27 +1176,10 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
             tu, qu, qliq, qice, qnl, qni = _tpmix2(lut, P0[NK1], theteu, A["QU"][NK],
                                                    A["QLIQ"][NK], A["QICE"][NK], XLV0, XLV1)
             # glaciation (l.1141-1161)
-            frz = tu <= _TTFRZ_K  # kfsw: D7g
-            part = tu > _TBFRZ_K  # kfsw: D7g
-            ttemp0 = jnp.where(part & (u["TTEMP"] > _TTFRZ_K), _TTFRZ_K, u["TTEMP"])  # kfsw: D7g
-            # kfsw: D7g
-            frc1 = jnp.where(part, (ttemp0 - tu) / _sd(ttemp0 - _TBFRZ_K, part & frz), 1.0)
-            frc1 = jnp.where(frz, frc1, 0.0)  # kfsw: D7g
-            iflag = jnp.where(frz & ~part, 1, u["IFLAG"])  # kfsw: D7g
-            ttemp = jnp.where(frz, tu, u["TTEMP"])  # kfsw: D7g
-            qfrz = (qliq + qnl) * frc1
-            qni_f = qni + qnl * frc1
-            qnl_f = qnl - qnl * frc1
-            qice_f = qice + qliq * frc1
-            qliq_f = qliq - qliq * frc1
-            tu_f, theteu_f, qu_f, qice_f2 = _dtfrznew(ab, tu, P0[NK1], qu, qfrz, qice_f)  # kfsw: S
-            tu = _w(frz, tu_f, tu)  # kfsw: D7g
-            theteu = _w(frz, theteu_f, theteu)  # kfsw: D7g
-            qu = _w(frz, qu_f, qu)  # kfsw: D7g
-            qice = _w(frz, qice_f2, qice)  # kfsw: D7g
-            qliq = _w(frz, qliq_f, qliq)  # kfsw: D7g
-            qnl = _w(frz, qnl_f, qnl)  # kfsw: D7g
-            qni = _w(frz, qni_f, qni)  # kfsw: D7g
+            # kfsw: S
+            tu, theteu, qu, qliq, qice, qnl, qni, ttemp, allfrz = _glaciate(
+                ab, P0[NK1], tu, theteu, qu, qliq, qice, qnl, qni, u["TTEMP"], sm)
+            iflag = jnp.where(allfrz, 1, u["IFLAG"])  # kfsw: D7g
             tvu = tu * (1.0 + _TV_COEF * qu)
             first = NK == K  # kfsw: C-KLCL
             be = jnp.where(first, (TVLCL + tvu) / (TVEN + TV0[NK1]) - 1.0,
@@ -1069,7 +1198,8 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
             # kfsw: C-KLCL
             dilbe = jnp.where(first, ((TVLCL + tvqu) / (TVEN + TV0[NK1]) - 1.0) * dzz,
                               ((A["TVQU"][NK] + tvqu) / (TV0[NK] + TV0[NK1]) - 1.0) * dzz)
-            abe = jnp.where(dilbe > 0.0, u["ABE"] + dilbe * G, u["ABE"])  # kfsw: E6
+            pos_b, dinc = _abe_increment(dilbe, G, sm.abe_pos_width_m)
+            abe = u["ABE"] + jnp.where(pos_b, dinc, 0.0)  # kfsw: E6
             # entrainment / detrainment (l.1206-1263)
             cold = tvqu <= TV0[NK1]  # kfsw: D4
             thttmp = _F1_HI * thetee + (1.0 - _F1_HI) * theteu
@@ -1090,22 +1220,25 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
             tvdiff = jnp.abs(tu10 - tvqu)  # kfsw: D4
             tiny = tvdiff < _TVDIFF_MIN  # kfsw: D4
             eqf = (TV0[NK1] - tvqu) * _F1_LO / _sd(tu10 - tvqu, ~tiny)  # kfsw: D4
-            eqf = jnp.maximum(0.0, eqf)  # kfsw: E7
-            eqf = jnp.minimum(1.0, eqf)  # kfsw: E7
+            eqf = _clip_c1(eqf, 0.0, 1.0, sm.eqf_clip_width)
             ee_p, ud_p = prof5(eqf, lut.sm.prof5_width)
             ee_s = jnp.where(eqf == 1, 1.0, jnp.where(eqf == 0.0, 0.0, ee_p))  # kfsw: D7f
             ud_s = jnp.where(eqf == 1, 0.0, jnp.where(eqf == 0.0, 1.0, ud_p))  # kfsw: D7f
-            ee2 = jnp.where(cold, 0.5, jnp.where(vb | tiny, 1.0, ee_s))  # kfsw: D4
-            ud2 = jnp.where(cold, 1.0, jnp.where(vb | tiny, 0.0, ud_s))  # kfsw: D4
-            eqfrc = jnp.where(cold, 0.0, jnp.where(vb | tiny, 1.0, eqf))  # kfsw: D4
+            # kfsw: S
+            ee2, ud2, eqfrc = _entrain_select(
+                cold, vb, tiny, TV0[NK1] - tvqu, tu95 - TV0[NK1], tvdiff, ee_s, ud_s, eqf,
+                sm.entrain_select_width_k, sm.entrain_tiny_width_k)
             let = jnp.where(cold, u["LET"], NK1)  # kfsw: C-LET
-            ee2 = jnp.maximum(ee2, _EE2_MIN)  # kfsw: E8
+            if sm.ee2_floor_width:  # kfsw: S
+                ee2 = smooth_max_c1(ee2, _EE2_MIN, sm.ee2_floor_width)  # kfsw: E8
+            else:
+                ee2 = jnp.maximum(ee2, _EE2_MIN)  # kfsw: E8
             ud2 = _UD2_SCALE * ud2
             uer = 0.5 * rei * (u["EE1"] + ee2)
             udr = 0.5 * rei * (u["UD1"] + ud2)
             stop2 = A["UMF"][NK] - udr < _UMF_DETR_MIN  # kfsw: C-LTOP
             a3 = a2 & ~stop2
-            abe = jnp.where(stop2 & (dilbe > 0.0), abe - dilbe * G, abe)  # kfsw: E6,C-LTOP
+            abe = jnp.where(stop2 & pos_b, abe - dinc, abe)  # kfsw: E6,C-LTOP
             let = jnp.where(stop2, NK, let)  # kfsw: C-LET
             upold = A["UMF"][NK] - udr  # kfsw: S
             upnew = upold + uer
@@ -1171,10 +1304,15 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         A, u = _scan_levels(ubody, (A, u), 1, KX - 1)
         LTOP = u["LTOP"]
         cldhgt = Z0[LTOP] - ZLCL  # kfsw: C-LTOP
-        CHMIN = jnp.where(TLCL > _CHMIN_TWARM_K, _CHMIN_DEEP_M,
-                          jnp.where(TLCL >= _CHMIN_TCOLD_K,
-                                    _CHMIN_SHALLOW_M + _CHMIN_SLOPE_M_PER_K * (TLCL - _CHMIN_TCOLD_K),
-                                    _CHMIN_SHALLOW_M))  # kfsw: E9
+        if sm.chmin_clip_width_k:  # kfsw: S
+            CHMIN = _CHMIN_SHALLOW_M + _CHMIN_SLOPE_M_PER_K * (_clip_c1(
+                TLCL, _CHMIN_TCOLD_K, _CHMIN_TWARM_K, sm.chmin_clip_width_k) - _CHMIN_TCOLD_K)
+        else:
+            CHMIN = jnp.where(TLCL > _CHMIN_TWARM_K, _CHMIN_DEEP_M,
+                              jnp.where(TLCL >= _CHMIN_TCOLD_K,
+                                        _CHMIN_SHALLOW_M
+                                        + _CHMIN_SLOPE_M_PER_K * (TLCL - _CHMIN_TCOLD_K),
+                                        _CHMIN_SHALLOW_M))  # kfsw: E9
         noconv = (LTOP <= KLCL) | (LTOP <= KPBL) | (u["LET"] + 1 <= KPBL)  # kfsw: A4
         deep = ~noconv & (cldhgt > CHMIN) & (u["ABE"] > _ABE_MIN)  # kfsw: B1
         shallow = ~noconv & ~deep
@@ -1652,7 +1790,8 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
             dilbe = jnp.where(first,
                               ((tvlcl + tvqu) / (tven + TVG[NK1]) - 1.0) * (Z0[klcl] - zlcl),
                               ((tvq[NK] + tvqu) / (TVG[NK] + TVG[NK1]) - 1.0) * DZA[NK])
-            abeg = jnp.where(b & (dilbe > 0.0), abeg + dilbe * G, abeg)  # kfsw: E6
+            pos_b, dinc = _abe_increment(dilbe, G, lut.sm.abe_pos_width_m)
+            abeg = jnp.where(b & pos_b, abeg + dinc, abeg)  # kfsw: E6
             thteeg = _envirtht(lut, ab, P0[NK1], TG[NK1], QG[NK1])  # kfsw: S
             th_new = thn * DDILFRC[NK1] + thteeg * (1.0 - DDILFRC[NK1])  # kfsw: S
             return (_put(th, NK1, th_new, b), _put(tvq, NK1, tvqu, b), abeg)  # kfsw: C-KLCL2
