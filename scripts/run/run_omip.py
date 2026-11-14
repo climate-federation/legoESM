@@ -732,6 +732,10 @@ def parse_args(argv: list[str] | None = None):
                          "--B-h (2-D metrics only)."))
     p.add_argument("--K-h", type=float, default=None,
                    help="Override horizontal tracer diffusivity K_h [m²/s] (default: 1e3 with bathy).")
+    p.add_argument("--K-v", type=float, default=None,
+                   help="Override the constant vertical tracer diffusivity K_v [m²/s] "
+                        "that is ADDED to the vertical-mixing scheme's K (default 1e-4). "
+                        "Use 0 with KPP so kpp_k_bg is the only background.")
     p.add_argument("--no-lat-scaling", action="store_true",
                    help=(
                        "Disable cos²(lat) scaling of A_h. By default A_h is "
@@ -1753,6 +1757,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   B_h_override: float = None,
                   B_h_barotropic_override: float = None,
                   K_h_override: float = None,
+                  K_v_override: float = None,
                   A_h_eq_boost: float = 1.0,
                   A_h_eq_sigma_deg: float = 5.0,
                   C_smag: float = None,
@@ -1828,7 +1833,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
     # explicit K_h because the discrete Laplacian has truncation error;
     # spectral grids are spectrally accurate and rely on hyperdiffusion.
     A_v = 1.0e-3  # vertical viscosity [m²/s] (all grids)
-    K_v = 1.0e-4  # vertical tracer diffusivity [m²/s] (all grids)
+    K_v = 1.0e-4 if K_v_override is None else float(K_v_override)  # vertical tracer diffusivity [m²/s], added to the mixing scheme's K
     if grid_type == "spectral":
         A_h = 1.0e4   # spectral Laplacian is exact: less needed
         K_h = 1.0e3
@@ -6158,6 +6163,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         B_h_override=args.B_h,
         B_h_barotropic_override=args.B_h_barotropic,
         K_h_override=args.K_h,
+        K_v_override=getattr(args, "K_v", None),
         A_h_eq_boost=args.A_h_eq_boost,
         A_h_eq_sigma_deg=args.A_h_eq_sigma,
         C_smag=args.C_smag,

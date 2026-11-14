@@ -54,3 +54,4 @@ no_conservation_fixer: true
 # sw_penetration: jerlov_2band
 # monthly_mld_sst: true       # monthly-mean SST and MLD output
 # max_wallclock_seconds: 41400   # clean checkpoint+exit before a 12 h limit
+K_v: 0.0                      # constant K_v is ADDED to KPP; main default 1e-4 eroded the thermocline (old run: LEGOESM_KV=0)

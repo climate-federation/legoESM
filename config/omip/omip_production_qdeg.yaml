@@ -47,3 +47,4 @@ vertical_mixing_scheme: kpp
 kpp_k_bg: 1.0e-6
 implicit_vertical_mixing: true
 no_conservation_fixer: true
+K_v: 0.0                      # constant K_v is ADDED to KPP; main default 1e-4 eroded the thermocline (old run: LEGOESM_KV=0)
