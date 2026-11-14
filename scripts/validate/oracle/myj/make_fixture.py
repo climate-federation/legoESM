@@ -9,7 +9,7 @@ usage:
       --wrf <WRF v4.8.0> --out tests/atmosphere/oracle_fixtures/myj.npz
 
 Columns: the 20 L32 columns of the tier-2 YSU audit (also the MYNN oracle's
-column set; dt = 1200 s), plus 4 variants that reach branches the 20 do not:
+column set; dt = 1200 s), plus 5 variants that reach branches the 20 do not:
 cloud water in the top of the boundary layer (``trop_ocean_deep_stcu``), cloud
 ice and supercooled water aloft (``all_snow_land_ice``), snow cover on land
 (``all_snow_land_snowcover``: the sublimation-heat factor) and a nonzero
@@ -62,7 +62,7 @@ def write_constants(path):
 
 
 def audit_columns(src):
-    """The 20 audit columns + 4 variants, bottom-up, as driver inputs."""
+    """The 20 audit columns + 5 variants, bottom-up, as driver inputs."""
     capa = C.R_d / C.c_pd
     cols = []
     for i, nm in enumerate(str(n) for n in src["names"]):
@@ -106,6 +106,8 @@ def audit_columns(src):
     c["snow"] = 0.05
     c = copy("desert_high_lcl", "desert_high_lcl_ct")
     c["ct"] = 0.5
+    c = copy("trop_ocean_deep", "trop_ocean_deep_uz0")      # surface velocity (vote Z13)
+    c["uz0"], c["vz0"] = 1.0, -0.5
     return cols
 
 

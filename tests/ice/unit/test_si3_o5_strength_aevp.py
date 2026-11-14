@@ -476,16 +476,28 @@ def _assert_trees_identical(a, b, label):
 
 
 def _parent_lane3():
-    return _load_parent(
-        (
-            ("legoesm.ice.dynamics", "packages/ice/legoesm/ice/dynamics.py"),
-            ("legoesm.ice.fidelity.nemo_adv2d_rhg_testcase_recipe",
-             "packages/ice/legoesm/ice/fidelity/nemo_adv2d_rhg_testcase_recipe.py"),
-            ("legoesm.ice.ridging", "packages/ice/legoesm/ice/ridging.py"),
-            ("legoesm.ice.fidelity.nemo_rheo_testcase_recipe",
-             "packages/ice/legoesm/ice/fidelity/nemo_rheo_testcase_recipe.py"),
+    # The parent modules exec against the CURRENT legoesm.ice.transport, whose
+    # advect_si3_prather_2d defaults to main's smooth limiter since #2432; the parent
+    # revision only ever had NEMO's hard limiter, so the parent arm is bound to it.
+    import functools
+
+    import legoesm.ice.transport as transport
+
+    current = transport.advect_si3_prather_2d
+    transport.advect_si3_prather_2d = functools.partial(current, limit_sharpness_scale=math.inf)
+    try:
+        return _load_parent(
+            (
+                ("legoesm.ice.dynamics", "packages/ice/legoesm/ice/dynamics.py"),
+                ("legoesm.ice.fidelity.nemo_adv2d_rhg_testcase_recipe",
+                 "packages/ice/legoesm/ice/fidelity/nemo_adv2d_rhg_testcase_recipe.py"),
+                ("legoesm.ice.ridging", "packages/ice/legoesm/ice/ridging.py"),
+                ("legoesm.ice.fidelity.nemo_rheo_testcase_recipe",
+                 "packages/ice/legoesm/ice/fidelity/nemo_rheo_testcase_recipe.py"),
+            )
         )
-    )
+    finally:
+        transport.advect_si3_prather_2d = current
 
 
 @pytest.mark.skipif(not _RHG_ROOT.exists(), reason="lane-3 ICE_ADV2D_RHG record absent")

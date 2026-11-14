@@ -160,6 +160,8 @@ EXCLUDED: frozenset[str] = frozenset(
         # two-stream tree above), not a single-tendency parameterization. Its
         # energy-conservation invariant is gated analytically in
         # tests/unit/test_mc3d_raytracer.py, not via __physics_contract__.
+        # raytracer_lw.py is NOT excluded: it carries a contract recording that
+        # it has no reference implementation.
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/emulator.py",
@@ -169,7 +171,6 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/photon_walk.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/plane_adapter.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/qrng.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/raytracer_lw.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/raytracer_sw.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/sampling.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/tally.py",

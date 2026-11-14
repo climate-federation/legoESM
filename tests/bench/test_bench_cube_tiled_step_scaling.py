@@ -69,3 +69,32 @@ def test_parity_tolerances_match_adapter_gate():
     # (a silent loosening here would let a stage regression pass the lane).
     assert mod.TILED_PARITY_ATOL == {"u": 2e-5, "v": 2e-5,
                                      "T": 1e-4, "p_s": 0.06}
+
+
+def test_tile_device_order_block2x2():
+    np = pytest.importorskip("numpy")
+    order = mod.tile_device_order
+    rows = order(4, "rows")
+    assert (rows.ravel() == np.arange(96)).all()
+    blk = order(4, "block2x2")
+    assert sorted(blk.ravel()) == list(range(96))
+    # each node (4 consecutive devices) owns one 2x2 block of one face
+    for n in range(24):
+        f, i, j = np.nonzero((blk // 4) == n)
+        assert len(set(f)) == 1 and np.ptp(i) == 1 and np.ptp(j) == 1
+    assert (order(2, "block2x2") == order(2, "rows")).all()
+    with pytest.raises(SystemExit):
+        order(3, "block2x2")
+
+
+def test_halo_grouping_cli_contract(monkeypatch, capsys):
+    monkeypatch.setattr(sys, 'argv', ['bench', '--help'])
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 0
+    assert '--halo-grouping {current,bundled}' in capsys.readouterr().out
+    monkeypatch.setattr(sys, 'argv', ['bench', '--kt', '2',
+                                    '--halo-grouping', 'invalid'])
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 2

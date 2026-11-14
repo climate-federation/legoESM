@@ -9,8 +9,8 @@ domain-decomposed at the dycore level):
   icosahedral   -- MPAS Voronoi TRiSK PE dycore (cell partition)
   latlon        -- Lat-lon C-grid FV PE dycore (latitude-band
                    decomposition via ``make_latlon_mpi_step``;
-                   needs >=2 lat rows per rank for the halo=2
-                   PPM/biharmonic exchanges)
+                   needs >=3 lat rows per rank for the halo=3
+                   PPM exchange)
 
 Single-rank only (listed but their MPI paths are not domain-decomposed
 at the dycore level — see iter 13/14 honest-sweep guards):
@@ -342,8 +342,8 @@ def _weak_resolution_ll(n_ranks: int, base_n: int = WEAK_BASE_LL) -> int:
     top:
 
     * divisible by ``n_ranks`` (uniform bands → clean cells/rank),
-    * at least 2 lat rows per rank — ``pad_halo_latlon_mpi`` raises
-      when ``halo(=2 for PPM/biharmonic) > n_lat_local``, so a band
+    * at least 3 lat rows per rank — ``pad_halo_latlon_mpi`` raises
+      when ``halo(=3 for PPM) > n_lat_local``, so a band
       must never be thinner than the deepest operator halo.
 
     The divisibility / band-floor rounding means the ACTUAL cells per
@@ -358,7 +358,7 @@ def _weak_resolution_ll(n_ranks: int, base_n: int = WEAK_BASE_LL) -> int:
     """
     n_raw = base_n * math.sqrt(n_ranks)
     n_rounded = max(8, 2 * round(n_raw / 2))
-    while n_rounded % n_ranks != 0 or n_rounded < 2 * n_ranks:
+    while n_rounded % n_ranks != 0 or n_rounded < 3 * n_ranks:
         n_rounded += 2
     return n_rounded
 
@@ -805,13 +805,13 @@ def _build_cubed_sphere_tiled_loop(resolution, nlev, dt, physics_level,
     return step_fn, state, dt, total_cells, cells_per_rank
 
 
-def _factor_2d_latlon(n_ranks, n_lat, n_lon, min_lat=2, min_lon=2):
+def _factor_2d_latlon(n_ranks, n_lat, n_lon, min_lat=3, min_lon=3):
     """Factor ``n_ranks`` into ``(proc_lat, proc_lon)`` for the 2-D pencil,
     MINIMISING the per-rank halo perimeter ``n_lat/proc_lat + n_lon/proc_lon``
     (the whole point of 2-D vs the 1-D band).
 
-    Constraints: each block keeps ``>= min_lat`` latitude rows (the halo=2
-    PPM/biharmonic exchange) and ``>= min_lon`` longitude columns.  Raises if
+    Constraints: each block keeps ``>= min_lat`` latitude rows (the halo=3
+    PPM exchange) and ``>= min_lon`` longitude columns.  Raises if
     no valid factorisation exists (e.g. too many ranks for the resolution),
     rather than silently building a degenerate block.
 
@@ -942,10 +942,10 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
             slice_latlon_grid_to_band,
         )
 
-        if n_lat // n_ranks < 2:
+        if n_lat // n_ranks < 3:
             raise ValueError(
-                f"lat-lon band MPI needs >=2 lat rows per rank for the "
-                f"halo=2 PPM/biharmonic exchange; got n_lat={n_lat} on "
+                f"lat-lon band MPI needs >=3 lat rows per rank for the "
+                f"halo=3 PPM exchange; got n_lat={n_lat} on "
                 f"{n_ranks} ranks ({n_lat // n_ranks} rows/rank)."
             )
 
@@ -1385,8 +1385,8 @@ def generate_sweep_cases(
         for res in resolutions:
             for n in rank_counts:
                 # Lat-lon bands: uniform decomposition (divisible) AND
-                # >=2 lat rows per rank (halo=2 exchange minimum).
-                if grid_type == "latlon" and (res % n != 0 or res // n < 2):
+                # >=3 lat rows per rank (halo=3 exchange minimum).
+                if grid_type == "latlon" and (res % n != 0 or res // n < 3):
                     continue
                 cases.append(CaseSpec(grid_type, res, n, "strong", physics, nlev, precision))
 
@@ -1791,8 +1791,8 @@ def main() -> int:
             )
         return 2
     # Lat-lon band MPI is real (latitude-band decomposition), but a
-    # band must hold at least 2 lat rows for the halo=2 PPM /
-    # biharmonic exchange (``pad_halo_latlon_mpi`` raises when
+    # band must hold at least 3 lat rows for the halo=3 PPM
+    # exchange (``pad_halo_latlon_mpi`` raises when
     # ``halo > n_lat_local``).  Refuse undersized configurations
     # up-front with a clear message instead of a mid-build traceback.
     if args.latlon_2d and grid_type != "latlon":
@@ -1805,11 +1805,11 @@ def main() -> int:
     # _factor_2d_latlon validates the per-block rows/cols — skip the band
     # guard for --latlon-2d.
     if (grid_type == "latlon" and not args.latlon_2d
-            and n_ranks > 1 and resolution // n_ranks < 2):
+            and n_ranks > 1 and resolution // n_ranks < 3):
         if is_rank0:
             print(
-                f"ERROR: lat-lon band MPI needs >=2 lat rows per rank "
-                f"(halo=2 exchange); resolution={resolution} on "
+                f"ERROR: lat-lon band MPI needs >=3 lat rows per rank "
+                f"(halo=3 exchange); resolution={resolution} on "
                 f"{n_ranks} ranks gives {resolution // n_ranks} "
                 f"rows/rank.  Increase --resolution or reduce ranks.",
                 flush=True,

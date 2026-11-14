@@ -37,11 +37,13 @@ def rb():
 
 
 def test_rh_split_is_an_exact_identity(prs):
-    """RH_m - RH_e must equal (RH_m - RH_swapT) + (RH_swapT - RH_e) EXACTLY.
+    """RH_m - RH_e must equal (RH_m - RH_swapT) + (RH_swapT - RH_e) to rounding.
 
     The whole temperature-vs-humidity attribution is this telescoping sum. If
     it only held approximately, the two parts would be a regression rather
-    than a decomposition and could not be quoted separately.
+    than a decomposition and could not be quoted separately.  Float add/sub
+    leaves a few-ulp residual (VC62); a regression-not-decomposition would be
+    O(1e-2).
     """
     rng = np.random.default_rng(0)
     plev = np.array([85000.0, 70000.0, 50000.0])
@@ -55,7 +57,8 @@ def test_rh_split_is_an_exact_identity(prs):
     rh_swap = prs._rh(T_e, w_m, plev)
 
     residual = (rh_m - rh_e) - ((rh_m - rh_swap) + (rh_swap - rh_e))
-    assert np.max(np.abs(residual)) == 0.0
+    scale = np.max(np.abs(np.stack([rh_m, rh_e, rh_swap])))
+    assert np.max(np.abs(residual)) <= 4 * np.spacing(scale)
 
 
 def test_rh_responds_to_temperature_at_fixed_humidity(prs):

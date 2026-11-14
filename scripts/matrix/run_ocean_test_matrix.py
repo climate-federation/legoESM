@@ -6219,7 +6219,8 @@ def run_inertia_gravity_wave_channel(tc: TestCase, output_dir: Path,
         "mode_purity": purity_frac, "energy_ratio": energy_ratio,
         "reference": "Bishnu et al. 2024, DOI:10.1029/2022MS003545",
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{_time.time() - t_wall:.1f}s"})
+        "wall_time": f"{_time.time() - t_wall:.1f}s"},
+        diag=diag)
     return ("PASS" if ok else "FAIL", wall, notes)
 
 

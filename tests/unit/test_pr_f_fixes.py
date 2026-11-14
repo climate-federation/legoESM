@@ -41,13 +41,14 @@ def test_pe_configs_expose_p_ceil_default():
         "CGridLatLonPrimitiveEquationConfig": (
             "sponge_coeff", "sponge_width_m", "sponge_shape",
             "sponge_scale_height_m", "sb81_omega_conversion", "nu_del4",
-            "nu_del4_cfl_frac", "energy_fixer",
+            "nu_del4_cfl_frac", "energy_fixer", "nu_div4_scale", "vertical_form",
         ),
         # MPAS: defaulted appends since p_ceil (vertical filter, advection
         # scheme, top sponge, div4 damping, dycore energy fixer).
         "MPASPrimitiveEquationConfig": (
             "nu_vert4_T", "vert_advection_scheme", "sponge_del2_top_layers",
             "sponge_del2_top_factor", "nu_div4", "energy_fixer",
+            "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form",
         ),
     }
     for cfg_cls in (

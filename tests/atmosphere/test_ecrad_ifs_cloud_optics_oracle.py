@@ -122,7 +122,7 @@ def test_gradient_across_transition(name, points):
 
 
 def test_gradient_across_g_cap():
-    g = jnp.asarray(co._FU_MAX_G) * jnp.array([0.997, 0.999, 1.0, 1.001, 1.003])
+    g = jnp.asarray(co._fu_max_g(np.float64)) * jnp.array([0.997, 0.999, 1.0, 1.001, 1.003])
     dg = jax.vmap(jax.grad(lambda v: co._g_cap(v, 100.0)))(g)
     assert np.all(np.isfinite(dg)) and np.all(np.asarray(dg) != 0.0)
 

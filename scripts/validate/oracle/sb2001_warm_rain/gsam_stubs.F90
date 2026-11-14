@@ -42,7 +42,7 @@ contains
     real, intent(in) :: e, p
     real :: w
     w = eps*e/(softplus(p - e - 1.) + 1.)
-    w = 1. - softplus(20.*(1. - w))/20.
+    w = merge(w - softplus(20.*(w - 1.))/20., 1. - softplus(20.*(1. - w))/20., w < 1.)
     qs_from_e = w/(1. + w)
   end function qs_from_e
   elemental real function qsl_lego(t, p)

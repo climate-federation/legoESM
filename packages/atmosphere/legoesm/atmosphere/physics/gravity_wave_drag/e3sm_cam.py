@@ -1905,6 +1905,7 @@ def _e3sm_cam_gwd_one_source(
             u, v, T, sgh, pmid, pint, dpm, zm, nm,
             rair, config.kwv, config.fcrit2,
             config.orographic.oro_min_h, config.orographic.oro_min_wind,
+            oro_wind_ramp_width=config.orographic.oro_wind_ramp_width,
         )
         do_taper = False
     elif config.source in ("frontal", "background"):

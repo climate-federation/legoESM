@@ -107,7 +107,8 @@ def _partial_manifest_path(out_dir):
     return os.path.join(out_dir, "partial.json")
 
 
-def _save_partial(out_dir, manifest, write_params, write_opt):
+def _save_partial(out_dir, manifest, write_params, write_opt,
+                  write_record=None):
     """Write one rolling mid-epoch checkpoint generation.
 
     The state files carry the epoch and step in their names and the manifest,
@@ -122,13 +123,18 @@ def _save_partial(out_dir, manifest, write_params, write_opt):
 
     tag = f"partial.e{int(manifest['epoch']):04d}.s{int(manifest['step']):06d}"
     names = {"params_file": tag + ".eqx", "opt_file": tag + ".opt.eqx"}
-    _atomic_write(os.path.join(out_dir, names["params_file"]), write_params)
+    pfile = os.path.join(out_dir, names["params_file"])
+    _atomic_write(pfile, write_params)
+    if write_record is not None:
+        write_record(pfile)
     _atomic_write(os.path.join(out_dir, names["opt_file"]), write_opt)
     payload = _json.dumps({**manifest, **names})
     _atomic_write(_partial_manifest_path(out_dir),
                   lambda t: _pathlib.Path(t).write_text(payload))
-    for f in glob.glob(os.path.join(out_dir, "partial.e*.eqx")):
-        if os.path.basename(f) not in names.values():
+    keep = {*names.values(), tag + ".knobs.json"}
+    for f in (glob.glob(os.path.join(out_dir, "partial.e*.eqx"))
+              + glob.glob(os.path.join(out_dir, "partial.e*.knobs.json"))):
+        if os.path.basename(f) not in keep:
             try:
                 os.remove(f)
             except OSError:
@@ -1377,7 +1383,8 @@ def _main(argv=None):
                     raise RuntimeError(
                         "resume: the mid-epoch checkpoint's frozen set "
                         "differs from the epoch checkpoint's")
-                params = eqx.tree_deserialise_leaves(_ppath, params)
+                from legoesm.ml.checkpoint_io import deserialise_knob_aware
+                params = deserialise_knob_aware(_ppath, params)
                 import zlib as _zlib
                 _partial_crc = (
                     _file_crc(_ppath), _file_crc(_partial_opt),
@@ -1760,6 +1767,7 @@ def _main(argv=None):
             cur_arr, cur_opt_state = jax.device_get((cur_arr, cur_opt_state))
         if rank != 0:
             return
+        from legoesm.ml.checkpoint_io import write_knob_record
         from legoesm.ml.training import checkpoint_view
         _save_partial(
             cfg.out_dir,
@@ -1769,7 +1777,8 @@ def _main(argv=None):
              "skipped": int(n_skipped), **_content_payload(_probe_content)},
             lambda t: eqx.tree_serialise_leaves(
                 t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
-            lambda t: eqx.tree_serialise_leaves(t, cur_opt_state))
+            lambda t: eqx.tree_serialise_leaves(t, cur_opt_state),
+            lambda p: write_knob_record(eqx.combine(cur_arr, _static_h), p))
 
     arr, opt_state, history = mpi_data_parallel_training_loop(
         loss_fn, arr, opt_state, optimizer, local, cfg.n_epochs, nproc,

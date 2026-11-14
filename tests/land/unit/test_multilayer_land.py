@@ -16,6 +16,8 @@ import jax
 import jax.numpy as jnp
 import numpy.testing as npt
 
+from legoesm.land.soil_hydraulics import saturation_head
+
 jax.config.update("jax_enable_x64", True)
 
 
@@ -92,8 +94,8 @@ class TestSoilHydraulics(unittest.TestCase):
         )
         config = SoilHydraulicsConfig()
         theta = jnp.linspace(config.theta_r + 0.01, config.theta_sat - 0.01, 20)
-        psi = van_genuchten_psi(theta, config)
-        theta_back = van_genuchten_theta(psi, config)
+        psi = van_genuchten_psi(theta, config, saturation_head(config))
+        theta_back = van_genuchten_theta(psi, config, saturation_head(config))
         npt.assert_allclose(theta_back, theta, atol=1e-6)
 
     def test_van_genuchten_saturation(self):
@@ -103,9 +105,9 @@ class TestSoilHydraulics(unittest.TestCase):
         )
         config = SoilHydraulicsConfig()
         psi = jnp.array([0.0])
-        theta = van_genuchten_theta(psi, config)
+        theta = van_genuchten_theta(psi, config, saturation_head(config))
         self.assertAlmostEqual(float(theta[0]), config.theta_sat, places=6)
-        K = van_genuchten_K(psi, config)
+        K = van_genuchten_K(psi, config, saturation_head(config))
         self.assertAlmostEqual(float(K[0]), config.K_sat, places=10)
 
     def test_van_genuchten_K_monotonic(self):
@@ -115,7 +117,7 @@ class TestSoilHydraulics(unittest.TestCase):
         )
         config = SoilHydraulicsConfig()
         psi = jnp.linspace(-10.0, -0.01, 50)
-        K = van_genuchten_K(psi, config)
+        K = van_genuchten_K(psi, config, saturation_head(config))
         diffs = jnp.diff(K)
         self.assertTrue(jnp.all(diffs >= 0))
 
@@ -137,7 +139,7 @@ class TestSoilHydraulics(unittest.TestCase):
         config = SoilHydraulicsConfig(retention_curve="van_genuchten")
         psi = jnp.array([-1.0, -5.0])
         theta1 = theta_from_psi(psi, config)
-        theta2 = van_genuchten_theta(psi, config)
+        theta2 = van_genuchten_theta(psi, config, saturation_head(config))
         npt.assert_allclose(theta1, theta2)
 
     def test_dispatch_hydraulic_conductivity(self):
@@ -148,7 +150,7 @@ class TestSoilHydraulics(unittest.TestCase):
         psi = jnp.array([-1.0, -5.0])
         theta = jnp.array([0.3, 0.2])
         K1 = hydraulic_conductivity(psi, theta, config)
-        K2 = van_genuchten_K(psi, config)
+        K2 = van_genuchten_K(psi, config, saturation_head(config))
         npt.assert_allclose(K1, K2)
 
     def test_moisture_capacity_positive(self):
@@ -276,7 +278,7 @@ class TestPDI(unittest.TestCase):
         # Just below h_crit
         psi_near_sat = jnp.array([-config.h_crit * 0.5])
         K_pdi = pdi_K(psi_near_sat, config)
-        K_vg = van_genuchten_K(psi_near_sat, config)
+        K_vg = van_genuchten_K(psi_near_sat, config, 0.0)
         # PDI should differ from standard VG near saturation due to constraint
         # (PDI interpolates to K_sat, VG drops from K_sat differently)
         self.assertTrue(jnp.all(jnp.isfinite(K_pdi)))
@@ -486,7 +488,7 @@ class TestRichards(unittest.TestCase):
 
         Below saturation theta is bounded by theta_sat; AT/above saturation the
         ParFlow/CliMA specific-storage switch lets theta rise elastically to
-        theta_sat*(1 + S_s*psi) for psi >= 0 (the compressible-storage term that
+        theta_sat*(1 + S_s*(psi - h_e)) for psi >= h_e, the saturation head (the compressible-storage term that
         replaced the old non-conservative theta clip).  The ceiling is that exact
         law, not theta_sat — a hard clip at theta_sat would destroy ponded water."""
         from legoesm.land.richards import RichardsConfig, solve_richards
@@ -498,7 +500,8 @@ class TestRichards(unittest.TestCase):
         out = solve_richards(psi, theta, grid, hconfig, rconfig,
                              flux_top, sink, dt=1800.0, surface_water=jnp.zeros(ncol))
         self.assertTrue(jnp.all(out.theta_new >= hconfig.theta_r - 1e-10))
-        ceiling = hconfig.theta_sat * (1.0 + hconfig.S_s * jnp.maximum(out.psi_new, 0.0))
+        h_e = saturation_head(hconfig)
+        ceiling = hconfig.theta_sat * (1.0 + hconfig.S_s * jnp.maximum(out.psi_new - h_e, 0.0))
         self.assertTrue(jnp.all(out.theta_new <= ceiling + 1e-10))
 
 

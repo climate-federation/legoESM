@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import math
+
 import argparse
 import hashlib
 import importlib.util
@@ -598,6 +600,7 @@ def _production(card, forcing, initial: ReplayState, subcycles: int) -> ReplaySt
         type(forcing)(*(jnp.asarray(value) for value in forcing)),
         card.metrics,
         config,
+        limit_sharpness_scale=math.inf,
     )
     jax.block_until_ready(result)
     return ReplayState(*(np.asarray(value) for value in result))
@@ -616,6 +619,7 @@ def _written_order_production(card, forcing, initial: ReplayState, subcycles: in
             type(forcing)(*(jnp.asarray(value) for value in forcing)),
             card.metrics,
             config,
+            limit_sharpness_scale=math.inf,
         )
     return ReplayState(*(np.asarray(value) for value in result))
 

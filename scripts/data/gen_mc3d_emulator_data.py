@@ -85,7 +85,8 @@ def main(argv=None):
   @jax.jit
   def _solve(k_ext, ssa, g, rayl, reff, mu0, azi, key):
     return solve_sw_monochromatic(
-        k_ext, ssa, g, geom, mu0=mu0, azimuth=azi, albedo=0.1, config=cfg,
+        k_ext, ssa, g, geom, mu0=mu0, azimuth=azi, albedo=0.1, diffuse_frac=0.0,
+        config=cfg,
         key=key, rayleigh_frac=rayl, mie_cdf=cdf_b, mie_ang=ang_b,
         r_eff=reff).abs_frac
 

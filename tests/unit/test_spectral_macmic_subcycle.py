@@ -420,6 +420,38 @@ def test_the_classical_factory_threads_the_count_on_both_paths(
     assert seen == [1 if n is None else n]
 
 
+def test_n3_gwd_runs_on_the_post_loop_state(setup, monkeypatch):
+    """CAM order (tphysbc then tphysac gw_tend): with N=3 the gravity-wave-drag
+    slot runs AFTER the sub-cycle, on the state it left.  The drag is replaced by
+    a T-dependent stub so the post-loop state is visible in its output."""
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
+
+    def stub_gwd(cfg, model_type, dt, *a, **k):
+        def fn(st, grid, sigma, grid_fields=None, phys_state=None, **kw):
+            z = lambda f: f.replace(data=jnp.zeros_like(f.data))
+            return SpectralHydrostaticState(
+                vor_hat=z(st.vor_hat), div_hat=z(st.div_hat),
+                T_hat=st.T_hat.replace(data=-1.0e-6 * st.T_hat.data),
+                lnps_hat=z(st.lnps_hat), phis_hat=z(st.phis_hat), tracers=None), None
+        return fn
+
+    monkeypatch.setattr(cb, "make_gwd_physics", stub_gwd)
+    grid, sigma, state = setup
+    cfg = _with_closure(_cfg(partition=False)[0], True)
+    cfg = cfg._replace(gravity_wave_drag=cfg.gravity_wave_drag._replace(scheme="rayleigh"))
+    (out, _), ps = _run_full(cfg, 3, grid, sigma, state)
+    tend, _ = _reference(cfg, grid, sigma, state, ps, 3)
+    st = state
+    for k in ("vor_hat", "div_hat", "T_hat", "lnps_hat"):      # the post-loop state
+        st = st._replace(**{k: getattr(st, k).replace(
+            data=getattr(st, k).data + _DT * tend[k])})
+    want_post = tend["T_hat"] - 1.0e-6 * st.T_hat.data
+    want_pre = tend["T_hat"] - 1.0e-6 * state.T_hat.data
+    _close(out.T_hat.data, want_post, 1e-10, "T_hat")
+    assert np.max(np.abs(np.asarray(want_post - want_pre))) > 1e-6 * np.max(
+        np.abs(np.asarray(want_post)))                           # the order is visible
+
+
 @pytest.mark.parametrize("split_rad", [True, False])
 def test_the_classical_factory_builds_incloud_warm_rain_on_both_paths(
         setup, split_rad):

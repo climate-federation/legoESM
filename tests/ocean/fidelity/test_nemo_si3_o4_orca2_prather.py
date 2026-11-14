@@ -44,13 +44,13 @@ import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ice import (
+    NEMO_SI3_CONSTANTS_CONFIG,
     SI3AdvectionDiagnostics,
     SI3AllPratherMoments,
     SI3ORCA2AdvectionGrid,
     SI3ORCA2StateConfig,
     SI3PratherMoments,
     SI3State,
-    build_si3_orca2_o4_config,
     si3_adv_x,
     si3_adv_y,
     si3_apply_state_halos_orca2,
@@ -1475,10 +1475,13 @@ def test_o4_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
             e1u=wfx0 + 1.0, e2v=wfx0 + 1.0, e2u=wfx0 + 1.0, e1v=wfx0 + 1.0,
             e1e2t=wfx0 + 1.0, tmask=wfx0 + 1.0, umask=wfx0 + 1.0, vmask=None,
         )
-    with pytest.raises(TypeError):
-        build_si3_orca2_o4_config()
-    with pytest.raises(ValueError, match="SI3ORCA2StateConfig"):
-        build_si3_orca2_o4_config(None)  # type: ignore[arg-type]
+    # Main #2396 (PR #2388 review item 10) deleted the O4 builder, which built a
+    # thermo_scheme step_sea_ice refuses: no O4 SeaIceConfig can be built at all.
+    import legoesm.ice as ice_package
+    import legoesm.ice.config as ice_config
+
+    assert not hasattr(ice_package, "build_si3_orca2_o4_config")
+    assert not hasattr(ice_config, "build_si3_orca2_o4_config")
 
 
 def test_o4_a5_maxsd_minsd_signed_zero_ties() -> None:
@@ -1535,7 +1538,10 @@ def test_o4_a5_maxsd_minsd_signed_zero_ties() -> None:
 def test_o4_a4_orca2_seam_and_north_fold_subcycle_lbc_lnk_pins_and_plants() -> None:
     """`si3_dyn_adv_pra_orca2` exchanges all 11 extensive families and 55 Prather moment arrays across the ORCA2 cyclic seam and T-pivot north fold at every subcycle (`icycle >= 2`), matching an independent NEMO-literal `lbc_lnk` replica at every fold and seam cell, and failing when any of `sx, sy, sxx, syy, sxy` has a wrong north-fold sign (`Plants O4-A4a..f`)."""
     o4_state_cfg = SI3ORCA2StateConfig.for_orca2_sas_ice(ln_icedyn=True)
-    cfg = build_si3_orca2_o4_config(o4_state_cfg).si3_orca2
+    # The deleted O4 builder only validated this identity and returned the config unchanged.
+    assert o4_state_cfg.ln_icedyn and o4_state_cfg.ln_dynadv_pra and not o4_state_cfg.ln_icethd
+    assert o4_state_cfg.ice_constants == NEMO_SI3_CONSTANTS_CONFIG
+    cfg = o4_state_cfg
     assert cfg is not None
     state0, tmask, umask, vmask = o1_gate.build_synthetic_orca2_o1_state(cfg)
 

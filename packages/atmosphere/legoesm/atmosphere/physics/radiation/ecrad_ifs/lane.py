@@ -118,9 +118,12 @@ def half_level_temperature(T, p_full, p_half, T_skin):
 def step(cfg: EcradIFSConfig, sources: EcradIFSSources, *, full_call: bool,
          packed_carry, T, p_full, p_half, T_skin, lat, lon, q, q_liquid, q_ice,
          q_rain, q_snow, cloud_fraction, land_fraction, mu0, albedo_dif,
-         albedo_dir, emissivity, iday, elapsed_s, g: float, c_pd: float):
+         albedo_dir, emissivity, iday, elapsed_s, g: float, c_pd: float,
+         aerosol=None):
     """One physics step.  ``full_call`` is static; ``iday`` is NDD(NINDAT),
-    the run start date's day of month, ``elapsed_s`` NSTEP*TSTEP [s].  Returns
+    the run start date's day of month, ``elapsed_s`` NSTEP*TSTEP [s];
+    ``aerosol`` the full call's :class:`.ifs_aerosol.MaccAerosol` (None = ecRad
+    aerosols off, vote C1a).  Returns
     ``(dT_dt (ncol, nlev), fluxes dict (ncol,), packed carry)``."""
     ncol, nlev = T.shape
     sharp = cfg.sharpness
@@ -152,7 +155,7 @@ def step(cfg: EcradIFSConfig, sources: EcradIFSSources, *, full_call: bool,
             aerosol_old=jnp.zeros((ncol, _N_TEGEN, nlev), T.dtype),
             # prepare_inputs' host-side seed lands in an output that
             # radiation_scheme discards; the traced seed above is the one used
-            nindat=0, nstep=0, tstep=0.0, **gas)
+            nindat=0, nstep=0, tstep=0.0, aerosol=aerosol, **gas)
     else:
         carry = unpack_carry(packed_carry, nlev)
     rh = ifs.radheatn(carry, p_half, q, T_skin, mu0, sources.solar_irradiance,

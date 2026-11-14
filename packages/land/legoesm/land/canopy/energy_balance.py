@@ -640,9 +640,25 @@ def canopy_air_update(
     raw_below: jax.Array,
     fStress: jax.Array,
     Ps: jax.Array,
+    Tc: jax.Array,
+    lam: jax.Array,
+    Cp: jax.Array,
+    sat_width: float,
     fwet: jax.Array = 0.0,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Update canopy air temperature Tc and specific humidity q_c.
+
+    Dew limit: the canopy air cannot hold more vapour than saturation at the
+    current canopy-air temperature ``Tc``.  The excess of the conductance-
+    weighted humidity over ``qsat(Tc)`` condenses through a C1 ramp of width
+    ``w = sat_width * qsat``: none at or below saturation, and at most
+    ``w / 2`` of supersaturation left in the air.  Its latent heat ``lam``
+    warms the canopy air; ``lam`` must be the heat of the phase the condensate
+    is stored in (the caller's snow-weighted ground charge).  Returned third:
+    the condensation as a mixing flux ``sum(cw) * dq`` [m s-1 kg kg-1]; times
+    air density it is the condensate mass flux the caller must deposit on the
+    surface (water conserved), and ``lam`` times that is the extra sensible
+    heat leaving the canopy top (energy conserved).
 
     ``fwet`` (wetted leaf fraction) blends the leaf WATER conductance with the
     wet-surface value ``1/Rb`` so the humidity balance transports the same
@@ -656,7 +672,7 @@ def canopy_air_update(
 
     Returns
     -------
-    Tc_new, q_c_new
+    Tc_new, q_c_new, cond_mix
     """
     ch_a   = 1.0 / jnp.maximum(rah_above, 1e-9)
     ch_sun = 1.0 / jnp.maximum(Rb_Sun,    1e-9)
@@ -687,9 +703,19 @@ def canopy_air_update(
     q_f_Sh  = saturation_specific_humidity(Tf_Sh,  Ps)
     q_s     = saturation_specific_humidity(Ts,     Ps)
 
-    Tc_new = (ch_a * Ta + ch_sun * Tf_Sun + ch_sh * Tf_Sh + ch_g * Ts) / (
-        ch_a + ch_sun + ch_sh + ch_g)
-    q_c_new = (cw_a * q_atm + cw_sun * q_f_Sun + cw_sh * q_f_Sh + cw_g * q_s) / (
-        cw_a + cw_sun + cw_sh + cw_g)
+    ch_sum = ch_a + ch_sun + ch_sh + ch_g
+    cw_sum = cw_a + cw_sun + cw_sh + cw_g
+    q_unc = (cw_a * q_atm + cw_sun * q_f_Sun + cw_sh * q_f_Sh + cw_g * q_s) / cw_sum
+    q_sat_c = saturation_specific_humidity(Tc, Ps)
+    # C1 ramp in the excess d = q_unc - qsat: exactly 0 at or below saturation,
+    # d^2/(2w) across the width w, then d - w/2 (air held at qsat + w/2).
+    w = sat_width * q_sat_c
+    d = q_unc - q_sat_c
+    dq_cond = jnp.where(d <= 0.0, 0.0,
+                        jnp.where(d < w, d * d / (2.0 * w), d - 0.5 * w))
+    cond_mix = cw_sum * dq_cond
+    Tc_new = (ch_a * Ta + ch_sun * Tf_Sun + ch_sh * Tf_Sh + ch_g * Ts
+              + lam * cond_mix / Cp) / ch_sum
+    q_c_new = q_unc - dq_cond
 
-    return Tc_new, q_c_new
+    return Tc_new, q_c_new, cond_mix

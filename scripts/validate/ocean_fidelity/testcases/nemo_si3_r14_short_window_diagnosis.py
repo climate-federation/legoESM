@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -100,7 +101,10 @@ def _stage_breakdown(card, state, ice_step_index: int, transport_step_index: int
     @jax.jit
     def stage_rhg(st, idx):
         forcing = recipe._forcing_for_state(card, st, idx)
-        dynamics = si3_cgrid_aevp_solver(st.dynamics, forcing, card.metrics, card.dynamics_config)
+        # NEMO's hard limits, as the lane recipe this stage mirrors selects them.
+        dynamics = si3_cgrid_aevp_solver(
+            st.dynamics, forcing, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
+        )
         div, delta = si3_lane_cgrid_deformation(
             dynamics, forcing, card.metrics, card.dynamics_config
         )
@@ -127,6 +131,7 @@ def _stage_breakdown(card, state, ice_step_index: int, transport_step_index: int
             ice_volume_index=recipe.ICE_RHEO_TRACERS.index("v_i"),
             concentration_index=recipe.ICE_RHEO_TRACERS.index("a_i"),
             subcycles=card.subcycles,
+            limit_sharpness_scale=math.inf,
         )
         contents = si3_prather_unpack_intensives(contents, cell_area, wet)
         contents = apply_si3_prather_source_corrections_lane(

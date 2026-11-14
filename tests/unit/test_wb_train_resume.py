@@ -806,3 +806,28 @@ def test_the_checkpoint_cadence_flag():
         ["--checkpoint-every-steps", "0"]).checkpoint_every_steps == 0
     with pytest.raises(SystemExit):
         mod.build_scale_config_from_args(["--checkpoint-every-steps", "-1"])
+
+
+def test_a_partial_of_aimip_knobs_carries_its_record_and_loads(tmp_path):
+    """A mid-epoch save writes the knob record beside its parameters, keeps
+    only the current generation's record, and loads back through the
+    knob-aware path (which refuses a record-less AIMIP file)."""
+    import equinox as eqx
+    from legoesm.ml.checkpoint_io import (
+        deserialise_knob_aware, knob_record_path, write_knob_record)
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+
+    p = AIMIPClassicalParams.from_defaults()
+    for step in (3, 5):
+        mod._save_partial(
+            str(tmp_path), _manifest(step=step, losses=(0.1,) * (step - 1)),
+            lambda t: eqx.tree_serialise_leaves(t, p),
+            lambda t: eqx.tree_serialise_leaves(t, p),
+            lambda f: write_knob_record(p, f))
+    _, pp, _ = mod._read_partial(str(tmp_path), 2, 10, _FP, _content())
+    assert [f.name for f in tmp_path.glob("partial.e*.knobs.json")] == [
+        knob_record_path(pp).name]
+    deserialise_knob_aware(pp, AIMIPClassicalParams.from_defaults())
+    knob_record_path(pp).unlink()
+    with pytest.raises(ValueError, match="no knob record"):
+        deserialise_knob_aware(pp, AIMIPClassicalParams.from_defaults())

@@ -6,7 +6,7 @@
 ! SATURATION (runtime, sat_mode):
 !   1 = legoesm.thermo exactly: Tetens 611.2*exp(17.67 Tc/(Tc+243.5)), Tc=max(T,150)-273.15
 !       (the e_s the oracle's escomp/lookup_es_des return), and for compute_qs (moist_conv only)
-!       q = w/(1+w) with w = 1 - softplus(20(1-w0))/20, w0 = eps e/(softplus(p-e-1)+1)
+!       q = w/(1+w) with w = min_20(w0, 1) (cancellation-free form each side of 1), w0 = eps e/(softplus(p-e-1)+1)
 !   2 = stock FMS: Goff-Gratch over water/ice with -20..0 C blend (sat_vapor_pres_k::compute_es_k,
 !       evaluated exactly instead of via its lookup table), q = eps e/(p-(1-eps)e)
 module constants_mod
@@ -264,7 +264,7 @@ contains
       d = softplus(p - es - 1.) + 1.
       w0 = eps*es/d
       dw0de = eps/d + eps*es*sigm(p - es - 1.)/d**2
-      w = 1. - softplus(20.*(1. - w0))/20.
+      w = merge(w0 - softplus(20.*(w0 - 1.))/20., 1. - softplus(20.*(1. - w0))/20., w0 < 1.)
       dwdw0 = sigm(20.*(1. - w0))
       qs = w/(1. + w)
       dqs = dwdw0*dw0de*des/(1. + w)**2

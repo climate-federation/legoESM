@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import jax
+import numpy as np
 import pytest
 import jax.numpy as jnp
 from legoesm.core.nonlinear import attach_implicit_gradient, make_implicit_newton_solver
@@ -79,10 +81,10 @@ def test_forward_step_uses_augmented_qr(monkeypatch):
     qr_called = False
     original_qr = jnp.linalg.qr
 
-    def recording_qr(value):
+    def recording_qr(value, **kwargs):
         nonlocal qr_called
         qr_called = True
-        return original_qr(value)
+        return original_qr(value, **kwargs)
 
     monkeypatch.setattr(jnp.linalg, "qr", recording_qr)
 
@@ -99,6 +101,47 @@ def test_forward_step_uses_augmented_qr(monkeypatch):
     assert bool(converged)
     assert jnp.allclose(x, 2.0, atol=1.0e-4)
     assert qr_called
+
+
+def test_forward_step_never_forms_q():
+    """The step applies Q^T from the packed reflectors: on GPU the explicit-Q
+    (householder_product / orgqr) lowering of ``qr`` runs per matrix and
+    dominated the land canopy solve."""
+    def residual(x, target):
+        return jnp.stack([x[0] - target[0], x[1] ** 3 + x[0] - target[1]])
+
+    solve = _solver(residual, x_scale=[1.0, 1.0], f_scale=[1.0, 1.0],
+                    max_iters=20)
+    # Seed off x1 = 0, where the Jacobian is singular and the solve stalls.
+    args = (jnp.array([1.5, 0.5]), jnp.array([2.0, 3.0]))
+    text = str(jax.make_jaxpr(solve)(*args))
+    assert "geqrf" in text
+    # The explicit-Q path is the ``qr`` primitive, which lowers to
+    # geqrf + householder_product; it must not appear in the step.
+    assert re.search(r"\bqr\[", text) is None
+    x, _, converged, *_ = solve(*args)
+    assert bool(converged)
+    assert jnp.allclose(x, jnp.array([2.0, 1.0]), atol=1.0e-4)
+
+
+def test_one_step_equals_damped_least_squares(x64):
+    """One accepted step on a linear residual is the damped normal-equations
+    solution; a wrong reflector layout or order gives a different step."""
+    rng = np.random.default_rng(0)
+    n = 6
+    jac = rng.normal(size=(n, n))
+    b = rng.normal(size=n)
+    damping = 0.3
+
+    def residual(x, b_):
+        return jnp.asarray(jac) @ x - b_
+
+    solve = _solver(residual, x_scale=np.ones(n), f_scale=np.ones(n),
+                    max_iters=1, lambda_initial=damping)
+    x, n_iters, *_ = solve(jnp.zeros(n), jnp.asarray(b))
+    expected = np.linalg.solve(jac.T @ jac + damping * np.eye(n), jac.T @ b)
+    assert int(n_iters) == 1
+    np.testing.assert_allclose(np.asarray(x), expected, rtol=1e-10, atol=1e-12)
 
 
 def test_column_equilibrated_exact_adjoint_matches_analytic_gradient(monkeypatch):

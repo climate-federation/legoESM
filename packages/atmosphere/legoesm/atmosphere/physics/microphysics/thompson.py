@@ -33,6 +33,10 @@ onto the oracle's representation and back (votes H1-H9, J1-J10):
   rain liquid and snow + graupel + ice frozen (H5).
 
 The scheme keeps WRF's hard switches (user-approved exception, 2026-11-03).
+One departure from WRF, on by default (user 2026-11-09): cloud water settling
+out of the lowest level is surface rain (``ThompsonConfig.
+cloud_sedimentation_to_precip``); WRF removes it and books it nowhere, 2.86x
+the reported rain over 3 days on the small MPAS test atmosphere.
 """
 
 from __future__ import annotations
@@ -144,7 +148,8 @@ def thompson_microphysics(
         Tb, pb, dzb, _flip(w), *r,
         _flip(h.N_i / dry),
         _flip(h.N_r) / rho_p, dt,
-        n_sed_max=n_sed)
+        n_sed_max=n_sed,
+        cloud_sed_to_rain=bool(config.cloud_sedimentation_to_precip))
     r_new = (o.qv, o.qc, o.qi, o.qr, o.qs, o.qg)
     q_new = [_flip(x) * dry for x in r_new]   # input dry factor (V1b)
     rate = [(qn - qo) / dt for qn, qo in zip(q_new, qs)]

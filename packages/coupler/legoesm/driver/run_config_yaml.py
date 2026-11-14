@@ -340,7 +340,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # post-step drain reads the same threaded sub-config in model_driver).
     # One flat scalar serves ALL SIX guarded schemes -- the four bulk
     # microphysics ones (morrison, p3, seifert_beheng, thompson) plus the
-    # Sundqvist diagnostic scheme and the ML emulator,
+    # ML emulator (Sundqvist's gscond port refuses the guard),
     # which gained the same guard when it was made uniform (only the active
     # scheme's sub-config is built, so one scalar is unambiguous). Keep this
     # block in step with microphysics/config.HARD_SAT_GUARD_SCHEMES.
@@ -350,8 +350,6 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.P3Config.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.SeifertBehengConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.SeifertBehengConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
-    "atm.micro.SundqvistConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
-    "atm.micro.SundqvistConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.MicrophysicsMLEmulatorConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.MicrophysicsMLEmulatorConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     # NOTE: LouisConfig.cloudtop_entrainment_efficiency was REMOVED 2026-07-23

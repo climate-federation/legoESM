@@ -31,6 +31,8 @@ jax.config.update("jax_enable_x64", True)
 
 ROOT = Path(__file__).resolve().parents[4]
 FIXTURE = ROOT / "tests/atmosphere/oracle_fixtures/sundqvist_zhao_carr.npz"
+# Whole-scheme oracle chain (gscond -> precpd) lives with the gscond fixture.
+CHAIN = ROOT / "tests/atmosphere/oracle_fixtures/sundqvist_zhao_carr_gscond.npz"
 GENERATOR = ROOT / "scripts/validate/oracle/sundqvist_zhao_carr/make_fixture.py"
 TOL = 1.0e-10
 # Fixture-input rebuild: last-digit libm differences across machines (measured
@@ -60,7 +62,14 @@ def _cfg(fx, run, sharpness=HARD):
         evap_coeff=evpco,
         wminco_liquid=wl, wminco_ice=wi, qc_crit=3.0e-4,
         coalescence_enh_coeff=300.0, bergeron_enh_coeff=0.5,
-        sigmoid_sharpness=sharpness)
+        sigmoid_sharpness=sharpness,
+        gscond_smooth_frac=(0.0 if sharpness == HARD
+                            else SundqvistConfig().gscond_smooth_frac))
+
+
+def _fresh(ncol, nlev, dtype=jnp.float64):
+    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_carry_init
+    return sundqvist_carry_init(ncol, nlev, dtype)
 
 
 def _sel(fx, names):
@@ -81,7 +90,8 @@ def _whole_call(fx, run, sharpness=HARD, dtype=jnp.float64, idx=None):
     hyd = HydrometeorState(q_c=g["q_c"], q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
     dt, cfg = _cfg(fx, run, sharpness)
     out = sundqvist_microphysics(g["T"], g["q_v"], hyd, g["p_full"], g["p_half"],
-                                 g["rho"], dz, dt, cfg, cell_area=1.0e10)
+                                 g["rho"], dz, dt, cfg, cell_area=1.0e10,
+                                 prev_state=_fresh(*g["T"].shape, dtype))
     return idx, dt, g, dz, out
 
 
@@ -135,34 +145,33 @@ def test_precpd_kernel_matches_zhao_carr(run):
 
 @pytest.mark.parametrize("run", RUNS)
 def test_whole_call_matches_zhao_carr(run):
-    """sundqvist_microphysics (hard limit) on the sub-saturated columns: the
-    condensation surrogate is exactly zero there, so every tendency and the
-    surface fluxes are the oracle's."""
+    """sundqvist_microphysics (hard limit, fresh start) vs the oracle chain
+    gscond -> precpd: every tendency and the surface fluxes.  Per-field metric
+    max|ours - oracle| / max|oracle| <= 1e-12 (the gscond port's bar), not the
+    pointwise metric: 12 clear cells end with 2e-20..1e-19 kg/kg of condensate
+    here where the oracle has 0 or 2e-19 (measured 2026-11-04)."""
     fx = _fx()
+    ch = dict(np.load(CHAIN))
+    np.testing.assert_array_equal(ch["names"], fx["names"])
+    np.testing.assert_array_equal(ch[f"chain_{run}_params"], fx[f"run_{run}"])
     idx, dt, g, dz, out = _whole_call(fx, run)
-    p = f"ora_{run}_"
+    p = f"chain_{run}_"
     T, qv, qc = (fx[f"col_{k}"][idx] for k in ("T", "q_v", "q_c"))
-    rn = fx[p + "rn"][idx] * 1000.0 / dt
-    errs = {
-        "dT": _rel(np.asarray(out.dT_dt) * dt, fx[p + "t"][idx] - T),
-        "dq_v": _rel(np.asarray(out.dq_v_dt) * dt, fx[p + "q"][idx] - qv),
-        "dq_c": _rel(np.asarray(out.dq_c_dt) * dt, fx[p + "cwm"][idx] - qc),
-        "precip": _rel(out.precipitation, rn),
-        "precip_frozen": _rel(out.precip_frozen, fx[p + "sr"][idx] * rn),
+    rn = ch[p + "rn"][idx] * 1000.0 / dt
+    def field(a, b):
+        a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+        return float(np.max(np.abs(a - b)) / max(np.max(np.abs(b)), 1e-300))
+
+    worst = {
+        "dT": field(np.asarray(out.dT_dt) * dt, ch[p + "t"][idx] - T),
+        "dq_v": field(np.asarray(out.dq_v_dt) * dt, ch[p + "q"][idx] - qv),
+        "dq_c": field(np.asarray(out.dq_c_dt) * dt, ch[p + "cwm"][idx] - qc),
+        "precip": field(out.precipitation, rn),
+        "precip_frozen": field(out.precip_frozen, ch[p + "sr"][idx] * rn),
     }
-    worst = {k: float(v.max()) for k, v in errs.items()}
-    print(f"run {run} whole-call max rel err", worst)
-    assert max(worst.values()) <= TOL, worst
+    print(f"run {run} whole-call max field err", worst)
+    assert max(worst.values()) <= 1.0e-12, worst
     assert np.all(np.asarray(out.dq_r_dt) == 0.0)
-    from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-    from legoesm.atmosphere.physics.microphysics.sundqvist import (
-        diagnose_sundqvist_process_rates)
-    z = jnp.zeros_like(g["T"])
-    hyd = HydrometeorState(q_c=g["q_c"], q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
-    rates = diagnose_sundqvist_process_rates(
-        g["T"], g["q_v"], hyd, g["p_full"], g["p_half"], g["rho"], dz, dt,
-        _cfg(fx, run)[1], cell_area=1.0e10)
-    assert np.all(np.asarray(rates.condensation) == 0.0)
 
 
 def test_fixture_exercises_oracle_branches():
@@ -263,7 +272,8 @@ def test_gradients_finite_on_fixture_columns(dtype):
             z = jnp.zeros_like(T)
             hyd = HydrometeorState(q_c=qc, q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
             out = sundqvist_microphysics(T, qv, hyd, g["p_full"], g["p_half"], g["rho"],
-                                         dz, dt, cfg, cell_area=1.0e10)
+                                         dz, dt, cfg, cell_area=1.0e10,
+                                         prev_state=_fresh(*T.shape, dtype))
             return jnp.sum(out.precipitation) * 1e3 + jnp.sum(out.dT_dt)
 
         grads = jax.grad(loss, argnums=(0, 1, 2))(g["T"], g["q_v"], g["q_c"])
@@ -282,7 +292,7 @@ def test_jit_matches_eager():
     hyd = HydrometeorState(q_c=g["q_c"], q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
     jitted = jax.jit(S.sundqvist_microphysics, static_argnums=(7, 8))(
         g["T"], g["q_v"], hyd, g["p_full"], g["p_half"], g["rho"], dz, dt, cfg,
-        cell_area=1.0e10)
+        cell_area=1.0e10, prev_state=_fresh(*g["T"].shape))
     for k in ("dT_dt", "dq_v_dt", "dq_c_dt", "precipitation", "precip_frozen"):
         assert float(_rel(getattr(jitted, k), getattr(eager, k)).max()) <= TOL, k
 
@@ -309,7 +319,8 @@ def test_column_water_closes_like_the_oracle(run):
 
 
 def test_pre_port_gaussian_f2_fields_refuse_non_default():
-    """The Gaussian-F2 fields have no oracle counterpart: a non-default value raises."""
+    """The Gaussian-F2 fields have no oracle counterpart, nor the surrogate's
+    hard saturation-adjustment guard: a non-default value raises."""
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
     from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
     from legoesm.atmosphere.physics.microphysics.sundqvist import (
@@ -317,9 +328,25 @@ def test_pre_port_gaussian_f2_fields_refuse_non_default():
     args = (jnp.full((1, 2), 280.0), jnp.full((1, 2), 1e-3), make_zero_hydrometeors(1, 2),
             jnp.full((1, 2), 8e4), jnp.asarray([[7e4, 8e4, 9e4]]), jnp.ones((1, 2)),
             jnp.full((1, 2), 1e3), 600.0)
-    diagnose_sundqvist_process_rates(*args, SundqvistConfig(), cell_area=1.0e10)
+    kw0 = dict(cell_area=1.0e10, prev_state=_fresh(1, 2))
+    diagnose_sundqvist_process_rates(*args, SundqvistConfig(), **kw0)
     diagnose_sundqvist_process_rates(*args, SundqvistConfig(
-        bergeron_T_peak_K=jnp.asarray(SundqvistConfig().bergeron_T_peak_K, jnp.float32)), cell_area=1.0e10)
+        bergeron_T_peak_K=jnp.asarray(SundqvistConfig().bergeron_T_peak_K, jnp.float32)), **kw0)
     for kw in (dict(bergeron_T_peak_K=260.0), dict(bergeron_T_width_K=5.0)):
         with pytest.raises(ValueError, match="no counterpart"):
-            diagnose_sundqvist_process_rates(*args, SundqvistConfig(**kw), cell_area=1.0e10)
+            diagnose_sundqvist_process_rates(*args, SundqvistConfig(**kw), **kw0)
+    for kw in (dict(hard_saturation_adjustment=True), dict(hard_sat_adjust_threshold=1.5),
+               dict(hard_sat_max_heating_K=2.0)):
+        with pytest.raises(ValueError, match="no such guard"):
+            diagnose_sundqvist_process_rates(*args, SundqvistConfig(**kw), **kw0)
+
+
+def test_missing_carry_refuses():
+    """Without the previous-step carry gscond cannot form its forcing: refuse."""
+    from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
+    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
+    with pytest.raises(ValueError, match="previous step's carry"):
+        sundqvist_microphysics(
+            jnp.full((1, 2), 280.0), jnp.full((1, 2), 1e-3), make_zero_hydrometeors(1, 2),
+            jnp.full((1, 2), 8e4), jnp.asarray([[7e4, 8e4, 9e4]]), jnp.ones((1, 2)),
+            jnp.full((1, 2), 1e3), 600.0, cell_area=1.0e10)

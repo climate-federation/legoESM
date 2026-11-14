@@ -82,12 +82,13 @@ def make_diag(grid, sigma, model=None):
         dth = th[..., :-1] - th[..., 1:]          # >0 stable (k=0 is top)
         leak = jnp.zeros(())
         if model is not None and model.config.nu_del4 > 0.0:
-            from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-                cgrid_latlon_hydrostatic_tendencies)
+            from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import (
+                cgrid_latlon_pe_tendencies)
             off = model.config._replace(nu_del4=0.0)
-            dT_on = cgrid_latlon_hydrostatic_tendencies(
-                s, grid, sigma, model.config, dt=model.dt)[2]
-            dT_off = cgrid_latlon_hydrostatic_tendencies(s, grid, sigma, off)[2]
+            form = model.config.vertical_form
+            dT_on = cgrid_latlon_pe_tendencies(
+                s, grid, sigma, model.config, dt=model.dt, vertical_form=form)[2]
+            dT_off = cgrid_latlon_pe_tendencies(s, grid, sigma, off, vertical_form=form)[2]
             col = jnp.sum(constants.c_pd * (dT_on - dT_off) * dp, axis=-1) / constants.g
             leak = jnp.sum(col * grid.area) / jnp.sum(grid.area)
         ul = s.u[:, :-1, 30:]

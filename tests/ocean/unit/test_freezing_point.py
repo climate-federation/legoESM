@@ -574,7 +574,6 @@ def test_run_omip_core2_freeze_scheme_wiring():
         assert "freezing" in inspect.signature(b).parameters, b.__name__
 
 
-@pytest.mark.xfail(strict=True, reason="PR #2388 review item 3 (gentine 2026-11-06); fix in the next SI3 PR")
 def test_nemo_eos_fzp_integer_salinity_matches_float():
     from legoesm.ocean.eos import nemo_eos_fzp
 

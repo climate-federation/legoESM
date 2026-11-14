@@ -515,6 +515,9 @@ def test_o17_inactive_category_open_water_snowfall_nan_fix_and_plant(monkeypatch
     for field in out_fixed._fields:
         assert int(np.isnan(np.asarray(getattr(out_fixed, field))).sum()) == 0, f"NaN in outputs.{field}"
     for field in stress_fixed._fields:
+        if field == "rCdU_ice":  # main's implicit-drag tail field: None on the explicit arm (ln_drgice_imp=F)
+            assert stress_fixed.rCdU_ice is None
+            continue
         assert int(np.isnan(np.asarray(getattr(stress_fixed, field))).sum()) == 0, f"NaN in stress.{field}"
 
     nine_fields = (

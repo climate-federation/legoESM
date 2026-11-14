@@ -45,21 +45,35 @@ for m in yomlun yomdyncore yomcst yoethf yomct3 yomrip0 yomphy2 yomphy3 yoerdu y
   sparse arpifs/module/$m.F90
 done
 sparse arpifs/phys_ec/satur.F90
+# aerosol arm (NAERMACC=1, votes A2a/A11/B1b/B2b/B5a): the 49r1 climatology, Tegen and
+# background-aerosol set-up and per-step chain (suecrad/updtim/radintg callees), unchanged
+for m in yoeaerc yoeaerc_tegen yoeaerd yoeaersnk reglatlon_field_mix yoecmip yoeozoc; do
+  sparse arpifs/module/$m.F90
+done
+sparse ifsaux/module/deallocate_if_associated_mod.F90
+for f in suaerh suaerv su_aerv updecaec suecaebc suecaeor suecaesd suecaess suecaesu; do
+  sparse arpifs/phys_ec/$f.F90
+done
+blob arpifs/adiab/gphpre.F90
+blob arpifs/climate/updcal.F90
+blob arpifs/transform/legtri.F90
 sparse arpifs/setup/sudyncore.F90
 blob arpifs/utility/posnam.F90
 blob arpifs/utility/posname.F90
 for f in radiation_scheme.F90 su_radiation_scheme.F90 liquid_effective_radius.F90 ice_effective_radius.F90 \
-         cloud_overlap_decorr_len.F90 radheatn.F90; do exported $f; done
+         cloud_overlap_decorr_len.F90 radheatn.F90 radact.F90; do exported $f; done
 # yoerdi.F90 and surdi.F90 (49r1) are compiled in the core build (bld49 MANIFEST) and reused;
 # surdi.F90 is copied to gen/ only to generate and prove its interface block
 mkdir -p gen; cp "$P49"/surdi.F90 gen/; cmp -s gen/surdi.F90 "$C"/src/surdi.F90 || { echo "core surdi differs"; exit 1; }
 add "$HERE"/ifs49_stubs.F90 harness
+add "$HERE"/ifs49_aer_stubs.F90 harness
 add "$HERE"/ifs49_radintg_post.F90 harness
 add "$HERE"/ifs49_driver.F90 harness
 M49=$OIFS/ifs-source/arpifs/module
 python3 -I "$HERE"/ifs49_poison.py src/ifs49_poison.F90 $M49/yoerad.F90:YOERAD:TERAD $M49/yoeaeratm.F90:YOEAERATM:TEAERATM \
   $C/src/yoerdi.F90:YOERDI:TERDI $M49/yoecldp.F90:YOECLDP:TECLDP $M49/yoecld.F90:YOECLD:TECLD $M49/yoephy.F90:YOEPHY:TEPHY \
-  $M49/yoephli.F90:YOEPHLI:TEPHLI $M49/yomphy2.F90:YOMPHY2:TPHY2 $M49/yomphy3.F90:YOMPHY3:TPHY3
+  $M49/yoephli.F90:YOEPHLI:TEPHLI $M49/yomphy2.F90:YOMPHY2:TPHY2 $M49/yomphy3.F90:YOMPHY3:TPHY3 \
+  $M49/yoeaerd.F90:YOEAERD:TEAERD $M49/yoeaersnk.F90:YOEAERSNK:TEAERSNK
 echo "harness_generated ifs49_poison.F90 $(git hash-object src/ifs49_poison.F90)" >> MANIFEST.txt
 python3 -I "$HERE"/ifs49_config_dump.py "$X"/ifs-source/radiation/module/radiation_config.F90 src/ifs49_config_dump.F90
 echo "harness_generated ifs49_config_dump.F90 $(git hash-object src/ifs49_config_dump.F90)" >> MANIFEST.txt
@@ -72,7 +86,8 @@ blob arpifs/namelist/namdyncore.nam.h; mv src/namdyncore.nam.h inc/
 
 # --- interface blocks (generated, then proven) -------------------------------
 INTF="satur su_radiation_scheme radiation_scheme liquid_effective_radius ice_effective_radius \
-      cloud_overlap_decorr_len radheatn surdi posnam posname"
+      cloud_overlap_decorr_len radheatn surdi posnam posname \
+      suaerh suaerv su_aerv updecaec radact gphpre updcal suecaebc suecaeor suecaesd suecaess suecaesu legtri"
 srcof() { [ -f src/$1.F90 ] && echo src/$1.F90 || echo gen/$1.F90; }
 for r in $INTF; do python3 -I "$HERE"/ifs49_intfb.py $(srcof $r) inc/$r.intfb.h; echo "harness_intfb $r.intfb.h $(git hash-object inc/$r.intfb.h)" >> MANIFEST.txt; done
 cp "$C"/inc/abor1.intfb.h inc/ 2>/dev/null || cp "$E172"/include/abor1.intfb.h inc/

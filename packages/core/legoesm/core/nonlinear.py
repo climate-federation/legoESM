@@ -114,9 +114,18 @@ def make_implicit_newton_solver(
                 [jacobian_z, jnp.sqrt(damping) * jnp.eye(n, dtype=residual.dtype)]
             )
             rhs = jnp.concatenate([-residual, jnp.zeros(n, residual.dtype)])
-            q, r = jnp.linalg.qr(augmented)
+            # Q^T rhs from the packed reflectors, never forming Q: on GPU the
+            # explicit-Q (orgqr) step runs one small kernel chain PER MATRIX,
+            # which was ~90% of the land canopy solve's wall time.
+            packed, taus = jnp.linalg.qr(augmented, mode="raw")
+            h = packed.T
+            qt_rhs = rhs
+            for k in range(n):
+                v = jnp.concatenate([jnp.zeros(k, h.dtype),
+                                     jnp.ones(1, h.dtype), h[k + 1:, k]])
+                qt_rhs = qt_rhs - taus[k] * jnp.dot(v, qt_rhs) * v
             delta_z = jax.scipy.linalg.solve_triangular(
-                r, q.T @ rhs, lower=False
+                jnp.triu(h[:n, :]), qt_rhs[:n], lower=False
             )
             predicted = residual + jacobian_z @ delta_z
             return delta_z, jnp.sum(predicted * predicted)

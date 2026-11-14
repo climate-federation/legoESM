@@ -37,6 +37,8 @@ __param_spec__ = {
             "smooth_energy_sharpness_m2j": "RULE 5 smoothing sharpness of the ePBL energy switches; a numerics regulariser, not physics",
             "smooth_colht_sharpness_per_m": "RULE 5 smoothing sharpness of the ePBL column-height switches; a numerics regulariser, not physics",
             "smooth_ratio_sharpness": "RULE 5 smoothing sharpness of the ePBL nondimensional caps; a numerics regulariser, not physics",
+            "smooth_velocity_sharpness_s_m": "RULE 5 smoothing sharpness of the ePBL velocity caps; a numerics regulariser, not physics",
+            "smooth_slope_sharpness": "RULE 5 smoothing sharpness of the ePBL column-height slope switches; a numerics regulariser, not physics",
         },
         "params": {
             "nstar": {"units": "1", "bounds": (0.02, 0.4), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) NSTAR: fraction of released PE available to drive entrainment", "shape": None},
@@ -44,11 +46,12 @@ __param_spec__ = {
             "tke_decay": {"units": "1", "bounds": (0.001, 12.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "TKE_DECAY: ratio of the Ekman depth to the TKE decay scale", "shape": None},
             "wstar_ustar_coef": {"units": "1", "bounds": (0.5, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "WSTAR_USTAR_COEF: efficiency of convective relative to mechanical TKE", "shape": None},
             "ekman_scale_coef": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EKMAN_SCALE_COEF: rotational inhibition of the mixing length", "shape": None},
-            "mke_to_tke_effic": {"units": "1", "bounds": (0.0, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MKE_TO_TKE_EFFIC: conversion of resolved shear KE into TKE", "shape": None},
+            # Off by default: the default sits on a bound, so a sigmoid cannot seed it.
+            "mke_to_tke_effic": {"units": "1", "bounds": (0.0, 0.2), "tunable_tier": 0, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MKE_TO_TKE_EFFIC: conversion of resolved shear KE into TKE", "shape": None},
             "mstar_cap": {"units": "1", "bounds": (-1.0, 20.0), "tunable_tier": 0, "transform": "none", "category": "vertical_mixing", "reference": "MSTAR_CAP: upper bound on mstar (OM4 scheme only, as in MOM6); negative disables", "shape": None},
             "mstar_coef": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR2_COEF1: rotation/stabilization balance (OM4 scheme)", "shape": None},
             "c_ek": {"units": "1", "bounds": (0.02, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR2_COEF2: Ekman-limited mixing coefficient (OM4 scheme)", "shape": None},
-            "mstar_convect_coef": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR_CONV_ADJ: reduction of mstar under convection", "shape": None},
+            "mstar_convect_coef": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR_CONV_ADJ: reduction of mstar under convection", "shape": None},
             "rh18_mstar_cn1": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN1 (Reichl & Hallberg 2018 value 0.275)", "shape": None},
             "rh18_mstar_cn2": {"units": "1", "bounds": (1.0, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN2 (Reichl & Hallberg 2018 value 8.0)", "shape": None},
             "rh18_mstar_cn3": {"units": "1", "bounds": (-12.0, -1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN3 (Reichl & Hallberg 2018 value -5.0)", "shape": None},
@@ -58,7 +61,7 @@ __param_spec__ = {
             "translay_scale": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EPBL_TRANSITION_SCALE: mixing length in the transition layer as a fraction of the boundary-layer depth", "shape": None},
             "vstar_scale_fac": {"units": "1", "bounds": (0.2, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EPBL_VEL_SCALE_FACTOR: overall scaling of the turbulent velocity", "shape": None},
             "vstar_surf_fac": {"units": "1", "bounds": (0.5, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "VSTAR_SURF_FAC: surface mechanical contribution to vstar (REICHL_H18 scheme)", "shape": None},
-            "omega_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "ML_OMEGA_FRAC: blend of 2*Omega with the local f in the rotational scale", "shape": None},
+            "omega_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "sigmoid", "category": "vertical_mixing", "reference": "ML_OMEGA_FRAC: blend of 2*Omega with the local f in the rotational scale", "shape": None},
             "K_bg": {"units": "m^2/s", "bounds": (1e-6, 1e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KD: background tracer diffusivity added below the boundary layer", "shape": None},
             "A_bg": {"units": "m^2/s", "bounds": (1e-5, 1e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KV: background viscosity added below the boundary layer", "shape": None},
         },
@@ -1180,6 +1183,8 @@ class EPBLConfig(NamedTuple):
     smooth_energy_sharpness_m2j: float = 1.0e6    # [m^2/J] TKE / PE per area
     smooth_colht_sharpness_per_m: float = 1.0e10  # [1/m] column-height change
     smooth_ratio_sharpness: float = 1.0e3         # [1] nondimensional ratios
+    smooth_velocity_sharpness_s_m: float = 1.0e6  # [s/m] velocity scales
+    smooth_slope_sharpness: float = 1.0e10        # [1] d(ColHt)/d(Kddt_h), ~1e-5
 
     # --- background floors added to the ePBL diffusivity ---
     K_bg: float = 1.0e-5               # KD   [m^2/s]

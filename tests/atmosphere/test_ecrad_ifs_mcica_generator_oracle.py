@@ -259,29 +259,42 @@ def _boundary_cases():
     return cases
 
 
-# (rand array index, slot) of the uniform that feeds ONLY the named switch;
-# a uniform enters the generator through switches only, so its hard-form
-# gradient is exactly 0 and its smooth gradient isolates that switch.
+# (rand array index, slot) of the uniform that feeds ONLY the named switch.
+# The McICA sampling is exact at every sharpness (user rule 2026-11-04, vote
+# T4): at each boundary case the uniform's gradient is exactly 0 and the
+# output equals the hard form, while frac/op keep finite nonzero gradients.
 SLOT = {"trigger": (0, (0,)), "cloud_to_cloud": (1, (0, 1)),
         "clear_to_cloud": (1, (0, 2)), "inhom_repeat": (3, (0, 2))}
 
 
 @pytest.mark.parametrize("case", list(SLOT))
-def test_gradient_across_transition(case):
+def test_sampling_exact_across_transition(case):
     rand = _boundary_cases()[case]
     f, op = jnp.asarray(F0), jnp.asarray(OP0)
     gf, gop = jax.grad(_small, argnums=(0, 1))(f, op, rand, 100.0)
     assert np.all(np.isfinite(np.concatenate([gf, gop]))) and np.abs(np.concatenate([gf, gop])).max() > 0
     which, slot = SLOT[case]
     g_r = jax.grad(_small, argnums=2)(f, op, rand, 100.0)[which][slot]
-    g_rh = jax.grad(_small, argnums=2)(f, op, rand, math.inf)[which][slot]
+    v100, vinf = float(_small(f, op, rand, 100.0)), float(_small(f, op, rand, math.inf))
     print(f"{case}: d/d frac,op max={np.abs(np.concatenate([gf, gop])).max():.3e} "
-          f"d/d uniform smooth={float(g_r):.3e} hard={float(g_rh):.3e}")
-    assert np.isfinite(g_r) and abs(float(g_r)) > 0.5 and float(g_rh) == 0.0
+          f"d/d uniform smooth={float(g_r):.3e} value 100={v100!r} inf={vinf!r}")
+    assert float(g_r) == 0.0
+    # the boundary case's draw decides the same way at 100 as at inf, and the
+    # decision really flips inside +-1e-9 at both (a crossing, not false == false)
+    side = {}
+    for s in (100.0, math.inf):
+        for d in (-1e-9, 1e-9):
+            r = list(rand)
+            r[which] = r[which].at[slot].add(d)
+            side[s, d] = float(_small(f, op, tuple(r), s))
+    for s in (100.0, math.inf):
+        assert side[s, -1e-9] != side[s, 1e-9], (case, s, "no crossing")
+    for d in (-1e-9, 1e-9):
+        assert (side[100.0, d] != v100) == (side[math.inf, d] != vinf), (case, d)
 
 
 def test_strict_compare_and_single_layer():
-    assert float(mg._lt(jnp.float64(1.0), jnp.float64(1.0), math.inf)) == 0.0   # oracle "<"
+    assert float(mg._lt(jnp.float64(1.0), jnp.float64(1.0))) == 0.0   # oracle "<"
     od, tcc = mg.cloud_generator(jnp.array([[0.5]]), jnp.zeros((1, 0)), jnp.ones((1, 1)),
                                  jnp.array([[0.2]]), jnp.full((1, 1, 1), 0.5),
                                  jnp.full((1, 1, 1), 0.37), jnp.full((1, 1, 1), 0.9),
@@ -340,9 +353,9 @@ def test_smooth_cover_bounds(f_thin):
 def test_smooth_cover_near_overcast_and_clear():
     """Review round 2: no cover collapse next to an overcast layer, no jump at
     MaxCloudFrac, finite gradients through adjacent clear layers."""
-    f0 = np.nextafter(mg._MAX_CLOUD_FRAC, 0.0)
+    f0 = np.nextafter(mg._max_cloud_frac(np.float64), 0.0)
     covers = [float(mg.cum_cloud_cover_exp_ran(jnp.array([f, 0.999]), jnp.ones(1), 100.0)[0][-1])
-              for f in (f0, mg._MAX_CLOUD_FRAC)]
+              for f in (f0, mg._max_cloud_frac(np.float64))]
     assert covers[0] >= f0 and abs(covers[0] - covers[1]) <= 1e-13
     g = jax.grad(lambda f: mg.cum_cloud_cover_exp_ran(f, jnp.full(2, 0.5), 100.0)[0][-1])(
         jnp.array([0.0, 0.0, 0.5]))

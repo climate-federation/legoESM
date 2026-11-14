@@ -634,8 +634,9 @@ def test_mpas_config_default_and_dispatch():
 def test_mpas_tendencies_reject_unknown_and_hybrid():
     """Fail-early on the STATIC config value, before any tracing."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies,
-    )
+        MPASPrimitiveEquationConfig,
+        )
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     from legoesm.grids.vertical import standard_hybrid_levels
 
     coord = _coord()
@@ -643,9 +644,9 @@ def test_mpas_tendencies_reject_unknown_and_hybrid():
     cfg_bad = MPASPrimitiveEquationConfig(vert_advection_scheme="nope")
     cfg_vl = MPASPrimitiveEquationConfig(vert_advection_scheme="van_leer")
     with pytest.raises(ValueError, match="unknown vert_advection_scheme"):
-        mpas_hydrostatic_tendencies(None, None, coord, cfg_bad)
+        mpas_pe_tendencies(None, None, coord, cfg_bad, vertical_form="legacy")
     with pytest.raises(ValueError, match="sigma vertical coordinate only"):
-        mpas_hydrostatic_tendencies(None, None, hyb, cfg_vl)
+        mpas_pe_tendencies(None, None, hyb, cfg_vl, vertical_form="legacy")
 
 
 def test_driver_config_and_validate_strict():
@@ -800,17 +801,18 @@ def test_mpas_tendencies_default_unchanged_and_van_leer_moves_all_three_paths():
     cover — theta (dT_dt), the tracers, and the edge winds (du_dt).
     """
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies,
-    )
+        MPASPrimitiveEquationConfig,
+        )
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     mesh, state = _mpas_state_and_mesh()
     coord = _coord()
     base = MPASPrimitiveEquationConfig()
     assert base.vert_advection_scheme == "upwind"
-    t_def = mpas_hydrostatic_tendencies(state, mesh, coord, base)
-    t_up = mpas_hydrostatic_tendencies(
-        state, mesh, coord, base._replace(vert_advection_scheme="upwind"))
-    t_vl = mpas_hydrostatic_tendencies(
-        state, mesh, coord, base._replace(vert_advection_scheme="van_leer"))
+    t_def = mpas_pe_tendencies(state, mesh, coord, base, vertical_form="legacy")
+    t_up = mpas_pe_tendencies(
+        state, mesh, coord, base._replace(vert_advection_scheme="upwind"), vertical_form="legacy")
+    t_vl = mpas_pe_tendencies(
+        state, mesh, coord, base._replace(vert_advection_scheme="van_leer"), vertical_form="legacy")
 
     assert jnp.array_equal(t_def.dT_dt.data, t_up.dT_dt.data)
     assert jnp.array_equal(t_def.du_dt.data, t_up.du_dt.data)

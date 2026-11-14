@@ -25,6 +25,7 @@ import sys
 
 import jax.numpy as jnp
 
+from legoesm.atmosphere.idealized.rcemip_initial_conditions import RCE_CELL_AREA_M2
 from legoesm import constants
 from legoesm.atmosphere.physics import (
     ConvectionConfig,
@@ -108,6 +109,10 @@ def build_scm(
         forcing=forcing,
         time_integrator="forward_euler",
         t0_seconds=_T_START_S,
+        # mynn25 (WRF port) reads q_c and the GCM cell area; land site
+        # (votes T1a/T2a/T3b)
+        q_c_profile=jnp.zeros(nlev), cell_area_m2=RCE_CELL_AREA_M2,
+        land_frac=1.0,
     )
 
 
@@ -126,8 +131,8 @@ def run(args: argparse.Namespace) -> int:
 
     scm.run(nsteps=nsteps)
     T_low = float(scm.state.T.data[0, 0, 0, -1])
-    qke_low = float(scm.phys_state.qke[0, -1])
-    qke_max = float(scm.phys_state.qke.max())
+    qke_low = float(scm.phys_state.qke[0, 0, -1])   # (ncol, 3, nlev) carry: qke slot
+    qke_max = float(scm.phys_state.qke[0, 0].max())
     print(f"[Wangara] T_low={T_low:.3f}  qke_low={qke_low:.4f}  "
           f"qke_max={qke_max:.4f}")
 

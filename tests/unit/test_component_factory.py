@@ -962,6 +962,50 @@ class TestFixMassForwarding:
         assert model.config.fix_mass is flag
         assert model.config.anchor_mass_to_initial is flag
 
+    @pytest.mark.parametrize("scale", [1.0, 0.25])
+    @pytest.mark.skipif(
+        not jax.config.read("jax_enable_x64"),
+        reason="spectral/Gaussian needs JAX_ENABLE_X64=1",
+    )
+    def test_spectral_pe_honours_hyperdiff_scale(self, scale):
+        from legoesm.grids.factory import create_grid
+        from legoesm.grids.gaussian import hyperdiff_coeff_for_efold
+        grid = create_grid("gaussian", 21)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="gaussian", resolution=21, nlev=5),
+            dycore=DycoreConfig(
+                energy_fixer=False,
+                model_type="hydrostatic", discretization="spectral",
+                dt=300.0, hyperdiff_scale=scale,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma())
+        base = hyperdiff_coeff_for_efold(grid, 0.5 * 3600.0)
+        assert model.config.hyperdiff_coeff == scale * base
+
+    @pytest.mark.parametrize("scale,warns", [(1.0, False), (40.0, True)])
+    @pytest.mark.skipif(
+        not jax.config.read("jax_enable_x64"),
+        reason="spectral/Gaussian needs JAX_ENABLE_X64=1",
+    )
+    def test_spectral_pe_warns_past_rk_stability(self, scale, warns, caplog):
+        import logging
+        from legoesm.grids.factory import create_grid
+        grid = create_grid("gaussian", 21)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="gaussian", resolution=21, nlev=5),
+            dycore=DycoreConfig(
+                energy_fixer=False,
+                model_type="hydrostatic", discretization="spectral",
+                dt=300.0, hyperdiff_scale=scale,
+            ),
+        )
+        # dt/1800 s per unit scale: 0.17 (stable) vs 6.7 (> 5.33 limit).
+        with caplog.at_level(logging.WARNING):
+            create_atmosphere_dycore(config, grid, _make_sigma())
+        assert any("real-axis stability" in r.message
+                   for r in caplog.records) is warns
+
     @pytest.mark.parametrize("flag", [True, False])
     @pytest.mark.skipif(
         not jax.config.read("jax_enable_x64"),

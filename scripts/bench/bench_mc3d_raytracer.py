@@ -48,11 +48,13 @@ def benchmark(nx=32, ny=32, nz=32, photons=64, coarsen_xy=0, coarsen_z=0,
 
   def run(key):
     r = solve_sw_monochromatic(k_ext, ssa, g, geom, mu0=0.7, azimuth=0.0,
-                               albedo=0.1, config=cfg, key=key)
+                               albedo=0.1, diffuse_frac=0.0, config=cfg,
+                               key=key)
     # Touch EVERY output leaf so XLA cannot dead-code-eliminate part of the
     # solve out of the timed window (full-solve throughput, not just one total).
     return (r.vol_abs_total + r.sfc_abs_total + r.tod_up_frac
-            + r.maxiter_frac + jnp.sum(r.abs_frac) + jnp.sum(r.sfc_abs_frac))
+            + r.maxiter_frac + jnp.sum(r.abs_frac) + jnp.sum(r.sfc_abs_frac)
+            + r.residual_frac + jnp.sum(r.tod_up_col_frac) + jnp.sum(r.sfc_up_frac))
 
   # Warm up (compile) then time.
   run(jax.random.PRNGKey(0)).block_until_ready()

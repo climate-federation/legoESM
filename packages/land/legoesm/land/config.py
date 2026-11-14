@@ -212,8 +212,8 @@ class MultiLayerLandConfig(NamedTuple):
     soil_grid: SoilGridConfig = SoilGridConfig()
     hydraulics: SoilHydraulicsConfig = SoilHydraulicsConfig()
     thermal: SoilThermalConfig = SoilThermalConfig()
-    # The four fields below are pinned explicitly (user-approved 2026-10-05), so
-    # they do not follow later changes to RichardsConfig defaults; the other
+    # The fields below are pinned explicitly (user-approved 2026-10-05), so they
+    # do not follow later changes to RichardsConfig defaults; the other
     # RichardsConfig fields still inherit its defaults.
     richards: RichardsConfig = RichardsConfig(
         fc_drain_saturation=0.5, max_iter=30, max_dse_per_iter=0.1, theta_tol=1e-6)

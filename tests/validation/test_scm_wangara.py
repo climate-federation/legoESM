@@ -91,7 +91,7 @@ def test_wangara_convective_qke_profile(wangara_run):
     cell, not at the surface.  A purely surface-driven turbulence
     response (no convective transport) would peak at the surface.
     """
-    qke = np.asarray(wangara_run.phys_state.qke[0])
+    qke = np.asarray(wangara_run.phys_state.qke[0, 0])   # qke slot (vote Z1a)
     k_max = int(np.argmax(qke))
     nlev = qke.size
     # Lowest cell is index nlev-1; convective qke peak must sit

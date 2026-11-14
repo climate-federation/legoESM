@@ -69,6 +69,7 @@ from legoesm.ice.si3_orca2_state import (
     si3_var_agg,
     si3_var_glo2eqv,
 )
+from legoesm.ice.config import SI3_HARD_SWITCHES
 from legoesm.ice.si3_surface import SI3SurfaceConfig
 
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer import (
@@ -479,7 +480,7 @@ def _case(master: Path, shape: tuple[int, int] = (7, 7)):
     )
     surface_cfg = SI3SurfaceConfig.from_resolved_namelists(
         run / "output.namelist.dyn", run / "output.namelist.ice"
-    )
+    )._replace(switches=SI3_HARD_SWITCHES)  # NEMO's hard switches, not main's smooth default
     card = build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)
     # The owned tile exercises three regimes at separated columns: open water,
     # active ice, and a nonzero category column below epsi10 (icethd.F90:121-138).

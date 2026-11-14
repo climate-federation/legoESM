@@ -190,7 +190,12 @@ def _run_sundqvist(grid, sigma_coord, monkeypatch):
     state = _moist_state(grid, sigma_coord, 1.10, 0.5, q_c=1e-3, q_r=1e-3)
     fn = make_microphysics_physics(
         MicrophysicsConfig(scheme="sundqvist"), "spectral_pe", DT)
-    tend, sfc = fn(state, grid, sigma_coord, return_sfc_precip=True)
+    pc = PhysicsConfig(radiation=RadiationConfig(scheme="none"),
+                       microphysics=MicrophysicsConfig(scheme="sundqvist"))
+    # Sundqvist writes its gscond carry (second return); fresh-start carry in.
+    tend, _, sfc = fn(state, grid, sigma_coord,
+                      phys_state=_phys_state(grid, sigma_coord, pc),
+                      return_sfc_precip=True)
     return state, tend, sfc, seen["out"]
 
 

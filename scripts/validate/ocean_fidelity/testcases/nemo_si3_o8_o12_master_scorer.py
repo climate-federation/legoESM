@@ -26,6 +26,7 @@ import numpy as np
 
 from legoesm import constants as canonical_constants
 from legoesm.core.precision import PrecisionPolicy, set_policy
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ice import bitz_lipscomb as bl
 from legoesm.ice.bitz_lipscomb import (
     SI3ColumnArrays,
@@ -47,6 +48,7 @@ from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 from legoesm.ice.itd import si3_ice_itd_rem
 from legoesm.ice.ponds import step_ponds
 from legoesm.ice.si3_thd_da import si3_ice_thd_da
+from legoesm.ice.si3_surface import fortran_sum0
 from legoesm.ice.si3_thd_pnd import si3_ice_thd_pnd
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o5_orca2_sas_gate import (
     max_ulp_diff,
@@ -966,42 +968,55 @@ def _build_compiled_kernels(
 
     @jax.jit
     def jit_prod_step_ponds(inputs: dict[str, jax.Array]):
-        zero_3d = jnp.zeros_like(inputs["a_i"])
-        return step_ponds(
-            inputs["a_ip_frac"],
-            inputs["h_ip"],
-            melt_water_m=zero_3d,
-            rain_water_m=zero_3d,
-            ice_mask=inputs["a_i"] > 0.0,
-            h_snow=zero_3d,
-            T_air=inputs["t_su"],
-            dt=rDt_ice,
-            drainage_timescale=86400.0,
-            refreeze_threshold=constants.T0,
-            pond_to_ice_max_area=0.6,
-            depth_to_area_ratio=0.8,
-            scheme="si3_lev",
-            at_i=inputs["a_i"],
-            a_i=inputs["a_i"],
-            h_i=inputs["h_i"],
-            t_su=inputs["t_su"],
-            h_il=inputs["h_il"],
-            dh_i_sum=inputs["dh_i_sum_2d"],
-            dh_s_sum=inputs["dh_s_sum_2d"],
-            sz_i=inputs["sz_i"],
-            t_i=inputs["t_i"],
-            namthd_pnd=pnd_orca2_cfg,
-            rho_w=rho_w,
-            gravity=gravity,
-            ice_constants=constants,
-            v_i=inputs["v_i"],
-            a_ip=inputs["a_ip"],
-            v_ip=inputs["v_ip"],
-            v_il=inputs["v_il"],
-            wfx_pnd=inputs["wfx_pnd"],
-            nn_hls=0,
-            _return_si3_outputs=True,
-        )
+        # Main's production step_ponds(scheme='si3_lev') takes ONE category per call (main
+        # #2396) and returns (a_ip/a_i, h_ip, drain, refreeze, h_il) for it; at_i is the
+        # category sum si3_ice_thd_pnd forms (icethd_pnd.F90:203).  Scored: a_ip/a_i, h_ip
+        # and h_il per category.  v_ip, v_il and at_i are not returned; the drain is a
+        # per-category quantity while the record holds only the category-summed wfx_pnd.
+        # All four are checked through the direct si3_ice_thd_pnd row only.
+        at_i = fortran_sum0(inputs["a_i"])
+        area, depth, lid = [], [], []
+        for jl in range(inputs["a_i"].shape[-1]):
+            cat = {k: v[..., jl] for k, v in inputs.items() if k != "wfx_pnd"}
+            zero = jnp.zeros_like(cat["a_i"])
+            out = step_ponds(
+                cat["a_ip_frac"],
+                cat["h_ip"],
+                melt_water_m=zero,
+                rain_water_m=zero,
+                ice_mask=cat["a_i"] > 0.0,
+                h_snow=zero,
+                T_air=cat["t_su"],
+                dt=rDt_ice,
+                drainage_timescale=86400.0,
+                refreeze_threshold=constants.T0,
+                pond_to_ice_max_area=0.6,
+                depth_to_area_ratio=0.8,
+                scheme="si3_lev",
+                at_i=at_i,
+                a_i=cat["a_i"],
+                h_i=cat["h_i"],
+                t_su=cat["t_su"],
+                h_il=cat["h_il"],
+                dh_i_sum=cat["dh_i_sum_2d"],
+                dh_s_sum=cat["dh_s_sum_2d"],
+                sz_i=cat["sz_i"],
+                t_i=cat["t_i"],
+                namthd_pnd=pnd_orca2_cfg,
+                rho_w=rho_w,
+                gravity=gravity,
+                ice_constants=constants,
+                v_i=cat["v_i"],
+                a_ip=cat["a_ip"],
+                v_ip=cat["v_ip"],
+                v_il=cat["v_il"],
+                wfx_pnd=inputs["wfx_pnd"],
+                nn_hls=0,
+            )
+            area.append(out[0])
+            depth.append(out[1])
+            lid.append(out[4])
+        return jnp.stack(area, axis=-1), jnp.stack(depth, axis=-1), jnp.stack(lid, axis=-1)
 
     @jax.jit
     def jit_o13_remap(inputs: dict[str, jax.Array]):
@@ -1831,11 +1846,23 @@ def score_o8_to_o12(
                 o12_pnd_acc.update(
                     spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0
                 )
-        prod_pnd_out = jit_prod_step_ponds(pnd_in)
-        for fname in PND_UPDATED_FIELDS:
-            prod_step_ponds_acc.update(
-                fname, getattr(prod_pnd_out, fname), f11[fname], kt=kt, category=0
-            )
+        # Production row: main's one-category step_ponds (a_ip/a_i, h_ip, h_il per category;
+        # v_ip, v_il, at_i and wfx_pnd through the direct row above only).  a_ip/a_i is scored
+        # against the record's a_ip divided by the entry a_i with main's own statement.
+        prod_area, prod_depth, prod_lid = jit_prod_step_ponds(pnd_in)
+        a_i_entry = np.asarray(f10["a_i"])
+        a_i_safe = np.where(a_i_entry > 0.0, a_i_entry, 1.0)
+        want_area = np.where(
+            a_i_entry > 0.0,
+            np.asarray(nemo_source_round(jnp.asarray(f11["a_ip"]) / jnp.asarray(a_i_safe))),
+            0.0,
+        )
+        for fname, got, want in (
+            ("a_ip/a_i", prod_area, want_area),
+            ("h_ip", prod_depth, f11["h_ip"]),
+            ("h_il", prod_lid, f11["h_il"]),
+        ):
+            prod_step_ponds_acc.update(fname, got, want, kt=kt, category=0)
         for spec in KINDS[11].fields:
             if spec.name not in PND_UPDATED_FIELDS:
                 prod_step_ponds_acc.update(
@@ -1907,6 +1934,12 @@ def score_o8_to_o12(
             "exit_kind": 11,
             "score": o12_pnd_acc.summary(),
             "production_step_ponds_si3_lev": prod_step_ponds_acc.summary(),
+            "production_step_ponds_si3_lev_scope": (
+                "one call per category; a_ip/a_i, h_ip and h_il scored at 0 ULP; v_ip, v_il "
+                "and at_i (not returned) and wfx_pnd (returned only as a per-category drain; "
+                "the record holds the category sum) are checked through the direct "
+                "si3_ice_thd_pnd row only"
+            ),
         },
         "O13": {
             "production_function": "legoesm.ice.itd.si3_ice_itd_rem",
@@ -2031,14 +2064,15 @@ def _summarize_o13_conservation(reports: Sequence[Mapping[str, Any]]) -> dict[st
 
 
 from legoesm.ice.si3_finalize import (  # noqa: E402 - late-rung extension
-    SI3FinalizeForcing,
     SI3FinalizeResponse,
     SI3Fluxes,
     SI3StressInputs,
     SI3UpdateFluxForcing,
+    si3_ice_update_tau,
+    si3_o15_step,
+    si3_o16_step,
 )
 from legoesm.ice.config import build_si3_orca2_o2_config  # noqa: E402
-from legoesm.ice.sea_ice import step_sea_ice  # noqa: E402
 from legoesm.ice.si3_orca2_state import (  # noqa: E402 - late-rung extension
     SI3AggregatedVars,
     SI3CategoryBounds,
@@ -2047,6 +2081,7 @@ from legoesm.ice.si3_orca2_state import (  # noqa: E402 - late-rung extension
     SI3State,
     si3_lbc_lnk_orca2,
 )
+from legoesm.ice.config import SI3_HARD_SWITCHES  # noqa: E402
 from legoesm.ice.si3_surface import SI3SurfaceConfig  # noqa: E402
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o16_master_gate import (  # noqa: E402
     PRE_AGG_TOTALS,
@@ -2320,7 +2355,7 @@ def score_o15_o16(
     }
     surface_config = SI3SurfaceConfig.from_resolved_namelists(
         run_dir / "output.namelist.dyn", run_dir / "output.namelist.ice"
-    )
+    )._replace(switches=SI3_HARD_SWITCHES)  # NEMO's hard switches, not main's smooth default
     first13_name = record_name(13, steps[0], 0)
     first13 = read_record_verified(
         records_dir / first13_name, digests["O15"].get(first13_name)
@@ -2333,32 +2368,43 @@ def score_o15_o16(
         correction_state, correction_fluxes, update_state, update, stress_inputs,
         sss, sst, amax,
     ):
-        forcing = SI3FinalizeForcing(
-            fluxes=correction_fluxes,
-            update_state=update_state,
-            update=update,
-            stress=stress_inputs,
+        # O15, then O16 on NEMO's record-18 entry state and the stress on the record-19
+        # inputs: the stage calls of the lane tip's step_sea_ice finalize dispatch.  Main
+        # #2396 (PR #2388 item 1) dropped SI3FinalizeForcing.update_state and feeds O15's
+        # corrected state to O16; scored here that differs from NEMO at halo cells
+        # (D196 round e, DECISION_NEEDED), so the lane keeps its given-entry composition.
+        cfg = sea_config.si3_orca2
+        correction = si3_o15_step(
+            correction_state,
+            correction_fluxes,
             sss_m=sss,
             sst_m=sst,
             rn_amax_2d=amax,
             rn_himin=float(namelist["rn_himin"]),
-            surface_config=surface_config,
-            ln_drgice_imp=bool(namelist["ln_drgice_imp"]),
-            plant_skip_rebin=plant == "o15-model-mutation",
-            plant_strip_transfer_barriers=plant == "o15-strip-transfer-barriers",
-            plant_omit_hfx_res=plant == "o16-model-mutation",
+            config=cfg,
+            _plant_skip_rebin=plant == "o15-model-mutation",
+            _plant_strip_transfer_barriers=plant == "o15-strip-transfer-barriers",
         )
-        zero_ocean = jnp.zeros_like(sss[2:-2, 2:-2])
-        return step_sea_ice(
-            correction_state,
-            forcing,
-            zero_ocean,
-            zero_ocean,
-            zero_ocean,
-            sea_config,
-            0.0,
-            cfg16.rDt_ice,
-        )[1]
+        h = int(cfg.nn_hls)
+        owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
+        update_fluxes = correction.fluxes.__class__(
+            *(field[owned] for field in correction.fluxes)
+        )
+        final = si3_o16_step(
+            update_state,
+            update_fluxes,
+            update,
+            sss_m=sss,
+            config=cfg,
+            surface_config=surface_config,
+            _plant_omit_hfx_res=plant == "o16-model-mutation",
+        )
+        stress = si3_ice_update_tau(
+            stress_inputs,
+            config=cfg,
+            ln_drgice_imp=bool(namelist["ln_drgice_imp"]),
+        )
+        return SI3FinalizeResponse(correction=correction, final=final, stress=stress)
 
     o15 = FieldScoreAccumulator()
     o16_agg = FieldScoreAccumulator()
@@ -2388,9 +2434,12 @@ def score_o15_o16(
         f18 = records[18]["fields"]
         state18 = _state_from_record(f18, cfg16, full_orca2=True)
         f19 = records[19]["fields"]
+        # Main's tail field tmask_k1 (implicit-drag arm only) stays None, as on the
+        # recorded explicit arm (ln_drgice_imp=F); kind 19 carries no such field.
         stress = SI3StressInputs(**{
             name: jnp.asarray(f19[name], dtype=jnp.float64)
             for name in SI3StressInputs._fields
+            if name != "tmask_k1"
         })
         response = production_step(
             state13,
@@ -2403,7 +2452,7 @@ def score_o15_o16(
             amax_full,
         )
         if not isinstance(response, SI3FinalizeResponse):
-            raise _refuse("step_sea_ice did not return the O15/O16 production response")
+            raise _refuse("the O15/O16 stage composition did not return SI3FinalizeResponse")
         out15 = response.correction
         got15 = _state_score_fields(out15.state, interior_halo=2)
         got15.update({

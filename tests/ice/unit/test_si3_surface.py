@@ -27,6 +27,7 @@ jax.config.update("jax_enable_x64", True)
 from legoesm import thermo  # noqa: E402
 from legoesm.core import bulk_flux  # noqa: E402
 from legoesm.ice import si3_surface as o7  # noqa: E402
+from legoesm.ice.config import SI3_HARD_SWITCHES  # noqa: E402
 from legoesm.ice.dynamics import SI3ORCA2FoldProgram  # noqa: E402
 from legoesm.ice.si3_orca2_state import fortran_sum_categories, si3_lbc_lnk_orca2  # noqa: E402
 
@@ -67,19 +68,22 @@ def _path(name):
 
 def _o2_config():
     return o7.SI3SurfaceConfig.from_resolved_namelists(
-        _path("si3_o2_ref_output.namelist.dyn"), _path("si3_o2_ref_output.namelist.ice"))
+        _path("si3_o2_ref_output.namelist.dyn"), _path("si3_o2_ref_output.namelist.ice"),
+    )._replace(switches=SI3_HARD_SWITCHES)  # NEMO's hard switches, not main's smooth default
 
 
 def _prod_config():
     """The production deck, read from its own shipped namelists merged as NEMO reads them."""
     return o7.SI3SurfaceConfig.from_input_namelists(
         _path("orca2_sas_ice_expref/namelist_ref"), _path("orca2_sas_ice_expref/namelist_cfg"),
-        _path("orca2_sas_ice_expref/namelist_ice_ref"), _path("orca2_sas_ice_expref/namelist_ice_cfg"))
+        _path("orca2_sas_ice_expref/namelist_ice_ref"), _path("orca2_sas_ice_expref/namelist_ice_cfg"),
+    )._replace(switches=SI3_HARD_SWITCHES)
 
 
 def _c1d_config():
     return o7.SI3SurfaceConfig.from_resolved_namelists(
-        _path("c1d_omip_l3_v2_output.namelist.dyn"), _path("c1d_omip_l3_v2_output.namelist.ice"))
+        _path("c1d_omip_l3_v2_output.namelist.dyn"), _path("c1d_omip_l3_v2_output.namelist.ice"),
+    )._replace(switches=SI3_HARD_SWITCHES)
 
 
 FOLD = SI3ORCA2FoldProgram(nn_hls=H, nfd_full_when_absent=True)

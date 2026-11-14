@@ -1591,7 +1591,7 @@ def _sponge_rate_from_config(coord, sponge_sigma: float,
 
 def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
                                    p_floor: float, scalar_body, vector_body,
-                                   sponge_rate=None):
+                                   sponge_rate=None, halo_grouping="current"):
     """Build the SHARED per-tile hydrostatic tendency + metric-slicer closures
     used by BOTH ``make_tiled_fv3_hydrostatic_tendencies_stage_2d`` (called once)
     and ``make_tiled_fv3_hydrostatic_step_stage_2d`` (called once per SSP-RK3
@@ -1645,7 +1645,36 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
             dp_t = dp_from_hybrid(coord, p_s_t)     # (1, nl, nl, nlev)
         else:
             dp_t = p_s_t[..., None] * coord.dsigma.astype(p_s_t.dtype)
-        dp_pad = scalar_body(dp_t[0], offs)[None]   # (1, nl+2, nl+2, nlev)
+        def _independent_scalars():
+            # ---- p_adiab + ln_ps (cc-local) ----
+            if _hybrid:
+                p_full = pressure_from_hybrid(coord, p_s_t)         # (1, nl, nl, nlev)
+            else:
+                p_full = pressure_from_sigma(coord.sigma_full, p_s_t)
+            p_adiab = jnp.maximum(p_full, _p_floor)
+            ln_ps = jnp.log(p_s_t)
+            _pg_dt = jnp.result_type(
+                ln_ps.dtype, resolve_dtype("atm_pressure_gradient", "compute"))
+            ln_ps_3d = ln_ps.astype(_pg_dt)[..., None]              # (1, nl, nl, 1)
+
+            # ---- MOMENTUM (eq 307-479): B=KE+Phi ; zeta ; scalar halos ----
+            Phi = _geo(T_t, p_s_t, coord, phis_t)
+            B = 0.5 * (u_cell ** 2 + v_cell ** 2) + Phi            # (1, nl, nl, nlev)
+            zeta = dgrid_vorticity_core(
+                u_d_t, v_d_t, cosa_c_t, dxe_t, dye_t, ar_t)
+            inv_T = 1.0 / T_t
+
+            return p_adiab, _pg_dt, ln_ps_3d, B, zeta, inv_T
+
+        if halo_grouping == "bundled":
+            p_adiab, _pg_dt, ln_ps_3d, B, zeta, inv_T = _independent_scalars()
+            from legoesm.parallel.cubesphere_exchange import bundled_tiled_pad
+            dp_pad, B_pad, zeta_pad, invT_pad, lnps_pad, T_pad = (
+                x[None] for x in bundled_tiled_pad(
+                    scalar_body,
+                    (dp_t[0], B[0], zeta[0], inv_T[0], ln_ps_3d[0], T_t[0]), offs))
+        else:
+            dp_pad = scalar_body(dp_t[0], offs)[None]
         dp_u, dp_v = cgrid_interp_cc_to_faces_local(dp_pad)
         div_dp = cgrid_divergence_local(
             dp_u * u_c, dp_v * v_c, dye_t, dxe_t, ar_t)  # (1, nl, nl, nlev)
@@ -1676,31 +1705,15 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
         vert_adv_u_cc, vert_adv_v_cc, vert_adv_T = (
             _vadv_uvT[0], _vadv_uvT[1], _vadv_uvT[2])
 
-        # ---- p_adiab + ln_ps (cc-local) ----
-        if _hybrid:
-            p_full = pressure_from_hybrid(coord, p_s_t)         # (1, nl, nl, nlev)
-        else:
-            p_full = pressure_from_sigma(coord.sigma_full, p_s_t)
-        p_adiab = jnp.maximum(p_full, _p_floor)
-        ln_ps = jnp.log(p_s_t)
-        _pg_dt = jnp.result_type(
-            ln_ps.dtype, resolve_dtype("atm_pressure_gradient", "compute"))
-        ln_ps_3d = ln_ps.astype(_pg_dt)[..., None]              # (1, nl, nl, 1)
-
-        # ---- MOMENTUM (eq 307-479): B=KE+Phi ; zeta ; scalar halos ----
-        Phi = _geo(T_t, p_s_t, coord, phis_t)
-        B = 0.5 * (u_cell ** 2 + v_cell ** 2) + Phi            # (1, nl, nl, nlev)
-        zeta = dgrid_vorticity_core(
-            u_d_t, v_d_t, cosa_c_t, dxe_t, dye_t, ar_t)
-        inv_T = 1.0 / T_t
-
-        # In-stage SCALAR halos.  ln_ps SHARED by momentum PGF + thermo (x64: the
-        # _pg_dt cast is a no-op, so this padded ln_ps == both standalone halos).
-        B_pad = scalar_body(B[0], offs)[None]
-        zeta_pad = scalar_body(zeta[0], offs)[None]
-        invT_pad = scalar_body(inv_T[0], offs)[None]
-        lnps_pad = scalar_body(ln_ps_3d[0], offs)[None]        # (1, nl+2, nl+2, 1)
-        T_pad = scalar_body(T_t[0], offs)[None]                # (1, nl+2, nl+2, nlev)
+        if halo_grouping == "current":
+            p_adiab, _pg_dt, ln_ps_3d, B, zeta, inv_T = _independent_scalars()
+            # In-stage SCALAR halos.  ln_ps SHARED by momentum PGF + thermo (x64: the
+            # _pg_dt cast is a no-op, so this padded ln_ps == both standalone halos).
+            B_pad = scalar_body(B[0], offs)[None]
+            zeta_pad = scalar_body(zeta[0], offs)[None]
+            invT_pad = scalar_body(inv_T[0], offs)[None]
+            lnps_pad = scalar_body(ln_ps_3d[0], offs)[None]        # (1, nl+2, nl+2, 1)
+            T_pad = scalar_body(T_t[0], offs)[None]                # (1, nl+2, nl+2, nlev)
 
         zeta_corner = (interp_center_to_corner(zeta_pad, cdgrid, padded=zeta_pad)
                        + fco_t[..., None])
@@ -2030,7 +2043,8 @@ def make_tiled_fv3_hydrostatic_step_stage_2d(mesh, cdgrid, coord, n: int,
                                             kt: int, nlev: int, *,
                                             p_floor: float, dt: float,
                                             sponge_sigma: float = 0.0,
-                                            sponge_tau_sec: float = 0.0):
+                                            sponge_tau_sec: float = 0.0,
+                                            halo_grouping="bundled"):
     """Full tiled SSP-RK3 STEP on a ``(6, kt, kt)`` mesh.
 
     Returns ``step(u_d, v_d, T, p_s, phis) -> (u_d, v_d, T, p_s)`` advanced one
@@ -2048,6 +2062,8 @@ def make_tiled_fv3_hydrostatic_step_stage_2d(mesh, cdgrid, coord, n: int,
     _validate_tiled_step_factory_args(
         "make_tiled_fv3_hydrostatic_step_stage_2d", mesh, cdgrid, coord, n,
         kt, nlev, p_floor, dt)
+    if halo_grouping not in ("current", "bundled"):
+        raise ValueError(f"unknown halo_grouping {halo_grouping!r}")
     grid = cdgrid.base
     nl = n // kt
     _dt = float(dt)
@@ -2067,13 +2083,15 @@ def make_tiled_fv3_hydrostatic_step_stage_2d(mesh, cdgrid, coord, n: int,
 
     scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
     vector_body = make_tiled_pad_vector_body(
-        mesh, ndim=4, halo=1, with_offsets=True)
+        mesh, ndim=4, halo=1, with_offsets=True,
+        halo_grouping=halo_grouping)
 
     # Shared tendency numerics (same builder as the tendency stage — no dup).
     _tile_tendency, _slice_metrics = _build_hydro_tile_tendency_fns(
         coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body,
         sponge_rate=_sponge_rate_from_config(coord, sponge_sigma,
-                                             sponge_tau_sec))
+                                             sponge_tau_sec),
+        halo_grouping=halo_grouping)
 
     fo = P("face", None, None)
     fw = P("face", None, None, None)
@@ -2323,7 +2341,8 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
         mesh, cdgrid, coord, n: int, kt: int, nlev: int, *,
         p_floor: float, dt: float,
         sponge_sigma: float = 0.0, sponge_tau_sec: float = 0.0,
-        column_physics_fn=None, fix_mass: bool = False, surface_fn=None):
+        column_physics_fn=None, fix_mass: bool = False, surface_fn=None,
+        halo_grouping="bundled"):
     """Blocked-I/O tiled SSP-RK3 STEP on a ``(6, kt, kt)`` mesh — the
     PRODUCTION (closed-loop) variant of the step stages above.
 
@@ -2354,6 +2373,8 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
     _validate_tiled_step_factory_args(
         "make_tiled_fv3_hydrostatic_step_blocked_2d", mesh, cdgrid, coord,
         n, kt, nlev, p_floor, dt)
+    if halo_grouping not in ("current", "bundled"):
+        raise ValueError(f"unknown halo_grouping {halo_grouping!r}")
     grid = cdgrid.base
     nl = n // kt
     _dt = float(dt)
@@ -2380,11 +2401,13 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
 
     scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
     vector_body = make_tiled_pad_vector_body(
-        mesh, ndim=4, halo=1, with_offsets=True)
+        mesh, ndim=4, halo=1, with_offsets=True,
+        halo_grouping=halo_grouping)
     _tile_tendency, _slice_metrics = _build_hydro_tile_tendency_fns(
         coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body,
         sponge_rate=_sponge_rate_from_config(coord, sponge_sigma,
-                                             sponge_tau_sec))
+                                             sponge_tau_sec),
+        halo_grouping=halo_grouping)
 
     fo = P("face", None, None)
     cz = P("face", "tile_i", "tile_j", None)       # corner blocked / cc 4D

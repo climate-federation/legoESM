@@ -159,9 +159,13 @@ def test_richards_drainage_reported_at_solver_debited_K():
     flux = jnp.zeros(1)
     sink = jnp.zeros((1, 8))
     pond0 = jnp.zeros(1)
-    out = solve_richards(psi0, theta0, grid, loam, RichardsConfig(max_iter=10),
+    # Few iterations, so the column is still draining when the loop stops:
+    # the theta-stepping solver converges this column within 10, where
+    # K(psi_final) and the debited K coincide to 5e-9 and the pin below would
+    # be vacuous.
+    out = solve_richards(psi0, theta0, grid, loam, RichardsConfig(max_iter=4),
                          flux, sink, 3600.0, surface_water=pond0)
-    out_m1 = solve_richards(psi0, theta0, grid, loam, RichardsConfig(max_iter=9),
+    out_m1 = solve_richards(psi0, theta0, grid, loam, RichardsConfig(max_iter=3),
                             flux, sink, 3600.0, surface_water=pond0)
     K_carry = hydraulic_conductivity(
         out_m1.psi_new, theta_from_psi(out_m1.psi_new, loam), loam)[:, -1]
@@ -187,7 +191,10 @@ def test_stiff_clay_conserves_after_specific_storage_switch():
     theta/capacity mismatch.)"""
     clay = SoilHydraulicsConfig(theta_r=_col(0.068), theta_sat=_col(0.38),
                                 alpha_vg=_col(1.0), n_vg=_col(1.09), K_sat=_col(5.56e-8))
-    assert abs(_richards_residual(clay, 0.0, 5.0e-7)) < 1.0e-3      # drying
+    # The drying sink is what the layers hold above the solver's dry floor
+    # (theta(-1e6 m) = 0.158 for this flat curve, from theta 0.30); a larger one
+    # is infeasible and the floor clip would have to create the difference.
+    assert abs(_richards_residual(clay, 0.0, 2.5e-7)) < 1.0e-3      # drying
     assert abs(_richards_residual(clay, 5.0e-6, 1.0e-7)) < 1.0e-3   # wetting
 
 

@@ -76,12 +76,6 @@ atm.turb.SmagorinskyConfig.C_s: 0.2969328413
 atm.turb.SmagorinskyConfig.Pr_t: 0.6953027164
 atm.turb.SmagorinskyConfig.l_mix_max: 125.117309
 
-# --- TKEConfig ---
-atm.turb.TKEConfig.Ce: 0.1483135179
-atm.turb.TKEConfig.Ck: 0.105736405
-atm.turb.TKEConfig.Pr_t: 0.3292365915
-atm.turb.TKEConfig.l_mix_max: 112.3040263
-
 # --- TurbulentEDMFConfig ---
 atm.turb.TurbulentEDMFConfig.Ce: 0.08788749871
 atm.turb.TurbulentEDMFConfig.Ck: 0.1854224056
@@ -90,14 +84,3 @@ atm.turb.TurbulentEDMFConfig.a_updraft: 0.05171694792
 atm.turb.TurbulentEDMFConfig.entrainment_rate: 0.001894258515
 atm.turb.TurbulentEDMFConfig.l_mix_max: 210.4144629
 
-# --- YSUConfig ---
-atm.turb.YSUConfig.Pr_t: 0.5206585342
-atm.turb.YSUConfig.Ri_crit: 0.1402296414
-atm.turb.YSUConfig.countergrad_coeff: 4.007697695
-atm.turb.YSUConfig.entrainment_ratio: 0.08172546025
-atm.turb.YSUConfig.entrainment_width_frac: 0.09085790307
-atm.turb.YSUConfig.l_mix_max: 157.9892013
-atm.turb.YSUConfig.louis_b: 5.113808996
-atm.turb.YSUConfig.louis_c: 2.375677616
-atm.turb.YSUConfig.louis_d: 6.462860228
-atm.turb.YSUConfig.ws_conv_coeff: 13.9663135

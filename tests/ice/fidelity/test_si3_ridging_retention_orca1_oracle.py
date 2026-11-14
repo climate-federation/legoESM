@@ -12,6 +12,7 @@ iteration is a separate defect).
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import jax
@@ -56,7 +57,8 @@ def _state(z) -> SI3JPL1RidgingState:
 def _orca1(sc) -> SI3JPL1RidgingConfig:
     return SI3JPL1RidgingConfig(
         snow_ridge_retention=sc["rn_fsnwrdg"], snow_raft_retention=sc["rn_fsnwrft"],
-        pond_ridge_retention=sc["rn_fpndrdg"], pond_raft_retention=sc["rn_fpndrft"])
+        pond_ridge_retention=sc["rn_fpndrdg"], pond_raft_retention=sc["rn_fpndrft"],
+        open_water_limit_sharpness=math.inf)  # NEMO hard open-water limits (oracle mode)
 
 
 def _rel(a, b):

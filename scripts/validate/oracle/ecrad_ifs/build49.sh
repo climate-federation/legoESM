@@ -74,6 +74,10 @@ python3 -I "$HERE"/patch_mcica_dump.py src/radiation_mcica_lw.F90 src/radiation_
 echo "harness_patch radiation_mcica_lw.F90 $(git hash-object src/radiation_mcica_lw.F90)" >> MANIFEST.txt
 echo "harness_patch radiation_mcica_sw.F90 $(git hash-object src/radiation_mcica_sw.F90)" >> MANIFEST.txt
 
+# harness instrumentation: aerosol-optics stage dumps around add_aerosol_optics (writes only, env-gated)
+python3 -I "$HERE"/patch_aerosol_dump.py src/radiation_interface.F90
+echo "harness_patch radiation_interface.F90 $(git hash-object src/radiation_interface.F90)" >> MANIFEST.txt
+
 # --- interface blocks ------------------------------------------------------
 # ecRad's generator (make_intfbl.1.pl) needs a perl module that is not
 # shipped, so take the 1.7.2 generated blocks and PROVE each one matches the

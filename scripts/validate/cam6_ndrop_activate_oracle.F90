@@ -41,7 +41,7 @@ contains
     es = 611.2_r8*exp(17.67_r8*tc/(tc + 243.5_r8))
     denom = softplus(p - es - 1.0_r8) + 1.0_r8
     w = epsilo*es/denom
-    w = 1.0_r8 - softplus(20.0_r8*(1.0_r8 - w))/20.0_r8
+    w = merge(w - softplus(20.0_r8*(w - 1.0_r8))/20.0_r8, 1.0_r8 - softplus(20.0_r8*(1.0_r8 - w))/20.0_r8, w < 1.0_r8)
     qs = w/(1.0_r8 + w)
   end subroutine qsat
   subroutine set_constants()

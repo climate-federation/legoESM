@@ -1443,7 +1443,6 @@ class TestThinIceAblationClosure:
             f"rain-on-ice runoff not delivered: got {d_fw:.3e}, "
             f"expected ~{rain * conc0:.3e}")
 
-    @pytest.mark.xfail(strict=True, reason="PR #2388 review item 2 (gentine 2026-11-06); fix in the next SI3 PR")
     def test_rain_on_ice_is_conserved_with_si3_lev_ponds(self):
         """Rain on the ice fraction must end up in the ponds or in the ocean
         freshwater with the SI3-LEV pond scheme.  Two-point (rain vs no rain),

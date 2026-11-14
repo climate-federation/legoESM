@@ -524,12 +524,14 @@ def _amip_main_only_dests(parser):
     them instead."""
     import inspect
     import re
-    from legoesm.driver.config import CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS
+    from legoesm.driver.config import (
+        CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS,
+    )
     pat = r"(?:args|pre)\.(\w+)|getattr\((?:args|pre),\s*\"(\w+)\""
     read = {m[0] or m[1] for m in re.findall(
         pat, inspect.getsource(_run_amip().build_config_from_args)
         + Path(__file__).read_text())}
-    read |= set(ZM_SCALAR_FIELDS) | set(CLUBB_SCALAR_FIELDS)
+    read |= set(ZM_SCALAR_FIELDS) | set(ZM_TRIGGER_FIELDS) | set(CLUBB_SCALAR_FIELDS)
     amip = {a.dest for a in _run_amip().build_arg_parser()._actions}
     return sorted((amip - read) - {"help"})
 
@@ -552,7 +554,15 @@ _COUPLED_DISCRETIZATION = {
 # in the shared choices; only run_amip restricts it to ifs_cloudsc (vote VC31b).
 _COUPLED_EXTRA_CHOICES = {"microphysics": ("ml_emulator",)}
 # ...and values it refused (reasons in tests/unit/_scheme_reachability_baseline.py).
-_COUPLED_REFUSED_CHOICES = {"surface_bulk_scheme": ("none",), "radiation": ("none",)}
+_COUPLED_REFUSED_CHOICES = {"surface_bulk_scheme": ("none",),
+                            "radiation": ("none", "ecrad_ifs")}
+# ecRad's between-call carry and McICA seed clock are verified on the MPAS
+# column lane only (vote R1a); refused here, also when a deck sets it.
+_ECRAD_IFS_REFUSAL = (
+    "radiation='ecrad_ifs' is refused by run_coupled: the coupled loop is not "
+    "verified to carry ecRad's between-call state (PhysicsState.ecrad_carry, "
+    "RADHEATN between full calls) or its McICA seed clock; run it with "
+    "run_amip on the MPAS column lane.")
 
 
 def _coupled_atm_config(args):
@@ -560,6 +570,8 @@ def _coupled_atm_config(args):
     rows the coupled lane sets itself (discretization, polar filter on lat-lon
     only, wallclock budget in hours, device count)."""
     explicit_discretization = args.discretization
+    if args.radiation == "ecrad_ifs":
+        raise SystemExit(_ECRAD_IFS_REFUSAL)
     cfg = _run_amip().build_config_from_args(args)
     if args.max_wallclock_hours and cfg.output.max_wallclock_seconds:
         raise SystemExit("--max-wallclock-hours and --max-wallclock-seconds both "

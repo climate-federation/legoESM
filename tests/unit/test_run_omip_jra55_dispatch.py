@@ -822,6 +822,14 @@ def test_slice_preloaded_records_second_cycle_matches_raw_preloader(tmp_path):
             np.asarray(raw_a[var]), np.asarray(raw_b[var]), rtol=1e-6)
 
 
+def _on_model_cells(js, field):
+    """A cache field as the model sees it: the synthetic cache is centred half a cell east of
+    the model, so startup attaches conservative regrid weights (the JRA55 0.5-degree-shift fix)."""
+    from legoesm.grids.regridding import regrid_scalar
+    rw = js.get("regrid_weights")
+    return field if rw is None else np.asarray(regrid_scalar(jnp.asarray(field), rw))
+
+
 def test_gpu_interp_block_uses_cycled_forcing_clock_second_cycle(tmp_path):
     """F1 end-to-end: the jitted interp scan body must select the
     analytically expected bracketing records + alpha in the SECOND
@@ -856,8 +864,8 @@ def test_gpu_interp_block_uses_cycled_forcing_clock_second_cycle(tmp_path):
         jnp.float64(meta["block_start_day_forcing"]),
     )
     probed_sw = np.asarray(final.T.data[..., 0]) * 1e3
-    expected = 0.5 * (ds["rsds"].isel(time=4).values
-                      + ds["rsds"].isel(time=5).values)
+    expected = _on_model_cells(js, 0.5 * (ds["rsds"].isel(time=4).values
+                                          + ds["rsds"].isel(time=5).values))
     np.testing.assert_allclose(probed_sw, expected, rtol=1e-9)
 
     # (b) Two-step block straddling the wrap (raw days 3.9375, 4.0):
@@ -871,7 +879,7 @@ def test_gpu_interp_block_uses_cycled_forcing_clock_second_cycle(tmp_path):
     )
     probed_sw = np.asarray(final.T.data[..., 0]) * 1e3
     np.testing.assert_allclose(
-        probed_sw, ds["rsds"].isel(time=0).values, rtol=1e-9)
+        probed_sw, _on_model_cells(js, ds["rsds"].isel(time=0).values), rtol=1e-9)
 
 
 def test_loop_gpu_interp_cycled_second_cycle_runs_finite(tmp_path):

@@ -613,6 +613,8 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
     vdir.mkdir(parents=True, exist_ok=True)
     ckpt = vdir / "params.eqx"
     eqx.tree_serialise_leaves(str(ckpt), trained)
+    from legoesm.ml.checkpoint_io import write_knob_record
+    write_knob_record(trained, ckpt)
 
     return {
         "variant": variant,

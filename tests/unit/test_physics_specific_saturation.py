@@ -100,13 +100,9 @@ def test_cloud_cover_dispatch_reads_a_saturated_column_as_rh_one():
     assert float((q / saturation_mixing_ratio(T, p)).max()) < 0.98
 
 
-def test_warm_rain_mixed_phase_curve_and_sundqvist_rates_are_specific():
+def test_warm_rain_mixed_phase_curve_is_specific():
     from legoesm.atmosphere.physics.microphysics._warm_rain import (
         mixed_phase_saturation_specific_humidity)
-    from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-    from legoesm.atmosphere.physics.microphysics.sundqvist import (
-        SundqvistConfig, diagnose_sundqvist_process_rates)
-    from legoesm import constants
     T, p, q = _saturated_column()
     np.testing.assert_allclose(np.asarray(mixed_phase_saturation_specific_humidity(T, p)),
                                np.asarray(q), rtol=1e-14, atol=0)
@@ -132,35 +128,8 @@ def test_warm_rain_mixed_phase_curve_and_sundqvist_rates_are_specific():
     r_cov = (1.0 - f) * saturation_mixing_ratio(T_c, p) + f * saturation_mixing_ratio_ice(T_c, p)
     np.testing.assert_allclose(np.asarray(cover_saturation_specific_humidity(T_c, p, cfg)),
                                np.asarray(r_cov / (1.0 + r_cov)), rtol=1e-14, atol=0)
-    z = jnp.zeros_like(q)
-    hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
-    rho = p / (constants.R_d * T)
-    # top-down interfaces around p with dp/g == rho*dz (500 m) per layer
-    ph = p[:, :1] + constants.g * rho[:, :1] * 500.0 * (
-        jnp.arange(p.shape[1] + 1) - 0.5 * p.shape[1])
-    rates = diagnose_sundqvist_process_rates(
-        T=T, q_v=q, hydrometeors=hyd, p_full=p, p_half=ph, rho=rho,
-        dz=jnp.full_like(T, 500.0), dt=300.0, config=SundqvistConfig(), cell_area=1.0e10)
-    # exactly saturated: no supersaturation to remove, gate fully open
-    assert float(jnp.abs(rates.condensation).max()) == 0.0
-    # the basis discriminator (GLM 2026-09-29: the zero above also holds
-    # for the OLD reference): a column halfway between q_sat and r_sat is
-    # supersaturated in q and sub-saturated in r, so it MUST condense
-    q_mid = 0.5 * (q + saturation_mixing_ratio(T, p))
-    rates_mid = diagnose_sundqvist_process_rates(
-        T=T, q_v=q_mid, hydrometeors=hyd, p_full=p, p_half=ph, rho=rho,
-        dz=jnp.full_like(T, 500.0), dt=300.0, config=SundqvistConfig(), cell_area=1.0e10)
-    assert float(rates_mid.condensation.min()) > 0.0
-    # a 1 % supersaturated column condenses; the OLD reading of a
-    # saturated column was RH 0.977, i.e. it saw q - r_sat < 0 as well,
-    # so the discriminating check is the exact zero above plus this:
-    rates_ss = diagnose_sundqvist_process_rates(
-        T=T, q_v=1.01 * q, hydrometeors=hyd, p_full=p, p_half=ph, rho=rho,
-        dz=jnp.full_like(T, 500.0), dt=300.0, config=SundqvistConfig(), cell_area=1.0e10)
-    cfg = SundqvistConfig()
-    gate = jax.nn.sigmoid(cfg.sigmoid_sharpness * (1.01 - cfg.rh_crit))   # the scheme's own RH gate at RH 1.01
-    np.testing.assert_allclose(np.asarray(rates_ss.condensation * 300.0),
-                               np.asarray(gate * 0.01 * q), rtol=1e-9)
+    # (The condensation-rate checks pinned the removed Sundqvist surrogate;
+    # gscond's specific-humidity q_s is pinned by its oracle test.)
 
 
 # --- ratchet -------------------------------------------------------------

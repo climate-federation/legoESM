@@ -189,7 +189,7 @@ end module zm_microphysics
 !  sat_mode 1 = legoESM legoesm.thermo.saturation_specific_humidity, reproduced
 !               exactly: Tetens 611.2*exp(17.67 Tc/(Tc+243.5)) with T clipped at
 !               150 K, w = eps*e/(softplus(p-e-1)+1), smooth cap
-!               w = 1 - softplus(20(1-w))/20, q = w/(1+w).  Used for BOTH calls
+!               w = min_20(w, 1) (cancellation-free form each side of 1), q = w/(1+w).  Used for BOTH calls
 !               (that is what the port does).
 !  sat_mode 2 = CESM2.1 wv_saturation: qsat_water = Goff-Gratch over water
 !               (wv_sat_methods, real code); qsat = linear interpolation of the
@@ -259,7 +259,7 @@ contains
     tc = max(t, 150._r8) - tfrz_l
     es = 611.2_r8*exp(17.67_r8*tc/(tc + 243.5_r8))
     w = eps_l*es/(softplus(p - es - 1._r8) + 1._r8)
-    w = 1._r8 - softplus(20._r8*(1._r8 - w))/20._r8
+    w = merge(w - softplus(20._r8*(w - 1._r8))/20._r8, 1._r8 - softplus(20._r8*(1._r8 - w))/20._r8, w < 1._r8)
     qs = w/(1._r8 + w)
   end subroutine lego_qsat
 
@@ -287,7 +287,7 @@ contains
     real(r8) :: w
     es = wv_sat_svp_trans(t, Lego_idx)
     w = eps_l*es/(softplus(p - es - 1._r8) + 1._r8)
-    w = 1._r8 - softplus(20._r8*(1._r8 - w))/20._r8
+    w = merge(w - softplus(20._r8*(w - 1._r8))/20._r8, 1._r8 - softplus(20._r8*(1._r8 - w))/20._r8, w < 1._r8)
     qs = w/(1._r8 + w)
   end subroutine lego_qsat_trans
 

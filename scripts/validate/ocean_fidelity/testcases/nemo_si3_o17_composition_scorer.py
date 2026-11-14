@@ -46,6 +46,7 @@ from legoesm.ice.si3_orca2_state import (
     si3_var_agg,
     si3_var_glo2eqv,
 )
+from legoesm.ice.config import SI3_HARD_SWITCHES
 from legoesm.ice.si3_surface import SI3SurfaceConfig
 
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer import (
@@ -443,7 +444,9 @@ def _rss_kib() -> int:
 
 def card_for(run: Path):
     nml = parse_resolved_ice_namelist(run / "output.namelist.ice", run / "output.namelist.dyn", DEFAULT_PPSRC)
-    surface_cfg = SI3SurfaceConfig.from_resolved_namelists(run / "output.namelist.dyn", run / "output.namelist.ice")
+    surface_cfg = SI3SurfaceConfig.from_resolved_namelists(
+        run / "output.namelist.dyn", run / "output.namelist.ice"
+    )._replace(switches=SI3_HARD_SWITCHES)  # NEMO's hard switches, not main's smooth default
     return build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)
 
 

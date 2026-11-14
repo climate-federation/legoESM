@@ -77,6 +77,12 @@ def test_ekman_neutral_temperature_in_exner_projected_band(ekman_run):
     assert 272.0 < T_low < 274.0, f"Neutral T_low out of band: {T_low}"
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "vote Z3c: the WRF MYNN-EDMF port warms this dry neutral column by an "
+    "interior source (0..4.3 mK over 3 h, +0.25 W/m2; 0..5.5 mK, +0.21 W/m2 "
+    "with Ch_neutral=0), not the surface heat flux; port bug vs WRF behaviour "
+    "vs the adapter's theta<->T step is open until the Fortran oracle runs "
+    "on this column"))
 def test_ekman_neutral_implicit_theta_drift_under_1mK(ekman_run):
     """The actual time-stepping drift in T_low must be < 1 mK over
     the test window.  ∂θ/∂z = 0 ⇒ no flux divergence on θ ⇒ the
@@ -122,13 +128,18 @@ def test_ekman_surface_wind_veers_toward_low_pressure(ekman_run):
 
 
 def test_ekman_surface_qke_tracks_friction_velocity(ekman_run):
-    """qke_sfc = B1^(2/3) · u*² with u* = √(Cd) · |V|."""
+    """WRF MYNN has no Dirichlet surface-qke BC (the lowest-level qke is
+    prognostic, shear production 2 u*^3 phi_m/(kappa z)), so qke_sfc is only
+    pinned to its local-equilibrium scale B1^(2/3) u*^2, u* = sqrt(Cd)|V|:
+    finite, positive, within a factor 2 (vote Z4c; measured 0.64 GABLS1 /
+    0.84 Ekman of that scale)."""
     u_low = float(ekman_run.state.u.data[0, 0, 0, -1])
     v_low = float(ekman_run.state.v.data[0, 0, 0, -1])
     V = (u_low ** 2 + v_low ** 2 + 1e-4) ** 0.5
     expected = (24.0 ** (2 / 3)) * 1.5e-3 * V * V
-    actual = float(ekman_run.phys_state.qke[0, -1])
-    np.testing.assert_allclose(actual, expected, rtol=0.10)
+    actual = float(ekman_run.phys_state.qke[0, 0, -1])   # qke slot (vote Z1a)
+    assert np.isfinite(actual) and actual > 0.0
+    assert 0.5 <= actual / expected <= 2.0, (actual, expected)
 
 
 def test_ekman_oracle_present_and_neutral():

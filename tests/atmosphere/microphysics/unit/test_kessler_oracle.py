@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[4]
 FIXTURE = ROOT / "tests/atmosphere/oracle_fixtures/kessler.npz"
 GENERATOR = ROOT / "scripts/validate/oracle/kessler/make_fixture.py"
 TOL = 1.0e-10
-HARD_LIMIT = dict(saturation_sharpness=1.0e30)
+HARD_LIMIT = dict(saturation_sharpness=1.0e30, conserving_sedimentation=False)
 STATES = ("T", "q_v", "q_c", "q_r")
 
 
@@ -104,7 +104,7 @@ def test_default_smoothing_gap_is_reported(dt):
     """Not a tolerance: prints the default-sharpness gap for the PR record."""
     from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
     fx = _fx()
-    ours = _ours(fx, dt, KesslerConfig())
+    ours = _ours(fx, dt, KesslerConfig(conserving_sedimentation=False))
     ora = _oracle(fx, dt)
     print(f"dt={dt:g} DEFAULT sharpness max rel err",
           {k: float(_rel(ours[k], ora[k]).max()) for k in ora},

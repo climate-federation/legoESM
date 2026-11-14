@@ -9,6 +9,8 @@ replay for its registered internal statement boundaries.
 
 from __future__ import annotations
 
+import math
+
 import argparse
 import hashlib
 import importlib.util
@@ -471,6 +473,7 @@ def run_probe(
             applied_forcing,
             card.metrics,
             card.dynamics_config,
+            limit_sharpness_scale=math.inf,
         )
     )
     production = solve(jax_state, jax_forcing)

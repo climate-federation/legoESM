@@ -258,6 +258,9 @@ _EXPLICIT_HYPERDIFF_SOLVERS = frozenset({
     "mpas_primitive_equations",
 })
 _EXPLICIT_DIVDAMP_SOLVERS = frozenset({"cdgrid_primitive_equations"})
+# Largest |z| on the negative real axis with |R(z)| <= 1 for the Shu-Osher
+# SSP-RK(5,4) tableau in timestepping/ssp_rk54.py (computed from it, 1e-5 grid).
+_SSP_RK54_REAL_AXIS_LIMIT = 5.33
 
 
 def warn_if_diffusion_unstable(solver_name: str, diff: DiffusionCoeffs,
@@ -1047,9 +1050,22 @@ def create_atmosphere_dycore(
         from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
         )
-        # Hyperdiffusion from truncation: 0.5-hour e-folding at max wavenumber
+        # Hyperdiffusion from truncation: 0.5-hour e-folding at max wavenumber,
+        # scaled by dycore.hyperdiff_scale (1.0 = that e-folding).
         from legoesm.grids.gaussian import hyperdiff_coeff_for_efold
-        hyperdiff = hyperdiff_coeff_for_efold(grid, 0.5 * 3600.0)
+        hyperdiff = dc.hyperdiff_scale * hyperdiff_coeff_for_efold(grid, 0.5 * 3600.0)
+        # ssp_rk54 applies it as an explicit tendency: warn (no clamp) when the
+        # n_max mode's |lambda*dt| leaves the integrator's real-axis region
+        # (diffusion term alone; silence is not a coupled-stability check).
+        _z_nmax = hyperdiff * (grid.n_max * (grid.n_max + 1)
+                               / grid.radius ** 2) ** 2 * dc.dt
+        if (str(dc.time_integrator).lower() not in ("leapfrog", "leapfrog_si")
+                and _z_nmax > _SSP_RK54_REAL_AXIS_LIMIT):
+            logger.warning(
+                "Spectral hyperdiffusion nu*eig_max^2*dt=%.2f exceeds the "
+                "ssp_rk54 real-axis stability limit %.2f (hyperdiff_scale=%g, "
+                "dt=%.1f s); the run may go unstable.",
+                _z_nmax, _SSP_RK54_REAL_AXIS_LIMIT, dc.hyperdiff_scale, dc.dt)
         # Spectral hydrostatic PE runs the 5-stage SSP-RK54 by default (spectral
         # stability).  It ALSO supports the semi-implicit LEAPFROG path, which
         # evaluates physics ONCE per step and is the integrator #405 requires to
@@ -1169,6 +1185,7 @@ def create_atmosphere_dycore(
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
             # Sigma-lane vertical advection scheme (see DycoreConfig).
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
+            vertical_form=dc.vertical_form,
             sponge_del2_top_layers=int(dc.mpas_sponge_del2_top_layers),
             sponge_del2_top_factor=float(dc.mpas_sponge_del2_top_factor),
             # Divergence-selective biharmonic damping (CAM-FV ldiv4).  The
@@ -1586,6 +1603,7 @@ def create_atmosphere_dycore(
             # own per-row 0.01*area_row^2/dt (NOT diff.div_damp4, whose
             # smallest-cell / dx_min^2 value is wrong on a lat-lon grid).
             nu_div4_scale=dc.mpas_div_damp4_scale,
+            vertical_form=dc.vertical_form,
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)

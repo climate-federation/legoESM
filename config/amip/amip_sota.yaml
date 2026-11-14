@@ -1,6 +1,14 @@
 # =============================================================================
-# legoESM AMIP — STATE-OF-THE-ART configuration
+# legoESM AMIP — STATE-OF-THE-ART configuration  [HISTORICAL — not production]
 # =============================================================================
+# HISTORICAL (user 2026-11-11): the FV3 duo is the only cubed-sphere dycore for
+# production; this cdgrid deck and its own physics set are retired.  The
+# cubed-sphere C48 production deck is config/amip/amip_production_fv3duo_c48.yaml
+# (CAM6 physics, same as every grid).  Kept for reproducing past runs only.
+# Known defects on the cdgrid pipeline lane this deck runs on (2026-11-11 probes):
+# physics receives face-direction winds (35 deg mean, up to 179 deg at the
+# poles), and the dycore state carries no water vapour (physics updates a copy
+# the dynamics never sees).
 # Extends the validated realism config (config/amip/amip_production.yaml) with the
 # SOTA upgrades identified 2026-07-01:
 #   1. LATEST LAND MODEL — multilayer Richards soil + CLM PFT/texture surface map

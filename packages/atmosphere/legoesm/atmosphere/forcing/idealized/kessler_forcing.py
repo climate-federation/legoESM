@@ -484,7 +484,7 @@ def make_kessler_forcing_latlon(dt, config: KesslerConfig | None = None):
     :func:`make_kessler_forcing_gridspace` binding the lat-lon dim labels.
 
     The lat-lon C-grid dycore already advects ``q_v``/``q_c``/``q_r`` in
-    mass-weighted flux form (``cgrid_latlon_hydrostatic_tendencies``), so this
+    mass-weighted flux form (``latlon_legacy_pe_tendencies``), so this
     supplies only the column microphysics source.
     """
     return make_kessler_forcing_gridspace(

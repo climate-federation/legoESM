@@ -2764,14 +2764,8 @@ class TestIter123OceanDriftTolerance:
 
     def test_iter132_igw_has_l2_and_amplitude_gates_monolithic(self):
         """iter-132 codex iter-131-followup HIGH-1: monolithic
-        run_inertia_gravity_wave applies the documented L2_err
-        and amplitude_conservation gates.
-
-        iter-138b: L2 threshold is now days-aware
-        (``l2_threshold = 0.1 if days >= 1.0 else 2.0``) since
-        quick-mode (0.2 days) at coarse resolution has natural
-        L2 ~ 1-2 due to numerical dispersion + propagation
-        time, far above the doc's 0.1 (which is for full mode).
+        run_inertia_gravity_wave applies its amplitude and
+        frozen-dycore gates and marks L2 as ungated.
         """
         from pathlib import Path
         text = (Path(__file__).resolve().parent.parent
@@ -2786,18 +2780,16 @@ class TestIter123OceanDriftTolerance:
         code = "\n".join(
             line for line in body.splitlines()
             if not line.lstrip().startswith("#"))
-        # L2 error gate uses days-aware threshold.
-        assert 'label="IGW L2 vs analytical"' in code
-        assert "l2_threshold = 0.1 if days >= 1.0 else 2.0" in code
-        assert "l2_err, l2_threshold" in code
-        # amplitude_ratio range gate, days-aware per iter-140.
-        assert 'label="IGW amplitude_ratio_lower"' in code
-        assert "amp_lower = 0.8 if days >= 1.0 else 0.5" in code
-        assert "amplitude_ratio, amp_lower" in code
-        assert 'op="ge"' in code
+        # L2 is reported, not gated (the case's phase is unmeasurable, see
+        # the runner); amplitude and frozen-dycore gates stand in for it.
+        assert "L2_UNGATED" in code
         assert 'label="IGW amplitude_ratio_upper"' in code
-        assert "amp_upper = 1.2 if days >= 1.0 else 1.5" in code
-        assert "amplitude_ratio, amp_upper" in code
+        assert "amplitude_ratio, _IGW_AMP_UPPER" in code
+        assert 'label="IGW amplitude_ratio_floor (wave extinguished)"' in code
+        assert "amplitude_ratio, _IGW_AMP_FLOOR" in code
+        assert 'op="ge"' in code
+        assert 'label="IGW corr_with_IC (frozen-dycore check)"' in code
+        assert "ic_corr, _IGW_IC_CORR_UPPER" in code
 
     def test_iter132_igw_has_l2_and_amplitude_gates_modular(self):
         """iter-132 codex iter-131-followup HIGH-1: modular
@@ -2952,32 +2944,41 @@ class TestIter123OceanDriftTolerance:
         meant for standing-wave steady state).
         """
         from pathlib import Path
-        for rel in (
-            "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/matrix/ocean_test_matrix/experiments.py",
-        ):
+        import re
+
+        def _code(rel):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
-            import re
             m = re.search(
                 r"def run_barotropic_wave\b"
                 r".*?(?=\ndef \w|\nRUNNERS)",
                 text, re.DOTALL,
             )
             assert m is not None, f"{rel}: missing"
-            body = m.group(0)
-            code = "\n".join(
-                line for line in body.splitlines()
+            return "\n".join(
+                line for line in m.group(0).splitlines()
                 if not line.lstrip().startswith("#"))
-            assert 'label="eta_conservation_lower"' in code
-            assert 'label="eta_conservation_upper"' in code
-            # iter-138b relaxed thresholds.
-            assert "eta_conservation, 0.5" in code
-            assert "eta_conservation, 1.5" in code
-            assert 'label="mean_eta_drift"' in code
-            assert "mean_eta_drift, 1e-4" in code
-            assert 'label="min_final_amplitude"' in code
-            assert "min_final_amplitude, 0.1" in code
+
+        code = _code("scripts/matrix/ocean_test_matrix/experiments.py")
+        assert 'label="eta_conservation_lower"' in code
+        assert 'label="eta_conservation_upper"' in code
+        # iter-138b relaxed thresholds.
+        assert "eta_conservation, 0.5" in code
+        assert "eta_conservation, 1.5" in code
+        assert 'label="mean_eta_drift"' in code
+        assert "mean_eta_drift, 1e-4" in code
+        assert 'label="min_final_amplitude"' in code
+        assert "min_final_amplitude, 0.1" in code
+
+        # The monolithic runner gates wave energy; its peak-amplitude
+        # metrics are reported only.
+        code = _code("scripts/matrix/run_ocean_test_matrix.py")
+        assert 'label="barotropic energy_ratio_floor (wave extinguished)"' in code
+        assert 'label="barotropic energy_ratio_ceiling (spurious growth)"' in code
+        assert "_BWAVE_ENERGY_FLOOR" in code
+        assert "_BWAVE_ENERGY_CEILING" in code
+        assert 'label="mean_eta_drift"' in code
+        assert "mean_eta_drift, 1e-4" in code
 
     def test_iter133_barotropic_gyre_gates(self):
         """iter-133 self-review based on
@@ -3138,12 +3139,12 @@ class TestIter123OceanDriftTolerance:
         assert m is not None
         body = m.group(0)
         # Must have a dedicated latlon branch (separate from cube).
-        assert 'elif grid_type == "latlon"' in body, (
+        assert 'elif grid_type in ("latlon", "tripole")' in body, (
             "iter-138: Phillips IC must dispatch latlon "
             "separately to handle u-shape (n_lat, n_lon+1).")
-        # Must broadcast u_jet_1d to (n_lat, n_u_lon).
-        assert "n_u_lon" in body
-        assert "u_jet_1d" in body
+        # The jet is built on the u faces, not the cell centres.
+        assert "_cgrid_face_lat_lon(grid)" in body
+        assert "u_jet_2d" in body
 
     def test_iter138_igw_latlon_u_v_edge_fix(self):
         """iter-138 (iter-137 ERROR-2): IGW IC must compute u/v
@@ -3162,7 +3163,7 @@ class TestIter123OceanDriftTolerance:
         assert m is not None
         body = m.group(0)
         # Must have dedicated latlon branch (separate from cube).
-        assert 'elif grid_type == "latlon"' in body
+        assert 'elif grid_type in ("latlon", "tripole")' in body
         # Must compute lon_u (u-edge longitudes) and lat_v
         # (v-edge latitudes).
         assert "lon_u" in body

@@ -64,6 +64,35 @@ def test_clm_ml_subflags_ignored_without_clm_ml():
     assert isinstance(cfg.surface_scheme, SimpleSEBConfig)
 
 
+def test_land_canopy_solve_group_round_trip():
+    """--land-canopy-solve-group reaches the two-leaf config; default 0 (one
+    batch per GPU, as AMIP production); a negative value is rejected."""
+    from legoesm.land.canopy.config import CanopyConfig
+    default = build_config_from_args(_parse_args(["--lat", "45.0"])).land.surface_scheme
+    assert default.solve_group == 0 == CanopyConfig().solve_group
+    cfg = build_config_from_args(_parse_args([
+        "--lat", "45.0", "--land-canopy-solve-group", "64"])).land.surface_scheme
+    assert cfg.solve_group == 64
+    with pytest.raises(ValueError, match="solve_group"):
+        build_config_from_args(_parse_args([
+            "--lat", "45.0", "--land-canopy-solve-group", "-1"]))
+    args = _parse_args(["--lat", "45.0"])
+    args.land_canopy_solve_group = 8.5      # a deck value bypasses argparse's type=int
+    with pytest.raises(ValueError, match="solve_group"):
+        build_config_from_args(args)
+    old = _parse_args(["--lat", "45.0"])
+    del old.land_canopy_solve_group         # a namespace saved before the flag existed
+    assert build_config_from_args(old).land.surface_scheme.solve_group == 0
+
+
+def test_committed_lmip_decks_select_solve_group():
+    from pathlib import Path
+    import yaml
+    root = Path(__file__).resolve().parents[2] / "config" / "lmip"
+    for name in ("lmip_example.yaml", "lmip_carbon_ic.yaml"):
+        assert yaml.safe_load((root / name).read_text())["land_canopy_solve_group"] == 0
+
+
 def test_pft_params_calibrated_is_default_and_matches_bake():
     """LMIP defaults to the ERA5-calibrated MULTILAYER land params shared with AMIP/CMIP
     (per-PFT + snow albedo); --pft-params raw reproduces the untuned CLM5 table."""

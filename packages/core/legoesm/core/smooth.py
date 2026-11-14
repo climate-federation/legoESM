@@ -185,6 +185,19 @@ def smooth_min_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     return jnp.where(y <= 0.0, a, jnp.where(y >= width, b + 0.0 * a, inside))
 
 
+def validate_smoothing_width(name: str, w) -> None:
+    """One legal range for a RULE 5 width that selects a static branch: 0 (the
+    reference's hard switch) or in [sqrt(t), 1/sqrt(t)], t = finfo(float32).tiny
+    (below it the ramp's slope overflows float32 and the gradient turns NaN).
+    Booleans and non-numbers are refused (a YAML ``false`` would read as 0)."""
+    lo = math.sqrt(float(jnp.finfo(jnp.float32).tiny))
+    if (isinstance(w, bool) or not isinstance(w, (int, float))
+            or not (w == 0 or lo <= w <= 1.0 / lo)):
+        raise ValueError(
+            f"{name} must be 0 (the reference's hard switch) or in "
+            f"[{lo:.3e}, {1.0 / lo:.3e}]; got {w!r}.")
+
+
 def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
     if width == 0:
@@ -211,6 +224,26 @@ def min_c1(a: jax.Array, b: jax.Array, sharpness: float) -> jax.Array:
     if _hard(sharpness):
         return jnp.minimum(a, b)
     return -max_c1(-a, -b, sharpness)
+
+
+@jax.custom_jvp
+def straight_through(hard: jax.Array, soft: jax.Array) -> jax.Array:
+    """Forward value ``hard`` EXACTLY, derivative of ``soft`` (straight-through estimator).
+
+    A ``custom_jvp``: the primal is ``hard`` itself, so ``soft`` is dead code in
+    the forward pass and the compiled forward is the hard one bit for bit,
+    under jit too.  (The arithmetic form ``hard - (sg(soft) - soft)`` is exact
+    eagerly, but under jit on CPU it was measured to differ from ``hard`` at the
+    smallest subnormal snow depth and in the sign of zero downstream, and it
+    propagates a NaN ``soft`` into the forward value.)  The tangent is that of
+    ``soft``; ``hard`` carries none.
+    """
+    return hard
+
+
+@straight_through.defjvp
+def _straight_through_jvp(primals, tangents):
+    return primals[0], tangents[1]
 
 
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:

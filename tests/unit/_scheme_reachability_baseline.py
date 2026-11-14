@@ -39,6 +39,11 @@ UNREACHABLE_SCHEMES = {
         "surface or the ocean, so the coupled climate has no energy source; "
         "main's run_coupled refused it and the shared parser (P5a) keeps "
         "that refusal.",
+    ("run_coupled", "radiation", "ecrad_ifs"):
+        "OpenIFS ecRad runs on the MPAS column lane only; the coupled loop is "
+        "not verified to carry its between-call state (PhysicsState."
+        "ecrad_carry) or McICA seed clock, so run_coupled refuses it, also "
+        "from a deck (vote R1a, test_run_coupled_refuses_ecrad_ifs).",
     ("run_coupled", "surface_bulk_scheme", "none"):
         "No surface bulk fluxes means no air-sea exchange, so nothing drives "
         "the ocean; run_coupled refuses it (test_surface_bulk_none).",

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import math
+
 import argparse
 import hashlib
 import importlib.util
@@ -149,6 +151,7 @@ def _make_jit_stepper(card):
             ice_volume_index=recipe.ICE_RHEO_TRACERS.index("v_i"),
             concentration_index=recipe.ICE_RHEO_TRACERS.index("a_i"),
             subcycles=card.subcycles,
+            limit_sharpness_scale=math.inf,
         )
 
     return jax.jit(advance)
@@ -363,7 +366,7 @@ def run_replay(
 
     forcing = recipe._forcing_for_state(card, state, TARGET_RESTART)
     dynamics = si3_cgrid_aevp_solver(
-        state.dynamics, forcing, card.metrics, card.dynamics_config
+        state.dynamics, forcing, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
     )
     lego_u = np.asarray(dynamics.u_ice_u)
     lego_v = np.asarray(dynamics.v_ice_v)

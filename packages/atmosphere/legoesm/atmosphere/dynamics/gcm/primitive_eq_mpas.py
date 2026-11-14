@@ -60,6 +60,7 @@ from legoesm.core.operators_voronoi import (
     cell_to_edge_avg_3d,
     apvm_correction_3d,
 )
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.grids.vertical import (
     SigmaCoordinate,
@@ -233,6 +234,11 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # (``vertical_del4_tracer_tendency_log``).  Must not overlap
     # ``vert4_flux_form_tracers``.  Empty = unused (bit-identical).
     vert4_log_form_tracers: tuple = ()
+    # Shared PE core vertical form (``primitive_eq_generic.VERTICAL_FORMS``).
+    # "legacy" (default) runs :func:`mpas_legacy_pe_tendencies`, this lane's
+    # pre-core body, unchanged; the driver fills it from
+    # ``DycoreConfig.vertical_form``.  Appended at the tuple END.
+    vertical_form: str = "legacy"
 
 
 # ============================================================================
@@ -242,7 +248,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
 class ThermoTerms(NamedTuple):
     """The three constituents of the dry thermodynamic tendency, as assembled.
 
-    Diagnostic only: returned by :func:`mpas_hydrostatic_tendencies` when it is
+    Diagnostic only: returned by :func:`mpas_legacy_pe_tendencies` when it is
     called with ``return_thermo_terms=True``, which no production path does.
     ``horiz_adv + horiz_diff + vert_adv + adiabatic_ps`` is the thermodynamic
     tendency before the vertical del4 filter and before physics are added, so a
@@ -502,7 +508,130 @@ def sponge_del2_profile(nlev: int, n_layers: int, factor) -> jnp.ndarray:
     return fac ** exponent
 
 
-def mpas_hydrostatic_tendencies(
+def mpas_momentum_dissipation(du_dt_3d, u_3d, mesh, config):
+    """Add the optional del-2 / del-4 viscosity and div-4 damping."""
+    # Viscosity — when both del2 and del4 are active, the biharmonic
+    # ``vector_laplacian_del4_3d`` is defined as
+    # ``-vector_laplacian_del2_3d(vector_laplacian_del2_3d(u))``, so
+    # the *inner* del2 is identical to the explicit del2 viscosity.
+    # Compute it once and reuse — saves one full
+    # ``vector_laplacian_del2_3d`` call (1 div + 1 curl + 1 grad +
+    # 1 tangential-curl difference) per RHS evaluation.  Same exploit
+    # as Loop 135 for the latlon ocean K_h+K_bih sharing.
+    _nu2 = config.nu_del2 * sponge_del2_profile(
+        u_3d.shape[-1], config.sponge_del2_top_layers,
+        config.sponge_del2_top_factor).astype(u_3d.dtype)
+    if config.nu_del2 > 0 and config.nu_del4 > 0:
+        _del2_u = vector_laplacian_del2_3d(u_3d, mesh)
+        du_dt_3d = du_dt_3d + _nu2[None, :] * _del2_u
+        du_dt_3d = du_dt_3d - config.nu_del4 * vector_laplacian_del2_3d(_del2_u, mesh)
+    elif config.nu_del2 > 0:
+        du_dt_3d = du_dt_3d + _nu2[None, :] * vector_laplacian_del2_3d(u_3d, mesh)
+    elif config.nu_del4 > 0:
+        du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
+
+    # Divergence-selective biharmonic damping (CAM-FV ldiv4).  Same sign
+    # convention as the vector biharmonic above: the del4 term enters with a
+    # minus sign, del2 with a plus.
+    if config.nu_div4 > 0:
+        du_dt_3d = du_dt_3d - config.nu_div4 * div_damp_del4_3d(u_3d, mesh)
+    return du_dt_3d
+
+
+def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
+                            mass_flux, sigma_dot, p_s, _dps_del4,
+                            _filter_weight, physics_tendency=None):
+    """Tracer tendency dict (``None`` for a dry state)."""
+    _vert_scheme = config.vert_advection_scheme
+    # --- 7. Tracer transport (moisture etc.) ---
+    # Advect prognostic tracers with the dycore's OWN edge wind (u_3d) and
+    # vertical mass flux (mass_flux for hybrid / sigma_dot for σ), so moisture
+    # transport is MASS-CONSISTENT with the thermodynamics — same horizontal
+    # operator (shared ``tracer_horizontal_advection``) and the SAME vertical
+    # operator the dycore uses for T (on the hybrid lane: the conservative
+    # limited tracer operator, T takes its theta form).  Physics (microphysics/convection)
+    # tracer tendencies add on.  ``tracers=None`` ⇒ dry, no extra work.
+    tracer_tends_out = None
+    if tracers is not None and len(tracers) > 0:
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
+            tracer_horizontal_advection,
+        )
+        _tnames = list(tracers.keys())
+        q = jnp.stack([tracers[k].data for k in _tnames], axis=-1)
+        dq = tracer_horizontal_advection(q, u_3d, mesh)
+        if _hybrid:
+            dq = dq + jax.vmap(
+                lambda qk: vertical_advection_hybrid_van_leer(
+                    qk, mass_flux, p_s, sigma_coord),
+                in_axes=-1, out_axes=-1)(q)
+        else:
+            dq = dq + jax.vmap(
+                lambda qk: vertical_advection(
+                    qk, sigma_dot, sigma_coord, scheme=_vert_scheme),
+                in_axes=-1, out_axes=-1)(q)
+        if _dps_del4 is not None:
+            # The p_s hyperdiffusion moves layer mass dB_k * _dps_del4 that no
+            # tracer flux accompanies; count it as dry air so each tracer's
+            # layer mass q*dp is unchanged: dq = -q dB_k _dps_del4 / dp_k.
+            # Without this it removed ~0.009 mm/day of water at res 6.
+            _dB = (sigma_coord.dB if _hybrid else sigma_coord.dsigma).astype(p_s.dtype)
+            _dp_c = sigma_coord.layer_thickness_dp(p_s)
+            _dp_c = jnp.where(_dp_c != 0, _dp_c, 1.0)  # halo padding (p_s = 0)
+            dq = dq - q * (_dB * _dps_del4[:, None] / _dp_c)[..., None]
+        # #930 vertical checkerboard damper on TRACERS (same operator + rate
+        # as the T filter above).  The 2026-07-23 moist-AMIP blowup forensics
+        # (Tibetan-plateau cell, ±140 K 2Δσ T zigzag with 66 g/kg q_v pooling
+        # at the hot levels) show the moist checkerboard's primary oscillator
+        # is the TRACER field: tracer vertical transport reuses the
+        # checkerboard-prone ``vertical_advection`` form (only T got the #962
+        # θ-form rewrite), so damping T alone cannot stabilize the coupled
+        # q↔latent-heating mode.  ``dsigma`` is passed so the MASS-weighted
+        # column integral (not merely the index-space sum) is zero to machine
+        # precision → conserves column moisture on the stretched hybrid and
+        # tropopause-refined σ grids too, not just on a uniform grid.
+        # Zero when nu_vert4_T == 0 (bit-identical).
+        if config.nu_vert4_T > 0.0 and q.shape[-2] > 2:
+            # Per-tracer form: names in ``vert4_flux_form_tracers`` get the
+            # mass-weighted flux form (no projection); the rest keep the
+            # projected form.  Static Python selection on the tracer names.
+            # A known water/number name this state does not carry (e.g. the
+            # q_v default on a passive-tracer-only state) is simply unused; a
+            # name that is no water/number tracer at all raised at function
+            # entry (``validate_vert4_flux_form_tracers``).
+            _flux_set = tuple(n for n in config.vert4_flux_form_tracers
+                              if n in _tnames)
+            _log_set = tuple(n for n in config.vert4_log_form_tracers
+                             if n in _tnames)
+            if not _flux_set and not _log_set:
+                dq = dq + jax.vmap(
+                    lambda qk: vertical_del4_T_tendency(
+                        qk, config.nu_vert4_T, _filter_weight),
+                    in_axes=-1, out_axes=-1)(q)
+            else:
+                dq = dq + jnp.stack([
+                    (vertical_del4_tracer_tendency_flux(
+                        q[..., _i], config.nu_vert4_T, _filter_weight)
+                     if _n in _flux_set else
+                     vertical_del4_tracer_tendency_log(
+                         q[..., _i], config.nu_vert4_T, _filter_weight)
+                     if _n in _log_set else
+                     vertical_del4_T_tendency(
+                         q[..., _i], config.nu_vert4_T, _filter_weight))
+                    for _i, _n in enumerate(_tnames)], axis=-1)
+        _phys_tt = (physics_tendency.tracer_tendencies
+                    if physics_tendency is not None else None)
+        for _i, k in enumerate(_tnames):
+            if _phys_tt is not None and k in _phys_tt:
+                dq = dq.at[..., _i].add(_phys_tt[k].data)
+        tracer_tends_out = {
+            k: Field(data=dq[..., _i], name=f"d{k}_dt",
+                     dims=("nCells", "nlev"), units="kg/kg/s")
+            for _i, k in enumerate(_tnames)
+        }
+    return tracer_tends_out
+
+
+def mpas_legacy_pe_tendencies(
     state: MPASHydrostaticState,
     mesh: VoronoiMesh,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
@@ -513,6 +642,12 @@ def mpas_hydrostatic_tendencies(
     fence_pv_flux: bool = False,
 ) -> MPASHydrostaticTendencies | tuple[MPASHydrostaticTendencies, "ThermoTerms"]:
     """Compute tendencies for the hydrostatic PE on an MPAS mesh.
+
+    The shared PE core's ``"legacy"`` vertical form on this grid (call it
+    through ``primitive_eq_generic.mpas_pe_tendencies``); TEMPORARY, kept for
+    comparability, retired after the A/B.  KNOWN DEFECT: #1029 (the analytic
+    ``B p_s / p`` hybrid pressure-gradient factor leaves a spurious wind
+    tendency in a resting atmosphere over terrain).
 
     Parameters
     ----------
@@ -715,31 +850,7 @@ def mpas_hydrostatic_tendencies(
     # Momentum tendency
     du_dt_3d = -grad_B_3d - pg_corr_3d + pv_flux_3d  # (nEdges, nlev)
 
-    # Viscosity — when both del2 and del4 are active, the biharmonic
-    # ``vector_laplacian_del4_3d`` is defined as
-    # ``-vector_laplacian_del2_3d(vector_laplacian_del2_3d(u))``, so
-    # the *inner* del2 is identical to the explicit del2 viscosity.
-    # Compute it once and reuse — saves one full
-    # ``vector_laplacian_del2_3d`` call (1 div + 1 curl + 1 grad +
-    # 1 tangential-curl difference) per RHS evaluation.  Same exploit
-    # as Loop 135 for the latlon ocean K_h+K_bih sharing.
-    _nu2 = config.nu_del2 * sponge_del2_profile(
-        u_3d.shape[-1], config.sponge_del2_top_layers,
-        config.sponge_del2_top_factor).astype(u_3d.dtype)
-    if config.nu_del2 > 0 and config.nu_del4 > 0:
-        _del2_u = vector_laplacian_del2_3d(u_3d, mesh)
-        du_dt_3d = du_dt_3d + _nu2[None, :] * _del2_u
-        du_dt_3d = du_dt_3d - config.nu_del4 * vector_laplacian_del2_3d(_del2_u, mesh)
-    elif config.nu_del2 > 0:
-        du_dt_3d = du_dt_3d + _nu2[None, :] * vector_laplacian_del2_3d(u_3d, mesh)
-    elif config.nu_del4 > 0:
-        du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
-
-    # Divergence-selective biharmonic damping (CAM-FV ldiv4).  Same sign
-    # convention as the vector biharmonic above: the del4 term enters with a
-    # minus sign, del2 with a plus.
-    if config.nu_div4 > 0:
-        du_dt_3d = du_dt_3d - config.nu_div4 * div_damp_del4_3d(u_3d, mesh)
+    du_dt_3d = mpas_momentum_dissipation(du_dt_3d, u_3d, mesh, config)
 
     # Batched divergences.  ``divergence_cell_3d`` shares the same
     # MPAS edgesOnCell gather + reduce on the leading edge axis (the
@@ -939,91 +1050,10 @@ def mpas_hydrostatic_tendencies(
         dT_dt_3d = dT_dt_3d + physics_tendency.dT_dt.data
         dp_s_dt = dp_s_dt + physics_tendency.dp_s_dt.data
 
-    # --- 7. Tracer transport (moisture etc.) ---
-    # Advect prognostic tracers with the dycore's OWN edge wind (u_3d) and
-    # vertical mass flux (mass_flux for hybrid / sigma_dot for σ), so moisture
-    # transport is MASS-CONSISTENT with the thermodynamics — same horizontal
-    # operator (shared ``tracer_horizontal_advection``) and the SAME vertical
-    # operator the dycore uses for T (on the hybrid lane: the conservative
-    # limited tracer operator, T takes its theta form).  Physics (microphysics/convection)
-    # tracer tendencies add on.  ``tracers=None`` ⇒ dry, no extra work.
-    tracer_tends_out = None
-    if state.tracers is not None and len(state.tracers) > 0:
-        from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
-            tracer_horizontal_advection,
-        )
-        _tnames = list(state.tracers.keys())
-        q = jnp.stack([state.tracers[k].data for k in _tnames], axis=-1)
-        dq = tracer_horizontal_advection(q, u_3d, mesh)
-        if _hybrid:
-            dq = dq + jax.vmap(
-                lambda qk: vertical_advection_hybrid_van_leer(
-                    qk, mass_flux, p_s, sigma_coord),
-                in_axes=-1, out_axes=-1)(q)
-        else:
-            dq = dq + jax.vmap(
-                lambda qk: vertical_advection(
-                    qk, sigma_dot, sigma_coord, scheme=_vert_scheme),
-                in_axes=-1, out_axes=-1)(q)
-        if _dps_del4 is not None:
-            # The p_s hyperdiffusion moves layer mass dB_k * _dps_del4 that no
-            # tracer flux accompanies; count it as dry air so each tracer's
-            # layer mass q*dp is unchanged: dq = -q dB_k _dps_del4 / dp_k.
-            # Without this it removed ~0.009 mm/day of water at res 6.
-            _dB = (sigma_coord.dB if _hybrid else sigma_coord.dsigma).astype(p_s.dtype)
-            _dp_c = sigma_coord.layer_thickness_dp(p_s)
-            _dp_c = jnp.where(_dp_c != 0, _dp_c, 1.0)  # halo padding (p_s = 0)
-            dq = dq - q * (_dB * _dps_del4[:, None] / _dp_c)[..., None]
-        # #930 vertical checkerboard damper on TRACERS (same operator + rate
-        # as the T filter above).  The 2026-07-23 moist-AMIP blowup forensics
-        # (Tibetan-plateau cell, ±140 K 2Δσ T zigzag with 66 g/kg q_v pooling
-        # at the hot levels) show the moist checkerboard's primary oscillator
-        # is the TRACER field: tracer vertical transport reuses the
-        # checkerboard-prone ``vertical_advection`` form (only T got the #962
-        # θ-form rewrite), so damping T alone cannot stabilize the coupled
-        # q↔latent-heating mode.  ``dsigma`` is passed so the MASS-weighted
-        # column integral (not merely the index-space sum) is zero to machine
-        # precision → conserves column moisture on the stretched hybrid and
-        # tropopause-refined σ grids too, not just on a uniform grid.
-        # Zero when nu_vert4_T == 0 (bit-identical).
-        if config.nu_vert4_T > 0.0 and q.shape[-2] > 2:
-            # Per-tracer form: names in ``vert4_flux_form_tracers`` get the
-            # mass-weighted flux form (no projection); the rest keep the
-            # projected form.  Static Python selection on the tracer names.
-            # A known water/number name this state does not carry (e.g. the
-            # q_v default on a passive-tracer-only state) is simply unused; a
-            # name that is no water/number tracer at all raised at function
-            # entry (``validate_vert4_flux_form_tracers``).
-            _flux_set = tuple(n for n in config.vert4_flux_form_tracers
-                              if n in _tnames)
-            _log_set = tuple(n for n in config.vert4_log_form_tracers
-                             if n in _tnames)
-            if not _flux_set and not _log_set:
-                dq = dq + jax.vmap(
-                    lambda qk: vertical_del4_T_tendency(
-                        qk, config.nu_vert4_T, _filter_weight),
-                    in_axes=-1, out_axes=-1)(q)
-            else:
-                dq = dq + jnp.stack([
-                    (vertical_del4_tracer_tendency_flux(
-                        q[..., _i], config.nu_vert4_T, _filter_weight)
-                     if _n in _flux_set else
-                     vertical_del4_tracer_tendency_log(
-                         q[..., _i], config.nu_vert4_T, _filter_weight)
-                     if _n in _log_set else
-                     vertical_del4_T_tendency(
-                         q[..., _i], config.nu_vert4_T, _filter_weight))
-                    for _i, _n in enumerate(_tnames)], axis=-1)
-        _phys_tt = (physics_tendency.tracer_tendencies
-                    if physics_tendency is not None else None)
-        for _i, k in enumerate(_tnames):
-            if _phys_tt is not None and k in _phys_tt:
-                dq = dq.at[..., _i].add(_phys_tt[k].data)
-        tracer_tends_out = {
-            k: Field(data=dq[..., _i], name=f"d{k}_dt",
-                     dims=("nCells", "nlev"), units="kg/kg/s")
-            for _i, k in enumerate(_tnames)
-        }
+    tracer_tends_out = mpas_tracer_tendencies(
+        state.tracers, u_3d, mesh, sigma_coord, config, _hybrid,
+        mass_flux if _hybrid else None, None if _hybrid else sigma_dot,
+        p_s, _dps_del4, _filter_weight, physics_tendency)
 
     _out = MPASHydrostaticTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",
@@ -1072,6 +1102,16 @@ def _vertical_advection_edge(
 # Model class
 # ============================================================================
 
+def mpas_model_tendencies(state, mesh, sigma_coord, config, physics_tendency=None,
+                          dt=0.0, *, return_thermo_terms=False, fence_pv_flux=False):
+    """The model's tendency RHS: the shared PE core with ``config.vertical_form``
+    (the multi-device sharder calls it with a rank-local mesh and the config)."""
+    return mpas_pe_tendencies(
+        state, mesh, sigma_coord, config, physics_tendency, dt,
+        vertical_form=config.vertical_form, return_thermo_terms=return_thermo_terms,
+        fence_pv_flux=fence_pv_flux)
+
+
 class MPASPrimitiveEquationModel(IntegrationMixin):
     """Hydrostatic primitive equation model on an MPAS Voronoi mesh.
 
@@ -1089,7 +1129,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
     #: legoesm-core free of an upward atmosphere dependency.  (The ``.tendencies``
     #: method binds ``self.mesh``; the sharder needs the per-device mesh, so it
     #: needs the unbound function.)
-    sharded_tendency_fn = staticmethod(mpas_hydrostatic_tendencies)
+    sharded_tendency_fn = staticmethod(mpas_model_tendencies)
 
     def __init__(
         self,
@@ -1154,7 +1194,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         dt: float = 0.0,
         physics_tendency: MPASHydrostaticTendencies | None = None,
     ) -> MPASHydrostaticTendencies:
-        return mpas_hydrostatic_tendencies(
+        return mpas_model_tendencies(
             state, self.mesh, self.sigma_coord, self.config,
             physics_tendency=physics_tendency, dt=dt,
         )
@@ -1289,7 +1329,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         # --- 1. Dynamics: RK-integrate dynamics-only tendencies (physics OFF;
         #        tracer ADVECTION stays in the dynamics, mass-consistently). ---
         def dyn_tendency_fn(s):
-            tend = mpas_hydrostatic_tendencies(
+            tend = mpas_model_tendencies(
                 s, self.mesh, self.sigma_coord, self.config,
                 physics_tendency=None, dt=dt,
             )
@@ -1515,40 +1555,19 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         _led_step = None
         if _led_phys_rows is not None:
             from legoesm.diagnostics.process_ledger import (
-                LEDGER_WATER_SPECIES, ROW_CLIPS, ROW_DYNAMICS, ROW_OTHER,
-                column_store_snapshot_column,
+                step_ledger_from_stages,
             )
-
-            _led_w = self.config.budget_ledger_level_weight
-
-            def _snap(s):
-                water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
-                         if s.tracers is not None and k in s.tracers]
-                return column_store_snapshot_column(
-                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water,
-                    level_weight=_led_w)
-
-            _s_pre = _snap(state)
-            _s_dyn = _snap(_state_postdyn)
-            _s_phy = _snap(_state_postphys)
-            _s_fix0 = _snap(_state_prefix)
-            _s_fix1 = _snap(_state_postfix)
-            _s_end = _snap(state_new)
-            _led_step = _led_phys_rows.astype(_s_pre.dtype)
-            _led_step = _led_step.at[:, ROW_DYNAMICS, :].add(
-                ((_s_dyn - _s_pre) + (_s_fix1 - _s_fix0)) / dt)
-            _led_step = _led_step.at[:, ROW_CLIPS, :].add(
-                ((_s_fix0 - _s_phy) + (_s_end - _s_fix1)) / dt)
             # Closure residual -> other_physics (the FV residual philosophy):
             # the physics rows are tendency integrals at the PRE-application
             # p_s, while the store snapshots see the applied state — a
             # physics dp_s_dt and the dt² cross-term (dt·dT_dt vs the p_s
-            # change) land nowhere otherwise.  Booking the discrepancy here
-            # makes sum(rows) == (snap(end) − snap(pre))/dt EXACT by
-            # construction, which is the property the closure test pins.
-            _led_step = _led_step.at[:, ROW_OTHER, :].add(
-                (_s_phy - _s_dyn) / dt
-                - _led_phys_rows.astype(_s_pre.dtype).sum(axis=1))
+            # change) land nowhere otherwise.
+            _led_step = step_ledger_from_stages(
+                _led_phys_rows,
+                (state, _state_postdyn, _state_postphys, _state_prefix,
+                 _state_postfix, state_new),
+                self.sigma_coord.dsigma, dt,
+                level_weight=self.config.budget_ledger_level_weight)
 
         # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
         # rounded the mass fixer's float64 back out of the bulk state.

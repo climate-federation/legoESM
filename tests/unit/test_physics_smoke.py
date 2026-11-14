@@ -17,6 +17,23 @@ import pytest
 from legoesm.core.field import Field
 
 
+def _micro_call(micro_fn, s, grid, sigma):
+    """Call a hydrostatic microphysics adapter; a carry-writing scheme
+    (Sundqvist's gscond) gets a fresh zero carry and its tendencies are
+    returned."""
+    if not getattr(micro_fn, "_writes_phys_state", False):
+        return micro_fn(s, grid, sigma)
+    from types import SimpleNamespace
+    shape = s.T.data.shape
+    ncol = 1
+    for n in shape[:-1]:
+        ncol *= int(n)
+    z = jnp.zeros((ncol, shape[-1]), s.T.data.dtype)
+    ps = SimpleNamespace(zc_T_prev=z, zc_q_v_prev=z,
+                         zc_p_s_prev=jnp.zeros((ncol,), s.T.data.dtype))
+    return micro_fn(s, grid, sigma, phys_state=ps)[0]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -147,7 +164,7 @@ def test_microphysics_smoke(scheme):
     config = MicrophysicsConfig(
         scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
     micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
-    tend = micro_fn(state, grid, sigma)
+    tend = _micro_call(micro_fn, state, grid, sigma)
     check_tendencies_finite(tend, f"microphysics({scheme})")
     check_shape(tend.dT_dt, (6, 8, 8, 10), f"microphysics({scheme}).dT_dt")
 
@@ -164,9 +181,18 @@ def test_turbulence_smoke(scheme):
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
     state, grid, sigma = make_hydrostatic_setup()
-    config = TurbulenceConfig(scheme=scheme)
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.physics.turbulence.config import YSUConfig
+    # ysu carries the WRF surface-layer state and needs the land/water flag
+    # on a grid without a land fraction
+    config = (TurbulenceConfig(scheme=scheme, ysu=YSUConfig(surface_type="land"))
+              if scheme == "ysu" else TurbulenceConfig(scheme=scheme))
     turb_fn = make_turbulence_physics(config, model_type="hydrostatic", dt=300.0)
-    tend, prog = turb_fn(state, grid, sigma)
+    ps = (init_physics_state(state.T.data.size // sigma.n_levels, sigma.n_levels,
+                             PhysicsConfig(turbulence=config))
+          if scheme == "ysu" else None)
+    tend, prog = turb_fn(state, grid, sigma, phys_state=ps)
     check_tendencies_finite(tend, f"turbulence({scheme})")
     check_shape(tend.dT_dt, (6, 8, 8, 10), f"turbulence({scheme}).dT_dt")
     # Non-zero wind tendency (surface friction)

@@ -303,6 +303,21 @@ class PhysicsState(NamedTuple):
     # (zeros without it), from which WRF Tiedtke's omega is formed on a grid
     # with no divergence operator.  Per-call INPUT, reset like dyn_tendency_*.
     dyn_w_ls: jnp.ndarray = None
+    # Sundqvist (Zhao-Carr gscond) previous-step state: the post-condensation
+    # T [K] and q_v [kg/kg], (ncol, nlev), and surface pressure [Pa], (ncol,),
+    # of the last microphysics call (the oracle's tp, qp, psp,
+    # zhaocarr_gscond.f:508-523), from which gscond forms the other-process
+    # tendencies that drive its condensation.  Zeros = fresh start (a column
+    # whose zc_p_s_prev is 0 starts with no other-process tendency).
+    # Materialised only when microphysics is ``sundqvist`` (None otherwise).
+    zc_T_prev: jnp.ndarray = None
+    zc_q_v_prev: jnp.ndarray = None
+    zc_p_s_prev: jnp.ndarray = None
+    # turbulence=ysu: the WRF revised MM5 surface layer's carried state,
+    # shape (ncol, 6) in ``turbulence.ysu.SFCLAY_FIELDS`` order (ust, mol,
+    # znt, hfx, qfx, pblh), seeded at WRF's cold start; None for every other
+    # scheme.  Appended LAST with a default.
+    sfclay: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -439,19 +454,12 @@ def init_physics_state(
     # --- GWD wave action spectrum ---
     # Seeded for prognostic_spectral AND any '+'-composite that contains it
     # (issue #834) — both thread the wave-action spectrum through the carry.
+    # ifs_wms: retained u/v tendencies + time since the last recompute.
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
-        gwd_carries_spectrum,
+        gwd_carry_seed,
     )
-    gwd_cfg = physics_config.gravity_wave_drag
-    if gwd_carries_spectrum(gwd_cfg.scheme):
-        sc = gwd_cfg.prognostic_spectral
-        gwd_spectrum = jnp.full(
-            (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux,
-            dtype=dtype,
-        )
-    else:
-        # Minimal allocation — zero-element trailing dims avoid wasted memory.
-        gwd_spectrum = jnp.zeros((ncol, 1, 1), dtype=dtype)
+    gwd_spectrum = gwd_carry_seed(physics_config.gravity_wave_drag, ncol, nlev,
+                                  dtype=dtype)
 
     # --- Master JAX PRNG key (advanced once per outer step) ---
     # Imported lazily so the module load path does not pull in the
@@ -515,7 +523,19 @@ def init_physics_state(
         ecrad_carry=_ecrad_carry_seed(physics_config, ncol, nlev, dtype),
         turb_tendency_qv=turb_tendency_qv,
         evap_sfc=evap_sfc,
+        zc_T_prev=_zc_seed(physics_config, (ncol, nlev), dtype),
+        zc_q_v_prev=_zc_seed(physics_config, (ncol, nlev), dtype),
+        zc_p_s_prev=_zc_seed(physics_config, (ncol,), dtype),
+        sfclay=_init_sfclay(ncol, physics_config, dtype),
     )
+
+
+def _zc_seed(physics_config, shape, dtype):
+    """Zero (fresh-start) Sundqvist gscond carry when microphysics is
+    ``sundqvist``, else None."""
+    if getattr(physics_config.microphysics, "scheme", None) != "sundqvist":
+        return None
+    return jnp.zeros(shape, dtype=dtype)
 
 
 def _ecrad_carry_seed(physics_config, ncol, nlev, dtype):
@@ -525,6 +545,15 @@ def _ecrad_carry_seed(physics_config, ncol, nlev, dtype):
         return None
     from legoesm.atmosphere.physics.radiation.ecrad_ifs.lane import carry_width
     return jnp.zeros((ncol, carry_width(nlev)), dtype=dtype)
+
+
+def _init_sfclay(ncol, physics_config, dtype):
+    """WRF cold-start surface-layer carry for turbulence=ysu, else None."""
+    turb = physics_config.turbulence
+    if turb.scheme != "ysu":
+        return None
+    from legoesm.atmosphere.physics.turbulence.ysu import init_sfclay_carry
+    return init_sfclay_carry(ncol, turb.ysu, jnp.float64 if dtype is None else dtype)
 
 
 def update_physics_state(phys_state, updates):
@@ -626,6 +655,10 @@ def update_physics_state(phys_state, updates):
                                            phys_state.turb_tendency_qv)),
         evap_sfc=_tiedtke_evap_update(phys_state.evap_sfc, updates),
         dyn_w_ls=updates.get("dyn_w_ls", None),
+        zc_T_prev=updates.get("zc_T_prev", phys_state.zc_T_prev),
+        zc_q_v_prev=updates.get("zc_q_v_prev", phys_state.zc_q_v_prev),
+        zc_p_s_prev=updates.get("zc_p_s_prev", phys_state.zc_p_s_prev),
+        sfclay=updates.get("sfclay", phys_state.sfclay),
     )
 
 

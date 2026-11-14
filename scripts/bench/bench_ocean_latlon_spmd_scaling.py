@@ -236,6 +236,48 @@ def _block(state):
                            if leaf is not None])
 
 
+# Measured step-time ratio (zonal_line M80 + single_reduce) / (jacobi M200, standard),
+# mean of forward+reverse passes in one allocation. Grid: tripole 3072x4352, 75 levels,
+# mesh-scaled A_h, dt 600 s, strong scaling. Jobs 28880268 (8-32 GPUs) and 28844608
+# (64-128 GPUs), Levante A100, 2026-11-09/11. Accuracy of both arms matched (job 28844607).
+TRIPOLE_SOLVER_RATIO = {
+    "float32": {8: 1.097, 16: 1.022, 32: 0.888, 64: 0.757, 128: 0.626},
+    "float64": {8: 1.385, 16: 1.313, 32: 1.205, 64: 1.015, 128: 0.788},
+}
+TRIPOLE_SOLVERS = {
+    "jacobi200": ("standard", "jacobi", 200),
+    "zline80sr": ("single_reduce", "zonal_line", 80),
+}
+ADVISORY_RATIO = 0.95
+
+
+def tripole_solver_advisory(*, tripole, mode, n_lat, n_lon, nlev, A_h_from_mesh,
+                            n_devices, precision, variant, precond, iters,
+                            backend="gpu", dt=600.0):
+    """One-line hint when the other measured tripole solver is faster here, else None.
+
+    Advisory only. Outside the measured grid/counts/precisions: "unmeasured"
+    (no interpolation between counts: the winner flips between rows).
+    """
+    current = next((k for k, v in TRIPOLE_SOLVERS.items()
+                    if v == (variant, precond, iters)), None)
+    if not tripole or current is None:
+        return None
+    row = TRIPOLE_SOLVER_RATIO.get(precision, {})
+    if ((mode, n_lat, n_lon, nlev, A_h_from_mesh, dt)
+            != ("strong", 3072, 4352, 75, True, 600.0)
+            or backend != "gpu" or n_devices not in row):
+        return (f"[solver advisory] {current}: unmeasured for this grid / "
+                f"{n_devices} devices / {precision} / {backend}.")
+    r = row[n_devices] if current == "jacobi200" else 1.0 / row[n_devices]
+    if r >= ADVISORY_RATIO:
+        return None
+    other = "zline80sr" if current == "jacobi200" else "jacobi200"
+    return (f"[solver advisory] {other} measured {100 * (1 - r):.0f}% less step time "
+            f"than {current} at {n_devices} devices {precision} (jobs 28880268/28844608); "
+            f"TRIPOLE_SOLVER={other} to switch.")
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--n-lat", type=int, default=96)
@@ -494,6 +536,14 @@ def main() -> int:
         # SLURM/OMPI auto-detect or PALS mpi4py bootstrap.
         from legoesm.parallel.early_init import init_multicontroller_distributed
         init_multicontroller_distributed(args.coordinator)
+    _advice = tripole_solver_advisory(
+        tripole=args.tripole, mode=args.mode, n_lat=args.n_lat, n_lon=args.n_lon,
+        nlev=args.nlev, A_h_from_mesh=args.A_h_from_mesh, n_devices=args.n_devices,
+        precision=_prec_label, variant=args.pcg_variant, precond=args.pcg_precond,
+        iters=args.pcg_fixed_iters,
+        backend=jax.default_backend(), dt=args.dt)
+    if _advice and jax.process_index() == 0:
+        print(_advice, flush=True)
 
     from legoesm.ocean.dynamics.sharded_ocean_step import (
         make_sharded_ocean_step,

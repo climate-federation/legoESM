@@ -66,6 +66,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.smooth import positive_part_c1
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ice.config import RidgingConfig
 from legoesm.ice.itd import category_bounds, upper_bounds
@@ -114,6 +115,12 @@ _SI3_JPL1_EPSI20 = 1.0e-20
 _SI3_JPL1_ZERO = 0.0
 _SI3_JPL1_ONE = 1.0
 _SI3_JPL1_TWO = 2.0
+# Open-water limit sharpness [1/(area fraction)]: the open-water floor (0),
+# ceiling (ice + open-water area, rdgrft_prep :594-602) and converged reset
+# MAX(0, 1 - a_i) (:307) are C1 positive parts that are exact outside a band of
+# width 1/s = 0.01 in area fraction.  math.inf selects NEMO's hard form (the
+# oracle mode).
+_SI3_JPL1_OPEN_WATER_LIMIT_SHARPNESS = 100.0
 
 
 @jax.custom_jvp
@@ -156,6 +163,7 @@ class SI3JPL1RidgingConfig(NamedTuple):
     snow_raft_retention: float = _SI3_JPL1_SNOW_RAFT_RETENTION
     pond_ridge_retention: float = _SI3_JPL1_POND_RIDGE_RETENTION
     pond_raft_retention: float = _SI3_JPL1_POND_RAFT_RETENTION
+    open_water_limit_sharpness: float = _SI3_JPL1_OPEN_WATER_LIMIT_SHARPNESS
 
 
 class SI3JPL1RidgingState(NamedTuple):
@@ -573,7 +581,14 @@ def _validate_si3_jpl1_ridging_config(config: SI3JPL1RidgingConfig) -> None:
         "pond_raft_retention",
     )
     expected = SI3JPL1RidgingConfig()
-    pinned = config._replace(**{name: getattr(expected, name) for name in retention_fields})
+    sharpness = config.open_water_limit_sharpness
+    if not (sharpness == math.inf or (math.isfinite(sharpness) and sharpness > _SI3_JPL1_ZERO)):
+        raise ValueError(
+            "SI3 jpl=1 open_water_limit_sharpness must be positive finite or math.inf "
+            f"(NEMO hard limits), got {sharpness!r}"
+        )
+    free_fields = retention_fields + ("open_water_limit_sharpness",)
+    pinned = config._replace(**{name: getattr(expected, name) for name in free_fields})
     if pinned != expected:
         raise ValueError(
             "SI3 jpl=1 ridging selector composition "
@@ -621,6 +636,18 @@ def apply_si3_jpl1_ridging(
     ``hfx_dyn = -sum_layers(losses.snow_enthalpy) / dt`` [W m-2] (:735-739)
     and ``wfx_pnd = rho_water * (losses.pond_volume + losses.pond_lid_volume)
     / dt`` (:743-747; the lid term only with ``ln_pnd_lids``).
+
+    KNOWN DIFFERENCE (smooth default): the open-water floor, ceiling and
+    converged reset use C1 positive parts (``open_water_limit_sharpness``,
+    band 0.01 in area fraction), exact outside the band; a zero or negative
+    pre-limit value stays exactly zero unless the cell's ice + open-water
+    area is itself below the band width (overlapping floor and ceiling
+    bands).  Inside a band each limit moves open
+    water by at most ``4/(27 s)``: down at the floor and at the reset, UP
+    just below the ice + open-water ceiling.  The area closure is then
+    reached later or not within the 19 passes (ORCA1 tier-4 step: 4,231
+    cells change, max 2.5e-3, see the D5 PR).  ``math.inf`` is NEMO's hard
+    form, used by the oracle test.
     """
 
     _validate_si3_jpl1_ridging_config(config)
@@ -675,6 +702,8 @@ def apply_si3_jpl1_ridging(
     opening = closing + divergence
     work = area > _SI3_JPL1_EPSI10
     listed = work
+    open_water_sharpness = config.open_water_limit_sharpness
+    hard_open_water = open_water_sharpness == math.inf
 
     # NEMO initializes iter=1 and loops while iter<20 (:285-320): at most 19
     # ordered shifts.  The ridging list is fixed once, before the loop
@@ -771,10 +800,18 @@ def apply_si3_jpl1_ridging(
         # open water through the opening rate after its ridging has stopped.
         shift = listed & (participation_ice > _SI3_JPL1_ZERO) & (gross > _SI3_JPL1_ZERO)
 
-        new_open_water = jnp.maximum(
-            _SI3_JPL1_ZERO,
-            open_water + (opening - participation_open * gross) * dt,
-        )
+        if hard_open_water:
+            new_open_water = jnp.maximum(
+                _SI3_JPL1_ZERO,
+                open_water + (opening - participation_open * gross) * dt,
+            )
+        else:
+            # Smooth default: the clamped opening rate above makes NEMO's
+            # update CLAMP(corrected_open, 0, total_area); its C1 form.
+            floored = positive_part_c1(corrected_open, open_water_sharpness)
+            new_open_water = total_area - positive_part_c1(
+                total_area - floored, open_water_sharpness
+            )
         # SI3 writes every donor/receiver ledger operation separately at
         # icedyn_rdgrft.F90:697-705,715-720,734-741,779-792,874-890.  Preserve
         # those fp64 statement boundaries under compiled execution: a plain
@@ -912,7 +949,7 @@ def apply_si3_jpl1_ridging(
         # cell; a converged cell stays converged with zero rates.
         open_water = jnp.where(
             listed & converged,
-            jnp.maximum(_SI3_JPL1_ZERO, _SI3_JPL1_ONE - area),
+            positive_part_c1(_SI3_JPL1_ONE - area, open_water_sharpness),
             open_water,
         )
         iterate = listed & ~converged

@@ -48,6 +48,7 @@ def solve_sw_sharded(
     mu0,
     azimuth: float,
     albedo,
+    diffuse_frac: float,
     config: MC3DRadiationConfig,
     key: Array,
     n_shards: int,
@@ -68,7 +69,7 @@ def solve_sw_sharded(
   def _shard(i):
     return raytracer_sw.solve_sw_monochromatic(
         k_ext, ssa, g, geom, mu0=mu0, azimuth=azimuth, albedo=albedo,
-        config=config, key=keys[i])
+        diffuse_frac=diffuse_frac, config=config, key=keys[i])
 
   # Fold-accumulate the running sum (NOT a list of all K results + a stacked
   # copy): peak memory is one result + one accumulator, independent of n_shards.

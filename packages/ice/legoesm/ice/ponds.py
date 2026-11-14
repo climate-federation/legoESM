@@ -67,7 +67,6 @@ def step_ponds(
     v_il: jnp.ndarray | None = None,
     wfx_pnd: jnp.ndarray | None = None,
     nn_hls: int = 0,
-    _return_si3_outputs: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advance pond area + depth one time step.
 
@@ -81,6 +80,8 @@ def step_ponds(
         liquid water].
     rain_water_m : array
         Water input from precipitation this step [m liquid].
+        ``scheme='si3_lev'`` ignores this: ``pnd_LEV`` fills from melt only
+        (``icethd_pnd.f90:454``), and the caller routes all rain to the ocean.
     ice_mask : bool array
         True where ice exists.
     h_snow : array
@@ -154,6 +155,17 @@ def step_ponds(
                 "h_il, melt totals, sz_i, t_i, rho_w, gravity, and ice_constants"
             )
         a_i_f64 = jnp.asarray(a_i, dtype=jnp.float64)
+        # One category per call on any spatial layout: lat-lon, cube (6, n, n), MPAS (ncol,).
+        spatial_shape = a_i_f64.shape
+        if jnp.shape(at_i) != spatial_shape:
+            raise ValueError(
+                "step_ponds(scheme='si3_lev') takes one category per call: at_i "
+                f"shape {jnp.shape(at_i)} must equal a_i shape {spatial_shape}"
+            )
+
+        def grid_2d(field):
+            return field if field.ndim == 2 else field.reshape(-1, 1)
+
         pond_area_f64 = jnp.asarray(pond_area, dtype=jnp.float64)
         h_ip_in = jnp.asarray(pond_depth, dtype=jnp.float64)
         h_il_in = jnp.asarray(h_il, dtype=jnp.float64)
@@ -188,48 +200,32 @@ def step_ponds(
             sz_i_f64 = sz_i_f64[..., None]
         if t_i_f64.ndim == h_ip_in.ndim:
             t_i_f64 = t_i_f64[..., None]
-        squeeze_cat = a_i_f64.ndim == 2
-        if squeeze_cat:
-            a_i_3d = a_i_f64[..., None]
-            v_i_3d = v_i_in[..., None]
-            h_i_3d = h_i_in[..., None]
-            t_su_3d = t_su_in[..., None]
-            a_ip_3d = a_ip_in[..., None]
-            v_ip_3d = v_ip_in[..., None]
-            h_ip_3d = h_ip_in[..., None]
-            v_il_3d = v_il_in[..., None]
-            h_il_3d = h_il_in[..., None]
-            a_ip_frac_3d = pond_area_f64[..., None]
-            dh_i_sum_3d = dh_i_sum_in[..., None]
-            dh_s_sum_3d = dh_s_sum_in[..., None]
-            sz_i_4d = sz_i_f64[..., None]
-            t_i_4d = t_i_f64[..., None]
-            at_i_2d = at_i_in
-        else:
-            a_i_3d = a_i_f64
-            v_i_3d = v_i_in
-            h_i_3d = h_i_in
-            t_su_3d = t_su_in
-            a_ip_3d = a_ip_in
-            v_ip_3d = v_ip_in
-            h_ip_3d = h_ip_in
-            v_il_3d = v_il_in
-            h_il_3d = h_il_in
-            a_ip_frac_3d = pond_area_f64
-            dh_i_sum_3d = dh_i_sum_in
-            dh_s_sum_3d = dh_s_sum_in
-            if sz_i_f64.shape[2] == a_i_3d.shape[2] and sz_i_f64.shape[3] != a_i_3d.shape[2]:
-                sz_i_4d = jnp.transpose(sz_i_f64, (0, 1, 3, 2))
-                t_i_4d = jnp.transpose(t_i_f64, (0, 1, 3, 2))
-            else:
-                sz_i_4d = sz_i_f64
-                t_i_4d = t_i_f64
-            at_i_2d = at_i_in if at_i_in.ndim == 2 else None
-        wfx_2d = (
-            jnp.zeros(a_i_3d.shape[:2], dtype=jnp.float64)
+        if sz_i_f64.shape[:-1] != spatial_shape or t_i_f64.shape != sz_i_f64.shape:
+            raise ValueError(
+                f"step_ponds(scheme='si3_lev') requires sz_i and t_i shape {spatial_shape} "
+                f"plus an optional layer axis; got {sz_i_f64.shape}, {t_i_f64.shape}"
+            )
+        wfx_in = (
+            jnp.zeros(spatial_shape, dtype=jnp.float64)
             if wfx_pnd is None
             else jnp.asarray(wfx_pnd, dtype=jnp.float64)
         )
+        at_i_2d = grid_2d(at_i_in)
+        wfx_2d = grid_2d(wfx_in)
+        a_i_3d = grid_2d(a_i_f64)[..., None]
+        v_i_3d = grid_2d(v_i_in)[..., None]
+        h_i_3d = grid_2d(h_i_in)[..., None]
+        t_su_3d = grid_2d(t_su_in)[..., None]
+        a_ip_3d = grid_2d(a_ip_in)[..., None]
+        v_ip_3d = grid_2d(v_ip_in)[..., None]
+        h_ip_3d = grid_2d(h_ip_in)[..., None]
+        v_il_3d = grid_2d(v_il_in)[..., None]
+        h_il_3d = grid_2d(h_il_in)[..., None]
+        a_ip_frac_3d = grid_2d(pond_area_f64)[..., None]
+        dh_i_sum_3d = grid_2d(dh_i_sum_in)[..., None]
+        dh_s_sum_3d = grid_2d(dh_s_sum_in)[..., None]
+        sz_i_4d = sz_i_f64.reshape(at_i_2d.shape + (sz_i_f64.shape[-1], 1))
+        t_i_4d = t_i_f64.reshape(at_i_2d.shape + (t_i_f64.shape[-1], 1))
         dt_f64 = jnp.asarray(dt, dtype=jnp.float64)
         r1_dt = nemo_source_round(jnp.float64(1.0) / dt_f64)
         nml = {
@@ -274,15 +270,13 @@ def step_ponds(
             gravity=gravity,
             nn_hls=nn_hls,
             constants=ice_constants,
-            _allow_general_shape=not _return_si3_outputs,
-            _at_i_override=None if _return_si3_outputs else at_i_2d,
+            _allow_general_shape=True,
+            _at_i_override=at_i_2d,
         )
-        if _return_si3_outputs:
-            return pnd_out
-        a_ip_out = pnd_out.a_ip[..., 0] if squeeze_cat else pnd_out.a_ip
-        h_ip_out = pnd_out.h_ip[..., 0] if squeeze_cat else pnd_out.h_ip
-        h_il_out = pnd_out.h_il[..., 0] if squeeze_cat else pnd_out.h_il
-        wfx_out = pnd_out.wfx_pnd if squeeze_cat else pnd_out.wfx_pnd[..., None]
+        a_ip_out = pnd_out.a_ip[..., 0].reshape(spatial_shape)
+        h_ip_out = pnd_out.h_ip[..., 0].reshape(spatial_shape)
+        h_il_out = pnd_out.h_il[..., 0].reshape(spatial_shape)
+        wfx_out = pnd_out.wfx_pnd.reshape(spatial_shape)
         has_ice = a_i_f64 > 0.0
         safe_ai = jnp.where(has_ice, a_i_f64, jnp.ones_like(a_i_f64))
         pond_area_new = jnp.where(

@@ -61,7 +61,8 @@ def _model_and_state():
     return model, state
 
 
-def test_adapter_matches_serial_default_config():
+@pytest.mark.parametrize("jitted", [False, True], ids=["eager", "jit"])
+def test_adapter_matches_serial_default_config(jitted):
     mesh = _mesh()
     model, state = _model_and_state()
 
@@ -70,6 +71,9 @@ def test_adapter_matches_serial_default_config():
         ref = model.step(ref, DT)
 
     tiled_step = make_tiled_cc_step(model, mesh, kt=KT, dt=DT)
+    if jitted:
+        # Match the benchmark's outer JIT as well as retaining eager coverage.
+        tiled_step = jax.jit(tiled_step)
     out = state
     for _ in range(3):
         out = tiled_step(out)

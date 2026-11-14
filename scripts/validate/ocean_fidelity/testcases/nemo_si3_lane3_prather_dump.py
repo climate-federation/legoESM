@@ -11,6 +11,7 @@ Usage: nemo_si3_lane3_prather_dump.py OUT.npz [--plant-multiply-order]
 
 from __future__ import annotations
 
+import math
 import sys
 
 import jax.numpy as jnp
@@ -82,6 +83,7 @@ def main(argv: list[str]) -> None:
     c1, m1, _ = advect_si3_prather_1d(
         contents, moments, u_ice, jnp.zeros_like(v_ice), area, wet, 1200.0,
         dx=6000.0, dy=6000.0, ice_volume_index=0, concentration_index=1,
+        limit_sharpness_scale=math.inf,  # NEMO's hard limiter, not main's smooth default
     )
     out["adv1d.contents"] = np.asarray(c1)
     for k, m in enumerate(m1):
@@ -91,6 +93,7 @@ def main(argv: list[str]) -> None:
             contents, moments, u_ice, v_ice, area, wet, 1200.0,
             dx=6000.0, dy=6000.0, ice_step_index=step,
             ice_volume_index=0, concentration_index=1,
+            limit_sharpness_scale=math.inf,  # NEMO's hard limiter, not main's smooth default
         )
         out[f"adv2d_k{step}.contents"] = np.asarray(c2)
         for k, m in enumerate(m2):

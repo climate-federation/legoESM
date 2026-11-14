@@ -134,7 +134,6 @@ class TestKessler:
         cond_mask = out.dT_dt > 1e-8
         assert jnp.all(out.dq_v_dt[cond_mask] < 0.0)
 
-    @pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
     def test_sign_subsaturated_clear_no_negative_qc(self):
         """Subsaturated clear air (q_c=0): no spurious negative cloud water."""
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=0.6)
@@ -144,7 +143,6 @@ class TestKessler:
         q_c_new = hyd.q_c + dt * out.dq_c_dt
         assert jnp.all(q_c_new >= -1e-12)
 
-    @pytest.mark.xfail(strict=True, reason="Faithful ESCOMP kessler_run sediments over level-centre spacing and floors negatives, so column water is not conserved against rho*dz (oracle residual reproduced to round-off); pending user decision (Kessler port PR, ASK 2)")
     def test_conservation_total_water(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
         out = kessler_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1200.0)
@@ -196,16 +194,27 @@ class TestKessler:
         assert jnp.isfinite(g)
         assert g > 0.0  # more autoconversion -> more rain produced
 
-    @pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
-    def test_idealized_subsaturated_no_condensation(self):
+    # RULE 5 record (x64 SLURM 2026-11-11): max |dT_dt|, |dq_v_dt|, |P| at the
+    # default on the rh=0.5 column (the bounded smooth switch's residual);
+    # zero at the hard limit.
+    DEFAULT_GAP_SUBSAT = (8.638727896e-09, 3.4701365754e-12, 0.0)
+
+    @pytest.mark.parametrize("hard", [True, False], ids=["hard_limit", "default"])
+    def test_idealized_subsaturated_no_condensation(self, hard):
         """Clear subsaturated column with no hydrometeors -> ~zero tendency."""
+        from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
+        cfg = KesslerConfig(saturation_sharpness=1.0e30) if hard else KesslerConfig()
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=0.5)
         hyd = hyd._replace(q_c=jnp.zeros_like(hyd.q_c),
                            q_r=jnp.zeros_like(hyd.q_r))
-        out = kessler_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1200.0)
-        assert jnp.max(jnp.abs(out.dT_dt)) < 1e-12
-        assert jnp.max(jnp.abs(out.dq_v_dt)) < 1e-12
-        assert jnp.max(jnp.abs(out.precipitation)) < 1e-12
+        out = kessler_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1200.0, cfg)
+        got = [float(jnp.max(jnp.abs(x))) for x in
+               (out.dT_dt, out.dq_v_dt, out.precipitation)]
+        if hard:
+            assert max(got) < 1e-12
+        else:
+            np.testing.assert_allclose(got, self.DEFAULT_GAP_SUBSAT, rtol=1e-6,
+                                       atol=1e-12)
 
     def test_jit_matches_eager(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
@@ -226,18 +235,28 @@ class TestKessler:
 # SUNDQVIST
 # ======================================================================
 
+def _sq_fresh(T):
+    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_carry_init
+    return sundqvist_carry_init(*T.shape, T.dtype)
+
+
 class TestSundqvist:
-    def test_sign_condensation_only_above_supersat(self):
-        """Condensation removes only supersaturation (not q_v above RH_crit)."""
-        T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.0)
-        # exactly saturated -> condensation should be ~0 (only removes >q_sat)
-        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10)
-        # at RH=1.0, q_v-q_sat=0 -> condensation 0
-        assert jnp.max(jnp.abs(out.dq_c_dt)) < 1e-6
+    def test_no_condensation_without_other_process_forcing(self):
+        """Zhao-Carr gscond condenses only what the other processes supply
+        since the previous step: a fresh start (no forcing) condenses nothing,
+        even super-saturated."""
+        from legoesm.atmosphere.physics.microphysics.sundqvist import (
+            diagnose_sundqvist_process_rates)
+        T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
+        r = diagnose_sundqvist_process_rates(
+            T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10,
+            prev_state=_sq_fresh(T))
+        # round-off only: on a fresh start (p/ps)*psp differs from p by an ulp
+        assert float(jnp.max(r.condensation)) * 1800.0 < 1e-15 * float(jnp.max(q_v))
 
     def test_conservation_total_water(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
-        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10)
+        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10, prev_state=_sq_fresh(T))
         res = _column_water_residual(out, _layer_mass(p_half), 1.0)
         assert jnp.max(jnp.abs(res)) < 1e-15
 
@@ -252,7 +271,7 @@ class TestSundqvist:
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=0.9)
         hyd = hyd._replace(q_r=jnp.full_like(hyd.q_r, 2.0e-4))
         dt = 1800.0
-        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt, cell_area=1.0e10)
+        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt, cell_area=1.0e10, prev_state=_sq_fresh(T))
         # dq_r_dt = -q_r/dt exactly (drained)
         np.testing.assert_allclose(out.dq_r_dt, -hyd.q_r / dt, rtol=1e-12)
         res = _column_water_residual(out, _layer_mass(p_half), 1.0)
@@ -261,15 +280,18 @@ class TestSundqvist:
     def test_sign_qc_nonneg_under_step(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
         dt = 1800.0
-        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt, cell_area=1.0e10)
+        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt, cell_area=1.0e10, prev_state=_sq_fresh(T))
         q_c_new = hyd.q_c + dt * out.dq_c_dt
         assert jnp.all(q_c_new >= -1e-12)
 
     def test_differentiability_grad_and_params(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
+        # 1% moistening since the previous step: gscond condenses it.
+        prev = {"zc_T_prev": T, "zc_q_v_prev": 0.99 * q_v,
+                "zc_p_s_prev": p_half[:, -1]}
 
         def loss(qv):
-            out = sundqvist_microphysics(T, qv, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10)
+            out = sundqvist_microphysics(T, qv, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10, prev_state=prev)
             return jnp.sum(out.precipitation)
 
         g = jax.grad(loss)(q_v)
@@ -278,17 +300,19 @@ class TestSundqvist:
 
         def loss_rate(rate):
             cfg = SundqvistConfig(auto_rate=rate)
-            out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cfg, cell_area=1.0e10)
+            # dt 60 s: at 1800 s the release is capped by the available cloud
+            # and carries no gradient in the rate.
+            out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 60.0, cfg, cell_area=1.0e10, prev_state=prev)
             return jnp.sum(out.precipitation)
 
         gr = jax.grad(loss_rate)(SundqvistConfig().auto_rate)
-        assert jnp.isfinite(gr)
+        assert jnp.isfinite(gr) and jnp.abs(gr) > 0.0
 
     def test_idealized_dry_column_zero(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=0.3)
         hyd = hyd._replace(q_c=jnp.zeros_like(hyd.q_c),
                            q_r=jnp.zeros_like(hyd.q_r))
-        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10)
+        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10, prev_state=_sq_fresh(T))
         assert jnp.max(jnp.abs(out.dq_v_dt)) < 1e-12
         assert jnp.max(jnp.abs(out.precipitation)) < 1e-12
 

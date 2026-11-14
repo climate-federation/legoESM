@@ -19,6 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ice import NEMO_SI3_CONSTANTS_CONFIG
+from legoesm.ice.config import SI3_HARD_SWITCHES
 from legoesm.ice.dynamics import SI3ORCA2FoldProgram
 from legoesm.ice.si3_surface import (
     SI3SurfaceConfig,
@@ -1021,12 +1022,13 @@ def admit_evidence_directory(
         if left != right:
             raise _refuse(f"reference/record restart bytes differ: {ref_path.name}")
         restart_count += 1
+    # NEMO's hard switches on every O7 config, not main's smooth default.
     config = SI3SurfaceConfig.from_resolved_namelists(
         rec / "output.namelist.dyn", rec / "output.namelist.ice"
-    )
+    )._replace(switches=SI3_HARD_SWITCHES)
     reference_config = SI3SurfaceConfig.from_resolved_namelists(
         ref / "output.namelist.dyn", ref / "output.namelist.ice"
-    )
+    )._replace(switches=SI3_HARD_SWITCHES)
     if reference_config != config:
         raise _refuse("reference and record resolved O7 configurations differ")
     deck = manifest / "production_deck"
@@ -1035,7 +1037,7 @@ def admit_evidence_directory(
         deck / "namelist_cfg",
         deck / "namelist_ice_ref",
         deck / "namelist_ice_cfg",
-    )
+    )._replace(switches=SI3_HARD_SWITCHES)
     if config != production:
         raise _refuse("resolved record config is not the unmodified production ORCA2_SAS_ICE deck")
     if not (config.rn_Cd_ia == config.rn_Ce_ia == config.rn_Ch_ia == 1.4e-3):
@@ -1127,7 +1129,7 @@ def run_control_self_test(plant: str, *, nemo_root: Path = DEFAULT_NEMO_ROOT) ->
         nemo_root / "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg",
         nemo_root / "cfgs/SHARED/namelist_ice_ref",
         nemo_root / "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg",
-    )
+    )._replace(switches=SI3_HARD_SWITCHES)  # NEMO's hard switches, not main's smooth default
     mask = np.ones((4, 4), dtype=np.float64)
     if plant in {"swapped-field", "composed-feed", "sum-seed"}:
         kmm = derive_sas_time_level(nemo_root)

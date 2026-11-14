@@ -125,3 +125,16 @@ V40/V41 delta re-review: codex CLEAN. GLM: (1) lru_cache key has no mtime, so a 
 first load is not re-hashed -- not taken (pre-existing cache design; the pinned file is read-only, 0444); (2) "no
 negative hash test" -- refuted: both hash-gate tests FAIL with the gate removed (job 11034524, DID NOT RAISE x2),
 and a failing first load raises before anything is cached.
+
+## CAM6 physics sequencing (feat/cam6-physics-order)
+
+| id | choice | me | codex | GLM | result |
+|---|---|---|---|---|---|
+| V57 | scope (a) MPAS/hydrostatic AND spectral lanes, N>1 macmic path only; N=1 parallel split unchanged / (b) MPAS only | a | a | a | a |
+| V58 | (a) no switch, CAM order replaces the old order (RULE 3) / (b) add an order switch | a | a | a | a |
+| V59 | held-radiation steps: (a) cached heating applied to the post-macmic state before GWD (CAM radiation_tend) / (b) GWD without it | a | a | a | a |
+| V60 | other sequencing departures (per-process qneg3, ocean flux per sub-step, held heating K/s not Q*dp, Beljaars/dadadj, radiation phase): (a) out of scope, reported / (b) include | a | a | a | a |
+| V61 | oracle: (a) commit Fortran glue harness + fixture + test with the same stubs at 1e-10 / (b) scratch patch only | a | a | a | a |
+| V62 | measurement: (a) production MPAS CAM6 deck, 2562 cells, 2 days, main vs branch, area-weighted rsut/rlut/precip / (b) offline one window only | a | a | a | a |
+| V63 | A/B land IC (deck's land_ic file absent on Ginsburg): (a) cold-start land in both arms / (b) stage a file | a | a | a | a |
+| V64 | IFS CLOUDSC lane after merging main: (a) keep main's order (once group on start-of-step state; CAM order only off CLOUDSC) / (b) CAM post-loop order too | a | a | a | a |

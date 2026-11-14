@@ -1291,6 +1291,12 @@ def prognostic_carry_seeds(
     # (issue #405/#413: "expected (ncol, nlev)").  ncol = product of the
     # horizontal dims (n_lat*n_lon for lat-lon, 6*n*n for cubed-sphere).
     _traits = turbulence_scheme_traits(turbulence)
+    if _traits.energy_field == "sfclay":
+        raise NotImplementedError(
+            f"turbulence={turbulence!r} carries the WRF surface-layer state "
+            "(PhysicsState.sfclay), which SegmentCarry does not thread; the "
+            "ERA5 SegmentCarry initialisers refuse it rather than drop it."
+        )
     if _traits.carries_energy:
         _ncol = int(np.prod(shape_3d[:-1]))
         seeds[_traits.energy_field] = jnp.zeros((_ncol, shape_3d[-1]))

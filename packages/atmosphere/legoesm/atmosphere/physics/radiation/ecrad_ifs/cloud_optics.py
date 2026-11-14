@@ -97,7 +97,9 @@ _SOCRATES_MIN_RE = float(np.float32(1.2e-6))
 _SOCRATES_MAX_RE = float(np.float32(50.0e-6))
 
 # --- Fu-IFS limits and conversions (radiation_ice_optics_fu.F90:29-30,71-73) ---
-_FU_MAX_G = 1.0 - 10.0 * float(np.finfo(np.float64).eps)   # MaxAsymmetryFactor
+# MaxAsymmetryFactor = 1 - 10*epsilon(1.0_jprb), epsilon of the working precision (vote F1).
+def _fu_max_g(dtype):
+    return 1.0 - 10.0 * float(np.finfo(np.dtype(dtype)).eps)
 _FU_MAX_RE = 100.0e-6                       # MaxEffectiveRadius, m
 _FU_RE_TO_DE_UM = 1.0e6 / 0.64952           # re (m) -> Fu effective diameter (um)
 _KG_TO_G = 1000.0                           # iwp kg m-2 -> g m-2
@@ -194,7 +196,7 @@ def _fu_de_um(re, sharpness):
 
 
 def _g_cap(g, sharpness):
-    return _smin(g, _FU_MAX_G, _G_CAP_SHARPNESS_FACTOR * sharpness)
+    return _smin(g, _fu_max_g(jnp.result_type(g)), _G_CAP_SHARPNESS_FACTOR * sharpness)
 
 
 def _ice_fu_sw(coeff, ice_wp, re, sharpness):

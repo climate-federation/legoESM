@@ -97,7 +97,8 @@ def energy_consistent_moisture_floor(q_v_raw, T, weight):
 #: imports nothing above it" contract.
 BORROW_ELIGIBLE_TRACERS = frozenset(
     {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g",
-     "N_c", "N_r", "N_i", "N_s", "N_g"})
+     "N_c", "N_r", "N_i", "N_s", "N_g",
+     "o3_ifs"})
 
 
 def is_borrow_eligible_tracer(name: str) -> bool:

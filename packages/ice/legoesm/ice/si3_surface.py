@@ -14,14 +14,17 @@ saturation, ``theta_exner``, ``blk_ice_1`` and turbulent statements live in
 import ice) and are called from here.
 
 Exact-input contract: every physical array is required (``None`` raises) and
-every deck scalar comes from :class:`SI3SurfaceConfig`, which has no defaults
-and is built only from NEMO namelists.
+every deck scalar comes from :class:`SI3SurfaceConfig`, built only from NEMO
+namelists.  Its one non-deck field, ``switches``, defaults to the smooth form.
 
-Non-differentiable statements (``IF``/``MIN``/``MAX`` switches, square roots
-at zero, ``pow`` at zero) keep NEMO's forward bits; only their gradients are
-guarded.  ``h_s`` zero tests read the IEEE bit pattern (NEMO's scalar
-comparison keeps a positive subnormal nonzero); XLA CPU ``jit`` still flushes
-that operand, the D5 platform floor (DECISION 158).
+``IF``/``MIN``/``MAX`` switches on model state are C1 ramps of width
+``switches.relative_width x scale`` (RULE 5).  At ``SI3_HARD_SWITCHES``
+(``relative_width = 0.0``) the statements run as NEMO's, with its forward bits;
+exact-NEMO gates select that explicitly.  Square roots and ``pow`` at zero keep
+NEMO's forward bits in both forms; only their gradients are guarded.  ``h_s``
+zero tests read the IEEE bit pattern (NEMO's scalar comparison keeps a positive
+subnormal nonzero); XLA CPU ``jit`` still flushes that operand, the D5 platform
+floor (DECISION 158).
 """
 
 from __future__ import annotations
@@ -40,7 +43,9 @@ from legoesm.core.bulk_flux import (
     sqrt_zero_subgradient,
 )
 from legoesm.core.nemo_namelist import overlay, parse_namelist
+from legoesm.core.smooth import max_c1, min_c1, smoothstep_cubic, straight_through
 from legoesm.core.source_rounding import nemo_source_round as sr
+from legoesm.ice.config import SI3SwitchConfig
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 from legoesm.ice.dynamics import SI3ORCA2FoldProgram
 from legoesm.ice.si3_orca2_state import (
@@ -102,7 +107,22 @@ _R1_RHO0 = 1.0 / _RHO0                        # eosbn2.f90:2378
 
 
 class SI3SurfaceConfig(NamedTuple):
-    """Deck scalars for the SI3 surface statements; no defaults."""
+    """Deck scalars for the SI3 surface statements, plus the ramp widths.
+
+    The deck scalars have no defaults.  ``switches`` is the only field that is
+    not a namelist value.
+
+    KNOWN DIFFERENCE (RULE 5): NEMO's switches are hard; the smooth default
+    differs from it by at most 2.7e-5 in albedo, 0.016 W/m2 in qsr_ice and
+    1.2e-3 W/m2 in qsb_ice_bot over the 350 ORCA1 record cells, and not at all
+    in qlead, fhld or the mass terms; 96 seeded pond and lead-cut columns show
+    no gap above 6e-17.  Inside a ramp the gap reaches the step itself (0.054
+    albedo mid-way through the melt ramp).  Per case in
+    ``si3_lane_smooth_gaps.npz``.  The snow-free test is hard in the forward
+    pass in every mode; ``snow_ramp_width_m`` only sets its surrogate gradient
+    (see ``si3_snow_free``).
+    ``switches=SI3_HARD_SWITCHES`` recovers NEMO.
+    """
 
     rn_Cd_ia: float
     rn_Ce_ia: float
@@ -136,6 +156,7 @@ class SI3SurfaceConfig(NamedTuple):
     ln_leadhfx: bool
     ln_icedO: bool
     ln_icedH: bool
+    switches: SI3SwitchConfig = SI3SwitchConfig()
 
     @classmethod
     def from_resolved_namelists(cls, dyn: Path, ice: Path) -> "SI3SurfaceConfig":
@@ -250,6 +271,59 @@ def _fmax(a, b):
     return jnp.where(b > a, b, a)
 
 
+def si3_sharp(w):
+    """Sharpness ``1/w`` for the core.smooth helpers; ``inf`` (hard) at ``w = 0``."""
+    return jnp.inf if w == 0.0 else 1.0 / w
+
+
+def si3_ge(x, c, w):
+    """``x >= c`` as 0/1; smooth: C1 ramp over ``[c - w, c]`` (exact 1 at and above ``c``)."""
+    if w == 0.0:
+        return (x >= c).astype(jnp.result_type(x, float))
+    return smoothstep_cubic((x - c + w) / w)
+
+
+def si3_gt(x, c, w):
+    """``x > c`` as 0/1; smooth: C1 ramp over ``[c, c + w]`` (exact 0 at and below ``c``)."""
+    if w == 0.0:
+        return (x > c).astype(jnp.result_type(x, float))
+    return smoothstep_cubic((x - c) / w)
+
+
+def si3_mix(weight, a, b, w):
+    """``where(weight, a, b)`` for the hard 0/1 weight (bitwise), linear blend when smooth."""
+    if w == 0.0:
+        return jnp.where(weight == 1.0, a, b)
+    return b + (a - b) * weight
+
+
+def si3_snow_free(h_snow, w, preserve_subnormal):
+    """1 where ``h_snow == 0`` (NEMO's IEEE test) -- the forward value is hard in every mode.
+
+    ``w = snow_ramp_width_m`` when the ports are smooth, else 0.  ``w > 0``:
+    straight-through (user ruling 3a), forward NEMO's hard test bit for bit,
+    gradient of the surrogate ``1 - C1(h_snow / w)``.  A forward ramp is not
+    used: the ORCA1 record holds trace snow down to 1.2e-30 m in 355 ice
+    cells, so any ramp width >= 1e-15 m changes their through-ice sunlight by
+    up to 218 W/m2.
+    """
+    if preserve_subnormal:
+        # XLA CPU flushes the smallest positive fp64 snow thickness to zero in
+        # floating comparisons.  NEMO's scalar IEEE comparison does not.  A
+        # left shift discards the sign bit and preserves every nonzero payload,
+        # including subnormals; both +0 and -0 remain zero.
+        snow_bits = jax.lax.bitcast_convert_type(h_snow, jnp.uint64)
+        zero = (snow_bits << jnp.uint64(1)) == jnp.uint64(0)
+    else:  # private one-variable ablation; never exposed in SeaIceConfig
+        zero = h_snow == 0.0
+    hard = zero.astype(jnp.result_type(h_snow, float))
+    if w == 0.0:
+        return hard
+    if 0.0 < w < jnp.finfo(jnp.float64).tiny:   # vote: subnormal widths make h / w NaN the tangent
+        raise ValueError(f"snow_ramp_width_m={w!r} is subnormal; use 0.0 or a normal positive width")
+    return straight_through(hard, 1.0 - smoothstep_cubic(h_snow / w))
+
+
 def _sum0(terms):
     """Fortran ``SUM(x(:))`` over the category axis: ``+0`` then each term in order."""
     # Materialized seed: XLA otherwise folds 0 + x to x, which keeps a -0 term's sign.
@@ -317,28 +391,58 @@ def si3_ice_alb(*, t_su, h_i, h_s, a_ip_eff, h_ip, h_il, cloud_fra, smask0, conf
     za_s_fra = si3_var_snwfra_3d(                                                   # :191
         snw3, SI3ORCA2StateConfig.for_orca2_sas_ice(nn_snwfra=config.nn_snwfra, nn_hls=0)
     ).reshape(ph_snw.shape)
-    if config.ld_pnd_alb:
+    sw = config.switches
+    r = sw.relative_width
+    if r > 0.0:
+        fraction_sharp = si3_sharp(r * sw.cut_fraction_scale)
+        snow_free = si3_snow_free(ph_snw, sw.snow_ramp_width_m, True)
+        if config.nn_snwfra == 0:                                                   # icevar.f90 h_s > 0
+            za_s_fra = sr(1.0 - snow_free)
+        melting = si3_ge(pt_su, _RT0, r * sw.temperature_scale_K)
+        if config.ld_pnd_alb:
+            zafrac_pnd = min_c1(pafrac_pnd, sr(1.0 - za_s_fra), fraction_sharp)
+            zalb_ice = jnp.full_like(ph_ice, config.rn_alb_idry)
+        else:
+            zafrac_pnd = jnp.zeros_like(ph_ice)
+            zalb_ice = si3_mix(snow_free * melting, config.rn_alb_imlt, config.rn_alb_idry, r)
+        zafrac_ice = max_c1(sr(sr(1.0 - zafrac_pnd) - za_s_fra), 0.0, fraction_sharp)
+        is_thin = si3_ge(-ph_ice, -_ALB_THIN_BREAK_M, r * _ALB_THIN_BREAK_M)
+        is_mid = si3_ge(-ph_ice, -config.rn_alb_hpiv, r * config.rn_alb_hpiv)
+        # The mid piece has weight wherever h > thin break, above the pivot too.
+        log_h = sr(transcendentals.log(jnp.where(ph_ice > _ALB_THIN_BREAK_M, ph_ice, 1.0)))
+        alb_mid = sr(zalb_ice + sr(sr(sr(_THIN_ICE_ALBEDO - zalb_ice) * z1_c1) * sr(zhpiv - log_h)))
+        alb_thin = sr(_RALB_OCE + sr(sr((_THIN_ICE_ALBEDO - _RALB_OCE) * z1_c2) * ph_ice))
+        zalb_ice = si3_mix(is_thin, alb_thin, si3_mix(is_mid, alb_mid, zalb_ice, r), r)
+    elif config.ld_pnd_alb:
         zafrac_pnd = _fmin(pafrac_pnd, sr(1.0 - za_s_fra))                          # :201
         zalb_ice = jnp.full_like(ph_ice, config.rn_alb_idry)                        # :212
     else:
         zafrac_pnd = jnp.zeros_like(ph_ice)                                         # :203
         melt = _ieee_is_zero(ph_snw) & (pt_su >= _RT0)                              # :214
         zalb_ice = jnp.where(melt, config.rn_alb_imlt, config.rn_alb_idry)          # :214-215
-    zafrac_ice = _fmax(0.0, sr(sr(1.0 - zafrac_pnd) - za_s_fra))                    # :205
-    mid = (_ALB_THIN_BREAK_M < ph_ice) & (ph_ice <= config.rn_alb_hpiv)            # :218
-    log_h = sr(transcendentals.log(jnp.where(mid, ph_ice, 1.0)))  # gradient-only safe argument
-    alb_mid = sr(zalb_ice + sr(sr(sr(_THIN_ICE_ALBEDO - zalb_ice) * z1_c1) * sr(zhpiv - log_h)))  # :219
-    alb_thin = sr(_RALB_OCE + sr(sr((_THIN_ICE_ALBEDO - _RALB_OCE) * z1_c2) * ph_ice))           # :221
-    zalb_ice = jnp.where(mid, alb_mid, jnp.where(ph_ice <= _ALB_THIN_BREAK_M, alb_thin, zalb_ice))
+    if r == 0.0:
+        zafrac_ice = _fmax(0.0, sr(sr(1.0 - zafrac_pnd) - za_s_fra))                # :205
+        mid = (_ALB_THIN_BREAK_M < ph_ice) & (ph_ice <= config.rn_alb_hpiv)        # :218
+        log_h = sr(transcendentals.log(jnp.where(mid, ph_ice, 1.0)))  # gradient-only safe argument
+        alb_mid = sr(zalb_ice + sr(sr(sr(_THIN_ICE_ALBEDO - zalb_ice) * z1_c1) * sr(zhpiv - log_h)))  # :219
+        alb_thin = sr(_RALB_OCE + sr(sr((_THIN_ICE_ALBEDO - _RALB_OCE) * z1_c2) * ph_ice))       # :221
+        zalb_ice = jnp.where(mid, alb_mid, jnp.where(ph_ice <= _ALB_THIN_BREAK_M, alb_thin, zalb_ice))
     snw_dry = sr(config.rn_alb_sdry - sr(sr(config.rn_alb_sdry - zalb_ice)
                  * sr(transcendentals.exp(sr(-sr(ph_snw * z1_c3))))))                          # :226
     snw_melt = sr(config.rn_alb_smlt - sr(sr(config.rn_alb_smlt - zalb_ice)
                   * sr(transcendentals.exp(sr(-sr(ph_snw * z1_c4))))))                         # :228
-    zalb_snw = jnp.where(pt_su < _RT0, snw_dry, snw_melt)                                      # :225
+    if r > 0.0:
+        zalb_snw = si3_mix(melting, snw_melt, snw_dry, r)
+    else:
+        zalb_snw = jnp.where(pt_su < _RT0, snw_dry, snw_melt)                                  # :225
     pnd_decay = sr(transcendentals.exp(sr(-sr(ph_pnd * z1_href_pnd))))
     pnd_dark = sr(config.rn_alb_dpnd - sr(sr(config.rn_alb_dpnd - zalb_ice) * pnd_decay))       # :232
     pnd_lid = sr(config.rn_alb_lpnd - sr(sr(config.rn_alb_lpnd - zalb_ice) * pnd_decay))        # :234
-    zalb_pnd = jnp.where(ph_lid <= _POND_LID_ALBEDO_M, pnd_dark, pnd_lid)                      # :231
+    if r > 0.0:
+        thin_lid = si3_ge(-ph_lid, -_POND_LID_ALBEDO_M, r * _POND_LID_ALBEDO_M)
+        zalb_pnd = si3_mix(thin_lid, pnd_dark, pnd_lid, r)
+    else:
+        zalb_pnd = jnp.where(ph_lid <= _POND_LID_ALBEDO_M, pnd_dark, pnd_lid)                  # :231
     zalb_os = sr(sr(sr(sr(za_s_fra * zalb_snw) + sr(zafrac_pnd * zalb_pnd))
                     + sr(zafrac_ice * zalb_ice)) * mask)                                       # :238
     poly = sr(-sr(sr(_ALB_CLOUD_QUAD * zalb_os) * zalb_os))
@@ -403,17 +507,22 @@ def si3_blk_ice_2(
     atb, aib = _req("at_i_b", at_i_b), _req("a_i_b", a_i_b)
     qns_o, qsr_o, cloud = _req("qns_oce", qns_oce), _req("qsr_oce", qsr_oce), _req("cloud_fra", cloud_fra)
     rcpi, rlfus, rhos = _ICE.c_ice, _ICE.latent_fusion, _ICE.rho_snow
+    sw = config.switches
+    r = sw.relative_width
+    t_width = r * sw.temperature_scale_K
 
     zcoef_dqlw = (4.0 * _EMISS_I) * _STEFAN                                         # :1210
     zztmp = sr(1.0 / sr(1.0 - _ALBO))                                               # :1211
     zcptrain = sr(sr(sr(ptair - _RT0) * _RCP) * mask)                               # :1214
-    zcptsnw = sr(sr(sr(_fmin(ptair, _RT0) - _RT0) * rcpi) * mask)                   # :1215
+    t_cap = _fmin(ptair, _RT0) if r == 0.0 else min_c1(ptair, _RT0, si3_sharp(t_width))
+    zcptsnw = sr(sr(sr(t_cap - _RT0) * rcpi) * mask)                                # :1215
     zcptn = sr(sr(sst * _RCP) * mask)                                               # :1216
 
     def x(a):  # 2D field read inside the category loop
         return a[..., None]
 
-    turb = nemo_si3_ice_turbulent(zst, x(pslp), x(rho), x(wndm), x(ch), x(ce), x(th_zu), x(q_zu))  # :1224-1256
+    turb = nemo_si3_ice_turbulent(zst, x(pslp), x(rho), x(wndm), x(ch), x(ce), x(th_zu), x(q_zu),
+                                  goff_floor_width_K=t_width)                       # :1224-1256
     qsr_ice = sr(sr(zztmp * sr(1.0 - palb)) * x(qsr2))                              # :1231
     zst3 = sr(sr(zst * zst) * zst)                                                  # :1234
     z_qlw = sr(sr(_EMISS_I * sr(x(pdqlw) - sr(sr(_STEFAN * zst) * zst3))) * x(mask))  # :1235
@@ -445,8 +554,14 @@ def si3_blk_ice_2(
 
     ztri = x(sr(sr(_SW_TRANS_CLEAR * sr(1.0 - cloud)) + sr(_SW_TRANS_CLOUDY * cloud)))  # :1320
     thin = sr(ztri + sr(sr(1.0 - ztri) * sr(1.0 - sr(phi * _SW_THIN_ICE_INV_M))))   # :1326
-    ztmp = jnp.where(phi < _SW_THIN_ICE_M, thin, ztri)                              # :1325
-    qtr_ice_top = jnp.where(_ieee_le_zero(phs), sr(qsr_ice * ztmp), 0.0)            # :1323-1329
+    if r > 0.0:
+        is_thin = 1.0 - si3_ge(phi, _SW_THIN_ICE_M, r * _SW_THIN_ICE_M)
+        ztmp = si3_mix(is_thin, thin, ztri, r)
+        snow_free = si3_snow_free(phs, sw.snow_ramp_width_m, True)
+        qtr_ice_top = si3_mix(snow_free, sr(qsr_ice * ztmp), 0.0, r)
+    else:
+        ztmp = jnp.where(phi < _SW_THIN_ICE_M, thin, ztri)                          # :1325
+        qtr_ice_top = jnp.where(_ieee_le_zero(phs), sr(qsr_ice * ztmp), 0.0)        # :1323-1329
     return SI3BlkIce2(
         qsr_ice=qsr_ice, qns_ice=qns_ice, dqns_ice=dqns_ice, qla_ice=qla_ice, dqla_ice=dqla_ice,
         evap_ice=evap_ice, devap_ice=devap_ice, tprecip=tprecip, sprecip=sprecip,
@@ -489,11 +604,14 @@ def si3_ice_flx_other(
         vv = sr(sr(zv_io * zv_io) + sr(zv_iom1 * zv_iom1))
         zfric = sr(sr(zdrag * sr(0.5 * sr(uu + vv))) * mask)                        # :396-397
         us, vs = sr(uiw + ui), sr(vis + vi)
-        zvel = sr(0.5 * sqrt_zero_subgradient(sr(sr(us * us) + sr(vs * vs))))       # :398-399
+        speed_sq = sr(sr(us * us) + sr(vs * vs))
+        zvel = sr(0.5 * sqrt_zero_subgradient(speed_sq))                            # :398-399
+        speed_sq = sr(0.25 * speed_sq)
     else:                                                                           # :401-406
         tu, tv = _req("utau", utau), _req("vtau", vtau)
         zfric = sr(sr(_R1_RHO0 * sqrt_zero_subgradient(sr(sr(tu * tu) + sr(tv * tv)))) * mask)
         zvel = jnp.zeros_like(mask)
+        speed_sq = jnp.zeros_like(mask)
 
     rdt = config.rDt_ice
     r1_dt = 1.0 / rdt                                                               # icestp.f90:419
@@ -502,6 +620,34 @@ def si3_ice_flx_other(
     zqld = sr(sr(mask * rdt) * sr(sr(sr(sr(lead * qsr_o) * frq) + sr(lead * qns_o)) + qemp_o))  # :417-419
     sst_k = sr(sst + _RT0)
     zqfr = sr(sr(sr(sr(_RHO0 * _RCP) * e3t) * sr(t_bo2 - sst_k)) * mask)            # :423
+    sw = config.switches
+    r = sw.relative_width
+    if r > 0.0:
+        flux_sharp = si3_sharp(r * sw.flux_scale_W_m2)
+        energy_sharp = si3_sharp(r * sw.flux_scale_W_m2 * rdt)
+        ice_width = r * sw.ice_switch_scale
+        zswitch = si3_ge(at, _EPSI10, ice_width) * mask
+        at_floor = max_c1(at, _EPSI10, si3_sharp(ice_width))
+        zqfr_neg = min_c1(zqfr, 0.0, energy_sharp)
+        zqfr_pos = max_c1(zqfr, 0.0, energy_sharp)
+        zfric_u = sqrt_zero_subgradient(zfric)      # _ZFRIC_UMIN is 0, so :429's floor cannot bind
+        qsb = sr(sr(sr(sr(sr(zswitch * _RHO0) * _RCP) * _ZCH) * zfric_u) * sr(sst_k - t_bo2))
+        qsb = zswitch * min_c1(qsb, -sr(sr(zqfr_neg * r1_dt) / at_floor), flux_sharp)
+        supercool = si3_gt(sr(t_bo2 - sst_k), 0.0, r * sw.temperature_scale_K)
+        supercool = supercool * si3_ge(vt, _SUPERCOOL_VOLUME_M, r * _SUPERCOOL_VOLUME_M)
+        zqfr = si3_mix(supercool, 0.0, zqfr, r)
+        zqfr_pos = si3_mix(supercool, 0.0, zqfr_pos, r)
+        qsb = si3_mix(supercool, 0.0, qsb, r)
+        # NEMO's IF (zqld - zqfr < 0) without a branch: these two forms agree with it in every case.
+        fhld = zswitch * max_c1(sr(sr(zqld - zqfr_pos) * r1_dt) / at_floor, 0.0, flux_sharp)
+        qlead = min_c1(sr(zqld - zqfr), 0.0, energy_sharp)
+        stop_sq = _LANDFAST_SPEED * _LANDFAST_SPEED     # squared: finite gradient for ice at rest
+        slow = si3_ge(-speed_sq, -stop_sq, r * stop_sq)
+        packed = si3_ge(at, sr(amax - _AMAX_MARGIN), r * sw.cut_fraction_scale)
+        thick = si3_ge(vt, _THICK_ICE_M, r * _THICK_ICE_M)
+        full = si3_ge(at, 1.0 - _EPSI10, r * sw.full_cover_scale)
+        cut = 1.0 - (1.0 - slow * packed * thick) * (1.0 - full * thick)
+        return SI3FlxOther(qsb_ice_bot=qsb, fhld=fhld, qlead=si3_mix(cut, 0.0, qlead, r))
     zqfr_neg = _fmin(zqfr, 0.0)                                                     # :424
     zqfr_pos = _fmax(zqfr, 0.0)                                                     # :425
     zfric_u = _fmax(sqrt_zero_subgradient(zfric), _ZFRIC_UMIN)                      # :429

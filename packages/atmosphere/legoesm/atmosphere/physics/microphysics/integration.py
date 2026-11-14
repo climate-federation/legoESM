@@ -54,6 +54,7 @@ from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
+from legoesm.atmosphere.physics.microphysics._warm_rain import mg2_absent_gradient_gate
 from legoesm.atmosphere.physics.clouds.cloud_fraction import cam6_ice_stratus_fraction
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
@@ -332,14 +333,29 @@ def require_relvar_for_kk2000_cam6(microphysics_config, relvar_wired: bool):
 # Hydrostatic PE
 # ===========================================================================
 
-def sundqvist_lane_kwargs(scheme_name, grid, ncol, carries_q_i):
+_SUNDQVIST_CARRY = ("zc_T_prev", "zc_q_v_prev", "zc_p_s_prev")
+
+
+def sundqvist_lane_kwargs(scheme_name, grid, ncol, carries_q_i, phys_state=None):
     """Sundqvist's lane inputs: the grid-cell area [m^2] per column (None where
-    the grid has none; Sundqvist then raises) and whether the lane carries q_i."""
+    the grid has none; Sundqvist then raises), whether the lane carries q_i, and
+    the gscond previous-step carry from ``phys_state`` (None on a lane that
+    threads no PhysicsState; Sundqvist then raises)."""
     if scheme_name != "sundqvist":
         return {}
     area = getattr(grid, "grid_area", None)
+    prev = None
+    if phys_state is not None:
+        prev = {k: jnp.asarray(getattr(phys_state, k)).reshape(
+            (ncol,) if k == "zc_p_s_prev" else (ncol, -1)) for k in _SUNDQVIST_CARRY}
     return dict(cell_area=None if area is None else jnp.asarray(area).reshape(ncol),
-                carries_q_i=carries_q_i)
+                carries_q_i=carries_q_i, prev_state=prev)
+
+
+def sundqvist_carry_update(micro_out, phys_state):
+    """The scheme's carry reshaped to the PhysicsState field shapes."""
+    return {k: micro_out.carry[k].reshape(getattr(phys_state, k).shape)
+            for k in _SUNDQVIST_CARRY}
 
 
 def require_thompson_tracers(scheme_name, carried, scheme_config=None):
@@ -475,6 +491,7 @@ def _make_hydrostatic_microphysics(
     Signature: (state, grid, sigma_coord) -> HydrostaticTendencies
     """
     scheme_name, micro_fn, scheme_config = _get_microphysics_fn(microphysics_config)
+    _sundqvist = scheme_name == "sundqvist"
     is_ml = scheme_name == "ml_emulator"
     _ml_model_cache = [None]
 
@@ -605,21 +622,38 @@ def _make_hydrostatic_microphysics(
                 "snow number tracer N_s in the state; it is absent.")
         # Extract actual hydrometeor state from tracers (fall back to zero
         # for any species not present in the tracer registry).
+        _q = {k: _get_tracer(k) for k in ("q_c", "q_r", "q_i", "q_s", "q_g")}
+        _n = {k: _get_tracer(k) for k in ("N_c", "N_r", "N_i")}
+        _n["N_s"] = (_get_tracer("N_s") if state.tracers is not None
+                     and "N_s" in state.tracers else None)
+        # stored per MASS, used per VOLUME — see _PER_MASS_NUMBER_SPECIES
+        _nv = {k: number_per_mass_to_per_volume(_n[k], rho) for k in ("N_c", "N_r")}
+        if scheme_name == "morrison":
+            # Gradient-only gate (forward bitwise): no sensitivity to a
+            # hydrometeor below MG2's absent threshold, nor to its number
+            # (see mg2_absent_gradient_gate).  Numbers are keyed on their own
+            # mass (N_c->q_c, N_r->q_r, N_i->q_i, N_s->q_s); the per-volume
+            # ones are gated AFTER the density conversion so the absent
+            # number cannot reach T, p or q_v through rho either.
+            _absent = {k: _q["q_" + k[2]] for k in ("N_c", "N_r", "N_i", "N_s")}
+            _n = {k: (None if v is None else
+                      mg2_absent_gradient_gate(v, _absent[k]))
+                  for k, v in _n.items()}
+            _nv = {k: mg2_absent_gradient_gate(v, _absent[k]) for k, v in _nv.items()}
+            _q = {k: mg2_absent_gradient_gate(v, v) for k, v in _q.items()}
         hydrometeors = HydrometeorState(
-            q_c=_get_tracer("q_c"),
-            q_r=_get_tracer("q_r"),
-            q_i=_get_tracer("q_i"),
-            q_s=_get_tracer("q_s"),
-            q_g=_get_tracer("q_g"),
-            # stored per MASS, used per VOLUME — see _PER_MASS_NUMBER_SPECIES
-            N_c=number_per_mass_to_per_volume(_get_tracer("N_c"), rho),
-            N_r=number_per_mass_to_per_volume(_get_tracer("N_r"), rho),
-            N_i=_get_tracer("N_i"),
+            q_c=_q["q_c"],
+            q_r=_q["q_r"],
+            q_i=_q["q_i"],
+            q_s=_q["q_s"],
+            q_g=_q["q_g"],
+            N_c=_nv["N_c"],
+            N_r=_nv["N_r"],
+            N_i=_n["N_i"],
             # Prognostic snow number [1/kg] when the state carries it (the
             # CAM6 MG2 mode's two-moment snow, required there, see above);
             # absent outside that mode => None => single-moment snow.
-            N_s=(_get_tracer("N_s") if state.tracers is not None
-                 and "N_s" in state.tracers else None),
+            N_s=_n["N_s"],
         )
 
         # Aerosol-CCN specified-Nc fill.  Override the (dead-zeros, never
@@ -699,7 +733,7 @@ def _make_hydrostatic_microphysics(
                 # decision 2026-10-24, 2), on this sub-step's post-CLUBB state.
                 _ast = _kw["cloud_fraction"]
                 _npccn = cam6_activation_npccn(
-                    T_col, q_v_col, p_full_col, p_half_col, _get_tracer("N_c"),
+                    T_col, q_v_col, p_full_col, p_half_col, _n["N_c"],
                     hydrometeors.q_c, hydrometeors.q_i, _ast, phys_state, forcing,
                     cam6_activation, dt)
                 _kw["npccn"] = number_per_mass_to_per_volume(_npccn, rho)
@@ -709,7 +743,8 @@ def _make_hydrostatic_microphysics(
                     _below, _ast, phys_state.cloud_fraction_old.reshape(ncol, nlev))
             _kw.update(sundqvist_lane_kwargs(
                 scheme_name, grid, ncol,
-                state.tracers is not None and "q_i" in state.tracers))
+                state.tracers is not None and "q_i" in state.tracers,
+                phys_state))
             _kw.update(thompson_lane_kwargs(
                 scheme_name, lambda: _hydrostatic_w_for_thompson(
                     state, grid, sigma_coord, phys_state, T_col, p_full_col,
@@ -808,6 +843,8 @@ def _make_hydrostatic_microphysics(
         if _prog_nc:
             return tend, {"cloud_fraction_old": _cldo_new.reshape(
                 phys_state.cloud_fraction_old.shape)}
+        if _sundqvist:
+            return tend, sundqvist_carry_update(micro_out, phys_state)
         return tend
 
     def reset_state():
@@ -828,6 +865,9 @@ def _make_hydrostatic_microphysics(
         # Writes the CLDO carry: the accumulator calls it as a carry module
         # (accepts_ps, see make_hydrostatic combined) with the forcing.
         physics_fn._wants_forcing = True
+        physics_fn._writes_phys_state = True
+    elif _sundqvist:
+        # Writes the gscond previous-step carry (zc_*).
         physics_fn._writes_phys_state = True
     elif _incloud or relvar_from_clubb or scheme_name == "thompson":
         # thompson: the SCM's prescribed large-scale w (PhysicsState.dyn_w_ls)
@@ -1491,6 +1531,7 @@ def _make_spectral_pe_microphysics(
     tendencies to its own advective tendencies during the SSP-RK stages.
     """
     scheme_name, micro_fn, scheme_config = _get_microphysics_fn(microphysics_config)
+    _sundqvist = scheme_name == "sundqvist"
     is_ml = scheme_name == "ml_emulator"
     _ml_model_cache = [None]
     _incloud = _check_incloud_cloud_config(scheme_config, cloud_config,
@@ -1634,7 +1675,8 @@ def _make_spectral_pe_microphysics(
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
                 **sundqvist_lane_kwargs(
                     scheme_name, grid, ncol,
-                    state.tracers is not None and "q_i" in state.tracers),
+                    state.tracers is not None and "q_i" in state.tracers,
+                    phys_state),
                 **thompson_lane_kwargs(scheme_name, lambda: _spectral_w(
                     fields, p_s, sigma_coord, T_col, p_full_col, q_v_col,
                     ncol, nlev)),
@@ -1688,16 +1730,19 @@ def _make_spectral_pe_microphysics(
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             tracers=tracers_tend,
         )
-        if not return_sfc_precip:
-            return tend
-        # Surface precip [kg/m^2/s, +down] the scheme computes, and its frozen
-        # part (None when the scheme does not publish it), as on the
-        # hydrostatic bridge (#2277).
-        _pf = micro_out.precip_frozen
-        return tend, (
-            micro_out.precipitation.reshape(n_lat, n_lon).astype(p_s.dtype),
-            None if _pf is None
-            else _pf.reshape(n_lat, n_lon).astype(p_s.dtype))
+        out = (tend,)
+        if _sundqvist:
+            out = out + (sundqvist_carry_update(micro_out, phys_state),)
+        if return_sfc_precip:
+            # Surface precip [kg/m^2/s, +down] the scheme computes, and its
+            # frozen part (None when the scheme does not publish it), as on the
+            # hydrostatic bridge (#2277).
+            _pf = micro_out.precip_frozen
+            out = out + ((
+                micro_out.precipitation.reshape(n_lat, n_lon).astype(p_s.dtype),
+                None if _pf is None
+                else _pf.reshape(n_lat, n_lon).astype(p_s.dtype)),)
+        return out[0] if len(out) == 1 else out
 
     def reset_state():
         _ml_model_cache[0] = None
@@ -1705,6 +1750,9 @@ def _make_spectral_pe_microphysics(
     physics_fn.reset_state = reset_state
     if _incloud:
         physics_fn._wants_phys_state_ro = True
-    # #2277: accepts ``return_sfc_precip=True`` (second return: surface precip).
+    # #2277: accepts ``return_sfc_precip=True`` (last return: surface precip).
     physics_fn._emits_sfc_precip = True
+    if _sundqvist:
+        # Writes the gscond previous-step carry (zc_*), second return.
+        physics_fn._writes_phys_state = True
     return physics_fn

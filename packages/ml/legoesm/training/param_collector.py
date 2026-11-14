@@ -47,6 +47,8 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.soil_thermal",
     "legoesm.ocean.physics.shortwave_penetration",
     "legoesm.ice.config",
+    "legoesm.ice.constants_config",
+    "legoesm.ice.si3_orca2_state",
     "legoesm.ice.shortwave",
     "legoesm.coupler.config",
     "legoesm.coupler.coupled_latlon_band",
@@ -80,6 +82,9 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.ocean.physics.vertical_mixing.tidal",
     # --- atmosphere physics (Phase 4 spec migration) ---
     "legoesm.atmosphere.physics.gravity_wave_drag.config",
+    "legoesm.atmosphere.physics.gravity_wave_drag.ifs_wms",
+    "legoesm.atmosphere.physics.methane_oxidation",
+    "legoesm.atmosphere.physics.radiation.ozone_cariolle",
     "legoesm.atmosphere.physics.clouds.config",
     "legoesm.atmosphere.physics.convection.config",
     "legoesm.atmosphere.physics.microphysics.config",
@@ -93,6 +98,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.atmosphere.physics.turbulence.config",
     "legoesm.atmosphere.physics.turbulence.clubb",
     "legoesm.atmosphere.physics.turbulence.pbl_height",
+    "legoesm.atmosphere.physics.turbulence.myj_wrf",
     "legoesm.atmosphere.physics.radiation.config",
     "legoesm.atmosphere.physics.ml_parameterization",
 )

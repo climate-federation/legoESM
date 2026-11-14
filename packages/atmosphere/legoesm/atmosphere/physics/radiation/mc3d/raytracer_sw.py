@@ -1,9 +1,10 @@
 """Shortwave 3D Monte-Carlo ray-tracing driver (single monochromatic field).
 
-Launches a collimated solar beam at the top of the domain, one batch of photons
-at a time (``lax.scan`` over ``n_batches`` to bound peak memory), walks them with
-``photon_walk.trace_batch``, and accumulates analog tallies into an
-``MC3DResult``. The g-point / spectral loop and the conversion of fractions to
+Launches photons at the top of the domain (collimated beam, plus a diffuse
+cosine-weighted fraction as microhh's ``tod_inc_diffuse``), one batch at a time
+(``lax.scan`` over ``n_batches`` to bound peak memory), walks them with
+microhh's weighted estimator (``photon_walk.trace_batch_weighted``) and returns
+the tallies as an ``MC3DResult``. The g-point / spectral loop and the conversion of fractions to
 physical W/m^2 + heating rates live in the integration layer (Phase 2); this
 module is the spatial solver for one optical field.
 """
@@ -17,15 +18,9 @@ import jax.numpy as jnp
 from legoesm.atmosphere.physics.radiation.mc3d import knull_grid
 from legoesm.atmosphere.physics.radiation.mc3d import photon_walk
 from legoesm.atmosphere.physics.radiation.mc3d import qrng
-from legoesm.atmosphere.physics.radiation.mc3d import tally
+from legoesm.atmosphere.physics.radiation.mc3d import sampling
 from legoesm.atmosphere.physics.radiation.mc3d.config import MC3DRadiationConfig
-from legoesm.atmosphere.physics.radiation.mc3d.photon_walk import (
-    PlaneRTGeometry,
-    STATUS_MAXITER,
-    STATUS_SFC_ABS,
-    STATUS_TOD_UP,
-    STATUS_VOL_ABS,
-)
+from legoesm.atmosphere.physics.radiation.mc3d.photon_walk import PlaneRTGeometry
 from legoesm.atmosphere.physics.radiation.mc3d.tally import MC3DResult
 
 Array: TypeAlias = jax.Array
@@ -37,6 +32,7 @@ class SWFluxResult(NamedTuple):
   abs_flux: Array       # (nx,ny,nz) absorbed flux per cell (per ground area)
   sfc_abs_flux: Array   # (nx,ny) net SW absorbed at the surface
   tod_up_flux: Array    # scalar domain-mean TOD upwelling (reflected) flux
+  residual_flux: Array  # scalar domain-mean flux still in flight at the step cap
 
 
 def _beam_direction(mu0: float, azimuth: float, dtype) -> Array:
@@ -56,6 +52,7 @@ def solve_sw_monochromatic(
     mu0: float,
     azimuth: float,
     albedo: float,
+    diffuse_frac: float,
     config: MC3DRadiationConfig,
     key: Array,
     rayleigh_frac: Array | None = None,
@@ -63,7 +60,7 @@ def solve_sw_monochromatic(
     mie_ang: Array | None = None,
     r_eff: Array | None = None,
 ) -> MC3DResult:
-  """Trace the shortwave beam through one optical field; return analog tallies.
+  """Trace shortwave photons through one optical field; return the tallies.
 
   ``rayleigh_frac`` (optional ``(nx,ny,nz)``): local fraction of total scattering
   that is gas Rayleigh; when given, scatter events split into an explicit
@@ -78,6 +75,9 @@ def solve_sw_monochromatic(
     mu0: cosine of solar zenith angle (>0).
     azimuth: solar azimuth [rad].
     albedo: Lambertian surface albedo in [0,1].
+    diffuse_frac: diffuse share of the top-of-domain incident flux (microhh
+      ``tod_inc_diffuse / (tod_inc_direct + tod_inc_diffuse)``); 0 when the
+      domain top is the top of the atmosphere.
     config: MC numerics.
     key: PRNG key.
   """
@@ -104,10 +104,6 @@ def solve_sw_monochromatic(
         "raise qrng._N_DIGITS_BASE2."
     )
 
-  # Counts are tallied as integers for exact conservation; refuse loudly if they
-  # would overflow int32 without x64 (no silent coerce). See assert_count_capacity.
-  tally.assert_count_capacity(n_total, x64_enabled=jax.config.jax_enable_x64)
-
   maj = knull_grid.build_majorant_grid(
       k_ext, geom.z_faces, config.knull_floor,
       coarsen_xy=int(config.knull_coarsen_xy),
@@ -126,24 +122,20 @@ def solve_sw_monochromatic(
   else:
     col_rot = jnp.zeros((ncols, 2), dtype=dtype)
 
-  # Tally counts as integers so the analog-MC "sums to exactly 1" invariant is
-  # not eroded by float rounding above 2^24 photons (float32) / 2^53 (float64).
-  count_dt = jnp.int64 if jax.config.jax_enable_x64 else jnp.int32
-  ones = jnp.ones((batch_size,), dtype=count_dt)
+  if not 0.0 <= float(diffuse_frac) <= 1.0:
+    raise ValueError(f"diffuse_frac={diffuse_frac} must lie in [0, 1].")
 
-  def batch_step(carry, batch):
-    vol_c, sfc_c, tod_c, max_c = carry
+  def batch_step(acc, batch):
     b, bkey = batch
     # Derive this batch's photon -> (column, within-column, ix, iy) from the
     # global photon index instead of carrying four n_total int arrays as scan xs
     # (memory): photon i is in column i//p, so col=pid//p, ix=col//ny, iy=col%ny.
-    # (Name it pid, NOT g -- g is the asymmetry-field argument.)
     pid = b * batch_size + jnp.arange(batch_size, dtype=jnp.int32)
     col_b = pid // p
     pwc_b = (pid % p).astype(jnp.int32)
     ix_b = col_b // ny
     iy_b = col_b % ny
-    k_pos, k_walk = jax.random.split(bkey)
+    k_pos, k_kind, k_dif, k_walk = jax.random.split(bkey, 4)
     if use_qrng:
       # Low-discrepancy launch position (Halton + per-column rotation).
       hx, hy = qrng.halton_2d(pwc_b, col_rot[col_b])
@@ -155,48 +147,49 @@ def solve_sw_monochromatic(
     y = (iy_b.astype(dtype) + uy_) * geom.dy
     z = jnp.full((batch_size,), z_tod, dtype=dtype)
     pos0 = jnp.stack([x, y, z], axis=1)
-    dir0 = jnp.broadcast_to(beam, (batch_size, 3))
-    walk_keys = jax.random.split(k_walk, batch_size)
-
-    states = photon_walk.trace_batch(
-        walk_keys, pos0, dir0, k_ext, ssa, g, maj, albedo, geom,
-        int(config.max_iterations), rayleigh_frac=rayleigh_frac,
-        mie_cdf=mie_cdf, mie_ang=mie_ang, r_eff=r_eff,
+    # microhh reset_photon: diffuse with probability tod_inc_diffuse/total,
+    # cosine-weighted downward; else the collimated beam.
+    direct0 = jax.random.uniform(k_kind, (batch_size,), dtype=dtype) >= diffuse_frac
+    dif_dir = jax.vmap(lambda k: sampling.lambertian_reflect(k, dtype))(
+        jax.random.split(k_dif, batch_size)) * jnp.asarray([1.0, 1.0, -1.0], dtype)
+    dir0 = jnp.where(direct0[:, None], beam[None, :], dif_dir)
+    t = photon_walk.trace_batch_weighted(
+        k_walk, pos0, dir0, direct0, k_ext, ssa, g, maj, albedo, geom,
+        int(config.max_iterations), float(config.weight_floor),
+        rayleigh_frac=rayleigh_frac, mie_cdf=mie_cdf, mie_ang=mie_ang,
+        r_eff=r_eff,
         free_path_floor_sharpness=float(config.free_path_floor_sharpness),
     )
-    st = states.status
-    vol_ids = jnp.where(st == STATUS_VOL_ABS, states.vol_idx, -1)
-    sfc_ids = jnp.where(st == STATUS_SFC_ABS, states.sfc_idx, -1)
-    vol_c = vol_c + jax.ops.segment_sum(ones, vol_ids, num_segments=ncells)
-    sfc_c = sfc_c + jax.ops.segment_sum(ones, sfc_ids, num_segments=ncols)
-    tod_c = tod_c + jnp.sum(st == STATUS_TOD_UP).astype(count_dt)
-    max_c = max_c + jnp.sum(st == STATUS_MAXITER).astype(count_dt)
-    return (vol_c, sfc_c, tod_c, max_c), None
+    return jax.tree.map(jnp.add, acc, t), None
 
   bkeys = jax.random.split(key, nb)
-  init = (
-      jnp.zeros((ncells,), count_dt),
-      jnp.zeros((ncols,), count_dt),
-      jnp.zeros((), count_dt),
-      jnp.zeros((), count_dt),
-  )
-  (vol_c, sfc_c, tod_c, max_c), _ = jax.lax.scan(
-      batch_step, init, (jnp.arange(nb, dtype=jnp.int32), bkeys)
-  )
+  zc = jnp.zeros((ncells,), dtype)
+  zs = jnp.zeros((ncols,), dtype)
+  init = photon_walk.WeightedTally(zc, zc, zs, zs, zs, zs,
+                                   jnp.zeros((), dtype),
+                                   jnp.zeros((), jnp.int32))
+  t, _ = jax.lax.scan(
+      batch_step, init, (jnp.arange(nb, dtype=jnp.int32), bkeys))
 
   inv_p = 1.0 / p
   inv_n = 1.0 / n_total
-  # Max-iter photons are folded into the escaped (TOD-up) bin so the physical
-  # budget closes exactly: vol_abs_total + sfc_abs_total + tod_up_frac == 1.
-  # maxiter_frac is a diagnostic SUBSET of tod_up_frac (warn if non-negligible).
-  escaped = tod_c + max_c
+  cells = (nx, ny, nz)
+  cols = (nx, ny)
+  sfc_net = t.sfc_dir + t.sfc_dif - t.sfc_up
   return MC3DResult(
-      abs_frac=vol_c.reshape(nx, ny, nz).astype(dtype) * inv_p,
-      sfc_abs_frac=sfc_c.reshape(nx, ny).astype(dtype) * inv_p,
-      tod_up_frac=escaped.astype(dtype) * inv_n,
-      vol_abs_total=jnp.sum(vol_c).astype(dtype) * inv_n,
-      sfc_abs_total=jnp.sum(sfc_c).astype(dtype) * inv_n,
-      maxiter_frac=max_c.astype(dtype) * inv_n,
+      abs_frac=(t.abs_dir + t.abs_dif).reshape(cells) * inv_p,
+      sfc_abs_frac=sfc_net.reshape(cols) * inv_p,
+      tod_up_frac=jnp.sum(t.tod_up) * inv_n,
+      vol_abs_total=jnp.sum(t.abs_dir + t.abs_dif) * inv_n,
+      sfc_abs_total=jnp.sum(sfc_net) * inv_n,
+      maxiter_frac=t.n_capped.astype(dtype) * inv_n,
+      abs_dir_frac=t.abs_dir.reshape(cells) * inv_p,
+      abs_dif_frac=t.abs_dif.reshape(cells) * inv_p,
+      sfc_dir_frac=t.sfc_dir.reshape(cols) * inv_p,
+      sfc_dif_frac=t.sfc_dif.reshape(cols) * inv_p,
+      sfc_up_frac=t.sfc_up.reshape(cols) * inv_p,
+      tod_up_col_frac=t.tod_up.reshape(cols) * inv_p,
+      residual_frac=t.residual * inv_n,
   )
 
 
@@ -210,6 +203,7 @@ def solve_sw_spectral(
     mu0: float,
     azimuth: float,
     albedo: float,
+    diffuse_frac: float,
     config: MC3DRadiationConfig,
     key: Array,
     rayleigh_frac: Array | None = None,
@@ -244,6 +238,8 @@ def solve_sw_spectral(
       already the vertical component).
     azimuth: solar azimuth [rad].
     albedo: Lambertian surface albedo.
+    diffuse_frac: diffuse share of each g-point's incident flux (see
+      ``solve_sw_monochromatic``).
     config: MC numerics.
     key: PRNG key (split per g-point).
   """
@@ -262,7 +258,7 @@ def solve_sw_spectral(
              else jnp.zeros((ngpt,), jnp.int32))
 
   def gpt_step(carry, inp):
-    abs_acc, sfc_acc, tod_acc = carry
+    abs_acc, sfc_acc, tod_acc, res_acc = carry
     tau_g, ssa_g, g_g, f_in, rf_g, band_idx, gkey = inp
     # Extinction [1/m] from layer optical depth; broadcast dz over (nx,ny,nz).
     k_ext = tau_g / dz[None, None, :]
@@ -272,24 +268,26 @@ def solve_sw_spectral(
     ang_g = mie_lut_ang[band_idx] if use_mie else None
     res = solve_sw_monochromatic(
         k_ext, ssa_g, g_g, geom, mu0=mu0, azimuth=azimuth, albedo=albedo,
-        config=config, key=gkey,
+        diffuse_frac=diffuse_frac, config=config, key=gkey,
         rayleigh_frac=rf_g if use_rayleigh else None,
         mie_cdf=cdf_g, mie_ang=ang_g,
         r_eff=r_eff if use_mie else None)
     abs_acc = abs_acc + res.abs_frac * f_in
     sfc_acc = sfc_acc + res.sfc_abs_frac * f_in
     tod_acc = tod_acc + res.tod_up_frac * f_in
-    return (abs_acc, sfc_acc, tod_acc), None
+    res_acc = res_acc + res.residual_frac * f_in
+    return (abs_acc, sfc_acc, tod_acc, res_acc), None
 
   init = (
       jnp.zeros((nx, ny, nz), dtype),
       jnp.zeros((nx, ny), dtype),
       jnp.zeros((), dtype),
+      jnp.zeros((), dtype),
   )
-  (abs_acc, sfc_acc, tod_acc), _ = jax.lax.scan(
+  (abs_acc, sfc_acc, tod_acc, res_acc), _ = jax.lax.scan(
       gpt_step, init,
       (tau, ssa, g, incident_flux.astype(dtype), rfrac, band_in, gkeys)
   )
   return SWFluxResult(
-      abs_flux=abs_acc, sfc_abs_flux=sfc_acc, tod_up_flux=tod_acc
-  )
+      abs_flux=abs_acc, sfc_abs_flux=sfc_acc, tod_up_flux=tod_acc,
+      residual_flux=res_acc)
