@@ -122,9 +122,24 @@ def pnorm_smooth_min(a: jax.Array, b: jax.Array, p: float, eps: float) -> jax.Ar
     return _pnorm_lo_hi(jnp.where(first, a, b), jnp.where(first, b, a), p, eps)
 
 
+@jax.custom_jvp
+def _div(x, y):
+    return x / y
+
+
+@_div.defjvp
+def _div_jvp(primals, tangents):
+    # d(x/y) = (dx - (x/y) dy) / y through _div again, so no order of AD forms
+    # y^-2 (which underflows to 0 for tiny y in fp32 and gives 0*inf = NaN).
+    x, y = primals
+    dx, dy = tangents
+    out = _div(x, y)
+    return out, _div(dx - out * dy, y)
+
+
 def _pnorm_ratio(lo, hi, eps):
     ok = hi > eps
-    return ok, jnp.where(ok, lo / jnp.where(ok, hi, jnp.ones_like(hi)), jnp.zeros_like(lo))
+    return ok, jnp.where(ok, _div(lo, jnp.where(ok, hi, jnp.ones_like(hi))), jnp.zeros_like(lo))
 
 
 @functools.partial(jax.custom_jvp, nondiff_argnums=(2, 3))
