@@ -4494,6 +4494,7 @@ def _resolve_convection(config):
             use_ifs_capdcycl=getattr(
                 config, 'bechtold_use_ifs_capdcycl', True),
             ifs_shallow_nosupply=config.bechtold_ifs_shallow_nosupply,
+            ifs_hard_switches=config.bechtold_ifs_hard_switches,
             use_ifs_land_rhebc=getattr(
                 config, 'bechtold_use_ifs_land_rhebc', True),
             use_ifs_snow_melt=getattr(

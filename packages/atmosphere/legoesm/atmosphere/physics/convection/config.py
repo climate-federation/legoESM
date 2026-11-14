@@ -1561,6 +1561,12 @@ class BechtoldConfig(NamedTuple):
     # _ifs_cumastrn.cumastrn_column (shallow closure).
     ifs_shallow_nosupply: str = "zero"
     ifs_shallow_supply_width_w_m2: float = 1.0  # W/m2, 0 = hard max
+    # Faithful chain only (RULE 5, #2281): False (default) = the elementwise
+    # switches (so far the closure; ascent and fluxes follow) take their C1 smooth
+    # forms (_ifs_smooth.IfsSmooth, width 0.01 x a scale of the switched
+    # quantity); True = OpenIFS's exact switches.  The level/flag structure is
+    # hard either way (KNOWN DIFFERENCE in _ifs_cumastrn).
+    ifs_hard_switches: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.
