@@ -10,6 +10,7 @@ A static ``sharpness = math.inf`` returns the discontinuous function exactly
 (``x >= 0``, ``jnp.maximum``, ...): the hard limit of a RULE 5 smooth switch.
 """
 
+import functools
 import math
 import numbers
 
@@ -105,17 +106,62 @@ def pnorm_smooth_min(a: jax.Array, b: jax.Array, p: float, eps: float) -> jax.Ar
     elementwise min/max); the ratio is 0 where ``hi <= eps`` (where-before-
     divide, AD-safe), so there the result is the exact ``min`` and it jumps
     (from ``eps`` to ``2^(-1/p)*eps`` where ``a = b``) as ``hi`` crosses
-    ``eps``: callers zero inputs ``<= eps`` first (both GWD callers zero
-    stresses ``<= taumin = eps``).  Above ``eps``: scale-free (unlike the
+    ``eps``: callers with ``eps > 0`` zero inputs ``<= eps`` first (the GWD
+    stress caps zero stresses ``<= taumin = eps``).  Above ``eps``: scale-free (unlike the
     additive :func:`smooth_min`), C-infinity, never above ``min(a, b)``,
     equal to ``2^(-1/p)*a`` where ``a = b``; exact ``min`` as ``p -> inf``.
-    Used for the GWD stress cap ``min(taudmp, tausat)`` (Lindzen, McFarlane).
+    Used for the GWD stress cap ``min(taudmp, tausat)`` (Lindzen, McFarlane,
+    E3SM-CAM), the GWD tendency limiters and the launch Froude cap; callers
+    with ``eps = 0`` pass non-negative inputs (``hi = 0`` then means both are
+    0 and the exact 0 is returned with finite gradients).  ``lo``/``hi`` are
+    picked with one ``where`` (not ``minimum``/``maximum``, whose AD splits
+    the tangent at a tie and zeroes the curvature there); the formula is
+    symmetric, so either pick is the same smooth function.
     """
-    lo = jnp.minimum(a, b)
-    hi = jnp.maximum(a, b)
+    first = a <= b
+    return _pnorm_lo_hi(jnp.where(first, a, b), jnp.where(first, b, a), p, eps)
+
+
+@jax.custom_jvp
+def _div(x, y):
+    return x / y
+
+
+@_div.defjvp
+def _div_jvp(primals, tangents):
+    # d(x/y) = (dx - (x/y) dy) / y through _div again, so forward-mode AD never
+    # forms y^-2 (it underflows to 0 for tiny y in fp32: 0*inf = NaN).  Measured
+    # in fp32 at y ~ 1e-20: first and second derivatives (fwd-fwd, fwd-rev,
+    # rev-rev) finite; third-order reverse is NaN (transposition divides plainly).
+    x, y = primals
+    dx, dy = tangents
+    out = _div(x, y)
+    return out, _div(dx - out * dy, y)
+
+
+def _pnorm_ratio(lo, hi, eps):
     ok = hi > eps
-    ratio = jnp.where(ok, lo / jnp.where(ok, hi, jnp.ones_like(hi)), jnp.zeros_like(lo))
+    return ok, jnp.where(ok, _div(lo, jnp.where(ok, hi, jnp.ones_like(hi))), jnp.zeros_like(lo))
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(2, 3))
+def _pnorm_lo_hi(lo, hi, p, eps):
+    _, ratio = _pnorm_ratio(lo, hi, eps)
     return lo * (1.0 + ratio ** p) ** (-1.0 / p)
+
+
+@_pnorm_lo_hi.defjvp
+def _pnorm_lo_hi_jvp(p, eps, primals, tangents):
+    # Analytic, bounded partials: d/dlo = (1+r^p)^(-1/p-1), d/dhi =
+    # r^(p+1) (1+r^p)^(-1/p-1) with r = lo/hi <= 1.  Differentiating lo/hi
+    # instead overflows hi^-2 in fp32 for tiny hi (NaN gradient at lo = 0).
+    lo, hi = primals
+    dlo, dhi = tangents
+    ok, ratio = _pnorm_ratio(lo, hi, eps)
+    rp = ratio ** p
+    w = (1.0 + rp) ** (-1.0 / p - 1.0)
+    out = lo * (1.0 + rp) ** (-1.0 / p)
+    return out, w * dlo + jnp.where(ok, ratio ** (p + 1.0) * w, 0.0) * dhi
 
 
 def smooth_clamp(
