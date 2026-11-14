@@ -1039,40 +1039,18 @@ def nemo_orca2_k0_ocean_step(
     production ``step`` with forcing made by the shared literal surface path.
     The atmospheric input is the card's own pair of physical file records;
     no NEMO exchange record is accepted by this API.
-
-    ``nemo_kt`` may be a traced step counter (a loop over steps); the
-    ``nn_fsbc`` phase must then be given as a static ``forcing_update`` and the
-    damping target is stamped with that counter, so the caller must have
-    checked the targets' host stamps (as ``integrate_scan`` does).  With an
-    integer ``nemo_kt``, an explicit ``forcing_update`` must agree with it.
     """
 
     _validate_k0_ocean_card(card)
     # sbc(kstp,Nbb,Nbb) reads the live rung-10 state.  The caller owns only
     # the explicit controls/carry; it cannot shadow S0-M or S3 with stale
     # state arrays.
-    traced_kt = isinstance(nemo_kt, jax.core.Tracer)
-    if traced_kt:
-        if not isinstance(forcing_update, bool):
-            raise ValueError(
-                "a traced nemo_kt needs a static forcing_update=<bool>")
-        if sponge is not None and sponge.nemo_kt is not None:
-            # the loop re-stamps the target below; only a target whose host
-            # stamp was already checked and cleared may be re-stamped
-            raise ValueError(
-                "a traced nemo_kt needs damping targets with nemo_kt=None "
-                "(host stamps checked and cleared, e.g. by split_controls)")
-    elif (isinstance(nemo_kt, bool) or not isinstance(nemo_kt, (int, np.integer))
-            or nemo_kt < 1):
-        raise ValueError("standalone ORCA2 requires nemo_kt=<positive step>")
+    traced_kt = _check_k0_step_number(nemo_kt, forcing_update, sponge)
     if int(s0.forcing_stride) != 2:
         raise ValueError("standalone ORCA2 K0 requires nn_fsbc=2")
-    if not traced_kt:
-        phase = (int(nemo_kt) - 1) % int(s0.forcing_stride) == 0
-        if forcing_update is not None and forcing_update != phase:
-            raise ValueError(
-                f"forcing_update={forcing_update!r} disagrees with nemo_kt={nemo_kt}")
-        forcing_update = phase
+    if not traced_kt:  # a traced counter carries its phase as a static argument
+        # an integer step: the nn_fsbc phase follows from the step number (as before)
+        forcing_update = (int(nemo_kt) - 1) % int(s0.forcing_stride) == 0
     u_level = state.u if state.u_before is None else state.u_before
     v_level = state.v if state.v_before is None else state.v_before
     z_coord = card.ocean.recipe.z_coord
@@ -1109,8 +1087,7 @@ def nemo_orca2_k0_ocean_step(
         "freshwater": surface.freshwater_forcing,
         "surface_forcing": surface.surface_forcing,
     }
-    if sponge is not None:
-        # model.step checks a traced counter's target by identity
+    if sponge is not None:  # model.step checks a traced counter's target by identity
         kwargs["sponge"] = sponge._replace(nemo_kt=nemo_kt) if traced_kt else sponge
     kwargs["nemo_kt"] = nemo_kt if traced_kt else int(nemo_kt)
     stepped = model.step(state, card.ocean.dt_s, **kwargs)
@@ -1827,3 +1804,29 @@ __all__ = [
     "rho_air_moist",
     "seawater_q_sat",
 ]
+
+
+def _check_k0_step_number(nemo_kt, forcing_update, sponge) -> bool:
+    """Validate ``nemo_orca2_k0_ocean_step``'s step number; True if it is traced.
+
+    A traced ``nemo_kt`` (a loop over steps) needs the ``nn_fsbc`` phase as a
+    static ``forcing_update``, and damping targets whose host stamp was already
+    checked and cleared (``nemo_kt=None``), because the step re-stamps them with
+    the counter for ``model.step``'s identity check.  An integer ``nemo_kt``
+    must be positive, and an explicit ``forcing_update`` must agree with it
+    (kept here so the step's cited line ranges do not move).
+    """
+    if isinstance(nemo_kt, jax.core.Tracer):
+        if not isinstance(forcing_update, bool):
+            raise ValueError("a traced nemo_kt needs a static forcing_update=<bool>")
+        if sponge is not None and sponge.nemo_kt is not None:
+            raise ValueError(
+                "a traced nemo_kt needs damping targets with nemo_kt=None "
+                "(host stamps checked and cleared, e.g. by split_controls)")
+        return True
+    if (isinstance(nemo_kt, bool) or not isinstance(nemo_kt, (int, np.integer))
+            or nemo_kt < 1):
+        raise ValueError("standalone ORCA2 requires nemo_kt=<positive step>")
+    if forcing_update is not None and forcing_update != ((int(nemo_kt) - 1) % 2 == 0):
+        raise ValueError(f"forcing_update={forcing_update!r} disagrees with nemo_kt={nemo_kt}")
+    return False
