@@ -189,6 +189,8 @@ def test_traced_step_number_needs_a_static_phase_and_a_cleared_stamp(monkeypatch
         jax.eval_shape(lambda k: call(k, clean._replace(nemo_kt=3), True), 3)
     with pytest.raises(ValueError, match="disagrees"):
         call(3, clean._replace(nemo_kt=3), False)        # integer step 3 is a forcing step
+    with pytest.raises(ValueError, match="disagrees"):
+        call(3, clean._replace(nemo_kt=3), 1)            # not a bool
 
 
 def test_same_static_tells_whether_a_rollout_can_be_reused():

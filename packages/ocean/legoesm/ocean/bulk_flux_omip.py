@@ -1827,6 +1827,7 @@ def _check_k0_step_number(nemo_kt, forcing_update, sponge) -> bool:
     if (isinstance(nemo_kt, bool) or not isinstance(nemo_kt, (int, np.integer))
             or nemo_kt < 1):
         raise ValueError("standalone ORCA2 requires nemo_kt=<positive step>")
-    if forcing_update is not None and forcing_update != ((int(nemo_kt) - 1) % 2 == 0):
+    if forcing_update is not None and (not isinstance(forcing_update, bool)
+                                       or forcing_update != ((int(nemo_kt) - 1) % 2 == 0)):
         raise ValueError(f"forcing_update={forcing_update!r} disagrees with nemo_kt={nemo_kt}")
     return False
