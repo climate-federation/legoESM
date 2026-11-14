@@ -1664,6 +1664,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "width 0); 'first_guess' = OpenIFS (cumastrn.F90:912 keeps "
                              "0.1 of the CFL limit, grows as 1/dt). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_shallow_nosupply}.")
+    parser.add_argument("--bechtold-ifs-hard-switches",
+                        dest="bechtold_ifs_hard_switches",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_ifs_hard_switches,
+                        help="Faithful IFS chain: OpenIFS's exact elementwise "
+                             "switches (so far the closure) instead of their "
+                             "RULE 5 smooth forms; the cloud "
+                             "levels are exact either way. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_hard_switches}.")
     parser.add_argument("--bechtold-use-ifs-land-rhebc",
                         dest="bechtold_use_ifs_land_rhebc",
                         action=argparse.BooleanOptionalAction,
@@ -2693,6 +2702,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--precision", type=str, default="fp32",
                         choices=["fp32", "fp64", "mixed"],
                         help="Precision mode: fp32, fp64, or mixed")
+    parser.add_argument("--land-compute-precision", type=str, default="policy",
+                        choices=["policy", "fp64"],
+                        help="'fp64' runs the MPAS multilayer land step in "
+                             "float64 inside a lower-precision run; 'policy' "
+                             "follows --precision")
+    parser.add_argument("--microphysics-compute-precision", type=str,
+                        default="policy", choices=["policy", "fp64"],
+                        help="'fp64' runs the microphysics in float64 inside "
+                             "a lower-precision run; 'policy' follows "
+                             "--precision")
     parser.add_argument("--gradient-checkpoint", action="store_true", default=False,
                         help="Enable gradient checkpointing for O(sqrt(N)) AD memory")
     parser.add_argument("--profile", type=int, default=0, metavar="N_STEPS",
@@ -3391,6 +3410,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_M_b_max=args.bechtold_M_b_max,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
+        bechtold_ifs_hard_switches=args.bechtold_ifs_hard_switches,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
         bechtold_snow_refill_width_kg_m2_s=args.bechtold_snow_refill_width_kg_m2_s,
@@ -3404,6 +3424,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         physics_parameterization_layers=args.physics_parameterization_layers,
         physics_parameterization_seed=args.physics_parameterization_seed,
         precision=args.precision,
+        land_compute_precision=args.land_compute_precision,
+        microphysics_compute_precision=args.microphysics_compute_precision,
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         distributed_mode=args.distributed_mode,

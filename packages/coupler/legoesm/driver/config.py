@@ -1759,6 +1759,9 @@ class ExperimentConfig(NamedTuple):
     # The faithful chain's no-supply shallow mode
     # (BechtoldConfig.ifs_shallow_nosupply; bechtold_use_ifs_ascent above).
     bechtold_ifs_shallow_nosupply: str = "zero"
+    # The faithful chain's elementwise switches: False = RULE 5 smooth forms,
+    # True = OpenIFS exact (BechtoldConfig.ifs_hard_switches, #2281).
+    bechtold_ifs_hard_switches: bool = False
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1847,6 +1850,17 @@ class ExperimentConfig(NamedTuple):
 
     # Performance
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
+    # "fp64": the MPAS-lane multilayer land step runs in float64 inside a
+    # lower-precision run (inputs up-cast, outputs back to the carry/storage
+    # dtype; x64 enabled).  The two-leaf canopy solver's convergence test sits
+    # at the fp32 rounding floor: in fp32, 43% of land columns never converge.
+    # "policy": land follows ``precision``.
+    land_compute_precision: str = "policy"
+    # "fp64": every microphysics kernel runs in float64 inside a
+    # lower-precision run (inputs up-cast, tendencies back to the storage
+    # dtype; x64 enabled).  User ruling 2026-08: microphysics stays fp64.
+    # "policy": microphysics follows ``precision``.
+    microphysics_compute_precision: str = "policy"
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
 
     # Reproducibility (Stage A1).  Master RNG seed for the run: every random key
@@ -2668,6 +2682,26 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"precision must be one of {_valid_precisions}, got {self.precision!r}"
             )
+        if self.land_compute_precision not in ("policy", "fp64"):
+            errors.append(
+                "land_compute_precision must be one of ('policy', 'fp64'), "
+                f"got {self.land_compute_precision!r}")
+        elif (self.land_compute_precision == "fp64"
+              and not (self.column_loop_lane and self.use_multilayer_land)):
+            errors.append(
+                "land_compute_precision='fp64' acts only on the MPAS-lane "
+                "multilayer land step (column_loop_lane and "
+                "use_multilayer_land); this run has neither, so it would be "
+                "ignored")
+        if self.microphysics_compute_precision not in ("policy", "fp64"):
+            errors.append(
+                "microphysics_compute_precision must be one of "
+                f"('policy', 'fp64'), got {self.microphysics_compute_precision!r}")
+        elif (self.microphysics_compute_precision == "fp64"
+              and self.microphysics == "none"):
+            errors.append(
+                "microphysics_compute_precision='fp64' with microphysics="
+                "'none' would be ignored")
         _valid_distributed_modes = ("mpi", "spmd")
         if self.distributed_mode not in _valid_distributed_modes:
             errors.append(
@@ -5563,6 +5597,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_capdcycl=getattr(
                 amip_cfg, 'bechtold_use_ifs_capdcycl', True),
             bechtold_ifs_shallow_nosupply=amip_cfg.bechtold_ifs_shallow_nosupply,
+            bechtold_ifs_hard_switches=amip_cfg.bechtold_ifs_hard_switches,
             bechtold_use_ifs_land_rhebc=getattr(
                 amip_cfg, 'bechtold_use_ifs_land_rhebc', True),
             bechtold_use_ifs_snow_melt=getattr(
@@ -5744,6 +5779,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
             bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,
             bechtold_ifs_shallow_nosupply=self.bechtold_ifs_shallow_nosupply,
+            bechtold_ifs_hard_switches=self.bechtold_ifs_hard_switches,
             bechtold_use_ifs_land_rhebc=self.bechtold_use_ifs_land_rhebc,
             bechtold_use_ifs_snow_melt=self.bechtold_use_ifs_snow_melt,
             sigma_b=self.sigma_b,

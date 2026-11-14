@@ -4494,6 +4494,7 @@ def _resolve_convection(config):
             use_ifs_capdcycl=getattr(
                 config, 'bechtold_use_ifs_capdcycl', True),
             ifs_shallow_nosupply=config.bechtold_ifs_shallow_nosupply,
+            ifs_hard_switches=config.bechtold_ifs_hard_switches,
             use_ifs_land_rhebc=getattr(
                 config, 'bechtold_use_ifs_land_rhebc', True),
             use_ifs_snow_melt=getattr(
@@ -4857,7 +4858,12 @@ def _resolve_microphysics(config):
     )
 
     scheme = config.microphysics
-    micro_fn = resolve_kernel(MICROPHYSICS_REGISTRY, scheme)
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MICROPHYSICS_PRECISION_MODULE,
+    )
+    from legoesm.core.precision import with_precision_override
+    micro_fn = with_precision_override(MICROPHYSICS_PRECISION_MODULE)(
+        resolve_kernel(MICROPHYSICS_REGISTRY, scheme))
     mc = MicrophysicsConfig(scheme=scheme)
     micro_config = getattr(mc, scheme)
     required_microphysics_tracer_slots(scheme, micro_config)

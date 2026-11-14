@@ -18,6 +18,24 @@ Arrays are 1-based padded (see :mod:`._ifs_cuascent`).  ``land`` is the
 LDLAND flag as a fraction: every ``IF(LDLAND)`` is evaluated as
 ``land*A + (1-land)*B``, which is the source exactly for land in {0, 1}
 (legoESM's existing convention for fractional land; a decision is pending).
+
+Differentiability (RULE 5, #2281, user decision 2026-11-12: partial).  With
+``IfsTunables.hard_switches`` False (the host default,
+BechtoldConfig.ifs_hard_switches) the elementwise switches on traced state --
+the closure's floors, caps and branch selections -- take the C1 forms of
+:class:`legoesm.atmosphere.physics._ifs_smooth.IfsSmooth`, window 0.01 x a
+scale of the switched quantity (``_S_*`` below); True gives OpenIFS's exact
+switches (the oracle match).  Division guards and safety floors
+(RMFCMIN, ZEPS_MF, ZMFS_MIN, ZDQMIN_FLOOR) stay hard.  #2281 part 1 smooths
+the closure; the ascent thermodynamics and the fluxes follow.
+KNOWN DIFFERENCE, kept hard in both modes: the level/flag structure.  Cloud
+base and top, departure level, downdraught top and base, the cloud type
+KTYPE, LDCUM/LDDRAF and every level mask built from them are chosen from
+traced buoyancy, pressure and humidity and read through integer gathers;
+their gradients are zero or undefined at a level change.  Smoothing them is
+a soft-level rewrite (a new scheme), not done.  Gap of the smooth default
+against the oracle per fixture column: tests/atmosphere/
+test_bechtold_ifs_oracle.py (``_SWITCH_GAP``).
 """
 from __future__ import annotations
 
@@ -30,6 +48,7 @@ import numpy as np
 from legoesm.core.smooth import smooth_max
 
 from .mass_flux import ifs_ztaures
+from .._ifs_smooth import IfsSmooth
 from .._ifs_thermo import cuadjtq, foealfcu, foeewmcu, foelhmcu
 from ._ifs_cuascent import (
     cuascn, cubasen, cuinin, kget, kset, sdiv, spow, ssqrt,
@@ -147,6 +166,28 @@ ZBIDIAG_EPS = 1.0e-35  # cubidiag.F90:72,:76
 NJKT1_P, NJKT2_P, NJKT3_P = 350.0e2, 60.0e2, 950.0e2
 NJKT5_P, NJKT6_P, NJKT7_P = 500.0e2, 700.0e2, 100.0e2
 
+# --- RULE 5 smooth-window widths (#2281; IfsSmooth, ifs_hard_switches=False):
+# w = 0.01 x a scale of the switched quantity (user rule, as CLOUDSC), the
+# scale = 2nd percentile of |x| > 1e-14 over the oracle fixture's 24 columns
+# per quantity class (scripts/validate/oracle/bechtold_ifs/switch_scales.py);
+# O(1) ratios against a traced bound use 0.01 x the bound.  The P2 includes
+# values of lanes the scheme discards (as the CLOUDSC scales do). ---
+_W_REL = 0.01
+_S_MF = 1.0e-3         # [kg m-2 s-1] mass flux
+_S_DH = 95.6           # [J/kg] cloud-base moist static energy excess
+_S_HEAT = 4.71e-8      # [kg m-1 s-3] ZHEAT summand (buoyancy x g x mass flux)
+_S_CAPE = 0.218        # [J/kg]
+_S_TIME = 112.0        # [s] adjustment time scale
+_S_VEL = 0.841         # [m/s] mean updraught velocity
+_S_GEO = 812.0         # [m2 s-2] geopotential depth
+_S_PRES = 354.0        # [Pa] departure-level pressure depth
+# omega is 0 in every fixture column (no sample): 0.01 x |ZOMEGA_RES| instead
+_S_OMEGA = abs(ZOMEGA_RES)   # [Pa/s]
+_W_MF, _W_DH, _W_HEAT, _W_CAPE, _W_TIME, _W_VEL, _W_GEO, _W_PRES, _W_OMEGA = (
+    _W_REL * x for x in (_S_MF, _S_DH, _S_HEAT, _S_CAPE, _S_TIME, _S_VEL,
+                         _S_GEO, _S_PRES, _S_OMEGA))
+_W_SATFR = _W_REL * ZSATFR_MAX  # O(1) ratio: 0.01 x |threshold|
+
 
 class IfsTunables(NamedTuple):
     """Run-set CUMASTRN constants a host may override; defaults are sucumf's."""
@@ -163,6 +204,10 @@ class IfsTunables(NamedTuple):
     # run's BechtoldConfig.ifs_shallow_nosupply / ifs_shallow_supply_width_w_m2.
     shallow_nosupply: str = "first_guess"
     shallow_supply_width_w_m2: float = 1.0
+    # RULE 5 (#2281): True = OpenIFS's exact elementwise switches (the
+    # source, this NamedTuple's default); the host passes its run's
+    # BechtoldConfig.ifs_hard_switches (default False = the C1 smooth forms).
+    hard_switches: bool = True
 
 
 SHALLOW_NOSUPPLY_MODES = ("zero", "first_guess")
@@ -688,6 +733,7 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     tuple of :func:`njkt_levels`; ``pgaw`` the Gaussian weight PGAW (ZDX =
     2*RA*SQRT(RPI*PGAW), :728).  Returns :class:`CumastrnOut`."""
     rg, rcpd, retv, rlvtt = th.RG, th.RCPD, th.RETV, th.RLVTT
+    sm = IfsSmooth(tun.hard_switches)
     njkt1, njkt2, njkt3, njkt5, njkt6, njkt7 = njkt
     lev = jnp.arange(K + 1)
     zcons2 = RMFCFL / (rg * dt)
@@ -718,11 +764,14 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     ikb = kcbot
     zmfmax = (kget(paph, ikb) - kget(paph, ikb - 1)) * zcons2
     zqumqe = kget(b["pqu"], ikb) + kget(b["plu"], ikb) - kget(zqenh, ikb)
+    # ZDQMIN_FLOOR (1e-10) guards the first-guess ZDH denominator: a hard
+    # safety floor (vote 2026-11-14), never approached by 0.01 q
     zdqmin = jnp.maximum(ZDQMIN_FRAC * kget(zqenh, ikb), ZDQMIN_FLOOR)
     zdh = rcpd * (kget(b["ptu"], ikb) - kget(ztenh, ikb)) + rlvtt * zqumqe
-    zdh = rg * jnp.maximum(zdh, ZDH_DQ * zdqmin)
+    zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)
+    # sh_ok stays hard: its False side removes the shallow cloud (A4, below)
     sh_ok = zdhpbl > 0.0
-    zmfub_sh = jnp.where(sh_ok, jnp.minimum(sdiv(zdhpbl, zdh, sh_ok), zmfmax),
+    zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),
                          zmfmax * ZMFUB_DEEP)
     zmfub = jnp.where(ldcum, jnp.where(ktype == 1, zmfmax * ZMFUB_DEEP, zmfub_sh), 0.0)
     ldcum = ldcum & ~((ktype == 2) & ~sh_ok)
@@ -762,9 +811,9 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     rng2 = (lev >= njkt2) & (lev <= K)
     llo3 = deep & rng2 & (lev <= kcbot) & (lev > kctop)
     tup, qup, gup = _up(pten), _up(pqen), _up(pgeo)
-    zheat = jnp.sum(jnp.where(llo3, jnp.maximum(
-        0.0, ((tup - pten + (gup - pgeo) * zorcpd) / ztenh + retv * (qup - pqen))
-        * (rg * (pmfu + pmfd))), 0.0))
+    zheat = jnp.sum(jnp.where(llo3, sm.pos(
+        ((tup - pten + (gup - pgeo) * zorcpd) / ztenh + retv * (qup - pqen))
+        * (rg * (pmfu + pmfd)), _W_HEAT), 0.0))
     zdzp = pap - _up(pap)
     zcape = jnp.sum(jnp.where(llo3, ((ptu - ztenh) / ztenh + retv * (pqu - zqenh) - plu)
                               * zdzp, 0.0))
@@ -777,31 +826,38 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     ztaures = ifs_ztaures(zdx)
     ikd, ikb, ik = idpl, kcbot, kctop
     ztau = ((kget(pgeoh, ik) - kget(pgeoh, ikb))
-            / ((ZTAU_W0 + jnp.minimum(ZTAU_WMAX, pwmean)) * rg) * ztaures * RTAUA)
+            / ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)
     zxtau = ztau
-    llo1 = paph[K + 1] - kget(paph, ikd) < ZPBL_DP
+    llo1 = sm.lt(paph[K + 1] - kget(paph, ikd), ZPBL_DP, _W_PRES)
     zduten = ZDUTEN0 + ssqrt(0.5 * (kget(puen, ikb) ** 2 + kget(pven, ikb) ** 2
                                   + kget(puen, njkt3) ** 2 + kget(pven, njkt3) ** 2))
-    ztaupbl = jnp.minimum(ZDCYC_DZ, kget(pgeoh, ikb) - pgeoh[K + 1]) / (rg * zduten)
+    ztaupbl = sm.min(kget(pgeoh, ikb) - pgeoh[K + 1], ZDCYC_DZ, _W_GEO) / (rg * zduten)
     # LDLAND as a land fraction: exact for land in {0, 1}
-    zcapdcycl = jnp.where(llo1, land * (zcappbl * ztau / ztaures)
-                          + (1.0 - land) * (zcappbl * ztaupbl), 0.0)
+    zcapdcycl = sm.sel(llo1, land * (zcappbl * ztau / ztaures)
+                       + (1.0 - land) * (zcappbl * ztaupbl), 0.0)
     zdqcv = zdqcv * rlvtt / kget(pgeoh, ik) * zxtau / jnp.maximum(ZTAURES_MIN, ztaures) * tun.rcapqadv
     zsatfr = zsatfr / (paph[K + 1] - kget(paph, ik))
     zcape2 = tun.rcapqadv * zcape2 + (1.0 - tun.rcapqadv) * zcape
-    zcapdcycl = jnp.maximum(zcapdcycl, -2.0 * zcape2)
-    br = (zsatfr <= ZSATFR_MAX) | (kget(pvervel, njkt5) < ZOMEGA_RES)
-    zcape_c = jnp.where(br, jnp.maximum(RMINCAPE * zcape, zcape2 - zcapdcycl + zdqcv),
-                        jnp.maximum(RMINCAPE * zcape, zcape - zcapdcycl))
-    zcape_c = jnp.minimum(zcape_c, ZCAPE_MAX)
-    zheat_c = jnp.maximum(ZHEAT_MIN, zheat)
-    zxtau_c = jnp.maximum(ZXTAU_MIN, jnp.minimum(ZXTAU_MAX, zxtau))
-    zmfub1 = jnp.maximum((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN)   # ZFACCA = 1
+    zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)
+    # (A | B) as 1 - (1 - A)(1 - B): exact for hard 0/1 weights
+    br = 1.0 - ((1.0 - sm.le(zsatfr, ZSATFR_MAX, _W_SATFR))
+                * (1.0 - sm.lt(kget(pvervel, njkt5), ZOMEGA_RES, _W_OMEGA)))
+    zcape_c = sm.sel(br, sm.max(zcape2 - zcapdcycl + zdqcv, RMINCAPE * zcape, _W_CAPE),
+                     sm.max(zcape - zcapdcycl, RMINCAPE * zcape, _W_CAPE))
+    zcape_c = sm.min(zcape_c, ZCAPE_MAX, _W_CAPE)
+    zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)
+    zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)
+    zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1
     zmfmax = (kget(paph, ikb) - kget(paph, ikb - 1)) * zcons2
-    zmfub1 = jnp.where(deep, jnp.minimum(zmfub1, zmfmax), zmfub)
+    zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)
     # shallow and mid-level, :881-936
     pmfd_b = kget(pmfd, ikb)
-    zeps = jnp.where(pmfd_b < 0.0, -pmfd_b / jnp.maximum(zmfub, ZEPS_MF), 0.0)
+    # a ratio to the traced base flux: window 0.01 x ZMFUB (mid-level base
+    # fluxes, ~1e-6, sit far below the mass-flux class scale); floored at
+    # 0.01 x the division guard so a non-convecting lane's window stays > 0
+    w_mfub = jnp.hypot(_W_REL * zmfub, _W_REL * ZEPS_MF)
+    zeps = (sm.pos(-pmfd_b, w_mfub)
+            / jnp.maximum(zmfub, ZEPS_MF))   # ZEPS_MF: division guard
     zqumqe = (kget(pqu, ikb) + kget(plu, ikb) - zeps * kget(zqd, ikb)
               - (1.0 - zeps) * kget(zqenh, ikb))
     zdh = (rcpd * (kget(ptu, ikb) - zeps * kget(ztd, ikb) - (1.0 - zeps) * kget(ztenh, ikb))
@@ -809,7 +865,7 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     zdh2 = (rcpd * (kget(ptu, ikb - 1) - zeps * kget(ztd, ikb - 1)
                     - (1.0 - zeps) * kget(ztenh, ikb - 1)) + rlvtt * zqumqe)
     zdh = 0.5 * (zdh + zdh2)
-    zdh = rg * jnp.maximum(zdh, ZDH_MIN * rcpd)
+    zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)
     # KNOWN DIFFERENCE (RULE 5 / departure from OpenIFS, main #2253, user
     # decision 2026-10-28) when tun.shallow_nosupply == "zero": a column first
     # triggered deep and reclassified shallow with no sub-cloud supply keeps
@@ -826,14 +882,17 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
         supply = smooth_max(zdhpbl, 0.0,
                             sharpness=float("inf") if w == 0.0 else 1.0 / (rg * w))
     m2 = supply / zdh
-    weak = (m2 > ZSHAL_MF * zmfmax / RMFCFL) & (zdh < ZSHAL_DH * rg * rcpd)
-    m2 = jnp.where(weak, supply / (ZSHAL_DH2 * rcpd * rg), m2)
+    weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)
+            * sm.lt(zdh, ZSHAL_DH * rg * rcpd, rg * _W_DH))
+    m2 = sm.sel(weak, supply / (ZSHAL_DH2 * rcpd * rg), m2)
     if tun.shallow_nosupply == "first_guess":
+        # the source's own branch: kept exact (the default "zero" mode smooths it)
         m2 = jnp.where(zdhpbl > 0.0, m2, zmfub)                    # :905 / :912
-    m2 = jnp.minimum(m2, zmfmax)
-    m3 = jnp.maximum(zmfub, ZMID_MF * zkhfl / kget(pgeoh, ikb)) * (1.0 + zeps)
-    m3 = jnp.where(kget(pgeoh, ikb) < ZMID_GEO, jnp.minimum(m3, zmfmax / (ZMID_CFL * RMFCFL)),
-                   jnp.minimum(m3, zmfmax))
+    m2 = sm.min(m2, zmfmax, _W_MF)
+    m3 = sm.max(ZMID_MF * zkhfl / kget(pgeoh, ikb), zmfub, w_mfub) * (1.0 + zeps)
+    m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),
+                sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),
+                sm.min(m3, zmfmax, _W_MF))
     zmfub1 = jnp.where(ldcum & (ktype == 2), m2, zmfub1)
     zmfub1 = jnp.where(ldcum & (ktype == 3), m3, zmfub1)
     # rescale DD fluxes, :940-953
@@ -850,10 +909,23 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
         on = ldcum & (jk >= kctop - 1)
         zdz_ = (paph[K + 1] - kget(paph, jk)) / (paph[K + 1] - kget(paph, kcbot))
         mu = kset(mu, jk, kget(mu, kcbot) * zdz_, on & (jk > kcbot))
-        zmfmx = jnp.minimum((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA)
+        zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)
         mk = kget(mu, jk)
-        hit = on & (mk * zm > zmfmx)
-        zm = jnp.where(hit, jnp.maximum(jnp.minimum(zm, sdiv(zmfmx, mk, hit)), ZMFS_MIN), zm)
+        if sm.hard:
+            hit = on & (mk * zm > zmfmx)
+            zm = jnp.where(hit, jnp.maximum(jnp.minimum(zm, sdiv(zmfmx, mk, hit)), ZMFS_MIN), zm)
+        else:
+            # chained C1 min over levels (vote V5-l); window 0.01 x the traced
+            # bound.  mk > 0 and the RMFCMIN floor on the divisor are division
+            # guards (an fp32 overflow of the bound would turn the window and
+            # the gradient into inf/NaN); below RMFCMIN the bound is far above
+            # zm, so min(zm, r) is exactly zm.  ZMFS_MIN stays a hard safety
+            # floor, applied where the cap is engaged (m < zm), as the hard
+            # path applies it where the cap is hit.
+            ok = on & (mk > 0.0)
+            r = zmfmx / jnp.maximum(mk, RMFCMIN)
+            m = sm.min(zm, r, _W_REL * r)
+            zm = jnp.where(ok & (m < zm), jnp.maximum(m, ZMFS_MIN), zm)
         return mu, zm
 
     pmfu, zmfs = jax.lax.fori_loop(0, K - 1, lim, (pmfu, zmfs0))
@@ -1055,6 +1127,9 @@ def cumastrn(th, dt, pgaw, T, q, u, v, plitot, omega, qsat, ahfs, qhfl, p_full,
             f"unknown shallow-closure no-supply scheme "
             f"shallow_nosupply={tun.shallow_nosupply!r}; choose one of "
             f"{SHALLOW_NOSUPPLY_MODES}.")
+    if not isinstance(tun.hard_switches, bool):
+        raise ValueError(
+            f"hard_switches must be a python bool (static), got {tun.hard_switches!r}.")
     if not tun.shallow_supply_width_w_m2 >= 0.0:
         raise ValueError(
             "shallow_supply_width_w_m2 must be >= 0 (0 = hard max(ZDHPBL, 0)), "

@@ -33,6 +33,7 @@ from legoesm.core.tracers import (
     init_tracers,
 )
 from legoesm.driver.config import ExperimentConfig
+from legoesm.core.precision import cast_pytree, match_leaf_dtypes
 from legoesm.driver.physics_pipeline import (
     refuse_cap_floor_on_fv,
     rrtmgp_config_from_experiment,
@@ -51,6 +52,9 @@ from legoesm.driver.mpas_diff_step import mpas_cadence, pick_physics_fn
 from legoesm.driver.restart import save_restart, load_restart
 
 logger = logging.getLogger("legoesm.driver")
+
+# precision-override module name of the MPAS-lane multilayer land step
+LAND_PRECISION_MODULE = "multilayer_land"
 
 # Set once an MPAS run has frozen its long-lived objects (gc.freeze).
 _GC_FROZEN = [False]
@@ -4459,6 +4463,10 @@ class ModelDriver:
                 f"  IC: loading ERA5 from {cfg.ic_path} "
                 f"(year={cfg.start_year})"
             )
+            # seed-state dtypes: the ERA5 IC is built in float64 and is cast
+            # back to them once, below (an fp32 run must start in fp32)
+            _seed_state = self.state
+            _seed_qv = self.tracers.get("q_v")
             era5_slice = load_era5_ic(cfg.ic_path, cfg.start_year,
                                       allow_flat_phis=cfg.era5_allow_flat_phis)
 
@@ -4623,6 +4631,21 @@ class ModelDriver:
                 f"q_v={_h2[0]*1000:.2f} g/kg, "
                 f"CWV={_h2[1]:.1f} kg/m2"
             )
+
+            # One cast of the IC to the seed state's per-leaf dtypes (no-op
+            # when they agree, e.g. every fp64 run).  p_s goes to
+            # promote_types(seed p_s dtype, policy accumulate), as the MPAS
+            # mass fixer stores it ('mixed' keeps a float64 p_s, #1675).
+            from legoesm.core.precision import resolve_dtype
+            _ic_ps = getattr(self.state, "p_s", None)
+            self.state = match_leaf_dtypes(self.state, _seed_state)
+            if _ic_ps is not None and getattr(_seed_state, "p_s", None) is not None:
+                _ps_dt = jnp.promote_types(_seed_state.p_s.data.dtype,
+                                           resolve_dtype(None, "accumulate"))
+                self.state = self.state._replace(
+                    p_s=self.state.p_s.replace(data=_ic_ps.data.astype(_ps_dt)))
+            if _seed_qv is not None and "q_v" in self.tracers:
+                self.tracers["q_v"] = self.tracers["q_v"].astype(_seed_qv.dtype)
 
             # ERA5 phis is kept for dynamics — substituting ETOPO phis at t=0
             # while keeping ERA5 winds creates a pressure-gradient imbalance
@@ -6696,8 +6719,31 @@ class ModelDriver:
             # can build the rank's LatLonBandLayout.  Other grids ignore
             # this — cubed-sphere uses the per-face N via its own path.
             grid_n=self.config.grid.resolution,
+            # float64 land inside a lower-precision run needs x64 on; the
+            # rest of the run keeps its policy dtypes (as in 'mixed').
+            x64=(True if "fp64" in (self.config.land_compute_precision,
+                                     self.config.microphysics_compute_precision)
+                 else None),
         )
         self._device_config = rc.device_config
+        import jax.numpy as _jnp
+        from legoesm.core.precision import resolve_dtype, set_module_override
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MICROPHYSICS_PRECISION_MODULE,
+        )
+        # Set (or clear: None) every run, so a previous driver in the same
+        # process cannot leak its override into this one.
+        for _mod, _sel in ((LAND_PRECISION_MODULE,
+                            self.config.land_compute_precision),
+                           (MICROPHYSICS_PRECISION_MODULE,
+                            self.config.microphysics_compute_precision)):
+            set_module_override(
+                _mod, compute=("float64" if _sel == "fp64" else None))
+            if _sel == "fp64" and resolve_dtype(_mod, "compute") != _jnp.float64:
+                raise RuntimeError(
+                    f"{_mod} compute precision 'fp64' requested but this "
+                    "backend has no float64 (or x64 is off); it would "
+                    "silently run in float32")
 
         # Multi-controller SPMD (distributed_mode='spmd'): rank/world
         # come from jax.distributed — no mpi4jax topology exists (and
@@ -14545,6 +14591,8 @@ class ModelDriver:
                 else 1)
             DT_LAND = _LAND_K * DT
 
+            _land64 = cfg.land_compute_precision == "fp64"
+
             def _make_land_step(_dt_land):
               @jax.jit
               def _land_step(land_state, a2s, doy, lai_doy, lai_year):
@@ -14562,13 +14610,22 @@ class ModelDriver:
                     _params_in = _land_pack(_p) if _land_pack_on else _p
                 else:
                     _params_in = _lml_params_p
+                _lml_cfg_in, _lml_lat_in, _lml_carbon_in = (
+                    _lml_cfg_p, _lml_lat_p, _lml_carbon_p)
+                if _land64:
+                    _state_carry, _carbon_carry = _state_in, _lml_carbon_p
+                    (_state_in, _a2s_in, _lml_cfg_in, _params_in,
+                     _lml_lat_in, _lml_carbon_in) = cast_pytree(
+                        (_state_in, _a2s_in, _lml_cfg_p, _params_in,
+                         _lml_lat_p, _lml_carbon_p),
+                        LAND_PRECISION_MODULE, "compute")
                 if _land_mesh is None:
                     new_state, resp, _carbon, _sfc = (
                         step_multilayer_land_with_diagnostics(
-                            _state_in, _a2s_in, _lml_cfg_p, _lml_umin,
-                            _dt_land, lat=_lml_lat_p, doy=doy,
+                            _state_in, _a2s_in, _lml_cfg_in, _lml_umin,
+                            _dt_land, lat=_lml_lat_in, doy=doy,
                             land_params=_params_in,
-                            carbon_state=_lml_carbon_p))
+                            carbon_state=_lml_carbon_in))
                 else:
                     # per-column = the leaves the packing gathered (leading
                     # axis = the full column count before packing)
@@ -14580,13 +14637,21 @@ class ModelDriver:
                             step_multilayer_land_with_diagnostics(
                                 st, a2s, c, _lml_umin, _dt_land, lat=la,
                                 doy=d, land_params=p, carbon_state=cb)),
-                        (_state_in, _a2s_in, _lml_cfg_p, _params_in,
-                         _lml_lat_p, _lml_carbon_p, doy),
+                        (_state_in, _a2s_in, _lml_cfg_in, _params_in,
+                         _lml_lat_in, _lml_carbon_in, doy),
                         jax.tree_util.tree_map(
                             lambda x: (hasattr(x, "shape") and len(x.shape) >= 1
                                        and x.shape[0] == _land_ncol_full),
                             _full),
                         _land_mesh, _land_keep)
+                if _land64:
+                    # state back to the carry's own per-leaf dtypes; the
+                    # fluxes/diagnostics to the run's storage dtype
+                    new_state = match_leaf_dtypes(new_state, _state_carry)
+                    if _carbon is not None and _carbon_carry is not None:
+                        _carbon = match_leaf_dtypes(_carbon, _carbon_carry)
+                    resp, _sfc = cast_pytree(
+                        (resp, _sfc), None, "storage", allow_downcast=True)
                 # resp.albedo is the END-OF-STEP land albedo, already
                 # snow-brightened by the tile (band_albedo / snow_albedo) and
                 # dry-soil-brightened.  It used to be discarded here, so the
