@@ -71,7 +71,11 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-from legoesm.atmosphere.physics.convection._kf_eta import KFConstants, kf_eta_para
+from legoesm.atmosphere.physics.convection._kf_eta import (
+    KFConstants,
+    kf_eta_para,
+    kf_smoothing,
+)
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig
 from legoesm.atmosphere.physics.convection.mass_flux import compute_column_geometry
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -225,7 +229,7 @@ def kain_fritsch_wrf_convection(
         flip(u), flip(v), flip(T), flip(q_v), flip(p_full), flip(dz), flip(w_grid),
         flip(rhoe), dt=dt, dx=dx, constants=kc, params=_oracle_params(config),
         trigger=3 if config.enable_rh_trigger_perturb else 1, warm_rain=True,
-        cudt=dt / _KF_SEC_PER_MIN)
+        cudt=dt / _KF_SEC_PER_MIN, smoothing=kf_smoothing(config))
     # convective precipitation over the levels of its production (see module docstring)
     ems = o["ems"]
     has_mass = ems > 0.0

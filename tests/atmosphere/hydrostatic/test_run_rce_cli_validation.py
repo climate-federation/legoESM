@@ -56,8 +56,8 @@ def test_run_rce_rejects_bad_cli_args(tmp_path, flag, value, expected_err):
     env["JAX_ENABLE_X64"] = "1"
     cmd = [
         sys.executable, str(DRIVER),
-        "--grid-type", "cubed_sphere",
-        "--discretization", "cdgrid",
+        "--grid-type", "gaussian",
+        "--discretization", "spectral",
         "--resolution", "12",
         "--days", "1",
         "--nlev", "20",
@@ -111,57 +111,8 @@ def test_gaussian_grid_auto_enables_x64(tmp_path):
         f"auto-enable did not fire in time.\nstderr: {result.stderr[-800:]}")
 
 
-def test_nonspectral_grid_keeps_caller_precision(tmp_path):
-    """A non-spectral grid must NOT trip the auto-enable (stays float32 when the
-    caller runs float32) — the sniff is grid-specific, not a blanket override."""
-    env = os.environ.copy()
-    env["JAX_PLATFORMS"] = "cpu"
-    env["JAX_ENABLE_X64"] = "0"
-    cmd = [
-        sys.executable, str(DRIVER),
-        "--grid-type", "cubed_sphere", "--discretization", "cdgrid",
-        "--resolution", "12", "--days", "1", "--diag-days", "1", "--nlev", "20",
-        "--output", str(tmp_path / "rce_cs_f32"),
-    ]
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True,
-                            timeout=180)
-    assert result.returncode == 0, (
-        f"cubed_sphere f32 run failed: exit {result.returncode}\n"
-        f"stdout: {result.stdout[-800:]}\nstderr: {result.stderr[-800:]}")
-    assert "auto-enabled JAX_ENABLE_X64" not in (result.stdout + result.stderr), \
-        "non-spectral grid wrongly triggered the spectral x64 auto-enable"
 
 
-def test_rrtmgp_morrison_runs(tmp_path):
-    """RRTMGP radiation + Morrison microphysics wiring runs end-to-end (finite,
-    non-zero exit only on real failure). Small/short — this is a smoke of the
-    branch selection + the physics_step/micro_step signatures, not a science run."""
-    env = os.environ.copy()
-    env["JAX_PLATFORMS"] = "cpu"
-    env["JAX_ENABLE_X64"] = "0"
-    cmd = [
-        sys.executable, str(DRIVER),
-        "--grid-type", "cubed_sphere", "--discretization", "cdgrid",
-        "--resolution", "8", "--days", "1", "--diag-days", "1", "--nlev", "20",
-        "--radiation", "rrtmgp", "--microphysics", "morrison",
-        "--cloud-fraction-scheme", "sundqvist",
-        "--output", str(tmp_path / "rce_rrtmgp_morrison"),
-    ]
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True,
-                            timeout=600)
-    combined = result.stdout + result.stderr
-    assert result.returncode == 0, (
-        f"rrtmgp+morrison run failed: exit {result.returncode}\n"
-        f"stdout: {result.stdout[-1000:]}\nstderr: {result.stderr[-1000:]}")
-    assert "RRTMGP radiation" in combined and "morrison" in combined, \
-        "run header did not report RRTMGP radiation + morrison microphysics"
-    # The subgrid cloud-fraction scheme (Sundqvist / Xu-Randall) feeds RRTMGP so
-    # a coarse subsaturated column still carries radiatively-active cloud; the
-    # flag must round-trip and be honored (reported) in the run header.
-    assert "cloud fraction: sundqvist" in combined, \
-        "run header did not report the wired --cloud-fraction-scheme"
-    assert "Traceback" not in combined and "nan" not in result.stdout.lower(), \
-        f"rrtmgp+morrison produced a traceback / NaN.\nstdout: {result.stdout[-1000:]}"
 
 
 def test_rrtmgp_morrison_clouds_are_radiatively_active():

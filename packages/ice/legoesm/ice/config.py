@@ -10,7 +10,8 @@ from legoesm.ice.constants_config import (
     NEMO_SI3_CONSTANTS_CONFIG,
     IceConstantsConfig,
 )
-from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
+                                      NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH)
 
 __param_spec__ = {
@@ -132,6 +133,8 @@ __param_spec__ = {
             "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
             "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
             "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
+            "most_zeta_cap_width": "numerics: RULE 5 half-width of the smooth |zeta| cap at 10 (0 = hard clip)",
+            "gfs_unstable_join_width": "numerics: RULE 5 width of the GFS unstable smooth join at zeta = -0.5 (0 = exact step)",
             "h_ice_min": "numerics: min ice thickness for smooth ops",
             "T_ice_min": "numerics: lower temperature bound for stability",
             "z_ref": "convention: MOST reference height (10 m standard)",
@@ -639,6 +642,14 @@ class SeaIceConfig(NamedTuple):
     # config -> dynamics -> config import cycle; the dispatcher checks its
     # concrete SI3O17Card contract before use.
     si3_o17: object | None = None
+    # Unstable-regime (zeta<0) MOST form, chosen independently of
+    # stability_scheme: "native" (default, byte-identical: each bulk path's own
+    # form) | "businger_dyer" | "coare3".  Unknown -> ValueError at dispatch.
+    unstable_scheme: str = "native"
+    # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10) and the GFS
+    # unstable smooth-join width (0 = the exact GFS step); bulk_flux constants.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
+    gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH
 
 
 from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E402,F401

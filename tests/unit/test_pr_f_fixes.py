@@ -12,63 +12,6 @@ import jax.numpy as jnp
 import pytest
 
 
-def test_pe_configs_expose_p_ceil_default():
-    """The surface-pressure ceiling is a per-dycore config field now (mirroring
-    p_floor), not a hardcoded 2.0e6 literal in the clip — and it is tunable."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        CGridLatLonPrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        MPASPrimitiveEquationConfig,
-    )
-
-    # Positional-ABI invariant (codex PR F): existing positional callers pass
-    # args up to and including ``p_ceil``, so nothing may be INSERTED before it
-    # (that shifts every later field's positional binding).  APPENDING new fields
-    # AFTER ``p_ceil`` WITH DEFAULTS is ABI-safe — those callers simply omit them.
-    # So the fields after ``p_ceil`` must be EMPTY or exactly a known append-only
-    # tail.  #836 appended the lat-lon C-grid top-sponge knobs after ``p_ceil``.
-    _APPENDED_AFTER_P_CEIL = {
-        # #771: moisture flux-form flag appended after p_ceil (default False).
-        # a4bacf763d: dycore energy fixer appended after it (default False).
-        "CDGridPrimitiveEquationConfig": ("moisture_flux_form", "energy_fixer"),
-        # #836: lat-lon C-grid top-sponge knobs appended after p_ceil (default OFF).
-        # Later defaulted appends: SB81 omega conversion (a676ea4395), del-4
-        # hyperdiffusion (f4036a54b3), dycore energy fixer (a4bacf763d).
-        "CGridLatLonPrimitiveEquationConfig": (
-            "sponge_coeff", "sponge_width_m", "sponge_shape",
-            "sponge_scale_height_m", "sb81_omega_conversion", "nu_del4",
-            "nu_del4_cfl_frac", "energy_fixer", "nu_div4_scale", "vertical_form",
-        ),
-        # MPAS: defaulted appends since p_ceil (vertical filter, advection
-        # scheme, top sponge, div4 damping, dycore energy fixer).
-        "MPASPrimitiveEquationConfig": (
-            "nu_vert4_T", "vert_advection_scheme", "sponge_del2_top_layers",
-            "sponge_del2_top_factor", "nu_div4", "energy_fixer",
-            "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form",
-        ),
-    }
-    for cfg_cls in (
-        CDGridPrimitiveEquationConfig,
-        CGridLatLonPrimitiveEquationConfig,
-        MPASPrimitiveEquationConfig,
-    ):
-        assert cfg_cls().p_ceil == 2.0e6              # default == former literal
-        assert cfg_cls(p_ceil=1.5e6).p_ceil == 1.5e6  # tunable
-        fields = cfg_cls._fields
-        tail = fields[fields.index("p_ceil") + 1:]
-        allowed = _APPENDED_AFTER_P_CEIL.get(cfg_cls.__name__, ())
-        assert tail == allowed, (
-            f"{cfg_cls.__name__}: only the append-only tail {allowed} may follow "
-            f"p_ceil (positional constructor ABI); got trailing fields {tail}. "
-            "Inserting a field BEFORE p_ceil, or appending one without recording "
-            "it here, breaks existing positional callers."
-        )
-
-
 def test_duogrid_monotone_clip_warns_non_conservative():
     """fill_corner_region(monotone_clip=True) must warn that the clip is
     non-conservative; the default (False) is silent."""

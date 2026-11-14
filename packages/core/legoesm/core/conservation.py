@@ -1342,7 +1342,8 @@ def apply_physics_water_mass(tracers, tracer_tendencies, p_s, sigma_coord,
     return out, p_s_new
 
 
-def shift_ps_keep_tracer_mass(p_s, tracers, sigma_coord, correction):
+def shift_ps_keep_tracer_mass(p_s, tracers, sigma_coord, correction,
+                              p_s_dtype=None):
     """Uniform ``p_s += correction`` (a mass fixer's move) with every
     tracer re-weighted onto the new layer masses so each tracer's column
     mass is untouched: ``q' = q * dp_k / dp_k'``.  The added or removed
@@ -1351,8 +1352,13 @@ def shift_ps_keep_tracer_mass(p_s, tracers, sigma_coord, correction):
     unweighted shift changes dry pressure by only ``correction * (1 -
     sum_k dB_k Q_k)`` and moves water by ``Q_bar * correction`` -- codex
     and GLM 2026-09-28).  Returns ``(p_s_new, tracers_new)``.
+
+    ``p_s_dtype``: the dtype ``p_s_new`` is stored in; the tracers are
+    re-weighted against that stored (rounded) value.  ``None``: the add's dtype.
     """
     p_s_new = p_s + correction
+    if p_s_dtype is not None:
+        p_s_new = p_s_new.astype(p_s_dtype)
     if tracers is None:
         return p_s_new, tracers
     ratio = sigma_coord.layer_thickness_dp(p_s) / sigma_coord.layer_thickness_dp(p_s_new)

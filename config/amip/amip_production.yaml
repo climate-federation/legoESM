@@ -131,6 +131,9 @@ cld_macmic_num_steps: 3     # CAM6 namelist_defaults_cam.xml:1254 (mg2 + clubb_s
 
 # ---- radiation / clouds / microphysics --------------------------------------
 radiation: rrtmg            # rrtmgp builder (CAM6 uses RRTMG; same k-lineage)
+rrtmgp_gas_tables: full     # reference RRTMGP tables (LW g256 / SW g224): RFMIP
+                            # forcing error <=0.04 W/m2 vs up to 0.24 with the
+                            # reduced g128/g112 set (user approval 2026-11-12)
 rrtmgp_overhead_layer: true # CAM RRTMG extra layer above the model top (ozone
                             # column above p_top absorbs; ~2 W/m2 leaves budget)
 # Saturation curve the cloud-cover diagnosis measures RH against.  NAMED, not
@@ -473,7 +476,12 @@ land_soil_init: aridity
 # (glaciers keep the spin-up). Built by scripts/data/regrid_land_ic.py
 # --era5-soil-t; provenance is in the file's metadata. data/ is gitignored:
 # stage the file in the launch directory.
-land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101.npz
+# _v2 (user 2026-11-13, option 1): the same file with ONE column (index 19808)
+# lifted to the run's Richards dry floor by regrid_land_ic.py --lift-only
+# (--vg-air-entry-m -0.02, the run's CLM surfdata), as #2496 did for C48; the
+# old file (md5 4e73c23e847526e87c8d92d10ee644a2) is refused by the loader
+# since the dry floor moved (#2404) and is kept alongside, unchanged.
+land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101_v2.npz
 
 # ---- moisture smoothing / clamps (unchanged) -----------------------------------
 mpas_qv_smooth_del2_m2s: 0.0
