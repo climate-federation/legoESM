@@ -1,4 +1,4 @@
-"""The FV3-duo and simple tiled-cube Kessler lanes run the RUN'S resolved
+"""The FV3-duo Kessler lane run the RUN'S resolved
 Kessler config (hard saturation-adjustment flags), not ``KesslerConfig()``
 (issue #1969)."""
 from __future__ import annotations
@@ -29,19 +29,6 @@ def _expected(cfg):
     return KesslerConfig()._replace(**_HARD)
 
 
-@pytest.mark.parametrize("over", [{}])
-def test_tiled_cube_lane_passes_run_kessler_config(monkeypatch, over):
-    seen = {}
-
-    def _spy(sigma, dt, config=None):
-        seen["config"] = config
-        return "fn"
-
-    monkeypatch.setattr(kessler_forcing, "make_kessler_column_physics_fn", _spy)
-    cfg = _cfg(**over)
-    stub = SimpleNamespace(config=cfg, sigma=None)
-    assert ModelDriver._tiled_cube_column_physics_fn(stub) == "fn"
-    assert seen["config"] == _expected(cfg)
 
 
 @pytest.mark.parametrize("over", [{}])
@@ -66,9 +53,6 @@ def test_fv3_duo_lane_passes_run_kessler_config(monkeypatch, over):
 
 
 def _call_lane(lane, cfg):
-    if lane == "tiled":
-        return ModelDriver._tiled_cube_column_physics_fn(
-            SimpleNamespace(config=cfg, sigma=None))
     import jax.numpy as jnp
     model = SimpleNamespace(grid=SimpleNamespace(n=2, ng=1),
                             config=SimpleNamespace(km=2), _ptop=1.0,
@@ -79,7 +63,7 @@ def _call_lane(lane, cfg):
         SimpleNamespace(config=cfg, model=model), bundle, 60.0)
 
 
-@pytest.mark.parametrize("lane", ["tiled", "fv3_duo"])
+@pytest.mark.parametrize("lane", ["fv3_duo"])
 @pytest.mark.parametrize("flag,match", [
     ("subgrid_autoconversion", "subgrid_autoconversion"),
     ("nc_from_aerosol", "no aerosol droplet-number mode")])
@@ -88,7 +72,7 @@ def test_unsupported_flag_on_kessler_lane_raises(lane, flag, match):
         _call_lane(lane, _cfg(**{flag: True}))
 
 
-@pytest.mark.parametrize("lane", ["tiled", "fv3_duo"])
+@pytest.mark.parametrize("lane", ["fv3_duo"])
 def test_hard_saturation_flags_are_refused_on_kessler_lanes(lane):
     """The faithful kessler_run port has no hard-saturation guard, so a run
     config that asks for one is refused, not silently ignored."""

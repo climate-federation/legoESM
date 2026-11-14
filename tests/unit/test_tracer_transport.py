@@ -227,20 +227,6 @@ class TestSolverFactory:
         )
         assert isinstance(model, TracerTransportModel)
 
-    def test_create_shallow_water(self, grid):
-        """Factory creates ShallowWaterModel."""
-        from legoesm.atmosphere.dynamics import create_model, ShallowWaterModel
-        model = create_model("shallow_water", grid=grid)
-        assert isinstance(model, ShallowWaterModel)
-
-    def test_create_primitive_equations(self, grid, sigma_coord):
-        """Factory creates PrimitiveEquationModel."""
-        from legoesm.atmosphere.dynamics import create_model, PrimitiveEquationModel
-        model = create_model(
-            "primitive_equations",
-            grid=grid, sigma_coord=sigma_coord,
-        )
-        assert isinstance(model, PrimitiveEquationModel)
 
     def test_create_unknown_raises(self):
         """Unknown solver name raises ValueError."""
@@ -251,32 +237,15 @@ class TestSolverFactory:
     def test_available_solvers_list(self):
         """AVAILABLE_SOLVERS is populated."""
         from legoesm.atmosphere.dynamics import AVAILABLE_SOLVERS
-        assert "cdgrid_shallow_water" in AVAILABLE_SOLVERS
+        assert "fv3_duo_primitive_equations" in AVAILABLE_SOLVERS
         assert "tracer_transport" in AVAILABLE_SOLVERS
-        assert "cdgrid_primitive_equations" in AVAILABLE_SOLVERS
+        assert "cdgrid_primitive_equations" not in AVAILABLE_SOLVERS
         assert "spectral_shallow_water" in AVAILABLE_SOLVERS
 
 
 class TestSolverAxes:
     """Test the two-axis (dynamics x discretization) solver selection."""
 
-    def test_resolve_hydrostatic_centered(self):
-        """dynamics=hydrostatic + discretization=centered -> cdgrid_primitive_equations."""
-        from legoesm.atmosphere.dynamics import resolve_solver_name
-        name = resolve_solver_name(dynamics="hydrostatic", discretization="centered")
-        assert name == "cdgrid_primitive_equations"
-
-    def test_resolve_nonhydrostatic_centered(self):
-        """dynamics=nonhydrostatic + discretization=centered -> cdgrid_compressible_euler."""
-        from legoesm.atmosphere.dynamics import resolve_solver_name
-        name = resolve_solver_name(dynamics="nonhydrostatic", discretization="centered")
-        assert name == "cdgrid_compressible_euler"
-
-    def test_resolve_shallow_water_centered(self):
-        """dynamics=shallow_water + discretization=centered -> cdgrid_shallow_water."""
-        from legoesm.atmosphere.dynamics import resolve_solver_name
-        name = resolve_solver_name(dynamics="shallow_water", discretization="centered")
-        assert name == "cdgrid_shallow_water"
 
     def test_resolve_shallow_water_spectral(self):
         """dynamics=shallow_water + discretization=spectral -> spectral_shallow_water."""
@@ -312,7 +281,7 @@ class TestSolverAxes:
         """Invalid dynamics value raises ValueError."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         with pytest.raises(ValueError, match="Unknown dynamics"):
-            resolve_solver_name(dynamics="invalid", discretization="cdgrid")
+            resolve_solver_name(dynamics="invalid", discretization="spectral")
 
     def test_resolve_invalid_discretization_raises(self):
         """Invalid discretization value raises ValueError."""
@@ -332,80 +301,29 @@ class TestSolverAxes:
         name = resolve_solver_name(dynamics="nonhydrostatic", discretization="spectral")
         assert name == "spectral_compressible_euler"
 
-    def test_resolve_legacy_equations_takes_precedence(self):
-        """Legacy equations key works when no axis keys are given."""
-        from legoesm.atmosphere.dynamics import resolve_solver_name
-        name = resolve_solver_name(equations="primitive_equations")
-        # Legacy "primitive_equations" is a deprecated alias → cdgrid_primitive_equations
-        assert name == "cdgrid_primitive_equations"
 
     def test_resolve_explicit_axes_override_legacy(self):
         """When dynamics is set explicitly, it overrides legacy equations."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         name = resolve_solver_name(
             dynamics="nonhydrostatic",
-            discretization="cdgrid",
+            discretization="spectral",
             equations="shallow_water",  # legacy, should be ignored
         )
-        assert name == "cdgrid_compressible_euler"
+        assert name == "spectral_compressible_euler"
 
     def test_solver_axes_roundtrip(self):
         """solver_axes() is the inverse of resolve_solver_name()."""
         from legoesm.atmosphere.dynamics import resolve_solver_name, solver_axes
         for dyn in ["shallow_water", "hydrostatic", "nonhydrostatic"]:
-            for disc in ["cdgrid", "spectral"]:
+            for disc in ["fv3_duo", "spectral"]:
                 try:
                     name = resolve_solver_name(dynamics=dyn, discretization=disc)
                 except ValueError:
                     continue  # unimplemented combination
                 axes = solver_axes(name)
-                assert axes == (dyn, disc), f"Roundtrip failed for {name}"
+                assert axes == (("hydrostatic", disc) if disc == "fv3_duo" else (dyn, disc)), f"Roundtrip failed for {name}"
 
-    def test_create_model_from_config_hydrostatic(self, grid, sigma_coord):
-        """create_model with Config resolves hydrostatic centered correctly."""
-        from legoesm.atmosphere.dynamics import create_model, PrimitiveEquationModel
-        from legoesm.config import Config
-        cfg = Config.from_dict({
-            "atmosphere": {
-                "dynamics": "hydrostatic",
-                "discretization": "centered",
-            }
-        })
-        model = create_model(legoesm_config=cfg, grid=grid, sigma_coord=sigma_coord)
-        assert isinstance(model, PrimitiveEquationModel)
-
-    def test_create_model_from_config_nonhydrostatic(self, grid):
-        """create_model with Config resolves nonhydrostatic centered correctly."""
-        from legoesm.atmosphere.dynamics import create_model, CompressibleEulerModel
-        from legoesm.config import Config
-        from legoesm.grids.vertical import create_height_coordinate, compute_terrain_metric
-        hc = create_height_coordinate(10, 30000.0)
-        z_s = jnp.zeros((6, grid.lon.shape[1], grid.lon.shape[1]))
-        tm = compute_terrain_metric(z_s, hc)
-        cfg = Config.from_dict({
-            "atmosphere": {
-                "dynamics": "nonhydrostatic",
-                "discretization": "centered",
-            }
-        })
-        model = create_model(
-            legoesm_config=cfg, grid=grid,
-            height_coord=hc, terrain_metric=tm,
-        )
-        assert isinstance(model, CompressibleEulerModel)
-
-    def test_create_model_from_config_shallow_water(self, grid):
-        """create_model with Config resolves shallow_water centered correctly."""
-        from legoesm.atmosphere.dynamics import create_model, ShallowWaterModel
-        from legoesm.config import Config
-        cfg = Config.from_dict({
-            "atmosphere": {
-                "dynamics": "shallow_water",
-                "discretization": "centered",
-            }
-        })
-        model = create_model(legoesm_config=cfg, grid=grid)
-        assert isinstance(model, ShallowWaterModel)
 
     def test_create_model_no_name_no_config_raises(self):
         """create_model with neither name nor config raises ValueError."""
@@ -419,7 +337,7 @@ class TestSolverAxes:
         assert "hydrostatic" in DYNAMICS_OPTIONS
         assert "nonhydrostatic" in DYNAMICS_OPTIONS
         assert "shallow_water" in DYNAMICS_OPTIONS
-        assert "cdgrid" in DISCRETIZATION_OPTIONS
+        assert "fv3_duo" in DISCRETIZATION_OPTIONS
         assert "spectral" in DISCRETIZATION_OPTIONS
 
 

@@ -101,30 +101,3 @@ def test_vector_lift_vorticity_is_smooth_scalar_is_not():
         "interp_center_to_corner on stacked (u, v)."
     )
     assert r_vec < r_scalar / 5.0
-
-
-def test_pe_source_uses_vector_lift_not_scalar_stacked_uv():
-    """Source guard: the PE cell-centre conversion paths must not lift the
-    prognostic / tendency winds with a scalar ``interp_center_to_corner`` on a
-    stacked ``(u, v)``.  Catches a silent revert of the iter-14 fix.
-    """
-    src = legoesm_source_path(
-        "atmosphere/dynamics/gcm/primitive_eq_cdgrid.py"
-    ).read_text()
-    # The three fixed sites must call the vector helper.
-    assert src.count("center_to_dgrid_vector(") >= 3, (
-        "PE cc→D-grid wind/tendency lifts must use center_to_dgrid_vector at "
-        "all three sites (_step_cell_centre, tendencies() entry, vector "
-        "tendency blocks)."
-    )
-    # No stacked-(u,v)-then-scalar-interp pattern should remain.
-    bad = re.search(
-        r"jnp\.stack\(\s*\[\s*[^\]]*\bu[^\]]*,\s*[^\]]*\bv[^\]]*\]"
-        r"[\s\S]{0,400}?interp_center_to_corner",
-        src,
-    )
-    assert bad is None, (
-        "found a stacked-(u,v) → scalar interp_center_to_corner lift in "
-        "primitive_eq_cdgrid.py — this re-introduces the cube panel-seam wind "
-        "imprint; use center_to_dgrid_vector."
-    )

@@ -123,10 +123,6 @@ LITERAL_BUDGET: dict[str, dict[str, int]] = {
         "ORACLE_CPAIR = 1004.64": 1,
         "ORACLE_G = 9.80616": 1,
     },
-    "tests/atmosphere/hydrostatic/unit/test_semi_implicit_cdgrid.py": {
-        "dx_min = 6.371e6 * (np.pi / 2) / n / np.sqrt(3)": 8,
-        "dx_min = 6.371e6 * (np.pi / 2) / 8 / np.sqrt(3)": 1,
-    },
     "tests/distributed/test_coupler_mpi.py": {
         "ocean_sst = _pattern(shape, base=287.0, face_scale=0.35, x_scale=0.08, y_scale=-0.04)": 1,
     },

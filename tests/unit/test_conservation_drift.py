@@ -567,22 +567,6 @@ class TestIter92AuditFollowupDelegation:
             f"no-floor patterns in bench_spectral_sw.py: {bad}"
         )
 
-    def test_w2_w5_cosine_bell_uses_helper(self):
-        """``run_w2_w5_cosine_bell_iter1030.py`` mass drift uses
-        the shared helper.
-        """
-        from pathlib import Path
-        path = Path(__file__).resolve().parent.parent.parent / \
-               "scripts" / "run" / "run_w2_w5_cosine_bell_iter1030.py"
-        text = path.read_text()
-        code_only = "\n".join(
-            line for line in text.splitlines()
-            if not line.lstrip().startswith("#")
-        )
-        assert "compute_relative_drift([mass_init, mass_final])" in code_only, (
-            "iter-93: ``run_w2_w5_cosine_bell_iter1030.py`` must "
-            "compute mass drift via the shared helper."
-        )
 
     def test_advection_convergence_2d_uses_helper(self):
         """``run_advection_convergence_2d.py`` mass drift uses

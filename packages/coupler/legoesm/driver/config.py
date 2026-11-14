@@ -158,7 +158,7 @@ def normalize_grid_type(name: str) -> str:
 class DycoreConfig(NamedTuple):
     """Dynamical core configuration."""
     model_type: str = "hydrostatic"       # shallow_water, hydrostatic, nonhydrostatic
-    discretization: str = "cdgrid"        # cdgrid, spectral, sfno, u_cast, mpas
+    discretization: str = "fv3_duo"        # fv3_duo, spectral, sfno, u_cast, mpas, latlon_cgrid
     dt: float = 600.0
     hyperdiff_scale: float = 1.0
     div_damp_scale: float = 1.0
@@ -2287,6 +2287,11 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        if (normalize_grid_type(g.grid_type) == "cubed_sphere"
+                and d.discretization != "fv3_duo"):
+            errors.append(
+                "Cubed-sphere atmosphere requires dycore.discretization='fv3_duo'; "
+                f"retired or unsupported selection {d.discretization!r}.")
         # The faithful IFS convection hands its detrained rain and snow
         # (PSNDE) to the host's rain and snow species (user 2026-10-28, R12):
         # only schemes that carry and process both may run it.  p3's snow

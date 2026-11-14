@@ -62,13 +62,11 @@ INLINE_IMPORT_BUDGET = {
     _ATMOS_DYN / "spectral_pe.py": 1,
     _ATMOS_DYN / "primitive_eq_mpas.py": 1,
     _ATMOS_DYN / "primitive_eq_latlon_cgrid.py": 3,
-    _ATMOS_DYN / "primitive_eq_cdgrid.py": 20,
     # Shallow-water + NH dycores (iter-229..232 sweep, complete).
     _ATMOS_DYN / "shallow_water_fv3_cdgrid.py": 5,
     _ATMOS_DYN / "shallow_water_mpas.py": 0,
     _ATMOS_DYN / "shallow_water_latlon_cgrid.py": 3,
     _ATMOS_DYN / "spectral_sw.py": 1,
-    _ATMOS_DYN / "compressible_euler_cdgrid.py": 23,
     _ATMOS_DYN / "compressible_euler_mpas.py": 0,
     _ATMOS_DYN / "spectral_nh.py": 3,
     # Ocean dycores (iter-233 sweep, in progress).  Budgets reflect
