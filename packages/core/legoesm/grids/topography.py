@@ -1235,7 +1235,8 @@ def _read_regridded_sso_field(grid, path, var_name, *, aliases=False):
     """One subgrid-orography field from ``path``, NaN -> 0, sampled bilinearly
     onto ``grid`` (unclipped: tensor components are signed).  Returns the
     regridded numpy array and the file's construction record.  The legacy
-    alias names stand in only when ``aliases`` (the default SSO_STDH field)."""
+    alias names stand in only when the caller passes ``aliases``
+    (``load_subgrid_orography`` does for its default SSO_STDH)."""
     import xarray as xr
 
     ds = xr.open_dataset(path)
