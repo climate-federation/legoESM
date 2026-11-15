@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH as W
 
 jax.config.update("jax_enable_x64", True)
 
@@ -264,14 +265,14 @@ def test_most_surface_flux_signs_and_limits():
     un = _neutral_ustar(U, z1, z0)
 
     # Neutral: θ_air == T_sfc.
-    us, ths, q0, cd = sl.most_surface_flux(U, 265.0, 265.0, z1, z0, thref)
+    us, ths, q0, cd = sl.most_surface_flux(U, 265.0, 265.0, z1, z0, thref, zeta_cap_width=W)
     assert abs(float(q0)) < 1e-9
     assert abs(float(ths)) < 1e-9
     assert abs(float(us) - un) < 1e-6
     assert abs(float(cd) - (un / U) ** 2) < 1e-9
 
     # Stable: warmer air over a cooled surface ⇒ w'θ' < 0, u_* and Cd suppressed.
-    us_s, ths_s, q0_s, cd_s = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref)
+    us_s, ths_s, q0_s, cd_s = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, zeta_cap_width=W)
     assert float(q0_s) < 0.0                         # downward (cooling) heat flux
     assert float(ths_s) > 0.0
     assert float(us_s) < un                          # stability reduces u_*
@@ -283,7 +284,7 @@ def test_most_surface_flux_is_differentiable():
     """Reverse-mode AD through the surface-layer solve (legoESM end-to-end AD
     goal): d q0 / d T_sfc is finite and non-zero in the stable regime."""
     def q0_of_tsfc(t_sfc):
-        return sl.most_surface_flux(4.0, 265.0, t_sfc, 2.0, 0.1, 265.0)[2]
+        return sl.most_surface_flux(4.0, 265.0, t_sfc, 2.0, 0.1, 265.0, zeta_cap_width=W)[2]
 
     g = jax.grad(q0_of_tsfc)(263.0)
     assert bool(jnp.isfinite(g)) and abs(float(g)) > 0.0
@@ -298,12 +299,107 @@ def test_most_surface_flux_reuses_shared_psi(monkeypatch):
     re-derived inline ψ would ignore the patch and this test would fail."""
     z1, z0, thref, U = 2.0, 0.1, 265.0, 4.0
     # Strongly stable input — a faithful solver gives u_* well below neutral.
-    us_real = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref)[0])
+    us_real = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref, zeta_cap_width=W)[0])
     un = _neutral_ustar(U, z1, z0)
     assert us_real < 0.95 * un                       # stability correction active
 
-    monkeypatch.setattr(sl, "psi_m", lambda z: jnp.zeros_like(jnp.asarray(z)))
-    monkeypatch.setattr(sl, "psi_h", lambda z: jnp.zeros_like(jnp.asarray(z)))
-    us_patched = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref)[0])
+    monkeypatch.setattr(sl, "psi_m", lambda z, **kw: jnp.zeros_like(jnp.asarray(z)))
+    monkeypatch.setattr(sl, "psi_h", lambda z, **kw: jnp.zeros_like(jnp.asarray(z)))
+    us_patched = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref, zeta_cap_width=W)[0])
     # ψ≡0 ⇒ pure neutral log-law, regardless of the (strong) stratification.
     assert abs(us_patched - un) < 1e-6
+
+
+# --- smooth |zeta| cap in the MOST surface layer (RULE 5) --------------------
+# Inputs (wind, dtheta, z1) + hard-clip outputs (u*, theta*, q0, cd_eff) from the
+# pre-change code, and the default-minus-hard gap per state.  States: GABLS1-like
+# (zeta 0.003), saturated (12.6), four inside the cap ramp (11.1 = the 5.8 %
+# heat-flux maximum of the 9600-state sweep, 8.6 (no gap), 9.6, 10.6), and the state
+# where the hard-clip heat flux has a slope kink in the surface temperature
+# (bisected on the jump of d q0/d T_s; its hard output is the width-0 path, which
+# reproduces the six pre-change states exactly).
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+from jax.test_util import check_grads  # noqa: E402
+
+_CAP_FILE = Path(__file__).parent / "fixtures" / "les_most_zeta_cap_gap.npz"
+
+
+def _cap_outputs(width):
+    ref = np.load(_CAP_FILE)
+    th = float(ref["theta_ref"])
+    return np.array([[float(o) for o in sl.most_surface_flux(
+        jnp.asarray(spd), jnp.asarray(th + dth), jnp.asarray(th), z1,
+        float(ref["z0"]), th, zeta_cap_width=width)]
+        for spd, dth, z1 in ref["inputs"]])
+
+
+def test_most_surface_flux_hard_limit_reproduces_the_clip():
+    np.testing.assert_array_equal(_cap_outputs(0.0), np.load(_CAP_FILE)["hard"])
+
+
+def test_most_surface_flux_default_gap_per_state():
+    ref = np.load(_CAP_FILE)
+    gap = _cap_outputs(W) - ref["hard"]
+    np.testing.assert_allclose(gap, ref["gap"], rtol=1e-6, atol=1e-12)
+    assert np.abs(gap).max() > 1e-6
+
+
+def test_most_surface_flux_check_grads_inside_the_cap_ramp():
+    ref = np.load(_CAP_FILE)
+    spd, dth, z1 = ref["inputs"][6]          # on a kink of the hard clip
+    th = float(ref["theta_ref"])
+
+    def q0(t_sfc, width=W):
+        return sl.most_surface_flux(spd, th + dth, t_sfc, z1, float(ref["z0"]), th,
+                                    zeta_cap_width=width)[2]
+    t0 = jnp.asarray(th)
+    check_grads(q0, (t0,), order=2, modes=("fwd", "rev"), eps=1e-6)
+    assert float(jax.grad(q0)(t0)) != 0.0
+    with pytest.raises(AssertionError):      # the hard clip is not smooth here
+        check_grads(lambda t: q0(t, 0.0), (t0,), order=2, modes=("fwd", "rev"),
+                    eps=1e-6)
+
+
+@pytest.mark.parametrize("mod_cfg", ["spectral", "pseudo"])
+def test_les_configs_carry_the_cap_width(mod_cfg):
+    from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pip
+    dims = dict(nx=4, ny=4, nz=6, Lx=400.0, Ly=400.0, Lz=400.0)
+    cfg = (sl.SpectralLESConfig(**dims) if mod_cfg == "spectral"
+           else pip.PseudoIncompressibleConfig(**dims))
+    assert cfg.most_zeta_cap_width == W
+
+
+def test_both_les_cores_pass_the_config_width(monkeypatch):
+    """The spectral rhs and the pseudo-incompressible surface hand the config's
+    most_zeta_cap_width to most_surface_flux."""
+    from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pip
+    seen = []
+    real = sl.most_surface_flux
+
+    def spy(*a, zeta_cap_width):
+        seen.append(zeta_cap_width)
+        return real(*a, zeta_cap_width=zeta_cap_width)
+    monkeypatch.setattr(sl, "most_surface_flux", spy)
+    monkeypatch.setattr(pip, "most_surface_flux", spy)
+    dims = dict(nx=4, ny=4, nz=6, Lx=400.0, Ly=400.0, Lz=400.0)
+    g = sl.make_grid(sl.SpectralLESConfig(**dims, most_zeta_cap_width=1.25),
+                     dtype=jnp.float64)
+    sh = (4, 4, 6)
+    u = jnp.full(sh, 3.0)
+    sl.rhs(u, jnp.zeros(sh), jnp.zeros((4, 4, 7)), g, (3.0, 0.0), 1e-4,
+           theta=jnp.full(sh, 265.0), t_sfc=jnp.asarray(263.0))
+    pcfg = pip.PseudoIncompressibleConfig(**dims, surface="most_cooling",
+                                          most_zeta_cap_width=0.75)
+    pg = pip.make_grid(pcfg, dtype=jnp.float64)
+    pip._surface_state(u, jnp.zeros(sh), jnp.full(sh, 265.0), pg,
+                       pip.PseudoIncompressibleForcing(t_sfc=jnp.asarray(263.0)))
+    assert seen == [1.25, 0.75], seen
+
+
+if __name__ == "__main__":
+    base = dict(np.load(_CAP_FILE))
+    base["gap"] = _cap_outputs(W) - base["hard"]
+    np.savez(_CAP_FILE, **base)
+    print("wrote", _CAP_FILE)

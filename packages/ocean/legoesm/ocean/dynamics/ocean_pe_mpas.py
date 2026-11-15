@@ -86,6 +86,12 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
     validate_bottom_drag_scheme,
 )
 from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+from legoesm.ocean.dynamics.ocean_pe_generic import (
+    OceanPECoeffs,
+    OceanPEOperators,
+    ocean_baroclinic_tendencies,
+)
+from legoesm.grids.operator_adapters import mpas_neighbour_operators
 from legoesm import constants
 
 
@@ -101,7 +107,48 @@ def mpas_ocean_baroclinic_tendencies(
     halo_refresh=None,
     term_diagnostics: bool = False,
 ) -> MPASOceanTendencies:
-    """Compute baroclinic (slow) tendencies for MPAS ocean.
+    """Baroclinic (slow) tendencies of the MPAS ocean.
+
+    z* configurations run on the shared core
+    (:func:`mpas_ocean_pe_tendencies`, thickness-weighted lateral tracer
+    diffusion); partial cells, ``pgf_scheme="zero"``, non-linear / BBL /
+    background-velocity bottom drag and ``term_diagnostics`` run the original
+    code (:func:`_mpas_tendencies_outside_core`).  KNOWN DEFECT: that original
+    code's lateral tracer diffusion is not thickness weighted and leaks heat
+    and salt where the layer thickness varies (5.3e-6 of the gross on the
+    shared-core test fixture).
+    """
+    # Dispatch hardening (#1484 codex): this is a PUBLIC entrypoint, so a typo
+    # must not fall through the "not in (none, real_freshwater)" test and
+    # silently run the virtual-salt closure. The constructor validates too;
+    # this is the direct-call path.
+    _VALID_FW = ("none", "virtual_salt_flux", "real_freshwater")
+    if config.freshwater_closure not in _VALID_FW:
+        raise ValueError(
+            f"freshwater_closure must be one of {_VALID_FW}, got "
+            f"{config.freshwater_closure!r} (mpas_ocean_baroclinic_tendencies)")
+    if not term_diagnostics and _outside_shared_core(z_coord, config) is None:
+        return mpas_ocean_pe_tendencies(
+            state, mesh, z_coord, config, freshwater=freshwater, physics_fn=physics_fn,
+            surface_forcing=surface_forcing, sponge=sponge, halo_refresh=halo_refresh)
+    return _mpas_tendencies_outside_core(
+        state, mesh, z_coord, config, freshwater, physics_fn, surface_forcing, sponge,
+        halo_refresh, term_diagnostics)
+
+
+def _mpas_tendencies_outside_core(
+    state: MPASOceanState,
+    mesh,
+    z_coord: OceanZStarCoordinate,
+    config: MPASOceanConfig = MPASOceanConfig(),
+    freshwater: FreshwaterForcing | None = None,
+    physics_fn=None,
+    surface_forcing=None,
+    sponge=None,
+    halo_refresh=None,
+    term_diagnostics: bool = False,
+) -> MPASOceanTendencies:
+    """Original MPAS baroclinic tendencies (lanes outside the shared core).
 
     Parameters
     ----------
@@ -125,15 +172,6 @@ def mpas_ocean_baroclinic_tendencies(
     -------
     MPASOceanTendencies
     """
-    # Dispatch hardening (#1484 codex): this is a PUBLIC entrypoint, so a typo
-    # must not fall through the "not in (none, real_freshwater)" test below and
-    # silently run the virtual-salt closure. The constructor validates too;
-    # this is the direct-call path.
-    _VALID_FW = ("none", "virtual_salt_flux", "real_freshwater")
-    if config.freshwater_closure not in _VALID_FW:
-        raise ValueError(
-            f"freshwater_closure must be one of {_VALID_FW}, got "
-            f"{config.freshwater_closure!r} (mpas_ocean_baroclinic_tendencies)")
     g = config.g
     rho_0 = config.rho_0
 
@@ -147,88 +185,8 @@ def mpas_ocean_baroclinic_tendencies(
     c1 = mesh.cellsOnEdge[0]  # (nEdges,)
     c2 = mesh.cellsOnEdge[1]  # (nEdges,)
 
-    def _fill_land_cells_mpas(field_cell, mask_cell):
-        return fill_land_cells_mpas(field_cell, mask_cell, c1, c2,
-                                    mesh.edgesOnCell, mesh.nEdgesOnCell,
-                                    band_capacity=config.land_fill_band_capacity)
-
-    # ---- Layer thickness and Jacobian ----
-    jacobian = compute_ocean_jacobian(
-        eta, H_bathy, z_coord,
-        min_water_column_m=config.min_water_column_m,
-    )
-    h_k = compute_layer_thickness(
-        eta, H_bathy, z_coord,
-        min_water_column_m=config.min_water_column_m,
-    )  # (nCells, nlev)
-
-    # ---- Density and hydrostatic pressure ----
-    # Fill land-cell T/S with ocean-neighbor values before EOS so that
-    # density on land ≈ ρ₀, preventing spurious ρ' at coastlines.
-    # Uses the reference Jacobian (J=1, eta=0): the barotropic solver
-    # handles g*grad(eta) and using actual J here would double-count it.
-    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
-    # Depth-dependent reference profile for ρ'.  Two flavors:
-    #   * STATIC (preferred): if ``state.rho_ref_z`` was populated at
-    #     init, ρ' = ρ − ρ_ref(z) using a frozen profile.  Cuts the
-    #     partial-cell PGF residual ~24× without the dynamic version's
-    #     positive-feedback drift (project_mpas_etopo_instability.md
-    #     §8g).  Always wins when present.
-    #   * DYNAMIC (legacy / discouraged): wet-cell mean recomputed every
-    #     call (``use_baroclinic_rho_ref=True``).  NaN'd at day 60 on
-    #     ETOPO+ico4 because ρ_ref chases T,S drift.  Kept only for
-    #     back-compat / comparison.
-    _rho_ref_z_static = (
-        state.rho_ref_z.data if state.rho_ref_z is not None else None
-    )
-    _use_dd_rho_ref = getattr(config, "use_baroclinic_rho_ref", False)
-    if _use_dd_rho_ref and isinstance(z_coord, OceanPartialCellCoordinate):
-        _is_active_3d = z_coord.is_active.astype(T_3d.dtype)
-    else:
-        _is_active_3d = None
-    # Integrate the baroclinic pressure anomaly p' against the actual
-    # partial-cell thickness h_k (NEMO ``ln_hpg_zps`` / MITgcm) ONLY for
-    # the Adcroft scheme.  This is the matched partner of the
-    # ``pgf_scheme == "adcroft"`` Adcroft–Campin face-correction branch
-    # below and MUST fire under the same guard: the AC correction reads
-    # centroid depths from h_partial, so p' has to be on the h_partial
-    # grid too (commit 62913cbe6 fixed that mismatch by enabling
-    # ``use_h_actual_pgf`` for the adcroft comparison runs).
-    #
-    # The bare "centered" scheme carries NO such correction.  Integrating
-    # p' on h_partial places p'[k] at each cell's *actual* centroid
-    # depth, which differs across a bottom-level step; the centered
-    # ``gradient_edge(p')`` then differences pressures at mismatched
-    # depths, injecting an uncompensated spurious ∇p' that blows up the
-    # rest state on a seamount step (max|u| 5.5e-4 → 1.2e-1 over 1 h).
-    # Centered therefore always integrates p' on the dz_ref reference-
-    # depth grid (its stable, common-depth treatment) regardless of
-    # ``use_h_actual_pgf``.  smc03/ahh08/zero drop p' from the Bernoulli
-    # scalar entirely, so the choice is moot for them and they too keep
-    # the dz_ref default.  When unset, falls back to dz_ref (legacy z*).
-    _use_h_actual_pgf = (
-        getattr(config, "use_h_actual_pgf", False)
-        and getattr(config, "pgf_scheme", "centered") == "adcroft"
-    )
-    if _use_h_actual_pgf and isinstance(z_coord, OceanPartialCellCoordinate):
-        _h_for_pgf = h_k
-    else:
-        _h_for_pgf = None
-    rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
-        T_3d, S_3d, mask,
-        lambda field: _fill_land_cells_mpas(field, mask),
-        eos_fn, z_coord.dz_ref, rho_0, g,
-        n_iter=2,
-        use_depth_dependent_ref=_use_dd_rho_ref,
-        is_active_3d=_is_active_3d,
-        h_actual=_h_for_pgf,
-        rho_ref_z_static=_rho_ref_z_static,
-        allow_baroclinic_f32=True,   # opt-in f32-EOS lever (LEGOESM_BAROCLINIC_F32)
-    )
-
-    # Fill land cells in p_prime before gradient_edge so the 2-cell
-    # stencil sees smooth values at coastlines.
-    p_prime = _fill_land_cells_mpas(p_prime, mask)
+    jacobian, h_k, rho_prime, p_prime = mpas_ocean_geometry_and_density(
+        state, mesh, z_coord, config)
 
     # ---- Edge mask for land boundaries ----
     edge_mask = mask[c1] * mask[c2]  # 1 only if both cells are ocean
@@ -492,173 +450,9 @@ def mpas_ocean_baroclinic_tendencies(
             f"(allowed: 'centered', 'adcroft', 'smc03', 'ahh08', 'zero')",
         )
 
-    # PV flux: RELATIVE vorticity only, q = ζ(u)/h. Planetary Coriolis is
-    # applied separately (a) as online f·v_t(u_bar) in the barotropic
-    # substep and (b) as a forward-backward Matsuno correction on the
-    # 3D perturbation in the step() function. This matches the lat-lon
-    # C-grid pattern and sidesteps the frozen-Coriolis instability that
-    # follows from carrying planetary Coriolis in the baroclinic-step
-    # depth-mean forcing (τ ~ 1/f ≈ 0.2 days at mid-latitudes; see #160).
-    #
-    # P4 of MPAS realistic-geometry plan: on partial-cell coordinates,
-    # use the hybrid vertex thickness (active-renormalized kite-area
-    # mean in the interior, min-over-active fallback at coasts) for
-    # the q = ζ/h_v normalization.  Pure kite-mean lets a thin partial
-    # vertex transmit O(1) PV flux from a deep neighbor and drive
-    # spurious coastal currents (per the dycore audit).  The
-    # downstream ``du_dt_full * edge_mask`` already zeros the
-    # perimeter contribution from edges with one dry cell, so we do
-    # NOT additionally mask the Thuburn tangential reconstruction
-    # (per audit recommendation; keeps the discrete summation-by-
-    # parts identity intact on the wet sub-mesh).  Default
-    # ``pv_scheme="enstrophy"`` (already in MPASOceanConfig) is the
-    # right choice for realistic bathymetry per the audit.
-    zero_f = jnp.zeros_like(mesh.fVertex)
-    if isinstance(z_coord, OceanPartialCellCoordinate):
-        zeta = curl_vertex_3d(u_3d, mesh)
-        h_v_hybrid = vertex_thickness_hybrid(
-            h_k, mesh, alpha=config.vertex_thickness_alpha,
-        )
-        h_v_safe = jnp.maximum(h_v_hybrid, 1.0e-10)
-        q_relative = (zeta + zero_f[:, None]) / h_v_safe
-    else:
-        q_relative = potential_vorticity_vertex_3d(
-            u_3d, h_k, zero_f, mesh,
-        )  # (nVertices, nlev); equals ζ/h_v_kite
+    pv_flux = mpas_ocean_pv_flux(u_3d, h_k, h_e_3d, z_coord, mesh, config)
 
-    # APVM (Anticipated Potential Vorticity Method, Sadourny & Basdevant
-    # 1985; Ringler et al. 2010) upstream-biases q by dt_apvm/2 to damp
-    # the ζ-checkerboard null mode of the energy-conserving PV flux.
-    # Without it, a 2Δx vortex mode at vertices amplifies through
-    # nonlinear interactions (observed: τ ~ 1 d at U=0.2 m/s on 20 km).
-    if config.apvm_dt > 0.0:
-        q_relative = apvm_correction_3d(q_relative, u_3d, mesh, config.apvm_dt)
-
-    # ``h_e_3d`` is already computed above (line 158); pass it via
-    # ``h_edge_3d=`` so ``pv_flux_*_conserving_3d`` skips its internal
-    # ``edge_thickness_3d`` (i.e. one redundant ``cellsOnEdge`` gather).
-    if config.pv_scheme == "energy":
-        pv_flux = pv_flux_energy_conserving_3d(
-            u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
-        )
-    elif config.pv_scheme == "mixed":
-        # Weighted blend: α·F_energy + (1−α)·F_enstrophy. α=1 reverts to
-        # pure energy-conserving; α=0 to pure enstrophy-conserving. For the
-        # Eady ζ-checkerboard null mode, α ≈ 0.6–0.9 preserves most of the
-        # BCI growth rate while inheriting the enstrophy scheme's stability.
-        alpha = config.pv_alpha
-        pv_flux = (
-            alpha * pv_flux_energy_conserving_3d(
-                u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
-            )
-            + (1.0 - alpha)
-              * pv_flux_enstrophy_conserving_3d(
-                  u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
-              ))
-    elif config.pv_scheme == "enstrophy":
-        pv_flux = pv_flux_enstrophy_conserving_3d(
-            u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
-        )
-    else:
-        raise ValueError(
-            f"Unknown pv_scheme {config.pv_scheme!r}; "
-            "expected one of: 'energy', 'enstrophy', 'mixed'."
-        )
-
-    # Horizontal viscosity on TOTAL velocity (not perturbation).
-    # The depth-average of the viscous tendency enters F_slow and damps
-    # the barotropic mode.  This matches MOM6, NEMO, POP, and the
-    # lat-lon implementation (Hallberg 1997).  Previously acted on
-    # u_prime_3d, which zeroed the barotropic viscous contribution.
-    # On MPAS, K_zeta_bih already provided barotropic damping (it acts
-    # on u_3d), so the effect is secondary — but switching to u_3d
-    # for A_h/B_h/C_smag is the correct formulation.
-    visc = jnp.zeros_like(u_3d)
-    # Per-edge equatorial-boost factor for A_h (and B_h).  Boosts
-    # damping at low latitudes where the implicit-CN solver's Coriolis
-    # restoring fails (f→0).  Diagnosed in project_mpas_etopo_
-    # instability.md §"equatorial mode": top-100 hot-spot edges
-    # cluster at mean |lat|=22°, peaking in equatorial Pacific.
-    _eq_boost = config.equatorial_visc_boost
-    if _eq_boost > 0:
-        # Tight Gaussian centered at equator (default sigma=5° matches lat-lon
-        # production config).  Previous cos²(lat) was too wide — it
-        # overdamped real mid-latitude dynamics while the instability is
-        # confined to |lat| < 10°.
-        if config.equatorial_visc_sigma_deg <= 0:
-            raise ValueError(
-                "equatorial_visc_sigma_deg must be > 0 when "
-                "equatorial_visc_boost > 0 (Gaussian width divides latEdge; "
-                f"got {config.equatorial_visc_sigma_deg})."
-            )
-        _sigma_rad = jnp.radians(config.equatorial_visc_sigma_deg)
-        _lat_e = mesh.latEdge.astype(u_3d.dtype)
-        _gauss = jnp.exp(-0.5 * (_lat_e / _sigma_rad) ** 2)
-        _lat_factor = (1.0 + _eq_boost * _gauss)[:, jnp.newaxis]  # (nEdges, 1)
-    else:
-        _lat_factor = 1.0
-    _mid_refresh = None if halo_refresh is None else halo_refresh.edges
-    if config.A_h > 0 and config.B_h > 0:
-        _del2_u_visc = vector_laplacian_del2_3d(u_3d, mesh)
-        visc = visc + config.A_h * _lat_factor * _del2_u_visc
-        # vector_laplacian_del4 = -del2(del2); fold the sign into the
-        # subtraction so the arithmetic matches ``+ B_h * del4``.
-        # [stage-halo T1] the shared intermediate feeds a SECOND del2
-        # (4 hops total > halo_depth) — refresh its ring first; the A_h
-        # term above already consumed only 2 hops and stays as-is.
-        _del2_for_del4 = _del2_u_visc
-        if _mid_refresh is not None:
-            (_del2_for_del4,) = _mid_refresh(_del2_for_del4)
-        visc = visc - config.B_h * _lat_factor * vector_laplacian_del2_3d(_del2_for_del4, mesh)
-    elif config.A_h > 0:
-        visc = visc + config.A_h * _lat_factor * vector_laplacian_del2_3d(u_3d, mesh)
-    elif config.B_h > 0:
-        visc = visc + config.B_h * _lat_factor * vector_laplacian_del4_3d(
-            u_3d, mesh, mid_refresh=_mid_refresh)
-
-    # Flow-dependent Smagorinsky biharmonic viscosity
-    if config.C_smag > 0:
-        visc = visc + smagorinsky_biharmonic_3d(
-            u_3d, mesh, config.C_smag, mid_refresh=_mid_refresh)
-
-    # Flow-dependent Smagorinsky Laplacian viscosity
-    # Unlike the biharmonic variant, this damps ALL scales where strain
-    # is large (not just grid-scale).  Effective at coarse resolution
-    # (~120 km) where the biharmonic Smagorinsky produces zero.
-    # Matches the lat-lon ``C_smag_lap`` scheme.
-    if getattr(config, "C_smag_lap", 0.0) > 0:
-        visc = visc + _lat_factor * smagorinsky_laplacian_3d(
-            u_3d, mesh, config.C_smag_lap)
-
-    # Flow-dependent Leith biharmonic viscosity
-    if getattr(config, "C_leith", 0.0) > 0:
-        visc = visc + leith_biharmonic_3d(
-            u_3d, mesh, config.C_leith,
-            modified=getattr(config, "C_leith_modified", False),
-            mid_refresh=_mid_refresh)
-
-    # Biharmonic dissipation on relative vorticity ζ (scale-selective damping
-    # of grid-scale vorticity patterns — notably the ζ-checkerboard null
-    # mode of the energy-conserving PV flux).  This is applied to the total
-    # velocity u_3d (not u_prime_3d) because ζ is a derived quantity and the
-    # full ζ (including the planetary-Coriolis-free baroclinic+barotropic ζ)
-    # carries the null-mode amplitude.  Invisible to ``B_h·del4(u)`` because
-    # the null mode lives in the kernel of the discrete curl-to-velocity map.
-    if config.K_zeta_bih is None:
-        raise ValueError(
-            "MPAS ocean tendency: config.K_zeta_bih is None (the DERIVED "
-            "sentinel). It is resolved from the mesh by MPASOceanModel; build "
-            "the model, or pass a config with an explicit coefficient "
-            "(0.0 = the term off).")
-    if config.K_zeta_bih > 0:
-        # [stage-halo T3] vertex-channel mid-refresh: the curl -> vertex-
-        # Laplacian -> tangential-gradient chain is 3 hops (codex r1 #2 —
-        # the NEMO-match recipe runs K_zeta_bih=1e14, so without this the
-        # stage-correct claim was false for the production config).
-        visc = visc + config.K_zeta_bih * biharmonic_vorticity_del4_3d(
-            u_3d, mesh,
-            mid_refresh=(None if halo_refresh is None
-                         else halo_refresh.vertices))
+    visc = mpas_ocean_momentum_viscosity(u_3d, mesh, config, halo_refresh)
 
     # Vertical advection of perturbation momentum (#171 Level-1).
     w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
@@ -982,6 +776,78 @@ def mpas_ocean_baroclinic_tendencies(
     # freshwater, and the z-star tracer step conserves h*S while the column
     # stretches, so a VSF on top is a spurious salt source NEMO does not
     # have.  The genuine surface_forcing.salt_flux pathway is untouched.
+    dT_dt_3d, dS_dt_3d = mpas_ocean_freshwater_salt_sources(
+        dT_dt_3d, dS_dt_3d, T_3d, S_3d, h_k, mask, mesh, config, freshwater,
+        surface_forcing, halo_refresh)
+
+    # ---- Sponge layer relaxation ----
+    # Cast sponge arrays to state dtype to prevent float64 promotion when
+    # the precision policy stores state in float32 (crashes barotropic scan).
+    if sponge is not None:
+        dT_dt_3d, dS_dt_3d = apply_sponge_tracer_relaxation(
+            dT_dt_3d, dS_dt_3d, T_3d, S_3d, sponge, mask=mask,
+            expand_gamma_axis=-1,
+        )
+        # Edge velocity sponge (if reference velocity provided).
+        # EXT-N1 guard (mirrors ocean_pe_latlon_cgrid._bc_sponge_relaxation):
+        # a full-rank (per-cell, z-varying) gamma supports TRACER relaxation
+        # only.  The momentum sponge below averages gamma to edges and then
+        # broadcasts over the vertical with ``gamma_edge[:, None]``; a
+        # ``(nCells, nlev)`` gamma would silently broadcast to
+        # ``(nEdges, nlev, nlev)`` (a wrong-shaped momentum increment) instead.
+        # Static shapes ⇒ trace-time error, never a silently wrong broadcast.
+        if sponge.u_ref is not None:
+            if sponge.gamma.ndim == T_3d.ndim:
+                raise ValueError(
+                    "3-D (full-rank per-cell) SpongeForcing.gamma supports "
+                    "tracer relaxation only; u_ref requires a 1-D "
+                    "(nCells,) horizontal gamma (the MPAS momentum sponge "
+                    "averages gamma to edges and broadcasts over the "
+                    "vertical).")
+            _dt = T_3d.dtype
+            gamma_edge = 0.5 * (sponge.gamma.astype(_dt)[c1] + sponge.gamma.astype(_dt)[c2])
+            gamma_edge_3d = gamma_edge[:, jnp.newaxis]
+            du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref.astype(_dt) - u_3d) * edge_mask[:, jnp.newaxis]
+
+    if term_diagnostics:
+        # Debug-only: the momentum tendency split by operator (masked as in
+        # du_dt_full). Static Python flag, so the production trace is untouched.
+        return MPASOceanTendencies(
+            du_dt=Field(data=du_dt_3d, name="du_dt",
+                        dims=("nEdges", "nlev"), units="m/s²"),
+            dT_dt=Field(data=dT_dt_3d, name="dT_dt",
+                        dims=("nCells", "nlev"), units="degC/s"),
+            dS_dt=Field(data=dS_dt_3d, name="dS_dt",
+                        dims=("nCells", "nlev"), units="PSU/s"),
+            deta_dt=Field(data=deta_dt, name="deta_dt",
+                          dims=("nCells",), units="m/s"),
+            F_slow_u=Field(data=F_slow_u, name="F_slow_u",
+                           dims=("nEdges",), units="m/s²"),
+        ), {"grad_B": -grad_B * edge_mask_3d, "pv_flux": pv_flux * edge_mask_3d,
+            "visc": visc * edge_mask_3d, "vert_adv_u": vert_adv_u * edge_mask_3d,
+            "du_dt_full": du_dt_full, "w_e": w_e, "h_e_3d": h_e_3d}
+    return MPASOceanTendencies(
+        du_dt=Field(data=du_dt_3d, name="du_dt",
+                    dims=("nEdges", "nlev"), units="m/s²"),
+        dT_dt=Field(data=dT_dt_3d, name="dT_dt",
+                    dims=("nCells", "nlev"), units="degC/s"),
+        dS_dt=Field(data=dS_dt_3d, name="dS_dt",
+                    dims=("nCells", "nlev"), units="PSU/s"),
+        deta_dt=Field(data=deta_dt, name="deta_dt",
+                      dims=("nCells",), units="m/s"),
+        F_slow_u=Field(data=F_slow_u, name="F_slow_u",
+                       dims=("nEdges",), units="m/s²"),
+    )
+
+
+
+
+def mpas_ocean_freshwater_salt_sources(dT_dt_3d, dS_dt_3d, T_3d, S_3d, h_k, mask, mesh,
+                                       config, freshwater=None, surface_forcing=None,
+                                       halo_refresh=None):
+    """Virtual-salt freshwater closure (+ its temperature twin) and the real
+    surface salt-mass flux of the MPAS ocean tendency (pure move from
+    :func:`mpas_ocean_baroclinic_tendencies`).  Returns ``(dT_dt_3d, dS_dt_3d)``."""
     if (freshwater is not None
             and config.freshwater_closure not in ("none", "real_freshwater")):
         # When ``normalize_freshwater`` is on, remove the global area-mean of the
@@ -1125,66 +991,284 @@ def mpas_ocean_baroclinic_tendencies(
             jnp.asarray(_sf_salt, dS_dt_3d.dtype), h_k[:, 0], config.rho_0,
         )
         dS_dt_3d = dS_dt_3d.at[:, 0].add(dS_salt * mask)
+    return dT_dt_3d, dS_dt_3d
 
-    # ---- Sponge layer relaxation ----
-    # Cast sponge arrays to state dtype to prevent float64 promotion when
-    # the precision policy stores state in float32 (crashes barotropic scan).
-    if sponge is not None:
-        dT_dt_3d, dS_dt_3d = apply_sponge_tracer_relaxation(
-            dT_dt_3d, dS_dt_3d, T_3d, S_3d, sponge, mask=mask,
-            expand_gamma_axis=-1,
-        )
-        # Edge velocity sponge (if reference velocity provided).
-        # EXT-N1 guard (mirrors ocean_pe_latlon_cgrid._bc_sponge_relaxation):
-        # a full-rank (per-cell, z-varying) gamma supports TRACER relaxation
-        # only.  The momentum sponge below averages gamma to edges and then
-        # broadcasts over the vertical with ``gamma_edge[:, None]``; a
-        # ``(nCells, nlev)`` gamma would silently broadcast to
-        # ``(nEdges, nlev, nlev)`` (a wrong-shaped momentum increment) instead.
-        # Static shapes ⇒ trace-time error, never a silently wrong broadcast.
-        if sponge.u_ref is not None:
-            if sponge.gamma.ndim == T_3d.ndim:
-                raise ValueError(
-                    "3-D (full-rank per-cell) SpongeForcing.gamma supports "
-                    "tracer relaxation only; u_ref requires a 1-D "
-                    "(nCells,) horizontal gamma (the MPAS momentum sponge "
-                    "averages gamma to edges and broadcasts over the "
-                    "vertical).")
-            _dt = T_3d.dtype
-            gamma_edge = 0.5 * (sponge.gamma.astype(_dt)[c1] + sponge.gamma.astype(_dt)[c2])
-            gamma_edge_3d = gamma_edge[:, jnp.newaxis]
-            du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref.astype(_dt) - u_3d) * edge_mask[:, jnp.newaxis]
+def mpas_ocean_geometry_and_density(state, mesh, z_coord, config):
+    """Layer thickness, Jacobian, density anomaly and the land-filled
+    baroclinic pressure anomaly of the MPAS ocean tendency (pure move from
+    :func:`mpas_ocean_baroclinic_tendencies`).  Returns ``(jacobian, h_k,
+    rho_prime, p_prime)``."""
+    g = config.g
+    rho_0 = config.rho_0
+    T_3d = state.T.data
+    S_3d = state.S.data
+    eta = state.eta.data
+    H_bathy = state.H_bathy.data
+    mask = state.land_mask.data
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
 
-    if term_diagnostics:
-        # Debug-only: the momentum tendency split by operator (masked as in
-        # du_dt_full). Static Python flag, so the production trace is untouched.
-        return MPASOceanTendencies(
-            du_dt=Field(data=du_dt_3d, name="du_dt",
-                        dims=("nEdges", "nlev"), units="m/s²"),
-            dT_dt=Field(data=dT_dt_3d, name="dT_dt",
-                        dims=("nCells", "nlev"), units="degC/s"),
-            dS_dt=Field(data=dS_dt_3d, name="dS_dt",
-                        dims=("nCells", "nlev"), units="PSU/s"),
-            deta_dt=Field(data=deta_dt, name="deta_dt",
-                          dims=("nCells",), units="m/s"),
-            F_slow_u=Field(data=F_slow_u, name="F_slow_u",
-                           dims=("nEdges",), units="m/s²"),
-        ), {"grad_B": -grad_B * edge_mask_3d, "pv_flux": pv_flux * edge_mask_3d,
-            "visc": visc * edge_mask_3d, "vert_adv_u": vert_adv_u * edge_mask_3d,
-            "du_dt_full": du_dt_full, "w_e": w_e, "h_e_3d": h_e_3d}
-    return MPASOceanTendencies(
-        du_dt=Field(data=du_dt_3d, name="du_dt",
-                    dims=("nEdges", "nlev"), units="m/s²"),
-        dT_dt=Field(data=dT_dt_3d, name="dT_dt",
-                    dims=("nCells", "nlev"), units="degC/s"),
-        dS_dt=Field(data=dS_dt_3d, name="dS_dt",
-                    dims=("nCells", "nlev"), units="PSU/s"),
-        deta_dt=Field(data=deta_dt, name="deta_dt",
-                      dims=("nCells",), units="m/s"),
-        F_slow_u=Field(data=F_slow_u, name="F_slow_u",
-                       dims=("nEdges",), units="m/s²"),
+    def _fill_land_cells_mpas(field_cell, mask_cell):
+        return fill_land_cells_mpas(field_cell, mask_cell, c1, c2,
+                                    mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                    band_capacity=config.land_fill_band_capacity)
+
+    # ---- Layer thickness and Jacobian ----
+    jacobian = compute_ocean_jacobian(
+        eta, H_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    )
+    h_k = compute_layer_thickness(
+        eta, H_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    )  # (nCells, nlev)
+
+    # ---- Density and hydrostatic pressure ----
+    # Fill land-cell T/S with ocean-neighbor values before EOS so that
+    # density on land ≈ ρ₀, preventing spurious ρ' at coastlines.
+    # Uses the reference Jacobian (J=1, eta=0): the barotropic solver
+    # handles g*grad(eta) and using actual J here would double-count it.
+    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    # Depth-dependent reference profile for ρ'.  Two flavors:
+    #   * STATIC (preferred): if ``state.rho_ref_z`` was populated at
+    #     init, ρ' = ρ − ρ_ref(z) using a frozen profile.  Cuts the
+    #     partial-cell PGF residual ~24× without the dynamic version's
+    #     positive-feedback drift (project_mpas_etopo_instability.md
+    #     §8g).  Always wins when present.
+    #   * DYNAMIC (legacy / discouraged): wet-cell mean recomputed every
+    #     call (``use_baroclinic_rho_ref=True``).  NaN'd at day 60 on
+    #     ETOPO+ico4 because ρ_ref chases T,S drift.  Kept only for
+    #     back-compat / comparison.
+    _rho_ref_z_static = (
+        state.rho_ref_z.data if state.rho_ref_z is not None else None
+    )
+    _use_dd_rho_ref = getattr(config, "use_baroclinic_rho_ref", False)
+    if _use_dd_rho_ref and isinstance(z_coord, OceanPartialCellCoordinate):
+        _is_active_3d = z_coord.is_active.astype(T_3d.dtype)
+    else:
+        _is_active_3d = None
+    # Integrate the baroclinic pressure anomaly p' against the actual
+    # partial-cell thickness h_k (NEMO ``ln_hpg_zps`` / MITgcm) ONLY for
+    # the Adcroft scheme.  This is the matched partner of the
+    # ``pgf_scheme == "adcroft"`` Adcroft–Campin face-correction branch
+    # below and MUST fire under the same guard: the AC correction reads
+    # centroid depths from h_partial, so p' has to be on the h_partial
+    # grid too (commit 62913cbe6 fixed that mismatch by enabling
+    # ``use_h_actual_pgf`` for the adcroft comparison runs).
+    #
+    # The bare "centered" scheme carries NO such correction.  Integrating
+    # p' on h_partial places p'[k] at each cell's *actual* centroid
+    # depth, which differs across a bottom-level step; the centered
+    # ``gradient_edge(p')`` then differences pressures at mismatched
+    # depths, injecting an uncompensated spurious ∇p' that blows up the
+    # rest state on a seamount step (max|u| 5.5e-4 → 1.2e-1 over 1 h).
+    # Centered therefore always integrates p' on the dz_ref reference-
+    # depth grid (its stable, common-depth treatment) regardless of
+    # ``use_h_actual_pgf``.  smc03/ahh08/zero drop p' from the Bernoulli
+    # scalar entirely, so the choice is moot for them and they too keep
+    # the dz_ref default.  When unset, falls back to dz_ref (legacy z*).
+    _use_h_actual_pgf = (
+        getattr(config, "use_h_actual_pgf", False)
+        and getattr(config, "pgf_scheme", "centered") == "adcroft"
+    )
+    if _use_h_actual_pgf and isinstance(z_coord, OceanPartialCellCoordinate):
+        _h_for_pgf = h_k
+    else:
+        _h_for_pgf = None
+    rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
+        T_3d, S_3d, mask,
+        lambda field: _fill_land_cells_mpas(field, mask),
+        eos_fn, z_coord.dz_ref, rho_0, g,
+        n_iter=2,
+        use_depth_dependent_ref=_use_dd_rho_ref,
+        is_active_3d=_is_active_3d,
+        h_actual=_h_for_pgf,
+        rho_ref_z_static=_rho_ref_z_static,
+        allow_baroclinic_f32=True,   # opt-in f32-EOS lever (LEGOESM_BAROCLINIC_F32)
     )
 
+    # Fill land cells in p_prime before gradient_edge so the 2-cell
+    # stencil sees smooth values at coastlines.
+    p_prime = _fill_land_cells_mpas(p_prime, mask)
+    return jacobian, h_k, rho_prime, p_prime
+
+
+def mpas_ocean_pv_flux(u_3d, h_k, h_e_3d, z_coord, mesh, config):
+    """Relative-vorticity PV flux of the MPAS ocean tendency (pure move from
+    :func:`mpas_ocean_baroclinic_tendencies`)."""
+    # PV flux: RELATIVE vorticity only, q = ζ(u)/h. Planetary Coriolis is
+    # applied separately (a) as online f·v_t(u_bar) in the barotropic
+    # substep and (b) as a forward-backward Matsuno correction on the
+    # 3D perturbation in the step() function. This matches the lat-lon
+    # C-grid pattern and sidesteps the frozen-Coriolis instability that
+    # follows from carrying planetary Coriolis in the baroclinic-step
+    # depth-mean forcing (τ ~ 1/f ≈ 0.2 days at mid-latitudes; see #160).
+    #
+    # P4 of MPAS realistic-geometry plan: on partial-cell coordinates,
+    # use the hybrid vertex thickness (active-renormalized kite-area
+    # mean in the interior, min-over-active fallback at coasts) for
+    # the q = ζ/h_v normalization.  Pure kite-mean lets a thin partial
+    # vertex transmit O(1) PV flux from a deep neighbor and drive
+    # spurious coastal currents (per the dycore audit).  The
+    # downstream ``du_dt_full * edge_mask`` already zeros the
+    # perimeter contribution from edges with one dry cell, so we do
+    # NOT additionally mask the Thuburn tangential reconstruction
+    # (per audit recommendation; keeps the discrete summation-by-
+    # parts identity intact on the wet sub-mesh).  Default
+    # ``pv_scheme="enstrophy"`` (already in MPASOceanConfig) is the
+    # right choice for realistic bathymetry per the audit.
+    zero_f = jnp.zeros_like(mesh.fVertex)
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        zeta = curl_vertex_3d(u_3d, mesh)
+        h_v_hybrid = vertex_thickness_hybrid(
+            h_k, mesh, alpha=config.vertex_thickness_alpha,
+        )
+        h_v_safe = jnp.maximum(h_v_hybrid, 1.0e-10)
+        q_relative = (zeta + zero_f[:, None]) / h_v_safe
+    else:
+        q_relative = potential_vorticity_vertex_3d(
+            u_3d, h_k, zero_f, mesh,
+        )  # (nVertices, nlev); equals ζ/h_v_kite
+
+    # APVM (Anticipated Potential Vorticity Method, Sadourny & Basdevant
+    # 1985; Ringler et al. 2010) upstream-biases q by dt_apvm/2 to damp
+    # the ζ-checkerboard null mode of the energy-conserving PV flux.
+    # Without it, a 2Δx vortex mode at vertices amplifies through
+    # nonlinear interactions (observed: τ ~ 1 d at U=0.2 m/s on 20 km).
+    if config.apvm_dt > 0.0:
+        q_relative = apvm_correction_3d(q_relative, u_3d, mesh, config.apvm_dt)
+
+    # ``h_e_3d`` is already computed above (line 158); pass it via
+    # ``h_edge_3d=`` so ``pv_flux_*_conserving_3d`` skips its internal
+    # ``edge_thickness_3d`` (i.e. one redundant ``cellsOnEdge`` gather).
+    if config.pv_scheme == "energy":
+        pv_flux = pv_flux_energy_conserving_3d(
+            u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
+        )
+    elif config.pv_scheme == "mixed":
+        # Weighted blend: α·F_energy + (1−α)·F_enstrophy. α=1 reverts to
+        # pure energy-conserving; α=0 to pure enstrophy-conserving. For the
+        # Eady ζ-checkerboard null mode, α ≈ 0.6–0.9 preserves most of the
+        # BCI growth rate while inheriting the enstrophy scheme's stability.
+        alpha = config.pv_alpha
+        pv_flux = (
+            alpha * pv_flux_energy_conserving_3d(
+                u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
+            )
+            + (1.0 - alpha)
+              * pv_flux_enstrophy_conserving_3d(
+                  u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
+              ))
+    elif config.pv_scheme == "enstrophy":
+        pv_flux = pv_flux_enstrophy_conserving_3d(
+            u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
+        )
+    else:
+        raise ValueError(
+            f"Unknown pv_scheme {config.pv_scheme!r}; "
+            "expected one of: 'energy', 'enstrophy', 'mixed'."
+        )
+    return pv_flux
+
+
+def mpas_ocean_momentum_viscosity(u_3d, mesh, config, halo_refresh=None):
+    """Horizontal momentum viscosity of the MPAS ocean tendency (pure move from
+    :func:`mpas_ocean_baroclinic_tendencies`)."""
+    # Horizontal viscosity on TOTAL velocity (not perturbation).
+    # The depth-average of the viscous tendency enters F_slow and damps
+    # the barotropic mode.  This matches MOM6, NEMO, POP, and the
+    # lat-lon implementation (Hallberg 1997).  Previously acted on
+    # u_prime_3d, which zeroed the barotropic viscous contribution.
+    # On MPAS, K_zeta_bih already provided barotropic damping (it acts
+    # on u_3d), so the effect is secondary — but switching to u_3d
+    # for A_h/B_h/C_smag is the correct formulation.
+    visc = jnp.zeros_like(u_3d)
+    # Per-edge equatorial-boost factor for A_h (and B_h).  Boosts
+    # damping at low latitudes where the implicit-CN solver's Coriolis
+    # restoring fails (f→0).  Diagnosed in project_mpas_etopo_
+    # instability.md §"equatorial mode": top-100 hot-spot edges
+    # cluster at mean |lat|=22°, peaking in equatorial Pacific.
+    _eq_boost = config.equatorial_visc_boost
+    if _eq_boost > 0:
+        # Tight Gaussian centered at equator (default sigma=5° matches lat-lon
+        # production config).  Previous cos²(lat) was too wide — it
+        # overdamped real mid-latitude dynamics while the instability is
+        # confined to |lat| < 10°.
+        if config.equatorial_visc_sigma_deg <= 0:
+            raise ValueError(
+                "equatorial_visc_sigma_deg must be > 0 when "
+                "equatorial_visc_boost > 0 (Gaussian width divides latEdge; "
+                f"got {config.equatorial_visc_sigma_deg})."
+            )
+        _sigma_rad = jnp.radians(config.equatorial_visc_sigma_deg)
+        _lat_e = mesh.latEdge.astype(u_3d.dtype)
+        _gauss = jnp.exp(-0.5 * (_lat_e / _sigma_rad) ** 2)
+        _lat_factor = (1.0 + _eq_boost * _gauss)[:, jnp.newaxis]  # (nEdges, 1)
+    else:
+        _lat_factor = 1.0
+    _mid_refresh = None if halo_refresh is None else halo_refresh.edges
+    if config.A_h > 0 and config.B_h > 0:
+        _del2_u_visc = vector_laplacian_del2_3d(u_3d, mesh)
+        visc = visc + config.A_h * _lat_factor * _del2_u_visc
+        # vector_laplacian_del4 = -del2(del2); fold the sign into the
+        # subtraction so the arithmetic matches ``+ B_h * del4``.
+        # [stage-halo T1] the shared intermediate feeds a SECOND del2
+        # (4 hops total > halo_depth) — refresh its ring first; the A_h
+        # term above already consumed only 2 hops and stays as-is.
+        _del2_for_del4 = _del2_u_visc
+        if _mid_refresh is not None:
+            (_del2_for_del4,) = _mid_refresh(_del2_for_del4)
+        visc = visc - config.B_h * _lat_factor * vector_laplacian_del2_3d(_del2_for_del4, mesh)
+    elif config.A_h > 0:
+        visc = visc + config.A_h * _lat_factor * vector_laplacian_del2_3d(u_3d, mesh)
+    elif config.B_h > 0:
+        visc = visc + config.B_h * _lat_factor * vector_laplacian_del4_3d(
+            u_3d, mesh, mid_refresh=_mid_refresh)
+
+    # Flow-dependent Smagorinsky biharmonic viscosity
+    if config.C_smag > 0:
+        visc = visc + smagorinsky_biharmonic_3d(
+            u_3d, mesh, config.C_smag, mid_refresh=_mid_refresh)
+
+    # Flow-dependent Smagorinsky Laplacian viscosity
+    # Unlike the biharmonic variant, this damps ALL scales where strain
+    # is large (not just grid-scale).  Effective at coarse resolution
+    # (~120 km) where the biharmonic Smagorinsky produces zero.
+    # Matches the lat-lon ``C_smag_lap`` scheme.
+    if getattr(config, "C_smag_lap", 0.0) > 0:
+        visc = visc + _lat_factor * smagorinsky_laplacian_3d(
+            u_3d, mesh, config.C_smag_lap)
+
+    # Flow-dependent Leith biharmonic viscosity
+    if getattr(config, "C_leith", 0.0) > 0:
+        visc = visc + leith_biharmonic_3d(
+            u_3d, mesh, config.C_leith,
+            modified=getattr(config, "C_leith_modified", False),
+            mid_refresh=_mid_refresh)
+
+    # Biharmonic dissipation on relative vorticity ζ (scale-selective damping
+    # of grid-scale vorticity patterns — notably the ζ-checkerboard null
+    # mode of the energy-conserving PV flux).  This is applied to the total
+    # velocity u_3d (not u_prime_3d) because ζ is a derived quantity and the
+    # full ζ (including the planetary-Coriolis-free baroclinic+barotropic ζ)
+    # carries the null-mode amplitude.  Invisible to ``B_h·del4(u)`` because
+    # the null mode lives in the kernel of the discrete curl-to-velocity map.
+    if config.K_zeta_bih is None:
+        raise ValueError(
+            "MPAS ocean tendency: config.K_zeta_bih is None (the DERIVED "
+            "sentinel). It is resolved from the mesh by MPASOceanModel; build "
+            "the model, or pass a config with an explicit coefficient "
+            "(0.0 = the term off).")
+    if config.K_zeta_bih > 0:
+        # [stage-halo T3] vertex-channel mid-refresh: the curl -> vertex-
+        # Laplacian -> tangential-gradient chain is 3 hops (codex r1 #2 —
+        # the NEMO-match recipe runs K_zeta_bih=1e14, so without this the
+        # stage-correct claim was false for the production config).
+        visc = visc + config.K_zeta_bih * biharmonic_vorticity_del4_3d(
+            u_3d, mesh,
+            mid_refresh=(None if halo_refresh is None
+                         else halo_refresh.vertices))
+    return visc
 
 def _vertical_diffusion(field_3d, dz_half, dz, jacobian, coeff, is_edge, mesh):
     """Compute vertical diffusion d/dz(coeff * df/dz).
@@ -1238,3 +1322,125 @@ def _vertical_diffusion(field_3d, dz_half, dz, jacobian, coeff, is_edge, mesh):
 
     dz_safe = jnp.maximum(dz_actual, 1e-10)
     return (flux_above - flux_below) / dz_safe
+
+
+# ============================================================================
+# Shared-core plug-ins (see ocean_pe_generic)
+# ============================================================================
+
+def _outside_shared_core(z_coord, config) -> str | None:
+    """Why this configuration does not run on the shared core (None if it does)."""
+    if not isinstance(z_coord, OceanZStarCoordinate):
+        return f"coordinate {type(z_coord).__name__} (z* only)"
+    # On z* the adcroft / smc03 / ahh08 corrections are inactive in the model
+    # (they act on partial cells only), so all three equal "centered" there.
+    if config.pgf_scheme not in ("centered", "adcroft", "smc03", "ahh08"):
+        return f"pgf_scheme={config.pgf_scheme!r}"
+    if validate_bottom_drag_scheme(str(config.bottom_drag_scheme)) != "legacy" or (
+            config.bottom_drag_r > 0 and (config.bottom_drag_bbl_thickness > 0
+                                          or config.bottom_drag_bg_velocity > 0)):
+        return "bottom drag other than linear bottom-level drag"
+    return None
+
+
+def mpas_ocean_pe_operators(state, mesh, z_coord, config=MPASOceanConfig(), *,
+                            freshwater=None, physics_fn=None, surface_forcing=None,
+                            halo_refresh=None):
+    """MPAS / TRiSK plug-ins of :func:`.ocean_pe_generic.ocean_baroclinic_tendencies`."""
+    # Dispatch hardening (#1484 codex): this is a PUBLIC entrypoint, so a typo
+    # must not fall through the "not in (none, real_freshwater)" test and
+    # silently run the virtual-salt closure. The constructor validates too;
+    # this is the direct-call path.
+    _VALID_FW = ("none", "virtual_salt_flux", "real_freshwater")
+    if config.freshwater_closure not in _VALID_FW:
+        raise ValueError(
+            f"freshwater_closure must be one of {_VALID_FW}, got "
+            f"{config.freshwater_closure!r} (mpas_ocean_pe_operators)")
+    reason = _outside_shared_core(z_coord, config)
+    if reason is not None:
+        raise ValueError(f"mpas_ocean_pe_operators: {reason} is not on the shared core")
+    c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
+    mask = state.land_mask.data
+    edge_mask = mask[c1] * mask[c2]
+    edge_mask_3d = jnp.broadcast_to(edge_mask[:, None], state.u.data.shape).astype(
+        state.u.data.dtype)
+
+    def edge_mean(f):
+        return (0.5 * (f[c1] + f[c2]),)
+
+    def face_thickness(h_k, vel):
+        h_e = edge_mean(h_k)
+        return h_e, h_e
+
+    def depth_mean_divisor(h_sum):
+        return jnp.maximum(jnp.maximum(h_sum, config.min_water_column_m), 1e-10)
+
+    def momentum_terms(dvel, ctx):
+        u_3d = ctx.vel[0]
+        h_e = ctx.h_face_metric[0]
+        pv_flux = mpas_ocean_pv_flux(u_3d, ctx.h_k, h_e, z_coord, mesh, config)
+        visc = mpas_ocean_momentum_viscosity(u_3d, mesh, config, halo_refresh)
+        vert_adv = flux_form_vertical_momentum_advection(
+            ctx.vel_prime[0], 0.5 * (ctx.w[c1] + ctx.w[c2]), h_e)
+        return ((dvel[0] + pv_flux + visc + vert_adv) * edge_mask_3d,)
+
+    def finalize(dvel, ctx):
+        h_e = ctx.h_face_metric[0]
+        H_e = depth_mean_divisor(jnp.sum(h_e, axis=1))
+        F_slow_u = jnp.sum(dvel[0] * h_e, axis=1) / H_e * edge_mask
+        return ((dvel[0] - F_slow_u[:, None]) * edge_mask_3d,), F_slow_u
+
+    def sources(dvel, dT, dS, ctx):
+        du = dvel[0]
+        if physics_fn is not None:
+            phys = physics_fn(state, mesh, z_coord, surface_forcing)
+            du = du + phys.du_dt.data * edge_mask_3d
+            dT = dT + phys.dT_dt.data
+            dS = dS + phys.dS_dt.data
+        dT, dS = mpas_ocean_freshwater_salt_sources(
+            dT, dS, state.T.data, state.S.data, ctx.h_k, mask, mesh, config,
+            freshwater, surface_forcing, halo_refresh)
+        return (du,), dT, dS, None
+
+    coeffs = OceanPECoeffs(config.rho_0, config.K_h, config.K_bih, config.K_v, config.A_v,
+                           config.implicit_vertical_mixing, config.bottom_drag_r)
+    return OceanPEOperators(
+        grid_ops=mpas_neighbour_operators(mesh),
+        coeffs=coeffs,
+        dz_ref=z_coord.dz_ref,
+        dz_half_ref=z_coord.dz_half_ref,
+        z_coord=z_coord,
+        cell_mask=mask,
+        face_masks=(edge_mask_3d,),
+        face_masks_2d=(edge_mask,),
+        geometry_density=lambda: mpas_ocean_geometry_and_density(state, mesh, z_coord, config),
+        face_thickness=face_thickness,
+        depth_mean_divisor=depth_mean_divisor,
+        cell_to_face=edge_mean,
+        kinetic_energy=lambda vel: kinetic_energy_cell_3d(vel[0] * edge_mask[:, None], mesh),
+        pgf_correction=lambda grad, ctx: grad,
+        momentum_terms=momentum_terms,
+        finalize=finalize,
+        sources=sources,
+        refresh_cells=(None if halo_refresh is None
+                       else (lambda f: halo_refresh.cells(f)[0])),
+    )
+
+
+def mpas_ocean_pe_tendencies(state, mesh, z_coord, config=MPASOceanConfig(), *,
+                             freshwater=None, physics_fn=None, surface_forcing=None,
+                             sponge=None, halo_refresh=None):
+    """MPAS ocean baroclinic tendencies on the shared core."""
+    ops = mpas_ocean_pe_operators(state, mesh, z_coord, config, freshwater=freshwater,
+                                  physics_fn=physics_fn, surface_forcing=surface_forcing,
+                                  halo_refresh=halo_refresh)
+    vel_ref = None if sponge is None or sponge.u_ref is None else (sponge.u_ref,)
+    t = ocean_baroclinic_tendencies((state.u.data,), state.T.data, state.S.data, ops,
+                                    sponge=sponge, sponge_vel_ref=vel_ref)
+    return MPASOceanTendencies(
+        du_dt=Field(data=t.dvel[0], name="du_dt", dims=("nEdges", "nlev"), units="m/s²"),
+        dT_dt=Field(data=t.dT, name="dT_dt", dims=("nCells", "nlev"), units="degC/s"),
+        dS_dt=Field(data=t.dS, name="dS_dt", dims=("nCells", "nlev"), units="PSU/s"),
+        deta_dt=Field(data=t.deta, name="deta_dt", dims=("nCells",), units="m/s"),
+        F_slow_u=Field(data=t.extra, name="F_slow_u", dims=("nEdges",), units="m/s²"),
+    )

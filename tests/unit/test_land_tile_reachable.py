@@ -126,3 +126,45 @@ class TestDriverActuallyExecutesTheInvariant:
             "the invariant was called with an array other than the f_land the "
             "driver stored in TileConfig -- it is not guarding the live tile "
             "fraction")
+
+
+def test_coupled_multilayer_clm_lane_solves_on_its_configured_air_entry_head(monkeypatch):
+    """The coupled driver's CLM multilayer lane rebuilds the soil hydraulics from
+    the CLM map; the configured air-entry head must survive that rebuild, and the
+    map's wilting point / field capacity must be built on the same head."""
+    import numpy as np
+    import jax.numpy as jnp
+    import legoesm.land.clm_surface_map as clm
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig, OutputConfig
+    from legoesm.driver.coupled_config import preset_slab_simple
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
+    heads = []
+
+    def fake_map(path, lat_deg, lon_deg, *, vg_air_entry_m):
+        heads.append(vg_air_entry_m)
+        n = int(np.asarray(lat_deg).size)
+        pft = np.zeros((n, 17)); pft[:, 0] = 1.0
+        o = np.ones(n)
+        return dict(pft_fractions=jnp.asarray(pft), theta_wp=jnp.asarray(0.12 * o),
+                    theta_fc=jnp.asarray(0.30 * o), glacier_frac=jnp.asarray(0.0 * o),
+                    pct_sand=jnp.asarray(40.0 * o), pct_clay=jnp.asarray(20.0 * o),
+                    theta_r=jnp.asarray(0.05 * o), theta_sat=jnp.asarray(0.45 * o),
+                    alpha_vg=jnp.asarray(2.0 * o), n_vg=jnp.asarray(1.4 * o),
+                    K_sat=jnp.asarray(1.0e-5 * o))
+
+    monkeypatch.setattr(clm, "load_clm_surface", fake_map)
+    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: "unused")
+    atm = ExperimentConfig(grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
+                           dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+                           output=OutputConfig(diag_days=1), radiation="gray", days=1)
+    coupled = preset_slab_simple()._replace(
+        land_mode="multilayer", land_param_source="clm",
+        land_config=MultiLayerLandConfig(hydraulics=SoilHydraulicsConfig(vg_air_entry_m=-0.05)))
+    drv = CoupledESMDriver(atm, coupled)
+    drv.setup()
+    assert heads == [-0.05]
+    h = drv._land_cfg.hydraulics
+    assert h.vg_air_entry_m == -0.05
+    assert np.ndim(h.alpha_vg) == 2                # the per-column CLM map was applied

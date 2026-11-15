@@ -216,6 +216,13 @@ class CanopyForcingBundle(NamedTuple):
 # Residual function (defines the closure equations)
 # ---------------------------------------------------------------------------
 
+def condensate_latent_heat(b: CanopyForcingBundle) -> jax.Array:
+    """Latent heat [J kg-1] of canopy-air condensation: the snow-weighted ground
+    charge, because the land step stores the snow-covered share of the dew on
+    the pack as ice (L_s) and the rest as liquid leaf water (L_v)."""
+    return b.lam if b.lam_soil is None else b.lam_soil
+
+
 def _canopy_residual(
     x: jax.Array,
     bundle: CanopyForcingBundle,
@@ -321,14 +328,22 @@ def _canopy_residual(
         b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
     # ---- Canopy air update (FULLY_COUPLED: soil included) ----
-    Tc_new, q_c_new = canopy_air_update(
+    # A leaf with no area has no energy balance to invert: its "new" leaf
+    # temperature is garbage (measured -0.71 K on hot desert ground and 4.9e6 K
+    # on a bare test column, where even its ~4e-6 weight warmed the canopy air
+    # 2.5 K), and the saturation humidity evaluated there overflows to NaN.
+    # Feed the pinned state instead: at the root it equals Tc, so the empty
+    # leaves drop out of the canopy-air balance exactly.
+    bare = b.LAI <= LEAF_AREA_FLOOR
+    Tc_new, q_c_new, _ = canopy_air_update(
         b.Ta, b.q_atm,
-        Tf_Sun_new, Tf_Sh_new, Ts,
+        jnp.where(bare, Tf_Sun, Tf_Sun_new), jnp.where(bare, Tf_Sh, Tf_Sh_new), Ts,
         gs_Sun, gs_Sh,
         Rb_Sun, Rb_Sh,
         rah_above, raw_above,
         rah_below, raw_soil_evap,
-        b.fStress_soil, b.Ps, fwet=b.fwet)
+        b.fStress_soil, b.Ps, Tc, condensate_latent_heat(b), b.Cp, rh_cap_width,
+        fwet=b.fwet)
 
     # ---- Sunlit-leaf anchor when fSun is too small for two-leaf split ----
     # When ``fSun`` is small, ``Rb_Sun = rb / (LAI · fSun)`` is large, the
@@ -380,7 +395,6 @@ def _canopy_residual(
     # or below it both leaf classes are bit-identical to bare ground, so a
     # column with LAI = 1e-7 is pinned too, and no column with distinct leaf
     # physics is.
-    bare = b.LAI <= LEAF_AREA_FLOOR
     pinned = jnp.array([
         Tf_Sun - Tc,
         Tf_Sh  - Tc,
@@ -464,23 +478,23 @@ def canopy_forward(
     if LE_module == "BT":
         q_f_Sun = saturation_specific_humidity(Tf_Sun, b.Ps)
         q_f_Sh  = saturation_specific_humidity(Tf_Sh,  b.Ps)
-        Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_bt(
+        Rn_Sun, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, _ = leaf_energy_balance_bt(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
-        Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh, _  = leaf_energy_balance_bt(
+        Rn_Sh,  LE_Sh,  H_Sh,  Tf_Sh_new, gs_Sh, _  = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
     else:
-        Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_pm(
+        Rn_Sun, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, _ = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
-        Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh,  _ = leaf_energy_balance_pm(
+        Rn_Sh,  LE_Sh,  H_Sh,  Tf_Sh_new, gs_Sh,  _ = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
@@ -510,7 +524,22 @@ def canopy_forward(
         rah_below, raw_soil_evap, b.fStress_soil,
         b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
+    # Canopy-air condensation (the dew limit; see canopy_air_update), with the
+    # residual's exact inputs so it is the condensation the closure balanced.
+    # Mass flux [kg m-2 s-1], deposited on the surface by the caller; its
+    # latent heat leaves the canopy top as sensible heat.
+    bare = b.LAI <= LEAF_AREA_FLOOR
+    _, _, cond_mix = canopy_air_update(
+        b.Ta, b.q_atm,
+        jnp.where(bare, Tf_Sun, Tf_Sun_new), jnp.where(bare, Tf_Sh, Tf_Sh_new), Ts,
+        gs_Sun, gs_Sh, Rb_Sun, Rb_Sh,
+        rah_above, raw_above, rah_below, raw_soil_evap,
+        b.fStress_soil, b.Ps, Tc, condensate_latent_heat(b), b.Cp, rh_cap_width,
+        fwet=b.fwet)
+    condensation = b.rhoa * cond_mix
+
     return dict(
+        condensation=condensation, raw_above=raw_above,
         An_Sun=An_Sun, An_Sh=An_Sh,
         Agross_Sun=Agross_Sun, Agross_Sh=Agross_Sh,
         LE_Sun=LE_Sun, LE_Sh=LE_Sh, LE_Soil=LE_Soil,

@@ -155,7 +155,7 @@ def _model(st, **kw):
     return compute_sam_oceflx_fluxes(
         j["ubot"] - j["us"], j["vbot"] - j["vs"], j["thbot"], j["qbot"],
         j["ts"], j["ssq"], j["rbot"], z_bot=j["zbot"], variant="cesm",
-        return_2m=True, t_bot=j["tbot"], **kw,
+        return_2m=True, t_bot=j["tbot"], **({"zeta_cap_width": 0.0} | kw),  # source clamp
     )
 
 

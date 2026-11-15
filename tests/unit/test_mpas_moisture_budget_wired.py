@@ -259,3 +259,93 @@ def test_the_first_sample_after_a_restart_reports_nothing():
     d._feed_mpas_moisture_budget(10.0, diag, _kw(16, precip_mm_day=2.0,
                                                  hfls_w_m2=100.0, evspsbl=_water_of(16, 100.0)))
     assert np.isnan(diag.moisture_tracker.residual[-1])
+
+
+@pytest.mark.slow
+def test_the_series_row_carries_this_intervals_closure(tmp_path, monkeypatch):
+    """The time-series row written at a diagnostic step must hold the closure
+    the CMOR feed records at THAT step, not the previous interval's (#2171).
+
+    The feed is wrapped to stamp a distinct value per call; the row must
+    carry it.  Read before the feed, the row would hold the previous stamp
+    (or NaN for the first window).  This is the behavioural test of the
+    read-after-feed order (it replaced a test that read the loop's source)."""
+    from legoesm.driver.config import (
+        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig)
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=3, nlev=20,
+                        vertical_coord="hybrid"),
+        dycore=DycoreConfig(discretization="mpas", dt=300.0),
+        output=OutputConfig(output_dir="", diag_days=1, cmip_output=True,
+                            monthly_means=True, cmip_resolution_deg=10.0),
+        days=2, dataset="analytical", radiation="gray", convection="none",
+        turbulence="none", precision="fp64", distributed=False,
+    )
+    d = ModelDriver(cfg, output_dir=str(tmp_path))
+    d.setup()
+    real = ModelDriver._feed_mpas_cmip_accumulators
+    stamps = []
+
+    def feed(self, day, **kw):
+        real(self, day, **kw)
+        if kw.get("flux_only"):
+            stamps.append(1000.0 + len(stamps))
+            self.diagnostics.moisture_tracker.residual.append(stamps[-1])
+    monkeypatch.setattr(ModelDriver, "_feed_mpas_cmip_accumulators", feed)
+    d.run()
+
+    assert len(stamps) == 2, f"expected two diagnostic windows, fed {len(stamps)}"
+    (ts_path,) = list(tmp_path.rglob("timeseries.npz"))
+    with np.load(ts_path) as z:
+        series = np.asarray(z["moisture_residual"])
+    np.testing.assert_array_equal(series[-2:], stamps)
+
+
+def _two_day_mpas_driver(tmp_path):
+    from legoesm.driver.config import (
+        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig)
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=3, nlev=20,
+                        vertical_coord="hybrid"),
+        dycore=DycoreConfig(discretization="mpas", dt=300.0),
+        output=OutputConfig(output_dir="", diag_days=1, cmip_output=True,
+                            monthly_means=True, cmip_resolution_deg=10.0),
+        days=2, dataset="analytical", radiation="gray", convection="none",
+        turbulence="none", precision="fp64", distributed=False,
+    )
+    d = ModelDriver(cfg, output_dir=str(tmp_path))
+    d.setup()
+    return d
+
+
+@pytest.mark.slow
+def test_a_window_the_feed_did_not_record_drops_the_tendency_baseline(
+        tmp_path, monkeypatch):
+    """A window whose flux feed records no closure must drop the tendency
+    baseline, so the next closure does not difference water across the gap;
+    a recorded window must keep it (an unconditional drop would erase every
+    baseline and no closure would survive).  Replaces a test that read the
+    loop's source text.  The first window is fed but left unrecorded."""
+    real = ModelDriver._feed_mpas_cmip_accumulators
+    fed, drops = [], []
+
+    def feed(self, day, **kw):
+        n = len(self.diagnostics.moisture_tracker.residual)
+        real(self, day, **kw)
+        if kw.get("flux_only"):
+            del self.diagnostics.moisture_tracker.residual[n:]
+            if fed:                       # window 1 unrecorded, window 2 recorded
+                self.diagnostics.moisture_tracker.residual.append(2000.0)
+            fed.append(day)
+
+    real_drop = MoistureBudgetTracker.drop_baseline
+
+    def drop(self):
+        drops.append(len(fed))
+        real_drop(self)
+    monkeypatch.setattr(ModelDriver, "_feed_mpas_cmip_accumulators", feed)
+    monkeypatch.setattr(MoistureBudgetTracker, "drop_baseline", drop)
+    _two_day_mpas_driver(tmp_path).run()
+
+    assert len(fed) == 2, f"expected two diagnostic windows, fed {len(fed)}"
+    assert drops == [1], drops            # once, right after the unrecorded window

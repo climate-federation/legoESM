@@ -34,9 +34,11 @@ def _load():
     return mod
 
 
-# thompson is HARD_SAT_GUARD_EXEMPT now (the WRF port, vote K3)
-GUARDED = ("sundqvist", "morrison", "p3", "ml_emulator")
-EXEMPT = ("sdm", "fast_sbm", "kessler", "seifert_beheng", "thompson")
+# thompson is HARD_SAT_GUARD_EXEMPT now (the WRF port, vote K3); sundqvist
+# too (the ccpp zhaocarr_gscond port, #2434)
+GUARDED = ("morrison", "p3", "ml_emulator")
+EXEMPT = ("sdm", "fast_sbm", "kessler", "seifert_beheng", "thompson",
+          "sundqvist")
 
 
 @pytest.mark.parametrize("scheme", GUARDED)
@@ -68,10 +70,10 @@ def test_default_is_byte_identical_to_the_historical_builder(scheme):
 def test_float_overrides_round_trip():
     rcp = _load()
     cfg = rcp._build_microphysics_config(
-        "sundqvist", hard_saturation_adjustment=True,
+        "morrison", hard_saturation_adjustment=True,
         hard_sat_adjust_threshold=1.25, hard_sat_max_heating_K=8.0)
-    assert cfg.sundqvist.hard_sat_adjust_threshold == pytest.approx(1.25)
-    assert cfg.sundqvist.hard_sat_max_heating_K == pytest.approx(8.0)
+    assert cfg.morrison.hard_sat_adjust_threshold == pytest.approx(1.25)
+    assert cfg.morrison.hard_sat_max_heating_K == pytest.approx(8.0)
 
 
 def test_float_override_without_the_gate_is_refused():
@@ -80,10 +82,10 @@ def test_float_override_without_the_gate_is_refused():
     rcp = _load()
     with pytest.raises(ValueError, match="requires --hard-saturation-adjustment"):
         rcp._build_microphysics_config(
-            "sundqvist", hard_sat_adjust_threshold=1.2)
+            "morrison", hard_sat_adjust_threshold=1.2)
     with pytest.raises(ValueError, match="requires --hard-saturation-adjustment"):
         rcp._build_microphysics_config(
-            "sundqvist", hard_sat_max_heating_K=8.0)
+            "morrison", hard_sat_max_heating_K=8.0)
 
 
 # HARD_SAT_GUARD_EXEMPT schemes: refused when the config is built.
@@ -119,7 +121,7 @@ def test_flags_round_trip_through_real_argv(monkeypatch):
     merely accepted as keyword arguments by the builder."""
     rcp = _load()
     monkeypatch.setattr(sys, "argv", [
-        "run_rcemip_plane.py", "--microphysics", "sundqvist",
+        "run_rcemip_plane.py", "--microphysics", "morrison",
         "--hard-saturation-adjustment",
         "--hard-sat-adjust-threshold", "1.3",
         "--hard-sat-max-heating-k", "7.5",
@@ -135,9 +137,9 @@ def test_flags_round_trip_through_real_argv(monkeypatch):
         hard_saturation_adjustment=args.hard_saturation_adjustment,
         hard_sat_adjust_threshold=args.hard_sat_adjust_threshold,
         hard_sat_max_heating_K=args.hard_sat_max_heating_k)
-    assert cfg.sundqvist.hard_saturation_adjustment is True
-    assert cfg.sundqvist.hard_sat_adjust_threshold == pytest.approx(1.3)
-    assert cfg.sundqvist.hard_sat_max_heating_K == pytest.approx(7.5)
+    assert cfg.morrison.hard_saturation_adjustment is True
+    assert cfg.morrison.hard_sat_adjust_threshold == pytest.approx(1.3)
+    assert cfg.morrison.hard_sat_max_heating_K == pytest.approx(7.5)
 
 
 def test_defaults_from_real_argv_leave_the_guard_off(monkeypatch):

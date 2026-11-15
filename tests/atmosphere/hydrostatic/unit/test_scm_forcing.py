@@ -861,6 +861,7 @@ def test_shared_physics_fn_radiation_hook_isolated_between_scms():
         sigma_coord=sigma_coord,
         dt=60.0,
         forcing=forcing_warm,
+        physics_config=cfg,
     )
     scm_plain = SingleColumnModel(
         physics_fn=shared_physics_fn,
@@ -870,6 +871,7 @@ def test_shared_physics_fn_radiation_hook_isolated_between_scms():
         sigma_coord=sigma_coord,
         dt=60.0,
         forcing=None,  # no forcing
+        physics_config=cfg,
     )
 
     scm_warm.step()

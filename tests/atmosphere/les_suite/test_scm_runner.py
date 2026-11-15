@@ -202,14 +202,14 @@ def test_diagnostic_scheme_flux_nonlocal_beats_local():
     art = _windy_cbl_artifact()
     truth = diagnostic_truth(art)
     rmse = {}
-    for sch in ("smagorinsky", "louis", "holtslag_boville", "ysu"):
+    for sch in ("smagorinsky", "louis", "holtslag_boville"):
         flux = diagnostic_scheme_flux(art, TurbulenceConfig(scheme=sch), nlev=32)
         assert flux.shape == truth.heights_m.shape
         assert bool(jnp.all(jnp.isfinite(flux)))
         rmse[sch] = float(diagnostic_flux_score(truth, flux).wtheta_rmse)
 
     local_worst = max(rmse["smagorinsky"], rmse["louis"])
-    nonlocal_best = min(rmse["holtslag_boville"], rmse["ysu"])
+    nonlocal_best = rmse["holtslag_boville"]
     # Local closures carry ≈0 flux through the mixed layer (structural ceiling) ⇒ their
     # RMSE ≈ the LES flux magnitude; nonlocal beats them by a clear margin.
     assert nonlocal_best < local_worst - 0.1
@@ -224,6 +224,9 @@ def test_diagnostic_scheme_flux_rejects_moist_and_tke():
     # TKE-carrying scheme → rejected (no wtheta_flux exposure).
     with pytest.raises(ValueError, match="TKE-carrying"):
         diagnostic_scheme_flux(_windy_cbl_artifact(), _closure_config())
+    # ysu carries the WRF surface-layer state -> rejected by the same guard.
+    with pytest.raises(ValueError, match="not wired for the Q1 diagnostic"):
+        diagnostic_scheme_flux(_windy_cbl_artifact(), TurbulenceConfig(scheme="ysu"))
 
 
 def test_scm_final_profile_finite_on_eval_grid():

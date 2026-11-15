@@ -32,6 +32,7 @@
   "bechtold_dx_m": 0.0,
   "bechtold_enable_cmt": null,
   "bechtold_epsilon_deep": 0.00175,
+  "bechtold_ifs_hard_switches": false,
   "bechtold_ifs_shallow_nosupply": "zero",
   "bechtold_rain_vapor_sink": "formation",
   "bechtold_rhebc_land": 0.75,
@@ -144,7 +145,8 @@
     "sponge_shape": "sin2",
     "sponge_width_m": 10000.0,
     "time_integrator": "ssp_rk3",
-    "use_polar_filter": false
+    "use_polar_filter": false,
+    "vertical_form": "legacy"
   },
   "dynamic_albedo": false,
   "e3sm_cam_beres_variant": "e3sm",

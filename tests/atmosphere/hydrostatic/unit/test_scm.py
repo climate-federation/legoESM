@@ -431,13 +431,14 @@ def test_swap_convection_schemes(conv_scheme):
 @pytest.mark.parametrize(
     "turb_scheme",
     # mynn25 (WRF port) needs q_c / cell area: tests/unit/test_mynn_lanes.py
-    ["smagorinsky", "louis", "tke", "clubb_lite",
+    ["smagorinsky", "louis", "tke",
      "holtslag_boville", "ysu", "edmf"],
 )
 def test_swap_turbulence_schemes(turb_scheme):
-    cfg = _baseline_cfg(
-        turbulence=TurbulenceConfig(scheme=turb_scheme),
-    )
+    turb = TurbulenceConfig(scheme=turb_scheme)
+    if turb_scheme == "ysu":  # the SCM column has no land fraction / cell area
+        turb = turb._replace(ysu=turb.ysu._replace(surface_type="land", dx_m=1.0e5))
+    cfg = _baseline_cfg(turbulence=turb)
     _run_and_assert_stable(cfg)
 
 

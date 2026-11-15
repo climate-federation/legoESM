@@ -271,13 +271,11 @@ def tune_closure_ad(
 def _cbl_scheme_table():
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     from legoesm.atmosphere.physics.turbulence.config import (
-        CLUBBLiteConfig,
         HoltslagBovilleConfig,
         LouisConfig,
         MYNN25Config,
         SmagorinskyConfig,
         TurbulentEDMFConfig,
-        YSUConfig,
     )
 
     # The Q2 closure-order ladder (LES_SUITE.md D3): local → nonlocal → 1.5-order →
@@ -291,9 +289,7 @@ def _cbl_scheme_table():
         "smagorinsky": (SmagorinskyConfig, "atm.turb.SmagorinskyConfig"),   # local
         "louis": (LouisConfig, "atm.turb.LouisConfig"),                     # local
         "holtslag_boville": (HoltslagBovilleConfig, "atm.turb.HoltslagBovilleConfig"),  # nonlocal
-        "ysu": (YSUConfig, "atm.turb.YSUConfig"),                          # nonlocal
         "mynn25": (MYNN25Config, "atm.turb.MYNN25Config"),                 # 1.5-order (MYNN)
-        "clubb_lite": (CLUBBLiteConfig, "atm.turb.CLUBBLiteConfig"),       # higher-order
         "edmf": (TurbulentEDMFConfig, "atm.turb.TurbulentEDMFConfig"),     # mass-flux
         "clubb": (CLUBBConfig, "atm.turb.CLUBBParams"),                    # full higher-order
     }

@@ -71,98 +71,6 @@ def _make_sigma(nlev=5):
 # 1. Solver resolution — cubed-sphere C-D grid
 # =========================================================================
 
-class TestCDGridResolution:
-    """Factory resolves the correct CDGrid solver for each model_type."""
-
-    def test_shallow_water_creates_sw_model(self):
-        # FV3 single-implementation M2 (2026-07-13): the cube SW factory now
-        # returns the FV3-faithful edge-midpoint core (FV3EdgeShallowWaterModel
-        # + fv3_sw_tendencies), the model the Williamson matrix validates —
-        # NOT the legacy corner-corner CDGridShallowWaterModel (which cannot
-        # stabilize the cube W5/W6 wave class).  See
-        # docs/architecture/fv3_single_implementation_program.md (Phase-1 M2).
-        config = _make_config(model_type="shallow_water")
-        grid = _make_cubed_sphere_grid()
-        sigma = _make_sigma()
-        model = create_atmosphere_dycore(config, grid, sigma)
-
-        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
-            FV3EdgeShallowWaterModel, CDGridShallowWaterModel)
-        assert isinstance(model, FV3EdgeShallowWaterModel)
-        assert not isinstance(model, CDGridShallowWaterModel)
-        # The validated preset must be wired VERBATIM (codex M2: the class
-        # swap alone is insufficient) — config == williamson_cli_calibration(
-        # grid.n) with only the three driver-exposed overrides applied.
-        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
-            williamson_cli_calibration, CDGridShallowWaterConfig)
-        expected = williamson_cli_calibration(grid.n)._replace(
-            use_conservation_fixer=config.dycore.conservation_fixer,
-            fix_mass=config.dycore.fix_mass,
-            time_integrator=(CDGridShallowWaterConfig().time_integrator
-                             if config.dycore.time_integrator == "auto"
-                             else config.dycore.time_integrator),
-        )
-        assert model.config == expected
-        assert model.config.hyperdiff_coeff > 0.0
-        assert model.config.div_damp > 0.0
-        assert model.config.damp_v > 0.0
-
-    def test_shallow_water_rejects_nondefault_diffusion_scale(self):
-        # codex M2: the driver diffusion knobs have no effect on the fixed
-        # cube-SW preset; a non-default scale must fail loudly, not silently
-        # no-op.
-        from legoesm.driver.config import (
-            ExperimentConfig, GridConfig, DycoreConfig)
-        grid = _make_cubed_sphere_grid()
-        sigma = _make_sigma()
-        for knob in ("hyperdiff_scale", "a_h_scale", "div_damp_scale"):
-            config = ExperimentConfig(
-                grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-                dycore=DycoreConfig(energy_fixer=False, model_type="shallow_water",
-                                    discretization="centered", dt=300.0,
-                                    **{knob: 2.0}),
-                days=1)
-            with pytest.raises(ValueError, match=knob):
-                create_atmosphere_dycore(config, grid, sigma)
-
-    def test_shallow_water_rejects_resolution_mismatch(self):
-        # codex M2: calibration uses grid.n; a grid/config resolution mismatch
-        # must raise rather than build C24 damping on a C48 grid.
-        config = _make_config(model_type="shallow_water", resolution=16)
-        grid = _make_cubed_sphere_grid(resolution=8)  # grid.n=8 != cfg 16
-        sigma = _make_sigma()
-        with pytest.raises(ValueError, match="does not match"):
-            create_atmosphere_dycore(config, grid, sigma)
-
-    def test_hydrostatic_creates_pe_model(self):
-        config = _make_config(model_type="hydrostatic")
-        grid = _make_cubed_sphere_grid()
-        sigma = _make_sigma()
-        model = create_atmosphere_dycore(config, grid, sigma)
-
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
-        assert isinstance(model, CDGridPrimitiveEquationModel)
-
-    def test_nonhydrostatic_creates_ce_model(self):
-        config = _make_config(model_type="nonhydrostatic")
-        grid = _make_cubed_sphere_grid()
-        sigma = _make_sigma()
-        model = create_atmosphere_dycore(config, grid, sigma)
-
-        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import CDGridCompressibleEulerModel
-        assert isinstance(model, CDGridCompressibleEulerModel)
-
-    def test_cdgrid_alias_resolves_same_as_centered(self):
-        """discretization='cdgrid' is an alias for 'centered' on cubed_sphere."""
-        config_c = _make_config(discretization="centered")
-        config_d = _make_config(discretization="cdgrid")
-        grid = _make_cubed_sphere_grid()
-        sigma = _make_sigma()
-
-        model_c = create_atmosphere_dycore(config_c, grid, sigma)
-        model_d = create_atmosphere_dycore(config_d, grid, sigma)
-        assert type(model_c) is type(model_d)
-
 
 # =========================================================================
 # 2. Diffusion coefficients
@@ -263,7 +171,7 @@ class TestDiffusiveCFLGuard:
             # explicit set in M2 — it uses a fixed validated preset that owns
             # its own hyperdiff, so the raw diff.hyperdiff is discarded; see
             # test_shallow_water_does_not_cry_wolf below.)
-            warn_if_diffusion_unstable("cdgrid_primitive_equations", diff, grid, 600.0)
+            warn_if_diffusion_unstable("mpas_primitive_equations", diff, grid, 600.0)
         assert any("hyperdiff" in r.message and "max stable" in r.message
                    for r in caplog.records)
 
@@ -285,7 +193,7 @@ class TestDiffusiveCFLGuard:
         grid = _make_cubed_sphere_grid()
         diff = compute_diffusion(grid, DycoreConfig(dt=600.0))  # tuned defaults
         with caplog.at_level(logging.WARNING):
-            warn_if_diffusion_unstable("cdgrid_primitive_equations", diff, grid, 600.0)
+            warn_if_diffusion_unstable("mpas_primitive_equations", diff, grid, 600.0)
         assert not any("max stable" in r.message for r in caplog.records)
 
     def test_spectral_solver_does_not_cry_wolf(self, caplog):
@@ -298,21 +206,6 @@ class TestDiffusiveCFLGuard:
         with caplog.at_level(logging.WARNING):
             warn_if_diffusion_unstable("spectral_primitive_equations", diff, grid, 600.0)
         assert not any("max stable" in r.message for r in caplog.records)
-
-    def test_divdamp_only_checked_for_primitive_equations(self, caplog):
-        import logging
-        from legoesm.driver.component_factory import warn_if_diffusion_unstable
-        grid = _make_cubed_sphere_grid()
-        diff = compute_diffusion(grid, DycoreConfig(dt=600.0, div_damp_scale=1e9))
-        # Shallow water never forwards div_damp → silent.
-        with caplog.at_level(logging.WARNING):
-            warn_if_diffusion_unstable("cdgrid_shallow_water", diff, grid, 600.0)
-        assert not any("div_damp" in r.message for r in caplog.records)
-        caplog.clear()
-        # Primitive equations forwards div_damp → warns.
-        with caplog.at_level(logging.WARNING):
-            warn_if_diffusion_unstable("cdgrid_primitive_equations", diff, grid, 600.0)
-        assert any("div_damp" in r.message for r in caplog.records)
 
 
 # =========================================================================
@@ -381,8 +274,6 @@ class TestAtmosphereOnEveryGlobalGrid:
         [
             # M2 (2026-07-13): cube SW factory returns the FV3-faithful
             # edge-midpoint core, not the legacy corner-corner CDGrid model.
-            ("cubed_sphere", 8, "shallow_water", "cdgrid", {},
-             "FV3EdgeShallowWaterModel", "grid"),
             pytest.param(
                 "gaussian", 21, "shallow_water", "spectral", {},
                 "SpectralShallowWaterModel", "grid",
@@ -444,38 +335,6 @@ class TestAtmosphereOnEveryGlobalGrid:
 class TestDriverDelegation:
     """ModelDriver._create_dycore uses the factory."""
 
-    def test_driver_creates_hydrostatic_model(self):
-        """Default config (hydrostatic/centered/cubed_sphere) works."""
-        config = _make_config(model_type="hydrostatic")
-        grid = _make_cubed_sphere_grid()
-        sigma = _make_sigma()
-
-        from legoesm.driver.model_driver import ModelDriver
-        driver = ModelDriver(config, output_dir="/tmp/test_driver")
-        driver.grid = grid
-        driver.sigma = sigma
-        driver._create_dycore()
-
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
-        assert isinstance(driver.model, CDGridPrimitiveEquationModel)
-        assert driver._hyperdiff > 0.0
-
-    def test_driver_creates_shallow_water_model(self):
-        config = _make_config(model_type="shallow_water")
-        grid = _make_cubed_sphere_grid()
-        sigma = _make_sigma()
-
-        from legoesm.driver.model_driver import ModelDriver
-        driver = ModelDriver(config, output_dir="/tmp/test_driver_sw")
-        driver.grid = grid
-        driver.sigma = sigma
-        driver._create_dycore()
-
-        # M2 (2026-07-13): driver now builds the FV3-faithful edge-midpoint
-        # cube SW core, not the legacy corner-corner CDGrid model.
-        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
-            FV3EdgeShallowWaterModel)
-        assert isinstance(driver.model, FV3EdgeShallowWaterModel)
 
     def test_driver_shallow_water_run_raises_clear_error(self):
         # codex M2: the factory builds the SW model for component-registry
@@ -498,20 +357,6 @@ class TestDriverDelegation:
         driver3 = ModelDriver(config, output_dir="/tmp/test_driver_sw_init")
         with pytest.raises(NotImplementedError, match="not runnable via ModelDriver"):
             driver3._init_state()
-
-    def test_driver_creates_nonhydrostatic_model(self):
-        config = _make_config(model_type="nonhydrostatic")
-        grid = _make_cubed_sphere_grid()
-        sigma = _make_sigma()
-
-        from legoesm.driver.model_driver import ModelDriver
-        driver = ModelDriver(config, output_dir="/tmp/test_driver_nh")
-        driver.grid = grid
-        driver.sigma = sigma
-        driver._create_dycore()
-
-        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import CDGridCompressibleEulerModel
-        assert isinstance(driver.model, CDGridCompressibleEulerModel)
 
 
 # =========================================================================
@@ -540,30 +385,17 @@ class TestSupportedMatrix:
         assert "hydrostatic" in model_types
         assert "nonhydrostatic" in model_types
 
-    def test_cubed_sphere_has_all_three_levels(self):
-        cs_entries = [e for e in supported_matrix() if e["grid_type"] == "cubed_sphere"]
-        cs_types = {e["model_type"] for e in cs_entries}
-        assert cs_types >= {"shallow_water", "hydrostatic", "nonhydrostatic"}
+    def test_cubed_sphere_only_lists_fv3_duo(self):
+        cube = {key: solver for key, solver in _DRIVER_SUPPORTED.items()
+                if key[2] == "cubed_sphere"}
+        assert {key[0] for key in cube} == {"hydrostatic", "nonhydrostatic"}
+        assert {key[1] for key in cube} == {"fv3_duo"}
+        assert set(cube.values()) == {"fv3_duo_primitive_equations"}
 
 
 # =========================================================================
 # 6. Config default preserves existing behavior
 # =========================================================================
-
-class TestDefaultBehavior:
-    """DycoreConfig defaults produce the same model as before the refactor."""
-
-    def test_default_config_creates_hydrostatic_cdgrid(self):
-        """Default ExperimentConfig creates hydrostatic PE on cubed_sphere with
-        the dycore energy fixer ON (wired on this lane since F15b)."""
-        config = ExperimentConfig()
-        grid = _make_cubed_sphere_grid(config.grid.resolution)
-        sigma = _make_sigma(config.grid.nlev)
-        model = create_atmosphere_dycore(config, grid, sigma)
-
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
-        assert isinstance(model, CDGridPrimitiveEquationModel)
-        assert model.config.energy_fixer is True
 
 
 # =========================================================================
@@ -817,36 +649,6 @@ class TestCreateModelGridAware:
             f"Expected CGridLatLonPrimitiveEquationModel, got {type(model).__name__}"
         )
 
-    def test_explicit_cdgrid_name_not_rerouted(self):
-        """Explicit name='cdgrid_primitive_equations' must NOT be rerouted
-        even when grid is LatLonGrid — the caller asked for that solver.
-        """
-        from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics import create_model
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationModel,
-        )
-
-        grid = create_latlon_grid(16)
-        sigma = create_sigma_coordinate(5)
-        # Explicit name= → no rerouting.  CDGrid model will get a
-        # LatLonGrid it can't handle, which is the caller's problem;
-        # the point is that the factory does not silently swap solvers.
-        # We test the type check path by catching the expected error.
-        try:
-            model = create_model(
-                name="cdgrid_primitive_equations",
-                grid=grid, sigma_coord=sigma,
-            )
-            # If it succeeds, it must be the CDGrid model, not lat-lon.
-            assert isinstance(model, CDGridPrimitiveEquationModel), (
-                f"Explicit cdgrid request rerouted to {type(model).__name__}"
-            )
-        except (TypeError, AttributeError, ValueError):
-            # Expected: CDGrid model can't handle LatLonGrid.
-            pass
-
 
 # =========================================================================
 # 10. time_integrator="auto" default resolves per-dycore
@@ -883,39 +685,6 @@ class TestTimeIntegratorAutoDefault:
         assert expected == "ssp_rk54_scan"  # the documented stable default
         assert model.config.time_integrator == expected
 
-    def test_cube_pe_default_resolves_to_dycore_default(self):
-        """Cubed-sphere PE maps "auto" to its own default (ssp_rk3) — the
-        pre-flip behaviour for the scientific validation suite."""
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationConfig,
-        )
-        config = _make_config(model_type="hydrostatic")
-        grid = _make_cubed_sphere_grid()
-        model = create_atmosphere_dycore(config, grid, _make_sigma())
-        assert model.config.time_integrator == (
-            CDGridPrimitiveEquationConfig().time_integrator
-        )
-        # "auto" itself must never leak into a model config (it is not a
-        # dispatch_integrator key).
-        assert model.config.time_integrator != "auto"
-
-    def test_explicit_integrator_forwarded_verbatim(self):
-        """An explicit scheme name is forwarded untouched (integrator-
-        sensitivity runs stay possible)."""
-        config = ExperimentConfig(
-            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-            dycore=DycoreConfig(
-                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
-                model_type="hydrostatic",
-                discretization="centered",
-                dt=300.0,
-                time_integrator="ssp_rk3_scan",
-            ),
-        )
-        grid = _make_cubed_sphere_grid()
-        model = create_atmosphere_dycore(config, grid, _make_sigma())
-        assert model.config.time_integrator == "ssp_rk3_scan"
-
 
 # =========================================================================
 # 11. fix_mass forwarding on every branch with a fix_mass config field
@@ -927,20 +696,6 @@ class TestFixMassForwarding:
     DROPPED it (silently ignoring fix_mass=True); the spectral-NH and
     MPAS-NH branches forward it (pinned here so they cannot regress)."""
 
-    @pytest.mark.parametrize("flag", [True, False])
-    def test_cdgrid_compressible_euler_forwards_fix_mass(self, flag):
-        config = ExperimentConfig(
-            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-            dycore=DycoreConfig(
-                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
-                model_type="nonhydrostatic", discretization="centered",
-                dt=300.0, fix_mass=flag,
-            ),
-        )
-        grid = _make_cubed_sphere_grid()
-        model = create_atmosphere_dycore(config, grid, _make_sigma())
-        assert model.config.fix_mass is flag
-        assert model.config.anchor_mass_to_initial is flag
 
     @pytest.mark.parametrize("flag", [True, False])
     @pytest.mark.skipif(
@@ -1045,19 +800,6 @@ class TestFixMassForwarding:
     # conservation_fixer=False must OVERRIDE fix_mass=True on every
     # forwarding branch (the lat-lon contract; codex 2026-07-12 —
     # unconditional forwarding ignored the master conservation switch).
-    def test_cdgrid_ce_conservation_fixer_false_overrides(self):
-        config = ExperimentConfig(
-            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-            dycore=DycoreConfig(
-                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
-                model_type="nonhydrostatic", discretization="centered",
-                dt=300.0, fix_mass=True, conservation_fixer=False,
-            ),
-        )
-        model = create_atmosphere_dycore(
-            config, _make_cubed_sphere_grid(), _make_sigma())
-        assert model.config.fix_mass is False
-        assert model.config.anchor_mass_to_initial is False
 
     @pytest.mark.skipif(
         not jax.config.read("jax_enable_x64"),
@@ -1211,26 +953,6 @@ class TestEnergyConsistentMoistureClipWiring:
 
     def test_experiment_flag_defaults_off(self):
         assert _make_config().energy_consistent_moisture_clip is False
-
-    def test_cube_core_config_carries_the_flag(self):
-        grid = _make_cubed_sphere_grid()
-        sigma = _make_sigma()
-        for want in (False, True):
-            config = _make_config(model_type="hydrostatic")._replace(
-                energy_consistent_moisture_clip=want)
-            model = create_atmosphere_dycore(config, grid, sigma)
-            assert model.config.energy_consistent_moisture_clip is want
-
-    def test_core_configs_accept_and_default_the_field(self):
-        # MPAS mesh build is heavy; assert the config contract directly.
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-            MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationConfig)
-        assert MPASPrimitiveEquationConfig().energy_consistent_moisture_clip is False
-        assert CDGridPrimitiveEquationConfig().energy_consistent_moisture_clip is False
-        assert MPASPrimitiveEquationConfig(
-            energy_consistent_moisture_clip=True).energy_consistent_moisture_clip is True
 
 
 def test_spectral_pe_hyperdiff_is_half_hour_efold():

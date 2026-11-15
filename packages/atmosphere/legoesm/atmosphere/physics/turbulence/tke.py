@@ -133,17 +133,24 @@ def tke_turbulence(
         tsk=thz0 / (constants.p_ref / psfc) ** (constants.R_d / constants.c_pd),
         qsfc=qz0, xland=jnp.full_like(thz0, 2.0), snow=zero, sice=zero)
     out = jax.vmap(lambda c: myjpbl_column(**c, cfg=config.myj))(cols)
+    # MYJ's surface term is implicit: it exchanges against the UPDATED lowest level, so
+    # the water the column gains is not exactly sflx_q.  Report what it applied
+    # (MYJ adds no other water) so surface and atmosphere budgets agree.
+    dq_v_dt = f(out.dqdt)                                   # MYJ's own specific-humidity DQDT
+    evap_applied = jnp.sum(dq_v_dt * (p_half[:, 1:] - p_half[:, :-1]), axis=1) / constants.g
+    from legoesm.thermo import charged_latent_heat
+    lhflx = lhflx + charged_latent_heat(config.surface.bulk_scheme, T_sfc) * (evap_applied - sflx_q)
     kh_iface = f(out.exch_h)                                # top-down interior interfaces
     km_iface = f(out.exch_m)
     output = TurbulenceOutput(
         du_dt=f(out.rublten),
         dv_dt=f(out.rvblten),
         dT_dt=f(out.rthblten) * exner,
-        dq_v_dt=f(out.dqdt),                                # MYJ's own specific-humidity DQDT
+        dq_v_dt=dq_v_dt,
         Km=half_to_full(km_iface),
         Kh=half_to_full(kh_iface),
         shflx=shflx,
-        lhflx=lhflx, evap_sfc=sflx_q,
+        lhflx=lhflx, evap_sfc=evap_applied,
         ustar=ustar,
         h_pbl=out.pblh,
         Kh_iface=half_to_iface_zero_ends(kh_iface),

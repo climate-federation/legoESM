@@ -441,6 +441,17 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     return jnp.pad(f, tuple(pad), mode="wrap")
 
 
+def cell_winds_cgrid(u: jnp.ndarray, v: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """C-grid face velocities averaged to cell centres ``(u_c, v_c)``."""
+    return 0.5 * (u[:, :-1] + u[:, 1:]), 0.5 * (v[:-1, :] + v[1:, :])
+
+
+def kinetic_energy_cgrid(u: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
+    """Cell-centre ``0.5 * (u_c**2 + v_c**2)`` from C-grid face velocities."""
+    u_c, v_c = cell_winds_cgrid(u, v)
+    return 0.5 * (u_c**2 + v_c**2)
+
+
 def interp_cell_to_uface(
     f: jnp.ndarray, *, source_round: bool = False,
 ) -> jnp.ndarray:

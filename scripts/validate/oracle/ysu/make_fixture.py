@@ -50,7 +50,7 @@ TIE_COPY = "tibet_deep_mixed"
 def constants_vector(dt):
     # cp g rovcp rd rovg ep1 ep2 karman xlv rv dt (ysu_driver.F90 order)
     return [C.c_pd, C.g, C.R_d / C.c_pd, C.R_d, C.R_d / C.g, C.R_v / C.R_d - 1.0,
-            C.R_d / C.R_v, C.kappa_von_karman, C.L_v, C.R_v, dt]
+            C.R_d / C.R_v, C.kappa_von_karman, C.L_v, C.R_v, dt]  # latent-ok: WRF YSU oracle constant
 
 
 def columns(src):

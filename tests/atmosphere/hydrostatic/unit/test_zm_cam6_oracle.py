@@ -35,14 +35,17 @@ from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
 
 from tests.atmosphere.hydrostatic.unit import _zm_cam6_oracle as O
 
-CFG = ZhangMcFarlaneConfig()
+# The reference comparison runs at the trigger's hard limit (RULE 5; the
+# default-width gap is pinned in tests/atmosphere/test_zm_pblh_oracle.py).
+CFG = ZhangMcFarlaneConfig(trigger_width_J_kg=0.0)
 # columns called without a land fraction: the explicit aquaplanet choice
 CFG_AQUA = CFG._replace(land_fraction="none")
 DT = 1800.0
 NLEV = 30
 KW = dict(tpert=0.0, capelmt=CFG.capelmt, tau=CFG.tau, num_cin=CFG.num_cin,
           dmpdz=CFG.dmpdz, tiedke_add=CFG.tiedke_add, lwmax=LWMAX, c0_lnd=CFG.c0_lnd,
-          c0_ocn=CFG.c0_ocn, alfa=CFG.alfa, limcnv_p_pa=CFG.limcnv_p_pa)
+          c0_ocn=CFG.c0_ocn, alfa=CFG.alfa, limcnv_p_pa=CFG.limcnv_p_pa,
+          trigger_width=CFG.trigger_width_J_kg)
 
 
 @pytest.fixture(autouse=True)

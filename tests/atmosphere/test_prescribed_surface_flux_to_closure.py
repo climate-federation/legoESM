@@ -124,12 +124,15 @@ def test_only_one_channel_can_be_prescribed():
 def test_ysu_convective_pathway_switches_on_with_the_flux():
     """The consequence, on the scheme codex named.
 
-    YSU builds its convective velocity scale from shflx. With the historical
-    Ch=0 the dry convective case runs it with no convection at all; handing it
-    the deck flux must change its tendencies.
+    YSU builds its convective velocity scale from the surface sensible flux.
+    With the prescribed flux (WRF's scm_force_flux path) at zero the dry
+    convective case runs with no convection at all; handing it the deck flux
+    must change its PBL.
     """
     from legoesm.atmosphere.physics.turbulence.config import YSUConfig
-    from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
+    from legoesm.atmosphere.physics.turbulence.ysu import (
+        init_sfclay_carry, ysu_turbulence,
+    )
 
     nlev = 24
     ncol = 1
@@ -137,30 +140,30 @@ def test_ysu_convective_pathway_switches_on_with_the_flux():
     z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
     p_half = jnp.linspace(8.0e4, 1.0e5, nlev + 1)[None, :]
     p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    # Well-mixed dry column, zero wind: the CBL case's defining configuration.
-    T = jnp.full((ncol, nlev), 300.0)
+    # Well-mixed dry column (theta = 300 K), zero wind: the CBL case's defining
+    # configuration; the skin 1 K warmer than the lowest air so the WRF surface
+    # layer, which takes its stability from the skin, is unstable (R4 vote K2).
+    T = 300.0 * (p_full / constants.p_ref) ** constants.kappa
     u = jnp.zeros((ncol, nlev))
     v = jnp.zeros((ncol, nlev))
     q_v = jnp.full((ncol, nlev), 1.0e-3)
     rho = jnp.full((ncol, nlev), CBL_RHO)
-    T_sfc = jnp.full((ncol,), 300.0)
+    T_sfc = T[:, -1] + 1.0
     q_sfc = jnp.full((ncol,), 1.0e-3)
 
     deck_shf = CBL_W_THETA_K_M_S * CBL_RHO * constants.c_pd
     off = YSUConfig(surface=SurfaceLayerConfig(
-        Cd_neutral=7.5e-3, Ch_neutral=0.0))
-    on = YSUConfig(surface=SurfaceLayerConfig(
-        Cd_neutral=7.5e-3, Ch_neutral=0.0,
-        prescribed_shflx_w_m2=deck_shf, prescribed_lhflx_w_m2=0.0))
+        prescribed_shflx_w_m2=0.0, prescribed_lhflx_w_m2=0.0),
+        surface_type="land", dx_m=1.0e5)
+    on = off._replace(surface=off.surface._replace(prescribed_shflx_w_m2=deck_shf))
+    c0 = init_sfclay_carry(ncol, off)
 
-    out_off = ysu_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
-                             T_sfc, q_sfc, rho, 10.0, off)
-    out_on = ysu_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
-                            T_sfc, q_sfc, rho, 10.0, on)
+    out_off, _ = ysu_turbulence(u, v, T, q_v, c0, p_full, p_half, z_full, z_half,
+                                T_sfc, q_sfc, rho, 10.0, off)
+    out_on, _ = ysu_turbulence(u, v, T, q_v, c0, p_full, p_half, z_full, z_half,
+                               T_sfc, q_sfc, rho, 10.0, on)
 
-    assert float(out_off.shflx[0]) == pytest.approx(0.0), (
-        "Ch=0 with no prescription gives the closure a zero surface flux -- "
-        "this is the defect being repaired")
+    assert float(out_off.shflx[0]) == pytest.approx(0.0)
     assert float(out_on.shflx[0]) == pytest.approx(deck_shf)
 
     # h_pbl is the sharp discriminator: YSU's convective branch grows the PBL
@@ -250,11 +253,11 @@ def test_the_override_arrives_as_the_matching_w_m2_flux(w_theta):
 
 
 def test_the_kinematic_round_trip_is_exact():
-    """YSU divides straight back out; it must recover what was prescribed.
+    """The helper's conversion inverts exactly at the lowest-level density.
 
-    ``ysu.py``: ``wtheta_sfc = shflx / (rho[:, -1] * c_pd)``. Converting with
-    any OTHER density here would leave a silent offset in the one number every
-    flux-driven nonlocal scheme is built on.
+    Only the helper is tested: the WRF YSU kernel converts back with its own
+    surface-pressure density (rhox), so the kinematic flux it applies is the
+    prescribed one x rho[:, -1] / rhox (~0.997; recorded finding, vote K7).
     """
     from legoesm.atmosphere.physics.turbulence.config import YSUConfig
     from legoesm.atmosphere.physics.turbulence.integration import (
@@ -281,33 +284,39 @@ def test_the_closure_tracks_a_flux_that_changes_between_steps():
     from legoesm.atmosphere.physics.turbulence.config import (
         TurbulenceConfig, YSUConfig,
     )
-    from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
+    from legoesm.atmosphere.physics.turbulence.ysu import (
+        init_sfclay_carry, ysu_turbulence,
+    )
 
     nlev, ncol = 24, 1
     z_half = jnp.linspace(1600.0, 0.0, nlev + 1)[None, :]
     z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
     p_half = jnp.linspace(8.0e4, 1.0e5, nlev + 1)[None, :]
     p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    T = jnp.full((ncol, nlev), 300.0)
+    # theta = 300 K below 800 m, +8 K/km above: a capping inversion, so the
+    # PBL depth can respond to the flux magnitude (R4 votes K2/K2')
+    theta = jnp.where(z_full < 800.0, 300.0, 300.0 + 8.0e-3 * (z_full - 800.0))
+    T = theta * (p_full / constants.p_ref) ** constants.kappa
     u = jnp.zeros((ncol, nlev))
     v = jnp.zeros((ncol, nlev))
     q_v = jnp.full((ncol, nlev), 1.0e-3)
     rho = jnp.full((ncol, nlev), CBL_RHO)
-    T_sfc = jnp.full((ncol,), 300.0)
+    T_sfc = T[:, -1] + 1.0
     q_sfc = jnp.full((ncol,), 1.0e-3)
 
     from legoesm.atmosphere.physics.turbulence.integration import (
         _resolve_prescribed_surface_fluxes,
     )
-    base = YSUConfig(surface=SurfaceLayerConfig(
-        Cd_neutral=7.5e-3, Ch_neutral=0.0))
+    base = YSUConfig(surface=SurfaceLayerConfig(), surface_type="land", dx_m=1.0e5)
     assert TurbulenceConfig(scheme="ysu", ysu=base).ysu is base  # dispatch sanity
 
     def _run(w_theta):
+        # heat AND water prescribed: YSU's WRF surface layer keeps both
+        # (scm_force_flux); a heat-only prescription is refused there.
         cfg = _resolve_prescribed_surface_fluxes(
-            base, _phys_state_stub(wth=w_theta), rho)
-        return ysu_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
-                              T_sfc, q_sfc, rho, 10.0, cfg)
+            base, _phys_state_stub(wth=w_theta, wqv=0.0), rho)
+        return ysu_turbulence(u, v, T, q_v, init_sfclay_carry(ncol, base), p_full,
+                              p_half, z_full, z_half, T_sfc, q_sfc, rho, 10.0, cfg)[0]
 
     morning, midday = _run(0.02), _run(0.12)
     assert float(morning.shflx[0]) == pytest.approx(

@@ -307,13 +307,13 @@ def cloud_overlap_decorr_len(gemu):
     return _RCADECOR + (_RCBDECOR * cos2_lat), 0.5
 
 
-def overlap_param(pressure_hl, temperature_hl, decorr_len_m):
+def overlap_param(pressure_hl, temperature_hl, decorr_len_m, r_over_g=_R_OVER_G_ECRAD):
     """radiation_cloud.F90 set_overlap_param, pressure increasing with index:
-    (ncol, nlev-1).  decorr_len_m (ncol,)."""
+    (ncol, nlev-1).  decorr_len_m (ncol,); r_over_g [m/K] defaults to ecRad's."""
     L = decorr_len_m[..., None]
-    first = jnp.exp(-(_R_OVER_G_ECRAD / L[..., 0]) * temperature_hl[..., 1]
+    first = jnp.exp(-(r_over_g / L[..., 0]) * temperature_hl[..., 1]
                     * jnp.log(pressure_hl[..., 2] / pressure_hl[..., 1]))
-    rest = jnp.exp(-(0.5 * _R_OVER_G_ECRAD / L) * temperature_hl[..., 2:-1]
+    rest = jnp.exp(-(0.5 * r_over_g / L) * temperature_hl[..., 2:-1]
                    * jnp.log(pressure_hl[..., 3:] / pressure_hl[..., 1:-2]))
     return jnp.concatenate([first[..., None], rest], axis=-1)
 

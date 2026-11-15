@@ -438,6 +438,10 @@ def _shift_boundary(
     return a_i, v_i, v_s, sv_i, oa_i, a_ip, v_ip, v_il, t_su, e_s, e_i, szv_i, h_i
 
 
+def _si3_traced(*trees) -> bool:
+    return any(isinstance(x, jax.core.Tracer) for x in jax.tree_util.tree_leaves(trees))
+
+
 def _ice_itd_reb(
     state: SI3State,
     rn_amax_2d: Field,
@@ -448,6 +452,63 @@ def _ice_itd_reb(
     """Production ``ice_itd_reb``/``itd_shiftice`` for five categories."""
     if config.jpl <= 1:
         return state
+    if _si3_traced(state, rn_amax_2d) and _materialize_transfer_statements:
+        # DECISION 198: traced callers route through Round 3's static-trip
+        # `fori_loop` `si3_ice_itd_reb` / `_si3_itd_shiftice` (`src/ICE/iceitd.F90:432-690`).
+        from legoesm.ice.itd import SI3IceCorConfig, si3_ice_itd_reb
+
+        cor_cfg = SI3IceCorConfig(
+            rn_himin=0.1,  # coeff-ok: frozen ORCA2_SAS_ICE rn_himin deck value
+            rn_simin=config.rn_simin,
+            rn_sinew=config.rn_sinew,
+            nn_icesal=config.nn_icesal,
+            ln_pnd=config.ln_pnd,
+            ln_pnd_lids=config.ln_pnd_lids,
+            rdt_ice=config.rDt_ice,
+            rhoi=config.ice_constants.rho_ice,
+            rhos=config.ice_constants.rho_snow,
+            rhow=canonical_constants.rho_water,
+            rt0=config.ice_constants.T0,
+        )
+        s = si3_ice_itd_reb(
+            {
+                "a_i": state.a_i,
+                "v_i": state.v_i,
+                "v_s": state.v_s,
+                "sv_i": state.sv_i,
+                "oa_i": state.oa_i,
+                "a_ip": state.a_ip,
+                "v_ip": state.v_ip,
+                "v_il": state.v_il,
+                "t_su": state.t_su,
+                "e_s": state.e_s,
+                "e_i": state.e_i,
+                "szv_i": state.szv_i,
+                "h_i": state.equivalent.h_i,
+            },
+            interior=jnp.ones(state.a_i.shape[:2], dtype=bool),
+            hi_max=state.bounds.hi_max,
+            hi_mean=state.bounds.hi_mean,
+            amax=rn_amax_2d,
+            cfg=cor_cfg,
+            traced=True,
+        )
+        eqv = state.equivalent._replace(h_i=s["h_i"], a_i=s["a_i"], v_s=s["v_s"])
+        return state._replace(
+            a_i=s["a_i"],
+            v_i=s["v_i"],
+            v_s=s["v_s"],
+            sv_i=s["sv_i"],
+            oa_i=s["oa_i"],
+            a_ip=s["a_ip"],
+            v_ip=s["v_ip"],
+            v_il=s["v_il"],
+            t_su=s["t_su"],
+            e_s=s["e_s"],
+            e_i=s["e_i"],
+            szv_i=s["szv_i"],
+            equivalent=eqv,
+        )
     a_i, v_i, v_s, sv_i = state.a_i, state.v_i, state.v_s, state.sv_i
     oa_i, a_ip, v_ip, v_il = state.oa_i, state.a_ip, state.v_ip, state.v_il
     t_su, e_s, e_i, szv_i = state.t_su, state.e_s, state.e_i, state.szv_i
@@ -607,6 +668,95 @@ def si3_ice_cor(
         )
 
     dtype = state.a_i.dtype
+    if _si3_traced(state, fluxes, sss_m, sst_m, rn_amax_2d) and not _plant_strip_transfer_barriers:
+        # DECISION 198: traced callers route the 50-step salinity bounds
+        # (`src/ICE/icecor.F90:114-122`) and `ice_var_zapsmall` (`src/ICE/icevar.F90:619-735`)
+        # through Round 3's static-trip `fori_loop` helpers in `itd.py`.
+        from legoesm.ice.itd import (
+            SI3IceCorConfig,
+            si3_ice_cor_salinity_bounds,
+            si3_var_zapsmall as _itd_var_zapsmall,
+        )
+
+        cor_cfg = SI3IceCorConfig(
+            rn_himin=rn_himin,
+            rn_simin=config.rn_simin,
+            rn_sinew=config.rn_sinew,
+            nn_icesal=config.nn_icesal,
+            ln_pnd=config.ln_pnd,
+            ln_pnd_lids=config.ln_pnd_lids,
+            rdt_ice=config.rDt_ice,
+            rhoi=config.ice_constants.rho_ice,
+            rhos=config.ice_constants.rho_snow,
+            rhow=canonical_constants.rho_water,
+            rt0=config.ice_constants.T0,
+        )
+        eqv = state.equivalent
+        agg = state.aggregated
+        int_bool = interior.astype(bool)
+        sss_arr = jnp.asarray(sss_m, dtype=dtype)
+        sst_arr = jnp.asarray(sst_m, dtype=dtype)
+        s = {
+            "a_i": state.a_i,
+            "v_i": state.v_i,
+            "v_s": state.v_s,
+            "sv_i": state.sv_i,
+            "oa_i": state.oa_i,
+            "a_ip": state.a_ip,
+            "v_ip": state.v_ip,
+            "v_il": state.v_il,
+            "e_s": state.e_s,
+            "e_i": state.e_i,
+            "szv_i": state.szv_i,
+            "sz_i": eqv.sz_i,
+            "t_su": state.t_su,
+            "t_i": eqv.t_i,
+            "t_s": eqv.t_s,
+            "h_i": eqv.h_i,
+            "h_s": eqv.h_s,
+            "h_ip": eqv.h_ip,
+            "h_il": eqv.h_il,
+            "at_i": agg.at_i,
+            "vt_i": agg.vt_i,
+            "ato_i": agg.ato_i,
+            "sfx_res": fluxes.sfx_res,
+            "hfx_res": fluxes.hfx_res,
+            "wfx_res": fluxes.wfx_res,
+        }
+        s = si3_ice_cor_salinity_bounds(s, interior=int_bool, sss_m=sss_arr, cfg=cor_cfg, traced=True)
+        s = _itd_var_zapsmall(s, interior=int_bool, sss_m=sss_arr, sst_m=sst_arr, cfg=cor_cfg, traced=True)
+        eqv = eqv._replace(
+            h_i=s["h_i"],
+            h_s=s["h_s"],
+            h_ip=s["h_ip"],
+            h_il=s["h_il"],
+            sz_i=s["sz_i"],
+            t_i=s["t_i"],
+            t_s=s["t_s"],
+            a_i=s["a_i"],
+            v_s=s["v_s"],
+        )
+        agg = agg._replace(at_i=s["at_i"], vt_i=s["vt_i"], ato_i=s["ato_i"])
+        state = state._replace(
+            v_i=s["v_i"],
+            v_s=s["v_s"],
+            sv_i=s["sv_i"],
+            oa_i=s["oa_i"],
+            a_i=s["a_i"],
+            a_ip=s["a_ip"],
+            v_ip=s["v_ip"],
+            v_il=s["v_il"],
+            t_su=s["t_su"],
+            e_s=s["e_s"],
+            e_i=s["e_i"],
+            szv_i=s["szv_i"],
+            equivalent=eqv,
+            aggregated=agg,
+        )
+        return SI3CorrectionResult(
+            state=state,
+            fluxes=fluxes._replace(wfx_res=s["wfx_res"], hfx_res=s["hfx_res"], sfx_res=s["sfx_res"]),
+        )
     r1_nlay_i = sr(jnp.asarray(_ONE / float(config.nlay_i), dtype=dtype))
     r1_dt = sr(jnp.asarray(_ONE / config.rDt_ice, dtype=dtype))
     rhoi = jnp.asarray(config.ice_constants.rho_ice, dtype=dtype)

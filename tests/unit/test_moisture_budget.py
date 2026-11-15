@@ -198,3 +198,25 @@ class TestMoistureBudgetTracker:
         old_style = np.array(tracker.dW_dt[1:]) * 86400.0 + np.array(
             tracker.precip_rate[1:])
         np.testing.assert_allclose(old_style, 0.0, atol=1e-6)
+
+
+def test_a_dropped_baseline_reports_nan_not_a_gap_spanning_closure():
+    """After a window that was not recorded, the next closure must not
+    difference water across the gap against fluxes of the last window only."""
+    dsigma = jnp.full(3, 1.0 / 3)
+    p_s = jnp.full((2, 2), 100000.0)
+    zero = jnp.zeros((2, 2))
+
+    def run(drop):
+        t = MoistureBudgetTracker()
+        t.update(jnp.full((2, 2, 3), 0.010), p_s, dsigma, zero, evap=zero,
+                 elapsed_seconds=0.0)
+        # day 1 window skipped; water fell by 1 g/kg meanwhile
+        if drop:
+            t.drop_baseline()
+        t.update(jnp.full((2, 2, 3), 0.009), p_s, dsigma, zero, evap=zero,
+                 elapsed_seconds=2 * 86400.0)
+        return t.residual[-1]
+
+    assert np.isfinite(run(drop=False))   # the spurious gap-spanning number
+    assert np.isnan(run(drop=True))

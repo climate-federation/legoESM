@@ -30,11 +30,13 @@ import jax.numpy as jnp  # noqa: E402
 
 from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pi  # noqa: E402
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH  # noqa: E402
 
 # --- case definitions (GABLS1 / Wangara, reduced) -------------------------------
 CASES = {
     "gabls1": dict(theta0=265.0, Ug=8.0, fcor=1.39e-4, z0=0.1, Lz=400.0,
-                   cooling_rate=0.25, Q0=0.0, zi=100.0, gamma=0.01),   # K/hr cooling
+                   cooling_rate=0.25, Q0=0.0, zi=100.0, gamma=0.01,    # K/hr cooling
+                   most_zeta_cap_width=MOST_ZETA_CAP_WIDTH),
     "wangara": dict(theta0=290.0, Ug=5.0, fcor=1.0e-4, z0=0.1, Lz=1500.0,
                     cooling_rate=0.0, Q0=0.06, zi=200.0, gamma=0.003),  # +ve flux heating
 }
@@ -55,7 +57,8 @@ def run_new(case, args, dtype):
         nx=nx, ny=ny, nz=nz, Lx=args.Lx, Ly=args.Lx, Lz=c["Lz"],
         theta_ref0=c["theta0"], scheme="weno5", sgs="vreman", c_vreman=0.07,
         f_cor=c["fcor"], ug=c["Ug"], vg=0.0, surface=surface, z0=c["z0"],
-        sfc_theta_flux=c["Q0"], poisson_maxiter=args.maxiter)
+        sfc_theta_flux=c["Q0"], poisson_maxiter=args.maxiter,
+        **{k: c[k] for k in ("most_zeta_cap_width",) if k in c})
     g = pi.make_grid(cfg, dtype=dtype)
     z = g.z_c
     th = _sounding(z, c, dtype)
@@ -101,7 +104,7 @@ def run_spectral(case, args, dtype):
         nx=nx, ny=ny, nz=nz, Lx=args.Lx, Ly=args.Lx, Lz=c["Lz"], z0=c["z0"],
         dealias=True, c_s=0.18, smagorinsky_dynamic=False, sgs_model="vreman",
         time_scheme="rk3", buoyancy=True, theta_ref0=c["theta0"], pr_sgs=1.0,
-        nu_floor=0.05)
+        nu_floor=0.05, **{k: c[k] for k in ("most_zeta_cap_width",) if k in c})
     g = sl.make_grid(cfg, dtype=dtype)
     z = g.z_c
     th = _sounding(z, c, dtype)

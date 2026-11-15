@@ -34,8 +34,8 @@ from legoesm.core.state import (
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
     MPASPrimitiveEquationConfig,
     MPASPrimitiveEquationModel,
-    mpas_hydrostatic_tendencies,
 )
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
 from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
     MPASCompressibleEulerConfig,
     MPASCompressibleEulerModel,
@@ -148,8 +148,8 @@ class TestMPASHydrostaticPE(unittest.TestCase):
 
     def test_tendency_shapes(self):
         """Tendencies have correct shapes."""
-        tend = mpas_hydrostatic_tendencies(
-            self.state_pert, self.mesh, self.sigma, self.config,
+        tend = mpas_pe_tendencies(
+            self.state_pert, self.mesh, self.sigma, self.config, vertical_form="legacy"
         )
         self.assertEqual(tend.du_dt.data.shape,
                          (self.mesh.nEdges, self.nlev))
@@ -162,8 +162,8 @@ class TestMPASHydrostaticPE(unittest.TestCase):
 
     def test_tendencies_finite(self):
         """Tendencies contain no NaN or Inf."""
-        tend = mpas_hydrostatic_tendencies(
-            self.state_pert, self.mesh, self.sigma, self.config,
+        tend = mpas_pe_tendencies(
+            self.state_pert, self.mesh, self.sigma, self.config, vertical_form="legacy"
         )
         self.assertTrue(jnp.all(jnp.isfinite(tend.du_dt.data)))
         self.assertTrue(jnp.all(jnp.isfinite(tend.dT_dt.data)))
@@ -171,8 +171,8 @@ class TestMPASHydrostaticPE(unittest.TestCase):
 
     def test_rest_state_zero_tendencies(self):
         """Rest state (u=0, uniform T, uniform p_s) has near-zero tendencies."""
-        tend = mpas_hydrostatic_tendencies(
-            self.state, self.mesh, self.sigma, self.config,
+        tend = mpas_pe_tendencies(
+            self.state, self.mesh, self.sigma, self.config, vertical_form="legacy"
         )
         # At rest, all tendencies should be very small
         self.assertLess(float(jnp.max(jnp.abs(tend.du_dt.data))), 1e-3)
@@ -183,8 +183,8 @@ class TestMPASHydrostaticPE(unittest.TestCase):
         energy-conserving PV flux."""
         bad = self.config._replace(pv_scheme="bogus")
         with self.assertRaisesRegex(ValueError, "Unknown pv_scheme"):
-            mpas_hydrostatic_tendencies(
-                self.state_pert, self.mesh, self.sigma, bad,
+            mpas_pe_tendencies(
+                self.state_pert, self.mesh, self.sigma, bad, vertical_form="legacy"
             )
 
     def test_model_step(self):
@@ -226,8 +226,8 @@ class TestMPASHydrostaticPE(unittest.TestCase):
         def loss(u_data):
             s = self.state._replace(
                 u=self.state.u.replace(data=u_data))
-            tend = mpas_hydrostatic_tendencies(
-                s, self.mesh, self.sigma, self.config)
+            tend = mpas_pe_tendencies(
+                s, self.mesh, self.sigma, self.config, vertical_form="legacy")
             return jnp.sum(tend.du_dt.data ** 2)
 
         grad_fn = jax.grad(loss)

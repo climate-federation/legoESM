@@ -140,7 +140,7 @@ def main():
         fin, fout = Path(tmp) / "ifs_in.txt", Path(tmp) / "ifs_out.txt"
         with open(fin, "w") as f:
             f.write(f"{ncol} {nlev}\n")
-            wr(f, (C.g, C.R_d, C.c_pd, C.R_v / C.R_d - 1.0, C.L_v))
+            wr(f, (C.g, C.R_d, C.c_pd, C.R_v / C.R_d - 1.0, C.L_v))  # latent-ok: Louis oracle constant
             for i in range(ncol):
                 for arr in (d["u"][i], d["v"][i], d["T"][i], d["q"][i], d["p_half"][i],
                             C.g * d["zm"][i], C.g * d["zi"][i], np.append(Ri[i], 0.0),
@@ -175,7 +175,7 @@ def main():
                               text=True).stdout.split("\n")[0]
     meta = dict(oracle=ORACLE, compiler=gfortran, arms=ARMS, icon_cb_cc=[ICON_CB, ICON_CC],
                 constants=dict(g=C.g, R_d=C.R_d, c_pd=C.c_pd, retv=C.R_v / C.R_d - 1.0,
-                               L_v=C.L_v, kappa_vk=C.kappa_von_karman),
+                               L_v=C.L_v, kappa_vk=C.kappa_von_karman),  # latent-ok: Louis oracle constant
                 inputs_sha256=hashlib.sha256(Path(a.inputs).read_bytes()).hexdigest(),
                 names=[str(n) for n in src["names"]],
                 setup="IFS: PKHVFL=0 KINV=KLEV PZ0MM=0 PLAM=150, PRI=legoESM Ri; "

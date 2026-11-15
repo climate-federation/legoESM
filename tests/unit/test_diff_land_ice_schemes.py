@@ -81,9 +81,9 @@ def _hydro_cfg(curve):
 # Suctions strictly BELOW the air-entry pressure of the sharp-air-entry
 # families (Clapp-Hornberger / Brooks-Corey default psi_sat = psi_b =
 # -0.478 m), i.e. genuinely unsaturated.  Above air entry those curves are
-# flat at theta_sat BY CONSTRUCTION (see
+# flat (Brooks-Corey) or elastic only (Clapp-Hornberger) BY CONSTRUCTION (see
 # TestSoilRetentionNearSaturation), so a fixture that straddled it would
-# report a scheme property as a dead gradient.
+# report a scheme property as a vanishing gradient.
 _UNSAT_PSI = np.array([-0.6, -1.0, -3.0, -10.0, -50.0])
 
 
@@ -191,7 +191,7 @@ class TestSoilRetentionNearSaturation:
     are flat at ``theta_sat`` above their air-entry pressure, so the raw
     retention curve has ``dtheta/dpsi`` EXACTLY zero there.  ``theta_from_psi``
     starts the elastic specific-storage branch AT air entry
-    (``soil_hydraulics.air_entry_psi``), so the band carries the small but
+    (``soil_hydraulics.saturation_head``), so the band carries the small but
     non-zero elastic capacity ``S_s*theta_sat`` and the soil-moisture adjoint
     through ``theta`` is not dead there (it used to be: the elastic term only
     switched on at ``psi >= 0``, and the Richards solver's capacity on the band

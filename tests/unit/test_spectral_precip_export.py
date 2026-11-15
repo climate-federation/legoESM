@@ -18,9 +18,14 @@ DT = 1800.0
 
 def _driver(tmp_path, days=1.5, diag_days=1, checkpoint_days=0):
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="gaussian", resolution=8, nlev=8),
+        # leapfrog_si on sigma levels: the spectral loop that threads
+        # PhysicsState, which Sundqvist's gscond carry needs (the RK loop
+        # refuses it; leapfrog is refused on hybrid levels).
+        grid=GridConfig(grid_type="gaussian", resolution=8, nlev=8,
+                        vertical_coord="sigma"),
         dycore=DycoreConfig(energy_fixer=False, model_type="hydrostatic",
-                            discretization="spectral", dt=DT),
+                            discretization="spectral", dt=DT,
+                            time_integrator="leapfrog_si"),
         output=OutputConfig(output_dir="", diag_days=diag_days,
                             checkpoint_days=checkpoint_days),
         days=days, dataset="analytical", radiation="gray", rh_init=1.3,

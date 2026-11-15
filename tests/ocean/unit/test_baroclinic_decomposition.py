@@ -37,8 +37,12 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.latlon import create_latlon_grid
+# Pins the pre-core body, which the public dispatcher still runs for configs
+# the shared ocean core refuses; the routed path is pinned in
+# test_ocean_pe_generic.py (the core's lateral diffusion shifts the routed
+# explicit_biharmonic_smag_merid case by 5.0e-14 abs).
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-    latlon_cgrid_ocean_baroclinic_tendencies,
+    _latlon_tendencies_outside_core as latlon_cgrid_ocean_baroclinic_tendencies,
 )
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig

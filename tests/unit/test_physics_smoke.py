@@ -181,9 +181,18 @@ def test_turbulence_smoke(scheme):
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
     state, grid, sigma = make_hydrostatic_setup()
-    config = TurbulenceConfig(scheme=scheme)
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.physics.turbulence.config import YSUConfig
+    # ysu carries the WRF surface-layer state and needs the land/water flag
+    # on a grid without a land fraction
+    config = (TurbulenceConfig(scheme=scheme, ysu=YSUConfig(surface_type="land"))
+              if scheme == "ysu" else TurbulenceConfig(scheme=scheme))
     turb_fn = make_turbulence_physics(config, model_type="hydrostatic", dt=300.0)
-    tend, prog = turb_fn(state, grid, sigma)
+    ps = (init_physics_state(state.T.data.size // sigma.n_levels, sigma.n_levels,
+                             PhysicsConfig(turbulence=config))
+          if scheme == "ysu" else None)
+    tend, prog = turb_fn(state, grid, sigma, phys_state=ps)
     check_tendencies_finite(tend, f"turbulence({scheme})")
     check_shape(tend.dT_dt, (6, 8, 8, 10), f"turbulence({scheme}).dT_dt")
     # Non-zero wind tendency (surface friction)

@@ -54,6 +54,9 @@ from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 from legoesm.atmosphere.physics.microphysics.config import (
     MicrophysicsConfig, resolve_warm_rain_scheme)
 from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+from legoesm.atmosphere.physics.methane_oxidation import MethoxConfig, make_methox_physics
+from legoesm.atmosphere.physics.radiation.ozone_cariolle import (
+    OzoneCariolleConfig, make_cariolle_physics)
 
 from legoesm.atmosphere.physics.radiation.integration import (
     make_radiation_physics,
@@ -117,6 +120,11 @@ class PhysicsConfig(NamedTuple):
     turbulence: TurbulenceConfig = TurbulenceConfig()
     microphysics: MicrophysicsConfig = MicrophysicsConfig()
     gravity_wave_drag: GravityWaveDragConfig = GravityWaveDragConfig()
+    # OpenIFS 49r1 METHOX water source (MPAS lane only; enabled=False = off).
+    methox: MethoxConfig = MethoxConfig()
+    # OpenIFS 49r1 Cariolle chemistry of the advected o3_ifs tracer (MPAS lane
+    # only; tracer only, radiation keeps its own ozone).
+    cariolle: OzoneCariolleConfig = OzoneCariolleConfig()
 
 
 def _micro_liquid_from_closure_on(microphysics_config) -> bool:
@@ -347,6 +355,12 @@ def make_physics(
         raise ValueError(
             f"surface_bulk_coeffs is wired for model_type {_bulk_models}; "
             f"{model_type!r} would silently drop the surface exchange.")
+    if config.methox.enabled and model_type != "mpas":
+        raise ValueError("ifs_methox runs only on the MPAS column lane; "
+                         f"got model_type={model_type!r}")
+    if config.cariolle.enabled and model_type != "mpas":
+        raise ValueError("ifs_ozone_chem runs only on the MPAS column lane; "
+                         f"got model_type={model_type!r}")
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(
             config, dt, column_mesh=column_mesh, need_rad=need_rad,
@@ -939,6 +953,16 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _micro_entry = tagged_fns[-1]
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, model_type, dt), True, "gwd_spectrum"))
+    if config.methox.enabled:
+        if model_type != "mpas":
+            raise ValueError("ifs_methox runs only on the MPAS column lane; "
+                             f"got model_type={model_type!r}")
+        tagged_fns.append((make_methox_physics(config.methox), False, None))
+    if config.cariolle.enabled:
+        if model_type != "mpas":
+            raise ValueError("ifs_ozone_chem runs only on the MPAS column lane; "
+                             f"got model_type={model_type!r}")
+        tagged_fns.append((make_cariolle_physics(config.cariolle, dt), False, None))
     # Macmic group of each module, PARALLEL to ``tagged_fns`` (same append
     # order): "pre" = applied to the intermediate state before the loop
     # (deep convection), "sub" = sub-cycled (turbulence, microphysics),
@@ -957,6 +981,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     if config.microphysics.scheme != "none":
         _macmic_group.append("sub")
     if config.gravity_wave_drag.scheme != "none":
+        _macmic_group.append("once")
+    if config.methox.enabled:
+        _macmic_group.append("once")
+    if config.cariolle.enabled:
         _macmic_group.append("once")
     if len(_macmic_group) != len(tagged_fns):
         raise AssertionError(
@@ -999,6 +1027,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         if config.microphysics.scheme != "none":
             _ledger_row_of.append(ROW_MICROPHYSICS)
         if config.gravity_wave_drag.scheme != "none":
+            _ledger_row_of.append(ROW_OTHER)
+        if config.methox.enabled:
+            _ledger_row_of.append(ROW_OTHER)
+        if config.cariolle.enabled:
             _ledger_row_of.append(ROW_OTHER)
         # Drift guard: the row list is built by REPEATING the append order
         # above, so a module added to tagged_fns without a matching row here
@@ -1114,7 +1146,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _DIAG_FIELDS = ("sw_up_toa", "lw_up_toa", "sw_down_toa",
                         "shflx_sfc", "lhflx_sfc",
                         "sw_up_toa_clr", "lw_up_toa_clr",
-                        "sed_substeps_required", "evap_sfc")
+                        "sed_substeps_required", "evap_sfc",
+                        "shflx_ow", "lhflx_ow", "evap_ow", "taux_ow",
+                        "tauy_ow")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Per-process ledger: capture each module's row from its OWN complete
@@ -1254,7 +1288,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     assert _COUNT_DIAG_FIELDS <= {"sw_up_toa", "lw_up_toa", "sw_down_toa",
                                   "shflx_sfc", "lhflx_sfc", "sw_up_toa_clr",
                                   "lw_up_toa_clr", "sed_substeps_required",
-                                  "evap_sfc"}
+                                  "evap_sfc", "shflx_ow", "lhflx_ow",
+                                  "evap_ow", "taux_ow", "tauy_ow"}
 
     def _advance_state(state, du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends, dt_x):
         """``state + dt_x * tendency`` (CAM ``physics_update``); ``phis`` fixed."""
@@ -1776,6 +1811,13 @@ def _make_spectral_pe_combined(
 
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None,
                    return_sfc_precip=False):
+        if (config.turbulence.scheme == "ysu" and forcing is not None
+                and forcing.get("sic") is not None):
+            # R4 votes X8/J7: WRF blends sea ice through a second surface-layer
+            # call per ice fraction, which is not ported.
+            raise ValueError(
+                "turbulence=ysu (WRF surface layer) does not handle sea ice; "
+                "this spectral run's forcing carries a sea-ice field ('sic').")
         if not tagged_fns:
             zero_3d = jnp.zeros_like(state.vor_hat.data)
             zero_2d = jnp.zeros_like(state.lnps_hat.data)

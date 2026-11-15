@@ -179,7 +179,7 @@ def initial_ice_number_from_mass(q_i, rho_cloud_ice: float = _RHO_CLOUD_ICE_DEFA
 # q/cover with in-cloud CDNC but through its own ECHAM radius law), so an
 # in-cloud number there is refused until that choice is made.
 _IN_CLOUD_NUMBER_SCHEMES = ("cam6_clubb", "resolved")
-# --- two_region sub-grid cloud-optics inhomogeneity ---
+# --- sub-grid cloud-optics inhomogeneity / partial coverage ---
 _INHOM_CF_FLOOR = 1.0e-3         # min cloud fraction for the in-cloud water path
 _INHOM_R_EFF_FLOOR_M = 1.0e-6    # min effective radius in the tau estimate [m]
 _TAU_GEOMETRIC_COEFF = 1.5       # 3 Q_ext/4 with Q_ext≈2 (geometric-optics extinction)
@@ -541,63 +541,6 @@ def _adiabatic_incloud_condensate(cf, dp, T, p_full, config):
                        config.q_c_diagnostic)
 
 
-def _two_region_inhomogeneity_factor(
-    tau: jnp.ndarray, fsd, g,
-) -> jnp.ndarray:
-    r"""Tau-dependent sub-grid cloud-optics inhomogeneity factor (chi_eff).
-
-    NOT YET FAITHFUL to ecRad Tripleclouds (1.7.2), the oracle this option is
-    named after (tier-2 audit, 2026-10-19).  This is a per-layer grey
-    surrogate: on ecRad's own meridian columns, the change from fsd = 0 to
-    fsd = 1.0 is -8.2 W/m2 of TOA reflected SW against Tripleclouds' -18.2
-    (45%) and +0.17 W/m2 of OLR against +3.04 (5%), with the oracle run at
-    overlap_param = 1 (maximally coherent inhomogeneity; the IFS default
-    overlap and decorrelation would give a smaller oracle effect).
-    Tripleclouds solves vertically overlapped thin/thick regions
-    explicitly, splits them from a lognormal or (ecRad 1.7.2 default) gamma
-    distribution (the 1 +/- fsd split here leaves the thin half empty at
-    fsd = 1), and solves
-    the LW with the regions too, instead of reusing a factor derived from SW
-    reflectance.  A faithful port needs a region-resolved solver;
-    which overlap and decorrelation it uses is a pending user decision.
-
-    Two-region (Shonk & Hogan 2008 "Tripleclouds") split of the in-cloud
-    optical depth ``tau`` into equal-area optically-THIN ``tau(1-fsd)`` and
-    optically-THICK ``tau(1+fsd)`` sub-columns.  Inverting the domain-mean
-    conservative two-stream reflectance
-    ``R_bar = 1/2[R(tau(1-fsd)) + R(tau(1+fsd))]``, ``R(t) = t/(t+gamma0)``,
-    ``gamma0 = 2/(1-g)``, to an effective optical depth ``tau_eff`` and taking
-    ``chi_eff = tau_eff/tau`` has the exact CLOSED FORM
-
-        chi_eff = 1 - fsd^2 * tau / (gamma0 + tau).
-
-    Written closed-form (not via ``gamma0 R_bar/(1-R_bar)``) so there is NO
-    ``1/(1-R_bar)`` division (fp32-unsafe as ``R_bar -> 1`` for a thick cloud),
-    NO overflow, and NO clip/zero-guard: the value is analytically bounded in
-    ``[1 - fsd^2, 1]``, monotone-decreasing in ``tau``, and smooth =>
-    ``jax.grad``-safe everywhere.
-
-    Behaviour: ``chi_eff = 1`` for a thin cloud (``tau -> 0``) or a homogeneous
-    one (``fsd -> 0``), and DECREASES with ``tau`` toward the asymptote
-    ``1 - fsd^2`` -- so a THICK cloud is reduced MORE than a thin one (unlike a
-    constant scalar).  Note the reduction is BOUNDED by ``1 - fsd^2``: for
-    ``fsd < 1`` the effective ``tau`` still grows without limit, so this
-    corrects the plane-parallel albedo bias by the physically-correct
-    inhomogeneity amount but does NOT drive a very thick cloud optically thin.
-    A genuine "clear sub-column" that caps a thick cloud's albedo (breaking the
-    saturation outright) is the ``fsd -> 1`` limit, where ``tau_eff -> gamma0``.
-    """
-    gamma0 = 2.0 / jnp.maximum(1.0 - g, 1.0e-6)   # g is a fixed numerics const
-    fsd2 = fsd * fsd
-    # Formed as (1 - fsd^2) + fsd^2 gamma0/(gamma0 + tau), NOT the equal
-    # 1 - fsd^2 tau/(gamma0 + tau): this builds the small residual DIRECTLY,
-    # avoiding the 1-minus-almost-1 fp32 cancellation for a thick cloud.
-    # 0 < gamma0/(gamma0 + tau) <= 1 (gamma0 > 0, tau >= 0) => chi_eff in
-    # [1 - fsd^2, 1], smooth and finite (no clip/where; caller validates
-    # fsd in [0, 1] via ExperimentConfig.validate_strict).
-    return (1.0 - fsd2) + fsd2 * gamma0 / (gamma0 + tau)
-
-
 def _partial_coverage_factor(
     tau_grid: jnp.ndarray, cf: jnp.ndarray, g,
 ) -> jnp.ndarray:
@@ -623,8 +566,8 @@ def _partial_coverage_factor(
     ``R`` is CONCAVE, so ``R(cf tau_ic) >= R_ICA`` for every ``cf < 1``: the
     single-column form is ALWAYS too bright.  This is the partial-coverage
     plane-parallel albedo bias, and it is INDEPENDENT of the in-cloud (fsd)
-    variability that :func:`_two_region_inhomogeneity_factor` corrects -- that
-    one subdivides the CLOUDY region, this one accounts for the CLEAR fraction.
+    variability (the ``cloud_optics_inhomogeneity`` options) -- that one
+    subdivides the CLOUDY region, this one accounts for the CLEAR fraction.
 
     Solving ``R(tau_eff) = R_ICA`` for the effective optical depth gives the
     exact closed form ``tau_eff = gamma0 cf tau_ic/(gamma0 + (1-cf) tau_ic)``.
@@ -651,10 +594,7 @@ def _partial_coverage_factor(
     LAYER, and RRTMGP adds the phase optical depths into one layer total
     (rrtmgp/optics/cloud_optics.py), so inverting each phase separately and
     summing is not the same function and leaves the layer too bright whenever
-    both phases are present.  This is the one place the coverage factor
-    deliberately differs from the fsd factor, which IS per-phase because
-    in-cloud VARIABILITY genuinely differs between a patchy liquid deck and a
-    uniform ice layer.
+    both phases are present.
 
     Limits (each exercised in tests/unit/test_partial_coverage_optics.py):
       * ``cf -> 1``       => chi_cover -> 1 (overcast: nothing to correct).
@@ -666,16 +606,7 @@ def _partial_coverage_factor(
         the single-column form violates outright.
 
     SIGN: ``chi_cover <= 1`` always, so this can only DIM the cloud, never
-    brighten it -- the same one-way guarantee the fsd factor carries.
-
-    COMPOSITION WITH ``two_region``.  The three-region subcolumn is: fraction
-    ``(1-cf)`` clear, and the cloudy ``cf`` split into equal-area ``tau(1±fsd)``
-    halves.  Its ICA reflectance is ``cf * Rbar_fsd = cf * R(tau chi_fsd)``, so
-    the coverage inversion must be evaluated at ``C = tau * chi_fsd``, NOT at
-    the raw ``tau``.  Evaluating at ``tau`` OVER-thins (codex review: cf=0.4,
-    fsd=0.75, tau=100 gives tau_eff 3.66 against the correct 6.17, a reflectance
-    0.101 too DIM).  The caller therefore applies the factors SEQUENTIALLY,
-    recomputing tau between them.
+    brighten it.
 
     ACCURACY / SCOPE -- this factor is EXACT only for a SINGLE layer under a
     grey conservative two-stream.  Known, deliberate approximations:
@@ -696,9 +627,7 @@ def _partial_coverage_factor(
         separate emissivity-space inversion.  NOTE the bound
         ``cf(1-e^-t) <= 1-e^-x <= 1-e^-ct`` relies on ``gamma0 >= 2``, i.e.
         ``g >= 0``, NOT merely on ``chi_cover <= 1``; a negative
-        ``cloud_optics_asymmetry_g`` would break it.  The pre-existing fsd
-        factor shares the SW-surrogate-applied-to-LW flaw -- precedent, not
-        justification.
+        ``cloud_optics_asymmetry_g`` would break it.
       * VERTICAL OVERLAP: applied per layer independently, because the solver
         carries no overlap state.  For a multi-layer cloud that is between the
         maximum- and random-overlap ICA answers (codex review, two identical
@@ -1084,6 +1013,7 @@ def compute_cloud_properties(
     n_cloud_in_cloud: bool = False,
     mg2_ice_dcs_m: float | None = None,
     mg2_ice_slope_log_width: float | None = None,
+    subcolumn_inhomogeneity: bool = False,
 ) -> CloudProperties:
     """Compute diagnostic cloud fraction and cloud optical properties.
 
@@ -1469,9 +1399,9 @@ def compute_cloud_properties(
     # These are grid-mean (not in-cloud) values, which is what RRTMGP expects
     # when treating each layer independently (no overlap assumption).
     # Grid-mean water/ice paths [kg/m^2].  The sub-grid inhomogeneity
-    # correction (Cahalan scalar OR the tau-dependent two_region optic) is
-    # applied AFTER the effective radii below, because the two_region scheme
-    # needs the in-cloud optical depth = f(water path, r_eff).
+    # correction (Cahalan scalar; two_region is applied per subcolumn by the
+    # radiation lane) comes AFTER the effective radii below, because the
+    # partial-coverage factor needs the in-cloud optical depth = f(path, r_eff).
     lwp = q_c * dp / constants.g
     iwp = q_i * dp / constants.g
 
@@ -1710,20 +1640,18 @@ def compute_cloud_properties(
         _tau_liq = _tau_liq * _chi
         _tau_ice = _tau_ice * _chi
     elif _inhom_scheme == "two_region":
-        # Apply the inhomogeneity factor PER PHASE, each from its OWN optical
-        # depth (a patchy LIQUID cloud must not thin a horizontally-uniform ICE
-        # layer).  tau -> 0 => chi_eff -> 1 (no change).
-        _fsd = config.cloud_fsd
-        _chi_liq = _two_region_inhomogeneity_factor(_tau_liq, _fsd, _g)
-        _chi_ice = _two_region_inhomogeneity_factor(_tau_ice, _fsd, _g)
-        lwp = lwp * _chi_liq
-        iwp = iwp * _chi_ice
-        # SEQUENTIAL, not a product of two factors of the raw tau: the
-        # three-region ICA reflectance is cf*R(tau*chi_fsd), so the coverage
-        # inversion below must be evaluated at the fsd-THINNED optical depth.
-        # Evaluating both at the raw tau over-thins (codex review, 2026-07-31).
-        _tau_liq = _tau_liq * _chi_liq
-        _tau_ice = _tau_ice * _chi_ice
+        # ecRad McICA gamma-PDF scaling per subcolumn cell, applied by the
+        # radiation lane (subcolumns.ecrad_inhomogeneity_scaling); the paths
+        # leave here unscaled.  Any other caller would silently drop it.
+        if not (subcolumn_inhomogeneity
+                and getattr(config, "cloud_vertical_overlap_optics", "none") == "max_random"
+                and getattr(config, "cloud_partial_coverage_optics", "none") == "none"):
+            raise ValueError(
+                "cloud_optics_inhomogeneity='two_region' (ecRad McICA gamma "
+                "scaling) needs cloud_vertical_overlap_optics='max_random', "
+                "cloud_partial_coverage_optics='none' and a radiation lane that "
+                "applies the subcolumn scaling (subcolumn_inhomogeneity=True)"
+            )
     else:
         raise ValueError(
             f"unknown cloud_optics_inhomogeneity {_inhom_scheme!r}; "

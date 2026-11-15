@@ -19,9 +19,5 @@ for case in cbl gabls1; do
   $PY scripts/validate/diag_clubb_surface_flux.py --case $case --scheme clubb \
       --steps 30 --print-every 1 2>&1 | tail -45
   echo "rc=${PIPESTATUS[0]}"
-  echo "=================== $case / clubb_lite (control) ==================="
-  $PY scripts/validate/diag_clubb_surface_flux.py --case $case --scheme clubb_lite \
-      --steps 30 --print-every 10 2>&1 | tail -12
-  echo "rc=${PIPESTATUS[0]}"
 done
 echo "DONE $(date +%T)"

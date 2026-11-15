@@ -1,6 +1,16 @@
 # =============================================================================
-# legoESM AMIP — STATE-OF-THE-ART configuration
+# legoESM AMIP — STATE-OF-THE-ART configuration  [HISTORICAL — not production]
 # =============================================================================
+# HISTORICAL (user 2026-11-11): the FV3 duo is the only cubed-sphere dycore for
+# production; this cdgrid deck and its own physics set are retired.  The
+# cubed-sphere C48 production deck is config/amip/amip_production_fv3duo_c48.yaml
+# (CAM6 physics, same as every grid). This historical deck now selects fv3_duo
+# and refuses its unported main-path physics/L40 setup; it cannot reproduce
+# legacy C/D-grid runs after the atmosphere retirement (2026-11-13).
+# Known defects on the cdgrid pipeline lane this deck runs on (2026-11-11 probes):
+# physics receives face-direction winds (35 deg mean, up to 179 deg at the
+# poles), and the dycore state carries no water vapour (physics updates a copy
+# the dynamics never sees).
 # Extends the validated realism config (config/amip/amip_production.yaml) with the
 # SOTA upgrades identified 2026-07-01:
 #   1. LATEST LAND MODEL — multilayer Richards soil + CLM PFT/texture surface map
@@ -32,12 +42,12 @@
 # Tracking: GitHub issue #636.
 # =============================================================================
 
-# --- Grid + dycore: cubed-sphere C48 / L40, cd-grid, dt 150 s -----------------
+# --- Historical C48 / L40 setup; fv3_duo refuses this unported setup --------
 grid_type: cubed_sphere
 resolution: 48
 nlev: 40
 transition_exponent: 2       # C48 resolves ~4760 m of Tibet; exponent 3 gives negative layer mass above ~3470 m (#1029)
-discretization: cdgrid
+discretization: fv3_duo
 persistent_dgrid: true       # #1028: carry D-staggered winds between steps; the cc round trip damps eddies (C36 HS jet 13 -> 39-41 m/s). Single-process cube only.
 energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
 dt: 150.0

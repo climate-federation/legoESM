@@ -37,6 +37,8 @@ __param_spec__ = {
             "smooth_energy_sharpness_m2j": "RULE 5 smoothing sharpness of the ePBL energy switches; a numerics regulariser, not physics",
             "smooth_colht_sharpness_per_m": "RULE 5 smoothing sharpness of the ePBL column-height switches; a numerics regulariser, not physics",
             "smooth_ratio_sharpness": "RULE 5 smoothing sharpness of the ePBL nondimensional caps; a numerics regulariser, not physics",
+            "smooth_velocity_sharpness_s_m": "RULE 5 smoothing sharpness of the ePBL velocity caps; a numerics regulariser, not physics",
+            "smooth_slope_sharpness": "RULE 5 smoothing sharpness of the ePBL column-height slope switches; a numerics regulariser, not physics",
         },
         "params": {
             "nstar": {"units": "1", "bounds": (0.02, 0.4), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) NSTAR: fraction of released PE available to drive entrainment", "shape": None},
@@ -1181,6 +1183,8 @@ class EPBLConfig(NamedTuple):
     smooth_energy_sharpness_m2j: float = 1.0e6    # [m^2/J] TKE / PE per area
     smooth_colht_sharpness_per_m: float = 1.0e10  # [1/m] column-height change
     smooth_ratio_sharpness: float = 1.0e3         # [1] nondimensional ratios
+    smooth_velocity_sharpness_s_m: float = 1.0e6  # [s/m] velocity scales
+    smooth_slope_sharpness: float = 1.0e10        # [1] d(ColHt)/d(Kddt_h), ~1e-5
 
     # --- background floors added to the ePBL diffusivity ---
     K_bg: float = 1.0e-5               # KD   [m^2/s]

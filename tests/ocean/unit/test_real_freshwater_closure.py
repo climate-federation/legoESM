@@ -112,15 +112,15 @@ class TestVSFGateIsWhereItRuns:
     def test_mpas_gate_present_in_tendencies(self):
         from legoesm.ocean.dynamics import ocean_pe_mpas
         src = inspect.getsource(
-            ocean_pe_mpas.mpas_ocean_baroclinic_tendencies)
+            ocean_pe_mpas.mpas_ocean_freshwater_salt_sources)
         assert self.LL_GATE in src, (
             "the MPAS VSF block must be skipped for real_freshwater, in "
-            "mpas_ocean_baroclinic_tendencies")
+            "mpas_ocean_freshwater_salt_sources")
 
     def test_mpas_gate_nonvacuous(self):
         from legoesm.ocean.dynamics import ocean_pe_mpas
         src = inspect.getsource(
-            ocean_pe_mpas.mpas_ocean_baroclinic_tendencies)
+            ocean_pe_mpas.mpas_ocean_freshwater_salt_sources)
         mutated = src.replace(self.LL_GATE, '!= "none"')
         assert self.LL_GATE not in mutated
 

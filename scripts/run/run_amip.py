@@ -135,10 +135,12 @@ def _argv_federates(argv: list[str]) -> bool:
 if "--multicontroller" not in sys.argv:
     maybe_init_jax_distributed(federate=_argv_federates(sys.argv))
 
+from legoesm.atmosphere.physics.turbulence.config import refuse_retired_turbulence
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
     ZM_SCALAR_FIELDS,
+    ZM_TRIGGER_FIELDS,
     ZM_WIDTH_FIELDS,
     VALID_TURBULENCE,
     DycoreConfig,
@@ -151,6 +153,7 @@ from legoesm.driver.config import (
 from legoesm.driver.run_status import status_to_exit_code
 
 from legoesm import constants
+from legoesm.core.bulk_flux import VALID_UNSTABLE_SCHEMES
 from legoesm.grids.halo import CORNER_FILL_MODES
 
 _DYCORE_DEFAULTS = DycoreConfig()
@@ -421,6 +424,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "hybrid lat-lon C-grid — discretization-consistent with the "
              "geopotential and ln p^SB gradients (#1029). Default ON; "
              "--no-sb81-omega-conversion selects the legacy arithmetic form.",
+    )
+    parser.add_argument(
+        "--vertical-form", default=_DYCORE_DEFAULTS.vertical_form,
+        help="Vertical form of the shared hydrostatic PE core on the lat-lon "
+             "C-grid and MPAS lanes.  'legacy' (default) is each lane's pre-core "
+             "tendency, unchanged (temporary; carries #930 on lat-lon, #1029 on "
+             "MPAS and the lat-lon 50 K floor); 'as83' is Arakawa-Suarez 1983 "
+             "(energy-conserving, hybrid only); 'sb81_theta' the SB81 theta form.  "
+             "Checked against the core's list by validate_strict.",
     )
     # Task #25: JIT compile bloat at production scale.  The inline
     # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
@@ -754,6 +766,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "resolutions (C24/C48 L20) compile instead of stalling. "
                              "Numerically exact (columns are independent); must "
                              "divide the column count.")
+    parser.add_argument("--rrtmgp-gas-tables", choices=("reduced", "full"),
+                        default=_EXPERIMENT_DEFAULTS.rrtmgp_gas_tables,
+                        help="RRTMGP gas-optics tables: 'reduced' (LW g128 / SW "
+                             "g112) or 'full' (LW g256 / SW g224, the reference "
+                             "tables; about twice the radiation cost).")
     parser.add_argument("--rrtmgp-overhead-layer", action="store_true",
                         default=_EXPERIMENT_DEFAULTS.rrtmgp_overhead_layer,
                         help="CAM RRTMG-style transported layer from the model "
@@ -966,7 +983,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--surface-stability-scheme", type=str,
                         dest="surface_stability_scheme", default="dyer1974",
                         choices=["dyer1974", "beljaars_holtslag1991",
-                                 "grachev2007_sheba", "gryanik2020"],
+                                 "grachev2007_sheba", "gryanik2020", "gfs",
+                                 "wrf_revmm5", "mynn_sfc"],
                         help="Stable-branch (zeta>0) Monin-Obukhov similarity "
                              "functions for the surface layer (bulk_flux psi_m/"
                              "psi_h). dyer1974 (default) is byte-identical: "
@@ -977,6 +995,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "a rounding-level change on coare3, and the "
                              "genuinely different strong-stable tails there "
                              "are grachev2007_sheba/gryanik2020.")
+    parser.add_argument("--surface-unstable-scheme", type=str,
+                        dest="surface_unstable_scheme", default="native",
+                        choices=list(VALID_UNSTABLE_SCHEMES),
+                        help="Unstable-branch (zeta<0) Monin-Obukhov form, "
+                             "independent of --surface-stability-scheme. native "
+                             "(default, byte-identical) = each bulk scheme's own "
+                             "form (Businger-Dyer on large_yeager, Fairall blend "
+                             "on coare3); businger_dyer or coare3 force that form "
+                             "(with gryanik2020 an explicit choice scales the "
+                             "unstable heat function by Pr0=0.98 so phi_h is "
+                             "continuous at z/L=0; native keeps the bulk scheme's "
+                             "own unscaled form). Needs coare3 or large_yeager.")
     # Large-Yeager (--surface-bulk-scheme large_yeager) RULE 5 smooth-switch
     # widths (#2241).  Defaults = the ExperimentConfig values (bit-identical);
     # 0 = AeroBulk's hard switch.  Read only by large_yeager.
@@ -999,6 +1029,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Large-Yeager smoothing band of the 33 m/s drag "
                              "cutoff [m/s]. 0 = AeroBulk hard cutoff. Read only "
                              "by large_yeager.")
+    parser.add_argument("--surface-most-zeta-cap-width",
+                        dest="surface_most_zeta_cap_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_most_zeta_cap_width,
+                        help="Half-width of the smooth cap on |z/L| at 10 in the "
+                             "Monin-Obukhov stability functions (identity below "
+                             "10 - width). 0 = the hard clip.")
+    parser.add_argument("--surface-gfs-unstable-join-width",
+                        dest="surface_gfs_unstable_join_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_gfs_unstable_join_width,
+                        help="Width in z/L of the smooth join of the GFS unstable "
+                             "branches at z/L = -0.5. 0 = the exact GFS step. "
+                             "Read only with --surface-unstable-scheme gfs.")
     parser.add_argument("--hb-kvf-min", dest="hb_kvf_min", type=float,
                         default=None,
                         help="Free-atmosphere diffusivity floor override "
@@ -1066,10 +1108,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["constant", "two_region"], default="constant",
                         help="Sub-grid cloud-optics inhomogeneity scheme: "
                              "'constant' (Cahalan scalar chi, legacy default) or "
-                             "'two_region' (TAU-DEPENDENT Shonk-Hogan 2008 optic "
-                             "that breaks the plane-parallel tau-saturation a "
-                             "scalar cannot -- a thick cloud is reduced MORE than "
-                             "a thin one).")
+                             "'two_region' (ecRad 49r1 McICA gamma-PDF scaling of "
+                             "each max_random subcolumn cell; needs "
+                             "--cloud-vertical-overlap-optics max_random).")
     parser.add_argument("--cloud-vertical-overlap-optics",
                         dest="cloud_vertical_overlap_optics",
                         choices=["none", "max_random", "mcica"], default="none",
@@ -1123,8 +1164,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "0.0 %% cover against 35-40 %% observed.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
-                             "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
-                             "=> thinner leaking sub-column => lower albedo). "
+                             "two_region optic [0,1] (Shonk-Hogan ~0.75; width "
+                             "of the gamma PDF of the subcolumn cells). "
                              "None=CloudConfig default 0.75.")
     parser.add_argument("--use-clubb-cloud-fraction",
                         action=argparse.BooleanOptionalAction, default=False,
@@ -1156,6 +1197,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                                  "booking (0 = CAM's hard switch; MPAS ZM + "
                                  "CLUBB with cld_macmic_num_steps>=2 only). "
                                  "Default: the scheme's own value.")
+    for _f, _leaf in ZM_TRIGGER_FIELDS.items():
+        parser.add_argument("--" + _f.replace("_", "-"), type=float,
+                            default=None, dest=_f,
+                            help=f"ZhangMcFarlaneConfig.{_leaf}: RULE 5 width "
+                                 "[J/kg] of the cape > capelmt deep-convection "
+                                 "trigger (0 = CAM's hard switch). Default: the "
+                                 "scheme's own value.")
     parser.add_argument("--clubb-q-flux-scale", type=float, default=None,
                         dest="clubb_q_flux_scale",
                         help="Moisture-only multiplier on CLUBB's q_v eddy "
@@ -1235,6 +1283,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "soil conductivity x 10**(-e * ice fraction). Active "
                              "only with --land-soil-freeze-thaw. Default 6 (CLM5); "
                              "0 = no impedance; range 0..10.")
+    parser.add_argument("--land-soil-vg-air-entry-m", dest="land_soil_vg_air_entry_m",
+                        type=float, default=_EXPERIMENT_DEFAULTS.land_soil_vg_air_entry_m,
+                        help="Air-entry head [m] of the modified van Genuchten soil "
+                             "retention curve (Vogel et al. 2001); <= 0, 0 = the "
+                             "classic curve. Default -0.02.")
     parser.add_argument("--land-canopy-stress-b0", dest="land_canopy_stress_b0",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_canopy_stress_b0,
@@ -1277,6 +1330,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Two-leaf canopy: fixed-point iterations of the "
                              "above-canopy Monin-Obukhov solve. Default: the "
                              "land CanopyConfig value.")
+    parser.add_argument("--land-canopy-solve-group",
+                        dest="land_canopy_solve_group", type=int,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_solve_group,
+                        help="Two-leaf canopy: columns per batch of the Newton "
+                             "solve, 0 = one batch per GPU. Default: the land "
+                             "CanopyConfig value.")
     parser.add_argument("--land-snow-insulation", dest="land_snow_insulation",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_snow_insulation,
@@ -1531,6 +1590,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Bechtold fields may differ from their defaults. "
                              "Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
+    parser.add_argument("--ifs-methox",
+                        dest="ifs_methox",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.ifs_methox,
+                        help="OpenIFS 49r1 methane-oxidation water source "
+                             "(METHOX) with the run's CH4. Default "
+                             f"{_EXPERIMENT_DEFAULTS.ifs_methox}.")
+    parser.add_argument("--ifs-ozone-chem",
+                        dest="ifs_ozone_chem",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.ifs_ozone_chem,
+                        help="OpenIFS 49r1 Cariolle ozone chemistry on an "
+                             "advected o3_ifs tracer (not fed to radiation). "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.ifs_ozone_chem}.")
     parser.add_argument("--bechtold-use-ifs-subcloud-evap",
                         dest="bechtold_use_ifs_subcloud_evap",
                         action=argparse.BooleanOptionalAction,
@@ -1570,6 +1644,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(openifs cuflxn.F90 FOEALFCU wet-bulb split, "
                              "RTAUMEL melt; FOLD variant). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_snow_melt}.")
+    parser.add_argument("--bechtold-snow-refill-width-kg-m2-s", type=float,
+                        default=None, dest="bechtold_snow_refill_width_kg_m2_s",
+                        help="BechtoldConfig.snow_refill_width_kg_m2_s: RULE 5 "
+                             "width [kg/m^2/s] of the sub-cloud snow refill "
+                             "(0 = the oracle's hard switch). Default: the "
+                             "scheme's own value.")
     parser.add_argument("--bechtold-use-ifs-capdcycl",
                         dest="bechtold_use_ifs_capdcycl",
                         action=argparse.BooleanOptionalAction,
@@ -1588,6 +1668,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "width 0); 'first_guess' = OpenIFS (cumastrn.F90:912 keeps "
                              "0.1 of the CFL limit, grows as 1/dt). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_shallow_nosupply}.")
+    parser.add_argument("--bechtold-ifs-hard-switches",
+                        dest="bechtold_ifs_hard_switches",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_ifs_hard_switches,
+                        help="Faithful IFS chain: OpenIFS's exact elementwise "
+                             "switches (so far the closure) instead of their "
+                             "RULE 5 smooth forms; the cloud "
+                             "levels are exact either way. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_hard_switches}.")
     parser.add_argument("--bechtold-use-ifs-land-rhebc",
                         dest="bechtold_use_ifs_land_rhebc",
                         action=argparse.BooleanOptionalAction,
@@ -2617,6 +2706,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--precision", type=str, default="fp32",
                         choices=["fp32", "fp64", "mixed"],
                         help="Precision mode: fp32, fp64, or mixed")
+    parser.add_argument("--land-compute-precision", type=str, default="policy",
+                        choices=["policy", "fp64"],
+                        help="'fp64' runs the MPAS multilayer land step in "
+                             "float64 inside a lower-precision run; 'policy' "
+                             "follows --precision")
+    parser.add_argument("--microphysics-compute-precision", type=str,
+                        default="policy", choices=["policy", "fp64"],
+                        help="'fp64' runs the microphysics in float64 inside "
+                             "a lower-precision run; 'policy' follows "
+                             "--precision")
     parser.add_argument("--gradient-checkpoint", action="store_true", default=False,
                         help="Enable gradient checkpointing for O(sqrt(N)) AD memory")
     parser.add_argument("--profile", type=int, default=0, metavar="N_STEPS",
@@ -2828,16 +2927,19 @@ def dry_run_check_inputs(config: ExperimentConfig,
 
 def _default_discretization_for_grid(grid_type: str) -> str:
     """The dycore discretization to use when the user gave a grid but no
-    ``--discretization``.  The SCVT Voronoi mesh supports only 'mpas'; every
-    other grid defaults to 'centered'.  Shared by ``_postprocess_args`` and
+    ``--discretization``. Cube uses 'fv3_duo', the SCVT Voronoi mesh uses
+    'mpas', and other grids retain 'centered'. Shared by ``_postprocess_args`` and
     ``build_config_from_args`` so a caller that skips postprocess still resolves
     a supported (model_type, discretization, grid_type) triple (codex r2)."""
     if grid_type in ("voronoi", "mpas", "mpas_voronoi", "icosahedral"):
         return "mpas"
+    if grid_type == "cubed_sphere":
+        return "fv3_duo"
     return "centered"
 
 
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    refuse_retired_turbulence(args.turbulence, "run_amip --turbulence")
     # Defensive boundary: --grid-type/--discretization carry a None sentinel
     # default (explicitness tracking for the --truncation conflict guard in
     # _postprocess_args). A caller that skips _postprocess_args must still get
@@ -2920,6 +3022,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_scale_height_m=args.sponge_scale_height_m,
         # #1029 ω-side SB81 conversion (default ON; --no-sb81-omega-conversion = legacy).
         sb81_omega_conversion=args.sb81_omega_conversion,
+        vertical_form=args.vertical_form,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
     )
@@ -2997,6 +3100,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
         rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,
+        rrtmgp_gas_tables=args.rrtmgp_gas_tables,
         diurnal_cycle=args.diurnal_cycle,
         orbital_insolation=args.orbital_insolation,
         co2_ppmv=args.co2_ppmv,
@@ -3030,7 +3134,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
-           for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS,
+           for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS,
                       **CLUBB_SCALAR_FIELDS}},
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
@@ -3053,10 +3157,13 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_stability_scheme=args.surface_stability_scheme,
+        surface_unstable_scheme=args.surface_unstable_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
         surface_large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
         surface_large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
         surface_large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
+        surface_most_zeta_cap_width=args.surface_most_zeta_cap_width,
+        surface_gfs_unstable_join_width=args.surface_gfs_unstable_join_width,
         surface_z_ref_model_level=args.surface_z_ref_model_level,
         surface_ocean_q_sfc_saline=args.surface_ocean_q_sfc_saline,
         hb_kvf_min=args.hb_kvf_min,
@@ -3091,6 +3198,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_snow_scheme=args.land_snow_scheme,
         land_snow_emissivity=args.land_snow_emissivity,
         land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
+        land_soil_vg_air_entry_m=args.land_soil_vg_air_entry_m,
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
         land_canopy_snow_masking=args.land_canopy_snow_masking,
@@ -3187,6 +3295,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
         land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
         land_canopy_most_n_iters=args.land_canopy_most_n_iters,
+        land_canopy_solve_group=args.land_canopy_solve_group,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None
@@ -3295,6 +3404,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
         bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
         bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
+        ifs_methox=args.ifs_methox,
+        ifs_ozone_chem=args.ifs_ozone_chem,
         bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
         bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
         bechtold_dx_m=args.bechtold_dx_m,
@@ -3305,8 +3416,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_M_b_max=args.bechtold_M_b_max,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
+        bechtold_ifs_hard_switches=args.bechtold_ifs_hard_switches,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
+        bechtold_snow_refill_width_kg_m2_s=args.bechtold_snow_refill_width_kg_m2_s,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,
@@ -3317,6 +3430,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         physics_parameterization_layers=args.physics_parameterization_layers,
         physics_parameterization_seed=args.physics_parameterization_seed,
         precision=args.precision,
+        land_compute_precision=args.land_compute_precision,
+        microphysics_compute_precision=args.microphysics_compute_precision,
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         distributed_mode=args.distributed_mode,
@@ -3906,7 +4021,9 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
     surface (anemic evaporation over a calm warm ocean).
 
     This re-applies the previously-resolved surface ``bulk_scheme`` +
-    ``gustiness_w_zi`` + ``stability_scheme`` and the two run-resolved surface
+    ``gustiness_w_zi`` + ``stability_scheme`` / ``unstable_scheme`` with their
+    RULE 5 widths (``most_zeta_cap_width``, ``gfs_unstable_join_width``) and the
+    two run-resolved surface
     switches (``z_ref_model_level``, ``ocean_q_sfc_saline``) onto the trained
     Louis config, keeping the trained ``Cd_neutral``/``Ch_neutral``/``z0``
     (the MOST/COARE schemes ignore the neutral ``Cd``/``Ch`` but DO use
@@ -3922,6 +4039,9 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
             bulk_scheme=prev_surf.bulk_scheme,
             gustiness_w_zi=prev_surf.gustiness_w_zi,
             stability_scheme=prev_surf.stability_scheme,
+            unstable_scheme=prev_surf.unstable_scheme,
+            most_zeta_cap_width=prev_surf.most_zeta_cap_width,
+            gfs_unstable_join_width=prev_surf.gfs_unstable_join_width,
             z_ref_model_level=prev_surf.z_ref_model_level,
             ocean_q_sfc_saline=prev_surf.ocean_q_sfc_saline))
 

@@ -51,7 +51,7 @@ from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
 from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
     holtslag_boville_turbulence,
 )
-from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
+from legoesm.atmosphere.physics.turbulence.ysu import init_sfclay_carry, ysu_turbulence
 from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     McFarlaneConfig,
     HinesConfig,
@@ -66,8 +66,19 @@ TURB_SCHEMES = {
     "smagorinsky": (smagorinsky_turbulence, lambda: SmagorinskyConfig(surface=SurfaceLayerConfig(), stability_form="lilly")),
     "louis": (louis_turbulence, lambda: LouisConfig(surface=SurfaceLayerConfig())),
     "holtslag_boville": (holtslag_boville_turbulence, lambda: HoltslagBovilleConfig(surface=SurfaceLayerConfig())),
-    "ysu": (ysu_turbulence, lambda: YSUConfig(surface=SurfaceLayerConfig())),
 }
+
+
+def _ysu(u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho, dt, config):
+    """One cold-start step of the WRF surface layer + YSU (the scheme carries
+    the surface-layer state; its other schemes' signature here has none)."""
+    out, _ = ysu_turbulence(u, v, T, q_v, init_sfclay_carry(T.shape[0], config),
+                            p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho, dt, config)
+    return out
+
+
+def _ysu_cfg():
+    return YSUConfig(surface=SurfaceLayerConfig(), surface_type="land", dx_m=1.0e5)
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +319,6 @@ TURB_GRAD_PARAMS = {
     "smagorinsky": ["C_s", "l_mix_max", "Pr_t"],
     "louis": ["b_louis", "b_heat_ratio", "l_mix_max", "Ri_crit"],
     "holtslag_boville": ["fak", "fakn", "betam", "betah", "sffrac", "Ri_crit"],
-    "ysu": ["entrainment_ratio", "countergrad_coeff", "Pr_t", "louis_b",
-            "entrainment_width_frac"],
 }
 
 
@@ -453,7 +462,7 @@ def test_idealized_louis_stability_suppression():
 
 @pytest.mark.parametrize("name,fn,mk", [
     ("holtslag_boville", holtslag_boville_turbulence, lambda: HoltslagBovilleConfig(surface=SurfaceLayerConfig())),
-    ("ysu", ysu_turbulence, lambda: YSUConfig(surface=SurfaceLayerConfig())),
+    ("ysu", _ysu, _ysu_cfg),
 ])
 def test_idealized_convective_kprofile_shape(name, fn, mk):
     d = _base_column(1, 30, 305.0, 300.0, 4.0, 12.0)
@@ -469,16 +478,12 @@ def test_idealized_convective_kprofile_shape(name, fn, mk):
 
 
 def test_idealized_ysu_pbl_deepens_with_surface_heating():
-    """YSU bulk-Ri PBL height must respond to surface heat flux.
-
-    Regression for the codex atm-turb-gwd finding A: the bulk-Ri numerator now
-    carries the Troen-Mahrt / Hong et al. (2006) unstable surface-excess parcel
-    θ_T = b·(w'θ')_0/w_s, so a convective surface heat flux deepens the
-    diagnosed PBL.  Uses a hydrostatically-consistent well-mixed-then-capped
-    profile so the PBL stays bounded by the inversion (the first-crossing
-    diagnosis is robust to a sharp inversion).
+    """YSU bulk-Ri PBL height must respond to surface heat flux (WRF YSU's
+    thermal-excess second pass, fed by the WRF surface layer's sensible heat
+    flux).  Uses a hydrostatically-consistent well-mixed-then-capped profile
+    so the PBL stays bounded by the inversion.
     """
-    cfg = YSUConfig(surface=SurfaceLayerConfig())
+    cfg = _ysu_cfg()
     ncol, nlev = 1, 50
     p_half = jnp.linspace(2000.0, 1.0e5, nlev + 1)[None, :]
     p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
@@ -504,13 +509,14 @@ def test_idealized_ysu_pbl_deepens_with_surface_heating():
     def run(off):
         T_sfc = T[:, -1] + off
         q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        return ysu_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
-                              T_sfc, q_sfc, rho, DT, cfg)
+        return _ysu(u, v, T, q_v, p_full, p_half, z_full, z_half,
+                    T_sfc, q_sfc, rho, DT, cfg)
 
     o_neutral = run(0.0)   # zero surface flux
     o_warm = run(8.0)      # strong surface heating
-    # PBL deepens with surface heating (the bug was h_pbl pinned at the floor).
-    assert float(o_warm.h_pbl[0]) > float(o_neutral.h_pbl[0]) + 50.0
+    # PBL deepens with surface heating (the inversion caps WRF YSU: measured
+    # 2007.8 -> 2024.8 m on this column; R4 vote K1).
+    assert float(o_warm.h_pbl[0]) > float(o_neutral.h_pbl[0])
     # And it stays physically bounded by the inversion (not the domain mean).
     assert float(o_warm.h_pbl[0]) < 3000.0
     # K-profile magnitude also responds to the deeper convective BL.

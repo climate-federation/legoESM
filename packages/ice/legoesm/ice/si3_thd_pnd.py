@@ -19,8 +19,8 @@ import jax.numpy as jnp
 from legoesm.core import transcendentals
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ice.bitz_lipscomb import (
-    SI3DHFluxes,
-    SI3O10CategoryStages,
+    SI3DHFluxes, SI3DHIncrements,
+    SI3O10CategoryStages, guard_inactive_columns,
     ieee_lt_zero,
     si3_ice_thd_o10_category_stages,
 )
@@ -104,6 +104,27 @@ def _nemo_sqrt_jvp(primals, tangents):
     return y, ydot
 
 
+def _category_loop(body, carry, xs: Sequence):
+    """``DO jl = 1, jpl``: ``carry, y = body(carry, xs[jl])`` in order; returns ``carry, [y_jl]``.
+
+    DECISION 194: when any input is a JAX tracer (jit/grad) the passes run as
+    one ``lax.scan`` over the stacked ``xs`` (same body, same order, static
+    trip count), so the traced program holds the category body once; the body
+    is checkpointed so reverse mode stores only the carry.  Eager calls keep
+    the Python loop.
+    """
+    leaves = jax.tree_util.tree_leaves((carry, tuple(xs)))
+    if not any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
+        ys = []
+        for x in xs:
+            carry, y = body(carry, x)
+            ys.append(y)
+        return carry, ys
+    stacked = jax.tree.map(lambda *v: jnp.stack(v), *xs)
+    carry, ys = jax.lax.scan(jax.checkpoint(body), carry, stacked)
+    return carry, [jax.tree.map(lambda y, jl=jl: y[jl], ys) for jl in range(len(xs))]
+
+
 def _required(name: str, value):
     if value is None:
         raise ValueError(f"SI3 O12 pond stage requires {name!r}; no default")
@@ -163,6 +184,19 @@ class SI3O12Stages(NamedTuple):
 
     categories: tuple[SI3O12CategoryOutput, ...]
     pnd: SI3PondOutputs
+    fluxes: "SI3O12FluxCarry | None" = None
+
+
+class SI3O12FluxCarry(NamedTuple):
+    """Live module accumulators after the admitted category loop."""
+
+    category: SI3DHFluxes
+    sfx_bri: jax.Array
+    sfx_lam: jax.Array
+    hfx_thd: jax.Array
+    wfx_lam: jax.Array
+    hfx_err_dif: jax.Array
+    hfx_dif: jax.Array
 
 
 def si3_ice_perm_eff(
@@ -525,22 +559,13 @@ def si3_pnd_lev(
         )
 
     jpl = arr["a_i"].shape[-1]
-    wfx = arr["wfx_pnd"]
-    a_ip_list, h_ip_list, h_il_list, v_ip_list, v_il_list = [], [], [], [], []
-    for jl in range(jpl):
+    per_category = ("a_i", "h_i", "t_su", "a_ip", "h_ip", "h_il", "dh_i_sum", "dh_s_sum", "sz_i", "t_i")
+
+    def _category(wfx, cat):
         cat_out = _pnd_lev_single_category(
             at_i=arr["at_i"],
             wfx_pnd=wfx,
-            a_i=arr["a_i"][..., jl],
-            h_i=arr["h_i"][..., jl],
-            t_su=arr["t_su"][..., jl],
-            a_ip=arr["a_ip"][..., jl],
-            h_ip=arr["h_ip"][..., jl],
-            h_il=arr["h_il"][..., jl],
-            dh_i_sum=arr["dh_i_sum"][..., jl],
-            dh_s_sum=arr["dh_s_sum"][..., jl],
-            sz_i=arr["sz_i"][..., :, jl],
-            t_i=arr["t_i"][..., :, jl],
+            **cat,
             rDt_ice=scl["rDt_ice"],
             r1_Dt_ice=scl["r1_Dt_ice"],
             rn_himin=scl["rn_himin"],
@@ -555,19 +580,19 @@ def si3_pnd_lev(
             z1_aspect=z1_aspect,
             z1_Tp=z1_Tp,
         )
-        wfx = cat_out.wfx_pnd
-        a_ip_list.append(cat_out.a_ip)
-        h_ip_list.append(cat_out.h_ip)
-        h_il_list.append(cat_out.h_il)
-        v_ip_list.append(cat_out.v_ip)
-        v_il_list.append(cat_out.v_il)
+        return cat_out.wfx_pnd, cat_out
 
+    wfx, outs = _category_loop(
+        _category,
+        arr["wfx_pnd"],
+        [{k: arr[k][..., jl] for k in per_category} for jl in range(jpl)],
+    )
     return SI3PndLevOutputs(
-        a_ip=jnp.stack(a_ip_list, axis=-1),
-        h_ip=jnp.stack(h_ip_list, axis=-1),
-        h_il=jnp.stack(h_il_list, axis=-1),
-        v_ip=jnp.stack(v_ip_list, axis=-1),
-        v_il=jnp.stack(v_il_list, axis=-1),
+        a_ip=jnp.stack([o.a_ip for o in outs], axis=-1),
+        h_ip=jnp.stack([o.h_ip for o in outs], axis=-1),
+        h_il=jnp.stack([o.h_il for o in outs], axis=-1),
+        v_ip=jnp.stack([o.v_ip for o in outs], axis=-1),
+        v_il=jnp.stack([o.v_il for o in outs], axis=-1),
         wfx_pnd=wfx,
     )
 
@@ -784,7 +809,7 @@ def si3_ice_thd_pnd(
 def si3_ice_thd_o12_stages(
     *,
     category_entries: Sequence[dict],
-    category_fluxes: Sequence[SI3DHFluxes],
+    category_fluxes: Sequence[SI3DHFluxes] | SI3DHFluxes,
     sfx_bri,
     sfx_lam,
     hfx_thd,
@@ -819,28 +844,129 @@ def si3_ice_thd_o12_stages(
     if namelist is None:
         raise ValueError("si3_ice_thd_o12_stages requires the resolved namelist; no default")
     nml = dict(namelist)
-    if len(category_entries) != 5 or len(category_fluxes) != 5:
-        raise ValueError("SI3 O12 requires 5 category entries and flux tuples (jpl=5)")
+    if len(category_entries) != 5:
+        raise ValueError("SI3 O12 requires 5 category entries (jpl=5)")
+    live_flux_carry = isinstance(category_fluxes, SI3DHFluxes)
+    if not live_flux_carry and len(category_fluxes) != 5:
+        raise ValueError("SI3 O12 record replay requires 5 category flux tuples (jpl=5)")
     ln_iceda = nml.get("ln_icedA")
     if not isinstance(ln_iceda, bool):
-        raise ValueError(f"si3_ice_thd_o12_stages requires bool ln_icedA in namelist; got {ln_iceda!r}")
+        raise ValueError(
+            "si3_ice_thd_o12_stages requires bool ln_icedA in namelist; "
+            f"got {ln_iceda!r}"
+        )
     r1_nlay_s_arr = _required("r1_nlay_s", r1_nlay_s)
     r1_nlay_i_arr = _required("r1_nlay_i", r1_nlay_i)
     sr = nemo_source_round
 
-    cat_outputs: list[SI3O12CategoryOutput] = []
     cur_sfx_bri = _required("sfx_bri", sfx_bri)
     cur_sfx_lam = _required("sfx_lam", sfx_lam)
-    _required("hfx_thd", hfx_thd)
+    cur_hfx_thd = _required("hfx_thd", hfx_thd)
     cur_wfx_lam = _required("wfx_lam", wfx_lam)
+    cur_fluxes = category_fluxes if live_flux_carry else None
+    if live_flux_carry:  # icethd.F90:160-180; icethd_zdf_bl99.F90:828-831
+        cur_hfx_err_dif = _required(  # icethd_zdf_bl99.F90:828
+            "hfx_err_dif", category_entries[0]["hfx_err_dif"]  # icethd_zdf_bl99.F90:828
+        )  # icethd_zdf_bl99.F90:828
+        cur_hfx_dif = _required("hfx_dif", category_entries[0]["hfx_dif"])  # icethd_zdf_bl99.F90:831
+    else:  # icethd.F90:160-180 exact-input record replay arm
+        cur_hfx_err_dif = None  # icethd.F90:160-180 exact-input record replay arm
+        cur_hfx_dif = None  # icethd.F90:160-180 exact-input record replay arm
 
-    for jl in range(5):
-        entry = category_entries[jl]
-        fluxes = category_fluxes[jl]
+    def _category(carry, xs):  # one ``DO jl = 1, jpl`` pass (icethd.f90:176-221)
+        (cur_sfx_bri, cur_sfx_lam, cur_hfx_thd, cur_wfx_lam,
+         cur_fluxes, cur_hfx_err_dif, cur_hfx_dif) = carry
+        raw_entry = dict(xs[0])
+        if live_flux_carry:
+            raw_entry["hfx_err_dif"] = cur_hfx_err_dif  # icethd_zdf_bl99.F90:828
+            raw_entry["hfx_dif"] = cur_hfx_dif  # icethd_zdf_bl99.F90:831
+        prev_fluxes = cur_fluxes if live_flux_carry else xs[1]
+        prev_sfx_bri = cur_sfx_bri
+        prev_sfx_lam = cur_sfx_lam
+        prev_hfx_thd = cur_hfx_thd
+        prev_wfx_lam = cur_wfx_lam
+        active_selector = raw_entry.get("active", raw_entry.get("_active"))
+        if active_selector is not None:
+            active = jnp.asarray(active_selector, dtype=jnp.bool_)  # icethd.F90:130-135
+        elif raw_entry.get("a_i") is not None:
+            active = (  # icethd.F90:132
+                jnp.asarray(raw_entry["a_i"], dtype=jnp.float64)
+                > jnp.asarray(constants.epsi10, dtype=jnp.float64)
+            )
+        else:
+            active = None
+
+        def _where_active(active_val, inactive_val):
+            act = jnp.asarray(active_val, dtype=jnp.float64)
+            inact = jnp.asarray(inactive_val, dtype=jnp.float64)
+            mask = jnp.reshape(active, active.shape + (1,) * (act.ndim - active.ndim))
+            return jnp.where(mask, act, inact)
+
+        entry = dict(raw_entry)
+        if active is not None:
+            # icethd.F90:130-165: NEMO gathers only a_i > epsi10 into 1:npti and
+            # skips category thermo when npti == 0.  Replace ~active lanes with
+            # constant finite inputs before calling O10/DA so inactive columns
+            # cannot produce 0/0 in forward values or reverse-mode cotangents.
+            safe_fills = {
+                "a_i": 1.0,
+                "at_i": 1.0,
+                "h_i": 1.0,
+                "h_s": 0.1,  # coeff-ok: inactive-only finite AD guard; never selected
+                "t_su": constants.T0 - 1.0,
+                "t_i": constants.T0 - 1.0,
+                "t_s": constants.T0 - 1.0,
+                "t_bo": constants.T0 - 0.1,  # coeff-ok: inactive-only finite AD guard; never selected
+                "sst": 0.0,
+                "sss": 34.0,  # coeff-ok: inactive-only finite AD guard; never selected
+                "s_i": 4.0,
+                "sz_i": 4.0,
+                "e_i": 3.0e8,  # coeff-ok: inactive-only finite AD guard; never selected
+                "e_s": 1.0e8,  # coeff-ok: inactive-only finite AD guard; never selected
+                "o_i": 0.0,
+            }
+            for k, fill in safe_fills.items():
+                if entry.get(k) is not None:
+                    entry[k] = guard_inactive_columns(
+                        entry[k], active, jnp.float64, inactive_fill=fill
+                    )
+            for k in (
+                "qns_ice",
+                "qsr_ice",
+                "dqns_ice",
+                "qtr_ice_top",
+                "qsb_ice_bot",
+                "fhld",
+                "frq_m",
+                "sprecip",
+                "qprec_ice",
+                "evap_ice",
+                "hfx_err_dif",
+                "hfx_dif",
+            ):
+                if entry.get(k) is not None:
+                    entry[k] = guard_inactive_columns(
+                        entry[k], active, jnp.float64, inactive_fill=0.0
+                    )
+            fluxes = SI3DHFluxes(
+                **{
+                    f: guard_inactive_columns(
+                        getattr(prev_fluxes, f), active, jnp.float64, inactive_fill=0.0
+                    )
+                    for f in SI3DHFluxes._fields
+                }
+            )
+            sfx_bri_in = guard_inactive_columns(
+                prev_sfx_bri, active, jnp.float64, inactive_fill=0.0
+            )
+        else:
+            fluxes = prev_fluxes
+            sfx_bri_in = prev_sfx_bri
+
         o10 = si3_ice_thd_o10_category_stages(
             entry=entry,
             fluxes=fluxes,
-            sfx_bri=cur_sfx_bri,
+            sfx_bri=sfx_bri_in,
             namelist=nml,
             rDt_ice=rDt_ice,
             r1_Dt_ice=r1_Dt_ice,
@@ -853,11 +979,36 @@ def si3_ice_thd_o12_stages(
         )
         cur_sfx_bri = o10.sal.sfx_bri
         dh = o10.o9.dh
+        if live_flux_carry:
+            # icethd.f90 carries the module flux arrays through the category
+            # loop; the five-tuple arm above remains the exact-input record
+            # replay boundary used by O9--O12 scorers.
+            cur_fluxes = dh.fluxes._replace(sfx_res=o10.sal.sfx_res)  # icethd_sal.F90:239,624
+            cur_hfx_err_dif = o10.o9.zdf.hfx_err_dif  # icethd_zdf_bl99.F90:828
+            cur_hfx_dif = o10.o9.zdf.hfx_dif  # icethd_zdf_bl99.F90:831
         a_i_cat = dh.a_i
         h_i_cat = dh.h_i
         h_s_cat = dh.h_s
 
         if ln_iceda:
+            sfx_lam_in = (
+                guard_inactive_columns(prev_sfx_lam, active, jnp.float64, inactive_fill=0.0)
+                if active is not None
+                else cur_sfx_lam
+            )
+            hfx_thd_in = (
+                # NEMO icethd.F90:397,497 and icethd_da.F90:146-147 pass the DH-updated flux.
+                guard_inactive_columns(
+                    dh.fluxes.hfx_thd, active, jnp.float64, inactive_fill=0.0
+                )
+                if active is not None
+                else dh.fluxes.hfx_thd
+            )
+            wfx_lam_in = (
+                guard_inactive_columns(prev_wfx_lam, active, jnp.float64, inactive_fill=0.0)
+                if active is not None
+                else cur_wfx_lam
+            )
             da_out = si3_ice_thd_da(
                 at_i=entry["at_i"],
                 a_i=a_i_cat,
@@ -869,11 +1020,9 @@ def si3_ice_thd_o12_stages(
                 sz_i=o10.sal.sz_i,
                 sst=entry["sst"],
                 t_bo=entry["t_bo"],
-                sfx_lam=cur_sfx_lam,
-                # NEMO icethd.F90:397,497 and icethd_da.F90:146-147 pass the
-                # DH-updated flux.
-                hfx_thd=dh.fluxes.hfx_thd,
-                wfx_lam=cur_wfx_lam,
+                sfx_lam=sfx_lam_in,
+                hfx_thd=hfx_thd_in,
+                wfx_lam=wfx_lam_in,
                 rn_beta=nml.get("rn_beta"),
                 rn_dmin=nml.get("rn_dmin"),
                 rDt_ice=rDt_ice,
@@ -884,7 +1033,12 @@ def si3_ice_thd_o12_stages(
             h_i_cat = da_out.h_i
             h_s_cat = da_out.h_s
             cur_sfx_lam = da_out.sfx_lam
+            cur_hfx_thd = da_out.hfx_thd
             cur_wfx_lam = da_out.wfx_lam
+            if live_flux_carry:
+                # ``hfx_thd`` is both a DH accumulator and an ice_thd_da
+                # in/out array.  The next category sees DA's updated value.
+                cur_fluxes = cur_fluxes._replace(hfx_thd=cur_hfx_thd)
         else:
             da_out = None
 
@@ -903,7 +1057,167 @@ def si3_ice_thd_o12_stages(
         oa_i_cat = sr(o_i_entry * a_i_cat)
         szv_i_cat = sr(sr(o10.sal.sz_i * v_i_cat[..., None]) * r1_nlay_i_arr)
 
-        cat_outputs.append(
+        t_su_cat = dh.t_su
+        t_i_cat = o10.t_i
+        t_s_cat = dh.t_s
+        sz_i_cat = o10.sal.sz_i
+        s_i_cat = dh.s_i
+        dh_i_sum_cat = dh.dh.dh_i_sum
+        dh_s_sum_cat = dh.dh.dh_s_sum
+
+        if active is not None:
+            # icethd.F90:456-526 (tab_1d_2d scatter over 1:npti) and
+            # icestp.F90:438-501 (diag_set0): inactive categories leave state
+            # and cumulative 2D fluxes untouched and keep zeroed diagnostics.
+            raw_a_i = jnp.asarray(raw_entry.get("_a_i_2d", raw_entry["a_i"]), dtype=jnp.float64)
+            raw_h_i = jnp.asarray(raw_entry.get("_h_i_2d", raw_entry["h_i"]), dtype=jnp.float64)
+            raw_h_s = jnp.asarray(raw_entry.get("_h_s_2d", raw_entry["h_s"]), dtype=jnp.float64)
+            raw_s_i = jnp.asarray(raw_entry.get("_s_i_2d", raw_entry["s_i"]), dtype=jnp.float64)
+            raw_sz_i = jnp.asarray(raw_entry.get("_sz_i_2d", raw_entry["sz_i"]), dtype=jnp.float64)
+            raw_t_su = raw_entry.get("_t_su_2d", raw_entry["t_su"])
+            raw_t_i = raw_entry.get("_t_i_2d", raw_entry["t_i"])
+            raw_t_s = raw_entry.get("_t_s_2d", raw_entry["t_s"])
+            raw_o_i = jnp.asarray(_required("o_i", raw_entry.get("o_i")), dtype=jnp.float64)
+            raw_e_i = jnp.asarray(raw_entry["e_i"], dtype=jnp.float64)
+            raw_e_s = jnp.asarray(raw_entry["e_s"], dtype=jnp.float64)
+            raw_v_i = (
+                jnp.asarray(raw_entry["v_i"], dtype=jnp.float64)
+                if raw_entry.get("v_i") is not None
+                else sr(raw_h_i * raw_a_i)
+            )
+            raw_v_s = (
+                jnp.asarray(raw_entry["v_s"], dtype=jnp.float64)
+                if raw_entry.get("v_s") is not None
+                else sr(raw_h_s * raw_a_i)
+            )
+            raw_sv_i = (
+                jnp.asarray(raw_entry["sv_i"], dtype=jnp.float64)
+                if raw_entry.get("sv_i") is not None
+                else sr(raw_s_i * raw_v_i)
+            )
+            raw_oa_i = (
+                jnp.asarray(raw_entry["oa_i"], dtype=jnp.float64)
+                if raw_entry.get("oa_i") is not None
+                else sr(raw_o_i * raw_a_i)
+            )
+            raw_szv_i = (
+                jnp.asarray(raw_entry["szv_i"], dtype=jnp.float64)
+                if raw_entry.get("szv_i") is not None
+                else sr(sr(raw_sz_i * raw_v_i[..., None]) * r1_nlay_i_arr)
+            )
+            raw_e_i_2d = (
+                jnp.asarray(raw_entry["e_i_2d"], dtype=jnp.float64)
+                if raw_entry.get("e_i_2d") is not None
+                else sr(sr(sr(raw_e_i * raw_h_i[..., None]) * raw_a_i[..., None]) * r1_nlay_i_arr)
+            )
+            raw_e_s_2d = (
+                jnp.asarray(raw_entry["e_s_2d"], dtype=jnp.float64)
+                if raw_entry.get("e_s_2d") is not None
+                else sr(sr(sr(raw_e_s * raw_h_s[..., None]) * raw_a_i[..., None]) * r1_nlay_s_arr)
+            )
+            a_i_cat = _where_active(a_i_cat, raw_a_i)  # icethd.F90:456
+            h_i_cat = _where_active(h_i_cat, raw_h_i)  # icethd.F90:457
+            h_s_cat = _where_active(h_s_cat, raw_h_s)  # icethd.F90:458
+            s_i_cat = _where_active(s_i_cat, raw_s_i)  # icethd.F90:459
+            t_su_cat = _where_active(t_su_cat, raw_t_su)  # icethd.F90:460
+            t_s_cat = _where_active(t_s_cat, raw_t_s)  # icethd.F90:464
+            e_s_2d = _where_active(e_s_2d, raw_e_s_2d)  # icethd.F90:465,492
+            t_i_cat = _where_active(t_i_cat, raw_t_i)  # icethd.F90:469
+            e_i_2d = _where_active(e_i_2d, raw_e_i_2d)  # icethd.F90:470,489
+            sz_i_cat = _where_active(sz_i_cat, raw_sz_i)  # icethd.F90:471
+            szv_i_cat = _where_active(szv_i_cat, raw_szv_i)  # icethd.F90:472,498
+            v_i_cat = _where_active(v_i_cat, raw_v_i)  # icethd.F90:493,523
+            v_s_cat = _where_active(v_s_cat, raw_v_s)  # icethd.F90:494,524
+            sv_i_cat = _where_active(sv_i_cat, raw_sv_i)  # icethd.F90:495,525
+            oa_i_cat = _where_active(oa_i_cat, raw_oa_i)  # icethd.F90:496,526
+
+            dh_inc = SI3DHIncrements(
+                **{
+                    f: _where_active(getattr(dh.dh, f), 0.0)
+                    for f in SI3DHIncrements._fields
+                }
+            )  # icestp.F90:494-495; icethd.F90:512-517
+            dh_i_sum_cat = dh_inc.dh_i_sum
+            dh_s_sum_cat = dh_inc.dh_s_sum
+            dh_fluxes_masked = SI3DHFluxes(
+                **{
+                    f: _where_active(getattr(dh.fluxes, f), getattr(prev_fluxes, f))
+                    for f in SI3DHFluxes._fields
+                }
+            )  # icethd.F90:473-507
+            raw_t_si = (
+                raw_entry["t_si"] if raw_entry.get("t_si") is not None else constants.T0
+            )  # icestp.F90:488; icethd.F90:518
+            zdf_masked = o10.o9.zdf._replace(
+                t_su=_where_active(o10.o9.zdf.t_su, raw_t_su),
+                t_s=_where_active(o10.o9.zdf.t_s, raw_t_s),
+                t_i=_where_active(o10.o9.zdf.t_i, raw_t_i),
+                e_i=_where_active(o10.o9.zdf.e_i, raw_e_i),
+                e_s=_where_active(o10.o9.zdf.e_s, raw_e_s),
+                qcn_ice_bot=_where_active(o10.o9.zdf.qcn_ice_bot, 0.0),  # icestp.F90:491; icethd.F90:510
+                qcn_ice_top=_where_active(o10.o9.zdf.qcn_ice_top, 0.0),  # icestp.F90:492; icethd.F90:511
+                cnd_ice=_where_active(o10.o9.zdf.cnd_ice, 0.0),  # icestp.F90:490; icethd.F90:520
+                hfx_err_dif=_where_active(
+                    o10.o9.zdf.hfx_err_dif, raw_entry["hfx_err_dif"]
+                ),  # icethd.F90:502
+                hfx_dif=_where_active(
+                    o10.o9.zdf.hfx_dif, raw_entry["hfx_dif"]
+                ),  # icethd.F90:503
+                qtr_ice_bot=_where_active(o10.o9.zdf.qtr_ice_bot, 0.0),  # icestp.F90:489; icethd.F90:519
+                t_si=_where_active(o10.o9.zdf.t_si, raw_t_si),  # icestp.F90:488; icethd.F90:518
+            )
+            dh_masked = dh._replace(
+                a_i=_where_active(dh.a_i, raw_a_i),
+                h_i=_where_active(dh.h_i, raw_h_i),
+                h_s=_where_active(dh.h_s, raw_h_s),
+                t_su=t_su_cat,
+                t_s=t_s_cat,
+                e_i=_where_active(dh.e_i, raw_e_i),
+                e_s=_where_active(dh.e_s, raw_e_s),
+                s_i=s_i_cat,
+                sz_i=_where_active(dh.sz_i, raw_sz_i),
+                qml_ice=_where_active(dh.qml_ice, 0.0),  # icestp.F90:493; icethd.F90:521
+                dh=dh_inc,
+                fluxes=dh_fluxes_masked,
+            )
+            sal_masked = o10.sal._replace(
+                sz_i=sz_i_cat,
+                sfx_bri=_where_active(o10.sal.sfx_bri, prev_sfx_bri),  # icethd.F90:481
+                sfx_res=_where_active(o10.sal.sfx_res, prev_fluxes.sfx_res),  # icethd.F90:482
+            )
+            o9_masked = o10.o9._replace(
+                zdf=zdf_masked,
+                dh=dh_masked,
+                t_i=_where_active(o10.o9.t_i, raw_t_i),
+            )
+            o10 = o10._replace(
+                o9=o9_masked,
+                sal=sal_masked,
+                t_i=t_i_cat,
+            )
+            cur_sfx_bri = sal_masked.sfx_bri
+            if live_flux_carry:
+                cur_fluxes = dh_fluxes_masked._replace(sfx_res=sal_masked.sfx_res)
+                cur_hfx_err_dif = zdf_masked.hfx_err_dif
+                cur_hfx_dif = zdf_masked.hfx_dif
+            if da_out is not None:
+                da_out = da_out._replace(
+                    a_i=a_i_cat,
+                    h_i=h_i_cat,
+                    h_s=h_s_cat,
+                    sfx_lam=_where_active(da_out.sfx_lam, prev_sfx_lam),  # icethd.F90:483
+                    hfx_thd=_where_active(da_out.hfx_thd, prev_hfx_thd),  # icethd.F90:499
+                    wfx_lam=_where_active(da_out.wfx_lam, prev_wfx_lam),  # icethd.F90:476
+                )
+                cur_sfx_lam = da_out.sfx_lam
+                cur_hfx_thd = da_out.hfx_thd
+                cur_wfx_lam = da_out.wfx_lam
+                if live_flux_carry:
+                    cur_fluxes = cur_fluxes._replace(hfx_thd=cur_hfx_thd)
+
+        carry = (cur_sfx_bri, cur_sfx_lam, cur_hfx_thd, cur_wfx_lam,
+                 cur_fluxes, cur_hfx_err_dif, cur_hfx_dif)
+        return carry, (
             SI3O12CategoryOutput(
                 o10=o10,
                 da=da_out,
@@ -912,20 +1226,30 @@ def si3_ice_thd_o12_stages(
                 h_s=h_s_cat,
                 v_i=v_i_cat,
                 v_s=v_s_cat,
-                t_su=dh.t_su,
-                t_i=o10.t_i,
+                t_su=t_su_cat,
+                t_i=t_i_cat,
                 e_i=e_i_2d,
-                t_s=dh.t_s,
+                t_s=t_s_cat,
                 e_s=e_s_2d,
-                sz_i=o10.sal.sz_i,
+                sz_i=sz_i_cat,
                 szv_i=szv_i_cat,
-                s_i=dh.s_i,
+                s_i=s_i_cat,
                 sv_i=sv_i_cat,
                 oa_i=oa_i_cat,
-                dh_i_sum=dh.dh.dh_i_sum,
-                dh_s_sum=dh.dh.dh_s_sum,
+                dh_i_sum=dh_i_sum_cat,
+                dh_s_sum=dh_s_sum_cat,
             )
         )
+
+    carry, cat_outputs = _category_loop(
+        _category,
+        (cur_sfx_bri, cur_sfx_lam, cur_hfx_thd, cur_wfx_lam,
+         cur_fluxes, cur_hfx_err_dif, cur_hfx_dif),
+        [(category_entries[jl], None if live_flux_carry else category_fluxes[jl])
+         for jl in range(5)],
+    )
+    (cur_sfx_bri, cur_sfx_lam, cur_hfx_thd, cur_wfx_lam,
+     cur_fluxes, cur_hfx_err_dif, cur_hfx_dif) = carry
 
     def _pack_3d(field_name: str) -> jax.Array:
         vals = [getattr(c, field_name) for c in cat_outputs]
@@ -970,7 +1294,13 @@ def si3_ice_thd_o12_stages(
         nn_hls=nn_hls,
         constants=constants,
     )
-    return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out)
+    live_out = None
+    if live_flux_carry:
+        live_out = SI3O12FluxCarry(  # icethd.F90:117-171 module-array carry
+            cur_fluxes, cur_sfx_bri, cur_sfx_lam, cur_hfx_thd, cur_wfx_lam,
+            cur_hfx_err_dif, cur_hfx_dif,
+        )
+    return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out, fluxes=live_out)
 
 
 __all__ = (
@@ -978,6 +1308,7 @@ __all__ = (
     "SI3PondOutputs",
     "SI3O12CategoryOutput",
     "SI3O12Stages",
+    "SI3O12FluxCarry",
     "si3_ice_perm_eff",
     "si3_pnd_lev",
     "si3_ice_thd_pnd",

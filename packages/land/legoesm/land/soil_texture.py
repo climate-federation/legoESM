@@ -123,17 +123,20 @@ def vg_params_from_index(idx):
     return {k: v[i] for k, v in table.items()}
 
 
-def wilting_field_capacity(vg):
-    """(theta_wp, theta_fc) from a per-cell VG dict, via the van-Genuchten curve
-    at psi=-150 m (wilting, ~-1.5 MPa) and psi=-3.36 m (field capacity, -33 kPa).
-    Reuses ``soil_hydraulics.van_genuchten_theta`` with per-cell array config
-    fields (no re-derived retention curve)."""
-    from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, van_genuchten_theta
-    # Per-cell config: the VG retention fields are arrays; van_genuchten_theta
-    # broadcasts over them (the other fields keep their scalar defaults, unused).
+def wilting_field_capacity(vg, *, vg_air_entry_m):
+    """(theta_wp, theta_fc) from a per-cell VG dict, via the run's own van
+    Genuchten curve (air-entry head ``vg_air_entry_m`` [m], <= 0) at psi=-150 m
+    (wilting, ~-1.5 MPa) and psi=-3.36 m (field capacity, -33 kPa).  Reuses
+    ``soil_hydraulics.theta_from_psi`` with per-cell array config fields (no
+    re-derived retention curve)."""
+    from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, theta_from_psi
+    # Per-cell config: the VG retention fields are arrays and broadcast (the other
+    # fields keep their scalar defaults; both heads are far below saturation, so
+    # the elastic branch is not reached).
     cfg = SoilHydraulicsConfig(
+        retention_curve="van_genuchten", vg_air_entry_m=vg_air_entry_m,
         theta_r=vg["theta_r"], theta_sat=vg["theta_sat"],
         alpha_vg=vg["alpha_vg"], n_vg=vg["n_vg"], K_sat=vg["K_sat"])
-    theta_wp = van_genuchten_theta(jnp.asarray(_PSI_WILTING_M), cfg)
-    theta_fc = van_genuchten_theta(jnp.asarray(_PSI_FIELD_CAP_M), cfg)
+    theta_wp = theta_from_psi(jnp.asarray(_PSI_WILTING_M), cfg)
+    theta_fc = theta_from_psi(jnp.asarray(_PSI_FIELD_CAP_M), cfg)
     return theta_wp, theta_fc
