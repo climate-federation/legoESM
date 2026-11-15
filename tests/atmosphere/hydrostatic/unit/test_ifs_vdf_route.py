@@ -125,7 +125,9 @@ def test_filtered_std_survives_partition_pad_and_reorder():
     mesh = mesh._replace(subgrid_topo_stddev=f, subgrid_topo_filt_stddev=f)
     lm = build_local_mesh(mesh, partition_voronoi_mesh(mesh, 2, 0))
     outs = [lm, _pad_voronoi_for_sharding(mesh, 7), reorder_voronoi_for_sharding(mesh, 7),
+            reorder_voronoi_for_sharding(mesh, 7, edge_order="block"),
             _pad_local_mesh_to(lm, int(lm.nCells) + 3, int(lm.nEdges) + 5, int(lm.nVertices) + 4)]
     for m in outs:
+        assert m.subgrid_topo_filt_stddev is not None
         np.testing.assert_array_equal(np.asarray(m.subgrid_topo_filt_stddev),
                                       np.asarray(m.subgrid_topo_stddev))
