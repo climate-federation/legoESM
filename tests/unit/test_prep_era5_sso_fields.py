@@ -163,10 +163,21 @@ def _resolved(z_m, block_deg=2.0):
     return out["SSO_K"].values, out["SSO_L"].values, out["SSO_M"].values
 
 
-def _square_cos():
-    """cos(lat) at the one 2x2-square centre per 2-deg block of the 1-deg fixture."""
-    lat = np.arange(-89.0, 90.5, 1.0).reshape(-1, 2)
-    return np.cos(np.deg2rad(0.5 * (lat[:, 0] + lat[:, 1])))
+def _hx2_rows(dh):
+    """Mean squared zonal slope of the one 2x2 square per 2-deg block, for a
+    zonal height step dh per point: each edge uses its own row's cos(lat), and
+    the +90 pole row's edge is dropped."""
+    cos = np.cos(np.deg2rad(np.arange(-89.0, 90.5, 1.0).reshape(-1, 2)))
+    g2 = (dh / (_D * cos)) ** 2
+    g2[-1, 1] = np.nan                         # pole row
+    return np.nanmean(g2, axis=1)
+
+
+def _hx_rows(dh):
+    cos = np.cos(np.deg2rad(np.arange(-89.0, 90.5, 1.0).reshape(-1, 2)))
+    g = dh / (_D * cos)
+    g[-1, 1] = np.nan
+    return np.nanmean(g, axis=1)
 
 
 _D = np.deg2rad(1.0) * constants.R_earth
@@ -177,7 +188,7 @@ def test_resolved_slope_zonal_ramp_is_exact():
     c = 10.0
     z = np.broadcast_to(c * np.arange(360.0), (181, 360)).copy()
     K, L, M = _resolved(z)
-    expect = 0.5 * (c / (_D * _square_cos())) ** 2
+    expect = 0.5 * _hx2_rows(c)
     np.testing.assert_allclose(K[:, 0], expect, rtol=1e-12)
     np.testing.assert_allclose(L[:, 0], expect, rtol=1e-12)
     np.testing.assert_allclose(M, 0.0, atol=1e-20)
@@ -193,7 +204,7 @@ def test_resolved_slope_meridional_and_oblique_are_exact():
     np.testing.assert_allclose(M, 0.0, atol=1e-20)
     j = np.arange(360.0)[None, :]
     K2, L2, M2 = _resolved(c * i + c * j)
-    np.testing.assert_allclose(M2[:, 0], c / (_D * _square_cos()) * (c / _D), rtol=1e-12)
+    np.testing.assert_allclose(M2[:, 0], _hx_rows(c) * (c / _D), rtol=1e-12)
 
 
 def test_resolved_slope_keeps_two_point_variation():
@@ -201,7 +212,7 @@ def test_resolved_slope_keeps_two_point_variation():
     z = np.zeros((181, 360))
     z[:, 1::2] = 400.0
     K, L, M = _resolved(z)
-    expect = 0.5 * (400.0 / (_D * _square_cos())) ** 2
+    expect = 0.5 * _hx2_rows(400.0)
     np.testing.assert_allclose(K[:, 0], expect, rtol=1e-12)
     np.testing.assert_allclose(M, 0.0, atol=1e-20)
 
@@ -210,7 +221,7 @@ def test_resolved_slope_sees_a_checkerboard():
     """Checkerboard 0/400 m: averaging gradients before squaring would cancel to zero."""
     z = 400.0 * ((np.arange(181)[:, None] + np.arange(360)[None, :]) % 2)
     K, L, M = _resolved(z.astype(float))
-    hx2 = (400.0 / (_D * _square_cos())) ** 2
+    hx2 = _hx2_rows(400.0)
     hy2 = (400.0 / _D) ** 2
     np.testing.assert_allclose(K[:, 0], 0.5 * (hx2 + hy2), rtol=1e-12)
     np.testing.assert_allclose(L[:, 0], 0.5 * (hx2 - hy2), rtol=1e-12)
@@ -244,3 +255,27 @@ def test_pole_row_noise_stays_bounded():
     z[0] = 1e-3 * np.sin(np.deg2rad(np.arange(360.0)))
     K, L, M = _resolved(z)
     assert K.max() < 1e-9
+
+
+def test_float32_angles_keep_the_tensor_psd():
+    """ERA5 stores float32: the tensor must still satisfy K >= hypot(L, M)."""
+    rng = np.random.default_rng(5)
+    sig = rng.uniform(1e-3, 0.1, 5000).astype(np.float32)
+    gam = rng.uniform(1e-5, 1e-3, 5000).astype(np.float32)
+    the = rng.uniform(-1.57, 1.57, 5000).astype(np.float32)
+    K, L, M = prep.sso_tensor(sig, gam, the)
+    assert np.all(K - np.hypot(L, M) >= 0.0)
+    _, g, _ = prep.sso_from_tensor(K, L, M)
+    np.testing.assert_allclose(g, gam.astype(np.float64), rtol=1e-5)
+
+
+def test_smooth_polar_field_has_no_polar_slope_spike():
+    """h = H cos(lat) sin(lon) has |dh/dx| = H |cos(lon)| / R at every latitude,
+    so the polar-most block's zonal slope must match an equatorial block's."""
+    H = 1000.0
+    lat = np.deg2rad(np.linspace(90.0, -90.0, 181))[:, None]
+    lon = np.deg2rad(np.arange(360.0))[None, :]
+    K, L, M = _resolved(H * np.cos(lat) * np.sin(lon), block_deg=2.0)
+    hx2 = K + L                                  # = mean hx^2
+    np.testing.assert_allclose(hx2[-1], hx2[45], rtol=0.02)
+    np.testing.assert_allclose(hx2[0], hx2[45], rtol=0.02)

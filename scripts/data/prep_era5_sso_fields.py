@@ -50,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prep_subgrid_orography import block_area_mean  # noqa: E402
 
 ARCO_URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+_POLE_COS = 1e-6     # coeff-ok: rows with cos(lat) below this are pole rows (ERA5: 6e-17 vs next 4e-3)
 RAW_VARS = {
     "sdor": "standard_deviation_of_orography",
     "isor": "anisotropy_of_sub_gridscale_orography",
@@ -64,8 +65,9 @@ def sso_tensor(sigma, gamma, theta):
     """Baines-Palmer K, L, M from slope sigma, anisotropy gamma, angle theta [rad]."""
     s2 = np.asarray(sigma, dtype=np.float64) ** 2
     g2 = np.asarray(gamma, dtype=np.float64) ** 2
+    t2 = 2.0 * np.asarray(theta, dtype=np.float64)
     s = 0.5 * s2 * (1.0 - g2)
-    return 0.5 * s2 * (1.0 + g2), s * np.cos(2.0 * theta), s * np.sin(2.0 * theta)
+    return 0.5 * s2 * (1.0 + g2), s * np.cos(t2), s * np.sin(t2)
 
 
 def sso_from_tensor(K, L, M):
@@ -114,8 +116,8 @@ def resolved_slope_tensor(h, lat, factor: int, res_deg: float):
     of the two north-south edges squared, hx*hy = mean of the four edge products.
     Per square this matrix is positive semi-definite (Cauchy-Schwarz), and all
     three moments share the square's cos(lat) weight, so K >= hypot(L, M)
-    holds for every block.  The zonal metric uses the square-centre latitude,
-    which never sits on a pole.
+    holds for every block.  Each zonal edge uses its own row's metric; an edge
+    lying on a pole row has zero length and is dropped.
     """
     from legoesm import constants
 
@@ -124,9 +126,15 @@ def resolved_slope_tensor(h, lat, factor: int, res_deg: float):
     latb = np.deg2rad(lat.reshape(-1, factor))
     d = np.deg2rad(res_deg) * constants.R_earth
     cos_m = np.cos(0.5 * (latb[:, 1:] + latb[:, :-1]))[:, :, None, None]
+    cos_r = np.cos(latb)[:, :, None, None]
     a, b = hb[:, :-1, :, :-1], hb[:, :-1, :, 1:]      # south-west, south-east
     c, e = hb[:, 1:, :, :-1], hb[:, 1:, :, 1:]        # north-west, north-east
-    hxs, hxn = (b - a) / (d * cos_m), (e - c) / (d * cos_m)
+    # Each zonal edge uses its own row's metric; an edge on a pole row (zero
+    # length) is dropped and the square keeps its other zonal edge.
+    on_s, on_n = cos_r[:, :-1] > _POLE_COS, cos_r[:, 1:] > _POLE_COS
+    hxs = np.where(on_s, (b - a) / (d * np.where(on_s, cos_r[:, :-1], 1.0)), 0.0)
+    hxn = np.where(on_n, (e - c) / (d * np.where(on_n, cos_r[:, 1:], 1.0)), 0.0)
+    n_x = on_s.astype(np.float64) + on_n
     hyw, hye = (c - a) / d, (e - b) / d
     w = np.broadcast_to(cos_m, a.shape)
     ws = w.sum(axis=(1, 3))
@@ -134,9 +142,9 @@ def resolved_slope_tensor(h, lat, factor: int, res_deg: float):
     def wmean(x):
         return (w * x).sum(axis=(1, 3)) / ws
 
-    hx2 = wmean(0.5 * (hxs ** 2 + hxn ** 2))
+    hx2 = wmean((hxs ** 2 + hxn ** 2) / n_x)
     hy2 = wmean(0.5 * (hyw ** 2 + hye ** 2))
-    hxhy = wmean(0.25 * (hxs + hxn) * (hyw + hye))
+    hxhy = wmean(0.5 * (hxs + hxn) / n_x * (hyw + hye))
     return 0.5 * (hx2 + hy2), 0.5 * (hx2 - hy2), hxhy
 
 
