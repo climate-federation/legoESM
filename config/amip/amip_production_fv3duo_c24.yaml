@@ -66,6 +66,15 @@ mpas_qv_smooth_del4_m4s: 0.0       # B5: OFF on the duo (no FV3 counterpart)
 # provenance is in the file's metadata.  data/ is gitignored: stage the file
 # in the launch directory.
 land_ic: data/lmip_soil_ic/soil_ic_fv3duo24_era5T_19790101.npz
+# Subgrid orography: resolved cutoff TWO grid cells (user 2026-11-15, same rule
+# at C24 and C48; re-baselines C24). Built by scripts/data/prep_subgrid_orography.py
+# --fine-res-deg 1.0 --block-deg 3.0 --resolved-cutoff-deg 6.0 from
+# etopo_0p25deg.nc (md5 e365143605121428710820d2276efb73); file md5
+# 1421f49a9f0aa48de7809ae19add2bcb. Cell 3.454 deg; cutoff snapped down to the
+# 1-deg source sampling (votes V1/V2/V5 in the PR), so scales 6.0-6.9 deg
+# are counted neither as subgrid drag nor as one of the two cells. Named here, so the
+# launcher's machine default (MPAS 2-deg file) does not replace it.
+subgrid_orography_file: data/amip/sso_stdh_fv3duo_c24_cut2dx.nc
 
 # ---- hardware ---------------------------------------------------------------
 rrtmgp_use_scan: null       # keep the code default (unrolled on CPU, scan on GPU): the

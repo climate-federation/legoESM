@@ -35,3 +35,9 @@ rad_update_steps: 24        # CAM6 f09: radiation hourly at this dt
 # as 06a48bc153 did for MPAS; file md5 79522dc3d17b8a1b1d17c1e209926ec7.
 # data/ is gitignored: stage the file in the launch directory.
 land_ic: data/lmip_soil_ic/soil_ic_fv3duo48_era5T_19790101_v2.npz
+# Subgrid orography, two-cell cutoff (see the C24 deck): --fine-res-deg 1.0
+# --block-deg 2.0 --resolved-cutoff-deg 3.0 (cell 1.727 deg; block > cell
+# because the builder needs two source samples per block, vote V5; scales
+# 3.0-3.45 deg are counted in neither term after the snap-down), file md5
+# 25b4d79d6fa21dd16d6c360a6e31e836.
+subgrid_orography_file: data/amip/sso_stdh_fv3duo_c48_cut2dx.nc
