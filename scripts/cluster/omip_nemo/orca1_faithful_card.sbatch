@@ -133,7 +133,7 @@ RC=${ST[0]}; [ "$RC" = 0 ] && RC=$(( ST[1] ? ST[1] : ST[2] ))
 # conservation gate can close the windows on both sides of the leg boundary.
 if [ "$RC" = 0 ] && [ "$LEG" = 1 ] && [ "${HALF#*.}" = 0 ]; then
   cp -f $OUT/snapshot_final.npz $OUT/snapshot_day$(printf %04d ${HALF%.*}).npz || RC=1
-elif [ "$LEG" = 1 ]; then
+elif [ "$LEG" = 1 ] && [ "${HALF#*.}" != 0 ]; then
   echo "[warn] leg 1 ends on fractional day $HALF: no boundary snapshot kept"
 fi
 echo "=== card exit: $RC ==="
