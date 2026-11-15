@@ -68,11 +68,11 @@ def test_mpas_lane_runs_and_routes_condensate():
     assert np.any(np.asarray(tend.dT_dt.data) != 0.0)
 
 
-@pytest.mark.parametrize("drop", ["sigflt", "q_i", "rad_heating"])
+@pytest.mark.parametrize("drop", ["sigflt", "q_i", "q_v", "rad_heating"])
 def test_mpas_lane_refuses_missing_inputs(drop):
     mesh, sigma, state, ps, f_land = _mpas(sigflt=drop != "sigflt")
-    if drop == "q_i":
-        state = state._replace(tracers={k: v for k, v in state.tracers.items() if k != "q_i"})
+    if drop in ("q_i", "q_v"):
+        state = state._replace(tracers={k: v for k, v in state.tracers.items() if k != drop})
     if drop == "rad_heating":
         ps = None
     fn = make_turbulence_physics(TURB, "mpas", dt=DT, f_land=f_land)

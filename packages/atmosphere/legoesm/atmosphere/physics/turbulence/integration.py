@@ -438,6 +438,9 @@ def _ifs_vdf_lane_kwargs(scheme_name, tracers, phys_state, mesh, ncol, nlev, lan
     one is passed as ``None`` and refused by the kernel."""
     if scheme_name != "ifs_vdf":
         return {}
+    if tracers is None or "q_v" not in tracers:
+        # the bridge would substitute zero vapour and drop its tendency (vote 13 G24)
+        raise ValueError("turbulence=ifs_vdf needs the q_v tracer; this state carries none.")
 
     def col(x, shape):
         if x is None:

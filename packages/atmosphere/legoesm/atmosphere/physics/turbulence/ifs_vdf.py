@@ -70,7 +70,8 @@ from legoesm.atmosphere.physics.convection._ifs_cumastrn import njkt_levels
 from legoesm.core.smooth import sqrt_c1
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
-from legoesm.atmosphere.physics.turbulence.surface_layer import surface_fluxes_at_lowest_level
+from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction, surface_fluxes_at_lowest_level, surface_moisture_flux)
 from legoesm.timestepping.tridiagonal import thomas_solve
 
 __physics_contract__ = {
@@ -970,7 +971,7 @@ def ifs_vdfmain(th, u, v, T, q, ql, qi, p_half, p_full, geo_full, geo_half, hrlw
                      khfl, kqfl, hg.khvfl, hg.ri, zinv, kinv, kcb, kct, kpbl, cfg=cfg, g=rg,
                      rd=th.RD, cpd=cpd, retv=th.RETV, lv=lv)
     cfm = ex.cfm.at[-1].set(cfm_sfc)
-    # vdfmain.F90:1093-1096: no mass flux at KLEV-1 when none at KLEV-2 (vote 10 G11)
+    # vdfmain.F90:1093-1096 (half levels 0..KLEV): ZMFLX(KLEV-1) = 0 when ZMFLX(KLEV-2) < eps (vote 10 G11)
     mflx = hg.mflx.at[K - 1].set(jnp.where(hg.mflx[K - 2] < _EPS_MACH, 0.0, hg.mflx[K - 1]))
     tofdc = ifs_tofd_coefficient(geo_full[None], u[None], v[None], jnp.atleast_1d(sigflt),
                                  tofd_cfg, rg)[0]
@@ -1033,6 +1034,11 @@ def ifs_vdf_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sf
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1], T_sfc, q_sfc, rho[:, -1],
             config.surface, z_full[:, -1] - z_half[:, -1])
     tau_x, tau_y, shflx, lhflx, ustar = surface_flux
+    # water BC = the surface's own water flux; VDFMAIN divides REXTLHF by RLVTT,
+    # so it is handed evap*RLVTT, and the heat BC carries the latent enthalpy
+    # correction, as every lane kernel does (vote 13 G22/G23)
+    evap = surface_moisture_flux(config.surface, lhflx, T_sfc)
+    shf_in = shflx + latent_enthalpy_correction(lhflx, evap)
     th = lego_thermo()
     ncol, K = T.shape
     g = th.RG
@@ -1056,9 +1062,10 @@ def ifs_vdf_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sf
                            config.main)
 
     o = jax.vmap(col)(u, v, T, q_v, q_c, q_i, p_half, p_full, geo_full, geo_half, rad_heating,
-                      jnp.broadcast_to(sigflt, (ncol,)), shflx, lhflx, ustar, cfm_sfc, frti,
+                      jnp.broadcast_to(sigflt, (ncol,)), shf_in, evap * th.RLVTT, ustar, cfm_sfc,
+                      frti,
                       T_sfc)
     return TurbulenceOutput(
         du_dt=o.vom, dv_dt=o.vol, dT_dt=o.te, dq_v_dt=o.qe, Km=o.km, Kh=o.kh, shflx=shflx,
-        lhflx=lhflx, ustar=ustar, h_pbl=o.pblh, dq_c_dt=o.le, evap_sfc=lhflx / th.RLVTT,
+        lhflx=lhflx, ustar=ustar, h_pbl=o.pblh, dq_c_dt=o.le, evap_sfc=evap,
         dq_i_dt=o.ie)

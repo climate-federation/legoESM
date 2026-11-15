@@ -830,6 +830,25 @@ def test_lane_kernel_runs_and_refuses_missing_inputs(fixm):
             ifs_vdf_turbulence(*pos, 900.0, IFSVDFLaneConfig(), flux, **{**x, k: None})
 
 
+def test_lane_kernel_surface_signs(fixm):
+    """Lane flux tuple is positive UP: an upward sensible and latent flux warms
+    and moistens the lowest layer, and the water flux the kernel reports is the
+    surface's own (prescribed evaporation wins over lhflx / L)."""
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    x = {k: jnp.asarray(v) for k, v in _lane_cols(fixm).items()}
+    pos = [x.pop(k) for k in ("u", "v", "T", "q_v", "p_full", "p_half", "z_full", "z_half",
+                              "T_sfc", "q_sfc", "rho")]
+    z = jnp.zeros(3)
+    run = lambda sh, lh, cfg=IFSVDFLaneConfig(): ifs_vdf_turbulence(
+        *pos, 900.0, cfg, (z, z, z + sh, z + lh, z + 0.3), **x)
+    base, warm, wet = run(0.0, 0.0), run(50.0, 0.0), run(0.0, 100.0)
+    assert np.all(np.asarray(warm.dT_dt - base.dT_dt)[:, -1] > 0.0)
+    assert np.all(np.asarray(wet.dq_v_dt - base.dq_v_dt)[:, -1] > 0.0)
+    assert np.all(np.asarray(wet.evap_sfc) > 0.0)
+    cfg = IFSVDFLaneConfig(surface=SurfaceLayerConfig(prescribed_evap_kg_m2_s=2.0e-5))
+    np.testing.assert_allclose(np.asarray(run(0.0, 100.0, cfg).evap_sfc), 2.0e-5)
+
+
 def test_lane_kernel_gradient_at_rest(fixm):
     """The surface momentum coefficient's wind floor keeps the gradient finite
     with the lowest-level wind at rest (vote 11 G15)."""
