@@ -23,9 +23,6 @@ from legoesm.grids.vertical import (
     make_hybrid_levels, compute_mass_flux_hybrid,
     vertical_advection_hybrid, compute_omega_hybrid,
 )
-from legoesm.parallel.tiled_production_cdgrid import (
-    make_tiled_vertical_pe_stage_2d,
-)
 
 
 def _inputs(n, nlev, seed):
@@ -79,55 +76,3 @@ def test_vertical_pe_compose_host_body():
         t = _reassemble_cc(lambda ti, tj: _chain(ti, tj, which), kt)
         np.testing.assert_array_equal(
             t, g, err_msg=f"composed {which} host-body != global (slice-once chain)")
-
-
-def test_vertical_pe_stage_shape_guard():
-    """The stage shape guard fires (non-vacuous) on a non-cc horizontal shape."""
-    kt, nlev = 2, 8
-    n = kt * 6
-    coord = make_hybrid_levels(nlev)
-    # Build a 1-device mesh shim only enough to construct the stage closure; the
-    # guard runs in pure Python before _body, so no real devices are needed.
-    from jax.sharding import Mesh
-    if len(jax.devices()) < 6 * kt * kt:
-        pytest.skip(f"needs --xla_force_host_platform_device_count={6 * kt * kt}")
-    dev = np.array(jax.devices()[:6 * kt * kt]).reshape(6, kt, kt)
-    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
-    stage = make_tiled_vertical_pe_stage_2d(mesh, coord, n, kt)
-    bad = jnp.zeros((6, n + 1, n, nlev))   # wrong horizontal extent
-    p_s = jnp.zeros((6, n + 1, n))
-    with pytest.raises(ValueError, match="must be cc"):
-        stage(bad, bad, p_s, p_s)
-
-
-def test_vertical_pe_stage_np24():
-    kt, nl, nlev = 2, 6, 8
-    ndev = 6 * kt * kt
-    if len(jax.devices()) < ndev:
-        pytest.skip(f"needs --xla_force_host_platform_device_count={ndev}")
-    from jax.sharding import Mesh
-
-    n = kt * nl
-    coord = make_hybrid_levels(nlev)
-    div_3d, field, p_s, dp_s_dt = _inputs(n, nlev, 51)
-    mf_g, tend_g, omega_g, dt_g = _global_bundle(div_3d, field, p_s, dp_s_dt, coord)
-
-    dev = np.array(jax.devices()[:ndev]).reshape(6, kt, kt)
-    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
-    stage = make_tiled_vertical_pe_stage_2d(mesh, coord, n, kt)
-    mf_s, tend_s, omega_s, dt_s = stage(div_3d, field, p_s, dp_s_dt)
-
-    def _re(arr, last):
-        a = np.asarray(arr).reshape(6, kt, nl, kt, nl, last)
-        return _reassemble_cc(lambda ti, tj: a[:, ti, :, tj, :, :], kt)
-
-    mf_t = _re(mf_s, nlev + 1)
-    tend_t = _re(tend_s, nlev)
-    omega_t = _re(omega_s, nlev)
-    dt_t = _re(dt_s, 1)
-    assert mf_t.shape == (6, n, n, nlev + 1)
-    assert dt_t.shape == (6, n, n, 1)
-    np.testing.assert_array_equal(mf_t, mf_g, err_msg="composed mass_flux != global")
-    np.testing.assert_array_equal(tend_t, tend_g, err_msg="composed vertical_advection != global")
-    np.testing.assert_array_equal(omega_t, omega_g, err_msg="composed omega != global")
-    np.testing.assert_array_equal(dt_t, dt_g, err_msg="composed D_total_p != global")

@@ -2419,9 +2419,8 @@ def test_amip_sota_config_builds_valid_experiment_config():
 
 
 @pytest.mark.parametrize("deck", ["amip_sota.yaml", "amip_realism_c12.yaml"])
-def test_single_process_cube_decks_carry_persistent_dgrid(deck):
-    """The cube AMIP decks carry D-staggered winds between steps (#1028):
-    the per-step cell-centre round trip damps the eddies."""
+def test_historical_cube_decks_select_duo_and_refuse_legacy_setup(deck):
+    """Historical decks select duo and fail rather than run legacy physics."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
     parser.set_defaults(**load_yaml_config(
@@ -2430,12 +2429,14 @@ def test_single_process_cube_decks_carry_persistent_dgrid(deck):
         _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc",
                              "--land-mask-file", "/dummy/lsm.nc"]), parser)
     cfg = build_config_from_args(args)
-    # The lane ModelDriver._enter_persistent_dgrid accepts.
     assert cfg.grid.grid_type == "cubed_sphere"
     assert cfg.dycore.model_type == "hydrostatic"
-    assert cfg.dycore.discretization in ("cdgrid", "centered", "finite_volume")
+    assert cfg.dycore.discretization == "fv3_duo"
     assert cfg.ensemble_size in (None, 1) and not cfg.distributed
     assert cfg.dycore.persistent_dgrid is True
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    with pytest.raises(ValueError, match="fv3_duo"):
+        create_atmosphere_dycore(cfg, None, None)
 
 
 def test_config_yaml_round_trips_authoritative_values():
@@ -2660,7 +2661,8 @@ _SMOOTH_BECHTOLD_LEAF_PRE2249 = {
     'downdraft_rh_sharpness': 10.0, 'downdraft_transport': False, 'dx_m': 0.0,
     'enable_cmt': False, 'enable_downdraft': True, 'enable_stochastic': False,
     'epsilon_deep': 0.00175, 'epsilon_midlevel': 0.0001,
-    'epsilon_shallow': 0.0035, 'ifs_shallow_nosupply': 'zero',
+    'epsilon_shallow': 0.0035, 'ifs_hard_switches': False,
+    'ifs_shallow_nosupply': 'zero',
     'ifs_shallow_supply_width_w_m2': 1.0, 'lcl_membership_sharpness': 2.0,
     'mc_normalize_scale': 0.05, 'p_conv_top_pa': 15000.0, 'parcel_dT': 0.5,
     'parcel_dq': 0.001, 'precip_efficiency': 0.8,
@@ -2808,6 +2810,13 @@ def test_aimip_louis_preserves_resolved_surface_scheme():
     assert trained_real.surface.z_ref_model_level is False
     resolved_default = LouisConfig(surface=SurfaceLayerConfig(bulk_scheme="coare3"))
     assert _louis_with_preserved_surface(trained_real, resolved_default).surface.z_ref_model_level is True
+    # the RULE 5 widths survive too (a requested 0 = hard limit was reset)
+    resolved_w = LouisConfig(surface=SurfaceLayerConfig(
+        bulk_scheme="coare3", unstable_scheme="gfs",
+        most_zeta_cap_width=0.0, gfs_unstable_join_width=0.0))
+    out_w = _louis_with_preserved_surface(trained, resolved_w).surface
+    assert out_w.most_zeta_cap_width == 0.0
+    assert out_w.gfs_unstable_join_width == 0.0
 
 
 def test_aimip_louis_preserve_surface_noop_without_prev():
@@ -3214,7 +3223,7 @@ def test_vertical_form_flag_flows_to_dycore_config():
             vertical_form="bogus")).validate_strict()
     cube = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--grid-type", "cubed_sphere",
-        "--discretization", "cdgrid", "--vertical-form", "as83",
+        "--discretization", "fv3_duo", "--vertical-form", "as83",
     ]), parser))
     with pytest.raises(ValueError, match="vertical_form='as83' is only wired"):
         cube.validate_strict()
@@ -4088,7 +4097,6 @@ def test_bechtold_capdcycl_and_land_rhebc_round_trip():
         assert back.bechtold_use_ifs_land_rhebc is flag
 
 
-
 def test_bechtold_ifs_ascent_and_shallow_nosupply_round_trip():
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.physics_pipeline import _resolve_convection
@@ -4114,6 +4122,26 @@ def test_bechtold_ifs_ascent_and_shallow_nosupply_round_trip():
     bad = ExperimentConfig(convection="bechtold", bechtold_ifs_shallow_nosupply="typo")
     with pytest.raises(ValueError, match="bechtold_ifs_shallow_nosupply"):
         bad.validate_strict()
+
+def test_bechtold_ifs_hard_switches_round_trip():
+    """#2281: the faithful chain's smooth/exact switch selection reaches
+    BechtoldConfig from the CLI and survives the AMIP config round trip."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--convection", "bechtold", "--bechtold-use-ifs-ascent"]
+    d = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert d.bechtold_ifs_hard_switches is False
+    assert _resolve_convection(d)[1].ifs_hard_switches is False
+    h = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--bechtold-ifs-hard-switches"]), parser))
+    assert _resolve_convection(h)[1].ifs_hard_switches is True
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold", bechtold_use_ifs_ascent=True,
+                             bechtold_ifs_hard_switches=flag)
+        back = ExperimentConfig.from_amip_config(e.to_amip_config())
+        assert back.bechtold_ifs_hard_switches is flag
+
 
 def test_bechtold_use_ifs_snow_melt_round_trip():
     from legoesm.driver.config import ExperimentConfig
@@ -4200,7 +4228,7 @@ def test_truncation_conflicting_grid_or_discretization_errors():
     args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
                              parser)
     assert args.grid_type == "cubed_sphere"
-    assert args.discretization == "centered"
+    assert args.discretization == "fv3_duo"
 
 
 def test_explicit_zero_p_top_and_stretching_survive():
@@ -6332,3 +6360,39 @@ def test_sundqvist_deck_names_the_snow_refill_width():
     p.set_defaults(**load_yaml_config(path, p))
     cfg = build_config_from_args(p.parse_args([]))
     assert cfg.bechtold_snow_refill_width_kg_m2_s == 1.0e-8
+
+
+def test_land_compute_precision_flag_flows_to_config():
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.land_compute_precision == "policy"
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-compute-precision", "fp64"]), parser))
+    assert cfg_on.land_compute_precision == "fp64"
+
+
+def test_microphysics_compute_precision_flag_flows_to_config():
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.microphysics_compute_precision == "policy"
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--microphysics-compute-precision", "fp64"]), parser))
+    assert cfg_on.microphysics_compute_precision == "fp64"
+
+
+def test_fp32_land64_micro64_deck_selects_fp64_land_and_micro():
+    from pathlib import Path
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    deck = (Path(__file__).resolve().parents[2] / "config" / "amip"
+            / "amip_production_fp32_land64_micro64.yaml")
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(deck, parser))
+    args = parser.parse_args([])
+    assert args.precision == "fp32"
+    assert args.land_compute_precision == "fp64"
+    assert args.microphysics_compute_precision == "fp64"
+    assert args.use_multilayer_land is True
+    assert args.microphysics != "none"

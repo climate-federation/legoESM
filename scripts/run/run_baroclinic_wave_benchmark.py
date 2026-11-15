@@ -538,42 +538,7 @@ def main():
         model = MPASPrimitiveEquationModel(grid, sigma, config)
 
     else:
-        from legoesm.grids.cubed_sphere import (
-            CubedSphereGrid,
-            create_cubed_sphere,
-            rotate_winds_grid_to_geo,
-        )
-        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.operators_cdgrid import dgrid_vorticity, dgrid_to_center_vector
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationModel,
-            CDGridPrimitiveEquationConfig,
-            hydrostatic_to_fv3,
-            fv3_to_hydrostatic,
-        )
-        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
-
-        grid = create_cubed_sphere(N_GRID)
-        cdgrid = create_cubed_sphere_cdgrid(grid)
-
-        print("Initializing Jablonowski-Williamson baroclinic wave...")
-        state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
-        ps_init = np.array(state_cc.p_s.data)
-        print(f"  Initial max |u|: {float(jnp.max(jnp.abs(state_cc.u.data))):.1f} m/s")
-        print(f"  Initial mean T:  {float(jnp.mean(state_cc.T.data)):.1f} K")
-        print(f"  Initial p_s:     {float(jnp.mean(state_cc.p_s.data)) / 100:.1f} hPa")
-
-        state = hydrostatic_to_fv3(state_cc, cdgrid)
-
-        config = CDGridPrimitiveEquationConfig(
-            hyperdiff_coeff=nu4,
-            hyperdiff_ps_coeff=nu4,
-            use_conservation_fixer=True,
-            fix_mass=True,
-            anchor_mass_to_initial=True,
-            time_integrator="ssp_rk3",
-        )
-        model = CDGridPrimitiveEquationModel(grid, sigma, config)
+        raise ValueError("fv3_duo replaces this retired cube atmosphere adapter; no duo equivalent is wired here.")
 
     # -----------------------------------------------------------------------
     # Helper closures for grid-dependent diagnostics

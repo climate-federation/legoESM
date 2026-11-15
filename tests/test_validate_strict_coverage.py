@@ -67,6 +67,7 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "surface_bulk_scheme",
         "surface_thermo_convention",
         "surface_stability_scheme",  # already guarded (config.py); ratchet entry
+        "surface_unstable_scheme",  # membership check in validate_strict
         "land_surface_scheme",
         "land_snow_scheme",
         "gravity_wave_drag",

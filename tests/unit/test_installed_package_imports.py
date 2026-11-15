@@ -105,12 +105,6 @@ PRODUCTION_ROOTS = tuple(
 # modules into the installed package.  52 files import them, so that migration
 # is its own PR, not a rider on a red-main fix.
 GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
-    'scripts/bench/bench_cube_shardmap_halo.py': frozenset({
-        'tests.test_cases.baroclinic_wave',
-    }),
-    'scripts/bench/bench_fv3_sw_fb_vs_production.py': frozenset({
-        'tests.test_cases.williamson',
-    }),
     'scripts/bench/bench_mpas_spmd_scaling.py': frozenset({
         'tests.test_cases.baroclinic_wave',
     }),
@@ -135,11 +129,7 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
     'scripts/bench/run_levante_gpu_scaling.py': frozenset({
         'tests.test_cases.baroclinic_wave',
     }),
-    'scripts/bench/run_scaling_diagnosis.py': frozenset({
-        'tests.test_cases.baroclinic_wave',
-    }),
     'scripts/matrix/check_conservation_all.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
         'tests.atmosphere.shallow_water.test_cases.williamson_mpas',
     }),
     'scripts/matrix/run_atmosphere_test_matrix.py': frozenset({
@@ -153,9 +143,7 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
         'tests.test_cases.dcmip2008',
         'tests.test_cases.dcmip2008.jablonowski_rotated',
         'tests.test_cases.dcmip2012.rest_state_topography',
-        'tests.test_cases.dcmip2025',
         'tests.test_cases.dcmip_transport',
-        'tests.test_cases.williamson',
         'tests.test_cases.williamson_extended',
     }),
     'scripts/run/run_baroclinic_wave_benchmark.py': frozenset({
@@ -163,27 +151,6 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
     }),
     'scripts/run/run_w2_mpas_convergence.py': frozenset({
         'tests.atmosphere.shallow_water.test_cases.williamson_mpas',
-    }),
-    'scripts/run/run_w2_w5_cosine_bell_iter1030.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-        'tests.test_cases.cosine_bell',
-        'tests.test_iter921_w2_v_vs_h_pareto_sentinel',
-    }),
-    'scripts/validate/run_colliding_modons.py': frozenset({
-        'tests.test_cases.colliding_modons',
-    }),
-    'scripts/validate/validate_cubed_sphere_fv3_atmos.py': frozenset({
-        'tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1',
-        'tests.test_cases.williamson',
-    }),
-    'scripts/validate/validate_tpu_emulation_sharding.py': frozenset({
-        'tests.test_cases.baroclinic_wave',
-    }),
-    'scripts/validate/visual_regression.py': frozenset({
-        'tests.williamson_diagnostic',
-    }),
-    'src/legoesm/cli.py': frozenset({
-        'tests.test_cases.williamson',
     }),
 }
 

@@ -30,9 +30,6 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.halo import set_halo_backend
 from legoesm.core.operators_cdgrid import center_to_dgrid_vector
-from legoesm.parallel.tiled_production_cdgrid import (
-    make_tiled_center_to_dgrid_vector_stage_2d,
-)
 
 N = 24
 NLEV = 6
@@ -76,31 +73,6 @@ def _compare_corner(u_t, v_t, u_g, v_g, kt, nl):
     su = float(np.max(np.abs(u_g))) + 1e-300
     sv = float(np.max(np.abs(v_g))) + 1e-300
     return wu / su, wv / sv
-
-
-@pytest.mark.parametrize("KT", [2, 3])
-def test_tiled_lift_matches_global(cdg, KT):
-    ndev = 6 * KT * KT
-    if len(jax.devices()) < ndev:
-        pytest.skip(
-            f"kt={KT} needs {ndev} host devices "
-            f"(--xla_force_host_platform_device_count={ndev})")
-    nl = N // KT
-    u_cc, v_cc = _inputs(N, NLEV, 50 + KT)
-    u_g, v_g = _global_lift(u_cc, v_cc, cdg)
-
-    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-
-    dev = np.array(jax.devices()[:ndev]).reshape(6, KT, KT)
-    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
-    stage = make_tiled_center_to_dgrid_vector_stage_2d(mesh, cdg, N, KT, NLEV)
-
-    fw = NamedSharding(mesh, P("face", None, None, None))
-    u_t, v_t = stage(jax.device_put(u_cc, fw), jax.device_put(v_cc, fw))
-
-    ru, rv = _compare_corner(np.asarray(u_t), np.asarray(v_t), u_g, v_g, KT, nl)
-    assert ru < 1e-10, f"u_d rel {ru:.3e} (kt={KT})"
-    assert rv < 1e-10, f"v_d rel {rv:.3e} (kt={KT})"
 
 
 def test_lift_compose_host_body(cdg):

@@ -20,7 +20,6 @@ REPO = Path(__file__).resolve().parents[2]
 BENCHES = [
     "scripts/bench/bench_atm_latlon_spmd_scaling.py",
     "scripts/bench/bench_ocean_latlon_spmd_scaling.py",
-    "scripts/bench/bench_cube_tiled_step_scaling.py",
 ]
 
 
@@ -83,28 +82,6 @@ def test_ocean_rejected_config_exits_before_jax_is_imported():
     assert "JAX_IMPORTED False" in proc.stdout, proc.stdout + proc.stderr
 
 
-def test_cube_rejected_memory_exits_before_jax_is_imported(monkeypatch):
-    """Cube path: n_devices is derived (6*kt^2) so the device-count gate can
-    never fire from the CLI — the memory gate is the one a user hits. This is
-    also the LEGOESM_DEVICE_HBM default path: no --device-hbm flag is passed.
-    """
-    bench = REPO / BENCHES[2]
-    code = (
-        "import sys, runpy\n"
-        "sys.argv = ['bench', '--resolution', '1152', '--nlev', '60', "
-        "'--kt', '3', '--steps', '3']\n"
-        "try:\n"
-        f"    runpy.run_path(r'{bench}', run_name='__main__')\n"
-        "except SystemExit as e:\n"
-        "    print('EXIT', e.code)\n"
-        "    print('JAX_IMPORTED', 'jax' in sys.modules)\n"
-    )
-    env = {**os.environ, "LEGOESM_DEVICE_HBM": "a100-40"}
-    proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                          text=True, timeout=300, cwd=REPO, env=env)
-    out = proc.stdout + proc.stderr
-    assert "exceeds" in out, out
-    assert "JAX_IMPORTED False" in proc.stdout, out
 
 
 def test_nearest_divisible_is_actually_nearest():

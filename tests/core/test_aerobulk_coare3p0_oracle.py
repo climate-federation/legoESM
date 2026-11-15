@@ -50,6 +50,7 @@ from legoesm.core.bulk_flux import (  # noqa: E402
     COARE_CHARNOCK_RAMP_WIDTH,
     COARE_GUST_ONSET_WIDTH,
     COARE_NEUTRAL_WIDTH,
+    MOST_ZETA_CAP_WIDTH,
     _coare3p0_charnock,
     _gust_factor,
     compute_most_fluxes,
@@ -64,11 +65,16 @@ _GAP_FILE = Path(__file__).parent / "oracle_fixtures" / "aerobulk_coare3p0_defau
 # Charnock-only gap (fp64 0.011, width 0 = the hard neutral switch), user decision S7.
 _CHARNOCK_GAP_FILE = (Path(__file__).parent / "oracle_fixtures"
                       / "aerobulk_coare3p0_charnock0p011_width0_gap.npz")
+# |zeta| cap alone at its default (Charnock 0.011, every other width hard).
+_CAP_GAP_FILE = (Path(__file__).parent / "oracle_fixtures"
+                 / "aerobulk_coare3p0_zeta_cap_gap.npz")
 _RTOL = 1e-10
 _HEIGHTS = {"z10": 10.0, "z2": 2.0}
 CHARNOCK_AEROBULK = float(np.float32(0.011))  # AeroBulk charn_coare3p0 literal
 # The #2241 RULE 5 widths at their hard limit (AeroBulk's clip and x**(2/3)).
-_HARD_2241 = dict(coare_charnock_ramp_width=0.0, coare_gust_onset_width=0.0)
+# Plus the |zeta| cap at its hard limit (AeroBulk's +-50 clip).
+_HARD_2241 = dict(coare_charnock_ramp_width=0.0, coare_gust_onset_width=0.0,
+                  most_zeta_cap_width=0.0)
 
 
 def _fixture():
@@ -367,8 +373,37 @@ def test_exchange_cap_below_aerobulk_floor_raises():
         compute_most_fluxes(*x, scheme=scheme, max_exchange_coeff=1.0e-4)
 
 
+_CAP_ONLY = dict(coare_neutral_width=0.0, **(_HARD_2241 | dict(most_zeta_cap_width=MOST_ZETA_CAP_WIDTH)))
+# u 1 m/s, no gustiness, air 290 K over 283.33 K, q = qs = 5 g/kg: the hard
+# solver's last-iteration z/L = 50, on TURB_COARE3P0's clip (probe_oracle_cap.py).
+_ZETA50_TS = 283.32625580150784
+
+
+def test_zeta_cap_only_gap_per_state():
+    """RULE 5 KNOWN DIFFERENCE of the smooth |zeta| cap alone, pinned per state."""
+    stored = np.load(_CAP_GAP_FILE)
+    gaps = _default_gaps(_fixture(), **_CAP_ONLY)
+    assert sorted(gaps) == sorted(stored.files)
+    for k, g in gaps.items():
+        np.testing.assert_allclose(g, stored[k], rtol=1e-6, atol=1e-12, err_msg=k)
+    hard = _default_gaps(_fixture(), coare_neutral_width=0.0, **_HARD_2241)
+    assert max(np.abs(gaps[k] - hard[k]).max() for k in gaps) > 1e-6
+
+
+def test_check_grads_zeta_cap_scheme_level_at_default():
+    """On the clip (z/L = 50): the smooth cap is C2 there."""
+    st = dict(u=1.0, q=0.005, qs=0.005)
+    t0 = jnp.asarray(_ZETA50_TS)
+    f = _one_state_flux("ts", "coare3", st, gustiness_w_zi=0.0)
+    g = _one_state_flux("ts", "coare3", st, gustiness_w_zi=0.0, most_zeta_cap_width=0.0)
+    assert float(f(t0)) != float(g(t0))
+    check_grads(f, (t0,), order=2, modes=("fwd", "rev"), eps=1e-6)
+    assert float(jax.grad(f)(t0)) != 0.0
+
+
 if __name__ == "__main__":
     np.savez_compressed(_GAP_FILE, width=COARE_NEUTRAL_WIDTH, **_default_gaps(_fixture()))
     np.savez_compressed(_CHARNOCK_GAP_FILE,
                         **_default_gaps(_fixture(), coare_neutral_width=0.0, **_HARD_2241))
-    print("wrote", _GAP_FILE, _CHARNOCK_GAP_FILE)
+    np.savez_compressed(_CAP_GAP_FILE, **_default_gaps(_fixture(), **_CAP_ONLY))
+    print("wrote", _GAP_FILE, _CHARNOCK_GAP_FILE, _CAP_GAP_FILE)
