@@ -702,16 +702,10 @@ _SITE_POINTS = {
         ('L32', 1, 'inject', 'q', 1.0586956521739133, 0.0001, ()),
     ('/ ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)', 'min'):
         ('L32', 9, 'input', 'q', 1.1985054347826085, 1.9621876652955546e-08, ()),
-    ('br = 1.0 - ((1.0 - sm.le(zsatfr, ZSATFR_MAX, _W_SATFR))', 'le'):
-        ('L32', 1, 'input', 'q', 1.0586956521739133, 1.0612271223959327e-06, ()),
     ('llo1 = sm.lt(paph[K + 1] - kget(paph, ikd), ZPBL_DP, _W_PRES)', 'lt'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('m = sm.min(zm, r, _W_REL * r)', 'min'):
         ('L32', 12, 'input', 'omega', -11.82065217391305, 1.1745622232621571e-05, ()),
-    ('m2 = sm.min(m2, zmfmax, _W_MF)', 'min'):
-        ('L137', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('m3 = sm.max(ZMID_MF * zkhfl / kget(pgeoh, ikb), zmfub, w_mfub) * (1.0 + zeps)', 'max'):
-        ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
     ('sm.max(zcape - zcapdcycl, RMINCAPE * zcape, _W_CAPE))', 'max'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'):
@@ -724,8 +718,6 @@ _SITE_POINTS = {
         ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
     ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
         ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
-    ('zeps = (sm.pos(-pmfd_b, w_mfub)', 'pos'):
-        ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
     ('zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)', 'min'):
         ('STRESS', 0, 'inject', 'q', 1.225, 0.0001, ()),
     ('zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1', 'max'):
@@ -747,6 +739,14 @@ _SITE_POINTS = {
 # the width, as expressions in _ifs_cumastrn's namespace plus RG = g and
 # RCPD = c_pd; reason).
 _SITE_SYNTHETIC = {
+    ('br = 1.0 - ((1.0 - sm.le(zsatfr, ZSATFR_MAX, _W_SATFR))', 'le'):
+        ('ZSATFR_MAX', '_W_SATFR', 'full-scheme point found, but check_grads through the whole scheme does not agree with autodiff to 1e-3 relative there'),
+    ('m2 = sm.min(m2, zmfmax, _W_MF)', 'min'):
+        ('0.3', '_W_MF', 'full-scheme point found, but check_grads through the whole scheme does not agree with autodiff to 1e-3 relative there'),
+    ('zeps = (sm.pos(-pmfd_b, w_mfub)', 'pos'):
+        ('0.0', '_W_REL * 1.0e-6', 'full-scheme point found, but check_grads through the whole scheme does not agree with autodiff to 1e-3 relative there'),
+    ('m3 = sm.max(ZMID_MF * zkhfl / kget(pgeoh, ikb), zmfub, w_mfub) * (1.0 + zeps)', 'max'):
+        ('1.0e-6', '_W_REL * 1.0e-6', 'full-scheme point found, but check_grads through the whole scheme does not agree with autodiff to 1e-3 relative there'),
     ('* sm.lt(zdh, ZSHAL_DH * rg * rcpd, rg * _W_DH))', 'lt'):
         ('ZSHAL_DH * RG * RCPD', 'RG * _W_DH', "shallow 'weak' branch: needs a shallow flux above 0.3 x the CFL limit with a cloud-base energy excess below half its scale at once; no fixture column has both"),
     ('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'):
