@@ -355,3 +355,16 @@ def test_lott_miller_loader_requires_every_field(tmp_path, drop):
     path = _sso_tensor_file(tmp_path / "t.nc", lambda lon: 0.0 * lon, drop=drop)
     with pytest.raises(KeyError):
         load_sso_lott_miller(create_cubed_sphere(8), path, scale_check="off")
+
+
+def test_scale_check_runs_before_the_regrid(tmp_path, monkeypatch):
+    """A mismatched file is refused before any regridding is paid for (vote S6)."""
+    import legoesm.grids.topography as topo
+    path = _write(tmp_path, "coarse.nc", _sso_ds(block_deg=2.0))
+
+    def boom(*a, **k):
+        raise RuntimeError("regridded before the scale check")
+
+    monkeypatch.setattr(topo, "_regrid_to_target", boom)
+    with pytest.raises(ValueError, match="block_deg"):
+        load_subgrid_orography(create_cubed_sphere(48), path, scale_check="error")

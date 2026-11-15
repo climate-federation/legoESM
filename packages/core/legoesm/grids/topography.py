@@ -1222,19 +1222,15 @@ def load_subgrid_orography(
         Subgrid orographic stddev [m], clipped to >= 0, shape ``(6, n, n)``
         for cubed-sphere or ``(n_lat, n_lon)`` for Gaussian.
     """
-    sso_grid, built = _read_regridded_sso_field(grid, path, var_name, aliases=var_name == "SSO_STDH")
-
-    # #1712: does this file's scale decomposition belong to THIS grid?
-    _, _, _, _grid_spacing_deg = _target_grid_degrees(grid)
-    _check_sso_scale_decomposition(
-        built, float(_grid_spacing_deg), path, scale_check)
+    sso_grid = _read_regridded_sso_field(grid, path, var_name, aliases=var_name == "SSO_STDH",
+                                         scale_check=scale_check)
     return jnp.asarray(np.maximum(sso_grid, 0.0))
 
 
-def _read_regridded_sso_field(grid, path, var_name, *, aliases=False):
+def _read_regridded_sso_field(grid, path, var_name, *, aliases=False, scale_check=None):
     """One subgrid-orography field from ``path``, NaN -> 0, sampled bilinearly
-    onto ``grid`` (unclipped: tensor components are signed).  Returns the
-    regridded numpy array and the file's construction record.  The legacy
+    onto ``grid`` (unclipped: tensor components are signed).  With
+    ``scale_check`` the #1712 scale check runs before regridding.  The legacy
     alias names stand in only when the caller passes ``aliases``
     (``load_subgrid_orography`` does for its default SSO_STDH)."""
     import xarray as xr
@@ -1276,6 +1272,12 @@ def _read_regridded_sso_field(grid, path, var_name, *, aliases=False):
     finally:
         ds.close()
 
+    if scale_check is not None:
+        # #1712: does this file's scale decomposition belong to THIS grid?
+        _, _, _, _grid_spacing_deg = _target_grid_degrees(grid)
+        _check_sso_scale_decomposition(
+            built, float(_grid_spacing_deg), path, scale_check)
+
     while sso_data.ndim > 2:
         sso_data = sso_data[0]
 
@@ -1294,7 +1296,7 @@ def _read_regridded_sso_field(grid, path, var_name, *, aliases=False):
     sso_grid = _regrid_to_target(
         lat_src, lon_src, sso_data, target_lat_2d, target_lon_2d
     )
-    return sso_grid, built
+    return sso_grid
 
 
 class SSOFields(NamedTuple):
@@ -1326,10 +1328,8 @@ def load_sso_lott_miller(grid, path: str, *, scale_check: str = "warn") -> SSOFi
     SSO_M; scripts/data/prep_era5_sso_fields.py) on ``grid``.  The tensor
     components are sampled and gamma/theta/sigma rebuilt from them, so an
     angle is never interpolated.  Every variable is required (no aliases)."""
-    std, built = _read_regridded_sso_field(grid, path, "SSO_STDH")
-    _check_sso_scale_decomposition(
-        built, float(_target_grid_degrees(grid)[3]), path, scale_check)
-    K, L, M = (_read_regridded_sso_field(grid, path, v)[0] for v in ("SSO_K", "SSO_L", "SSO_M"))
+    std = _read_regridded_sso_field(grid, path, "SSO_STDH", scale_check=scale_check)
+    K, L, M = (_read_regridded_sso_field(grid, path, v) for v in ("SSO_K", "SSO_L", "SSO_M"))
     sigma, gamma, theta = sso_from_tensor(K, L, M)
     return SSOFields(jnp.asarray(np.maximum(std, 0.0)), jnp.asarray(gamma), jnp.asarray(theta),
                      jnp.asarray(sigma))
