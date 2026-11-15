@@ -289,8 +289,106 @@ def cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backe
           f"(radius moved {rows['Nc x2']['reff'] * 1e6:.2f} -> {rows['Nc x0.5']['reff'] * 1e6:.2f} um)")
     return 0
 
+def use_checkpoint_terrain():
+    """#2303, THIS PROBE ONLY: the relaunch adopts the restored state's terrain
+    as its terrain product instead of refusing the restart (the rebuilt product
+    differs from the stored phis by up to 7.1e-2 m2/s2 on land; cause open).
+    The difference is printed; the production restart gate is not changed."""
+    import legoesm.driver.model_driver as md
+
+    def adopt(self):
+        st = np.asarray(self.state.phis.data)
+        d = float(np.max(np.abs(st.astype(np.float64) - np.asarray(self._phis_data, np.float64))))
+        print(f"use-checkpoint-terrain: rebuilt vs stored phis max|d| {d:.3e} m2/s2; "
+              "adopting the stored field", flush=True)
+        self._phis_data = self.state.phis.data.astype(self._phis_data.dtype)
+    md.ModelDriver._check_restart_terrain = adopt
+
+
+def era5_snapshot_on_cells(swap_dir, day, cell_lat, cell_lon, origin):
+    """#2303: ERA5 00-UTC T, q and surface pressure of snapshot ``day``
+    (``era5_prep.sbatch`` output: cdo ``setgridtype,regular`` of the N320
+    hourly analyses) area-averaged onto the Voronoi cells.  Every ERA5 point
+    belongs to the cell whose generator is nearest (``nearest_column_map``,
+    which is exactly Voronoi membership), weighted by cos(lat).  Point-levels
+    below that point's own ERA5 surface pressure are extrapolated by ECMWF and
+    are excluded; a cell level with none left is NaN.  Returns plev [Pa,
+    ascending], T [K] and q [kg/kg specific] as (ncell, nplev), ps [Pa] (ncell)."""
+    import xarray as xr
+    from legoesm.coupler.grid_remap import nearest_column_map
+    d = Path(swap_dir)
+    t = xr.open_dataset(d / f"pl130_day{day}.nc")
+    q = xr.open_dataset(d / f"pl133_day{day}.nc")
+    s = xr.open_dataset(d / f"sf134_day{day}.nc")
+
+    def one(ds):
+        names = [v for v in ds.data_vars if ds[v].ndim >= 3]
+        if len(names) != 1:
+            raise SystemExit(f"expected one field in {ds.encoding.get('source')}, got {names}")
+        return ds[names[0]].isel(time=0)
+    T, Q, PS = one(t), one(q), one(s)
+    if T.dims != ("plev", "lat", "lon") or Q.dims != T.dims or PS.dims != ("lat", "lon"):
+        raise SystemExit(f"unexpected ERA5 dims T{T.dims} q{Q.dims} ps{PS.dims}")
+    for a in (Q, PS):
+        if not (np.array_equal(a["lat"], T["lat"]) and np.array_equal(a["lon"], T["lon"])):
+            raise SystemExit("ERA5 T, q and ps are on different lat/lon coordinates")
+    want = np.datetime64(origin, "s") + np.timedelta64(int(day) * 86400, "s")
+    for a in (T, Q, PS):
+        if np.datetime64(a["time"].values, "s") != want:
+            raise SystemExit(f"ERA5 snapshot time {a['time'].values} != {want} (origin {origin} + day {day})")
+    plev = np.asarray(T["plev"], dtype=np.float64)
+    if not np.array_equal(plev, np.asarray(Q["plev"], dtype=np.float64)):
+        raise SystemExit("ERA5 T and q pressure levels differ")
+    lat = np.deg2rad(np.asarray(T["lat"], dtype=np.float64))
+    lon = np.deg2rad(np.asarray(T["lon"], dtype=np.float64))
+    lat2, lon2 = np.meshgrid(lat, lon, indexing="ij")
+    owner = nearest_column_map(cell_lat, cell_lon, lat2.ravel(), lon2.ravel())
+    wpt = np.cos(lat2).ravel()
+    ncell = np.asarray(cell_lat).size
+    ps_pt = np.asarray(PS, dtype=np.float64).ravel()
+    if np.bincount(owner, minlength=ncell).min() == 0:
+        raise SystemExit("a model cell received no ERA5 point")
+    o = np.argsort(plev)
+    plev = plev[o]
+    Ta = np.asarray(T, dtype=np.float64).reshape(plev.size, -1)[o]
+    Qa = np.asarray(Q, dtype=np.float64).reshape(plev.size, -1)[o]
+    out_T = np.empty((ncell, plev.size))
+    out_q = np.empty((ncell, plev.size))
+    for k in range(plev.size):
+        wk = np.where(plev[k] <= ps_pt, wpt, 0.0)
+        den = np.bincount(owner, wk, minlength=ncell)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out_T[:, k] = np.bincount(owner, wk * Ta[k], minlength=ncell) / den
+            out_q[:, k] = np.bincount(owner, wk * Qa[k], minlength=ncell) / den
+        out_T[den == 0, k] = np.nan
+        out_q[den == 0, k] = np.nan
+    ps = np.bincount(owner, wpt * ps_pt, minlength=ncell) / np.bincount(owner, wpt, minlength=ncell)
+    return plev, out_T, out_q, ps
+
+
+def swap_on_layers(plev, prof, ps, p_full, model):
+    """``model`` (ncol, nlev) with each layer replaced by the column's ERA5
+    profile ``prof`` (ncol, nplev on ascending ``plev``), linear in log p
+    between the bracketing ERA5 levels.  The model value is KEPT where the
+    layer pressure exceeds the deepest ERA5 level (1000 hPa) or the cell's
+    ERA5 surface pressure ``ps``, or where a bracketing level has no
+    above-ground ERA5 data.  A layer above the top ERA5 level is fatal (no
+    extrapolation is defined).  Returns (swapped, kept-mask)."""
+    p_full = np.asarray(p_full, dtype=np.float64)
+    if (p_full < plev[0]).any():
+        raise SystemExit(f"model layer above the top ERA5 level {plev[0]:.0f} Pa")
+    lp, x = np.log(plev), np.log(p_full)
+    j = np.clip(np.searchsorted(lp, x), 1, lp.size - 1)
+    wt = (x - lp[j - 1]) / (lp[j] - lp[j - 1])
+    rows = np.arange(p_full.shape[0])[:, None]
+    v = (1.0 - wt) * prof[rows, j - 1] + wt * prof[rows, j]
+    keep = (p_full > plev[-1]) | (p_full > np.asarray(ps)[:, None]) | ~np.isfinite(v)
+    return np.where(keep, model, v), keep
+
+
 def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend,
-                  ref_run, era5_dir, target):
+                  ref_run, era5_dir, target, swap_dir=None, day=None, out_json=None,
+                  swap_origin=None):
     """#2109: clear-sky OLR of the PRODUCTION clear-sky radiation call on the
     captured state, re-solved with temperature and/or humidity corrected to
     ERA5 by the global-mean profile ``rlutcs_kernel.bias_profiles`` measures
@@ -317,11 +415,19 @@ def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_back
                 m.ERA5 = era5_dir
             return m
         rk._load = _load
-    plev, dT, ratio = rk.bias_profiles(ref_run)
-    print(f"perturbation profile from {ref_run} (global mean, below-ground masked; "
-          f"ERA5 {era5_dir or 'climatology'}):")
-    for p, t, r in zip(plev, dT, ratio):
-        print(f"   {p / 100:7.0f} hPa   dT(ERA5-model) {t:+6.2f} K   q_ERA5/q_model {r:5.2f}")
+    if swap_dir is None:
+        plev, dT, ratio = rk.bias_profiles(ref_run)
+        print(f"perturbation profile from {ref_run} (global mean, below-ground masked; "
+              f"ERA5 {era5_dir or 'climatology'}):")
+        for p, t, r in zip(plev, dT, ratio):
+            print(f"   {p / 100:7.0f} hPa   dT(ERA5-model) {t:+6.2f} K   q_ERA5/q_model {r:5.2f}")
+    else:
+        cell_lat = np.asarray(mesh.latCell, dtype=np.float64)
+        cell_lon = np.asarray(mesh.lonCell, dtype=np.float64)
+        eplev, eT, eq, eps = era5_snapshot_on_cells(swap_dir, day, cell_lat, cell_lon, swap_origin)
+        print(f"#2303 swap: ERA5 00 UTC snapshot of day {day} from {swap_dir}, "
+              f"{eplev.size} levels, area-averaged onto {cell_lat.size} cells")
+        kept = {}
     fn = fns["radiation"]
     area = np.asarray(mesh.areaCell, dtype=np.float64)
     w = area / area.sum()
@@ -338,11 +444,24 @@ def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_back
             b = dict(b)
             pf = np.asarray(b["p_full"], dtype=np.float64)
             T = np.asarray(b["T"], dtype=np.float64)
+            if swap_dir is not None:
+                if b.get("lon") is None:
+                    raise SystemExit("radiation call carries no lon: column order unverifiable")
+                gate(np.allclose(np.asarray(b["lat"], dtype=np.float64).ravel(), cell_lat)
+                     and np.allclose(np.asarray(b["lon"], dtype=np.float64).ravel(), cell_lon),
+                     "radiation columns are the mesh cells, in order (lat and lon)")
             if mode in ("dT", "both"):
-                T = T + rk._on_columns(plev, dT, pf, 0.0)
+                if swap_dir is None:
+                    T = T + rk._on_columns(plev, dT, pf, 0.0)
+                else:
+                    T, kept["T"] = swap_on_layers(eplev, eT, eps, pf, T)
             b["T"] = jnp.asarray(T, dtype=jnp.asarray(b["T"]).dtype)
             if mode in ("dq", "both"):
-                q = np.asarray(b["q_v"], dtype=np.float64) * rk._on_columns(plev, ratio, pf, 1.0)
+                q = np.asarray(b["q_v"], dtype=np.float64)
+                if swap_dir is None:
+                    q = q * rk._on_columns(plev, ratio, pf, 1.0)
+                else:
+                    q, kept["q"] = swap_on_layers(eplev, eq, eps, pf, q)
                 b["q_v"] = jnp.asarray(q, dtype=jnp.asarray(b["q_v"]).dtype)
             out = real_backend(**b)
             if out.lw_flux_up_toa_clr is None:
@@ -400,6 +519,15 @@ def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_back
     for m, lab in (("dT", "+ temperature correction to ERA5"), ("dq", "+ humidity correction to ERA5"),
                    ("both", "+ both")):
         print(f"  {lab:<34s} {g[m]:8.2f}  (d = {g[m] - g['base']:+6.2f})")
+    if swap_dir is not None:
+        g["overlap"] = g["both"] - g["dT"] - g["dq"] + g["base"]
+        print(f"  overlap (both - dT - dq, deltas)   {g['overlap']:+8.2f}")
+        for k, m in kept.items():
+            print(f"  {k}: model value kept in {100 * m.mean():.2f} % of layers "
+                  f"({100 * (m * w[:, None]).sum() / m.shape[1]:.2f} % area-weighted)")
+        if out_json:
+            Path(out_json).write_text(json.dumps({"day": day, **g, "target": target,
+                                                  "kept_frac": {k: float(m.mean()) for k, m in kept.items()}}))
     if target is not None:
         print(f"\nrlutcs error to explain: {target:+.2f} W/m2 (model - obs)")
         for m in ("dT", "dq", "both"):
@@ -453,6 +581,17 @@ def main(argv=None):
     ap.add_argument("--profile-era5", default=None,
                     help="ERA5 monthly folder for the profile (e.g. a same-year 1979 copy); "
                          "default: profile_rh_split's climatology")
+    ap.add_argument("--era5-swap", default=None, metavar="DIR",
+                    help="#2303: with --rlutcs-replay, REPLACE T / q_v per column by the ERA5 "
+                         "00-UTC snapshot of --day in DIR (era5_snapshot_on_cells) instead of "
+                         "the global-mean bias profile")
+    ap.add_argument("--use-checkpoint-terrain", action="store_true",
+                    help="#2303 probe only: adopt the checkpoint's stored terrain instead of "
+                         "refusing a restart whose rebuilt terrain differs")
+    ap.add_argument("--swap-json", default=None, help="write the --era5-swap global means here")
+    ap.add_argument("--swap-origin", default=None,
+                    help="UTC datetime of model day 0 (e.g. 1979-01-01T00:00); the ERA5 files "
+                         "must be stamped origin + --day")
     ap.add_argument("--target", type=float, default=None,
                     help="rlutcs model-minus-obs error to be explained [W/m2]")
     ap.add_argument("--n-times", type=int, default=8)
@@ -479,6 +618,8 @@ def main(argv=None):
         ap.error("--no-graupel-riming needs --nc-budget")
     if args.reset_field != "mg2_drop_early_reset_log_width" and not args.reset_width_ab:
         ap.error("--reset-field needs --reset-width-ab")
+    if args.era5_swap and not args.swap_origin:
+        ap.error("--era5-swap needs --swap-origin")
     if args.reset_width_ab and (args.nc_budget or args.rlutcs_replay):
         ap.error("--reset-width-ab is its own mode (not with --nc-budget / --rlutcs-replay)")
     t0 = time.time()
@@ -554,6 +695,8 @@ def main(argv=None):
         raise H._Captured()
     combined.make_physics = spy_make_physics
     MPASPrimitiveEquationModel.step = spy_step
+    if args.use_checkpoint_terrain:
+        use_checkpoint_terrain()
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "run"))
     import run_amip
     try:
@@ -575,7 +718,9 @@ def main(argv=None):
     T0 = np.asarray(state.T.data, dtype=np.float64)
     if args.rlutcs_replay:
         return rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend,
-                             args.ref_run or args.run, args.profile_era5, args.target)
+                             args.ref_run or args.run, args.profile_era5, args.target,
+                             swap_dir=args.era5_swap, day=args.day, out_json=args.swap_json,
+                             swap_origin=args.swap_origin)
     if args.reset_width_ab:
         return NCB.run_reset_ab(model, state, DT, pf_full, forcing, phys_state, micro_calls,
                                 out_dir, f"{args.run}_d{args.day:04d}")
