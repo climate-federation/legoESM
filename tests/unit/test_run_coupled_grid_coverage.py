@@ -69,18 +69,51 @@ def test_gaussian_dynamic_ocean_with_distinct_grid_parses():
     assert args.ocean_grid == "latlon:48"
 
 
+# Child process for the gaussian/slab test: runs ``run_coupled.main`` unchanged
+# (the full CLI path) and records the slab SST right after ``setup()`` and
+# right after ``run()``.  The driver writes no SST field, so the change over the
+# run is printed here for the test to parse.
+_SST_CHANGE_CHILD = """
+import sys
+import numpy as np
+sys.path.insert(0, sys.argv[1])
+import run_coupled
+from legoesm.driver.coupled_esm_driver import CoupledESMDriver as D
+rec = {}
+def _wrap(name, key):
+    orig = getattr(D, name)
+    def f(self, *a, **k):
+        out = orig(self, *a, **k)
+        rec[key] = np.array(self._ocean_state.T_sfc.data, dtype=np.float64)
+        rec["lat"] = np.asarray(self._atm._grid_lat, dtype=np.float64)
+        return out
+    setattr(D, name, f)
+_wrap("setup", "sst0")
+_wrap("run", "sst1")
+run_coupled.main(sys.argv[2:])
+d = rec["sst1"] - rec["sst0"]
+lat = np.rad2deg(np.broadcast_to(rec["lat"], d.shape))
+print("SST_CHANGE finite=%d tropics_mean=%.6e global_mean=%.6e"
+      % (np.isfinite(d).all(), d[np.abs(lat) < 20.0].mean(), d.mean()))
+"""
+
+
 def test_gaussian_slab_coupled_runs(tmp_path):
-    """Coupled --grid gaussian with a slab ocean RUNS end-to-end (A2): the
-    spectral atm state is synthesized to grid in _build_atm_forcing, and
-    _run_spectral recomputes + stashes the surface net radiation at the daily
-    coupling boundary so the ocean is radiatively forced (not the zero-SW
-    #1202-class bug). The equator-to-pole SST structure that develops is the
-    tell-tale of nonzero insolation-driven forcing."""
+    """Coupled --grid gaussian with a slab ocean RUNS end-to-end (A2) and the
+    spectral lane's surface radiation reaches the slab (#1202, zero-SW class).
+
+    Asserts the tropical-mean SST change over the 1-day run, not the SST
+    spread (the initial analytic SST already spans 30 K).  Measured on CPU,
+    fp64, unweighted mean over |lat| < 20: +0.089 K; with the shortwave into
+    the ocean zeroed -0.003 K; with the ocean step skipped exactly 0.  The
+    0.04 K bound is about half the measured value; re-measure it if the case
+    (resolution, days, physics) changes."""
     env = os.environ.copy()
     env["JAX_PLATFORMS"] = "cpu"
     env["JAX_ENABLE_X64"] = "1"
     result = subprocess.run(
-        [sys.executable, str(DRIVER), "--grid", "gaussian", "--ocean", "slab",
+        [sys.executable, "-c", _SST_CHANGE_CHILD, str(DRIVER.parent),
+         "--grid", "gaussian", "--ocean", "slab",
          "--resolution", "16", "--days", "1", "--radiation", "gray",
          "--no-energy-fixer",   # not wired on the spectral lane (F15)
          # The faithful Kessler (#2083, the spectral default) runs a fixed
@@ -95,15 +128,14 @@ def test_gaussian_slab_coupled_runs(tmp_path):
         f"coupled gaussian slab run did not complete.\n{combined[-1200:]}"
     assert "Traceback" not in combined and "nan" not in result.stdout.lower(), \
         f"coupled gaussian produced a traceback / NaN.\n{combined[-1200:]}"
-    # Nonzero radiative forcing => the ocean SST develops an equator-to-pole
-    # spread (a zero-SW-forced slab would stay flat at its init).
-    m = re.search(r"SST final \(ocean\): mean=[\d.]+K, range=\[([\d.]+), "
-                  r"([\d.]+)\]K", combined)
-    assert m, f"no SST range in output.\n{combined[-800:]}"
-    lo, hi = float(m.group(1)), float(m.group(2))
-    assert hi - lo > 5.0, (
-        f"SST spread {hi - lo:.1f}K too small — ocean under-forced (zero-SW "
-        f"regression?)")
+    m = re.search(r"SST_CHANGE finite=(\d) tropics_mean=(\S+) global_mean=(\S+)",
+                  combined)
+    assert m, f"no SST change in output.\n{combined[-800:]}"
+    assert m.group(1) == "1", "non-finite SST change"
+    d_trop = float(m.group(2))
+    assert d_trop > 0.04, (
+        f"tropical-mean SST change {d_trop:.4f} K over 1 day; the slab is not "
+        f"radiatively forced (zero-SW regression?) or not coupled")
 
 
 def test_ocean_mode_label_mapping():
