@@ -395,6 +395,26 @@ def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
                                   ic["soil_hydraulics_column_sig"])
 
 
+def test_era5_stage_builds_its_grid_in_float64(tmp_path, monkeypatch):
+    """The ERA5 soil-T stage picks donors and land/glacier columns on the run's
+    float64 centres, not the builder's default fp32 ones."""
+    import jax.numpy as jnp
+    import legoesm.grids.factory as gf
+    from legoesm.core.precision import get_policy, set_policy
+    rg, ic_path, _ = _setup_cli(tmp_path, monkeypatch)
+    stub, seen = gf.create_grid, []
+    monkeypatch.setattr(gf, "create_grid",
+                        lambda *a, **k: (seen.append(get_policy().storage), stub())[1])
+    ambient = get_policy()
+    try:
+        set_policy(ambient._replace(storage=jnp.float32))
+        files, lsm, sd = _era5_inputs(tmp_path)
+        assert _run_cli(rg, ic_path, tmp_path / "out.npz", files, lsm, sd) == 0
+    finally:
+        set_policy(ambient)
+    assert seen == [jnp.float64]
+
+
 @pytest.mark.parametrize("extra", [["--stamp-only"],
                                    ["--source-soil-hydraulics", "a", "b", "c"]])
 def test_cli_refuses_stamping_flags_in_era5_mode(tmp_path, monkeypatch, extra):
