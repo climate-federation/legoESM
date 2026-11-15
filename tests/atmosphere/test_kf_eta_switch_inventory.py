@@ -70,7 +70,7 @@ BASELINE = {
     "C-KLCL2": ("hard", 34),
     "C-KPBL": ("hard", 60), "C-L5": ("hard", 6),
     "C-L5g": ("smooth", 6), "C-LDB": ("hard", 32), "C-LET": ("hard", 35),
-    "C-LFS": ("hard", 37), "C-LTOP": ("hard", 102), "C-LTOPs": ("smooth", 60), "C-LETs": ("smooth", 30), "C-ML": ("hard", 6), "C-NIC": ("hard", 7),
+    "C-LFS": ("hard", 37), "C-LTOP": ("hard", 102), "C-LTOPs": ("smooth", 68), "C-LETs": ("smooth", 39), "C-ML": ("hard", 6), "C-NIC": ("hard", 7),
     "C-NSTEP": ("hard", 4), "D1": ("smooth", 5), "D2": ("hard", 5), "D3": ("smooth", 6),
     "D4": ("smooth", 19), "D5": ("hard", 2), "D6": ("hard", 4), "D7a": ("smooth", 18),
     "D7b": ("smooth", 2), "D7c": ("hard", 2), "D7d": ("smooth", 5), "D7e": ("smooth", 7),
@@ -81,7 +81,7 @@ BASELINE = {
     "E11": ("hard", 12), "E11c": ("smooth", 4), "E12": ("hard", 5), "E13": ("hard", 2),
     "E14": ("hard", 1), "E15": ("hard", 9), "E16": ("hard", 5), "E17": ("hard", 1),
     "E18": ("hard", 1), "E19": ("hard", 1), "F1": ("smooth", 19), "F2": ("smooth", 40),
-    "S": ("static", 260), "H": ("static", 17),
+    "S": ("static", 261), "H": ("static", 17),
 }
 
 

@@ -1105,6 +1105,14 @@ def _put(a, i, v, m):
     return a.at[i].set(jnp.where(m, v, a[i]))  # kfsw: H
 
 
+def _survival_inflow_limit(aincm1, wl):
+    """A level's inflow limit divided by its survival share ``wl``, capped at
+    _AINCMX0 (the closure's min caps it anyway); divides only below the cap so
+    a tiny share keeps values and gradients finite."""
+    c = wl * _AINCMX0 > aincm1  # kfsw: C-LETs
+    return jnp.where(c, aincm1 / _sd(wl, c), _AINCMX0)  # kfsw: C-LETs
+
+
 def _sd(x, ok):
     """Denominator that is ``x`` where it is used and 1 elsewhere (keeps the
     unselected branch finite so gradients through ``jnp.where`` stay finite)."""
@@ -1308,7 +1316,7 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
         u = dict(WTW=WTW, REI=zero, UPOLD=VMFLCL, UPNEW=VMFLCL, ABE=zero, TRPPT=zero,
                  EE1=one, UD1=zero, DILBE=zero, TTEMP=jnp.asarray(_TTFRZ_K, dtype),
                  IFLAG=jnp.asarray(0, i32), LET=LCL, exited=jnp.asarray(False),
-                 LTOP=jnp.asarray(KL, i32), SV=one, ABES=zero)  # kfsw: S
+                 LTOP=jnp.asarray(KL, i32), SV=one)  # kfsw: S
         if sv:  # kfsw: S
             # this candidate's survival arrays and precipitation start empty
             # (levels it never reaches must not keep an earlier candidate's
@@ -1478,8 +1486,6 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
                     cw = cold.astype(dtype)  # kfsw: C-LETs
                 B["CW"] = _put(B["CW"], NK1, cw, wa)  # kfsw: C-LETs
                 v["SV"] = _w(wa, snew, sv0)  # kfsw: C-LTOPs
-                # kfsw: C-LTOPs
-                v["ABES"] = u["ABES"] + jnp.where(wa, snew * jnp.where(pos_b, dinc, 0.0), 0.0)
                 B["DABE"] = _put(B["DABE"], NK, jnp.where(pos_b, dinc, 0.0), wa)  # kfsw: C-LTOPs
             ex = a & (stop1 | stop2)
             v["LTOP"] = _w(ex, NK, u["LTOP"])  # kfsw: C-LTOP
@@ -1511,9 +1517,8 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
                                         + _CHMIN_SLOPE_M_PER_K * (TLCL - _CHMIN_TCOLD_K),
                                         _CHMIN_SHALLOW_M))  # kfsw: E9
         noconv = (e_top <= KLCL) | (e_top <= KPBL) | (e_let + 1 <= KPBL)  # kfsw: A4
-        abe_out = u["ABES"] if sv else u["ABE"]  # kfsw: S
-        abe_b = _conv_abe(A["DABE"], ptop) / pcd if sv else abe_out  # kfsw: S
-        deep = ~noconv & (cldhgt > CHMIN) & (abe_b > _ABE_MIN)  # kfsw: B1
+        abe_out = _conv_abe(A["DABE"], ptop) / pcd if sv else u["ABE"]  # kfsw: S
+        deep = ~noconv & (cldhgt > CHMIN) & (abe_out > _ABE_MIN)  # kfsw: B1
         shallow = ~noconv & ~deep
         exit_sh = shallow & (NU == sc_nuchm)  # kfsw: B2
         zero_cols = noconv | (shallow & ~exit_sh)
@@ -1625,6 +1630,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         Wtop = jnp.where(sh, Ws, Wn)  # kfsw: B1
         PTOP = jnp.sum(Wtop, axis=0)  # kfsw: C-LTOPs
         PGE = jnp.cumsum(PTOP[::-1])[::-1]  # kfsw: C-LTOPs
+        PCD = _sd(PGE[0], PGE[0] > 0.0)  # P(convection), guarded  # kfsw: C-LTOPs
         raw = (UMF, UER, UDR, DETLQ, DETIC, PPTLIQ, PPTICE, QLIQ, QICE, DILFRC,
                QLQOUT, QICOUT, S["UPO"], S["UPN"], DP, kk)
         # a member's mass flux at KLCL (its LET block lies above)
@@ -1937,6 +1943,13 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     udd = UER - DER
     okm = valid & (kk >= LC) & (kk <= LMAX) & (udd > _UERDER_MIN)  # kfsw: E15,C-KCHECK,C-KLCL,C-LFS
     AINCM1 = EMS / (_sd(udd, okm) * TIMEC)  # kfsw: E15
+    if sv:  # kfsw: S
+        # a level above KLCL limits the inflow with the share of the members
+        # whose downdraft starts at or above it (no member: it drops out)
+        okm = valid & (kk >= LC) & (udd > _UERDER_MIN)  # kfsw: C-LETs
+        AINCM1 = EMS / (_sd(udd, okm) * TIMEC)  # kfsw: C-LETs
+        wl = jnp.where(kk <= KLCL, 1.0, jnp.cumsum(ql[::-1])[::-1] / PCD)  # kfsw: C-LETs
+        AINCM1 = _survival_inflow_limit(AINCM1, wl)
     AINCMX = jnp.minimum(_AINCMX0, jnp.min(jnp.where(okm, AINCM1, _AINCMX0)))  # kfsw: E15
     AINC = jnp.where(AINCMX < 1.0, AINCMX, 1.0)  # kfsw: E15
     TDER2, PPTFL2 = TDER, PPTFLX
@@ -2018,16 +2031,12 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         def neg_body(cc, NK):
             qg, fatal = cc
             b = (NK <= LTOPD) & (qg[NK] < 0.0)  # kfsw: D7i
-            if sv:  # kfsw: S
-                # no borrow above every possible top (the oracle stops at LTOP)
-                pge = PGE[NK]  # kfsw: S
-                live = pge > 0.0  # kfsw: C-LTOPs
-                b = b & live
             fatal = fatal | (b & (NK == 1))  # kfsw: D7i,A6
             if sv:  # kfsw: S
                 # the donor above is the next level while the cloud continues,
-                # the cloud base when the top is here (probability-weighted)
-                pup = jnp.where(live, PGE[NK + 1] / jnp.where(live, pge, 1.0), 0.0)  # kfsw: C-LTOPs
+                # the cloud base when the top is here (probability-weighted;
+                # fades to the base as the tops run out)
+                pup = PGE[NK + 1] / (PGE[NK] + _QSHARE_FLOOR * PCD)  # kfsw: C-LTOPs
                 q_up = borrow(qg, b, NK, NK + 1)
                 q_wr = borrow(qg, b, NK, KLCL_c)
                 qg = q_wr + pup * (q_up - q_wr)
@@ -2086,7 +2095,12 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
 
         def abeg_body(cc, NK):
             th, tvq, abeg = cc
-            b = (NK >= kq) & (NK <= LTOP - 1)  # kfsw: C-KLCL2
+            if sv:  # kfsw: S
+                # the whole column; each increment counts for the convecting
+                # members whose top lies above NK
+                b = NK >= kq  # kfsw: C-LTOPs
+            else:
+                b = (NK >= kq) & (NK <= LTOP - 1)  # kfsw: C-KLCL2
             NK1 = NK + 1
             thn = th[NK]  # kfsw: S
             tgu, qgu = _tpmix2dd(lut, P0[NK1], thn)  # kfsw: S
@@ -2097,6 +2111,8 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
                               ((tvlcl + tvqu) / (tven + TVG[NK1]) - 1.0) * (Z0[klcl] - zlcl),
                               ((tvq[NK] + tvqu) / (TVG[NK] + TVG[NK1]) - 1.0) * DZA[NK])
             pos_b, dinc = _abe_increment(dilbe, G, lut.sm.abe_pos_width_m)
+            if sv:  # kfsw: S
+                dinc = dinc * PGE[NK1] / PCD  # kfsw: C-LTOPs
             abeg = jnp.where(b & pos_b, abeg + dinc, abeg)  # kfsw: E6
             thteeg = _envirtht(lut, ab, P0[NK1], TG[NK1], QG[NK1])  # kfsw: S
             th_new = thn * DDILFRC[NK1] + thteeg * (1.0 - DDILFRC[NK1])  # kfsw: S
@@ -2194,8 +2210,16 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         DQRDT = (QRG + QSG) / TIMECf
         DQSDT = jnp.zeros_like(TG)
     elif not f_qs:  # kfsw: S
-        # kfsw: C-ML
-        TGf = jnp.where(kk <= ML, TG - (QIG + QSG) * _RLF / CPM, TG + (QLG + QRG) * _RLF / CPM)
+        if sv:  # kfsw: S
+            # P(k <= ML_t | convection), ML_t the highest warm level <= top t
+            ml_t = jax.lax.cummax(jnp.where(warm, kk, 0))  # kfsw: C-LTOPs
+            pml = jnp.sum(jnp.where(kk[:, None] <= ml_t[None, :], PTOP[None, :], 0.0),  # kfsw: C-LTOPs
+                          axis=1) / PCD
+            TGf = (pml * (TG - (QIG + QSG) * _RLF / CPM)
+                   + (1.0 - pml) * (TG + (QLG + QRG) * _RLF / CPM))
+        else:
+            # kfsw: C-ML
+            TGf = jnp.where(kk <= ML, TG - (QIG + QSG) * _RLF / CPM, TG + (QLG + QRG) * _RLF / CPM)
         DQCDT = (QLG + QIG) / TIMECf
         DQIDT = jnp.zeros_like(TG)
         DQRDT = (QRG + QSG) / TIMECf

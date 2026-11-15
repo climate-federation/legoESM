@@ -161,7 +161,10 @@ def test_default_gap_per_case_matches_record(fix, stored, case):
 _UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_width_kgkg",
                 "q0_floor_width_kgkg", "l5_gather_width_pa", "wklcl_cap_width_m",
                 "dtlcl_onset_width_ms", "entrain_tiny_width_k", "eqf_clip_width",
-                "chmin_clip_width_k", "top_stop_wtw_width_m2s2", "top_stop_umf_width_kgs"}
+                "chmin_clip_width_k", "top_stop_umf_width_kgs",
+                # the band column is mid-band at the DEFAULT widths only (the
+                # "all" case); stop1 alone is exercised on it shifted in-test
+                "top_stop_wtw_width_m2s2"}
 
 
 def _moved(stored, case):
@@ -801,6 +804,22 @@ def test_downdraft_mixture_gradient_is_finite_for_a_tiny_share(monkeypatch, dtyp
     assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
 
 
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+def test_survival_inflow_limit_is_the_capped_ratio_with_finite_gradients(dtype):
+    """min(a / wl, cap) with cap where wl = 0; a 1e-20 share keeps the reverse
+    gradient finite (in fp32 the unguarded a / wl gives a non-finite one)."""
+    a = jnp.asarray([2.0, 2.0, 2.0, 2.0, 0.0], dtype)
+    wl = jnp.asarray([1.0, 0.5, 1e-20, 0.0, 0.3], dtype)
+    cap = kfe._AINCMX0
+    np.testing.assert_allclose(np.asarray(kfe._survival_inflow_limit(a, wl)),
+                               [2.0, 4.0, cap, cap, 0.0], rtol=1e-6)
+    g = jax.grad(lambda a, w: jnp.sum(kfe._survival_inflow_limit(a, w)), argnums=(0, 1))(a, wl)
+    assert all(bool(jnp.all(jnp.isfinite(x))) for x in g)
+    old = jax.grad(lambda w: jnp.sum(jnp.minimum(cap, jnp.where(w > 0, a / jnp.where(
+        w > 0, w, 1.0), cap))))(wl)
+    assert bool(jnp.all(jnp.isfinite(old))) == (dtype == jnp.float64)
+
+
 def test_downdraft_mixes_over_the_source_levels_of_the_let_members(monkeypatch):
     """Half of each top's weight moved to the lowest accepted LET puts those
     members' downdraft source one level below it, under the column's own LFS
@@ -831,6 +850,96 @@ def test_downdraft_mixes_over_the_source_levels_of_the_let_members(monkeypatch):
     f = fx["L_nat_w0_fired"] == 1
     assert np.all(np.asarray(out.convective_mask)[f] == 1.0)
     assert np.all(np.abs(tot.sum(axis=1))[f] <= 1.0e-9 * scale[f])
+
+
+
+# Band column (make_fixture.BAND, appended last): the default top weights are
+# 14:0.343 / 13:0.657.  Shifting its upper troposphere by _HARD_FLIP_DT puts it
+# at the hard stop1 flip + 2e-7 K instead, where the stop1 width alone splits it.
+_HARD_FLIP_DT = 0.01304718491
+
+
+def _band(fx):
+    i = len(fx["sweep_combo"]) - 1
+    up = jnp.asarray(fx["sweep_p"][i] < 5.0e4, jnp.float64)
+    return i, up, jnp.asarray(fx["sweep_T"][i])[None]
+
+
+def _frac(fx, i, T, up, lo_sm, mid_sm):
+    """Where ``mid_sm`` at T sits between ``lo_sm`` at T -/+ 1e-4 K (upper)."""
+    lo, _ = _sweep_column(fx, i, T - 1e-4 * up, lo_sm)
+    hi, _ = _sweep_column(fx, i, T + 1e-4 * up, lo_sm)
+    mid, _ = _sweep_column(fx, i, T, mid_sm)
+    jump = float(jnp.max(jnp.abs(hi["dtdt"] - lo["dtdt"])))
+    return float(jnp.max(jnp.abs(mid["dtdt"] - lo["dtdt"]))) / jump, lo, hi
+
+
+def test_band_column_top_sits_inside_the_smooth_band():
+    """At the default widths the band column's tendencies lie strictly between
+    the two saturated tops' (the column the default-gap test records); shifted
+    to the hard flip, the stop1 width alone splits it between the hard tops."""
+    fx = dict(np.load(_FIX))
+    i, up, T = _band(fx)
+    frac, _, _ = _frac(fx, i, T, up, _DEFAULT, _DEFAULT)
+    assert 0.2 < frac < 0.8
+    wonly = kfe.KF_HARD._replace(top_stop_wtw_width_m2s2=_DEFAULT.top_stop_wtw_width_m2s2)
+    frac, lo, hi = _frac(fx, i, T + _HARD_FLIP_DT * up, up, kfe.KF_HARD, wonly)
+    assert int(lo["ltop"][0]) != int(hi["ltop"][0]) and 0.2 < frac < 0.8
+
+
+def _band_grad_fn():
+    """Jitted scalar f(s) = sum(dtdt(T0 + s d) r) on the band column at the
+    default widths (d, r random); jitted because eager order-2 tracing of the
+    whole scheme exhausts LLVM."""
+    fx = dict(np.load(_FIX))
+    i, up, T0 = _band(fx)
+    rng = np.random.default_rng(0)
+    r, d = (jnp.asarray(rng.normal(size=32)) for _ in range(2))
+    f = jax.jit(lambda s: jnp.sum(_sweep_column(fx, i, T0 + s * d, _DEFAULT)[0]["dtdt"][0] * r))
+    return f, fx, i, up, T0, r
+
+
+def test_default_gradient_through_the_band_column_is_c2():
+    """Order-2 check_grads (fp64) of the band column's heating at the default
+    widths.  f carries a 3e-7 relative noise floor and f''/f' ~ -2.5e5 /K inside
+    the band, so no 2-point step meets 1e-5 (best ~2e-5): check_grads runs at
+    1e-3 (vote 17, 3/3); the accuracy test below holds 1e-5."""
+    f, fx, i, up, T0, r = _band_grad_fn()
+    check_grads(f, (0.0,), order=2, modes=("fwd", "rev"), eps=3e-9, atol=1e-3, rtol=1e-3)
+
+
+def test_default_gradient_through_the_band_column_is_accurate_and_carries_the_top():
+    """First and second AD derivatives on the band column match 4-point
+    Richardson differences to 1e-5 (measured 2.4e-6 / 3.0e-6), and the slope
+    along the uniform upper shift carries the top flip."""
+    f, fx, i, up, T0, r = _band_grad_fn()
+    g1 = jax.jit(jax.grad(f))
+    g2 = jax.jit(jax.grad(jax.grad(f)))
+    e = 3e-8
+    for g, ad in ((f, g1), (g1, g2)):
+        fd = (8.0 * (g(e) - g(-e)) - (g(2 * e) - g(-2 * e))) / (12.0 * e)
+        np.testing.assert_allclose(float(ad(0.0)), float(fd), rtol=1e-5)
+    # Non-vacuity: along the uniform upper shift the default slope carries the
+    # top flip (its jump over the ~2e-6 K band), not just the smooth background.
+    g = jax.jit(lambda s: jnp.sum(_sweep_column(fx, i, T0 + s * up, _DEFAULT)[0]["dtdt"][0] * r))
+    jump = abs(float(g(1e-4) - g(-1e-4)))
+    assert jump > 0.0 and abs(float(jax.grad(g)(0.0))) > 0.1 * jump / 1e-5
+
+
+def test_band_column_converges_to_the_hard_top_as_the_width_shrinks():
+    """The stop1 width alone (others hard) at w, w/10, w/100, w*1e-6, on the band
+    column shifted to the hard flip: its distance from the hard path shrinks to
+    round-off as the band leaves it."""
+    fx = dict(np.load(_FIX))
+    i, up, T = _band(fx)
+    T = T + _HARD_FLIP_DT * up
+    hard, _ = _sweep_column(fx, i, T, kfe.KF_HARD)
+    w = _DEFAULT.top_stop_wtw_width_m2s2
+    d = [float(jnp.max(jnp.abs(_sweep_column(
+        fx, i, T, kfe.KF_HARD._replace(top_stop_wtw_width_m2s2=w * f))[0]["dtdt"]
+        - hard["dtdt"]))) for f in (1.0, 0.1, 0.01, 1e-6)]
+    assert d[0] > 1e-6 * float(jnp.max(jnp.abs(hard["dtdt"])))
+    assert d[3] <= 1e-12 and d[2] <= d[0] and d[3] <= d[1]
 
 
 def test_top_hazards_are_the_oracle_steps_at_zero_width_and_c2():
