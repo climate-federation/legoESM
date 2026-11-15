@@ -110,3 +110,22 @@ def test_driver_attaches_filtered_std_and_refuses_without_file(tmp_path):
         ModelDriver._attach_ifs_vdf_sigflt(drv, "", jnp.float64)
     ModelDriver._attach_ifs_vdf_sigflt(drv, str(path), jnp.float64)
     np.testing.assert_allclose(np.asarray(drv.grid.subgrid_topo_filt_stddev), 40.0)
+
+
+def test_filtered_std_survives_partition_pad_and_reorder():
+    """Every mesh rebuild that carries the GWD's SSO std carries the filtered one
+    identically (local mesh, sharding pad, sharding reorder, local pad)."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.parallel.sharded_dynamics import _pad_local_mesh_to
+    from legoesm.parallel.voronoi_partition import (
+        _pad_voronoi_for_sharding, build_local_mesh, partition_voronoi_mesh,
+        reorder_voronoi_for_sharding)
+    mesh = create_voronoi_mesh(2, lloyd_iterations=0)
+    f = jnp.linspace(1.0, 2.0, int(mesh.nCells))
+    mesh = mesh._replace(subgrid_topo_stddev=f, subgrid_topo_filt_stddev=f)
+    lm = build_local_mesh(mesh, partition_voronoi_mesh(mesh, 2, 0))
+    outs = [lm, _pad_voronoi_for_sharding(mesh, 7), reorder_voronoi_for_sharding(mesh, 7),
+            _pad_local_mesh_to(lm, int(lm.nCells) + 3, int(lm.nEdges) + 5, int(lm.nVertices) + 4)]
+    for m in outs:
+        np.testing.assert_array_equal(np.asarray(m.subgrid_topo_filt_stddev),
+                                      np.asarray(m.subgrid_topo_stddev))
