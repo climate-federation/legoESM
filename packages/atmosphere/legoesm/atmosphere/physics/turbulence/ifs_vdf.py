@@ -68,6 +68,7 @@ from legoesm.atmosphere.physics._ifs_thermo import satur_qsat
 from legoesm.atmosphere.physics.convection._ifs_cuascent import cubasen, cuinin
 from legoesm.atmosphere.physics.convection._ifs_cumastrn import njkt_levels
 from legoesm.core.smooth import sqrt_c1
+from legoesm.timestepping.tridiagonal import thomas_solve
 
 __physics_contract__ = {
     "summary": (
@@ -652,3 +653,178 @@ def ifs_vdfhghtn(th, T, q, u, v, slgs, cptgz, qe, p_half, p_full, geo_full, geo_
     return IFSVDFHghtnOutput(ri=ri, khvfl=khvfl, zinv=zinv_p, zcldbase=zcldbase, eis=eis,
                              kinv=kinv, kcbase=kcbase, kctop=kctop, kpbltype=kpbl,
                              mflx=mflx, slguh=slguh, qtuh=qtuh, uuh=uuh, vuh=vuh)
+
+
+# --------------------------------------------------------------------------
+# Stage 2: implicit solvers (vdfdifm, vdfdifh flux path, vdfincr, vdfdifc).
+# No switches on traced state.  Tridiagonal solves use the shared
+# thomas_solve (vote 7 D2); round-off differs from the IFS eliminations.
+# KTOP is the static Fortran (1-based) top level (vote 7 D3); above it the
+# tendencies are 0 and the solved fields equal the inputs (undefined in IFS).
+# --------------------------------------------------------------------------
+
+def _diffusion_bands(coef, z1dp, extra_diag):
+    """Bands of (1 - dt g d/dp coef d/dp + extra) on levels ktop..KLEV: the
+    exchange coefficient coef[k] sits on the half level below full level k."""
+    prev = jnp.concatenate([jnp.zeros((1,), coef.dtype), coef[:-1]])
+    a = -prev * z1dp
+    c = (-coef * z1dp).at[-1].set(0.0)
+    b = 1.0 + (prev + coef) * z1dp + extra_diag
+    return a, b, c
+
+
+class IFSVDFDifmOutput(NamedTuple):
+    udif: jax.Array
+    vdif: jax.Array
+    dtutofd: jax.Array
+    dtvtofd: jax.Array
+    dtuso: jax.Array
+    dtvso: jax.Array
+    dtuvdf: jax.Array
+    dtvvdf: jax.Array
+
+
+def ifs_vdfdifm(u, v, p_half, cfm, tofdc, soteu, sotev, sobeta, vom, vol, ucurr, vcurr,
+                dt, g, ktop: int) -> IFSVDFDifmOutput:
+    """VDFDIFM (vdfdifm.F90, 49r1): implicit momentum diffusion with TOFD and
+    SSO drag and the surface stress against the ocean current.  ZMF = 0 in
+    the Fortran, so the mass-flux terms vanish and are not taken (vote 7 D4)."""
+    u, v = jnp.asarray(u), jnp.asarray(v)
+    s = ktop - 1
+    z1dp = g * dt / (p_half[s + 1:] - p_half[s:-1])
+    a, b, c = _diffusion_bands(cfm[s:], z1dp, (tofdc[s:] + sobeta[s:]) * dt)
+    hu = cfm[-1] * z1dp[-1]
+    du = u[s:] + dt * (vom[s:] + soteu[s:])
+    dv = v[s:] + dt * (vol[s:] + sotev[s:])
+    du, dv = du.at[-1].add(hu * ucurr), dv.at[-1].add(hu * vcurr)
+    udif = u.at[s:].set(thomas_solve(a, b, c, du))
+    vdif = v.at[s:].set(thomas_solve(a, b, c, dv))
+    act = jnp.arange(u.shape[0]) >= s
+    z = lambda x: jnp.where(act, x, 0.0)
+    dtutofd, dtvtofd = z(-tofdc * udif), z(-tofdc * vdif)
+    dtuso, dtvso = z(-sobeta * udif + soteu), z(-sobeta * vdif + sotev)
+    dtuvdf = z((udif - u) / dt - vom - dtuso)
+    dtvvdf = z((vdif - v) / dt - vol - dtvso)
+    return IFSVDFDifmOutput(udif, vdif, dtutofd, dtvtofd, dtuso, dtvso, dtuvdf, dtvvdf)
+
+
+class IFSVDFDifhOutput(NamedTuple):
+    tdif: jax.Array        # s_lg after diffusion (KLEV)
+    qdif: jax.Array        # q_t after diffusion (KLEV)
+    slgevdf: jax.Array
+    qtevdf: jax.Array
+    tskh: jax.Array        # skin temperature per tile (KTILES)
+    tskte: jax.Array       # skin temperature tendency per tile
+
+
+def ifs_vdfdifh_flux(th, slg, qt, p_half, cfh, mflx, sluh, qtuh, slge, qte, frti, evapsnw,
+                     tskti, cfhti, fsh1d, flh1d, dt, ktop: int) -> IFSVDFDifhOutput:
+    """VDFDIFH (vdfdifh.F90, 49r1) on its prescribed-flux path (LDFLUX1D,
+    vote 1 V1): implicit diffusion of s_lg and q_t with the mass-flux terms,
+    the snow-evaporation correction on tile 7, the surface fluxes FSH1D/FLH1D
+    (W m-2, downward positive) and the per-tile skin temperature.  ``mflx``,
+    ``sluh``, ``qtuh`` are half-level (vdfmain 0..KLEV); tile arrays have
+    KTILES >= 7 entries.  SURFSEB is not ported: every output of it is
+    overwritten on this path (vote 7 D1)."""
+    slg, qt = jnp.asarray(slg), jnp.asarray(qt)
+    s = ktop - 1
+    rg, cpd = th.RG, th.RCPD                        # RVTMP2 = 0 (suphec.F90:231)
+    z1dp = rg * dt / (p_half[s + 1:] - p_half[s:-1])
+    cf = cfh[s:]
+    mf = mflx[s + 1:]                                       # PMFLX(JK), JK = ktop..KLEV
+    prev_cf = jnp.concatenate([jnp.zeros((1,), cf.dtype), cf[:-1]])
+    a = (-prev_cf - mflx[s:-1].at[0].set(0.0)) * z1dp       # PMFLX(JK-1); none at KTOP
+    c = (-cf * z1dp).at[-1].set(0.0)
+    b = 1.0 + (prev_cf + cf + mf) * z1dp
+    b = b.at[-1].set(1.0 + prev_cf[-1] * z1dp[-1])          # no exchange to the surface
+    msl, mqt = mflx * sluh, mflx * qtuh
+    dmsl = (msl[s + 1:].at[-1].set(0.0) - msl[s:-1].at[0].set(0.0)) * z1dp
+    dmqt = (mqt[s + 1:].at[-1].set(0.0) - mqt[s:-1].at[0].set(0.0)) * z1dp
+    csnq = frti[6] * evapsnw * z1dp[-1]                    # ZCSNS = RCPD*RVTMP2*.. = 0
+    ys = slg[s:] + dt * slge[s:] + dmsl
+    yq = (qt[s:] + dt * qte[s:] + dmqt).at[-1].add(-csnq)
+    e_k = jnp.zeros_like(ys).at[-1].set(1.0)
+    x0s, x0q, col = (thomas_solve(a, b, c, y) for y in (ys, yq, e_k))
+    # x_KLEV = ZBSL + ZASL * J; ZASL = -g RPLDARE dt / dp_KLEV * Z1BET (RPLDARE = 1)
+    fac = -rg * dt / (p_half[-1] - p_half[-2])
+    zasl = fac * col[-1]
+    js = jnp.broadcast_to(fsh1d, tskti.shape)
+    jq = flh1d / th.RLVTT
+    zssk = x0s[-1] - js * (zasl - 1.0 / cfhti)
+    tskh = zssk / cpd
+    tdif = slg.at[s:].set(x0s + js[0] * fac * col)
+    qdif = qt.at[s:].set(x0q + jq * fac * col)
+    act = jnp.arange(slg.shape[0]) >= s
+    slgevdf = jnp.where(act, (tdif - slg) / dt - slge, 0.0)
+    qtevdf = jnp.where(act, (qdif - qt) / dt - qte, 0.0)
+    return IFSVDFDifhOutput(tdif, qdif, slgevdf, qtevdf, tskh, (tskh - tskti) / dt)
+
+
+class IFSVDFIncrOutput(NamedTuple):
+    vom: jax.Array
+    vol: jax.Array
+    slge: jax.Array
+    qte: jax.Array
+    slgewodis: jax.Array
+    vdis: jax.Array        # W m-2
+    vdisg: jax.Array
+    strtu: jax.Array       # half levels 0..KLEV
+    strtv: jax.Array
+    strsou: jax.Array
+    strsov: jax.Array
+    strtofdu: jax.Array
+    strtofdv: jax.Array
+    tofdu: jax.Array
+    tofdv: jax.Array
+    disgw3d: jax.Array
+
+
+def ifs_vdfincr(u, v, p_half, dtutofd, dtvtofd, dtuso, dtvso, dtuvdf, dtvvdf, vom, vol,
+                slge, qte, slgevdf, qtevdf, dt, g) -> IFSVDFIncrOutput:
+    """VDFINCR (vdfincr.F90, 49r1): tendency increments, the kinetic-energy
+    dissipation added to s_lg, and the cumulative stress profiles (ILEV = 1)."""
+    dp = p_half[1:] - p_half[:-1]
+    gdph = -dp / g
+    u1, v1 = u + vom * dt, v + vol * dt
+    u2, v2 = u1 + dtuvdf * dt, v1 + dtvvdf * dt
+    u3, v3 = u2 + dtuso * dt, v2 + dtvso * dt
+    vdfdis = 0.5 * (u1 - u2) * (u1 + u2) + 0.5 * (v1 - v2) * (v1 + v2)
+    sodis = 0.5 * (u2 - u3) * (u2 + u3) + 0.5 * (v2 - v3) * (v2 + v3)
+    cum = lambda x: jnp.concatenate([jnp.zeros((1,), x.dtype), jnp.cumsum(x * gdph)])
+    strtofdu, strtofdv = cum(dtutofd), cum(dtvtofd)
+    return IFSVDFIncrOutput(
+        vom=vom + dtuvdf + dtuso, vol=vol + dtvvdf + dtvso,
+        slge=slge + slgevdf + (vdfdis + sodis) / dt, qte=qte + qtevdf,
+        slgewodis=slge + slgevdf,
+        vdis=jnp.sum(vdfdis * dp) / (g * dt), vdisg=jnp.sum(sodis * dp) / (g * dt),
+        strtu=cum(dtuvdf), strtv=cum(dtvvdf), strsou=cum(dtuso), strsov=cum(dtvso),
+        strtofdu=strtofdu, strtofdv=strtofdv, tofdu=strtofdu[-1], tofdv=strtofdv[-1],
+        disgw3d=sodis)
+
+
+class IFSVDFDifcOutput(NamedTuple):
+    tenc: jax.Array        # (KLEV, KTRAC) total tracer tendency
+    cflxt: jax.Array       # (KTRAC) surface flux incl. dry deposition
+
+
+def ifs_vdfdifc(c, tenc, p_half, cfh, wd, cflx, dt, g, ktop: int) -> IFSVDFDifcOutput:
+    """VDFDIFC (vdfdifc.F90, 49r1): implicit tracer diffusion (ZALF = 1) with
+    surface flux ``cflx`` and dry-deposition velocity ``wd`` per tracer;
+    ``c``/``tenc`` are (KLEV, KTRAC)."""
+    c, tenc = jnp.asarray(c), jnp.asarray(tenc)
+    s = ktop - 1
+    zqdp = g * dt / (p_half[s + 1:] - p_half[s:-1])
+    cf = cfh[s:]
+    prev = jnp.concatenate([jnp.zeros((1,), cf.dtype), cf[:-1]])
+    a = -prev * zqdp
+    cc = (-cf * zqdp).at[-1].set(0.0)
+    b0 = (1.0 + (prev + cf) * zqdp).at[-1].set(1.0 + prev[-1] * zqdp[-1])
+
+    def one(ci, ti, wdi, fi):
+        b = b0.at[-1].add(wdi * zqdp[-1])
+        y = (ci[s:] + dt * ti[s:]).at[-1].add(-zqdp[-1] * fi)
+        x = thomas_solve(a, b, cc, y)
+        return ti.at[s:].set((x - ci[s:]) / dt), fi + wdi * x[-1]
+
+    t_out, fl = jax.vmap(one, in_axes=(1, 1, 0, 0), out_axes=(1, 0))(c, tenc, wd, cflx)
+    return IFSVDFDifcOutput(t_out, fl)

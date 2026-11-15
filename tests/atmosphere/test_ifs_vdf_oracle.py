@@ -35,7 +35,8 @@ from legoesm import constants
 from legoesm.atmosphere.physics._ifs_thermo import ifs_thermo
 from legoesm.atmosphere.physics.turbulence.ifs_vdf import (
     IFSTOFDConfig, IFSVDFConfig, hard_config, hard_tofd_config, ifs_hghtn_parcel, ifs_slgs,
-    ifs_tofd_coefficient, ifs_vdfdpbl, ifs_vdfexcu, ifs_vdfhghtn,
+    ifs_tofd_coefficient, ifs_vdfdifc, ifs_vdfdifh_flux, ifs_vdfdifm, ifs_vdfdpbl, ifs_vdfexcu,
+    ifs_vdfhghtn, ifs_vdfincr,
 )
 from legoesm.atmosphere.physics.convection._ifs_cumastrn import njkt_levels
 
@@ -526,3 +527,125 @@ def test_hghtn_gradients_at_default(fix, name):
     gr = jax.grad(f, argnums=(0, 1))(*args)
     assert all(np.all(np.isfinite(np.asarray(x))) for x in gr)
     assert any(np.any(np.asarray(x) != 0.0) for x in gr)
+
+
+# ---------------------------------------------------------------- stage 2
+# Inputs as the driver read them (make_fixture.py, vote 7 D5); the solvers are
+# fed the oracle's own stage-1 intermediates (CFM/CFH/TOFDC/MFLX/SLGUH/QTUH).
+_KTOP = 1
+_DIFM = ("udif", "vdif", "dtutofd", "dtvtofd", "dtuso", "dtvso", "dtuvdf", "dtvvdf")
+_DIFH = ("tdif", "qdif", "slgevdf", "qtevdf", "tskh", "tskte")
+_INCR = ("vom", "vol", "slge", "qte", "slgewodis", "vdis", "vdisg", "strtu", "strtv", "strsou",
+         "strsov", "strtofdu", "strtofdv", "tofdu", "tofdv", "disgw3d")
+
+
+def _s2_inputs(fix, arm, g, i):
+    th = _th(fix, arm, g)
+    a = lambda k: _a(fix, g, k)[i]
+    o = lambda k: jnp.asarray(fix[f"{arm}_{g}_{k}"][i])
+    tile, sfc2 = a("tile"), a("sfc2")
+    T, q, ql = a("T"), a("q"), a("ql")
+    return dict(
+        th=th, u=a("u"), v=a("v"), p_half=a("p_half"), T=T, qe=a("qe"),
+        cfm=o("cfm").at[-1].set(sfc2[3]), cfh=o("cfh"), tofdc=o("tofdc"), mflx=o("mflx"),
+        sluh=o("slguh"), qtuh=o("qtuh"), sobeta=a("sobeta"), soteu=a("soteu"), sotev=a("sotev"),
+        frti=tile[:8], cfhti=tile[8:16], tskti=tile[16:], evapsnw=sfc2[0], ucurr=sfc2[1],
+        vcurr=sfc2[2], cflx=sfc2[4:6], wd=sfc2[6:8], c=jnp.stack([a("c1"), a("c2")], axis=1),
+        slg=a("geo_full") + T * th.RCPD - th.RLVTT * ql, qt=q + ql, shf=a("shf"), lhf=a("lhf"),
+        dt=float(fix["ptsphy"]))
+
+
+@jax.jit   # one compile per grid: eager op-by-op runs exhaust XLA's CPU code space
+def _s2_run(x):
+    th, dt, g = x["th"], x["dt"], x["th"].RG
+    z = jnp.zeros_like(x["u"])
+    m = ifs_vdfdifm(x["u"], x["v"], x["p_half"], x["cfm"], x["tofdc"], x["soteu"], x["sotev"],
+                    x["sobeta"], z, z, x["ucurr"], x["vcurr"], dt, g, _KTOP)
+    h = ifs_vdfdifh_flux(th, x["slg"], x["qt"], x["p_half"], x["cfh"], x["mflx"], x["sluh"],
+                         x["qtuh"], z, x["qe"], x["frti"], x["evapsnw"], x["tskti"], x["cfhti"],
+                         x["shf"], x["lhf"], dt, _KTOP)
+    n = ifs_vdfincr(x["u"], x["v"], x["p_half"], m.dtutofd, m.dtvtofd, m.dtuso, m.dtvso,
+                    m.dtuvdf, m.dtvvdf, z, z, z, x["qe"], h.slgevdf, h.qtevdf, dt, g)
+    c = ifs_vdfdifc(x["c"], jnp.zeros_like(x["c"]), x["p_half"], x["cfh"], x["wd"], x["cflx"],
+                    dt, g, _KTOP)
+    return m, h, n, c
+
+
+@pytest.mark.parametrize("arm", _ARMS)
+@pytest.mark.parametrize("g", _GROUPS)
+def test_solvers_match_openifs(fix, arm, g):
+    n = len(fix[f"{g}_names"])
+    res = [_s2_run(_s2_inputs(fix, arm, g, i)) for i in range(n)]
+    for j, names in ((0, _DIFM), (1, _DIFH), (2, _INCR)):
+        for k in names:
+            ours = np.stack([np.asarray(getattr(r[j], k)) for r in res])
+            e = _err(ours, fix[f"{arm}_{g}_{k}"])
+            assert e <= _TOL, (k, e)
+    tenc = np.stack([np.asarray(r[3].tenc) for r in res])
+    for t in (0, 1):
+        assert _err(tenc[:, :, t], fix[f"{arm}_{g}_tenc{t + 1}"]) <= _TOL, t
+    assert _err(np.stack([np.asarray(r[3].cflxt) for r in res]), fix[f"{arm}_{g}_cflxt"]) <= _TOL
+
+
+_EPS = float(np.finfo(np.float64).eps)
+
+
+def _close(w, tend, flux, new, old, dt):
+    """sum(dp/g tend) == flux to the fp64 round-off of differencing the column
+    state over dt: 100 eps sum(dp/g (|new| + |old|)) / dt (vote 8; measured
+    worst 45 eps on the fixture)."""
+    lhs = float(np.sum(w * np.asarray(tend)))
+    scale = float(np.sum(w * (np.abs(np.asarray(new)) + np.abs(np.asarray(old))))) / dt
+    assert abs(lhs - flux) <= 100.0 * _EPS * scale, (lhs, flux, scale)
+
+
+@pytest.mark.parametrize("g", _GROUPS)
+def test_solver_budgets_close(fix, g):
+    """Per column: water, s_lg (+ VDFINCR dissipation), momentum and tracer
+    budgets close against the surface fluxes."""
+    for i in range(len(fix[f"{g}_names"])):
+        x = _s2_inputs(fix, "N", g, i)
+        m, h, n, c = _s2_run(x)
+        dt, th = x["dt"], x["th"]
+        w = np.asarray(x["p_half"][1:] - x["p_half"][:-1]) / th.RG
+        shf = -float(x["shf"])
+        # water: -J_q - snow-tile evaporation
+        _close(w, h.qtevdf, -float(x["lhf"]) / th.RLVTT - float(x["frti"][6] * x["evapsnw"]),
+               h.qdif, x["qt"], dt)
+        # s_lg: -SHF; with VDFINCR the dissipated kinetic energy returns as heat
+        _close(w, h.slgevdf, shf, h.tdif, x["slg"], dt)
+        u1, v1 = np.asarray(x["u"]), np.asarray(x["v"])
+        u3 = u1 + dt * np.asarray(m.dtuvdf + m.dtuso)
+        v3 = v1 + dt * np.asarray(m.dtvvdf + m.dtvso)
+        dke = 0.5 * (u3 ** 2 + v3 ** 2 - u1 ** 2 - v1 ** 2) / dt
+        ke = 0.5 * (u1 ** 2 + v1 ** 2 + u3 ** 2 + v3 ** 2)
+        _close(w, np.asarray(n.slge) + dke, shf, np.asarray(h.tdif) + ke, x["slg"], dt)
+        # momentum: turbulent stress at the surface against the current (TOFD drag apart)
+        for d, t, cur, sol, old in ((m.dtuvdf, m.dtutofd, x["ucurr"], m.udif, x["u"]),
+                                    (m.dtvvdf, m.dtvtofd, x["vcurr"], m.vdif, x["v"])):
+            _close(w, d - t, -float(x["cfm"][-1] * (sol[-1] - cur)), sol, old, dt)
+        # tracers: -(flux + dry deposition)
+        for t in (0, 1):
+            _close(w, c.tenc[:, t], -float(c.cflxt[t]), x["c"][:, t] + dt * c.tenc[:, t],
+                   x["c"][:, t], dt)
+
+
+def test_solver_gradients(fix):
+    """Reverse-mode check_grads through each solver (thomas_solve's adjoint is
+    reverse-only)."""
+    x = _s2_inputs(fix, "N", "L32", 0)
+    kw = dict(order=1, modes=("rev",), atol=1e-6, rtol=1e-5, eps=1e-6)
+    z = jnp.zeros_like(x["u"])
+    check_grads(lambda u, cfm: jnp.sum(ifs_vdfdifm(
+        u, x["v"], x["p_half"], cfm, x["tofdc"], x["soteu"], x["sotev"], x["sobeta"], z, z,
+        x["ucurr"], x["vcurr"], x["dt"], x["th"].RG, _KTOP).udif ** 2), (x["u"], x["cfm"]), **kw)
+    check_grads(lambda slg, cfh, shf: jnp.sum(jnp.concatenate(ifs_vdfdifh_flux(
+        x["th"], slg, x["qt"], x["p_half"], cfh, x["mflx"], x["sluh"], x["qtuh"], z, x["qe"],
+        x["frti"], x["evapsnw"], x["tskti"], x["cfhti"], shf, x["lhf"], x["dt"], _KTOP)) ** 2),
+        (x["slg"], x["cfh"].at[-1].set(0.0), x["shf"]), **kw)
+    check_grads(lambda cc, cfh: jnp.sum(ifs_vdfdifc(
+        cc, jnp.zeros_like(cc), x["p_half"], cfh, x["wd"], x["cflx"], x["dt"], x["th"].RG,
+        _KTOP).tenc ** 2), (x["c"], x["cfh"].at[-1].set(0.0)), **kw)
+    check_grads(lambda d: jnp.sum(ifs_vdfincr(
+        x["u"], x["v"], x["p_half"], z, z, z, z, d, z, z, z, z, x["qe"], z, z, x["dt"],
+        x["th"].RG).slge ** 2), (z + 1e-3,), **kw)

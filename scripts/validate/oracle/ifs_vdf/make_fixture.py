@@ -18,11 +18,15 @@ L_v (CONST_MODE 1).  The fixture stores the inputs exactly as the driver read
 them (text round trip) and, per arm, every VDFDPBL/VDFHGHTN/VDFEXCU output the
 driver prints.
 """
+import re
 import subprocess
 import sys
 from pathlib import Path
 
+import jax
 import numpy as np
+
+jax.config.update("jax_enable_x64", True)   # SYN saturation in fp64 whatever the env
 
 from legoesm import constants as C
 from legoesm.thermo import saturation_mixing_ratio
@@ -72,7 +76,25 @@ ARRAYS = ("p_half", "p_full", "geo_full", "geo_half", "T", "q", "u", "v", "ql", 
           "hrsw", "qe")
 SCAL = ("kmfl", "khfl", "kqfl", "pblh", "zinv", "zcldbase", "eis", "khvfl")
 INTS = ("kinv", "kcbase", "kctop", "kpbltype", "njkt2", "njkt6")
-ROWS = ("ri", "mflx", "slguh", "qtuh", "uuh", "vuh", "cfm", "cfh", "kh", "km", "tofdc")
+ROWS = ("ri", "mflx", "slguh", "qtuh", "uuh", "vuh", "cfm", "cfh", "kh", "km", "tofdc",
+        "udif", "vdif", "dtutofd", "dtvtofd", "dtuso", "dtvso", "dtuvdf", "dtvvdf",
+        "tdif", "qdif", "slgevdf", "qtevdf", "tskh", "tskte",
+        "vom", "vol", "slge", "qte", "slgewodis")
+DIS = ("vdis", "vdisg", "tofdu", "tofdv")
+ROWS2 = ("strtu", "strtv", "strsou", "strsov", "strtofdu", "strtofdv", "disgw3d", "tenc1", "tenc2")
+# Stage-2 test inputs (vote 7 D5): 8 IFS tiles; sea = open water 0.9 + ice 0.1, land =
+# wet skin, low veg, high veg, shaded snow, bare soil; surface heat exchange per tile
+# 0.01 kg m-2 s-1 x (1 - 0.05 (tile-1)); skin 0.1 K x tile above the lowest level;
+# snow evaporation -1e-5 kg m-2 s-1 over land; ocean current (0.2, -0.1) m/s over sea;
+# SSO drag 1e-4 s-1 below 2 km with SOTE = -beta u; surface drag coefficient
+# CFM(KLEV) = rho u*^2 / max(|U_KLEV|, 0.1) (SURFEXCDRIVER is not ported); two tracers.
+FRTI_SEA = (0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+FRTI_LAND = (0.0, 0.0, 0.1, 0.4, 0.0, 0.3, 0.1, 0.1)
+CFHTI = tuple(0.01 * (1.0 - 0.05 * k) for k in range(8))
+SO_BETA, SO_ZMAX = 1.0e-4, 2000.0
+CURRENT = (0.2, -0.1)
+EVAPSNW = -1.0e-5
+CFLX, WD = (1.0e-8, -1.0e-9), (0.0, 0.01)
 
 
 def _r(x):
@@ -113,7 +135,8 @@ def synthetic(base):
 
 def inputs(d):
     ncol = d["T"].shape[0]
-    x = {k: [] for k in ("names", "land", "shf", "lhf", "ustar", "z0m", "sigflt") + ARRAYS}
+    x = {k: [] for k in ("names", "land", "shf", "lhf", "ustar", "z0m", "sigflt") + ARRAYS
+         + ("tile", "sfc2", "sobeta", "soteu", "sotev", "c1", "c2")}
     for i in range(ncol):
         for j, (shf, lhf, ust, wf) in enumerate(SURF):
             x["names"].append(f"{d['names'][i]}_sfc{j}")
@@ -131,6 +154,20 @@ def inputs(d):
                        qe=d["dq_adv"][i] + d["dq_other"][i])
             for k in ARRAYS:
                 x[k].append(_r(src[k]))
+            sea = land <= 0.5
+            T_, q_, u_, v_ = src["T"], src["q"], src["u"], src["v"]
+            K = T_.size
+            rho = src["p_half"][-1] / (C.R_d * T_[-1] * (1.0 + (C.R_v / C.R_d - 1.0) * q_[-1]))
+            beta = np.where(src["geo_full"] / C.g < SO_ZMAX, SO_BETA, 0.0)
+            x["tile"].append(_r(np.r_[FRTI_SEA if sea else FRTI_LAND, CFHTI,
+                                      T_[-1] + 0.1 * (1.0 + np.arange(8))]))
+            x["sfc2"].append(_r(np.r_[0.0 if sea else EVAPSNW, CURRENT if sea else (0.0, 0.0),
+                                      rho * ust ** 2 / max(np.hypot(u_[-1], v_[-1]), 0.1), CFLX, WD]))
+            x["sobeta"].append(_r(beta))
+            x["soteu"].append(_r(-beta * u_))
+            x["sotev"].append(_r(-beta * v_))
+            x["c1"].append(_r(1.0e-6 * (1.0 + 0.1 * np.sin(np.arange(K)))))
+            x["c2"].append(_r(0.01 * q_))
     return {k: np.array(v) for k, v in x.items()}
 
 
@@ -143,7 +180,16 @@ def oracle_text(x):
         out.append(fmt([x[k][i] for k in ("land", "shf", "lhf", "ustar", "z0m", "sigflt")]))
         for k in ARRAYS:
             out.append(fmt(x[k][i]))
+        out.append("TILE " + fmt(x["tile"][i]))
+        out.append("SFC2 " + fmt(x["sfc2"][i]))
+        for k in ("sobeta", "soteu", "sotev", "c1", "c2"):
+            out.append(fmt(x[k][i]))
     return "\n".join(out) + "\n"
+
+
+def _f(tok):
+    """Fortran ES output drops the 'E' for 3-digit exponents ('1.2-166')."""
+    return float(re.sub(r"(\d)([+-]\d{3})$", r"\1E\2", tok))
 
 
 def parse(path):
@@ -152,11 +198,17 @@ def parse(path):
     res, k = {}, 1
     for _ in range(n):
         name = lines[k].split()[1]
-        sc = [float(v) for v in lines[k + 1].split()[1:]]
+        sc = [_f(v) for v in lines[k + 1].split()[1:]]
         it = [int(v) for v in lines[k + 2].split()[1:]]
-        rows = [np.array([float(v) for v in lines[k + 3 + j].split()]) for j in range(len(ROWS))]
-        res[name] = {**dict(zip(SCAL, sc)), **dict(zip(INTS, it)), **dict(zip(ROWS, rows))}
-        k += 3 + len(ROWS)
+        row = lambda j: np.array([_f(v) for v in lines[k + j].split()])
+        rows = [row(3 + j) for j in range(len(ROWS))]
+        j = 3 + len(ROWS)
+        dis = [_f(v) for v in lines[k + j].split()[1:]]
+        rows2 = [row(j + 1 + m) for m in range(len(ROWS2))]
+        cflxt = np.array([_f(v) for v in lines[k + j + 1 + len(ROWS2)].split()[1:]])
+        res[name] = {**dict(zip(SCAL, sc)), **dict(zip(INTS, it)), **dict(zip(ROWS, rows)),
+                     **dict(zip(DIS, dis)), **dict(zip(ROWS2, rows2)), "cflxt": cflxt}
+        k += 3 + len(ROWS) + 2 + len(ROWS2)
     return res
 
 
@@ -187,7 +239,7 @@ def main(cols, build, outp):
         for arm in ARMS:
             res, log = run(build, x, arm, f"{arm}_{g}")
             fx[f"{arm}_{g}_log"] = np.array(log)
-            for f in SCAL + INTS + ROWS:
+            for f in SCAL + INTS + ROWS + DIS + ROWS2 + ("cflxt",):
                 fx[f"{arm}_{g}_{f}"] = np.array([res[nm][f] for nm in x["names"]])
     np.savez_compressed(outp, **fx)
     print("FIXTURE_OK", outp)
