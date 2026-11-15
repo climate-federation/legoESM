@@ -81,6 +81,7 @@ from legoesm.grids.vertical import (
     compute_geopotential_hybrid,
     vertical_advection,
     vertical_advection_hybrid,
+    vertical_advection_hybrid_sb,
     compute_pressure_velocity,
     compute_mass_flux_from_cumsum,
     compute_sigma_dot_from_cumsum,
@@ -445,14 +446,18 @@ def cgrid_to_hydrostatic(
 
 def latlon_tracer_tendencies(tracers, u, v, u_c, v_c, dp_u, dp_v, div_dp, dp,
                               vert_vel, p_s, grid, sigma_coord, config, _hybrid):
-    """Tracer tendencies (mass-weighted flux form); ``vert_vel`` is the hybrid
-    mass flux or the sigma-dot."""
+    """Tracer tendencies with conservative Simmons-Burridge hybrid transport.
+
+    ``vert_vel`` is the hybrid interface mass flux (positive downward) or
+    the sigma-dot.
+    """
 
     # --- 12. Tracer transport (mass-weighted flux form) ---
     # Uses the same mass fluxes (dp_u*u, dp_v*v) as the continuity
     # equation for discrete consistency.  The mixing-ratio tendency is:
-    #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp - vert_advection
-    # This conserves ∫ q·dp·dA (tracer mass) to machine precision.
+    #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp + vertical_tendency
+    # With PPM horizontal transport, the hybrid flux form closes the
+    # instantaneous product rule for ∫ q·dp·dA (tracer mass) to round-off.
     #
     # All tracers share the same u, v, dp, div_dp.  Stack along a trailing
     # tracer axis and fold it into the level axis so the operator's
@@ -504,21 +509,13 @@ def latlon_tracer_tendencies(tracers, u, v, u_c, v_c, dp_u, dp_v, div_dp, dp,
                 u_c[..., None] * dq_dx_stack + v_c[..., None] * dq_dy_stack
             )
 
-        # Vertical advection batched across all tracers — both
-        # ``vertical_advection_hybrid`` and ``vertical_advection``
-        # operate on ``axis=-1`` for the vertical, so move the tracer
-        # axis to leading where the velocity-independent shared work
-        # (``F_full`` / ``p_full`` for hybrid, ``F`` for sigma) is
-        # computed *once* and the upwind ``jnp.diff(field, axis=-1)``
-        # broadcasts across the (n_tracers,) axis.  Replaces a Python
-        # for-loop that called the operator ``n_tracers`` times.
-        # Same leading-axis batching as the (u, v) vertical advection
-        # in CD-grid CE/PE (Loop 142).
+        # Both vertical operators use axis=-1 and broadcast their shared
+        # mass fluxes across the leading tracer axis.
         tracers_lead = jnp.moveaxis(
             tracer_stack, -1, 0,
         )  # (n_tracers, n_lat, n_lon, nlev)
         if _hybrid:
-            vert_q_lead = vertical_advection_hybrid(
+            vert_q_lead = vertical_advection_hybrid_sb(
                 tracers_lead, vert_vel, p_s, sigma_coord,
             )
         else:

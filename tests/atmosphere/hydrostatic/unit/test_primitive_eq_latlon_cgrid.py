@@ -1002,6 +1002,98 @@ class TestTracerMassConservation:
         return float(jnp.sum(column.astype(jnp.float64)
                              * grid.area.astype(jnp.float64))) / constants.g
 
+    @pytest.fixture
+    def hybrid_flow(self):
+        """The existing hybrid conservation fixture after its 20-step spin-up."""
+        from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+        from legoesm.grids.vertical import make_cam6_l32_levels
+
+        previous = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            grid = create_latlon_grid(
+                n_lat=32, radius=constants.R_earth, omega=constants.Omega)
+            hybrid = make_cam6_l32_levels()
+            config = CGridLatLonPrimitiveEquationConfig(fix_mass=True, A_h=1e5)
+            model = CGridLatLonPrimitiveEquationModel(grid, hybrid, config)
+            state = hydrostatic_to_cgrid(held_suarez_init_latlon(grid, hybrid), grid)
+            target_mass = model.compute_mass(state)
+            for _ in range(20):
+                state = model.step(state, 30.0, target_mass=target_mass)
+            yield grid, hybrid, config, state
+        finally:
+            set_policy(previous)
+
+    @pytest.mark.skipif(not jax.config.read("jax_enable_x64"), reason="requires fp64")
+    def test_hybrid_tracer_paired_conservation(self, hybrid_flow, monkeypatch):
+        """The instantaneous tracer/continuity product rule closes globally."""
+        import numpy as np
+        from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as pe
+        from legoesm.grids.vertical import dp_from_hybrid
+
+        grid, hybrid, config, state = hybrid_flow
+        nlev = hybrid.n_levels
+        # Same vertical water profile and modulation as the van Leer column test.
+        rng = np.random.default_rng(0)
+        q = jnp.asarray(1.0e-2 * np.exp(-0.5 * ((np.arange(nlev) - 24) / 3.0) ** 2)
+                        * (1.0 + 0.3 * rng.random(state.T.shape)))
+        captured = {}
+        original = pe.latlon_tracer_tendencies
+
+        def observe(*args, **kwargs):
+            captured["F"] = args[9]
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(pe, "latlon_tracer_tendencies", observe)
+        _, _, _, dps, dq = cgrid_latlon_pe_tendencies(
+            state._replace(tracers={"q_v": q}), grid, hybrid, config,
+            vertical_form="legacy")
+        dp = dp_from_hybrid(hybrid, state.p_s)
+        F = captured["F"]
+        scale = jnp.sum(jnp.abs(F[..., 1:-1] * jnp.diff(q, axis=-1)), axis=-1)
+        assert float(jnp.max(jnp.abs(F))) > 0.0
+        assert float(jnp.sum(scale * grid.area)) > 0.0
+        column = jnp.sum(dp * dq["q_v"] + q * hybrid.dB * dps[..., None], axis=-1)
+        residual = float(jnp.abs(jnp.sum(column * grid.area)) / jnp.sum(scale * grid.area))
+        print(f"hybrid paired normalized residual = {residual:.17e}")
+        assert residual < 1e-12
+
+    @pytest.mark.skipif(not jax.config.read("jax_enable_x64"), reason="requires fp64")
+    def test_hybrid_constant_tracer_preserved(self, hybrid_flow):
+        """Regression guard: constant tracers remain constant with either operator."""
+        grid, hybrid, config, state = hybrid_flow
+        q = jnp.full_like(state.T, 7.3e-3)
+        _, _, _, _, dq = cgrid_latlon_pe_tendencies(
+            state._replace(tracers={"q_v": q}), grid, hybrid, config,
+            vertical_form="legacy")
+        error = float(jnp.max(jnp.abs(dq["q_v"])))
+        print(f"hybrid constant tracer max tendency = {error:.17e}")
+        assert error < 1e-18
+
+    @pytest.mark.skipif(not jax.config.read("jax_enable_x64"), reason="requires fp64")
+    def test_hybrid_tracer_check_grads(self):
+        """The smooth centered operator supports second-order derivatives."""
+        import numpy as np
+        from jax.test_util import check_grads
+        from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+        from tests.atmosphere.hydrostatic.unit.test_primitive_eq_generic import _ll_fn
+
+        previous = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            f, args = _ll_fn("hybrid", form="legacy")
+            eager = f(*args)[-1]
+            w = jnp.asarray(np.random.RandomState(0).randn(*eager.shape))
+            scale = [float(jnp.abs(a).max()) for a in args]
+
+            def scalar(*z):
+                return jnp.sum(w * f(*(zi * c for zi, c in zip(z, scale)))[-1])
+
+            check_grads(scalar, tuple(a / c for a, c in zip(args, scale)),
+                        order=2, modes=("rev",), eps=1e-6)
+        finally:
+            set_policy(previous)
+
     def test_tracer_mass_conserved_50_steps(self, grid, sigma):
         """A Gaussian tracer bump should conserve ∫ q·dp·dA over 50 steps."""
         config = CGridLatLonPrimitiveEquationConfig(
