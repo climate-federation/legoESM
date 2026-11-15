@@ -368,3 +368,5 @@ def test_scale_check_runs_before_the_regrid(tmp_path, monkeypatch):
     monkeypatch.setattr(topo, "_regrid_to_target", boom)
     with pytest.raises(ValueError, match="block_deg"):
         load_subgrid_orography(create_cubed_sphere(48), path, scale_check="error")
+    with pytest.raises(ValueError):                 # an unknown mode is still refused
+        load_subgrid_orography(create_cubed_sphere(48), path, scale_check=None)

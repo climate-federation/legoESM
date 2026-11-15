@@ -1227,7 +1227,11 @@ def load_subgrid_orography(
     return jnp.asarray(np.maximum(sso_grid, 0.0))
 
 
-def _read_regridded_sso_field(grid, path, var_name, *, aliases=False, scale_check=None):
+_NO_SCALE_CHECK = object()   # tensor components: the check runs once, on SSO_STDH
+
+
+def _read_regridded_sso_field(grid, path, var_name, *, aliases=False,
+                              scale_check=_NO_SCALE_CHECK):
     """One subgrid-orography field from ``path``, NaN -> 0, sampled bilinearly
     onto ``grid`` (unclipped: tensor components are signed).  With
     ``scale_check`` the #1712 scale check runs before regridding.  The legacy
@@ -1272,7 +1276,7 @@ def _read_regridded_sso_field(grid, path, var_name, *, aliases=False, scale_chec
     finally:
         ds.close()
 
-    if scale_check is not None:
+    if scale_check is not _NO_SCALE_CHECK:
         # #1712: does this file's scale decomposition belong to THIS grid?
         _, _, _, _grid_spacing_deg = _target_grid_degrees(grid)
         _check_sso_scale_decomposition(
