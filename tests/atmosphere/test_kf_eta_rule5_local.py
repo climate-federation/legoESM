@@ -882,6 +882,7 @@ def _frac(fx, i, T, up, lo_sm, mid_sm):
     hi, _ = _sweep_column(fx, i, T + 1e-4 * up, lo_sm)
     mid, _ = _sweep_column(fx, i, T, mid_sm)
     jump = float(jnp.max(jnp.abs(hi["dtdt"] - lo["dtdt"])))
+    assert jump > 0.0, "the +-1e-4 K states do not straddle the top flip"
     return float(jnp.max(jnp.abs(mid["dtdt"] - lo["dtdt"]))) / jump, lo, hi
 
 
