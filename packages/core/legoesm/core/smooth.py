@@ -10,6 +10,7 @@ A static ``sharpness = math.inf`` returns the discontinuous function exactly
 (``x >= 0``, ``jnp.maximum``, ...): the hard limit of a RULE 5 smooth switch.
 """
 
+import functools
 import math
 import numbers
 
@@ -105,17 +106,62 @@ def pnorm_smooth_min(a: jax.Array, b: jax.Array, p: float, eps: float) -> jax.Ar
     elementwise min/max); the ratio is 0 where ``hi <= eps`` (where-before-
     divide, AD-safe), so there the result is the exact ``min`` and it jumps
     (from ``eps`` to ``2^(-1/p)*eps`` where ``a = b``) as ``hi`` crosses
-    ``eps``: callers zero inputs ``<= eps`` first (both GWD callers zero
-    stresses ``<= taumin = eps``).  Above ``eps``: scale-free (unlike the
+    ``eps``: callers with ``eps > 0`` zero inputs ``<= eps`` first (the GWD
+    stress caps zero stresses ``<= taumin = eps``).  Above ``eps``: scale-free (unlike the
     additive :func:`smooth_min`), C-infinity, never above ``min(a, b)``,
     equal to ``2^(-1/p)*a`` where ``a = b``; exact ``min`` as ``p -> inf``.
-    Used for the GWD stress cap ``min(taudmp, tausat)`` (Lindzen, McFarlane).
+    Used for the GWD stress cap ``min(taudmp, tausat)`` (Lindzen, McFarlane,
+    E3SM-CAM), the GWD tendency limiters and the launch Froude cap; callers
+    with ``eps = 0`` pass non-negative inputs (``hi = 0`` then means both are
+    0 and the exact 0 is returned with finite gradients).  ``lo``/``hi`` are
+    picked with one ``where`` (not ``minimum``/``maximum``, whose AD splits
+    the tangent at a tie and zeroes the curvature there); the formula is
+    symmetric, so either pick is the same smooth function.
     """
-    lo = jnp.minimum(a, b)
-    hi = jnp.maximum(a, b)
+    first = a <= b
+    return _pnorm_lo_hi(jnp.where(first, a, b), jnp.where(first, b, a), p, eps)
+
+
+@jax.custom_jvp
+def _div(x, y):
+    return x / y
+
+
+@_div.defjvp
+def _div_jvp(primals, tangents):
+    # d(x/y) = (dx - (x/y) dy) / y through _div again, so forward-mode AD never
+    # forms y^-2 (it underflows to 0 for tiny y in fp32: 0*inf = NaN).  Measured
+    # in fp32 at y ~ 1e-20: first and second derivatives (fwd-fwd, fwd-rev,
+    # rev-rev) finite; third-order reverse is NaN (transposition divides plainly).
+    x, y = primals
+    dx, dy = tangents
+    out = _div(x, y)
+    return out, _div(dx - out * dy, y)
+
+
+def _pnorm_ratio(lo, hi, eps):
     ok = hi > eps
-    ratio = jnp.where(ok, lo / jnp.where(ok, hi, jnp.ones_like(hi)), jnp.zeros_like(lo))
+    return ok, jnp.where(ok, _div(lo, jnp.where(ok, hi, jnp.ones_like(hi))), jnp.zeros_like(lo))
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(2, 3))
+def _pnorm_lo_hi(lo, hi, p, eps):
+    _, ratio = _pnorm_ratio(lo, hi, eps)
     return lo * (1.0 + ratio ** p) ** (-1.0 / p)
+
+
+@_pnorm_lo_hi.defjvp
+def _pnorm_lo_hi_jvp(p, eps, primals, tangents):
+    # Analytic, bounded partials: d/dlo = (1+r^p)^(-1/p-1), d/dhi =
+    # r^(p+1) (1+r^p)^(-1/p-1) with r = lo/hi <= 1.  Differentiating lo/hi
+    # instead overflows hi^-2 in fp32 for tiny hi (NaN gradient at lo = 0).
+    lo, hi = primals
+    dlo, dhi = tangents
+    ok, ratio = _pnorm_ratio(lo, hi, eps)
+    rp = ratio ** p
+    w = (1.0 + rp) ** (-1.0 / p - 1.0)
+    out = lo * (1.0 + rp) ** (-1.0 / p)
+    return out, w * dlo + jnp.where(ok, ratio ** (p + 1.0) * w, 0.0) * dhi
 
 
 def smooth_clamp(
@@ -185,6 +231,19 @@ def smooth_min_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     return jnp.where(y <= 0.0, a, jnp.where(y >= width, b + 0.0 * a, inside))
 
 
+def validate_smoothing_width(name: str, w) -> None:
+    """One legal range for a RULE 5 width that selects a static branch: 0 (the
+    reference's hard switch) or in [sqrt(t), 1/sqrt(t)], t = finfo(float32).tiny
+    (below it the ramp's slope overflows float32 and the gradient turns NaN).
+    Booleans and non-numbers are refused (a YAML ``false`` would read as 0)."""
+    lo = math.sqrt(float(jnp.finfo(jnp.float32).tiny))
+    if (isinstance(w, bool) or not isinstance(w, (int, float))
+            or not (w == 0 or lo <= w <= 1.0 / lo)):
+        raise ValueError(
+            f"{name} must be 0 (the reference's hard switch) or in "
+            f"[{lo:.3e}, {1.0 / lo:.3e}]; got {w!r}.")
+
+
 def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
     if width == 0:
@@ -231,6 +290,22 @@ def straight_through(hard: jax.Array, soft: jax.Array) -> jax.Array:
 @straight_through.defjvp
 def _straight_through_jvp(primals, tangents):
     return primals[0], tangents[1]
+
+
+def sqrt_c1(x: jax.Array, width: float) -> jax.Array:
+    """C1 ``sqrt(max(x, 0))``: exactly 0 for ``x <= 0``, exactly ``sqrt(x)`` for
+    ``x >= width``, and the monotone cubic Hermite bridge
+    ``sqrt(width) * (2.5 t**2 - 1.5 t**3)``, ``t = x/width``, between (value and
+    slope match at both joins).  ``width = 0`` is the hard ``sqrt(max(x, 0))``
+    with a zero gradient at ``x <= 0``.  The square root is evaluated only on
+    ``x >= width`` (masked argument), so its gradient stays finite."""
+    if width == 0:
+        ok = x > 0.0
+        return jnp.where(ok, jnp.sqrt(jnp.where(ok, x, 1.0)), 0.0)
+    t = jnp.clip(x / width, 0.0, 1.0)
+    bridge = math.sqrt(width) * t * t * (2.5 - 1.5 * t)
+    above = x >= width
+    return jnp.where(above, jnp.sqrt(jnp.where(above, x, width)), bridge)
 
 
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:

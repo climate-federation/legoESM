@@ -214,49 +214,7 @@ def run_timeloop(step_fn, state, dt, n_steps, check_fn, scalar_fn,
 # ---------------------------------------------------------------------------
 
 def run_cubed_sphere(days, nlev, vertical_coord):
-    """Run Held-Suarez + RRTMGP on cubed-sphere C36."""
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig)
-    from legoesm.atmosphere.forcing.idealized.held_suarez import (
-        held_suarez_init, held_suarez_forcing)
-    from legoesm.core.operators import global_integral
-
-    n = 36
-    grid = create_cubed_sphere(n)
-    sigma = _create_vertical(nlev, vertical_coord)
-    dt = 200.0
-
-    config = CDGridPrimitiveEquationConfig(
-        hyperdiff_coeff=_hyperdiff_cube(n),
-        hyperdiff_ps_coeff=_hyperdiff_cube(n),
-        div_damp_coeff=_div_damp_cube(n),
-        A_h=_laplacian_visc_cube(n),
-        use_conservation_fixer=True, fix_mass=True)
-    model = CDGridPrimitiveEquationModel(grid, sigma, config)
-    state = held_suarez_init(grid, sigma)
-
-    physics_fn = _make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing)
-
-    def step_fn(s, dt_):
-        return model.step_with_physics(s, dt_, physics_fn)
-
-    def check_fn(s):
-        return (check_finite({"T": s.T.data, "u": s.u.data}),
-                float(jnp.max(jnp.abs(s.u.data))))
-
-    def scalar_fn(s):
-        return {
-            "mass": float(global_integral(s.p_s, grid)),
-            "max_wind": float(jnp.max(jnp.sqrt(s.u.data**2 + s.v.data**2))),
-            "mean_T": float(jnp.mean(s.T.data)),
-        }
-
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(6 * 3600 / dt))  # every 6 hours
-
-    return run_timeloop(step_fn, state, dt, n_steps, check_fn, scalar_fn,
-                        diag_every, label="Cubed-Sphere C36 RRTMGP")
+    raise ValueError("fv3_duo replaces this retired cube atmosphere adapter; no duo equivalent is wired here.")
 
 
 def run_latlon(days, nlev, vertical_coord, sb81_omega_conversion=True):

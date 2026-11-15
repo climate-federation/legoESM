@@ -160,7 +160,7 @@ def test_all_wired_schemes_build_with_registry_key():
     # registry scheme_key that has scalar tunable params.
     m = _tuner()
     for scheme in ("smagorinsky", "louis", "holtslag_boville",
-                   "clubb_lite", "edmf", "clubb"):
+                   "edmf", "clubb"):
         base, key = m._base_turbulence(scheme)
         assert base.scheme == scheme
         assert getattr(base, scheme) is not None

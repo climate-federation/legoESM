@@ -34,17 +34,17 @@ CONFIG = SoilHydraulicsConfig()  # VG loam defaults
 class Test3a_VGRoundtrip:
     def test_psi_theta_roundtrip(self):
         psi_vals = -jnp.logspace(-2, 3, 50)
-        theta = van_genuchten_theta(psi_vals, CONFIG)
-        psi_recovered = van_genuchten_psi(theta, CONFIG)
+        theta = van_genuchten_theta(psi_vals, CONFIG, 0.0)
+        psi_recovered = van_genuchten_psi(theta, CONFIG, 0.0)
         rel_err = jnp.abs(psi_recovered - psi_vals) / jnp.abs(psi_vals)
         assert jnp.all(rel_err < 1e-4)
 
     def test_saturation_at_zero(self):
-        theta_0 = van_genuchten_theta(jnp.array([0.0]), CONFIG)
+        theta_0 = van_genuchten_theta(jnp.array([0.0]), CONFIG, 0.0)
         assert jnp.allclose(theta_0, CONFIG.theta_sat, atol=1e-10)
 
     def test_dry_limit(self):
-        theta_dry = van_genuchten_theta(jnp.array([-1e6]), CONFIG)
+        theta_dry = van_genuchten_theta(jnp.array([-1e6]), CONFIG, 0.0)
         assert float(theta_dry[0]) < CONFIG.theta_r + 0.01
 
 
@@ -56,13 +56,13 @@ class Test3a_VGRoundtrip:
 class Test3b_VGMonotonicity:
     def test_theta_monotone(self):
         psi_vals = jnp.linspace(-100.0, 0.0, 200)
-        theta = van_genuchten_theta(psi_vals, CONFIG)
+        theta = van_genuchten_theta(psi_vals, CONFIG, 0.0)
         dtheta = jnp.diff(theta)
         assert jnp.all(dtheta >= -1e-12)
 
     def test_K_monotone(self):
         psi_vals = jnp.linspace(-100.0, -0.01, 200)
-        K = van_genuchten_K(psi_vals, CONFIG)
+        K = van_genuchten_K(psi_vals, CONFIG, 0.0)
         dK = jnp.diff(K)
         assert jnp.all(dK >= -1e-15)
 
@@ -75,18 +75,18 @@ class Test3b_VGMonotonicity:
 class Test3c_VGBounds:
     def test_theta_bounded(self):
         psi_vals = jnp.linspace(-1000.0, 0.0, 500)
-        theta = van_genuchten_theta(psi_vals, CONFIG)
+        theta = van_genuchten_theta(psi_vals, CONFIG, 0.0)
         assert jnp.all(theta >= CONFIG.theta_r - 1e-10)
         assert jnp.all(theta <= CONFIG.theta_sat + 1e-10)
 
     def test_K_bounded(self):
         psi_vals = jnp.linspace(-1000.0, 0.0, 500)
-        K = van_genuchten_K(psi_vals, CONFIG)
+        K = van_genuchten_K(psi_vals, CONFIG, 0.0)
         assert jnp.all(K >= 0.0)
         assert jnp.all(K <= CONFIG.K_sat + 1e-15)
 
     def test_K_at_saturation(self):
-        K_sat_calc = van_genuchten_K(jnp.array([0.0]), CONFIG)
+        K_sat_calc = van_genuchten_K(jnp.array([0.0]), CONFIG, 0.0)
         assert jnp.allclose(K_sat_calc, CONFIG.K_sat, rtol=1e-6)
 
 
@@ -98,11 +98,11 @@ class Test3c_VGBounds:
 class Test3d_VGCapacity:
     def test_C_positive_unsaturated(self):
         psi_vals = jnp.linspace(-100.0, -0.01, 200)
-        C = van_genuchten_C(psi_vals, CONFIG)
+        C = van_genuchten_C(psi_vals, CONFIG, 0.0)
         assert jnp.all(C > 0.0)
 
     def test_C_zero_at_saturation(self):
-        C_sat = van_genuchten_C(jnp.array([0.0]), CONFIG)
+        C_sat = van_genuchten_C(jnp.array([0.0]), CONFIG, 0.0)
         assert jnp.allclose(C_sat, 0.0, atol=1e-10)
 
 
@@ -264,7 +264,7 @@ class TestMoistureCapacityDispatch:
 class Test3i_CrossModel:
     def test_all_agree_at_saturation(self):
         psi_0 = jnp.array([0.0])
-        theta_vg = van_genuchten_theta(psi_0, CONFIG)
+        theta_vg = van_genuchten_theta(psi_0, CONFIG, 0.0)
         theta_pdi = pdi_theta(psi_0, CONFIG)
         theta_lu = lu_theta(psi_0, CONFIG)
         theta_bc = brooks_corey_theta(jnp.array([CONFIG.psi_b]), CONFIG)
@@ -340,7 +340,7 @@ class Test3l_VanGenuchtenADSafety:
         cfg = SoilHydraulicsConfig(retention_curve="van_genuchten")
         # dry -> exact saturation (psi=0) -> ponded (psi>0)
         psi = jnp.array([-10.0, -1.0, -1e-3, -1e-9, 0.0, 1e-3])
-        g = jax.grad(lambda p: jnp.sum(van_genuchten_K(p, cfg)))(psi)
+        g = jax.grad(lambda p: jnp.sum(van_genuchten_K(p, cfg, 0.0)))(psi)
         assert jnp.all(jnp.isfinite(g)), f"van_genuchten_K grad not finite: {g}"
         # Public dispatch path (what richards' K_top exercises on raw psi).
         g2 = jax.grad(
@@ -351,7 +351,7 @@ class Test3l_VanGenuchtenADSafety:
     def test_vg_C_grad_finite_at_saturation(self):
         cfg = SoilHydraulicsConfig(retention_curve="van_genuchten")
         psi = jnp.array([-10.0, -1.0, -1e-3, -1e-9, 0.0])
-        g = jax.grad(lambda p: jnp.sum(van_genuchten_C(p, cfg)))(psi)
+        g = jax.grad(lambda p: jnp.sum(van_genuchten_C(p, cfg, 0.0)))(psi)
         assert jnp.all(jnp.isfinite(g)), f"van_genuchten_C grad not finite: {g}"
         # Public dispatch path (moisture_capacity, richards Picard iteration).
         g2 = jax.grad(

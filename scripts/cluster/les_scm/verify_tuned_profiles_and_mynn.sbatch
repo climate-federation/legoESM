@@ -51,7 +51,7 @@ done
 echo "=============== 3. control: every scheme on cbl ==============="
 # If mynn25 is alone in dying here, the defect is in mynn25. If it has company,
 # the defect is in the cbl arm.
-for s in smagorinsky louis tke mynn25 clubb_lite clubb holtslag_boville ysu edmf; do
+for s in smagorinsky louis tke mynn25 clubb holtslag_boville ysu edmf; do
   echo "--------- $s / cbl ---------"
   $PY scripts/validate/diag_scheme_blowup.py --case cbl --scheme "$s" \
       --nlev 48 --steps 2000 --print-every 400 2>&1 | tail -12

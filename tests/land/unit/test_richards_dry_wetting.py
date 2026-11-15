@@ -30,7 +30,7 @@ from legoesm.land.richards import RichardsConfig, solve_richards
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import (
     SoilHydraulicsConfig,
-    air_entry_psi,
+    saturation_head,
     moisture_capacity,
     psi_from_theta,
     theta_from_psi,
@@ -119,7 +119,7 @@ def test_flood_on_saturated_column_splits_rain_into_runoff_and_drainage():
     column passes K_sat*dt to drainage, the rest ponds and runs off, and the
     water table's pressure survives.  The old solver reported 97 mm of runoff
     AND 19 mm of drainage from 100 mm of rain (+16 mm created)."""
-    psi_hs = jnp.asarray(air_entry_psi(_CH) + np.asarray(_GRID.z_node))[None, :]
+    psi_hs = jnp.asarray(saturation_head(_CH) + np.asarray(_GRID.z_node))[None, :]
     theta_hs = theta_from_psi(psi_hs, _CH)
     _, theta1, psi1, runoff, drain, pond, budget = _step(
         _CH, theta_hs, psi_hs, 100.0, pond0_m=0.05)
@@ -138,7 +138,7 @@ def test_falling_water_table_desaturates_without_overshoot():
     theta0 = np.array([[0.30, 0.30, 0.30, 0.32, 0.34, 0.36, 0.40, 0.426, 0.426, 0.426]])
     psi0 = np.array(psi_from_theta(jnp.asarray(theta0), _CH))
     zn = np.asarray(_GRID.z_node)
-    psi0[0, 7:] = air_entry_psi(_CH) + (zn[7:] - zn[7]) + 0.05
+    psi0[0, 7:] = saturation_head(_CH) + (zn[7:] - zn[7]) + 0.05
     theta0 = np.asarray(theta_from_psi(jnp.asarray(psi0), _CH))
     _, theta1, psi1, runoff, drain, _, budget = _step(
         _CH, jnp.asarray(theta0), jnp.asarray(psi0), 1.0)
@@ -150,7 +150,7 @@ def test_falling_water_table_desaturates_without_overshoot():
 
 
 def test_hydrostatic_saturated_column_with_zero_flux_bottom_stays_put():
-    psi_hs = jnp.asarray(air_entry_psi(_CH) + np.asarray(_GRID.z_node))[None, :]
+    psi_hs = jnp.asarray(saturation_head(_CH) + np.asarray(_GRID.z_node))[None, :]
     theta_hs = theta_from_psi(psi_hs, _CH)
     out, theta1, psi1, runoff, drain, pond, budget = _step(
         _CH, theta_hs, psi_hs, 0.0, bottom_bc="zero_flux")
@@ -188,7 +188,7 @@ def test_theta_psi_are_inverses_through_saturation(hyd):
     elastic branch (which starts at air entry), so psi(theta) inverts it, and
     the capacity is its derivative there: the solver's linear system and the
     state then agree on how much water a saturated layer stores."""
-    psi_b = float(air_entry_psi(hyd))
+    psi_b = float(saturation_head(hyd))
     psi = jnp.array([-50.0, -5.0, -1.0, psi_b - 1e-3, psi_b + 1e-3, 0.5, 3.0])
     theta = theta_from_psi(psi, hyd)
     assert np.all(np.diff(np.asarray(theta)) > 0.0)

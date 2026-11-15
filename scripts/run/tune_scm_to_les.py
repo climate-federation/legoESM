@@ -271,7 +271,6 @@ def tune_closure_ad(
 def _cbl_scheme_table():
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     from legoesm.atmosphere.physics.turbulence.config import (
-        CLUBBLiteConfig,
         HoltslagBovilleConfig,
         LouisConfig,
         MYNN25Config,
@@ -291,7 +290,6 @@ def _cbl_scheme_table():
         "louis": (LouisConfig, "atm.turb.LouisConfig"),                     # local
         "holtslag_boville": (HoltslagBovilleConfig, "atm.turb.HoltslagBovilleConfig"),  # nonlocal
         "mynn25": (MYNN25Config, "atm.turb.MYNN25Config"),                 # 1.5-order (MYNN)
-        "clubb_lite": (CLUBBLiteConfig, "atm.turb.CLUBBLiteConfig"),       # higher-order
         "edmf": (TurbulentEDMFConfig, "atm.turb.TurbulentEDMFConfig"),     # mass-flux
         "clubb": (CLUBBConfig, "atm.turb.CLUBBParams"),                    # full higher-order
     }

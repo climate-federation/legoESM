@@ -52,6 +52,7 @@ __param_spec__ = {
     "BechtoldConfig": {
         "scheme_key": "atm.conv.BechtoldConfig",
         "excluded": {
+            "snow_refill_width_kg_m2_s": "numerics: RULE 5 width of the sub-cloud snow refill max(-snow_left, 0) (cuflxn.F90:493-495; 0 = the oracle's hard switch)",
             "ifs_shallow_supply_width_w_m2": "smoothing width of the faithful-chain max(ZDHPBL, 0) shallow supply ramp (RULE 5 differentiable form), not a tunable",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
@@ -229,6 +230,31 @@ __param_spec__ = {
             "cape_or_sharpness": "numerics: sigmoid sharpness on the CAPE-OR fallback trigger",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
             "cape_threshold": "default 0 = disabled/off (KF gates on the trigger function, not CAPE)",
+            "wrf_lut_knot_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_tpmix_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_condload_sqrt_width_m2s2": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wtw_floor_width_m2s2": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_prof5_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_lcl_gather_width_m": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_l5_gather_width_pa": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_q0_clip_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_q0_floor_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_tlcl_cap_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wklcl_cap_width_m": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_dtlcl_onset_width_ms": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wlcl_onset_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wlcl_cap_width_ms": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_rad_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_entrain_select_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_entrain_tiny_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_eqf_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_ee2_floor_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_frc_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_freeze_onset_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_abe_pos_width_m": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_chmin_clip_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_top_stop_wtw_width_m2s2": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_top_stop_umf_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "cloud_depth_min": "trigger: fixed shallow/deep cloud-depth split (not sigmoid-tunable, fix via config)",
             "cloud_depth_sharpness": "numerics: sigmoid sharpness on the deep/shallow blend",
             "cloud_top_detrainment_fraction": "fixed KF-Eta cloud-top detrainment-level fraction (structural detrainment profile, not a tunable closure rate)",
@@ -323,6 +349,7 @@ __param_spec__ = {
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
             "detrain_phase_width_K": "numerics: RULE 5 smoothing width of the detrainment liquid/ice ramp corners (0 = CAM hard switch)",
             "detrain_number_width_kgkg_s": "numerics: RULE 5 smoothing width of max(0, dlf) in the detrainment number source (0 = CAM hard switch)",
+            "trigger_width_J_kg": "numerics: RULE 5 width of the cape > capelmt deep-convection trigger ramp (0 = CAM hard switch)",
         },
         "params": {
             "c0_lnd": {"units": "1/m", "bounds": (0.002, 0.02), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM zmconv_c0_lnd namelist span (0.002-0.0075 across configurations)", "shape": None},
@@ -755,6 +782,10 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # source [kg/kg/s].  0 = CAM's hard switch.
     detrain_phase_width_K: float = 0.1
     detrain_number_width_kgkg_s: float = 1.0e-12
+    # RULE 5 width [J/kg] of the deep-convection trigger cape > capelmt: the
+    # closure mass flux is scaled by a C1 ramp from 0 at capelmt to 1 at
+    # capelmt + width (_zm_cam6 module docstring).  0 = CAM's hard switch.
+    trigger_width_J_kg: float = 10.0
 
 
 class KainFritschConfig(NamedTuple):
@@ -971,6 +1002,34 @@ class KainFritschConfig(NamedTuple):
     # KF-Eta port (kain_fritsch_wrf.py), OPT-IN and NOT RULE 5 compliant (its
     # traced-state switches are hard; #2280).  Any other value raises.
     variant: str = "smooth"
+    # RULE 5 widths of the variant="wrf_kfeta" port (#2280; forms and values
+    # voted author/GLM/codex); 0 = the oracle's hard switch.  Read only by that
+    # variant (kain_fritsch_wrf.py -> _kf_eta.KFSmoothing).
+    wrf_lut_knot_width: float = 0.25  # table index units, 0 or (0, 1]
+    wrf_tpmix_width_kgkg: float = 1.0e-6
+    wrf_condload_sqrt_width_m2s2: float = 1.0e-4
+    wrf_wtw_floor_width_m2s2: float = 1.0e-4
+    wrf_prof5_width: float = 0.05
+    wrf_lcl_gather_width_m: float = 50.0
+    wrf_l5_gather_width_pa: float = 500.0
+    wrf_q0_clip_width_kgkg: float = 1.0e-6
+    wrf_q0_floor_width_kgkg: float = 1.0e-7
+    wrf_tlcl_cap_width_k: float = 0.1
+    wrf_wklcl_cap_width_m: float = 100.0
+    wrf_dtlcl_onset_width_ms: float = 1.0e-4
+    wrf_wlcl_onset_width_k: float = 0.01
+    wrf_wlcl_cap_width_ms: float = 0.1
+    wrf_rad_clip_width: float = 0.05
+    wrf_entrain_select_width_k: float = 0.1
+    wrf_entrain_tiny_width_k: float = 1.0e-3
+    wrf_eqf_clip_width: float = 0.02
+    wrf_ee2_floor_width: float = 0.02
+    wrf_frc_clip_width: float = 0.02
+    wrf_freeze_onset_width_k: float = 0.5
+    wrf_abe_pos_width_m: float = 0.01
+    wrf_chmin_clip_width_k: float = 1.0
+    wrf_top_stop_wtw_width_m2s2: float = 2.0e-4
+    wrf_top_stop_umf_width_kgs: float = 2.0
 
 
 class EmanuelConfig(NamedTuple):
@@ -1506,6 +1565,12 @@ class BechtoldConfig(NamedTuple):
     # _ifs_cumastrn.cumastrn_column (shallow closure).
     ifs_shallow_nosupply: str = "zero"
     ifs_shallow_supply_width_w_m2: float = 1.0  # W/m2, 0 = hard max
+    # Faithful chain only (RULE 5, #2281): False (default) = the elementwise
+    # switches (so far the closure; ascent and fluxes follow) take their C1 smooth
+    # forms (_ifs_smooth.IfsSmooth, width 0.01 x a scale of the switched
+    # quantity); True = OpenIFS's exact switches.  The level/flag structure is
+    # hard either way (KNOWN DIFFERENCE in _ifs_cumastrn).
+    ifs_hard_switches: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.
@@ -1562,6 +1627,10 @@ class BechtoldConfig(NamedTuple):
     # Default True since 2026-07-17 (RCE A/B: T-drift 0.052 -> 0.026 K/day;
     # AMIP stable).
     use_ifs_snow_melt: bool = True
+    # RULE 5 width [kg/m^2/s] of the snow refill in that march (cuflxn.F90:
+    # 493-495, an overdrawn snow flux topped up from the rain): a one-sided C1
+    # positive part; 0 = the oracle's hard switch.  Default voted 2026-11-10.
+    snow_refill_width_kg_m2_s: float = 1.0e-8
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

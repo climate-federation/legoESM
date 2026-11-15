@@ -454,19 +454,12 @@ def init_physics_state(
     # --- GWD wave action spectrum ---
     # Seeded for prognostic_spectral AND any '+'-composite that contains it
     # (issue #834) — both thread the wave-action spectrum through the carry.
+    # ifs_wms: retained u/v tendencies + time since the last recompute.
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
-        gwd_carries_spectrum,
+        gwd_carry_seed,
     )
-    gwd_cfg = physics_config.gravity_wave_drag
-    if gwd_carries_spectrum(gwd_cfg.scheme):
-        sc = gwd_cfg.prognostic_spectral
-        gwd_spectrum = jnp.full(
-            (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux,
-            dtype=dtype,
-        )
-    else:
-        # Minimal allocation — zero-element trailing dims avoid wasted memory.
-        gwd_spectrum = jnp.zeros((ncol, 1, 1), dtype=dtype)
+    gwd_spectrum = gwd_carry_seed(physics_config.gravity_wave_drag, ncol, nlev,
+                                  dtype=dtype)
 
     # --- Master JAX PRNG key (advanced once per outer step) ---
     # Imported lazily so the module load path does not pull in the

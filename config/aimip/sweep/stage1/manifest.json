@@ -8,7 +8,7 @@
   },
   "baseline_yaml": "config/aimip/sweep/stage1/baseline_classical_t21_rrtmgp.yaml",
   "results_dir": "results/aimip_classical_sweep_stage1",
-  "n_combos": 25,
+  "n_combos": 24,
   "combos": [
     {
       "name": "combo_baseline",
@@ -153,18 +153,6 @@
         "aimip_microphysics": "sundqvist"
       },
       "suite": "config/aimip/sweep/stage1/combo_turb_smagorinsky/suite.yaml"
-    },
-    {
-      "name": "combo_turb_clubb_lite",
-      "dim": "aimip_turbulence",
-      "scheme": "clubb_lite",
-      "overrides": {
-        "aimip_convection": "tiedtke",
-        "aimip_turbulence": "clubb_lite",
-        "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "sundqvist"
-      },
-      "suite": "config/aimip/sweep/stage1/combo_turb_clubb_lite/suite.yaml"
     },
     {
       "name": "combo_turb_holtslag_boville",

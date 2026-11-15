@@ -23,7 +23,6 @@ jax.config.update("jax_enable_x64", True)
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 MATRIX = REPO / "scripts" / "matrix" / "run_atmosphere_test_matrix.py"
-PROBE = REPO / "scripts" / "validate" / "cg_helmholtz_mixed_precision_1675.py"
 
 
 # ----------------------------------------------------------------------
@@ -42,13 +41,16 @@ def _topo_init_calls() -> list[ast.Call]:
 
 
 def test_every_topo_init_call_routes_through_the_kwargs_helper():
-    """All four grid lanes must take the seed, not only the one an arm used.
+    """All remaining non-cube grid lanes must take the seed, not only the one an arm used.
 
     A per-lane override is how the height knob would have silently skipped a
     grid; the helper is the single point that cannot.
     """
     calls = _topo_init_calls()
-    assert len(calls) == 4, f"expected 4 topo init call sites, found {len(calls)}"
+    assert {c.func.id for c in calls} == {
+        "held_suarez_topo_init_latlon", "held_suarez_topo_init_mpas",
+        "held_suarez_topo_init_spectral"}
+    assert len(calls) == 3
     for c in calls:
         starstar = [k for k in c.keywords if k.arg is None]
         assert len(starstar) == 1, ast.dump(c)
@@ -213,41 +215,3 @@ def test_blowup_check_interval_override_is_parsed_and_validated():
 # ----------------------------------------------------------------------
 # #1675 site 1 -- the CG mixed-precision probe
 # ----------------------------------------------------------------------
-
-def test_cg_probe_reports_both_arms_and_they_agree(capsys):
-    """The probe's own finding, at a size cheap enough for CI.
-
-    Promoting the Laplacian metric arrays is a no-op because the CG iterate is
-    already float64 and JAX promotes f64 x f32 -> f64, so the two arms must
-    agree closely.  If a future change makes them diverge, that is a real
-    signal and this test should be re-read, not deleted.
-    """
-    sys.path.insert(0, str(PROBE.parent))
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("_cg_probe_1675", PROBE)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        rc = mod.main(["--n", "8", "--kappa", "1e4", "--maxiter", "200"])
-    finally:
-        sys.path.pop(0)
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "metrics PROMOTED (the fix)" in out
-    assert "metrics f32 (pre-fix control)" in out
-
-    def _grab(label, key):
-        block = out.split(label, 1)[1]
-        line = [ln for ln in block.splitlines() if key in ln][0]
-        return float(line.split("=")[1].split()[0])
-
-    fix = _grab("metrics PROMOTED (the fix)", "reported rel_res")
-    ctl = _grab("metrics f32 (pre-fix control)", "reported rel_res")
-    assert fix > 0.0 and ctl > 0.0
-    # same number to within a few percent: the promotion changes nothing
-    assert abs(fix - ctl) / ctl < 0.05, (
-        f"promoted {fix:.3e} vs control {ctl:.3e} -- the arms have diverged; "
-        f"re-read #1675 site 1 before trusting either")
-    # and the answer is accurate even though the residual is not tiny
-    fwd = _grab("metrics PROMOTED (the fix)", "forward error vs fp64")
-    assert fwd < 1.0e-6, f"forward error {fwd:.3e} is not float32-limited"

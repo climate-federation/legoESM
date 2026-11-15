@@ -16,8 +16,8 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-    CGridLatLonHydrostaticState, CGridLatLonPrimitiveEquationConfig,
-    cgrid_latlon_hydrostatic_tendencies)
+    CGridLatLonHydrostaticState, CGridLatLonPrimitiveEquationConfig)
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
 from legoesm.grids.latlon import create_latlon_grid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts/matrix"))
@@ -32,10 +32,11 @@ dt = 200.0
 dp = jnp.diff(sigma.pressure_at_half(st.p_s), axis=-1)
 dp_ref = jnp.diff(sigma.pressure_at_half(jnp.full_like(st.p_s, constants.p_ref)), axis=-1)
 A = jnp.sum(grid.area)
-off = cgrid_latlon_hydrostatic_tendencies(st, grid, sigma, CGridLatLonPrimitiveEquationConfig(), dt=dt)[2]
+_cfg0 = CGridLatLonPrimitiveEquationConfig()
+off = cgrid_latlon_pe_tendencies(st, grid, sigma, _cfg0, dt=dt, vertical_form=_cfg0.vertical_form)[2]
 for label, frac in (("capped (production)", 0.25), ("cap lifted", 1e30)):
     cfg = CGridLatLonPrimitiveEquationConfig(nu_del4=nu, nu_del4_cfl_frac=frac)
-    d4 = cgrid_latlon_hydrostatic_tendencies(st, grid, sigma, cfg, dt=dt)[2] - off
+    d4 = cgrid_latlon_pe_tendencies(st, grid, sigma, cfg, dt=dt, vertical_form=cfg.vertical_form)[2] - off
     lm = float(jnp.sum(jnp.sum(constants.c_pd * d4 * dp, -1) / constants.g * grid.area) / A)
     ll = float(jnp.sum(jnp.sum(constants.c_pd * d4 * dp_ref, -1) / constants.g * grid.area) / A)
     print(f"{label:22s} L_mass {lm:+.4e} W/m2   L_level(ref layer mass) {ll:+.4e} W/m2")

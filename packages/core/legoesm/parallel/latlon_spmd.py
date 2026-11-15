@@ -33,12 +33,12 @@ from jax.sharding import PartitionSpec as P
 from legoesm.parallel.shard_map_compat import shard_map
 
 # Reference halo depth for the topology chooser's pole-fold cost model: the
-# widest production halo (the PPM halo-2 exchange).  The chooser's score is
+# widest production halo (the PPM halo-3 exchange).  The chooser's score is
 # otherwise normalized per unit halo depth; the partner fold's h-quadratic
 # E/W-extension strips are charged at this reference so the constant stays
 # honest without threading the runtime halo through the chooser (see
 # choose_latlon_2d_topology).
-_FOLD_REF_HALO = 2
+_FOLD_REF_HALO = 3
 
 
 def _resolve_halo_nocomm(env_value: str) -> str:
@@ -515,8 +515,9 @@ def partner_pole_fold_window(edge, lon_index, mesh, halo: int, negate: bool):
 
     ``w >= 2*halo`` required (the E/W extension strips must fit the
     neighbour tile); ``min_tile`` in :func:`choose_latlon_2d_topology`
-    already enforces ``w >= 2`` and production halos are ``<= 2``, so the
-    guard only fires on hand-built degenerate meshes.
+    enforces only ``w >= 3`` while the PPM halo is 3, so tiles with
+    ``3 <= w < 6`` take the gather fold (``make_latlon_2d_pad_body``) or are
+    refused by the packed 2-D body.
 
     AD-safe: ``ppermute`` is self-transposing; the window ``take`` is a
     gather with a defined transpose (scatter-add).
@@ -646,7 +647,7 @@ def make_latlon_2d_pad_body(mesh, halo: int = 1, negate: bool = False):
       columns of its lat-EXTENDED block carry its own lat-ghost rows, which
       originate on the receiver's DIAGONAL tile.  No explicit corner message:
       every consumer stencil (vertex circulation, 4-pt Coriolis averages,
-      PPM halo-2 reconstruction) reads corners only through this two-pass
+      PPM halo-3 reconstruction) reads corners only through this two-pass
       composition, matching the serial pad's corner values exactly (both are
       pure data movement — no arithmetic, so bit-equal).
     * poles: the PHYSICAL pole tiles (``axis_index("lat") == 0`` / ``p_lat-1``)
@@ -1452,7 +1453,7 @@ def choose_latlon_2d_topology(
     n_lat: int,
     n_lon: int,
     *,
-    min_tile: int = 2,
+    min_tile: int = 3,
     band_preference: float = 1.25,
 ) -> tuple[int, int]:
     """Choose the ``(p_lat, p_lon)`` factorization of ``n_devices`` for the
@@ -1465,7 +1466,7 @@ def choose_latlon_2d_topology(
       * ``p_lat * p_lon == n_devices``;
       * ``n_lat % p_lat == 0`` and ``n_lon % p_lon == 0``;
       * every SPLIT dimension keeps at least ``min_tile`` cells per tile
-        (default 2 — the widest production halo, the PPM ``halo=2``
+        (default 3 — the widest production halo, the PPM ``halo=3``
         exchange, moves edge blocks of that depth in ONE ppermute hop).
 
     Score = the per-tile RECEIVED communication volume of one full halo pad,
@@ -1490,7 +1491,7 @@ def choose_latlon_2d_topology(
           2h-wide E/W extension strips (``2 * h*2h``) plus the antipodal
           ``(h, w+4h)`` block; both folds / 2h -> ``w + 8*_FOLD_REF_HALO``
           with the ``h``-quadratic strip terms charged at the widest
-          production halo (``_FOLD_REF_HALO = 2``, the PPM halo-2
+          production halo (``_FOLD_REF_HALO = 3``, the PPM halo-3
           exchange — the score is otherwise halo-normalized).  NO cap at
           the gather cost: the runtime never falls back to the gather on
           this branch, so capping would undercharge forced-partner
@@ -1536,7 +1537,7 @@ def choose_latlon_2d_topology(
                 # the partner path whenever (even p_lon, w >= 2h), even
                 # where the gather would move fewer bytes (codex r1 #3 —
                 # a min() cap undercharged forced-partner candidates and
-                # could select a worse topology).  h_ref=2 is the widest
+                # could select a worse topology).  h_ref=3 is the widest
                 # production halo; smaller runtime halos cost less.
                 fold = float(w + 8 * _FOLD_REF_HALO)
             else:

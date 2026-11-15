@@ -8,6 +8,9 @@ from legoesm.land.clm_surface_map import (
 from legoesm.land.surface_params import CLM5_PFT_NAMES, LandSurfaceParams
 
 
+_HEAD = -0.02   # the production air-entry head [m]
+
+
 def _write_synthetic_surfdata(path, nlat=6, nlon=8, n_nat=15, nlev=10):
     import xarray as xr
     lat = np.linspace(85, -85, nlat); lon = np.linspace(0, 315, nlon)
@@ -36,7 +39,7 @@ def test_load_and_provider(tmp_path):
     # target grid (coarser, shifted) -> exercises nearest-neighbour regrid
     lat = np.linspace(80, -80, 5); lon = np.linspace(10, 300, 6)
     LO, LA = np.meshgrid(lon, lat)
-    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    m = load_clm_surface(f, LA.ravel(), LO.ravel(), vg_air_entry_m=_HEAD)
     ncol = 30
 
     fr = np.asarray(m["pft_fractions"])
@@ -66,7 +69,7 @@ def test_crop_fraction_goes_to_crop_slot(tmp_path):
     _write_synthetic_surfdata(f)
     lat = np.linspace(80, -80, 4); lon = np.linspace(0, 270, 4)
     LO, LA = np.meshgrid(lon, lat)
-    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    m = load_clm_surface(f, LA.ravel(), LO.ravel(), vg_air_entry_m=_HEAD)
     fr = np.asarray(m["pft_fractions"])
     i_crop = CLM5_PFT_NAMES.index("crop_c3")
     assert np.all(fr[:, i_crop] > 0.0)                    # 10% crop everywhere
@@ -81,7 +84,7 @@ def test_glacier_raises_albedo(tmp_path):
     _write_synthetic_surfdata(f)
     lat = np.linspace(85, -85, 8); lon = np.linspace(0, 315, 8)
     LO, LA = np.meshgrid(lon, lat)
-    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    m = load_clm_surface(f, LA.ravel(), LO.ravel(), vg_air_entry_m=_HEAD)
     p = CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
                                 m["glacier_frac"])()
     fg = np.asarray(m["glacier_frac"]); alb = np.asarray(p.albedo_veg)
@@ -101,7 +104,7 @@ def test_tuned_variant_selection(tmp_path):
     _write_synthetic_surfdata(f)
     lat = np.linspace(85, -85, 8); lon = np.linspace(0, 315, 8)
     LO, LA = np.meshgrid(lon, lat)
-    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    m = load_clm_surface(f, LA.ravel(), LO.ravel(), vg_air_entry_m=_HEAD)
     args = (m["pft_fractions"], m["theta_wp"], m["theta_fc"], m["glacier_frac"])
     slab = CLMSurfaceParamProvider(*args, variant="slab")()
     mult = CLMSurfaceParamProvider(*args, variant="multilayer")()
@@ -133,7 +136,7 @@ def test_multilayer_extended_bake(tmp_path):
     _write_synthetic_surfdata(f)
     lat = np.linspace(80, -80, 5); lon = np.linspace(10, 300, 6)
     LO, LA = np.meshgrid(lon, lat)
-    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    m = load_clm_surface(f, LA.ravel(), LO.ravel(), vg_air_entry_m=_HEAD)
     args = (m["pft_fractions"], m["theta_wp"], m["theta_fc"], m["glacier_frac"])
     slab = CLMSurfaceParamProvider(*args, variant="slab")()
     mult = CLMSurfaceParamProvider(*args, variant="multilayer")()
@@ -162,7 +165,7 @@ def test_clm_multilayer_setup_builds_params_and_config(tmp_path):
     _write_synthetic_surfdata(f)
     lat = np.linspace(70, -70, 4); lon = np.linspace(20, 300, 5)
     LO, LA = np.meshgrid(lon, lat)
-    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    m = load_clm_surface(f, LA.ravel(), LO.ravel(), vg_air_entry_m=_HEAD)
     ncol = LA.size
 
     base = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=6, total_depth=2.5))
@@ -200,7 +203,7 @@ def test_clm_multilayer_setup_preserves_surface_snow_stomata(tmp_path):
     _write_synthetic_surfdata(f)
     lat = np.linspace(70, -70, 4); lon = np.linspace(20, 300, 5)
     LO, LA = np.meshgrid(lon, lat)
-    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    m = load_clm_surface(f, LA.ravel(), LO.ravel(), vg_air_entry_m=_HEAD)
 
     # exactly what _setup_multilayer_land builds: land MOST for the soil SEB
     # (matching the atmospheric land tile) + snow-albedo feedback + Jarvis stomata.
@@ -261,7 +264,7 @@ def test_clm_loader_spatial_lai_crop_split(tmp_path):
     f = str(tmp_path / "lai.nc")
     _write_surfdata_with_lai(f)
     tgt_lat = np.array([0.0, 0.0, 0.0]); tgt_lon = np.array([0.0, 120.0, 240.0])
-    m = load_clm_surface(f, tgt_lat, tgt_lon)
+    m = load_clm_surface(f, tgt_lat, tgt_lon, vg_air_entry_m=_HEAD)
     lai = np.asarray(m["lai"])
     assert lai.shape == (3,)
     assert lai[0] < 1e-6, f"bare cell LAI ~0, got {lai[0]}"
@@ -294,7 +297,7 @@ def test_clm_loader_no_lai_when_climatology_absent(tmp_path):
     _write_synthetic_surfdata(f)                          # no MONTHLY_LAI / PCT_CFT
     lat = np.linspace(80, -80, 4); lon = np.linspace(0, 270, 4)
     LO, LA = np.meshgrid(lon, lat)
-    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    m = load_clm_surface(f, LA.ravel(), LO.ravel(), vg_air_entry_m=_HEAD)
     assert m.get("lai") is None
     prov = CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
                                    m["glacier_frac"])
@@ -390,7 +393,7 @@ def test_canopy_cap_survives_calibration_and_bake(tmp_path):
     lat = np.linspace(70, -70, 4)
     lon = np.linspace(20, 300, 5)
     lon2, lat2 = np.meshgrid(lon, lat)
-    m = load_clm_surface(f, lat2.ravel(), lon2.ravel())
+    m = load_clm_surface(f, lat2.ravel(), lon2.ravel(), vg_air_entry_m=_HEAD)
 
     base = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=6, total_depth=2.5),
@@ -404,3 +407,45 @@ def test_canopy_cap_survives_calibration_and_bake(tmp_path):
         soil_grid=SoilGridConfig(n_layers=6, total_depth=2.5),
         surface_scheme=TwoLeafCanopyConfig()))
     assert clm_multilayer_setup(m, base_config=base60)[1].surface_scheme.max_iters == 60
+
+
+def test_every_loader_call_passes_the_runs_air_entry_head():
+    """The CLM map's soil wilting point / field capacity sit on the run's own
+    retention curve: the loader has no default head, and no production call site
+    substitutes the library default (user 2026-10-18).  0.0 is the classic curve,
+    used deliberately by the slab land, which solves no van Genuchten soil water."""
+    import ast
+    import inspect
+    import pathlib
+    from legoesm.land import clm_surface_map as csm
+    for fn in (csm.load_clm_surface, csm.clm_surface_provider):
+        p = inspect.signature(fn).parameters["vg_air_entry_m"]
+        assert p.default is inspect.Parameter.empty, fn.__name__
+    root = pathlib.Path(__file__).resolve().parents[2]
+    calls = []
+    for sub in ("packages", "src", "scripts"):
+        for f in sorted((root / sub).rglob("*.py")):
+            if "__pycache__" in f.parts or "tmp" in f.relative_to(root).parts[:2]:
+                continue
+            src = f.read_text()
+            if "load_clm_surface" not in src and "clm_surface_provider" not in src:
+                continue
+            for node in ast.walk(ast.parse(src)):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "id", getattr(node.func, "attr", None))
+                if name not in ("load_clm_surface", "clm_surface_provider"):
+                    continue
+                kw = {k.arg: k.value for k in node.keywords}
+                where = f"{f.relative_to(root)}:{node.lineno}"
+                calls.append(where)
+                assert "vg_air_entry_m" in kw, f"{where}: no air-entry head"
+                text = ast.unparse(kw["vg_air_entry_m"])
+                assert "SoilHydraulicsConfig()" not in text and "_field_defaults" not in text, (
+                    f"{where}: falls back to the library default head ({text})")
+                v = kw["vg_air_entry_m"]
+                if isinstance(v, ast.UnaryOp) and isinstance(v.operand, ast.Constant):
+                    v = v.operand                       # -0.02 parses as USub(0.02)
+                if isinstance(v, ast.Constant):
+                    assert v.value == 0.0, f"{where}: hard-coded head {text}"
+    assert len(calls) >= 8, calls     # the scan really found the production call sites

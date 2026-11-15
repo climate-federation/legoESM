@@ -61,7 +61,7 @@ def tracer_horizontal_advection(q, u_edge, mesh):
 
     SHARED, vertical-coordinate-INDEPENDENT kernel: reused by BOTH the sigma
     standalone ``tracer_advection_tendency`` AND the hybrid coupled PE
-    (``primitive_eq_mpas.mpas_hydrostatic_tendencies``), each of which then
+    (``primitive_eq_mpas.mpas_legacy_pe_tendencies``), each of which then
     adds its OWN matching vertical advection (``vertical_advection`` for
     sigma, ``vertical_advection_hybrid_van_leer`` for the hybrid dycore).  Keeping the
     horizontal numerics in one place avoids duplicating the gather +

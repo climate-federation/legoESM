@@ -15,6 +15,7 @@ grid_type: gaussian
 resolution: 31              # T31: n_lat 48 x n_lon 96 (quadratic Gaussian grid), ~417 km at the
                             # equator -- the SAME 48 x 96 columns as the lat-lon-48 deck (C24 class)
 discretization: spectral
+vertical_form: legacy       # preserve this lane; as83 is selected for MPAS only
 column_lane: true           # the spectral dycore is the dynamics operator of the CAM6 column loop
 time_integrator: ssp_rk54   # D5: the self-starting 5-stage SSP-RK (leapfrog refused on this lane);
                             # explicit, no semi-implicit substeps

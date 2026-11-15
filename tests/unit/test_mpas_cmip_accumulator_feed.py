@@ -941,3 +941,31 @@ def test_wap_is_published_and_closes_continuity(mesh):
     ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
     out = dc._spatial_monthly.finalize(min_sample_fraction=0)
     assert "field_3d_wap" in out, sorted(k for k in out if k.startswith("field_3d"))
+
+
+def test_plev19_shared_bracket_is_bit_identical(mesh):
+    dc, sigma_full, _ = _make_collector(mesh)
+    rng = np.random.default_rng(0)
+    n = int(mesh.nCells)
+    p_s = 5.0e4 + 5.0e4 * rng.random(n)
+    br = dc._plev19_bracket(p_s)
+    for _ in range(3):
+        field = rng.standard_normal((n, NLEV))
+        np.testing.assert_array_equal(dc._interp_to_plev19(field, p_s, br),
+                                      dc._interp_to_plev19(field, p_s))
+
+
+def test_feed_computes_the_plev19_bracket_once_per_sample(mesh, monkeypatch):
+    dc, sigma_full, _ = _make_collector(mesh)
+    f = _synthetic_cell_fields(mesh, sigma_full)
+    u_east, v_north = reconstruct_cell_velocity(f["u_edge"], mesh)
+    calls = []
+    orig = dc._plev19_bracket
+    monkeypatch.setattr(dc, "_plev19_bracket",
+                        lambda p_s: calls.append(1) or orig(p_s))
+    dc.feed_cmip_accumulators_native(
+        day=15.0, T=f["T"], p_s=f["p_s"], lat_deg=f["lat_deg"],
+        q_v=f["q_v"], u_east=np.asarray(u_east), v_north=np.asarray(v_north),
+        precip=f["precip"], phis=f["phis"],
+    )
+    assert len(calls) == 1

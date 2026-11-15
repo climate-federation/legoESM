@@ -167,7 +167,11 @@ def _build_surface_scheme(args: argparse.Namespace):
     if name == "simple_seb":
         return SimpleSEBConfig()
     if name == "two_leaf":
-        return TwoLeafCanopyConfig()
+        # A namespace saved before the flag existed carries no value: use the
+        # scheme's own default (codex + GLM vote, author dissenting).
+        return TwoLeafCanopyConfig(solve_group=getattr(
+            args, "land_canopy_solve_group",
+            TwoLeafCanopyConfig._field_defaults["solve_group"])).validate()
     if name == "clm_ml":
         from legoesm.land.canopy.config import CLMMLCanopyConfig
         cfg = CLMMLCanopyConfig()
@@ -730,6 +734,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "upstream design value). num_ml_steps is derived from it, "
                         "so the canopy air budget stays at its design sub-step "
                         "whatever host --dt is used.")
+    p.add_argument("--land-canopy-solve-group", type=int, default=0,
+                   dest="land_canopy_solve_group",
+                   help="Two-leaf canopy: columns per batch of the Newton solve, "
+                        "0 = one batch per GPU (the AMIP production value). "
+                        "Read only with --land-surface-scheme two_leaf.")
     p.add_argument("--output", default="lmip_output",
                    help="Output directory")
     p.add_argument("--checkpoint-days", type=int, default=100,

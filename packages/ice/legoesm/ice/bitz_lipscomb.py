@@ -233,6 +233,9 @@ _T_ICE_FLOOR_C = -100.0
 # C1 (1 - smoothstep_cubic(h_i / width)): all snow at h_i = 0 as NEMO
 # (`icethd_dh.F90:427-440`), none at h_i >= width; 0.0 = NEMO's h_i == 0.
 _FULL_MELT_SNOW_WIDTH_M = 1.0e-3
+# SI3SwitchConfig.relative_width [-] at which the per-fix widths above take
+# their stated values (per_fix = relative_width / this; 0 = NEMO's hard form).
+_PER_FIX_REFERENCE_RELATIVE_WIDTH = 0.01
 
 
 # Compatibility constants for the public functions exposed by the parked
@@ -314,7 +317,7 @@ def _column_widths(switches: SI3SwitchConfig, dt: float = 0.0) -> _ColumnWidths:
     if not (rw >= 0.0 and rw < math.inf):
         raise ValueError(f"SI3SwitchConfig.relative_width must be finite and >= 0, got {rw!r}")
     T = rw * switches.temperature_scale_K
-    return _ColumnWidths(rw / 0.01, T, T * switches.melt_point_scale_K, rw * switches.thickness_scale_m,
+    return _ColumnWidths(rw / _PER_FIX_REFERENCE_RELATIVE_WIDTH, T, T * switches.melt_point_scale_K, rw * switches.thickness_scale_m,
                          rw * switches.salinity_scale, rw * switches.flux_scale_W_m2 * dt)
 
 

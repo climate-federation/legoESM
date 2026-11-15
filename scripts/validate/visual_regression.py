@@ -135,48 +135,7 @@ def hamming(h1, h2) -> int:
 # Field production (reuses the canonical diagnostic harness)
 # ---------------------------------------------------------------------------
 def produce_vwind_field(n_res: int = 8, n_steps: int = 5, dt: float = 600.0):
-    """Run a short Williamson-2 cube SW sim and return (v_cc_field, edge_ratio)."""
-    repo = pathlib.Path(__file__).resolve().parents[2]
-    if str(repo) not in sys.path:
-        sys.path.insert(0, str(repo))
-    import jax.numpy as jnp
-    from tests.williamson_diagnostic import (  # canonical harness — no dup numerics
-        create_cubed_sphere,
-        create_cubed_sphere_cdgrid,
-        cube_edge_artifact_ratio,
-        integrate,
-        williamson2_ic,
-    )
-    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
-        CDGridShallowWaterConfig,
-        CDGridShallowWaterModel,
-    )
-    from legoesm.core.operators_cdgrid import dgrid_to_center_vector
-
-    grid = create_cubed_sphere(n_res)
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    dx_min = float(jnp.min(grid.dx))
-    config = CDGridShallowWaterConfig(
-        A_h=0.0,
-        hyperdiff_coeff=dx_min ** 4 / (86400.0 * 30.0),
-        div_damp=0.0,
-        use_conservation_fixer=True,
-        fix_mass=True,
-    )
-    model = CDGridShallowWaterModel(grid, config)
-    state0 = williamson2_ic(cdgrid)
-    model.set_initial_mass(state0)
-    state, stable = integrate(model, state0, dt, n_steps)
-    if not stable:
-        raise RuntimeError("cube SW sim went unstable — cannot produce a field")
-    _u_cc, v_cc = dgrid_to_center_vector(state.u_d, state.v_d)
-    v = np.asarray(v_cc, dtype=np.float64)
-    # ``v`` is the cube-local cell-centre meridional wind: a deterministic
-    # *regression fingerprint* of the W2 flow (not analytically zero in this
-    # basis). ``edge_ratio`` measures how concentrated grid-scale structure is at
-    # panel boundaries vs the interior — the quantitative proxy for cube imprint.
-    edge_ratio = float(cube_edge_artifact_ratio(np.abs(v), n_res))
-    return v, edge_ratio
+    raise ValueError("fv3_duo has no atmosphere shallow-water visual-regression adapter.")
 
 
 def _generate(n_res: int, n_steps: int, dt: float) -> None:

@@ -827,6 +827,53 @@ def _overlap_matrix(src_edges, tgt_edges, periodic_span=None):
     return _ov(0.0)
 
 
+def _latlon_overlap_weights(src_lat, src_lon, tgt_lat, tgt_lon):
+    """Separable conservative overlap weights between regular lat-lon grids.
+
+    ``(w_lat (n_tgt_lat, n_src_lat), w_lon (n_tgt_lon, n_src_lon))``: latitude uses sin(lat)
+    (true cell-area measure), longitude is periodic.  Edges are clipped to the poles: a
+    pole-centred row extrapolates to +/-90.5, where sin folds back and the cap would get zero
+    width.  Shared by :func:`conservative_regrid_latlon` and
+    :func:`conservative_latlon_regrid_weights`.
+    """
+    def _sin_lat_edges(lat):
+        return np.sin(np.deg2rad(np.clip(_cell_edges(lat), -90.0, 90.0)))
+    w_lat = _overlap_matrix(_sin_lat_edges(src_lat), _sin_lat_edges(tgt_lat))
+    w_lon = _overlap_matrix(_cell_edges(src_lon), _cell_edges(tgt_lon), periodic_span=360.0)
+    return w_lat, w_lon
+
+
+def conservative_latlon_regrid_weights(src_lat, src_lon, tgt_lat, tgt_lon) -> RegridWeights:
+    """First-order conservative lat-lon -> lat-lon remap as sparse :class:`RegridWeights`.
+
+    The same overlap weights as :func:`conservative_regrid_latlon` (not NaN-aware: every source
+    cell is assumed valid), stored in the k-sparse form :func:`regrid_scalar` and the OMIP
+    forcing loaders apply.  ``target_shape = (n_tgt_lat, n_tgt_lon)``.  Inputs are 1-D cell
+    centres [deg]; source index = ``i_lat * n_src_lon + i_lon``.
+    """
+    w_lat, w_lon = _latlon_overlap_weights(src_lat, src_lon, tgt_lat, tgt_lon)
+    n_src_lon = int(np.asarray(src_lon).size)
+
+    def _sparse(w):
+        k = max(int((w > 0).sum(axis=1).max()), 1)
+        idx = np.argsort(-w, axis=1, kind="stable")[:, :k]
+        return idx, np.take_along_axis(w, idx, axis=1)
+
+    ia, wa = _sparse(w_lat)                                   # (n_tl, kl)
+    ib, wb = _sparse(w_lon)                                   # (n_to, ko)
+    idx = ia[:, None, :, None] * n_src_lon + ib[None, :, None, :]
+    w = wa[:, None, :, None] * wb[None, :, None, :]
+    n_t = ia.shape[0] * ib.shape[0]
+    idx = idx.reshape(n_t, -1)
+    w = w.reshape(n_t, -1)
+    tot = w.sum(axis=1, keepdims=True)
+    if (tot <= 0).any():
+        raise ValueError("conservative_latlon_regrid_weights: a target cell overlaps no source")
+    return RegridWeights(src_indices=jnp.asarray(idx), weights=jnp.asarray(w / tot),
+                         target_shape=(ia.shape[0], ib.shape[0]),
+                         src_flat_size=int(np.asarray(src_lat).size) * n_src_lon)
+
+
 def conservative_regrid_latlon(field, src_lat, src_lon, tgt_lat, tgt_lon):
     """First-order **conservative**, NaN-aware regrid between regular lat-lon grids.
 
@@ -850,16 +897,7 @@ def conservative_regrid_latlon(field, src_lat, src_lon, tgt_lat, tgt_lon):
     field = np.asarray(field, dtype=np.float64)
     has_layers = field.ndim == 3
     v = field if has_layers else field[:, :, None]            # (ns_lat, ns_lon, L)
-
-    # Latitude weight uses sin(lat) (true cell-area measure); longitude is periodic.
-    # Edges clipped to the poles: a pole-centred row extrapolates to +/-90.5,
-    # where sin folds back and the cap would get zero width.
-    def _sin_lat_edges(lat):
-        return np.sin(np.deg2rad(np.clip(_cell_edges(lat), -90.0, 90.0)))
-    w_lat = _overlap_matrix(_sin_lat_edges(src_lat),
-                            _sin_lat_edges(tgt_lat))   # (n_tgt_lat, n_src_lat)
-    w_lon = _overlap_matrix(_cell_edges(src_lon), _cell_edges(tgt_lon),
-                            periodic_span=360.0)                        # (n_tgt_lon, n_src_lon)
+    w_lat, w_lon = _latlon_overlap_weights(src_lat, src_lon, tgt_lat, tgt_lon)
 
     valid = np.isfinite(v).astype(np.float64)
     fv = np.where(valid > 0, v, 0.0)

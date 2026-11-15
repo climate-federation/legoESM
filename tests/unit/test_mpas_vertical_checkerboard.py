@@ -34,9 +34,9 @@ from legoesm.core.field import Field
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
     MPASPrimitiveEquationModel,
     MPASPrimitiveEquationConfig,
-    mpas_hydrostatic_tendencies,
     vertical_del4_T_tendency,
 )
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
 
 pytestmark = pytest.mark.skipif(
     not jax.config.read("jax_enable_x64"),
@@ -86,14 +86,14 @@ def test_2dz_is_undamped_null_mode_without_filter():
 
     cfg0 = MPASPrimitiveEquationConfig(
         nu_vert4_T=0.0, nu_del2=0.0, nu_del4=0.0, K_h=0.0)
-    tend0 = mpas_hydrostatic_tendencies(state, mesh, coord, cfg0, dt=60.0)
+    tend0 = mpas_pe_tendencies(state, mesh, coord, cfg0, dt=60.0, vertical_form="legacy")
     # No vertical damping of the 2Δσ mode: dT/dt is machine-zero.
     assert float(jnp.abs(tend0.dT_dt.data).max()) < 1e-10
 
     nu = 2.0e-6
     cfg1 = MPASPrimitiveEquationConfig(
         nu_vert4_T=nu, nu_del2=0.0, nu_del4=0.0, K_h=0.0)
-    tend1 = mpas_hydrostatic_tendencies(state, mesh, coord, cfg1, dt=60.0)
+    tend1 = mpas_pe_tendencies(state, mesh, coord, cfg1, dt=60.0, vertical_form="legacy")
     dT = tend1.dT_dt.data[0]
     # The filter now produces a nonzero tendency that OPPOSES the 2Δσ mode
     # (negative projection onto (-1)^k), i.e. it damps it.

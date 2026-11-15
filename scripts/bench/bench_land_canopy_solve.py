@@ -29,7 +29,7 @@ jax.config.update("jax_enable_x64", True)
 SYNTH_SOIL_DT_PER_G = 1.0e-3
 
 
-def build_call(ncol: int, cap: int):
+def build_call(ncol: int, cap: int, group: int = 0):
     from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.land.config import MultiLayerLandConfig
     from legoesm.land.surface_scheme import TwoLeafCanopyConfig
@@ -51,7 +51,7 @@ def build_call(ncol: int, cap: int):
         has_precipitation=f(np.ones(ncol)))
     T_soil = f(288.0 + 8.0 * r.random(ncol))
     w_frac = f(0.3 + 0.6 * r.random(ncol))
-    cfg = TwoLeafCanopyConfig(max_iters=cap)
+    cfg = TwoLeafCanopyConfig(max_iters=cap, solve_group=group)
     land_cfg = MultiLayerLandConfig()
 
     @jax.jit
@@ -75,13 +75,16 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--trace", default=None)
     ap.add_argument("--save", default=None)
+    ap.add_argument("--group", type=int, default=0,
+                    help="canopy solve columns per batch (0 = one batch)")
     a = ap.parse_args()
     rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"], text=True,
                          capture_output=True).stdout.strip()
     dirty = subprocess.run(["git", "status", "--porcelain"], text=True,
                            capture_output=True).stdout.count("\n")
-    print(f"commit {rev} dirty {dirty} jax {jax.__version__}")
-    call, args = build_call(a.ncol, a.cap)
+    print(f"commit {rev} dirty {dirty} jax {jax.__version__} "
+          f"solve_group {a.group}")
+    call, args = build_call(a.ncol, a.cap, a.group)
     t0 = time.perf_counter()
     out = jax.block_until_ready(call(*args))
     print(f"compile+first call {time.perf_counter() - t0:.1f} s "

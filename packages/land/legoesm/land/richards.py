@@ -40,6 +40,7 @@ from legoesm import constants
 from legoesm.land.soil_grid import SoilGrid
 from legoesm.land.soil_hydraulics import (
     SoilHydraulicsConfig,
+    saturation_head,
     theta_from_psi,
     psi_from_theta,
     hydraulic_conductivity,
@@ -383,6 +384,7 @@ def solve_richards(
     psi_m = psi  # iterate
 
     _psi_dry_floor, _theta_floor = dry_floor(hydro_config)
+    _h_sat = saturation_head(hydro_config)
 
     def _bottom_drain_K(K_m):
         """Free-drainage bottom conductivity, CFL-capped: ONE expression shared by
@@ -623,7 +625,7 @@ def solve_richards(
         # that drains (a falling water table) had the mirror problem: its elastic
         # capacity is just as tiny and the psi step overshot to a deeply dry psi.
         # theta(psi) is strictly increasing through saturation (its elastic branch
-        # starts at air entry, see soil_hydraulics.air_entry_psi), so
+        # starts at the saturation head, see soil_hydraulics.saturation_head), so
         # psi_from_theta is its inverse and the fixed point is unchanged: the
         # discrete balance with theta = theta(psi).
         if _shift_psi:
@@ -763,8 +765,8 @@ def solve_richards(
     else:
         runoff_subsurface = jnp.zeros_like(flux_top)  # dtype-matched (codex)
 
-    # Convert runoff from m/s of water to kg/m2/s
-    runoff_surface_kgm2s = runoff_surface * constants.rho_water
+    # Convert runoff from m/s of water to kg/m2/s (surface: after the pond
+    # return below)
     runoff_subsurface_kgm2s = runoff_subsurface * constants.rho_water
 
     # Column water budget of the imposed fluxes (pond + soil storage) [m]; > 0 =
@@ -796,15 +798,13 @@ def solve_richards(
     refill = jnp.clip(created, 0.0, draw)
     excess = jnp.maximum(created - refill, 0.0)
     deficit = jnp.maximum(-created, 0.0)    # refill = 0 whenever created < 0
-    # Unsaturated layers only (psi < 0).  (psi_from_theta now inverts the elastic
-    # branch too, see soil_hydraulics.air_entry_psi, but the take-back keeps to
-    # the unsaturated zone: a saturated layer sits on its hydrostatic cap and has
-    # no room; a Clapp-Hornberger layer between air entry and 0 counts as
-    # unsaturated here although it holds elastic water, which is harmless.)
+    # Unsaturated layers only (psi below the saturation head, see
+    # soil_hydraulics.saturation_head): a saturated layer sits on its
+    # hydrostatic cap and has no room, and is never touched.
     # Excess comes out of each layer's water above the dry floor; a deficit goes
     # into each layer's room below saturation; both in proportion, capped so no
     # layer leaves [theta_floor, theta_sat].
-    unsat = psi_final < 0.0
+    unsat = psi_final < _h_sat
     unsat_avail = jnp.where(
         unsat, jnp.maximum((theta_final - theta_floor) * dz[None, :], 0.0), 0.0)
     unsat_room = jnp.where(
@@ -843,6 +843,17 @@ def solve_richards(
     # invert only approximately (round trip off by up to ~0.08 m3/m3), so there
     # the debited layer's psi carries that pre-existing inverse error; resetting
     # theta from psi instead destroyed ~0.3 kg/m2 per step on a dry column.
+    # A deficit the unsaturated room could not take back (a ponded, saturated
+    # column whose last unconverged iterate lost water: measured up to 4 mm per
+    # step) goes back into the pond, the overflow above pond_max to overland
+    # runoff, so the step closes.  Unconverged columns only: a converged column
+    # carries round-off here, and a round-off pond would switch on pond physics.
+    returned = jnp.where(converged, 0.0,
+                         jnp.maximum(-(_budget(theta_final) - refill), 0.0))
+    pond_total = surface_water_new + returned
+    surface_water_new = jnp.minimum(pond_total, richards_config.pond_max)
+    runoff_surface = runoff_surface + (pond_total - surface_water_new) / dt
+    runoff_surface_kgm2s = runoff_surface * constants.rho_water
     water_created = _budget(theta_final) - refill
 
     return RichardsOutput(

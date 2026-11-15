@@ -28,7 +28,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from legoesm.atmosphere.physics.convection._kf_eta import KFConstants, kf_eta_para
+from legoesm.atmosphere.physics.convection._kf_eta import KF_HARD, KFConstants, kf_eta_para
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig
 from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection
 from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import _lego_constants
@@ -39,7 +39,10 @@ _FIX = Path(__file__).parent / "oracle_fixtures" / "kain_fritsch.npz"
 _TOL = 1.0e-10  # user-approved oracle-match tolerance (max relative error, fp64)
 # The port is the OPT-IN variant (default "smooth" is the surrogate; #2280):
 # every wrapper test goes through the public dispatch with it selected.
-_WRF = KainFritschConfig(variant="wrf_kfeta")
+# Oracle comparisons pin the hard limit of every RULE 5 width explicitly; the
+# smooth default is _WRF_DEFAULT (gaps: test_kf_eta_rule5_local.py).
+_WRF_DEFAULT = KainFritschConfig(variant="wrf_kfeta")
+_WRF = _WRF_DEFAULT._replace(**{k: 0.0 for k in _WRF_DEFAULT._fields if k.startswith("wrf_")})
 _OUT = ("dtdt", "dqdt", "dqcdt", "dqrdt", "dqidt", "dqsdt")
 _DIAG_SCALARS = ("ltop", "let", "lc", "kpbl", "lcl", "lfs", "ldb", "ncount", "nstep", "abe",
                  "ainc", "timec", "tder", "trppt", "pptflx", "cpr", "fbfrc", "frc2", "vmflcl",
@@ -81,7 +84,7 @@ def _winds_td(fix, m):
     return fix["u_nat"], fix["v_nat"]
 
 
-def _run_core(fix, arm, dtype=jnp.float64):
+def _run_core(fix, arm, dtype=jnp.float64, smoothing=KF_HARD):
     m = _meta(fix, arm)
     u, v = _winds_td(fix, m)
     T = _bu(fix["T"], dtype)
@@ -90,7 +93,7 @@ def _run_core(fix, arm, dtype=jnp.float64):
         jnp.asarray(fix["dz_bu"], dtype), jnp.full_like(T, m["w"]),
         jnp.asarray(fix[f"rhoe_{m['cs']}_bu"], dtype), dt=m["dt"], dx=float(fix["dx"]),
         constants=_consts(fix, m["cs"]), trigger=m["trigger"], warm_rain=m["warm_rain"],
-        f_qi=m["f_qi"], f_qs=m["f_qs"], cudt=float(fix["cudt"]))
+        f_qi=m["f_qi"], f_qs=m["f_qs"], cudt=float(fix["cudt"]), smoothing=smoothing)
 
 
 def _rel(ours, ref):
@@ -145,7 +148,7 @@ def test_sweep_columns_match_wrf(fix):
             o = kf_eta_para(u[None], v[None], t[None], q[None], p[None], dz[None], w[None],
                             rh[None], dt=dt, dx=dx, constants=kc, trigger=int(trig),
                             warm_rain=warm == "1", f_qi=fqi == "1", f_qs=fqs == "1",
-                            cudt=float(fix["cudt"]))
+                            cudt=float(fix["cudt"]), smoothing=KF_HARD)
             return {k: o[k][0] for k in _OUT + ("pratec", "fired", "ishall", "nca")}
 
         args = [jnp.asarray(fix[f"sweep_{k}"][sel]) for k in
@@ -167,7 +170,7 @@ def test_lookup_beyond_table_is_clamped_edge_continuous():
     coordinate: finite, constant beyond the edge and continuous at it."""
     from legoesm.atmosphere.physics.convection import _kf_eta as K
     kc = _lego_constants()
-    lut = tuple(jnp.asarray(x) for x in K.kf_lookup_tables(kc.svp1, kc.svp2, kc.svp3, kc.svpt0))
+    lut = K._kf_tables(kc, jnp.float64, K.KF_HARD)
     plutop, rdpr, rdthk = (float(x) for x in lut[4:7])
     p_edge = plutop + (K._KFNP - 1) / rdpr            # top of the pressure axis
     for p in (p_edge, p_edge + 5.0e3):
@@ -180,7 +183,7 @@ def test_lookup_beyond_table_is_clamped_edge_continuous():
     b = np.asarray(K._tab_interp(lut, p_edge + 5.0e3, 330.0))
     np.testing.assert_allclose(a, b, rtol=1e-8)
     top = K._ALU_ASTRT + (K._ALU_N - 1) * K._ALU_AINC
-    np.testing.assert_allclose(K._tlog_lookup(lut[3], top), K._tlog_lookup(lut[3], 10.0 * top),
+    np.testing.assert_allclose(K._tlog_lookup(lut, top), K._tlog_lookup(lut, 10.0 * top),
                                rtol=1e-12)
 
 
@@ -246,12 +249,14 @@ def test_wrapper_matches_wrf(fix, arm, cfg):
         assert _rel(np.asarray(out.cape)[f], fix[f"{arm}_abe"][f]) <= _TOL
 
 
+@pytest.mark.parametrize("cfg", [_WRF, _WRF_DEFAULT], ids=["hard", "default"])
 @pytest.mark.parametrize("arm", ["L_nat_w05", "L_nat_w0"])
-def test_column_water_closes_as_the_oracle(fix, arm):
+def test_column_water_closes_as_the_oracle(fix, arm, cfg):
     """Vapour + cloud + precipitation sources integrate to zero in each column
-    (the oracle's own moisture budget); measured residual is round-off."""
+    (the oracle's own moisture budget), hard and at the RULE 5 default widths;
+    measured residual is round-off."""
     m, x = _wrapper_inputs(fix, arm)
-    out, _ = kain_fritsch_convection(**x, config=_WRF)
+    out, _ = kain_fritsch_convection(**x, config=cfg)
     dp = fix["p_half"][:, 1:] - fix["p_half"][:, :-1]
     tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt)
            + np.asarray(out.dq_r_conv_dt)) * dp / constants.g
@@ -260,13 +265,14 @@ def test_column_water_closes_as_the_oracle(fix, arm):
     assert np.all(np.abs(tot.sum(axis=1))[f] <= 1.0e-9 * scale[f])
 
 
+@pytest.mark.parametrize("cfg", [_WRF, _WRF_DEFAULT], ids=["hard", "default"])
 @pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
-def test_wrapper_gradients_finite(fix, dtype):
+def test_wrapper_gradients_finite(fix, dtype, cfg):
     m, x = _wrapper_inputs(fix, "L_nat_w05", dtype)
 
     def loss(T, q, u, v, w):
         out, carry = kain_fritsch_convection(**{**x, "T": T, "q_v": q, "u": u, "v": v,
-                                                "w_grid": w}, config=_WRF)
+                                                "w_grid": w}, config=cfg)
         return (jnp.sum(out.dT_dt) * 1e2 + jnp.sum(out.dq_v_dt) * 1e6
                 + jnp.sum(out.dq_r_conv_dt) * 1e6 + jnp.sum(carry))
 

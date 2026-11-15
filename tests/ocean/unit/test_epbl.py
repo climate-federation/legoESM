@@ -109,7 +109,7 @@ def test_find_pe_chg_orig_matches_independent_reimplementation():
                 pres_z=1.1e4,
                 dt_to_dcolht_k=1.7e-4, ds_to_dcolht_k=-8.0e-5,
                 dt_to_dcolht_a=1.3e-4, ds_to_dcolht_a=-6.0e-5,
-                colht_sharpness=math.inf)  # MOM6's exact min(colht, 0)
+                colht_sharpness=math.inf, slope_sharpness=math.inf)  # MOM6's exact min(colht, 0)
     pe, dpe, pe_max, dpe0 = _find_pe_chg_orig(**args)
 
     # Independent transcription of MOM_energetic_PBL.F90:3460-3519.
@@ -171,7 +171,8 @@ def test_find_pe_chg_condensed_agrees_with_orig_on_a_shared_case():
         hp_a * (T_a - T_b), hp_a * (S_a - S_b),
         T_b - T_a, S_b - S_a,
         dt_to_dpe_k, ds_to_dpe_k, dt_to_dpe_a, ds_to_dpe_a,
-        pres, dt_ch_k, ds_ch_k, dt_ch_a, ds_ch_a, colht_sharpness=math.inf)
+        pres, dt_ch_k, ds_ch_k, dt_ch_a, ds_ch_a, colht_sharpness=math.inf,
+        slope_sharpness=math.inf)
     assert float(pe_new) == pytest.approx(float(pe_orig), rel=1e-10)
 
 
@@ -583,11 +584,27 @@ def test_k_after_surface_flux_rejected_outside_scm():
 
 
 def test_om4_mstar_at_zero_coriolis_takes_the_obukhov_cap():
-    """MOM6's log(u*/(f*BLD)) is +inf at f = 0, so min() returns 1.25."""
-    cfg = EPBLConfig(mstar_scheme="om4", mstar_convect_coef=0.0)
+    """MOM6's log(u*/(f*BLD)) is +inf at f = 0, so min() returns 1.25
+    (MOM6's exact switches; the smooth default differs by the ratio-class
+    widths of the 1.25 cap and the max, see the epbl.py KNOWN DIFFERENCES)."""
+    cfg = EPBLConfig(mstar_scheme="om4", mstar_convect_coef=0.0,
+                     **{f: math.inf for f in EPBLConfig._fields
+                        if f.startswith("smooth_")})
     m = _find_mstar(cfg, jnp.asarray(0.0), jnp.asarray(0.01),
                     jnp.asarray(30.0), jnp.asarray(0.0))
     assert float(m) == 1.25
+
+
+def test_om4_mstar_nan_friction_velocity_takes_mstar_n_zero_at_the_exact_limit():
+    """MOM6's guard order: u* > f*BLD is tested first, so a NaN u* gives
+    mstar_N = 0 (and mstar_S = 0 at B = 0), not NaN."""
+    cfg = EPBLConfig(mstar_scheme="om4", mstar_convect_coef=0.0,
+                     **{f: math.inf for f in EPBLConfig._fields
+                        if f.startswith("smooth_")})
+    for f0 in (9.37e-5, 0.0):
+        m = _find_mstar(cfg, jnp.asarray(0.0), jnp.asarray(math.nan),
+                        jnp.asarray(22.0), jnp.asarray(f0))
+        assert float(m) == 0.0
 
 
 def test_missing_mld_guess_becomes_mid_column_without_iteration():

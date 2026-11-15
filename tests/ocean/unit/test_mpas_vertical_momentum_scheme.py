@@ -56,3 +56,14 @@ def test_term_diagnostics_work_with_nemo_advective(pieces):
                                                 vertical_momentum_scheme="nemo_advective"))
     _, terms = mpas_ocean_baroclinic_tendencies(st, mesh, z, m.config, term_diagnostics=True)
     assert "w_e" in terms and bool(jnp.all(jnp.isfinite(terms["vert_adv_u"])))
+
+
+
+def test_nemo_advective_leaves_the_shared_core(pieces):
+    """z* runs on the shared core, which has only the upwind form: the NEMO
+    option must route to the original body instead of being dropped."""
+    from legoesm.ocean.dynamics.ocean_pe_mpas import _outside_shared_core
+    _, z, _ = pieces
+    assert _outside_shared_core(z, MPASOceanConfig()) is None
+    assert _outside_shared_core(
+        z, MPASOceanConfig(vertical_momentum_scheme="nemo_advective")) is not None

@@ -67,6 +67,9 @@ __param_spec__ = {
             # a tracer / fix a static, non-differentiable quadrature shape. Not
             # trainable until the quadrature uses a fixed max grid with masking.
             "dc": "phase-speed bin width -> Python int quadrature count (jnp.arange shape) in _front_fav; not traceable",
+            "softmin_sharpness": "p of the p-norm smooth min of the saturation cap and the tendency limiters (RULE 5, #2241); a differentiability/smoothing width, not a closure",
+            "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter (RULE 5, #2241); a differentiability/smoothing width, not a closure",
+            "crit_level_floor": "(u - c) offset at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure (default 0 = E3SM)",
         },
         "params": {
             # --- efficiency (primary amplitude knob) ---
@@ -139,7 +142,7 @@ __param_spec__ = {
     "LindzenConfig": {
         "scheme_key": "atm.gwd.LindzenConfig",
         "excluded": {
-            "Fr_sharpness": "p-norm exponent of the smooth min(taudmp, tausat) (NOT a Froude-number transition); a differentiability/smoothing width, not a closure",
+            "Fr_sharpness": "p-norm exponent of the smooth min(taudmp, tausat), the tendency limiters, dscal/diffusivity and the launch Froude cap (#2241); a differentiability/smoothing width, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
             "oro_wind_ramp_width": "numerics: smooth-switch width of the U > oro_min_wind launch gate (RULE 5), value decided by codex+GLM (#2241)",
@@ -210,6 +213,8 @@ __param_spec__ = {
 }
 
 
+from legoesm.atmosphere.physics.gravity_wave_drag.ifs_wms import IFSWMSConfig
+
 class RayleighConfig(NamedTuple):
     """Configuration for Rayleigh friction drag.
 
@@ -261,8 +266,10 @@ class LindzenConfig(NamedTuple):
         cap ``fcrit2*(U/N)^2`` and the orographic-only tendency cap.  Default 1.
     Fr_sharpness : float
         Exponent p of the p-norm smooth ``min(taudmp, tausat)`` =
-        ``(taudmp^-p + tausat^-p)^(-1/p)`` (default 20.0); exact E3SM ``min``
-        at infinite sharpness. NOT a Froude-number transition.
+        ``(taudmp^-p + tausat^-p)^(-1/p)`` (default 20.0); the same p smooths
+        the tendency limiters, ``dscal``, the diffusivity ``max`` and the
+        launch Froude cap (#2241).  Exact E3SM ``min``/``max`` at infinite
+        sharpness.
     crit_level_sharpness : float
         Sigmoid sharpness [s/m] of the smooth critical-level test (default
         10.0): the saturation stress is multiplied by a smooth XNOR of the two
@@ -867,6 +874,22 @@ class E3SMCAMConfig(NamedTuple):
         Frontal source sub-config.
     beres : E3SMBeresConfig
         Convective (Beres 2004) source sub-config.
+    softmin_sharpness : float
+        RULE 5 (#2241): exponent p of the p-norm smooth min used for
+        ``min(taudmp, tausat)`` and the tendency limiters (orographic
+        saturation, ``umcfac``, ``tndmax``) in ``gw_drag_prof`` (default 50,
+        the McFarlaneConfig value); the same p smooths ``dscal = min(1, .)``,
+        the diffusivity ``max(dback, .)`` over waves and the orographic Froude
+        cap.  1e12 = E3SM's hard ``min``/``max``.
+    crit_level_sharpness : float
+        RULE 5 (#2241): sigmoid sharpness [s/m] of the smooth critical-level
+        test (both ``u - c`` signs agree across the layer; the mcfarlane.py
+        form), default 100 (#2241 vote: fixture gaps at round-off; the
+        McFarlane/Lindzen value 10 left 5-13 % gaps).  1e12 = E3SM's hard
+        test.
+    crit_level_floor : float
+        Offset [m/s] of the smooth critical-level test (default 0.0 = E3SM's
+        ``(u-c)`` sign test).
     """
     source: str = "orographic"
     pgwv: int = 0
@@ -893,6 +916,9 @@ class E3SMCAMConfig(NamedTuple):
     orographic: E3SMOrographicConfig = E3SMOrographicConfig()
     frontal: E3SMFrontalConfig = E3SMFrontalConfig()
     beres: E3SMBeresConfig = E3SMBeresConfig()
+    softmin_sharpness: float = 50.0
+    crit_level_sharpness: float = 100.0
+    crit_level_floor: float = 0.0
 
 
 class GWDMLEmulatorConfig(NamedTuple):
@@ -933,7 +959,7 @@ class GravityWaveDragConfig(NamedTuple):
     ------
     scheme : str
         Active GWD scheme: "rayleigh", "lindzen", "mcfarlane",
-        "hines", "prognostic_spectral", "e3sm_cam", "ml_emulator",
+        "hines", "prognostic_spectral", "e3sm_cam", "ml_emulator", "ifs_wms",
         or "none".
     rayleigh : RayleighConfig
         Configuration for Rayleigh friction scheme.
@@ -949,6 +975,8 @@ class GravityWaveDragConfig(NamedTuple):
         Configuration for the faithful E3SM/CAM gw_drag_prof scheme.
     ml_emulator : GWDMLEmulatorConfig
         Configuration for ML emulator scheme.
+    ifs_wms : IFSWMSConfig
+        Configuration for the OpenIFS 49r1 WMS non-orographic scheme.
     """
     scheme: str = "none"
     rayleigh: RayleighConfig = RayleighConfig()
@@ -958,3 +986,4 @@ class GravityWaveDragConfig(NamedTuple):
     prognostic_spectral: PrognosticSpectralConfig = PrognosticSpectralConfig()
     e3sm_cam: E3SMCAMConfig = E3SMCAMConfig()
     ml_emulator: GWDMLEmulatorConfig = GWDMLEmulatorConfig()
+    ifs_wms: IFSWMSConfig = IFSWMSConfig()
