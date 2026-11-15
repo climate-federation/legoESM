@@ -4369,6 +4369,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "dycore.spectral_sponge_nu_top_m2s is wired into the hydrostatic spectral "
                 "dycore only; it would be silently inert here.")
+        elif _snu > 0 and not (d.column_lane and d.energy_fixer):
+            errors.append(
+                "dycore.spectral_sponge_nu_top_m2s needs dycore.column_lane and "
+                "dycore.energy_fixer: only the column-lane ssp_rk54 step returns the "
+                "sponge's energy loss (global energy fixer); legacy/leapfrog steps do not.")
         _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
         if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
             errors.append(

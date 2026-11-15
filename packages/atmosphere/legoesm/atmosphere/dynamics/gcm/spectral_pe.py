@@ -1833,6 +1833,11 @@ class SpectralPrimitiveEquationModel:
             self._sponge_factor = jnp.ones(nlev)
             self._sponge_factor_T = jnp.ones((self.grid.ls.shape[0], nlev))
         if nu_top > 0:
+            if self.config.time_integrator in ("leapfrog", "leapfrog_si"):
+                # the factor is built for one dt; a leapfrog update spans 2 dt
+                raise ValueError(
+                    "sponge_del2_nu_top_m2s is not supported with leapfrog "
+                    f"integrators (got {self.config.time_integrator!r})")
             if nlev < len(_CAM_SE_NU_SCALE_TOP):
                 raise ValueError(
                     f"sponge_del2_nu_top_m2s needs >= {len(_CAM_SE_NU_SCALE_TOP)} "

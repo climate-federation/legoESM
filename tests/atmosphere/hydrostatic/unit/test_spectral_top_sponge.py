@@ -148,6 +148,15 @@ def test_refuses_too_few_levels():
         m._ensure_sponge_factor(DT)
 
 
+def test_refuses_leapfrog():
+    grid = create_gaussian_grid(21)
+    m = SpectralPrimitiveEquationModel(
+        grid=grid, sigma_coord=create_sigma_coordinate(NLEV),
+        config=SpectralPEConfig(time_integrator="leapfrog", sponge_del2_nu_top_m2s=NU_TOP))
+    with pytest.raises(ValueError, match="leapfrog"):
+        m._ensure_sponge_factor(DT)
+
+
 def test_factory_forwards_and_config_validates():
     from legoesm.driver.component_factory import create_atmosphere_dycore
     from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
@@ -163,7 +172,10 @@ def test_factory_forwards_and_config_validates():
     assert DycoreConfig().spectral_sponge_nu_top_m2s == 0.0
     grid_cfg = GridConfig(grid_type="gaussian", resolution=21, nlev=NLEV)
     for bad in (dict(spectral_sponge_nu_top_m2s=-1.0),
-                dict(spectral_sponge_nu_top_m2s=NU_TOP, discretization="mpas")):
+                dict(spectral_sponge_nu_top_m2s=NU_TOP, discretization="mpas"),
+                dict(spectral_sponge_nu_top_m2s=NU_TOP, column_lane=False),
+                dict(spectral_sponge_nu_top_m2s=NU_TOP, column_lane=True,
+                     energy_fixer=False)):
         with pytest.raises(ValueError, match="spectral_sponge_nu_top_m2s"):
             ExperimentConfig(grid=grid_cfg, dycore=DycoreConfig(
                 model_type="hydrostatic",
