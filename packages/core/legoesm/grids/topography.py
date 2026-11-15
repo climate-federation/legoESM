@@ -1228,7 +1228,10 @@ def load_subgrid_orography(
     try:
         all_names = set(ds.data_vars) | set(ds.coords)
         sso_var = var_name if var_name in all_names else None
-        if sso_var is None:
+        # the legacy aliases stand in for the default field only: any other
+        # requested field (e.g. the filtered SSO_STDH_FILT) is a different
+        # quantity and must not fall back to the unfiltered std
+        if sso_var is None and var_name == "SSO_STDH":
             for c in ("SSO_STDH", "sso_stdh", "stddev_orography", "sgh"):
                 if c in all_names:
                     sso_var = c
