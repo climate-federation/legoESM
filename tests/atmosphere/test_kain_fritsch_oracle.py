@@ -9,7 +9,9 @@ fp64), in 12 arms that vary the constant set (legoESM / WRF), the winds, the
 grid-scale w, the time step, ``kf_trigger`` (3 / 1) and the hydrometeor
 feedback branch (warm_rain / ice / mixed phase), plus 117 columns of a seeded
 randomised sweep (perturbed soundings, winds, w, dt 60-900 s, DX 3-60 km) picked
-to run the branches the arms do not reach.  Generator:
+to run the branches the arms do not reach, and one constructed column whose
+cloud top sits inside the RULE 5 smooth top band at the default widths (make_fixture.BAND,
+appended last).  Generator:
 ``scripts/validate/oracle/kain_fritsch/{build.sh,make_fixture.py}``.  The
 oracle was fed exactly what the wrapper feeds the port (see make_fixture.py).
 

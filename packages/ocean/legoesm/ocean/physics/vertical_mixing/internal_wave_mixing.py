@@ -334,9 +334,7 @@ def compute_iwm_diffusivity(
 
     # --- 'nsq' / 'sho' components: N² and N weighting ----------------------
     N2_pos = jnp.maximum(N2, 0.0)
-    # sqrt's derivative is infinite where N2 is clipped to 0 and poisoned every
-    # reverse-mode gradient; NaN passes through so the forward is unchanged.
-    N_pos = safe_sqrt_nan(N2_pos)
+    N_pos = safe_sqrt_nan(N2_pos)  # finite gradient at N2 <= 0; NaN passes through
     sum_n2 = jnp.sum(dz_w * N2_pos, axis=-1, keepdims=True)   # (F90:184-186)
     sum_n = jnp.sum(dz_w * N_pos, axis=-1, keepdims=True)
     zfact3 = jnp.where(
