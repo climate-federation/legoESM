@@ -708,26 +708,36 @@ _SITE_POINTS = {
         ('L32', 1, 'input', 'q', 1.0586956521739133, 1.0612271223959327e-06, ()),
     ('llo1 = sm.lt(paph[K + 1] - kget(paph, ikd), ZPBL_DP, _W_PRES)', 'lt'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('m = sm.min(zm, r, _W_REL * r)', 'min'):
+        ('L32', 12, 'input', 'omega', -11.82065217391305, 1.1745622232621571e-05, ()),
     ('m2 = sm.min(m2, zmfmax, _W_MF)', 'min'):
         ('L137', 0, 'inject', None, 0.0, 0.0001, ()),
     ('m3 = sm.max(ZMID_MF * zkhfl / kget(pgeoh, ikb), zmfub, w_mfub) * (1.0 + zeps)', 'max'):
         ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
     ('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'):
         ('L32', 12, 'inject', None, 0.0, 0.0001, (('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),', 'min'),)),
+    ('sm.max(zcape - zcapdcycl, RMINCAPE * zcape, _W_CAPE))', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),', 'min'):
         ('L32', 12, 'inject', None, 0.0, 0.0001, (('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'),)),
+    ('sm.min(m3, zmfmax, _W_MF))', 'min'):
+        ('L32', 12, 'inject', None, 0.0, 0.0001, (('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'), ('m = sm.min(zm, r, _W_REL * r)', 'min'))),
     ('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'):
         ('L137', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)', 'max'):
         ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
-    ('zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)', 'max'):
-        ('L32', 15, 'inject', None, 0.0, 0.0001, (('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'),)),
+    ('zcape_c = sm.min(zcape_c, ZCAPE_MAX, _W_CAPE)', 'min'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, (('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'), ('m = sm.min(zm, r, _W_REL * r)', 'min'))),
+    ('zcape_c = sm.sel(br, sm.max(zcape2 - zcapdcycl + zdqcv, RMINCAPE * zcape, _W_CAPE),', 'max'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
     ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
         ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
-    ('zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)', 'max'):
-        ('L32', 10, 'inject', None, 0.0, 0.0001, (('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'),)),
-    ('m = sm.min(zm, r, _W_REL * r)', 'min'):
-        ('L32', 12, 'input', 'omega', -11.82065217391305, 1.1745622232621571e-05, ()),
+    ('zeps = (sm.pos(-pmfd_b, w_mfub)', 'pos'):
+        ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
+    ('zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)', 'min'):
+        ('STRESS', 0, 'inject', 'q', 1.225, 0.0001, ()),
+    ('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'):
+        ('L32', 13, 'inject', None, 0.0, 0.0001, (('m = sm.min(zm, r, _W_REL * r)', 'min'),)),
     ('zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1', 'max'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('ztaupbl = sm.min(kget(pgeoh, ikb) - pgeoh[K + 1], ZDCYC_DZ, _W_GEO) / (rg * zduten)', 'min'):
@@ -739,26 +749,37 @@ _SITE_POINTS = {
 }
 
 
-# Sites whose committed point does not yet pass check_grads / the exact-site
-# control (follow-up on #2281): smoothed like every other site, but their
-# gradient is covered only by the hard-limit and per-column gap tests.
-_SITE_PENDING = {
-    ('sm.max(zcape - zcapdcycl, RMINCAPE * zcape, _W_CAPE))', 'max'),
-    ('sm.min(m3, zmfmax, _W_MF))', 'min'),
-    ('zcape_c = sm.min(zcape_c, ZCAPE_MAX, _W_CAPE)', 'min'),
-    ('zcape_c = sm.sel(br, sm.max(zcape2 - zcapdcycl + zdqcv, RMINCAPE * zcape, _W_CAPE),', 'max'),
-    ('zeps = (sm.pos(-pmfd_b, w_mfub)', 'pos'),
-    ('zheat = jnp.sum(jnp.where(llo3, sm.pos(', 'pos'),
-    ('zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)', 'min'),
-    ('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'),
-    ('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'),
+# Sites no fixture column, input perturbation or injection reaches (vote
+# 2026-11-15, author/GLM/codex), with the reason; their smoothing is covered by
+# the hard-limit and per-column gap tests only.
+_SITE_UNREACHABLE = {
+    # the first-guess shallow base flux only sets the ascent's mass-flux scale;
+    # the final closure rescales the profile by ZMFUB1/ZMFUB, so the outputs
+    # are invariant to it to first order (gradient <= 4e-20 on every column)
+    ('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'):
+        "first-guess shallow flux cancels in the final closure rescale",
+    # the per-level heating summand's window (4.7e-10) sits ~5 orders below
+    # the ZHEAT_MIN floor; with the floor and the cap held mid-window the
+    # derivative is 7e-15, noise against a loss of O(100)
+    ('zheat = jnp.sum(jnp.where(llo3, sm.pos(', 'pos'):
+        "heating summand window shielded by the ZHEAT_MIN floor",
+    # the first-guess energy floor feeds only the first-guess shallow flux,
+    # which cancels as above (derivative 2.8e-15 at the best point)
+    ('zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)', 'max'):
+        "feeds only the first-guess shallow flux, which cancels in the closure rescale",
+    # the ZHEAT_MIN floor of the deep-closure heating: with the cap held
+    # mid-window the derivative through it is 5e-16 (round-off against O(100))
+    ('zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)', 'max'):
+        "reaches the output only at round-off level",
 }
+_SITE_PENDING: set = set()   # none left
 
 
 def test_every_switch_site_has_a_gradient_point():
     """A new or edited smooth switch in CUMASTRN must get its own point."""
-    assert _probe("switch_sites").sites() == set(_SITE_POINTS) | _SITE_PENDING
-    assert not set(_SITE_POINTS) & _SITE_PENDING
+    sets = (set(_SITE_POINTS), _SITE_PENDING, set(_SITE_UNREACHABLE))
+    assert _probe("switch_sites").sites() == set.union(*sets)
+    assert sum(map(len, sets)) == len(set.union(*sets))
 
 
 @pytest.fixture
@@ -803,7 +824,11 @@ def test_switch_site_gradient_at_default(fix, site, _fresh_jit):
     check_grads(run, (x0,), order=1, modes=("rev",), eps=h)
     gs = float(jax.grad(run)(x0))
     gh = float(jax.grad(lambda s: run(s, hard=[site]))(x0))
-    assert np.isfinite(gs) and gs != gh
+    # the derivative changes by more than round-off: 1e-3 relative, and above a
+    # floor 1e-12 (the loss is O(100); a site that only reaches the output at
+    # round-off level is unreachable, see _SITE_UNREACHABLE)
+    big = max(abs(gs), abs(gh))
+    assert np.isfinite(gs) and big > 1e-12 and abs(gs - gh) > 1e-3 * big
 
 
 def test_switch_scales_probe_covers_every_class(fix):
