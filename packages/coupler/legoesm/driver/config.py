@@ -2702,8 +2702,9 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "use_multilayer_land runs in production only on the column "
                 "loop (MPAS, or dycore.column_lane); the compiled pipeline "
-                f"(discretization={d.discretization!r}) is kept for ML/AIMIP "
-                "training, whose entry points set ml_pipeline=True.")
+                f"(discretization={d.discretization!r}) keeps multilayer land "
+                "only for ML training entry points, which set "
+                "ml_pipeline=True.")
         if self.microphysics_compute_precision not in ("policy", "fp64"):
             errors.append(
                 "microphysics_compute_precision must be one of "

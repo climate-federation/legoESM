@@ -1384,10 +1384,12 @@ def _strict_errors(cfg):
 def test_multilayer_land_off_the_column_loop_needs_ml_pipeline():
     """Production full physics runs only on the column loop; the compiled
     pipeline keeps it for ML training, which opts in with ml_pipeline."""
-    pipe = dict(grid=GridConfig(grid_type="latlon"), use_multilayer_land=True)
+    pipe = dict(grid=GridConfig(grid_type="latlon"), use_multilayer_land=True,
+                land_mask_path="land_mask.nc")
     assert "ml_pipeline=True" in _strict_errors(ExperimentConfig(**pipe))
-    assert "ml_pipeline" not in _strict_errors(
-        ExperimentConfig(ml_pipeline=True, **pipe))
-    assert "ml_pipeline" not in _strict_errors(ExperimentConfig(
-        grid=GridConfig(grid_type="latlon"),
-        dycore=DycoreConfig(column_lane=True), use_multilayer_land=True))
+    ExperimentConfig(ml_pipeline=True, **pipe).validate_strict()
+    ExperimentConfig(dycore=DycoreConfig(column_lane=True),
+                     **pipe).validate_strict()
+    # the opt-in covers land only: CAM6 clouds were never wired on the pipeline
+    assert "cam6_clubb' is wired on the MPAS lane only" in _strict_errors(
+        ExperimentConfig(ml_pipeline=True, cloud_scheme="cam6_clubb", **pipe))
