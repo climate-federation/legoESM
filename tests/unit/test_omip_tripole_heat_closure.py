@@ -205,3 +205,62 @@ def test_nonfinite_salt_is_fatal():
     b["ice_salinity"][3, 3] = np.nan
     with pytest.raises(SystemExit, match="non-finite"):
         _close([a, b])
+
+
+def _cli_json(run_dir, *extra):
+    import json
+    from omip_tripole_heat_closure import main
+    out = run_dir / "closure.json"
+    rc = main(["--run-dir", str(run_dir), "--domain-cfg", str(run_dir / "domain_cfg.nc"),
+               "--max-residual-wm2", "1e-6", "--json-out", str(out), *extra])
+    return rc, json.loads(out.read_text())
+
+
+def test_restart_start_window_equals_the_snapshot_window(tmp_path):
+    import shutil
+    (tmp_path / "ref").mkdir()
+    ref = _run_dir(tmp_path / "ref", Q)
+    rc_ref, js_ref = _cli_json(ref)
+    rec = tmp_path / "rec"
+    rec.mkdir()
+    for f in ("domain_cfg.nc", "run_manifest.json", "run.log", "snapshot_day0010.npz"):
+        shutil.copy(ref / f, rec / f)
+    with np.load(ref / "snapshot_day0005.npz") as a:
+        np.savez(rec / "restart_leg1.npz", T=a["T"], eta=a["eta"], H_bathy=a["H_bathy"],
+                 land_mask=a["land_mask"], _step=a["step"], _time_days=a["time_days"])
+    rc, js = _cli_json(rec, "--restart-start", str(rec / "restart_leg1.npz"))
+    assert rc == rc_ref == 0
+    assert js["worst_abs_residual_wm2"] == pytest.approx(js_ref["worst_abs_residual_wm2"],
+                                                        abs=1e-12)
+
+
+def test_restart_start_refuses_a_restart_from_another_grid(tmp_path):
+    (tmp_path / "r").mkdir()
+    run = _run_dir(tmp_path / "r", Q)
+    with np.load(run / "snapshot_day0005.npz") as a:
+        np.savez(run / "rs.npz", T=a["T"], eta=a["eta"], H_bathy=a["H_bathy"] + 1.0,
+                 land_mask=a["land_mask"], _step=np.float64(1000), _time_days=np.float64(2))
+    with pytest.raises(SystemExit, match="H_bathy differs"):
+        _cli_json(run, "--restart-start", str(run / "rs.npz"))
+
+
+def test_domain_cfg_cells_with_a_thick_bottom_cell_close(tmp_path):
+    """Two wet levels, the bottom one 800 m against a 300 m reference: only the
+    domain_cfg rebuild closes; the interface rule would count a third level."""
+    import json
+    run = _run_dir(tmp_path, Q, extra_flags="--nemo-geometry domain_cfg")
+    d = (Q + GEO) * DT_WIN / (RHO * CP * 900.0)
+    for tag, T0 in (("day0005", 10.0), ("day0010", 10.0 + d)):
+        with np.load(run / f"snapshot_{tag}.npz") as z:
+            s = dict(z)
+        s["H_bathy"] = np.full((NY, NX), 900.0)
+        s["bottom_level"] = np.full((NY, NX), 1.0)
+        T = np.full((NY, NX, 3), T0)
+        T[..., 2] = 0.0                       # the dry third level
+        s["T"] = T
+        np.savez(run / f"snapshot_{tag}.npz", **s)
+    assert _cli(run, 1e-6) == 0
+    m = json.loads((run / "run_manifest.json").read_text())
+    m["run"]["command_line"] = m["run"]["command_line"].replace("--nemo-geometry domain_cfg", "")
+    (run / "run_manifest.json").write_text(json.dumps(m))
+    assert _cli(run, 1e-6) == 1               # interface rule: wrong cells, residual

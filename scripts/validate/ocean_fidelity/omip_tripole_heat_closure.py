@@ -99,12 +99,45 @@ def load_snapshot(path):
     keys = ("T", "S", "eta", "H_bathy", "land_mask", "cell_area", "step",
             "ice_concentration", "ice_thickness", "ice_salinity",
             "time_days", "z_interface_ref", "q_net_mean", "flux_mean_n_steps",
-            "flux_mean_window_s")
+            "flux_mean_window_s", "bottom_level")
     with np.load(path) as z:
         out = {k: np.asarray(z[k], dtype=np.float64) for k in keys if k in z.files}
     for k in ("T", "eta", "H_bathy", "land_mask", "cell_area"):
         if k not in out:
             raise SystemExit(f"FATAL: {path} lacks {k}")
+        _fatal_nonfinite(f"{path}:{k}", out[k])
+    return out
+
+
+# restart key -> snapshot key, for the state the closure reads.
+_RESTART_KEYS = {"T": "T", "S": "S", "eta": "eta", "H_bathy": "H_bathy",
+                 "land_mask": "land_mask", "ice_concentration": "ice_concentration",
+                 "ice_h_ice": "ice_thickness", "ice_S_ice": "ice_salinity",
+                 "_step": "step", "_time_days": "time_days"}
+
+
+def restart_as_snapshot(path, template):
+    """The state of a ``--restart-save`` archive as a window-START snapshot.
+
+    Post-hoc recovery for runs whose leg-boundary snapshot was overwritten
+    (D18): T, S, eta, sea ice, step and time come from the restart; the static
+    grid fields (cell area, interfaces, bottom level) from ``template``, the
+    run's next snapshot, whose bathymetry and land mask must agree exactly.
+    It carries no flux means, so it can only START a window."""
+    with np.load(path) as z:
+        out = {v: np.asarray(z[k], dtype=np.float64)
+               for k, v in _RESTART_KEYS.items() if k in z.files}
+    for k in ("H_bathy", "land_mask"):
+        if k not in out or not np.array_equal(out[k], template[k]):
+            raise SystemExit(f"FATAL: {path} {k} differs from the next snapshot's")
+    for k in ("cell_area", "z_interface_ref", "bottom_level"):
+        if k in template:
+            out[k] = template[k]
+    wet = out["land_mask"]
+    for k in ("ice_concentration", "ice_thickness", "ice_salinity"):
+        if k in out:
+            out[k] = out[k] * wet           # the snapshot writer masks ice the same way
+    for k in ("T", "eta"):
         _fatal_nonfinite(f"{path}:{k}", out[k])
     return out
 
@@ -254,6 +287,10 @@ def parse_args(argv=None):
                    help="gate: fail when any window's |relative change of ocean+ice "
                         "salt| exceeds this (requires ice_salinity in the snapshots)")
     p.add_argument("--json-out", default=None)
+    p.add_argument("--restart-start", default=None,
+                   help="restart archive whose state starts the window that "
+                        "ends at the next snapshot (post-hoc recovery of an "
+                        "overwritten leg-boundary snapshot; reported as such)")
     return p.parse_args(argv)
 
 
@@ -291,6 +328,18 @@ def main(argv=None) -> int:
         if _SNAP_RE.search(p.name):
             s = load_snapshot(p)
             by_step.setdefault(int(s["step"]), (p, s))   # final == last day: keep one
+    if a.restart_start:
+        with np.load(a.restart_start) as z:
+            r_step = int(z["_step"])
+        if r_step in by_step:
+            raise SystemExit(f"FATAL: a snapshot already exists at restart step {r_step}")
+        nxt = [k for k in sorted(by_step) if k > r_step]
+        if not nxt:
+            raise SystemExit("FATAL: no snapshot after the restart step")
+        by_step[r_step] = (Path(a.restart_start),
+                           restart_as_snapshot(a.restart_start, by_step[nxt[0]][1]))
+        print(f"[closure] POST-HOC: window start at step {r_step} read from "
+              f"{a.restart_start} (no flux means; starts a window only)")
     paths = [by_step[k][0] for k in sorted(by_step)]
     snaps = [by_step[k][1] for k in sorted(by_step)]
     if rargs.ew_cyclic_overlap:
@@ -298,8 +347,25 @@ def main(argv=None) -> int:
     if len(snaps) < 2:
         raise SystemExit("FATAL: need at least two snapshots at distinct steps")
 
+    domain_cells = getattr(rargs, "nemo_geometry", "mesh_mask") == "domain_cfg"
+
     def z_coord_for(s):
         zs, pc = build_z_coord(e3t_1d, gdept_1d, s["H_bathy"])
+        if domain_cells:
+            # NEMO's own cells: the bottom cell may be thicker than its
+            # reference level, which the interface rule cannot rebuild.
+            from legoesm.ocean.vertical import create_full_step_coordinate
+            if "bottom_level" not in s:
+                raise SystemExit("FATAL: --nemo-geometry domain_cfg run but the "
+                                 "snapshot has no bottom_level")
+            bl = s["bottom_level"].astype(np.int64)
+            zh = np.abs(np.asarray(zs.z_half_ref, dtype=np.float64))
+            wet = bl >= 0
+            bt = np.where(wet, s["H_bathy"] - zh[np.maximum(bl, 0)], 0.0)
+            pc = create_full_step_coordinate(zs, bl, bottom_thickness=bt)
+            if not np.allclose(np.asarray(pc.h_partial).sum(-1), s["H_bathy"],
+                               rtol=0, atol=1e-6):
+                raise SystemExit("FATAL: rebuilt cells do not sum to H_bathy")
         zi = s.get("z_interface_ref")
         if zi is None:
             raise SystemExit("FATAL: snapshot lacks z_interface_ref (run without "
