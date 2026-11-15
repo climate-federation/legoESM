@@ -1,8 +1,9 @@
-"""Oracle match: OpenIFS 49r1 VDF column kernels (``turbulence.ifs_vdf``), stage 1a.
+"""Oracle match: OpenIFS 49r1 VDF column kernels (``turbulence.ifs_vdf``), stage 1.
 
 Fixture ``oracle_fixtures/ifs_vdf_kernels.npz``: the tier-2 audit's 24
-atmosphere columns (16 L32, 5 L137, 3 stress), each with four surface sets,
-and the outputs of RUNNING OpenIFS 8f6f722f73 arpifs/phys_ec/{vdfdpbl,
+atmosphere columns (16 L32, 5 L137, 3 stress) plus 9 analytic SYN columns
+(dry mixed layers and cloud-topped layers on an L137 grid), each with seven
+surface sets, and the outputs of RUNNING OpenIFS 8f6f722f73 arpifs/phys_ec/{vdfdpbl,
 vdfhghtn,vdfexcu,vdftofdc}.F90 (gfortran 8.5, fp64) in two arms: ``N`` 49r1
 native constants, ``L`` legoESM g/R_d/c_pd/R_v/L_v
 (scripts/validate/oracle/ifs_vdf/{build.sh,driver.F90,make_fixture.py}).
@@ -31,17 +32,19 @@ import pytest
 from jax.test_util import check_grads
 
 from legoesm import constants
+from legoesm.atmosphere.physics._ifs_thermo import ifs_thermo
 from legoesm.atmosphere.physics.turbulence.ifs_vdf import (
-    IFSTOFDConfig, IFSVDFConfig, hard_config, hard_tofd_config, ifs_tofd_coefficient,
-    ifs_vdfdpbl, ifs_vdfexcu,
+    IFSTOFDConfig, IFSVDFConfig, hard_config, hard_tofd_config, ifs_hghtn_parcel, ifs_slgs,
+    ifs_tofd_coefficient, ifs_vdfdpbl, ifs_vdfexcu, ifs_vdfhghtn,
 )
+from legoesm.atmosphere.physics.convection._ifs_cumastrn import njkt_levels
 
 _DIR = Path(__file__).parent / "oracle_fixtures"
 _FIX = _DIR / "ifs_vdf_kernels.npz"
 _GAPS = _DIR / "ifs_vdf_kernels_gaps.json"
 _TOL = 1.0e-12                     # oracle bar (vote 3 T2)
 _GAP_RTOL, _GAP_ATOL = 1.0e-6, 1.0e-12   # RULE 5 stored-gap tolerance
-_GROUPS = ("L32", "L137", "STRESS")
+_GROUPS = ("L32", "L137", "STRESS", "SYN")
 _ARMS = ("N", "L")
 _EXCU = ("cfm", "cfh", "km", "kh")
 
@@ -148,6 +151,10 @@ def _measured_gaps(fix):
         args = (_a(fix, g, "geo_full"), _a(fix, g, "u"), _a(fix, g, "v"), _a(fix, g, "sigflt"))
         gaps[f"{g}_tofdc"] = _col_gaps(ifs_tofd_coefficient(*args, IFSTOFDConfig(), c["g"]),
                                        ifs_tofd_coefficient(*args, hard_tofd_config(), c["g"]))
+        soft, hard = _hghtn(fix, "N", g, IFSVDFConfig()), _hghtn(fix, "N", g, hard_config())
+        for k in _HG_SCAL + _HG_ROWS:
+            s_, h_ = (np.asarray(getattr(o, k)).reshape(len(fix[f"{g}_names"]), -1) for o in (soft, hard))
+            gaps[f"{g}_hg_{k}"] = _col_gaps(s_, h_)
     return gaps
 
 
@@ -382,3 +389,140 @@ def test_finite_where_stable_denominator_vanishes():
     f = lambda r: jnp.sum(_excu_case(IFSVDFConfig(), ri=jnp.full((_K,), r), kinv=_K, kpbltype=0))
     r = -0.09512492197250393
     assert np.isfinite(float(f(r))) and np.isfinite(float(jax.grad(f)(r)))
+
+
+# ---------------------------------------------------------------------------
+# Stage 1b: VDFHGHTN
+# ---------------------------------------------------------------------------
+_HG_INT = ("kinv", "kcbase", "kctop", "kpbltype")
+_HG_SCAL = ("zinv", "zcldbase", "eis", "khvfl")
+_HG_ROWS = ("ri", "mflx", "slguh", "qtuh", "uuh", "vuh")
+_KNAMES = ("RG", "RD", "RV", "RCPD", "RLVTT", "RTT", "RA", "RLMLT", "R2ES", "R3LES", "R4LES",
+           "R3IES", "R4IES", "RPI")
+
+
+def _th(fix, arm, g):
+    line = [ln for ln in str(fix[f"{arm}_{g}_log"]).splitlines() if ln.startswith("K ")
+            and not ln.startswith("K RG")][-1]
+    c = dict(zip(_KNAMES, (float(x.replace("D", "E")) for x in line.split()[1:])))
+    th = ifs_thermo(**{k: c[k] for k in _KNAMES[:11]}, R3IES=c["R3IES"], R4IES=c["R4IES"])
+    assert th.RPI == c["RPI"]
+    return th
+
+
+def _hghtn(fix, arm, g, cfg):
+    th = _th(fix, arm, g)
+    T, q, u, v, gf = (_a(fix, g, k) for k in ("T", "q", "u", "v", "geo_full"))
+    cptgz = gf + T * th.RCPD                                           # RVTMP2 = 0
+    slgs = ifs_slgs(T, q, _a(fix, g, "ql"), gf, th.RCPD, th.RLVTT)
+    o = lambda k: jnp.asarray(fix[f"{arm}_{g}_{k}"])
+    f = lambda *a: ifs_vdfhghtn(th, *a, dt=float(fix["ptsphy"]), cfg=cfg)
+    return jax.vmap(f)(T, q, u, v, slgs, cptgz, _a(fix, g, "qe"), _a(fix, g, "p_half"),
+                       _a(fix, g, "p_full"), gf, _a(fix, g, "geo_half"), o("pblh"),
+                       o("kmfl"), o("khfl"), o("kqfl"), _a(fix, g, "land"))
+
+
+@pytest.mark.parametrize("arm", _ARMS)
+@pytest.mark.parametrize("g", _GROUPS)
+def test_hghtn_matches_openifs(fix, arm, g):
+    out = _hghtn(fix, arm, g, hard_config())
+    for k in _HG_INT:
+        np.testing.assert_array_equal(np.asarray(getattr(out, k)), fix[f"{arm}_{g}_{k}"], err_msg=k)
+    for k in _HG_SCAL + _HG_ROWS:
+        e = _err(getattr(out, k), fix[f"{arm}_{g}_{k}"])
+        assert e <= _TOL, (k, e)
+
+
+_HG_FIX = {}
+
+
+def _hg_fix():
+    if not _HG_FIX:
+        _HG_FIX.update(dict(np.load(_FIX)))
+    return _HG_FIX
+
+
+def _hg1(cfg, name, *, dT=0.0, khfl=None, kqfl=None, dt=None, slgs_fn=None, parcel=False):
+    """One SYN fixture column through VDFHGHTN (arm N) with targeted overrides;
+    returns every real output concatenated (or the CUBASEN parcel)."""
+    fx = _hg_fix()
+    i = list(fx["SYN_names"]).index(name)
+    th = _th(fx, "N", "SYN")
+    col = {k: _a(fx, "SYN", k)[i] for k in ("T", "q", "u", "v", "ql", "qe", "p_half", "p_full",
+                                             "geo_full", "geo_half", "land")}
+    o = lambda k: jnp.asarray(fx[f"N_SYN_{k}"][i])
+    T = col["T"] + dT
+    khfl = o("khfl") if khfl is None else khfl
+    kqfl = o("kqfl") if kqfl is None else kqfl
+    if parcel:
+        return th, ifs_hghtn_parcel(th, T, col["q"], col["u"], col["v"], col["qe"], col["p_half"],
+                                    col["p_full"], col["geo_full"], col["geo_half"], o("kmfl"),
+                                    khfl, kqfl, col["land"])[2]
+    slgs = ifs_slgs(T, col["q"], col["ql"], col["geo_full"], th.RCPD, th.RLVTT)
+    slgs = slgs if slgs_fn is None else slgs_fn(slgs, th, col["p_full"])
+    out = ifs_vdfhghtn(th, T, col["q"], col["u"], col["v"], slgs, col["geo_full"] + T * th.RCPD,
+                       col["qe"], col["p_half"], col["p_full"], col["geo_full"], col["geo_half"],
+                       o("pblh"), o("kmfl"), khfl, kqfl, col["land"],
+                       dt=float(fx["ptsphy"]) if dt is None else dt, cfg=cfg)
+    return jnp.concatenate([jnp.ravel(getattr(out, k)) for k in _HG_SCAL + _HG_ROWS])
+
+
+def _eis_case(cfg):
+    """The two EIS branches 0.5 width apart (smooth side of MAX)."""
+    def fn(slgs, th, p_full):
+        K = slgs.shape[0]
+        _, _, n3, _, n6, _ = njkt_levels(K, jnp.concatenate([p_full[:1], p_full]))
+        b1 = slgs[n6 - 1] - slgs[n3 - 1]
+        return slgs.at[-1].set(slgs[n3 - 1] - (b1 - 0.5 * IFSVDFConfig().eis_width_k * th.RCPD))
+    return _hg1(cfg, "sc_eis_a_sfc0", slgs_fn=fn)
+
+
+def _mf_cap_case(cfg):
+    """Lowest-level mass flux 0.5 width above its CFL cap (clipped side of MIN)."""
+    from legoesm.atmosphere.physics.turbulence import ifs_vdf as m
+    fx = _hg_fix()
+    i = list(fx["SYN_names"]).index("dry1500_sfc0")
+    K = fx["SYN_T"].shape[1]
+    mf_k = float(_hg1(hard_config(), "dry1500_sfc0", dt=1.0)[len(_HG_SCAL) + K + K - 1])
+    pf = fx["SYN_p_full"][i]
+    dt = (pf[-1] - pf[-2]) * m._MF_CFL / (_th(fx, "N", "SYN").RG
+                                          * (mf_k - 0.5 * IFSVDFConfig().mf_cap_width))
+    return _hg1(cfg, "dry1500_sfc0", dt=dt)
+
+
+def _foedelta_dT():
+    """Column shift that puts the lowest cloudy parcel level 0.0025 K above RTT
+    (inside the centred +-0.005 K band of the 0.01 K step)."""
+    th, b = _hg1(hard_config(), "sc_weak_sfc0", parcel=True)
+    k = int(np.max(np.nonzero(np.asarray(b["plu"]) > 0.0)[0]))
+    f = lambda d: float(_hg1(hard_config(), "sc_weak_sfc0", dT=d, parcel=True)[1]["ptu"][k]) - th.RTT
+    d0 = th.RTT - float(b["ptu"][k])
+    d = _bisect(f, 0.0025, d0 - 3.0, d0 + 3.0, n=40)
+    _, bb = _hg1(hard_config(), "sc_weak_sfc0", dT=d, parcel=True)
+    assert float(bb["plu"][k]) > 0.0 and 0.0 < float(bb["ptu"][k]) - th.RTT < 0.005
+    return d
+
+
+_SWITCH_CASES.update({
+    "eis_width_k": _eis_case,
+    "khvfl_pos_width": lambda cfg: _hg1(cfg, "dry1500_sfc0", khfl=-5.0e-4, kqfl=0.0),
+    "wsfc_pow_width": lambda cfg: _hg1(cfg, "dry1500_sfc0", khfl=-5.0e-4, kqfl=0.0),
+    "mf_cap_width": _mf_cap_case,
+    # weak flux: level-to-level mass-flux changes inside the 5e-4 band
+    "dmf_split_width": lambda cfg: _hg1(cfg, "dry1500_sfc0", khfl=-1.0e-6, kqfl=0.0),
+    "foedelta_width_k": lambda cfg: _hg1(cfg, "sc_weak_sfc0", dT=_foedelta_dT()),
+})
+
+
+@pytest.mark.parametrize("name", ("dry1500_sfc1", "dry1500_sfc0", "sc_eis_b_sfc0", "sc_weak_sfc0"))
+def test_hghtn_gradients_at_default(fix, name):
+    """check_grads through VDFHGHTN at the smooth default, one SYN column per PBL type."""
+    i = list(fix["SYN_names"]).index(name)
+    assert int(fix["N_SYN_kpbltype"][i]) == ("dry1500_sfc1", "dry1500_sfc0", "sc_eis_b_sfc0",
+                                             "sc_weak_sfc0").index(name)
+    f = lambda dT, khfl: jnp.sum(_hg1(IFSVDFConfig(), name, dT=dT, khfl=khfl) ** 2)
+    args = (jnp.zeros(fix["SYN_T"].shape[1]), jnp.asarray(fix["N_SYN_khfl"][i]))
+    check_grads(f, args, order=1, modes=("fwd", "rev"), atol=1e-6, rtol=1e-5, eps=1e-6)
+    gr = jax.grad(f, argnums=(0, 1))(*args)
+    assert all(np.all(np.isfinite(np.asarray(x))) for x in gr)
+    assert any(np.any(np.asarray(x) != 0.0) for x in gr)

@@ -49,6 +49,9 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+from legoesm.atmosphere.physics._ifs_thermo import satur_qsat
+from legoesm.atmosphere.physics.convection._ifs_cuascent import cubasen, cuinin
+from legoesm.atmosphere.physics.convection._ifs_cumastrn import njkt_levels
 from legoesm.core.smooth import sqrt_c1
 
 __physics_contract__ = {
@@ -107,6 +110,12 @@ __param_spec__ = {
             "cbrt_width": "smoothing width",
             "sqrt_width": "smoothing width",
             "guard_width_frac": "smoothing width",
+            "eis_width_k": "smoothing width",
+            "khvfl_pos_width": "smoothing width",
+            "wsfc_pow_width": "smoothing width",
+            "mf_cap_width": "smoothing width",
+            "dmf_split_width": "smoothing width",
+            "foedelta_width_k": "smoothing width",
         },
         "params": {},
     },
@@ -148,6 +157,19 @@ _EPS_FLUX = 1.0e-10          # vdfexcu.F90 ZEPS in the Obukhov length
 _EPS_MACH = 100.0 * float(np.finfo(np.float64).eps)   # vdfexcu.F90 ZEPSILON
 _RLAM_M = 150.0              # suvdf.F90:124 RLAM, unstable asymptotic length
 _RCDHALF = 16.0              # suvdfs.F90:159, PHIMU/PHIHU (fcvdfs.func.h)
+# --- vdfhghtn.F90 fixed numbers (49r1) ---
+_RICRI_OVERSHOOT = 50.0      # ZRICRI, overshoot limit of the inversion level
+_REISTHSC_K = 5.0            # suvdf.F90:135 REISTHSC, stratocumulus inversion strength
+_RDEPTHS_PA = 2.0e4          # sucumf.F90:170 RDEPTHS, maximum shallow cloud depth
+_MF_CM = 0.1                 # ZCM, mass-flux prefactor (consistent with vdfexcu)
+_MF_SIGW = 1.2               # sigma-w scale factor
+_MF_WSFC = 1.5               # surface velocity-scale factor
+_MF_POW = 0.33333            # the literal exponent of vdfhghtn.F90
+_MF_CFL = 3.0                # ZCONS10 = 3/(g*dt): mass-flux CFL cap
+_MF_ENTR_UP = 0.9            # entrainment share where the mass flux grows
+_MF_ENTR_DN = 0.1 * 0.5      # MAX(0,-0.1*ZFAC)*0.5 where it shrinks
+_MF_EPS = 1.0e-10            # ZDMFN/(PMFLX+1E-10)
+_SLGS_QT = 5.87              # vdfmain.F90:974 entropy-equivalent static energy factor
 # --- branch-evaluation bounds (numerics, vote 4 G1): inside the validity of
 # the LTG denominators and (1-16Ri)^(-1/4), outside the Ri blend band ---
 _RI_STABLE_LO = -0.03          # the LTG momentum denominator vanishes at Ri = -0.095
@@ -192,6 +214,13 @@ class IFSVDFConfig(NamedTuple):
     cbrt_width: float = 0.0033            # m3 s-3, C1 bridge of the radiative velocity cube root
     sqrt_width: float = 0.01              # C1 bridge of (1 - z/zml)^0.5
     guard_width_frac: float = 0.01        # |L| >= ZEPSILON and MAX(ZEPSILON, z_inv) guards
+    # --- VDFHGHTN (vote 5) ---
+    eis_width_k: float = 0.05             # MAX of the two static-energy jumps / cp
+    khvfl_pos_width: float = 1.0e-3       # K m s-1, MAX(0, -KHVFL)
+    wsfc_pow_width: float = 3.0e-4        # m3 s-3, C1 bridge of (.)^0.33333
+    mf_cap_width: float = 5.0e-4          # kg m-2 s-1, MIN(MF, MF_max)
+    dmf_split_width: float = 5.0e-4       # kg m-2 s-1, SIGN(dMF) entrainment split
+    foedelta_width_k: float = 0.01        # FOEDELTA (T >= RTT) in FOELH
 
 
 class IFSTOFDConfig(NamedTuple):
@@ -448,3 +477,162 @@ def ifs_tofd_coefficient(geo_full, u, v, sigflt, cfg: IFSTOFDConfig = IFSTOFDCon
     zs = jnp.where(zz > 0.0, zz, 1.0)
     c = coef * uabs * jnp.exp(-(zs / _TOFD_IZ_M) ** _TOFD_EXP) * zs ** _TOFD_IN
     return jnp.where(zz > 0.0, c, 0.0) * _step(_TOFD_ZMAX_M - zz, cfg.zmax_width_m, strict=False)
+
+
+class IFSVDFHghtnOutput(NamedTuple):
+    """VDFHGHTN outputs.  Half-level fields have KLEV+1 entries (Fortran
+    vdfhghtn 1..KLEV+1 = vdfmain 0..KLEV); integer levels are 1-based."""
+
+    ri: jax.Array        # (KLEV,) gradient Richardson number, entry KLEV = 0
+    khvfl: jax.Array     # K m s-1, surface buoyancy flux (downward +)
+    zinv: jax.Array      # m, PBL height
+    zcldbase: jax.Array  # m, cloud base (-100 = none)
+    eis: jax.Array       # K, inversion strength
+    kinv: jax.Array      # inversion level
+    kcbase: jax.Array    # cloud base level (-1 = none)
+    kctop: jax.Array     # cloud top level (-1 = none)
+    kpbltype: jax.Array  # 0 stable, 1 dry, 2 stratocumulus, 3 cumulus
+    mflx: jax.Array      # (KLEV+1,) kg m-2 s-1 dry-PBL mass flux
+    slguh: jax.Array     # (KLEV+1,) updraught generalised liquid static energy
+    qtuh: jax.Array      # (KLEV+1,) updraught total water
+    uuh: jax.Array       # (KLEV+1,) updraught u
+    vuh: jax.Array       # (KLEV+1,) updraught v
+
+
+def ifs_slgs(T, q, ql, geo_full, cpd, lv):
+    """vdfmain.F90:966-974 ZSLGSM1 (RVTMP2 = 0): s_l,g + cp T 5.87 q_t."""
+    return geo_full + cpd * T - lv * ql + cpd * T * _SLGS_QT * (q + ql)
+
+
+def ifs_hghtn_parcel(th, T, q, u, v, qe, p_half, p_full, geo_full, geo_half, kmfl, khfl,
+                     kqfl, land):
+    """VDFHGHTN's surface test parcel (vdfhghtn.F90:295-330): SATUR, CUININ and
+    CUBASEN (convection port, hard form) in the convection port's 1-based padded
+    layout.  Returns the half-level u, v (CUININ) and the CUBASEN dict."""
+    K = T.shape[0]
+    rd, cpd, retv = th.RD, th.RCPD, th.RETV
+    # 1-based padded layout of the convection port (index 0 a finite copy)
+    pf = lambda a: jnp.concatenate([a[:1], a])
+    pten, pqen, puen, pven, pgeo, pap = (pf(a) for a in (T, q, u, v, geo_full, p_full))
+    paph, pgeoh = pf(p_half), pf(geo_half)
+    lev = jnp.arange(K + 1)
+    njkt1, njkt2, _, _, njkt6, _ = njkt_levels(K, pap)
+    # --- 2. SATUR (KFLAG 1) from NJKT2 down, PQM1 above; CUININ
+    pqsen = jnp.where(lev >= njkt2, satur_qsat(th, pten, pap, kflag=1), pqen)
+    ztenh, zqenh, _, puu, pvu = cuinin(th, K, pten, pqen, pqsen, puen, pven, pgeo,
+                                             paph, pgeoh, njkt2)
+    # --- 3. surface fluxes for the test parcel (vdfhghtn.F90:316-322), CUBASEN
+    zrho = paph[K + 1] / (rd * T[-1] * (1.0 + retv * q[-1]))
+    b = cubasen(th, K, ztenh, zqenh, pgeoh, paph, kqfl * zrho, khfl * cpd * zrho, pf(qe),
+                pten, pqen, pqsen, pgeo, land, njkt1, njkt2, njkt6,
+                kindex=K, ldmixs=True, pkmfl=kmfl)
+    return puu, pvu, b
+
+
+def ifs_vdfhghtn(th, T, q, u, v, slgs, cptgz, qe, p_half, p_full, geo_full, geo_half,
+                 pblh, kmfl, khfl, kqfl, land, dt, cfg: IFSVDFConfig = IFSVDFConfig()):
+    """VDFHGHTN, one column (vdfhghtn.F90, 49r1).
+
+    ``th`` is the :class:`legoesm.atmosphere.physics._ifs_thermo.IFSThermo` of
+    the run (RVTMP2 = 0); full-level arrays KLEV, half-level arrays KLEV+1
+    (vdfmain 0..KLEV); ``land`` is 0 or 1 (LDLAND).  CUININ/CUBASEN are the
+    convection port's, in their exact hard form (vote 5 HR; KNOWN DIFFERENCE as
+    the IFS convection port #2281): the surface test parcel, its cloud base and
+    top, and the PBL type are discrete.
+    """
+    K = T.shape[0]
+    rg, rd, cpd, retv = th.RG, th.RD, th.RCPD, th.RETV
+    zrg = 1.0 / rg
+    dt_ = T.dtype
+    # --- 1. Richardson number between full levels (vdfhghtn.F90:279-293)
+    zdz = geo_full[:-1] - geo_full[1:]
+    du2 = _max((u[:-1] - u[1:]) ** 2 + (v[:-1] - v[1:]) ** 2, _REPDU2, cfg.repdu2_width)
+    droro = (2.0 * (cptgz[:-1] - cptgz[1:])
+             / (cptgz[:-1] + cptgz[1:] - geo_full[:-1] - geo_full[1:])
+             + retv * (q[:-1] - q[1:]))
+    ri = jnp.concatenate([zdz * droro / du2, jnp.zeros((1,), dt_)])
+
+    puu, pvu, b = ifs_hghtn_parcel(th, T, q, u, v, qe, p_half, p_full, geo_full, geo_half,
+                                   kmfl, khfl, kqfl, land)
+    ztu, zqu, zlu, zwu2h = b["ptu"], b["pqu"], b["plu"], b["pwu2h"]
+    kcbase, kctop = b["kcbot"], b["kctop"]
+    _, _, njkt3, njkt5, njkt6, _ = njkt_levels(K, jnp.concatenate([p_full[:1], p_full]))
+    pgeoh = jnp.concatenate([geo_half[:1], geo_half])
+    # --- 4. updraught conserved quantities on half levels 1..KLEV (+ KLEV+1 copy)
+    delta = _step(ztu - th.RTT, cfg.foedelta_width_k, strict=False)     # FOEDELTA
+    lh = delta * th.RLVTT + (1.0 - delta) * th.RLSTT                     # FOELH
+    slg = cpd * ztu + pgeoh[:K + 1] - lh * zlu                           # RVTMP2 = 0
+    slguh = jnp.concatenate([slg[1:K + 1], slg[K:K + 1]])
+    qtuh = jnp.concatenate([(zqu + zlu)[1:K + 1], (zqu + zlu)[K:K + 1]])
+    uuh0 = jnp.concatenate([puu[1:K + 1], u[-1:]])
+    vuh0 = jnp.concatenate([pvu[1:K + 1], v[-1:]])
+
+    # --- 5. inversion height and PBL type (discrete, vote 5 H2)
+    khvfl = khfl + retv * T[-1] * kqfl
+    conv = khvfl < 0.0
+    sg = lambda k: slgs[jnp.clip(k, 1, K) - 1]
+    eis = _max(sg(njkt6) - sg(njkt3), sg(njkt3) - slgs[-1], cfg.eis_width_k * cpd) / cpd
+    jk = jnp.arange(1, K + 1)
+    ok = conv & (zwu2h[1:K + 1] > 0.0) & (ri < _RICRI_OVERSHOOT) & (jk >= 2)
+    iinv = jnp.where(jnp.any(ok), jnp.min(jnp.where(ok, jk, K + 1)), K)
+    gh = lambda k: geo_half[jnp.clip(k - 1, 0, K)] * zrg                  # PGEOH(k)/g
+    ph = lambda k: p_half[jnp.clip(k - 1, 0, K)]
+    ikb = kcbase
+    ikt = jnp.where(kcbase == kctop, ikb, kctop + 1)
+    has_cb = ikb > 0
+    sc = has_cb & (eis > _REISTHSC_K) & (ph(ikb) - ph(ikt) <= _RDEPTHS_PA)
+    kpbl = jnp.where(conv, jnp.where(has_cb, jnp.where(sc, 2, 3), 1), 0)
+    zinv_loop = jnp.where(conv, gh(iinv), 0.0)
+    zinv_m = jnp.where(conv & has_cb, gh(ikb), zinv_loop)             # ZINV (mass flux)
+    iinv = jnp.where(conv & sc, ikt, iinv)
+    zinv_p = jnp.where(conv & sc, gh(ikt), zinv_loop)                 # PZINV
+    zcldbase = jnp.where(conv & has_cb, gh(ikb), -100.0)
+    zt5 = gh(njkt5)
+    # all heights here are gh(k) of integer levels, so MIN and the gates below are
+    # exact index picks (vote 6 V6)
+    zinv_p = jnp.where(conv, jnp.minimum(zinv_p, zt5), zinv_p)
+    zinv_m = jnp.where(conv, jnp.minimum(zinv_m, zt5), zinv_m)
+    kinv = jnp.maximum(njkt5, iinv)
+
+    # --- 6. dry-PBL mass flux and updraught momentum (vdfhghtn.F90:471-500)
+    zcons10 = _MF_CFL / (rg * dt)
+    zz = geo_half[K - 1] * zrg                                           # PGEOH(KLEV)/g
+    dry = kpbl <= 1
+    gate = dry & (zinv_m > zz)
+    w0 = gate.astype(dt_)
+    zinv_s = jnp.where(zinv_m > 0.0, zinv_m, 1.0)
+    rho_k = p_full[-1] / (rd * T[-1] * (1.0 + retv * q[-1]))
+    wsfc = _MF_WSFC * _RKAP * _max(-khvfl, 0.0, cfg.khvfl_pos_width) * rg * zz / T[-1]
+    mf_k = (_MF_CM * _MF_SIGW * _pow_c1(wsfc, _MF_POW, cfg.wsfc_pow_width)
+            * jnp.sqrt(jnp.where(gate, 1.0 - zz / zinv_s, 1.0)) * rho_k)   # vote 6 V7
+    mf_k = _min(mf_k, (p_full[-1] - p_full[-2]) * zcons10, cfg.mf_cap_width)
+    mf_k = w0 * mf_k
+
+    def body(carry, j):
+        # Fortran JK = j (KLEV-1 .. 2); python full index j-1, half index j-1
+        mf_up, uu_up, vu_up = carry
+        zh = geo_half[j - 1] * zrg
+        w = w0 * (zh < zinv_m)
+        mfmax = (p_full[j - 1] - p_full[j - 2]) * zcons10
+        mf = mf_k * geo_half[j - 1] / geo_half[K - 1] * (1.0 - zh / zinv_s) ** 2
+        mf = _min(mf, mfmax, cfg.mf_cap_width)
+        dmf = mf - mf_up
+        entr = (_MF_ENTR_UP * _sm(cfg.dmf_split_width).pos(dmf, cfg.dmf_split_width)
+                + _MF_ENTR_DN * _sm(cfg.dmf_split_width).pos(-dmf, cfg.dmf_split_width))
+        entr = entr / (mf + _MF_EPS)
+        uu = (uu_up * (1.0 - entr) + 2.0 * entr * u[j - 1]) / (1.0 + entr)
+        vu = (vu_up * (1.0 - entr) + 2.0 * entr * v[j - 1]) / (1.0 + entr)
+        mf_o = w * mf
+        uu_o = w * uu + (1.0 - w) * uuh0[j - 1]
+        vu_o = w * vu + (1.0 - w) * vuh0[j - 1]
+        return (mf_o, uu_o, vu_o), (mf_o, uu_o, vu_o)
+
+    js = jnp.arange(K - 1, 1, -1)
+    _, (mfs, uus, vus) = jax.lax.scan(body, (mf_k, uuh0[K - 1], vuh0[K - 1]), js)
+    idx = js - 1
+    mflx = jnp.zeros(K + 1, dt_).at[K - 1].set(mf_k).at[idx].set(mfs)
+    uuh = uuh0.at[idx].set(uus)
+    vuh = vuh0.at[idx].set(vus)
+    return IFSVDFHghtnOutput(ri=ri, khvfl=khvfl, zinv=zinv_p, zcldbase=zcldbase, eis=eis,
+                             kinv=kinv, kcbase=kcbase, kctop=kctop, kpbltype=kpbl,
+                             mflx=mflx, slguh=slguh, qtuh=qtuh, uuh=uuh, vuh=vuh)

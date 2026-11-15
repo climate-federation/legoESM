@@ -25,8 +25,31 @@ from pathlib import Path
 import numpy as np
 
 from legoesm import constants as C
+from legoesm.thermo import saturation_mixing_ratio
 
-GROUPS = ("L32", "L137", "STRESS")
+GROUPS = ("L32", "L137", "STRESS", "SYN")
+# SYN: analytic columns on the first L137 column's pressure grid (vote 3,
+# codex note: targeted inputs).  The audit columns hold no dry mixed layer
+# deeper than ~300 m (the mass-flux loop never runs) and no cloud-topped layer
+# with inversion strength 2-5 K or cloud depth 5-20 kPa, so neither the
+# stratocumulus test (REISTHSC, RDEPTHS) nor the entrainment split binds.
+# IFS's inversion strength counts q_t (vdfhghtn SLGS), so the cloud-topped
+# profiles need a dry free troposphere and a large theta jump to reach 2-5 K.
+# (name, theta_ml K, z_inv m, inversion jump K, free-troposphere dtheta/dz K/km,
+#  q_t mixed layer, q_t free troposphere)
+SYN = (("dry700", 298.0, 700.0, 6.0, 6.0, 3.0e-3, 1.0e-3),
+       ("dry1500", 300.0, 1500.0, 4.0, 5.0, 2.0e-3, 1.0e-3),
+       ("dry2500", 305.0, 2500.0, 3.0, 5.0, 1.5e-3, 0.8e-3),
+       ("sc_weak", 289.0, 900.0, 1.5, 1.0, 9.0e-3, 4.0e-3),
+       ("sc_eis_a", 289.0, 900.0, 12.0, 3.0, 9.0e-3, 1.0e-3),
+       ("sc_eis_b", 289.0, 900.0, 16.0, 3.0, 9.0e-3, 1.0e-3),
+       ("sc_eis_c", 289.0, 900.0, 22.0, 3.0, 9.0e-3, 1.0e-3),
+       ("sc_deep_a", 290.0, 1600.0, 18.0, 3.0, 1.0e-2, 1.0e-3),
+       ("sc_deep_b", 290.0, 1600.0, 26.0, 3.0, 1.0e-2, 1.0e-3))
+# SYN wind: linear shear so the updraught momentum entrainment is visible
+SYN_U, SYN_DUDZ, SYN_V, SYN_DVDZ = 3.0, 4.0e-3, -2.0, 2.0e-3
+# isothermal stratosphere: the theta profile alone reaches ~26 K at the 1 Pa top
+SYN_T_STRAT = 210.0
 # (SHF_down W m-2, LHF_down W m-2, u* m s-1, wind factor); None = the column's own flux.
 # Sets 4-5 are targeted (vote 3, codex note): a weak sensible flux between the
 # two VDFEXCU cumulus thresholds, and a weakly stable, windy column whose
@@ -55,6 +78,37 @@ ROWS = ("ri", "mflx", "slguh", "qtuh", "uuh", "vuh", "cfm", "cfh", "kh", "km", "
 def _r(x):
     """The value the driver reads back from its '%.17e' text."""
     return np.array([float(f"{float(v):.17e}") for v in np.ravel(x)]).reshape(np.shape(x))
+
+
+def synthetic(base):
+    """SYN columns: theta/q_t profiles integrated hydrostatically on base column 0's grid."""
+    ph, pf = np.asarray(base["p_half"][0], float), np.asarray(base["p_full"][0], float)
+    K = pf.size
+    kap = C.R_d / C.c_pd
+    out = {k: [] for k in ("names", "land", "shf_up", "lhf_up", "p_half", "p_full", "geo_full",
+                           "geo_half", "T", "q", "u", "v", "lit", "dT_rad", "dq_adv", "dq_other")}
+    for name, th0, zi, dth, gam, qt0, qft in SYN:
+        z = np.zeros(K)
+        for _ in range(4):      # fixed point: profile in z, z from the hydrostatic Tv
+            th = np.where(z < zi, th0, th0 + dth + gam * 1e-3 * (z - zi))
+            qt = np.where(z < zi, qt0, qft)
+            T = np.maximum(th * (pf / C.p_ref) ** kap, SYN_T_STRAT)
+            q = np.minimum(qt, np.asarray(saturation_mixing_ratio(T, pf)))
+            tv = T * (1.0 + (C.R_v / C.R_d - 1.0) * q)
+            gh = np.zeros(K + 1)
+            for k in range(K - 1, 0, -1):
+                gh[k] = gh[k + 1] + C.R_d * tv[k] * np.log(ph[k + 1] / ph[k])
+            gh[0] = gh[1] + C.R_d * tv[0] * np.log(2.0)
+            alpha = np.r_[np.log(2.0), 1.0 - ph[1:K] / (ph[2:] - ph[1:K]) * np.log(ph[2:] / ph[1:K])]
+            gf = gh[1:] + C.R_d * tv * alpha
+            z = gf / C.g
+        for k, v in (("names", name), ("land", 0.0), ("shf_up", 100.0), ("lhf_up", 50.0),
+                     ("p_half", ph), ("p_full", pf), ("geo_full", gf), ("geo_half", gh),
+                     ("T", T), ("q", q), ("u", SYN_U + SYN_DUDZ * z), ("v", SYN_V + SYN_DVDZ * z),
+                     ("lit", qt - q), ("dT_rad", np.zeros(K)), ("dq_adv", np.zeros(K)),
+                     ("dq_other", np.zeros(K))):
+            out[k].append(v)
+    return {k: np.array(v) for k, v in out.items()}
 
 
 def inputs(d):
@@ -125,7 +179,9 @@ def run(build, x, arm, tag):
 def main(cols, build, outp):
     fx = {"ptsphy": np.array(PTSPHY)}
     for g in GROUPS:
-        x = inputs(np.load(Path(cols) / f"columns_{g}.npz", allow_pickle=True))
+        src = Path(cols) / f"columns_{'L137' if g == 'SYN' else g}.npz"
+        d = np.load(src, allow_pickle=True)
+        x = inputs(synthetic(d) if g == "SYN" else d)
         for k, v in x.items():
             fx[f"{g}_{k}"] = v
         for arm in ARMS:
