@@ -29,8 +29,12 @@ rad_update_steps: 24        # CAM6 f09: radiation hourly at this dt
 # lifts 1 column (Taklimakan, +8.48 mm) to the run's dry floor, vote
 # 2026-11-12); file md5 b4eeee974d84b16da99dfda954d85c38; full provenance in
 # the file's metadata.
+# _v2 (vote 2026-11-15, 3-0): the dry floor moved on main (bc2f61141d) and the
+# file above was refused at setup; regrid_land_ic.py --lift-only lifts the same
+# column 3453 by 0.25 mm (surfdata_1.9x2.5 md5 aad251b8..., air-entry -0.02 m),
+# as 06a48bc153 did for MPAS; file md5 79522dc3d17b8a1b1d17c1e209926ec7.
 # data/ is gitignored: stage the file in the launch directory.
-land_ic: data/lmip_soil_ic/soil_ic_fv3duo48_era5T_19790101.npz
+land_ic: data/lmip_soil_ic/soil_ic_fv3duo48_era5T_19790101_v2.npz
 # Subgrid orography, two-cell cutoff (see the C24 deck): --fine-res-deg 1.0
 # --block-deg 2.0 --resolved-cutoff-deg 3.0 (cell 1.727 deg; block > cell
 # because the builder needs two source samples per block, vote V5; scales

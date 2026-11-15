@@ -684,6 +684,7 @@ def test_setup_multilayer_land_on_latlon_grid(monkeypatch, tmp_path):
         # the default meant that flipping it turned twenty of them red
         # at once for a reason none of them is about.
         land_surface_scheme="simple_seb",
+        ml_pipeline=True,
     )
     driver = ModelDriver(cfg, output_dir=tmp_path)
     driver.setup()          # raised TypeError (reshape) before the fix
@@ -1370,3 +1371,25 @@ def test_pipeline_land_tile_refuses_precip_without_its_frozen_part(
     with pytest.raises(ValueError, match="precip_frozen"):
         _tile_forcing(monkeypatch, tmp_path,
                       lambda n: jnp.full(n, 1e-5), None)
+
+
+def _strict_errors(cfg):
+    try:
+        cfg.validate_strict()
+    except ValueError as e:
+        return str(e)
+    return ""
+
+
+def test_multilayer_land_off_the_column_loop_needs_ml_pipeline():
+    """Production full physics runs only on the column loop; the compiled
+    pipeline keeps it for ML training, which opts in with ml_pipeline."""
+    pipe = dict(grid=GridConfig(grid_type="latlon"), use_multilayer_land=True,
+                land_mask_path="land_mask.nc")
+    assert "ml_pipeline=True" in _strict_errors(ExperimentConfig(**pipe))
+    ExperimentConfig(ml_pipeline=True, **pipe).validate_strict()
+    ExperimentConfig(dycore=DycoreConfig(column_lane=True),
+                     **pipe).validate_strict()
+    # the opt-in covers land only: CAM6 clouds were never wired on the pipeline
+    assert "cam6_clubb' is wired on the MPAS lane only" in _strict_errors(
+        ExperimentConfig(ml_pipeline=True, cloud_scheme="cam6_clubb", **pipe))
