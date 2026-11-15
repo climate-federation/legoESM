@@ -149,6 +149,7 @@ def test_solver_thickness_matches_carried_thickness(runs):
     for _, hl in on:
         assert abs(hl["split_zdf_thickness_mismatch"]) <= REL_TOL * abs(hl["entry"])
         assert np.isfinite(hl["split_adv_flux_divergence"])
+        assert np.isfinite(hl["split_adv_inactive_keep"])
 
 
 def test_freshwater_stage_is_live(runs):

@@ -7010,7 +7010,7 @@ class LatLonCGridOceanModel:
                 _grid.area, state.land_mask.data,
                 bool(getattr(_cfg_b, "ew_cyclic_overlap", False)))
             _hl = {}
-            _hl_fd_T = None
+            _hl_fd_T = _hl_keep_T = None
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
                                return_tracer_heat_split=_return_heat_ledger,
@@ -11649,7 +11649,11 @@ class LatLonCGridOceanModel:
                             _hl_fd_T = total_flux_div
 
                     tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
+                    if _hl is not None and tr_name == 'T':
+                        _hl_raw_T = tr_new
                     tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
+                    if _hl is not None and tr_name == 'T':
+                        _hl_keep_T = tr_new - _hl_raw_T
 
                     # Store current flux divergence for AB2 carry
                     if _tti == "ab2":
@@ -11730,6 +11734,12 @@ class LatLonCGridOceanModel:
                 # division, its floor and the inactive-cell keep add.
                 _hl["split_adv_flux_divergence"] = _hl_content(
                     -dt * _hl_fd_T, jnp.ones_like(_hl_fd_T), _hl_w)
+            if _hl_keep_T is not None:
+                # Inactive cells keep T_mid instead of hT_new/h_new; the rest
+                # of (step_advection - flux divergence) is the h_new floor
+                # and the h_old -> h_new reweighting of the kept values.
+                _hl["split_adv_inactive_keep"] = _hl_content(
+                    _hl_keep_T, h_k_new, _hl_w)
 
         # #1442: keep the tracer-advecting mass fluxes instead of discarding
         # them.  PURE DIAGNOSTIC -- read-only capture of values this step
