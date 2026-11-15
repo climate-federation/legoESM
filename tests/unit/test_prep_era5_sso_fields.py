@@ -157,17 +157,65 @@ def test_rejects_partial_globe_and_out_of_range_inputs():
         prep.build_era5_sso(raw, block_deg=2.0)
 
 
-def test_resolved_terrain_slope_enters_the_tensor():
-    """Isotropic subgrid + resolved ridges varying only in lon -> anisotropic, theta 0.
+def _resolved(z_m, block_deg=2.0):
+    """Build with no ERA5 subgrid slope, so K/L/M are the resolved terrain's alone."""
+    out = prep.build_era5_sso(_raw(slor=0.0, z=z_m * constants.g_ifs), block_deg=block_deg)
+    return out["SSO_K"].values, out["SSO_L"].values, out["SSO_M"].values
 
-    The resolved height now subgrid at block scale carries slope in x only, so it
-    adds to K and L (not M), turning gamma below 1 with the major axis along x.
-    """
+
+def _square_cos(block):
+    """cos(lat) at the 2x2-square centres of each block of the 1-deg fixture."""
+    lat = np.arange(-89.0, 90.5, 1.0).reshape(-1, block)
+    return np.cos(np.deg2rad(0.5 * (lat[:, 1:] + lat[:, :-1])))
+
+
+_D = np.deg2rad(1.0) * constants.R_earth
+
+
+def test_resolved_slope_zonal_ramp_is_exact():
+    """h = c * lon index: every in-block square has hx = c / (D cos), hy = 0."""
+    c = 10.0
+    z = np.broadcast_to(c * np.arange(360.0), (181, 360)).copy()
+    K, L, M = _resolved(z)
+    w = _square_cos(2)
+    expect = (w * 0.5 * (c / (_D * w)) ** 2).sum(1) / w.sum(1)
+    np.testing.assert_allclose(K[:, 0], expect, rtol=1e-12)
+    np.testing.assert_allclose(L[:, 0], expect, rtol=1e-12)
+    np.testing.assert_allclose(M, 0.0, atol=1e-20)
+
+
+def test_resolved_slope_meridional_and_oblique_are_exact():
+    c = 10.0
+    i = np.arange(181.0)[::-1, None]          # raw lat runs 90 -> -90; i grows northward
+    K, L, M = _resolved(np.broadcast_to(c * i, (181, 360)).copy())
+    hy2 = (c / _D) ** 2
+    np.testing.assert_allclose(K, 0.5 * hy2, rtol=1e-12)
+    np.testing.assert_allclose(L, -0.5 * hy2, rtol=1e-12)
+    np.testing.assert_allclose(M, 0.0, atol=1e-20)
+    j = np.arange(360.0)[None, :]
+    K2, L2, M2 = _resolved(c * i + c * j)
+    w = _square_cos(2)
+    np.testing.assert_allclose(M2[:, 0], ((w * (c / (_D * w)) * (c / _D)).sum(1) / w.sum(1)),
+                               rtol=1e-12)
+
+
+def test_resolved_slope_keeps_two_point_variation():
+    """Alternating 0/400 m columns: a centred stencil would see no slope at all."""
     z = np.zeros((181, 360))
-    z[:, 2::4] = 400.0 * constants.g_ifs
-    z[:, 3::4] = 400.0 * constants.g_ifs
-    out = prep.build_era5_sso(_raw(slor=1e-4, isor=1.0, anor=0.0, z=z), block_deg=4.0)
-    mid = slice(15, 30)                       # away from the poles
-    assert np.all(out["SSO_GAMMA"].values[mid] < 0.9)
-    np.testing.assert_allclose(out["SSO_THETA"].values[mid], 0.0, atol=1e-9)
-    assert np.all(out["SSO_SIGMA"].values[mid] > 2e-4)
+    z[:, 1::2] = 400.0
+    K, L, M = _resolved(z)
+    w = _square_cos(2)
+    expect = (w * 0.5 * (400.0 / (_D * w)) ** 2).sum(1) / w.sum(1)
+    np.testing.assert_allclose(K[:, 0], expect, rtol=1e-12)
+    np.testing.assert_allclose(M, 0.0, atol=1e-20)
+
+
+def test_jump_between_blocks_is_resolved_not_subgrid():
+    """Blocks flat inside, different from their neighbours: no subgrid slope or variance."""
+    z = np.zeros((181, 360))
+    z[:, 2::4] = 500.0
+    z[:, 3::4] = 500.0
+    K, L, M = _resolved(z)
+    np.testing.assert_allclose(K, 0.0, atol=1e-20)
+    out = prep.build_era5_sso(_raw(sdor=0.0, slor=0.0, z=z * constants.g_ifs), block_deg=2.0)
+    np.testing.assert_allclose(out["SSO_STDH"].values, 0.0, atol=1e-9)

@@ -23,8 +23,8 @@ Aggregation (decisions voted 2026-11-15; see the PR body):
 - gamma/theta/sigma: via the Baines-Palmer tensor K = <hx^2+hy^2>/2,
   L = <hx^2-hy^2>/2, M = <hx hy>, which are averages of gradient products and
   so aggregate linearly.  The resolved ERA5 terrain that becomes subgrid at
-  block scale adds its own gradient tensor (deviation from the block-mean
-  gradient), so std and K/L/M describe the same terrain.  The file stores
+  block scale adds its own gradient tensor (slopes inside each block only),
+  so std and K/L/M describe the same terrain.  The file stores
   K, L, M, so a runtime bilinear sample never interpolates an angle;
   gamma/theta/sigma are stored as well.
 - sdfor: rms of sdfor only (the TOFD band is fixed, not model-relative).
@@ -103,6 +103,35 @@ def _native_points(raw):
     return r, lat[1:], lon
 
 
+def resolved_slope_tensor(h, lat, factor: int, res_deg: float):
+    """Block-mean Baines-Palmer K, L, M of the resolved terrain inside each block.
+
+    At block scale the model keeps only each block's mean height, so every slope
+    inside a block is subgrid, and every jump between blocks is resolved.
+    Gradients are taken on each 2x2 square of points that lies wholly inside a
+    block (so two-point variation counts, and no stencil crosses a block edge),
+    and averaged with cos(lat) weights at the square centres.
+    """
+    from legoesm import constants
+
+    n_lat, n_lon = h.shape
+    hb = h.reshape(n_lat // factor, factor, n_lon // factor, factor)
+    latb = lat.reshape(-1, factor)
+    cos_c = np.cos(np.deg2rad(0.5 * (latb[:, 1:] + latb[:, :-1])))[:, :, None, None]
+    d = np.deg2rad(res_deg) * constants.R_earth
+    a, b = hb[:, :-1, :, :-1], hb[:, :-1, :, 1:]      # south-west, south-east
+    c, e = hb[:, 1:, :, :-1], hb[:, 1:, :, 1:]        # north-west, north-east
+    hx = 0.5 * ((b - a) + (e - c)) / (d * cos_c)
+    hy = 0.5 * ((c - a) + (e - b)) / d
+    w = np.broadcast_to(cos_c, hx.shape)
+    ws = w.sum(axis=(1, 3))
+
+    def wmean(x):
+        return (w * x).sum(axis=(1, 3)) / ws
+
+    return wmean(0.5 * (hx ** 2 + hy ** 2)), wmean(0.5 * (hx ** 2 - hy ** 2)), wmean(hx * hy)
+
+
 def build_era5_sso(raw, *, block_deg: float):
     """PURE: raw ERA5 point-grid Dataset -> block-aggregated SSO Dataset."""
     import xarray as xr
@@ -137,25 +166,10 @@ def build_era5_sso(raw, *, block_deg: float):
 
     mean = {v: block_area_mean(fine[v], lat, factor) for v in fine}
 
-    def up(a):
-        return np.repeat(np.repeat(a, factor, axis=0), factor, axis=1)
-
-    var_resolved = block_area_mean((fine["h"] - up(mean["h"])) ** 2, lat, factor)
-    # The resolved terrain that becomes subgrid at block scale also carries
-    # slope: add its gradient tensor (deviation from the block-mean gradient),
-    # so std and K/L/M describe the same terrain.  Measured on ERA5: +2.5 %
-    # (median) / +9 % (p90) of K in mountain blocks at 1 deg, +5 % / +15 % at 2 deg.
-    dx = np.deg2rad(fine_res_deg) * constants.R_earth
-    coslat = np.cos(np.deg2rad(lat))[:, None]
-    hx = np.where(coslat > 1e-12, (np.roll(fine["h"], -1, axis=1)
-                                   - np.roll(fine["h"], 1, axis=1))
-                  / (2.0 * dx * np.maximum(coslat, 1e-12)), 0.0)
-    hy = np.gradient(fine["h"], dx, axis=0)
-    hx = hx - up(block_area_mean(hx, lat, factor))
-    hy = hy - up(block_area_mean(hy, lat, factor))
-    mean["K"] = mean["K"] + block_area_mean(0.5 * (hx ** 2 + hy ** 2), lat, factor)
-    mean["L"] = mean["L"] + block_area_mean(0.5 * (hx ** 2 - hy ** 2), lat, factor)
-    mean["M"] = mean["M"] + block_area_mean(hx * hy, lat, factor)
+    h_mu = np.repeat(np.repeat(mean["h"], factor, axis=0), factor, axis=1)
+    var_resolved = block_area_mean((fine["h"] - h_mu) ** 2, lat, factor)
+    dK, dL, dM = resolved_slope_tensor(fine["h"], lat, factor, fine_res_deg)
+    mean["K"], mean["L"], mean["M"] = mean["K"] + dK, mean["L"] + dL, mean["M"] + dM
     std = np.sqrt(np.maximum(mean["sdor2"], 0.0) + var_resolved)
     std_filt = np.sqrt(np.maximum(mean["sdfor2"], 0.0))
     sigma, gamma, theta = sso_from_tensor(mean["K"], mean["L"], mean["M"])
