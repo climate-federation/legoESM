@@ -363,9 +363,15 @@ def main(argv=None) -> int:
             wet = bl >= 0
             bt = np.where(wet, s["H_bathy"] - zh[np.maximum(bl, 0)], 0.0)
             pc = create_full_step_coordinate(zs, bl, bottom_thickness=bt)
+            if not np.array_equal(wet, s["land_mask"] > 0.5):
+                raise SystemExit("FATAL: bottom_level and land_mask disagree")
             if not np.allclose(np.asarray(pc.h_partial).sum(-1), s["H_bathy"],
                                rtol=0, atol=1e-6):
                 raise SystemExit("FATAL: rebuilt cells do not sum to H_bathy")
+        if "bottom_level" in s and not np.array_equal(
+                np.asarray(pc.bottom_level), s["bottom_level"].astype(np.int64)):
+            raise SystemExit("FATAL: rebuilt bottom levels differ from the run's "
+                             "(wrong --nemo-geometry for this run?)")
         zi = s.get("z_interface_ref")
         if zi is None:
             raise SystemExit("FATAL: snapshot lacks z_interface_ref (run without "
@@ -380,8 +386,9 @@ def main(argv=None) -> int:
     if getattr(rargs, "isf", False) and rargs.isf_forcing_file:
         from legoesm.ocean.forcing.isf_spe import load_isf_spe_forcing
         s0 = snaps[0]
-        isf = load_isf_spe_forcing(rargs.isf_forcing_file, _snap_lat(paths[0]),
-                                   _snap_lon(paths[0]), land_mask=s0["land_mask"])
+        p_xy = next(p for p in paths if _SNAP_RE.search(p.name))   # a restart has no lat/lon
+        isf = load_isf_spe_forcing(rargs.isf_forcing_file, _snap_lat(p_xy),
+                                   _snap_lon(p_xy), land_mask=s0["land_mask"])
         fwf12 = np.asarray(isf.fwf, dtype=np.float64)
 
         def isf_fwf_for(sa, sb, dt):

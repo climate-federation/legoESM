@@ -216,22 +216,34 @@ def _cli_json(run_dir, *extra):
     return rc, json.loads(out.read_text())
 
 
-def test_restart_start_window_equals_the_snapshot_window(tmp_path):
+@pytest.mark.parametrize("flags", ["", "--ew-cyclic-overlap"])
+def test_restart_start_window_equals_the_snapshot_window(tmp_path, flags):
     import shutil
     (tmp_path / "ref").mkdir()
-    ref = _run_dir(tmp_path / "ref", Q)
-    rc_ref, js_ref = _cli_json(ref)
+    ref = _run_dir(tmp_path / "ref", Q, extra_flags=flags)
+    for tag, sal, h in (("day0005", 4.0, 1.0), ("day0010", 4.0, 1.2)):
+        with np.load(ref / f"snapshot_{tag}.npz") as z:
+            snap = dict(z)
+        snap.update(S=np.full((NY, NX, 3), 35.0), ice_concentration=np.full((NY, NX), 0.5),
+                    ice_thickness=np.full((NY, NX), h), ice_salinity=np.full((NY, NX), sal))
+        np.savez(ref / f"snapshot_{tag}.npz", **snap)
+    rc_ref, js_ref = _cli_json(ref, "--max-salt-rel", "1.0")
     rec = tmp_path / "rec"
     rec.mkdir()
     for f in ("domain_cfg.nc", "run_manifest.json", "run.log", "snapshot_day0010.npz"):
         shutil.copy(ref / f, rec / f)
     with np.load(ref / "snapshot_day0005.npz") as a:
-        np.savez(rec / "restart_leg1.npz", T=a["T"], eta=a["eta"], H_bathy=a["H_bathy"],
-                 land_mask=a["land_mask"], _step=a["step"], _time_days=a["time_days"])
-    rc, js = _cli_json(rec, "--restart-start", str(rec / "restart_leg1.npz"))
+        np.savez(rec / "restart_leg1.npz", T=a["T"], S=a["S"], eta=a["eta"],
+                 H_bathy=a["H_bathy"], land_mask=a["land_mask"],
+                 ice_concentration=a["ice_concentration"], ice_h_ice=a["ice_thickness"],
+                 ice_S_ice=a["ice_salinity"], _step=a["step"], _time_days=a["time_days"])
+    rc, js = _cli_json(rec, "--restart-start", str(rec / "restart_leg1.npz"),
+                       "--max-salt-rel", "1.0")
     assert rc == rc_ref == 0
     assert js["worst_abs_residual_wm2"] == pytest.approx(js_ref["worst_abs_residual_wm2"],
                                                         abs=1e-12)
+    assert js["worst_abs_salt_rel"] == pytest.approx(js_ref["worst_abs_salt_rel"], abs=1e-15)
+    assert js_ref["worst_abs_salt_rel"] > 1e-6     # the ice term is live in this case
 
 
 def test_restart_start_refuses_a_restart_from_another_grid(tmp_path):
@@ -263,4 +275,5 @@ def test_domain_cfg_cells_with_a_thick_bottom_cell_close(tmp_path):
     m = json.loads((run / "run_manifest.json").read_text())
     m["run"]["command_line"] = m["run"]["command_line"].replace("--nemo-geometry domain_cfg", "")
     (run / "run_manifest.json").write_text(json.dumps(m))
-    assert _cli(run, 1e-6) == 1               # interface rule: wrong cells, residual
+    with pytest.raises(SystemExit, match="bottom levels differ"):
+        _cli(run, 1e-6)                       # interface rule: a level the run lacks
