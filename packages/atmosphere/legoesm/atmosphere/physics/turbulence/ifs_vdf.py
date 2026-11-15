@@ -659,6 +659,8 @@ def ifs_vdfhghtn(th, T, q, u, v, slgs, cptgz, qe, p_half, p_full, geo_full, geo_
 # Stage 2: implicit solvers (vdfdifm, vdfdifh flux path, vdfincr, vdfdifc).
 # No switches on traced state.  Tridiagonal solves use the shared
 # thomas_solve (vote 7 D2); round-off differs from the IFS eliminations.
+# Exchange coefficients cfm/cfh are full-level (KLEV entries): cfh[k] is
+# PCFH(k+1), on the half level below full level k.
 # KTOP is the static Fortran (1-based) top level (vote 7 D3); above it the
 # tendencies are 0 and the solved fields equal the inputs (undefined in IFS).
 # --------------------------------------------------------------------------
