@@ -83,9 +83,9 @@ def _resolved_path_flags(_LAUNCHER) -> list[str]:
 
 
 def _sso_flag_value(flags: list[str]) -> str | None:
-    if "--subgrid-orography-file" not in flags:
+    if "--default-subgrid-orography-file" not in flags:
         return None
-    return flags[flags.index("--subgrid-orography-file") + 1]
+    return flags[flags.index("--default-subgrid-orography-file") + 1]
 
 
 @pytest.mark.parametrize("launcher", _LAUNCHERS, ids=_launcher_ids())

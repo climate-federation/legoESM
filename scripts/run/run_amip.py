@@ -1964,6 +1964,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "per-column launch height comes from this field "
                              "(real mountains, ~0 over ocean) instead of the "
                              "scalar 500 m default.")
+    parser.add_argument("--default-subgrid-orography-file", type=str,
+                        default="",
+                        help="Machine default for --subgrid-orography-file, "
+                             "used only when neither the --config deck nor the "
+                             "command line names one (the launchers pass it, "
+                             "so a deck built for one grid keeps its own file).")
     parser.add_argument("--albedo-land-month", type=int, default=0,
                         help="Month (1-12) to pick from a monthly land-albedo "
                              "climatology; 0 = annual mean (default).")
@@ -3518,6 +3524,8 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
 
 def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
                       argv: list[str] | None = None) -> argparse.Namespace:
+    if not args.subgrid_orography_file:
+        args.subgrid_orography_file = args.default_subgrid_orography_file
     # Auto-detect MPI environment.
     # SLURM_NTASKS=1 is always set in batch jobs even for single-task GPU runs;
     # only treat it as an MPI signal when > 1 actual tasks are allocated.

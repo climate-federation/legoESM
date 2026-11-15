@@ -5390,6 +5390,8 @@ _DUO_DECK_OWN_ROWS = frozenset({
     "physics_update_steps", "rad_update_steps",
     # the same land IC recipe on this grid's own columns (a per-grid file)
     "land_ic_path",
+    # subgrid orography with a two-cell resolved cutoff (user 2026-11-15)
+    "subgrid_orography_path",
     # hardware, not physics: GPU g-point batch (fluxes differ by summation order)
     "rrtmgp_gpoint_batch_size",
     # RRTMGP scan vs unrolled recurrence: the MPAS deck's scan row was measured
@@ -5423,8 +5425,9 @@ def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
     own = migrate_renamed_keys(yaml.safe_load(
         (amip / "amip_production_fv3duo_c24.yaml").read_text()))
     assert own.get("include") == "amip_production.yaml"
-    own_dests = ({k.split(".")[-1] for k in _DUO_DECK_OWN_ROWS} - {"land_ic_path"}
-                 | {"land_ic"})
+    own_dests = ({k.split(".")[-1] for k in _DUO_DECK_OWN_ROWS}
+                 - {"land_ic_path", "subgrid_orography_path"}
+                 | {"land_ic", "subgrid_orography_file"})
     extra = set(own) - {"include"} - own_dests
     assert not extra, f"duo deck sets rows that are not its own: {sorted(extra)}"
     mpas = _resolved_deck_fields(amip / "amip_production.yaml")
@@ -5443,7 +5446,7 @@ def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
 
 _DUO_C48_OWN_ROWS = frozenset({
     "grid.resolution", "dycore.dt", "physics_update_steps", "rad_update_steps",
-    "land_ic_path",
+    "land_ic_path", "subgrid_orography_path",
 })
 
 
@@ -5454,8 +5457,9 @@ def test_duo_c48_deck_differs_from_the_c24_duo_deck_only_in_resolution_rows():
     own = migrate_renamed_keys(yaml.safe_load(
         (amip / "amip_production_fv3duo_c48.yaml").read_text()))
     assert own.get("include") == "amip_production_fv3duo_c24.yaml"
-    own_dests = ({k.split(".")[-1] for k in _DUO_C48_OWN_ROWS} - {"land_ic_path"}
-                 | {"land_ic"})
+    own_dests = ({k.split(".")[-1] for k in _DUO_C48_OWN_ROWS}
+                 - {"land_ic_path", "subgrid_orography_path"}
+                 | {"land_ic", "subgrid_orography_file"})
     extra = set(own) - {"include"} - own_dests
     assert not extra, f"C48 duo deck sets rows that are not its own: {sorted(extra)}"
     c24 = _resolved_deck_fields(amip / "amip_production_fv3duo_c24.yaml")
@@ -6396,3 +6400,33 @@ def test_fp32_land64_micro64_deck_selects_fp64_land_and_micro():
     assert args.microphysics_compute_precision == "fp64"
     assert args.use_multilayer_land is True
     assert args.microphysics != "none"
+
+
+@pytest.mark.parametrize("deck, sso", [
+    ("amip_production_fv3duo_c24.yaml", "data/amip/sso_stdh_fv3duo_c24_cut2dx.nc"),
+    ("amip_production_fv3duo_c48.yaml", "data/amip/sso_stdh_fv3duo_c48_cut2dx.nc"),
+    ("amip_production.yaml", "/machine/default_sso.nc"),
+])
+def test_launcher_sso_default_never_replaces_a_decks_own_file(deck, sso):
+    """The launchers pass the MPAS 2-deg subgrid orography as a machine
+    DEFAULT; the duo decks name their two-cell-cutoff files and keep them."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser)
+    parser.set_defaults(**keys, _config_keys=frozenset(keys))
+    argv = _AMIP_DUMMY_PATHS + ["--default-subgrid-orography-file",
+                                "/machine/default_sso.nc"]
+    args = _postprocess_args(parser.parse_args(argv), parser, argv)
+    assert build_config_from_args(args).subgrid_orography_path == sso
+
+
+@pytest.mark.parametrize("cell, block, cutoff", [(3.454, 3.0, 6.0),
+                                                 (1.727, 2.0, 3.0)])
+def test_duo_sso_cutoff_is_two_cells_and_passes_the_scale_guard(cell, block, cutoff):
+    """User 2026-11-15: resolved cutoff = two grid cells at C24 and C48, snapped
+    down to the 1-deg source sampling; nothing above it is launched as drag."""
+    from legoesm.grids.topography import _check_sso_scale_decomposition
+    assert 2 * cell - 1.0 < cutoff <= 2 * cell
+    assert cutoff >= block
+    built = {"block_deg": block, "fine_res_deg": 1.0, "resolved_cutoff_deg": cutoff}
+    assert _check_sso_scale_decomposition(built, cell, "f.nc", "warn") is None
