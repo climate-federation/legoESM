@@ -1390,6 +1390,10 @@ class ExperimentConfig(NamedTuple):
     # slab knobs (C_land, emissivity_land) become unused and
     # the multilayer config below takes over.
     use_multilayer_land: bool = False
+    # ML/AIMIP training entry points only: lets full physics (multilayer land)
+    # run on the compiled pipeline, which production refuses.  Not a run_amip
+    # argument, so no deck can set it.
+    ml_pipeline: bool = False
     # Land-tile call interval [s]; 0.0 (default) advances the land every
     # host step (legacy).  A positive value calls the tile every
     # round(land_update_seconds/dt) steps with the atmosphere forcing
@@ -2693,6 +2697,13 @@ class ExperimentConfig(NamedTuple):
                 "multilayer land step (column_loop_lane and "
                 "use_multilayer_land); this run has neither, so it would be "
                 "ignored")
+        if (self.use_multilayer_land and not self.column_loop_lane
+                and not self.ml_pipeline):
+            errors.append(
+                "use_multilayer_land runs in production only on the column "
+                "loop (MPAS, or dycore.column_lane); the compiled pipeline "
+                f"(discretization={d.discretization!r}) is kept for ML/AIMIP "
+                "training, whose entry points set ml_pipeline=True.")
         if self.microphysics_compute_precision not in ("policy", "fp64"):
             errors.append(
                 "microphysics_compute_precision must be one of "

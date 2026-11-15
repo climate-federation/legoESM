@@ -110,6 +110,7 @@ def setup_driver(args):
         days=1, dataset="analytical", radiation="gray",
         land_mask_path=args.land_mask_file,
         use_multilayer_land=True,
+        ml_pipeline=True,
         multilayer_n_layers=args.n_layers, multilayer_soil_depth=args.soil_depth,
         # fp64 is REQUIRED for the backward: stiff clay van-Genuchten soils
         # (n_vg~1.09 -> m~0.083) make Se**(-1/m) and its reverse-mode derivative
