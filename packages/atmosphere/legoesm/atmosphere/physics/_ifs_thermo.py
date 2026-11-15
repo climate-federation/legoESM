@@ -51,6 +51,16 @@ RTICECU_OFFSET_K = 38.0  # sucumf.F90:272  RTICECU = RTT - 38 (LMFGLAC, convecti
 RTBER_OFFSET_K = 5.0     # suphec.F90:247-248  RTBER = RTBERCU = RTT - 5
 RKAP = constants.kappa_von_karman   # parphy.F90 RKAP = 0.4 (same value)
 QSAT_CAP = 0.5           # cuadjtq.F90 ZQMAX / satur.F90 MIN(0.5, ZQS)
+# --- RULE 5 windows of the convection thermodynamics (#2281 part 2), used only
+# when a caller passes an IfsSmooth ``sm`` (CUMASTRN); w = 0.01 x a scale of the
+# switched quantity (P2 over the CUMASTRN oracle fixture,
+# scripts/validate/oracle/bechtold_ifs/switch_scales.py); O(1) ratios 0.01 x
+# the threshold. ---
+_W_REL = 0.01
+_S_TCU = 1.0             # [K] temperature (PLACEHOLDER, measured)
+_S_CONDCU = 1.0e-6       # [kg/kg] condensation increment (PLACEHOLDER)
+_W_TCU, _W_CONDCU = _W_REL * _S_TCU, _W_REL * _S_CONDCU
+_W_EPCU = _W_REL * QSAT_CAP   # e/p against QSAT_CAP (O(1) ratio)
 RKOOP1 = 2.583           # suphec.F90:253  Koop homogeneous-nucleation fit
 RKOOP2 = 0.48116e-2      # suphec.F90:254  [K-1]
 
@@ -135,9 +145,15 @@ def foealfa(th, t):
                               - th.RTICE) * th.RTWAT_RTICE_R) ** 2)
 
 
-def foealfcu(th, t):
-    return jnp.minimum(1.0, ((jnp.maximum(th.RTICECU, jnp.minimum(th.RTWAT, t))
-                              - th.RTICECU) * th.RTWAT_RTICECU_R) ** 2)
+def foealfcu(th, t, sm=None):
+    """Convective liquid fraction.  With an IfsSmooth ``sm`` (not exact) the
+    upper clip at RTWAT (a slope jump) is C1; the lower clip at RTICECU is
+    already C1 (the ramp is quadratic) and the min(1, .) never binds."""
+    if sm is None or sm.hard:
+        return jnp.minimum(1.0, ((jnp.maximum(th.RTICECU, jnp.minimum(th.RTWAT, t))
+                                  - th.RTICECU) * th.RTWAT_RTICECU_R) ** 2)
+    return ((jnp.maximum(th.RTICECU, sm.min(t, th.RTWAT, _W_TCU))
+             - th.RTICECU) * th.RTWAT_RTICECU_R) ** 2
 
 
 def ew_mixed(th, a, t):
@@ -159,8 +175,8 @@ def foeewm(th, t):
     return ew_mixed(th, foealfa(th, t), t)
 
 
-def foeewmcu(th, t):
-    return ew_mixed(th, foealfcu(th, t), t)
+def foeewmcu(th, t, sm=None):
+    return ew_mixed(th, foealfcu(th, t, sm), t)
 
 
 def dem_mixed(th, a, t):
@@ -172,8 +188,8 @@ def foedem(th, t):
     return dem_mixed(th, foealfa(th, t), t)
 
 
-def foedemcu(th, t):
-    return dem_mixed(th, foealfcu(th, t), t)
+def foedemcu(th, t, sm=None):
+    return dem_mixed(th, foealfcu(th, t, sm), t)
 
 
 def foeldcpm(th, t):
@@ -181,13 +197,13 @@ def foeldcpm(th, t):
     return a * th.RALVDCP + (1.0 - a) * th.RALSDCP
 
 
-def foeldcpmcu(th, t):
-    a = foealfcu(th, t)
+def foeldcpmcu(th, t, sm=None):
+    a = foealfcu(th, t, sm)
     return a * th.RALVDCP + (1.0 - a) * th.RALSDCP
 
 
-def foelhmcu(th, t):
-    a = foealfcu(th, t)
+def foelhmcu(th, t, sm=None):
+    a = foealfcu(th, t, sm)
     return a * th.RLVTT + (1.0 - a) * th.RLSTT
 
 
@@ -210,14 +226,30 @@ def satur_qsat(th, t, p, kflag=0):
 # ---------------------------------------------------------------------------
 # CUADJTQ (LPHYLIN = .FALSE.), one point
 # ---------------------------------------------------------------------------
-def _adj_mixed(th, psp, t, q):
+def _gate0(sm, zcond, zcond1):
+    """where(zcond == 0, 0, zcond1); smooth: zcond1 x the one-sided weight of
+    zcond > 0 (exact at zcond <= 0 and zcond >= the window)."""
+    if sm is None or sm.hard:
+        return jnp.where(zcond == 0.0, 0.0, zcond1)
+    return zcond1 * sm.on(zcond, 0.0, _W_CONDCU)
+
+
+def _pos(sm, x):
+    return jnp.maximum(x, 0.0) if sm is None else sm.pos(x, _W_CONDCU)
+
+
+def _cap(sm, x):
+    return jnp.minimum(QSAT_CAP, x) if sm is None else sm.min(x, QSAT_CAP, _W_EPCU)
+
+
+def _adj_mixed(th, psp, t, q, sm=None):
     """cuadjtq.F90 KCALL 1 (and the mixed-phase half of KCALL 6), :156-187."""
     zqp = 1.0 / psp
 
     def cond(t, q, cap):
         zl = 1.0 / (t - th.R4LES)
         zi = 1.0 / (t - th.R4IES)
-        a = foealfcu(th, t)
+        a = foealfcu(th, t, sm)
         zqsat = th.R2ES * (a * jnp.exp(th.R3LES * (t - th.RTT) * zl)
                            + (1.0 - a) * jnp.exp(th.R3IES * (t - th.RTT) * zi))
         zqsat = cap(zqsat * zqp)
@@ -225,17 +257,19 @@ def _adj_mixed(th, psp, t, q):
         zf = a * th.R5ALVCP * zl ** 2 + (1.0 - a) * th.R5ALSCP * zi ** 2
         return (q * zcor ** 2 - zqsat * zcor) / (zcor ** 2 + zqsat * zf)
 
-    zcond = jnp.maximum(cond(t, q, lambda x: jnp.minimum(QSAT_CAP, x)), 0.0)
-    t = t + foeldcpmcu(th, t) * zcond
+    # FMINJ is MIN in a different arithmetic: the same cap when smooth
+    cap2 = (lambda x: fminj(QSAT_CAP, x)) if sm is None or sm.hard else (lambda x: _cap(sm, x))
+    zcond = _pos(sm, cond(t, q, lambda x: _cap(sm, x)))
+    t = t + foeldcpmcu(th, t, sm) * zcond
     q = q - zcond
-    zcond1 = cond(t, q, lambda x: fminj(QSAT_CAP, x))
-    zcond1 = jnp.where(zcond == 0.0, 0.0, zcond1)
-    t = t + foeldcpmcu(th, t) * zcond1
+    zcond1 = cond(t, q, cap2)
+    zcond1 = _gate0(sm, zcond, zcond1)
+    t = t + foeldcpmcu(th, t, sm) * zcond1
     q = q - zcond1
     return t, q
 
 
-def _adj_liquid(th, psp, t, q):
+def _adj_liquid(th, psp, t, q, sm=None):
     """cuadjtq.F90 KCALL 6, liquid-only half (LDOFLAG), :191-215."""
     zqp = 1.0 / psp
 
@@ -246,52 +280,68 @@ def _adj_liquid(th, psp, t, q):
         zf = th.R5ALVCP * zl ** 2
         return (q * zcor ** 2 - zqsat * zcor) / (zcor ** 2 + zqsat * zf)
 
-    zcond = jnp.maximum(cond(t, q, lambda x: jnp.minimum(QSAT_CAP, x)), 0.0)
+    cap2 = (lambda x: fminj(QSAT_CAP, x)) if sm is None or sm.hard else (lambda x: _cap(sm, x))
+    zcond = _pos(sm, cond(t, q, lambda x: _cap(sm, x)))
     t = t + th.RALVDCP * zcond
     q = q - zcond
-    zcond1 = cond(t, q, lambda x: fminj(QSAT_CAP, x))
-    zcond1 = jnp.where(zcond == 0.0, 0.0, zcond1)
+    zcond1 = cond(t, q, cap2)
+    zcond1 = _gate0(sm, zcond, zcond1)
     t = t + th.RALVDCP * zcond1
     q = q - zcond1
     return t, q
 
 
-def _adj_cu_unclamped(th, psp, t, q, clamp_first, clamp_second):
+def _adj_cu_unclamped(th, psp, t, q, clamp_first, clamp_second, sm=None):
     """cuadjtq.F90 KCALL 2 (:221-243) and KCALL 3 (:316-335): FOE*CU form."""
     zqp = 1.0 / psp
 
     def cond(t, q):
-        zqsat = jnp.minimum(QSAT_CAP, foeewmcu(th, t) * zqp)
+        zqsat = _cap(sm, foeewmcu(th, t, sm) * zqp)
         zcor = 1.0 / (1.0 - th.RETV * zqsat)
         zqsat = zqsat * zcor
-        return (q - zqsat) / (1.0 + zqsat * zcor * foedemcu(th, t))
+        return (q - zqsat) / (1.0 + zqsat * zcor * foedemcu(th, t, sm))
 
     zcond = clamp_first(cond(t, q))
-    t = t + foeldcpmcu(th, t) * zcond
+    t = t + foeldcpmcu(th, t, sm) * zcond
     q = q - zcond
     zcond1 = clamp_second(cond(t, q), zcond)
-    t = t + foeldcpmcu(th, t) * zcond1
+    t = t + foeldcpmcu(th, t, sm) * zcond1
     q = q - zcond1
     return t, q
 
 
-def cuadjtq(th, kcall, psp, t, q, flag=True, oflag=None):
+def cuadjtq(th, kcall, psp, t, q, flag=True, oflag=None, sm=None):
     """CUADJTQ for one point.  ``kcall`` is a static python int; ``flag``
-    (LDFLAG) and ``oflag`` (LDOFLAG, KCALL 6 only) are booleans.  Points
-    with ``flag`` False are returned unchanged (KCALL 3 has no flag)."""
+    (LDFLAG) is a boolean and ``oflag`` (LDOFLAG, KCALL 6 only) a boolean or,
+    with ``sm``, a weight in [0, 1].  Points with ``flag`` False are returned
+    unchanged (KCALL 3 has no flag).  ``sm`` (an IfsSmooth, CUMASTRN only):
+    the condensation clamps, the saturation cap and the second-iteration gate
+    take their C1 forms (windows ``_W_*CU``); None = exact."""
     if kcall == 1:
-        tn, qn = _adj_mixed(th, psp, t, q)
+        tn, qn = _adj_mixed(th, psp, t, q, sm)
     elif kcall == 6:
-        tm, qm = _adj_mixed(th, psp, t, q)
-        tl, ql = _adj_liquid(th, psp, t, q)
-        tn = jnp.where(oflag, tl, tm)
-        qn = jnp.where(oflag, ql, qm)
+        tm, qm = _adj_mixed(th, psp, t, q, sm)
+        tl, ql = _adj_liquid(th, psp, t, q, sm)
+        if sm is None or sm.hard:
+            tn = jnp.where(oflag, tl, tm)
+            qn = jnp.where(oflag, ql, qm)
+        else:
+            tn = oflag * tl + (1.0 - oflag) * tm
+            qn = oflag * ql + (1.0 - oflag) * qm
     elif kcall == 2:
-        tn, qn = _adj_cu_unclamped(
-            th, psp, t, q, lambda c: jnp.minimum(c, 0.0),
-            lambda c1, c: jnp.where(c == 0.0, jnp.minimum(c1, 0.0), c1))
+        if sm is None or sm.hard:
+            tn, qn = _adj_cu_unclamped(
+                th, psp, t, q, lambda c: jnp.minimum(c, 0.0),
+                lambda c1, c: jnp.where(c == 0.0, jnp.minimum(c1, 0.0), c1), sm)
+        else:
+            # min(c, 0) = -pos(-c); the second clamp min(c1, 0) = c1 - pos(c1)
+            # applies where the first one bound (c = 0): weight 1 - on(-c, 0)
+            tn, qn = _adj_cu_unclamped(
+                th, psp, t, q, lambda c: -sm.pos(-c, _W_CONDCU),
+                lambda c1, c: c1 - (1.0 - sm.on(-c, 0.0, _W_CONDCU))
+                * sm.pos(c1, _W_CONDCU), sm)
     elif kcall == 3:
-        return _adj_cu_unclamped(th, psp, t, q, lambda c: c, lambda c1, c: c1)
+        return _adj_cu_unclamped(th, psp, t, q, lambda c: c, lambda c1, c: c1, sm)
     else:
         raise ValueError(f"cuadjtq: KCALL {kcall} is not ported (1, 2, 3, 6 are)")
     return jnp.where(flag, tn, t), jnp.where(flag, qn, q)

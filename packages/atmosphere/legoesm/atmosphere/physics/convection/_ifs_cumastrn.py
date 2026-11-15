@@ -746,11 +746,12 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
 
     # 2. CUININ, :436-445
     ztenh, zqenh, _zqsenh, zuu, zvu = cuinin(
-        th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2)
+        th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2, sm=sm)
     zud, zvd, ztd, zqd = zuu, zvu, ztenh, zqenh
     # 3. CUBASEN, :450-461 (ZKMFL = 0)
     b = cubasen(th, K, ztenh, zqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
-                pten, pqen, pqsen, pgeo, land, njkt1, njkt2, njkt6, entrorg=tun.entrorg)
+                pten, pqen, pqsen, pgeo, land, njkt1, njkt2, njkt6, entrorg=tun.entrorg,
+                sm=sm)
     ldcum, kcbot, ictop0, idpl = b["ldcum"], b["kcbot"], b["kctop"], b["kdpl"]
     # sub-cloud budgets, :463-479
     zkhfl = -pahfs_sfc - rlvtt * pqhfl_sfc
@@ -781,7 +782,7 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
                pap, paph, pvervel, b["pwubase"], ldcum, ktype, b["klab"], b["ptu"],
                b["pqu"], b["plu"], zmfub, kcbot, idpl, njkt7, rprcon=tun.rprcon,
                zdnoprc=tun.zdnoprc, entrorg=tun.entrorg, detrpen=tun.detrpen,
-               entshalp=tun.entshalp)
+               entshalp=tun.entshalp, sm=sm)
     ztenh, zqenh = a["ptenh"], a["pqenh"]
     ldcum, ktype, kcbot, kctop = a["ldcum"], a["ktype"], a["kcbot"], a["kctop"]
     ptu, pqu, plu, plrain = a["ptu"], a["pqu"], a["plu"], a["plrain"]

@@ -24,12 +24,14 @@ import numpy as np
 
 from legoesm.atmosphere.physics import _ifs_smooth
 from legoesm.atmosphere.physics._ifs_thermo import lego_thermo, satur_qsat
+from legoesm.atmosphere.physics import _ifs_thermo
 from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+from legoesm.atmosphere.physics.convection import _ifs_cuascent
 
 FIXTURE = (Path(__file__).resolve().parents[4] / "tests" / "atmosphere"
            / "oracle_fixtures" / "bechtold_ifs.npz")
 GROUPS = ("L32", "L137", "STRESS")
-MODULES = (M,)
+MODULES = (M, _ifs_cuascent, _ifs_thermo)
 _ONE_ARG = ("pos", "neg1", "abs")
 _TWO_ARG = ("max", "min", "gt", "ge", "lt", "le", "on", "off")
 _FLOOR = 1.0e-14
@@ -41,7 +43,8 @@ def _classes():
     for mod in MODULES:
         for name in dir(mod):
             if name.startswith("_S_") and hasattr(mod, "_W_" + name[3:]):
-                out[(mod, "_W_" + name[3:])] = name[3:]
+                tag = "" if mod is M else "[" + mod.__name__.rsplit(".", 1)[1] + "]"
+                out[(mod, "_W_" + name[3:])] = name[3:] + tag
     return out
 
 

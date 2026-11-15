@@ -25,6 +25,7 @@ import jax.numpy as jnp
 
 from legoesm.core.profile_metrics import safe_sqrt_nan
 
+from .._ifs_smooth import IfsSmooth
 from .._ifs_thermo import (
     cuadjtq, foealfa, foealfcu, foeewm, QSAT_CAP, RKAP,
 )
@@ -113,6 +114,33 @@ ZVW_EXP = 0.2         # :724
 ZWMEAN_MIN = 1.0e-2   # :863  floor of the mean updraught KE [m2 s-2]
 ZDPMEAN_MIN = 1.0     # :863  floor of the averaging depth [Pa]
 
+# --- RULE 5 smooth-window widths (#2281 part 2; IfsSmooth, hard_switches False):
+# w = 0.01 x a scale of the switched quantity, the scale = 2nd percentile of
+# |x| > 1e-14 over the oracle fixture per class
+# (scripts/validate/oracle/bechtold_ifs/switch_scales.py); O(1) ratios use
+# 0.01 x the threshold (0.01 where the threshold is 0 or 1).  The
+# temperature clamp [ZTU_MIN, ZTU_MAX] and the division floors RMFCMIN,
+# ZKEDKE_FLOOR, ZDPMEAN_MIN stay hard; the exact cloud-base estimate in
+# CUBASEN feeds only the (hard) level choice and stays exact. ---
+_W_REL = 0.01
+_S_MF = 1.0e-3        # [kg m-2 s-1] mass flux (= _ifs_cumastrn._S_MF, part 1)
+_S_TEX = 1.0e-2       # [K] parcel temperature excess (PLACEHOLDER)
+_S_T = 1.0            # [K] temperature (PLACEHOLDER)
+_S_VAP = 1.0e-6       # [kg/kg] vapour (PLACEHOLDER)
+_S_COND = 1.0e-6      # [kg/kg] condensate (PLACEHOLDER)
+_S_SE = 1.0e2         # [J/kg] static energy (PLACEHOLDER)
+_S_KE = 1.0e-1        # [m2/s2] updraught kinetic energy (PLACEHOLDER)
+_S_VEL = 1.0e-1       # [m/s] updraught velocity (PLACEHOLDER)
+_S_BUO = 1.0e-2       # [K] virtual-temperature buoyancy (PLACEHOLDER)
+_S_BUOC = 1.0e-4      # [1] normalised buoyancy (PLACEHOLDER)
+_S_CAPEL = 1.0e-1     # [J/kg] per-level CAPE increment (PLACEHOLDER)
+(_W_MF, _W_TEX, _W_T, _W_VAP, _W_COND, _W_SE, _W_KE, _W_VEL, _W_BUO, _W_BUOC,
+ _W_CAPEL) = (_W_REL * x for x in (_S_MF, _S_TEX, _S_T, _S_VAP, _S_COND, _S_SE,
+                                    _S_KE, _S_VEL, _S_BUO, _S_BUOC, _S_CAPEL))
+_W_ONE = _W_REL                    # O(1) ratios against 1 (and the [0, 1] clip)
+_W_RH = _W_REL * ZRH_ADV           # RH against ZRH_ADV
+_W_OENTR = _W_REL * ZOENTR_MAX     # organised entrainment against its cap
+
 
 # ---------------------------------------------------------------------------
 # helpers (one column, 1-based arrays)
@@ -146,15 +174,11 @@ def sdiv(a, b, ok):
     return a / jnp.where(ok, b, 1.0)
 
 
-def _fsign_half(x):
-    """0.5 + SIGN(0.5, x): 1 for x >= 0, 0 for x < 0."""
-    return jnp.where(x >= 0.0, 1.0, 0.0)
-
-
 # ---------------------------------------------------------------------------
 # CUININ (cuinin.F90:139-199)
 # ---------------------------------------------------------------------------
-def cuinin(th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2):
+def cuinin(th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2, sm=None):
+    sm = IfsSmooth(True) if sm is None else sm
     jk = jnp.arange(K + 1)
     up = jnp.concatenate([pten[:1], pten[:-1]])     # PTEN(JK-1)
     gup = jnp.concatenate([pgeo[:1], pgeo[:-1]])
@@ -162,17 +186,17 @@ def cuinin(th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2):
     qsup = jnp.concatenate([pqsen[:1], pqsen[:-1]])
     rcpd = th.RCPD
     zorcpd = 1.0 / rcpd
-    ptenh = (jnp.maximum(rcpd * up + gup, rcpd * pten + pgeo) - pgeoh[:K + 1]) * zorcpd
+    ptenh = (sm.max(rcpd * pten + pgeo, rcpd * up + gup, _W_SE) - pgeoh[:K + 1]) * zorcpd
     pqenh = qup
     pqsenh = qsup
     adj = (jk >= 2) & (jk < K - 1) & (jk >= njkt2)
     # levels outside the window (incl. the model top, PAPH(1) may be 0) are
     # never adjusted (cuinin.F90:154); a finite pressure there keeps the
     # discarded lane's gradient finite (value-identical)
-    ta, qsa = cuadjtq(th, 3, jnp.where(adj, paph[:K + 1], paph[K]), ptenh, pqsenh)
+    ta, qsa = cuadjtq(th, 3, jnp.where(adj, paph[:K + 1], paph[K]), ptenh, pqsenh, sm=sm)
     ptenh = jnp.where(adj, ta, ptenh)
     pqsenh = jnp.where(adj, qsa, pqsenh)
-    pqenh = jnp.where(adj, jnp.maximum(jnp.minimum(qup, qsup) + (pqsenh - qsup), 0.0), pqenh)
+    pqenh = jnp.where(adj, sm.pos(sm.min(qup, qsup, _W_VAP) + (pqsenh - qsup), _W_VAP), pqenh)
     ptenh = ptenh.at[K].set((rcpd * pten[K] + pgeo[K] - pgeoh[K]) * zorcpd)
     pqenh = pqenh.at[K].set(pqen[K])
     ptenh = ptenh.at[1].set(pten[1])
@@ -192,14 +216,15 @@ def cuinin(th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2):
 # ---------------------------------------------------------------------------
 def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
             pten, pqen, pqsen, pgeo, land, njkt1, njkt2, njkt6, entrorg=ENTRORG,
-            *, kindex=None, ldmixs=False, pkmfl=None):
+            *, kindex=None, ldmixs=False, pkmfl=None, sm=None):
     """Returns dict: ptu, pqu, plu, klab, ldcum, ldsc, kcbot, kbotsc, kctop
     (ICTOP0), kdpl, pwubase, pcape, pwu2h (surface-parcel kinetic energy).
 
     Defaults are CUMASTRN's call (KINDEX = NJKT1, LDMIXS = .FALSE., PKMFL = 0);
     VDFHGHTN calls it with ``kindex=K, ldmixs=True`` and the surface kinematic
-    momentum flux (vdfhghtn.F90:341-350).
+    momentum flux (vdfhghtn.F90:341-350).  ``sm``: IfsSmooth (None = exact).
     """
+    sm = IfsSmooth(True) if sm is None else sm
     rg, rcpd, rd, retv = th.RG, th.RCPD, th.RD, th.RETV
     zrg = 1.0 / rg
     zrcpd = 1.0 / rcpd
@@ -248,10 +273,10 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
         unst = zkhvfl < 0.0
         zws = ZWS_SCALE * spow(jnp.where(unst, zws0, 1.0), ZWS_EXP)
         zws_ok = jnp.where(unst, zws, 1.0)
-        ztex = jnp.maximum(-ZWS_FAC * pahfs_sfc / (zrho_s * zws_ok * rcpd), ZTEXC0)
-        zqex = jnp.maximum(-ZWS_FAC * pqhfl_sfc / (zrho_s * zws_ok), ZQEXC0)
-        ztex = jnp.minimum(ztex, ZTEX_MAX)
-        zqex = jnp.minimum(zqex, ZQEX_MAX)
+        ztex = sm.max(-ZWS_FAC * pahfs_sfc / (zrho_s * zws_ok * rcpd), ZTEXC0, _W_TEX)
+        zqex = sm.max(-ZWS_FAC * pqhfl_sfc / (zrho_s * zws_ok), ZQEXC0, _W_VAP)
+        ztex = sm.min(ztex, ZTEX_MAX, _W_TEX)
+        zqex = sm.min(zqex, ZQEX_MAX, _W_VAP)
         s_qu = zqenh[K] + zqex
         s_suh = zs_enh[K] + rcpd * ztex
         s_tu = (zs_enh[K] - pgeoh[K]) * zrcpd + ztex
@@ -260,13 +285,15 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
         ztexc = jnp.asarray(ZTEXC0, f)
         zqexc = jnp.asarray(ZQEXC0, f)
         km1 = jkk == K - 1
-        ztexc = jnp.where(km1, jnp.minimum(jnp.maximum(ztexc, st["ztex"]), ZTEX_MAX), ztexc)
-        zqexc = jnp.where(km1, jnp.minimum(jnp.maximum(zqexc, st["zqex"]), ZQEX_MAX), zqexc)
-        gate = ((jkk < K - 1) & (jkk > njkt6)
-                & (kget(zqenh, jkk) / kget(pqsen, jkk) < ZRH_ADV))
-        zadv = jnp.minimum(ZQADV_MAX, jnp.maximum(0.0, kget(ptenqa, jkk) * ZQADV_TAU))
+        ztexc = jnp.where(km1, sm.min(sm.max(st["ztex"], ztexc, _W_TEX), ZTEX_MAX, _W_TEX),
+                          ztexc)
+        zqexc = jnp.where(km1, sm.min(sm.max(st["zqex"], zqexc, _W_VAP), ZQEX_MAX, _W_VAP),
+                          zqexc)
+        gate = (((jkk < K - 1) & (jkk > njkt6))
+                * sm.lt(kget(zqenh, jkk) / kget(pqsen, jkk), ZRH_ADV, _W_RH))
+        zadv = sm.min(sm.pos(kget(ptenqa, jkk) * ZQADV_TAU, _W_VAP), ZQADV_MAX, _W_VAP)
         # LDLAND as the land fraction (exact for land in {0, 1})
-        zqexc = zqexc + land * jnp.where(gate, zadv, 0.0)
+        zqexc = zqexc + land * gate * zadv
         e_qu = kget(zqenh, jkk) + zqexc
         e_suh = kget(zs_enh, jkk) + rcpd * ztexc
         e_tu = (kget(zs_enh, jkk) - kget(pgeoh, jkk)) * zrcpd + ztexc
@@ -327,14 +354,14 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
             if ldmixs:                                    # :462
                 zeps = jnp.where((kindex == K) & (kget(s["zlu"], jk + 1) > 0.0),
                                  zeps * ENTSTPC3, zeps)
-            mix_s = jnp.minimum(1.0, 0.5 * zdz * zeps)
+            mix_s = sm.min(0.5 * zdz * zeps, 1.0, _W_ONE)
             ztmp = 1.0 / (1.0 + mix_s)
             qu_s = (qu1 * (1.0 - mix_s) + 2.0 * mix_s * zqf) * ztmp
             suh_s = (suh1 * (1.0 - mix_s) + 2.0 * mix_s * zsf) * ztmp
             # deep: :454-472
-            mix_d = ZMIX_DEEP * entrorg * zdz * jnp.minimum(
-                1.0, (kget(pqsen, jk) / pqsen[K]) ** 3)
-            mix_d = jnp.minimum(1.0, mix_d)
+            mix_d = ZMIX_DEEP * entrorg * zdz * sm.min(
+                (kget(pqsen, jk) / pqsen[K]) ** 3, 1.0, _W_ONE)
+            mix_d = sm.min(mix_d, 1.0, _W_ONE)
             qu_d = qu1 * (1.0 - mix_d) + zqf * mix_d
             suh_d = suh1 * (1.0 - mix_d) + zsf * mix_d
             zmix = jnp.where(shallow, mix_s, mix_d)
@@ -347,11 +374,11 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
             # nothing from such a lane is written)
             tu = jnp.where(on, tu, kget(ptenh, jk))
             qu = jnp.where(on, qu, kget(pqenh, jk))
-            tu, qu = cuadjtq(th, 1, kget(paph, jk), tu, qu, on)
-            zdq = jnp.maximum(zqold - qu, 0.0)
+            tu, qu = cuadjtq(th, 1, kget(paph, jk), tu, qu, on, sm=sm)
+            zdq = sm.pos(zqold - qu, _W_COND)
             lu = kget(s["zlu"], jk + 1) + zdq
-            zlglac = zdq * ((1.0 - foealfcu(th, tu))
-                            - (1.0 - foealfcu(th, kget(s["ztu"], jk + 1))))
+            zlglac = zdq * ((1.0 - foealfcu(th, tu, sm))
+                            - (1.0 - foealfcu(th, kget(s["ztu"], jk + 1), sm)))
             lu = 0.5 * lu
             tu = tu + th.RALFDCP * zlglac
             suh = rcpd * tu + kget(pgeoh, jk)
@@ -362,7 +389,7 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
             ztmp = 1.0 / (1.0 + 2.0 * zmix)
             wu2 = (kget(s["zwu2h"], jk + 1) * (1.0 - 2.0 * zmix) + 2.0 * zbuof * zdz) * ztmp
             s["zcape"] = kset(s["zcape"], jkk, kget(s["zcape"], jkk)
-                            + jnp.maximum(0.0, zbuof * zdz), on)
+                            + sm.pos(zbuof * zdz, _W_CAPEL), on)
             # exact cloud base, :517-555
             ik = jk + 1
             tuk = kget(s["ztu"], ik)
@@ -419,7 +446,7 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
         lldeep = kget(paph, jkb) - kget(paph, jkt) > RDEPTHS
         lldcum = jnp.where(lldeep & (kindex < K - 1), False, st["lldcum"])
         go_s = jnp.where(kindex == K - 1, ~lldcum, True)
-        wub = safe_sqrt_nan(jnp.maximum(kget(st["zwu2h"], jkb), 0.0))
+        wub = safe_sqrt_nan(sm.pos(kget(st["zwu2h"], jkb), _W_KE))
         st["lldcum"] = jnp.where(sfc, lldcum, st["lldcum"])
         st["ldsc"] = jnp.where(sfc, st["lldsc"], st["ldsc"])
         st["kbotsc"] = jnp.where(sfc, jnp.where(st["lldsc"], st["ibotsc"], -1), st["kbotsc"])
@@ -456,7 +483,7 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
         st["ldsc"] = jnp.where(reset, False, st["ldsc"])
         st["kbotsc"] = jnp.where(reset, -1, st["kbotsc"])
         st["pwubase"] = jnp.where(
-            reset, safe_sqrt_nan(jnp.maximum(kget(st["zwu2h"], st["icbot"]), 0.0)),
+            reset, safe_sqrt_nan(sm.pos(kget(st["zwu2h"], st["icbot"]), _W_KE)),
             st["pwubase"])
         st["first"] = jnp.where(reset, False, st["first"])
         st["go"] = jnp.where(el, ~deep, st["go"])
@@ -477,8 +504,10 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
 def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
            pap, paph, pvervel, pwubase, ldcum, ktype, klab, ptu, pqu, plu,
            pmfub, kcbot, kdpl, njkt7, rprcon=RPRCON, zdnoprc=ZDNOPRC,
-           entrorg=ENTRORG, detrpen=DETRPEN, entshalp=ENTSHALP):
-    """Returns dict of the CUASCN outputs (incl. the INOUT PTENH/PQENH)."""
+           entrorg=ENTRORG, detrpen=DETRPEN, entshalp=ENTSHALP, sm=None):
+    """Returns dict of the CUASCN outputs (incl. the INOUT PTENH/PQENH).
+    LSCV (liquid-only condensation) is carried as a weight in [0, 1]."""
+    sm = IfsSmooth(True) if sm is None else sm
     rg, rcpd, retv, rtt = th.RG, th.RCPD, th.RETV, th.RTT
     f = pten.dtype
     i32 = jnp.int32
@@ -494,7 +523,7 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
     pmfub = jnp.where(ldcum, pmfub, 0.0)
     pqu = pqu.at[K].set(jnp.where(ldcum, pqu[K], 0.0))
     ktype = jnp.where(ldcum, ktype, 0)
-    lscv = ktype > 1                                   # LSCVLIQ = .TRUE.
+    lscv = (ktype > 1).astype(f)                       # LSCVLIQ = .TRUE.
     llklab = ~ldcum | (ktype == 3)
     plu = jnp.where(lev == kcbot, plu, 0.0)
     klab = jnp.where(llklab, 0, klab)
@@ -532,7 +561,7 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         mid = ((~s["ldcum"]) & (kget(s["klab"], kk + 1) == 0) & (kk > njkt7)
                & (kget(pqen, kk) > ZMID_RH * kget(pqsen, kk)))
         tum = (rcpd * kget(pten, kk) + kget(pgeo, kk) - kget(pgeoh, kk + 1)) * zorcpd
-        zzzmb = jnp.minimum(jnp.maximum(ZMID_MF_MIN, -kget(pvervel, kk) * zrg), RMFLIA)
+        zzzmb = sm.min(sm.max(-kget(pvervel, kk) * zrg, ZMID_MF_MIN, _W_MF), RMFLIA, _W_MF)
         s["ptu"] = kset(s["ptu"], kk + 1, tum, mid)
         s["pqu"] = kset(s["pqu"], kk + 1, kget(pqen, kk), mid)
         s["plu"] = kset(s["plu"], kk + 1, 0.0, mid)
@@ -548,17 +577,25 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         s["ktype"] = jnp.where(mid, 3, s["ktype"])
         # --- per-level preamble, :442-466
         kt3 = s["ktype"] == 3
-        s["lscv"] = s["lscv"] | (kt3 & (kget(pten, s["kcbot"]) > rtt - ZLSCV_DT))
+        # (A | B) as 1 - (1 - A)(1 - B): exact for hard 0/1 weights
+        s["lscv"] = 1.0 - (1.0 - s["lscv"]) * (
+            1.0 - kt3 * sm.gt(kget(pten, s["kcbot"]), rtt - ZLSCV_DT, _W_T))
         klab_up = kget(s["klab"], jk + 1)
         s["klab"] = kset(s["klab"], jk, 0, klab_up == 0)
         llflag = (s["ldcum"] & (klab_up == 2)) | (kt3 & (klab_up == 1))
         zph = kget(paph, jk)
         zmfmax = (kget(paph, jk) - kget(paph, jk - 1)) * zcons2
-        capm = kt3 & (jk == s["kcbot"]) & (s["pmfub"] > zmfmax)
-        zfac = sdiv(zmfmax, s["pmfub"], capm)
+        if sm.hard:
+            capm = kt3 & (jk == s["kcbot"]) & (s["pmfub"] > zmfmax)
+            zfac = sdiv(zmfmax, s["pmfub"], capm)
+            newmfub = zmfmax
+        else:
+            capm = kt3 & (jk == s["kcbot"]) & (s["pmfub"] > 0.0)
+            newmfub = sm.min(s["pmfub"], zmfmax, _W_MF)
+            zfac = sdiv(newmfub, s["pmfub"], capm)
         for nm in ("pmfu", "pmfus", "pmfuq"):
             s[nm] = kset(s[nm], jk + 1, kget(s[nm], jk + 1) * zfac, capm)
-        s["pmfub"] = jnp.where(capm, zmfmax, s["pmfub"])
+        s["pmfub"] = jnp.where(capm, newmfub, s["pmfub"])
         s["llo3"] = s["llo3"] | (klab_up > 0)
         llo3 = s["llo3"]
         # --- CUENTR (LDWORK = LLO3), cuentr.F90:124-151
@@ -571,14 +608,14 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         # --- ascent for LLFLAG, :478-524
         mfu1 = kget(s["pmfu"], jk + 1)
         fl = llo3 & llflag
-        zdmfde_f = jnp.minimum(zdmfde, ZDETR_MAX * mfu1)
-        rh = jnp.minimum(1.0, kget(pqen, jk) / kget(pqsen, jk))
+        zdmfde_f = sm.min(zdmfde, ZDETR_MAX * mfu1, _W_MF)
+        rh = sm.min(kget(pqen, jk) / kget(pqsen, jk), 1.0, _W_ONE)
         atb = jk == kcb
         zoentr_b = -entrorg * (rh - ENTR_RH) * (kget(pgeoh, jk) - kget(pgeoh, jk + 1)) * zrg
-        zoentr_b = jnp.minimum(ZOENTR_MAX, zoentr_b) * mfu1
+        zoentr_b = sm.min(zoentr_b, ZOENTR_MAX, _W_OENTR) * mfu1
         zoentr = jnp.where(fl & atb, zoentr_b, s["zoentr"])
         blw = jk < kcb
-        zxs = jnp.maximum(mfu1 - zmfmax, 0.0)
+        zxs = sm.pos(mfu1 - zmfmax, _W_MF)
         s["pwmean"] = jnp.where(fl & blw, s["pwmean"] + kget(s["pkineu"], jk + 1)
                                 * (kget(pap, jk + 1) - kget(pap, jk)), s["pwmean"])
         s["zdpmean"] = jnp.where(fl & blw, s["zdpmean"] + kget(pap, jk + 1) - kget(pap, jk),
@@ -588,8 +625,8 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         de_b = jnp.where(s["ktype"] >= 2, en_b, zdmfde_f)
         de_b = de_b * (ZDETR_RH - rh)
         zmftest = mfu1 + en_b - de_b
-        zchange = jnp.maximum(zmftest - zmfmax, 0.0)
-        zxe = jnp.maximum(zchange - zxs, 0.0)
+        zchange = sm.pos(zmftest - zmfmax, _W_MF)
+        zxe = sm.pos(zchange - zxs, _W_MF)
         en_b = en_b - zxe
         zchange = zchange - zxe
         de_b = de_b + zchange
@@ -599,7 +636,7 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         zqeen = kget(s["pqenh"], jk + 1) * zdmfen
         zseen = (rcpd * kget(s["ptenh"], jk + 1) + kget(pgeoh, jk + 1)) * zdmfen
         lit = kget(plitot, jk)
-        zleen = jnp.where(lit > RLMIN, lit * zdmfen, 0.0)
+        zleen = sm.on(lit, RLMIN, _W_COND) * lit * zdmfen
         zscde = (rcpd * kget(s["ptu"], jk + 1) + kget(pgeoh, jk + 1)) * zdmfde
         zqude = kget(s["pqu"], jk + 1) * zdmfde
         lude = kget(s["plu"], jk + 1) * zdmfde
@@ -610,7 +647,7 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         lu = zmfulk * zfac
         qu = zmfuqk * zfac
         tu = jnp.minimum(ZTU_MAX, jnp.maximum(ZTU_MIN, (zmfusk * zfac - kget(pgeoh, jk)) * zorcpd))
-        lrain = kget(s["plrain"], jk + 1) * jnp.maximum(0.0, mfu1 - zdmfde) * zfac
+        lrain = kget(s["plrain"], jk + 1) * sm.pos(mfu1 - zdmfde, _W_MF) * zfac
         s["pdmfen"] = kset(s["pdmfen"], jk, zdmfen - zdmfde, fl)
         s["pmfu"] = kset(s["pmfu"], jk, mfu, fl)
         s["plude"] = kset(s["plude"], jk, lude, fl)
@@ -629,17 +666,17 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         # CUADJTQ KCALL 6 (LSCVLIQ), :540-548
         tu0 = kget(s["ptu"], jk)
         qu0 = kget(s["pqu"], jk)
-        tu, qu = cuadjtq(th, 6, zph, tu0, qu0, fl, s["lscv"])
+        tu, qu = cuadjtq(th, 6, zph, tu0, qu0, fl, s["lscv"], sm=sm)
         s["ptu"] = kset(s["ptu"], jk, tu, fl)
         s["pqu"] = kset(s["pqu"], jk, qu, fl)
         cnd = fl & (qu != zqold)
         # glaciation, :571-587
-        glac = kget(s["plu"], jk) * ((1.0 - foealfcu(th, tu))
-                                    - (1.0 - foealfcu(th, kget(s["ptu"], jk + 1))))
-        glac = jnp.where(s["lscv"], 0.0, glac)
-        zfacg = foealfcu(th, kget(pten, jk))
+        glac = kget(s["plu"], jk) * ((1.0 - foealfcu(th, tu, sm))
+                                    - (1.0 - foealfcu(th, kget(s["ptu"], jk + 1), sm)))
+        glac = (1.0 - s["lscv"]) * glac
+        zfacg = foealfcu(th, kget(pten, jk), sm)
         glac = glac + zfacg * kget(s["pdmfup"], jk + 1) / jnp.maximum(RMFCMIN, mfu1) \
-            * _fsign_half(rtt - kget(pten, jk)) * 1.0
+            * sm.ge(rtt, kget(pten, jk), _W_T)
         tu = tu + th.RALFDCP * glac
         s["plglac"] = kset(s["plglac"], jk, glac, cnd)
         s["ptu"] = kset(s["ptu"], jk, tu, cnd)
@@ -666,36 +703,39 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         s["plu"] = kset(s["plu"], jk, 0.0, mno)
         # in-cloud (KLAB(JK+1) == 2)
         ic = cnd & (klab1 == 2)
-        reint = ic & (zbuo < ZBUO_REINT)
+        wre = sm.lt(zbuo, ZBUO_REINT, _W_BUO)
         teh = 0.5 * (kget(pten, jk) + kget(pten, jk - 1))
         qeh = 0.5 * (kget(pqen, jk) + kget(pqen, jk - 1))
-        s["ptenh"] = kset(s["ptenh"], jk, teh, reint)
-        s["pqenh"] = kset(s["pqenh"], jk, qeh, reint)
-        zbuo = jnp.where(reint, zbc - teh * (1.0 + retv * qeh), zbuo)
+        teh = wre * teh + (1.0 - wre) * kget(s["ptenh"], jk)
+        qeh = wre * qeh + (1.0 - wre) * kget(s["pqenh"], jk)
+        s["ptenh"] = kset(s["ptenh"], jk, teh, ic)
+        s["pqenh"] = kset(s["pqenh"], jk, qeh, ic)
+        zbuo = sm.sel(wre, zbc - teh * (1.0 + retv * qeh), zbuo)
         s["zbuo"] = kset(s["zbuo"], jk, zbuo, ic)
         tvh = kget(s["ptenh"], jk) * (1.0 + retv * kget(s["pqenh"], jk))
         zbuoc = 0.5 * (zbuo + kget(s["zbuo"], jk + 1)) / tvh
         zdkbuo = (kget(pgeoh, jk) - kget(pgeoh, jk + 1)) * ZFACBUO * zbuoc
         mfden = jnp.maximum(RMFCMIN, mfu1)
-        zdken = jnp.minimum(1.0, (1.0 + Z_CWDRAG) * jnp.where(zdmfen > 0.0, zdmfen, zdmfde) / mfden)
-        ke = jnp.maximum(ZKE_MIN, (kget(s["pkineu"], jk + 1) * (1.0 - zdken) + zdkbuo)
-                         / (1.0 + zdken))
-        neg = zbuoc < 0.0
+        ent = sm.sel(sm.on(zdmfen, 0.0, _W_MF), zdmfen, zdmfde)
+        zdken = sm.min((1.0 + Z_CWDRAG) * ent / mfden, 1.0, _W_ONE)
+        ke = sm.max((kget(s["pkineu"], jk + 1) * (1.0 - zdken) + zdkbuo) / (1.0 + zdken),
+                    ZKE_MIN, _W_KE)
+        neg = sm.lt(zbuoc, 0.0, _W_BUOC)
         zkedke = ke / jnp.maximum(ZKEDKE_FLOOR, kget(s["pkineu"], jk + 1))
-        zkedke = jnp.maximum(0.0, jnp.minimum(1.0, zkedke))
+        zkedke = sm.pos(sm.min(zkedke, 1.0, _W_ONE), _W_ONE)
         zmfun = (ZDETR_RH - rh) * safe_sqrt_nan(zkedke)
-        de_n = jnp.maximum(zdmfde, mfu1 * (1.0 - zmfun))
-        zdmfde_ic = jnp.where(neg, de_n, zdmfde)
-        lude_ic = jnp.where(neg, kget(s["plu"], jk + 1) * de_n, kget(s["plude"], jk))
-        mfu_ic = jnp.where(neg, mfu1 + zdmfen - de_n, kget(s["pmfu"], jk))
+        de_n = sm.max(mfu1 * (1.0 - zmfun), zdmfde, _W_MF)
+        zdmfde_ic = sm.sel(neg, de_n, zdmfde)
+        lude_ic = sm.sel(neg, kget(s["plu"], jk + 1) * de_n, kget(s["plude"], jk))
+        mfu_ic = sm.sel(neg, mfu1 + zdmfen - de_n, kget(s["pmfu"], jk))
         # organized entrainment for the next level, :617-625
-        org = zbuo > ZBUO_ORG
-        rhm1 = jnp.minimum(1.0, kget(pqen, jk - 1) / kget(pqsen, jk - 1))
+        org = sm.gt(zbuo, ZBUO_ORG, _W_BUO)
+        rhm1 = sm.min(kget(pqen, jk - 1) / kget(pqsen, jk - 1), 1.0, _W_ONE)
         zoe = (entrorg * (ZOENTR_RH - (rhm1 - ENTR_RH))
                * (kget(pgeoh, jk - 1) - kget(pgeoh, jk)) * zrg
-               * jnp.minimum(1.0, kget(pqsen, jk) / kget(pqsen, s["kcbot"])) ** 3)
-        zoe = jnp.minimum(ZOENTR_MAX, zoe) * mfu_ic
-        zoentr = jnp.where(ic, jnp.where(org, zoe, 0.0), zoentr)
+               * sm.min(kget(pqsen, jk) / kget(pqsen, s["kcbot"]), 1.0, _W_ONE) ** 3)
+        zoe = sm.min(zoe, ZOENTR_MAX, _W_OENTR) * mfu_ic
+        zoentr = jnp.where(ic, org * zoe, zoentr)
         # below departure: erase
         bd = jk > kdpl
         mfu_ic = jnp.where(bd, mfu1, mfu_ic)
@@ -729,40 +769,49 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         # precipitation by analytic integration, :641-712
         luk = kget(s["plu"], jk)
         tuk = kget(s["ptu"], jk)
-        pr = llo3 & llo1 & (luk > zdnoprc)
-        zwu = jnp.minimum(ZWU_MAX, jnp.sqrt(2.0 * jnp.maximum(ZKE_PRC_MIN, kget(s["pkineu"], jk + 1))))
-        zzco = 1.0 + ZZCO_LIQ * foealfcu(th, tuk)
+        pr = llo3 & llo1
+        wpr = sm.on(luk, zdnoprc, _W_COND)
+        zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk + 1), ZKE_PRC_MIN, _W_KE)),
+                     ZWU_MAX, _W_VEL)
+        zzco = 1.0 + ZZCO_LIQ * foealfcu(th, tuk, sm)
         zprcon = zprcdgw / (ZPRC_W * zwu) * zzco
-        zdt = jnp.minimum(th.RTBERCU - th.RTICECU, jnp.maximum(th.RTBERCU - tuk, 0.0))
+        zdt = sm.min(sm.pos(th.RTBERCU - tuk, _W_T), th.RTBERCU - th.RTICECU, _W_T)
         zcbf = 1.0 + Z_CPRC2 * safe_sqrt_nan(zdt)
         zzco = zprcon * zcbf
         zlcrit = zdnoprc / zcbf
         zdfi = kget(pgeoh, jk) - kget(pgeoh, jk + 1)
         zc = luk - zluold
         zd = zzco * (1.0 - jnp.exp(-(luk / zlcrit) ** 2)) * zdfi
-        zd = jnp.where(pr, zd, 1.0)
+        # division guard on the same threshold (unused where the weight is 0)
+        zd = jnp.where(pr & (luk > zdnoprc), zd, 1.0)
         zint = jnp.exp(-zd)
         zlnew = zluold * zint + zc / zd * (1.0 - zint)
-        zlnew = jnp.maximum(0.0, jnp.minimum(luk, zlnew))
-        zlnew = jnp.minimum(Z_CLDMAX, zlnew)
-        zprecip = jnp.where(pr, jnp.maximum(0.0, zluold + zc - zlnew), 0.0)
+        zlnew = sm.pos(sm.min(zlnew, luk, _W_COND), _W_COND)
+        zlnew = sm.min(zlnew, Z_CLDMAX, _W_COND)
+        zprecip = wpr * sm.pos(zluold + zc - zlnew, _W_COND)
+        if sm.hard:
+            pr = pr & (luk > zdnoprc)
         s["pdmfup"] = kset(s["pdmfup"], jk, zprecip * kget(s["pmfu"], jk), pr)
         s["plrain"] = kset(s["plrain"], jk, kget(s["plrain"], jk) + zprecip, pr)
-        s["plu"] = kset(s["plu"], jk, zlnew, pr)
+        s["plu"] = kset(s["plu"], jk, sm.sel(wpr, zlnew, luk), pr)
         # rain fall-out, :740-761
         lr = kget(s["plrain"], jk)
-        rf = llo3 & llo1 & (lr > 0.0)
+        rf = llo3 & llo1
+        wrf = sm.on(lr, 0.0, _W_COND)
         zvw = ZVW_COEF * spow(lr, ZVW_EXP)
         zvi = Z_CWIFRAC * zvw
-        zalfaw = jnp.where(s["lscv"], 1.0, foealfcu(th, tuk))
+        zalfaw = s["lscv"] + (1.0 - s["lscv"]) * foealfcu(th, tuk, sm)
         zvv = zalfaw * zvw + (1.0 - zalfaw) * zvi
         zrold = lr - zprecip
-        zwu = jnp.minimum(ZWU_MAX, jnp.sqrt(2.0 * jnp.maximum(ZKE_RAIN_MIN, kget(s["pkineu"], jk))))
-        zd = jnp.where(rf, zvv / zwu, 1.0)
+        zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk), ZKE_RAIN_MIN, _W_KE)),
+                     ZWU_MAX, _W_VEL)
+        zd = jnp.where(rf & (lr > 0.0), zvv / zwu, 1.0)   # division guard
         zint = jnp.exp(-zd)
         zrnew = zrold * zint + zprecip / zd * (1.0 - zint)
-        zrnew = jnp.maximum(0.0, jnp.minimum(lr, zrnew))
-        s["plrain"] = kset(s["plrain"], jk, zrnew, rf)
+        zrnew = sm.pos(sm.min(zrnew, lr, _W_COND), _W_COND)
+        if sm.hard:
+            rf = rf & (lr > 0.0)
+        s["plrain"] = kset(s["plrain"], jk, sm.sel(wrf, zrnew, lr), rf)
         # fluxes, :764-773
         mfuk = kget(s["pmfu"], jk)
         luk = kget(s["plu"], jk)
@@ -770,7 +819,7 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         s["pmful"] = kset(s["pmful"], jk, luk * mfuk, fl)
         s["pmfus"] = kset(s["pmfus"], jk, (rcpd * tuk + kget(pgeoh, jk)) * mfuk, fl)
         s["pmfuq"] = kset(s["pmfuq"], jk, kget(s["pqu"], jk) * mfuk, fl)
-        za = jnp.where(s["lscv"], 1.0, foealfcu(th, tuk))
+        za = s["lscv"] + (1.0 - s["lscv"]) * foealfcu(th, tuk, sm)
         lde = kget(s["plude"], jk)
         s["pludeli1"] = kset(s["pludeli1"], jk, za * lde, fl)
         s["pludeli2"] = kset(s["pludeli2"], jk, (1.0 - za) * lde, fl)
@@ -784,7 +833,7 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
     # 5. final, :859-866
     ldc = jnp.where(st["kctop"] == -1, False, st["ldcum"])
     kcbot = jnp.maximum(st["kcbot"], st["kctop"])
-    pw = jnp.maximum(ZWMEAN_MIN, st["pwmean"] / jnp.maximum(ZDPMEAN_MIN, st["zdpmean"]))
+    pw = sm.max(st["pwmean"] / jnp.maximum(ZDPMEAN_MIN, st["zdpmean"]), ZWMEAN_MIN, _W_VEL)
     pwmean = jnp.where(ldc, jnp.sqrt(2.0 * pw), st["pwmean"])
     out = dict(st)
     out.update(ldcum=ldc, kcbot=kcbot, pwmean=pwmean)
