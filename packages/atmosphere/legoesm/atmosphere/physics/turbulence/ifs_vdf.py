@@ -43,6 +43,11 @@ gaps (max |smooth - hard| / max |hard| per column):
 - Up to 0.69 at the VDFEXCU cumulus Bowen-ratio test (flux_test_width_w_m2).
 - EIS 0.0024 (eis_width_k); the VDFHGHTN mass flux, updraught and Ri fields
   agree to round-off.
+- The VDFHGHTN surface test parcel is the convection port's CUBASEN in its
+  hard form (vote 5; as the IFS convection port), so the parcel's excess and
+  every PBL-type flag switch discretely at KHVFL = 0: on a 1.5 km dry mixed
+  layer the updraught SLG at the lowest half level jumps 201 J/kg (0.2 K)
+  between KHFL = -1e-8 and 0 K m/s (codex review, stage 1b).
 
 Levels run top -> surface; full-level arrays have KLEV entries (Fortran
 1..KLEV), half-level arrays KLEV+1 entries (Fortran 0..KLEV).  One column per
@@ -540,8 +545,9 @@ def ifs_hghtn_parcel(th, T, q, u, v, qe, p_half, p_full, geo_full, geo_half, kmf
 
 
 def ifs_vdfhghtn(th, T, q, u, v, slgs, cptgz, qe, p_half, p_full, geo_full, geo_half,
-                 pblh, kmfl, khfl, kqfl, land, dt, cfg: IFSVDFConfig = IFSVDFConfig()):
-    """VDFHGHTN, one column (vdfhghtn.F90, 49r1).
+                 kmfl, khfl, kqfl, land, dt, cfg: IFSVDFConfig = IFSVDFConfig()):
+    """VDFHGHTN, one column (vdfhghtn.F90, 49r1).  PBLH is not an argument: it
+    feeds only VDFEIS, which 49r1 disables (LLEIS = .false., vdfhghtn.F90:159).
 
     ``th`` is the :class:`legoesm.atmosphere.physics._ifs_thermo.IFSThermo` of
     the run (RVTMP2 = 0); full-level arrays KLEV, half-level arrays KLEV+1

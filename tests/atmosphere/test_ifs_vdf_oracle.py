@@ -418,8 +418,8 @@ def _hghtn(fix, arm, g, cfg):
     o = lambda k: jnp.asarray(fix[f"{arm}_{g}_{k}"])
     f = lambda *a: ifs_vdfhghtn(th, *a, dt=float(fix["ptsphy"]), cfg=cfg)
     return jax.vmap(f)(T, q, u, v, slgs, cptgz, _a(fix, g, "qe"), _a(fix, g, "p_half"),
-                       _a(fix, g, "p_full"), gf, _a(fix, g, "geo_half"), o("pblh"),
-                       o("kmfl"), o("khfl"), o("kqfl"), _a(fix, g, "land"))
+                       _a(fix, g, "p_full"), gf, _a(fix, g, "geo_half"), o("kmfl"), o("khfl"),
+                       o("kqfl"), _a(fix, g, "land"))
 
 
 @pytest.mark.parametrize("arm", _ARMS)
@@ -462,7 +462,7 @@ def _hg1(cfg, name, *, dT=0.0, khfl=None, kqfl=None, dt=None, slgs_fn=None, parc
     slgs = slgs if slgs_fn is None else slgs_fn(slgs, th, col["p_full"])
     out = ifs_vdfhghtn(th, T, col["q"], col["u"], col["v"], slgs, col["geo_full"] + T * th.RCPD,
                        col["qe"], col["p_half"], col["p_full"], col["geo_full"], col["geo_half"],
-                       o("pblh"), o("kmfl"), khfl, kqfl, col["land"],
+                       o("kmfl"), khfl, kqfl, col["land"],
                        dt=float(fx["ptsphy"]) if dt is None else dt, cfg=cfg)
     return jnp.concatenate([jnp.ravel(getattr(out, k)) for k in _HG_SCAL + _HG_ROWS])
 
