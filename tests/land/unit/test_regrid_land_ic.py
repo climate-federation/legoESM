@@ -876,5 +876,6 @@ def test_target_grid_centres_are_the_runs(grid_type, res):
     finally:
         set_policy(old)
     lat, lon = rg._cols_rad(rg._target_grid(grid_type, res))
+    assert get_policy() == old                      # the swap is undone
     np.testing.assert_array_equal(lat, np.asarray(mesh.latCell))
     np.testing.assert_array_equal(lon, np.asarray(mesh.lonCell))
