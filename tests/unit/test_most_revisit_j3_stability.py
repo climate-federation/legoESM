@@ -53,3 +53,11 @@ def test_unknown_name_raises():
     for bad in ("j3", "most_revisit"):
         with pytest.raises(ValueError, match="stability_scheme"):
             bf.psi_m(jnp.asarray(0.5), bad)
+
+
+def test_coare_blend_refuses_a_width_past_the_log_domain():
+    z = jnp.asarray([-1.0, 0.0, 1.0])
+    for f in (bf.psi_m_coare, bf.psi_h_coare):
+        assert np.all(np.isfinite(f(z, S, 0.99 * bf._J3_ZC)))
+        with pytest.raises(ValueError, match="neutral_width"):
+            f(z, S, bf._J3_ZC)
