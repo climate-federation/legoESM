@@ -59,6 +59,10 @@ def test_uniform_fields_survive_aggregation():
     np.testing.assert_allclose(out["SSO_THETA"].values, 0.3, atol=1e-10)
     assert out.attrs["block_deg"] == 2.0 and out.attrs["fine_res_deg"] == 1.0
     assert out["SSO_STDH"].shape == (90, 180)
+    s, g, t = 0.02 ** 2 / 2, 0.5 ** 2, 0.6
+    np.testing.assert_allclose(out["SSO_K"].values, s * (1 + g), rtol=1e-12)
+    np.testing.assert_allclose(out["SSO_L"].values, s * (1 - g) * np.cos(t), rtol=1e-12)
+    np.testing.assert_allclose(out["SSO_M"].values, s * (1 - g) * np.sin(t), rtol=1e-12)
 
 
 def test_orthogonal_ridges_average_to_isotropic_not_mean_angle():
@@ -125,3 +129,45 @@ def test_build_refuses_non_finite_input():
     raw["sdor"] = (("latitude", "longitude"), sd)
     with pytest.raises(ValueError, match="non-finite"):
         prep.build_era5_sso(raw, block_deg=2.0)
+
+
+def test_blocks_are_cos_lat_area_weighted():
+    """sdor differs between the two rows of each block: the mean of sdor^2 is cos-weighted."""
+    raw = _raw()
+    lat = raw["latitude"].values
+    sd = np.where((np.round(lat) % 2 == 0)[:, None], 100.0, 300.0) * np.ones((1, 360))
+    raw["sdor"] = (("latitude", "longitude"), sd)
+    out = prep.build_era5_sso(raw, block_deg=2.0)
+    rows = np.sort(lat)[1:].reshape(-1, 2)          # cell rows after dropping -90
+    w = np.cos(np.deg2rad(rows))
+    v = np.where(np.round(rows) % 2 == 0, 100.0, 300.0) ** 2
+    expect = np.sqrt((w * v).sum(1) / w.sum(1))
+    np.testing.assert_allclose(out["SSO_STDH"].values[:, 0], expect, rtol=1e-12)
+    assert not np.allclose(expect[-10:], np.sqrt((100.0 ** 2 + 300.0 ** 2) / 2), rtol=1e-4)
+
+
+def test_rejects_partial_globe_and_out_of_range_inputs():
+    with pytest.raises(ValueError, match="global"):
+        prep.build_era5_sso(_raw().isel(longitude=slice(0, 180)), block_deg=2.0)
+    raw = _raw()
+    iso = raw["isor"].values.copy()
+    iso[5, 5] = 1.2
+    raw["isor"] = (("latitude", "longitude"), iso)
+    with pytest.raises(ValueError, match="isor"):
+        prep.build_era5_sso(raw, block_deg=2.0)
+
+
+def test_resolved_terrain_slope_enters_the_tensor():
+    """Isotropic subgrid + resolved ridges varying only in lon -> anisotropic, theta 0.
+
+    The resolved height now subgrid at block scale carries slope in x only, so it
+    adds to K and L (not M), turning gamma below 1 with the major axis along x.
+    """
+    z = np.zeros((181, 360))
+    z[:, 2::4] = 400.0 * constants.g_ifs
+    z[:, 3::4] = 400.0 * constants.g_ifs
+    out = prep.build_era5_sso(_raw(isor=1.0, anor=0.0, z=z), block_deg=4.0)
+    mid = slice(15, 30)                       # away from the poles
+    assert np.all(out["SSO_GAMMA"].values[mid] < 0.9)
+    np.testing.assert_allclose(out["SSO_THETA"].values[mid], 0.0, atol=1e-9)
+    assert np.all(out["SSO_SIGMA"].values[mid] > 0.02)

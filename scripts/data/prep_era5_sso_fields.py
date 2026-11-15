@@ -22,8 +22,11 @@ Aggregation (decisions voted 2026-11-15; see the PR body):
   not bathymetry).
 - gamma/theta/sigma: via the Baines-Palmer tensor K = <hx^2+hy^2>/2,
   L = <hx^2-hy^2>/2, M = <hx hy>, which are averages of gradient products and
-  so aggregate linearly.  The file stores K, L, M, so a runtime bilinear
-  sample never interpolates an angle; gamma/theta/sigma are stored as well.
+  so aggregate linearly.  The resolved ERA5 terrain that becomes subgrid at
+  block scale adds its own gradient tensor (deviation from the block-mean
+  gradient), so std and K/L/M describe the same terrain.  The file stores
+  K, L, M, so a runtime bilinear sample never interpolates an angle;
+  gamma/theta/sigma are stored as well.
 - sdfor: rms of sdfor only (the TOFD band is fixed, not model-relative).
 
 Usage::
@@ -91,8 +94,13 @@ def _native_points(raw):
     if not (np.isclose(lat[0], -90.0) and np.isclose(lat[-1], 90.0)):
         raise ValueError("expected a pole-to-pole ERA5 point grid")
     order = np.argsort(lon, kind="stable")
+    lon = lon[order]
+    dlat, dlon = np.diff(lat), np.diff(lon)
+    if not (np.allclose(dlat, dlat[0]) and np.allclose(dlon, dlat[0])
+            and np.isclose(lon.size * dlat[0], 360.0)):
+        raise ValueError("expected a regular, global, equal-spacing lat-lon point grid")
     r = r.isel(latitude=slice(1, None), longitude=order)
-    return r, lat[1:], lon[order]
+    return r, lat[1:], lon
 
 
 def build_era5_sso(raw, *, block_deg: float):
@@ -115,6 +123,11 @@ def build_era5_sso(raw, *, block_deg: float):
     for v in ("sdor", "sdfor", "slor", "isor", "anor", "z"):
         if not np.isfinite(r[v].values).all():
             raise ValueError(f"raw field {v} has non-finite values")
+    for v, lo, hi in (("sdor", 0.0, np.inf), ("sdfor", 0.0, np.inf),
+                      ("slor", 0.0, np.inf), ("isor", 0.0, 1.0)):
+        x = r[v].values
+        if x.min() < lo or x.max() > hi:
+            raise ValueError(f"raw field {v} outside [{lo}, {hi}]")
     # Tensor on the native points, so no angle is ever averaged.
     K, L, M = sso_tensor(r["slor"].values, r["isor"].values, r["anor"].values)
     fine = {"K": K, "L": L, "M": M,
@@ -123,8 +136,26 @@ def build_era5_sso(raw, *, block_deg: float):
             "h": np.asarray(r["z"].values, dtype=np.float64) / constants.g_ifs}
 
     mean = {v: block_area_mean(fine[v], lat, factor) for v in fine}
-    h_mu = np.repeat(np.repeat(mean["h"], factor, axis=0), factor, axis=1)
-    var_resolved = block_area_mean((fine["h"] - h_mu) ** 2, lat, factor)
+
+    def up(a):
+        return np.repeat(np.repeat(a, factor, axis=0), factor, axis=1)
+
+    var_resolved = block_area_mean((fine["h"] - up(mean["h"])) ** 2, lat, factor)
+    # The resolved terrain that becomes subgrid at block scale also carries
+    # slope: add its gradient tensor (deviation from the block-mean gradient),
+    # so std and K/L/M describe the same terrain.  Measured on ERA5: +2.5 %
+    # (median) / +9 % (p90) of K in mountain blocks at 1 deg, +5 % / +15 % at 2 deg.
+    dx = np.deg2rad(fine_res_deg) * constants.R_earth
+    coslat = np.cos(np.deg2rad(lat))[:, None]
+    hx = np.where(coslat > 1e-12, (np.roll(fine["h"], -1, axis=1)
+                                   - np.roll(fine["h"], 1, axis=1))
+                  / (2.0 * dx * np.maximum(coslat, 1e-12)), 0.0)
+    hy = np.gradient(fine["h"], dx, axis=0)
+    hx = hx - up(block_area_mean(hx, lat, factor))
+    hy = hy - up(block_area_mean(hy, lat, factor))
+    mean["K"] = mean["K"] + block_area_mean(0.5 * (hx ** 2 + hy ** 2), lat, factor)
+    mean["L"] = mean["L"] + block_area_mean(0.5 * (hx ** 2 - hy ** 2), lat, factor)
+    mean["M"] = mean["M"] + block_area_mean(hx * hy, lat, factor)
     std = np.sqrt(np.maximum(mean["sdor2"], 0.0) + var_resolved)
     std_filt = np.sqrt(np.maximum(mean["sdfor2"], 0.0))
     sigma, gamma, theta = sso_from_tensor(mean["K"], mean["L"], mean["M"])
