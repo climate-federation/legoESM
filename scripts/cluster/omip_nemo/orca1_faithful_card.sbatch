@@ -129,6 +129,11 @@ ST=("${PIPESTATUS[@]}")   # driver | tee | tail
 # The driver's own status when it failed; otherwise a tee/tail failure (an
 # unwritten run.log) still fails the job.
 RC=${ST[0]}; [ "$RC" = 0 ] && RC=$(( ST[1] ? ST[1] : ST[2] ))
+# Leg 2 rewrites snapshot_final.npz; keep leg 1's under its day so the
+# conservation gate can close the windows on both sides of the leg boundary.
+if [ "$RC" = 0 ] && [ "$LEG" = 1 ] && [ "${HALF#*.}" = 0 ]; then
+  cp -f $OUT/snapshot_final.npz $OUT/snapshot_day$(printf %04d ${HALF%.*}).npz || RC=1
+fi
 echo "=== card exit: $RC ==="
 echo "OUT=$OUT"
 echo DONE
