@@ -6473,8 +6473,13 @@ class LatLonCGridOceanModel:
                    nemo_stage_zad_eta_after_override=None,
                    nemo_vorticity_q_override=None,
                    nemo_vorticity_transport_override=None,
-                   nemo_literal_hpg_vmask=None, nemo_stage_r3f=None, nemo_stage_r3t_stretch=None):
+                   nemo_literal_hpg_vmask=None, nemo_stage_r3f=None, nemo_stage_r3t_stretch=None,
+                   return_tracer_heat_split=False):
         """Compute baroclinic tendencies.
+
+        ``return_tracer_heat_split`` (static, heat-ledger diagnostic):
+        forwarded to :func:`latlon_cgrid_ocean_baroclinic_tendencies`, which
+        then returns ``(tendencies, split)``.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
         tendency for the RK3 momentum sub-stages, which discard dT_dt/dS_dt
@@ -6545,6 +6550,7 @@ class LatLonCGridOceanModel:
             nemo_literal_hpg_vmask=nemo_literal_hpg_vmask, nemo_stage_r3f=nemo_stage_r3f, nemo_stage_r3t_stretch=nemo_stage_r3t_stretch,  # noqa: E501
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
+            return_tracer_heat_split=return_tracer_heat_split,
         )
 
     def tendencies_with_diagnostics(
@@ -6640,8 +6646,15 @@ class LatLonCGridOceanModel:
                    _return_ldf_diagnostic_trace: bool = False,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
+                   _return_heat_ledger: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
         """Core step logic — no JIT wrapper.
+
+        ``_return_heat_ledger`` (private, static; reached only through
+        :meth:`step_with_heat_ledger`): also return a dict of global heat
+        content increments [degC m^3] between successive operators of this
+        step -- see ``legoesm.ocean.heat_ledger``.  Read-only reductions of
+        arrays the step already holds; ``False`` adds no op.
 
         ``_external_tracer_rate`` (private, #1492 DINO ``surface_tendency_
         placement="leapfrog_rhs"``): optional ``(dT_dt, dS_dt)`` full-column
@@ -6973,8 +6986,33 @@ class LatLonCGridOceanModel:
             or callable(_rhs_term_observer)
             or bool(self._nemo_ws_test_hooks
                     .expose_stage1_momentum_rhs_split))
+        # Heat ledger (diagnostic, static gate): global content of the
+        # temperature field at each operator boundary below, as
+        # tracer_content(T, h, w) with the thickness T is defined on there.
+        _hl = None
+        if _return_heat_ledger:
+            if (_want_rhs_components or not _apply_implicit_vmix
+                    or _return_barotropic_substeps
+                    or _return_tracer_process_trace or _return_tracer_zdf_trace
+                    or _return_ldf_diagnostic_trace or _return_raw_kaa_qco
+                    or _external_tracer_rate is not None
+                    or _fct_tracer_before is not None
+                    or _cfg_b.tracer_time_integrator != "euler"):
+                raise ValueError(
+                    "the heat ledger is wired for the forward-Euler tracer "
+                    "step only (tracer_time_integrator='euler', implicit "
+                    "vertical mixing applied in-step, no private traces)")
+            from legoesm.ocean.budgets import (
+                ledger_cell_weights as _hl_weights,
+                tracer_content as _hl_content,
+            )
+            _hl_w = _hl_weights(
+                _grid.area, state.land_mask.data,
+                bool(getattr(_cfg_b, "ew_cyclic_overlap", False)))
+            _hl = {}
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
+                               return_tracer_heat_split=_return_heat_ledger,
                                precomputed_geom_density=_geom_density,
                                grid=_grid, vertex_mask=_vmask,
                                ab2_scope_override=_ab2_scope_override,
@@ -6997,6 +7035,8 @@ class LatLonCGridOceanModel:
                                nemo_literal_hpg_vmask=(
                                    _ws_literal_hpg_vmask),
                                return_nemo_operator_components=_want_rhs_components)
+        if _return_heat_ledger:
+            _tend_result, _hl_split = _tend_result
         if _want_rhs_components:
             tend, _mom_term_diagnostics, _live_operands = _tend_result
             _nemo_ws_stage1_operator_operands = (
@@ -8063,6 +8103,18 @@ class LatLonCGridOceanModel:
             state_mid.eta.data, state_mid.H_bathy.data, _zc,
             min_water_column_m=_cfg_b.min_water_column_m,
         )
+        if _hl is not None:
+            # Entry content, then the explicit RHS (T_new = T + dt*dT_dt,
+            # masked) on the same entry thickness; the per-block split of
+            # dT_dt is informational (split_* keys, not ledger stages).
+            _hl_k = _hl_content(state.T.data, h_k_old, _hl_w)
+            _hl["entry"] = _hl_k
+            _hl_k1 = _hl_content(state_mid.T.data, h_k_old, _hl_w)
+            _hl["step_explicit_rhs"] = _hl_k1 - _hl_k
+            _hl_k = _hl_k1
+            for _hl_name, _hl_rate in _hl_split.items():
+                _hl["split_rhs_" + _hl_name] = _hl_content(
+                    dt * _hl_rate, h_k_old, _hl_w)
 
         # 6. Barotropic step.  Two paths:
         #    - explicit_substep: split-explicit forward-backward substepping
@@ -11099,6 +11151,12 @@ class LatLonCGridOceanModel:
             if _l5_mle_transport_exposure:
                 _nemo_ws_l5_mle_transport_trace = _mle_trace
 
+        if _hl is not None:
+            # GM/Redi increment (and anything else that moved T_mid since
+            # the explicit RHS), still on the entry thickness.
+            _hl_k1 = _hl_content(T_mid, h_k_old, _hl_w)
+            _hl["step_gm_redi"] = _hl_k1 - _hl_k
+            _hl_k = _hl_k1
         if _cfg_b.tracer_advection == "som":
             # SOM (Prather 1986): Second Order Moments advection (#210).
             # Advects polynomial sub-cell distributions (mean + 9 moments)
@@ -11657,6 +11715,12 @@ class LatLonCGridOceanModel:
             S=state_new.S.replace(data=S_corrected),
             w=w_field,
         )
+        if _hl is not None:
+            # Flux-form advection (horizontal + vertical, bolus folded in)
+            # together with the entry -> after thickness change.
+            _hl_k1 = _hl_content(T_corrected, h_k_new, _hl_w)
+            _hl["step_advection"] = _hl_k1 - _hl_k
+            _hl_k = _hl_k1
 
         # #1442: keep the tracer-advecting mass fluxes instead of discarding
         # them.  PURE DIAGNOSTIC -- read-only capture of values this step
@@ -11838,6 +11902,12 @@ class LatLonCGridOceanModel:
                         state_new.T.data.dtype)),
             )
 
+        if _hl is not None:
+            # Freshwater closure block (real_freshwater: dilution + entry
+            # heat of runoff/ice/normalisation water; virtual: T twin).
+            _hl_k1 = _hl_content(state_new.T.data, h_k_new, _hl_w)
+            _hl["step_freshwater"] = _hl_k1 - _hl_k
+            _hl_k = _hl_k1
         # 8a'. AB2 "advective" scope: apply the weight-1.0 DISSIPATIVE increment.
         # On the FORWARD-EULER ``step()`` path (``_apply_implicit_vmix=True``)
         # the dissipative increment (momentum lateral friction + bottom drag;
@@ -11875,6 +11945,19 @@ class LatLonCGridOceanModel:
                     data=(state_new.v.data + _dv_bc) * v_mask_3d),
             )
 
+        if _hl is not None:
+            _hl_k1 = _hl_content(state_new.T.data, h_k_new, _hl_w)
+            _hl["step_dissipative_increment"] = _hl_k1 - _hl_k
+            _hl_k = _hl_k1
+            # Sources the implicit solve adds to its input (dt * rate, masked),
+            # on the thickness the step carries; the solve's own conservation
+            # is then step_vertical minus these.
+            for _hl_name, _hl_src in (
+                    ("surface", tend.surface_tracer_forcing),
+                    ("column_source", tend.tracer_source)):
+                if _hl_src is not None:
+                    _hl["split_zdf_" + _hl_name] = _hl_content(
+                        dt * _hl_src.dT_dt.data * mask_3d, h_k_new, _hl_w)
         _nemo_ws_pre_implicit_state = (
             state_new
             if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)
@@ -12063,6 +12146,12 @@ class LatLonCGridOceanModel:
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
             )
 
+        if _hl is not None:
+            # Implicit vertical solve: TKE/EVD/K33 mixing plus the implicit
+            # surface heat / column sources it carries (split_zdf_*).
+            _hl_k1 = _hl_content(state_new.T.data, h_k_new, _hl_w)
+            _hl["step_vertical"] = _hl_k1 - _hl_k
+            _hl_k = _hl_k1
         if self._nemo_ws_test_hooks.expose_stage3_raw_momentum:
             # WRITE-only capture at NEMO's raw-Kaa boundary: the implicit
             # dyn_zdf result is complete, while the depth-mean replacement
@@ -12301,6 +12390,19 @@ class LatLonCGridOceanModel:
         # carry's dtypes stay stable.
         state_new = self._carry_nemo_rk3_after_ssh(state, state_new)
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
+        if _hl is not None:
+            # Conservation fixer / end-of-stage folds (still on h_k_new), then
+            # the thickness the step hands back (final eta), the one every
+            # caller measures the state on.
+            _hl_k1 = _hl_content(state_new.T.data, h_k_new, _hl_w)
+            _hl["step_post_vertical"] = _hl_k1 - _hl_k
+            _hl_k = _hl_k1
+            _hl_k1 = _hl_content(state_new.T.data, compute_layer_thickness(
+                state_new.eta.data, state_new.H_bathy.data, _zc,
+                min_water_column_m=_cfg_b.min_water_column_m), _hl_w)
+            _hl["step_final_thickness"] = _hl_k1 - _hl_k
+            _hl["end"] = _hl_k1
+            return state_new, _hl
         if _return_momentum_budget_trace:
             if (getattr(_cfg_b, "momentum_time_integrator", "euler")
                     != "rk3_ws"):
@@ -16149,6 +16251,93 @@ class LatLonCGridOceanModel:
         if getattr(self.config, "ew_cyclic_overlap", False):
             new_state = self._apply_ew_cyclic_overlap(new_state)
         return new_state
+
+    def step_with_heat_ledger(self, state: LatLonCGridOceanState, dt: float,
+                              freshwater=None, surface_forcing=None,
+                              sponge=None, *, t_seconds=None):
+        """:meth:`step` plus a per-operator global heat ledger.
+
+        Returns ``(new_state, ledger)``.  ``ledger`` maps stage name to a
+        device fp64 scalar: the change of ``sum(T * h * area * wet)``
+        [degC m^3] across that operator, each ocean column counted once
+        (``budgets.ledger_cell_weights``).  ``entry`` / ``end`` are the
+        content before and after the step; the ``step_*`` stages telescope,
+        so their sum is ``end - entry`` to round-off.  ``split_*`` keys are
+        informational sub-splits (explicit-RHS blocks, implicit-solve
+        sources) and are NOT part of that sum.
+
+        Diagnostic only: the new state comes from the SAME ``_step_impl`` /
+        post-step sequence as :meth:`step` (forward-Euler outer integrator),
+        and the ledger only reads arrays the step already holds.  Any other
+        integrator or a private fidelity hook raises.
+        """
+        _oi = getattr(self.config, "outer_integrator", "forward_euler")
+        _h = self._nemo_ws_test_hooks
+        if (_oi != "forward_euler"
+                or self.config.barotropic.barotropic_solver
+                == "implicit_unsplit"
+                or _h.expose_barotropic_substeps or _h.momentum_budget_trace
+                or _h.expose_live_stage_operands
+                or _h.tracer_process_trace is not None
+                or _h.tracer_zdf_trace
+                or _h.tracer_ldf_diagnostics is not None
+                or _h.expose_stage3_fct_inputs or _h.expose_l3_eiv_transport
+                or _h.expose_l5_mle_transport):
+            raise ValueError(
+                "step_with_heat_ledger supports outer_integrator="
+                "'forward_euler' without private fidelity hooks only; got "
+                f"outer_integrator={_oi!r}")
+        self.prime_step_caches(state)
+        _tf = getattr(self.config, "tidal_forcing", None)
+        if _tf is not None and _tf.enabled and t_seconds is None:
+            raise ValueError(
+                "tidal_forcing.enabled=True but step_with_heat_ledger() was "
+                "called without t_seconds")
+        if self.config.rk3_stage3_damping_after_geothermal_nemo_order:
+            raise ValueError(
+                "step_with_heat_ledger does not thread nemo_kt (L6 ordered "
+                "damping)")
+        with jax.disable_jit(False):
+            return self._step_heat_ledger_jitted(
+                state, dt, freshwater, surface_forcing, sponge,
+                t_seconds=t_seconds)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_heat_ledger_jitted(self, state, dt, freshwater=None,
+                                 surface_forcing=None, sponge=None, *,
+                                 t_seconds=None):
+        """JIT body of :meth:`step_with_heat_ledger`: the forward-Euler arm of
+        :meth:`_step_jitted` with the ledger switched on, then the same three
+        post-step operators, each measured on the final thickness."""
+        new_state, ledger = self._step_impl(
+            state, dt, freshwater=freshwater,
+            surface_forcing=surface_forcing, sponge=sponge,
+            t_seconds=t_seconds, _return_heat_ledger=True)
+        from legoesm.ocean.budgets import ledger_cell_weights, tracer_content
+        w = ledger_cell_weights(
+            self.grid.area, state.land_mask.data,
+            bool(getattr(self.config, "ew_cyclic_overlap", False)))
+        h_end = compute_layer_thickness(
+            new_state.eta.data, new_state.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m)
+        k = ledger.pop("end")
+        for name, on, op in (
+                ("step_polar_filter",
+                 self.config.polar_filter.use_polar_filter,
+                 lambda st: self._apply_polar_filter(st, dt)),
+                ("step_freeze_floor", self.config.freeze_floor,
+                 self._apply_freeze_floor),
+                ("step_ew_overlap",
+                 getattr(self.config, "ew_cyclic_overlap", False),
+                 self._apply_ew_cyclic_overlap)):
+            if not on:
+                continue
+            new_state = op(new_state)
+            k1 = tracer_content(new_state.T.data, h_end, w)
+            ledger[name] = k1 - k
+            k = k1
+        ledger["end"] = k
+        return new_state, ledger
 
     def _carry_nemo_rk3_after_ssh(self, entry_state, new_state):
         """Leave NEMO's next-step after-SSH guess in the state it hands on.

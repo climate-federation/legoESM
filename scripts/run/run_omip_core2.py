@@ -6842,6 +6842,108 @@ class _SurfaceFluxAccumulator:
         return out
 
 
+class _HeatLedgerAccumulator:
+    """``--heat-ledger``: per-operator global heat content changes, summed
+    over each snapshot window.
+
+    Content is ``sum(T * h * w)`` with ``h`` the live thickness from the
+    state's own eta (``compute_layer_thickness``, the model's
+    ``min_water_column_m``) and ``w = area * land_mask`` with the cyclic halo
+    copies dropped (``budgets.ledger_cell_weights``) -- the heat-closure
+    gate's integral divided by ``rho_0 * c_sw``.  The driver measures the
+    content before the ocean step, after it, and after every post-step update
+    that runs; the ocean step's own per-operator split arrives from
+    ``step_with_heat_ledger``.  Controls recorded with the stages:
+
+    * ``between_steps``: content change between one step's end and the next
+      step's start (nothing may touch the state there; must be 0);
+    * ``model_entry_mismatch``: the step's own entry content minus the
+      driver's (same thickness and weights; must be 0);
+    * ``model_step_unattributed``: the driver-measured step change minus the
+      sum of the step's ``step_*`` stages (must be round-off).
+
+    ``applied_qnet`` is ``dt * sum(q_net * area * wet)`` of the forcing
+    handed to the step, in J -- the same field ``q_net_mean`` accumulates.
+    Sums stay on device; ``drain`` pulls them once per window.
+    """
+
+    def __init__(self, *, area, land_mask, z_coord, min_water_column_m,
+                 ew_cyclic_overlap, rho_0, c_sw):
+        from legoesm.ocean.budgets import ledger_cell_weights, tracer_content
+        from legoesm.ocean.vertical import compute_layer_thickness
+        if not jax.config.jax_enable_x64:
+            raise SystemExit("--heat-ledger needs fp64 (JAX_ENABLE_X64=1): a "
+                             "float32 content sum cannot resolve one step's "
+                             "change against the ocean's total heat.")
+        w = ledger_cell_weights(area, land_mask, ew_cyclic_overlap)
+        self._content = jax.jit(lambda T, eta, H: tracer_content(
+            T, compute_layer_thickness(eta, H, z_coord,
+                                       min_water_column_m=min_water_column_m),
+            w))
+        self._area_sum = jax.jit(lambda q: jnp.sum(
+            jnp.asarray(q, dtype=jnp.float64) * w))
+        self._scale = float(rho_0) * float(c_sw)
+        self._sums, self._joules, self._order = {}, {}, []
+        self._n = 0
+        self._prev = None
+
+    def _add(self, table, name, value):
+        if name not in self._order:
+            self._order.append(name)
+        prev = table.get(name)
+        table[name] = value if prev is None else prev + value
+
+    def content(self, state):
+        return self._content(state.T.data, state.eta.data, state.H_bathy.data)
+
+    def begin_step(self, state, q_net, dt):
+        k = self.content(state)
+        if self._prev is not None:
+            self._add(self._sums, "between_steps", k - self._prev)
+        self._prev = k
+        if q_net is not None:
+            self._add(self._joules, "applied_qnet",
+                      float(dt) * self._area_sum(q_net))
+
+    def model_step(self, state, ledger):
+        k = self.content(state)
+        total = k - self._prev
+        self._add(self._sums, "model_step", total)
+        staged = 0.0
+        for name, value in ledger.items():
+            if name in ("entry", "end"):
+                continue
+            self._add(self._sums, name, value)
+            if name.startswith("step_"):
+                staged = staged + value
+        self._add(self._sums, "model_step_unattributed", total - staged)
+        self._add(self._sums, "model_entry_mismatch",
+                  ledger["entry"] - self._prev)
+        self._prev = k
+
+    def mark(self, stage, state):
+        k = self.content(state)
+        self._add(self._sums, stage, k - self._prev)
+        self._prev = k
+
+    def end_step(self):
+        self._n += 1
+
+    def drain(self):
+        """Window sums in J as numpy scalars (plus the step count and the
+        stage order), then reset.  Empty when no step was accumulated."""
+        if self._n == 0:
+            return {}
+        out = {f"ledger_{k}_J": np.asarray(float(v) * self._scale)
+               for k, v in self._sums.items()}
+        out.update({f"ledger_{k}_J": np.asarray(float(v))
+                    for k, v in self._joules.items()})
+        out["ledger_n_steps"] = np.asarray(self._n)
+        out["ledger_stages"] = np.asarray(self._order)
+        self._sums, self._joules, self._order, self._n = {}, {}, [], 0
+        return out
+
+
 class _ZdfTrendAccumulator:
     """Host-side running mean of the implicit vertical-diffusion T tendency.
 
@@ -6956,9 +7058,12 @@ def _mld_now(state, z_coord):
                              wet_mask=wet.astype(T.dtype), bottom_depth=Hb)
 
 
-def _snapshot_extra(args, model, state, sf, dt, z_coord, flux_acc):
+def _snapshot_extra(args, model, state, sf, dt, z_coord, flux_acc,
+                    heat_ledger=None):
     """Merge the caller-supplied snapshot diagnostics into one dict."""
     extra = {}
+    if heat_ledger is not None:
+        extra.update(heat_ledger.drain())
     if args.kprofile_snapshots:
         extra.update(_kprofiles(model, state, sf, dt, z_coord) or {})
     if flux_acc is not None:
@@ -8327,6 +8432,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "trajectory is unchanged, and the flag is excluded "
                         "from the restart fingerprint so turning it on does "
                         "not break a chained leg.")
+    p.add_argument("--heat-ledger", action="store_true",
+                   help="Per-operator GLOBAL heat ledger (diagnostic). Every "
+                        "step records the change of sum(T*h*area*wet) across "
+                        "each operator -- inside the ocean step (explicit RHS, "
+                        "GM/Redi, advection, freshwater entry, implicit "
+                        "vertical solve, post-step projections) and across "
+                        "each driver post-step update (SSS restoring, freezing "
+                        "relaxation, geothermal, ISF, BBL, nudging) -- plus "
+                        "the applied q_net, and writes the window sums into "
+                        "each snapshot as ledger_<stage>_J. Each ocean column "
+                        "is counted once (--ew-cyclic-overlap halos dropped). "
+                        "Read-only (the state is bitwise unchanged on CPU) and "
+                        "excluded from the restart fingerprint. Tripole grid, "
+                        "single device, standard loop only (refused "
+                        "elsewhere); requires fp64.")
     p.add_argument("--kprofile-snapshots", action="store_true",
                    help="Store the vertical viscosity and diffusivity the "
                         "implicit solve consumes (K_M_diag/K_H_diag, with "
@@ -9255,6 +9375,13 @@ def main() -> int:
                  if not ok]
         if _need:
             raise ValueError(f"--nemo-geometry domain_cfg needs {', '.join(_need)}")
+    if args.heat_ledger and (args.grid != "tripole" or args.n_gpus > 1
+                             or int(args.scan_block) > 0):
+        raise ValueError(
+            "--heat-ledger is wired for the single-device tripole standard "
+            "loop only (--grid tripole, --n-gpus 1, --scan-block 0); got "
+            f"--grid {args.grid} --n-gpus {args.n_gpus} "
+            f"--scan-block {args.scan_block}.")
     if args.tripole_vmix != "none" and args.grid != "tripole":
         raise ValueError(
             "--tripole-vmix wires the vertical-mixing closure onto the "
@@ -10756,6 +10883,8 @@ def main() -> int:
         # restart un-resumable.
         "flux_accumulate", "mld_accumulate", "state_accumulate",
         "trd_accumulate", "trd_columns",
+        # The heat ledger only READS the state (bitwise-neutral step).
+        "heat_ledger",
         "restart_branch_from_different_config",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
@@ -11753,6 +11882,18 @@ def main() -> int:
                  if (args.flux_accumulate or args.mld_accumulate
                      or args.state_accumulate)
                  else None)
+    _hl_acc = None
+    if args.heat_ledger:
+        if app_grid_type != "tripole" or not hasattr(model,
+                                                     "step_with_heat_ledger"):
+            raise SystemExit(f"--heat-ledger is not wired for grid "
+                             f"{app_grid_type!r}")
+        _hl_acc = _HeatLedgerAccumulator(
+            area=grid.area, land_mask=state.land_mask.data, z_coord=z_coord,
+            min_water_column_m=model.config.min_water_column_m,
+            ew_cyclic_overlap=bool(args.ew_cyclic_overlap),
+            rho_0=model.config.constants.rho_0,
+            c_sw=model.config.constants.c_sw)
     # Attached HERE, after every setup-time rebuild of the model (a hook set at
     # build time was silently dropped by those rebuilds).
     if args.trd_accumulate:
@@ -12328,7 +12469,14 @@ def main() -> int:
             # Accumulated from the forcing HANDED TO THE STEP, so on the ice
             # lane this is the post-blend, ice-partitioned flux. MLD rides
             # the same window and the same single count.
-            state = _ocean_step(state, sf, fw, _t_sec)
+            if _hl_acc is not None:
+                _hl_acc.begin_step(state, sf.q_net, dt)
+                state, _hl_step = model.step_with_heat_ledger(
+                    state, dt, surface_forcing=sf, freshwater=fw,
+                    t_seconds=_t_sec)
+                _hl_acc.model_step(state, _hl_step)
+            else:
+                state = _ocean_step(state, sf, fw, _t_sec)
         if _gw_acc is not None:
             # READ-ONLY: `state` is never reassigned here, so the trajectory
             # is bit-identical to a run without the flag.
@@ -12408,6 +12556,8 @@ def main() -> int:
                     config=sss_restore_cfg, grid=grid, z_coord=z_coord, dt=dt,
                     lat2d_deg=lat2d, lon2d_deg=lon2d,
                     river_runoff=_R_gate)
+            if _hl_acc is not None:
+                _hl_acc.mark("post_sss_restore", state)
         if args.ice_thermo and _sic is not None:
             # Prescribed-ice freezing relaxation (the post-step half of the
             # thermodynamic boundary; the SW cut + (1-sic) flux suppression are in
@@ -12443,6 +12593,8 @@ def main() -> int:
                 T=Field(jnp.asarray(state.T.data).at[..., 0].set(jnp.asarray(T0)),
                         name=state.T.name,
                         dims=state.T.dims, units=state.T.units))
+            if _hl_acc is not None:
+                _hl_acc.mark("post_ice_freeze_relax", state)
         if args.geothermal:
             # Geothermal bottom heat-flux BC (NEMO ln_trabbc): warm the deepest
             # wet cell of each column by the seafloor heat flux Q_geo. Live
@@ -12468,6 +12620,8 @@ def main() -> int:
             state = apply_geothermal_step(
                 state, dz_live=_dz, wet_cell=_wet, dt=dt, config=_geo_cfg,
                 flux_wm2=_geo_map)
+            if _hl_acc is not None:
+                _hl_acc.mark("post_geothermal", state)
         if isf_forcing is not None:
             # NEMO ISF 'spe' prescribed melt (ln_isfpar_mlt, cn_isfpar_mlt=
             # 'spe'): monthly Depoorter melt deposited over the per-column
@@ -12494,6 +12648,8 @@ def main() -> int:
                 zmax_m=jnp.asarray(isf_forcing.zmax[_mi]),
                 dz_live=_dz_isf, wet_cell=_wet_isf, dt=dt,
                 rho_0=float(model.config.rho_0))
+            if _hl_acc is not None:
+                _hl_acc.mark("post_isf", state)
         if bbl_geom is not None:
             # NEMO advective BBL (Campin-Goosse): dense shelf bottom water
             # descends the slope. Host post-step exchange, exactly tracer-
@@ -12520,6 +12676,8 @@ def main() -> int:
                     dy_u_faces=bbl_face_widths[0],
                     dx_v_faces=bbl_face_widths[1],
                     nlev=int(args.nlev))
+            if _hl_acc is not None:
+                _hl_acc.mark("post_bbl", state)
         if nudge_tau_s > 0 and (nudge_release_s <= 0 or step * dt < nudge_release_s):
             a = dt / nudge_tau_s
             # WOA nudging is genuinely FULL-3-D (every level relaxes toward
@@ -12538,6 +12696,8 @@ def main() -> int:
                 S=Field(jnp.asarray(Sn), name=state.S.name,
                         dims=state.S.dims, units=state.S.units),
             )
+            if _hl_acc is not None:
+                _hl_acc.mark("post_woa_nudge", state)
         if drag_tau_s > 0 and step * dt < drag_days_s:
             df = float(np.exp(-dt / drag_tau_s))   # Rayleigh decay factor
             _upd = {"u": Field(jnp.asarray(np.asarray(state.u.data) * df),
@@ -12553,6 +12713,10 @@ def main() -> int:
             # honest accounting; device-side drag is scaling-M2 increment 2).
             _pers_res.count_leaf_full(gathers=len(_upd), uploads=len(_upd))
             state = state._replace(**_upd)
+        if _hl_acc is not None:
+            # After every update of this step; nothing else touches the state
+            # before the next step's begin_step (checked as between_steps).
+            _hl_acc.end_step()
         if _flux_acc is not None:
             # After EVERY update of this step (step, SSS restoring, freezing
             # relaxation, geothermal, ISF, BBL, nudging, drag): XIOS averages
@@ -12640,8 +12804,11 @@ def main() -> int:
                 # window instead of discarding it silently.
                 _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d,
                                grid=grid, io_proc=_is_io_proc(), ice_state=ice_state,
-                               extra=(_flux_acc.drain(dt)
-                                      if _flux_acc is not None else None))
+                               extra=({**(_flux_acc.drain(dt)
+                                          if _flux_acc is not None else {}),
+                                       **(_hl_acc.drain()
+                                          if _hl_acc is not None else {})}
+                                      or None))
                 _close_csv()
                 # Dump what the accumulator reached before the abort: the last
                 # cadence row alone would understate the run, and the run-end
@@ -12660,7 +12827,8 @@ def main() -> int:
                            ice_state=ice_state, grid=grid,
                            step=step, day=day,
                            extra=_snapshot_extra(args, model, state, sf, dt,
-                                                 z_coord, _flux_acc))
+                                                 z_coord, _flux_acc,
+                                                 heat_ledger=_hl_acc))
             print(f"[snapshot] day {day:.0f} saved", flush=True)
             # Same cadence as the snapshot, and AFTER this step's
             # gateway_step, so the row's n_steps matches the snapshot's day.
@@ -12683,6 +12851,7 @@ def main() -> int:
                            z_coord=z_coord, grid=grid, io_proc=_is_io_proc(),
                            ice_state=ice_state,
                            extra=({**(_flux_acc.drain(dt) if _flux_acc is not None else {}),
+                                   **(_hl_acc.drain() if _hl_acc is not None else {}),
                                    **(model._trd_callback.drain(dt)
                                       if getattr(model, "_trd_callback", None) is not None else {})}
                                   or None))
@@ -12697,7 +12866,8 @@ def main() -> int:
                    io_proc=_io, ice_state=ice_state, grid=grid,
                    step=step, day=day,
                    extra=_snapshot_extra(args, model, state, sf, dt,
-                                         z_coord, _flux_acc))
+                                         z_coord, _flux_acc,
+                                         heat_ledger=_hl_acc))
     _write_run_restart(n_steps, n_steps * dt / _SEC_PER_DAY, state, ice_state)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)

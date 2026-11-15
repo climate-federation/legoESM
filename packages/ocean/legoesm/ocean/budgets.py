@@ -179,7 +179,37 @@ def compute_tracer_budget(state, z_coord, *, grid_type: str, grid,
     )
 
 
+def ledger_cell_weights(area, land_mask, ew_cyclic_overlap: bool):
+    """Column weights ``area * land_mask`` for an on-device content sum.
+
+    With ``ew_cyclic_overlap`` (NEMO's two duplicated halo columns,
+    ``0 == nx-2`` and ``nx-1 == 1``) both copies get weight zero, so every
+    ocean column is counted once -- the same rule as the tripole heat-closure
+    gate's ``drop_cyclic_overlap``.
+    """
+    w = jnp.asarray(area, dtype=jnp.float64) * jnp.asarray(
+        land_mask, dtype=jnp.float64)
+    if ew_cyclic_overlap:
+        w = w.at[..., 0].set(0.0).at[..., -1].set(0.0)
+    return w
+
+
+def tracer_content(tracer, h_k, weights):
+    """``sum(tracer * h_k * weights)`` in fp64, on device (jit-safe).
+
+    The device twin of :func:`compute_tracer_budget`'s content integral
+    (``heat_content / (rho_0 * c_p)`` when ``tracer`` is T and ``weights``
+    is ``area * land_mask``): same cell volumes, no host transfer, so a
+    per-step ledger can accumulate it without synchronising.  Units
+    ``[tracer] m^3``.
+    """
+    f64 = jnp.float64
+    return jnp.sum(jnp.asarray(tracer, dtype=f64) * jnp.asarray(h_k, dtype=f64)
+                   * jnp.asarray(weights, dtype=f64)[..., None])
+
+
 __all__ = [
     "EnergyBudget", "TracerBudget",
     "compute_energy_budget", "compute_tracer_budget",
+    "ledger_cell_weights", "tracer_content",
 ]

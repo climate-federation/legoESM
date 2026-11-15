@@ -5629,8 +5629,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     nemo_vorticity_q_override=None,
     nemo_vorticity_transport_override=None,
     nemo_literal_hpg_vmask=None, nemo_stage_r3f=None, nemo_stage_r3t_stretch=None,
+    return_tracer_heat_split: bool = False,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
+
+    ``return_tracer_heat_split`` (static, diagnostic only -- the heat ledger,
+    ``legoesm.ocean.heat_ledger``): also return the explicit temperature
+    tendency split by the block that added it, ``(tendencies, split)`` with
+    ``split`` a dict of masked rates [degC/s] -- ``ldf`` (stage-9 tracer
+    diffusion), ``physics`` (``physics_fn``), ``surface`` (the explicit part
+    of the external surface forcing: q_net + penetrating shortwave unless
+    routed implicit) and ``sponge``.  Their sum is ``dT_dt`` to round-off.
+    Every block still adds into the same running ``dT_dt``, so the returned
+    tendencies are unchanged; ``False`` (every production caller) adds no op.
 
     Parameters
     ----------
@@ -6204,6 +6215,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # arrays, bit-identical. The GM/Redi isoneutral+skew part is added to this
     # bucket in the model step (where GM/Redi is computed).
     _ab2_advective = getattr(config, "ab2_scope", "total") == "advective"
+    if return_tracer_heat_split:
+        if _ab2_advective or momentum_only or diagnose_momentum:
+            raise ValueError(
+                "return_tracer_heat_split is defined only for the full tracer "
+                "tendency under ab2_scope='total' without momentum diagnostics")
+        _hs_ldf = dT_dt
     if _ab2_advective:
         dT_diss_lat = dT_dt
         dS_diss_lat = dS_dt
@@ -6418,6 +6435,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_diss_raw = None
 
     # --- Stage 10b: physics-pipeline tendencies. ---
+    _hs_before_phys = dT_dt
     (du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u,
      diag_phys_v) = _bc_physics_tendencies(
         du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, z_coord,
@@ -6498,6 +6516,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 "external-forcing shortwave path; leave "
                 "surface_forcing.shortwave_scheme='auto' on a NEMO qsr card.")
         _sw_scheme = _sw_pen_scheme
+    _hs_before_surface = dT_dt
     (du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat,
      diag_surface_stress_u, diag_surface_stress_v) = (
         _bc_external_surface_forcing(
@@ -6557,6 +6576,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         sponge is not None
         and bool(getattr(
             config, "rk3_stage3_damping_after_geothermal_nemo_order", False)))
+    _hs_before_sponge = dT_dt
     du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v = _bc_sponge_relaxation(
         du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
         include_tracers=not (_sponge_implicit or _sponge_stage3_damping),
@@ -6711,6 +6731,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dS_diss=dS_diss,
         tracer_source=tracer_source,
     )
+
+    if return_tracer_heat_split:
+        # Differences of the running sum: each block's own addition, masked
+        # like dT_dt above (x distributes over +, so the sum is dT_dt).
+        _hs_split = {
+            "ldf": _hs_ldf * mask_3d,
+            "physics": (_hs_before_surface - _hs_before_phys) * mask_3d,
+            "surface": (_hs_before_sponge - _hs_before_surface) * mask_3d,
+            "sponge": (tendencies.dT_dt.data - _hs_before_sponge * mask_3d),
+        }
+        return tendencies, _hs_split
 
     if not diagnose_momentum:
         if return_nemo_operator_components:
