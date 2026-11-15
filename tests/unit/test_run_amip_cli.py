@@ -402,7 +402,7 @@ def test_transient_land_cover_validate_strict_requires_multilayer_and_surfdata()
         "--land-mask-file", "lsm.nc", "--use-multilayer-land",
         "--transient-land-cover",
         "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
-    ]), parser))
+    ]), parser))._replace(ml_pipeline=True)
     cfg.validate_strict()  # complete config: no error
 
     # transient cover but no surfdata path -> reject
@@ -675,7 +675,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
         "--use-multilayer-land", "--land-mask-file", "lsm.nc",
-    ]), parser))
+    ]), parser))._replace(ml_pipeline=True)
     assert cfg_clm.land_surface_scheme == "clm_ml"
     cfg_clm.validate_strict()  # must not raise
 
@@ -2365,6 +2365,10 @@ _STRICT_FAILING_DECKS = {
         "campaign deck: land_update_seconds/land_calibrated_physics without multilayer land",
     "amip_aug13_control.yaml":
         "rerun of the 13 Aug campaign reference; inherits amip_campaign_mpas.yaml's errors",
+    "amip_land_v6.yaml":
+        "land overlay, not a standalone deck: no grid, so multilayer land lands off the column loop",
+    "amip_sota.yaml":
+        "historical cdgrid deck (user 2026-11-11): multilayer land off the column loop",
 }
 
 
@@ -2405,7 +2409,9 @@ def test_amip_sota_config_builds_valid_experiment_config():
         _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc",
                              "--land-mask-file", "/dummy/lsm.nc"]), parser)
     cfg = build_config_from_args(args)
-    cfg.validate_strict()  # raises if the SOTA combo is inconsistent
+    # historical (user 2026-11-11): full physics off the column loop is refused
+    with pytest.raises(ValueError, match="ml_pipeline=True"):
+        cfg.validate_strict()
     assert cfg.use_multilayer_land is True
     # aerosol_ccn is DISABLED in the shipped SOTA config (#745): as wired the
     # indirect effect is ~15x too strong (-24 W/m^2 vs IPCC -1 to -1.7); it
@@ -6396,3 +6402,12 @@ def test_fp32_land64_micro64_deck_selects_fp64_land_and_micro():
     assert args.microphysics_compute_precision == "fp64"
     assert args.use_multilayer_land is True
     assert args.microphysics != "none"
+
+
+def test_no_deck_can_set_ml_pipeline(tmp_path):
+    """The pipeline exemption is for ML entry points only: a deck key is refused."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    deck = tmp_path / "deck.yaml"
+    deck.write_text("ml_pipeline: true\n")
+    with pytest.raises((SystemExit, ValueError, KeyError)):
+        load_yaml_config(str(deck), build_arg_parser())

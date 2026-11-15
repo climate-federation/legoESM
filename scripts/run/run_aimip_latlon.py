@@ -210,7 +210,9 @@ def build_latlon_config(args):
         parsed.slab_land_active, parsed.use_multilayer_land,
         getattr(parsed, "land_mask_file", "") or "<none>")
     from legoesm.training.scale_build import resolve_training_ice_skin
-    return resolve_training_ice_skin(ra.build_config_from_args(parsed))
+    # an ML/AIMIP entry point: the compiled pipeline is its lane (P6)
+    return resolve_training_ice_skin(
+        ra.build_config_from_args(parsed)._replace(ml_pipeline=True))
 
 
 # ---------------------------------------------------------------------------

@@ -418,7 +418,8 @@ def test_surface_tiled_multilayer_requires_named_land(topography):
     """Idealized terrain needs a mask; file-derived land also enables the tile."""
     ml = ExperimentConfig(surface_tiled=True, turbulence="louis",
                           use_multilayer_land=True, slab_land_active=False,
-                          land_mask_path="", topography=topography)
+                          land_mask_path="", topography=topography,
+                          ml_pipeline=True)
     with pytest.raises(ValueError, match=f"topography={topography!r}.*NO land"):
         ml.validate_strict()
     ml._replace(land_mask_path="land_mask.nc").validate_strict()

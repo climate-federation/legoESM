@@ -141,3 +141,13 @@ def test_land_tile_on_flat_terrain_accepts_era5_not_zero():
     for kw in ({"slab_land_active": True}, {"use_multilayer_land": True}):
         assert "land physics on no land" in _msgs(
             _cfg(land_fraction_source="zero", **kw))
+
+
+def test_aimip_latlon_opts_into_the_ml_pipeline():
+    """AIMIP training runs multilayer land on the compiled pipeline, which
+    production refuses; its config builder must opt in."""
+    mod = _latlon_script()
+    cfg = mod.build_latlon_config(
+        mod.build_parser().parse_args(["--land-model", "multilayer"]))
+    assert cfg.use_multilayer_land and cfg.ml_pipeline
+    assert "ml_pipeline" not in _msgs(cfg)
