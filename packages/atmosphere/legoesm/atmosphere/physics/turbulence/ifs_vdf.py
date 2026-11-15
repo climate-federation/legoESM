@@ -32,7 +32,17 @@ hard form.
 KNOWN DIFFERENCES at the smooth default (measured per fixture column and
 stored with the test, tests/atmosphere/test_ifs_vdf_oracle.py): the smooth
 switches move the exchange coefficients only for columns with a level inside
-a switch band; the hard form matches the oracle to 1e-12.
+a switch band; the hard form matches the oracle to 1e-12.  Largest measured
+gaps (max |smooth - hard| / max |hard| per column):
+
+- K_M, K_H, CFM, CFH up to 9.1x on a near-neutral mixed layer under a weak
+  stable surface flux and strong wind (Ri ~ 0 inside the ri_width band).
+  OpenIFS switches between its stable and unstable branches at Ri = 0, and
+  the two differ ~20x there; the smooth form gives their blend.  ri_width = 0
+  recovers OpenIFS.
+- Up to 0.69 at the VDFEXCU cumulus Bowen-ratio test (flux_test_width_w_m2).
+- EIS 0.0024 (eis_width_k); the VDFHGHTN mass flux, updraught and Ri fields
+  agree to round-off.
 
 Levels run top -> surface; full-level arrays have KLEV entries (Fortran
 1..KLEV), half-level arrays KLEV+1 entries (Fortran 0..KLEV).  One column per
