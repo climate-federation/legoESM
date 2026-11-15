@@ -25,7 +25,7 @@ def nemo_source_round(value: jax.Array) -> jax.Array:
     """
     if current_numerics() == "nemo_fast":
         value = jnp.asarray(value)
-        if jnp.issubdtype(value.dtype, jnp.inexact):
+        if jnp.issubdtype(value.dtype, jnp.floating):
             return value
     value = jax.lax.optimization_barrier(value)
     return jnp.where(

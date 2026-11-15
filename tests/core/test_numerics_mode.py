@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -335,3 +336,45 @@ def test_bind_aot_leaves_nothing_to_launder():
     for bound in (compiled, exported):
         for name in ("lower", "compile", "serialize", "as_text", "mlir_module"):
             assert not hasattr(bound, name), name
+
+
+@pytest.mark.parametrize("exponent", [0.5, 0.0, 2.0])
+def test_fast_pow_keeps_the_guarded_gradient_at_base_zero(use_policy, exponent):
+    use_policy("libm")
+    base = jnp.zeros(3)
+    right = jnp.full(3, exponent)
+
+    def grads():
+        f = lambda b, e: jnp.sum(tx.pow(b, e))
+        return (jax.jit(jax.grad(f, argnums=(0, 1)))(base, right),
+                jax.jvp(lambda b: tx.pow(b, right), (base,), (jnp.ones(3),))[1])
+
+    with numerics_scope("nemo_exact"):
+        exact = grads()
+    with numerics_scope("nemo_fast"):
+        fast = grads()
+    for got, want in zip(jax.tree.leaves(fast), jax.tree.leaves(exact)):
+        assert np.all(np.isfinite(got))
+        np.testing.assert_array_equal(got, want)
+
+
+def test_fast_guard_keeps_refusing_complex_input():
+    for mode in NUMERICS_MODES:
+        with numerics_scope(mode), pytest.raises(TypeError):
+            sr(jnp.ones(2, jnp.complex64))
+
+
+def test_filter_jit_warmed_without_a_mode_retraces_under_a_scope():
+    traces = []
+
+    @eqx.filter_jit
+    def fn(v):
+        traces.append(current_numerics())
+        return sr(v * v)
+
+    x = jnp.linspace(0.1, 0.9, 5)
+    fn(x)
+    with numerics_scope("nemo_fast"):
+        fn(x)
+    fn(x)
+    assert traces == [None, "nemo_fast"]
