@@ -107,29 +107,33 @@ def resolved_slope_tensor(h, lat, factor: int, res_deg: float):
     """Block-mean Baines-Palmer K, L, M of the resolved terrain inside each block.
 
     At block scale the model keeps only each block's mean height, so every slope
-    inside a block is subgrid, and every jump between blocks is resolved.
-    Gradients are taken on each 2x2 square of points that lies wholly inside a
-    block (so two-point variation counts, and no stencil crosses a block edge),
-    and averaged with cos(lat) weights at the square centres.
+    inside a block is subgrid, and every jump between blocks is resolved.  Slopes
+    are taken on point pairs wholly inside a block (no stencil crosses a block
+    edge) and squared before averaging, so two-point and checkerboard variation
+    count: hx^2 on east-west pairs (cos-weighted by row), hy^2 on north-south
+    pairs (cos-weighted at the pair midpoint), and hx*hy as the mean of the four
+    edge products around each 2x2 square (cos-weighted at the square centre).
     """
     from legoesm import constants
 
     n_lat, n_lon = h.shape
     hb = h.reshape(n_lat // factor, factor, n_lon // factor, factor)
-    latb = lat.reshape(-1, factor)
-    cos_c = np.cos(np.deg2rad(0.5 * (latb[:, 1:] + latb[:, :-1])))[:, :, None, None]
+    latb = np.deg2rad(lat.reshape(-1, factor))
     d = np.deg2rad(res_deg) * constants.R_earth
-    a, b = hb[:, :-1, :, :-1], hb[:, :-1, :, 1:]      # south-west, south-east
-    c, e = hb[:, 1:, :, :-1], hb[:, 1:, :, 1:]        # north-west, north-east
-    hx = 0.5 * ((b - a) + (e - c)) / (d * cos_c)
-    hy = 0.5 * ((c - a) + (e - b)) / d
-    w = np.broadcast_to(cos_c, hx.shape)
-    ws = w.sum(axis=(1, 3))
+    cos_r = np.cos(latb)[:, :, None, None]                      # cell rows
+    cos_m = np.cos(0.5 * (latb[:, 1:] + latb[:, :-1]))[:, :, None, None]
+    hx = np.diff(hb, axis=3) / (d * cos_r)                      # (nb, f, nb, f-1)
+    hy = np.diff(hb, axis=1) / d                                # (nb, f-1, nb, f)
 
-    def wmean(x):
-        return (w * x).sum(axis=(1, 3)) / ws
+    def wmean(x, w):
+        w = np.broadcast_to(w, x.shape)
+        return (w * x).sum(axis=(1, 3)) / w.sum(axis=(1, 3))
 
-    return wmean(0.5 * (hx ** 2 + hy ** 2)), wmean(0.5 * (hx ** 2 - hy ** 2)), wmean(hx * hy)
+    hx2, hy2 = wmean(hx ** 2, cos_r), wmean(hy ** 2, cos_m)
+    hxs, hxn = hx[:, :-1], hx[:, 1:]                            # south / north edges
+    hyw, hye = hy[:, :, :, :-1], hy[:, :, :, 1:]                # west / east edges
+    hxhy = 0.25 * (hxs * hyw + hxs * hye + hxn * hyw + hxn * hye)
+    return 0.5 * (hx2 + hy2), 0.5 * (hx2 - hy2), wmean(hxhy, cos_m)
 
 
 def build_era5_sso(raw, *, block_deg: float):

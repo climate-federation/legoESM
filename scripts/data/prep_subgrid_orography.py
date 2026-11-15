@@ -103,9 +103,18 @@ def subgrid_orography_stddev(
 
     # Terrain height above sea level: bathymetry launches no mountain waves.
     h = np.clip(elev, 0.0, None)
-    mu = block_area_mean(h, lat, factor)
-    mu_fine = np.repeat(np.repeat(mu, factor, axis=0), factor, axis=1)
-    var = block_area_mean((h - mu_fine) ** 2, lat, factor)
+    hb = h.reshape(n_lat // factor, factor, n_lon // factor, factor)
+    # Area weights on a regular lat-lon grid: cell area ∝ cos(lat) (row-wise;
+    # constant in lon). Weighted first/second moments so every sample counts
+    # by the area it represents inside the block.
+    w_row = np.cos(np.deg2rad(lat))
+    wb = np.broadcast_to(
+        w_row.reshape(n_lat // factor, factor, 1, 1),
+        hb.shape,
+    )
+    w_sum = np.maximum(wb.sum(axis=(1, 3)), 1e-12)
+    mu = (wb * hb).sum(axis=(1, 3)) / w_sum
+    var = (wb * (hb - mu[:, None, :, None]) ** 2).sum(axis=(1, 3)) / w_sum
     sso = np.sqrt(var)
     lat_b = lat.reshape(-1, factor).mean(axis=1)
     lon_b = lon.reshape(-1, factor).mean(axis=1)

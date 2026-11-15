@@ -163,10 +163,9 @@ def _resolved(z_m, block_deg=2.0):
     return out["SSO_K"].values, out["SSO_L"].values, out["SSO_M"].values
 
 
-def _square_cos(block):
-    """cos(lat) at the 2x2-square centres of each block of the 1-deg fixture."""
-    lat = np.arange(-89.0, 90.5, 1.0).reshape(-1, block)
-    return np.cos(np.deg2rad(0.5 * (lat[:, 1:] + lat[:, :-1])))
+def _row_cos(block):
+    """cos(lat) of the cell rows of each block of the 1-deg fixture."""
+    return np.cos(np.deg2rad(np.arange(-89.0, 90.5, 1.0).reshape(-1, block)))
 
 
 _D = np.deg2rad(1.0) * constants.R_earth
@@ -177,7 +176,7 @@ def test_resolved_slope_zonal_ramp_is_exact():
     c = 10.0
     z = np.broadcast_to(c * np.arange(360.0), (181, 360)).copy()
     K, L, M = _resolved(z)
-    w = _square_cos(2)
+    w = _row_cos(2)
     expect = (w * 0.5 * (c / (_D * w)) ** 2).sum(1) / w.sum(1)
     np.testing.assert_allclose(K[:, 0], expect, rtol=1e-12)
     np.testing.assert_allclose(L[:, 0], expect, rtol=1e-12)
@@ -194,9 +193,9 @@ def test_resolved_slope_meridional_and_oblique_are_exact():
     np.testing.assert_allclose(M, 0.0, atol=1e-20)
     j = np.arange(360.0)[None, :]
     K2, L2, M2 = _resolved(c * i + c * j)
-    w = _square_cos(2)
-    np.testing.assert_allclose(M2[:, 0], ((w * (c / (_D * w)) * (c / _D)).sum(1) / w.sum(1)),
-                               rtol=1e-12)
+    wr = _row_cos(2)
+    hx = 0.5 * (c / (_D * wr[:, 0]) + c / (_D * wr[:, 1]))     # mean of south/north edges
+    np.testing.assert_allclose(M2[:, 0], hx * (c / _D), rtol=1e-12)
 
 
 def test_resolved_slope_keeps_two_point_variation():
@@ -204,9 +203,21 @@ def test_resolved_slope_keeps_two_point_variation():
     z = np.zeros((181, 360))
     z[:, 1::2] = 400.0
     K, L, M = _resolved(z)
-    w = _square_cos(2)
+    w = _row_cos(2)
     expect = (w * 0.5 * (400.0 / (_D * w)) ** 2).sum(1) / w.sum(1)
     np.testing.assert_allclose(K[:, 0], expect, rtol=1e-12)
+    np.testing.assert_allclose(M, 0.0, atol=1e-20)
+
+
+def test_resolved_slope_sees_a_checkerboard():
+    """Checkerboard 0/400 m: averaging gradients before squaring would cancel to zero."""
+    z = 400.0 * ((np.arange(181)[:, None] + np.arange(360)[None, :]) % 2)
+    K, L, M = _resolved(z.astype(float))
+    wr = _row_cos(2)
+    hx2 = (wr * (400.0 / (_D * wr)) ** 2).sum(1) / wr.sum(1)
+    hy2 = (400.0 / _D) ** 2
+    np.testing.assert_allclose(K[:, 0], 0.5 * (hx2 + hy2), rtol=1e-12)
+    np.testing.assert_allclose(L[:, 0], 0.5 * (hx2 - hy2), rtol=1e-12)
     np.testing.assert_allclose(M, 0.0, atol=1e-20)
 
 
