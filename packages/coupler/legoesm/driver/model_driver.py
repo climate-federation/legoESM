@@ -13444,9 +13444,14 @@ class ModelDriver:
                     "land with channels 'ts_fluxes'.")
             _ice_sheet_bulk_w = self._surfdata_glacier_mask(
                 str(cfg.surfdata_path)).astype(self.state.p_s.data.dtype)
+            _ice_sheet_bulk_z0 = jnp.asarray(
+                float(cfg.land_prescribed_ice_sheet_z0_m),
+                dtype=self.state.p_s.data.dtype)
             logger.info(
-                "  Prescribed land: bulk sensible heat on %d glacier-dominant "
-                "cells of this rank (file's flux elsewhere)",
+                "  Prescribed land: land-tile Monin-Obukhov sensible heat "
+                "(z0 = %g m) on %d glacier-dominant cells of this rank "
+                "(file's flux elsewhere)",
+                float(cfg.land_prescribed_ice_sheet_z0_m),
                 int(np.asarray(_ice_sheet_bulk_w).sum()))
         _land_lapse_K_m = (
             float(getattr(cfg, "land_lapse_K_per_km", 0.0)) * 1.0e-3)
@@ -15996,6 +16001,7 @@ class ModelDriver:
                     _forcing["shflx_land"] = _land_shflx_cells
                     if _ice_sheet_bulk_w is not None:
                         _forcing["shflx_land_bulk_weight"] = _ice_sheet_bulk_w
+                        _forcing["shflx_land_bulk_z0"] = _ice_sheet_bulk_z0
                 if _land_lhflx_cells is not None:
                     # Latent heat alone (prescribed-land "ts_lh"): the
                     # turbulence then keeps its bulk sensible heat over land.

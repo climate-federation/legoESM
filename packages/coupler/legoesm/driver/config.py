@@ -2318,6 +2318,12 @@ class ExperimentConfig(NamedTuple):
     # (measured: 2 m air 5-6 K too cold over Antarctica, surface 4 K warmer
     # than the air; ERA5 has the air 1.5 K warmer).  Static mask.
     land_prescribed_ice_sheet_bulk_sensible: bool = False
+    # Roughness length [m] of the fixed-roughness land-tile Monin-Obukhov law
+    # that computes that sensible heat (not the open-ocean law, whose stable
+    # exchange over ice was measured at a fifth of ERA5's).  0.0024 m = CLM5
+    # snow/glacier momentum roughness (zsno; CLM5 Tech Note sect. 2.5.1).
+    # Read only with land_prescribed_ice_sheet_bulk_sensible.
+    land_prescribed_ice_sheet_z0_m: float = 0.0024
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -3690,6 +3696,11 @@ class ExperimentConfig(NamedTuple):
                     "at a transient legoesm_surfdata NetCDF (pft_frac(year, npft, "
                     "lat, lon) in percent, CLM5 17-PFT axis); none was set."
                 )
+        if not (self.land_prescribed_ice_sheet_z0_m > 0.0):
+            errors.append(
+                "land_prescribed_ice_sheet_z0_m must be a positive roughness "
+                f"length [m]; got {self.land_prescribed_ice_sheet_z0_m!r}."
+            )
         if not (self.surface_z0_land > 0.0):
             errors.append(
                 f"surface_z0_land must be a positive roughness length [m]; "

@@ -2517,6 +2517,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(Antarctica, Greenland) use the bulk sensible "
                              "heat against the prescribed skin temperature "
                              "instead of the file's flux. Default off.")
+    parser.add_argument("--land-prescribed-ice-sheet-z0-m", type=float,
+                        default=None, dest="land_prescribed_ice_sheet_z0_m",
+                        help="Roughness length [m] of the land-tile "
+                             "Monin-Obukhov law used for the ice-sheet "
+                             "sensible heat under "
+                             "--land-prescribed-ice-sheet-bulk-sensible "
+                             "(default: the config default, 0.0024).")
     parser.add_argument("--sea-ice-flux-split",
                         action=_BoolOneSpelling, default=False,
                         dest="sea_ice_flux_split",
@@ -3367,6 +3374,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sea_ice_flux_split=bool(args.sea_ice_flux_split),
         land_prescribed_ice_sheet_bulk_sensible=bool(
             args.land_prescribed_ice_sheet_bulk_sensible),
+        land_prescribed_ice_sheet_z0_m=(
+            args.land_prescribed_ice_sheet_z0_m
+            if args.land_prescribed_ice_sheet_z0_m is not None
+            else _EXPERIMENT_DEFAULTS.land_prescribed_ice_sheet_z0_m),
         ice_thickness_m=(
             args.ice_thickness_m
             if args.ice_thickness_m is not None

@@ -1252,6 +1252,10 @@ def _make_mpas_turbulence(
                     z_full[:, -1] - z_half[:, -1],
                 )
 
+            # The surface law as the bulk calls see it (before the blended
+            # water flux is pinned into ``step_config`` below).
+            _surface_cfg_bulk = step_config.surface
+
             # ``forcing["sea_ice_frac"]`` + ``forcing["T_ice_minus_sea"]``
             # (sea_ice_flux_split): the non-land bulk call is made twice, on
             # the ice skin and on the open water of a partly ice-covered
@@ -1351,7 +1355,36 @@ def _make_mpas_turbulence(
                         "over land sensible heat (forcing['shflx_land']); "
                         "without one it would be ignored.")
                 _w_bulk = jnp.asarray(_w_bulk, dtype=q_sfc.dtype).reshape(nCells)
-                _sh_land = _w_bulk * _sh + (1.0 - _w_bulk) * _sh_land
+                # ``forcing["shflx_land_bulk_z0"]`` (static, [m]): the bulk
+                # value on that share is the fixed-roughness LAND-tile
+                # Monin-Obukhov law at this snow/ice roughness, against the
+                # land-blended ``T_sfc`` (the prescribed skin over land) --
+                # not ``_sh``, which is the open-ocean air-sea law and gives
+                # a stable ice sheet a small fraction of the exchange
+                # (measured: -3 W/m2 with the air 3.5 K warmer than the
+                # surface, ERA5 -16).  No fallback to the ocean law.
+                _z0_bulk = forcing.get("shflx_land_bulk_z0")
+                if _z0_bulk is None:
+                    raise ValueError(
+                        "forcing['shflx_land_bulk_weight'] needs "
+                        "forcing['shflx_land_bulk_z0'] (roughness length [m] "
+                        "of the land-tile law used on that share).")
+                from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                    land_tile_surface_cfg,
+                )
+                _sh_sheet = surface_fluxes_at_lowest_level(
+                    u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
+                    T_sfc, q_sfc, rho[:, -1],
+                    land_tile_surface_cfg(
+                        _surface_cfg_bulk,
+                        jnp.asarray(_z0_bulk, dtype=q_sfc.dtype)),
+                    z_full[:, -1] - z_half[:, -1],
+                )[2]
+                _sh_land = _w_bulk * _sh_sheet + (1.0 - _w_bulk) * _sh_land
+            elif forcing.get("shflx_land_bulk_z0") is not None:
+                raise ValueError(
+                    "forcing['shflx_land_bulk_z0'] is only consumed together "
+                    "with forcing['shflx_land_bulk_weight'].")
             _surface_flux = (
                 _tx, _ty,
                 (1.0 - _fl) * _sh + _fl * _sh_land,
@@ -1397,11 +1430,14 @@ def _make_mpas_turbulence(
                 "(sea_ice_flux_split) are only consumed together with the "
                 "land's own heat fluxes (forcing['shflx_land'] or "
                 "['lhflx_land']); without them they would be ignored.")
-        elif forcing is not None and forcing.get("shflx_land_bulk_weight") is not None:
+        elif forcing is not None and (
+                forcing.get("shflx_land_bulk_weight") is not None
+                or forcing.get("shflx_land_bulk_z0") is not None):
             raise ValueError(
-                "forcing['shflx_land_bulk_weight'] is only consumed together "
-                "with the land's own sensible heat (forcing['shflx_land']); "
-                "without it it would be ignored.")
+                "forcing['shflx_land_bulk_weight'] / ['shflx_land_bulk_z0'] "
+                "are only consumed together with the land's own sensible "
+                "heat (forcing['shflx_land']); without it they would be "
+                "ignored.")
         elif forcing is not None and forcing.get("taumag_land") is not None:
             raise ValueError(
                 "forcing['taumag_land'] (land-model surface stress) is only "

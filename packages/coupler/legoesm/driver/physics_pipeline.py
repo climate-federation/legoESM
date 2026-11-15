@@ -4162,22 +4162,9 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 _PIPELINE_UNSUPPORTED_CONVECTION = frozenset()
 
 
-def land_tile_surface_cfg(ocean_cfg, z0_land):
-    """The LAND tile law, derived from the OCEAN tile law.
-
-    Fixed-roughness Monin-Obukhov (``"most"``) at ``z0_land``, no
-    Charnock/gustiness, and the default thermodynamic convention even when the
-    ocean tile runs aerobulk (AIR-SEA-only option, #762).
-
-    One owner, called by the atmosphere's land tile AND by the unified slab
-    surface-energy balance, so the two can never diverge into different land
-    flux laws again -- and callable without a pipeline, so a probe can ask
-    instead of reconstruct (#1320).
-    """
-    return ocean_cfg._replace(
-        bulk_scheme="most", z0=z0_land, gustiness_w_zi=0.0,
-        thermo_convention="legoesm",
-    )
+from legoesm.atmosphere.physics.turbulence.surface_layer import (  # noqa: E402
+    land_tile_surface_cfg,
+)
 
 
 def resolve_tiled_surface_configs(config, z0_land=None):

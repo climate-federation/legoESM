@@ -6320,3 +6320,15 @@ def test_land_prescribed_ice_sheet_bulk_sensible_flag_flows_to_config():
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", flag]), parser))
         assert cfg.land_prescribed_ice_sheet_bulk_sensible is want
+
+
+def test_land_prescribed_ice_sheet_z0_m_flag_flows_to_config():
+    """--land-prescribed-ice-sheet-z0-m round-trip; unset = config default."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_prescribed_ice_sheet_z0_m == 0.0024
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-prescribed-ice-sheet-z0-m", "0.001"]), parser))
+    assert cfg.land_prescribed_ice_sheet_z0_m == 0.001

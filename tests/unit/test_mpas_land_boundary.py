@@ -1446,63 +1446,121 @@ def test_ice_split_changes_sensible_heat_under_the_production_law(
 # land_prescribed_ice_sheet_bulk_sensible: bulk sensible heat on a static
 # share of the land fraction, the handed-over flux on the rest
 # ---------------------------------------------------------------------------
+_Z0_SNOW = 0.0024      # the config default (CLM5 snow roughness) [m]
+
+
+def _production_tc():
+    tc = TurbulenceConfig(scheme="louis")
+    return tc._replace(louis=tc.louis._replace(
+        surface=tc.louis.surface._replace(bulk_scheme="large_yeager_cesm")))
+
+
+def _land_law_tc(tc, z0):
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        land_tile_surface_cfg)
+    return tc._replace(louis=tc.louis._replace(
+        surface=land_tile_surface_cfg(tc.louis.surface, z0)))
+
+
+def _sheet_keys(w, z0=_Z0_SNOW):
+    return {"shflx_land_bulk_weight": w, "shflx_land_bulk_z0": jnp.asarray(z0)}
+
+
 def _bulk_weight_runs(mpas_mesh, sigma_coord, state64, w):
+    """presc: the file's flux on all land; ocean / land: the bulk sensible heat
+    of the run's (ocean) law and of the land-tile law at the snow roughness,
+    each from a latent-only ("ts_lh") run whose ONLY law it is; got: the
+    option."""
     ncell = state64.T.data.shape[0]
     f_land = jnp.asarray(np.linspace(0.2, 1.0, ncell))
-    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
-                               f_land=f_land)
+    tc = _production_tc()
+    fn = _make_mpas_turbulence(tc, 300.0, f_land=f_land)
+    fn_land = _make_mpas_turbulence(_land_law_tc(tc, _Z0_SNOW), 300.0,
+                                    f_land=f_land)
     f = _land_forcing(ncell, shflx=-25.0, lhflx=2.0)     # ice-sheet-like
-    run = lambda g: _fluxes(fn(state64, mpas_mesh, sigma_coord, forcing=g))[0]  # noqa: E731
+    run = lambda h, g: _fluxes(h(state64, mpas_mesh, sigma_coord, forcing=g))[0]  # noqa: E731
     lh_only = {k: v for k, v in f.items() if k != "shflx_land"}   # "ts_lh"
-    return run(f), run(lh_only), run(dict(f, shflx_land_bulk_weight=w)), f_land
+    return (run(fn, f), run(fn, lh_only), run(fn_land, lh_only),
+            run(fn, dict(f, **_sheet_keys(w))), np.asarray(f_land))
 
 
-def test_ice_sheet_bulk_weight_limits_and_blend(mpas_mesh, sigma_coord, state64):
-    """Weight 0 = the file's flux everywhere; weight 1 = the bulk sensible
-    heat of the latent-only ("ts_lh") handoff; in between, the weighted sum.
-    Latent heat and water are untouched.  Sign: positive upward throughout."""
+def test_ice_sheet_bulk_share_is_the_land_tile_law(mpas_mesh, sigma_coord, state64):
+    """On the weighted share of the land fraction the sensible heat is the
+    fixed-roughness LAND-tile law against the skin temperature -- not the
+    run's ocean law -- and the file's flux on the rest; weight 0 is the file's
+    flux everywhere.  Latent heat and water are untouched.  Sign: positive
+    upward throughout."""
     ncell = state64.T.data.shape[0]
-    for wval in (0.0, 1.0):
-        presc, bulk, got, _ = _bulk_weight_runs(
-            mpas_mesh, sigma_coord, state64, jnp.full((ncell,), wval))
-        want = bulk if wval == 1.0 else presc
-        for k in ("shflx_sfc", "lhflx_sfc", "evap_sfc"):
-            np.testing.assert_allclose(got[k], want[k], rtol=1e-12, atol=1e-14)
-    # The two limits differ (300 K skin under 290 K air: bulk flux is upward,
-    # the handed flux is -25 W/m2), so the weight is not inert.
-    assert (bulk["shflx_sfc"] - presc["shflx_sfc"] > 1.0).all()
-    w = jnp.asarray(np.linspace(0.0, 1.0, ncell))
-    presc, bulk, got, _ = _bulk_weight_runs(mpas_mesh, sigma_coord, state64, w)
-    np.testing.assert_allclose(
-        got["shflx_sfc"],
-        np.asarray(w) * bulk["shflx_sfc"] + (1 - np.asarray(w)) * presc["shflx_sfc"],
-        rtol=1e-12, atol=1e-12)
+    for w in (jnp.zeros((ncell,)), jnp.ones((ncell,)),
+              jnp.asarray(np.linspace(0.0, 1.0, ncell))):
+        presc, ocean, land, got, fl = _bulk_weight_runs(
+            mpas_mesh, sigma_coord, state64, w)
+        np.testing.assert_allclose(
+            got["shflx_sfc"],
+            presc["shflx_sfc"] + fl * np.asarray(w) * (land["shflx_sfc"] + 25.0),
+            rtol=1e-11, atol=1e-11)
+        for k in ("lhflx_sfc", "evap_sfc"):
+            np.testing.assert_allclose(got[k], presc[k], rtol=1e-12, atol=1e-14)
+    # w = linspace: not the ocean law's value on that share (non-vacuous).
+    wrong = presc["shflx_sfc"] + fl * np.asarray(w) * (ocean["shflx_sfc"] + 25.0)
+    assert np.abs(got["shflx_sfc"] - wrong)[-1] > 1.0      # f_land = w = 1
+    assert not np.allclose(land["shflx_sfc"], ocean["shflx_sfc"], rtol=1e-3)
 
 
-def test_ice_sheet_bulk_weight_refused_without_land_sensible_heat(
+def test_ice_sheet_land_law_exchanges_more_than_ocean_law_in_stable_air():
+    """A stable ice-sheet column near ERA5's state (air 1.4 K warmer than the
+    surface, 10 m/s, lowest level 52 m up as on the 32-level AMIP grid): the
+    land-tile law at the snow roughness carries at least twice the downward
+    sensible heat of the CESM open-ocean law (measured 2026-11-15: -13.0
+    against -5.3 W/m2).  NOT true in stronger stability under the linear
+    Dyer stable function this law inherits (3.5 K, 6 m/s: -1.1 against -1.8;
+    the non-linear stable functions give -3.3 to -5.7 there)."""
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        land_tile_surface_cfg, surface_fluxes_at_lowest_level)
+    ocean_cfg = _production_tc().louis.surface
+    assert ocean_cfg.z_ref_model_level is True
+    z = jnp.asarray([52.0])
+    args = (jnp.asarray([10.0]), jnp.asarray([0.0]),
+            jnp.asarray([241.4]) - constants.g / constants.c_pd * z,
+            jnp.asarray([3.0e-4]), jnp.asarray([240.0]), jnp.asarray([2.5e-4]),
+            jnp.asarray([0.9]))
+    sh_o = float(surface_fluxes_at_lowest_level(*args, ocean_cfg, z)[2][0])
+    sh_l = float(surface_fluxes_at_lowest_level(
+        *args, land_tile_surface_cfg(ocean_cfg, _Z0_SNOW), z)[2][0])
+    assert sh_o < 0.0 and sh_l < 0.0
+    assert abs(sh_l) >= 2.0 * abs(sh_o), (sh_o, sh_l)
+
+
+def test_ice_sheet_bulk_weight_refused_when_inconsistent(
         mpas_mesh, sigma_coord, state64):
     ncell = state64.T.data.shape[0]
     f_land = jnp.full((ncell,), 0.5)
-    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
-                               f_land=f_land)
+    fn = _make_mpas_turbulence(_production_tc(), 300.0, f_land=f_land)
     w = jnp.ones((ncell,))
     f = _land_forcing(ncell, shflx=-25.0, lhflx=2.0)
     lh_only = {k: v for k, v in f.items() if k != "shflx_land"}
-    for g in (dict(lh_only, shflx_land_bulk_weight=w),
-              {"T_sfc": jnp.full((ncell,), 300.0), "shflx_land_bulk_weight": w}):
+    for g in (dict(lh_only, **_sheet_keys(w)),
+              dict({"T_sfc": jnp.full((ncell,), 300.0)}, **_sheet_keys(w))):
         with pytest.raises(ValueError, match="shflx_land_bulk_weight"):
+            fn(state64, mpas_mesh, sigma_coord, forcing=g)
+    # The weight without its roughness (no fallback to the ocean law), and
+    # the roughness without the weight.
+    for g in (dict(f, shflx_land_bulk_weight=w),
+              dict(f, shflx_land_bulk_z0=jnp.asarray(_Z0_SNOW)),
+              {"T_sfc": jnp.full((ncell,), 300.0),
+               "shflx_land_bulk_z0": jnp.asarray(_Z0_SNOW)}):
+        with pytest.raises(ValueError, match="shflx_land_bulk_z0"):
             fn(state64, mpas_mesh, sigma_coord, forcing=g)
 
 
 def test_ice_sheet_bulk_weight_gradient(mpas_mesh, sigma_coord, state64):
     """The surface sensible heat is differentiable in the handed flux and in
-    the lowest-level air through the bulk share (finite, non-zero)."""
+    the skin temperature through the land-tile-law share (finite, non-zero)."""
     ncell = state64.T.data.shape[0]
     f_land = jnp.full((ncell,), 1.0)
-    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
-                               f_land=f_land)
+    fn = _make_mpas_turbulence(_production_tc(), 300.0, f_land=f_land)
     f = dict(_land_forcing(ncell, shflx=-25.0, lhflx=2.0),
-             shflx_land_bulk_weight=jnp.full((ncell,), 0.5))
+             **_sheet_keys(jnp.full((ncell,), 0.5)))
 
     def loss(T_skin, sh):
         out = fn(state64, mpas_mesh, sigma_coord,
@@ -1516,6 +1574,16 @@ def test_ice_sheet_bulk_weight_gradient(mpas_mesh, sigma_coord, state64):
     assert (np.asarray(g[0]) > 0.0).all()                 # warmer skin, more upward heat
     np.testing.assert_allclose(np.asarray(g[1]), 0.5, rtol=1e-10)
     check_grads(loss, args, order=1, modes=["rev"], rtol=1e-5)
+
+
+def test_ice_sheet_z0_default_and_validated_positive():
+    from legoesm.driver.config import ExperimentConfig
+    assert ExperimentConfig().land_prescribed_ice_sheet_z0_m == _Z0_SNOW
+    assert "land_prescribed_ice_sheet_z0_m" not in "\n".join(
+        _strict_errors(_ice_sheet_cfg()))
+    for bad in (0.0, -1.0e-3):
+        assert "land_prescribed_ice_sheet_z0_m" in "\n".join(
+            _strict_errors(_ice_sheet_cfg(land_prescribed_ice_sheet_z0_m=bad)))
 
 
 def _ice_sheet_cfg(**kw):
