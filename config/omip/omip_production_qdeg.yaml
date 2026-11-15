@@ -12,7 +12,7 @@ dt: 300.0
 days: 10950.0                 # 30 years: 1-10 spin-up, 11-30 analysis
 checkpoint_days: 30.0
 precision: fp64
-output: results/omip_production_qdeg_L60
+output: results/omip_production_qdeg_L60_v2
 
 # --- bathymetry: ETOPO 0.25 deg, no equatorial smoothing (removed on main)
 bathymetry: /work/bb1596/b384036/diffESM/data/bathy/bathy_025deg_etopo_sulawesi.nc   # neck of Sulawesi closed
@@ -48,3 +48,4 @@ kpp_k_bg: 1.0e-6
 implicit_vertical_mixing: true
 no_conservation_fixer: true
 K_v: 0.0                      # constant K_v is ADDED to KPP; main default 1e-4 eroded the thermocline (old run: LEGOESM_KV=0)
+# run with: export LEGOESM_KPP_VT_N2=potential   (KPP V_t^2 from potential-density N; kpp.py)
