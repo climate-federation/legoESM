@@ -6420,13 +6420,34 @@ def test_launcher_sso_default_never_replaces_a_decks_own_file(deck, sso):
     assert build_config_from_args(args).subgrid_orography_path == sso
 
 
-@pytest.mark.parametrize("cell, block, cutoff", [(3.454, 3.0, 6.0),
-                                                 (1.727, 2.0, 3.0)])
-def test_duo_sso_cutoff_is_two_cells_and_passes_the_scale_guard(cell, block, cutoff):
-    """User 2026-11-15: resolved cutoff = two grid cells at C24 and C48, snapped
-    down to the 1-deg source sampling; nothing above it is launched as drag."""
+def _two_cell_cutoff_report(attrs, cell):
+    """None when a file's recorded cutoff is two cells snapped down to its
+    source sampling and the loader's scale guard accepts it on this grid."""
     from legoesm.grids.topography import _check_sso_scale_decomposition
-    assert 2 * cell - 1.0 < cutoff <= 2 * cell
-    assert cutoff >= block
-    built = {"block_deg": block, "fine_res_deg": 1.0, "resolved_cutoff_deg": cutoff}
-    assert _check_sso_scale_decomposition(built, cell, "f.nc", "warn") is None
+    fine, cutoff = float(attrs["fine_res_deg"]), float(attrs["resolved_cutoff_deg"])
+    if not 2 * cell - fine < cutoff <= 2 * cell:
+        return f"cutoff {cutoff} is not two {cell}-deg cells at {fine}-deg sampling"
+    if cutoff < float(attrs["block_deg"]):
+        return "cutoff below the block"
+    built = {k: float(attrs[k]) for k in ("block_deg", "fine_res_deg",
+                                          "resolved_cutoff_deg")}
+    return _check_sso_scale_decomposition(built, cell, "f.nc", "warn")
+
+
+@pytest.mark.parametrize("res, cell", [(24, 3.454), (48, 1.727)])
+def test_duo_sso_product_cutoff_is_two_cells(res, cell):
+    """User 2026-11-15: resolved cutoff = two grid cells at C24 and C48. Reads
+    the product the deck names (skips where it is not staged)."""
+    import yaml
+    import xarray as xr
+    deck = yaml.safe_load((_repo_root() / "config" / "amip" /
+                           f"amip_production_fv3duo_c{res}.yaml").read_text())
+    path = _repo_root() / deck["subgrid_orography_file"]
+    if not path.is_file():
+        pytest.skip(f"{path} not staged")
+    with xr.open_dataset(path) as ds:
+        attrs = dict(ds.attrs)
+    assert _two_cell_cutoff_report(attrs, cell) is None
+    # planted violation: the old one-block, no-cutoff-like coarse cutoff
+    assert _two_cell_cutoff_report({**attrs, "resolved_cutoff_deg": 4 * cell},
+                                   cell) is not None
