@@ -16,7 +16,7 @@ import xarray as xr
 
 from legoesm.grids.cubed_sphere import CubedSphereGrid, create_cubed_sphere
 from legoesm.grids.gaussian import GaussianGrid
-from legoesm.grids.topography import load_subgrid_orography
+from legoesm.grids.topography import load_sso_lott_miller, load_subgrid_orography, sso_from_tensor
 
 
 @pytest.fixture(scope="module")
@@ -305,3 +305,53 @@ def test_the_report_fires_once_per_file_and_grid(tmp_path, caplog):
     marginal = [r for r in caplog.records if "SECOND time" in r.message]
     assert len(marginal) == 1
     assert "launch stress" not in marginal[0].message
+
+
+
+def _tensor(sigma, gamma, theta):
+    s = 0.5 * sigma ** 2 * (1.0 - gamma ** 2)
+    return 0.5 * sigma ** 2 * (1.0 + gamma ** 2), s * np.cos(2 * theta), s * np.sin(2 * theta)
+
+
+def _sso_tensor_file(path, theta_of_lon, drop=None):
+    lat = np.arange(-89.0, 90.0, 2.0)
+    lon = np.arange(1.0, 360.0, 2.0)
+    shp = (lat.size, lon.size)
+    theta = np.broadcast_to(theta_of_lon(lon)[None, :], shp)
+    K, L, M = _tensor(np.full(shp, 0.02), np.full(shp, 0.5), theta)
+    v = {"SSO_STDH": np.full(shp, 300.0), "SSO_K": K, "SSO_L": L, "SSO_M": M}
+    if drop is not None:
+        v["sgh"] = v.pop(drop)      # a legacy alias name must not stand in
+    xr.Dataset({k: (("lat", "lon"), a) for k, a in v.items()},
+               coords={"lat": lat, "lon": lon}).to_netcdf(path)
+    return str(path)
+
+
+def test_tensor_inversion_round_trip_and_flat_convention():
+    sig, gam, th = np.array([0.03, 0.0]), np.array([0.4, 0.7]), np.array([-1.2, 0.3])
+    s, g, t = sso_from_tensor(*_tensor(sig, gam, th))
+    np.testing.assert_allclose(s, [0.03, 0.0], atol=1e-15)
+    np.testing.assert_allclose(g[0], 0.4, rtol=1e-12)
+    np.testing.assert_allclose(t[0], -1.2, rtol=1e-12)
+    assert g[1] == 1.0 and t[1] == 0.0                      # flat cell
+
+
+def test_lott_miller_loader_never_interpolates_the_angle(tmp_path):
+    """Ridges at +85 and -85 deg on alternate 2-deg columns: the same
+    orientation up to 10 deg.  Sampling theta itself would give ~0 between
+    them; the tensor gives +-90 deg (cos 2 theta ~ -1)."""
+    path = _sso_tensor_file(tmp_path / "t.nc",
+                            lambda lon: np.where((lon // 2) % 2 == 0, 1.0, -1.0) * np.deg2rad(85.0))
+    f = load_sso_lott_miller(create_cubed_sphere(8), path, scale_check="off")
+    c2 = np.cos(2.0 * np.asarray(f.theta))
+    assert np.all(c2 < -0.95)
+    np.testing.assert_allclose(np.asarray(f.std), 300.0)
+    # the averaged tensor of two ridges 10 deg apart is slightly less anisotropic
+    np.testing.assert_allclose(np.asarray(f.sigma), 0.02, rtol=1e-2)
+
+
+@pytest.mark.parametrize("drop", ["SSO_K", "SSO_L", "SSO_M", "SSO_STDH"])
+def test_lott_miller_loader_requires_every_field(tmp_path, drop):
+    path = _sso_tensor_file(tmp_path / "t.nc", lambda lon: 0.0 * lon, drop=drop)
+    with pytest.raises(KeyError):
+        load_sso_lott_miller(create_cubed_sphere(8), path, scale_check="off")
