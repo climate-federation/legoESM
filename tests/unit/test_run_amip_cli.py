@@ -6396,3 +6396,38 @@ def test_fp32_land64_micro64_deck_selects_fp64_land_and_micro():
     assert args.microphysics_compute_precision == "fp64"
     assert args.use_multilayer_land is True
     assert args.microphysics != "none"
+
+
+@pytest.mark.parametrize("scheme,width", [("sb", 1e-6), ("van_leer", 2e-6), ("van_leer", 0.0)])
+def test_tracer_vertical_flags_round_trip(scheme, width):
+    from legoesm.driver.config import experiment_config_to_dict, experiment_config_from_dict
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--tracer-vertical-scheme", scheme,
+        "--tracer-van-leer-width", str(width)]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.dycore.tracer_vertical_scheme == scheme
+    assert cfg.dycore.tracer_van_leer_width == width
+    restored = experiment_config_from_dict(experiment_config_to_dict(cfg))
+    assert restored.dycore.tracer_vertical_scheme == scheme
+    assert restored.dycore.tracer_van_leer_width == width
+    with pytest.raises(ValueError, match="tracer_vertical_scheme"):
+        cfg._replace(dycore=cfg.dycore._replace(tracer_vertical_scheme="typo")).validate_strict()
+    for invalid in (-1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="tracer_van_leer_width"):
+            cfg._replace(dycore=cfg.dycore._replace(tracer_van_leer_width=invalid)).validate_strict()
+
+
+@pytest.mark.parametrize("deck,scheme", [("amip_production.yaml", "van_leer"),
+                                         ("amip_production_latlon48.yaml", "sb")])
+def test_production_decks_explicitly_select_tracer_smoothing(deck, scheme):
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    rows = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser)
+    assert rows["tracer_vertical_scheme"] == scheme
+    assert rows["tracer_van_leer_width"] == 1e-6
+    parser.set_defaults(**rows)
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    assert cfg.dycore.tracer_vertical_scheme == scheme
+    assert cfg.dycore.tracer_van_leer_width == 1e-6

@@ -1025,19 +1025,28 @@ class TestTracerMassConservation:
             set_policy(previous)
 
     @pytest.mark.skipif(not jax.config.read("jax_enable_x64"), reason="requires fp64")
-    def test_hybrid_tracer_paired_conservation(self, hybrid_flow, monkeypatch):
+    @pytest.mark.parametrize("scheme", ["sb", "van_leer"])
+    def test_hybrid_tracer_paired_conservation(self, hybrid_flow, monkeypatch, scheme):
         """The instantaneous tracer/continuity product rule closes globally."""
         import numpy as np
         from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as pe
         from legoesm.grids.vertical import dp_from_hybrid
 
         grid, hybrid, config, state = hybrid_flow
+        config = config._replace(tracer_vertical_scheme=scheme)
         nlev = hybrid.n_levels
         # Same vertical water profile and modulation as the van Leer column test.
         rng = np.random.default_rng(0)
         q = jnp.asarray(1.0e-2 * np.exp(-0.5 * ((np.arange(nlev) - 24) / 3.0) ** 2)
                         * (1.0 + 0.3 * rng.random(state.T.shape)))
         captured = {}
+        real_vertical = pe.vertical_advection_hybrid_van_leer
+
+        def observe_vertical(*args, **kwargs):
+            captured["width"] = kwargs["smoothing_width"]
+            return real_vertical(*args, **kwargs)
+
+        monkeypatch.setattr(pe, "vertical_advection_hybrid_van_leer", observe_vertical)
         original = pe.latlon_tracer_tendencies
 
         def observe(*args, **kwargs):
@@ -1048,8 +1057,16 @@ class TestTracerMassConservation:
         _, _, _, dps, dq = cgrid_latlon_pe_tendencies(
             state._replace(tracers={"q_v": q}), grid, hybrid, config,
             vertical_form="legacy")
+        if scheme == "van_leer":
+            assert captured["width"] == config.tracer_van_leer_width
         dp = dp_from_hybrid(hybrid, state.p_s)
         F = captured["F"]
+        if scheme == "van_leer":
+            from tests.unit.test_vertical_advection_hybrid_van_leer import product_rule_residual
+            vertical_residual = product_rule_residual(
+                real_vertical, hybrid, state.p_s, F, q)
+            print(f"latlon vertical per-column paired residual = {vertical_residual:.17e}")
+            assert vertical_residual < 1e-12
         scale = jnp.sum(jnp.abs(F[..., 1:-1] * jnp.diff(q, axis=-1)), axis=-1)
         assert float(jnp.max(jnp.abs(F))) > 0.0
         assert float(jnp.sum(scale * grid.area)) > 0.0
@@ -1059,13 +1076,26 @@ class TestTracerMassConservation:
         assert residual < 1e-12
 
     @pytest.mark.skipif(not jax.config.read("jax_enable_x64"), reason="requires fp64")
-    def test_hybrid_constant_tracer_preserved(self, hybrid_flow):
+    @pytest.mark.parametrize("scheme", ["sb", "van_leer"])
+    def test_hybrid_constant_tracer_preserved(self, hybrid_flow, scheme, monkeypatch):
         """Regression guard: constant tracers remain constant with either operator."""
+        from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as pe
+        calls = []
+        real = pe.vertical_advection_hybrid_van_leer
+
+        def observe(*args, **kwargs):
+            calls.append(kwargs["smoothing_width"])
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pe, "vertical_advection_hybrid_van_leer", observe)
         grid, hybrid, config, state = hybrid_flow
+        config = config._replace(tracer_vertical_scheme=scheme)
         q = jnp.full_like(state.T, 7.3e-3)
         _, _, _, _, dq = cgrid_latlon_pe_tendencies(
             state._replace(tracers={"q_v": q}), grid, hybrid, config,
             vertical_form="legacy")
+        if scheme == "van_leer":
+            assert calls == [config.tracer_van_leer_width]
         error = float(jnp.max(jnp.abs(dq["q_v"])))
         print(f"hybrid constant tracer max tendency = {error:.17e}")
         assert error < 1e-18

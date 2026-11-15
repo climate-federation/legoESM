@@ -73,6 +73,8 @@ mpas_sponge_del2_top_layers: 2       # index-based sponge: 2 layers on L32 span
                                      # branches) -- 2 layers is the closest
                                      # offered setting (user 2026-09-21)
 mpas_sponge_del2_top_factor: 8.0
+tracer_vertical_scheme: van_leer
+tracer_van_leer_width: 1.0e-6  # ASKED(user): smooth hybrid tracer default
 mpas_vert_advection_scheme: sb       # conservative Simmons-Burridge flux form
                                      # of the hybrid theta transport (van Leer
                                      # is sigma-only on this lane).  The

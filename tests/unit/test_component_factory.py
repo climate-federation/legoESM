@@ -962,3 +962,18 @@ def test_spectral_pe_hyperdiff_is_half_hour_efold():
     eig_max = 42 * 43 / (g.radius * g.radius)
     expected = 1.0 / (0.5 * 3600.0 * eig_max ** 2)
     assert hyperdiff_coeff_for_efold(g, 0.5 * 3600.0) == pytest.approx(expected, rel=1e-14)
+
+
+@pytest.mark.parametrize("grid_type,discretization", [("mpas", "mpas"), ("latlon", "latlon_cgrid")])
+def test_hybrid_tracer_smoothing_config_reaches_dycore(grid_type, discretization):
+    from legoesm.grids.factory import create_grid
+    from legoesm.grids.vertical import make_cam6_l32_levels
+    grid = create_grid(grid_type, 1 if grid_type == "mpas" else 4,
+                       **({"lloyd_iterations": 2} if grid_type == "mpas" else {}))
+    cfg = _make_config(grid_type=grid_type, discretization=discretization, nlev=32)
+    cfg = cfg._replace(dycore=cfg.dycore._replace(
+        tracer_vertical_scheme="van_leer", tracer_van_leer_width=2e-6))
+    model = create_atmosphere_dycore(cfg, grid, make_cam6_l32_levels())
+    assert model.config.tracer_van_leer_width == 2e-6
+    if grid_type == "latlon":
+        assert model.config.tracer_vertical_scheme == "van_leer"

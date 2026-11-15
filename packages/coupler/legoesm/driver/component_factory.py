@@ -1047,6 +1047,7 @@ def create_atmosphere_dycore(
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
             # Sigma-lane vertical advection scheme (see DycoreConfig).
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
+            tracer_van_leer_width=dc.tracer_van_leer_width,
             vertical_form=dc.vertical_form,
             sponge_del2_top_layers=int(dc.mpas_sponge_del2_top_layers),
             sponge_del2_top_factor=float(dc.mpas_sponge_del2_top_factor),
@@ -1446,6 +1447,8 @@ def create_atmosphere_dycore(
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
         )
         cfg = CGridLatLonPrimitiveEquationConfig(
+            tracer_vertical_scheme=dc.tracer_vertical_scheme,
+            tracer_van_leer_width=dc.tracer_van_leer_width,
             A_h=_A_h,
             fix_mass=_fix_mass,
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,  # #1354/#1515 borrow (grid-general knob)

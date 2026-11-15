@@ -551,6 +551,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "decision 2026-08-16: conserving form always); "
                              "--no-mpas-conservative-tracer-clamp restores the "
                              "legacy clamp for bit-comparison runs.")
+    parser.add_argument("--tracer-vertical-scheme", choices=("sb", "van_leer"),
+                        default=_DYCORE_DEFAULTS.tracer_vertical_scheme,
+                        help="Hybrid lat-lon tracer vertical scheme (MPAS always uses van Leer).")
+    parser.add_argument("--tracer-van-leer-width", type=float,
+                        default=_DYCORE_DEFAULTS.tracer_van_leer_width,
+                        help="Hybrid tracer numerical smoothing width; zero recovers hard van Leer.")
     parser.add_argument("--mpas-vert-advection-scheme",
                         choices=("upwind", "van_leer", "sb"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
@@ -2992,6 +2998,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             else tuple(args.mpas_vert4_log_form_tracers or ())),
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
+        tracer_vertical_scheme=args.tracer_vertical_scheme,
+        tracer_van_leer_width=args.tracer_van_leer_width,
         mpas_sponge_del2_top_layers=(args.mpas_sponge_del2_top_layers
                                      if args.mpas_sponge_del2_top_layers is not None else 0),
         mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor

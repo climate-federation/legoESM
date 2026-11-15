@@ -16,6 +16,11 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
+import pytest
+
+# Reuse the existing scoped science-test precision fixture; x64 alone does not
+# choose the geometry/storage precision used by the MPAS mesh constructor.
+from tests.atmosphere.hydrostatic.unit.test_mpas_vert4_flux_form import fp64_policy as fp64_policy
 
 from legoesm.grids.vertical import (
     compute_mass_flux_from_cumsum, dp_from_hybrid, make_cam6_l32_levels,
@@ -36,7 +41,7 @@ def _column(seed=0, ncol=6):
     return coord, p_s, F, q
 
 
-def _product_rule_residual(op, coord, p_s, F, q):
+def product_rule_residual(op, coord, p_s, F, q):
     dp = dp_from_hybrid(coord, p_s)
     col = jnp.sum(dp * op(q, F, p_s, coord) - q * (F[..., 1:] - F[..., :-1]), axis=-1)
     scale = jnp.sum(jnp.abs(F[..., 1:-1] * jnp.diff(q, axis=-1)), axis=-1)
@@ -45,8 +50,8 @@ def _product_rule_residual(op, coord, p_s, F, q):
 
 def test_column_water_telescopes_and_the_upwind_operator_does_not():
     coord, p_s, F, q = _column()
-    assert _product_rule_residual(vertical_advection_hybrid_van_leer, coord, p_s, F, q) < 1e-12
-    assert _product_rule_residual(vertical_advection_hybrid, coord, p_s, F, q) > 1e-3
+    assert product_rule_residual(vertical_advection_hybrid_van_leer, coord, p_s, F, q) < 1e-12
+    assert product_rule_residual(vertical_advection_hybrid, coord, p_s, F, q) > 1e-3
 
 
 def test_constant_field_has_zero_tendency():
@@ -65,7 +70,7 @@ def test_positive_and_bounded_under_repeated_steps():
     rate = (jnp.abs(F[..., :-1]) + jnp.abs(F[..., 1:])) / dp
     dt = 0.3 / float(jnp.max(rate))
     for _ in range(200):
-        q = q + dt * vertical_advection_hybrid_van_leer(q, F, p_s, coord)
+        q = q + dt * vertical_advection_hybrid_van_leer(q, F, p_s, coord, smoothing_width=0.0)
     assert float(jnp.min(q)) >= -1e-18
     assert float(jnp.max(q)) <= 1.0e-3 * (1 + 1e-12)
 
@@ -84,14 +89,24 @@ def test_mpas_hybrid_tracer_path_runs_the_conservative_operator(monkeypatch):
     nlev = coord.A_full.shape[0]
     mesh = h._make_mesh(level=2)
     state = h._add_perturbation_hydro(h._make_hydrostatic_state(mesh, nlev), mesh, nlev)
-    qv = jnp.asarray(np.linspace(1e-6, 1.5e-2, nlev)[None, :].repeat(mesh.nCells, 0))
+    from legoesm.atmosphere.standard_atmosphere import standard_atmosphere_temperature
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.thermo import saturation_mixing_ratio
+
+    # Reuse the shared realistic lapse-rate/stratosphere profile and the
+    # production humidity initializer, with existing seeded wind perturbations.
+    temperature = standard_atmosphere_temperature(mesh.latCell, coord.sigma_full)
+    state = state._replace(T=state.T.replace(data=temperature))
+    pressure = state.p_s.data[..., None] * coord.sigma_full
+    qv = (ExperimentConfig().rh_init * saturation_mixing_ratio(temperature, pressure)
+          * coord.sigma_full**2)
     state = state._replace(tracers={"q_v": Field(
         data=qv, name="q_v", dims=("nCells", "nlev"), units="kg/kg")})
     calls = []
     real = pe.vertical_advection_hybrid_van_leer
 
     def spy(*a, **k):
-        calls.append(1)
+        calls.append((a, k))
         return real(*a, **k)
 
     monkeypatch.setattr(pe, "vertical_advection_hybrid_van_leer", spy)
@@ -99,6 +114,34 @@ def test_mpas_hybrid_tracer_path_runs_the_conservative_operator(monkeypatch):
         state, mesh, coord, pe.MPASPrimitiveEquationConfig(nu_del2=1.0e5))
     assert calls, "the MPAS hybrid tracer path no longer calls the conservative operator"
     assert np.all(np.isfinite(np.asarray(out.tracer_tendencies["q_v"].data)))
+    assert calls[0][1]["smoothing_width"] == pe.MPASPrimitiveEquationConfig().tracer_van_leer_width
+    # Diagnose only the shared vertical column operator: horizontal MPAS
+    # transport is outside this instantaneous paired-column claim.
+    args, kwargs = calls[0]
+    _, F_actual, ps_actual, coord_actual = args
+    q_actual = qv
+    residual = product_rule_residual(real, coord_actual, ps_actual, F_actual, q_actual)
+    assert residual < 1e-12
+    constant = jnp.full_like(q_actual, 7.3e-3)
+    assert float(jnp.max(jnp.abs(real(constant, F_actual, ps_actual, coord_actual)))) < 1e-18
+    hard = pe.mpas_model_tendencies(
+        state, mesh, coord, pe.MPASPrimitiveEquationConfig(nu_del2=1.0e5, tracer_van_leer_width=0.0))
+    smooth_t = np.asarray(out.tracer_tendencies["q_v"].data)
+    hard_t = np.asarray(hard.tracer_tendencies["q_v"].data)
+    gap = smooth_t - hard_t
+    root_area = np.sqrt(np.asarray(mesh.areaCell))[:, None]
+    norm_hard = np.linalg.norm(root_area * hard_t)
+    assert norm_hard > 0.0
+    relative_l2 = np.linalg.norm(root_area * gap) / norm_hard
+    print(f"MPAS realistic full tendency max_abs={np.max(np.abs(gap)):.17e} "
+          f"area_weighted_relative_l2={relative_l2:.17e} "
+          f"paired={residual:.17e}")
+    assert np.max(np.abs(gap)) > 0.0
+    np.testing.assert_allclose(
+        [np.max(np.abs(gap)), relative_l2],
+        [1.50305240469567766e-12, 1.56016741894977938e-4],
+        rtol=1e-6, atol=1e-12)
+
 
 
 def test_boundary_donor_faces_keep_a_full_column_in_range():
@@ -116,6 +159,127 @@ def test_boundary_donor_faces_keep_a_full_column_in_range():
         dt = 0.4 / float(jnp.max((jnp.abs(F[..., :-1]) + jnp.abs(F[..., 1:])) / dp))
         q = q0
         for _ in range(2000):
-            q = q + dt * vertical_advection_hybrid_van_leer(q, F, p_s, coord)
+            q = q + dt * vertical_advection_hybrid_van_leer(q, F, p_s, coord, smoothing_width=0.0)
         assert float(jnp.min(q)) >= float(jnp.min(q0)) - 1e-12
         assert float(jnp.max(q)) <= float(jnp.max(q0)) + 1e-12
+
+
+# Frozen output from unpatched T14 8bece12646691fa7623f88f3cceb2180c056a35b,
+# generated on PBS in fp64. No second implementation of the hard operator.
+_HARD_FIXTURE = pathlib.Path(__file__).with_name("fixtures") / "hybrid_van_leer_t14.npz"
+
+
+def _limiter_case(case):
+    coord, p_s, F, q = _column(case)
+    if case == 2:
+        q = jnp.zeros_like(q).at[:, 18:22].set(1.0e-3)
+    elif case == 3:
+        q = jnp.asarray(1.13 + 0.86 * np.random.default_rng(3).random(q.shape))
+    return coord, p_s, F, q
+
+
+# Measured max absolute tendency mismatch per column, not a worst-case bound.
+_SMOOTH_GAPS = {0: [1.2857524359504217e-11, 1.8958846472768847e-11, 1.6357891351111067e-11,
+     5.3966569906561464e-12, 5.744429300353268e-12, 1.3356375404876502e-11],
+ 1: [2.002636952119823e-11, 6.6635620214287445e-12, 7.820350091416473e-12,
+     8.236875563390563e-12, 1.7102631941098632e-11, 6.321238185594137e-12],
+ 2: [1.2074767416900973e-11, 1.3679817558193771e-11, 1.1791039756341337e-11,
+     1.4657586879953915e-11, 6.097042873110794e-12, 1.2218949057344338e-11],
+ 3: [3.855855138099122e-10, 8.499207460700994e-10, 1.1436932218325215e-09,
+     5.527660763265788e-10, 4.828227014635404e-10, 8.289120110598247e-10]}
+
+
+@pytest.mark.parametrize("case", range(4))
+def test_hard_limit_matches_t14_snapshot(case):
+    coord, p_s, F, q = _limiter_case(case)
+    actual = vertical_advection_hybrid_van_leer(q, F, p_s, coord, smoothing_width=0.0)
+    with np.load(_HARD_FIXTURE) as reference:
+        np.testing.assert_array_equal(np.asarray(actual).view(np.uint64),
+                                      reference[str(case)].view(np.uint64))
+
+
+@pytest.mark.parametrize("case", range(4))
+def test_smooth_default_recorded_gap_per_column(case):
+    coord, p_s, F, q = _limiter_case(case)
+    hard = vertical_advection_hybrid_van_leer(q, F, p_s, coord, smoothing_width=0.0)
+    smooth = vertical_advection_hybrid_van_leer(q, F, p_s, coord)
+    gap = np.max(np.abs(np.asarray(smooth - hard)), axis=-1)
+    assert np.max(gap) > 0.0  # Detect a hard default even below the absolute comparison floor.
+    np.testing.assert_allclose(gap, _SMOOTH_GAPS[case], rtol=1e-6, atol=1e-12)
+    np.testing.assert_allclose(jax.jit(vertical_advection_hybrid_van_leer)(q, F, p_s, coord),
+                               smooth, rtol=1e-12, atol=1e-18)
+
+
+def test_default_limiter_check_grads_order_two_at_plateau_and_zero_flux():
+    """Perturb in width units so FD resolves the default-width transition."""
+    from jax.test_util import check_grads
+
+    coord, p_s, F, q = _limiter_case(2)
+    q = q[:1]
+    F = F[:1].at[:, 15].set(0.0)
+    p_s = p_s[:1]
+    width = 1e-6
+    # Keep a nonzero exchange to scale the scalar, even at the zero face.
+    scale = jnp.max(jnp.abs(F)) / jnp.min(dp_from_hybrid(coord, p_s))
+    weights = jnp.asarray(np.random.default_rng(0).normal(size=q.shape))
+
+    def scalar(q_units, F_units):
+        return jnp.sum(weights * vertical_advection_hybrid_van_leer(
+            q_units * width, F_units * width, p_s, coord)) / (width * scale)
+
+    args = (q / width, F / width)
+    grad = jax.grad(scalar, argnums=(0, 1))(*args)
+    hess = jax.jacfwd(jax.grad(scalar, argnums=0), argnums=0)(*args)
+    assert all(np.all(np.isfinite(x)) for x in (*grad, hess))
+    assert float(jnp.max(jnp.abs(grad[0]))) > 0.0
+    # A hard limiter has no curvature inside these plateaus; pin smoothing.
+    assert float(jnp.max(jnp.abs(hess))) > 0.0
+    check_grads(scalar, args, order=2, modes=("fwd", "rev"), eps=1e-6)
+
+
+@pytest.mark.parametrize("width", [-1.0, float("nan"), float("inf")])
+def test_limiter_width_rejects_invalid(width):
+    coord, p_s, F, q = _column()
+    with pytest.raises(ValueError, match="smoothing_width"):
+        vertical_advection_hybrid_van_leer(q, F, p_s, coord, smoothing_width=width)
+
+
+def test_latlon_tracer_scheme_rejects_unknown_on_empty_state():
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as pe
+    config = pe.CGridLatLonPrimitiveEquationConfig(tracer_vertical_scheme="typo")
+    with pytest.raises(ValueError, match="unknown tracer vertical scheme"):
+        pe.latlon_tracer_tendencies({}, *([None] * 12), config, True)
+
+
+@pytest.mark.parametrize("module_name,class_name", [
+    ("primitive_eq_mpas", "MPASPrimitiveEquationConfig"),
+    ("primitive_eq_latlon_cgrid", "CGridLatLonPrimitiveEquationConfig"),
+])
+def test_smoothing_width_is_excluded_from_training(module_name, class_name):
+    import importlib
+    module = importlib.import_module("legoesm.atmosphere.dynamics.gcm." + module_name)
+    spec = module.__param_spec__[class_name]
+    assert "tracer_van_leer_width" not in spec["params"]
+    assert spec["excluded"]["tracer_van_leer_width"] == "tunable_tier 0: numerics smoothing width"
+
+
+def test_positive_width_approaches_hard_clipped_limit_on_stretched_grid():
+    coord, p_s, F, q = _limiter_case(3)
+    hard = vertical_advection_hybrid_van_leer(q, F, p_s, coord, smoothing_width=0.0)
+    smooth = vertical_advection_hybrid_van_leer(q, F, p_s, coord)
+    narrow = vertical_advection_hybrid_van_leer(q, F, p_s, coord, smoothing_width=1e-8)
+    # A 100x narrower transition must reduce the gap by at least 10x.
+    assert float(jnp.max(jnp.abs(narrow - hard))) < 0.1 * float(jnp.max(jnp.abs(smooth - hard)))
+    # Reflecting the tracer about zero interchanges bounds and reverses all
+    # corrections; this also exercises the independently reconstructed q_neg.
+    np.testing.assert_allclose(vertical_advection_hybrid_van_leer(-q, F, p_s, coord),
+                               -smooth, rtol=1e-12, atol=1e-18)
+
+
+@pytest.mark.parametrize("dtype,width", [(jnp.float32, 1e-30), (jnp.float32, 1e30),
+                                         (jnp.float64, 1e-200), (jnp.float64, 1e200)])
+def test_positive_width_must_be_representable(dtype, width):
+    coord, p_s, F, q = _column()
+    with pytest.raises(ValueError, match="smoothing_width.*representable"):
+        vertical_advection_hybrid_van_leer(q.astype(dtype), F.astype(dtype), p_s, coord,
+                                         smoothing_width=width)

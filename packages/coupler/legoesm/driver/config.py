@@ -16,7 +16,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from legoesm import constants
 from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
@@ -429,6 +429,10 @@ class DycoreConfig(NamedTuple):
     # A/B; it carries #930 (lat-lon), #1029 (MPAS) and the lat-lon 50 K floor.
     # validate_strict refuses any other form off those two lanes.
     vertical_form: str = "legacy"
+    # ASKED(user), 2026-11-15: lat-lon HYBRID selector; MPAS always van Leer.
+    # Sigma tracer transport is unchanged; width applies to hybrid van Leer.
+    tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
+    tracer_van_leer_width: float = 1e-6
 
 
 class EvaluationConfig(NamedTuple):
@@ -4458,6 +4462,10 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"dycore.vertical_form={d.vertical_form!r} is untested on the "
                     "lat-lon MPI and 2-D tiled lanes; they take 'legacy'.")
+        if d.tracer_vertical_scheme not in ("sb", "van_leer"):
+            errors.append("dycore.tracer_vertical_scheme must be one of ('sb', 'van_leer')")
+        if not math.isfinite(d.tracer_van_leer_width) or d.tracer_van_leer_width < 0.0:
+            errors.append("dycore.tracer_van_leer_width must be finite and nonnegative")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
