@@ -849,6 +849,27 @@ def test_lane_kernel_surface_signs(fixm):
     np.testing.assert_allclose(np.asarray(run(0.0, 100.0, cfg).evap_sfc), 2.0e-5)
 
 
+def test_lane_kernel_budgets_with_prescribed_evaporation(fixm):
+    """With a prescribed water flux unequal to lhflx / L_v (and calm air, so no
+    dissipation), the column takes up exactly that water and exactly
+    shflx + lhflx of moist enthalpy cp T + L_v q - L_f q_i (vote 13 G22/G23)."""
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    x = {k: jnp.asarray(v) for k, v in _lane_cols(fixm).items()}
+    x["u"], x["v"] = 0.0 * x["u"], 0.0 * x["v"]
+    pos = [x.pop(k) for k in ("u", "v", "T", "q_v", "p_full", "p_half", "z_full", "z_half",
+                              "T_sfc", "q_sfc", "rho")]
+    z = jnp.zeros(3)
+    evap, sh, lh = 2.0e-5, 30.0, 100.0
+    cfg = IFSVDFLaneConfig(surface=SurfaceLayerConfig(prescribed_evap_kg_m2_s=evap))
+    o = ifs_vdf_turbulence(*pos, 900.0, cfg, (z, z, z + sh, z + lh, z + 0.3), **x)
+    w = np.diff(np.asarray(pos[5]), axis=1) / constants.g
+    water = np.sum(w * np.asarray(o.dq_v_dt + o.dq_c_dt + o.dq_i_dt), axis=1)
+    np.testing.assert_allclose(water, evap, rtol=1e-9)
+    h = np.sum(w * np.asarray(constants.c_pd * o.dT_dt + constants.L_v * o.dq_v_dt
+                              - constants.L_f * o.dq_i_dt), axis=1)   # latent-ok: moist enthalpy
+    np.testing.assert_allclose(h, sh + lh, rtol=1e-9)
+
+
 def test_lane_kernel_gradient_at_rest(fixm):
     """The surface momentum coefficient's wind floor keeps the gradient finite
     with the lowest-level wind at rest (vote 11 G15)."""
