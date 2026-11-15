@@ -19,9 +19,9 @@ def nemo_source_round(value: jax.Array) -> jax.Array:
     ``isfinite``/``select``/``copysign`` chain is the operative contraction
     guard.  It is an IEEE identity, including signed infinities and NaNs, and
     remains differentiable for finite physical inputs.  Under the
-    ``"nemo_fast"`` numerics mode a floating input comes back unguarded as a
-    JAX array; any other input keeps the guard, so it is promoted exactly as
-    under ``"nemo_exact"`` (an integer comes back as a float).
+    ``"nemo_fast"`` numerics mode a real floating input comes back unguarded
+    as a JAX array; any other input keeps the guard and behaves exactly as
+    under ``"nemo_exact"`` (an integer comes back as a float, a complex raises).
     """
     if current_numerics() == "nemo_fast":
         value = jnp.asarray(value)

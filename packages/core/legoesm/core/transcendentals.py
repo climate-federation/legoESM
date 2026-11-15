@@ -497,7 +497,17 @@ def _native_pow(left: jax.Array, right: jax.Array) -> jax.Array:
 
 @_native_pow.defjvp
 def _native_pow_jvp(primals, tangents):
-    return _guarded_pow_jvp(_native_pow, jnp.log, primals, tangents)
+    # Primal exactly as jnp.power; the tangent is taken in the result dtype, an
+    # integer operand (float0 tangent) contributing none.
+    result = _native_pow(*primals)
+    dtype = result.dtype
+    left, right = (jnp.asarray(p, dtype) for p in primals)
+    left_dot, right_dot = (
+        jnp.zeros_like(left) if t.dtype == jax.dtypes.float0 else jnp.asarray(t, dtype)
+        for t in tangents)
+    _, tangent = _guarded_pow_jvp(
+        jnp.power, jnp.log, (left, right), (left_dot, right_dot))
+    return result, tangent
 
 
 def _guarded_pow_jvp(pow_fn, log_fn, primals, tangents):
@@ -506,7 +516,7 @@ def _guarded_pow_jvp(pow_fn, log_fn, primals, tangents):
     left, right = primals
     left_dot, right_dot = tangents
     result = pow_fn(left, right)
-    int_dtype = jnp.int64 if left.dtype == jnp.float64 else jnp.int32
+    int_dtype = {2: jnp.int16, 4: jnp.int32, 8: jnp.int64}[left.dtype.itemsize]
     positive = jax.lax.bitcast_convert_type(left, int_dtype) > 0
     safe_left = jnp.where(positive, left, jnp.ones_like(left))
     safe_result = jnp.where(positive, result, jnp.zeros_like(result))
@@ -546,11 +556,14 @@ def atan(value) -> jax.Array:
 
 
 def pow(left, right) -> jax.Array:
-    """Evaluate binary power under the active precision policy."""
+    """Evaluate binary power under the active precision policy.
+
+    Under ``"nemo_fast"`` a floating result is ``jnp.power`` forward (as the
+    native policy) with the libm arm's guarded tangent at bases <= 0.
+    """
     left_array, right_array = jnp.broadcast_arrays(jnp.asarray(left), jnp.asarray(right))
-    if (current_numerics() == "nemo_fast" and left_array.dtype == right_array.dtype
-            and jnp.issubdtype(left_array.dtype, jnp.floating)):
-        # Native primal with the libm arm's guarded tangent at bases <= 0.
+    if (current_numerics() == "nemo_fast"
+            and jnp.issubdtype(jnp.result_type(left_array, right_array), jnp.floating)):
         return _native_pow(left_array, right_array)
     if _native():
         return jnp.power(left_array, right_array)

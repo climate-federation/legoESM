@@ -338,24 +338,53 @@ def test_bind_aot_leaves_nothing_to_launder():
             assert not hasattr(bound, name), name
 
 
-@pytest.mark.parametrize("exponent", [0.5, 0.0, 2.0])
-def test_fast_pow_keeps_the_guarded_gradient_at_base_zero(use_policy, exponent):
+_POW_CASES = {
+    # base, exponent: zero bases (guarded tangent), positive and negative
+    # bases (nonzero controls), mixed widths and an integer operand.
+    "zero_half": (jnp.zeros(3), jnp.full(3, 0.5)),
+    "zero_zero": (jnp.zeros(3), jnp.zeros(3)),
+    "zero_two": (jnp.zeros(3), jnp.full(3, 2.0)),
+    "positive": (jnp.array([0.3, 1.0, 2.5]), jnp.array([0.5, 1.7, -1.2])),
+    "negative": (jnp.array([-0.3, -2.0, -1.5]), jnp.array([2.0, 3.0, 0.5])),
+    "f64_base_f32_exp": (jnp.array([0.0, 0.4, 1.3]),
+                         jnp.array([0.5, 0.5, 2.0], jnp.float32)),
+    "f32_base_f64_exp": (jnp.array([0.0, 0.4, 1.3], jnp.float32),
+                         jnp.array([0.5, 0.5, 2.0])),
+    "int_base": (jnp.array([0, 1, 3]), jnp.array([0.5, 1.5, 2.0])),
+    "int_exp": (jnp.array([0.0, 0.4, 1.3]), jnp.array([0, 1, 2])),
+}
+
+
+@pytest.mark.parametrize("case", list(_POW_CASES))
+def test_fast_pow_gradient_matches_the_guarded_exact_gradient(use_policy, case):
     use_policy("libm")
-    base = jnp.zeros(3)
-    right = jnp.full(3, exponent)
+    base, exponent = _POW_CASES[case]
+    floats = [i for i, a in enumerate((base, exponent))
+              if jnp.issubdtype(a.dtype, jnp.floating)]
 
     def grads():
         f = lambda b, e: jnp.sum(tx.pow(b, e))
-        return (jax.jit(jax.grad(f, argnums=(0, 1)))(base, right),
-                jax.jvp(lambda b: tx.pow(b, right), (base,), (jnp.ones(3),))[1])
+        return jax.jit(jax.grad(f, argnums=tuple(floats)))(base, exponent)
 
     with numerics_scope("nemo_exact"):
         exact = grads()
     with numerics_scope("nemo_fast"):
         fast = grads()
     for got, want in zip(jax.tree.leaves(fast), jax.tree.leaves(exact)):
+        assert got.dtype == want.dtype
         assert np.all(np.isfinite(got))
-        np.testing.assert_array_equal(got, want)
+        rtol = 1e-5 if got.dtype == jnp.float32 else 1e-12
+        np.testing.assert_allclose(got, want, rtol=rtol, atol=0)
+    if case == "positive":
+        assert np.all(np.abs(np.asarray(fast[0])) > 0)
+
+
+@pytest.mark.parametrize("dtype", [jnp.float16, jnp.bfloat16])
+def test_fast_pow_differentiates_half_precision(dtype):
+    f = lambda b: tx.pow(b, jnp.asarray(3.0, dtype))
+    with numerics_scope("nemo_fast"):
+        got = jax.grad(f)(jnp.asarray(2.0, dtype))
+    assert float(got) == 12.0
 
 
 def test_fast_guard_keeps_refusing_complex_input():
