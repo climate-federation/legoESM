@@ -344,7 +344,15 @@ def _boundary_layer_depth(
     # is evaluated with the previous-step boundary-layer depth (h_bl_prev) so
     # V_t^2 does not depend on the very h it helps to compute.  N is floored
     # at sqrt(1e-30) for an AD-safe gradient (no max()-induced 0*inf).
-    N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
+    # Opt-in (LEGOESM_KPP_VT_N2=potential): take N for V_t^2 from the
+    # surface-referenced (potential) density, like delta_rho above.  The
+    # in-situ gradient adds the compressibility term g^2/c^2 ~ 4e-5 s^-2,
+    # which doubles N in weakly stratified water and so deepens h_bl.
+    import os as _os
+    _rho_n2 = (rho_surf_ref
+               if _os.environ.get("LEGOESM_KPP_VT_N2", "insitu") == "potential"
+               else rho)
+    N2 = compute_buoyancy_frequency(_rho_n2, z_coord.dz_ref, jacobian)
     N2_full = jnp.concatenate([N2[..., :1], N2], axis=-1)
     # N = sqrt(max(N^2, 0)): only STABLE stratification (N^2 > 0) contributes to
     # the unresolved-shear variance (LMD94 / CVMix); convective layers (N^2 < 0)
