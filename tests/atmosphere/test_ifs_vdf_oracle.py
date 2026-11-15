@@ -252,8 +252,15 @@ def _dtv_case(cfg):
 
 
 def _kcap_case(cfg):
-    kmax = lambda lk: float(jnp.max(_excu_case(hard_config(), kmfl=10.0 ** lk, out="kh")))
-    lk = _bisect(kmax, 1.0e6 - 5.0e3, 0.0, 14.0)
+    # MIN(K, 1e6) is smooth on the clipped side: unclipped K = 1e6 + 5e3
+    from legoesm.atmosphere.physics.turbulence import ifs_vdf as m
+    cap = m._KCAP_M2_S
+    try:
+        m._KCAP_M2_S = 1.0e30
+        kmax = lambda lk: float(jnp.max(_excu_case(hard_config(), kmfl=10.0 ** lk, out="kh")))
+        lk = _bisect(kmax, cap + 5.0e3, 0.0, 14.0)
+    finally:
+        m._KCAP_M2_S = cap
     return _excu_case(cfg, kmfl=10.0 ** lk)
 
 
@@ -264,10 +271,11 @@ def _sqrt_case(cfg):
 
 
 def _cbase_case(cfg):
-    # MIN(1, z/z_cloudbase) is one-sided: z/z_cb = 1.005 at JK = 10 (z_cb = PGEOH(11))
+    # MIN(1, z/z_cloudbase) is smooth on the clipped side: z/z_cb = 0.995 at JK = 11
+    # (z_cb = PGEOH(KCBASE-1) = PGEOH(10))
     gh = _col()["gh"]
-    gh = gh.at[11].set(gh[10] / 1.005)
-    return _excu_case(cfg, kpbltype=3, khfl=-0.01, kqfl=-1.0e-4, kcbase=12, kctop=8, gh=gh)
+    gh = gh.at[11].set(0.995 * gh[10])
+    return _excu_case(cfg, kpbltype=3, khfl=-0.01, kqfl=-1.0e-4, kcbase=11, kctop=8, gh=gh)
 
 
 def _shear_floor_case(cfg):
@@ -286,10 +294,10 @@ _SWITCH_CASES = {
     "ri_width": lambda cfg: _excu_case(cfg, ri=jnp.full((_K,), 5.0e-4), kinv=_K, kpbltype=0),
     "pblh_switch_width_m": _level_edge_case,
     "lmin_width_m": lambda cfg: _stable_case(cfg, 298.5),   # 0.1 h just below 30 m
-    "lmax_width_m": lambda cfg: _stable_case(cfg, 2985.0),
-    # MIN(hr(IINV), hr(IINV-1)) is one-sided: the lower level's rate 5e-7 K/s below
+    "lmax_width_m": lambda cfg: _stable_case(cfg, 3015.0),   # 0.1 h just above 300 m
+    # MIN(hr(IINV), hr(IINV-1)) is smooth on the clipped side: hr(IINV) 5e-7 K/s above
     "hr_min_width": lambda cfg: _excu_case(
-        cfg, kpbltype=2, hr=jnp.full((_K,), -1.0e-4).at[7].add(-5.0e-7)),
+        cfg, kpbltype=2, hr=jnp.full((_K,), -1.0e-4).at[7].add(5.0e-7)),
     "dradflx_width": lambda cfg: _excu_case(cfg, kpbltype=2, hr=jnp.full((_K,), -1.0e-7)),
     "flux_test_width_w_m2": lambda cfg: _excu_case(cfg, kpbltype=3, khfl=-0.1 / constants.c_pd,
                                                    kqfl=-1.0e-4, kcbase=11, kctop=8),
@@ -300,12 +308,12 @@ _SWITCH_CASES = {
     "cbrt_width": lambda cfg: _excu_case(cfg, kpbltype=2, hr=jnp.full((_K,), -3.0e-8)),
     "sqrt_width": _sqrt_case,
     "guard_width_frac": lambda cfg: _excu_case(
-        cfg, kmfl=0.0, khvfl=-0.995 * _guard_khvfl()),
+        cfg, kmfl=0.0, khvfl=-1.005 * _guard_khvfl()),
 }
 
 
 def _guard_khvfl():
-    """KHVFL that puts |1/L| at 99.5 % of its 1/ZEPSILON cap (u* at REPUST)."""
+    """KHVFL that puts |1/L| at its 1/ZEPSILON cap (u* at REPUST)."""
     from legoesm.atmosphere.physics.turbulence import ifs_vdf as m
     T = float(_col()["T"][-1])
     return (1.0 / m._EPS_MACH) * m._REPUST ** 3 * T / (m._RKAP * constants.g)

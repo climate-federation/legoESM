@@ -48,7 +48,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.core.smooth import max_c1, min_c1, smoothstep_cubic, sqrt_c1
+from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+from legoesm.core.smooth import sqrt_c1
 
 __physics_contract__ = {
     "summary": (
@@ -220,39 +221,44 @@ def hard_tofd_config(cfg: IFSTOFDConfig = IFSTOFDConfig()) -> IFSTOFDConfig:
     return cfg._replace(zmax_width_m=0.0, repdu2_width_frac=0.0)
 
 
+def _sm(width):
+    """The shared IFS-port switch forms (CLOUDSC, CUMASTRN): hard at width 0."""
+    return IfsSmooth(width == 0.0)
+
+
 def _step(x, width, strict=True):
     """Heaviside(x), C1 cubic over |x| < width/2, exact outside (vote 3 W1).
 
     Hard (width 0): ``x > 0`` if strict else ``x >= 0``, as the oracle's test.
     """
     x = jnp.asarray(x)
-    if width == 0.0:
-        return ((x > 0) if strict else (x >= 0)).astype(x.dtype)
-    return smoothstep_cubic(x / width + 0.5)
+    sm = _sm(width)
+    return sm.gt(x, 0.0, width) if strict else sm.ge(x, 0.0, width)
 
 
 def _max(a, b, width):
-    """MAX(a, b): exact for a - b >= width, C1 below (vote 3 W2)."""
-    return max_c1(a, b, math.inf if width == 0.0 else 1.0 / width)
+    """MAX(a, b): exact for a <= b, C1 for 0 < a - b < width (vote 3 W2)."""
+    return _sm(width).max(a, b, width)
 
 
 def _min(a, b, width):
-    return min_c1(a, b, math.inf if width == 0.0 else 1.0 / width)
+    return _sm(width).min(a, b, width)
 
 
-def _cbrt_c1(x, width):
-    """C1 x^(1/3) for x >= 0: exact for x >= width, cubic bridge below (vote 3 Wm).
+def _pow_c1(x, p, width):
+    """C1 x**p (0 < p < 1) for x >= 0: exact for x >= width, cubic bridge below
+    (vote 3 Wm, vote 5 H7).
 
-    The bridge cbrt(width) * (8/3 t^2 - 5/3 t^3), t = x/width, matches value
-    and slope at t = 1 and is 0 with zero slope at t = 0.
+    The bridge width**p * ((3-p) t^2 + (p-2) t^3), t = x/width, matches value and
+    slope at t = 1, is 0 with zero slope at t = 0 and is monotone on [0, 1].
     """
     if width == 0.0:
         ok = x > 0.0
-        return jnp.where(ok, jnp.where(ok, x, 1.0) ** (1.0 / 3.0), 0.0)
+        return jnp.where(ok, jnp.where(ok, x, 1.0) ** p, 0.0)
     t = jnp.clip(x / width, 0.0, 1.0)
-    bridge = width ** (1.0 / 3.0) * t * t * (8.0 / 3.0 - 5.0 / 3.0 * t)  # coeff-ok: C1 Hermite bridge coefficients
+    bridge = width ** p * t * t * ((3.0 - p) + (p - 2.0) * t)  # coeff-ok: C1 Hermite bridge coefficients
     above = x >= width
-    return jnp.where(above, jnp.where(above, x, width) ** (1.0 / 3.0), bridge)
+    return jnp.where(above, jnp.where(above, x, width) ** p, bridge)
 
 
 def _pbl_height_crossing(sv, geo_full, u, v, sv_bot, cfg, g):
@@ -394,7 +400,7 @@ def ifs_vdfexcu(u, v, T, q, p_half, geo_full, geo_half, cptgz, hrlw, hrsw, z0m,
     # cloud-top driven K (Lock et al. 2000 eq. 5), stratocumulus only
     zml = zinv_geo
     tl_lev = T[:-1]                                                         # PTM1(JL,JK)
-    vsc = _cbrt_c1(g / tl_lev * zml * drad, cfg.cbrt_width)
+    vsc = _pow_c1(g / tl_lev * zml * drad, 1.0 / 3.0, cfg.cbrt_width)
     zml_s = _max(zml, _EPS_MACH, gz)
     kcld = (_KCLD_COEF * _RKAP * vsc * zz ** 2 / zml_s
             * sqrt_c1(1.0 - zz / zml_s, cfg.sqrt_width))
