@@ -57,8 +57,8 @@ QSAT_CAP = 0.5           # cuadjtq.F90 ZQMAX / satur.F90 MIN(0.5, ZQS)
 # scripts/validate/oracle/bechtold_ifs/switch_scales.py); O(1) ratios 0.01 x
 # the threshold. ---
 _W_REL = 0.01
-_S_TCU = 1.0             # [K] temperature (PLACEHOLDER, measured)
-_S_CONDCU = 1.0e-6       # [kg/kg] condensation increment (PLACEHOLDER)
+_S_TCU = 1.87             # [K] temperature (P2, fixture)
+_S_CONDCU = 1.42e-6       # [kg/kg] condensation increment (P2, fixture)
 _W_TCU, _W_CONDCU = _W_REL * _S_TCU, _W_REL * _S_CONDCU
 _W_EPCU = _W_REL * QSAT_CAP   # e/p against QSAT_CAP (O(1) ratio)
 RKOOP1 = 2.583           # suphec.F90:253  Koop homogeneous-nucleation fit
@@ -149,11 +149,12 @@ def foealfcu(th, t, sm=None):
     """Convective liquid fraction.  With an IfsSmooth ``sm`` (not exact) the
     upper clip at RTWAT (a slope jump) is C1; the lower clip at RTICECU is
     already C1 (the ramp is quadratic) and the min(1, .) never binds."""
-    if sm is None or sm.hard:
+    if sm is None:
         return jnp.minimum(1.0, ((jnp.maximum(th.RTICECU, jnp.minimum(th.RTWAT, t))
                                   - th.RTICECU) * th.RTWAT_RTICECU_R) ** 2)
-    return ((jnp.maximum(th.RTICECU, sm.min(t, th.RTWAT, _W_TCU))
-             - th.RTICECU) * th.RTWAT_RTICECU_R) ** 2
+    a = ((jnp.maximum(th.RTICECU, sm.min(t, th.RTWAT, _W_TCU))
+          - th.RTICECU) * th.RTWAT_RTICECU_R) ** 2
+    return jnp.minimum(1.0, a) if sm.hard else a
 
 
 def ew_mixed(th, a, t):

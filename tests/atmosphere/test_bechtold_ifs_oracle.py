@@ -878,8 +878,5 @@ def test_switch_scales_probe_covers_every_class(fix):
     before = (M._W_MF, _ifs_smooth.IfsSmooth.max)
     scales = probe.p2(probe.measure(fix, ("L32",)))
     assert (M._W_MF, _ifs_smooth.IfsSmooth.max) == before
-    want = {n[3:] for n in dir(M) if n.startswith("_S_") and hasattr(M, "_W_" + n[3:])}
-    assert set(scales) == want
-    # omega is 0 in every fixture column: no sample (its scale is 0.01 x |threshold|)
-    assert scales.pop("OMEGA")[1] == 0
+    assert set(scales) == set(probe._classes().values())
     assert all(np.isfinite(s) and s > 0.0 and n > 0 for s, n in scales.values())

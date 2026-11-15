@@ -124,16 +124,16 @@ ZDPMEAN_MIN = 1.0     # :863  floor of the averaging depth [Pa]
 # CUBASEN feeds only the (hard) level choice and stays exact. ---
 _W_REL = 0.01
 _S_MF = 1.0e-3        # [kg m-2 s-1] mass flux (= _ifs_cumastrn._S_MF, part 1)
-_S_TEX = 1.0e-2       # [K] parcel temperature excess (PLACEHOLDER)
-_S_T = 1.0            # [K] temperature (PLACEHOLDER)
-_S_VAP = 1.0e-6       # [kg/kg] vapour (PLACEHOLDER)
-_S_COND = 1.0e-6      # [kg/kg] condensate (PLACEHOLDER)
-_S_SE = 1.0e2         # [J/kg] static energy (PLACEHOLDER)
-_S_KE = 1.0e-1        # [m2/s2] updraught kinetic energy (PLACEHOLDER)
-_S_VEL = 1.0e-1       # [m/s] updraught velocity (PLACEHOLDER)
-_S_BUO = 1.0e-2       # [K] virtual-temperature buoyancy (PLACEHOLDER)
-_S_BUOC = 1.0e-4      # [1] normalised buoyancy (PLACEHOLDER)
-_S_CAPEL = 1.0e-1     # [J/kg] per-level CAPE increment (PLACEHOLDER)
+_S_TEX = 2.8e-2       # [K] parcel temperature excess (P2, fixture)
+_S_T = 1.31            # [K] temperature (P2, fixture)
+_S_VAP = 3.0e-6       # [kg/kg] vapour (P2, fixture)
+_S_COND = 4.75e-9      # [kg/kg] condensate (P2, fixture)
+_S_SE = 133.0         # [J/kg] static energy (P2, fixture)
+_S_KE = 0.1        # [m2/s2] updraught kinetic energy (P2, fixture)
+_S_VEL = 9.68       # [m/s] updraught velocity (P2, fixture)
+_S_BUO = 6.41e-2       # [K] virtual-temperature buoyancy (P2, fixture)
+_S_BUOC = 8.02e-6      # [1] normalised buoyancy (P2, fixture)
+_S_CAPEL = 1.96e-5     # [J/kg] per-level CAPE increment (P2, fixture)
 (_W_MF, _W_TEX, _W_T, _W_VAP, _W_COND, _W_SE, _W_KE, _W_VEL, _W_BUO, _W_BUOC,
  _W_CAPEL) = (_W_REL * x for x in (_S_MF, _S_TEX, _S_T, _S_VAP, _S_COND, _S_SE,
                                     _S_KE, _S_VEL, _S_BUO, _S_BUOC, _S_CAPEL))
