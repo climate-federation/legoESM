@@ -57,11 +57,10 @@ echo "DAYS=$DAYS LEG=$LEG TARGET=$TARGET YEARS=$YEARS OUT=$OUT"
 # SLURM file so the job summary is unchanged.
 mkdir -p $OUT
 # NEMO runs no Smagorinsky at all -- its lateral momentum viscosity is read
-# entirely from eddy_viscosity_3D.nc (nn_ahm_ijk_t = -30) -- while this card
-# adds one and ramps it down mid-run.  The two knobs below let an arm turn
-# that term off without touching any other flag; the DEFAULTS ARE THE CARD'S
-# OWN VALUES, so an unparameterised submission runs exactly what it always
-# ran.  Both columns must move together: --C-smag-lap sets the value the
+# entirely from eddy_viscosity_3D.nc (nn_ahm_ijk_t = -30).  The two knobs below
+# let an arm turn a Smagorinsky term on without touching any other flag; the
+# defaults are OFF since 2026-10-06 (before: 3.0 ramped 3.0/1.5/0.5 at days
+# 0/8/16).  Both columns must move together: --C-smag-lap sets the value the
 # schedule's first segment inherits before day 0.
 # user 2026-10-06: card = baseline run trp_vadv_d30 (no Smagorinsky, as in NEMO; user 2026-09-27)
 CSMAG=${CSMAG:-0}

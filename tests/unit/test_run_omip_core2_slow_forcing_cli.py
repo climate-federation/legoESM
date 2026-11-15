@@ -139,3 +139,14 @@ def test_carried_flag_refused_where_nothing_consumes_it(argv, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", *argv])
     with pytest.raises(SystemExit, match="nemo-carried-external-mode is (wired|refused)"):
         core2.main()
+
+
+@pytest.mark.parametrize("grid", ["mpas", "cubed_sphere", "fesom"])
+def test_grids_without_a_consumer_refuse_the_flag(grid, monkeypatch):
+    import sys
+    import scripts.run.run_omip_core2 as core2
+    monkeypatch.setattr(sys, "argv", [
+        "run_omip_core2.py", "--grid", grid,
+        "--barotropic-slow-forcing-depth-evaluation", "nemo_literal"])
+    with pytest.raises(SystemExit, match="silently ignored"):
+        core2.main()

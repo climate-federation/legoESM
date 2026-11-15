@@ -141,7 +141,8 @@ def test_the_scan_block_lane_refuses_the_flag_rather_than_ignoring_it():
 
     src = Path(mod.__file__).read_text()
     assert "if args.flux_accumulate and use_scan:" in src
-    guard = src.split("if args.flux_accumulate and use_scan:", 1)[1][:600]
+    guard = src.split("if args.flux_accumulate and use_scan:", 1)[1].split(
+        "\n    if ", 1)[0]
     assert "raise SystemExit" in guard
     assert "--scan-block" in guard
 
@@ -255,7 +256,9 @@ def test_the_scan_block_lane_refuses_the_mld_flag_too():
 
     src = Path(mod.__file__).read_text()
     assert "if args.mld_accumulate and use_scan:" in src
-    guard = src.split("if args.mld_accumulate and use_scan:", 1)[1][:600]
+    # Only this guard's own block: the next guard also raises SystemExit.
+    guard = src.split("if args.mld_accumulate and use_scan:", 1)[1].split(
+        "\n    if ", 1)[0]
     assert "raise SystemExit" in guard
     assert "--scan-block" in guard
 

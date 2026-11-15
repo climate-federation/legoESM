@@ -4526,10 +4526,11 @@ def _nearest_wet_target(src_lat_deg, src_lon_deg, tgt_lat_deg, tgt_lon_deg):
     """Index into the target arrays of the nearest target point (great-circle
     chord) for every source point, and that chord distance."""
     from scipy.spatial import cKDTree
+    from legoesm.grids.regridding import latlon_to_xyz
 
     def _xyz(lat, lon):
-        la, lo = np.deg2rad(np.asarray(lat, float)), np.deg2rad(np.asarray(lon, float))
-        return np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], -1)
+        return latlon_to_xyz(np.deg2rad(np.asarray(lat, float)),
+                             np.deg2rad(np.asarray(lon, float)))
 
     d, idx = cKDTree(_xyz(tgt_lat_deg, tgt_lon_deg)).query(
         _xyz(src_lat_deg, src_lon_deg), k=1)
@@ -8865,6 +8866,11 @@ def main() -> int:
         raise SystemExit("--nemo-carried-external-mode is wired on --grid tripole/"
                          "latlon with --momentum-rk3 only; elsewhere it would be "
                          "silently ignored")
+    if (args.barotropic_slow_forcing_depth_evaluation is not None
+            and args.grid not in ("tripole", "latlon_bathy")):
+        raise SystemExit("--barotropic-slow-forcing-depth-evaluation is wired on "
+                         f"--grid tripole/latlon_bathy only (got {args.grid!r}); it "
+                         "would be silently ignored.")
     if args.trd_columns is not None and not args.trd_accumulate:
         raise SystemExit("--trd-columns needs --trd-accumulate")
     if args.trd_accumulate and args.grid != "tripole":

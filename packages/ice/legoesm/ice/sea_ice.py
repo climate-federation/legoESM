@@ -98,7 +98,7 @@ _NO_SHEAR_RIDGING = 0.0
 _NEMO_EPSI10 = 1.0e-10
 # Supercooled-cell cutoff: qsb_ice_bot = 0 once the cell holds >= 20 m of ice
 # volume per unit area (icesbc.F90:381, "arbitrary" in the source).
-_NEMO_SUPERCOOL_VT_MAX_M = 20.0
+_NEMO_SUPERCOOL_VT_MAX_M = constants.ice_supercool_volume_stop_nemo
 
 
 def _ocean_to_ice_heat_flux(

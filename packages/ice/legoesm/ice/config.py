@@ -618,7 +618,7 @@ class SeaIceConfig(NamedTuple):
     #    one ice step.  Needs ocean_dz_top_m (step_sea_ice kwarg).
     ocean_heat_flux_scheme: str = "constant"
     # NEMO zch, ocean-ice heat transfer coefficient (icesbc.F90:321 PARAMETER).
-    ocean_heat_ch_nemo: float = 0.0057
+    ocean_heat_ch_nemo: float = constants.ice_ocean_heat_transfer_nemo
     # Layered SI3 is an option inside this existing model.
     # ORDER, decided at the 2026-09-25 merge: both sides appended fields at
     # the tail claiming to preserve positional SeaIceConfig constructors, and

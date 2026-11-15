@@ -15360,8 +15360,10 @@ class LatLonCGridOceanModel:
                 # NEMO's ttrd_zdf (implicit vertical diffusion incl. the K33
                 # diagonal); handed to a host accumulator, state untouched.
                 from jax.experimental import io_callback
-                io_callback(trd_callback, None, (T_new - T_solve_in) / dt,
-                            _K_trd, ordered=True)
+                # stop_gradient: io_callback has no JVP rule; the hook must not
+                # make the step non-differentiable.
+                io_callback(trd_callback, None, *jax.lax.stop_gradient(
+                    ((T_new - T_solve_in) / dt, _K_trd)), ordered=True)
         if do_momentum:
             if _zdf_momentum_observer is not None:
                 jax.debug.callback(
@@ -15400,8 +15402,9 @@ class LatLonCGridOceanModel:
                 _bud = _tke_budget_box[0] if _tke_budget_box else None
                 if _bud is None:
                     _bud = (jnp.full_like(A_v_cell, jnp.nan),) * 4
-                io_callback(col_callback, None, T_new, S_new, u_new, v_new,
-                            _K_trd, A_v_cell, _e_col, *_bud, ordered=True)
+                io_callback(col_callback, None, *jax.lax.stop_gradient(
+                    (T_new, S_new, u_new, v_new, _K_trd, A_v_cell, _e_col, *_bud)),
+                    ordered=True)
             if self._tke_realized_kdiss_active() and (
                     return_K_diss_v or (K_diss_v_w is None and do_tracers)):
                 # Realized implicit-friction dissipation K_diss_v (Veros

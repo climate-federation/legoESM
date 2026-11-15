@@ -197,3 +197,21 @@ def test_columns_without_accumulate_is_refused(monkeypatch):
                                       "--trd-columns", "225", "255", "2"])
     with pytest.raises(SystemExit, match="needs --trd-accumulate"):
         _core2().main()
+
+
+@pytest.mark.parametrize("hook", ["trd_callback", "col_callback"])
+def test_hook_keeps_the_step_differentiable(hook):
+    """io_callback has no JVP rule: an attached hook must not make the step
+    non-differentiable, and must not change the gradient."""
+    m, st, tke0, *_ = _setup()
+
+    def loss(T, cb):
+        s = st._replace(T=st.T.replace(data=T))
+        return jnp.sum(m._apply_implicit_vertical_mixing(
+            s, _DT, None, tke_old=tke0, return_tke=True,
+            **{hook: cb})[0].T.data ** 2)
+
+    g_cb = jax.grad(loss)(st.T.data, lambda *a: None)
+    g_no = jax.grad(loss)(st.T.data, None)
+    assert bool(jnp.all(jnp.isfinite(g_cb)))
+    np.testing.assert_array_equal(np.asarray(g_cb), np.asarray(g_no))
