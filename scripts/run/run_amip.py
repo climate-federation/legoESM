@@ -980,7 +980,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="surface_stability_scheme", default="dyer1974",
                         choices=["dyer1974", "beljaars_holtslag1991",
                                  "grachev2007_sheba", "gryanik2020", "gfs",
-                                 "wrf_revmm5", "mynn_sfc"],
+                                 "wrf_revmm5", "mynn_sfc", "most_revisit_j3"],
                         help="Stable-branch (zeta>0) Monin-Obukhov similarity "
                              "functions for the surface layer (bulk_flux psi_m/"
                              "psi_h). dyer1974 (default) is byte-identical: "
