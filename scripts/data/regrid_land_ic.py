@@ -250,7 +250,7 @@ def main_era5_soil_t(args) -> int:
             "source IC has no soil-hydraulics stamp, so the output would be "
             "refused by the model; stamp it first (--stamp-only).")
     ncol = src["T_soil"].shape[0]
-    grid = _ic_grid(args.target_grid, args.target_resolution)
+    grid = _target_grid(args.target_grid, args.target_resolution)
     lat, lon = _cols_rad(grid)
     if lat.size != ncol:
         raise SystemExit(f"grid has {lat.size} columns, the IC has {ncol}.")
