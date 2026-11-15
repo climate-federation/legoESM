@@ -156,6 +156,26 @@ def _ic_grid(grid_type: str, resolution: int):
     return create_grid(grid_type, resolution=resolution)
 
 
+def _target_grid(grid_type: str, resolution: int):
+    """The target grid with float64 coordinates, as the production decks build
+    it (``precision: fp64``).  The default float32 storage moves centres off
+    exact values (3.75 deg -> 3.7500001), and a centre exactly halfway between
+    two CLM cells then picks the other cell than the run (159 of 2427 lat-lon
+    land columns)."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.precision import get_policy, set_policy
+    if not jax.config.jax_enable_x64:
+        raise SystemExit("regridding needs JAX_ENABLE_X64=1: the run builds its "
+                         "grid in float64.")
+    old = get_policy()
+    set_policy(old._replace(storage=jnp.float64))
+    try:
+        return _ic_grid(grid_type, resolution)
+    finally:
+        set_policy(old)
+
+
 def _source_land_mask(surfdata: str, grid, land_ncol: int) -> np.ndarray:
     """The spin-up's own land definition on its own grid.
 
@@ -467,7 +487,7 @@ def main(argv=None) -> int:
             f"reconstructed source grid has {src_lat.size} columns, the state "
             f"has {ncol_src}: the metadata does not describe this file.")
 
-    dst_grid = _ic_grid(args.target_grid, args.target_resolution)
+    dst_grid = _target_grid(args.target_grid, args.target_resolution)
     dst_lat, dst_lon = _cols_rad(dst_grid)
 
     from legoesm.coupler.grid_remap import nearest_column_map
