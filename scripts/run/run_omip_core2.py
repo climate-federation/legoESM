@@ -6862,8 +6862,9 @@ class _HeatLedgerAccumulator:
     * ``model_step_unattributed``: the driver-measured step change minus the
       sum of the step's ``step_*`` stages (must be round-off).
 
-    ``applied_qnet`` is ``dt * sum(q_net * area * wet)`` of the forcing
-    handed to the step, in J -- the same field ``q_net_mean`` accumulates.
+    ``applied_q_net`` / ``applied_sw_down`` are ``dt * sum(F * area * wet)``
+    of the forcing handed to the step, in J -- the fields ``q_net_mean`` /
+    ``sw_down_mean`` accumulate (q_net includes the shortwave).
     Sums stay on device; ``drain`` pulls them once per window.
     """
 
@@ -6896,14 +6897,16 @@ class _HeatLedgerAccumulator:
     def content(self, state):
         return self._content(state.T.data, state.eta.data, state.H_bathy.data)
 
-    def begin_step(self, state, q_net, dt):
+    def begin_step(self, state, sf, dt):
         k = self.content(state)
         if self._prev is not None:
             self._add(self._sums, "between_steps", k - self._prev)
         self._prev = k
-        if q_net is not None:
-            self._add(self._joules, "applied_qnet",
-                      float(dt) * self._area_sum(q_net))
+        for name in ("q_net", "sw_down"):
+            v = getattr(sf, name, None)
+            if v is not None:
+                self._add(self._joules, f"applied_{name}",
+                          float(dt) * self._area_sum(v))
 
     def model_step(self, state, ledger):
         k = self.content(state)
@@ -12470,7 +12473,7 @@ def main() -> int:
             # lane this is the post-blend, ice-partitioned flux. MLD rides
             # the same window and the same single count.
             if _hl_acc is not None:
-                _hl_acc.begin_step(state, sf.q_net, dt)
+                _hl_acc.begin_step(state, sf, dt)
                 state, _hl_step = model.step_with_heat_ledger(
                     state, dt, surface_forcing=sf, freshwater=fw,
                     t_seconds=_t_sec)

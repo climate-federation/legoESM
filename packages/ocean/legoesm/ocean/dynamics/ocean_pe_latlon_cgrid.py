@@ -5634,7 +5634,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
     ``return_tracer_heat_split`` (static, diagnostic only -- the heat ledger,
-    ``legoesm.ocean.heat_ledger``): also return the explicit temperature
+    ``LatLonCGridOceanModel.step_with_heat_ledger``): also return the explicit temperature
     tendency split by the block that added it, ``(tendencies, split)`` with
     ``split`` a dict of masked rates [degC/s] -- ``ldf`` (stage-9 tracer
     diffusion), ``physics`` (``physics_fn``), ``surface`` (the explicit part

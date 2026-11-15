@@ -78,7 +78,8 @@ def test_accumulator_known_answer():
     s1 = _state(np.full((ny, nx, nz), 2.0), eta)   # model step: +1 K
     s2 = _state(np.full((ny, nx, nz), 2.5), eta)   # post-step:  +0.5 K
     for _ in range(2):
-        acc.begin_step(s0, jnp.full((ny, nx), 10.0), 100.0)
+        acc.begin_step(s0, SimpleNamespace(q_net=jnp.full((ny, nx), 10.0),
+                                           sw_down=None), 100.0)
         acc.model_step(s1, {"entry": acc.content(s0),
                             "step_a": 0.25 * vol, "step_b": 0.75 * vol,
                             "split_x": 123.0, "end": acc.content(s1)})
@@ -94,10 +95,11 @@ def test_accumulator_known_answer():
     assert abs(float(out["ledger_model_entry_mismatch_J"])) <= 1e-9 * k * vol
     # step 2 began at s0 after step 1 ended at s2: -1.5 K between steps
     assert float(out["ledger_between_steps_J"]) == pytest.approx(-1.5 * k * vol)
-    assert float(out["ledger_applied_qnet_J"]) == pytest.approx(
+    assert "ledger_applied_sw_down_J" not in out
+    assert float(out["ledger_applied_q_net_J"]) == pytest.approx(
         2 * 100.0 * 10.0 * area[:, 1:-1].sum())
     assert list(out["ledger_stages"]) == [
-        "applied_qnet", "model_step", "step_a", "step_b", "split_x",
+        "applied_q_net", "model_step", "step_a", "step_b", "split_x",
         "model_step_unattributed", "model_entry_mismatch", "post_geothermal",
         "between_steps"]
     assert acc.drain() == {}

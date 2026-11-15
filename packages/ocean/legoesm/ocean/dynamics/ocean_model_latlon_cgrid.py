@@ -6653,7 +6653,7 @@ class LatLonCGridOceanModel:
         ``_return_heat_ledger`` (private, static; reached only through
         :meth:`step_with_heat_ledger`): also return a dict of global heat
         content increments [degC m^3] between successive operators of this
-        step -- see ``legoesm.ocean.heat_ledger``.  Read-only reductions of
+        step -- see :meth:`step_with_heat_ledger`.  Read-only reductions of
         arrays the step already holds; ``False`` adds no op.
 
         ``_external_tracer_rate`` (private, #1492 DINO ``surface_tendency_
@@ -7010,6 +7010,7 @@ class LatLonCGridOceanModel:
                 _grid.area, state.land_mask.data,
                 bool(getattr(_cfg_b, "ew_cyclic_overlap", False)))
             _hl = {}
+            _hl_fd_T = None
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
                                return_tracer_heat_split=_return_heat_ledger,
@@ -11644,6 +11645,8 @@ class LatLonCGridOceanModel:
                     else:
                         # Forward Euler (default)
                         hT_new = h_k_old * tr - dt * total_flux_div
+                        if _hl is not None and tr_name == 'T':
+                            _hl_fd_T = total_flux_div
 
                     tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
                     tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
@@ -11721,6 +11724,12 @@ class LatLonCGridOceanModel:
             _hl_k1 = _hl_content(T_corrected, h_k_new, _hl_w)
             _hl["step_advection"] = _hl_k1 - _hl_k
             _hl_k = _hl_k1
+            if _hl_fd_T is not None:
+                # The flux-divergence integral alone (zero by the divergence
+                # theorem); step_advection minus this is what the h_new
+                # division, its floor and the inactive-cell keep add.
+                _hl["split_adv_flux_divergence"] = _hl_content(
+                    -dt * _hl_fd_T, jnp.ones_like(_hl_fd_T), _hl_w)
 
         # #1442: keep the tracer-advecting mass fluxes instead of discarding
         # them.  PURE DIAGNOSTIC -- read-only capture of values this step
@@ -11949,6 +11958,7 @@ class LatLonCGridOceanModel:
             _hl_k1 = _hl_content(state_new.T.data, h_k_new, _hl_w)
             _hl["step_dissipative_increment"] = _hl_k1 - _hl_k
             _hl_k = _hl_k1
+            _hl_T_pre_zdf = state_new.T.data
             # Sources the implicit solve adds to its input (dt * rate, masked),
             # on the thickness the step carries; the solve's own conservation
             # is then step_vertical minus these.
@@ -12152,6 +12162,21 @@ class LatLonCGridOceanModel:
             _hl_k1 = _hl_content(state_new.T.data, h_k_new, _hl_w)
             _hl["step_vertical"] = _hl_k1 - _hl_k
             _hl_k = _hl_k1
+            # The tracer solve conserves sum(dz_cell * T) with the solver's
+            # own dz_cell (_apply_implicit_vertical_mixing: h_partial or
+            # dz_ref times the Jacobian of the eta it is handed); the part of
+            # step_vertical that is only that weight differing from h_new is
+            # sum((h_new - dz_cell) * dT) exactly (linear in T).
+            from legoesm.ocean.vertical import (
+                compute_ocean_jacobian as _hl_jacobian,
+            )
+            _hl_dz = (_zc.h_partial
+                      if isinstance(_zc, OceanPartialCellCoordinate)
+                      else _zc.dz_ref) * _hl_jacobian(
+                state_new.eta.data, state_new.H_bathy.data, _zc,
+            )[..., jnp.newaxis]
+            _hl["split_zdf_thickness_mismatch"] = _hl_content(
+                state_new.T.data - _hl_T_pre_zdf, h_k_new - _hl_dz, _hl_w)
         if self._nemo_ws_test_hooks.expose_stage3_raw_momentum:
             # WRITE-only capture at NEMO's raw-Kaa boundary: the implicit
             # dyn_zdf result is complete, while the depth-mean replacement
@@ -16273,20 +16298,33 @@ class LatLonCGridOceanModel:
         """
         _oi = getattr(self.config, "outer_integrator", "forward_euler")
         _h = self._nemo_ws_test_hooks
+        _h0 = type(_h)()
+        # Every private hook must sit at its default: several of them swap
+        # or override the tracer state inside the step, which the ledger
+        # would then book to an operator.  Non-scalar values never compare.
+        _hooks_on = [
+            name for name in _h._fields
+            if not (getattr(_h, name) is getattr(_h0, name)
+                    or (isinstance(getattr(_h0, name),
+                                   (bool, int, float, str, tuple))
+                        and type(getattr(_h, name)) is type(getattr(_h0, name))
+                        and getattr(_h, name) == getattr(_h0, name)))]
         if (_oi != "forward_euler"
                 or self.config.barotropic.barotropic_solver
-                == "implicit_unsplit"
-                or _h.expose_barotropic_substeps or _h.momentum_budget_trace
-                or _h.expose_live_stage_operands
-                or _h.tracer_process_trace is not None
-                or _h.tracer_zdf_trace
-                or _h.tracer_ldf_diagnostics is not None
-                or _h.expose_stage3_fct_inputs or _h.expose_l3_eiv_transport
-                or _h.expose_l5_mle_transport):
+                == "implicit_unsplit" or _hooks_on):
             raise ValueError(
                 "step_with_heat_ledger supports outer_integrator="
                 "'forward_euler' without private fidelity hooks only; got "
-                f"outer_integrator={_oi!r}")
+                f"outer_integrator={_oi!r}, hooks={_hooks_on}")
+        # The same eager preamble as step(): cold-start TKE coefficient
+        # memory, the L3 route check, the rigid-lid rank guard, the caches.
+        state = self._seed_tke_preclosure_carry(state)
+        self._check_l3_krhs_route(self.config)
+        if self.config.barotropic.barotropic_solver == "rigid_lid":
+            from legoesm.ocean.dynamics.rigid_lid_latlon_cgrid import (
+                assert_rigid_lid_single_rank,
+            )
+            assert_rigid_lid_single_rank()
         self.prime_step_caches(state)
         _tf = getattr(self.config, "tidal_forcing", None)
         if _tf is not None and _tf.enabled and t_seconds is None:
@@ -16308,7 +16346,7 @@ class LatLonCGridOceanModel:
                                  t_seconds=None):
         """JIT body of :meth:`step_with_heat_ledger`: the forward-Euler arm of
         :meth:`_step_jitted` with the ledger switched on, then the same three
-        post-step operators, each measured on the final thickness."""
+        post-step operators, each measured on its own returned thickness."""
         new_state, ledger = self._step_impl(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
@@ -16317,9 +16355,6 @@ class LatLonCGridOceanModel:
         w = ledger_cell_weights(
             self.grid.area, state.land_mask.data,
             bool(getattr(self.config, "ew_cyclic_overlap", False)))
-        h_end = compute_layer_thickness(
-            new_state.eta.data, new_state.H_bathy.data, self.z_coord,
-            min_water_column_m=self.config.min_water_column_m)
         k = ledger.pop("end")
         for name, on, op in (
                 ("step_polar_filter",
@@ -16333,7 +16368,11 @@ class LatLonCGridOceanModel:
             if not on:
                 continue
             new_state = op(new_state)
-            k1 = tracer_content(new_state.T.data, h_end, w)
+            # Each projection may move eta too (the polar filter does), so
+            # the content is taken on the thickness of the state it returns.
+            k1 = tracer_content(new_state.T.data, compute_layer_thickness(
+                new_state.eta.data, new_state.H_bathy.data, self.z_coord,
+                min_water_column_m=self.config.min_water_column_m), w)
             ledger[name] = k1 - k
             k = k1
         ledger["end"] = k

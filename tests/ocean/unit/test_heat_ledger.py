@@ -42,7 +42,7 @@ def _fp64():
         set_policy(prev)
 
 
-def _model(**cfg_kw):
+def _model(perturb=True, **cfg_kw):
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.vertical import create_ocean_z_star
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
@@ -61,7 +61,8 @@ def _model(**cfg_kw):
     kw.update(cfg_kw)
     cfg = LatLonCGridOceanConfig.from_flat(**kw)
     rng = np.random.default_rng(1)
-    T = np.asarray(state.T.data) + rng.standard_normal(state.T.data.shape)
+    T = np.asarray(state.T.data) + (rng.standard_normal(state.T.data.shape)
+                                    if perturb else 0.0)
     T = T * np.asarray(state.land_mask.data)[..., None]
     state = state._replace(T=Field(jnp.asarray(T), name=state.T.name,
                                    dims=state.T.dims, units=state.T.units))
@@ -105,12 +106,16 @@ def runs(_fp64):
 
 
 def test_state_bitwise_identical_with_ledger(runs):
+    """Every leaf of the carried state (T, S, eta, u, v, tke, carries...)."""
     *_, off, on = runs
     for i, ((a, _), (b, _)) in enumerate(zip(off, on)):
-        for name in ("T", "S", "eta", "u", "v"):
-            x = np.asarray(getattr(a, name).data)
-            y = np.asarray(getattr(b, name).data)
-            assert np.array_equal(x, y), f"step {i + 1}: {name} moved"
+        la, ta = jax.tree_util.tree_flatten(a)
+        lb, tb = jax.tree_util.tree_flatten(b)
+        assert ta == tb, f"step {i + 1}: pytree structure differs"
+        assert len(la) >= 5
+        for j, (x, y) in enumerate(zip(la, lb)):
+            assert np.array_equal(np.asarray(x), np.asarray(y)), (
+                f"step {i + 1}: leaf {j} moved")
 
 
 def test_stages_telescope_to_the_step_change(runs):
@@ -134,6 +139,16 @@ def test_explicit_rhs_split_adds_up(runs):
     for _, hl in on:
         split = sum(v for k, v in hl.items() if k.startswith("split_rhs_"))
         assert abs(split - hl["step_explicit_rhs"]) <= REL_TOL * abs(hl["entry"])
+
+
+def test_solver_thickness_matches_carried_thickness(runs):
+    """The implicit solve conserves sum(dz_cell*T); on this coordinate its
+    dz_cell is the carried h_new, so the mismatch split is round-off, and
+    the advection flux-divergence split is reported."""
+    *_, on = runs
+    for _, hl in on:
+        assert abs(hl["split_zdf_thickness_mismatch"]) <= REL_TOL * abs(hl["entry"])
+        assert np.isfinite(hl["split_adv_flux_divergence"])
 
 
 def test_freshwater_stage_is_live(runs):
@@ -161,11 +176,15 @@ def test_end_content_matches_compute_tracer_budget(runs):
     assert abs(tb.heat_content - hl["end"]) <= REL_TOL * abs(hl["end"])
 
 
-def test_known_answer_surface_heat():
-    """Known answer: with only a uniform q_net (no shortwave, no water), the
-    surface block of the explicit RHS (or the implicit-solve surface source)
-    integrates to dt * q_net * area / (rho_0 c_sw) over counted columns."""
-    grid, _, state, model = _model(freshwater_closure="none")
+@pytest.mark.parametrize("implicit", [False, True])
+def test_known_answer_surface_heat(implicit):
+    """Known answer: a uniform-T rest ocean under a uniform q_net only (no
+    shortwave, no water, no circulation) gains exactly dt * q_net * area /
+    (rho_0 c_sw) over the counted columns -- in the step's TOTAL content
+    change (delivered heat), and in the recorded source split, on both the
+    explicit and the implicit surface route."""
+    grid, _, state, model = _model(perturb=False, freshwater_closure="none",
+                                   surface_forcing_implicit=implicit)
     from legoesm.ocean.state import OceanSurfaceForcing
     from legoesm.ocean.budgets import ledger_cell_weights
     shape = state.land_mask.data.shape
@@ -178,6 +197,12 @@ def test_known_answer_surface_heat():
     w = np.asarray(ledger_cell_weights(grid.area, state.land_mask.data, True))
     want = DT * q * w.sum() / (cc.rho_0 * cc.c_sw)
     assert got == pytest.approx(want, rel=1.0e-10)
+    # Delivered heat is a difference of two contents ~1e6 x larger, so it
+    # resolves only to REL_TOL of the content (fp64 cancellation).
+    tol = REL_TOL * abs(float(hl["entry"]))
+    assert abs(float(hl["end"] - hl["entry"]) - want) <= tol
+    staged = "step_vertical" if implicit else "step_explicit_rhs"
+    assert abs(float(hl[staged]) - want) <= tol
 
 
 def test_refuses_other_outer_integrators():
@@ -197,3 +222,18 @@ def test_ledger_weights_drop_halo_copies_once():
     T = np.ones((3, 6, 2))
     h = np.full((3, 6, 2), 5.0)
     assert float(tracer_content(T, h, w)) == pytest.approx(3 * 4 * 2.0 * 2 * 5.0)
+
+
+def test_refuses_private_hooks():
+    """A hook that overrides the pre-solve tracers would be booked to an
+    operator; the ledger refuses every non-default hook."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
+    )
+    grid, z_coord, state, model = _model()
+    hooked = LatLonCGridOceanModel(
+        grid, z_coord, model.config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            pre_implicit_tracer_override=(state.T.data, state.S.data)))
+    with pytest.raises(ValueError, match="pre_implicit_tracer_override"):
+        hooked.step_with_heat_ledger(state, DT)
