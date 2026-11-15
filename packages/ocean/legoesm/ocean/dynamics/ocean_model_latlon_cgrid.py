@@ -11913,6 +11913,37 @@ class LatLonCGridOceanModel:
             _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
                 _F_fw_rate_now, state_new.S.data, state_new.T.data,
                 h_k_new, mask, F_entry=_F_entry, entry_heat=_entry_heat)
+            if _hl is not None:
+                # Entry heat by channel, through the SAME entry function fed
+                # one channel at a time (rate = that channel alone): runoff
+                # (incl. its depth spread, at the smooth max(SST, 0)) and ice
+                # melt/freeze water (at SST); the remainder of the total is
+                # the global-normalisation residual (rain/evap/restoring
+                # carry zero tracer heat).  step_freshwater minus the total
+                # is what the dilution itself adds (should be round-off).
+                _hl_one = jnp.ones_like(_entry_heat)
+                _hl["split_fw_entry_heat"] = _hl_content(
+                    dt * _entry_heat, _hl_one, _hl_w)
+                _hl_zero = jnp.zeros_like(jnp.asarray(freshwater.precip))
+                _hl_fw0 = freshwater._replace(
+                    precip=_hl_zero, evap=_hl_zero, runoff=_hl_zero,
+                    ice_fw=_hl_zero, restoring=None)
+                _hl_parts = {}
+                for _hl_ch in ("runoff", "ice_fw"):
+                    _hl_src = jnp.asarray(getattr(freshwater, _hl_ch))
+                    _, _hl_eh = real_freshwater_entry(
+                        _hl_fw0._replace(**{_hl_ch: _hl_src}),
+                        _hl_src / _cfg_b.rho_0, h_k_new, mask, _cfg_b.rho_0,
+                        state_new.T.data,
+                        runoff_spread_m=resolve_runoff_spread_arg(_cfg_b),
+                        runoff_t_floor_sharpness=(
+                            _cfg_b.runoff_temperature_floor_sharpness))
+                    _hl_parts[_hl_ch] = _hl_content(dt * _hl_eh, _hl_one, _hl_w)
+                _hl["split_fw_runoff_heat"] = _hl_parts["runoff"]
+                _hl["split_fw_ice_heat"] = _hl_parts["ice_fw"]
+                _hl["split_fw_normalisation_heat"] = (
+                    _hl["split_fw_entry_heat"] - _hl_parts["runoff"]
+                    - _hl_parts["ice_fw"])
             state_new = state_new._replace(
                 S=state_new.S.replace(
                     data=state_new.S.data + (dt * _dS_dil).astype(_S_dtype)),

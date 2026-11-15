@@ -156,6 +156,22 @@ def test_freshwater_stage_is_live(runs):
     """Runoff enters at max(SST, 0) under real_freshwater: non-zero heat."""
     *_, on = runs
     assert all(abs(hl["step_freshwater"]) > 0.0 for _, hl in on)
+    assert all(abs(hl["split_fw_runoff_heat"]) > 0.0 for _, hl in on)
+
+
+def test_freshwater_stage_is_its_entry_heat(runs):
+    """The freshwater-closure stage changes content only by the heat the
+    entering water carries (runoff + ice + normalisation residual); the
+    dilution redistributes."""
+    *_, on = runs
+    for _, hl in on:
+        tol = REL_TOL * abs(hl["entry"])
+        assert abs(hl["step_freshwater"] - hl["split_fw_entry_heat"]) <= tol
+        # No ice water and no normalisation on this card: the runoff
+        # channel must carry the whole entry heat (normalisation is the
+        # remainder, so a missed runoff level would show up there).
+        assert hl["split_fw_ice_heat"] == 0.0
+        assert abs(hl["split_fw_normalisation_heat"]) <= tol
 
 
 def test_end_content_matches_compute_tracer_budget(runs):
