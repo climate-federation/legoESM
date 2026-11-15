@@ -122,6 +122,17 @@ def _provenance():
                 generated_at_commit=sha, metric="max over levels of |port - WRF oracle|")
 
 
+@pytest.fixture(autouse=True)
+def _clear_jax_caches():
+    """Drop compiled code after each test.  Every case compiles fresh KF graphs
+    whose code stays mapped; one process climbed ~16k memory maps per gap case
+    to the kernel's vm.max_map_count (65530) and LLVM then failed ("Cannot
+    allocate memory"), failing and aborting the rest of the file.  Same
+    mitigation as tests/land/conftest.py."""
+    yield
+    jax.clear_caches()
+
+
 @pytest.fixture(scope="module")
 def fix():
     return dict(np.load(_FIX))
