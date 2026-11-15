@@ -256,11 +256,12 @@ def test_restart_start_refuses_a_restart_from_another_grid(tmp_path):
         _cli_json(run, "--restart-start", str(run / "rs.npz"))
 
 
-def test_domain_cfg_cells_with_a_thick_bottom_cell_close(tmp_path):
+@pytest.mark.parametrize("overlap", ["", " --ew-cyclic-overlap"])
+def test_domain_cfg_cells_with_a_thick_bottom_cell_close(tmp_path, overlap):
     """Two wet levels, the bottom one 800 m against a 300 m reference: only the
     domain_cfg rebuild closes; the interface rule would count a third level."""
     import json
-    run = _run_dir(tmp_path, Q, extra_flags="--nemo-geometry domain_cfg")
+    run = _run_dir(tmp_path, Q, extra_flags="--nemo-geometry domain_cfg" + overlap)
     d = (Q + GEO) * DT_WIN / (RHO * CP * 900.0)
     for tag, T0 in (("day0005", 10.0), ("day0010", 10.0 + d)):
         with np.load(run / f"snapshot_{tag}.npz") as z:

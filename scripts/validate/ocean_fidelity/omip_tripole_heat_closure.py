@@ -92,7 +92,13 @@ def drop_cyclic_overlap(snap):
     lm = snap["land_mask"].copy()
     lm[:, 0] = 0.0
     lm[:, -1] = 0.0
-    return {**snap, "land_mask": lm}
+    out = {**snap, "land_mask": lm}
+    if "bottom_level" in snap:            # the copies leave the cell rebuild too
+        bl = snap["bottom_level"].copy()
+        bl[:, 0] = -1.0
+        bl[:, -1] = -1.0
+        out["bottom_level"] = bl
+    return out
 
 
 def load_snapshot(path):
@@ -365,11 +371,13 @@ def main(argv=None) -> int:
             pc = create_full_step_coordinate(zs, bl, bottom_thickness=bt)
             if not np.array_equal(wet, s["land_mask"] > 0.5):
                 raise SystemExit("FATAL: bottom_level and land_mask disagree")
-            if not np.allclose(np.asarray(pc.h_partial).sum(-1), s["H_bathy"],
-                               rtol=0, atol=1e-6):
+            if not np.allclose(np.asarray(pc.h_partial).sum(-1)[wet],
+                               s["H_bathy"][wet], rtol=0, atol=1e-6):
                 raise SystemExit("FATAL: rebuilt cells do not sum to H_bathy")
+        ocean = s["land_mask"] > 0.5
         if "bottom_level" in s and not np.array_equal(
-                np.asarray(pc.bottom_level), s["bottom_level"].astype(np.int64)):
+                np.asarray(pc.bottom_level)[ocean],
+                s["bottom_level"].astype(np.int64)[ocean]):
             raise SystemExit("FATAL: rebuilt bottom levels differ from the run's "
                              "(wrong --nemo-geometry for this run?)")
         zi = s.get("z_interface_ref")
