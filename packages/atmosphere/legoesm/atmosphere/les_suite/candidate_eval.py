@@ -359,6 +359,10 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
 
     forcing = scm.forcing_arg
     record_fn = None if forcing is None else forcing.surface_flux_fn
+    rad_fn = None if forcing is None else forcing.rad_T_tendency
+    if candidate is not None and candidate.reads_rad and rad_fn is None:
+        raise ValueError(f"candidate {candidate.name!r} declares READS_RAD but this "
+                         "case's forcing has no radiative tendency channel")
 
     def _geo(t):
         """The geostrophic wind the SCM forcing applies at time ``t`` (surface-first;
@@ -379,6 +383,9 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
         base = scm_column_inputs(state, sigma, phys_state, f_c=f_c, u_geo=ug,
                                  v_geo=vg, dt=dt, uw_s=zero, vw_s=zero, z0_m=z0_m,
                                  z0h_m=z0h_m, sfc_drag_most=sfc_drag_most)
+        if rad_fn is not None:  # the profile the SCM forcing applies this step
+            base = base._replace(rad_T_tendency=jnp.asarray(
+                rad_fn(t), base.theta_l.dtype)[::-1])
         imp = implied_fluxes(tend_turb, base)
         if record_fn is not None:  # the surface law gives every closure its fluxes
             rec = record_fn(state, sigma, t)

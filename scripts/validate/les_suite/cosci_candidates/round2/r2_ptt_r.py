@@ -329,14 +329,18 @@ def _recover_flux(x_new, x, m_w, w_half, rho_half, dt):
     return g_w / (w_half * rho_half)
 
 
-def step(params, inputs, aux):
-    """Internal expm states and diagnostics: dict with the new theta_l, q_t, u, v."""
+def step(params, inputs, aux, b_extra=None):
+    """Internal expm states and diagnostics: dict with the new theta_l, q_t, u, v.
+    ``b_extra`` (n+1, n): an additional mass-flux operator added to the exchange of
+    every field (r2_ptt_full's top-down branch); None = this candidate."""
     o = _operator(params, inputs, aux)
     m, dt, rho_h = inputs.mass, inputs.dt, inputs.rho_half
     n = m.shape[0]
     b_loc = _crossing_matrix(o["r_loc"])
     b_nl = _nonlocal_matrix(o["big_m"])
     b_sc = b_loc + b_nl
+    if b_extra is not None:
+        b_sc = b_sc + b_extra
     ones_h = jnp.ones_like(rho_h)
     th_new = _expm_step(b_sc, rho_h[0] * inputs.w_theta_s, inputs.theta_l,
                         m * inputs.exner, inputs.exner_half, dt)
@@ -360,9 +364,9 @@ def step(params, inputs, aux):
                 b_nl=b_nl, b_loc=b_loc, b_rot=b_rot)
 
 
-def fluxes(params, inputs, aux):
+def fluxes(params, inputs, aux, b_extra=None):
     """((w'theta_l', w'q_t'), (u'w', v'w'), B_mem_new): kinematic, (n+1,), +up."""
-    st = step(params, inputs, aux)
+    st = step(params, inputs, aux, b_extra)
     m, dt, rho_h = inputs.mass, inputs.dt, inputs.rho_half
     ones_h = jnp.ones_like(rho_h)
     dtype = rho_h.dtype
@@ -388,10 +392,10 @@ def fluxes(params, inputs, aux):
     return (wth, wqt), (uw, vw), b_mem
 
 
-def implied_surface_fluxes(params, inputs, aux):
+def implied_surface_fluxes(params, inputs, aux, b_extra=None):
     """Index-0 flux recovered from the expm state change BEFORE it is overwritten by
     the prescribed/passed value (conservation diagnostic: equals it to round-off)."""
-    st = step(params, inputs, aux)
+    st = step(params, inputs, aux, b_extra)
     m, dt, rho_h = inputs.mass, inputs.dt, inputs.rho_half
     ones_h = jnp.ones_like(rho_h)
     return dict(

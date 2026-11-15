@@ -117,7 +117,11 @@ class ColumnInputs(NamedTuple):
     [m] of the LES case the column runs (NaN when the column has none); the LES
     case's wall-drag law ``sfc_drag_most``: 1 when its surface stress was
     Businger-Dyer stability-corrected at the prescribed flux's Obukhov length, 0 for
-    the plain neutral log law (NaN when the column has none).
+    the plain neutral log law (NaN when the column has none); the LES radiative
+    TEMPERATURE tendency ``rad_T_tendency`` (n,) [K/s] the SCM forcing applies this
+    step (CloudBench), NaN on a column whose forcing has no radiation channel. A
+    candidate reads it only if it declares ``READS_RAD = True``; the rollout then
+    refuses a case without the channel. The tuned benchmark schemes never see it.
     """
 
     z_full: Array
@@ -147,6 +151,7 @@ class ColumnInputs(NamedTuple):
     z0_m: Array
     z0h_m: Array
     sfc_drag_most: Array
+    rad_T_tendency: Array
 
 
 class Candidate(NamedTuple):
@@ -158,6 +163,7 @@ class Candidate(NamedTuple):
     init_aux: Any
     fluxes: Any
     source_path: str
+    reads_rad: bool = False
 
     def default_params(self) -> dict:
         return {k: jnp.asarray(float(v[0])) for k, v in self.params.items()}
@@ -189,8 +195,12 @@ def load_candidate(path: str | Path) -> Candidate:
         if not (float(lo) < float(hi) and float(lo) <= float(d) <= float(hi)):
             raise ValueError(
                 f"{path.name}: PARAMS[{k!r}] needs lo < hi and lo <= default <= hi")
+    reads_rad = getattr(mod, "READS_RAD", False)
+    if not isinstance(reads_rad, bool):
+        raise ValueError(f"{path.name}: READS_RAD must be a bool, got {reads_rad!r}")
     return Candidate(name=path.stem, kind=mod.KIND, params=dict(mod.PARAMS),
-                     init_aux=mod.init_aux, fluxes=mod.fluxes, source_path=str(path))
+                     init_aux=mod.init_aux, fluxes=mod.fluxes, source_path=str(path),
+                     reads_rad=reads_rad)
 
 
 # --- flux <-> tendency (the conservative conversion) --------------------------------
@@ -432,7 +442,7 @@ def column_inputs(*, z_full, z_half, rho_full, rho_half, mass, exner, exner_half
                   p_full, p_half, theta_l, q_t, u, v, w_theta_s, w_qt_s, uw_s, vw_s,
                   f_c=0.0, u_geo=None, v_geo=None, dt, temp=None, q_v=None,
                   q_c=None, z0_m=None, z0h_m=None,
-                  sfc_drag_most=None) -> ColumnInputs:
+                  sfc_drag_most=None, rad_T_tendency=None) -> ColumnInputs:
     """Assemble :class:`ColumnInputs` (surface-first arrays; scalars broadcast).
 
     ``temp``/``q_v``/``q_c`` given together, or all omitted for a cloud-free column
@@ -459,7 +469,9 @@ def column_inputs(*, z_full, z_half, rho_full, rho_half, mass, exner, exner_half
         q_c=zeros if q_c is None else _s(q_c),
         z0_m=_s(jnp.nan if z0_m is None else z0_m),
         z0h_m=_s(jnp.nan if z0h_m is None else z0h_m),
-        sfc_drag_most=_s(jnp.nan if sfc_drag_most is None else sfc_drag_most))
+        sfc_drag_most=_s(jnp.nan if sfc_drag_most is None else sfc_drag_most),
+        rad_T_tendency=(jnp.full_like(zeros, jnp.nan) if rad_T_tendency is None
+                        else _s(rad_T_tendency)))
 
 
 def half_level_average(full: Array, surface_value: Array) -> Array:
