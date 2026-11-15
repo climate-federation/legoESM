@@ -69,7 +69,7 @@ latlon_qv_smooth_del4_m4s: 0.0      # this lane's own q_v del-4 smoother: OFF, a
 # --target-resolution 48 --target-clm-surfdata <the run's CLM surfdata> (soil
 # water carried as relative wetness between dry floor and saturation, rebuilt
 # on this run's soil, user 2026-11-12), then --era5-soil-t (ERA5 1979-01-01
-# 00 UTC stl1-4); file md5 98355568bf8af5e168b8c505e42e704a; provenance is in
+# 00 UTC stl1-4); file md5 cf1c0fa064b8f257c90f255726d8b2b2; provenance is in
 # the file's metadata.  data/ is gitignored: stage the file in the launch
 # directory.
 land_ic: data/lmip_soil_ic/soil_ic_latlon48_era5T_19790101.npz
