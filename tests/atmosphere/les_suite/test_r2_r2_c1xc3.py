@@ -258,6 +258,26 @@ def test_nonuniform_rain_leaves_plume_thermodynamics_unchanged(col, profile):
     assert float(jnp.max(k0["M_star"])) > 0.0
 
 
+@pytest.mark.parametrize("col", list(COLUMNS))
+@pytest.mark.parametrize("profile", ["cell0", "random"])
+def test_nonuniform_rain_leaves_tke_production_unchanged(col, profile):
+    """Rain added non-uniformly to q_t (q_v, q_c, temp unchanged) leaves the new TKE
+    unchanged: the buoyancy production's nonlocal water flux carries no rain."""
+    mod, cand = _module(), _cand()
+    p = cand.default_params()
+    inp = COLUMNS[col]()
+    n = inp.q_t.shape[0]
+    if profile == "cell0":
+        q_r = jnp.zeros(n).at[0].set(0.004)
+    else:
+        q_r = 0.004 * jnp.asarray(np.random.default_rng(1).random(n))
+    wet = inp._replace(q_t=inp.q_t + q_r)
+    e0 = np.asarray(mod.fluxes(p, inp, cand.init_aux(inp))[2]["e"])
+    e1 = np.asarray(mod.fluxes(p, wet, cand.init_aux(wet))[2]["e"])
+    assert np.max(np.abs(e0 - cand.init_aux(inp)["e"])) > 1e-6
+    np.testing.assert_allclose(e1, e0, rtol=1e-10, atol=1e-14)
+
+
 def test_law_column_with_missing_roughness_has_finite_gradients():
     """A law column may carry NaN roughness; the discarded own law must not put
     0*NaN into the gradient, and the result equals that with finite roughness."""

@@ -61,7 +61,8 @@ surface flux.
     is the harness' enthalpy form (storage m Pi, face weights Pi_half), so the
     returned flux applied under heat_form="enthalpy" reproduces the solved state.
     TKE: implicit M-matrix (C1), P_b = -K_h N_eff^2 + (g/theta_v0)(A_th F^NL_thl +
-    A_q F^NL_qt) at faces (F^NL explicit at t^n), sign-split.
+    A_q F^NL_qn) at faces (F^NL explicit at t^n; water part rain-free, deviation
+    17), sign-split.
 
 Conservation (RULE 0): every transport is an interface flux; F(0) is the surface
 input (scalars prescribed, momentum the applied stress), F(n) = 0 is set exactly.
@@ -125,8 +126,9 @@ Deviations from the hypothesis text (each recorded)
    total water left d (q_r,below - q_r,here)). The transported plume total water
    q_t,u is the hypothesis' entraining q_t (conservation untouched); rain is
    passive in theta_v (no loading, as both parents' theta_v). The nonlocal
-   buoyancy flux in P_b applies A_q to the total-water F^NL (its rain part is not
-   separated). (VOTED V15, V20.)
+   buoyancy flux in P_b applies A_q to the non-precipitating F^NL (plume q_n,u,
+   environment q_n; rain excluded; codex r4 P2, VOTED 2026-11-15 3-0).
+   (VOTED V15, V20.)
 18. Surface buoyancy flux B_s = (g/theta_v0)(A_th,0 w'theta_l'_s + A_q,0 w'q_t'_s)
    with the cell-0 moist coefficients (review r2, codex P1; equals C1's form in
    clear air without rain). (VOTED V16.)
@@ -365,7 +367,7 @@ def kernel(params, inputs, aux):
         w2n = _sp_w2((w2 + 2.0 * _A_W * B * dz) / (1.0 + 2.0 * p["b_w"] * eps * dz))
         an = a * jnp.exp(-p["delta_c"] * chi * dz)
         Tn = T * _g_inf(w2n / _W_D ** 2 - 1.0)
-        return (Xn, w2n, an, Tn, qc_n, qn_n), (Xn, w2n, an, Tn, qc_n)
+        return (Xn, w2n, an, Tn, qc_n, qn_n), (Xn, w2n, an, Tn, qc_n, qn_n)
 
     xs = (X[1:], s_cell[1:], inp.z_full[1:], dz_cell[1:], inp.exner_half[2:],
           inp.p_half[2:], thv_face[2:], q_n[1:])
@@ -373,12 +375,13 @@ def kernel(params, inputs, aux):
     a_u = jnp.asarray(p["a_u"], cdt)
     carry0 = (Xu1.astype(cdt), jnp.asarray(w2_1, cdt), a_u, jnp.asarray(T_1, cdt),
               jnp.asarray(qc1, cdt), jnp.asarray(qn1, cdt))
-    _, (Xu_s, w2_s, a_s, T_s, qcu_s) = jax.lax.scan(_plume_step, carry0, xs)
+    _, (Xu_s, w2_s, a_s, T_s, qcu_s, qnu_s) = jax.lax.scan(_plume_step, carry0, xs)
     Xu_f = jnp.concatenate([Xu1[None], Xu1[None], Xu_s], axis=0)    # (n+1, 4)
     w2_f = jnp.concatenate([w2_1[None], w2_1[None], w2_s])
     a_f = jnp.concatenate([jnp.broadcast_to(a_u, (2,)), a_s])
     Pi_f = jnp.concatenate([T_1[None], T_1[None], T_s])
     qcu_f = jnp.concatenate([qc1[None], qc1[None], qcu_s])
+    qnu_f = jnp.concatenate([qn1[None], qn1[None], qnu_s])
     edge = jnp.ones(n + 1, w2_f.dtype).at[0].set(0.0).at[n].set(0.0)
     M_star = edge * G_c * a_f * jnp.sqrt(w2_f) * Pi_f              # (n+1,) >= 0
 
@@ -412,7 +415,7 @@ def kernel(params, inputs, aux):
     return dict(Bs=Bs, ustar=ustar, c_s=c_s, tau_law=tau_law, F0=F0, sigma_w=sigma_w,
                 G_c=G_c, f_c=f_c, a_th=a_th, a_q=a_q, a_th_f=a_th_f, a_q_f=a_q_f,
                 N2f=N2f, S2f=S2f, Kmf=Kmf, Khf=Khf, Pr_t=Pr_t, lc=lc, c_N=c_N,
-                Xu_f=Xu_f, w2_f=w2_f, Pi_f=Pi_f, qcu_f=qcu_f, M_star=M_star, M=M,
+                Xu_f=Xu_f, w2_f=w2_f, Pi_f=Pi_f, qcu_f=qcu_f, qnu_f=qnu_f, M_star=M_star, M=M,
                 tau=tau, Mm=Mm, delta=delta, Z_ref=Z_ref, A=A, chi=1.0 - A, W=W, R=R,
                 D=D, gb=gb, z1=z1, dzf=dzf, bmat=bmat)
 
@@ -488,7 +491,8 @@ def fluxes_and_state(params, inputs, aux):
     e = aux["e"]
     kap = constants.kappa_von_karman
     fnl_th = (expl[:, 0] + g_nl @ inp.theta_l) / rh[1:n]            # explicit F^NL
-    fnl_q = (expl[:, 1] + g_nl @ inp.q_t) / rh[1:n]
+    # rain-free F^NL for the buoyancy term only (VOTED V2 2026-11-15, 3-0)
+    fnl_q = (k["Mm"][1:n] * k["qnu_f"][1:n] + g_nl @ (inp.q_v + inp.q_c)) / rh[1:n]
     wthv_nl = k["a_th_f"] * fnl_th + k["a_q_f"] * fnl_q
     P_face = jnp.concatenate([jnp.reshape(k["ustar"] ** 3 / (kap * k["z1"]), (1,)),
                               k["Kmf"] * k["S2f"], zero])
