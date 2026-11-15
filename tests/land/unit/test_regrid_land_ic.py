@@ -869,13 +869,15 @@ def test_target_grid_centres_are_the_runs(grid_type, res):
     if not jax.config.jax_enable_x64:
         pytest.skip("needs JAX_ENABLE_X64=1")
     rg = _load("scripts/data/regrid_land_ic.py", "_rg_tg")
-    old = get_policy()
-    set_policy(old._replace(storage=jnp.float64))
+    ambient = get_policy()
+    fp32 = ambient._replace(storage=jnp.float32)
     try:
+        set_policy(fp32._replace(storage=jnp.float64))
         mesh = build_latlon_column_mesh(create_grid(grid_type, resolution=res))
+        set_policy(fp32)                            # the builder's default
+        lat, lon = rg._cols_rad(rg._target_grid(grid_type, res))
+        assert get_policy() == fp32                 # the swap is undone
     finally:
-        set_policy(old)
-    lat, lon = rg._cols_rad(rg._target_grid(grid_type, res))
-    assert get_policy() == old                      # the swap is undone
+        set_policy(ambient)
     np.testing.assert_array_equal(lat, np.asarray(mesh.latCell))
     np.testing.assert_array_equal(lon, np.asarray(mesh.lonCell))
