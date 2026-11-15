@@ -429,6 +429,10 @@ class DycoreConfig(NamedTuple):
     # A/B; it carries #930 (lat-lon), #1029 (MPAS) and the lat-lon 50 K floor.
     # validate_strict refuses any other form off those two lanes.
     vertical_form: str = "legacy"
+    # Spectral lane, CAM-SE top Laplacian sponge (dyn_comp.F90 nu_top): del2
+    # viscosity [m2/s] x (4, 2, 1) on vor, div and T of the top three levels.
+    # 0.0 = off (bit-identical).  (appended after vertical_form: positional ABI)
+    spectral_sponge_nu_top_m2s: float = 0.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -4356,6 +4360,20 @@ class ExperimentConfig(NamedTuple):
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
         _vert_adv_options = ("upwind", "van_leer", "sb")
+        _snu = d.spectral_sponge_nu_top_m2s
+        if not (isinstance(_snu, (int, float)) and not isinstance(_snu, bool)
+                and math.isfinite(_snu) and _snu >= 0.0):
+            errors.append(
+                f"dycore.spectral_sponge_nu_top_m2s must be a finite number >= 0 (got {_snu!r})")
+        elif _snu > 0 and (d.discretization != "spectral" or d.model_type != "hydrostatic"):
+            errors.append(
+                "dycore.spectral_sponge_nu_top_m2s is wired into the hydrostatic spectral "
+                "dycore only; it would be silently inert here.")
+        elif _snu > 0 and not (d.column_lane and d.energy_fixer):
+            errors.append(
+                "dycore.spectral_sponge_nu_top_m2s needs dycore.column_lane and "
+                "dycore.energy_fixer: only the column-lane ssp_rk54 step returns the "
+                "sponge's energy loss (global energy fixer); legacy/leapfrog steps do not.")
         _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
         if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
             errors.append(
