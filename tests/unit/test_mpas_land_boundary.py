@@ -1440,3 +1440,116 @@ def test_ice_split_changes_sensible_heat_under_the_production_law(
                                    rtol=1e-10, atol=0, err_msg=k)
         assert not np.allclose(split[k], unsplit[k], rtol=1e-6), (
             f"{k}: the split changed nothing (vacuous)")
+
+
+# ---------------------------------------------------------------------------
+# land_prescribed_ice_sheet_bulk_sensible: bulk sensible heat on a static
+# share of the land fraction, the handed-over flux on the rest
+# ---------------------------------------------------------------------------
+def _bulk_weight_runs(mpas_mesh, sigma_coord, state64, w):
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.asarray(np.linspace(0.2, 1.0, ncell))
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    f = _land_forcing(ncell, shflx=-25.0, lhflx=2.0)     # ice-sheet-like
+    run = lambda g: _fluxes(fn(state64, mpas_mesh, sigma_coord, forcing=g))[0]  # noqa: E731
+    lh_only = {k: v for k, v in f.items() if k != "shflx_land"}   # "ts_lh"
+    return run(f), run(lh_only), run(dict(f, shflx_land_bulk_weight=w)), f_land
+
+
+def test_ice_sheet_bulk_weight_limits_and_blend(mpas_mesh, sigma_coord, state64):
+    """Weight 0 = the file's flux everywhere; weight 1 = the bulk sensible
+    heat of the latent-only ("ts_lh") handoff; in between, the weighted sum.
+    Latent heat and water are untouched.  Sign: positive upward throughout."""
+    ncell = state64.T.data.shape[0]
+    for wval in (0.0, 1.0):
+        presc, bulk, got, _ = _bulk_weight_runs(
+            mpas_mesh, sigma_coord, state64, jnp.full((ncell,), wval))
+        want = bulk if wval == 1.0 else presc
+        for k in ("shflx_sfc", "lhflx_sfc", "evap_sfc"):
+            np.testing.assert_allclose(got[k], want[k], rtol=1e-12, atol=1e-14)
+    # The two limits differ (300 K skin under 290 K air: bulk flux is upward,
+    # the handed flux is -25 W/m2), so the weight is not inert.
+    assert (bulk["shflx_sfc"] - presc["shflx_sfc"] > 1.0).all()
+    w = jnp.asarray(np.linspace(0.0, 1.0, ncell))
+    presc, bulk, got, _ = _bulk_weight_runs(mpas_mesh, sigma_coord, state64, w)
+    np.testing.assert_allclose(
+        got["shflx_sfc"],
+        np.asarray(w) * bulk["shflx_sfc"] + (1 - np.asarray(w)) * presc["shflx_sfc"],
+        rtol=1e-12, atol=1e-12)
+
+
+def test_ice_sheet_bulk_weight_refused_without_land_sensible_heat(
+        mpas_mesh, sigma_coord, state64):
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.full((ncell,), 0.5)
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    w = jnp.ones((ncell,))
+    f = _land_forcing(ncell, shflx=-25.0, lhflx=2.0)
+    lh_only = {k: v for k, v in f.items() if k != "shflx_land"}
+    for g in (dict(lh_only, shflx_land_bulk_weight=w),
+              {"T_sfc": jnp.full((ncell,), 300.0), "shflx_land_bulk_weight": w}):
+        with pytest.raises(ValueError, match="shflx_land_bulk_weight"):
+            fn(state64, mpas_mesh, sigma_coord, forcing=g)
+
+
+def test_ice_sheet_bulk_weight_gradient(mpas_mesh, sigma_coord, state64):
+    """The surface sensible heat is differentiable in the handed flux and in
+    the lowest-level air through the bulk share (finite, non-zero)."""
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.full((ncell,), 1.0)
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    f = dict(_land_forcing(ncell, shflx=-25.0, lhflx=2.0),
+             shflx_land_bulk_weight=jnp.full((ncell,), 0.5))
+
+    def loss(T_skin, sh):
+        out = fn(state64, mpas_mesh, sigma_coord,
+                 forcing=dict(f, T_sfc=T_skin, shflx_land=sh))
+        out = out[0] if isinstance(out, tuple) else out
+        return jnp.sum(out.shflx_sfc.data)
+
+    args = (jnp.full((ncell,), 300.0), jnp.full((ncell,), -25.0))
+    g = jax.grad(loss, argnums=(0, 1))(*args)
+    assert all(np.isfinite(np.asarray(x)).all() for x in g)
+    assert (np.asarray(g[0]) > 0.0).all()                 # warmer skin, more upward heat
+    np.testing.assert_allclose(np.asarray(g[1]), 0.5, rtol=1e-10)
+    check_grads(loss, args, order=1, modes=["rev"], rtol=1e-5)
+
+
+def _ice_sheet_cfg(**kw):
+    kw.setdefault("radiation", "rrtmg")
+    kw.setdefault("turbulence", "clubb")
+    kw.setdefault("land_prescribed_flux_file", "land_fluxes.nc")
+    kw.setdefault("land_prescribed_channels", "ts_fluxes")
+    kw.setdefault("surfdata_path", "surfdata.nc")
+    kw.setdefault("ocean_flux_on_ocean_surface", False)
+    kw.setdefault("land_prescribed_ice_sheet_bulk_sensible", True)
+    return _mpas_cfg(**kw)
+
+
+def test_ice_sheet_bulk_flag_default_off_and_accepted_where_live():
+    from legoesm.driver.config import (
+        ExperimentConfig, ice_sheet_bulk_sensible_ineligible_reason)
+    assert ExperimentConfig().land_prescribed_ice_sheet_bulk_sensible is False
+    cfg = _ice_sheet_cfg()
+    assert ice_sheet_bulk_sensible_ineligible_reason(cfg) == ""
+    assert "land_prescribed_ice_sheet_bulk_sensible" not in "\n".join(
+        _strict_errors(cfg))
+
+
+@pytest.mark.parametrize("kw,why", [
+    (dict(land_prescribed_flux_file=""), "not prescribed"),
+    (dict(land_prescribed_channels="ts_lh"), "not prescribed"),
+    (dict(surfdata_path=""), "surfdata_path"),
+    (dict(ocean_flux_on_ocean_surface=True), "ocean_flux_on_ocean_surface"),
+])
+def test_ice_sheet_bulk_flag_refused_where_inert(kw, why):
+    from legoesm.driver.config import ice_sheet_bulk_sensible_ineligible_reason
+    bad = _ice_sheet_cfg(**kw)
+    assert why in ice_sheet_bulk_sensible_ineligible_reason(bad)
+    assert "land_prescribed_ice_sheet_bulk_sensible" in "\n".join(
+        _strict_errors(bad))
+    assert "land_prescribed_ice_sheet_bulk_sensible" not in "\n".join(
+        _strict_errors(bad._replace(land_prescribed_ice_sheet_bulk_sensible=False)))

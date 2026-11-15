@@ -1339,6 +1339,19 @@ def _make_mpas_turbulence(
             # which over land carries the prescribed skin temperature.
             _sh_land = (_sh if _lhf_only else jnp.where(
                 _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0))
+            # ``forcing["shflx_land_bulk_weight"]`` (static, [0, 1] per cell;
+            # land_prescribed_ice_sheet_bulk_sensible): the share of the land
+            # fraction whose sensible heat is the bulk value above instead of
+            # the handed-over flux.  Sign: positive upward, both terms.
+            _w_bulk = forcing.get("shflx_land_bulk_weight")
+            if _w_bulk is not None:
+                if _lhf_only:
+                    raise ValueError(
+                        "forcing['shflx_land_bulk_weight'] replaces a handed-"
+                        "over land sensible heat (forcing['shflx_land']); "
+                        "without one it would be ignored.")
+                _w_bulk = jnp.asarray(_w_bulk, dtype=q_sfc.dtype).reshape(nCells)
+                _sh_land = _w_bulk * _sh + (1.0 - _w_bulk) * _sh_land
             _surface_flux = (
                 _tx, _ty,
                 (1.0 - _fl) * _sh + _fl * _sh_land,
@@ -1384,6 +1397,11 @@ def _make_mpas_turbulence(
                 "(sea_ice_flux_split) are only consumed together with the "
                 "land's own heat fluxes (forcing['shflx_land'] or "
                 "['lhflx_land']); without them they would be ignored.")
+        elif forcing is not None and forcing.get("shflx_land_bulk_weight") is not None:
+            raise ValueError(
+                "forcing['shflx_land_bulk_weight'] is only consumed together "
+                "with the land's own sensible heat (forcing['shflx_land']); "
+                "without it it would be ignored.")
         elif forcing is not None and forcing.get("taumag_land") is not None:
             raise ValueError(
                 "forcing['taumag_land'] (land-model surface stress) is only "

@@ -5171,6 +5171,21 @@ class ModelDriver:
                 _rebuilt = _rebuilt._replace(**_carry)
         return _rebuilt
 
+    def _surfdata_glacier_mask(self, surfdata_path: str):
+        """(ncol,) 1.0 on glacier-dominant columns of the surface data
+        regridded to ``self.grid`` (land.boundary_data.glacier_mask), else 0."""
+        from legoesm.land.config import LandConfig
+        from legoesm.land.boundary_data import (
+            glacier_mask, init_land_surface_data)
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        _start_year = getattr(self.config, "start_year", None)
+        _, _, gsd = init_land_surface_data(
+            surfdata_path, self._surface_data_grid(),
+            LandConfig(surface_scheme=SimpleSEBConfig()),
+            float(self.config.start_day),
+            year=None if _start_year is None else float(_start_year))
+        return jnp.asarray(glacier_mask(gsd).astype(np.float64))
+
     def _surfdata_land_albedo(self, surfdata_path: str, lat_albedo):
         """Static land albedo field from harmonized surface data.
 
@@ -13419,6 +13434,20 @@ class ModelDriver:
                  "ts_fluxes": " and the file's sensible/latent fluxes"}[_land_presc_mode],
                 "; albedo from the file" if self._land_presc.albedo is not None
                 else "; albedo static")
+        # Ice sheets under prescribed fluxes: bulk sensible heat on the
+        # glacier-dominant columns (static mask from the surface data).
+        _ice_sheet_bulk_w = None
+        if bool(getattr(cfg, "land_prescribed_ice_sheet_bulk_sensible", False)):
+            if not _land_presc_sh:
+                raise ValueError(
+                    "land_prescribed_ice_sheet_bulk_sensible needs prescribed "
+                    "land with channels 'ts_fluxes'.")
+            _ice_sheet_bulk_w = self._surfdata_glacier_mask(
+                str(cfg.surfdata_path)).astype(self.state.p_s.data.dtype)
+            logger.info(
+                "  Prescribed land: bulk sensible heat on %d glacier-dominant "
+                "cells of this rank (file's flux elsewhere)",
+                int(np.asarray(_ice_sheet_bulk_w).sum()))
         _land_lapse_K_m = (
             float(getattr(cfg, "land_lapse_K_per_km", 0.0)) * 1.0e-3)
         _f_land_cells = None
@@ -15965,6 +15994,8 @@ class ModelDriver:
                 # The land's OWN turbulent fluxes -- the actual coupling.
                 if _land_shflx_cells is not None:
                     _forcing["shflx_land"] = _land_shflx_cells
+                    if _ice_sheet_bulk_w is not None:
+                        _forcing["shflx_land_bulk_weight"] = _ice_sheet_bulk_w
                 if _land_lhflx_cells is not None:
                     # Latent heat alone (prescribed-land "ts_lh"): the
                     # turbulence then keeps its bulk sensible heat over land.

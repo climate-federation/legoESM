@@ -2309,6 +2309,15 @@ class ExperimentConfig(NamedTuple):
     # charges the open water's heat loss to the ice).  The atmosphere receives
     # the cover-weighted sum.  Checked by sea_ice_flux_split_eligibility.
     sea_ice_flux_split: bool = False
+    # Prescribed land, "ts_fluxes" mode only: over glacier-dominant columns
+    # (land.boundary_data.glacier_mask of surfdata_path: Antarctica, Greenland)
+    # the SENSIBLE heat is the bulk value against the prescribed skin
+    # temperature (as in "ts_lh") instead of the file's flux.  Elsewhere the
+    # file's flux is kept.  Why: the file's downward flux over the ice sheets
+    # (~-25 W/m2) is taken from the lowest air whatever its temperature
+    # (measured: 2 m air 5-6 K too cold over Antarctica, surface 4 K warmer
+    # than the air; ERA5 has the air 1.5 K warmer).  Static mask.
+    land_prescribed_ice_sheet_bulk_sensible: bool = False
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -5250,6 +5259,13 @@ class ExperimentConfig(NamedTuple):
                     "non-land fraction's surface fluxes from the land's, but "
                     f"{_why}. Leave it unset (auto) or false.")
 
+        if self.land_prescribed_ice_sheet_bulk_sensible:
+            _why = ice_sheet_bulk_sensible_ineligible_reason(self)
+            if _why:
+                errors.append(
+                    "land_prescribed_ice_sheet_bulk_sensible=True computes the "
+                    f"sensible heat over the ice sheets, but {_why}.")
+
         if self.sea_ice_flux_split:
             _ok, _why = sea_ice_flux_split_eligibility(self)
             if not _ok:
@@ -6054,6 +6070,22 @@ def ocean_flux_surface_eligibility(cfg) -> tuple[bool, str]:
                        "eligible); otherwise the ocean-surface stress covers "
                        "the land too")
     return True, ""
+
+
+def ice_sheet_bulk_sensible_ineligible_reason(cfg) -> str:
+    """Why ``land_prescribed_ice_sheet_bulk_sensible=True`` would be inert or
+    wrong in ``cfg`` ("" = live): it replaces the FILE's sensible heat, needs
+    the glacier map, and its bulk value must be taken against the land skin."""
+    if not (bool(cfg.land_prescribed_flux_file)
+            and cfg.land_prescribed_channels == "ts_fluxes"):
+        return ("the land sensible heat is not prescribed "
+                "(needs land_prescribed_flux_file with channels 'ts_fluxes')")
+    if not cfg.surfdata_path:
+        return "surfdata_path is empty (the glacier map comes from it)"
+    if resolve_ocean_flux_on_ocean_surface(cfg):
+        return ("ocean_flux_on_ocean_surface is on: the bulk sensible heat "
+                "is then evaluated on the ocean/ice surface, not the land skin")
+    return ""
 
 
 def sea_ice_flux_split_eligibility(cfg) -> tuple[bool, str]:

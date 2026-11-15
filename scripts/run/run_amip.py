@@ -2509,6 +2509,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "cold condensate to cloud ice). Fixes the "
                              "TTL ice-supersaturation vapour bias. Requires "
                              "--hard-saturation-adjustment.")
+    parser.add_argument("--land-prescribed-ice-sheet-bulk-sensible",
+                        action=_BoolOneSpelling, default=False,
+                        dest="land_prescribed_ice_sheet_bulk_sensible",
+                        help="Prescribed land, channels ts_fluxes: over "
+                             "glacier-dominant columns of the surface data "
+                             "(Antarctica, Greenland) use the bulk sensible "
+                             "heat against the prescribed skin temperature "
+                             "instead of the file's flux. Default off.")
     parser.add_argument("--sea-ice-flux-split",
                         action=_BoolOneSpelling, default=False,
                         dest="sea_ice_flux_split",
@@ -3357,6 +3365,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             else _EXPERIMENT_DEFAULTS.mcfarlane_effgw_oro),
         ice_skin_prognostic=args.ice_skin_prognostic,
         sea_ice_flux_split=bool(args.sea_ice_flux_split),
+        land_prescribed_ice_sheet_bulk_sensible=bool(
+            args.land_prescribed_ice_sheet_bulk_sensible),
         ice_thickness_m=(
             args.ice_thickness_m
             if args.ice_thickness_m is not None

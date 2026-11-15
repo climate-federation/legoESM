@@ -6307,3 +6307,16 @@ def test_mpas_ps_hyperdiff_scale_reaches_the_dycore_and_only_surface_pressure():
     assert off.nu_del4_ps == 0.0 and off.nu_del4 == nu4
     assert half.nu_del4_ps == pytest.approx(0.5 * nu4, rel=1e-12)
     assert half.nu_del4 == nu4
+
+
+def test_land_prescribed_ice_sheet_bulk_sensible_flag_flows_to_config():
+    """--land-prescribed-ice-sheet-bulk-sensible round-trip; unset = off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_prescribed_ice_sheet_bulk_sensible is False
+    for flag, want in (("--land-prescribed-ice-sheet-bulk-sensible", True),
+                       ("--no-land-prescribed-ice-sheet-bulk-sensible", False)):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", flag]), parser))
+        assert cfg.land_prescribed_ice_sheet_bulk_sensible is want
