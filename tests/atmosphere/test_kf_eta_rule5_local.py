@@ -18,6 +18,8 @@ Smoothed here, each by one ``KFSmoothing`` width (0 = the oracle):
 * PR 4/7, updraft level-local switches: E3, D1, D3, E4, E5, D4, E7, E8, D7g,
   E6, E9 (``KFSmoothing`` docstring).  Cloud top LTOP, LET, the A4 test and
   the D7f PROF5 endpoint overrides stay hard.
+* PR 5a/7, cloud top by survival weights: ``top_stop_wtw_width_m2s2`` and
+  ``top_stop_umf_width_kgs`` (C-LTOPs, C-LETs; the D4 weights are quintic).
 
 The three tests per switch: the hard limit is the oracle (the oracle suite in
 test_kain_fritsch_oracle.py runs ``KF_HARD``); the per-case gap at the default,
@@ -48,6 +50,7 @@ import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
 from legoesm.atmosphere.physics.convection import _kf_eta as kfe  # noqa: E402
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig  # noqa: E402
+from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection  # noqa: E402
 from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import _lego_constants  # noqa: E402
 
 from legoesm import constants  # noqa: E402
@@ -55,8 +58,10 @@ from tests.atmosphere.test_kain_fritsch_oracle import (  # noqa: E402
     _FIX,
     _OUT,
     _arms,
+    _WRF_DEFAULT,
     _consts,
     _run_core,
+    _wrapper_inputs,
 )
 
 _GAPS = Path(__file__).parent / "oracle_fixtures" / "kf_eta_rule5_gaps.json"
@@ -117,6 +122,17 @@ def _provenance():
                 generated_at_commit=sha, metric="max over levels of |port - WRF oracle|")
 
 
+@pytest.fixture(autouse=True)
+def _clear_jax_caches():
+    """Drop compiled code after each test.  Every case compiles fresh KF graphs
+    whose code stays mapped; one process climbed ~16k memory maps per gap case
+    to the kernel's vm.max_map_count (65530) and LLVM then failed ("Cannot
+    allocate memory"), failing and aborting the rest of the file.  Same
+    mitigation as tests/land/conftest.py."""
+    yield
+    jax.clear_caches()
+
+
 @pytest.fixture(scope="module")
 def fix():
     return dict(np.load(_FIX))
@@ -156,7 +172,7 @@ def test_default_gap_per_case_matches_record(fix, stored, case):
 _UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_width_kgkg",
                 "q0_floor_width_kgkg", "l5_gather_width_pa", "wklcl_cap_width_m",
                 "dtlcl_onset_width_ms", "entrain_tiny_width_k", "eqf_clip_width",
-                "chmin_clip_width_k"}
+                "chmin_clip_width_k", "top_stop_wtw_width_m2s2", "top_stop_umf_width_kgs"}
 
 
 def _moved(stored, case):
@@ -565,9 +581,293 @@ def test_chmin_and_rad_clamps_hit_the_oracle_ends():
             kfe._clip_c1(t, kfe._CHMIN_TCOLD_K, kfe._CHMIN_TWARM_K, 0.0))
 
 
+# --- soft cloud top, survival weights (PR 5a) -------------------------------------
+
+def _oracle_top_block(j, t, f):
+    """NumPy transcription of the oracle's cloud-top block (l.1421-1475) for
+    LET = j, LTOP = t on plume arrays ``f`` (dict of 1-based padded arrays)."""
+    umf, uer, udr = f["UMF"].copy(), f["UER"].copy(), f["UDR"].copy()
+    detlq, detic = f["DETLQ"].copy(), f["DETIC"].copy()
+    pl, pi_ = f["PPTLIQ"].copy(), f["PPTICE"].copy()
+    if j == t:
+        udr_t = umf[t] + udr[t] - uer[t]
+        rat = f["UPN"][t - 1] / f["UPO"][t - 1]
+        udr[t], detlq[t], detic[t] = udr_t, f["QLIQ"][t] * udr_t * rat, f["QICE"][t] * udr_t * rat
+        uer[t], umf[t] = 0.0, 0.0
+    elif j < t:
+        dumfdp = umf[j] / f["DP"][j + 1:t + 1].sum()
+        for k in range(j + 1, t + 1):
+            un = umf[k - 1] - f["DP"][k] * dumfdp
+            ue = un * (1.0 - 1.0 / f["DILFRC"][k])
+            ud = umf[k - 1] - un + ue
+            if k == t:
+                ud, ue, un = umf[k - 1], 0.0, umf[k]
+            if k >= j + 2:
+                pl[k], pi_[k] = umf[k - 1] * f["QLQOUT"][k], umf[k - 1] * f["QICOUT"][k]
+            umf[k], uer[k], udr[k] = un, ue, ud
+            detlq[k] = ud * f["QLIQ"][k] * f["DILFRC"][k]
+            detic[k] = ud * f["QICE"][k] * f["DILFRC"][k]
+    out = [umf, uer, udr, detlq, detic, pl, pi_]
+    for x in out:
+        x[t + 1:] = 0.0
+    return out
+
+
+def _plume(n=10, seed=7):
+    rng = np.random.default_rng(seed)
+    f = {k: 0.5 + rng.random(n + 2) for k in
+         ("UMF", "UER", "UDR", "DETLQ", "DETIC", "PPTLIQ", "PPTICE", "QLIQ", "QICE",
+          "QLQOUT", "QICOUT", "UPO", "UPN")}
+    f["DILFRC"] = 1.0 + 0.3 * rng.random(n + 2)
+    f["DP"] = 2000.0 + 3000.0 * rng.random(n + 2)
+    return f
+
+
+def _expect(W, f, kk):
+    return kfe._expected_top_profile(
+        jnp.asarray(W), *(jnp.asarray(f[k]) for k in (
+            "UMF", "UER", "UDR", "DETLQ", "DETIC", "PPTLIQ", "PPTICE", "QLIQ", "QICE",
+            "DILFRC", "QLQOUT", "QICOUT", "UPO", "UPN", "DP")), kk)
+
+
+def test_expected_top_profile_one_hot_is_the_oracle_block():
+    f, n = _plume(), 10
+    kk = jnp.arange(n + 2)
+    for j, t in ((4, 4), (3, 7), (6, 7), (2, 9), (5, 10), (8, 5)):
+        W = np.zeros((n + 2, n + 2))
+        W[j, t] = 1.0
+        got = _expect(W, f, kk)
+        want = _oracle_top_block(min(j, t), t, f)
+        for g, w_ in zip(got, want):
+            np.testing.assert_allclose(np.asarray(g), w_, rtol=1e-13, atol=1e-14, err_msg=f"{j},{t}")
+
+
+def test_expected_top_profile_is_linear_in_weights_and_c2():
+    f, n = _plume(), 10
+    kk = jnp.arange(n + 2)
+    rng = np.random.default_rng(1)
+    W = rng.random((n + 2, n + 2))
+    W[[0, n + 1], :] = 0.0
+    W[:, [0, n + 1]] = 0.0
+    W /= W.sum()
+    got = _expect(W, f, kk)
+    want = [sum(W[j, t] * np.asarray(_oracle_top_block(min(j, t), t, f)[i])
+                for j in range(n + 2) for t in range(1, n + 1)) for i in range(7)]
+    for g, w_ in zip(got, want):
+        np.testing.assert_allclose(np.asarray(g)[1:n + 1], np.asarray(w_)[1:n + 1], rtol=1e-12)
+    check_grads(lambda w, u: _expect_w(w, u, f, kk), (jnp.asarray(W), jnp.asarray(f["UMF"])),
+                order=2, modes=("fwd", "rev"), eps=1e-4)
+
+
+def _expect_w(W, umf, f, kk):
+    g = dict(f, UMF=umf)
+    return jnp.sum(jnp.stack(_expect(W, {k: v for k, v in g.items()}, kk)) ** 2)
+
+
+def _weights(seed=3, n=12, K=3, wc=None):
+    rng = np.random.default_rng(seed)
+    kk = jnp.arange(n + 2)
+    h1, h2 = 0.2 * rng.random(n + 2), 0.1 * rng.random(n + 2)
+    s, E1, E2 = 1.0, np.zeros(n + 2), np.zeros(n + 2)
+    for k in range(K, n):
+        E1[k], E2[k] = s * h1[k], s * (1 - h1[k]) * h2[k]
+        s *= (1 - h1[k]) * (1 - h2[k])
+    CW = rng.random(n + 2) if wc is None else wc
+    return kk, jnp.asarray(E1), jnp.asarray(E2), s, jnp.asarray(CW), K, n
+
+
+def test_top_weights_sum_to_p_convecting_and_reduce_to_the_oracle_let():
+    kk, E1, E2, s, CW, K, n = _weights()
+    W = kfe._top_weights(E1, E2, s, CW, kk, K, K + 1, n, K)
+    # tops at or below LCL = K + 1 are no-convection members: zero weight
+    p_conv = 1.0 - float(jnp.sum((E1 + E2)[K:K + 2]))
+    np.testing.assert_allclose(float(jnp.sum(W)), p_conv, rtol=1e-13)
+    assert float(jnp.min(W)) >= 0.0 and p_conv < 1.0
+    # a mixed layer above LCL: tops at or below KPBL and LETs below KPBL - 1
+    # are rejected as well (the oracle's no-convection test, per member)
+    Wp = np.asarray(kfe._top_weights(E1, E2, s, CW, kk, K, K + 1, n, K + 3))
+    assert not Wp[:, :K + 4].any() and not Wp[:K + 3, :].any()
+    np.testing.assert_array_equal(Wp[K + 3:, K + 4:], np.asarray(W)[K + 3:, K + 4:])
+    # the shallow LET override keeps the rejected members out
+    e1 = np.zeros(n + 2)
+    e1[9], e1[12] = 0.25, 0.75
+    cw = np.ones(n + 2)
+    cw[10] = 0.0
+    args = (jnp.asarray(e1), E1 * 0, 0.0, jnp.asarray(cw), kk, K, K + 1, n, K + 3)
+    Wn, Ws = kfe._top_weights(*args), kfe._top_weights(*args, let_fixed=K + 3)
+    np.testing.assert_allclose([float(jnp.sum(Wn)), float(jnp.sum(Ws))], [0.75, 0.75], rtol=1e-15)
+    # hard cold flags: LET given a stop1 top t is the last non-cold level <= t
+    cold = np.array([0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0], float)
+    E1h = np.zeros(n + 2)
+    E1h[8] = 1.0
+    W = np.asarray(kfe._top_weights(jnp.asarray(E1h), E1 * 0, 0.0, jnp.asarray(cold), kk,
+                                    K, K + 1, n, K))
+    assert W[5, 8] == 1.0 and W.sum() == 1.0  # levels 6-8 cold: LET = 5
+    W = np.asarray(kfe._top_weights(jnp.asarray(E1h), E1 * 0, 0.0, jnp.asarray(cold * 0 + 1),
+                                    kk, K, K + 1, n, K))
+    assert W[K + 1, 8] == 1.0  # all cold: the initial LET = LCL
+    E2h = np.zeros(n + 2)
+    E2h[7] = 1.0
+    W = np.asarray(kfe._top_weights(E1 * 0, jnp.asarray(E2h), 0.0, jnp.asarray(cold), kk,
+                                    K, K + 1, n, K))
+    assert W[7, 7] == 1.0  # stop2 puts LET at the top
+    # exhaustion: the residual survival tops out at KX
+    W = np.asarray(kfe._top_weights(E1 * 0, E1 * 0, 1.0, jnp.asarray(cold), kk, K, K + 1, n, K))
+    assert W[:, n].sum() == 1.0
+    check_grads(lambda e, c: kfe._top_weights(e, E2, s, c, kk, K, K + 1, n, K), (E1, CW),
+                order=2, modes=("fwd", "rev"), eps=1e-4)
+
+
+def test_deep_test_abe_counts_only_accepted_members():
+    """75% of the plume exits at a rejected top after increments 2 and 8; the
+    accepted quarter tops out at 12: its ABE is 10, not the 16 that
+    survival weighting over all members would give after normalising."""
+    dabe = jnp.zeros(14).at[4].set(2.0).at[5].set(8.0)
+    ptop = jnp.zeros(14).at[12].set(0.25)
+    np.testing.assert_allclose(float(kfe._conv_abe(dabe, ptop)) / 0.25, 10.0, rtol=1e-15)
+    ptop = ptop.at[5].set(0.5)  # a member topping at 5 keeps only the level-4 increment
+    np.testing.assert_allclose(float(kfe._conv_abe(dabe, ptop)), 0.25 * 10.0 + 0.5 * 2.0, rtol=1e-15)
+
+
+def test_cont_floor_is_identity_above_5_and_c2():
+    x = jnp.linspace(5.0, 40.0, 50)
+    np.testing.assert_array_equal(kfe._cont_floor(x), x)
+    assert float(jnp.min(kfe._cont_floor(jnp.linspace(-10.0, 5.0, 301)))) >= 1.0
+    check_grads(kfe._cont_floor, (3.0,), order=2, modes=("fwd", "rev"), eps=1e-4)
+
+
+def test_updraft_mass_closes_with_a_rejected_top(monkeypatch):
+    """Three quarters of the exit mass on a cloud top at the source level K
+    (no fixture column reaches it; the oracle's no-convection test rejects
+    it) carry no flux and draw no source air, while the accepted quarter
+    still convects: updraft entrainment and detrainment integrate to the same
+    mass, and the column's water closes.
+    (No fixture or sweep column has KPBL above LCL, so the KPBL rejection is
+    covered by the weights unit test only.)"""
+    top_weights = kfe._top_weights
+
+    def with_top_at_k(E1, E2, s_ex, CW, kk, K, LCL, KX, KPBL, let_fixed=None):
+        E1 = 0.25 * E1 + 0.75 * (kk == K)
+        return top_weights(E1, 0.25 * E2, 0.25 * s_ex, CW, kk, K, LCL, KX, KPBL, let_fixed)
+
+    monkeypatch.setattr(kfe, "_top_weights", with_top_at_k)
+    fx = dict(np.load(_FIX))
+    i = 90
+    cs, trig, warm, fqi, fqs = fx["sweep_combos"][fx["sweep_combo"][i]]
+    a = [jnp.asarray(fx[f"sweep_{k}"][i])[None] for k in ("u", "v", "T", "q", "p", "dz", "w", "rhoe")]
+    o = kfe.kf_eta_para(*a, dt=fx["sweep_dt"][i], dx=fx["sweep_dx"][i], constants=_consts(fx, cs),
+                        trigger=int(trig), warm_rain=warm == "1", f_qi=fqi == "1", f_qs=fqs == "1",
+                        cudt=float(fx["cudt"]),
+                        smoothing=_DEFAULT._replace(top_stop_umf_width_kgs=2.000001))
+    assert bool(o["fired"][0])
+    uer, udr = np.asarray(o["uer"][0]), np.asarray(o["udr"][0])
+    assert abs(uer.sum() - udr.sum()) <= 1e-12 * uer.sum()
+    der, ddr = np.asarray(o["der"][0]), np.asarray(o["ddr"][0])
+    assert np.abs(der).sum() > 0.0
+    assert abs(der.sum() + ddr.sum()) <= 1e-12 * np.abs(der).sum()
+    _, x = _wrapper_inputs(fx, "L_nat_w0")
+    out, _ = kain_fritsch_convection(
+        **x, config=_WRF_DEFAULT._replace(wrf_top_stop_umf_width_kgs=2.000001))
+    dp = fx["p_half"][:, 1:] - fx["p_half"][:, :-1]
+    tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt)
+           + np.asarray(out.dq_r_conv_dt)) * dp / constants.g
+    scale = np.sum(np.abs(np.asarray(out.dq_v_dt)) * dp / constants.g, axis=1)
+    f = fx["L_nat_w0_fired"] == 1
+    assert np.all(np.asarray(out.convective_mask)[f] == 1.0)
+    assert np.all(np.abs(tot.sum(axis=1))[f] <= 1.0e-9 * scale[f])
+
+
+def _sweep_column(fx, i, T=None, smoothing=_DEFAULT, dtype=jnp.float64):
+    cs, trig, warm, fqi, fqs = fx["sweep_combos"][fx["sweep_combo"][i]]
+    a = [jnp.asarray(fx[f"sweep_{k}"][i], dtype)[None]
+         for k in ("u", "v", "T", "q", "p", "dz", "w", "rhoe")]
+    if T is not None:
+        a[2] = T
+    return kfe.kf_eta_para(*a, dt=fx["sweep_dt"][i], dx=fx["sweep_dx"][i], constants=_consts(fx, cs),
+                           trigger=int(trig), warm_rain=warm == "1", f_qi=fqi == "1",
+                           f_qs=fqs == "1", cudt=float(fx["cudt"]), smoothing=smoothing), a[2]
+
+
+def _split_weights(monkeypatch, share):
+    top_weights = kfe._top_weights
+
+    def split(E1, E2, s_ex, CW, kk, K, LCL, KX, KPBL, let_fixed=None):
+        W = top_weights(E1, E2, s_ex, CW, kk, K, LCL, KX, KPBL, let_fixed)
+        m = jnp.maximum(LCL, KPBL)
+        low = (kk == m + 1)[:, None] * jnp.sum(W, axis=0)[None, :]
+        return (1.0 - share) * W + share * jnp.where(kk[None, :] > m, low, 0.0)
+
+    monkeypatch.setattr(kfe, "_top_weights", split)
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+def test_downdraft_mixture_gradient_is_finite_for_a_tiny_share(monkeypatch, dtype):
+    """A LET member carrying 1e-20 of the weight (its own downdraft source
+    level) keeps the temperature gradient finite."""
+    fx = dict(np.load(_FIX))
+    _split_weights(monkeypatch, 1e-20)
+    sm = _DEFAULT._replace(top_stop_umf_width_kgs=2.0000011)
+    _, T = _sweep_column(fx, 90, smoothing=sm, dtype=dtype)
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, 90, T, sm, dtype)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_downdraft_mixes_over_the_source_levels_of_the_let_members(monkeypatch):
+    """Half of each top's weight moved to the lowest accepted LET puts those
+    members' downdraft source one level below it, under the column's own LFS
+    (a downdraft deep enough to run): the downdraft is the mixture of both
+    runs (its normalised profile changes shape, not only amplitude), its mass
+    closes, the column's water closes, and the temperature gradient stays
+    finite.  The base run's width differs by 2e-7 kg/s only to get its own
+    trace; the top widths move no fixture case (1.6e-15)."""
+    fx = dict(np.load(_FIX))
+    base, _ = _sweep_column(fx, 90, smoothing=_DEFAULT._replace(top_stop_umf_width_kgs=2.0000007))
+    _split_weights(monkeypatch, 0.5)
+    sm = _DEFAULT._replace(top_stop_umf_width_kgs=2.0000009)
+    o, T = _sweep_column(fx, 90, smoothing=sm)
+    assert bool(o["fired"][0])
+    der, ddr = np.asarray(o["der"][0]), np.asarray(o["ddr"][0])
+    assert abs(der.sum() + ddr.sum()) <= 1e-12 * np.abs(der).sum()
+    d0 = np.asarray(base["der"][0])
+    assert float(np.abs(der / der.sum() - d0 / d0.sum()).max()) > 1e-6
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, 90, T, sm)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g)))
+    _, x = _wrapper_inputs(fx, "L_nat_w0")
+    out, _ = kain_fritsch_convection(
+        **x, config=_WRF_DEFAULT._replace(wrf_top_stop_umf_width_kgs=2.0000009))
+    dp = fx["p_half"][:, 1:] - fx["p_half"][:, :-1]
+    tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt)
+           + np.asarray(out.dq_r_conv_dt)) * dp / constants.g
+    scale = np.sum(np.abs(np.asarray(out.dq_v_dt)) * dp / constants.g, axis=1)
+    f = fx["L_nat_w0_fired"] == 1
+    assert np.all(np.asarray(out.convective_mask)[f] == 1.0)
+    assert np.all(np.abs(tot.sum(axis=1))[f] <= 1.0e-9 * scale[f])
+
+
+def test_top_hazards_are_the_oracle_steps_at_zero_width_and_c2():
+    """Each cloud-top exit hazard is the oracle's strict step at width 0, one
+    half at the threshold, saturated outside its band, and C2 inside it."""
+    sm = _DEFAULT
+    for i, (thr, w) in enumerate(((1.0e-3, sm.top_stop_wtw_width_m2s2),
+                                  (10.0, sm.top_stop_umf_width_kgs))):
+        def h(x, s=sm, i=i):
+            args = (x, 50.0) if i == 0 else (1.0, x)
+            return kfe._top_hazards(*args, s)[i]
+        xs = jnp.array([thr - w, thr - 0.5 * w, thr, thr + 0.5 * w, thr + w])
+        np.testing.assert_allclose(np.asarray(h(xs)), [1.0, 1.0, 0.5, 0.0, 0.0], atol=1e-15)
+        np.testing.assert_array_equal(np.asarray(h(xs, kfe.KF_HARD)), [1.0, 1.0, 0.0, 0.0, 0.0])
+        hz = lambda z, h=h, thr=thr, w=w: h(thr + w * z)  # noqa: E731  (band units)
+        check_grads(hz, (0.2,), order=2, modes=("fwd", "rev"), eps=1e-5)
+        assert float(jax.grad(hz)(0.2)) < 0.0
+
+
 def test_widths_are_validated():
     with pytest.raises(ValueError, match="lut_knot_width"):
         kfe.validate_kf_smoothing(_DEFAULT._replace(lut_knot_width=1.5))
+    with pytest.raises(ValueError, match="top_stop_umf_width_kgs"):
+        kfe.validate_kf_smoothing(_DEFAULT._replace(top_stop_umf_width_kgs=10.5))
+    with pytest.raises(ValueError, match="top_stop_wtw_width_m2s2"):
+        kfe.validate_kf_smoothing(_DEFAULT._replace(top_stop_wtw_width_m2s2=2.5e-3))
     with pytest.raises(ValueError, match="prof5_width"):
         kfe.validate_kf_smoothing(_DEFAULT._replace(prof5_width=3.0))
     with pytest.raises(ValueError, match="entrain_tiny_width_k"):

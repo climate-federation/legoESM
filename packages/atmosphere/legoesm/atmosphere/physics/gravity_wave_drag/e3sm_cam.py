@@ -106,9 +106,25 @@ deliberate departures / version choices (canaries in
   ~1e-12 Pa at realistic heating, i.e. effectively nothing); the real
   offline ``mfcc`` lookup table (``newmfspectra*.nc``) is not vendored. Pass a
   real ``mfcc_table`` (``beres.use_stand_in_table=False``) for faithfulness.
-* **Smoothing.** The genuine Fortran kinks (critical level, saturation cap,
-  tendency limiters) are kept as-is — no extra sigmoids — plus a few defensive
-  clamps (e.g. ``mi>=0``) that bind only for pathological inputs (see below).
+* **Smoothing (RULE 5, #2241).** The critical-level sign test, the
+  ``min(taudmp, tausat)`` saturation cap, the tendency limiters (orographic
+  saturation, ``umcfac``, ``tndmax``), ``dscal = min(1, .)``, the diffusivity
+  ``max(dback, max over waves)`` and the orographic launch Froude cap are
+  smooth by default (``E3SMCAMConfig.softmin_sharpness`` = 50 for the p-norm
+  min/max, ``crit_level_sharpness`` = 100 s/m, ``crit_level_floor`` = 0;
+  Lindzen passes its own ``Fr_sharpness``/``crit_level_*``).  Sharpness 1e12
+  is E3SM's hard switch and matches the E3SM v3.0.1 oracle to <= 5e-14.
+  KNOWN DIFFERENCE at the defaults (measured 2026-11-12, per column, pinned
+  in ``test_gw_spec_e3sm_oracle.py``): spectral arms up to 3.4e-3 in du/dt,
+  4.7e-3 in the dT field and 9.0e-3 in a single flat column's dT (the p-norm
+  diffusivity max); the orographic member of the spectral suite up to 3.6e-2
+  du/dt, 2.1e-2 dT.  Kept hard: the
+  ``taumin``/``ubmc2mn`` floors, the static mountain-height gate and the
+  defensive clamps (e.g. ``mi>=0``) that bind only for pathological inputs
+  (see below).  The ``taumin`` zeroing leaves derivative kinks at the
+  default on the spectral arms (a wind-scale scan, 2026-11-12: setting
+  ``taumin = 0`` removes them, but then ``dscal`` divides by zero); one more
+  kink (background L36, column 0, s = 0.8229) is not attributed.
 
 Conservation (see ``__physics_contract__`` energy note): ``conserves=["none"]``
 as the static INTERSECTION over all selectable sources (a contract must hold
@@ -135,14 +151,12 @@ arrays have ``nlev+1`` points with index ``0`` the top interface and
 
 Differentiability notes
 -----------------------
-The E3SM solver is piecewise-smooth.  The kinks are the same ones the Fortran
-has — the critical-level test ``sign(u-c)`` changing between interfaces (a
-physical discontinuity), the ``min(taudmp, tausat)`` saturation cap, and the
-``min`` tendency limiters — plus a few defensive clamps (e.g. ``mi>=0``) that
-bind only for pathological inputs.  All are kept exactly (via ``jnp.where`` /
-``jnp.minimum`` / ``jnp.maximum``); their sub-gradients are correct on each
-side and the kinks are measure-zero, so ``jax.grad`` is well-defined almost
-everywhere and never NaN.  No hard Python control flow on traced values is
+At the hard limit the E3SM solver is piecewise-smooth with the Fortran's
+kinks — the critical-level test ``sign(u-c)`` changing between interfaces, the
+``min(taudmp, tausat)`` saturation cap, and the ``min`` tendency limiters —
+which the default smooths (above); the remaining hard selects and defensive
+clamps (e.g. ``mi>=0``) have correct sub-gradients on each side, so
+``jax.grad`` is well-defined almost everywhere and never NaN.  No hard Python control flow on traced values is
 used; both vertical sweeps are ``lax.scan``.
 
 The Beres (2004) convective source (``gw_convect.F90``) source-SPECTRUM table
@@ -375,8 +389,13 @@ def gw_oro_src(
     oro_min_h: float,
     oro_min_wind: float,
     oro_wind_ramp_width: float = 0.0,
+    froude_cap_sharpness: float | None = None,
 ):
     """McFarlane (1987) orographic source (single c=0 wave).
+
+    ``froude_cap_sharpness = p`` (RULE 5, #2241): the Froude cap
+    ``min(hdsp^2, fcrit2*(U/N)^2)`` becomes the p-norm smooth min (the
+    ``gw_drag_prof`` stress-cap form); ``None`` is E3SM's hard ``min``.
 
     ``oro_wind_ramp_width = w`` [m/s] (static Python float): ``0.0`` is E3SM's
     hard ``U > oro_min_wind`` launch gate (the stress jumps from tau(U) to 0);
@@ -422,9 +441,11 @@ def gw_oro_src(
     # McFarlane c=0 launch stress (gw_oro.F90).
     oroko2 = 0.5 * kwv
     sghmax = fcrit2 * (ubi_sfc / jnp.where(nsrc > 0.0, nsrc, 1.0)) ** 2
-    tauoro = (
-        oroko2 * jnp.minimum(hdsp ** 2, sghmax) * rsrc * nsrc * ubi_sfc
-    )
+    if froude_cap_sharpness is None:
+        h_eff_sq = jnp.minimum(hdsp ** 2, sghmax)
+    else:
+        h_eff_sq = pnorm_smooth_min(hdsp ** 2, sghmax, froude_cap_sharpness, 0.0)
+    tauoro = oroko2 * h_eff_sq * rsrc * nsrc * ubi_sfc
     active = (ubi_sfc > oro_min_wind) & (hdsp > oro_min_h)
     if oro_wind_ramp_width != 0.0:
         if not (math.isfinite(oro_wind_ramp_width) and oro_wind_ramp_width > 0.0):
@@ -1071,9 +1092,10 @@ def gw_drag_prof(
         (E3SM ``alpha(0:pver)``).  ``None`` -> uniform ``cfg.alpha_newtonian``
         at every interface (the default clean-oracle behaviour).
     softmin_sharpness, crit_level_sharpness, crit_level_floor : optional
-        Smoothing used by callers that carry their own sharpness fields
-        (``lindzen.py``): a p-norm smooth min (p = ``softmin_sharpness``) for
-        ``min(taudmp, tausat)``, and, in the form ``mcfarlane.py`` uses, a smooth XNOR of the two
+        Smoothing from the caller's sharpness fields (``lindzen.py``,
+        ``e3sm_cam_gwd``): a p-norm smooth min (p = ``softmin_sharpness``) for
+        ``min(taudmp, tausat)`` and for the tendency limiters (orographic
+        saturation, ``umcfac``, ``tndmax``; #2241), and, in the form ``mcfarlane.py`` uses, a smooth XNOR of the two
         ``(u - c) - crit_level_floor`` sign tests for the critical level.
         Each reduces to the E3SM hard switch at infinite sharpness (floor 0).
         ``None`` (default) = the exact E3SM kinks, unchanged.
@@ -1170,9 +1192,27 @@ def gw_drag_prof(
         dsat = (ubmc / ni_k) ** 2 * (
             effkwv * ubmc ** 2 / (rog * ti_k * ni_k) - alpha_k
         )
-        dscal = jnp.minimum(1.0, tau_below / (tausat + cfg.taumin))
-        d_waves = jnp.where(active, dscal * dsat, -jnp.inf)
-        d = jnp.maximum(cfg.dback, jnp.max(d_waves, axis=1, keepdims=True))
+        ratio = tau_below / (tausat + cfg.taumin)
+        if softmin_sharpness is None:
+            dscal = jnp.minimum(1.0, ratio)
+            d_waves = jnp.where(active, dscal * dsat, -jnp.inf)
+            d = jnp.maximum(cfg.dback, jnp.max(d_waves, axis=1, keepdims=True))
+        else:
+            # RULE 5 (#2241): the p-norm smooth min for dscal and the p-norm
+            # smooth max (dback^p + sum_waves x^p)^(1/p) over the positive
+            # parts x for d, scaled by the hard max so x^p cannot overflow
+            # (the scale cancels exactly).  Exact at p -> inf.
+            dscal = pnorm_smooth_min(ratio, jnp.ones_like(ratio), softmin_sharpness, 0.0)
+            x = jnp.where(active, jnp.maximum(dscal * dsat, 0.0), 0.0)
+            scale = jnp.maximum(cfg.dback, jnp.max(x, axis=1, keepdims=True))
+            ok = scale > 0.0
+            safe = jnp.where(ok, scale, 1.0)
+            # the power's argument is >= 1 where ok (the max term is 1); 1.0
+            # elsewhere keeps 0**(1/p) and its infinite derivative out of AD.
+            inner = jnp.where(ok, (cfg.dback / safe) ** softmin_sharpness
+                              + jnp.sum((x / safe) ** softmin_sharpness, axis=1, keepdims=True),
+                              1.0)
+            d = jnp.where(ok, safe * inner ** (1.0 / softmin_sharpness), 0.0)
 
         # stress this interface: min(taudmp, tausat).
         # E3SM: wrk = -2*mi*rog*t(k+1)*(piln(k+1)-piln(k)) where t(k+1) is the
@@ -1241,15 +1281,25 @@ def gw_drag_prof(
         ubtl_raw = gravit * (tau_below - tau_above) * rdpm[:, m][:, None]
 
         cmu = c_col - ubm_m[:, m][:, None]           # (ncol, nwav)
+        limits = [cfg.umcfac * jnp.abs(cmu) / dt, jnp.full_like(cmu, tndmax)]
         if is_oro:
-            ubtlsat = effkwv * jnp.abs(cmu) ** 3 / (
+            limits.insert(0, effkwv * jnp.abs(cmu) ** 3 / (
                 2.0 * rog * t[:, m][:, None] * nm_m[:, m][:, None]
-            )
-            ubtl = jnp.minimum(ubtl_raw, ubtlsat)
-        else:
-            ubtl = ubtl_raw
-        ubtl = jnp.minimum(ubtl, cfg.umcfac * jnp.abs(cmu) / dt)
-        ubtl = jnp.minimum(ubtl, tndmax)
+            ))
+        ubtl = ubtl_raw
+        for limit in limits:
+            if softmin_sharpness is None:
+                ubtl = jnp.minimum(ubtl, limit)
+            else:
+                # The same p-norm smooth min as the stress cap (#2241, the
+                # mcfarlane.py limiter form) on the positive part, applied in
+                # sequence like E3SM's mins (not one joint p-norm); a negative
+                # divergence is below every (non-negative) limit, as in E3SM.
+                ubtl = jnp.where(
+                    ubtl > 0.0,
+                    pnorm_smooth_min(jnp.maximum(ubtl, 0.0), limit,
+                                     softmin_sharpness, 0.0),
+                    ubtl)
 
         within = (m < tend_level)[:, None]           # midpoint m below tend
         signed = jnp.sign(cmu) * ubtl
@@ -1906,6 +1956,7 @@ def _e3sm_cam_gwd_one_source(
             rair, config.kwv, config.fcrit2,
             config.orographic.oro_min_h, config.orographic.oro_min_wind,
             oro_wind_ramp_width=config.orographic.oro_wind_ramp_width,
+            froude_cap_sharpness=config.softmin_sharpness,
         )
         do_taper = False
     elif config.source in ("frontal", "background"):
@@ -1999,6 +2050,9 @@ def _e3sm_cam_gwd_one_source(
         ubm, ubi, xv, yv, dpm, rdpm, lat, config.effgw, dt, config,
         orographic_only=orographic_only, do_taper=do_taper,
         alpha_iface=alpha_iface,
+        softmin_sharpness=config.softmin_sharpness,
+        crit_level_sharpness=config.crit_level_sharpness,
+        crit_level_floor=config.crit_level_floor,
     )
 
     du_dt = utgw
