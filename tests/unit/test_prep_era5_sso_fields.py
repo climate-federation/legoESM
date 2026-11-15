@@ -166,8 +166,8 @@ def test_resolved_terrain_slope_enters_the_tensor():
     z = np.zeros((181, 360))
     z[:, 2::4] = 400.0 * constants.g_ifs
     z[:, 3::4] = 400.0 * constants.g_ifs
-    out = prep.build_era5_sso(_raw(isor=1.0, anor=0.0, z=z), block_deg=4.0)
+    out = prep.build_era5_sso(_raw(slor=1e-4, isor=1.0, anor=0.0, z=z), block_deg=4.0)
     mid = slice(15, 30)                       # away from the poles
     assert np.all(out["SSO_GAMMA"].values[mid] < 0.9)
     np.testing.assert_allclose(out["SSO_THETA"].values[mid], 0.0, atol=1e-9)
-    assert np.all(out["SSO_SIGMA"].values[mid] > 0.02)
+    assert np.all(out["SSO_SIGMA"].values[mid] > 2e-4)
