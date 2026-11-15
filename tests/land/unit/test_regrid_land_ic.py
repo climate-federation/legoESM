@@ -852,3 +852,29 @@ def test_main_refuses_a_source_stamped_with_another_curve(tmp_path, monkeypatch)
     mod, argv, *_ = _rebuild_setup(tmp_path, monkeypatch, curve="van_genuchten")
     with pytest.raises(SystemExit, match="retention curve"):
         mod.main(argv)
+
+
+@pytest.mark.parametrize("grid_type,res", [("latlon", 48), ("gaussian", 31)])
+def test_target_grid_centres_are_the_runs(grid_type, res):
+    """The builder's target centres equal the run's column mesh at float64
+    storage (production precision: fp64) bit for bit; the float32 default put
+    lat-lon centres off exact values, so ties between CLM cells broke the
+    other way than the run's."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.atmosphere.dynamics.gcm.latlon_cgrid_column import (
+        build_latlon_column_mesh)
+    from legoesm.core.precision import get_policy, set_policy
+    from legoesm.grids.factory import create_grid
+    if not jax.config.jax_enable_x64:
+        pytest.skip("needs JAX_ENABLE_X64=1")
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg_tg")
+    old = get_policy()
+    set_policy(old._replace(storage=jnp.float64))
+    try:
+        mesh = build_latlon_column_mesh(create_grid(grid_type, resolution=res))
+    finally:
+        set_policy(old)
+    lat, lon = rg._cols_rad(rg._target_grid(grid_type, res))
+    np.testing.assert_array_equal(lat, np.asarray(mesh.latCell))
+    np.testing.assert_array_equal(lon, np.asarray(mesh.lonCell))
