@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
+from legoesm.ice.config import SI3_HARD_SWITCHES
 from legoesm.ice.dynamics import SI3CGridAEVPForcing, SI3CGridAEVPState, SI3CGridMetrics
 from legoesm.ice.si3_finalize import SI3StressInputs, _sum_flux_terms
 from legoesm.ice.si3_o17 import (
@@ -223,7 +224,7 @@ def main() -> None:
     )
     surface_cfg = SI3SurfaceConfig.from_resolved_namelists(
         run / "output.namelist.dyn", run / "output.namelist.ice"
-    )
+    )._replace(switches=SI3_HARD_SWITCHES)
     card = build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)
     h = int(card.state.nn_hls)
     owned = (slice(h, -h), slice(h, -h))
@@ -249,7 +250,10 @@ def main() -> None:
         arr = np.asarray(getattr(trace.finalize.final.outputs, name))
         nan_counts[f"outputs.{name}"] = int(np.isnan(arr).sum())
     for name in trace.finalize.stress._fields:
-        arr = np.asarray(getattr(trace.finalize.stress, name))
+        value = getattr(trace.finalize.stress, name)
+        if value is None:
+            continue
+        arr = np.asarray(value)
         arr_owned = arr[owned] if arr.shape[:2] == (184, 152) else arr
         nan_counts[f"stress.{name}"] = int(np.isnan(arr_owned).sum())
 

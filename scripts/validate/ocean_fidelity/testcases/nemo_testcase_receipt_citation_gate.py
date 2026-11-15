@@ -15386,7 +15386,7 @@ for _citation, _lines in (
     ('packages/ice/legoesm/ice/config.py:291-338', '312-359'),
     ('tests/ice/fidelity/test_nemo_si3_phase2_gate.py:58-71', '64-77'),
     ('tests/ice/fidelity/test_nemo_si3_phase2_adv2d_gate.py:64-74', '68-78'),
-    ('tests/ice/fidelity/test_nemo_si3_phase2_rung33_kernel.py:233-238', '243-248'),
+    ('tests/ice/fidelity/test_nemo_si3_phase2_rung33_kernel.py:233-238', '250-255'),
     ('tests/ice/unit/test_si3_landfast_l16.py:191-207', '193-209'),
     ('packages/ice/legoesm/ice/dynamics.py:101-103', '104-106'),
     ('packages/ice/legoesm/ice/config.py:524-525', '632-633'),

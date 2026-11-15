@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 from pathlib import Path
 
 import jax
@@ -136,6 +137,7 @@ def test_rn_ishlat_outside_resolved_orca1_arm_is_rejected_before_tracing():
             _forcing_for_state(card.forcing_template, card.initial_state, card.base),
             card.metrics,
             card.dynamics_config._replace(rn_ishlat=0.0),
+            limit_sharpness_scale=math.inf,
         )
 
 
@@ -154,6 +156,7 @@ def test_drag_io_t_is_directionally_averaged_like_nemo():
         changed,
         card.metrics,
         card.dynamics_config._replace(n_subcycles=1),
+        limit_sharpness_scale=math.inf,
     )
     assert np.all(np.isfinite(np.asarray(result.u_ice_u)))
     assert not np.array_equal(
@@ -164,6 +167,7 @@ def test_drag_io_t_is_directionally_averaged_like_nemo():
                 forcing,
                 card.metrics,
                 card.dynamics_config._replace(n_subcycles=1),
+                limit_sharpness_scale=math.inf,
             ).u_ice_u
         ),
     )
@@ -183,7 +187,9 @@ def test_f_stress_deliberately_has_no_t_presence_mask():
     )
     state = SI3CGridAEVPState(zero, zero, one, one, one)
     config = card.dynamics_config._replace(n_subcycles=1)
-    result = si3_cgrid_aevp_solver(state, forcing, card.metrics, config)
+    result = si3_cgrid_aevp_solver(
+        state, forcing, card.metrics, config, limit_sharpness_scale=math.inf
+    )
     assert float(jnp.max(jnp.abs(result.stress1_t))) == 0.0
     assert float(jnp.max(jnp.abs(result.stress2_t))) == 0.0
     # icedyn_rhg_evp.F90:488-489 has no zmsk on stress12.
@@ -237,6 +243,7 @@ def test_full_hundred_subcycle_kernel_jits_and_differentiates():
             card.metrics,
             card.dynamics_config,
             differentiable=True,
+            limit_sharpness_scale=math.inf,
         )
         return jnp.sum(result.u_ice_u[2:-2, 2:-2])
 

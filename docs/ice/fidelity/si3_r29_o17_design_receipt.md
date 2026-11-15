@@ -2492,4 +2492,4 @@ scratch sources; sha256 of source and committed copy, measured with
 - `scripts/validate/ocean_fidelity/testcases/si3_nanfix/verify_proof1_active_bits.py`:
   `cdab33c8f83557c1df686d7e7db9ca51738f5eaf01107a4747cb2da4cae368b6`
 - `scripts/validate/ocean_fidelity/testcases/si3_nanfix/verify_proof2_orca2_step1.py`:
-  `4852e5f7177cb1a2de4f46552f86bacf407f6431af7870f3a0da1024da03d857`
+  `94aba3d6a3f34f44144b70166a698fbee6f0700530be733f2dc484d281825d39`
