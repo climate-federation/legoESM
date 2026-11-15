@@ -40,6 +40,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prep_etopo_topography import regrid_elevation_to_latlon  # noqa: E402
 
 
+def block_area_mean(x, lat, factor: int):
+    """Area-weighted mean of ``x(lat, lon)`` over non-overlapping factor x factor blocks.
+
+    Regular lat-lon cell area is proportional to cos(lat) (row-wise, constant in
+    lon), so every sample counts by the area it represents inside its block.
+    """
+    import numpy as np
+
+    n_lat, n_lon = x.shape
+    xb = np.asarray(x, dtype=np.float64).reshape(
+        n_lat // factor, factor, n_lon // factor, factor)
+    wb = np.broadcast_to(
+        np.cos(np.deg2rad(lat)).reshape(n_lat // factor, factor, 1, 1), xb.shape)
+    w_sum = np.maximum(wb.sum(axis=(1, 3)), 1e-12)
+    return (wb * xb).sum(axis=(1, 3)) / w_sum
+
+
 def subgrid_orography_stddev(
     ds,
     *,
@@ -86,18 +103,9 @@ def subgrid_orography_stddev(
 
     # Terrain height above sea level: bathymetry launches no mountain waves.
     h = np.clip(elev, 0.0, None)
-    hb = h.reshape(n_lat // factor, factor, n_lon // factor, factor)
-    # Area weights on a regular lat-lon grid: cell area ∝ cos(lat) (row-wise;
-    # constant in lon). Weighted first/second moments so every sample counts
-    # by the area it represents inside the block.
-    w_row = np.cos(np.deg2rad(lat))
-    wb = np.broadcast_to(
-        w_row.reshape(n_lat // factor, factor, 1, 1),
-        hb.shape,
-    )
-    w_sum = np.maximum(wb.sum(axis=(1, 3)), 1e-12)
-    mu = (wb * hb).sum(axis=(1, 3)) / w_sum
-    var = (wb * (hb - mu[:, None, :, None]) ** 2).sum(axis=(1, 3)) / w_sum
+    mu = block_area_mean(h, lat, factor)
+    mu_fine = np.repeat(np.repeat(mu, factor, axis=0), factor, axis=1)
+    var = block_area_mean((h - mu_fine) ** 2, lat, factor)
     sso = np.sqrt(var)
     lat_b = lat.reshape(-1, factor).mean(axis=1)
     lon_b = lon.reshape(-1, factor).mean(axis=1)
