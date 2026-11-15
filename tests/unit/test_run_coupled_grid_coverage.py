@@ -83,6 +83,11 @@ def test_gaussian_slab_coupled_runs(tmp_path):
         [sys.executable, str(DRIVER), "--grid", "gaussian", "--ocean", "slab",
          "--resolution", "16", "--days", "1", "--radiation", "gray",
          "--no-energy-fixer",   # not wired on the spectral lane (F15)
+         # The faithful Kessler (#2083, the spectral default) runs a fixed
+         # 256-pass sub-cycle loop every step: 1 day took ~12 min here vs ~4
+         # without microphysics.  This test is about radiative forcing of the
+         # ocean; Kessler has its own oracle tests.
+         "--microphysics", "none",
          "--output", str(tmp_path / "coupled_gauss")],
         env=env, capture_output=True, text=True, timeout=600)
     combined = _driver_output(result)
