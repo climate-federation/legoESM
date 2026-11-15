@@ -700,8 +700,6 @@ def _probe(name):
 _SITE_POINTS = {
     ('* (1.0 - sm.lt(kget(pvervel, njkt5), ZOMEGA_RES, _W_OMEGA)))', 'lt'):
         ('L32', 1, 'inject', 'q', 1.0586956521739133, 0.0001, ()),
-    ('* sm.lt(zdh, ZSHAL_DH * rg * rcpd, rg * _W_DH))', 'lt'):
-        ('L32', 9, 'inject', None, 0.0, 0.0001, (('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'),)),
     ('/ ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)', 'min'):
         ('L32', 9, 'input', 'q', 1.1985054347826085, 1.9621876652955546e-08, ()),
     ('br = 1.0 - ((1.0 - sm.le(zsatfr, ZSATFR_MAX, _W_SATFR))', 'le'):
@@ -714,20 +712,14 @@ _SITE_POINTS = {
         ('L137', 0, 'inject', None, 0.0, 0.0001, ()),
     ('m3 = sm.max(ZMID_MF * zkhfl / kget(pgeoh, ikb), zmfub, w_mfub) * (1.0 + zeps)', 'max'):
         ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
-    ('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'):
-        ('L32', 12, 'inject', None, 0.0, 0.0001, (('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),', 'min'),)),
     ('sm.max(zcape - zcapdcycl, RMINCAPE * zcape, _W_CAPE))', 'max'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),', 'min'):
-        ('L32', 12, 'inject', None, 0.0, 0.0001, (('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'),)),
-    ('sm.min(m3, zmfmax, _W_MF))', 'min'):
-        ('L32', 12, 'inject', None, 0.0, 0.0001, (('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'), ('m = sm.min(zm, r, _W_REL * r)', 'min'))),
     ('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'):
         ('L137', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)', 'max'):
         ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
     ('zcape_c = sm.min(zcape_c, ZCAPE_MAX, _W_CAPE)', 'min'):
-        ('L32', 1, 'inject', None, 0.0, 0.0001, (('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'), ('m = sm.min(zm, r, _W_REL * r)', 'min'))),
+        ('L32', 9, 'inject', 'q', 1.075, 0.0001, ()),
     ('zcape_c = sm.sel(br, sm.max(zcape2 - zcapdcycl + zdqcv, RMINCAPE * zcape, _W_CAPE),', 'max'):
         ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
     ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
@@ -736,8 +728,6 @@ _SITE_POINTS = {
         ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
     ('zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)', 'min'):
         ('STRESS', 0, 'inject', 'q', 1.225, 0.0001, ()),
-    ('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'):
-        ('L32', 13, 'inject', None, 0.0, 0.0001, (('m = sm.min(zm, r, _W_REL * r)', 'min'),)),
     ('zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1', 'max'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('ztaupbl = sm.min(kget(pgeoh, ikb) - pgeoh[K + 1], ZDCYC_DZ, _W_GEO) / (rg * zduten)', 'min'):
@@ -749,35 +739,73 @@ _SITE_POINTS = {
 }
 
 
-# Sites no fixture column, input perturbation or injection reaches (vote
-# 2026-11-15, author/GLM/codex), with the reason; their smoothing is covered by
-# the hard-limit and per-column gap tests only.
-_SITE_UNREACHABLE = {
-    # the first-guess shallow base flux only sets the ascent's mass-flux scale;
-    # the final closure rescales the profile by ZMFUB1/ZMFUB, so the outputs
-    # are invariant to it to first order (gradient <= 4e-20 on every column)
-    ('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'):
-        "first-guess shallow flux cancels in the final closure rescale",
-    # the per-level heating summand's window (4.7e-10) sits ~5 orders below
-    # the ZHEAT_MIN floor; with the floor and the cap held mid-window the
-    # derivative is 7e-15, noise against a loss of O(100)
-    ('zheat = jnp.sum(jnp.where(llo3, sm.pos(', 'pos'):
-        "heating summand window shielded by the ZHEAT_MIN floor",
-    # the first-guess energy floor feeds only the first-guess shallow flux,
-    # which cancels as above (derivative 2.8e-15 at the best point)
-    ('zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)', 'max'):
-        "feeds only the first-guess shallow flux, which cancels in the closure rescale",
-    # the ZHEAT_MIN floor of the deep-closure heating: with the cap held
-    # mid-window the derivative through it is 5e-16 (round-off against O(100))
+# Sites no full-scheme column reaches (no fixture column, input
+# perturbation or single-site injection gives a resolvable derivative through
+# them): a direct gradient test of the smoothed expression inside its window
+# at the default width (coordinator ruling 2026-11-15), with the reason.
+# Values: (bound b, or a representative value where the bound is traced, and
+# the width, as expressions in _ifs_cumastrn's namespace plus RG = g and
+# RCPD = c_pd; reason).
+_SITE_SYNTHETIC = {
+    ('* sm.lt(zdh, ZSHAL_DH * rg * rcpd, rg * _W_DH))', 'lt'):
+        ('ZSHAL_DH * RG * RCPD', 'RG * _W_DH', "shallow 'weak' branch: needs a shallow flux above 0.3 x the CFL limit with a cloud-base energy excess below half its scale at once; no fixture column has both"),
+    ('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'):
+        ('ZMID_GEO', '_W_GEO', "mid-level cap choice by cloud-base geopotential: the fixture's one mid-level cloud has its base far above 1500 m2/s2 and its flux far below either cap"),
+    ('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),', 'min'):
+        ('0.1', '_W_MF', "mid-level flux cap (low base): binds only for a mid-level cloud near the CFL limit; the fixture's one mid-level flux is ~1e-6"),
+    ('sm.min(m3, zmfmax, _W_MF))', 'min'):
+        ('0.3', '_W_MF', "mid-level flux cap: binds only for a mid-level cloud near the CFL limit; the fixture's one mid-level flux is ~1e-6"),
+    ('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'):
+        ('0.3', '_W_MF', 'deep closure CFL cap: where it binds the final limiter re-caps the flux level by level, masking its derivative'),
     ('zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)', 'max'):
-        "reaches the output only at round-off level",
+        ('ZHEAT_MIN', '_W_HEAT', 'ZHEAT_MIN floor of the deep-closure heating: convecting columns heat orders of magnitude above it'),
+    ('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'):
+        ("0.3", "_W_MF", "first-guess shallow flux: the final closure rescales the profile "
+                       "by ZMFUB1/ZMFUB, so the outputs are invariant to it to first order"),
+    ('zheat = jnp.sum(jnp.where(llo3, sm.pos(', 'pos'):
+        ("0.0", "_W_HEAT", "per-level heating summand: its window (4.7e-10) sits ~5 orders "
+                         "below the ZHEAT_MIN floor of the summed heating"),
+    ('zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)', 'max'):
+        ("0.1", "_W_DH", "first-guess energy floor: feeds only the first-guess shallow "
+                       "flux, which cancels in the closure rescale"),
 }
+
+
+@pytest.mark.parametrize("site", sorted(_SITE_SYNTHETIC), ids=lambda t: f"{t[1]}:{t[0][:60]}")
+def test_switch_site_synthetic_gradient(site):
+    """RULE 5 gradient test of an unreached site's smoothed expression, alone,
+    at mid-window and the default width: check_grads passes and the
+    derivative differs from the exact switch's."""
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+
+    sp = _probe("switch_sites")
+    method = site[1]
+    bexpr, wexpr, reason = _SITE_SYNTHETIC[site]
+    assert reason
+    th = lego_thermo()
+    ns = {**vars(M), "RG": th.RG, "RCPD": th.RCPD}
+    b, w = float(eval(bexpr, ns)), float(eval(wexpr, ns))
+
+    def f(a, hard=False):
+        sm = IfsSmooth(hard)
+        args = (a, w) if method in ("pos", "neg1") else (a, jnp.asarray(b), w)
+        return getattr(sm, method)(*args)
+
+    a0 = jnp.asarray(float(sp._mid(method, b, w)))
+    gs = float(jax.grad(f)(a0))
+    gh = float(jax.grad(lambda a: f(a, True))(a0))
+    check_grads(f, (a0,), order=1, modes=("rev",), eps=1e-3 * w, atol=1e-3 * abs(gs), rtol=1e-3)
+    assert np.isfinite(gs) and abs(gs - gh) > 1e-3 * max(abs(gs), abs(gh))
+
+
 _SITE_PENDING: set = set()   # none left
 
 
 def test_every_switch_site_has_a_gradient_point():
     """A new or edited smooth switch in CUMASTRN must get its own point."""
-    sets = (set(_SITE_POINTS), _SITE_PENDING, set(_SITE_UNREACHABLE))
+    sets = (set(_SITE_POINTS), _SITE_PENDING, set(_SITE_SYNTHETIC))
     assert _probe("switch_sites").sites() == set.union(*sets)
     assert sum(map(len, sets)) == len(set.union(*sets))
 
@@ -821,12 +849,14 @@ def test_switch_site_gradient_at_default(fix, site, _fresh_jit):
         sp.output(fix, x_of(x0))
         jax.effects_barrier()
     assert np.any(sp.in_window(site, np.concatenate(pos[site])))
-    check_grads(run, (x0,), order=1, modes=("rev",), eps=h)
     gs = float(jax.grad(run)(x0))
     gh = float(jax.grad(lambda s: run(s, hard=[site]))(x0))
+    # tolerances relative to this site's derivative (the default atol 1e-5
+    # would pass a derivative of 1e-6 that is wrong by 90 %)
+    check_grads(run, (x0,), order=1, modes=("rev",), eps=h, atol=1e-3 * abs(gs), rtol=1e-3)
     # the derivative changes by more than round-off: 1e-3 relative, and above a
     # floor 1e-12 (the loss is O(100); a site that only reaches the output at
-    # round-off level is unreachable, see _SITE_UNREACHABLE)
+    # round-off level gets a synthetic test, see _SITE_SYNTHETIC)
     big = max(abs(gs), abs(gh))
     assert np.isfinite(gs) and big > 1e-12 and abs(gs - gh) > 1e-3 * big
 
