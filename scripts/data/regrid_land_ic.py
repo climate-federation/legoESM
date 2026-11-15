@@ -454,7 +454,7 @@ def main_lift_only(args) -> int:
             f"source IC is on {meta_src.get('grid_type')} "
             f"{meta_src.get('resolution')}, not {args.target_grid} "
             f"{args.target_resolution}.")
-    lat, lon = _cols_rad(_ic_grid(args.target_grid, args.target_resolution))
+    lat, lon = _cols_rad(_target_grid(args.target_grid, args.target_resolution))
     if lat.size != src["theta_soil"].shape[0]:
         raise SystemExit(f"grid has {lat.size} columns, the IC has "
                          f"{src['theta_soil'].shape[0]}.")
