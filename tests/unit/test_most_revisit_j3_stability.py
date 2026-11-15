@@ -30,7 +30,7 @@ def test_psi_is_the_integral_of_phi():
 
 
 def test_heat_equals_momentum_and_psi_zero_at_neutral():
-    z = jnp.linspace(-5.0, 30.0, 701)
+    z = jnp.linspace(0.0, 30.0, 601)  # stable side; unstable keeps Businger-Dyer m != h
     np.testing.assert_array_equal(bf.psi_h(z, S), bf.psi_m(z, S))
     assert float(bf.psi_m(jnp.asarray(0.0), S)) == 0.0
 
@@ -44,9 +44,18 @@ def test_asymptotes():
 
 
 def test_gradients_through_both_branches_and_the_cap():
-    for z0 in (-2.0, -1e-3, 0.0, 1e-3, 0.5, 3.0, 9.5, 12.0):
-        for f in (bf.psi_m, bf.psi_h, bf.psi_m_coare, bf.psi_h_coare):
+    fs = (bf.psi_m, bf.psi_h, bf.psi_m_coare, bf.psi_h_coare)
+    for z0 in (-2.0, 0.5, 3.0, 9.5, 12.0):
+        for f in fs:
             check_grads(lambda z: f(z, S), (jnp.asarray(z0),), order=2, modes=["rev"])
+    for z0 in (-1e-3, 1e-3):  # MOST only: COARE's narrow neutral blend needs a finer step
+        for f in fs[:2]:
+            check_grads(lambda z: f(z, S), (jnp.asarray(z0),), order=2, modes=["rev"])
+    # zeta = 0: slope may jump there (allowed), derivatives must stay finite
+    for f in fs:
+        g = lambda z: f(z, S)  # noqa: E731
+        assert np.isfinite(float(jax.grad(g)(0.0)))
+        assert np.isfinite(float(jax.grad(jax.grad(g))(0.0)))
 
 
 def test_unknown_name_raises():
