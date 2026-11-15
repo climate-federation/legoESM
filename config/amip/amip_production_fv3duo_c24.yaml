@@ -71,7 +71,8 @@ land_ic: data/lmip_soil_ic/soil_ic_fv3duo24_era5T_19790101.npz
 # --fine-res-deg 1.0 --block-deg 3.0 --resolved-cutoff-deg 6.0 from
 # etopo_0p25deg.nc (md5 e365143605121428710820d2276efb73); file md5
 # 1421f49a9f0aa48de7809ae19add2bcb. Cell 3.454 deg; cutoff snapped down to the
-# 1-deg source sampling (votes V1/V2/V5 in the PR). Named here, so the
+# 1-deg source sampling (votes V1/V2/V5 in the PR), so scales 6.0-6.9 deg
+# are counted neither as subgrid drag nor as one of the two cells. Named here, so the
 # launcher's machine default (MPAS 2-deg file) does not replace it.
 subgrid_orography_file: data/amip/sso_stdh_fv3duo_c24_cut2dx.nc
 
