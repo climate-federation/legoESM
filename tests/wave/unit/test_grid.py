@@ -20,11 +20,22 @@ from legoesm.wave.grid import (
 def test_metrics_are_the_spherical_ones(tiny_config):
     env = build_wave_env(tiny_config)
     lat = np.asarray(tiny_config.grid.lat_deg, dtype=float)
-    expected_x = R_earth_neuralswm * np.round(np.cos(np.deg2rad(lat)), 5)
+    expected_x = R_earth_neuralswm * np.cos(np.deg2rad(lat))
     assert np.allclose(np.asarray(env.x_metric).ravel(), expected_x, rtol=1e-6)
     assert np.allclose(np.asarray(env.y_metric), R_earth_neuralswm, rtol=1e-6)
     assert env.lon.shape == (1, 6, 1, 1, 1)
     assert env.lat.shape == (1, 1, 5, 1, 1)
+
+
+def test_direction_vectors_preserve_unit_length(tiny_config):
+    env = build_wave_env(tiny_config)
+    norm_squared = np.asarray(env.sin_theta)**2 + np.asarray(env.cos_theta)**2
+    # A unit direction vector stays normalized to floating-point precision;
+    # independent decimal rounding of its components violates this identity.
+    np.testing.assert_allclose(
+        norm_squared, 1.0, rtol=0,
+        atol=2 * np.finfo(norm_squared.dtype).eps,
+    )
 
 
 def test_prepare_env_attaches_dispersion(tiny_config, tiny_state):

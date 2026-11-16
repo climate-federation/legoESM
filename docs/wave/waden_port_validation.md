@@ -30,6 +30,15 @@ and positivity-projection diagnostics are descriptive. Open/prescribed domains
 exchange energy through boundaries, so their integral change is not itself a
 conservation residual.
 
+## Geometry update after the recorded validation
+
+Wave-grid trigonometric fields now use unrounded sine and cosine, following
+WADEN's removal of five-decimal geometry rounding. Spherical metrics and
+transport directions therefore change from the version used for the archived
+measurements below. Those manifests and rollout differences describe their
+recorded revisions; they do not certify the updated geometry. Re-run the
+external evidence lane before citing them for the updated implementation.
+
 ## Recorded results (2026-11-12)
 
 The four reproducible cases were rerun on the current legoESM stack at the

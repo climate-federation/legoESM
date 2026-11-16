@@ -59,20 +59,6 @@ class WaveEnv(NamedTuple):
 
 
 
-# The released NeuralSWM checkpoint was trained with the PyTorch baseline's
-# five-decimal rounding of the spherical metric; keep the same grid it saw.
-# The inverse is a separate constant so the operation is bit-identical to the
-# reference's ``round(x * 1e5) * 1e-5`` (division differs by one ulp for some
-# inputs).
-_ROUND_SCALE = 1e5
-_ROUND_INV_SCALE = 1e-5
-
-
-def _round5(value: jax.Array) -> jax.Array:
-    """Match the PyTorch baseline's five-decimal rounding."""
-    return jnp.round(value * _ROUND_SCALE) * _ROUND_INV_SCALE
-
-
 def build_wave_env(config: WaveConfig, dtype=jnp.float32) -> WaveEnv:
     """Build the static part of the environment (no dispersion fields)."""
     config.validate()
@@ -115,7 +101,7 @@ def build_wave_env(config: WaveConfig, dtype=jnp.float32) -> WaveEnv:
     if lat.shape[0] == 2:
         dlat = jnp.broadcast_to(jnp.abs(lat_grid[:, :, 1:2] - lat_grid[:, :, :1]), dlat.shape)
 
-    cos_lat = _round5(jnp.cos(lat_grid)) if spherical else jnp.ones_like(lat_grid)
+    cos_lat = jnp.cos(lat_grid) if spherical else jnp.ones_like(lat_grid)
     latitude_sign = 1 if config.grid.lat_deg[1] > config.grid.lat_deg[0] else -1
     longitude_sign = 1 if config.grid.lon_deg[1] > config.grid.lon_deg[0] else -1
     data_theta = np.mod(
@@ -133,8 +119,8 @@ def build_wave_env(config: WaveConfig, dtype=jnp.float32) -> WaveEnv:
         dfreq=dfreq,
         dlon=dlon,
         dlat=dlat,
-        sin_theta=_round5(jnp.sin(theta_grid)),
-        cos_theta=_round5(jnp.cos(theta_grid)),
+        sin_theta=jnp.sin(theta_grid),
+        cos_theta=jnp.cos(theta_grid),
         cos_lat=cos_lat,
         n_theta=n_theta,
         n_freq=n_freq,
