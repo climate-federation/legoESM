@@ -129,7 +129,7 @@ def test_polar_night_decays_light_mean_and_stays_finite():
 def test_means_track_the_whole_day_average():
     """Day and night steps carry equal weight: the means converge to the
     24-hour average of every driver, light included (night zeros count)."""
-    cfg = pm.PModelConfig(tau_acclim_s=5.0 * 86400.0)
+    cfg = pm.PModelConfig(acclimation_days=5.0)
     s = _state(t_c=10.0, vpd=500.0)
     day = dict(T_K=jnp.full((1,), constants.T_freeze + 25.0),
                ppfd=jnp.full((1,), 800.0),
@@ -185,24 +185,26 @@ def test_init_state_uses_config_constants_and_override():
 
 
 def test_valid_selector_tuples():
-    assert pm.VALID_CAPACITY_SCHEMES == ("prescribed", "p_model", "phydro")
-    assert pm.OPTIMALITY_CAPACITY_SCHEMES == ("p_model", "phydro")
-    assert pm.VALID_G1_SOURCES == ("table", "p_model")
+    assert pm.VALID_CAPACITY_SCHEMES == ("prescribed", "pmodel", "phydro")
+    assert pm.OPTIMALITY_CAPACITY_SCHEMES == ("pmodel", "phydro")
+    assert pm.VALID_G1_SOURCES == ("table", "pmodel")
 
 
 def test_canopy_config_validates_switches():
     from legoesm.land.canopy.config import CanopyConfig
     with pytest.raises(ValueError, match="capacity_scheme"):
-        CanopyConfig(capacity_scheme="pmodel").validate()
+        CanopyConfig(capacity_scheme="optimum").validate()
+    with pytest.raises(ValueError, match="renamed 'pmodel'"):
+        CanopyConfig(capacity_scheme="p_model").validate()
     with pytest.raises(ValueError, match="g1_source"):
         CanopyConfig(g1_source="xi").validate()
-    # g1_source='p_model' + non-medlyn is legal AT CONFIG LEVEL (the
+    # g1_source='pmodel' + non-medlyn is legal AT CONFIG LEVEL (the
     # phydro slope mapping covers every model); the least-cost-only
     # combination is refused at the consumers, which can see the
     # transpiration_stress switch (see test_phydro_wiring).
-    CanopyConfig(g1_source="p_model", stomatal_model="ball_berry").validate()
-    CanopyConfig(g1_source="p_model", stomatal_model="medlyn").validate()
-    CanopyConfig(capacity_scheme="p_model").validate()
+    CanopyConfig(g1_source="pmodel", stomatal_model="ball_berry").validate()
+    CanopyConfig(g1_source="pmodel", stomatal_model="medlyn").validate()
+    CanopyConfig(capacity_scheme="pmodel").validate()
 
 
 def test_init_multilayer_state_carries_acclim_iff_switch_active():
@@ -213,7 +215,7 @@ def test_init_multilayer_state_carries_acclim_iff_switch_active():
     cfg_off = MultiLayerLandConfig(surface_scheme=CanopyConfig())
     assert init_multilayer_land_state(4, cfg_off).pmodel_acclim is None
     cfg_on = MultiLayerLandConfig(surface_scheme=CanopyConfig(
-        capacity_scheme="p_model", g1_source="p_model",
+        capacity_scheme="pmodel", g1_source="pmodel",
         stomatal_model="medlyn"))
     s = init_multilayer_land_state(4, cfg_on, pmodel_co2_init_ppm=390.0)
     assert s.pmodel_acclim is not None

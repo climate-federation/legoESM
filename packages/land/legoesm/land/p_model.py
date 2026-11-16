@@ -182,21 +182,16 @@ __param_spec__ = {
                 ),
                 "shape": None,
             },
-            "tau_acclim_s": {
-                "units": "s", "bounds": (86400.0, 10368000.0),
-                "tunable_tier": 2, "transform": "sigmoid",
-                "category": "photosynthesis",
-                "reference": "Mengoli et al. 2022 (~15 d acclimation memory)",
-                "shape": None,
-            },
-            "subdaily_alpha": {
-                "units": "1/day", "bounds": (0.0083, 1.0),  # ~120 d .. no memory
+            "acclimation_days": {
+                "units": "day", "bounds": (1.0, 120.0),
                 "tunable_tier": 2, "transform": "sigmoid",
                 "category": "photosynthesis",
                 "reference": (
-                    "Mengoli et al. 2022 / pyrealm AcclimationModel alpha "
-                    "(1/15 = ~15 d memory on the daily optimal traits)"),
-                "shape": None,
+                    "Mengoli et al. 2022 / pyrealm AcclimationModel (~15 d "
+                    "memory): the e-folding time of the half-hourly driver "
+                    "EMA (han, phydro) and 1/alpha of the daily trait memory "
+                    "(mengoli), one parameter for every scheme"),
+                "shape": None, "legacy_name": "tau_acclim_s",
             },
         },
     },
@@ -256,7 +251,7 @@ _F_J25_UMOL_GN_S = 1257.0  # umol e- /s /gN in electron transport (= 8.06 * 156)
 class PModelConfig(NamedTuple):
     """Configuration for the P-model optimality parameter source.
 
-    ``beta_cost``/``kphio``/``tau_acclim_s`` are the tunables (see
+    ``beta_cost``/``kphio``/``acclimation_days`` are the tunables (see
     ``__param_spec__``); the rest are numeric guards and recorded
     initialisation constants (excluded from calibration).
     """
@@ -268,8 +263,10 @@ class PModelConfig(NamedTuple):
     # --- C4 optimality (rpmodel c4; Cai & Prentice 2020) ---
     beta_cost_c4: float = 146.0 / 9.0  # [-] C4 cost ratio (rpmodel: beta/9)
     kphio_c4: float = 1.0        # [mol/mol] C4 base quantum yield (rpmodel 1.0)
-    # --- acclimation (Mengoli et al. 2022) ---
-    tau_acclim_s: float = 1296000.0  # [s] = 15 days
+    # --- acclimation memory (Mengoli et al. 2022), one parameter for every
+    #     scheme: e-folding time [days] of the driver EMA (han, phydro) and
+    #     1/alpha of the daily trait memory (mengoli) ---
+    acclimation_days: float = 15.0   # [day]
     # --- numerics (smooth guards; excluded from calibration) ---
     vpd_min_pa: float = 50.0     # [Pa] smooth floor under sqrt(D)
     mj_floor_eps: float = 0.01   # [-] mj kept above C_STAR + eps
@@ -279,74 +276,118 @@ class PModelConfig(NamedTuple):
     init_vpd_pa: float = 800.0   # [Pa] VPD-mean cold-start
     init_co2_ppm: float = 400.0  # [umol/mol] CO2 cold-start (driver may override)
     # --- acclimation scheme (appended last; positional configs stay aligned) ---
-    # "ema_24h": the optimum at 15-day running means of the 24 h drivers (the
-    # original scheme, default).  "subdaily_noon": Mengoli et al. (2022) /
-    # pyrealm SubdailyPModel — the optimum at each day's noon-window means,
-    # with a daily memory ``subdaily_alpha`` on the optimal TRAITS (xi,
-    # Vcmax25, Jmax25), pyrealm order.  Compile-time string.
-    acclimation: str = "ema_24h"
-    subdaily_alpha: float = 1.0 / 15.0  # [1/day] daily memory weight on traits
-    window_start_h: float = 11.0  # [h, local solar] first window step
-    window_end_h: float = 13.0    # [h, local solar] last window step
-    # --- C3 quantum-yield formulation (appended last) ---
+    # "han": the optimum solved on half-hourly exponential running means of the
+    # drivers (e-folding ``acclimation_days``; Stocker 2020 order: average the
+    # drivers, then optimise).  "mengoli": Mengoli et al. (2022) / pyrealm
+    # SubdailyPModel — the daily optimum at the window means, then the memory
+    # (alpha = 1/acclimation_days per day) on the optimal TRAITS xi, Vcmax25,
+    # Jmax25 themselves.  Compile-time strings.
+    acclimation_scheme: str = "han"
+    # Which steps feed the acclimation: "24h" (every step), "daytime" (steps
+    # with PAR > 0) or "noon" (the window_start_h..window_end_h local-solar
+    # window).  han (and the P-hydro acclimation, which shares this EMA) keep
+    # the half-hourly EMA on window-only options, weighting each in-window
+    # step by the time elapsed since the previous one, so the e-folding stays
+    # ``acclimation_days`` of calendar time; mengoli takes the window means.
+    acclimation_hours: str = "24h"
+    window_start_h: float = 11.0  # [h, local solar] first noon-window step
+    window_end_h: float = 13.0    # [h, local solar] last noon-window step
+    # --- C3 intrinsic quantum yield phi0 (appended last) ---
     # "temperature": kphio x Bernacchi (2003) quadratic (original, default).
     # "sandoval": Sandoval et al. (2026) — peak 1/9 reduced by the
     # climatological aridity index, peaked temperature response whose optimum
     # follows mGDD0 (JULES form, with the T/Topt factor).  Needs per-column
     # aridity index and mGDD0 (init_pmodel_acclim ``sandoval_inputs``); the
     # reference ``kphio`` is fixed by the method and must stay at its default.
-    kphio_method: str = "temperature"
+    intrinsic_quantum_yield: str = "temperature"
 
 
-VALID_ACCLIMATION = ("ema_24h", "subdaily_noon")
-VALID_KPHIO_METHODS = ("temperature", "sandoval")
+VALID_ACCLIMATION_SCHEMES = ("han", "mengoli")
+VALID_ACCLIMATION_HOURS = ("24h", "daytime", "noon")
+VALID_INTRINSIC_QUANTUM_YIELD = ("temperature", "sandoval")
+# Retired names, refused with the new one named (no silent aliases).
+_RETIRED_SCHEMES = {"ema_24h": "han", "subdaily_noon": "mengoli"}
+_S_PER_DAY = 86400.0
 
 
-def _check_kphio_method(cfg: "PModelConfig") -> str:
-    """Return ``cfg.kphio_method`` after validating it (raise on unknown)."""
-    if cfg.kphio_method not in VALID_KPHIO_METHODS:
+def _retired(kind: str, value, table: dict) -> str:
+    return (f" ({kind} {value!r} was renamed {table[value]!r})"
+            if value in table else "")
+
+
+def _check_quantum_yield(cfg: "PModelConfig") -> str:
+    """Return ``cfg.intrinsic_quantum_yield`` after validating it."""
+    if cfg.intrinsic_quantum_yield not in VALID_INTRINSIC_QUANTUM_YIELD:
         raise ValueError(
-            f"unknown PModelConfig.kphio_method {cfg.kphio_method!r}; must be "
-            f"one of {VALID_KPHIO_METHODS}")
-    return cfg.kphio_method
+            f"unknown PModelConfig.intrinsic_quantum_yield "
+            f"{cfg.intrinsic_quantum_yield!r}; must be one of "
+            f"{VALID_INTRINSIC_QUANTUM_YIELD}")
+    return cfg.intrinsic_quantum_yield
 
 
 def _check_acclimation(cfg: "PModelConfig") -> str:
-    """Return ``cfg.acclimation`` after validating it (raise on unknown, and
-    on a memory weight or window the subdaily scheme cannot use)."""
-    if cfg.acclimation not in VALID_ACCLIMATION:
+    """Return ``cfg.acclimation_scheme`` after validating the scheme, the
+    hours, the memory and the noon window (raise on anything unknown)."""
+    if cfg.acclimation_scheme not in VALID_ACCLIMATION_SCHEMES:
         raise ValueError(
-            f"unknown PModelConfig.acclimation {cfg.acclimation!r}; must be "
-            f"one of {VALID_ACCLIMATION}")
-    if cfg.acclimation == "subdaily_noon":
-        alpha = cfg.subdaily_alpha
-        if not (isinstance(alpha, (int, float)) and 0.0 < alpha <= 1.0):
-            # (a traced tunable is not checked here; its spec bounds apply)
-            if isinstance(alpha, (int, float)):
-                raise ValueError(
-                    f"PModelConfig.subdaily_alpha={alpha} must lie in (0, 1]")
-        if not (0.0 <= cfg.window_start_h < cfg.window_end_h < _HOURS_PER_DAY):
-            raise ValueError(
-                "PModelConfig noon window must satisfy 0 <= window_start_h < "
-                f"window_end_h < 24; got ({cfg.window_start_h}, "
-                f"{cfg.window_end_h})")
-    return cfg.acclimation
+            f"unknown PModelConfig.acclimation_scheme "
+            f"{cfg.acclimation_scheme!r}; must be one of "
+            f"{VALID_ACCLIMATION_SCHEMES}"
+            + _retired("acclimation", cfg.acclimation_scheme, _RETIRED_SCHEMES))
+    if cfg.acclimation_hours not in VALID_ACCLIMATION_HOURS:
+        raise ValueError(
+            f"unknown PModelConfig.acclimation_hours "
+            f"{cfg.acclimation_hours!r}; must be one of "
+            f"{VALID_ACCLIMATION_HOURS}")
+    days = cfg.acclimation_days
+    if isinstance(days, (int, float)) and not days > 0.0:
+        # (a traced tunable is not checked here; its spec bounds apply)
+        raise ValueError(
+            f"PModelConfig.acclimation_days={days} must be positive")
+    if (cfg.acclimation_scheme == "mengoli" and isinstance(days, (int, float))
+            and days < 1.0):
+        # the daily trait memory is alpha = 1/days per day; alpha > 1 overshoots
+        raise ValueError(
+            f"PModelConfig.acclimation_days={days} must be >= 1 under the "
+            "mengoli scheme (alpha = 1/days per day)")
+    if not (0.0 <= cfg.window_start_h < cfg.window_end_h < _HOURS_PER_DAY):
+        raise ValueError(
+            "PModelConfig noon window must satisfy 0 <= window_start_h < "
+            f"window_end_h < 24; got ({cfg.window_start_h}, "
+            f"{cfg.window_end_h})")
+    return cfg.acclimation_scheme
+
+
+def acclimation_tau_s(cfg: "PModelConfig"):
+    """E-folding time [s] of the driver EMA: ``acclimation_days`` in seconds."""
+    return cfg.acclimation_days * _S_PER_DAY
+
+
+def needs_solar_hour(cfg: "PModelConfig") -> bool:
+    """Whether the acclimation update reads the local solar hour: the noon
+    window, or the mengoli scheme's day boundary (24h / noon windows).
+    ``daytime`` is decided by PAR > 0 and needs no clock."""
+    scheme = _check_acclimation(cfg)
+    return cfg.acclimation_hours == "noon" or (
+        scheme == "mengoli" and cfg.acclimation_hours != "daytime")
 
 
 # Valid selector values for the CanopyConfig switches wired in
 # surface_scheme/two_leaf_canopy.py; imported by canopy/config.py.
-# capacity_scheme: "prescribed" (table) | "p_model" (least-cost acclimated
+# capacity_scheme: "prescribed" (table) | "pmodel" (least-cost acclimated
 # optimum) | "phydro" (P-hydro acclimated optimum, two-leaf canopy only).
-VALID_CAPACITY_SCHEMES = ("prescribed", "p_model", "phydro")
-OPTIMALITY_CAPACITY_SCHEMES = ("p_model", "phydro")
-VALID_G1_SOURCES = ("table", "p_model")
+VALID_CAPACITY_SCHEMES = ("prescribed", "pmodel", "phydro")
+OPTIMALITY_CAPACITY_SCHEMES = ("pmodel", "phydro")
+VALID_G1_SOURCES = ("table", "pmodel")
 
 
 class PModelAcclimState(NamedTuple):
     """Whole-day running-mean acclimation drivers, all shape ``(ncol,)``.
 
     Every field is a plain exponential moving average over day AND night
-    with e-folding time ``PModelConfig.tau_acclim_s``
+    with e-folding time ``PModelConfig.acclimation_days`` (han / P-hydro;
+    on window-only ``acclimation_hours`` each in-window step is weighted by
+    the time elapsed since the previous one, ``dt_since_update_s``)
     (:func:`advance_pmodel_acclim`); ``iabs_mean`` is the mean of the light
     the caller passes (sunlit-leaf absorbed PAR under the two-leaf scheme),
     night zeros included.
@@ -363,7 +404,7 @@ class PModelAcclimState(NamedTuple):
     # resistance per leaf area [MPa m2 s/mol] (land/phydro.py PhydroSupply).
     psi_s_mean_mpa: jax.Array | None = None
     rsoil_mean: jax.Array | None = None
-    # --- subdaily_noon acclimation only (``None`` under ema_24h) ---
+    # --- mengoli acclimation only (``None`` under han) ---
     # Running sums over the current day's noon window (reset when it closes).
     win_sum_iabs: jax.Array | None = None
     win_sum_t_K: jax.Array | None = None
@@ -386,10 +427,14 @@ class PModelAcclimState(NamedTuple):
     # Completed windows since cold start (0 -> the next close SEEDS the traits
     # with that day's optimum instead of applying the memory; JULES / pyrealm).
     n_days: jax.Array | None = None
-    # --- kphio_method='sandoval' only: per-column CLIMATOLOGICAL inputs,
+    # --- intrinsic_quantum_yield='sandoval' only: per-column CLIMATOLOGICAL inputs,
     # constant through the run (set once at init, carried unchanged). ---
     aridity_index: jax.Array | None = None   # [-] PET / P
     mgdd0_c: jax.Array | None = None         # [degC] mean T of days > 0 degC
+    # --- windowed driver EMA (acclimation_hours != '24h'): seconds elapsed
+    # since the last in-window update, so the e-folding stays calendar time.
+    # None on a state written before this field existed (reads as 0). ---
+    dt_since_update_s: jax.Array | None = None
 
 
 _SUBDAILY_FIELDS = (
@@ -423,7 +468,7 @@ def pmodel_switches_active(surface_scheme=None, stomata=None) -> bool:
             continue
         if getattr(obj, "capacity_scheme", "prescribed") in OPTIMALITY_CAPACITY_SCHEMES:
             return True
-        if getattr(obj, "g1_source", "table") == "p_model":
+        if getattr(obj, "g1_source", "table") == "pmodel":
             return True
     return False
 
@@ -497,7 +542,7 @@ def chi_core(xi: jax.Array, gamma_over_ca: jax.Array,
     """chi = Gamma*/ca + (1 - Gamma*/ca) xi / (xi + sqrt(D)) (Stocker 2020
     eq. 8; xi [Pa^0.5], D [Pa]).  The ONE implementation, shared by the
     acclimated optimum and the canopy's instantaneous ci under
-    ``stomatal_model='pmodel_chi'`` (JULES ``stomata_pmodel``; pyrealm
+    ``stomatal_model='pmodel'`` (JULES ``stomata_pmodel``; pyrealm
     SubdailyPModel step 8)."""
     return gamma_over_ca + (1.0 - gamma_over_ca) * xi / (xi + sqrt_vpd_pa)
 
@@ -509,10 +554,10 @@ def _phi0(T_K: jax.Array, cfg: PModelConfig,
     The Bernacchi quadratic goes negative below ~ -14 degC; a smooth floor at
     0 keeps deep-cold acclimated capacities at ~0 with finite gradients.
     """
-    if _check_kphio_method(cfg) == "sandoval":
+    if _check_quantum_yield(cfg) == "sandoval":
         if kphio_inputs is None:
             raise ValueError(
-                "PModelConfig.kphio_method='sandoval' needs the per-column "
+                "PModelConfig.intrinsic_quantum_yield='sandoval' needs the per-column "
                 "aridity index and mGDD0 (sandoval_inputs at init); this caller "
                 "does not pass them (e.g. the P-hydro optimum is not wired).")
         return phi0_sandoval(T_K, *kphio_inputs)
@@ -558,13 +603,13 @@ def phi0_sandoval(T_K: jax.Array, aridity_index: jax.Array,
 
 def kphio_inputs_from(acclim: "PModelAcclimState | None",
                  cfg: "PModelConfig") -> tuple | None:
-    """``(aridity_index, mgdd0_c)`` from the state under kphio_method=
+    """``(aridity_index, mgdd0_c)`` from the state under intrinsic_quantum_yield=
     'sandoval' (raise if absent), else ``None``."""
-    if _check_kphio_method(cfg) != "sandoval":
+    if _check_quantum_yield(cfg) != "sandoval":
         return None
     if acclim is None or acclim.aridity_index is None or acclim.mgdd0_c is None:
         raise ValueError(
-            "PModelConfig.kphio_method='sandoval' but the acclimation state "
+            "PModelConfig.intrinsic_quantum_yield='sandoval' but the acclimation state "
             "carries no aridity_index / mgdd0_c: initialise it with "
             "init_pmodel_acclim(..., sandoval_inputs=(ai, mgdd0)).")
     return (acclim.aridity_index, acclim.mgdd0_c)
@@ -576,7 +621,7 @@ def phi0_c3(T_K: jax.Array, kphio_ref: jax.Array | float) -> jax.Array:
     ``kphio_ref * (0.352 + 0.022 Tc - 3.4e-4 Tc^2)`` (Bernacchi et al. 2003;
     rpmodel / pyrealm ``QuantumYieldTemperature``), smoothly floored at 0.
     Shared by the acclimated optimum and, under
-    ``CanopyConfig.light_response='pmodel_phi0'``, by the canopy kernel's
+    ``CanopyConfig.electron_transport_model='smith'``, by the canopy kernel's
     instantaneous electron transport, so the phi0 that sizes Vcmax/Jmax is
     the one that uses them.
     """
@@ -609,7 +654,7 @@ def acclimated_capacities(
             "PModelAcclimState. Initialise it (init_pmodel_acclim) or select "
             "capacity_scheme='prescribed' / g1_source='table'."
         )
-    if _check_acclimation(cfg) == "subdaily_noon":
+    if _check_acclimation(cfg) == "mengoli":
         return _realised_capacities(acclim, cfg)
     return capacities_at(acclim.t_mean_K, acclim.vpd_mean_pa,
                          acclim.co2_mean_ppm, acclim.ps_ema,
@@ -628,7 +673,7 @@ def capacities_at(
 ) -> PModelCapacities:
     """C3 least-cost optimum at GIVEN acclimation drivers (any scheme).
 
-    The ema_24h scheme calls this at the running means; the subdaily scheme
+    The han scheme calls this at the running means; the mengoli scheme
     at each day's noon-window means (the daily optimum it then smooths).
     """
     chi, xi, ci, gamma_star, big_k = optimal_chi(
@@ -652,9 +697,9 @@ def _require_subdaily(acclim: PModelAcclimState) -> None:
     missing = [f for f in _SUBDAILY_FIELDS if getattr(acclim, f) is None]
     if missing:
         raise ValueError(
-            "PModelConfig.acclimation='subdaily_noon' but the acclimation "
+            "PModelConfig.acclimation_scheme='mengoli' but the acclimation "
             f"state lacks {missing}: initialise it with init_pmodel_acclim "
-            "under the same config (a state built for ema_24h cannot be "
+            "under the same config (a state built for han cannot be "
             "used).")
 
 
@@ -697,11 +742,11 @@ def acclim_means(acclim: PModelAcclimState,
     current traits were set at, for consumers that read them directly (the
     stomatal-slope mapping, Gamma* for the C3/C4 slopes).
 
-    ema_24h: the state itself.  subdaily_noon: the running means replaced by
+    han: the state itself.  mengoli: the running means replaced by
     the last completed noon window's means (light is not read by those
     consumers and is left as the 24 h running mean).
     """
-    if _check_acclimation(cfg) == "ema_24h":
+    if _check_acclimation(cfg) == "han":
         return acclim
     _require_subdaily(acclim)
     return acclim._replace(t_mean_K=acclim.day_t_K,
@@ -783,7 +828,7 @@ def init_pmodel_acclim(
     """Cold-start acclimation state from the recorded config constants.
 
     ``sandoval_inputs = (aridity_index, mgdd0_c)`` (scalar or ``(ncol,)``)
-    are the climatological inputs of ``kphio_method='sandoval'``, required
+    are the climatological inputs of ``intrinsic_quantum_yield='sandoval'``, required
     there and refused otherwise (they would be inert).  mGDD0 is clamped to
     ``_MGDD0_RANGE_C`` (the JULES rule; outside it Topt is undefined).
 
@@ -805,18 +850,18 @@ def init_pmodel_acclim(
         psi_s_mean_mpa=None if soil_init is None else full(soil_init[0]),
         rsoil_mean=None if soil_init is None else full(soil_init[1]),
     )
-    if _check_kphio_method(cfg) == "sandoval":
+    if _check_quantum_yield(cfg) == "sandoval":
         if sandoval_inputs is None:
             raise ValueError(
-                "PModelConfig.kphio_method='sandoval' needs sandoval_inputs="
+                "PModelConfig.intrinsic_quantum_yield='sandoval' needs sandoval_inputs="
                 "(aridity_index, mgdd0_c) at init")
         if cfg.kphio != PModelConfig._field_defaults["kphio"]:
             raise ValueError(
                 f"PModelConfig.kphio={cfg.kphio} would be silently inert under "
-                "kphio_method='sandoval' (its peak 1/9 is fixed by the method; "
+                "intrinsic_quantum_yield='sandoval' (its peak 1/9 is fixed by the method; "
                 "pyrealm refuses the same); leave kphio at its default")
         if not cfg.kphio_temp:
-            raise ValueError("kphio_method='sandoval' is temperature-dependent; "
+            raise ValueError("intrinsic_quantum_yield='sandoval' is temperature-dependent; "
                              "kphio_temp=False is not supported")
         ai, mg = sandoval_inputs
         try:   # concrete inputs (the usual case): reject what makes phi0 NaN
@@ -835,15 +880,16 @@ def init_pmodel_acclim(
             mgdd0_c=jnp.clip(full(0.0) + jnp.asarray(mg, dtype=dtype), lo, hi))
     elif sandoval_inputs is not None:
         raise ValueError(
-            "sandoval_inputs given but PModelConfig.kphio_method="
-            f"{cfg.kphio_method!r}; they would be silently inert")
-    if _check_acclimation(cfg) == "ema_24h":
+            "sandoval_inputs given but PModelConfig.intrinsic_quantum_yield="
+            f"{cfg.intrinsic_quantum_yield!r}; they would be silently inert")
+    state = state._replace(dt_since_update_s=full(0.0))
+    if _check_acclimation(cfg) == "han":
         return state
     if soil_init is not None:
         raise ValueError(
-            "PModelConfig.acclimation='subdaily_noon' is not wired for "
+            "PModelConfig.acclimation_scheme='mengoli' is not wired for "
             "P-hydro (transpiration_stress='phydro'), whose optimum is solved "
-            "at the 24 h running means; select acclimation='ema_24h'.")
+            "on the driver EMA; select acclimation_scheme='han'.")
     # Subdaily cold start: the traits hold the optimum at the cold-start
     # drivers (the same recorded init constants) only until the first noon
     # window closes, which SEEDS them with that day's optimum (n_days = 0).
@@ -895,21 +941,57 @@ def in_noon_window(solar_hour: jax.Array, dt: float,
     return (h >= cfg.window_start_h - tol) & (h <= cfg.window_end_h + tol)
 
 
-def _advance_subdaily(new: PModelAcclimState, old: PModelAcclimState, *,
-                      T_K, ppfd, vpd_pa, co2_ppm, ps_pa, solar_hour,
-                      cfg: PModelConfig, dt: float) -> PModelAcclimState:
-    """Noon-window accumulation, daily optimum and daily trait memory.
+def acclimation_window(cfg: PModelConfig, dt: float, *, solar_hour=None,
+                       ppfd=None) -> tuple[jax.Array, jax.Array]:
+    """``(in_window, closes)`` of this step for ``cfg.acclimation_hours``.
 
-    Accumulate the drivers on window steps; on the LAST window step (the next
-    step falls outside) form the window means, evaluate the C3 and C4 optima
-    there, and update the realised traits — seeded with the optimum on the
-    first completed window, else ``real += alpha * (opt - real)`` (pyrealm
-    order: the memory acts on xi, Vcmax25, Jmax25 themselves).  The new
-    values take effect from the next step (pyrealm ``update_point='max'``).
+    ``24h``: every step is in the window, which closes on the day's last step
+    (local solar hour + dt reaches 24 h).  ``noon``: the
+    ``window_start_h..window_end_h`` local-solar window, closing on its last
+    step.  ``daytime``: steps with PAR > 0 (no clock needed); the window
+    closes on the first dark step after a lit one, so the mengoli daily
+    update lands one step after sunset (``closes`` then marks a step that is
+    itself OUTSIDE the window).
     """
-    _require_subdaily(old)
+    hours = cfg.acclimation_hours
+    if hours == "daytime":
+        if ppfd is None:
+            raise ValueError("acclimation_hours='daytime' needs the step's PAR")
+        inw = ppfd > 0.0
+        return inw, ~inw          # a dark step closes a lit run (checked by the caller)
+    if solar_hour is None:
+        raise ValueError(
+            f"acclimation_hours={hours!r} needs each step's local solar hour "
+            "(solar_hour=None): this caller does not pass the clock the "
+            "window is defined on.")
+    if hours == "24h":
+        step_h = dt / _S_PER_HOUR
+        inw = jnp.ones_like(jnp.asarray(solar_hour), dtype=bool)
+        close = (jnp.mod(jnp.round(solar_hour / step_h) * step_h, _HOURS_PER_DAY)
+                 + step_h >= _HOURS_PER_DAY - 1e-6 * step_h)  # coeff-ok: float tolerance on the rounded hour
+        return inw, close
     inw = in_noon_window(solar_hour, dt, cfg)
     close = inw & ~in_noon_window(solar_hour + dt / _S_PER_HOUR, dt, cfg)
+    return inw, close
+
+
+def _advance_subdaily(new: PModelAcclimState, old: PModelAcclimState, *,
+                      T_K, ppfd, vpd_pa, co2_ppm, ps_pa, inw, close,
+                      cfg: PModelConfig, dt: float) -> PModelAcclimState:
+    """Window accumulation, daily optimum and daily trait memory (mengoli).
+
+    Accumulate the drivers on window steps; when the window CLOSES form the
+    window means, evaluate the C3 and C4 optima there, and update the
+    realised traits — seeded with the optimum on the first completed window,
+    else ``real += alpha * (opt - real)``, ``alpha = 1/acclimation_days``
+    (pyrealm order: the memory acts on xi, Vcmax25, Jmax25 themselves).  The
+    new values take effect from the next step (pyrealm ``update_point='max'``).
+    ``inw``/``close`` come from :func:`acclimation_window`; for the
+    ``daytime`` hours ``close`` is the first dark step after a lit run.
+    """
+    _require_subdaily(old)
+    if cfg.acclimation_hours == "daytime":
+        close = close & (old.win_count > 0.0)
     w = inw.astype(old.win_count.dtype)
     # where(), not w * x: an off-window non-finite driver must not reach the
     # sums (0 * NaN = NaN; codex review round 1).
@@ -937,7 +1019,7 @@ def _advance_subdaily(new: PModelAcclimState, old: PModelAcclimState, *,
                         kphio_inputs=kphio_inputs_from(old, cfg))
     opt4 = capacities_c4_at(m_t, m_vpd, m_co2, m_ps, m_iabs, cfg)
     seed = old.n_days < 0.5
-    alpha = cfg.subdaily_alpha
+    alpha = 1.0 / cfg.acclimation_days
 
     def upd(real, optimum):
         smoothed = jnp.where(seed, optimum, real + alpha * (optimum - real))
@@ -1013,7 +1095,7 @@ def acclimated_capacities_c4(
             "PModelAcclimState. Initialise it (init_pmodel_acclim) or select "
             "capacity_scheme='prescribed' / g1_source='table'."
         )
-    if _check_acclimation(cfg) == "subdaily_noon":
+    if _check_acclimation(cfg) == "mengoli":
         _require_subdaily(acclim)
         _, _, _, gamma_star, _ = optimal_chi(
             acclim.day_t_K, acclim.day_vpd_pa, acclim.day_co2_ppm,
@@ -1085,8 +1167,8 @@ def acclim_trajectory(
 ) -> "PModelAcclimState":
     """Scan the acclimation update over a driver time series.
 
-    ``solar_hour`` (same leading time axis) is required under
-    ``acclimation='subdaily_noon'``.
+    ``solar_hour`` (same leading time axis) is required whenever
+    :func:`needs_solar_hour` says so.
 
     Drivers have a leading time axis ((n_time, ...) per leaf); returns the
     PER-STEP state trajectory (leaves (n_time, ...)) so a diagnostic
@@ -1126,12 +1208,13 @@ def advance_pmodel_acclim(
     rsoil_leaf: jax.Array | None = None,
     solar_hour: jax.Array | None = None,
 ) -> PModelAcclimState:
-    """One acclimation step: whole-day running means of every driver, plus,
-    under ``acclimation='subdaily_noon'``, the noon-window accumulation and
-    daily trait memory (:func:`_advance_subdaily`), which needs this step's
-    local ``solar_hour`` [h].
+    """One acclimation step: running means of every driver over the steps
+    ``acclimation_hours`` selects, plus, under ``acclimation_scheme=
+    'mengoli'``, the window accumulation and daily trait memory
+    (:func:`_advance_subdaily`).  ``solar_hour`` [h] is needed whenever
+    :func:`needs_solar_hour` says so.
 
-    A plain exponential moving average with e-folding time ``tau_acclim_s``
+    A plain exponential moving average with e-folding time ``acclimation_days``
     — every timestep, day and night, carries the same weight, so the means
     are the 24-hour (multi-day) averages the optimality literature sizes
     capacities for (daily / weekly / monthly means; Stocker et al. 2020).
@@ -1140,7 +1223,26 @@ def advance_pmodel_acclim(
     P-hydro soil-state means advance with the same gain when the step's
     ``psi_s_mpa``/``rsoil_leaf`` are given and the state carries them.
     """
-    gain = 1.0 - jnp.exp(-dt / cfg.tau_acclim_s)
+    scheme = _check_acclimation(cfg)
+    inw = close = None
+    if scheme == "mengoli":
+        # mengoli's window feeds the window sums only; the driver means stay
+        # the plain 24 h EMA (diagnostics, C4 path), as under han / 24h.
+        inw, close = acclimation_window(cfg, dt, solar_hour=solar_hour, ppfd=ppfd)
+    if scheme == "mengoli" or cfg.acclimation_hours == "24h":
+        gain = 1.0 - jnp.exp(-dt / acclimation_tau_s(cfg))
+        since = acclim.dt_since_update_s
+    else:
+        inw, close = acclimation_window(cfg, dt, solar_hour=solar_hour, ppfd=ppfd)
+        # Windowed half-hourly EMA: an in-window step carries the weight of
+        # the time elapsed since the previous in-window step, so the memory
+        # is ``acclimation_days`` of CALENDAR time (a plain dt/tau on noon
+        # steps alone would stretch 15 days to ~180).
+        prev = (jnp.zeros_like(T_K) if acclim.dt_since_update_s is None
+                else acclim.dt_since_update_s)
+        elapsed = prev + dt
+        gain = jnp.where(inw, 1.0 - jnp.exp(-elapsed / acclimation_tau_s(cfg)), 0.0)
+        since = jnp.where(inw, 0.0, elapsed)
     step = lambda mean, x: mean + gain * (x - mean)  # noqa: E731
     soil = {}
     if acclim.psi_s_mean_mpa is not None:
@@ -1157,15 +1259,11 @@ def advance_pmodel_acclim(
         vpd_mean_pa=step(acclim.vpd_mean_pa, vpd_pa),
         co2_mean_ppm=step(acclim.co2_mean_ppm, co2_ppm),
         ps_ema=step(acclim.ps_ema, ps_pa),
+        dt_since_update_s=since,
         **soil,
     )
-    if _check_acclimation(cfg) == "ema_24h":
+    if scheme == "han":
         return new
-    if solar_hour is None:
-        raise ValueError(
-            "PModelConfig.acclimation='subdaily_noon' needs each step's local "
-            "solar hour (solar_hour=None): this caller does not pass the "
-            "clock the noon window is defined on.")
     return _advance_subdaily(new, acclim, T_K=T_K, ppfd=ppfd, vpd_pa=vpd_pa,
-                             co2_ppm=co2_ppm, ps_pa=ps_pa,
-                             solar_hour=solar_hour, cfg=cfg, dt=dt)
+                             co2_ppm=co2_ppm, ps_pa=ps_pa, inw=inw,
+                             close=close, cfg=cfg, dt=dt)

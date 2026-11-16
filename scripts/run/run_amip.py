@@ -1391,20 +1391,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "BARE GROUND with a conductance that has no leaf-area "
                              "dependence. 'clm_ml' is the full multilayer canopy.")
     parser.add_argument("--land-capacity-scheme",
-                        choices=["prescribed", "p_model"],
+                        choices=["prescribed", "pmodel"],
                         default=_EXPERIMENT_DEFAULTS.land_capacity_scheme,
                         dest="land_capacity_scheme",
                         help="Source of the land photosynthetic capacities: "
-                             "'prescribed' (default, PFT tables) or 'p_model' "
+                             "'prescribed' (default, PFT tables) or 'pmodel' "
                              "(acclimated optimality Vcmax25 + Jmax ratio; "
                              "requires use_multilayer_land except under "
                              "simple_seb + land-stomatal-beta).")
     parser.add_argument("--land-g1-source",
-                        choices=["table", "p_model"],
+                        choices=["table", "pmodel"],
                         default=_EXPERIMENT_DEFAULTS.land_g1_source,
                         dest="land_g1_source",
                         help="Source of the Medlyn stomatal slope: 'table' "
-                             "(default) or 'p_model' (least-cost xi; the "
+                             "(default) or 'pmodel' (least-cost xi; the "
                              "active scheme's stomatal model must be medlyn).")
     parser.add_argument("--land-two-leaf-stomatal-model",
                         choices=["", "ball_berry", "medlyn", "leuning"],

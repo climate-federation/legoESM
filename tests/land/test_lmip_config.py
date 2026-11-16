@@ -371,7 +371,7 @@ def test_pmodel_switch_keys_default_and_validate():
     assert cfg.physics["canopy_capacity_scheme"] == "prescribed"
     assert cfg.physics["canopy_g1_source"] == "table"
     bad = _minimal()
-    bad["physics"]["canopy_capacity_scheme"] = "pmodel"
+    bad["physics"]["canopy_capacity_scheme"] = "optimum"
     with pytest.raises(ValueError, match="canopy_capacity_scheme"):
         validate_config(bad)
     bad2 = _minimal()
@@ -391,7 +391,7 @@ def test_pmodel_switches_that_would_be_dropped_are_refused():
                         "year_start": 2000, "year_end": 2000},
             "surfdata": {"path": "sd.nc"},
             "time": {"dt": 3600.0, "n_steps": 4, "start_doy": 0.0}}
-    pm = {"canopy_capacity_scheme": "p_model", "stomatal_model": "medlyn"}
+    pm = {"canopy_capacity_scheme": "pmodel", "stomatal_model": "medlyn"}
     with pytest.raises(ValueError, match="calibrated_land_physics"):
         validate_config({**base, "physics": {
             "land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
@@ -417,7 +417,7 @@ def test_co2_file_defaults_to_empty_and_must_be_a_string():
 
 
 def test_optimality_wrapper_fills_the_switches_and_refuses_disagreement():
-    """physics.optimality fills the four optimality switches (least_cost |
+    """physics.optimality fills the four optimality switches (pmodel |
     phydro); a switch also given must agree; the P-hydro arm's three 'phydro'
     switches must come together."""
     import copy
@@ -433,6 +433,8 @@ def test_optimality_wrapper_fills_the_switches_and_refuses_disagreement():
     }
     for arm, switches in OPTIMALITY_SWITCHES.items():
         cfg = copy.deepcopy(base); cfg["physics"]["optimality"] = arm
+        if arm == "pmodel":
+            cfg["physics"]["pmodel_acclimation_scheme"] = "han"
         phys = validate_config(cfg).physics
         assert "optimality" not in phys
         for k, v in switches.items():
@@ -461,77 +463,83 @@ def test_pmodel_acclimation_key_defaults_validates_and_refuses_inert_use():
     base = {
         "grid": {"type": "latlon", "resolution": 4},
         "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
-                    "bulk_scheme": "most", "optimality": "least_cost"},
+                    "bulk_scheme": "most", "optimality": "pmodel",
+                    "pmodel_acclimation_scheme": "han"},
         "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000, "year_end": 2000},
         "surfdata": {"path": "x.nc"},
         "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
         "output": {"tapes": [{"name": "d", "freq": "daily", "average": "mean", "vars": ["GPP"]}]},
     }
-    assert validate_config(copy.deepcopy(base)).physics["pmodel_acclimation"] == "ema_24h"
-    ok = copy.deepcopy(base); ok["physics"]["pmodel_acclimation"] = "subdaily_noon"
-    assert validate_config(ok).physics["pmodel_acclimation"] == "subdaily_noon"
-    bad = copy.deepcopy(base); bad["physics"]["pmodel_acclimation"] = "noon"
-    with pytest.raises(ValueError, match="pmodel_acclimation"):
+    assert validate_config(copy.deepcopy(base)).physics["pmodel_acclimation_scheme"] == "han"
+    none = copy.deepcopy(base); none["physics"]["optimality"] = "none"
+    none["physics"].pop("pmodel_acclimation_scheme")
+    assert "pmodel_acclimation_scheme" not in validate_config(none).physics
+    ok = copy.deepcopy(base); ok["physics"]["pmodel_acclimation_scheme"] = "mengoli"
+    assert validate_config(ok).physics["pmodel_acclimation_scheme"] == "mengoli"
+    bad = copy.deepcopy(base); bad["physics"]["pmodel_acclimation_scheme"] = "noon"
+    with pytest.raises(ValueError, match="pmodel_acclimation_scheme"):
         validate_config(bad)
     inert = copy.deepcopy(base); inert["physics"].pop("optimality")
-    inert["physics"]["pmodel_acclimation"] = "subdaily_noon"
-    with pytest.raises(ValueError, match="silently inert"):
+    inert["physics"]["pmodel_acclimation_scheme"] = "mengoli"
+    with pytest.raises(ValueError, match="optimality='pmodel' only"):
         validate_config(inert)
     ph = copy.deepcopy(base); ph["physics"]["optimality"] = "phydro"
-    ph["physics"]["pmodel_acclimation"] = "subdaily_noon"
-    with pytest.raises(ValueError, match="P-hydro"):
+    ph["physics"]["pmodel_acclimation_scheme"] = "mengoli"
+    with pytest.raises(ValueError, match="optimality='pmodel' only"):
         validate_config(ph)
     seb = copy.deepcopy(base); seb["physics"]["surface_scheme"] = "simple_seb"
     seb["physics"].pop("optimality")
-    seb["physics"].update(canopy_capacity_scheme="p_model", stomata_enabled=True,
-                          pmodel_acclimation="subdaily_noon")
+    seb["physics"].update(canopy_capacity_scheme="pmodel", stomata_enabled=True,
+                          pmodel_acclimation_scheme="mengoli")
     with pytest.raises(ValueError, match="two-leaf canopy only"):
         validate_config(seb)
 
 
-def test_canopy_light_response_key_defaults_and_refuses_without_pmodel():
+def test_electron_transport_model_key_defaults_and_refuses_without_pmodel():
     import copy
     from legoesm.land.lmip_config import validate_config
     base = {
         "grid": {"type": "latlon", "resolution": 4},
         "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
-                    "bulk_scheme": "most", "optimality": "least_cost"},
+                    "bulk_scheme": "most", "optimality": "pmodel",
+                    "pmodel_acclimation_scheme": "han"},
         "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000, "year_end": 2000},
         "surfdata": {"path": "x.nc"},
         "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
         "output": {"tapes": [{"name": "d", "freq": "daily", "average": "mean", "vars": ["GPP"]}]},
     }
-    assert validate_config(copy.deepcopy(base)).physics["canopy_light_response"] == "clm"
-    ok = copy.deepcopy(base); ok["physics"]["canopy_light_response"] = "pmodel_phi0"
-    assert validate_config(ok).physics["canopy_light_response"] == "pmodel_phi0"
-    bad = copy.deepcopy(base); bad["physics"]["canopy_light_response"] = "smith"
-    with pytest.raises(ValueError, match="canopy_light_response"):
+    assert validate_config(copy.deepcopy(base)).physics["electron_transport_model"] == "nrh"
+    ok = copy.deepcopy(base); ok["physics"]["electron_transport_model"] = "smith"
+    assert validate_config(ok).physics["electron_transport_model"] == "smith"
+    bad = copy.deepcopy(base); bad["physics"]["electron_transport_model"] = "pmodel_phi0"
+    with pytest.raises(ValueError, match="renamed 'smith'"):
         validate_config(bad)
     nopm = copy.deepcopy(base); nopm["physics"].pop("optimality")
-    nopm["physics"]["canopy_light_response"] = "pmodel_phi0"
-    with pytest.raises(ValueError, match="canopy_capacity_scheme='p_model'"):
+    nopm["physics"].pop("pmodel_acclimation_scheme")
+    nopm["physics"]["electron_transport_model"] = "smith"
+    with pytest.raises(ValueError, match="canopy_capacity_scheme='pmodel'"):
         validate_config(nopm)
 
 
-def test_pmodel_chi_stomatal_model_requires_pmodel_capacities_and_no_slope():
+def test_pmodel_stomatal_model_requires_pmodel_capacities_and_no_slope():
     import copy
     from legoesm.land.lmip_config import validate_config
     base = {
         "grid": {"type": "latlon", "resolution": 4},
         "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
-                    "bulk_scheme": "most", "stomatal_model": "pmodel_chi",
-                    "canopy_capacity_scheme": "p_model", "canopy_g1_source": "table"},
+                    "bulk_scheme": "most", "stomatal_model": "pmodel",
+                    "canopy_capacity_scheme": "pmodel", "canopy_g1_source": "table"},
         "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000, "year_end": 2000},
         "surfdata": {"path": "x.nc"},
         "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
         "output": {"tapes": [{"name": "d", "freq": "daily", "average": "mean", "vars": ["GPP"]}]},
     }
-    assert validate_config(copy.deepcopy(base)).physics["stomatal_model"] == "pmodel_chi"
-    bad = copy.deepcopy(base); bad["physics"]["canopy_g1_source"] = "p_model"
-    with pytest.raises(ValueError, match="pmodel_chi|g1_source"):
+    assert validate_config(copy.deepcopy(base)).physics["stomatal_model"] == "pmodel"
+    bad = copy.deepcopy(base); bad["physics"]["canopy_g1_source"] = "pmodel"
+    with pytest.raises(ValueError, match="pmodel|g1_source"):
         validate_config(bad)
     bad2 = copy.deepcopy(base); bad2["physics"]["canopy_capacity_scheme"] = "prescribed"
-    with pytest.raises(ValueError, match="pmodel_chi"):
+    with pytest.raises(ValueError, match="pmodel"):
         validate_config(bad2)
 
 
@@ -540,31 +548,33 @@ def test_sandoval_kphio_needs_its_file_and_the_file_needs_sandoval():
     base = {
         "grid": {"type": "latlon", "resolution": 4},
         "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
-                    "bulk_scheme": "most", "optimality": "least_cost"},
+                    "bulk_scheme": "most", "optimality": "pmodel",
+                    "pmodel_acclimation_scheme": "han"},
         "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000, "year_end": 2000},
         "surfdata": {"path": "x.nc"},
         "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
         "output": {"tapes": [{"name": "d", "freq": "daily", "average": "mean", "vars": ["GPP"]}]},
     }
     c = validate_config(copy.deepcopy(base))
-    assert c.physics["pmodel_kphio_method"] == "temperature"
+    assert c.physics["intrinsic_quantum_yield"] == "temperature"
     assert c.surfdata["sandoval_file"] == ""
-    ok = copy.deepcopy(base); ok["physics"]["pmodel_kphio_method"] = "sandoval"
+    ok = copy.deepcopy(base); ok["physics"]["intrinsic_quantum_yield"] = "sandoval"
     ok["surfdata"]["sandoval_file"] = "sv.nc"
     assert validate_config(ok).surfdata["sandoval_file"] == "sv.nc"
-    nofile = copy.deepcopy(base); nofile["physics"]["pmodel_kphio_method"] = "sandoval"
+    nofile = copy.deepcopy(base); nofile["physics"]["intrinsic_quantum_yield"] = "sandoval"
     with pytest.raises(ValueError, match="sandoval_file"):
         validate_config(nofile)
     inert = copy.deepcopy(base); inert["surfdata"]["sandoval_file"] = "sv.nc"
     with pytest.raises(ValueError, match="inert"):
         validate_config(inert)
     nopm = copy.deepcopy(base); nopm["physics"].pop("optimality")
-    nopm["physics"]["pmodel_kphio_method"] = "sandoval"
+    nopm["physics"].pop("pmodel_acclimation_scheme")
+    nopm["physics"]["intrinsic_quantum_yield"] = "sandoval"
     nopm["surfdata"]["sandoval_file"] = "sv.nc"
     with pytest.raises(ValueError, match="silently inert"):
         validate_config(nopm)
-    typo = copy.deepcopy(base); typo["physics"]["pmodel_kphio_method"] = "sandovl"
-    with pytest.raises(ValueError, match="pmodel_kphio_method"):
+    typo = copy.deepcopy(base); typo["physics"]["intrinsic_quantum_yield"] = "sandovl"
+    with pytest.raises(ValueError, match="intrinsic_quantum_yield"):
         validate_config(typo)
 
 
@@ -576,3 +586,85 @@ def test_params_block_defaults_empty_and_must_be_a_mapping():
     bad = _minimal(); bad["params"] = [1.0]
     with pytest.raises(ValueError, match="params must be a mapping"):
         validate_config(bad)
+
+
+def _two_leaf_base(**physics):
+    import copy
+    base = {
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most"},
+        "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": "x.nc"},
+        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "d", "freq": "daily", "average": "mean", "vars": ["GPP"]}]},
+    }
+    base["physics"].update(physics)
+    return copy.deepcopy(base)
+
+
+@pytest.mark.parametrize("physics,hint", [
+    ({"optimality": "least_cost"}, "renamed 'pmodel'"),
+    ({"canopy_capacity_scheme": "p_model"}, "renamed 'pmodel'"),
+    ({"canopy_g1_source": "p_model"}, "renamed 'pmodel'"),
+    ({"stomatal_model": "pmodel_chi"}, "renamed 'pmodel'"),
+    ({"optimality": "pmodel", "pmodel_acclimation_scheme": "ema_24h"}, "renamed 'han'"),
+    ({"optimality": "pmodel", "pmodel_acclimation_scheme": "subdaily_noon"}, "renamed 'mengoli'"),
+    ({"optimality": "pmodel", "pmodel_acclimation": "han"}, "renamed physics.pmodel_acclimation_scheme"),
+    ({"canopy_light_response": "clm"}, "renamed physics.electron_transport_model"),
+    ({"electron_transport_model": "clm"}, "renamed 'nrh'"),
+    ({"electron_transport_model": "pmodel_phi0"}, "renamed 'smith'"),
+    ({"pmodel_kphio_method": "temperature"}, "renamed physics.intrinsic_quantum_yield"),
+])
+def test_retired_switch_strings_are_refused_with_the_new_name(physics, hint):
+    from legoesm.land.lmip_config import validate_config
+    with pytest.raises(ValueError, match=hint):
+        validate_config(_two_leaf_base(**physics))
+
+
+def test_optimality_arms_pin_stomata_hours_and_days():
+    """The four arms resolve to the table of docs/land/optimality_switches.md."""
+    from legoesm.land.lmip_config import validate_config
+    want = {
+        ("none",): dict(canopy_capacity_scheme="prescribed", canopy_g1_source="table",
+                        stomatal_model="ball_berry", pmodel_acclimation_hours="24h"),
+        ("pmodel", "han"): dict(canopy_capacity_scheme="pmodel", canopy_g1_source="pmodel",
+                                stomatal_model="medlyn", pmodel_acclimation_hours="24h"),
+        ("pmodel", "mengoli"): dict(canopy_capacity_scheme="pmodel", canopy_g1_source="table",
+                                    stomatal_model="pmodel", pmodel_acclimation_hours="noon"),
+        ("phydro",): dict(canopy_capacity_scheme="phydro", canopy_g1_source="table",
+                          stomatal_model="phydro", pmodel_acclimation_hours="24h"),
+    }
+    for arm, exp in want.items():
+        phys = {"optimality": arm[0]}
+        if len(arm) > 1:
+            phys["pmodel_acclimation_scheme"] = arm[1]
+        got = validate_config(_two_leaf_base(**phys)).physics
+        for k, v in exp.items():
+            assert got[k] == v, (arm, k, got[k])
+        assert got["pmodel_acclimation_days"] == 15.0
+        assert got["electron_transport_model"] == "nrh"
+        assert got["intrinsic_quantum_yield"] == "temperature"
+    # han admits ball_berry, refuses leuning / pmodel; mengoli pins pmodel
+    ok = validate_config(_two_leaf_base(optimality="pmodel", pmodel_acclimation_scheme="han",
+                                        stomatal_model="ball_berry")).physics
+    assert ok["stomatal_model"] == "ball_berry"
+    for sm in ("leuning", "pmodel", "phydro"):
+        with pytest.raises(ValueError, match="admits stomatal_model"):
+            validate_config(_two_leaf_base(optimality="pmodel", pmodel_acclimation_scheme="han",
+                                           stomatal_model=sm))
+    with pytest.raises(ValueError, match="admits stomatal_model"):
+        validate_config(_two_leaf_base(optimality="pmodel", pmodel_acclimation_scheme="mengoli",
+                                       stomatal_model="medlyn"))
+    # hours / days given explicitly override the arm defaults
+    got = validate_config(_two_leaf_base(optimality="pmodel", pmodel_acclimation_scheme="han",
+                                         pmodel_acclimation_hours="daytime",
+                                         pmodel_acclimation_days=7)).physics
+    assert got["pmodel_acclimation_hours"] == "daytime" and got["pmodel_acclimation_days"] == 7.0
+    with pytest.raises(ValueError, match="pmodel_acclimation_days"):
+        validate_config(_two_leaf_base(optimality="pmodel", pmodel_acclimation_scheme="han",
+                                       pmodel_acclimation_days=0))
+    # smith electron transport is admitted under the phydro arm too
+    got = validate_config(_two_leaf_base(optimality="phydro",
+                                         electron_transport_model="smith")).physics
+    assert got["electron_transport_model"] == "smith"

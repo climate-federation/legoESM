@@ -21,8 +21,15 @@ from legoesm.land.canopy.sif import SIFConfig
 # Valid canopy Vcmax25 depth profiles (see radiative_transfer.canopy
 # Vcmax integral and coordination_kn).
 VALID_VCMAX_PROFILES = ("kn", "coordination")
-# C3 electron-transport light response (CanopyConfig.light_response).
-VALID_LIGHT_RESPONSES = ("clm", "pmodel_phi0")
+# C3 electron-transport model of the half-hourly FvCB step
+# (CanopyConfig.electron_transport_model): "nrh" = non-rectangular hyperbola
+# (theta 0.7, I_PSII = 0.5*0.85*APAR; the standard FvCB form of CLM / JULES /
+# Bonan); "smith" = J = 4 phi0(T_leaf) I / sqrt(1 + (4 phi0 I / Jmax)^2), the
+# P-model / pyrealm form (Mengoli 2022, pyrealm SubdailyPModel, the JULES
+# P-model lane).  The ACCLIMATED sizing of Jmax25 (han, mengoli, phydro)
+# always inverts the Smith curve, whatever this switch says.
+VALID_ELECTRON_TRANSPORT = ("nrh", "smith")
+_RETIRED_ELECTRON_TRANSPORT = {"clm": "nrh", "pmodel_phi0": "smith"}
 from legoesm.land.p_model import (
     VALID_CAPACITY_SCHEMES,
     VALID_G1_SOURCES,
@@ -151,7 +158,8 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 # Valid values for the static leaf-gas-exchange dispatch field.  Kept next to
 # the config so the fail-early validator and the config default cannot drift.
 _VALID_STOMATAL_MODELS = ("ball_berry", "medlyn", "leuning", "phydro",
-                          "pmodel_chi")
+                          "pmodel")
+_RETIRED_STOMATAL_MODELS = {"pmodel_chi": "pmodel"}
 VALID_LE_MODULES = ("BT", "PM")
 
 # Valid values for the CLM-ML canopy-airspace turbulence dispatch field
@@ -258,14 +266,14 @@ class CanopyConfig(NamedTuple):
     # --- P-model optimality switches (land/p_model.py; appended last) ---
     # Source of the leaf photosynthetic capacities: "prescribed" (default —
     # PFT tables / CanopyLandParams, bit-identical legacy behaviour) or
-    # "p_model" (acclimated leaf-top Vcmax25 + Jmax25/Vcmax25 ratio from the
+    # "pmodel" (acclimated leaf-top Vcmax25 + Jmax25/Vcmax25 ratio from the
     # least-cost/coordination optimum at the running daytime-mean drivers;
     # C4 capacities and slopes come from the rpmodel c4 method with the
     # beta/9 cost ratio — both pathways optimality-supplied).
-    capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
+    capacity_scheme: str = "prescribed"   # "prescribed" | "pmodel" | "phydro"
     # Source of the Medlyn slope: "table" (default — per-PFT m_C3/m_C4) or
-    # "p_model" (predicted g1 = xi; requires stomatal_model="medlyn").
-    g1_source: str = "table"              # "table" | "p_model"
+    # "pmodel" (predicted g1 = xi; requires stomatal_model="medlyn").
+    g1_source: str = "table"              # "table" | "pmodel"
     # NB: the P-model tunables (PModelConfig) live ONCE per land config at
     # the root (MultiLayerLandConfig.p_model / LandConfig.p_model), not here —
     # a second instance in one built tree would make land.p_model.* overrides
@@ -293,15 +301,17 @@ class CanopyConfig(NamedTuple):
     # capacity at high LAI (bottom/top ~ e^-5.8 at LAI=8).
     vcmax_profile: str = "kn"             # "kn" | "coordination"
     vcmax_light_frac: float = 0.35
-    # --- C3 light response of electron transport (appended last) ---
-    # "clm" (default — CLM5 / Bonan non-rectangular hyperbola, theta = 0.7,
-    # I = 0.5 * 0.85 * APAR, temperature-independent initial yield ~0.106
-    # mol C/photon; bit-identical legacy behaviour) or "pmodel_phi0" — the
-    # P-model form J = 4 phi0(T_leaf) I / sqrt(1 + (4 phi0 I / Jmax)^2) with
-    # the SAME phi0(T) (PModelConfig.kphio x Bernacchi 2003) that sizes the
-    # acclimated Vcmax/Jmax (JULES leaf_limits; pyrealm SubdailyPModel).
-    # Requires capacity_scheme='p_model'.
-    light_response: str = "clm"           # "clm" | "pmodel_phi0"
+    # --- C3 electron-transport model of the half-hourly step (appended last) ---
+    # "nrh" (default for every arm — CLM5 / Bonan non-rectangular hyperbola,
+    # theta = 0.7, I = 0.5 * 0.85 * APAR, temperature-independent initial
+    # yield ~0.106 mol C/photon; bit-identical legacy behaviour) or "smith" —
+    # the P-model form J = 4 phi0(T_leaf) I / sqrt(1 + (4 phi0 I / Jmax)^2)
+    # with the phi0(T) (PModelConfig.kphio x Bernacchi 2003, or Sandoval) of
+    # the P model (JULES P-model lane; pyrealm SubdailyPModel; Mengoli 2022).
+    # Requires an optimality capacity source (capacity_scheme 'pmodel' or
+    # 'phydro').  The acclimated Jmax25 sizing inverts the Smith curve
+    # regardless (see VALID_ELECTRON_TRANSPORT).
+    electron_transport_model: str = "nrh"   # "nrh" | "smith"
     # --- Run layout (appended last; not physics) ---
     # True when the driver splits the columns across devices (run_lmip_biophys
     # --column-devices > 1): the canopy then solves each device's block as one
@@ -319,9 +329,11 @@ class CanopyConfig(NamedTuple):
         keeps its own raise as a backstop).  Returns ``self`` for chaining.
         """
         if self.stomatal_model not in _VALID_STOMATAL_MODELS:
+            _ren = _RETIRED_STOMATAL_MODELS.get(self.stomatal_model)
             raise ValueError(
                 f"unknown stomatal_model {self.stomatal_model!r}; the stomatal "
-                f"conductance scheme must be one of {_VALID_STOMATAL_MODELS}")
+                f"conductance scheme must be one of {_VALID_STOMATAL_MODELS}"
+                + (f" ('{self.stomatal_model}' was renamed '{_ren}')" if _ren else ""))
         if self.LE_module not in VALID_LE_MODULES:
             raise ValueError(
                 f"unknown LE_module {self.LE_module!r}; the leaf-energy module "
@@ -332,11 +344,15 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 f"unknown capacity_scheme {self.capacity_scheme!r}; the "
                 f"photosynthetic-capacity source must be one of "
-                f"{VALID_CAPACITY_SCHEMES}")
+                f"{VALID_CAPACITY_SCHEMES}"
+                + (" ('p_model' was renamed 'pmodel')"
+                   if self.capacity_scheme == "p_model" else ""))
         if self.g1_source not in VALID_G1_SOURCES:
             raise ValueError(
                 f"unknown g1_source {self.g1_source!r}; the Medlyn-slope scheme "
-                f"must be one of {VALID_G1_SOURCES}")
+                f"must be one of {VALID_G1_SOURCES}"
+                + (" ('p_model' was renamed 'pmodel')"
+                   if self.g1_source == "p_model" else ""))
         if self.vcmax_profile not in VALID_VCMAX_PROFILES:
             raise ValueError(
                 f"unknown vcmax_profile {self.vcmax_profile!r}; the canopy "
@@ -352,26 +368,30 @@ class CanopyConfig(NamedTuple):
                 f"vcmax_profile='coordination' (got 'kn'); it would be "
                 f"silently inert - select the coordination profile or drop "
                 f"the override")
-        if self.stomatal_model == "pmodel_chi" and (
-                self.capacity_scheme != "p_model" or self.g1_source != "table"):
+        if self.stomatal_model == "pmodel" and (
+                self.capacity_scheme != "pmodel" or self.g1_source != "table"):
             # ci = chi(xi) * Ca with xi from the P-model optimum; no slope is
             # read, so a predicted slope would be inert.
             raise ValueError(
-                "stomatal_model='pmodel_chi' sets ci from the P-model xi: it "
-                "requires capacity_scheme='p_model' and g1_source='table' (got "
+                "stomatal_model='pmodel' sets ci from the P-model xi: it "
+                "requires capacity_scheme='pmodel' and g1_source='table' (got "
                 f"{self.capacity_scheme!r}, {self.g1_source!r})")
-        if self.light_response not in VALID_LIGHT_RESPONSES:
+        if self.electron_transport_model not in VALID_ELECTRON_TRANSPORT:
+            _ren = _RETIRED_ELECTRON_TRANSPORT.get(self.electron_transport_model)
             raise ValueError(
-                f"unknown light_response {self.light_response!r}; the C3 "
-                f"electron-transport light response must be one of "
-                f"{VALID_LIGHT_RESPONSES}")
-        if (self.light_response == "pmodel_phi0"
-                and self.capacity_scheme != "p_model"):
+                f"unknown electron_transport_model "
+                f"{self.electron_transport_model!r}; the C3 electron-transport "
+                f"model must be one of {VALID_ELECTRON_TRANSPORT}"
+                + (f" ('{self.electron_transport_model}' was renamed '{_ren}')"
+                   if _ren else ""))
+        if (self.electron_transport_model == "smith"
+                and self.capacity_scheme not in ("pmodel", "phydro")):
             raise ValueError(
-                "light_response='pmodel_phi0' uses the P-model quantum yield "
-                "that sizes the acclimated capacities; it requires "
-                f"capacity_scheme='p_model' (got {self.capacity_scheme!r})")
-        # NB: g1_source='p_model' with a non-Medlyn stomatal model is legal
+                "electron_transport_model='smith' uses the P-model quantum "
+                "yield that sizes the acclimated capacities; it requires "
+                "capacity_scheme='pmodel' or 'phydro' (got "
+                f"{self.capacity_scheme!r})")
+        # NB: g1_source='pmodel' with a non-Medlyn stomatal model is legal
         # ONLY under transpiration_stress='phydro' (whose slope mapping
         # covers every model); this config cannot see that switch, so the
         # cross-check lives at the consumers (multilayer step /
@@ -933,17 +953,17 @@ class CLMMLCanopyConfig(NamedTuple):
     # wants the full CLM PFT parameterisation validated first.
     use_surfdata_pft: bool = False
     # --- P-model optimality switches (land/p_model.py; appended last) ---
-    # capacity_scheme="p_model" injects the acclimated per-column leaf-top
+    # capacity_scheme="pmodel" injects the acclimated per-column leaf-top
     # Vcmax25 into the canopy nitrogen profile (generic per-column provider;
     # the per-PFT table stays the default) AND unifies the growth-temperature
     # clock (the P-model acclimation temperature replaces the backend's
-    # 10-day t_a10 for the Kattge & Knorr entropies).  g1_source="p_model"
+    # 10-day t_a10 for the Kattge & Knorr entropies).  g1_source="pmodel"
     # injects the predicted per-column Medlyn slope (requires
     # stomatal_model="medlyn").  pmodel_rjv25 additionally replaces the
     # backend's Jmax25:Vcmax25 acclimation ratio with the coordination
     # optimum (option; off keeps the backend closure).
-    capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
-    g1_source: str = "table"              # "table" | "p_model"
+    capacity_scheme: str = "prescribed"   # "prescribed" | "pmodel" | "phydro"
+    g1_source: str = "table"              # "table" | "pmodel"
     pmodel_rjv25: bool = False
 
     def validate(self) -> "CLMMLCanopyConfig":
@@ -998,17 +1018,17 @@ class CLMMLCanopyConfig(NamedTuple):
                 "capacity_scheme='phydro' (the P-hydro arm) lives in the "
                 "two-leaf canopy; the CLM-ML scheme carries its own plant "
                 "hydraulics")
-        if self.g1_source == "p_model" and self.stomatal_model != "medlyn":
+        if self.g1_source == "pmodel" and self.stomatal_model != "medlyn":
             raise ValueError(
-                "g1_source='p_model' predicts a MEDLYN slope and requires "
+                "g1_source='pmodel' predicts a MEDLYN slope and requires "
                 f"stomatal_model='medlyn'; got {self.stomatal_model!r}.")
-        if self.capacity_scheme == "p_model" and self.vcmax25_override is not None:
+        if self.capacity_scheme == "pmodel" and self.vcmax25_override is not None:
             raise ValueError(
-                "capacity_scheme='p_model' and vcmax25_override are two "
+                "capacity_scheme='pmodel' and vcmax25_override are two "
                 "providers for one canopy-top Vcmax25; select one.")
-        if self.pmodel_rjv25 and self.capacity_scheme != "p_model":
+        if self.pmodel_rjv25 and self.capacity_scheme != "pmodel":
             raise ValueError(
                 "pmodel_rjv25=True (coordination Jmax25:Vcmax25 ratio) "
-                "requires capacity_scheme='p_model'; the ratio has no meaning "
+                "requires capacity_scheme='pmodel'; the ratio has no meaning "
                 "without the optimality capacity source.")
         return self

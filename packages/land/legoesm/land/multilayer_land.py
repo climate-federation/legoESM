@@ -582,7 +582,7 @@ def _step_multilayer_land_impl(
         if not pmodel_switches_active(config.surface_scheme, config.stomata):
             raise ValueError(
                 "transpiration_stress='phydro' needs a P-model switch "
-                "(capacity_scheme/g1_source='p_model') to feed the profit "
+                "(capacity_scheme/g1_source='pmodel') to feed the profit "
                 "optimum into; with prescribed parameters the switch would "
                 "be silently inert.")
     # The supply is also needed when the state carries the P-hydro soil-state
@@ -782,7 +782,7 @@ def _step_multilayer_land_impl(
             _caps_ml = acclimated_capacities(state.pmodel_acclim, config.p_model)
             _caps4_ml = acclimated_capacities_c4(
                 state.pmodel_acclim, config.p_model)
-            if _cc_ml.capacity_scheme == "p_model":
+            if _cc_ml.capacity_scheme == "pmodel":
                 _v_col = jnp.where(_c3_mask, _caps_ml.vcmax25_leaf,
                                    _caps4_ml.vcmax25_c4_leaf)
                 # Unified growth-temperature clock (user decision): the
@@ -793,7 +793,7 @@ def _step_multilayer_land_impl(
                     # C3-only by construction: the backend zeroes jmax25top
                     # for C4 columns regardless of the injected ratio.
                     _jv_col = _caps_ml.rjv25
-            if _cc_ml.g1_source == "p_model":
+            if _cc_ml.g1_source == "pmodel":
                 _g1_col = jnp.where(_c3_mask, _caps_ml.g1_kpa,
                                     _caps4_ml.g1_c4_kpa)
 
@@ -1202,13 +1202,13 @@ def _step_multilayer_land_impl(
         # (its own radiative transfer, APAR_Sun / (fSun * LAI)); the schemes
         # without that sunlit/shaded transfer (CLM-ML, simple SEB) still use
         # the incident top-of-canopy PPFD from the shared SW split.
-        if (config.p_model.acclimation == "subdaily_noon"
+        if (config.p_model.acclimation_scheme == "mengoli"
                 and not isinstance(config.surface_scheme, TwoLeafCanopyConfig)):
             # The noon-window optimum is sized on the sunlit-leaf absorbed
             # PAR of the two-leaf transfer (comparable to the JULES top-leaf
             # light); the other schemes have no such leaf-level light.
             raise ValueError(
-                "PModelConfig.acclimation='subdaily_noon' is implemented for "
+                "PModelConfig.acclimation_scheme='mengoli' is implemented for "
                 "the two-leaf canopy only; got surface scheme "
                 f"{type(config.surface_scheme).__name__}")
         if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
@@ -1239,8 +1239,8 @@ def _step_multilayer_land_impl(
                        else _phydro_supply.psi_s_mpa),
             rsoil_leaf=(None if _phydro_supply is None
                         else _phydro_supply.rsoil_leaf),
-            # Local solar hour of this step (subdaily_noon only; the driver
-            # supplies it — the land model carries no clock).
+            # Local solar hour of this step (noon window / mengoli day
+            # boundary; the driver supplies it — the land model has no clock).
             solar_hour=solar_hour,
         )
     else:
@@ -1752,9 +1752,9 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
         else:
             caps = acclimated_capacities(acc, config.p_model)
         chi = caps.chi
-        if cc.capacity_scheme in ("p_model", "phydro"):
+        if cc.capacity_scheme in ("pmodel", "phydro"):
             vc = caps.vcmax25_leaf
-        if cc.g1_source == "p_model":
+        if cc.g1_source == "pmodel":
             slope = slope_for_model(cc.stomatal_model, chi, acc, gstar,
                                     d0_leuning_kpa=cc.d0_leuning_kpa)
     stress = jnp.ones_like(wfrac) if _no_theta else wfrac

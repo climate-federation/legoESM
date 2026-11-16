@@ -520,17 +520,17 @@ def test_calibrated_land_rejects_a_contradicting_config(tmp_path):
 
 @pytest.mark.parametrize("arm,extra", [
     ("baseline", {"stomatal_model": "medlyn"}),
-    ("least_cost", {"optimality": "least_cost"}),
+    ("pmodel", {"optimality": "pmodel", "pmodel_acclimation_scheme": "han"}),
     ("phydro", {"optimality": "phydro"}),
-    ("least_cost_subdaily", {"optimality": "least_cost",
-                             "pmodel_acclimation": "subdaily_noon"}),
+    ("pmodel_subdaily", {"optimality": "pmodel",
+                             "pmodel_acclimation_scheme": "mengoli"}),
     # The upgraded P-model of the global comparison (sub-daily acclimation,
     # P-model phi0 in electron transport, ci from the acclimated xi).
-    ("pmodel_chi_subdaily", {"canopy_capacity_scheme": "p_model",
+    ("pmodel_subdaily", {"canopy_capacity_scheme": "pmodel",
                              "canopy_g1_source": "table",
-                             "stomatal_model": "pmodel_chi",
-                             "pmodel_acclimation": "subdaily_noon",
-                             "canopy_light_response": "pmodel_phi0"}),
+                             "stomatal_model": "pmodel",
+                             "pmodel_acclimation_scheme": "mengoli",
+                             "electron_transport_model": "smith"}),
 ])
 def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
     """The three arms of the global comparison (prescribed / least-cost with
@@ -611,7 +611,7 @@ def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
         lat = ds["lat"].values
         assert np.nanmin(n_rub) >= 0.0
         assert np.all(n_rub[:, np.abs(lat) < 60.0, :] > 0.0)
-        if extra.get("pmodel_acclimation", "ema_24h") == "ema_24h":
+        if extra.get("pmodel_acclimation_scheme", "han") == "han":
             assert np.nanmin(n_rub) > 0.0
     if arm == "phydro":
         assert np.all(psil <= ds["pmodel_psi_soil"].values + 1e-9)
@@ -667,8 +667,8 @@ def test_co2_file_reaches_photosynthesis(tmp_path):
             "grid": {"type": "latlon", "resolution": 4},
             "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
                         "bulk_scheme": "most", "stomatal_model": "medlyn",
-                        "canopy_capacity_scheme": "p_model",
-                        "canopy_g1_source": "p_model"},
+                        "canopy_capacity_scheme": "pmodel",
+                        "canopy_g1_source": "pmodel"},
             "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000,
                         "year_end": 2000, "co2_file": str(ghg)},
             "surfdata": {"path": str(sd)},
@@ -686,7 +686,7 @@ def test_co2_file_reaches_photosynthesis(tmp_path):
 
 
 def test_sandoval_kphio_and_params_block_reach_the_global_run(tmp_path):
-    """physics.pmodel_kphio_method='sandoval' (inputs from surfdata.sandoval_file)
+    """physics.intrinsic_quantum_yield='sandoval' (inputs from surfdata.sandoval_file)
     and a config ``params:`` block both change the simulated GPP of the global
     driver, so neither can be silently inert; an unknown parameter is refused."""
     import yaml
@@ -706,11 +706,11 @@ def test_sandoval_kphio_and_params_block_reach_the_global_run(tmp_path):
             "grid": {"type": "latlon", "resolution": 4},
             "physics": {"land_mode": "multilayer",
                         "surface_scheme": "two_leaf_canopy", "bulk_scheme": "most",
-                        "canopy_capacity_scheme": "p_model",
+                        "canopy_capacity_scheme": "pmodel",
                         "canopy_g1_source": "table",
-                        "stomatal_model": "pmodel_chi",
-                        "pmodel_acclimation": "subdaily_noon",
-                        "canopy_light_response": "pmodel_phi0",
+                        "stomatal_model": "pmodel",
+                        "pmodel_acclimation_scheme": "mengoli",
+                        "electron_transport_model": "smith",
                         "canopy_vcmax_profile": "coordination", **physics_extra},
             "forcing": {"source": "synthetic", "data_dir": "",
                         "year_start": 2000, "year_end": 2000},
@@ -729,7 +729,7 @@ def test_sandoval_kphio_and_params_block_reach_the_global_run(tmp_path):
         return np.asarray(xr.open_dataset(out / "lmip_biophys.step.nc")["GPP"].values)
 
     base = run("temp", {})
-    sand = run("sand", {"pmodel_kphio_method": "sandoval"},
+    sand = run("sand", {"intrinsic_quantum_yield": "sandoval"},
                {"sandoval_file": str(sv)})
     frac = run("frac", {}, params={"land.two_leaf_canopy.vcmax_light_frac": 0.5})
     for g in (base, sand, frac):
@@ -759,10 +759,10 @@ def test_column_sharded_run_matches_the_unsharded_run(tmp_path):
     cfg = validate_config({
         "grid": {"type": "latlon", "resolution": 4},
         "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
-                    "bulk_scheme": "most", "canopy_capacity_scheme": "p_model",
-                    "canopy_g1_source": "table", "stomatal_model": "pmodel_chi",
-                    "pmodel_acclimation": "subdaily_noon",
-                    "canopy_light_response": "pmodel_phi0"},
+                    "bulk_scheme": "most", "canopy_capacity_scheme": "pmodel",
+                    "canopy_g1_source": "table", "stomatal_model": "pmodel",
+                    "pmodel_acclimation_scheme": "mengoli",
+                    "electron_transport_model": "smith"},
         "forcing": {"source": "synthetic", "data_dir": "",
                     "year_start": 2000, "year_end": 2000},
         "surfdata": {"path": str(sd)},
@@ -820,7 +820,8 @@ def test_ci_ca_is_taped_only_where_the_canopy_has_leaves(tmp_path):
     cfg = validate_config({
         "grid": {"type": "latlon", "resolution": 4},
         "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
-                    "bulk_scheme": "most", "optimality": "least_cost"},
+                    "bulk_scheme": "most", "optimality": "pmodel",
+                    "pmodel_acclimation_scheme": "han"},
         "forcing": {"source": "synthetic", "data_dir": "",
                     "year_start": 2000, "year_end": 2000},
         "surfdata": {"path": str(sd)},

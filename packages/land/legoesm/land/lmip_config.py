@@ -77,15 +77,52 @@ _GRID_TYPES = ("latlon", "gaussian", "cubed_sphere",
 _LAND_MODES = ("multilayer", "slab")
 _SURFACE_SCHEMES = ("two_leaf_canopy", "simple_seb")
 _BULK_SCHEMES = ("most", "constant")
-_STOMATA_MODELS = ("ball_berry", "medlyn", "phydro", "pmodel_chi")
+_STOMATA_MODELS = ("ball_berry", "medlyn", "phydro", "pmodel")
 # physics.optimality -> the optimality switches it stands for (lmip_config and
 # the EC-site driver share this table; the launcher's --arm maps onto it).
+# The pmodel arm is completed by physics.pmodel_acclimation_scheme (han |
+# mengoli), which pins the stomatal model and the slope source:
+#   pmodel + han      -> stomatal medlyn (ball_berry allowed), g1 pmodel
+#   pmodel + mengoli  -> stomatal pmodel (xi-driven ci), g1 table
 OPTIMALITY_SWITCHES = {
-    "least_cost": {"canopy_capacity_scheme": "p_model", "canopy_g1_source": "p_model",
-                   "transpiration_stress": "beta_theta", "stomatal_model": "medlyn"},
+    "pmodel": {"canopy_capacity_scheme": "pmodel",
+               "transpiration_stress": "beta_theta"},
     "phydro": {"canopy_capacity_scheme": "phydro", "canopy_g1_source": "table",
                "transpiration_stress": "phydro", "stomatal_model": "phydro"},
 }
+# Per acclimation scheme: the stomatal models the pmodel arm admits (first =
+# default) and the slope source it pins.
+PMODEL_ARM_BY_SCHEME = {
+    "han": {"stomatal_model": ("medlyn", "ball_berry"), "canopy_g1_source": "pmodel"},
+    "mengoli": {"stomatal_model": ("pmodel",), "canopy_g1_source": "table"},
+}
+# Acclimation hours per scheme when the config does not name them.
+PMODEL_HOURS_DEFAULT = {"han": "24h", "mengoli": "noon", "phydro": "24h"}
+# Retired keys / values, refused with the new name (no silent aliases).
+_RETIRED_PHYSICS_KEYS = {
+    "pmodel_acclimation": "pmodel_acclimation_scheme (values han | mengoli)",
+    "canopy_light_response": "electron_transport_model (values nrh | smith)",
+    "pmodel_kphio_method": "intrinsic_quantum_yield",
+}
+_RETIRED_PHYSICS_VALUES = {
+    "optimality": {"least_cost": "pmodel"},
+    "canopy_capacity_scheme": {"p_model": "pmodel"},
+    "canopy_g1_source": {"p_model": "pmodel"},
+    "stomatal_model": {"pmodel_chi": "pmodel"},
+    "pmodel_acclimation_scheme": {"ema_24h": "han", "subdaily_noon": "mengoli"},
+    "electron_transport_model": {"clm": "nrh", "pmodel_phi0": "smith"},
+}
+
+
+def _refuse_retired(physics: dict) -> None:
+    for k, new in _RETIRED_PHYSICS_KEYS.items():
+        if k in physics:
+            raise ValueError(f"physics.{k} was renamed physics.{new}")
+    for k, table in _RETIRED_PHYSICS_VALUES.items():
+        v = physics.get(k)
+        if v in table:
+            raise ValueError(
+                f"physics.{k}={v!r} was renamed {table[v]!r}")
 # Snow thermal scheme.  Only the single-node bulk SWE budget exists on this
 # lane today; the key is validated so a config naming the (future) multilayer
 # snow column fails loudly here instead of silently running different physics.
@@ -178,17 +215,61 @@ def validate_config(data: dict) -> LMIPConfig:
     # --- Composable physics knobs (optional; defaults = the AMIP-consistent
     #     multilayer two-leaf canopy).  None means "use the land default / the
     #     per-PFT surfdata value". ------------------------------------------------
+    # Retired names are refused with the new one named (old configs must be
+    # updated, never silently re-read).
+    _refuse_retired(physics)
     # physics.optimality: a wrapper that fills the optimality switches at once
-    # ('least_cost' | 'phydro'); absent or 'none' -> the switches are read as
-    # given.  A switch also given must agree, so there is one source of truth.
+    # ('pmodel' | 'phydro'); absent or 'none' -> the switches are read as given.
+    # A switch also given must agree, so there is one source of truth.
     _opt = physics.pop("optimality", None)
     if _opt in ("none", ""):
         _opt = None
-    if _opt is not None:
-        if _opt not in OPTIMALITY_SWITCHES:
+    if _opt is not None and _opt not in OPTIMALITY_SWITCHES:
+        raise ValueError(
+            f"physics.optimality={_opt!r} not in {tuple(OPTIMALITY_SWITCHES)}")
+    # physics.pmodel_acclimation_scheme: required with optimality=pmodel,
+    # refused otherwise (P-hydro's acclimation is built in; none runs no P
+    # model).
+    _scheme = physics.pop("pmodel_acclimation_scheme", None)
+    from legoesm.land.p_model import (
+        VALID_ACCLIMATION_HOURS, VALID_ACCLIMATION_SCHEMES,
+        VALID_INTRINSIC_QUANTUM_YIELD)
+    if _opt == "pmodel":
+        if _scheme is None:
             raise ValueError(
-                f"physics.optimality={_opt!r} not in {tuple(OPTIMALITY_SWITCHES)}")
-        for k, v in OPTIMALITY_SWITCHES[_opt].items():
+                "physics.optimality='pmodel' needs physics."
+                f"pmodel_acclimation_scheme in {VALID_ACCLIMATION_SCHEMES}")
+        if _scheme not in VALID_ACCLIMATION_SCHEMES:
+            raise ValueError(
+                f"physics.pmodel_acclimation_scheme={_scheme!r} not in "
+                f"{VALID_ACCLIMATION_SCHEMES}")
+    elif _scheme is not None and (
+            _opt == "phydro"
+            or physics.get("canopy_capacity_scheme") != "pmodel"):
+        # (a resolved config carries the key next to its explicit
+        # canopy_capacity_scheme=pmodel; that round-trips)
+        raise ValueError(
+            f"physics.pmodel_acclimation_scheme={_scheme!r} is read by "
+            "optimality='pmodel' only (got "
+            f"optimality={_opt if _opt else 'none'!r}); drop it")
+    elif _scheme is not None and _scheme not in VALID_ACCLIMATION_SCHEMES:
+        raise ValueError(
+            f"physics.pmodel_acclimation_scheme={_scheme!r} not in "
+            f"{VALID_ACCLIMATION_SCHEMES}")
+    if _opt is not None:
+        pinned = dict(OPTIMALITY_SWITCHES[_opt])
+        if _opt == "pmodel":
+            arm = PMODEL_ARM_BY_SCHEME[_scheme]
+            pinned["canopy_g1_source"] = arm["canopy_g1_source"]
+            _sm = physics.get("stomatal_model", arm["stomatal_model"][0])
+            if _sm not in arm["stomatal_model"]:
+                raise ValueError(
+                    f"physics.optimality='pmodel' with pmodel_acclimation_scheme="
+                    f"{_scheme!r} admits stomatal_model in "
+                    f"{arm['stomatal_model']} (default "
+                    f"{arm['stomatal_model'][0]!r}); got {_sm!r}")
+            pinned["stomatal_model"] = _sm
+        for k, v in pinned.items():
             if k in physics and physics[k] != v:
                 raise ValueError(
                     f"physics.optimality={_opt!r} sets {k}={v!r} but the config "
@@ -264,8 +345,8 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             "the P-hydro arm (stomatal_model='phydro') lives in the two-leaf "
             f"canopy; got surface_scheme={physics['surface_scheme']!r}")
-    _pm_on = (physics["canopy_capacity_scheme"] in ("p_model", "phydro")
-              or physics["canopy_g1_source"] == "p_model")
+    _pm_on = (physics["canopy_capacity_scheme"] in ("pmodel", "phydro")
+              or physics["canopy_g1_source"] == "pmodel")
     if _pm_on and physics.get("calibrated_land_physics", False):
         # apply_calibrated_multilayer REPLACES the surface scheme and stomata
         # configs, so the P-model switches would vanish without a trace and
@@ -273,7 +354,7 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             "physics.calibrated_land_physics=true replaces the surface scheme "
             "and would silently drop canopy_capacity_scheme / canopy_g1_source "
-            "= 'p_model'; set one or the other")
+            "= 'pmodel'; set one or the other")
     if (_pm_on and physics["land_mode"] == "slab"
             and physics["surface_scheme"] == "simple_seb"):
         # The slab LandConfig is built without the StomataConfig that carries
@@ -284,85 +365,97 @@ def validate_config(data: dict) -> LMIPConfig:
             "stomata block); use land_mode='multilayer' or the two-leaf canopy")
     # P-model instantaneous ci (ci = chi(xi) Ca; JULES stomata_pmodel): the
     # two-leaf canopy with the P-model capacities and no predicted slope.
-    if physics["stomatal_model"] == "pmodel_chi" and (
+    if physics["stomatal_model"] == "pmodel" and (
             physics["surface_scheme"] != "two_leaf_canopy"
-            or physics["canopy_capacity_scheme"] != "p_model"
+            or physics["canopy_capacity_scheme"] != "pmodel"
             or physics["canopy_g1_source"] != "table"):
         raise ValueError(
-            "physics.stomatal_model='pmodel_chi' needs the two-leaf canopy with "
-            "canopy_capacity_scheme='p_model' and canopy_g1_source='table'")
-    # C3 electron-transport light response: 'clm' (default) or 'pmodel_phi0'
-    # (P-model phi0(T_leaf), the phi0 that sizes the acclimated capacities).
-    physics.setdefault("canopy_light_response", "clm")
-    from legoesm.land.canopy.config import VALID_LIGHT_RESPONSES
-    if physics["canopy_light_response"] not in VALID_LIGHT_RESPONSES:
+            "physics.stomatal_model='pmodel' needs the two-leaf canopy with "
+            "canopy_capacity_scheme='pmodel' and canopy_g1_source='table'")
+    # C3 electron-transport model of the half-hourly step: 'nrh' (default,
+    # every arm) or 'smith' (the P-model form with phi0(T_leaf)); the
+    # acclimated Jmax25 sizing inverts the Smith curve regardless.
+    physics.setdefault("electron_transport_model", "nrh")
+    from legoesm.land.canopy.config import VALID_ELECTRON_TRANSPORT
+    if physics["electron_transport_model"] not in VALID_ELECTRON_TRANSPORT:
         raise ValueError(
-            f"physics.canopy_light_response={physics['canopy_light_response']!r}"
-            f" not in {VALID_LIGHT_RESPONSES}")
-    if physics["canopy_light_response"] == "pmodel_phi0" and (
+            f"physics.electron_transport_model="
+            f"{physics['electron_transport_model']!r} not in "
+            f"{VALID_ELECTRON_TRANSPORT}")
+    if physics["electron_transport_model"] == "smith" and (
             physics["surface_scheme"] != "two_leaf_canopy"
-            or physics["canopy_capacity_scheme"] != "p_model"):
+            or physics["canopy_capacity_scheme"] not in ("pmodel", "phydro")):
         raise ValueError(
-            "physics.canopy_light_response='pmodel_phi0' needs the two-leaf "
-            "canopy with canopy_capacity_scheme='p_model'; got surface_scheme="
-            f"{physics['surface_scheme']!r}, canopy_capacity_scheme="
-            f"{physics['canopy_capacity_scheme']!r}")
-    # P-model acclimation scheme: 'ema_24h' (15-day running means of the 24 h
-    # drivers, the original) or 'subdaily_noon' (Mengoli et al. 2022: daily
-    # optimum at the 11:00-13:00 local-solar means, 1/15 memory on the traits).
-    physics.setdefault("pmodel_acclimation", "ema_24h")
-    from legoesm.land.p_model import VALID_ACCLIMATION
-    if physics["pmodel_acclimation"] not in VALID_ACCLIMATION:
+            "physics.electron_transport_model='smith' needs the two-leaf "
+            "canopy with canopy_capacity_scheme='pmodel' or 'phydro'; got "
+            f"surface_scheme={physics['surface_scheme']!r}, "
+            f"canopy_capacity_scheme={physics['canopy_capacity_scheme']!r}")
+    # P-model acclimation: scheme (han = half-hourly driver EMA, the optimum
+    # on the means; mengoli = daily optimum on the window means, memory on
+    # the traits), hours (24h | daytime | noon) and memory [days].  The
+    # scheme is recorded for the pmodel arm only (the drivers default to han
+    # elsewhere; P-hydro shares the driver EMA and reads hours/days).
+    if _scheme:
+        physics["pmodel_acclimation_scheme"] = _scheme
+    _hours_default = PMODEL_HOURS_DEFAULT["phydro" if _ph else
+                                         (_scheme or "han")]
+    physics.setdefault("pmodel_acclimation_hours", _hours_default)
+    if physics["pmodel_acclimation_hours"] not in VALID_ACCLIMATION_HOURS:
         raise ValueError(
-            f"physics.pmodel_acclimation={physics['pmodel_acclimation']!r} "
-            f"not in {VALID_ACCLIMATION}")
-    if physics["pmodel_acclimation"] == "subdaily_noon":
+            f"physics.pmodel_acclimation_hours="
+            f"{physics['pmodel_acclimation_hours']!r} not in "
+            f"{VALID_ACCLIMATION_HOURS}")
+    physics.setdefault("pmodel_acclimation_days", 15.0)
+    _days = physics["pmodel_acclimation_days"]
+    if not isinstance(_days, (int, float)) or isinstance(_days, bool) or not _days > 0:
+        raise ValueError(
+            f"physics.pmodel_acclimation_days={_days!r} must be a positive "
+            "number of days")
+    physics["pmodel_acclimation_days"] = float(_days)
+    if _scheme == "mengoli":
         # Refuse every combination where the switch would be inert or would
-        # mix noon-acclimated traits with 24 h conditions (no silent fallback).
-        if not _pm_on:
-            raise ValueError(
-                "physics.pmodel_acclimation='subdaily_noon' without a P-model "
-                "switch (canopy_capacity_scheme / canopy_g1_source = p_model) "
-                "would be silently inert")
+        # mix window-acclimated traits with 24 h conditions (no silent fallback).
         if (physics["land_mode"] != "multilayer"
                 or physics["surface_scheme"] != "two_leaf_canopy"):
             raise ValueError(
-                "physics.pmodel_acclimation='subdaily_noon' is implemented for "
+                "physics.pmodel_acclimation_scheme='mengoli' is implemented for "
                 "land_mode='multilayer' with the two-leaf canopy only; got "
                 f"land_mode={physics['land_mode']!r}, surface_scheme="
                 f"{physics['surface_scheme']!r}")
-        if physics["transpiration_stress"] == "phydro":
-            raise ValueError(
-                "physics.pmodel_acclimation='subdaily_noon' is not wired for "
-                "the P-hydro arm (its optimum uses the 24 h running means)")
+    elif physics["pmodel_acclimation_hours"] != "24h" and not _pm_on:
+        raise ValueError(
+            f"physics.pmodel_acclimation_hours="
+            f"{physics['pmodel_acclimation_hours']!r} without an optimality "
+            "arm (pmodel / phydro) would be silently inert")
     # Intrinsic quantum yield phi0: 'temperature' (Bernacchi-type phi0(T), the
     # original) or 'sandoval' (Sandoval et al. 2026: phi0 peak from the aridity
     # index, thermal breadth from mGDD0).  Sandoval needs the climatological
     # inputs file, surfdata.sandoval_file (scripts/data/build_sandoval_inputs.py).
-    physics.setdefault("pmodel_kphio_method", "temperature")
-    from legoesm.land.p_model import VALID_KPHIO_METHODS
-    if physics["pmodel_kphio_method"] not in VALID_KPHIO_METHODS:
+    physics.setdefault("intrinsic_quantum_yield", "temperature")
+    if physics["intrinsic_quantum_yield"] not in VALID_INTRINSIC_QUANTUM_YIELD:
         raise ValueError(
-            f"physics.pmodel_kphio_method={physics['pmodel_kphio_method']!r} "
-            f"not in {VALID_KPHIO_METHODS}")
+            f"physics.intrinsic_quantum_yield="
+            f"{physics['intrinsic_quantum_yield']!r} not in "
+            f"{VALID_INTRINSIC_QUANTUM_YIELD}")
     _sv_file = (data.get("surfdata") or {}).get("sandoval_file") or ""
     if not isinstance(_sv_file, str):
         raise ValueError(
             f"surfdata.sandoval_file must be a path string (got {_sv_file!r})")
-    if physics["pmodel_kphio_method"] == "sandoval":
+    if physics["intrinsic_quantum_yield"] == "sandoval":
         if not _pm_on or physics["land_mode"] != "multilayer":
             raise ValueError(
-                "physics.pmodel_kphio_method='sandoval' needs a P-model switch "
-                "(canopy_capacity_scheme / canopy_g1_source = p_model) on "
-                "land_mode='multilayer'; otherwise it would be silently inert")
+                "physics.intrinsic_quantum_yield='sandoval' needs an optimality "
+                "arm (canopy_capacity_scheme pmodel / phydro or canopy_g1_source "
+                "pmodel) on land_mode='multilayer'; otherwise it would be "
+                "silently inert")
         if not _sv_file:
             raise ValueError(
-                "physics.pmodel_kphio_method='sandoval' needs "
+                "physics.intrinsic_quantum_yield='sandoval' needs "
                 "surfdata.sandoval_file (aridity index + mGDD0 climatology)")
     elif _sv_file:
         raise ValueError(
-            "surfdata.sandoval_file is given but physics.pmodel_kphio_method="
-            f"{physics['pmodel_kphio_method']!r}; the file would be inert")
+            "surfdata.sandoval_file is given but physics.intrinsic_quantum_yield="
+            f"{physics['intrinsic_quantum_yield']!r}; the file would be inert")
     if (physics["canopy_vcmax_profile"] != "kn"
             and physics["surface_scheme"] != "two_leaf_canopy"):
         raise ValueError(

@@ -228,8 +228,8 @@ class StomataConfig(NamedTuple):
     # --- P-model optimality switches (land/p_model.py; appended last) ---
     # Source of the big-leaf photosynthetic capacity / Medlyn slope; the
     # PModelConfig itself lives once per land config (config.p_model).
-    capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
-    g1_source: str = "table"              # "table" | "p_model"
+    capacity_scheme: str = "prescribed"   # "prescribed" | "pmodel"
+    g1_source: str = "table"              # "table" | "pmodel"
 
     def validate(self) -> "StomataConfig":
         """Fail-early check of the static dispatch/switch fields.
@@ -254,10 +254,10 @@ class StomataConfig(NamedTuple):
             raise ValueError(
                 f"unknown g1_source {self.g1_source!r}; the Medlyn-slope "
                 f"scheme must be one of {VALID_G1_SOURCES}")
-        # NB: g1_source='p_model' + non-Medlyn is legal only under phydro
+        # NB: g1_source='pmodel' + non-Medlyn is legal only under phydro
         # (cross-checked at compute_effective_beta, which sees the switch).
-        if (self.capacity_scheme == "p_model"
-                or self.g1_source == "p_model") and not self.enabled:
+        if (self.capacity_scheme == "pmodel"
+                or self.g1_source == "pmodel") and not self.enabled:
             raise ValueError(
                 "a P-model switch is set on the big-leaf StomataConfig but "
                 "stomata are DISABLED (enabled=False): the switch would be "

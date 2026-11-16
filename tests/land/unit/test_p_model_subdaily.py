@@ -1,13 +1,13 @@
 """Subdaily (noon-window) P-model acclimation, Mengoli et al. (2022).
 
-Properties pinned here (land/p_model.py, acclimation='subdaily_noon'):
+Properties pinned here (land/p_model.py, acclimation_scheme='mengoli'):
 
 * the 11:00-13:00 local-solar window holds 3 hourly / 5 half-hourly steps and
   only the noon step at a 3-hourly step, and closes exactly once per day;
 * the first completed window SEEDS the realised traits with that day's
   optimum; afterwards real <- real + alpha * (opt - real) (pyrealm order);
 * the traits do not change between windows, and the 24 h running means keep
-  evolving exactly as under ema_24h;
+  evolving exactly as under han;
 * misuse raises (unknown scheme, missing solar hour, P-hydro soil means,
   ema state handed to subdaily consumers);
 * finite gradients and eager/jit parity through a full day;
@@ -38,7 +38,7 @@ def _x64():
     jax.config.update("jax_enable_x64", _ENTRY_X64)
 
 
-SUB = PModelConfig(acclimation="subdaily_noon")
+SUB = PModelConfig(acclimation_scheme="mengoli", acclimation_hours="noon")
 NCOL = 2
 T_DAY = constants.T_freeze + 22.0
 T_NIGHT = constants.T_freeze + 12.0
@@ -114,7 +114,7 @@ def test_memory_after_seed_follows_alpha():
     dt = 3600.0
     s1 = _run_day(_init(), dt)
     s2 = _run_day(s1, dt, light_scale=2.0)
-    alpha = SUB.subdaily_alpha
+    alpha = 1.0 / SUB.acclimation_days
     np.testing.assert_allclose(s2.vcmax25_real,
                                s1.vcmax25_real * (1.0 + alpha), rtol=1e-10)
     # xi does not depend on light: unchanged by the second day
@@ -131,7 +131,7 @@ def test_traits_frozen_between_windows_and_ema_unchanged():
                                   solar_hour=jnp.full((NCOL,), h))
     for f in ("xi_real", "vcmax25_real", "jmax25_real", "n_days", "win_count"):
         np.testing.assert_array_equal(getattr(s, f), getattr(s0, f))
-    # the 24 h running means advance exactly as under ema_24h
+    # the 24 h running means advance exactly as under han
     e = _init(PModelConfig())
     for h in _hours(dt)[:20]:
         e = advance_pmodel_acclim(e, **_drivers(h), cfg=PModelConfig(), dt=dt)
@@ -151,7 +151,7 @@ def test_capacities_read_realised_traits_and_window_means():
     view = acclim_means(s, SUB)
     np.testing.assert_array_equal(view.t_mean_K, s.day_t_K)
     np.testing.assert_array_equal(view.vpd_mean_pa, s.day_vpd_pa)
-    # ema_24h view is the state itself
+    # han view is the state itself
     e = _init(PModelConfig())
     assert acclim_means(e, PModelConfig()) is e
 
@@ -159,7 +159,7 @@ def test_capacities_read_realised_traits_and_window_means():
 def test_default_state_has_no_subdaily_fields():
     e = _init(PModelConfig())
     assert e.xi_real is None and e.win_count is None and e.n_days is None
-    assert PModelConfig().acclimation == "ema_24h"
+    assert PModelConfig().acclimation_scheme == "han"
 
 
 def test_off_window_nan_does_not_reach_the_window_sums():
@@ -176,16 +176,16 @@ def test_off_window_nan_does_not_reach_the_window_sums():
 
 
 def test_invalid_window_or_memory_is_refused():
-    with pytest.raises(ValueError, match="subdaily_alpha"):
-        _init(PModelConfig(acclimation="subdaily_noon", subdaily_alpha=1.5))
+    with pytest.raises(ValueError, match="acclimation_days"):
+        _init(PModelConfig(acclimation_scheme="mengoli", acclimation_days=0.5))
     with pytest.raises(ValueError, match="window"):
-        _init(PModelConfig(acclimation="subdaily_noon", window_start_h=13.0,
+        _init(PModelConfig(acclimation_scheme="mengoli", window_start_h=13.0,
                            window_end_h=11.0))
 
 
 def test_refusals():
-    bad = PModelConfig(acclimation="noon")
-    with pytest.raises(ValueError, match="unknown PModelConfig.acclimation"):
+    bad = PModelConfig(acclimation_scheme="noon")
+    with pytest.raises(ValueError, match="unknown PModelConfig.acclimation_scheme"):
         _init(bad)
     s = _init()
     with pytest.raises(ValueError, match="solar hour"):
@@ -245,8 +245,8 @@ def test_restart_round_trips_subdaily_state(tmp_path):
 
     cfg = MultiLayerLandConfig(
         surface_scheme=TwoLeafCanopyConfig(
-            stomatal_model="medlyn", capacity_scheme="p_model",
-            g1_source="p_model").validate(),
+            stomatal_model="medlyn", capacity_scheme="pmodel",
+            g1_source="pmodel").validate(),
         p_model=SUB)
     st = init_multilayer_land_state(NCOL, cfg, T_init=T_DAY)
     st = st._replace(pmodel_acclim=_run_day(st.pmodel_acclim, 3600.0))
@@ -260,3 +260,60 @@ def test_restart_round_trips_subdaily_state(tmp_path):
             assert b is None
         else:
             np.testing.assert_array_equal(np.asarray(b), np.asarray(a))
+
+
+# --- han with a window: the half-hourly driver EMA on in-window steps only,
+# each weighted by the calendar time since the previous in-window step ---
+
+def test_han_windowed_ema_keeps_calendar_memory():
+    """Under han + noon, the step closing a 24 h gap between windows carries
+    gain 1 - exp(-24 h / tau) (not dt / tau); off-window steps leave the
+    means and advance dt_since_update_s."""
+    dt = 1800.0
+    cfg = PModelConfig(acclimation_scheme="han", acclimation_hours="noon",
+                       acclimation_days=15.0)
+    tau = 15.0 * 86400.0
+    s = _init(cfg)
+    assert np.all(np.asarray(s.dt_since_update_s) == 0.0)
+    t0 = np.asarray(s.t_mean_K).copy()
+    # 00:00 - 10:30: no window step, means frozen, elapsed time accumulates
+    for h in _hours(dt)[:22]:
+        s = advance_pmodel_acclim(s, **_drivers(h), cfg=cfg, dt=dt,
+                                  solar_hour=jnp.full((NCOL,), h))
+    np.testing.assert_array_equal(np.asarray(s.t_mean_K), t0)
+    np.testing.assert_allclose(np.asarray(s.dt_since_update_s), 22 * dt)
+    # 11:00: the first window step weights the whole 23 x 1800 s elapsed
+    d = _drivers(11.0)
+    s1 = advance_pmodel_acclim(s, **d, cfg=cfg, dt=dt,
+                               solar_hour=jnp.full((NCOL,), 11.0))
+    g = 1.0 - np.exp(-(23 * dt) / tau)
+    np.testing.assert_allclose(np.asarray(s1.t_mean_K),
+                               t0 + g * (np.asarray(d["T_K"]) - t0), rtol=1e-12)
+    np.testing.assert_array_equal(np.asarray(s1.dt_since_update_s), 0.0)
+    # the plain-24h gain over the same steps is identical in the limit of
+    # many small steps: 1 - exp(-sum dt / tau) == prod of per-step factors
+    assert np.isclose(g, 1.0 - np.exp(-dt / tau) ** 23)
+    # no mengoli fields under han
+    assert s1.xi_real is None and s1.win_count is None
+
+
+def test_han_daytime_window_is_par_gated_and_needs_no_solar_hour():
+    cfg = PModelConfig(acclimation_scheme="han", acclimation_hours="daytime")
+    from legoesm.land.p_model import needs_solar_hour
+    assert not needs_solar_hour(cfg)
+    s = _init(cfg)
+    t0 = np.asarray(s.t_mean_K).copy()
+    s = advance_pmodel_acclim(s, **_drivers(2.0), cfg=cfg, dt=1800.0)   # night
+    np.testing.assert_array_equal(np.asarray(s.t_mean_K), t0)
+    s = advance_pmodel_acclim(s, **_drivers(9.0), cfg=cfg, dt=1800.0)   # day, T != init
+    assert np.all(np.asarray(s.t_mean_K) != t0)
+
+
+def test_retired_scheme_strings_name_the_new_one():
+    for old, new in (("ema_24h", "han"), ("subdaily_noon", "mengoli")):
+        with pytest.raises(ValueError, match=f"renamed '{new}'"):
+            _init(PModelConfig(acclimation_scheme=old))
+    with pytest.raises(TypeError):
+        PModelConfig(tau_acclim_s=1.0)
+    with pytest.raises(TypeError):
+        PModelConfig(subdaily_alpha=0.1)

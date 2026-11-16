@@ -9,7 +9,7 @@ Pinned:
   T/Topt factor the maximum itself lies < 1 K above Topt;
 * the peak falls monotonically with aridity and is 1/9 at AI -> 0;
 * the optimum and the subdaily daily optimum use it; the canopy light
-  response uses it under light_response='pmodel_phi0';
+  response uses it under light_response='smith';
 * refusals: missing inputs, inputs under the temperature method, a
   non-default kphio under Sandoval; mGDD0 clamped to [1, 50] degC at init.
 """
@@ -28,7 +28,7 @@ from legoesm.land.p_model import (
 )
 
 _ENTRY_X64 = jax.config.read("jax_enable_x64")
-SV = PModelConfig(kphio_method="sandoval")
+SV = PModelConfig(intrinsic_quantum_yield="sandoval")
 
 
 @pytest.fixture(autouse=True)
@@ -106,7 +106,7 @@ def test_state_carries_inputs_and_capacities_use_them():
     np.testing.assert_array_equal(st.mgdd0_c, [1.0, 1.0])     # clamped
     caps = acclimated_capacities(st, SV)
     assert float(caps.vcmax25_leaf[1]) < float(caps.vcmax25_leaf[0])  # arid column
-    sub = PModelConfig(kphio_method="sandoval", acclimation="subdaily_noon")
+    sub = PModelConfig(intrinsic_quantum_yield="sandoval", acclimation_scheme="mengoli")
     s2 = init_pmodel_acclim(1, t_init_K=290.0, ps_init_pa=1e5, cfg=sub,
                             sandoval_inputs=(1.0, 60.0), dtype=jnp.float64)
     assert float(s2.mgdd0_c[0]) == 50.0 and float(s2.vcmax25_real[0]) > 0.0
@@ -130,9 +130,9 @@ def test_refusals():
     with pytest.raises(ValueError, match="silently inert"):
         init_pmodel_acclim(1, t_init_K=290.0, ps_init_pa=1e5,
                            cfg=SV._replace(kphio=0.125), sandoval_inputs=(1.0, 10.0))
-    with pytest.raises(ValueError, match="unknown PModelConfig.kphio_method"):
+    with pytest.raises(ValueError, match="unknown PModelConfig.intrinsic_quantum_yield"):
         init_pmodel_acclim(1, t_init_K=290.0, ps_init_pa=1e5,
-                           cfg=PModelConfig(kphio_method="fixed"))
+                           cfg=PModelConfig(intrinsic_quantum_yield="fixed"))
     ema = init_pmodel_acclim(1, t_init_K=290.0, ps_init_pa=1e5, cfg=PModelConfig())
     with pytest.raises(ValueError, match="carries no aridity_index"):
         acclimated_capacities(ema, SV)

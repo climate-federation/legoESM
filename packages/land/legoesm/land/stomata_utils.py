@@ -111,8 +111,8 @@ def compute_effective_beta(
             "transpiration_stress='hydraulic' closes the draw-down inside the "
             "two-leaf canopy Newton; the big-leaf stomata have no leaf water "
             "potential unknown")
-    _pm_on = (config.stomata.capacity_scheme == "p_model"
-              or config.stomata.g1_source == "p_model")
+    _pm_on = (config.stomata.capacity_scheme == "pmodel"
+              or config.stomata.g1_source == "pmodel")
     _rjv25 = None
     _tgc_c = None
     if _pm_on:
@@ -127,11 +127,11 @@ def compute_effective_beta(
             acclimated_capacities, acclimated_capacities_c4)
         _phydro_on = getattr(
             config, "transpiration_stress", "beta_theta") == "phydro"
-        if (config.stomata.g1_source == "p_model"
+        if (config.stomata.g1_source == "pmodel"
                 and config.stomata.stomata_model != "medlyn"
                 and not _phydro_on):
             raise ValueError(
-                "g1_source='p_model' predicts a MEDLYN slope under the "
+                "g1_source='pmodel' predicts a MEDLYN slope under the "
                 "least-cost stomatal model dispatch; with "
                 f"stomata_model={config.stomata.stomata_model!r} select "
                 "transpiration_stress='phydro' (whose slope mapping covers "
@@ -161,13 +161,13 @@ def compute_effective_beta(
         # (codex design review).
         _vc3 = _hcaps.vcmax25_leaf if _phydro_on else _caps.vcmax25_leaf
         _rjv_src = _hcaps.rjv25 if _phydro_on else _caps.rjv25
-        if config.stomata.capacity_scheme == "p_model":
+        if config.stomata.capacity_scheme == "pmodel":
             _stomata = _stomata._replace(
                 Vc_max25=((1.0 - _fC4) * _vc3
                           + _fC4 * _caps4.vcmax25_c4_leaf))
             _rjv25 = _rjv_src  # consumed by the C3 branch only
             _tgc_c = pmodel_acclim.t_mean_K - constants.T_freeze
-        if config.stomata.g1_source == "p_model":
+        if config.stomata.g1_source == "pmodel":
             if _phydro_on:
                 # Slope for the ACTIVE model from the profit optimum's chi;
                 # blended with the C4 least-cost slope as before.  Note the

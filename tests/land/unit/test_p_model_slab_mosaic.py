@@ -48,8 +48,8 @@ def _slab_state(ncol, acclim=None, T_init=290.0):
 
 def _pm_cfg(**kw):
     return LandConfig(surface_scheme=TwoLeafCanopyConfig(
-        stomatal_model="medlyn", capacity_scheme="p_model",
-        g1_source="p_model", **kw).validate())
+        stomatal_model="medlyn", capacity_scheme="pmodel",
+        g1_source="pmodel", **kw).validate())
 
 
 def test_slab_two_leaf_pmodel_runs_and_advances_state():
@@ -67,7 +67,8 @@ def test_slab_two_leaf_pmodel_runs_and_advances_state():
     assert float(new_state.pmodel_acclim.t_mean_K[0]) != pytest.approx(
         float(st.pmodel_acclim.t_mean_K[0]))
     for leaf in new_state.pmodel_acclim:
-        assert np.all(np.isfinite(np.asarray(leaf)))
+        if leaf is not None:   # scheme-specific leaves stay None
+            assert np.all(np.isfinite(np.asarray(leaf)))
     assert np.all(np.isfinite(np.asarray(resp.T_sfc)))
 
 
@@ -94,8 +95,8 @@ def test_mosaic_unit_patch_matches_direct_call_with_pmodel():
         compute_two_leaf_canopy_fluxes)
 
     land_cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(
-        stomatal_model="medlyn", capacity_scheme="p_model",
-        g1_source="p_model").validate())
+        stomatal_model="medlyn", capacity_scheme="pmodel",
+        g1_source="pmodel").validate())
     cc = land_cfg.surface_scheme
     acclim = init_pmodel_acclim(
         1, t_init_K=290.0, ps_init_pa=101325.0, cfg=land_cfg.p_model)

@@ -23,7 +23,7 @@ physics:
   land_mode: multilayer
   surface_scheme: two_leaf_canopy
   bulk_scheme: most
-  stomatal_model: medlyn          # required by g1_source=p_model
+  stomatal_model: medlyn          # pmodel + han admits medlyn | ball_berry
   snow_albedo_feedback: true
   snow_scheme: single
   enable_freeze_thaw: true        # REQUIRED globally (boreal columns NaN without)
@@ -31,7 +31,12 @@ physics:
   soil_depth_m: 3.0
   soil_growth_factor: 2.0
   # --- the switches under test (each named explicitly, no reliance on defaults) ---
-  optimality: least_cost                # = p_model capacities + p_model g1, beta_theta, medlyn
+  optimality: pmodel                    # = pmodel capacities, beta_theta; with the scheme below: pmodel g1, medlyn
+  pmodel_acclimation_scheme: han        # han = half-hourly driver EMA, optimum on the means
+  pmodel_acclimation_hours: 24h
+  pmodel_acclimation_days: 15
+  electron_transport_model: nrh
+  intrinsic_quantum_yield: temperature
   canopy_vcmax_profile: kn              # unchanged from the baseline (one variable at a time)
   vc_max25: null
   g1: null

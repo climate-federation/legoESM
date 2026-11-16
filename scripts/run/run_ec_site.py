@@ -682,7 +682,7 @@ def _prognostic_fluxes(d: ECSiteDriver,
               else d.canopy_params)
     # Local solar hour per step: only the subdaily P-model reads it.
     _solar = (jnp.asarray(_site_solar_hour(d, noon_clock))
-              if land_config.p_model.acclimation == "subdaily_noon" else None)
+              if needs_solar_hour(land_config.p_model) else None)
     xs = (d.forcing, params, d.doy, jnp.asarray(d.theta_soil), _solar)
     if _want_diag:
         run = jax.jit(lambda s0, x: jax.lax.scan(_scan_step, s0, x))
@@ -835,6 +835,9 @@ def _site_sandoval_inputs(d: ECSiteDriver) -> tuple[float, float]:
     return ai, mgdd0
 
 
+from legoesm.land.p_model import needs_solar_hour  # noqa: E402
+
+
 def _site_solar_hour(d: ECSiteDriver, noon_clock: float | None = None) -> np.ndarray:
     """Local solar hour of each step, shape ``(n_time, 1)``.
 
@@ -922,18 +925,41 @@ def _best_year_slice(driver_nc: str, d) -> tuple[int, int, int]:
 
 
 def _resolve_optimality(args) -> dict:
-    """The four optimality switches from ``--optimality`` and/or the explicit
-    flags (same table as lmip_config: OPTIMALITY_SWITCHES).  An explicit flag
-    must agree with the wrapper; absent flags take the driver defaults."""
-    from legoesm.land.lmip_config import OPTIMALITY_SWITCHES
+    """The optimality switches from ``--optimality`` (+
+    ``--pmodel-acclimation-scheme``) and/or the explicit flags (same tables
+    as lmip_config: OPTIMALITY_SWITCHES, PMODEL_ARM_BY_SCHEME,
+    PMODEL_HOURS_DEFAULT).  An explicit flag must agree with the wrapper;
+    absent flags take the driver defaults."""
+    from legoesm.land.lmip_config import (
+        OPTIMALITY_SWITCHES, PMODEL_ARM_BY_SCHEME, PMODEL_HOURS_DEFAULT)
     # config key -> (argparse dest, run_site keyword)
     _map = {"canopy_capacity_scheme": ("canopy_capacity_scheme", "capacity_scheme"),
             "canopy_g1_source": ("canopy_g1_source", "g1_source"),
             "transpiration_stress": ("transpiration_stress", "transpiration_stress"),
             "stomatal_model": ("canopy_stomatal_model", "canopy_stomatal_model")}
     given = {k: getattr(args, dest) for k, (dest, _) in _map.items()}
+    scheme = args.pmodel_acclimation_scheme
+    if args.optimality == "pmodel":
+        if scheme is None:
+            raise ValueError("--optimality pmodel needs --pmodel-acclimation-scheme "
+                             f"{'|'.join(PMODEL_ARM_BY_SCHEME)}")
+    elif scheme is not None:
+        raise ValueError(
+            f"--pmodel-acclimation-scheme {scheme} is read by --optimality pmodel "
+            f"only (got {args.optimality or 'none'}); drop it")
     if args.optimality is not None:
-        for k, v in OPTIMALITY_SWITCHES[args.optimality].items():
+        pinned = dict(OPTIMALITY_SWITCHES[args.optimality])
+        if args.optimality == "pmodel":
+            arm = PMODEL_ARM_BY_SCHEME[scheme]
+            pinned["canopy_g1_source"] = arm["canopy_g1_source"]
+            sm = given["stomatal_model"] or arm["stomatal_model"][0]
+            if sm not in arm["stomatal_model"]:
+                raise ValueError(
+                    f"--optimality pmodel with --pmodel-acclimation-scheme {scheme} "
+                    f"admits --canopy-stomatal-model in {arm['stomatal_model']} "
+                    f"(default {arm['stomatal_model'][0]}); got {sm}")
+            pinned["stomatal_model"] = sm
+        for k, v in pinned.items():
             if given[k] is not None and given[k] != v:
                 raise ValueError(
                     f"--optimality {args.optimality} sets {k}={v!r} but "
@@ -942,8 +968,15 @@ def _resolve_optimality(args) -> dict:
             given[k] = v
     defaults = {"canopy_capacity_scheme": "prescribed", "canopy_g1_source": "table",
                 "transpiration_stress": "beta_theta", "stomatal_model": None}
-    return {kw: (defaults[k] if given[k] is None else given[k])
-            for k, (_, kw) in _map.items()}
+    out = {kw: (defaults[k] if given[k] is None else given[k])
+           for k, (_, kw) in _map.items()}
+    out["pmodel_acclimation_scheme"] = scheme if scheme else "han"
+    hours = args.pmodel_acclimation_hours
+    if hours is None:
+        hours = PMODEL_HOURS_DEFAULT["phydro" if args.optimality == "phydro"
+                                     else out["pmodel_acclimation_scheme"]]
+    out["pmodel_acclimation_hours"] = hours
+    return out
 
 
 def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
@@ -974,9 +1007,11 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              transpiration_stress: str = "beta_theta",
              vcmax_profile: str = "kn",
              params_path: str | None = None,
-             pmodel_acclimation: str | None = None,
-             light_response: str = "clm",
-             kphio_method: str | None = None,
+             pmodel_acclimation_scheme: str = "han",
+             pmodel_acclimation_hours: str = "24h",
+             pmodel_acclimation_days: float = 15.0,
+             electron_transport_model: str = "nrh",
+             intrinsic_quantum_yield: str | None = None,
              sandoval_ai: float | None = None,
              sandoval_mgdd0: float | None = None) -> dict:
     if mode not in ("diagnostic", "prognostic"):
@@ -986,8 +1021,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     # P-model switches vs the manual scale flags: the canopy overwrites the
     # scaled quantity when the optimality source is on, so a non-default scale
     # would be silently inert — refuse loudly (no hidden choices).
-    _pm_cap = capacity_scheme in ("p_model", "phydro")
-    _pm_g1 = g1_source == "p_model"
+    _pm_cap = capacity_scheme in ("pmodel", "phydro")
+    _pm_g1 = g1_source == "pmodel"
     if transpiration_stress != "beta_theta" and mode != "prognostic":
         # Diagnostic mode drives the canopy directly (no multilayer land
         # step), and P-hydro lives in the multilayer step - refuse loudly.
@@ -1041,16 +1076,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     d = read_ec_site_driver(driver_nc)
     # Solar noon of the site from the FULL record, before any slicing.
     _noon_clock = (_site_noon_clock(d)
-                   if pmodel_acclimation == "subdaily_noon" else None)
+                   if (pmodel_acclimation_scheme == "mengoli"
+                       or pmodel_acclimation_hours == "noon") else None)
     # Sandoval climatology from the FULL record, before any slicing; or the
     # values given explicitly (e.g. the JULES site ancillaries), both or none.
     if (sandoval_ai is None) != (sandoval_mgdd0 is None):
         raise ValueError("give both sandoval_ai and sandoval_mgdd0, or neither")
-    if sandoval_ai is not None and kphio_method != "sandoval":
+    if sandoval_ai is not None and intrinsic_quantum_yield != "sandoval":
         raise ValueError("sandoval_ai/sandoval_mgdd0 given without "
-                         "kphio_method='sandoval'; they would be inert")
+                         "intrinsic_quantum_yield='sandoval'; they would be inert")
     _sv_inputs = None
-    if kphio_method == "sandoval":
+    if intrinsic_quantum_yield == "sandoval":
         _sv_forcing = _site_sandoval_inputs(d)
         if sandoval_ai is not None:
             _sv_inputs = (float(sandoval_ai), float(sandoval_mgdd0))
@@ -1124,7 +1160,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         canopy_config = TwoLeafCanopyConfig(
             max_iters=30, stress_b0=stress_b0,
             capacity_scheme=capacity_scheme, g1_source=g1_source,
-            vcmax_profile=vcmax_profile, light_response=light_response,
+            vcmax_profile=vcmax_profile,
+            electron_transport_model=electron_transport_model,
             **({"stomatal_model": canopy_stomatal_model}
                if canopy_stomatal_model is not None else {})).validate()
     elif canopy == "clmml":
@@ -1167,17 +1204,19 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     if transpiration_stress != "beta_theta":
         land_config = land_config._replace(
             transpiration_stress=transpiration_stress)
-    if kphio_method is not None:
-        # P-model C3 quantum yield: 'temperature' (kphio x Bernacchi) or
-        # 'sandoval' (Sandoval et al. 2026; site AI and mGDD0 below).
+    if intrinsic_quantum_yield is not None:
+        # P-model C3 intrinsic quantum yield: 'temperature' (kphio x
+        # Bernacchi) or 'sandoval' (Sandoval et al. 2026; site AI and mGDD0).
         land_config = land_config._replace(p_model=land_config.p_model._replace(
-            kphio_method=kphio_method))
-    if pmodel_acclimation is not None:
-        # P-model acclimation scheme (land/p_model.py): 'ema_24h' (24 h
-        # running means, the default) or 'subdaily_noon' (Mengoli et al.
-        # 2022 noon-window optimum with a daily trait memory).
-        land_config = land_config._replace(p_model=land_config.p_model._replace(
-            acclimation=pmodel_acclimation))
+            intrinsic_quantum_yield=intrinsic_quantum_yield))
+    # P-model acclimation (land/p_model.py): scheme 'han' (half-hourly driver
+    # EMA, optimum on the means) or 'mengoli' (daily optimum on the window
+    # means, memory on the traits); hours '24h' | 'daytime' | 'noon'; memory
+    # in days.  Recorded for every arm (P-hydro shares the driver EMA).
+    land_config = land_config._replace(p_model=land_config.p_model._replace(
+        acclimation_scheme=pmodel_acclimation_scheme,
+        acclimation_hours=pmodel_acclimation_hours,
+        acclimation_days=float(pmodel_acclimation_days)))
     if params_path:
         # Same calibration layer as the MIP drivers (run_lmip): the shared
         # loader validates each key against the parameter registry
@@ -1257,8 +1296,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
                 co2_ppm=fz.co2_ppmv, ps_pa=fz.p_surface,
                 cfg=land_config.p_model, dt=float(d.dt_s),
                 solar_hour=(jnp.asarray(_site_solar_hour(d, _noon_clock))
-                            if land_config.p_model.acclimation
-                            == "subdaily_noon" else None))
+                            if needs_solar_hour(land_config.p_model) else None))
             # PRE-step alignment (parity with the prognostic lane, which
             # evaluates capacities from the state BEFORE advancing it):
             # step i uses the state after step i-1; step 0 uses the init.
@@ -1521,25 +1559,48 @@ def main() -> int:
                     help="PLANT wilting point [m3/m3] for root-zone transpiration, "
                          "SEPARATE from the soil wilting point; below the soil "
                          "value = deep-rooted extraction (e.g. phreatophytes)")
-    ap.add_argument("--optimality", default=None, choices=["least_cost", "phydro"],
+    ap.add_argument("--optimality", default=None, choices=["none", "pmodel", "phydro"],
                     help="wrapper that sets the optimality switches at once: "
-                         "'least_cost' (p_model capacities + p_model g1, "
-                         "beta_theta stress, medlyn) or 'phydro' (phydro "
-                         "capacities, table g1, phydro stress, phydro stomata). "
+                         "'pmodel' (pmodel capacities, beta_theta stress; with "
+                         "--pmodel-acclimation-scheme han: medlyn|ball_berry "
+                         "stomata and the pmodel slope; mengoli: pmodel stomata "
+                         "(xi-driven ci) and the table slope) or 'phydro' "
+                         "(phydro capacities, table g1, phydro stress, phydro "
+                         "stomata); 'none' / unset = the explicit switches. "
                          "Any switch also given must agree.")
+    ap.add_argument("--pmodel-acclimation-scheme", default=None,
+                    choices=["han", "mengoli"], dest="pmodel_acclimation_scheme",
+                    help="with --optimality pmodel (required there, refused "
+                         "elsewhere): 'han' = half-hourly driver EMA, optimum on "
+                         "the means (Stocker 2020 order); 'mengoli' = daily "
+                         "optimum on the window means, memory on the traits "
+                         "(Mengoli 2022 / pyrealm SubdailyPModel order)")
+    ap.add_argument("--pmodel-acclimation-hours", default=None,
+                    choices=["24h", "daytime", "noon"], dest="pmodel_acclimation_hours",
+                    help="steps feeding the acclimation (pmodel and phydro): "
+                         "'24h' (every step; default for han / phydro), "
+                         "'daytime' (PAR > 0) or 'noon' (11-13 h local solar; "
+                         "default for mengoli).  han / phydro keep the "
+                         "half-hourly EMA, weighting each in-window step by the "
+                         "time since the previous one")
+    ap.add_argument("--pmodel-acclimation-days", type=float, default=15.0,
+                    dest="pmodel_acclimation_days",
+                    help="acclimation memory [days]: e-folding time of the "
+                         "driver EMA (han, phydro) and 1/alpha of the daily "
+                         "trait memory (mengoli)")
     ap.add_argument("--canopy-capacity-scheme", default=None,
-                    choices=["prescribed", "p_model", "phydro"],
+                    choices=["prescribed", "pmodel", "phydro"],
                     dest="canopy_capacity_scheme",
                     help="source of the leaf photosynthetic capacities: "
-                         "'prescribed' (default, site/PFT values), 'p_model' "
+                         "'prescribed' (default, site/PFT values), 'pmodel' "
                          "(least-cost acclimated Vcmax25 + Jmax ratio) or "
                          "'phydro' (P-hydro acclimated optimum; two-leaf only); "
                          "the optimality values are incompatible with the "
                          "--vcmax-*-scale flags and --clmml-vcmax25.")
     ap.add_argument("--canopy-g1-source", default=None,
-                    choices=["table", "p_model"], dest="canopy_g1_source",
+                    choices=["table", "pmodel"], dest="canopy_g1_source",
                     help="source of the Medlyn slope: 'table' (default) or "
-                         "'p_model' (least-cost xi; requires the medlyn "
+                         "'pmodel' (least-cost xi; requires the medlyn "
                          "stomatal model; incompatible with the "
                          "--stomatal-m-*-scale flags).")
     ap.add_argument("--params", type=str, default=None,
@@ -1565,47 +1626,40 @@ def main() -> int:
                     help="two-leaf canopy Vcmax25 depth profile: 'kn' "
                          "(default nitrogen profile) or 'coordination' "
                          "(fraction of the diffuse-light envelope)")
-    ap.add_argument("--canopy-light-response", default="clm",
-                    choices=["clm", "pmodel_phi0"],
-                    dest="canopy_light_response",
-                    help="two-leaf C3 electron-transport light response: "
-                         "'clm' (default; CLM5 theta=0.7, PSII yield 0.85) or "
-                         "'pmodel_phi0' (J = 4 phi0(T_leaf) I / sqrt(1 + "
-                         "(4 phi0 I / Jmax)^2) with the P-model phi0; needs "
-                         "--optimality least_cost / capacity p_model)")
-    ap.add_argument("--pmodel-kphio-method", default=None,
+    ap.add_argument("--electron-transport-model", default="nrh",
+                    choices=["nrh", "smith"],
+                    dest="electron_transport_model",
+                    help="two-leaf C3 electron transport of the half-hourly "
+                         "step: 'nrh' (default, every arm; non-rectangular "
+                         "hyperbola, theta 0.7, I = 0.5*0.85*APAR, the standard "
+                         "FvCB form of CLM / JULES / Bonan) or 'smith' (J = 4 "
+                         "phi0(T_leaf) I / sqrt(1 + (4 phi0 I / Jmax)^2), the "
+                         "P-model / pyrealm form, Mengoli 2022; needs "
+                         "--optimality pmodel or phydro).  The acclimated "
+                         "Jmax25 sizing inverts the Smith curve regardless.")
+    ap.add_argument("--intrinsic-quantum-yield", default=None,
                     choices=["temperature", "sandoval"],
-                    dest="pmodel_kphio_method",
-                    help="P-model C3 quantum yield: 'temperature' (unset = "
+                    dest="intrinsic_quantum_yield",
+                    help="P-model C3 intrinsic quantum yield phi0: 'temperature' (unset = "
                          "config default; kphio x Bernacchi 2003) or "
                          "'sandoval' (Sandoval et al. 2026; aridity index and "
                          "mGDD0 computed from the full site record)")
     ap.add_argument("--sandoval-ai", type=float, default=None,
-                    help="with --pmodel-kphio-method sandoval: aridity index "
+                    help="with --intrinsic-quantum-yield sandoval: aridity index "
                          "PET/P to use instead of the site-forcing estimate "
                          "(give with --sandoval-mgdd0)")
     ap.add_argument("--sandoval-mgdd0", type=float, default=None,
-                    help="with --pmodel-kphio-method sandoval: mGDD0 [degC] "
+                    help="with --intrinsic-quantum-yield sandoval: mGDD0 [degC] "
                          "to use instead of the site-forcing estimate")
-    ap.add_argument("--pmodel-acclimation", default=None,
-                    choices=["ema_24h", "subdaily_noon"],
-                    dest="pmodel_acclimation",
-                    help="P-model acclimation (with --optimality least_cost / "
-                         "capacity p_model): 'ema_24h' (unset = config "
-                         "default; optimum at 15-day running means of the "
-                         "24 h drivers) or 'subdaily_noon' (optimum at each "
-                         "day's 11:00-13:00 local-solar means, 1/15 daily "
-                         "memory on the traits; Mengoli et al. 2022)")
     ap.add_argument("--canopy-stomatal-model", default=None,
                     choices=["ball_berry", "medlyn", "leuning", "phydro",
-                             "pmodel_chi"],
+                             "pmodel"],
                     dest="canopy_stomatal_model",
                     help="two-leaf stomatal conductance model (unset keeps the "
-                         "config default ball_berry; required as 'medlyn' for "
-                         "--canopy-g1-source p_model; 'phydro' = the P-hydro "
-                         "instantaneous optimum, set together with "
-                         "--transpiration-stress phydro and "
-                         "--canopy-capacity-scheme p_model).")
+                         "config default ball_berry; medlyn|ball_berry under "
+                         "--optimality pmodel + han, 'pmodel' (xi-driven ci) "
+                         "under pmodel + mengoli, 'phydro' = the P-hydro "
+                         "instantaneous optimum under --optimality phydro).")
     ap.add_argument("--canopy-interception", dest="interception",
                     action="store_true", default=False,
                     help="enable the shared canopy-water interception scheme "
@@ -1644,9 +1698,9 @@ def main() -> int:
                  clmml_turbulence=args.clmml_turbulence,
                  clmml_stomatal=args.clmml_stomatal,
                  clmml_vcmax25=args.clmml_vcmax25,
-                 pmodel_acclimation=args.pmodel_acclimation,
-                 light_response=args.canopy_light_response,
-                 kphio_method=args.pmodel_kphio_method,
+                 pmodel_acclimation_days=args.pmodel_acclimation_days,
+                 electron_transport_model=args.electron_transport_model,
+                 intrinsic_quantum_yield=args.intrinsic_quantum_yield,
                  sandoval_ai=args.sandoval_ai, sandoval_mgdd0=args.sandoval_mgdd0,
                  plant_wilting_point=args.plant_wilting_point,
                  spinup_steps=args.spinup_steps,

@@ -195,7 +195,7 @@ def test_constant_canaries():
     cfg = pm.PModelConfig()
     assert cfg.beta_cost == 146.0
     assert cfg.kphio == 0.081785
-    assert cfg.tau_acclim_s == 15.0 * 86400.0
+    assert cfg.acclimation_days * 86400.0 == 15.0 * 86400.0
     # Huber reference viscosity check value: 890.02 uPa s at 298.15 K, 1 atm.
     mu = float(lb.water_viscosity(jnp.float64(298.15), jnp.float64(_O_PATM)))
     assert mu == pytest.approx(890.02e-6, rel=1e-4)
@@ -231,7 +231,7 @@ def test_ema_recurrence_exact():
         s, T_K=jnp.full((1,), 300.0), ppfd=jnp.full((1,), 600.0),
         vpd_pa=jnp.full((1,), 1200.0), co2_ppm=jnp.full((1,), 410.0),
         ps_pa=jnp.full((1,), _O_PATM), cfg=cfg, dt=dt)
-    gain = 1.0 - math.exp(-dt / cfg.tau_acclim_s)
+    gain = 1.0 - math.exp(-dt / (cfg.acclimation_days * 86400.0))
     assert float(s2.iabs_mean[0]) == pytest.approx(
         300.0 + gain * (600.0 - 300.0), rel=1e-12)
     assert float(s2.t_mean_K[0]) == pytest.approx(

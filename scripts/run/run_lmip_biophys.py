@@ -218,11 +218,13 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         canopy_vcmax_profile=cfg.physics.get("canopy_vcmax_profile", "kn"),
         transpiration_stress=cfg.physics.get(
             "transpiration_stress", "beta_theta"),
-        pmodel_acclimation=cfg.physics.get("pmodel_acclimation", "ema_24h"),
-        pmodel_kphio_method=cfg.physics.get("pmodel_kphio_method", "temperature"),
+        pmodel_acclimation_scheme=cfg.physics.get("pmodel_acclimation_scheme", "han"),
+        pmodel_acclimation_hours=cfg.physics.get("pmodel_acclimation_hours", "24h"),
+        pmodel_acclimation_days=float(cfg.physics.get("pmodel_acclimation_days", 15.0)),
+        intrinsic_quantum_yield=cfg.physics.get("intrinsic_quantum_yield", "temperature"),
         sandoval_file=cfg.surfdata.get("sandoval_file", ""),
         params=dict(cfg.raw.get("params") or {}),
-        canopy_light_response=cfg.physics.get("canopy_light_response", "clm"),
+        electron_transport_model=cfg.physics.get("electron_transport_model", "nrh"),
         calibrated_land_physics=bool(
             cfg.physics.get("calibrated_land_physics", False)),
         vc_max25=cfg.physics.get("vc_max25", None),
@@ -535,7 +537,7 @@ def run(args) -> int:
             capacity_scheme=args.canopy_capacity_scheme,
             g1_source=args.canopy_g1_source,
             vcmax_profile=args.canopy_vcmax_profile,
-            light_response=getattr(args, "canopy_light_response", "clm"),
+            electron_transport_model=getattr(args, "electron_transport_model", "nrh"),
             column_sharded=int(getattr(args, "column_devices", 1)) > 1).validate()
     elif args.surface_scheme == "simple_seb":
         surf = SimpleSEBConfig()
@@ -547,11 +549,11 @@ def run(args) -> int:
     # beta amip_sota disabled for over-transpiration, #730); the two-leaf canopy
     # ignores it (it has its own leaf conductance).  Only override a scalar the
     # user actually set (None -> land default / per-PFT surfdata value).
-    # The two-leaf P-hydro ("phydro") and P-model ci ("pmodel_chi") options
+    # The two-leaf P-hydro ("phydro") and P-model ci ("pmodel") options
     # have no big-leaf counterpart, and the two-leaf canopy never reads this
     # config: leave the StomataConfig default in those cases instead of naming
     # a scheme the big leaf lacks (lmip_config restricts both to the canopy).
-    _two_leaf_only = ("phydro", "pmodel_chi")
+    _two_leaf_only = ("phydro", "pmodel")
     _stom = {"enabled": bool(args.stomata_enabled)}
     if args.stomatal_model not in _two_leaf_only:
         _stom["stomata_model"] = args.stomatal_model
@@ -568,14 +570,14 @@ def run(args) -> int:
             raise ValueError(
                 f"--g1 with physics.stomatal_model={args.stomatal_model!r} would "
                 "be silently inert (that scheme reads no stomatal slope); drop it.")
-        if args.canopy_g1_source == "p_model":
+        if args.canopy_g1_source == "pmodel":
             raise ValueError(
-                "--g1 with physics.canopy_g1_source=p_model would be silently "
+                "--g1 with physics.canopy_g1_source=pmodel would be silently "
                 "inert (the optimality slope overwrites it); drop one.")
         _stom["g1_bb" if args.stomatal_model == "ball_berry" else "g1_med"] = float(args.g1)
-    if args.vc_max25 is not None and args.canopy_capacity_scheme == "p_model":
+    if args.vc_max25 is not None and args.canopy_capacity_scheme == "pmodel":
         raise ValueError(
-            "--vc-max25 with physics.canopy_capacity_scheme=p_model would be "
+            "--vc-max25 with physics.canopy_capacity_scheme=pmodel would be "
             "silently inert (the optimality capacity overwrites it); drop one.")
     stomata = StomataConfig(**_stom).validate()
 
@@ -642,13 +644,15 @@ def run(args) -> int:
             # through init_land_surface_data (which only _replace()s hydraulics).
             thermal=SoilThermalConfig(enable_freeze_thaw=bool(args.enable_freeze_thaw)),
             transpiration_stress=args.transpiration_stress)
-        # P-model acclimation scheme (physics.pmodel_acclimation; validated in
-        # lmip_config): 'ema_24h' or 'subdaily_noon' (Mengoli et al. 2022).
-        # Quantum-yield form (physics.pmodel_kphio_method): 'temperature' or
-        # 'sandoval' (inputs from surfdata.sandoval_file, mapped below).
+        # P-model acclimation (physics.pmodel_acclimation_scheme / _hours /
+        # _days; validated in lmip_config) and the intrinsic quantum yield
+        # (physics.intrinsic_quantum_yield: 'temperature' or 'sandoval', inputs
+        # from surfdata.sandoval_file, mapped below).
         base_cfg = base_cfg._replace(p_model=base_cfg.p_model._replace(
-            acclimation=getattr(args, "pmodel_acclimation", "ema_24h"),
-            kphio_method=getattr(args, "pmodel_kphio_method", "temperature")))
+            acclimation_scheme=getattr(args, "pmodel_acclimation_scheme", "han"),
+            acclimation_hours=getattr(args, "pmodel_acclimation_hours", "24h"),
+            acclimation_days=float(getattr(args, "pmodel_acclimation_days", 15.0)),
+            intrinsic_quantum_yield=getattr(args, "intrinsic_quantum_yield", "temperature")))
         # A land initial condition is only meaningful for the model it was
         # equilibrated under, so a spin-up feeding a calibrated coupled run has to
         # use the same one — including its soil column, which this driver
@@ -772,7 +776,7 @@ def run(args) -> int:
     _co2_init = co2_by_year.get(year_masks[0][0])
     # Sandoval phi0 climatology (aridity index, mGDD0) on the model columns.
     _sv_inputs = None
-    if getattr(args, "pmodel_kphio_method", "temperature") == "sandoval":
+    if getattr(args, "intrinsic_quantum_yield", "temperature") == "sandoval":
         _sv_inputs = sandoval_inputs_on_grid(args.sandoval_file, grid)
         print(f"Sandoval inputs: {args.sandoval_file} | AI median "
               f"{np.median(_sv_inputs[0]):.3g}, mGDD0 median "
@@ -891,10 +895,12 @@ def run(args) -> int:
         from legoesm.land.carbon.carbon_cycle import init_carbon_state
         _carbon_state = init_carbon_state((ncol,), config.carbon)
 
-    # Subdaily P-model: column longitudes [deg E] for the local solar hour.
+    # Column longitudes [deg E] for the local solar hour, read by the
+    # acclimation's noon window / the mengoli day boundary.
+    from legoesm.land.p_model import needs_solar_hour
     _subdaily = (is_multilayer
                  and getattr(config, "p_model", None) is not None
-                 and config.p_model.acclimation == "subdaily_noon")
+                 and needs_solar_hour(config.p_model))
     if _subdaily:
         from legoesm.land.p_model import local_solar_hour
         _lon_deg_cols = jnp.asarray(np.rad2deg(np.asarray(lon_rad)).ravel())
@@ -922,7 +928,7 @@ def run(args) -> int:
         if is_multilayer:
             # Local mean solar hour per column from the UTC model clock
             # (doy_t = UTC seconds since the forcing-year start / 86400) and the
-            # column longitude; read only by the subdaily P-model.
+            # column longitude; read by the acclimation window only.
             _solar_t = (local_solar_hour(doy_t * _SEC_PER_DAY, _lon_deg_cols)
                         if _subdaily else None)
             new_state, resp, _, surf_out = step_fn(

@@ -194,7 +194,7 @@ def canopy_met_variables(
 
 # --- Ci range of the empirical stomatal models' diffusion closure ---
 _CI_EMPIRICAL_MIN_FRAC = 0.5   # [-] floor of the diffusion Ci, as a fraction of Ca (C3 operating range)
-# Width of the smooth max(gs_open, b0) of stomatal_model='pmodel_chi'
+# Width of the smooth max(gs_open, b0) of stomatal_model='pmodel'
 # [mol m-2 s-1]: small against daytime gs (~0.1-0.5) and comparable to b0.
 _PMODEL_CHI_SWITCH_MOL = 1.0e-3  # coeff-ok: numerics smoothing width
 _CI_EMPIRICAL_MAX_FRAC = 1.5   # [-] ceiling; above Ca so a respiring leaf (An < 0) reaches its physical Ci
@@ -262,7 +262,7 @@ def _compute_gs_and_ci(
             An, VPD_kPa, Ca, co2_compensation_point(Tf), m, d0_leuning_kpa, b0)
     elif stomatal_model == "ball_berry":
         gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
-    elif stomatal_model == "pmodel_chi":
+    elif stomatal_model == "pmodel":
         # P-model instantaneous ci (JULES stomata_pmodel / pyrealm
         # SubdailyPModel step 8): ci = chi * Ca with chi from the acclimated
         # (lagged) xi [Pa^0.5, carried in the slope slot ``m``], the current
@@ -305,7 +305,7 @@ def _compute_gs_and_ci(
         raise ValueError(
             f"unknown stomatal_model {stomatal_model!r}; the stomatal "
             "conductance scheme must be one of "
-            "{'ball_berry', 'medlyn', 'leuning', 'phydro', 'pmodel_chi'}")
+            "{'ball_berry', 'medlyn', 'leuning', 'phydro', 'pmodel'}")
 
     # Minimum cuticular conductance: keep gs > 0 even at full water stress with
     # the legacy ``stress_b0=True`` (m = b0 = 0), otherwise the leaf gs/Ci/An
@@ -315,7 +315,7 @@ def _compute_gs_and_ci(
     gs_mol = jnp.maximum(gs_mol, _GS_MIN_MOL)
 
     Ci = Ca - DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
-    if stomatal_model == "pmodel_chi":
+    if stomatal_model == "pmodel":
         # No 0.5 Ca floor: with gs >= gs_open the open-leaf ci is >= chi Ca > 0
         # (chi < 0.5 is normal for C4 and for cool-acclimated leaves in dry
         # air; the floor would break ci = chi Ca there).  Keep the 1.5 Ca cap

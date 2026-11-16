@@ -843,8 +843,8 @@ class ExperimentConfig(NamedTuple):
     # Routed onto the ACTIVE surface scheme's config (two_leaf/clm_ml canopy
     # switches; simple_seb -> the big-leaf StomataConfig). "prescribed"/"table"
     # keep legacy behaviour bit-for-bit.
-    land_capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
-    land_g1_source: str = "table"              # "table" | "p_model"
+    land_capacity_scheme: str = "prescribed"   # "prescribed" | "pmodel"
+    land_g1_source: str = "table"              # "table" | "pmodel"
     # Per-scheme stomatal-model selection ("" = keep that scheme's default).
     land_two_leaf_stomatal_model: str = ""     # "" | ball_berry | medlyn | leuning
     land_clm_ml_stomatal_model: str = ""       # "" | medlyn | ball_berry | wue | leuning
@@ -2733,12 +2733,12 @@ class ExperimentConfig(NamedTuple):
             )
         # Land surface-scheme membership (mirror the model_driver dispatch so a
         # typo fails here, not at run time).
-        _valid_cap = ("prescribed", "p_model")
+        _valid_cap = ("prescribed", "pmodel")
         if self.land_capacity_scheme not in _valid_cap:
             errors.append(
                 f"land_capacity_scheme must be one of {_valid_cap}, "
                 f"got {self.land_capacity_scheme!r}")
-        _valid_g1 = ("table", "p_model")
+        _valid_g1 = ("table", "pmodel")
         if self.land_g1_source not in _valid_g1:
             errors.append(
                 f"land_g1_source must be one of {_valid_g1}, "
@@ -2760,8 +2760,8 @@ class ExperimentConfig(NamedTuple):
                 f"{_valid_seb_sm}, got "
                 f"{self.land_simple_seb_stomata_model!r}")
         # Cross-checks: the switches must not be silently inert.
-        _pm_any = (self.land_capacity_scheme == "p_model"
-                   or self.land_g1_source == "p_model")
+        _pm_any = (self.land_capacity_scheme == "pmodel"
+                   or self.land_g1_source == "pmodel")
         if _pm_any and not self.use_multilayer_land:
             errors.append(
                 "a land P-model switch is set but use_multilayer_land is off: "
@@ -2774,7 +2774,7 @@ class ExperimentConfig(NamedTuple):
                 "a land P-model switch is set under simple_seb but "
                 "land_stomatal_beta is off: the big-leaf stomatal path is "
                 "disabled and the switch would be silently inert")
-        if self.land_g1_source == "p_model":
+        if self.land_g1_source == "pmodel":
             _eff_sm = {
                 "two_leaf": self.land_two_leaf_stomatal_model or "ball_berry",
                 "clm_ml": self.land_clm_ml_stomatal_model or "wue",
@@ -2782,7 +2782,7 @@ class ExperimentConfig(NamedTuple):
             }.get(self.land_surface_scheme, "")
             if _eff_sm != "medlyn":
                 errors.append(
-                    "land_g1_source='p_model' predicts a MEDLYN slope; select "
+                    "land_g1_source='pmodel' predicts a MEDLYN slope; select "
                     "the medlyn stomatal model for the active scheme "
                     f"(effective model is {_eff_sm!r})")
         _valid_land_surface = ("simple_seb", "two_leaf", "clm_ml")

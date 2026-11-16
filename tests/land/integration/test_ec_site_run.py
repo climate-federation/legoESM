@@ -652,8 +652,8 @@ def test_run_site_phydro_and_profile_wiring(tmp_path):
     # capacities + the instantaneous optimum as the stomatal model.
     with pytest.raises(ValueError, match="phydro"):
         mod.run_site(driver_nc, "prognostic", str(tmp_path / "o2b"),
-                     chunk=96, capacity_scheme="p_model",
-                     g1_source="p_model", canopy_stomatal_model="medlyn",
+                     chunk=96, capacity_scheme="pmodel",
+                     g1_source="pmodel", canopy_stomatal_model="medlyn",
                      transpiration_stress="phydro")
     m_ph = mod.run_site(driver_nc, "prognostic", str(tmp_path / "o2"),
                         chunk=96, capacity_scheme="phydro",
@@ -710,16 +710,29 @@ def test_cli_optimality_wrapper_resolves_and_refuses_disagreement():
     mod = _load_driver_module()
     ns = lambda **kw: argparse.Namespace(**{"optimality": None, "canopy_capacity_scheme": None,
                                             "canopy_g1_source": None, "transpiration_stress": None,
-                                            "canopy_stomatal_model": None, **kw})
+                                            "canopy_stomatal_model": None,
+                                            "pmodel_acclimation_scheme": None,
+                                            "pmodel_acclimation_hours": None, **kw})
     assert mod._resolve_optimality(ns(optimality="phydro")) == {
         "capacity_scheme": "phydro", "g1_source": "table",
-        "transpiration_stress": "phydro", "canopy_stomatal_model": "phydro"}
-    assert mod._resolve_optimality(ns(optimality="least_cost")) == {
-        "capacity_scheme": "p_model", "g1_source": "p_model",
-        "transpiration_stress": "beta_theta", "canopy_stomatal_model": "medlyn"}
+        "transpiration_stress": "phydro", "canopy_stomatal_model": "phydro",
+        "pmodel_acclimation_scheme": "han", "pmodel_acclimation_hours": "24h"}
+    assert mod._resolve_optimality(ns(optimality="pmodel", pmodel_acclimation_scheme="han")) == {
+        "capacity_scheme": "pmodel", "g1_source": "pmodel",
+        "transpiration_stress": "beta_theta", "canopy_stomatal_model": "medlyn",
+        "pmodel_acclimation_scheme": "han", "pmodel_acclimation_hours": "24h"}
     assert mod._resolve_optimality(ns(canopy_stomatal_model="medlyn")) == {
         "capacity_scheme": "prescribed", "g1_source": "table",
-        "transpiration_stress": "beta_theta", "canopy_stomatal_model": "medlyn"}
+        "transpiration_stress": "beta_theta", "canopy_stomatal_model": "medlyn",
+        "pmodel_acclimation_scheme": "han", "pmodel_acclimation_hours": "24h"}
+    assert mod._resolve_optimality(ns(optimality="pmodel", pmodel_acclimation_scheme="mengoli")) == {
+        "capacity_scheme": "pmodel", "g1_source": "table",
+        "transpiration_stress": "beta_theta", "canopy_stomatal_model": "pmodel",
+        "pmodel_acclimation_scheme": "mengoli", "pmodel_acclimation_hours": "noon"}
+    with pytest.raises(ValueError, match="needs --pmodel-acclimation-scheme"):
+        mod._resolve_optimality(ns(optimality="pmodel"))
+    with pytest.raises(ValueError, match="drop it"):
+        mod._resolve_optimality(ns(optimality="phydro", pmodel_acclimation_scheme="han"))
     with pytest.raises(ValueError, match="set one or the other"):
         mod._resolve_optimality(ns(optimality="phydro", canopy_stomatal_model="medlyn"))
 
@@ -741,7 +754,7 @@ def test_site_solar_hour_recovers_solar_noon_offset():
     # the window then holds five half-hour steps per day
     from legoesm.land.p_model import PModelConfig, in_noon_window
     inw = np.asarray(in_noon_window(solar[:48], dt,
-                                    PModelConfig(acclimation="subdaily_noon")))
+                                    PModelConfig(acclimation_scheme="mengoli")))
     assert int(inw.sum()) == 5
 
 
@@ -753,8 +766,8 @@ def test_run_site_subdaily_pmodel_acclimation(tmp_path, mode):
     mod = _load_driver_module()
     metrics = mod.run_site(
         driver_nc, mode, str(tmp_path / "out"), chunk=48,
-        capacity_scheme="p_model", g1_source="p_model",
-        canopy_stomatal_model="medlyn", pmodel_acclimation="subdaily_noon")
+        capacity_scheme="pmodel", g1_source="pmodel",
+        canopy_stomatal_model="medlyn", pmodel_acclimation_scheme="mengoli")
     assert metrics["GPP"]["n"] > 0 and metrics["GPP"]["model_nan"] == 0
     assert np.isfinite(metrics["GPP"]["rmse"])
 
@@ -767,13 +780,13 @@ def test_run_site_pmodel_light_response(tmp_path):
     mod = _load_driver_module()
     metrics = mod.run_site(
         driver_nc, "prognostic", str(tmp_path / "out"), chunk=48,
-        capacity_scheme="p_model", g1_source="p_model",
-        canopy_stomatal_model="medlyn", pmodel_acclimation="subdaily_noon",
-        light_response="pmodel_phi0")
+        capacity_scheme="pmodel", g1_source="pmodel",
+        canopy_stomatal_model="medlyn", pmodel_acclimation_scheme="mengoli",
+        electron_transport_model="smith")
     assert metrics["GPP"]["n"] > 0 and metrics["GPP"]["model_nan"] == 0
-    with pytest.raises(ValueError, match="capacity_scheme='p_model'"):
+    with pytest.raises(ValueError, match="capacity_scheme='pmodel'"):
         mod.run_site(driver_nc, "prognostic", str(tmp_path / "out2"), chunk=48,
-                     light_response="pmodel_phi0")
+                     electron_transport_model="smith")
 
 
 def test_site_sandoval_inputs_known_answer():
@@ -814,9 +827,9 @@ def test_run_site_sandoval_kphio(tmp_path):
     driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
     _make_driver(driver_nc, n=48 * 3)
     mod = _load_driver_module()
-    kw = dict(capacity_scheme="p_model", g1_source="p_model",
-              canopy_stomatal_model="medlyn", pmodel_acclimation="subdaily_noon",
-              light_response="pmodel_phi0", kphio_method="sandoval")
+    kw = dict(capacity_scheme="pmodel", g1_source="pmodel",
+              canopy_stomatal_model="medlyn", pmodel_acclimation_scheme="mengoli",
+              electron_transport_model="smith", intrinsic_quantum_yield="sandoval")
     with pytest.raises(ValueError, match="no precipitation"):
         mod.run_site(driver_nc, "prognostic", str(tmp_path / "o0"), chunk=48, **kw)
     ds = xr.open_dataset(driver_nc).load()
@@ -833,30 +846,30 @@ def test_sandoval_inputs_given_explicitly_and_refusals(tmp_path):
     ds = xr.open_dataset(driver_nc).load(); ds["P"] = ds["P"] + 0.05
     wet = str(tmp_path / "SYN-Wet_driver_v2.nc"); ds.to_netcdf(wet)
     mod = _load_driver_module()
-    kw = dict(capacity_scheme="p_model", g1_source="p_model",
+    kw = dict(capacity_scheme="pmodel", g1_source="pmodel",
               canopy_stomatal_model="medlyn")
     with pytest.raises(ValueError, match="both"):
         mod.run_site(wet, "diagnostic", str(tmp_path / "a"), chunk=48,
-                     kphio_method="sandoval", sandoval_ai=1.0, **kw)
+                     intrinsic_quantum_yield="sandoval", sandoval_ai=1.0, **kw)
     with pytest.raises(ValueError, match="inert"):
         mod.run_site(wet, "diagnostic", str(tmp_path / "b"), chunk=48,
                      sandoval_ai=1.0, sandoval_mgdd0=10.0, **kw)
     m = mod.run_site(wet, "diagnostic", str(tmp_path / "c"), chunk=48,
-                     kphio_method="sandoval", sandoval_ai=2.0, sandoval_mgdd0=12.0, **kw)
+                     intrinsic_quantum_yield="sandoval", sandoval_ai=2.0, sandoval_mgdd0=12.0, **kw)
     assert m["GPP"]["model_nan"] == 0
 
 
 @pytest.mark.parametrize("mode", ["diagnostic", "prognostic"])
-def test_run_site_pmodel_chi(tmp_path, mode):
+def test_run_site_pmodel(tmp_path, mode):
     """Step E end to end: ci = chi(xi) Ca with the subdaily acclimation and the
     P-model light response."""
     driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
     _make_driver(driver_nc, n=48 * 2)
     mod = _load_driver_module()
     m = mod.run_site(driver_nc, mode, str(tmp_path / "out"), chunk=48,
-                     capacity_scheme="p_model", g1_source="table",
-                     canopy_stomatal_model="pmodel_chi",
-                     pmodel_acclimation="subdaily_noon", light_response="pmodel_phi0")
+                     capacity_scheme="pmodel", g1_source="table",
+                     canopy_stomatal_model="pmodel",
+                     pmodel_acclimation_scheme="mengoli", electron_transport_model="smith")
     assert m["GPP"]["n"] > 0 and m["GPP"]["model_nan"] == 0
 
 
@@ -868,6 +881,6 @@ def test_subdaily_short_slice_uses_full_record_noon(tmp_path):
     mod = _load_driver_module()
     m = mod.run_site(driver_nc, "prognostic", str(tmp_path / "o"), chunk=48,
                      start_step=20, max_steps=10,
-                     capacity_scheme="p_model", g1_source="p_model",
-                     canopy_stomatal_model="medlyn", pmodel_acclimation="subdaily_noon")
+                     capacity_scheme="pmodel", g1_source="pmodel",
+                     canopy_stomatal_model="medlyn", pmodel_acclimation_scheme="mengoli")
     assert m["GPP"]["model_nan"] == 0

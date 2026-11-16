@@ -1,4 +1,4 @@
-"""stomatal_model='pmodel_chi' (step E): ci = chi(xi) Ca at every step.
+"""stomatal_model='pmodel' (step E): ci = chi(xi) Ca at every step.
 
 JULES stomata_pmodel / pyrealm SubdailyPModel: chi = Gamma*/Ca + (1 -
 Gamma*/Ca) xi / (xi + sqrt(D)) from the acclimated (lagged) xi and the
@@ -38,7 +38,7 @@ def _x64():
 def _gs_ci(An, xi=60.0, vpd=1200.0, Tf=constants.T_freeze + 25.0, b0=0.01):
     a = lambda v: jnp.asarray(v, dtype=jnp.float64)  # noqa: E731
     rs, gs, ci = _compute_gs_and_ci(a(An), a(0.6), a(vpd), a(410.0), a(Tf), a(1e5),
-                                    a(xi), a(b0), "pmodel_chi")
+                                    a(xi), a(b0), "pmodel")
     return rs, gs, ci
 
 
@@ -56,7 +56,7 @@ def test_open_leaf_ci_equals_chi_ca(An):
 
 def test_low_chi_is_not_clipped():
     """chi < 0.5 (C4-like small xi in dry air) must still give ci = chi Ca:
-    no 0.5 Ca floor under pmodel_chi (codex review round 1)."""
+    no 0.5 Ca floor under pmodel (codex review round 1)."""
     Tf = constants.T_freeze + 30.0
     chi = float(chi_core(15.0, co2_compensation_point(jnp.asarray(Tf)) / 410.0,
                          np.sqrt(3000.0)))
@@ -80,14 +80,14 @@ def test_drier_air_lowers_chi_and_conductance():
 
 def test_config_refusals():
     from legoesm.land.canopy.config import CanopyConfig
-    with pytest.raises(ValueError, match="pmodel_chi"):
-        CanopyConfig(stomatal_model="pmodel_chi").validate()
-    with pytest.raises(ValueError, match="pmodel_chi"):
-        CanopyConfig(stomatal_model="pmodel_chi", capacity_scheme="p_model",
-                     g1_source="p_model").validate()
-    ok = CanopyConfig(stomatal_model="pmodel_chi", capacity_scheme="p_model",
+    with pytest.raises(ValueError, match="pmodel"):
+        CanopyConfig(stomatal_model="pmodel").validate()
+    with pytest.raises(ValueError, match="pmodel"):
+        CanopyConfig(stomatal_model="pmodel", capacity_scheme="pmodel",
+                     g1_source="pmodel").validate()
+    ok = CanopyConfig(stomatal_model="pmodel", capacity_scheme="pmodel",
                       g1_source="table").validate()
-    assert ok.stomatal_model == "pmodel_chi"
+    assert ok.stomatal_model == "pmodel"
 
 
 def test_two_leaf_step_sunlit_and_shaded_share_chi():
@@ -104,21 +104,21 @@ def test_two_leaf_step_sunlit_and_shaded_share_chi():
         cos_zenith=0.8, co2_ppmv=410.0, has_radiation=1.0,
         has_precipitation=1.0).items()})
     out = {}
-    for sm, g1 in (("pmodel_chi", "table"), ("medlyn", "p_model")):
+    for sm, g1 in (("pmodel", "table"), ("medlyn", "pmodel")):
         cfg = MultiLayerLandConfig(surface_scheme=CanopyConfig(
-            stomatal_model=sm, capacity_scheme="p_model", g1_source=g1).validate())
+            stomatal_model=sm, capacity_scheme="pmodel", g1_source=g1).validate())
         st = init_multilayer_land_state(n, cfg, T_init=constants.T_freeze + 22.0)
         _, _, _, o = step_multilayer_land_with_diagnostics(st, f, cfg, U_min=1.0, dt=1800.0)
         sun, sh = np.asarray(o.ci_ca_sun), np.asarray(o.ci_ca_sh)
         assert np.all(np.isfinite(sun)) and np.all(np.isfinite(np.asarray(o.gpp)))
         out[sm] = np.abs(sun - sh)
-    assert np.all(out["pmodel_chi"] < 0.02)
-    assert np.all(out["pmodel_chi"] < out["medlyn"])
+    assert np.all(out["pmodel"] < 0.02)
+    assert np.all(out["pmodel"] < out["medlyn"])
 
 
 def _production_gs_mol(gs_open, b0, xi=60.0, vpd=1000.0,
                        Tf=constants.T_freeze + 20.0, Ca=410.0):
-    """Conductance [mol m-2 s-1] returned by the PRODUCTION pmodel_chi branch
+    """Conductance [mol m-2 s-1] returned by the PRODUCTION pmodel branch
     for the An that gives the requested gs_open (codex review round 3)."""
     from legoesm.land.canopy.energy_balance import gs_mol_per_ms
     chi = float(chi_core(xi, co2_compensation_point(jnp.asarray(Tf)) / Ca, np.sqrt(vpd)))

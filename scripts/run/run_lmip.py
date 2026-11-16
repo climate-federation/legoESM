@@ -191,7 +191,7 @@ def _build_surface_scheme(args: argparse.Namespace):
             overrides["vcmax_profile"] = _vp
         cfg = TwoLeafCanopyConfig()._replace(**overrides) if overrides \
             else TwoLeafCanopyConfig()
-        # Fail-early on invalid combos (e.g. g1_source=p_model without medlyn).
+        # Fail-early on invalid combos (e.g. g1_source=pmodel without medlyn).
         return cfg.validate()
     if name == "clm_ml":
         from legoesm.land.canopy.config import CLMMLCanopyConfig
@@ -841,12 +841,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    dest="canopy_stomatal_model",
                    help="Two-leaf stomatal conductance model. Unset keeps the "
                         "CanopyConfig default (ball_berry). Required as "
-                        "'medlyn' when --canopy-g1-source p_model.")
+                        "'medlyn' when --canopy-g1-source pmodel.")
     p.add_argument("--canopy-capacity-scheme", default="prescribed",
-                   choices=["prescribed", "p_model"],
+                   choices=["prescribed", "pmodel"],
                    dest="canopy_capacity_scheme",
                    help="Source of the two-leaf C3 leaf capacities: "
-                        "'prescribed' (default, PFT tables) or 'p_model' "
+                        "'prescribed' (default, PFT tables) or 'pmodel' "
                         "(acclimated optimality Vcmax25 + Jmax25/Vcmax25 for "
                         "C3 and the rpmodel-c4 optimum for C4 columns).")
     p.add_argument("--canopy-vcmax-profile", default="kn",
@@ -858,10 +858,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "of the diffuse-PAR light envelope; "
                         "land.two_leaf_canopy.vcmax_light_frac via --params).")
     p.add_argument("--canopy-g1-source", default="table",
-                   choices=["table", "p_model"],
+                   choices=["table", "pmodel"],
                    dest="canopy_g1_source",
                    help="Source of the Medlyn slope g1: 'table' (default, "
-                        "per-PFT) or 'p_model' (least-cost xi; requires "
+                        "per-PFT) or 'pmodel' (least-cost xi; requires "
                         "--canopy-stomatal-model medlyn). Two-leaf only.")
     p.add_argument("--transpiration-stress", default="beta_theta",
                    choices=["beta_theta", "phydro"],
@@ -870,7 +870,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "'beta_theta' (default, empirical root-zone theta "
                         "multiplier) or 'phydro' (Joshi-2022 profit optimum "
                         "on the SPA plant-hydraulics supply; REPLACES the "
-                        "multiplier; needs a p_model switch and a "
+                        "multiplier; needs a pmodel switch and a "
                         "two_leaf/simple_seb scheme).")
     p.add_argument("--pmodel-cold-restart", action="store_true",
                    dest="pmodel_cold_restart",

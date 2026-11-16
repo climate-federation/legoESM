@@ -3,7 +3,7 @@
 The P-model sizes Vcmax/Jmax with phi0(T) = kphio x Bernacchi (2003); the
 CLM kernel's light response has a temperature-independent initial yield of
 0.5 * 0.85 / 4 = 0.10625 mol C per mol photon. Under
-light_response='pmodel_phi0' the kernel uses J = 4 phi0(T) I /
+electron_transport_model='smith' the kernel uses J = 4 phi0(T) I /
 sqrt(1 + (4 phi0 I / Jmax)^2) instead. Pinned here:
 
 * the initial light-use slope ratio P-model/CLM equals phi0(T)/0.10625 at a
@@ -76,14 +76,16 @@ def test_default_is_clm_form_and_dark_gradients_finite():
 
 def test_config_refusals():
     from legoesm.land.canopy.config import CanopyConfig
-    with pytest.raises(ValueError, match="unknown light_response"):
-        CanopyConfig(light_response="smith").validate()
-    with pytest.raises(ValueError, match="requires capacity_scheme='p_model'"):
-        CanopyConfig(light_response="pmodel_phi0").validate()
-    ok = CanopyConfig(light_response="pmodel_phi0", capacity_scheme="p_model",
-                      g1_source="p_model", stomatal_model="medlyn").validate()
-    assert ok.light_response == "pmodel_phi0"
-    assert CanopyConfig().light_response == "clm"
+    with pytest.raises(ValueError, match="unknown electron_transport_model"):
+        CanopyConfig(electron_transport_model="bogus").validate()
+    with pytest.raises(ValueError, match="renamed 'smith'"):
+        CanopyConfig(electron_transport_model="pmodel_phi0").validate()
+    with pytest.raises(ValueError, match="requires capacity_scheme='pmodel'"):
+        CanopyConfig(electron_transport_model="smith").validate()
+    ok = CanopyConfig(electron_transport_model="smith", capacity_scheme="pmodel",
+                      g1_source="pmodel", stomatal_model="medlyn").validate()
+    assert ok.electron_transport_model == "smith"
+    assert CanopyConfig().electron_transport_model == "nrh"
 
 
 def test_two_leaf_step_runs_and_lowers_light_limited_gpp():
@@ -104,13 +106,22 @@ def test_two_leaf_step_runs_and_lowers_light_limited_gpp():
         cos_zenith=0.5, co2_ppmv=410.0, has_radiation=1.0,
         has_precipitation=1.0).items()})
     gpp = {}
-    for light in ("clm", "pmodel_phi0"):
+    for light in ("nrh", "smith"):
         cfg = MultiLayerLandConfig(surface_scheme=CanopyConfig(
-            stomatal_model="medlyn", capacity_scheme="p_model",
-            g1_source="p_model", light_response=light).validate())
+            stomatal_model="medlyn", capacity_scheme="pmodel",
+            g1_source="pmodel", electron_transport_model=light).validate())
         st = init_multilayer_land_state(n, cfg, T_init=constants.T_freeze + 20.0)
         _, _, _, out = step_multilayer_land_with_diagnostics(
             st, f, cfg, U_min=1.0, dt=1800.0)
         gpp[light] = np.asarray(out.gpp)
         assert np.all(np.isfinite(gpp[light]))
-    assert np.all(gpp["pmodel_phi0"] < gpp["clm"])
+    assert np.all(gpp["smith"] < gpp["nrh"])
+
+
+def test_smith_electron_transport_is_admitted_under_phydro_capacities():
+    from legoesm.land.canopy.config import CanopyConfig
+    ok = CanopyConfig(electron_transport_model="smith", capacity_scheme="phydro",
+                      g1_source="table", stomatal_model="phydro").validate()
+    assert ok.electron_transport_model == "smith"
+    with pytest.raises(ValueError, match="requires capacity_scheme='pmodel' or 'phydro'"):
+        CanopyConfig(electron_transport_model="smith", capacity_scheme="prescribed").validate()

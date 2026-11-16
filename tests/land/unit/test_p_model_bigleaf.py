@@ -47,7 +47,7 @@ def _acclim(ncol, cfg):
 
 def test_switch_reproduces_hand_injected_config():
     ncol = 2
-    cfg = _cfg(capacity_scheme="p_model", g1_source="p_model")
+    cfg = _cfg(capacity_scheme="pmodel", g1_source="pmodel")
     carbon = init_carbon_state((ncol,), cfg.carbon)
     acclim = _acclim(ncol, cfg)
     beta_a, gpp_a, _ = compute_effective_beta(
@@ -80,23 +80,23 @@ def test_defaults_bit_identical_passthrough():
 
 def test_validate_matrix():
     with pytest.raises(ValueError, match="capacity_scheme"):
-        StomataConfig(enabled=True, capacity_scheme="pmodel").validate()
-    # ball_berry + g1_source='p_model' validates (phydro covers it); the
+        StomataConfig(enabled=True, capacity_scheme="optimum").validate()
+    # ball_berry + g1_source='pmodel' validates (phydro covers it); the
     # least-cost-only combination raises at compute_effective_beta.
     StomataConfig(enabled=True, stomata_model="ball_berry",
-                  g1_source="p_model").validate()
+                  g1_source="pmodel").validate()
     with pytest.raises(ValueError, match="inert"):
-        StomataConfig(enabled=False, capacity_scheme="p_model").validate()
+        StomataConfig(enabled=False, capacity_scheme="pmodel").validate()
     StomataConfig(enabled=True, stomata_model="leuning").validate()
     # capacities + leuning stomata composes (only the g1 source needs medlyn)
     StomataConfig(enabled=True, stomata_model="leuning",
-                  capacity_scheme="p_model").validate()
+                  capacity_scheme="pmodel").validate()
 
 
 def test_jarvis_fallback_with_switch_raises():
     cfg = MultiLayerLandConfig(
         stomata=StomataConfig(enabled=True, stomata_model="medlyn",
-                              capacity_scheme="p_model"),
+                              capacity_scheme="pmodel"),
         carbon=CarbonConfig(scheme="none"))
     with pytest.raises(ValueError, match="Jarvis|coupled Farquhar"):
         compute_effective_beta(
@@ -110,7 +110,7 @@ def test_c4_column_uses_the_c4_optimum():
     from legoesm.land.p_model import acclimated_capacities_c4
     from legoesm.land.surface_params import LandSurfaceParams
     from legoesm.land import stomata as sto
-    cfg = _cfg(capacity_scheme="p_model", g1_source="p_model")
+    cfg = _cfg(capacity_scheme="pmodel", g1_source="pmodel")
     carbon = init_carbon_state((1,), cfg.carbon)
     acclim = _acclim(1, cfg)
     lp = LandSurfaceParams(
@@ -139,7 +139,7 @@ def test_c4_column_uses_the_c4_optimum():
 
 
 def test_switch_without_state_raises():
-    cfg = _cfg(capacity_scheme="p_model")
+    cfg = _cfg(capacity_scheme="pmodel")
     carbon = init_carbon_state((1,), cfg.carbon)
     with pytest.raises(ValueError, match="acclimation state"):
         compute_effective_beta(

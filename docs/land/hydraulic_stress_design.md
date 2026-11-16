@@ -6,7 +6,7 @@ arm switches.
 
 ## Goal
 
-Give all three arms (baseline, least_cost, phydro) the same short-term drought
+Give all three arms (baseline, pmodel, phydro) the same short-term drought
 physics, a root-xylem-leaf hydraulic model, with an equal number of tunable
 parameters per arm, while keeping the classical empirical beta(theta) stress
 available as a switch value.
@@ -44,7 +44,7 @@ available as a switch value.
 6. **gplant is a fixed shared constant** (4e-3 mol m-2 leaf s-1 MPa-1), not
    tuned: it trades off with psi50_xylem.
 
-## Short-term physics under `transpiration_stress=hydraulic` (baseline, least_cost)
+## Short-term physics under `transpiration_stress=hydraulic` (baseline, pmodel)
 
 Per leaf class c in {sun, shade}, every hour, solved jointly with the existing
 canopy energy balance (Tf_sun, Tf_sh, Ci_sun, Ci_sh, Tc, q_c):
@@ -75,7 +75,7 @@ Vcmax as in decision 2.
 
 ## Tunable parameters (five per arm)
 
-| slot | baseline | least_cost | phydro |
+| slot | baseline | pmodel | phydro |
 |---|---|---|---|
 | 1 | Vcmax25,top | beta (unit-cost ratio, now 146) | beta (unit-cost ratio) |
 | 2 | g1 | kphio (intrinsic quantum yield) | kphio |
@@ -112,9 +112,9 @@ ck_g1, root_biomass, alpha_cost.
 * **`p_model.py`:** beta and kphio as per-arm tunables (already config fields);
   skip the beta(theta)-stressed rjv25 path under `hydraulic`.
 * **Switches (`config.py`, `lmip_config.py`):** two axes,
-  `optimality in {none, least_cost, phydro}` and
+  `optimality in {none, pmodel, phydro}` and
   `transpiration_stress in {beta_theta, hydraulic, phydro}`; the wrapper
-  defaults none/least_cost -> hydraulic, phydro -> phydro; either overridable.
+  defaults none/pmodel -> hydraulic, phydro -> phydro; either overridable.
   `submit_lmip_ginsburg.sh` arms unchanged otherwise.
 * **Tuning interface:** an `ArmTunables` NamedTuple per arm with the five slots
   and a mapping to config fields, so a fitting script sees one shape for all
@@ -135,7 +135,7 @@ ck_g1, root_biomass, alpha_cost.
 
 1. Hydraulics module + Medlyn supply-demand row (baseline arm).
 2. W_V inside FvCB for all hydraulic modes, phydro included (decision 2).
-3. least_cost under `hydraulic` (mostly config).
+3. pmodel under `hydraulic` (mostly config).
 4. Switch axes and the `ArmTunables` interface.
 5. Tuning: EC sites first, then a stratified column subset of the global grid
    from a common restart (the model is column-independent, so a subset is an

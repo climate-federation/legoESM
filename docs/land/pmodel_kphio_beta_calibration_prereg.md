@@ -28,7 +28,7 @@ is recorded as a SEPARATE open finding, not something this calibration fixes.
 
 | item | value |
 |---|---|
-| arm | diagnostic, two-leaf, `capacity_scheme=p_model`, `g1_source=p_model`, `stomatal_model=medlyn` (the ladder's `cap_g1`) |
+| arm | diagnostic, two-leaf, `capacity_scheme=pmodel`, `g1_source=p_model`, `stomatal_model=medlyn` (the ladder's `cap_g1`) |
 | drivers | `jf3423/DifferBESS/data/sitelevel/nc/<SITE>_driver_v2.nc`, full record |
 | soil | `--soil auto` (per-site texture), `transpiration_stress=beta_theta` HELD FIXED |
 | scored | `score_valid` mask as written by `run_ec_site` (observed forcing only) |

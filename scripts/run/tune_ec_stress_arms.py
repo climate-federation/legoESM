@@ -197,7 +197,7 @@ def build_site(site, arm, years):
     phys = _ec.ec_site_physics(d.site_id)
     canopy = _ec.TwoLeafCanopyConfig(
         max_iters=30, stomatal_model="medlyn",
-        capacity_scheme="p_model", g1_source="p_model").validate()
+        capacity_scheme="pmodel", g1_source="pmodel").validate()
     lc = _ec._build_land_config(
         canopy, "auto", "free_drainage", phys.get("soil_depth_m", 0.0),
         root_depth=phys["root_depth"],

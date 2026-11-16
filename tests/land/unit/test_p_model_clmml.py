@@ -19,18 +19,18 @@ from legoesm.land.canopy.config import CLMMLCanopyConfig
 
 def test_validate_switch_matrix():
     with pytest.raises(ValueError, match="capacity_scheme"):
-        CLMMLCanopyConfig(capacity_scheme="pmodel").validate()
+        CLMMLCanopyConfig(capacity_scheme="optimum").validate()
     with pytest.raises(ValueError, match="g1_source"):
         CLMMLCanopyConfig(g1_source="xi").validate()
     with pytest.raises(ValueError, match="medlyn"):
-        CLMMLCanopyConfig(stomatal_model="wue", g1_source="p_model").validate()
+        CLMMLCanopyConfig(stomatal_model="wue", g1_source="pmodel").validate()
     with pytest.raises(ValueError, match="two .*providers|providers"):
-        CLMMLCanopyConfig(capacity_scheme="p_model",
+        CLMMLCanopyConfig(capacity_scheme="pmodel",
                           vcmax25_override=55.0).validate()
     with pytest.raises(ValueError, match="pmodel_rjv25"):
         CLMMLCanopyConfig(pmodel_rjv25=True).validate()
-    CLMMLCanopyConfig(stomatal_model="medlyn", capacity_scheme="p_model",
-                      g1_source="p_model", pmodel_rjv25=True).validate()
+    CLMMLCanopyConfig(stomatal_model="medlyn", capacity_scheme="pmodel",
+                      g1_source="pmodel", pmodel_rjv25=True).validate()
 
 
 def test_backend_injection_points_exist():

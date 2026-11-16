@@ -235,7 +235,7 @@ class MultiLayerLandConfig(NamedTuple):
     # Newton, the slope down-regulated by the leaf water potential —
     # land/plant_hydraulics.py; two-leaf + medlyn only); or "phydro" (the Joshi
     # profit optimum on the same supply REPLACES the multiplier; requires a
-    # p_model capacity/g1 switch to feed and a two_leaf/simple_seb scheme —
+    # pmodel capacity/g1 switch to feed and a two_leaf/simple_seb scheme —
     # CLM-ML carries its own plant hydraulics).  Unknown -> ValueError at the
     # step dispatch.
     transpiration_stress: str = "beta_theta"  # "beta_theta" | "hydraulic" | "phydro"
@@ -384,8 +384,8 @@ def biophysics_lmip_p_model_setup() -> dict:
     setup = biophysics_lmip_two_leaf_setup()
     setup["surface_scheme"] = TwoLeafCanopyConfig(
         stomatal_model="medlyn",
-        capacity_scheme="p_model",
-        g1_source="p_model",
+        capacity_scheme="pmodel",
+        g1_source="pmodel",
     ).validate()
     return setup
 

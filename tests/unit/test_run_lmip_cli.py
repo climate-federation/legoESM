@@ -293,11 +293,11 @@ def test_pmodel_switches_flow_to_config():
     cfg = build_config_from_args(_parse_args(
         ["--lat", "45.0", "--land-surface-scheme", "two_leaf",
          "--canopy-stomatal-model", "medlyn",
-         "--canopy-capacity-scheme", "p_model",
-         "--canopy-g1-source", "p_model"])).land
+         "--canopy-capacity-scheme", "pmodel",
+         "--canopy-g1-source", "pmodel"])).land
     ss = cfg.surface_scheme
-    assert ss.capacity_scheme == "p_model"
-    assert ss.g1_source == "p_model"
+    assert ss.capacity_scheme == "pmodel"
+    assert ss.g1_source == "pmodel"
     assert ss.stomatal_model == "medlyn"
 
 
@@ -316,20 +316,20 @@ def test_pmodel_bogus_choice_rejected():
     from scripts.run.run_lmip import _parse_args
 
     with pytest.raises(SystemExit):
-        _parse_args(["--lat", "45.0", "--canopy-capacity-scheme", "pmodel"])
+        _parse_args(["--lat", "45.0", "--canopy-capacity-scheme", "optimum"])
 
 
 def test_pmodel_g1_nonmedlyn_builds_for_phydro():
-    """g1_source='p_model' with the default ball_berry stomata BUILDS (the
+    """g1_source='pmodel' with the default ball_berry stomata BUILDS (the
     phydro slope mapping covers every model); running it without phydro is
     refused at the land step, which sees both switches."""
     from scripts.run.run_lmip import _parse_args, build_config_from_args
 
     land = build_config_from_args(_parse_args(
         ["--lat", "45.0", "--land-surface-scheme", "two_leaf",
-         "--canopy-g1-source", "p_model",
+         "--canopy-g1-source", "pmodel",
          "--transpiration-stress", "phydro"])).land
-    assert land.surface_scheme.g1_source == "p_model"
+    assert land.surface_scheme.g1_source == "pmodel"
     assert land.transpiration_stress == "phydro"
 
 
@@ -342,23 +342,23 @@ def test_pmodel_flags_route_per_scheme():
     with pytest.raises(ValueError, match="inert"):
         build_config_from_args(_parse_args(
             ["--lat", "45.0", "--land-surface-scheme", "simple_seb",
-             "--canopy-capacity-scheme", "p_model"]))
+             "--canopy-capacity-scheme", "pmodel"]))
     land = build_config_from_args(_parse_args(
         ["--lat", "45.0", "--land-surface-scheme", "simple_seb",
          "--stomata-enabled", "--stomata-model", "medlyn",
          "--carbon-scheme", "differland",
-         "--canopy-capacity-scheme", "p_model",
-         "--canopy-g1-source", "p_model"])).land
-    assert land.stomata.capacity_scheme == "p_model"
-    assert land.stomata.g1_source == "p_model"
+         "--canopy-capacity-scheme", "pmodel",
+         "--canopy-g1-source", "pmodel"])).land
+    assert land.stomata.capacity_scheme == "pmodel"
+    assert land.stomata.g1_source == "pmodel"
     # clm_ml: switches land on CLMMLCanopyConfig (medlyn required for g1).
     ss = build_config_from_args(_parse_args(
         ["--lat", "45.0", "--land-surface-scheme", "clm_ml",
          "--clm-ml-stomatal-model", "medlyn",
-         "--canopy-capacity-scheme", "p_model",
-         "--canopy-g1-source", "p_model"])).land.surface_scheme
-    assert ss.capacity_scheme == "p_model"
-    assert ss.g1_source == "p_model"
+         "--canopy-capacity-scheme", "pmodel",
+         "--canopy-g1-source", "pmodel"])).land.surface_scheme
+    assert ss.capacity_scheme == "pmodel"
+    assert ss.g1_source == "pmodel"
 
 
 def test_stomatal_model_selectable_on_every_scheme():
@@ -411,13 +411,13 @@ def test_ec_site_pmodel_flags_parse_and_guard():
 
     with pytest.raises(ValueError, match="inert"):
         run_site("/nonexistent.nc", "diagnostic", "/tmp/x", 8,
-                 capacity_scheme="p_model", vcmax_scale=1.2)
+                 capacity_scheme="pmodel", vcmax_scale=1.2)
     with pytest.raises(ValueError, match="inert"):
         run_site("/nonexistent.nc", "diagnostic", "/tmp/x", 8,
-                 g1_source="p_model", stomatal_m_scale=0.8)
+                 g1_source="pmodel", stomatal_m_scale=0.8)
     with pytest.raises(ValueError, match="two providers|providers"):
         run_site("/nonexistent.nc", "prognostic", "/tmp/x", 8,
-                 canopy="clmml", capacity_scheme="p_model", clmml_vcmax25=60.0)
+                 canopy="clmml", capacity_scheme="pmodel", clmml_vcmax25=60.0)
 
 
 def test_vcmax_profile_flag_routes_and_refuses():

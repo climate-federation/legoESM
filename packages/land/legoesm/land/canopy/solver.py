@@ -299,12 +299,12 @@ class CanopyForcingBundle(NamedTuple):
     psi50_g1_mpa: jax.Array | None = None
     ck_g1: jax.Array | None = None
     # P-model reference quantum yield (PModelConfig.kphio) as (ncol,), set
-    # only under CanopyConfig.light_response='pmodel_phi0': the C3 kernel's
+    # only under CanopyConfig.electron_transport_model='smith': the C3 kernel's
     # electron transport then uses J = 4 phi0(T) I / sqrt(1 + (4 phi0 I /
     # Jmax)^2).  None keeps the CLM PSII light response.  Appended last.
     phi0_ref: jax.Array | None = None
-    # Sandoval et al. (2026) phi0 inputs (PModelConfig.kphio_method=
-    # 'sandoval' with light_response='pmodel_phi0'): per-column aridity index
+    # Sandoval et al. (2026) phi0 inputs (PModelConfig.intrinsic_quantum_yield=
+    # 'sandoval' with electron_transport_model='smith'): per-column aridity index
     # and mGDD0 [degC]; None otherwise.  Appended last.
     phi0_ai: jax.Array | None = None
     phi0_mgdd0: jax.Array | None = None

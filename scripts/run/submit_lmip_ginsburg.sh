@@ -7,14 +7,14 @@
 # starts from the restart block N writes.
 #
 #   # one-year test
-#   scripts/run/submit_lmip_ginsburg.sh --arm least_cost --year-start 2000 --year-end 2000
+#   scripts/run/submit_lmip_ginsburg.sh --arm pmodel-han --year-start 2000 --year-end 2000
 #   # full period, 5-year blocks
-#   scripts/run/submit_lmip_ginsburg.sh --arm least_cost --year-start 2000 --year-end 2014
+#   scripts/run/submit_lmip_ginsburg.sh --arm pmodel-han --year-start 2000 --year-end 2014
 #   # another partition / skip full nodes (repeatable, passed to sbatch)
 #   ... --partition short --sbatch-arg=--exclude=g097,g098
 #   # extend an existing run
-#   scripts/run/submit_lmip_ginsburg.sh --arm least_cost --year-start 2001 --year-end 2014 \
-#       --restart-from <root>/least_cost/2000-2000/restart_2001_d000h00.npz
+#   scripts/run/submit_lmip_ginsburg.sh --arm pmodel-han --year-start 2001 --year-end 2014 \
+#       --restart-from <root>/pmodel-han/2000-2000/restart_2001_d000h00.npz
 #   # warm start from the published 1985 soil state (no P-model acclimation state
 #   # in it: the first block resets that explicitly), start only after job 123 ends well
 #   ... --restart-from data/lmip_soil_ic/restart_1985_d000h00.npz --pmodel-cold-restart --after 123
@@ -24,13 +24,16 @@
 # Arms (tests/land/integration/test_run_lmip_biophys.py):
 #   baseline    optimality=none + prescribed capacities, table g1, beta(theta)
 #               stress, medlyn stomata (all given explicitly)
-#   least_cost  physics.optimality=least_cost (p_model capacities + p_model g1,
+#   pmodel-han  physics.optimality=pmodel + pmodel_acclimation_scheme=han (pmodel
+#               capacities + pmodel g1 on the half-hourly driver EMA, medlyn,
+#   pmodel-mengoli  ... scheme=mengoli (daily optimum at the noon-window means,
+#               memory on the traits, pmodel stomata = xi-driven ci; table g1,
 #               beta(theta) stress, medlyn)
 #   phydro      physics.optimality=phydro (phydro capacities, table g1, phydro
 #               stress, phydro instantaneous optimum as the stomatal model)
 set -euo pipefail
 
-ARM=least_cost
+ARM=pmodel-han
 YEAR_START=2000
 YEAR_END=2000
 BLOCK_YEARS=5
@@ -75,10 +78,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$ARM" in
-    baseline)   ARM_OVR=(optimality=none canopy_capacity_scheme=prescribed canopy_g1_source=table transpiration_stress=beta_theta stomatal_model=medlyn) ;;
-    least_cost) ARM_OVR=(optimality=least_cost) ;;
-    phydro)     ARM_OVR=(optimality=phydro) ;;
-    *) echo "unknown --arm '$ARM' (baseline | least_cost | phydro)" >&2; exit 2 ;;
+    # Every arm names the shared switches explicitly (no reliance on defaults):
+    # NRH electron transport, Bernacchi phi0(T), 15-day memory, kn profile.
+    baseline)       ARM_OVR=(optimality=none canopy_capacity_scheme=prescribed canopy_g1_source=table transpiration_stress=beta_theta stomatal_model=medlyn electron_transport_model=nrh intrinsic_quantum_yield=temperature pmodel_acclimation_days=15 canopy_vcmax_profile=kn) ;;
+    pmodel-han)     ARM_OVR=(optimality=pmodel pmodel_acclimation_scheme=han pmodel_acclimation_hours=24h electron_transport_model=nrh intrinsic_quantum_yield=temperature pmodel_acclimation_days=15 canopy_vcmax_profile=kn) ;;
+    pmodel-mengoli) ARM_OVR=(optimality=pmodel pmodel_acclimation_scheme=mengoli pmodel_acclimation_hours=noon electron_transport_model=nrh intrinsic_quantum_yield=temperature pmodel_acclimation_days=15 canopy_vcmax_profile=kn) ;;
+    phydro)         ARM_OVR=(optimality=phydro pmodel_acclimation_hours=24h electron_transport_model=nrh intrinsic_quantum_yield=temperature pmodel_acclimation_days=15 canopy_vcmax_profile=kn) ;;
+    *) echo "unknown --arm '$ARM' (baseline | pmodel-han | pmodel-mengoli | phydro)" >&2; exit 2 ;;
 esac
 (( YEAR_END >= YEAR_START )) || { echo "--year-end < --year-start" >&2; exit 2; }
 (( BLOCK_YEARS >= 1 )) || { echo "--block-years must be >= 1" >&2; exit 2; }
