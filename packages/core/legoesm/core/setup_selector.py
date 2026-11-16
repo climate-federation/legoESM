@@ -32,7 +32,9 @@ the live matrix catalog) stays in the adapter via ``known_names``.
 A runner may also accept runner-only keys beyond ``SETUP_KEYS``
 (``MatrixRunnerSpec.extra_keys``, e.g. the ocean BENCH harness's ``preset`` /
 ``steps``, #2113) and may have no case filter at all (``case_flag=None``); any
-other runner rejects those keys as unknown fields.
+other runner rejects those keys as unknown fields.  A positional case (a
+subcommand, ``case_flag=""``) and a runner with no grid choice
+(``grid_flag=None``) cover the single-column runner (#2103).
 
 Pure / dependency-free (``shlex`` + ``math`` + ``dataclasses``).
 """
@@ -69,7 +71,9 @@ class MatrixRunnerSpec:
     # use ``"="``; a runner whose case flag is ALREADY exact (sea-ice ``--test``,
     # ``tc.case == args.test``) uses ``""``.
     exact_prefix: str = "="
-    grid_flag: str = "--grid"
+    # ``None`` = the runner has no grid choice (e.g. a single-column runner):
+    # ``setup.grid`` is still validated against ``valid_grids`` but not emitted.
+    grid_flag: str | None = "--grid"
     levels_flag: str | None = "--levels"
     dt_flag: str | None = "--dt"
     days_flag: str | None = "--days"
@@ -177,10 +181,12 @@ def build_matrix_command(spec: MatrixRunnerSpec, setup, *, output_path=None) -> 
     anything omitted.
     """
     parts = [f"python {spec.runner_path}"]
-    if spec.case_flag is not None:
-        parts.append(f"{spec.case_flag} "
-                     f"{shlex.quote(spec.exact_prefix + str(setup['name']))}")
-    parts.append(f"{spec.grid_flag} {shlex.quote(str(setup['grid']))}")
+    if spec.case_flag is not None:   # "" = positional case (subcommand)
+        parts.append(" ".join(filter(None, [
+            spec.case_flag,
+            shlex.quote(spec.exact_prefix + str(setup['name']))])))
+    if spec.grid_flag is not None:
+        parts.append(f"{spec.grid_flag} {shlex.quote(str(setup['grid']))}")
     if setup.get("levels") is not None and spec.levels_flag:
         parts.append(f"{spec.levels_flag} {int(setup['levels'])}")
     if setup.get("resolution") and spec.resolution_flag:
