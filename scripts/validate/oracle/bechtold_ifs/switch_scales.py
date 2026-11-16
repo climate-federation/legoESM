@@ -90,6 +90,7 @@ def measure(fix, groups=GROUPS):
                 return f(self, x, b, w, *a, **k)
         return g
 
+    jax.clear_caches()   # traces are cached blind to the patched methods/widths
     try:
         for n in orig:
             setattr(_ifs_smooth.IfsSmooth, n, wrap(n))
@@ -109,6 +110,7 @@ def measure(fix, groups=GROUPS):
             setattr(_ifs_smooth.IfsSmooth, n, f)
         for (mod, wname), v in saved.items():
             setattr(mod, wname, v)
+        jax.clear_caches()
     return {c: np.concatenate(v) for c, v in store.items()}
 
 

@@ -993,16 +993,19 @@ def test_every_switch_site_has_a_gradient_point():
     assert sum(map(len, sets)) == len(set.union(*sets))
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def _fresh_jit():
-    """Each per-site test compiles a fresh instrumented scheme; drop the
-    compiled code after it (XLA's CPU JIT runs out of code memory otherwise)."""
+    """Every test starts and ends with empty JAX caches: traces are cached by
+    function identity, blind to the IfsSmooth methods and widths the probes
+    patch, so a trace made under instrumentation (or before it) would be
+    reused across tests; and XLA's CPU JIT runs out of code memory otherwise."""
+    jax.clear_caches()
     yield
     jax.clear_caches()
 
 
 @pytest.mark.parametrize("site", sorted(_SITE_POINTS), ids=lambda t: f"{t[1]}:{t[0][:60]}")
-def test_switch_site_gradient_at_default(fix, site, _fresh_jit):
+def test_switch_site_gradient_at_default(fix, site):
     """RULE 5 gradient test, per switch site, at the default (smooth): at the
     site's point it is inside its window, check_grads (order 1, reverse)
     passes on the scheme's heating + drying + mass flux with respect to the
