@@ -864,6 +864,7 @@ from legoesm.ice.si3_o17 import (  # noqa: E402
     SI3O17LiveForcing,
     SI3O17StepState,
     SI3O17Trace,
+    si3_icethd_age_and_lbc,
     si3_o17_step,
 )
 
@@ -922,6 +923,14 @@ def _si3_orca2_o2_step_with_trace(
             config=config.si3_orca2,
             _plant_skip_rebin=forcing.plant_skip_rebin,
             _plant_strip_transfer_barriers=forcing.plant_strip_transfer_barriers,
+        )
+        correction = correction._replace(
+            state=si3_icethd_age_and_lbc(
+                correction.state,
+                rDt_ice=config.si3_orca2.rDt_ice,
+                nn_hls=config.si3_orca2.nn_hls,
+                ldfull=True,
+            )
         )
         h = int(config.si3_orca2.nn_hls)
         owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))

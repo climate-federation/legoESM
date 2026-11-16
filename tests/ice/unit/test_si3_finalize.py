@@ -470,6 +470,95 @@ def test_step_sea_ice_returns_the_o15_corrected_state() -> None:
     np.testing.assert_array_equal(np.asarray(new_state.szv_i)[owned], np.asarray(corrected.szv_i)[owned])
 
 
+def test_step_sea_ice_runs_icethd_age_increment_and_state_lbc_after_ice_cor() -> None:
+    cfg = _config(nn_hls=1)
+    shape, owned_shape = (6, 6), (4, 4)
+    owned = (slice(1, -1), slice(1, -1))
+    state0 = SI3State.zeros(*shape, cfg)
+    a = jnp.full((*shape, 1), -1.0, dtype=jnp.float64)
+    a = a.at[owned].set(0.25)
+    v = jnp.zeros((*shape, 1), dtype=jnp.float64).at[owned].set(0.125)
+    oa = jnp.full((*shape, 1), -999.0, dtype=jnp.float64)
+    oa_values = jnp.arange(16.0, dtype=jnp.float64).reshape(*owned_shape, 1) + 10.0
+    oa = oa.at[owned].set(oa_values)
+    state0 = state0._replace(
+        a_i=a,
+        v_i=v,
+        oa_i=oa,
+        szv_i=jnp.zeros((*shape, 1, 1), dtype=jnp.float64),
+        equivalent=state0.equivalent._replace(h_i=jnp.where(a > 0.0, v / a, 0.0), a_i=a),
+        aggregated=state0.aggregated._replace(at_i=a[..., 0], vt_i=v[..., 0]),
+    )
+    z = jnp.zeros(shape, dtype=jnp.float64)
+    stress = SI3StressInputs(
+        uu_kbb=z,
+        vv_kbb=z,
+        umask_k1=jnp.ones(shape),
+        vmask_k1=jnp.ones(shape),
+        u_ice=z,
+        v_ice=z,
+        u_oce=z,
+        v_oce=z,
+        drag_io=jnp.ones(shape) * 0.005,
+        at_i=a[..., 0],
+        utau=z,
+        vtau=z,
+        tmod_io=z,
+        taum=jnp.ones(owned_shape),
+        utau_oce=jnp.zeros(owned_shape),
+        vtau_oce=jnp.zeros(owned_shape),
+    )
+    update = _forcing(owned_shape, (*owned_shape, 1))._replace(
+        tmask=jnp.ones(shape),
+        snwice_mass=jnp.zeros(shape),
+        snwice_mass_b=jnp.zeros(shape),
+    )
+    fluxes = _fluxes(shape)
+    forcing = SI3FinalizeForcing(
+        fluxes=fluxes,
+        update=update,
+        stress=stress,
+        sss_m=jnp.full(shape, 34.0),
+        sst_m=jnp.full(shape, -1.8),
+        rn_amax_2d=jnp.full(shape, 0.95),
+        rn_himin=0.1,
+        surface_config=_surface_config(nn_hls=1),
+        ln_drgice_imp=False,
+    )
+    _, response = sea_ice_module.step_sea_ice(
+        state0,
+        forcing,
+        jnp.zeros(owned_shape),
+        jnp.zeros(owned_shape),
+        jnp.zeros(owned_shape),
+        build_si3_orca2_o2_config(cfg),
+        0.0,
+        cfg.rDt_ice,
+    )
+    ice_cor = si3_o15_step(
+        state0,
+        fluxes,
+        sss_m=forcing.sss_m,
+        sst_m=forcing.sst_m,
+        rn_amax_2d=forcing.rn_amax_2d,
+        rn_himin=forcing.rn_himin,
+        config=cfg,
+    ).state
+    corrected = response.correction.state
+    expected_owned_age = np.asarray(ice_cor.oa_i[owned]) + np.asarray(ice_cor.a_i[owned]) * cfg.rDt_ice
+    # The full north-fold refresh then overwrites full-array [4, 4] from [2, 4].
+    expected_owned_age[-1, -1] = expected_owned_age[1, -1]
+    np.testing.assert_array_equal(np.asarray(corrected.oa_i[owned]), expected_owned_age)
+
+    # T-point cyclic seam, closed south, north halo, and full pivot row.
+    np.testing.assert_array_equal(corrected.oa_i[:, 0], 0.0)
+    np.testing.assert_array_equal(corrected.oa_i[0, 2], corrected.oa_i[4, 2])
+    np.testing.assert_array_equal(corrected.oa_i[5, 2], corrected.oa_i[1, 2])
+    np.testing.assert_array_equal(corrected.oa_i[3, 5], corrected.oa_i[3, 3])
+    np.testing.assert_array_equal(corrected.oa_i[4, 4], corrected.oa_i[2, 4])
+    assert not np.any(np.asarray(corrected.oa_i) == -999.0)
+
+
 @pytest.mark.parametrize("ln_drgice_imp", [False, True])
 @pytest.mark.parametrize("field", ["tmod_io", "utau"])
 def test_o16_tau_gradient_is_finite_at_zero_relative_velocity_both_arms(field, ln_drgice_imp) -> None:

@@ -507,15 +507,21 @@ def _scatter(full: jnp.ndarray, interior: jnp.ndarray, h: int) -> jnp.ndarray:
     return full.at[h:-h, h:-h, ...].set(interior)
 
 
-def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
-    """Finish ``ice_thd`` after ``ice_cor(kt, 2)`` (``icethd.F90:185-201``)."""
+def si3_icethd_age_and_lbc(
+    state: SI3State,
+    *,
+    rDt_ice: float,
+    nn_hls: int,
+    ldfull: bool,
+) -> SI3State:
+    """Run the age increment and state LBC after ``ice_cor(kt, 2)``."""
 
-    h = int(card.state.nn_hls)  # icethd.F90:185-201 (A2D(0) and lbc_lnk extents)
+    h = int(nn_hls)  # icethd.F90:185-190 (A2D(0) and lbc_lnk extents)
     owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))  # icethd.F90:185-200
     oa_i = state.oa_i.at[owned].set(  # icethd.F90:185
         nemo_source_round(  # icethd.F90:185; block compiled FMA contraction
             state.oa_i[owned]
-            + nemo_source_round(state.a_i[owned] * card.state.rDt_ice)  # icethd.F90:185
+            + nemo_source_round(state.a_i[owned] * rDt_ice)  # icethd.F90:185
         )
     )
 
@@ -525,10 +531,10 @@ def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
             "T",
             1.0,
             nn_hls=h,
-            ldfull=card.fold.nfd_full_when_absent,  # icethd.F90:188-190
+            ldfull=ldfull,  # icethd.F90:188-190
         )
 
-    linked = state._replace(  # icethd.F90:188-190
+    return state._replace(  # icethd.F90:188-190
         a_i=t_lbc(state.a_i),  # icethd.F90:188
         v_i=t_lbc(state.v_i),  # icethd.F90:188
         v_s=t_lbc(state.v_s),  # icethd.F90:188
@@ -542,6 +548,19 @@ def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
         e_s=t_lbc(state.e_s),  # icethd.F90:190
         szv_i=t_lbc(state.szv_i),  # icethd.F90:190
     )
+
+
+def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
+    """Finish ``ice_thd`` after ``ice_cor(kt, 2)`` (``icethd.F90:185-201``)."""
+
+    h = int(card.state.nn_hls)  # icethd.F90:185-201 (A2D(0) and lbc_lnk extents)
+    owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))  # icethd.F90:185-200
+    linked = si3_icethd_age_and_lbc(
+        state,
+        rDt_ice=card.state.rDt_ice,
+        nn_hls=h,
+        ldfull=card.fold.nfd_full_when_absent,
+    )  # icethd.F90:185-190
     at_i = fortran_sum_categories(linked.a_i, axis=-1)  # icethd.F90:192
     no_ice = at_i == 0.0  # icethd.F90:194
     if h:
