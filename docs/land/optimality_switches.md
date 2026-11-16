@@ -22,8 +22,14 @@ Meaning of the values:
   P-hydro arm reads no slope.
 * `transpiration_stress`: `beta_theta` = the empirical root-zone
   soil-moisture factor on Vcmax and on the Medlyn slope (tabulated or
-  least-cost);
-  `phydro` = the hydraulic supply curve replaces it.
+  least-cost); `hydraulic` = the soil-to-leaf supply
+  (`land/plant_hydraulics.py`) closed against the Medlyn demand inside the
+  canopy Newton (two draw-down unknowns, one supply-equals-demand row per
+  leaf class), the slope down-regulated by the leaf water potential,
+  `g1 * 2^(-(psi_L/psi50_g1)^ck_g1)` (`land.plant_hydraulics`), no
+  empirical factor; two-leaf + `medlyn` only (step 1 of
+  `docs/land/hydraulic_stress_design.md`); `phydro` = the P-hydro profit
+  optimum on the same supply replaces it.
 * `stomatal_model`: the half-hourly leaf conductance.  `phydro` = the
   instantaneous P-hydro optimum solved inside the canopy Newton closure
   (two extra unknowns, the sunlit and shaded draw-downs).

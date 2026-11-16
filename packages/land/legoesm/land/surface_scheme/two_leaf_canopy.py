@@ -185,6 +185,9 @@ def advance_TgC_ema(
 # pass, so a failing column can be replayed in isolation.
 import os as _os
 _DUMP_UNSOLVED_DIR = _os.environ.get("LEGOESM_DUMP_UNSOLVED", "")
+# Initial draw-down of the Newton unknowns under transpiration_stress=
+# "hydraulic" (no acclimated optimum to seed from) [MPa].
+_DPSI_SEED_HYDRAULIC_MPA = 0.1
 
 
 def _dump_unsolved(bundles, x0, x, n_iters, converged):
@@ -438,8 +441,14 @@ def compute_two_leaf_canopy_fluxes(
     rjv25 = None
     chi_opt = None  # P-model optimum ci/ca (C3/C4 blend), seeds the Newton Ci
     dpsi_seed = None  # P-hydro acclimated draw-down, seeds the Newton dpsi
-    _phydro_on = getattr(
-        land_config, "transpiration_stress", "beta_theta") == "phydro"
+    _ts = getattr(land_config, "transpiration_stress", "beta_theta")
+    _phydro_on = _ts == "phydro"
+    # transpiration_stress="hydraulic": the empirical theta factor is replaced
+    # by the soil-to-leaf supply (plant_hydraulics.py) closed against the
+    # Medlyn demand, with the slope down-regulated by the leaf water
+    # potential; two draw-down unknowns as under phydro.
+    _hydraulic = _ts == "hydraulic"
+    _hyd_on = _hydraulic or _phydro_on
     # The P-hydro arm is ONE configuration, named "phydro" on every switch it
     # replaces: the acclimated optimum's capacities (capacity_scheme), the
     # hydraulic supply in place of the empirical stress (transpiration_
@@ -456,8 +465,17 @@ def compute_two_leaf_canopy_fluxes(
             "transpiration_stress='phydro' and stomatal_model='phydro' "
             "together (physics.optimality=phydro does this); got "
             f"capacity_scheme={cc.capacity_scheme!r}, transpiration_stress="
-            f"{'phydro' if _phydro_on else 'beta_theta'!r}, "
-            f"stomatal_model={cc.stomatal_model!r}")
+            f"{_ts!r}, stomatal_model={cc.stomatal_model!r}")
+    if _hydraulic and cc.stomatal_model != "medlyn":
+        raise ValueError(
+            "transpiration_stress='hydraulic' closes the draw-down against the "
+            "MEDLYN demand (the supply-demand row is written for that model); "
+            f"got stomatal_model={cc.stomatal_model!r}")
+    if _hydraulic and phydro_supply is None:
+        raise ValueError(
+            "transpiration_stress='hydraulic' but no PhydroSupply was threaded "
+            "to the canopy (phydro_supply=None): this caller does not carry "
+            "the soil-to-leaf supply state.")
     if _phydro_on and cc.g1_source != "table":
         raise ValueError(
             "the P-hydro arm reads no stomatal slope (stomatal_model='phydro'); "
@@ -548,8 +566,9 @@ def compute_two_leaf_canopy_fluxes(
     # Under phydro the water limitation lives INSIDE the profit optimum
     # (supply cap + hydraulic risk cost): the empirical multiplier is
     # replaced by 1 (user decision ASK-14; GLM: anything else double-counts).
-    if (getattr(land_config, "transpiration_stress", "beta_theta")
-            == "phydro"):
+    # Under "hydraulic" likewise: the leaf water potential (a Newton unknown)
+    # down-regulates the slope inside the closure, so no pre-multiplier.
+    if _hyd_on:
         fStress_vcmax = jnp.ones_like(w_frac_rz)
     else:
         fStress_vcmax = w_frac_rz     # Vcmax / transpiration down-regulation
@@ -557,7 +576,7 @@ def compute_two_leaf_canopy_fluxes(
                      else w_frac_soil_evap)   # soil evaporation stress
 
     Vc3_leaf_stressed = Vc3_leaf * fStress_vcmax
-    if rjv25 is not None and not _phydro_on:
+    if rjv25 is not None and not _hyd_on:
         # Least-cost capacities under the empirical stress: rpmodel re-derives
         # Jmax from the STRESSED Vcmax, so Jmax25/Vcmax25 falls with the stress
         # (p_model.stressed_rjv25_factor).  P-hydro carries its water
@@ -634,8 +653,12 @@ def compute_two_leaf_canopy_fluxes(
     Ci_init = ci_seed(Ca, fC4, chi_opt)
 
     _x0 = [Ta, Ta, Ci_init, Ci_init, Tc_init, q_c_init]
-    if cc.stomatal_model == "phydro":
-        # The two draw-down unknowns start at the acclimated optimum's.
+    if _hydraulic:
+        # No acclimated optimum to seed from: a small fixed draw-down.
+        dpsi_seed = jnp.full(ncol, _DPSI_SEED_HYDRAULIC_MPA)
+    if _hyd_on:
+        # The two draw-down unknowns start at the acclimated optimum's
+        # (phydro) or at the fixed seed (hydraulic).
         _x0 += [dpsi_seed, dpsi_seed]
     initial_state = jnp.stack(_x0, axis=-1)  # (ncol, 6) or (ncol, 8)
 
@@ -670,15 +693,24 @@ def compute_two_leaf_canopy_fluxes(
             **_phydro_bundle,
         )
 
-    # This step's supply + the hydraulic constants for the instantaneous
-    # optimum (stomatal_model="phydro"); nothing otherwise.
-    if cc.stomatal_model == "phydro":
+    # This step's supply + the hydraulic constants whenever leaf hydraulics
+    # is on: the P-hydro risk cost for the instantaneous optimum
+    # (stomatal_model="phydro"), the slope's Weibull curve for the
+    # supply-demand closure (transpiration_stress="hydraulic"); nothing
+    # otherwise.
+    if _hyd_on:
         _hc = land_config.phydro
         _phydro_bundle = dict(
             psi_s_mpa=phydro_supply.psi_s_mpa, rsoil_leaf=phydro_supply.rsoil_leaf,
             gplant_mol=_bcast(_hc.gplant_mol),
             psi50_xylem_mpa=_bcast(_hc.psi50_xylem_mpa),
-            ck_xylem=_bcast(_hc.ck_xylem), gamma_cost=_bcast(_hc.gamma_cost))
+            ck_xylem=_bcast(_hc.ck_xylem))
+        if _phydro_on:
+            _phydro_bundle["gamma_cost"] = _bcast(_hc.gamma_cost)
+        else:
+            _ph = land_config.plant_hydraulics
+            _phydro_bundle["psi50_g1_mpa"] = _bcast(_ph.psi50_g1_mpa)
+            _phydro_bundle["ck_g1"] = _bcast(_ph.ck_g1)
     else:
         _phydro_bundle = {}
 
@@ -854,8 +886,8 @@ def compute_two_leaf_canopy_fluxes(
         gs_Sh=gs_Sh,
         ci_ca_sun=x_final[:, 2] / Ca,
         ci_ca_sh=x_final[:, 3] / Ca,
-        dpsi_sun_mpa=(x_final[:, 6] if cc.stomatal_model == "phydro" else None),
-        dpsi_sh_mpa=(x_final[:, 7] if cc.stomatal_model == "phydro" else None),
+        dpsi_sun_mpa=(x_final[:, 6] if _hyd_on else None),
+        dpsi_sh_mpa=(x_final[:, 7] if _hyd_on else None),
         n_iters=n_iters,
         # Whether the Newton closure actually reached a root on this column.
         # False means the fluxes above are a stopped iterate, not a solution —

@@ -83,6 +83,15 @@ from legoesm.land.p_model import (
     optimal_chi,
     _phi0,
 )
+from legoesm.land.plant_hydraulics import (  # noqa: F401 (re-exported)
+    LeafHydraulics,
+    PhydroSupply,
+    floored_vpd,
+    leaf_supply_gs_w,
+    soil_root_supply,
+    supply_transpiration,
+    weibull_vulnerability,
+)
 
 __physics_contract__ = {
     "summary": (
@@ -180,34 +189,11 @@ __param_spec__ = {
     },
 }
 
-# --- SPA fine-root geometry (Bonan 2014 / CLM-ML MLpftcon table; fixed) ---
-_ROOT_RADIUS_M = 0.29e-3   # [m] fine-root radius (root_radius_SPA)
-_ROOT_DENSITY_GM3 = 0.31e6  # [g biomass / m3 root] (root_density_SPA)
-_ROOT_RESIST = 25.0        # [MPa s g mmol-1 H2O] root resistivity (root_resist_SPA)
-
 # --- numerics (module constants; iteration counts are never config) ---
 _N_CHI_ITER = 30    # inner bisection on dF/dchi (bracket width 2^-30)
 _N_DPSI_ITER = 30   # outer bisection on dF/ddpsi
 _DPSI_MAX_MPA = 10.0  # [MPa] upper bracket of the draw-down search
-_RBD_FLOOR = 1e-10  # coeff-ok: Bonan A23 root-biomass-density floor [g/m3]
-_LAI_FLOOR = 1.0e-3  # [m2/m2] guards the per-leaf-area resistance on bare columns
-# Wettest soil matric potential a root can see: field capacity.  The Richards
-# lane can overshoot to POSITIVE potentials for a step when rain lands on dry
-# soil (a water-balance artefact); fed to the optimum that reverses the
-# soil-to-leaf gradient and yields negative conductance and capacities.
-_PSI_SOIL_CAP_MPA = -0.033
-_PSI_SOIL_CAP_WIDTH_MPA = 0.005  # softplus width of the cap (AD safety)
 _UMOL_PER_MOL = 1.0e6
-_LN2 = float(np.log(2.0))
-# Weibull argument guards: the ratio psi/psi50 is clipped so (ratio ** ck) and
-# its derivatives stay finite for every admissible ck.
-_WEIBULL_RATIO_MIN = 1.0e-12
-_WEIBULL_RATIO_MAX = 1.0e3
-# Gauss-Legendre nodes/weights on [0, 1] for the xylem-path mean of P.
-_GL_NODES, _GL_WEIGHTS = (
-    0.5 * (np.polynomial.legendre.leggauss(8)[0] + 1.0),
-    0.5 * np.polynomial.legendre.leggauss(8)[1],
-)
 # Implicit-gradient guards: the Newton-refinement step is applied only on
 # columns with a live interior optimum and a well-conditioned Hessian.
 _A_ACTIVE_UMOL = 1.0e-6    # [umol m-2 s-1] below this the plant is shut down
@@ -231,13 +217,6 @@ class PHydroConfig(NamedTuple):
     init_rsoil_leaf: float = 0.0     # [MPa m2 leaf s/mol]
 
 
-class PhydroSupply(NamedTuple):
-    """Soil-side supply state, all ``(ncol,)``."""
-
-    rsoil_leaf: jax.Array  # [MPa m2 leaf s/mol] soil-to-root resistance per leaf area
-    psi_s_mpa: jax.Array   # [MPa] conductance-weighted soil water potential
-
-
 class PhydroCapacities(NamedTuple):
     """Acclimated parameter predictions from the profit optimum."""
 
@@ -259,107 +238,6 @@ class _Env(NamedTuple):
     ca_umol: jax.Array  # [umol/mol] ambient CO2
     g: jax.Array        # [-] Gamma* / ca
     jlim: jax.Array     # [umol m-2 s-1] 4 * phi0 * Iabs
-
-
-def soil_root_supply(
-    psi_soil_m: jax.Array,
-    theta_soil: jax.Array,
-    dz_m: jax.Array,
-    root_frac: jax.Array,
-    lai: jax.Array,
-    hydraulics_cfg,
-    cfg: PHydroConfig,
-) -> PhydroSupply:
-    """Soil-to-root resistance (Bonan 2014 eqs. A23-A25) and bulk soil potential.
-
-    Layered soil-to-root resistances from root geometry + the Richards
-    lane's own hydraulic conductivity; conductances sum in parallel across
-    layers.  The bulk soil potential is the CONDUCTANCE-weighted mean — the
-    exact effective potential of parallel layers feeding one root — so a
-    dried-out layer drops out through its own collapsing conductance.
-    ``rsoil_leaf`` is returned as ZERO (see the note at the return); the xylem
-    resistance is added inside :func:`phydro_optimum`, where it depends on the
-    draw-down.
-
-    Shapes: ``psi_soil_m``/``theta_soil``/``root_frac`` are
-    ``(ncol, nlev)``; ``dz_m`` is ``(nlev,)``; ``lai`` is ``(ncol,)``.
-    """
-    from legoesm.land.soil_hydraulics import hydraulic_conductivity
-
-    # Soil conductivity [m/s] -> [mol m-1 s-1 MPa-1]:
-    # (m/s) * (mol m-3 water) / (MPa m-1 head) with head = rho*g*1e-6.
-    hk_ms = hydraulic_conductivity(psi_soil_m, theta_soil, hydraulics_cfg)
-    mol_per_m3 = constants.rho_water / constants.M_h2o
-    mpa_per_m = constants.rho_water * constants.g * 1e-6
-    hk_mol = jnp.maximum(hk_ms, 0.0) * mol_per_m3 / mpa_per_m
-
-    # Matric potential [MPa], smoothly capped at field capacity: ~psi well
-    # below the cap, -> the cap from below above it (sign: psi <= 0, drier is
-    # more negative).
-    smp_mpa = _PSI_SOIL_CAP_MPA - _PSI_SOIL_CAP_WIDTH_MPA * jax.nn.softplus(
-        (_PSI_SOIL_CAP_MPA - psi_soil_m * mpa_per_m) / _PSI_SOIL_CAP_WIDTH_MPA)
-
-    dz = jnp.broadcast_to(dz_m, psi_soil_m.shape)
-    rbd = jnp.maximum(cfg.root_biomass_gm2 * root_frac / dz, _RBD_FLOOR)
-    rld = rbd / (_ROOT_DENSITY_GM3 * jnp.pi * _ROOT_RADIUS_M ** 2)
-    root_dist = jnp.sqrt(1.0 / (rld * jnp.pi))
-    # A23 (radial soil-to-root) + A24 (root tissue).  _ROOT_RESIST is in the
-    # SPA mmol convention; the *1e3 converts the resulting resistance to the
-    # mol convention used throughout this module.
-    soilr1 = jnp.log(root_dist / _ROOT_RADIUS_M) / (
-        2.0 * jnp.pi * rld * dz * jnp.maximum(hk_mol, 1e-30))
-    soilr2 = (_ROOT_RESIST * 1e3) / (rbd * dz)
-    soilr = soilr1 + soilr2  # [MPa m2 ground s mol-1]
-
-    g_layers = 1.0 / soilr
-    g_soil_ground = jnp.maximum(jnp.sum(g_layers, axis=-1), 1e-30)  # [mol/m2 ground/s/MPa]
-    psi_s = jnp.sum(smp_mpa * g_layers, axis=-1) / g_soil_ground
-
-    # The soil-to-root resistance is MASKED to zero (user decision 2026-10-28):
-    # the plant sees the conductance-weighted soil potential at its root
-    # surface, as in rphydro.  The layer conductances above still weight that
-    # potential.  (The per-leaf-area resistance, Bonan A25, would be
-    # ``max(lai, _LAI_FLOOR) / g_soil_ground``; its running mean, needed by the
-    # acclimated optimum, is dominated by dry-spell spikes of 1e7-1e8 and shut
-    # the plant down for weeks after rain.)
-    rsoil_leaf = jnp.zeros_like(psi_s)
-    return PhydroSupply(rsoil_leaf=rsoil_leaf, psi_s_mpa=psi_s)
-
-
-def _weibull_exponent(psi_mpa: jax.Array, psi50_mpa, ck) -> jax.Array:
-    """``ln(2) * (psi/psi50)**ck`` with the ratio clipped to a finite range.
-
-    The clip keeps the power AND its derivatives (w.r.t. psi, psi50 and ck)
-    finite: at psi = 0 the bare ``ratio**ck`` has a NaN ck-derivative
-    (``0 * log 0``), and at very negative psi it overflows.
-    """
-    ratio = jnp.clip(psi_mpa / psi50_mpa, _WEIBULL_RATIO_MIN, _WEIBULL_RATIO_MAX)
-    return _LN2 * ratio ** ck
-
-
-def weibull_vulnerability(psi_mpa: jax.Array, psi50_mpa, ck) -> jax.Array:
-    """Fraction of maximum conductance/capacity left at ``psi``: ``0.5**((psi/psi50)**ck)``."""
-    return jnp.exp(-_weibull_exponent(psi_mpa, psi50_mpa, ck))
-
-
-def supply_transpiration(dpsi, psi_s_mpa, rsoil_leaf, gplant_mol,
-                         psi50_xylem_mpa, ck_xylem):
-    """Transpiration the soil-to-leaf path supplies at a draw-down.
-
-    ``E = lsc(psi_s, dpsi) * dpsi`` [mol H2O / m2 leaf / s] with
-    ``lsc = 1/(rsoil + 1/(gplant * Pbar))`` and ``Pbar`` the mean of the
-    Weibull curve over the xylem path ``[psi_s - dpsi, psi_s]`` (fixed-node
-    quadrature: smooth in dpsi, psi50 and ck; no incomplete-gamma function).
-    Shared by the acclimated and the instantaneous optimum.
-    """
-    pbar = sum(
-        float(w) * weibull_vulnerability(
-            psi_s_mpa - float(t) * dpsi, psi50_xylem_mpa, ck_xylem)
-        for t, w in zip(_GL_NODES, _GL_WEIGHTS))
-    kx = gplant_mol * pbar
-    # lsc = 1/(rsoil + 1/kx), written without the 1/kx so kx -> 0 is finite.
-    lsc = kx / (1.0 + rsoil_leaf * kx)
-    return lsc * dpsi
 
 
 def _supply_side(dpsi: jax.Array, env: _Env, cfg: PHydroConfig):
@@ -545,61 +423,6 @@ def phydro_optimum(
     return PhydroCapacities(
         vcmax25_leaf=vcmax25, rjv25=rjv25, chi=chi, dpsi_mpa=dpsi,
         psi_leaf_mpa=supply.psi_s_mpa - dpsi, gs_mol=gs, converged=converged)
-
-
-class LeafHydraulics(NamedTuple):
-    """Supply state of ONE leaf class for the instantaneous step, all ``(ncol,)``.
-
-    ``dpsi_mpa`` is the class's Newton unknown (soil-to-leaf draw-down);
-    the soil fields are THIS step's (not the acclimated) supply; the
-    hydraulic constants travel as per-column arrays so the canopy solver's
-    implicit backward pass can differentiate with respect to them.
-    """
-
-    dpsi_mpa: jax.Array        # [MPa] draw-down (Newton unknown)
-    psi_s_mpa: jax.Array       # [MPa] conductance-weighted soil potential
-    rsoil_leaf: jax.Array      # [MPa m2 leaf s/mol] soil-to-root resistance
-    lai_class: jax.Array       # [m2 leaf/m2 ground] leaf area of the class
-    gplant_mol: jax.Array      # [mol/m2 leaf/s/MPa]
-    psi50_xylem_mpa: jax.Array  # [MPa]
-    ck_xylem: jax.Array        # [-]
-    gamma_cost: jax.Array      # [umol/m2/s/MPa^2]
-
-
-# --- leaf VPD floor of the supply conductance gs = E / D ---
-_VPD_FLOOR_PA = 50.0        # [Pa] floor on the leaf-to-air VPD in gs = E / D (as the rphydro kernel)
-_VPD_FLOOR_WIDTH_PA = 0.0   # [Pa] width of the smooth floor; 0 = hard max
-
-
-def floored_vpd(vpd_pa: jax.Array) -> jax.Array:
-    """Leaf VPD with the kernel's 50 Pa floor, optionally smoothed.
-
-    The hard ``max(VPD, 50)`` has a derivative jump at the floor; a shaded
-    leaf colder than the canopy-air dew point sits exactly there and the
-    canopy Newton stalls on the kink.  With a width ``w`` the floor is the
-    smooth-max ``50 + 0.5 (v + sqrt(v^2 + w^2))``, ``v = VPD - 50``: same
-    limits, continuous derivative, ``w/2`` above the hard floor at VPD = 50.
-    """
-    v = vpd_pa - _VPD_FLOOR_PA
-    if _VPD_FLOOR_WIDTH_PA <= 0.0:
-        return jnp.maximum(vpd_pa, _VPD_FLOOR_PA)
-    return _VPD_FLOOR_PA + 0.5 * (v + jnp.sqrt(v * v + _VPD_FLOOR_WIDTH_PA ** 2))
-
-
-def leaf_supply_gs_w(hyd: LeafHydraulics, d_frac: jax.Array) -> jax.Array:
-    """Water-vapour conductance of the whole leaf CLASS at its draw-down.
-
-    ``E_leaf = supply_transpiration(dpsi)`` per leaf area; the class
-    transpires ``lai_class * E_leaf`` per ground area, so
-    ``gs_w = lai_class * E_leaf / D`` [mol H2O / m2 ground / s].  The
-    draw-down is taken as given (>= 0): the canopy solver projects its
-    trial steps onto that bound, so no floor is applied here (a smooth floor
-    put a corner at zero that the damped Newton stalled on).
-    """
-    e_leaf = supply_transpiration(
-        hyd.dpsi_mpa, hyd.psi_s_mpa, hyd.rsoil_leaf,
-        hyd.gplant_mol, hyd.psi50_xylem_mpa, hyd.ck_xylem)
-    return hyd.lai_class * e_leaf / jnp.maximum(d_frac, 1e-9)  # coeff-ok: div-by-zero guard on VPD/P
 
 
 def instantaneous_foc(

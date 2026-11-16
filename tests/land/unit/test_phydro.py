@@ -72,7 +72,8 @@ def test_supply_tracks_soil_potential_and_resistance_rises_when_dry():
     assert np.all(np.asarray(sup.rsoil_leaf) == 0.0)
     # Wetter than field capacity (and the Richards lane's positive overshoot
     # on rain) is capped smoothly at the cap, with a finite gradient.
-    cap, width = ph._PSI_SOIL_CAP_MPA, ph._PSI_SOIL_CAP_WIDTH_MPA
+    from legoesm.land import plant_hydraulics as phy
+    cap, width = phy._PSI_SOIL_CAP_MPA, phy._PSI_SOIL_CAP_WIDTH_MPA  # moved with soil_root_supply
     for wet_m in (-1.0, 350.0):  # ~-0.01 MPa and ~+3.4 MPa
         psi_w = jnp.full_like(psi, wet_m)
         psi_s = float(ph.soil_root_supply(psi_w, theta, dz, rf, lai, hyd, cfg).psi_s_mpa[0])

@@ -554,18 +554,26 @@ def _step_multilayer_land_impl(
     # =================================================================
     canopy_state_new = None  # updated only by CLMMLCanopyConfig branch
     # --- P-hydro transpiration-stress source (dispatch-hardened) ---
-    if config.transpiration_stress not in ("beta_theta", "phydro"):
+    if config.transpiration_stress not in ("beta_theta", "hydraulic", "phydro"):
         raise ValueError(
             f"unknown transpiration_stress scheme "
             f"{config.transpiration_stress!r}; must be one of "
-            "('beta_theta', 'phydro')")
+            "('beta_theta', 'hydraulic', 'phydro')")
     _phydro_supply = None
-    if config.transpiration_stress == "phydro":
+    _leaf_hydraulics_on = config.transpiration_stress in ("hydraulic", "phydro")
+    if _leaf_hydraulics_on:
         if isinstance(config.surface_scheme, CLMMLCanopyConfig):
             raise ValueError(
-                "transpiration_stress='phydro' is not supported with the "
-                "CLM-ML scheme (it carries its OWN plant hydraulics; "
-                "composing both would double-count the supply limit).")
+                f"transpiration_stress={config.transpiration_stress!r} is not "
+                "supported with the CLM-ML scheme (it carries its OWN plant "
+                "hydraulics; composing both would double-count the supply limit).")
+        if (config.transpiration_stress == "hydraulic"
+                and not isinstance(config.surface_scheme, TwoLeafCanopyConfig)):
+            raise ValueError(
+                "transpiration_stress='hydraulic' closes the draw-down inside "
+                "the two-leaf canopy Newton; select the two_leaf_canopy "
+                f"surface scheme (got {type(config.surface_scheme).__name__})")
+    if config.transpiration_stress == "phydro":
         if not pmodel_switches_active(config.surface_scheme, config.stomata):
             raise ValueError(
                 "transpiration_stress='phydro' needs a P-model switch "
@@ -576,9 +584,9 @@ def _step_multilayer_land_impl(
     # means but this configuration does not select phydro (a state shared
     # across arms): their running means must keep advancing, never freeze.
     _acc = state.pmodel_acclim
-    if (config.transpiration_stress == "phydro"
+    if (_leaf_hydraulics_on
             or (_acc is not None and _acc.psi_s_mean_mpa is not None)):
-        from legoesm.land.phydro import soil_root_supply
+        from legoesm.land.plant_hydraulics import soil_root_supply
         # LAI for the per-leaf-area supply: same priority the canopy resolves
         # (override > per-column params > scalar default).
         _lai_sup = compute_prognostic_lai(
@@ -1667,8 +1675,8 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
     ``rsoil_acc``         P-hydro acclimated soil-to-root resistance (NaN otherwise)
     """
     from legoesm.land.p_model import acclimated_capacities, optimal_chi
-    from legoesm.land.phydro import (
-        PhydroSupply, phydro_optimum, slope_for_model, soil_root_supply)
+    from legoesm.land.phydro import PhydroSupply, phydro_optimum, slope_for_model
+    from legoesm.land.plant_hydraulics import soil_root_supply
     cc = config.surface_scheme
     lp = land_params
     theta = state.theta_soil
@@ -1684,6 +1692,9 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
         _get(lp, "LAI", jnp.full((ncol,), 1.5)),  # coeff-ok: canopy default LAI fallback
         config.hydraulics, config.phydro)
     phydro = config.transpiration_stress == "phydro"
+    # No empirical pre-multiplier under either hydraulic mode (the leaf water
+    # potential acts inside the closure).
+    _no_theta = config.transpiration_stress in ("hydraulic", "phydro")
     vc, slope = _get(lp, "Vcmax25_C3_leaf", nan), _get(lp, "m_C3", nan)
     chi, psi_leaf = nan, nan
     psi_s_acc, rsoil_acc = nan, nan
@@ -1710,11 +1721,11 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
         if cc.g1_source == "p_model":
             slope = slope_for_model(cc.stomatal_model, chi, acc, gstar,
                                     d0_leuning_kpa=cc.d0_leuning_kpa)
-    stress = jnp.ones_like(wfrac) if phydro else wfrac
+    stress = jnp.ones_like(wfrac) if _no_theta else wfrac
     return {
         "wfrac": wfrac, "psi_soil": supply.psi_s_mpa,
         "vcmax25": vc * stress, "vcmax25_nostress": vc,
-        "slope": slope * (1.0 if (cc.g1_source == "p_model" or phydro) else stress),
+        "slope": slope * (1.0 if phydro else stress),
         "chi": chi, "psi_leaf": psi_leaf,
         "rsoil": supply.rsoil_leaf, "psi_soil_acc": psi_s_acc, "rsoil_acc": rsoil_acc,
     }

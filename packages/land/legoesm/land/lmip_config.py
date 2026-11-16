@@ -223,19 +223,27 @@ def validate_config(data: dict) -> LMIPConfig:
             f"physics.canopy_vcmax_profile="
             f"{physics['canopy_vcmax_profile']!r} not in "
             f"{VALID_VCMAX_PROFILES}")
-    if physics["transpiration_stress"] not in ("beta_theta", "phydro"):
+    if physics["transpiration_stress"] not in ("beta_theta", "hydraulic", "phydro"):
         raise ValueError(
             f"physics.transpiration_stress="
             f"{physics['transpiration_stress']!r} not in "
-            "('beta_theta', 'phydro')")
-    if (physics["transpiration_stress"] == "phydro"
+            "('beta_theta', 'hydraulic', 'phydro')")
+    if (physics["transpiration_stress"] in ("hydraulic", "phydro")
             and physics["land_mode"] != "multilayer"):
         # The slab land builds LandConfig, which has no phydro fields - the
         # switch would be silently DROPPED, not applied (codex review).
         raise ValueError(
-            "physics.transpiration_stress='phydro' requires "
-            f"land_mode='multilayer' (got {physics['land_mode']!r}); the "
-            "slab land has no soil water-potential column")
+            f"physics.transpiration_stress={physics['transpiration_stress']!r} "
+            f"requires land_mode='multilayer' (got {physics['land_mode']!r}); "
+            "the slab land has no soil water-potential column")
+    if physics["transpiration_stress"] == "hydraulic" and (
+            physics["surface_scheme"] != "two_leaf_canopy"
+            or physics["stomatal_model"] != "medlyn"):
+        raise ValueError(
+            "physics.transpiration_stress='hydraulic' closes the draw-down "
+            "against the Medlyn demand inside the two-leaf canopy Newton; got "
+            f"surface_scheme={physics['surface_scheme']!r}, "
+            f"stomatal_model={physics['stomatal_model']!r}")
     # The P-hydro arm is one configuration, named "phydro" on every switch it
     # replaces (two_leaf_canopy refuses the rest at trace time; this is the
     # fail-early copy).  physics.optimality=phydro fills them all.

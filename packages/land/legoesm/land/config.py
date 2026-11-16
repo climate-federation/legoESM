@@ -8,6 +8,7 @@ from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.p_model import PModelConfig
 from legoesm.land.phydro import PHydroConfig
+from legoesm.land.plant_hydraulics import PlantHydraulicsConfig
 from legoesm.land.stomata import StomataConfig
 from legoesm.land.snow_bands import ElevationSnowBandConfig
 from legoesm.land.soil_grid import SoilGridConfig
@@ -229,13 +230,19 @@ class MultiLayerLandConfig(NamedTuple):
     # carry only the string switches that activate it.  Appended last.
     p_model: PModelConfig = PModelConfig()
     # Transpiration water-stress source: "beta_theta" (default — the empirical
-    # root-zone theta multiplier, bit-identical legacy) or "phydro" (the Joshi
-    # profit optimum on the SPA supply REPLACES the multiplier; requires a
+    # root-zone theta multiplier, bit-identical legacy); "hydraulic" (the
+    # soil-to-leaf supply closed against the Medlyn demand inside the two-leaf
+    # Newton, the slope down-regulated by the leaf water potential —
+    # land/plant_hydraulics.py; two-leaf + medlyn only); or "phydro" (the Joshi
+    # profit optimum on the same supply REPLACES the multiplier; requires a
     # p_model capacity/g1 switch to feed and a two_leaf/simple_seb scheme —
     # CLM-ML carries its own plant hydraulics).  Unknown -> ValueError at the
     # step dispatch.
-    transpiration_stress: str = "beta_theta"  # "beta_theta" | "phydro"
+    transpiration_stress: str = "beta_theta"  # "beta_theta" | "hydraulic" | "phydro"
     phydro: PHydroConfig = PHydroConfig()
+    # Parameters read only under transpiration_stress="hydraulic" (the slope's
+    # Weibull curve); the xylem constants are PHydroConfig's, shared.
+    plant_hydraulics: PlantHydraulicsConfig = PlantHydraulicsConfig()
 
 
 def resolve_land_config(land_mode: str, land_config=None):

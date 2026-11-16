@@ -1407,10 +1407,13 @@ def main() -> int:
                          "scheme's __param_spec__ bounds and spliced into the "
                          "land config - the same layer run_lmip --params uses")
     ap.add_argument("--transpiration-stress", default=None,
-                    choices=["beta_theta", "phydro"],
+                    choices=["beta_theta", "hydraulic", "phydro"],
                     dest="transpiration_stress",
                     help="root-zone transpiration limitation: 'beta_theta' "
-                         "(default, empirical soil-moisture stress) or "
+                         "(default, empirical soil-moisture stress), "
+                         "'hydraulic' (soil-to-leaf supply closed against the "
+                         "Medlyn demand, slope down-regulated by the leaf "
+                         "water potential; two-leaf + medlyn) or "
                          "'phydro' (Joshi-2022 hydraulic supply; the P-hydro "
                          "arm, with --canopy-capacity-scheme phydro and "
                          "--canopy-stomatal-model phydro; prognostic mode)")

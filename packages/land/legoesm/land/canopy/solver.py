@@ -58,7 +58,9 @@ from typing import NamedTuple
 from legoesm.land.canopy.config import CanopyConfig, VALID_LE_MODULES
 from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
 from legoesm.land.canopy.photosynthesis import photosynthesis
-from legoesm.land.phydro import LeafHydraulics, floored_vpd, instantaneous_foc
+from legoesm.land.phydro import instantaneous_foc
+from legoesm.land.plant_hydraulics import (
+    LeafHydraulics, floored_vpd, leaf_psi, supply_demand_residual, weibull_stress)
 from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
 from legoesm.land.canopy.stability import (
     monin_obukhov_stability,
@@ -145,9 +147,13 @@ _N_STATE = 6
 _N_STATE_PHYDRO = 8
 
 
-def state_size(stomatal_model: str) -> int:
-    """Length of the Newton state vector for a stomatal model."""
-    return _N_STATE_PHYDRO if stomatal_model == "phydro" else _N_STATE
+def state_size(stomatal_model: str, transpiration_stress: str = "beta_theta") -> int:
+    """Length of the Newton state vector: 8 whenever leaf hydraulics is on
+    (``stomatal_model="phydro"`` or ``transpiration_stress="hydraulic"``,
+    which append the two draw-down unknowns), 6 otherwise."""
+    if stomatal_model == "phydro" or transpiration_stress == "hydraulic":
+        return _N_STATE_PHYDRO
+    return _N_STATE
 
 
 def _xscale(n: int) -> jax.Array:
@@ -248,19 +254,26 @@ class CanopyForcingBundle(NamedTuple):
     psi50_xylem_mpa: jax.Array | None = None
     ck_xylem: jax.Array | None = None
     gamma_cost: jax.Array | None = None
+    # Weibull down-regulation of the Medlyn slope by the leaf water potential
+    # (transpiration_stress == "hydraulic" only; None otherwise).
+    psi50_g1_mpa: jax.Array | None = None
+    ck_g1: jax.Array | None = None
 
 
-def _leaf_hydraulics(x, bundle: CanopyForcingBundle, stomatal_model: str):
+def _leaf_hydraulics(x, bundle: CanopyForcingBundle):
     """``(hyd_Sun, hyd_Sh)`` from the state's draw-downs; ``(None, None)``
-    unless the stomatal model is ``"phydro"``."""
-    if stomatal_model != "phydro":
+    for the 6-unknown closure.  Leaf hydraulics is on whenever the state
+    carries the two draw-downs (``stomatal_model="phydro"`` or
+    ``transpiration_stress="hydraulic"``), a static shape."""
+    if x.shape[0] != _N_STATE_PHYDRO:
         return None, None
     b = bundle
     if b.psi_s_mpa is None:
         raise ValueError(
-            "stomatal_model='phydro' but the forcing bundle carries no "
-            "P-hydro supply (psi_s_mpa=None); the caller must thread the "
-            "step's PhydroSupply and PHydroConfig into the bundle")
+            "the canopy state carries the two draw-down unknowns but the "
+            "forcing bundle has no soil-to-leaf supply (psi_s_mpa=None); the "
+            "caller must thread the step's PhydroSupply and the hydraulic "
+            "constants into the bundle")
     _LAI_CLASS_FLOOR = 1.0e-3  # coeff-ok: leaf-area floor of an empty leaf class [m2/m2]
     def _hyd(dpsi, lai_class):
         return LeafHydraulics(
@@ -274,6 +287,25 @@ def _leaf_hydraulics(x, bundle: CanopyForcingBundle, stomatal_model: str):
 # ---------------------------------------------------------------------------
 # Residual function (defines the closure equations)
 # ---------------------------------------------------------------------------
+
+def _class_slopes(bundle: CanopyForcingBundle, hyd_Sun, hyd_Sh, stomatal_model: str):
+    """Per-class stomatal slope ``(m_Sun, m_Sh)``.
+
+    Under ``transpiration_stress="hydraulic"`` (leaf hydraulics on, an
+    empirical stomatal model) the slope is down-regulated by the class's leaf
+    water potential, ``m * W_g1(psi_L)``, ``psi_L = psi_s - dpsi`` with the
+    class's draw-down unknown; the bundle's ``m`` is then the UNSTRESSED
+    slope (the empirical theta factor is 1).  ``b.m`` unchanged otherwise
+    (the P-hydro arm reads no slope).
+    """
+    b = bundle
+    if hyd_Sun is None or stomatal_model == "phydro" or b.psi50_g1_mpa is None:
+        return b.m, b.m
+    def _m(hyd):
+        return b.m * weibull_stress(leaf_psi(hyd.dpsi_mpa, hyd.psi_s_mpa),
+                                    b.psi50_g1_mpa, b.ck_g1)
+    return _m(hyd_Sun), _m(hyd_Sh)
+
 
 _KKT_FB_EPS = 1e-6  # [umol m-2 s-1 MPa-1] smoothing of the Fischer-Burmeister function at the origin
 
@@ -308,7 +340,8 @@ def _canopy_residual(
     """
     Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c = (
         x[0], x[1], x[2], x[3], x[4], x[5])
-    hyd_Sun, hyd_Sh = _leaf_hydraulics(x, bundle, stomatal_model)
+    hyd_Sun, hyd_Sh = _leaf_hydraulics(x, bundle)
+    m_Sun, m_Sh = _class_slopes(bundle, hyd_Sun, hyd_Sh, stomatal_model)
 
     b = bundle
     Ts = b.Ts_bc
@@ -362,26 +395,26 @@ def _canopy_residual(
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_bt(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
-            b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
+            b.lam, b.Cp, b.rhoa, Rb_Sun, m_Sun, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
             d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sun)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
-            b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
+            b.lam, b.Cp, b.rhoa, Rb_Sh, m_Sh, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
             d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sh)
     else:  # PM
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
-            b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
+            b.Cp, b.rhoa, Rb_Sun, m_Sun, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
             d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sun)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
-            b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
+            b.Cp, b.rhoa, Rb_Sh, m_Sh, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
             d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sh)
 
@@ -522,6 +555,26 @@ def _canopy_residual(
         kkt_Sh = _kkt_fischer_burmeister(2.0 * b.gamma_cost * x[7], -foc_Sh)
         rows += [_FOC_ROW_SCALE * (w_dpsi * anchor_dpsi + (1.0 - w_dpsi) * kkt_Sun),
                  _FOC_ROW_SCALE * kkt_Sh]
+    elif hyd_Sun is not None:
+        # transpiration_stress="hydraulic" with an empirical stomatal model:
+        # each class's draw-down is closed by supply = demand, the water the
+        # xylem delivers at dpsi (as a conductance, plus the cuticular
+        # intercept) equal to the stomatal model's conductance
+        # (plant_hydraulics.supply_demand_residual), both in mol H2O/m2/s.
+        # The slope's W_g1(psi_L) factor (above) makes the demand fall as the
+        # leaf dries, so the row has a root on the rising branch of the
+        # supply curve; at night both sides are the intercept and dpsi = 0.
+        # Same sunlit degeneracy anchor as the P-hydro rows, in the row's
+        # units: the supply slope gplant times the draw-down difference.
+        d_frac = floored_vpd(VPD_c) / b.Ps
+        sd_Sun = supply_demand_residual(
+            hyd_Sun, d_frac, gs_Sun * gs_mol_per_ms(Tf_Sun, b.Ps), b.b0)
+        sd_Sh = supply_demand_residual(
+            hyd_Sh, d_frac, gs_Sh * gs_mol_per_ms(Tf_Sh, b.Ps), b.b0)
+        w_dpsi = jnp.clip((anchor_weight - _ANCHOR_DPSI_LO) / (1.0 - 2.0 * _ANCHOR_DPSI_LO), 0.0, 1.0)
+        anchor_dpsi = b.gplant_mol * (x[6] - x[7])
+        rows += [_FOC_ROW_SCALE * (w_dpsi * anchor_dpsi + (1.0 - w_dpsi) * sd_Sun),
+                 _FOC_ROW_SCALE * sd_Sh]
     return jnp.array(rows)
 
 
@@ -546,7 +599,8 @@ def canopy_forward(
     """
     Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c = (
         x[0], x[1], x[2], x[3], x[4], x[5])
-    hyd_Sun, hyd_Sh = _leaf_hydraulics(x, bundle, stomatal_model)
+    hyd_Sun, hyd_Sh = _leaf_hydraulics(x, bundle)
+    m_Sun, m_Sh = _class_slopes(bundle, hyd_Sun, hyd_Sh, stomatal_model)
 
     b = bundle
     Ts = b.Ts_bc
@@ -599,26 +653,26 @@ def canopy_forward(
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_bt(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
-            b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
+            b.lam, b.Cp, b.rhoa, Rb_Sun, m_Sun, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
             d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sun)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh, _  = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
-            b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
+            b.lam, b.Cp, b.rhoa, Rb_Sh, m_Sh, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
             d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sh)
     else:
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
-            b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
+            b.Cp, b.rhoa, Rb_Sun, m_Sun, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
             d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sun)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh,  _ = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
-            b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
+            b.Cp, b.rhoa, Rb_Sh, m_Sh, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
             d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sh)
 

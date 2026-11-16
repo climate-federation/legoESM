@@ -106,6 +106,11 @@ def compute_effective_beta(
         raise ValueError(
             "capacity_scheme='phydro' (the P-hydro arm) lives in the two-leaf "
             "canopy; the big-leaf stomata have no instantaneous hydraulic optimum")
+    if getattr(config, "transpiration_stress", "beta_theta") == "hydraulic":
+        raise ValueError(
+            "transpiration_stress='hydraulic' closes the draw-down inside the "
+            "two-leaf canopy Newton; the big-leaf stomata have no leaf water "
+            "potential unknown")
     _pm_on = (config.stomata.capacity_scheme == "p_model"
               or config.stomata.g1_source == "p_model")
     _rjv25 = None
