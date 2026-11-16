@@ -831,12 +831,6 @@ _SITE_SYNTHETIC = {
     ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
         ('ZXTAU_MAX', '_W_TIME',
          'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)'),
-    ('zrnew = sm.pos(sm.min(zrnew, lr, _W_COND), _W_COND)', 'min'):
-        ('_S_COND', '_W_COND',
-         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist) (bound traced: representative value)', 'cuascent'),
-    ('zrnew = sm.pos(sm.min(zrnew, lr, _W_COND), _W_COND)', 'pos'):
-        ('0.0', '_W_COND',
-         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
     ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk + 1), ZKE_PRC_MIN, _W_KE)),', 'max'):
         ('ZKE_PRC_MIN', '_W_KE',
          'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
@@ -846,9 +840,6 @@ _SITE_SYNTHETIC = {
     ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk), ZKE_RAIN_MIN, _W_KE)),', 'min'):
         ('ZWU_MAX', '_W_VEL',
          'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
-    ('a = ((jnp.maximum(th.RTICECU, sm.min(t, th.RTWAT, _W_TCU))', 'min'):
-        ('th.RTWAT', '_W_TCU',
-         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'thermo'),
     ('lrain = kget(s["plrain"], jk + 1) * sm.pos(mfu1 - zdmfde, _W_MF) * zfac', 'pos'):
         ('0.0', '_W_MF',
          'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
@@ -900,21 +891,6 @@ _SITE_SYNTHETIC = {
     ('zkedke = sm.pos(sm.min(zkedke, 1.0, _W_ONE), _W_ONE)', 'pos'):
         ('0.0', '_W_ONE',
          'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
-    ('zleen = sm.on(lit, RLMIN, _W_COND) * lit * zdmfen', 'on'):
-        ('RLMIN', '_W_COND',
-         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
-    ('zlnew = sm.min(zlnew, Z_CLDMAX, _W_COND)', 'min'):
-        ('Z_CLDMAX', '_W_COND',
-         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
-    ('zlnew = sm.pos(sm.min(zlnew, luk, _W_COND), _W_COND)', 'min'):
-        ('_S_COND', '_W_COND',
-         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist) (bound traced: representative value)', 'cuascent'),
-    ('zlnew = sm.pos(sm.min(zlnew, luk, _W_COND), _W_COND)', 'pos'):
-        ('0.0', '_W_COND',
-         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
-    ('zprecip = wpr * sm.pos(zluold + zc - zlnew, _W_COND)', 'pos'):
-        ('0.0', '_W_COND',
-         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
     ('* sm.pos(c1, _W_CONDCU), sm)', 'pos'):
         ('0.0', '_W_CONDCU',
          'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
@@ -948,6 +924,27 @@ _SITE_SYNTHETIC = {
     ('zxs = sm.pos(mfu1 - zmfmax, _W_MF)', 'pos'):
         ('0.0', '_W_MF',
          'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('tc = th.RTWAT - sm.pos(th.RTWAT - t, _W_TCU)    # <= RTWAT: fraction <= 1', 'pos'):
+        ('0.0', '_W_TCU',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'thermo'),
+    ('zleen = sm.sel(sm.on(lit, RLMIN, _W_COND), lit * zdmfen, 0.0)', 'on'):
+        ('RLMIN', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('zlnew = Z_CLDMAX - sm.pos(Z_CLDMAX - zlnew, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('zlnew = luk - sm.pos(luk - zlnew, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('zlnew = sm.pos(zlnew, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('zrnew = lr - sm.pos(lr - zrnew, _W_COND)   # <= lr', 'pos'):
+        ('0.0', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('zrnew = sm.pos(zrnew, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
 }
 
 
@@ -1045,6 +1042,39 @@ def test_switch_site_gradient_at_default(fix, site):
     # round-off level gets a synthetic test, see _SITE_SYNTHETIC)
     big = max(abs(gs), abs(gh))
     assert np.isfinite(gs) and big > 1e-12 and abs(gs - gh) > 1e-3 * big
+
+
+def test_ascent_smooth_cloud_to_rain_conserves_water():
+    """At the smooth default the rain gains exactly what the cloud loses, and
+    0 <= new cloud <= cloud, inside and around both cap windows."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent as A
+
+    sm, w = IfsSmooth(False), A._W_COND
+    for luk in (5.0e-4, A.Z_CLDMAX, A.Z_CLDMAX + 0.5 * w, 3.0 * A.Z_CLDMAX):
+        z0 = jnp.linspace(-3.0 * w, 3.0 * w, 61)
+        for zl in (luk + z0, A.Z_CLDMAX + z0, z0):
+            for wpr in (0.0, 0.3, 1.0):
+                zlnew, zprecip = A.cloud_to_rain(sm, jnp.asarray(luk), zl, wpr)
+                cloud = wpr * zlnew + (1.0 - wpr) * luk
+                np.testing.assert_allclose(cloud + zprecip, luk, rtol=1e-14, atol=0.0)
+                assert np.all(np.asarray(zlnew) >= 0.0) and np.all(np.asarray(zlnew) <= luk)
+
+
+def test_smooth_liquid_fraction_never_exceeds_one():
+    """FOEALFCU's smooth upper clip sits on the cold side of RTWAT: the
+    fraction stays <= 1 and is exact outside the window."""
+    from legoesm.atmosphere.physics import _ifs_thermo as T
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+
+    th = lego_thermo()
+    t = th.RTWAT + jnp.linspace(-3.0, 3.0, 601) * T._W_TCU
+    a = np.asarray(T.foealfcu(th, t, IfsSmooth(False)))
+    exact = np.asarray(T.foealfcu(th, t))
+    assert np.all(a <= 1.0)
+    out = np.asarray(t < th.RTWAT - T._W_TCU) | np.asarray(t >= th.RTWAT)
+    np.testing.assert_allclose(a[out], exact[out], rtol=1e-12)
+    assert np.any(a[~out] != exact[~out])
 
 
 def test_ascent_mass_flux_width_is_the_closure_one():

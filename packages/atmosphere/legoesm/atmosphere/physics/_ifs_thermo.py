@@ -147,13 +147,14 @@ def foealfa(th, t):
 
 def foealfcu(th, t, sm=None):
     """Convective liquid fraction.  With an IfsSmooth ``sm`` (not exact) the
-    upper clip at RTWAT (a slope jump) is C1; the lower clip at RTICECU is
-    already C1 (the ramp is quadratic) and the min(1, .) never binds."""
+    upper clip at RTWAT (a slope jump) is C1, smoothed on the cold side so the
+    fraction never exceeds 1; the lower clip at RTICECU is already C1 (the
+    ramp is quadratic).  The smooth form keeps no min(1, .) (it cannot bind)."""
     if sm is None:
         return jnp.minimum(1.0, ((jnp.maximum(th.RTICECU, jnp.minimum(th.RTWAT, t))
                                   - th.RTICECU) * th.RTWAT_RTICECU_R) ** 2)
-    a = ((jnp.maximum(th.RTICECU, sm.min(t, th.RTWAT, _W_TCU))
-          - th.RTICECU) * th.RTWAT_RTICECU_R) ** 2
+    tc = th.RTWAT - sm.pos(th.RTWAT - t, _W_TCU)    # <= RTWAT: fraction <= 1
+    a = ((jnp.maximum(th.RTICECU, tc) - th.RTICECU) * th.RTWAT_RTICECU_R) ** 2
     return jnp.minimum(1.0, a) if sm.hard else a
 
 
