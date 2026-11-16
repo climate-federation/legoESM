@@ -475,3 +475,17 @@ def test_segment_refuses_a_malformed_clock(runs):
     with pytest.raises(ValueError, match="leading axis"):
         mpas_segment(exp, s0, ps0, 3, forcing=forcing, schedule="uniform",
                      clock={"day_of_year": c["day_of_year"]})
+
+
+def test_rebuild_physics_with_the_exported_config_reproduces_the_segment(runs):
+    """Rebuilding the variants from the exported config is the export: the
+    segment is bitwise the same."""
+    from legoesm.driver.mpas_diff_step import rebuild_physics
+    _, exp = runs
+    eb = rebuild_physics(exp, exp["phys_cfg"])
+    assert eb["physics_fn"] is not exp["physics_fn"]
+    s0, ps0 = exp["state"], exp["phys_state"]
+    ref, _ = mpas_segment(exp, s0, ps0, N)
+    out, _ = mpas_segment(eb, s0, ps0, N)
+    for a, b in zip(_fields(ref), _fields(out)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
