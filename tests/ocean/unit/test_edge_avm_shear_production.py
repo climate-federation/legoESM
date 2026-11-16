@@ -81,8 +81,19 @@ def test_rectangle_equals_the_cgrid_nemo_transcription_incl_walls():
 
 @pytest.fixture(scope="module")
 def mesh():
+    # Module scope runs before the autouse _x64 fixture: build under fp64
+    # explicitly, else the geometry is stored in the default policy's float32
+    # and the float64 references below differ at ~6e-8.
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.grids.voronoi import create_voronoi_mesh
-    return create_voronoi_mesh(subdivision_level=3)
+    prev, prev_x64 = get_policy(), jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        return create_voronoi_mesh(subdivision_level=3)
+    finally:
+        set_policy(prev)
+        jax.config.update("jax_enable_x64", prev_x64)
 
 
 def _uniform_flow(mesh, nlev):

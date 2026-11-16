@@ -297,9 +297,9 @@ def test_unknown_literal_raises():
             vertical_momentum_scheme="centred"))   # typo
 
 
-@pytest.mark.parametrize("scheme", ["centered_full", "nemo_advective"])
+@pytest.mark.parametrize("scheme", ["centered_full"])
 def test_explicit_scheme_with_adaptive_implicit_rejected(scheme):
-    """centered_full / nemo_advective + adaptive_implicit_vertadv=True is
+    """centered_full + adaptive_implicit_vertadv=True is
     incompatible (the adaptive-implicit path replaces the explicit stage
     entirely) and must fail fast at config validation rather than silently
     no-op."""
@@ -527,3 +527,21 @@ def test_centered_full_differentiable():
     g = jax.grad(loss)(1.0)
     assert np.isfinite(float(g))
     assert abs(float(g)) > 0.0
+
+
+def test_nemo_advective_with_adaptive_implicit_is_the_explicit_part():
+    """nemo_advective is the explicit part of the adaptive-implicit stage
+    (NEMO ln_dynadv_vec + ln_zad_Aimp), so it is accepted; only the
+    implicit_unsplit step, which skips that stage, refuses it."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    grid = create_latlon_grid(_N_LAT, _N_LON)
+    z = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(
+        vertical_momentum_scheme="nemo_advective", adaptive_implicit_vertadv=True))
+    with pytest.raises(ValueError, match="not threaded through the implicit_unsplit"):
+        LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(
+            vertical_momentum_scheme="nemo_advective", adaptive_implicit_vertadv=True,
+            barotropic_solver="implicit_unsplit"))
