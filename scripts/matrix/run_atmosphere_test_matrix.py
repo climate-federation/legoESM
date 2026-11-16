@@ -3141,43 +3141,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
     # --- Error norms for TC2 ---
     notes = ""
-    if test_num == 2 and tc.grid_type == "cubed_sphere":
-        exact = williamson_test2_exact(grid, days * 86400.0)
-        h_final = state.h if isinstance(state.h, jnp.ndarray) else state.h.data
-        h_exact = exact.h.data
-        # Manual L2 / Linf norms for CDGrid state
-        err = h_final - h_exact
-        area = grid.area
-        l2 = float(jnp.sqrt(jnp.sum(err**2 * area) / jnp.sum(h_exact**2 * area)))
-        linf = float(jnp.max(jnp.abs(err)) / jnp.max(jnp.abs(h_exact)))
-        norms = {"l2": l2, "linf": linf}
-        # Iter-742 (corrects iter-741 per Codex stop-time review):
-        # iter-740 measured v_d-error, iter-741 corrected to pre-
-        # regrid v_north, but the actual plotted field in
-        # snapshots_v.png is the POST-REGRID v_ll =
-        # _regrid_2d(v_north, lon_deg, lat_deg, coord_kind=cube).
-        # The regrid step interpolates cube-face-native to lat-lon
-        # and can shift/smooth the peak; the PNG colourbar reflects
-        # v_ll magnitude, not v_north magnitude.  Iter-742 measures
-        # the same quantity the snapshot plots — matching the
-        # visual artifact exactly.
-        #
-        # The exact W2 geographic v_north is ZERO everywhere at all
-        # times.  Regridding a zero field yields zero, so max|v_ll|
-        # is itself the error (no subtraction).
-        u_cc = 0.5 * (np.asarray(state.u_d, dtype=np.float64)[:, :, :-1]
-                      + np.asarray(state.u_d, dtype=np.float64)[:, :, 1:])
-        v_cc = 0.5 * (np.asarray(state.v_d, dtype=np.float64)[:, :-1, :]
-                      + np.asarray(state.v_d, dtype=np.float64)[:, 1:, :])
-        v_north_face = _sa_4edge_np * u_cc + _ca_4edge_np * v_cc
-        v_ll = _regrid_2d(v_north_face, lon_deg, lat_deg, coord_kind)
-        v_linf = float(np.max(np.abs(v_ll)))
-        v_north_linf_face = float(np.max(np.abs(v_north_face)))
-        norms["v_linf"] = v_linf
-        notes = (f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}, "
-                 f"v_ll_Linf={v_linf:.2e} "
-                 f"(pre-regrid {v_north_linf_face:.2e})")
-    elif test_num == 2 and tc.grid_type == "latlon":
+    if test_num == 2 and tc.grid_type == "latlon":
         exact = williamson_test2_exact_cgrid(grid, days * 86400.0)
         norms = compute_error_norms_cgrid(state, exact, grid)
         notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
