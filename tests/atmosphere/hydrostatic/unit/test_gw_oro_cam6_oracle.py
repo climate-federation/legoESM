@@ -33,6 +33,7 @@ import numpy as np
 import pytest
 from jax.test_util import check_grads
 
+from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
 
@@ -311,3 +312,26 @@ def test_smoothing_widths_validated(fx, field, bad):
     """0 (CAM) or a usable width; a negative/NaN/sub-fp32 width raises (#2546)."""
     with pytest.raises(ValueError, match=field):
         _run(fx, McFarlaneConfig()._replace(**{field: bad}))
+
+
+@pytest.mark.parametrize("col,a_star", _UMCFAC_KINKS)
+def test_limited_stress_divergence_equals_deposited_momentum(fx, col, a_star):
+    """RULE 0 (#2546 review): every layer's redetermined stress increment is
+    the momentum the layer receives, |ubt| dp / g, to round-off, at the
+    default inside the smooth sign's width (a* + 2e-4 m/s: |tanh| ~ 0.2 there).
+    Carrying ubtl instead (the |tanh| < 1 shortfall) loses up to 24 %."""
+    keys = ("u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho", "lat",
+            "sgh", "lf", "q", "p_ref_half")
+    f1 = {k: jnp.asarray(fx[k][col:col + 1]) if k != "p_ref_half" else jnp.asarray(fx[k])
+          for k in keys}
+    out, tau = mcfarlane_gwd(
+        f1["u"] + (a_star + 2e-4), f1["v"], f1["T"], f1["p_full"], f1["p_half"],
+        f1["z_full"], f1["z_half"], f1["rho"], f1["lat"], float(fx["dt"]),
+        McFarlaneConfig(), h_topo_col=f1["sgh"], p_ref_half=f1["p_ref_half"],
+        land_frac_col=f1["lf"], tracers={"q_v": f1["q"]}, return_stress=True)
+    dp = np.diff(np.asarray(f1["p_half"]), axis=1)
+    ubt = np.hypot(np.asarray(out.du_dt), np.asarray(out.dv_dt))
+    deposit = ubt * dp / constants.g
+    np.testing.assert_allclose(np.diff(np.asarray(tau), axis=1), deposit,
+                               rtol=1e-10, atol=1e-12 * float(deposit.max()))
+    assert float(deposit.max()) > 0.0

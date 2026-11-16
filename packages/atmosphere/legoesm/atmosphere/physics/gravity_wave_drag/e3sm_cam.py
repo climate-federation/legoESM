@@ -1354,10 +1354,14 @@ def gw_drag_prof(
             gwut = jnp.where(within, signed * effgw * ptap, 0.0)
             ubt = jnp.sum(gwut, axis=1)
 
-        # re-derive stress on the interface below from the bounded tendency.
+        # re-derive stress on the interface below from the bounded tendency
+        # (E3SM: abs(gwut)/(effgw*ptaper) = ubtl).  Under the smooth sign the
+        # deposited divergence is |tanh|*ubtl; carrying ubtl would drop
+        # (1-|tanh|)*ubtl of momentum (RULE 0, #2546 review).
+        deposited = ubtl if umcfac_sign_width == 0.0 else jnp.abs(sign_cmu) * ubtl
         tau_below_new = jnp.where(
             within,
-            tau_above + ubtl * dpm[:, m][:, None] / gravit,
+            tau_above + deposited * dpm[:, m][:, None] / gravit,
             tau_below,
         )
         tau_state = tau_state.at[:, :, m + 1].set(tau_below_new)

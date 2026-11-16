@@ -470,9 +470,10 @@ def mcfarlane_gwd(
             gwut = sign_tanh(cmu, config.umcfac_sign_width) * ubtl
         # The limited stress divergence is carried to the layer below
         # (CAM "redetermine the effective stress on the interface below").
-        # CAM's |gwut| is ubtl (>= 0) exactly; ubtl keeps it so under the
-        # smooth sign (|tanh| < 1, and kinked at ubm = 0), as in e3sm_cam.
-        tau_below = tau_top + ubtl * dp[:, j] / g
+        # |gwut|, not ubtl: under the smooth sign |gwut| = |tanh|*ubtl, and
+        # carrying ubtl would drop (1-|tanh|)*ubtl of momentum (#2546 review,
+        # 24% of the layer's deposit at column 9's switch); C2 (~|ubm|^3).
+        tau_below = tau_top + jnp.abs(gwut) * dp[:, j] / g
         return tau_below, (gwut, tau_below)
 
     _, (ubt, tau_lim) = jax.lax.scan(tend_step, tau[:, 0], jnp.arange(nlev))
