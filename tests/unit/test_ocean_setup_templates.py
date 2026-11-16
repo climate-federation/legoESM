@@ -334,3 +334,58 @@ class TestBenchHarnessRoute:
         with pytest.raises(ValueError, match="not a valid matrix grid"):
             self._cfg({"name": "bench", "grid": "mpas",
                        "preset": "orca1_like"}).validate_strict()
+
+
+# ------------------------------------------------------- single column #2103
+_ONE_D_TEMPLATES = _REPO_ROOT / "config" / "templates" / "1d"
+
+
+def _scm_cases() -> dict:
+    """The live case catalog of the single-column matrix runner."""
+    sys.path.insert(0, str(_REPO_ROOT / "scripts" / "matrix"))
+    import run_scm_test_matrix as S  # noqa: PLC0415
+    return S.CASES
+
+
+def _ocean_1d_template_paths() -> list[Path]:
+    return [p for p in sorted(_ONE_D_TEMPLATES.glob("*.yaml"))
+            if OceanExperimentConfig.from_yaml(str(p)).get("model.type")
+            in ("ocean", "ocean_only")]
+
+
+class TestOceanColumnTemplates:
+    def _cfg(self, setup):
+        return OceanExperimentConfig.from_dict(
+            {"model": {"type": "ocean_only"}, "setup": setup})
+
+    def test_ocean_scm_names_are_runner_cases(self):
+        from legoesm.ocean.config import _OCEAN_SCM_CASES  # noqa: PLC0415
+        assert set(_OCEAN_SCM_CASES) <= set(_scm_cases())
+
+    def test_shipped_1d_templates_name_a_real_scm_case(self):
+        paths = _ocean_1d_template_paths()
+        assert paths, f"no ocean templates under {_ONE_D_TEMPLATES}"
+        cases = _scm_cases()
+        for path in paths:
+            cfg = OceanExperimentConfig.from_yaml(str(path))
+            cfg.validate_strict()
+            name = cfg.get("setup.name")
+            assert name in cases, (path.name, name)
+            assert shlex.split(cfg.run_command()) == [
+                "python", "scripts/matrix/run_scm_test_matrix.py", name]
+
+    def test_unknown_column_case_raises(self):
+        with pytest.raises(ValueError, match="not a known experiment"):
+            self._cfg({"name": "lock_exchange", "grid": "column"}).validate_strict()
+
+    def test_column_case_on_3d_grid_raises(self):
+        with pytest.raises(ValueError, match="not a known experiment"):
+            self._cfg({"name": "ocean_convective_deepening",
+                       "grid": "latlon"}).validate_strict()
+
+    @pytest.mark.parametrize("over", [{"levels": 10}, {"dt_seconds": 60.0},
+                                      {"duration_days": 1.0}, {"quick": True}])
+    def test_overrides_rejected(self, over):
+        with pytest.raises(ValueError, match="not supported by"):
+            self._cfg({"name": "ocean_convective_deepening", "grid": "column",
+                       **over}).validate_strict()
