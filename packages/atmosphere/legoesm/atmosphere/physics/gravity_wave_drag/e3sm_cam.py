@@ -114,17 +114,25 @@ deliberate departures / version choices (canaries in
   min/max, ``crit_level_sharpness`` = 100 s/m, ``crit_level_floor`` = 0;
   Lindzen passes its own ``Fr_sharpness``/``crit_level_*``).  Sharpness 1e12
   is E3SM's hard switch and matches the E3SM v3.0.1 oracle to <= 5e-14.
-  KNOWN DIFFERENCE at the defaults (measured 2026-11-12, per column, pinned
-  in ``test_gw_spec_e3sm_oracle.py``): spectral arms up to 3.4e-3 in du/dt,
-  4.7e-3 in the dT field and 9.0e-3 in a single flat column's dT (the p-norm
-  diffusivity max); the orographic member of the spectral suite up to 3.6e-2
-  du/dt, 2.1e-2 dT.  Kept hard: the
-  ``taumin``/``ubmc2mn`` floors, the static mountain-height gate and the
+  Since 2026-11-16 (#2241, widths voted 3-0 by Claude/GLM/codex) the
+  ``|c - u|`` of the ``umcfac`` limit is ``(c-u)*tanh((c-u)/w)``
+  (``umcfac_abs_width`` 0.01 m/s; its E3SM kink at a critical level was 43 of
+  66 kinks of a wind-scale scan, incl. the one left unattributed on
+  2026-11-12), the tendency's ``sign(c - u)`` is ``tanh((c-u)/ws)``
+  (``umcfac_sign_width`` 1e-3 m/s; with the smooth ``|c - u|`` alone the
+  signed tendency is only C1) and the ``taumin`` zeroing is a one-sided quintic ramp
+  (``taumin_ramp_width`` 1e-10 Pa; 3 of 66); 0 = E3SM for each.
+  KNOWN DIFFERENCE at the defaults (measured 2026-11-16, per column, pinned
+  in ``test_gw_spec_e3sm_oracle.py``): spectral arms up to 7.9e-3 in du/dt
+  and 6.7e-3 in the dT field (background at dt = 1800 s, where the umcfac
+  limit binds; 2.6e-3 and 1.0e-3 before the |c - u| width) and 9.0e-3 in a
+  single flat column's dT (the p-norm diffusivity max); the orographic member
+  of the spectral suite up to 3.6e-2 du/dt, 2.1e-2 dT.  Kept hard: the
+  ``ubmc2mn`` floor, the static mountain-height gate and the
   defensive clamps (e.g. ``mi>=0``) that bind only for pathological inputs
-  (see below).  The ``taumin`` zeroing leaves derivative kinks at the
-  default on the spectral arms (a wind-scale scan, 2026-11-12: setting
-  ``taumin = 0`` removes them, but then ``dscal`` divides by zero); one more
-  kink (background L36, column 0, s = 0.8229) is not attributed.
+  (see below).  11 more kinks of that scan, all on the convective (Beres)
+  arms and none on the frontal-only arm at the same columns, persist with
+  both widths (PLAUSIBLE: the Beres source; follow-up issue).
 
 Conservation (see ``__physics_contract__`` energy note): ``conserves=["none"]``
 as the static INTERSECTION over all selectable sources (a contract must hold
@@ -183,7 +191,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
-from legoesm.core.smooth import pnorm_smooth_min, smoothstep_quintic
+from legoesm.core.smooth import pnorm_smooth_min, smoothstep_quintic, validate_smoothing_width
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
 # to the top-level driver ``e3sm_cam_gwd``; the ``gw_*`` functions above/below
@@ -1074,6 +1082,9 @@ def gw_drag_prof(
     crit_level_sharpness: float | None = None,
     crit_level_floor: float = 0.0,
     tndmax_per_day: float | None = None,
+    umcfac_abs_width: float = 0.0,
+    umcfac_sign_width: float = 0.0,
+    taumin_ramp_width: float = 0.0,
 ):
     """Stress-profile + tendency solver, faithful to ``gw_drag_prof``.
 
@@ -1099,6 +1110,12 @@ def gw_drag_prof(
         ``(u - c) - crit_level_floor`` sign tests for the critical level.
         Each reduces to the E3SM hard switch at infinite sharpness (floor 0).
         ``None`` (default) = the exact E3SM kinks, unchanged.
+    umcfac_abs_width, umcfac_sign_width, taumin_ramp_width : float
+        RULE 5 (#2241) widths [m/s, m/s, Pa]: ``(c-u)*tanh((c-u)/w)`` for the
+        ``|c - u|`` of the ``umcfac`` limit, ``tanh((c-u)/ws)`` for the
+        sign the tendency takes, and ``tau*smoothstep_quintic(
+        (tau - taumin)/w)`` for the ``taumin`` zeroing of ``tausat``/``taudmp``
+        (the stress cap's p-norm then takes eps 0).  ``0.0`` (default) = E3SM.
     tndmax_per_day : optional
         Tendency ceiling [m/s/day] overriding the E3SM value selected by
         ``orographic_only`` (500 orographic-only, else ``cfg.tndmax_per_day``).
@@ -1118,6 +1135,18 @@ def gw_drag_prof(
     # a single-wave non-orographic call is not silently routed through the
     # orographic branch (codex iter-1 finding #7).
     is_oro = orographic_only
+    validate_smoothing_width("umcfac_abs_width", umcfac_abs_width)
+    validate_smoothing_width("umcfac_sign_width", umcfac_sign_width)
+    validate_smoothing_width("taumin_ramp_width", taumin_ramp_width)
+
+    def zero_below_taumin(tau):
+        if taumin_ramp_width == 0.0:
+            return jnp.where(tau <= cfg.taumin, 0.0, tau)
+        return tau * smoothstep_quintic((tau - cfg.taumin) / taumin_ramp_width)
+
+    # the ramp leaves stresses in (0, taumin], so the cap's eps contract
+    # (inputs <= eps zeroed) needs eps 0 there (pnorm_smooth_min docstring).
+    cap_eps = cfg.taumin if taumin_ramp_width == 0.0 else 0.0
 
     effkwv = cfg.kwv * cfg.fcrit2
     rog = constants.R_d / constants.g
@@ -1182,7 +1211,7 @@ def gw_drag_prof(
             # E3SM's strict test (product > 0) fails at an exactly zero wind,
             # where the sigmoids sit at 1/2 for any sharpness.
             tausat = jnp.where(ubmc * ubmc_below == 0.0, 0.0, tausat)
-        tausat = jnp.where(tausat <= cfg.taumin, 0.0, tausat)
+        tausat = zero_below_taumin(tausat)
 
         # diffusivity: d = max(dback, dscal*dsat) over waves.  alpha is the
         # Newtonian-cooling coefficient at interface k (E3SM alpha(k)).
@@ -1239,7 +1268,7 @@ def gw_drag_prof(
             piln[:, k + 1][:, None] - piln[:, k][:, None]
         )
         taudmp = tau_below * jnp.exp(wrk)
-        taudmp = jnp.where(taudmp <= cfg.taumin, 0.0, taudmp)
+        taudmp = zero_below_taumin(taudmp)
         if softmin_sharpness is None:
             tau_computed = jnp.minimum(taudmp, tausat)
         else:
@@ -1247,7 +1276,7 @@ def gw_drag_prof(
             # p = softmin_sharpness (shared with mcfarlane.py; user decision
             # 2026-10-28).  C-infinity for positive stresses, in
             # [0, min(taudmp, tausat)]; exact min at p -> inf.
-            tau_computed = pnorm_smooth_min(taudmp, tausat, softmin_sharpness, cfg.taumin)
+            tau_computed = pnorm_smooth_min(taudmp, tausat, softmin_sharpness, cap_eps)
             tau_computed = jnp.where(tausat > 0.0, tau_computed, 0.0)
         # In the source region keep the launched value at interface k.
         tau_k = jnp.where(active, tau_computed, tau_launched_iface[:, :, k])
@@ -1281,7 +1310,14 @@ def gw_drag_prof(
         ubtl_raw = gravit * (tau_below - tau_above) * rdpm[:, m][:, None]
 
         cmu = c_col - ubm_m[:, m][:, None]           # (ncol, nwav)
-        limits = [cfg.umcfac * jnp.abs(cmu) / dt, jnp.full_like(cmu, tndmax)]
+        # RULE 5 (#2241): |c-u| -> (c-u)*tanh((c-u)/w) and, below, sign(c-u)
+        # -> tanh((c-u)/ws); smoothing only the |.| would leave the signed
+        # tendency ~ sign(x)*x^2/w, C1 but not C2, at a critical level.
+        abs_cmu = (jnp.abs(cmu) if umcfac_abs_width == 0.0
+                   else cmu * jnp.tanh(cmu / umcfac_abs_width))
+        sign_cmu = (jnp.sign(cmu) if umcfac_sign_width == 0.0
+                    else jnp.tanh(cmu / umcfac_sign_width))
+        limits = [cfg.umcfac * abs_cmu / dt, jnp.full_like(cmu, tndmax)]
         if is_oro:
             limits.insert(0, effkwv * jnp.abs(cmu) ** 3 / (
                 2.0 * rog * t[:, m][:, None] * nm_m[:, m][:, None]
@@ -1302,7 +1338,7 @@ def gw_drag_prof(
                     ubtl)
 
         within = (m < tend_level)[:, None]           # midpoint m below tend
-        signed = jnp.sign(cmu) * ubtl
+        signed = sign_cmu * ubtl
         ptap = ptaper[:, None]                        # (ncol,1)
         if is_oro:
             # E3SM: gwut = sign(ubtl,c-ubm)*effgw*ptaper, but ubt accumulates
@@ -2053,6 +2089,9 @@ def _e3sm_cam_gwd_one_source(
         softmin_sharpness=config.softmin_sharpness,
         crit_level_sharpness=config.crit_level_sharpness,
         crit_level_floor=config.crit_level_floor,
+        umcfac_abs_width=config.umcfac_abs_width,
+        umcfac_sign_width=config.umcfac_sign_width,
+        taumin_ramp_width=config.taumin_ramp_width,
     )
 
     du_dt = utgw
