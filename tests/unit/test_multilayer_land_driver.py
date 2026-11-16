@@ -538,14 +538,6 @@ def test_setup_seeds_aridity_aware_soil_moisture(monkeypatch, tmp_path):
     assert not np.allclose(theta, 0.5 * np.asarray(driver.physics.land_ml_cfg.hydraulics.theta_sat))
 
 
-# NOTE: multilayer land on the LAT-LON grid is a separate, pre-existing setup
-# limitation (``_setup_multilayer_land`` flattens the 2-D-per-cell ``grid.lat``
-# via the adapter, but lat-lon ``grid.lat`` is 1-D, so the setup crashes BEFORE
-# the aridity seeding runs).  #837's aridity fix is validated on the cubed-sphere
-# path (``test_setup_seeds_aridity_aware_soil_moisture``); enabling multilayer
-# land on lat-lon is an out-of-scope follow-up.
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
 
