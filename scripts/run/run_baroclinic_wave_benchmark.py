@@ -551,10 +551,6 @@ def main():
         elif USE_ICOSAHEDRAL:
             u_e, v_n = reconstruct_cell_velocity(st.u.data, grid)
             return st.p_s.data, u_e, v_n, st.T.data
-        else:
-            cc = fv3_to_hydrostatic(st, cdgrid)
-            u_c, v_c = dgrid_to_center_vector(st.u_d.data, st.v_d.data)
-            return cc.p_s.data, u_c, v_c, cc.T.data
 
     def _blowup_check(st):
         ps, _, _, _ = _get_grid_fields(st)
@@ -603,10 +599,6 @@ def main():
             jnp.sum((KE0 + constants.c_vd * T0) * dp0 / constants.g, axis=-1)
             * area
         ))
-    else:
-        state_cc_init = fv3_to_hydrostatic(state, cdgrid)
-        mass_init = compute_dry_mass(state_cc_init, grid)
-        energy_init = compute_total_energy(state_cc_init, grid, sigma)
 
     diag_times.append(0.0)
     diag_dry_mass.append(mass_init)
@@ -690,10 +682,6 @@ def main():
                     jnp.sum((KE_now + constants.c_vd * T_now) * dp_now / constants.g, axis=-1)
                     * area
                 ))
-            else:
-                cc_now = fv3_to_hydrostatic(state, cdgrid)
-                mass_now = compute_dry_mass(cc_now, grid)
-                energy_now = compute_total_energy(cc_now, grid, sigma)
 
             diag_times.append(day)
             diag_dry_mass.append(mass_now)
