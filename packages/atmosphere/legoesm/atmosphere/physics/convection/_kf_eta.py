@@ -352,8 +352,7 @@ class KFSmoothing(NamedTuple):
       hazards of the updraft's survival; either nonzero runs the updraft to
       the model top and replaces the hard LTOP/LET by their joint survival
       weights (the LET cold weight is D4's, width ``entrain_select_width_k``).
-      The downdraft, the melting level and the closure read these weights
-      (PRs 5b, 5c).
+      The downdraft (PR 5b) and the closure (PR 5c) read these weights.
     * Downdraft (PR 6a): ``lfs_depth_width_pa`` is the band of the first-
       crossing weights of the LFS search (first level 150 hPa above the
       source-layer top; C-LFSs); ``melt_t_width_k`` the band of the soft warm
@@ -1736,7 +1735,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
             v = warm.astype(dtype)  # kfsw: C-MLs
         NW = _any_in_range(v, kk)
         # P(melting | top t): a warm level in (LC, t] (the oracle's LC < ML)
-        mel_p = 1.0 - jnp.cumprod(jnp.where(kk > LC, 1.0 - v, 1.0))  # kfsw: C-MLs,C-KCHECK
+        mel_p = _any_in_range(jnp.where(kk > LC, v, 0.0), kk)[0]  # kfsw: C-MLs,C-KCHECK
 
     # the source feeds only the convecting members
     vmf_src = VMFLCL * jnp.sum(PTOP) if sv else VMFLCL  # kfsw: S
@@ -2275,6 +2274,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         if sv:  # kfsw: S
             # P(k <= ML_t | convection), ML_t the highest warm level <= top t
             pml = jnp.sum(NW * PTOP[None, :], axis=1) / PCD  # kfsw: C-LTOPs,C-MLs
+            pml = pml.at[0].set(jnp.sum(PTOP) / PCD)  # pad level: k <= ML_t always  # kfsw: S
             TGf = (pml * (TG - (QIG + QSG) * _RLF / CPM)
                    + (1.0 - pml) * (TG + (QLG + QRG) * _RLF / CPM))
         else:

@@ -1015,7 +1015,7 @@ def test_lfs_weights_check_grads_through_the_depth_band():
         return kfe._lfs_member_weights(kfe._first_crossing(s, kk, KX), kk)[:, 5:]
 
     d0 = kfe._LFS_DEPTH_PA + jnp.array([-9e3, -6e3, -3e3, -2e3, -0.2 * w, 0.3 * w, 4e3, 8e3])
-    check_grads(ql, (d0,), order=2, modes=("fwd", "rev"), eps=1.0)
+    check_grads(ql, (d0,), order=2, modes=("fwd", "rev"), eps=1e-2)
     assert float(jnp.abs(jax.jacfwd(ql)(d0)).sum()) > 0.0
 
 
@@ -1028,13 +1028,16 @@ def test_any_in_range_is_the_oracle_warm_test_and_c2():
         NW = np.asarray(kfe._any_in_range(jnp.asarray(warm, jnp.float64), kk))
         want = np.array([[t >= k and warm[k:t + 1].any() for t in range(NP)] for k in range(NP)])
         np.testing.assert_array_equal(NW, want)
+        LC = int(rng.integers(0, NP))  # melting given the top: a warm level in (LC, t]
+        mel = kfe._any_in_range(jnp.where(kk > LC, jnp.asarray(warm, jnp.float64), 0.0), kk)[0]
+        np.testing.assert_array_equal(np.asarray(mel), np.cumsum(warm & (np.arange(NP) > LC)) > 0)
     w = _DEFAULT.melt_t_width_k
 
     def nw(T0):
         return kfe._any_in_range(kfe._step_c2(T0 - kfe._T00_K, w), kk)
 
     T0 = kfe._T00_K + jnp.array([-5.0, -0.3 * w, 0.1 * w, -2.0, 0.2 * w, 3.0, -1.0, -0.4 * w, 4.0, 6.0])
-    check_grads(nw, (T0,), order=2, modes=("fwd", "rev"), eps=1e-3)
+    check_grads(nw, (T0,), order=2, modes=("fwd", "rev"), eps=1e-5)
     assert float(jnp.abs(jax.jacfwd(nw)(T0)).sum()) > 0.0
 
 
