@@ -42,6 +42,7 @@ TKE_FIELDS = ("surface_flux_coeff", "Prandtl_tke0", "lc_coeff", "etau_frac", "al
               "bg_diff_scale", "c_eps", "c_k")
 GM_FIELDS = ("kappa_redi_diffusive_velocity",)
 TREG_FIELDS = ("aei0",)
+SEED_MARGIN = 0.001  # = param_collector._SIGMOID_SEED_MARGIN (normalised)
 
 
 def card_values(config) -> dict[str, float]:
@@ -58,10 +59,11 @@ def perturbed(values: dict, bounds: dict, factor: float) -> dict:
     out = {}
     for name, v in values.items():
         lo, hi = bounds[name]
+        margin = SEED_MARGIN * (hi - lo)       # the collector refuses seeds this close to an edge
         p = v * factor
-        if not lo < p < hi:
+        if not lo + margin < p < hi - margin:
             p = v / factor
-        if not lo < p < hi:
+        if not lo + margin < p < hi - margin:
             raise ValueError(f"{name}={v} cannot be perturbed by {factor} inside {lo, hi}")
         out[name] = p
     return out
@@ -173,8 +175,8 @@ def main(argv=None) -> int:
     constraints = params.constraints
     log.update(truth=truth_vals, start=start_vals)
 
-    truth_state = jax.jit(make_k0_rollout(card, model, split, checkpoints=args.checkpoints))(
-        start, ops).state
+    truth_state = jax.jit(make_k0_rollout(card, model, split, schedule="binomial",
+                                          checkpoints=args.checkpoints))(start, ops).state
     loss_of_state = misfit(z, model.grid.area, args.depth_m)
 
     def loss(raw, carry, operands, truth):
@@ -190,12 +192,10 @@ def main(argv=None) -> int:
     raw = dict(params.raw_values)
     opt_state = opt.init(raw)
     save()
-    for k in range(args.opt_steps):
+    for k in range(args.opt_steps + 1):              # the last pass only scores the final values
         t0 = time.perf_counter()
         value, g = vg(raw, start, ops, truth_state)
         g = jax.device_get(g)
-        if k == 0:
-            assert_no_inert(g)
         cur = TrainablePhysicsParams(raw_values=raw, constraints=constraints).as_dict()
         log["steps"].append({
             "step": k, "loss": float(value), "seconds": time.perf_counter() - t0,
@@ -203,12 +203,22 @@ def main(argv=None) -> int:
             "rel_error": {n: float(cur[n]) / truth_vals[n] - 1.0 for n in names},
             "grad": {n: float(v) for n, v in g.items()}})
         save()
+        if k == 0:
+            assert_no_inert(g)                        # logged first, so a refusal shows every gradient
+        if not np.isfinite(float(value)):
+            raise SystemExit(f"non-finite loss at step {k}")
         print(f"step {k} loss {float(value):.6e} "
               f"max|rel err| {max(abs(v) for v in log['steps'][-1]['rel_error'].values()):.3f}",
               flush=True)
+        if k == args.opt_steps:
+            break
         updates, opt_state = opt.update(g, opt_state, raw)
         raw = jax.tree.map(lambda a, u: a + u, raw, updates)
-    return 0
+    losses = [r["loss"] for r in log["steps"]]
+    log["loss_decreased"] = bool(losses[-1] < losses[0])
+    save()
+    print(f"loss {losses[0]:.6e} -> {losses[-1]:.6e}", flush=True)
+    return 0 if log["loss_decreased"] else 3
 
 
 if __name__ == "__main__":

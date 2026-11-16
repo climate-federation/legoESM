@@ -24,6 +24,9 @@ def test_perturbation_scales_and_reflects_inside_bounds():
     assert out["a"] == 1.25 and out["b"] == pytest.approx(9.0 / 1.25)
     with pytest.raises(ValueError, match="cannot be perturbed"):
         twin.perturbed({"c": 1.0}, {"c": (0.9, 1.1)}, 1.25)
+    # x1.25 lands within the collector's edge margin of hi: reflected instead
+    out = twin.perturbed({"d": 8.0}, {"d": (0.0, 10.0 + 0.005)}, 1.25)
+    assert out["d"] == pytest.approx(8.0 / 1.25)
 
 
 class Tke(NamedTuple):
