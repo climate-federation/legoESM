@@ -474,14 +474,15 @@ land_soil_init: aridity
 # Land starting state: the res-6 spun-up soil water/snow (soil_ic_mpas6.npz) with
 # soil TEMPERATURE replaced by ERA5 1979-01-01 00 UTC stl1-4 on non-glacier land
 # (glaciers keep the spin-up). Built by scripts/data/regrid_land_ic.py
-# --era5-soil-t; provenance is in the file's metadata. data/ is gitignored:
+# --target-grid mpas --target-resolution 6 --target-clm-surfdata <the run's
+# CLM surfdata> (soil water carried as relative wetness between dry floor and
+# saturation, rebuilt on this run's soil, user 2026-11-12), then
+# --era5-soil-t; file md5 0d3a2af0a438c1653ddc3f5c122966c9; provenance is in
+# the file's metadata. data/ is gitignored:
 # stage the file in the launch directory.
-# _v2 (user 2026-11-13, option 1): the same file with ONE column (index 19808)
-# lifted to the run's Richards dry floor by regrid_land_ic.py --lift-only
-# (--vg-air-entry-m -0.02, the run's CLM surfdata), as #2496 did for C48; the
-# old file (md5 4e73c23e847526e87c8d92d10ee644a2) is refused by the loader
-# since the dry floor moved (#2404) and is kept alongside, unchanged.
-land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101_v2.npz
+# _v3 (2026-11-15): rebuilt with --vg-air-entry-m -0.02 against main's moved
+# dry floor (re-land of #2497/#2526; supersedes the _v2 lift-only file).
+land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101_v3.npz
 
 # ---- moisture smoothing / clamps (unchanged) -----------------------------------
 mpas_qv_smooth_del2_m2s: 0.0
