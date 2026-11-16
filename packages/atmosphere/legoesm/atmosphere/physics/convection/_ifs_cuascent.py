@@ -195,17 +195,23 @@ def sdiv(a, b, ok):
     return a / jnp.where(ok, b, 1.0)
 
 
-def cloud_to_rain(sm, luk, zlnew, wpr):
-    """Smooth form of CUASCN's conversion (:700-712): the cloud water left
-    after precipitation, capped at Z_CLDMAX and at ``luk`` from below
-    (``b - pos(b - a) <= b``, the ``luk`` cap last, then >= 0), and the
-    precipitation, which is exactly what the cloud loses at weight ``wpr``
-    (cloud ``sel(wpr, zlnew, luk)`` + rain = ``luk``).  The Z_CLDMAX cap may be
-    exceeded by up to 0.15 of its window."""
+def cloud_to_rain(sm, pr, luk, zluold, zc, zlnew, wpr, zdnoprc):
+    """CUASCN's cloud-to-rain conversion (:700-712) on the levels ``pr``:
+    returns (cloud water left, precipitation, levels written).  Exact: the
+    OpenIFS clamps, ZPRECIP = 0 where LUK <= ZDNOPRC.  Smooth: the caps at
+    Z_CLDMAX and ``luk`` from below (``b - pos(b - a) <= b``, the ``luk`` cap
+    last, then >= 0) and precipitation exactly what the cloud loses at weight
+    ``wpr`` (cloud ``sel(wpr, zlnew, luk)`` + rain = ``luk``); the Z_CLDMAX cap
+    may be exceeded by up to 0.15 of its window."""
+    if sm.hard:
+        zlnew = jnp.maximum(0.0, jnp.minimum(luk, zlnew))
+        zlnew = jnp.minimum(Z_CLDMAX, zlnew)
+        pr = pr & (luk > zdnoprc)
+        return zlnew, jnp.where(pr, jnp.maximum(0.0, zluold + zc - zlnew), 0.0), pr
     zlnew = Z_CLDMAX - sm.pos(Z_CLDMAX - zlnew, _W_COND)
     zlnew = luk - sm.pos(luk - zlnew, _W_COND)
     zlnew = sm.pos(zlnew, _W_COND)
-    return zlnew, wpr * (luk - zlnew)
+    return zlnew, jnp.where(pr, wpr * (luk - zlnew), 0.0), pr
 
 
 # ---------------------------------------------------------------------------
@@ -388,14 +394,16 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
             if ldmixs:                                    # :462
                 zeps = jnp.where((kindex == K) & (kget(s["zlu"], jk + 1) > 0.0),
                                  zeps * ENTSTPC3, zeps)
-            mix_s = sm.min(0.5 * zdz * zeps, 1.0, _W_ONE)
+            # capped at 1 from below (1 - pos(1 - x) <= 1): the blends stay convex
+            mix_s = 0.5 * zdz * zeps
+            mix_s = jnp.minimum(1.0, mix_s) if sm.hard else 1.0 - sm.pos(1.0 - mix_s, _W_ONE)
             ztmp = 1.0 / (1.0 + mix_s)
             qu_s = (qu1 * (1.0 - mix_s) + 2.0 * mix_s * zqf) * ztmp
             suh_s = (suh1 * (1.0 - mix_s) + 2.0 * mix_s * zsf) * ztmp
             # deep: :454-472
             mix_d = ZMIX_DEEP * entrorg * zdz * sm.min(
                 (kget(pqsen, jk) / pqsen[K]) ** 3, 1.0, _W_ONE)
-            mix_d = sm.min(mix_d, 1.0, _W_ONE)
+            mix_d = jnp.minimum(1.0, mix_d) if sm.hard else 1.0 - sm.pos(1.0 - mix_d, _W_ONE)
             qu_d = qu1 * (1.0 - mix_d) + zqf * mix_d
             suh_d = suh1 * (1.0 - mix_d) + zsf * mix_d
             zmix = jnp.where(shallow, mix_s, mix_d)
@@ -822,13 +830,7 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         zd = jnp.where(pr & (luk > zdnoprc), zd, 1.0)
         zint = jnp.exp(-zd)
         zlnew = zluold * zint + zc / zd * (1.0 - zint)
-        if sm.hard:
-            zlnew = jnp.maximum(0.0, jnp.minimum(luk, zlnew))
-            zlnew = jnp.minimum(Z_CLDMAX, zlnew)
-            zprecip = jnp.maximum(0.0, zluold + zc - zlnew)
-            pr = pr & (luk > zdnoprc)
-        else:
-            zlnew, zprecip = cloud_to_rain(sm, luk, zlnew, wpr)
+        zlnew, zprecip, pr = cloud_to_rain(sm, pr, luk, zluold, zc, zlnew, wpr, zdnoprc)
         s["pdmfup"] = kset(s["pdmfup"], jk, zprecip * kget(s["pmfu"], jk), pr)
         s["plrain"] = kset(s["plrain"], jk, kget(s["plrain"], jk) + zprecip, pr)
         s["plu"] = kset(s["plu"], jk, sm.sel(wpr, zlnew, luk), pr)

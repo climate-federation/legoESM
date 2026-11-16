@@ -756,7 +756,7 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('mix_d = ZMIX_DEEP * entrorg * zdz * sm.min(', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('mix_s = sm.min(0.5 * zdz * zeps, 1.0, _W_ONE)', 'min'):
+    ('mix_s = jnp.minimum(1.0, mix_s) if sm.hard else 1.0 - sm.pos(1.0 - mix_s, _W_ONE)', 'pos'):
         ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
     ('neg = sm.lt(zbuoc, 0.0, _W_BUOC)', 'lt'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
@@ -906,8 +906,8 @@ _SITE_SYNTHETIC = {
     ('lambda c1, c: c1 - (1.0 - sm.on(-c, 0.0, _W_CONDCU))', 'on'):
         ('0.0', '_W_CONDCU',
          'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
-    ('mix_d = sm.min(mix_d, 1.0, _W_ONE)', 'min'):
-        ('1.0', '_W_ONE',
+    ('mix_d = jnp.minimum(1.0, mix_d) if sm.hard else 1.0 - sm.pos(1.0 - mix_d, _W_ONE)', 'pos'):
+        ('0.0', '_W_ONE',
          'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
     ('return jnp.minimum(QSAT_CAP, x) if sm is None else sm.min(x, QSAT_CAP, _W_EPCU)', 'min'):
         ('QSAT_CAP', '_W_EPCU',
@@ -1055,10 +1055,26 @@ def test_ascent_smooth_cloud_to_rain_conserves_water():
         z0 = jnp.linspace(-3.0 * w, 3.0 * w, 61)
         for zl in (luk + z0, A.Z_CLDMAX + z0, z0):
             for wpr in (0.0, 0.3, 1.0):
-                zlnew, zprecip = A.cloud_to_rain(sm, jnp.asarray(luk), zl, wpr)
+                zlnew, zprecip, _ = A.cloud_to_rain(
+                    sm, True, jnp.asarray(luk), 0.0, jnp.asarray(luk), zl, wpr, A.ZDNOPRC)
                 cloud = wpr * zlnew + (1.0 - wpr) * luk
                 np.testing.assert_allclose(cloud + zprecip, luk, rtol=1e-14, atol=0.0)
                 assert np.all(np.asarray(zlnew) >= 0.0) and np.all(np.asarray(zlnew) <= luk)
+
+
+def test_exact_cloud_to_rain_makes_no_rain_below_the_onset():
+    """Exact form: no precipitation where the cloud water is at or below the
+    onset ZDNOPRC (OpenIFS sets ZPRECIP = 0 there), so existing rain is not
+    fed from a level that does not precipitate."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent as A
+
+    luk = jnp.asarray([0.5, 1.0, 2.0]) * A.ZDNOPRC
+    zlnew, zprecip, pr = A.cloud_to_rain(IfsSmooth(True), True, luk, 0.2 * luk,
+                                         0.8 * luk, 0.3 * luk, 1.0, A.ZDNOPRC)
+    np.testing.assert_array_equal(np.asarray(pr), [False, False, True])
+    np.testing.assert_array_equal(np.asarray(zprecip)[:2], 0.0)
+    assert float(zprecip[2]) > 0.0
 
 
 def test_smooth_liquid_fraction_never_exceeds_one():
