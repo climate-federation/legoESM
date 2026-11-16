@@ -179,12 +179,14 @@ def _ocean_to_ice_heat_flux(
     zqfr = rho_cp * jnp.asarray(ocean_dz_top_m) * (-dT)
     cap = -jnp.minimum(zqfr, 0.0) / dt / jnp.maximum(ice_area_total,
                                                      _NEMO_EPSI10)
-    zswitch = si3_ge(ice_area_total, _NEMO_EPSI10, 0.0)
+    zswitch = ice_area_total >= _NEMO_EPSI10
     stop = si3_gt(-dT, 0.0, 0.0) * si3_ge(
         ice_volume_total, _NEMO_SUPERCOOL_VT_MAX_M, 0.0)
-    return _nemo_si3_qsb(zswitch, constants.rho_ocean, constants.c_p_seawater,
-                         config.ocean_heat_ch_nemo, ustar, dT, cap, stop,
-                         0.0, 0.0)
+    # The outer where keeps an ice-free cell an exact +0.0 even when its
+    # SST/cap is non-finite, as before the helper was shared (GLM review).
+    return jnp.where(zswitch, _nemo_si3_qsb(
+        1.0, constants.rho_ocean, constants.c_p_seawater,
+        config.ocean_heat_ch_nemo, ustar, dT, cap, stop, 0.0, 0.0), 0.0)
 
 
 def _nemo_si3_qsb(switch, rho, c, ch, ustar, dT, cap, stop_supercool, r, flux_w):

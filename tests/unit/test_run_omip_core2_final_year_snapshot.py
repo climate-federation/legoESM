@@ -45,6 +45,7 @@ def test_final_year_file_shares_the_final_snapshot_extra():
     assert len(after) == 1, "expected one post-loop year write"
     src = ast.unparse(after[0])
     assert "_save_snapshot" in src and "extra=_final_extra" in src, src
+    assert "step=n_steps" in src and "day=_final_day" in src, src
     finals = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
               and ast.unparse(n.func) == "_save_snapshot"
               and n.args[1:2] and ast.unparse(n.args[1]) == "'final'"]

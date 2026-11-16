@@ -12647,7 +12647,8 @@ def main() -> int:
     if not args.smoke and steps_per_year > 0 and n_steps % steps_per_year == 0:
         _save_snapshot(out_dir, f"year{n_steps // steps_per_year:03d}", state,
                        lat2d, lon2d, z_coord=z_coord, grid=grid, io_proc=_io,
-                       ice_state=ice_state, extra=_final_extra)
+                       ice_state=ice_state, step=n_steps, day=_final_day,
+                       extra=_final_extra)
         print(f"[snapshot] year {n_steps // steps_per_year} saved", flush=True)
     _write_run_restart(n_steps, n_steps * dt / _SEC_PER_DAY, state, ice_state)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
