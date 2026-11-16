@@ -53,6 +53,8 @@ from legoesm.core.operators_voronoi import (
     smagorinsky_laplacian_3d,
     leith_biharmonic_3d,
     vector_laplacian_del2_3d,
+    nemo_ldf_lap_e3_voronoi_3d,
+    nemo_vertex_thickness_3d,
     vector_laplacian_del4_3d,
 )
 from legoesm.ocean.dynamics.mpas_partial_cell_helpers import (
@@ -73,6 +75,7 @@ from legoesm.ocean.vertical import (
     compute_ocean_jacobian,
     diagnose_w_from_flux_div,
     flux_form_vertical_momentum_advection,
+    nemo_advective_vertical_momentum_advection,
 )
 from legoesm.ocean.freshwater import (
     FreshwaterForcing,
@@ -452,13 +455,40 @@ def _mpas_tendencies_outside_core(
 
     pv_flux = mpas_ocean_pv_flux(u_3d, h_k, h_e_3d, z_coord, mesh, config)
 
+    # NEMO nn_ahm_ijk_t=-30 viscosity (coefficients attached to the coordinate
+    # by the driver, fmask/shlat folded into ahmf): the file IS the Laplacian.
+    _nemo_ahmt = getattr(z_coord, "nemo_ldf_ahmt", None)
+    if _nemo_ahmt is not None and (config.A_h != 0.0 or config.B_h != 0.0):
+        raise ValueError(
+            "the coordinate carries NEMO eddy_viscosity_3D coefficients; "
+            f"A_h and B_h must be 0 (got A_h={config.A_h!r}, B_h={config.B_h!r}).")
     visc = mpas_ocean_momentum_viscosity(u_3d, mesh, config, halo_refresh)
+    if _nemo_ahmt is not None:
+        _h_vtx = nemo_vertex_thickness_3d(h_k, z_coord.is_active, z_coord.dz_ref, mesh)
+        visc = nemo_ldf_lap_e3_voronoi_3d(
+            u_3d, mesh, _nemo_ahmt, z_coord.nemo_ldf_ahmf, h_k, h_e_3d, _h_vtx,
+            edge_mask_3d) + visc
 
     # Vertical advection of perturbation momentum (#171 Level-1).
-    w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
-    vert_adv_u = flux_form_vertical_momentum_advection(
-        u_prime_3d, w_e, h_e_3d,
-    )
+    _vms = getattr(config, "vertical_momentum_scheme", "upwind_perturbation")
+    w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1); also a term diagnostic
+    if _vms == "upwind_perturbation":
+        vert_adv_u = flux_form_vertical_momentum_advection(
+            u_prime_3d, w_e, h_e_3d,
+        )
+    elif _vms == "nemo_advective":
+        # NEMO dynzad: 2-cell mean of areaCell*w at the edge, normalised by the
+        # 2-cell mean area (the edge's e1e2u analogue), full velocity.
+        _aw = mesh.areaCell[:, jnp.newaxis] * w
+        vert_adv_u = nemo_advective_vertical_momentum_advection(
+            u_3d, 0.5 * (_aw[c1] + _aw[c2]), h_e_3d,
+            (0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2]))[:, jnp.newaxis],
+            face_active=edge_mask_3d,
+        )
+    else:
+        raise ValueError(
+            f"MPASOceanConfig.vertical_momentum_scheme={_vms!r}: expected "
+            "'upwind_perturbation' or 'nemo_advective'")
 
     # Full nonlinear momentum tendency.  Use the per-level edge mask
     # (zero below the shallower neighbor's seafloor on partial cells)
@@ -1340,6 +1370,11 @@ def _outside_shared_core(z_coord, config) -> str | None:
             config.bottom_drag_r > 0 and (config.bottom_drag_bbl_thickness > 0
                                           or config.bottom_drag_bg_velocity > 0)):
         return "bottom drag other than linear bottom-level drag"
+    # The core runs the upwind perturbation form only (NEMO viscosity needs
+    # partial cells, already excluded above).
+    vms = getattr(config, "vertical_momentum_scheme", "upwind_perturbation")
+    if vms != "upwind_perturbation":
+        return f"vertical_momentum_scheme={vms!r}"
     return None
 
 

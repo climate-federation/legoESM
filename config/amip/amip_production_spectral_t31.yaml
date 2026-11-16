@@ -67,10 +67,13 @@ mpas_div_damp4_scale: 0.0
 mpas_qv_smooth_del2_m2s: 0.0
 mpas_qv_smooth_del4_m4s: 0.0        # refused non-zero on the column lane (edge operator)
 # ---- land IC -------------------------------------------------------------------
-land_ic: data/lmip_soil_ic/soil_ic_spectral_t31_era5T_19790101.npz
-                            # the spun-up soil IC regridded to the T31 Gaussian grid (same recipe /
-                            # source / batch as the MPAS res-6, duo C24 and lat-lon-48 files,
-                            # regrid_land_ic.py at 294495454, from restart_1985_d000h00.npz + ERA5
-                            # 1979-01-01 soil T, built 2026-10-12).  md5 1f4e0e6cd20a5e6b994ea89dee54fa84
-                            # (data/ is not tracked; copy the file beside the deck's data dir).
-                            # adopted (user 2026-10-27), as the lat-lon-48 file was
+# Built by scripts/data/regrid_land_ic.py --target-grid gaussian
+# --target-resolution 31 --target-clm-surfdata <the run's CLM surfdata> (soil
+# water carried as relative wetness between dry floor and saturation, rebuilt
+# on this run's soil, user 2026-11-12), then --era5-soil-t (ERA5 1979-01-01
+# 00 UTC stl1-4); file md5 f35b679ff782bf64346c740d3dab78c2; provenance is in
+# the file's metadata.  data/ is gitignored: stage the file in the launch
+# directory.
+# _v3 (2026-11-15): rebuilt with --vg-air-entry-m -0.02 against main's moved
+# dry floor (re-land of #2497/#2526).
+land_ic: data/lmip_soil_ic/soil_ic_spectral_t31_era5T_19790101_v3.npz

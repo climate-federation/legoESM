@@ -282,7 +282,9 @@ def test_orca2_shared_ws_program_admits_een_without_admitting_a_hybrid():
         ),
     )
     LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
-    with pytest.raises(ValueError, match="incompatible with adaptive_implicit"):
+    # nemo_advective + adaptive implicit is a legal pair on its own since
+    # 2026-10-02; the WS program is what refuses the hybrid (ln_zad_Aimp=F).
+    with pytest.raises(ValueError, match="rk3_ws requires one complete momentum program"):
         LatLonCGridOceanModel(
             recipe.grid,
             recipe.z_coord,

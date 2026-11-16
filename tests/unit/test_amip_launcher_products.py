@@ -21,7 +21,7 @@ REPO = Path(__file__).resolve().parents[2]
 LAUNCHERS = ("config/amip/amip_production.sh",
              "config/amip/amip_production.ginsburg.sh")
 SAME_PRODUCT = ("--aerosol-file", "--aerosol-ccn-file", "--land-mask-file",
-                "--subgrid-orography-file", "--ic-path", "--volcanic-aerosol-file")
+                "--default-subgrid-orography-file", "--ic-path", "--volcanic-aerosol-file")
 # Forcing channels every Levante entry point must pass as the Ginsburg twin does.
 FORCING_PRODUCTS = ("--aerosol-file", "--aerosol-ccn-file", "--volcanic-aerosol-file")
 

@@ -402,7 +402,7 @@ def test_transient_land_cover_validate_strict_requires_multilayer_and_surfdata()
         "--land-mask-file", "lsm.nc", "--use-multilayer-land",
         "--transient-land-cover",
         "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
-    ]), parser))
+    ]), parser))._replace(ml_pipeline=True)
     cfg.validate_strict()  # complete config: no error
 
     # transient cover but no surfdata path -> reject
@@ -675,7 +675,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
         "--use-multilayer-land", "--land-mask-file", "lsm.nc",
-    ]), parser))
+    ]), parser))._replace(ml_pipeline=True)
     assert cfg_clm.land_surface_scheme == "clm_ml"
     cfg_clm.validate_strict()  # must not raise
 
@@ -2365,6 +2365,10 @@ _STRICT_FAILING_DECKS = {
         "campaign deck: land_update_seconds/land_calibrated_physics without multilayer land",
     "amip_aug13_control.yaml":
         "rerun of the 13 Aug campaign reference; inherits amip_campaign_mpas.yaml's errors",
+    "amip_land_v6.yaml":
+        "land overlay, not a standalone deck: no grid, so multilayer land lands off the column loop",
+    "amip_sota.yaml":
+        "historical cdgrid deck (user 2026-11-11): multilayer land off the column loop",
 }
 
 
@@ -2405,7 +2409,9 @@ def test_amip_sota_config_builds_valid_experiment_config():
         _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc",
                              "--land-mask-file", "/dummy/lsm.nc"]), parser)
     cfg = build_config_from_args(args)
-    cfg.validate_strict()  # raises if the SOTA combo is inconsistent
+    # historical (user 2026-11-11): full physics off the column loop is refused
+    with pytest.raises(ValueError, match="ml_pipeline=True"):
+        cfg.validate_strict()
     assert cfg.use_multilayer_land is True
     # aerosol_ccn is DISABLED in the shipped SOTA config (#745): as wired the
     # indirect effect is ~15x too strong (-24 W/m^2 vs IPCC -1 to -1.7); it
@@ -5390,6 +5396,8 @@ _DUO_DECK_OWN_ROWS = frozenset({
     "physics_update_steps", "rad_update_steps",
     # the same land IC recipe on this grid's own columns (a per-grid file)
     "land_ic_path",
+    # subgrid orography with a two-cell resolved cutoff (user 2026-11-15)
+    "subgrid_orography_path",
     # hardware, not physics: GPU g-point batch (fluxes differ by summation order)
     "rrtmgp_gpoint_batch_size",
     # RRTMGP scan vs unrolled recurrence: the MPAS deck's scan row was measured
@@ -5423,8 +5431,9 @@ def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
     own = migrate_renamed_keys(yaml.safe_load(
         (amip / "amip_production_fv3duo_c24.yaml").read_text()))
     assert own.get("include") == "amip_production.yaml"
-    own_dests = ({k.split(".")[-1] for k in _DUO_DECK_OWN_ROWS} - {"land_ic_path"}
-                 | {"land_ic"})
+    own_dests = ({k.split(".")[-1] for k in _DUO_DECK_OWN_ROWS}
+                 - {"land_ic_path", "subgrid_orography_path"}
+                 | {"land_ic", "subgrid_orography_file"})
     extra = set(own) - {"include"} - own_dests
     assert not extra, f"duo deck sets rows that are not its own: {sorted(extra)}"
     mpas = _resolved_deck_fields(amip / "amip_production.yaml")
@@ -5443,7 +5452,7 @@ def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
 
 _DUO_C48_OWN_ROWS = frozenset({
     "grid.resolution", "dycore.dt", "physics_update_steps", "rad_update_steps",
-    "land_ic_path",
+    "land_ic_path", "subgrid_orography_path",
 })
 
 
@@ -5454,8 +5463,9 @@ def test_duo_c48_deck_differs_from_the_c24_duo_deck_only_in_resolution_rows():
     own = migrate_renamed_keys(yaml.safe_load(
         (amip / "amip_production_fv3duo_c48.yaml").read_text()))
     assert own.get("include") == "amip_production_fv3duo_c24.yaml"
-    own_dests = ({k.split(".")[-1] for k in _DUO_C48_OWN_ROWS} - {"land_ic_path"}
-                 | {"land_ic"})
+    own_dests = ({k.split(".")[-1] for k in _DUO_C48_OWN_ROWS}
+                 - {"land_ic_path", "subgrid_orography_path"}
+                 | {"land_ic", "subgrid_orography_file"})
     extra = set(own) - {"include"} - own_dests
     assert not extra, f"C48 duo deck sets rows that are not its own: {sorted(extra)}"
     c24 = _resolved_deck_fields(amip / "amip_production_fv3duo_c24.yaml")
@@ -6396,3 +6406,63 @@ def test_fp32_land64_micro64_deck_selects_fp64_land_and_micro():
     assert args.microphysics_compute_precision == "fp64"
     assert args.use_multilayer_land is True
     assert args.microphysics != "none"
+
+
+@pytest.mark.parametrize("deck, sso", [
+    ("amip_production_fv3duo_c24.yaml", "data/amip/sso_stdh_fv3duo_c24_cut2dx.nc"),
+    ("amip_production_fv3duo_c48.yaml", "data/amip/sso_stdh_fv3duo_c48_cut2dx.nc"),
+    ("amip_production.yaml", "/machine/default_sso.nc"),
+])
+def test_launcher_sso_default_never_replaces_a_decks_own_file(deck, sso):
+    """The launchers pass the MPAS 2-deg subgrid orography as a machine
+    DEFAULT; the duo decks name their two-cell-cutoff files and keep them."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser)
+    parser.set_defaults(**keys, _config_keys=frozenset(keys))
+    argv = _AMIP_DUMMY_PATHS + ["--default-subgrid-orography-file",
+                                "/machine/default_sso.nc"]
+    args = _postprocess_args(parser.parse_args(argv), parser, argv)
+    assert build_config_from_args(args).subgrid_orography_path == sso
+
+
+def _two_cell_cutoff_report(attrs, cell):
+    """None when a file's recorded cutoff is two cells snapped down to its
+    source sampling and the loader's scale guard accepts it on this grid."""
+    from legoesm.grids.topography import _check_sso_scale_decomposition
+    fine, cutoff = float(attrs["fine_res_deg"]), float(attrs["resolved_cutoff_deg"])
+    if not 2 * cell - fine < cutoff <= 2 * cell:
+        return f"cutoff {cutoff} is not two {cell}-deg cells at {fine}-deg sampling"
+    if cutoff < float(attrs["block_deg"]):
+        return "cutoff below the block"
+    built = {k: float(attrs[k]) for k in ("block_deg", "fine_res_deg",
+                                          "resolved_cutoff_deg")}
+    return _check_sso_scale_decomposition(built, cell, "f.nc", "warn")
+
+
+@pytest.mark.parametrize("res, cell", [(24, 3.454), (48, 1.727)])
+def test_duo_sso_product_cutoff_is_two_cells(res, cell):
+    """User 2026-11-15: resolved cutoff = two grid cells at C24 and C48. Reads
+    the product the deck names (skips where it is not staged)."""
+    import yaml
+    import xarray as xr
+    deck = yaml.safe_load((_repo_root() / "config" / "amip" /
+                           f"amip_production_fv3duo_c{res}.yaml").read_text())
+    path = _repo_root() / deck["subgrid_orography_file"]
+    if not path.is_file():
+        pytest.skip(f"{path} not staged")
+    with xr.open_dataset(path) as ds:
+        attrs = dict(ds.attrs)
+    assert _two_cell_cutoff_report(attrs, cell) is None
+    # planted violation: the old one-block, no-cutoff-like coarse cutoff
+    assert _two_cell_cutoff_report({**attrs, "resolved_cutoff_deg": 4 * cell},
+                                   cell) is not None
+
+
+def test_no_deck_can_set_ml_pipeline(tmp_path):
+    """The pipeline exemption is for ML entry points only: a deck key is refused."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    deck = tmp_path / "deck.yaml"
+    deck.write_text("ml_pipeline: true\n")
+    with pytest.raises((SystemExit, ValueError, KeyError)):
+        load_yaml_config(str(deck), build_arg_parser())

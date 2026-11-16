@@ -71,7 +71,7 @@ _PATH_FLAGS = {"--surfdata": "AMIP_SURFDATA", "--ic-path": "ERA5_IC",
                "--volcanic-aerosol-file": "VOLCANIC", "--topography": "ETOPO",
                "--clm-surfdata-path": "CLM_SURFDATA",
                "--land-mask-file": "AMIP_LAND_MASK",
-               "--subgrid-orography-file": "AMIP_SSO"}
+               "--default-subgrid-orography-file": "AMIP_SSO"}
 _DAY = re.compile(r"^\s*Day\s+([\d.]+):.*\(\S+ sim-days/s, (\d+)s\)")
 _HELD = re.compile(r"run totals \d+ / (\d+)")
 
