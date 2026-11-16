@@ -756,8 +756,6 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('mix_d = ZMIX_DEEP * entrorg * zdz * sm.min(', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('mix_s = jnp.minimum(1.0, mix_s) if sm.hard else 1.0 - sm.pos(1.0 - mix_s, _W_ONE)', 'pos'):
-        ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
     ('neg = sm.lt(zbuoc, 0.0, _W_BUOC)', 'lt'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('pqenh = jnp.where(adj, sm.pos(sm.min(qup, qsup, _W_VAP) + (pqsenh - qsup), _W_VAP), pqenh)', 'min'):
@@ -778,6 +776,8 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zoe = sm.min(zoe, ZOENTR_MAX, _W_OENTR) * mfu_ic', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('return jnp.minimum(1.0, x) if sm.hard else 1.0 - sm.pos(1.0 - x, _W_ONE)', 'pos'):
+        ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
 }
 
 
@@ -906,9 +906,6 @@ _SITE_SYNTHETIC = {
     ('lambda c1, c: c1 - (1.0 - sm.on(-c, 0.0, _W_CONDCU))', 'on'):
         ('0.0', '_W_CONDCU',
          'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
-    ('mix_d = jnp.minimum(1.0, mix_d) if sm.hard else 1.0 - sm.pos(1.0 - mix_d, _W_ONE)', 'pos'):
-        ('0.0', '_W_ONE',
-         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
     ('return jnp.minimum(QSAT_CAP, x) if sm is None else sm.min(x, QSAT_CAP, _W_EPCU)', 'min'):
         ('QSAT_CAP', '_W_EPCU',
          'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
@@ -1075,6 +1072,47 @@ def test_exact_cloud_to_rain_makes_no_rain_below_the_onset():
     np.testing.assert_array_equal(np.asarray(pr), [False, False, True])
     np.testing.assert_array_equal(np.asarray(zprecip)[:2], 0.0)
     assert float(zprecip[2]) > 0.0
+
+
+def test_smooth_mixing_fraction_keeps_the_parcel_blend_convex():
+    """The test parcel's entrainment mixing fraction stays <= 1 inside the
+    smooth window, so vapour and static energy of the blended parcel stay
+    between the parcel's and the environment's (no negative vapour)."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent as A
+
+    x = 1.0 + jnp.linspace(-3.0, 3.0, 601) * A._W_ONE
+    m = A.mixing_fraction(IfsSmooth(False), x)
+    assert np.all(np.asarray(m) <= 1.0) and np.all(np.asarray(m) >= 0.0)
+    q_parcel, q_env = 1.0e-2, 1.0e-6
+    q = q_parcel * (1.0 - m) + q_env * m
+    assert np.all(np.asarray(q) >= q_env)
+    np.testing.assert_array_equal(np.asarray(A.mixing_fraction(IfsSmooth(True), x)),
+                                  np.minimum(1.0, np.asarray(x)))
+
+
+@pytest.mark.parametrize("site", [
+    ("zlnew = luk - sm.pos(luk - zlnew, _W_COND)", "pos"),
+    ("zlnew = Z_CLDMAX - sm.pos(Z_CLDMAX - zlnew, _W_COND)", "pos"),
+    ("zrnew = lr - sm.pos(lr - zrnew, _W_COND)   # <= lr", "pos"),
+    ("return jnp.minimum(1.0, x) if sm.hard else 1.0 - sm.pos(1.0 - x, _W_ONE)", "pos"),
+])
+def test_host_water_closes_with_a_bounded_cap_active(fix, site):
+    """RULE 0 with the smooth caps inside their windows: every level's capped
+    operand is moved to mid-window (L32, smooth default) and the water the
+    host receives still sums to zero over each column (fp64, _TOL)."""
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    sp = _probe("switch_sites")
+    with sp.instrument(inject={site: jnp.asarray(1.0)}):
+        out, _ = _wrapper_out(fix, BechtoldConfig(use_ifs_ascent=True, dx_m=_DX), "L32")
+    dp = np.diff(fix["L32_p_half"], axis=1)
+    col = lambda a: np.sum(np.asarray(a) * dp, axis=1) / _thermo(fix, "L").RG  # noqa: E731
+    dry = col(out.dq_v_dt)
+    res = (dry + col(out.dq_c_conv_dt) + col(out.dq_r_conv_dt)
+           + col(out.dq_r_detr_dt) + col(out.dq_s_detr_dt))
+    assert np.max(np.abs(dry)) > 0.0
+    assert np.max(np.abs(res)) / np.max(np.abs(dry)) <= _TOL
 
 
 def test_smooth_liquid_fraction_never_exceeds_one():

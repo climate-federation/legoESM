@@ -195,6 +195,13 @@ def sdiv(a, b, ok):
     return a / jnp.where(ok, b, 1.0)
 
 
+def mixing_fraction(sm, x):
+    """CUBASEN's test-parcel mixing fraction MIN(1, x).  Smooth: capped at 1
+    from below (``1 - pos(1 - x) <= 1``), so the parcel/environment blends
+    stay convex and keep vapour and static energy between their two ends."""
+    return jnp.minimum(1.0, x) if sm.hard else 1.0 - sm.pos(1.0 - x, _W_ONE)
+
+
 def cloud_to_rain(sm, pr, luk, zluold, zc, zlnew, wpr, zdnoprc):
     """CUASCN's cloud-to-rain conversion (:700-712) on the levels ``pr``:
     returns (cloud water left, precipitation, levels written).  Exact: the
@@ -395,15 +402,14 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
                 zeps = jnp.where((kindex == K) & (kget(s["zlu"], jk + 1) > 0.0),
                                  zeps * ENTSTPC3, zeps)
             # capped at 1 from below (1 - pos(1 - x) <= 1): the blends stay convex
-            mix_s = 0.5 * zdz * zeps
-            mix_s = jnp.minimum(1.0, mix_s) if sm.hard else 1.0 - sm.pos(1.0 - mix_s, _W_ONE)
+            mix_s = mixing_fraction(sm, 0.5 * zdz * zeps)
             ztmp = 1.0 / (1.0 + mix_s)
             qu_s = (qu1 * (1.0 - mix_s) + 2.0 * mix_s * zqf) * ztmp
             suh_s = (suh1 * (1.0 - mix_s) + 2.0 * mix_s * zsf) * ztmp
             # deep: :454-472
             mix_d = ZMIX_DEEP * entrorg * zdz * sm.min(
                 (kget(pqsen, jk) / pqsen[K]) ** 3, 1.0, _W_ONE)
-            mix_d = jnp.minimum(1.0, mix_d) if sm.hard else 1.0 - sm.pos(1.0 - mix_d, _W_ONE)
+            mix_d = mixing_fraction(sm, mix_d)
             qu_d = qu1 * (1.0 - mix_d) + zqf * mix_d
             suh_d = suh1 * (1.0 - mix_d) + zsf * mix_d
             zmix = jnp.where(shallow, mix_s, mix_d)
