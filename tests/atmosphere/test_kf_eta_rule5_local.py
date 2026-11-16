@@ -178,7 +178,10 @@ _UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_wid
                 "chmin_clip_width_k", "top_stop_umf_width_kgs",
                 # the band column is mid-band at the DEFAULT widths only (the
                 # "all" case); stop1 alone is exercised on it shifted in-test
-                "top_stop_wtw_width_m2s2"}
+                "top_stop_wtw_width_m2s2",
+                # PR 6a: no fixture level lies within 0.05 K of T00 (measured:
+                # gaps at the hard gap to 2e-15); helper tests cover both sides
+                "melt_t_width_k"}
 
 
 def _moved(stored, case):

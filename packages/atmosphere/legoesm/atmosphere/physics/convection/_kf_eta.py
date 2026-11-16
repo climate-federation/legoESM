@@ -360,6 +360,12 @@ class KFSmoothing(NamedTuple):
       source layer and the top) and of the freezing-level correction.  Either
       nonzero runs the survival-weighted path like the cloud-top widths (with
       both top widths 0 its top weights are the oracle's one-hot top).
+      KNOWN DIFFERENCE (fixture, max over columns and levels, vs the hard
+      limit's gap): the LFS width alone moves the sweep's heating by up to
+      2.8e-6 K/s and its precipitation rate by 1.6e-6 (kg/m2/s); the melting
+      width moves no fixture case (no level within 0.05 K of T00).  The warm
+      flags are treated as independent per level; budgets close member by
+      member (the weights only re-mix complete oracle runs).
     """
 
     lut_knot_width: float
