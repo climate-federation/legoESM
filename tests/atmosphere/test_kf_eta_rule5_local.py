@@ -1089,7 +1089,9 @@ def test_descent_base_weights_reduce_to_the_first_stop_and_stay_normalised():
     # a saturated stop inside the descent (survival factor exactly 0): the
     # reverse-mode gradient stays finite and reaches the levels above it
     d2 = d.at[3].set(0.5)
+    assert float(jnp.abs(pb(d2)[:3]).sum()) == 0.0  # the exact zero below the stop
     jr = jax.jacrev(pb)(d2)
+    assert float(jnp.abs(jr[:3]).sum()) == 0.0
     assert bool(jnp.all(jnp.isfinite(jr))) and float(jnp.abs(jr[:, 5:8]).sum()) > 0.0
     check_grads(pb, (d2,), order=2, modes=("fwd", "rev"), eps=1e-4)
 
