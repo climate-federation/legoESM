@@ -1090,6 +1090,19 @@ def _dd_cols(fx, sm, cols):
     return [_sweep_column(fx, i, smoothing=sm)[0] for i in cols]
 
 
+def test_dd_rh_adjustment_adj_branch_is_unreachable_for_positive_layers():
+    """D7h ``adj`` (rhh < 1) stays hard: the descent runs at ND <= LDT < KSTART
+    and rhh = 1 - 0.2 (Z0[KSTART] - Z0[ND]) / 1000 m, so rhh < 1 whenever Z0
+    increases, i.e. for positive layer thicknesses, which every fixture and
+    sweep column has (at rhh = 1 the two branches coincide anyway)."""
+    fx = dict(np.load(_FIX))
+    dz = [np.asarray(fx[k]) for k in fx if k.endswith("_dz") or k == "sweep_dz"]
+    assert dz and all(np.all(d > 0.0) for d in dz)
+    z0 = np.cumsum(np.asarray(fx["sweep_dz"]), axis=-1)
+    rhh = 1.0 - kfe._RHH_DECR / kfe._RHH_PER_M * (z0[..., 1:] - z0[..., :-1])
+    assert np.all(rhh < 1.0)
+
+
 def test_soft_downdraft_converges_to_the_hard_downdraft_as_the_widths_shrink():
     """With every other width at its default, the PR 6b widths at 1e-9 of
     their defaults reproduce the hard base and acceptance (widths 0) on fired
