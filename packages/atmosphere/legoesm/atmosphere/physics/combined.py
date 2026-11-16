@@ -37,6 +37,7 @@ Example
 
 from __future__ import annotations
 
+import functools
 from typing import Callable, NamedTuple
 
 import jax
@@ -741,6 +742,21 @@ def _with_physics_cache(physics_fn, n_steps=1):
     return _copy_physics_fn_attrs(cached_physics_fn, physics_fn)
 
 
+def _remat_module(fn):
+    """``fn`` (a module's ``(state, grid, sigma_coord, **kw)`` call) under
+    ``jax.checkpoint``: reverse mode stores the module's inputs and recomputes
+    it, so one physics call's gradient holds one module's residuals at a time
+    instead of every module's.  Forward-only lowering inlines the same
+    operations (no barrier: ``differentiated=False``).  The mesh and vertical
+    coordinate are closed over (not JAX arrays); the module markers
+    (``_wants_forcing`` ...) are kept."""
+    @functools.wraps(fn)
+    def call(state, grid, sigma_coord, **kw):
+        return jax.checkpoint(
+            lambda s, k: fn(s, grid, sigma_coord, **k))(state, kw)
+    return call
+
+
 def held_physics_variant(physics_fn):
     """The held-physics step: ``PhysicsState.held_physics`` with the STATE
     tendencies zeroed (the whole physics increment was applied on the physics
@@ -1194,6 +1210,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         """
         phys_updates = {}
         fn0, accepts_ps, field_name = fns[0]
+        fn0 = _remat_module(fn0)
         if accepts_ps:
             if getattr(fn0, "_wants_forcing", False):
                 first, field_val = fn0(state, grid, sigma_coord,
@@ -1284,6 +1301,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 combined_tracer_tends[k] = v.data
 
         for _i_mod, (fn, accepts_ps, field_name) in enumerate(fns[1:], start=1):
+            fn = _remat_module(fn)
             if accepts_ps:
                 if getattr(fn, "_wants_forcing", False):
                     t, field_val = fn(state, grid, sigma_coord,

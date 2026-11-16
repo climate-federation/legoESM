@@ -346,3 +346,9 @@ def test_loop_census_ranks_the_scan_that_stacks_residuals(capsys):
 
 def test_parser_accepts_the_modmem_stage():
     assert pam.build_parser().parse_args(["--stage", "modmem"]).stage == "modmem"
+
+
+def test_parser_round_trips_rad_chunk():
+    assert pam.build_parser().parse_args(
+        ["--stage", "memory", "--rad-chunk", "214"]).rad_chunk == 214
+    assert pam.build_parser().parse_args(["--stage", "memory"]).rad_chunk == 0

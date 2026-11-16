@@ -771,6 +771,10 @@ def build_parser():
     ap.add_argument("--batch", type=int, default=1,
                     help="timing stage: B windows (one cadence period "
                          "apart) in one jax.vmap call; needs --schedule")
+    ap.add_argument("--rad-chunk", type=int, default=0,
+                    help="rebuild the physics with RRTMGP column_chunk_size "
+                         "= this (must divide the column count); 0 = as "
+                         "exported")
     ap.add_argument("--repeats", type=int, default=3,
                     help="timing stage: steady-state calls timed per window")
     ap.add_argument("--stash-modules", action="store_true",
@@ -811,6 +815,13 @@ def main(argv=None):
     t0 = time.time()
     drv = build_driver(rest, a.resolution, a.n_steps)
     exp = drv.export_mpas_step()
+    if a.rad_chunk:
+        from legoesm.driver.mpas_diff_step import rebuild_physics
+        cfg = exp["phys_cfg"]
+        exp = rebuild_physics(exp, cfg._replace(radiation=cfg.radiation._replace(
+            rrtmgp=cfg.radiation.rrtmgp._replace(column_chunk_size=a.rad_chunk))))
+        print(f"RAD_CHUNK {a.rad_chunk}: physics rebuilt with the RRTMGP "
+              "column-chunked solve", flush=True)
     print(f"built+exported in {time.time() - t0:.1f} s; ncol="
           f"{exp['state'].T.data.shape}, physics every "
           f"{exp['phys_update_steps']} steps, radiation every "

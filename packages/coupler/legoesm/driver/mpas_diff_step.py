@@ -54,7 +54,7 @@ import jax
 import jax.numpy as jnp
 
 __all__ = ["mpas_cadence", "pick_physics_fn", "mpas_branch_index", "mpas_step",
-           "mpas_segment", "window_clocks"]
+           "mpas_segment", "window_clocks", "rebuild_physics"]
 
 
 def mpas_cadence(step: int, *, subcycle_rad: bool, rad_update_steps: int,
@@ -85,6 +85,22 @@ def mpas_branch_index(step: int, exp: dict) -> int:
 
 
 _VARIANT_KEYS = ("physics_fn", "physics_fn_norad", "physics_fn_held")
+
+
+def rebuild_physics(exp: dict, phys_cfg) -> dict:
+    """``exp`` whose physics variants are rebuilt from ``phys_cfg`` by the
+    run loop's own builder (``exp["build_physics"]``), each variant built
+    only where the export has one; the held variant is re-derived from the
+    new full one."""
+    from legoesm.atmosphere.physics.combined import held_physics_variant
+    build = exp["build_physics"]
+    full = build(phys_cfg)
+    return dict(
+        exp, phys_cfg=phys_cfg, physics_fn=full,
+        physics_fn_norad=(build(phys_cfg, need_rad=False)
+                          if exp["physics_fn_norad"] is not None else None),
+        physics_fn_held=(held_physics_variant(full)
+                         if exp["physics_fn_held"] is not None else None))
 
 
 def _run_variant(exp: dict, pfn, state, phys_state, forcing, target_mass):
