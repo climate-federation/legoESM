@@ -615,10 +615,10 @@ def test_nosupply_gradient_through_the_supply_ramp(fix):
 # precipitation) per fixture column, measured (x64, CPU) by switch_gaps().
 _SWITCH_GAP = {
     "L32": (
-        [1.155408049270849e-13, 6.382851606121968e-13, 9.329321598065945e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.527033819234069e-16, 4.2997772808050026e-14, 0.0, 0.0, 4.061234644816772e-12, 8.597091978769083e-13, 1.5572484289018971e-12],
-        [1.2208611804052711e-14, 8.208652670311285e-14, 3.7711641379674507e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.768519006471387e-15, 0.0, 0.0, 7.768887789727816e-13, 5.056799592526267e-14, 1.101205278761102e-13],
-        [1.4776039621664564e-14, 9.01139097311247e-14, 3.81658947462115e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0292097072507253e-15, 6.920393684326509e-16, 0.0, 0.0, 7.544410353326226e-13, 4.6335526034809616e-14, 3.560926557233197e-14],
-        [7.228524788231107e-15, 9.835763388781988e-14, 3.4814984448074187e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.6066020765652573e-14, 1.0220917382663544e-15, 0.0, 0.0, 7.373443210654421e-13, 3.8308962631369565e-14, 0.0],
+        [1.155408049270849e-13, 6.381140202323673e-13, 0.0011130719528878582, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.527033819234069e-16, 4.198668525995863e-05, 0.0, 0.07037075107906984, 4.0608539898861155e-12, 1.7179434496712484e-12, 1.5572484289018971e-12],
+        [1.7172552867238978e-14, 7.531650388223756e-14, 0.0010985278742337056, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.689802829971999e-05, 0.0, 0.013070933253375527, 7.768887789727816e-13, 5.056799592526267e-14, 1.101205278761102e-13],
+        [1.4365594076618328e-14, 7.842070846841177e-14, 0.0011884180672240485, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0292097072507253e-15, 5.127344626210799e-05, 0.0, 0.0, 7.555190282387929e-13, 4.719359133175054e-14, 3.560926557233197e-14],
+        [3.975688633527109e-15, 8.820962404225116e-14, 0.0010549443125625845, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.4518722729335297e-14, 5.1273446260288524e-05, 0.0, 0.0, 7.36695393170115e-13, 3.9271499380901464e-14, 0.0],
     ),
     "L137": (
         [1.661612930475599e-11, 0.0, 0.0, 0.0, 0.0],
@@ -627,10 +627,10 @@ _SWITCH_GAP = {
         [0.0, 0.0, 0.0, 0.0, 0.0],
     ),
     "STRESS": (
-        [3.4442221391695113e-13, 4.5420032351625236e-14, 1.775404919440501e-12],
-        [3.9701823491282336e-14, 7.704682611898458e-15, 4.996926756862235e-13],
-        [1.1354137486081727e-13, 6.838908281453185e-16, 5.255835484158918e-13],
-        [1.2160758858600408e-15, 3.2671250364719703e-15, 4.0989188218272814e-13],
+        [1.722849855972394e-13, 0.012694584019058777, 1.775547491707708e-12],
+        [4.407539335181932e-14, 0.014005735274384364, 4.996926756862235e-13],
+        [1.2783764286336544e-13, 0.015307609436948059, 5.235744369922836e-13],
+        [1.0640664001275355e-15, 0.0153076094369521, 4.0989188218272814e-13],
     ),
 }
 
@@ -728,6 +728,120 @@ _SITE_POINTS = {
         ('L32', 2, 'input', 'sflux', 3.5652173913043477, 1.2682412999266035e-05, ()),
     ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('* sm.ge(rtt, kget(pten, jk), _W_T)', 'ge'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('* sm.lt(kget(zqenh, jkk) / kget(pqsen, jkk), ZRH_ADV, _W_RH))', 'lt'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('* sm.min(kget(pqsen, jk) / kget(pqsen, s["kcbot"]), 1.0, _W_ONE) ** 3)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zqex = sm.max(-ZWS_FAC * pqhfl_sfc / (zrho_s * zws_ok), ZQEXC0, _W_VAP)', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zqex = sm.min(zqex, ZQEX_MAX, _W_VAP)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zqexc = jnp.where(km1, sm.min(sm.max(st["zqex"], zqexc, _W_VAP), ZQEX_MAX, _W_VAP),', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zqexc = jnp.where(km1, sm.min(sm.max(st["zqex"], zqexc, _W_VAP), ZQEX_MAX, _W_VAP),', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zrnew = sm.pos(sm.min(zrnew, lr, _W_COND), _W_COND)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zrnew = sm.pos(sm.min(zrnew, lr, _W_COND), _W_COND)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ztex = sm.max(-ZWS_FAC * pahfs_sfc / (zrho_s * zws_ok * rcpd), ZTEXC0, _W_TEX)', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ztex = sm.min(ztex, ZTEX_MAX, _W_TEX)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ztexc = jnp.where(km1, sm.min(sm.max(st["ztex"], ztexc, _W_TEX), ZTEX_MAX, _W_TEX),', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ztexc = jnp.where(km1, sm.min(sm.max(st["ztex"], ztexc, _W_TEX), ZTEX_MAX, _W_TEX),', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk + 1), ZKE_PRC_MIN, _W_KE)),', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk + 1), ZKE_PRC_MIN, _W_KE)),', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk), ZKE_RAIN_MIN, _W_KE)),', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk), ZKE_RAIN_MIN, _W_KE)),', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zxe = sm.pos(zchange - zxs, _W_MF)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zzzmb = sm.min(sm.max(-kget(pvervel, kk) * zrg, ZMID_MF_MIN, _W_MF), RMFLIA, _W_MF)', 'max'):
+        ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
+    ('zzzmb = sm.min(sm.max(-kget(pvervel, kk) * zrg, ZMID_MF_MIN, _W_MF), RMFLIA, _W_MF)', 'min'):
+        ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
+    ('a = ((jnp.maximum(th.RTICECU, sm.min(t, th.RTWAT, _W_TCU))', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('de_n = sm.max(mfu1 * (1.0 - zmfun), zdmfde, _W_MF)', 'max'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
+    ('ent = sm.sel(sm.on(zdmfen, 0.0, _W_MF), zdmfen, zdmfde)', 'on'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('lrain = kget(s["plrain"], jk + 1) * sm.pos(mfu1 - zdmfde, _W_MF) * zfac', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('mix_d = ZMIX_DEEP * entrorg * zdz * sm.min(', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('mix_s = sm.min(0.5 * zdz * zeps, 1.0, _W_ONE)', 'min'):
+        ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
+    ('neg = sm.lt(zbuoc, 0.0, _W_BUOC)', 'lt'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('newmfub = sm.min(s["pmfub"], zmfmax, _W_MF)', 'min'):
+        ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
+    ('org = sm.gt(zbuo, ZBUO_ORG, _W_BUO)', 'gt'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('pqenh = jnp.where(adj, sm.pos(sm.min(qup, qsup, _W_VAP) + (pqsenh - qsup), _W_VAP), pqenh)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('pqenh = jnp.where(adj, sm.pos(sm.min(qup, qsup, _W_VAP) + (pqsenh - qsup), _W_VAP), pqenh)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ptenh = (sm.max(rcpd * pten + pgeo, rcpd * up + gup, _W_SE) - pgeoh[:K + 1]) * zorcpd', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('pw = sm.max(st["pwmean"] / jnp.maximum(ZDPMEAN_MIN, st["zdpmean"]), ZWMEAN_MIN, _W_VEL)', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('reset, safe_sqrt_nan(sm.pos(kget(st["zwu2h"], st["icbot"]), _W_KE)),', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('return jnp.maximum(x, 0.0) if sm is None else sm.pos(x, _W_CONDCU)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('return zcond1 * sm.on(zcond, 0.0, _W_CONDCU)', 'on'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('rh = sm.min(kget(pqen, jk) / kget(pqsen, jk), 1.0, _W_ONE)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('rhm1 = sm.min(kget(pqen, jk - 1) / kget(pqsen, jk - 1), 1.0, _W_ONE)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('wpr = sm.on(luk, zdnoprc, _W_COND)', 'on'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('wre = sm.lt(zbuo, ZBUO_REINT, _W_BUO)', 'lt'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('wrf = sm.on(lr, 0.0, _W_COND)', 'on'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zadv = sm.min(sm.pos(kget(ptenqa, jkk) * ZQADV_TAU, _W_VAP), ZQADV_MAX, _W_VAP)', 'min'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zadv = sm.min(sm.pos(kget(ptenqa, jkk) * ZQADV_TAU, _W_VAP), ZQADV_MAX, _W_VAP)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zchange = sm.pos(zmftest - zmfmax, _W_MF)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zdken = sm.min((1.0 + Z_CWDRAG) * ent / mfden, 1.0, _W_ONE)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zdmfde_f = sm.min(zdmfde, ZDETR_MAX * mfu1, _W_MF)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zdq = sm.pos(zqold - qu, _W_COND)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zdt = sm.min(sm.pos(th.RTBERCU - tuk, _W_T), th.RTBERCU - th.RTICECU, _W_T)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zdt = sm.min(sm.pos(th.RTBERCU - tuk, _W_T), th.RTBERCU - th.RTICECU, _W_T)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zkedke = sm.pos(sm.min(zkedke, 1.0, _W_ONE), _W_ONE)', 'min'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
+    ('zkedke = sm.pos(sm.min(zkedke, 1.0, _W_ONE), _W_ONE)', 'pos'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
+    ('zleen = sm.on(lit, RLMIN, _W_COND) * lit * zdmfen', 'on'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zlnew = sm.min(zlnew, Z_CLDMAX, _W_COND)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zlnew = sm.pos(sm.min(zlnew, luk, _W_COND), _W_COND)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zlnew = sm.pos(sm.min(zlnew, luk, _W_COND), _W_COND)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zoe = sm.min(zoe, ZOENTR_MAX, _W_OENTR) * mfu_ic', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zprecip = wpr * sm.pos(zluold + zc - zlnew, _W_COND)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
 }
 
 
@@ -736,8 +850,9 @@ _SITE_POINTS = {
 # them): a direct gradient test of the smoothed expression inside its window
 # at the default width (coordinator ruling 2026-11-15), with the reason.
 # Values: (bound b, or a representative value where the bound is traced, and
-# the width, as expressions in _ifs_cumastrn's namespace plus RG = g and
-# RCPD = c_pd; reason).
+# the width, as expressions in the site module's namespace plus RG = g and
+# RCPD = c_pd; reason; optional module: "cuascent" or "thermo", else
+# _ifs_cumastrn).
 _SITE_SYNTHETIC = {
     ('br = 1.0 - ((1.0 - sm.le(zsatfr, ZSATFR_MAX, _W_SATFR))', 'le'):
         ('ZSATFR_MAX', '_W_SATFR', 'full-scheme point found, but check_grads through the whole scheme does not agree with autodiff to 1e-3 relative there'),
@@ -778,14 +893,17 @@ def test_switch_site_synthetic_gradient(site):
     derivative differs from the exact switch's."""
     from jax.test_util import check_grads
     from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics import _ifs_thermo
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent
     from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
 
     sp = _probe("switch_sites")
     method = site[1]
-    bexpr, wexpr, reason = _SITE_SYNTHETIC[site]
+    bexpr, wexpr, reason, *mod = _SITE_SYNTHETIC[site]
     assert reason
+    mod = {"cuascent": _ifs_cuascent, "thermo": _ifs_thermo}[mod[0]] if mod else M
     th = lego_thermo()
-    ns = {**vars(M), "RG": th.RG, "RCPD": th.RCPD}
+    ns = {**vars(mod), "RG": th.RG, "RCPD": th.RCPD}
     b, w = float(eval(bexpr, ns)), float(eval(wexpr, ns))
 
     def f(a, hard=False):
@@ -800,7 +918,19 @@ def test_switch_site_synthetic_gradient(site):
     assert np.isfinite(gs) and abs(gs - gh) > 1e-3 * max(abs(gs), abs(gh))
 
 
-_SITE_PENDING: set = set()   # none left
+_SITE_PENDING: set = {
+    ('* sm.pos(c1, _W_CONDCU), sm)', 'pos'),
+    ('+ sm.pos(zbuof * zdz, _W_CAPEL), on)', 'pos'),
+    ('zxs = sm.pos(mfu1 - zmfmax, _W_MF)', 'pos'),
+    ('1.0 - kt3 * sm.gt(kget(pten, s["kcbot"]), rtt - ZLSCV_DT, _W_T))', 'gt'),
+    ('ke = sm.max((kget(s["pkineu"], jk + 1) * (1.0 - zdken) + zdkbuo) / (1.0 + zdken),', 'max'),
+    ('lambda c1, c: c1 - (1.0 - sm.on(-c, 0.0, _W_CONDCU))', 'on'),
+    ('mix_d = sm.min(mix_d, 1.0, _W_ONE)', 'min'),
+    ('return jnp.minimum(QSAT_CAP, x) if sm is None else sm.min(x, QSAT_CAP, _W_EPCU)', 'min'),
+    ('th, psp, t, q, lambda c: -sm.pos(-c, _W_CONDCU),', 'pos'),
+    ('wub = safe_sqrt_nan(sm.pos(kget(st["zwu2h"], jkb), _W_KE))', 'pos'),
+    ('zoentr_b = sm.min(zoentr_b, ZOENTR_MAX, _W_OENTR) * mfu1', 'min'),
+}
 
 
 def test_every_switch_site_has_a_gradient_point():
@@ -859,6 +989,13 @@ def test_switch_site_gradient_at_default(fix, site, _fresh_jit):
     # round-off level gets a synthetic test, see _SITE_SYNTHETIC)
     big = max(abs(gs), abs(gh))
     assert np.isfinite(gs) and big > 1e-12 and abs(gs - gh) > 1e-3 * big
+
+
+def test_ascent_mass_flux_width_is_the_closure_one():
+    """The ascent reuses the closure's mass-flux scale (vote 2026-11-14)."""
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent, _ifs_cumastrn
+
+    assert _ifs_cuascent._S_MF == _ifs_cumastrn._S_MF
 
 
 def test_switch_scales_probe_covers_every_class(fix):
