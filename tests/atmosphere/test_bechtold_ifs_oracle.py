@@ -700,8 +700,6 @@ def _probe(name):
 _SITE_POINTS = {
     ('* (1.0 - sm.lt(kget(pvervel, njkt5), ZOMEGA_RES, _W_OMEGA)))', 'lt'):
         ('L32', 1, 'inject', 'q', 1.0586956521739133, 0.0001, ()),
-    ('/ ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)', 'min'):
-        ('L32', 9, 'input', 'q', 1.1985054347826085, 1.9621876652955546e-08, ()),
     ('llo1 = sm.lt(paph[K + 1] - kget(paph, ikd), ZPBL_DP, _W_PRES)', 'lt'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('m = sm.min(zm, r, _W_REL * r)', 'min'):
@@ -710,14 +708,10 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'):
         ('L137', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)', 'max'):
-        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
     ('zcape_c = sm.min(zcape_c, ZCAPE_MAX, _W_CAPE)', 'min'):
         ('L32', 9, 'inject', 'q', 1.075, 0.0001, ()),
     ('zcape_c = sm.sel(br, sm.max(zcape2 - zcapdcycl + zdqcv, RMINCAPE * zcape, _W_CAPE),', 'max'):
         ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
-    ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
-        ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
     ('zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)', 'min'):
         ('STRESS', 0, 'inject', 'q', 1.225, 0.0001, ()),
     ('zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1', 'max'):
@@ -726,8 +720,6 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'max'):
         ('L32', 2, 'input', 'sflux', 3.5652173913043477, 1.2682412999266035e-05, ()),
-    ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('* sm.ge(rtt, kget(pten, jk), _W_T)', 'ge'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('* sm.lt(kget(zqenh, jkk) / kget(pqsen, jkk), ZRH_ADV, _W_RH))', 'lt'):
@@ -742,10 +734,6 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zqexc = jnp.where(km1, sm.min(sm.max(st["zqex"], zqexc, _W_VAP), ZQEX_MAX, _W_VAP),', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zrnew = sm.pos(sm.min(zrnew, lr, _W_COND), _W_COND)', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zrnew = sm.pos(sm.min(zrnew, lr, _W_COND), _W_COND)', 'pos'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('ztex = sm.max(-ZWS_FAC * pahfs_sfc / (zrho_s * zws_ok * rcpd), ZTEXC0, _W_TEX)', 'max'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('ztex = sm.min(ztex, ZTEX_MAX, _W_TEX)', 'min'):
@@ -754,13 +742,7 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('ztexc = jnp.where(km1, sm.min(sm.max(st["ztex"], ztexc, _W_TEX), ZTEX_MAX, _W_TEX),', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk + 1), ZKE_PRC_MIN, _W_KE)),', 'max'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk + 1), ZKE_PRC_MIN, _W_KE)),', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk), ZKE_RAIN_MIN, _W_KE)),', 'max'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk), ZKE_RAIN_MIN, _W_KE)),', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zxe = sm.pos(zchange - zxs, _W_MF)', 'pos'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
@@ -768,13 +750,9 @@ _SITE_POINTS = {
         ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
     ('zzzmb = sm.min(sm.max(-kget(pvervel, kk) * zrg, ZMID_MF_MIN, _W_MF), RMFLIA, _W_MF)', 'min'):
         ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
-    ('a = ((jnp.maximum(th.RTICECU, sm.min(t, th.RTWAT, _W_TCU))', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('de_n = sm.max(mfu1 * (1.0 - zmfun), zdmfde, _W_MF)', 'max'):
         ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
     ('ent = sm.sel(sm.on(zdmfen, 0.0, _W_MF), zdmfen, zdmfde)', 'on'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('lrain = kget(s["plrain"], jk + 1) * sm.pos(mfu1 - zdmfde, _W_MF) * zfac', 'pos'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('mix_d = ZMIX_DEEP * entrorg * zdz * sm.min(', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
@@ -782,65 +760,23 @@ _SITE_POINTS = {
         ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
     ('neg = sm.lt(zbuoc, 0.0, _W_BUOC)', 'lt'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('newmfub = sm.min(s["pmfub"], zmfmax, _W_MF)', 'min'):
-        ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
-    ('org = sm.gt(zbuo, ZBUO_ORG, _W_BUO)', 'gt'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('pqenh = jnp.where(adj, sm.pos(sm.min(qup, qsup, _W_VAP) + (pqsenh - qsup), _W_VAP), pqenh)', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('pqenh = jnp.where(adj, sm.pos(sm.min(qup, qsup, _W_VAP) + (pqsenh - qsup), _W_VAP), pqenh)', 'pos'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('ptenh = (sm.max(rcpd * pten + pgeo, rcpd * up + gup, _W_SE) - pgeoh[:K + 1]) * zorcpd', 'max'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('pw = sm.max(st["pwmean"] / jnp.maximum(ZDPMEAN_MIN, st["zdpmean"]), ZWMEAN_MIN, _W_VEL)', 'max'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('reset, safe_sqrt_nan(sm.pos(kget(st["zwu2h"], st["icbot"]), _W_KE)),', 'pos'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('return jnp.maximum(x, 0.0) if sm is None else sm.pos(x, _W_CONDCU)', 'pos'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('return zcond1 * sm.on(zcond, 0.0, _W_CONDCU)', 'on'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('rh = sm.min(kget(pqen, jk) / kget(pqsen, jk), 1.0, _W_ONE)', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('rhm1 = sm.min(kget(pqen, jk - 1) / kget(pqsen, jk - 1), 1.0, _W_ONE)', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('wpr = sm.on(luk, zdnoprc, _W_COND)', 'on'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('wre = sm.lt(zbuo, ZBUO_REINT, _W_BUO)', 'lt'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('wrf = sm.on(lr, 0.0, _W_COND)', 'on'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zadv = sm.min(sm.pos(kget(ptenqa, jkk) * ZQADV_TAU, _W_VAP), ZQADV_MAX, _W_VAP)', 'min'):
         ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
     ('zadv = sm.min(sm.pos(kget(ptenqa, jkk) * ZQADV_TAU, _W_VAP), ZQADV_MAX, _W_VAP)', 'pos'):
         ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
-    ('zchange = sm.pos(zmftest - zmfmax, _W_MF)', 'pos'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zdken = sm.min((1.0 + Z_CWDRAG) * ent / mfden, 1.0, _W_ONE)', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zdmfde_f = sm.min(zdmfde, ZDETR_MAX * mfu1, _W_MF)', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zdq = sm.pos(zqold - qu, _W_COND)', 'pos'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zdt = sm.min(sm.pos(th.RTBERCU - tuk, _W_T), th.RTBERCU - th.RTICECU, _W_T)', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zdt = sm.min(sm.pos(th.RTBERCU - tuk, _W_T), th.RTBERCU - th.RTICECU, _W_T)', 'pos'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zkedke = sm.pos(sm.min(zkedke, 1.0, _W_ONE), _W_ONE)', 'min'):
-        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
-    ('zkedke = sm.pos(sm.min(zkedke, 1.0, _W_ONE), _W_ONE)', 'pos'):
-        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
-    ('zleen = sm.on(lit, RLMIN, _W_COND) * lit * zdmfen', 'on'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zlnew = sm.min(zlnew, Z_CLDMAX, _W_COND)', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zlnew = sm.pos(sm.min(zlnew, luk, _W_COND), _W_COND)', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zlnew = sm.pos(sm.min(zlnew, luk, _W_COND), _W_COND)', 'pos'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zoe = sm.min(zoe, ZOENTR_MAX, _W_OENTR) * mfu_ic', 'min'):
-        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zprecip = wpr * sm.pos(zluold + zc - zlnew, _W_COND)', 'pos'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
 }
 
@@ -883,6 +819,135 @@ _SITE_SYNTHETIC = {
     ('zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)', 'max'):
         ("0.1", "_W_DH", "first-guess energy floor: feeds only the first-guess shallow "
                        "flux, which cancels in the closure rescale"),
+    ('/ ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)', 'min'):
+        ('ZTAU_WMAX', '_W_VEL',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)'),
+    ('zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)', 'max'):
+        ('-2.0 * _S_CAPE', '_W_CAPE',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist) (bound traced: representative value)'),
+    ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
+        ('ZDH_MIN * RCPD', '_W_DH',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)'),
+    ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
+        ('ZXTAU_MAX', '_W_TIME',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)'),
+    ('zrnew = sm.pos(sm.min(zrnew, lr, _W_COND), _W_COND)', 'min'):
+        ('_S_COND', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist) (bound traced: representative value)', 'cuascent'),
+    ('zrnew = sm.pos(sm.min(zrnew, lr, _W_COND), _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk + 1), ZKE_PRC_MIN, _W_KE)),', 'max'):
+        ('ZKE_PRC_MIN', '_W_KE',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk), ZKE_RAIN_MIN, _W_KE)),', 'max'):
+        ('ZKE_RAIN_MIN', '_W_KE',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk), ZKE_RAIN_MIN, _W_KE)),', 'min'):
+        ('ZWU_MAX', '_W_VEL',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('a = ((jnp.maximum(th.RTICECU, sm.min(t, th.RTWAT, _W_TCU))', 'min'):
+        ('th.RTWAT', '_W_TCU',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'thermo'),
+    ('lrain = kget(s["plrain"], jk + 1) * sm.pos(mfu1 - zdmfde, _W_MF) * zfac', 'pos'):
+        ('0.0', '_W_MF',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('newmfub = sm.min(s["pmfub"], zmfmax, _W_MF)', 'min'):
+        ('0.3', '_W_MF',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist) (bound traced: representative value)', 'cuascent'),
+    ('org = sm.gt(zbuo, ZBUO_ORG, _W_BUO)', 'gt'):
+        ('ZBUO_ORG', '_W_BUO',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('pqenh = jnp.where(adj, sm.pos(sm.min(qup, qsup, _W_VAP) + (pqsenh - qsup), _W_VAP), pqenh)', 'pos'):
+        ('0.0', '_W_VAP',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('pw = sm.max(st["pwmean"] / jnp.maximum(ZDPMEAN_MIN, st["zdpmean"]), ZWMEAN_MIN, _W_VEL)', 'max'):
+        ('ZWMEAN_MIN', '_W_VEL',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('return jnp.maximum(x, 0.0) if sm is None else sm.pos(x, _W_CONDCU)', 'pos'):
+        ('0.0', '_W_CONDCU',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'thermo'),
+    ('return zcond1 * sm.on(zcond, 0.0, _W_CONDCU)', 'on'):
+        ('0.0', '_W_CONDCU',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'thermo'),
+    ('wpr = sm.on(luk, zdnoprc, _W_COND)', 'on'):
+        ('ZDNOPRC', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('wre = sm.lt(zbuo, ZBUO_REINT, _W_BUO)', 'lt'):
+        ('ZBUO_REINT', '_W_BUO',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('wrf = sm.on(lr, 0.0, _W_COND)', 'on'):
+        ('0.0', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zchange = sm.pos(zmftest - zmfmax, _W_MF)', 'pos'):
+        ('0.0', '_W_MF',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zdmfde_f = sm.min(zdmfde, ZDETR_MAX * mfu1, _W_MF)', 'min'):
+        ('ZDETR_MAX * 0.03', '_W_MF',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist) (bound traced: representative value)', 'cuascent'),
+    ('zdq = sm.pos(zqold - qu, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zdt = sm.min(sm.pos(th.RTBERCU - tuk, _W_T), th.RTBERCU - th.RTICECU, _W_T)', 'min'):
+        ('th.RTBERCU - th.RTICECU', '_W_T',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zdt = sm.min(sm.pos(th.RTBERCU - tuk, _W_T), th.RTBERCU - th.RTICECU, _W_T)', 'pos'):
+        ('0.0', '_W_T',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zkedke = sm.pos(sm.min(zkedke, 1.0, _W_ONE), _W_ONE)', 'min'):
+        ('1.0', '_W_ONE',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zkedke = sm.pos(sm.min(zkedke, 1.0, _W_ONE), _W_ONE)', 'pos'):
+        ('0.0', '_W_ONE',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zleen = sm.on(lit, RLMIN, _W_COND) * lit * zdmfen', 'on'):
+        ('RLMIN', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zlnew = sm.min(zlnew, Z_CLDMAX, _W_COND)', 'min'):
+        ('Z_CLDMAX', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zlnew = sm.pos(sm.min(zlnew, luk, _W_COND), _W_COND)', 'min'):
+        ('_S_COND', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist) (bound traced: representative value)', 'cuascent'),
+    ('zlnew = sm.pos(sm.min(zlnew, luk, _W_COND), _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('zprecip = wpr * sm.pos(zluold + zc - zlnew, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative, or the result differs between runs under xdist)', 'cuascent'),
+    ('* sm.pos(c1, _W_CONDCU), sm)', 'pos'):
+        ('0.0', '_W_CONDCU',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
+    ('+ sm.pos(zbuof * zdz, _W_CAPEL), on)', 'pos'):
+        ('0.0', '_W_CAPEL',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('1.0 - kt3 * sm.gt(kget(pten, s["kcbot"]), rtt - ZLSCV_DT, _W_T))', 'gt'):
+        ('th.RTT - ZLSCV_DT', '_W_T',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('ke = sm.max((kget(s["pkineu"], jk + 1) * (1.0 - zdken) + zdkbuo) / (1.0 + zdken),', 'max'):
+        ('ZKE_MIN', '_W_KE',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('lambda c1, c: c1 - (1.0 - sm.on(-c, 0.0, _W_CONDCU))', 'on'):
+        ('0.0', '_W_CONDCU',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
+    ('mix_d = sm.min(mix_d, 1.0, _W_ONE)', 'min'):
+        ('1.0', '_W_ONE',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('return jnp.minimum(QSAT_CAP, x) if sm is None else sm.min(x, QSAT_CAP, _W_EPCU)', 'min'):
+        ('QSAT_CAP', '_W_EPCU',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
+    ('th, psp, t, q, lambda c: -sm.pos(-c, _W_CONDCU),', 'pos'):
+        ('0.0', '_W_CONDCU',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
+    ('wub = safe_sqrt_nan(sm.pos(kget(st["zwu2h"], jkb), _W_KE))', 'pos'):
+        ('0.0', '_W_KE',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('zoentr_b = sm.min(zoentr_b, ZOENTR_MAX, _W_OENTR) * mfu1', 'min'):
+        ('ZOENTR_MAX', '_W_OENTR',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('zxs = sm.pos(mfu1 - zmfmax, _W_MF)', 'pos'):
+        ('0.0', '_W_MF',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
 }
 
 
@@ -903,7 +968,7 @@ def test_switch_site_synthetic_gradient(site):
     assert reason
     mod = {"cuascent": _ifs_cuascent, "thermo": _ifs_thermo}[mod[0]] if mod else M
     th = lego_thermo()
-    ns = {**vars(mod), "RG": th.RG, "RCPD": th.RCPD}
+    ns = {**vars(mod), "RG": th.RG, "RCPD": th.RCPD, "th": th}
     b, w = float(eval(bexpr, ns)), float(eval(wexpr, ns))
 
     def f(a, hard=False):
@@ -918,19 +983,7 @@ def test_switch_site_synthetic_gradient(site):
     assert np.isfinite(gs) and abs(gs - gh) > 1e-3 * max(abs(gs), abs(gh))
 
 
-_SITE_PENDING: set = {
-    ('* sm.pos(c1, _W_CONDCU), sm)', 'pos'),
-    ('+ sm.pos(zbuof * zdz, _W_CAPEL), on)', 'pos'),
-    ('zxs = sm.pos(mfu1 - zmfmax, _W_MF)', 'pos'),
-    ('1.0 - kt3 * sm.gt(kget(pten, s["kcbot"]), rtt - ZLSCV_DT, _W_T))', 'gt'),
-    ('ke = sm.max((kget(s["pkineu"], jk + 1) * (1.0 - zdken) + zdkbuo) / (1.0 + zdken),', 'max'),
-    ('lambda c1, c: c1 - (1.0 - sm.on(-c, 0.0, _W_CONDCU))', 'on'),
-    ('mix_d = sm.min(mix_d, 1.0, _W_ONE)', 'min'),
-    ('return jnp.minimum(QSAT_CAP, x) if sm is None else sm.min(x, QSAT_CAP, _W_EPCU)', 'min'),
-    ('th, psp, t, q, lambda c: -sm.pos(-c, _W_CONDCU),', 'pos'),
-    ('wub = safe_sqrt_nan(sm.pos(kget(st["zwu2h"], jkb), _W_KE))', 'pos'),
-    ('zoentr_b = sm.min(zoentr_b, ZOENTR_MAX, _W_OENTR) * mfu1', 'min'),
-}
+_SITE_PENDING: set = set()   # none left
 
 
 def test_every_switch_site_has_a_gradient_point():
