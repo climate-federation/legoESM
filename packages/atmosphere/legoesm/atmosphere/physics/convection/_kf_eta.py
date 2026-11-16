@@ -1949,7 +1949,8 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         """The oracle's downdraft and its acceptance for one source level LFS,
         melting flag/ice precipitation, updraft precipitation and base flux.
         ``soft`` (static, PR 6b): the expectation over the descent's base LDB
-        and the acceptance weights (dd_ok, deep_dd, nodd) of the accepted
+        and the acceptance weights (dd_ok, deep_dd, nodd; with the DDINC cap and
+        the D7h low blend inside each run) of the accepted
         downdraft and the no-downdraft outcome; DMF/DER/DDR and TDER are those
         expectations, THTAD/QD the base-independent states below the source
         layer (the closure reads only DDR*THTAD and DDR*QD), LDB the base of
