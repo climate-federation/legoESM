@@ -69,12 +69,9 @@ latlon_qv_smooth_del4_m4s: 0.0      # this lane's own q_v del-4 smoother: OFF, a
 # --target-resolution 48 --target-clm-surfdata <the run's CLM surfdata> (soil
 # water carried as relative wetness between dry floor and saturation, rebuilt
 # on this run's soil, user 2026-11-12), then --era5-soil-t (ERA5 1979-01-01
-# 00 UTC stl1-4); file md5 cf1c0fa064b8f257c90f255726d8b2b2; provenance is in
+# 00 UTC stl1-4); file md5 aba80c8dbcd0b3b0616e0fe9dee8460e; provenance is in
 # the file's metadata.  data/ is gitignored: stage the file in the launch
 # directory.
-land_ic: data/lmip_soil_ic/soil_ic_latlon48_era5T_19790101.npz
-                            # the spun-up soil IC regridded to this grid (same recipe / source /
-                            # batch as the MPAS res-6 and duo C24 files, regrid_land_ic.py at
-                            # 294495454, from restart_1985_d000h00.npz + ERA5 1979-01-01 soil T).
-                            # ADOPTED by the user 2026-10-14: md5 6ecd8c389e2522cf2951ad020a570134
-                            # (data/ is not tracked; copy the file beside the deck's data dir).
+# _v3 (2026-11-15): rebuilt with --vg-air-entry-m -0.02 against main's moved
+# dry floor (re-land of #2497/#2526).
+land_ic: data/lmip_soil_ic/soil_ic_latlon48_era5T_19790101_v3.npz

@@ -512,7 +512,7 @@ def test_production_deck_resolves_to_the_era5_soil_t_ic():
     parser.set_defaults(**keys)
     parser.set_defaults(_config_keys=frozenset(keys))
     cfg = build_config_from_args(parser.parse_args([]))
-    assert cfg.land_ic_path == "data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101_v2.npz"
+    assert cfg.land_ic_path == "data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101_v3.npz"
 
 
 def test_fv3_duo_target_writes_the_duo_column_mesh_not_the_generic_cube(
