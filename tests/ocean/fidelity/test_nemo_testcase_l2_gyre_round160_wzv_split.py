@@ -147,7 +147,7 @@ def test_a_card_that_resolves_the_program_without_a_config_choice_raises():
 
 
 class _Config:
-    """The two fields the stage transport reads off the card's config."""
+    """Minimal false/default stage-transport configuration."""
 
     adaptive_implicit_vertadv = False
     min_water_column_m = 10.0

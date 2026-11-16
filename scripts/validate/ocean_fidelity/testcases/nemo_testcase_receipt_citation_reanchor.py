@@ -13,6 +13,8 @@ REPO = Path(__file__).resolve().parents[4]
 BASE = next((a for a in sys.argv[1:] if not a.startswith("-")), "HEAD~1")
 APPLY = "--apply" in sys.argv
 WORKTREE = "--worktree" in sys.argv
+ONLY = next((a.split("=", 1)[1] for a in sys.argv
+             if a.startswith("--file=")), None)
 
 diff_range = [BASE] if WORKTREE else [BASE, "HEAD"]
 FILES = subprocess.run(
@@ -22,6 +24,8 @@ FILES = subprocess.run(
 FILES = [f for f in FILES if f.endswith(".py")
          and subprocess.run(["git", "-C", str(REPO), "cat-file", "-e",
                              f"{BASE}:{f}"], capture_output=True).returncode == 0]
+if ONLY is not None:
+    FILES = [f for f in FILES if f == ONLY]
 
 def line_map(path):
     old = subprocess.run(["git", "-C", str(REPO), "show", f"{BASE}:{path}"],
@@ -54,11 +58,15 @@ for name, m in MAPS.items():
 
 TARGETS = [REPO / "scripts/validate/ocean_fidelity/testcases"
            / "nemo_testcase_receipt_citation_gate.py"]
-# Scope: the gate's CITATION_MAP and the receipt the gate reads.  Older
-# receipts keep the line numbers that were right when they were written; the
-# gate does not read them (AUDITED_ROUNDS).
-TARGETS += [REPO / "docs/ocean/fidelity/testcases"
-            / "nemo_testcases_l2_gyre_phase3_round8_receipt.md"]
+# Re-anchor the default receipt and the later receipts audited independently
+# by the round-specific citation-gate tests.
+_RECEIPTS = REPO / "docs/ocean/fidelity/testcases"
+TARGETS += [
+    _RECEIPTS / "nemo_testcases_l2_gyre_phase3_round8_receipt.md",
+    _RECEIPTS / "nemo_testcases_l4_orca2_round341_rescore_walk_receipt.md",
+    _RECEIPTS / "nemo_testcases_l4_orca2_round343_speed_benchmark_receipt.md",
+    _RECEIPTS / "nemo_testcases_l4_orca2_round344_fast_literal_receipt.md",
+]
 
 NAMES = "|".join(re.escape(n) for n in MAPS)
 # `<basename>:N` or `<basename>:N-M` or `<basename>:a,b,c`

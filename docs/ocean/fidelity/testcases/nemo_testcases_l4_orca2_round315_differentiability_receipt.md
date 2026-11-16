@@ -213,7 +213,7 @@ Rung 10 (one step) has 1-5 plus:
 
 | # | statement | what | lanes | class |
 |---|---|---|---|---|
-| 6 | `internal_wave_mixing.py:444` | square root of the clipped N^2: infinite slope where N^2 <= 0 | 359,826 (60,973 inf) | residual |
+| 6 | `internal_wave_mixing.py:439` | square root of the clipped N^2: infinite slope where N^2 <= 0 | 359,826 (60,973 inf) | residual |
 | 7 | `tke.py:1082` | square root in the TKE mixing length | 358,441 | residual |
 | 8 | `tke.py:3643-3654` | square root over the dissipation length | 358,441 | residual |
 | 9 | `shortwave_penetration.py:561` | level thickness below the bottom (masked) | 21,883 | generated + residual |

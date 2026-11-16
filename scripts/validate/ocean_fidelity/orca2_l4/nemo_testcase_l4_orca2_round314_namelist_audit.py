@@ -490,7 +490,9 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:namzdf_tke\.ln_mxl0", "map", card=lambda c: c.flat[T + "tke_mxl_choice"] == 3,
            why="choice 3 carries the surface stress anchor", effect=VM))
     a(Rule(r"oce:namzdf_tke\.nn_mxlice", "map", card=lambda c: float(c.flat[T + "nemo_mxlice"]),
-           why="needs SI3's mean ice thickness, which the card does not compute", effect=VM,
+           why="off on the shipped card: it needs SI3's mean ice thickness, which the "
+               "card does not compute (D135); the rung-10 NEMO comparison runs it with "
+               "the recorded hm_i (D154, round 326)", effect=VM,
            cls="b:D135"))
     a(Rule(r"oce:namzdf_tke\.rn_mxlice", "inert", switch=(("oce:namzdf_tke.nn_mxlice", 2.0),),
            why="read only by nn_mxlice = 1; NEMO runs 2"))
@@ -569,7 +571,17 @@ def _rules() -> list[Rule]:
     # ---- namtra_eiv ----
     EDDY = "eddy-induced advection / mixed-layer eddies"
     a(Rule(r"oce:namtra_eiv\.ln_ldfeiv", "map", card=lambda c: c.flat[G + "kappa_GM"] > 0.0,
-           why="card kappa_GM = 0 (declared unmeasured: 'staged_gm_eiv')", effect=EDDY, cls="c"))
+           why="card runs lane B L3's eddy-induced velocity on lane A's L9 route since "
+               "round 325 (DECISION 151); before it kappa_GM = 0", effect=EDDY, cls="c"))
+    a(Rule(r"oce:namtra_eiv\.nn_aei_ijk_t", "map",
+           card=lambda c: 21.0 if c.flat[G + "treguier.enabled"] else 0.0,
+           why="21 = Treguier F(i,j,t), the card's treguier block", effect=EDDY))
+    a(Rule(r"oce:namtra_eiv\.rn_ue", "map", card=C(G + "treguier.aei0"),
+           want=lambda n, c, nemo: 0.5 * n * nemo[("oce", "namtra_eiv", "rn_le")][0],
+           why="card aei0 = 1/2*rn_Ue*rn_Le", effect=EDDY))
+    a(Rule(r"oce:namtra_eiv\.rn_le", "map", card=C(G + "treguier.aei0"),
+           want=lambda n, c, nemo: 0.5 * nemo[("oce", "namtra_eiv", "rn_ue")][0] * n,
+           why="card aei0 = 1/2*rn_Ue*rn_Le", effect=EDDY))
     a(Rule(r"oce:namtra_eiv\.ln_eke_equ", "map", card=lambda c: c.flat[G + "eke"] is not None,
            why="card gm_redi.eke = None", effect=EDDY))
     a(Rule(r"oce:namtra_eiv\..*", "nm", why="follows ln_ldfeiv: the card runs no eddy-induced velocity",

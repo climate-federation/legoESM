@@ -268,6 +268,7 @@ def test_kappa_redi_scale_moves_the_traced_step_state():
         ph = OceanPhysicsConfig()
         cfg = LatLonCGridOceanConfig.from_flat(
             A_h=1.0e3, A_v=1.0e-3, K_h=0.0, K_v=1.0e-4, bottom_drag_r=1.0e-3,
+            lateral_viscosity_mask_levels="surface",
             gm_redi=GMRediConfig(kappa_GM=0.0, kappa_Redi=1.0e3,
                                  slope_scheme="nemo_iso_lap"),
             outer_integrator="forward_euler")._replace(physics=ph._replace(

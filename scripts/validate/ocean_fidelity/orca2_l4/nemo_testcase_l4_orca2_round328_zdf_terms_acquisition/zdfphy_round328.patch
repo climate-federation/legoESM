@@ -1,0 +1,25 @@
+--- zdfphy.F90
++++ zdfphy.F90
+@@ -40,0 +41,3 @@
++   USE zdfphy_round328_writer, ONLY : r328_zp_begin, r328_zp_boundary2, &
++      & r328_zp_finish
++                     ! round-328 WRITE-only term-boundary recorder
+@@ -315,0 +319,10 @@
++         CALL r328_zp_begin(kt,Kbb,Kmm,Krhs, &
++            & avm(ntsi:ntei,ntsj:ntej,2:jpkm1),avt(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & avs(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & en(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & avm_k(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & rn2(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & r3t(ntsi:ntei,ntsj:ntej,Kmm), &
++            & ht_0(ntsi:ntei,ntsj:ntej),mbkt(ntsi:ntei,ntsj:ntej), &
++            & wmask(ntsi:ntei,ntsj:ntej,2:jpkm1))
+@@ -332,0 +346,3 @@
++         CALL r328_zp_boundary2(avm(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & avt(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & avs(ntsi:ntei,ntsj:ntej,2:jpkm1))
+@@ -336,0 +353,3 @@
++         CALL r328_zp_finish(avm(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & avt(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & avs(ntsi:ntei,ntsj:ntej,2:jpkm1))

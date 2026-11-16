@@ -1,0 +1,25 @@
+--- stprk3.F90
++++ stprk3.F90
+@@ -33,6 +33,7 @@
+    USE stprk3_stg     ! RK3 stages
+    USE stp2d          ! external mode solver
+    USE lib_mpp, ONLY : l_perpetual_ts
++   USE round340_state_writer, ONLY: r340_state_frame
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -53,4 +54,5 @@
++   PUBLIC   r340_entry_probe
+    !!----------------------------------------------------------------------
+    !! NEMO/OCE 5.0, NEMO Consortium (2024)
+    !! Software governed by the CeCILL license (see ./LICENSE)
+    !!----------------------------------------------------------------------
+@@ -127,0 +130 @@
++                         CALL r340_state_frame( kstp, 0, Nbb, ts(:,:,:,:,Nbb), uu(:,:,:,Nbb), vv(:,:,:,Nbb), ssh(:,:,Nbb) )
+@@ -315,0 +319,6 @@
++   SUBROUTINE r340_entry_probe(kt,klev,pts,pu,pv,pssh)
++      INTEGER,INTENT(in)::kt,klev
++      REAL(wp),INTENT(in)::pts(:,:,:,:),pu(:,:,:),pv(:,:,:),pssh(:,:)
++      CALL r340_state_frame(kt,0,klev,pts,pu,pv,pssh)
++   END SUBROUTINE r340_entry_probe
++

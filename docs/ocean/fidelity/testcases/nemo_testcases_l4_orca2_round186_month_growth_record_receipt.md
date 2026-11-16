@@ -26,7 +26,7 @@ NEMO.  The ordinary production trajectory completes 95 finite steps.  Its
 step-95 entry live thickness is valid everywhere: minimum
 `0.036497629967637335 m`, zero non-finite values, and zero non-positive finite
 values.  Step 96 then reaches the registered `raw-mesh e3w_int must contain
-only finite values > 0` refusal at `eos.py:747`.
+only finite values > 0` refusal at `eos.py:759`.
 
 An offline replay of the ordinary completed step-95 state localises the first
 invalid boundary to stage 1's one-third geometry, after the split-explicit

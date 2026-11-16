@@ -30,6 +30,10 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round323_l8
     without_selection,
 )
 
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round325_l9_eiv_d122_gate import (  # noqa: E501
+    without_l3,
+)
+
 DECK = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
 
 
@@ -39,7 +43,7 @@ def cards():
         pytest.skip("ORCA2 input deck is unavailable")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     return {
-        "rung10": build_orca2_zps_card(DECK),
+        "rung10": without_l3(build_orca2_zps_card(DECK)),  # round 325: L3 reverted
         "rung0": rung0.build_rung0_card(DECK),
         "omt0": omt0.build_omt0_card(DECK),
         "omt1": omt1.build_omt1_card(DECK),
@@ -84,5 +88,5 @@ def test_l3_with_l8_is_refused(cards) -> None:
 
     r = cards["rung10"].recipe
     cfg = r.model_config._replace(gm_redi=orca2_l3_eiv_gm_redi())
-    with pytest.raises(ValueError, match="certified L2 standard-isoneutral"):
+    with pytest.raises(ValueError, match="the certified L2 selection, or L9"):
         LatLonCGridOceanModel(r.grid, r.z_coord, cfg, iwm_forcing=r.iwm_forcing)

@@ -40,7 +40,8 @@ def require(condition: bool, message: str) -> None:
 
 OMT0_VECTOR_ONLY = (
     "rk3_vector_rhs_nemo_order", "een_vorticity_written_order",
-    "een_nemo_top_f_u_halo", "nemo_zad_written_association",
+    "een_nemo_top_f_u_halo", "een_nemo_relative_vorticity",
+    "nemo_zad_written_association",
     "nemo_stage2_momentum_wzv_half_step",
     "nemo_stage_momentum_wzv_stored_kmm_ratios",
 )

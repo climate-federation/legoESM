@@ -58,6 +58,12 @@ def test_line_numbers_expands_commas_and_ranges():
     assert gate.line_numbers("1,3-5") == [1, 3, 4, 5]
 
 
+def test_c_source_citations_are_scanned():
+    assert gate.extract("`packages/core/legoesm/core/_scalar_libm.c:4-38`") == [
+        "packages/core/legoesm/core/_scalar_libm.c:4-38"
+    ]
+
+
 @pytest.mark.parametrize("spec", ["309-300", ""])
 def test_a_reversed_or_empty_range_raises_instead_of_crashing_later(spec):
     """It used to return ``[]`` and crash in ``check`` with an IndexError.
@@ -254,3 +260,107 @@ def test_default_si3_receipt_discovery_is_complete() -> None:
         if name.startswith("docs/ice/fidelity/si3_r") and name.endswith("_receipt.md")
     }
     assert registered == {path.name for path in SI3_RECEIPTS}
+def test_orca2_round341_receipt_passes_citation_gate_and_plant_fires():
+    """The round-341 receipt must pass the citation gate and fail on a plant."""
+    if not gate.FILES["stp2d.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round341_rescore_walk_receipt.md"
+    )
+    heading = "# ORCA2 round 341 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    planted = gate.run(
+        receipt,
+        heading,
+        plant="ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:177",
+    )
+    assert planted["status"] == "FAIL"
+    assert any(
+        row["citation"]
+        == "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:177"
+        for row in planted["failures"]
+    )
+
+
+def test_orca2_round343_receipt_passes_citation_gate_and_plant_fires():
+    """The round-343 receipt must pass the citation gate and fail on a plant."""
+    if not gate.FILES["stp2d.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round343_speed_benchmark_receipt.md"
+    )
+    heading = "# ORCA2 round 343 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    planted = gate.run(
+        receipt,
+        heading,
+        plant="packages/core/legoesm/core/precision.py:117-125",
+    )
+    assert planted["status"] == "FAIL"
+    assert any(
+        row["citation"] == "packages/core/legoesm/core/precision.py:117-125"
+        for row in planted["failures"]
+    )
+
+
+def test_orca2_round344_receipt_passes_citation_gate_and_plant_fires():
+    """The round-344 receipt must pass the citation gate and fail on a plant."""
+    if not gate.FILES["stp2d.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round344_fast_literal_receipt.md"
+    )
+    heading = "# ORCA2 round 344 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    citation = (
+        "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round343_speed_benchmark.py:1186-1233"
+    )
+    planted = gate.run(receipt, heading, plant=citation)
+    assert planted["status"] == "FAIL"
+    assert any(row["citation"] == citation for row in planted["failures"])
+
+
+def test_orca2_round348_receipt_passes_citation_gate_and_plant_fires():
+    """The round-348 receipt must pass the citation gate and fail on a plant."""
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round348_speed_long_runs_receipt.md"
+    )
+    heading = "# ORCA2 round 348 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    citation = "packages/core/legoesm/core/_scalar_libm.c:4-38"
+    planted = gate.run(receipt, heading, plant=citation)
+    assert planted["status"] == "FAIL"
+    assert any(row["citation"] == citation for row in planted["failures"])

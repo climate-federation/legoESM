@@ -298,10 +298,12 @@ def test_mld_carried_step_entry_n2_execution_is_recipe_derived():
     # already select it, so all three are mandatory measured blast-radius
     # rows in the landing gate.
     assert executing == {
-        "GYRE-zco", "DINO:nemo_dino_kamm", "DINO:nemo_dino_kamm_mlf"}
+        "GYRE-zco", "ORCA2-zps",
+        "DINO:nemo_dino_kamm", "DINO:nemo_dino_kamm_mlf"}
     assert cards["GYRE-zco"]["gm_redi_mld_criterion"] == "n2_integral"
     assert cards["GYRE-zco"]["executes_route"]
-    assert cards["ORCA2-zps"]["gm_redi_slope_n2_evaluation"] == "recompute"
+    assert cards["ORCA2-zps"]["gm_redi_slope_n2_evaluation"] == \
+        "carried_step_entry"
     assert not cards["NEMO-GYRE-recipe"]["executes_route"]
     assert not cards["LOCK_EXCHANGE-zco"]["executes_route"]
     assert not cards["OVERFLOW-zps"]["executes_route"]

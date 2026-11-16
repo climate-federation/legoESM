@@ -436,10 +436,7 @@ def _np_turb_ncar(theta, q, sst, ssq, wind, nb_iter=5):
 
 
 def _np_nemo_l_vap(theta_sst):
-    """NEMO sbc_phy ``L_vap`` verbatim (empirical slope 2370 J/kg/K).  The model
-    uses the Kirchhoff slope c_pw - c_pv = 2372 instead; the parity test below
-    rescales the mirror's latent flux by the known ratio, and
-    ``test_l_vap_deviation_from_nemo_is_bounded`` pins the deviation itself."""
+    """NEMO sbc_phy ``L_vap`` verbatim (empirical slope 2370 J/kg/K)."""
     return (2.501 - 0.00237 * (theta_sst - _RT0)) * 1e6  # const-ok: NEMO L_vap mirror
 
 
@@ -519,12 +516,10 @@ def test_full_flux_path_matches_independent_numpy_mirror():
         slp_Pa=jnp.asarray(slp))
     names = ("tau_x", "tau_y", "sh", "lh", "evap")
     theta_sst = _np_theta_exner(sst, slp)
-    l_ratio = np.asarray(latent_heat_vaporization(jnp.asarray(theta_sst))) / _np_nemo_l_vap(theta_sst)
+    l_ratio = (np.asarray(latent_heat_vaporization(jnp.asarray(theta_sst)))
+               / _np_nemo_l_vap(theta_sst))
     for nm, a, b in zip(names, out, ref):
         if nm == "lh":
-            # The ONE intentional departure from the Fortran: Kirchhoff L_v(T)
-            # in place of NEMO's empirical slope.  Exact parity after rescaling
-            # by that known ratio; evap itself is untouched by the choice of L.
             b = b * l_ratio
         assert np.allclose(np.asarray(a), b, rtol=1e-10, atol=1e-12), nm
 
@@ -612,8 +607,6 @@ def test_seawater_q_sat_salt_factor_and_pressure():
 
 def test_rho_air_moist_reference_and_floor():
     rho_dry = float(rho_air_moist(288.15, 0.0, constants.p_atm_std))
-    # rel 2e-6: the implementation floors q at 1e-6 like NEMO (rctv0*1e-6
-    # ~ 6e-7 relative shift vs the exact dry-air value).
     assert rho_dry == pytest.approx(
         constants.p_atm_std / (constants.R_d * 288.15), rel=2e-6)
     # moisture lightens air
@@ -626,11 +619,10 @@ def test_l_vap_and_cp_air_reference():
     assert float(latent_heat_vaporization(constants.T_freeze)) == (
         pytest.approx(constants.L_v, rel=1e-12))
     assert float(latent_heat_vaporization(constants.T_freeze + 25.0)) == (
-        pytest.approx(constants.L_v - (constants.c_pw - constants.c_pv) * 25.0, rel=1e-12))
-    # Independent pin (codex round 2): a literal, not the constants the
-    # implementation reads, so a drift in c_pw/c_pv cannot pass unnoticed.
+        pytest.approx(constants.L_v - (constants.c_pw - constants.c_pv) * 25.0,
+                      rel=1e-12))
     assert float(latent_heat_vaporization(constants.T_freeze + 25.0)) == (
-        pytest.approx(2441700.0, rel=1e-12))   # const-ok: 2.501e6 - 2372*25 pinned
+        pytest.approx(2441700.0, rel=1e-12))  # const-ok: shared Kirchhoff pin
     assert float(moist_air_cp(0.0)) == pytest.approx(
         constants.c_p_dry_air_nemo, rel=1e-12)
     assert float(moist_air_cp(0.01)) == pytest.approx(
@@ -638,16 +630,13 @@ def test_l_vap_and_cp_air_reference():
         rel=1e-12)
 
 
-def test_l_vap_deviation_from_nemo_is_bounded():
-    """Kirchhoff (2372 J/kg/K) vs NEMO's empirical 2370: identical at 0 degC,
-    within 3e-5 relative over the whole ocean SST range (user decision 2026-09-28,
-    one latent-heat formula for the codebase)."""
+def test_public_l_vap_deviation_from_nemo_is_bounded():
     T = constants.T_freeze + np.array([0.0, 10.0, 25.0, 32.0])
     ours = np.asarray(latent_heat_vaporization(jnp.asarray(T)))
     nemo = _np_nemo_l_vap(T)
     assert ours[0] == pytest.approx(nemo[0], rel=1e-14)
     assert np.all(np.abs(ours / nemo - 1.0) < 3e-5)
-    assert np.all(ours[1:] < nemo[1:])   # Kirchhoff is the slightly steeper slope, so smaller L when warm
+    assert np.all(ours[1:] < nemo[1:])
 
 
 _NO_ICE = {"nn_ice": 0, "ice_if": None}

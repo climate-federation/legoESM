@@ -42,7 +42,7 @@ satisfied: no AT-BAR row leaves the bar and first-over-bar does not move.
 Statement walk: the helper forms `wumask/wvmask`, the live two-factor
 denominator, face-summed `avm`, source-ordered products, coast factors, and
 the `0.25` T-point combine in
-`packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:384-454`.
+`packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:397-470`.
 The step-entry result is frozen and consumed by both the Prandtl calculation
 and TKE production. Given NEMO operands, no arithmetic difference remains:
 the NEMO-velocity replay is bit-exact (`0/17,400` unequal). The sole textual

@@ -194,7 +194,7 @@ operation and reject unapplied replacement anchors at
 `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10272-10309`.
 The gate now also rejects `CITATION_MAP.update` hidden in any helper and counts
 all top-level writes at
-`tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py:183-234`.
+`tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py:189-240`.
 
 ## Preregistered projection and choices
 

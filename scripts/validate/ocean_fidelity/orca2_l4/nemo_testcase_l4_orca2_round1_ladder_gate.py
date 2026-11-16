@@ -15,6 +15,7 @@ stops fail-closed until both MPI slabs exist for the surface and entry records.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import re
@@ -275,13 +276,152 @@ def comparison_card(card):
     velocity), so only this harness selects the G5 path, and the step reads
     the recorded rCdU_ice that ``_surface_forcings`` passes.  The shipped card
     keeps the switch off (DECISION 133).
+
+    DECISION 157: rung 10's initial SSH is lowered by the record's own SI3
+    initial ice (one category, ponds off), read from its ocean.output; the
+    shipped card keeps ORCA2's five-category ponds-on ice.  Other cases carry
+    no SI3 initial ice and keep their SSH.
+
+    DECISION 154: TKE's under-ice surface mixing length, nn_mxlice = 2
+    (zdftke.f90:620-623), reads SI3's hm_i, which the card cannot compute
+    either; ``_surface_forcings`` passes round 326's admitted record.  The
+    shipped card keeps nn_mxlice = 0 (DECISION 135).
     """
     cfg = card.recipe.model_config
     require(not cfg.implicit_ice_ocean_top_drag,
             "the shipped rung-10 card selects the ice-ocean top drag "
             "(DECISION 133 keeps it off)")
-    return card._replace(recipe=card.recipe._replace(
-        model_config=cfg._replace(implicit_ice_ocean_top_drag=True)))
+    mixing = cfg.physics.vertical_mixing
+    require(mixing.tke.nemo_mxlice == 0,
+            "the shipped rung-10 card selects nn_mxlice = 2 "
+            "(DECISION 135 keeps it 0)")
+    physics = cfg.physics._replace(vertical_mixing=mixing._replace(
+        tke=mixing.tke._replace(nemo_mxlice=2)))
+    recipe = card.recipe._replace(model_config=cfg._replace(
+        implicit_ice_ocean_top_drag=True, physics=physics))
+    if card.case == "ORCA2-zps":
+        recipe = recipe._replace(initial_state=record_initial_ice_state(card))
+    return card._replace(recipe=recipe)
+
+
+# The rung-10 record: its own SI3 initial ice (DECISION 157) is read from here.
+RUNG10_RECORD_RUN = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/"
+    "acquisition/orca1ice_surface_entry_every_step_a_np2")
+
+_NAMELIST_ECHO = r"\b{}\s*=\s*(\S+)(?:[ \t]+(\S+))?[ \t]*$"
+
+
+def _echo(text: str, name: str) -> tuple[str, ...]:
+    hits = re.findall(_NAMELIST_ECHO.format(re.escape(name)), text, re.M)
+    require(len(hits) == 1,
+            f"record ocean.output echoes {name} {len(hits)} times, not once")
+    return tuple(v for v in hits[0] if v)
+
+
+def _logical(text: str, name: str) -> bool:
+    (value,) = _echo(text, name)
+    require(value in ("T", "F"), f"record {name} = {value} is not a logical")
+    return value == "T"
+
+
+def _pair(text: str, name: str) -> tuple[float, float]:
+    got = _echo(text, name)
+    require(len(got) == 2, f"record {name} is not a north/south pair: {got}")
+    return float(got[0]), float(got[1])
+
+
+@functools.lru_cache(maxsize=1)
+def record_initial_ice(record_run: Path):
+    """SI3's initial ice exactly as the record's ocean.output resolved it.
+
+    ice_istate_init echoes &namini (iceistate.f90:518-530) and then zeroes the
+    pond fraction/depth when ln_pnd = F (:551-553); ice_istate forms the pond
+    concentration as rn_apd_ini * a_i (:324,335).  Refuses unless the run used
+    the analytic initialisation (ln_iceini = T, nn_iceini_file = 0).
+    """
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import ORCA2InitialIce
+
+    path = record_run / "ocean.output"
+    require(path.is_file(), f"record initial-ice settings unreadable: {path}")
+    text = path.read_text(encoding="utf-8", errors="strict")
+    require(_logical(text, "ln_iceini"), "record ln_iceini is not T")
+    require(_echo(text, "nn_iceini_file") == ("0",),
+            "record does not use the analytic initial ice (nn_iceini_file)")
+    ponds = _logical(text, "ln_pnd")
+    (thres,) = _echo(text, "rn_thres_sst")
+    ati = _pair(text, "rn_ati_ini")
+    apd = _pair(text, "rn_apd_ini") if ponds else (0.0, 0.0)
+    hpd = _pair(text, "rn_hpd_ini") if ponds else (0.0, 0.0)
+    require(not ponds or _pair(text, "rn_hld_ini") == (0.0, 0.0),
+            "record pond lids are not represented by the card's ice mass")
+    ice = ORCA2InitialIce(
+        thres_sst=float(thres),
+        ice_concentration=ati,
+        ice_thickness_m=_pair(text, "rn_hti_ini"),
+        snow_thickness_m=_pair(text, "rn_hts_ini"),
+        pond_concentration=(apd[0] * ati[0], apd[1] * ati[1]),
+        pond_depth_m=hpd,
+    )
+    (jpl,) = _echo(text, "jpl")
+    return ice, int(jpl)
+
+
+def record_initial_ice_state(card):
+    """The card's initial state with SSH lowered by the record's initial ice."""
+    import jax.numpy as jnp
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import orca2_initial_ice_ssh
+
+    ice, _ = record_initial_ice(RUNG10_RECORD_RUN)
+    state = card.recipe.initial_state
+    z = card.recipe.z_coord
+    ssh = orca2_initial_ice_ssh(
+        np.asarray(state.T.data), np.asarray(state.S.data),
+        np.asarray(z.is_active), np.asarray(card.recipe.grid.f_T),
+        np.asarray(z.nemo_e1e2t), ice)
+    return state._replace(eta=state.eta.replace(
+        data=jnp.asarray(ssh, dtype=jnp.float64)))
+
+
+ROUND326_HMI_RUN = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/"
+    "acquisition/orca1ice_tke_hmi_10step_np2")
+
+
+@functools.lru_cache(maxsize=1)
+def _admitted_hm_i_records():
+    """Round 326's hm_i record, admitted by its gate (A2-A4) before any use."""
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round326_hmi_gate as r326,
+    )
+
+    admission = r326.run_gate(ROUND326_HMI_RUN, surface_root=r326.ROUND5_RUN)
+    require(admission["status"] == "PASS_R326_HMI_ADMISSION",
+            f"hm_i record not admitted: {admission['status']}")
+    records = r326.load(ROUND326_HMI_RUN)
+    require({r326.record_name(kt, rank): r["sha256"]
+             for (rank, kt), r in records.items()} == admission["records"],
+            "hm_i records changed after admission")
+    return {key: {f: r326.owned(r["fields"][f]) for f in ("hm_i", "fr_i")}
+            for key, r in records.items()}
+
+
+def recorded_hm_i(kt: int, fr_i: np.ndarray) -> np.ndarray:
+    """hm_i as zdf_tke read it at kt, both ranks assembled as the surface frames.
+
+    The record is written in zdf_tke just before tke_avn at kt, so it is the
+    value NEMO used at kt; its fr_i must equal the frame's bit for bit.
+    """
+    records = _admitted_hm_i_records()
+    require((0, kt) in records, f"no admitted hm_i record for kt {kt}")
+    got = {f: np.concatenate([records[(0, kt)][f], records[(1, kt)][f]], axis=1)
+           for f in ("hm_i", "fr_i")}
+    require(got["fr_i"].shape == fr_i.shape
+            and np.array_equal(got["fr_i"].view(np.uint64),
+                               np.asarray(fr_i, dtype=np.float64).view(np.uint64)),
+            f"kt {kt}: hm_i record's fr_i is not the surface frame's")
+    return got["hm_i"]
 
 
 _FORTRAN_REAL = re.compile(r"^[-0-9.eE+*/ ]+$")
@@ -532,31 +672,33 @@ def assemble_surface_fields(root: Path, kt: int) -> dict[str, np.ndarray]:
 def chlorophyll_at_step(
     deck_root: Path, kt: int, wet: np.ndarray, *, dt_s: float
 ) -> np.ndarray:
-    """Reproduce the first-month monthly ``fld_read`` interpolation."""
+    """Reproduce no-leap cyclic monthly ``fld_read`` interpolation."""
 
     from netCDF4 import Dataset
 
-    require(1 <= kt <= 240, "chlorophyll step must be in 1..240")
+    require(1 <= kt <= 2920, "chlorophyll step must be in 1..2920")
     path = deck_root / "chlorophyll.nc"
     require(path.is_file(), f"missing ORCA2 chlorophyll input: {path}")
     with Dataset(path) as dataset:
         source = np.asarray(dataset.variables["CHLA"][:], dtype=np.float64)
     require(source.shape == (12, 148, 180),
             f"unexpected chlorophyll shape {source.shape}")
-    # The admitted run resolves record centres at -15.5, +15.5 and +45.0 days.
-    # NEMO forms the midpoint clock and weights at fldread.f90:243-246.  The
-    # January centre is crossed between kt=124 and kt=125.
+    # chlorophyll.nc is the admitted 12-month climatology.  NEMO forms the
+    # midpoint clock and weights at fldread.f90:243-246, using no-leap month
+    # centres and cyclic December/January neighbours.
     dt_i = int(dt_s)
     require(float(dt_i) == float(dt_s) and dt_i % 2 == 0,
             f"chlorophyll clock needs an even integer dt, got {dt_s}")
     midpoint_s = (2 * kt - 1) * dt_i // 2
-    centres_s = (-1339200, 1339200, 3888000)
-    if midpoint_s < centres_s[1]:
-        before_index, after_index = 11, 0
-        before_s, after_s = centres_s[:2]
-    else:
-        before_index, after_index = 0, 1
-        before_s, after_s = centres_s[1:]
+    month_days = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+    centres_s = ((np.cumsum(month_days) - month_days / 2) * 86400).astype(np.int64)
+    extended_s = np.concatenate(([centres_s[-1] - 365 * 86400], centres_s,
+                                 [centres_s[0] + 365 * 86400]))
+    after_ext = int(np.searchsorted(extended_s, midpoint_s, side="right"))
+    before_ext = after_ext - 1
+    before_s, after_s = int(extended_s[before_ext]), int(extended_s[after_ext])
+    before_index = (before_ext - 1) % 12
+    after_index = (after_ext - 1) % 12
     after = np.float64(midpoint_s - before_s) / np.float64(after_s - before_s)
     before = np.float64(1.0) - after
     result = before * source[before_index] + after * source[after_index]
@@ -845,6 +987,11 @@ def _surface_forcings(
         # SI3's recorded rCdU_ice; rCdU_top = rCdU_ice with no cavity
         # (zdfdrg.f90:187).  Read only by implicit_ice_ocean_top_drag.
         ice_ocean_top_drag_rCdu=jnp.asarray(fields["rCdU_ice"]),
+        # SI3's hm_i as zdf_tke read it at kt; read only by nn_mxlice = 2.
+        ice_mean_thickness_hm_i=(
+            jnp.asarray(recorded_hm_i(kt, fields["fr_i"]))
+            if card.recipe.model_config.physics.vertical_mixing.tke.nemo_mxlice == 2
+            else None),
     )
     if card.recipe.model_config.rk3_stage3_geothermal_nemo_written:
         # tra_bbc reads sn_qgh once (nn_geoflx = 2, yearly climatology).

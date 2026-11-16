@@ -46,26 +46,37 @@ def test_top_drag_without_record_refuses_on_every_run_path(vortex, path):
         PATHS[path](model, card.recipe.initial_state, card.dt_s, sf)
 
 
-def test_comparison_card_selects_only_the_top_drag(vortex):
+@pytest.fixture(scope="module")
+def gyre():
+    # comparison_card also selects TKE nn_mxlice = 2 (round 326), so it needs a
+    # card with physics; VORTEX has none.
+    return recipe.build_nemo_testcase_card("GYRE-zco")
+
+
+def test_comparison_card_selects_only_the_top_drag_and_mxlice(gyre):
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
     )
-    card = vortex[0]
+    card = gyre
     cfg = card.recipe.model_config
     assert not cfg.implicit_ice_ocean_top_drag
     got = ladder.comparison_card(card)
-    assert got.recipe.model_config == cfg._replace(implicit_ice_ocean_top_drag=True)
+    mixing = cfg.physics.vertical_mixing
+    assert got.recipe.model_config == cfg._replace(
+        implicit_ice_ocean_top_drag=True,
+        physics=cfg.physics._replace(vertical_mixing=mixing._replace(
+            tke=mixing.tke._replace(nemo_mxlice=2))))
     assert got._replace(recipe=card.recipe) == card
     with pytest.raises(ladder.GateError, match="DECISION 133"):
         ladder.comparison_card(got)
 
 
-def test_round324_arms_move_only_rung10_drag(vortex):
+def test_round324_arms_move_only_rung10_drag(gyre):
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
         nemo_testcase_l4_orca2_round324_top_drag_d122_gate as gate,
     )
-    card = vortex[0]
+    card = gyre
     assert gate.selected_card(card, arm="drag", rung="rung10") == \
         ladder.comparison_card(card)
     for rung in gate.RUNGS:
