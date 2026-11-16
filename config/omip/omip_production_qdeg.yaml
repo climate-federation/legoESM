@@ -12,7 +12,7 @@ dt: 300.0
 days: 10950.0                 # 30 years: 1-10 spin-up, 11-30 analysis
 checkpoint_days: 30.0
 precision: fp64
-output: results/omip_production_qdeg_L60_v2
+output: results/omip_production_qdeg_L60_v3
 
 # --- bathymetry: ETOPO 0.25 deg, no equatorial smoothing (removed on main)
 bathymetry: /work/bb1596/b384036/diffESM/data/bathy/bathy_025deg_etopo_sulawesi.nc   # neck of Sulawesi closed
@@ -38,7 +38,7 @@ physics: full
 
 # --- lateral mixing (eddy-permitting)
 A_h: 5.0e4                    # 2e4 lets a jet grow in the Nordic Seas (74N) on the 4-GPU path; 5e4 is stable
-K_h: 250.0
+K_h: 50.0                     # 250 leaks heat across the sloping thermocline without Redi (t180_kh50 test)
 B_h_barotropic: 4.0e11        # 1e14 x (0.25)^4: same stability margin as 1 deg
 no_gm_redi: true
 
