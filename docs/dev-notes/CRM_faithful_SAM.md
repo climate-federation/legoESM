@@ -190,7 +190,7 @@ Pr·N²))`, Δ=(dx·dy·dz)^⅓, moist N² (Durran-Klemp), Pr=1, Cs=0.19, no wal
   codex iter-60: SAM `tke_full.f90:31` Pr=1 ⇒ tkh=tk=K_m (legoESM Pr=1 matches); positivity test
   (spike stays ≥0 within the diffusion CFL); all-slots matches the advection's all-slots treatment.
 - **SGS-VERT (#81, iter-64) ✅ — SGS now fully 3D like SAM:** explicit vertical flux `∂_z(K∂_zφ)` via
-  `_vertical_K_diffusion_full` (u/v/θ'/tracers, full-level, face-co-located K) + `_vertical_K_diffusion_w`
+  `vertical_K_diffusion_full` (u/v/θ'/tracers, full-level, face-co-located K) + `vertical_K_diffusion_w`
   (half-level w); flux-form on the stretched grid, NO-FLUX interior BC (surface injected separately, SAM
   `diffuse_scalar`). Gated `sgs_vertical_diffusion` (default False; RCE/GATE/LBA ON). Explicit Smag-K, no tridiag.
   **MASS-WEIGHTED** `(1/ρ)∂_z(ρ_w K∂_zφ)` (scalars/u/v), `(1/ρ_w)∂_z(ρ K∂_z w)` for w — codex bj0cx7grd

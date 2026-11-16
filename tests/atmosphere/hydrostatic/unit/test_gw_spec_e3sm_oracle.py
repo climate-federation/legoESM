@@ -82,7 +82,8 @@ def fx():
     return z, meta, t
 
 
-_HARD = dict(softmin_sharpness=1.0e12, crit_level_sharpness=1.0e12, crit_level_floor=0.0)
+_HARD = dict(softmin_sharpness=1.0e12, crit_level_sharpness=1.0e12, crit_level_floor=0.0,
+             umcfac_abs_width=0.0, umcfac_sign_width=0.0, taumin_ramp_width=0.0)
 
 
 def _config(ours, hard=True):
@@ -145,54 +146,67 @@ def test_matches_e3sm_oracle(fx, arm, ds):
 # Per-(arm, dataset) gap of the RULE 5 smooth default (E3SMCAMConfig():
 # softmin_sharpness 50, crit_level_sharpness 100, crit_level_floor 0) vs the
 # oracle: du/dv per column (metric of _rel_err, per column), dT as the field
-# max-norm over flat columns.  Measured 2026-11-12 (#2241); a change to a smooth
+# max-norm over flat columns.  Measured 2026-11-12, re-measured 2026-11-16 when the
+# umcfac |c - u| (0.01 m/s), sign (1e-3 m/s) and taumin (1e-10 Pa) widths
+# landed (#2241: only background_dt1800 moved beyond 1e-5 relative, max du
+# 2.65e-3 -> 7.88e-3, dT field 1.02e-3 -> 6.74e-3; flat-column dT in three
+# other L36 arms moved < 5e-6 relative); a change to a smooth
 # form or a default width re-measures these (CLAUDE.md RULE 5).
 _DEFAULT_GAP = {
     'background/l36': {
-        'du': [0.002108721345086995, 0.0010616902333161087, 0.002646053370863181, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071351864223, 0.0004652215882224963],
-        'dv': [0.0021087213450869256, 0.0010616902333162653, 0.002646053370863179, 0.002210858303638304, 0.0, 0.0, 0.0012456071351862148, 0.0],
+        'du': [0.002108721345086995, 0.0010616902333161087, 0.002646053370863181, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071295903564, 0.0004652215882224963],
+        'dv': [0.0021087213450869256, 0.0010616902333162653, 0.002646053370863179, 0.002210858303638304, 0.0, 0.0, 0.00124560712959019, 0.0],
         'dT_field': 0.001020719281732452,
-        'dT_cols_flat': [0.00390124423025145, 0.0008934157396024475, 0.0029192506608293665, 0.00902431375659232, 0.0008366744401474168, 0.003367879032994043, 0.0004088565224634661]},
+        'dT_cols_flat': [0.00390124423025145, 0.0008934157396024475, 0.0029192506608293665, 0.00902431375659232, 0.0008366744401474168, 0.0033678790304886926, 0.0004088565224634661],
+    },
     'background/l32': {
         'du': [0.0017106779342957862, 0.001092933815946785, 0.002448257744577537],
         'dv': [0.001710677934295963, 0.0010929338159467632, 0.002448257744577592],
         'dT_field': 0.001807693020653454,
-        'dT_cols_flat': [0.004082420000327104, 0.0005339347503535069, 0.0015094902321471752]},
+        'dT_cols_flat': [0.004082420000327104, 0.0005339347503535069, 0.0015094902321471752],
+    },
     'background_dt1800/l36': {
-        'du': [0.002108721345086995, 0.0010616902333161087, 0.002646053370863181, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071351864223, 0.0004652215882224963],
-        'dv': [0.0021087213450869256, 0.0010616902333162653, 0.002646053370863179, 0.002210858303638304, 0.0, 0.0, 0.0012456071351862148, 0.0],
-        'dT_field': 0.0010206824377921625,
-        'dT_cols_flat': [0.0039012106087277254, 0.0008934106656589562, 0.002919245822167362, 0.009024134388708792, 0.0008366734677625923, 0.0033678871846648767, 0.0004088574633997424]},
+        'du': [0.002108721345086995, 0.0010616902333161087, 0.002646053370863181, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071295903564, 0.007878700328799434],
+        'dv': [0.0021087213450869256, 0.0010616902333162653, 0.002646053370863179, 0.002210858303638304, 0.0, 0.0, 0.00124560712959019, 0.0],
+        'dT_field': 0.006739966027246468,
+        'dT_cols_flat': [0.0039012106087277254, 0.0008934106656589562, 0.002919245822167362, 0.009024134388708792, 0.0008366734677625923, 0.003367887182159502, 0.006739966027246468],
+    },
     'frontal_taper/l36': {
         'du': [0.0, 0.0, 0.0019715720332921342, 0.002044083485452372, 0.0, 0.0, 0.002221890296605758, 0.0],
         'dv': [0.0, 0.0, 0.001971572033292119, 0.0020440834854523883, 0.0, 0.0, 0.0022218902966057775, 0.0],
         'dT_field': 0.004737198616929807,
-        'dT_cols_flat': [0.0, 0.0, 0.0018477827086538204, 0.0, 0.0, 0.004737198616929807, 0.0]},
+        'dT_cols_flat': [0.0, 0.0, 0.0018477747024415305, 0.0, 0.0, 0.004737198616929807, 0.0],
+    },
     'frontal_taper/l32': {
         'du': [0.0030392863618121557, 0.0, 0.0034188551369078216],
         'dv': [0.0030392863618120022, 0.0, 0.0034188551369078706],
         'dT_field': 0.004674693184129954,
-        'dT_cols_flat': [0.006114392768353289, 0.0, 0.004650292706994736]},
+        'dT_cols_flat': [0.006114392768353289, 0.0, 0.004650292706994736],
+    },
     'convective_frontal/l36': {
         'du': [2.809628679758638e-06, 0.0, 0.0019710884561676507, 0.0020440834854522794, 0.0, 2.3725363871957644e-05, 0.0021661630212110347, 0.0014267022035004402],
         'dv': [2.809628679640786e-06, 0.0, 0.00197074588113237, 0.0020440834854522556, 0.0, 0.0, 0.0021698027258529816, 0.0],
         'dT_field': 0.0012500463992782592,
-        'dT_cols_flat': [1.2165928674851645e-05, 0.0, 0.001847764722398273, 0.0, 8.291689284458155e-06, 0.0046367786014093375, 0.0012500463992782592]},
+        'dT_cols_flat': [1.2165928674851645e-05, 0.0, 0.0018477619841124214, 0.0, 8.291689284458155e-06, 0.0046367786014093375, 0.0012500463992782592],
+    },
     'convective_frontal/l32': {
         'du': [0.0029823098011374075, 5.5079502542875605e-05, 0.0034188551369078723],
         'dv': [0.0029390075250634237, 5.5079502542873654e-05, 0.0034188551369078637],
         'dT_field': 0.004650291917694309,
-        'dT_cols_flat': [0.006135465458491181, 5.00011759699771e-05, 0.004650291917694309]},
+        'dT_cols_flat': [0.006135465458491181, 5.00011759699771e-05, 0.004650291917694309],
+    },
     'oro_frontal_convective/l36': {
-        'du': [5.542798660332171e-05, 1.8518663263341885e-08, 0.0016460885766577974, 0.0003877750536236757, 0.0, 0.03623998594747442, 0.02095917721888361, 0.0014267022035004402],
-        'dv': [5.5330865504131554e-05, 1.8518663530970958e-08, 0.0017314786230068285, 0.00014249684694425498, 0.0, 0.0, 0.020913701834633598, 0.0],
+        'du': [5.542798660332171e-05, 1.8518663263341885e-08, 0.0016460885763447063, 0.0003877750536236757, 0.0, 0.03623998594747442, 0.02095917721888361, 0.0014267022035004402],
+        'dv': [5.5330865504131554e-05, 1.8518663530970958e-08, 0.0017314786228733118, 0.00014249684694425498, 0.0, 0.0, 0.020913701834633598, 0.0],
         'dT_field': 0.021182235750415664,
-        'dT_cols_flat': [6.0458310692180346e-05, 1.8506302522747416e-08, 7.625518317127693e-05, 0.0, 0.010386135524647436, 0.021182235750415664, 0.0009508738097634513]},
+        'dT_cols_flat': [6.0458310692180346e-05, 1.8506302522747416e-08, 7.625469381429111e-05, 0.0, 0.010386135606333273, 0.021182235750415664, 0.0009508738097634513],
+    },
     'oro_frontal_convective/l32': {
         'du': [0.008069593561070199, 3.4012083172282785e-06, 0.000606868850477048],
         'dv': [0.00865468257805327, 6.215826410991961e-07, 0.000648888639421392],
         'dT_field': 0.003038395565792255,
-        'dT_cols_flat': [0.00999856954991142, 2.693399308041848e-05, 0.0003929395193558013]},
+        'dT_cols_flat': [0.00999856954991142, 2.693399308041848e-05, 0.0003929395193558013],
+    },
 }
 
 
@@ -222,15 +236,25 @@ def test_default_smoothing_gap_per_case(fx, arm, ds):
 # the HARD-limit tendency of that column has a derivative jump, found
 # 2026-11-12 by scanning s in [0.8, 1.2] (step 5e-4) and bisecting; check_grads
 # fails there at the hard limit and passes at the default (#2241).
-_KINKS = (("convective_frontal/l36", 3, 0.8178145073179883),
-          ("frontal_taper/l36", 3, 0.8178145073179883),
-          ("oro_frontal_convective/l36", 0, 0.9330450443017286),
-          ("oro_frontal_convective/l36", 3, 0.8178145073179883))
+_KINKS = (("convective_frontal/l36", 3, 0.8178145073179883, 1e-5),
+          ("frontal_taper/l36", 3, 0.8178145073179883, 1e-5),
+          ("oro_frontal_convective/l36", 0, 0.9330450443017286, 1e-5),
+          ("oro_frontal_convective/l36", 3, 0.8178145073179883, 1e-5),
+          # #2241 (2026-11-16, scan of d f/ds at the default +-5e-5 around each
+          # earlier candidate, patched variants): the |c - u| of the umcfac
+          # limit (43 of 66 candidates; this one was the unattributed kink) and
+          # the taumin zeroing (3 of 66).  Each is removed by its width field.
+          # eps 1e-6 at the umcfac cases: the smooth sign is 1e-3 m/s wide,
+          # finer than u*1e-5 resolves (f'' measured continuous; vote 3-0).
+          ("background/l36", 0, 0.8228612252375684, 1e-6),      # umcfac |c - u|
+          ("background/l32", 1, 0.8298968, 1e-6),               # umcfac |c - u|, sign
+          ("background/l36", 3, 0.8242109368577084, 1e-5))      # taumin zeroing
 
 
-@pytest.mark.parametrize("case,col,s_star", _KINKS)
-def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star):
-    """RULE 5 gradient test at the default; reverse mode, eps 1e-5 (Lindzen)."""
+@pytest.mark.parametrize("case,col,s_star,eps", _KINKS)
+def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps):
+    """RULE 5 gradient test at the default; reverse mode, eps 1e-5 (Lindzen)
+    unless the switch's width needs a finer step."""
     z, meta, table = fx
     arm, ds = case.split("/")
     m = meta["arms"][arm]
@@ -245,10 +269,21 @@ def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star):
 
     f = make(_config(m["ours"], hard=False))
     s0 = jnp.asarray(s_star)
-    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-5)
+    check_grads(f, (s0,), order=2, modes=("rev",), eps=eps)
     assert float(jax.grad(f)(s0)) != 0.0
     with pytest.raises(AssertionError):          # the hard limit has the kink
-        check_grads(make(_config(m["ours"])), (s0,), order=2, modes=("rev",), eps=1e-5)
+        check_grads(make(_config(m["ours"])), (s0,), order=2, modes=("rev",), eps=eps)
+
+
+@pytest.mark.parametrize("field", ["umcfac_abs_width", "umcfac_sign_width", "taumin_ramp_width"])
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), 1.0e-30])
+def test_smoothing_widths_validated(fx, field, bad):
+    """0 (E3SM) or a usable width; a negative/NaN/sub-fp32 width raises (#2241)."""
+    z, meta, table = fx
+    m = meta["arms"]["background"]
+    cfg = _config(m["ours"], hard=False)._replace(**{field: bad})
+    with pytest.raises(ValueError, match=field):
+        _run(_inputs(z, "l36"), cfg, m["dt"], None)
 
 
 @pytest.mark.xfail(strict=True, reason="kernel dse omits phis (asked): 2 ulp(dse)/dt")

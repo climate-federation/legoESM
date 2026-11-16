@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import json
+from pathlib import Path
 
 from legoesm.core.fv3_native_eta import (
     interface_pressure,
@@ -120,3 +122,64 @@ def test_ak_and_bk_shape_mismatch_is_refused():
     ak, bk, _, _ = set_eta_analytic(5)
     with pytest.raises(ValueError, match="must match"):
         interface_pressure(ak, bk[:-1], 1.0e5)
+
+
+def test_fv3_l40_matches_source_data_and_closes_column_mass():
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, duo_eta_table)
+    from legoesm.core.fv3_native_eta import FV3_L40_KS
+    source = json.loads((Path(__file__).parent / "fixtures/fv3_l40_oracle.json").read_text())
+    ak, bk, ptop = duo_eta_table("fv3_l40", 40)
+    # Complete coefficients, not a summary norm; tiny ak[-2] must survive.
+    assert ak.dtype == bk.dtype == np.float64
+    assert ak.tobytes() == np.asarray(source["ak"], dtype=np.float64).tobytes()
+    assert bk.tobytes() == np.asarray(source["bk"], dtype=np.float64).tobytes()
+    assert ptop == source["ptop"] and FV3_L40_KS == source["ks"]
+    assert ak.shape == bk.shape == (41,)
+    assert (bk[:FV3_L40_KS + 1] == 0).all()
+    ps = np.array([9.0e4, 1.0e5, 1.1e5, 1.05e5])
+    pe = interface_pressure(ak, bk, ps)
+    dp = layer_thickness(ak, bk, ps)
+    assert (dp > 0).all()
+    np.testing.assert_array_equal(pe[:, -1], ps)
+    np.testing.assert_array_equal(dp.sum(axis=-1), ps - ptop)
+    assert FV3DuoConfig().eta == "analytic" and FV3DuoConfig().km == 5
+    for km in (5, 10, 32, 39, 41):
+        with pytest.raises(ValueError, match="40-level"):
+            duo_eta_table("fv3_l40", km)
+    with pytest.raises(ValueError, match="expected"):
+        duo_eta_table("unknown", 40)
+
+
+def test_l40_probe_reads_unmodified_source(tmp_path):
+    """Direct test of the generator, independent of stored production data."""
+    import importlib.util
+    import os
+    import shutil
+    root = Path(__file__).resolve().parents[2]
+    source = Path("/scratch/b/b381103/fv3_zenodo_8327578/src/atmos_cubed_sphere-symmetryclean")
+    archive = source.parents[1] / "code.zip"
+    if not (os.environ.get("SLURM_JOB_ID") and source.is_dir() and archive.is_file()
+            and shutil.which("gfortran")):
+        pytest.skip("source regeneration requires the pinned archive on a SLURM node")
+    spec = importlib.util.spec_from_file_location(
+        "gen_eta_l40_oracle", root / "scripts/validate/fv3_native/gen_eta_l40_oracle.py")
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    actual = probe.generate(source, archive)
+    recorded = json.loads((Path(__file__).parent / "fixtures/fv3_l40_oracle.json").read_text())
+    for key in ("ak", "bk", "ptop", "ks", "archive_md5", "source_sha256"):
+        assert actual[key] == recorded[key], key
+    bad_archive = tmp_path / "bad.zip"
+    bad_archive.write_bytes(b"planted non-archive checksum violation")
+    with pytest.raises(ValueError, match="archive md5 mismatch"):
+        probe.generate(source, bad_archive)
+    altered = tmp_path / "source"
+    for name in recorded["source_sha256"]:
+        dest = altered / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / name, dest)
+    with (altered / "tools/fv_eta.F90").open("a") as stream:
+        stream.write("\n! planted source provenance violation\n")
+    with pytest.raises(ValueError, match="source differs from pinned archive"):
+        probe.generate(altered, source.parents[1] / "code.zip")

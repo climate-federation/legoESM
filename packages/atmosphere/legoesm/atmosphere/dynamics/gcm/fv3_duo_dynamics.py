@@ -17,8 +17,8 @@ enforced loudly here and at the component factory rather than assumed:
   configured storage dtype at the boundary. fp32/mixed storage is
   accepted by the config but the RUNTIME is not yet wired (refused at
   construction);
-* the vertical coordinate is ``set_eta_analytic``'s ``km in {5, 10}``
-  branch (fv_eta.F90:334-344) — any other km raises there;
+* vertical coordinates are selected by ``eta``: analytic L5/L10,
+  CAM6 L32, or source-default FV3 L40; unsupported table/km pairs raise;
 * ``kord_tm`` must be NEGATIVE: a positive value selects a different
   remap operator (fv_mapz.F90:495-501) that is not ported.
 
@@ -78,8 +78,9 @@ class FV3DuoConfig(NamedTuple):
 
     Defaults are the pinned oracle deck's resolved namelist
     (``full_step_oracle_parity.py``: k_split=1, n_split=8,
-    kord_mt=9, kord_tm=-9, kord_tr=9).  ``km`` must be in {5, 10}
-    (fv_eta.F90:334-344 — the only analytic ``set_eta`` branch).
+    kord_mt=9, kord_tm=-9, kord_tr=9). ``km`` must match ``eta``
+    (analytic: 5/10; cam6_l32: 32; fv3_l40: 40); a mismatch raises in
+    :func:`duo_eta_table`, not at construction.
     """
     km: int = 5
     k_split: int = 1
@@ -116,6 +117,8 @@ class FV3DuoConfig(NamedTuple):
     #: 15 pure-pressure interfaces), km must be 32.  The step reads
     #: ak/bk/ptop generically (no ks); the L32 deck is NOT
     #: Fortran-certified -- rung 4 gates it (rest states, DCMIP16 km=32).
+    #: "fv3_l40": source-default FV3 L40 (fv_eta.F90:413-417,759-760);
+    #: ptop=5000 Pa, standard var_hi/UKMO hybrid, km must be 40.
     eta: str = "analytic"
     #: fv_mapz.F90:336/:1840 ``fill``: FV3's column borrow (``fillz``) on
     #: every tracer after the vertical remap -- the dycore-internal
@@ -187,12 +190,22 @@ def duo_sw_deck(*, nord: int, d4_bg: float, sponge_del2_top_layers: int = 0,
 def duo_eta_table(eta: str, km: int):
     """``(ak [Pa], bk, ptop [Pa])`` for :class:`FV3DuoConfig.eta`.
 
+    ``"fv3_l40"``: exact default FV3 km40 data, see
+    ``legoesm.core.fv3_native_eta`` (Zenodo 8327578, archive md5
+    25b2f54c0a807275e1c4edf4aa41a197; tools/fv_eta.F90:413-417,759-760).
     ``"analytic"``: :func:`set_eta_analytic` (km in {5, 10}, raises
     otherwise).  ``"cam6_l32"``: the CAM6 L32 interface table, km == 32;
     the top 15 interfaces are pure pressure (bk exactly 0.0, so
     ``pe = ak + bk*ps`` is ps-independent there without any ``ks``
     branch -- gated by a test that perturbs ps).
     """
+    if eta == "fv3_l40":
+        from legoesm.core.fv3_native_eta import FV3_L40_AK, FV3_L40_BK
+        if km != 40:
+            raise ValueError(f"FV3DuoConfig(eta='fv3_l40') is the 40-level table; got km={km}")
+        ak = np.asarray(FV3_L40_AK, dtype=np.float64)
+        bk = np.asarray(FV3_L40_BK, dtype=np.float64)
+        return ak, bk, float(ak[0])
     if eta == "analytic":
         ak, bk, ptop, _ks = set_eta_analytic(km)
         return np.asarray(ak, dtype=np.float64), np.asarray(bk, dtype=np.float64), float(ptop)
@@ -207,7 +220,7 @@ def duo_eta_table(eta: str, km: int):
         bk = np.asarray(CAM6_L32_HYBI, dtype=np.float64)
         return ak, bk, float(ak[0])
     raise ValueError(
-        f"FV3DuoConfig.eta={eta!r}: expected 'analytic' or 'cam6_l32'")
+        f"FV3DuoConfig.eta={eta!r}: expected 'analytic', 'cam6_l32' or 'fv3_l40'")
 
 
 def lon_modulated_tracer(sphum, agrid_lon, n: int, ng: int, iq: int):
