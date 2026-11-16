@@ -320,7 +320,9 @@ def smooth_round(x: jax.Array, width: float) -> jax.Array:
     """Nearest-integer rounding as a C2 staircase (RULE 5): equal to ``n``
     except where ``frac(x)`` is within ``width/2`` of 1/2, where it rises to
     ``n + 1`` by ``smoothstep_quintic``.  ``width`` in (0, 1].  ``width = 0`` is
-    Fortran ``NINT`` (half away from zero), exactly."""
+    Fortran ``NINT`` (half away from zero), exactly; as ``width -> 0`` the
+    staircase tends to ``floor(x + 1/2)``, which differs from ``NINT`` only at
+    exact negative half-integers."""
     if width == 0:
         return jnp.sign(x) * jnp.floor(jnp.abs(x) + 0.5)
     n = jnp.floor(x)

@@ -724,10 +724,11 @@ def gw_beres_src(
     # RULE 5 (#2545): width of the smooth integer staircases that replace
     # E3SM's NINT/INT of traced winds and heating depth (0 = exact E3SM).
     rw = beres.index_round_width
-    if not (rw == 0 or 0.0 < rw <= 1.0):
+    validate_smoothing_width("index_round_width", rw)      # 0, or fp32-safe
+    if rw > 1.0:
         raise ValueError(
-            f"E3SMBeresConfig.index_round_width must be 0 (E3SM NINT/INT) or "
-            f"in (0, 1]; got {rw!r}.")
+            f"index_round_width must be 0 (E3SM NINT/INT) or in (0, 1] index "
+            f"units; got {rw!r}.")
 
     # --- Source-wind direction from the 700 hPa winds (E3SM uses u(:,k700)).
     u700 = jnp.take(u, k700_i, axis=1)                     # (ncol,)
@@ -836,16 +837,34 @@ def gw_beres_src(
     uh = jnp.clip(uh, -float(maxuh), float(maxuh))
 
     # Speeds for critical-level filtering (min/max projected wind in range).
-    umin = jnp.where(
-        in_range, ubm, jnp.asarray(pgwv * dc, dtype)
-    )
-    umin = jnp.where(found[:, None], umin, jnp.asarray(pgwv * dc, dtype))
-    umin = jnp.min(umin, axis=1)
-    umax = jnp.where(
-        in_range, ubm, jnp.asarray(-pgwv * dc, dtype)
-    )
-    umax = jnp.where(found[:, None], umax, jnp.asarray(-pgwv * dc, dtype))
-    umax = jnp.max(umax, axis=1)
+    ks = beres.crit_minmax_sharpness
+    if math.isinf(ks):
+        umin = jnp.where(
+            in_range, ubm, jnp.asarray(pgwv * dc, dtype)
+        )
+        umin = jnp.where(found[:, None], umin, jnp.asarray(pgwv * dc, dtype))
+        umin = jnp.min(umin, axis=1)
+        umax = jnp.where(
+            in_range, ubm, jnp.asarray(-pgwv * dc, dtype)
+        )
+        umax = jnp.where(found[:, None], umax, jnp.asarray(-pgwv * dc, dtype))
+        umax = jnp.max(umax, axis=1)
+    else:
+        # RULE 5 (#2545, vote 3-0): masked log-sum-exp soft min/max over the
+        # heating-range levels plus E3SM's sentinel +-pgwv*dc (the value of
+        # an empty range and of the masked levels), C-infinity in the winds;
+        # overestimates |extremum| by <= ln(n)/ks.  inf = E3SM's min/max.
+        if not ks > 0.0:
+            raise ValueError(f"crit_minmax_sharpness must be > 0 (inf = E3SM); got {ks!r}.")
+        lev = (in_range & found[:, None])
+        keep = jnp.concatenate([lev, jnp.ones((ncol, 1), dtype=bool)], axis=1)
+
+        def soft_max(x, sentinel):
+            x = jnp.concatenate([x, jnp.full((ncol, 1), sentinel, dtype)], axis=1)
+            return jax.nn.logsumexp(ks * x, axis=1, where=keep) / ks
+
+        umin = -soft_max(-ubm, -pgwv * dc)
+        umax = soft_max(ubm, -pgwv * dc)
 
     # --- Table lookup.  E3SM: tau0 = mfcc(NINT(hdepth), NINT(uh), :).
     # Round-half-away-from-zero like Fortran NINT.  NOTE (codex beres-1 #2):

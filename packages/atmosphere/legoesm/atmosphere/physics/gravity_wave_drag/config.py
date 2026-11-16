@@ -42,6 +42,7 @@ __param_spec__ = {
             "hdepth_min_km": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "mfcc_uh_slope": "stand-in-table-only surrogate slope (default 0 = uh-independent); the real source spectrum is the offline mfcc table, not a trained scalar",
             "storm_speed_min": "ground-relative storm-speed floor used only to truncate the integer Doppler cell-speed CS; a discretisation threshold, not a continuum closure",
+            "crit_minmax_sharpness": "numerics: sharpness [s/m] of the soft min/max of the heating-range wind (critical-level bin bounds; RULE 5, #2545; inf = E3SM), value voted by Claude+GLM+codex",
             "index_round_width": "numerics: width (index units) of the smooth NINT/INT staircases of the table lookup, Doppler shift and critical-level bins (RULE 5, #2545; 0 = E3SM), value voted by Claude+GLM+codex",
         },
         "params": {
@@ -759,6 +760,14 @@ class E3SMBeresConfig(NamedTuple):
         ``NINT(Umax/dc)``; lookups and shifts blend the two neighbouring
         integers linearly.  Each was a jump in the launched spectrum (a wind
         scan found 10 kinks there, #2545).  In (0, 1]; ``0.0`` = E3SM exactly.
+        At a width > 0 the ``hd_index_rule`` choice is not distinguished (the
+        two rules differ only at exact half-km ties; vote 3-0).
+    crit_minmax_sharpness : float
+        RULE 5 (#2545) sharpness [s/m] of the log-sum-exp soft min/max of the
+        projected wind over the heating range (E3SM ``Umin``/``Umax``, the
+        critical-level bin bounds); default 100 (vote 3-0), overestimating
+        the extremum by at most ``ln(n_levels)/100`` m/s.  ``math.inf`` =
+        E3SM's ``min``/``max`` exactly.
     """
     cf: float = 20.0
     hdepth_scaling_factor: float = 1.0
@@ -781,6 +790,7 @@ class E3SMBeresConfig(NamedTuple):
     source_level_rule: str = "interface_below_p"
     hd_index_rule: str = "nint"
     index_round_width: float = 0.1
+    crit_minmax_sharpness: float = 100.0
 
 
 class E3SMCAMConfig(NamedTuple):

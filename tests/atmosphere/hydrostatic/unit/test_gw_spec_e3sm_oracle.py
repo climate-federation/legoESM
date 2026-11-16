@@ -93,7 +93,8 @@ def _config(ours, hard=True):
     cfg = E3SMCAMConfig()._replace(frontal=fr, beres=br, **o)
     if not hard:
         return cfg
-    return cfg._replace(beres=br._replace(index_round_width=0.0), **_HARD)
+    return cfg._replace(beres=br._replace(index_round_width=0.0,
+                                          crit_minmax_sharpness=float("inf")), **_HARD)
 
 
 def _inputs(z, ds, dtype=jnp.float64):
@@ -265,7 +266,10 @@ _KINKS = (("convective_frontal/l36", 3, 0.8178145073179883, 1e-5),
           ("convective_frontal/l32", 1, 0.8008877124605397, 1e-5),      # NINT(uh)
           ("convective_frontal/l32", 1, 0.8512297290955184, 1e-5),      # NINT(Umax/dc)
           ("oro_frontal_convective/l36", 2, 0.8062826495054753, 1e-5),  # NINT(uh), INT(CS)
-          ("oro_frontal_convective/l32", 0, 0.8152495757979976, 1e-5))  # NINT(uh)
+          ("oro_frontal_convective/l32", 0, 0.8152495757979976, 1e-5),  # NINT(uh)
+          ("oro_frontal_convective/l32", 0, 0.8528525390220053, 1e-5),  # as convective
+          ("oro_frontal_convective/l32", 1, 0.8008877124605397, 1e-5),  # l32 (same
+          ("oro_frontal_convective/l32", 1, 0.8512297290955184, 1e-5))  # columns)
 
 
 @pytest.mark.parametrize("case,col,s_star,eps", _KINKS)
