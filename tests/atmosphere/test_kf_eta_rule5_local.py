@@ -52,7 +52,7 @@ from legoesm.atmosphere.physics.convection import _kf_eta as kfe  # noqa: E402
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig  # noqa: E402
 from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection  # noqa: E402
 from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import _lego_constants  # noqa: E402
-from legoesm.core.smooth import smooth_max_c1, smoothstep_quintic  # noqa: E402
+from legoesm.core.smooth import smooth_max_c1  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from tests.atmosphere.test_kain_fritsch_oracle import (  # noqa: E402
@@ -856,7 +856,7 @@ def _switch_cases():
         ("pefcbh_cap_width", lambda x, w: kfe._cap_c1(x, kfe._PEFCBH_MAX, w),
          kfe._PEFCBH_MAX - 0.3 * d.pefcbh_cap_width, 0.5,
          _NO_COLUMN.format("the cloud-base PEFCBH (E14)")),
-        ("qmix_floor_width_kgkg", lambda x, w: -kfe._cap_c1(-x, 0.0, w),
+        ("qmix_floor_width_kgkg", lambda x, w: kfe._floor0_c1(x, w),
          0.3 * d.qmix_floor_width_kgkg, 1e-3,
          _NO_COLUMN.format("the closure mixed-layer qmix (E17)")),
         ("dabe_floor_width_jkg", lambda x, w: smooth_max_c1(x, 100.0, w),
@@ -868,10 +868,10 @@ def _switch_cases():
         ("uerder_onset_width_kgs", lambda x, w: kfe._step_c2(x - kfe._UERDER_MIN, w) if w else (
             x > kfe._UERDER_MIN) * 1.0, kfe._UERDER_MIN + 0.2 * d.uerder_onset_width_kgs, 1.0,
          _NO_COLUMN.format("UER - DER (E15 eligibility)")),
-        ("closure_sup_width_kgkg", lambda x, w: kfe._step_c2(x, w) if w else (x > 0.0) * 1.0,
+        ("closure_sup_width_kgkg", lambda x, w: kfe._sup_select(x, 0.0, (1.0,), (0.0,), w)[0],
          0.2 * d.closure_sup_width_kgkg, 1e-4,
          _NO_COLUMN.format("the closure mixed layer within 1e-6 kg/kg of saturation (D7j)")),
-        ("cpr_onset_width_kgs", lambda x, w: smoothstep_quintic(x / w) if w else (x > 0.0) * 1.0,
+        ("cpr_onset_width_kgs", lambda x, w: kfe._frc2(x, x, 1.0, w)[1],
          0.4 * d.cpr_onset_width_kgs, 1e3, _NO_COLUMN.format("CPR (D7k)")),
     ]
 
@@ -896,7 +896,7 @@ def test_inflow_limit_fold_is_the_oracle_min_at_zero_width_and_c1_inside():
     """E15: the fold of C1 minima over the levels is the oracle's min(_AINCMX0,
     min over eligible levels) and AINC = min(AINCMX, 1) at width 0, exact
     outside the bands, and differentiable in a level's limit inside one."""
-    a = jnp.asarray([5.0, 0.6, 3.0, 0.62, 2000.0])
+    a = jnp.asarray([5.0, 0.6, 0.05, 0.62, 2000.0])
     ok = jnp.asarray([True, True, False, True, True])
     hard = jnp.minimum(kfe._AINCMX0, jnp.min(jnp.where(ok, a, kfe._AINCMX0)))
     mx, ai = kfe._inflow_limit_c1(a, ok, 0.0)
@@ -909,7 +909,22 @@ def test_inflow_limit_fold_is_the_oracle_min_at_zero_width_and_c1_inside():
     _grad_nonzero(f, jnp.asarray(0.603), 1e-5)
     e = jnp.asarray([1.0, 0.3, 0.0, 1.0, 1.0])
     g = jax.grad(lambda e: kfe._inflow_limit_c1(a, e, w)[0])(e)
-    assert bool(jnp.all(jnp.isfinite(g)))
+    assert bool(jnp.all(jnp.isfinite(g))) and float(g[2]) == 0.0
+    mx0, ai0 = kfe._inflow_limit_c1(a, e.at[1].set(0.0).at[3].set(0.0), w)
+    assert float(mx0) == 5.0 and float(ai0) == 1.0  # ineligible levels drop out
+
+
+def test_frc2_keeps_the_feedback_ratio_and_ramps_only_the_diagnostic():
+    """D7k: the ratio that scales the fed-back rain and snow is the oracle's at
+    every width (the water is never altered); only the exported FRC2 ramps in
+    from CPR = 0, and it is the oracle's above the width."""
+    w = _DEFAULT.cpr_onset_width_kgs
+    cpr = jnp.asarray([0.0, 0.3 * w, 2.0 * w, 1e5])
+    r0, d0 = kfe._frc2(0.8 * cpr, cpr, 0.5, 0.0)
+    r, d = kfe._frc2(0.8 * cpr, cpr, 0.5, w)
+    np.testing.assert_array_equal(np.asarray(r), np.asarray(r0))
+    np.testing.assert_array_equal(np.asarray(d[2:]), np.asarray(d0[2:]))
+    assert float(d[0]) == 0.0 and 0.0 < float(d[1]) < float(d0[1])
 
 
 def test_upstream_face_weight_conserves_and_matches_the_oracle_off_band():

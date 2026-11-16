@@ -143,7 +143,7 @@ KF_SWITCHES = {
     "D7h": ("D", "hard", "downdraft RH adjustment: low (qsrh < qd) and adj (rhh < 1)"),
     "D7i": ("D", "hard", "subsidence moisture borrow where QG < 0"),
     "D7j": ("D", "smooth", "closure mixed-layer supersaturation adjustment (sup)"),
-    "D7k": ("D", "smooth", "CPR > 0 guard of the precipitation feedback ratio FRC2 (smooth: onset from CPR = 0)"),
+    "D7k": ("D", "smooth", "CPR > 0 guard of the precipitation feedback ratio FRC2 (smooth: exported FRC2 ramps in; water unchanged)"),
     "E1": ("E", "smooth", "Q0 clipped to [1e-6, QES]"),
     "E2": ("E", "smooth", "TLCL <= TMIX (first pass and closure)"),
     "E3": ("E", "smooth", "WKLCL linear ramp capped at wklcl_ref"),
@@ -362,7 +362,8 @@ class KFSmoothing(NamedTuple):
       (E17 qmix >= 0, one-sided), ``dabe_floor_width_jkg`` (E18 DABE >= 0.1 ABE),
       ``closure_sup_width_kgkg`` (D7j, blend of the supersaturated and
       unsaturated closure mixed layer, centred on qmix = qss) and
-      ``cpr_onset_width_kgs`` (D7k, FRC2 ramps in from CPR = 0).
+      ``cpr_onset_width_kgs`` (D7k, the exported FRC2 ramps in from CPR = 0;
+      the feedback water keeps the oracle's ratio).
     """
 
     lut_knot_width: float
@@ -1146,6 +1147,37 @@ def _inflow_limit_c1(aincm1, elig, w):
     acc, _ = jax.lax.scan(lambda a, x: (smooth_min_c1(a, x, w), None),  # kfsw: E15
                           jnp.asarray(_AINCMX0, aincm1.dtype), v)
     return acc, _cap_c1(acc, 1.0, w)
+
+
+def _floor0_c1(x, w):
+    """max(x, 0) (w = 0, the oracle) or its one-sided C1 form, never below 0
+    and exactly ``x`` above ``w`` (E17 closure qmix)."""
+    if w:  # kfsw: S
+        return -_cap_c1(-x, 0.0, w)
+    return jnp.maximum(x, 0.0)  # kfsw: E17
+
+
+def _sup_select(qmix, qss, sat, unsat, w):
+    """The closure mixed layer's supersaturated states where qmix > qss, else
+    the unsaturated ones (D7j); w > 0 blends them over |qmix - qss| < w/2."""
+    if w:  # kfsw: S
+        ws = _step_c2(qmix - qss, w)
+        return tuple(ws * a + (1.0 - ws) * b for a, b in zip(sat, unsat))  # kfsw: D7j
+    sup = qmix > qss  # kfsw: D7j
+    return tuple(jnp.where(sup, a, b) for a, b in zip(sat, unsat))  # kfsw: D7j
+
+
+def _frc2(pptflx, cpr, ainc, w):
+    """(feedback ratio, exported FRC2) of the precipitation feedback (D7k).
+    The ratio PPTFLX / (CPR AINC) (0 at CPR = 0) scales RAINFB/SNOWFB, which
+    carry PPTLIQ/PPTICE <= CPR and so vanish with CPR either way: it stays the
+    oracle's so the fed-back water is never altered.  The exported diagnostic
+    jumps to 0 at CPR = 0; w > 0 ramps it in over 0 < CPR < w."""
+    cpos = cpr > 0.0  # kfsw: D7k
+    r = jnp.where(cpos, pptflx / _sd(cpr * ainc, cpos), 0.0)  # kfsw: D7k
+    if w:  # kfsw: S
+        return r, r * smoothstep_quintic(cpr / w)  # kfsw: D7k
+    return r, r
 
 
 def _sd(x, ok):
@@ -2123,26 +2155,19 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         qmix = QS / DPTHMX
         es_ = ALIQ * jnp.exp((tmix * BLIQ - CLIQ) / (tmix - DLIQ))
         qss = _EPS_KF * es_ / (PMIX - es_)
-        sup = qmix > qss  # kfsw: D7j
         rl = XLV0 - XLV1 * tmix
         cpm = CP * (1.0 + _CPM_Q * qmix)
         dssdt = qss * (CLIQ - BLIQ * DLIQ) / ((tmix - DLIQ) * (tmix - DLIQ))
         dq = (qmix - qss) / (1.0 + rl * dssdt / cpm)
         tmix_s = tmix + rl / CP * dq
         qmix_s = qmix - dq
-        qmix_u = -_cap_c1(-qmix, 0.0, sm.qmix_floor_width_kgkg)
+        qmix_u = _floor0_c1(qmix, sm.qmix_floor_width_kgkg)
         emix = qmix_u * PMIX / (_EPS_KF + qmix_u)
         tlog = _tlog_lookup(lut, emix / ALIQ)
         tdpt = (CLIQ - DLIQ * tlog) / (BLIQ - tlog)
         tlcl_u = _cap_c1(_tsat_from_dewpoint(tdpt, tmix), tmix, lut.sm.tlcl_cap_width_k)
-        if sm.closure_sup_width_kgkg:  # kfsw: S
-            ws = _step_c2(qmix - qss, sm.closure_sup_width_kgkg)
-            tmix, qmix, tlcl = (ws * a_ + (1.0 - ws) * b_ for a_, b_ in
-                                ((tmix_s, tmix), (qmix_s, qmix_u), (tmix_s, tlcl_u)))
-        else:
-            tmix = jnp.where(sup, tmix_s, tmix)  # kfsw: D7j
-            qmix = jnp.where(sup, qmix_s, qmix_u)  # kfsw: D7j
-            tlcl = jnp.where(sup, tmix_s, tlcl_u)  # kfsw: D7j
+        tmix, qmix, tlcl = _sup_select(qmix, qss, (tmix_s, qmix_s, tmix_s), (tmix, qmix_u, tlcl_u),
+                                       sm.closure_sup_width_kgkg)
         tvlcl = tlcl * (1.0 + _TV_COEF * qmix)
         zlcl = ZMIX + (tlcl - tmix) / GDRY
         hit = valid & (kk >= LC) & (zlcl <= Z0)  # kfsw: C-KLCL2,C-KCHECK
@@ -2251,10 +2276,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
 
     # --- hydrometeors (l.2318-2382) ---
     FBFRC = sc["FBFRC"]
-    cpos = CPR > 0.0  # kfsw: D7k
-    FRC2 = jnp.where(cpos, PPTFLX / _sd(CPR * AINC, cpos), 0.0)  # kfsw: D7k
-    if sm.cpr_onset_width_kgs:  # kfsw: S
-        FRC2 = FRC2 * smoothstep_quintic(CPR / sm.cpr_onset_width_kgs)  # kfsw: D7k
+    FRC2, FRC2_out = _frc2(PPTFLX, CPR, AINC, sm.cpr_onset_width_kgs)
     RAINFB = PPTLIQ * AINC * FBFRC * FRC2
     SNOWFB = PPTICE * AINC * FBFRC * FRC2
     QLG = advect(zf, lambda fin, fout: fin + F["DETLQ"] - fout, OMG, FXM, NSTEP, DTIME)
@@ -2326,7 +2348,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         ltop=jnp.where(fired, LTOP, 0), let=jnp.where(fired, LET, 0),
         abe=fin(sc["ABE"]), vmflcl=fin(VMFLCL), ainc=fin(AINC), timec=fin(TIMECf),
         ncount=jnp.where(fired, C["NCOUNT"], 0), fabe=fin(C["FABE"]), tder=fin(TDER),
-        trppt=fin(TRPPT), pptflx=fin(PPTFLX), cpr=fin(CPR), frc2=fin(FRC2), fbfrc=fin(FBFRC),
+        trppt=fin(TRPPT), pptflx=fin(PPTFLX), cpr=fin(CPR), frc2=fin(FRC2_out), fbfrc=fin(FBFRC),
         lfs=jnp.where(fired, LFS, 0), ldb=jnp.where(fired, LDB, 0), wlcl=fin(sc["WLCL"]),
         rad=fin(sc["RAD"]), chmin=fin(sc["CHMIN"]), cldhgt=fin(S["CLDHGT"][LC]),
         lcl=jnp.where(fired, LCL, 0), au0=fin(AU0), nstep=jnp.where(fired, NSTEP, 0),

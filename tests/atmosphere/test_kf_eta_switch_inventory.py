@@ -75,13 +75,13 @@ BASELINE = {
     "D4": ("smooth", 19), "D5": ("hard", 2), "D6": ("hard", 4), "D7a": ("smooth", 18),
     "D7b": ("smooth", 2), "D7c": ("hard", 2), "D7d": ("smooth", 5), "D7e": ("smooth", 7),
     "D7f": ("hard", 8), "D7g": ("smooth", 21), "D7h": ("hard", 6), "D7i": ("hard", 15),
-    "D7j": ("smooth", 5), "D7k": ("smooth", 4), "E1": ("smooth", 2), "E2": ("smooth", 2),
+    "D7j": ("smooth", 7), "D7k": ("smooth", 4), "E1": ("smooth", 2), "E2": ("smooth", 2),
     "E3": ("smooth", 3), "E4": ("smooth", 2), "E5": ("smooth", 8), "E6": ("smooth", 5),
     "E7": ("smooth", 4), "E8": ("smooth", 2), "E9": ("smooth", 8), "E10": ("smooth", 7),
     "E11": ("hard", 12), "E11c": ("smooth", 4), "E12": ("smooth", 10), "E13": ("smooth", 4),
-    "E14": ("smooth", 2), "E15": ("smooth", 13), "E16": ("hard", 5), "E17": ("smooth", 2),
+    "E14": ("smooth", 2), "E15": ("smooth", 13), "E16": ("hard", 5), "E17": ("smooth", 3),
     "E18": ("smooth", 1), "E19": ("smooth", 2), "F1": ("smooth", 19), "F2": ("smooth", 40),
-    "S": ("static", 268), "H": ("static", 17),
+    "S": ("static", 269), "H": ("static", 17),
 }
 
 
