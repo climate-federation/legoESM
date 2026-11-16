@@ -1988,7 +1988,10 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         RHBAR = RHBAR / _sd(DPTT2, dd_ok)  # kfsw: B3
         DMFFRC = _DMFFRC_COEF * (1.0 - RHBAR)
 
-        DTMELT = jnp.where(mel, _RLF * PPTMLT / (CP * _sd(UMF_KLCL, mel & dd_ok)), 0.0)  # kfsw: B5
+        # the soft run always descends (p_ok weights it): guard its divisor
+        # where the column has no updraft mass at KLCL (weight 0 there)
+        mok = mel & (UMF_KLCL != 0.0) if soft else mel & dd_ok  # kfsw: A0
+        DTMELT = jnp.where(mel, _RLF * PPTMLT / (CP * _sd(UMF_KLCL, mok)), 0.0)  # kfsw: B5
         LDT = jnp.minimum(LFS - 1, KSTART - 1)  # kfsw: C-LFS
         tzk, _ = _tpmix2dd(lut, P0[KSTART], THETED[KSTART])  # kfsw: C-KPBL
         tzk = tzk - DTMELT
