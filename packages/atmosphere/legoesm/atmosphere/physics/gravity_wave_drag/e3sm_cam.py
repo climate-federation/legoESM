@@ -191,7 +191,14 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
-from legoesm.core.smooth import pnorm_smooth_min, smoothstep_quintic, validate_smoothing_width
+from legoesm.core.smooth import (
+    blend_integer_index,
+    pnorm_smooth_min,
+    smooth_round,
+    smooth_trunc,
+    smoothstep_quintic,
+    validate_smoothing_width,
+)
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
 # to the top-level driver ``e3sm_cam_gwd``; the ``gw_*`` functions above/below
@@ -702,6 +709,13 @@ def gw_beres_src(
     maxh = beres.maxh
     dtype = u.dtype
     k700_i = jnp.asarray(k700, dtype=jnp.int32)
+    # RULE 5 (#2545): width of the smooth integer staircases that replace
+    # E3SM's NINT/INT of traced winds and heating depth (0 = exact E3SM).
+    rw = beres.index_round_width
+    if not (rw == 0 or 0.0 < rw <= 1.0):
+        raise ValueError(
+            f"E3SMBeresConfig.index_round_width must be 0 (E3SM NINT/INT) or "
+            f"in (0, 1]; got {rw!r}.")
 
     # --- Source-wind direction from the 700 hPa winds (E3SM uses u(:,k700)).
     u700 = jnp.take(u, k700_i, axis=1)                     # (ncol,)
@@ -801,7 +815,7 @@ def gw_beres_src(
     )
     # E3SM truncates CS to an integer (``int(sign(...))``); CAM6
     # (gw_convect.F90:217) keeps it real.  Static Python switch.
-    cs = jnp.trunc(cs_f) if beres.storm_speed_truncate else cs_f
+    cs = smooth_trunc(cs_f, rw) if beres.storm_speed_truncate else cs_f
 
     uh = jnp.sum(
         jnp.where(in_range, ubm, 0.0), axis=1
@@ -831,62 +845,99 @@ def gw_beres_src(
     # the gather is always valid and jit/grad-safe.  For the default
     # hdepth_scaling_factor == 1 this clip is a no-op and the lookup is
     # bit-identical to E3SM.
-    if beres.hd_index_rule == "nint":
-        h_idx = _nint(hdepth)                              # 1..maxh (km)
-    elif beres.hd_index_rule == "nearest_grid":
-        # CAM6 index_of_nearest on hd = 1..maxh km: interfaces at k + 0.5,
-        # idx = 1 + count(hdepth > interface)  (exact ties -> lower row).
-        interfaces = jnp.arange(1, maxh, dtype=dtype) + 0.5    # (maxh-1,)
-        h_idx = 1 + jnp.sum(hdepth[:, None] > interfaces[None, :], axis=1)
-    else:
+    if beres.hd_index_rule not in ("nint", "nearest_grid"):
         raise ValueError(
             f"Unknown E3SMBeresConfig.hd_index_rule {beres.hd_index_rule!r}; "
             "expected 'nint' (E3SM) or 'nearest_grid' (CAM6)."
         )
-    h_idx = jnp.clip(h_idx, 1, maxh)
-    h_row = (h_idx - 1).astype(jnp.int32)                  # 0-based table row
-    uh_idx = _nint(uh)
-    uh_idx = jnp.clip(uh_idx, -maxuh, maxuh)
-    uh_col = (uh_idx + maxuh).astype(jnp.int32)            # 0-based table col
-    # gather per column: mfcc[h_row, uh_col, :] -> (ncol, nwav)
-    tau0 = mfcc[h_row, uh_col, :]                          # (ncol, nwav)
-
-    # Doppler shift so the spectrum is ground-relative by -nint(CS/dc):
-    # E3SM ``cshift`` (wraps) or CAM6 ``eoshift`` (zero fill).
-    shift = -_nint(cs / dc).astype(jnp.int32)              # (ncol,)
-    if beres.spectrum_shift == "circular":
-        tau0 = _cshift_rows(tau0, shift)
-    elif beres.spectrum_shift == "end_off":
-        tau0 = _eoshift_rows(tau0, shift)
-    else:
+    if beres.spectrum_shift not in ("circular", "end_off"):
         raise ValueError(
             f"Unknown E3SMBeresConfig.spectrum_shift {beres.spectrum_shift!r}; "
             "expected 'circular' (E3SM cshift) or 'end_off' (CAM6 eoshift)."
         )
+    shift_rows = _cshift_rows if beres.spectrum_shift == "circular" else _eoshift_rows
+    if rw == 0:
+        if beres.hd_index_rule == "nint":
+            h_idx = _nint(hdepth)                              # 1..maxh (km)
+        elif beres.hd_index_rule == "nearest_grid":
+            # CAM6 index_of_nearest on hd = 1..maxh km: interfaces at k + 0.5,
+            # idx = 1 + count(hdepth > interface)  (exact ties -> lower row).
+            interfaces = jnp.arange(1, maxh, dtype=dtype) + 0.5    # (maxh-1,)
+            h_idx = 1 + jnp.sum(hdepth[:, None] > interfaces[None, :], axis=1)
+        h_idx = jnp.clip(h_idx, 1, maxh)
+        h_row = (h_idx - 1).astype(jnp.int32)                  # 0-based table row
+        uh_idx = _nint(uh)
+        uh_idx = jnp.clip(uh_idx, -maxuh, maxuh)
+        uh_col = (uh_idx + maxuh).astype(jnp.int32)            # 0-based table col
+        # gather per column: mfcc[h_row, uh_col, :] -> (ncol, nwav)
+        tau0 = mfcc[h_row, uh_col, :]                          # (ncol, nwav)
 
-    # Adjust magnitude by q0^2/AL.
-    tau0 = tau0 * (q0 * q0 / beres.al)[:, None]
+        # Doppler shift so the spectrum is ground-relative by -nint(CS/dc):
+        # E3SM ``cshift`` (wraps) or CAM6 ``eoshift`` (zero fill).
+        shift = -_nint(cs / dc).astype(jnp.int32)              # (ncol,)
+        if beres.spectrum_shift == "circular":
+            tau0 = _cshift_rows(tau0, shift)
+        elif beres.spectrum_shift == "end_off":
+            tau0 = _eoshift_rows(tau0, shift)
 
-    # Critical-level filtering: zero tau0 for Umini <= l <= Umaxi (bounds
-    # guard below).
-    umini = jnp.maximum(_nint(umin / dc), -pgwv).astype(jnp.int32)  # (ncol,)
-    umaxi = jnp.minimum(_nint(umax / dc), pgwv).astype(jnp.int32)
-    ls = jnp.arange(-pgwv, pgwv + 1)[None, :]              # (1, nwav) wave index
-    # E3SM gw_convect.F90:293-295 guards the slice with ``if (Umaxi > Umini)``,
-    # so equal bounds zero NOTHING; CAM6 gw_convect.F90:285 slices
-    # unconditionally, and ``tau0(Umini:Umaxi) = 0`` with equal bounds zeroes
-    # ONE bin.  The E3SM rule goes with the E3SM ``cshift`` spectrum
-    # (spectrum_shift="circular"), the CAM6 rule with ``eoshift``.
-    if beres.spectrum_shift == "circular":
-        bounds_ok = umaxi[:, None] > umini[:, None]
+        # Adjust magnitude by q0^2/AL.
+        tau0 = tau0 * (q0 * q0 / beres.al)[:, None]
+
+        # Critical-level filtering: zero tau0 for Umini <= l <= Umaxi (bounds
+        # guard below).
+        umini = jnp.maximum(_nint(umin / dc), -pgwv).astype(jnp.int32)  # (ncol,)
+        umaxi = jnp.minimum(_nint(umax / dc), pgwv).astype(jnp.int32)
+        ls = jnp.arange(-pgwv, pgwv + 1)[None, :]              # (1, nwav) wave index
+        # E3SM gw_convect.F90:293-295 guards the slice with ``if (Umaxi > Umini)``,
+        # so equal bounds zero NOTHING; CAM6 gw_convect.F90:285 slices
+        # unconditionally, and ``tau0(Umini:Umaxi) = 0`` with equal bounds zeroes
+        # ONE bin.  The E3SM rule goes with the E3SM ``cshift`` spectrum
+        # (spectrum_shift="circular"), the CAM6 rule with ``eoshift``.
+        if beres.spectrum_shift == "circular":
+            bounds_ok = umaxi[:, None] > umini[:, None]
+        else:
+            bounds_ok = umaxi[:, None] >= umini[:, None]
+        crit_mask = (
+            bounds_ok
+            & (ls >= umini[:, None])
+            & (ls <= umaxi[:, None])
+        )                                                      # (ncol, nwav)
+        tau0 = jnp.where(crit_mask, 0.0, tau0)
     else:
-        bounds_ok = umaxi[:, None] >= umini[:, None]
-    crit_mask = (
-        bounds_ok
-        & (ls >= umini[:, None])
-        & (ls <= umaxi[:, None])
-    )                                                      # (ncol, nwav)
-    tau0 = jnp.where(crit_mask, 0.0, tau0)
+        # RULE 5 (#2545): every NINT above becomes the C2 staircase
+        # smooth_round (width rw, in index units) and every integer lookup /
+        # shift / bin bound a linear blend of the two neighbouring integers,
+        # exact wherever the staircase is flat.  Clamps to the integer table
+        # bounds act BEFORE rounding (equal to E3SM's clamp after NINT), so
+        # their kinks sit on flat steps.  The nint/nearest_grid row rules
+        # differ only at exact half-km ties, a measure-zero set here.
+        h_r = smooth_round(jnp.clip(hdepth, 1.0, float(maxh)), rw) - 1.0
+        uh_r = smooth_round(jnp.clip(uh, -float(maxuh), float(maxuh)), rw) + maxuh
+
+        def take_hu(ui):                                 # (ncol,) -> (ncol, nwav)
+            ui = jnp.clip(ui, 0, 2 * maxuh)
+            return blend_integer_index(
+                h_r, lambda hi: mfcc[jnp.clip(hi, 0, maxh - 1), ui, :])
+
+        tau0 = blend_integer_index(uh_r, take_hu)       # (ncol, nwav)
+        shift_r = -smooth_round(cs / dc, rw)
+        tau0 = blend_integer_index(shift_r, lambda k: shift_rows(tau0, k))
+        tau0 = tau0 * (q0 * q0 / beres.al)[:, None]
+        # The filter keeps E3SM's integer mask (incl. its bounds guard) and
+        # blends the masks of the neighbouring integer bounds, so it is exact
+        # on flat steps and C2 where both bounds move at once (codex vote 1).
+        umini_r = smooth_round(jnp.maximum(umin / dc, -float(pgwv)), rw)
+        umaxi_r = smooth_round(jnp.minimum(umax / dc, float(pgwv)), rw)
+        ls = jnp.arange(-pgwv, pgwv + 1)[None, :]
+        strict = beres.spectrum_shift == "circular"
+
+        def crit_mask(lo, hi):                           # E3SM/CAM6 integer mask
+            ok = (hi > lo) if strict else (hi >= lo)
+            return (ok[:, None] & (ls >= lo[:, None]) & (ls <= hi[:, None])).astype(dtype)
+
+        crit = blend_integer_index(
+            umini_r, lambda lo: blend_integer_index(umaxi_r, lambda hi: crit_mask(lo, hi)))
+        tau0 = tau0 * (1.0 - crit)
 
     # Only launch where hdepth >= hdepth_min and |lat| < pi/2 (E3SM gate).
     launch = (hdepth >= beres.hdepth_min_km) & (jnp.abs(lat) < (0.5 * math.pi))

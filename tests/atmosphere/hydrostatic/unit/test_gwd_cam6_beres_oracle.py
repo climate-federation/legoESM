@@ -189,7 +189,8 @@ def _synthetic(pver=30, seed=3):
 
 def _beres(**kw):
     base = dict(cf=CF, al=AL, z_heat_max=Z_HEAT_MAX, storm_speed_min=STORM_MIN,
-                maxh=MAXH, maxuh=MAXUH, use_stand_in_table=False)
+                maxh=MAXH, maxuh=MAXUH, use_stand_in_table=False,
+                index_round_width=0.0)       # the oracle's NINT/INT (RULE 5 hard limit)
     base.update(kw)
     return E3SMBeresConfig(**base)
 

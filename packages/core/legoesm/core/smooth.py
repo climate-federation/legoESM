@@ -314,3 +314,40 @@ def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
     Uses sqrt(x^2 + epsilon) which is differentiable everywhere.
     """
     return jnp.sqrt(x * x + epsilon)
+
+
+def smooth_round(x: jax.Array, width: float) -> jax.Array:
+    """Nearest-integer rounding as a C2 staircase (RULE 5): equal to ``n``
+    except where ``frac(x)`` is within ``width/2`` of 1/2, where it rises to
+    ``n + 1`` by ``smoothstep_quintic``.  ``width`` in (0, 1].  ``width = 0`` is
+    Fortran ``NINT`` (half away from zero), exactly."""
+    if width == 0:
+        return jnp.sign(x) * jnp.floor(jnp.abs(x) + 0.5)
+    n = jnp.floor(x)
+    return n + smoothstep_quintic((x - n - 0.5) / width + 0.5)
+
+
+def smooth_trunc(x: jax.Array, width: float) -> jax.Array:
+    """Truncation toward zero as a C2 staircase (RULE 5): ``sign(x)*m`` with
+    ``m = floor(|x|)`` except over the last ``width`` of each unit, where it
+    rises to ``m + 1`` by ``smoothstep_quintic`` (so exactly 0, with zero
+    derivatives, for ``|x| < 1 - width``).  ``width`` in (0, 1].  ``width = 0`` is ``jnp.trunc``, exactly."""
+    if width == 0:
+        return jnp.trunc(x)
+    a = jnp.abs(x)
+    m = jnp.floor(a)
+    return jnp.sign(x) * (m + smoothstep_quintic((a - m - 1.0) / width + 1.0))
+
+
+def blend_integer_index(r: jax.Array, take):
+    """``take(n)`` at an integer-valued ``r``; between integers the linear
+    blend ``(1-t)*take(floor(r)) + t*take(floor(r)+1)``, ``t = r - floor(r)``,
+    so a smooth staircase ``r`` (:func:`smooth_round`) gives a smooth lookup.
+    ``take`` receives an int32 index array of ``r``'s shape and returns an
+    array whose leading dims are ``r``'s."""
+    lo = jnp.floor(r)
+    t = r - lo
+    lo = lo.astype(jnp.int32)
+    a, b = take(lo), take(lo + 1)
+    t = t.reshape(t.shape + (1,) * (a.ndim - t.ndim))
+    return (1.0 - t) * a + t * b

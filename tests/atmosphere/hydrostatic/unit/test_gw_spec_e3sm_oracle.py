@@ -91,7 +91,9 @@ def _config(ours, hard=True):
     fr = E3SMFrontalConfig()._replace(**o.pop("frontal", {}))
     br = E3SMBeresConfig()._replace(**o.pop("beres", {}))
     cfg = E3SMCAMConfig()._replace(frontal=fr, beres=br, **o)
-    return cfg._replace(**_HARD) if hard else cfg
+    if not hard:
+        return cfg
+    return cfg._replace(beres=br._replace(index_round_width=0.0), **_HARD)
 
 
 def _inputs(z, ds, dtype=jnp.float64):
