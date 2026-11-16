@@ -20,6 +20,9 @@ Smoothed here, each by one ``KFSmoothing`` width (0 = the oracle):
   the D7f PROF5 endpoint overrides stay hard.
 * PR 5a/7, cloud top by survival weights: ``top_stop_wtw_width_m2s2`` and
   ``top_stop_umf_width_kgs`` (C-LTOPs, C-LETs; the D4 weights are quintic).
+* PR 6a, downdraft source and melting weights: ``lfs_depth_width_pa``
+  (C-LFSs, first-crossing weights of the LFS search) and ``melt_t_width_k``
+  (C-MLs, soft warm flags of the melting test and the freezing level).
 
 The three tests per switch: the hard limit is the oracle (the oracle suite in
 test_kain_fritsch_oracle.py runs ``KF_HARD``); the per-case gap at the default,
@@ -175,7 +178,11 @@ _UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_wid
                 "chmin_clip_width_k", "top_stop_umf_width_kgs",
                 # the band column is mid-band at the DEFAULT widths only (the
                 # "all" case); stop1 alone is exercised on it shifted in-test
-                "top_stop_wtw_width_m2s2"}
+                "top_stop_wtw_width_m2s2",
+                # PR 6a: no fixture level lies within 0.05 K of T00 (measured:
+                # gaps at the hard gap to 2e-15); covered by helper tests and
+                # a column shifted into the band in-test
+                "melt_t_width_k"}
 
 
 def _moved(stored, case):
@@ -969,6 +976,134 @@ def test_top_hazards_are_the_oracle_steps_at_zero_width_and_c2():
         hz = lambda z, h=h, thr=thr, w=w: h(thr + w * z)  # noqa: E731  (band units)
         check_grads(hz, (0.2,), order=2, modes=("fwd", "rev"), eps=1e-5)
         assert float(jax.grad(hz)(0.2)) < 0.0
+
+
+# --- PR 6a: soft LFS search and warm-level flags --------------------------------
+
+def _oracle_lfs(cand, KX, let):
+    kl0 = int(np.argmax(cand)) if cand.any() else KX
+    return min(kl0, let - 1)
+
+
+def test_lfs_weights_reduce_to_the_oracle_search_and_stay_normalised():
+    """0/1 crossing flags give the oracle's LFS = min(kl0, LET - 1) one-hot for
+    every LET (none crossing: kl0 = KX); soft flags give normalised weights."""
+    NP, KX = 12, 10
+    kk = jnp.arange(NP)
+    rng = np.random.default_rng(1)
+    for _ in range(40):
+        cand = rng.random(NP) < 0.25
+        cand[0] = False
+        cand[KX + 1:] = False
+        QL = np.asarray(kfe._lfs_member_weights(
+            kfe._first_crossing(jnp.asarray(cand, jnp.float64), kk, KX), kk))
+        np.testing.assert_array_equal(QL[:, 0], 0.0)
+        for j in range(1, NP):
+            np.testing.assert_array_equal(QL[:, j], np.arange(NP) == _oracle_lfs(cand, KX, j))
+    s = jnp.asarray(np.where(np.arange(NP) <= KX, rng.random(NP), 0.0))
+    pi = kfe._first_crossing(s, kk, KX)
+    np.testing.assert_allclose(float(jnp.sum(pi)), 1.0, rtol=1e-14)
+    np.testing.assert_allclose(np.asarray(jnp.sum(kfe._lfs_member_weights(pi, kk), axis=0))[1:],
+                               1.0, rtol=1e-14)
+
+
+def test_lfs_weights_check_grads_through_the_depth_band():
+    """Gradient at the default width with two levels inside the 150 hPa band."""
+    w = _DEFAULT.lfs_depth_width_pa
+    NP, KX = 8, 6
+    kk = jnp.arange(NP)
+    valid = (kk >= 3) & (kk <= KX)
+
+    def ql(depth):  # depth = P0[KSTART] - P0 per level [Pa]
+        s = jnp.where(valid, kfe._step_c2(depth - kfe._LFS_DEPTH_PA, w), 0.0)
+        return kfe._lfs_member_weights(kfe._first_crossing(s, kk, KX), kk)[:, 5:]
+
+    d0 = kfe._LFS_DEPTH_PA + jnp.array([-9e3, -6e3, -3e3, -2e3, -0.2 * w, 0.3 * w, 4e3, 8e3])
+    check_grads(ql, (d0,), order=2, modes=("fwd", "rev"), eps=1e-2)
+    assert float(jnp.abs(jax.jacfwd(ql)(d0)).sum()) > 0.0
+
+
+def test_any_in_range_is_the_oracle_warm_test_and_c2():
+    NP = 10
+    kk = jnp.arange(NP)
+    rng = np.random.default_rng(2)
+    for _ in range(20):
+        warm = rng.random(NP) < 0.3
+        NW = np.asarray(kfe._any_in_range(jnp.asarray(warm, jnp.float64), kk))
+        want = np.array([[t >= k and warm[k:t + 1].any() for t in range(NP)] for k in range(NP)])
+        np.testing.assert_array_equal(NW, want)
+        LC = int(rng.integers(0, NP))  # melting given the top: a warm level in (LC, t]
+        mel = kfe._any_in_range(jnp.where(kk > LC, jnp.asarray(warm, jnp.float64), 0.0), kk)[0]
+        np.testing.assert_array_equal(np.asarray(mel), np.cumsum(warm & (np.arange(NP) > LC)) > 0)
+    w = _DEFAULT.melt_t_width_k
+
+    def nw(T0):
+        return kfe._any_in_range(kfe._step_c2(T0 - kfe._T00_K, w), kk)
+
+    T0 = kfe._T00_K + jnp.array([-5.0, -0.3 * w, 0.1 * w, -2.0, 0.2 * w, 3.0, -1.0, -0.4 * w, 4.0, 6.0])
+    check_grads(nw, (T0,), order=2, modes=("fwd", "rev"), eps=1e-5)
+    assert float(jnp.abs(jax.jacfwd(nw)(T0)).sum()) > 0.0
+
+
+@pytest.mark.parametrize("field", ["lfs_depth_width_pa", "melt_t_width_k"])
+def test_a_downdraft_width_alone_runs_the_survival_path_with_finite_gradients(field):
+    """Either width alone (cloud-top widths 0: one-hot top weights) runs the
+    mixture path; its per-case gap against the oracle is the recorded one
+    (test_default_gap_per_case_matches_record), and its gradient is finite."""
+    fx = dict(np.load(_FIX))
+    sm = kfe.KF_HARD._replace(**{field: getattr(_DEFAULT, field)})
+    assert kfe._survival_on(sm) and not kfe._survival_on(kfe.KF_HARD)
+    o, T = _sweep_column(fx, 90, smoothing=sm)
+    assert bool(o["fired"][0])
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, 90, T, sm)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_melt_width_acts_on_a_column_shifted_into_its_band():
+    """Sweep column 73 (no warm rain, no qs/qi species: the freezing-level
+    split of the condensate heating is live) shifted so its highest warm
+    level sits 0.2 widths above T00: the default width moves the heating
+    against the width -> 0 limit (measured 8.2e-7 K/s), and the gradient is
+    finite."""
+    fx = dict(np.load(_FIX))
+    i, k = 73, 10
+    _, T = _sweep_column(fx, i)
+    w = _DEFAULT.melt_t_width_k
+    Ts = T + (kfe._T00_K + 0.2 * w - T[0, k])
+    a, _ = _sweep_column(fx, i, Ts)
+    b, _ = _sweep_column(fx, i, Ts, _DEFAULT._replace(melt_t_width_k=1e-9 * w))
+    assert bool(a["fired"][0])
+    assert float(jnp.max(jnp.abs(a["dtdt"] - b["dtdt"]))) > 1e-7
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, i, T)[0]["dtdt"]))(Ts)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_water_closes_and_gradient_is_finite_at_fractional_melting(monkeypatch):
+    """Every melting and freezing-level probability halved (no fixture level
+    sits in the warm band): the heating moves, the column's water still closes
+    and the temperature gradient stays finite.  The width differs from the
+    default by 3e-7 K only to get its own trace."""
+    fx = dict(np.load(_FIX))
+    sm = _DEFAULT._replace(melt_t_width_k=0.1000003)
+    i = 90
+    base, T = _sweep_column(fx, i, smoothing=sm)
+    anyr = kfe._any_in_range
+    monkeypatch.setattr(kfe, "_any_in_range", lambda v, kk: 0.5 * anyr(v, kk))
+    sm2 = _DEFAULT._replace(melt_t_width_k=0.1000005)
+    o, _ = _sweep_column(fx, i, smoothing=sm2)
+    assert bool(o["fired"][0])
+    assert float(jnp.max(jnp.abs(o["dtdt"] - base["dtdt"]))) > 0.0
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, i, T, sm2)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g)))
+    _, x = _wrapper_inputs(fx, "L_nat_w0")
+    out, _ = kain_fritsch_convection(**x, config=_WRF_DEFAULT._replace(wrf_melt_t_width_k=0.1000005))
+    dp = fx["p_half"][:, 1:] - fx["p_half"][:, :-1]
+    tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt)
+           + np.asarray(out.dq_r_conv_dt)) * dp / constants.g
+    scale = np.sum(np.abs(np.asarray(out.dq_v_dt)) * dp / constants.g, axis=1)
+    f = fx["L_nat_w0_fired"] == 1
+    assert f.any()
+    assert np.all(np.abs(tot.sum(axis=1))[f] <= 1.0e-9 * scale[f])
 
 
 def test_widths_are_validated():
