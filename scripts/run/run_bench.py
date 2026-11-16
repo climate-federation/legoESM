@@ -104,12 +104,15 @@ def _parse_args(argv=None):
     )
     p.add_argument("--dt", type=float, default=None, help="Time step [s] (overrides preset).")
     p.add_argument(
-        "--steps", type=int, default=1000, help="Number of steps (NEMO nn_itend default 1000)."
+        "--steps",
+        type=int,
+        default=bench_exp.BENCH_DEFAULT_STEPS,
+        help="Number of steps (NEMO nn_itend default 1000).",
     )
     p.add_argument(
         "--warmup-steps",
         type=int,
-        default=5,
+        default=bench_exp.BENCH_DEFAULT_WARMUP_STEPS,
         help="Warmup steps excluded from the steady-state mean.",
     )
     p.add_argument(

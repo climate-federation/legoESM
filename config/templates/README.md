@@ -29,7 +29,7 @@ Shallow water only runs the second way.
 | `2d/` | tier1 | `setup:` templates naming the shallow-water matrix cases (Williamson 2, Williamson 5) |
 | `3d_idealized/` | tier2–3 | dry/idealized 3D recipes (Held-Suarez, hydrostatic gray-radiation year) |
 | `atmosphere/` | tier1–2 | `setup:` templates naming atmosphere matrix cases (Williamson 5, Held-Suarez, baroclinic wave) |
-| `ocean/` | tier1–2 | `setup:` templates naming idealized ocean matrix cases (gyres, channels, waves, overflow, BENCH, ...) |
+| `ocean/` | tier1–2 | `setup:` templates naming idealized ocean matrix cases (gyres, channels, waves, overflow, BENCH, ...); `bench_harness.yaml` adds the BENCH harness keys (`preset`, `steps`, `warmup_steps`, `n_lat`, `timing_jsonl`; `levels` and `dt_seconds` override the preset) and routes to `scripts/run/run_bench.py` |
 | `global_ocean/` | tier3 | OMIP / global ocean |
 | `sea_ice/` | tier1–2 | `setup:` templates naming sea-ice matrix cases |
 
