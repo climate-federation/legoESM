@@ -797,12 +797,14 @@ def test_updraft_mass_closes_with_a_rejected_top(monkeypatch):
     assert np.all(np.abs(tot.sum(axis=1))[f] <= 1.0e-9 * scale[f])
 
 
-def _sweep_column(fx, i, T=None, smoothing=_DEFAULT, dtype=jnp.float64):
+def _sweep_column(fx, i, T=None, smoothing=_DEFAULT, dtype=jnp.float64, p=None):
     cs, trig, warm, fqi, fqs = fx["sweep_combos"][fx["sweep_combo"][i]]
     a = [jnp.asarray(fx[f"sweep_{k}"][i], dtype)[None]
          for k in ("u", "v", "T", "q", "p", "dz", "w", "rhoe")]
     if T is not None:
         a[2] = T
+    if p is not None:
+        a[4] = p
     return kfe.kf_eta_para(*a, dt=fx["sweep_dt"][i], dx=fx["sweep_dx"][i], constants=_consts(fx, cs),
                            trigger=int(trig), warm_rain=warm == "1", f_qi=fqi == "1",
                            f_qs=fqs == "1", cudt=float(fx["cudt"]), smoothing=smoothing), a[2]
@@ -1112,10 +1114,9 @@ def test_dd_rh_adjustment_adj_branch_is_unreachable_for_positive_layers():
 
 
 def test_deep_dd_is_implied_by_dd_ok_over_the_fixture():
-    """deep_dd stays hard (vote 23): the base lies at least one layer below
-    the source layer, and every fixture layer is thicker than half the dd_ok
-    width, so the base is deeper than 50 hPa wherever the dd_ok weight is
-    positive."""
+    """Why deep_dd's shared band (vote 24) leaves the fixture gaps unchanged:
+    every fixture layer is thicker than half the dd_ok width, so deep_dd's
+    weight is exactly 1 wherever the dd_ok weight is positive."""
     fx = dict(np.load(_FIX))
     p = [np.asarray(fx[k]) for k in fx if k.endswith("_p") and np.asarray(fx[k]).ndim >= 1]
     assert p
@@ -1128,7 +1129,7 @@ def test_dd_ok_width_acts_on_a_column_shifted_into_its_band(monkeypatch):
     """The 50 hPa threshold moved to 0.2 widths below sweep column 90's own
     source-to-source-layer depth puts its dd_ok test in the band: the default
     width moves the heating against the width -> 0 limit, and the gradient is
-    finite."""
+    finite with respect to the column's pressure (the switch's own input)."""
     fx = dict(np.load(_FIX))
     i = 90
     o, T = _sweep_column(fx, i)
@@ -1142,8 +1143,14 @@ def test_dd_ok_width_acts_on_a_column_shifted_into_its_band(monkeypatch):
     b, _ = _sweep_column(fx, i, smoothing=sm._replace(dd_ok_depth_width_pa=1e-9 * w))
     assert bool(a["fired"][0])
     assert float(jnp.max(jnp.abs(a["dtdt"] - b["dtdt"]))) > 1e-9 * float(jnp.max(jnp.abs(b["dtdt"])))
-    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, i, T, sm)[0]["dtdt"]))(T)
-    assert bool(jnp.all(jnp.isfinite(g)))
+    p0 = jnp.asarray(p, jnp.float64)[None]
+    sp = lambda p: jnp.sum(_sweep_column(fx, i, smoothing=sm, p=p)[0]["dtdt"])
+    gp = jax.grad(sp)(p0)
+    assert bool(jnp.all(jnp.isfinite(gp)))
+    # the 1e-9 width is outside its band here: the hard limit's gradient
+    hp = jax.grad(lambda p: jnp.sum(_sweep_column(
+        fx, i, smoothing=sm._replace(dd_ok_depth_width_pa=1e-9 * w), p=p)[0]["dtdt"]))(p0)
+    assert float(jnp.max(jnp.abs(gp - hp))) > 1e-6 * float(jnp.max(jnp.abs(hp)))
 
 
 def test_soft_downdraft_converges_to_the_hard_downdraft_as_the_widths_shrink():
