@@ -38,8 +38,9 @@ from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH
                                       NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH)
 
-if TYPE_CHECKING:  # avoid a config <-> clubb import cycle at runtime
+if TYPE_CHECKING:  # avoid config <-> clubb / ifs_vdf import cycles at runtime
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    from legoesm.atmosphere.physics.turbulence.ifs_vdf import IFSVDFLaneConfig
 
 
 # Machine-readable tunable/fixed split for the turbulence scheme configs.
@@ -778,7 +779,7 @@ class TurbulenceConfig(NamedTuple):
     scheme : str
         Active turbulence scheme: "smagorinsky", "louis", "tke",
         "mynn25", "clubb_lite", "holtslag_boville", "ysu", "edmf",
-        or "none".
+        "ifs_vdf" (OpenIFS 49r1 VDF, MPAS lane only), or "none".
     smagorinsky : SmagorinskyConfig
         Configuration for Smagorinsky scheme.
     louis : LouisConfig
@@ -800,6 +801,9 @@ class TurbulenceConfig(NamedTuple):
         Configuration for YSU scheme.
     edmf : TurbulentEDMFConfig
         Configuration for EDMF scheme.
+    ifs_vdf : IFSVDFLaneConfig or None
+        Configuration for the OpenIFS VDF port; ``None`` selects the default
+        ``IFSVDFLaneConfig()`` (resolved in the dispatcher, like ``clubb``).
     update_interval_steps : int
         NOT YET IMPLEMENTED in the production physics pipeline — turbulence
         is recomputed EVERY step regardless of this value.  Only the SCM
@@ -826,6 +830,8 @@ class TurbulenceConfig(NamedTuple):
     # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
     # turbulence runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1
+    # appended last (positional ABI)
+    ifs_vdf: IFSVDFLaneConfig | None = None
 
 
 CLUBB_LITE_STANDIN_NOTE = (

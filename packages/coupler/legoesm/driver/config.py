@@ -548,7 +548,7 @@ _CLUBB_LITE_WARNED = False  # one stand-in warning per process
 
 VALID_TURBULENCE = (
     "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
-    "holtslag_boville", "ysu", "edmf", "none",
+    "holtslag_boville", "ysu", "edmf", "ifs_vdf", "none",
 )
 
 VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg", "ecrad_ifs")

@@ -3834,8 +3834,39 @@ class ModelDriver:
             if _msg is not None:
                 logger.warning("  %s", _msg)
 
+        if getattr(self.config, "turbulence", "none") == "ifs_vdf":
+            self._attach_ifs_vdf_sigflt(sso_path, _sd)
+
         self._assert_vertical_coordinate_supports_this_orography()
         self._check_zm_land_fraction()
+
+    def _attach_ifs_vdf_sigflt(self, sso_path, dtype) -> None:
+        """turbulence=ifs_vdf: the filtered subgrid-orography std (IFS sigflt,
+        ``SSO_STDH_FILT``) for its turbulent orographic form drag, read from
+        ``subgrid_orography_path`` through the same loader and remap as the
+        GWD's ``SSO_STDH``.  Required; never defaulted (vote 9 G9)."""
+        if not sso_path:
+            raise ValueError(
+                "turbulence=ifs_vdf needs subgrid_orography_path: a file carrying "
+                "SSO_STDH_FILT (the filtered subgrid orography std for its form drag).")
+        from legoesm.grids.topography import load_subgrid_orography
+        filt = load_subgrid_orography(self.grid, sso_path, var_name="SSO_STDH_FILT").astype(dtype)
+        try:
+            self.grid = self.grid._replace(subgrid_topo_filt_stddev=filt)
+        except (TypeError, ValueError, AttributeError) as e:
+            raise ValueError(
+                "turbulence=ifs_vdf runs on the MPAS lane only; grid type "
+                f"{type(self.grid).__name__} has no subgrid_topo_filt_stddev field") from e
+        if self._voronoi_layout is not None:
+            _lm = self._voronoi_layout.local_mesh
+            if filt.shape[0] != int(_lm.nCells):
+                raise ValueError(
+                    f"filtered subgrid orography has {filt.shape[0]} columns "
+                    f"but the rank-local mesh has {int(_lm.nCells)}")
+            self._voronoi_layout = self._voronoi_layout._replace(
+                local_mesh=_lm._replace(subgrid_topo_filt_stddev=filt))
+        logger.info("  Filtered subgrid orography (IFS VDF form drag): %s (max=%.0f m)",
+                    sso_path, float(jnp.max(filt)))
 
     def _check_zm_land_fraction(self) -> None:
         """Zhang-McFarlane land policy means the same on every lane: "required"

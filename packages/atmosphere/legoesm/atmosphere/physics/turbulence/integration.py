@@ -152,6 +152,9 @@ def materialize_sub_config(config: TurbulenceConfig) -> TurbulenceConfig:
         # import here would close a cycle.
         from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
         return config._replace(clubb=CLUBBConfig())
+    if config.scheme == "ifs_vdf" and config.ifs_vdf is None:
+        from legoesm.atmosphere.physics.turbulence.ifs_vdf import IFSVDFLaneConfig
+        return config._replace(ifs_vdf=IFSVDFLaneConfig())
     return config
 
 
@@ -204,6 +207,9 @@ def get_turbulence_fn(config: TurbulenceConfig):
         return "ysu", ysu_turbulence, config.ysu
     elif config.scheme == "edmf":
         return "edmf", edmf_turbulence, config.edmf
+    elif config.scheme == "ifs_vdf":
+        from legoesm.atmosphere.physics.turbulence.ifs_vdf import ifs_vdf_turbulence
+        return "ifs_vdf", ifs_vdf_turbulence, materialize_sub_config(config).ifs_vdf
     elif config.scheme == "none":
         return "none", None, None
     else:
@@ -231,7 +237,7 @@ def schemes_accepting_surface_flux() -> tuple[str, ...]:
     """
     names = []
     for name in ("smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
-                 "clubb", "holtslag_boville", "ysu", "edmf"):
+                 "clubb", "holtslag_boville", "ysu", "edmf", "ifs_vdf"):
         _n, fn, _cfg = get_turbulence_fn(TurbulenceConfig(scheme=name))
         if kernel_accepts_surface_flux(fn):
             names.append(name)
@@ -423,6 +429,29 @@ def _ysu_lane_kwargs(carry_field, ncol, *, land_fraction=None, cell_area=None):
     kw = {"land_fraction": land_fraction, "cell_area": cell_area}
     return {k: jnp.reshape(jnp.asarray(v), (ncol,)) for k, v in kw.items()
             if v is not None}
+
+
+def _ifs_vdf_lane_kwargs(scheme_name, tracers, phys_state, mesh, ncol, nlev, land_fraction):
+    """turbulence=ifs_vdf lane inputs (vote 9 G1/G9, vote 11 G12), else ``{}``:
+    cloud liquid/ice, the lagged total radiative heating, the filtered-orography
+    std (``mesh.subgrid_topo_filt_stddev``) and the land fraction.  An absent
+    one is passed as ``None`` and refused by the kernel."""
+    if scheme_name != "ifs_vdf":
+        return {}
+    if tracers is None or "q_v" not in tracers:
+        # the bridge would substitute zero vapour and drop its tendency (vote 13 G24)
+        raise ValueError("turbulence=ifs_vdf needs the q_v tracer; this state carries none.")
+
+    def col(x, shape):
+        if x is None:
+            return None
+        return jnp.reshape(jnp.asarray(x.data if hasattr(x, "data") else x), shape)
+
+    trc = tracers or {}
+    return {"q_c": col(trc.get("q_c"), (ncol, nlev)), "q_i": col(trc.get("q_i"), (ncol, nlev)),
+            "rad_heating": col(getattr(phys_state, "rad_heating", None), (ncol, nlev)),
+            "sigflt": col(getattr(mesh, "subgrid_topo_filt_stddev", None), (ncol,)),
+            "land_fraction": col(land_fraction, (ncol,))}
 
 
 def _resolve_T_sfc(T_col, phys_state):
@@ -1444,6 +1473,8 @@ def _make_mpas_turbulence(
                 **_sfc_kw,
                 **_smagorinsky_condensate_kwargs(
                     scheme_name, state.tracers, (nCells, nlev)),
+                **_ifs_vdf_lane_kwargs(scheme_name, state.tracers, phys_state, mesh,
+                                       nCells, nlev, f_land),
             )
         if _liquid_partition and turb_out.dq_c_dt is None:
             raise ValueError(
@@ -1533,9 +1564,10 @@ def _make_mpas_turbulence(
                 )
             else:
                 tracer_tends["q_c"] = turb_out.dq_c_dt.reshape(_qc_raw.shape)
-        if scheme_name == "mynn25":
+        if scheme_name in ("mynn25", "ifs_vdf"):
             # WRF MYNN-EDMF condensate tendencies (vote N6); the lane kwargs
             # refused a state without q_c, q_i is None without an ice tracer.
+            # IFS VDF: its REPQMI correction moves cloud water to vapour.
             for _nm, _dq in (("q_c", turb_out.dq_c_dt),
                              ("q_i", turb_out.dq_i_dt)):
                 if _dq is None:
