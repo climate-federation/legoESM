@@ -43,7 +43,8 @@ _HARD = 1.0e12   # sharpness at the hard-switch limit
 def _hard_config():
     return McFarlaneConfig()._replace(
         min_wind_sharpness=_HARD, softmin_sharpness=_HARD,
-        crit_level_sharpness=_HARD, crit_level_floor=0.0)
+        crit_level_sharpness=_HARD, crit_level_floor=0.0,
+        umcfac_abs_width=0.0, umcfac_sign_width=0.0, taumin_ramp_width=0.0)
 
 
 def _run(f, cfg):
@@ -263,3 +264,50 @@ def test_check_grads_through_the_smoothing_at_default(fx, col, s_star):
     s0 = jnp.asarray(s_star)
     check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-5)
     assert float(jax.grad(f)(s0)) != 0.0
+
+
+# (column, a*): zonal-wind OFFSETS (u + a*) where the umcfac limit's |0 - ubm|
+# kinks (a projected wind crosses 0 in a limited layer; a wind SCALE never
+# moves such a zero).  Found 2026-11-16 by scanning a in [-10, 10] m/s (step
+# 0.01) at widths 0 and bisecting; the jump persists to h = 1e-9 at widths 0
+# and vanishes with umcfac_abs_width alone (#2546).
+_UMCFAC_KINKS = ((1, -0.11720559719624321), (9, -0.19999999999999987))
+_CAM_SWITCHES = dict(umcfac_abs_width=0.0, umcfac_sign_width=0.0, taumin_ramp_width=0.0)
+
+
+def _offset_fn(fx, col, cfg):
+    keys = ("u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho", "lat",
+            "sgh", "lf", "q", "p_ref_half")
+    f1 = {k: jnp.asarray(fx[k][col:col + 1]) if k != "p_ref_half" else jnp.asarray(fx[k])
+          for k in keys}
+
+    def f(a):
+        out = mcfarlane_gwd(
+            f1["u"] + a, f1["v"], f1["T"], f1["p_full"], f1["p_half"], f1["z_full"],
+            f1["z_half"], f1["rho"], f1["lat"], float(fx["dt"]), cfg,
+            h_topo_col=f1["sgh"], p_ref_half=f1["p_ref_half"],
+            land_frac_col=f1["lf"], tracers={"q_v": f1["q"]})
+        return jnp.sum(out.du_dt) + jnp.sum(out.dv_dt) + jnp.sum(out.dT_dt)
+    return jax.jit(f)
+
+
+@pytest.mark.parametrize("col,a_star", _UMCFAC_KINKS)
+def test_check_grads_through_umcfac_abs_and_sign_at_default(fx, col, a_star):
+    """RULE 5 gradient test (#2546): the default's smooth |ubm| / sign pass
+    check_grads where CAM's abs (widths 0) fails.  eps 1e-6: the smooth sign
+    is 1e-3 m/s wide (as in the E3SM test)."""
+    a0 = jnp.asarray(a_star)
+    f = _offset_fn(fx, col, McFarlaneConfig())
+    check_grads(f, (a0,), order=2, modes=("rev",), eps=1e-6)
+    assert float(jax.grad(f)(a0)) != 0.0
+    with pytest.raises(AssertionError):
+        check_grads(_offset_fn(fx, col, McFarlaneConfig()._replace(**_CAM_SWITCHES)),
+                    (a0,), order=2, modes=("rev",), eps=1e-6)
+
+
+@pytest.mark.parametrize("field", sorted(_CAM_SWITCHES))
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), 1.0e-30])
+def test_smoothing_widths_validated(fx, field, bad):
+    """0 (CAM) or a usable width; a negative/NaN/sub-fp32 width raises (#2546)."""
+    with pytest.raises(ValueError, match=field):
+        _run(fx, McFarlaneConfig()._replace(**{field: bad}))

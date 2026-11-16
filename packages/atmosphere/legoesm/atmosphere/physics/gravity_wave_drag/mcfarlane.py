@@ -107,7 +107,13 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
-from legoesm.core.smooth import pnorm_smooth_min
+from legoesm.core.smooth import (
+    abs_tanh,
+    pnorm_smooth_min,
+    sign_tanh,
+    validate_smoothing_width,
+    zero_at_or_below,
+)
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
 __physics_contract__ = {
@@ -335,6 +341,8 @@ def mcfarlane_gwd(
                 "(or negative) model top.  Use a vertical coordinate with a "
                 "positive top pressure."
             )
+    for _w in ("umcfac_abs_width", "umcfac_sign_width", "taumin_ramp_width"):
+        validate_smoothing_width(_w, getattr(config, _w))
     config = config._replace(
         use_e3sm_hdsp=(_hdsp is True)
         or (_hdsp == "auto" and h_topo_col is not None),
@@ -394,6 +402,7 @@ def mcfarlane_gwd(
     )[0]
     kwv = config.k_wave
     floor = config.crit_level_floor
+    cap_eps = _TAUMIN_PA if config.taumin_ramp_width == 0.0 else 0.0
 
     def stress_step(tau_below, j):
         ub = ubi[:, j]
@@ -409,11 +418,13 @@ def mcfarlane_gwd(
         mi = ni[:, j] / (2.0 * kwv * ubmc2) * (alpha[j] + ni[:, j] ** 2 / ubmc2 * _DBACK)
         taudmp = tau_below * jnp.exp(
             -2.0 * mi * (R_d / g) * T[:, j] * (piln[:, j + 1] - piln[:, j]))
-        tausat = jnp.where(tausat <= _TAUMIN_PA, 0.0, tausat)
-        taudmp = jnp.where(taudmp <= _TAUMIN_PA, 0.0, taudmp)
+        tausat = zero_at_or_below(tausat, _TAUMIN_PA, config.taumin_ramp_width)
+        taudmp = zero_at_or_below(taudmp, _TAUMIN_PA, config.taumin_ramp_width)
         # Smooth min(taudmp, tausat): p-norm, p = softmin_sharpness (the
-        # Lindzen form, #2241); exact min at softmin_sharpness -> inf.
-        tau_new = pnorm_smooth_min(taudmp, tausat, config.softmin_sharpness, _TAUMIN_PA)
+        # Lindzen form, #2241); exact min at softmin_sharpness -> inf.  The
+        # taumin ramp leaves stresses in (0, taumin], so the cap's eps
+        # contract (inputs <= eps zeroed) takes eps 0 there (as e3sm_cam).
+        tau_new = pnorm_smooth_min(taudmp, tausat, config.softmin_sharpness, cap_eps)
         tau_new = jnp.where(tausat > 0.0, tau_new, 0.0)
         # Interfaces at and below src_level hold tau0 (gw_oro.F90 source hold).
         tau_new = jnp.where(j < src_level, tau_new, tau_below)
@@ -430,14 +441,23 @@ def mcfarlane_gwd(
         ubtl = g * (tau[:, j + 1] - tau_top) / dp[:, j]
         # umcfac and tndmax limiters: the same p-norm smooth min as the
         # stress cap (#2241), exact min at softmin_sharpness -> inf.
-        ubtl = pnorm_smooth_min(jnp.abs(ubtl), config.umcfac * jnp.abs(0.0 - ubm[:, j]) / dt,
+        # RULE 5 (#2546): |0 - ubm| -> x*tanh(x/w) and its sign -> tanh(x/ws)
+        # (the E3SM forms of #2241); widths 0 are CAM's abs and sign.
+        cmu = 0.0 - ubm[:, j]
+        ubtl = pnorm_smooth_min(jnp.abs(ubtl),
+                                config.umcfac * abs_tanh(cmu, config.umcfac_abs_width) / dt,
                                 config.softmin_sharpness, 0.0)
         ubtl = pnorm_smooth_min(ubtl, jnp.full_like(ubtl, tndmax),
                                 config.softmin_sharpness, 0.0)
-        gwut = jnp.where((0.0 - ubm[:, j]) >= 0.0, ubtl, -ubtl)
+        if config.umcfac_sign_width == 0.0:
+            gwut = jnp.where(cmu >= 0.0, ubtl, -ubtl)
+        else:
+            gwut = sign_tanh(cmu, config.umcfac_sign_width) * ubtl
         # The limited stress divergence is carried to the layer below
         # (CAM "redetermine the effective stress on the interface below").
-        tau_below = tau_top + jnp.abs(gwut) * dp[:, j] / g
+        # CAM's |gwut| is ubtl (>= 0) exactly; ubtl keeps it so under the
+        # smooth sign (|tanh| < 1, and kinked at ubm = 0), as in e3sm_cam.
+        tau_below = tau_top + ubtl * dp[:, j] / g
         return tau_below, (gwut, tau_below)
 
     _, (ubt, tau_lim) = jax.lax.scan(tend_step, tau[:, 0], jnp.arange(nlev))

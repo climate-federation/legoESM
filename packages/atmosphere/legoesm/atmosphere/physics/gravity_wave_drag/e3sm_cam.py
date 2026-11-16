@@ -191,7 +191,14 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
-from legoesm.core.smooth import pnorm_smooth_min, smoothstep_quintic, validate_smoothing_width
+from legoesm.core.smooth import (
+    abs_tanh,
+    pnorm_smooth_min,
+    sign_tanh,
+    smoothstep_quintic,
+    validate_smoothing_width,
+    zero_at_or_below,
+)
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
 # to the top-level driver ``e3sm_cam_gwd``; the ``gw_*`` functions above/below
@@ -1140,9 +1147,7 @@ def gw_drag_prof(
     validate_smoothing_width("taumin_ramp_width", taumin_ramp_width)
 
     def zero_below_taumin(tau):
-        if taumin_ramp_width == 0.0:
-            return jnp.where(tau <= cfg.taumin, 0.0, tau)
-        return tau * smoothstep_quintic((tau - cfg.taumin) / taumin_ramp_width)
+        return zero_at_or_below(tau, cfg.taumin, taumin_ramp_width)
 
     # the ramp leaves stresses in (0, taumin], so the cap's eps contract
     # (inputs <= eps zeroed) needs eps 0 there (pnorm_smooth_min docstring).
@@ -1313,10 +1318,8 @@ def gw_drag_prof(
         # RULE 5 (#2241): |c-u| -> (c-u)*tanh((c-u)/w) and, below, sign(c-u)
         # -> tanh((c-u)/ws); smoothing only the |.| would leave the signed
         # tendency ~ sign(x)*x^2/w, C1 but not C2, at a critical level.
-        abs_cmu = (jnp.abs(cmu) if umcfac_abs_width == 0.0
-                   else cmu * jnp.tanh(cmu / umcfac_abs_width))
-        sign_cmu = (jnp.sign(cmu) if umcfac_sign_width == 0.0
-                    else jnp.tanh(cmu / umcfac_sign_width))
+        abs_cmu = abs_tanh(cmu, umcfac_abs_width)
+        sign_cmu = sign_tanh(cmu, umcfac_sign_width)
         limits = [cfg.umcfac * abs_cmu / dt, jnp.full_like(cmu, tndmax)]
         if is_oro:
             limits.insert(0, effkwv * jnp.abs(cmu) ** 3 / (
