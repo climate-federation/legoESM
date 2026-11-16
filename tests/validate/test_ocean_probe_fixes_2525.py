@@ -76,3 +76,10 @@ def test_missing_bounds_or_empty_window_is_fatal():
         m.daily_record_bounds(_DS(time_counter=_Var([0.0])), 0)
     with pytest.raises(SystemExit, match="no hourly record"):
         m.records_in_window(np.array([5.0e5]), (0.0, 86400.0))
+
+
+def test_truncated_hourly_window_is_fatal():
+    m = _load("tracer_variance_budget_nemo")
+    hourly = np.arange(1, 13) * 3600.0 - 1800.0       # only 12 of 24 hours
+    with pytest.raises(SystemExit, match="needed to cover"):
+        m.records_in_window(hourly, (0.0, 86400.0))

@@ -85,6 +85,13 @@ def records_in_window(times, bounds):
     idx = np.where((t > lo) & (t <= hi))[0]
     if idx.size == 0:
         raise SystemExit(f"FATAL: no hourly record in daily window ({lo}, {hi}]")
+    # The window must be COVERED, not merely touched: a truncated hourly file
+    # would otherwise average fewer hours than the daily record (codex).
+    dt = float(np.median(np.diff(t))) if t.size > 1 else hi - lo
+    need = int(round((hi - lo) / dt))
+    if idx.size != need:
+        raise SystemExit(f"FATAL: {idx.size} hourly records in daily window "
+                         f"({lo}, {hi}], {need} needed to cover it")
     return [int(i) for i in idx]
 
 
@@ -170,8 +177,11 @@ def main() -> int:
         Tsum = T if Tsum is None else Tsum + T
         Ssum = S if Ssum is None else Ssum + S
         e3sum = e3 if e3sum is None else e3sum + e3
-    if n_valid == 0:
-        raise SystemExit("FATAL: no hourly record carries both state and trends")
+    if n_valid != len(recs):
+        raise SystemExit(f"FATAL: only {n_valid} of the {len(recs)} hourly "
+                         "records in the daily window carry both state and "
+                         "trends; the exact and daily-mean budgets would cover "
+                         "different hours")
     chi_exact_T /= n_valid
     chi_exact_S /= n_valid
     Tbar, Sbar, e3bar = Tsum / n_valid, Ssum / n_valid, e3sum / n_valid
