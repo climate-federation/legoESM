@@ -12615,7 +12615,11 @@ def main() -> int:
             # when the snapshot block above already did).
             state = _ensure_global_state(state)
             _write_run_restart(step, step * dt / _SEC_PER_DAY, state, ice_state)
-        if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
+        # The final step is written after the loop, together with
+        # snapshot_final, so the window means are drained once and land in
+        # both files (#2525: draining here left snapshot_final without them).
+        if (not args.smoke and steps_per_year > 0 and step % steps_per_year == 0
+                and step != n_steps):
             yr = step // steps_per_year
             state = _ensure_global_state(state)
             # codex: drain here as well, or a window silently SPANS the
@@ -12634,11 +12638,17 @@ def main() -> int:
     # state digest all need the full staggered-v global layout (one gather).
     state = _ensure_global_state(state)
     _io = _is_io_proc()
+    _final_extra = _snapshot_extra(args, model, state, sf, dt, z_coord,
+                                   _flux_acc)
+    _final_day = n_steps * dt / _SEC_PER_DAY
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
                    io_proc=_io, ice_state=ice_state, grid=grid,
-                   step=step, day=day,
-                   extra=_snapshot_extra(args, model, state, sf, dt,
-                                         z_coord, _flux_acc))
+                   step=n_steps, day=_final_day, extra=_final_extra)
+    if not args.smoke and steps_per_year > 0 and n_steps % steps_per_year == 0:
+        _save_snapshot(out_dir, f"year{n_steps // steps_per_year:03d}", state,
+                       lat2d, lon2d, z_coord=z_coord, grid=grid, io_proc=_io,
+                       ice_state=ice_state, extra=_final_extra)
+        print(f"[snapshot] year {n_steps // steps_per_year} saved", flush=True)
     _write_run_restart(n_steps, n_steps * dt / _SEC_PER_DAY, state, ice_state)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)

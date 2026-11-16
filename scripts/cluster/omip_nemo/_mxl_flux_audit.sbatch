@@ -28,6 +28,8 @@
 #
 # Record 0:1 is the five-day window ENDING at day 5, matching both snapshots.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 R=/burg-archive/glab/users/pg2328/legoESM; cd $R || exit 1
 M=/burg-archive/glab/users/pg2328/_omip_merge
 echo "MAIN HEAD: $(git log --oneline -1)"
@@ -53,3 +55,4 @@ for pair in "mxl3_ctl:$CTL" "mxl4_arm:$ARM"; do
   echo "### $LAB rc=$?"
 done
 echo DONE
+exit ${RC:-0}

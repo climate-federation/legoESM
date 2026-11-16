@@ -57,7 +57,8 @@ def _row(rows, name):
 
 def test_known_answer_recovers_the_planted_prandtl():
     K_H, K_M, avt, avm, wet, lat, lon = _fields()
-    rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon)
+    rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon,
+                                    k_wave=0 * K_H)
     r = _row(rows, "nino3")
     # Floors excluded => 5 of 6 interfaces survive.
     assert r["n"] == NCOL * (NIFACE - 1)
@@ -74,7 +75,8 @@ def test_saturated_prandtl_is_flagged_not_hidden():
     """A Pr median sitting on the 10.0 clamp must report at_ceil == 1."""
     K_H, K_M, avt, avm, wet, lat, lon = _fields()
     K_H = K_M / 10.0
-    rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon)
+    rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon,
+                                    k_wave=0 * K_H)
     r = _row(rows, "nino3")
     assert r["Pr_ours_median"] == pytest.approx(10.0, rel=1e-12)
     assert r["Pr_ours_frac_at_ceiling"] == 1.0
@@ -85,7 +87,8 @@ def test_control_fires_when_nemo_prandtl_sign_is_broken():
     K_H, K_M, avt, avm, wet, lat, lon = _fields()
     avt[:, 1:] = avm[:, 1:] * 2.0            # Pr_nemo = 0.5: cannot happen
     with pytest.raises(SystemExit, match="avt exceeds its avm"):
-        ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon)
+        ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon,
+                                    k_wave=0 * K_H)
 
 
 def test_control_tolerates_the_inversion_in_evd_columns():
@@ -96,7 +99,7 @@ def test_control_tolerates_the_inversion_in_evd_columns():
     evd[NCOL // 2:] = True
     avt[evd, 1:] = 100.0                     # rn_evd
     rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon,
-                                    evd_cols=evd)
+                                    evd_cols=evd, k_wave=0 * K_H)
     assert _row(rows, "nino3/calm")["Pr_nemo_median"] == pytest.approx(PR_NEMO)
 
 
@@ -107,7 +110,8 @@ def test_depth_split_separates_the_thermocline_from_the_abyss():
                 (NCOL, 1))
     K_H = K_M / np.where(z <= 300.0, PR_OURS, 10.0)   # saturated only deep
     rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon,
-                                    z_iface=z, z_cuts_m=(300.0,))
+                                    z_iface=z, z_cuts_m=(300.0,),
+                                    k_wave=0 * K_H)
     shallow = _row(rows, "nino3<300m")
     assert shallow["Pr_ours_median"] == pytest.approx(PR_OURS, rel=1e-12)
     assert shallow["Pr_ours_frac_at_ceiling"] == 0.0
@@ -126,8 +130,45 @@ def test_ri_ratio_uses_only_the_both_unclamped_subset():
     # excluded, leaving the planted PR_OURS/PR_NEMO on the rest.
     K_H = K_M / PR_OURS
     K_H[: NCOL // 2, :] = K_M[: NCOL // 2, :] / 10.0
-    rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon)
+    rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon,
+                                    k_wave=0 * K_H)
     r = _row(rows, "nino3")
     assert r["Pr_ours_frac_at_ceiling"] == pytest.approx(0.5, rel=1e-12)
     assert r["n_both_unclamped"] == (NCOL // 2) * (NIFACE - 1)
     assert r["Ri_ratio_median"] == pytest.approx(PR_OURS / PR_NEMO, rel=1e-12)
+
+
+# --- #2525: avm/avt carries IWM on ORCA1, so it is not the closure Prandtl ---
+
+def test_iwm_on_both_sides_is_removed_before_the_prandtl():
+    """K_wave added to avt, avm, K_H and K_M (as zdf_iwm and the probe do)
+    must not move the closure Prandtl the report recovers."""
+    K_H, K_M, avt, avm, wet, lat, lon = _fields()
+    kw = np.full_like(K_H, 3.0e-3)
+    rows = ctn.prandtl_split_report(K_H + kw, K_M + kw, avt + kw, avm + kw,
+                                    wet, lat, lon, k_wave=kw)
+    r = _row(rows, "nino3")
+    assert r["Pr_nemo_median"] == pytest.approx(PR_NEMO, rel=1e-12)
+    assert r["Pr_ours_median"] == pytest.approx(PR_OURS, rel=1e-12)
+    assert r["Ri_ratio_median"] == pytest.approx(PR_OURS / PR_NEMO, rel=1e-12)
+
+
+def test_no_iwm_estimate_reports_no_prandtl():
+    """Without K_wave there is no closure Prandtl: NaN, never avm/avt."""
+    K_H, K_M, avt, avm, wet, lat, lon = _fields()
+    rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon)
+    r = _row(rows, "nino3")
+    assert r["K_M_over_avm_rms"] == pytest.approx(1.0, rel=1e-12)
+    for k in ("Pr_nemo_median", "Pr_ours_median", "Ri_ratio_median",
+              "Pr_ours_frac_at_ceiling"):
+        assert np.isnan(r[k]), k
+
+
+def test_evd_columns_report_no_prandtl():
+    K_H, K_M, avt, avm, wet, lat, lon = _fields()
+    evd = np.zeros(NCOL, dtype=bool)
+    evd[NCOL // 2:] = True
+    avt[evd, 1:] = 100.0
+    rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon,
+                                    evd_cols=evd, k_wave=0 * K_H)
+    assert np.isnan(_row(rows, "nino3/evd")["Pr_nemo_median"])

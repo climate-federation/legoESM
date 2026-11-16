@@ -35,11 +35,18 @@ TAG=$(printf 'day%04d' "$DAY")
 
 TRP=${TRP:-trp_orca1faithtint_d30}
 MPAS=${MPAS:-mpas_gmtreguier_d30}
-snap() {   # run dir -> snapshot for DAY, falling back to final when that is
-           # the run's target day (the Treguier arm wrote only snapshot_final)
+snap() {   # run dir -> snapshot for DAY, falling back to final ONLY when the
+           # final snapshot's own stamped day is DAY (the Treguier arm wrote
+           # only snapshot_final; #2525: the fallback used to be unconditional)
   local f=$R/$1/snapshot_$TAG.npz
-  [ -r "$f" ] || f=$R/$1/snapshot_final.npz
-  [ -r "$f" ] || { echo "FATAL: $1 has no day-$DAY snapshot" >&2; return 1; }
+  if [ ! -r "$f" ]; then
+    f=$R/$1/snapshot_final.npz
+    [ -r "$f" ] || { echo "FATAL: $1 has no day-$DAY snapshot" >&2; return 1; }
+    $PY -c "import sys, numpy as np; z = np.load(sys.argv[1]); \
+d = float(z['time_days']) if 'time_days' in z.files else float('nan'); \
+sys.exit(0 if abs(d - float(sys.argv[2])) < 1e-6 else \
+f'FATAL: {sys.argv[1]} is day {d}, not day {sys.argv[2]}')" "$f" "$DAY" || return 1
+  fi
   echo "$f"
 }
 ST=$(snap "$TRP") || exit 1

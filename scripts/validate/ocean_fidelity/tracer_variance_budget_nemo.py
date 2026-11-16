@@ -66,6 +66,28 @@ def _fill(x):
     return np.asarray(x, dtype=np.float64)
 
 
+def daily_record_bounds(ds, rec):
+    """(lo, hi) of record ``rec`` from time_counter's CF ``bounds`` variable."""
+    tc = ds.variables["time_counter"]
+    bname = getattr(tc, "bounds", None)
+    if bname is None or bname not in ds.variables:
+        raise SystemExit("FATAL: daily file's time_counter has no bounds "
+                         "variable; cannot tell which hours its record covers")
+    lo, hi = (float(x) for x in np.asarray(ds.variables[bname][rec]))
+    return lo, hi
+
+
+def records_in_window(times, bounds):
+    """Indices of ``times`` inside the half-open window (lo, hi] (#2525: the
+    hourly state average must span the same hours as the daily record)."""
+    lo, hi = bounds
+    t = np.asarray(times, dtype=np.float64)
+    idx = np.where((t > lo) & (t <= hi))[0]
+    if idx.size == 0:
+        raise SystemExit(f"FATAL: no hourly record in daily window ({lo}, {hi}]")
+    return [int(i) for i in idx]
+
+
 def chi(tr, tend, dV, wet):
     """2 * integral(tracer' * tendency) dV, with tracer' about the
     VOLUME-WEIGHTED mean over the same wet cells the integral uses."""
@@ -94,9 +116,16 @@ def main() -> int:
     import netCDF4 as nc
     e1t, e2t, _e3t_ref, tmask = load_mesh_metrics(a.mesh_mask)
 
+    dd = nc.Dataset(a.daily_trd)
     dh = nc.Dataset(a.hourly_trd)
     nt = len(dh.dimensions["time_counter"])
-    print(f"[hourly] {nt} records")
+    _u = [getattr(d.variables["time_counter"], "units", None) for d in (dd, dh)]
+    if _u[0] != _u[1]:
+        raise SystemExit(f"FATAL: daily/hourly time_counter units differ: {_u}")
+    recs = records_in_window(dh.variables["time_counter"][:],
+                             daily_record_bounds(dd, 0))
+    print(f"[hourly] {nt} records, {len(recs)} inside daily record 0 "
+          f"({recs[0]}..{recs[-1]})")
 
     # EXACT zdf variance decay: hour by hour on instantaneous fields.
     chi_exact_T = 0.0
@@ -105,7 +134,7 @@ def main() -> int:
     Tsum = None
     Ssum = None
     e3sum = None
-    for r in range(nt):
+    for r in recs:
         T = _fill(dh.variables["votemper"][r])
         S = _fill(dh.variables["vosaline"][r])
         e3 = _fill(dh.variables["e3t"][r])
@@ -146,10 +175,10 @@ def main() -> int:
     chi_exact_T /= n_valid
     chi_exact_S /= n_valid
     Tbar, Sbar, e3bar = Tsum / n_valid, Ssum / n_valid, e3sum / n_valid
-    print(f"[exact] averaged over {n_valid} of {nt} hourly records")
+    print(f"[exact] averaged over {n_valid} of {len(recs)} hourly records "
+          "in daily record 0")
     print(f"[exact]  chi_zdf theta {chi_exact_T:+.6e}   salt {chi_exact_S:+.6e}")
 
-    dd = nc.Dataset(a.daily_trd)
     e3d = _fill(dd.variables["e3t"][0])
     dV = e1t[None] * e2t[None] * e3d
     wetT = np.isfinite(Tbar) & (tmask > 0.5)
@@ -169,7 +198,7 @@ def main() -> int:
     res = {"chi_zdf_exact": {"theta": chi_exact_T, "salt": chi_exact_S},
            "chi_zdf_daily_mean": {"theta": chi_approx_T, "salt": chi_approx_S},
            "daily_mean_over_exact": {"theta": rT, "salt": rS},
-           "n_hourly_records": nt, "operators": {}}
+           "n_hourly_records": len(recs), "operators": {}}
 
     for tag, ops, tr in (("theta", T_OPS, Tbar), ("salt", S_OPS, Sbar)):
         print(f"\n=== {tag}: variance decay by operator (negative = destroys "
