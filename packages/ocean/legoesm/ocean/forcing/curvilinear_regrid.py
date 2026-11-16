@@ -107,3 +107,30 @@ def estimate_curvilinear_cell_area(lat_deg, lon_deg):
     dlat = np.abs(np.gradient(lat, axis=-2))
     return (constants.R_earth ** 2 * np.cos(np.deg2rad(lat))
             * np.deg2rad(dlon) * np.deg2rad(dlat))
+
+
+def nearest_centre_index(src_lon_deg, src_lat_deg, tgt_lon_deg, tgt_lat_deg) -> np.ndarray:
+    """Flat index of the nearest TARGET cell centre (unit sphere) for every
+    source cell -- the repo's first-order curvilinear locator, source->target.
+
+    Returns an integer array of the source shape indexing the flattened target.
+    """
+    from scipy.spatial import cKDTree
+
+    tgt = unit_sphere_xyz(tgt_lon_deg, tgt_lat_deg).reshape(-1, 3)
+    src = unit_sphere_xyz(src_lon_deg, src_lat_deg)
+    _, idx = cKDTree(tgt).query(src.reshape(-1, 3), k=1)
+    return idx.reshape(np.shape(src_lat_deg))
+
+
+def layer_overlap_thickness(src_top, src_bot, dst_top, dst_bot) -> np.ndarray:
+    """Thickness [m] shared by each source layer and each destination layer.
+
+    Depths positive down.  ``src_*`` have shape ``(..., n_src)``, ``dst_*``
+    ``(..., n_dst)`` with matching leading axes; returns ``(..., n_src, n_dst)``.
+    A conservative vertical remap is ``sum_src overlap * value`` divided by
+    ``sum_src overlap`` per destination layer.
+    """
+    st, sb = np.asarray(src_top)[..., :, None], np.asarray(src_bot)[..., :, None]
+    dt, db = np.asarray(dst_top)[..., None, :], np.asarray(dst_bot)[..., None, :]
+    return np.maximum(0.0, np.minimum(sb, db) - np.maximum(st, dt))
