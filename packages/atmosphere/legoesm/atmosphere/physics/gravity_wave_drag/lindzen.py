@@ -63,7 +63,8 @@ hard.  Since #2241 (2026-11-12) the same p (``Fr_sharpness``) also smooths
 the tendency limiters (orographic saturation, ``umcfac``, ``tndmax``),
 ``dscal = min(1, .)``, the diffusivity ``max(dback, .)`` and the launch Froude
 cap ``min(hdsp^2, fcrit2 (U/N)^2)``; since 2026-11-16 ``umcfac_abs_width``
-(0.01 m/s, the smooth ``|ubm|`` of the ``umcfac`` limit) and
+(0.01 m/s, the smooth ``|ubm|`` of the ``umcfac`` limit),
+``umcfac_sign_width`` (1e-3 m/s, the smooth sign of the tendency) and
 ``taumin_ramp_width`` (1e-10 Pa, the ``taumin`` zeroing as a quintic ramp)
 smooth the last two switches on model state (#2241; per-column gap below
 unchanged to 1e-6 relative).  The production smoothing values are NOT
@@ -217,6 +218,7 @@ def lindzen_gwd(
         crit_level_floor=config.crit_level_floor,
         tndmax_per_day=config.tndmax_per_day,
         umcfac_abs_width=config.umcfac_abs_width,
+        umcfac_sign_width=config.umcfac_sign_width,
         taumin_ramp_width=config.taumin_ramp_width,
     )
 

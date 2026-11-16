@@ -83,7 +83,7 @@ def fx():
 
 
 _HARD = dict(softmin_sharpness=1.0e12, crit_level_sharpness=1.0e12, crit_level_floor=0.0,
-             umcfac_abs_width=0.0, taumin_ramp_width=0.0)
+             umcfac_abs_width=0.0, umcfac_sign_width=0.0, taumin_ramp_width=0.0)
 
 
 def _config(ours, hard=True):
@@ -147,9 +147,10 @@ def test_matches_e3sm_oracle(fx, arm, ds):
 # softmin_sharpness 50, crit_level_sharpness 100, crit_level_floor 0) vs the
 # oracle: du/dv per column (metric of _rel_err, per column), dT as the field
 # max-norm over flat columns.  Measured 2026-11-12, re-measured 2026-11-16 when the
-# umcfac |c - u| (0.01 m/s) and taumin (1e-10 Pa) widths landed (#2241: only
-# background_dt1800 moved beyond 1e-5 relative, max du 2.65e-3 -> 7.88e-3; flat-column
-# dT in three other L36 arms moved < 5e-6 relative); a change to a smooth
+# umcfac |c - u| (0.01 m/s), sign (1e-3 m/s) and taumin (1e-10 Pa) widths
+# landed (#2241: only background_dt1800 moved beyond 1e-5 relative, max du
+# 2.65e-3 -> 7.88e-3, dT field 1.02e-3 -> 6.74e-3; flat-column dT in three
+# other L36 arms moved < 5e-6 relative); a change to a smooth
 # form or a default width re-measures these (CLAUDE.md RULE 5).
 _DEFAULT_GAP = {
     'background/l36': {
@@ -167,8 +168,8 @@ _DEFAULT_GAP = {
     'background_dt1800/l36': {
         'du': [0.002108721345086995, 0.0010616902333161087, 0.002646053370863181, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071295903564, 0.007878700328799434],
         'dv': [0.0021087213450869256, 0.0010616902333162653, 0.002646053370863179, 0.002210858303638304, 0.0, 0.0, 0.00124560712959019, 0.0],
-        'dT_field': 0.006730735561512934,
-        'dT_cols_flat': [0.0039012106087277254, 0.0008934106656589562, 0.002919245822167362, 0.009024134388708792, 0.0008366734677625923, 0.003367887182159502, 0.006730735561512934],
+        'dT_field': 0.006739966027246468,
+        'dT_cols_flat': [0.0039012106087277254, 0.0008934106656589562, 0.002919245822167362, 0.009024134388708792, 0.0008366734677625923, 0.003367887182159502, 0.006739966027246468],
     },
     'frontal_taper/l36': {
         'du': [0.0, 0.0, 0.0019715720332921342, 0.002044083485452372, 0.0, 0.0, 0.002221890296605758, 0.0],
@@ -235,22 +236,25 @@ def test_default_smoothing_gap_per_case(fx, arm, ds):
 # the HARD-limit tendency of that column has a derivative jump, found
 # 2026-11-12 by scanning s in [0.8, 1.2] (step 5e-4) and bisecting; check_grads
 # fails there at the hard limit and passes at the default (#2241).
-_KINKS = (("convective_frontal/l36", 3, 0.8178145073179883),
-          ("frontal_taper/l36", 3, 0.8178145073179883),
-          ("oro_frontal_convective/l36", 0, 0.9330450443017286),
-          ("oro_frontal_convective/l36", 3, 0.8178145073179883),
+_KINKS = (("convective_frontal/l36", 3, 0.8178145073179883, 1e-5),
+          ("frontal_taper/l36", 3, 0.8178145073179883, 1e-5),
+          ("oro_frontal_convective/l36", 0, 0.9330450443017286, 1e-5),
+          ("oro_frontal_convective/l36", 3, 0.8178145073179883, 1e-5),
           # #2241 (2026-11-16, scan of d f/ds at the default +-5e-5 around each
           # earlier candidate, patched variants): the |c - u| of the umcfac
           # limit (43 of 66 candidates; this one was the unattributed kink) and
           # the taumin zeroing (3 of 66).  Each is removed by its width field.
-          ("background/l36", 0, 0.8228612252375684),      # umcfac |c - u|
-          ("background/l32", 1, 0.8298968),               # umcfac |c - u|
-          ("background/l36", 3, 0.8242109368577084))      # taumin zeroing
+          # eps 1e-6 at the umcfac cases: the smooth sign is 1e-3 m/s wide,
+          # finer than u*1e-5 resolves (f'' measured continuous; vote 3-0).
+          ("background/l36", 0, 0.8228612252375684, 1e-6),      # umcfac |c - u|
+          ("background/l32", 1, 0.8298968, 1e-6),               # umcfac |c - u|, sign
+          ("background/l36", 3, 0.8242109368577084, 1e-5))      # taumin zeroing
 
 
-@pytest.mark.parametrize("case,col,s_star", _KINKS)
-def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star):
-    """RULE 5 gradient test at the default; reverse mode, eps 1e-5 (Lindzen)."""
+@pytest.mark.parametrize("case,col,s_star,eps", _KINKS)
+def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps):
+    """RULE 5 gradient test at the default; reverse mode, eps 1e-5 (Lindzen)
+    unless the switch's width needs a finer step."""
     z, meta, table = fx
     arm, ds = case.split("/")
     m = meta["arms"][arm]
@@ -265,13 +269,13 @@ def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star):
 
     f = make(_config(m["ours"], hard=False))
     s0 = jnp.asarray(s_star)
-    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-5)
+    check_grads(f, (s0,), order=2, modes=("rev",), eps=eps)
     assert float(jax.grad(f)(s0)) != 0.0
     with pytest.raises(AssertionError):          # the hard limit has the kink
-        check_grads(make(_config(m["ours"])), (s0,), order=2, modes=("rev",), eps=1e-5)
+        check_grads(make(_config(m["ours"])), (s0,), order=2, modes=("rev",), eps=eps)
 
 
-@pytest.mark.parametrize("field", ["umcfac_abs_width", "taumin_ramp_width"])
+@pytest.mark.parametrize("field", ["umcfac_abs_width", "umcfac_sign_width", "taumin_ramp_width"])
 @pytest.mark.parametrize("bad", [-1.0, float("nan"), 1.0e-30])
 def test_smoothing_widths_validated(fx, field, bad):
     """0 (E3SM) or a usable width; a negative/NaN/sub-fp32 width raises (#2241)."""

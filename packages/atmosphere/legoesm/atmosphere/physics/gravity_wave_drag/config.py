@@ -72,6 +72,7 @@ __param_spec__ = {
             "crit_level_floor": "(u - c) offset at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure (default 0 = E3SM)",
             "umcfac_abs_width": "numerics: width of the smooth |c - u| in the umcfac tendency limit (RULE 5, #2241; 0 = E3SM's |x|), value voted by Claude+GLM+codex",
             "taumin_ramp_width": "numerics: width [Pa] of the smooth taumin stress zeroing (RULE 5, #2241; 0 = E3SM's hard zeroing), value voted by Claude+GLM+codex",
+            "umcfac_sign_width": "numerics: width of the smooth sign(c - u) of the limited tendency (RULE 5, #2241; 0 = E3SM's sign), value voted by Claude+GLM+codex",
         },
         "params": {
             # --- efficiency (primary amplitude knob) ---
@@ -150,6 +151,7 @@ __param_spec__ = {
             "oro_wind_ramp_width": "numerics: smooth-switch width of the U > oro_min_wind launch gate (RULE 5), value decided by codex+GLM (#2241)",
             "umcfac_abs_width": "numerics: width of the smooth |c - u| in the umcfac tendency limit (RULE 5, #2241; 0 = E3SM's |x|), value voted by Claude+GLM+codex",
             "taumin_ramp_width": "numerics: width [Pa] of the smooth taumin stress zeroing (RULE 5, #2241; 0 = E3SM's hard zeroing), value voted by Claude+GLM+codex",
+            "umcfac_sign_width": "numerics: width of the smooth sign(c - u) of the limited tendency (RULE 5, #2241; 0 = E3SM's sign), value voted by Claude+GLM+codex",
         },
         "params": {
             # --- orographic launch amplitude ---
@@ -301,8 +303,14 @@ class LindzenConfig(NamedTuple):
         Width [m/s] of the smooth ``|c - u|`` in the ``umcfac`` tendency limit
         ``umcfac*|c - u|/dt`` (RULE 5, #2241; default 0.01, Claude/GLM/codex
         vote 3-0): ``(c-u)*tanh((c-u)/w)``, 0 at a critical level, never above
-        ``|c - u|``.  ``0.0`` is E3SM's ``abs``, whose kink at a critical level
-        propagates down through the re-derived stress.
+        ``|c - u|``.  ``0.0`` is E3SM's ``abs``, whose kink at a critical
+        level propagates down through the re-derived stress.
+    umcfac_sign_width : float
+        Width [m/s] of the smooth ``sign(c - u)`` the limited tendency takes,
+        ``tanh((c-u)/ws)`` (RULE 5, #2241; default 1e-3, vote 3-0: with the
+        smooth ``|c - u|`` alone the signed tendency is ~ ``x|x|/w``, C1 but
+        not C2; 1e-3 leaves the oracle gap of the smooth ``|c - u|``
+        unchanged, 0.01 raised it to 2.6e-2).  ``0.0`` is E3SM's ``sign``.
     taumin_ramp_width : float
         Width [Pa] of the smooth ``taumin`` zeroing of ``tausat``/``taudmp``
         (RULE 5, #2241; default 1e-10 = ``taumin``, vote 3-0): the stress is
@@ -320,6 +328,7 @@ class LindzenConfig(NamedTuple):
     umcfac: float = 0.5
     oro_wind_ramp_width: float = 0.5
     umcfac_abs_width: float = 0.01
+    umcfac_sign_width: float = 1.0e-3
     taumin_ramp_width: float = 1.0e-10
 
 
@@ -912,8 +921,14 @@ class E3SMCAMConfig(NamedTuple):
         Width [m/s] of the smooth ``|c - u|`` in the ``umcfac`` tendency limit
         ``umcfac*|c - u|/dt`` (RULE 5, #2241; default 0.01, Claude/GLM/codex
         vote 3-0): ``(c-u)*tanh((c-u)/w)``, 0 at a critical level, never above
-        ``|c - u|``.  ``0.0`` is E3SM's ``abs``, whose kink at a critical level
-        propagates down through the re-derived stress.
+        ``|c - u|``.  ``0.0`` is E3SM's ``abs``, whose kink at a critical
+        level propagates down through the re-derived stress.
+    umcfac_sign_width : float
+        Width [m/s] of the smooth ``sign(c - u)`` the limited tendency takes,
+        ``tanh((c-u)/ws)`` (RULE 5, #2241; default 1e-3, vote 3-0: with the
+        smooth ``|c - u|`` alone the signed tendency is ~ ``x|x|/w``, C1 but
+        not C2; 1e-3 leaves the oracle gap of the smooth ``|c - u|``
+        unchanged, 0.01 raised it to 2.6e-2).  ``0.0`` is E3SM's ``sign``.
     taumin_ramp_width : float
         Width [Pa] of the smooth ``taumin`` zeroing of ``tausat``/``taudmp``
         (RULE 5, #2241; default 1e-10 = ``taumin``, vote 3-0): the stress is
@@ -950,6 +965,7 @@ class E3SMCAMConfig(NamedTuple):
     crit_level_sharpness: float = 100.0
     crit_level_floor: float = 0.0
     umcfac_abs_width: float = 0.01
+    umcfac_sign_width: float = 1.0e-3
     taumin_ramp_width: float = 1.0e-10
 
 
