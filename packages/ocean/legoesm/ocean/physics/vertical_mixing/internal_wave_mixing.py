@@ -194,6 +194,13 @@ class IWMConfig(NamedTuple):
     power_sho_wm2: float = 1.0e-10   # uniform fallback [W/m²]
     scale_bot_m: float = 100.0       # uniform fallback [m]
     scale_cri_m: float = 100.0       # uniform fallback [m]
+    # N² fed to the wave formula: "nemo_bn2" (DEFAULT, user 2026-10-06: NEMO
+    # zdfiwm reads rn2 = eosbn2 bn2, zdfiwm.F90:185-211) or "insitu" (the
+    # pre-2026-10-06 behaviour: in-situ density contrast, carries
+    # compressibility so a neutral layer never reads N²<=0 and the wave
+    # viscosity never saturates at night).
+    n2_mode: str = "nemo_bn2"
+    n2_eos_form: str = "teos10"      # alpha/beta for nemo_bn2: teos10 (ORCA1) | seos
     # A card that reads real de Lavergne maps sets this, so a host that
     # forgets to thread them gets a refusal instead of the uniform
     # constant-power fallback, which is different physics.
