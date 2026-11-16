@@ -64,10 +64,15 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
-from legoesm.atmosphere.physics._ifs_thermo import satur_qsat
+from legoesm.atmosphere.physics._ifs_thermo import lego_thermo, satur_qsat
 from legoesm.atmosphere.physics.convection._ifs_cuascent import cubasen, cuinin
 from legoesm.atmosphere.physics.convection._ifs_cumastrn import njkt_levels
 from legoesm.core.smooth import sqrt_c1
+from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
+from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction, surface_fluxes_at_lowest_level, surface_moisture_flux)
+from legoesm.timestepping.tridiagonal import thomas_solve
 
 __physics_contract__ = {
     "summary": (
@@ -132,6 +137,16 @@ __param_spec__ = {
             "dmf_split_width": "smoothing width",
             "foedelta_width_k": "smoothing width",
         },
+        "params": {},
+    },
+    "IFSVDFMainConfig": {
+        "scheme_key": "atm.turb.IFSVDFMainConfig",
+        "excluded": {"repqmi_width": "smoothing width"},
+        "params": {},
+    },
+    "IFSVDFLaneConfig": {
+        "scheme_key": "atm.turb.IFSVDFLaneConfig",
+        "excluded": {"cfm_wind_width_m_s": "smoothing width"},
         "params": {},
     },
     "IFSTOFDConfig": {
@@ -652,3 +667,405 @@ def ifs_vdfhghtn(th, T, q, u, v, slgs, cptgz, qe, p_half, p_full, geo_full, geo_
     return IFSVDFHghtnOutput(ri=ri, khvfl=khvfl, zinv=zinv_p, zcldbase=zcldbase, eis=eis,
                              kinv=kinv, kcbase=kcbase, kctop=kctop, kpbltype=kpbl,
                              mflx=mflx, slguh=slguh, qtuh=qtuh, uuh=uuh, vuh=vuh)
+
+
+# --------------------------------------------------------------------------
+# Stage 2: implicit solvers (vdfdifm, vdfdifh flux path, vdfincr, vdfdifc).
+# No switches on traced state.  Tridiagonal solves use the shared
+# thomas_solve (vote 7 D2); round-off differs from the IFS eliminations.
+# Exchange coefficients cfm/cfh are full-level (KLEV entries): cfh[k] is
+# PCFH(k+1), on the half level below full level k.
+# KTOP is the static Fortran (1-based) top level (vote 7 D3); above it the
+# tendencies are 0 and the solved fields equal the inputs (undefined in IFS).
+# --------------------------------------------------------------------------
+
+def _diffusion_bands(coef, z1dp, extra_diag):
+    """Bands of (1 - dt g d/dp coef d/dp + extra) on levels ktop..KLEV: the
+    exchange coefficient coef[k] sits on the half level below full level k."""
+    prev = jnp.concatenate([jnp.zeros((1,), coef.dtype), coef[:-1]])
+    a = -prev * z1dp
+    c = (-coef * z1dp).at[-1].set(0.0)
+    b = 1.0 + (prev + coef) * z1dp + extra_diag
+    return a, b, c
+
+
+class IFSVDFDifmOutput(NamedTuple):
+    udif: jax.Array
+    vdif: jax.Array
+    dtutofd: jax.Array
+    dtvtofd: jax.Array
+    dtuso: jax.Array
+    dtvso: jax.Array
+    dtuvdf: jax.Array
+    dtvvdf: jax.Array
+
+
+def ifs_vdfdifm(u, v, p_half, cfm, tofdc, soteu, sotev, sobeta, vom, vol, ucurr, vcurr,
+                dt, g, ktop: int) -> IFSVDFDifmOutput:
+    """VDFDIFM (vdfdifm.F90, 49r1): implicit momentum diffusion with TOFD and
+    SSO drag and the surface stress against the ocean current.  ZMF = 0 in
+    the Fortran, so the mass-flux terms vanish and are not taken (vote 7 D4)."""
+    u, v = jnp.asarray(u), jnp.asarray(v)
+    s = ktop - 1
+    z1dp = g * dt / (p_half[s + 1:] - p_half[s:-1])
+    a, b, c = _diffusion_bands(cfm[s:], z1dp, (tofdc[s:] + sobeta[s:]) * dt)
+    hu = cfm[-1] * z1dp[-1]
+    du = u[s:] + dt * (vom[s:] + soteu[s:])
+    dv = v[s:] + dt * (vol[s:] + sotev[s:])
+    du, dv = du.at[-1].add(hu * ucurr), dv.at[-1].add(hu * vcurr)
+    udif = u.at[s:].set(thomas_solve(a, b, c, du))
+    vdif = v.at[s:].set(thomas_solve(a, b, c, dv))
+    act = jnp.arange(u.shape[0]) >= s
+    z = lambda x: jnp.where(act, x, 0.0)
+    dtutofd, dtvtofd = z(-tofdc * udif), z(-tofdc * vdif)
+    dtuso, dtvso = z(-sobeta * udif + soteu), z(-sobeta * vdif + sotev)
+    dtuvdf = z((udif - u) / dt - vom - dtuso)
+    dtvvdf = z((vdif - v) / dt - vol - dtvso)
+    return IFSVDFDifmOutput(udif, vdif, dtutofd, dtvtofd, dtuso, dtvso, dtuvdf, dtvvdf)
+
+
+class IFSVDFDifhOutput(NamedTuple):
+    tdif: jax.Array        # s_lg after diffusion (KLEV)
+    qdif: jax.Array        # q_t after diffusion (KLEV)
+    slgevdf: jax.Array
+    qtevdf: jax.Array
+    tskh: jax.Array        # skin temperature per tile (KTILES)
+    tskte: jax.Array       # skin temperature tendency per tile
+
+
+def ifs_vdfdifh_flux(th, slg, qt, p_half, cfh, mflx, sluh, qtuh, slge, qte, frti, evapsnw,
+                     tskti, cfhti, fsh1d, flh1d, dt, ktop: int) -> IFSVDFDifhOutput:
+    """VDFDIFH (vdfdifh.F90, 49r1) on its prescribed-flux path (LDFLUX1D,
+    vote 1 V1): implicit diffusion of s_lg and q_t with the mass-flux terms,
+    the snow-evaporation correction on tile 7, the surface fluxes FSH1D/FLH1D
+    (W m-2, downward positive) and the per-tile skin temperature.  ``mflx``,
+    ``sluh``, ``qtuh`` are half-level (vdfmain 0..KLEV); tile arrays have
+    KTILES >= 7 entries.  SURFSEB is not ported: every output of it is
+    overwritten on this path (vote 7 D1)."""
+    slg, qt = jnp.asarray(slg), jnp.asarray(qt)
+    s = ktop - 1
+    rg, cpd = th.RG, th.RCPD                        # RVTMP2 = 0 (suphec.F90:231)
+    z1dp = rg * dt / (p_half[s + 1:] - p_half[s:-1])
+    cf = cfh[s:]
+    mf = mflx[s + 1:]                                       # PMFLX(JK), JK = ktop..KLEV
+    prev_cf = jnp.concatenate([jnp.zeros((1,), cf.dtype), cf[:-1]])
+    a = (-prev_cf - mflx[s:-1].at[0].set(0.0)) * z1dp       # PMFLX(JK-1); none at KTOP
+    c = (-cf * z1dp).at[-1].set(0.0)
+    b = 1.0 + (prev_cf + cf + mf) * z1dp
+    b = b.at[-1].set(1.0 + prev_cf[-1] * z1dp[-1])          # no exchange to the surface
+    msl, mqt = mflx * sluh, mflx * qtuh
+    dmsl = (msl[s + 1:].at[-1].set(0.0) - msl[s:-1].at[0].set(0.0)) * z1dp
+    dmqt = (mqt[s + 1:].at[-1].set(0.0) - mqt[s:-1].at[0].set(0.0)) * z1dp
+    csnq = frti[6] * evapsnw * z1dp[-1]                    # ZCSNS = RCPD*RVTMP2*.. = 0
+    ys = slg[s:] + dt * slge[s:] + dmsl
+    yq = (qt[s:] + dt * qte[s:] + dmqt).at[-1].add(-csnq)
+    e_k = jnp.zeros_like(ys).at[-1].set(1.0)
+    x0s, x0q, col = (thomas_solve(a, b, c, y) for y in (ys, yq, e_k))
+    # x_KLEV = ZBSL + ZASL * J; ZASL = -g RPLDARE dt / dp_KLEV * Z1BET (RPLDARE = 1)
+    fac = -rg * dt / (p_half[-1] - p_half[-2])
+    zasl = fac * col[-1]
+    js = jnp.broadcast_to(fsh1d, tskti.shape)
+    jq = flh1d / th.RLVTT
+    zssk = x0s[-1] - js * (zasl - 1.0 / cfhti)
+    tskh = zssk / cpd
+    tdif = slg.at[s:].set(x0s + js[0] * fac * col)
+    qdif = qt.at[s:].set(x0q + jq * fac * col)
+    act = jnp.arange(slg.shape[0]) >= s
+    slgevdf = jnp.where(act, (tdif - slg) / dt - slge, 0.0)
+    qtevdf = jnp.where(act, (qdif - qt) / dt - qte, 0.0)
+    return IFSVDFDifhOutput(tdif, qdif, slgevdf, qtevdf, tskh, (tskh - tskti) / dt)
+
+
+class IFSVDFIncrOutput(NamedTuple):
+    vom: jax.Array
+    vol: jax.Array
+    slge: jax.Array
+    qte: jax.Array
+    slgewodis: jax.Array
+    vdis: jax.Array        # W m-2
+    vdisg: jax.Array
+    strtu: jax.Array       # half levels 0..KLEV
+    strtv: jax.Array
+    strsou: jax.Array
+    strsov: jax.Array
+    strtofdu: jax.Array
+    strtofdv: jax.Array
+    tofdu: jax.Array
+    tofdv: jax.Array
+    disgw3d: jax.Array
+
+
+def ifs_vdfincr(u, v, p_half, dtutofd, dtvtofd, dtuso, dtvso, dtuvdf, dtvvdf, vom, vol,
+                slge, qte, slgevdf, qtevdf, dt, g) -> IFSVDFIncrOutput:
+    """VDFINCR (vdfincr.F90, 49r1): tendency increments, the kinetic-energy
+    dissipation added to s_lg, and the cumulative stress profiles (ILEV = 1)."""
+    dp = p_half[1:] - p_half[:-1]
+    gdph = -dp / g
+    u1, v1 = u + vom * dt, v + vol * dt
+    u2, v2 = u1 + dtuvdf * dt, v1 + dtvvdf * dt
+    u3, v3 = u2 + dtuso * dt, v2 + dtvso * dt
+    vdfdis = 0.5 * (u1 - u2) * (u1 + u2) + 0.5 * (v1 - v2) * (v1 + v2)
+    sodis = 0.5 * (u2 - u3) * (u2 + u3) + 0.5 * (v2 - v3) * (v2 + v3)
+    cum = lambda x: jnp.concatenate([jnp.zeros((1,), x.dtype), jnp.cumsum(x * gdph)])
+    strtofdu, strtofdv = cum(dtutofd), cum(dtvtofd)
+    return IFSVDFIncrOutput(
+        vom=vom + dtuvdf + dtuso, vol=vol + dtvvdf + dtvso,
+        slge=slge + slgevdf + (vdfdis + sodis) / dt, qte=qte + qtevdf,
+        slgewodis=slge + slgevdf,
+        vdis=jnp.sum(vdfdis * dp) / (g * dt), vdisg=jnp.sum(sodis * dp) / (g * dt),
+        strtu=cum(dtuvdf), strtv=cum(dtvvdf), strsou=cum(dtuso), strsov=cum(dtvso),
+        strtofdu=strtofdu, strtofdv=strtofdv, tofdu=strtofdu[-1], tofdv=strtofdv[-1],
+        disgw3d=sodis)
+
+
+class IFSVDFDifcOutput(NamedTuple):
+    tenc: jax.Array        # (KLEV, KTRAC) total tracer tendency
+    cflxt: jax.Array       # (KTRAC) surface flux incl. dry deposition
+
+
+def ifs_vdfdifc(c, tenc, p_half, cfh, wd, cflx, dt, g, ktop: int) -> IFSVDFDifcOutput:
+    """VDFDIFC (vdfdifc.F90, 49r1): implicit tracer diffusion (ZALF = 1) with
+    surface flux ``cflx`` and dry-deposition velocity ``wd`` per tracer;
+    ``c``/``tenc`` are (KLEV, KTRAC)."""
+    c, tenc = jnp.asarray(c), jnp.asarray(tenc)
+    s = ktop - 1
+    zqdp = g * dt / (p_half[s + 1:] - p_half[s:-1])
+    cf = cfh[s:]
+    prev = jnp.concatenate([jnp.zeros((1,), cf.dtype), cf[:-1]])
+    a = -prev * zqdp
+    cc = (-cf * zqdp).at[-1].set(0.0)
+    b0 = (1.0 + (prev + cf) * zqdp).at[-1].set(1.0 + prev[-1] * zqdp[-1])
+
+    def one(ci, ti, wdi, fi):
+        b = b0.at[-1].add(wdi * zqdp[-1])
+        y = (ci[s:] + dt * ti[s:]).at[-1].add(-zqdp[-1] * fi)
+        x = thomas_solve(a, b, cc, y)
+        return ti.at[s:].set((x - ci[s:]) / dt), fi + wdi * x[-1]
+
+    t_out, fl = jax.vmap(one, in_axes=(1, 1, 0, 0), out_axes=(1, 0))(c, tenc, wd, cflx)
+    return IFSVDFDifcOutput(t_out, fl)
+
+
+# --------------------------------------------------------------------------
+# Stage 3: VDFMAIN glue (vdfmain.F90, 49r1) on the prescribed-flux path
+# (LSFCFLX; vote 9), over-implicit time scheme only (LWDS = .false., RVDIFTS
+# = 1.5; vote 9 G8), no tracers.  SURFEXCDRIVER is not ported: the caller
+# supplies the surface momentum coefficient CFM(KLEV), u*, and the fluxes.
+# --------------------------------------------------------------------------
+_RVDIFTS = 1.5               # suvdf.F90 RVDIFTS (49r1 default)
+_REPQMI = 1.0e-8             # sucldp.F90 / yoecnd REPQMI, kg kg-1
+_FOG_ZINV_M = 150.0          # vdfmain.F90:1043 PZINV < 150 m (cloud/fog correction)
+_FOG_SHF_W_M2 = -20.0        # vdfmain.F90:1043 ZKHVFL*RCPD > -20
+
+
+class IFSVDFMainConfig(NamedTuple):
+    """Glue switch widths (0 = hard; vote 9 G6)."""
+
+    repqmi_width: float = 1.0e-10     # kg kg-1, the REPQMI tests and their MIN/MAX
+
+
+class IFSVDFMainOutput(NamedTuple):
+    te: jax.Array            # K s-1 (KLEV), total incl. the input tendency
+    qe: jax.Array            # kg kg-1 s-1
+    le: jax.Array            # liquid
+    ie: jax.Array            # ice
+    vom: jax.Array           # m s-2
+    vol: jax.Array
+    kh: jax.Array            # m2 s-1 (KLEV)
+    km: jax.Array
+    ri: jax.Array
+    zinv: jax.Array          # m
+    pblh: jax.Array          # m
+    kpbltype: jax.Array      # 0..3
+    strtu: jax.Array         # turbulent stress, half levels 0..KLEV (N m-2)
+    strtv: jax.Array
+    tofdu: jax.Array         # vertically integrated TOFD stress
+    tofdv: jax.Array
+    vdis: jax.Array          # W m-2 turbulent dissipation
+    vdisg: jax.Array
+
+
+def _fog_correction(th, zinv, kpbl, kinv, kcbase, kctop, khvfl, pblh, ql, qi, geo_full,
+                    geo_half, njkt6):
+    """vdfmain.F90:1040-1060: a dry-convective PBL (type 1, inversion < 150 m)
+    with cloud or fog below max(PBLH, inversion) becomes type 2 at the level
+    of maximum condensate.  Discrete (vote 9 G7)."""
+    K = ql.shape[0]
+    test = (kpbl == 1) & (zinv < _FOG_ZINV_M) & (khvfl * th.RCPD > _FOG_SHF_W_M2)
+    c = ql + qi
+
+    def body(carry, jk):
+        zi, lmin, first, cb, ct, ii, kp = carry
+        hit = (test & (jk >= njkt6) & (geo_half[jk] / th.RG <= jnp.maximum(pblh, zi))
+               & (c[jk - 1] > lmin))
+        zi = jnp.where(hit, geo_full[jk - 1] / th.RG, zi)
+        cb = jnp.where(hit & first, jk, cb)
+        first = first & ~hit
+        ct, ii = jnp.where(hit, jk, ct), jnp.where(hit, jk, ii)
+        kp = jnp.where(hit, 2, kp)
+        lmin = jnp.where(hit, c[jk - 1], lmin)
+        return (zi, lmin, first, cb, ct, ii, kp), None
+
+    i32 = lambda x: jnp.asarray(x, jnp.int32)
+    init = (zinv, jnp.zeros((), ql.dtype), jnp.array(True), i32(kcbase), i32(kctop), i32(kinv),
+            i32(kpbl))
+    (zi, _, _, cb, ct, ii, kp), _ = jax.lax.scan(body, init, jnp.arange(K, 0, -1, dtype=jnp.int32))
+    return zi, kp, ii, cb, ct
+
+
+def _repqmi_correction(th, q, ql, qi, te, qe, le, ie, dt, w):
+    """vdfmain.F90:1478-1493: where the updated humidity would fall below REPQMI
+    under cloud, take the deficit from the condensate (liquid share first by
+    its updated amount), with the latent heat.  Smooth over ``w`` (vote 9 G6)."""
+    sm = _sm(w)
+    w1 = q + qe * dt
+    w2 = ql + qi + (le + ie) * dt
+    gate = sm.gt(_REPQMI - w1, 0.0, w) * sm.gt(w2 - _REPQMI, 0.0, w)
+    dq = gate * _min(_REPQMI - w1, w2, w) / dt
+    frac = _max(0.0, ql + le * dt, w) * (1.0 / _max(w2, _REPQMI, w))   # ZW3 = .*ZW4, as the Fortran
+    return (te - th.RLVTT / th.RCPD * frac * dq - th.RLSTT / th.RCPD * (1.0 - frac) * dq,
+            qe + dq, le - frac * dq, ie - (1.0 - frac) * dq)
+
+
+def ifs_vdfmain(th, u, v, T, q, ql, qi, p_half, p_full, geo_full, geo_half, hrlw, hrsw, z0m,
+                sigflt, shf, lhf, ustar, cfm_sfc, frti, evapsnw, tskti, cfhti, sobeta, soteu,
+                sotev, ucurr, vcurr, te, qe, le, ie, vom, vol, dt,
+                cfg: IFSVDFConfig = IFSVDFConfig(), tofd_cfg: IFSTOFDConfig = IFSTOFDConfig(),
+                main_cfg: IFSVDFMainConfig = IFSVDFMainConfig()) -> IFSVDFMainOutput:
+    """VDFMAIN (vdfmain.F90, 49r1), one column, levels top -> surface.
+
+    Surface: ``shf``/``lhf`` W m-2 downward positive (REXTSHF/REXTLHF),
+    ``ustar`` m s-1 (KMFL = u*^2), ``cfm_sfc`` the surface momentum coefficient
+    CFM(KLEV) (kg m-2 s-1, VDFDIFM units).  Tiles (KTILES = 8) enter only the
+    land test (FRTI(1)+FRTI(2) <= 0.5), the snow-evaporation term and the skin
+    temperature, which is not returned.  ``te .. vol`` are the tendencies the
+    scheme receives (process-split callers pass zeros); outputs are totals.
+
+    KNOWN DIFFERENCE (RULE 5): the REPQMI low-humidity correction
+    (vdfmain.F90:1478-1493) is smoothed over ``main_cfg.repqmi_width``; width 0
+    is the oracle.  The gap per fixture case is stored with the tests.
+    """
+    u, v, T, q, ql, qi = (jnp.asarray(x) for x in (u, v, T, q, ql, qi))
+    K = T.shape[0]
+    rg, cpd, lv = th.RG, th.RCPD, th.RLVTT                 # RVTMP2 = 0
+    cptgz = geo_full + cpd * T
+    slg = cptgz - lv * ql
+    qt = q + ql
+    slgs = ifs_slgs(T, q, ql, geo_full, cpd, lv)
+    slge = cpd * te - lv * le
+    qte = qe + le
+    rho = p_half[-1] / (th.RD * T[-1] * (1.0 + th.RETV * q[-1]))
+    kmfl = ustar ** 2
+    khfl = shf / cpd / rho
+    kqfl = lhf / lv / rho
+    land = (frti[0] + frti[1] <= 0.5).astype(T.dtype)
+
+    pblh = ifs_vdfdpbl(u, v, T, q, geo_full, cfg, rg, cpd, th.RETV)
+    hg = ifs_vdfhghtn(th, T, q, u, v, slgs, cptgz, qe, p_half, p_full, geo_full, geo_half,
+                      kmfl, khfl, kqfl, land, dt, cfg)
+    njkt6 = njkt_levels(K, jnp.concatenate([p_full[:1], p_full]))[4]
+    zinv, kpbl, kinv, kcb, kct = _fog_correction(th, hg.zinv, hg.kpbltype, hg.kinv, hg.kcbase,
+                                                 hg.kctop, hg.khvfl, pblh, ql, qi, geo_full,
+                                                 geo_half, njkt6)
+    ex = ifs_vdfexcu(u, v, T, q, p_half, geo_full, geo_half, cptgz, hrlw, hrsw, z0m, kmfl,
+                     khfl, kqfl, hg.khvfl, hg.ri, zinv, kinv, kcb, kct, kpbl, cfg=cfg, g=rg,
+                     rd=th.RD, cpd=cpd, retv=th.RETV, lv=lv)
+    cfm = ex.cfm.at[-1].set(cfm_sfc)
+    # vdfmain.F90:1093-1096 (half levels 0..KLEV): ZMFLX(KLEV-1) = 0 when ZMFLX(KLEV-2) < eps (vote 10 G11)
+    mflx = hg.mflx.at[K - 1].set(jnp.where(hg.mflx[K - 2] < _EPS_MACH, 0.0, hg.mflx[K - 1]))
+    tofdc = ifs_tofd_coefficient(geo_full[None], u[None], v[None], jnp.atleast_1d(sigflt),
+                                 tofd_cfg, rg)[0]
+    tmst = dt * _RVDIFTS
+    m = ifs_vdfdifm(u, v, p_half, cfm, tofdc, soteu, sotev, sobeta, vom, vol, ucurr, vcurr,
+                    tmst, rg, 1)
+    h = ifs_vdfdifh_flux(th, slg, qt, p_half, ex.cfh, mflx, hg.slguh, hg.qtuh, slge, qte, frti,
+                         evapsnw, tskti, cfhti, shf, lhf, tmst, 1)
+    n = ifs_vdfincr(u, v, p_half, m.dtutofd, m.dtvtofd, m.dtuso, m.dtvso, m.dtuvdf, m.dtvvdf,
+                    vom, vol, slge, qte, h.slgevdf, h.qtevdf, dt, rg)
+
+    te_o, qe_o, le_o, ie_o = _repqmi_correction(
+        th, q, ql, qi, (n.slge + lv * le) / cpd, n.qte - le, le, ie, dt, main_cfg.repqmi_width)
+    return IFSVDFMainOutput(
+        te=te_o, qe=qe_o, le=le_o, ie=ie_o, vom=n.vom, vol=n.vol, kh=ex.kh, km=ex.km,
+        ri=hg.ri, zinv=zinv, pblh=pblh, kpbltype=kpbl, strtu=n.strtu, strtv=n.strtv,
+        tofdu=n.tofdu, tofdv=n.tofdv, vdis=n.vdis, vdisg=n.vdisg)
+
+
+# --------------------------------------------------------------------------
+# Lane kernel (turbulence="ifs_vdf"): VDFMAIN per column on the lane's state.
+# --------------------------------------------------------------------------
+class IFSVDFLaneConfig(NamedTuple):
+    """``TurbulenceConfig.ifs_vdf``.  ``surface.z0`` is the momentum roughness
+    VDFEXCU reads (vote 9 G4); the surface fluxes are the lane's (handed-in
+    land/tile flux) or the shared bulk formula on ``surface`` (vote 9 G5)."""
+
+    vdf: IFSVDFConfig = IFSVDFConfig()
+    tofd: IFSTOFDConfig = IFSTOFDConfig()
+    main: IFSVDFMainConfig = IFSVDFMainConfig()
+    surface: SurfaceLayerConfig = SurfaceLayerConfig()
+    cfm_wind_width_m_s: float = 1.0e-3     # MAX(|U|, 0.1 m/s) in CFM(KLEV) (vote 9 G3)
+
+
+def ifs_vdf_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho, dt,
+                       config: IFSVDFLaneConfig, surface_flux=None, *, q_c=None, q_i=None,
+                       rad_heating=None, sigflt=None, land_fraction=None) -> TurbulenceOutput:
+    """OpenIFS 49r1 VDF (``ifs_vdfmain``) on (ncol, nlev) columns, top first.
+
+    Required lane inputs, refused when absent (votes 9 G1/G9, 11): cloud liquid
+    and ice ``q_c``/``q_i`` (kg/kg; not diffused, they enter s_lg, the cloud/fog
+    PBL correction and the REPQMI correction), ``rad_heating`` (K/s, the total
+    radiative heating as HRLW; HRSW = 0), ``sigflt`` (m, std of the filtered
+    subgrid orography for TOFD) and ``land_fraction``.
+
+    KNOWN DIFFERENCES vs VDFMAIN: SURFEXCDRIVER is not ported -- CFM(KLEV) =
+    |tau| / max(|U_KLEV|, 0.1 m/s) from the lane's stress and the fluxes are the
+    lane's (prescribed-flux path); input tendencies are zero (process split,
+    vote 9 G2); no SSO blocking (its own GWD scheme), no ocean current, no snow
+    evaporation tile; tiles are open water 1 - land_fraction and land
+    land_fraction (vote 11).
+    """
+    for name, val in (("q_c", q_c), ("q_i", q_i), ("rad_heating", rad_heating),
+                      ("sigflt", sigflt), ("land_fraction", land_fraction)):
+        if val is None:
+            raise ValueError(f"turbulence=ifs_vdf needs {name} from the lane; none was passed "
+                             "(only the MPAS lane supplies the IFS VDF inputs).")
+    if surface_flux is None:
+        surface_flux = surface_fluxes_at_lowest_level(
+            u[:, -1], v[:, -1], T[:, -1], q_v[:, -1], T_sfc, q_sfc, rho[:, -1],
+            config.surface, z_full[:, -1] - z_half[:, -1])
+    tau_x, tau_y, shflx, lhflx, ustar = surface_flux
+    # water BC = the surface's own water flux; VDFMAIN divides REXTLHF by RLVTT,
+    # so it is handed evap*RLVTT, and the heat BC carries the latent enthalpy
+    # correction, as every lane kernel does (vote 13 G22/G23)
+    evap = surface_moisture_flux(config.surface, lhflx, T_sfc)
+    shf_in = shflx + latent_enthalpy_correction(lhflx, evap)
+    th = lego_thermo()
+    ncol, K = T.shape
+    g = th.RG
+    geo_full = g * (z_full - z_half[:, -1:])
+    geo_half = g * (z_half - z_half[:, -1:])
+    usq = u[:, -1] ** 2 + v[:, -1] ** 2
+    cfm_sfc = jnp.hypot(tau_x, tau_y) / jnp.sqrt(
+        _max(usq, _REPDU2, 2.0 * math.sqrt(_REPDU2) * config.cfm_wind_width_m_s))
+    lf = jnp.broadcast_to(jnp.asarray(land_fraction, T.dtype), (ncol,))
+    e8 = jnp.eye(8, dtype=T.dtype)
+    frti = (1.0 - lf)[:, None] * e8[0] + lf[:, None] * e8[3]
+    zk = jnp.zeros((K,), T.dtype)
+    z8 = jnp.zeros((8,), T.dtype)
+    z0m = jnp.asarray(config.surface.z0, T.dtype)
+
+    def col(u_, v_, T_, q_, qc_, qi_, ph_, pf_, gf_, gh_, hr_, sig_, shf_, lhf_, ust_, cfm_,
+            fr_, ts_):
+        return ifs_vdfmain(th, u_, v_, T_, q_, qc_, qi_, ph_, pf_, gf_, gh_, hr_, zk, z0m, sig_,
+                           -shf_, -lhf_, ust_, cfm_, fr_, 0.0, z8 + ts_, z8 + 1.0, zk, zk, zk,
+                           0.0, 0.0, zk, zk, zk, zk, zk, zk, dt, config.vdf, config.tofd,
+                           config.main)
+
+    o = jax.vmap(col)(u, v, T, q_v, q_c, q_i, p_half, p_full, geo_full, geo_half, rad_heating,
+                      jnp.broadcast_to(sigflt, (ncol,)), shf_in, evap * th.RLVTT, ustar, cfm_sfc,
+                      frti,
+                      T_sfc)
+    return TurbulenceOutput(
+        du_dt=o.vom, dv_dt=o.vol, dT_dt=o.te, dq_v_dt=o.qe, Km=o.km, Kh=o.kh, shflx=shflx,
+        lhflx=lhflx, ustar=ustar, h_pbl=o.pblh, dq_c_dt=o.le, evap_sfc=evap,
+        dq_i_dt=o.ie)

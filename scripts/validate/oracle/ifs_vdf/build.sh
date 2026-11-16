@@ -13,7 +13,8 @@ MODS="$S/module/yomcst.F90 $S/module/yoethf.F90 $S/module/yoevdf.F90 $S/module/y
       $S/module/yoegwd.F90 $S/module/yoephli.F90 $S/module/parphy.F90"
 RTNS="$S/phys_ec/suvdf.F90 $S/phys_ec/suvdfs.F90 $S/phys_ec/satur.F90 $S/phys_ec/cuadjtq.F90 \
       $S/phys_ec/cuinin.F90 $S/phys_ec/cubasen.F90 $S/phys_ec/vdfeis.F90 $S/phys_ec/vdfdpbl.F90 \
-      $S/phys_ec/vdfhghtn.F90 $S/phys_ec/vdfexcu.F90 $S/phys_ec/vdftofdc.F90"
+      $S/phys_ec/vdfhghtn.F90 $S/phys_ec/vdfexcu.F90 $S/phys_ec/vdftofdc.F90 \
+      $S/phys_ec/vdfdifm.F90 $S/phys_ec/vdfdifh.F90 $S/phys_ec/vdfincr.F90 $S/phys_ec/vdfdifc.F90"
 mkdir -p "$B/inc"; cd "$B"
 # empty interface blocks (implicit interfaces) except the two routines with
 # OPTIONAL arguments: CUADJTQ (as bechtold_ifs) and SURF_INQ
@@ -21,6 +22,8 @@ for f in $(grep -ho '#include "[a-z0-9_]*\.intfb\.h"' $RTNS "$HERE/driver.F90" |
   : > inc/$f
 done
 cp "$HERE/../bechtold_ifs/cuadjtq.intfb.h" inc/
+# surfseb.h declares a C_PTR surface handle; the stub takes the stub surface type
+cp "$HERE/surfseb_stub.h" inc/surfseb.h
 cat > inc/surf_inq.h <<'EOF'
 INTERFACE
 SUBROUTINE SURF_INQ(YDSURF, PREPUST)
@@ -37,7 +40,7 @@ done
 FF="-O1 -ffp-contract=off -fno-fast-math -cpp -ffree-line-length-none -fbacktrace -g"
 INC="-I$B/inc -I$S/function -I$S/include"
 gfortran $FF $INC -c "$HERE/stubs.F90"
-for f in $MODS $RTNS "$HERE/driver.F90"; do
+for f in $MODS "$HERE/oracle_setup.F90" $RTNS "$HERE/driver.F90"; do
   gfortran $FF $INC -c "$f"
 done
 gfortran $FF -o oracle.x *.o
