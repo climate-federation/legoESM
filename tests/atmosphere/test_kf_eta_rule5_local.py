@@ -1044,6 +1044,34 @@ def test_any_in_range_is_the_oracle_warm_test_and_c2():
     assert float(jnp.abs(jax.jacfwd(nw)(T0)).sum()) > 0.0
 
 
+def test_water_closes_and_gradient_is_finite_at_fractional_melting(monkeypatch):
+    """Every melting and freezing-level probability halved (no fixture level
+    sits in the warm band): the heating moves, the column's water still closes
+    and the temperature gradient stays finite.  The width differs from the
+    default by 3e-7 K only to get its own trace."""
+    fx = dict(np.load(_FIX))
+    sm = _DEFAULT._replace(melt_t_width_k=0.1000003)
+    i = 90
+    base, T = _sweep_column(fx, i, smoothing=sm)
+    anyr = kfe._any_in_range
+    monkeypatch.setattr(kfe, "_any_in_range", lambda v, kk: 0.5 * anyr(v, kk))
+    sm2 = _DEFAULT._replace(melt_t_width_k=0.1000005)
+    o, _ = _sweep_column(fx, i, smoothing=sm2)
+    assert bool(o["fired"][0])
+    assert float(jnp.max(jnp.abs(o["dtdt"] - base["dtdt"]))) > 0.0
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, i, T, sm2)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g)))
+    _, x = _wrapper_inputs(fx, "L_nat_w0")
+    out, _ = kain_fritsch_convection(**x, config=_WRF_DEFAULT._replace(wrf_melt_t_width_k=0.1000005))
+    dp = fx["p_half"][:, 1:] - fx["p_half"][:, :-1]
+    tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt)
+           + np.asarray(out.dq_r_conv_dt)) * dp / constants.g
+    scale = np.sum(np.abs(np.asarray(out.dq_v_dt)) * dp / constants.g, axis=1)
+    f = fx["L_nat_w0_fired"] == 1
+    assert f.any()
+    assert np.all(np.abs(tot.sum(axis=1))[f] <= 1.0e-9 * scale[f])
+
+
 def test_widths_are_validated():
     with pytest.raises(ValueError, match="lut_knot_width"):
         kfe.validate_kf_smoothing(_DEFAULT._replace(lut_knot_width=1.5))
