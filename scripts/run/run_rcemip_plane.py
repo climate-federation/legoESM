@@ -85,6 +85,7 @@ from legoesm.grids.vertical import (
     create_height_coordinate_from_z_half,
     create_stretched_height_coordinate,
 )
+from legoesm.parallel.staggered_init import staggered_first_call
 
 
 # JAX x64 toggle happens at IMPORT TIME (before argparse). Two paths:
@@ -2451,9 +2452,10 @@ def main():
             if land_rad_refresh_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
             ):
-                cached_rad_tend, cached_land_rad_sfc = land_rad_refresh_jit(
-                    state, land_T_sfc,
-                )
+                cached_rad_tend, cached_land_rad_sfc = (
+                    staggered_first_call(land_rad_refresh_jit, state, land_T_sfc)
+                    if cached_rad_tend is None
+                    else land_rad_refresh_jit(state, land_T_sfc))
             if cached_rad_tend is not None:
                 state = apply_radiation_forward_euler(
                     state, cached_rad_tend, args.dt,
@@ -2481,7 +2483,10 @@ def main():
             if rad_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
             ):
-                cached_rad_tend = rad_jit(state)
+                # First refresh: return the compile's freed heap to the OS.
+                cached_rad_tend = (staggered_first_call(rad_jit, state)
+                                   if cached_rad_tend is None
+                                   else rad_jit(state))
             if cached_rad_tend is not None:
                 state = apply_radiation_forward_euler(
                     state, cached_rad_tend, args.dt,
