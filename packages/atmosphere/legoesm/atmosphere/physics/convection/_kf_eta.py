@@ -109,6 +109,7 @@ KF_SWITCHES = {
     "B1": ("B", "hard", "deep vs shallow (cldhgt > CHMIN and ABE > 1) and every ISHALL use"),
     "B2": ("B", "hard", "source-layer candidate loop, shallow restart at argmax CLDHGT"),
     "B3": ("B", "hard", "downdraft: dd_ok, deep_dd, nodd (TDER<1), ddinc cap"),
+    "B3s": ("B", "smooth", "downdraft acceptance as weights: dd_ok, deep_dd, nodd onset, ddinc cap"),
     "B4": ("B", "hard", "closure iteration branches: cyc1, cyc2, convergence, saturation, FABE=0"),
     "B5": ("B", "hard", "melting below the freezing level: LC < ML"),
     "C-KCHECK": ("C", "hard", "15 hPa source-layer candidates, candidate base LC = KCHECK(NU)"),
@@ -119,6 +120,7 @@ KF_SWITCHES = {
     "C-L5": ("C", "hard", "L5 and LLFC pressure levels"),
     "C-L5g": ("C", "smooth", "wind speed at L5 in VCONV"),
     "C-LDB": ("C", "hard", "downdraft base LDB and the downdraft level masks"),
+    "C-LDBs": ("C", "smooth", "downdraft base by the descent's survival weights (argmax = LDB diagnostic)"),
     "C-LET": ("C", "hard", "equilibrium-temperature level LET and the cloud-top detrainment layer"),
     "C-LFS": ("C", "hard", "level of free sink LFS (KLFS) and LDT"),
     "C-LFSs": ("C", "smooth", "soft LFS search: first-crossing weights of the 150 hPa depth test"),
@@ -143,6 +145,7 @@ KF_SWITCHES = {
     "D7f": ("D", "hard", "PROF5 eqf == 0 / eqf == 1 exact-equality overrides"),
     "D7g": ("D", "smooth", "glaciation: freezing (frz) and partial (part) ramps, DTFRZNEW"),
     "D7h": ("D", "hard", "downdraft RH adjustment: low (qsrh < qd) and adj (rhh < 1)"),
+    "D7hs": ("D", "smooth", "downdraft RH adjustment low (qsrh < qd) blended"),
     "D7i": ("D", "hard", "subsidence moisture borrow where QG < 0"),
     "D7j": ("D", "hard", "closure mixed-layer supersaturation adjustment (sup)"),
     "D7k": ("D", "hard", "CPR > 0 guard of the precipitation feedback ratio FRC2"),
@@ -371,6 +374,24 @@ class KFSmoothing(NamedTuple):
       freezing-level split of the condensate heating.  Each run's downdraft
       evaporation is debited from its precipitation (PPTFLX = TRPPT - TDER),
       so the water budget closes at any melting probability (tested).
+    * Downdraft acceptance (PR 6b; any nonzero runs the survival path):
+      ``dd_ok_depth_width_pa`` the band of the two 50 hPa depth tests (the
+      source above the source layer, dd_ok, and the base below the source,
+      deep_dd; one band, so deep_dd's weight is at least dd_ok's at every
+      base below the source layer; vote 24), ``ldb_tv_width_k`` the band of the descent's stop hazard
+      TVD > TV0 (the base LDB by survival weights), ``nodd_tder_width_kgs``
+      the onset band of the acceptance TDER >= 1 kg/s, ``ddinc_cap_width``
+      the one-sided band of TDER * DDINC <= TRPPT (in units of TRPPT) and
+      ``dd_rh_low_width_kgkg`` the band of the RH-adjustment branch
+      qsrh < qd (D7h ``low``).  D7h ``adj`` (rhh < 1) stays hard: the descent
+      runs below the source layer, where rhh < 1 always.
+      KNOWN DIFFERENCE (fixture, max over columns and levels, vs the hard
+      limit's gap of 2.3e-15 K/s): the descent-stop width moves the heating
+      by up to 4.4e-7 K/s (warm-rain column at 20 m/s); dd_ok/deep_dd, the
+      TDER onset, the DDINC cap and the RH branch move no fixture case (no
+      downdraft within their bands; dd_ok is exercised on a column shifted
+      into its band in-test).  Each base's run closes its own water budget
+      (PPTFLX = TRPPT - TDER per run), so the mixture closes it too (tested).
     """
 
     lut_knot_width: float
@@ -400,6 +421,11 @@ class KFSmoothing(NamedTuple):
     top_stop_umf_width_kgs: float
     lfs_depth_width_pa: float
     melt_t_width_k: float
+    dd_ok_depth_width_pa: float
+    ldb_tv_width_k: float
+    nodd_tder_width_kgs: float
+    ddinc_cap_width: float
+    dd_rh_low_width_kgkg: float
 
 
 KF_HARD = KFSmoothing(*(0.0 for _ in KFSmoothing._fields))
@@ -409,7 +435,29 @@ def _survival_on(sm: KFSmoothing) -> bool:
     """The survival-weighted (mixture) path runs when a cloud-top or a
     downdraft width is set (static)."""
     return bool(sm.top_stop_wtw_width_m2s2 or sm.top_stop_umf_width_kgs  # kfsw: S
-                or sm.lfs_depth_width_pa or sm.melt_t_width_k)
+                or sm.lfs_depth_width_pa or sm.melt_t_width_k or _soft_downdraft_on(sm))
+
+
+def _soft_downdraft_on(sm: KFSmoothing) -> bool:
+    """The downdraft runs as the mixture over its base and acceptance (PR 6b)."""
+    return bool(sm.dd_ok_depth_width_pa or sm.ldb_tv_width_k  # kfsw: S
+                or sm.nodd_tder_width_kgs or sm.ddinc_cap_width
+                or sm.dd_rh_low_width_kgkg)
+
+
+def _gt_c2(x, w):
+    """Weight of x > 0: the oracle's 0/1 at w = 0, else the C2 step (B3s, C-LDBs, D7hs)."""
+    if w:  # kfsw: S
+        return _step_c2(x, w)
+    return (x > 0.0).astype(jnp.result_type(x))  # kfsw: B3s,C-LDBs,D7hs
+
+
+def _descent_base_weights(h, lev):
+    """P(LDB = b) for stop hazards ``h`` [NP] of a descent tested downward over
+    the levels ``lev`` (top first): h_b * prod_{j > b in lev} (1 - h_j)."""
+    q = jnp.where(lev, 1.0 - h, 1.0)  # kfsw: C-LDBs
+    tail = jnp.concatenate([jnp.cumprod(q[::-1])[::-1][1:], jnp.ones((1,), q.dtype)])  # kfsw: C-LDBs
+    return jnp.where(lev, h * tail, 0.0)  # kfsw: C-LDBs
 # Largest PROF5 blend half-width: entrainment and detrainment fractions stay
 # non-negative on eq in [0, 1] (tested); wider blends reach the far branch's
 # negative values (ud < 0 at width 3).
@@ -427,10 +475,12 @@ def validate_kf_smoothing(sm: KFSmoothing) -> None:
     for name, w in sm._asdict().items():  # kfsw: S
         validate_smoothing_width(f"KFSmoothing.{name}", w)  # kfsw: S
     # the stop1 band stays at WTW >= 0; the stop2 band stays above the
-    # continuation floor (identity from _CONT_HI_KGS up)
+    # continuation floor (identity from _CONT_HI_KGS up); the acceptance onset band stays at
+    # TDER > 0 (the run's DDINC divides by its TDER where it is accepted)
     for name, hi in (("lut_knot_width", 1.0), ("prof5_width", _PROF5_WIDTH_MAX),
                      ("top_stop_wtw_width_m2s2", 2.0 * _WTW_STOP),
-                     ("top_stop_umf_width_kgs", 2.0 * (_UMF_DETR_MIN - _CONT_HI_KGS))):
+                     ("top_stop_umf_width_kgs", 2.0 * (_UMF_DETR_MIN - _CONT_HI_KGS)),
+                     ("nodd_tder_width_kgs", 2.0 * _TDER_MIN)):
         if getattr(sm, name) > hi:  # kfsw: S
             raise ValueError(f"KFSmoothing.{name} must be 0 or in (0, {hi}]; "
                              f"got {getattr(sm, name)!r}")  # kfsw: S
@@ -1857,10 +1907,66 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     def mlt_body(c, k):
         return _w((k >= KLCL) & (k <= LTOP), c + PPTICE[k], c)  # kfsw: C-KLCL,C-LTOP
 
-    def downdraft(LFS, mel, PPTMLT, TRPPT, UMF_KLCL):
+    def _downdraft_mixture(LFS, LDT, HZ, TZ, QSD, QDK, DMF, DER, DMFFRC, p_ok, TRPPT,
+                           UMF_KLCL):
+        """Expectation over the base b = LDB (survival weights of the descent)
+        of the oracle's dd3 and acceptance (l.1757-1873), in closed form: with
+        C[k] = sum DP over [k, LDT] the accepted run b has DDR = -DMFK DP / C[b]
+        and DMF = DMFK (1 - C / C[b]) on [b, LDT], scaled by its DDINC_b; DMF
+        and DER from the source layer up keep the descent's entrainment
+        values times the total accepted DDINC."""
+        lev = (kk >= 1) & (kk <= LDT)  # kfsw: C-LDBs
+        HZ = jnp.where(kk == 1, 1.0, HZ)  # the oracle stops at level 1  # kfsw: C-LDBs
+        PB = _descent_base_weights(HZ, lev)
+        C = jnp.cumsum(jnp.where(lev, DP, 0.0)[::-1])[::-1]  # kfsw: C-LDBs
+        Cs = _sd(C, lev & (C > 0.0))  # kfsw: C-LDBs
+        DMFK = DMF[KSTART]  # kfsw: C-KPBL
+        G_ = jnp.cumsum(jnp.where(lev, (QSD - QDK) * DP, 0.0)[::-1])[::-1]  # kfsw: C-LDBs
+        TDERB = -DMFK * G_ / Cs  # raw TDER of the run with base b
+        # deep_dd shares dd_ok's band (vote 24): its weight >= p_ok's at every base
+        deep = _gt_c2(P0 - P0[LFS] - _DD_MIN_DEPTH_PA, sm.dd_ok_depth_width_pa)  # kfsw: B3s,C-LFSs
+        if sm.nodd_tder_width_kgs:  # kfsw: S
+            acc = _step_c2(TDERB - _TDER_MIN, sm.nodd_tder_width_kgs)
+        else:
+            acc = (TDERB >= _TDER_MIN).astype(dtype)  # kfsw: B3s
+        ddinc = -DMFFRC * UMF_KLCL / _sd(DMFK, DMFK != 0.0)  # kfsw: B3s
+        if sm.ddinc_cap_width:  # kfsw: S
+            tp = _sd(TRPPT, TRPPT > 0.0)  # kfsw: B3s
+            TDERF = TRPPT * _cap_c1(TDERB * ddinc / tp, 1.0, sm.ddinc_cap_width)
+        else:
+            TDERF = jnp.minimum(TDERB * ddinc, TRPPT)  # kfsw: B3s
+        ddincb = TDERF / _sd(TDERB, acc > 0.0)  # kfsw: B3s
+        wacc = PB * p_ok * deep * acc
+        cb = wacc * ddincb
+        S0, S1 = jnp.cumsum(cb), jnp.cumsum(cb / Cs)  # kfsw: C-LDBs
+        tot = jnp.sum(cb)  # kfsw: B3s
+        up = (kk >= KSTART) & (kk <= LFS)  # kfsw: C-KPBL,C-LFSs
+        DDR = jnp.where(lev, -DMFK * DP * S1, 0.0)  # kfsw: C-LDBs
+        DMFo = jnp.where(lev, DMFK * (S0 - C * S1), jnp.where(up, DMF * tot, 0.0))  # kfsw: C-LDBs
+        DERo = jnp.where(up, DER * tot, 0.0)  # kfsw: C-KPBL,C-LFSs
+        THTAD = jnp.where(lev, TZ * _exner(P0, QSD), 0.0)  # kfsw: C-LDBs
+        QDo = jnp.where(lev, QSD, 0.0)  # kfsw: C-LDBs
+        TDER = jnp.sum(wacc * TDERF)  # kfsw: B3s
+        LDB = jnp.argmax(PB).astype(i32)  # kfsw: C-LDBs (diagnostic)
+        return (DMFo, DERo, DDR, THTAD, TZ, QDo, TDER, TRPPT - TDER, LDB)
+
+    def downdraft(LFS, mel, PPTMLT, TRPPT, UMF_KLCL, soft=False):
         """The oracle's downdraft and its acceptance for one source level LFS,
-        melting flag/ice precipitation, updraft precipitation and base flux."""
-        dd_ok = ~sh & (P0[KSTART] - P0[LFS] > _DD_MIN_DEPTH_PA)  # kfsw: B3
+        melting flag/ice precipitation, updraft precipitation and base flux.
+        ``soft`` (static, PR 6b): the expectation over the descent's base LDB
+        and the acceptance weights (dd_ok, deep_dd, nodd; with the DDINC cap and
+        the D7h low blend inside each run) of the accepted
+        downdraft and the no-downdraft outcome; DMF/DER/DDR and TDER are those
+        expectations, THTAD/QD the base-independent states below the source
+        layer (the closure reads only DDR*THTAD and DDR*QD), LDB the base of
+        largest weight (diagnostic)."""
+        if soft:  # kfsw: S
+            dep = P0[KSTART] - P0[LFS] - _DD_MIN_DEPTH_PA  # kfsw: C-KPBL,C-LFSs
+            p_ok = _gt_c2(dep, sm.dd_ok_depth_width_pa)
+            p_ok = jnp.where(sh, 0.0, p_ok)  # kfsw: B1
+            dd_ok = jnp.asarray(True)  # the descent runs; p_ok weights its outcome
+        else:
+            dd_ok = ~sh & (P0[KSTART] - P0[LFS] > _DD_MIN_DEPTH_PA)  # kfsw: B3
         tz_l, qss_l = _tpmix2dd(lut, P0[LFS], THETEE[LFS])  # kfsw: C-LFS
         thtad_l = tz_l * _exner(P0[LFS], qss_l)  # kfsw: C-LFS
         tvd_l = tz_l * (1.0 + _TV_COEF * qss_l)
@@ -1893,7 +1999,10 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         RHBAR = RHBAR / _sd(DPTT2, dd_ok)  # kfsw: B3
         DMFFRC = _DMFFRC_COEF * (1.0 - RHBAR)
 
-        DTMELT = jnp.where(mel, _RLF * PPTMLT / (CP * _sd(UMF_KLCL, mel & dd_ok)), 0.0)  # kfsw: B5
+        # the soft run always descends (p_ok weights it): guard its divisor
+        # where the column has no updraft mass at KLCL (weight 0 there)
+        mok = mel & (UMF_KLCL != 0.0) if soft else mel & dd_ok  # kfsw: A0
+        DTMELT = jnp.where(mel, _RLF * PPTMLT / (CP * _sd(UMF_KLCL, mok)), 0.0)  # kfsw: B5
         LDT = jnp.minimum(LFS - 1, KSTART - 1)  # kfsw: C-LFS
         tzk, _ = _tpmix2dd(lut, P0[KSTART], THETED[KSTART])  # kfsw: C-KPBL
         tzk = tzk - DTMELT
@@ -1906,7 +2015,10 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
 
         def dd2_body(c, ND):
             tz, qsd, thd, qd, dpdd, ldb, ex = c
-            a = dd_ok & (ND <= LDT) & ~ex  # kfsw: B3,C-LDB
+            if soft:  # kfsw: S
+                a = ND <= LDT  # every level of the descent  # kfsw: C-LDBs
+            else:
+                a = dd_ok & (ND <= LDT) & ~ex  # kfsw: B3,C-LDB
             dpdd_n = dpdd + DP[ND]  # kfsw: S
             thd_n = THETED[KSTART]  # kfsw: C-KPBL
             qd_n = qd[KSTART]  # kfsw: C-KPBL
@@ -1918,20 +2030,35 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
             t1rh = t_n + dtmp
             es_r = rhh * ALIQ * jnp.exp((BLIQ * t1rh - CLIQ) / (t1rh - DLIQ))
             qsrh = _EPS_KF * es_r / (P0[ND] - es_r)  # kfsw: S
-            low = qsrh < qd_n  # kfsw: D7h
-            qsrh = jnp.where(low, qd_n, qsrh)  # kfsw: D7h
-            t1rh = jnp.where(low, t_n + (qss - qsrh) * rl / CP, t1rh)  # kfsw: D7h
+            if sm.dd_rh_low_width_kgkg:  # kfsw: S
+                wlo = _gt_c2(qd_n - qsrh, sm.dd_rh_low_width_kgkg)
+                t1rh = t1rh + wlo * (t_n + (qss - qd_n) * rl / CP - t1rh)
+                qsrh = qsrh + wlo * (qd_n - qsrh)
+            else:
+                low = qsrh < qd_n  # kfsw: D7h
+                qsrh = jnp.where(low, qd_n, qsrh)  # kfsw: D7h
+                t1rh = jnp.where(low, t_n + (qss - qsrh) * rl / CP, t1rh)  # kfsw: D7h
             adj = rhh < 1.0  # kfsw: D7h
             t_n = jnp.where(adj, t1rh, t_n)  # kfsw: D7h
             qsd_n = jnp.where(adj, qsrh, qss)  # kfsw: D7h
             tvd = t_n * (1.0 + _TV_COEF * qsd_n)
+            if soft:  # kfsw: S
+                # the stop hazard weights the descent's base
+                hz_n = _gt_c2(tvd - TV0[ND], sm.ldb_tv_width_k)  # kfsw: C-LDBs
+                return (_put(tz, ND, t_n, a), _put(qsd, ND, qsd_n, a), _put(thd, ND, thd_n, a),
+                        _put(qd, ND, qd_n, a), dpdd, ldb, _put(ex, ND, hz_n, a))  # kfsw: C-LDBs
             stop = (tvd > TV0[ND]) | (ND == 1)  # kfsw: B3,C-LDB
             # kfsw: B3,C-LDB
             return (_put(tz, ND, t_n, a), _put(qsd, ND, qsd_n, a), _put(thd, ND, thd_n, a),
                     _put(qd, ND, qd_n, a), _w(a, dpdd_n, dpdd), _w(a & stop, ND, ldb), ex | (a & stop))
 
-        TZ, QSD, THETED, QD, DPDD, LDB, _ = _scan_levels(
-            dd2_body, (TZ, QSD, THETED, QD, zero, LFS, jnp.asarray(False)), 1, KX, reverse=True)
+        ex0 = zf if soft else jnp.asarray(False)  # kfsw: S
+        TZ, QSD, THETED, QD, DPDD, LDB, HZ = _scan_levels(
+            dd2_body, (TZ, QSD, THETED, QD, zero, LFS, ex0), 1, KX, reverse=True)
+        if soft:  # kfsw: S
+            # kfsw: C-LDBs,C-KPBL
+            return _downdraft_mixture(LFS, LDT, HZ, TZ, QSD, QD[KSTART], DMF, DER, DMFFRC,
+                                      p_ok, TRPPT, UMF_KLCL)
         deep_dd = dd_ok & (P0[LDB] - P0[LFS] > _DD_MIN_DEPTH_PA)  # kfsw: B3
 
         def dd3_body(c, ND):
@@ -1990,7 +2117,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
             # a level no member selects still runs (fixed cost): run it at the
             # column's own LFS so its (zero-weight) values and gradients stay finite
             lr = jnp.where(ql > 0.0, l, LFS)  # kfsw: C-LETs
-            out = downdraft(lr, True, mlt / qd, trp / qd, umf_klcl)
+            out = downdraft(lr, True, mlt / qd, trp / qd, umf_klcl, soft=_soft_downdraft_on(sm))
             return (ql,) + out
 
         ql, DMFs, DERs, DDRs, THTADs, _, QDs, TDERs, _, LDBs = jax.vmap(member)(kk)  # kfsw: C-LETs
