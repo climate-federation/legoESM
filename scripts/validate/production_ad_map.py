@@ -714,7 +714,7 @@ def build_parser():
     ap.add_argument("--stage", required=True,
                     choices=("components", "physics", "params", "dycore",
                              "step", "land", "eager", "eqns", "timing",
-                             "memory", "loops"))
+                             "memory", "loops", "modmem"))
     ap.add_argument("--module", default="microphysics",
                     help="eqns stage: the module whose calls are traced")
     ap.add_argument("--calls", default="1,2,3",
@@ -805,7 +805,8 @@ def main(argv=None):
     if a.stage == "eqns":
         global ALL_CALLS
         ALL_CALLS = {}
-    if a.stage in ("components", "eqns") or a.rad_fp64 or a.stash_modules:
+    if (a.stage in ("components", "eqns", "modmem") or a.rad_fp64
+            or a.stash_modules):
         install_spies(rec)
     t0 = time.time()
     drv = build_driver(rest, a.resolution, a.n_steps)
@@ -942,6 +943,24 @@ def main(argv=None):
                                 target_mass=tm)[0]
             return _proj_loss(s)
         loop_census(jax.grad(step_loss), x0)
+    elif a.stage == "modmem":
+        # compile-only gradient memory of each CAM6 module call, as the
+        # combined physics calls it (spies record the first concrete call)
+        pfn = exp["physics_fn" if a.physics_variant == "full" else
+                  "physics_fn_norad"]
+        _ = pfn(state0, mesh, sigma, phys_state=ps0, forcing=forcing0)
+        ncol = int(state0.T.data.shape[0])
+        for name, (fn, fa, fk) in sorted(rec.items()):
+            st = fa[0]
+
+            def mem_module(x, _fn=fn, _fa=fa, _fk=fk, _st=st):
+                return _proj_loss(_fn(_with_x(_st, x), *_fa[1:], **_fk))
+            try:
+                memory_report(name.replace("make_", "").replace("_physics", ""),
+                              jax.grad(mem_module), (_state_x(st),), ncol)
+            except Exception as e:   # report, do not hide
+                print(f"MEMORY_FAIL {name}: {type(e).__name__}: {e}"[:2000],
+                      flush=True)
     elif a.stage == "memory":
         # Compile-only buffer accounting of each piece of one production
         # step, then the scheduled segment over --n-steps (forward), so the

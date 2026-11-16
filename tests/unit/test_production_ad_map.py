@@ -342,3 +342,7 @@ def test_loop_census_ranks_the_scan_that_stacks_residuals(capsys):
     assert top["stacked_mib"] * 2**20 == 5 * 3 * 8
     assert top["src"].split(":")[0].endswith("test_production_ad_map.py")
     assert "LOOP " in capsys.readouterr().out
+
+
+def test_parser_accepts_the_modmem_stage():
+    assert pam.build_parser().parse_args(["--stage", "modmem"]).stage == "modmem"
