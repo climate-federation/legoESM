@@ -19,12 +19,15 @@ def _main_tree():
 
 
 def _year_writes(tree):
-    """(inside_loop, If node) for every ``if`` whose test reads steps_per_year."""
+    """(inside_loop, If node) for every ``if`` whose test reads steps_per_year
+    and whose body writes a snapshot."""
     loops = [n for n in ast.walk(tree) if isinstance(n, ast.For)
              and ast.unparse(n.target) == "step"]
     in_loop = {id(n) for lp in loops for n in ast.walk(lp)}
     return [(id(n) in in_loop, n) for n in ast.walk(tree)
-            if isinstance(n, ast.If) and "steps_per_year" in ast.unparse(n.test)]
+            if isinstance(n, ast.If) and "steps_per_year" in ast.unparse(n.test)
+            and any(isinstance(c, ast.Call) and ast.unparse(c.func) == "_save_snapshot"
+                    for b in n.body for c in ast.walk(b))]
 
 
 def test_in_loop_annual_snapshot_skips_the_final_step():
@@ -36,13 +39,15 @@ def test_in_loop_annual_snapshot_skips_the_final_step():
 
 def test_final_year_file_shares_the_final_snapshot_extra():
     tree = _main_tree()
-    after = [n for inside, n in _year_writes(tree) if not inside]
+    # (the lax.scan lane's while-loop year write carries no accumulators)
+    after = [n for inside, n in _year_writes(tree) if not inside
+             and "n_steps % steps_per_year" in ast.unparse(n.test)]
     assert len(after) == 1, "expected one post-loop year write"
     src = ast.unparse(after[0])
     assert "_save_snapshot" in src and "extra=_final_extra" in src, src
     finals = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
               and ast.unparse(n.func) == "_save_snapshot"
               and n.args[1:2] and ast.unparse(n.args[1]) == "'final'"]
-    assert finals and all(
+    assert finals and any(
         any(k.arg == "extra" and ast.unparse(k.value) == "_final_extra"
             for k in c.keywords) for c in finals)

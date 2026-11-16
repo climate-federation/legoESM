@@ -714,7 +714,12 @@ def closure_prandtl(K_M, K_H, avm, avt, k_wave):
     with np.errstate(divide="ignore", invalid="ignore"):
         kh, km = K_H - k_wave, K_M - k_wave
         at, am = avt - k_wave, avm - k_wave
-        ok = (kh > 0) & (km > 0) & (at > 0) & (am > 0)
+        ok = (kh > 0) & (km > 0) & (at > 0) & (am > 0) \
+            & np.isfinite(at) & np.isfinite(am)
+        if ok.any():
+            # NEMO's floors on the CLOSURE fields: a floor plus a spatially
+            # varying K_wave is off the total's floor but still floored.
+            ok &= (at > at[ok].min() * 1.01) & (am > am[ok].min() * 1.01)
         return (np.where(ok, km / kh, np.nan), np.where(ok, am / at, np.nan))
 
 

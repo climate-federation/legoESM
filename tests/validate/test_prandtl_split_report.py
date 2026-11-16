@@ -172,3 +172,17 @@ def test_evd_columns_report_no_prandtl():
     rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon,
                                     evd_cols=evd, k_wave=0 * K_H)
     assert np.isnan(_row(rows, "nino3/evd")["Pr_nemo_median"])
+
+
+def test_closure_floors_are_excluded_under_a_varying_k_wave():
+    """codex review: floors detected on the TOTALS miss a closure floor that
+    K_wave lifts off the total's minimum; they must be detected after the
+    subtraction (interface 0 is the floored one in _fields)."""
+    K_H, K_M, avt, avm, wet, lat, lon = _fields()
+    kw = np.full_like(K_H, 3.0e-3)
+    kw[0, 0] = 0.0                     # one floored interface keeps no wave
+    rows = ctn.prandtl_split_report(K_H + kw, K_M + kw, avt + kw, avm + kw,
+                                    wet, lat, lon, k_wave=kw)
+    r = _row(rows, "nino3")
+    assert r["Pr_nemo_median"] == pytest.approx(PR_NEMO, rel=1e-12)
+    assert r["n_pr_closure"] == NCOL * (NIFACE - 1)
