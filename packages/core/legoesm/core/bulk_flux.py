@@ -118,6 +118,7 @@ _VALID_STABILITY_SCHEMES = (
     "gfs",
     "wrf_revmm5",
     "mynn_sfc",
+    "most_revisit_j3",
 )
 
 # ``unstable_scheme`` selects the UNSTABLE-branch (zeta < 0) psi_m, psi_h
@@ -243,6 +244,16 @@ _MYNN_STABLE_P_H = 1.1
 _MYNN_UNSTABLE_GAMMA = 16.0
 _MYNN_CONV_M = 10.0
 _MYNN_CONV_H = 34.0
+# --- MOST revisit J3 stable form (legoESM 22-tower flux-gradient benchmark v5,
+# global fit, odd days of all sites; unpublished, most_revisit/out/
+# standard_benchmark_v5.json global_fit/J3).  Stable (zeta > 0):
+#   phi = 1 + a_inf zeta + (a0 - a_inf) zeta / (1 + zeta/zc)
+#   psi = -a_inf zeta - (a0 - a_inf) zc ln(1 + zeta/zc)
+# slope a0 at zeta -> 0+, a_inf as zeta -> inf.  Heat = momentum: the fitted
+# neutral Prandtl number 1.0014 is 1 within its error (vote, see PR).
+_J3_A0 = 4.025
+_J3_A_INF = 0.4710
+_J3_ZC = 1.224
 
 # --- Thermal/momentum roughness ratio z0h/z0 ---
 # Ratio of the thermal (scalar) roughness length z0h (= z0_t = z0_q) to the
@@ -716,6 +727,12 @@ def _mynn_psi_h(zeta_pos):
     return -_MYNN_STABLE_A_H * _mynn_stable_log(zeta_pos, _MYNN_STABLE_P_H)
 
 
+def _most_revisit_j3_psi(zeta_pos):
+    """MOST revisit J3 stable psi(zeta), zeta > 0; momentum and heat alike."""
+    return (-_J3_A_INF * zeta_pos
+            - (_J3_A0 - _J3_A_INF) * _J3_ZC * jnp.log1p(zeta_pos / _J3_ZC))
+
+
 def _mynn_free_convective(zeta_neg, c):
     """MYNN/Fairall free-convective psi_c with y = (1 - c zeta)^(1/3), zeta <= 0."""
     sqrt3 = math.sqrt(3.0)
@@ -846,6 +863,8 @@ def _stable_psi_m(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
         return _wrf_revmm5_psi_m(zeta_pos)
     elif stability_scheme == "mynn_sfc":
         return _mynn_psi_m(zeta_pos)
+    elif stability_scheme == "most_revisit_j3":
+        return _most_revisit_j3_psi(zeta_pos)
     raise ValueError(
         f"Unknown stability_scheme {stability_scheme!r}; expected one of "
         f"{_VALID_STABILITY_SCHEMES}."
@@ -871,6 +890,8 @@ def _stable_psi_h(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
         return _wrf_revmm5_psi_h(zeta_pos)
     elif stability_scheme == "mynn_sfc":
         return _mynn_psi_h(zeta_pos)
+    elif stability_scheme == "most_revisit_j3":
+        return _most_revisit_j3_psi(zeta_pos)
     raise ValueError(
         f"Unknown stability_scheme {stability_scheme!r}; expected one of "
         f"{_VALID_STABILITY_SCHEMES}."
@@ -918,6 +939,7 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
       tail; the GFS unstable form is ``unstable_scheme="gfs"``
     - ``"wrf_revmm5"``           : WRF revised MM5 (Jimenez et al. 2012)
     - ``"mynn_sfc"``             : MYNN surface layer (Olson et al. 2021) stable
+    - ``"most_revisit_j3"``      : legoESM MOST revisit J3 fit (heat = momentum)
 
     ``unstable_gamma`` / ``stable_beta`` are the trainable Businger-Dyer
     coefficients (Businger et al. 1971 / Dyer 1974). They act ONLY when
@@ -1231,6 +1253,7 @@ _STABLE_ZETA_MIN = {
     "grachev2007_sheba": max(-1.0 / _GRACHEV_B_M,  # cbrt(1+z) + B_m > 0
                              -(_GRACHEV_C_H - math.sqrt(_GRACHEV_C_H ** 2 - 4.0)) / 2.0),
     "gryanik2020": -1.0 / _GRYANIK_B_H,  # log1p(b_h zeta)
+    "most_revisit_j3": -_J3_ZC,  # log1p(zeta / zc)
 }
 
 
