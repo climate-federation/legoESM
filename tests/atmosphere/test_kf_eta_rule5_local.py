@@ -24,7 +24,7 @@ Smoothed here, each by one ``KFSmoothing`` width (0 = the oracle):
   (C-LFSs, first-crossing weights of the LFS search) and ``melt_t_width_k``
   (C-MLs, soft warm flags of the melting test and the freezing level).
 * PR 6b, downdraft base and acceptance: ``dd_ok_depth_width_pa``,
-  ``deep_dd_depth_width_pa``, ``nodd_tder_width_kgs``, ``ddinc_cap_width``
+  ``nodd_tder_width_kgs``, ``ddinc_cap_width``
   (B3s), ``ldb_tv_width_k`` (C-LDBs) and ``dd_rh_low_width_kgkg`` (D7hs).
 
 The three tests per switch: the hard limit is the oracle (the oracle suite in
@@ -184,7 +184,15 @@ _UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_wid
                 "top_stop_wtw_width_m2s2",
                 # PR 6a: no fixture level lies within 0.05 K of T00 (measured:
                 # gaps at the hard gap to 2e-15); helper tests cover both sides
-                "melt_t_width_k"}
+                "melt_t_width_k",
+                # PR 6b (vote 23): no fixture downdraft sits in these bands
+                # (gaps at the hard gap to 2e-15).  Covered: helper tests, the
+                # width -> 0 convergence of the whole soft downdraft, and dd_ok
+                # on a column shifted into its band.  Residual risk (GLM):
+                # nodd, the DDINC cap and the RH branch could compare a wrong
+                # internal quantity without any test noticing.
+                "dd_ok_depth_width_pa", "nodd_tder_width_kgs", "ddinc_cap_width",
+                "dd_rh_low_width_kgkg"}
 
 
 def _moved(stored, case):
@@ -1049,7 +1057,7 @@ def test_any_in_range_is_the_oracle_warm_test_and_c2():
 
 # --- PR 6b: downdraft base and acceptance weights -----------------------------
 
-_DD6B = ("dd_ok_depth_width_pa", "deep_dd_depth_width_pa", "ldb_tv_width_k",
+_DD6B = ("dd_ok_depth_width_pa", "ldb_tv_width_k",
          "nodd_tder_width_kgs", "ddinc_cap_width", "dd_rh_low_width_kgkg")
 
 
@@ -1101,6 +1109,41 @@ def test_dd_rh_adjustment_adj_branch_is_unreachable_for_positive_layers():
     z0 = np.cumsum(np.asarray(fx["sweep_dz"]), axis=-1)
     rhh = 1.0 - kfe._RHH_DECR / kfe._RHH_PER_M * (z0[..., 1:] - z0[..., :-1])
     assert np.all(rhh < 1.0)
+
+
+def test_deep_dd_is_implied_by_dd_ok_over_the_fixture():
+    """deep_dd stays hard (vote 23): the base lies at least one layer below
+    the source layer, and every fixture layer is thicker than half the dd_ok
+    width, so the base is deeper than 50 hPa wherever the dd_ok weight is
+    positive."""
+    fx = dict(np.load(_FIX))
+    p = [np.asarray(fx[k]) for k in fx if k.endswith("_p") and np.asarray(fx[k]).ndim >= 1]
+    assert p
+    for a in p:
+        dp = -np.diff(a, axis=-1)
+        assert np.all(dp > 0.5 * _DEFAULT.dd_ok_depth_width_pa)
+
+
+def test_dd_ok_width_acts_on_a_column_shifted_into_its_band(monkeypatch):
+    """The 50 hPa threshold moved to 0.2 widths below sweep column 90's own
+    source-to-source-layer depth puts its dd_ok test in the band: the default
+    width moves the heating against the width -> 0 limit, and the gradient is
+    finite."""
+    fx = dict(np.load(_FIX))
+    i = 90
+    o, T = _sweep_column(fx, i)
+    p = np.asarray(fx["sweep_p"][i])
+    lfs, kpbl = int(o["lfs"][0]), int(o["kpbl"][0])
+    depth = p[kpbl] - p[lfs - 1]  # P0[KSTART] - P0[LFS], 1-based levels, KSTART = KPBL + 1
+    w = _DEFAULT.dd_ok_depth_width_pa
+    monkeypatch.setattr(kfe, "_DD_MIN_DEPTH_PA", depth - 0.2 * w)
+    sm = _DEFAULT._replace(dd_ok_depth_width_pa=w * (1 + 3e-9))
+    a, _ = _sweep_column(fx, i, smoothing=sm)
+    b, _ = _sweep_column(fx, i, smoothing=sm._replace(dd_ok_depth_width_pa=1e-9 * w))
+    assert bool(a["fired"][0])
+    assert float(jnp.max(jnp.abs(a["dtdt"] - b["dtdt"]))) > 1e-9 * float(jnp.max(jnp.abs(b["dtdt"])))
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, i, T, sm)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g)))
 
 
 def test_soft_downdraft_converges_to_the_hard_downdraft_as_the_widths_shrink():

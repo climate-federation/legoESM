@@ -370,15 +370,18 @@ class KFSmoothing(NamedTuple):
       flags are treated as independent per level; budgets close member by
       member (the weights only re-mix complete oracle runs).
     * Downdraft acceptance (PR 6b; any nonzero runs the survival path):
-      ``dd_ok_depth_width_pa`` / ``deep_dd_depth_width_pa`` the bands of the
-      two 50 hPa depth tests (source above the source layer, base below the
-      source), ``ldb_tv_width_k`` the band of the descent's stop hazard
+      ``dd_ok_depth_width_pa`` the band of the 50 hPa depth test of the
+      source above the source layer, ``ldb_tv_width_k`` the band of the descent's stop hazard
       TVD > TV0 (the base LDB by survival weights), ``nodd_tder_width_kgs``
       the onset band of the acceptance TDER >= 1 kg/s, ``ddinc_cap_width``
       the one-sided band of TDER * DDINC <= TRPPT (in units of TRPPT) and
       ``dd_rh_low_width_kgkg`` the band of the RH-adjustment branch
       qsrh < qd (D7h ``low``).  D7h ``adj`` (rhh < 1) stays hard: the descent
-      runs below the source layer, where rhh < 1 always.
+      runs below the source layer, where rhh < 1 always.  The base depth test
+      deep_dd (P0[LDB] - P0[LFS] > 50 hPa) stays hard: the base lies at least
+      one layer below the source layer, so wherever the dd_ok weight is
+      positive the base is deeper than 50 hPa (layers thicker than half the
+      dd_ok width; vote 23).
     """
 
     lut_knot_width: float
@@ -409,7 +412,6 @@ class KFSmoothing(NamedTuple):
     lfs_depth_width_pa: float
     melt_t_width_k: float
     dd_ok_depth_width_pa: float
-    deep_dd_depth_width_pa: float
     ldb_tv_width_k: float
     nodd_tder_width_kgs: float
     ddinc_cap_width: float
@@ -428,8 +430,8 @@ def _survival_on(sm: KFSmoothing) -> bool:
 
 def _soft_downdraft_on(sm: KFSmoothing) -> bool:
     """The downdraft runs as the mixture over its base and acceptance (PR 6b)."""
-    return bool(sm.dd_ok_depth_width_pa or sm.deep_dd_depth_width_pa  # kfsw: S
-                or sm.ldb_tv_width_k or sm.nodd_tder_width_kgs or sm.ddinc_cap_width
+    return bool(sm.dd_ok_depth_width_pa or sm.ldb_tv_width_k  # kfsw: S
+                or sm.nodd_tder_width_kgs or sm.ddinc_cap_width
                 or sm.dd_rh_low_width_kgkg)
 
 
@@ -1911,7 +1913,8 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         DMFK = DMF[KSTART]  # kfsw: C-KPBL
         G_ = jnp.cumsum(jnp.where(lev, (QSD - QDK) * DP, 0.0)[::-1])[::-1]  # kfsw: C-LDBs
         TDERB = -DMFK * G_ / Cs  # raw TDER of the run with base b
-        deep = _gt_c2(P0 - P0[LFS] - _DD_MIN_DEPTH_PA, sm.deep_dd_depth_width_pa)  # kfsw: B3s,C-LFSs
+        # deep_dd: true wherever p_ok > 0 (the base is a layer below KSTART)
+        deep = (P0 - P0[LFS] > _DD_MIN_DEPTH_PA).astype(dtype)  # kfsw: B3,C-LFSs
         if sm.nodd_tder_width_kgs:  # kfsw: S
             acc = _step_c2(TDERB - _TDER_MIN, sm.nodd_tder_width_kgs)
         else:

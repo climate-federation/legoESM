@@ -258,7 +258,6 @@ __param_spec__ = {
             "wrf_lfs_depth_width_pa": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_melt_t_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_dd_ok_depth_width_pa": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
-            "wrf_deep_dd_depth_width_pa": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_ldb_tv_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_nodd_tder_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_ddinc_cap_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
@@ -1041,7 +1040,6 @@ class KainFritschConfig(NamedTuple):
     wrf_lfs_depth_width_pa: float = 500.0
     wrf_melt_t_width_k: float = 0.1
     wrf_dd_ok_depth_width_pa: float = 500.0
-    wrf_deep_dd_depth_width_pa: float = 500.0
     wrf_ldb_tv_width_k: float = 0.1
     wrf_nodd_tder_width_kgs: float = 1.0
     wrf_ddinc_cap_width: float = 0.02
