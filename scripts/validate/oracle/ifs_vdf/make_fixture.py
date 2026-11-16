@@ -1,6 +1,7 @@
 """Run the OpenIFS 49r1 VDF column-kernel oracle and write the fixture.
 
 usage: python make_fixture.py <columns dir> <build dir> <out.npz>
+       python make_fixture.py --main <columns dir> <main build dir> <out.npz>
 
 <columns dir> holds the tier-2 audit columns ``columns_{L32,L137,STRESS}.npz``
 (the same 24 atmosphere columns as the IFS convection and SSO oracles).  Each
@@ -17,6 +18,11 @@ Arms: N = 49r1 native constants (CONST_MODE 2); L = legoESM g, R_d, c_pd, R_v,
 L_v (CONST_MODE 1).  The fixture stores the inputs exactly as the driver read
 them (text round trip) and, per arm, every VDFDPBL/VDFHGHTN/VDFEXCU output the
 driver prints.
+
+--main runs ``oracle_main.x`` (build_main.sh: VDFMAIN itself) on the same inputs
+plus the RQM group: the SYN columns with their top RQM_NLEV levels nearly dry
+(q = RQM_Q, PQE = 0) under liquid and ice cloud, so the REPQMI low-humidity
+correction fires there.
 """
 import re
 import subprocess
@@ -228,6 +234,58 @@ def run(build, x, arm, tag):
     return res, r.stdout
 
 
+RQM_NLEV, RQM_Q, RQM_L, RQM_I = 10, 2.0e-9, 1.0e-6, 5.0e-7
+MAIN_SCAL = ("zinv", "pblh", "vdis", "vdisg", "tofdu", "tofdv")
+MAIN_ROWS = ("te", "qe", "le", "ie", "vom", "vol", "kh", "km", "ri", "strtu", "strtv",
+             "difts", "diftq")
+
+
+def parse_main(path):
+    lines = Path(path).read_text().splitlines()
+    n, _ = (int(v) for v in lines[0].split())
+    res, k = {}, 1
+    for _ in range(n):
+        name = lines[k].split()[1]
+        sc = [_f(v) for v in lines[k + 1].split()[1:]]
+        kp = int(lines[k + 2].split()[1])
+        rows = [np.array([_f(v) for v in lines[k + 3 + j].split()]) for j in range(len(MAIN_ROWS))]
+        res[name] = {**dict(zip(MAIN_SCAL, sc)), "kpbltype": kp, **dict(zip(MAIN_ROWS, rows))}
+        k += 3 + len(MAIN_ROWS)
+    return res
+
+
+def main_fixture(cols, build, outp):
+    build = Path(build)
+    fx = {"ptsphy": np.array(PTSPHY)}
+    for g in GROUPS + ("RQM",):
+        src = Path(cols) / f"columns_{'L137' if g in ('SYN', 'RQM') else g}.npz"
+        d = np.load(src, allow_pickle=True)
+        x = inputs(synthetic(d) if g in ("SYN", "RQM") else d)
+        if g == "RQM":
+            for k, val in (("q", RQM_Q), ("ql", RQM_L), ("qi", RQM_I), ("qe", 0.0)):
+                x[k][:, :RQM_NLEV] = _r(val)
+        for k, v in x.items():
+            fx[f"{g}_{k}"] = v
+        for arm in ARMS:
+            tag = f"main_{arm}_{g}"
+            inf, outf, nml = build / f"in_{tag}.txt", build / f"out_{tag}.txt", build / f"run_{tag}.nml"
+            inf.write_text(oracle_text(x))
+            body = ", ".join(f"{k}={v!r}" for k, v in ARMS[arm].items())
+            nml.write_text(f"&RUN {body}, PTSPHY={PTSPHY!r}, INFILE='{inf}', OUTFILE='{outf}' /\n"
+                           "&NAMSCEN /\n&NAMVDF /\n&NAMGWD /\n")
+            r = subprocess.run([str(build / "oracle_main.x"), str(nml)], capture_output=True, text=True)
+            if r.returncode != 0 or "DRIVER_DONE" not in r.stdout:
+                raise SystemExit(f"oracle_main failed {tag}: {r.stdout[-400:]} {r.stderr[-400:]}")
+            res = parse_main(outf)
+            if list(res) != list(x["names"]):
+                raise SystemExit(f"column order/names differ {tag}")
+            fx[f"{arm}_{g}_log"] = np.array(r.stdout)
+            for f in MAIN_SCAL + ("kpbltype",) + MAIN_ROWS:
+                fx[f"{arm}_{g}_{f}"] = np.array([res[nm][f] for nm in x["names"]])
+    np.savez_compressed(outp, **fx)
+    print("FIXTURE_OK", outp)
+
+
 def main(cols, build, outp):
     fx = {"ptsphy": np.array(PTSPHY)}
     for g in GROUPS:
@@ -246,4 +304,7 @@ def main(cols, build, outp):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    if sys.argv[1] == "--main":
+        main_fixture(*sys.argv[2:5])
+    else:
+        main(*sys.argv[1:4])

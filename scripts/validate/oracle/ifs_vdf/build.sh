@@ -40,7 +40,7 @@ done
 FF="-O1 -ffp-contract=off -fno-fast-math -cpp -ffree-line-length-none -fbacktrace -g"
 INC="-I$B/inc -I$S/function -I$S/include"
 gfortran $FF $INC -c "$HERE/stubs.F90"
-for f in $MODS $RTNS "$HERE/driver.F90"; do
+for f in $MODS "$HERE/oracle_setup.F90" $RTNS "$HERE/driver.F90"; do
   gfortran $FF $INC -c "$f"
 done
 gfortran $FF -o oracle.x *.o

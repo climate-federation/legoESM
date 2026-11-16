@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from functools import partial
 from pathlib import Path
 
 import jax
@@ -36,7 +37,8 @@ from legoesm.atmosphere.physics._ifs_thermo import ifs_thermo
 from legoesm.atmosphere.physics.turbulence.ifs_vdf import (
     IFSTOFDConfig, IFSVDFConfig, hard_config, hard_tofd_config, ifs_hghtn_parcel, ifs_slgs,
     ifs_tofd_coefficient, ifs_vdfdifc, ifs_vdfdifh_flux, ifs_vdfdifm, ifs_vdfdpbl, ifs_vdfexcu,
-    ifs_vdfhghtn, ifs_vdfincr,
+    IFSVDFLaneConfig, IFSVDFMainConfig, ifs_vdf_turbulence, ifs_vdfhghtn, ifs_vdfincr,
+    ifs_vdfmain,
 )
 from legoesm.atmosphere.physics.convection._ifs_cumastrn import njkt_levels
 
@@ -649,3 +651,235 @@ def test_solver_gradients(fix):
     check_grads(lambda d: jnp.sum(ifs_vdfincr(
         x["u"], x["v"], x["p_half"], z, z, z, z, d, z, z, z, z, x["qe"], z, z, x["dt"],
         x["th"].RG).slge ** 2), (z + 1e-3,), **kw)
+
+
+
+# ---------------------------------------------------------------- stage 3
+# VDFMAIN itself (build_main.sh / driver_main.F90, make_fixture.py --main):
+# the same inputs plus the RQM group (top levels nearly dry under cloud).
+# Snow evaporation is SURFEXCDRIVER's output there (stubbed 0), not the input.
+_FIXM = _DIR / "ifs_vdf_main.npz"
+_GAPS_M = _DIR / "ifs_vdf_main_gaps.json"
+_GROUPS_M = _GROUPS + ("RQM",)
+_M_ROWS = ("te", "qe", "vom", "vol", "kh", "km", "ri", "strtu", "strtv")
+_M_SCAL = ("zinv", "pblh", "vdis", "vdisg", "tofdu", "tofdv")
+
+
+@pytest.fixture(scope="module")
+def fixm():
+    return dict(np.load(_FIXM))
+
+
+def _m_cols(fx, arm, g):
+    a = lambda k: _a(fx, g, k)
+    tile, sfc2 = a("tile"), a("sfc2")
+    z = jnp.zeros_like(a("T"))
+    return (a("u"), a("v"), a("T"), a("q"), a("ql"), a("qi"), a("p_half"), a("p_full"),
+            a("geo_full"), a("geo_half"), a("hrlw"), a("hrsw"), a("z0m"), a("sigflt"), a("shf"),
+            a("lhf"), a("ustar"), sfc2[:, 3], tile[:, :8], 0.0 * sfc2[:, 0], tile[:, 16:],
+            tile[:, 8:16],
+            a("sobeta"), a("soteu"), a("sotev"), sfc2[:, 1], sfc2[:, 2], z, a("qe"), z, z, z, z)
+
+
+@partial(jax.jit, static_argnums=(0, 2, 3, 4, 5))   # widths pick hard/smooth in Python
+def _m_run(th, cols, dt, cfg, tofd_cfg, main_cfg):
+    f = lambda *c: ifs_vdfmain(th, *c, dt, cfg, tofd_cfg, main_cfg)
+    return jax.vmap(f)(*cols)
+
+
+def _main(fx, arm, g, cfg, tofd_cfg, main_cfg):
+    return _m_run(_th(fx, arm, g), _m_cols(fx, arm, g), float(fx["ptsphy"]), cfg, tofd_cfg,
+                  main_cfg)
+
+
+_HARD_M = (hard_config(), hard_tofd_config(), IFSVDFMainConfig(repqmi_width=0.0))
+_SOFT_M = (IFSVDFConfig(), IFSTOFDConfig(), IFSVDFMainConfig())
+
+
+@pytest.mark.parametrize("arm", _ARMS)
+@pytest.mark.parametrize("g", _GROUPS_M)
+def test_vdfmain_matches_openifs(fixm, arm, g):
+    o = _main(fixm, arm, g, *_HARD_M)
+    np.testing.assert_array_equal(np.asarray(o.kpbltype), fixm[f"{arm}_{g}_kpbltype"])
+    for k in _M_ROWS + _M_SCAL:
+        e = _err(getattr(o, k), fixm[f"{arm}_{g}_{k}"])
+        assert e <= _TOL, (k, e)
+    # liquid and ice tendencies are the two shares of one condensate transfer:
+    # scaled together (vote 12 G18), so the oracle's ~1e-27 round-off ice share
+    # of an all-liquid transfer is not read against itself
+    e = _err(jnp.stack([o.le, o.ie]), np.stack([fixm[f"{arm}_{g}_le"], fixm[f"{arm}_{g}_ie"]]))
+    assert e <= _TOL, ("le/ie", e)
+
+
+def test_vdfmain_fixture_exercises_glue(fixm, fix):
+    """The two glue switches fire on the fixture: the REPQMI correction (RQM
+    levels end at q + dt qe = REPQMI with condensate removed) and the cloud/fog
+    PBL correction (VDFHGHTN type 1 promoted to type 2 by VDFMAIN)."""
+    dt = float(fixm["ptsphy"])
+    w1 = fixm["RQM_q"][:, :10] + dt * fixm["N_RQM_qe"][:, :10]
+    fired = np.abs(w1 - 1.0e-8) < 1e-20          # most RQM top levels (diffusion moistens a few)
+    assert fired.mean() > 0.9
+    assert np.all(fixm["N_RQM_le"][:, :10][fired] < 0.0) and np.all(fixm["N_RQM_ie"][:, :10][fired] < 0.0)
+    promoted = sum(int(np.sum((fix[f"N_{g}_kpbltype"] == 1) & (fixm[f"N_{g}_kpbltype"] == 2)))
+                   for g in _GROUPS)
+    assert promoted > 0
+
+
+def _measured_main_gaps(fx):
+    gaps = {}
+    for g in _GROUPS_M:
+        hard = _main(fx, "N", g, *_HARD_M[:2], IFSVDFMainConfig(repqmi_width=0.0))
+        soft = _main(fx, "N", g, *_HARD_M[:2], IFSVDFMainConfig())
+        for k in ("te", "qe", "le", "ie"):
+            gaps[f"{g}_{k}"] = _col_gaps(getattr(soft, k), getattr(hard, k))
+    return gaps
+
+
+def test_repqmi_smooth_gap_per_column(fixm):
+    """RULE 5: the smooth REPQMI correction's mismatch against the hard form,
+    per fixture column, equals the stored measurement (VDF widths held hard)."""
+    gaps = _measured_main_gaps(fixm)
+    if os.environ.get("IFS_VDF_REGEN_GAPS") == "1":
+        _GAPS_M.write_text(json.dumps(gaps, indent=1, sort_keys=True))
+    stored = json.loads(_GAPS_M.read_text())
+    assert sorted(stored) == sorted(gaps)
+    for k, v in gaps.items():
+        np.testing.assert_allclose(v, stored[k], rtol=_GAP_RTOL, atol=_GAP_ATOL, err_msg=k)
+
+
+def test_repqmi_width_is_live():
+    """Non-vacuity of repqmi_width: inside its band (updated humidity 3e-11
+    below REPQMI under cloud) the smooth correction differs from the hard one
+    and stays finite; far outside both agree."""
+    from legoesm.atmosphere.physics._ifs_thermo import lego_thermo
+    from legoesm.atmosphere.physics.turbulence import ifs_vdf as m
+    th, dt = lego_thermo(), 900.0
+    q = jnp.array([m._REPQMI - 3.0e-11, 2.0e-9])
+    c = jnp.array([1.0e-6, 1.0e-6])
+    z = jnp.zeros(2)
+    hard = m._repqmi_correction(th, q, c, 0.3 * c, z, z, z, z, dt, 0.0)
+    soft = m._repqmi_correction(th, q, c, 0.3 * c, z, z, z, z, dt, IFSVDFMainConfig().repqmi_width)
+    for h, s in zip(hard, soft):
+        assert np.all(np.isfinite(np.asarray(s)))
+        assert float(h[0]) != float(s[0])
+        assert float(h[1]) == float(s[1])
+
+
+def test_vdfmain_water_budget(fixm):
+    """Column total water: tendency integral = surface flux + input tendency
+    (the REPQMI correction only moves water between phases)."""
+    for g in _GROUPS_M:
+        th = _th(fixm, "N", g)
+        o = _main(fixm, "N", g, *_SOFT_M)
+        dt = float(fixm["ptsphy"])
+        for i in range(len(fixm[f"{g}_names"])):
+            a = lambda k: np.asarray(fixm[f"{g}_{k}"][i])
+            w = (a("p_half")[1:] - a("p_half")[:-1]) / th.RG
+            tend = np.asarray(o.qe[i] + o.le[i] + o.ie[i]) - a("qe")
+            flux = -float(a("lhf")) / th.RLVTT
+            old = a("q") + a("ql") + a("qi")
+            _close(w, tend, flux, old + dt * tend, old, dt)
+
+
+def test_vdfmain_gradient_through_repqmi(fixm):
+    """check_grads (reverse) at the smooth default through the REPQMI correction
+    on an RQM column: d(top-level tendencies)/d(q, ql) finite and non-zero."""
+    th = _th(fixm, "N", "RQM")
+    cols = [c[0] for c in _m_cols(fixm, "N", "RQM")]
+    dt = float(fixm["ptsphy"])
+
+    def f(q, ql):
+        c = list(cols)
+        c[3], c[4] = q, ql
+        o = ifs_vdfmain(th, *c, dt, *_SOFT_M)
+        return jnp.sum((o.qe[:10] + 2.0 * o.le[:10] + 3.0 * o.ie[:10]) * 1e8)
+
+    f = jax.jit(f)
+    gq, gl = jax.grad(f, argnums=(0, 1))(cols[3], cols[4])
+    assert np.all(np.isfinite(gq)) and np.any(np.asarray(gq[:10]) != 0.0)
+    assert np.any(np.asarray(gl[:10]) != 0.0)
+    check_grads(f, (cols[3], cols[4]), order=1, modes=("rev",), atol=1e-6, rtol=1e-4,
+                eps=1e-12)
+
+
+def _lane_cols(fx, g="SYN", n=3):
+    a = lambda k: np.asarray(fx[f"{g}_{k}"][:n])
+    g0 = constants.g
+    zf, zh = a("geo_full") / g0, a("geo_half") / g0
+    T, q = a("T"), a("q")
+    rho = a("p_full") / (constants.R_d * T)
+    return dict(u=a("u"), v=a("v"), T=T, q_v=q, p_full=a("p_full"), p_half=a("p_half"),
+                z_full=zf, z_half=zh, T_sfc=T[:, -1] + 1.0, q_sfc=q[:, -1] * 1.1, rho=rho,
+                q_c=a("ql"), q_i=a("qi"), rad_heating=a("hrlw"), sigflt=a("sigflt"),
+                land_fraction=a("land"))
+
+
+def test_lane_kernel_runs_and_refuses_missing_inputs(fixm):
+    x = {k: jnp.asarray(v) for k, v in _lane_cols(fixm).items()}
+    pos = [x.pop(k) for k in ("u", "v", "T", "q_v", "p_full", "p_half", "z_full", "z_half",
+                              "T_sfc", "q_sfc", "rho")]
+    flux = (jnp.full(3, 0.1), jnp.full(3, -0.05), jnp.full(3, 20.0), jnp.full(3, 80.0),
+            jnp.full(3, 0.3))
+    o = ifs_vdf_turbulence(*pos, 900.0, IFSVDFLaneConfig(), flux, **x)
+    for k in ("du_dt", "dT_dt", "dq_v_dt", "dq_c_dt", "dq_i_dt", "h_pbl"):
+        assert np.all(np.isfinite(np.asarray(getattr(o, k)))), k
+    o2 = ifs_vdf_turbulence(*pos, 900.0, IFSVDFLaneConfig(), None, **x)   # bulk fluxes
+    assert np.all(np.isfinite(np.asarray(o2.dT_dt)))
+    for k in x:
+        with pytest.raises(ValueError, match=k):
+            ifs_vdf_turbulence(*pos, 900.0, IFSVDFLaneConfig(), flux, **{**x, k: None})
+
+
+def test_lane_kernel_surface_signs(fixm):
+    """Lane flux tuple is positive UP: an upward sensible and latent flux warms
+    and moistens the lowest layer, and the water flux the kernel reports is the
+    surface's own (prescribed evaporation wins over lhflx / L)."""
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    x = {k: jnp.asarray(v) for k, v in _lane_cols(fixm).items()}
+    pos = [x.pop(k) for k in ("u", "v", "T", "q_v", "p_full", "p_half", "z_full", "z_half",
+                              "T_sfc", "q_sfc", "rho")]
+    z = jnp.zeros(3)
+    run = lambda sh, lh, cfg=IFSVDFLaneConfig(): ifs_vdf_turbulence(
+        *pos, 900.0, cfg, (z, z, z + sh, z + lh, z + 0.3), **x)
+    base, warm, wet = run(0.0, 0.0), run(50.0, 0.0), run(0.0, 100.0)
+    assert np.all(np.asarray(warm.dT_dt - base.dT_dt)[:, -1] > 0.0)
+    assert np.all(np.asarray(wet.dq_v_dt - base.dq_v_dt)[:, -1] > 0.0)
+    assert np.all(np.asarray(wet.evap_sfc) > 0.0)
+    cfg = IFSVDFLaneConfig(surface=SurfaceLayerConfig(prescribed_evap_kg_m2_s=2.0e-5))
+    np.testing.assert_allclose(np.asarray(run(0.0, 100.0, cfg).evap_sfc), 2.0e-5)
+
+
+def test_lane_kernel_budgets_with_prescribed_evaporation(fixm):
+    """With a prescribed water flux unequal to lhflx / L_v (and calm air, so no
+    dissipation), the column takes up exactly that water and exactly
+    shflx + lhflx of moist enthalpy cp T + L_v q - L_f q_i (vote 13 G22/G23)."""
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    x = {k: jnp.asarray(v) for k, v in _lane_cols(fixm).items()}
+    x["u"], x["v"] = 0.0 * x["u"], 0.0 * x["v"]
+    pos = [x.pop(k) for k in ("u", "v", "T", "q_v", "p_full", "p_half", "z_full", "z_half",
+                              "T_sfc", "q_sfc", "rho")]
+    z = jnp.zeros(3)
+    evap, sh, lh = 2.0e-5, 30.0, 100.0
+    cfg = IFSVDFLaneConfig(surface=SurfaceLayerConfig(prescribed_evap_kg_m2_s=evap))
+    o = ifs_vdf_turbulence(*pos, 900.0, cfg, (z, z, z + sh, z + lh, z + 0.3), **x)
+    w = np.diff(np.asarray(pos[5]), axis=1) / constants.g
+    water = np.sum(w * np.asarray(o.dq_v_dt + o.dq_c_dt + o.dq_i_dt), axis=1)
+    np.testing.assert_allclose(water, evap, rtol=1e-9)
+    h = np.sum(w * np.asarray(constants.c_pd * o.dT_dt + constants.L_v * o.dq_v_dt
+                              - constants.L_f * o.dq_i_dt), axis=1)   # latent-ok: moist enthalpy
+    np.testing.assert_allclose(h, sh + lh, rtol=1e-9)
+
+
+def test_lane_kernel_gradient_at_rest(fixm):
+    """The surface momentum coefficient's wind floor keeps the gradient finite
+    with the lowest-level wind at rest (vote 11 G15)."""
+    x = {k: jnp.asarray(v) for k, v in _lane_cols(fixm, n=1).items()}
+    u = x.pop("u").at[:, -1].set(0.0)
+    v = x.pop("v").at[:, -1].set(0.0)
+    pos = [x.pop(k) for k in ("T", "q_v", "p_full", "p_half", "z_full", "z_half", "T_sfc",
+                              "q_sfc", "rho")]
+    flux = (jnp.full(1, 0.0), jnp.full(1, 0.0), jnp.full(1, 20.0), jnp.full(1, 80.0),
+            jnp.full(1, 0.3))
+    g = jax.grad(lambda uu: jnp.sum(ifs_vdf_turbulence(
+        uu, v, *pos, 900.0, IFSVDFLaneConfig(), flux, **x).du_dt ** 2))(u)
+    assert np.all(np.isfinite(np.asarray(g)))
