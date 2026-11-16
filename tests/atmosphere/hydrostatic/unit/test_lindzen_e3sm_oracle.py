@@ -39,7 +39,7 @@ _KEYS = ("u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho", "lat", "s
 def _hard_config():
     return LindzenConfig()._replace(
         Fr_sharpness=_HARD, crit_level_sharpness=_HARD, crit_level_floor=0.0,
-        oro_wind_ramp_width=0.0)
+        oro_wind_ramp_width=0.0, umcfac_abs_width=0.0, taumin_ramp_width=0.0)
 
 
 def _run(f, cfg, dtype=jnp.float64):

@@ -62,7 +62,11 @@ pressure floors are static (orography, the model-top interface) and stay
 hard.  Since #2241 (2026-11-12) the same p (``Fr_sharpness``) also smooths
 the tendency limiters (orographic saturation, ``umcfac``, ``tndmax``),
 ``dscal = min(1, .)``, the diffusivity ``max(dback, .)`` and the launch Froude
-cap ``min(hdsp^2, fcrit2 (U/N)^2)``.  The production smoothing values are NOT
+cap ``min(hdsp^2, fcrit2 (U/N)^2)``; since 2026-11-16 ``umcfac_abs_width``
+(0.01 m/s, the smooth ``|ubm|`` of the ``umcfac`` limit) and
+``taumin_ramp_width`` (1e-10 Pa, the ``taumin`` zeroing as a quintic ramp)
+smooth the last two switches on model state (#2241; per-column gap below
+unchanged to 1e-6 relative).  The production smoothing values are NOT
 the hard limit; the oracle test pins that gap per column.  KNOWN DIFFERENCE
 at the defaults (vs the E3SM oracle, 17 columns, measured 2026-11-12): up to
 6.9e-2 relative in du/dt (column 9; 6.2e-2 column 15, 4.4e-2 column 8) and
@@ -212,6 +216,8 @@ def lindzen_gwd(
         crit_level_sharpness=config.crit_level_sharpness,
         crit_level_floor=config.crit_level_floor,
         tndmax_per_day=config.tndmax_per_day,
+        umcfac_abs_width=config.umcfac_abs_width,
+        taumin_ramp_width=config.taumin_ramp_width,
     )
 
     # E3SM driver discrete-KE heating (gw_drag.F90:908-913; ttgw = 0 for the

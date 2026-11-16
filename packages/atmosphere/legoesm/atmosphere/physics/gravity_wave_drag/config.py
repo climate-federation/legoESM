@@ -70,6 +70,8 @@ __param_spec__ = {
             "softmin_sharpness": "p of the p-norm smooth min of the saturation cap and the tendency limiters (RULE 5, #2241); a differentiability/smoothing width, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter (RULE 5, #2241); a differentiability/smoothing width, not a closure",
             "crit_level_floor": "(u - c) offset at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure (default 0 = E3SM)",
+            "umcfac_abs_width": "numerics: width of the smooth |c - u| in the umcfac tendency limit (RULE 5, #2241; 0 = E3SM's |x|), value voted by Claude+GLM+codex",
+            "taumin_ramp_width": "numerics: width [Pa] of the smooth taumin stress zeroing (RULE 5, #2241; 0 = E3SM's hard zeroing), value voted by Claude+GLM+codex",
         },
         "params": {
             # --- efficiency (primary amplitude knob) ---
@@ -146,6 +148,8 @@ __param_spec__ = {
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
             "oro_wind_ramp_width": "numerics: smooth-switch width of the U > oro_min_wind launch gate (RULE 5), value decided by codex+GLM (#2241)",
+            "umcfac_abs_width": "numerics: width of the smooth |c - u| in the umcfac tendency limit (RULE 5, #2241; 0 = E3SM's |x|), value voted by Claude+GLM+codex",
+            "taumin_ramp_width": "numerics: width [Pa] of the smooth taumin stress zeroing (RULE 5, #2241; 0 = E3SM's hard zeroing), value voted by Claude+GLM+codex",
         },
         "params": {
             # --- orographic launch amplitude ---
@@ -293,6 +297,18 @@ class LindzenConfig(NamedTuple):
         from tau(2 m/s) to 0).  The mountain-height gate (``hdsp > 10 m``) and
         the 1 Pa pressure floors stay hard: they are static (orography; the
         model-top interface), not model state.
+    umcfac_abs_width : float
+        Width [m/s] of the smooth ``|c - u|`` in the ``umcfac`` tendency limit
+        ``umcfac*|c - u|/dt`` (RULE 5, #2241; default 0.01, Claude/GLM/codex
+        vote 3-0): ``(c-u)*tanh((c-u)/w)``, 0 at a critical level, never above
+        ``|c - u|``.  ``0.0`` is E3SM's ``abs``, whose kink at a critical level
+        propagates down through the re-derived stress.
+    taumin_ramp_width : float
+        Width [Pa] of the smooth ``taumin`` zeroing of ``tausat``/``taudmp``
+        (RULE 5, #2241; default 1e-10 = ``taumin``, vote 3-0): the stress is
+        multiplied by ``smoothstep_quintic((tau - taumin)/w)``, exactly 0 at and
+        below ``taumin`` and exact from ``taumin + w``.  ``0.0`` is E3SM's
+        hard zeroing (a jump of ``taumin``).
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
@@ -303,6 +319,8 @@ class LindzenConfig(NamedTuple):
     tndmax_per_day: float = 500.0
     umcfac: float = 0.5
     oro_wind_ramp_width: float = 0.5
+    umcfac_abs_width: float = 0.01
+    taumin_ramp_width: float = 1.0e-10
 
 
 class McFarlaneConfig(NamedTuple):
@@ -890,6 +908,18 @@ class E3SMCAMConfig(NamedTuple):
     crit_level_floor : float
         Offset [m/s] of the smooth critical-level test (default 0.0 = E3SM's
         ``(u-c)`` sign test).
+    umcfac_abs_width : float
+        Width [m/s] of the smooth ``|c - u|`` in the ``umcfac`` tendency limit
+        ``umcfac*|c - u|/dt`` (RULE 5, #2241; default 0.01, Claude/GLM/codex
+        vote 3-0): ``(c-u)*tanh((c-u)/w)``, 0 at a critical level, never above
+        ``|c - u|``.  ``0.0`` is E3SM's ``abs``, whose kink at a critical level
+        propagates down through the re-derived stress.
+    taumin_ramp_width : float
+        Width [Pa] of the smooth ``taumin`` zeroing of ``tausat``/``taudmp``
+        (RULE 5, #2241; default 1e-10 = ``taumin``, vote 3-0): the stress is
+        multiplied by ``smoothstep_quintic((tau - taumin)/w)``, exactly 0 at and
+        below ``taumin`` and exact from ``taumin + w``.  ``0.0`` is E3SM's
+        hard zeroing (a jump of ``taumin``).
     """
     source: str = "orographic"
     pgwv: int = 0
@@ -919,6 +949,8 @@ class E3SMCAMConfig(NamedTuple):
     softmin_sharpness: float = 50.0
     crit_level_sharpness: float = 100.0
     crit_level_floor: float = 0.0
+    umcfac_abs_width: float = 0.01
+    taumin_ramp_width: float = 1.0e-10
 
 
 class GWDMLEmulatorConfig(NamedTuple):
