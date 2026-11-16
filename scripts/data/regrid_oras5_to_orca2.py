@@ -10,6 +10,7 @@ Argon on 2026-11-16):
   (domcfg e3t_0, partial bottom cells), so heat and salt content are kept;
 - weight = ORCA025 cell area (e1t*e2t) x overlap thickness x ORCA025 wet;
   SSH uses area x surface wet;
+- a duplicated ORCA2 point (north fold) takes its first copy's value;
 - an ORCA2 wet cell with no ORCA025 sample is NaN (excluded from the loss),
   ORCA025 water landing on ORCA2 land is dropped; both are counted.
 
@@ -88,7 +89,8 @@ def build_weights(src, dst):
     nz_s, ny_s, nx_s = swet.shape
     nz_d, ny_d, nx_d = dwet.shape
     n2s, n2d = ny_s * nx_s, ny_d * nx_d
-    col = nearest_centre_index(slon, slat, dlon, dlat).ravel()       # dst column per src column
+    twin = twin_columns(dlon, dlat)                                  # duplicated points -> first copy
+    col = twin[nearest_centre_index(slon, slat, dlon, dlat).ravel()]  # dst column per src column
     dtop_c, dbot_c = dtop.reshape(nz_d, -1).T, dbot.reshape(nz_d, -1).T  # (n2d, nz_d)
     dwet_c = dwet.reshape(nz_d, -1).T
     rows, cols, vals = [], [], []
@@ -115,11 +117,21 @@ def build_weights(src, dst):
     s = np.nonzero(swet[0].ravel())[0]
     keep2 = dwet[0].ravel()[col[s]]
     W2 = sp.csr_matrix((sarea.ravel()[s][keep2], (col[s][keep2], s[keep2])), shape=(n2d, n2s))
+    # a duplicated grid point (north fold) carries the same values as its first copy
+    W2 = W2[twin]
+    W3 = W3[(np.arange(nz_d)[:, None] * n2d + twin[None, :]).ravel()]
     counts = {"dropped_volume_fraction": dropped / total,
               "orca2_wet_cells": int(dwet.sum()),
               "orca2_wet_cells_without_data": int((dwet.ravel() & (np.asarray(W3.sum(1)).ravel() == 0)).sum()),
               "orca2_wet_surface_cells_without_ssh": int((dwet[0].ravel() & (np.asarray(W2.sum(1)).ravel() == 0)).sum())}
     return W3, W2, counts
+
+
+def twin_columns(lon, lat, decimals=5):
+    """Flat index of the first column at the same (lat, lon) as each column."""
+    key = np.round(np.asarray(lat), decimals) * 1e7 + np.round(np.asarray(lon) % 360.0, decimals)
+    _, first, inv = np.unique(key.ravel(), return_index=True, return_inverse=True)
+    return first[inv]
 
 
 def apply(W, x, wet_src, shape):

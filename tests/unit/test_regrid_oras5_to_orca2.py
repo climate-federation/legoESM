@@ -49,3 +49,16 @@ def test_a_target_cell_with_no_source_is_nan_and_counted():
     assert counts["orca2_wet_cells_without_data"] == 2
     out = r.apply(W3, np.ones((3, 2, 4)), swet, dst[2].shape)
     assert np.all(np.isnan(out[:, 0, 0])) and np.all(np.isfinite(out[0, 0, 1]))
+
+
+def test_a_duplicated_target_point_gets_its_twins_value():
+    src, dst = _grids()
+    dlon, dlat, dwet, dtop, dbot = dst
+    # add a third target column at the SAME place as the first (a fold duplicate)
+    dlon3 = np.concatenate([dlon, dlon[:, :1]], axis=1); dlat3 = np.concatenate([dlat, dlat[:, :1]], axis=1)
+    cat = lambda a: np.concatenate([a, a[:, :, :1]], axis=2)  # noqa: E731
+    W3, W2, counts = r.build_weights(src, (dlon3, dlat3, cat(dwet), cat(dtop), cat(dbot)))
+    T = np.random.default_rng(1).normal(size=(3, 2, 4))
+    out = r.apply(W3, T, src[3], cat(dwet).shape)
+    np.testing.assert_array_equal(out[:, 0, 2], out[:, 0, 0])
+    assert counts["orca2_wet_cells_without_data"] == 0
