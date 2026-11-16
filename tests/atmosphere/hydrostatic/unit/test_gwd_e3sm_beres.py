@@ -155,8 +155,9 @@ def test_beres_uh_column_lookup():
     pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
     to = lambda a: jnp.asarray(a[None, :])
     slope = 0.02
-    beres0 = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=0.0)
-    beresS = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=slope)
+    # E3SM's integer NINT(uh) column mapping: the RULE 5 hard limit (#2545).
+    beres0 = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=0.0, index_round_width=0.0)
+    beresS = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=slope, index_round_width=0.0)
     mfcc0 = build_stand_in_mfcc(NGWV, DC, beres0, jnp.float64)
     mfccS = build_stand_in_mfcc(NGWV, DC, beresS, jnp.float64)
     out0 = gw_beres_src(to(u), to(v), to(netdt), to(zm), jnp.zeros(1),
