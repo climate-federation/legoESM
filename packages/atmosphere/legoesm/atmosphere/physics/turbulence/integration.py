@@ -1020,14 +1020,7 @@ def _make_mpas_turbulence(
     _liquid_partition = (bool(turbulence_config.liquid_partition)
                          and scheme_name == "clubb")
 
-    if isinstance(f_land, str) and f_land != "grid":
-        raise ValueError(f"f_land={f_land!r}: an array, None, or 'grid' "
-                         "(read the mesh's land_frac at call time)")
-    _f_land_from_grid = isinstance(f_land, str)
-
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
-        # "grid": the land fraction is the mesh's own (a column block's slice)
-        f_land_c = mesh.land_frac if _f_land_from_grid else f_land
         from legoesm.grids.voronoi import (
             cell_vector_to_edge_normal,
             reconstruct_cell_velocity,
@@ -1160,13 +1153,13 @@ def _make_mpas_turbulence(
         _qsfc_traced = (forcing.get("q_sfc_land")
                         if forcing is not None else None)
         if _qsfc_traced is not None:
-            if f_land_c is None:
+            if f_land is None:
                 raise ValueError(
                     "forcing['q_sfc_land'] (traced land surface humidity) "
                     "requires the land fraction to be threaded into the "
                     "turbulence factory (make_physics f_land=...)."
                 )
-            _f_land_col = jnp.asarray(f_land_c, dtype=q_sfc.dtype).reshape(nCells)
+            _f_land_col = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
             q_sfc = ((1.0 - _f_land_col) * q_sfc
                      + _f_land_col * jnp.asarray(
                          _qsfc_traced, dtype=q_sfc.dtype).reshape(nCells))
@@ -1175,7 +1168,7 @@ def _make_mpas_turbulence(
         if _qsfc_traced is not None:
             pass                     # the solved humidity supersedes beta
         elif _beta_traced is not None:
-            if f_land_c is None:
+            if f_land is None:
                 raise ValueError(
                     "forcing['beta_land'] (traced per-cell beta_soil) "
                     "requires the land fraction to be threaded into the "
@@ -1186,15 +1179,15 @@ def _make_mpas_turbulence(
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
                 beta_limited_surface_humidity,
             )
-            _f_land_col = jnp.asarray(f_land_c, dtype=q_sfc.dtype).reshape(nCells)
+            _f_land_col = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
             q_sfc = beta_limited_surface_humidity(
                 q_sfc, q_v_col[:, -1], _f_land_col,
                 jnp.asarray(_beta_traced, dtype=q_sfc.dtype).reshape(nCells))
-        elif f_land_c is not None and land_beta != 1.0:
+        elif f_land is not None and land_beta != 1.0:
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
                 beta_limited_surface_humidity,
             )
-            _f_land_col = jnp.asarray(f_land_c, dtype=q_sfc.dtype).reshape(nCells)
+            _f_land_col = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
             q_sfc = beta_limited_surface_humidity(
                 q_sfc, q_v_col[:, -1], _f_land_col, land_beta)
         if getattr(_surf, "ocean_q_sfc_saline", False):
@@ -1211,8 +1204,8 @@ def _make_mpas_turbulence(
                     T_sfc, p_s.reshape(nCells),
                     thermo_convention=_surf.thermo_convention,
                     bulk_scheme=_surf.bulk_scheme))
-            _fo = (1.0 - jnp.asarray(f_land_c, dtype=q_sfc.dtype).reshape(nCells)
-                   if f_land_c is not None else 1.0)
+            _fo = (1.0 - jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+                   if f_land is not None else 1.0)
             q_sfc = q_sfc + _fo * (_q_ocean - _q_sfc_fresh)
 
         # A per-step prescribed surface flux (a diurnal cycle the run-constant
@@ -1233,7 +1226,7 @@ def _make_mpas_turbulence(
         _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
         _surface_flux = None
         if _shf_land is not None:
-            if f_land_c is None:
+            if f_land is None:
                 raise ValueError(
                     "forcing['shflx_land'] requires f_land in the turbulence "
                     "factory (make_physics f_land=...).")
@@ -1249,7 +1242,7 @@ def _make_mpas_turbulence(
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
                 surface_fluxes_at_lowest_level,
             )
-            _fl = jnp.asarray(f_land_c, dtype=q_sfc.dtype).reshape(nCells)
+            _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
             # ``forcing["T_sfc_ocean"]`` (ocean_flux_on_ocean_surface,
             # #1320): the non-land fraction's bulk call sees the ocean/ice
             # surface instead of the land-blended T_sfc/q_sfc, whose land skin
@@ -1378,7 +1371,7 @@ def _make_mpas_turbulence(
                     getattr(_surf, "ocean_q_sfc_saline", False)
                     or (_qsfc_traced is None and (
                         _beta_traced is not None
-                        or (f_land_c is not None and land_beta != 1.0)))):
+                        or (f_land is not None and land_beta != 1.0)))):
                 # votes X10/X11: the WRF surface layer takes the lane's land
                 # humidity (incl. the land model's solved q_sfc_land) with
                 # moisture availability 1, and computes its own saline water
@@ -1403,7 +1396,7 @@ def _make_mpas_turbulence(
                 **_sfc_kw,
                 **_prognostic_clubb_lat_kwargs(carry_field, _mesh_lat),
                 **_mynn_kw,
-                **_ysu_lane_kwargs(carry_field, nCells, land_fraction=f_land_c,
+                **_ysu_lane_kwargs(carry_field, nCells, land_fraction=f_land,
                                    cell_area=mesh.grid_area),
             )
             tke_out = tke_new

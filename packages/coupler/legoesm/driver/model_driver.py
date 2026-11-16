@@ -13710,26 +13710,16 @@ class ModelDriver:
             peeled cold-start step (votes M3/R3a).  ``column_block_size``:
             the gradient path's column blocks (``column_blocked_physics``);
             the run loop never sets it."""
-            _fl = (_f_land_cells if (_land_beta != 1.0 or _land_beta_soil_on)
-                   else None)
-            if column_block_size and _fl is not None:
-                # a block reads its slice of the mesh's land fraction; that
-                # must BE this field, or the blocks would run another surface
-                _lf = getattr(self.model.mesh, "land_frac", None)
-                if _lf is None or not np.array_equal(np.asarray(_lf),
-                                                     np.asarray(_fl)):
-                    raise ValueError(
-                        "column_block_size: the turbulence land fraction is "
-                        "not the mesh's land_frac; column blocks cannot slice "
-                        "it")
-                _fl = "grid"
             return make_physics(_cfg, model_type="mpas", dt=DT_PHYS,
                                 column_block_size=column_block_size,
                                 mynn_initflag=mynn_initflag,
                                 cam6_activation=_cam6_act,
                                 budget_ledger_level_weight=_ledger_weight,
                                 column_mesh=_column_mesh, need_rad=need_rad,
-                                f_land=_fl,
+                                f_land=(_f_land_cells
+                                        if (_land_beta != 1.0
+                                            or _land_beta_soil_on)
+                                        else None),
                                 land_beta=_land_beta,
                                 budget_ledger=_budget_ledger_on,
                                 physics_cadence=_phys_cadence_write,
