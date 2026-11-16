@@ -55,6 +55,7 @@ RCEMIP1_DECK_ARGV = (
     "--smag-cs", "0.19", "--semi-implicit", "--microphysics", "morrison",
     "--nlev", "64", "--T-sfc", "300.0", "--insolation", "rcemip",
     "--radiation", "rrtmgp", "--clouds", "--radiation-interval", "150",
+    "--radiation-column-chunk", "128",
 )
 
 
@@ -300,7 +301,8 @@ def main(argv=None):
         rad_cfg = rcp._build_radiation_config(
             rargs.radiation, update_interval_steps=rargs.radiation_interval,
             clouds=rargs.clouds, insolation=rargs.insolation,
-            t_sfc=rargs.T_sfc)
+            t_sfc=rargs.T_sfc,
+            column_chunk_size=rargs.radiation_column_chunk)
         mp_cfg = rcp._build_microphysics_config(
             rargs.microphysics, rargs.homogeneous_ice_nucleation,
             hard_saturation_adjustment=rargs.hard_saturation_adjustment,

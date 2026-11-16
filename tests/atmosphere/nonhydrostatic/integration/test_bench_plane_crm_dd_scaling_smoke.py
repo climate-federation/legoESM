@@ -40,7 +40,8 @@ def test_crm_bench_single_rank(tmp_path, mode):
         "--mode", mode, "--nx", "8", "--ny", "8", "--nlev", "8",
         "--warmup-steps", "1", "--time-steps", "2", "--windows", "2",
         "--semi-implicit", "--theta-noise-amp", "0.1", "--time-physics", "--physics-calls", "1",
-        "--radiation", "gray", "--single-rank-path", "serial",
+        "--radiation", "gray", "--radiation-column-chunk", "0",
+        "--single-rank-path", "serial",
         "--output", str(out),
     ], timeout_s=900)
     fail_on_nonzero(result, "bench_plane_crm_dd_scaling.py",

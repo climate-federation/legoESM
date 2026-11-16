@@ -171,4 +171,8 @@ def test_crm_bench_defaults_are_the_rcemip1_production_deck():
     assert (a.hyperdiff, a.n_acoustic_substeps, a.off_centering,
             a.smag_cs) == (1.0e7, 6, 0.1, 0.19)
     assert cfg.semi_implicit_acoustic and cfg.substep_horizontal_acoustic
+    assert a.radiation_column_chunk == 128
+    deck = (_REPO / "scripts/run/run_rcemip1_crm.sh").read_text()
+    assert "RAD_CHUNK=${RAD_CHUNK:-128}" in deck
+    assert '--radiation-column-chunk "$RAD_CHUNK"' in deck
     assert rcp.parse_args([*crm.RCEMIP1_DECK_ARGV, "--nlev", "8"]).nlev == 8
