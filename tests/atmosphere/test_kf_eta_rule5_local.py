@@ -1045,6 +1045,20 @@ def test_any_in_range_is_the_oracle_warm_test_and_c2():
     assert float(jnp.abs(jax.jacfwd(nw)(T0)).sum()) > 0.0
 
 
+@pytest.mark.parametrize("field", ["lfs_depth_width_pa", "melt_t_width_k"])
+def test_a_downdraft_width_alone_runs_the_survival_path_with_finite_gradients(field):
+    """Either width alone (cloud-top widths 0: one-hot top weights) runs the
+    mixture path; its per-case gap against the oracle is the recorded one
+    (test_default_gap_per_case_matches_record), and its gradient is finite."""
+    fx = dict(np.load(_FIX))
+    sm = kfe.KF_HARD._replace(**{field: getattr(_DEFAULT, field)})
+    assert kfe._survival_on(sm) and not kfe._survival_on(kfe.KF_HARD)
+    o, T = _sweep_column(fx, 90, smoothing=sm)
+    assert bool(o["fired"][0])
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, 90, T, sm)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+
+
 def test_melt_width_acts_on_a_column_shifted_into_its_band():
     """Sweep column 73 (no warm rain, no qs/qi species: the freezing-level
     split of the condensate heating is live) shifted so its highest warm
