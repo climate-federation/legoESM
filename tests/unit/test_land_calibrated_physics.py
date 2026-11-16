@@ -535,7 +535,8 @@ def test_soil_can_be_started_near_saturation():
 
     wet = build_config_from_args(_postprocess_args(parser.parse_args(
         base + ["--land-soil-init", "saturation_fraction",
-                "--land-soil-moisture-init-frac", "0.9"]), parser))
+                "--land-soil-moisture-init-frac", "0.9"]), parser)
+    )._replace(ml_pipeline=True)
     assert wet.land_soil_init == "saturation_fraction"
     assert wet.land_soil_moisture_init_frac == pytest.approx(0.9)
     wet.validate_strict()
