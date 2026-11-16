@@ -38,8 +38,7 @@ for _p in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/ocean",
 TKE = "ocean.vm.tke"
 GM = "ocean.lat.gm_redi"
 TREG = "ocean.lat.treguier"
-TKE_FIELDS = ("surface_flux_coeff", "Prandtl_tke0", "lc_coeff", "etau_frac", "alpha_tke",
-              "bg_diff_scale", "c_eps", "c_k")
+TKE_FIELDS = ("lc_coeff", "etau_frac", "c_eps", "c_k")  # the four the NEMO-literal TKE path reads
 GM_FIELDS = ("kappa_redi_diffusive_velocity",)
 TREG_FIELDS = ("aei0",)
 SEED_MARGIN = 0.001  # = param_collector._SIGMOID_SEED_MARGIN (normalised)
