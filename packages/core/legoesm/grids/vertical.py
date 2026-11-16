@@ -1011,8 +1011,9 @@ def vertical_advection(
         return _vertical_advection_van_leer_sigma(field, sigma_dot, sigma_coord)
     if scheme != "upwind":
         raise ValueError(
-            f"unknown vertical advection scheme {scheme!r}; expected one of "
-            f"{VERTICAL_ADVECTION_SCHEMES}"
+            f"unknown vertical advection scheme {scheme!r} for the sigma "
+            "coordinate; expected 'upwind' or 'van_leer' ('sb' is the "
+            "hybrid-coordinate flux form, vertical_advection_hybrid_sb)"
         )
     return _vertical_advection_upwind_sigma(field, sigma_dot, sigma_coord)
 

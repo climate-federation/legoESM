@@ -183,7 +183,8 @@ _UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_wid
                 # "all" case); stop1 alone is exercised on it shifted in-test
                 "top_stop_wtw_width_m2s2",
                 # PR 6a: no fixture level lies within 0.05 K of T00 (measured:
-                # gaps at the hard gap to 2e-15); helper tests cover both sides
+                # gaps at the hard gap to 2e-15); covered by helper tests and
+                # a column shifted into the band in-test
                 "melt_t_width_k",
                 # PR 6b (vote 23): no fixture downdraft sits in these bands
                 # (gaps at the hard gap to 2e-15).  Covered: helper tests, the
@@ -1055,6 +1056,67 @@ def test_any_in_range_is_the_oracle_warm_test_and_c2():
     T0 = kfe._T00_K + jnp.array([-5.0, -0.3 * w, 0.1 * w, -2.0, 0.2 * w, 3.0, -1.0, -0.4 * w, 4.0, 6.0])
     check_grads(nw, (T0,), order=2, modes=("fwd", "rev"), eps=1e-5)
     assert float(jnp.abs(jax.jacfwd(nw)(T0)).sum()) > 0.0
+
+
+@pytest.mark.parametrize("field", ["lfs_depth_width_pa", "melt_t_width_k"])
+def test_a_downdraft_width_alone_runs_the_survival_path_with_finite_gradients(field):
+    """Either width alone (cloud-top widths 0: one-hot top weights) runs the
+    mixture path; its per-case gap against the oracle is the recorded one
+    (test_default_gap_per_case_matches_record), and its gradient is finite."""
+    fx = dict(np.load(_FIX))
+    sm = kfe.KF_HARD._replace(**{field: getattr(_DEFAULT, field)})
+    assert kfe._survival_on(sm) and not kfe._survival_on(kfe.KF_HARD)
+    o, T = _sweep_column(fx, 90, smoothing=sm)
+    assert bool(o["fired"][0])
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, 90, T, sm)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_melt_width_acts_on_a_column_shifted_into_its_band():
+    """Sweep column 73 (no warm rain, no qs/qi species: the freezing-level
+    split of the condensate heating is live) shifted so its highest warm
+    level sits 0.2 widths above T00: the default width moves the heating
+    against the width -> 0 limit (measured 8.2e-7 K/s), and the gradient is
+    finite."""
+    fx = dict(np.load(_FIX))
+    i, k = 73, 10
+    _, T = _sweep_column(fx, i)
+    w = _DEFAULT.melt_t_width_k
+    Ts = T + (kfe._T00_K + 0.2 * w - T[0, k])
+    a, _ = _sweep_column(fx, i, Ts)
+    b, _ = _sweep_column(fx, i, Ts, _DEFAULT._replace(melt_t_width_k=1e-9 * w))
+    assert bool(a["fired"][0])
+    assert float(jnp.max(jnp.abs(a["dtdt"] - b["dtdt"]))) > 1e-7
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, i, T)[0]["dtdt"]))(Ts)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_water_closes_and_gradient_is_finite_at_fractional_melting(monkeypatch):
+    """Every melting and freezing-level probability halved (no fixture level
+    sits in the warm band): the heating moves, the column's water still closes
+    and the temperature gradient stays finite.  The width differs from the
+    default by 3e-7 K only to get its own trace."""
+    fx = dict(np.load(_FIX))
+    sm = _DEFAULT._replace(melt_t_width_k=0.1000003)
+    i = 90
+    base, T = _sweep_column(fx, i, smoothing=sm)
+    anyr = kfe._any_in_range
+    monkeypatch.setattr(kfe, "_any_in_range", lambda v, kk: 0.5 * anyr(v, kk))
+    sm2 = _DEFAULT._replace(melt_t_width_k=0.1000005)
+    o, _ = _sweep_column(fx, i, smoothing=sm2)
+    assert bool(o["fired"][0])
+    assert float(jnp.max(jnp.abs(o["dtdt"] - base["dtdt"]))) > 0.0
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, i, T, sm2)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g)))
+    _, x = _wrapper_inputs(fx, "L_nat_w0")
+    out, _ = kain_fritsch_convection(**x, config=_WRF_DEFAULT._replace(wrf_melt_t_width_k=0.1000005))
+    dp = fx["p_half"][:, 1:] - fx["p_half"][:, :-1]
+    tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt)
+           + np.asarray(out.dq_r_conv_dt)) * dp / constants.g
+    scale = np.sum(np.abs(np.asarray(out.dq_v_dt)) * dp / constants.g, axis=1)
+    f = fx["L_nat_w0_fired"] == 1
+    assert f.any()
+    assert np.all(np.abs(tot.sum(axis=1))[f] <= 1.0e-9 * scale[f])
 
 
 # --- PR 6b: downdraft base and acceptance weights -----------------------------

@@ -1112,6 +1112,8 @@ def _pad_local_mesh_to(mesh, target_nCells, target_nEdges, target_nVertices):
                                        pad_c, fill=0.0)),
         land_frac=(None if mesh.land_frac is None
                    else pad1(mesh.land_frac, pad_c, fill=0.0)),
+        subgrid_topo_filt_stddev=(None if mesh.subgrid_topo_filt_stddev is None
+                                  else pad1(mesh.subgrid_topo_filt_stddev, pad_c, fill=0.0)),
     )
 
 

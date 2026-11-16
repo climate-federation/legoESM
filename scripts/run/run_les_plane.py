@@ -371,7 +371,7 @@ def build(args):
         smagorinsky_dynamic_cs_max=1.0 if args.scale_dependent else 0.3,
         smagorinsky_prandtl=1.0,
         # Keep the Mason κz mixing-length cap ON even for LASD. It is a NUMERICAL
-        # necessity here: the dycore's 3D SGS vertical flux (_vertical_K_diffusion_full)
+        # necessity here: the dycore's 3D SGS vertical flux (vertical_K_diffusion_full)
         # is EXPLICIT forward-Euler, so it is CFL-limited (K < 0.5·dz²/dt ≈ 45 m²/s
         # near the surface for dz≈3 m, dt=0.1 s). Without the cap the uncapped
         # near-wall LASD K (l_m=Cs·Δ in the high-shear first cell) overshoots that

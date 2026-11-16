@@ -75,7 +75,7 @@ def surface_kinematic_flux_tendency(flux_s, height_coord: HeightCoordinate):
 
     Injected ONLY on the SURFACE boundary cell — the LAST index in the height
     coordinate's TOP-TO-BOTTOM storage (``z_half[-1] = 0``).  The interior SGS
-    vertical diffusion (``compressible_euler_plane._vertical_K_diffusion_full``)
+    vertical diffusion (``compressible_euler_plane.vertical_K_diffusion_full``)
     uses a NO-FLUX (``F=0``) surface interface and documents that "surface/top
     fluxes are injected SEPARATELY by the surface scheme" (SAM
     ``diffuse_scalar_z.f90:61``); this boundary-cell source is EXACTLY that

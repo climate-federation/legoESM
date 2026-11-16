@@ -53,6 +53,7 @@ ENTR_RH = 1.0         # sucumf.F90:140
 ENTSHALP = 2.0        # sucumf.F90:144  shallow/mid-level entrainment factor
 ENTSTPC1 = 0.8        # sucumf.F90:147  test-parcel 1/z entrainment
 ENTSTPC2 = 2.0e-4     # sucumf.F90:148
+ENTSTPC3 = 3.0        # sucumf.F90:149  in-cloud test-parcel entrainment factor (LDMIXS)
 DETRPEN = 0.75e-4     # sucumf.F90:129  turbulent detrainment [1/m]
 RMFCMIN = 1.0e-8      # sucumf.F90:160  minimum mass flux (safety)
 RDEPTHS = 2.0e4       # sucumf.F90:170  deep/shallow depth split [Pa]
@@ -187,12 +188,18 @@ def cuinin(th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2):
 
 
 # ---------------------------------------------------------------------------
-# CUBASEN (cubasen.F90:247-746), KINDEX = NJKT1, LDMIXS = LDTDKMF = .FALSE.
+# CUBASEN (cubasen.F90:247-746), LDTDKMF = .FALSE.
 # ---------------------------------------------------------------------------
 def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
-            pten, pqen, pqsen, pgeo, land, njkt1, njkt2, njkt6, entrorg=ENTRORG):
+            pten, pqen, pqsen, pgeo, land, njkt1, njkt2, njkt6, entrorg=ENTRORG,
+            *, kindex=None, ldmixs=False, pkmfl=None):
     """Returns dict: ptu, pqu, plu, klab, ldcum, ldsc, kcbot, kbotsc, kctop
-    (ICTOP0), kdpl, pwubase, pcape."""
+    (ICTOP0), kdpl, pwubase, pcape, pwu2h (surface-parcel kinetic energy).
+
+    Defaults are CUMASTRN's call (KINDEX = NJKT1, LDMIXS = .FALSE., PKMFL = 0);
+    VDFHGHTN calls it with ``kindex=K, ldmixs=True`` and the surface kinematic
+    momentum flux (vdfhghtn.F90:341-350).
+    """
     rg, rcpd, rd, retv = th.RG, th.RCPD, th.RD, th.RETV
     zrg = 1.0 / rg
     zrcpd = 1.0 / rcpd
@@ -201,12 +208,12 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
     zs_enh = rcpd * ptenh + pgeoh[:K + 1]             # ZSENH(1..K)
     zqenh = pqenh                                      # ZQENH(1..K)
     zero = jnp.zeros(K + 1, f)
-    kindex = njkt1
+    kindex = njkt1 if kindex is None else kindex
     jkt2 = njkt2
 
     st = dict(
         ztu=ptenh, zqu=pqenh, zlu=zero, ilab=jnp.zeros(K + 1, i32),
-        zsuh=zero, zbuoh=zero, zwu2h=zero, zcape=zero,
+        zsuh=zero, zbuoh=zero, zwu2h=zero, zcape=zero, pwu2h=zero,
         go=jnp.bool_(True), first=jnp.bool_(True), deep=jnp.bool_(False),
         ztex=jnp.zeros((), f), zqex=jnp.zeros((), f),
         idpl=i32(K), icbot=i32(K), ibotsc=i32(K - 1), ictop=i32(K - 1),
@@ -233,7 +240,10 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
         # --- surface departure (JKK == KLEV), :335-370
         zrho_s = paph[K + 1] / (rd * (pten[K] * (1.0 + retv * pqen[K])))
         zkhvfl = (pahfs_sfc * zrcpd + retv * pten[K] * pqhfl_sfc) / zrho_s
-        zws0 = (ZUST_MIN ** 3.0
+        # ZUST = MAX(SQRT(PKMFL), 0.1) (:342); CUMASTRN passes PKMFL = 0
+        ust3 = (ZUST_MIN ** 3.0 if pkmfl is None else
+                jnp.maximum(ssqrt(pkmfl), ZUST_MIN) ** 3.0)
+        zws0 = (ust3
                 - ZWS_FAC * RKAP * zkhvfl * (pgeoh[K] - pgeoh[K + 1]) / pten[K])
         unst = zkhvfl < 0.0
         zws = ZWS_SCALE * spow(jnp.where(unst, zws0, 1.0), ZWS_EXP)
@@ -295,6 +305,7 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
         st["ztu"] = kset(st["ztu"], jkk, tu0, setp)
         st["zlu"] = kset(st["zlu"], jkk, 0.0, setp)
         st["zwu2h"] = kset(st["zwu2h"], jkk, wu20, setp)
+        st["pwu2h"] = kset(st["pwu2h"], jkk, wu20, set_s)              # :358
         st["zbuoh"] = kset(st["zbuoh"], jkk, buo0, setp)
         st["ztex"] = jnp.where(go0 & surf, jnp.where(unst, ztex, 0.0), st["ztex"])
         st["zqex"] = jnp.where(go0 & surf, jnp.where(unst, zqex, 0.0), st["zqex"])
@@ -313,6 +324,9 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
             suh1 = kget(s["zsuh"], jk + 1)
             # shallow: 1/z mixing, :428-441
             zeps = ENTSTPC1 / ((kget(pgeo, jk) - pgeoh[K + 1]) * zrg) + ENTSTPC2
+            if ldmixs:                                    # :462
+                zeps = jnp.where((kindex == K) & (kget(s["zlu"], jk + 1) > 0.0),
+                                 zeps * ENTSTPC3, zeps)
             mix_s = jnp.minimum(1.0, 0.5 * zdz * zeps)
             ztmp = 1.0 / (1.0 + mix_s)
             qu_s = (qu1 * (1.0 - mix_s) + 2.0 * mix_s * zqf) * ztmp
@@ -381,6 +395,7 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
             s["zlu"] = kset(s["zlu"], jk, lu, on)
             s["zbuoh"] = kset(s["zbuoh"], jk, buoh, on)
             s["zwu2h"] = kset(s["zwu2h"], jk, wu2, on)
+            s["pwu2h"] = kset(s["pwu2h"], jk, wu2, on & (jkk == K))   # :559-561
             s["ilab"] = kset(s["ilab"], jkb, 2, c1)
             s["ilab"] = kset(s["ilab"], jk, 2, c1 | c2)
             s["lldsc"] = s["lldsc"] | c1 | c2
@@ -453,7 +468,7 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
     return dict(ptu=st["ptu"], pqu=st["pqu"], plu=st["plu"], klab=st["klab"],
                 ldcum=st["ldcum"], ldsc=st["ldsc"], kcbot=st["kcbot"],
                 kbotsc=st["kbotsc"], kctop=st["kctop"], kdpl=st["kdpl"],
-                pwubase=st["pwubase"], pcape=pcape)
+                pwubase=st["pwubase"], pcape=pcape, pwu2h=st["pwu2h"])
 
 
 # ---------------------------------------------------------------------------

@@ -40,29 +40,29 @@ class IfsSmooth:
         return _sm.smoothstep_cubic(d / w + 0.5)
 
     def gt(self, a, b, w):
-        return self._f(self._step(a - b, w, True), a)
+        return self._f(self._step(a - b, w, True), a, b)
 
     def ge(self, a, b, w):
-        return self._f(self._step(a - b, w, False), a)
+        return self._f(self._step(a - b, w, False), a, b)
 
     def lt(self, a, b, w):
-        return self._f(self._step(b - a, w, True), a)
+        return self._f(self._step(b - a, w, True), a, b)
 
     def le(self, a, b, w):
-        return self._f(self._step(b - a, w, False), a)
+        return self._f(self._step(b - a, w, False), a, b)
 
     def on(self, x, thr, w, strict=True):
         """weight of (x > thr) [strict] or (x >= thr), one-sided (VC47): smooth only on
         [thr, thr + w], exactly 0 for x <= thr (so a gated substitute never reaches an output)."""
         if self.hard:
-            return self._f((x > thr) if strict else (x >= thr), x)
+            return self._f((x > thr) if strict else (x >= thr), x, thr)
         return _sm.smoothstep_cubic((x - thr) / w)
 
     def off(self, x, thr, w, strict=True):
         """weight of (x < thr) [strict] or (x <= thr), one-sided on [thr, thr + w] (VC47):
         exactly 1 for x <= thr."""
         if self.hard:
-            return self._f((x < thr) if strict else (x <= thr), x)
+            return self._f((x < thr) if strict else (x <= thr), x, thr)
         return 1.0 - _sm.smoothstep_cubic((x - thr) / w)
 
     def neg1(self, x, w):
@@ -72,8 +72,10 @@ class IfsSmooth:
         return _sm.smoothstep_cubic(-x / w)
 
     @staticmethod
-    def _f(m, like):
-        return m.astype(jnp.result_type(like)) if m.dtype == jnp.bool_ else m
+    def _f(m, *operands):
+        # dtype of the comparison's own promotion: a python-scalar operand
+        # stays weak, so (273.16 >= T_f32) is float32 even under x64
+        return m.astype(jnp.result_type(*operands)) if m.dtype == jnp.bool_ else m
 
     def sel(self, m, x, y):
         if self.hard:

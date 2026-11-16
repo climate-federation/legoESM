@@ -366,9 +366,14 @@ class KFSmoothing(NamedTuple):
       KNOWN DIFFERENCE (fixture, max over columns and levels, vs the hard
       limit's gap): the LFS width alone moves the sweep's heating by up to
       2.8e-6 K/s and its precipitation rate by 1.6e-6 (kg/m2/s); the melting
-      width moves no fixture case (no level within 0.05 K of T00).  The warm
-      flags are treated as independent per level; budgets close member by
-      member (the weights only re-mix complete oracle runs).
+      width moves no fixture case (no level within 0.05 K of T00, the half-width
+      band of the C2 step).  The warm
+      flags are treated as independent per level.  They set the downdraft's
+      melting cooling (each source-level run takes its members' conditional
+      mean melting ice, as in PR 5b; the cooling is nonlinear in it) and the
+      freezing-level split of the condensate heating.  Each run's downdraft
+      evaporation is debited from its precipitation (PPTFLX = TRPPT - TDER),
+      so the water budget closes at any melting probability (tested).
     * Downdraft acceptance (PR 6b; any nonzero runs the survival path):
       ``dd_ok_depth_width_pa`` the band of the two 50 hPa depth tests (the
       source above the source layer, dd_ok, and the base below the source,

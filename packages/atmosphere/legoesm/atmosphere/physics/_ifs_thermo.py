@@ -196,10 +196,14 @@ def fminj(x, y):
     return y - 0.5 * (jnp.abs(x - y) - (x - y))
 
 
-def satur_qsat(th, t, p):
-    """satur.F90 KFLAG=0 (as the convection driver forms PQSEN):
-    ZQS = MIN(0.5, FOEEWM(T)/P);  PQSEN = ZQS/(1 - RETV*ZQS)."""
-    zqs = jnp.minimum(QSAT_CAP, foeewm(th, t) / p)
+def satur_qsat(th, t, p, kflag=0):
+    """satur.F90 (LDPHYLIN = .FALSE.): ZQS = MIN(0.5, E(T)/P), PQSAT = ZQS/(1 - RETV*ZQS),
+    E = FOEEWM (KFLAG 0, as the convection driver forms PQSEN) or FOEEWMCU
+    (KFLAG 1, as VDFHGHTN calls it)."""
+    if kflag not in (0, 1):
+        raise ValueError(f"satur_qsat: kflag must be 0 or 1, got {kflag!r}")
+    e = foeewmcu(th, t) if kflag == 1 else foeewm(th, t)
+    zqs = jnp.minimum(QSAT_CAP, e / p)
     return zqs / (1.0 - th.RETV * zqs)
 
 

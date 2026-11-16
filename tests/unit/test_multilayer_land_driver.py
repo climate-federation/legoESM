@@ -52,6 +52,14 @@ def _run_hydraulics_stamp(drv):
         HYDRAULICS_SOURCE_CLM_MAP, __file__)
 
 
+def _grid_lat(grid):
+    """Per-column latitude in the driver's column layout: ``lat2d`` on lat-lon
+    (``lat`` is the 1-D axis there), ``lat`` on the cube, ``latCell`` on MPAS."""
+    for name in ("lat2d", "lat", "latCell"):
+        if getattr(grid, name, None) is not None:
+            return getattr(grid, name)
+
+
 def _patch_land_loaders(monkeypatch):
     """Replace the CLM-surfdata + land-mask loaders with synthetic data."""
     import legoesm.land.clm_surface_map as clm
@@ -82,9 +90,7 @@ def _patch_land_loaders(monkeypatch):
         from legoesm.land.boundary_data.gap_fill import (
             bare_canopy_params, bare_land_surface_params,
         )
-        _lat = getattr(grid, "lat", None)
-        _lat = grid.latCell if _lat is None else _lat
-        n = int(jnp.asarray(_lat).size)
+        n = int(jnp.asarray(_grid_lat(grid)).size)
         f = lambda v: jnp.full(n, v)
         from legoesm.land.canopy import CanopyConfig
         from legoesm.land.canopy.config import CLMMLCanopyConfig
@@ -117,9 +123,7 @@ def _patch_land_loaders(monkeypatch):
     monkeypatch.setattr(
         topo, "load_land_fraction",
         lambda grid, path, *a, **k: jnp.full(
-            jnp.asarray(getattr(grid, "lat", None)
-                        if getattr(grid, "lat", None) is not None
-                        else grid.latCell).shape, 0.5))
+            jnp.asarray(_grid_lat(grid)).shape, 0.5))
 
 
 def _small_cfg():
@@ -128,8 +132,9 @@ def _small_cfg():
         # fixture above supplies them synthetically; this names the source the
         # guard checks for.
         surfdata_path="synthetic",
-        grid=GridConfig(resolution=8, nlev=8),
-        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=8),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0,
+                            discretization="latlon_cgrid"),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical",
         radiation="gray",
@@ -143,6 +148,10 @@ def _small_cfg():
         # the default meant that flipping it turned twenty of them red
         # at once for a reason none of them is about.
         land_surface_scheme="simple_seb",
+        # Moist physics with multilayer land off the column loop runs only on
+        # the ML-training pipeline lane, and on the cube that lane is now the
+        # dry FV3 duo (e137cbf996, #2523): drive the lat-lon pipeline instead.
+        ml_pipeline=True,
     )
 
 
@@ -167,7 +176,7 @@ def test_setup_wires_multilayer_land(monkeypatch, tmp_path):
     driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
     driver.setup()
 
-    ncol = driver.grid.lat.size
+    ncol = int(jnp.asarray(_grid_lat(driver.grid)).size)
     assert driver.physics.land_ml_cfg is not None
     assert driver.physics.land_ml_params is not None
     assert driver.physics.land_ml_lat is not None
@@ -261,7 +270,7 @@ def test_setup_clm_ml_warm_starts_and_threads_gridinfo(monkeypatch, tmp_path):
     _patch_land_loaders(monkeypatch)
     # A tiny grid keeps the eager warm-start + O(ncol) machinery cheap.
     cfg = _canopy_cfg()._replace(land_surface_scheme="clm_ml",
-                                 grid=GridConfig(resolution=2, nlev=8))
+                                 grid=GridConfig(grid_type="latlon", resolution=2, nlev=8))
     driver_clm = ModelDriver(cfg, output_dir=tmp_path / "clmml")
     driver_clm.setup()
 
@@ -297,7 +306,7 @@ def test_clm_ml_pipeline_step_jits(monkeypatch, tmp_path):
 
     _patch_land_loaders(monkeypatch)
     cfg = _canopy_cfg()._replace(land_surface_scheme="clm_ml",
-                                 grid=GridConfig(resolution=2, nlev=8))
+                                 grid=GridConfig(grid_type="latlon", resolution=2, nlev=8))
     driver = ModelDriver(cfg, output_dir=tmp_path)
     driver.setup()
     ncol = int(driver._land_ml_state.T_soil.shape[0])
@@ -432,7 +441,7 @@ def test_build_training_segment_land_gradient(monkeypatch, tmp_path):
     pipe.land_ml_cfg = pipe.land_ml_cfg._replace(
         bulk_scheme="most", stomata=StomataConfig(enabled=True),
         carbon=CarbonConfig(scheme="differland"))
-    ncol = int(driver.grid.lat.size)
+    ncol = int(jnp.asarray(_grid_lat(driver.grid)).size)
     pipe.land_ml_carbon = init_carbon_state((ncol,), pipe.land_ml_cfg.carbon)
     base_lp = pipe.land_ml_params
 
@@ -462,8 +471,10 @@ def test_multilayer_elevation_land_enables_tiled_flux_without_slab_or_mask(monke
         lambda grid, config: (jnp.zeros(grid.grid_shape_2d),
                               jnp.full(grid.grid_shape_2d, 0.5)))
     cfg = ExperimentConfig(
-        grid=GridConfig(resolution=8, nlev=8),
-        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=8),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0,
+                            discretization="latlon_cgrid"),
+        ml_pipeline=True,                     # see _small_cfg
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical", radiation="gray",
         topography="synthetic_elevation.nc",  # file loader patched above
@@ -527,14 +538,6 @@ def test_setup_seeds_aridity_aware_soil_moisture(monkeypatch, tmp_path):
     assert not np.allclose(theta, 0.5 * np.asarray(driver.physics.land_ml_cfg.hydraulics.theta_sat))
 
 
-# NOTE: multilayer land on the LAT-LON grid is a separate, pre-existing setup
-# limitation (``_setup_multilayer_land`` flattens the 2-D-per-cell ``grid.lat``
-# via the adapter, but lat-lon ``grid.lat`` is 1-D, so the setup crashes BEFORE
-# the aridity seeding runs).  #837's aridity fix is validated on the cubed-sphere
-# path (``test_setup_seeds_aridity_aware_soil_moisture``); enabling multilayer
-# land on lat-lon is an out-of-scope follow-up.
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
 
@@ -554,7 +557,7 @@ def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
     #    mix two configs' provenance in one directory.)
     src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
     src.setup()
-    ncol = src.grid.lat.size
+    ncol = int(jnp.asarray(_grid_lat(src.grid)).size)
     n_layers = 6
     seed = src._land_ml_state
     spun = seed._replace(
@@ -760,7 +763,7 @@ def test_transient_cover_setup_reweights_by_year(monkeypatch, tmp_path):
 
     cover, years, rebuild = driver._land_cover_transient
     assert list(np.asarray(years)) == [2000.0, 2010.0]
-    ncol = driver.grid.lat.size
+    ncol = int(jnp.asarray(_grid_lat(driver.grid)).size)
     assert cover.shape == (2, ncol, 17)
 
     lp_2000 = driver._transient_land_ml_params(0.0)          # cover_year 2000
@@ -818,15 +821,15 @@ def test_jitted_radiation_reads_traced_land_ml_params(monkeypatch, tmp_path):
     pipe = driver.physics
     land_ml = driver._land_ml_state
 
-    g2 = tuple(driver.grid.lat.shape)
+    g2 = tuple(jnp.asarray(_grid_lat(driver.grid)).shape)
     nlev = _small_cfg().grid.nlev
     T = jnp.full((*g2, nlev), 285.0)
     p_s = jnp.full(g2, 1.0e5)
     q_v = jnp.full((*g2, nlev), 0.005)
     sst = jnp.full(g2, 290.0)
     sic = jnp.zeros(g2)
-    lat = jnp.asarray(driver.grid.lat)
-    lon = jnp.asarray(driver.grid.lon)
+    lat = jnp.asarray(_grid_lat(driver.grid))
+    lon = jnp.asarray(driver.grid.lon2d)
     u = jnp.full((*g2, nlev), 3.0)
     v = jnp.zeros((*g2, nlev))
 
@@ -900,7 +903,7 @@ def test_clm_ml_use_surfdata_pft_derives_mixed_pft_columns(monkeypatch, tmp_path
 
     cfg = _canopy_cfg()._replace(land_surface_scheme="clm_ml",
                                 clm_ml_use_surfdata_pft=True,
-                                grid=GridConfig(resolution=2, nlev=8))
+                                grid=GridConfig(grid_type="latlon", resolution=2, nlev=8))
     driver = ModelDriver(cfg, output_dir=tmp_path)
     driver.setup()
 

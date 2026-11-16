@@ -13,6 +13,8 @@ Cases:
     gabls1    Stable BL (Cuxart et al. 2006, MYNN-2.5)
     ekman     Neutral Ekman BL (Andren et al. 1994, MYNN-2.5)
     wangara   Convective dry BL (Day 33, MYNN-2.5 + prescribed fluxes)
+    ocean_convective_deepening
+              Ocean free-convective deepening vs analytic oracle
     oracle    Generate jax_scm reference NetCDFs (needs .venv-jax-scm)
 
 Each subcommand exposes the same flags as the standalone script it
@@ -37,7 +39,9 @@ _SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from matrix.scm import ekman, gabls1, oracle, rce, wangara  # noqa: E402
+from matrix.scm import (  # noqa: E402
+    ekman, gabls1, ocean_convective_deepening, oracle, rce, wangara,
+)
 
 CASES = {
     "rce": rce,
@@ -45,6 +49,7 @@ CASES = {
     "ekman": ekman,
     "wangara": wangara,
     "oracle": oracle,
+    "ocean_convective_deepening": ocean_convective_deepening,
 }
 
 
