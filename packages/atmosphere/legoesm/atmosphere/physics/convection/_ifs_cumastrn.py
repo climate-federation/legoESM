@@ -27,7 +27,8 @@ the closure's floors, caps and branch selections -- take the C1 forms of
 scale of the switched quantity (``_S_*`` below); True gives OpenIFS's exact
 switches (the oracle match).  Division guards and safety floors
 (RMFCMIN, ZEPS_MF, ZMFS_MIN, ZDQMIN_FLOOR) stay hard.  #2281 part 1 smooths
-the closure; the ascent thermodynamics and the fluxes follow.
+the closure, part 2 the ascent (:mod:`._ifs_cuascent`, CUADJTQ/FOEALFCU in
+:mod:`.._ifs_thermo`); the fluxes follow.
 KNOWN DIFFERENCE, kept hard in both modes: the level/flag structure.  Cloud
 base and top, departure level, downdraught top and base, the cloud type
 KTYPE, LDCUM/LDDRAF and every level mask built from them are chosen from

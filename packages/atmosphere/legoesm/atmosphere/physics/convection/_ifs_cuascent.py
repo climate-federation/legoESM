@@ -17,6 +17,27 @@ no inf/NaN reaches the gradient (value-identical, see ``ssqrt``/``spow``/``sdiv`
 The cloud-base vertical velocity (cubasen), the organised-detrainment and the
 Bergeron precipitation-enhancement square roots use ``core.profile_metrics.safe_sqrt_nan``
 instead, so a NaN reaching them passes through (user-approved, #2209).
+
+Differentiability (RULE 5, #2281 part 2).  CUININ, CUBASEN and CUASCN take an
+``sm`` (:class:`.._ifs_smooth.IfsSmooth`, None = exact); CUMASTRN passes its
+own, so with ``hard_switches`` False the elementwise switches on traced state
+(parcel excess caps, mixing and entrainment/detrainment clips, saturation
+adjustment clamps, LSCV/glaciation and re-initialisation/organisation tests,
+the precipitation and rain fall-out onsets, kinetic-energy and velocity
+floors/caps) take the C1 forms, window 0.01 x the 2nd percentile of the
+switched operand's distance to its switch point over the oracle fixture
+(``_S_*``; scripts/validate/oracle/bechtold_ifs/switch_scales.py).  LSCV is a
+weight in [0, 1].  Kept hard: division guards, the level/flag structure
+(cloud base/top, departure level, mid-level initiation, the in-cloud masks),
+the parcel temperature clamp, ZKEDKE_FLOOR, ZDPMEAN_MIN, and CUBASEN's
+cloud-base estimate (it only picks a level).
+KNOWN DIFFERENCE at the smooth default against the oracle (arm L0, per
+fixture column, tests/atmosphere/test_bechtold_ifs_oracle.py
+``_SWITCH_GAP``, max|difference| / max|oracle| over the column): heating
+up to 7.0 % (the fixture's one mid-level cloud),
+moistening 1.3 %, updraught mass flux 0.12 %, surface precipitation 0.11 %
+(L32); about 1.5 % in the STRESS columns.  ``hard_switches=True`` recovers
+the source exactly.
 """
 from __future__ import annotations
 
