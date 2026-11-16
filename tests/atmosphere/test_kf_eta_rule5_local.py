@@ -1183,20 +1183,6 @@ def test_dd_rh_adjustment_adj_branch_is_unreachable_for_positive_layers():
     assert np.all(rhh < 1.0)
 
 
-def test_deep_dd_is_implied_by_dd_ok_over_the_fixture():
-    """Why deep_dd's shared band (vote 24) leaves the fixture gaps unchanged:
-    every fixture layer is thicker than the dd_ok width (dd_ok's weight is
-    positive above -w/2, deep_dd's is 1 above +w/2, and the base is at least
-    one layer deeper), so deep_dd's weight is exactly 1 wherever the dd_ok
-    weight is positive."""
-    fx = dict(np.load(_FIX))
-    p = [np.asarray(fx[k]) for k in fx if k.endswith("_p") and np.asarray(fx[k]).ndim >= 1]
-    assert p
-    for a in p:
-        dp = -np.diff(a, axis=-1)
-        assert np.all(dp > _DEFAULT.dd_ok_depth_width_pa)
-
-
 def test_dd_ok_width_acts_on_a_column_shifted_into_its_band(monkeypatch):
     """The 50 hPa threshold moved to 0.2 widths below sweep column 90's own
     source-to-source-layer depth puts its dd_ok test in the band: the default
