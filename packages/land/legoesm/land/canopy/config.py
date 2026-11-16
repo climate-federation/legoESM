@@ -21,6 +21,8 @@ from legoesm.land.canopy.sif import SIFConfig
 # Valid canopy Vcmax25 depth profiles (see radiative_transfer.canopy
 # Vcmax integral and coordination_kn).
 VALID_VCMAX_PROFILES = ("kn", "coordination")
+# C3 electron-transport light response (CanopyConfig.light_response).
+VALID_LIGHT_RESPONSES = ("clm", "pmodel_phi0")
 from legoesm.land.p_model import (
     VALID_CAPACITY_SCHEMES,
     VALID_G1_SOURCES,
@@ -148,7 +150,8 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 # ---------------------------------------------------------------------------
 # Valid values for the static leaf-gas-exchange dispatch field.  Kept next to
 # the config so the fail-early validator and the config default cannot drift.
-_VALID_STOMATAL_MODELS = ("ball_berry", "medlyn", "leuning", "phydro")
+_VALID_STOMATAL_MODELS = ("ball_berry", "medlyn", "leuning", "phydro",
+                          "pmodel_chi")
 VALID_LE_MODULES = ("BT", "PM")
 
 # Valid values for the CLM-ML canopy-airspace turbulence dispatch field
@@ -290,6 +293,21 @@ class CanopyConfig(NamedTuple):
     # capacity at high LAI (bottom/top ~ e^-5.8 at LAI=8).
     vcmax_profile: str = "kn"             # "kn" | "coordination"
     vcmax_light_frac: float = 0.35
+    # --- C3 light response of electron transport (appended last) ---
+    # "clm" (default — CLM5 / Bonan non-rectangular hyperbola, theta = 0.7,
+    # I = 0.5 * 0.85 * APAR, temperature-independent initial yield ~0.106
+    # mol C/photon; bit-identical legacy behaviour) or "pmodel_phi0" — the
+    # P-model form J = 4 phi0(T_leaf) I / sqrt(1 + (4 phi0 I / Jmax)^2) with
+    # the SAME phi0(T) (PModelConfig.kphio x Bernacchi 2003) that sizes the
+    # acclimated Vcmax/Jmax (JULES leaf_limits; pyrealm SubdailyPModel).
+    # Requires capacity_scheme='p_model'.
+    light_response: str = "clm"           # "clm" | "pmodel_phi0"
+    # --- Run layout (appended last; not physics) ---
+    # True when the driver splits the columns across devices (run_lmip_biophys
+    # --column-devices > 1): the canopy then solves each device's block as one
+    # batch with no global sort (surface_scheme.two_leaf_canopy.
+    # canopy_solve_batching).  Results are unchanged to round-off.
+    column_sharded: bool = False
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -334,6 +352,25 @@ class CanopyConfig(NamedTuple):
                 f"vcmax_profile='coordination' (got 'kn'); it would be "
                 f"silently inert - select the coordination profile or drop "
                 f"the override")
+        if self.stomatal_model == "pmodel_chi" and (
+                self.capacity_scheme != "p_model" or self.g1_source != "table"):
+            # ci = chi(xi) * Ca with xi from the P-model optimum; no slope is
+            # read, so a predicted slope would be inert.
+            raise ValueError(
+                "stomatal_model='pmodel_chi' sets ci from the P-model xi: it "
+                "requires capacity_scheme='p_model' and g1_source='table' (got "
+                f"{self.capacity_scheme!r}, {self.g1_source!r})")
+        if self.light_response not in VALID_LIGHT_RESPONSES:
+            raise ValueError(
+                f"unknown light_response {self.light_response!r}; the C3 "
+                f"electron-transport light response must be one of "
+                f"{VALID_LIGHT_RESPONSES}")
+        if (self.light_response == "pmodel_phi0"
+                and self.capacity_scheme != "p_model"):
+            raise ValueError(
+                "light_response='pmodel_phi0' uses the P-model quantum yield "
+                "that sizes the acclimated capacities; it requires "
+                f"capacity_scheme='p_model' (got {self.capacity_scheme!r})")
         # NB: g1_source='p_model' with a non-Medlyn stomatal model is legal
         # ONLY under transpiration_stress='phydro' (whose slope mapping
         # covers every model); this config cannot see that switch, so the

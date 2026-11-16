@@ -86,3 +86,14 @@ class MultiLayerLandState(NamedTuple):
     # two-leaf P-model switch (``capacity_scheme``/``g1_source``) is active;
     # ``None`` otherwise.  Appended last (positional-ABI rule).
     pmodel_acclim: Any | None = None
+    # Warm-start cache for the two-leaf canopy Newton closure (ported from
+    # legoESM main 57e4c45b6a): the last CERTIFIED solution per column,
+    # ``(ncol, n_state)`` (6, or 8 under P-hydro), NaN where a column has never
+    # converged (read as "cold start").  NOT a prognostic variable: it only seeds
+    # the iteration.  The solve's adjoint returns a zero cotangent for its seed,
+    # but that does not make the answer seed-independent (the residual has
+    # spurious roots), which is why a seed must pass the root certificate's
+    # physical box (``canopy.solver.canopy_state_admissible``) to be used.
+    # Present iff the surface scheme is the two-leaf canopy; ``None`` otherwise
+    # (cold start every step, as before).  Appended last (positional-ABI rule).
+    canopy_x: Any | None = None

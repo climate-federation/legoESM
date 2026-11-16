@@ -179,3 +179,31 @@ def test_rjv25_default_is_kattge_knorr_bitwise():
         _jnp.array(0.0), _jnp.array(101325.0), _jnp.array(0.3), args["TgC"],
         rjv25=_jnp.array(1.0))
     assert An_b < An_a
+
+
+def test_gross_assimilation_is_exactly_zero_with_zero_capacity_in_the_dark():
+    """A leaf with Vcmax25 = 0 (the sub-daily P-model optimum in polar night)
+    in the dark has Ac = Aj = 0; the co-limitation roots must give exactly 0,
+    not the sqrt guard's -sqrt(eps)/(2 theta)."""
+    args = (jnp.array(263.15), jnp.array(280.0), jnp.array(0.0))
+    for fC4 in (0.0, 1.0):
+        _, a_gross = photosynthesis(
+            *args, jnp.array(0.0), jnp.array(0.0), jnp.array(fC4),
+            jnp.array(101325.0), jnp.array(0.3), jnp.array(-10.0))
+        assert float(a_gross) == 0.0, (fC4, float(a_gross))
+
+
+def test_zero_root_floor_keeps_the_unfloored_gradient():
+    """The floor on the smaller root must not change d(root)/dA at an exact
+    zero root (A = 0 < B: dark electron transport, a zero co-limitation)."""
+    from legoesm.land.canopy.photosynthesis import _smaller_root_quadratic
+    theta, B = 0.7, 50.0
+
+    def unfloored(a):
+        s = a + B
+        return (s - jnp.sqrt(jnp.maximum(s * s - 4.0 * theta * a * B, 1e-12))) / (2.0 * theta)
+
+    g = jax.grad(lambda a: _smaller_root_quadratic(theta, a, jnp.asarray(B)))(jnp.asarray(0.0))
+    g_ref = jax.grad(unfloored)(jnp.asarray(0.0))
+    assert float(g_ref) > 0.0
+    assert float(g) == pytest.approx(float(g_ref), rel=1e-12)

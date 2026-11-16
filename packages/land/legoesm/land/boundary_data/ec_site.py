@@ -199,6 +199,10 @@ class ECSiteDriver(NamedTuple):
     # (n_time,) 1 where a SOIL field (TS/SWC) was gap-filled.  Prescribed per-step
     # in diagnostic mode; only the initial state in prognostic mode.
     soil_filled: np.ndarray | None = None
+    # (n_time,) clock hour of each time stamp [0, 24) in the driver's own time
+    # base (FLUXNET: local standard time).  Used to place the P-model's noon
+    # acclimation window; ``doy`` alone carries no time of day.
+    clock_hour: np.ndarray | None = None
 
 
 def _masked(ds: xr.Dataset, name: str) -> np.ndarray:
@@ -300,6 +304,7 @@ def read_ec_site_driver(
                    and float(np.ptp(dt_arr)) <= _DT_UNIFORM_TOL_S)
     dt_s = float(np.median(dt_pos)) if dt_pos.size else _DT_FALLBACK_S
     doy = (t.astype("datetime64[D]") - t.astype("datetime64[Y]")).astype(int) + 1.0
+    clock_hour = ((t - t.astype("datetime64[D]")) / np.timedelta64(1, "s")) / 3600.0
 
     # --- read + range-mask + gap-fill every driving series; keep pre-fill masks
     fil, obs = {}, {}
@@ -468,4 +473,5 @@ def read_ec_site_driver(
         lat_rad=lat_rad, lon_deg=lon_out,
         doy=doy, dt_s=dt_s, igbp=igbp, climate=climate, pft=pft, site_id=site_id,
         met_filled=met_filled, soil_filled=soil_filled,
+        clock_hour=np.asarray(clock_hour, dtype=np.float64),
     )

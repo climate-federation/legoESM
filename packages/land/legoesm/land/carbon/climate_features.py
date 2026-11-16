@@ -75,3 +75,26 @@ def reduce_climatology_to_features(
     aridity = map_yr / np.maximum(pet, _PET_MIN)
     sw_mean = monthly_sw_w.mean(axis=1)
     return ClimateFeatures(mat, map_yr, t_seasonal, aridity, sw_mean)
+
+
+def priestley_taylor_pet_rate(netrad_w, t_k, p_pa):
+    """Priestley & Taylor (1972) potential evapotranspiration [kg m-2 s-1].
+
+    ``PET = alpha * s / (s + gamma) * max(Rn, 0) / L_v`` with alpha = 1.26,
+    ``s`` the slope of the saturation vapour-pressure curve and ``gamma`` the
+    psychrometric constant, both from the canopy's own meteorology helper
+    (``canopy_met_variables``; no re-derived saturation curve).  Unlike the
+    fixed 0.5 proxy of :func:`reduce_climatology_to_features`, ``s/(s+gamma)``
+    here follows temperature (~0.5 at 7 degC, ~0.77 at 30 degC), which the
+    Sandoval et al. (2026) aridity index needs: its peak quantum yield falls
+    as AI^4.09.  Element-wise; intended for daily-mean inputs.
+    """
+    import jax.numpy as jnp
+    from legoesm.land.canopy.energy_balance import canopy_met_variables
+
+    t = jnp.asarray(t_k, dtype=jnp.float64)
+    p = jnp.asarray(p_pa, dtype=jnp.float64)
+    # Saturated air: only the slope s and gamma are used, not humidity.
+    _, _, _, _, s, _, gamma = canopy_met_variables(p, t, jnp.zeros_like(t))
+    rn = jnp.maximum(jnp.asarray(netrad_w, dtype=jnp.float64), 0.0)
+    return np.asarray(_PT_ALPHA * s / (s + gamma) * rn / constants.L_v)

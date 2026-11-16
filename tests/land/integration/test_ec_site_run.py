@@ -722,3 +722,152 @@ def test_cli_optimality_wrapper_resolves_and_refuses_disagreement():
         "transpiration_stress": "beta_theta", "canopy_stomatal_model": "medlyn"}
     with pytest.raises(ValueError, match="set one or the other"):
         mod._resolve_optimality(ns(optimality="phydro", canopy_stomatal_model="medlyn"))
+
+
+def test_site_solar_hour_recovers_solar_noon_offset():
+    """The noon window is placed on the forcing's own solar noon: a clock
+    offset planted in a synthetic cos(zenith) record is recovered."""
+    from types import SimpleNamespace
+    mod = _load_driver_module()
+    dt = 1800.0
+    clock = (np.arange(48 * 10) * 0.5 + 0.25) % 24.0      # stamps at :15/:45
+    offset = 0.31                                        # solar noon 12:18.6
+    cz = np.clip(np.cos(2.0 * np.pi * (clock - 12.0 - offset) / 24.0), 0.0, None)
+    d = SimpleNamespace(clock_hour=clock, dt_s=dt,
+                        forcing=SimpleNamespace(cos_zenith=cz[:, None]))
+    solar = mod._site_solar_hour(d).ravel()
+    i_peak = int(np.argmax(cz[:48]))
+    assert solar[i_peak] == pytest.approx(clock[i_peak] - offset, abs=0.03)
+    # the window then holds five half-hour steps per day
+    from legoesm.land.p_model import PModelConfig, in_noon_window
+    inw = np.asarray(in_noon_window(solar[:48], dt,
+                                    PModelConfig(acclimation="subdaily_noon")))
+    assert int(inw.sum()) == 5
+
+
+@pytest.mark.parametrize("mode", ["diagnostic", "prognostic"])
+def test_run_site_subdaily_pmodel_acclimation(tmp_path, mode):
+    """The least-cost arm runs end to end with the subdaily acclimation."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=48 * 3)
+    mod = _load_driver_module()
+    metrics = mod.run_site(
+        driver_nc, mode, str(tmp_path / "out"), chunk=48,
+        capacity_scheme="p_model", g1_source="p_model",
+        canopy_stomatal_model="medlyn", pmodel_acclimation="subdaily_noon")
+    assert metrics["GPP"]["n"] > 0 and metrics["GPP"]["model_nan"] == 0
+    assert np.isfinite(metrics["GPP"]["rmse"])
+
+
+def test_run_site_pmodel_light_response(tmp_path):
+    """Step D end to end: the P-model light response with the subdaily
+    acclimation runs in prognostic mode and is refused without p_model."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=48 * 2)
+    mod = _load_driver_module()
+    metrics = mod.run_site(
+        driver_nc, "prognostic", str(tmp_path / "out"), chunk=48,
+        capacity_scheme="p_model", g1_source="p_model",
+        canopy_stomatal_model="medlyn", pmodel_acclimation="subdaily_noon",
+        light_response="pmodel_phi0")
+    assert metrics["GPP"]["n"] > 0 and metrics["GPP"]["model_nan"] == 0
+    with pytest.raises(ValueError, match="capacity_scheme='p_model'"):
+        mod.run_site(driver_nc, "prognostic", str(tmp_path / "out2"), chunk=48,
+                     light_response="pmodel_phi0")
+
+
+def test_site_sandoval_inputs_known_answer():
+    """mGDD0 = mean of daily-mean T over days above 0 degC; AI = sum PET /
+    sum P over whole days, PET from daily Priestley-Taylor on the forcing's
+    net radiation. Planted record: two warm days (20 degC) and one frozen day
+    (-5 degC); constant radiation and rain; a partial day is ignored."""
+    from types import SimpleNamespace
+    from legoesm import constants
+    from legoesm.land.carbon.climate_features import priestley_taylor_pet_rate
+    mod = _load_driver_module()
+    n_day, spd = 3, 48
+    clock = np.tile(np.arange(spd) * 0.5, n_day + 1)[: n_day * spd + 10]   # +partial day
+    n = clock.size
+    T = np.full(n, constants.T_freeze + 20.0)
+    T[2 * spd: 3 * spd] = constants.T_freeze - 5.0
+    eps, alb, sw, p_rate = 0.97, 0.2, 400.0, 2e-5
+    lw = constants.sigma_sb * T ** 4            # LW_in = sigma T^4
+    col = lambda a: np.asarray(a, dtype=float)[:, None]  # noqa: E731
+    d = SimpleNamespace(
+        clock_hour=clock, dt_s=1800.0,
+        forcing=SimpleNamespace(T_lowest=col(T), sw_down=col(np.full(n, sw)),
+                                lw_down=col(lw), p_surface=col(np.full(n, 1e5)),
+                                precip_total=col(np.full(n, p_rate))),
+        canopy_params=SimpleNamespace(ALB_VIS=col(np.full(n, alb)), ALB_NIR=col(np.full(n, alb)),
+                                      emissivity=col(np.full(n, eps))))
+    ai, mgdd0 = mod._site_sandoval_inputs(d)
+    assert mgdd0 == pytest.approx(20.0)
+    rn = (1 - alb) * sw + eps * (lw[[0, 0, 2 * spd]] - constants.sigma_sb * T[[0, 0, 2 * spd]] ** 4)
+    pet = priestley_taylor_pet_rate(rn, T[[0, 0, 2 * spd]], np.full(3, 1e5))
+    assert ai == pytest.approx(pet.sum() / (3 * p_rate), rel=1e-10)
+
+
+def test_run_site_sandoval_kphio(tmp_path):
+    """Step C end to end: Sandoval phi0 (with the subdaily acclimation and the
+    P-model light response) runs on a driver with rain; a rainless record
+    is refused (AI undefined)."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=48 * 3)
+    mod = _load_driver_module()
+    kw = dict(capacity_scheme="p_model", g1_source="p_model",
+              canopy_stomatal_model="medlyn", pmodel_acclimation="subdaily_noon",
+              light_response="pmodel_phi0", kphio_method="sandoval")
+    with pytest.raises(ValueError, match="no precipitation"):
+        mod.run_site(driver_nc, "prognostic", str(tmp_path / "o0"), chunk=48, **kw)
+    ds = xr.open_dataset(driver_nc).load()
+    ds["P"] = ds["P"] + 0.05                                   # mm per step
+    wet = str(tmp_path / "SYN-Wet_driver_v2.nc"); ds.to_netcdf(wet)
+    for mode in ("diagnostic", "prognostic"):
+        m = mod.run_site(wet, mode, str(tmp_path / f"o_{mode}"), chunk=48, **kw)
+        assert m["GPP"]["n"] > 0 and m["GPP"]["model_nan"] == 0
+
+
+def test_sandoval_inputs_given_explicitly_and_refusals(tmp_path):
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=48 * 2)
+    ds = xr.open_dataset(driver_nc).load(); ds["P"] = ds["P"] + 0.05
+    wet = str(tmp_path / "SYN-Wet_driver_v2.nc"); ds.to_netcdf(wet)
+    mod = _load_driver_module()
+    kw = dict(capacity_scheme="p_model", g1_source="p_model",
+              canopy_stomatal_model="medlyn")
+    with pytest.raises(ValueError, match="both"):
+        mod.run_site(wet, "diagnostic", str(tmp_path / "a"), chunk=48,
+                     kphio_method="sandoval", sandoval_ai=1.0, **kw)
+    with pytest.raises(ValueError, match="inert"):
+        mod.run_site(wet, "diagnostic", str(tmp_path / "b"), chunk=48,
+                     sandoval_ai=1.0, sandoval_mgdd0=10.0, **kw)
+    m = mod.run_site(wet, "diagnostic", str(tmp_path / "c"), chunk=48,
+                     kphio_method="sandoval", sandoval_ai=2.0, sandoval_mgdd0=12.0, **kw)
+    assert m["GPP"]["model_nan"] == 0
+
+
+@pytest.mark.parametrize("mode", ["diagnostic", "prognostic"])
+def test_run_site_pmodel_chi(tmp_path, mode):
+    """Step E end to end: ci = chi(xi) Ca with the subdaily acclimation and the
+    P-model light response."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=48 * 2)
+    mod = _load_driver_module()
+    m = mod.run_site(driver_nc, mode, str(tmp_path / "out"), chunk=48,
+                     capacity_scheme="p_model", g1_source="table",
+                     canopy_stomatal_model="pmodel_chi",
+                     pmodel_acclimation="subdaily_noon", light_response="pmodel_phi0")
+    assert m["GPP"]["n"] > 0 and m["GPP"]["model_nan"] == 0
+
+
+def test_subdaily_short_slice_uses_full_record_noon(tmp_path):
+    """A slice shorter than a day cannot locate solar noon by itself; the
+    driver estimates it from the full record first (codex review round 1)."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=48 * 2)
+    mod = _load_driver_module()
+    m = mod.run_site(driver_nc, "prognostic", str(tmp_path / "o"), chunk=48,
+                     start_step=20, max_steps=10,
+                     capacity_scheme="p_model", g1_source="p_model",
+                     canopy_stomatal_model="medlyn", pmodel_acclimation="subdaily_noon")
+    assert m["GPP"]["model_nan"] == 0

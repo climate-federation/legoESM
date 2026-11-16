@@ -524,6 +524,10 @@ def _save_restart(
     if getattr(state, "pmodel_acclim", None) is not None:
         for _fname, _val in zip(PModelAcclimState._fields, state.pmodel_acclim):
             payload[f"pmodel_{_fname}"] = np.asarray(_val)
+    # Two-leaf canopy warm-start cache (NaN = never converged): persisted so a
+    # resumed run seeds exactly as the uninterrupted run would.
+    if getattr(state, "canopy_x", None) is not None:
+        payload["canopy_x"] = np.asarray(state.canopy_x)
     np.savez_compressed(str(restart_path), **payload)
 
 
@@ -565,6 +569,17 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig,
         state = state._replace(
             ice_bands=jnp.asarray(data["ice_bands"]) if "ice_bands" in data
             else jnp.zeros((ncol, nb)))
+    # Two-leaf canopy warm-start cache: restore when present; an archive without
+    # it starts the cache empty ("cold") for the two-leaf canopy, so the warm
+    # start is not lost for the rest of the run.
+    if "canopy_x" in data:
+        state = state._replace(canopy_x=jnp.asarray(data["canopy_x"]))
+    else:
+        from legoesm.land.surface_scheme import TwoLeafCanopyConfig as _TL
+        if isinstance(config.surface_scheme, _TL):
+            _w = 8 if config.surface_scheme.stomatal_model == "phydro" else 6
+            state = state._replace(canopy_x=jnp.full(
+                (state.snow_depth.shape[0], _w), jnp.nan, dtype=state.T_soil.dtype))
     # P-model acclimation state: restore when present; a P-model-active config
     # resuming an archive WITHOUT it is a scientific reset of the acclimated
     # capacities and is refused unless --pmodel-cold-restart made it explicit.

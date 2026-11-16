@@ -64,7 +64,9 @@ from legoesm.land.canopy import CanopyConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.stomata import StomataConfig
 from legoesm import constants
+from legoesm.land.canopy.solver import leafless_mask
 from legoesm.land.multilayer_land import (
+    finite_check_view,
     step_multilayer_land,
     step_multilayer_land_with_diagnostics,
     init_multilayer_land_state,
@@ -118,6 +120,55 @@ def grid_latlon_rad(grid):
     return jnp.asarray(lat.ravel()), jnp.asarray(lon.ravel())
 
 
+def sandoval_inputs_on_grid(path: str, grid) -> tuple[np.ndarray, np.ndarray]:
+    """Sandoval et al. (2026) phi0 inputs ``(aridity_index, mgdd0_c)``, each
+    ``(ncol,)`` in the surfdata column order, from a regular lat-lon
+    climatology file (``lat``, ``lon`` [deg], ``aridity_index``, ``mgdd0``;
+    NaN off land; scripts/data/build_sandoval_inputs.py writes one).
+
+    Each model cell takes the area-weighted mean over its land source cells
+    (NaN-aware conservative regrid).  The aridity index is averaged in log
+    space (a geometric mean): phi0 depends on AI through (1 + AI^4.09), so an
+    arithmetic mean over a cell that spans a desert edge would be set by its
+    driest sub-cell.  mGDD0 is averaged arithmetically (it is a temperature).
+    Model cells with no land source cell (open ocean, small islands) take the
+    nearest filled model cell, so the field is finite everywhere; their value
+    only matters if the land fraction admits them.  Regular lat-lon model
+    grids only: anything else raises.
+    """
+    import xarray as xr
+    from legoesm.grids.regridding import conservative_regrid_latlon
+    from legoesm.coupler.grid_remap import nearest_column_map
+    if not (hasattr(grid, "lat2d") and hasattr(grid, "lon2d")
+            and np.ndim(grid.lat) == 1 and np.ndim(grid.lon) == 1):
+        raise ValueError(
+            "sandoval_inputs_on_grid: regular lat-lon model grids only "
+            f"(got {type(grid).__name__})")
+    with xr.open_dataset(path) as ds:
+        src_lat = np.asarray(ds["lat"].values, np.float64)
+        src_lon = np.asarray(ds["lon"].values, np.float64)
+        ai = np.asarray(ds["aridity_index"].values, np.float64)
+        mg = np.asarray(ds["mgdd0"].values, np.float64)
+    if np.any(ai[np.isfinite(ai)] <= 0.0):
+        raise ValueError(f"{path}: aridity_index must be > 0 on land")
+    tgt_lat = np.rad2deg(np.asarray(grid.lat, np.float64))
+    tgt_lon = np.rad2deg(np.asarray(grid.lon, np.float64))
+    ai_c = np.exp(conservative_regrid_latlon(np.log(ai), src_lat, src_lon,
+                                             tgt_lat, tgt_lon)).ravel()
+    mg_c = conservative_regrid_latlon(mg, src_lat, src_lon,
+                                      tgt_lat, tgt_lon).ravel()
+    filled = np.isfinite(ai_c) & np.isfinite(mg_c)
+    if not filled.any():
+        raise ValueError(f"{path}: no land source cell overlaps the model grid")
+    lat_c, lon_c = (np.asarray(a) for a in grid_latlon_rad(grid))
+    gap = ~filled
+    if gap.any():
+        src = np.flatnonzero(filled)[nearest_column_map(
+            lat_c[filled], lon_c[filled], lat_c[gap], lon_c[gap])]
+        ai_c[gap], mg_c[gap] = ai_c[src], mg_c[src]
+    return ai_c, mg_c
+
+
 def build_model_times(start_doy: float, dt: float, n_steps: int, *, synthetic: bool):
     """Model step times in seconds since the forcing-year start.
 
@@ -167,6 +218,11 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         canopy_vcmax_profile=cfg.physics.get("canopy_vcmax_profile", "kn"),
         transpiration_stress=cfg.physics.get(
             "transpiration_stress", "beta_theta"),
+        pmodel_acclimation=cfg.physics.get("pmodel_acclimation", "ema_24h"),
+        pmodel_kphio_method=cfg.physics.get("pmodel_kphio_method", "temperature"),
+        sandoval_file=cfg.surfdata.get("sandoval_file", ""),
+        params=dict(cfg.raw.get("params") or {}),
+        canopy_light_response=cfg.physics.get("canopy_light_response", "clm"),
         calibrated_land_physics=bool(
             cfg.physics.get("calibrated_land_physics", False)),
         vc_max25=cfg.physics.get("vc_max25", None),
@@ -199,6 +255,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         # CLI overrides the config here for chaining ergonomics.
         restart_from=cli_args.restart_from or cfg.restart.get("from", ""),
         pmodel_cold_restart=bool(getattr(cli_args, "pmodel_cold_restart", False)),
+        column_devices=int(getattr(cli_args, "column_devices", 1)),
         output_config="",                        # embedded output block is used directly
         _cfg_output_tapes=cfg.output,            # -> load_output_config indirection below
         _cfg_luc=cfg.raw.get("land_use_change") or {},   # E_LUC bookkeeping block
@@ -268,12 +325,16 @@ _VAR_META = {
     "pmodel_g1":      {"long_name": "C3 stomatal slope fed to the canopy kernel, after any "
                                     "water-stress factor (Medlyn g1 under stomatal_model=medlyn)",
                        "units": "kPa 0.5"},
-    "ci_ca_sun_day":  {"long_name": "sunlit-leaf solved Ci/Ca times the daytime flag; "
-                                    "daytime mean = mean(ci_ca_sun_day) / mean(day_frac)",
+    "ci_ca_sun_day":  {"long_name": "sunlit-leaf solved Ci/Ca times the leafy-daytime flag; "
+                                    "daytime mean = mean(ci_ca_sun_day) / mean(leafy_day_frac)",
                        "units": "1"},
-    "ci_ca_shade_day": {"long_name": "shaded-leaf solved Ci/Ca times the daytime flag; "
-                                     "daytime mean = mean(ci_ca_shade_day) / mean(day_frac)",
+    "ci_ca_shade_day": {"long_name": "shaded-leaf solved Ci/Ca times the leafy-daytime flag; "
+                                     "daytime mean = mean(ci_ca_shade_day) / mean(leafy_day_frac)",
                         "units": "1"},
+    "leafy_day_frac": {"long_name": "daytime-with-leaves flag (cos zenith > 0 and canopy "
+                                    "leaf area above the leafless threshold); its mean is "
+                                    "the leafy daytime fraction of the averaging window",
+                       "units": "1"},
     "day_frac":       {"long_name": "daytime flag (cos zenith > 0); its mean is the "
                                     "daytime fraction of the averaging window",
                        "units": "1"},
@@ -473,7 +534,9 @@ def run(args) -> int:
             max_iters=50, tol=1e-2, stomatal_model=args.stomatal_model,
             capacity_scheme=args.canopy_capacity_scheme,
             g1_source=args.canopy_g1_source,
-            vcmax_profile=args.canopy_vcmax_profile).validate()
+            vcmax_profile=args.canopy_vcmax_profile,
+            light_response=getattr(args, "canopy_light_response", "clm"),
+            column_sharded=int(getattr(args, "column_devices", 1)) > 1).validate()
     elif args.surface_scheme == "simple_seb":
         surf = SimpleSEBConfig()
     else:
@@ -484,11 +547,13 @@ def run(args) -> int:
     # beta amip_sota disabled for over-transpiration, #730); the two-leaf canopy
     # ignores it (it has its own leaf conductance).  Only override a scalar the
     # user actually set (None -> land default / per-PFT surfdata value).
-    # The two-leaf P-hydro option ("phydro") has no big-leaf counterpart, and
-    # the two-leaf canopy never reads this config: leave the StomataConfig
-    # default in that case instead of naming a scheme the big leaf lacks.
+    # The two-leaf P-hydro ("phydro") and P-model ci ("pmodel_chi") options
+    # have no big-leaf counterpart, and the two-leaf canopy never reads this
+    # config: leave the StomataConfig default in those cases instead of naming
+    # a scheme the big leaf lacks (lmip_config restricts both to the canopy).
+    _two_leaf_only = ("phydro", "pmodel_chi")
     _stom = {"enabled": bool(args.stomata_enabled)}
-    if args.stomatal_model != "phydro":
+    if args.stomatal_model not in _two_leaf_only:
         _stom["stomata_model"] = args.stomatal_model
     if args.surface_scheme == "simple_seb":
         # simple_seb: the P-model switches live on the big-leaf StomataConfig.
@@ -499,6 +564,10 @@ def run(args) -> int:
     if args.gs_max is not None:
         _stom["gs_max"] = float(args.gs_max)
     if args.g1 is not None:
+        if args.stomatal_model in _two_leaf_only:
+            raise ValueError(
+                f"--g1 with physics.stomatal_model={args.stomatal_model!r} would "
+                "be silently inert (that scheme reads no stomatal slope); drop it.")
         if args.canopy_g1_source == "p_model":
             raise ValueError(
                 "--g1 with physics.canopy_g1_source=p_model would be silently "
@@ -573,6 +642,13 @@ def run(args) -> int:
             # through init_land_surface_data (which only _replace()s hydraulics).
             thermal=SoilThermalConfig(enable_freeze_thaw=bool(args.enable_freeze_thaw)),
             transpiration_stress=args.transpiration_stress)
+        # P-model acclimation scheme (physics.pmodel_acclimation; validated in
+        # lmip_config): 'ema_24h' or 'subdaily_noon' (Mengoli et al. 2022).
+        # Quantum-yield form (physics.pmodel_kphio_method): 'temperature' or
+        # 'sandoval' (inputs from surfdata.sandoval_file, mapped below).
+        base_cfg = base_cfg._replace(p_model=base_cfg.p_model._replace(
+            acclimation=getattr(args, "pmodel_acclimation", "ema_24h"),
+            kphio_method=getattr(args, "pmodel_kphio_method", "temperature")))
         # A land initial condition is only meaningful for the model it was
         # equilibrated under, so a spin-up feeding a calibrated coupled run has to
         # use the same one — including its soil column, which this driver
@@ -593,6 +669,15 @@ def run(args) -> int:
         raise ValueError(
             f"unknown land_mode {args.land_mode!r} (expected 'multilayer' or 'slab')")
     base_cfg = resolve_land_config(args.land_mode, base_cfg)
+    if getattr(args, "params", None):
+        # The config's ``params:`` block: the shared calibration loader
+        # validates every key against the parameter registry (unknown, tier-0
+        # and out-of-bounds values raise) and splices it into the matching
+        # nested *Config — the same route as run_lmip / run_ec_site --params.
+        from legoesm.driver.run_config_yaml import apply_params_to_config
+        base_cfg = apply_params_to_config(
+            base_cfg, args.params, driver="run_lmip_biophys")
+        print(f"params: {args.params}")
     is_multilayer = (args.land_mode == "multilayer")
 
     config, _params_nominal, gsd = init_land_surface_data(
@@ -685,6 +770,13 @@ def run(args) -> int:
         co2_by_year = {}
         print("CO2: constant default (no forcing.co2_file)")
     _co2_init = co2_by_year.get(year_masks[0][0])
+    # Sandoval phi0 climatology (aridity index, mGDD0) on the model columns.
+    _sv_inputs = None
+    if getattr(args, "pmodel_kphio_method", "temperature") == "sandoval":
+        _sv_inputs = sandoval_inputs_on_grid(args.sandoval_file, grid)
+        print(f"Sandoval inputs: {args.sandoval_file} | AI median "
+              f"{np.median(_sv_inputs[0]):.3g}, mGDD0 median "
+              f"{np.median(_sv_inputs[1]):.3g} degC")
 
     # T0 seed for cold-start soil temperature: stage just the first year's
     # first step (one AtmToSurface slice, ~100 KB) and extract T_lowest[0].
@@ -748,7 +840,8 @@ def run(args) -> int:
             # cold-start template, as model_driver and run_land_spinup do.
             state = merge_land_restart_into_template(
                 loaded, init_multilayer_land_state(
-                    ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init),
+                    ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init,
+                    pmodel_sandoval_inputs=_sv_inputs),
                 allow_pmodel_cold_start=bool(
                     getattr(args, "pmodel_cold_restart", False)))
             print(f"restart: loaded state from {args.restart_from} "
@@ -756,7 +849,8 @@ def run(args) -> int:
                   f"steps_completed={restart_meta['n_steps_completed']})")
         else:
             state = init_multilayer_land_state(
-                ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init)
+                ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init,
+                pmodel_sandoval_inputs=_sv_inputs)
             state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
 
     update_land_params = make_step_land_params_updater(
@@ -797,6 +891,26 @@ def run(args) -> int:
         from legoesm.land.carbon.carbon_cycle import init_carbon_state
         _carbon_state = init_carbon_state((ncol,), config.carbon)
 
+    # Subdaily P-model: column longitudes [deg E] for the local solar hour.
+    _subdaily = (is_multilayer
+                 and getattr(config, "p_model", None) is not None
+                 and config.p_model.acclimation == "subdaily_noon")
+    if _subdaily:
+        from legoesm.land.p_model import local_solar_hour
+        _lon_deg_cols = jnp.asarray(np.rad2deg(np.asarray(lon_rad)).ravel())
+    # Optional column sharding (a run-time layout choice, not physics): the
+    # carry and each year's forcing are split along the column axis, so XLA
+    # runs one block of independent columns per device.
+    _col_mesh = None
+    _n_coldev = int(getattr(args, "column_devices", 1))
+    if _n_coldev > 1:
+        from legoesm.parallel.column_shard import create_column_mesh, shard_column_tree
+        if jax.device_count() < _n_coldev:
+            raise SystemExit(
+                f"--column-devices {_n_coldev} but JAX sees {jax.device_count()} "
+                "device(s); on CPU set XLA_FLAGS=--xla_force_host_platform_device_count"
+                f"={_n_coldev} before starting")
+        _col_mesh = create_column_mesh(_n_coldev)
     # ----- scan body: (state, tape_accums, revert_count) -> next. -----
     def _step_body(carry, xs):
         state, accums, revert_count = carry
@@ -806,10 +920,15 @@ def run(args) -> int:
         # Multilayer uses the diagnostics variant (4-tuple) so surface_out.gpp is
         # reachable; slab keeps the 3-tuple.  ``is_multilayer`` is static.
         if is_multilayer:
+            # Local mean solar hour per column from the UTC model clock
+            # (doy_t = UTC seconds since the forcing-year start / 86400) and the
+            # column longitude; read only by the subdaily P-model.
+            _solar_t = (local_solar_hour(doy_t * _SEC_PER_DAY, _lon_deg_cols)
+                        if _subdaily else None)
             new_state, resp, _, surf_out = step_fn(
                 state, forcing_t, config, U_MIN, dt,
                 lat=lat_rad, land_params=land_params_t, doy=doy_t,
-                carbon_state=_carbon_state)
+                carbon_state=_carbon_state, solar_hour=_solar_t)
         else:
             new_state, resp, _ = step_fn(
                 state, forcing_t, config, U_MIN, dt,
@@ -901,12 +1020,21 @@ def run(args) -> int:
                                          else surf_out.dpsi_sun_mpa)
             values["phydro_dpsi_shade"] = (_nan if surf_out.dpsi_sh_mpa is None
                                            else surf_out.dpsi_sh_mpa)
-            # Solved Ci/Ca of every arm, daytime only: a tape mean of the
-            # product divided by the mean of the flag is the daytime mean.
+            # Solved Ci/Ca of every arm, by day and only where the canopy has
+            # leaves: a tape mean of the product divided by the mean of
+            # ``leafy_day_frac`` is the daytime leafy mean.  Leafless steps (ice
+            # sheet, barren ground, a leafless season or a buried canopy) are
+            # treated like night: their Ci = Ca is a pinned value, not a
+            # physiological one (user decision 2026-11-10).  The flag follows
+            # the leaf area the canopy solved with (after any override).
             _day = (forcing_t.cos_zenith > 0.0).astype(surf_out.ci_ca_sun.dtype)
-            values["ci_ca_sun_day"] = surf_out.ci_ca_sun * _day
-            values["ci_ca_shade_day"] = surf_out.ci_ca_sh * _day
+            _lai_c = (surf_out.lai_canopy if surf_out.lai_canopy is not None
+                      else lai_diag)
+            _leafy_day = _day * jnp.where(leafless_mask(_lai_c), 0.0, 1.0)
+            values["ci_ca_sun_day"] = surf_out.ci_ca_sun * _leafy_day
+            values["ci_ca_shade_day"] = surf_out.ci_ca_sh * _leafy_day
             values["day_frac"] = _day
+            values["leafy_day_frac"] = _leafy_day
         _pm_state = getattr(new_state, "pmodel_acclim", None)
         if _pm_state is not None:
             from legoesm.land.p_model import acclimated_capacities as _acc
@@ -937,7 +1065,8 @@ def run(args) -> int:
         # PASS/FAIL.  The reverted step's diagnostics are untrustworthy, so mask
         # them to NaN; ``reverted`` (0/1) is tape-able as a per-cell failure-rate
         # map and ``revert_count`` accumulates a per-cell total for the summary.
-        reverted = _nonfinite_per_col(new_state, ncol)          # (ncol,) bool
+        # (the canopy warm-start cache is NaN by design: finite_check_view)
+        reverted = _nonfinite_per_col(finite_check_view(new_state), ncol)  # (ncol,) bool
         def _revert(n, o):
             if getattr(n, "ndim", 0) < 1 or n.shape[0] != ncol:
                 return n
@@ -1095,6 +1224,12 @@ def run(args) -> int:
 
     steps_done = 0
     revert_count = jnp.zeros(ncol)                  # per-cell NaN-revert tally
+    if _col_mesh is not None:
+        # Column axis by layout: state (ncol, ...), tapes (n_slots, ncol).
+        state, revert_count = shard_column_tree(
+            (state, revert_count), _col_mesh, ncol, axis=0)
+        tape_accums = shard_column_tree(tape_accums, _col_mesh, ncol, axis=1)
+        print(f"column sharding: {ncol} columns over {_n_coldev} devices")
     for k, (year, mask) in enumerate(year_masks):
         # Year-local model times: the year's forcing clock resets to 0 at Jan 1.
         tq_year = tq[mask]
@@ -1106,6 +1241,8 @@ def run(args) -> int:
             prefix=args.prefix, suffix=args.suffix,
             k_neighbors=args.k_neighbors, allow_synthetic=allow_syn,
             **({"co2_ppmv": co2_by_year[year]} if co2_by_year else {}))
+        if _col_mesh is not None:
+            forcing_year = shard_column_tree(forcing_year, _col_mesh, ncol, axis=1)
         doy_year = jnp.asarray(tq_year / _SEC_PER_DAY)
         # Transient cover: broadcast this chunk's calendar year across its steps as
         # a TRACED scan input (not a Python constant baked into the closure) so
@@ -1215,6 +1352,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="allow resuming a P-model-active run from a restart "
                          "written before the acclimation state existed (an "
                          "explicit, recorded reset; refused otherwise).")
+    ap.add_argument("--column-devices", type=int, default=1,
+                    dest="column_devices",
+                    help="split the columns across this many JAX devices "
+                         "(columns are independent, so results are unchanged; "
+                         "on CPU set XLA_FLAGS=--xla_force_host_platform_device_count"
+                         "=N and give the job N cores).  Must divide the column "
+                         "count.  1 = no sharding.")
     ap.add_argument("--restart-from", default="",
                     help="override the config's restart.from field — the most "
                          "common per-run change (chained warm starts)")
