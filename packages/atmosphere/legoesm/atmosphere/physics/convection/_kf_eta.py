@@ -142,8 +142,8 @@ KF_SWITCHES = {
     "D7g": ("D", "smooth", "glaciation: freezing (frz) and partial (part) ramps, DTFRZNEW"),
     "D7h": ("D", "hard", "downdraft RH adjustment: low (qsrh < qd) and adj (rhh < 1)"),
     "D7i": ("D", "hard", "subsidence moisture borrow where QG < 0"),
-    "D7j": ("D", "hard", "closure mixed-layer supersaturation adjustment (sup)"),
-    "D7k": ("D", "hard", "CPR > 0 guard of the precipitation feedback ratio FRC2"),
+    "D7j": ("D", "smooth", "closure mixed-layer supersaturation adjustment (sup)"),
+    "D7k": ("D", "smooth", "CPR > 0 guard of the precipitation feedback ratio FRC2 (smooth: onset from CPR = 0)"),
     "E1": ("E", "smooth", "Q0 clipped to [1e-6, QES]"),
     "E2": ("E", "smooth", "TLCL <= TMIX (first pass and closure)"),
     "E3": ("E", "smooth", "WKLCL linear ramp capped at wklcl_ref"),
@@ -153,17 +153,17 @@ KF_SWITCHES = {
     "E7": ("E", "smooth", "eqf clipped to [0, 1]"),
     "E8": ("E", "smooth", "ee2 >= 0.5"),
     "E9": ("E", "smooth", "CHMIN temperature ramp between 273 and 293 K"),
-    "E10": ("E", "hard", "upstream direction OMG <= 0 in the subsidence advection"),
+    "E10": ("E", "smooth", "upstream direction OMG <= 0 in the subsidence advection (smooth: face weight on OMG)"),
     "E11": ("E", "hard", "square root kink at zero: GDT, wind speed, shear"),
     "E11c": ("E", "smooth", "CONDLOAD square roots of WTW and G1"),
-    "E12": ("E", "hard", "TIMEC = DX/VCONV clamped to [timec_min, timec_max], VCONV > 0"),
-    "E13": ("E", "hard", "PEF clamped to [0.2, 0.9]"),
-    "E14": ("E", "hard", "PEFCBH <= 0.9"),
-    "E15": ("E", "hard", "inflow limit AINCMX: UER-DER > 1e-3 mask, min reduction, AINC <= 1"),
+    "E12": ("E", "smooth", "TIMEC = DX/VCONV clamped to [timec_min, timec_max] (VCONV > 0 stays a divisor guard)"),
+    "E13": ("E", "smooth", "PEF clamped to [0.2, 0.9]"),
+    "E14": ("E", "smooth", "PEFCBH <= 0.9"),
+    "E15": ("E", "smooth", "inflow limit AINCMX: UER-DER > 1e-3 mask, min reduction, AINC <= 1"),
     "E16": ("E", "hard", "subsidence time step DTT limited by |OMG|*TIMEC > 0.75 DP"),
-    "E17": ("E", "hard", "closure qmix >= 0"),
-    "E18": ("E", "hard", "DABE >= 0.1 ABE"),
-    "E19": ("E", "hard", "new AINC capped at AINCMX"),
+    "E17": ("E", "smooth", "closure qmix >= 0"),
+    "E18": ("E", "smooth", "DABE >= 0.1 ABE"),
+    "E19": ("E", "smooth", "new AINC capped at AINCMX"),
     "F1": ("F", "smooth", "ALU log table: coordinate clamp and interval index"),
     "F2": ("F", "smooth", "TTAB/QSTAB tables: coordinate clamps and interval indices"),
     "S": ("S", "static", "static level index, static pad mask, Python-level option dispatch"),
@@ -352,6 +352,17 @@ class KFSmoothing(NamedTuple):
       weights (the LET cold weight is D4's, width ``entrain_select_width_k``).
       Interim: the downdraft, the melting level and the closure re-ascent
       still read the hard LTOP/LET of the same scan.
+    * Closure-local clamps (PR 7a, forms vote 19, widths vote 20):
+      ``omg_upwind_width_pas`` (E10, upwind side of the subsidence advection,
+      the same face weight on both sides), ``timec_clip_width_s`` (E12 TIMEC
+      clip), ``pef_clip_width`` (E13), ``pefcbh_cap_width`` (E14, one-sided),
+      ``uerder_onset_width_kgs`` (E15 eligibility UER - DER > 1e-3, centred),
+      ``ainc_min_width`` (E15 level minimum of the inflow limits and AINC <= 1),
+      ``ainc_cap_width`` (E19 AINC <= AINCMX, one-sided), ``qmix_floor_width_kgkg``
+      (E17 qmix >= 0, one-sided), ``dabe_floor_width_jkg`` (E18 DABE >= 0.1 ABE),
+      ``closure_sup_width_kgkg`` (D7j, blend of the supersaturated and
+      unsaturated closure mixed layer, centred on qmix = qss) and
+      ``cpr_onset_width_kgs`` (D7k, FRC2 ramps in from CPR = 0).
     """
 
     lut_knot_width: float
@@ -379,6 +390,17 @@ class KFSmoothing(NamedTuple):
     chmin_clip_width_k: float
     top_stop_wtw_width_m2s2: float
     top_stop_umf_width_kgs: float
+    omg_upwind_width_pas: float
+    timec_clip_width_s: float
+    pef_clip_width: float
+    pefcbh_cap_width: float
+    uerder_onset_width_kgs: float
+    ainc_min_width: float
+    ainc_cap_width: float
+    qmix_floor_width_kgkg: float
+    dabe_floor_width_jkg: float
+    closure_sup_width_kgkg: float
+    cpr_onset_width_kgs: float
 
 
 KF_HARD = KFSmoothing(*(0.0 for _ in KFSmoothing._fields))
@@ -399,10 +421,12 @@ def validate_kf_smoothing(sm: KFSmoothing) -> None:
     for name, w in sm._asdict().items():  # kfsw: S
         validate_smoothing_width(f"KFSmoothing.{name}", w)  # kfsw: S
     # the stop1 band stays at WTW >= 0; the stop2 band stays above the
-    # continuation floor (identity from _CONT_HI_KGS up)
+    # continuation floor (identity from _CONT_HI_KGS up); the UER - DER
+    # eligibility band stays above 0 (the inflow limit divides by it)
     for name, hi in (("lut_knot_width", 1.0), ("prof5_width", _PROF5_WIDTH_MAX),
                      ("top_stop_wtw_width_m2s2", 2.0 * _WTW_STOP),
-                     ("top_stop_umf_width_kgs", 2.0 * (_UMF_DETR_MIN - _CONT_HI_KGS))):
+                     ("top_stop_umf_width_kgs", 2.0 * (_UMF_DETR_MIN - _CONT_HI_KGS)),
+                     ("uerder_onset_width_kgs", 2.0 * _UERDER_MIN)):
         if getattr(sm, name) > hi:  # kfsw: S
             raise ValueError(f"KFSmoothing.{name} must be 0 or in (0, {hi}]; "
                              f"got {getattr(sm, name)!r}")  # kfsw: S
@@ -557,13 +581,13 @@ def _stencil_c1(x, n_nodes, w):
 
 def _step_c(x, w):
     """C1 step centred on 0, band |x| < w/2: 0 below, 1 above (RULE 5)."""
-    return smoothstep_cubic(0.5 + x / w)  # kfsw: C-KLCLg,C-L5g
+    return smoothstep_cubic(0.5 + x / w)  # kfsw: C-KLCLg,C-L5g,E10
 
 
 def _step_c2(x, w):
     """C2 (quintic) step centred on 0, band |x| < w/2 (w > 0): 0 below, 1
     above (D4 weights, cloud-top survival hazards and the soft LET)."""
-    return smoothstep_quintic(0.5 + x / w)  # kfsw: D4,C-LTOPs,C-LETs
+    return smoothstep_quintic(0.5 + x / w)  # kfsw: D4,C-LTOPs,C-LETs,E15,D7j
 
 
 # Continuation floor of the updraft's mass fluxes past a likely stop2 exit
@@ -691,8 +715,8 @@ def _cap_c1(x, cap, w):
     ``cap``, exactly ``x`` below ``cap - w`` (E1 Q0 <= QES and, negated, Q0 >=
     1e-6; E2 TLCL <= TMIX; E4 WLCL <= 3 m/s)."""
     if w:  # kfsw: S
-        return cap - positive_part_c1(cap - x, 1.0 / w)  # kfsw: E1,E2,E4
-    return jnp.minimum(x, cap)  # kfsw: E1,E2,E4
+        return cap - positive_part_c1(cap - x, 1.0 / w)  # kfsw: E1,E2,E4,E14,E17,E19
+    return jnp.minimum(x, cap)  # kfsw: E1,E2,E4,E14,E17,E19
 
 
 def _glaciate(ab, p, tu, theteu, qu, qliq, qice, qnl, qni, ttemp_prev, sm):
@@ -811,8 +835,8 @@ def _clip_c1(x, lo, hi, w):
     """clip(x, lo, hi) (w = 0, the oracle's max-then-min) or its C1 form, exact
     outside the bands |x - lo|, |x - hi| < w/2 (E5, E7, E9)."""
     if w:  # kfsw: S
-        return smooth_min_c1(smooth_max_c1(x, lo, w), hi, w)  # kfsw: E5,E7,E9
-    return jnp.minimum(jnp.maximum(x, lo), hi)  # kfsw: E5,E7,E9
+        return smooth_min_c1(smooth_max_c1(x, lo, w), hi, w)  # kfsw: E5,E7,E9,E12,E13
+    return jnp.minimum(jnp.maximum(x, lo), hi)  # kfsw: E5,E7,E9,E12,E13
 
 
 def _gather_at_height(f, Z0, z, kk, valid, LC, w):
@@ -1105,12 +1129,23 @@ def _put(a, i, v, m):
     return a.at[i].set(jnp.where(m, v, a[i]))  # kfsw: H
 
 
-def _survival_inflow_limit(aincm1, wl):
+def _survival_inflow_limit(aincm1, wl, cap):
     """A level's inflow limit divided by its survival share ``wl``, capped at
-    _AINCMX0 (the closure's min caps it anyway); divides only below the cap so
-    a tiny share keeps values and gradients finite."""
-    c = wl * _AINCMX0 > aincm1  # kfsw: C-LETs
-    return jnp.where(c, aincm1 / _sd(wl, c), _AINCMX0)  # kfsw: C-LETs
+    ``cap`` >= _AINCMX0 (the closure's minimum then ignores it); divides only
+    below the cap so a tiny share keeps values and gradients finite."""
+    c = wl * cap > aincm1  # kfsw: C-LETs
+    return jnp.where(c, aincm1 / _sd(wl, c), cap)  # kfsw: C-LETs
+
+
+def _inflow_limit_c1(aincm1, elig, w):
+    """AINCMX = min(_AINCMX0, the levels' limits) and AINC = min(AINCMX, 1) as
+    a fold of C1 minima (E15, width ``w``; exact outside the bands); ``elig``
+    in [0, 1] blends each level's limit with ``top`` (no-op in the fold)."""
+    top = _AINCMX0 + w
+    v = elig * jnp.where(elig > 0.0, jnp.minimum(aincm1, top), top) + (1.0 - elig) * top  # kfsw: E15
+    acc, _ = jax.lax.scan(lambda a, x: (smooth_min_c1(a, x, w), None),  # kfsw: E15
+                          jnp.asarray(_AINCMX0, aincm1.dtype), v)
+    return acc, _cap_c1(acc, 1.0, w)
 
 
 def _sd(x, ok):
@@ -1572,20 +1607,27 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
                  f_qi=f_qi, f_qs=f_qs, cudt=cudt, KX=KX, GDRY=GDRY, DXSQ=DXSQ)
 
 
-def _upstream_step(X, OMG, FXM, inc, LTOP, kk, src, dtime, EMSD):
+def _upstream_step(X, OMG, FXM, inc, LTOP, kk, src, dtime, EMSD, w):
     """One upstream/forward step of the KF vertical advection (l.1990-2018,
-    l.2336-2375): THFXIN/THFXOUT built exactly as the oracle accumulates them."""
-    le = OMG <= 0.0  # kfsw: E10
+    l.2336-2375): THFXIN/THFXOUT built exactly as the oracle accumulates them.
+    ``w`` > 0 blends the two upwind sides of a face over |OMG| < w/2 with the
+    same weight on both levels it couples (conservative)."""
+    le = _step_c(-OMG, w) if w else OMG <= 0.0  # kfsw: E10
     up = jnp.concatenate([X[1:], X[-1:]])  # X(k+1)
     dn = jnp.concatenate([X[:1], X[:-1]])  # X(k-1)
     fxm_up = jnp.concatenate([FXM[1:], FXM[-1:]])
     le_up = jnp.concatenate([le[1:], le[-1:]])
     a_rng = inc & (kk >= 2)                       # levels processed as NK; kfsw: C-LTOP
     b_rng = inc & (kk + 1 <= LTOP)                # levels touched by NK+1; kfsw: C-LTOP
-    fin = jnp.where(a_rng & le, -FXM * dn, 0.0)  # kfsw: E10
-    fin = jnp.where(b_rng & ~le_up, fin + fxm_up * up, fin)  # kfsw: E10
-    fout = jnp.where(a_rng & ~le, FXM * X, 0.0)  # kfsw: E10
-    fout = jnp.where(b_rng & le_up, fout + (-fxm_up * X), fout)  # kfsw: E10
+    if w:  # kfsw: S
+        la, lb = le * a_rng, le_up * b_rng  # face weights inside the ranges
+        fin = la * (-FXM * dn) + (b_rng - lb) * fxm_up * up
+        fout = (a_rng - la) * FXM * X + lb * (-fxm_up * X)
+    else:
+        fin = jnp.where(a_rng & le, -FXM * dn, 0.0)  # kfsw: E10
+        fin = jnp.where(b_rng & ~le_up, fin + fxm_up * up, fin)  # kfsw: E10
+        fout = jnp.where(a_rng & ~le, FXM * X, 0.0)  # kfsw: E10
+        fout = jnp.where(b_rng & le_up, fout + (-fxm_up * X), fout)  # kfsw: E10
     return jnp.where(inc, X + src(fin, fout) * dtime * EMSD, X)  # kfsw: C-LTOP
 
 
@@ -1752,8 +1794,14 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     vok = VCONV > 0.0  # kfsw: E12
     TIMEC = jnp.where(vok, dx / _sd(VCONV, vok), jnp.inf)  # kfsw: E12
     TADVEC = TIMEC
-    TIMEC = jnp.maximum(prm["timec_min"], TIMEC)  # kfsw: E12
-    TIMEC = jnp.minimum(prm["timec_max"], TIMEC)  # kfsw: E12
+    if sm.timec_clip_width_s:  # kfsw: S
+        # VCONV = 0 (TIMEC = inf) takes a finite stand-in past the clip band
+        big = prm["timec_max"] + sm.timec_clip_width_s
+        TIMEC = _clip_c1(jnp.where(vok, TIMEC, big), prm["timec_min"], prm["timec_max"],  # kfsw: E12
+                         sm.timec_clip_width_s)
+    else:
+        TIMEC = jnp.maximum(prm["timec_min"], TIMEC)  # kfsw: E12
+        TIMEC = jnp.minimum(prm["timec_max"], TIMEC)  # kfsw: E12
     TIMEC = jnp.where(sh, _TIMEC_SHALLOW_S, TIMEC)  # kfsw: B1
     NIC = _nint(TIMEC / dt)  # kfsw: C-NIC
     TIMEC = NIC.astype(dtype) * dt  # kfsw: C-NIC
@@ -1764,13 +1812,13 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     dzc = Z_T - Z0[LCL]  # kfsw: C-KLCL
     VWS = _VWS_SCALE * SHSIGN * _safe_sqrt(VWS) / _sd(dzc, dzc != 0.0)  # kfsw: E11,C-LTOP
     PEF = _PEF_C0 + VWS * (_PEF_C1 + VWS * (_PEF_C2 - VWS * _PEF_C3))
-    PEF = jnp.minimum(jnp.maximum(PEF, _PEF_MIN), _PEF_MAX)  # kfsw: E13
+    PEF = _clip_c1(PEF, _PEF_MIN, _PEF_MAX, sm.pef_clip_width)
     CBH = (sc["ZLCL"] - Z0[1]) * _CBH_FT_PER_M
     RCBH = jnp.where(CBH < _CBH_LOW, _RCBH_LOW,
                      _RCBH_C0 + CBH * (_RCBH_C1 + CBH * (_RCBH_C2 + CBH * (
                          _RCBH_C3 + CBH * (_RCBH_C4 - CBH * _RCBH_C5)))))  # kfsw: D6
     RCBH = jnp.where(CBH > _CBH_HIGH, _RCBH_HIGH, RCBH)  # kfsw: D6
-    PEFCBH = jnp.minimum(1.0 / (1.0 + RCBH), _PEFCBH_MAX)  # kfsw: E14
+    PEFCBH = _cap_c1(1.0 / (1.0 + RCBH), _PEFCBH_MAX, sm.pefcbh_cap_width)
     PEFF = 0.5 * (PEF + PEFCBH)
 
     # --- downdraft (l.1647-1784) ---
@@ -1941,17 +1989,27 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     # --- inflow limit and closure (l.1879-2281) ---
     LMAX = jnp.maximum(KLCL, LFS)  # kfsw: C-KLCL,C-LFS
     udd = UER - DER
-    okm = valid & (kk >= LC) & (kk <= LMAX) & (udd > _UERDER_MIN)  # kfsw: E15,C-KCHECK,C-KLCL,C-LFS
-    AINCM1 = EMS / (_sd(udd, okm) * TIMEC)  # kfsw: E15
     if sv:  # kfsw: S
         # a level above KLCL limits the inflow with the share of the members
         # whose downdraft starts at or above it (no member: it drops out)
-        okm = valid & (kk >= LC) & (udd > _UERDER_MIN)  # kfsw: C-LETs
-        AINCM1 = EMS / (_sd(udd, okm) * TIMEC)  # kfsw: C-LETs
+        rng = valid & (kk >= LC)  # kfsw: C-LETs
+    else:
+        rng = valid & (kk >= LC) & (kk <= LMAX)  # kfsw: C-KCHECK,C-KLCL,C-LFS
+    if sm.uerder_onset_width_kgs:  # kfsw: S
+        elig = rng * _step_c2(udd - _UERDER_MIN, sm.uerder_onset_width_kgs)
+        okm = elig > 0.0  # kfsw: E15
+    else:
+        okm = rng & (udd > _UERDER_MIN)  # kfsw: E15
+        elig = okm
+    AINCM1 = EMS / (_sd(udd, okm) * TIMEC)  # kfsw: E15
+    if sv:  # kfsw: S
         wl = jnp.where(kk <= KLCL, 1.0, jnp.cumsum(ql[::-1])[::-1] / PCD)  # kfsw: C-LETs
-        AINCM1 = _survival_inflow_limit(AINCM1, wl)
-    AINCMX = jnp.minimum(_AINCMX0, jnp.min(jnp.where(okm, AINCM1, _AINCMX0)))  # kfsw: E15
-    AINC = jnp.where(AINCMX < 1.0, AINCMX, 1.0)  # kfsw: E15
+        AINCM1 = _survival_inflow_limit(AINCM1, wl, _AINCMX0 + sm.ainc_min_width)
+    if sm.ainc_min_width or sm.uerder_onset_width_kgs:  # kfsw: S
+        AINCMX, AINC = _inflow_limit_c1(AINCM1, elig, sm.ainc_min_width)
+    else:
+        AINCMX = jnp.minimum(_AINCMX0, jnp.min(jnp.where(okm, AINCM1, _AINCMX0)))  # kfsw: E15
+        AINC = jnp.where(AINCMX < 1.0, AINCMX, 1.0)  # kfsw: E15
     TDER2, PPTFL2 = TDER, PPTFLX
     base = dict(UMF=UMF, DMF=DMF, DETLQ=DETLQ, DETIC=DETIC, UDR=UDR, UER=UER, DER=DER, DDR=DDR)
     if sv:  # kfsw: S
@@ -1968,7 +2026,8 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     def advect(X, src, OMG, FXM, nstep, dtime):
         def step(c, s):
             # kfsw: C-NSTEP
-            return jnp.where(s < nstep, _upstream_step(c, OMG, FXM, inc, LTOPD, kk, src, dtime, EMSD), c), None
+            return jnp.where(s < nstep, _upstream_step(c, OMG, FXM, inc, LTOPD, kk, src, dtime, EMSD,
+                                                       sm.omg_upwind_width_pas), c), None
         X, _ = jax.lax.scan(step, X, jnp.arange(_MAX_SUBSTEPS, dtype=i32))  # kfsw: S
         return X
 
@@ -2071,14 +2130,19 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         dq = (qmix - qss) / (1.0 + rl * dssdt / cpm)
         tmix_s = tmix + rl / CP * dq
         qmix_s = qmix - dq
-        qmix_u = jnp.maximum(qmix, 0.0)  # kfsw: E17
+        qmix_u = -_cap_c1(-qmix, 0.0, sm.qmix_floor_width_kgkg)
         emix = qmix_u * PMIX / (_EPS_KF + qmix_u)
         tlog = _tlog_lookup(lut, emix / ALIQ)
         tdpt = (CLIQ - DLIQ * tlog) / (BLIQ - tlog)
         tlcl_u = _cap_c1(_tsat_from_dewpoint(tdpt, tmix), tmix, lut.sm.tlcl_cap_width_k)
-        tmix = jnp.where(sup, tmix_s, tmix)  # kfsw: D7j
-        qmix = jnp.where(sup, qmix_s, qmix_u)  # kfsw: D7j
-        tlcl = jnp.where(sup, tmix_s, tlcl_u)  # kfsw: D7j
+        if sm.closure_sup_width_kgkg:  # kfsw: S
+            ws = _step_c2(qmix - qss, sm.closure_sup_width_kgkg)
+            tmix, qmix, tlcl = (ws * a_ + (1.0 - ws) * b_ for a_, b_ in
+                                ((tmix_s, tmix), (qmix_s, qmix_u), (tmix_s, tlcl_u)))
+        else:
+            tmix = jnp.where(sup, tmix_s, tmix)  # kfsw: D7j
+            qmix = jnp.where(sup, qmix_s, qmix_u)  # kfsw: D7j
+            tlcl = jnp.where(sup, tmix_s, tlcl_u)  # kfsw: D7j
         tvlcl = tlcl * (1.0 + _TV_COEF * qmix)
         zlcl = ZMIX + (tlcl - tmix) / GDRY
         hit = valid & (kk >= LC) & (zlcl <= Z0)  # kfsw: C-KLCL2,C-KCHECK
@@ -2121,7 +2185,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         theteu, _, ABEG = _scan_levels(abeg_body, (theteu, jnp.zeros(NP, dtype), zero), 1, KX - 1)
         # decision logic (l.2179-2280)
         stop_noitr = c["NOITR"]
-        DABE = jnp.maximum(ABE - ABEG, _DABE_FRAC * ABE)  # kfsw: E18
+        DABE = smooth_max_c1(ABE - ABEG, _DABE_FRAC * ABE, sm.dabe_floor_width_jkg)  # kfsw: E18
         FABE = ABEG / ABE
         ret_fabe = (FABE > 1.0) & (ISHALL == 0)  # kfsw: A5
         later = ncount != 1  # kfsw: S
@@ -2137,7 +2201,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         cyc2 = ~fz & (DABE < _DABE_MIN)  # kfsw: B4
         # kfsw: B4
         ainc_new = jnp.where(fz, c["AINC"] * 0.5, c["AINC"] * _STAB * ABE / _sd(DABE, ~fz & ~cyc2))
-        ainc_new = jnp.minimum(AINCMX, ainc_new)  # kfsw: E19
+        ainc_new = _cap_c1(ainc_new, AINCMX, sm.ainc_cap_width)
         ret_small = ainc_new < _AINC_MIN  # kfsw: A5
         # resolve the branch order of the oracle
         p_stop = stop_here                       # ISTOP or shallow: exit after the T conversion
@@ -2189,6 +2253,8 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     FBFRC = sc["FBFRC"]
     cpos = CPR > 0.0  # kfsw: D7k
     FRC2 = jnp.where(cpos, PPTFLX / _sd(CPR * AINC, cpos), 0.0)  # kfsw: D7k
+    if sm.cpr_onset_width_kgs:  # kfsw: S
+        FRC2 = FRC2 * smoothstep_quintic(CPR / sm.cpr_onset_width_kgs)  # kfsw: D7k
     RAINFB = PPTLIQ * AINC * FBFRC * FRC2
     SNOWFB = PPTICE * AINC * FBFRC * FRC2
     QLG = advect(zf, lambda fin, fout: fin + F["DETLQ"] - fout, OMG, FXM, NSTEP, DTIME)

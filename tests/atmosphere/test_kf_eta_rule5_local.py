@@ -52,6 +52,7 @@ from legoesm.atmosphere.physics.convection import _kf_eta as kfe  # noqa: E402
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig  # noqa: E402
 from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection  # noqa: E402
 from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import _lego_constants  # noqa: E402
+from legoesm.core.smooth import smooth_max_c1, smoothstep_quintic  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from tests.atmosphere.test_kain_fritsch_oracle import (  # noqa: E402
@@ -175,7 +176,11 @@ _UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_wid
                 "chmin_clip_width_k", "top_stop_umf_width_kgs",
                 # the band column is mid-band at the DEFAULT widths only (the
                 # "all" case); stop1 alone is exercised on it shifted in-test
-                "top_stop_wtw_width_m2s2"}
+                "top_stop_wtw_width_m2s2",
+                # PR 7a: no fixture column reaches these bands
+                "timec_clip_width_s", "pef_clip_width", "pefcbh_cap_width",
+                "uerder_onset_width_kgs", "ainc_cap_width", "qmix_floor_width_kgkg",
+                "closure_sup_width_kgkg", "cpr_onset_width_kgs"}
 
 
 def _moved(stored, case):
@@ -822,13 +827,112 @@ def test_survival_inflow_limit_is_the_capped_ratio_with_finite_gradients(dtype):
     a = jnp.asarray([2.0, 2.0, 2.0, 2.0, 0.0], dtype)
     wl = jnp.asarray([1.0, 0.5, 1e-20, 0.0, 0.3], dtype)
     cap = kfe._AINCMX0
-    np.testing.assert_allclose(np.asarray(kfe._survival_inflow_limit(a, wl)),
+    np.testing.assert_allclose(np.asarray(kfe._survival_inflow_limit(a, wl, cap)),
                                [2.0, 4.0, cap, cap, 0.0], rtol=1e-6)
-    g = jax.grad(lambda a, w: jnp.sum(kfe._survival_inflow_limit(a, w)), argnums=(0, 1))(a, wl)
+    g = jax.grad(lambda a, w: jnp.sum(kfe._survival_inflow_limit(a, w, cap)), argnums=(0, 1))(a, wl)
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in g)
     old = jax.grad(lambda w: jnp.sum(jnp.minimum(cap, jnp.where(w > 0, a / jnp.where(
         w > 0, w, 1.0), cap))))(wl)
     assert bool(jnp.all(jnp.isfinite(old))) == (dtype == jnp.float64)
+
+
+# --- PR 7a: closure-local clamps (forms vote 19, widths vote 20) ---------------
+
+_NO_COLUMN = "no fixture column puts {} inside its band (the width moves no recorded case)"
+
+
+def _switch_cases():
+    """(width field, hard op, smooth op at the default width, a point inside
+    its band, a point outside it, why no fixture column reaches the band or
+    None) for each closure-local switch."""
+    d = _DEFAULT
+    tmin, tmax = KainFritschConfig().timec_min_s, KainFritschConfig().timec_max_s
+    return [
+        ("timec_clip_width_s", lambda x, w: kfe._clip_c1(x, tmin, tmax, w),
+         tmax - 0.2 * d.timec_clip_width_s, tmax + d.timec_clip_width_s,
+         _NO_COLUMN.format("DX/VCONV (E12)")),
+        ("pef_clip_width", lambda x, w: kfe._clip_c1(x, kfe._PEF_MIN, kfe._PEF_MAX, w),
+         kfe._PEF_MIN + 0.2 * d.pef_clip_width, 0.5, _NO_COLUMN.format("the shear PEF (E13)")),
+        ("pefcbh_cap_width", lambda x, w: kfe._cap_c1(x, kfe._PEFCBH_MAX, w),
+         kfe._PEFCBH_MAX - 0.3 * d.pefcbh_cap_width, 0.5,
+         _NO_COLUMN.format("the cloud-base PEFCBH (E14)")),
+        ("qmix_floor_width_kgkg", lambda x, w: -kfe._cap_c1(-x, 0.0, w),
+         0.3 * d.qmix_floor_width_kgkg, 1e-3,
+         _NO_COLUMN.format("the closure mixed-layer qmix (E17)")),
+        ("dabe_floor_width_jkg", lambda x, w: smooth_max_c1(x, 100.0, w),
+         100.0 + 0.2 * d.dabe_floor_width_jkg, 500.0, None),
+        ("ainc_cap_width", lambda x, w: kfe._cap_c1(x, 2.0, w),
+         2.0 - 0.3 * d.ainc_cap_width, 1.0, _NO_COLUMN.format("the new AINC near AINCMX (E19)")),
+        ("omg_upwind_width_pas", lambda x, w: kfe._step_c(-x, w) if w else (x <= 0.0) * 1.0,
+         0.2 * d.omg_upwind_width_pas, 0.3, None),
+        ("uerder_onset_width_kgs", lambda x, w: kfe._step_c2(x - kfe._UERDER_MIN, w) if w else (
+            x > kfe._UERDER_MIN) * 1.0, kfe._UERDER_MIN + 0.2 * d.uerder_onset_width_kgs, 1.0,
+         _NO_COLUMN.format("UER - DER (E15 eligibility)")),
+        ("closure_sup_width_kgkg", lambda x, w: kfe._step_c2(x, w) if w else (x > 0.0) * 1.0,
+         0.2 * d.closure_sup_width_kgkg, 1e-4,
+         _NO_COLUMN.format("the closure mixed layer within 1e-6 kg/kg of saturation (D7j)")),
+        ("cpr_onset_width_kgs", lambda x, w: smoothstep_quintic(x / w) if w else (x > 0.0) * 1.0,
+         0.4 * d.cpr_onset_width_kgs, 1e3, _NO_COLUMN.format("CPR (D7k)")),
+    ]
+
+
+@pytest.mark.parametrize("field,op,inside,outside,unreached", _switch_cases())
+def test_closure_local_switch_is_oracle_outside_its_band_and_differentiable_inside(
+        field, op, inside, outside, unreached):
+    """RULE 5 gradient test of each closure-local smoothed expression, alone,
+    at the default width: width 0 is the oracle's operation, the smooth form is
+    exact outside its band, and check_grads passes with a non-zero derivative
+    inside it.  For the widths no fixture column exercises this direct test is
+    the gradient check; ``unreached`` (the reason) is pinned to the coverage
+    record."""
+    w = getattr(_DEFAULT, field)
+    assert (unreached is not None) == (field in _UNEXERCISED)
+    x = jnp.asarray(outside, jnp.float64)
+    assert float(op(x, w)) == float(op(x, 0.0))
+    _grad_nonzero(lambda v: op(v, w), jnp.asarray(inside, jnp.float64), 1e-3 * w)
+
+
+def test_inflow_limit_fold_is_the_oracle_min_at_zero_width_and_c1_inside():
+    """E15: the fold of C1 minima over the levels is the oracle's min(_AINCMX0,
+    min over eligible levels) and AINC = min(AINCMX, 1) at width 0, exact
+    outside the bands, and differentiable in a level's limit inside one."""
+    a = jnp.asarray([5.0, 0.6, 3.0, 0.62, 2000.0])
+    ok = jnp.asarray([True, True, False, True, True])
+    hard = jnp.minimum(kfe._AINCMX0, jnp.min(jnp.where(ok, a, kfe._AINCMX0)))
+    mx, ai = kfe._inflow_limit_c1(a, ok, 0.0)
+    assert float(mx) == float(hard) and float(ai) == float(jnp.minimum(hard, 1.0))
+    w = _DEFAULT.ainc_min_width
+    far = a.at[3].set(0.7)
+    mxs, ais = kfe._inflow_limit_c1(far, ok, w)
+    assert float(mxs) == 0.6 and float(ais) == 0.6
+    f = lambda v: kfe._inflow_limit_c1(a.at[3].set(v), ok, w)[1]  # noqa: E731
+    _grad_nonzero(f, jnp.asarray(0.603), 1e-5)
+    e = jnp.asarray([1.0, 0.3, 0.0, 1.0, 1.0])
+    g = jax.grad(lambda e: kfe._inflow_limit_c1(a, e, w)[0])(e)
+    assert bool(jnp.all(jnp.isfinite(g)))
+
+
+def test_upstream_face_weight_conserves_and_matches_the_oracle_off_band():
+    """E10: the blended upwind fluxes cancel level to level (the column sum of
+    fin - fout is unchanged) and equal the oracle's where |OMG| >= w/2."""
+    n = 8
+    kk = jnp.arange(n)
+    inc = (kk >= 1) & (kk <= 6)
+    X = jnp.linspace(300.0, 340.0, n)
+    w = _DEFAULT.omg_upwind_width_pas
+    keep = lambda fin, fout: fin - fout  # noqa: E731
+    one = jnp.ones(n)
+
+    def step(omg, w):
+        return kfe._upstream_step(X, omg, omg * 1e4, inc, 6, kk, keep, 1.0, one, w)
+
+    omg = jnp.asarray([0.0, -0.3, 0.2, -0.1, 0.4, -0.2, 0.3, 0.0])
+    np.testing.assert_allclose(np.asarray(step(omg, w)), np.asarray(step(omg, 0.0)), rtol=1e-14)
+    for o in (0.2 * w, -0.4 * w):
+        d = step(omg.at[3].set(o), w) - X
+        assert abs(float(jnp.sum(jnp.where(inc, d, 0.0)))) <= 1e-9 * float(jnp.max(jnp.abs(d)))
+    f = lambda o: jnp.sum(step(omg.at[3].set(o), w) * jnp.arange(1.0, n + 1))  # noqa: E731
+    _grad_nonzero(f, jnp.asarray(0.2 * w), 1e-7)
 
 
 def test_downdraft_mixes_over_the_source_levels_of_the_let_members(monkeypatch):

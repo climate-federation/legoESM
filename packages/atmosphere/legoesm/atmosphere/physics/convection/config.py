@@ -255,6 +255,17 @@ __param_spec__ = {
             "wrf_chmin_clip_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_top_stop_wtw_width_m2s2": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_top_stop_umf_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_omg_upwind_width_pas": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_timec_clip_width_s": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_pef_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_pefcbh_cap_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_uerder_onset_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_ainc_min_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_ainc_cap_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_qmix_floor_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_dabe_floor_width_jkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_sup_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_cpr_onset_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "cloud_depth_min": "trigger: fixed shallow/deep cloud-depth split (not sigmoid-tunable, fix via config)",
             "cloud_depth_sharpness": "numerics: sigmoid sharpness on the deep/shallow blend",
             "cloud_top_detrainment_fraction": "fixed KF-Eta cloud-top detrainment-level fraction (structural detrainment profile, not a tunable closure rate)",
@@ -1030,6 +1041,17 @@ class KainFritschConfig(NamedTuple):
     wrf_chmin_clip_width_k: float = 1.0
     wrf_top_stop_wtw_width_m2s2: float = 2.0e-4
     wrf_top_stop_umf_width_kgs: float = 2.0
+    wrf_omg_upwind_width_pas: float = 1.0e-3
+    wrf_timec_clip_width_s: float = 60.0
+    wrf_pef_clip_width: float = 0.02
+    wrf_pefcbh_cap_width: float = 0.02
+    wrf_uerder_onset_width_kgs: float = 1.0e-3
+    wrf_ainc_min_width: float = 0.01
+    wrf_ainc_cap_width: float = 0.01
+    wrf_qmix_floor_width_kgkg: float = 1.0e-7
+    wrf_dabe_floor_width_jkg: float = 1.0
+    wrf_closure_sup_width_kgkg: float = 1.0e-6
+    wrf_cpr_onset_width_kgs: float = 1.0
 
 
 class EmanuelConfig(NamedTuple):
