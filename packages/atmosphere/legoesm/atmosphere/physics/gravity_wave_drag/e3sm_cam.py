@@ -130,9 +130,21 @@ deliberate departures / version choices (canaries in
   of the spectral suite up to 3.6e-2 du/dt, 2.1e-2 dT.  Kept hard: the
   ``ubmc2mn`` floor, the static mountain-height gate and the
   defensive clamps (e.g. ``mi>=0``) that bind only for pathological inputs
-  (see below).  11 more kinks of that scan, all on the convective (Beres)
-  arms and none on the frontal-only arm at the same columns, persist with
-  both widths (PLAUSIBLE: the Beres source; follow-up issue).
+  (see below).  The 10 kinks of that scan on the convective (Beres) arms are
+  the Beres source's E3SM ``NINT``/``INT`` of traced state (MEASURED
+  2026-11-16, #2545: critical-level bin bounds, table column ``NINT(uh)``,
+  cell speed ``INT(CS)`` and Doppler shift ``NINT(CS/dc)``); since #2545 each
+  is a C2 staircase with linear neighbour blending, ``beres.index_round_width``
+  0.1 index units (vote 3-0; 0 = E3SM), the table row ``NINT(hdepth)`` too.
+  A rescan of every Beres-arm column at the default finds no kink left.
+  KNOWN DIFFERENCE (#2545, pinned per case in ``test_gw_spec_e3sm_oracle.py``):
+  on the Beres arms the max per-column du/dt gap goes 2.2e-3 -> 9.7e-3 (L36)
+  and 3.4e-3 -> 1.5e-2 (L32, convective+frontal), flat-column dT 6.1e-3 ->
+  1.6e-2; the oro+frontal+convective L36 maximum (3.6e-2) is unchanged.
+  Width 0.5 gave 0.39 and 1.0 gave 0.46 (not chosen).  STILL HARD on traced
+  state (recorded, follow-up issue): the heating-range level detection
+  (``netdt > 0`` per level), ``q0 = max`` over the range and the
+  ``hdepth >= hdepth_min_km`` launch gate.
 
 Conservation (see ``__physics_contract__`` energy note): ``conserves=["none"]``
 as the static INTERSECTION over all selectable sources (a contract must hold
