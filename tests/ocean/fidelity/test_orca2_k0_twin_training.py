@@ -31,8 +31,13 @@ class Tke(NamedTuple):
     c_eps: float = 0.7
 
 
+class Treg(NamedTuple):
+    aei0: float = 3000.0
+
+
 class Gm(NamedTuple):
-    kappa_GM: float = 1000.0
+    kappa_redi_diffusive_velocity: float = 0.018
+    treguier: Treg = Treg()
 
 
 class VM(NamedTuple):
@@ -50,10 +55,13 @@ class Cfg(NamedTuple):
 
 def test_with_params_reaches_both_subconfigs_and_leaves_the_model_alone():
     model = SimpleNamespace(config=Cfg())
-    m = twin.with_params(model, {twin.TKE: {"c_k": 0.2}, twin.GM: {"kappa_GM": 500.0}})
+    m = twin.with_params(model, {twin.TKE: {"c_k": 0.2},
+                                 twin.GM: {"kappa_redi_diffusive_velocity": 0.02},
+                                 twin.TREG: {"aei0": 2000.0}})
     assert m.config.physics.vertical_mixing.tke.c_k == 0.2
     assert m.config.physics.vertical_mixing.tke.c_eps == 0.7
-    assert m.config.gm_redi.kappa_GM == 500.0
+    assert m.config.gm_redi.kappa_redi_diffusive_velocity == 0.02
+    assert m.config.gm_redi.treguier.aei0 == 2000.0
     assert model.config == Cfg() and m is not model
     with pytest.raises(ValueError, match="no injection path"):
         twin.with_params(model, {"ocean.vm.iwm": {"x": 1.0}})
@@ -62,6 +70,8 @@ def test_with_params_reaches_both_subconfigs_and_leaves_the_model_alone():
 def test_misfit_is_zero_at_truth_and_ignores_deep_and_dry_cells():
     z = SimpleNamespace(is_active=np.ones((2, 2, 3)), t_depth_ref=np.array([10.0, 500.0, 2000.0]),
                         z_full_ref=None, h_partial=np.ones((2, 2, 3)))
+    with pytest.raises(ValueError, match="t_depth_ref"):
+        twin.misfit(SimpleNamespace(**{**vars(z), "t_depth_ref": None}), np.ones((2, 2)), 1000.0)
     z.is_active[0, 0, :] = 0.0
     loss = twin.misfit(z, np.ones((2, 2)), depth_m=1000.0)
     rng = np.random.default_rng(0)

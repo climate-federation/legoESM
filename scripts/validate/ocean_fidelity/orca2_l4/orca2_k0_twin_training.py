@@ -37,9 +37,11 @@ for _p in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/ocean",
 
 TKE = "ocean.vm.tke"
 GM = "ocean.lat.gm_redi"
+TREG = "ocean.lat.treguier"
 TKE_FIELDS = ("surface_flux_coeff", "Prandtl_tke0", "lc_coeff", "etau_frac", "alpha_tke",
               "bg_diff_scale", "c_eps", "c_k")
-GM_FIELDS = ("kappa_GM", "kappa_redi_diffusive_velocity")
+GM_FIELDS = ("kappa_redi_diffusive_velocity",)
+TREG_FIELDS = ("aei0",)
 
 
 def card_values(config) -> dict[str, float]:
@@ -47,6 +49,7 @@ def card_values(config) -> dict[str, float]:
     tke = config.physics.vertical_mixing.tke
     out = {f"{TKE}.{f}": float(getattr(tke, f)) for f in TKE_FIELDS}
     out.update({f"{GM}.{f}": float(getattr(config.gm_redi, f)) for f in GM_FIELDS})
+    out.update({f"{TREG}.{f}": float(getattr(config.gm_redi.treguier, f)) for f in TREG_FIELDS})
     return out
 
 
@@ -65,10 +68,10 @@ def perturbed(values: dict, bounds: dict, factor: float) -> dict:
 
 
 def with_params(model, overrides: dict):
-    """A shallow copy of ``model`` whose config carries the TKE / GM overrides."""
+    """A shallow copy of ``model`` whose config carries the TKE / GM / Treguier overrides."""
     from legoesm.core.param_overrides import apply_param_overrides
 
-    unknown = set(overrides) - {TKE, GM}
+    unknown = set(overrides) - {TKE, GM, TREG}
     if unknown:
         raise ValueError(f"no injection path for {sorted(unknown)}")
     cfg = model.config
@@ -76,8 +79,13 @@ def with_params(model, overrides: dict):
         vm = cfg.physics.vertical_mixing
         vm = vm._replace(tke=apply_param_overrides(vm.tke, overrides[TKE]))
         cfg = cfg._replace(physics=cfg.physics._replace(vertical_mixing=vm))
-    if GM in overrides:
-        cfg = cfg._replace(gm_redi=apply_param_overrides(cfg.gm_redi, overrides[GM]))
+    if GM in overrides or TREG in overrides:
+        gm = cfg.gm_redi
+        if GM in overrides:
+            gm = apply_param_overrides(gm, overrides[GM])
+        if TREG in overrides:
+            gm = gm._replace(treguier=apply_param_overrides(gm.treguier, overrides[TREG]))
+        cfg = cfg._replace(gm_redi=gm)
     m = copy.copy(model)
     m.config = cfg
     return m
@@ -86,8 +94,9 @@ def with_params(model, overrides: dict):
 def misfit(z_coord, area, depth_m):
     """``(state, truth) -> L`` with per-field variance normalisation from the truth."""
     wet = jnp.asarray(z_coord.is_active, dtype=jnp.float64)
-    level_depth = jnp.asarray(z_coord.t_depth_ref if z_coord.t_depth_ref is not None
-                              else jnp.abs(z_coord.z_full_ref))
+    if z_coord.t_depth_ref is None:
+        raise ValueError("misfit needs the NEMO level-centre depths (t_depth_ref)")
+    level_depth = jnp.asarray(z_coord.t_depth_ref)
     w3 = (jnp.asarray(area)[..., None] * jnp.asarray(z_coord.h_partial) * wet
           * (level_depth <= depth_m))
     w2 = jnp.asarray(area) * wet[..., 0]
@@ -154,12 +163,12 @@ def main(argv=None) -> int:
     truth_vals = card_values(model.config)
     names = sorted(truth_vals)
     params0 = build_orca2_rung10_trainable_params(
-        active_scheme_keys={TKE, GM}, tier=0, include=tuple(names),
+        active_scheme_keys={TKE, GM, TREG}, tier=0, include=tuple(names),
         init_values=truth_vals, dtype=jnp.float64)
     bounds = {c.name: (c.min_val, c.max_val) for c in params0.constraints}
     start_vals = perturbed(truth_vals, bounds, args.perturb)
     params = build_orca2_rung10_trainable_params(
-        active_scheme_keys={TKE, GM}, tier=0, include=tuple(names),
+        active_scheme_keys={TKE, GM, TREG}, tier=0, include=tuple(names),
         init_values=start_vals, dtype=jnp.float64)
     constraints = params.constraints
     log.update(truth=truth_vals, start=start_vals)
