@@ -1,6 +1,7 @@
 """Run the OpenIFS 49r1 VDF column-kernel oracle and write the fixture.
 
 usage: python make_fixture.py <columns dir> <build dir> <out.npz>
+       python make_fixture.py --main <columns dir> <main build dir> <out.npz>
 
 <columns dir> holds the tier-2 audit columns ``columns_{L32,L137,STRESS}.npz``
 (the same 24 atmosphere columns as the IFS convection and SSO oracles).  Each
@@ -17,16 +18,48 @@ Arms: N = 49r1 native constants (CONST_MODE 2); L = legoESM g, R_d, c_pd, R_v,
 L_v (CONST_MODE 1).  The fixture stores the inputs exactly as the driver read
 them (text round trip) and, per arm, every VDFDPBL/VDFHGHTN/VDFEXCU output the
 driver prints.
+
+--main runs ``oracle_main.x`` (build_main.sh: VDFMAIN itself) on the same inputs
+plus the RQM group: the SYN columns with their top RQM_NLEV levels nearly dry
+(q = RQM_Q, PQE = 0) under liquid and ice cloud, so the REPQMI low-humidity
+correction fires there.
 """
+import re
 import subprocess
 import sys
 from pathlib import Path
 
+import jax
 import numpy as np
 
-from legoesm import constants as C
+jax.config.update("jax_enable_x64", True)   # SYN saturation in fp64 whatever the env
 
-GROUPS = ("L32", "L137", "STRESS")
+from legoesm import constants as C
+from legoesm.thermo import saturation_mixing_ratio
+
+GROUPS = ("L32", "L137", "STRESS", "SYN")
+# SYN: analytic columns on the first L137 column's pressure grid (vote 3,
+# codex note: targeted inputs).  The audit columns hold no dry mixed layer
+# deeper than ~300 m (the mass-flux loop never runs) and no cloud-topped layer
+# with inversion strength 2-5 K or cloud depth 5-20 kPa, so neither the
+# stratocumulus test (REISTHSC, RDEPTHS) nor the entrainment split binds.
+# IFS's inversion strength counts q_t (vdfhghtn SLGS), so the cloud-topped
+# profiles need a dry free troposphere and a large theta jump to reach 2-5 K.
+# (name, theta_ml K, z_inv m, inversion jump K, free-troposphere dtheta/dz K/km,
+#  q_t mixed layer, q_t free troposphere)
+SYN = (("dry700", 298.0, 700.0, 6.0, 6.0, 3.0e-3, 1.0e-3),
+       ("dry1500", 300.0, 1500.0, 4.0, 5.0, 2.0e-3, 1.0e-3),
+       ("dry2500", 305.0, 2500.0, 3.0, 5.0, 1.5e-3, 0.8e-3),
+       ("sc_weak", 289.0, 900.0, 1.5, 1.0, 9.0e-3, 4.0e-3),
+       ("sc_eis_a", 289.0, 900.0, 12.0, 3.0, 9.0e-3, 1.0e-3),
+       ("sc_eis_b", 289.0, 900.0, 16.0, 3.0, 9.0e-3, 1.0e-3),
+       ("sc_eis_c", 289.0, 900.0, 22.0, 3.0, 9.0e-3, 1.0e-3),
+       ("sc_deep_a", 290.0, 1600.0, 18.0, 3.0, 1.0e-2, 1.0e-3),
+       ("sc_deep_b", 290.0, 1600.0, 26.0, 3.0, 1.0e-2, 1.0e-3))
+# SYN wind: linear shear so the updraught momentum entrainment is visible
+SYN_U, SYN_DUDZ, SYN_V, SYN_DVDZ = 3.0, 4.0e-3, -2.0, 2.0e-3
+# isothermal stratosphere: the theta profile alone reaches ~26 K at the 1 Pa top
+SYN_T_STRAT = 210.0
 # (SHF_down W m-2, LHF_down W m-2, u* m s-1, wind factor); None = the column's own flux.
 # Sets 4-5 are targeted (vote 3, codex note): a weak sensible flux between the
 # two VDFEXCU cumulus thresholds, and a weakly stable, windy column whose
@@ -49,7 +82,25 @@ ARRAYS = ("p_half", "p_full", "geo_full", "geo_half", "T", "q", "u", "v", "ql", 
           "hrsw", "qe")
 SCAL = ("kmfl", "khfl", "kqfl", "pblh", "zinv", "zcldbase", "eis", "khvfl")
 INTS = ("kinv", "kcbase", "kctop", "kpbltype", "njkt2", "njkt6")
-ROWS = ("ri", "mflx", "slguh", "qtuh", "uuh", "vuh", "cfm", "cfh", "kh", "km", "tofdc")
+ROWS = ("ri", "mflx", "slguh", "qtuh", "uuh", "vuh", "cfm", "cfh", "kh", "km", "tofdc",
+        "udif", "vdif", "dtutofd", "dtvtofd", "dtuso", "dtvso", "dtuvdf", "dtvvdf",
+        "tdif", "qdif", "slgevdf", "qtevdf", "tskh", "tskte",
+        "vom", "vol", "slge", "qte", "slgewodis")
+DIS = ("vdis", "vdisg", "tofdu", "tofdv")
+ROWS2 = ("strtu", "strtv", "strsou", "strsov", "strtofdu", "strtofdv", "disgw3d", "tenc1", "tenc2")
+# Stage-2 test inputs (vote 7 D5): 8 IFS tiles; sea = open water 0.9 + ice 0.1, land =
+# wet skin, low veg, high veg, shaded snow, bare soil; surface heat exchange per tile
+# 0.01 kg m-2 s-1 x (1 - 0.05 (tile-1)); skin 0.1 K x tile above the lowest level;
+# snow evaporation -1e-5 kg m-2 s-1 over land; ocean current (0.2, -0.1) m/s over sea;
+# SSO drag 1e-4 s-1 below 2 km with SOTE = -beta u; surface drag coefficient
+# CFM(KLEV) = rho u*^2 / max(|U_KLEV|, 0.1) (SURFEXCDRIVER is not ported); two tracers.
+FRTI_SEA = (0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+FRTI_LAND = (0.0, 0.0, 0.1, 0.4, 0.0, 0.3, 0.1, 0.1)
+CFHTI = tuple(0.01 * (1.0 - 0.05 * k) for k in range(8))
+SO_BETA, SO_ZMAX = 1.0e-4, 2000.0
+CURRENT = (0.2, -0.1)
+EVAPSNW = -1.0e-5
+CFLX, WD = (1.0e-8, -1.0e-9), (0.0, 0.01)
 
 
 def _r(x):
@@ -57,9 +108,41 @@ def _r(x):
     return np.array([float(f"{float(v):.17e}") for v in np.ravel(x)]).reshape(np.shape(x))
 
 
+def synthetic(base):
+    """SYN columns: theta/q_t profiles integrated hydrostatically on base column 0's grid."""
+    ph, pf = np.asarray(base["p_half"][0], float), np.asarray(base["p_full"][0], float)
+    K = pf.size
+    kap = C.R_d / C.c_pd
+    out = {k: [] for k in ("names", "land", "shf_up", "lhf_up", "p_half", "p_full", "geo_full",
+                           "geo_half", "T", "q", "u", "v", "lit", "dT_rad", "dq_adv", "dq_other")}
+    for name, th0, zi, dth, gam, qt0, qft in SYN:
+        z = np.zeros(K)
+        for _ in range(4):      # fixed point: profile in z, z from the hydrostatic Tv
+            th = np.where(z < zi, th0, th0 + dth + gam * 1e-3 * (z - zi))
+            qt = np.where(z < zi, qt0, qft)
+            T = np.maximum(th * (pf / C.p_ref) ** kap, SYN_T_STRAT)
+            q = np.minimum(qt, np.asarray(saturation_mixing_ratio(T, pf)))
+            tv = T * (1.0 + (C.R_v / C.R_d - 1.0) * q)
+            gh = np.zeros(K + 1)
+            for k in range(K - 1, 0, -1):
+                gh[k] = gh[k + 1] + C.R_d * tv[k] * np.log(ph[k + 1] / ph[k])
+            gh[0] = gh[1] + C.R_d * tv[0] * np.log(2.0)
+            alpha = np.r_[np.log(2.0), 1.0 - ph[1:K] / (ph[2:] - ph[1:K]) * np.log(ph[2:] / ph[1:K])]
+            gf = gh[1:] + C.R_d * tv * alpha
+            z = gf / C.g
+        for k, v in (("names", name), ("land", 0.0), ("shf_up", 100.0), ("lhf_up", 50.0),
+                     ("p_half", ph), ("p_full", pf), ("geo_full", gf), ("geo_half", gh),
+                     ("T", T), ("q", q), ("u", SYN_U + SYN_DUDZ * z), ("v", SYN_V + SYN_DVDZ * z),
+                     ("lit", qt - q), ("dT_rad", np.zeros(K)), ("dq_adv", np.zeros(K)),
+                     ("dq_other", np.zeros(K))):
+            out[k].append(v)
+    return {k: np.array(v) for k, v in out.items()}
+
+
 def inputs(d):
     ncol = d["T"].shape[0]
-    x = {k: [] for k in ("names", "land", "shf", "lhf", "ustar", "z0m", "sigflt") + ARRAYS}
+    x = {k: [] for k in ("names", "land", "shf", "lhf", "ustar", "z0m", "sigflt") + ARRAYS
+         + ("tile", "sfc2", "sobeta", "soteu", "sotev", "c1", "c2")}
     for i in range(ncol):
         for j, (shf, lhf, ust, wf) in enumerate(SURF):
             x["names"].append(f"{d['names'][i]}_sfc{j}")
@@ -77,6 +160,20 @@ def inputs(d):
                        qe=d["dq_adv"][i] + d["dq_other"][i])
             for k in ARRAYS:
                 x[k].append(_r(src[k]))
+            sea = land <= 0.5
+            T_, q_, u_, v_ = src["T"], src["q"], src["u"], src["v"]
+            K = T_.size
+            rho = src["p_half"][-1] / (C.R_d * T_[-1] * (1.0 + (C.R_v / C.R_d - 1.0) * q_[-1]))
+            beta = np.where(src["geo_full"] / C.g < SO_ZMAX, SO_BETA, 0.0)
+            x["tile"].append(_r(np.r_[FRTI_SEA if sea else FRTI_LAND, CFHTI,
+                                      T_[-1] + 0.1 * (1.0 + np.arange(8))]))
+            x["sfc2"].append(_r(np.r_[0.0 if sea else EVAPSNW, CURRENT if sea else (0.0, 0.0),
+                                      rho * ust ** 2 / max(np.hypot(u_[-1], v_[-1]), 0.1), CFLX, WD]))
+            x["sobeta"].append(_r(beta))
+            x["soteu"].append(_r(-beta * u_))
+            x["sotev"].append(_r(-beta * v_))
+            x["c1"].append(_r(1.0e-6 * (1.0 + 0.1 * np.sin(np.arange(K)))))
+            x["c2"].append(_r(0.01 * q_))
     return {k: np.array(v) for k, v in x.items()}
 
 
@@ -89,7 +186,16 @@ def oracle_text(x):
         out.append(fmt([x[k][i] for k in ("land", "shf", "lhf", "ustar", "z0m", "sigflt")]))
         for k in ARRAYS:
             out.append(fmt(x[k][i]))
+        out.append("TILE " + fmt(x["tile"][i]))
+        out.append("SFC2 " + fmt(x["sfc2"][i]))
+        for k in ("sobeta", "soteu", "sotev", "c1", "c2"):
+            out.append(fmt(x[k][i]))
     return "\n".join(out) + "\n"
+
+
+def _f(tok):
+    """Fortran ES output drops the 'E' for 3-digit exponents ('1.2-166')."""
+    return float(re.sub(r"(\d)([+-]\d{3})$", r"\1E\2", tok))
 
 
 def parse(path):
@@ -98,11 +204,17 @@ def parse(path):
     res, k = {}, 1
     for _ in range(n):
         name = lines[k].split()[1]
-        sc = [float(v) for v in lines[k + 1].split()[1:]]
+        sc = [_f(v) for v in lines[k + 1].split()[1:]]
         it = [int(v) for v in lines[k + 2].split()[1:]]
-        rows = [np.array([float(v) for v in lines[k + 3 + j].split()]) for j in range(len(ROWS))]
-        res[name] = {**dict(zip(SCAL, sc)), **dict(zip(INTS, it)), **dict(zip(ROWS, rows))}
-        k += 3 + len(ROWS)
+        row = lambda j: np.array([_f(v) for v in lines[k + j].split()])
+        rows = [row(3 + j) for j in range(len(ROWS))]
+        j = 3 + len(ROWS)
+        dis = [_f(v) for v in lines[k + j].split()[1:]]
+        rows2 = [row(j + 1 + m) for m in range(len(ROWS2))]
+        cflxt = np.array([_f(v) for v in lines[k + j + 1 + len(ROWS2)].split()[1:]])
+        res[name] = {**dict(zip(SCAL, sc)), **dict(zip(INTS, it)), **dict(zip(ROWS, rows)),
+                     **dict(zip(DIS, dis)), **dict(zip(ROWS2, rows2)), "cflxt": cflxt}
+        k += 3 + len(ROWS) + 2 + len(ROWS2)
     return res
 
 
@@ -122,20 +234,77 @@ def run(build, x, arm, tag):
     return res, r.stdout
 
 
+RQM_NLEV, RQM_Q, RQM_L, RQM_I = 10, 2.0e-9, 1.0e-6, 5.0e-7
+MAIN_SCAL = ("zinv", "pblh", "vdis", "vdisg", "tofdu", "tofdv")
+MAIN_ROWS = ("te", "qe", "le", "ie", "vom", "vol", "kh", "km", "ri", "strtu", "strtv",
+             "difts", "diftq")
+
+
+def parse_main(path):
+    lines = Path(path).read_text().splitlines()
+    n, _ = (int(v) for v in lines[0].split())
+    res, k = {}, 1
+    for _ in range(n):
+        name = lines[k].split()[1]
+        sc = [_f(v) for v in lines[k + 1].split()[1:]]
+        kp = int(lines[k + 2].split()[1])
+        rows = [np.array([_f(v) for v in lines[k + 3 + j].split()]) for j in range(len(MAIN_ROWS))]
+        res[name] = {**dict(zip(MAIN_SCAL, sc)), "kpbltype": kp, **dict(zip(MAIN_ROWS, rows))}
+        k += 3 + len(MAIN_ROWS)
+    return res
+
+
+def main_fixture(cols, build, outp):
+    build = Path(build)
+    fx = {"ptsphy": np.array(PTSPHY)}
+    for g in GROUPS + ("RQM",):
+        src = Path(cols) / f"columns_{'L137' if g in ('SYN', 'RQM') else g}.npz"
+        d = np.load(src, allow_pickle=True)
+        x = inputs(synthetic(d) if g in ("SYN", "RQM") else d)
+        if g == "RQM":
+            for k, val in (("q", RQM_Q), ("ql", RQM_L), ("qi", RQM_I), ("qe", 0.0)):
+                x[k][:, :RQM_NLEV] = _r(val)
+        for k, v in x.items():
+            fx[f"{g}_{k}"] = v
+        for arm in ARMS:
+            tag = f"main_{arm}_{g}"
+            inf, outf, nml = build / f"in_{tag}.txt", build / f"out_{tag}.txt", build / f"run_{tag}.nml"
+            inf.write_text(oracle_text(x))
+            body = ", ".join(f"{k}={v!r}" for k, v in ARMS[arm].items())
+            nml.write_text(f"&RUN {body}, PTSPHY={PTSPHY!r}, INFILE='{inf}', OUTFILE='{outf}' /\n"
+                           "&NAMSCEN /\n&NAMVDF /\n&NAMGWD /\n")
+            r = subprocess.run([str(build / "oracle_main.x"), str(nml)], capture_output=True, text=True)
+            if r.returncode != 0 or "DRIVER_DONE" not in r.stdout:
+                raise SystemExit(f"oracle_main failed {tag}: {r.stdout[-400:]} {r.stderr[-400:]}")
+            res = parse_main(outf)
+            if list(res) != list(x["names"]):
+                raise SystemExit(f"column order/names differ {tag}")
+            fx[f"{arm}_{g}_log"] = np.array(r.stdout)
+            for f in MAIN_SCAL + ("kpbltype",) + MAIN_ROWS:
+                fx[f"{arm}_{g}_{f}"] = np.array([res[nm][f] for nm in x["names"]])
+    np.savez_compressed(outp, **fx)
+    print("FIXTURE_OK", outp)
+
+
 def main(cols, build, outp):
     fx = {"ptsphy": np.array(PTSPHY)}
     for g in GROUPS:
-        x = inputs(np.load(Path(cols) / f"columns_{g}.npz", allow_pickle=True))
+        src = Path(cols) / f"columns_{'L137' if g == 'SYN' else g}.npz"
+        d = np.load(src, allow_pickle=True)
+        x = inputs(synthetic(d) if g == "SYN" else d)
         for k, v in x.items():
             fx[f"{g}_{k}"] = v
         for arm in ARMS:
             res, log = run(build, x, arm, f"{arm}_{g}")
             fx[f"{arm}_{g}_log"] = np.array(log)
-            for f in SCAL + INTS + ROWS:
+            for f in SCAL + INTS + ROWS + DIS + ROWS2 + ("cflxt",):
                 fx[f"{arm}_{g}_{f}"] = np.array([res[nm][f] for nm in x["names"]])
     np.savez_compressed(outp, **fx)
     print("FIXTURE_OK", outp)
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    if sys.argv[1] == "--main":
+        main_fixture(*sys.argv[2:5])
+    else:
+        main(*sys.argv[1:4])
