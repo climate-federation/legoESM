@@ -839,9 +839,17 @@ def land_snowfall_from_sfc_diag(sfc_diag, precip):
     slot = (len(MPAS_SFC_DIAG_BASE_KEYS)
             + MPAS_SFC_DIAG_EXTRA_KEYS.index("precip_frozen"))
     frozen = sfc_diag[slot] if len(sfc_diag) > slot else None
+    return land_snowfall_from_frozen(
+        None if frozen is None else frozen.data, sfc_diag[2] is not None, precip)
+
+
+def land_snowfall_from_frozen(frozen, precip_published: bool, precip):
+    """:func:`land_snowfall_from_sfc_diag` on the bare arrays: ``frozen`` the
+    published frozen surface flux (or None), ``precip_published`` whether the
+    total was published at all (a static flag), ``precip`` the total."""
     if frozen is not None:
-        return jnp.clip(jnp.asarray(frozen.data).reshape(-1), 0.0, precip)
-    if sfc_diag[2] is None:
+        return jnp.clip(jnp.asarray(frozen).reshape(-1), 0.0, precip)
+    if not precip_published:
         return jnp.zeros_like(precip)
     raise ValueError(
         "interactive land: the physics publishes surface precipitation but "
@@ -1203,10 +1211,20 @@ def _sfc_accum_add(sums, xs):
 
 
 @jax.jit
-def _tree_add(a, b):
-    """Leafwise ``a + b`` of two like pytrees in one compiled call (the land
-    forcing window sum: one add per leaf, bit-identical to the eager adds)."""
-    return jax.tree_util.tree_map(jnp.add, a, b)
+def _land_window_init(a2s):
+    """First sample of a land-forcing window: the sum is the sample; the
+    SW-weighted zenith sum and its weight (``sw_down + 1 W/m2``) start."""
+    w = a2s.sw_down + 1.0
+    return a2s, a2s.cos_zenith * w, w
+
+
+@jax.jit
+def _land_window_add(a2s_sum, cz_wsum, w_sum, a2s):
+    """Add one sample to a land-forcing window (leafwise sum, SW-weighted
+    zenith sum, weight sum) in one compiled call."""
+    w = a2s.sw_down + 1.0
+    return (jax.tree_util.tree_map(jnp.add, a2s_sum, a2s),
+            cz_wsum + a2s.cos_zenith * w, w_sum + w)
 
 
 class _MPASSfcFluxAccum:
@@ -14120,6 +14138,9 @@ class ModelDriver:
             # scorecard's month-3-onward window clears it.
             if _ice_skin_on:
                 from legoesm.forcing.surface_utils import advance_ice_skin
+                _advance_ice_skin_jit = jax.jit(
+                    advance_ice_skin,
+                    static_argnames=("dt_s", "h_ice_m", "melt_cap_width_K"))
                 _h_ice = float(cfg.ice_thickness_m)
                 _staged_skin = None
                 if isinstance(self._carry_aux, dict):
@@ -14172,11 +14193,31 @@ class ModelDriver:
                 # ocean_flux_on_ocean_surface is on (#1320).  The ice
                 # component is the constant T_ice or the per-cell prognostic
                 # skin READ AT CALL TIME.
-                _sst = jnp.asarray(_sst).reshape(-1)
-                _sic = jnp.asarray(_sic).reshape(-1)
-                return blend_surface_temperature(
-                    _sst, _sic,
-                    self._ice_T_skin if _ice_skin_on else _T_ice).reshape(-1)
+                return _anchors_core(_sst, _sic, _current_skin())[1]
+
+            @jax.jit
+            def _anchors_core(_sst, _sic, _skin):
+                """(T_sfc, ocean/ice T_sfc) of one SST/SIC/skin triple: the
+                blend, then the land-lapse correction, in one compiled call
+                (the per-step re-anchor was ~10 eager dispatches)."""
+                _ts_o = blend_surface_temperature(
+                    jnp.asarray(_sst).reshape(-1), jnp.asarray(_sic).reshape(-1),
+                    _skin).reshape(-1)
+                _ts = _ts_o
+                if _lapse_z is not None:
+                    # Cast the storage-dtype (possibly f32) statics to the
+                    # anchor dtype so the correction is formed at anchor
+                    # precision (mirrors the turbulence-path cast).  Where
+                    # f_land and sic overlap (elevated icy coasts) the lapse
+                    # cools the blended anchor's land fraction too --
+                    # directionally harmless (see codex F5).
+                    _ts = land_lapse_adjusted_surface_temperature(
+                        _ts, _f_land_cells.astype(_ts.dtype),
+                        _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
+                return _ts, _ts_o
+
+            def _current_skin():
+                return self._ice_T_skin if _ice_skin_on else _T_ice
 
             def _blend_T_sfc(_sst, _sic):
                 # Blend prescribed SST with the ice component (constant T_ice,
@@ -14194,26 +14235,16 @@ class ModelDriver:
                 # rather than to (nCells,nCells) — the scalar-T_ice blend
                 # tolerated (nCells,1) via a trailing reshape; the array skin
                 # must not (codex-4) -- done in _ocean_ice_T_sfc.
-                _ts = _ocean_ice_T_sfc(_sst, _sic)
-                if _lapse_z is not None:
-                    # Cast the storage-dtype (possibly f32) statics to the
-                    # anchor dtype so the correction is formed at anchor
-                    # precision (mirrors the turbulence-path cast).  Where
-                    # f_land and sic overlap (elevated icy coasts) the lapse
-                    # cools the blended anchor's land fraction too —
-                    # directionally harmless (see codex F5).
-                    _ts = land_lapse_adjusted_surface_temperature(
-                        _ts, _f_land_cells.astype(_ts.dtype),
-                        _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
-                return _ts
+                return _anchors_core(_sst, _sic, _current_skin())[0]
 
             def _write_sfc_anchors(_dst, _sst, _sic):
                 # The ONE place both surface anchors are written, so the
                 # ocean/ice anchor can never go stale against T_sfc (daily
                 # write and the per-step ice-skin re-anchor both come here).
-                _dst["T_sfc"] = _blend_T_sfc(_sst, _sic)
+                _ts, _ts_o = _anchors_core(_sst, _sic, _current_skin())
+                _dst["T_sfc"] = _ts
                 if _ocean_sfc_on:
-                    _dst["T_sfc_ocean"] = _ocean_ice_T_sfc(_sst, _sic)
+                    _dst["T_sfc_ocean"] = _ts_o
 
             # (The former ``_compute_T_sfc(day)`` wrapper — a one-line
             # ``_blend_T_sfc(*get_sst_sic(day))`` — was inlined at its single
@@ -14319,6 +14350,19 @@ class ModelDriver:
                 T_skin=getattr(self, "_ice_T_skin", None),
                 h_ice_m=float(cfg.ice_thickness_m),
                 melt_width_K=float(cfg.sea_ice_melt_ramp_width_K))
+
+        @jax.jit
+        def _sea_albedo_core(_skin, _sic, _alb_ocean, _f_land_alb, _alb_land):
+            """(ice albedo, ice/ocean blend, full surface albedo) of the
+            current skin in one compiled call (the per-step refresh was
+            ~10 eager dispatches)."""
+            _alb_ice = sea_ice_albedo(
+                _sia_scheme, _albedo_ice, T_skin=_skin,
+                h_ice_m=float(cfg.ice_thickness_m),
+                melt_width_K=float(cfg.sea_ice_melt_ramp_width_K))
+            _sea = blend_surface_property(_sic, _alb_ice, _alb_ocean)
+            return _alb_ice, _sea, blended_surface_albedo(
+                _sic, _f_land_alb, _alb_ice, _alb_ocean, _alb_land)
 
         _alb_ocean_cur = None    # open-ocean albedo of the current forcing day
         _albedo_land_static = None
@@ -15000,36 +15044,62 @@ class ModelDriver:
                 if (_sd is None or len(_sd) < 10
                         or _sd[8] is None or _sd[9] is None):
                     return None
-                sw_down = jnp.asarray(_sd[8].data).reshape(-1)
-                lw_down = jnp.asarray(_sd[9].data).reshape(-1)
-                precip = (jnp.asarray(_sd[2].data).reshape(-1)
-                          if _sd[2] is not None else jnp.zeros_like(sw_down))
-                # the atmosphere's own rain/snow partition (F29)
-                precip_snow = land_snowfall_from_sfc_diag(_sd, precip)
-                T_air = self.state.T.data[:, -1]
+                _frz_slot = _frozen_precip_slot()
+                _frozen = (_sd[_frz_slot].data
+                           if len(_sd) > _frz_slot and _sd[_frz_slot] is not None
+                           else None)
                 _qv_tr = (self.state.tracers or {}).get("q_v")
-                q_air = (_qv_tr.data[:, -1] if _qv_tr is not None
-                         else jnp.zeros_like(T_air))
-                p_s = jnp.asarray(self.state.p_s.data).reshape(-1)
-                # Column model (cell winds carried): a slice.  Voronoi edge
-                # winds: the Perot reconstruction, compiled once above.
-                u_c, v_c = (_cell_winds(self.state, self.grid, level=-1)
-                            if self.state.v is not None
-                            else _recon_cell_velocity_jit(self.state.u.data[:, -1]))
-                # Same conventions as the canonical extractor (coupler
-                # surface_exchange) and the coupled tile: the coordinate's
-                # lowest full-level pressure and the MOIST density there,
-                # rho = p_lowest / (R_d T_v) (F28: was p_s / (R_d T), ~1-2 %
-                # high).
+                if self.state.v is not None:
+                    u_c, v_c = _cell_winds(self.state, self.grid, level=-1)
+                    u_edge_last = None
+                else:
+                    u_c = v_c = None
+                    u_edge_last = self.state.u.data[:, -1]
+                return _marshal_core(
+                    _sd[8].data, _sd[9].data,
+                    None if _sd[2] is None else _sd[2].data, _frozen,
+                    self.state.T.data[:, -1],
+                    None if _qv_tr is None else _qv_tr.data[:, -1],
+                    self.state.p_s.data, u_edge_last, u_c, v_c,
+                    jnp.asarray(_doy, dtype=jnp.float64),
+                    jnp.asarray(_sod, dtype=jnp.float64),
+                    land_co2_ppmv(_forcing_daily.get("ghg_vmr"), cfg.co2_ppmv),
+                    precip_published=_sd[2] is not None)
+
+            def _frozen_precip_slot():
+                from legoesm.core.state import MPAS_SFC_DIAG_BASE_KEYS, MPAS_SFC_DIAG_EXTRA_KEYS
+                return (len(MPAS_SFC_DIAG_BASE_KEYS)
+                        + MPAS_SFC_DIAG_EXTRA_KEYS.index("precip_frozen"))
+
+            from functools import partial as _partial
+
+            from legoesm.core.coupling_fields import land_co2_ppmv, lowest_level_height
+            from legoesm.thermo import moist_air_density
+
+            @_partial(jax.jit, static_argnames=("precip_published",))
+            def _marshal_core(sw_down, lw_down, precip, frozen, t_air, q_air,
+                              p_s, u_edge_last, u_c, v_c, doy, sod, co2,
+                              *, precip_published):
+                """The AtmToSurface of one step from bare arrays, one compiled
+                call (eagerly this was ~30 device dispatches per step)."""
+                T_air = t_air
+                sw_down = jnp.asarray(sw_down).reshape(-1)
+                lw_down = jnp.asarray(lw_down).reshape(-1)
+                precip = (jnp.asarray(precip).reshape(-1)
+                          if precip is not None else jnp.zeros_like(sw_down))
+                precip_snow = land_snowfall_from_frozen(
+                    frozen, precip_published, precip)
+                if q_air is None:
+                    q_air = jnp.zeros_like(T_air)
+                p_s = jnp.asarray(p_s).reshape(-1)
+                if u_edge_last is not None:
+                    u_c, v_c = _recon_cell_velocity_jit(u_edge_last)
                 # The zenith is the REAL per-cell sun (same doy/seconds the
                 # radiation uses this step): it was a fixed 0.5 when only the
                 # bulk scheme ran here (which never reads it), but the two-leaf
                 # canopy now runs on this lane and its radiation partitioning
                 # is zenith-driven -- a fixed sun would give the canopy neither
                 # a diurnal cycle nor night.
-                from legoesm.core.coupling_fields import (
-                    land_co2_ppmv, lowest_level_height)
-                from legoesm.thermo import moist_air_density
                 _p_full = self.sigma.pressure_at_full(p_s)
                 p_lowest = _p_full[..., -1]
                 z_lowest = lowest_level_height(
@@ -15043,12 +15113,9 @@ class ModelDriver:
                     u_lowest=u_c, v_lowest=v_c,
                     p_lowest=p_lowest, p_surface=p_s,
                     rho_lowest=moist_air_density(T_air, p_lowest, q_air),
-                    cos_zenith=_cos_zen_fn(
-                        jnp.asarray(_doy, dtype=jnp.float64),
-                        jnp.asarray(_sod, dtype=jnp.float64) / 3600.0),
+                    cos_zenith=_cos_zen_fn(doy, sod / 3600.0),
                     # Radiation's CO2 (daily GHG file, else cfg.co2_ppmv).
-                    co2_ppmv=jnp.full_like(T_air, land_co2_ppmv(
-                        _forcing_daily.get("ghg_vmr"), cfg.co2_ppmv)),
+                    co2_ppmv=jnp.full_like(T_air, co2),
                     has_radiation=jnp.ones_like(T_air),
                     has_precipitation=jnp.ones_like(T_air),
                 )
@@ -15889,6 +15956,10 @@ class ModelDriver:
                 state = state._replace(tracers=_new_trc_sm)
             return state
 
+        # One compiled call per step (sponge multiply + q_v smoothing) instead
+        # of one eager dispatch per operation.
+        _poststep_state = jax.jit(_poststep_state)
+
         # Profiling windows, off unless LEGOESM_TRACE_STEPS="first:count:dir"
         # (loop-step indices; see ``trace_windows`` for LEGOESM_TRACE_WINDOWS /
         # LEGOESM_TRACE_RANKS).  Blocks on the state at each window edge so a
@@ -16480,7 +16551,7 @@ class ModelDriver:
                 _lwn = (_sd[1].data if (_sd is not None and len(_sd) > 1
                                         and _sd[1] is not None) else None)
                 if _swn is not None and _lwn is not None:
-                    self._ice_T_skin = advance_ice_skin(
+                    self._ice_T_skin = _advance_ice_skin_jit(
                         self._ice_T_skin, _swn, _lwn,
                         (_sd[6].data if len(_sd) > 6 and _sd[6] is not None
                          else None),
@@ -16504,12 +16575,10 @@ class ModelDriver:
                 # albedo.
                 if (_ice_alb_melt and _sfc_albedo_on
                         and _alb_ocean_cur is not None):
-                    _alb_ice_day = _ice_albedo_now()
-                    _sea_albedo_day = blend_surface_property(
-                        _ice_sic_cur, _alb_ice_day, _alb_ocean_cur)
-                    _forcing_daily["sfc_albedo"] = blended_surface_albedo(
-                        _ice_sic_cur, _alb_f_land, _alb_ice_day,
-                        _alb_ocean_cur, _albedo_land_static)
+                    (_alb_ice_day, _sea_albedo_day,
+                     _forcing_daily["sfc_albedo"]) = _sea_albedo_core(
+                        getattr(self, "_ice_T_skin", None), _ice_sic_cur,
+                        _alb_ocean_cur, _alb_f_land, _albedo_land_static)
             # Interactive multilayer land step (MPAS port): advance the soil/
             # snow columns with the surface fluxes this step just exported
             # (sw/lw down refresh on radiation steps; precip every step) and
@@ -16532,17 +16601,13 @@ class ModelDriver:
                     # plain mean over an interval that straddles the
                     # terminator hands it a small-positive sun with full
                     # daytime SW (GLM review, 2026-08-26).
-                    _land_a2s_sum = (
-                        _a2s if _land_a2s_sum is None
-                        else _tree_add(_land_a2s_sum, _a2s))
-                    _land_cz_w = _a2s.sw_down + 1.0
                     if _land_a2s_n == 0:
-                        _land_cz_wsum = _a2s.cos_zenith * _land_cz_w
-                        _land_w_sum = _land_cz_w
+                        (_land_a2s_sum, _land_cz_wsum,
+                         _land_w_sum) = _land_window_init(_a2s)
                     else:
-                        _land_cz_wsum = (
-                            _land_cz_wsum + _a2s.cos_zenith * _land_cz_w)
-                        _land_w_sum = _land_w_sum + _land_cz_w
+                        (_land_a2s_sum, _land_cz_wsum,
+                         _land_w_sum) = _land_window_add(
+                            _land_a2s_sum, _land_cz_wsum, _land_w_sum, _a2s)
                     _land_a2s_n += 1
                 # A full interval fires the cadence step; a SINGLE sample
                 # fires the bootstrap step when no held outputs exist yet

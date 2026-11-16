@@ -59,6 +59,11 @@ if (( ARM_ID >= 2 && N_GPUS != 1 )) || (( ARM_ID < 2 && N_GPUS != 4 )); then
 fi
 ARM_EXTRA="${ARMS[${ARM_ID}]}"
 NAME="${ARM_NAMES[${ARM_ID}]}"
+# EXTRA_FLAGS="..." (with ARM_NAME) replaces the arm's flags: ad-hoc ladders
+# (e.g. the g-point batch-size ladder) without editing the arm table.
+if [[ -n "${EXTRA_FLAGS:-}" ]]; then
+  ARM_EXTRA="${EXTRA_FLAGS}"; NAME="${ARM_NAME:?EXTRA_FLAGS needs ARM_NAME}"
+fi
 OUTDIR="${ROOT}/${NAME}_${SLURM_JOB_ID:-local}"
 mkdir -p "${OUTDIR}"
 source "${REPO}/config/amip/amip_production.sh"
