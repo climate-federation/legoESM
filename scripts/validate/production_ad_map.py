@@ -714,7 +714,7 @@ def build_parser():
     ap.add_argument("--stage", required=True,
                     choices=("components", "physics", "params", "dycore",
                              "step", "land", "eager", "eqns", "timing",
-                             "memory", "loops", "blockgap"))
+                             "memory", "loops"))
     ap.add_argument("--module", default="microphysics",
                     help="eqns stage: the module whose calls are traced")
     ap.add_argument("--calls", default="1,2,3",
@@ -771,10 +771,6 @@ def build_parser():
     ap.add_argument("--batch", type=int, default=1,
                     help="timing stage: B windows (one cadence period "
                          "apart) in one jax.vmap call; needs --schedule")
-    ap.add_argument("--column-block", type=int, default=0,
-                    help="rebuild the physics variants in column blocks of "
-                         "this many columns (mpas_diff_step.with_column_"
-                         "blocks); 0 = the exported physics")
     ap.add_argument("--repeats", type=int, default=3,
                     help="timing stage: steady-state calls timed per window")
     ap.add_argument("--stash-modules", action="store_true",
@@ -813,12 +809,7 @@ def main(argv=None):
         install_spies(rec)
     t0 = time.time()
     drv = build_driver(rest, a.resolution, a.n_steps)
-    exp = exp_native = drv.export_mpas_step()
-    if a.column_block:
-        from legoesm.driver.mpas_diff_step import with_column_blocks
-        exp = with_column_blocks(exp_native, a.column_block)
-        print(f"COLUMN_BLOCK {a.column_block}: physics variants rebuilt in "
-              "column blocks", flush=True)
+    exp = drv.export_mpas_step()
     print(f"built+exported in {time.time() - t0:.1f} s; ncol="
           f"{exp['state'].T.data.shape}, physics every "
           f"{exp['phys_update_steps']} steps, radiation every "
@@ -951,30 +942,6 @@ def main(argv=None):
                                 target_mass=tm)[0]
             return _proj_loss(s)
         loop_census(jax.grad(step_loss), x0)
-    elif a.stage == "blockgap":
-        # forward of the native physics vs the column-blocked one (the column
-        # view projects the wind tendency once): the KNOWN DIFFERENCE
-        from legoesm.driver.mpas_diff_step import mpas_segment
-        if not a.column_block:
-            raise SystemExit("--stage blockgap needs --column-block")
-        outs = [jax.jit(lambda s, p, _e=e: mpas_segment(
-            _e, s, p, a.n_steps, step0=a.at_step, schedule="uniform"))(
-                state0, ps0)[0] for e in (exp_native, exp)]
-        nat, blk = outs
-        for k in ("u", "T", "p_s"):
-            r, b = getattr(nat, k).data, getattr(blk, k).data
-            print("BLOCKGAP " + json.dumps(dict(
-                field=k, n_steps=a.n_steps, block=a.column_block,
-                max_abs=float(jnp.max(jnp.abs(b - r))),
-                rms=float(jnp.sqrt(jnp.mean((b - r) ** 2))),
-                scale=float(jnp.max(jnp.abs(r))))), flush=True)
-        for k in nat.tracers:
-            r, b = nat.tracers[k].data, blk.tracers[k].data
-            print("BLOCKGAP " + json.dumps(dict(
-                field=k, n_steps=a.n_steps, block=a.column_block,
-                max_abs=float(jnp.max(jnp.abs(b - r))),
-                rms=float(jnp.sqrt(jnp.mean((b - r) ** 2))),
-                scale=float(jnp.max(jnp.abs(r))))), flush=True)
     elif a.stage == "memory":
         # Compile-only buffer accounting of each piece of one production
         # step, then the scheduled segment over --n-steps (forward), so the

@@ -32,7 +32,6 @@ from legoesm.driver.mpas_diff_step import (  # noqa: E402
     mpas_segment,
     pick_physics_fn,
     window_clocks,
-    with_column_blocks,
 )
 
 DT, N = 600.0, 4
@@ -476,74 +475,3 @@ def test_segment_refuses_a_malformed_clock(runs):
     with pytest.raises(ValueError, match="leading axis"):
         mpas_segment(exp, s0, ps0, 3, forcing=forcing, schedule="uniform",
                      clock={"day_of_year": c["day_of_year"]})
-
-
-# 162 columns: one block of all of them, and blocks of 50 (4 blocks, the last
-# padded by 38 repeats of the final column).
-BLOCKS = (162, 50)
-
-
-@pytest.mark.parametrize("block", BLOCKS)
-def test_column_blocked_segment_matches_native(runs, block):
-    """The physics in column blocks (each rematerialised) reproduces the
-    native call: forward over a window crossing every variant, and the
-    gradient.  This fixture has ONE wind-tendency module (tke turbulence,
-    plain projection) and no macmic sub-steps, so the single-projection
-    difference of the column view is absent here; one block of every column
-    is bitwise (measured), the padded blocks differ at XLA fusion roundoff."""
-    _, exp = runs
-    eb = with_column_blocks(exp, block)
-    s0, ps0 = exp["state"], exp["phys_state"]
-    n = N_SCHED
-
-    def run(e):
-        return jax.jit(lambda s, p: mpas_segment(e, s, p, n,
-                                                 schedule="uniform"))(s0, ps0)
-    (ref, pref), (out, pout) = run(exp), run(eb)
-    for a, b, k in zip(_fields(ref) + [pref.tke], _fields(out) + [pout.tke],
-                       ("u", "T", "p_s", "q_v", "tke carry")):
-        a, b = np.asarray(a), np.asarray(b)
-        np.testing.assert_allclose(b, a, rtol=0.0,
-                                   atol=FWD_TOL * np.abs(a).max(), err_msg=k)
-    t0 = s0.T.data
-    g_ref = jax.jit(jax.grad(segment_loss(exp, n_steps=n,
-                                          schedule="uniform")))(t0)
-    g = jax.jit(jax.grad(segment_loss(eb, n_steps=n, schedule="uniform")))(t0)
-    scale = float(jnp.abs(g_ref).max())
-    assert scale > 0.0 and bool(jnp.all(jnp.isfinite(g)))
-    np.testing.assert_allclose(np.asarray(g), np.asarray(g_ref), rtol=0.0,
-                               atol=GRAD_TOL * scale)
-
-
-def test_column_blocked_gradient_stores_block_inputs_only(runs):
-    """Reverse mode remats each block: the block loop stacks the blocks'
-    inputs, not the physics residuals.  Measured on this fixture (4 blocks of
-    50): 0.53 MiB stacked with the remat, 214.7 MiB without; the bound sits
-    between."""
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]
-                           / "scripts" / "validate"))
-    import production_ad_map as pam
-    _, exp = runs
-    eb = with_column_blocks(exp, 50)
-    s0, ps0, model = exp["state"], exp["phys_state"], exp["model"]
-
-    def loss(T):
-        out = eb["physics_fn"](s0._replace(T=s0.T.replace(data=T)), model.mesh,
-                               model.sigma_coord, phys_state=ps0,
-                               forcing=exp["forcing"])
-        return sum(jnp.sum(x) for x in jax.tree_util.tree_leaves(out[0]))
-    rows = pam.loop_census(jax.grad(loss), s0.T.data, top=0)
-    blk = [r for r in rows if r["length"] == 4 and "combined.py" in r["src"]]
-    assert blk
-    assert max(r["stacked_mib"] for r in blk) <= 5.0, blk
-
-
-def test_column_blocks_refuse_other_models_and_negative_sizes():
-    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
-    with pytest.raises(ValueError, match="no block wrapper"):
-        make_physics(PhysicsConfig(), model_type="hydrostatic",
-                     column_block_size=64)
-    with pytest.raises(ValueError, match=">= 0"):
-        make_physics(PhysicsConfig(), model_type="mpas", column_block_size=-1)
