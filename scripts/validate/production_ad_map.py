@@ -775,9 +775,6 @@ def build_parser():
                     help="rebuild the physics variants in column blocks of "
                          "this many columns (mpas_diff_step.with_column_"
                          "blocks); 0 = the exported physics")
-    ap.add_argument("--zero-winds", action="store_true",
-                    help="blockgap stage: start both runs from zero winds "
-                         "(diagnostic: isolates the wind handling)")
     ap.add_argument("--repeats", type=int, default=3,
                     help="timing stage: steady-state calls timed per window")
     ap.add_argument("--stash-modules", action="store_true",
@@ -960,21 +957,14 @@ def main(argv=None):
         from legoesm.driver.mpas_diff_step import mpas_segment
         if not a.column_block:
             raise SystemExit("--stage blockgap needs --column-block")
-        s_in = state0
-        if a.zero_winds:
-            # diagnostic: no wind to round-trip, so a remaining gap is not
-            # the wind handling of the column view
-            s_in = state0._replace(u=state0.u.replace(
-                data=jnp.zeros_like(state0.u.data)))
         outs = [jax.jit(lambda s, p, _e=e: mpas_segment(
             _e, s, p, a.n_steps, step0=a.at_step, schedule="uniform"))(
-                s_in, ps0)[0] for e in (exp_native, exp)]
+                state0, ps0)[0] for e in (exp_native, exp)]
         nat, blk = outs
         for k in ("u", "T", "p_s"):
             r, b = getattr(nat, k).data, getattr(blk, k).data
             print("BLOCKGAP " + json.dumps(dict(
                 field=k, n_steps=a.n_steps, block=a.column_block,
-                zero_winds=a.zero_winds,
                 max_abs=float(jnp.max(jnp.abs(b - r))),
                 rms=float(jnp.sqrt(jnp.mean((b - r) ** 2))),
                 scale=float(jnp.max(jnp.abs(r))))), flush=True)
