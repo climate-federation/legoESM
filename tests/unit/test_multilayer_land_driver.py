@@ -1458,34 +1458,34 @@ def test_cold_start_seed_above_floor_is_bitwise_unchanged(monkeypatch, tmp_path)
             np.asarray(getattr(off._land_ml_state, name)), err_msg=name)
 
 
-def test_land_ic_file_start_is_bitwise_unchanged_by_the_floor_lift(
-        monkeypatch, tmp_path):
-    """A run that loads a land start file never sees the cold-start lift:
-    file soil water below the dry floor arrives as written, and the state is
-    bitwise the same with the lift disabled."""
+def _land_ic_at(theta, monkeypatch, tmp_path):
+    """A same-hydraulics land start file with uniform soil water ``theta``."""
     from legoesm.land.restart import save_land_restart
-    from legoesm.land.richards import dry_floor
 
     _patch_land_loaders(monkeypatch)
     src = ModelDriver(_dry_seed_cfg(), output_dir=tmp_path / "src")
     src.setup()
-    floor = np.asarray(dry_floor(src.physics.land_ml_cfg.hydraulics)[1])
-    below = jnp.full_like(src._land_ml_state.theta_soil, 0.0505)
-    assert float(np.max(0.0505 - floor)) < 0.0
     spun = src._land_ml_state._replace(
-        theta_soil=below,
+        theta_soil=jnp.full_like(src._land_ml_state.theta_soil, theta),
         T_soil=jnp.asarray(np.asarray(src._land_ml_state.T_soil) + 3.0))
-    ic = tmp_path / "land_ic.npz"
+    ic = tmp_path / f"land_ic_{theta}.npz"
     save_land_restart(ic, spun, land_mode="multilayer",
                       t_end_s=365 * 86400.0, n_steps_completed=1, metadata={},
                       soil_grid=src.physics.land_ml_cfg.soil_grid,
                       soil_hydraulics=_run_hydraulics_stamp(src),
                       hydraulics=src.physics.land_ml_cfg.hydraulics)
-    cfg = _dry_seed_cfg()._replace(land_ic_path=str(ic))
+    return _dry_seed_cfg()._replace(land_ic_path=str(ic))
+
+
+def test_land_ic_file_start_is_bitwise_unchanged_by_the_floor_lift(
+        monkeypatch, tmp_path):
+    """A start file at or above the dry floor loads as written, bitwise the
+    same with the cold-start lift disabled."""
+    cfg = _land_ic_at(0.06, monkeypatch, tmp_path)   # floor here is 0.0512
     on = ModelDriver(cfg, output_dir=tmp_path / "on")
     on.setup()
     np.testing.assert_allclose(np.asarray(on._land_ml_state.theta_soil),
-                               0.0505, rtol=1e-6)
+                               0.06, rtol=1e-6)
     _floor_off(monkeypatch)
     off = ModelDriver(cfg, output_dir=tmp_path / "off")
     off.setup()
@@ -1493,3 +1493,49 @@ def test_land_ic_file_start_is_bitwise_unchanged_by_the_floor_lift(
         np.testing.assert_array_equal(
             np.asarray(getattr(on._land_ml_state, name)),
             np.asarray(getattr(off._land_ml_state, name)), err_msg=name)
+
+
+def test_land_ic_file_below_the_dry_floor_is_refused(monkeypatch, tmp_path):
+    """A same-hydraulics start file below the floor would have the first
+    solve create the difference; setup refuses it, naming the amount."""
+    cfg = _land_ic_at(0.0505, monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="below this run's Richards dry floor"):
+        ModelDriver(cfg, output_dir=tmp_path / "dst").setup()
+
+
+def test_every_land_forcing_field_is_classed_extensive_or_intensive():
+    """A new AtmToSurface field must be classed: an amount the land books
+    over its step (scaled at the bootstrap) or a state it reads as is."""
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.driver.model_driver import (
+        LAND_EXTENSIVE_FORCING, LAND_INTENSIVE_FORCING)
+    ext, inten = set(LAND_EXTENSIVE_FORCING), set(LAND_INTENSIVE_FORCING)
+    assert not ext & inten
+    assert ext | inten == set(AtmToSurface._fields)
+
+
+def test_bootstrap_then_regular_call_books_each_sample_once():
+    """Energy and water booking across a start: the bootstrap call (one
+    sample, advances K*DT) plus the next regular call (samples 2..K+1, K*DT)
+    book exactly the sum of the samples' amounts x DT for rain, snow and
+    downward SW/LW."""
+    import jax
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.driver.model_driver import land_bootstrap_forcing
+    K, DT = 3, 300.0
+    rng = np.random.default_rng(0)
+
+    def sample():
+        return AtmToSurface(**{f: jnp.asarray(rng.uniform(0.0, 400.0, 4))
+                               for f in AtmToSurface._fields})
+    s = [sample() for _ in range(K + 1)]
+    boot = land_bootstrap_forcing(s[0], 1, K)
+    reg = jax.tree_util.tree_map(lambda *x: sum(x) / K, *s[1:])
+    # named here, not read from the module, so dropping one there fails here
+    for f in ("sw_down", "lw_down", "precip_total", "precip_snow"):
+        booked = (np.asarray(getattr(boot, f))
+                  + np.asarray(getattr(reg, f))) * K * DT
+        fell = sum(np.asarray(getattr(x, f)) for x in s) * DT
+        np.testing.assert_allclose(booked, fell, rtol=1e-12, err_msg=f)
+    np.testing.assert_array_equal(np.asarray(boot.T_lowest),
+                                  np.asarray(s[0].T_lowest))

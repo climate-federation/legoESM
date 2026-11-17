@@ -1645,6 +1645,24 @@ def _sfc_flux_lag_slots() -> tuple[int, int]:
 # every restart dropped the pending samples (precipitation and radiation the
 # land never received) and re-ran the one-step bootstrap.
 _LAND_WIN_PREFIXES = ("land_win_", "land_held_", "cpl_win_")
+
+# AtmToSurface fields a land call books as an amount over its step (mean rate
+# x DT_LAND); every other field is a state or flag the call reads as is.
+LAND_EXTENSIVE_FORCING = ("sw_down", "lw_down", "precip_total", "precip_snow")
+LAND_INTENSIVE_FORCING = ("T_lowest", "q_lowest", "u_lowest", "v_lowest",
+                          "p_lowest", "p_surface", "rho_lowest", "cos_zenith",
+                          "co2_ppmv", "has_radiation", "has_precipitation",
+                          "z_lowest")
+
+
+def land_bootstrap_forcing(a2s, n_samples, k):
+    """A bootstrap land call's forcing: it advances DT_LAND = k host steps on
+    ``n_samples`` (< k) samples, so the amounts it books are scaled by
+    n_samples / k and each sample is booked once (the next call books the
+    later ones)."""
+    f = n_samples / k
+    return a2s._replace(**{name: getattr(a2s, name) * f
+                           for name in LAND_EXTENSIVE_FORCING})
 # Per-run scalars among those keys (every other key is a per-cell field).
 _WIN_SCALAR_KEYS = ("land_win_n", "cpl_win_n", "cpl_win_k")
 # Coupling window (P5b): per-step sums of the fluxes the coupler consumes as
@@ -5275,6 +5293,31 @@ class ModelDriver:
                     make_soil_grid(cfg.soil_grid).dz,
                     land_mask=_f_land_ic > 0.0, file_column_sig=_sig_ic,
                     path=_land_ic_path)
+                # Soil water below the Richards dry floor would be lifted for free
+                # on the first solve (water created).  The conversion above lifts
+                # files on other hydraulics; one on this run's hydraulics must
+                # already be at or above the floor.  1e-12 absorbs fp64 roundoff
+                # of the floor recomputed at run time.
+                _th_ic = np.asarray(_merged.theta_soil, dtype=np.float64)
+                _fl_ic = np.asarray(dry_floor(cfg.hydraulics)[1], dtype=np.float64)
+                _gap_ic = np.where((_f_land_ic > 0.0)[:, None],
+                                   np.broadcast_to(_fl_ic, _th_ic.shape) - _th_ic,
+                                   0.0)
+                _bad_ic = ((_f_land_ic > 0.0)[:, None]
+                           & ~(_th_ic >= np.broadcast_to(_fl_ic, _th_ic.shape)
+                               - 1.0e-12))
+                if np.any(_bad_ic):
+                    _dz_ic = np.asarray(make_soil_grid(cfg.soil_grid).dz)
+                    _kg_ic = np.sum(np.where(_bad_ic, _gap_ic, 0.0) * _dz_ic,
+                                    axis=-1) * constants.rho_water
+                    raise ValueError(
+                        f"land IC {_land_ic_path}: {int(_bad_ic.sum())} soil "
+                        f"layers in {int(np.any(_bad_ic, axis=-1).sum())} land "
+                        "columns are below this run's Richards dry floor (max "
+                        f"{float(_gap_ic.max()):.3g} m3/m3, {float(_kg_ic.max()):.3g}"
+                        " kg/m2 in one column); the first solve would create that "
+                        "water.  Rebuild the file lifted to the floor "
+                        "(regrid_land_ic --lift-only).")
             except Exception:
                 # The conversion is per column, so its refusals are rank-local
                 # while the other ranks walk on into the next collective.  Take
@@ -14833,11 +14876,15 @@ class ModelDriver:
               return _land_step_none
 
             _land_step_fn = _make_land_step(DT_LAND)
-            # Bootstrap variant: one host step's forcing, tile advanced by
-            # DT — used only for the first call after a (re)start so the
-            # surface blend never runs land-free for a whole interval.
-            _land_step_boot_fn = (
-                _land_step_fn if _LAND_K == 1 else _make_land_step(DT))
+            # Bootstrap call (first call after a (re)start with no held
+            # outputs, so the surface blend never runs land-free): one host
+            # step's forcing, tile advanced DT_LAND like every call, because
+            # its evaporation is debited AHEAD for the K steps the atmosphere
+            # then holds it.  Its precipitation fell for one step only, so the
+            # call site scales that sample's rain and snow by 1/K.  A DT boot
+            # step debited one step and was held K: (K-1)*DT*E created.
+            # Its downward radiation is scaled the same way (energy).
+            _land_step_boot_fn = _land_step_fn
             if _land_split is not None:
                 from jax.experimental import multihost_utils as _mhu
                 _proc = jax.process_index()
@@ -16489,9 +16536,17 @@ class ModelDriver:
                             lambda s: s / _land_a2s_n, _land_a2s_sum))
                     _a2s_mean = _a2s_mean._replace(
                         cos_zenith=_land_cz_wsum / _land_w_sum)
+                    if _land_a2s_n < _LAND_K:
+                        # bootstrap: the samples' rain, snow and downward
+                        # radiation spread over DT_LAND, so each sample is
+                        # booked once (the next call books the later ones)
+                        _a2s_mean = land_bootstrap_forcing(
+                            _a2s_mean, _land_a2s_n, _LAND_K)
                     _land_fn = (_land_step_fn if _land_a2s_n >= _LAND_K
                                 else _land_step_boot_fn)
-                    _land_call_n = _land_a2s_n
+                    # every call advances the tile DT_LAND, so its runoff
+                    # rate spans _LAND_K host steps
+                    _land_call_n = _LAND_K
                     _land_a2s_sum = None
                     _land_a2s_n = 0
                     _pt0 = time.perf_counter() if _PHASE_TIMERS else 0.0
