@@ -325,6 +325,8 @@ def test_level_swap_of_the_crit_bound_is_smooth_at_default():
 @pytest.mark.parametrize("field,bad", [("index_round_width", -0.1), ("index_round_width", 1.5),
                                        ("index_round_width", 1e-50),
                                        ("crit_minmax_sharpness", 0.0), ("crit_minmax_sharpness", 1e-50),
+                                       ("crit_minmax_sharpness", float("-inf")),
+                                       ("crit_minmax_sharpness", True),
                                        ("crit_minmax_sharpness", 1e40)])
 def test_beres_smoothing_fields_validated(field, bad):
     """#2545: 0/inf (E3SM) or an fp32-safe width/sharpness; anything else raises."""

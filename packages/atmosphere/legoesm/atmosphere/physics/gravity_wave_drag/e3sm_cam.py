@@ -849,6 +849,8 @@ def gw_beres_src(
 
     # Speeds for critical-level filtering (min/max projected wind in range).
     ks = beres.crit_minmax_sharpness
+    if isinstance(ks, bool) or not isinstance(ks, (int, float)) or not ks > 0.0:
+        raise ValueError(f"crit_minmax_sharpness must be > 0 (inf = E3SM); got {ks!r}.")
     if math.isinf(ks):
         umin = jnp.where(
             in_range, ubm, jnp.asarray(pgwv * dc, dtype)
@@ -865,8 +867,6 @@ def gw_beres_src(
         # heating-range levels plus E3SM's sentinel +-pgwv*dc (the value of
         # an empty range and of the masked levels), C-infinity in the winds;
         # overestimates |extremum| by <= ln(n)/ks.  inf = E3SM's min/max.
-        if not ks > 0.0:
-            raise ValueError(f"crit_minmax_sharpness must be > 0 (inf = E3SM); got {ks!r}.")
         # 1/ks is the soft extremum's width [m/s]: the same fp32-safe range
         # as every RULE 5 width (codex review 2: 1e-50 / 1e40 gave NaN).
         validate_smoothing_width("crit_minmax_sharpness (as 1/sharpness)", 1.0 / ks)
