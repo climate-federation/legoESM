@@ -80,6 +80,8 @@ def test_state_roundtrip_helpers():
     (["--stage", "step"], "none", None, "recompute"),
     (["--stage", "step", "--schedule", "binomial", "--checkpoints", "12",
       "--storage", "host"], "binomial", 12, "host"),
+    (["--stage", "timing", "--schedule", "two_level", "--checkpoints", "16",
+      "--storage", "host"], "two_level", 16, "host"),
 ])
 def test_parser_round_trips_the_schedule_flags(argv, schedule, checkpoints,
                                                storage):

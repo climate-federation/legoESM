@@ -743,7 +743,8 @@ def build_parser():
                     help="params stage: AD vs FD per knob instead of one direction")
     ap.add_argument("--only", default="",
                     help="components stage: comma list of modules to check")
-    ap.add_argument("--schedule", choices=("none", "uniform", "binomial"),
+    ap.add_argument("--schedule",
+                    choices=("none", "uniform", "binomial", "two_level"),
                     default="none",
                     help="step stage: mpas_segment loop form (none = the "
                          "unrolled loop with per-step remat; uniform / binomial "

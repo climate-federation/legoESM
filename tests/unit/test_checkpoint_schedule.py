@@ -134,3 +134,42 @@ def test_unknown_schedule_raises():
 def test_unknown_storage_raises():
     with pytest.raises(ValueError, match="unknown storage"):
         checkpointed_loop(lambda c: c, jnp.zeros(3), 4, storage="bogus")
+
+
+@pytest.mark.parametrize("n,k", [(1, None), (7, 3), (32, None), (32, 5), (25, 25)])
+def test_two_level_matches_the_plain_gradient(n, k):
+    """Segments of ceil(n/k) steps plus a tail when they do not divide n."""
+    A, b, x0 = _problem(seed=11)
+    g_none = jax.grad(_loss)(x0, A, b, n, "none")
+    g_two = jax.jit(jax.grad(_loss, argnums=0), static_argnums=(3, 4))(
+        x0, A, b, n, "two_level") if k is None else jax.grad(_loss)(
+        x0, A, b, n, "two_level", checkpoints=k)
+    assert jnp.allclose(g_none, g_two, rtol=1e-10, atol=1e-12)
+
+
+def test_two_level_stores_segment_states_not_every_step():
+    """The outer loop stacks one state per segment (n/k), not one per step:
+    with 64 steps in 8 segments the largest stacked residual is 8 states."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                           / "scripts" / "validate"))
+    import production_ad_map as pam
+    A, b, x0 = _problem(d=16, seed=13)
+    rows = pam.loop_census(jax.grad(lambda x: _loss(
+        x, A, b, 64, "two_level", checkpoints=8)), x0, top=0)
+    state = x0.size * x0.dtype.itemsize
+    assert {r["length"] for r in rows} >= {8}
+    assert max(r["stacked_mib"] for r in rows) * 2**20 <= 8 * state
+
+
+@pytest.mark.parametrize("n", [12, 30])
+def test_two_level_host_storage_matches_grad(n):
+    A, b, x0 = _problem(seed=17)
+    g_dev = jax.grad(_loss)(x0, A, b, n, "two_level", storage="recompute")
+    try:
+        g_host = jax.jit(jax.grad(lambda x: _loss(
+            x, A, b, n, "two_level", storage="host")))(x0)
+    except Exception as e:  # offload unsupported on this backend (e.g. plain CPU)
+        pytest.skip(f"host offload unsupported here: {e}")
+    assert jnp.allclose(g_dev, g_host, rtol=1e-10, atol=1e-12)
