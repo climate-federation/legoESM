@@ -155,9 +155,36 @@ def test_hard_limit_matches_oracle(pft, ci):
         np.testing.assert_allclose(float(getattr(out, k)[0]), v, rtol=1e-9, atol=1e-12, err_msg=k)
 
 
-# Measured per-case |default - oracle| of ASW_Sun at clip_width=0.01 [W m-2]
-# (re-measure and update with the reason if the smooth form or its width changes).
-DEFAULT_GAP = {}
+# Measured per-case (default - oracle) of ASW_Sun at clip_width=0.01 [W m-2], job
+# 11246531 at bc66092e18.  The smooth clip binds in sparse canopies: case 3
+# (LAI 0.3) -0.13..-0.28 W m-2 (0.2-0.4 %), case 5 (LAI 0.02) ~-0.42 W m-2 of ~2.4.
+# Re-measure and update with the reason if the smooth form or its width changes.
+DEFAULT_GAP = {
+    ('ENF', 0): 1.1368683772161603e-13,
+    ('ENF', 1): 0.0,
+    ('ENF', 2): 0.0,
+    ('ENF', 3): -0.13113163138851291,
+    ('ENF', 4): 0.0,
+    ('ENF', 5): -0.4169488069051792,
+    ('DBF', 0): 0.0,
+    ('DBF', 1): -2.842170943040401e-14,
+    ('DBF', 2): -7.105427357601002e-15,
+    ('DBF', 3): -0.14388150179298975,
+    ('DBF', 4): 0.0,
+    ('DBF', 5): -0.41883570266885517,
+    ('SAV', 0): 0.0,
+    ('SAV', 1): -2.842170943040401e-14,
+    ('SAV', 2): 7.105427357601002e-15,
+    ('SAV', 3): -0.2158431328892476,
+    ('SAV', 4): 0.0,
+    ('SAV', 5): -0.42347850271457177,
+    ('GRA', 0): 3.410605131648481e-13,
+    ('GRA', 1): -2.842170943040401e-14,
+    ('GRA', 2): 7.105427357601002e-15,
+    ('GRA', 3): -0.2804923504400705,
+    ('GRA', 4): 0.0,
+    ('GRA', 5): -0.4273900644988575,
+}
 
 
 @pytest.mark.parametrize("pft", PFTS)
