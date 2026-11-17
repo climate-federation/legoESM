@@ -1458,34 +1458,34 @@ def test_cold_start_seed_above_floor_is_bitwise_unchanged(monkeypatch, tmp_path)
             np.asarray(getattr(off._land_ml_state, name)), err_msg=name)
 
 
-def test_land_ic_file_start_is_bitwise_unchanged_by_the_floor_lift(
-        monkeypatch, tmp_path):
-    """A run that loads a land start file never sees the cold-start lift:
-    file soil water below the dry floor arrives as written, and the state is
-    bitwise the same with the lift disabled."""
+def _land_ic_at(theta, monkeypatch, tmp_path):
+    """A same-hydraulics land start file with uniform soil water ``theta``."""
     from legoesm.land.restart import save_land_restart
-    from legoesm.land.richards import dry_floor
 
     _patch_land_loaders(monkeypatch)
     src = ModelDriver(_dry_seed_cfg(), output_dir=tmp_path / "src")
     src.setup()
-    floor = np.asarray(dry_floor(src.physics.land_ml_cfg.hydraulics)[1])
-    below = jnp.full_like(src._land_ml_state.theta_soil, 0.0505)
-    assert float(np.max(0.0505 - floor)) < 0.0
     spun = src._land_ml_state._replace(
-        theta_soil=below,
+        theta_soil=jnp.full_like(src._land_ml_state.theta_soil, theta),
         T_soil=jnp.asarray(np.asarray(src._land_ml_state.T_soil) + 3.0))
-    ic = tmp_path / "land_ic.npz"
+    ic = tmp_path / f"land_ic_{theta}.npz"
     save_land_restart(ic, spun, land_mode="multilayer",
                       t_end_s=365 * 86400.0, n_steps_completed=1, metadata={},
                       soil_grid=src.physics.land_ml_cfg.soil_grid,
                       soil_hydraulics=_run_hydraulics_stamp(src),
                       hydraulics=src.physics.land_ml_cfg.hydraulics)
-    cfg = _dry_seed_cfg()._replace(land_ic_path=str(ic))
+    return _dry_seed_cfg()._replace(land_ic_path=str(ic))
+
+
+def test_land_ic_file_start_is_bitwise_unchanged_by_the_floor_lift(
+        monkeypatch, tmp_path):
+    """A start file at or above the dry floor loads as written, bitwise the
+    same with the cold-start lift disabled."""
+    cfg = _land_ic_at(0.06, monkeypatch, tmp_path)   # floor here is 0.0512
     on = ModelDriver(cfg, output_dir=tmp_path / "on")
     on.setup()
     np.testing.assert_allclose(np.asarray(on._land_ml_state.theta_soil),
-                               0.0505, rtol=1e-6)
+                               0.06, rtol=1e-6)
     _floor_off(monkeypatch)
     off = ModelDriver(cfg, output_dir=tmp_path / "off")
     off.setup()
@@ -1493,3 +1493,11 @@ def test_land_ic_file_start_is_bitwise_unchanged_by_the_floor_lift(
         np.testing.assert_array_equal(
             np.asarray(getattr(on._land_ml_state, name)),
             np.asarray(getattr(off._land_ml_state, name)), err_msg=name)
+
+
+def test_land_ic_file_below_the_dry_floor_is_refused(monkeypatch, tmp_path):
+    """A same-hydraulics start file below the floor would have the first
+    solve create the difference; setup refuses it, naming the amount."""
+    cfg = _land_ic_at(0.0505, monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="below this run's Richards dry floor"):
+        ModelDriver(cfg, output_dir=tmp_path / "dst").setup()

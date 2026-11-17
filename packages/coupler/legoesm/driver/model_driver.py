@@ -5303,6 +5303,29 @@ class ModelDriver:
                     _conv["dry_moved_mm_max"], _conv["wet_layers"],
                     _conv["wet_columns"], _conv["pond_columns"],
                     _conv["pond_mm_max"])
+            # Soil water below the Richards dry floor would be lifted for free
+            # on the first solve (water created).  The conversion above lifts
+            # files on other hydraulics; one on this run's hydraulics must
+            # already be at or above the floor.  1e-12 absorbs fp64 roundoff
+            # of the floor recomputed at run time.
+            _th_ic = np.asarray(_merged.theta_soil, dtype=np.float64)
+            _fl_ic = np.asarray(dry_floor(cfg.hydraulics)[1], dtype=np.float64)
+            _gap_ic = np.where((_f_land_ic > 0.0)[:, None],
+                               np.broadcast_to(_fl_ic, _th_ic.shape) - _th_ic,
+                               0.0)
+            _bad_ic = _gap_ic > 1.0e-12
+            if np.any(_bad_ic):
+                _dz_ic = np.asarray(make_soil_grid(cfg.soil_grid).dz)
+                _kg_ic = np.sum(np.where(_bad_ic, _gap_ic, 0.0) * _dz_ic,
+                                axis=-1) * constants.rho_water
+                raise ValueError(
+                    f"land IC {_land_ic_path}: {int(_bad_ic.sum())} soil "
+                    f"layers in {int(np.any(_bad_ic, axis=-1).sum())} land "
+                    "columns are below this run's Richards dry floor (max "
+                    f"{float(_gap_ic.max()):.3g} m3/m3, {float(_kg_ic.max()):.3g}"
+                    " kg/m2 in one column); the first solve would create that "
+                    "water.  Rebuild the file lifted to the floor "
+                    "(regrid_land_ic --lift-only).")
             self._land_ml_state = jax.tree_util.tree_map(
                 lambda a: (a.astype(storage_dtype)
                            if hasattr(a, "dtype")
