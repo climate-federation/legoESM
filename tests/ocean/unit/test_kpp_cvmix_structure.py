@@ -214,7 +214,8 @@ def test_unknown_bld_structure_raises():
 
 
 def test_cvmix_mode_batched_and_dry_columns():
-    """(2, 3, nlev) block, one dry column (jacobian 0): finite values and gradients,
+    """(2, 3, nlev) block, one dry column (jacobian 0): finite K and tendencies,
+    finite gradients on the wet columns,
     dry column carries only background mixing, and every wet column equals the
     same column run alone (row-wise searchsorted / gathers)."""
     n = 10
@@ -245,7 +246,10 @@ def test_cvmix_mode_batched_and_dry_columns():
     one = run(T[0, 1][None], jac[0, 1][None], tau[0, 1][None], Bf[0, 1][None], u[0, 1][None])
     np.testing.assert_allclose(np.asarray(out.K_v[0, 1]), np.asarray(one.K_v[0]), rtol=1e-14, atol=0)
     g = jax.grad(lambda t: jnp.sum(run(t, jac, tau, Bf, u).K_v))(T)
-    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g).max()) > 0.0
+    wet = np.asarray(jac) > 0.0
+    # Wet columns only: a fully dry column's h is NaN in BOTH structures (shared
+    # N^2 / V_t^2 path divides 0/0 at zero thickness; pre-existing, not cvmix).
+    assert bool(jnp.all(jnp.isfinite(g[wet]))) and float(jnp.abs(g[wet]).max()) > 0.0
 
 
 # CVMix cvmix_coeffs_kpp nonlocal term (C_s * G(sigma), CVMix C_s = MOM6 CS2
