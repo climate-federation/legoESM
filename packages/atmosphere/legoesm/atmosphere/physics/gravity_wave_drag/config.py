@@ -170,6 +170,9 @@ __param_spec__ = {
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "min_wind_sharpness": "sigmoid sharpness of the smooth min-wind activation; a differentiability/smoothing width, not a closure",
             "softmin_sharpness": "p of the p-norm smooth min of the saturation cap min(taudmp, tausat) and of the umcfac / tndmax tendency limiters; a differentiability/smoothing width, not a closure",
+            "umcfac_abs_width": "numerics: width of the smooth |ubm| in the umcfac tendency limit (RULE 5, #2546; 0 = CAM's |x|), E3SM value voted by Claude+GLM+codex",
+            "umcfac_sign_width": "numerics: width of the smooth sign(-ubm) of the limited tendency (RULE 5, #2546; 0 = CAM's sign), E3SM value voted by Claude+GLM+codex",
+            "taumin_ramp_width": "numerics: width [Pa] of the smooth taumin stress zeroing (RULE 5, #2546; 0 = CAM's hard zeroing), E3SM value voted by Claude+GLM+codex",
         },
         "params": {
             # --- orographic launch amplitude / efficiency ---
@@ -438,6 +441,20 @@ class McFarlaneConfig(NamedTuple):
         stress profile after propagation (``tau *= effgw``); with a land
         fraction the per-column efficiency is ``effgw_oro*landfrac`` (issue
         #1712).
+    umcfac_abs_width : float
+        Width [m/s] of the smooth ``|ubm|`` in the ``umcfac`` tendency limit
+        ``umcfac*|0 - ubm|/dt``: ``x*tanh(x/w)`` (RULE 5, #2546; default 0.01,
+        the E3SM value of #2241).  ``0.0`` is CAM's ``abs``, kinked where
+        the projected wind changes sign.
+    umcfac_sign_width : float
+        Width [m/s] of the smooth sign the limited tendency takes,
+        ``tanh(-ubm/ws)`` (RULE 5, #2546; default 1e-3, the E3SM value).
+        ``0.0`` is CAM's ``sign``.
+    taumin_ramp_width : float
+        Width [Pa] of the smooth ``taumin`` zeroing of ``tausat``/``taudmp``
+        (RULE 5, #2546; default 1e-10 = ``taumin``, the E3SM value):
+        ``tau*smoothstep_quintic((tau - taumin)/w)``.  ``0.0`` is CAM's hard
+        zeroing (a jump of ``taumin``).
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
@@ -456,6 +473,9 @@ class McFarlaneConfig(NamedTuple):
     tndmax_per_day: float = 400.0
     umcfac: float = 0.5
     effgw_oro: float = 0.125
+    umcfac_abs_width: float = 0.01
+    umcfac_sign_width: float = 1.0e-3
+    taumin_ramp_width: float = 1.0e-10
 
 
 class HinesConfig(NamedTuple):
