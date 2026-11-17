@@ -315,8 +315,8 @@ def test_level_swap_of_the_crit_bound_is_smooth_at_default():
 
     s0 = jnp.asarray(0.0)
     f = make(E3SMBeresConfig())
-    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-4)
+    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-5)
     assert float(jax.grad(f)(s0)) != 0.0
     with pytest.raises(AssertionError):
         check_grads(make(E3SMBeresConfig(crit_minmax_sharpness=float("inf"))), (s0,),
-                    order=2, modes=("rev",), eps=1e-4)
+                    order=2, modes=("rev",), eps=1e-5)
