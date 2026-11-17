@@ -1869,7 +1869,7 @@ def init_multilayer_land_state(
             # their cold-start values are PHydroConfig init fields.
             soil_init=((config.phydro.init_psi_s_mpa, config.phydro.init_rsoil_leaf)
                        if config.transpiration_stress == "phydro" else None),
-            # Sandoval kphio: per-column (aridity index, mGDD0) climatology.
+            # Sandoval phi0: per-column (aridity index, mGDD0) climatology.
             sandoval_inputs=pmodel_sandoval_inputs,
         )
 

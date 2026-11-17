@@ -795,10 +795,11 @@ def compute_two_leaf_canopy_fluxes(
             # broadcast: every bundle leaf is vmapped over columns, so the
             # scalar config float must be (ncol,)
             d0_leuning_kpa=jnp.full(ncol, cc.d0_leuning_kpa),
-            # P-model reference quantum yield for the C3 electron transport
-            # (electron_transport_model='smith'); None = the NRH form.
-            phi0_ref=(jnp.full(ncol, land_config.p_model.kphio)
-                      if _light == "smith" and not _sandoval else None),
+            # P-model peak quantum yield for the C3 electron transport
+            # (electron_transport_model='smith'; under Sandoval it is that
+            # curve's peak); None = the NRH form.
+            phi0_ref=(jnp.full(ncol, land_config.p_model.phi0_peak)
+                      if _light == "smith" else None),
             # Sandoval et al. (2026) phi0 for the light response: the same
             # per-column climatology that sizes the acclimated capacities.
             phi0_ai=(_sv_inputs[0] if _light == "smith" and _sandoval

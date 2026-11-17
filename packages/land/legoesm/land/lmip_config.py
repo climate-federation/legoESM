@@ -428,7 +428,7 @@ def validate_config(data: dict) -> LMIPConfig:
             f"{physics['pmodel_acclimation_hours']!r} without an optimality "
             "arm (pmodel / phydro) would be silently inert")
     # Intrinsic quantum yield phi0: 'temperature' (Bernacchi-type phi0(T), the
-    # original) or 'sandoval' (Sandoval et al. 2026: phi0 peak from the aridity
+    # original) or 'sandoval' (Sandoval et al. 2026: p_model.phi0_peak scaled by the aridity
     # index, thermal breadth from mGDD0).  Sandoval needs the climatological
     # inputs file, surfdata.sandoval_file (scripts/data/build_sandoval_inputs.py).
     physics.setdefault("intrinsic_quantum_yield", "temperature")
@@ -642,6 +642,14 @@ def validate_config(data: dict) -> LMIPConfig:
     data["params"] = params
 
     # E_LUC land-use-change bookkeeping (optional block; scheme fail-fast here,
+    # The peak quantum yield has one published value per
+    # physics.intrinsic_quantum_yield option (p_model.PHI0_PEAK_DEFAULT:
+    # temperature 0.0579 = rpmodel kphio x q_max, sandoval 1/9); record it
+    # here unless the params block gives it, so the resolved config carries
+    # the value every arm ran with.
+    from legoesm.land.p_model import PHI0_PEAK_DEFAULT
+    params.setdefault("land.p_model.phi0_peak",
+                      PHI0_PEAK_DEFAULT[physics["intrinsic_quantum_yield"]])
     # the numeric knobs are validated by validate_luc_config at run entry).
     luc = data.get("land_use_change") or {}
     from legoesm.land.land_use_change import LUC_SCHEMES, LandUseChangeConfig

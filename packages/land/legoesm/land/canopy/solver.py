@@ -298,7 +298,7 @@ class CanopyForcingBundle(NamedTuple):
     # (transpiration_stress == "hydraulic" only; None otherwise).
     psi50_g1_mpa: jax.Array | None = None
     ck_g1: jax.Array | None = None
-    # P-model reference quantum yield (PModelConfig.kphio) as (ncol,), set
+    # P-model peak quantum yield (PModelConfig.phi0_peak) as (ncol,), set
     # only under CanopyConfig.electron_transport_model='smith': the C3 kernel's
     # electron transport then uses J = 4 phi0(T) I / sqrt(1 + (4 phi0 I /
     # Jmax)^2).  None keeps the CLM PSII light response.  Appended last.

@@ -78,7 +78,7 @@ Vcmax as in decision 2.
 | slot | baseline | pmodel | phydro |
 |---|---|---|---|
 | 1 | Vcmax25,top | beta (unit-cost ratio, now 146) | beta (unit-cost ratio) |
-| 2 | g1 | kphio (intrinsic quantum yield) | kphio |
+| 2 | g1 | phi0_peak (peak intrinsic quantum yield, both phi0 options) | phi0_peak |
 | 3 | psi50 xylem | psi50 xylem | psi50 xylem |
 | 4 | psi50 Vcmax | psi50 Vcmax | psi50 Vcmax |
 | 5 | psi50 g1 | psi50 g1 | gamma (acclimation and both leaves) |
@@ -109,7 +109,7 @@ ck_g1, root_biomass, alpha_cost.
 * **`multilayer_land.py`:** compute and thread `PhydroSupply` whenever
   hydraulics is on; root-uptake weights from the supply's layer conductances
   under `hydraulic` and `phydro` (root_frac*beta_k only under `beta_theta`).
-* **`p_model.py`:** beta and kphio as per-arm tunables (already config fields);
+* **`p_model.py`:** beta and phi0_peak as per-arm tunables (already config fields);
   skip the beta(theta)-stressed rjv25 path under `hydraulic`.
 * **Switches (`config.py`, `lmip_config.py`):** two axes,
   `optimality in {none, pmodel, phydro}` and

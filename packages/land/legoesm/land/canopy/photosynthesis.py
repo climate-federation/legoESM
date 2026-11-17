@@ -327,11 +327,11 @@ def c3_assimilation(
 ) -> LeafAssimilation:
     """Canonical FvCB C3 gross assimilation + dark respiration (Bonan ch. 11).
 
-    ``phi0_ref`` (P-model reference quantum yield, ``PModelConfig.kphio``)
+    ``phi0_ref`` (P-model peak quantum yield, ``PModelConfig.phi0_peak``)
     selects the P-model light response for J (see the electron-transport
-    block); ``phi0_sandoval = (aridity_index, mgdd0_c)`` selects it with the
-    Sandoval et al. (2026) phi0(T); both ``None`` keeps the CLM PSII form
-    bit-for-bit.
+    block); ``phi0_sandoval = (aridity_index, mgdd0_c)`` additionally selects
+    the Sandoval et al. (2026) phi0(T) shape (``phi0_ref`` is then its peak);
+    ``phi0_ref=None`` keeps the CLM PSII form bit-for-bit.
 
     The shared biochemistry kernel behind both :func:`c3_photosynthesis` (net,
     floored) and the big-leaf coupled A-gs solver.  Returns the GROSS co-limited
@@ -362,7 +362,7 @@ def c3_assimilation(
     # Dark respiration (Tjoelker + Atkin), basal at 0.015 * Vcmax25
     Rd = _rd_atkin(Tf, TgC_a, Vcmax25)
 
-    if phi0_ref is None and phi0_sandoval is None:
+    if phi0_ref is None:
         # Electron transport (CLM5 / Bonan eq. 11.23-11.24): smaller root of
         # theta_j J^2 - (I + Jmax) J + I Jmax = 0, I = 0.5 phi_PSII APAR.
         I_PSII = 0.5 * _PHI_PSII * APAR
@@ -373,7 +373,7 @@ def c3_assimilation(
         # J = 4 phi0(T_leaf) I / sqrt(1 + (4 phi0 I / Jmax)^2).  The same
         # phi0(T) that sized the acclimated capacities (land/p_model.py).
         from legoesm.land.p_model import phi0_c3, phi0_sandoval as _phi0_s
-        phi0 = (_phi0_s(Tf, *phi0_sandoval) if phi0_sandoval is not None
+        phi0 = (_phi0_s(Tf, *phi0_sandoval, phi0_ref) if phi0_sandoval is not None
                 else phi0_c3(Tf, phi0_ref))
         four_phi_i = 4.0 * phi0 * APAR
         Jmax_safe = jnp.maximum(Jmax, 1e-9)  # coeff-ok: div-by-zero guard (Jmax -> 0)

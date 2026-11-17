@@ -194,7 +194,9 @@ def test_constant_canaries():
     assert pm._KPHIO_QUAD_C3 == (0.352, 0.022, -3.4e-4)
     cfg = pm.PModelConfig()
     assert cfg.beta_cost == 146.0
-    assert cfg.kphio == 0.081785
+    # phi0_peak is the peak-normalised kphio: rpmodel 0.081785 x q_max
+    assert cfg.phi0_peak == pytest.approx(0.081785 * pm._KPHIO_QUAD_C3_MAX, rel=1e-15)
+    assert pm._KPHIO_QUAD_C3_MAX == pytest.approx(0.7078823529411765, rel=1e-12)
     assert cfg.acclimation_days * 86400.0 == 15.0 * 86400.0
     # Huber reference viscosity check value: 890.02 uPa s at 298.15 K, 1 atm.
     mu = float(lb.water_viscosity(jnp.float64(298.15), jnp.float64(_O_PATM)))

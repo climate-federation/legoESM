@@ -57,6 +57,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.land.config import MultiLayerLandConfig, LandConfig, resolve_land_config
+from legoesm.land.p_model import PHI0_PEAK_DEFAULT
 from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
@@ -652,7 +653,10 @@ def run(args) -> int:
             acclimation_scheme=getattr(args, "pmodel_acclimation_scheme", "han"),
             acclimation_hours=getattr(args, "pmodel_acclimation_hours", "24h"),
             acclimation_days=float(getattr(args, "pmodel_acclimation_days", 15.0)),
-            intrinsic_quantum_yield=getattr(args, "intrinsic_quantum_yield", "temperature")))
+            intrinsic_quantum_yield=getattr(args, "intrinsic_quantum_yield", "temperature"),
+            # option's published peak (lmip_config records the same value in
+            # params, which are applied below and override this)
+            phi0_peak=PHI0_PEAK_DEFAULT[getattr(args, "intrinsic_quantum_yield", "temperature")]))
         # A land initial condition is only meaningful for the model it was
         # equilibrated under, so a spin-up feeding a calibrated coupled run has to
         # use the same one — including its soil column, which this driver

@@ -560,7 +560,9 @@ def test_sandoval_kphio_needs_its_file_and_the_file_needs_sandoval():
     assert c.surfdata["sandoval_file"] == ""
     ok = copy.deepcopy(base); ok["physics"]["intrinsic_quantum_yield"] = "sandoval"
     ok["surfdata"]["sandoval_file"] = "sv.nc"
-    assert validate_config(ok).surfdata["sandoval_file"] == "sv.nc"
+    _ok = validate_config(ok)
+    assert _ok.surfdata["sandoval_file"] == "sv.nc"
+    assert _ok.raw["params"]["land.p_model.phi0_peak"] == 1.0 / 9.0  # Sandoval peak recorded
     nofile = copy.deepcopy(base); nofile["physics"]["intrinsic_quantum_yield"] = "sandoval"
     with pytest.raises(ValueError, match="sandoval_file"):
         validate_config(nofile)
@@ -579,10 +581,17 @@ def test_sandoval_kphio_needs_its_file_and_the_file_needs_sandoval():
 
 
 def test_params_block_defaults_empty_and_must_be_a_mapping():
-    assert validate_config(_minimal()).raw["params"] == {}
+    from legoesm.land.p_model import PHI0_PEAK_DEFAULT
+    # The only entry a bare config records is the quantum-yield peak of the
+    # chosen phi0 option (so the resolved config carries the value it ran with).
+    _peak = {"land.p_model.phi0_peak": PHI0_PEAK_DEFAULT["temperature"]}
+    assert validate_config(_minimal()).raw["params"] == _peak
     c = _minimal(); c["params"] = {"land.two_leaf_canopy.vcmax_light_frac": 1.0}
     assert validate_config(c).raw["params"] == {
-        "land.two_leaf_canopy.vcmax_light_frac": 1.0}
+        "land.two_leaf_canopy.vcmax_light_frac": 1.0, **_peak}
+    # an explicit peak wins over the option default
+    c = _minimal(); c["params"] = {"land.p_model.phi0_peak": 0.07}
+    assert validate_config(c).raw["params"] == {"land.p_model.phi0_peak": 0.07}
     bad = _minimal(); bad["params"] = [1.0]
     with pytest.raises(ValueError, match="params must be a mapping"):
         validate_config(bad)

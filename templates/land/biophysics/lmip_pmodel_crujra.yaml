@@ -49,7 +49,7 @@ physics:
   pmodel_acclimation_hours: 24h         # 24h | daytime | noon (mengoli default: noon)
   pmodel_acclimation_days: 15           # memory [days], one parameter for every scheme
   electron_transport_model: nrh         # nrh (standard FvCB, every arm) | smith (P-model form), half-hourly step only
-  intrinsic_quantum_yield: temperature  # temperature (Bernacchi phi0(T)) | sandoval
+  intrinsic_quantum_yield: temperature  # temperature (Bernacchi phi0(T) shape) | sandoval; the peak phi0_peak takes the option's published value (0.0579 / 1/9) unless params: land.p_model.phi0_peak sets it
   canopy_vcmax_profile: kn              # unchanged from the baseline (one variable at a time)
   vc_max25: null
   g1: null

@@ -10,8 +10,10 @@ Pinned:
 * the peak falls monotonically with aridity and is 1/9 at AI -> 0;
 * the optimum and the subdaily daily optimum use it; the canopy light
   response uses it under light_response='smith';
-* refusals: missing inputs, inputs under the temperature method, a
-  non-default kphio under Sandoval; mGDD0 clamped to [1, 50] degC at init.
+* the peak is ``PModelConfig.phi0_peak`` (published 1/9), the tunable shared
+  with the temperature option, and phi0 scales linearly with it;
+* refusals: missing inputs, inputs under the temperature method; mGDD0
+  clamped to [1, 50] degC at init.
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ from legoesm.land.p_model import (
 )
 
 _ENTRY_X64 = jax.config.read("jax_enable_x64")
-SV = PModelConfig(intrinsic_quantum_yield="sandoval")
+_PEAK = 1.0 / 9.0  # published Sandoval peak (Long et al. 1993)
+SV = PModelConfig(intrinsic_quantum_yield="sandoval", phi0_peak=_PEAK)
 
 
 @pytest.fixture(autouse=True)
@@ -50,7 +53,7 @@ _JULES_REF = [
 
 @pytest.mark.parametrize("site,tg,ai,mg,ref", _JULES_REF)
 def test_matches_jules_form_reference(site, tg, ai, mg, ref):
-    phi = float(phi0_sandoval(jnp.asarray(constants.T_freeze + tg), ai, mg))
+    phi = float(phi0_sandoval(jnp.asarray(constants.T_freeze + tg), ai, mg, _PEAK))
     # reference printed to 5 significant figures; R differs by 4e-6 relative
     assert phi == pytest.approx(ref, rel=1e-4), site
 
@@ -66,12 +69,12 @@ def _topt(mg):
 def test_peak_at_topt_equals_aridity_peak(ai, mg):
     topt = _topt(mg)
     peak = (1.0 / 9.0) / (1.0 + ai ** 4.090556) ** 0.121122
-    assert float(phi0_sandoval(jnp.asarray(topt), ai, mg)) == pytest.approx(peak, rel=1e-10)
+    assert float(phi0_sandoval(jnp.asarray(topt), ai, mg, _PEAK)) == pytest.approx(peak, rel=1e-10)
     # With the T/Topt factor (JULES form) the maximum lies slightly ABOVE
     # Topt (the factor adds d ln T/dT = 1/T to the slope), by < 1 K, and
     # exceeds the Topt value by a negligible amount.
     t = jnp.linspace(topt - 20.0, topt + 10.0, 3001)
-    phi = np.asarray(phi0_sandoval(t, ai, mg))
+    phi = np.asarray(phi0_sandoval(t, ai, mg, _PEAK))
     t_max = float(t[int(np.argmax(phi))])
     assert 0.0 < t_max - topt < 1.0
     assert phi.max() / peak - 1.0 < 1e-3
@@ -80,7 +83,7 @@ def test_peak_at_topt_equals_aridity_peak(ai, mg):
 def test_peak_decreases_with_aridity():
     ai = jnp.asarray([1e-6, 0.5, 1.0, 2.0, 5.0, 20.0])
     topt = _topt(15.0)
-    phi = np.asarray(phi0_sandoval(jnp.full(6, topt), ai, 15.0))
+    phi = np.asarray(phi0_sandoval(jnp.full(6, topt), ai, 15.0, _PEAK))
     assert phi[0] == pytest.approx(1.0 / 9.0, rel=1e-8)
     assert np.all(np.diff(phi) < 0.0)
 
@@ -92,9 +95,9 @@ def test_optimum_scales_with_phi0_ratio():
     T = jnp.asarray([constants.T_freeze + 18.0])
     args = (T, jnp.asarray([1000.0]), jnp.asarray([410.0]), jnp.asarray([1e5]),
             jnp.asarray([800.0]))
-    c_t = capacities_at(*args, PModelConfig())
+    c_t = capacities_at(*args, PModelConfig(phi0_peak=_PEAK))
     c_s = capacities_at(*args, SV, kphio_inputs=(jnp.asarray([1.2]), jnp.asarray([12.0])))
-    ratio = float(phi0_sandoval(T, 1.2, 12.0)[0] / phi0_c3(T, PModelConfig().kphio)[0])
+    ratio = float(phi0_sandoval(T, 1.2, 12.0, _PEAK)[0] / phi0_c3(T, _PEAK)[0])
     assert float(c_s.vcmax25_leaf[0] / c_t.vcmax25_leaf[0]) == pytest.approx(ratio, rel=1e-10)
     assert float(c_s.chi[0]) == float(c_t.chi[0])     # phi0 does not enter chi
 
@@ -106,7 +109,7 @@ def test_state_carries_inputs_and_capacities_use_them():
     np.testing.assert_array_equal(st.mgdd0_c, [1.0, 1.0])     # clamped
     caps = acclimated_capacities(st, SV)
     assert float(caps.vcmax25_leaf[1]) < float(caps.vcmax25_leaf[0])  # arid column
-    sub = PModelConfig(intrinsic_quantum_yield="sandoval", acclimation_scheme="mengoli")
+    sub = SV._replace(acclimation_scheme="mengoli")
     s2 = init_pmodel_acclim(1, t_init_K=290.0, ps_init_pa=1e5, cfg=sub,
                             sandoval_inputs=(1.0, 60.0), dtype=jnp.float64)
     assert float(s2.mgdd0_c[0]) == 50.0 and float(s2.vcmax25_real[0]) > 0.0
@@ -127,9 +130,10 @@ def test_refusals():
     with pytest.raises(ValueError, match="silently inert"):
         init_pmodel_acclim(1, t_init_K=290.0, ps_init_pa=1e5, cfg=PModelConfig(),
                            sandoval_inputs=(1.0, 10.0))
-    with pytest.raises(ValueError, match="silently inert"):
+    with pytest.raises(ValueError, match="left at the temperature option's default"):
         init_pmodel_acclim(1, t_init_K=290.0, ps_init_pa=1e5,
-                           cfg=SV._replace(kphio=0.125), sandoval_inputs=(1.0, 10.0))
+                           cfg=PModelConfig(intrinsic_quantum_yield="sandoval"),
+                           sandoval_inputs=(1.0, 10.0))
     with pytest.raises(ValueError, match="unknown PModelConfig.intrinsic_quantum_yield"):
         init_pmodel_acclim(1, t_init_K=290.0, ps_init_pa=1e5,
                            cfg=PModelConfig(intrinsic_quantum_yield="fixed"))
@@ -145,6 +149,20 @@ def test_light_response_uses_sandoval_phi0():
         jnp.asarray(T), jnp.asarray(300.0), I, jnp.asarray(500.0), jnp.asarray(20.0),
         rjv25=jnp.asarray(2.0), **kw).a_gross
     s_clm = jax.grad(lambda I: a(I))(1e-3)
-    s_sv = jax.grad(lambda I: a(I, phi0_sandoval=(jnp.asarray(2.0), jnp.asarray(12.0))))(1e-3)
-    expected = float(phi0_sandoval(jnp.asarray(T), 2.0, 12.0)) / (0.5 * 0.85 / 4.0)
+    s_sv = jax.grad(lambda I: a(I, phi0_ref=jnp.asarray(_PEAK),
+                                phi0_sandoval=(jnp.asarray(2.0), jnp.asarray(12.0))))(1e-3)
+    expected = float(phi0_sandoval(jnp.asarray(T), 2.0, 12.0, _PEAK)) / (0.5 * 0.85 / 4.0)
     assert float(s_sv / s_clm) == pytest.approx(expected, rel=2e-3)
+
+
+def test_phi0_peak_scales_sandoval_linearly():
+    T = jnp.asarray(constants.T_freeze + 18.0)
+    base = float(phi0_sandoval(T, 1.2, 12.0, _PEAK))
+    assert float(phi0_sandoval(T, 1.2, 12.0, 0.5 * _PEAK)) == pytest.approx(0.5 * base, rel=1e-12)
+    # and the config value is what the optimum reads
+    args = (T[None], jnp.asarray([1000.0]), jnp.asarray([410.0]), jnp.asarray([1e5]),
+            jnp.asarray([800.0]))
+    inputs = (jnp.asarray([1.2]), jnp.asarray([12.0]))
+    v1 = capacities_at(*args, SV, kphio_inputs=inputs).vcmax25_leaf[0]
+    v2 = capacities_at(*args, SV._replace(phi0_peak=0.5 * _PEAK), kphio_inputs=inputs).vcmax25_leaf[0]
+    assert float(v2 / v1) == pytest.approx(0.5, rel=1e-10)

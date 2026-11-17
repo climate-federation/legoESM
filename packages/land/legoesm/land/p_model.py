@@ -25,9 +25,10 @@ oracle.  Chi: rpmodel ``calc_optimal_chi`` (Stocker eq. 8-9); Jmax limitation:
 et al. 2017); ``Vcmax = phi0(T)*Iabs*mprime/mc``; ``Jmax = 4*phi0(T)*Iabs /
 sqrt((1/fact_jmaxlim)^2 - 1)``, algebraically rearranged here to
 ``4*phi0*Iabs*sqrt((1-k)/k)`` with ``k = (c*/mj)^(2/3)`` (identical, since
-``fact_jmaxlim = sqrt(1-k)``); ``phi0(T) = kphio*(0.352 + 0.022 Tc
-- 3.4e-4 Tc^2)`` (Bernacchi 2003 fit, rpmodel ``ftemp_kphio``), kphio default
-0.081785 (rpmodel's temperature-dependent, no-soil-moisture calibration).
+``fact_jmaxlim = sqrt(1-k)``); ``phi0(T) = phi0_peak/q_max*(0.352 + 0.022 Tc
+- 3.4e-4 Tc^2)`` (Bernacchi 2003 fit, rpmodel ``ftemp_kphio``, peak-normalised
+so ``phi0_peak`` is the curve maximum; default 0.0579 = rpmodel's kphio
+0.081785 x q_max, its temperature-dependent, no-soil-moisture calibration).
 
 DELIBERATE DEPARTURES from rpmodel, for internal consistency with the host
 kernel (each documented where it happens):
@@ -127,7 +128,7 @@ __physics_contract__ = {
         "tests/land/unit/test_p_model.py: chi in (0,1) and decreasing in "
         "VPD; g1 ~ 2-6 kPa^0.5 at 25 degC / 1 kPa / 400 ppm / sea level; "
         "capacities -> 0 smoothly as Iabs -> 0 with finite rjv25 and finite "
-        "gradients; rjv25 independent of kphio and Iabs; the running means "
+        "gradients; rjv25 independent of phi0_peak and Iabs; the running means "
         "converge to the 24-hour average and stay finite through polar "
         "night. tests/land/unit/"
         "test_p_model_faithful.py: rel-1e-9 scalar-oracle pin."
@@ -158,14 +159,16 @@ __param_spec__ = {
                 "reference": "Stocker et al. 2020 GMD sect. 2.4.1 (beta = 146)",
                 "shape": None,
             },
-            "kphio": {
-                "units": "mol/mol", "bounds": (0.02, 0.15), "tunable_tier": 2,
+            "phi0_peak": {
+                "units": "mol/mol", "bounds": (0.014, 0.125), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "photosynthesis",
                 "reference": (
-                    "Stocker et al. 2020 GMD Table 1 (0.081785, temperature-"
-                    "dependent setup, no soil-moisture stress)"
+                    "peak of phi0(T): Stocker et al. 2020 GMD Table 1 kphio "
+                    "0.081785 x q_max = 0.0579 (temperature option); Long et "
+                    "al. 1993 1/9 (sandoval option)"
                 ),
                 "shape": None,
+                "legacy_name": "kphio",
             },
             "beta_cost_c4": {
                 "units": "1", "bounds": (3.0, 60.0), "tunable_tier": 2,
@@ -201,8 +204,26 @@ __param_spec__ = {
 C_STAR = 0.41  # [-] unit cost of Jmax maintenance; k = (c*/mj)^(2/3)
 
 # --- Bernacchi (2003) quantum-yield temperature fit (rpmodel ftemp_kphio, C3) ---
-# phi0(T)/kphio = a + b*Tc + c*Tc^2, ascending powers of leaf T [degC].
+# q(Tc) = a + b*Tc + c*Tc^2, ascending powers of leaf T [degC].
 _KPHIO_QUAD_C3 = (0.352, 0.022, -3.4e-4)
+# PEAK-NORMALISED FORM (user decision 2026-11-17; do NOT revert to the rpmodel
+# ``kphio * q(Tc)`` form): phi0(Tc) = phi0_peak * q(Tc) / q_max, with q_max the
+# quadratic's maximum, q(-b/2c) = a - b^2/(4c) = 0.7079 at Tc = 32.35 degC.
+# ``phi0_peak`` is then the CURVE MAXIMUM [mol/mol], the same quantity the
+# Sandoval option's peak is, so one tunable means one thing under both
+# ``intrinsic_quantum_yield`` options and the two arms can be compared and
+# tuned on one slot.  rpmodel's kphio = 0.081785 corresponds exactly to
+# phi0_peak = 0.081785 * q_max = 0.0579 (the default below), so the
+# temperature option is numerically unchanged at its default.
+_KPHIO_QUAD_C3_MAX = _KPHIO_QUAD_C3[0] - _KPHIO_QUAD_C3[1] ** 2 / (4.0 * _KPHIO_QUAD_C3[2])
+_RPMODEL_KPHIO = 0.081785  # [mol/mol] rpmodel / Stocker 2020 Table 1 kphio (pre-normalisation scale)
+# Published peak per intrinsic_quantum_yield option (user decision 2026-11-17):
+# the drivers set PModelConfig.phi0_peak from this table when the config does
+# not give it, and the resolved config records the value.
+PHI0_PEAK_DEFAULT = {
+    "temperature": _RPMODEL_KPHIO * _KPHIO_QUAD_C3_MAX,  # 0.0579 = rpmodel kphio x q_max
+    "sandoval": 1.0 / 9.0,                               # Long et al. 1993
+}
 
 # --- C4 quantum-yield temperature fit (rpmodel ftemp_kphio, c4 branch) ---
 # "Cai & Prentice (2020), corrected by David Orme" (rpmodel source comment);
@@ -225,7 +246,9 @@ _DEG_LON_PER_HOUR = 15.0  # 360 deg of longitude per 24 h of mean solar time
 # Published constants as in pyrealm 3.0.0rc5 PModelConst.sandoval_* and the
 # JULES vn7.6_pmodel_unified_kphio pmodel_kphio_mod.F90 (identical):
 # phi_peak = phi_max / (1 + AI^m)^n; dS = s0 * mGDD0^s1; Hd = hd_fac * dS.
-_SANDOVAL_PHI0_MAX = 0.1111111111111111   # [mol/mol] = 1/9 (Long et al. 1993)
+# The peak itself (1/9 = 0.1111, Long et al. 1993) is NOT a constant here: it
+# is ``PModelConfig.phi0_peak``, the tunable shared with the temperature
+# option (set phi0_peak = 1/9 for the published Sandoval curve).
 _SANDOVAL_PEAK_MN = (4.090556, 0.121122)  # aridity curvature (m, n)
 _SANDOVAL_ENTROPY = (3468.185, -0.6680158)  # dS = s0 * mGDD0^s1 [J/mol/K]
 _SANDOVAL_HA = 70885.39                   # [J/mol] activation energy
@@ -251,14 +274,20 @@ _F_J25_UMOL_GN_S = 1257.0  # umol e- /s /gN in electron transport (= 8.06 * 156)
 class PModelConfig(NamedTuple):
     """Configuration for the P-model optimality parameter source.
 
-    ``beta_cost``/``kphio``/``acclimation_days`` are the tunables (see
+    ``beta_cost``/``phi0_peak``/``acclimation_days`` are the tunables (see
     ``__param_spec__``); the rest are numeric guards and recorded
     initialisation constants (excluded from calibration).
     """
 
     # --- optimality (Stocker et al. 2020 GMD) ---
     beta_cost: float = 146.0     # [-] carboxylation:transpiration cost ratio
-    kphio: float = 0.081785      # [mol/mol] apparent quantum yield (rpmodel default)
+    # Peak C3 quantum yield [mol/mol] = the maximum of phi0(T) under BOTH
+    # intrinsic_quantum_yield options (see the _KPHIO_QUAD_C3_MAX note):
+    # temperature -> phi0_peak * q(Tc)/q_max; sandoval -> phi0_peak /
+    # (1 + AI^m)^n * f(T).  Default = rpmodel's kphio 0.081785 x q_max
+    # (0.0579), i.e. the temperature option at its published calibration;
+    # the published Sandoval peak is 1/9 (set explicitly on that arm).
+    phi0_peak: float = _RPMODEL_KPHIO * _KPHIO_QUAD_C3_MAX  # PHI0_PEAK_DEFAULT["temperature"]
     kphio_temp: bool = True      # Bernacchi 2003 phi0(T) quadratic on (compile-time)
     # --- C4 optimality (rpmodel c4; Cai & Prentice 2020) ---
     beta_cost_c4: float = 146.0 / 9.0  # [-] C4 cost ratio (rpmodel: beta/9)
@@ -293,12 +322,12 @@ class PModelConfig(NamedTuple):
     window_start_h: float = 11.0  # [h, local solar] first noon-window step
     window_end_h: float = 13.0    # [h, local solar] last noon-window step
     # --- C3 intrinsic quantum yield phi0 (appended last) ---
-    # "temperature": kphio x Bernacchi (2003) quadratic (original, default).
+    # "temperature": phi0_peak x Bernacchi (2003) quadratic / its maximum.
     # "sandoval": Sandoval et al. (2026) — peak 1/9 reduced by the
     # climatological aridity index, peaked temperature response whose optimum
     # follows mGDD0 (JULES form, with the T/Topt factor).  Needs per-column
     # aridity index and mGDD0 (init_pmodel_acclim ``sandoval_inputs``); the
-    # reference ``kphio`` is fixed by the method and must stay at its default.
+    # peak is ``phi0_peak`` (published value 1/9).
     intrinsic_quantum_yield: str = "temperature"
 
 
@@ -560,19 +589,20 @@ def _phi0(T_K: jax.Array, cfg: PModelConfig,
                 "PModelConfig.intrinsic_quantum_yield='sandoval' needs the per-column "
                 "aridity index and mGDD0 (sandoval_inputs at init); this caller "
                 "does not pass them (e.g. the P-hydro optimum is not wired).")
-        return phi0_sandoval(T_K, *kphio_inputs)
+        return phi0_sandoval(T_K, *kphio_inputs, cfg.phi0_peak)
     if not cfg.kphio_temp:
-        return jnp.asarray(cfg.kphio) * jnp.ones_like(T_K)
-    return phi0_c3(T_K, cfg.kphio)
+        return jnp.asarray(cfg.phi0_peak) * jnp.ones_like(T_K)
+    return phi0_c3(T_K, cfg.phi0_peak)
 
 
 def phi0_sandoval(T_K: jax.Array, aridity_index: jax.Array,
-                  mgdd0_c: jax.Array) -> jax.Array:
+                  mgdd0_c: jax.Array, phi0_peak: jax.Array | float) -> jax.Array:
     """Sandoval et al. (2026) C3 quantum yield phi0(T) [mol/mol].
 
-    ``phi_peak(AI) * f(T; mGDD0)``: the peak 1/9 is reduced by the
-    climatological aridity index AI = PET/P, ``phi_peak = (1/9) / (1 +
-    AI^m)^n``; ``f`` is a peaked Arrhenius function equal to 1 at Topt (the
+    ``phi_peak(AI) * f(T; mGDD0)``: the peak ``phi0_peak`` (published 1/9;
+    ``PModelConfig.phi0_peak``, the tunable shared with the temperature
+    option) is reduced by the climatological aridity index AI = PET/P,
+    ``phi_peak = phi0_peak / (1 + AI^m)^n``; ``f`` is a peaked Arrhenius function equal to 1 at Topt (the
     optimum of the plain peaked Arrhenius; with the T/Topt factor the maximum
     of ``f`` lies < 1 K above Topt and exceeds 1 by < 0.1 %), whose activation
     entropy ``dS = s0 * mGDD0^s1`` (and
@@ -589,7 +619,7 @@ def phi0_sandoval(T_K: jax.Array, aridity_index: jax.Array,
     """
     r_gas = constants.R_universal
     m, n = _SANDOVAL_PEAK_MN
-    phi_peak = _SANDOVAL_PHI0_MAX / (1.0 + aridity_index ** m) ** n
+    phi_peak = phi0_peak / (1.0 + aridity_index ** m) ** n
     s0, s1 = _SANDOVAL_ENTROPY
     ds = s0 * mgdd0_c ** s1
     hd = _SANDOVAL_HD_FACTOR * ds
@@ -615,11 +645,15 @@ def kphio_inputs_from(acclim: "PModelAcclimState | None",
     return (acclim.aridity_index, acclim.mgdd0_c)
 
 
-def phi0_c3(T_K: jax.Array, kphio_ref: jax.Array | float) -> jax.Array:
+def phi0_c3(T_K: jax.Array, phi0_peak: jax.Array | float) -> jax.Array:
     """Temperature-dependent C3 quantum yield phi0(T) [mol/mol].
 
-    ``kphio_ref * (0.352 + 0.022 Tc - 3.4e-4 Tc^2)`` (Bernacchi et al. 2003;
-    rpmodel / pyrealm ``QuantumYieldTemperature``), smoothly floored at 0.
+    ``phi0_peak * q(Tc) / q_max``, ``q = 0.352 + 0.022 Tc - 3.4e-4 Tc^2``
+    (Bernacchi et al. 2003; rpmodel / pyrealm ``QuantumYieldTemperature``),
+    ``q_max = q(32.35 degC) = 0.7079``, smoothly floored at 0.  Peak-normalised
+    on purpose so ``phi0_peak`` IS the curve maximum, the same quantity as the
+    Sandoval peak (see the ``_KPHIO_QUAD_C3_MAX`` note; rpmodel's kphio =
+    phi0_peak / q_max).  Do not revert to ``kphio * q``.
     Shared by the acclimated optimum and, under
     ``CanopyConfig.electron_transport_model='smith'``, by the canopy kernel's
     instantaneous electron transport, so the phi0 that sizes Vcmax/Jmax is
@@ -629,7 +663,7 @@ def phi0_c3(T_K: jax.Array, kphio_ref: jax.Array | float) -> jax.Array:
     a0, a1, a2 = _KPHIO_QUAD_C3
     quad = a0 + a1 * tc + a2 * tc * tc
     quad = _PHI0_FLOOR_WIDTH * jax.nn.softplus(quad / _PHI0_FLOOR_WIDTH)
-    return kphio_ref * quad
+    return phi0_peak * quad / _KPHIO_QUAD_C3_MAX
 
 
 def acclimated_capacities(
@@ -851,15 +885,16 @@ def init_pmodel_acclim(
         rsoil_mean=None if soil_init is None else full(soil_init[1]),
     )
     if _check_quantum_yield(cfg) == "sandoval":
+        if cfg.phi0_peak == PHI0_PEAK_DEFAULT["temperature"]:
+            raise ValueError(
+                "PModelConfig.intrinsic_quantum_yield='sandoval' with phi0_peak "
+                "left at the temperature option's default (0.0579): set "
+                "phi0_peak explicitly (published Sandoval peak "
+                "PHI0_PEAK_DEFAULT['sandoval'] = 1/9; the drivers do this)")
         if sandoval_inputs is None:
             raise ValueError(
                 "PModelConfig.intrinsic_quantum_yield='sandoval' needs sandoval_inputs="
                 "(aridity_index, mgdd0_c) at init")
-        if cfg.kphio != PModelConfig._field_defaults["kphio"]:
-            raise ValueError(
-                f"PModelConfig.kphio={cfg.kphio} would be silently inert under "
-                "intrinsic_quantum_yield='sandoval' (its peak 1/9 is fixed by the method; "
-                "pyrealm refuses the same); leave kphio at its default")
         if not cfg.kphio_temp:
             raise ValueError("intrinsic_quantum_yield='sandoval' is temperature-dependent; "
                              "kphio_temp=False is not supported")

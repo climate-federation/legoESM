@@ -78,12 +78,12 @@ def test_capacities_decay_smoothly_to_zero_at_low_light():
     assert v[-1] == pytest.approx(0.0, abs=1e-12)
 
 
-def test_rjv25_invariant_to_kphio_and_iabs():
+def test_rjv25_invariant_to_phi0_peak_and_iabs():
     # phi0 and Iabs cancel in Jmax/Vcmax: rjv25 depends only on the optimum.
     base = pm.acclimated_capacities(_state(), pm.PModelConfig())
     double_light = pm.acclimated_capacities(_state(ppfd=800.0), pm.PModelConfig())
     half_kphio = pm.acclimated_capacities(
-        _state(), pm.PModelConfig(kphio=0.0409))
+        _state(), pm.PModelConfig(phi0_peak=0.5 * pm.PModelConfig().phi0_peak))
     assert float(base.rjv25[0]) == pytest.approx(float(double_light.rjv25[0]), rel=1e-12)
     assert float(base.rjv25[0]) == pytest.approx(float(half_kphio.rjv25[0]), rel=1e-12)
     # while Vcmax25 itself scales ~linearly with both
@@ -151,17 +151,17 @@ def test_means_track_the_whole_day_average():
 def test_gradients_finite_including_mj_floor_neighborhood():
     cfg = pm.PModelConfig()
 
-    def loss(beta, kphio, ppfd, vpd, co2):
-        c = pm.PModelConfig(beta_cost=beta, kphio=kphio)
+    def loss(beta, phi0_peak, ppfd, vpd, co2):
+        c = pm.PModelConfig(beta_cost=beta, phi0_peak=phi0_peak)
         caps = pm.acclimated_capacities(
             _state(ppfd=ppfd, vpd=vpd, co2=co2), c)
         return (caps.vcmax25_leaf[0] + caps.rjv25[0] + caps.g1_kpa[0])
 
-    g = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(146.0, 0.081785, 400.0, 1000.0, 400.0)
+    g = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(146.0, 0.0579, 400.0, 1000.0, 400.0)
     assert all(np.isfinite(float(x)) for x in g)
     # mj -> c* neighborhood: very high VPD + low CO2 pushes chi (and mj) down
     # onto the smooth floor; gradients must stay finite, not NaN or huge.
-    g_edge = jax.grad(loss, argnums=(0, 3, 4))(146.0, 0.081785, 400.0, 7000.0, 120.0)
+    g_edge = jax.grad(loss, argnums=(0, 3, 4))(146.0, 0.0579, 400.0, 7000.0, 120.0)
     assert all(np.isfinite(float(x)) for x in g_edge)
     del cfg
 

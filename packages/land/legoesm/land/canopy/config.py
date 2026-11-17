@@ -306,7 +306,7 @@ class CanopyConfig(NamedTuple):
     # theta = 0.7, I = 0.5 * 0.85 * APAR, temperature-independent initial
     # yield ~0.106 mol C/photon; bit-identical legacy behaviour) or "smith" —
     # the P-model form J = 4 phi0(T_leaf) I / sqrt(1 + (4 phi0 I / Jmax)^2)
-    # with the phi0(T) (PModelConfig.kphio x Bernacchi 2003, or Sandoval) of
+    # with the phi0(T) (PModelConfig.phi0_peak x the Bernacchi 2003 shape, or Sandoval) of
     # the P model (JULES P-model lane; pyrealm SubdailyPModel; Mengoli 2022).
     # Requires an optimality capacity source (capacity_scheme 'pmodel' or
     # 'phydro').  The acclimated Jmax25 sizing inverts the Smith curve

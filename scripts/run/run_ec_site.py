@@ -1205,10 +1205,15 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         land_config = land_config._replace(
             transpiration_stress=transpiration_stress)
     if intrinsic_quantum_yield is not None:
-        # P-model C3 intrinsic quantum yield: 'temperature' (kphio x
-        # Bernacchi) or 'sandoval' (Sandoval et al. 2026; site AI and mGDD0).
+        # P-model C3 intrinsic quantum yield: 'temperature' (phi0_peak x
+        # Bernacchi shape) or 'sandoval' (Sandoval et al. 2026; site AI and
+        # mGDD0).  The peak takes the option's published value
+        # (p_model.PHI0_PEAK_DEFAULT); --params land.p_model.phi0_peak below
+        # overrides it.
+        from legoesm.land.p_model import PHI0_PEAK_DEFAULT
         land_config = land_config._replace(p_model=land_config.p_model._replace(
-            intrinsic_quantum_yield=intrinsic_quantum_yield))
+            intrinsic_quantum_yield=intrinsic_quantum_yield,
+            phi0_peak=PHI0_PEAK_DEFAULT[intrinsic_quantum_yield]))
     # P-model acclimation (land/p_model.py): scheme 'han' (half-hourly driver
     # EMA, optimum on the means) or 'mengoli' (daily optimum on the window
     # means, memory on the traits); hours '24h' | 'daytime' | 'noon'; memory
@@ -1606,7 +1611,7 @@ def main() -> int:
     ap.add_argument("--params", type=str, default=None,
                     help="YAML calibration file of tuned parameters keyed by "
                          "param_collector qualified name 'scheme_key.field' "
-                         "(e.g. land.p_model.kphio), validated against each "
+                         "(e.g. land.p_model.phi0_peak), validated against each "
                          "scheme's __param_spec__ bounds and spliced into the "
                          "land config - the same layer run_lmip --params uses")
     ap.add_argument("--transpiration-stress", default=None,
@@ -1641,7 +1646,7 @@ def main() -> int:
                     choices=["temperature", "sandoval"],
                     dest="intrinsic_quantum_yield",
                     help="P-model C3 intrinsic quantum yield phi0: 'temperature' (unset = "
-                         "config default; kphio x Bernacchi 2003) or "
+                         "config default; phi0_peak x Bernacchi 2003 shape) or "
                          "'sandoval' (Sandoval et al. 2026; aridity index and "
                          "mGDD0 computed from the full site record)")
     ap.add_argument("--sandoval-ai", type=float, default=None,

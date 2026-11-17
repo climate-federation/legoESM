@@ -1,6 +1,6 @@
 """C3 light response of electron transport: CLM vs P-model phi0(T) (step D).
 
-The P-model sizes Vcmax/Jmax with phi0(T) = kphio x Bernacchi (2003); the
+The P-model sizes Vcmax/Jmax with phi0(T) = phi0_peak x Bernacchi (2003) / q_max; the
 CLM kernel's light response has a temperature-independent initial yield of
 0.5 * 0.85 / 4 = 0.10625 mol C per mol photon. Under
 electron_transport_model='smith' the kernel uses J = 4 phi0(T) I /
@@ -89,8 +89,8 @@ def test_config_refusals():
 
 
 def test_two_leaf_step_runs_and_lowers_light_limited_gpp():
-    """End to end through the two-leaf canopy at dim light: with kphio =
-    0.0818 the P-model initial yield at 20 C (~0.06) is below CLM's 0.106,
+    """End to end through the two-leaf canopy at dim light: with phi0_peak =
+    0.0579 the P-model initial yield at 20 C (~0.056) is below CLM's 0.106,
     so light-limited GPP must fall when the switch is on."""
     from legoesm.land.config import MultiLayerLandConfig
     from legoesm.land.multilayer_land import (
