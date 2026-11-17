@@ -1403,7 +1403,7 @@ def _dry_soil_map(path, lat_deg, lon_deg, *, vg_air_entry_m):
     residual, so the aridity seed lands below the Richards dry floor."""
     m = _fake_surface_map(path, lat_deg, lon_deg, vg_air_entry_m=vg_air_entry_m)
     o = jnp.ones_like(m["theta_wp"])
-    return dict(m, theta_wp=0.051 * o, theta_fc=0.052 * o)
+    return dict(m, theta_wp=0.0501 * o, theta_fc=0.0505 * o)
 
 
 def _floor_off(monkeypatch):
@@ -1427,7 +1427,7 @@ def test_cold_start_seed_below_dry_floor_creates_no_water(monkeypatch, tmp_path)
     cfg = drv.physics.land_ml_cfg
     st = drv._land_ml_state
     floor = np.asarray(dry_floor(cfg.hydraulics)[1])
-    assert float(np.max(0.052 - floor)) < 0.0     # the seed IS below the floor
+    assert float(np.max(0.0505 - floor)) < 0.0    # the seed IS below the floor
     theta = np.asarray(st.theta_soil)
     # storage dtype may be fp32: equal to the floor to its rounding
     np.testing.assert_allclose(theta, np.broadcast_to(floor, theta.shape),
