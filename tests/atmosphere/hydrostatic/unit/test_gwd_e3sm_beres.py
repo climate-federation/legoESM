@@ -320,3 +320,17 @@ def test_level_swap_of_the_crit_bound_is_smooth_at_default():
     with pytest.raises(AssertionError):
         check_grads(make(E3SMBeresConfig(crit_minmax_sharpness=float("inf"))), (s0,),
                     order=2, modes=("rev",), eps=1e-5)
+
+
+@pytest.mark.parametrize("field,bad", [("index_round_width", -0.1), ("index_round_width", 1.5),
+                                       ("index_round_width", 1e-50),
+                                       ("crit_minmax_sharpness", 0.0), ("crit_minmax_sharpness", 1e-50),
+                                       ("crit_minmax_sharpness", 1e40)])
+def test_beres_smoothing_fields_validated(field, bad):
+    """#2545: 0/inf (E3SM) or an fp32-safe width/sharpness; anything else raises."""
+    pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
+    to = lambda a: jnp.asarray(a[None, :])
+    beres = E3SMBeresConfig(use_stand_in_table=True, **{field: bad})
+    mfcc = build_stand_in_mfcc(NGWV, DC, beres, jnp.float64)
+    with pytest.raises(ValueError, match=field):
+        gw_beres_src(to(u), to(v), to(netdt), to(zm), jnp.zeros(1), k700, mfcc, NGWV, DC, beres)

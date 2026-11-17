@@ -856,6 +856,9 @@ def gw_beres_src(
         # overestimates |extremum| by <= ln(n)/ks.  inf = E3SM's min/max.
         if not ks > 0.0:
             raise ValueError(f"crit_minmax_sharpness must be > 0 (inf = E3SM); got {ks!r}.")
+        # 1/ks is the soft extremum's width [m/s]: the same fp32-safe range
+        # as every RULE 5 width (codex review 2: 1e-50 / 1e40 gave NaN).
+        validate_smoothing_width("crit_minmax_sharpness (as 1/sharpness)", 1.0 / ks)
         lev = (in_range & found[:, None])
         keep = jnp.concatenate([lev, jnp.ones((ncol, 1), dtype=bool)], axis=1)
 
