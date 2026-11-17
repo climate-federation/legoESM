@@ -89,7 +89,9 @@ def test_segment_hands_surface_midpoint_sun_or_legacy_daily_mean(
     float64: this checks routing, not agreement between solar approximations.
     """
     from legoesm.atmosphere.physics.radiation.solar import (
-        cos_zenith_angle, daily_mean_insolation, earth_orbit,
+        cos_zenith_angle,
+        daily_mean_insolation,
+        earth_orbit,
         earth_sun_distance_factor,
     )
     from legoesm.coupler import grid_remap
@@ -99,12 +101,12 @@ def test_segment_hands_surface_midpoint_sun_or_legacy_daily_mean(
     orbit = earth_orbit() if orbital else None
     handed = []
 
-    class SurfaceHandoffReached(Exception):
+    class SurfaceHandoffReachedError(Exception):
         pass
 
     def capture_forcing(forcing, remapper):
         handed.append(forcing)
-        raise SurfaceHandoffReached
+        raise SurfaceHandoffReachedError
 
     # Stop at the real handoff, before unrelated ocean/land integration.
     monkeypatch.setattr(grid_remap, "remap_surface_fields", capture_forcing)
@@ -112,7 +114,7 @@ def test_segment_hands_surface_midpoint_sun_or_legacy_daily_mean(
     lat, lon = drv._atm._grid_lat, drv._atm._grid_lon
     for end_hour in (1.0, 7.0, 13.0, 19.0):
         end_day = end_hour / 24.0
-        with pytest.raises(SurfaceHandoffReached):
+        with pytest.raises(SurfaceHandoffReachedError):
             if owned:
                 drv._owned_segment(end_day, dt)
             else:
