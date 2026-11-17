@@ -1708,8 +1708,13 @@ class CoupledESMDriver:
     # Coupling step
     # ==================================================================
 
-    def _build_atm_forcing(self, day: float):
-        """Build AtmToSurface from atmosphere state and physics."""
+    def _build_atm_forcing(self, day: float, *, segment_seconds: float = 0.0):
+        """Build surface forcing at the segment ending on ``day``.
+
+        With a daily cycle, solar geometry uses the segment midpoint; the
+        downward radiation remains the atmosphere's segment mean. Direct
+        callers without a segment duration use the supplied instant.
+        """
         from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.forcing.surface_utils import (
             blend_surface_temperature,
@@ -1908,7 +1913,8 @@ class CoupledESMDriver:
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import (
-                daily_mean_insolation, earth_orbit, earth_sun_distance_factor,
+                cos_zenith_angle, daily_mean_insolation, earth_orbit,
+                earth_sun_distance_factor,
             )
             # Solar constant from legoesm.constants per CLAUDE.md.
             # ``acfg.S_0`` allows override for sensitivity studies.
@@ -1916,14 +1922,20 @@ class CoupledESMDriver:
             # Realistic orbit (Berger 1978) when enabled; None ⇒ circular.
             _orbit = (earth_orbit()
                       if getattr(acfg, "orbital_insolation", False) else None)
-            _eccf = (earth_sun_distance_factor(float(doy), _orbit)
-                     if _orbit is not None else 1.0)
-            Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0,
-                                            orbit=_orbit)
-            # cos_zen is a geometric optical-path cosine: use the orbital
-            # declination but divide out the (a/r)^2 flux factor so it stays
-            # <= 1.  _eccf == 1.0 on the circular orbit ⇒ bit-identical.
-            cos_zen = jnp.clip(Q_daily / (_eccf * S_0), 0.0, 1.0)
+            if acfg.diurnal_cycle:
+                sun_day = day - 0.5 * segment_seconds / 86400.0
+                sun_doy, sun_seconds = self._atm._calendar_for_radiation(sun_day)
+                cos_zen = jnp.maximum(cos_zenith_angle(
+                    lat, self._atm._grid_lon, sun_doy, sun_seconds / 3600.0,
+                    orbit=_orbit), 0.0)
+            else:
+                _eccf = (earth_sun_distance_factor(float(doy), _orbit)
+                         if _orbit is not None else 1.0)
+                Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0,
+                                                orbit=_orbit)
+                # Geometric optical-path cosine: divide out the orbital
+                # (a/r)^2 flux factor. Preserve the daily-mean path exactly.
+                cos_zen = jnp.clip(Q_daily / (_eccf * S_0), 0.0, 1.0)
         else:
             cos_zen = jnp.full_like(p_s, 0.5)
 
@@ -2677,7 +2689,9 @@ class CoupledESMDriver:
                 f"atm_owns_surface: segment {dt_segment} s != coupling_dt "
                 f"{win} s; the atmosphere's exports are the means of ONE "
                 "coupling window.")
-        atm_forcing = self._build_atm_forcing(day)
+        atm_forcing = (self._build_atm_forcing(day, segment_seconds=dt_segment)
+                       if self.atm_config.diurnal_cycle
+                       else self._build_atm_forcing(day))
         self._last_atm_precip = atm_forcing.precip_total
         q_flux_now = None
         if getattr(self, "_qflux_forcing", None) is not None:
@@ -2718,7 +2732,9 @@ class CoupledESMDriver:
 
         from legoesm.coupler.grid_remap import remap_field, remap_surface_fields
 
-        atm_forcing = self._build_atm_forcing(day)
+        atm_forcing = (self._build_atm_forcing(day, segment_seconds=dt_segment)
+                       if self.atm_config.diurnal_cycle
+                       else self._build_atm_forcing(day))
         # F2 (C1) tripwire: stash the precip RATE the coupler is about to
         # deliver so the segment-boundary moisture-budget residual can compare
         # it against the atmosphere's OWN column-water-vapour drain (an

@@ -11,11 +11,13 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
 
-def _coupled_driver(insolation_start_doy):
+def _coupled_driver(insolation_start_doy, *, diurnal=False, orbital=False,
+                    output_dir=None):
     from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
@@ -25,8 +27,9 @@ def _coupled_driver(insolation_start_doy):
         dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="latlon_cgrid"),
         radiation="gray", convection="none", turbulence="none", days=1,
-        insolation_start_doy=insolation_start_doy)
-    drv = CoupledESMDriver(atm, CoupledConfig())     # slab ocean (default)
+        insolation_start_doy=insolation_start_doy,
+        diurnal_cycle=diurnal, orbital_insolation=orbital)
+    drv = CoupledESMDriver(atm, CoupledConfig(), output_dir=output_dir)
     drv.setup()
     return _as_after_one_segment(drv)
 
@@ -36,6 +39,8 @@ def _as_after_one_segment(drv):
     the coupler refuses to build surface forcing before one exists."""
     z = jnp.zeros_like(drv._atm.state.p_s.data)
     drv._atm._carry_aux = {"held_sw_net_sfc": z, "held_lw_net_sfc": z, "seg_precip": z}
+    if drv.atm_config.diurnal_cycle:
+        drv._atm._carry_aux.update(seg_sw_net_sfc=z, seg_lw_net_sfc=z)
     return drv
 
 
@@ -70,6 +75,64 @@ def test_coupler_insolation_default_is_january_byte_identical():
     lat = drv._atm._grid_lat
     np.testing.assert_allclose(np.asarray(cos_zen), np.asarray(_cos_zen_ref(lat, 1.0)),
                                rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("owned", [False, True])
+@pytest.mark.parametrize("orbital", [False, True])
+@pytest.mark.parametrize("diurnal", [False, True])
+def test_segment_hands_surface_midpoint_sun_or_legacy_daily_mean(
+        monkeypatch, tmp_path, owned, orbital, diurnal):
+    """Exercise both real segment callers up to their first surface handoff.
+
+    The expected geometry comes from the host solar formula at an independently
+    specified midpoint, not from the forcing builder. Equality is exact in
+    float64: this checks routing, not agreement between solar approximations.
+    """
+    from legoesm.atmosphere.physics.radiation.solar import (
+        cos_zenith_angle, daily_mean_insolation, earth_orbit,
+        earth_sun_distance_factor,
+    )
+    from legoesm.coupler import grid_remap
+
+    drv = _coupled_driver(244, diurnal=diurnal, orbital=orbital,
+                          output_dir=tmp_path)
+    orbit = earth_orbit() if orbital else None
+    handed = []
+
+    class SurfaceHandoffReached(Exception):
+        pass
+
+    def capture_forcing(forcing, remapper):
+        handed.append(forcing)
+        raise SurfaceHandoffReached
+
+    # Stop at the real handoff, before unrelated ocean/land integration.
+    monkeypatch.setattr(grid_remap, "remap_surface_fields", capture_forcing)
+    dt = float(drv.coupled_cfg.coupling_dt)
+    lat, lon = drv._atm._grid_lat, drv._atm._grid_lon
+    for end_hour in (1.0, 7.0, 13.0, 19.0):
+        end_day = end_hour / 24.0
+        with pytest.raises(SurfaceHandoffReached):
+            if owned:
+                drv._owned_segment(end_day, dt)
+            else:
+                drv._segment_hook(drv._atm, end_day, dt)
+        actual = np.asarray(handed[-1].cos_zenith)
+        if diurnal:
+            midpoint = (end_hour - dt / 7200.0) / 24.0
+            doy, seconds = drv._atm._calendar_for_radiation(midpoint)
+            raw = np.asarray(cos_zenith_angle(
+                lat, lon, doy, seconds / 3600.0, orbit=orbit))
+            expected = np.maximum(raw, 0.0)
+            assert np.any(raw < 0.0) and np.any(raw > 0.0)
+            np.testing.assert_array_equal(actual[raw < 0.0], 0.0)
+        else:
+            doy, _ = drv._atm._calendar_for_radiation(end_day)
+            eccf = earth_sun_distance_factor(float(doy), orbit) if orbital else 1.0
+            s0 = drv.atm_config.S_0
+            expected = jnp.clip(daily_mean_insolation(
+                lat, float(doy), S_0=s0, orbit=orbit) / (eccf * s0), 0.0, 1.0)
+        np.testing.assert_array_equal(actual, np.asarray(expected))
 
 
 def _earth_system_driver(insolation_start_doy, tmp_path):
