@@ -15,7 +15,8 @@ readonly O17_EXTENDED=${O17_EXTENDED:-0}
 
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly NEMO_SOURCE_ROOT=${NEMO_SOURCE_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
-readonly SOURCE_CFG=ORCA2_SAS_ICE
+readonly SOURCE_CFG=${SOURCE_CFG:-ORCA2_SAS_ICE}
+readonly SOURCE_EXP=${SOURCE_EXP:-EXPREF}
 readonly BASE_BLD=${BASE_BLD:-$NEMO_ROOT/cfgs/ORCA2_SAS_ICE_O7_REF/BLD}
 readonly SAS_PPSRC=$BASE_BLD/ppsrc/nemo
 readonly REAL_SAS_FIXTURE=${O8O16_REAL_SAS_FIXTURE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round13/refused/oracle_o7_orca2_sas_ice_20261025T172428Z_rc2_3061284}
@@ -53,7 +54,7 @@ readonly WRITER=$here/o8_o16_master_writer.F90
 readonly O17_WRITER=$here/o17_master_writer.F90
 readonly STUB_NEMO=$here/stub_nemo.sh
 readonly STUB_MPIRUN=$here/stub_mpirun.sh
-readonly PROD=$NEMO_ROOT/cfgs/$SOURCE_CFG/EXPREF
+readonly PROD=$NEMO_ROOT/cfgs/$SOURCE_CFG/$SOURCE_EXP
 readonly SHARED=$NEMO_ROOT/cfgs/SHARED
 readonly REF_ROOT=$NEMO_ROOT/cfgs/$REF_CFG
 readonly REC_ROOT=$NEMO_ROOT/cfgs/$REC_CFG
@@ -555,6 +556,16 @@ admit() {
   [[ -f "$EVIDENCE/manifest/run_manifest.json" ]] || refuse 'missing pre-run manifest'
   "$PY" "$GATE" --admit-existing "$EVIDENCE"
 }
+
+# Acquisition profiles extend this admitted framework without copying its
+# traps, resource gates, retained-refusal policy, or argument parser.
+if [[ -n "${O8O16_PROFILE_SCRIPT:-}" ]]; then
+  [[ -r "$O8O16_PROFILE_SCRIPT" ]] || refuse "profile is unreadable: $O8O16_PROFILE_SCRIPT"
+  # shellcheck source=/dev/null
+  source "$O8O16_PROFILE_SCRIPT"
+  c_profile_main "$mode"
+  exit 0
+fi
 
 if [[ "$mode" == --move-aside-builds ]]; then move_builds_aside; exit 0; fi
 if [[ "$mode" == --preflight-only ]]; then run_preflight; exit 0; fi

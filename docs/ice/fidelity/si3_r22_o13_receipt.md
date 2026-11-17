@@ -68,7 +68,7 @@ Focused results:
 
 ## 5. Master score and controls
 
-The r21 scorer was extended in place. `_score_o13_step` reads verified Kind 11/12 pairs, calls the production function with arrays as JIT arguments, checks P4 conservation, and compares every one of the 96 EXIT fields (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1036-1066`). `score_o13` is the all-step mode of that same block, not a reimplementation (`:1069-1121`), and the integrated O8–O13 loop calls the same helper (`:1845-1849`).
+The r21 scorer was extended in place. `_score_o13_step` reads verified Kind 11/12 pairs, calls the production function with arrays as JIT arguments, checks P4 conservation, and compares every one of the 96 EXIT fields (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1054-1084`). `score_o13` is the all-step mode of that same block, not a reimplementation (`:1087-1139`), and the integrated O8–O13 loop calls the same helper (`:1863-1867`).
 
 Admission pins verified during the final run:
 

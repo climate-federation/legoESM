@@ -17175,6 +17175,50 @@ CITATION_MAP.update({
         38],
 })
 
+# The coupled C-ladder made the shared master-record dimensions explicit.  Its
+# additive line shifts compose with the already-resolved main/SI3 line map.
+# Preserve both historical citation spellings because receipts on the two
+# parents cite each form.
+_C_LADDER_REANCHORS = (
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1036-1066', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1054-1084'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1069-1121', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1087-1139'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1845-1849', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1863-1867'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2588', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2620'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:540-596', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:558-614'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:714-1032', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:732-1050'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1287-1304', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1305-1322'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1463-1696', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1481-1714'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1585-1610', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1603-1628'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1720-1730', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1738-1748'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1733-1805', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1751-1823'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1811-1842', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1829-1860'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1236-1973', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1254-1991'),
+    ('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1151', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1153'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:882-890', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:900-908'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1129-1232', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1147-1250'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:328-366', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:329-367'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:369-423', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:370-424'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:607-696', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:625-714'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2159-2232', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2186-2259'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2298-2475', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2325-2507'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2440-2455', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2472-2487'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:257-300', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:258-301'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:427-536', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:428-540'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1698-1717', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1716-1735'),
+    ('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1170', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1172'),
+)
+for _old, _new in _C_LADDER_REANCHORS:
+    _value = CITATION_MAP[_old] if _old in CITATION_MAP else CITATION_MAP[_new]
+    _live = _value.get("lines", _old.rsplit(":", 1)[1]) if isinstance(_value, dict) else _old.rsplit(":", 1)[1]
+    _combined = _compose_reline(_old, _new, _live)
+    _resolved = _catchup_value(
+        _value,
+        _old.rsplit(":", 1)[0] + ":" + _combined,
+        _line_extent(_combined),
+    )
+    CITATION_MAP[_old] = _resolved
+    CITATION_MAP[_new] = _resolved
+
 def audit_map() -> list[dict]:
     """EVERY entry in the map must resolve cleanly, cited this round or not.
 

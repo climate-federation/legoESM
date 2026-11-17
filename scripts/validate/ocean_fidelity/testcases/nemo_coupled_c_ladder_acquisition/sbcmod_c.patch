@@ -1,0 +1,15 @@
+--- sbcmod.f90
++++ sbcmod.f90
+@@ -76,1 +76,2 @@
+-   USE diu_bulk, ONLY:   ln_diurnal_only   ! diurnal SST diagnostic
++   USE diu_bulk, ONLY:   ln_diurnal_only   ! diurnal SST diagnostic
++   USE c_ladder_writer, ONLY : c_record_sbc
+@@ -501,1 +502,3 @@
+-      CASE(  2 )   ;         CALL ice_stp  ( kt, Kbb, Kmm, nsbc )      ! SI3 ice model
++      CASE(  2 )
++                              CALL c_record_sbc(3,kt,Kbb,Kmm)
++                              CALL ice_stp( kt, Kbb, Kmm, nsbc )       ! SI3 ice model
+@@ -570,1 +573,2 @@
+-      END DO   ;   END DO
++      END DO   ;   END DO
++      CALL c_record_sbc(4,kt,Kbb,Kmm)
