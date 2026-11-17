@@ -311,9 +311,9 @@ class CanopyConfig(NamedTuple):
     # v10 ``two_stream_shared`` (``canopy_shortwave_two_stream``; needs the
     # ``leaf_*`` CanopyLandParams).  Static Python string.  Appended at the end.
     sw_scheme: str = "ryu"
-    # Smoothing width [-] (fraction of the incident band flux) of the two-stream
-    # clip of the sunlit absorbed fraction to [0, canopy absorbed] (upstream clips
-    # hard).  0 = the reference's hard clip.  Read only by sw_scheme="two_stream".
+    # Smoothing width [-] of the two-stream clip of the sunlit share of canopy
+    # absorption (sunlit / canopy absorbed) to [0, 1] (upstream clips hard).  0 =
+    # the reference's hard clip.  Read only by sw_scheme="two_stream".
     two_stream_clip_width: float = 0.01
 
     def validate(self) -> "CanopyConfig":

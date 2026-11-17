@@ -195,18 +195,54 @@ def test_default_width_gap_recorded(pft, ci):
     np.testing.assert_allclose(gap, DEFAULT_GAP[(pft, ci)], rtol=1e-6, atol=1e-12)
 
 
-def test_gradient_through_default():
-    case = CASES[1]
+# A forcing case whose sunlit/canopy ratio sits INSIDE the smoothing band at the
+# default width (measured; see GRAD_CASE_NOTE), so the gradient test exercises the
+# smooth switch rather than an exact branch.
+GRAD_PFT, GRAD_CI = "DBF", 1
+
+
+def _sun(width, pft, ci):
     def f(lai, sza):
-        a = [jnp.array([x]) for x in case]
+        a = [jnp.array([x]) for x in CASES[ci]]
         a[6], a[5] = lai, sza
         o = rt.canopy_shortwave_two_stream(*a, jnp.array([60.0]), jnp.array([40.0]), jnp.array([0.4]),
-                                           _optics("DBF"), 0.01)
+                                           _optics(pft), width)
         return jnp.sum(o.ASW_Sun) + 0.5 * jnp.sum(o.ASW_Sh)
-    lai, sza = jnp.array([1.5]), jnp.array([55.0])
+    return f
+
+
+def test_gradient_through_default():
+    f = _sun(0.01, GRAD_PFT, GRAD_CI)
+    lai, sza = jnp.array([CASES[GRAD_CI][6]]), jnp.array([CASES[GRAD_CI][5]])
     check_grads(f, (lai, sza), order=1, modes=["rev"], atol=1e-6, rtol=1e-5)
     g = jax.grad(f)(lai, sza)
     assert np.isfinite(float(g[0])) and float(g[0]) != 0.0
+    # control: the case is inside the band, so the hard clip has a different slope
+    g_hard = jax.grad(_sun(0.0, GRAD_PFT, GRAD_CI))(lai, sza)
+    assert abs(float(g[0]) - float(g_hard[0])) > 1e-6 * abs(float(g_hard[0])) + 1e-9
+
+
+@pytest.mark.parametrize("width", [0.0, 0.01])
+def test_sunlit_bounded_in_sparse_canopies(width):
+    """0 <= sunlit <= canopy absorbed for every L down to the floor, both widths;
+    the control shows the grid reaches the regime where a flux-space smooth clip
+    (the reviewed defect) goes negative."""
+    from legoesm.core.smooth import smooth_max_c1, smooth_min_c1
+    worst_flux_space = 0.0
+    for pft in PFTS:
+        opt = _optics(pft)
+        for sza in (10.0, 45.0, 75.0, 88.0):
+            for L in (1e-4, 1e-3, 5e-3, 0.02, 0.1):
+                for rho, tau in ((opt.rho_vis, opt.tau_vis), (opt.rho_nir, opt.tau_nir)):
+                    fr = rt._ts_fractions(jnp.array([sza]), jnp.array([L]), rho, tau, 0.2, opt,
+                                          jnp.array([0.7]), width)
+                    for kind in "bd":
+                        sun, sh, _, _ = (float(x[0]) for x in fr[kind])
+                        assert sun >= 0.0 and sh >= -1e-15
+                        veg = sun + sh
+                        old = float(smooth_min_c1(smooth_max_c1(jnp.array(0.3 * veg), 0.0, 0.01), veg, 0.01))
+                        worst_flux_space = min(worst_flux_space, old)
+    assert worst_flux_space < 0.0
 
 
 @pytest.mark.parametrize("width", [0.0, 0.01])
@@ -224,7 +260,7 @@ def test_energy_closure(width):
                         sun, sh, soil, alb = (float(x[0]) for x in fr[kind])
                         assert min(sun, sh, soil) >= -1e-12
                         assert abs(alb + sun + sh + soil - 1.0) < 1e-12
-    for case in CASES[:4]:
+    for case in CASES[:4] + [CASES[0][:6] + (0.0,) + CASES[0][7:]]:
         out = _run(case, "DBF", width)
         PARd, PARf, NIRd, NIRf, UV, *_, AV, AN = case
         incoming_abs = (1 - AV) * (PARd + PARf + UV) + (1 - AN) * (NIRd + NIRf)

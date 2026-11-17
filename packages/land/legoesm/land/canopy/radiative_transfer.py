@@ -497,9 +497,16 @@ def canopy_shortwave_rt(
 # (documented departures from the closed form): K nudged by _TS_K_NUDGE off the
 # K = h removable singularity, the h -> K series of the cross integral, the
 # omega*beta and leaf-area floors, the SZA > 89 deg night extinction, the
-# rescale skipped below _TS_FLUX_EPS, LAI <= 0 zeroing.  RULE 5: upstream's hard
-# clip of the sunlit fraction to [0, canopy absorbed] is smoothed (C1, exact
-# outside a band of ``clip_width``); ``clip_width = 0`` is the hard clip.
+# rescale skipped below _TS_FLUX_EPS, LAI <= 0 zeroing.  Departure: at LAI <= 0
+# the soil takes the whole absorbed total (upstream discards the leaf share of
+# the floored solve, ~1e-4 of (1 - ALB) I).  RULE 5 KNOWN DIFFERENCE: upstream's
+# hard clip of the sunlit fraction to [0, canopy absorbed] is smoothed in ratio
+# space (sunlit / canopy absorbed clipped to [0, 1] by smooth_max_c1 /
+# smooth_min_c1, exact outside a band of ``clip_width``); ``clip_width = 0``
+# recovers the reference.  At the default 0.01 the sunlit absorbed SW differs
+# from the reference only where that ratio is within 0.005 of 1 (sparse canopies:
+# per-case gaps in tests/land/unit/test_canopy_two_stream_sw.py); invariants
+# kept: 0 <= sunlit <= canopy absorbed, sunlit + shaded = canopy absorbed.
 # Not ported (separate upstream differences): its PFT-geometry Vcmax split (ours
 # kept), its longwave k_d, its per-site soil-albedo inversion.
 _TS_NIGHT_SZA = 89.0          # deg; beyond it the beam extinction is _TS_NIGHT_K
@@ -624,8 +631,13 @@ def _ts_fractions(SZA, L, rho, tau, alb_soil, optics, w_sun, clip_width):
                        + h * A * (vm - 1.0) * (1.0 - eK * eL) / (K + h)
                        - h * B * (vp - 1.0) * cross)
         beam_sun = (1.0 - omega) * (1.0 - eK) if kind == "b" else 0.0
-        abs_sun = smooth_min_c1(smooth_max_c1(beam_sun + w_sun * sun_diffuse, 0.0, clip_width),
-                                abs_veg, clip_width)
+        # Upstream: clip(raw, 0, abs_veg).  Smoothed in RATIO space so the result
+        # stays in [0, abs_veg] exactly (the bands at 0 and 1 cannot overlap) and
+        # the gap scales with abs_veg; clip_width = 0 is the hard clip.
+        pos = abs_veg > 0.0
+        ratio = jnp.where(pos, (beam_sun + w_sun * sun_diffuse) / jnp.where(pos, abs_veg, 1.0), 0.0)
+        ratio = smooth_min_c1(smooth_max_c1(ratio, 0.0, clip_width), 1.0, clip_width)
+        abs_sun = abs_veg * ratio
         out[kind] = (abs_sun, abs_veg - abs_sun, abs_soil, albedo)
     return out
 
@@ -683,7 +695,9 @@ def canopy_shortwave_two_stream(
     leafy = LAI > 0
     ASW_Sun = jnp.where(leafy, P[0] + N[0] + U[0], zero)
     ASW_Sh = jnp.where(leafy, P[1] + N[1] + U[1], zero)
-    ASW_Soil = P[2] + N[2] + U[2]
+    # LAI <= 0: the solver ran on the L floor; the soil takes the whole absorbed
+    # total so absorbed SW = (1 - ALB) I (upstream discards the leaf share there).
+    ASW_Soil = jnp.where(leafy, P[2] + N[2] + U[2], sum(P) + sum(N) + sum(U))
     APAR_Sun = jnp.where(leafy, P[0] * _APAR_CONVERSION, zero)
     APAR_Sh = jnp.where(leafy, P[1] * _APAR_CONVERSION, zero)
 
