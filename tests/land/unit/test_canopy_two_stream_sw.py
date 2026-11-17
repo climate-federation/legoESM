@@ -124,6 +124,7 @@ CASES = [  # PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV, SZA, LAI, CI, ALB_VIS, AL
     (250.0, 40.0, 260.0, 40.0, 12.0, 35.0, 0.3, 1.0, 0.10, 0.30),
     (0.0, 5.0, 0.0, 5.0, 0.2, 88.5, 2.5, 0.6, 0.05, 0.27),
     (200.0, 50.0, 210.0, 50.0, 10.0, 45.0, 0.02, 0.5, 0.12, 0.30),
+    (220.0, 40.0, 230.0, 40.0, 10.0, 30.0, 0.01, 1.0, 0.08, 0.30),  # sunlit share in the band
 ]
 PFTS = ["ENF", "DBF", "SAV", "GRA"]
 
@@ -198,7 +199,7 @@ def test_default_width_gap_recorded(pft, ci):
 # A forcing case whose sunlit/canopy ratio sits INSIDE the smoothing band at the
 # default width (measured; see GRAD_CASE_NOTE), so the gradient test exercises the
 # smooth switch rather than an exact branch.
-GRAD_PFT, GRAD_CI = "DBF", 1
+GRAD_PFT, GRAD_CI = "DBF", 6
 
 
 def _sun(width, pft, ci):
