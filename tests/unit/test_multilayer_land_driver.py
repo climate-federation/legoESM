@@ -1521,8 +1521,7 @@ def test_bootstrap_then_regular_call_books_each_sample_once():
     downward SW/LW."""
     import jax
     from legoesm.core.coupling_fields import AtmToSurface
-    from legoesm.driver.model_driver import (
-        LAND_EXTENSIVE_FORCING, land_bootstrap_forcing)
+    from legoesm.driver.model_driver import land_bootstrap_forcing
     K, DT = 3, 300.0
     rng = np.random.default_rng(0)
 
@@ -1532,7 +1531,8 @@ def test_bootstrap_then_regular_call_books_each_sample_once():
     s = [sample() for _ in range(K + 1)]
     boot = land_bootstrap_forcing(s[0], 1, K)
     reg = jax.tree_util.tree_map(lambda *x: sum(x) / K, *s[1:])
-    for f in LAND_EXTENSIVE_FORCING:
+    # named here, not read from the module, so dropping one there fails here
+    for f in ("sw_down", "lw_down", "precip_total", "precip_snow"):
         booked = (np.asarray(getattr(boot, f))
                   + np.asarray(getattr(reg, f))) * K * DT
         fell = sum(np.asarray(getattr(x, f)) for x in s) * DT
