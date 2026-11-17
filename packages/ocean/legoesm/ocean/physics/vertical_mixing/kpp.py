@@ -30,10 +30,12 @@ FAITHFUL to LMD94:
   surface-layer cap d_eff = min(d, epsilon*h).
 - ``_kpp_unresolved_shear_variance`` — the Eq. 23 V_t^2 with the explicit
   (-beta_T)^1/2 prefactor and Cv = 1.6 (a prior 2.236x-too-large bug is fixed).
-- ``_boundary_layer_depth`` — the Eq. 21 bulk-Richardson TERM: the Ri_b criterion
-  with density referenced to the surface pressure (potential density,
-  CVMix/MOM6 convention).  The crossing DEPTH itself is a sigmoid blend, not
-  LMD94's discrete interpolation — see DEPARTURES.
+- ``_boundary_layer_depth`` — the Eq. 21 bulk-Richardson TERM.  Two structures
+  (``KPPConfig.bld_structure``): ``"legacy"`` differences top-cell potential
+  density (p = 0) and picks the crossing by a sigmoid-weighted average of
+  cell-centre depths; ``"cvmix"`` follows CVMix/MOM6 (surface-layer averaged
+  reference at the local pressure, (1 - eps/2) Ri scaling, first-crossing
+  quadratic interpolation) — see DEPARTURES.
 - ``KPPConfig`` App. B constants (kappa, Ri_c=0.3, Cv=1.6, a_m, c_m, a_s, c_s,
   zeta_m, zeta_s, 16/5 Businger coefficients).
 
@@ -45,8 +47,15 @@ DEPARTURES (documented, canaried in the test):
   sigma = 1; the reduced form cannot represent a nonzero interior-matched base
   value/slope, so it omits that matching construction (base entrainment is
   under-represented whenever the interior K/dK is nonzero there).
-- The BL-depth crossing is a differentiable sigmoid-weighted interpolation
-  (``crossing_sharpness``), not LMD94's discrete linear interpolation.
+- ``bld_structure="legacy"``: the BL-depth crossing is a sigmoid-weighted
+  average of cell-CENTRE depths; at the hard limit it snaps to the centre of
+  the first supercritical cell (no interpolation), and the BL diffusivity is
+  evaluated at centres and averaged to interfaces.
+- ``bld_structure="cvmix"``: the first-crossing selection is smooth
+  (sigmoid of sharpness ``crossing_sharpness`` on Ri_b - Ri_c); at the hard
+  limit it reproduces CVMix ``compute_OBL_depth`` (quadratic) except at
+  Ri_b == Ri_c exactly, where the sigmoid gives 1/2 and CVMix's strict ``>``
+  gives 0.
 - AD-safety floors/caps (d_eff cap, w >= 1e-10, N^2 >= 0, base clips) and the
   optional Langmuir-turbulence enhancement (off by default).
 
@@ -270,6 +279,99 @@ def _kpp_unresolved_shear_variance(N, d, w_s, cfg, eps):
                * jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))))
 
 
+_BLD_STRUCTURES = ("legacy", "cvmix")
+# CVMix compute_bulk_Richardson: a zero denominator gives num * 1e10.
+_CVMIX_ZERO_DENOM_RI_FACTOR = 1e10
+
+
+def _mom6_surface_layer_deltas(T, S, u, v, dz, z_depth, cfg, eos_fn, g):
+    """MOM6 KPP_compute_BLD reference differences (MOM_CVMix_KPP.F90 1300-1428).
+
+    For each centre k the reference is the thickness average of T, S, u, v over
+    the surface layer [0, SL_k], SL_k = epsilon * max(d_k, top-cell thickness),
+    and both density operands are evaluated at the pressure of the top
+    interface of k (rho_0 * g * z_top_k, Boussinesq).  Returns
+    (delta_rho [kg/m^3], delta_V2 [m^2/s^2]), each (..., nlev).
+    """
+    z_bot = jnp.cumsum(dz, axis=-1)
+    z_top = z_bot - dz
+    sl = cfg.epsilon_lmd * jnp.maximum(z_depth, dz[..., :1])
+    nlev = z_bot.shape[-1]
+    # Cell holding SL_k: first bottom interface strictly below it (MOM6's
+    # overlap min(max(0, SL - z_top), dz) summed over cells).
+    j = jax.vmap(lambda zb, x: jnp.searchsorted(zb, x, side="right"))(
+        z_bot.reshape(-1, nlev), sl.reshape(-1, nlev)).reshape(sl.shape)
+    j = jnp.minimum(j, nlev - 1)
+    sl_safe = jnp.where(sl > 0.0, sl, 1.0)  # dry columns: forward value unused
+
+    def sl_mean(q):
+        cum_top = jnp.cumsum(q * dz, axis=-1) - q * dz
+        part = (jnp.take_along_axis(cum_top, j, axis=-1)
+                + jnp.take_along_axis(q, j, axis=-1)
+                * (sl - jnp.take_along_axis(z_top, j, axis=-1)))
+        return part / sl_safe
+
+    S_eos = eos_salinity(S, eos_fn)
+    p_top = rho_0_ref * g * z_top
+    delta_rho = (eos_fn(T, S_eos, p_top)
+                 - eos_fn(sl_mean(T), sl_mean(S_eos), p_top))
+    delta_V2 = (u - sl_mean(u)) ** 2 + (v - sl_mean(v)) ** 2
+    return delta_rho, delta_V2
+
+
+def _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g):
+    """CVMix compute_bulk_Richardson: (1 - eps/2) * d * g*delta_rho/rho_0 over
+    (delta_V2 + V_t2); a zero denominator gives num * 1e10."""
+    num = (1.0 - 0.5 * cfg.epsilon_lmd) * g * delta_rho * z_depth / rho_0_ref
+    den = delta_V2 + V_t2
+    return jnp.where(den != 0.0, num / jnp.where(den != 0.0, den, 1.0),
+                     num * _CVMIX_ZERO_DENOM_RI_FACTOR)
+
+
+def _cvmix_first_crossing_depth(Ri_b, z_depth, cfg):
+    """CVMix compute_OBL_depth_low (non-Stokes, quadratic), smoothed (RULE 5).
+
+    s_k = sigmoid(crossing_sharpness * (Ri_b_k - Ri_c)) replaces CVMix's
+    "first k with Ri_b_k > Ri_c"; the soft first-crossing weights
+    w_k = s_k * prod_{j<k}(1 - s_j) select: k = 0 -> d_0; k >= 1 -> the root of
+    CVMix's quadratic through (d_{k-1}, Ri_{k-1}), (d_k, Ri_k) with the
+    backward-difference slope at d_{k-1} (zero slope for k = 1); no crossing
+    (weight prod_j(1 - s_j)) -> d_{nlev-1}.  The hard limit (sharpness -> inf)
+    is CVMix's depth.  The in-bracket root is taken in closed form and clipped
+    into the bracket, with c = min(Ri_{k-1} - Ri_c, 0), so brackets that do not
+    straddle Ri_c (they only carry soft weight) stay finite and continuous.
+    """
+    s = jax.nn.sigmoid(cfg.crossing_sharpness * (Ri_b - cfg.Ri_crit))
+    surv = jnp.cumprod(1.0 - s, axis=-1)
+    pad_axes = ((0, 0),) * (s.ndim - 1)
+    surv_prev = jnp.pad(surv[..., :-1], (*pad_axes, (1, 0)), constant_values=1.0)
+    w = s * surv_prev
+    w_none = surv[..., -1]
+
+    d0, d1 = z_depth[..., :-1], z_depth[..., 1:]
+    y0, y1 = Ri_b[..., :-1], Ri_b[..., 1:]
+    H = d1 - d0
+    H_safe = jnp.where(H > 0.0, H, 1.0)
+    dprev = d0[..., 1:] - d0[..., :-1]
+    slope_prev = (y0[..., 1:] - y0[..., :-1]) / jnp.where(dprev > 0.0, dprev, 1.0)
+    m = jnp.pad(slope_prev, (*pad_axes, (1, 0)))   # bracket 1: zero slope
+    c = jnp.minimum(y0 - cfg.Ri_crit, 0.0)
+    a = (y1 - y0 - m * H) / H_safe ** 2
+    root_d = jnp.sqrt(jnp.maximum(m * m - 4.0 * a * c, 0.0))
+    # In-bracket root of a*x^2 + m*x + c: 2c/(-m - root_d) when m > 0 (no
+    # cancellation), (-m + root_d)/(2a) otherwise (straddling then needs a > 0).
+    den_pos = jnp.where(m > 0.0, -m - root_d, -1.0)
+    a_safe = jnp.where(a > 0.0, a, 1.0)
+    x_pos = 2.0 * c / den_pos
+    x_neg = jnp.where(a > 0.0, (-m + root_d) / (2.0 * a_safe), H)
+    x = jnp.clip(jnp.where(m > 0.0, x_pos, x_neg), 0.0, H)
+    h_bracket = d0 + x
+
+    return (w[..., 0] * z_depth[..., 0]
+            + jnp.sum(w[..., 1:] * h_bracket, axis=-1)
+            + w_none * z_depth[..., -1])
+
+
 def _boundary_layer_depth(
     rho: jnp.ndarray,
     T: jnp.ndarray,
@@ -288,8 +390,10 @@ def _boundary_layer_depth(
 ) -> jnp.ndarray:
     """Estimate boundary layer depth h via bulk Richardson number.
 
-    Uses linear interpolation to find the depth where Ri_b crosses
-    Ri_crit, rather than snapping to the nearest model level.
+    ``bld_structure="legacy"``: sigmoid-weighted average of cell-centre depths
+    around the Ri_b = Ri_crit crossing (hard limit: centre of the first
+    supercritical cell, no interpolation).  ``"cvmix"``: CVMix first-crossing
+    quadratic interpolation, smoothed (``_cvmix_first_crossing_depth``).
 
     Returns shape (...) boundary layer depth [m, positive downward].
     """
@@ -299,6 +403,10 @@ def _boundary_layer_depth(
     # Depth of cell centers below surface (positive downward)
     z_depth = jnp.cumsum(dz_actual, axis=-1) - 0.5 * dz_actual
 
+    if cfg.bld_structure not in _BLD_STRUCTURES:
+        raise ValueError(
+            f"Unknown KPPConfig.bld_structure={cfg.bld_structure!r}; "
+            f"expected one of {_BLD_STRUCTURES}.")
     # Buoyancy (density) and velocity differences from the surface for the
     # bulk Richardson number.  LMD94 Eq. 21 requires density referenced to a
     # COMMON pressure: the previous ``rho - rho[..., :1]`` differenced two
@@ -306,9 +414,10 @@ def _boundary_layer_depth(
     # pressures, so in warm/deep/stratified columns the compressibility +
     # thermobaric contribution inflated delta_rho and the boundary layer was
     # diagnosed too shallow (the documented low-latitude MLD-too-shallow
-    # bias).  Reference every level to the SURFACE pressure (p = 0 Pa =>
-    # potential density) before differencing, removing the spurious pressure
-    # term (CVMix / MOM6 KPP convention).  ``eos_fn`` defaults to
+    # bias).  "legacy" references every level to the SURFACE pressure (p = 0
+    # Pa => potential density) and to the top cell; MOM6 instead uses the
+    # local pressure and a surface-layer average ("cvmix", see
+    # _mom6_surface_layer_deltas).  ``eos_fn`` defaults to
     # ``wright_eos`` so the reference density matches how the in-situ ``rho``
     # was built when the caller does not thread an explicit EOS.  (N^2 / V_t^2
     # below still use the in-situ ``rho`` gradient — a smaller secondary
@@ -318,11 +427,15 @@ def _boundary_layer_depth(
         eos_fn = wright_eos
     # Floored salinity for sqrt(S) EOSes (infinite dRho/dS at S = 0), as
     # the density above; Wright as is (#2243).
-    rho_surf_ref = eos_fn(T, eos_salinity(S, eos_fn), jnp.zeros_like(T))
-    delta_rho = rho_surf_ref - rho_surf_ref[..., :1]
-    delta_u = u - u[..., :1]
-    delta_v = v - v[..., :1]
-    delta_V2 = delta_u**2 + delta_v**2
+    if cfg.bld_structure == "cvmix":
+        delta_rho, delta_V2 = _mom6_surface_layer_deltas(
+            T, S, u, v, dz_actual, z_depth, cfg, eos_fn, g)
+    else:
+        rho_surf_ref = eos_fn(T, eos_salinity(S, eos_fn), jnp.zeros_like(T))
+        delta_rho = rho_surf_ref - rho_surf_ref[..., :1]
+        delta_u = u - u[..., :1]
+        delta_v = v - v[..., :1]
+        delta_V2 = delta_u**2 + delta_v**2
 
     # LMD94 Eq. 23 unresolved-shear variance:
     #   V_t^2(d) = Cv * (-beta_T)^1/2 / (Ri_c * kappa^2) * (c_s*eps)^-1/2
@@ -352,6 +465,11 @@ def _boundary_layer_depth(
     _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg,
                                      ice_frac=ice_frac)
     V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)
+
+    if cfg.bld_structure == "cvmix":
+        Ri_b = _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g)
+        h = _cvmix_first_crossing_depth(Ri_b, z_depth, cfg)
+        return jnp.maximum(h, dz_actual[..., 0])
 
     # Bulk Richardson number
     Ri_b = (g * delta_rho * z_depth) / (
@@ -547,6 +665,8 @@ def kpp_vertical_mixing(
         ))[..., jnp.newaxis]
         w_m = w_m * eps_langmuir
         w_s = w_s * eps_langmuir
+    else:
+        eps_langmuir = 1.0
 
     # --- BL viscosity (momentum, w_m) and diffusivity (scalar, w_s) ---
     K_bl_m_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_m * G, cfg.K_max)
@@ -581,8 +701,22 @@ def kpp_vertical_mixing(
     K_bl_s_half = 0.5 * (K_bl_s_full[..., :-1] + K_bl_s_full[..., 1:])
 
     # sigma at interfaces
-    z_half_depth = 0.5 * (z_depth[..., :-1] + z_depth[..., 1:])
-    sigma_half = z_half_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
+    if cfg.bld_structure == "cvmix":
+        # CVMix SimpleShapes: K = h * w(sigma) * G(sigma) AT the interfaces.
+        z_half_depth = jnp.cumsum(dz_actual, axis=-1)[..., :-1]
+        sigma_half = z_half_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
+        sig_i = jnp.clip(sigma_half, 0.0, 1.0)
+        w_m_i, w_s_i = _kpp_velocity_scales(
+            u_star, B_f, sig_i * h_bl[..., jnp.newaxis], h_bl[..., jnp.newaxis],
+            cfg, ice_frac=ice_frac)
+        G_i = _kpp_shape_function(sig_i)
+        K_bl_m_half = jnp.minimum(
+            h_bl[..., jnp.newaxis] * w_m_i * eps_langmuir * G_i, cfg.K_max)
+        K_bl_s_half = jnp.minimum(
+            h_bl[..., jnp.newaxis] * w_s_i * eps_langmuir * G_i, cfg.K_max)
+    else:
+        z_half_depth = 0.5 * (z_depth[..., :-1] + z_depth[..., 1:])
+        sigma_half = z_half_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
     in_bl = sigma_half < 1.0
 
     # Combine BL and interior.  Each branch uses its own background

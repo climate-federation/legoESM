@@ -989,6 +989,11 @@ class KPPConfig(NamedTuple):
     a_s: float = -28.86       # LMD94 scalar convective constant (slope = c_s)
     crossing_sharpness: float = 20.0  # Sigmoid sharpness for h_bl crossing-depth selector
     crossing_threshold: float = 0.1   # Crossing-strength threshold for h_bl blend
+    # Boundary-layer structure: "legacy" (top-cell potential-density reference,
+    # centre-depth crossing average, centre K averaged to interfaces) or
+    # "cvmix" (MOM6 surface-layer/local-pressure reference, CVMix (1-eps/2) Ri,
+    # smoothed first-crossing quadratic interpolation, interface K).
+    bld_structure: str = "legacy"
     # Timestep [s] used to derive the explicit-diffusion CFL ceiling
     # A_v_max = 0.25 * min(dz_k, dz_k+1)^2 / cfl_cap_dt_s on the MPAS path.
     # MUST be set to the ocean dynamics dt for the cap to be correct: a
