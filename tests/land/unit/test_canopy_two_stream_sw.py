@@ -228,7 +228,7 @@ def test_gradient_through_default():
     assert abs(float(g[0]) - float(g_hard[0])) > 1e-6 * abs(float(g_hard[0])) + 1e-9
 
 
-@pytest.mark.parametrize("width", [0.0, 0.01])
+@pytest.mark.parametrize("width", [0.0, 0.01, 1.0])
 def test_sunlit_bounded_in_sparse_canopies(width):
     """0 <= sunlit <= canopy absorbed for every L down to the floor, both widths;
     the control shows the grid reaches the regime where a flux-space smooth clip
@@ -309,6 +309,9 @@ def test_config_default_and_validation():
         CanopyConfig(sw_scheme="bogus").validate()
     with pytest.raises(ValueError, match="two_stream_clip_width"):
         CanopyConfig(two_stream_clip_width=-1.0).validate()
+    CanopyConfig(two_stream_clip_width=1.0).validate()
+    with pytest.raises(ValueError, match="must be <= 1"):
+        CanopyConfig(two_stream_clip_width=1.01).validate()
     CanopyConfig(sw_scheme="two_stream").validate()
 
 

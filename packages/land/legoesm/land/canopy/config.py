@@ -356,6 +356,10 @@ class CanopyConfig(NamedTuple):
                 f"unknown sw_scheme {self.sw_scheme!r}; the canopy shortwave "
                 f"scheme must be one of {VALID_SW_SCHEMES}")
         validate_smoothing_width("two_stream_clip_width", self.two_stream_clip_width)
+        if self.two_stream_clip_width > 1.0:
+            raise ValueError(
+                "two_stream_clip_width must be <= 1 (the smoothing bands at 0 and 1 of "
+                f"the sunlit share would overlap), got {self.two_stream_clip_width!r}")
         return self
 
 
