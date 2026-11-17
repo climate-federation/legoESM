@@ -244,6 +244,26 @@ def validate_smoothing_width(name: str, w) -> None:
             f"[{lo:.3e}, {1.0 / lo:.3e}]; got {w!r}.")
 
 
+def abs_tanh(x: jax.Array, width: float) -> jax.Array:
+    """``|x|`` as ``x*tanh(x/width)`` (RULE 5): C-infinity, 0 at 0, never above
+    ``|x|``, within ``0.28*width`` of it.  ``width = 0`` is ``jnp.abs``."""
+    return jnp.abs(x) if width == 0 else x * jnp.tanh(x / width)
+
+
+def sign_tanh(x: jax.Array, width: float) -> jax.Array:
+    """``sign(x)`` as ``tanh(x/width)`` (RULE 5).  ``width = 0`` is ``jnp.sign``."""
+    return jnp.sign(x) if width == 0 else jnp.tanh(x / width)
+
+
+def zero_at_or_below(x: jax.Array, floor: float, width: float) -> jax.Array:
+    """``x`` zeroed where ``x <= floor`` (RULE 5): ``x*smoothstep_quintic((x -
+    floor)/width)``, exactly 0 at and below ``floor`` and exactly ``x`` from
+    ``floor + width``, C2.  ``width = 0`` is the hard ``where(x <= floor, 0, x)``."""
+    if width == 0:
+        return jnp.where(x <= floor, 0.0, x)
+    return x * smoothstep_quintic((x - floor) / width)
+
+
 def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
     if width == 0:

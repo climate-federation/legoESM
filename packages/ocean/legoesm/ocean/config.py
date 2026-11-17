@@ -166,8 +166,32 @@ def _is_bench_harness(setup) -> bool:
             and any(k in setup for k, _ in _BENCH_HARNESS_KEYS))
 
 
+# Single-column route (#2103): ``setup.grid: column`` names an ocean case of the
+# SCM matrix runner (a positional subcommand; no grid / override flags).  Kept
+# in step with that runner's ``CASES`` by tests/unit/test_ocean_setup_templates.py.
+_SCM_RUNNER = "scripts/matrix/run_scm_test_matrix.py"
+_OCEAN_SCM_CASES = ("ocean_convective_deepening",)
+
+
+def _ocean_scm_spec():
+    """MatrixRunnerSpec for the single-column runner (#2103)."""
+    from legoesm.core.setup_selector import MatrixRunnerSpec
+    return MatrixRunnerSpec(
+        runner_path=_SCM_RUNNER, valid_grids=("column",), case_flag="",
+        exact_prefix="", grid_flag=None, levels_flag=None, dt_flag=None,
+        days_flag=None, resolution_flag=None, output_flag=None,
+        quick_flag=None,
+    )
+
+
+def _is_column(setup) -> bool:
+    return isinstance(setup, dict) and setup.get("grid") == "column"
+
+
 def _setup_spec(setup):
     """The runner spec a ``setup:`` block routes to."""
+    if _is_column(setup):
+        return _ocean_scm_spec()
     return _bench_harness_spec() if _is_bench_harness(setup) \
         else _ocean_matrix_spec()
 
@@ -508,8 +532,14 @@ class OceanExperimentConfig:
         # Shape / keys / grid-set / run-control validation + registry membership
         # via the shared selector (single source of truth, used by every
         # component adapter).
+        column = _is_column(setup)
         validate_setup(setup, _setup_spec(setup),
-                       known_names=AVAILABLE_EXPERIMENTS)
+                       known_names=_OCEAN_SCM_CASES if column
+                       else AVAILABLE_EXPERIMENTS)
+        if column:
+            # Single-column case (#2103): not a 3-D registry experiment, so no
+            # ``grid_support`` gate.
+            return
         if _is_bench_harness(setup):
             _validate_bench_harness(setup)
         # Ocean-specific: the experiment's own ``grid_support`` gate — the grid

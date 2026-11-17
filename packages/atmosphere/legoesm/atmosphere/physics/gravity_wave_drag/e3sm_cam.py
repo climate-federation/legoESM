@@ -122,6 +122,12 @@ deliberate departures / version choices (canaries in
   (``umcfac_sign_width`` 1e-3 m/s; with the smooth ``|c - u|`` alone the
   signed tendency is only C1) and the ``taumin`` zeroing is a one-sided quintic ramp
   (``taumin_ramp_width`` 1e-10 Pa; 3 of 66); 0 = E3SM for each.
+  Since #2546 the stress redetermined below a limited layer adds E3SM's
+  ``abs(gwut)`` (= ``|tanh|*ubtl`` under the smooth sign), so the stress drop
+  equals the momentum the layer receives (RULE 0; carrying ``ubtl``, as
+  #2241 did, lost up to 24 % of a layer's deposit).  It is C1, not C2, where
+  a layer's unlimited non-positive divergence crosses a critical level (one
+  test point; vote 3-0).
   KNOWN DIFFERENCE at the defaults (measured 2026-11-16, per column, pinned
   in ``test_gw_spec_e3sm_oracle.py``): spectral arms up to 7.9e-3 in du/dt
   and 6.7e-3 in the dT field (background at dt = 1800 s, where the umcfac
@@ -204,12 +210,15 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 from legoesm.core.smooth import (
+    abs_tanh,
     blend_integer_index,
     pnorm_smooth_min,
+    sign_tanh,
     smooth_round,
     smooth_trunc,
     smoothstep_quintic,
     validate_smoothing_width,
+    zero_at_or_below,
 )
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
@@ -1225,9 +1234,7 @@ def gw_drag_prof(
     validate_smoothing_width("taumin_ramp_width", taumin_ramp_width)
 
     def zero_below_taumin(tau):
-        if taumin_ramp_width == 0.0:
-            return jnp.where(tau <= cfg.taumin, 0.0, tau)
-        return tau * smoothstep_quintic((tau - cfg.taumin) / taumin_ramp_width)
+        return zero_at_or_below(tau, cfg.taumin, taumin_ramp_width)
 
     # the ramp leaves stresses in (0, taumin], so the cap's eps contract
     # (inputs <= eps zeroed) needs eps 0 there (pnorm_smooth_min docstring).
@@ -1398,10 +1405,8 @@ def gw_drag_prof(
         # RULE 5 (#2241): |c-u| -> (c-u)*tanh((c-u)/w) and, below, sign(c-u)
         # -> tanh((c-u)/ws); smoothing only the |.| would leave the signed
         # tendency ~ sign(x)*x^2/w, C1 but not C2, at a critical level.
-        abs_cmu = (jnp.abs(cmu) if umcfac_abs_width == 0.0
-                   else cmu * jnp.tanh(cmu / umcfac_abs_width))
-        sign_cmu = (jnp.sign(cmu) if umcfac_sign_width == 0.0
-                    else jnp.tanh(cmu / umcfac_sign_width))
+        abs_cmu = abs_tanh(cmu, umcfac_abs_width)
+        sign_cmu = sign_tanh(cmu, umcfac_sign_width)
         limits = [cfg.umcfac * abs_cmu / dt, jnp.full_like(cmu, tndmax)]
         if is_oro:
             limits.insert(0, effkwv * jnp.abs(cmu) ** 3 / (
@@ -1436,10 +1441,14 @@ def gw_drag_prof(
             gwut = jnp.where(within, signed * effgw * ptap, 0.0)
             ubt = jnp.sum(gwut, axis=1)
 
-        # re-derive stress on the interface below from the bounded tendency.
+        # re-derive stress on the interface below from the bounded tendency
+        # (E3SM: abs(gwut)/(effgw*ptaper) = ubtl).  Under the smooth sign the
+        # deposited divergence is |tanh|*ubtl; carrying ubtl would drop
+        # (1-|tanh|)*ubtl of momentum (RULE 0, #2546 review).
+        deposited = ubtl if umcfac_sign_width == 0.0 else jnp.abs(sign_cmu) * ubtl
         tau_below_new = jnp.where(
             within,
-            tau_above + ubtl * dpm[:, m][:, None] / gravit,
+            tau_above + deposited * dpm[:, m][:, None] / gravit,
             tau_below,
         )
         tau_state = tau_state.at[:, :, m + 1].set(tau_below_new)

@@ -154,8 +154,10 @@ def test_matches_e3sm_oracle(fx, arm, ds):
 # landed (#2241: only background_dt1800 moved beyond 1e-5 relative, max du
 # 2.65e-3 -> 7.88e-3, dT field 1.02e-3 -> 6.74e-3; flat-column dT in three
 # other L36 arms moved < 5e-6 relative); a change to a smooth
-# form or a default width re-measures these (CLAUDE.md RULE 5).  Re-measured
-# 2026-11-16 when the Beres NINT/INT staircases landed (#2545,
+# form or a default width re-measures these (CLAUDE.md RULE 5).
+# Re-measured 2026-11-17 (#2546): the stress below a limited layer now adds
+# |gwut| (momentum-exact); only background_dt1800 (umcfac binds) moved.
+# Re-measured 2026-11-16 when the Beres NINT/INT staircases landed (#2545,
 # index_round_width 0.1, crit_minmax_sharpness 100): only the four Beres
 # (convective) entries moved.
 _DEFAULT_GAP = {
@@ -172,10 +174,10 @@ _DEFAULT_GAP = {
         'dT_cols_flat': [0.004082420000327104, 0.0005339347503535069, 0.0015094902321471752],
     },
     'background_dt1800/l36': {
-        'du': [0.002108721345086995, 0.0010616902333161087, 0.002646053370863181, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071295903564, 0.007878700328799434],
-        'dv': [0.0021087213450869256, 0.0010616902333162653, 0.002646053370863179, 0.002210858303638304, 0.0, 0.0, 0.00124560712959019, 0.0],
-        'dT_field': 0.006739966027246468,
-        'dT_cols_flat': [0.0039012106087277254, 0.0008934106656589562, 0.002919245822167362, 0.009024134388708792, 0.0008366734677625923, 0.003367887182159502, 0.006739966027246468],
+        'du': [0.002108721345086995, 0.0010616902333161087, 0.0026460533886112528, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071295903564, 0.007890662689603267],
+        'dv': [0.0021087213450869256, 0.0010616902333162653, 0.0026460533886112675, 0.002210858303638304, 0.0, 0.0, 0.00124560712959019, 0.0],
+        'dT_field': 0.0067412484444515555,
+        'dT_cols_flat': [0.0039012106087277254, 0.0008934106656589562, 0.002919245822167362, 0.009024134388708792, 0.0008366734677625923, 0.003367887182159502, 0.0067412484444515555],
     },
     'frontal_taper/l36': {
         'du': [0.0, 0.0, 0.0019715720332921342, 0.002044083485452372, 0.0, 0.0, 0.002221890296605758, 0.0],
@@ -253,7 +255,10 @@ _KINKS = (("convective_frontal/l36", 3, 0.8178145073179883, 1e-5),
           # eps 1e-6 at the umcfac cases: the smooth sign is 1e-3 m/s wide,
           # finer than u*1e-5 resolves (f'' measured continuous; vote 3-0).
           ("background/l36", 0, 0.8228612252375684, 1e-6),      # umcfac |c - u|
-          ("background/l32", 1, 0.8298968, 1e-6),               # umcfac |c - u|, sign
+          # order 1 here (#2546, vote 3-0): the momentum-exact carry |gwut|
+          # (CAM's abs) is C1, not C2, where this layer's unlimited
+          # non-positive divergence crosses the critical level.
+          ("background/l32", 1, 0.8298968, 1e-6, 1),            # umcfac |c - u|, sign
           ("background/l36", 3, 0.8242109368577084, 1e-5),      # taumin zeroing
           # #2545 (2026-11-16): the Beres source's E3SM NINT/INT of traced wind,
           # each flip located to 2e-7 in s on the shipped code: critical-level
@@ -273,8 +278,9 @@ _KINKS = (("convective_frontal/l36", 3, 0.8178145073179883, 1e-5),
           ("oro_frontal_convective/l32", 1, 0.8512297290955184, 1e-5))  # columns)
 
 
-@pytest.mark.parametrize("case,col,s_star,eps", _KINKS)
-def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps):
+@pytest.mark.parametrize("case,col,s_star,eps,order",
+                         [k if len(k) == 5 else (*k, 2) for k in _KINKS])
+def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps, order):
     """RULE 5 gradient test at the default; reverse mode, eps 1e-5 (Lindzen)
     unless the switch's width needs a finer step."""
     z, meta, table = fx
@@ -291,10 +297,10 @@ def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps
 
     f = make(_config(m["ours"], hard=False))
     s0 = jnp.asarray(s_star)
-    check_grads(f, (s0,), order=2, modes=("rev",), eps=eps)
+    check_grads(f, (s0,), order=order, modes=("rev",), eps=eps)
     assert float(jax.grad(f)(s0)) != 0.0
     with pytest.raises(AssertionError):          # the hard limit has the kink
-        check_grads(make(_config(m["ours"])), (s0,), order=2, modes=("rev",), eps=eps)
+        check_grads(make(_config(m["ours"])), (s0,), order=order, modes=("rev",), eps=eps)
 
 
 @pytest.mark.parametrize("field", ["umcfac_abs_width", "umcfac_sign_width", "taumin_ramp_width"])

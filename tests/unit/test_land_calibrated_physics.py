@@ -623,7 +623,7 @@ def test_a_canopy_gets_per_pft_canopy_parameters(monkeypatch, tmp_path):
     """
     import sys
     sys.path.insert(0, "tests/unit")
-    from test_multilayer_land_driver import _patch_land_loaders, _small_cfg
+    from test_multilayer_land_driver import _grid_lat, _patch_land_loaders, _small_cfg
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.land.canopy.config import CanopyLandParams
 
@@ -666,7 +666,7 @@ def test_a_canopy_gets_per_pft_canopy_parameters(monkeypatch, tmp_path):
         "emissivity now varies by column — if that is intended, this test is "
         "stale and the tuned emissivity may finally be reaching the canopy")
     # And the two datasets agreed on the column count.
-    assert np.asarray(params.hc).shape[0] == int(driver.grid.lat.size)
+    assert np.asarray(params.hc).shape[0] == int(np.asarray(_grid_lat(driver.grid)).size)
 
 
 def test_a_canopy_without_its_surfdata_is_refused(monkeypatch, tmp_path):
