@@ -141,8 +141,10 @@ deliberate departures / version choices (canaries in
   2026-11-16, #2545: critical-level bin bounds, table column ``NINT(uh)``,
   cell speed ``INT(CS)`` and Doppler shift ``NINT(CS/dc)``); since #2545 each
   is a C2 staircase with linear neighbour blending, ``beres.index_round_width``
-  0.1 index units (vote 3-0; 0 = E3SM), the table row ``NINT(hdepth)`` too.
-  A rescan of every Beres-arm column at the default finds no kink left.
+  0.1 index units (vote 3-0; 0 = E3SM), the table row ``NINT(hdepth)`` too;
+  the bounds' ``min``/``max`` over the heating-range levels are a masked
+  log-sum-exp (``beres.crit_minmax_sharpness`` 100 s/m, inf = E3SM; a level
+  swap inside a rounding window kinked, codex review).  A rescan of every Beres-arm column at the default finds no kink left.
   KNOWN DIFFERENCE (#2545, pinned per case in ``test_gw_spec_e3sm_oracle.py``):
   on the Beres arms the max per-column du/dt gap goes 2.2e-3 -> 9.7e-3 (L36)
   and 3.4e-3 -> 1.5e-2 (L32, convective+frontal), flat-column dT 6.1e-3 ->
