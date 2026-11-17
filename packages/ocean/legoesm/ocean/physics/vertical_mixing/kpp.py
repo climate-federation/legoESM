@@ -344,21 +344,23 @@ def _cvmix_bracket_offset(f0, fH, m, H, beta):
     selects (f0 <= 0 < fH) whenever |f0|, |fH| >> ln2/beta (7e-13 at
     beta = 1e12; closer to Ri_c the softplus offset remains), giving CVMix's
     root.  When a clamp underflows to 0 the bracket's sigmoid weight underflows
-    with it; the clamp is floored at +-tiny so the root stays defined.
+    with it; the normalised end values are floored at -+sqrt(tiny).
     """
     tiny = jnp.finfo(jnp.result_type(f0)).tiny
-    # Floor at +-tiny: underflowed clamps keep their sign, so the bracket
-    # still has one root (its weight has underflowed too).
-    q0 = jnp.minimum(-jax.nn.softplus(-beta * f0) / beta, -tiny)
-    qH = jnp.maximum(jax.nn.softplus(beta * fH) / beta, tiny)
+    q0 = -jax.nn.softplus(-beta * f0) / beta
+    qH = jax.nn.softplus(beta * fH) / beta
     H_safe = jnp.where(H > 0.0, H, 1.0)
     # The root is homogeneous of degree 0 in (q0, qH, m H), so normalising by
     # a stop-gradient scale is exact and keeps every product O(1) (clamped end
     # values reach 1e-300; a 1/scale^2 adjoint would overflow).
-    scale = jax.lax.stop_gradient(jnp.maximum(qH - q0, jnp.abs(m) * H_safe))
-    Q0 = q0 / scale
+    scale = jax.lax.stop_gradient(jnp.maximum(jnp.maximum(qH - q0, jnp.abs(m) * H_safe), tiny))
+    # Floor the normalised end values at -+sqrt(tiny): they keep their sign
+    # (one root) and the r_pos denominator, >= 2 tiny**0.25, squares without
+    # underflow.  Binds only where the bracket's weight is ~|Q0| (negligible).
+    floor = jnp.sqrt(tiny)
+    Q0 = jnp.minimum(q0 / scale, -floor)
     M = m * H_safe / scale
-    A = qH / scale - Q0 - M      # x in units of H
+    A = jnp.maximum(qH / scale, floor) - Q0 - M      # x in units of H
     disc = M * M - 4.0 * A * Q0
     # sqrt has an infinite derivative at 0: double-where.
     root_d = jnp.where(disc > 0.0, jnp.sqrt(jnp.where(disc > 0.0, disc, 1.0)), 0.0)

@@ -126,6 +126,17 @@ def test_crossing_gradient_finite_extreme_ri(ri, dtype):
         assert bool(jnp.all(jnp.isfinite(g))), g
 
 
+def test_crossing_gradient_finite_flushed_q0_fp32():
+    """Round-5b review repro: normalisation flushes Q0 with tiny M > 0 (fp32)."""
+    r = np.float32(5.3)
+    ri = jnp.asarray([0.0, np.nextafter(r, np.float32(0.0)), r, 1e7], dtype=jnp.float32)
+    dz = np.array([1.0, 999.0, 2.0 ** -13, 2.0 ** -13], dtype=np.float32)
+    z = jnp.asarray(np.cumsum(dz) - dz / 2)
+    f = lambda v: K._cvmix_first_crossing_depth(v, z, CFG)
+    for g in (jax.grad(f)(ri), jax.jit(jax.grad(f))(ri)):
+        assert bool(jnp.all(jnp.isfinite(g))), g
+
+
 def test_bracket_offset_saturated_negative_slope():
     """f0 >> 0 with m < 0 (q0 clamp underflows): offset tends to the second
     root -m H / (qH - m H), not 0 (round-5 review)."""
