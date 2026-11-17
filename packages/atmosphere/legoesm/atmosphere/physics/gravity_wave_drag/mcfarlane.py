@@ -56,8 +56,9 @@ the ``|0 - ubm|`` of the ``umcfac`` limit (``umcfac_abs_width`` 0.01 m/s,
 ``x*tanh(x/w)``), the sign the limited tendency takes (``umcfac_sign_width``
 1e-3 m/s, ``tanh``) and the ``taumin`` zeroing (``taumin_ramp_width`` 1e-10 Pa,
 quintic ramp; the stress cap's p-norm then takes eps 0); 0 = CAM for each.
-The redetermined stress below a limited layer adds ``ubtl`` (CAM's
-``|gwut|``, identical at widths 0).  The ``hdsp > 10 m`` gate (static
+The redetermined stress below a limited layer adds CAM's ``|gwut|``
+(``|tanh|*ubtl`` under the smooth sign), so the stress drop equals the
+momentum the layer receives (RULE 0).  The ``hdsp > 10 m`` gate (static
 orography), ``n2min`` and ``ubmc2mn`` are hard, as in CAM (piecewise smooth;
 finite gradients).  The production smoothing values are NOT the hard limit.
 KNOWN DIFFERENCE at the defaults (vs the CAM6 oracle, 14 columns, pinned per
