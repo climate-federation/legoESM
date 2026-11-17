@@ -174,6 +174,8 @@ __param_spec__ = {
             "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "crossing_sharpness": "numerics: solver/CFL/smoothing parameter",
             "crossing_threshold": "numerics: solver/CFL/smoothing parameter",
+            "min_vt2": "numerics: floor/cap (CVMix minVtsqr)",
+            "min_vt2_width": "numerics: solver/CFL/smoothing parameter",
             "epsilon_lmd": "numerics: floor/cap",
             "gamma_S": "Large 1994 fixed nondim constant",
             "gamma_T": "Large 1994 fixed nondim constant",
@@ -994,6 +996,11 @@ class KPPConfig(NamedTuple):
     # "cvmix" (MOM6 surface-layer/local-pressure reference, CVMix (1-eps/2) Ri,
     # smoothed first-crossing quadratic interpolation, interface K).
     bld_structure: str = "legacy"
+    # cvmix structure only: CVMix floor V_t^2 >= minVtsqr [m^2/s^2], applied as
+    # a C1 smooth max of this width (0 = CVMix's hard max).  Exact outside
+    # |V_t^2 - min_vt2| >= width/2; at most width/8 above the hard max.
+    min_vt2: float = 1e-10
+    min_vt2_width: float = 1e-11
     # Timestep [s] used to derive the explicit-diffusion CFL ceiling
     # A_v_max = 0.25 * min(dz_k, dz_k+1)^2 / cfl_cap_dt_s on the MPAS path.
     # MUST be set to the ocean dynamics dt for the cap to be correct: a

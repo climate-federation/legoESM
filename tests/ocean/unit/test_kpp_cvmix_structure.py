@@ -137,6 +137,15 @@ def test_crossing_gradient_finite_flushed_q0_fp32():
         assert bool(jnp.all(jnp.isfinite(g))), g
 
 
+def test_bracket_offset_tangent_discriminant_fp32():
+    """Double root (A < 0, M > 0, disc rounds to 0 in fp32): the sqrt is never
+    differentiated at 0."""
+    f = lambda v: K._cvmix_bracket_offset(v[0], v[1], v[2], jnp.float32(1.0), 1e12)
+    for fH in (0.0, 1e-13, -1e-13):
+        v = jnp.asarray([-0.5, fH, 1.0], dtype=jnp.float32)
+        assert bool(jnp.all(jnp.isfinite(jax.grad(f)(v)))), fH
+
+
 def test_bracket_offset_saturated_negative_slope():
     """f0 >> 0 with m < 0 (q0 clamp underflows): offset tends to the second
     root -m H / (qH - m H), not 0 (round-5 review)."""
@@ -149,6 +158,56 @@ def test_bracket_offset_saturated_negative_slope():
     g = lambda f0: K._cvmix_bracket_offset(f0, -f0, 0.0, 1.0, 20.0)
     assert 0.0 <= float(g(80.0)) <= 1.0
     assert bool(jnp.isfinite(jax.grad(g)(80.0)))
+
+
+# V_t^2 floor (CVMix minVtsqr 1e-10): inputs, CVMix max(V_t^2, 1e-10), and the
+# default (width 1e-11) recorded per case: exact outside the +-5e-12 band,
+# +1.2005 %, +1.25 % (= width/8) and +1.058 % inside it.
+_VT2_IN = [0.0, 9.99e-11, 1e-10, 1.004e-10, 2e-10]
+_VT2_CVMIX = [1e-10, 1e-10, 1e-10, 1.004e-10, 2e-10]
+_VT2_DEFAULT = [1e-10, 1.012005e-10, 1.0125e-10, 1.01458e-10, 2e-10]
+
+
+def test_min_vt2_hard_limit_is_cvmix():
+    got = K._cvmix_min_vt2(jnp.asarray(_VT2_IN), CFG._replace(min_vt2_width=0.0))
+    np.testing.assert_array_equal(np.asarray(got), _VT2_CVMIX)
+
+
+def test_min_vt2_default_records_gap():
+    got = K._cvmix_min_vt2(jnp.asarray(_VT2_IN), CFG)
+    np.testing.assert_allclose(np.asarray(got), _VT2_DEFAULT, rtol=1e-6, atol=1e-12)
+
+
+def test_min_vt2_gradient():
+    # Inside the band (1e-10 +- 5e-12) the slope is strictly between 0 and 1.
+    f = lambda v: K._cvmix_min_vt2(v, CFG)
+    check_grads(f, (jnp.asarray([9.99e-11, 1e-10, 1.004e-10]),), order=1, modes=["rev"], eps=1e-14)
+    g = jax.grad(lambda v: jnp.sum(f(v)))(jnp.asarray([9.99e-11, 1e-10, 1.004e-10]))
+    assert bool(jnp.all((g > 0.0) & (g < 1.0))), g
+
+
+def test_still_column_fp32_gradients_finite():
+    """Review repro: fp32 still column (zero velocity and buoyancy flux, u* 1e-6)
+    gave NaN temperature adjoints through the bulk-Ri division."""
+    prev = get_policy()
+    set_policy(PrecisionPolicy.fp32())
+    try:
+        n = 4
+        zc = create_z_star_from_thicknesses(np.ones(n))
+        S = jnp.full((1, n), 35.0, dtype=jnp.float32)
+        z0 = jnp.zeros((1, n), dtype=jnp.float32)
+
+        def h(T):
+            rho = wright_eos(T, S, z0)
+            return jnp.sum(K._boundary_layer_depth(
+                rho, T, S, z0, z0, zc, jnp.ones(1, jnp.float32),
+                jnp.array([1e-6], jnp.float32), jnp.zeros(1, jnp.float32), CFG))
+
+        T = jnp.full((1, n), 20.0, dtype=jnp.float32)
+        for g in (jax.grad(h)(T), jax.jit(jax.grad(h))(T)):
+            assert bool(jnp.all(jnp.isfinite(g))), g
+    finally:
+        set_policy(prev)
 
 
 def test_bulk_richardson_matches_cvmix():

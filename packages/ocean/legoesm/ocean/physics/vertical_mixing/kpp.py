@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.smooth import smooth_max_c1, validate_smoothing_width
 from legoesm.ocean.eos import (
     compute_buoyancy_frequency,
 )
@@ -323,6 +324,16 @@ def _mom6_surface_layer_deltas(T, S, u, v, dz, z_depth, cfg, eos_fn, g):
     return delta_rho, delta_V2
 
 
+def _cvmix_min_vt2(V_t2, cfg):
+    """CVMix compute_unresolved_shear floor max(V_t^2, minVtsqr), C1-smoothed
+    over ``cfg.min_vt2_width`` (0 = CVMix's hard max).  KNOWN DIFFERENCE at the
+    default width 1e-11: exact outside |V_t^2 - 1e-10| >= 5e-12, at most
+    +1.25e-12 (+1.25 %) inside.  Also bounds the Ri denominator away from 0,
+    whose division adjoint otherwise overflows."""
+    validate_smoothing_width("KPPConfig.min_vt2_width", cfg.min_vt2_width)
+    return smooth_max_c1(V_t2, cfg.min_vt2, cfg.min_vt2_width)
+
+
 def _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g):
     """CVMix compute_bulk_Richardson: (1 - eps/2) * d * g*delta_rho/rho_0 over
     (delta_V2 + V_t2); a zero denominator gives num * 1e10."""
@@ -501,6 +512,7 @@ def _boundary_layer_depth(
     V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)
 
     if cfg.bld_structure == "cvmix":
+        V_t2 = _cvmix_min_vt2(V_t2, cfg)
         Ri_b = _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g)
         h = _cvmix_first_crossing_depth(Ri_b, z_depth, cfg)
         return jnp.maximum(h, dz_actual[..., 0])
