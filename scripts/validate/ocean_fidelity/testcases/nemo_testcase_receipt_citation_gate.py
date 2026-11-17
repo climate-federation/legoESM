@@ -17175,6 +17175,180 @@ CITATION_MAP.update({
         38],
 })
 
+# The C-ladder merge introduced these alternate historical spellings.  Keep
+# every alias visible to the static duplicate-key audit; the composition below
+# only updates the already-declared source spelling.
+CITATION_MAP.update({
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1054-1084': {
+        'lines': '1069-1099',
+        'anchors': ['def _score_o13_step(', 'return conservation', 31],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1087-1139': {
+        'lines': '1102-1154',
+        'anchors': ['def score_o13(', '"rungs": {"O13": {', 53],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1863-1867': {
+        'lines': '1890-1894',
+        'anchors': [
+            '# 6. Rung O13: Kind 11 -> Kind 12 (production si3_ice_itd_rem).',
+            'jit_o13_remap=jit_o13_remap, accumulator=o13_remap_acc, plant=plant,',
+            5,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2620': {
+        'lines': '1-2669',
+        'anchors': ['#!/usr/bin/env python3', 'raise SystemExit(main())', 2669],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:558-614': {
+        'lines': '560-616',
+        'anchors': [
+            'def _verify_record_scalars_against_namelist(',
+            'f"record identity {sname}={got!r} disagrees',
+            57,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:732-1050': {
+        'lines': '734-1065',
+        'anchors': [
+            '@functools.lru_cache(maxsize=8)',
+            '"jit_prod_step_ponds": jit_prod_step_ponds,',
+            332,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1305-1322': {
+        'lines': '1320-1337',
+        'anchors': [
+            '# 1. Rung O8: Kind 1 -> Kind 2 (si3_ice_thd_frazil)',
+            'o8_acc.update("fraz_frac", out_o8.fraz_frac, f2["fraz_frac"], kt=kt, category=0)',
+            18,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1481-1714': {
+        'lines': '1496-1729',
+        'anchors': [
+            '# Check Kind 21 -> Kind 3 gather for intensive/state fields',
+            'picard_iconv_matches += 1',
+            234,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1603-1628': {
+        'lines': '1618-1643',
+        'anchors': [
+            '# Spot-check unpadded (npti,) JIT execution on kt == steps[0]',
+            'unpadded_spot_checks += 1',
+            26,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1738-1748': {
+        'lines': '1753-1763',
+        'anchors': [
+            '# 4. Rung O11: Kind 8 -> Kind 9 (si3_ice_thd_da)',
+            'spec.name, r8["fields"][spec.name], f9[spec.name], kt=kt, category=jl',
+            11,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1751-1823': {
+        'lines': '1766-1838',
+        'anchors': [
+            '# Production entry point: si3_lane_column_step_arrays (Kind 3 -> Kind 4, 5, 6, 7, 8, 9)',
+            'prod_trace.post_sal.S_layers[:npti],',
+            73,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1829-1860': {
+        'lines': '1844-1887',
+        'anchors': [
+            "# 5. Rung O12: Kind 10 -> Kind 11 (si3_ice_thd_pnd and step_ponds(scheme='si3_lev'))",
+            ('spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0', 2),
+            44,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1254-1991': {
+        'lines': '1269-2024',
+        'anchors': ['def score_o8_to_o12(', '"rungs": rungs_report,', 756],
+    },
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1151': {
+        'lines': '1-1092',
+        'anchors': [
+            '"""Direct unit and master-record tests for the SI3 O8--O14 0-ULP scoring driver."""',
+            ('    }', 8),
+            1092,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:900-908': {
+        'lines': '902-910',
+        'anchors': [('@jax.jit', 11), ('constants=constants,', 9), 9],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1147-1250': {
+        'lines': '1162-1265',
+        'anchors': ['def score_o14(', ('"resolved_namelist": namelist,', 2), 104],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:329-367': {
+        'lines': '331-369',
+        'anchors': ['def parse_resolved_ice_namelist(', 'return parsed', 39],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:370-424': {
+        'lines': '372-426',
+        'anchors': [
+            'def verify_master_admission_manifests(',
+            '"rung_record_digests": rung_digests,',
+            55,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:625-714': {
+        'lines': '627-716',
+        'anchors': ['class FieldScoreAccumulator:', '"fields": self.stats,', 90],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2186-2259': {
+        'lines': '2221-2294',
+        'anchors': [
+            'def verify_kind15_translation_evidence(',
+            '"translation_kind": 15,',
+            74,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2325-2507': {
+        'lines': '2360-2556',
+        'anchors': ['def score_o15_o16(', '"scores": summaries,', 197],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2472-2487': {
+        'lines': '2521-2536',
+        'anchors': [
+            'tau_meta = records[20]["meta"]',
+            'o16_tau.update(spec.name, got, expected, kt=kt, category=0)',
+            16,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:258-301': {
+        'lines': '260-303',
+        'anchors': [
+            '_KIND15_V1_SCHEMA_LABELS = ("cloud_fra", "qsr", "sfx")',
+            '"writer_labels": list(writer_labels),',
+            44,
+        ],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:428-540': {
+        'lines': '430-542',
+        'anchors': ['def read_record_verified(', '"reader_translation": reader_translation,', 113],
+    },
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1716-1735': {
+        'lines': '1731-1750',
+        'anchors': [
+            '# 3. Rung O10: Kind 6 -> Kind 7 (si3_ice_thd_sal) and Kind 7 -> Kind 8 (si3_ice_thd_temp)',
+            'spec.name, r7["fields"][spec.name], f8[spec.name], kt=kt, category=jl',
+            20,
+        ],
+    },
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1172': {
+        'lines': '1-1187',
+        'anchors': [
+            '"""Direct unit and master-record tests for the SI3 O8--O14 0-ULP scoring driver."""',
+            '            verify(planted)',
+            1187,
+        ],
+    },
+})
+
 # The coupled C-ladder made the shared master-record dimensions explicit.  Its
 # additive line shifts compose with the already-resolved main/SI3 line map.
 # Preserve both historical citation spellings because receipts on the two
@@ -17207,8 +17381,16 @@ _C_LADDER_REANCHORS = (
     ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1698-1717', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1716-1735'),
     ('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1170', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1172'),
 )
+_C_LADDER_PREEXISTING_NEW = {
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1153',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1172',
+}
 for _old, _new in _C_LADDER_REANCHORS:
-    _value = CITATION_MAP[_old] if _old in CITATION_MAP else CITATION_MAP[_new]
+    if _old.endswith(':1-1170'):
+        CITATION_MAP[_old] = CITATION_MAP[_new]
+        continue
+    _source = _new if _new in _C_LADDER_PREEXISTING_NEW else _old
+    _value = CITATION_MAP[_source]
     _live = _value.get("lines", _old.rsplit(":", 1)[1]) if isinstance(_value, dict) else _old.rsplit(":", 1)[1]
     _combined = _compose_reline(_old, _new, _live)
     _resolved = _catchup_value(
@@ -17216,8 +17398,7 @@ for _old, _new in _C_LADDER_REANCHORS:
         _old.rsplit(":", 1)[0] + ":" + _combined,
         _line_extent(_combined),
     )
-    CITATION_MAP[_old] = _resolved
-    CITATION_MAP[_new] = _resolved
+    CITATION_MAP[_source] = _resolved
 
 # Coupled-step Round 2 extracts the O17 through-update-flux core and threads
 # explicit stress cadence through already-cited production/scorer/test files.
@@ -17270,7 +17451,7 @@ _step2_shift_citations(
         "tests/ice/unit/test_si3_o17.py:" + lines
         for lines in ("577-1075", "587-655", "587-771", "669-739", "967-1075")
     ),
-    lambda line: line + 59 if line >= 237 else line,
+    lambda line: line + 105 if line >= 237 else line,
 )
 _step2_shift_citations(
     tuple(

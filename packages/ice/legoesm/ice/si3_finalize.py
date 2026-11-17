@@ -1174,6 +1174,8 @@ def si3_ice_update_tau(
     """
     if type(nn_fsbc) is not int or type(config.nn_fsbc) is not int:
         raise TypeError("ice_update_tau nn_fsbc and config.nn_fsbc must be static Python integers")
+    if type(kt) is not int:
+        raise TypeError("ice_update_tau kt must be a static Python integer")
     if nn_fsbc != config.nn_fsbc:
         raise ValueError(
             "ice_update_tau nn_fsbc must equal config.nn_fsbc: "

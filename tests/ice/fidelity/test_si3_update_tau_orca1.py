@@ -278,6 +278,11 @@ def test_nn_fsbc_argument_must_match_config_and_rejects_bool():
         si3_ice_update_tau(
             _inputs(d), config=cfg, ln_drgice_imp=True, nn_fsbc=True, kt=1
         )
+    for kt in (True, 1.5):
+        with pytest.raises(TypeError, match="kt must be a static Python integer"):
+            si3_ice_update_tau(
+                _inputs(d), config=cfg, ln_drgice_imp=True, nn_fsbc=2, kt=kt
+            )
 
 
 def test_loop_extents_at_nn_hls_2():
