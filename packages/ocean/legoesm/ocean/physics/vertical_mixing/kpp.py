@@ -407,8 +407,8 @@ def _boundary_layer_depth(
 
     if cfg.bld_structure not in _BLD_STRUCTURES:
         raise ValueError(
-            f"Unknown KPPConfig.bld_structure={cfg.bld_structure!r}; "
-            f"expected one of {_BLD_STRUCTURES}.")
+            f"Unknown KPPConfig.bld_structure={cfg.bld_structure!r} "
+            f"(boundary-layer structure variant); expected one of {_BLD_STRUCTURES}.")
     # Buoyancy (density) and velocity differences from the surface for the
     # bulk Richardson number.  LMD94 Eq. 21 requires density referenced to a
     # COMMON pressure: the previous ``rho - rho[..., :1]`` differenced two

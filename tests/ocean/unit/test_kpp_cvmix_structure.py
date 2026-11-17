@@ -144,19 +144,24 @@ def test_surface_layer_delta_rho_matches_mom6(case):
     np.testing.assert_allclose(np.asarray(drho[0]), c["drho"], rtol=1e-10, atol=1e-12)
 
 
-def test_surface_layer_delta_v2_linear_profile():
-    """u linear in depth on a stretched grid: the [0, SL_k] mean is u(SL_k / 2)."""
+def test_surface_layer_delta_v2_matches_overlap_average():
+    """Delta-V^2 against MOM6's explicit thickness-overlap loop (MOM_CVMix_KPP.F90
+    1342-1364, transcribed independently) on a stretched grid."""
     dz = np.array([1.0, 1.5, 2.0, 3.0, 4.5, 6.0])
     z = _centres(dz)
-    u = 0.1 - 0.01 * z
-    sl = 0.1 * np.maximum(z, dz[0])
-    want = (u - (0.1 - 0.01 * sl / 2)) ** 2
+    z_top = np.cumsum(dz) - dz
+    u = 0.1 - 0.01 * z + 0.003 * np.sin(z)
+    want = np.empty_like(z)
+    for k in range(z.size):
+        sl = 0.1 * max(z[k], dz[0])
+        overlap = np.clip(sl - z_top, 0.0, dz)
+        want[k] = (u[k] - np.sum(overlap * u) / np.sum(overlap)) ** 2
     T = jnp.full((1, dz.size), 15.0)
     S = jnp.full((1, dz.size), 35.0)
     _, dv2 = K._mom6_surface_layer_deltas(T, S, jnp.asarray(u)[None], jnp.zeros((1, dz.size)),
                                           jnp.asarray(dz)[None], jnp.asarray(z)[None], CFG,
                                           wright_eos, constants.g)
-    np.testing.assert_allclose(np.asarray(dv2[0]), want, rtol=1e-12, atol=1e-30)
+    np.testing.assert_allclose(np.asarray(dv2[0]), want, rtol=1e-10, atol=1e-20)
 
 
 # CVMix cvmix_coeffs_kpp (SimpleShapes, enhanced diffusion off) at MOM6 step-12 OBL,
