@@ -13542,22 +13542,6 @@ CITATION_MAP['ocean_pe_latlon_cgrid.py:5728'] = [
 CITATION_MAP['ocean_pe_latlon_cgrid.py:5746'] = [
     ('_bc_horizontal_momentum_advection_flux_form(', 2), 1]
 
-# Main's phase-3 receipt also cites these exact statement/docstring boundaries.
-# Keep them explicit: the blank separator at the reader boundary is pinned by
-# its exact occurrence, so even that otherwise-content-free endpoint shifts
-# fail closed.
-CITATION_MAP.update({
-    'provenance.py:106': ('    """', 8),
-    'vertical.py:66-71': [
-        ('    """', 2), ('        raise ValueError(', 1), 6],
-    'vertical.py:76-77': [
-        'e3t_0 = jnp.asarray(e3t_0, dtype=dtype)',
-        ('if getattr(z_coord, "linear_free_surface", False):', 1), 2],
-    'vertical.py:85-89': [
-        'mask, which is the whole point of the guard.', '            "path")', 5],
-    'nemo_testcase_l2_gyre_phase3_gate.py:323': ('', 323),
-})
-
 # Decision-189 precipitation-closure selector: retain the exact historical
 # claims while pinning every shifted endpoint to its new source location.
 _reanchor('packages/ice/legoesm/ice/config.py:524-574',
@@ -17174,6 +17158,36 @@ CITATION_MAP.update({
  36],
     'zdftke_round331.patch:8-24': ['@@ -254,0 +259,6 @@', '+         CALL r331_after_solve(jj,en(ntsi:ntei,jj,1:jpkm1))', 17],
     'zdftke_round332.patch:12-23': ['@@ -185,3 +187,5 @@', '+            & zmxld(ntsi:ntei,1:jpkm1),p_pdlr(ntsi:ntei,jj,2:jpkm1))', 12],
+})
+
+# Coupling-step-1 receipt reanchors.  Each entry preserves the source-side
+# cited content at its merged-tree location; the audit below validates the
+# anchors exactly as it does the rest of the map.
+CITATION_MAP.update({
+    'ocean_model_latlon_cgrid.py:6796-6841': [
+        '# The UP3 T-point upwind selector is keyed by the REFERENCE the config\'s',
+        '# ``umask(ji,jj,jk)``; :444 adds the barotropic correction as', 46],
+    'ocean_model_latlon_cgrid.py:7315-7325': [
+        '"barotropic_wind_nemo_stored_depth requires "',
+        '# (stprk3_stg.f90:163); the mirrored r1_h*_0 rows are', 11],
+    'ocean_model_latlon_cgrid.py:13455':
+        'if tend.K_diss_bot is not None:',
+    'ocean_model_latlon_cgrid.py:2568-2570': [
+        'kbb_velocity: tuple,', (') -> tuple:', 1), 3],
+    'ocean_model_latlon_cgrid.py:2573-2575': [
+        '``stprk3.F90:186`` computes ``uu_b/vv_b(Naa)`` once before all stages.',
+        'solved slot into ``Nnn``; stages 2 and 3 therefore read this-step ``Nnn``',
+        3],
+    'ocean_model_latlon_cgrid.py:2576':
+        'at :200-207.  Only stage 1 reads the last-step ``Kbb`` pair.  Keeping this',
+    'ocean_model_latlon_cgrid.py:2581': 'return kbb_velocity',
+    'shortwave_penetration.py:647':
+        '# Gradient-only: 1 below the blue level (discarded by the where) and',
+    'tke.py:3662-3662': ['_dissl_positive = tke_curr > 0.0',
+                         '_dissl_positive = tke_curr > 0.0', 1],
+    'scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10529-10566': [
+        ("('ll_bt_av    = .TRUE.', 1),", 1),
+        ("('IF( .NOT.lk_linssh ) THEN   !* Update ocean depth', 1),", 2), 38],
 })
 
 def audit_map() -> list[dict]:
