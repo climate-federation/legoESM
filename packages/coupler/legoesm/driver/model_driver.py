@@ -14833,11 +14833,14 @@ class ModelDriver:
               return _land_step_none
 
             _land_step_fn = _make_land_step(DT_LAND)
-            # Bootstrap variant: one host step's forcing, tile advanced by
-            # DT — used only for the first call after a (re)start so the
-            # surface blend never runs land-free for a whole interval.
-            _land_step_boot_fn = (
-                _land_step_fn if _LAND_K == 1 else _make_land_step(DT))
+            # Bootstrap call (first call after a (re)start with no held
+            # outputs, so the surface blend never runs land-free): one host
+            # step's forcing, tile advanced DT_LAND like every call, because
+            # its evaporation is debited AHEAD for the K steps the atmosphere
+            # then holds it.  Its precipitation fell for one step only, so the
+            # call site scales that sample's rain and snow by 1/K.  A DT boot
+            # step debited one step and was held K: (K-1)*DT*E created.
+            _land_step_boot_fn = _land_step_fn
             if _land_split is not None:
                 from jax.experimental import multihost_utils as _mhu
                 _proc = jax.process_index()
@@ -16489,9 +16492,17 @@ class ModelDriver:
                             lambda s: s / _land_a2s_n, _land_a2s_sum))
                     _a2s_mean = _a2s_mean._replace(
                         cos_zenith=_land_cz_wsum / _land_w_sum)
+                    if _land_a2s_n < _LAND_K:
+                        # bootstrap: the samples' rain over DT_LAND
+                        _pf = _land_a2s_n / _LAND_K
+                        _a2s_mean = _a2s_mean._replace(
+                            precip_total=_a2s_mean.precip_total * _pf,
+                            precip_snow=_a2s_mean.precip_snow * _pf)
                     _land_fn = (_land_step_fn if _land_a2s_n >= _LAND_K
                                 else _land_step_boot_fn)
-                    _land_call_n = _land_a2s_n
+                    # every call advances the tile DT_LAND, so its runoff
+                    # rate spans _LAND_K host steps
+                    _land_call_n = _LAND_K
                     _land_a2s_sum = None
                     _land_a2s_n = 0
                     _pt0 = time.perf_counter() if _PHASE_TIMERS else 0.0

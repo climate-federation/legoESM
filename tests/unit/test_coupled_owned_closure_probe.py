@@ -112,3 +112,17 @@ def test_real_case_options_refuse_missing_or_stray_paths(argv, msg, capsys):
     with pytest.raises(SystemExit):
         probe.main(argv)
     assert msg in capsys.readouterr().err
+
+
+@pytest.mark.slow
+def test_land_bootstrap_call_creates_no_water(tmp_path):
+    """The gate run over three coupling windows: the land row closes to
+    roundoff.  A bootstrap land call that debits one host step while the
+    atmosphere holds its evaporation K steps leaves (K-1)*DT*E (~1.7e7 kg
+    here) in the land row."""
+    import json
+    out = tmp_path / "gate.json"
+    assert probe.main(["--days", "0.0625", "--json", str(out)]) == 0
+    rows = json.loads(out.read_text())["rows"]
+    assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
+    assert abs(rows["system_water"]) < 1.0e3, rows["system_water"]
