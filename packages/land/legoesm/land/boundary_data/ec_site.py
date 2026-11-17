@@ -43,6 +43,7 @@ from legoesm import constants
 from legoesm.thermo import saturation_vapor_pressure_aerk, moist_air_density
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.forcing.cru_jra import snow_fraction, SNOW_RAIN_RAMP_K
+from legoesm.land.canopy.radiative_transfer import two_stream_leaf_optics
 from legoesm.land.canopy.config import (
     CanopyLandParams,
     PFT_AERO_PARAMS,
@@ -431,6 +432,8 @@ def read_ec_site_driver(
         # PFT-specific leaf width (DifferBESS): ENF/DNF 0.01, EBF 0.04, GRA/SHR
         # 0.02, DBF/MF/SAV/CRO 0.025 — directly sets leaf boundary-layer resistance.
         d_leaf=colf(PFT_LEAF_WIDTH.get(pft, _D_LEAF_DEFAULT)),
+        # Leaf optics + geometry, read only by CanopyConfig.sw_scheme="two_stream".
+        **{k: colf(v) for k, v in two_stream_leaf_optics(pft).items()},
     )
 
     # --- diagnostic soil prescription ---

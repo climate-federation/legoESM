@@ -81,6 +81,21 @@ def test_run_ec_site_evaluation_smoke(tmp_path):
     assert np.nanmax(np.abs(part - le[v])) < 1.0   # W/m2 rounding slack
 
 
+def test_run_ec_site_evaluation_two_stream(tmp_path):
+    """--canopy-sw-scheme two_stream runs end to end, is recorded, and changes the fluxes."""
+    _make_driver(str(tmp_path / "SYN-Test_driver_v2.nc"))
+    run = _load("run_ec_site_evaluation", _RUNNER_PY)
+    a = xr.open_dataset(run.run_evaluation("SYN-Test", str(tmp_path / "r.nc"), str(tmp_path)))
+    b = xr.open_dataset(run.run_evaluation("SYN-Test", str(tmp_path / "t.nc"), str(tmp_path),
+                                           sw_scheme="two_stream"))
+    assert a.attrs["canopy_sw_scheme"] == "ryu" and b.attrs["canopy_sw_scheme"] == "two_stream"
+    v = b.valid.values.astype(bool)
+    for k in ("gpp_mod", "le_mod", "h_mod"):
+        assert np.all(np.isfinite(b[k].values[v]))
+    assert not b.reverted.values.astype(bool).any()
+    assert np.nanmax(np.abs(a.h_mod.values[v] - b.h_mod.values[v])) > 0.1
+
+
 def test_run_ec_site_evaluation_rejects_empty_window(tmp_path):
     """A year window matching no step is a hard error, never a silent empty run."""
     _make_driver(str(tmp_path / "SYN-Test_driver_v2.nc"))

@@ -44,6 +44,7 @@ import xarray as xr
 from legoesm import constants
 from legoesm.land.boundary_data.ec_site import read_ec_site_driver
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+from legoesm.land.canopy.config import VALID_SW_SCHEMES
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.multilayer_land import (
     init_multilayer_land_state, step_multilayer_land_with_diagnostics)
@@ -74,7 +75,7 @@ def _find_driver(driver_dir: str, site: str) -> str:
 
 def run_evaluation(site: str, out_path: str, driver_dir: str,
                    year_lo: int = 0, year_hi: int = 9999,
-                   stress_b0: bool = False) -> str:
+                   stress_b0: bool = False, sw_scheme: str = "ryu") -> str:
     """Run the site and write the evaluation NetCDF; returns the output path."""
     nc = _find_driver(driver_dir, site)
     t = pd.DatetimeIndex(xr.open_dataset(nc)["time"].values)
@@ -105,7 +106,7 @@ def run_evaluation(site: str, out_path: str, driver_dir: str,
     # stress_b0=False keeps the Ball-Berry cuticular intercept unstressed (the
     # validated default: a live canopy sustains a baseline transpiration; a
     # dormant/deciduous canopy self-limits via LAI -> 0).
-    cc = TwoLeafCanopyConfig(max_iters=30, stress_b0=stress_b0)
+    cc = TwoLeafCanopyConfig(max_iters=30, stress_b0=stress_b0, sw_scheme=sw_scheme)
     land = _build_land_config(
         cc, soil="auto", bottom_bc="free_drainage", depth_m=phys["soil_depth_m"],
         root_depth=phys["root_depth"], z_ref=phys["z_ref"], texture=tex)
@@ -193,6 +194,7 @@ def run_evaluation(site: str, out_path: str, driver_dir: str,
          "valid": ("time", np.asarray(d.valid).ravel()[sl].astype(float))},
         coords={"time": t.values, "z": znode})
     ds.attrs.update(site=site, dt_s=float(d.dt_s), pft=str(getattr(d, "pft", "?")),
+                    canopy_sw_scheme=sw_scheme,
                     theta_sat=tsat, theta_r=tr,
                     theta_fc=float(land.theta_fc), theta_wp=float(land.theta_wp))
     # Lossless zlib: keeps the checked-in example outputs small without changing values.
@@ -211,9 +213,13 @@ def main() -> int:
     ap.add_argument("--year-hi", type=int, default=9999, help="last calendar year")
     ap.add_argument("--stress-b0", action="store_true",
                     help="legacy: also stress the Ball-Berry cuticular intercept")
+    ap.add_argument("--canopy-sw-scheme", choices=VALID_SW_SCHEMES, default="ryu",
+                    help="canopy shortwave partition: ryu (default) or two_stream "
+                         "(Sellers two-stream with CLM5 per-PFT leaf optics)")
     args = ap.parse_args()
     p = run_evaluation(args.site, args.out, args.driver_dir,
-                       args.year_lo, args.year_hi, stress_b0=args.stress_b0)
+                       args.year_lo, args.year_hi, stress_b0=args.stress_b0,
+                       sw_scheme=args.canopy_sw_scheme)
     ds = xr.open_dataset(p)
     print(f"saved {p}  n={ds.dims['time']}  site={ds.attrs['site']} pft={ds.attrs['pft']}")
     return 0
