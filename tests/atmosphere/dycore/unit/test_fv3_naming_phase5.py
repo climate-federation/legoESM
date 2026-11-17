@@ -17,34 +17,6 @@ import pytest
 
 jax = pytest.importorskip("jax")
 
-from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (  # noqa: E402
-    make_fv3_component_fidelity_nh_config,
-    make_fv3_faithful_nh_config,
-)
-from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (  # noqa: E402
-    make_fv3_component_fidelity_pe_config,
-    make_fv3_faithful_pe_config,
-)
-
-
-class TestDeprecatedAliases:
-    def test_pe_alias_warns_and_matches(self):
-        with pytest.warns(FutureWarning, match="COMPONENT-fidelity"):
-            old = make_fv3_faithful_pe_config()
-        new = make_fv3_component_fidelity_pe_config()
-        assert old == new
-
-    def test_nh_alias_warns_and_matches(self):
-        with pytest.warns(FutureWarning, match="COMPONENT-fidelity"):
-            old = make_fv3_faithful_nh_config()
-        new = make_fv3_component_fidelity_nh_config()
-        assert old == new
-
-    def test_overrides_flow_through_alias(self):
-        with pytest.warns(FutureWarning):
-            old = make_fv3_faithful_pe_config(nord_v=2)
-        assert old.nord_v == 2
-
 
 class TestFullFidelityTripwire:
     """No configuration may advertise FULL FV3 fidelity until the native
@@ -62,11 +34,6 @@ class TestFullFidelityTripwire:
                 / "packages" / "atmosphere" / "legoesm" / "atmosphere"
                 / "dynamics" / "gcm")
 
-    def test_component_factories_carry_disclaimer(self):
-        for fn in (make_fv3_component_fidelity_pe_config,
-                   make_fv3_component_fidelity_nh_config):
-            doc = " ".join((fn.__doc__ or "").split())
-            assert "NOT a full FV3" in doc, fn.__name__
 
     @staticmethod
     def _full_claims(text: str) -> bool:

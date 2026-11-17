@@ -40,6 +40,7 @@ from legoesm.grids.operator_adapters import (
     mpas_neighbour_operators,
     rbffd_operators,
 )
+from legoesm.grids.operators_latlon_cgrid import kinetic_energy_cgrid
 
 Edge = tuple[jax.Array, ...]
 
@@ -73,17 +74,6 @@ def shallow_water_tendencies(
 # ============================================================================
 # Lat-lon C-grid plug-ins
 # ============================================================================
-
-def cell_winds_cgrid(u: jax.Array, v: jax.Array) -> tuple[jax.Array, jax.Array]:
-    """C-grid face velocities averaged to cell centres ``(u_c, v_c)``."""
-    return 0.5 * (u[:, :-1] + u[:, 1:]), 0.5 * (v[:-1, :] + v[1:, :])
-
-
-def kinetic_energy_cgrid(u: jax.Array, v: jax.Array) -> jax.Array:
-    """Cell-centre ``0.5 * (u_c**2 + v_c**2)`` from C-grid face velocities."""
-    u_c, v_c = cell_winds_cgrid(u, v)
-    return 0.5 * (u_c**2 + v_c**2)
-
 
 def latlon_sw_operators(grid: Any, config: Any, dt: Any = None) -> SWOperators:
     """Lat-lon C-grid plug-ins (PPM or centered mass flux, absolute-vorticity

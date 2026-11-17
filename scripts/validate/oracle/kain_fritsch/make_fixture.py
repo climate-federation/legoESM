@@ -1,6 +1,9 @@
 """Run the WRF KF-Eta oracle (module_cu_kfeta.F, v4.8.0 06d4240ae9) and write the fixture.
 
 usage: python make_fixture.py <columns.npz> <build dir> <out.npz>
+       python make_fixture.py --band <fixture.npz> <build dir> <out.npz>
+
+``--band`` appends the BAND columns (below) to the sweep of an existing fixture.
 
 <columns.npz> is the tier-1/tier-2 audit column set
 (oracle_audit/zm_deep_convection/inputs/columns.npz: 3 real L32 MPAS AMIP
@@ -164,6 +167,51 @@ def parse(text, ncol, nlev):
     return cols
 
 
+# Constructed columns whose cloud top sits inside a smooth RULE 5 band at the
+# default widths (no audit or sweep column does): (source sweep column, uniform
+# temperature shift [K] above 500 hPa).  At the default widths column 5's top
+# weights split 14:0.5 / 13:0.5 at s = -0.978668979615 K (the hard top flips
+# 14 -> 13 by stop1 at -0.965621794705 K); at s + 2e-7 K they are 14:0.343 /
+# 13:0.657 (measured on the port, see PR 5c).  The oracle top there is 14.
+BAND = ((5, -0.978668779615),)
+
+
+def add_band(fix_path, build, out_path):
+    """Append BAND to the sweep of an existing fixture (oracle outputs fresh)."""
+    fix = dict(np.load(fix_path))
+    prof = ("T", "q", "p", "dz", "rhoe", "u", "v", "w")
+
+    def oracle(i, T):
+        cs, trig, warm, fqi, fqs = (fix["sweep_combos"][fix["sweep_combo"][i]])
+        K = LEGO if cs == "L" else WRF
+        flags = (int(trig), int(warm), int(fqi), int(fqs))
+        a = {k: fix[f"sweep_{k}"][i][::-1] for k in prof}  # top-down
+        cc, oob, crash = run_one(build, K, float(fix["sweep_dt"][i]), float(fix["sweep_dx"][i]),
+                                 flags, T[::-1], a["q"], a["p"], a["dz"], a["rhoe"], a["u"],
+                                 a["v"], a["w"])
+        assert not (oob or crash) and cc["nfatal"] == 0, (i, oob, crash)
+        return cc
+
+    for i, shift in BAND:
+        # the build reproduces the source column's stored outputs first
+        cc = oracle(i, fix["sweep_T"][i])
+        err = max(float(np.max(np.abs(cc[k] - fix[f"sweep_{k}"][i]))) for k in OUT_ARRAYS)
+        assert err == 0.0, (i, err)
+        T = fix["sweep_T"][i] + shift * (fix["sweep_p"][i] < 5.0e4)
+        cc = oracle(i, T)
+        new = dict(cell=-1, col=i, T=T)
+        for k in ("combo", "dt", "dx") + prof[1:]:
+            new.setdefault(k, fix[f"sweep_{k}"][i])
+        for k in OUT_ARRAYS + ("fired", "ishall", "pratec", "nca"):
+            new[k] = cc[k]
+        for k, v in new.items():
+            fix[f"sweep_{k}"] = np.concatenate([fix[f"sweep_{k}"], np.asarray(v)[None]])
+        print("band column from sweep", i, "shift", shift, "fired", cc["fired"],
+              "ltop", cc.get("ltop"))
+    np.savez_compressed(out_path, **fix)
+    print("wrote", out_path, Path(out_path).stat().st_size, "bytes")
+
+
 def main(col_path, build, out_path):
     c = np.load(col_path)
     T, q, pf, ph = (np.asarray(c[k], np.float64) for k in ("T", "q", "p_full", "p_half"))
@@ -255,4 +303,7 @@ def main(col_path, build, out_path):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    if sys.argv[1] == "--band":
+        add_band(*sys.argv[2:5])
+    else:
+        main(*sys.argv[1:4])

@@ -40,7 +40,8 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.bulk_flux import psi_h, psi_m   # canonical MOST stability functions
+from legoesm.core.bulk_flux import (  # canonical MOST stability functions
+    MOST_ZETA_CAP_WIDTH, psi_h, psi_m)
 from legoesm.atmosphere.physics._shared import (
     brunt_vaisala_n_squared_from_gradient,
     lilly_buoyancy_factor,
@@ -201,21 +202,70 @@ class SpectralLESConfig(NamedTuple):
     #                                 moist monotone scalar path leaves water
     #                                 tracers unfiltered by default; set True only
     #                                 to reproduce the old filtered-tracer behavior.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH  # RULE 5 half-width of the
+    #                                 smooth |zeta| cap at 10 in the MOST surface
+    #                                 layer (most_surface_flux); 0 = hard clip.
 
 
 class SpectralLESLayout(NamedTuple):
-    """y-slab MPI decomposition for the distributed horizontal FFT.
+    """MPI decomposition for the distributed horizontal FFT.
 
-    Rank owns ``(ny_local, nx, nz)`` physically; in spectral space it owns the
-    full ``ny`` (ky) and a kx-column slab of width ``nkx_local`` (see
-    ``parallel/distributed_fft.py``). ``n_ranks_x`` is implicitly 1 (slab).
-    ``comm`` is the MPI communicator (non-array; kept out of any AD path).
+    y-slab (``n_ranks_x == 1``, the default): rank owns ``(ny_local, nx, nz)``
+    physically; in spectral space the full ``ny`` (ky) and a kx-column slab of
+    width ``nkx_local`` (see ``parallel/distributed_fft.py``).
+
+    x-y pencil (``n_ranks_x > 1``, build with
+    :func:`make_spectral_les_pencil_layout`): rank ``(ry, rx) =
+    divmod(rank, n_ranks_x)`` owns ``(ny/Py, nx/Px, nz)``; ``comm_row`` (size
+    ``Px``) and ``comm_col`` (size ``Py``) are its row / column
+    sub-communicators. ``rank``/``n_ranks``/``comm`` always refer to the full
+    communicator (planar means reduce over it). ``nx`` is the GLOBAL nx.
+    Communicators are non-array and kept out of any AD path.
     """
     rank: int
     n_ranks: int
     ny_global: int
     nx: int
     comm: Any = None
+    n_ranks_x: int = 1
+    comm_row: Any = None
+    comm_col: Any = None
+
+    @property
+    def n_ranks_y(self) -> int:
+        return self.n_ranks // self.n_ranks_x
+
+    @property
+    def ry(self) -> int:
+        return self.rank // self.n_ranks_x
+
+    @property
+    def rx(self) -> int:
+        return self.rank % self.n_ranks_x
+
+
+def make_spectral_les_pencil_layout(comm, n_ranks_y: int, n_ranks_x: int,
+                                    ny_global: int, nx: int) -> SpectralLESLayout:
+    """Collective: build a ``n_ranks_y x n_ranks_x`` pencil layout on ``comm``.
+
+    ``n_ranks_x == 1`` returns the plain y-slab layout (no sub-communicators),
+    so slab runs keep the pre-pencil code path exactly."""
+    size, rank = comm.Get_size(), comm.Get_rank()
+    if n_ranks_y < 1 or n_ranks_x < 1 or n_ranks_y * n_ranks_x != size:
+        raise ValueError(
+            f"mesh {n_ranks_y}x{n_ranks_x} != communicator size {size}")
+    if ny_global % n_ranks_y or nx % n_ranks_x:
+        raise ValueError(
+            f"global {ny_global}x{nx} not divisible by mesh {n_ranks_y}x{n_ranks_x}")
+    if n_ranks_x == 1:
+        return SpectralLESLayout(rank=rank, n_ranks=size, ny_global=ny_global,
+                                 nx=nx, comm=comm)
+    ry, rx = divmod(rank, n_ranks_x)
+    comm_row = comm.Split(color=ry, key=rx)
+    comm_col = comm.Split(color=rx, key=ry)
+    return SpectralLESLayout(rank=rank, n_ranks=size, ny_global=ny_global,
+                             nx=nx, comm=comm, n_ranks_x=n_ranks_x,
+                             comm_row=comm_row, comm_col=comm_col)
 
 
 class SpectralLESGrid(NamedTuple):
@@ -344,11 +394,13 @@ def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64,
         # pointwise spectral multiply (kx, ky, k2, masks) lines up with the
         # (ny, nkx_local, nz) output of distributed_rfft2. Padding columns carry
         # no energy (zeros), so the sliced wavenumbers there are harmless.
+        # Pencil: the kx chunk is owned per COLUMN index ry of Py (the slab
+        # transform runs on comm_col); for the slab n_ranks_y/ry == n_ranks/rank.
         from legoesm.parallel.distributed_fft import (
             kx_local_size, local_kx_slice)
         nkx = nx // 2 + 1
-        nkx_pad = layout.n_ranks * kx_local_size(nx, layout.n_ranks)
-        lo, hi = local_kx_slice(nx, layout.n_ranks, layout.rank)
+        nkx_pad = layout.n_ranks_y * kx_local_size(nx, layout.n_ranks_y)
+        lo, hi = local_kx_slice(nx, layout.n_ranks_y, layout.ry)
 
         def _slice(arr):
             return jnp.pad(arr, ((0, 0), (0, nkx_pad - nkx)))[:, lo:hi]
@@ -369,21 +421,19 @@ def _fft(f, g: SpectralLESGrid):
     ``(ny_global, nkx_local, nz)``)."""
     if g.layout is None:
         return jnp.fft.rfft2(f, axes=(0, 1))
-    from legoesm.parallel.distributed_fft import distributed_rfft2
-    L = g.layout
-    return distributed_rfft2(f, ny_global=L.ny_global, nx=L.nx,
-                             n_ranks=L.n_ranks, comm=L.comm)
+    from legoesm.parallel.distributed_fft import layout_rfft2
+    return layout_rfft2(f, g.layout)
 
 
-def _ifft(fh, g: SpectralLESGrid):
+def _ifft(fh, g: SpectralLESGrid, nz=None):
     """Inverse of :func:`_fft` (returns the physical y-slab ``(ny_local,nx,nz)``
-    under MPI, the global ``(ny,nx,nz)`` serially)."""
+    under MPI, the global ``(ny,nx,nz)`` serially). ``nz`` = vertical extent of
+    the field that was transformed; required under the pencil layout (its
+    spectral z axis is zero-padded, so the length is ambiguous)."""
     if g.layout is None:
         return jnp.fft.irfft2(fh, axes=(0, 1), s=(g.cfg.ny, g.cfg.nx))
-    from legoesm.parallel.distributed_fft import distributed_irfft2
-    L = g.layout
-    return distributed_irfft2(fh, ny_global=L.ny_global, nx=L.nx,
-                              n_ranks=L.n_ranks, comm=L.comm)
+    from legoesm.parallel.distributed_fft import layout_irfft2
+    return layout_irfft2(fh, g.layout, nz)
 
 
 def _planar_mean(f, g: SpectralLESGrid, keepdims=False):
@@ -404,25 +454,25 @@ def _planar_mean(f, g: SpectralLESGrid, keepdims=False):
 def ddx(f, g: SpectralLESGrid):
     """∂/∂x via spectral (exact); Nyquist x-mode killed for a real derivative."""
     fh = _fft(f, g) * (1j * g.kx[..., None])
-    return _ifft(fh, g)
+    return _ifft(fh, g, f.shape[-1])
 
 
 def ddy(f, g: SpectralLESGrid):
     fh = _fft(f, g) * (1j * g.ky[..., None])
-    return _ifft(fh, g)
+    return _ifft(fh, g, f.shape[-1])
 
 
 def _apply_filter(f, g: SpectralLESGrid):
     """Smooth horizontal high-wavenumber low-pass (per z-level). Multiplies the
     rfft2 spectrum by the precomputed σ(k) mask; uniform in z ⇒ divergence-free
     preserving when applied equally to u, v, w."""
-    return _ifft(_fft(f, g) * g.filter_mask[..., None], g)
+    return _ifft(_fft(f, g) * g.filter_mask[..., None], g, f.shape[-1])
 
 
 def _dealias(f, g: SpectralLESGrid):
     if not g.cfg.dealias:
         return f
-    return _ifft(_fft(f, g) * g.dealias_mask[..., None], g)
+    return _ifft(_fft(f, g) * g.dealias_mask[..., None], g, f.shape[-1])
 
 
 # --------------------------------------------------------------------------- #
@@ -440,8 +490,13 @@ def _pad_to_fine(f_yxz, g: SpectralLESGrid | None = None):
     undecomposed) and y via one all-to-all transpose — see
     ``parallel/distributed_fft.distributed_pad_to_fine``."""
     if g is not None and g.layout is not None:
-        from legoesm.parallel.distributed_fft import distributed_pad_to_fine
+        from legoesm.parallel.distributed_fft import (
+            distributed_pad_to_fine, layout_is_pencil, pencil_pad_to_fine)
         L = g.layout
+        if layout_is_pencil(L):
+            return pencil_pad_to_fine(
+                f_yxz, ny_global=L.ny_global, nx=L.nx, n_ranks_y=L.n_ranks_y,
+                n_ranks_x=L.n_ranks_x, comm_row=L.comm_row, comm_col=L.comm_col)
         return distributed_pad_to_fine(f_yxz, ny_global=L.ny_global, nx=L.nx,
                                        n_ranks=L.n_ranks, comm=L.comm)
     ny, nx, nz = f_yxz.shape
@@ -457,8 +512,14 @@ def _pad_to_fine(f_yxz, g: SpectralLESGrid | None = None):
 def _truncate_from_fine(f_fine, ny, nx, g: SpectralLESGrid | None = None):
     """Fine ``(3ny/2,3nx/2,nz)`` → coarse ``(ny,nx,nz)`` physical (+9/4 scaling)."""
     if g is not None and g.layout is not None:
-        from legoesm.parallel.distributed_fft import distributed_truncate_from_fine
+        from legoesm.parallel.distributed_fft import (
+            distributed_truncate_from_fine, layout_is_pencil,
+            pencil_truncate_from_fine)
         L = g.layout
+        if layout_is_pencil(L):
+            return pencil_truncate_from_fine(
+                f_fine, ny_global=L.ny_global, nx=L.nx, n_ranks_y=L.n_ranks_y,
+                n_ranks_x=L.n_ranks_x, comm_row=L.comm_row, comm_col=L.comm_col)
         return distributed_truncate_from_fine(f_fine, ny_global=L.ny_global,
                                               nx=L.nx, n_ranks=L.n_ranks,
                                               comm=L.comm)
@@ -665,7 +726,8 @@ def advection(u, v, w, g: SpectralLESGrid):
 # --------------------------------------------------------------------------- #
 # Coupled stable Monin–Obukhov surface layer (GABLS1 prescribed-cooling BC)     #
 # --------------------------------------------------------------------------- #
-def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10):
+def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10, *,
+                      zeta_cap_width):
     """Coupled Monin–Obukhov surface layer (planar-mean, GABLS1-faithful).
 
     Given the planar-mean first-level wind speed ``spd_mean=⟨|u₁|⟩`` and potential
@@ -679,8 +741,19 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
 
     The stability functions ``ψ_m, ψ_h`` are the SHARED canonical Businger–Dyer
     implementation (:func:`legoesm.core.bulk_flux.psi_m`/``psi_h``; stable branch
-    Dyer 1974 ``−5ζ``, unstable Businger–Dyer, both internally clipped to
-    ``ζ∈[−10,10]`` with safe-branch gradients) rather than a re-derived form.
+    Dyer 1974 ``−5ζ``, unstable Businger–Dyer, |ζ| capped at 10 with safe-branch
+    gradients) rather than a re-derived form.  ``zeta_cap_width`` (keyword,
+    required; the config's ``most_zeta_cap_width``) is the RULE 5 half-width of
+    the smooth cap; 0 is the former hard clip.
+
+    KNOWN DIFFERENCE vs the hard clip, at the default width 2 (cap ramp
+    |ζ| in (8, 12)), measured over 9600 states (wind 0.5-10 m/s, θ₁−T_s
+    0.05-10 K, z₁ 3.125 / 6.25 m, z0 0.1 m, θ_ref 263.5 K): 109 converge with
+    |ζ| inside the ramp, where the surface heat flux differs by up to 5.8 %
+    (ζ = 11.1); outside it the result is unchanged, incl. GABLS1-like states
+    (ζ ~ 0.003-0.01).  Per-state gaps pinned in
+    ``tests/unit/fixtures/les_most_zeta_cap_gap.npz``; ``zeta_cap_width=0``
+    reproduces the hard clip exactly.
     Thermal roughness ``z0h=z0`` (Beare et al. 2006 specify z0m=z0h=0.1 m).
 
     Returns ``(u_star, theta_star, q0, cd_eff)`` with the kinematic surface heat
@@ -701,8 +774,8 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     for _ in range(n_iter):
         inv_L = kappa * gacc * th_star / (u_star ** 2 * theta_ref + 1e-12)
         zeta = z1 * inv_L                         # +ve stable, −ve unstable
-        u_star = kappa * spd_mean / (lnz - psi_m(zeta))
-        th_star = kappa * dth / (lnz - psi_h(zeta))
+        u_star = kappa * spd_mean / (lnz - psi_m(zeta, zeta_cap_width=zeta_cap_width))
+        th_star = kappa * dth / (lnz - psi_h(zeta, zeta_cap_width=zeta_cap_width))
     q0 = -u_star * th_star
     cd_eff = (u_star / (spd_mean + 1e-12)) ** 2
     return u_star, th_star, q0, cd_eff
@@ -1035,8 +1108,23 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     wzh = _fft(ddz_f2c(w_s, dz), g)
     div_h = uh + vh + wzh                                   # (nyk, nxr, nz) complex
     rhs = div_h / dt
+    k2_2d = g.k2
+    pencil = g.layout is not None and getattr(g.layout, "n_ranks_x", 1) > 1
+    if pencil:
+        # Pencil spectral data are z-split: gather whole z for the vertical solve
+        # (ky chunk rx of Px, zero-padded rows -> k2=0 -> gauge-pinned, rhs 0 ->
+        # phi 0), trimmed to nz BEFORE building the matrix, re-padded after.
+        from legoesm.parallel.distributed_fft import (
+            chunk_slice, pencil_spec_to_zwhole)
+        L = g.layout
+        rhs = pencil_spec_to_zwhole(rhs, nz_out=nz, n_ranks_x=L.n_ranks_x,
+                                    comm_row=L.comm_row)
+        lo, hi = chunk_slice(L.ny_global, L.n_ranks_x, L.rx)
+        k2_2d = jnp.pad(g.k2, ((0, L.n_ranks_x * (hi - lo) - L.ny_global),
+                               (0, 0)))[lo:hi]
+        nyk = hi - lo
     # Tridiagonal in z (centres), Neumann walls: φ[-1]=φ[0], φ[nz]=φ[nz-1].
-    k2 = g.k2[..., None]                                    # (nyk, nxr, 1)
+    k2 = k2_2d[..., None]                                   # (nyk, nxr, 1)
     inv_dz2 = 1.0 / dz ** 2
     a = jnp.full((nyk, nxr, nz), inv_dz2, dtype=rhs.dtype)   # sub
     c = jnp.full((nyk, nxr, nz), inv_dz2, dtype=rhs.dtype)   # super
@@ -1051,15 +1139,19 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     # is singular by one constant, so pin only the GAUGE — φ[0]=0 — and keep the
     # interior vertical Laplacian. (Pinning the whole mode to 0 would leave the
     # vertical divergence of these columns uncorrected — an O(5%) leak.)
-    sing = (g.k2 == 0.0)                                   # (ny, nxr)
+    sing = (k2_2d == 0.0)                                  # (nyk, nxr)
     s0 = sing[..., None]
     b = b.at[..., 0].set(jnp.where(sing, 1.0, b[..., 0]))
     c = c.at[..., 0].set(jnp.where(sing, 0.0, c[..., 0]))
     rhs = rhs.at[..., 0].set(jnp.where(sing, 0.0 + 0.0j, rhs[..., 0]))
     del s0
     phi_h = thomas_solve(a, b, c, rhs)
+    if pencil:
+        from legoesm.parallel.distributed_fft import pencil_zwhole_to_spec
+        phi_h = pencil_zwhole_to_spec(phi_h, ny_global=L.ny_global,
+                                      n_ranks_x=L.n_ranks_x, comm_row=L.comm_row)
     # u = u* - dt ∇φ.  Horizontal grad spectral; vertical grad to faces.
-    phi = _ifft(phi_h, g)
+    phi = _ifft(phi_h, g, nz)
     u_new = u_s - dt * ddx(phi, g)
     v_new = v_s - dt * ddy(phi, g)
     dphidz_f = jnp.pad(ddz_c2f(phi, dz), ((0, 0), (0, 0), (1, 1)))    # 0 at walls
@@ -1079,7 +1171,7 @@ def _horizontal_hyperdiff(f, nu4, g: SpectralLESGrid):
     NOT act as broad diffusion (the WENO5 sharpness in the energy-containing
     scales is preserved)."""
     k4 = (g.k2 ** 2)[..., None]                            # (nyk, nxr, 1)
-    return _ifft(-nu4 * k4 * _fft(f, g), g)
+    return _ifft(-nu4 * k4 * _fft(f, g), g, f.shape[-1])
 
 
 def _w_hyperdiffusion(w, g: SpectralLESGrid):
@@ -1139,7 +1231,8 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
         th1_mean = _planar_mean(theta[..., 0], g)
         _us, _ths, sfc_flux, cd_surf = most_surface_flux(
-            spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
+            spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0,
+            zeta_cap_width=g.cfg.most_zeta_cap_width)
     Fu, Fv, Fw, u_star = sgs_and_wall(u, v, w, nu_t, g, u_geo, cd_surf=cd_surf)
     ug, vg = u_geo
     Ru = Cu + Fu + f_cor * (v - vg) + force[0]

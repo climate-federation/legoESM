@@ -66,7 +66,6 @@ to an environment variable (machine-portable; no personal paths):
 | `run_atmosphere_test_matrix.py` | Master test suite: 64+ cases across SW/hydrostatic/NH × cubed-sphere/lat-lon/icosahedral/spectral. Use `--only sw`, `--only hydro`, `--only nh` to filter. |
 | `run_amip.py` | Production AMIP CLI wrapper around `ModelDriver`. Supports real forcing (COBE, HadISST), RRTMG radiation, checkpointing. |
 | `run_baroclinic_wave_benchmark.py` | Publication-quality baroclinic wave figures (replicates CliMA/Yatunin et al. 2026 Figure 3). |
-| `validate_cubed_sphere_fv3_atmos.py` | Targeted FV3 C-D grid edge-discontinuity validation. |
 
 ## Ocean
 

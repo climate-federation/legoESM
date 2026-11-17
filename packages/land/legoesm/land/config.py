@@ -16,7 +16,8 @@ from legoesm.land.topmodel_runoff import TopmodelConfig
 from legoesm.land.richards import RichardsConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
 from legoesm.surface_albedo import LandAlbedoConfig
-from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+from legoesm.core.bulk_flux import (MOST_ZETA_CAP_WIDTH,
+                                      NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH)
 
 
@@ -27,6 +28,7 @@ __param_spec__ = {
             "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
             "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
             "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
+            "most_zeta_cap_width": "numerics: RULE 5 half-width of the smooth |zeta| cap at 10 (0 = hard clip)",
             "beta_min": "numerics: soil-water stress floor",
             "snow_melt_rate": "unreachable: degree-day melt coefficient read ONLY in the Q_net-is-None fallback of update_snow (snow_budget.py). The two callers that thread THIS config field (slab_land, multilayer_land) both pass an energy-limited Q_net, so jax.grad w.r.t. the config field is identically zero. (The coupler snow-albedo-feedback diagnostic in physics_pipeline.py does call update_snow with Q_net=None, but with the FUNCTION DEFAULT snow_melt_rate, not this config field, so it does not make the field trainable.)",
             "z_ref": "convention: reference height [m]",
@@ -50,6 +52,7 @@ __param_spec__ = {
             "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
             "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
             "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
+            "most_zeta_cap_width": "numerics: RULE 5 half-width of the smooth |zeta| cap at 10 (0 = hard clip)",
             "beta_min": "numerics: soil-water stress floor",
             "snow_melt_rate": "unreachable: degree-day melt coefficient read ONLY in the Q_net-is-None fallback of update_snow (snow_budget.py). The two callers that thread THIS config field (slab_land, multilayer_land) both pass an energy-limited Q_net, so jax.grad w.r.t. the config field is identically zero. (The coupler snow-albedo-feedback diagnostic in physics_pipeline.py does call update_snow with Q_net=None, but with the FUNCTION DEFAULT snow_melt_rate, not this config field, so it does not make the field trainable.)",
             "z_ref": "convention: reference height [m]",
@@ -132,6 +135,8 @@ class LandConfig(NamedTuple):
     large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
     large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
     large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10); bulk_flux constant.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
 
 
 class MultiLayerLandConfig(NamedTuple):
@@ -212,8 +217,8 @@ class MultiLayerLandConfig(NamedTuple):
     soil_grid: SoilGridConfig = SoilGridConfig()
     hydraulics: SoilHydraulicsConfig = SoilHydraulicsConfig()
     thermal: SoilThermalConfig = SoilThermalConfig()
-    # The four fields below are pinned explicitly (user-approved 2026-10-05), so
-    # they do not follow later changes to RichardsConfig defaults; the other
+    # The fields below are pinned explicitly (user-approved 2026-10-05), so they
+    # do not follow later changes to RichardsConfig defaults; the other
     # RichardsConfig fields still inherit its defaults.
     richards: RichardsConfig = RichardsConfig(
         fc_drain_saturation=0.5, max_iter=30, max_dse_per_iter=0.1, theta_tol=1e-6)
@@ -256,6 +261,8 @@ class MultiLayerLandConfig(NamedTuple):
     large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
     large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
     large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10); bulk_flux constant.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
 
 
 def resolve_land_config(land_mode: str, land_config=None):

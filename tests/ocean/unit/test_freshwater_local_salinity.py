@@ -128,7 +128,8 @@ class TestDispatchHardening:
             LatLonCGridOceanConfig(normalize_freshwater=True))
 
     def test_mpas_gate_source_tripwire(self):
-        # The MPAS raise lives inside mpas_ocean_baroclinic_tendencies (a
+        # The MPAS raise lives inside mpas_ocean_freshwater_salt_sources,
+        # called by both the shared-core and the outside-core paths (a
         # full Voronoi mesh is integration-suite territory).  Source-level
         # tripwire in the dispatch-hardening style: the gate, its
         # normalize-incompatibility branch, and the local-S selection must
@@ -136,7 +137,7 @@ class TestDispatchHardening:
         # the numeric path is not executed.
         import inspect
         from legoesm.ocean.dynamics import ocean_pe_mpas
-        src = inspect.getsource(ocean_pe_mpas.mpas_ocean_baroclinic_tendencies)
+        src = inspect.getsource(ocean_pe_mpas.mpas_ocean_freshwater_salt_sources)
         assert 'getattr(config, "freshwater_salinity", "s_ref")' in src
         assert "incompatible with" in src            # normalize+local raise
         assert "freshwater_salinity must be" in src  # unknown-selection raise

@@ -1994,10 +1994,11 @@ def _active_comm(tab: DuoHaloTables):
 
 
 def _barrier_comm(tab: DuoHaloTables):
-    """The attached bundle IF it owns the edge-blend barriers (the window
-    bundle does: its operands are window stacks the flat blend cannot
-    read).  The ring/tile SPMD bundles leave the barriers to the flat
-    blend under GSPMD, so they are not routed here."""
+    """The attached bundle IF it owns the edge-blend barriers: the window
+    bundle (its operands are window stacks the flat blend cannot read)
+    and the face ring (border-band blend, fv3_duo_spmd.make_ring_barrier).
+    The tiled SPMD bundle leaves the barriers to the flat blend under
+    GSPMD, so it is not routed here."""
     comm = _active_comm(tab)
     return comm if getattr(comm, "handles_barriers", False) else None
 

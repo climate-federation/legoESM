@@ -22,6 +22,7 @@ include: amip_production.yaml
 grid_type: latlon
 resolution: 48              # n_lat 48 (n_lon 96): 3.75 deg, ~417 km at the equator (C24 class, design row P3)
 discretization: latlon_cgrid
+vertical_form: legacy       # lat-lon production stays legacy (user 2026-11-11)
 column_lane: true           # the lat-lon dycore is the dynamics operator of the CAM6 column loop
 use_polar_filter: true      # Fourier polar filter: the dt below is set by the EQUATORIAL CFL (as
                             # amip_sundqvist_latlon24.yaml); filter off, the pole-cell clamp is 36 s.
@@ -64,9 +65,13 @@ mpas_qv_smooth_del2_m2s: 0.0
 mpas_qv_smooth_del4_m4s: 0.0        # refused non-zero on the column lane (edge operator)
 latlon_qv_smooth_del4_m4s: 0.0      # this lane's own q_v del-4 smoother: OFF, as in P3 (user 2026-10-26)
 # ---- land IC -------------------------------------------------------------------
-land_ic: data/lmip_soil_ic/soil_ic_latlon48_era5T_19790101.npz
-                            # the spun-up soil IC regridded to this grid (same recipe / source /
-                            # batch as the MPAS res-6 and duo C24 files, regrid_land_ic.py at
-                            # 294495454, from restart_1985_d000h00.npz + ERA5 1979-01-01 soil T).
-                            # ADOPTED by the user 2026-10-14: md5 6ecd8c389e2522cf2951ad020a570134
-                            # (data/ is not tracked; copy the file beside the deck's data dir).
+# Built by scripts/data/regrid_land_ic.py --target-grid latlon
+# --target-resolution 48 --target-clm-surfdata <the run's CLM surfdata> (soil
+# water carried as relative wetness between dry floor and saturation, rebuilt
+# on this run's soil, user 2026-11-12), then --era5-soil-t (ERA5 1979-01-01
+# 00 UTC stl1-4); file md5 aba80c8dbcd0b3b0616e0fe9dee8460e; provenance is in
+# the file's metadata.  data/ is gitignored: stage the file in the launch
+# directory.
+# _v3 (2026-11-15): rebuilt with --vg-air-entry-m -0.02 against main's moved
+# dry floor (re-land of #2497/#2526).
+land_ic: data/lmip_soil_ic/soil_ic_latlon48_era5T_19790101_v3.npz

@@ -327,6 +327,7 @@ def test_positional_construction_unshifted_by_tail_field():
         "lateral_viscosity_mask_levels",
         "lateral_shlat",
         "runoff_temperature_floor_sharpness",
+        "lateral_viscosity_file_coastal",
     )
     # Head layout unchanged — the slots any positional caller binds first.
     assert f[:9] == (

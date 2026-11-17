@@ -109,6 +109,9 @@ class VoronoiMesh(NamedTuple):
     # ``_f_land``); ``None`` = legacy behaviour, byte-identical.
     subgrid_topo_stddev: jnp.ndarray | None = None   # (nCells,) [m]
     land_frac: jnp.ndarray | None = None             # (nCells,) [0-1]
+    # filtered subgrid-orography std (IFS sigflt, ERA5 SSO_STDH_FILT) for the
+    # IFS VDF turbulent orographic form drag; loaded only for turbulence=ifs_vdf
+    subgrid_topo_filt_stddev: jnp.ndarray | None = None   # (nCells,) [m]
 
     # ------------------------------------------------------------------
     # GridProtocol properties

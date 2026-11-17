@@ -73,6 +73,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--legoesm-snapshot", required=True)
+    ap.add_argument("--use-mean-fields", action="store_true",
+                    help="upwelling block reads the driver's 5-day window-mean "
+                         "mass_flux_w_mean (--state-accumulate) instead of the "
+                         "instantaneous w; refuses snapshots without it")
     ap.add_argument("--nemo-gridt", required=True)
     ap.add_argument("--nemo-month", type=int, default=1)
     ap.add_argument("--nemo-t-recs", default=None,
@@ -99,13 +103,17 @@ def main() -> int:
                          "`mass_flux_w` is a VELOCITY [m/s], so one side has "
                          "to be divided by the cell area e1t*e2t before they "
                          "are the same quantity.")
-    ap.add_argument("--nemo-w-var", default="wocetr_eff",
+    ap.add_argument("--nemo-w-var", default=None,
                     choices=("wocetr_eff", "wo"),
                     help="which NEMO vertical field the wfile carries. "
                          "`wocetr_eff` is a TRANSPORT [m3/s] (hourly trd1h_T; "
                          "needs --mesh-mask for the area divide). `wo` is a "
                          "VELOCITY [m/s] (the 5-day grid_W files) and is "
-                         "compared directly.")
+                         "compared directly. DEFAULT: read from the file -- "
+                         "the old default was `wocetr_eff`, which the 5-day "
+                         "grid_W files do not contain at all, so a caller who "
+                         "omitted this flag compared a transport against a "
+                         "velocity or crashed on a missing variable.")
     ap.add_argument("--box-budget", default=None,
                     help="'lo,hi' longitude window: volume budget of the box "
                          "|lat|<=--budget-lat-halfwidth, --budget-layer, ours "
@@ -296,6 +304,25 @@ def main() -> int:
           f"[tilt] ours {tl:+.1f} m, NEMO {tn:+.1f} m")
 
     if a.nemo_wfile:
+        if a.nemo_w_var is None:
+            # READ IT FROM THE FILE rather than guess. The old default named
+            # wocetr_eff, which the 5-day grid_W files do not contain, so a
+            # caller who omitted the flag got a missing-variable crash or, with
+            # a file that had both, a transport compared against a velocity.
+            import netCDF4 as _nc          # function-scope, as elsewhere here
+            _ds = _nc.Dataset(a.nemo_wfile)
+            try:
+                _present = [v for v in ("wo", "wocetr_eff")
+                            if v in _ds.variables]
+            finally:
+                _ds.close()
+            if not _present:
+                raise SystemExit(
+                    f"FATAL: {a.nemo_wfile} carries neither 'wo' nor "
+                    f"'wocetr_eff'; pass --nemo-w-var explicitly.")
+            a.nemo_w_var = _present[0]
+            print(f"[nemo-w] using {a.nemo_w_var!r} (read from the file; "
+                  f"present: {_present})")
         if a.nemo_w_var == "wocetr_eff" and not a.mesh_mask:
             raise SystemExit("--nemo-wfile requires --mesh-mask: wocetr_eff is "
                              "m3/s and our mass_flux_w is m/s, and without the "
@@ -926,7 +953,18 @@ def _upwelling_block(a, L, tgt_lat, tgt_lon, band, zc, regrid):
     import netCDF4 as nc
     from legoesm import constants  # noqa: F401  (unit conventions live there)
 
-    w_l = np.load(a.legoesm_snapshot).get("mass_flux_w")
+    _snapw = np.load(a.legoesm_snapshot)
+    # Prefer the driver's 5-day window mean when the snapshot carries it: NEMO's
+    # wo is a 5-day mean, and an instantaneous w read 6x at day 5 (2026-09-26).
+    if a.use_mean_fields:
+        if "mass_flux_w_mean" not in _snapw.files:
+            raise SystemExit("--use-mean-fields but the snapshot has no mass_flux_w_mean "
+                             "(run the driver with --state-accumulate); no silent fallback")
+        w_l = _snapw["mass_flux_w_mean"]
+        print("[upwelling] ours = mass_flux_w_mean (5-day WINDOW MEAN, matched to NEMO wo)")
+    else:
+        w_l = _snapw.get("mass_flux_w")
+        print("[upwelling] ours = mass_flux_w INSTANTANEOUS snapshot (NEMO wo is a 5-day mean)")
     if w_l is None:
         raise SystemExit("snapshot has no `mass_flux_w`; rerun with the mass "
                          "flux carry stored, or drop --nemo-wfile.")

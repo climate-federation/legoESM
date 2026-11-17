@@ -41,7 +41,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.precision import resolve_dtype
-from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.source_rounding import nemo_source_round, nemo_source_store
 
 # ==============================================================================
 # Ocean constants
@@ -800,8 +800,15 @@ def compute_buoyancy_frequency_nemo_bn2(
         # ``CASE( np_teos10, np_eos80 )`` runs a single polynomial and the two
         # forms differ only in the coefficient set and normalization that
         # eos_init loads (rdeltaS 20 vs 32, r1_S0 1/40 vs 0.875/35.16504).
-        alpha, beta = nemo_roquet_alpha_beta(
-            T, S, eos_gdept, eos_form=eos_form, source_rounded=source_rounded)
+        # Stored once: otherwise XLA CPU re-evaluates this polynomial inside
+        # every N2 consumer kernel of the ORCA2 step (3.59 copies, M10).
+        # Only when source-rounded: an unrounded polynomial can be contracted
+        # differently once stored (GYRE's bits moved).
+        def rab(t, s, d):
+            return nemo_roquet_alpha_beta(
+                t, s, d, eos_form=eos_form, source_rounded=source_rounded)
+        alpha, beta = (nemo_source_store(rab, T, S, eos_gdept)
+                       if source_rounded else rab(T, S, eos_gdept))
     else:
         if source_rounded:
             raise ValueError(
@@ -980,25 +987,35 @@ def nemo_r3t_stretch(
         # never stretches.  Mirrors the same special case in
         # vertical.compute_ocean_jacobian (:813-815).
         return jnp.ones_like(jnp.asarray(eta))
-    # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are masked)
-    # rather than eta/0 -> inf/NaN poisoning the downstream chain.
-    H = jnp.asarray(H_bathy)
-    wet_H = H > 0.0
-    safe_H = jnp.where(wet_H, H, 1.0)
-    if evaluation == "nemo_reciprocal":
-        # domain.F90:158 stores r1_ht_0 before domqco.F90:160 multiplies it
-        # by ssh.  The barrier preserves that fp64 boundary under JIT.
-        r1_H = lax.optimization_barrier(1.0 / safe_H)
-        r3t = jnp.where(wet_H, nemo_source_round(jnp.asarray(eta) * r1_H) if getattr(z_coord, "nemo_r3t_stored_product", False) is True else jnp.asarray(eta) * r1_H, 0.0)  # card-selected: domqco.f90:257 stores the product  # noqa: E501
-    else:
-        r3t = jnp.where(wet_H, jnp.asarray(eta) / safe_H, 0.0)
-    # Safety floor on the stretch, NOT on r3t: a column driven to
-    # eta + H_bathy <= 0 (unclamped restart/IC, wetting-drying) would give a
-    # NON-POSITIVE geometric depth/thickness, which silently flips the sign
-    # of downstream terms.  Callers that already clamp eta (the PGF passes
-    # eta_safe) never reach this; it exists so an unclamped caller degrades
-    # loudly-wrong rather than silently-plausible.
-    return jnp.maximum(1.0 + r3t, 1.0e-6)
+    stored_product = getattr(z_coord, "nemo_r3t_stored_product", False) is True
+
+    def stretch(eta, H):
+        # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are
+        # masked) rather than eta/0 -> inf/NaN poisoning the downstream chain.
+        wet_H = H > 0.0
+        safe_H = jnp.where(wet_H, H, 1.0)
+        if evaluation == "nemo_reciprocal":
+            # domain.F90:158 stores r1_ht_0 before domqco.F90:160 multiplies
+            # it by ssh.  The barrier preserves that fp64 boundary under JIT.
+            r1_H = lax.optimization_barrier(1.0 / safe_H)
+            r3t = jnp.where(wet_H, nemo_source_round(eta * r1_H) if stored_product else eta * r1_H, 0.0)  # card-selected: domqco.f90:257 stores the product  # noqa: E501
+        else:
+            r3t = jnp.where(wet_H, eta / safe_H, 0.0)
+        # Safety floor on the stretch, NOT on r3t: a column driven to
+        # eta + H_bathy <= 0 (unclamped restart/IC, wetting-drying) would give
+        # a NON-POSITIVE geometric depth/thickness, which silently flips the
+        # sign of downstream terms.  Callers that already clamp eta (the PGF
+        # passes eta_safe) never reach this; it exists so an unclamped caller
+        # degrades loudly-wrong rather than silently-plausible.
+        return jnp.maximum(1.0 + r3t, 1.0e-6)
+
+    # Stored once: otherwise XLA CPU re-evaluates r3t inside every 3-D
+    # consumer kernel of the ORCA2 step (about 100 kernels).  Only with the
+    # source-rounded product: an unrounded one can be contracted differently
+    # once stored (TSUNAMI's bits moved).
+    eta, H_bathy = jnp.asarray(eta), jnp.asarray(H_bathy)
+    return (nemo_source_store(stretch, eta, H_bathy) if stored_product
+            else stretch(eta, H_bathy))
 
 
 def nemo_r3t_rk3_stage1_stretch(

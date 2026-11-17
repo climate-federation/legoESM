@@ -81,6 +81,8 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.core import transcendentals as tx
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
+from legoesm.core.numerics_mode import NUMERICS_MODES, require_numerics
 from legoesm.core.precision import get_policy
 from legoesm.core.smooth import positive_part_c1
 from legoesm.core.source_rounding import (
@@ -551,14 +553,50 @@ def nemo_zu_air_state(theta_air_K, q_air, *,
 def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
                                wind_speed, *, nb_iter: int = _NB_ITER_NCAR,
                                zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH,
-                               cd_cutoff_width: float | None = None):
+                               zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
+                               cd_cutoff_width: float | None = None,
+                               dthv_width: float | None = None,
+                               neutral_width: float | None = None):
     """Legacy/public coefficient interface.
 
     The first-guess stability uses the RAW ``theta``/``q`` (NEMO ``t_zt``/
     ``q_zt``); the iteration uses the floored :func:`nemo_zu_air_state`.
     ``cd_cutoff_width`` (None = ``NCAR_CD_CUTOFF_WIDTH``, 0 = NEMO's hard
-    switch): RULE 5 width of the 33 m/s drag-plateau blend (#2241)."""
-    from legoesm.core.bulk_flux import large_yeager_neutral_cd, psi_m, psi_h
+    switch): RULE 5 width of the 33 m/s drag-plateau blend (#2241).
+
+    RULE 5 (#2241): the stable/unstable neutral Stanton select (18 vs 32.7)
+    is the core TURB_NCAR blend :func:`ncar_stable_weight`, half-width
+    ``dthv_width`` [K] on the first-guess ``dTv`` (None = ``NCAR_DTHV_WIDTH``,
+    1e-2) and ``neutral_width`` on ``zeta`` in the iteration (None =
+    ``NCAR_NEUTRAL_WIDTH``, 1e-3).  ``0.0`` is NEMO's hard ``> 0`` step,
+    kept local: the core helper's width-0 branch is AeroBulk's ``>= 0``, which
+    differs at exactly 0.  Widths are static Python floats.
+    KNOWN DIFFERENCE (measured 2026-11-12, SST 290 K, q_air = q_sfc,
+    theta_air - SST in [-0.03, 0.03] K, wind 3/8/15 m/s): only states with
+    ``|dTv| < dthv_width`` or ``|zeta| < neutral_width`` move; Ch by up to
+    +39 % / -22 % (exactly neutral: the blend's midpoint vs NEMO's unstable
+    32.7), Cd and Ce by at most 6e-5 relative; per-state gaps are pinned in
+    ``test_ncar_bulk.py``.  The Cx floors, the wind floors and the psi_m/psi_h
+    zeta = 0 switch stay hard, as in the core port.
+
+    NEMO clips zeta to +-10 before psi; here that clip is psi's smooth |zeta|
+    cap (``zeta_cap_width``; 0 = NEMO's hard clip).  KNOWN DIFFERENCE
+    (RULE 5, user-approved), measured: near-calm unstable states (0.56 m/s
+    over a 2-4 K warmer sea) change by up to 0.58 % in Ch; the stable states
+    of a (wind, SST) scan never settle inside the cap's ramp (per-case gaps:
+    tests/ocean/unit/fixtures/omip_ncar_zeta_cap_gap.npz)."""
+    from legoesm.core.bulk_flux import (
+        NCAR_DTHV_WIDTH, NCAR_NEUTRAL_WIDTH, large_yeager_neutral_cd,
+        ncar_stable_weight, psi_m, psi_h,
+    )
+
+    def stable_weight(x, width):
+        if width == 0.0:
+            return jnp.where(x > 0.0, 1.0, 0.0)
+        return ncar_stable_weight(x, width)
+
+    dthv_width = NCAR_DTHV_WIDTH if dthv_width is None else dthv_width
+    neutral_width = NCAR_NEUTRAL_WIDTH if neutral_width is None else neutral_width
 
     k = constants.kappa_von_karman
     theta = jnp.asarray(theta_air_K, dtype=jnp.float64)
@@ -567,7 +605,7 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
     ssq = jnp.asarray(q_sfc, dtype=jnp.float64)
     Ub = jnp.maximum(jnp.asarray(wind_speed, dtype=jnp.float64), _U10_FLOOR_M_S)
     dTv = _virt_temp(theta, q) - _virt_temp(sst, ssq)
-    stable = jnp.where(dTv > 0.0, 1.0, 0.0)
+    stable = stable_weight(dTv, dthv_width)
     CdN = large_yeager_neutral_cd(Ub, nemo_parity=True, cd_cutoff_width=cd_cutoff_width)
     sqrt_CdN = jnp.sqrt(CdN)
     Cd = CdN
@@ -585,8 +623,8 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
         inv_L = _one_on_obukhov(
             theta_zu, q_zu, u_star, theta_star, q_star
         )
-        zeta = jnp.clip(_ZU_M * inv_L, -_ZETA_ABS_MAX, _ZETA_ABS_MAX)
-        psim = psi_m(zeta)
+        zeta = _ZU_M * inv_L
+        psim = psi_m(zeta, zeta_cap_width=zeta_cap_width)
         UN10 = jnp.maximum(
             _UN10_FLOOR_M_S, Ub * (1.0 + sqrt_Cd / k * psim)
         )
@@ -596,9 +634,9 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
         denom = 1.0 - sqrt_CdN / k * psim
         Cd = jnp.maximum(CdN / (denom * denom), _CX_MIN)
         sqrt_Cd = jnp.sqrt(Cd)
-        zh = -psi_h(zeta) / k / sqrt_CdN
+        zh = -psi_h(zeta, zeta_cap_width=zeta_cap_width) / k / sqrt_CdN
         ratio = sqrt_Cd / sqrt_CdN
-        stable = jnp.where(zeta > 0.0, 1.0, 0.0)
+        stable = stable_weight(zeta, neutral_width)
         ChN = _ch_n10(sqrt_CdN, stable)
         CeN = _ce_n10(sqrt_CdN)
         Ch = jnp.maximum(ChN * ratio / (1.0 + ChN * zh), _CX_MIN)
@@ -882,7 +920,13 @@ class NemoStandaloneK0Config(NamedTuple):
 
 
 class NemoStandaloneK0OceanCard(NamedTuple):
-    """The certified rung-10 ocean plus explicit standalone K0 selectors."""
+    """The certified rung-10 ocean plus explicit standalone K0 selectors.
+
+    ``numerics`` is the run-wide numerics mode the card was built for
+    (:mod:`legoesm.core.numerics_mode`): ``None`` runs as before the mode
+    existed; ``"nemo_exact"`` or ``"nemo_fast"`` must equal the mode of the
+    driver's ``numerics_scope``.
+    """
 
     ocean: object
     k0: NemoStandaloneK0Config
@@ -890,6 +934,7 @@ class NemoStandaloneK0OceanCard(NamedTuple):
     precip_factor: object
     evap_factor: object
     nb_iter: int
+    numerics: str | None = None
 
 
 class NemoStandaloneK0StepResult(NamedTuple):
@@ -917,6 +962,10 @@ def validate_nemo_standalone_k0(config: NemoStandaloneK0Config) -> None:
 def _validate_k0_ocean_card(card: NemoStandaloneK0OceanCard) -> None:
     """Bind Decision 175 and K0 istate to the real rung-10 card that consumes them."""
 
+    if card.numerics not in (None, *NUMERICS_MODES):
+        raise ValueError(
+            "standalone K0 card numerics must be None or one of "
+            f"{NUMERICS_MODES}, got {card.numerics!r}")
     validate_nemo_standalone_k0(card.k0)
     ocean = card.ocean
     config = ocean.recipe.model_config
@@ -1042,6 +1091,7 @@ def nemo_orca2_k0_ocean_step(
     """
 
     _validate_k0_ocean_card(card)
+    require_numerics(card.numerics)
     # sbc(kstp,Nbb,Nbb) reads the live rung-10 state.  The caller owns only
     # the explicit controls/carry; it cannot shadow S0-M or S3 with stale
     # state arrays.
@@ -1093,7 +1143,7 @@ def nemo_orca2_k0_ocean_step(
     stepped = model.step(state, card.ocean.dt_s, **kwargs)
     state_after = stepped.state_after if hasattr(stepped, "state_after") else stepped
     next_shortwave_fraction = _nemo_orca2_k0_next_fraqsr_compiled(
-        z_coord, get_policy(),
+        z_coord, get_policy(), card.numerics,
         card.ocean.recipe.model_config.physics.shortwave_penetration,
         state.eta.data, state_after.eta.data, state.H_bathy.data,
         state.land_mask.data, surface.s2.penetrative_qsr, chl,
@@ -1125,10 +1175,12 @@ def _nemo_orca2_k0_surface_compiled(
     It makes :func:`nemo_orca2_k0_surface_card`'s call with the ``nn_fsbc``
     branch static.  Arrays are traced and other leaves static, so each branch
     compiles once (forcing steps never read, and are not passed, the carry);
-    ``policy`` keys the cache because tracing picks the transcendental arm.
-    Per-step integers (``kt``, clock seconds) arrive as arrays.
+    ``policy`` keys the cache because tracing picks the transcendental arm;
+    ``card.numerics`` keys it alongside the numerics-mode context and must
+    equal it.  Per-step integers (``kt``, clock seconds) arrive as arrays.
     """
     del policy
+    require_numerics(card.numerics)
     temperature = jnp.asarray(temperature, dtype=jnp.float64)
     salinity = jnp.asarray(salinity, dtype=jnp.float64)
     u_before = jnp.asarray(u_level, dtype=jnp.float64)[:, 1:, 0]
@@ -1174,11 +1226,15 @@ def _nemo_orca2_k0_surface_compiled(
 
 @eqx.filter_jit
 def _nemo_orca2_k0_next_fraqsr_compiled(
-    z_coord, policy, shortwave_penetration, ssh_before, ssh_after, h_bathy,
-    land_mask, penetrative_qsr, chl,
+    z_coord, policy, numerics, shortwave_penetration, ssh_before, ssh_after,
+    h_bathy, land_mask, penetrative_qsr, chl,
 ):
-    """The K0 step's carried ``fraqsr_1lev`` as one program."""
+    """The K0 step's carried ``fraqsr_1lev`` as one program.
+
+    ``numerics`` (the card's) keys the cache and must equal the active mode.
+    """
     del policy
+    require_numerics(numerics)
     # traqsr.f90:327-402 replaces fraqsr_1lev during stage 3 with Kmm = Nnn
     # (stage-2 exit r1_2 * (r3t(Kbb) + r3ta), stprk3_stg.f90:215,525),
     # gdepw_1d(2) * (1 + r3t(Kmm)), e3t_3d(1) * (1 + r3t(Kmm) * tmask(1)),
@@ -1643,7 +1699,10 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
                    nb_iter: int = _NB_ITER_NCAR, L_latent=None,
                    u_oce=None, v_oce=None, vfac: float = 0.0,
                    zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH,
-                   cd_cutoff_width: float | None = None):
+                   zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
+                   cd_cutoff_width: float | None = None,
+                   dthv_width: float | None = None,
+                   neutral_width: float | None = None):
     """Open-ocean bulk fluxes ``(tau_x, tau_y, shflx, lhflx, evap)``.
 
     Sign conventions: ``shflx``/``lhflx`` > 0 add heat to the ocean;
@@ -1692,6 +1751,10 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
         NCAR only: width [m/s] of the RULE 5 blend into the 33 m/s neutral
         drag plateau (#2241); None = ``NCAR_CD_CUTOFF_WIDTH`` (0.5), ``0.0`` =
         NEMO's hard switch (oracle tests).
+    dthv_width, neutral_width : float or None
+        NCAR only: half-widths of the RULE 5 stable/unstable Stanton blend
+        (#2241, see :func:`ncar_transfer_coefficients`); None = the core
+        defaults, ``0.0`` = NEMO's hard switch (oracle tests).
     """
     if algo not in _VALID_OMIP_BULK_ALGOS:
         raise ValueError(
@@ -1751,7 +1814,9 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     theta_sst = exner_potential_temperature(sst, slp_for_sst)
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
         theta_air, q_a, theta_sst, ssq, wind_speed, nb_iter=nb_iter,
-        zu_floor_rel_width=zu_floor_rel_width, cd_cutoff_width=cd_cutoff_width,
+        zu_floor_rel_width=zu_floor_rel_width, zeta_cap_width=zeta_cap_width,
+        cd_cutoff_width=cd_cutoff_width,
+        dthv_width=dthv_width, neutral_width=neutral_width,
     )
     rho = rho_air_moist(T_air, q_a, p10) if rho_air is None else jnp.asarray(
         rho_air, dtype=jnp.float64)

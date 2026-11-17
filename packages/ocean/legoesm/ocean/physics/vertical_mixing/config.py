@@ -37,6 +37,8 @@ __param_spec__ = {
             "smooth_energy_sharpness_m2j": "RULE 5 smoothing sharpness of the ePBL energy switches; a numerics regulariser, not physics",
             "smooth_colht_sharpness_per_m": "RULE 5 smoothing sharpness of the ePBL column-height switches; a numerics regulariser, not physics",
             "smooth_ratio_sharpness": "RULE 5 smoothing sharpness of the ePBL nondimensional caps; a numerics regulariser, not physics",
+            "smooth_velocity_sharpness_s_m": "RULE 5 smoothing sharpness of the ePBL velocity caps; a numerics regulariser, not physics",
+            "smooth_slope_sharpness": "RULE 5 smoothing sharpness of the ePBL column-height slope switches; a numerics regulariser, not physics",
         },
         "params": {
             "nstar": {"units": "1", "bounds": (0.02, 0.4), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) NSTAR: fraction of released PE available to drive entrainment", "shape": None},
@@ -708,6 +710,14 @@ class TKEConfig(NamedTuple):
     # order, including the per-column mbkt+1 no-crossing fallback. Only the
     # complete DINO NEMO cards select it; all other cards remain vectorized.
     tke_langmuir_evaluation: str = "vectorized"
+    # Langmuir source vs NEMO's explicit dissipation add-back.  NEMO adds the
+    # Langmuir increment to en BEFORE the matrix (zdftke.F90:367), so the RHS
+    # add-back zfact3*dissl*en (:419) multiplies the post-Langmuir en.
+    # ``separate`` (historical): Langmuir is a plain RHS source and the
+    # add-back uses the pre-Langmuir e_old.  ``nemo_pre_solve``: the add-back
+    # also acts on dt*source, as in NEMO (factored matrix + nemo_1p5_split
+    # only; the literal matrix already assembles it that way).
+    tke_langmuir_rhs_coupling: str = "separate"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
     # NEMO cards instead freeze p_sh2 from selected step-entry face levels and
@@ -1181,6 +1191,8 @@ class EPBLConfig(NamedTuple):
     smooth_energy_sharpness_m2j: float = 1.0e6    # [m^2/J] TKE / PE per area
     smooth_colht_sharpness_per_m: float = 1.0e10  # [1/m] column-height change
     smooth_ratio_sharpness: float = 1.0e3         # [1] nondimensional ratios
+    smooth_velocity_sharpness_s_m: float = 1.0e6  # [s/m] velocity scales
+    smooth_slope_sharpness: float = 1.0e10        # [1] d(ColHt)/d(Kddt_h), ~1e-5
 
     # --- background floors added to the ePBL diffusivity ---
     K_bg: float = 1.0e-5               # KD   [m^2/s]

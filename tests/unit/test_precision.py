@@ -303,6 +303,51 @@ class TestWithPrecision:
         assert my_function.__name__ == "my_function"
 
 
+class TestWithPrecisionOverride:
+    """``with_precision_override``: fp64 kernel inside an fp32 run, only while
+    the module's compute override is set; gradients flow through the casts."""
+
+    def setup_method(self):
+        set_policy(PrecisionPolicy.fp32())
+        clear_module_overrides()
+
+    def teardown_method(self):
+        set_policy(PrecisionPolicy.fp32())
+        clear_module_overrides()
+
+    @staticmethod
+    def _kernel(seen):
+        from legoesm.core.precision import with_precision_override
+
+        @with_precision_override("test_kernel")
+        def kernel(x, *, cfg):
+            seen.append(x.dtype)
+            return {"y": jnp.sin(x) * x * cfg["a"], "n": None}
+        return kernel
+
+    def test_off_without_override(self):
+        seen = []
+        out = self._kernel(seen)(jnp.ones(3, jnp.float32),
+                                 cfg={"a": jnp.float32(2.0)})
+        assert seen == [jnp.float32] and out["y"].dtype == jnp.float32
+
+    def test_fp64_inside_fp32_and_grad(self):
+        set_module_override("test_kernel", compute="fp64")
+        seen = []
+        k = self._kernel(seen)
+        x = jnp.linspace(0.1, 1.0, 4, dtype=jnp.float32)
+        a = jnp.float32(2.0)
+        out = k(x, cfg={"a": a})
+        assert seen[-1] == jnp.float64 and out["y"].dtype == jnp.float32
+        g = jax.grad(lambda x: jnp.sum(k(x, cfg={"a": a})["y"]))(x)
+        assert g.dtype == jnp.float32
+        x64 = x.astype(jnp.float64)
+        want = 2.0 * (jnp.cos(x64) * x64 + jnp.sin(x64))
+        assert jnp.allclose(g, want, rtol=1e-6)
+        gj = jax.jit(jax.grad(lambda x: jnp.sum(k(x, cfg={"a": a})["y"])))(x)
+        assert jnp.allclose(gj, g, rtol=1e-6)
+
+
 # ===========================================================================
 # Part 6: Recommended overrides
 # ===========================================================================
@@ -812,3 +857,35 @@ class TestPrecisionWiring:
         B_half = np.linspace(0.0, 1.0, n + 1)
         coord = create_hybrid_coordinate(n, A_half, B_half)
         assert coord.A_half.dtype == jnp.float32
+
+
+def test_kessler_forcing_lane_honours_microphysics_override(monkeypatch):
+    """The tiled-cube Kessler lane calls the kernel outside both dispatch
+    funnels; the microphysics compute override must still reach it."""
+    import legoesm.atmosphere.forcing.idealized.kessler_forcing as KF
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MICROPHYSICS_PRECISION_MODULE, KesslerConfig)
+    seen = []
+    real = KF.kessler_microphysics
+
+    def spy(**k):
+        seen.append(k["T"].dtype)
+        return real(**k)
+
+    monkeypatch.setattr(KF, "kessler_microphysics", spy)
+    ncol, nlev = 2, 4
+    p_half = jnp.tile(jnp.linspace(2.0e4, 1.0e5, nlev + 1, dtype=jnp.float32),
+                      (ncol, 1))
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    T = jnp.full((ncol, nlev), 280.0, jnp.float32)
+    q = jnp.full((ncol, nlev), 1.0e-3, jnp.float32)
+    set_policy(PrecisionPolicy.fp32())
+    clear_module_overrides()
+    try:
+        set_module_override(MICROPHYSICS_PRECISION_MODULE, compute="fp64")
+        out = KF.kessler_column_tendencies_pressure(
+            T, p_full, p_half, q, q, q, dt=60.0, config=KesslerConfig())
+    finally:
+        clear_module_overrides()
+    assert seen == [jnp.float64]
+    assert all(o.dtype == jnp.float32 for o in out)

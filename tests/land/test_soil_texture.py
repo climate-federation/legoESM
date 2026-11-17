@@ -24,7 +24,7 @@ def test_vg_params_monotone_with_clay():
     idx = usda_texture_index(jnp.array([95.0, 20.0]), jnp.array([2.0, 60.0]))
     vg = vg_params_from_index(idx)
     assert float(vg["K_sat"][0]) > float(vg["K_sat"][1])      # sand drains faster
-    wp, fc = wilting_field_capacity(vg)
+    wp, fc = wilting_field_capacity(vg, vg_air_entry_m=-0.02)
     assert float(wp[1]) > float(wp[0])                        # clay holds more water
     assert bool(jnp.all(fc > wp))                             # FC above WP everywhere
     assert bool(jnp.all((wp > 0) & (fc < 0.5)))               # physical range
@@ -60,6 +60,23 @@ def test_solid_thermal_from_texture():
     # no-mineral-data cell (ice/organic, %sand=%clay=0) -> loam fallback, never zero
     k0 = float(soil_solid_conductivity(0.0, 0.0))
     assert k0 > 2.9 and k0 == float(soil_solid_conductivity(40.0, 30.0))
+
+
+def test_wilting_and_field_capacity_lie_on_the_runs_retention_curve():
+    """The plant thresholds come from the curve the soil water is solved on: the
+    air-entry van Genuchten curve with the run's head, not the classic one."""
+    from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, theta_from_psi
+    idx = usda_texture_index(jnp.array([95.0, 40.0, 20.0]), jnp.array([2.0, 20.0, 60.0]))
+    vg = vg_params_from_index(idx)
+    for h_e in (-0.02, -0.1):
+        wp, fc = wilting_field_capacity(vg, vg_air_entry_m=h_e)
+        cfg = SoilHydraulicsConfig(vg_air_entry_m=h_e, theta_r=vg["theta_r"],
+                                   theta_sat=vg["theta_sat"], alpha_vg=vg["alpha_vg"],
+                                   n_vg=vg["n_vg"], K_sat=vg["K_sat"])
+        np.testing.assert_array_equal(np.asarray(wp), np.asarray(theta_from_psi(jnp.asarray(-150.0), cfg)))
+        np.testing.assert_array_equal(np.asarray(fc), np.asarray(theta_from_psi(jnp.asarray(-3.36), cfg)))
+    wp0, fc0 = wilting_field_capacity(vg, vg_air_entry_m=0.0)
+    assert bool(jnp.all(fc > fc0)) and bool(jnp.all(wp > wp0))   # Se / Sc > Se
 
 
 if __name__ == "__main__":

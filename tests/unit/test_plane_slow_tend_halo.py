@@ -23,6 +23,7 @@ from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
 from legoesm.atmosphere.dynamics.les.compressible_euler_plane_halo import (
     plane_compressible_euler_slow_tendencies_halo,
 )
+from legoesm import constants
 from legoesm.grids.plane import create_plane_grid
 from legoesm.grids.vertical import create_height_coordinate
 from legoesm.parallel.plane_mpi import make_plane_pencil_layout
@@ -31,7 +32,7 @@ jax.config.update("jax_enable_x64", True)
 
 
 def _setup(use_coriolis=False, hyperdiff=0.0, with_tracers=False,
-           scheme="upwind1", halo=1):
+           scheme="upwind1", halo=1, n_tracers=3):
     grid = create_plane_grid(
         nx=8, ny=6, nlev=10, dx=1000.0, dy=2000.0, dtype=jnp.float64,
     )
@@ -66,7 +67,7 @@ def _setup(use_coriolis=False, hyperdiff=0.0, with_tracers=False,
     )
     if with_tracers:
         tr = 0.01 * jax.random.normal(
-            keys[5], (6, 8, 10, 3),
+            keys[5], (6, 8, 10, n_tracers),
         )
         state = state._replace(
             tracers=state.tracers.replace(data=tr),
@@ -78,40 +79,106 @@ def _setup(use_coriolis=False, hyperdiff=0.0, with_tracers=False,
     return grid, hc, tm, cfg, state, layout
 
 
-def test_momentum_advection_split_raises_in_mpi_halo_path():
-    """ADV-SPLIT #86 (codex iter-68 [S2]): the per-field momentum/scalar
-    advection split is wired ONLY in the serial slow-tendency path. The MPI
-    halo path must FAIL LOUD (NotImplementedError) — not silently apply the
-    scalar scheme to momentum, which would diverge serial≠MPI — until the
-    split is wired here too. Guards the explicit experimental limitation."""
-    grid, hc, tm, _, state, layout = _setup()
-    cfg_split = CompressibleEulerConfig(
-        sponge_coeff=0.05, sponge_width=5_000.0,
-        smagorinsky_cs=0.0, use_coriolis=False, n_acoustic_substeps=12,
-        horizontal_advection_scheme="van_leer",
-        horizontal_momentum_advection_scheme="centered",   # split ≠ scalar
-    )
-    with pytest.raises(NotImplementedError, match="ADV-SPLIT"):
+def _serial_vs_halo(state, grid, hc, tm, cfg, layout, **tol):
+    expected = plane_compressible_euler_slow_tendencies(state, grid, hc, tm, cfg)
+    actual = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg, layout)
+    _eq_tendencies(actual, expected, **tol)
+
+
+# Morrison (run_rcemip1_crm.sh production microphysics) carries 11 tracer slots.
+_N_TRACERS_MORRISON = 11
+
+
+@pytest.mark.parametrize("scheme,mscheme,halo", [
+    ("van_leer", "centered", 2),   # production RCEMIP split
+    ("van_leer", "weno5", 3),      # momentum leg wider than the scalar leg
+    ("centered", None, 1),         # centred on every leg
+    ("upwind1", "van_leer", 2),
+])
+def test_halo_equiv_momentum_advection_split(scheme, mscheme, halo):
+    """ADV-SPLIT #86 on the MPI halo path: u/v/w use the momentum scheme and
+    the scalars the scalar scheme, exactly as the serial slow tendency."""
+    grid, hc, tm, cfg, state, layout = _setup(
+        hyperdiff=1.0e6, with_tracers=True, scheme=scheme, halo=halo,
+        n_tracers=_N_TRACERS_MORRISON)
+    cfg = cfg._replace(horizontal_momentum_advection_scheme=mscheme)
+    _serial_vs_halo(state, grid, hc, tm, cfg, layout)
+
+
+def test_halo_rejects_halo_narrower_than_momentum_scheme():
+    grid, hc, tm, cfg, state, layout = _setup(scheme="van_leer", halo=2)
+    cfg = cfg._replace(horizontal_momentum_advection_scheme="weno5")
+    with pytest.raises(ValueError, match="layout.halo >= 3"):
         plane_compressible_euler_slow_tendencies_halo(
-            state, grid, hc, tm, cfg_split, layout,
-        )
+            state, grid, hc, tm, cfg, layout)
 
 
-def test_vertical_sgs_raises_in_mpi_halo_path():
-    """SGS-VERT #81 (iter-68): the vertical SGS flux ∂_z(K ∂_z φ) is wired only
-    in the serial path. The MPI halo path must FAIL LOUD — not silently apply
-    horizontal-only SGS (serial≠MPI divergence) — until the vertical leg is
-    wired here too. Parallels the #86 momentum-split guard."""
-    grid, hc, tm, _, state, layout = _setup()
-    cfg_vsgs = CompressibleEulerConfig(
-        sponge_coeff=0.05, sponge_width=5_000.0,
-        smagorinsky_cs=0.2, use_coriolis=False, n_acoustic_substeps=12,
+def test_horizontal_advection_halo_width():
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        horizontal_advection_halo_width,
+    )
+    cfg = CompressibleEulerConfig(horizontal_advection_scheme="van_leer")
+    assert horizontal_advection_halo_width(cfg) == 2
+    assert horizontal_advection_halo_width(
+        cfg._replace(horizontal_momentum_advection_scheme="centered")) == 2
+    assert horizontal_advection_halo_width(
+        cfg._replace(horizontal_momentum_advection_scheme="weno5")) == 3
+    with pytest.raises(ValueError, match="Unknown"):
+        horizontal_advection_halo_width(
+            cfg._replace(horizontal_momentum_advection_scheme="centred"))
+
+
+@pytest.mark.parametrize("closure", ["smagorinsky", "molecular"])
+def test_halo_equiv_vertical_sgs(closure):
+    """SGS-VERT #81 on the MPI halo path: the vertical SGS flux on u, v, θ',
+    every tracer and w matches the serial path."""
+    grid, hc, tm, cfg, state, layout = _setup(
+        with_tracers=True, scheme="van_leer", halo=2,
+        n_tracers=_N_TRACERS_MORRISON)
+    cfg = cfg._replace(
+        smagorinsky_cs=0.19, smagorinsky_prandtl=1.0,
+        smagorinsky_wall_damping=False, smagorinsky_delta_max=1000.0,
+        turbulence_closure=closure, molecular_viscosity=constants.nu_air,
         sgs_vertical_diffusion=True,
+        horizontal_momentum_advection_scheme="centered")
+    _serial_vs_halo(state, grid, hc, tm, cfg, layout, rtol=1e-11, atol=1e-11)
+
+
+def test_halo_vertical_sgs_is_not_inert():
+    """Control for the test above: the vertical SGS leg changes the halo
+    tendency (so matching serial with it on is not a no-op comparison)."""
+    grid, hc, tm, cfg, state, layout = _setup(
+        with_tracers=True, scheme="van_leer", halo=2)
+    cfg = cfg._replace(smagorinsky_cs=0.19, sgs_vertical_diffusion=True)
+    on = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg, layout)
+    off = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg._replace(sgs_vertical_diffusion=False), layout)
+    for fld in ("du_dt", "dv_dt", "dw_dt", "dtheta_prime_dt", "dtracers_dt"):
+        assert np.max(np.abs(np.asarray(getattr(on, fld).data)
+                             - np.asarray(getattr(off, fld).data))) > 0.0, fld
+
+
+def test_jit_split_fast_path_honours_momentum_split():
+    """The upwind1 / no-SGS / no-tracer fast path must not drop the momentum
+    scheme: it falls back to the full halo kernel, which matches serial."""
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane_halo import (
+        slow_tendency_jit_split,
     )
-    with pytest.raises(NotImplementedError, match="SGS-VERT"):
+    grid, hc, tm, cfg, state, layout = _setup()
+    cfg = cfg._replace(horizontal_momentum_advection_scheme="centered")
+    expected = plane_compressible_euler_slow_tendencies(state, grid, hc, tm, cfg)
+    actual = slow_tendency_jit_split(state, grid, hc, tm, cfg, layout)
+    _eq_tendencies(actual, expected)
+
+
+def test_halo_rejects_dynamic_smagorinsky():
+    grid, hc, tm, cfg, state, layout = _setup()
+    cfg = cfg._replace(smagorinsky_cs=0.19, smagorinsky_dynamic=True)
+    with pytest.raises(NotImplementedError, match="smagorinsky_dynamic"):
         plane_compressible_euler_slow_tendencies_halo(
-            state, grid, hc, tm, cfg_vsgs, layout,
-        )
+            state, grid, hc, tm, cfg, layout)
 
 
 def _eq_tendencies(a, b, rtol=1e-12, atol=1e-12):

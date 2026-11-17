@@ -25,10 +25,6 @@ from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate, hybrid_from_sigma
 from legoesm.grids.halo import pad_halo_vector
-from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-    CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
-    cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
-)
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
 from legoesm.atmosphere.physics.radiation.solar import perpetual_equinox_insolation
@@ -66,51 +62,6 @@ def _make_hydrostatic_state(grid, sigma, T_val=300.0, u_val=0.0, v_val=0.0,
 # =========================================================================
 # C1: Rest-state invariance
 # =========================================================================
-
-class TestC1RestStateInvariance:
-    """A resting, isothermal, flat-bottom atmosphere should produce
-    near-zero tendencies from the dynamical core (no hyperdiffusion)."""
-
-    def test_rest_state_tendencies_near_zero(self):
-        grid = create_cubed_sphere(8)
-        cdgrid = create_cubed_sphere_cdgrid(grid)
-        sigma = create_sigma_coordinate(5)
-        state = _make_hydrostatic_state(grid, sigma, T_val=300.0,
-                                        u_val=0.0, v_val=0.0)
-        config = PrimitiveEquationConfig(hyperdiff_coeff=0.0)
-
-        tend = hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
-
-        # Wind tendencies should be ~0 (Coriolis with u=v=0 gives zero)
-        # Use 1e-6 tolerance to accommodate float32 precision
-        atol_wind = 1e-6
-        assert jnp.allclose(tend.du_dt.data, 0.0, atol=atol_wind), (
-            f"max |du/dt| = {float(jnp.max(jnp.abs(tend.du_dt.data))):.2e}")
-        assert jnp.allclose(tend.dv_dt.data, 0.0, atol=atol_wind), (
-            f"max |dv/dt| = {float(jnp.max(jnp.abs(tend.dv_dt.data))):.2e}")
-
-        # Temperature tendency: isothermal + hydrostatic ⟹ ~0 advective heating
-        assert jnp.allclose(tend.dT_dt.data, 0.0, atol=atol_wind), (
-            f"max |dT/dt| = {float(jnp.max(jnp.abs(tend.dT_dt.data))):.2e}")
-
-        # Surface pressure tendency: no divergence ⟹ ~0
-        assert jnp.allclose(tend.dp_s_dt.data, 0.0, atol=1e-4), (
-            f"max |dp_s/dt| = {float(jnp.max(jnp.abs(tend.dp_s_dt.data))):.2e}")
-
-    def test_rest_state_jit_compatible(self):
-        """Tendency computation should work under jax.jit."""
-        grid = create_cubed_sphere(8)
-        cdgrid = create_cubed_sphere_cdgrid(grid)
-        sigma = create_sigma_coordinate(5)
-        state = _make_hydrostatic_state(grid, sigma)
-        config = PrimitiveEquationConfig(hyperdiff_coeff=0.0)
-
-        @jax.jit
-        def compute(state):
-            return hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
-
-        tend = compute(state)
-        assert jnp.all(jnp.isfinite(tend.du_dt.data))
 
 
 # =========================================================================
