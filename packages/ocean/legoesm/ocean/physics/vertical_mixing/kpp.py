@@ -711,6 +711,8 @@ def kpp_vertical_mixing(
     if cfg.bld_structure == "cvmix":
         # CVMix SimpleShapes: K = h * w(sigma) * G(sigma) AT the interfaces.
         z_half_depth = jnp.cumsum(dz_actual, axis=-1)[..., :-1]
+        # max(h, eps) guards h = 0 only; it does not clean a NaN h (a fully dry
+        # column's h is NaN via the shared N^2 / V_t^2 0/0, in both structures).
         sigma_half = z_half_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
         sig_i = jnp.clip(sigma_half, 0.0, 1.0)
         w_m_i, w_s_i = _kpp_velocity_scales(
