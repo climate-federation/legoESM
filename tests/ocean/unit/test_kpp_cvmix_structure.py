@@ -214,10 +214,9 @@ def test_unknown_bld_structure_raises():
 
 
 def test_cvmix_mode_batched_and_dry_columns():
-    """(2, 3, nlev) block, one dry column (jacobian 0): finite K and tendencies,
-    finite gradients on the wet columns,
-    dry column carries only background mixing, and every wet column equals the
-    same column run alone (row-wise searchsorted / gathers)."""
+    """(2, 3, nlev) block with per-column thickness (jacobian 0.9-1.1) and one dry
+    column: finite K and tendencies, every wet column equals the same column run
+    alone (row-wise searchsorted / gathers), finite gradients on wet columns."""
     n = 10
     dzr = np.array([1.0, 1.5, 2.0, 3.0, 4.5, 6.0, 8.0, 10.0, 12.0, 15.0])
     zc = create_z_star_from_thicknesses(dzr)
@@ -226,30 +225,45 @@ def test_cvmix_mode_batched_and_dry_columns():
     T = jnp.asarray(20.0 - 0.05 * zr + 0.02 * rng.standard_normal((2, 3, n)))
     S = jnp.broadcast_to(jnp.asarray(35.0 + 0.001 * zr), (2, 3, n))
     u = jnp.asarray(0.2 * np.exp(-zr / 5.0) * rng.uniform(0.5, 1.5, (2, 3, 1)))
-    jac = jnp.ones((2, 3)).at[1, 2].set(0.0)
-    tau = jnp.full((2, 3), 0.05)
+    jac = jnp.asarray([[1.0, 0.9, 1.1], [1.05, 0.95, 0.0]])
+    tau = jnp.asarray(rng.uniform(0.02, 0.1, (2, 3)))
     Bf = jnp.asarray(rng.uniform(-1e-7, 1e-7, (2, 3)))
 
-    def run(T_, jac_, tau_, Bf_, u_):
-        S_ = jnp.broadcast_to(S[0, 0], T_.shape)
+    def run(T_, S_, jac_, tau_, Bf_, u_):
         rho = wright_eos(T_, S_, jnp.zeros_like(T_))
-        return K.kpp_vertical_mixing(u_, jnp.zeros_like(u_), T_, S_,
-                                     rho, jnp.zeros(T_.shape[:-1]), zc, jac_, CFG, constants.g,
-                                     tau_x=tau_, tau_y=jnp.zeros_like(tau_), B_f=Bf_,
-                                     Q_sfc_T=jnp.ones(T_.shape[:-1]), Q_sfc_S=jnp.zeros(T_.shape[:-1]),
-                                     apply_diffusion=False)
+        return K.kpp_vertical_mixing(u_, jnp.zeros_like(u_), T_, S_, rho, jnp.zeros(T_.shape[:-1]),
+                                     zc, jac_, CFG, constants.g, tau_x=tau_,
+                                     tau_y=jnp.zeros_like(tau_), B_f=Bf_,
+                                     Q_sfc_T=jnp.ones(T_.shape[:-1]),
+                                     Q_sfc_S=jnp.zeros(T_.shape[:-1]), apply_diffusion=False)
 
-    out = run(T, jac, tau, Bf, u)
+    out = run(T, S, jac, tau, Bf, u)
     for f in (out.K_v, out.A_v, out.dT_dt):
         assert bool(jnp.all(jnp.isfinite(f)))
     np.testing.assert_allclose(np.asarray(out.K_v[1, 2]), CFG.K_bg, rtol=0, atol=1e-15)
-    one = run(T[0, 1][None], jac[0, 1][None], tau[0, 1][None], Bf[0, 1][None], u[0, 1][None])
-    np.testing.assert_allclose(np.asarray(out.K_v[0, 1]), np.asarray(one.K_v[0]), rtol=1e-14, atol=0)
-    g = jax.grad(lambda t: jnp.sum(run(t, jac, tau, Bf, u).K_v))(T)
+    for i, j in ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1)):
+        one = run(T[i, j][None], S[i, j][None], jac[i, j][None], tau[i, j][None], Bf[i, j][None],
+                  u[i, j][None])
+        for got, want in ((out.K_v, one.K_v), (out.A_v, one.A_v), (out.dT_dt, one.dT_dt)):
+            np.testing.assert_allclose(np.asarray(got[i, j]), np.asarray(want[0]), rtol=1e-13, atol=0)
+    g = jax.grad(lambda t: jnp.sum(run(t, S, jac, tau, Bf, u).K_v))(T)
     wet = np.asarray(jac) > 0.0
     # Wet columns only: a fully dry column's h is NaN in BOTH structures (shared
     # N^2 / V_t^2 path divides 0/0 at zero thickness; pre-existing, not cvmix).
     assert bool(jnp.all(jnp.isfinite(g[wet]))) and float(jnp.abs(g[wet]).max()) > 0.0
+
+
+def test_crossing_continuous_on_supercritical_plateau():
+    """Brackets whose top is already supercritical carry soft weight; their root
+    must not jump when the plateau curvature changes sign (review case)."""
+    d = jnp.asarray([0.5, 1.5, 2.5, 3.5, 4.5])
+    ri = jnp.asarray([0.0, 0.31, 0.31, 0.31, 0.8])
+    h0 = float(K._cvmix_first_crossing_depth(ri, d, CFG))
+    for k in (2, 3):
+        for e in (1e-8, -1e-8):
+            h1 = float(K._cvmix_first_crossing_depth(ri.at[k].add(e), d, CFG))
+            assert abs(h1 - h0) < 1e-6, (k, e, h0, h1)
+    check_grads(lambda r: K._cvmix_first_crossing_depth(r, d, CFG), (ri,), order=1, modes=["rev"])
 
 
 # CVMix cvmix_coeffs_kpp nonlocal term (C_s * G(sigma), CVMix C_s = MOM6 CS2

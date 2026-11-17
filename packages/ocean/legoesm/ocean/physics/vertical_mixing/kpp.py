@@ -341,9 +341,9 @@ def _cvmix_first_crossing_depth(Ri_b, z_depth, cfg):
     CVMix's quadratic through (d_{k-1}, Ri_{k-1}), (d_k, Ri_k) with the
     backward-difference slope at d_{k-1} (zero slope for k = 1); no crossing
     (weight prod_j(1 - s_j)) -> d_{nlev-1}.  The hard limit (sharpness -> inf)
-    is CVMix's depth.  The in-bracket root is taken in closed form and clipped
-    into the bracket, with c = min(Ri_{k-1} - Ri_c, 0), so brackets that do not
-    straddle Ri_c (they only carry soft weight) stay finite and continuous.
+    is CVMix's depth.  The in-bracket root is taken in closed form; brackets that
+    do not straddle Ri_c (they only carry soft weight) map to 0 (top already
+    supercritical) or H (bottom still subcritical), continuous in Ri_b.
     """
     s = jax.nn.sigmoid(cfg.crossing_sharpness * (Ri_b - cfg.Ri_crit))
     surv = jnp.cumprod(1.0 - s, axis=-1)
@@ -359,18 +359,27 @@ def _cvmix_first_crossing_depth(Ri_b, z_depth, cfg):
     dprev = d0[..., 1:] - d0[..., :-1]
     slope_prev = (y0[..., 1:] - y0[..., :-1]) / jnp.where(dprev > 0.0, dprev, 1.0)
     m = jnp.pad(slope_prev, (*pad_axes, (1, 0)))   # bracket 1: zero slope
-    c = jnp.minimum(y0 - cfg.Ri_crit, 0.0)
-    a = (y1 - y0 - m * H) / H_safe ** 2
-    disc = m * m - 4.0 * a * c
-    # sqrt has an infinite derivative at 0 (hit when m = c = 0): double-where.
+    f0 = y0 - cfg.Ri_crit                 # quadratic value at the bracket top
+    fH = y1 - cfg.Ri_crit                 # ... and at its bottom
+    straddle = (f0 < 0.0) & (fH > 0.0)
+    # Unique in-bracket root of a*x^2 + m*x + f0 for straddling brackets
+    # (2c/(-m - sqrt(D)) when m > 0, (-m + sqrt(D))/(2a) otherwise, where a > 0);
+    # operands are replaced by a benign straddling triple elsewhere so no branch
+    # produces a NaN value or gradient.
+    c = jnp.where(straddle, f0, -1.0)
+    m_s = jnp.where(straddle, m, 1.0)
+    a = jnp.where(straddle, (y1 - y0 - m * H) / H_safe ** 2, 0.0)
+    disc = m_s * m_s - 4.0 * a * c
+    # sqrt has an infinite derivative at 0: double-where.
     root_d = jnp.where(disc > 0.0, jnp.sqrt(jnp.where(disc > 0.0, disc, 1.0)), 0.0)
-    # In-bracket root of a*x^2 + m*x + c: 2c/(-m - root_d) when m > 0 (no
-    # cancellation), (-m + root_d)/(2a) otherwise (straddling then needs a > 0).
-    den_pos = jnp.where(m > 0.0, -m - root_d, -1.0)
     a_safe = jnp.where(a > 0.0, a, 1.0)
-    x_pos = 2.0 * c / den_pos
-    x_neg = jnp.where(a > 0.0, (-m + root_d) / (2.0 * a_safe), H)
-    x = jnp.clip(jnp.where(m > 0.0, x_pos, x_neg), 0.0, H)
+    x_pos = 2.0 * c / jnp.where(m_s > 0.0, -m_s - root_d, -1.0)
+    x_neg = (-m_s + root_d) / (2.0 * a_safe)
+    root = jnp.clip(jnp.where(m_s > 0.0, x_pos, x_neg), 0.0, H)
+    # Non-straddling brackets carry only soft weight: top already supercritical
+    # -> 0, bottom still subcritical -> H.  Continuous at both edges (the
+    # straddling root tends to 0 as f0 -> 0- and to H as fH -> 0+).
+    x = jnp.where(f0 >= 0.0, 0.0, jnp.where(fH <= 0.0, H, root))
     h_bracket = d0 + x
 
     return (w[..., 0] * z_depth[..., 0]
