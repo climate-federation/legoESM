@@ -901,6 +901,47 @@ class NemoStandaloneK0StepResult(NamedTuple):
     next_s2: NemoS2Inputs
 
 
+def nemo_orca2_ocean_consumption_step(
+    ocean_card,
+    state,
+    *,
+    surface_forcing,
+    freshwater_forcing,
+    model=None,
+    sponge=None,
+    nemo_kt=None,
+):
+    """Consume an explicit coupled surface boundary in the ORCA2 ocean.
+
+    ``surface_forcing`` is the single hand-off for NEMO ``qns``, ``qsr``,
+    ``emp``, ``sfx``, native stresses, ``fr_i``, ``taum``, ``rCdU_ice`` and
+    ``hm_i``.  The production ocean already owns the active TKE and implicit
+    top-drag consumers; this core only shares its exact ``model.step`` call.
+    """
+
+    if (isinstance(nemo_kt, bool) or not isinstance(nemo_kt, (int, np.integer))
+            or nemo_kt < 1):
+        raise ValueError("ORCA2 ocean consumption requires nemo_kt=<positive step>")
+    if model is None:
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+
+        recipe = ocean_card.recipe
+        model = LatLonCGridOceanModel(
+            recipe.grid, recipe.z_coord, recipe.model_config,
+            iwm_forcing=recipe.iwm_forcing,
+        )
+    kwargs = {
+        "freshwater": freshwater_forcing,
+        "surface_forcing": surface_forcing,
+        "nemo_kt": int(nemo_kt),
+    }
+    if sponge is not None:
+        kwargs["sponge"] = sponge
+    return model.step(state, ocean_card.dt_s, **kwargs)
+
+
 def validate_nemo_standalone_k0(config: NemoStandaloneK0Config) -> None:
     """Refuse every surface-card configuration other than Decision-175 K0."""
 
@@ -1073,24 +1114,15 @@ def nemo_orca2_k0_ocean_step(
     s0 = s0._replace(kt=int(nemo_kt))
     if forcing_update:
         state = state._replace(T=state.T.replace(data=temperature))
-    if model is None:
-        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            LatLonCGridOceanModel,
-        )
-
-        recipe = card.ocean.recipe
-        model = LatLonCGridOceanModel(
-            recipe.grid, recipe.z_coord, recipe.model_config,
-            iwm_forcing=recipe.iwm_forcing,
-        )
-    kwargs = {
-        "freshwater": surface.freshwater_forcing,
-        "surface_forcing": surface.surface_forcing,
-    }
-    if sponge is not None:
-        kwargs["sponge"] = sponge
-    kwargs["nemo_kt"] = int(nemo_kt)
-    stepped = model.step(state, card.ocean.dt_s, **kwargs)
+    stepped = nemo_orca2_ocean_consumption_step(
+        card.ocean,
+        state,
+        surface_forcing=surface.surface_forcing,
+        freshwater_forcing=surface.freshwater_forcing,
+        model=model,
+        sponge=sponge,
+        nemo_kt=nemo_kt,
+    )
     state_after = stepped.state_after if hasattr(stepped, "state_after") else stepped
     next_shortwave_fraction = _nemo_orca2_k0_next_fraqsr_compiled(
         z_coord, get_policy(),
@@ -1794,6 +1826,7 @@ __all__ = [
     "NemoStandaloneSurfaceResult",
     "build_nemo_orca2_k0_ocean_card",
     "nemo_orca2_k0_ocean_step",
+    "nemo_orca2_ocean_consumption_step",
     "nemo_orca2_k0_s0f",
     "nemo_orca2_k0_surface_card",
     "NemoTStressLbcPlan",

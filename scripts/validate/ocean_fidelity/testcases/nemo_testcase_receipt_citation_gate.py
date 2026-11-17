@@ -17465,6 +17465,60 @@ _step2_shift_citations(
     lambda line: line + 23 if line >= 164 else line + 2 if line >= 79 else line,
 )
 
+# Coupled-step Round 3 inserts the shared ocean consumer and the CASE(2)
+# freshwater state machine.  Compose those insertions onto the cited live
+# ranges while preserving every historical receipt spelling.
+_step2_shift_citations(
+    tuple(
+        "packages/ocean/legoesm/ocean/bulk_flux_omip.py:" + lines
+        for lines in (
+            "1030-1114", "1132-1153", "1168-1171", "1176-1219",
+            "1320-1581", "1401-1473", "1402-1474", "901-974",
+        )
+    ),
+    lambda line: line + 32 if line >= 1097 else line + 41 if line >= 904 else line,
+)
+_step2_shift_citations(
+    tuple(
+        "packages/ocean/legoesm/ocean/forcing/nemo_surface.py:" + lines
+        for lines in ("143-187", "348-358", "406-414")
+    ),
+    lambda line: line + 111,
+)
+_merge_resolution_repin(
+    "packages/ocean/legoesm/ocean/bulk_flux_omip.py:1132-1153",
+    "1164-1185",
+    anchors=[
+        "temperature = jnp.asarray(temperature, dtype=jnp.float64)",
+        (")", 474),
+    ],
+)
+_merge_resolution_repin(
+    "packages/ocean/legoesm/ocean/bulk_flux_omip.py:1176-1219",
+    "1208-1251",
+    anchors=["def _nemo_orca2_k0_next_fraqsr_compiled(", (")", 499)],
+)
+_merge_resolution_repin(
+    "packages/ocean/legoesm/ocean/bulk_flux_omip.py:1402-1474",
+    "1434-1506",
+    anchors=["if not update:", (")", 597)],
+)
+_merge_resolution_repin(
+    "packages/ocean/legoesm/ocean/bulk_flux_omip.py:901-974",
+    "901-1015",
+    anchors=["next_s2: NemoS2Inputs", ("),", 34)],
+)
+_merge_resolution_repin(
+    "packages/ocean/legoesm/ocean/forcing/nemo_surface.py:143-187",
+    "254-298",
+    anchors=["first_from_rest = jnp.logical_and(", (")", 121)],
+)
+_merge_resolution_repin(
+    "packages/ocean/legoesm/ocean/forcing/nemo_surface.py:348-358",
+    "459-469",
+    anchors=["utau_u, vtau_v = nemo_t_stress_to_uv(", (")", 179)],
+)
+
 # The extraction moves the public wrapper and separates its stress call from
 # the core's stress-input construction, so these three semantic anchors are
 # re-pinned rather than represented as a uniform line shift.
