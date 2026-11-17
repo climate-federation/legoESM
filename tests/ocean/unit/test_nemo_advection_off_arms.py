@@ -257,10 +257,39 @@ def test_store_salt_flux_is_refused_with_tracer_advection_none(tsunami_card):
             tsunami_card.recipe.grid, tsunami_card.recipe.z_coord, cfg)
 
 
-def test_tracer_none_stage1_is_the_qco_ratio_and_fct2_plant_moves_it(
+def test_vortex_tracer_none_stage1_is_the_qco_ratio_and_fct2_plant_moves_it(
         vortex_off_card):
     # stprk3_stg.f90:503-505 with ts(Krhs) = 0 (:467)
     g = vortex_off_card.recipe.grid
+    nj, ni = g.f_T.shape
+    shape = (nj, ni, 1)
+    a, b = 20.0 + _field(shape, 10), 30.0 + _field(shape, 11)
+    r3b, r3m, r3a = (1e-3 * _field((nj, ni), s) for s in (12, 13, 14))
+    qb, qm, qa = 1.0 + r3b, 1.0 + r3m, 1.0 + r3a
+    mfu = 0.1 * _field((nj, ni + 1, 1), 15)
+    mfv = 0.1 * _field((nj + 1, ni, 1), 16)
+    w = jnp.zeros((nj, ni, 2))
+    h = jnp.full(shape, 100.0)
+
+    def step(scheme):
+        return _nemo_ws_rk3_tracer_pair_step(
+            a, b, scheme, mfu, mfv, w, h, h,
+            jnp.full((nj, ni + 1, 1), 100.0), jnp.full((nj + 1, ni, 1), 100.0),
+            g, 1000.0, jnp.ones(shape),
+            stage_qco_weights=((qb, qm, qa),) * 3, stop_after_stage=1)
+
+    a1, b1 = step("none")
+    want_a = (qb[..., None] * a + (1000.0 / 3.0) * qm[..., None] * 0.0) / qa[..., None]
+    assert np.array_equal(a1, want_a)
+    assert np.array_equal(a1, qb[..., None] * a / qa[..., None])
+    assert np.array_equal(b1, qb[..., None] * b / qa[..., None])
+    assert not np.array_equal(step("fct2")[0], a1)
+
+
+def test_tsunami_tracer_none_stage1_is_the_qco_ratio_and_fct2_plant_moves_it(
+        tsunami_card):
+    # stprk3_stg.f90:503-505 with ts(Krhs) = 0 (:467)
+    g = tsunami_card.recipe.grid
     nj, ni = g.f_T.shape
     shape = (nj, ni, 1)
     a, b = 20.0 + _field(shape, 10), 30.0 + _field(shape, 11)

@@ -17160,34 +17160,19 @@ CITATION_MAP.update({
     'zdftke_round332.patch:12-23': ['@@ -185,3 +187,5 @@', '+            & zmxld(ntsi:ntei,1:jpkm1),p_pdlr(ntsi:ntei,jj,2:jpkm1))', 12],
 })
 
-# Coupling-step-1 receipt reanchors.  Each entry preserves the source-side
-# cited content at its merged-tree location; the audit below validates the
-# anchors exactly as it does the rest of the map.
+# Coupling-step-1 receipt reanchors whose current targets were not already in
+# the map.  These anchors pin the cited code, not nearby explanatory prose.
 CITATION_MAP.update({
-    'ocean_model_latlon_cgrid.py:6796-6841': [
-        '# The UP3 T-point upwind selector is keyed by the REFERENCE the config\'s',
-        '# ``umask(ji,jj,jk)``; :444 adds the barotropic correction as', 46],
-    'ocean_model_latlon_cgrid.py:7315-7325': [
-        '"barotropic_wind_nemo_stored_depth requires "',
-        '# (stprk3_stg.f90:163); the mirrored r1_h*_0 rows are', 11],
-    'ocean_model_latlon_cgrid.py:13455':
-        'if tend.K_diss_bot is not None:',
-    'ocean_model_latlon_cgrid.py:2568-2570': [
-        'kbb_velocity: tuple,', (') -> tuple:', 1), 3],
-    'ocean_model_latlon_cgrid.py:2573-2575': [
-        '``stprk3.F90:186`` computes ``uu_b/vv_b(Naa)`` once before all stages.',
-        'solved slot into ``Nnn``; stages 2 and 3 therefore read this-step ``Nnn``',
-        3],
-    'ocean_model_latlon_cgrid.py:2576':
-        'at :200-207.  Only stage 1 reads the last-step ``Kbb`` pair.  Keeping this',
-    'ocean_model_latlon_cgrid.py:2581': 'return kbb_velocity',
-    'shortwave_penetration.py:647':
-        '# Gradient-only: 1 below the blue level (discarded by the where) and',
-    'tke.py:3662-3662': ['_dissl_positive = tke_curr > 0.0',
-                         '_dissl_positive = tke_curr > 0.0', 1],
-    'scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10529-10566': [
-        ("('ll_bt_av    = .TRUE.', 1),", 1),
-        ("('IF( .NOT.lk_linssh ) THEN   !* Update ocean depth', 1),", 2), 38],
+    'ocean_model_latlon_cgrid.py:2930-2932': [
+        ('q_before[..., None] * base', 2), ') / q_after', 3],
+    'ocean_model_latlon_cgrid.py:2938': [
+        ('return jnp.where(active_3d > 0.5, out, base)', 2)],
+    'tke.py:3658-3669': [
+        'dissl_new = None', ('        )', 32), 12],
+    'scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:11779-11816': [
+        ('# The inserted O10 expressions also change occurrence numbers for otherwise', 1),
+        ('raise RuntimeError(f"unapplied O10 citation anchors: {_missing_o10_anchors}")', 1),
+        38],
 })
 
 def audit_map() -> list[dict]:
