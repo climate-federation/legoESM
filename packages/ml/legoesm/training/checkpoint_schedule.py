@@ -14,9 +14,16 @@ Three schedules over a fixed-length loop, all yielding the SAME gradient:
                  schedule the DJ4Earth paper (Moses et al., JAMES 2026) uses
                  for Oceananigans/ShallowWaters long rollouts.
 
+- ``"two_level"`` the loop cut into ``checkpoints`` segments: the reverse
+                 pass stores each segment's entry state, re-runs one segment
+                 at a time storing its per-step states, and remats each
+                 step.  O(K + N/K) stored states, two extra forward passes.
+
 A ``storage`` axis is orthogonal to recompute: ``"host"`` offloads the
 dominant (matmul) residuals to pinned host (CPU) DRAM via a JAX offload
-checkpoint policy, trading PCIe bandwidth for device (GPU/TPU) HBM.
+checkpoint policy, trading PCIe bandwidth for device (GPU/TPU) HBM.  Under
+``"two_level"``, ``"host"`` instead offloads the stored STATES (both levels),
+so the device holds one step's residuals whatever the loop length.
 
 Everything here operates on an opaque ``body``/carry, so it is grid- and
 component-agnostic (atmosphere, ocean, land, sea ice; any grid).
@@ -33,7 +40,7 @@ from jax.ad_checkpoint import checkpoint_policies as _cp
 
 Carry = TypeVar("Carry")
 
-VALID_SCHEDULES = ("none", "uniform", "binomial")
+VALID_SCHEDULES = ("none", "uniform", "binomial", "two_level")
 VALID_STORAGE = ("recompute", "host")
 
 
@@ -62,6 +69,43 @@ def offload_policy(storage: str):
     raise ValueError(f"unknown storage {storage!r}; expected one of {VALID_STORAGE}")
 
 
+def _two_level_loop(body, init, n_steps, checkpoints, storage):
+    """``checkpointed_loop(schedule="two_level")``: the states are tagged by
+    name and each level's ``jax.checkpoint`` saves only its own name (kept on
+    device, or offloaded to pinned host under ``storage="host"``)."""
+    from jax.ad_checkpoint import checkpoint_name
+
+    K = checkpoints if checkpoints is not None else sqrt_checkpoints(n_steps)
+    seg_len = -(-n_steps // int(max(1, min(K, n_steps))))
+    n_seg, tail = divmod(n_steps, seg_len)
+
+    def policy(name):
+        if storage == "host":
+            return _cp.save_and_offload_only_these_names(
+                names_which_can_be_saved=[], names_which_can_be_offloaded=[name],
+                offload_src="device", offload_dst="pinned_host")
+        return _cp.save_only_these_names(name)
+
+    def named(c, name):
+        return jax.tree_util.tree_map(lambda x: checkpoint_name(x, name), c)
+
+    def step(c, _):
+        return body(named(c, "loop_step_state")), None
+    step = jax.checkpoint(step, policy=policy("loop_step_state"),
+                          prevent_cse=False)
+
+    def segment(c, _):
+        c, _ = jax.lax.scan(step, named(c, "loop_segment_state"), None,
+                            length=seg_len)
+        return c, None
+    segment = jax.checkpoint(segment, policy=policy("loop_segment_state"),
+                             prevent_cse=False)
+    c, _ = jax.lax.scan(segment, init, None, length=n_seg)
+    if tail:
+        c, _ = jax.lax.scan(step, c, None, length=tail)
+    return c
+
+
 def checkpointed_loop(
     body: Callable[[Carry], Carry],
     init: Carry,
@@ -87,10 +131,11 @@ def checkpointed_loop(
         Initial carry.
     n_steps : int
         Static number of iterations.
-    schedule : {"none", "uniform", "binomial"}
+    schedule : {"none", "uniform", "binomial", "two_level"}
         Adjoint-memory strategy (see module docstring).
     checkpoints : int, optional
-        Binomial checkpoint budget K; defaults to ``sqrt_checkpoints(n_steps)``.
+        Binomial checkpoint budget K, or the two-level segment count;
+        defaults to ``sqrt_checkpoints(n_steps)``.
     base : int
         Treeverse fan-out for the binomial schedule (``equinox`` default 16).
     storage : {"recompute", "host"}
@@ -116,6 +161,9 @@ def checkpointed_loop(
         )
     if n_steps <= 0:
         return init
+
+    if schedule == "two_level":
+        return _two_level_loop(body, init, n_steps, checkpoints, storage)
 
     if schedule in ("none", "uniform"):
         def scan_body(c, _):
