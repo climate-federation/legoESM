@@ -385,9 +385,11 @@ def score_step(out, trace, records: dict[int, dict[str, Any]], card, label: str)
 def kt_program(kt: int, nn_fsbc: int) -> int:
     """Representative kt of the same compiled program.
 
-    The O17 graph reads ``kt`` only through ``si3_dyn_orca2`` -> Prather's sweep
-    parity ``MOD((kt-1)/nn_fsbc, 2)`` (``icedyn_adv_pra.F90:267-367``,
-    ``si3_orca2_state.py`` ``kt_parity``) and its ``kt >= 1`` guard.
+    O17 records occur on SI3 calls, so every representative satisfies the
+    stress refresh cadence ``MOD(kt-1, nn_fsbc) == 0``
+    (``iceupdate.F90:361``).  The two representatives also preserve Prather's
+    sweep parity ``MOD((kt-1)/nn_fsbc, 2)``
+    (``icedyn_adv_pra.F90:267-367``, ``si3_orca2_state.py`` ``kt_parity``).
     """
     return 1 + ((kt - 1) // nn_fsbc) % 2 * nn_fsbc
 

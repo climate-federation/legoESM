@@ -51,17 +51,22 @@ ORDER = (
 
 def _calls(path: Path) -> list[str]:
     tree = ast.parse(path.read_text())
-    function = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "si3_o17_step"
-    )
     out = []
-    for node in ast.walk(function):
-        if isinstance(node, ast.Call):
-            fn = node.func
-            if isinstance(fn, ast.Name):
-                out.append((node.lineno, fn.id))
+    # Round 2 makes the stress boundary explicit: the source-owned core ends
+    # after ice_update_flx and the public wrapper performs ice_update_tau.
+    # Audit both bodies in their execution order so the call-order contract is
+    # unchanged by the extraction.
+    for function_name in ("_si3_o17_through_update_flx", "si3_o17_step"):
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == function_name
+        )
+        for node in ast.walk(function):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                if isinstance(fn, ast.Name):
+                    out.append((node.lineno, fn.id))
     calls = [name for _, name in sorted(out)]
     # The production function contains an explicit swap plant in one ``if``
     # arm followed by the real call in its ``else`` arm.  AST walking sees

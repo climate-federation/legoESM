@@ -40,8 +40,10 @@ from legoesm.ice.itd import (
 )
 from legoesm.ice.ridging import SI3RdgrftConfig, SI3RdgrftResult, SI3RdgrftState, si3_ice_dyn_rdgrft
 from legoesm.ice.si3_finalize import (
+    SI3CorrectionResult,
     SI3FinalizeResponse,
     SI3Fluxes,
+    SI3O16Result,
     SI3StressInputs,
     SI3UpdateFluxForcing,
     si3_ice_update_tau,
@@ -159,6 +161,27 @@ class SI3O17Trace(NamedTuple):
     remap: dict
     open_water: SI3DOOutputs
     finalize: SI3FinalizeResponse
+
+
+class _SI3O17ThroughUpdateFlux(NamedTuple):
+    """O17 state and named boundaries immediately after ``ice_update_flx``."""
+
+    state: SI3O17StepState
+    surface_stress: SI3SurfaceOutputs
+    strength: SI3ORCA2Strength
+    aevp: SI3CGridAEVPState
+    deformation: tuple[jnp.ndarray, jnp.ndarray]
+    advection: SI3AdvectionDiagnostics
+    advection_state: SI3State
+    redistribution: SI3RdgrftResult
+    postdyn_correction: SI3IceCorState
+    frazil: SI3Frazil
+    thermodynamics: SI3O12Stages
+    remap: dict
+    open_water: SI3DOOutputs
+    correction: SI3CorrectionResult
+    final: SI3O16Result
+    stress_inputs: SI3StressInputs
 
 
 def build_orca2_sas_ice_o17_card(*, surface: SI3SurfaceConfig, thermo_namelist: dict) -> SI3O17Card:
@@ -569,7 +592,7 @@ def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
     )
 
 
-def si3_o17_step(
+def _si3_o17_through_update_flx(
     entry: SI3O17StepState,
     forcing: SI3O17LiveForcing,
     card: SI3O17Card,
@@ -578,8 +601,8 @@ def si3_o17_step(
     _plant_drop_redistribution: bool = False,
     _plant_drop_deformation_fold: bool = False,
     _test_return_surface_probe: bool = False,
-) -> tuple[SI3O17StepState, SI3O17Trace]:
-    """One exact production call graph in NEMO ``ice_stp`` order."""
+) -> _SI3O17ThroughUpdateFlux:
+    """Run the exact NEMO ``ice_stp`` graph through ``ice_update_flx``."""
 
     if card.core2_precipitation_closure is not False:
         raise ValueError("O17 freezes core2_precipitation_closure=False")
@@ -1171,21 +1194,70 @@ def si3_o17_step(
         v_ice=final.state.v_ice,
         at_i=final.state.aggregated.at_i,
     )
-    stress = si3_ice_update_tau(stress_inputs, config=card.state, ln_drgice_imp=card.ln_drgice_imp)
-    finalize = SI3FinalizeResponse(correction, final, stress)
-    return SI3O17StepState(final.state, aevp), SI3O17Trace(
-        surface,
-        strength,
-        aevp,
-        (divu, delta),
-        adv,
-        advection_state,
-        rdg,
-        cor,
-        frazil,
-        stages,
-        remap,
-        open_water,
+    return _SI3O17ThroughUpdateFlux(
+        state=SI3O17StepState(final.state, aevp),
+        surface_stress=surface,
+        strength=strength,
+        aevp=aevp,
+        deformation=(divu, delta),
+        advection=adv,
+        advection_state=advection_state,
+        redistribution=rdg,
+        postdyn_correction=cor,
+        frazil=frazil,
+        thermodynamics=stages,
+        remap=remap,
+        open_water=open_water,
+        correction=correction,
+        final=final,
+        stress_inputs=stress_inputs,
+    )
+
+
+def si3_o17_step(
+    entry: SI3O17StepState,
+    forcing: SI3O17LiveForcing,
+    card: SI3O17Card,
+    *,
+    _plant_swap_rheology_advection: bool = False,
+    _plant_drop_redistribution: bool = False,
+    _plant_drop_deformation_fold: bool = False,
+    _test_return_surface_probe: bool = False,
+) -> tuple[SI3O17StepState, SI3O17Trace]:
+    """One exact production call graph in NEMO ``ice_stp`` order."""
+
+    core = _si3_o17_through_update_flx(
+        entry,
+        forcing,
+        card,
+        _plant_swap_rheology_advection=_plant_swap_rheology_advection,
+        _plant_drop_redistribution=_plant_drop_redistribution,
+        _plant_drop_deformation_fold=_plant_drop_deformation_fold,
+        _test_return_surface_probe=_test_return_surface_probe,
+    )
+    if _test_return_surface_probe:
+        return core
+    stress = si3_ice_update_tau(
+        core.stress_inputs,
+        config=card.state,
+        ln_drgice_imp=card.ln_drgice_imp,
+        nn_fsbc=card.state.nn_fsbc,
+        kt=forcing.kt,
+    )
+    finalize = SI3FinalizeResponse(core.correction, core.final, stress)
+    return core.state, SI3O17Trace(
+        core.surface_stress,
+        core.strength,
+        core.aevp,
+        core.deformation,
+        core.advection,
+        core.advection_state,
+        core.redistribution,
+        core.postdyn_correction,
+        core.frazil,
+        core.thermodynamics,
+        core.remap,
+        core.open_water,
         finalize,
     )
 

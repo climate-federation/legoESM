@@ -313,14 +313,16 @@ def _nemo_cadenced_tau_step(
     *,
     config: SI3ORCA2StateConfig,
     ln_drgice_imp: bool,
-    update_now: bool,
+    nn_fsbc: int,
+    kt: int,
 ) -> SI3StressOutputs:
     """Use the production cadence arm already present on the main line."""
     return si3_ice_update_tau(
         inputs,
         config=config,
         ln_drgice_imp=ln_drgice_imp,
-        ice_step=update_now,
+        nn_fsbc=nn_fsbc,
+        kt=kt,
     )
 
 
@@ -465,14 +467,15 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
                 },
                 tmask_k1=jnp.asarray(c4["tmask"]),
             )
-            cadence = (kt - 1) % 2 == 0
+            scored_kt = kt
             if plant == "wrong-parity":
-                cadence = not cadence
+                scored_kt += 1
             got = _nemo_cadenced_tau_step(
                 stress,
                 config=cfg,
                 ln_drgice_imp=bool(namelist["ln_drgice_imp"]),
-                update_now=cadence,
+                nn_fsbc=cfg.nn_fsbc,
+                kt=scored_kt,
             )
             for name in ("utau", "vtau", "taum"):
                 _equal(

@@ -139,12 +139,16 @@ def test_tau_cadence_reuses_production_api(tmp_path: Path) -> None:
         interior * 10,
     )
     cfg = SI3ORCA2StateConfig.for_orca2_sas_ice(nn_hls=2, nn_fsbc=2)
-    assert "ice_step" in inspect.signature(si3_ice_update_tau).parameters
-    off = scorer._nemo_cadenced_tau_step(inputs, config=cfg, ln_drgice_imp=False, update_now=False)
+    assert {"nn_fsbc", "kt"} <= set(inspect.signature(si3_ice_update_tau).parameters)
+    off = scorer._nemo_cadenced_tau_step(
+        inputs, config=cfg, ln_drgice_imp=False, nn_fsbc=2, kt=2
+    )
     np.testing.assert_array_equal(off.tmod_io, inputs.tmod_io)
     np.testing.assert_array_equal(off.taum, inputs.taum)
     np.testing.assert_array_equal(off.utau_oce, inputs.utau_oce)
-    on = scorer._nemo_cadenced_tau_step(inputs, config=cfg, ln_drgice_imp=False, update_now=True)
+    on = scorer._nemo_cadenced_tau_step(
+        inputs, config=cfg, ln_drgice_imp=False, nn_fsbc=2, kt=1
+    )
     assert not np.array_equal(on.tmod_io, inputs.tmod_io)
     with pytest.raises(ValueError, match="parity"):
         scorer.self_test("wrong-parity", tmp_path)

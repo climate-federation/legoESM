@@ -175,7 +175,7 @@ class SI3StressInputs(NamedTuple):
     taum: Field
     utau_oce: Field
     vtau_oce: Field
-    # Level-1 T mask; read only by the implicit arm (rCdU_ice, iceupdate.F90:391 in NEMO 5.0.1).
+    # Level-1 T mask; read only by the implicit arm (NEMO 5.0.2 iceupdate.F90:391).
     tmask_k1: Field | None = None
 
 
@@ -186,7 +186,7 @@ class SI3StressOutputs(NamedTuple):
     tmod_io: Field
     utau_oce: Field
     vtau_oce: Field
-    # Implicit ice-ocean top drag (< 0, m/s) on DO_2D(1,1,1,1); None on the explicit arm (NEMO does not set it there).
+    # Implicit top drag (< 0, m/s), NEMO 5.0.2 iceupdate.F90:388-392.
     rCdU_ice: Field | None = None
 
 
@@ -1158,18 +1158,23 @@ def si3_ice_update_tau(
     *,
     config: SI3ORCA2StateConfig,
     ln_drgice_imp: bool,
-    ice_step: bool = True,
+    nn_fsbc: int,
+    kt: int,
 ) -> SI3StressOutputs:
-    """``ice_update_tau`` (NEMO 5.0.1 ``iceupdate.F90:345-405``; same statements in the 5.0.2 deck).
+    """``ice_update_tau`` (NEMO 5.0.2 ``iceupdate.F90:361-407``).
 
-    ``ice_step`` is NEMO's ``MOD(kt-1, nn_fsbc) == 0`` (a static Python bool, decided by the caller).  True recomputes
-    ``tmod_io`` and ``taum`` and saves ``utau_oce``/``vtau_oce``; False (an ocean step between two ice steps, only
-    possible when ``nn_fsbc > 1``) carries ``inputs.tmod_io``, ``inputs.taum``, ``inputs.utau_oce`` and
-    ``inputs.vtau_oce`` unchanged and redoes only the every-ocean-step blend.  Under ``ln_drgice_imp`` the
+    ``nn_fsbc`` and ``kt`` are explicit static Python integers.  NEMO's
+    ``MOD(kt-1, nn_fsbc) == 0`` block (:361-385) recomputes ``tmod_io`` and
+    ``taum`` and saves ``utau_oce``/``vtau_oce``; intervening ocean steps carry
+    those four private fields unchanged.  Both parities execute the stress
+    blend (:387-407).  Under ``ln_drgice_imp`` the
     every-ocean-step block also returns ``rCdU_ice = -tmod_io*at_i*tmask/rho0`` on ``DO_2D(1,1,1,1)`` (the array
     shrunk by ``nn_hls-1`` per side), the drag the ocean's implicit top friction consumes; the implicit arm
     requires ``inputs.tmask_k1``.
     """
+    if nn_fsbc < 1 or kt < 1:
+        raise ValueError("ice_update_tau requires positive static nn_fsbc and kt")
+    refresh_private_stress = (kt - 1) % nn_fsbc == 0
     h = int(config.nn_hls)
     if h < 1:
         raise ValueError("ice_update_tau requires at least one halo cell")
@@ -1200,7 +1205,7 @@ def si3_ice_update_tau(
     below = (slice(h, -h), slice(h - 1, -h - 1))
     at_i = inputs.at_i[sl]
 
-    if ice_step:
+    if refresh_private_stress:
         # ``IF( MOD( kt-1, nn_fsbc ) == 0 )`` block (:362-385)
         zu = sr(sr(inputs.u_ice[1:-1, 1:-1] + inputs.u_ice[:-2, 1:-1]) -
                 sr(inputs.u_oce[1:-1, 1:-1] + inputs.u_oce[:-2, 1:-1]))

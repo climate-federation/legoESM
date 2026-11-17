@@ -2435,6 +2435,8 @@ def score_o15_o16(
             stress_inputs,
             config=cfg,
             ln_drgice_imp=bool(namelist["ln_drgice_imp"]),
+            nn_fsbc=1,
+            kt=1,
         )
         return SI3FinalizeResponse(correction=correction, final=final, stress=stress)
 

@@ -17219,6 +17219,111 @@ for _old, _new in _C_LADDER_REANCHORS:
     CITATION_MAP[_old] = _resolved
     CITATION_MAP[_new] = _resolved
 
+# Coupled-step Round 2 extracts the O17 through-update-flux core and threads
+# explicit stress cadence through already-cited production/scorer/test files.
+# Compose those mechanical insertions onto every live line spec for each file;
+# the historical receipt citation strings remain unchanged.
+def _step2_shift_citations(citations, transform) -> None:
+    for citation in citations:
+        value = CITATION_MAP[citation]
+        lines = value.get("lines", citation.rsplit(":", 1)[1]) if isinstance(value, dict) else citation.rsplit(":", 1)[1]
+        shifted = re.sub(r"\d+", lambda match: str(transform(int(match.group()))), lines)
+        if shifted != lines:
+            _merge_resolution_repin(citation, shifted)
+
+
+_step2_shift_citations(
+    (
+        "packages/ice/legoesm/ice/sea_ice.py:3120-3159",
+        "packages/ice/legoesm/ice/sea_ice.py:2941-2962",
+        "packages/ice/legoesm/ice/sea_ice.py:3335-3407",
+        "packages/ice/legoesm/ice/sea_ice.py:3354-3386",
+        "packages/ice/legoesm/ice/sea_ice.py:1783-1861,3086-3094,3328-3489",
+        "packages/ice/legoesm/ice/sea_ice.py:428-441,1811-1815,2923-2971,3108-3188,3328-3451,3496-3498",
+    ),
+    lambda line: line + 2 if line >= 838 else line,
+)
+_step2_shift_citations(
+    (
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2588",
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2298-2475",
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2440-2455",
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2620",
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2325-2507",
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2472-2487",
+    ),
+    lambda line: line + 2 if line >= 2438 else line,
+)
+_step2_shift_citations(
+    tuple(
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:" + lines
+        for lines in (
+            "809-811", "812-815", "839-846", "848", "450-456", "450-877",
+            "475-486", "489-496", "552-672", "675-755", "758-877", "886-949",
+            "444-447",
+        )
+    ),
+    lambda line: line + 2 if line >= 395 else line,
+)
+_step2_shift_citations(
+    tuple(
+        "tests/ice/unit/test_si3_o17.py:" + lines
+        for lines in ("577-1075", "587-655", "587-771", "669-739", "967-1075")
+    ),
+    lambda line: line + 59 if line >= 237 else line,
+)
+_step2_shift_citations(
+    tuple(
+        "packages/ice/legoesm/ice/si3_o17.py:" + lines
+        for lines in (
+            "395-398", "484-488", "1117-1124", "1125-1130", "1131-1136",
+            "1138-1152", "559-568", "587-589", "610-619", "744-760",
+            "761-781", "79-97", "164-291",
+        )
+    ),
+    lambda line: line + 23 if line >= 164 else line + 2 if line >= 79 else line,
+)
+
+# The extraction moves the public wrapper and separates its stress call from
+# the core's stress-input construction, so these three semantic anchors are
+# re-pinned rather than represented as a uniform line shift.
+_merge_resolution_repin(
+    "packages/ice/legoesm/ice/si3_o17.py:559-568",
+    "1217-1226",
+    anchors=["def si3_o17_step(", ") -> tuple[SI3O17StepState, SI3O17Trace]:"],
+)
+_merge_resolution_repin(
+    "packages/ice/legoesm/ice/si3_o17.py:1131-1136",
+    "1192-1247",
+    anchors=[
+        "stress_inputs = forcing.stress._replace(",
+        "    finalize = SI3FinalizeResponse(core.correction, core.final, stress)",
+    ],
+)
+_merge_resolution_repin(
+    "packages/ice/legoesm/ice/si3_o17.py:1138-1152",
+    "1248-1261",
+    anchors=["    return core.state, SI3O17Trace(", "        finalize,"],
+)
+_merge_resolution_repin(
+    "packages/ice/legoesm/ice/si3_o17.py:1117-1124",
+    "1178-1184",
+    anchors=["    final = si3_o16_step(", "        surface_config=card.surface,"],
+)
+_merge_resolution_repin(
+    "packages/ice/legoesm/ice/si3_o17.py:744-760",
+    "780-793",
+    anchors=["    eqv = si3_var_glo2eqv(", "        hi_max_top=state.bounds.hi_max[-1],"],
+)
+_merge_resolution_repin(
+    "packages/ice/legoesm/ice/si3_o17.py:164-291",
+    "187-313",
+    anchors=[
+        "def build_orca2_sas_ice_o17_card(*, surface: SI3SurfaceConfig, thermo_namelist: dict) -> SI3O17Card:",
+        "        core2_precipitation_closure=False,",
+    ],
+)
+
 def audit_map() -> list[dict]:
     """EVERY entry in the map must resolve cleanly, cited this round or not.
 

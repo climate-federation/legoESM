@@ -234,6 +234,58 @@ def test_o17_typed_pytree_boundary_and_explicit_card() -> None:
     assert callable(si3_o17_step)
 
 
+def test_o17_split_is_bitwise_identity_and_double_tau_plant_fires(mixed, monkeypatch) -> None:
+    entry, forcing, card = mixed
+    with jax.disable_jit():
+        core = o17_mod._si3_o17_through_update_flx(entry, forcing, card)
+    original_tau = o17_mod.si3_ice_update_tau
+    stress = original_tau(
+        core.stress_inputs,
+        config=card.state,
+        ln_drgice_imp=card.ln_drgice_imp,
+        nn_fsbc=card.state.nn_fsbc,
+        kt=forcing.kt,
+    )
+    expected = (
+        core.state,
+        o17_mod.SI3O17Trace(
+            *(getattr(core, name) for name in o17_mod.SI3O17Trace._fields[:-1]),
+            o17_mod.SI3FinalizeResponse(core.correction, core.final, stress),
+        ),
+    )
+
+    calls = []
+
+    def one_tau(inputs, **kwargs):
+        calls.append(kwargs["kt"])
+        assert len(calls) == 1, "update_tau called twice on odd step"
+        return original_tau(inputs, **kwargs)
+
+    monkeypatch.setattr(o17_mod, "_si3_o17_through_update_flx", lambda *_args, **_kwargs: core)
+    monkeypatch.setattr(o17_mod, "si3_ice_update_tau", one_tau)
+    with jax.disable_jit():
+        actual = o17_mod.si3_o17_step(entry, forcing, card)
+    _assert_bitwise_equal(actual, expected)
+    assert calls == [forcing.kt]
+
+    calls.clear()
+
+    def planted_core(*_args, **_kwargs):
+        one_tau(
+            core.stress_inputs,
+            config=card.state,
+            ln_drgice_imp=card.ln_drgice_imp,
+            nn_fsbc=card.state.nn_fsbc,
+            kt=forcing.kt,
+        )
+        return core
+
+    monkeypatch.setattr(o17_mod, "_si3_o17_through_update_flx", planted_core)
+    with pytest.raises(AssertionError, match="called twice on odd step"):
+        with jax.disable_jit():
+            o17_mod.si3_o17_step(entry, forcing, card)
+
+
 def test_o17_card_refuses_core2_closure_before_any_inference() -> None:
     card = SI3O17Card(*([None] * (len(SI3O17Card._fields) - 1)), True)
     with pytest.raises(ValueError, match="core2_precipitation_closure=False"):
@@ -350,17 +402,24 @@ def test_o17_run_and_admit_supply_real_stub_scores_and_preflight_runs_the_run_br
     assert gates < stop < master.index('mkdir -p "$EVIDENCE/input"') < master.index("stage_run \"$REC_CFG\"")
 
 
-def test_o17_kt_enters_only_through_prather_sweep_parity() -> None:
+def test_o17_kt_enters_prather_parity_and_explicit_stress_cadence() -> None:
     import ast
     import inspect
 
-    tree = ast.parse(inspect.getsource(o17_mod.si3_o17_step))
-    uses = [node for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute) and node.attr == "kt"]
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+    core_tree = ast.parse(inspect.getsource(o17_mod._si3_o17_through_update_flx))
+    core_uses = [node for node in ast.walk(core_tree)
+                 if isinstance(node, ast.Attribute) and node.attr == "kt"]
+    calls = [node for node in ast.walk(core_tree) if isinstance(node, ast.Call)
              and getattr(node.func, "id", "") == "si3_dyn_orca2"]
     passed = [kw.value for call in calls for kw in call.keywords if kw.arg == "kt"]
-    assert len(uses) == len(passed) == 2 and all(u in passed for u in uses)
+    assert len(core_uses) == len(passed) == 2 and all(u in passed for u in core_uses)
+
+    wrapper_tree = ast.parse(inspect.getsource(o17_mod.si3_o17_step))
+    tau = next(node for node in ast.walk(wrapper_tree) if isinstance(node, ast.Call)
+               and getattr(node.func, "id", "") == "si3_ice_update_tau")
+    keywords = {kw.arg: ast.unparse(kw.value) for kw in tau.keywords}
+    assert keywords["kt"] == "forcing.kt"
+    assert keywords["nn_fsbc"] == "card.state.nn_fsbc"
     assert [scorer.kt_program(kt, 1) for kt in (1, 2, 3, 4, 99, 100)] == [1, 2, 1, 2, 1, 2]
 
 
