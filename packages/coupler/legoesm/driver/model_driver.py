@@ -1645,6 +1645,24 @@ def _sfc_flux_lag_slots() -> tuple[int, int]:
 # every restart dropped the pending samples (precipitation and radiation the
 # land never received) and re-ran the one-step bootstrap.
 _LAND_WIN_PREFIXES = ("land_win_", "land_held_", "cpl_win_")
+
+# AtmToSurface fields a land call books as an amount over its step (mean rate
+# x DT_LAND); every other field is a state or flag the call reads as is.
+LAND_EXTENSIVE_FORCING = ("sw_down", "lw_down", "precip_total", "precip_snow")
+LAND_INTENSIVE_FORCING = ("T_lowest", "q_lowest", "u_lowest", "v_lowest",
+                          "p_lowest", "p_surface", "rho_lowest", "cos_zenith",
+                          "co2_ppmv", "has_radiation", "has_precipitation",
+                          "z_lowest")
+
+
+def land_bootstrap_forcing(a2s, n_samples, k):
+    """A bootstrap land call's forcing: it advances DT_LAND = k host steps on
+    ``n_samples`` (< k) samples, so the amounts it books are scaled by
+    n_samples / k and each sample is booked once (the next call books the
+    later ones)."""
+    f = n_samples / k
+    return a2s._replace(**{name: getattr(a2s, name) * f
+                           for name in LAND_EXTENSIVE_FORCING})
 # Per-run scalars among those keys (every other key is a per-cell field).
 _WIN_SCALAR_KEYS = ("land_win_n", "cpl_win_n", "cpl_win_k")
 # Coupling window (P5b): per-step sums of the fluxes the coupler consumes as
@@ -16522,12 +16540,8 @@ class ModelDriver:
                         # bootstrap: the samples' rain, snow and downward
                         # radiation spread over DT_LAND, so each sample is
                         # booked once (the next call books the later ones)
-                        _pf = _land_a2s_n / _LAND_K
-                        _a2s_mean = _a2s_mean._replace(
-                            precip_total=_a2s_mean.precip_total * _pf,
-                            precip_snow=_a2s_mean.precip_snow * _pf,
-                            sw_down=_a2s_mean.sw_down * _pf,
-                            lw_down=_a2s_mean.lw_down * _pf)
+                        _a2s_mean = land_bootstrap_forcing(
+                            _a2s_mean, _land_a2s_n, _LAND_K)
                     _land_fn = (_land_step_fn if _land_a2s_n >= _LAND_K
                                 else _land_step_boot_fn)
                     # every call advances the tile DT_LAND, so its runoff

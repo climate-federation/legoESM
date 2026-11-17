@@ -1501,3 +1501,41 @@ def test_land_ic_file_below_the_dry_floor_is_refused(monkeypatch, tmp_path):
     cfg = _land_ic_at(0.0505, monkeypatch, tmp_path)
     with pytest.raises(ValueError, match="below this run's Richards dry floor"):
         ModelDriver(cfg, output_dir=tmp_path / "dst").setup()
+
+
+def test_every_land_forcing_field_is_classed_extensive_or_intensive():
+    """A new AtmToSurface field must be classed: an amount the land books
+    over its step (scaled at the bootstrap) or a state it reads as is."""
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.driver.model_driver import (
+        LAND_EXTENSIVE_FORCING, LAND_INTENSIVE_FORCING)
+    ext, inten = set(LAND_EXTENSIVE_FORCING), set(LAND_INTENSIVE_FORCING)
+    assert not ext & inten
+    assert ext | inten == set(AtmToSurface._fields)
+
+
+def test_bootstrap_then_regular_call_books_each_sample_once():
+    """Energy and water booking across a start: the bootstrap call (one
+    sample, advances K*DT) plus the next regular call (samples 2..K+1, K*DT)
+    book exactly the sum of the samples' amounts x DT for rain, snow and
+    downward SW/LW."""
+    import jax
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.driver.model_driver import (
+        LAND_EXTENSIVE_FORCING, land_bootstrap_forcing)
+    K, DT = 3, 300.0
+    rng = np.random.default_rng(0)
+
+    def sample():
+        return AtmToSurface(**{f: jnp.asarray(rng.uniform(0.0, 400.0, 4))
+                               for f in AtmToSurface._fields})
+    s = [sample() for _ in range(K + 1)]
+    boot = land_bootstrap_forcing(s[0], 1, K)
+    reg = jax.tree_util.tree_map(lambda *x: sum(x) / K, *s[1:])
+    for f in LAND_EXTENSIVE_FORCING:
+        booked = (np.asarray(getattr(boot, f))
+                  + np.asarray(getattr(reg, f))) * K * DT
+        fell = sum(np.asarray(getattr(x, f)) for x in s) * DT
+        np.testing.assert_allclose(booked, fell, rtol=1e-12, err_msg=f)
+    np.testing.assert_array_equal(np.asarray(boot.T_lowest),
+                                  np.asarray(s[0].T_lowest))
