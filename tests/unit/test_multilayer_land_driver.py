@@ -1406,10 +1406,10 @@ def _floor_off(monkeypatch):
 
 
 def _dry_seed_cfg():
-    """A cold-start seed at the residual (porosity fraction 0 -> theta_r plus
+    """A cold-start seed at the residual (porosity fraction 0.1 = 0.045, clipped up to theta_r plus
     the edge guard, 0.051), below this soil's Richards dry floor (0.0512)."""
     return _small_cfg()._replace(land_soil_init="saturation_fraction",
-                                 land_soil_moisture_init_frac=0.0)
+                                 land_soil_moisture_init_frac=0.1)
 
 
 def test_cold_start_seed_below_dry_floor_creates_no_water(monkeypatch, tmp_path):
