@@ -335,3 +335,40 @@ def test_limited_stress_divergence_equals_deposited_momentum(fx, col, a_star):
     np.testing.assert_allclose(np.diff(np.asarray(tau), axis=1), deposit,
                                rtol=1e-10, atol=1e-12 * float(deposit.max()))
     assert float(deposit.max()) > 0.0
+
+
+# (column, s*): wind SCALES at which the launch stress is ~taumin (the smooth
+# U > 2 m/s gate makes it tiny), so CAM's taumin zeroing switches stress
+# levels above the source off: a jump of ~taumin in the profile.  Found
+# 2026-11-17 by bisecting the hard config's count of nonzero stresses (#2546).
+_TAUMIN_POINTS = ((1, 0.2571661190557264), (4, 0.11968111034790291))
+
+
+@pytest.mark.parametrize("col,s_star", _TAUMIN_POINTS)
+def test_check_grads_through_taumin_ramp_at_default(fx, col, s_star):
+    """RULE 5 gradient test (#2546): the default's quintic taumin ramp passes
+    check_grads where CAM's hard zeroing fails.  f is scaled by 1e10/effgw so
+    the ~taumin stresses are O(1) for the tolerance."""
+    keys = ("u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho", "lat",
+            "sgh", "lf", "q", "p_ref_half")
+    f1 = {k: jnp.asarray(fx[k][col:col + 1]) if k != "p_ref_half" else jnp.asarray(fx[k])
+          for k in keys}
+    eff = McFarlaneConfig().effgw_oro * float(fx["lf"][col])
+
+    def make(cfg):
+        def f(s):
+            out = mcfarlane_gwd(
+                f1["u"] * s, f1["v"] * s, f1["T"], f1["p_full"], f1["p_half"],
+                f1["z_full"], f1["z_half"], f1["rho"], f1["lat"], float(fx["dt"]), cfg,
+                h_topo_col=f1["sgh"], p_ref_half=f1["p_ref_half"],
+                land_frac_col=f1["lf"], tracers={"q_v": f1["q"]})
+            return 1e10 / eff * (jnp.sum(out.du_dt) + jnp.sum(out.dv_dt))
+        return jax.jit(f)
+
+    s0 = jnp.asarray(s_star)
+    f = make(McFarlaneConfig())
+    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-5 * s_star)
+    assert float(jax.grad(f)(s0)) != 0.0
+    with pytest.raises(AssertionError):
+        check_grads(make(McFarlaneConfig()._replace(taumin_ramp_width=0.0)), (s0,),
+                    order=2, modes=("rev",), eps=1e-5 * s_star)
