@@ -134,3 +134,85 @@ def test_level_without_oras5_data_copies_level_above_and_is_masked():
     f, v = O.day_to_fields(a, wet3, um, vm)
     assert np.isfinite(f["T"]).all() and np.allclose(f["T"][..., -1], f["T"][..., -2])
     assert not v["T"][..., -1].any()
+
+
+def test_place_ts_matches_driver_placement(tmp_path):
+    """The trainer's IC T, S equal what the OMIP driver builds from the same day written as a
+    climatology file, and an ORAS5 gap takes same-depth water, not the 4-neighbour mean."""
+    xr = pytest.importorskip("xarray")
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_woa import init_ocean_from_woa
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    depths = np.linspace(0.5, 990.0, O.NLEV)
+    a = _day()
+    a[:O.NLEV] += (np.arange(O.NLEV) * 0.1)[:, None, None]          # T varies with depth
+    a[O.NLEV:2 * O.NLEV, :, 200:] += 1.0                             # S front in longitude
+    a[:O.NLEV, 100, 49] += 1.0                                       # the gap's four neighbours differ
+    a[:O.NLEV, 100, 51] += 3.0
+    a[:O.NLEV, 101, 50] += 7.0
+    meta = {"lat_centres": np.arange(-89.5, 90.0, 1.0).tolist(),
+            "lon_centres": np.arange(0.0, 360.0, 1.0).tolist(), "depths_m": depths.tolist()}
+    grid = create_latlon_grid(O.NLAT, O.NLON)
+    z = create_ocean_z_star(n_levels=8, H_max=1000.0)
+    land = np.ones((O.NLAT, O.NLON))
+    cd = np.broadcast_to(np.abs(np.asarray(z.z_full_ref)), (O.NLAT, O.NLON, 8)).copy()
+    cd[:, ::3, -1] -= 40.0                                           # cut bottom cells
+    T, S = O.place_ts(a, meta, grid, z, cd, land)
+
+    ds = xr.Dataset({"thetao": (("time", "lev", "lat", "lon"), np.asarray(a[:O.NLEV], np.float64)[None]),
+                     "so": (("time", "lev", "lat", "lon"), np.asarray(a[O.NLEV:2 * O.NLEV], np.float64)[None])},
+                    coords={"time": [0.0], "lev": ("lev", depths, {"units": "meters", "positive": "down"}),
+                            "lat": meta["lat_centres"], "lon": meta["lon_centres"]})
+    path = tmp_path / "day.nc"
+    ds.to_netcdf(path)
+    Td, Sd = init_ocean_from_woa(grid, z, path, path, T_var="thetao", S_var="so", cell_center_depths=cd)
+    np.testing.assert_array_equal(T, np.asarray(Td))
+    np.testing.assert_array_equal(S, np.asarray(Sd))
+    assert np.all(np.isfinite(T)) and np.all(np.isfinite(S))
+    donors = [T[100, 49], T[100, 51], T[99, 50], T[101, 50]]
+    assert any(np.allclose(T[100, 50], d, atol=1e-4) for d in donors)   # one same-depth donor (float32 grid lat) ...
+    assert not np.allclose(T[100, 50], np.mean(donors, axis=0))      # ... not the 4-neighbour mean
+
+
+def test_depth_cap_is_oras5_contiguous_bottom_and_refuses_changing_mask():
+    nlev = O.NLEV
+    day = np.zeros((4 * nlev + 4, 2, 3), np.float32)
+    day[:nlev, 0, 0] = np.nan                    # land column
+    day[3:nlev, 0, 1] = np.nan                   # three wet levels
+    day[2, 1, 2] = np.nan                        # gap at level 2, valid below: ignored
+    dz = np.arange(1.0, nlev + 1.0)
+    cap, n_gap = O.depth_cap([day, day.copy()], dz)
+    assert cap[0, 0] == 0.0 and cap[0, 1] == 1.0 + 2.0 + 3.0 and cap[1, 2] == 1.0 + 2.0
+    assert cap[1, 0] == dz.sum() and n_gap == 1
+    other = day.copy(); other[5, 1, 1] = np.nan
+    with pytest.raises(ValueError, match="differs"):
+        O.depth_cap([day, other], dz)
+
+
+def test_apply_depth_cap_shallows_and_lands():
+    from scripts.run.run_omip import apply_depth_cap
+    H = np.array([[4000.0, 3000.0, 50.0]]); land = np.array([[1.0, 1.0, 0.0]])
+    cap = np.array([[500.0, 5.0, 4000.0]])
+    Hn, ocean, n_land, n_sh = apply_depth_cap(H, land, cap, 10.0)
+    assert Hn[0, 0] == 500.0 and ocean.tolist() == [[True, False, False]]
+    assert (n_land, n_sh) == (1, 1)
+    with pytest.raises(ValueError, match="shape"):
+        apply_depth_cap(H, land, cap[:, :2], 10.0)
+
+
+def test_face_walls_from_native_mask():
+    lat = np.arange(-80.0, 90.01, 0.25)
+    lon = np.arange(0.0, 360.0, 0.25)
+    wet = np.ones((4, lat.size, lon.size), bool)
+    on_edge = np.isclose(lon, 120.5)                  # meridian between cells 120 and 121
+    rows = (lat > 5.0) & (lat < 6.0)                  # model row j=95 (5.5N)
+    wet[2:, np.ix_(rows, on_edge)[0], np.ix_(rows, on_edge)[1]] = False
+    wet[:, lat < -78.0] = False                       # land rows
+    wet[3, np.isclose(lat, 10.0), 50] = False         # one v-edge point closed at level 3
+    fu, fv = O.face_walls(wet, lat, lon)
+    assert fu.shape == (O.NLAT, O.NLON + 1) and fv.shape == (O.NLAT + 1, O.NLON)
+    assert fu[95, 121] == 2 and fu[94, 121] == 4 and fu[95, 120] == 4
+    assert np.array_equal(fu[:, 0], fu[:, -1]) and fu[5, 10] == 0
+    assert fv[100, 50] == 4                            # other native points on that edge stay wet
+    assert fv[0].max() == 0 and fv[-1].max() == 0

@@ -74,3 +74,14 @@ def test_polar_filter_flag_is_tristate_can_disable():
     assert p.parse_args(["--no-polar-filter"]).polar_filter is False   # #939 A/B disable
     assert p.parse_args(["--polar-filter"]).polar_filter is True
     assert p.parse_args([]).polar_filter is None
+
+
+def test_polar_filter_tracers_off_by_default_and_flag_reaches_config():
+    from scripts.run.run_omip import parse_args
+    assert parse_args([]).polar_filter_tracers is False
+    assert parse_args(["--polar-filter-tracers"]).polar_filter_tracers is True
+    assert _latlon_config(True).polar_filter.polar_filter_tracers is False
+    _, _, cfg, _, _ = _create_setup(
+        "latlon", _RES, _NLEV, _H_MAX, physics_preset="full", water_type="II",
+        use_bathymetry=True, polar_filter_tracers=True)
+    assert cfg.polar_filter.polar_filter_tracers is True

@@ -83,6 +83,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     reads_stored_vface_metric,
     pad_ns_zero,
     vface_zonal_cos_lat,
+    face_wall_gates,
+    walled_face_depth,
 )
 from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_ends
 from legoesm.ocean.dynamics.eta_floor import (
@@ -122,6 +124,9 @@ def _depth_average_to_faces(
     # active-vs-inactive partial-cell faces (one side has h=0).
     h_u_inner = jnp.minimum(jnp.roll(h_k, 1, axis=1), h_k)
     h_u = jnp.concatenate([h_u_inner, h_u_inner[:, 0:1, :]], axis=1)
+    gu, gv = face_wall_gates(grid, h_k.shape[-1], h_k.dtype)
+    if gu is not None:
+        h_u = h_u * gu
     # Barotropic-mean face velocity (#517 item 1: shared
     # depth_average_to_faces; floor = min_water_col → bit-identical).
     # U_bar was open-coded as TWO separate sums → fused=False (byte-identity).
@@ -142,6 +147,8 @@ def _depth_average_to_faces(
         # Data-dependent fold application (SPMD-safe: the seam is masked,
         # not sliced, so non-owner shards are untouched under shard_map).
         h_v = apply_north_fold(h_v, north_row, grid, north_mask=nmask)
+    if gv is not None:
+        h_v = h_v * gv
     # #517 shared helper, fused=True == the fused-stack sum topology
     # (byte-identical to the open-coded stack/sum this replaces).
     V_bar = depth_average_to_faces(v_3d, h_v, v_mask, min_water_col)
@@ -192,7 +199,7 @@ def _h_total_at_faces(
         north_row = jnp.minimum(H_total[-1:], fold_vface_row(H_total, grid))
         H_v = apply_north_fold(H_v, north_row, grid, north_mask=nmask)
 
-    return H_u, H_v
+    return walled_face_depth(H_u, H_v, h_k * mask[..., None], grid, min_water_col)
 
 
 def _helmholtz_apply(
@@ -1765,6 +1772,9 @@ def barotropic_implicit_latlon_cgrid(
     if fold_is_local(grid) or nmask is not None:
         north_3d = h_active_3d[-1:] * h_active_3d[-1:, grid.fold.perm_T, :]
         v_active_3d = apply_north_fold(v_active_3d, north_3d, grid, north_mask=nmask)
+    _gu, _gv = face_wall_gates(grid, h_active_3d.shape[-1], u_3d.dtype)
+    if _gu is not None:
+        u_active_3d, v_active_3d = u_active_3d * _gu, v_active_3d * _gv
     u_new_3d = (
         (u_prime + U_new[..., jnp.newaxis])
         * u_mask[..., jnp.newaxis] * u_active_3d

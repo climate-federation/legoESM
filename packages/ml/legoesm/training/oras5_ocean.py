@@ -10,7 +10,8 @@ the model runs on eORCA1 ``e3t_1d`` and puts its centres at layer midpoints, <= 
 
 Horizontal: T/S/eta at centres as stored; u, v averaged to C-grid faces (u: seam face from the
 two edge columns; v: polar faces carry no target).  Wet model cells with no ORAS5 value are
-filled by neighbour averaging for the initial condition and MASKED out of the loss.
+filled by neighbour averaging and MASKED out of the loss; the initial T, S instead come from
+``place_ts`` (the OMIP driver's observed-profile placement).
 
 Loss (Neptune-style L1, as the phase-1 probe): per variable, sum over valid cells of
 |pred - target| x area x layer thickness / summed weights / that variable's weighted std
@@ -68,6 +69,72 @@ def _fill(f, valid, wet2, n_iter=200):
     if left.any():
         f = np.where(left, f[v > 0].mean(), f)
     return f
+
+
+def depth_cap(days, dz):
+    """ORAS5's own column depth on the model grid: bottom interface of the deepest level
+    with finite T reached from the surface without a gap; 0 = land.  ``days`` are stored
+    days whose T masks must agree (ORAS5 land is time-invariant).  Returns
+    ``(cap (lat, lon), n_columns_with_valid_cells_below_a_gap)``."""
+    valid = [np.isfinite(np.asarray(d[:NLEV])) for d in days]
+    for k, v in enumerate(valid[1:], 1):
+        if not np.array_equal(v, valid[0]):
+            raise ValueError(f"ORAS5 T mask differs between stored day 0 and day {k}")
+    lead = np.cumprod(valid[0], axis=0).sum(axis=0)
+    z_bot = np.concatenate([[0.0], np.cumsum(np.asarray(dz, np.float64))])
+    return z_bot[lead], int((valid[0].sum(axis=0) > lead).sum())
+
+
+def face_walls(wet, lat, lon):
+    """Open-level counts at the 1-degree model faces from a finer ocean mask.
+
+    ``wet`` (lev, lat, lon) is the native mask (e.g. 0.25-degree ORAS5, finite T),
+    whose points include the 1-degree cell edges.  A face is open at a level when
+    a native point ON its edge, strictly inside its span, is wet there; the count
+    runs from the surface down to the first closed level.  Returns
+    ``face_nlev_u`` (NLAT, NLON+1) and ``face_nlev_v`` (NLAT+1, NLON) in the
+    model's face layout (u-face c between cells c-1 and c, periodic)."""
+    lon = np.asarray(lon) % 360.0
+    o = np.argsort(lon)
+    lon, wet, lat = lon[o], np.asarray(wet, bool)[:, :, o], np.asarray(lat)
+    lead = lambda x: np.cumprod(x, axis=0).sum(axis=0)
+    def col(x):
+        k = np.flatnonzero(np.isclose(lon, x % 360.0))
+        if k.size != 1:
+            raise ValueError(f"native mask has no single column on edge lon {x}")
+        return wet[:, :, k[0]]
+    def row(y):
+        k = np.flatnonzero(np.isclose(lat, y))
+        return wet[:, k[0], :] if k.size == 1 else None
+    nlu = np.zeros((NLAT, NLON), int)                 # face east of cell i
+    for i in range(NLON):
+        c = col(i + 0.5)
+        for j in range(NLAT):
+            r = (lat > -90.0 + j) & (lat < -89.0 + j)
+            nlu[j, i] = lead(c[:, r].any(axis=1)) if r.any() else 0
+    nlv = np.zeros((NLAT + 1, NLON), int)
+    for j in range(1, NLAT):
+        r = row(-90.0 + j)
+        if r is None:
+            continue
+        for i in range(NLON):
+            c = ((lon > i - 0.5) & (lon < i + 0.5)) if i else ((lon > 359.5) | (lon < 0.5))
+            nlv[j, i] = lead(r[:, c].any(axis=1))
+    return np.concatenate([nlu[:, -1:], nlu], axis=1), nlv
+
+
+def place_ts(a, meta, grid, z_coord, cell_depths, land_mask):
+    """Initial-condition T, S ``(lat, lon, lev)`` placed exactly as the OMIP driver places an
+    observed climatology: same-depth nearest-valid fill on the ORAS5 grid, unstable-donor
+    rejection, bilinear to the model centres, vertical interpolation to each cell's centroid
+    depth; land columns zeroed as the driver does."""
+    from legoesm.ocean.init_woa import place_profiles_on_grid
+    src = lambda k: np.moveaxis(np.asarray(a[NLEV * k:NLEV * (k + 1)], np.float64), 0, -1)
+    T, S = place_profiles_on_grid(src(0), src(1), np.asarray(meta["lat_centres"]),
+                                  np.asarray(meta["lon_centres"]), np.asarray(meta["depths_m"]),
+                                  grid, z_coord, cell_center_depths=cell_depths)
+    m = np.asarray(land_mask)[..., None]
+    return np.asarray(T) * m, np.asarray(S) * m
 
 
 def day_to_fields(a, wet3, u_mask, v_mask):

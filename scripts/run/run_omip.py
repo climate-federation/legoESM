@@ -134,11 +134,14 @@ _DEFAULT_IWM_CONFIG = _IWMConfig()
 # hoisted from _create_setup so a --params calibration file can override its
 # tunables (kappa_GM/kappa_Redi/S_max, the Visbeck adaptive-kappa knobs, and
 # the Treguier-1997 adaptive-kappa cap aei0 — #691/#724 reachability audit).
-# Values are unchanged from the inline construction (byte-identical default).
+# Values as the inline original, plus implicit_K33 (see the field comment).
 _DEFAULT_BATHY_GM_REDI = GMRediConfig(
     kappa_GM=800.0,
     kappa_Redi=800.0,
     S_max=0.005,
+    # Explicit K33 is unstable on the ~1 m eORCA1 top layers at dt=1800 s
+    # (one-step +102 degC overshoot; implicit: +0.6 degC).
+    implicit_K33=True,
     visbeck=VisbeckConfig(
         enabled=True,
         alpha=0.015,
@@ -679,6 +682,14 @@ def parse_args(argv: list[str] | None = None):
                        "When provided, loads realistic topography instead "
                        "of a flat-bottom domain."
                    ))
+    p.add_argument("--depth-cap-file", type=str, default=None,
+                   help=("Lat-lon bathymetry only: .npy (n_lat, n_lon) maximum depth [m], "
+                         "0 = land.  Model depth = min(ETOPO-derived, cap); cells capped "
+                         "below --H-min become land."))
+    p.add_argument("--face-wall-file", type=str, default=None,
+                   help=("Lat-lon bathymetry only: .npz with face_nlev_u (n_lat, n_lon+1) and "
+                         "face_nlev_v (n_lat+1, n_lon), the number of open levels from the "
+                         "surface at each face (depth-limited walls, e.g. sub-grid sills)."))
     p.add_argument("--H-min", type=float, default=10.0,
                    help="Minimum ocean depth [m]; shallower cells become land (default 10).")
     p.add_argument("--smoothing-passes", type=int, default=2,
@@ -1173,6 +1184,9 @@ def parse_args(argv: list[str] | None = None):
                    help="Disable GPU-side forcing interpolation (use CPU path).")
     p.add_argument("--no-gm-redi", action="store_true",
                    help="Disable GM/Redi isopycnal mixing (for diagnostic experiments).")
+    p.add_argument("--polar-filter-tracers", action="store_true",
+                   help=("Also apply the lat-lon Fourier polar filter to T/S "
+                         "(default: momentum and eta only)."))
     p.add_argument("--implicit-vertical-mixing", action="store_true",
                    dest="implicit_vertical_mixing",
                    help=("Use backward-Euler implicit vertical viscosity and "
@@ -1745,6 +1759,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   slope_foot_alpha: float = 0.0,
                   no_lat_scaling: bool = False,
                   no_gm_redi: bool = False,
+                  polar_filter_tracers: bool = False,
                   gm_redi: GMRediConfig | None = None,
                   implicit_vertical_mixing: bool = False,
                   vertical_mixing: VerticalMixingConfig | None = None,
@@ -1940,6 +1955,13 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             bathy_gm_redi = (
                 gm_redi if gm_redi is not None else _DEFAULT_BATHY_GM_REDI
             )
+            # K33 enters only the backward-Euler vertical solve, and the model
+            # refuses implicit_K33 without it (same pattern as zdfiwm/zdfddm).
+            if (not no_gm_redi and bathy_gm_redi.implicit_K33
+                    and not implicit_vertical_mixing):
+                implicit_vertical_mixing = True
+                print("[setup] GM/Redi implicit_K33: implicit_vertical_mixing "
+                      "forced ON (K33 is applied by the backward-Euler solve)")
             _A_h = A_h_override if A_h_override is not None else 2.0e5
             _B_h = B_h_override if B_h_override is not None else 5.0e9
             _K_h = K_h_override if K_h_override is not None else 1e3
@@ -2002,6 +2024,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # (which _apply_polar_filter rejects).
                 use_polar_filter=True,
                 polar_filter_cutoff_lat_deg=60.0,
+                polar_filter_tracers=polar_filter_tracers,
                 # MOM6 MAXVEL: clip barotropic velocities to prevent
                 # blowup from WBC intensification at coarse resolution.
                 # MOM6 default is 6.0 m/s; we use 3.0 since realistic
@@ -4598,6 +4621,37 @@ def _extract_scalars(state, grid_type, grid, z_coord):
 _PARTIAL_CELL_THIN_THRESHOLD = 0.3
 
 
+def attach_face_walls(grid, walls, config):
+    """Lat-lon geometry carrying depth-limited face walls (open-level counts)."""
+    from legoesm.grids.latlon import ensure_geometry
+    fu, fv = np.asarray(walls["face_nlev_u"]), np.asarray(walls["face_nlev_v"])
+    if fu.shape != (grid.n_lat, grid.n_lon + 1) or fv.shape != (grid.n_lat + 1, grid.n_lon):
+        raise ValueError(f"face walls shapes {fu.shape}/{fv.shape} do not match the "
+                         f"{grid.n_lat}x{grid.n_lon} grid's u/v faces")
+    if not np.array_equal(fu[:, 0], fu[:, -1]):
+        raise ValueError("face_nlev_u columns 0 and n_lon are the same periodic face and must agree")
+    if min(fu.min(), fv.min()) < 0:
+        raise ValueError("face wall open-level counts must be >= 0")
+    geom = ensure_geometry(
+        grid, metric_convention=config.metric_convention,
+        vface_zonal_metric_evaluation=config.vface_zonal_metric_evaluation,
+        coriolis_placement=config.coriolis_placement)
+    return geom._replace(face_nlev_u=jnp.asarray(fu, jnp.int32),
+                         face_nlev_v=jnp.asarray(fv, jnp.int32))
+
+
+def apply_depth_cap(H_bathy, land_mask, cap, H_min):
+    """Model depth = min(H_bathy, cap); wet cells whose cap is below ``H_min`` become land.
+    Returns ``(H, ocean_mask, n_new_land, n_made_shallower)``."""
+    H = np.asarray(H_bathy, np.float64)
+    if np.shape(cap) != H.shape:
+        raise ValueError(f"depth cap shape {np.shape(cap)} != grid {H.shape}")
+    was_wet = np.asarray(land_mask) > 0.5
+    ocean = was_wet & (np.asarray(cap) >= H_min)
+    H_new = np.minimum(H, cap)
+    return (H_new, ocean, int((was_wet & ~ocean).sum()), int((ocean & (H_new < H)).sum()))
+
+
 def _snap_thin_partial_cells(H_bathy, land_mask, z_coord,
                              thin_threshold: float = _PARTIAL_CELL_THIN_THRESHOLD):
     """Round bathymetry up to the interface above where the partial cell would
@@ -6123,6 +6177,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         slope_foot_alpha=args.slope_foot_alpha,
         no_lat_scaling=args.no_lat_scaling,
         no_gm_redi=getattr(args, "no_gm_redi", False),
+        polar_filter_tracers=getattr(args, "polar_filter_tracers", False),
         gm_redi=run_config.gm_redi,
         implicit_vertical_mixing=getattr(
             args, "implicit_vertical_mixing", False),
@@ -6500,6 +6555,15 @@ def run_omip_single(grid_type: str, args) -> dict:
             print(f"  Narrow passage fill (min_width={min_w}): "
                   f"{n_filled} cells → land")
 
+        # --- Depth cap (e.g. the training reanalysis' own land) ---
+        if getattr(args, "depth_cap_file", None):
+            H_np, ocean_mask, n_land, n_shallower = apply_depth_cap(
+                H_bathy_init, land_mask_init, np.load(args.depth_cap_file), args.H_min)
+            land_mask_init = jnp.asarray(ocean_mask.astype(np.float64))
+            H_bathy_init = jnp.asarray(H_np, dtype=jnp.float64)
+            print(f"  Depth cap {Path(args.depth_cap_file).name}: {n_land} cells -> land, "
+                  f"{n_shallower} cells made shallower")
+
         # --- Remove small enclosed basins ---
         # After closing narrow passages and polar caps, some small bays
         # may remain connected to the open ocean only through 1-2 cells.
@@ -6562,7 +6626,19 @@ def run_omip_single(grid_type: str, args) -> dict:
         from legoesm.ocean.vertical import create_partial_cell_coordinate
         H_bathy_init, land_mask_init = _snap_thin_partial_cells(
             H_bathy_init, land_mask_init, z_coord)
+        if getattr(args, "depth_cap_file", None):
+            _wet = np.asarray(land_mask_init) > 0.5
+            _over = _wet & (np.asarray(H_bathy_init) > np.load(args.depth_cap_file) + 1e-6)
+            if _over.any():
+                raise RuntimeError(f"{int(_over.sum())} wet columns deeper than the depth cap "
+                                   "after bathymetry post-processing")
         z_coord_partial = create_partial_cell_coordinate(z_coord, H_bathy_init)
+        if getattr(args, "face_wall_file", None):
+            grid = attach_face_walls(grid, np.load(args.face_wall_file), config)
+            print(f"  Face walls {args.face_wall_file}: "
+                  f"{int((np.asarray(grid.face_nlev_u) < z_coord.n_levels).sum())} u-faces, "
+                  f"{int((np.asarray(grid.face_nlev_v) < z_coord.n_levels).sum())} v-faces "
+                  "limited (before AND with the cell-derived faces)")
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
         model = LatLonCGridOceanModel(
             grid, z_coord_partial, config,

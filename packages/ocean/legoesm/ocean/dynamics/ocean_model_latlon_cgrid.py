@@ -80,6 +80,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks,
     compute_face_masks_3d,
+    wall_faces,
     divergence_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
@@ -2328,7 +2329,7 @@ def _nemo_ws_stage_transport(
     if legacy_min_face_thickness:
         # Private ablation control ONLY (_NEMOWSRK3TestHooks); NEMO has no
         # such switch and the WS-RK3 identity never selects this arm.
-        hu_stage = min_cell_to_uface(h_stage)
+        hu_stage = min_cell_to_uface(h_stage, grid)
         hv_stage = min_cell_to_vface(h_stage, grid)
         r1_hu_stage = r1_hv_stage = None
     else:
@@ -3126,8 +3127,8 @@ def _forward_backward_coriolis_3d(
     """
     u.shape[-1]
 
-    u_mask_3d = u_mask[..., jnp.newaxis]
-    v_mask_3d = v_mask[..., jnp.newaxis]
+    u_mask_3d, v_mask_3d = wall_faces(
+        u_mask[..., jnp.newaxis], v_mask[..., jnp.newaxis], grid, u.shape[-1])
 
     # --- Layer thickness at face points for depth averaging ---
     min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
@@ -3144,7 +3145,7 @@ def _forward_backward_coriolis_3d(
     # both use min_cell_to_uface/min_cell_to_vface.  Arithmetic mean
     # overestimates face depth at topographic steps, creating a
     # barotropic-baroclinic residual that drives spurious currents.
-    h_u = min_cell_to_uface(h_k)
+    h_u = min_cell_to_uface(h_k, grid)
     h_v = min_cell_to_vface(h_k, grid)
 
     # --- Depth-averaged velocity (barotropic component) ---
@@ -3930,6 +3931,20 @@ class LatLonCGridOceanModel:
                 "solve through a separate diffusivity K_v + (avs - avt) in the "
                 "implicit path; the explicit / shared-K pair path cannot carry "
                 "avs != avt — codex r2).")
+        if (getattr(self.grid, "face_nlev_u", None) is not None
+                and self.config.barotropic.barotropic_solver != "implicit_cn"):
+            raise ValueError(
+                "depth-limited face walls (grid.face_nlev_u/v) are wired into the "
+                "implicit_cn barotropic path only; got barotropic_solver="
+                f"{self.config.barotropic.barotropic_solver!r}")
+        _gm_init = getattr(self.config, "gm_redi", None)
+        if (_gm_init is not None and getattr(_gm_init, "implicit_K33", False)
+                and not getattr(self.config, "implicit_vertical_mixing", False)):
+            raise ValueError(
+                "gm_redi.implicit_K33=True requires "
+                "implicit_vertical_mixing=True (K33 is removed from the "
+                "explicit Redi flux and re-added only inside the implicit "
+                "vertical solve; without it K33 is silently dropped).")
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
         self.rigid_lid_data = None
@@ -6780,8 +6795,8 @@ class LatLonCGridOceanModel:
         # column depth ⇒ exact tracer conservation; Veros's streamfunction rigid lid).
         dt_mom = dt / _cfg_b.dt_mom_ratio
 
-        u_mask_3d = state.u_mask.data[..., jnp.newaxis]
-        v_mask_3d = state.v_mask.data[..., jnp.newaxis]
+        u_mask_3d, v_mask_3d = wall_faces(
+            state.u_mask.data[..., jnp.newaxis], state.v_mask.data[..., jnp.newaxis], self.grid, state.u.data.shape[-1])
         mask_3d = state.land_mask.data[..., jnp.newaxis]
 
         # 1. Baroclinic tendencies (non-Coriolis)
@@ -7104,7 +7119,7 @@ class LatLonCGridOceanModel:
         # that F_slow = depth_avg(du_dt, h_u) is consistent with the
         # 3D tendency.  Arithmetic mean overestimates face depth at
         # topographic steps, creating a barotropic-baroclinic residual.
-        h_u_pre = min_cell_to_uface(h_k_pre)
+        h_u_pre = min_cell_to_uface(h_k_pre, _grid)
         # h at v-faces — same min-rule for meridional direction.
         h_v_pre = min_cell_to_vface(h_k_pre, _grid)
 
@@ -8669,7 +8684,7 @@ class LatLonCGridOceanModel:
             # it, masked by the live 3-D face mask, IS ``e3u_0``, and its column
             # sum IS ``hu_0`` (both measured equal to NEMO's mesh_mask to 0.0
             # over every wet face).
-            _ws_h_u_ref = min_cell_to_uface(_ws_h_ref) * _ws_u_live_mask
+            _ws_h_u_ref = min_cell_to_uface(_ws_h_ref, _grid) * _ws_u_live_mask
             _ws_h_v_ref = min_cell_to_vface(_ws_h_ref, _grid) * _ws_v_live_mask
             _ws_H_u_ref = jnp.maximum(jnp.sum(_ws_h_u_ref, axis=-1), 1e-10)
             _ws_H_v_ref = jnp.maximum(jnp.sum(_ws_h_v_ref, axis=-1), 1e-10)
@@ -10138,7 +10153,7 @@ class LatLonCGridOceanModel:
         # baroclinic structure) and apply a uniform barotropic correction
         # so that sum_k(h_k * u_corrected_k) = Hu_avg exactly.
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
-        _min_uface_op = min_cell_to_uface
+        _min_uface_op = lambda f: min_cell_to_uface(f, _grid)
         _min_vface_op = lambda f: min_cell_to_vface(f, _grid)
         mask = state.land_mask.data
 
@@ -10169,8 +10184,8 @@ class LatLonCGridOceanModel:
             v_mask_3d_tracer = v_mask_3d_tracer.astype(h_v_old.dtype)
             active_3d = _zc.is_active.astype(h_u_old.dtype)
         else:
-            u_mask_3d_tracer = state.u_mask.data[..., jnp.newaxis]
-            v_mask_3d_tracer = state.v_mask.data[..., jnp.newaxis]
+            u_mask_3d_tracer, v_mask_3d_tracer = wall_faces(
+                state.u_mask.data[..., jnp.newaxis], state.v_mask.data[..., jnp.newaxis], self.grid, state.u.data.shape[-1])
             active_3d = mask_3d
 
         # Full 3D velocity (barotropic + baroclinic) from state after
@@ -12062,8 +12077,8 @@ class LatLonCGridOceanModel:
             _u_mean_now, _v_mean_now = self._fixed_depth_means(state_new, z_coord=z_coord, config=config, grid=grid)
             _du = (_u_mean_baro - _u_mean_now)[..., jnp.newaxis]
             _dv = (_v_mean_baro - _v_mean_now)[..., jnp.newaxis]
-            _um = state.u_mask.data[..., jnp.newaxis]
-            _vm = state.v_mask.data[..., jnp.newaxis]
+            _um, _vm = wall_faces(
+                state.u_mask.data[..., jnp.newaxis], state.v_mask.data[..., jnp.newaxis], self.grid, state.u.data.shape[-1])
             state_new = state_new._replace(
                 u=state_new.u.replace(data=state_new.u.data + _du * _um),
                 v=state_new.v.replace(data=state_new.v.data + _dv * _vm),
@@ -13141,7 +13156,7 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "step-entry face-native shear requires z_coord.is_active "
                 "for NEMO face masks.")
-        u_mask, v_mask = compute_face_masks_3d(is_active)
+        u_mask, v_mask = compute_face_masks_3d(is_active, self.grid)
         metric_source = getattr(
             tke_cfg, "tke_shear_metric_source", "tpoint_jacobian")
         fold_top_v = bool(getattr(tke_cfg, "nemo_sh2_fold_top_v", False))
@@ -14775,8 +14790,8 @@ class LatLonCGridOceanModel:
                 dz_u, dz_v = _nemo_dynzdf_drag_face_thickness(
                     state.eta.data, state.H_bathy.data, _zc, _cfg_b, _grid,
                     dz_u.dtype)
-            u_mask_3d = state.u_mask.data[..., jnp.newaxis]
-            v_mask_3d = state.v_mask.data[..., jnp.newaxis]
+            u_mask_3d, v_mask_3d = wall_faces(
+                state.u_mask.data[..., jnp.newaxis], state.v_mask.data[..., jnp.newaxis], self.grid, state.u.data.shape[-1])
 
         # ---- #1226 NEMO dynzdf composition options (u/v ONLY) ----
         # zdf_baroclinic_only: split u_solve_in/v_solve_in into (baroclinic
@@ -16207,14 +16222,15 @@ class LatLonCGridOceanModel:
         u_mask = state.u_mask.data     # (n_lat, n_lon+1)
         v_mask = state.v_mask.data     # (n_lat+1, n_lon)
 
-        T = _masked_filter_3d(state.T.data, land, mask_c)
-        S = _masked_filter_3d(state.S.data, land, mask_c)
-        # Prescribed-flow lever (STATIC config gate): filter TRACERS only.
-        # Filtering the pinned u/v/eta would UNPIN the prescribed circulation
-        # (repeated zonal Fourier truncation walks a "frozen" flow away from
-        # the held values step after step); the pinned flow needs no polar
-        # CFL filter because it never evolves.  T/S keep the stability filter
-        # — their advection under "frozen" still crosses converging meridians.
+        if cfg.polar_filter.polar_filter_tracers:
+            T = _masked_filter_3d(state.T.data, land, mask_c)
+            S = _masked_filter_3d(state.S.data, land, mask_c)
+        else:
+            T, S = state.T.data, state.S.data
+        # Prescribed-flow lever (STATIC config gate): never filter the pinned
+        # u/v/eta -- repeated zonal Fourier truncation would walk a "frozen"
+        # flow away from the held values step after step.  T/S follow
+        # polar_filter_tracers as on the dynamic path.
         if getattr(self.config, "prescribed_flow", None) is not None:
             return state._replace(
                 T=state.T.replace(data=T), S=state.S.replace(data=S))
@@ -16223,6 +16239,8 @@ class LatLonCGridOceanModel:
         # filter the n_lon-wide interior with the cell mask, then re-append col 0.
         u_int = _masked_filter_3d(state.u.data[:, :-1], u_mask[:, :-1], mask_c)
         u = jnp.concatenate([u_int, u_int[:, 0:1]], axis=1)
+        # The zonal filter spans walled faces; keep their closed levels at rest.
+        u, v = wall_faces(u, v, _grid)
         eta = _masked_filter_2d(state.eta.data, land, mask_c)
 
         return state._replace(
@@ -16440,8 +16458,8 @@ class LatLonCGridOceanModel:
         eps = _cfg_b.ab2_epsilon
         a_n, a_p = 1.5 + eps, 0.5 + eps
         mask3 = state.land_mask.data[..., jnp.newaxis]
-        u_mask3 = state.u_mask.data[..., jnp.newaxis]
-        v_mask3 = state.v_mask.data[..., jnp.newaxis]
+        u_mask3, v_mask3 = wall_faces(
+            state.u_mask.data[..., jnp.newaxis], state.v_mask.data[..., jnp.newaxis], self.grid, state.u.data.shape[-1])
         # Partial-cell coords: fold the per-level FACE/CELL activity into the
         # AB2 masks.  Without this, a face that is wet at the surface but
         # CLOSED at depth (variable bathymetry) carries a growing artifact:
@@ -16494,7 +16512,7 @@ class LatLonCGridOceanModel:
         h_k = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, _zc,
             min_water_column_m=_cfg_b.min_water_column_m)
-        h_u = min_cell_to_uface(h_k)
+        h_u = min_cell_to_uface(h_k, _grid)
         h_v = min_cell_to_vface(h_k, _grid)
 
         def _split(field, h_face):
@@ -17103,8 +17121,8 @@ class LatLonCGridOceanModel:
         gamma = _cfg_b.asselin_gamma
         _tke_n2_bundle = self._tke_step_entry_n2_bundle(
             state, z_coord=_zc, config=_cfg_b)
-        u_mask3 = state.u_mask.data[..., jnp.newaxis]
-        v_mask3 = state.v_mask.data[..., jnp.newaxis]
+        u_mask3, v_mask3 = wall_faces(
+            state.u_mask.data[..., jnp.newaxis], state.v_mask.data[..., jnp.newaxis], self.grid, state.u.data.shape[-1])
         cmask = state.land_mask.data
         mask3 = cmask[..., jnp.newaxis]
         # Partial-cell coords: fold the per-level FACE/CELL activity into the
@@ -17225,7 +17243,7 @@ class LatLonCGridOceanModel:
         h_k = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, _zc,
             min_water_column_m=_cfg_b.min_water_column_m)
-        h_u = min_cell_to_uface(h_k)
+        h_u = min_cell_to_uface(h_k, _grid)
         h_v = min_cell_to_vface(h_k, _grid)
 
         def _split(field, h_face):
@@ -17599,8 +17617,8 @@ class LatLonCGridOceanModel:
         gamma = _cfg_b.asselin_gamma
         _tke_n2_bundle = self._tke_step_entry_n2_bundle(
             state, z_coord=_zc, config=_cfg_b)
-        u_mask3 = state.u_mask.data[..., jnp.newaxis]
-        v_mask3 = state.v_mask.data[..., jnp.newaxis]
+        u_mask3, v_mask3 = wall_faces(
+            state.u_mask.data[..., jnp.newaxis], state.v_mask.data[..., jnp.newaxis], self.grid, state.u.data.shape[-1])
         cmask = state.land_mask.data
         mask3 = cmask[..., jnp.newaxis]
         if isinstance(_zc, OceanPartialCellCoordinate):
@@ -17656,7 +17674,7 @@ class LatLonCGridOceanModel:
         h_k = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, _zc,
             min_water_column_m=_cfg_b.min_water_column_m)
-        h_u = min_cell_to_uface(h_k)
+        h_u = min_cell_to_uface(h_k, _grid)
         h_v = min_cell_to_vface(h_k, _grid)
 
         def _split(field, h_face):
@@ -17981,7 +17999,7 @@ class LatLonCGridOceanModel:
         h_k = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, _zc,
             min_water_column_m=_cfg_b.min_water_column_m)
-        h_u = min_cell_to_uface(h_k)
+        h_u = min_cell_to_uface(h_k, _grid)
         h_v = min_cell_to_vface(h_k, _grid)
         eta_new, u_corr, v_corr = solve_unsplit_freesurface(
             state.eta.data, u_star, v_star, h_u, h_v, dt, g, _grid,

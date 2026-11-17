@@ -665,7 +665,7 @@ def nemo_qco_card_mesh_operands(h_ref, u_mask_3d, v_mask_3d, grid, dtype):
 
     geom_grid = ensure_geometry(grid)
     e3t_0 = jnp.asarray(h_ref, dtype=dtype)
-    e3u_0 = min_cell_to_uface(e3t_0)[:, 1:, :]
+    e3u_0 = min_cell_to_uface(e3t_0, grid)[:, 1:, :]
     e3v_0 = min_cell_to_vface(e3t_0, grid)[1:, :, :]
     umask3 = jnp.asarray(u_mask_3d, dtype=dtype)[:, 1:, :]
     vmask3 = jnp.asarray(v_mask_3d, dtype=dtype)[1:, :, :]

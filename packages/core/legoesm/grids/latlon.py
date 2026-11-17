@@ -1368,6 +1368,13 @@ class LatLonCGridGeometry(NamedTuple):
     # at the NamedTuple end to preserve positional callers.
     native_lat_T_deg: jax.Array | None = None
 
+    # Optional depth-limited walls: number of open levels (from the surface) at
+    # each u-face ``(n_lat, n_lon+1)`` / v-face ``(n_lat+1, n_lon)``, ANDed into
+    # the cell-derived face masks and face thicknesses (a 1-deg face between two
+    # wet cells can still be blocked below a sub-grid sill).  ``None`` = no walls.
+    face_nlev_u: jax.Array | None = None
+    face_nlev_v: jax.Array | None = None
+
     # Optional literal NEMO F-point Coriolis, native (n_lat, n_lon) indexing.
     # Appended so positional callers retain their field order.  Only the NEMO
     # EEN/ENE vorticity path may consume this; generic C-grid Coriolis keeps

@@ -794,7 +794,8 @@ def ocean_config_from_dict(d: dict):
 
     Unknown fields are dropped (forward-compat: an older manifest with a since-
     removed field still loads); missing fields fall back to the NamedTuple
-    default.  Only ``legoesm.*`` types may be reconstructed (a manifest cannot
+    default (except ``polar_filter_tracers``, replayed as True; see
+    ``_legacy_polar_filter_tracers``).  Only ``legoesm.*`` types may be reconstructed (a manifest cannot
     coax this into importing arbitrary modules).
     """
     return _decode_config(d)
@@ -946,6 +947,18 @@ def _reconcile_recorded_constants(fields: dict) -> None:
         )
 
 
+def _legacy_polar_filter_tracers(cls, obj, fields):
+    """Configs saved before ``polar_filter_tracers`` existed filtered T/S
+    whenever the polar filter ran; replay them that way, not with the new
+    default (False)."""
+    names = set(cls._fields) | (set(cls.flat_fields()) if hasattr(cls, "flat_fields") else set())
+    if "polar_filter_tracers" not in names or "polar_filter_tracers" in obj:
+        return
+    if cls.__name__ == "PolarFilterConfig" or (
+            "use_polar_filter" in obj and "polar_filter" not in obj):
+        fields["polar_filter_tracers"] = True
+
+
 def _decode_config(obj):
     if isinstance(obj, dict) and "__type__" in obj:
         cls = _resolve_config_type(obj["__type__"])
@@ -962,6 +975,7 @@ def _decode_config(obj):
             if k != "__type__" and k in known
         }
         _reconcile_recorded_constants(fields)
+        _legacy_polar_filter_tracers(cls, obj, fields)
         if hasattr(cls, "from_flat"):
             return cls.from_flat(**fields)
         return cls(**fields)

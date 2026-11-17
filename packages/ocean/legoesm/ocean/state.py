@@ -1915,6 +1915,10 @@ class PolarFilterConfig(NamedTuple):
     polar_filter_max_wave_speed: float = 300.0
     # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
     polar_filter_safety_factor: float = 0.85
+    # Also filter T/S.  Off: the filter's cap comes from a 300 m/s gravity-wave
+    # speed, irrelevant to tracer advection, and filtering T/S across coastlines
+    # created new local extrema (+4 degC at 60N, WB 1deg, dt 1800 s).
+    polar_filter_tracers: bool = False
 
 
 # Deferred to break the state <-> physics import cycle: importing

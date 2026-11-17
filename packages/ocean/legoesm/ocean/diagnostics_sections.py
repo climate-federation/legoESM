@@ -743,7 +743,7 @@ def mass_fluxes_from_state(state, z_coord, grid, *,
 
     h_k = compute_layer_thickness(state.eta.data, state.H_bathy.data, z_coord,
                                   min_water_column_m=min_water_column_m)
-    h_u = min_cell_to_uface(h_k)
+    h_u = min_cell_to_uface(h_k, grid)
     h_v = min_cell_to_vface(h_k, grid)
     # Partial-cell coords carry a 3-D activity mask; a plain z-star coord does
     # NOT have ``is_active`` (a default run would crash here), so mirror the

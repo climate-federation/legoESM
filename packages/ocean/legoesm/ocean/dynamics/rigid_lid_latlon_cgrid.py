@@ -601,7 +601,7 @@ def barotropic_rigid_lid_latlon_cgrid(state, dt, grid, z_coord, config, rl_data,
     h_k = compute_layer_thickness(
         state.eta.data, state.H_bathy.data, z_coord,
         min_water_column_m=config.min_water_column_m)
-    h_u = min_cell_to_uface(h_k)                              # (n_lat, n_lon+1, nlev)
+    h_u = min_cell_to_uface(h_k, grid)                              # (n_lat, n_lon+1, nlev)
     h_v = min_cell_to_vface(h_k, grid)                        # (n_lat+1, n_lon, nlev)
     # Floored face-column depths (#517 item 5: shared column_depth; floor
     # = _DEPTH_FLOOR → bit-identical).  H_u / H_v are reused below to

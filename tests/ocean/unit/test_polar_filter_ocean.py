@@ -69,7 +69,7 @@ def _set_T(state, arr):
 
 def test_tracer_zonal_mean_conserved():
     """Per-latitude, per-level OCEAN zonal mean of T,S preserved to round-off."""
-    grid, state, model = _model()
+    grid, state, model = _model(polar_filter_tracers=True)
     land = np.asarray(state.land_mask.data)  # (n_lat, n_lon)
     rng = np.random.default_rng(0)
     T = np.array(state.T.data)
@@ -89,7 +89,7 @@ def test_tracer_zonal_mean_conserved():
 
 def test_land_cells_unchanged():
     """Land cells are restored bit-exactly to their input value."""
-    grid, state, model = _model()
+    grid, state, model = _model(polar_filter_tracers=True)
     land = np.asarray(state.land_mask.data)
     assert land.min() < 0.5, "test needs some land cells (raise land threshold?)"
     T = np.array(state.T.data)
@@ -102,7 +102,7 @@ def test_land_cells_unchanged():
 def test_highk_poleward_damped():
     """A high zonal-wavenumber mode poleward of the cutoff is damped; a low-k
     mode at the same latitude is kept."""
-    grid, state, model = _model(land_lat_threshold=89.0)  # full-ocean band at 71
+    grid, state, model = _model(land_lat_threshold=89.0, polar_filter_tracers=True)  # full-ocean band at 71
     lat_deg = np.rad2deg(np.asarray(grid.lat))
     j = int(np.argmin(np.abs(lat_deg - 71.0)))  # poleward of 60 cutoff
     assert abs(lat_deg[j]) > 60.0
@@ -125,7 +125,7 @@ def test_highk_poleward_damped():
 
 def test_equatorward_unchanged():
     """A latitude equatorward of the cutoff is left ~unchanged (full passband)."""
-    grid, state, model = _model(land_lat_threshold=89.0)
+    grid, state, model = _model(land_lat_threshold=89.0, polar_filter_tracers=True)
     lat_deg = np.rad2deg(np.asarray(grid.lat))
     j = int(np.argmin(np.abs(lat_deg - 0.0)))  # equator, well within cutoff
     assert abs(lat_deg[j]) < 60.0
@@ -169,16 +169,58 @@ def test_step_gating_off_vs_on():
         T[j, :, 0] += np.cos(2 * np.pi * k_hi * lon / n_lon)
         return _set_T(state, T), j
 
-    g0, s0, m0 = _model(use_polar_filter=False, land_lat_threshold=89.0,
+    g0, s0, m0 = _model(use_polar_filter=False, land_lat_threshold=89.0, polar_filter_tracers=True,
                         n_lon=n_lon)
     s0, j = _seed(g0, s0)
     out0 = np.asarray(m0.step(s0, 900.0).T.data)
     amp_off = np.abs(np.fft.rfft(out0[j, :, 0]))[k_hi]
 
-    g1, s1, m1 = _model(use_polar_filter=True, land_lat_threshold=89.0,
+    g1, s1, m1 = _model(use_polar_filter=True, land_lat_threshold=89.0, polar_filter_tracers=True,
                         n_lon=n_lon)
     s1, j = _seed(g1, s1)
     out1 = np.asarray(m1.step(s1, 900.0).T.data)
     amp_on = np.abs(np.fft.rfft(out1[j, :, 0]))[k_hi]
 
     assert amp_on < 0.2 * amp_off  # filter ON strongly damps the poleward high-k
+
+
+def test_tracers_unfiltered_by_default_momentum_filtered():
+    """Default: T/S pass through the filter bit-unchanged while u is filtered;
+    polar_filter_tracers=True filters T."""
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    assert LatLonCGridOceanConfig.from_flat().polar_filter.polar_filter_tracers is False
+    rng = np.random.default_rng(3)
+    outs = {}
+    for tracers in (False, True):
+        grid, state, model = _model(land_lat_threshold=89.0,
+                                    polar_filter_tracers=tracers)
+        T = np.array(state.T.data) + rng.standard_normal(state.T.data.shape)
+        S = np.array(state.S.data) + 0.1 * rng.standard_normal(state.S.data.shape)
+        u = np.array(state.u.data) + 0.1 * rng.standard_normal(state.u.data.shape)
+        u[:, -1] = u[:, 0]
+        state = state._replace(T=state.T.replace(data=jnp.asarray(T)),
+                               S=state.S.replace(data=jnp.asarray(S)),
+                               u=state.u.replace(data=jnp.asarray(u)))
+        out = model._apply_polar_filter(state, 900.0)
+        outs[tracers] = (T, S, u, np.asarray(out.T.data), np.asarray(out.S.data),
+                         np.asarray(out.u.data))
+    T0, S0, u0, To, So, uo = outs[False]
+    assert np.array_equal(To, T0) and np.array_equal(So, S0)
+    assert not np.array_equal(uo, u0)
+    T1, S1, _, To1, So1, _ = outs[True]
+    assert not np.array_equal(To1, T1) and not np.array_equal(So1, S1)
+
+
+def test_old_saved_config_replays_tracer_filtering():
+    """A config saved before polar_filter_tracers existed replays with T/S
+    filtering on; a new one round-trips its own value."""
+    from legoesm.ocean.config import ocean_config_from_dict, ocean_config_to_dict
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    new = LatLonCGridOceanConfig.from_flat(use_polar_filter=True)
+    d = ocean_config_to_dict(new)
+    assert ocean_config_from_dict(d).polar_filter.polar_filter_tracers is False
+    d["polar_filter"].pop("polar_filter_tracers")
+    assert ocean_config_from_dict(d).polar_filter.polar_filter_tracers is True
+    flat = {k: v for k, v in d.items() if k != "polar_filter"}
+    flat.update({k: v for k, v in d["polar_filter"].items() if k != "__type__"})
+    assert ocean_config_from_dict(flat).polar_filter.polar_filter_tracers is True

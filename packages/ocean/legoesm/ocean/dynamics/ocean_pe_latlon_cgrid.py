@@ -126,6 +126,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     leith_biharmonic_tendency_cgrid,
     compute_vertex_mask,
     compute_face_masks_3d,
+    wall_faces,
     per_level_viscosity_masks,
     nemo_shlat_vertex_mask,
     nemo_hpg_sco_literal_cgrid,
@@ -1491,7 +1492,7 @@ def _bc_vertical_and_depthmean_velocity(
     # barotropic Helmholtz solver, the slow-forcing depth-average, and
     # the tracer mass flux — required for the H&A 2009 column-sum
     # invariant to hold.
-    h_u = min_cell_to_uface(h_k)
+    h_u = min_cell_to_uface(h_k, grid)
     h_v = min_cell_to_vface(h_k, grid)
     flux_div_k = divergence_cgrid(
         h_u * u * u_mask_3d, h_v * v * v_mask_3d, grid,
@@ -4401,6 +4402,14 @@ def nemo_dynzdf_drag_rhs(zdt_2, pair_sum, u_b, e3):
         nemo_source_round(zdt_2 * pair_sum)[..., None] * u_b) / e3)
 
 
+def _wall_bottom_levels(bot_lev_u, bot_lev_v, grid):
+    """A depth-limited wall raises a face's bottom level to its last open level."""
+    if getattr(grid, "face_nlev_u", None) is None:
+        return bot_lev_u, bot_lev_v
+    return (jnp.minimum(bot_lev_u, jnp.asarray(grid.face_nlev_u) - 1),
+            jnp.minimum(bot_lev_v, jnp.asarray(grid.face_nlev_v) - 1))
+
+
 def nemo_bottom_drag_rate_faces(
     u, v, h_k, z_coord, config, grid, *, return_cell_rate=False,
 ):
@@ -4512,6 +4521,7 @@ def nemo_bottom_drag_rate_faces(
         [bot_lev_u_inner, bot_lev_u_inner[:, 0:1]], axis=1)
     bot_lev_v_int = jnp.minimum(bot_lev_cell[:-1], bot_lev_cell[1:])
     bot_lev_v = jnp.pad(bot_lev_v_int, ((1, 1), (0, 0)), constant_values=0)
+    bot_lev_u, bot_lev_v = _wall_bottom_levels(bot_lev_u, bot_lev_v, grid)
     is_bot_u_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
                     == bot_lev_u[..., jnp.newaxis]).astype(u.dtype)
     is_bot_v_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
@@ -4657,6 +4667,7 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
             bot_lev_v_int = jnp.minimum(bot_lev_cell[:-1], bot_lev_cell[1:])
             bot_lev_v = jnp.pad(bot_lev_v_int, ((1, 1), (0, 0)),
                                  constant_values=0)
+            bot_lev_u, bot_lev_v = _wall_bottom_levels(bot_lev_u, bot_lev_v, grid)
             is_bot_u_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
                             == bot_lev_u[..., jnp.newaxis]).astype(u.dtype)
             is_bot_v_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
@@ -5603,8 +5614,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     if isinstance(z_coord, OceanPartialCellCoordinate):
         u_mask_3d, v_mask_3d = compute_face_masks_3d(z_coord.is_active, grid)
     else:
-        u_mask_3d = u_mask[..., jnp.newaxis]
-        v_mask_3d = v_mask[..., jnp.newaxis]
+        u_mask_3d, v_mask_3d = wall_faces(
+            u_mask[..., jnp.newaxis], v_mask[..., jnp.newaxis], grid,
+            state.u.data.shape[-1])
 
     g_val = config.g
     rho_0 = config.rho_0

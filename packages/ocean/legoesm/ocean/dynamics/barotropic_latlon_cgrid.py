@@ -453,7 +453,7 @@ def _depth_average_to_faces(
     # both use min_cell_to_uface/min_cell_to_vface.  Arithmetic mean
     # overestimates face depth at topographic steps, creating a
     # barotropic-baroclinic residual that drives spurious currents.
-    h_u = min_cell_to_uface(h_k)
+    h_u = min_cell_to_uface(h_k, grid)
     h_v = min_cell_to_vface(h_k, grid)
 
     _literal_r1_u = _literal_r1_v = None
@@ -465,7 +465,7 @@ def _depth_average_to_faces(
         # (reused verbatim, not re-derived).
         dtype = h_k.dtype
         H_total_2d = jnp.sum(h_k, axis=-1)
-        H_u_minrule = min_cell_to_uface(H_total_2d)
+        H_u_minrule = min_cell_to_uface(H_total_2d, grid)
         H_v_minrule = min_cell_to_vface(H_total_2d, grid)
         _prep = _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype)
         H_u_nemo, H_v_nemo, _literal_r1_u, _literal_r1_v = _nemo_ssh_avg_apply(
@@ -1440,7 +1440,7 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
         raise ValueError(
             "barotropic_een_coefficient_evaluation='nemo_literal' requires "
             "barotropic_coriolis='ene_metric' or 'een_metric'")
-    e3u = min_cell_to_uface(h_k).astype(dtype)      # (nlat, nlon+1, nlev)
+    e3u = min_cell_to_uface(h_k, grid).astype(dtype)      # (nlat, nlon+1, nlev)
     e3v = min_cell_to_vface(h_k, grid).astype(dtype)  # (nlat+1, nlon, nlev)
     hu = jnp.sum(e3u, axis=-1)                       # (nlat, nlon+1)
     hv = jnp.sum(e3v, axis=-1)                       # (nlat+1, nlon)
@@ -2877,7 +2877,7 @@ def _reconcile_targets(config, *, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
     # divide with the wet-column floor (a wet column always exceeds it, so
     # this is the land-mask guard, not a physics clip).
     _H_u_now = jnp.maximum(
-        jnp.sum(min_cell_to_uface(h_k_now), axis=-1), min_water_col)
+        jnp.sum(min_cell_to_uface(h_k_now, grid), axis=-1), min_water_col)
     _H_v_now = jnp.maximum(
         jnp.sum(min_cell_to_vface(h_k_now, grid), axis=-1), min_water_col)
     return (Hu_avg / _H_u_now).astype(dtype), (Hv_avg / _H_v_now).astype(dtype)

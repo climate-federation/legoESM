@@ -537,7 +537,7 @@ def test_redi_flux_geometry_stage_changes_live_flux_result():
                 barotropic_slow_forcing_depth_evaluation="min_rule_live",
                 barotropic_face_depth="nemo_ssh_avg",
                 surface_stress_implicit=True,
-                implicit_vertical_mixing=False,
+                implicit_vertical_mixing=True,
                 rk3_stage3_heat_nemo_written=True,
                 rk3_stage3_tracer_nemo_stored_thickness=stored_thickness,
                 eos="nemo_eos80",   # ORCA2's own EOS (slope_n2='nemo_bn2')
@@ -572,9 +572,9 @@ def test_redi_flux_geometry_stage_changes_live_flux_result():
         s_off = np.asarray(gm_off.S.data).view(np.uint64)
         assert np.count_nonzero(t_on != t_off) == 18
         assert np.count_nonzero(s_on != s_off) == 18
-        # Re-pinned with eos='nemo_eos80' (see the a33 test above).
-        assert t_on[1, 0, 0] == np.uint64(4626170872078521070)
-        assert t_off[1, 0, 0] == np.uint64(4626170872078513176)
+        # Re-pinned with eos="nemo_eos80" and implicit vertical mixing (K33 applied).
+        assert t_on[1, 0, 0] == np.uint64(4626170834292015516)
+        assert t_off[1, 0, 0] == np.uint64(4626170834292007623)
     finally:
         set_policy(prev_policy)
 

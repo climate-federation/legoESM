@@ -291,7 +291,7 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
         state.eta.data, state.H_bathy.data, z_coord,
         min_water_column_m=config.min_water_column_m,
     )
-    h_u = min_cell_to_uface(h_k)
+    h_u = min_cell_to_uface(h_k, grid)
     h_v = min_cell_to_vface(h_k, grid)
     if isinstance(z_coord, OceanPartialCellCoordinate):
         u_mask_3d, v_mask_3d = compute_face_masks_3d(z_coord.is_active, grid)

@@ -290,7 +290,44 @@ def interp_wface_to_center(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([top, interior, bottom], axis=-1)
 
 
-def min_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
+def face_wall_gates(grid, nlev: int, dtype):
+    """Per-level open gates ``(n_lat, n_lon+1, nlev)`` / ``(n_lat+1, n_lon, nlev)``
+    from ``grid.face_nlev_u/v`` (depth-limited walls), or ``(None, None)``."""
+    fu = getattr(grid, "face_nlev_u", None)
+    if fu is None:
+        return None, None
+    k = jnp.arange(nlev)
+    return ((jnp.asarray(fu)[..., None] > k).astype(dtype),
+            (jnp.asarray(grid.face_nlev_v)[..., None] > k).astype(dtype))
+
+
+def wall_faces(u3, v3, grid, nlev: int | None = None):
+    """Close per-level u/v-face fields below each face's wall; identity without walls.
+
+    ``u3``/``v3`` carry a trailing level axis (length ``nlev``, or 1 to be
+    broadcast to ``nlev``)."""
+    if getattr(grid, "face_nlev_u", None) is None:
+        return u3, v3
+    gu, gv = face_wall_gates(grid, nlev or u3.shape[-1], jnp.result_type(u3))
+    return u3 * gu, v3 * gv
+
+
+def walled_face_depth(H_u, H_v, h_k, grid, floor):
+    """Column depth at faces a depth-limited wall narrows: the sum of the open
+    layers' min-rule face thicknesses (what the per-level fluxes can carry),
+    floored at ``floor``.  Unwalled faces keep ``H_u``/``H_v`` unchanged."""
+    if getattr(grid, "face_nlev_u", None) is None:
+        return H_u, H_v
+    bare = grid._replace(face_nlev_u=None, face_nlev_v=None)
+    hu, hv = min_cell_to_uface(h_k), min_cell_to_vface(h_k, bare)
+    gu, gv = face_wall_gates(grid, h_k.shape[-1], hu.dtype)
+    cut_u = jnp.any(hu * (1 - gu) > 0, axis=-1)
+    cut_v = jnp.any(hv * (1 - gv) > 0, axis=-1)
+    return (jnp.where(cut_u, jnp.maximum(jnp.sum(hu * gu, axis=-1), floor), H_u),
+            jnp.where(cut_v, jnp.maximum(jnp.sum(hv * gv, axis=-1), floor), H_v))
+
+
+def min_cell_to_uface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     """Min-rule interpolation of a cell-center thickness to u-faces.
 
     Use this (NOT ``interp_cell_to_uface``) for layer thickness ``h_k``
@@ -313,13 +350,18 @@ def min_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     Parameters
     ----------
     f : (n_lat, n_lon, ...) at cell centers.
+    grid : optional; its depth-limited walls (``face_nlev_u``) zero a
+        per-level ``f`` below each wall.
 
     Returns
     -------
     f_u : (n_lat, n_lon+1, ...) at u-faces.
     """
     f_u = jnp.minimum(jnp.roll(f, 1, axis=1), f)
-    return jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+    f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+    if f.ndim == 3 and getattr(grid, "face_nlev_u", None) is not None:
+        f_u = f_u * face_wall_gates(grid, f.shape[-1], f_u.dtype)[0]
+    return f_u
 
 
 def min_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
@@ -350,6 +392,8 @@ def min_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
         f_partner = f[-1:, grid.fold.perm_T]
         north = jnp.minimum(f[-1:], f_partner)
         f_v = apply_north_fold(f_v, north, grid, north_mask=nmask)
+    if f.ndim == 3 and getattr(grid, "face_nlev_v", None) is not None:
+        f_v = f_v * face_wall_gates(grid, f.shape[-1], f_v.dtype)[1]
     return f_v
 
 
@@ -1814,7 +1858,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     # dynldf_lev.f90:123,127-129,135,139.
     if thickness_operands is None:
         e3t_kbb = h_k
-        e3u_kbb = min_cell_to_uface(h_k)
+        e3u_kbb = min_cell_to_uface(h_k, grid)
         e3v_kbb = min_cell_to_vface(h_k, grid)
         e3f_live = min_cell_to_vertex(h_k, grid)
         e3u_kmm = e3u_kbb
@@ -4286,13 +4330,13 @@ def compute_face_masks_3d(
         _reject_yreentrant_under_spmd("compute_face_masks_3d")
         wrap = a[-1:] * a[0:1]
         v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
-        return u_mask, v_mask
+        return wall_faces(u_mask, v_mask, grid)
     south = jnp.zeros_like(a[:1])
     north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
     # SPMD lat-band interior cuts: see _spmd_cut_vfaces (no-op unless armed).
     v_mask = _spmd_cut_vfaces(v_mask, a)
-    return u_mask, v_mask
+    return wall_faces(u_mask, v_mask, grid)
 
 
 def per_level_viscosity_masks(
@@ -4342,7 +4386,21 @@ def per_level_viscosity_masks(
     vx3 = compute_vertex_mask(cell, grid=grid).astype(dtype)
     if vertex_mask is not None:
         vx3 = vx3 * jnp.asarray(vertex_mask, dtype)[..., jnp.newaxis]
+    if getattr(grid, "face_nlev_u", None) is not None:
+        gu, gv = face_wall_gates(grid, cell.shape[-1], dtype)
+        um3, vm3 = um3 * gu, vm3 * gv
+        vx3 = vx3 * _wall_vertex_gate(gu, gv)
     return cell, um3, vm3, vx3
+
+
+def _wall_vertex_gate(gu, gv):
+    """A vertex touching a walled face is dry at that level (free-slip along the
+    wall, as at a coast).  Vertex (r, c) touches u[r-1, c], u[r, c], v[r, c-1],
+    v[r, c]; single-device periodic layout."""
+    one = jnp.ones_like(gu[:1])
+    u_pad = jnp.concatenate([one, gu, one], axis=0)              # (n_lat+2, n_lon+1, nlev)
+    v_ext = jnp.concatenate([gv[:, -1:], gv, gv[:, :1]], axis=1)  # (n_lat+1, n_lon+2, nlev)
+    return u_pad[:-1] * u_pad[1:] * v_ext[:, :-1] * v_ext[:, 1:]
 
 
 def nemo_shlat_vertex_mask(
@@ -5959,7 +6017,7 @@ def compute_face_masks(
         _reject_yreentrant_under_spmd("compute_face_masks")
         wrap = (land_mask[-1:] * land_mask[0:1]).astype(land_mask.dtype)
         v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
-        return u_mask, v_mask
+        return _close_fully_walled(u_mask, v_mask, grid)
     south = jnp.zeros((1, land_mask.shape[1]), dtype=land_mask.dtype)
     # The fold face is kept as a wall (zero) until a proper halo
     # exchange architecture (Option B) is implemented.  Opening the
@@ -5971,4 +6029,12 @@ def compute_face_masks(
     # 2-D builder IN-BODY and ANDs it into the 3-D mask, re-walling every cut
     # the 3-D fix had opened).  Same shared exchange, no-op unless armed.
     v_mask = _spmd_cut_vfaces(v_mask, land_mask)
-    return u_mask, v_mask
+    return _close_fully_walled(u_mask, v_mask, grid)
+
+
+def _close_fully_walled(u_mask, v_mask, grid):
+    """2-D face masks: a face whose wall leaves no open level is closed."""
+    if getattr(grid, "face_nlev_u", None) is None:
+        return u_mask, v_mask
+    return (u_mask * (jnp.asarray(grid.face_nlev_u) > 0).astype(u_mask.dtype),
+            v_mask * (jnp.asarray(grid.face_nlev_v) > 0).astype(v_mask.dtype))

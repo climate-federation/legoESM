@@ -2260,6 +2260,10 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
     apply the fold permutation.  ``perm_T`` / ``perm_v`` are
     longitude-only and unaffected by latitude banding.
     """
+    if getattr(geom, "face_nlev_u", None) is not None:
+        raise NotImplementedError(
+            "depth-limited face walls (face_nlev_u/v) are single-device only; "
+            "band slicing would misalign them")
     s, e = layout.lat_start, layout.lat_end
 
     def t(a):   # T-point / u-point (leading dim n_lat) → [s:e]

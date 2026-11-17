@@ -974,6 +974,10 @@ def widen_cgrid_geometry_band(geom, halo: int):
 
     Traced (per-step) op: two fused exchanges (cell group + v-face group).
     """
+    if getattr(geom, "face_nlev_u", None) is not None:
+        raise NotImplementedError(
+            "depth-limited face walls (face_nlev_u/v) are single-device only; "
+            "band slicing would misalign them")
     # Refuse on an ACTIVE fold (``is_active`` is rank-CONSISTENT on sliced
     # bands — unlike ``fold_is_local``, which is True only on the north band
     # and would raise on one rank while the others proceed into a fused
