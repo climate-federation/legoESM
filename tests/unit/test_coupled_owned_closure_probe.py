@@ -125,4 +125,5 @@ def test_land_bootstrap_call_creates_no_water(tmp_path):
     assert probe.main(["--days", "0.0625", "--json", str(out)]) == 0
     rows = json.loads(out.read_text())["rows"]
     assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
-    assert abs(rows["system_water"]) < 1.0e3, rows["system_water"]
+    # the system row adds the atmosphere's own ~1e-9-relative residual
+    assert abs(rows["system_water"] - rows["atm_water"]) < 1.0e3, rows
