@@ -64,6 +64,7 @@ NAME="${ARM_NAMES[${ARM_ID}]}"
 if [[ -n "${EXTRA_FLAGS:-}" ]]; then
   ARM_EXTRA="${EXTRA_FLAGS}"; NAME="${ARM_NAME:?EXTRA_FLAGS needs ARM_NAME}"
 fi
+[[ "${LAUNCHER:-srun}" == "hpcx" ]] && NAME="${NAME}_hpcx_cmpi${CUDA_MPI:-unset}"
 OUTDIR="${ROOT}/${NAME}_${SLURM_JOB_ID:-local}"
 mkdir -p "${OUTDIR}"
 source "${REPO}/config/amip/amip_production.sh"
@@ -107,9 +108,31 @@ echo "launch (${N_GPUS} rank(s)): ${CMD[*]}"
 _CPUS="${SLURM_CPUS_PER_TASK:-8}"
 unset SLURM_CPUS_PER_TASK
 _GPU_MAP=$(seq -s, 0 $((N_GPUS - 1)))
-srun --ntasks="${N_GPUS}" --ntasks-per-node="${N_GPUS}" --gpus-per-node="${N_GPUS}" \
-     --gpu-bind="map_gpu:${_GPU_MAP}" --cpus-per-task="${_CPUS}" \
-     --kill-on-bad-exit=1 "${CMD[@]}"
+if [[ "${LAUNCHER:-srun}" == "hpcx" ]]; then
+  # NVIDIA HPC-X MPI (CUDA-aware) under its own mpirun: it cannot start under
+  # srun on these nodes (probe job 29077883).  One GPU per local rank via the
+  # wrapper.  CUDA_MPI=1 hands device buffers to MPI (GPU-direct halos),
+  # CUDA_MPI=0 stages them through the host as the production stack does.
+  # Profiler traces are switched OFF here: the driver picks the traced rank
+  # from SLURM_PROCID, which mpirun does not set per rank.
+  source "${REPO}/scripts/cluster/levante/hpcx_gdr_env.sh"
+  export MPI4JAX_USE_CUDA_MPI="${CUDA_MPI:?LAUNCHER=hpcx needs CUDA_MPI=0|1}"
+  unset LEGOESM_TRACE_STEPS LEGOESM_TRACE_RANKS
+  CMD[0]="${REPO}/.venv-gdr/bin/python"
+  _WRAP="${OUTDIR}/gpu_local_rank.sh"
+  printf '#!/bin/bash\nexport CUDA_VISIBLE_DEVICES=${OMPI_COMM_WORLD_LOCAL_RANK}\nexec "$@"\n' > "${_WRAP}"
+  chmod +x "${_WRAP}"
+  echo "launch via HPC-X mpirun, MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI}: ${CMD[*]}"
+  mpirun -np "${N_GPUS}" --bind-to none \
+    -x PYTHONPATH -x JAX_PLATFORMS -x JAX_ENABLE_X64 -x XLA_PYTHON_CLIENT_PREALLOCATE \
+    -x XLA_PYTHON_CLIENT_MEM_FRACTION -x LEGOESM_JIT_CACHE_DIR -x LEGOESM_PHASE_TIMERS \
+    -x MPI4JAX_USE_CUDA_MPI -x LD_LIBRARY_PATH -x PATH -x OPAL_PREFIX \
+    -x AMIP_SURFDATA -x ERA5_IC "${_WRAP}" "${CMD[@]}"
+else
+  srun --ntasks="${N_GPUS}" --ntasks-per-node="${N_GPUS}" --gpus-per-node="${N_GPUS}" \
+       --gpu-bind="map_gpu:${_GPU_MAP}" --cpus-per-task="${_CPUS}" \
+       --kill-on-bad-exit=1 "${CMD[@]}"
+fi
 RC=$?
 echo "run_amip exit=${RC}  $(date -u)"
 grep -h "phase timers" "${OUTDIR}"/*.log 2>/dev/null | tail -5
