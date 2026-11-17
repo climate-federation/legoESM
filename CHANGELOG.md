@@ -7,6 +7,11 @@ All notable changes to legoESM. Format roughly follows
 
 ### Added
 
+- **Optional spectral wave component.** Adds a standalone `legoesm-wave`
+  package with WADEN dynamics, NeuralSWM parameterization interfaces,
+  atmosphere/ocean coupling, Stokes-drift feedback to KPP Langmuir mixing,
+  and checkpoint continuation support. Coupled wave execution is opt-in.
+
 - **ePBL vertical mixing (`VerticalMixingConfig(scheme="epbl")`).** A JAX
   port of MOM6's `MOM_energetic_PBL` (created by B. G. Reichl and R. Hallberg;
   machine-learned diffusivity options by A. Sane), swappable with KPP and

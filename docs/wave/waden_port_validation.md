@@ -39,6 +39,50 @@ measurements below. Those manifests and rollout differences describe their
 recorded revisions; they do not certify the updated geometry. Re-run the
 external evidence lane before citing them for the updated implementation.
 
+## Local PR preparation checks (2026-11-17)
+
+Runtime revision: `057bb826d5fe36defc43108a0eed402e5e9befce`, after merging
+upstream into `wave/06-validation-evidence`. The contribution author executed
+the commands below and supplied the terminal summaries. This record is based
+on those runs; the working tree was clean when the results were recorded.
+Environment: Python 3.13.13, JAX/jaxlib 0.9.2, pytest 9.1.1,
+build 1.6.1 and hatchling 1.33.0.
+
+| Check | Backend / setting | Terminal result |
+| --- | --- | --- |
+| Wave unit suite | CUDA, GPU 0 (RTX 4080 SUPER), `JAX_ENABLE_X64=1` | 168 passed in 876.05 s |
+| Coupling, restart, KPP and CLI suite | CPU, `JAX_ENABLE_X64=1` | 16 passed, 1 skipped in 249.54 s |
+| Wave distribution build | Local Python, no build isolation | Wheel and sdist built successfully |
+
+Commands, run from the repository root:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+.venv/bin/python -m pytest tests/wave/unit/ --tb=short -q
+
+JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+.venv/bin/python -m pytest \
+  tests/wave/integration/ \
+  tests/ocean/unit/test_kpp_langmuir.py \
+  tests/unit/test_run_coupled_wave_cli.py \
+  --tb=short -q
+
+.venv/bin/python -m build --no-isolation packages/wave \
+  --outdir /tmp/legoesm-wave-pr-dist
+```
+
+The build produced `legoesm_wave-1.0.1-py3-none-any.whl` and
+`legoesm_wave-1.0.1.tar.gz`. The skipped test is the historical NeuralSWM
+parity lane requiring external reference/weight artefacts. These are local
+checks, separate from GitHub Actions results. They do not remeasure the
+archived WW3/WADEN comparisons below; the contribution author explicitly
+elected to defer that rerun for this preparation pass.
+
+The startup-script merge conflict received two independent same-model
+reviews. The named Claude/GLM cross-model pair review has not been completed;
+the review arrangement remains an explicit maintainer decision.
+
 ## Recorded results (2026-11-12)
 
 The four reproducible cases were rerun on the current legoESM stack at the
@@ -137,11 +181,11 @@ and forward/reverse finite-difference agreement away from switching surfaces
 check gives no general guarantee at limiter switches or over long rollouts.
 
 The port keeps WADEN's hard TVD/positivity switches as the default. The
-project owner explicitly waived RULE 5 (differentiability versus oracle
-fidelity) for this dynamics core on 2026-11-12; the waiver is a deliberate
-decision, not a default chosen by the port. A globally smooth operator would
-change the numerical model and needs a separate proposal and scientific
-validation.
+contribution author explicitly chose this exception to RULE 5
+(differentiability versus oracle fidelity) on 2026-11-12. Acceptance of this
+scope under the upstream project's smooth-switch policy remains a maintainer
+review decision. A globally smooth operator would change the numerical model
+and needs a separate proposal and scientific validation.
 
 ## Coupling and release review
 
