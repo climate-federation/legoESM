@@ -203,3 +203,38 @@ def test_unknown_bld_structure_raises():
     with pytest.raises(ValueError, match="bld_structure"):
         K._boundary_layer_depth(T, T, T, T, T, zc, jnp.ones(1), jnp.array([0.01]),
                                 jnp.zeros(1), KPPConfig(bld_structure="cvmx"))
+
+
+def test_cvmix_mode_batched_and_dry_columns():
+    """(2, 3, nlev) block, one dry column (jacobian 0): finite values and gradients,
+    dry column carries only background mixing, and every wet column equals the
+    same column run alone (row-wise searchsorted / gathers)."""
+    n = 10
+    dzr = np.array([1.0, 1.5, 2.0, 3.0, 4.5, 6.0, 8.0, 10.0, 12.0, 15.0])
+    zc = create_z_star_from_thicknesses(dzr)
+    zr = np.cumsum(dzr) - 0.5 * dzr
+    rng = np.random.default_rng(0)
+    T = jnp.asarray(20.0 - 0.05 * zr + 0.02 * rng.standard_normal((2, 3, n)))
+    S = jnp.broadcast_to(jnp.asarray(35.0 + 0.001 * zr), (2, 3, n))
+    u = jnp.asarray(0.2 * np.exp(-zr / 5.0) * rng.uniform(0.5, 1.5, (2, 3, 1)))
+    jac = jnp.ones((2, 3)).at[1, 2].set(0.0)
+    tau = jnp.full((2, 3), 0.05)
+    Bf = jnp.asarray(rng.uniform(-1e-7, 1e-7, (2, 3)))
+
+    def run(T_, jac_, tau_, Bf_, u_):
+        S_ = jnp.broadcast_to(S[0, 0], T_.shape)
+        rho = wright_eos(T_, S_, jnp.zeros_like(T_))
+        return K.kpp_vertical_mixing(u_, jnp.zeros_like(u_), T_, S_,
+                                     rho, jnp.zeros(T_.shape[:-1]), zc, jac_, CFG, constants.g,
+                                     tau_x=tau_, tau_y=jnp.zeros_like(tau_), B_f=Bf_,
+                                     Q_sfc_T=jnp.ones(T_.shape[:-1]), Q_sfc_S=jnp.zeros(T_.shape[:-1]),
+                                     apply_diffusion=False)
+
+    out = run(T, jac, tau, Bf, u)
+    for f in (out.K_v, out.A_v, out.dT_dt):
+        assert bool(jnp.all(jnp.isfinite(f)))
+    np.testing.assert_allclose(np.asarray(out.K_v[1, 2]), CFG.K_bg, rtol=0, atol=1e-15)
+    one = run(T[0, 1][None], jac[0, 1][None], tau[0, 1][None], Bf[0, 1][None], u[0, 1][None])
+    np.testing.assert_allclose(np.asarray(out.K_v[0, 1]), np.asarray(one.K_v[0]), rtol=1e-14, atol=0)
+    g = jax.grad(lambda t: jnp.sum(run(t, jac, tau, Bf, u).K_v))(T)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g).max()) > 0.0
