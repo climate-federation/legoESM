@@ -63,7 +63,8 @@ _CROSSING = {
 # Port depth at the DEFAULT sharpness (20) per case: the recorded RULE-5 gap.
 _DEFAULT_DEPTH = {
     "bracket1": 1.244916972515393,     # CVMix 1.24535599 -> gap -0.04 %
-    "concave": 3.402727637058351,      # CVMix 3.79289322 -> gap -10.29 %
+    "concave": 3.538069366225749,      # CVMix 3.79289322 -> gap -6.72 % (was -10.29 % before
+                                       # non-straddling brackets continued to 0 / H)
     "first_cell": 0.5000444751382389,  # CVMix 0.5        -> gap +0.01 %
     "interior": 4.626519199654815,     # CVMix 4.75       -> gap -2.60 %
     "multiple": 2.568907329687243,     # CVMix 2.28077641 -> gap +12.63 %
