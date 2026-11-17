@@ -360,6 +360,72 @@ def _plane_background_mass(
     )
 
 
+
+_FP64_PARTS = frozenset({"acoustic", "mass_fixer", "compensated_mass_fixer"})
+
+
+def _validate_fp64_parts(parts) -> None:
+    unknown = set(parts) - _FP64_PARTS
+    if unknown:
+        raise ValueError(
+            f"fp64_parts {sorted(unknown)} unknown; allowed {sorted(_FP64_PARTS)}.")
+
+
+def _cast_like(tree, like):
+    """Cast every array leaf of ``tree`` to the dtype of the matching leaf of ``like``."""
+    return jax.tree.map(
+        lambda a, b: a if a.dtype == b.dtype else a.astype(b.dtype), tree, like)
+
+
+def _to_fp64(tree):
+    return jax.tree.map(
+        lambda a: a.astype(jnp.float64)
+        if jnp.issubdtype(a.dtype, jnp.floating) else a, tree)
+
+
+def _in_fp64(fn):
+    """Run ``fn(state, other, *rest)`` with the float leaves of ``state`` and
+    ``other`` (a tendency state or a target mass) in fp64; return the state
+    result in the input state's dtypes."""
+    def wrapped(s, other, *rest, **kw):
+        return _cast_like(fn(_to_fp64(s), _to_fp64(other), *rest, **kw), s)
+    return wrapped
+
+
+def _compensated_sum(x: jax.Array) -> jax.Array:
+    """Pairwise sum with TwoSum error terms carried alongside (fp32-accurate
+    to ~eps^2 * N): result = sum of pairwise partial sums + summed errors."""
+    x = x.reshape(-1)
+    n = 1 << max(0, (x.size - 1).bit_length())
+    s = jnp.pad(x, (0, n - x.size))
+    err = jnp.zeros_like(s)
+    while s.size > 1:
+        a, b = s[0::2], s[1::2]
+        t = a + b
+        bp = t - a
+        e = (a - (t - bp)) + (b - bp)
+        err = err[0::2] + err[1::2] + e
+        s = t
+    return s[0] + err[0]
+
+
+def _plane_weighted_anomaly_compensated(rho_p, grid, height_coord, terrain_metric):
+    w = _plane_horizontal_weight(grid, terrain_metric)
+    return _compensated_sum(rho_p * w * height_coord.dz)
+
+
+def fix_mass_anomaly_compensated(state, target_anomaly, grid, height_coord,
+                                 terrain_metric):
+    """Dry-mass fixer anchored on the rho' anomaly integral (no subtraction of
+    two near-equal totals) with a compensated sum."""
+    anomaly = _plane_weighted_anomaly_compensated(
+        state.rho_prime.data, grid, height_coord, terrain_metric)
+    weighted_volume = _plane_volume_weight(grid, height_coord, terrain_metric)
+    delta = (target_anomaly - anomaly) / weighted_volume
+    return state._replace(
+        rho_prime=state.rho_prime.replace(data=state.rho_prime.data + delta))
+
+
 def fix_mass_nonhydrostatic_plane(
     state: PlaneNonHydrostaticState,
     target_mass: jax.Array,
@@ -3107,7 +3173,11 @@ class PlaneCompressibleEulerModel:
         # feature-gate Python `if`, not jnp.where). The fixer itself
         # tolerates None (computes inline), so this never traps.
         self._background_mass: jax.Array | None = (
-            _plane_background_mass(grid, height_coord, terrain_metric)
+            _plane_weighted_mass_sum(
+                height_coord.rho_ref.astype(jnp.float64), grid, height_coord,
+                terrain_metric)
+            if config.fix_mass and "mass_fixer" in config.fp64_parts
+            else _plane_background_mass(grid, height_coord, terrain_metric)
             if config.fix_mass else None
         )
 
@@ -3174,15 +3244,23 @@ class PlaneCompressibleEulerModel:
         # make_physics fn rather than silently reseed (#405/#413).
         refuse_unthreaded_stateful_physics(
             physics_fn, None, where="NH plane step()")
+        mass_state = (_to_fp64(state) if "mass_fixer" in self.config.fp64_parts
+                      else state)
+        if "compensated_mass_fixer" in self.config.fp64_parts:
+            if self._target_mass is None:
+                self._target_mass = _plane_weighted_anomaly_compensated(
+                    state.rho_prime.data, self.grid, self.height_coord,
+                    self.terrain_metric)
+            return self._step_jit(state, dt, self._target_mass, physics_fn)
         if self.config.fix_mass and self.config.anchor_mass_to_initial:
             if self._target_mass is None:
                 self._target_mass = compute_dry_mass_plane(
-                    state, self.grid, self.height_coord, self.terrain_metric,
+                    mass_state, self.grid, self.height_coord, self.terrain_metric,
                 )
         target = self._target_mass
         if target is None and self.config.fix_mass:
             target = compute_dry_mass_plane(
-                state, self.grid, self.height_coord, self.terrain_metric,
+                mass_state, self.grid, self.height_coord, self.terrain_metric,
             )
         return self._step_jit(state, dt, target, physics_fn)
 
@@ -3335,10 +3413,16 @@ class PlaneCompressibleEulerModel:
         )
         if (getattr(self, "_jit_halo_core", None) is None
                 or getattr(self, "_jit_halo_key", None) != _jit_key):
+            parts = self.config.fp64_parts
+            _validate_fp64_parts(parts)
+            acoustic_fn = (_in_fp64(acoustic_update_fn) if "acoustic" in parts
+                           else acoustic_update_fn)
+
             def _halo_core(s):
-                return split_explicit_step(
-                    s, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-                )
+                return _cast_like(split_explicit_step(
+                    s, lambda x: _cast_like(slow_tendency_fn(x), x),
+                    acoustic_fn, dt, se_config,
+                ), s)
             self._jit_halo_core = jax.jit(_halo_core)
             self._jit_halo_key = _jit_key
         stepped = self._jit_halo_core(state_local)
@@ -3356,16 +3440,19 @@ class PlaneCompressibleEulerModel:
                     # Initial reduction across all ranks so every rank
                     # captures the same anchor.
                     self._target_mass = compute_dry_mass_plane_mpi(
-                        state_local, self.grid, self.height_coord,
+                        _to_fp64(state_local) if "mass_fixer" in self.config.fp64_parts else state_local, self.grid, self.height_coord,
                         self.terrain_metric, layout, owned_mask,
                     )
                 target = self._target_mass
             else:
                 target = compute_dry_mass_plane_mpi(
-                    state_local, self.grid, self.height_coord,
+                    _to_fp64(state_local) if "mass_fixer" in self.config.fp64_parts else state_local, self.grid, self.height_coord,
                     self.terrain_metric, layout, owned_mask,
                 )
-            stepped = fix_mass_nonhydrostatic_plane_mpi(
+            mpi_fixer = (_in_fp64(fix_mass_nonhydrostatic_plane_mpi)
+                         if "mass_fixer" in self.config.fp64_parts
+                         else fix_mass_nonhydrostatic_plane_mpi)
+            stepped = mpi_fixer(
                 stepped, target, self.grid, self.height_coord,
                 self.terrain_metric, layout, owned_mask,
             )
@@ -3457,12 +3544,23 @@ class PlaneCompressibleEulerModel:
                     self.height_coord, self.terrain_metric, self.config,
                 )
 
-        state_new = split_explicit_step(
-            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-        )
+        parts = self.config.fp64_parts
+        _validate_fp64_parts(parts)
+        if "acoustic" in parts:
+            acoustic_update_fn = _in_fp64(acoustic_update_fn)
+        state_new = _cast_like(split_explicit_step(
+            state, lambda s: _cast_like(slow_tendency_fn(s), s),
+            acoustic_update_fn, dt, se_config,
+        ), state)
 
         if self.config.fix_mass and target_mass is not None:
-            state_new = fix_mass_nonhydrostatic_plane(
+            if "compensated_mass_fixer" in parts:
+                return fix_mass_anomaly_compensated(
+                    state_new, target_mass, self.grid, self.height_coord,
+                    self.terrain_metric)
+            fixer = (_in_fp64(fix_mass_nonhydrostatic_plane)
+                     if "mass_fixer" in parts else fix_mass_nonhydrostatic_plane)
+            state_new = fixer(
                 state_new, target_mass, self.grid, self.height_coord,
                 self.terrain_metric,
                 # Concrete eager constant read off the static ``self``
