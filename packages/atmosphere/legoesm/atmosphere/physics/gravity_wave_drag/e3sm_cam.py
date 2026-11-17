@@ -122,6 +122,12 @@ deliberate departures / version choices (canaries in
   (``umcfac_sign_width`` 1e-3 m/s; with the smooth ``|c - u|`` alone the
   signed tendency is only C1) and the ``taumin`` zeroing is a one-sided quintic ramp
   (``taumin_ramp_width`` 1e-10 Pa; 3 of 66); 0 = E3SM for each.
+  Since #2546 the stress redetermined below a limited layer adds E3SM's
+  ``abs(gwut)`` (= ``|tanh|*ubtl`` under the smooth sign), so the stress drop
+  equals the momentum the layer receives (RULE 0; carrying ``ubtl``, as
+  #2241 did, lost up to 24 % of a layer's deposit).  It is C1, not C2, where
+  a layer's unlimited non-positive divergence crosses a critical level (one
+  test point; vote 3-0).
   KNOWN DIFFERENCE at the defaults (measured 2026-11-16, per column, pinned
   in ``test_gw_spec_e3sm_oracle.py``): spectral arms up to 7.9e-3 in du/dt
   and 6.7e-3 in the dT field (background at dt = 1800 s, where the umcfac

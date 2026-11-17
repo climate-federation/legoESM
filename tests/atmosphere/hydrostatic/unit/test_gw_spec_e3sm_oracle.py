@@ -247,12 +247,16 @@ _KINKS = (("convective_frontal/l36", 3, 0.8178145073179883, 1e-5),
           # eps 1e-6 at the umcfac cases: the smooth sign is 1e-3 m/s wide,
           # finer than u*1e-5 resolves (f'' measured continuous; vote 3-0).
           ("background/l36", 0, 0.8228612252375684, 1e-6),      # umcfac |c - u|
-          ("background/l32", 1, 0.8298968, 1e-6),               # umcfac |c - u|, sign
+          # order 1 here (#2546, vote 3-0): the momentum-exact carry |gwut|
+          # (CAM's abs) is C1, not C2, where this layer's unlimited
+          # non-positive divergence crosses the critical level.
+          ("background/l32", 1, 0.8298968, 1e-6, 1),            # umcfac |c - u|, sign
           ("background/l36", 3, 0.8242109368577084, 1e-5))      # taumin zeroing
 
 
-@pytest.mark.parametrize("case,col,s_star,eps", _KINKS)
-def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps):
+@pytest.mark.parametrize("case,col,s_star,eps,order",
+                         [k if len(k) == 5 else (*k, 2) for k in _KINKS])
+def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps, order):
     """RULE 5 gradient test at the default; reverse mode, eps 1e-5 (Lindzen)
     unless the switch's width needs a finer step."""
     z, meta, table = fx
@@ -269,10 +273,10 @@ def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps
 
     f = make(_config(m["ours"], hard=False))
     s0 = jnp.asarray(s_star)
-    check_grads(f, (s0,), order=2, modes=("rev",), eps=eps)
+    check_grads(f, (s0,), order=order, modes=("rev",), eps=eps)
     assert float(jax.grad(f)(s0)) != 0.0
     with pytest.raises(AssertionError):          # the hard limit has the kink
-        check_grads(make(_config(m["ours"])), (s0,), order=2, modes=("rev",), eps=eps)
+        check_grads(make(_config(m["ours"])), (s0,), order=order, modes=("rev",), eps=eps)
 
 
 @pytest.mark.parametrize("field", ["umcfac_abs_width", "umcfac_sign_width", "taumin_ramp_width"])
