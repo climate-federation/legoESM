@@ -98,6 +98,14 @@ def test_crossing_gradient_at_default():
     assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g).max()) > 0.0
 
 
+@pytest.mark.parametrize("name", sorted(_CROSSING))
+def test_crossing_gradient_finite_every_case(name):
+    dz, ri, _ = _CROSSING[name]
+    d = jnp.asarray(_centres(dz))
+    g = jax.grad(lambda r: K._cvmix_first_crossing_depth(r, d, CFG))(jnp.asarray(ri))
+    assert bool(jnp.all(jnp.isfinite(g))), name
+
+
 def test_bulk_richardson_matches_cvmix():
     """CVMix compute_bulk_Richardson (N=0 -> V_t^2 = minVtsqr 1e-10)."""
     zc = np.array([-0.5, -1.5, -2.5])

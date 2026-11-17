@@ -357,7 +357,9 @@ def _cvmix_first_crossing_depth(Ri_b, z_depth, cfg):
     m = jnp.pad(slope_prev, (*pad_axes, (1, 0)))   # bracket 1: zero slope
     c = jnp.minimum(y0 - cfg.Ri_crit, 0.0)
     a = (y1 - y0 - m * H) / H_safe ** 2
-    root_d = jnp.sqrt(jnp.maximum(m * m - 4.0 * a * c, 0.0))
+    disc = m * m - 4.0 * a * c
+    # sqrt has an infinite derivative at 0 (hit when m = c = 0): double-where.
+    root_d = jnp.where(disc > 0.0, jnp.sqrt(jnp.where(disc > 0.0, disc, 1.0)), 0.0)
     # In-bracket root of a*x^2 + m*x + c: 2c/(-m - root_d) when m > 0 (no
     # cancellation), (-m + root_d)/(2a) otherwise (straddling then needs a > 0).
     den_pos = jnp.where(m > 0.0, -m - root_d, -1.0)
