@@ -1172,6 +1172,13 @@ def si3_ice_update_tau(
     shrunk by ``nn_hls-1`` per side), the drag the ocean's implicit top friction consumes; the implicit arm
     requires ``inputs.tmask_k1``.
     """
+    if type(nn_fsbc) is not int or type(config.nn_fsbc) is not int:
+        raise TypeError("ice_update_tau nn_fsbc and config.nn_fsbc must be static Python integers")
+    if nn_fsbc != config.nn_fsbc:
+        raise ValueError(
+            "ice_update_tau nn_fsbc must equal config.nn_fsbc: "
+            f"{nn_fsbc} != {config.nn_fsbc}"
+        )
     if nn_fsbc < 1 or kt < 1:
         raise ValueError("ice_update_tau requires positive static nn_fsbc and kt")
     refresh_private_stress = (kt - 1) % nn_fsbc == 0

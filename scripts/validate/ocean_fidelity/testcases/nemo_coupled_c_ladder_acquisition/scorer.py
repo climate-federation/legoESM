@@ -44,6 +44,7 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_composition_scorer i
 
 MAGIC = b"CLAD0001"
 UNSCORABLE = "NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP"
+ADMITTED_ICE_DIMENSIONS = (5, 10, 5)
 _HEADER_BYTES = 8 + 4 + 11 * 4
 _KIND1_FLAGS = (
     ("restart_means_present", "i4"),
@@ -294,6 +295,18 @@ def _coupled_resolved_namelist(run: Path) -> dict:
     return parsed
 
 
+def _admitted_resolved_namelist(evidence: Path) -> dict:
+    """Read the executed C3 configuration and refuse non-ICE5 evidence."""
+    namelist = _coupled_resolved_namelist(evidence / "REC_C3")
+    dimensions = tuple(int(namelist[name]) for name in ("jpl", "nlay_i", "nlay_s"))
+    if dimensions != ADMITTED_ICE_DIMENSIONS:
+        raise ValueError(
+            "STATUS PLANT-FIRED: resolved ice dimensions "
+            f"{dimensions} are inadmissible; expected ICE5 {ADMITTED_ICE_DIMENSIONS}"
+        )
+    return namelist
+
+
 def _interior_master_fields(record: dict) -> dict[str, np.ndarray]:
     """Crop full local-domain fields to the MPI shard's recorded interior."""
     meta = record["meta"]
@@ -377,7 +390,7 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     run = evidence / "REC_C3"
     records = run / "o8_o16_master_records"
-    namelist = _coupled_resolved_namelist(run)
+    namelist = _admitted_resolved_namelist(evidence)
     ice_dimensions = tuple(int(namelist[name]) for name in ("jpl", "nlay_i", "nlay_s"))
     first = read_record_verified(
         records / record_name(15, 1, 0, 0),
@@ -576,6 +589,7 @@ def main() -> int:
         return 0
     if args.evidence is None or args.ppsrc is None:
         parser.error("--evidence and --ppsrc are required outside --self-test")
+    _admitted_resolved_namelist(args.evidence)
     report = {
         "C0": score_c0(
             args.evidence / "REC_C3/c_ladder_records",

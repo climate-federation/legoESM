@@ -217,6 +217,20 @@ def test_c1_dimensions_come_from_ice5_run(tmp_path: Path) -> None:
     assert (cfg.jpl, cfg.nlay_i, cfg.nlay_s) == dimensions
 
 
+def test_scorer_refuses_non_ice5_evidence_before_scoring(tmp_path: Path) -> None:
+    run = tmp_path / "REC_C3"
+    run.mkdir()
+    (run / "output.namelist.ice").write_bytes(
+        (COUPLED_RECORD / "output.namelist.ice").read_bytes()
+    )
+    (run / "ocean.output").write_text("implicit ice-ocean drag ln_drgice_imp = T\n")
+    with pytest.raises(
+        ValueError,
+        match=r"resolved ice dimensions \(1, 3, 3\) are inadmissible; expected ICE5 \(5, 10, 5\)",
+    ):
+        scorer._admitted_resolved_namelist(tmp_path)
+
+
 def test_c_scorers_select_fp64_libm_before_scoring(monkeypatch, tmp_path: Path) -> None:
     selected = []
     monkeypatch.setattr(scorer, "set_policy", selected.append)
@@ -377,6 +391,11 @@ def test_scorer_main_reads_c0_from_staged_rec_c3(monkeypatch, tmp_path: Path) ->
 
     monkeypatch.setattr(scorer, "score_c0", fake_c0)
     monkeypatch.setattr(scorer, "score_c1", lambda *_args, **_kwargs: {"status": "PASS"})
+    monkeypatch.setattr(
+        scorer,
+        "_admitted_resolved_namelist",
+        lambda _evidence: {"jpl": 5, "nlay_i": 10, "nlay_s": 5},
+    )
     monkeypatch.setattr(
         sys,
         "argv",

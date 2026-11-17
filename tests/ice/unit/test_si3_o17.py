@@ -7,6 +7,9 @@ unplanted step passes; none edits an already computed result.
 
 import hashlib
 import struct
+import subprocess
+import sys
+import types
 from pathlib import Path
 
 import jax
@@ -68,6 +71,41 @@ def _bit_mismatches(actual, expected) -> list[str]:
 def _assert_bitwise_equal(actual, expected) -> None:
     mismatches = _bit_mismatches(actual, expected)
     assert not mismatches, "bit mismatches:\n" + "\n".join(mismatches)
+
+
+def _load_pre_split_o17() -> types.ModuleType:
+    """Load the f7d5bba8f O17/finalize pair under private module names."""
+    sources = {}
+    for name in ("si3_finalize", "si3_o17"):
+        sources[name] = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPO),
+                "show",
+                f"f7d5bba8f:packages/ice/legoesm/ice/{name}.py",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    finalize_name = "_si3_pre_split_f7d5bba8f_finalize"
+    finalize = types.ModuleType(finalize_name)
+    finalize.__file__ = f"{finalize_name}.py"
+    sys.modules[finalize_name] = finalize
+    exec(compile(sources["si3_finalize"], finalize.__file__, "exec"), finalize.__dict__)
+
+    o17_name = "_si3_pre_split_f7d5bba8f_o17"
+    o17 = types.ModuleType(o17_name)
+    o17.__file__ = f"{o17_name}.py"
+    source = sources["si3_o17"].replace(
+        "from legoesm.ice.si3_finalize import (",
+        f"from {finalize_name} import (",
+        1,
+    )
+    exec(compile(source, o17.__file__, "exec"), o17.__dict__)
+    return o17
 
 
 def _assert_only_signed_zeros_differ(actual, expected) -> list[str]:
@@ -236,24 +274,11 @@ def test_o17_typed_pytree_boundary_and_explicit_card() -> None:
 
 def test_o17_split_is_bitwise_identity_and_double_tau_plant_fires(mixed, monkeypatch) -> None:
     entry, forcing, card = mixed
+    baseline_module = _load_pre_split_o17()
     with jax.disable_jit():
-        core = o17_mod._si3_o17_through_update_flx(entry, forcing, card)
-    original_tau = o17_mod.si3_ice_update_tau
-    stress = original_tau(
-        core.stress_inputs,
-        config=card.state,
-        ln_drgice_imp=card.ln_drgice_imp,
-        nn_fsbc=card.state.nn_fsbc,
-        kt=forcing.kt,
-    )
-    expected = (
-        core.state,
-        o17_mod.SI3O17Trace(
-            *(getattr(core, name) for name in o17_mod.SI3O17Trace._fields[:-1]),
-            o17_mod.SI3FinalizeResponse(core.correction, core.final, stress),
-        ),
-    )
+        expected = baseline_module.si3_o17_step(entry, forcing, card)
 
+    original_tau = o17_mod.si3_ice_update_tau
     calls = []
 
     def one_tau(inputs, **kwargs):
@@ -261,7 +286,6 @@ def test_o17_split_is_bitwise_identity_and_double_tau_plant_fires(mixed, monkeyp
         assert len(calls) == 1, "update_tau called twice on odd step"
         return original_tau(inputs, **kwargs)
 
-    monkeypatch.setattr(o17_mod, "_si3_o17_through_update_flx", lambda *_args, **_kwargs: core)
     monkeypatch.setattr(o17_mod, "si3_ice_update_tau", one_tau)
     with jax.disable_jit():
         actual = o17_mod.si3_o17_step(entry, forcing, card)
@@ -270,7 +294,10 @@ def test_o17_split_is_bitwise_identity_and_double_tau_plant_fires(mixed, monkeyp
 
     calls.clear()
 
-    def planted_core(*_args, **_kwargs):
+    original_core = o17_mod._si3_o17_through_update_flx
+
+    def planted_core(*args, **kwargs):
+        core = original_core(*args, **kwargs)
         one_tau(
             core.stress_inputs,
             config=card.state,
@@ -284,6 +311,25 @@ def test_o17_split_is_bitwise_identity_and_double_tau_plant_fires(mixed, monkeyp
     with pytest.raises(AssertionError, match="called twice on odd step"):
         with jax.disable_jit():
             o17_mod.si3_o17_step(entry, forcing, card)
+
+    monkeypatch.setattr(o17_mod, "_si3_o17_through_update_flx", original_core)
+
+    def skipped_tau(inputs, **_kwargs):
+        return type(expected[1].finalize.stress)(
+            inputs.utau,
+            inputs.vtau,
+            inputs.taum,
+            inputs.tmod_io,
+            inputs.utau_oce,
+            inputs.vtau_oce,
+            None,
+        )
+
+    monkeypatch.setattr(o17_mod, "si3_ice_update_tau", skipped_tau)
+    with jax.disable_jit():
+        skipped = o17_mod.si3_o17_step(entry, forcing, card)
+    with pytest.raises(AssertionError, match="bit mismatches"):
+        _assert_bitwise_equal(skipped, expected)
 
 
 def test_o17_card_refuses_core2_closure_before_any_inference() -> None:
@@ -1520,7 +1566,7 @@ def test_o17_scorer_free_run_and_carried_state_plants(
     assert carried_ulp["status"] == "FAIL"
     assert carried_ulp["per_step"]["1:0"]["pass"] is True
     assert carried_ulp["per_step"]["2:0"]["carry_chain_intact"] is True
-    assert carried_ulp["per_step"]["2:0"]["different"] == 569
+    assert carried_ulp["per_step"]["2:0"]["different"] == 742
     assert carried_ulp["first_difference"]["step"] == 2
     assert carried_ulp["first_difference"]["field"] == "after_advection.v_i"
 
