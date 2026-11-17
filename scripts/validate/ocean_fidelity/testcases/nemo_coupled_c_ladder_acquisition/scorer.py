@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 from legoesm.core.nemo_namelist import parse_namelist
 from legoesm.core.precision import PrecisionPolicy, set_policy
-from legoesm.core.source_rounding import nemo_source_round as sr
+from legoesm.ice.config import SI3_HARD_SWITCHES
 from legoesm.ice.si3_finalize import (
     SI3StressInputs,
     SI3StressOutputs,
@@ -315,37 +315,12 @@ def _nemo_cadenced_tau_step(
     ln_drgice_imp: bool,
     update_now: bool,
 ) -> SI3StressOutputs:
-    """Replay NEMO's outer ``MOD(kt-1,nn_fsbc)`` guard for C1 scoring only."""
-    if update_now:
-        return si3_ice_update_tau(
-            inputs,
-            config=config._replace(nn_fsbc=1),
-            ln_drgice_imp=ln_drgice_imp,
-        )
-
-    h = int(config.nn_hls)
-    sl = (slice(h, -h), slice(h, -h))
-    left = (slice(h - 1, -h - 1), slice(h, -h))
-    below = (slice(h, -h), slice(h - 1, -h - 1))
-    at_i = inputs.at_i[sl]
-    zflagi = jnp.asarray(0.0 if ln_drgice_imp else 1.0, dtype=inputs.u_ice.dtype)
-    pu = sr(inputs.uu_kbb[sl] + inputs.uu_kbb[left])
-    pv = sr(inputs.vv_kbb[sl] + inputs.vv_kbb[below])
-    urel = sr(sr(inputs.u_ice[sl] + inputs.u_ice[left]) - sr(zflagi * pu))
-    vrel = sr(sr(inputs.v_ice[sl] + inputs.v_ice[below]) - sr(zflagi * pv))
-    half = jnp.asarray(0.5, dtype=inputs.u_ice.dtype)
-    one = jnp.asarray(1.0, dtype=inputs.u_ice.dtype)
-    zutau_ice = sr(sr(half * inputs.tmod_io[sl]) * urel)
-    zvtau_ice = sr(sr(half * inputs.tmod_io[sl]) * vrel)
-    utau_i = sr(sr(sr(one - at_i) * inputs.utau_oce) + sr(at_i * zutau_ice))
-    vtau_i = sr(sr(sr(one - at_i) * inputs.vtau_oce) + sr(at_i * zvtau_ice))
-    return SI3StressOutputs(
-        utau=inputs.utau.at[sl].set(utau_i),
-        vtau=inputs.vtau.at[sl].set(vtau_i),
-        taum=inputs.taum,
-        tmod_io=inputs.tmod_io,
-        utau_oce=inputs.utau_oce,
-        vtau_oce=inputs.vtau_oce,
+    """Use the production cadence arm already present on the main line."""
+    return si3_ice_update_tau(
+        inputs,
+        config=config,
+        ln_drgice_imp=ln_drgice_imp,
+        ice_step=update_now,
     )
 
 
@@ -415,7 +390,7 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
     flux_cfg = cfg._replace(nn_hls=0)
     surface_config = SI3SurfaceConfig.from_resolved_namelists(
         run / "output.namelist.dyn", run / "output.namelist.ice"
-    )
+    )._replace(switches=SI3_HARD_SWITCHES)
     steps = sorted(
         {int(path.name.split("_step")[1][:4]) for path in records.glob("o8o16_kind15_*.bin")}
     )
@@ -477,8 +452,18 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
                     "STATUS PLANT-FIRED: O17 record ice dimensions "
                     f"{private_dimensions} disagree with resolved run {ice_dimensions}"
                 )
+            c4 = read_c_record(
+                evidence
+                / "REC_C3/c_ladder_records"
+                / f"c_kind4_step{kt:04d}_rank{rank:04d}.bin"
+            )["fields"]
             stress = SI3StressInputs(
-                **{name: jnp.asarray(r19["fields"][name]) for name in SI3StressInputs._fields}
+                **{
+                    name: jnp.asarray(r19["fields"][name])
+                    for name in SI3StressInputs._fields
+                    if name != "tmask_k1"
+                },
+                tmask_k1=jnp.asarray(c4["tmask"]),
             )
             cadence = (kt - 1) % 2 == 0
             if plant == "wrong-parity":
@@ -500,9 +485,6 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
                     getattr(got, name),
                     private[name],
                 )
-            c4 = read_c_record(
-                evidence / "REC_C3/c_ladder_records" / f"c_kind4_step{kt:04d}_rank{rank:04d}.bin"
-            )["fields"]
             meta = r20["meta"]
             i0, i1 = meta["ntsi"] - 1, meta["ntei"]
             j0, j1 = meta["ntsj"] - 1, meta["ntej"]

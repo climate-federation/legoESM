@@ -117,7 +117,7 @@ def test_surface_mean_both_parities_and_numeric_plant(tmp_path: Path) -> None:
         scorer.self_test("numeric", tmp_path)
 
 
-def test_tau_cadence_is_scorer_only_and_preserves_production_api(tmp_path: Path) -> None:
+def test_tau_cadence_reuses_production_api(tmp_path: Path) -> None:
     full = jnp.ones((6, 6), dtype=jnp.float64)
     interior = jnp.ones((2, 2), dtype=jnp.float64)
     inputs = SI3StressInputs(
@@ -139,9 +139,7 @@ def test_tau_cadence_is_scorer_only_and_preserves_production_api(tmp_path: Path)
         interior * 10,
     )
     cfg = SI3ORCA2StateConfig.for_orca2_sas_ice(nn_hls=2, nn_fsbc=2)
-    assert "update_cadence" not in inspect.signature(si3_ice_update_tau).parameters
-    with pytest.raises(ValueError, match="nn_fsbc=1"):
-        si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=False)
+    assert "ice_step" in inspect.signature(si3_ice_update_tau).parameters
     off = scorer._nemo_cadenced_tau_step(inputs, config=cfg, ln_drgice_imp=False, update_now=False)
     np.testing.assert_array_equal(off.tmod_io, inputs.tmod_io)
     np.testing.assert_array_equal(off.taum, inputs.taum)
