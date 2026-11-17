@@ -99,7 +99,8 @@ def test_crossing_gradient_at_default():
     assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g).max()) > 0.0
 
 
-_GRAD_EXTRA = {"constant_sub": (_U, [0.1] * 8, None), "constant_super": (_U, [0.5] * 8, None)}
+_GRAD_EXTRA = {"constant_sub": (_U, [0.1] * 8, None), "constant_super": (_U, [0.5] * 8, None),
+               "constant_far": (_U, [50.0] * 8, None)}   # clamp underflows: sqrt(0) path
 
 
 @pytest.mark.parametrize("name", sorted(_CROSSING) + sorted(_GRAD_EXTRA))
