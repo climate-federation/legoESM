@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 _P = (Path(__file__).resolve().parents[2] / "scripts" / "validate"
       / "coupled_owned_closure.py")
@@ -89,3 +90,25 @@ def test_stores_weights():
     assert np.isclose(s["W_land"], 0.5 * (soil0 + 1.0 + 1.0 + 0.5) * 2.0)
     assert np.isclose(s["W_ice"], 900 * (1 * 0.5 * 0.5 * 2 + 2 * 0.25 * 1 * 3))
     assert np.isclose(s["H_slab"], 10 * (270 * 0.5 * 2 + 280 * 1.0 * 3))
+
+
+def test_injected_atmosphere_source_fails_the_bar():
+    # non-vacuity at the gate bar: a source of 1e-5 x P in the atmosphere
+    # must show up above 1e-6 relative in the atm and system rows
+    s0, s1, f = _closed()
+    src = 1e-5 * f["P_atm"]
+    rows = probe.budget_rows(s0, dict(s1, W_atm=s1["W_atm"] + src), f)
+    assert abs(rows["atm_water"]) / f["P_atm"] > 1e-6
+    assert abs(rows["system_water"]) / f["P_atm"] > 1e-6
+    assert np.isclose(rows["atm_water"], src)
+
+
+@pytest.mark.parametrize("argv, msg", [
+    (["--ic", "era5"], "--ic-path"),
+    (["--land", "real", "--land-mask-file", "m.nc"], "--clm-surfdata-path"),
+    (["--surfdata", "s.nc"], "--land real"),
+])
+def test_real_case_options_refuse_missing_or_stray_paths(argv, msg, capsys):
+    with pytest.raises(SystemExit):
+        probe.main(argv)
+    assert msg in capsys.readouterr().err
