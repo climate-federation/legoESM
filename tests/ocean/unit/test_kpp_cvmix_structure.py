@@ -98,9 +98,12 @@ def test_crossing_gradient_at_default():
     assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g).max()) > 0.0
 
 
-@pytest.mark.parametrize("name", sorted(_CROSSING))
+_GRAD_EXTRA = {"constant_sub": (_U, [0.1] * 8, None), "constant_super": (_U, [0.5] * 8, None)}
+
+
+@pytest.mark.parametrize("name", sorted(_CROSSING) + sorted(_GRAD_EXTRA))
 def test_crossing_gradient_finite_every_case(name):
-    dz, ri, _ = _CROSSING[name]
+    dz, ri, _ = {**_CROSSING, **_GRAD_EXTRA}[name]
     d = jnp.asarray(_centres(dz))
     g = jax.grad(lambda r: K._cvmix_first_crossing_depth(r, d, CFG))(jnp.asarray(ri))
     assert bool(jnp.all(jnp.isfinite(g))), name
@@ -243,3 +246,60 @@ def test_cvmix_mode_batched_and_dry_columns():
     np.testing.assert_allclose(np.asarray(out.K_v[0, 1]), np.asarray(one.K_v[0]), rtol=1e-14, atol=0)
     g = jax.grad(lambda t: jnp.sum(run(t, jac, tau, Bf, u).K_v))(T)
     assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g).max()) > 0.0
+
+
+# CVMix cvmix_coeffs_kpp nonlocal term (C_s * G(sigma), CVMix C_s = MOM6 CS2
+# 6.32739901508) on the stretched grid, OBL 9 m, u* 0.01, B_cvmix -5e-8 (unstable).
+_CVMIX_CS2 = 6.32739901508
+_NL_STRETCHED = [0.0, 0.5554918202538277, 0.9167784924111023, 0.7909248768848446,
+                 0.14646756979348968, 0.0, 0.0, 0.0, 0.0]
+
+
+def test_nonlocal_shape_at_true_interfaces(monkeypatch):
+    """cvmix mode evaluates G(sigma) of the nonlocal flux at the true interfaces
+    (stretched grid: centre midpoints would differ).  Shapes compared (the C_s
+    constants differ by the LMD94 rounding, a recorded known difference)."""
+    dz = np.array([1.0, 1.5, 2.0, 3.0, 4.5, 6.0, 8.0, 10.0])
+    n = dz.size
+    zc = create_z_star_from_thicknesses(dz)
+    T = jnp.asarray(20.0 - 0.05 * _centres(dz))[None]
+    S = jnp.full((1, n), 35.0)
+    monkeypatch.setattr(K, "_boundary_layer_depth", lambda *a, **k: jnp.array([9.0]))
+    out = K.kpp_vertical_mixing(jnp.zeros((1, n)), jnp.zeros((1, n)), T, S,
+                                wright_eos(T, S, jnp.zeros_like(T)), jnp.zeros(1), zc, jnp.ones(1),
+                                CFG, constants.g, tau_x=jnp.array([0.01 ** 2 * rho_0]),
+                                tau_y=jnp.zeros(1), B_f=jnp.array([5e-8]),
+                                Q_sfc_T=jnp.ones(1), Q_sfc_S=jnp.zeros(1), apply_diffusion=False)
+    dT = np.asarray(out.dT_dt[0])
+    F = -np.cumsum(dT * dz)[:-1]            # flux at interior interfaces
+    got = F / CFG.gamma_T
+    want = np.asarray(_NL_STRETCHED)[1:n] / _CVMIX_CS2
+    np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-15)
+
+
+# Legacy structure pinned at the stack base 7818b0e18d (PR #2560 head):
+# 2 columns, stretched grid, apply_diffusion=True, dt=600 s.
+_LEGACY_K_V = [[0.0028613390168094653, 0.004455298478307277, 0.003432405391351673, 0.0010864835042452773, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05], [0.0005128825621043311, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05]]
+_LEGACY_A_V = [[0.002591620563793403, 0.003929723781049334, 0.0030484785733987225, 0.0010274145473546054, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001], [0.0006028825621043311, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001]]
+_LEGACY_DT_DT = [[-4.371291449051502e-05, -3.33158948160732e-05, -3.1705760647775854e-05, 3.4093446170271146e-05, 1.2070653222080686e-05, -5.646886315028669e-22, 3.5734202462290796e-22, -1.4823076576950255e-22, 2.2940475654803966e-22, 3.3333333333333195e-08], [-3.94117477205255e-05, 2.587969485358914e-05, 7.986360435284163e-08, 4.129244142456893e-08, 1.6024165992988293e-08, 4.694099954881841e-09, 8.886105206707923e-10, 1.1087110016905693e-10, 8.671289543722097e-12, 1.3333727321538709e-08]]
+_LEGACY_DS_DT = [[1.37129144905082e-06, 8.315894816084423e-07, 5.455760647757201e-07, -8.579892893535707e-07, -2.501910962120453e-07, -1.6915843526709416e-21, 4.2310288332087366e-22, 2.152323953862978e-22, -1.793603294885815e-22, -6.666666666666921e-10], [2.0515302484154584e-06, -1.3410201656102868e-06, -1.8270765370071275e-20, 3.16093284743597e-21, 0.0, -5.635857240194629e-22, 4.2268929301459714e-22, -4.314574075076593e-22, 3.5954783958971605e-22, -2.6666666666667683e-09]]
+_LEGACY_DU_DT = [[-2.4017919398069545e-05, -1.0744126210987942e-05, -3.379876668229163e-06, 1.2728587545212194e-05, 1.856837327675612e-06, 4.086013134606541e-08, 1.0549690131577407e-08, 1.949210750009046e-09, 2.4752300459740787e-10, 2.071654324533266e-11], [-2.9581651571874514e-06, 1.695000890657672e-06, 4.343945162761329e-08, 3.183866423708344e-08, 2.017831729672153e-08, 1.1589502737532698e-08, 5.307029730153358e-09, 2.023736618579618e-09, 6.275161612187131e-10, 1.8037886749171123e-10]]
+
+
+def test_legacy_structure_unchanged():
+    dz = np.array([1.0, 1.5, 2.0, 3.0, 4.5, 6.0, 8.0, 10.0, 12.0, 15.0])
+    z = _centres(dz)
+    T = jnp.asarray(np.stack([20.0 - 0.05 * z, 18.0 - 0.02 * z + 0.3 * np.exp(-z / 4.0)]))
+    S = jnp.asarray(np.stack([35.0 + 0.001 * z, 34.5 + 0.004 * z]))
+    u = jnp.asarray(np.stack([0.2 * np.exp(-z / 5.0), 0.05 * np.exp(-z / 9.0)]))
+    v = jnp.asarray(np.stack([0.02 * np.exp(-z / 3.0), -0.04 * np.exp(-z / 6.0)]))
+    out = K.kpp_vertical_mixing(u, v, T, S, wright_eos(T, S, jnp.zeros_like(T)), jnp.zeros(2),
+                                create_z_star_from_thicknesses(dz), jnp.ones(2), KPPConfig(),
+                                constants.g, tau_x=jnp.array([0.05, 0.1]),
+                                tau_y=jnp.array([0.0, 0.02]), B_f=jnp.array([5e-8, -3e-8]),
+                                Q_sfc_T=jnp.array([1e-5, -2e-5]), Q_sfc_S=jnp.array([-1e-6, 1e-6]),
+                                apply_diffusion=True, dt=600.0)
+    for got, want in ((out.K_v, _LEGACY_K_V), (out.A_v, _LEGACY_A_V), (out.dT_dt, _LEGACY_DT_DT),
+                      (out.dS_dt, _LEGACY_DS_DT), (out.du_dt, _LEGACY_DU_DT)):
+        w = np.asarray(want)
+        np.testing.assert_allclose(np.asarray(got), w, rtol=1e-13, atol=1e-13 * np.abs(w).max())

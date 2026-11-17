@@ -48,8 +48,9 @@ DEPARTURES (documented, canaried in the test):
   value/slope, so it omits that matching construction (base entrainment is
   under-represented whenever the interior K/dK is nonzero there).
 - ``bld_structure="legacy"``: the BL-depth crossing is a sigmoid-weighted
-  average of cell-CENTRE depths; at the hard limit it snaps to the centre of
-  the first supercritical cell (no interpolation), and the BL diffusivity is
+  average of cell-CENTRE depths; at the hard limit it is the centre of the
+  first supercritical cell for a single crossing (the average of the
+  upward-crossing centres for several), never interpolated; the BL diffusivity is
   evaluated at centres and averaged to interfaces.
 - ``bld_structure="cvmix"``: the first-crossing selection is smooth
   (sigmoid of sharpness ``crossing_sharpness`` on Ri_b - Ri_c); at the hard
@@ -302,14 +303,17 @@ def _mom6_surface_layer_deltas(T, S, u, v, dz, z_depth, cfg, eos_fn, g):
     j = jax.vmap(lambda zb, x: jnp.searchsorted(zb, x, side="right"))(
         z_bot.reshape(-1, nlev), sl.reshape(-1, nlev)).reshape(sl.shape)
     j = jnp.minimum(j, nlev - 1)
-    sl_safe = jnp.where(sl > 0.0, sl, 1.0)  # dry columns: forward value unused
+    wet = sl > 0.0
+    sl_safe = jnp.where(wet, sl, 1.0)
 
     def sl_mean(q):
         cum_top = jnp.cumsum(q * dz, axis=-1) - q * dz
         part = (jnp.take_along_axis(cum_top, j, axis=-1)
                 + jnp.take_along_axis(q, j, axis=-1)
                 * (sl - jnp.take_along_axis(z_top, j, axis=-1)))
-        return part / sl_safe
+        # Dry column (zero thickness): reference = top cell, so delta = 0 and no
+        # zero salinity reaches a sqrt(S) EOS.
+        return jnp.where(wet, part / sl_safe, q[..., :1])
 
     S_eos = eos_salinity(S, eos_fn)
     p_top = rho_0_ref * g * z_top
@@ -394,7 +398,8 @@ def _boundary_layer_depth(
 
     ``bld_structure="legacy"``: sigmoid-weighted average of cell-centre depths
     around the Ri_b = Ri_crit crossing (hard limit: centre of the first
-    supercritical cell, no interpolation).  ``"cvmix"``: CVMix first-crossing
+    supercritical cell for one crossing, average of upward-crossing centres for
+    several; never interpolated).  ``"cvmix"``: CVMix first-crossing
     quadratic interpolation, smoothed (``_cvmix_first_crossing_depth``).
 
     Returns shape (...) boundary layer depth [m, positive downward].

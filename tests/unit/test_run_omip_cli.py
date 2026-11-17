@@ -36,6 +36,17 @@ def test_issue484_new_omip_flags_flow_to_config():
     assert cfg.vertical_mixing.kpp.A_bg == 2e-4
 
 
+def test_kpp_bld_structure_flag_flows_to_config():
+    """--kpp-bld-structure selects KPPConfig.bld_structure (default legacy)."""
+    off = build_config_from_args(parse_args(["--grid", "latlon"]))
+    assert off.vertical_mixing.kpp.bld_structure == "legacy"
+    on = build_config_from_args(parse_args(
+        ["--grid", "latlon", "--kpp-bld-structure", "cvmix"]))
+    assert on.vertical_mixing.kpp.bld_structure == "cvmix"
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "latlon", "--kpp-bld-structure", "cvmx"])
+
+
 def test_langmuir_flag_flows_to_config():
     """--langmuir toggles KPPConfig.enable_langmuir (default off)."""
     off = build_config_from_args(parse_args(["--grid", "latlon"]))
