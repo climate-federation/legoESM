@@ -255,8 +255,8 @@ def test_cvmix_mode_batched_and_dry_columns():
 
 
 def test_crossing_continuous_on_supercritical_plateau():
-    """Brackets whose top is already supercritical carry soft weight; their root
-    must not jump when the plateau curvature changes sign (review case)."""
+    """Brackets that only carry soft weight must not jump when the plateau
+    curvature changes sign (review case)."""
     d = jnp.asarray([0.5, 1.5, 2.5, 3.5, 4.5])
     ri = jnp.asarray([0.0, 0.31, 0.31, 0.31, 0.8])
     h0 = float(K._cvmix_first_crossing_depth(ri, d, CFG))
@@ -265,6 +265,35 @@ def test_crossing_continuous_on_supercritical_plateau():
             h1 = float(K._cvmix_first_crossing_depth(ri.at[k].add(e), d, CFG))
             assert abs(h1 - h0) < 1e-6, (k, e, h0, h1)
     check_grads(lambda r: K._cvmix_first_crossing_depth(r, d, CFG), (ri,), order=1, modes=["rev"])
+
+
+@pytest.mark.parametrize("f0,fH,m", [(0.0, 0.1, -1.0),    # top at Ri_c, dipping slope
+                                     (-0.1, 0.0, 1.0),    # bottom at Ri_c, convex
+                                     (0.0, 0.0, 0.0),
+                                     (0.2, -0.2, 0.0)])   # downward bracket, m sign flip
+def test_bracket_offset_continuous_at_review_seams(f0, fH, m):
+    """Offsets on both sides of each seam reviewers found agree to O(perturbation)."""
+    H = jnp.asarray(1.0)
+    base = float(K._cvmix_bracket_offset(jnp.asarray(f0), jnp.asarray(fH), jnp.asarray(m), H,
+                                         CFG.crossing_sharpness))
+    for df0, dfH, dm in ((1e-9, 0, 0), (-1e-9, 0, 0), (0, 1e-9, 0), (0, -1e-9, 0),
+                         (0, 0, 1e-9), (0, 0, -1e-9)):
+        x = float(K._cvmix_bracket_offset(jnp.asarray(f0 + df0), jnp.asarray(fH + dfH),
+                                          jnp.asarray(m + dm), H, CFG.crossing_sharpness))
+        assert abs(x - base) < 1e-6, (f0, fH, m, df0, dfH, dm, base, x)
+
+
+def test_bracket_offset_continuous_random():
+    """Random brackets: a 1e-9 perturbation of any input moves the offset < 1e-6."""
+    rng = np.random.default_rng(1)
+    f0, fH, m = (jnp.asarray(rng.uniform(-0.5, 0.5, 4000)) for _ in range(3))
+    H = jnp.asarray(rng.uniform(0.5, 10.0, 4000))
+    off = lambda *v: np.asarray(K._cvmix_bracket_offset(*v, H, CFG.crossing_sharpness))
+    x0 = off(f0, fH, m)
+    for v in ((f0 + 1e-9, fH, m), (f0, fH + 1e-9, m), (f0, fH, m + 1e-9)):
+        assert np.max(np.abs(off(*v) - x0)) < 1e-6
+    g = jax.grad(lambda a: jnp.sum(K._cvmix_bracket_offset(a, fH, m, H, CFG.crossing_sharpness)))(f0)
+    assert bool(jnp.all(jnp.isfinite(g)))
 
 
 # CVMix cvmix_coeffs_kpp nonlocal term (C_s * G(sigma), CVMix C_s = MOM6 CS2
