@@ -112,6 +112,8 @@ def main(argv=None) -> int:
     ap.add_argument("--warm-rain", default="kk2000",
                     help="morrison_warm_rain_scheme (morrison only)")
     ap.add_argument("--land-update-s", type=float, default=900.0)
+    ap.add_argument("--convection", default="none",
+                    help="convection scheme; 'none' is the gate run")
     ap.add_argument("--trace", action="store_true",
                     help="print the land row per exchange")
     ap.add_argument("--json", default=None)
@@ -148,7 +150,7 @@ def main(argv=None) -> int:
         dycore=DycoreConfig(discretization="mpas", dt=lp.DT),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=0),
         days=args.days, dataset="analytical", radiation="rrtmgp",
-        convection="none", turbulence="louis", microphysics=args.micro,
+        convection=args.convection, turbulence="louis", microphysics=args.micro,
         precision="fp64", land_mask_path="synthetic.nc",
         use_multilayer_land=True, multilayer_n_layers=4,
         multilayer_soil_depth=2.0, land_beta_soil=True,
@@ -179,6 +181,7 @@ def main(argv=None) -> int:
              g=constants.g, rho_water=constants.rho_water,
              rho_ice=constants.rho_ice)
     print("CONFIG", json.dumps(dict(days=args.days, micro=args.micro,
+                                    convection=args.convection,
                                     land_update_s=args.land_update_s,
                                     extra=extra, ncells=n, window=win,
                                     dt=lp.DT, f_lake_max=float(f_lake.max()),
@@ -195,6 +198,12 @@ def main(argv=None) -> int:
     if land0.snow_bands is not None or land0.ice_bands is not None \
             or land0.canopy_state is not None:
         raise SystemExit("land store not covered by this probe")
+
+    def species_totals():
+        dp = _np(atm.sigma.layer_thickness_dp(atm.state.p_s.data)).reshape(n, -1)
+        return {s: float(np.sum(np.sum(_np(atm.current_tracer(s)).reshape(n, -1)
+                                       * dp, axis=-1) / constants.g * area))
+                for s in carried}
 
     def arrays():
         p_s = atm.state.p_s.data
@@ -281,12 +290,14 @@ def main(argv=None) -> int:
 
     a0 = arrays()
     s0 = stores(a0, k)
+    sp0 = species_totals()
     trace = dict(W=s0["W_land"], E=0.0, P=0.0, R=0.0)
     pend0 = (I(prev["H"].evap) * win
              + I(prev["O"].ice_lake_freshwater_flux) * win)
     status = d.run(segment_callback=sample)
     a1 = arrays()
     s1 = stores(a1, k)
+    sp1 = species_totals()
     # pending = final minus initial in-flight water (initial is 0 by the
     # window-0 rule; printed, and subtracted, so the row never assumes it)
     F["pend_H"] = I(prev["H"].evap) * win
@@ -340,6 +351,7 @@ def main(argv=None) -> int:
     out = dict(status=status, steps=n_steps[0], exchanges=n_ex[0],
                stores0=s0, stores1=s1, fluxes=F, rows=rows,
                null=null, inject_rel_err=ctrl,
+               species0=sp0, species1=sp1,
                rel={r: rows[r] / (scale_e if r == "slab_heat" else scale_w)
                     for r in ("precip_split", "land_water", "slab_heat",
                               "atm_water", "ice_water", "system_water")})
@@ -351,6 +363,8 @@ def main(argv=None) -> int:
         print(f"ROW {r:14s} abs={rows[r]: .6e} rel={v: .3e}")
     print(f"ATTRIB land_water - boot_excess = "
           f"{rows['land_water'] - F['boot_excess']: .6e} kg")
+    for sp in carried:
+        print(f"SPECIES {sp:4s} {sp0[sp]: .9e} -> {sp1[sp]: .9e}")
     print("NULL", {r: v for r, v in null.items()})
     print("INJECT rel_err", ctrl)
     if args.json:
