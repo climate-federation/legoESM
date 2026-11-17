@@ -48,6 +48,12 @@ All notable changes to legoESM. Format roughly follows
 
 ### Fixed
 
+- **Coupled surface solar geometry with a daily cycle.** Surface
+  `cos_zenith` now uses the host solar formula at the coupling-segment midpoint
+  in both surface-ownership routes, floored at zero at night. The daily-mean
+  branch when `diurnal_cycle=False` and the segment-mean radiation fluxes are
+  unchanged.
+
 - **Hines gravity-wave drag no longer launches at the surface.** The launch
   level now defaults to 700 hPa and must lie in 300–900 hPa; the surface-launch
   path is removed (a surface-launched wave broke in the boundary layer and

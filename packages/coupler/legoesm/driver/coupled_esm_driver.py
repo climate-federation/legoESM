@@ -2689,9 +2689,7 @@ class CoupledESMDriver:
                 f"atm_owns_surface: segment {dt_segment} s != coupling_dt "
                 f"{win} s; the atmosphere's exports are the means of ONE "
                 "coupling window.")
-        atm_forcing = (self._build_atm_forcing(day, segment_seconds=dt_segment)
-                       if self.atm_config.diurnal_cycle
-                       else self._build_atm_forcing(day))
+        atm_forcing = self._build_atm_forcing(day, segment_seconds=dt_segment)
         self._last_atm_precip = atm_forcing.precip_total
         q_flux_now = None
         if getattr(self, "_qflux_forcing", None) is not None:
@@ -2732,9 +2730,7 @@ class CoupledESMDriver:
 
         from legoesm.coupler.grid_remap import remap_field, remap_surface_fields
 
-        atm_forcing = (self._build_atm_forcing(day, segment_seconds=dt_segment)
-                       if self.atm_config.diurnal_cycle
-                       else self._build_atm_forcing(day))
+        atm_forcing = self._build_atm_forcing(day, segment_seconds=dt_segment)
         # F2 (C1) tripwire: stash the precip RATE the coupler is about to
         # deliver so the segment-boundary moisture-budget residual can compare
         # it against the atmosphere's OWN column-water-vapour drain (an

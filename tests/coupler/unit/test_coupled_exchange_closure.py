@@ -233,7 +233,7 @@ def _hook_stub(shape, n_sub, handback=True):
                                   coupling_dt=3600.0),
         _atm=atm, _grid_remapper=ident, _sfc_state=None, _tile_config=None,
         _last_sfc_response=None, _sfc_flux_handback=None,
-        _build_atm_forcing=lambda day: types.SimpleNamespace(precip_total=z),
+        _build_atm_forcing=lambda day, *, segment_seconds: types.SimpleNamespace(precip_total=z),
         _step_ocean=lambda *a, **k: None,
         _ocean_surface_KuvC=lambda: (z, z, z),
         _step_surface=step_surface,
