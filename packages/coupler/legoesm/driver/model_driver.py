@@ -5169,6 +5169,24 @@ class ModelDriver:
             logger.warning(
                 "  Land tile: IC has no q_v tracer; multilayer soil seeded at "
                 "land_soil_moisture_init_frac*theta_sat (aridity-aware skipped).")
+        # The Richards solve clips theta up to its dry floor and a column at the
+        # floor has nothing to repay it with, so a seed below the floor would
+        # create that water on the first solve.  Start at the floor instead,
+        # read from the hydraulics the solver itself uses.
+        from legoesm.land.richards import dry_floor
+        from legoesm.land.soil_grid import make_soil_grid
+        _theta_floor = jnp.asarray(dry_floor(cfg.hydraulics)[1]).astype(
+            storage_dtype)
+        _seed = theta_init
+        theta_init = jnp.maximum(_seed, _theta_floor)
+        _lift = (_np.asarray(theta_init - _seed, dtype=_np.float64)
+                 * float(_np.sum(make_soil_grid(cfg.soil_grid).dz))
+                 * constants.rho_water)
+        logger.info(
+            "  Land tile: cold-start soil seed lifted to the Richards dry floor "
+            "in %d of %d columns (max %.3g, column-sum %.6g kg/m2)",
+            int(_np.count_nonzero(_lift > 0)), ncol, float(_np.max(_lift)),
+            float(_np.sum(_lift)))
         # Canonical cold-start template — always built so the spun-up land-IC
         # path (below) has the correct pytree STRUCTURE to graft onto (the
         # restart round-trips only the core prognostic fields; the optional

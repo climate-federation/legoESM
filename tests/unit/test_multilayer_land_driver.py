@@ -1396,3 +1396,95 @@ def test_multilayer_land_off_the_column_loop_needs_ml_pipeline():
     # the opt-in covers land only: CAM6 clouds were never wired on the pipeline
     assert "cam6_clubb' is wired on the MPAS lane only" in _strict_errors(
         ExperimentConfig(ml_pipeline=True, cloud_scheme="cam6_clubb", **pipe))
+
+
+def _dry_soil_map(path, lat_deg, lon_deg, *, vg_air_entry_m):
+    """The uniform-loam map with wilting point / field capacity just above the
+    residual, so the aridity seed lands below the Richards dry floor."""
+    m = _fake_surface_map(path, lat_deg, lon_deg, vg_air_entry_m=vg_air_entry_m)
+    o = jnp.ones_like(m["theta_wp"])
+    return dict(m, theta_wp=0.051 * o, theta_fc=0.052 * o)
+
+
+def _floor_off(monkeypatch):
+    """The driver's seed lift disabled: the floor it reads becomes -1."""
+    import legoesm.land.richards as rich
+    real = rich.dry_floor
+    monkeypatch.setattr(rich, "dry_floor", lambda h: (real(h)[0], -1.0))
+
+
+def test_cold_start_seed_below_dry_floor_creates_no_water(monkeypatch, tmp_path):
+    """A cold-start seed below the Richards dry floor starts AT the floor, so
+    the first solve creates no water (it used to lift the column for free)."""
+    import legoesm.land.clm_surface_map as clm
+    from legoesm.land.richards import dry_floor, solve_richards
+    from legoesm.land.soil_grid import make_soil_grid
+
+    _patch_land_loaders(monkeypatch)
+    monkeypatch.setattr(clm, "load_clm_surface", _dry_soil_map)
+    drv = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    drv.setup()
+    cfg = drv.physics.land_ml_cfg
+    st = drv._land_ml_state
+    floor = np.asarray(dry_floor(cfg.hydraulics)[1])
+    assert float(np.max(0.052 - floor)) < 0.0     # the seed IS below the floor
+    theta = np.asarray(st.theta_soil)
+    # storage dtype may be fp32: equal to the floor to its rounding
+    np.testing.assert_allclose(theta, np.broadcast_to(floor, theta.shape),
+                               rtol=1e-6)
+
+    ncol, nl = theta.shape
+    out = solve_richards(
+        st.psi_soil, st.theta_soil, make_soil_grid(cfg.soil_grid),
+        cfg.hydraulics, cfg.richards, jnp.zeros(ncol), jnp.zeros((ncol, nl)),
+        600.0, surface_water=st.surface_water)
+    # without the lift the column gains (floor - seed) x 2.5 m > 1e-2 m here
+    assert float(np.max(np.abs(np.asarray(out.water_created)))) < 1e-7
+
+
+def test_cold_start_seed_above_floor_is_bitwise_unchanged(monkeypatch, tmp_path):
+    from legoesm.land.richards import dry_floor
+
+    _patch_land_loaders(monkeypatch)
+    on = ModelDriver(_small_cfg(), output_dir=tmp_path / "on")
+    on.setup()
+    floor = np.asarray(dry_floor(on.physics.land_ml_cfg.hydraulics)[1])
+    assert np.all(np.asarray(on._land_ml_state.theta_soil) > floor)
+    _floor_off(monkeypatch)
+    off = ModelDriver(_small_cfg(), output_dir=tmp_path / "off")
+    off.setup()
+    for name in ("theta_soil", "psi_soil", "T_soil"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(on._land_ml_state, name)),
+            np.asarray(getattr(off._land_ml_state, name)), err_msg=name)
+
+
+def test_land_ic_file_start_is_bitwise_unchanged_by_the_floor_lift(
+        monkeypatch, tmp_path):
+    """A run that loads a land start file never sees the cold-start lift,
+    even from a dry-soil map whose seed would be lifted."""
+    import legoesm.land.clm_surface_map as clm
+    from legoesm.land.restart import save_land_restart
+
+    _patch_land_loaders(monkeypatch)
+    monkeypatch.setattr(clm, "load_clm_surface", _dry_soil_map)
+    src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    spun = src._land_ml_state._replace(
+        T_soil=jnp.asarray(np.asarray(src._land_ml_state.T_soil) + 3.0))
+    ic = tmp_path / "land_ic.npz"
+    save_land_restart(ic, spun, land_mode="multilayer",
+                      t_end_s=365 * 86400.0, n_steps_completed=1, metadata={},
+                      soil_grid=src.physics.land_ml_cfg.soil_grid,
+                      soil_hydraulics=_run_hydraulics_stamp(src),
+                      hydraulics=src.physics.land_ml_cfg.hydraulics)
+    cfg = _small_cfg()._replace(land_ic_path=str(ic))
+    on = ModelDriver(cfg, output_dir=tmp_path / "on")
+    on.setup()
+    _floor_off(monkeypatch)
+    off = ModelDriver(cfg, output_dir=tmp_path / "off")
+    off.setup()
+    for name in ("theta_soil", "psi_soil", "T_soil", "snow_depth"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(on._land_ml_state, name)),
+            np.asarray(getattr(off._land_ml_state, name)), err_msg=name)
