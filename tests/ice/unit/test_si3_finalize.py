@@ -19,7 +19,12 @@ from legoesm.ice.si3_finalize import (
     si3_o15_step,
     si3_o16_step,
 )
-from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig, SI3State
+from legoesm.ice.si3_orca2_state import (
+    SI3ORCA2StateConfig,
+    SI3State,
+    fortran_sum_categories,
+    si3_lbc_lnk_orca2,
+)
 from legoesm.ice.si3_surface import SI3SurfaceConfig
 
 
@@ -470,14 +475,16 @@ def test_step_sea_ice_returns_the_o15_corrected_state() -> None:
     np.testing.assert_array_equal(np.asarray(new_state.szv_i)[owned], np.asarray(corrected.szv_i)[owned])
 
 
-def test_step_sea_ice_runs_icethd_age_increment_and_state_lbc_after_ice_cor() -> None:
+def test_step_sea_ice_runs_complete_icethd_tail_after_ice_cor() -> None:
     cfg = _config(nn_hls=1)
     shape, owned_shape = (6, 6), (4, 4)
     owned = (slice(1, -1), slice(1, -1))
     state0 = SI3State.zeros(*shape, cfg)
     a = jnp.full((*shape, 1), -1.0, dtype=jnp.float64)
     a = a.at[owned].set(0.25)
+    a = a.at[2:4, 2:4, :].set(0.0)
     v = jnp.zeros((*shape, 1), dtype=jnp.float64).at[owned].set(0.125)
+    v = v.at[2:4, 2:4, :].set(0.0)
     oa = jnp.full((*shape, 1), -999.0, dtype=jnp.float64)
     oa_values = jnp.arange(16.0, dtype=jnp.float64).reshape(*owned_shape, 1) + 10.0
     oa = oa.at[owned].set(oa_values)
@@ -486,9 +493,20 @@ def test_step_sea_ice_runs_icethd_age_increment_and_state_lbc_after_ice_cor() ->
         v_i=v,
         oa_i=oa,
         szv_i=jnp.zeros((*shape, 1, 1), dtype=jnp.float64),
+        u_ice=jnp.arange(36.0, dtype=jnp.float64).reshape(shape) + 1.0,
+        v_ice=jnp.arange(36.0, dtype=jnp.float64).reshape(shape) + 101.0,
         equivalent=state0.equivalent._replace(h_i=jnp.where(a > 0.0, v / a, 0.0), a_i=a),
         aggregated=state0.aggregated._replace(at_i=a[..., 0], vt_i=v[..., 0]),
     )
+    refreshed_names = (
+        "a_i", "v_i", "v_s", "sv_i", "oa_i", "t_su",
+        "a_ip", "v_ip", "v_il", "e_i", "e_s", "szv_i",
+    )
+    poisoned = {}
+    for index, name in enumerate(refreshed_names):
+        field = getattr(state0, name)
+        poisoned[name] = jnp.full_like(field, -1000.0 - index).at[owned].set(field[owned])
+    state0 = state0._replace(**poisoned)
     z = jnp.zeros(shape, dtype=jnp.float64)
     stress = SI3StressInputs(
         uu_kbb=z,
@@ -525,7 +543,7 @@ def test_step_sea_ice_runs_icethd_age_increment_and_state_lbc_after_ice_cor() ->
         surface_config=_surface_config(nn_hls=1),
         ln_drgice_imp=False,
     )
-    _, response = sea_ice_module.step_sea_ice(
+    new_state, response = sea_ice_module.step_sea_ice(
         state0,
         forcing,
         jnp.zeros(owned_shape),
@@ -545,18 +563,36 @@ def test_step_sea_ice_runs_icethd_age_increment_and_state_lbc_after_ice_cor() ->
         config=cfg,
     ).state
     corrected = response.correction.state
-    expected_owned_age = np.asarray(ice_cor.oa_i[owned]) + np.asarray(ice_cor.a_i[owned]) * cfg.rDt_ice
-    # The full north-fold refresh then overwrites full-array [4, 4] from [2, 4].
-    expected_owned_age[-1, -1] = expected_owned_age[1, -1]
-    np.testing.assert_array_equal(np.asarray(corrected.oa_i[owned]), expected_owned_age)
+    expected_age = ice_cor.oa_i.at[owned].set(
+        ice_cor.oa_i[owned] + ice_cor.a_i[owned] * cfg.rDt_ice
+    )
+    for name in refreshed_names:
+        source = expected_age if name == "oa_i" else getattr(ice_cor, name)
+        expected = si3_lbc_lnk_orca2(
+            source, "T", 1.0, nn_hls=cfg.nn_hls, ldfull=True
+        )
+        np.testing.assert_array_equal(np.asarray(getattr(corrected, name)), np.asarray(expected))
+        np.testing.assert_array_equal(np.asarray(getattr(new_state, name)), np.asarray(expected))
+        assert not np.array_equal(np.asarray(expected), np.asarray(source)), name
 
-    # T-point cyclic seam, closed south, north halo, and full pivot row.
-    np.testing.assert_array_equal(corrected.oa_i[:, 0], 0.0)
-    np.testing.assert_array_equal(corrected.oa_i[0, 2], corrected.oa_i[4, 2])
-    np.testing.assert_array_equal(corrected.oa_i[5, 2], corrected.oa_i[1, 2])
-    np.testing.assert_array_equal(corrected.oa_i[3, 5], corrected.oa_i[3, 3])
-    np.testing.assert_array_equal(corrected.oa_i[4, 4], corrected.oa_i[2, 4])
-    assert not np.any(np.asarray(corrected.oa_i) == -999.0)
+    expected_at_i = fortran_sum_categories(corrected.a_i, axis=-1)
+    np.testing.assert_array_equal(np.asarray(corrected.aggregated.at_i), np.asarray(expected_at_i))
+    np.testing.assert_array_equal(np.asarray(new_state.aggregated.at_i), np.asarray(expected_at_i))
+
+    expected_u = ice_cor.u_ice.at[2, 2].set(0.0).at[2, 3].set(0.0)
+    expected_v = ice_cor.v_ice.at[2, 2].set(0.0).at[3, 2].set(0.0)
+    expected_u = si3_lbc_lnk_orca2(
+        expected_u, "U", -1.0, nn_hls=cfg.nn_hls, ldfull=True
+    )
+    expected_v = si3_lbc_lnk_orca2(
+        expected_v, "V", -1.0, nn_hls=cfg.nn_hls, ldfull=True
+    )
+    np.testing.assert_array_equal(np.asarray(corrected.u_ice), np.asarray(expected_u))
+    np.testing.assert_array_equal(np.asarray(corrected.v_ice), np.asarray(expected_v))
+    np.testing.assert_array_equal(np.asarray(new_state.u_ice), np.asarray(expected_u))
+    np.testing.assert_array_equal(np.asarray(new_state.v_ice), np.asarray(expected_v))
+    assert expected_u[2, 2] == expected_u[2, 3] == 0.0
+    assert expected_v[2, 2] == expected_v[3, 2] == 0.0
 
 
 @pytest.mark.parametrize("ln_drgice_imp", [False, True])
