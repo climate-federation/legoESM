@@ -113,15 +113,31 @@ def test_crossing_gradient_finite_every_case(name):
 
 @pytest.mark.parametrize("ri,dtype", [([0.0, 20.3, 20.3, -19.7], jnp.float64),
                                       ([0.0, 4.3, 4.3, -3.7], jnp.float32),
-                                      ([0.0, 60.0, 60.0, -60.0], jnp.float64)])
+                                      ([0.0, 60.0, 60.0, -60.0], jnp.float64),
+                                      ([19.0, -19.0, 0.0], jnp.float64),
+                                      ([2.2, -2.2, 0.0], jnp.float32)])
 def test_crossing_gradient_finite_extreme_ri(ri, dtype):
     """Large |Ri - Ri_c| (review case): clamped end values ~1e-175 (fp64) or
     clamp underflow must not give NaN adjoints, eager or jit."""
-    d = jnp.asarray([0.5, 1.5, 2.5, 3.5], dtype=dtype)
+    d = jnp.asarray([0.5, 1.5, 2.5, 3.5][: len(ri)], dtype=dtype)
     f = lambda r: K._cvmix_first_crossing_depth(r, d, CFG)
     r = jnp.asarray(ri, dtype=dtype)
     for g in (jax.grad(f)(r), jax.jit(jax.grad(f))(r)):
         assert bool(jnp.all(jnp.isfinite(g))), g
+
+
+def test_bracket_offset_saturated_negative_slope():
+    """f0 >> 0 with m < 0 (q0 clamp underflows): offset tends to the second
+    root -m H / (qH - m H), not 0 (round-5 review)."""
+    f = lambda f0: K._cvmix_bracket_offset(f0, 0.0, -40.0, 1.0, 20.0)
+    lim = 40.0 / (np.log(2.0) / 20.0 + 40.0)
+    for f0 in (30.0, 40.0, 80.0):
+        assert abs(float(f(f0)) - lim) < 1e-9, f0
+        assert bool(jnp.isfinite(jax.grad(f)(f0)))
+    # Both clamps underflow, m = 0 (k = 1 bracket): still a finite root.
+    g = lambda f0: K._cvmix_bracket_offset(f0, -f0, 0.0, 1.0, 20.0)
+    assert 0.0 <= float(g(80.0)) <= 1.0
+    assert bool(jnp.isfinite(jax.grad(g)(80.0)))
 
 
 def test_bulk_richardson_matches_cvmix():
