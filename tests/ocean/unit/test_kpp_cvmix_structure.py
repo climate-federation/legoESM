@@ -111,6 +111,19 @@ def test_crossing_gradient_finite_every_case(name):
     assert bool(jnp.all(jnp.isfinite(g))), name
 
 
+@pytest.mark.parametrize("ri,dtype", [([0.0, 20.3, 20.3, -19.7], jnp.float64),
+                                      ([0.0, 4.3, 4.3, -3.7], jnp.float32),
+                                      ([0.0, 60.0, 60.0, -60.0], jnp.float64)])
+def test_crossing_gradient_finite_extreme_ri(ri, dtype):
+    """Large |Ri - Ri_c| (review case): clamped end values ~1e-175 (fp64) or
+    clamp underflow must not give NaN adjoints, eager or jit."""
+    d = jnp.asarray([0.5, 1.5, 2.5, 3.5], dtype=dtype)
+    f = lambda r: K._cvmix_first_crossing_depth(r, d, CFG)
+    r = jnp.asarray(ri, dtype=dtype)
+    for g in (jax.grad(f)(r), jax.jit(jax.grad(f))(r)):
+        assert bool(jnp.all(jnp.isfinite(g))), g
+
+
 def test_bulk_richardson_matches_cvmix():
     """CVMix compute_bulk_Richardson (N=0 -> V_t^2 = minVtsqr 1e-10)."""
     zc = np.array([-0.5, -1.5, -2.5])

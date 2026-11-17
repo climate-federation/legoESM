@@ -341,21 +341,33 @@ def _cvmix_bracket_offset(f0, fH, m, H, beta):
     then has exactly one root in (0, H) and it is simple, so the offset is
     smooth in (f0, fH, m) (a root-selection rule on the raw quadratic has fold
     seams).  At the hard limit the clamps are exact for the bracket CVMix
-    selects (f0 <= 0 < fH), giving CVMix's root.  When a clamp underflows to 0
-    the bracket's sigmoid weight underflows with it.
+    selects (f0 <= 0 < fH) whenever |f0|, |fH| >> ln2/beta (7e-13 at
+    beta = 1e12; closer to Ri_c the softplus offset remains), giving CVMix's
+    root.  When a clamp underflows to 0 the bracket's sigmoid weight underflows
+    with it and the limit offset (0 or H) is used.
     """
     q0 = -jax.nn.softplus(-beta * f0) / beta
     qH = jax.nn.softplus(beta * fH) / beta
+    # Clamp underflow (|beta*f| > ~745): the bracket's weight underflows too;
+    # take the limit offset with safe operands so no adjoint is NaN.
+    degen = (q0 == 0.0) | (qH == 0.0) | (H <= 0.0)
     H_safe = jnp.where(H > 0.0, H, 1.0)
-    a = (qH - q0 - m * H) / H_safe ** 2
-    disc = m * m - 4.0 * a * q0
+    # Normalise to O(1) coefficients: tiny clamped end values (~1e-175 at
+    # |f| ~ 20) would otherwise underflow the discriminant products.
+    scale = jnp.maximum(qH - q0, jnp.abs(m) * H_safe)
+    scale = jnp.where(degen | (scale <= 0.0), 1.0, scale)
+    Q0 = jnp.where(degen, -1.0, q0 / scale)
+    M = jnp.where(degen, 0.0, m * H_safe / scale)
+    A = jnp.where(degen, 2.0, qH / scale) - Q0 - M      # x in units of H
+    disc = M * M - 4.0 * A * Q0
     # sqrt has an infinite derivative at 0: double-where.
     root_d = jnp.where(disc > 0.0, jnp.sqrt(jnp.where(disc > 0.0, disc, 1.0)), 0.0)
-    # The root is the upward zero: 2 q0 / (-m - sqrt(D)) for m > 0 (no
-    # cancellation), else (-m + sqrt(D)) / (2a) with a > 0 (q0 < 0 < qH, m <= 0).
-    r_pos = 2.0 * q0 / jnp.where(m > 0.0, -m - root_d, -1.0)
-    r_neg = (-m + root_d) / jnp.where(a > 0.0, 2.0 * a, 1.0)
-    return jnp.clip(jnp.where(m > 0.0, r_pos, r_neg), 0.0, H)
+    # The root is the upward zero: 2 Q0 / (-M - sqrt(D)) for M > 0 (no
+    # cancellation), else (-M + sqrt(D)) / (2A) with A > 0 (Q0 < 0 < QH, M <= 0).
+    r_pos = 2.0 * Q0 / jnp.where(M > 0.0, -M - root_d, -1.0)
+    r_neg = (-M + root_d) / jnp.where(A > 0.0, 2.0 * A, 1.0)
+    x = H * jnp.clip(jnp.where(M > 0.0, r_pos, r_neg), 0.0, 1.0)
+    return jnp.where(degen, jnp.where(q0 == 0.0, 0.0, jnp.maximum(H, 0.0)), x)
 
 
 def _cvmix_first_crossing_depth(Ri_b, z_depth, cfg):
