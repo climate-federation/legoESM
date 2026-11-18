@@ -2,15 +2,17 @@
 
 Fixture ``oracle_fixtures/mitgcm_c3f71ac8_caco3.npz`` banks ``CAR_FLUX``
 (``car_flux.F`` compiled from source) and the ``dic_init_fixed.F`` production
-level count ``nlev`` on eight columns: full depth, sea floor at level 9, sea
+level count ``nlev`` on fifteen columns: full depth, sea floor at level 9, sea
 floor inside the production levels, and a partial bottom cell
-(``hFacC = 0.5``), each for two (``zca``, ``zcrit``) pairs.  Driver and votes:
+(``hFacC = 0.5``) below and inside the production levels, each for three (``zca``, ``zcrit``) pairs; ``zcrit = 250 m`` sits exactly on a
+cell centre (the ``>=`` boundary of the ``nlev`` loop).  Driver and votes:
 ``oracle_audit/shelf_npzd_bs_oracle``.
 
 KNOWN DIFFERENCE (pinned per case): the port runs on the 1-D reference
-thickness, so a partial bottom cell dissolves its share over the full cell
-thickness; MITgcm divides by ``drF*hFacC``.  The rate there is ``hFacC`` times
-MITgcm's (0.5 here).
+thickness; MITgcm's only partial cell is the bottom one, where the flux
+arriving from above dissolves over ``drF*hFacC``.  That part of the port's
+rate is ``hFacC`` times MITgcm's (0.5 here); CaCO3 formed in the cell dissolves
+in place in both.
 """
 
 from pathlib import Path
