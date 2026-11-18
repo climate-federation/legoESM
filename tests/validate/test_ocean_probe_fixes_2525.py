@@ -83,3 +83,10 @@ def test_truncated_hourly_window_is_fatal():
     hourly = np.arange(1, 13) * 3600.0 - 1800.0       # only 12 of 24 hours
     with pytest.raises(SystemExit, match="needed to cover"):
         m.records_in_window(hourly, (0.0, 86400.0))
+
+
+def test_single_hourly_record_is_fatal():
+    """codex review round 2: a file holding only the first hour passed."""
+    m = _load("tracer_variance_budget_nemo")
+    with pytest.raises(SystemExit, match="single hourly record"):
+        m.records_in_window(np.array([1800.0]), (0.0, 86400.0))

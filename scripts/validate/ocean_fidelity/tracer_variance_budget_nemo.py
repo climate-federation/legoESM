@@ -87,7 +87,9 @@ def records_in_window(times, bounds):
         raise SystemExit(f"FATAL: no hourly record in daily window ({lo}, {hi}]")
     # The window must be COVERED, not merely touched: a truncated hourly file
     # would otherwise average fewer hours than the daily record (codex).
-    dt = float(np.median(np.diff(t))) if t.size > 1 else hi - lo
+    if t.size < 2:   # one record: no spacing to prove it covers the day
+        raise SystemExit("FATAL: a single hourly record cannot cover a daily window")
+    dt = float(np.median(np.diff(t)))
     need = int(round((hi - lo) / dt))
     if idx.size != need:
         raise SystemExit(f"FATAL: {idx.size} hourly records in daily window "
