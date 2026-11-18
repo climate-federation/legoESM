@@ -278,3 +278,12 @@ def test_polar_filter_keeps_open_face_momentum_and_closed_levels_at_rest():
         assert np.abs(new - old)[rows].max() > 1e-6            # the filter does act there
         assert np.abs(new * (1 - g)).max() == 0.0
         assert np.abs((new - old).sum(1)).max() <= 1e-12 * np.abs(old).sum(1).max()
+
+
+# ---------------------------------------------------------------- configuration
+
+def test_half_configured_walls_are_refused():
+    grid, z, _ = _setup()
+    for half in (grid._replace(face_nlev_v=None), grid._replace(face_nlev_u=None)):
+        with pytest.raises(ValueError, match="face_nlev_u and face_nlev_v"):
+            _model(half, z)

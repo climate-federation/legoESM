@@ -3953,6 +3953,11 @@ class LatLonCGridOceanModel:
                 "implicit vertical friction and the GM/Redi triads build their level "
                 "masks without them (momentum lost into closed levels, tracer flux "
                 "through the wall).")
+        if ((getattr(self.grid, "face_nlev_u", None) is None)
+                != (getattr(self.grid, "face_nlev_v", None) is None)):
+            raise ValueError(
+                "depth-limited face walls need both grid.face_nlev_u and face_nlev_v; "
+                "exactly one is set")
         _gm_init = getattr(self.config, "gm_redi", None)
         if (_gm_init is not None and getattr(_gm_init, "implicit_K33", False)
                 and not getattr(self.config, "implicit_vertical_mixing", False)):

@@ -4628,6 +4628,8 @@ def attach_face_walls(grid, walls, config, *, dz_ref, H_min):
     minimum ocean depth ``H_min`` is closed entirely, as a column that shallow is land:
     a 1 m slot between deep columns ran to 44.7 m/s in two steps."""
     from legoesm.grids.latlon import ensure_geometry
+    if "face_nlev_u" not in walls or "face_nlev_v" not in walls:
+        raise ValueError("face walls need both face_nlev_u and face_nlev_v")
     fu, fv = np.array(walls["face_nlev_u"]), np.array(walls["face_nlev_v"])
     if fu.shape != (grid.n_lat, grid.n_lon + 1) or fv.shape != (grid.n_lat + 1, grid.n_lon):
         raise ValueError(f"face walls shapes {fu.shape}/{fv.shape} do not match the "

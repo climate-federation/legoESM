@@ -29,6 +29,16 @@ def test_attach_validates_and_sets_geometry():
         attach_face_walls(grid, {"face_nlev_u": fu[:, :-1], "face_nlev_v": fv}, cfg, **Z)
 
 
+@pytest.mark.parametrize("missing", ["face_nlev_u", "face_nlev_v"])
+def test_attach_refuses_half_configured_walls(missing):
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    walls = {"face_nlev_u": np.full((4, 7), 3), "face_nlev_v": np.full((5, 6), 3)}
+    del walls[missing]
+    with pytest.raises(ValueError, match="face_nlev_u and face_nlev_v"):
+        attach_face_walls(create_latlon_grid(4, 6), walls, LatLonCGridOceanConfig.from_flat(), **Z)
+
+
 def test_attach_closes_faces_shallower_than_the_minimum_depth():
     """A walled face with less open depth than the run's minimum ocean depth is closed."""
     from legoesm.grids.latlon import create_latlon_grid
