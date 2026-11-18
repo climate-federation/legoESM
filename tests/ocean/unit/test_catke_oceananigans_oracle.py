@@ -6,8 +6,8 @@ oracle_audit/catke_carbonate_oracle) differs by a median 0.3-0.8 % in κc on the
 37 % on the 24 m column.
 
 ``oracle_fixtures/catke_oceananigans_v0_116_1.npz`` holds Oceananigans' own face/centre inputs and
-outputs on six single-column fixtures (free convection, wind, stable heating, entrainment, quiescent,
-24 m column), evaluated with the oracle's κuᶜᶜᶠ/κcᶜᶜᶠ/κeᶜᶜᶠ, dissipation_rate and top TKE flux.
+outputs on seven single-column fixtures (free convection, wind, stable heating, entrainment, quiescent,
+24 m column, and one where the entrainment length binds the tracer diffusivity), evaluated with the oracle's κuᶜᶜᶠ/κcᶜᶜᶠ/κeᶜᶜᶠ, dissipation_rate and top TKE flux.
 The port is fed the oracle's own face N², N²_above, S², depth, height above bottom, H, Jb and
 e_face := (oracle face w★)² (harness glue: Oceananigans carries e at centres and averages w★ to faces).
 
