@@ -79,23 +79,39 @@ DEPARTURES (documented, canaried in the test):
 - ``N_squared_min = 1e-7`` s^-2 is HIGHER than Simmons' suggested floor 1e-8
   (Sec. 5.3.5) — a stronger regularisation of the near-bottom singularity.
   The CVMix code has NO floor and returns K = 0 where N^2 <= 0 (Schmittner
-  Southern Ocean option off); this module
-  floors N^2 instead, so a statically unstable interface gets K = min(
-  Gamma*q*E*F/(rho_0*N_squared_min), K_max) (measured up to K_max = 5e-3 where
-  CVMix gives 0), and, on matched geometry, density and parameters,
-  0 < N^2 < 1e-7 gets a K smaller than or equal to CVMix's (K_CVMix/K_port =
-  N_squared_min/N^2 where neither hits K_max, e.g. 100 at N^2 = 1e-9).
+  Southern Ocean option off); this module floors N^2 for the division and,
+  like CVMix, returns K = 0 where N^2 <= 0 (the ``n2_gate_width`` gate).  On
+  matched geometry, density and parameters, 0 < N^2 < 1e-7 gets a K smaller
+  than or equal to CVMix's (floor: K_CVMix/K_port = N_squared_min/N^2 where
+  neither hits K_max; plus the gate ramp below).
   [measured in the oracle audit, not canaried]
+
+KNOWN DIFFERENCE (RULE 5 smoothing, measured against compiled CVMix on a
+7-level column, test_cfam_smooth_switches.py; the scheme is off in every
+production config):
+- N^2 floor (``n2_floor_width = 1e-9``): differs only for |N^2 - 1e-7| < 5e-10,
+  by up to 2.0e-4 relative (measured at N^2 = 1.003e-7, where the gate is 1,
+  with K far below K_max).
+- K_max cap (``k_max_width = 5e-5``): differs only for |K - K_max| < 2.5e-5,
+  K at most k_max_width/8 = 6.3e-6 below the hard cap (4.5e-4 relative measured).
+- N^2 <= 0 gate (``n2_gate_width = 1e-7``): one-sided, exactly 0 at N^2 <= 0
+  like CVMix; for 0 < N^2 < 1e-7 K is multiplied by smoothstep(N^2/1e-7), so
+  weakly stratified interfaces that CVMix sends to K_max get much less (5.9e-6
+  vs 5e-3 at N^2 = 2e-9; 1.1e-3 vs 5e-3 at 3e-8).
+- All three widths 0 plus N_squared_min = 0 recover compiled CVMix Simmons
+  exactly (pinned at rel 1e-12).
 - A ``K_max`` cap with NO background floor (caller adds background kappa), the
   ``max(H-z, 0)`` clamp (dry levels below the seafloor return F_raw=1 and are
   then zeroed by ``normalize_structure``'s wet mask), and an ``h_decay >= 1e-6``
   floor are AD/robustness guards not in the analytic oracle.
 
-Differentiability: ``differentiable`` is True in the AD sense — JAX returns
-finite selected-branch subgradients everywhere.  The form is NOT everywhere
-smooth: ``jnp.maximum`` (the H-z and N^2 floors), ``jnp.clip`` (the K_max cap),
-and the wet/dry ``jnp.where`` thresholds are kinked; gradients at those
-boundaries are one-sided but finite (checked in the faithfulness test).
+Differentiability (RULE 5): the traced-state switches are C1 by default — the
+N_squared_min floor (``n2_floor_width``), the K_max cap (``k_max_width``) and
+the CVMix zero-K gate at N^2 <= 0 (``n2_gate_width``, one-sided ramp, exactly
+0 at N^2 <= 0).  Widths 0 give the hard forms; with N_squared_min = 0 as well
+the port is compiled CVMix's Simmons scheme.  Still hard: the geometry-only
+``max(H-z, 0)`` clamp and wet/dry ``jnp.where`` masks (static domain, out of
+RULE 5 scope) and a ``max(K, 0)`` guard inactive for E_BT >= 0.
 """
 
 from __future__ import annotations
@@ -104,6 +120,10 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
+
+from legoesm.core.smooth import (
+    smooth_max_c1, smooth_min_c1, smoothstep_cubic, validate_smoothing_width,
+)
 
 from legoesm import constants
 
@@ -153,6 +173,9 @@ __param_spec__ = {
         "scheme_key": "ocean.vm.tidal",
         "excluded": {
             "N_squared_min": "numerics: floor/cap",
+            "n2_floor_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
+            "k_max_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
+            "n2_gate_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
         },
         "params": {
             "Gamma": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
@@ -186,6 +209,13 @@ class TidalMixingConfig(NamedTuple):
     N_squared_min: float = 1.0e-7  # Stratification floor [1/s²] to
                                     # prevent K → ∞ in convective cells.
     rho_0: float = constants.rho_ocean
+    # RULE 5 widths (0 = the hard reference form).  n2_floor_width [s^-2]:
+    # the N_squared_min floor; k_max_width [m^2/s]: the K_max cap;
+    # n2_gate_width [s^-2]: the one-sided ramp to K = 0 at N^2 <= 0 (CVMix).
+    # n2_gate_width = n2_floor_width = N_squared_min = 0 is compiled CVMix.
+    n2_floor_width: float = 1e-9
+    k_max_width: float = 5e-5
+    n2_gate_width: float = 1e-7
     # NOTE: this scheme intentionally has NO background-κ floor.  The
     # caller adds the chosen background κ (constant / KPP / Richardson)
     # on top of the tidal contribution; floors live there so that dry
@@ -375,16 +405,35 @@ def compute_tidal_diffusivity(
     )
     F = normalize_structure(F_raw, h_partial_m)
 
-    N2_safe = jnp.maximum(N_squared, config.N_squared_min)
+    for name in ("n2_floor_width", "k_max_width", "n2_gate_width"):
+        validate_smoothing_width(f"TidalMixingConfig.{name}", getattr(config, name))
+    # smooth_min_c1 dips up to width/8 below min(K, K_max); width <= 2*K_max
+    # keeps K >= 0 for K >= 0.
+    if isinstance(config.K_max, (int, float)) and config.k_max_width > 2.0 * config.K_max:
+        raise ValueError("TidalMixingConfig.k_max_width must be <= 2*K_max "
+                         f"({config.k_max_width!r} > 2*{config.K_max!r})")
+    # RULE 5: C1 floor / cap of widths n2_floor_width / k_max_width (0 = hard).
+    N2_safe = smooth_max_c1(N_squared, config.N_squared_min, config.n2_floor_width)
+    # N_squared_min = 0 with a hard floor (the CVMix limit) can leave N2_safe = 0
+    # where N^2 <= 0; the gate below zeroes K there, so divide by 1 instead.
+    pos = N2_safe > 0.0
+    N2_div = jnp.where(pos, N2_safe, 1.0)
 
     numerator = (
         config.Gamma * config.q_local * E_BT_W_per_m2[..., None] * F
     )
-    K = numerator / (config.rho_0 * N2_safe)
+    K = jnp.where(pos, numerator / (config.rho_0 * N2_div), config.K_max)
     # Cap only (no background floor — the caller adds background κ
     # on top of this contribution).  Zero where E_BT is zero or
     # where ``normalize_structure`` returned zero (dry columns).
-    K = jnp.clip(K, 0.0, config.K_max)
+    K = jnp.maximum(smooth_min_c1(K, config.K_max, config.k_max_width), 0.0)
+    # CVMix gate: K = 0 where N^2 <= 0, via a ONE-sided C1 ramp exactly 0 for
+    # N^2 <= 0 and 1 for N^2 >= n2_gate_width (width 0 = CVMix's N^2 > 0).
+    if config.n2_gate_width == 0:
+        gate = (N_squared > 0.0).astype(K.dtype)
+    else:
+        gate = smoothstep_cubic(N_squared / config.n2_gate_width)
+    K = K * gate
 
     # Force STRUCTURAL zeros to EXACTLY zero via ``where`` (not a multiply):
     # any cell where ``F == 0`` — a dry level (h_partial<=0) OR a degenerate

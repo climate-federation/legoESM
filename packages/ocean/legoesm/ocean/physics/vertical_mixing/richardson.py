@@ -40,10 +40,15 @@ DEPARTURES (documented, canaried in the test):
   Measured against the compiled CVMix (MOM6 submodule fce422195a) on 200 Ri
   values in [-1, 1e3]: max relative error 2.5e-16 for A_v and K_v, default and
   a non-default config (oracle_audit/cvmix_family_oracle, 2026-11-18; not canaried).
+- KNOWN DIFFERENCE (RULE 5): the C1 Ri >= 0 clip (``ri_clip_width = 0.01``)
+  changes A_v/K_v only for |Ri| < 0.005, by up to 1.8 % (9.3e-5 m^2/s) vs
+  compiled CVMix 'PP'; width 0 recovers CVMix exactly (pinned in
+  test_cfam_smooth_switches.py).  Off in every production config.
 - ``cfg.Pr_t`` is a dead no-op (the Ri-dependent Prandtl is built into the
   formula); a non-default value warns rather than silently doing nothing.
-- The unstable branch (Ri < 0) is clipped to Ri = 0 (maximum mixing) upstream in
-  ``richardson_number``.
+- The unstable branch (Ri < 0) is clipped to Ri = 0 (maximum mixing) inside
+  ``_pp81_diffusivities`` by a C1 ``smooth_max_c1`` of width
+  ``cfg.ri_clip_width`` (RULE 5); width 0 is CVMix's hard clip.
 """
 
 from __future__ import annotations
@@ -55,6 +60,7 @@ from legoesm.ocean.eos import (
     compute_buoyancy_frequency,
     compute_buoyancy_frequency_adiabatic,
 )
+from legoesm.core.smooth import smooth_max_c1, validate_smoothing_width
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
 from legoesm.ocean.physics.vertical_mixing._shared import (
     richardson_number,
@@ -113,8 +119,9 @@ def _pp81_diffusivities(Ri, cfg):
         nu (A_v, momentum) = K_0/(1+alpha*Ri)^n [CVMix Eq. 4.4] + A_bg [background]
         kappa (K_v, tracer) = A_v / (1 + alpha*Ri) + K_bg
 
-    ``Ri`` is expected already clipped to >= 0 (the unstable branch is handled
-    by the ``richardson_number`` clip -> maximum mixing at Ri = 0).  The FULL
+    ``Ri`` is the SIGNED gradient Richardson number; the unstable branch is
+    clipped to Ri = 0 (maximum mixing) here by ``smooth_max_c1(Ri, 0,
+    cfg.ri_clip_width)`` (RULE 5; width 0 = CVMix's hard ``Ri > 0`` test).  The FULL
     ``nu`` (including the A_bg background) enters the tracer division, so K_v
     departs from the canonical PP81 total tracer diffusivity (CVMix Aug-2012
     Eq. 4.5 shear ``K_0/(1+alpha*Ri)^(n+1)``, same K_0 numerator, plus the K_bg
@@ -122,6 +129,8 @@ def _pp81_diffusivities(Ri, cfg):
     [m^2/s], both >= 0 and monotonically decreasing with Ri, with an effective
     Prandtl number Pr = A_v/K_v that grows with Ri.
     """
+    validate_smoothing_width("RichardsonVerticalMixingConfig.ri_clip_width", cfg.ri_clip_width)
+    Ri = smooth_max_c1(Ri, 0.0, cfg.ri_clip_width)
     one_plus_aRi = 1.0 + cfg.alpha * Ri
     A_v = cfg.K_0 / one_plus_aRi ** cfg.n + cfg.A_bg              # momentum
     K_v = A_v / one_plus_aRi + cfg.K_bg                            # tracer
@@ -214,10 +223,10 @@ def richardson_vertical_mixing(
     else:
         N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
 
-    # Gradient Richardson number Ri = N^2 / S^2 (#518: shared helper; clip
-    # negative Ri -> max mixing for the unstable branch).
+    # Gradient Richardson number Ri = N^2 / S^2 (#518: shared helper), signed;
+    # _pp81_diffusivities clips Ri < 0 -> max mixing (RULE 5 C1 clip).
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
-    Ri = richardson_number(N2, u, v, dz_actual, eps=eps, clip_negative=True)
+    Ri = richardson_number(N2, u, v, dz_actual, eps=eps, clip_negative=False)
 
     # Pacanowski & Philander (1981); canonical SHEAR terms per CVMix Aug-2012
     # Eqs. 4.4-4.5 (POP settings α = 5, n = 2), backgrounds added separately:
