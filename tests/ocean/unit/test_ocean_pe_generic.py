@@ -32,10 +32,9 @@ TEND_RTOL = 1e-13
 JIT_RTOL = 1e-12
 NO_LATERAL = dict(K_h=0.0, K_bih=0.0)
 # all_on dT/dS shift, core vs model, max|new-old|/max|old| (measured on PBS): the
-# core's lateral diffusion is thickness weighted, the models' is not.
-LATERAL_SHIFT = {("latlon", "dT_dt"): 1.8371864066963238e-07,
-                 ("latlon", "dS_dt"): 7.28375099276871e-08,
-                 ("mpas", "dT_dt"): 5.700068429009425e-08,
+# core's lateral diffusion is thickness weighted, the MPAS model's is not.  The
+# lat-lon model's is (same operator as the core), so it matches to round-off.
+LATERAL_SHIFT = {("mpas", "dT_dt"): 5.700068429009425e-08,
                  ("mpas", "dS_dt"): 2.0672873015807817e-08}
 BUDGET_RTOL = 1e-13
 DT = 300.0
@@ -156,7 +155,7 @@ def _check_oracle(new, old, fields, cname, kind):
         for f in ("dT_dt", "dS_dt"):
             assert float(jnp.max(jnp.abs(getattr(old, f).data))) > 0.0, f
     for f in fields:
-        if cname == "all_on" and f in ("dT_dt", "dS_dt"):
+        if cname == "all_on" and (kind, f) in LATERAL_SHIFT:
             a, b = np.asarray(getattr(new, f).data), np.asarray(getattr(old, f).data)
             shift = np.max(np.abs(a - b)) / np.max(np.abs(b))
             np.testing.assert_allclose(shift, LATERAL_SHIFT[kind, f], rtol=1e-6)

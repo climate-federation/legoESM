@@ -132,6 +132,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     viscous_tendency_cgrid,
     leith_biharmonic_tendency_cgrid,
     compute_vertex_mask,
+    compute_face_masks,
     compute_face_masks_3d,
     wall_faces,
     per_level_viscosity_masks,
@@ -2451,7 +2452,11 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord, h_k, face_masks)
 
     _gops = latlon_sw_grid_operators(grid)
     _hf = (_rep(min_cell_to_uface(h_k, grid)), _rep(min_cell_to_vface(h_k, grid)))
-    _fm = tuple(_rep(m) for m in face_masks)
+    # A face next to land is closed whatever the level masks say (land columns can
+    # be level-active): otherwise tracer drains into land cells, whose tendency is
+    # masked, and heat and salt are lost.
+    _fm = tuple(_rep(m) * m2[..., jnp.newaxis]
+                for m, m2 in zip(face_masks, compute_face_masks(mask, grid)))
     _h, _cm = _rep(h_k), mask[..., jnp.newaxis]
 
     def _lap(q):

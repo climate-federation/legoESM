@@ -151,7 +151,7 @@ def test_two_basin_deep_wall_blocks_flow_and_conserves_volume():
 
 # ---------------------------------------------------------------- lateral tracer mixing
 
-def _lateral_tendencies(walls, T, S, H_east=3000.0, eta=None, **flat):
+def _lateral_tendencies(walls, T, S, H_east=3000.0, eta=None, land=None, **flat):
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_tracer_tendencies
     from legoesm.ocean.state import LatLonCGridOceanConfig
     from legoesm.ocean.vertical import compute_layer_thickness
@@ -159,7 +159,8 @@ def _lateral_tendencies(walls, T, S, H_east=3000.0, eta=None, **flat):
     cfg = LatLonCGridOceanConfig.from_flat(implicit_vertical_mixing=True, **flat)
     eta = s.eta.data if eta is None else jnp.asarray(eta)
     h_k = compute_layer_thickness(eta, s.H_bathy.data, z)
-    dT, dS = _bc_tracer_tendencies(jnp.asarray(T), jnp.asarray(S), cfg, grid, s.land_mask.data,
+    mask = s.land_mask.data if land is None else s.land_mask.data.at[land].set(0.0)
+    dT, dS = _bc_tracer_tendencies(jnp.asarray(T), jnp.asarray(S), cfg, grid, mask,
                                    jnp.ones((N_LAT, N_LON)), z, h_k,
                                    compute_face_masks_3d(z.is_active, grid))
     return np.asarray(dT), np.asarray(dS), np.asarray(grid.area_T)[..., None] * np.asarray(h_k)
@@ -193,13 +194,17 @@ def test_lateral_tracer_diffusion_does_not_cross_walls(coef):
                                   dict(K_h=1.0e3, K_bih=1.0e13)])
 def test_lateral_tracer_diffusion_conserves_heat_and_salt(coef, walls):
     """Budget: sum(area * h * dT/dt) = 0 and the same for S (in - out - d(storage) = 0),
-    with unequal partial bottom cells, a tilted sea surface and random tracers.
+    with unequal partial bottom cells, a tilted sea surface, a land cell and random tracers.
     Bound: 1e-12 of the gross sum(area * h * |tendency|)."""
     rng = np.random.default_rng(0)
     T = 10.0 + rng.standard_normal((N_LAT, N_LON, NLEV))
     S = 35.0 + 0.5 * rng.standard_normal((N_LAT, N_LON, NLEV))
     eta = 0.5 * rng.standard_normal((N_LAT, N_LON))
-    dT, dS, vol = _lateral_tendencies(walls, T, S, H_east=2600.0, eta=eta, **coef)
+    land = (2, 6)                    # a land cell whose column is still level-active
+    T[land], S[land] = 0.0, 0.0
+    dT, dS, vol = _lateral_tendencies(walls, T, S, H_east=2600.0, eta=eta, land=land, **coef)
+    assert np.abs(dT[land]).max() == 0.0 and np.abs(dS[land]).max() == 0.0
+    vol[land] = 0.0
     for d in (dT, dS):
         gross = np.sum(vol * np.abs(d))
         assert gross > 0.0
