@@ -93,6 +93,17 @@ def test_spe_deposition_and_volume_match_nemo(j):
     assert _rel(eta, FIX["spe_nemo_eta"][j]) <= TOL
 
 
+def test_spe_refreezing_gate_is_a_known_difference():
+    """NEMO applies a negative sornfisf; the port zeroes it (dormant on eORCA1)."""
+    j = 0
+    zmin, zmax, fwf = FIX["spe_zmin_zmax_fwf"][j]
+    nl = FIX["spe_E3"].size
+    dT, dS, eta = isf.isf_prescribed_melt_tendencies(
+        jnp.asarray(FIX["spe_SAL"]), jnp.asarray(FIX["spe_E3"]), jnp.ones(nl), jnp.asarray(-fwf),
+        jnp.asarray(zmin), jnp.asarray(zmax), rho_0=RHO0, c_sw=RCP, L_fus=LFUS)
+    assert not np.any(np.asarray(dT)) and not np.any(np.asarray(dS)) and float(eta) == 0.0
+
+
 @pytest.mark.parametrize("j", range(len(FIX["spe_names"])))
 def test_spe_tendency_gap_pinned(j):
     dT, _, _ = _spe(j)

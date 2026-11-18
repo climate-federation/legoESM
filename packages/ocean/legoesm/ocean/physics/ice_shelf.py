@@ -231,9 +231,24 @@ def isf_prescribed_melt_tendencies(
       point is ~0.14 K colder than the TEOS-10 form used here, so the
       temperature tendency differs by ~0.16 % per case (pinned).  Matching
       5.0.1 would need the slipped formula; not done.
-    * Salinity: NEMO adds no salt tendency (z* volume change dilutes the
-      whole column); here melt water dilutes the TBL cells only (virtual
-      salt).  The column salt integral is the same.
+    * Salinity: NEMO sets no salt tendency and adds the melt volume as a
+      divergence source over the TBL cells (``isf_hdiv_mlt``); here the TBL
+      cells get a virtual-salt dilution and the volume goes to a 2-D
+      ``eta`` source (see ``apply_isf_prescribed_melt_step``).  Not
+      compared against NEMO (no salt oracle in this test).
+    * Geometry: NEMO fixes ``ktop`` (on the static ``gdepw_0``) and the
+      band thickness ``zmax − zmin`` at initialisation, then bounds it each
+      step by the live water depth and top-cell thickness; here ``ktop``,
+      the ``zmax`` clamp and the band thickness are all recomputed from the
+      live thicknesses.  Identical at rest (the oracle columns have no
+      free-surface stretch); can differ by one level when the stretch moves
+      an interface across ``zmin``.
+    * NEMO masks a column out (no melt at all) when ``zmax`` is not below
+      the snapped ``zmin``; here the forcing loader widens every band to at
+      least 1 m and the melt is applied in the top cell.  On the eORCA1
+      Depoorter file this is 8 columns and 2.6 % of the annual melt that
+      NEMO drops and this port deposits (measured on the native grid with
+      the static ``gdepw_0`` snap).
     * The ``fwf > 0`` gate drops refreezing, which NEMO would apply; the
       eORCA1 forcing ``sornfisf`` has no negative values, so it never binds
       there.
@@ -371,8 +386,11 @@ def three_equation_melt(
     T_s = −20 °C): heat flux differs by at most 0.43 W/m² on the fixture
     grid; relative to the flux that is ≤0.12 % for T ≥ 0 °C but up to 32 %
     near freezing (T = −1.9 °C, 100 m draft) where the melt itself is tiny.
-    Pinned per case.  The default ``freeze_c`` (−7.61e-4 °C/dbar, Jenkins
-    1991) also differs from NEMO's −7.577e-4 °C/m.
+    Pinned per case.  The oracle passes NEMO's depth coefficient
+    (−7.53e-8·g·ρ0 = −7.577e-4 °C per metre of draft) as ``freeze_c`` with
+    ``p_ice_dbar`` = draft in metres, as NEMO does; the default
+    ``freeze_c`` (−7.61e-4 °C/dbar, Jenkins 1991, applied to
+    ``ice_base_pressure_dbar`` = draft) is 0.4 % larger, ~3 mK at 1000 m.
 
     Parameters
     ----------
