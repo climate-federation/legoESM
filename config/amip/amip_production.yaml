@@ -502,6 +502,11 @@ aerosol_reference_aod: 0.03  # 550 nm background AOD of the built-in reference
 # A date outside a multi-year forcing file's years raises (explicit: the
 # end-record hold is an opt-in for deliberate experiments only; F37).
 forcing_hold_outside_file_years: false
+# Gradient memory: each physics module call under jax.checkpoint (reverse mode
+# recomputes the module instead of storing its intermediates).  Forward values
+# are identical either way; written out so it rests on no default (user
+# decision 2026-11-18).
+physics_module_checkpoint: true
 start_year: 1979
 diag_days: 1
 checkpoint_days: 30         # run control, carried from the outgoing production
