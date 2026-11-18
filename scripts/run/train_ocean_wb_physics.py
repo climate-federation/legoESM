@@ -434,6 +434,11 @@ def main(argv=None):
                  "--dt", str(a.dt), "--days", "1",
                  "--bathymetry", str(REPO / "data/bathymetry/etopo_1deg.nc"),
                  "--implicit-vertical-mixing", "--north-cap-lat", "80", "--precision", "fp64",
+                 # The global fixer resets heat and salt to the previous step's totals, so
+                 # it cancels the net surface heat flux and freshwater dilution training
+                 # is forced with.  Off here; the model's own drift is the budget probe's
+                 # number (unforced: +0.23 W/m2, -7.8e-10 psu m/s, volume to round-off).
+                 "--no-conservation-fixer",
                  "--output", str(a.out / "omip_setup")]
     import os
     if os.environ.get("OWB_WOA_NC"):   # PROBE ONLY: setup T,S placed by the OMIP driver from this file
@@ -460,6 +465,7 @@ def main(argv=None):
               flush=True)
     argv_omip += ["--face-wall-file", str(wall_file)]
     model, state0, grid, z_coord, dt_run = capture_model(argv_omip)
+    assert not model.config.use_conservation_fixer, "OceanBench trains with the global fixer off"
     assert float(dt_run) == a.dt, dt_run
     O.check_levels(a.store, z_coord.z_full_ref)
     lat_c = np.rad2deg(np.asarray(grid.lat)).ravel()
