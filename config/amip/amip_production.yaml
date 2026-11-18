@@ -507,6 +507,9 @@ forcing_hold_outside_file_years: false
 # are identical either way; written out so it rests on no default (user
 # decision 2026-11-18).
 physics_module_checkpoint: true
+# MPAS RRTMGP solve in fp32 (forward production speed); gradient runs pass
+# --no-mpas-rrtmgp-fp32 for fp64 radiation (user decision 2026-11-18).
+mpas_rrtmgp_fp32: true
 start_year: 1979
 diag_days: 1
 checkpoint_days: 30         # run control, carried from the outgoing production

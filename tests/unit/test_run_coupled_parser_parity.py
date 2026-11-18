@@ -74,6 +74,8 @@ def test_coupled_defaults_are_pinned_and_differ_from_amip():
     (["--no-rrtmgp-gpoint-checkpoint"], "rrtmgp_gpoint_checkpoint", False),
     (["--physics-module-checkpoint"], "physics_module_checkpoint", True),
     (["--no-physics-module-checkpoint"], "physics_module_checkpoint", False),
+    (["--mpas-rrtmgp-fp32"], "mpas_rrtmgp_fp32", True),
+    (["--no-mpas-rrtmgp-fp32"], "mpas_rrtmgp_fp32", False),
     (["--unfused-radiation"], "unfused_radiation", True),
     (["--no-unfused-radiation"], "unfused_radiation", False),
 ])
@@ -92,6 +94,7 @@ def test_aliases_do_not_change_the_default():
     assert args.unfused_radiation is True
     assert args.rrtmgp_gpoint_checkpoint == _actions(amip_parser())["rrtmgp_gpoint_checkpoint"].default
     assert args.physics_module_checkpoint == _actions(amip_parser())["physics_module_checkpoint"].default
+    assert args.mpas_rrtmgp_fp32 == _actions(amip_parser())["mpas_rrtmgp_fp32"].default
 
 
 def test_grid_alias_is_a_real_option_string():

@@ -648,6 +648,7 @@ def build_parser():
            store_true=True)
     _alias(parser, "physics_module_checkpoint", "--physics-module-checkpoint",
            store_true=True)
+    _alias(parser, "mpas_rrtmgp_fp32", "--mpas-rrtmgp-fp32", store_true=True)
     _alias(parser, "unfused_radiation", "--no-unfused-radiation", store_false=True)
     acts = {a.dest: a for a in parser._actions}
     for dest, extra in _COUPLED_EXTRA_CHOICES.items():

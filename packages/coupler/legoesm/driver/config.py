@@ -825,6 +825,11 @@ class ExperimentConfig(NamedTuple):
     # under ``jax.checkpoint`` (gradient memory; forward values unchanged).
     # False = no module remat: faster gradients where memory is not the limit.
     physics_module_checkpoint: bool = True
+    # MPAS lane only: RRTMGP optics + RTE solve in float32 under x64 (the
+    # dycore stays fp64; ~2x faster forward).  The other lanes solve RRTMGP in
+    # the run precision.  False = fp64 radiation, for gradient runs (fp32
+    # rounding dominates a multi-step gradient).
+    mpas_rrtmgp_fp32: bool = True
     # Column-chunk the rrtmgp solve to cap the XLA compile time at higher
     # horizontal resolution (see ``RRTMGPConfig.column_chunk_size``).  0 =
     # off (byte-identical). >0 = jax.lax.map the solve over fixed-size column

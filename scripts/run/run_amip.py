@@ -762,6 +762,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "its intermediates (gradient memory); forward "
                              "values are identical either way.  False = faster "
                              "gradients where memory is not the limit.")
+    parser.add_argument("--no-mpas-rrtmgp-fp32",
+                        dest="mpas_rrtmgp_fp32",
+                        action="store_false",
+                        default=_EXPERIMENT_DEFAULTS.mpas_rrtmgp_fp32,
+                        help="MPAS lane: solve RRTMGP in fp64 instead of fp32 "
+                             "(default fp32, ~2x faster forward; fp64 for "
+                             "gradient runs).  Other lanes already use the "
+                             "run precision.")
     parser.add_argument("--radiation-column-chunk", type=int,
                         default=_EXPERIMENT_DEFAULTS.rrtmgp_column_chunk_size,
                         help="RRTMGP column-chunk block size (0 = off). >0 maps "
@@ -3046,6 +3054,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         physics_module_checkpoint=args.physics_module_checkpoint,
+        mpas_rrtmgp_fp32=args.mpas_rrtmgp_fp32,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
         rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,
         diurnal_cycle=args.diurnal_cycle,
