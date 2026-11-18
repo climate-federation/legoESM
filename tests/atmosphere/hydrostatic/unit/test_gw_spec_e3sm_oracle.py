@@ -91,7 +91,10 @@ def _config(ours, hard=True):
     fr = E3SMFrontalConfig()._replace(**o.pop("frontal", {}))
     br = E3SMBeresConfig()._replace(**o.pop("beres", {}))
     cfg = E3SMCAMConfig()._replace(frontal=fr, beres=br, **o)
-    return cfg._replace(**_HARD) if hard else cfg
+    if not hard:
+        return cfg
+    return cfg._replace(beres=br._replace(index_round_width=0.0,
+                                          crit_minmax_sharpness=float("inf")), **_HARD)
 
 
 def _inputs(z, ds, dtype=jnp.float64):
@@ -154,6 +157,9 @@ def test_matches_e3sm_oracle(fx, arm, ds):
 # form or a default width re-measures these (CLAUDE.md RULE 5).
 # Re-measured 2026-11-17 (#2546): the stress below a limited layer now adds
 # |gwut| (momentum-exact); only background_dt1800 (umcfac binds) moved.
+# Re-measured 2026-11-16 when the Beres NINT/INT staircases landed (#2545,
+# index_round_width 0.1, crit_minmax_sharpness 100): only the four Beres
+# (convective) entries moved.
 _DEFAULT_GAP = {
     'background/l36': {
         'du': [0.002108721345086995, 0.0010616902333161087, 0.002646053370863181, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071295903564, 0.0004652215882224963],
@@ -186,28 +192,28 @@ _DEFAULT_GAP = {
         'dT_cols_flat': [0.006114392768353289, 0.0, 0.004650292706994736],
     },
     'convective_frontal/l36': {
-        'du': [2.809628679758638e-06, 0.0, 0.0019710884561676507, 0.0020440834854522794, 0.0, 2.3725363871957644e-05, 0.0021661630212110347, 0.0014267022035004402],
-        'dv': [2.809628679640786e-06, 0.0, 0.00197074588113237, 0.0020440834854522556, 0.0, 0.0, 0.0021698027258529816, 0.0],
+        'du': [0.00968506344532093, 0.0, 0.005858737822303813, 0.0020440834854522794, 0.0, 2.3725363871957644e-05, 0.0021661630212110347, 0.0014267022035004402],
+        'dv': [0.009685063445320928, 0.0, 0.008934473740157923, 0.0020440834854522556, 0.0, 0.0, 0.0021698027258529816, 0.0],
         'dT_field': 0.0012500463992782592,
-        'dT_cols_flat': [1.2165928674851645e-05, 0.0, 0.0018477619841124214, 0.0, 8.291689284458155e-06, 0.0046367786014093375, 0.0012500463992782592],
+        'dT_cols_flat': [0.004947481047096745, 0.0, 0.0018477619841124214, 0.0, 8.291689284458155e-06, 0.0046367786014093375, 0.0012500463992782592],
     },
     'convective_frontal/l32': {
-        'du': [0.0029823098011374075, 5.5079502542875605e-05, 0.0034188551369078723],
-        'dv': [0.0029390075250634237, 5.5079502542873654e-05, 0.0034188551369078637],
+        'du': [0.003075873588991349, 0.014712869840803975, 0.0034188551369078723],
+        'dv': [0.003103679939416202, 0.014712869840804048, 0.0034188551369078637],
         'dT_field': 0.004650291917694309,
-        'dT_cols_flat': [0.006135465458491181, 5.00011759699771e-05, 0.004650291917694309],
+        'dT_cols_flat': [0.006320173795203495, 0.016071651848465648, 0.004650291917694309],
     },
     'oro_frontal_convective/l36': {
-        'du': [5.542798660332171e-05, 1.8518663263341885e-08, 0.0016460885763447063, 0.0003877750536236757, 0.0, 0.03623998594747442, 0.02095917721888361, 0.0014267022035004402],
-        'dv': [5.5330865504131554e-05, 1.8518663530970958e-08, 0.0017314786228733118, 0.00014249684694425498, 0.0, 0.0, 0.020913701834633598, 0.0],
+        'du': [0.0003043488644979132, 1.8518663263341885e-08, 0.0016393612601961426, 0.0003877750536236757, 0.0, 0.03623998594747442, 0.02095917721888361, 0.0014267022035004402],
+        'dv': [4.874869829723612e-05, 1.8518663530970958e-08, 0.001728609584596463, 0.00014249684694425498, 0.0, 0.0, 0.020913701834633598, 0.0],
         'dT_field': 0.021182235750415664,
-        'dT_cols_flat': [6.0458310692180346e-05, 1.8506302522747416e-08, 7.625469381429111e-05, 0.0, 0.010386135606333273, 0.021182235750415664, 0.0009508738097634513],
+        'dT_cols_flat': [0.00047237119349770605, 1.8506302522747416e-08, 7.625469381429111e-05, 0.0, 0.010386135606333273, 0.021182235750415664, 0.0009508738097634513],
     },
     'oro_frontal_convective/l32': {
-        'du': [0.008069593561070199, 3.4012083172282785e-06, 0.000606868850477048],
-        'dv': [0.00865468257805327, 6.215826410991961e-07, 0.000648888639421392],
-        'dT_field': 0.003038395565792255,
-        'dT_cols_flat': [0.00999856954991142, 2.693399308041848e-05, 0.0003929395193558013],
+        'du': [0.008081968235471854, 0.0009085328109832815, 0.000606868850477048],
+        'dv': [0.008661040495514829, 0.00016603752887341445, 0.000648888639421392],
+        'dT_field': 0.003036434574326499,
+        'dT_cols_flat': [0.009992116437032413, 0.001986870862181404, 0.0003929395193558013],
     },
 }
 
@@ -253,7 +259,23 @@ _KINKS = (("convective_frontal/l36", 3, 0.8178145073179883, 1e-5),
           # (CAM's abs) is C1, not C2, where this layer's unlimited
           # non-positive divergence crosses the critical level.
           ("background/l32", 1, 0.8298968, 1e-6, 1),            # umcfac |c - u|, sign
-          ("background/l36", 3, 0.8242109368577084, 1e-5))      # taumin zeroing
+          ("background/l36", 3, 0.8242109368577084, 1e-5),      # taumin zeroing
+          # #2545 (2026-11-16): the Beres source's E3SM NINT/INT of traced wind,
+          # each flip located to 2e-7 in s on the shipped code: critical-level
+          # bin bounds, table column NINT(uh), and NINT(uh) with INT(CS) /
+          # NINT(CS/dc).  Removed by beres.index_round_width (the hard limit
+          # here sets it 0); a rescan of every Beres-arm column at the default
+          # finds no kink left.
+          ("convective_frontal/l36", 0, 0.9885033894328875, 1e-5),      # NINT(Umin/dc)
+          ("convective_frontal/l36", 2, 0.8062826495054753, 1e-5),      # NINT(uh), INT(CS)
+          ("convective_frontal/l32", 0, 0.8528525390220053, 1e-5),      # NINT(uh), CS, shift
+          ("convective_frontal/l32", 1, 0.8008877124605397, 1e-5),      # NINT(uh)
+          ("convective_frontal/l32", 1, 0.8512297290955184, 1e-5),      # NINT(Umax/dc)
+          ("oro_frontal_convective/l36", 2, 0.8062826495054753, 1e-5),  # NINT(uh), INT(CS)
+          ("oro_frontal_convective/l32", 0, 0.8152495757979976, 1e-5),  # NINT(uh)
+          ("oro_frontal_convective/l32", 0, 0.8528525390220053, 1e-5),  # as convective
+          ("oro_frontal_convective/l32", 1, 0.8008877124605397, 1e-5),  # l32 (same
+          ("oro_frontal_convective/l32", 1, 0.8512297290955184, 1e-5))  # columns)
 
 
 @pytest.mark.parametrize("case,col,s_star,eps,order",
