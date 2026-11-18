@@ -158,7 +158,7 @@ def _kpp_ice_attenuation(ice_frac, eice):
     return jnp.maximum(1.0 - eff, 0.0)[..., jnp.newaxis]
 
 
-def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps, ice_frac=None):
+def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, ice_frac=None):
     """LMD94 (Appendix B) turbulent velocity scales at depth(s) ``d``.
 
     Returns the momentum (``w_m``) and scalar (``w_s``) similarity velocity
@@ -188,7 +188,6 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps, ice_frac=None):
         [m^2/s^3] (positive = destabilising, this module's sign convention).
     d : (..., nlev) depth(s) below the surface [m, positive down].
     h_bl_col : (..., 1) boundary-layer depth [m].
-    eps : small positive floor.
 
     Returns
     -------
@@ -199,13 +198,10 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps, ice_frac=None):
     # constant below sigma = epsilon (LMD94 App. A/B).
     d_eff = jnp.minimum(d, cfg.epsilon_lmd * h_bl_col)
     B_f_e = B_f[..., jnp.newaxis]
-    # copysign(eps, B_f) preserves the stability sign near zero (issue #168).
-    B_f_safe = jnp.where(
-        jnp.abs(B_f_e) > eps, B_f_e, jnp.copysign(eps, B_f_e),
-    )
     ustar_e = u_star[..., jnp.newaxis]
-    L_MO = ustar_e ** 3 / (kappa * B_f_safe)
-    zeta = d_eff / L_MO
+    # zeta = d/L_MO with B_f in the numerator (CVMix form): no buoyancy-flux floor
+    # is needed (u* > 0 on both u* paths), and weak fluxes keep their own zeta.
+    zeta = d_eff * kappa * B_f_e / ustar_e ** 3
     abs_zeta = jnp.abs(zeta)
     Bf_pos = jnp.maximum(B_f_e, 0.0)
     is_unstable = B_f_e > 0.0
@@ -353,7 +349,7 @@ def _boundary_layer_depth(
     max_depth = z_depth[..., -1]
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
-    _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg, eps,
+    _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg,
                                      ice_frac=ice_frac)
     V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)
 
@@ -516,7 +512,7 @@ def kpp_vertical_mixing(
     # convection (F-OCEAN-1), while w_m feeds the momentum viscosity.
     d = sigma_clip * h_bl[..., jnp.newaxis]
     w_m, w_s = _kpp_velocity_scales(
-        u_star, B_f, d, h_bl[..., jnp.newaxis], cfg, eps, ice_frac=ice_frac,
+        u_star, B_f, d, h_bl[..., jnp.newaxis], cfg, ice_frac=ice_frac,
     )
 
     # --- Langmuir turbulence enhancement (KPP-Langmuir) ---

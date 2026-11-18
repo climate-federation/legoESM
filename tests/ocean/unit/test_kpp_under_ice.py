@@ -76,9 +76,9 @@ class TestVelocityScales:
         u_star, B_f, d, h_bl = self._inputs()
         cfg0 = KPPConfig()
         cfg3 = KPPConfig(eice=3)
-        wm_a, ws_a = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg0, 1e-10)
+        wm_a, ws_a = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg0)
         # eice=3 but ice_frac=None -> still no attenuation -> identical
-        wm_b, ws_b = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg3, 1e-10,
+        wm_b, ws_b = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg3,
                                           ice_frac=None)
         np.testing.assert_array_equal(np.asarray(wm_a), np.asarray(wm_b))
         np.testing.assert_array_equal(np.asarray(ws_a), np.asarray(ws_b))
@@ -86,9 +86,9 @@ class TestVelocityScales:
     def test_full_ice_reduces_scales(self):
         u_star, B_f, d, h_bl = self._inputs()
         cfg = KPPConfig(eice=2)
-        wm_o, ws_o = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg, 1e-10,
+        wm_o, ws_o = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg,
                                           ice_frac=jnp.zeros((4,)))
-        wm_i, ws_i = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg, 1e-10,
+        wm_i, ws_i = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg,
                                           ice_frac=jnp.ones((4,)))
         # open water == eice-off; full ice floors both scales at 1e-10
         assert float(jnp.max(ws_o)) > 1e-6
@@ -98,9 +98,9 @@ class TestVelocityScales:
     def test_partial_ice_scales_linearly_mode2(self):
         u_star, B_f, d, h_bl = self._inputs()
         cfg = KPPConfig(eice=2)
-        _, ws0 = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg, 1e-10,
+        _, ws0 = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg,
                                       ice_frac=jnp.zeros((4,)))
-        _, ws_half = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg, 1e-10,
+        _, ws_half = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg,
                                           ice_frac=jnp.full((4,), 0.5))
         # 50% ice -> half the scale (well above the 1e-10 floor here)
         np.testing.assert_allclose(np.asarray(ws_half), 0.5 * np.asarray(ws0),

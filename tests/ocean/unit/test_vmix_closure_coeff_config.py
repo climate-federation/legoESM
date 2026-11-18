@@ -103,9 +103,8 @@ def test_businger_override_changes_velocity_scales():
     B_f = jnp.asarray([1e-7])  # destabilising
     d = jnp.asarray([[5.0, 20.0]])
     h_bl = jnp.asarray([[50.0]])
-    eps = 1e-12
-    wm0, _ = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg, eps)
-    wm1, _ = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg2, eps)
+    wm0, _ = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg)
+    wm1, _ = _kpp_velocity_scales(u_star, B_f, d, h_bl, cfg2)
     assert not np.allclose(np.asarray(wm0), np.asarray(wm1))
 
 
