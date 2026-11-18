@@ -1210,7 +1210,10 @@ def test_column_moist_static_energy_smooth_vs_exact(fix, g):
     max(the group's largest column heating, 1 W m-2) <= _TOL) and the smooth
     default adds the stored per-column amount."""
     ref, hard, smooth, heat = mse_residuals(fix, g)
-    assert np.max(np.abs(hard - ref)) / max(heat, _MSE_HEAT_FLOOR) <= _TOL
+    if heat == 0.0:
+        np.testing.assert_array_equal(hard, ref)
+    else:
+        assert np.max(np.abs(hard - ref)) / max(heat, _MSE_HEAT_FLOOR) <= _TOL
     np.testing.assert_allclose(smooth - hard, np.asarray(_MSE_SMOOTH_GAP[g]),
                                rtol=1e-6, atol=1e-12)
 
