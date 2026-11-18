@@ -4621,10 +4621,14 @@ def _extract_scalars(state, grid_type, grid, z_coord):
 _PARTIAL_CELL_THIN_THRESHOLD = 0.3
 
 
-def attach_face_walls(grid, walls, config):
-    """Lat-lon geometry carrying depth-limited face walls (open-level counts)."""
+def attach_face_walls(grid, walls, config, *, dz_ref, H_min):
+    """Lat-lon geometry carrying depth-limited face walls (open-level counts).
+
+    A face whose open depth (``dz_ref`` summed over its open levels) is below the run's
+    minimum ocean depth ``H_min`` is closed entirely, as a column that shallow is land:
+    a 1 m slot between deep columns ran to 44.7 m/s in two steps."""
     from legoesm.grids.latlon import ensure_geometry
-    fu, fv = np.asarray(walls["face_nlev_u"]), np.asarray(walls["face_nlev_v"])
+    fu, fv = np.array(walls["face_nlev_u"]), np.array(walls["face_nlev_v"])
     if fu.shape != (grid.n_lat, grid.n_lon + 1) or fv.shape != (grid.n_lat + 1, grid.n_lon):
         raise ValueError(f"face walls shapes {fu.shape}/{fv.shape} do not match the "
                          f"{grid.n_lat}x{grid.n_lon} grid's u/v faces")
@@ -4632,6 +4636,14 @@ def attach_face_walls(grid, walls, config):
         raise ValueError("face_nlev_u columns 0 and n_lon are the same periodic face and must agree")
     if min(fu.min(), fv.min()) < 0:
         raise ValueError("face wall open-level counts must be >= 0")
+    open_depth = np.concatenate([[0.0], np.cumsum(np.asarray(dz_ref, np.float64))])
+    n_closed = []
+    for f in (fu, fv):
+        thin = (f > 0) & (open_depth[np.minimum(f, open_depth.size - 1)] < H_min)
+        f[thin] = 0
+        n_closed.append(int(thin.sum()))
+    print(f"  Face walls: {n_closed[0]} u-faces and {n_closed[1]} v-faces with an open depth "
+          f"below H_min={H_min} m closed entirely")
     geom = ensure_geometry(
         grid, metric_convention=config.metric_convention,
         vface_zonal_metric_evaluation=config.vface_zonal_metric_evaluation,
@@ -6634,7 +6646,8 @@ def run_omip_single(grid_type: str, args) -> dict:
                                    "after bathymetry post-processing")
         z_coord_partial = create_partial_cell_coordinate(z_coord, H_bathy_init)
         if getattr(args, "face_wall_file", None):
-            grid = attach_face_walls(grid, np.load(args.face_wall_file), config)
+            grid = attach_face_walls(grid, np.load(args.face_wall_file), config,
+                                     dz_ref=z_coord.dz_ref, H_min=args.H_min)
             print(f"  Face walls {args.face_wall_file}: "
                   f"{int((np.asarray(grid.face_nlev_u) < z_coord.n_levels).sum())} u-faces, "
                   f"{int((np.asarray(grid.face_nlev_v) < z_coord.n_levels).sum())} v-faces "
