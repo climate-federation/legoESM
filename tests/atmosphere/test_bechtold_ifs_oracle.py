@@ -1131,6 +1131,74 @@ def test_smooth_liquid_fraction_never_exceeds_one():
     assert np.any(a[~out] != exact[~out])
 
 
+def _mse_residual(fix, g, dT, dq, snow_sfc, ice_det, snow_det, diss):
+    """Per column [W m-2]: integral of (cp dT/dt + Lv dq/dt) dp/g minus Lf x
+    (surface snow + detrained ice + detrained snow) minus the convective
+    kinetic-energy dissipation heating PVDISCU (LMFUVDIS) -- frozen moist
+    static energy, liquid reference (cudtdqn.F90: detrained liquid/rain at
+    RLVTT, ice/snow at RLSTT; surface rain/snow at RLVTT/RLSTT, :299).
+    Zero if the scheme closes it; with LMFENTHCONS off (sucumf.F90:208) the
+    in-cloud heating uses the mixed-phase FOELHMCU, so mixed-phase columns
+    need not close."""
+    th = _thermo(fix, "L")
+    dp = np.diff(fix[f"{g}_p_half"], axis=1)
+    col = lambda a: np.sum(np.asarray(a) * dp, axis=1) / th.RG  # noqa: E731
+    return (th.RCPD * col(np.asarray(dT) - fix[f"{g}_dT_other"])
+            + th.RLVTT * col(np.asarray(dq) - fix[f"{g}_dq_other"])
+            - th.RLMLT * (np.asarray(snow_sfc) + np.asarray(ice_det) + np.asarray(snow_det))
+            - np.asarray(diss))
+
+
+def mse_residuals(fix, g):
+    """(OpenIFS arm L, exact port, smooth default) column MSE residuals and
+    the largest column heating [W m-2] (the metric's scale)."""
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    o = lambda t: np.asarray(fix[f"L_{g}_{t}"])  # noqa: E731
+    ref = _mse_residual(fix, g, o("PTENT"), o("PTENQ"), o("PMFLXS")[:, -1],
+                        o("PLUDELI2").sum(1), o("PSNDE2").sum(1), o("PVDISCU"))
+    th, x = _thermo(fix, "L"), _inputs(fix, g, jnp.float64)
+    res = []
+    for hard in (True, False):
+        out = cumastrn(th, float(fix["dt"]), qsat=satur_qsat(th, x["T"], x["p_full"]),
+                       tun=IfsTunables(hard_switches=hard), **x)
+        res.append(_mse_residual(fix, g, out.ptent, out.ptenq, np.asarray(out.pmflxs)[:, -1],
+                                 np.asarray(out.pludeli)[:, 1].sum(1),
+                                 np.asarray(out.psnde)[:, 1].sum(1), out.pvdiscu))
+    dp = np.diff(fix[f"{g}_p_half"], axis=1)
+    heat = th.RCPD * np.sum((o("PTENT") - fix[f"{g}_dT_other"]) * dp, axis=1) / th.RG
+    return ref, res[0], res[1], float(np.max(np.abs(heat)))
+
+
+# Smooth default minus exact column frozen-MSE residual [W m-2] per fixture
+# column (RULE 0 x RULE 5: what the smoothing adds to the column energy
+# budget), measured (x64, CPU) by mse_residuals().  KNOWN DEFECT of the
+# reference (claim reviewed by codex and GLM, 2026-11-18): with LMFENTHCONS
+# off (sucumf.F90:208) the column does not close -- up to -228 W m-2 (1 % of
+# the column heating) on the deep fixture columns; it is the source's own
+# enthalpy-correction numerator (cudtdqn.F90:290-299).  The exact port
+# reproduces it (first assertion).
+_MSE_SMOOTH_GAP = {
+    "L32": [-5.431957106338814e-10, -9.727429972627988e-10, -0.027704053871804746, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.794919768371983e-11, -0.011967617924881324, 0.0, 2.3062560541853294e-11, -1.8975043758473475e-10, -6.591278634004993e-10, 1.7271485619062517e-10],
+    "L137": [1.2356137814306667e-11, 0.0, 0.0, 0.0, 0.0],
+    "STRESS": [1.0560086138866609e-09, 3.4830013889908003, 1.8132695345229877e-10],
+}
+
+
+@pytest.mark.parametrize("g", _GROUPS)
+def test_column_moist_static_energy_smooth_vs_exact(fix, g):
+    """The exact port leaves the reference's residual (oracle-match metric:
+    max |difference| / max column heating <= _TOL); the smooth default adds
+    the stored per-column amount."""
+    ref, hard, smooth, heat = mse_residuals(fix, g)
+    if heat == 0.0:
+        np.testing.assert_array_equal(hard, ref)
+    else:
+        assert np.max(np.abs(hard - ref)) / heat <= _TOL
+    np.testing.assert_allclose(smooth - hard, np.asarray(_MSE_SMOOTH_GAP[g]),
+                               rtol=1e-6, atol=1e-12)
+
+
 def test_ascent_mass_flux_width_is_the_closure_one():
     """The ascent reuses the closure's mass-flux scale (vote 2026-11-14)."""
     from legoesm.atmosphere.physics.convection import _ifs_cuascent, _ifs_cumastrn
