@@ -1025,9 +1025,51 @@ class TestTracerMassConservation:
             set_policy(previous)
 
     @pytest.mark.skipif(not jax.config.read("jax_enable_x64"), reason="requires fp64")
+    @pytest.mark.parametrize("sign", [1.0, -1.0])
+    def test_hybrid_tracer_vertical_direction(self, sign):
+        """Positive downward mass flux gives -mdot*dq/dp in the interior."""
+        import numpy as np
+        from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as pe
+        from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+        from legoesm.grids.vertical import dp_from_hybrid, pressure_from_hybrid
+
+        previous = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            # Uniform-pressure hybrid at p_ref: the centered stencil is exact
+            # on a linear profile (the stretched CAM grid need not be).
+            grid = create_latlon_grid(
+                n_lat=8, radius=constants.R_earth, omega=constants.Omega)
+            hybrid = make_hybrid_levels(n_levels=20, stretching=0.0)
+            state = _make_rest_state(grid, hybrid)
+            state = state._replace(p_s=jnp.full_like(state.p_s, hybrid.p_ref))
+            assert bool(jnp.all(state.u == 0.0))
+            assert bool(jnp.all(state.v == 0.0))
+            dp = dp_from_hybrid(hybrid, state.p_s)
+            slope = 1.0e-7  # (kg/kg)/Pa, increasing toward the surface
+            q = slope * pressure_from_hybrid(hybrid, state.p_s)
+            mdot = sign * 0.8  # Pa/s; uniform interior, closed lids
+            F = jnp.full((*state.p_s.shape, hybrid.n_levels + 1), mdot)
+            F = F.at[..., 0].set(0.0).at[..., -1].set(0.0)
+            zero = jnp.zeros_like(q)
+            dq = pe.latlon_tracer_tendencies(
+                {"q_v": q}, state.u, state.v, zero, zero,
+                jnp.ones_like(state.u), jnp.ones_like(state.v), zero, dp,
+                F, state.p_s, grid, hybrid,
+                CGridLatLonPrimitiveEquationConfig(tracer_vertical_scheme="sb"), True,
+            )["q_v"]
+            # Exclude only the two lid levels, where F transitions to zero.
+            np.testing.assert_allclose(
+                np.asarray(dq[..., 1:-1]), -mdot * slope,
+                rtol=0.0, atol=1e-18)
+            assert bool(jnp.all(sign * dq[..., 1:-1] < 0.0))
+        finally:
+            set_policy(previous)
+
+    @pytest.mark.skipif(not jax.config.read("jax_enable_x64"), reason="requires fp64")
     @pytest.mark.parametrize("scheme", ["sb", "van_leer"])
     def test_hybrid_tracer_paired_conservation(self, hybrid_flow, monkeypatch, scheme):
-        """The instantaneous tracer/continuity product rule closes globally."""
+        """Vertical budgets close per column; the full budget closes globally."""
         import numpy as np
         from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as pe
         from legoesm.grids.vertical import dp_from_hybrid
@@ -1039,14 +1081,19 @@ class TestTracerMassConservation:
         rng = np.random.default_rng(0)
         q = jnp.asarray(1.0e-2 * np.exp(-0.5 * ((np.arange(nlev) - 24) / 3.0) ** 2)
                         * (1.0 + 0.3 * rng.random(state.T.shape)))
-        captured = {}
-        real_vertical = pe.vertical_advection_hybrid_van_leer
+        captured = {"calls": 0}
+        symbol = ("vertical_advection_hybrid_sb" if scheme == "sb"
+                  else "vertical_advection_hybrid_van_leer")
+        real_vertical = getattr(pe, symbol)
 
         def observe_vertical(*args, **kwargs):
-            captured["width"] = kwargs["smoothing_width"]
-            return real_vertical(*args, **kwargs)
+            captured["calls"] += 1
+            captured["args"] = args
+            captured["width"] = kwargs.get("smoothing_width")
+            captured["vertical"] = real_vertical(*args, **kwargs)
+            return captured["vertical"]
 
-        monkeypatch.setattr(pe, "vertical_advection_hybrid_van_leer", observe_vertical)
+        monkeypatch.setattr(pe, symbol, observe_vertical)
         original = pe.latlon_tracer_tendencies
 
         def observe(*args, **kwargs):
@@ -1061,15 +1108,26 @@ class TestTracerMassConservation:
             assert captured["width"] == config.tracer_van_leer_width
         dp = dp_from_hybrid(hybrid, state.p_s)
         F = captured["F"]
-        if scheme == "van_leer":
-            from tests.unit.test_vertical_advection_hybrid_van_leer import product_rule_residual
-            vertical_residual = product_rule_residual(
-                real_vertical, hybrid, state.p_s, F, q)
-            print(f"latlon vertical per-column paired residual = {vertical_residual:.17e}")
-            assert vertical_residual < 1e-12
+        assert captured["calls"] == 1
+        q_arg, F_arg, ps_arg, coord_arg = captured["args"]
+        assert captured["vertical"].shape == (1, *q.shape)
+        assert q_arg.shape == (1, *q.shape)
+        np.testing.assert_array_equal(q_arg[0], q)
+        np.testing.assert_array_equal(F_arg, F)
+        np.testing.assert_array_equal(ps_arg, state.p_s)
+        assert coord_arg is hybrid
+        assert bool(jnp.all(F[..., 0] == 0.0))
+        assert bool(jnp.all(F[..., -1] == 0.0))
         scale = jnp.sum(jnp.abs(F[..., 1:-1] * jnp.diff(q, axis=-1)), axis=-1)
         assert float(jnp.max(jnp.abs(F))) > 0.0
-        assert float(jnp.sum(scale * grid.area)) > 0.0
+        assert bool(jnp.all(scale > 0.0))
+        # Continuity's vertical d(dp)/dt = -diff(F). Horizontal transport
+        # crosses column boundaries and belongs only in the global check.
+        vertical_column = jnp.sum(
+            dp * captured["vertical"][0] - q * jnp.diff(F, axis=-1), axis=-1)
+        vertical_residual = float(jnp.max(jnp.abs(vertical_column) / scale))
+        print(f"{scheme} vertical per-column paired residual = {vertical_residual:.17e}")
+        assert vertical_residual < 1e-12
         column = jnp.sum(dp * dq["q_v"] + q * hybrid.dB * dps[..., None], axis=-1)
         residual = float(jnp.abs(jnp.sum(column * grid.area)) / jnp.sum(scale * grid.area))
         print(f"hybrid paired normalized residual = {residual:.17e}")
