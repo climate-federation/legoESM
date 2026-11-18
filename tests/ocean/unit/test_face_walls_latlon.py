@@ -183,3 +183,46 @@ def test_lateral_tracer_diffusion_does_not_cross_walls(coef):
         assert np.abs(dT[2:4, 1:3, K_WALL:]).max() == 0.0
         assert np.abs(dS[2:4, 1:3, K_WALL:]).max() == 0.0
         assert np.abs(dT[2:4, 6, K_WALL:]).max() > 0.0
+
+
+def _gm(walls, T, S, cfg=None):
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        gm_redi_tracer_tendency_latlon)
+    from legoesm.ocean.vertical import compute_layer_thickness
+    grid, z, s = _setup(walls)
+    dT, dS = gm_redi_tracer_tendency_latlon(
+        jnp.asarray(T), jnp.asarray(S), s.eta.data, s.H_bathy.data, grid, z,
+        cfg or GMRediConfig(), mask=s.land_mask.data, u_mask=s.u_mask.data,
+        v_mask=s.v_mask.data)
+    h = np.asarray(compute_layer_thickness(s.eta.data, s.H_bathy.data, z))
+    return np.asarray(dT), np.asarray(dS), h * np.asarray(grid.area_T)[..., None]
+
+
+def test_gm_redi_triads_do_not_cross_walls():
+    """Budget: heat and salt.  The production triad GM/Redi (partial-cell coordinate)
+    carries nothing through a closed face level and stays in flux form."""
+    T, S = _basin_tracers()
+    dT, dS, _ = _gm(True, T, S)
+    dT0, dS0, _ = _gm(False, T, S)
+    assert np.abs(dT0[:, [3, 4], K_WALL:]).max() > 0.0         # open sill: the basins do mix
+    assert np.abs(dT).max() == 0.0 and np.abs(dS).max() == 0.0
+    rng = np.random.default_rng(2)
+    T3 = T + rng.normal(0, 0.3, T.shape) - 0.5 * np.arange(NLEV)   # stratified, sloping
+    S3 = S + rng.normal(0, 0.05, S.shape)
+    dT, dS, w = _gm(True, T3, S3)
+    for d in (dT, dS):
+        assert np.abs(d).max() > 0.0
+        assert abs((d * w).sum()) <= 1e-10 * np.abs(d * w).sum()
+
+
+@pytest.mark.parametrize("scheme", ["centered", "nemo_iso_lap"])
+def test_walls_refuse_gm_redi_schemes_that_ignore_them(scheme):
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    grid, z, _ = _setup()
+    with pytest.raises(ValueError, match="slope_scheme"):
+        _model(grid, z, gm_redi=GMRediConfig(slope_scheme=scheme))
+    _model(grid, z, gm_redi=GMRediConfig())                    # triads: accepted
+    if scheme == "centered":
+        grid0, z0, _ = _setup(False)
+        _model(grid0, z0, gm_redi=GMRediConfig(slope_scheme=scheme))   # no walls: unaffected

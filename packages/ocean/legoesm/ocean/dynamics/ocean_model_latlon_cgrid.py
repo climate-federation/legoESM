@@ -3937,6 +3937,14 @@ class LatLonCGridOceanModel:
                 "depth-limited face walls (grid.face_nlev_u/v) are wired into the "
                 "implicit_cn barotropic path only; got barotropic_solver="
                 f"{self.config.barotropic.barotropic_solver!r}")
+        _gm_walls = getattr(self.config, "gm_redi", None)
+        if (getattr(self.grid, "face_nlev_u", None) is not None
+                and _gm_walls is not None and _gm_walls.slope_scheme != "triads"):
+            raise ValueError(
+                "depth-limited face walls: GM/Redi slope_scheme="
+                f"{_gm_walls.slope_scheme!r} builds its face masks without the walls "
+                "and would mix heat and salt through them; only slope_scheme='triads' "
+                "(per-level face masks from compute_face_masks_3d) honours them.")
         _gm_init = getattr(self.config, "gm_redi", None)
         if (_gm_init is not None and getattr(_gm_init, "implicit_K33", False)
                 and not getattr(self.config, "implicit_vertical_mixing", False)):
