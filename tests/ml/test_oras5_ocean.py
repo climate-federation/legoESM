@@ -216,3 +216,28 @@ def test_face_walls_from_native_mask():
     assert np.array_equal(fu[:, 0], fu[:, -1]) and fu[5, 10] == 0
     assert fv[100, 50] == 4                            # other native points on that edge stay wet
     assert fv[0].max() == 0 and fv[-1].max() == 0
+
+
+def test_sample_face_masks_close_levels_below_walls():
+    """ORAS5 velocity below a wall is neither initial condition nor loss target."""
+    from types import SimpleNamespace as NS
+    fu = np.full((O.NLAT, O.NLON + 1), O.NLEV)
+    fv = np.full((O.NLAT + 1, O.NLON), O.NLEV)
+    fu[10, 5], fv[20, 7] = 3, 0
+    st = NS(u_mask=NS(data=jnp.ones((O.NLAT, O.NLON + 1))),
+            v_mask=NS(data=jnp.ones((O.NLAT + 1, O.NLON))))
+    wet3 = np.ones((O.NLAT, O.NLON, O.NLEV))
+    um, vm = T.sample_face_masks(
+        st, NS(face_nlev_u=jnp.asarray(fu), face_nlev_v=jnp.asarray(fv)), O.NLEV)
+    f, v = O.day_to_fields(_day(), wet3, um, vm)
+    w = O.weights(O.base_weights(np.arange(-89.5, 90.0), np.ones(O.NLEV)), v)
+    assert np.isclose(f["u"][10, 5, 2], 4.5) and v["u"][10, 5, 2] and float(w["u"][10, 5, 2]) > 0
+    assert (f["u"][10, 5, 3:] == 0).all() and not v["u"][10, 5, 3:].any()
+    assert (np.asarray(w["u"])[10, 5, 3:] == 0).all()
+    assert (f["v"][20, 7] == 0).all() and not v["v"][20, 7].any()
+    assert (np.asarray(w["v"])[20, 7] == 0).all() and float(w["v"][20, 8, 0]) > 0
+    # without walls: exactly the 2-D masks' fields
+    um0, vm0 = T.sample_face_masks(st, NS(), O.NLEV)
+    f0, v0 = O.day_to_fields(_day(), wet3, um0, vm0)
+    f2, v2 = O.day_to_fields(_day(), wet3, np.ones(fu.shape), np.ones(fv.shape))
+    assert all(np.array_equal(f0[k], f2[k]) and np.array_equal(v0[k], v2[k]) for k in O.FIELDS)
