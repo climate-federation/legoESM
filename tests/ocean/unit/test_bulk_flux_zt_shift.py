@@ -247,15 +247,14 @@ def test_turbulent_path_takes_air_temperature_potential_at_zt():
 
 
 def test_card_and_public_entry_points_pass_the_heights_on():
-    """The executing K0 program (_nemo_orca2_k0_surface_compiled) and the public
-    wrappers hand zt_m / q_zu_width to the NCAR path."""
+    """The executing K0 program (_nemo_orca2_k0_surface_compiled) hands the card's
+    zt_m / q_zu_width to the NCAR path.  The public literal boundary
+    nemo_blk_oce_ncar keeps its no-defaults signature (test_ncar_bulk) and stays
+    CORE-only (air T/q at 10 m)."""
     import inspect
 
     src = inspect.getsource(inspect.unwrap(bf._nemo_orca2_k0_surface_compiled))
     assert "zt_m=card.zt_m" in src and "q_zu_width=card.q_zu_floor_width_kg_kg" in src
-    for fn in (bf.nemo_blk_oce_ncar, bf.nemo_orca2_k0_surface_card):
-        s = inspect.getsource(fn)
-        assert "zt_m=zt_m" in s and "q_zu_width=q_zu_width" in s, fn.__name__
     s = inspect.getsource(bf._nemo_blk_oce_ncar)
     assert "zt_m=zt_m, q_zu_width=q_zu_width" in s
 

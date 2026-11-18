@@ -1003,7 +1003,7 @@ def nemo_orca2_k0_s0f(inputs: NemoStandaloneS0FInputs):
 def nemo_orca2_k0_surface_card(
     u_wind, v_wind, T_air_K, q_air, slp_Pa,
     qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
-    evap_factor, nb_iter, *, k0_config, ice_if, s0, s2, zt_m=_ZU_M, q_zu_width=None,
+    evap_factor, nb_iter, *, k0_config, ice_if, s0, s2,
     prior_surface=None, chl=None, geothermal_heat_flux_mwm2=None,
 ):
     """Run the production S0 -> S1 -> S3 -> S2 path for standalone K0.
@@ -1021,8 +1021,8 @@ def nemo_orca2_k0_surface_card(
         None, None, None,
         qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
         evap_factor, nb_iter,
-        nn_ice=k0_config.nn_ice, ice_if=ice_if, s0=s0, s2=s2, zt_m=zt_m,
-        prior_surface=prior_surface, chl=chl, q_zu_width=q_zu_width,
+        nn_ice=k0_config.nn_ice, ice_if=ice_if, s0=s0, s2=s2,
+        prior_surface=prior_surface, chl=chl,
         geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2,
     )
 
@@ -1320,14 +1320,14 @@ def blk_oce_2(
 def nemo_blk_oce_ncar(
     u_wind, v_wind, T_air_K, q_air, slp_Pa, sst_c, ssu, ssv,
     qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
-    evap_factor, nb_iter, *, nn_ice, ice_if, s0, s2, zt_m=_ZU_M, q_zu_width=None,
+    evap_factor, nb_iter, *, nn_ice, ice_if, s0, s2,
     prior_surface=None, chl=None, geothermal_heat_flux_mwm2=None,
 ):
     """Literal S0 -> NCAR S1 -> optional S3 -> optional S2 surface path.
 
     Every physical input and resolved deck scalar is required: this boundary
     has no standard-atmosphere, mask, precipitation, or coefficient defaults.
-    The returned stresses use NEMO's ocean (downward) convention.
+    The returned stresses use NEMO's ocean (downward) convention; air T/q at 10 m.
 
     ``nn_ice`` follows sbcmod.F90's ``SELECT CASE( nn_ice )`` after the bulk
     call: ``0`` returns the bulk fields (``ice_if`` must be None); ``1`` runs
@@ -1342,8 +1342,8 @@ def nemo_blk_oce_ncar(
     return _nemo_blk_oce_ncar(
         u_wind, v_wind, T_air_K, q_air, slp_Pa, sst_c, ssu, ssv,
         qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
-        evap_factor, nb_iter, nn_ice=nn_ice, ice_if=ice_if, s0=s0, s2=s2, zt_m=zt_m,
-        prior_surface=prior_surface, chl=chl, q_zu_width=q_zu_width,
+        evap_factor, nb_iter, nn_ice=nn_ice, ice_if=ice_if, s0=s0, s2=s2,
+        prior_surface=prior_surface, chl=chl,
         geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2,
         forcing_update=None,
     )

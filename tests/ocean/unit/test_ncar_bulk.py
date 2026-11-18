@@ -172,6 +172,8 @@ def test_k0_compiled_programs_trace_once_per_branch(monkeypatch):
         evap_factor: float
         nb_iter: int
         k0: K0
+        zt_m: float = 10.0                       # CORE heights: no zt -> zu shift
+        q_zu_floor_width_kg_kg: float = 1.0e-8
 
     class Z(NamedTuple):
         nemo_e3t_0: jax.Array
