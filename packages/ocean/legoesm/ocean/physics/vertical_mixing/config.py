@@ -995,7 +995,7 @@ class KPPConfig(NamedTuple):
     # centre-depth crossing average, centre K averaged to interfaces) or
     # "cvmix" (MOM6 surface-layer/local-pressure reference, CVMix (1-eps/2) Ri,
     # smoothed first-crossing quadratic interpolation, interface K).
-    bld_structure: str = "legacy"
+    bld_structure: str = "cvmix"
     # cvmix structure only: CVMix floor V_t^2 >= minVtsqr [m^2/s^2], applied as
     # a C1 smooth max of this width (0 = CVMix's hard max).  Exact outside
     # |V_t^2 - min_vt2| >= width/2; at most width/8 above the hard max.

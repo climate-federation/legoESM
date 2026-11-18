@@ -517,6 +517,11 @@ _LEGACY_DS_DT = [[1.37129144905082e-06, 8.315894816084423e-07, 5.455760647757201
 _LEGACY_DU_DT = [[-2.4017919398069545e-05, -1.0744126210987942e-05, -3.379876668229163e-06, 1.2728587545212194e-05, 1.856837327675612e-06, 4.086013134606541e-08, 1.0549690131577407e-08, 1.949210750009046e-09, 2.4752300459740787e-10, 2.071654324533266e-11], [-2.9581651571874514e-06, 1.695000890657672e-06, 4.343945162761329e-08, 3.183866423708344e-08, 2.017831729672153e-08, 1.1589502737532698e-08, 5.307029730153358e-09, 2.023736618579618e-09, 6.275161612187131e-10, 1.8037886749171123e-10]]
 
 
+def test_default_structure_is_cvmix():
+    """Production default (user 2026-11-18): cvmix, after the oracle check on real columns."""
+    assert KPPConfig().bld_structure == "cvmix"
+
+
 def test_legacy_structure_unchanged():
     dz = np.array([1.0, 1.5, 2.0, 3.0, 4.5, 6.0, 8.0, 10.0, 12.0, 15.0])
     z = _centres(dz)
@@ -525,7 +530,8 @@ def test_legacy_structure_unchanged():
     u = jnp.asarray(np.stack([0.2 * np.exp(-z / 5.0), 0.05 * np.exp(-z / 9.0)]))
     v = jnp.asarray(np.stack([0.02 * np.exp(-z / 3.0), -0.04 * np.exp(-z / 6.0)]))
     out = K.kpp_vertical_mixing(u, v, T, S, wright_eos(T, S, jnp.zeros_like(T)), jnp.zeros(2),
-                                create_z_star_from_thicknesses(dz), jnp.ones(2), KPPConfig(),
+                                create_z_star_from_thicknesses(dz), jnp.ones(2),
+                                KPPConfig(bld_structure="legacy"),
                                 constants.g, tau_x=jnp.array([0.05, 0.1]),
                                 tau_y=jnp.array([0.0, 0.02]), B_f=jnp.array([5e-8, -3e-8]),
                                 Q_sfc_T=jnp.array([1e-5, -2e-5]), Q_sfc_S=jnp.array([-1e-6, 1e-6]),
