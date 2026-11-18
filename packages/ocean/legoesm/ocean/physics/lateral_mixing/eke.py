@@ -46,6 +46,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.smooth import smooth_max_c1, smooth_min_c1, validate_smoothing_width
+
 
 __physics_contract__ = {
     "summary": (
@@ -115,6 +117,9 @@ __param_spec__ = {
         "excluded": {
             "e_min": "numerics: floor/cap",
             "l_min": "numerics: floor/cap",
+            "e_pos_width": "numerics: RULE 5 smoothing width",
+            "length_switch_width": "numerics: RULE 5 smoothing width",
+            "kappa_cap_width": "numerics: RULE 5 smoothing width",
         },
         "params": {
             "alpha_eke": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
@@ -374,19 +379,36 @@ class EKEConfig(NamedTuple):
     # On a Veros u_centered coordinate the two alternate by up to ±50% per
     # level. Default False ⇒ BIT-IDENTICAL.
     n2_over_dzw: bool = False
+    # RULE 5 smoothing widths of the closure's switches on traced state
+    # (smooth_min_c1/smooth_max_c1: exact once the two sides differ by more
+    # than width/2).  0 = Veros's hard max/min (oracle mode).
+    e_pos_width: float = 1.0e-8           # max(E, 0) [m^2/s^2]
+    length_switch_width: float = 1.0      # min/max between lengths (L_rossby, eke_len, l_min) [m]
+    kappa_cap_width: float = 100.0        # min(kappa_GM, kappa_gm_max) [m^2/s]
 
 
 def eke_mixing_length(L_rossby: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
     """Mixing length L = max(L_rossby, l_min) — the Rossby-radius length from the
     Visbeck machinery, floored so kappa_GM/dissipation stay well-defined. This is
     the ``mixing_length_scheme="rossby"`` length (legoESM's pre-eke_len default)."""
-    return jnp.maximum(L_rossby, cfg.l_min)
+    return smooth_max_c1(L_rossby, cfg.l_min, cfg.length_switch_width)
 
 
 # Denominator safety floor for the |f| and β reciprocals in the Rhines-limited
 # mixing length — a pure numerical floor (matches Veros eke_len's ``max(·, 1e-16)``),
 # exempt from the named-constant rule like the other eps floors in this module.
 _DENOM_FLOOR = 1.0e-16
+
+
+def _sqrt0(x: jnp.ndarray) -> jnp.ndarray:
+    """``sqrt(x)`` for ``x >= 0`` with a finite gradient at 0 (forward exact)."""
+    pos = x > 0.0
+    return jnp.where(pos, jnp.sqrt(jnp.where(pos, x, 1.0)), 0.0)
+
+
+def eke_positive_part(E: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
+    """``max(E, 0)`` (Veros ``max(0, eke)``), smoothed over ``cfg.e_pos_width``."""
+    return smooth_max_c1(E, 0.0, cfg.e_pos_width)
 
 
 def eke_rhines_length(
@@ -397,12 +419,11 @@ def eke_rhines_length(
 
     ``sqrt(E)`` is the eddy velocity scale [m/s] (``E`` is the specific eddy energy
     [m^2/s^2]); ``beta = df/dy`` [1/(m·s)]; ``sqrt(E)/beta`` has units m^2, so the
-    result is a length. ``E`` is floored at 0 and regularised by ``+1e-30`` before
-    the sqrt (finite gradient at ``E=0``); ``beta`` is floored at ``_DENOM_FLOOR``
-    (matching Veros, which assumes ``beta > 0`` — true on the sphere where
-    ``f = 2Ω sinφ`` ⇒ ``β = 2Ω cosφ/R ≥ 0``).
+    result is a length. ``E`` goes through :func:`eke_positive_part`; ``beta`` is
+    floored at ``_DENOM_FLOOR`` (matching Veros, which assumes ``beta > 0`` — true
+    on the sphere where ``f = 2Ω sinφ`` ⇒ ``β = 2Ω cosφ/R ≥ 0``).
     """
-    sqrt_E = jnp.sqrt(jnp.maximum(E, 0.0) + 1.0e-30)
+    sqrt_E = _sqrt0(eke_positive_part(E, cfg))
     beta_safe = jnp.maximum(beta, _DENOM_FLOOR)
     return jnp.sqrt(sqrt_E / beta_safe)
 
@@ -420,16 +441,15 @@ def eke_deformation_radius(
     ``Σ √(max(0,N²))·dzw·maskW``); the ``1/pi`` is the WKB first-baroclinic factor.
     The midlatitude branch ``c1/|f|`` is the deformation radius; the equatorial
     branch ``sqrt(c1/2β)`` caps it as ``|f|→0``. ``|f|`` and ``β`` denominators are
-    floored at ``_DENOM_FLOOR``; the equatorial sqrt is regularised by ``+1e-30`` for
-    a finite gradient at ``c1=0`` (where the midlatitude branch is exactly 0 and wins
-    the min, so the forward value is unaffected).
+    floored at ``_DENOM_FLOOR``.  The ``min`` is smoothed over
+    ``cfg.length_switch_width`` (RULE 5; 0 = Veros).
     """
     c1 = jnp.maximum(int_N_dz, 0.0) / jnp.pi
     f_safe = jnp.maximum(jnp.abs(f_coriolis), _DENOM_FLOOR)
     beta_safe = jnp.maximum(beta, _DENOM_FLOOR)
     L_mid = c1 / f_safe
-    L_eq = jnp.sqrt(c1 / (2.0 * beta_safe) + 1.0e-30)
-    return jnp.minimum(L_mid, L_eq)
+    L_eq = _sqrt0(c1 / (2.0 * beta_safe))
+    return smooth_min_c1(L_mid, L_eq, cfg.length_switch_width)
 
 
 def eke_len_composite(
@@ -443,17 +463,18 @@ def eke_len_composite(
     deformation radius ``L_def`` where eddies are weak/small; ``l_min`` floors the
     result. All inputs are lengths [m] ≥ 0.
     """
-    inner = jnp.minimum(cfg.eke_cross * L_def, cfg.eke_crhin * L_rhines)
-    return jnp.maximum(cfg.l_min, inner)
+    w = cfg.length_switch_width
+    inner = smooth_min_c1(cfg.eke_cross * L_def, cfg.eke_crhin * L_rhines, w)
+    return smooth_max_c1(inner, cfg.l_min, w)
 
 
 def eke_kappa_gm(E: jnp.ndarray, L: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
-    """Prognostic GM coefficient ``kappa_GM = c_k * L * sqrt(E)`` (clamped >= 0 and
-    <= kappa_gm_max). E is floored at 0 before the sqrt (sqrt of a tiny positive is
-    used at E=0 so the gradient stays finite)."""
-    E_pos = jnp.maximum(E, 0.0)
-    kappa = cfg.c_k * L * jnp.sqrt(E_pos + 1.0e-30)
-    return jnp.clip(kappa, 0.0, cfg.kappa_gm_max)
+    """Prognostic GM coefficient ``kappa_GM = min(kappa_gm_max, c_k * L * sqrt(max(E, 0)))``
+    (Veros ``K_gm``); the positive part and the cap are smoothed over
+    ``cfg.e_pos_width`` / ``cfg.kappa_cap_width`` (RULE 5; 0 = Veros). ``L >= 0``
+    so the result is >= 0."""
+    kappa = cfg.c_k * L * _sqrt0(eke_positive_part(E, cfg))
+    return smooth_min_c1(kappa, cfg.kappa_gm_max, cfg.kappa_cap_width)
 
 
 def eke_local_tendency(
@@ -474,10 +495,11 @@ def eke_local_tendency(
     L : array — mixing length [m] (already floored, see ``eke_mixing_length``).
     cfg : EKEConfig.
     """
-    E_pos = jnp.maximum(E, 0.0)
-    kappa = eke_kappa_gm(E_pos, L, cfg)
+    E_pos = eke_positive_part(E, cfg)
+    kappa = eke_kappa_gm(E, L, cfg)
     production = kappa * sigma ** 2
-    dissipation = cfg.c_eps * E_pos ** 1.5 / jnp.maximum(L, cfg.l_min)
+    L_d = smooth_max_c1(L, cfg.l_min, cfg.length_switch_width)
+    dissipation = cfg.c_eps * E_pos * _sqrt0(E_pos) / L_d
     return production - dissipation
 
 
@@ -800,6 +822,8 @@ def validate_eke_config(cfg: EKEConfig) -> None:
         raise ValueError(
             f"EKEConfig.kappa_gm_max must be > 0, got {cfg.kappa_gm_max!r}"
         )
+    for name in ("e_pos_width", "length_switch_width", "kappa_cap_width"):
+        validate_smoothing_width(f"EKEConfig.{name}", getattr(cfg, name))
     if cfg.mixing_length_scheme not in ("rossby", "rhines"):
         raise ValueError(
             "EKEConfig.mixing_length_scheme must be 'rossby' or 'rhines', got "
@@ -898,6 +922,7 @@ __all__ = [
     "eke_len_composite",
     "eke_kappa_gm",
     "eke_local_tendency",
+    "eke_positive_part",
     "eke_3d_local_tendency",
     "eke_apply_local_source",
     "validate_eke_config",
