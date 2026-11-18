@@ -66,12 +66,26 @@ DEPARTURES (documented, canaried in the test):
 - Normalisation is DISCRETE (``F / sum_k F_raw*h_k``, ``normalize_structure``),
   not CVMix's ANALYTIC denominator ``zeta*(1-e^(-H/zeta))`` (Eq. 5.27); the two
   agree in the fine-grid limit and differ by the mid-point-quadrature error on a
-  coarse column.  Both integrate F to unity by construction.
-- Boussinesq density: Eq. 5.22 divides by the LOCAL in-situ ``rho``; this module
-  divides by the configurable REFERENCE density ``rho_0`` (``config.rho_0``,
-  default ``constants.rho_ocean``) — the standard Boussinesq substitution.
+  coarse column.  Both integrate F to unity by construction.  The CVMix CODE
+  (``cvmix_compute_vert_dep``) is also discrete, but on INTERFACES k=2..nlev
+  weighted by the centre spacing ``zt(k-1)-zt(k)``; this module uses cell centres
+  weighted by thickness.  Fed CVMix's interface depths and centre-spacing
+  weights, with CVMix's density and parameters set to this module's, the two agree to
+  1.5e-15 relative (compiled CVMix fce422195a, 4 columns x 2 E values, cells with
+  N^2 >= N_squared_min; oracle_audit/cvmix_family_oracle, 2026-11-18).
+- Density: Eq. 5.22 writes the LOCAL in-situ ``rho``; the CVMix code divides by
+  the global ``FreshWaterDensity``; this module divides by the configurable
+  REFERENCE density ``rho_0`` (``config.rho_0``, default ``constants.rho_ocean``).
 - ``N_squared_min = 1e-7`` s^-2 is HIGHER than Simmons' suggested floor 1e-8
   (Sec. 5.3.5) — a stronger regularisation of the near-bottom singularity.
+  The CVMix code has NO floor and returns K = 0 where N^2 <= 0 (Schmittner
+  Southern Ocean option off); this module
+  floors N^2 instead, so a statically unstable interface gets K = min(
+  Gamma*q*E*F/(rho_0*N_squared_min), K_max) (measured up to K_max = 5e-3 where
+  CVMix gives 0), and, on matched geometry, density and parameters,
+  0 < N^2 < 1e-7 gets a K smaller than or equal to CVMix's (K_CVMix/K_port =
+  N_squared_min/N^2 where neither hits K_max, e.g. 100 at N^2 = 1e-9).
+  [measured in the oracle audit, not canaried]
 - A ``K_max`` cap with NO background floor (caller adds background kappa), the
   ``max(H-z, 0)`` clamp (dry levels below the seafloor return F_raw=1 and are
   then zeroed by ``normalize_structure``'s wet mask), and an ``h_decay >= 1e-6``
