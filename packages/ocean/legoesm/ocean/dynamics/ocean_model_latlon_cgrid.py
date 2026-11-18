@@ -36,7 +36,6 @@ from legoesm.grids.latlon import (
 )
 from legoesm.grids.polar_filter import (
     compute_polar_filter_mask,
-    fourier_filter,
     fourier_filter_3d,
 )
 from legoesm.ocean.vertical import (
@@ -16244,10 +16243,10 @@ class LatLonCGridOceanModel:
         filter preserves the zonal mean of the *filled* field; but discarding the
         filtered values that landed on land positions perturbs the OCEAN-only zonal
         mean, so we add back the per-latitude ocean-mean deficit, restoring the
-        exact per-latitude WET-CELL zonal MEAN.  Because cell area is constant in
-        longitude within a row, for ``eta`` this conserves the per-row ocean volume
-        exactly, and for ``u`` it preserves the zonal-mean flow (no spurious net
-        zonal current).  For ``T``/``S`` it conserves the per-row, per-level
+        exact per-latitude WET-CELL zonal MEAN.  For ``u`` it preserves the
+        zonal-mean flow (no spurious net zonal current).  ``eta`` is never
+        filtered, so volume, heat and salt are untouched when the tracers are not
+        filtered (the default).  For ``T``/``S`` (``polar_filter_tracers``) it conserves the per-row, per-level
         unweighted wet-cell mean, which equals the area·thickness-weighted tracer
         content EXACTLY only where the layer thickness is zonally uniform (full
         cells, rigid lid); under partial cells / z* ``eta`` the per-row content is
@@ -16260,7 +16259,7 @@ class LatLonCGridOceanModel:
         in the dynamics, so filtering them is harmless for the prognostic update;
         if a future diagnostic reads those slots, switch to ``compute_face_masks_3d``.
 
-        Dynamical caveat: filtering prognostic ``u``/``v``/``eta`` every step is a
+        Dynamical caveat: filtering prognostic ``u``/``v`` every step is a
         standard polar-filter practice but the latitude-dependent zonal filter does
         not commute with meridional differencing, so it can perturb discrete
         geostrophic balance poleward of the cutoff.  This is validated by the
@@ -16271,7 +16270,7 @@ class LatLonCGridOceanModel:
           * ``v`` v-face       (n_lat+1, n_lon, nlev)        -> v-face mask, v_mask
           * ``u`` u-face       (n_lat, n_lon+1, nlev)        -> cell mask on the
             periodic interior ``u[:, :-1]`` (last col == first), then re-wrapped
-          * ``eta`` 2D cell-centered (n_lat, n_lon)          -> cell mask, land_mask
+          * ``eta`` 2D cell-centered (n_lat, n_lon)          -> not filtered
 
         LIMITATION: even mask-aware, a lat-lon grid cannot be fully faithful in
         the land-locked Arctic (residual cross-pole basin coupling); the faithful
@@ -16323,16 +16322,6 @@ class LatLonCGridOceanModel:
             filt = filt + (zmean - filt_mean)
             return jnp.where(wet > 0.0, filt, data)
 
-        def _masked_filter_2d(data, wet2d, fmask):
-            wet = wet2d
-            ocean_cnt = jnp.maximum(jnp.sum(wet, axis=1, keepdims=True), 1.0)
-            zmean = jnp.sum(data * wet, axis=1, keepdims=True) / ocean_cnt
-            filled = jnp.where(wet > 0.0, data, zmean)
-            filt = fourier_filter(filled, _grid, fmask)
-            filt_mean = jnp.sum(filt * wet, axis=1, keepdims=True) / ocean_cnt
-            filt = filt + (zmean - filt_mean)
-            return jnp.where(wet > 0.0, filt, data)
-
         land = state.land_mask.data    # (n_lat, n_lon) 1=ocean
         u_mask = state.u_mask.data     # (n_lat, n_lon+1)
         v_mask = state.v_mask.data     # (n_lat+1, n_lon)
@@ -16362,12 +16351,13 @@ class LatLonCGridOceanModel:
         # filter the n_lon-wide interior with the cell mask, then re-append col 0.
         u_int = _masked_filter_3d(state.u.data[:, :-1], u_mask[:, :-1], mask_c)
         u = jnp.concatenate([u_int, u_int[:, 0:1]], axis=1)
-        eta = _masked_filter_2d(state.eta.data, land, mask_c)
+        # eta is NOT filtered: moving sea level between columns while T and S stay
+        # put changes sum(area * h * T) and sum(area * h * S) (measured on the
+        # 1-degree model: -2.39 W/m2 and +2.98e-6 psu m/s in one application).
 
         return state._replace(
             T=state.T.replace(data=T), S=state.S.replace(data=S),
-            u=state.u.replace(data=u), v=state.v.replace(data=v),
-            eta=state.eta.replace(data=eta))
+            u=state.u.replace(data=u), v=state.v.replace(data=v))
 
     def _apply_freeze_floor(self, state: LatLonCGridOceanState
                             ) -> LatLonCGridOceanState:

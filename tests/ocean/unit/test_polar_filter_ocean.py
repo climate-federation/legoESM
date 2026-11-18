@@ -224,3 +224,57 @@ def test_old_saved_config_replays_tracer_filtering():
     flat = {k: v for k, v in d.items() if k != "polar_filter"}
     flat.update({k: v for k, v in d["polar_filter"].items() if k != "__type__"})
     assert ocean_config_from_dict(flat).polar_filter.polar_filter_tracers is True
+
+
+def test_filter_conserves_volume_heat_and_salt():
+    """Budget: one filter application leaves sum(area*eta), sum(area*h*T) and
+    sum(area*h*S) unchanged (in - out - d(storage) = 0, nothing in or out), on a
+    grid with land, unequal partial bottom cells, non-uniform T/S and a rough sea
+    surface at filtered latitudes.  Bound 1e-12 relative."""
+    from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.init_latlon_cgrid import (
+        replace_land_mask, rest_state_latlon_cgrid_ocean,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import (
+        compute_layer_thickness, create_ocean_z_star, create_partial_cell_coordinate,
+    )
+    from legoesm.runtime.precision import apply_precision
+    apply_precision("fp64")
+    n_lat, n_lon, nlev = 24, 48, 6
+    rng = np.random.default_rng(7)
+    grid = ensure_geometry(create_latlon_grid(n_lat, n_lon))
+    H = jnp.asarray(rng.uniform(900.0, 4000.0, (n_lat, n_lon)))
+    z = create_partial_cell_coordinate(create_ocean_z_star(n_levels=nlev, H_max=4000.0), H)
+    s = rest_state_latlon_cgrid_ocean(grid, z, H_max=4000.0, land_lat_threshold=89.0,
+                                      H_bathy_override=H)
+    land = np.array(s.land_mask.data)
+    land[20:23, 5:11] = 0.0                              # a continent inside the filtered rows
+    land[2, 30:33] = 0.0
+    s = replace_land_mask(s, jnp.asarray(land))
+    wet = land[..., None] > 0
+    T = np.where(wet, 5.0 + 3.0 * rng.standard_normal((n_lat, n_lon, nlev)), 0.0)
+    S = np.where(wet, 35.0 + 0.5 * rng.standard_normal((n_lat, n_lon, nlev)), 0.0)
+    eta = 0.5 * rng.standard_normal((n_lat, n_lon)) * land
+    u = 0.1 * rng.standard_normal(s.u.data.shape); u[:, -1] = u[:, 0]
+    s = s._replace(T=s.T.replace(data=jnp.asarray(T)), S=s.S.replace(data=jnp.asarray(S)),
+                   eta=s.eta.replace(data=jnp.asarray(eta)),
+                   u=s.u.replace(data=jnp.asarray(u) * s.u_mask.data[..., None]))
+    model = LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(
+        barotropic_solver="implicit_cn", implicit_vertical_mixing=True,
+        enable_runtime_checks=False, use_polar_filter=True,
+        polar_filter_cutoff_lat_deg=60.0))
+    area = np.asarray(grid.area_T) * land
+
+    def totals(st):
+        h = np.asarray(compute_layer_thickness(st.eta.data, st.H_bathy.data, z))
+        return np.array([(np.asarray(st.eta.data) * area).sum(),
+                         (np.asarray(st.T.data) * h * area[..., None]).sum(),
+                         (np.asarray(st.S.data) * h * area[..., None]).sum()])
+
+    out = model._apply_polar_filter(s, 1800.0)
+    assert not np.array_equal(np.asarray(out.u.data), np.asarray(s.u.data))   # it filtered
+    t0, t1 = totals(s), totals(out)
+    scale = np.array([np.abs(np.asarray(s.eta.data) * area).sum(), abs(t0[1]), abs(t0[2])])
+    assert np.all(np.abs(t1 - t0) <= 1e-12 * scale), (t1 - t0) / scale
