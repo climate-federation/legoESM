@@ -571,8 +571,12 @@ def test_subcycled_bridge_hands_relvar_from_the_final_substep(monkeypatch):
     real_step, real_rv = clubb_mod.clubb_step, clubb_mod.cam6_relvar
 
     def spy_step(*a, **k):
+        # the sub-step runs under jax.checkpoint, which traces it even with
+        # jit disabled: read the values through a callback
         out = real_step(*a, **k)
-        seen.append({k_: np.asarray(out[5][k_]) for k_ in ("rcm_relvar", "rcp2_zt")})
+        jax.debug.callback(lambda r, p: seen.append(
+            {"rcm_relvar": np.asarray(r), "rcp2_zt": np.asarray(p)}),
+            out[5]["rcm_relvar"], out[5]["rcp2_zt"])
         return out
 
     def spy_rv(rcm, rcp2):
