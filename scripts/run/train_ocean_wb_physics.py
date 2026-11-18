@@ -497,6 +497,14 @@ def main(argv=None):
             x["frc"] = forcing_arrays(a, d, a.days, lat_rad, lon_rad)
     model.prime_step_caches(O.set_state_fields(state0, samples[0]["ic"]))
     base_cfg = model.config
+    # Constant eddy coefficient (kappa_GM = kappa_Redi as configured), Visbeck adaptive
+    # coefficient off: with it on, the reverse-mode gradient of a 2-day rollout is wrong
+    # on some start dates (2008-12-01: AD/FD 234 for A_h, 3e6 for K_v; 1.0003 with it
+    # off).  KNOWN DEFECT, cause not identified; see the commit that added this line.
+    base_cfg = base_cfg.replace_flat(gm_redi=base_cfg.gm_redi._replace(
+        visbeck=base_cfg.gm_redi.visbeck._replace(enabled=False)))
+    print(f"[{label}] eddy mixing: constant coefficient kappa_GM {base_cfg.gm_redi.kappa_GM} "
+          f"kappa_Redi {base_cfg.gm_redi.kappa_Redi} (Visbeck adaptive coefficient off)", flush=True)
     import os
     if os.environ.get("OWB_PCG_MAXITER"):   # PROBE ONLY: sea-level solver iteration cap
         base_cfg = base_cfg.replace_flat(
