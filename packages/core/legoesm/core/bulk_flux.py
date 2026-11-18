@@ -561,13 +561,14 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
                 "nemo_source_exact supports stability_scheme='dyer1974' only"
             )
         from legoesm.core import transcendentals as tx
+        from legoesm.core.profile_metrics import safe_sqrt_nan
         from legoesm.core.source_rounding import (
             nemo_fortran_sign as fortran_sign,
             nemo_source_round as R,
         )
 
         z = jnp.asarray(zeta, dtype=jnp.float64)
-        x2 = R(jnp.sqrt(jnp.abs(1.0 - 16.0 * z)))
+        x2 = R(safe_sqrt_nan(jnp.abs(1.0 - 16.0 * z)))  # finite grad at z = 1/16
         x2 = R(jnp.maximum(x2, 1.0))
         x = R(jnp.sqrt(x2))
         unstable = R(
@@ -634,13 +635,14 @@ def psi_h(zeta, stability_scheme="dyer1974", *,
                 "nemo_source_exact supports stability_scheme='dyer1974' only"
             )
         from legoesm.core import transcendentals as tx
+        from legoesm.core.profile_metrics import safe_sqrt_nan
         from legoesm.core.source_rounding import (
             nemo_fortran_sign as fortran_sign,
             nemo_source_round as R,
         )
 
         z = jnp.asarray(zeta, dtype=jnp.float64)
-        x2 = R(jnp.sqrt(jnp.abs(1.0 - 16.0 * z)))
+        x2 = R(safe_sqrt_nan(jnp.abs(1.0 - 16.0 * z)))  # finite grad at z = 1/16
         x2 = R(jnp.maximum(x2, 1.0))
         unstable = R(2.0 * tx.log(0.5 * (1.0 + x2)))
         stable_value = R(-5.0 * z)

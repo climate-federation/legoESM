@@ -1008,11 +1008,11 @@ def nemo_orca2_k0_surface_card(
 ):
     """Run the production S0 -> S1 -> S3 -> S2 path for standalone K0.
 
-    The routine accepts physical fields, including CORE fields and the
-    Decision-171 ice-cover interpolation operands, but no NEMO exchange
-    record.  It is intentionally a thin binding around
-    :func:`nemo_blk_oce_ncar`; the source-ordered arithmetic remains in that
-    shared production path.
+    CORE-only: air T/q are taken at 10 m; no zt input, 2-m air goes via the card.
+    It accepts physical fields, including CORE fields and the Decision-171
+    ice-cover interpolation operands, but no NEMO exchange record.  It is a
+    thin binding around :func:`nemo_blk_oce_ncar`, where the source-ordered
+    arithmetic stays.
     """
 
     validate_nemo_standalone_k0(k0_config)
@@ -1850,7 +1850,13 @@ def _zeta_and_zt_shift(inv_l, air):
 
     theta*/q* are the scales at the start of the iteration.  The zeta_t clamp is
     NEMO's hard one, mirroring zeta_u (it binds only for |zu/L| >= 50 at zt = 2 m,
-    where zeta_u is already clamped).  ``q_zu_width`` [kg/kg] smooths the MAX(0, .)
+    where zeta_u is already clamped).  RULE 5 RECORD: neither clamp has a smooth
+    form - no earlier decision exists for the pre-existing hard zeta_u clamp, so
+    zeta_t follows it (vote 2026-11-18) and both stay an open RULE 5 item for the
+    user.  KNOWN DIFFERENCE vs NEMO: none (hard = reference); beyond |zeta| = 10
+    the derivative w.r.t. 1/L through that clamp is 0.  Tests: hard limit vs the
+    Fortran transcription at both bounds, stored gap 0, check_grads in the
+    clamped cases (test_bulk_flux_zt_shift.py).  ``q_zu_width`` [kg/kg] smooths the MAX(0, .)
     with :func:`positive_part_c1` (exact above the width, never above MAX);
     0 = NEMO's hard MAX.  KNOWN DIFFERENCE at the default width: q_zu sits up to
     4/27 * width below NEMO only where the shifted humidity is within one width of

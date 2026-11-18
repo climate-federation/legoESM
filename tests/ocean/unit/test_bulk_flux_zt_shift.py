@@ -177,7 +177,9 @@ def test_smooth_default_gap_per_case():
     assert set(DEFAULT_GAPS) == set(CASES)
 
 
-@pytest.mark.parametrize("case", ["unstable", "stable", "dry_in_smoothing_band"])
+@pytest.mark.parametrize("case", ["unstable", "stable", "dry_in_smoothing_band",
+                                  "very_stable_zeta_t_clamped",
+                                  "very_unstable_zeta_t_clamped"])
 def test_gradient_through_the_shift_at_the_default(case):
     """d(q_zu)/d(q_zt) and d(theta_zu)/d(theta_zt) at the card's default width.
 
@@ -197,7 +199,8 @@ def test_gradient_through_the_shift_at_the_default(case):
     check_grads(lambda qq: out(jnp.float64(t), qq)[1], (jnp.float64(q),),
                 order=1, modes=("rev",), eps=1e-3 * width)
     dq = float(jax.grad(lambda qq: out(jnp.float64(t), qq)[1])(jnp.float64(q)))
-    assert np.isfinite(dq) and dq > 0.0
+    q_zu = float(out(jnp.float64(t), jnp.float64(q))[1])
+    assert np.isfinite(dq) and (dq > 0.0 if q_zu > 0.0 else dq == 0.0)  # 0 on the floor
 
 
 def test_zt_equal_zu_is_bit_identical_to_the_default_call():
@@ -262,3 +265,31 @@ def test_card_and_public_entry_points_pass_the_heights_on():
 def test_card_carries_zt_and_width_and_core_card_is_10m():
     d = bf.NemoStandaloneK0OceanCard._field_defaults
     assert d["zt_m"] == 10.0 and d["q_zu_floor_width_kg_kg"] == pytest.approx(1e-8)
+
+
+def test_gradient_is_finite_at_zeta_one_sixteenth():
+    """psi_m/psi_h take sqrt(|1 - 16 zeta|): at zeta = 1/16 exactly the plain sqrt
+    gave a NaN gradient (0 cotangent x inf slope), on zeta_u and zeta_t alike."""
+    from legoesm.core.bulk_flux import psi_h, psi_m
+
+    z = jnp.float64(1.0 / 16.0)
+    for psi in (psi_h, psi_m):
+        assert float(jax.grad(lambda x, p=psi: p(x, nemo_source_exact=True))(z)) == -5.0
+    f = jnp.float64
+
+    def g(inv_l):
+        air = ((f(288.0), f(0.008), f(287.0), f(0.008), f(-0.05), f(-1e-4)), (2.0, 1e-8))
+        _, th, qz = bf._zeta_and_zt_shift(inv_l, air)
+        return th + 1e3 * qz
+
+    for inv_l in (1.0 / 32.0, 1.0 / 160.0):       # zeta_t = 1/16, then zeta_u = 1/16
+        assert np.isfinite(float(jax.grad(g)(f(inv_l))))
+    check_grads(g, (f(1.0 / 32.0),), order=1, modes=("rev",), eps=1e-9)
+
+
+def test_public_surface_card_is_core_only_and_says_so():
+    import inspect
+
+    params = inspect.signature(bf.nemo_orca2_k0_surface_card).parameters
+    assert "zt_m" not in params and "q_zu_width" not in params
+    assert "CORE-only: air T/q are taken at 10 m" in bf.nemo_orca2_k0_surface_card.__doc__
