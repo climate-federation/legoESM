@@ -61,7 +61,7 @@ ARM="${ARMS[${SLURM_ARRAY_TASK_ID}]}"
 S="${ARM%%:*}"
 N_STEPS="${ARM##*:}"
 EXTRA=()
-[[ "${S}" == "binomial" || "${S}" == "two_level" ]] && EXTRA=(--checkpoints "${K}")
+[[ "${S}" == "binomial" ]] && EXTRA=(--checkpoints "${K}")
 [[ "${RAD_FP64}" == "1" ]] && EXTRA+=(--rad-fp64)
 # STASH_GRADS=1: per-step adjoint record (ADJOINT lines; unrolled loop only)
 : "${STASH_GRADS:=0}"
