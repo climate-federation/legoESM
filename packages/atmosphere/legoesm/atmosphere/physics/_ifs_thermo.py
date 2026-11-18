@@ -328,8 +328,11 @@ def cuadjtq(th, kcall, psp, t, q, flag=True, oflag=None, sm=None):
             tn = jnp.where(oflag, tl, tm)
             qn = jnp.where(oflag, ql, qm)
         else:
-            tn = oflag * tl + (1.0 - oflag) * tm
-            qn = oflag * ql + (1.0 - oflag) * qm
+            # exact selection at the weight's ends (no 0 x inf from the unused branch)
+            tn = jnp.where(oflag <= 0.0, tm,
+                           jnp.where(oflag >= 1.0, tl, oflag * tl + (1.0 - oflag) * tm))
+            qn = jnp.where(oflag <= 0.0, qm,
+                           jnp.where(oflag >= 1.0, ql, oflag * ql + (1.0 - oflag) * qm))
     elif kcall == 2:
         if sm is None or sm.hard:
             tn, qn = _adj_cu_unclamped(
