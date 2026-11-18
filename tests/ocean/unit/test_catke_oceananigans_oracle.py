@@ -15,7 +15,10 @@ Gated at rel 1e-12: κu, κc, κe on non-convecting faces; the surface TKE flux.
 KNOWN DIFFERENCES, pinned per case (rel 1e-6, abs 1e-12), from the different staggering:
 - convecting faces: the convective length uses ℑz(w★³) in Oceananigans, (ℑz w★)³ here (max 0.74 %);
 - centre dissipation rate: Oceananigans rebuilds centre Ri as the mean of face Ri, here N²/S² of
-  centre-averaged N² and centre shear (max 9.7 %; swapping in the oracle Ri closes it to 9e-16).
+  centre-averaged N² and centre shear (max 9.7 % on F1-F6; swapping in the oracle Ri closes it to 9e-16).
+  F7 adds one degenerate centre: zero shear at the mixed-layer base, where the face Ri jumps from -inf
+  to +inf; the oracle's dissipation length there equals the column depth (gap 116x, pinned; the
+  other 31 centres match to 7e-16).
 """
 from pathlib import Path
 
