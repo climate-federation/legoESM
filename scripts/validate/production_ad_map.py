@@ -99,6 +99,22 @@ H_SWEEP = (1.0,)          # multiples of --h; --h-sweep widens it
 RAD_FP64 = False          # --rad-fp64
 
 
+def nonfinite_census(g, batched=False):
+    """Census, not verdict: which leaf, how many entries, which columns carry
+    a non-finite cotangent (columns = axis 0, or axis 1 with ``batched``,
+    where axis 0 is the window and the windows hit are listed too)."""
+    for path, a in jax.tree_util.tree_leaves_with_path(g):
+        bad = np.asarray(~jnp.isfinite(a))
+        if not bad.any():
+            continue
+        idx = np.nonzero(bad)
+        cols = np.unique(idx[1 if batched else 0])
+        win = (f" windows={np.unique(idx[0]).tolist()}" if batched else "")
+        print(f"NONFINITE {jax.tree_util.keystr(path)} shape={a.shape} "
+              f"count={int(bad.sum())}/{bad.size}{win} ncols={cols.size} "
+              f"cols={cols[:12].tolist()}", flush=True)
+
+
 def grad_check(f, x, v, h, name):
     """f: pytree -> scalar.  AD directional derivative vs central FD (at each
     step in ``H_SWEEP * h``: an FD that converges to AD as h shrinks is a
@@ -113,15 +129,7 @@ def grad_check(f, x, v, h, name):
     gl = jax.tree_util.tree_leaves(g)
     finite = all(bool(jnp.all(jnp.isfinite(a))) for a in gl)
     if not finite:
-        # census, not verdict: which leaf, how many entries, which columns
-        # (axis 0) carry a non-finite cotangent
-        for path, a in jax.tree_util.tree_leaves_with_path(g):
-            bad = np.asarray(~jnp.isfinite(a))
-            if bad.any():
-                cols = np.unique(np.nonzero(bad)[0])
-                print(f"NONFINITE {jax.tree_util.keystr(path)} shape={a.shape} "
-                      f"count={int(bad.sum())}/{bad.size} ncols={cols.size} "
-                      f"cols={cols[:12].tolist()}", flush=True)
+        nonfinite_census(g)
     gmax = max(float(jnp.max(jnp.abs(a))) for a in gl)
     ad = float(sum(jnp.vdot(a, b) for a, b in zip(gl, jax.tree_util.tree_leaves(v))))
     fds = {}
@@ -678,6 +686,37 @@ def time_compiled(fn, args, repeats):
     return t_c, t_1, reps, out
 
 
+def window_check(exp, g_batch, args, n, step0, kw):
+    """Each window's gradient taken alone (plain ``mpas_segment``, no vmap,
+    one compile shared by all windows) against its slice of the batched
+    gradient ``g_batch``.  Prints, per window and leaf, max|diff| / max|alone|
+    (numbers only: vmap may reorder fp32 reductions, so not bitwise)."""
+    from legoesm.driver.mpas_diff_step import mpas_segment
+
+    def one(x, s, p, f, c):
+        out, _ = mpas_segment(exp, _with_x(s, x), p, n, forcing=f,
+                              step0=step0, clock=c, **kw)
+        return _proj_loss(out)
+    gfn = jax.jit(jax.grad(one))
+    nb = jax.tree_util.tree_leaves(args[0])[0].shape[0]
+    for b in range(nb):
+        t0 = time.time()
+        gb = jax.block_until_ready(gfn(*jax.tree_util.tree_map(
+            lambda t, _b=b: t[_b], args)))
+        rel = {}
+        for k in gb:
+            ref = np.asarray(gb[k], np.float64)
+            got = np.asarray(g_batch[k][b], np.float64)
+            scale = np.max(np.abs(ref))
+            rel[k] = (float(np.max(np.abs(got - ref)) / scale) if scale > 0
+                      else float(np.max(np.abs(got))))
+        print("WINDOW_CHECK " + json.dumps(dict(
+            window=b, seconds=time.time() - t0,
+            alone_finite=bool(all(np.all(np.isfinite(np.asarray(v)))
+                                  for v in gb.values())),
+            rel_max_diff=rel)), flush=True)
+
+
 def memory_report(label, fn, args, ncol):
     """Compile ``fn`` (named ``fn.__name__``, so an ``--xla_dump_hlo_module_re``
     filter can select it) WITHOUT running it and print XLA's own buffer
@@ -772,6 +811,10 @@ def build_parser():
     ap.add_argument("--batch", type=int, default=1,
                     help="timing stage: B windows (one cadence period "
                          "apart) in one jax.vmap call; needs --schedule")
+    ap.add_argument("--check-windows", action="store_true",
+                    help="timing stage with --batch: also take each window's "
+                         "gradient alone (no vmap) and print its difference "
+                         "from that window's slice of the batched gradient")
     ap.add_argument("--rad-chunk", type=int, default=0,
                     help="rebuild the physics with RRTMGP column_chunk_size "
                          "= this (must divide the column count); 0 = as "
@@ -933,6 +976,8 @@ def main(argv=None):
             tg_c, tg_1, tg_r, g = time_compiled(jax.grad(fwd), args, a.repeats)
             fin = all(bool(jnp.all(jnp.isfinite(t)))
                       for t in jax.tree_util.tree_leaves(g))
+            if not fin:
+                nonfinite_census(g, batched=nb > 1)
             med_f, med_g = float(np.median(tf_r)), float(np.median(tg_r))
             print("TIMING " + json.dumps(dict(
                 n_steps=n, schedule=a.schedule, checkpoints=a.checkpoints,
@@ -942,6 +987,8 @@ def main(argv=None):
                 grad_first_s=tg_1, grad_s=tg_r, grad_per_step_s=med_g / n,
                 grad_over_fwd=med_g / med_f, grad_finite=fin,
                 peak_gib=peak_gib())), flush=True)
+            if a.check_windows and nb > 1:
+                window_check(exp, g, args, n, step0s[0], kw)
     elif a.stage == "loops":
         # trace-only: which loops stack per-iteration residuals in the
         # gradient of one full-physics step (no compile, no device run)

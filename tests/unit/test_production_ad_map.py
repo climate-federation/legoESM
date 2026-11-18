@@ -354,3 +354,49 @@ def test_parser_round_trips_rad_chunk():
     assert pam.build_parser().parse_args(
         ["--stage", "memory", "--rad-chunk", "214"]).rad_chunk == 214
     assert pam.build_parser().parse_args(["--stage", "memory"]).rad_chunk == 0
+
+
+def test_nonfinite_census_names_windows_and_columns(capsys):
+    import numpy as np
+    g = {"T": np.zeros((3, 5, 2)), "q": np.zeros((3, 5))}
+    g["T"][2, 4, 1] = np.nan
+    g["T"][0, 1, 0] = np.inf
+    pam.nonfinite_census(g, batched=True)
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1 and "['T']" in out[0]
+    assert "count=2/30" in out[0] and "windows=[0, 2]" in out[0]
+    assert "cols=[1, 4]" in out[0]
+    pam.nonfinite_census(g)
+    assert "windows" not in capsys.readouterr().out
+
+
+def test_window_check_compares_each_window_alone(monkeypatch, capsys):
+    """Fake segment: x scaled by the window's clock; the batched gradient of
+    the summed loss is exact, a corrupted window shows a nonzero diff."""
+    import json
+    import numpy as np
+    import legoesm.driver.mpas_diff_step as mds
+
+    def seg(exp, s, p, n, forcing, step0, clock, **kw):
+        return {k: v * clock["c"] * n for k, v in s.items()}, p
+    monkeypatch.setattr(mds, "mpas_segment", seg)
+    monkeypatch.setattr(pam, "_with_x", lambda s, x: x)
+    monkeypatch.setattr(pam, "_proj_loss",
+                        lambda s: sum(jnp.sum(v ** 2) for v in s.values()))
+    x = {"T": jnp.arange(6.0).reshape(3, 2)}
+    c = {"c": jnp.array([1.0, 2.0, 3.0])}
+    args = (x, x, jnp.zeros(3), jnp.zeros(3), c)
+    g = {"T": 2 * x["T"] * (c["c"][:, None] * 4) ** 2}
+    g["T"] = g["T"].at[2, 1].multiply(1.5)
+    pam.window_check(None, g, args, 4, 0, {})
+    rows = [json.loads(line[len("WINDOW_CHECK "):])
+            for line in capsys.readouterr().out.splitlines()]
+    assert [r["window"] for r in rows] == [0, 1, 2]
+    assert rows[0]["rel_max_diff"]["T"] == 0.0
+    assert rows[1]["rel_max_diff"]["T"] == 0.0
+    np.testing.assert_allclose(rows[2]["rel_max_diff"]["T"], 0.5)
+    assert all(r["alone_finite"] for r in rows)
+
+
+def test_parser_check_windows():
+    assert pam.build_parser().parse_args(["--stage", "timing", "--check-windows"]).check_windows
