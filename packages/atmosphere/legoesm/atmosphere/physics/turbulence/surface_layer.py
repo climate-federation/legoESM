@@ -25,6 +25,7 @@ from legoesm.core.bulk_flux import (
     compute_most_fluxes,
     large_yeager_widths,
     compute_sam_oceflx_fluxes,
+    resolve_gustiness_w_zi,
     simple_bulk_fluxes,
     validate_bulk_scheme,
 )
@@ -71,6 +72,24 @@ __physics_contract__ = {
         "linearly by area fraction and ustar = sqrt(|tau|/rho)."
     ),
 }
+
+
+def land_tile_surface_cfg(ocean_cfg, z0_land):
+    """The LAND tile law, derived from the OCEAN tile law.
+
+    Fixed-roughness Monin-Obukhov (``"most"``) at ``z0_land``, no
+    Charnock/gustiness, and the default thermodynamic convention even when the
+    ocean tile runs aerobulk (AIR-SEA-only option, #762).
+
+    One owner, called by the atmosphere's land tile AND by the unified slab
+    surface-energy balance, so the two can never diverge into different land
+    flux laws again -- and callable without a pipeline, so a probe can ask
+    instead of reconstruct (#1320).
+    """
+    return ocean_cfg._replace(
+        bulk_scheme="most", z0=z0_land, gustiness_w_zi=0.0,
+        thermo_convention="legoesm",
+    )
 
 
 def surface_fluxes_at_lowest_level(u, v, T, q_v, T_sfc, q_sfc, rho, config,
@@ -211,6 +230,8 @@ def compute_surface_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
             variant="cesm", t_bot=t_bot, **_ws,
+            gustiness_w_zi=resolve_gustiness_w_zi(
+                getattr(config, "gustiness_w_zi", None), config.bulk_scheme),
         )
         return _apply_prescribed_scalar_fluxes(
             config, tau_x, tau_y, shflx, lhflx, ustar, rho) + tuple(_w)
@@ -628,6 +649,8 @@ def _single_tile_flux(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
             variant="cesm", t_bot=t_bot,
+            gustiness_w_zi=resolve_gustiness_w_zi(
+                getattr(config, "gustiness_w_zi", None), config.bulk_scheme),
         )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(

@@ -61,6 +61,18 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.rte import (
 # ---------------------------------------------------------------------------
 
 
+def _major_od(lookup, vmr_lib, molecules, T, p, igpt, vmr_fields=None):
+    return gas_optics.major_optical_depth_all_gpts(lookup, vmr_lib, molecules, T, p, vmr_fields)[igpt]
+
+
+def _minor_od(lookup, vmr_lib, molecules, T, p, igpt, vmr_fields=None):
+    return gas_optics.minor_optical_depth_all_gpts(lookup, vmr_lib, molecules, T, p, vmr_fields)[igpt]
+
+
+def _rayleigh_od(lookup, vmr_lib, molecules, T, p, igpt, vmr_fields=None):
+    return gas_optics.rayleigh_optical_depth_all_gpts(lookup, vmr_lib, molecules, T, p, vmr_fields)[igpt]
+
+
 class TestClipToTableRange:
     """Direct tests for the new safety helper."""
 
@@ -167,7 +179,7 @@ class TestRelativeAbundanceSafeDiv:
         # Force lower atmosphere (p > p_ref_trop ≈ 1e4 Pa).
         p = jnp.full(shape, 5e4)
         molecules = jnp.full(shape, 1e22)
-        tau = gas_optics.compute_major_optical_depth(
+        tau = _major_od(
             lookup, vmr_lib, molecules, T, p, igpt=jnp.array(0),
             vmr_fields=vmr_fields,
         )
@@ -183,7 +195,7 @@ class TestRelativeAbundanceSafeDiv:
         molecules = jnp.full(shape, 1e22)
 
         def loss(T_in):
-            tau = gas_optics.compute_major_optical_depth(
+            tau = _major_od(
                 lookup, vmr_lib, molecules, T_in, p, igpt=jnp.array(0),
                 vmr_fields=vmr_fields,
             )
@@ -207,7 +219,7 @@ class TestRelativeAbundanceSafeDiv:
 
         def loss(vmr):
             v = {lookup.idx_h2o: vmr, lookup.idx_o3: vmr}
-            tau = gas_optics.compute_major_optical_depth(
+            tau = _major_od(
                 lookup, vmr_lib, molecules, T, p, igpt=jnp.array(0),
                 vmr_fields=v,
             )
@@ -308,7 +320,7 @@ class TestOutOfRangeTemperature:
         T = jnp.full(shape, 130.0)
         p = jnp.full(shape, 5e4)
         molecules = jnp.full(shape, 1e22)
-        tau = gas_optics.compute_major_optical_depth(
+        tau = _major_od(
             lookup, vmr_lib, molecules, T, p, igpt=jnp.array(0)
         )
         assert jnp.all(jnp.isfinite(tau))
@@ -321,7 +333,7 @@ class TestOutOfRangeTemperature:
         for p_value in [5e4, 5e3]:
             p = jnp.full(shape, p_value)
             molecules = jnp.full(shape, 1e22)
-            tau = gas_optics.compute_minor_optical_depth(
+            tau = _minor_od(
                 lookup, vmr_lib, molecules, T, p, igpt=jnp.array(0)
             )
             assert jnp.all(jnp.isfinite(tau)), f"minor OD must be finite at p={p_value}"
@@ -351,10 +363,10 @@ class TestOutOfRangeTemperature:
         p = jnp.full(shape, 5e4)
         molecules = jnp.full(shape, 1e22)
 
-        tau_cold = gas_optics.compute_major_optical_depth(
+        tau_cold = _major_od(
             lookup, vmr_lib, molecules, T_cold, p, igpt=jnp.array(0)
         )
-        tau_ref_min = gas_optics.compute_major_optical_depth(
+        tau_ref_min = _major_od(
             lookup, vmr_lib, molecules, T_ref_min, p, igpt=jnp.array(0)
         )
         np.testing.assert_allclose(
@@ -362,10 +374,10 @@ class TestOutOfRangeTemperature:
             err_msg="major OD must saturate at lower table boundary T",
         )
 
-        tau_hot = gas_optics.compute_major_optical_depth(
+        tau_hot = _major_od(
             lookup, vmr_lib, molecules, T_hot, p, igpt=jnp.array(0)
         )
-        tau_ref_max = gas_optics.compute_major_optical_depth(
+        tau_ref_max = _major_od(
             lookup, vmr_lib, molecules, T_ref_max, p, igpt=jnp.array(0)
         )
         np.testing.assert_allclose(
@@ -394,10 +406,10 @@ class TestOutOfRangeTemperature:
         p = jnp.full(shape, 5e4)
         molecules = jnp.full(shape, 1e22)
 
-        tau_cold = gas_optics.compute_rayleigh_optical_depth(
+        tau_cold = _rayleigh_od(
             lookup_sw, vmr_lib, molecules, T_cold, p, igpt=jnp.array(0)
         )
-        tau_ref = gas_optics.compute_rayleigh_optical_depth(
+        tau_ref = _rayleigh_od(
             lookup_sw, vmr_lib, molecules, T_ref_min, p, igpt=jnp.array(0)
         )
         np.testing.assert_allclose(
@@ -1294,10 +1306,9 @@ class TestTropopauseBoundary:
         assert jnp.all(jnp.isfinite(out.sw_flux_up))
         assert jnp.all(jnp.isfinite(out.heating_rate))
 
-        # AD path must be finite — the lower-branch
-        # ``_compute_minor_optical_depth`` is evaluated everywhere via
-        # the jnp.where, so an unmasked NaN gradient from the dead
-        # branch would surface here.
+        # AD path must be finite — the lower-atmosphere minor term is
+        # evaluated everywhere via the jnp.where, so an unmasked NaN
+        # gradient from the dead branch would surface here.
         def loss(T_in):
             o = solver.solve_columns(
                 T=T_in, p_full=p_full, p_half=p_half,
@@ -1308,7 +1319,7 @@ class TestTropopauseBoundary:
         g = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(g)), (
             "all-stratosphere column gradient must be finite — "
-            "the dead lower-atm branch in compute_minor_optical_depth "
+            "the dead lower-atm branch of the minor optical depth "
             "must not propagate NaN cotangents."
         )
 
@@ -3286,7 +3297,7 @@ class TestRayleighScattering:
         lkp = self._lookup_sw()
         T, p, mol = self._state()
         ods = jnp.array([
-            gas_optics.compute_rayleigh_optical_depth(
+            _rayleigh_od(
                 lkp, vmr_lib, mol, T, p, igpt=jnp.array(i))[0, 0, 0]
             for i in range(lkp.n_gpt)
         ])
@@ -3298,8 +3309,8 @@ class TestRayleighScattering:
         lkp = self._lookup_sw()
         T, p, mol = self._state()
         igpt = jnp.array(50)
-        od1 = gas_optics.compute_rayleigh_optical_depth(lkp, vmr_lib, mol, T, p, igpt)
-        od2 = gas_optics.compute_rayleigh_optical_depth(
+        od1 = _rayleigh_od(lkp, vmr_lib, mol, T, p, igpt)
+        od2 = _rayleigh_od(
             lkp, vmr_lib, 2.0 * mol, T, p, igpt)
         # Rayleigh OD = cross-section · air amount → exactly linear.
         np.testing.assert_allclose(
@@ -3312,7 +3323,7 @@ class TestRayleighScattering:
         lkp = self._lookup_sw()
         T, p, mol = self._state()
         ods = np.array([
-            float(gas_optics.compute_rayleigh_optical_depth(
+            float(_rayleigh_od(
                 lkp, vmr_lib, mol, T, p, igpt=jnp.array(i))[0, 0, 0])
             for i in range(lkp.n_gpt)
         ])
@@ -3330,7 +3341,7 @@ class TestRayleighScattering:
         T, p, mol = self._state()
 
         def total_od(m):
-            return gas_optics.compute_rayleigh_optical_depth(
+            return _rayleigh_od(
                 lkp, vmr_lib, m, T, p, igpt=jnp.array(50)).sum()
 
         g = jax.grad(total_od)(mol)

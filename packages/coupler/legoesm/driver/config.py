@@ -422,6 +422,16 @@ class DycoreConfig(NamedTuple):
     # Default ("q_v",) since 2026-10-15 (user decision after the 30/60-day pair
     # against the flux form); amip_production.yaml also pins it explicitly.
     mpas_vert4_log_form_tracers: tuple = ("q_v",)
+    # Multiplier on the MPAS hydrostatic dycore's fourth-order hyperdiffusion
+    # of SURFACE PRESSURE only (effective nu_del4_ps = hyperdiff coefficient *
+    # this scale; the momentum hyperdiffusion nu_del4 is untouched).  The term
+    # moves air mass between columns without moving tracers: at 1.0 an offline
+    # probe measured 0.071 mm/day of water removed from the global budget, and
+    # exactly zero with the term off (amip_runs/waterleak_1113).  1.0 = the
+    # behaviour before this switch existed, byte-identical, and is KEPT as the
+    # default pending the project owner's decision; 0.0 = term off.
+    # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION.
+    mpas_ps_hyperdiff_scale: float = 1.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -1412,6 +1422,24 @@ class ExperimentConfig(NamedTuple):
     # slab knobs (C_land, emissivity_land) become unused and
     # the multilayer config below takes over.
     use_multilayer_land: bool = False
+    # Prescribed land surface (atmosphere-only AMIP, MPAS lane): a monthly
+    # climatology file of land skin temperature and land sensible/latent heat
+    # fluxes (scripts/data/build_era5_prescribed_land.py) replaces the land
+    # tile through the SAME three channels it hands over (T_sfc blend over the
+    # land fraction, forcing["shflx_land"] / ["lhflx_land"]).  Empty = off.
+    land_prescribed_flux_file: str = ""
+    # Which channels the prescribed land hands over (the file's albedo, when
+    # present, is always blended in over land):
+    #   "ts_lh" (default): skin temperature + the file's LATENT heat flux
+    #     (moisture availability from the climatology); the bulk scheme
+    #     computes the SENSIBLE heat against the skin temperature, keeping the
+    #     surface-air temperature feedback.
+    #   "ts": skin temperature only; the land humidity falls back to the
+    #     static land_beta fraction of saturation (measured 2026-11-06: deserts
+    #     evaporate freely at the warm prescribed skin, Australia +16 mm/day).
+    #   "ts_fluxes": skin temperature AND both fluxes (no feedback: winter
+    #     continental 2 m air up to 16 K too cold, tas rank 48/48).
+    land_prescribed_channels: str = "ts_lh"
     # Land-tile call interval [s]; 0.0 (default) advances the land every
     # host step (legacy).  A positive value calls the tile every
     # round(land_update_seconds/dt) steps with the atmosphere forcing
@@ -2268,6 +2296,34 @@ class ExperimentConfig(NamedTuple):
     # droplet size reset in the sedimentation fall speeds (prognostic droplet
     # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_sed_reset_log_width: float = 0.01
+    # MorrisonConfig.mg2_snow_accretes_ice / mg2_ice_sed_clear_air_sublimation:
+    # two CAM6 MG2 cloud-ice sinks (snow collects cloud ice; cloud ice falling
+    # into a less cloudy layer sublimates), read only in the CAM6 MG2 mode
+    # (morrison_warm_rain_incloud).  Defaults equal the leaf (True = MG2).
+    morrison_mg2_snow_accretes_ice: bool = True
+    morrison_mg2_ice_sed_clear_air_sublimation: bool = True
+    # MPAS lane, partly ice-covered sea cells: evaluate the surface exchange
+    # separately over the ice and the open water (each on its own surface
+    # temperature) and drive the prognostic ice skin with the ICE tile's
+    # turbulent fluxes and its own radiation, instead of the cell mean (which
+    # charges the open water's heat loss to the ice).  The atmosphere receives
+    # the cover-weighted sum.  Checked by sea_ice_flux_split_eligibility.
+    sea_ice_flux_split: bool = False
+    # Prescribed land, "ts_fluxes" mode only: over glacier-dominant columns
+    # (land.boundary_data.glacier_mask of surfdata_path: Antarctica, Greenland)
+    # the SENSIBLE heat is the bulk value against the prescribed skin
+    # temperature (as in "ts_lh") instead of the file's flux.  Elsewhere the
+    # file's flux is kept.  Why: the file's downward flux over the ice sheets
+    # (~-25 W/m2) is taken from the lowest air whatever its temperature
+    # (measured: 2 m air 5-6 K too cold over Antarctica, surface 4 K warmer
+    # than the air; ERA5 has the air 1.5 K warmer).  Static mask.
+    land_prescribed_ice_sheet_bulk_sensible: bool = False
+    # Roughness length [m] of the fixed-roughness land-tile Monin-Obukhov law
+    # that computes that sensible heat (not the open-ocean law, whose stable
+    # exchange over ice was measured at a fifth of ERA5's).  0.0024 m = CLM5
+    # snow/glacier momentum roughness (zsno; CLM5 Tech Note sect. 2.5.1).
+    # Read only with land_prescribed_ice_sheet_bulk_sensible.
+    land_prescribed_ice_sheet_z0_m: float = 0.0024
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2389,6 +2445,28 @@ class ExperimentConfig(NamedTuple):
                     "land_fraction_source='zero' with a land tile "
                     "(use_multilayer_land / slab_land_active): land physics "
                     "on no land")
+        if self.land_prescribed_channels not in ("ts", "ts_lh", "ts_fluxes"):
+            errors.append(
+                f"land_prescribed_channels={self.land_prescribed_channels!r}; "
+                "expected 'ts', 'ts_lh' or 'ts_fluxes'")
+        if self.land_prescribed_flux_file:
+            if self.grid.grid_type != "mpas":
+                errors.append(
+                    "land_prescribed_flux_file is an MPAS-lane option (the lane "
+                    "that hands the atmosphere the land's own fluxes); got "
+                    f"grid_type={self.grid.grid_type!r}")
+            if self.use_multilayer_land or self.slab_land_active:
+                errors.append(
+                    "land_prescribed_flux_file replaces the land tile: set "
+                    "use_multilayer_land=False and slab_land_active=False")
+            if self.land_beta_soil:
+                errors.append(
+                    "land_prescribed_flux_file with land_beta_soil=True: there is "
+                    "no soil to derive beta_soil from")
+            if not self.land_mask_path and self.land_fraction_source == "zero":
+                errors.append(
+                    "land_prescribed_flux_file needs a land fraction (land_mask_path "
+                    "or land_fraction_source) to blend the prescribed land in")
         # Owner decision 2026-08-16: conserving form always, and any
         # NON-conserving form must ANNOUNCE itself when invoked. These are
         # warnings, not errors — the legacy/exception paths stay selectable
@@ -2641,6 +2719,13 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "dycore.mpas_div_damp4_scale must be a finite number >= 0, "
                 f"got {_dd4!r}")
+        # Same reason: this scale multiplies the surface-pressure tendency.
+        _psh = getattr(d, "mpas_ps_hyperdiff_scale", 1.0)
+        if (not isinstance(_psh, (int, float)) or isinstance(_psh, bool)
+                or not math.isfinite(_psh) or _psh < 0):
+            errors.append(
+                "dycore.mpas_ps_hyperdiff_scale must be a finite number >= 0, "
+                f"got {_psh!r}")
         # Dynamical-core axis membership.  Mirror the gate in
         # ``atmosphere.dynamics.resolve_solver_name`` so a typo fails here, at
         # config-validation time, instead of deep in the solver factory at JIT.
@@ -3611,6 +3696,11 @@ class ExperimentConfig(NamedTuple):
                     "at a transient legoesm_surfdata NetCDF (pft_frac(year, npft, "
                     "lat, lon) in percent, CLM5 17-PFT axis); none was set."
                 )
+        if not (self.land_prescribed_ice_sheet_z0_m > 0.0):
+            errors.append(
+                "land_prescribed_ice_sheet_z0_m must be a positive roughness "
+                f"length [m]; got {self.land_prescribed_ice_sheet_z0_m!r}."
+            )
         if not (self.surface_z0_land > 0.0):
             errors.append(
                 f"surface_z0_land must be a positive roughness length [m]; "
@@ -4278,6 +4368,17 @@ class ExperimentConfig(NamedTuple):
                 "and the lat-lon C-grid PE only; on "
                 f"discretization={d.discretization!r}/model_type={d.model_type!r}/"
                 f"grid_type={g.grid_type!r} it would be silently inert")
+        # Only the hydrostatic MPAS dycore has the surface-pressure
+        # hyperdiffusion this scales; 1.0 is the no-change default.
+        _pshs = getattr(d, "mpas_ps_hyperdiff_scale", 1.0)
+        if (isinstance(_pshs, (int, float)) and not isinstance(_pshs, bool)
+                and _pshs != 1.0
+                and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
+            errors.append(
+                "dycore.mpas_ps_hyperdiff_scale is wired into the hydrostatic MPAS "
+                "dycore only; on "
+                f"discretization={d.discretization!r}/model_type={d.model_type!r} "
+                "it would be silently inert")
         # Names must be known per-mass water/number tracers (typo guard; the
         # dycore skips a valid name its state does not carry).  No inertness
         # error: the default is non-empty and, like mpas_nu_vert4_T, simply
@@ -4624,7 +4725,9 @@ class ExperimentConfig(NamedTuple):
                     errors.append(f"land_canopy_*: {exc}")
         for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
                     "morrison_do_graupel", "morrison_warm_rain_incloud",
-                    "morrison_prognostic_droplet_number"):
+                    "morrison_prognostic_droplet_number",
+                    "morrison_mg2_snow_accretes_ice",
+                    "morrison_mg2_ice_sed_clear_air_sublimation"):
             _v = getattr(self, _nm)
             if not isinstance(_v, bool):
                 errors.append(f"{_nm} must be a bool, got {_v!r}")
@@ -5166,6 +5269,20 @@ class ExperimentConfig(NamedTuple):
                     "ocean_flux_on_ocean_surface=True separates the "
                     "non-land fraction's surface fluxes from the land's, but "
                     f"{_why}. Leave it unset (auto) or false.")
+
+        if self.land_prescribed_ice_sheet_bulk_sensible:
+            _why = ice_sheet_bulk_sensible_ineligible_reason(self)
+            if _why:
+                errors.append(
+                    "land_prescribed_ice_sheet_bulk_sensible=True computes the "
+                    f"sensible heat over the ice sheets, but {_why}.")
+
+        if self.sea_ice_flux_split:
+            _ok, _why = sea_ice_flux_split_eligibility(self)
+            if not _ok:
+                errors.append(
+                    "sea_ice_flux_split=True separates the ice and open-water "
+                    f"surface exchange in sea-ice cells, but {_why}.")
 
         if self.land_stress_from_land is True:
             _ok, _why = land_stress_eligibility(self)
@@ -5963,6 +6080,46 @@ def ocean_flux_surface_eligibility(cfg) -> tuple[bool, str]:
                        "fraction (land_stress_from_land unset or true, "
                        "eligible); otherwise the ocean-surface stress covers "
                        "the land too")
+    return True, ""
+
+
+def ice_sheet_bulk_sensible_ineligible_reason(cfg) -> str:
+    """Why ``land_prescribed_ice_sheet_bulk_sensible=True`` would be inert or
+    wrong in ``cfg`` ("" = live): it replaces the FILE's sensible heat, needs
+    the glacier map, and its bulk value must be taken against the land skin."""
+    if not (bool(cfg.land_prescribed_flux_file)
+            and cfg.land_prescribed_channels == "ts_fluxes"):
+        return ("the land sensible heat is not prescribed "
+                "(needs land_prescribed_flux_file with channels 'ts_fluxes')")
+    if not cfg.surfdata_path:
+        return "surfdata_path is empty (the glacier map comes from it)"
+    if resolve_ocean_flux_on_ocean_surface(cfg):
+        return ("ocean_flux_on_ocean_surface is on: the bulk sensible heat "
+                "is then evaluated on the ocean/ice surface, not the land skin")
+    return ""
+
+
+def sea_ice_flux_split_eligibility(cfg) -> tuple[bool, str]:
+    """Is ``sea_ice_flux_split=True`` live in ``cfg``?
+    ``(eligible, reason_if_not)``: the prognostic ice skin it drives, the
+    RRTMGP radiation its ice-tile longwave is rebuilt from, and the land's
+    own heat fluxes handed to the boundary layer (prescribed or from the
+    interactive land), which is where the split exchange lives."""
+    if cfg.ice_skin_prognostic is False:
+        return False, ("ice_skin_prognostic is off (the split drives the "
+                       "prognostic ice skin)")
+    if cfg.radiation not in ("rrtmg", "rrtmgp"):
+        return False, (f"radiation={cfg.radiation!r}: the ice-tile longwave "
+                       "is rebuilt from the RRTMGP surface emissivity")
+    _presc = bool(cfg.land_prescribed_flux_file) and (
+        cfg.land_prescribed_channels in ("ts_lh", "ts_fluxes"))
+    if not _presc:
+        _ok, _why = land_flux_handoff_eligibility(cfg)
+        if not _ok:
+            return False, (
+                "the land's heat fluxes are not handed to the boundary "
+                "layer (no prescribed land fluxes with channels ts_lh / "
+                f"ts_fluxes, and {_why}); it would be silently inert")
     return True, ""
 
 

@@ -189,6 +189,7 @@ def sedimentation_tendency(
     cfl_speed: jax.Array | None = None,
     return_substeps: bool = False,
     dz_floor: bool = True,
+    inflow_fraction: jax.Array | None = None,
 ) -> jax.Array | tuple:
     """Compute sedimentation tendency from vertical flux divergence.
 
@@ -243,6 +244,16 @@ def sedimentation_tendency(
         Floor ``dz`` at 1 m in the divergence and the CFL count (the MG2
         machinery's guard).  gSAM's warm rain has no such floor and passes
         False.
+    inflow_fraction : jax.Array, optional
+        Share ``d`` in [0, 1], (ncol, nlev), of the flux leaving the layer
+        above that the layer receives (MG2 cloud ice: ``min(icldm(k)/
+        icldm(k-1), 1)``, micro_mg2_0.F90:2275-2280).  The remaining
+        ``(1 - d)·flux_in`` falls into clear air and is NOT added to the
+        layer: its rate [kg/kg/s, >= 0] is appended to the return tuple
+        (after the surface flux, before the sub-step count) for the caller to
+        hand to the vapour (MG2 qvlat / qisevap, :2292-2296).  None (default)
+        = everything is received, byte-identical, nothing appended.  The
+        value at level 0 is unused (nothing enters the model top).
     return_substeps : bool, default False
         Append the per-column REQUIRED sub-step count ``(ncol,)`` int32
         (``1 + floor(max_k V dt/dz)``, NOT clipped to ``n_substeps_max``) to
@@ -264,7 +275,8 @@ def sedimentation_tendency(
             raise ValueError("sedimentation sub-stepping needs dt")
         return _sedimentation_substepped(
             q_pos, rho, V_t, dz, dt, return_surface_flux, extra_sink,
-            int(n_substeps_max), cfl_speed, return_substeps, dz_floor)
+            int(n_substeps_max), cfl_speed, return_substeps, dz_floor,
+            inflow_fraction)
     flux = V_t * q_pos * rho  # (ncol, nlev) outgoing flux density [kg/m^2/s]
 
     if dt is not None:
@@ -286,10 +298,16 @@ def sedimentation_tendency(
     # zero buffer + concatenate.
     flux_in = jnp.pad(flux[:, :-1], ((0, 0), (1, 0)))
     dz_safe = jnp.clip(dz, 1.0, None) if dz_floor else dz
-    tendency = (flux_in - flux) / (rho * dz_safe)
+    if inflow_fraction is None:
+        tendency = (flux_in - flux) / (rho * dz_safe)
+    else:
+        tendency = (inflow_fraction * flux_in - flux) / (rho * dz_safe)
+        clear_loss = (1.0 - inflow_fraction) * flux_in / (rho * dz_safe)
 
     # Bottom outgoing flux is the precipitation reaching the surface.
     out = (tendency, flux[:, -1]) if return_surface_flux else (tendency,)
+    if inflow_fraction is not None:
+        out = out + (clear_loss,)
     if return_substeps:
         out = out + (_required_substeps(V_t, dz, dt, cfl_speed, dz_floor),)
     return out if len(out) > 1 else out[0]
@@ -319,7 +337,7 @@ def _required_substeps(V_t, dz, dt, cfl_speed, dz_floor=True):
 
 def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
                               extra_sink, n_max, cfl_speed, return_substeps,
-                              dz_floor=True):
+                              dz_floor=True, inflow_fraction=None):
     """MG2 ``micro_mg2_0.F90`` sedimentation loop (see caller docstring).
 
     Static-shape ``lax.fori_loop`` over ``n_max`` with sub-steps beyond a
@@ -352,7 +370,7 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
                if extra_sink is not None else None)
 
     def body(i, carry):
-        q_dum, tend_acc, sfc_acc = carry
+        q_dum, tend_acc, sfc_acc = carry[:3]
         active = i < nstep                                   # (ncol, 1)
         flux = V_t * q_dum * rho
         q_for_cap = (jnp.maximum(q_dum - reserve, 0.0) if reserve is not None
@@ -360,10 +378,17 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
         flux = jnp.minimum(flux, q_for_cap * rho * dz / dt_s)
         flux = jnp.where(active, flux, 0.0)
         flux_in = jnp.pad(flux[:, :-1], ((0, 0), (1, 0)))
-        tend = (flux_in - flux) / (rho * dz_safe)
+        if inflow_fraction is None:
+            tend = (flux_in - flux) / (rho * dz_safe)
+        else:
+            tend = (inflow_fraction * flux_in - flux) / (rho * dz_safe)
         q_dum = (q_dum + dt_s * tend).astype(_dtype)
-        return (q_dum, (tend_acc + tend / nstep).astype(_dtype),
-                (sfc_acc + flux[:, -1] / nstep[:, 0]).astype(_dtype))
+        new = (q_dum, (tend_acc + tend / nstep).astype(_dtype),
+               (sfc_acc + flux[:, -1] / nstep[:, 0]).astype(_dtype))
+        if inflow_fraction is None:
+            return new
+        loss = (1.0 - inflow_fraction) * flux_in / (rho * dz_safe)
+        return new + ((carry[3] + loss / nstep).astype(_dtype),)
 
     # Passes past every column's nstep add exact zeros, so stop after the
     # chunk holding max(nstep): bit-identical to running all n_max, and the
@@ -378,10 +403,14 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
             lambda cr: cr,
             carry)
 
-    _, tendency, sfc = jax.lax.fori_loop(
-        0, -(-n_max // _SED_CHUNK), chunk,
-        (q_pos, jnp.zeros_like(q_pos), jnp.zeros_like(q_pos[:, -1])))
+    _init = (q_pos, jnp.zeros_like(q_pos), jnp.zeros_like(q_pos[:, -1]))
+    if inflow_fraction is not None:
+        _init = _init + (jnp.zeros_like(q_pos),)
+    _res = jax.lax.fori_loop(0, -(-n_max // _SED_CHUNK), chunk, _init)
+    tendency, sfc = _res[1], _res[2]
     out = (tendency, sfc) if return_surface_flux else (tendency,)
+    if inflow_fraction is not None:
+        out = out + (_res[3],)
     if return_substeps:
         out = out + (nstep_req[:, 0],)
     return out if len(out) > 1 else out[0]

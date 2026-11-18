@@ -131,3 +131,26 @@ def test_oceflx_ad_safe():
     assert float(g[0]) > 0.0                 # dLHF/dT_sfc > 0
     assert float(g[1]) < 0.0                 # dLHF/dq_atm < 0
     assert float(g[2]) > 0.0                 # dLHF/dU > 0
+
+
+@pytest.mark.parametrize("variant", ["sam", "cesm"])
+def test_oceflx_convective_gustiness(variant):
+    """gustiness_w_zi: 0 is the oracle; > 0 raises the unstable flux (more at
+    low wind), leaves a stable column alone, and keeps the gradient finite."""
+    kw = dict(variant=variant, t_bot=jnp.asarray(299.0))
+    lhf = lambda zi, **a: float(compute_sam_oceflx_fluxes(
+        **_rce_args(**a), gustiness_w_zi=zi, **kw)[3])
+    base = float(compute_sam_oceflx_fluxes(**_rce_args(), **kw)[3])
+    assert lhf(0.0) == base
+    gain5, gain2 = lhf(600.0) / base, lhf(600.0, u=2.0) / lhf(0.0, u=2.0)
+    print(f"{variant}: LHF gain zi=600 at 5 m/s {gain5:.4f}, at 2 m/s {gain2:.4f}")
+    assert 1.0 < gain5 < gain2 < 2.0
+    assert lhf(600.0, theta_atm=303.0) == lhf(0.0, theta_atm=303.0)
+
+    def f(T_sfc, u):
+        a = _rce_args()
+        a.update(T_sfc=T_sfc, u_atm=u)
+        return compute_sam_oceflx_fluxes(**a, gustiness_w_zi=600.0, **kw)[3]
+    for T in (300.0, 299.0, 296.0):   # unstable, neutral-ish, stable
+        g = jax.grad(f, argnums=(0, 1))(jnp.asarray(T), jnp.asarray(5.0))
+        assert all(bool(jnp.isfinite(gi)) for gi in g)

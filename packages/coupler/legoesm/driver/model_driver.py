@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import latent_heat_vaporization, saturation_mixing_ratio
 from legoesm.forcing.time_utils import daily_forcing_bucket, day_to_calendar
 
 from legoesm.core.conservation import (
@@ -4408,7 +4408,7 @@ class ModelDriver:
         silently, the issue-#405 bug class)."""
         import numpy as _np
         from legoesm.land import init_multilayer_land_state, aridity_theta_init
-        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.thermo import latent_heat_vaporization, saturation_mixing_ratio
         from legoesm.land.clm_surface_map import (
             load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
         )
@@ -5170,6 +5170,21 @@ class ModelDriver:
             if _carry:
                 _rebuilt = _rebuilt._replace(**_carry)
         return _rebuilt
+
+    def _surfdata_glacier_mask(self, surfdata_path: str):
+        """(ncol,) 1.0 on glacier-dominant columns of the surface data
+        regridded to ``self.grid`` (land.boundary_data.glacier_mask), else 0."""
+        from legoesm.land.config import LandConfig
+        from legoesm.land.boundary_data import (
+            glacier_mask, init_land_surface_data)
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        _start_year = getattr(self.config, "start_year", None)
+        _, _, gsd = init_land_surface_data(
+            surfdata_path, self._surface_data_grid(),
+            LandConfig(surface_scheme=SimpleSEBConfig()),
+            float(self.config.start_day),
+            year=None if _start_year is None else float(_start_year))
+        return jnp.asarray(glacier_mask(gsd).astype(np.float64))
 
     def _surfdata_land_albedo(self, surfdata_path: str, lat_albedo):
         """Static land albedo field from harmonized surface data.
@@ -13323,6 +13338,18 @@ class ModelDriver:
             microphysics=_micro_cfg,
             gravity_wave_drag=gwd_config_for(cfg),
         )
+        _ice_rad_emis = None
+        if bool(getattr(cfg, "sea_ice_flux_split", False)):
+            # The ice tile's longwave balance uses the emissivity the
+            # radiation solve on THIS lane uses (its config value; the driver
+            # hands it no per-call emissivity), so the rebuilt ice-tile
+            # longwave and the atmosphere's surface longwave agree.
+            if _rad_scheme != "rrtmgp":
+                raise ValueError(
+                    "sea_ice_flux_split rebuilds the ice-tile longwave from "
+                    "the RRTMGP surface emissivity; radiation="
+                    f"{cfg.radiation!r} is not supported with it.")
+            _ice_rad_emis = float(phys_cfg.radiation.rrtmgp.sfc_emissivity)
         self._record_resolved_physics(
             convection=phys_cfg.convection,
             microphysics=phys_cfg.microphysics,
@@ -13384,6 +13411,48 @@ class ModelDriver:
         # knob over land; the turbulence factory then needs f_land even when
         # the static knob is at its neutral 1.0.
         _land_beta_soil_on = bool(getattr(cfg, "land_beta_soil", False))
+        # Prescribed land (atmosphere-only): the file's climatology stands in
+        # for the land tile on the three hand-off channels below; the land
+        # fraction is threaded into the turbulence factory exactly as for the
+        # interactive tile, so the flux keys are consumed, not refused.
+        _land_presc_path = str(getattr(cfg, "land_prescribed_flux_file", "") or "")
+        _land_presc_on = bool(_land_presc_path)
+        _land_presc_mode = str(getattr(cfg, "land_prescribed_channels", "ts_lh"))
+        _land_presc_fluxes = _land_presc_on and _land_presc_mode in ("ts_lh", "ts_fluxes")
+        _land_presc_sh = _land_presc_on and _land_presc_mode == "ts_fluxes"
+        self._land_presc = None
+        if _land_presc_on:
+            from legoesm.forcing.prescribed_land import load_prescribed_land
+            self._land_presc = load_prescribed_land(_land_presc_path, self.grid)
+            logger.info(
+                "  Prescribed land: %s (%d anchors; mode %s; land fraction "
+                "blends the skin temperature%s%s; no land tile)",
+                _land_presc_path, int(self._land_presc.times_doy.size),
+                _land_presc_mode,
+                {"ts": "; land fluxes from the bulk scheme against it",
+                 "ts_lh": " and the file's latent heat (sensible from the bulk scheme)",
+                 "ts_fluxes": " and the file's sensible/latent fluxes"}[_land_presc_mode],
+                "; albedo from the file" if self._land_presc.albedo is not None
+                else "; albedo static")
+        # Ice sheets under prescribed fluxes: bulk sensible heat on the
+        # glacier-dominant columns (static mask from the surface data).
+        _ice_sheet_bulk_w = None
+        if bool(getattr(cfg, "land_prescribed_ice_sheet_bulk_sensible", False)):
+            if not _land_presc_sh:
+                raise ValueError(
+                    "land_prescribed_ice_sheet_bulk_sensible needs prescribed "
+                    "land with channels 'ts_fluxes'.")
+            _ice_sheet_bulk_w = self._surfdata_glacier_mask(
+                str(cfg.surfdata_path)).astype(self.state.p_s.data.dtype)
+            _ice_sheet_bulk_z0 = jnp.asarray(
+                float(cfg.land_prescribed_ice_sheet_z0_m),
+                dtype=self.state.p_s.data.dtype)
+            logger.info(
+                "  Prescribed land: land-tile Monin-Obukhov sensible heat "
+                "(z0 = %g m) on %d glacier-dominant cells of this rank "
+                "(file's flux elsewhere)",
+                float(cfg.land_prescribed_ice_sheet_z0_m),
+                int(np.asarray(_ice_sheet_bulk_w).sum()))
         _land_lapse_K_m = (
             float(getattr(cfg, "land_lapse_K_per_km", 0.0)) * 1.0e-3)
         _f_land_cells = None
@@ -13569,7 +13638,8 @@ class ModelDriver:
                                 column_mesh=_column_mesh, need_rad=need_rad,
                                 f_land=(_f_land_cells
                                         if (_land_beta != 1.0
-                                            or _land_beta_soil_on)
+                                            or _land_beta_soil_on
+                                            or _land_presc_fluxes)
                                         else None),
                                 land_beta=_land_beta,
                                 budget_ledger=_budget_ledger_on,
@@ -13880,6 +13950,14 @@ class ModelDriver:
                         and self.get_sst_sic is not None)
         _sic_day = None            # (nCells,) ice fraction of the last forcing day
         _ice_skin_on = bool(getattr(cfg, "ice_skin_prognostic", False))
+        # Separate ice / open-water surface exchange in partly ice-covered
+        # cells (validate_strict: needs the prognostic skin and the land-flux
+        # handoff the split bulk call lives in).
+        _ice_split_on = bool(getattr(cfg, "sea_ice_flux_split", False))
+        if _ice_split_on and not _ice_skin_on:
+            raise ValueError(
+                "sea_ice_flux_split needs ice_skin_prognostic=True (it "
+                "splits the fluxes that drive the ice skin).")
         if _ice_skin_on and not _sst_forcing:
             raise ValueError(
                 "ice_skin_prognostic needs the prescribed SST/SIC "
@@ -14000,6 +14078,14 @@ class ModelDriver:
                 _dst["T_sfc"] = _blend_T_sfc(_sst, _sic)
                 if _ocean_sfc_on:
                     _dst["T_sfc_ocean"] = _ocean_ice_T_sfc(_sst, _sic)
+                if _ice_split_on:
+                    # The two tiles of the non-land surface, as the cover and
+                    # the ice-minus-sea contrast of the SAME blend written
+                    # above (skin read at call time, like the anchors).
+                    _dst["sea_ice_frac"] = jnp.asarray(_sic).reshape(-1)
+                    _dst["T_ice_minus_sea"] = (
+                        self._ice_T_skin.reshape(-1)
+                        - jnp.asarray(_sst).reshape(-1))
 
             # (The former ``_compute_T_sfc(day)`` wrapper — a one-line
             # ``_blend_T_sfc(*get_sst_sic(day))`` — was inlined at its single
@@ -14234,6 +14320,9 @@ class ModelDriver:
         print(f"  Non-land surface fluxes evaluated on: "
               f"{'OCEAN/ICE surface' if _ocean_sfc_on else 'land-blended surface'}"
               f" (ocean_flux_on_ocean_surface={_ocean_sfc_on})")
+        print(f"  Sea-ice cells, ice and open water exchange: "
+              f"{'SEPARATE (ice skin driven by its own fluxes)' if _ice_split_on else 'one blended surface'}"
+              f" (sea_ice_flux_split={_ice_split_on})")
         print(f"  Land surface stress to the boundary layer: "
               f"{'LAND MODEL' if _land_stress_on else 'atmosphere bulk law'} "
               f"(land_stress_from_land="
@@ -15566,6 +15655,32 @@ class ModelDriver:
         # LEGOESM_DIGEST_EVERY_STEPS=N: per-step restart-set digest log
         # (bitwise gate of refactors); off by default
         _DIGEST_EVERY = int(os.environ.get("LEGOESM_DIGEST_EVERY_STEPS", "0"))
+        def _presc_land_arrays(_day):
+            """Prescribed-land channels at simulated day ``_day`` (host
+            interpolation, then the lane's dtype)."""
+            from legoesm.forcing.prescribed_land import prescribed_land_at_day
+            _ts, _sh, _lh, _alb = prescribed_land_at_day(self._land_presc, float(_day))
+            _dt_ = self.state.p_s.data.dtype
+            _ts = jnp.asarray(_ts, dtype=_dt_)
+            _alb = None if _alb is None else jnp.asarray(_alb, dtype=_dt_)
+            if not _land_presc_fluxes:
+                return _ts, None, None, None, _alb
+            _lh = jnp.asarray(_lh, dtype=_dt_)
+            return (_ts, jnp.asarray(_sh, dtype=_dt_) if _land_presc_sh else None,
+                    _lh, _lh / latent_heat_vaporization(_ts), _alb)
+
+        _land_presc_day = None
+        if _land_presc_on:
+            # Seed so the very first step already blends the prescribed land
+            # (the interactive tile has a one-step bootstrap lag instead).
+            _land_presc_day = int(np.floor(_DAY_ORIGIN + start_step * DT / 86400.0))
+            (_land_T_skin, _land_shflx_cells, _land_lhflx_cells,
+             _land_evap_cells, _land_albedo_cells) = _presc_land_arrays(
+                float(_land_presc_day))
+            # The published ts/tas read the land skin from here; without it
+            # they fall back to the ocean anchor over land.
+            self._land_T_skin_last = _land_T_skin
+
         for step in range(n_steps_total):
             if step in _trace_edges:
                 jax.block_until_ready(self.state)
@@ -15855,7 +15970,7 @@ class ModelDriver:
                 # before the first land step (_land_T_skin None) the anchor is
                 # the unmodified SST field (incl. the lapse fallback) — the
                 # cold-start value the land tile itself was initialized from.
-                if (_land_ml_on and _land_T_skin is not None
+                if ((_land_ml_on or _land_presc_on) and _land_T_skin is not None
                         and "T_sfc" in _forcing):
                     _forcing["T_sfc"] = (
                         (1.0 - _f_land_cells) * _forcing["T_sfc"]
@@ -15866,7 +15981,7 @@ class ModelDriver:
                 # this is how the snow-albedo feedback reaches radiation on
                 # this lane.  Re-blend against the day's ocean/ice albedo so
                 # only the land fraction is replaced.
-                if (_land_ml_on and _land_albedo_cells is not None
+                if ((_land_ml_on or _land_presc_on) and _land_albedo_cells is not None
                         and _sea_albedo_day is not None
                         and "sfc_albedo" in _forcing):
                     _forcing["sfc_albedo"] = (
@@ -15884,6 +15999,12 @@ class ModelDriver:
                 # The land's OWN turbulent fluxes -- the actual coupling.
                 if _land_shflx_cells is not None:
                     _forcing["shflx_land"] = _land_shflx_cells
+                    if _ice_sheet_bulk_w is not None:
+                        _forcing["shflx_land_bulk_weight"] = _ice_sheet_bulk_w
+                        _forcing["shflx_land_bulk_z0"] = _ice_sheet_bulk_z0
+                if _land_lhflx_cells is not None:
+                    # Latent heat alone (prescribed-land "ts_lh"): the
+                    # turbulence then keeps its bulk sensible heat over land.
                     _forcing["lhflx_land"] = _land_lhflx_cells
                     _forcing["evap_land"] = _land_evap_cells
                 if _land_taumag_cells is not None:
@@ -16021,7 +16142,33 @@ class ModelDriver:
                                         and _sd[0] is not None) else None)
                 _lwn = (_sd[1].data if (_sd is not None and len(_sd) > 1
                                         and _sd[1] is not None) else None)
-                if _swn is not None and _lwn is not None:
+                if _ice_split_on:
+                    # Ice-tile energy balance: the ice's OWN turbulent loss
+                    # (exported by the split bulk call) and its own radiation,
+                    # rebuilt from the downwelling fluxes with the ice albedo
+                    # and the skin temperature -- not the cell-mean fluxes,
+                    # which charge the lead's heat loss to the ice.
+                    # Signs: radiative terms +into the surface, turbulent
+                    # +upward (advance_ice_skin's convention).
+                    def _sd_data(_k):
+                        _i = _sfc_diag_slot(_k)
+                        return (_sd[_i].data.reshape(-1)
+                                if (_sd is not None and len(_sd) > _i
+                                    and _sd[_i] is not None) else None)
+                    _swd, _lwd = _sd_data("sw_down_sfc"), _sd_data("lw_down_sfc")
+                    _sh_i, _lh_i = _sd_data("shflx_ice"), _sd_data("lhflx_ice")
+                    if not any(_x is None for _x in (_swd, _lwd, _sh_i, _lh_i)):
+                        _sk = self._ice_T_skin.reshape(-1)
+                        self._ice_T_skin = advance_ice_skin(
+                            self._ice_T_skin,
+                            _swd * (1.0 - _ice_albedo_now()),
+                            _ice_rad_emis * (
+                                _lwd - constants.sigma_sb * _sk ** 4),
+                            _sh_i, _lh_i,
+                            _ice_sic_cur, dt_s=DT, h_ice_m=_h_ice,
+                            melt_cap_width_K=float(
+                                cfg.ice_skin_melt_cap_width_K))
+                elif _swn is not None and _lwn is not None:
                     self._ice_T_skin = advance_ice_skin(
                         self._ice_T_skin, _swn, _lwn,
                         (_sd[6].data if len(_sd) > 6 and _sd[6] is not None
@@ -16059,6 +16206,15 @@ class ModelDriver:
             # no host sync; its skin T enters next step's forcing blend above.
             # Skipped (state held) only until the first radiation solve
             # populates the downwelling export.
+            if _land_presc_on and int(np.floor(_force_day)) != _land_presc_day:
+                # Prescribed land: refresh the three channels ONCE PER
+                # SIMULATED DAY (a monthly climatology resolves nothing finer;
+                # a per-step host refresh measured 108 vs 61 s/day at 2 deg).
+                _land_presc_day = int(np.floor(_force_day))
+                (_land_T_skin, _land_shflx_cells, _land_lhflx_cells,
+                 _land_evap_cells, _land_albedo_cells) = _presc_land_arrays(
+                    float(_land_presc_day))
+                self._land_T_skin_last = _land_T_skin
             if _land_ml_on:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:

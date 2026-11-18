@@ -9,8 +9,7 @@ reflectance/transmittance reduce to the analytic conservative limits
     r_diff -> gamma1*tau / (1 + gamma1*tau)      (gamma1 == gamma2)
     t_diff -> 1 / (1 + gamma1*tau)               (r + t = 1, no absorption)
 
-Canonical RRTMGP (mo_rte_solver_kernels) floors the sqrt argument at 1e-12
-in double precision precisely so this limit is reproduced.  A legacy outer
+The hyperbolic small-k*tau form needs no floor on k at all.  A legacy outer
 floor of k >= 1e-2 biased thick-cloud (tau ~ 50) SW transmittance by ~5%
 and reflectance by ~1%; these tests pin the limit tight enough that any
 floor of that magnitude fails.
@@ -126,8 +125,8 @@ def test_lw_diffuse_rt_uses_same_floor():
   shape = (1, 1, 3)
   tau = jnp.full(shape, tau_val, dtype=jnp.float64)
   g1 = jnp.full(shape, gamma1, dtype=jnp.float64)
-  r = np.asarray(mts._diffuse_reflectance(g1, g1, tau))
-  t = np.asarray(mts._diffuse_transmittance(g1, g1, tau))
+  diffuse = mts._diffuse_quantities(g1, g1, tau)
+  r, t = np.asarray(diffuse['r_diff']), np.asarray(diffuse['t_diff'])
   np.testing.assert_allclose(r + t, 1.0, atol=1e-6)
   np.testing.assert_allclose(
       r, gamma1 * tau_val / (1.0 + gamma1 * tau_val), rtol=1e-6

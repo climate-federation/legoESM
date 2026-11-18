@@ -1,0 +1,21 @@
+# AGU 2026 ATMOSPHERE-ONLY deck (2026-11-06): the tuned AGU deck (ice-to-snow 250 um,
+# CLUBB C8 6.0) with the land tile OFF and the land surface PRESCRIBED from an ERA5
+# monthly climatology of skin temperature and sensible/latent heat fluxes
+# (--land-prescribed-flux-file, built by scripts/data/build_era5_prescribed_land.py).
+# The land albedo stays the static surfdata map; the dry-soil brightening knob of the
+# simple land is inert without the tile.  Rows the validator ties to the land tile
+# are unset as in timing_noland.yaml.
+include: agu2026_simple_land.yaml
+use_multilayer_land: false
+land_surface_scheme: simple_seb
+land_calibrated_physics: false
+land_params_refresh: false
+land_soil_freeze_thaw: false
+land_update_seconds: 0
+land_beta_soil: false
+land_canopy_rh_cap_smoothing_width: null
+land_canopy_zeta_cap_smoothing_width: null
+land_canopy_most_n_iters: null
+ocean_flux_on_ocean_surface: null
+land_stress_from_land: null
+land_dry_soil_albedo_boost: null

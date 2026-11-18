@@ -284,7 +284,10 @@ def test_splinters_are_wired(monkeypatch):
     5 g/kg snow the limiter binds hard in some cells."""
     fx = A._fx()
     for qs in (2.0e-5, 5.0e-3):
-        d, m, n, left, s, _, total = _split_diff(fx, monkeypatch, _cfg(), qs)
+        # snow collecting cloud ice off: with it MG2's ice-number limiter may
+        # bind, and it credits the splinters, so the difference is not n alone
+        d, m, n, left, s, _, total = _split_diff(
+            fx, monkeypatch, _cfg(mg2_snow_accretes_ice=False), qs)
         assert (m > 0).all() and (n > 0).all() and (s > 0).all() and (s <= 1).all()
         # + 4 ulps of the whole ice tendency: the MG2 cloud-ice Bergeron (S10.6)
         # makes it ~1e7 x the splinter mass, so summation order shows

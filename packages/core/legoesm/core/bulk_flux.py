@@ -2097,6 +2097,9 @@ def compute_sam_oceflx_fluxes(
     z_diag: float = 2.0,
     t_bot: jnp.ndarray | None = None,
     return_wind_speed: bool = False,
+    gustiness_w_zi: float = 0.0,
+    gustiness_beta: float = 1.25,
+    gust_onset_width: float = COARE_GUST_ONSET_WIDTH,
 ) -> tuple[jnp.ndarray, ...]:
     """SAM ocean surface fluxes — faithful port of ``oceflx.f90`` (CESM1).
 
@@ -2173,6 +2176,14 @@ def compute_sam_oceflx_fluxes(
     n_iter : int or None
         Number of MO stability iterations.  None = the oracle's: 2 for
         ``"sam"``, 5 for ``"cesm"`` (CESM2.1 ``flux_max_iteration``).
+    gustiness_w_zi : float
+        Convective-gustiness boundary-layer depth z_i [m] (static).  0 (default)
+        = off, the oracle (CESM ``gust_fac = 0``).  > 0 adds, inside the
+        stability iteration, the free-convection gust of COARE 3.0 / Beljaars
+        (1995) in quadrature to the bulk wind: ``gust^2 = gustiness_beta^2 u*^2
+        max(-z_i/(kappa L), 0)^(2/3)`` with ``z/L = hol`` (the same
+        :func:`_gust_factor`, onset width ``gust_onset_width``, the coare3
+        branch uses).  NOT in shr_flux_atmOcn: an opt-in departure from it.
     t_bot : array or None
         ``"cesm"`` only, REQUIRED there: lowest-level ABSOLUTE air
         temperature [K] (CESM ``tbot``), read by the cold-air-outbreak
@@ -2265,6 +2276,8 @@ def compute_sam_oceflx_fluxes(
     # can differ from a further pass when the stability flag still flips).
     u_star_prev = 2.0 * u_star
     going = True
+    gusty = gustiness_w_zi > 0.0   # static Python switch
+    vmag0 = vmag
     hol = psixh = jnp.zeros_like(u_star)
     rh = rhn
     for _ in range(n_iter):
@@ -2272,6 +2285,7 @@ def compute_sam_oceflx_fluxes(
             going = going & (u_star != u_star_prev)
             u_star_prev = u_star
             old = (rdn, u_star, t_star, q_star, hol, stable, rh, psixh)
+            vmag_old = vmag
         hol = (
             karman * G * z_bot
             * (t_star / theta_atm + q_star / (1.0 / eps_v + q_atm))
@@ -2282,6 +2296,11 @@ def compute_sam_oceflx_fluxes(
         # sign*min(abs) form has a zero-gradient flat spot at hol=0 (neutral)
         # that severs d(flux)/d(state) sensitivity there under jax.grad.
         hol = jnp.clip(hol, -10.0, 10.0)
+        if gusty:
+            # -z_i/(kappa L) = -hol z_i/(kappa z_bot); unstable (hol < 0) only.
+            gust2 = gustiness_beta ** 2 * u_star ** 2 * _gust_factor(
+                -hol * gustiness_w_zi / (karman * z_bot), gust_onset_width)
+            vmag = jnp.sqrt(vmag0 ** 2 + gust2)   # vmag0 >= umin > 0
         stable = jnp.where(hol >= 0.0, 1.0, 0.0)
         xsq = jnp.maximum(jnp.sqrt(jnp.abs(1.0 - 16.0 * hol)), 1.0)
         xqq = jnp.sqrt(xsq)
@@ -2303,6 +2322,8 @@ def compute_sam_oceflx_fluxes(
             rdn, u_star, t_star, q_star, hol, stable, rh, psixh = (
                 jnp.where(going, new, prev) for new, prev in zip(
                     (rdn, u_star, t_star, q_star, hol, stable, rh, psixh), old))
+            if gusty:
+                vmag = jnp.where(going, vmag, vmag_old)
 
     # --- fluxes (legoESM upward-positive W/m²) ---
     tau = rho * u_star ** 2

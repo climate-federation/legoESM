@@ -197,6 +197,15 @@ morrison_warm_rain_incloud: true   # CAM6 MG2 in-cloud warm rain (user decision
                                    # self-aggregation, melt above +2 C, fall
                                    # speeds, snow sedimenting the post-source
                                    # state.
+morrison_mg2_snow_accretes_ice: true  # NAMED, equals the code default: CAM6
+                                   # MG2 accrete_cloud_ice_snow (micro_mg_utils
+                                   # .F90:1356-1414): snow collects cloud ice.
+                                   # Off: --no-morrison-mg2-snow-accretes-ice.
+morrison_mg2_ice_sed_clear_air_sublimation: true  # NAMED, equals the code
+                                   # default: cloud ice falling into a less
+                                   # cloudy layer sublimates the clear-air
+                                   # share (micro_mg2_0.F90:2270-2296).  Off:
+                                   # --no-morrison-mg2-ice-sed-clear-air-sublimation.
 morrison_ice_snow_d_auto: 500.0e-6 # CAM6 MG2 micro_mg_dcs = 500 um ice->snow
                                    # size (namelist_defaults_cam.xml:1244;
                                    # user decision 2026-10-19, was 250 um).

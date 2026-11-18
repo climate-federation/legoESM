@@ -571,6 +571,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "coefficient, so treat this as a calibration knob. "
                              "Unlike --div-damp-scale / the del2+del4 viscosities, this "
                              "damps only the curl-free mode and leaves balanced flow alone.")
+    parser.add_argument("--mpas-ps-hyperdiff-scale", type=float, default=None,
+                        dest="mpas_ps_hyperdiff_scale",
+                        help="Multiplier on the MPAS hydrostatic dycore's fourth-order "
+                             "hyperdiffusion of SURFACE PRESSURE only (momentum "
+                             "hyperdiffusion untouched; composes with --hyperdiff-scale). "
+                             "1.0 = unchanged behaviour (default), 0 = term off. The "
+                             "term moves air mass between columns without tracers "
+                             "(0.071 mm/day of water lost at 1.0, measured offline).")
     parser.add_argument("--energy-fixer",
                         action=argparse.BooleanOptionalAction,
                         default=_DYCORE_DEFAULTS.energy_fixer,
@@ -1807,6 +1815,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "is an error rather than a silent override. "
                              "Omitting it leaves those two flags in charge, so "
                              "existing decks are unaffected.")
+    parser.add_argument("--land-prescribed-flux-file", type=str,
+                        default=_EXPERIMENT_DEFAULTS.land_prescribed_flux_file,
+                        dest="land_prescribed_flux_file",
+                        help="Atmosphere-only AMIP (MPAS lane): NetCDF monthly "
+                             "climatology of land skin temperature ts [K] and "
+                             "land heat fluxes hfss/hfls [W/m2, positive up] "
+                             "(scripts/data/build_era5_prescribed_land.py). "
+                             "Replaces the land tile through the same T_sfc / "
+                             "shflx_land / lhflx_land channels; requires "
+                             "--no-use-multilayer-land and a land fraction.")
+    parser.add_argument("--land-prescribed-channels", type=str,
+                        choices=["ts", "ts_lh", "ts_fluxes"],
+                        default=_EXPERIMENT_DEFAULTS.land_prescribed_channels,
+                        dest="land_prescribed_channels",
+                        help="With --land-prescribed-flux-file: 'ts_lh' (default) "
+                             "prescribes the land skin temperature and the file's "
+                             "latent heat flux, with the sensible heat from the "
+                             "bulk scheme against that skin (feedback kept); 'ts' "
+                             "prescribes the skin only (deserts then evaporate at "
+                             "the static land_beta fraction of saturation: +16 "
+                             "mm/day over Australia, measured 2026-11-06); "
+                             "'ts_fluxes' prescribes both fluxes (no feedback: "
+                             "winter continental air 16 K too cold). The file's "
+                             "albedo, when present, is always blended in.")
     parser.add_argument("--use-multilayer-land", default=False,
                         action=argparse.BooleanOptionalAction,
                         help="Replace the slab land tile with the differentiable "
@@ -2426,6 +2458,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "MG2 has no graupel; --no-morrison-do-graupel "
                              "routes frozen rain to snow and removes the "
                              "graupel riming sink of cloud water.")
+    parser.add_argument("--morrison-mg2-snow-accretes-ice",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_snow_accretes_ice"],
+                        dest="morrison_mg2_snow_accretes_ice",
+                        help="CAM6 MG2 mode only: snow collects cloud ice "
+                             "(MG2 accrete_cloud_ice_snow; ice mass moves to "
+                             "snow). --no-morrison-mg2-snow-accretes-ice "
+                             "removes that sink.")
+    parser.add_argument("--morrison-mg2-ice-sed-clear-air-sublimation",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_ice_sed_clear_air_sublimation"],
+                        dest="morrison_mg2_ice_sed_clear_air_sublimation",
+                        help="CAM6 MG2 mode only: cloud ice falling into a "
+                             "layer with a smaller cloud fraction sublimates "
+                             "the clear-air share at once (MG2 sedimentation). "
+                             "--no-morrison-mg2-ice-sed-clear-air-sublimation "
+                             "keeps all of the falling ice.")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -2458,6 +2509,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "cold condensate to cloud ice). Fixes the "
                              "TTL ice-supersaturation vapour bias. Requires "
                              "--hard-saturation-adjustment.")
+    parser.add_argument("--land-prescribed-ice-sheet-bulk-sensible",
+                        action=_BoolOneSpelling, default=False,
+                        dest="land_prescribed_ice_sheet_bulk_sensible",
+                        help="Prescribed land, channels ts_fluxes: over "
+                             "glacier-dominant columns of the surface data "
+                             "(Antarctica, Greenland) use the bulk sensible "
+                             "heat against the prescribed skin temperature "
+                             "instead of the file's flux. Default off.")
+    parser.add_argument("--land-prescribed-ice-sheet-z0-m", type=float,
+                        default=None, dest="land_prescribed_ice_sheet_z0_m",
+                        help="Roughness length [m] of the land-tile "
+                             "Monin-Obukhov law used for the ice-sheet "
+                             "sensible heat under "
+                             "--land-prescribed-ice-sheet-bulk-sensible "
+                             "(default: the config default, 0.0024).")
+    parser.add_argument("--sea-ice-flux-split",
+                        action=_BoolOneSpelling, default=False,
+                        dest="sea_ice_flux_split",
+                        help="MPAS lane: evaluate the surface exchange "
+                             "separately over ice and open water in partly "
+                             "ice-covered cells and drive the prognostic ice "
+                             "skin with the ice tile's own fluxes. Needs the "
+                             "prognostic ice skin, RRTMGP radiation and the "
+                             "land's heat fluxes handed to the boundary "
+                             "layer. Default off.")
     parser.add_argument("--ice-skin-prognostic", "--mpas-ice-skin-prognostic",
                         action=_BoolOneSpelling, default=None,
                         dest="ice_skin_prognostic",
@@ -2938,6 +3014,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                                      if args.mpas_sponge_del2_top_factor is not None else 1.0),
         mpas_div_damp4_scale=(args.mpas_div_damp4_scale
                               if args.mpas_div_damp4_scale is not None else 0.0),
+        mpas_ps_hyperdiff_scale=(
+            args.mpas_ps_hyperdiff_scale
+            if args.mpas_ps_hyperdiff_scale is not None
+            else _DYCORE_DEFAULTS.mpas_ps_hyperdiff_scale),
         energy_fixer=args.energy_fixer,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
@@ -3123,6 +3203,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         land_dry_soil_albedo_boost=args.land_dry_soil_albedo_boost,
+        land_prescribed_flux_file=args.land_prescribed_flux_file,
+        land_prescribed_channels=args.land_prescribed_channels,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
         land_snow_scheme=args.land_snow_scheme,
         land_snow_emissivity=args.land_snow_emissivity,
@@ -3223,6 +3305,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_do_graupel=args.morrison_do_graupel,
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
         morrison_prognostic_droplet_number=args.morrison_prognostic_droplet_number,
+        morrison_mg2_snow_accretes_ice=args.morrison_mg2_snow_accretes_ice,
+        morrison_mg2_ice_sed_clear_air_sublimation=(
+            args.morrison_mg2_ice_sed_clear_air_sublimation),
         cam6_aerosol_dir=args.cam6_aerosol_dir,
         cam6_aerosol_number_scale=args.cam6_aerosol_number_scale,
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
@@ -3286,6 +3371,13 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.mcfarlane_effgw_oro if args.mcfarlane_effgw_oro is not None
             else _EXPERIMENT_DEFAULTS.mcfarlane_effgw_oro),
         ice_skin_prognostic=args.ice_skin_prognostic,
+        sea_ice_flux_split=bool(args.sea_ice_flux_split),
+        land_prescribed_ice_sheet_bulk_sensible=bool(
+            args.land_prescribed_ice_sheet_bulk_sensible),
+        land_prescribed_ice_sheet_z0_m=(
+            args.land_prescribed_ice_sheet_z0_m
+            if args.land_prescribed_ice_sheet_z0_m is not None
+            else _EXPERIMENT_DEFAULTS.land_prescribed_ice_sheet_z0_m),
         ice_thickness_m=(
             args.ice_thickness_m
             if args.ice_thickness_m is not None

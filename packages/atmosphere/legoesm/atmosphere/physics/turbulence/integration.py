@@ -1192,12 +1192,15 @@ def _make_mpas_turbulence(
         # the land solved; a flux is what crosses the boundary.  Momentum and
         # the ocean/ice fraction keep the scheme's own bulk computation.
         _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
+        _lhf_only = (forcing is not None and _shf_land is None
+                     and forcing.get("lhflx_land") is not None)
         _surface_flux = None
-        if _shf_land is not None:
+        _sh_ice = _lh_ice = None   # ice-tile fluxes (sea_ice_flux_split only)
+        if _shf_land is not None or _lhf_only:
             if f_land is None:
                 raise ValueError(
-                    "forcing['shflx_land'] requires f_land in the turbulence "
-                    "factory (make_physics f_land=...).")
+                    "forcing['shflx_land'] / ['lhflx_land'] require f_land in the "
+                    "turbulence factory (make_physics f_land=...).")
             if not _accepts_surface_flux:
                 raise ValueError(
                     f"turbulence scheme {scheme_name!r} cannot be handed the "
@@ -1240,11 +1243,81 @@ def _make_mpas_turbulence(
             # scheme -- the same one-sided contrast the helper exists to
             # prevent, surviving in the one place that did not call it
             # (codex).  Height measured from the LOCAL surface.
-            _tx, _ty, _sh, _lh, _us = surface_fluxes_at_lowest_level(
-                u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
-                _T_bulk, _q_bulk, rho[:, -1], step_config.surface,
-                z_full[:, -1] - z_half[:, -1],
-            )
+            from legoesm.thermo import charged_latent_heat
+
+            def _bulk(_T_s, _q_s):
+                return surface_fluxes_at_lowest_level(
+                    u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
+                    _T_s, _q_s, rho[:, -1], step_config.surface,
+                    z_full[:, -1] - z_half[:, -1],
+                )
+
+            # The surface law as the bulk calls see it (before the blended
+            # water flux is pinned into ``step_config`` below).
+            _surface_cfg_bulk = step_config.surface
+
+            # ``forcing["sea_ice_frac"]`` + ``forcing["T_ice_minus_sea"]``
+            # (sea_ice_flux_split): the non-land bulk call is made twice, on
+            # the ice skin and on the open water of a partly ice-covered
+            # cell, and the two are cover-weighted, instead of once on their
+            # blended temperature.  The ice share is exported so the ice skin
+            # is charged with its own turbulent loss, not the lead's.
+            # Sign: fluxes positive UPWARD (surface -> air), as the kernel's.
+            _sic_split = forcing.get("sea_ice_frac")
+            _dT_split = forcing.get("T_ice_minus_sea")
+            if (_sic_split is None) != (_dT_split is None):
+                raise ValueError(
+                    "forcing['sea_ice_frac'] and forcing['T_ice_minus_sea'] "
+                    "(sea_ice_flux_split) must be passed together.")
+            if _sic_split is None:
+                _tx, _ty, _sh, _lh, _us = _bulk(_T_bulk, _q_bulk)
+                _ev_bulk = _lh / charged_latent_heat(
+                    step_config.surface.bulk_scheme, _T_bulk)
+            else:
+                _sic_c = jnp.asarray(
+                    _sic_split, dtype=T_sfc.dtype).reshape(nCells)
+                # Tile temperatures as offsets from the anchor, so their
+                # cover-weighted mean IS the anchor.  On the land-blended
+                # anchor the ice/sea contrast only enters with the non-land
+                # weight it has in that blend.
+                _dT_c = jnp.asarray(
+                    _dT_split, dtype=T_sfc.dtype).reshape(nCells)
+                if _T_oc is None:
+                    _dT_c = (1.0 - _fl) * _dT_c
+                _T_ice_t = _T_bulk + (1.0 - _sic_c) * _dT_c
+                _T_wat_t = _T_bulk - _sic_c * _dT_c
+
+                def _q_law(_T):
+                    # The humidity law of the non-land surface (as above).
+                    if getattr(_surf, "ocean_q_sfc_saline", False):
+                        from legoesm.core.bulk_flux import ocean_surface_q_sat
+                        from legoesm.thermo import (
+                            mixing_ratio_to_specific_humidity)
+                        return (_Q_SAT_SALINE_FACTOR
+                                * mixing_ratio_to_specific_humidity(
+                                    ocean_surface_q_sat(
+                                        _T, p_s.reshape(nCells),
+                                        thermo_convention=_surf.thermo_convention,
+                                        bulk_scheme=_surf.bulk_scheme)))
+                    return saturation_specific_humidity(_T, p_full_col[:, -1])
+
+                _q_anchor = _q_law(_T_bulk)
+                _tx_i, _ty_i, _sh_ice, _lh_ice, _us_i = _bulk(
+                    _T_ice_t, _q_bulk + (_q_law(_T_ice_t) - _q_anchor))
+                _tx_w, _ty_w, _sh_w, _lh_w, _us_w = _bulk(
+                    _T_wat_t, _q_bulk + (_q_law(_T_wat_t) - _q_anchor))
+                _mix = lambda _i, _w: _sic_c * _i + (1.0 - _sic_c) * _w  # noqa: E731
+                _tx, _ty = _mix(_tx_i, _tx_w), _mix(_ty_i, _ty_w)
+                _sh, _lh = _mix(_sh_ice, _sh_w), _mix(_lh_ice, _lh_w)
+                # u* from the cover-weighted stress (u*^2 ~ stress / rho).
+                _us = jnp.sqrt(_mix(_us_i * _us_i, _us_w * _us_w))
+                # Water: each tile's latent heat over the latent heat ITS
+                # bulk call charged (the exact inverse, tile by tile).
+                _ev_bulk = _mix(
+                    _lh_ice / charged_latent_heat(
+                        step_config.surface.bulk_scheme, _T_ice_t),
+                    _lh_w / charged_latent_heat(
+                        step_config.surface.bulk_scheme, _T_wat_t))
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
             if forcing.get("evap_land") is None:
@@ -1258,18 +1331,60 @@ def _make_mpas_turbulence(
             # of the bulk charge,
             # taken BEFORE the heat blend), handed to the kernel as mass.  Land
             # values over pure-ocean cells may be NaN/undefined: masked out.
-            from legoesm.thermo import charged_latent_heat
             _ev_land = jnp.asarray(
                 forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
             _ev_land = jnp.where(_fl > 0.0, _ev_land, 0.0)
             _lh_land = jnp.where(_fl > 0.0, _lh_land, 0.0)   # 0 * NaN would poison the blend
-            _ev_blend = ((1.0 - _fl) * _lh / charged_latent_heat(
-                             step_config.surface.bulk_scheme, _T_bulk)
-                         + _fl * _ev_land)
+            _ev_blend = (1.0 - _fl) * _ev_bulk + _fl * _ev_land
             step_config = step_config._replace(surface=step_config.surface._replace(
                 prescribed_evap_kg_m2_s=_ev_blend))
-            _sh_land = jnp.where(
-                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0)
+            # Latent heat alone (prescribed land, "ts_lh" mode): the land
+            # sensible heat stays the bulk value against the blended T_sfc,
+            # which over land carries the prescribed skin temperature.
+            _sh_land = (_sh if _lhf_only else jnp.where(
+                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0))
+            # ``forcing["shflx_land_bulk_weight"]`` (static, [0, 1] per cell;
+            # land_prescribed_ice_sheet_bulk_sensible): the share of the land
+            # fraction whose sensible heat is the bulk value above instead of
+            # the handed-over flux.  Sign: positive upward, both terms.
+            _w_bulk = forcing.get("shflx_land_bulk_weight")
+            if _w_bulk is not None:
+                if _lhf_only:
+                    raise ValueError(
+                        "forcing['shflx_land_bulk_weight'] replaces a handed-"
+                        "over land sensible heat (forcing['shflx_land']); "
+                        "without one it would be ignored.")
+                _w_bulk = jnp.asarray(_w_bulk, dtype=q_sfc.dtype).reshape(nCells)
+                # ``forcing["shflx_land_bulk_z0"]`` (static, [m]): the bulk
+                # value on that share is the fixed-roughness LAND-tile
+                # Monin-Obukhov law at this snow/ice roughness, against the
+                # land-blended ``T_sfc`` (the prescribed skin over land) --
+                # not ``_sh``, which is the open-ocean air-sea law and gives
+                # a stable ice sheet a small fraction of the exchange
+                # (measured: -3 W/m2 with the air 3.5 K warmer than the
+                # surface, ERA5 -16).  No fallback to the ocean law.
+                _z0_bulk = forcing.get("shflx_land_bulk_z0")
+                if _z0_bulk is None:
+                    raise ValueError(
+                        "forcing['shflx_land_bulk_weight'] needs "
+                        "forcing['shflx_land_bulk_z0'] (roughness length [m] "
+                        "of the land-tile law used on that share).")
+                from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                    land_tile_surface_cfg,
+                )
+                _sh_sheet = surface_fluxes_at_lowest_level(
+                    u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
+                    T_sfc, q_sfc, rho[:, -1],
+                    land_tile_surface_cfg(
+                        _surface_cfg_bulk,
+                        jnp.asarray(_z0_bulk, dtype=q_sfc.dtype)),
+                    z_full[:, -1] - z_half[:, -1],
+                )[2]
+                _sh_land = _w_bulk * _sh_sheet + (1.0 - _w_bulk) * _sh_land
+            elif forcing.get("shflx_land_bulk_z0") is not None:
+                raise ValueError(
+                    "forcing['shflx_land_bulk_z0'] is only consumed together "
+                    "with forcing['shflx_land_bulk_weight'].")
             _surface_flux = (
                 _tx, _ty,
                 (1.0 - _fl) * _sh + _fl * _sh_land,
@@ -1307,6 +1422,22 @@ def _make_mpas_turbulence(
                 "forcing['T_sfc_ocean'] (non-land surface anchor) is only "
                 "consumed together with the land's own heat fluxes "
                 "(forcing['shflx_land']); without them it would be ignored.")
+        elif forcing is not None and (
+                forcing.get("sea_ice_frac") is not None
+                or forcing.get("T_ice_minus_sea") is not None):
+            raise ValueError(
+                "forcing['sea_ice_frac'] / ['T_ice_minus_sea'] "
+                "(sea_ice_flux_split) are only consumed together with the "
+                "land's own heat fluxes (forcing['shflx_land'] or "
+                "['lhflx_land']); without them they would be ignored.")
+        elif forcing is not None and (
+                forcing.get("shflx_land_bulk_weight") is not None
+                or forcing.get("shflx_land_bulk_z0") is not None):
+            raise ValueError(
+                "forcing['shflx_land_bulk_weight'] / ['shflx_land_bulk_z0'] "
+                "are only consumed together with the land's own sensible "
+                "heat (forcing['shflx_land']); without it they would be "
+                "ignored.")
         elif forcing is not None and forcing.get("taumag_land") is not None:
             raise ValueError(
                 "forcing['taumag_land'] (land-model surface stress) is only "
@@ -1501,6 +1632,12 @@ def _make_mpas_turbulence(
             evap_sfc=None if _evp is None else state.p_s.replace(
                 data=_evp.reshape(p_s.shape), name="evap_sfc_turb",
                 units="kg/m^2/s"),
+            shflx_ice=None if _sh_ice is None else state.p_s.replace(
+                data=_sh_ice.reshape(p_s.shape), name="shflx_ice_turb",
+                units="W/m^2"),
+            lhflx_ice=None if _lh_ice is None else state.p_s.replace(
+                data=_lh_ice.reshape(p_s.shape), name="lhflx_ice_turb",
+                units="W/m^2"),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)
