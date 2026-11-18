@@ -1124,11 +1124,16 @@ def test_ascent_cap_helpers_gradient_at_default():
         cloud = lambda z, luk=luk: A.cloud_to_rain(sm, True, luk, 0.0, luk, z, 0.7,  # noqa: E731
                                                    A.ZDNOPRC)[0]
         check_grads(cloud, (jnp.asarray(z0),), order=1, modes=("rev",), eps=1e-3 * wc)
-        assert float(jax.grad(cloud)(jnp.asarray(z0))) > 0.0
+        g = float(jax.grad(cloud)(jnp.asarray(z0)))
+        g_hard = float(jax.grad(lambda z, luk=luk: A.cloud_to_rain(
+            IfsSmooth(True), True, luk, 0.0, luk, z, 0.7, A.ZDNOPRC)[0])(jnp.asarray(z0)))
+        assert g > 0.0 and abs(g - g_hard) > 1e-3 * max(abs(g), abs(g_hard))
     x0 = jnp.asarray(1.0 - 0.5 * A._W_ONE)
     check_grads(lambda x: A.mixing_fraction(sm, x), (x0,), order=1, modes=("rev",),
                 eps=1e-3 * A._W_ONE)
-    assert float(jax.grad(lambda x: A.mixing_fraction(sm, x))(x0)) > 0.0
+    g = float(jax.grad(lambda x: A.mixing_fraction(sm, x))(x0))
+    g_hard = float(jax.grad(lambda x: A.mixing_fraction(IfsSmooth(True), x))(x0))
+    assert g > 0.0 and abs(g - g_hard) > 1e-3 * max(abs(g), abs(g_hard))
 
 
 def test_smooth_liquid_fraction_never_exceeds_one():
