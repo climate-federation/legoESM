@@ -1019,7 +1019,7 @@ class TestJRA55BridgeGrad:
                               * np.ones((1, 6)))
         lon_rad = jnp.asarray(np.radians(np.linspace(0.0, 300.0, 6))[None, :]
                               * np.ones((4, 1)))
-        day = 100.5   # Python float: _jra55_cos_zenith maps it via day_to_date
+        day = 100.5   # Python float: jra55_cos_zenith maps it via day_to_date
 
         def rho_sum(tas, huss, psl):
             s = slc._replace(tas=tas, huss=huss, psl=psl)

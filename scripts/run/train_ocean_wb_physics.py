@@ -375,8 +375,9 @@ def noleap_day(date):
     return noleap_doy(date)
 
 
-def forcing_arrays(a, date, days):
+def forcing_arrays(a, date, days, lat_rad, lon_rad):
     """Per rollout day k (ERA5 of date+k): ERA5 channels, ice climatology, runoff climatology."""
+    from legoesm.forcing.jra55_do import jra55_cos_zenith
     from legoesm.training.era5_ocean_forcing import load_era5_day
     ice = np.load(a.clim_dir / "siconc_oras5_1993_2017_daily.npy", mmap_mode="r")
     ro = np.load(a.clim_dir / "runoff_jra55do_daily.npy", mmap_mode="r")
@@ -385,7 +386,10 @@ def forcing_arrays(a, date, days):
     return {"era5": jnp.asarray(np.stack([load_era5_day(a.era5_store, d) for d in ds]), jnp.float64),
             "ice": jnp.asarray(np.stack([ice[k] for k in doy]), jnp.float64),
             "runoff": jnp.asarray(np.stack([ro[k] for k in doy]), jnp.float64),
-            "day": jnp.asarray([k + 0.5 for k in doy], jnp.float64)}
+            # zenith at local-calendar noon of each day (uses the day of year only),
+            # computed here on the host: the date conversion cannot run inside the scan
+            "cos_z": jnp.stack([jra55_cos_zenith(lat_rad, lon_rad, k + 0.5, ref_year=1993)
+                                for k in doy]).astype(jnp.float64)}
 
 
 def sample_face_masks(state0, grid, wet3):
@@ -486,9 +490,11 @@ def main(argv=None):
     std = O.field_std([b[1] for b in built], [b[2] for b in built])    # fixed, pooled IC days
     samples = [dict(b[0], std={f: jnp.asarray(std[f]) for f in O.FIELDS}) for b in built]
     print(f"[{label}] loss normaliser std {std}", flush=True)
+    lat_rad = jnp.asarray(np.deg2rad(lat_c))[:, None]
+    lon_rad = jnp.asarray(np.deg2rad(np.rad2deg(np.asarray(grid.lon)).ravel()))[None, :]
     if a.forcing != "none":
         for x, d in zip(samples, dates):
-            x["frc"] = forcing_arrays(a, d, a.days)
+            x["frc"] = forcing_arrays(a, d, a.days, lat_rad, lon_rad)
     model.prime_step_caches(O.set_state_fields(state0, samples[0]["ic"]))
     base_cfg = model.config
     step = make_step(model, a.dt)
@@ -497,8 +503,6 @@ def main(argv=None):
     # OMIP's LY09 bulk config, with ERA5's reference heights: wind 10 m, T/q 2 m
     coupler_cfg = CouplerConfig(bulk_scheme="large_yeager", z_ref=10.0, z_t_atm=2.0,
                                 z_q_atm=2.0, ocean_albedo=0.06)
-    lat_rad = jnp.asarray(np.deg2rad(lat_c))[:, None]
-    lon_rad = jnp.asarray(np.deg2rad(np.rad2deg(np.asarray(grid.lon)).ravel()))[None, :]
     ocean2 = jnp.asarray(wet3[..., 0])
 
     def day_forcing(c, f):
@@ -506,8 +510,7 @@ def main(argv=None):
         if a.forcing == "none":
             return None, None
         return surface_forcing(a.forcing, f["era5"], c.T.data[..., 0], f["runoff"], f["ice"],
-                               ocean2, lat_rad=lat_rad, lon_rad=lon_rad, day=f["day"],
-                               ref_year=1993, coupler_cfg=coupler_cfg)   # zenith uses doy only
+                               ocean2, cos_zenith=f["cos_z"], coupler_cfg=coupler_cfg)
     spd = int(round(86400.0 / a.dt))
 
     def run_day(c, cfg, f):
@@ -547,6 +550,25 @@ def main(argv=None):
         print(f"[{label}] first non-finite forward state: "
               f"{first_nonfinite(step, base_cfg, O.set_state_fields(state0, x['ic']), x, day_forcing, spd, a.days, a.forcing, O, lat_c, wet3, state0.T.data, state0.S.data, np.asarray(model.z_coord.h_partial).max(axis=(0, 1)))}",
               flush=True)
+        raise SystemExit(0)
+    if os.environ.get("OWB_FD_CHECK"):   # PROBE ONLY: AD gradient vs central finite difference
+        import equinox as eqx
+        for j, xs in enumerate(samples):
+            ls, gs = vg(params, xs)
+            print(f"[{label}] sample {j} ({dates[j]}) loss {float(ls):.6f} raw-space grad "
+                  f"{ {n: float(gs.raw[i]) for i, n in enumerate(kn)} }", flush=True)
+        x = samples[0]
+        lf = jax.jit(loss_fn)
+        l0, g = vg(params, x)
+        print(f"[{label}] FD check, sample 0 ({dates[0]}), loss {float(l0):.10f}", flush=True)
+        for n in os.environ["OWB_FD_CHECK"].split(","):
+            i = kn.index(n)
+            for eps in (1e-2, 1e-3, 1e-4):
+                lp, lm = (float(lf(eqx.tree_at(lambda q: q.raw, params, params.raw.at[i].add(e)), x))
+                          for e in (eps, -eps))
+                fd = (lp - lm) / (2 * eps)
+                print(f"[{label}] FD {n}: eps {eps:g} raw-space AD {float(g.raw[i]):+.6e} "
+                      f"FD {fd:+.6e} ratio {float(g.raw[i]) / fd if fd else float('nan'):.4f}", flush=True)
         raise SystemExit(0)
     for j, x in enumerate(samples):
         l0, g = vg(params, x)

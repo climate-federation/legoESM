@@ -30,7 +30,7 @@ from legoesm.forcing.jra55_do import (
     _gregorian_to_jdn,
     _grid_edges_from_centers,
     _jdn_to_gregorian,
-    _jra55_cos_zenith,
+    jra55_cos_zenith,
     _parse_time_axis_to_gregorian,
     _build_noleap_record_index,
     build_jra55_cache,
@@ -530,13 +530,13 @@ def _make_synthetic_slice(shape=(4, 8)) -> JRA55Slice:
 
 
 # ----------------------------------------------------------------------------
-# _jra55_cos_zenith
+# jra55_cos_zenith
 # ----------------------------------------------------------------------------
 
 def test_cos_zenith_returns_finite_values():
     lat = jnp.deg2rad(jnp.linspace(-89.0, 89.0, 9))[:, None]
     lon = jnp.deg2rad(jnp.linspace(0.0, 350.0, 12))[None, :]
-    cos_z = _jra55_cos_zenith(lat, lon, day=0.5, ref_year=1958)
+    cos_z = jra55_cos_zenith(lat, lon, day=0.5, ref_year=1958)
     assert jnp.all(jnp.isfinite(cos_z))
     assert float(jnp.min(cos_z)) >= -1.0 - 1e-12
     assert float(jnp.max(cos_z)) <= 1.0 + 1e-12
@@ -551,8 +551,8 @@ def test_cos_zenith_diurnal_signal_at_equator():
     # day 79 = Mar 21 0:00 (since day 0 is Jan 1 00:00)
     day_noon = 79.0 + 12.0 / 24.0  # Mar 21 noon
     day_midnight = 79.0            # Mar 21 00:00 → at lon=0 (UTC), this IS midnight
-    cz_noon = float(_jra55_cos_zenith(lat, lon, day=day_noon)[0, 0])
-    cz_mid = float(_jra55_cos_zenith(lat, lon, day=day_midnight)[0, 0])
+    cz_noon = float(jra55_cos_zenith(lat, lon, day=day_noon)[0, 0])
+    cz_mid = float(jra55_cos_zenith(lat, lon, day=day_midnight)[0, 0])
     # Sun overhead at noon at the equator on equinox.
     assert cz_noon > 0.95, f"expected ~+1 at noon, got {cz_noon}"
     # Sun directly opposite at midnight.

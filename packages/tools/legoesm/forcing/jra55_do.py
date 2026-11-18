@@ -966,7 +966,7 @@ def load_jra55_block(
 # the only I/O is in ``load_jra55_slice``.
 
 
-def _jra55_cos_zenith(
+def jra55_cos_zenith(
     lat_rad,
     lon_rad,
     day: float,
@@ -1011,6 +1011,7 @@ def jra55_to_atm_surface(
     *,
     ref_year: int = 1958,
     co2_ppmv: float = 400.0,
+    cos_zenith=None,
 ) -> AtmToSurface:
     """Bridge a JRA55Slice into the coupler's :class:`AtmToSurface`.
 
@@ -1060,7 +1061,10 @@ def jra55_to_atm_surface(
     T_v = slice.tas * (1.0 + (1.0 / constants.epsilon - 1.0) * slice.huss)
     rho_a = slice.psl / (constants.R_d * T_v)
 
-    cos_z = _jra55_cos_zenith(lat_rad, lon_rad, day, ref_year=ref_year)
+    # ``cos_zenith`` given: used as is and ``day`` is ignored (the date conversion is
+    # host-side Python, so a caller stepping inside a compiled scan precomputes it).
+    cos_z = (jra55_cos_zenith(lat_rad, lon_rad, day, ref_year=ref_year)
+             if cos_zenith is None else cos_zenith)
     # Broadcast cos_z to the field shape so all entries are 2-D arrays.
     cos_z_full = jnp.broadcast_to(cos_z, slice.tas.shape).astype(slice.tas.dtype)
 

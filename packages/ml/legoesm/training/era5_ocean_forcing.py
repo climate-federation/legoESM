@@ -58,7 +58,7 @@ def _zero_ice_response(like):
 
 
 def surface_forcing(mode, a, sst_C, runoff, ice_frac, ocean_mask, *, lat_rad=None,
-                    lon_rad=None, day=0.0, ref_year=1993, coupler_cfg=None):
+                    lon_rad=None, day=0.0, ref_year=1993, coupler_cfg=None, cos_zenith=None):
     """One model day's ``(FreshwaterForcing, OceanSurfaceForcing)`` from an ERA5 day."""
     from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing, open_water_bulk_forcing
     from legoesm.ocean.freshwater import FreshwaterForcing
@@ -69,7 +69,8 @@ def surface_forcing(mode, a, sst_C, runoff, ice_frac, ocean_mask, *, lat_rad=Non
     slc = era5_to_slice(a, runoff)
     if mode == "bulk":
         from legoesm.forcing.jra55_do import jra55_to_atm_surface
-        atm = jra55_to_atm_surface(slc, lat_rad, lon_rad, day, ref_year=ref_year)
+        atm = jra55_to_atm_surface(slc, lat_rad, lon_rad, day, ref_year=ref_year,
+                                   cos_zenith=cos_zenith)
         _, fw, sf = open_water_bulk_forcing(atm, sst_C + constants.T_freeze, slc.friver,
                                             coupler_cfg)
     elif mode == "prescribed":
