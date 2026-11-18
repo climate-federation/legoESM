@@ -17483,7 +17483,7 @@ _step2_shift_citations(
         "packages/ocean/legoesm/ocean/forcing/nemo_surface.py:" + lines
         for lines in ("143-187", "348-358", "406-414")
     ),
-    lambda line: line + 111,
+    lambda line: line + 116,
 )
 _merge_resolution_repin(
     "packages/ocean/legoesm/ocean/bulk_flux_omip.py:1132-1153",
@@ -17510,13 +17510,13 @@ _merge_resolution_repin(
 )
 _merge_resolution_repin(
     "packages/ocean/legoesm/ocean/forcing/nemo_surface.py:143-187",
-    "254-298",
-    anchors=["first_from_rest = jnp.logical_and(", (")", 121)],
+    "259-303",
+    anchors=["first_from_rest = jnp.logical_and(", (")", 123)],
 )
 _merge_resolution_repin(
     "packages/ocean/legoesm/ocean/forcing/nemo_surface.py:348-358",
-    "459-469",
-    anchors=["utau_u, vtau_v = nemo_t_stress_to_uv(", (")", 179)],
+    "464-474",
+    anchors=["utau_u, vtau_v = nemo_t_stress_to_uv(", (")", 181)],
 )
 
 # The extraction moves the public wrapper and separates its stress call from

@@ -90,6 +90,7 @@ def nemo_fwb_case2_step(
     snwice_mass_b,
     cell_area,
     surface_mask,
+    interior_surface_mask,
     reference_density,
     seconds_per_day,
     days_per_year,
@@ -101,8 +102,11 @@ def nemo_fwb_case2_step(
     """Advance NEMO ``sbc_fwb`` CASE(2) and apply its odd-step flux.
 
     The annual reduction follows sbcfwb.F90:342-373 and reads
-    ``snwice_mass_b`` (never ``snwice_fmass``).  Flux application is the
-    independent ``nn_fsbc`` guard at lines 388-390.  Supplying a restored
+    ``snwice_mass_b`` (never ``snwice_fmass``).  NEMO's ``glob_2Dsum`` applies
+    ``smask0_i`` to both the area and mass reductions
+    (lib_fortran_generic.h90:92,147; dommsk.F90:203-205), while the independent
+    flux application at sbcfwb.F90:388-390 uses ``smask0``.  The two masks are
+    therefore explicit, distinct inputs.  Supplying a restored
     :class:`NemoFwbCase2Carry` resumes all three restart variables directly.
     """
 
@@ -116,14 +120,15 @@ def nemo_fwb_case2_step(
     mass_b = _sr(jnp.asarray(snwice_mass_b, dtype=jnp.float64))
     area_field = _sr(jnp.asarray(cell_area, dtype=jnp.float64))
     smask = _sr(jnp.asarray(surface_mask, dtype=jnp.float64))
+    smask_i = _sr(jnp.asarray(interior_surface_mask, dtype=jnp.float64))
     sentinel = jnp.asarray(999.0, dtype=jnp.float64)
 
     def sample_annual(prior):
         a_fwb_b = _sr(jnp.asarray(prior.a_fwb, dtype=jnp.float64))
         r1_rho0 = _sr(jnp.asarray(1.0, dtype=jnp.float64) / rho0)
         height = _sr(ssh + _sr(mass_b * r1_rho0))
-        total = nemo_ddpdd_sum_2d(_sr(area_field * height), jnp.ones_like(smask))
-        area = nemo_ddpdd_sum_2d(area_field, smask)
+        total = nemo_ddpdd_sum_2d(_sr(area_field * height), smask_i)
+        area = nemo_ddpdd_sum_2d(_sr(area_field * smask), smask_i)
         a_fwb = _sr(_sr(total * rho0) / area)
         a_fwb_b = jnp.where(a_fwb_b == sentinel, a_fwb, a_fwb_b)
         year_seconds = _sr(
