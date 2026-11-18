@@ -335,7 +335,7 @@ def _mom6_cell_n(T, S, dz, eos_fn, g):
     thin = (dz[..., :-1] <= 0.0) | (dz[..., 1:] <= 0.0)
     h_mid = jnp.where(thin, 1.0, 0.5 * (dz[..., :-1] + dz[..., 1:]))
     N2 = jnp.where(thin, 0.0, g / rho_0_ref * drho / h_mid)
-    N2 = jnp.concatenate([N2, jnp.zeros_like(N2[..., :1])], axis=-1)
+    N2 = jnp.concatenate([N2, jnp.zeros_like(T[..., :1])], axis=-1)
     return jnp.sqrt(jnp.maximum(N2, 1e-30))
 
 

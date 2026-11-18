@@ -281,6 +281,21 @@ def test_vt2_buoyancy_frequency_is_mom6_interface_pressure(monkeypatch):
     np.testing.assert_allclose(seen[0][0], want, rtol=1e-12, atol=0.0)
 
 
+def test_single_cell_column():
+    """One wet level: the bottom-N append must come from the column shape (review)."""
+    zc = create_z_star_from_thicknesses(np.array([5.0]))
+    S = jnp.full((1, 1), 35.0)
+    z0 = jnp.zeros((1, 1))
+
+    def h(T):
+        return jnp.sum(K._boundary_layer_depth(wright_eos(T, S, z0), T, S, z0, z0, zc, jnp.ones(1),
+                                               jnp.array([0.005]), jnp.array([1e-8]), CFG))
+
+    T = jnp.full((1, 1), 15.0)
+    assert np.isfinite(float(h(T)))
+    assert bool(jnp.all(jnp.isfinite(jax.grad(h)(T))))
+
+
 def test_bulk_richardson_matches_cvmix():
     """CVMix compute_bulk_Richardson (N=0 -> V_t^2 = minVtsqr 1e-10)."""
     zc = np.array([-0.5, -1.5, -2.5])
