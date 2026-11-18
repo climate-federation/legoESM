@@ -163,7 +163,7 @@ class SI3O17Trace(NamedTuple):
     finalize: SI3FinalizeResponse
 
 
-class _SI3O17ThroughUpdateFlux(NamedTuple):
+class SI3O17ThroughUpdateFlux(NamedTuple):
     """O17 state and named boundaries immediately after ``ice_update_flx``."""
 
     state: SI3O17StepState
@@ -180,6 +180,7 @@ class _SI3O17ThroughUpdateFlux(NamedTuple):
     remap: dict
     open_water: SI3DOOutputs
     correction: SI3CorrectionResult
+    update_forcing: SI3UpdateFluxForcing
     final: SI3O16Result
     stress_inputs: SI3StressInputs
 
@@ -601,7 +602,7 @@ def _si3_o17_through_update_flx(
     _plant_drop_redistribution: bool = False,
     _plant_drop_deformation_fold: bool = False,
     _test_return_surface_probe: bool = False,
-) -> _SI3O17ThroughUpdateFlux:
+) -> SI3O17ThroughUpdateFlux:
     """Run the exact NEMO ``ice_stp`` graph through ``ice_update_flx``."""
 
     if card.core2_precipitation_closure is not False:
@@ -1194,7 +1195,7 @@ def _si3_o17_through_update_flx(
         v_ice=final.state.v_ice,
         at_i=final.state.aggregated.at_i,
     )
-    return _SI3O17ThroughUpdateFlux(
+    return SI3O17ThroughUpdateFlux(
         state=SI3O17StepState(final.state, aevp),
         surface_stress=surface,
         strength=strength,
@@ -1209,8 +1210,32 @@ def _si3_o17_through_update_flx(
         remap=remap,
         open_water=open_water,
         correction=correction,
+        update_forcing=update,
         final=final,
         stress_inputs=stress_inputs,
+    )
+
+
+def si3_o17_through_update_flx(
+    entry: SI3O17StepState,
+    forcing: SI3O17LiveForcing,
+    card: SI3O17Card,
+    *,
+    _plant_swap_rheology_advection: bool = False,
+    _plant_drop_redistribution: bool = False,
+    _plant_drop_deformation_fold: bool = False,
+    _test_return_surface_probe: bool = False,
+) -> SI3O17ThroughUpdateFlux:
+    """Public coupled-recipe boundary through NEMO ``ice_update_flx``."""
+
+    return _si3_o17_through_update_flx(
+        entry,
+        forcing,
+        card,
+        _plant_swap_rheology_advection=_plant_swap_rheology_advection,
+        _plant_drop_redistribution=_plant_drop_redistribution,
+        _plant_drop_deformation_fold=_plant_drop_deformation_fold,
+        _test_return_surface_probe=_test_return_surface_probe,
     )
 
 
@@ -1268,6 +1293,8 @@ __all__ = (
     "SI3O17LiveForcing",
     "SI3O17StepState",
     "SI3O17SurfaceForcing",
+    "SI3O17ThroughUpdateFlux",
     "SI3O17Trace",
+    "si3_o17_through_update_flx",
     "si3_o17_step",
 )

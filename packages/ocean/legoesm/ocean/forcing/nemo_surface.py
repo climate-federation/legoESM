@@ -12,15 +12,14 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-
 from legoesm.core.source_rounding import nemo_source_round as _sr
 from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
+from legoesm.ocean.forcing.sss_restoring import nemo_orca2_sss_restoring
 from legoesm.ocean.freshwater import (
     FreshwaterForcing,
     NemoRunoffSurface,
     nemo_orca2_surface_runoff,
 )
-from legoesm.ocean.forcing.sss_restoring import nemo_orca2_sss_restoring
 from legoesm.ocean.state import OceanSurfaceForcing
 
 
@@ -49,6 +48,19 @@ class NemoS2Result(NamedTuple):
     utau_u: jnp.ndarray
     vtau_v: jnp.ndarray
     penetrative_qsr: jnp.ndarray
+    qns_after_ssr: jnp.ndarray
+    emp_after_ssr: jnp.ndarray
+
+
+class NemoRunoffRestoringResult(NamedTuple):
+    """The ``sbc_rnf``/``sbc_ssr`` boundary immediately before ``sbc_fwb``."""
+
+    runoff: NemoRunoffSurface
+    restoring_coefficient: jnp.ndarray
+    erp: jnp.ndarray
+    qrp: jnp.ndarray
+    qns: jnp.ndarray
+    emp: jnp.ndarray
     qns_after_ssr: jnp.ndarray
     emp_after_ssr: jnp.ndarray
 
@@ -337,6 +349,108 @@ def nemo_t_stress_to_uv(
     return utau_u, vtau_v
 
 
+def nemo_orca2_runoff_restoring(
+    *,
+    kt,
+    forcing_stride,
+    post_ice_qns,
+    post_ice_emp,
+    runoff_now,
+    prior_runoff_mass,
+    prior_runoff_temperature_content,
+    prior_runoff_salinity_content,
+    prior_restoring_volume_flux,
+    prior_restoring_heat_flux,
+    prior_restoring_coefficient,
+    sst_mean,
+    sss_mean,
+    sss_target,
+    runoff_mouth_mask,
+    surface_mask,
+    runoff_factor,
+    reference_density,
+    restoring_mm_per_day,
+    restoring_bound_mm_per_day,
+    seconds_per_day,
+    salinity_floor,
+    heat_capacity,
+):
+    """Execute ``sbc_rnf`` then ``sbc_ssr`` through the pre-``sbc_fwb`` boundary."""
+
+    qns = _sr(jnp.asarray(post_ice_qns, dtype=jnp.float64))
+    emp = _sr(jnp.asarray(post_ice_emp, dtype=jnp.float64))
+    smask = _sr(jnp.asarray(surface_mask, dtype=jnp.float64))
+    sst = _sr(jnp.asarray(sst_mean, dtype=jnp.float64))
+    updated_runoff = nemo_orca2_surface_runoff(
+        runoff_now,
+        sst,
+        smask,
+        runoff_factor=runoff_factor,
+        reference_density=reference_density,
+    )
+    update = jnp.mod(jnp.asarray(kt) - 1, jnp.asarray(forcing_stride)) == 0
+    prior_runoff_mass = _sr(jnp.asarray(prior_runoff_mass, dtype=jnp.float64))
+    prior_runoff_temperature_content = _sr(
+        jnp.asarray(prior_runoff_temperature_content, dtype=jnp.float64)
+    )
+    prior_runoff_salinity_content = _sr(
+        jnp.asarray(prior_runoff_salinity_content, dtype=jnp.float64)
+    )
+    updated_coefficient, updated_erp, updated_heat_term = nemo_orca2_sss_restoring(
+        sss_mean,
+        sss_target,
+        sst,
+        runoff_mouth_mask,
+        smask,
+        prior_restoring_coefficient,
+        restoring_mm_per_day=restoring_mm_per_day,
+        bound_mm_per_day=restoring_bound_mm_per_day,
+        seconds_per_day=seconds_per_day,
+        salinity_floor=salinity_floor,
+        heat_capacity=heat_capacity,
+    )
+    prior_erp = _sr(jnp.asarray(prior_restoring_volume_flux, dtype=jnp.float64))
+    prior_qrp = _sr(jnp.asarray(prior_restoring_heat_flux, dtype=jnp.float64))
+    prior_coefficient = _sr(
+        jnp.asarray(prior_restoring_coefficient, dtype=jnp.float64)
+    )
+
+    def apply_forcing_update(_):
+        qrp_update = _sr(_sr(jnp.zeros_like(updated_heat_term)) - updated_heat_term)
+        emp_after_ssr = _sr(emp + updated_erp)
+        qns_after_ssr = _sr(qns - updated_heat_term)
+        return (
+            updated_runoff,
+            updated_coefficient,
+            updated_erp,
+            qrp_update,
+            qns_after_ssr,
+            emp_after_ssr,
+            qns_after_ssr,
+            emp_after_ssr,
+        )
+
+    def preserve_between_updates(_):
+        return (
+            NemoRunoffSurface(
+                prior_runoff_mass,
+                prior_runoff_temperature_content,
+                prior_runoff_salinity_content,
+            ),
+            prior_coefficient,
+            prior_erp,
+            prior_qrp,
+            qns,
+            emp,
+            qns,
+            emp,
+        )
+
+    return NemoRunoffRestoringResult(*jax.lax.cond(
+        update, apply_forcing_update, preserve_between_updates, operand=None
+    ))
+
+
 def nemo_orca2_s2(
     *,
     kt,
@@ -376,90 +490,54 @@ def nemo_orca2_s2(
     heat_capacity,
 ):
     """Execute the deck's S2 operations from an explicit post-S3 boundary."""
-    qns = _sr(jnp.asarray(post_ice_qns, dtype=jnp.float64))
     qsr = _sr(jnp.asarray(post_ice_qsr, dtype=jnp.float64))
-    emp = _sr(jnp.asarray(post_ice_emp, dtype=jnp.float64))
     sfx = _sr(jnp.asarray(post_ice_sfx, dtype=jnp.float64))
     taum = _sr(jnp.asarray(post_ice_taum, dtype=jnp.float64))
     utau = _sr(jnp.asarray(post_ice_utau, dtype=jnp.float64))
     vtau = _sr(jnp.asarray(post_ice_vtau, dtype=jnp.float64))
     smask = _sr(jnp.asarray(surface_mask, dtype=jnp.float64))
     sst = _sr(jnp.asarray(sst_mean, dtype=jnp.float64))
-
-    updated_runoff = nemo_orca2_surface_runoff(
-        runoff_now,
-        sst,
-        smask,
+    update = jnp.mod(jnp.asarray(kt) - 1, jnp.asarray(forcing_stride)) == 0
+    pre_fwb = nemo_orca2_runoff_restoring(
+        kt=kt,
+        forcing_stride=forcing_stride,
+        post_ice_qns=post_ice_qns,
+        post_ice_emp=post_ice_emp,
+        runoff_now=runoff_now,
+        prior_runoff_mass=prior_runoff_mass,
+        prior_runoff_temperature_content=prior_runoff_temperature_content,
+        prior_runoff_salinity_content=prior_runoff_salinity_content,
+        prior_restoring_volume_flux=prior_restoring_volume_flux,
+        prior_restoring_heat_flux=prior_restoring_heat_flux,
+        prior_restoring_coefficient=prior_restoring_coefficient,
+        sst_mean=sst_mean,
+        sss_mean=sss_mean,
+        sss_target=sss_target,
+        runoff_mouth_mask=runoff_mouth_mask,
+        surface_mask=surface_mask,
         runoff_factor=runoff_factor,
         reference_density=reference_density,
-    )
-    update = jnp.mod(jnp.asarray(kt) - 1, jnp.asarray(forcing_stride)) == 0
-    prior_runoff_mass = _sr(jnp.asarray(prior_runoff_mass, dtype=jnp.float64))
-    prior_runoff_temperature_content = _sr(
-        jnp.asarray(prior_runoff_temperature_content, dtype=jnp.float64)
-    )
-    prior_runoff_salinity_content = _sr(
-        jnp.asarray(prior_runoff_salinity_content, dtype=jnp.float64)
-    )
-    updated_coefficient, updated_erp, updated_heat_term = nemo_orca2_sss_restoring(
-        sss_mean,
-        sss_target,
-        sst,
-        runoff_mouth_mask,
-        smask,
-        prior_restoring_coefficient,
         restoring_mm_per_day=restoring_mm_per_day,
-        bound_mm_per_day=restoring_bound_mm_per_day,
+        restoring_bound_mm_per_day=restoring_bound_mm_per_day,
         seconds_per_day=seconds_per_day,
         salinity_floor=salinity_floor,
         heat_capacity=heat_capacity,
     )
-    prior_erp = _sr(jnp.asarray(prior_restoring_volume_flux, dtype=jnp.float64))
-    prior_qrp = _sr(jnp.asarray(prior_restoring_heat_flux, dtype=jnp.float64))
-    prior_coefficient = _sr(
-        jnp.asarray(prior_restoring_coefficient, dtype=jnp.float64)
-    )
     correction = _sr(jnp.asarray(freshwater_budget_correction, dtype=jnp.float64))
 
     def apply_forcing_update(_):
-        qrp_update = _sr(_sr(jnp.zeros_like(updated_heat_term)) - updated_heat_term)
-        emp_after_ssr = _sr(emp + updated_erp)
-        qns_after_ssr = _sr(qns - updated_heat_term)
         correction_masked = _sr(correction * smask)
-        emp_update = _sr(emp_after_ssr + correction_masked)
+        emp_update = _sr(pre_fwb.emp + correction_masked)
         correction_heat = _sr(
             _sr(_sr(correction * _sr(heat_capacity)) * sst) * smask
         )
-        qns_update = _sr(qns_after_ssr - correction_heat)
-        return (
-            updated_runoff,
-            updated_coefficient,
-            updated_erp,
-            qrp_update,
-            qns_update,
-            emp_update,
-            qns_after_ssr,
-            emp_after_ssr,
-        )
+        return _sr(pre_fwb.qns - correction_heat), emp_update
 
-    def preserve_between_updates(_):
-        return (
-            NemoRunoffSurface(
-                prior_runoff_mass,
-                prior_runoff_temperature_content,
-                prior_runoff_salinity_content,
-            ),
-            prior_coefficient,
-            prior_erp,
-            prior_qrp,
-            qns,
-            emp,
-            qns,
-            emp,
-        )
-
-    runoff, coefficient, erp, qrp, qns, emp, qns_after_ssr, emp_after_ssr = jax.lax.cond(
-        update, apply_forcing_update, preserve_between_updates, operand=None
+    qns, emp = jax.lax.cond(
+        update,
+        apply_forcing_update,
+        lambda _: (pre_fwb.qns, pre_fwb.emp),
+        operand=None,
     )
     utau_u, vtau_v = nemo_t_stress_to_uv(
         utau,
@@ -474,10 +552,10 @@ def nemo_orca2_s2(
     )
     penetrative_qsr = _sr(qsr)
     return NemoS2Result(
-        runoff,
-        coefficient,
-        erp,
-        qrp,
+        pre_fwb.runoff,
+        pre_fwb.restoring_coefficient,
+        pre_fwb.erp,
+        pre_fwb.qrp,
         qns,
         qsr,
         emp,
@@ -488,8 +566,8 @@ def nemo_orca2_s2(
         utau_u,
         vtau_v,
         penetrative_qsr,
-        qns_after_ssr,
-        emp_after_ssr,
+        pre_fwb.qns_after_ssr,
+        pre_fwb.emp_after_ssr,
     )
 
 
@@ -550,12 +628,14 @@ def nemo_s2_to_ocean_interfaces(
 __all__ = (
     "NemoFwbCase2Carry",
     "NemoFwbCase2Result",
+    "NemoRunoffRestoringResult",
     "NemoS2Result",
     "NemoSurfaceMeans",
     "NemoTStressLbcPlan",
     "nemo_fwb_case2_cold_start",
     "nemo_fwb_case2_step",
     "nemo_orca2_s2",
+    "nemo_orca2_runoff_restoring",
     "nemo_sbc_ssm_step",
     "nemo_s2_to_ocean_interfaces",
     "nemo_t_stress_lbc_neighbors",

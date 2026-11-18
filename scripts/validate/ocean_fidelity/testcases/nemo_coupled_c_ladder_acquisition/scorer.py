@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed C0/C1 scorer; C2--C4 remain explicitly unscorable."""
+"""Fail-closed C0/C1 scorer and D225/D226 compiled-C2 comparison."""
 
 from __future__ import annotations
 
@@ -44,7 +44,10 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_composition_scorer i
 
 MAGIC = b"CLAD0001"
 UNSCORABLE = "NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP"
+C2_READY = "READY_D225_D226_COMPILED_OBSERVATIONS"
 ADMITTED_ICE_DIMENSIONS = (5, 10, 5)
+C2_VERDICT_KINDS = (3, 4, 5, 6, 15, 16, 19, 20, 34)
+C2_REPORT_ONLY_KINDS = (1, 2)
 _HEADER_BYTES = 8 + 4 + 11 * 4
 _KIND1_FLAGS = (
     ("restart_means_present", "i4"),
@@ -246,6 +249,215 @@ def _write_stub_kind1_record(
 def _equal(name: str, got, want) -> None:
     if not np.array_equal(np.asarray(got).view(np.uint64), np.asarray(want).view(np.uint64)):
         raise ValueError(f"STATUS PLANT-FIRED: {name} is not 0 ULP")
+
+
+def _bit_words(value: np.ndarray) -> np.ndarray:
+    value = np.asarray(value)
+    if value.dtype.kind != "f" or value.dtype.itemsize != 8:
+        raise ValueError(f"D225 requires float64 observations, got {value.dtype}")
+    return np.ascontiguousarray(value).view(np.uint64).reshape(value.shape)
+
+
+def _d225_owned_arrays(got, want, mask: np.ndarray):
+    """Remove MPI halos, retaining an offset for record-coordinate reporting."""
+    got = np.asarray(got)
+    want = np.asarray(want)
+    mask = np.asarray(mask, dtype=bool)
+    if got.shape[:2] == mask.shape:
+        if min(mask.shape) <= 4:
+            raise ValueError(f"D225 full shard is too small for two-cell halos: {mask.shape}")
+        owned = (slice(2, -2), slice(2, -2)) + (slice(None),) * (got.ndim - 2)
+        return got[owned], want[owned], mask[2:-2, 2:-2], (2, 2)
+    if mask.shape[0] >= 5 and mask.shape[1] >= 5 and got.shape[:2] == (
+        mask.shape[0] - 4,
+        mask.shape[1] - 4,
+    ):
+        return got, want, mask[2:-2, 2:-2], (0, 0)
+    raise ValueError(f"D225 mask {mask.shape} cannot cover field {got.shape}")
+
+
+def _d225_field(got, want, wet_mask: np.ndarray) -> dict:
+    """Apply D225 exactly: wet raw words; dry signed-zero exception only."""
+    got = np.asarray(got)
+    want = np.asarray(want)
+    if got.shape != want.shape:
+        raise ValueError(f"C2 shape mismatch: candidate={got.shape}, NEMO={want.shape}")
+    got, want, wet_base, offset = _d225_owned_arrays(got, want, wet_mask)
+    got_bits, want_bits = _bit_words(got), _bit_words(want)
+    wet = np.broadcast_to(
+        wet_base.reshape(wet_base.shape + (1,) * (got.ndim - 2)), got.shape
+    )
+    different = got_bits != want_bits
+    sign_zero = different & (got == 0.0) & (want == 0.0)
+    wet_bad = different & wet
+    dry_sign_zero = sign_zero & ~wet
+    dry_bad = different & ~wet & ~sign_zero
+    bad = wet_bad | dry_bad
+    first = None
+    if np.any(bad):
+        owned_index = tuple(int(i) for i in np.argwhere(bad)[0])
+        index = (
+            owned_index[0] + offset[0],
+            owned_index[1] + offset[1],
+            *owned_index[2:],
+        )
+        first = {
+            "cell": index,
+            "got_bits": f"0x{int(got_bits[owned_index]):016x}",
+            "nemo_bits": f"0x{int(want_bits[owned_index]):016x}",
+            "domain": "wet" if bool(wet[owned_index]) else "dry",
+        }
+    return {
+        "values": int(got.size),
+        "wet_values": int(np.count_nonzero(wet)),
+        "wet_different": int(np.count_nonzero(wet_bad)),
+        "dry_zero_sign_different": int(np.count_nonzero(dry_sign_zero)),
+        "dry_other_different": int(np.count_nonzero(dry_bad)),
+        "first": first,
+    }
+
+
+def _merge_d225_counts(total: dict, row: dict) -> None:
+    for name in (
+        "values", "wet_values", "wet_different",
+        "dry_zero_sign_different", "dry_other_different",
+    ):
+        total[name] = total.get(name, 0) + row[name]
+
+
+def score_c2_observations(
+    candidate: dict[tuple[int, int, int], dict[str, object]],
+    expected: dict[tuple[int, int, int], dict[str, object]],
+    masks: dict[tuple[int, int], dict[str, np.ndarray]],
+) -> dict:
+    """Compare compiled recipe observations; perform no physical arithmetic.
+
+    Keys are ``(kind, kt, rank)``.  The runner constructs ``candidate`` from
+    the two jitted recipe traces; this function only compares and reports.
+    """
+    required = {
+        (kind, kt, rank)
+        for kind in (*C2_REPORT_ONLY_KINDS, *C2_VERDICT_KINDS)
+        for kt in (1, 2)
+        for rank in (0, 1)
+        if not (kind in (15, 16) and kt % 2 == 0)
+    }
+    missing = sorted(required - set(candidate))
+    if missing:
+        raise ValueError(f"C2 candidate observations incomplete; missing={missing[:8]}")
+    missing_expected = sorted(required - set(expected))
+    if missing_expected:
+        raise ValueError(f"C2 NEMO observations incomplete; missing={missing_expected[:8]}")
+
+    counts: dict[int, dict] = {}
+    report_only: dict[int, dict] = {}
+    first_failure = None
+    for kind, kt, rank in sorted(required, key=lambda key: (key[1], key[0], key[2])):
+        got_fields = candidate[(kind, kt, rank)]
+        want_fields = expected[(kind, kt, rank)]
+        if set(got_fields) != set(want_fields):
+            raise ValueError(
+                f"C2 kind={kind} kt={kt} rank={rank} field set mismatch: "
+                f"candidate_only={sorted(set(got_fields) - set(want_fields))}, "
+                f"NEMO_only={sorted(set(want_fields) - set(got_fields))}"
+            )
+        kind_total = (report_only if kind in C2_REPORT_ONLY_KINDS else counts).setdefault(
+            kind, {}
+        )
+        mask_names = masks[(kt, rank)]
+        for field in sorted(want_fields):
+            got = np.asarray(got_fields[field])
+            if got.dtype.kind != "f":
+                if not np.array_equal(got, np.asarray(want_fields[field])):
+                    raise ValueError(
+                        f"C2 integer metadata differs kind={kind} field={field} kt={kt} rank={rank}"
+                    )
+                continue
+            mask_name = "umask" if field == "uu" else "vmask" if field == "vv" else "tmask"
+            row = _d225_field(got, want_fields[field], mask_names[mask_name] > 0.5)
+            _merge_d225_counts(kind_total, row)
+            if (
+                kind in C2_VERDICT_KINDS
+                and first_failure is None
+                and row["first"] is not None
+            ):
+                first_failure = {
+                    "kind": kind, "field": field, "kt": kt, "rank": rank,
+                    **row["first"],
+                }
+    if first_failure is None:
+        status = "PASS_C2_0_ULP_WET"
+    else:
+        f = first_failure
+        status = (
+            f"FAIL_C2 kind={f['kind']} field={f['field']} cell={f['cell']} "
+            f"kt={f['kt']} rank={f['rank']} got={f['got_bits']} "
+            f"nemo={f['nemo_bits']} domain={f['domain']}"
+        )
+    return {
+        "status": status,
+        "compiled": True,
+        "verdict_kinds": list(C2_VERDICT_KINDS),
+        "report_only_kinds": list(C2_REPORT_ONLY_KINDS),
+        "counts": counts,
+        "report_only_counts": report_only,
+        "first_failure": first_failure,
+    }
+
+
+def load_c2_expected(evidence: Path) -> tuple[dict, dict]:
+    """Load only the admitted NEMO observations and D225 physical masks."""
+    run = evidence / "REC_C2"
+    namelist = _coupled_resolved_namelist(run)
+    dimensions = tuple(int(namelist[name]) for name in ("jpl", "nlay_i", "nlay_s"))
+    if dimensions != ADMITTED_ICE_DIMENSIONS:
+        raise ValueError(
+            "STATUS PLANT-FIRED: resolved ice dimensions "
+            f"{dimensions} are inadmissible; expected ICE5 {ADMITTED_ICE_DIMENSIONS}"
+        )
+    c_root = run / "c_ladder_records"
+    master_root = run / "o8_o16_master_records"
+    o17_root = run / "o17_master_records"
+    expected: dict[tuple[int, int, int], dict[str, object]] = {}
+    masks: dict[tuple[int, int], dict[str, np.ndarray]] = {}
+    for kt in (1, 2):
+        for rank in (0, 1):
+            for kind in (*C2_REPORT_ONLY_KINDS, 3, 4, 5, 6):
+                record = read_c_record(
+                    c_root / f"c_kind{kind}_step{kt:04d}_rank{rank:04d}.bin"
+                )
+                expected[(kind, kt, rank)] = record["fields"]
+                if kind == 4:
+                    masks[(kt, rank)] = {
+                        name: record["fields"][name]
+                        for name in ("tmask", "umask", "vmask")
+                    }
+            for kind in (15, 16, 19, 20):
+                if kind in (15, 16) and kt % 2 == 0:
+                    continue
+                record = read_record_verified(
+                    master_root / record_name(kind, kt, 0, rank),
+                    expected_ice_dimensions=dimensions,
+                )
+                expected[(kind, kt, rank)] = record["fields"]
+            private = read_o17_record(
+                o17_root / f"o17_kind34_tau_private_step{kt:04d}_rank{rank:04d}.bin"
+            )
+            private_dimensions = tuple(
+                int(private["meta"][name]) for name in ("jpl", "nlay_i", "nlay_s")
+            )
+            if private_dimensions != dimensions:
+                raise ValueError(
+                    f"O17 kind 34 dimensions {private_dimensions} != ICE5 {dimensions}"
+                )
+            expected[(34, kt, rank)] = private["fields"]
+    return expected, masks
+
+
+def score_c2(evidence: Path, candidate: dict[tuple[int, int, int], dict]) -> dict:
+    """Score observations emitted by one externally jitted coupled-pair run."""
+    expected, masks = load_c2_expected(evidence)
+    return score_c2_observations(candidate, expected, masks)
 
 
 def _coupled_resolved_namelist(run: Path) -> dict:
@@ -525,7 +737,7 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
 
 
 def status_report() -> dict:
-    return {"C2": UNSCORABLE, "C3": UNSCORABLE, "C4": UNSCORABLE}
+    return {"C2": C2_READY, "C3": UNSCORABLE, "C4": UNSCORABLE}
 
 
 def self_test(plant: str | None, scratch: Path) -> dict:

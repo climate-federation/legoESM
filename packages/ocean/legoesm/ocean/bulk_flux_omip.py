@@ -78,30 +78,41 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-from legoesm import constants
 from legoesm.core import transcendentals as tx
 from legoesm.core.precision import get_policy
 from legoesm.core.smooth import positive_part_c1
 from legoesm.core.source_rounding import (
     nemo_fortran_max,
     nemo_fortran_min,
+)
+from legoesm.core.source_rounding import (
     nemo_fortran_sign as _sign,
+)
+from legoesm.core.source_rounding import (
     nemo_source_barrier as B,
+)
+from legoesm.core.source_rounding import (
     nemo_source_round as R,
 )
 from legoesm.ocean.eos import nemo_eos_fzp_eos80
 from legoesm.ocean.forcing.nemo_fld_read import nemo_fld_time_interp
 from legoesm.ocean.forcing.nemo_surface import (
+    NemoFwbCase2Carry,
+    NemoS2Result,
     NemoSurfaceMeans,
     NemoTStressLbcPlan,
+    nemo_fwb_case2_cold_start,
+    nemo_fwb_case2_step,
+    nemo_orca2_runoff_restoring,
     nemo_orca2_s2,
-    nemo_sbc_ssm_step,
     nemo_s2_to_ocean_interfaces,
+    nemo_sbc_ssm_step,
     nemo_t_stress_lbc_neighbors,
+    nemo_t_stress_to_uv,
 )
 from legoesm.thermo import saturation_vapor_pressure_goff
 
+from legoesm import constants
 
 _U10_FLOOR_M_S: float = 0.5    # NEMO turb_ncar: Ubzu = MAX(0.5, U)
 _CH_UNSTABLE: float = 1.46e-3  # legacy ly09_2coeff only
@@ -558,7 +569,7 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
     ``q_zt``); the iteration uses the floored :func:`nemo_zu_air_state`.
     ``cd_cutoff_width`` (None = ``NCAR_CD_CUTOFF_WIDTH``, 0 = NEMO's hard
     switch): RULE 5 width of the 33 m/s drag-plateau blend (#2241)."""
-    from legoesm.core.bulk_flux import large_yeager_neutral_cd, psi_m, psi_h
+    from legoesm.core.bulk_flux import large_yeager_neutral_cd, psi_h, psi_m
 
     k = constants.kappa_von_karman
     theta = jnp.asarray(theta_air_K, dtype=jnp.float64)
@@ -899,6 +910,511 @@ class NemoStandaloneK0StepResult(NamedTuple):
     ocean: object
     next_s0: NemoS0Inputs
     next_s2: NemoS2Inputs
+
+
+class NemoORCA2SI3Card(NamedTuple):
+    """Resolved static selectors/fields for the NEMO ORCA2+SI3 recipe."""
+
+    ocean: object
+    ice: object
+    stress_lbc: NemoTStressLbcPlan
+    cell_area: object
+    interior_surface_mask: object
+    runoff_mouth_mask: object
+    surface_mask: object
+    tmask_east: object
+    tmask_north: object
+    umask: object
+    vmask: object
+    runoff_factor: object
+    reference_density: object
+    restoring_mm_per_day: object
+    restoring_bound_mm_per_day: object
+    seconds_per_day: object
+    days_per_year: object
+    salinity_floor: object
+    heat_capacity: object
+    annual_steps: int
+    forcing_stride: int
+    albedo: object
+    precip_factor: object
+    evap_factor: object
+    nb_iter: int
+
+
+class NemoORCA2SI3Forcing(NamedTuple):
+    """One physical forcing record plus the explicit static SI3 grid bundle."""
+
+    s0f: NemoStandaloneS0FInputs
+    o17: object
+    chl: object
+    geothermal_heat_flux_mwm2: object
+
+
+class NemoORCA2SI3Trace(NamedTuple):
+    """Verdict boundaries in NEMO source order for one coupled step."""
+
+    ocean_entry: object
+    means: NemoSurfaceMeans
+    bulk: NemoBlkOceResult
+    ice_core: object
+    stress_inputs: object
+    stress: object
+    pre_fwb: object
+    fwb: object
+    surface: object
+    ocean_exit: object
+
+
+class NemoORCA2SI3Carry:
+    """Restart-complete pure carry for the ORCA2+SI3 source-order recipe.
+
+    ``kt`` is static pytree metadata because the admitted SI3 Prather sweep and
+    aEVP program select a compile-time source program from the integer step.
+    All physical state remains dynamic leaves under :func:`jax.jit`/``grad``.
+    """
+
+    __slots__ = (
+        "ocean", "ice", "means", "stress", "fluxes", "runoff",
+        "restoring_volume_flux", "restoring_heat_flux", "restoring_coefficient",
+        "a_fwb", "a_fwb_b", "emp_corr", "kt",
+    )
+
+    _dynamic_fields = __slots__[:-1]
+
+    def __init__(
+        self,
+        ocean,
+        ice,
+        means,
+        stress,
+        fluxes,
+        runoff,
+        restoring_volume_flux,
+        restoring_heat_flux,
+        restoring_coefficient,
+        a_fwb,
+        a_fwb_b,
+        emp_corr,
+        kt,
+    ):
+        if type(kt) is not int or kt < 1:
+            raise ValueError("NemoORCA2SI3Carry kt must be a positive Python integer")
+        for name, value in zip(self._dynamic_fields, (
+            ocean, ice, means, stress, fluxes, runoff,
+            restoring_volume_flux, restoring_heat_flux, restoring_coefficient,
+            a_fwb, a_fwb_b, emp_corr,
+        ), strict=True):
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "kt", kt)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("NemoORCA2SI3Carry is immutable; use _replace")
+
+    def _replace(self, **updates):
+        unknown = set(updates) - set(self.__slots__)
+        if unknown:
+            raise ValueError(f"unknown NemoORCA2SI3Carry fields: {sorted(unknown)}")
+        return type(self)(*(updates.get(name, getattr(self, name)) for name in self.__slots__))
+
+    def tree_flatten(self):
+        return tuple(getattr(self, name) for name in self._dynamic_fields), self.kt
+
+    @classmethod
+    def tree_unflatten(cls, kt, children):
+        return cls(*children, kt)
+
+
+jax.tree_util.register_pytree_node(
+    NemoORCA2SI3Carry,
+    lambda carry: carry.tree_flatten(),
+    lambda kt, children: NemoORCA2SI3Carry.tree_unflatten(kt, children),
+)
+
+
+def nemo_orca2_si3_cold_start(
+    *, ocean, ice, means, stress, fluxes, runoff,
+    restoring_volume_flux, restoring_heat_flux, restoring_coefficient,
+    rn_fwb0, kt: int = 1,
+):
+    """Initialize the admitted ``ln_rstart=.FALSE.`` coupled carry."""
+
+    fwb = nemo_fwb_case2_cold_start(rn_fwb0)
+    return NemoORCA2SI3Carry(
+        ocean, ice, means, stress, fluxes, runoff,
+        restoring_volume_flux, restoring_heat_flux, restoring_coefficient,
+        fwb.a_fwb, fwb.a_fwb_b, fwb.emp_corr, kt,
+    )
+
+
+def _orca2_si3_full_field(owned, fold, staggering: str, nn_hls: int):
+    """Transpose a model-owned ORCA2 field and apply the existing SI3 LBC."""
+
+    from legoesm.ice.si3_orca2_state import si3_lbc_lnk_orca2
+
+    value = jnp.asarray(owned, dtype=jnp.float64).T
+    if nn_hls:
+        value = jnp.pad(value, ((nn_hls, nn_hls), (nn_hls, nn_hls)))
+    sign = -1.0 if staggering in ("U", "V") else 1.0
+    return si3_lbc_lnk_orca2(
+        value, staggering, sign, nn_hls=nn_hls,
+        ldfull=fold.nfd_full_when_absent,
+    )
+
+
+def _orca2_si3_insert_owned(template, owned, nn_hls: int):
+    value = jnp.asarray(template, dtype=jnp.float64)
+    owned = jnp.asarray(owned, dtype=jnp.float64)
+    if nn_hls == 0:
+        if value.shape != owned.shape:
+            raise ValueError("SI3 owned/full shape mismatch without halos")
+        return owned
+    if value.shape != (owned.shape[0] + 2 * nn_hls, owned.shape[1] + 2 * nn_hls):
+        raise ValueError("SI3 owned field does not fit its full-halo template")
+    return value.at[nn_hls:-nn_hls, nn_hls:-nn_hls].set(owned)
+
+
+def nemo_orca2_si3_coupled_step(
+    carry: NemoORCA2SI3Carry,
+    forcing: NemoORCA2SI3Forcing,
+    card: NemoORCA2SI3Card,
+    *,
+    model=None,
+    sponge=None,
+    _plant_skip_even_tau: bool = False,
+    _plant_run_si3_even: bool = False,
+    _plant_drop_hm_i: bool = False,
+    _plant_drop_rcdu_ice: bool = False,
+    _plant_fwb_even: bool = False,
+    _plant_double_stress_lbc: bool = False,
+):
+    """One coupled ORCA2+SI3 step in ``sbcmod``/``stprk3`` source order.
+
+    NEMO 5.0.2 sources: ``stprk3.F90:127-165``; ``sbcmod.F90:403-498,
+    529-547``; ``icestp.F90:126-234``; ``iceupdate.F90:361-407``.
+    """
+
+    from legoesm.ice.si3_finalize import si3_ice_update_tau
+    from legoesm.ice.si3_o17 import SI3O17LiveForcing, si3_o17_through_update_flx
+    from legoesm.ocean.eos import nemo_r3t_stretch
+
+    kt = carry.kt
+    if card.forcing_stride != card.ice.state.nn_fsbc:
+        raise ValueError("coupled ocean/ice forcing strides disagree")
+    if card.forcing_stride != 2:
+        raise ValueError("the admitted ORCA2+SI3 recipe requires nn_fsbc=2")
+    state = carry.ocean
+    u_level = state.u if state.u_before is None else state.u_before
+    v_level = state.v if state.v_before is None else state.v_before
+    u_owned = jnp.asarray(u_level.data, dtype=jnp.float64)[:, 1:, 0]
+    v_owned = jnp.asarray(v_level.data, dtype=jnp.float64)[1:, :, 0]
+    stretch = nemo_r3t_stretch(
+        card.ocean.recipe.z_coord,
+        state.eta.data,
+        state.H_bathy.data,
+        evaluation="nemo_reciprocal",
+    )
+    means = nemo_sbc_ssm_step(
+        carry.means,
+        kt=kt,
+        nit000=1,
+        forcing_stride=card.forcing_stride,
+        restart_means_present=False,
+        use_conservative_temperature=False,
+        remove_inverse_barometer=False,
+        u_before=u_owned,
+        v_before=v_owned,
+        temperature_now=state.T.data[..., 0],
+        salinity_now=state.S.data[..., 0],
+        ssh_now=state.eta.data,
+        ssh_inverse_barometer=jnp.zeros_like(state.eta.data),
+        e3t_reference=card.ocean.recipe.z_coord.nemo_e3t_0[..., 0],
+        r3t_now=stretch - jnp.asarray(1.0, dtype=jnp.float64),
+        surface_mask=state.land_mask.data,
+        shortwave_fraction_top=carry.means.frq,
+    )
+
+    atmosphere, runoff_now, sss_target = nemo_orca2_k0_s0f(forcing.s0f)
+    bulk = nemo_blk_oce_ncar(
+        *atmosphere[:5], means.sst, means.ssu, means.ssv, *atmosphere[5:],
+        card.surface_mask, card.albedo, card.precip_factor,
+        card.evap_factor, card.nb_iter,
+        nn_ice=0, ice_if=None, s0=None, s2=None,
+    )
+
+    h = int(card.ice.state.nn_hls)
+    fold = card.ice.fold
+    u_full = _orca2_si3_full_field(u_owned, fold, "U", h)
+    v_full = _orca2_si3_full_field(v_owned, fold, "V", h)
+    sst_full = _orca2_si3_full_field(means.sst, fold, "T", h)
+    sss_full = _orca2_si3_full_field(means.sss, fold, "T", h)
+    ssh_full = _orca2_si3_full_field(means.ssh, fold, "T", h)
+    ssu_full = _orca2_si3_full_field(means.ssu, fold, "U", h)
+    ssv_full = _orca2_si3_full_field(means.ssv, fold, "V", h)
+    e3t_full = _orca2_si3_full_field(means.e3t, fold, "T", h)
+    frq_full = _orca2_si3_full_field(means.frq, fold, "T", h)
+    o17 = forcing.o17
+    surface = o17.surface._replace(
+        wndi=atmosphere.u_wind.T,
+        wndj=atmosphere.v_wind.T,
+        theta_air_zt=bulk.theta_air.T,
+        q_air_zt=bulk.q_air.T,
+        slp=atmosphere.slp_Pa.T,
+        rhoa=bulk.rhoa.T,
+        smask0=card.surface_mask.T,
+        qlw=atmosphere.qlw_down.T,
+        precip=atmosphere.precip.T,
+        snow=atmosphere.snow.T,
+        qsr=bulk.qsr.T,
+        emp=bulk.emp.T,
+        qns_oce=bulk.qns.T,
+        qsr_oce=bulk.qsr.T,
+        ssu_m=ssu_full,
+        ssv_m=ssv_full,
+        utau=bulk.utau.T,
+        vtau=bulk.vtau.T,
+        frq_m=_crop_to_surface_interior(frq_full, bulk.qsr.T.shape),
+        e3t_m=_crop_to_surface_interior(e3t_full, bulk.qsr.T.shape),
+    )
+    stress_template = o17.stress
+    stress_inputs = stress_template._replace(
+        uu_kbb=u_full,
+        vv_kbb=v_full,
+        u_ice=carry.ice.ice.u_ice,
+        v_ice=carry.ice.ice.v_ice,
+        u_oce=u_full,
+        v_oce=v_full,
+        at_i=carry.ice.ice.aggregated.at_i,
+        utau=_orca2_si3_insert_owned(stress_template.utau, bulk.utau.T, h),
+        vtau=_orca2_si3_insert_owned(stress_template.vtau, bulk.vtau.T, h),
+        tmod_io=carry.stress.tmod_io,
+        taum=bulk.taum.T,
+        utau_oce=carry.stress.utau_oce,
+        vtau_oce=carry.stress.vtau_oce,
+    )
+    aevp_forcing = o17.aevp_forcing._replace(
+        ocean_u_u=u_full,
+        ocean_v_v=v_full,
+    )
+    live = SI3O17LiveForcing(
+        kt,
+        sss_full,
+        sst_full,
+        o17.rn_amax_2d,
+        o17.advection_grid,
+        aevp_forcing,
+        o17.aevp_metrics,
+        ssh_full,
+        surface,
+        stress_inputs,
+    )
+    run_ice = (kt - 1) % card.forcing_stride == 0 or _plant_run_si3_even
+    ice_core = None
+    ice = carry.ice
+    fluxes = carry.fluxes
+    if run_ice:
+        ice_core = si3_o17_through_update_flx(ice, live, card.ice)
+        ice = ice_core.state
+        fluxes = ice_core.final.outputs
+        stress_inputs = ice_core.stress_inputs
+    else:
+        stress_inputs = stress_inputs._replace(
+            u_ice=ice.ice.u_ice,
+            v_ice=ice.ice.v_ice,
+            at_i=ice.ice.aggregated.at_i,
+        )
+
+    if _plant_skip_even_tau and (kt - 1) % card.forcing_stride != 0:
+        stress = carry.stress
+    else:
+        stress = si3_ice_update_tau(
+            stress_inputs,
+            config=card.ice.state,
+            ln_drgice_imp=card.ice.ln_drgice_imp,
+            nn_fsbc=card.forcing_stride,
+            kt=kt,
+        )
+
+    ice_qsr = jnp.asarray(fluxes.qsr, dtype=jnp.float64).T
+    ice_qns = jnp.asarray(fluxes.qns, dtype=jnp.float64).T
+    ice_emp = jnp.asarray(fluxes.emp, dtype=jnp.float64).T
+    ice_sfx = jnp.asarray(fluxes.sfx, dtype=jnp.float64).T
+    ice_fr_i = jnp.asarray(fluxes.fr_i[h:-h, h:-h] if h else fluxes.fr_i).T
+    stress_utau = jnp.asarray(stress.utau[h:-h, h:-h] if h else stress.utau).T
+    stress_vtau = jnp.asarray(stress.vtau[h:-h, h:-h] if h else stress.vtau).T
+    stress_taum = jnp.asarray(stress.taum, dtype=jnp.float64).T
+    mass_b = jnp.asarray(
+        ice.ice.snwice_mass_b[h:-h, h:-h] if h else ice.ice.snwice_mass_b
+    ).T
+    pre_fwb = nemo_orca2_runoff_restoring(
+        kt=kt,
+        forcing_stride=card.forcing_stride,
+        post_ice_qns=ice_qns,
+        post_ice_emp=ice_emp,
+        runoff_now=runoff_now,
+        prior_runoff_mass=carry.runoff.mass_flux,
+        prior_runoff_temperature_content=carry.runoff.temperature_content,
+        prior_runoff_salinity_content=carry.runoff.salinity_content,
+        prior_restoring_volume_flux=carry.restoring_volume_flux,
+        prior_restoring_heat_flux=carry.restoring_heat_flux,
+        prior_restoring_coefficient=carry.restoring_coefficient,
+        sst_mean=means.sst,
+        sss_mean=means.sss,
+        sss_target=sss_target,
+        runoff_mouth_mask=card.runoff_mouth_mask,
+        surface_mask=card.surface_mask,
+        runoff_factor=card.runoff_factor,
+        reference_density=card.reference_density,
+        restoring_mm_per_day=card.restoring_mm_per_day,
+        restoring_bound_mm_per_day=card.restoring_bound_mm_per_day,
+        seconds_per_day=card.seconds_per_day,
+        salinity_floor=card.salinity_floor,
+        heat_capacity=card.heat_capacity,
+    )
+    fwb_kt = (
+        kt - 1
+        if _plant_fwb_even and (kt - 1) % card.forcing_stride != 0
+        else kt
+    )
+    fwb = nemo_fwb_case2_step(
+        NemoFwbCase2Carry(carry.a_fwb, carry.a_fwb_b, carry.emp_corr),
+        kt=fwb_kt,
+        annual_steps=card.annual_steps,
+        forcing_stride=card.forcing_stride,
+        ssh=state.eta.data,
+        snwice_mass_b=mass_b,
+        cell_area=card.cell_area,
+        surface_mask=card.surface_mask,
+        interior_surface_mask=card.interior_surface_mask,
+        reference_density=card.reference_density,
+        seconds_per_day=card.seconds_per_day,
+        days_per_year=card.days_per_year,
+        sst_mean=means.sst,
+        emp=pre_fwb.emp,
+        qns=pre_fwb.qns,
+        heat_capacity=card.heat_capacity,
+    )
+    utau, vtau, utau_east, vtau_north = nemo_t_stress_lbc_neighbors(
+        stress_utau, stress_vtau, card.stress_lbc
+    )
+    if _plant_double_stress_lbc:
+        utau, vtau, utau_east, vtau_north = nemo_t_stress_lbc_neighbors(
+            utau, vtau, card.stress_lbc
+        )
+    utau_u, vtau_v = nemo_t_stress_to_uv(
+        utau,
+        vtau,
+        utau_east,
+        vtau_north,
+        card.surface_mask,
+        card.tmask_east,
+        card.tmask_north,
+        card.umask,
+        card.vmask,
+    )
+    tail = NemoS2Result(
+        pre_fwb.runoff,
+        pre_fwb.restoring_coefficient,
+        pre_fwb.erp,
+        pre_fwb.qrp,
+        fwb.qns,
+        ice_qsr,
+        fwb.emp,
+        ice_sfx,
+        stress_taum,
+        utau,
+        vtau,
+        utau_u,
+        vtau_v,
+        ice_qsr,
+        pre_fwb.qns_after_ssr,
+        pre_fwb.emp_after_ssr,
+    )
+    ocean_surface, freshwater = nemo_s2_to_ocean_interfaces(
+        tail,
+        chl=forcing.chl,
+        ice_concentration=ice_fr_i,
+        geothermal_heat_flux_mwm2=forcing.geothermal_heat_flux_mwm2,
+    )
+    hm_full = ice.ice.aggregated.hm_i
+    hm_i = jnp.asarray(hm_full[h:-h, h:-h] if h else hm_full).T
+    if _plant_drop_hm_i:
+        hm_i = jnp.zeros_like(hm_i)
+    if _plant_drop_rcdu_ice:
+        rcdu = None
+    elif stress.rCdU_ice is None:
+        rcdu = None
+    else:
+        rcdu_halo = max(h - 1, 0)
+        rcdu = jnp.asarray(
+            stress.rCdU_ice[
+                rcdu_halo:-rcdu_halo,
+                rcdu_halo:-rcdu_halo,
+            ] if rcdu_halo else stress.rCdU_ice
+        ).T
+    ocean_surface = ocean_surface._replace(
+        ice_mean_thickness_hm_i=hm_i,
+        ice_ocean_top_drag_rCdu=rcdu,
+    )
+    stepped = nemo_orca2_ocean_consumption_step(
+        card.ocean,
+        state,
+        surface_forcing=ocean_surface,
+        freshwater_forcing=freshwater,
+        model=model,
+        sponge=sponge,
+        nemo_kt=kt,
+    )
+    ocean_exit = stepped.state_after if hasattr(stepped, "state_after") else stepped
+    next_carry = carry._replace(
+        ocean=ocean_exit,
+        ice=ice,
+        means=means,
+        stress=stress,
+        fluxes=fluxes,
+        runoff=pre_fwb.runoff,
+        restoring_volume_flux=pre_fwb.erp,
+        restoring_heat_flux=pre_fwb.qrp,
+        restoring_coefficient=pre_fwb.restoring_coefficient,
+        a_fwb=fwb.carry.a_fwb,
+        a_fwb_b=fwb.carry.a_fwb_b,
+        emp_corr=fwb.carry.emp_corr,
+        kt=kt + 1,
+    )
+    trace = NemoORCA2SI3Trace(
+        state, means, bulk, ice_core, stress_inputs, stress,
+        pre_fwb, fwb, tail, ocean_exit,
+    )
+    return next_carry, trace
+
+
+def nemo_orca2_si3_coupled_pair(
+    carry: NemoORCA2SI3Carry,
+    forcing: NemoORCA2SI3Forcing,
+    card: NemoORCA2SI3Card,
+    *,
+    even_forcing: NemoORCA2SI3Forcing | None = None,
+    model=None,
+    sponge=None,
+):
+    """Run the admitted C2 odd/even pair; callers own the :func:`jax.jit`.
+
+    Keeping the compilation boundary outside this pure recipe lets the C-ladder
+    harness judge the compiled model without moving loading, comparison, or
+    reporting into production physics.
+    """
+
+    odd_carry, odd = nemo_orca2_si3_coupled_step(
+        carry, forcing, card, model=model, sponge=sponge
+    )
+    even_carry, even = nemo_orca2_si3_coupled_step(
+        odd_carry,
+        forcing if even_forcing is None else even_forcing,
+        card,
+        model=model,
+        sponge=sponge,
+    )
+    return even_carry, (odd, even)
 
 
 def nemo_orca2_ocean_consumption_step(
@@ -1824,9 +2340,16 @@ __all__ = [
     "NemoStandaloneK0OceanCard",
     "NemoStandaloneK0StepResult",
     "NemoStandaloneSurfaceResult",
+    "NemoORCA2SI3Card",
+    "NemoORCA2SI3Carry",
+    "NemoORCA2SI3Forcing",
+    "NemoORCA2SI3Trace",
     "build_nemo_orca2_k0_ocean_card",
     "nemo_orca2_k0_ocean_step",
     "nemo_orca2_ocean_consumption_step",
+    "nemo_orca2_si3_cold_start",
+    "nemo_orca2_si3_coupled_pair",
+    "nemo_orca2_si3_coupled_step",
     "nemo_orca2_k0_s0f",
     "nemo_orca2_k0_surface_card",
     "NemoTStressLbcPlan",
