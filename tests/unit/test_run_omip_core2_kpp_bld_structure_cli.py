@@ -41,3 +41,44 @@ def test_accepted_on_tripole_kpp_and_when_unset():
     v = _core2()._validate_kpp_bld_structure
     v("tripole", "kpp", "cvmix")
     v("mpas", "none", None)
+
+
+def test_main_refuses_it_before_any_setup(monkeypatch):
+    core2 = _core2()
+    monkeypatch.setattr("sys.argv", ["run_omip_core2.py", "--grid", "mpas",
+                                     "--kpp-bld-structure", "cvmix"])
+    with pytest.raises(ValueError, match="--kpp-bld-structure"):
+        core2.main()
+
+
+def _calls(fn_name, callee):
+    import ast
+    import inspect
+    core2 = _core2()
+    tree = ast.parse(inspect.getsource(getattr(core2, fn_name)))
+    return [c for c in ast.walk(tree) if isinstance(c, ast.Call)
+            and getattr(c.func, "id", None) == callee]
+
+
+def _kw(call, name):
+    import ast
+    return next((ast.unparse(k.value) for k in call.keywords if k.arg == name), None)
+
+
+def test_main_forwards_it_to_build_tripole():
+    calls = _calls("main", "build_tripole")
+    assert calls and all(_kw(c, "kpp_bld_structure") == "args.kpp_bld_structure"
+                         for c in calls)
+
+
+def test_build_tripole_forwards_it_to_the_vmix_builder():
+    calls = _calls("build_tripole", "build_tripole_vmix_config")
+    assert calls and all(_kw(c, "kpp_bld_structure") == "kpp_bld_structure"
+                         for c in calls)
+
+
+def test_yaml_physics_conflict_includes_it():
+    import inspect
+    src = inspect.getsource(_core2().main)
+    i = src.index('if "physics" in _ovr and (')
+    assert "args.kpp_bld_structure is not None" in src[i:src.index("raise ValueError", i)]

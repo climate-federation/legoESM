@@ -8836,6 +8836,8 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
+    _validate_kpp_bld_structure(args.grid, args.tripole_vmix,
+                                args.kpp_bld_structure)
     if args.tke_shear_avm_weighting is not None and not (
             (args.grid == "tripole" and args.tripole_vmix == "tke")
             or (args.grid == "mpas" and args.mpas_vmix == "tke")
@@ -9222,8 +9224,6 @@ def main() -> int:
             "mpas applies it to the eORCA source mask/bathy BEFORE the Voronoi "
             "regrid (removes the imported ~73E seam). It is WRONG on a regular "
             f"period-nx lat-lon / cube grid. Got --grid {args.grid!r}.")
-    _validate_kpp_bld_structure(args.grid, args.tripole_vmix,
-                                args.kpp_bld_structure)
     if args.tripole_vmix != "none" and args.grid != "tripole":
         raise ValueError(
             "--tripole-vmix wires the vertical-mixing closure onto the "
@@ -9884,6 +9884,7 @@ def main() -> int:
             # build_latlon_bathy already threaded into live KPP (codex). Fail
             # loud on the conflict rather than let YAML win over the explicit CLI.
             if "physics" in _ovr and (args.kpp_ri_crit is not None
+                                      or args.kpp_bld_structure is not None
                                       or args.kpp_cv is not None
                                       or args.kpp_eice is not None
                                       or args.tke_surface_bc is not None
@@ -9892,7 +9893,7 @@ def main() -> int:
                                       or args.tke_step_evaluation is not None
                                       or args.tke_langmuir_rhs_coupling is not None):
                 raise ValueError(
-                    "--kpp-ri-crit/--kpp-cv/--kpp-eice/--tke-buoyancy-sink/--tke-step-evaluation conflict with a --config "
+                    "--kpp-ri-crit/--kpp-bld-structure/--kpp-cv/--kpp-eice/--tke-buoyancy-sink/--tke-step-evaluation conflict with a --config "
                     "ocean.physics block: the YAML physics config would overwrite "
                     "the CLI KPP override. Set Ri_crit/Cv/eice in the YAML "
                     "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "
