@@ -13796,6 +13796,7 @@ class ModelDriver:
         from legoesm.driver.orbit import experiment_orbit
         _orbit_params = experiment_orbit(cfg)
         phys_cfg = PhysicsConfig(
+            module_checkpoint=cfg.physics_module_checkpoint,
             radiation=RadiationConfig(
                 scheme=_rad_scheme if _rad_scheme != "none" else "none",
                 # cfg.S_0 (--solar-s0) is the constant-solar TSI on every lane;
@@ -18229,6 +18230,7 @@ class ModelDriver:
             from legoesm.driver.orbit import experiment_orbit
             _orbit_params = experiment_orbit(cfg)
             phys_cfg = PhysicsConfig(
+                module_checkpoint=cfg.physics_module_checkpoint,
                 radiation=RadiationConfig(
                     scheme=_rad_scheme,
                     # cfg.S_0: same constant-solar TSI as the compiled lanes.

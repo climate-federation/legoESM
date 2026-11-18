@@ -54,7 +54,7 @@ import jax
 import jax.numpy as jnp
 
 __all__ = ["mpas_cadence", "pick_physics_fn", "mpas_branch_index", "mpas_step",
-           "mpas_segment", "window_clocks"]
+           "mpas_segment", "stack_windows"]
 
 
 def mpas_cadence(step: int, *, subcycle_rad: bool, rad_update_steps: int,
@@ -130,25 +130,57 @@ def clock_tables(exp: dict, forcing, steps):
     return t
 
 
-def window_clocks(exp: dict, forcing, step0s, n_steps: int):
-    """:func:`clock_tables` of the ``n_steps`` windows starting at each of
-    ``step0s``, stacked on a leading window axis: the ``clock`` argument of a
-    ``jax.vmap`` of the scheduled :func:`mpas_segment` over windows (called
-    with ``step0=step0s[0]``).  The variant table is built once from that
-    ``step0`` and shared by every window, so start steps whose cadence
-    sequences differ are refused (a window would run another window's
-    physics variants)."""
-    step0s = [int(s) for s in step0s]
-    seqs = {tuple(mpas_branch_index(s, exp) for s in range(s0, s0 + n_steps))
-            for s0 in step0s}
-    if len(seqs) != 1:
-        raise ValueError(
-            f"window_clocks: start steps {step0s} differ in cadence phase "
-            "(physics/radiation variant sequence); batch windows that share it")
-    if forcing is None:
-        return None
-    tabs = [clock_tables(exp, forcing, range(s0, s0 + n_steps)) for s0 in step0s]
-    return jax.tree_util.tree_map(lambda *x: jnp.stack(x), *tabs)
+_CADENCE_KEYS = ("dt", "subcycle_rad", "rad_update_steps", "hold_phys",
+                 "phys_update_steps")
+
+
+def stack_windows(exps, n_steps: int):
+    """Batch windows that each come from their OWN export: ``exps[b]`` is the
+    driver exported at window b's start date (started there from its config
+    start day or a restart), so window b runs from its own state, physics
+    state and forcing -- SST/SIC, ozone, aerosol, solar constant, land skin,
+    as the run loop assembled them at that date -- with its own clock
+    (:func:`clock_tables` of ``exps[b]``).  Returns ``(state, phys_state,
+    forcing, clock)``, each stacked on a leading window axis, for a
+    ``jax.vmap`` of the scheduled
+    ``mpas_segment(exps[0], s, p, n_steps, forcing=f, clock=c)`` (job-local
+    step 0 in every export, so one cadence phase).
+
+    ``exps[0]``'s physics closures serve every window: they must not depend
+    on the date (the date reaches the step through the stacked arrays only).
+    Refused: an export without forcing, cadence or time-step settings that
+    differ between exports, and states / forcing whose pytree structure,
+    shapes or dtypes differ."""
+    exps = list(exps)
+    if not exps:
+        raise ValueError("stack_windows: no exports")
+    if any(e["forcing"] is None for e in exps):
+        raise ValueError("stack_windows: an export has no forcing dict (no "
+                         "clock to give each window)")
+    ref = tuple(exps[0][k] for k in _CADENCE_KEYS)
+    for b, e in enumerate(exps[1:], start=1):
+        got = tuple(e[k] for k in _CADENCE_KEYS)
+        if got != ref:
+            raise ValueError(
+                f"stack_windows: export {b} has {dict(zip(_CADENCE_KEYS, got))}"
+                f", export 0 {dict(zip(_CADENCE_KEYS, ref))}; batched windows "
+                "share one time step and physics/radiation cadence")
+    trees = [(e["state"], e["phys_state"], e["forcing"],
+              clock_tables(e, e["forcing"], range(n_steps))) for e in exps]
+
+    def sig(t):
+        return (jax.tree_util.tree_structure(t),
+                [(jnp.shape(x), jnp.result_type(x))
+                 for x in jax.tree_util.tree_leaves(t)])
+    for b, t in enumerate(trees[1:], start=1):
+        for name, x, y in zip(("state", "phys_state", "forcing", "clock"),
+                              trees[0], t):
+            if sig(x) != sig(y):
+                raise ValueError(
+                    f"stack_windows: export {b}'s {name} differs from export "
+                    "0's in pytree structure, shape or dtype")
+    return tuple(jax.tree_util.tree_map(lambda *x: jnp.stack(x), *parts)
+                 for parts in zip(*trees))
 
 
 def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
@@ -177,7 +209,7 @@ def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
     ``clock``: the per-step clock tables (:func:`clock_tables` of this
     window) passed in as arrays instead of built from ``step0``, so windows
     at different dates can share one ``jax.vmap``ped call
-    (:func:`window_clocks`); ``step0`` still selects the variant table.
+    (:func:`stack_windows`); ``step0`` still selects the variant table.
     Scheduled loop only."""
     forcing = exp["forcing"] if forcing is None else forcing
     if schedule is None and (checkpoints is not None or storage != "recompute"):

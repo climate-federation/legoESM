@@ -847,6 +847,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "smaller compiled footprint / faster cold compile for "
                              "FORWARD/inference runs (relieves the MPAS/L5 XLA compile "
                              "wall). Keep True for reverse-mode AD / training.")
+    parser.add_argument("--no-physics-module-checkpoint",
+                        dest="physics_module_checkpoint",
+                        action="store_false",
+                        default=_EXPERIMENT_DEFAULTS.physics_module_checkpoint,
+                        help="Disable jax.checkpoint around each hydrostatic "
+                             "physics module call.  True (default) = reverse "
+                             "mode recomputes each module instead of storing "
+                             "its intermediates (gradient memory); forward "
+                             "values are identical either way.  False = faster "
+                             "gradients where memory is not the limit.")
     parser.add_argument("--radiation-column-chunk", type=int,
                         default=_EXPERIMENT_DEFAULTS.rrtmgp_column_chunk_size,
                         help="RRTMGP column-chunk block size (0 = off). >0 maps "
@@ -3421,6 +3431,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_use_scan=args.rrtmgp_use_scan,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
+        physics_module_checkpoint=args.physics_module_checkpoint,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
         rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,
         rrtmgp_gas_tables=args.rrtmgp_gas_tables,

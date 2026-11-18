@@ -128,6 +128,11 @@ class PhysicsConfig(NamedTuple):
     # OpenIFS 49r1 Cariolle chemistry of the advected o3_ifs tracer (MPAS lane
     # only; tracer only, radiation keeps its own ozone).
     cariolle: OzoneCariolleConfig = OzoneCariolleConfig()
+    # Hydrostatic combined physics: each module call under jax.checkpoint
+    # (reverse mode stores the module's inputs and recomputes it -- one extra
+    # module forward per gradient step, a fraction of the residual memory).
+    # Forward values are the same either way.
+    module_checkpoint: bool = True
 
 
 def _micro_liquid_from_closure_on(microphysics_config) -> bool:
@@ -1210,7 +1215,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         """
         phys_updates = {}
         fn0, accepts_ps, field_name = fns[0]
-        fn0 = _remat_module(fn0)
+        if config.module_checkpoint:
+            fn0 = _remat_module(fn0)
         if accepts_ps:
             if getattr(fn0, "_wants_forcing", False):
                 first, field_val = fn0(state, grid, sigma_coord,
@@ -1301,7 +1307,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 combined_tracer_tends[k] = v.data
 
         for _i_mod, (fn, accepts_ps, field_name) in enumerate(fns[1:], start=1):
-            fn = _remat_module(fn)
+            if config.module_checkpoint:
+                fn = _remat_module(fn)
             if accepts_ps:
                 if getattr(fn, "_wants_forcing", False):
                     t, field_val = fn(state, grid, sigma_coord,

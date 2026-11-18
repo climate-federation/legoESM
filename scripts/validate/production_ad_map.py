@@ -37,7 +37,6 @@ import argparse
 import functools
 import importlib.util
 import json
-import math
 import sys
 import time
 from pathlib import Path
@@ -686,22 +685,22 @@ def time_compiled(fn, args, repeats):
     return t_c, t_1, reps, out
 
 
-def window_check(exp, g_batch, args, n, step0s, kw):
-    """The first and last window's gradient from a true standalone run (plain
-    ``mpas_segment`` from that window's own ``step0``, clock built inside, no
+def window_check(exps, g_batch, n, kw):
+    """The first and last window's gradient from a true standalone run (its
+    OWN export: own physics closures, forcing, and clock built inside; no
     vmap; one compile per window) against its slice of the batched gradient
     ``g_batch``.  Prints max|diff| / max|alone| per leaf (numbers only: vmap
     may reorder fp32 reductions, so not bitwise)."""
     from legoesm.driver.mpas_diff_step import mpas_segment
-    for b in sorted({0, len(step0s) - 1}):
-        x, s, p, f, _ = jax.tree_util.tree_map(lambda t, _b=b: t[_b], args)
+    for b in sorted({0, len(exps) - 1}):
+        e = exps[b]
 
-        def one(x_, _s0=step0s[b]):
-            out, _ = mpas_segment(exp, _with_x(s, x_), p, n, forcing=f,
-                                  step0=_s0, **kw)
+        def one(x_, _e=e):
+            out, _ = mpas_segment(_e, _with_x(_e["state"], x_),
+                                  _e["phys_state"], n, **kw)
             return _proj_loss(out)
         t0 = time.time()
-        gb = jax.block_until_ready(jax.jit(jax.grad(one))(x))
+        gb = jax.block_until_ready(jax.jit(jax.grad(one))(_state_x(e["state"])))
         rel = {}
         for k in gb:
             ref = np.asarray(gb[k], np.float64)
@@ -710,7 +709,7 @@ def window_check(exp, g_batch, args, n, step0s, kw):
             rel[k] = (float(np.max(np.abs(got - ref)) / scale) if scale > 0
                       else float(np.max(np.abs(got))))
         print("WINDOW_CHECK " + json.dumps(dict(
-            window=b, step0=step0s[b], seconds=time.time() - t0,
+            window=b, seconds=time.time() - t0,
             alone_finite=bool(all(np.all(np.isfinite(np.asarray(v)))
                                   for v in gb.values())),
             rel_max_diff=rel)), flush=True)
@@ -807,8 +806,13 @@ def build_parser():
     ap.add_argument("--timing-steps", default="64,256",
                     help="timing stage: comma list of window lengths [steps]")
     ap.add_argument("--batch", type=int, default=1,
-                    help="timing stage: B windows (one cadence period "
-                         "apart) in one jax.vmap call; needs --schedule")
+                    help="timing stage: B windows, each its own driver "
+                         "export (see --window-spacing-days), in one jax.vmap "
+                         "call; needs --schedule")
+    ap.add_argument("--window-spacing-days", type=float, default=None,
+                    help="timing stage with --batch: window b is the driver "
+                         "started this many days * b after the deck's start "
+                         "day (required with --batch)")
     ap.add_argument("--check-windows", action="store_true",
                     help="timing stage with --batch: also take the first and "
                          "last window's gradient from a standalone run and "
@@ -854,8 +858,7 @@ def main(argv=None):
         # the spies record only concrete calls, and jax.checkpoint traces its
         # arguments even when called eagerly: without this no module records.
         # Forward values are the same with or without the module remat.
-        import legoesm.atmosphere.physics.combined as _comb
-        _comb._remat_module = lambda fn: fn
+        rest = rest + ["--no-physics-module-checkpoint"]
     t0 = time.time()
     drv = build_driver(rest, a.resolution, a.n_steps)
     exp = drv.export_mpas_step()
@@ -926,27 +929,29 @@ def main(argv=None):
                 print(f"GRADCHECK_FAIL {name}: {type(e).__name__}: {e}"[:2000],
                       flush=True)
     elif a.stage == "timing":
-        from legoesm.driver.mpas_diff_step import mpas_segment, window_clocks
+        from legoesm.driver.mpas_diff_step import mpas_segment, stack_windows
         sched = None if a.schedule == "none" else a.schedule
         nb = a.batch
         if nb > 1:
             if sched is None:
                 raise SystemExit("--batch needs --schedule uniform|binomial "
                                  "(the clock is vmapped into the scheduled loop)")
-            # nb consecutive windows one cadence period apart: window b
-            # starts from the state the forward reaches after b*period steps, at
-            # its own clock; the held forcing is window 0's (all nb copies)
-            period = math.lcm(exp["rad_update_steps"], exp["phys_update_steps"])
-            step0s = [a.at_step + b * period for b in range(nb)]
-            # eager per-step loop: compiled once per variant, not per start
-            starts = [(state0, ps0)]
-            for st in step0s[:-1]:
-                starts.append(mpas_segment(exp, *starts[-1], period, step0=st))
-            stack = lambda *t: jax.tree_util.tree_map(  # noqa: E731
-                lambda *v: jnp.stack(v), *t)
-            sb, pb = stack(*[s for s, _ in starts]), stack(*[p for _, p in starts])
-            fb = stack(*[exp["forcing"]] * nb)
-            xb = _state_x(sb)
+            if a.window_spacing_days is None:
+                raise SystemExit("--batch needs --window-spacing-days")
+            if a.at_step or a.load_state:
+                raise SystemExit("--batch: each window starts at its own "
+                                 "export; --at-step/--load-state set window "
+                                 "0 only")
+            # window b: the driver started window_spacing_days * b after the
+            # deck's start day and exported there (own state, forcing, clock)
+            day0 = float(drv.config.start_day)
+            exps = [exp] + [build_driver(
+                rest + ["--start-day", repr(day0 + b * a.window_spacing_days)],
+                a.resolution, a.n_steps).export_mpas_step()
+                for b in range(1, nb)]
+            print("WINDOWS start days " + ", ".join(
+                repr(day0 + b * a.window_spacing_days) for b in range(nb)),
+                flush=True)
         for n in (int(t) for t in a.timing_steps.split(",") if t.strip()):
             kw = (dict(checkpoint=True) if sched is None else
                   dict(schedule=sched, checkpoints=a.checkpoints,
@@ -957,16 +962,15 @@ def main(argv=None):
                     return _proj_loss(s)
                 args = (x0,)
             else:
-                cb = window_clocks(exp, exp["forcing"], step0s, n)
+                sb, pb, fb, cb = stack_windows(exps, n)
 
                 def fwd(x, s, p, f, c, _n=n):
                     def one(x_, s_, p_, f_, c_):
                         out, _ = mpas_segment(exp, _with_x(s_, x_), p_, _n,
-                                              forcing=f_, step0=step0s[0],
-                                              clock=c_, **kw)
+                                              forcing=f_, clock=c_, **kw)
                         return _proj_loss(out)
                     return jnp.sum(jax.vmap(one)(x, s, p, f, c))
-                args = (xb, sb, pb, fb, cb)
+                args = (_state_x(sb), sb, pb, fb, cb)
             tf_c, tf_1, tf_r, _ = time_compiled(fwd, args, a.repeats)
             tg_c, tg_1, tg_r, g = time_compiled(jax.grad(fwd), args, a.repeats)
             fin = all(bool(jnp.all(jnp.isfinite(t)))
@@ -983,7 +987,7 @@ def main(argv=None):
                 grad_over_fwd=med_g / med_f, grad_finite=fin,
                 peak_gib=peak_gib())), flush=True)
             if a.check_windows and nb > 1:
-                window_check(exp, g, args, n, step0s, kw)
+                window_check(exps, g, n, kw)
     elif a.stage == "loops":
         # trace-only: which loops stack per-iteration residuals in the
         # gradient of one full-physics step (no compile, no device run)

@@ -31,7 +31,7 @@ from legoesm.driver.mpas_diff_step import (  # noqa: E402
     mpas_cadence,
     mpas_segment,
     pick_physics_fn,
-    window_clocks,
+    stack_windows,
 )
 
 DT, N = 600.0, 4
@@ -44,19 +44,19 @@ FWD_TOL = 1e-11
 GRAD_TOL = 1e-12
 
 
-def _driver(tmp_path, name):
+def _driver(tmp_path, name, start_day=0.0, **extra):
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8,
                         vertical_coord="hybrid"),
         dycore=DycoreConfig(dt=DT, discretization="mpas"),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=0),
-        days=(N + 0.5) * DT / 86400.0, start_day=0.0,
+        days=(N + 0.5) * DT / 86400.0, start_day=start_day,
         dataset="analytical", radiation="gray",
         convection="sbm", turbulence="tke", microphysics="kessler",
         physics_update_steps=2, rad_update_steps=4,
         mpas_qv_smooth_del2_m2s=1.0e5, sponge_enabled=True,
         precision="fp64", distributed=False,
-    )
+    )._replace(**extra)
     d = ModelDriver(cfg, output_dir=str(tmp_path / name))
     d.setup()
     return d
@@ -396,27 +396,41 @@ def _clock_live(exp):
         "physics_fn", "physics_fn_norad", "physics_fn_held")})
 
 
-def test_vmapped_windows_match_separate_windows(runs):
-    """Two windows of one cadence phase (start steps 0 and 4, radiation every
-    4), distinct initial T, batched by jax.vmap over (state, phys_state,
-    forcing, clock), reproduce each window run alone: forward, and the
-    gradient of the summed loss w.r.t. each window's initial T."""
-    exp = _clock_live(runs[1])
-    s0, ps0 = exp["state"], exp["phys_state"]
-    forcing = dict(exp["forcing"] or {})
-    step0s, n = (0, 4), N_SCHED
-    states = _stack(s0, s0._replace(T=s0.T.replace(data=s0.T.data + 0.5)))
-    phys, forcings = _stack(ps0, ps0), _stack(forcing, forcing)
-    clocks = window_clocks(exp, forcing, step0s, n)
+@pytest.fixture(scope="module")
+def two_windows(runs, tmp_path_factory):
+    """Window 0: the fixture export (day 0).  Window 1: a second export of the
+    same deck started on day 10.25 (another date and time of day), with a
+    distinct initial T and its surface temperature raised 1 K, so its state,
+    forcing and clock all differ from window 0's."""
+    e0 = runs[1]
+    e1 = _driver(tmp_path_factory.mktemp("mpas_win1"), "w1",
+                 start_day=10.25).export_mpas_step()
+    s1 = e1["state"]
+    f1 = dict(e1["forcing"])
+    f1["T_sfc"] = f1["T_sfc"] + 1.0
+    e1 = dict(e1, state=s1._replace(T=s1.T.replace(data=s1.T.data + 0.5)),
+              forcing=f1)
+    return e0, e1
+
+
+def test_vmapped_windows_match_separate_windows(two_windows):
+    """Two windows from two exports, batched by jax.vmap over (state,
+    phys_state, forcing, clock) with export 0's physics, reproduce each window
+    run alone from its OWN export (own physics closures, clock built inside):
+    forward, and the gradient of the summed loss w.r.t. each initial T."""
+    exps = [_clock_live(e) for e in two_windows]
+    n = N_SCHED
+    states, phys, forcings, clocks = stack_windows(exps, n)
     rng = np.random.default_rng(0)
     # weights over the END state's RMS (the initial wind is zero here)
+    e0 = exps[0]
     ws = [jnp.asarray(rng.standard_normal(np.shape(x))) / float(
         jnp.sqrt(jnp.mean(jnp.square(x))))
-        for x in _fields(mpas_segment(exp, s0, ps0, n)[0])]
+        for x in _fields(mpas_segment(e0, e0["state"], e0["phys_state"], n)[0])]
 
     def run(s, p, f, c):
-        return mpas_segment(exp, s, p, n, forcing=f, step0=step0s[0],
-                            schedule="uniform", clock=c)[0]
+        return mpas_segment(e0, s, p, n, forcing=f, schedule="uniform",
+                            clock=c)[0]
 
     def loss_one(s, p, f, c):
         return sum(jnp.sum(w * x) for w, x in zip(ws, _fields(run(s, p, f, c))))
@@ -426,12 +440,11 @@ def test_vmapped_windows_match_separate_windows(runs):
     out = jax.jit(jax.vmap(run))(states, phys, forcings, clocks)
     g = jax.jit(jax.grad(lambda t: jnp.sum(jax.vmap(loss_one)(
         with_t(states, t), phys, forcings, clocks))))(states.T.data)
-    for b, st in enumerate(step0s):
-        sb, pb = _take(states, b), _take(phys, b)
+    for b, eb in enumerate(exps):
+        sb, pb = eb["state"], eb["phys_state"]
 
-        def alone(s, p, _st=st):
-            return mpas_segment(exp, s, p, n, forcing=forcing, step0=_st,
-                                schedule="uniform")[0]
+        def alone(s, p, _e=eb):
+            return mpas_segment(_e, s, p, n, schedule="uniform")[0]
         ref = jax.jit(alone)(sb, pb)
         for a, o, k in zip(_fields(ref), _fields(_take(out, b)),
                            ("u", "T", "p_s", "q_v")):
@@ -447,19 +460,29 @@ def test_vmapped_windows_match_separate_windows(runs):
         np.testing.assert_allclose(np.asarray(g[b]), np.asarray(g_ref),
                                    rtol=0.0, atol=GRAD_TOL * scale,
                                    err_msg=f"window {b} grad")
-    # the clock is live in this fixture: one state, the two windows' clocks
-    a0 = jax.jit(run)(s0, ps0, forcing, _take(clocks, 0))
-    a1 = jax.jit(run)(s0, ps0, forcing, _take(clocks, 1))
-    assert float(jnp.abs(a0.T.data - a1.T.data).max()) > 0.0
+    # each window's own forcing and clock are live: window 1 run with window
+    # 0's forcing, or window 0's clock, gives another answer
+    s1, p1 = _take(states, 1), _take(phys, 1)
+    o1 = _take(out, 1).T.data
+    for f, c in ((_take(forcings, 0), _take(clocks, 1)),
+                 (_take(forcings, 1), _take(clocks, 0))):
+        assert float(jnp.abs(jax.jit(run)(s1, p1, f, c).T.data - o1).max()) > 0.0
 
 
-def test_window_clocks_refuse_a_mixed_cadence_phase(runs):
-    _, exp = runs
-    forcing = dict(exp["forcing"] or {})
-    with pytest.raises(ValueError, match="cadence phase"):
-        window_clocks(exp, forcing, (0, 1), 4)
-    c = window_clocks(exp, forcing, (0, 4, 8), 3)
-    assert all(v.shape[:2] == (3, 3) for v in c.values())
+def test_stack_windows_refusals(two_windows):
+    e0, e1 = two_windows
+    with pytest.raises(ValueError, match="no forcing"):
+        stack_windows([e0, dict(e1, forcing=None)], 3)
+    with pytest.raises(ValueError, match="cadence"):
+        stack_windows([e0, dict(e1, rad_update_steps=8)], 3)
+    with pytest.raises(ValueError, match="forcing differs"):
+        stack_windows([e0, dict(e1, forcing=dict(e1["forcing"],
+                                                 extra=jnp.zeros(1)))], 3)
+    with pytest.raises(ValueError, match="state differs"):
+        stack_windows([e0, dict(e1, state=e1["state"]._replace(
+            T=e1["state"].T.replace(data=e1["state"].T.data[:-1])))], 3)
+    with pytest.raises(ValueError, match="no exports"):
+        stack_windows([], 3)
 
 
 def test_segment_refuses_a_malformed_clock(runs):
@@ -478,7 +501,7 @@ def test_segment_refuses_a_malformed_clock(runs):
     # an unvmapped window stack whose window count equals n_steps
     with pytest.raises(ValueError, match=r"shape \(n_steps,\)"):
         mpas_segment(exp, s0, ps0, 3, forcing=forcing, schedule="uniform",
-                     clock=window_clocks(exp, forcing, (0, 4, 8), 3))
+                     clock=stack_windows([exp] * 3, 3)[3])
 
 
 def _n_checkpoints(jaxpr):
@@ -494,29 +517,22 @@ def _n_checkpoints(jaxpr):
     return n
 
 
-def test_physics_module_calls_are_rematerialised_and_forward_unchanged(
-        runs, monkeypatch):
-    """Each combined-physics module call is wrapped in jax.checkpoint (a trace
-    with the wrapper patched out has fewer checkpoint equations), and the
-    forward is bitwise the same with or without it.  The physics is a cached
-    jit traced once per process, so caches are cleared around each trace."""
-    import legoesm.atmosphere.physics.combined as comb
+def test_physics_module_checkpoint_switch(runs, tmp_path):
+    """physics_module_checkpoint (default on) wraps each combined-physics
+    module call in jax.checkpoint: an export built with it off has fewer
+    checkpoint equations, and the forward is bitwise the same either way."""
     _, exp = runs
+    assert exp["phys_cfg"].module_checkpoint is True
+    off = _driver(tmp_path, "off",
+                  physics_module_checkpoint=False).export_mpas_step()
+    assert off["phys_cfg"].module_checkpoint is False
     s0, ps0 = exp["state"], exp["phys_state"]
-
-    def trace():
-        jax.clear_caches()
-        def seg(s):
-            return mpas_segment(exp, s, ps0, 1)[0]
-        return (_n_checkpoints(jax.make_jaxpr(seg)(s0).jaxpr),
-                jax.jit(seg)(s0))
-    try:
-        n_on, out_on = trace()
-        monkeypatch.setattr(comb, "_remat_module", lambda fn: fn)
-        n_off, out_off = trace()
-    finally:
-        monkeypatch.undo()
-        jax.clear_caches()
-    assert n_on > n_off, (n_on, n_off)
-    for a, b in zip(_fields(out_on), _fields(out_off)):
+    counts, outs = [], []
+    for e in (exp, off):
+        def seg(s, _e=e):
+            return mpas_segment(_e, s, ps0, 1)[0]
+        counts.append(_n_checkpoints(jax.make_jaxpr(seg)(s0).jaxpr))
+        outs.append(jax.jit(seg)(s0))
+    assert counts[0] > counts[1], counts
+    for a, b in zip(_fields(outs[0]), _fields(outs[1])):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))

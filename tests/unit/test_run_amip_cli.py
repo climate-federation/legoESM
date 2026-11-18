@@ -6808,3 +6808,13 @@ def test_clubb_mf_flag_reaches_the_turbulence_config():
         "--dataset", "analytical", "--turbulence", "clubb", "--clubb-mf"]), parser))
     with pytest.raises(ValueError, match="clubb_prognostic"):
         turbulence_config_for(diag)
+
+
+def test_physics_module_checkpoint_flag_flows_to_config():
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    off = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--no-physics-module-checkpoint"]), parser))
+    assert on.physics_module_checkpoint is True
+    assert off.physics_module_checkpoint is False

@@ -663,6 +663,8 @@ def build_parser():
     _alias(parser, "conv_cloud_max", "--conv-cloud-max")
     _alias(parser, "rrtmgp_gpoint_checkpoint", "--rrtmgp-gpoint-checkpoint",
            store_true=True)
+    _alias(parser, "physics_module_checkpoint", "--physics-module-checkpoint",
+           store_true=True)
     _alias(parser, "unfused_radiation", "--no-unfused-radiation", store_false=True)
     acts = {a.dest: a for a in parser._actions}
     for dest, extra in _COUPLED_EXTRA_CHOICES.items():
