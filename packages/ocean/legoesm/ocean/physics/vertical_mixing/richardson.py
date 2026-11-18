@@ -34,9 +34,12 @@ DEPARTURES (documented, canaried in the test):
   re-dividing it into the tracer.  It exceeds the canonical PP81 total tracer
   diffusivity — the CVMix Eq. 4.5 SHEAR term ν₀/(1+α·Ri)^(n+1) (same ν₀ = K_0 as
   the momentum numerator) plus the K_bg background — by exactly A_bg/(1+α·Ri).
-  This full-ν placement is a deliberate iter-47 choice; the AUDITABLE claim
-  pinned by the test is the algebraic departure from the Eq. 4.5 shear form, NOT
-  a match to any particular Fortran (CVMix's documented tracer form is Eq. 4.5).
+  This full-ν placement departs from the CVMix DOCUMENT (Eq. 4.5) but MATCHES the
+  CVMix CODE: ``cvmix_coeffs_shear_low`` ('PP') computes
+  ``Tdiff = Mdiff/denom + PP_kappa_b`` with ``Mdiff`` including ``PP_nu_b``.
+  Measured against the compiled CVMix (MOM6 submodule fce422195a) on 200 Ri
+  values in [-1, 1e3]: max relative error 2.5e-16 for A_v and K_v, default and
+  a non-default config (oracle_audit/cvmix_family_oracle, 2026-11-18; not canaried).
 - ``cfg.Pr_t`` is a dead no-op (the Ri-dependent Prandtl is built into the
   formula); a non-default value warns rather than silently doing nothing.
 - The unstable branch (Ri < 0) is clipped to Ri = 0 (maximum mixing) upstream in
