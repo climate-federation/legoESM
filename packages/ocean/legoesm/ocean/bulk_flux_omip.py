@@ -246,7 +246,7 @@ def _pressure_from_potential(q_air, slp_Pa, z_m, theta_K):
 
 
 def potential_air_temperature_10m(
-    T_air_K, q_air, slp_Pa=None, *, nemo_source_exact: bool = False
+    T_air_K, q_air, slp_Pa=None, *, nemo_source_exact: bool = False, z_m=_ZU_M
 ):
     """NEMO blk_oce_1 air-temperature preprocessing at zt = 10 m.
 
@@ -256,7 +256,7 @@ def potential_air_temperature_10m(
     """
     p_slp = constants.p_atm_std if slp_Pa is None else slp_Pa
     p10 = pressure_at_height(
-        q_air, p_slp, _ZU_M, T_air_K, nemo_source_exact=nemo_source_exact
+        q_air, p_slp, z_m, T_air_K, nemo_source_exact=nemo_source_exact
     )
     return exner_potential_temperature(
         T_air_K, p10, nemo_source_exact=nemo_source_exact
@@ -428,7 +428,7 @@ def _un10_from_cd(zu, bulk_wind, cd, psi):
 
 
 def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
-                                      wind_speed, *, nb_iter: int):
+                                      wind_speed, *, nb_iter: int, zt_m=_ZU_M, q_zu_width=None):
     """Stability-iterated NCAR transfer coefficients at zt = zu = 10 m.
 
     Exact port of NEMO ``turb_ncar`` for the CORE-II case (all forcing at
@@ -481,8 +481,8 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
         inv_L = _one_on_obukhov_nemo(
             theta_zu, q_zu, u_star, theta_star, q_star
         )
-        zeta = R(_ZU_M * inv_L)
-        zeta = R(_sign(_fmin(jnp.abs(zeta), _ZETA_ABS_MAX), zeta))
+        air = (theta, q, theta_zu, q_zu, theta_star, q_star), (zt_m, q_zu_width)
+        zeta, theta_zu, q_zu = _zeta_and_zt_shift(inv_L, air)  # zt == zu: zeta only
         psim = psi_m(zeta, nemo_source_exact=True)
 
         UN10 = R(_fmax(
@@ -652,8 +652,8 @@ class _NemoTurbulentState(NamedTuple):
 
 def _nemo_ncar_turbulent(
     u_wind, v_wind, T_air_K, q_air, T_sfc_K, slp_Pa, mask, evap_factor,
-    *, nb_iter: int, q_sfc_override=None, rho_override=None,
-    latent_heat_override=None,
+    *, nb_iter: int, q_sfc_override=None, rho_override=None, zt_m=_ZU_M,
+    latent_heat_override=None, q_zu_width=None,
 ):
     """The executing round-5 ``blk_oce_1`` NCAR path, statement ordered."""
     u = jnp.asarray(u_wind, dtype=jnp.float64)
@@ -682,10 +682,10 @@ def _nemo_ncar_turbulent(
            if q_sfc_override is None
            else jnp.asarray(q_sfc_override, dtype=jnp.float64))
     theta_air, _ = potential_air_temperature_10m(
-        T_air, q, slp, nemo_source_exact=True
+        T_air, q, slp, nemo_source_exact=True, z_m=zt_m  # sbcblk.F90:612 pres_temp at rn_zqt
     )
     cd, ch, ce, Ub, theta_zu, q_zu = _ncar_transfer_coefficients_exact(
-        theta_air, q, theta_sst, ssq, wndm, nb_iter=nb_iter
+        theta_air, q, theta_sst, ssq, wndm, nb_iter=nb_iter, zt_m=zt_m, q_zu_width=q_zu_width
     )
     pressure, tabs = _pressure_from_potential(
         q_zu, slp, _ZU_M, theta_zu
@@ -883,18 +883,18 @@ class NemoStandaloneK0Config(NamedTuple):
 
 class NemoStandaloneK0OceanCard(NamedTuple):
     """The certified rung-10 ocean plus explicit standalone K0 selectors."""
-
     ocean: object
     k0: NemoStandaloneK0Config
     albedo: object
     precip_factor: object
     evap_factor: object
     nb_iter: int
+    zt_m: float = _ZU_M  # rn_zqt: air T/q height [m]; zt != zu shifts them to zu
+    q_zu_floor_width_kg_kg: float = _ZU_FLOOR_REL_WIDTH * _Q_ZU_FLOOR_KG_KG
 
 
 class NemoStandaloneK0StepResult(NamedTuple):
     """One composed surface calculation followed by one production ocean step."""
-
     surface: NemoStandaloneSurfaceResult
     ocean: object
     next_s0: NemoS0Inputs
@@ -976,7 +976,7 @@ def build_nemo_orca2_k0_ocean_card(deck_root):
         albedo=0.066,
         precip_factor=1.0,
         evap_factor=1.0,
-        nb_iter=5,
+        nb_iter=5, zt_m=_ZU_M,  # CORE-II air T/q at 10 m: no zt -> zu shift
     )
     _validate_k0_ocean_card(result)
     return result
@@ -1003,7 +1003,7 @@ def nemo_orca2_k0_s0f(inputs: NemoStandaloneS0FInputs):
 def nemo_orca2_k0_surface_card(
     u_wind, v_wind, T_air_K, q_air, slp_Pa,
     qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
-    evap_factor, nb_iter, *, k0_config, ice_if, s0, s2,
+    evap_factor, nb_iter, *, k0_config, ice_if, s0, s2, zt_m=_ZU_M, q_zu_width=None,
     prior_surface=None, chl=None, geothermal_heat_flux_mwm2=None,
 ):
     """Run the production S0 -> S1 -> S3 -> S2 path for standalone K0.
@@ -1021,8 +1021,8 @@ def nemo_orca2_k0_surface_card(
         None, None, None,
         qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
         evap_factor, nb_iter,
-        nn_ice=k0_config.nn_ice, ice_if=ice_if, s0=s0, s2=s2,
-        prior_surface=prior_surface, chl=chl,
+        nn_ice=k0_config.nn_ice, ice_if=ice_if, s0=s0, s2=s2, zt_m=zt_m,
+        prior_surface=prior_surface, chl=chl, q_zu_width=q_zu_width,
         geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2,
     )
 
@@ -1158,8 +1158,8 @@ def _nemo_orca2_k0_surface_compiled(
         *fields[:5], None, None, None, *fields[5:],
         s2.surface_mask, card.albedo, card.precip_factor,
         card.evap_factor, card.nb_iter,
-        nn_ice=card.k0.nn_ice, ice_if=ice_if, s0=s0, s2=s2,
-        prior_surface=prior_surface, chl=chl,
+        nn_ice=card.k0.nn_ice, ice_if=ice_if, s0=s0, s2=s2, zt_m=card.zt_m,
+        prior_surface=prior_surface, chl=chl, q_zu_width=card.q_zu_floor_width_kg_kg,
         geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2,
         forcing_update=forcing_update,
     )
@@ -1320,7 +1320,7 @@ def blk_oce_2(
 def nemo_blk_oce_ncar(
     u_wind, v_wind, T_air_K, q_air, slp_Pa, sst_c, ssu, ssv,
     qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
-    evap_factor, nb_iter, *, nn_ice, ice_if, s0, s2,
+    evap_factor, nb_iter, *, nn_ice, ice_if, s0, s2, zt_m=_ZU_M, q_zu_width=None,
     prior_surface=None, chl=None, geothermal_heat_flux_mwm2=None,
 ):
     """Literal S0 -> NCAR S1 -> optional S3 -> optional S2 surface path.
@@ -1342,8 +1342,8 @@ def nemo_blk_oce_ncar(
     return _nemo_blk_oce_ncar(
         u_wind, v_wind, T_air_K, q_air, slp_Pa, sst_c, ssu, ssv,
         qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
-        evap_factor, nb_iter, nn_ice=nn_ice, ice_if=ice_if, s0=s0, s2=s2,
-        prior_surface=prior_surface, chl=chl,
+        evap_factor, nb_iter, nn_ice=nn_ice, ice_if=ice_if, s0=s0, s2=s2, zt_m=zt_m,
+        prior_surface=prior_surface, chl=chl, q_zu_width=q_zu_width,
         geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2,
         forcing_update=None,
     )
@@ -1352,8 +1352,8 @@ def nemo_blk_oce_ncar(
 def _nemo_blk_oce_ncar(
     u_wind, v_wind, T_air_K, q_air, slp_Pa, sst_c, ssu, ssv,
     qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
-    evap_factor, nb_iter, *, nn_ice, ice_if, s0, s2,
-    prior_surface, chl, geothermal_heat_flux_mwm2, forcing_update,
+    evap_factor, nb_iter, *, nn_ice, ice_if, s0, s2, zt_m=_ZU_M,
+    prior_surface, chl, geothermal_heat_flux_mwm2, forcing_update, q_zu_width=None,
 ):
     """:func:`nemo_blk_oce_ncar`, whose ``MOD(kt-1, nn_fsbc) == 0`` branch a
     caller tracing ``s0.kt`` supplies as ``forcing_update`` (``None`` reads
@@ -1477,7 +1477,7 @@ def _nemo_blk_oce_ncar(
     state = _nemo_ncar_turbulent(
         u_wind, v_wind, T_air_K, q_air,
         R(sst_c_arr + constants.T_freeze), slp_Pa, wet, evap_factor,
-        nb_iter=int(nb_iter),
+        nb_iter=int(nb_iter), zt_m=zt_m, q_zu_width=q_zu_width,
     )
     rain = jnp.asarray(precip, dtype=jnp.float64)
     solid = jnp.asarray(snow, dtype=jnp.float64)
@@ -1831,3 +1831,52 @@ def _check_k0_step_number(nemo_kt, forcing_update, sponge) -> bool:
                                        or forcing_update != ((int(nemo_kt) - 1) % 2 == 0)):
         raise ValueError(f"forcing_update={forcing_update!r} disagrees with nemo_kt={nemo_kt}")
     return False
+
+
+_ZT_EQUAL_ZU_TOL_M: float = 0.01  # NEMO turb_ncar l_zt_equal_zu = ABS(zu - zt) < 0.01
+
+
+def _zeta_and_zt_shift(inv_l, air):
+    """NEMO turb_ncar stability parameter plus its ``zt /= zu`` air-state shift.
+
+    ``air = ((theta_zt, q_zt, theta_zu, q_zu, theta_star, q_star),
+    (zt_m, q_zu_width))``.  Always returns ``zeta_u = zu/L`` clamped to |.| <= 10
+    (sbcblk_algo_ncar.F90:162-163).  When ``zt == zu`` (NEMO's 1 cm test) the
+    air state at zu is returned unchanged, so the CORE-II card is untouched.
+    Otherwise (F90:166-174, L&Y 2004 Eq. 9b-9c)::
+
+        zeta_t = clamp(zt/L), shift = LOG(zt/zu) + psi_h(zeta_u) - psi_h(zeta_t)
+        t_zu = t_zt - theta*/k * shift,   q_zu = MAX(0, q_zt - q*/k * shift)
+
+    theta*/q* are the scales at the start of the iteration.  The zeta_t clamp is
+    NEMO's hard one, mirroring zeta_u (it binds only for |zu/L| >= 50 at zt = 2 m,
+    where zeta_u is already clamped).  ``q_zu_width`` [kg/kg] smooths the MAX(0, .)
+    with :func:`positive_part_c1` (exact above the width, never above MAX);
+    0 = NEMO's hard MAX.  KNOWN DIFFERENCE at the default width: q_zu sits up to
+    4/27 * width below NEMO only where the shifted humidity is within one width of
+    zero (gaps stored in tests/ocean/unit/test_bulk_flux_zt_shift.py).  ``zt_m`` and
+    ``q_zu_width`` are static Python floats (deck heights, not traced state).
+    """
+    (theta, q, theta_zu, q_zu, theta_star, q_star), (zt_m, q_zu_width) = air
+    if not (np.isfinite(float(zt_m)) and float(zt_m) > 0.0) or not (
+            q_zu_width is None
+            or (np.isfinite(float(q_zu_width)) and float(q_zu_width) >= 0.0)):
+        raise ValueError(f"need finite zt_m > 0 and q_zu_width >= 0, got {zt_m!r}, {q_zu_width!r}")
+    zeta = R(_ZU_M * inv_l)
+    zeta = R(_sign(_fmin(jnp.abs(zeta), _ZETA_ABS_MAX), zeta))
+    if abs(float(zt_m) - _ZU_M) < _ZT_EQUAL_ZU_TOL_M:
+        return zeta, theta_zu, q_zu
+    if q_zu_width is None:
+        raise ValueError("zt != zu needs an explicit q_zu_width (0 = NEMO's hard MAX)")
+    from legoesm.core.bulk_flux import psi_h
+
+    zeta_t = R(float(zt_m) * inv_l)
+    zeta_t = R(_sign(_fmin(jnp.abs(zeta_t), _ZETA_ABS_MAX), zeta_t))
+    height = R(tx.log(R(float(zt_m) / _ZU_M)) + psi_h(zeta, nemo_source_exact=True))
+    shift = R(height - psi_h(zeta_t, nemo_source_exact=True))
+    k = B(constants.kappa_von_karman)
+    theta_zu = R(B(theta) - R(R(theta_star / k) * shift))
+    q_shifted = R(B(q) - R(R(q_star / k) * shift))
+    if float(q_zu_width) == 0.0:
+        return zeta, theta_zu, R(_fmax(0.0, q_shifted))
+    return zeta, theta_zu, positive_part_c1(q_shifted, 1.0 / float(q_zu_width))
