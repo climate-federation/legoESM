@@ -198,7 +198,10 @@ def sdiv(a, b, ok):
 def mixing_fraction(sm, x):
     """CUBASEN's test-parcel mixing fraction MIN(1, x).  Smooth: capped at 1
     from below (``1 - pos(1 - x) <= 1``), so the parcel/environment blends
-    stay convex and keep vapour and static energy between their two ends."""
+    stay convex and keep vapour and static energy between their two ends.
+    Inside the window [1 - w, 1] the result is >= x by at most 4w/27 and its
+    slope is in [0, 4/3] (positive_part_c1); exact outside the window (vote
+    2026-11-18: no C1 form exact outside the window has slope <= 1)."""
     return jnp.minimum(1.0, x) if sm.hard else 1.0 - sm.pos(1.0 - x, _W_ONE)
 
 
