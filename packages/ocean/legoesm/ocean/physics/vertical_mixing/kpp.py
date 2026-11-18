@@ -324,6 +324,21 @@ def _mom6_surface_layer_deltas(T, S, u, v, dz, z_depth, cfg, eos_fn, g):
     return delta_rho, delta_V2
 
 
+def _mom6_cell_n(T, S, dz, eos_fn, g):
+    """N per cell for V_t^2 as MOM6/CVMix build it (MOM_CVMix_KPP.F90:1386-1440,
+    cvmix_kpp.F90:2694): from the interface BELOW each cell, both neighbours at
+    that interface's pressure rho_0 g z (Boussinesq), so no adiabatic
+    compression term; bottom cell 0.  Zero-thickness neighbours give N^2 = 0."""
+    S_eos = eos_salinity(S, eos_fn)
+    p = rho_0_ref * g * (jnp.cumsum(dz, axis=-1) - dz)[..., 1:]
+    drho = eos_fn(T[..., 1:], S_eos[..., 1:], p) - eos_fn(T[..., :-1], S_eos[..., :-1], p)
+    thin = (dz[..., :-1] <= 0.0) | (dz[..., 1:] <= 0.0)
+    h_mid = jnp.where(thin, 1.0, 0.5 * (dz[..., :-1] + dz[..., 1:]))
+    N2 = jnp.where(thin, 0.0, g / rho_0_ref * drho / h_mid)
+    N2 = jnp.concatenate([N2, jnp.zeros_like(N2[..., :1])], axis=-1)
+    return jnp.sqrt(jnp.maximum(N2, 1e-30))
+
+
 def _cvmix_min_vt2(V_t2, cfg):
     """CVMix compute_unresolved_shear floor max(V_t^2, minVtsqr), C1-smoothed
     over ``cfg.min_vt2_width`` (0 = CVMix's hard max).  KNOWN DIFFERENCE at the
@@ -464,9 +479,9 @@ def _boundary_layer_depth(
     # local pressure and a surface-layer average ("cvmix", see
     # _mom6_surface_layer_deltas).  ``eos_fn`` defaults to
     # ``wright_eos`` so the reference density matches how the in-situ ``rho``
-    # was built when the caller does not thread an explicit EOS.  (N^2 / V_t^2
-    # below still use the in-situ ``rho`` gradient — a smaller secondary
-    # effect, left unchanged so this fix stays surgical.)
+    # was built when the caller does not thread an explicit EOS.  (The legacy
+    # N^2 / V_t^2 below still use the in-situ ``rho`` gradient; cvmix mode
+    # builds MOM6's interface-pressure N instead.)
     if eos_fn is None:
         from legoesm.ocean.eos import wright_eos
         eos_fn = wright_eos
@@ -498,23 +513,24 @@ def _boundary_layer_depth(
     # is evaluated with the previous-step boundary-layer depth (h_bl_prev) so
     # V_t^2 does not depend on the very h it helps to compute.  N is floored
     # at sqrt(1e-30) for an AD-safe gradient (no max()-induced 0*inf).
+    if cfg.bld_structure == "cvmix":
+        # MOM6 KPP_compute_BLD (Vt_layer = 1): w_s at sigma = 1 with each
+        # trial depth as the OBL depth, not at d / h_est.
+        _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, z_depth, cfg,
+                                         ice_frac=ice_frac)
+        N_cell = _mom6_cell_n(T, S, dz_actual, eos_fn, g)
+        V_t2 = _kpp_unresolved_shear_variance(N_cell, z_depth, w_s_vt, cfg, eps)
+        V_t2 = _cvmix_min_vt2(V_t2, cfg)
+        Ri_b = _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g)
+        h = _cvmix_first_crossing_depth(Ri_b, z_depth, cfg)
+        return jnp.maximum(h, dz_actual[..., 0])
+
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
     N2_full = jnp.concatenate([N2[..., :1], N2], axis=-1)
     # N = sqrt(max(N^2, 0)): only STABLE stratification (N^2 > 0) contributes to
     # the unresolved-shear variance (LMD94 / CVMix); convective layers (N^2 < 0)
     # give V_t^2 = 0 there.  (Floored at 1e-30 for an AD-safe gradient.)
     N_full = jnp.sqrt(jnp.maximum(N2_full, 1e-30))  # [1/s]
-    if cfg.bld_structure == "cvmix":
-        # MOM6 KPP_compute_BLD (Vt_layer = 1): w_s at sigma = 1 with each
-        # trial depth as the OBL depth, not at d / h_est.
-        _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, z_depth, cfg,
-                                         ice_frac=ice_frac)
-        V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)
-        V_t2 = _cvmix_min_vt2(V_t2, cfg)
-        Ri_b = _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g)
-        h = _cvmix_first_crossing_depth(Ri_b, z_depth, cfg)
-        return jnp.maximum(h, dz_actual[..., 0])
-
     max_depth = z_depth[..., -1]
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)

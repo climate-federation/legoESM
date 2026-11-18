@@ -247,6 +247,40 @@ def test_vt2_velocity_scale_is_mom6_sigma_one(monkeypatch, B_f):
     np.testing.assert_allclose(seen[0][0], _WS_CVMIX[B_f], rtol=2e-4)
 
 
+def test_vt2_buoyancy_frequency_is_mom6_interface_pressure(monkeypatch):
+    """cvmix mode feeds V_t^2 MOM6's N (MOM_CVMix_KPP.F90:1386-1440; CVMix N_cntr =
+    N_iface(kt+1)): interface below each cell, both neighbours at that interface's
+    pressure -- no adiabatic term from the in-situ rho gradient (which gives N ~ 6e-3
+    1/s in a mixed layer).  Reference: an independent loop of the MOM6 formula."""
+    seen = []
+    orig = K._kpp_unresolved_shear_variance
+
+    def spy(N, d, w_s, cfg, eps):
+        seen.append(np.asarray(N))
+        return orig(N, d, w_s, cfg, eps)
+
+    monkeypatch.setattr(K, "_kpp_unresolved_shear_variance", spy)
+    dz = np.array([1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0])
+    Tv = np.array([20.0, 20.0, 20.0, 19.2, 17.5, 15.0, 12.0])
+    Sv = np.array([35.0, 35.0, 35.0, 35.05, 35.1, 35.2, 35.3])
+    zc = create_z_star_from_thicknesses(dz)
+    T, S = jnp.asarray(Tv)[None], jnp.asarray(Sv)[None]
+    z0 = jnp.zeros_like(T)
+    p_cell = rho_0 * constants.g * jnp.asarray(_centres(dz))[None]
+    K._boundary_layer_depth(wright_eos(T, S, p_cell), T, S, z0, z0, zc, jnp.ones(1),
+                            jnp.array([0.005]), jnp.array([1e-8]), CFG)
+    assert len(seen) == 1
+    want = np.zeros(dz.size)
+    p = 0.0
+    for k in range(dz.size - 1):
+        p += constants.g * rho_0 * dz[k]
+        r = np.asarray(wright_eos(jnp.array([Tv[k + 1], Tv[k]]), jnp.array([Sv[k + 1], Sv[k]]),
+                                  jnp.array([p, p])))
+        want[k] = np.sqrt(max(constants.g / rho_0 * (r[0] - r[1]) / (0.5 * (dz[k] + dz[k + 1])), 1e-30))
+    want[-1] = 1e-15
+    np.testing.assert_allclose(seen[0][0], want, rtol=1e-12, atol=0.0)
+
+
 def test_bulk_richardson_matches_cvmix():
     """CVMix compute_bulk_Richardson (N=0 -> V_t^2 = minVtsqr 1e-10)."""
     zc = np.array([-0.5, -1.5, -2.5])
