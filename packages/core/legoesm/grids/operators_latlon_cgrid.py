@@ -1143,6 +1143,7 @@ def laplacian_cgrid(
     grid: LatLonGrid,
     *,
     mask: jnp.ndarray | None = None,
+    face_gates: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> jnp.ndarray:
     """Scalar Laplacian on C-grid cell centers using compact stencils.
 
@@ -1155,6 +1156,8 @@ def laplacian_cgrid(
     f : array, shape (n_lat, n_lon) or (n_lat, n_lon, nlev)
     grid : LatLonGrid
     mask : array, optional
+    face_gates : (u-face, v-face) multipliers on the face gradients, optional
+        (closed face levels, e.g. depth-limited walls: zero flux through them).
 
     Returns
     -------
@@ -1187,6 +1190,10 @@ def laplacian_cgrid(
         else:
             grad_x = grad_x * u_mask
             grad_y = grad_y * v_mask
+
+    if face_gates is not None:
+        grad_x = grad_x * face_gates[0]
+        grad_y = grad_y * face_gates[1]
 
     lap = divergence_cgrid(grad_x, grad_y, grid)
 

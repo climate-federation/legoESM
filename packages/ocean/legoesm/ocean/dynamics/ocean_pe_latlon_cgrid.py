@@ -126,6 +126,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     leith_biharmonic_tendency_cgrid,
     compute_vertex_mask,
     compute_face_masks_3d,
+    face_wall_gates,
     wall_faces,
     per_level_viscosity_masks,
     nemo_shlat_vertex_mask,
@@ -2414,6 +2415,14 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     tracer_stack = jnp.stack([T, S], axis=-1)  # (n_lat, n_lon, nlev, 2)
     n_lat_t, n_lon_t, nlev_t, n_tracers = tracer_stack.shape
     tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
+    # Depth-limited walls: no diffusive flux through a closed face level (heat and
+    # salt would otherwise mix across a sill the velocities cannot cross).  The
+    # gates follow the flat (level, tracer) layout; ``None`` without walls.
+    _gates = face_wall_gates(grid, nlev_t, tracer_flat.dtype)
+    if _gates[0] is not None:
+        _gates = tuple(jnp.repeat(_g, n_tracers, axis=-1) for _g in _gates)
+    else:
+        _gates = None
 
     horiz_flat = jnp.zeros_like(tracer_flat)
     if is_active(config.K_h) and is_active(config.K_bih):
@@ -2422,18 +2431,18 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
         # ONCE and feed it to both branches.  Saves one full
         # laplacian_cgrid call (2 gradients + 1 divergence + masking)
         # per RHS evaluation.
-        _lap_tr = laplacian_cgrid(tracer_flat, grid, mask=mask)
+        _lap_tr = laplacian_cgrid(tracer_flat, grid, mask=mask, face_gates=_gates)
         horiz_flat = horiz_flat + config.K_h * _lap_tr
         horiz_flat = horiz_flat - config.K_bih * laplacian_cgrid(
-            _lap_tr, grid, mask=mask,
+            _lap_tr, grid, mask=mask, face_gates=_gates,
         )
     elif is_active(config.K_h):
         horiz_flat = horiz_flat + config.K_h * laplacian_cgrid(
-            tracer_flat, grid, mask=mask,
+            tracer_flat, grid, mask=mask, face_gates=_gates,
         )
     elif is_active(config.K_bih):
         horiz_flat = horiz_flat - config.K_bih * bilaplacian_cgrid(
-            tracer_flat, grid, mask=mask,
+            tracer_flat, grid, mask=mask, face_gates=_gates,
         )
     horiz_stack = horiz_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
 

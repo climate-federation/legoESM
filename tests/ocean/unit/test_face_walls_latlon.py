@@ -147,3 +147,39 @@ def test_two_basin_deep_wall_blocks_flow_and_conserves_volume():
     assert abs(vol1 - vol0) <= 1e-9 * abs(vol0)
     # the deep contrasts do drive flow through both sills without walls
     assert deep_u_open > 1e-4 and deep_v_open > 1e-4
+
+
+# ---------------------------------------------------------------- lateral tracer mixing
+
+def _lateral_tendencies(walls, T, S, **flat):
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_tracer_tendencies
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    grid, z, s = _setup(walls)
+    cfg = LatLonCGridOceanConfig.from_flat(implicit_vertical_mixing=True, **flat)
+    dT, dS = _bc_tracer_tendencies(jnp.asarray(T), jnp.asarray(S), cfg, grid, s.land_mask.data,
+                                   jnp.ones((N_LAT, N_LON)), z)
+    return np.asarray(dT), np.asarray(dS), np.asarray(grid.area_T)
+
+
+@pytest.mark.parametrize("coef", [dict(K_h=1.0e3), dict(K_bih=1.0e13),
+                                  dict(K_h=1.0e3, K_bih=1.0e13)])
+def test_lateral_tracer_diffusion_does_not_cross_walls(coef):
+    """Budget: heat and salt.  Laplacian / biharmonic tracer fluxes are zero through a
+    closed face level, so a basin-uniform deep tracer does not relax toward the
+    neighbour basin.  Only what the walls change is asserted: this operator is not
+    thickness-weighted and does not close the global heat budget, walls or not."""
+    T, S = _basin_tracers()
+    dT, dS, area = _lateral_tendencies(True, T, S, **coef)
+    dT0, dS0, _ = _lateral_tendencies(False, T, S, **coef)
+    assert np.abs(dT0[:, [3, 4], K_WALL:]).max() > 0.0         # open sill: the basins do mix
+    assert np.abs(dS0[:, [3, 4], K_WALL:]).max() > 0.0
+    assert np.abs(dT).max() == 0.0 and np.abs(dS).max() == 0.0
+    if "K_bih" not in coef:
+        # a meridional deep step is held by the v-sill, and mixes where there is none
+        # (Laplacian only: the biharmonic reaches these cells through their open neighbours)
+        T2, S2 = np.full_like(T, 15.0), np.full_like(S, 35.0)
+        T2[3:, :, K_WALL:], S2[3:, :, K_WALL:] = 9.0, 34.0
+        dT, dS, _ = _lateral_tendencies(True, T2, S2, **coef)
+        assert np.abs(dT[2:4, 1:3, K_WALL:]).max() == 0.0
+        assert np.abs(dS[2:4, 1:3, K_WALL:]).max() == 0.0
+        assert np.abs(dT[2:4, 6, K_WALL:]).max() > 0.0
