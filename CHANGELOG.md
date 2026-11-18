@@ -48,6 +48,14 @@ All notable changes to legoESM. Format roughly follows
 
 ### Fixed
 
+- **Ice-shelf prescribed melt is off in empty bands, as in NEMO.** Where the
+  melt band's bottom (`sodepmax_isf`, clipped to the sea floor) is not below
+  its snapped top, NEMO applies no melt; legoESM used to widen such bands to
+  1 m and deposit the melt. On the eORCA1 Depoorter forcing this removes
+  2.6 % of the annual ice-shelf melt (8 columns), so runs are not bit-comparable
+  with earlier ones. On regridded grids the monthly melt total is still
+  rescaled to the full source total before these columns are dropped.
+
 - **Hines gravity-wave drag no longer launches at the surface.** The launch
   level now defaults to 700 hPa and must lie in 300–900 hPa; the surface-launch
   path is removed (a surface-launched wave broke in the boundary layer and

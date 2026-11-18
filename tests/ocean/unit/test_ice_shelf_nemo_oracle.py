@@ -112,12 +112,13 @@ def test_spe_tendency_gap_pinned(j):
     _assert_pinned(got, FIX["pin_spe_dtdt"][j])
 
 
-def test_spe_empty_band_gets_no_melt_like_nemo():
+@pytest.mark.parametrize("m", range(len(FIX["spe_masked_nemo_eta"])))
+def test_spe_empty_band_gets_no_melt_like_nemo(m):
     """NEMO masks a column whose zmax is not below the snapped band top (mskisf_par = 0)."""
-    zmin, zmax, fwf = FIX["spe_masked_zmin_zmax_fwf"]
+    zmin, zmax, fwf = FIX["spe_masked_zmin_zmax_fwf"][m]
     nl = FIX["spe_E3"].size
     dT, dS, eta = isf.isf_prescribed_melt_tendencies(
         jnp.asarray(FIX["spe_SAL"]), jnp.asarray(FIX["spe_E3"]), jnp.ones(nl), jnp.asarray(fwf),
         jnp.asarray(zmin), jnp.asarray(zmax), rho_0=RHO0, c_sw=RCP, L_fus=LFUS)
-    assert not np.any(FIX["spe_masked_nemo_dtdt"]) and FIX["spe_masked_nemo_eta"] == 0.0
+    assert not np.any(FIX["spe_masked_nemo_dtdt"][m]) and FIX["spe_masked_nemo_eta"][m] == 0.0
     assert not np.any(np.asarray(dT)) and not np.any(np.asarray(dS)) and float(eta) == 0.0

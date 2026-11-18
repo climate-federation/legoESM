@@ -244,9 +244,11 @@ def isf_prescribed_melt_tendencies(
       free-surface stretch); can differ by one level when the stretch moves
       an interface across ``zmin``.
     * A column whose ``min(zmax, depth)`` is not below the snapped ``zmin``
-      gets no melt, as NEMO's ``mskisf_par``.  (Until 2026-11 the loader
-      widened such bands to 1 m and deposited the melt: on the eORCA1
-      Depoorter file 8 columns, 2.6 % of the annual melt.)
+      gets no melt, as NEMO's ``mskisf_par`` (eORCA1 Depoorter: 8 columns,
+      2.6 % of the annual melt).  NEMO decides this once on the static
+      grid; here it follows the live thicknesses, like ``ktop``.  On
+      regridded grids the loader rescales the monthly melt to the full
+      source total before this mask drops any column.
     * The ``fwf > 0`` gate drops refreezing, which NEMO would apply; the
       eORCA1 forcing ``sornfisf`` has no negative values, so it never binds
       there.
