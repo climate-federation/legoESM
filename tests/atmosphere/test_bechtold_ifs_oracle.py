@@ -1115,6 +1115,26 @@ def test_host_water_closes_with_a_bounded_cap_active(fix, site):
     assert np.max(np.abs(res)) / np.max(np.abs(dry)) <= _TOL
 
 
+def test_ascent_cap_helpers_gradient_at_default():
+    """check_grads through the two cap helpers themselves (not only the
+    generic smooth forms), at points inside their windows."""
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent as A
+
+    sm, wc = IfsSmooth(False), A._W_COND
+    for luk, z0 in ((1.0e-3, 1.0e-3 - 0.5 * wc), (2.0 * A.Z_CLDMAX, A.Z_CLDMAX - 0.5 * wc)):
+        luk = jnp.asarray(luk)
+        cloud = lambda z, luk=luk: A.cloud_to_rain(sm, True, luk, 0.0, luk, z, 0.7,  # noqa: E731
+                                                   A.ZDNOPRC)[0]
+        check_grads(cloud, (jnp.asarray(z0),), order=1, modes=("rev",), eps=1e-3 * wc)
+        assert 0.0 < float(jax.grad(cloud)(jnp.asarray(z0))) < 1.0
+    x0 = jnp.asarray(1.0 - 0.5 * A._W_ONE)
+    check_grads(lambda x: A.mixing_fraction(sm, x), (x0,), order=1, modes=("rev",),
+                eps=1e-3 * A._W_ONE)
+    assert 0.0 < float(jax.grad(lambda x: A.mixing_fraction(sm, x))(x0)) < 1.0
+
+
 def test_smooth_liquid_fraction_never_exceeds_one():
     """FOEALFCU's smooth upper clip sits on the cold side of RTWAT: the
     fraction stays <= 1 and is exact outside the window."""
@@ -1185,16 +1205,16 @@ _MSE_SMOOTH_GAP = {
 }
 
 
+_MSE_HEAT_FLOOR = 1.0   # W m-2 (vote 2026-11-18: L137 heats < 1e-3 W m-2)
+
+
 @pytest.mark.parametrize("g", _GROUPS)
 def test_column_moist_static_energy_smooth_vs_exact(fix, g):
-    """The exact port leaves the reference's residual (oracle-match metric:
-    max |difference| / max column heating <= _TOL); the smooth default adds
-    the stored per-column amount."""
+    """The exact port leaves the reference's residual (max |difference| /
+    max(the group's largest column heating, 1 W m-2) <= _TOL) and the smooth
+    default adds the stored per-column amount."""
     ref, hard, smooth, heat = mse_residuals(fix, g)
-    if heat == 0.0:
-        np.testing.assert_array_equal(hard, ref)
-    else:
-        assert np.max(np.abs(hard - ref)) / heat <= _TOL
+    assert np.max(np.abs(hard - ref)) / max(heat, _MSE_HEAT_FLOOR) <= _TOL
     np.testing.assert_allclose(smooth - hard, np.asarray(_MSE_SMOOTH_GAP[g]),
                                rtol=1e-6, atol=1e-12)
 
