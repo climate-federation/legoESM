@@ -189,15 +189,15 @@ _W_MF, _W_DH, _W_HEAT, _W_CAPE, _W_TIME, _W_VEL, _W_GEO, _W_PRES, _W_OMEGA = (
                          _S_GEO, _S_PRES, _S_OMEGA))
 _W_SATFR = _W_REL * ZSATFR_MAX  # O(1) ratio: 0.01 x |threshold|
 # part 3 (fluxes, evaporation, positivity): x = distance to the switch point
-_S_DDEN = 1.0          # [kg m-2 s-1] downdraught entrainment vs its bounds
-_S_DDBUO = 1.0         # [1] downdraught buoyancy / T
-_S_SQ = 1.0            # [kg m-2 s-1] -PMFD(IDBAS) - 0.5 PMFU(IDBAS)
-_S_QDEF = 1.0          # [kg/kg] saturation deficit
-_S_TFRZ = 1.0          # [K] temperature - RTT
-_S_PFLX = 1.0          # [kg m-2 s-1] precipitation fluxes and their caps
-_S_RHM = 1.0           # [1] cloud-layer RH - ZRHM_MIN
-_S_RATE = 1.0          # [kg m-2 s-1] detrainment-rate consistency
-_S_DDQF = 1.0          # [kg m-2 s-1] downdraught-top moisture flux test
+_S_DDEN = 7.87e-7          # [kg m-2 s-1] downdraught entrainment vs its bounds
+_S_DDBUO = 3.44e-3         # [1] downdraught buoyancy / T
+_S_SQ = 4.94e-10            # [kg m-2 s-1] -PMFD(IDBAS) - 0.5 PMFU(IDBAS)
+_S_QDEF = 1.63e-6          # [kg/kg] saturation deficit
+_S_TFRZ = 1.87          # [K] temperature - RTT
+_S_PFLX = 6.5e-8          # [kg m-2 s-1] precipitation fluxes and their caps
+_S_RHM = 1.53e-2           # [1] cloud-layer RH - ZRHM_MIN
+_S_RATE = 5.77e-8          # [kg m-2 s-1] detrainment-rate consistency
+_S_DDQF = 2.65e-7          # [kg m-2 s-1] downdraught-top moisture flux test
 _S_LUDE = 1.0          # [kg m-2 s-1] cloud-top detrained-liquid fixer
 _W_DDEN, _W_DDBUO, _W_SQ, _W_QDEF, _W_TFRZ, _W_PFLX, _W_RHM, _W_RATE, _W_DDQF, _W_LUDE = (
     _W_REL * x for x in (_S_DDEN, _S_DDBUO, _S_SQ, _S_QDEF, _S_TFRZ, _S_PFLX, _S_RHM,
@@ -537,7 +537,7 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
         zfac = zcons1 * (kget(paph, jk + 1) - kget(paph, jk))
         if sm.hard:
             melt = on & (sk > 0.0) & (zten > rtt)
-            zsnmlt = jnp.minimum(sk, zfac * (zten - rtt))
+            zsnmlt = sm.min(sk, zfac * (zten - rtt), _W_PFLX)
             dpmel = jnp.where(melt, zsnmlt, 0.0)
             qsn = foeewmcu(th, zten - zsnmlt / jnp.where(melt, zfac, 1.0)) / pk
         else:
@@ -560,8 +560,8 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
         av1 = zalfaw * (dmfup + dmfdp)
         av2 = (1.0 - zalfaw) * (dmfup + dmfdp) - dpmel
         if sm.hard:
-            sn1 = jnp.minimum(sn1, av1)
-            sn2 = jnp.minimum(sn2, av2)
+            sn1 = sm.min(sn1, av1, _W_PFLX)
+            sn2 = sm.min(sn2, av2, _W_PFLX)
         else:   # bounded: detrained snow/rain never exceed what is available
             sn1 = av1 - sm.pos(av1 - sn1, _W_PFLX)
             sn2 = av2 - sm.pos(av2 - sn2, _W_PFLX)
@@ -1032,7 +1032,7 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     zmfa = (zmfa - plude) * zdzt
     if sm.hard:
         lim2 = near & (pqen + zmfa < 0.0) & (plude > 0.0)
-        zfacl = jnp.minimum(-(pqen + zmfa) / zdzt, plude)
+        zfacl = sm.min(-(pqen + zmfa) / zdzt, plude, _W_LUDE)
     else:   # bounded: 0 <= ZFAC <= PLUDE, zero unless q + ZMFA < 0 and PLUDE > 0
         lude_p = sm.pos(plude, _W_LUDE)
         zfacl = lude_p - sm.pos(lude_p - sm.pos(-(pqen + zmfa) / zdzt, _W_LUDE), _W_LUDE)
