@@ -536,3 +536,12 @@ def test_physics_module_checkpoint_switch(runs, tmp_path):
     assert counts[0] > counts[1], counts
     for a, b in zip(_fields(outs[0]), _fields(outs[1])):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+@pytest.mark.parametrize("fp32", [True, False])
+def test_mpas_rrtmgp_fp32_switch_reaches_the_radiation(tmp_path, fp32):
+    """mpas_rrtmgp_fp32 selects the RRTMGP solve precision on the MPAS lane
+    (default True = fp32; False = fp64 radiation for gradient runs)."""
+    exp = _driver(tmp_path, f"rrtmgp_{fp32}", radiation="rrtmgp",
+                  mpas_rrtmgp_fp32=fp32).export_mpas_step()
+    assert exp["phys_cfg"].radiation.rrtmgp.compute_fp32 is fp32

@@ -6818,3 +6818,13 @@ def test_physics_module_checkpoint_flag_flows_to_config():
         ["--dataset", "analytical", "--no-physics-module-checkpoint"]), parser))
     assert on.physics_module_checkpoint is True
     assert off.physics_module_checkpoint is False
+
+
+def test_mpas_rrtmgp_fp32_flag_flows_to_config():
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    off = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--no-mpas-rrtmgp-fp32"]), parser))
+    assert on.mpas_rrtmgp_fp32 is True
+    assert off.mpas_rrtmgp_fp32 is False

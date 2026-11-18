@@ -13661,7 +13661,7 @@ class ModelDriver:
             "rrtmgp" if cfg.radiation in ("rrtmg", "rrtmgp")
             else cfg.radiation
         )
-        _rrtmgp_fp32 = (_rad_scheme == "rrtmgp")
+        _rrtmgp_fp32 = (_rad_scheme == "rrtmgp") and cfg.mpas_rrtmgp_fp32
         # Cloud-radiation coupling: thread the configured cloud-fraction
         # scheme into RRTMGP (cloud optics from microphysics condensate +
         # number).  ``include_clouds`` must be consistent with the cloud
