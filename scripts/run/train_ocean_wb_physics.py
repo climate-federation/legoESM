@@ -388,13 +388,16 @@ def forcing_arrays(a, date, days):
             "day": jnp.asarray([k + 0.5 for k in doy], jnp.float64)}
 
 
-def sample_face_masks(state0, grid, nlev):
-    """u/v-face masks for the samples: per level, closed below the model's depth-limited
-    walls (the model holds those levels at rest, so ORAS5 velocity there is neither an
-    initial condition nor a loss target); ``(.., 1)`` 2-D masks without walls."""
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import wall_faces
-    um, vm = wall_faces(state0.u_mask.data[..., None], state0.v_mask.data[..., None], grid, nlev)
-    return np.asarray(um), np.asarray(vm)
+def sample_face_masks(state0, grid, wet3):
+    """u/v-face masks for the samples: the model's own per-level face closure, i.e. the
+    2-D state masks times the level masks from ``wet3`` (closed below a shallower
+    neighbour's seabed and below a depth-limited wall).  The model holds those face
+    levels at rest, so ORAS5 velocity there is neither an initial condition nor a
+    loss target."""
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+    um, vm = compute_face_masks_3d(jnp.asarray(wet3), grid)
+    return (np.asarray(um * state0.u_mask.data[..., None]),
+            np.asarray(vm * state0.v_mask.data[..., None]))
 
 
 def build_sample(O, store, date, days, wet3, um, vm, base, place):
@@ -466,7 +469,7 @@ def main(argv=None):
     n_bad = int((wet3 & ~np.isfinite(np.moveaxis(np.asarray(O.load_day(a.store, dates[0])[:O.NLEV]), 0, -1))).sum())
     if n_bad:
         raise SystemExit(f"[{label}] {n_bad} model-wet cells where ORAS5 has no T despite the depth cap")
-    um, vm = sample_face_masks(state0, model.grid, O.NLEV)
+    um, vm = sample_face_masks(state0, model.grid, wet3)
     base = O.base_weights(lat_c, np.asarray(zc.h_partial) * wet3)
     from legoesm.ocean.vertical import compute_centroid_depth
     H = jnp.asarray(state0.H_bathy.data, jnp.float64)

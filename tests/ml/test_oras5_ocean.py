@@ -218,8 +218,9 @@ def test_face_walls_from_native_mask():
     assert fv[0].max() == 0 and fv[-1].max() == 0
 
 
-def test_sample_face_masks_close_levels_below_walls():
-    """ORAS5 velocity below a wall is neither initial condition nor loss target."""
+def test_sample_face_masks_close_levels_below_walls_and_seabed_steps():
+    """ORAS5 velocity at a face level the model keeps closed (below a wall, or below a
+    shallower neighbour's seabed) is neither initial condition nor loss target."""
     from types import SimpleNamespace as NS
     fu = np.full((O.NLAT, O.NLON + 1), O.NLEV)
     fv = np.full((O.NLAT + 1, O.NLON), O.NLEV)
@@ -227,8 +228,9 @@ def test_sample_face_masks_close_levels_below_walls():
     st = NS(u_mask=NS(data=jnp.ones((O.NLAT, O.NLON + 1))),
             v_mask=NS(data=jnp.ones((O.NLAT + 1, O.NLON))))
     wet3 = np.ones((O.NLAT, O.NLON, O.NLEV))
+    wet3[30, 40, 5:] = 0                                  # a column 5 levels deep
     um, vm = T.sample_face_masks(
-        st, NS(face_nlev_u=jnp.asarray(fu), face_nlev_v=jnp.asarray(fv)), O.NLEV)
+        st, NS(face_nlev_u=jnp.asarray(fu), face_nlev_v=jnp.asarray(fv)), wet3)
     f, v = O.day_to_fields(_day(), wet3, um, vm)
     w = O.weights(O.base_weights(np.arange(-89.5, 90.0), np.ones(O.NLEV)), v)
     assert np.isclose(f["u"][10, 5, 2], 4.5) and v["u"][10, 5, 2] and float(w["u"][10, 5, 2]) > 0
@@ -236,8 +238,16 @@ def test_sample_face_masks_close_levels_below_walls():
     assert (np.asarray(w["u"])[10, 5, 3:] == 0).all()
     assert (f["v"][20, 7] == 0).all() and not v["v"][20, 7].any()
     assert (np.asarray(w["v"])[20, 7] == 0).all() and float(w["v"][20, 8, 0]) > 0
-    # without walls: exactly the 2-D masks' fields
-    um0, vm0 = T.sample_face_masks(st, NS(), O.NLEV)
+    # seabed step: both u-faces and both v-faces of the shallow column close below level 5
+    for name, idx in (("u", (30, 40)), ("u", (30, 41)), ("v", (30, 40)), ("v", (31, 40))):
+        assert v[name][idx][:5].all() and float(np.asarray(w[name])[idx][4]) > 0, (name, idx)
+        assert (f[name][idx][5:] == 0).all() and not v[name][idx][5:].any(), (name, idx)
+        assert (np.asarray(w[name])[idx][5:] == 0).all(), (name, idx)
+    # without walls or steps: exactly the 2-D masks' fields
+    wet3 = np.ones((O.NLAT, O.NLON, O.NLEV))
+    um0, vm0 = T.sample_face_masks(st, NS(), wet3)
     f0, v0 = O.day_to_fields(_day(), wet3, um0, vm0)
-    f2, v2 = O.day_to_fields(_day(), wet3, np.ones(fu.shape), np.ones(fv.shape))
+    vm2 = np.ones(fv.shape)
+    vm2[[0, -1]] = 0.0               # the pole rows are walls in the model's v-face masks
+    f2, v2 = O.day_to_fields(_day(), wet3, np.ones(fu.shape), vm2)
     assert all(np.array_equal(f0[k], f2[k]) and np.array_equal(v0[k], v2[k]) for k in O.FIELDS)
