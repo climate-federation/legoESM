@@ -821,6 +821,10 @@ class ExperimentConfig(NamedTuple):
     # smaller compiled footprint / faster cold compile for FORWARD/inference
     # runs, used to relieve the XLA-CPU LLVM-JIT code-region pressure.
     rrtmgp_gpoint_checkpoint: bool = True
+    # ``PhysicsConfig.module_checkpoint``: each hydrostatic physics module call
+    # under ``jax.checkpoint`` (gradient memory; forward values unchanged).
+    # False = no module remat: faster gradients where memory is not the limit.
+    physics_module_checkpoint: bool = True
     # Column-chunk the rrtmgp solve to cap the XLA compile time at higher
     # horizontal resolution (see ``RRTMGPConfig.column_chunk_size``).  0 =
     # off (byte-identical). >0 = jax.lax.map the solve over fixed-size column

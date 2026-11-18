@@ -6296,3 +6296,13 @@ def test_sundqvist_deck_names_the_snow_refill_width():
     p.set_defaults(**load_yaml_config(path, p))
     cfg = build_config_from_args(p.parse_args([]))
     assert cfg.bechtold_snow_refill_width_kg_m2_s == 1.0e-8
+
+
+def test_physics_module_checkpoint_flag_flows_to_config():
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    off = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--no-physics-module-checkpoint"]), parser))
+    assert on.physics_module_checkpoint is True
+    assert off.physics_module_checkpoint is False

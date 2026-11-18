@@ -362,31 +362,33 @@ def test_nonfinite_census_names_windows_and_columns(capsys):
     assert "windows" not in capsys.readouterr().out
 
 
-def test_window_check_compares_first_and_last_window_alone(monkeypatch, capsys):
-    """Fake segment: x scaled by (step0 + 1) * n_steps; the standalone run of
-    window b uses step0s[b] and no clock.  A correct batched gradient shows
+def test_window_check_runs_first_and_last_window_from_their_own_export(
+        monkeypatch, capsys):
+    """Fake segment: x scaled by the export's own factor * n_steps, no clock
+    or forcing passed (the export's own).  A correct batched gradient shows
     zero difference, a corrupted last window a nonzero one; middle windows
     are not run."""
     import json
     import numpy as np
     import legoesm.driver.mpas_diff_step as mds
 
-    def seg(exp, s, p, n, forcing, step0, **kw):
-        assert "clock" not in kw
-        return {k: v * (step0 + 1) * n for k, v in s.items()}, p
+    def seg(exp, s, p, n, **kw):
+        assert "clock" not in kw and "forcing" not in kw and "step0" not in kw
+        return {k: v * exp["fac"] * n for k, v in s.items()}, p
     monkeypatch.setattr(mds, "mpas_segment", seg)
     monkeypatch.setattr(pam, "_with_x", lambda s, x: x)
+    monkeypatch.setattr(pam, "_state_x", lambda s: s)
     monkeypatch.setattr(pam, "_proj_loss",
                         lambda s: sum(jnp.sum(v ** 2) for v in s.values()))
-    x = {"T": jnp.arange(6.0).reshape(3, 2)}
-    step0s = [0, 1, 2]
-    fac = (jnp.asarray(step0s, float)[:, None] + 1) * 4
-    args = (x, x, jnp.zeros(3), jnp.zeros(3), jnp.zeros(3))
-    g = {"T": (2 * x["T"] * fac ** 2).at[2, 1].multiply(1.5)}
-    pam.window_check(None, g, args, 4, step0s, {})
+    xs = jnp.arange(6.0).reshape(3, 2)
+    exps = [dict(fac=float(b + 1), state={"T": xs[b]}, phys_state=None)
+            for b in range(3)]
+    fac = jnp.arange(1.0, 4.0)[:, None] * 4
+    g = {"T": (2 * xs * fac ** 2).at[2, 1].multiply(1.5)}
+    pam.window_check(exps, g, 4, {})
     rows = [json.loads(line[len("WINDOW_CHECK "):])
             for line in capsys.readouterr().out.splitlines()]
-    assert [(r["window"], r["step0"]) for r in rows] == [(0, 0), (2, 2)]
+    assert [r["window"] for r in rows] == [0, 2]
     assert rows[0]["rel_max_diff"]["T"] == 0.0
     np.testing.assert_allclose(rows[1]["rel_max_diff"]["T"], 0.5)
     assert all(r["alone_finite"] for r in rows)
@@ -394,3 +396,10 @@ def test_window_check_compares_first_and_last_window_alone(monkeypatch, capsys):
 
 def test_parser_check_windows():
     assert pam.build_parser().parse_args(["--stage", "timing", "--check-windows"]).check_windows
+
+
+def test_parser_window_spacing_days():
+    ap = pam.build_parser()
+    assert ap.parse_args(["--stage", "timing"]).window_spacing_days is None
+    assert ap.parse_args(["--stage", "timing", "--window-spacing-days",
+                          "30"]).window_spacing_days == 30.0
