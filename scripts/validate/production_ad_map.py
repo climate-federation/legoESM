@@ -686,23 +686,22 @@ def time_compiled(fn, args, repeats):
     return t_c, t_1, reps, out
 
 
-def window_check(exp, g_batch, args, n, step0, kw):
-    """Each window's gradient taken alone (plain ``mpas_segment``, no vmap,
-    one compile shared by all windows) against its slice of the batched
-    gradient ``g_batch``.  Prints, per window and leaf, max|diff| / max|alone|
-    (numbers only: vmap may reorder fp32 reductions, so not bitwise)."""
+def window_check(exp, g_batch, args, n, step0s, kw):
+    """The first and last window's gradient from a true standalone run (plain
+    ``mpas_segment`` from that window's own ``step0``, clock built inside, no
+    vmap; one compile per window) against its slice of the batched gradient
+    ``g_batch``.  Prints max|diff| / max|alone| per leaf (numbers only: vmap
+    may reorder fp32 reductions, so not bitwise)."""
     from legoesm.driver.mpas_diff_step import mpas_segment
+    for b in sorted({0, len(step0s) - 1}):
+        x, s, p, f, _ = jax.tree_util.tree_map(lambda t, _b=b: t[_b], args)
 
-    def one(x, s, p, f, c):
-        out, _ = mpas_segment(exp, _with_x(s, x), p, n, forcing=f,
-                              step0=step0, clock=c, **kw)
-        return _proj_loss(out)
-    gfn = jax.jit(jax.grad(one))
-    nb = jax.tree_util.tree_leaves(args[0])[0].shape[0]
-    for b in range(nb):
+        def one(x_, _s0=step0s[b]):
+            out, _ = mpas_segment(exp, _with_x(s, x_), p, n, forcing=f,
+                                  step0=_s0, **kw)
+            return _proj_loss(out)
         t0 = time.time()
-        gb = jax.block_until_ready(gfn(*jax.tree_util.tree_map(
-            lambda t, _b=b: t[_b], args)))
+        gb = jax.block_until_ready(jax.jit(jax.grad(one))(x))
         rel = {}
         for k in gb:
             ref = np.asarray(gb[k], np.float64)
@@ -711,7 +710,7 @@ def window_check(exp, g_batch, args, n, step0, kw):
             rel[k] = (float(np.max(np.abs(got - ref)) / scale) if scale > 0
                       else float(np.max(np.abs(got))))
         print("WINDOW_CHECK " + json.dumps(dict(
-            window=b, seconds=time.time() - t0,
+            window=b, step0=step0s[b], seconds=time.time() - t0,
             alone_finite=bool(all(np.all(np.isfinite(np.asarray(v)))
                                   for v in gb.values())),
             rel_max_diff=rel)), flush=True)
@@ -811,13 +810,9 @@ def build_parser():
                     help="timing stage: B windows (one cadence period "
                          "apart) in one jax.vmap call; needs --schedule")
     ap.add_argument("--check-windows", action="store_true",
-                    help="timing stage with --batch: also take each window's "
-                         "gradient alone (no vmap) and print its difference "
-                         "from that window's slice of the batched gradient")
-    ap.add_argument("--rad-chunk", type=int, default=0,
-                    help="rebuild the physics with RRTMGP column_chunk_size "
-                         "= this (must divide the column count); 0 = as "
-                         "exported")
+                    help="timing stage with --batch: also take the first and "
+                         "last window's gradient from a standalone run and "
+                         "print its difference from the batched slice")
     ap.add_argument("--repeats", type=int, default=3,
                     help="timing stage: steady-state calls timed per window")
     ap.add_argument("--stash-modules", action="store_true",
@@ -855,16 +850,15 @@ def main(argv=None):
     if (a.stage in ("components", "eqns", "modmem") or a.rad_fp64
             or a.stash_modules):
         install_spies(rec)
+    if a.stage in ("components", "eqns", "modmem"):
+        # the spies record only concrete calls, and jax.checkpoint traces its
+        # arguments even when called eagerly: without this no module records.
+        # Forward values are the same with or without the module remat.
+        import legoesm.atmosphere.physics.combined as _comb
+        _comb._remat_module = lambda fn: fn
     t0 = time.time()
     drv = build_driver(rest, a.resolution, a.n_steps)
     exp = drv.export_mpas_step()
-    if a.rad_chunk:
-        from legoesm.driver.mpas_diff_step import rebuild_physics
-        cfg = exp["phys_cfg"]
-        exp = rebuild_physics(exp, cfg._replace(radiation=cfg.radiation._replace(
-            rrtmgp=cfg.radiation.rrtmgp._replace(column_chunk_size=a.rad_chunk))))
-        print(f"RAD_CHUNK {a.rad_chunk}: physics rebuilt with the RRTMGP "
-              "column-chunked solve", flush=True)
     print(f"built+exported in {time.time() - t0:.1f} s; ncol="
           f"{exp['state'].T.data.shape}, physics every "
           f"{exp['phys_update_steps']} steps, radiation every "
@@ -913,6 +907,8 @@ def main(argv=None):
             raise SystemExit("--physics-variant norad: this cadence has no "
                              "no-radiation variant")
         _ = pfn(state0, mesh, sigma, phys_state=ps0, forcing=forcing0)
+        if not rec:
+            raise SystemExit("no physics module call was recorded")
         print("recorded modules: " + ", ".join(sorted(rec)), flush=True)
         only = {x.strip() for x in a.only.split(",") if x.strip()}
         for name, (fn, fa, fk) in sorted(rec.items()):
@@ -987,7 +983,7 @@ def main(argv=None):
                 grad_over_fwd=med_g / med_f, grad_finite=fin,
                 peak_gib=peak_gib())), flush=True)
             if a.check_windows and nb > 1:
-                window_check(exp, g, args, n, step0s[0], kw)
+                window_check(exp, g, args, n, step0s, kw)
     elif a.stage == "loops":
         # trace-only: which loops stack per-iteration residuals in the
         # gradient of one full-physics step (no compile, no device run)

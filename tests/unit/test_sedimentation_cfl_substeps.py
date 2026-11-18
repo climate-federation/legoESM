@@ -1012,7 +1012,7 @@ def test_gradient_stores_one_carry_per_chunk_not_every_substep():
     import production_ad_map as pam
     from legoesm.atmosphere.physics.microphysics.output import _SED_CHUNK
     q, rho, Vt, dz = _column(ncol=3, nlev=20)
-    n_max = 64
+    n_max = 96   # 12 chunks: not _SED_CHUNK, so the filter isolates the chunk loop
 
     def loss(qq):
         return jnp.sum(sedimentation_tendency(qq, rho, Vt, dz, dt=3000.0,

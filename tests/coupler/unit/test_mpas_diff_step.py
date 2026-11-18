@@ -469,23 +469,54 @@ def test_segment_refuses_a_malformed_clock(runs):
     c = clock_tables(exp, forcing, range(3))
     with pytest.raises(ValueError, match="unrolled loop builds"):
         mpas_segment(exp, s0, ps0, 3, forcing=forcing, clock=c)
-    with pytest.raises(ValueError, match="leading axis"):
+    with pytest.raises(ValueError, match=r"shape \(n_steps,\)"):
         mpas_segment(exp, s0, ps0, 4, forcing=forcing, schedule="uniform",
                      clock=c)
-    with pytest.raises(ValueError, match="leading axis"):
+    with pytest.raises(ValueError, match=r"shape \(n_steps,\)"):
         mpas_segment(exp, s0, ps0, 3, forcing=forcing, schedule="uniform",
                      clock={"day_of_year": c["day_of_year"]})
+    # an unvmapped window stack whose window count equals n_steps
+    with pytest.raises(ValueError, match=r"shape \(n_steps,\)"):
+        mpas_segment(exp, s0, ps0, 3, forcing=forcing, schedule="uniform",
+                     clock=window_clocks(exp, forcing, (0, 4, 8), 3))
 
 
-def test_rebuild_physics_with_the_exported_config_reproduces_the_segment(runs):
-    """Rebuilding the variants from the exported config is the export: the
-    segment is bitwise the same."""
-    from legoesm.driver.mpas_diff_step import rebuild_physics
+def _n_checkpoints(jaxpr):
+    """jax.checkpoint equations in ``jaxpr``, nested jaxprs included."""
+    n = 0
+    for eqn in jaxpr.eqns:
+        n += eqn.primitive.name in ("checkpoint", "remat", "remat2")
+        for v in eqn.params.values():
+            for sub in (v if isinstance(v, (tuple, list)) else (v,)):
+                inner = getattr(sub, "jaxpr", sub)
+                if hasattr(inner, "eqns"):
+                    n += _n_checkpoints(inner)
+    return n
+
+
+def test_physics_module_calls_are_rematerialised_and_forward_unchanged(
+        runs, monkeypatch):
+    """Each combined-physics module call is wrapped in jax.checkpoint (a trace
+    with the wrapper patched out has fewer checkpoint equations), and the
+    forward is bitwise the same with or without it.  The physics is a cached
+    jit traced once per process, so caches are cleared around each trace."""
+    import legoesm.atmosphere.physics.combined as comb
     _, exp = runs
-    eb = rebuild_physics(exp, exp["phys_cfg"])
-    assert eb["physics_fn"] is not exp["physics_fn"]
     s0, ps0 = exp["state"], exp["phys_state"]
-    ref, _ = mpas_segment(exp, s0, ps0, N)
-    out, _ = mpas_segment(eb, s0, ps0, N)
-    for a, b in zip(_fields(ref), _fields(out)):
+
+    def trace():
+        jax.clear_caches()
+        def seg(s):
+            return mpas_segment(exp, s, ps0, 1)[0]
+        return (_n_checkpoints(jax.make_jaxpr(seg)(s0).jaxpr),
+                jax.jit(seg)(s0))
+    try:
+        n_on, out_on = trace()
+        monkeypatch.setattr(comb, "_remat_module", lambda fn: fn)
+        n_off, out_off = trace()
+    finally:
+        monkeypatch.undo()
+        jax.clear_caches()
+    assert n_on > n_off, (n_on, n_off)
+    for a, b in zip(_fields(out_on), _fields(out_off)):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
