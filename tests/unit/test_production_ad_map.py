@@ -348,12 +348,6 @@ def test_parser_accepts_the_modmem_stage():
     assert pam.build_parser().parse_args(["--stage", "modmem"]).stage == "modmem"
 
 
-def test_parser_round_trips_rad_chunk():
-    assert pam.build_parser().parse_args(
-        ["--stage", "memory", "--rad-chunk", "214"]).rad_chunk == 214
-    assert pam.build_parser().parse_args(["--stage", "memory"]).rad_chunk == 0
-
-
 def test_nonfinite_census_names_windows_and_columns(capsys):
     import numpy as np
     g = {"T": np.zeros((3, 5, 2)), "q": np.zeros((3, 5))}
@@ -368,31 +362,33 @@ def test_nonfinite_census_names_windows_and_columns(capsys):
     assert "windows" not in capsys.readouterr().out
 
 
-def test_window_check_compares_each_window_alone(monkeypatch, capsys):
-    """Fake segment: x scaled by the window's clock; the batched gradient of
-    the summed loss is exact, a corrupted window shows a nonzero diff."""
+def test_window_check_compares_first_and_last_window_alone(monkeypatch, capsys):
+    """Fake segment: x scaled by (step0 + 1) * n_steps; the standalone run of
+    window b uses step0s[b] and no clock.  A correct batched gradient shows
+    zero difference, a corrupted last window a nonzero one; middle windows
+    are not run."""
     import json
     import numpy as np
     import legoesm.driver.mpas_diff_step as mds
 
-    def seg(exp, s, p, n, forcing, step0, clock, **kw):
-        return {k: v * clock["c"] * n for k, v in s.items()}, p
+    def seg(exp, s, p, n, forcing, step0, **kw):
+        assert "clock" not in kw
+        return {k: v * (step0 + 1) * n for k, v in s.items()}, p
     monkeypatch.setattr(mds, "mpas_segment", seg)
     monkeypatch.setattr(pam, "_with_x", lambda s, x: x)
     monkeypatch.setattr(pam, "_proj_loss",
                         lambda s: sum(jnp.sum(v ** 2) for v in s.values()))
     x = {"T": jnp.arange(6.0).reshape(3, 2)}
-    c = {"c": jnp.array([1.0, 2.0, 3.0])}
-    args = (x, x, jnp.zeros(3), jnp.zeros(3), c)
-    g = {"T": 2 * x["T"] * (c["c"][:, None] * 4) ** 2}
-    g["T"] = g["T"].at[2, 1].multiply(1.5)
-    pam.window_check(None, g, args, 4, 0, {})
+    step0s = [0, 1, 2]
+    fac = (jnp.asarray(step0s, float)[:, None] + 1) * 4
+    args = (x, x, jnp.zeros(3), jnp.zeros(3), jnp.zeros(3))
+    g = {"T": (2 * x["T"] * fac ** 2).at[2, 1].multiply(1.5)}
+    pam.window_check(None, g, args, 4, step0s, {})
     rows = [json.loads(line[len("WINDOW_CHECK "):])
             for line in capsys.readouterr().out.splitlines()]
-    assert [r["window"] for r in rows] == [0, 1, 2]
+    assert [(r["window"], r["step0"]) for r in rows] == [(0, 0), (2, 2)]
     assert rows[0]["rel_max_diff"]["T"] == 0.0
-    assert rows[1]["rel_max_diff"]["T"] == 0.0
-    np.testing.assert_allclose(rows[2]["rel_max_diff"]["T"], 0.5)
+    np.testing.assert_allclose(rows[1]["rel_max_diff"]["T"], 0.5)
     assert all(r["alone_finite"] for r in rows)
 
 
