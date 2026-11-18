@@ -497,6 +497,12 @@ def main(argv=None):
             x["frc"] = forcing_arrays(a, d, a.days, lat_rad, lon_rad)
     model.prime_step_caches(O.set_state_fields(state0, samples[0]["ic"]))
     base_cfg = model.config
+    import os
+    if os.environ.get("OWB_PCG_MAXITER"):   # PROBE ONLY: sea-level solver iteration cap
+        base_cfg = base_cfg.replace_flat(
+            barotropic_implicit_pcg_maxiter=int(os.environ["OWB_PCG_MAXITER"]))
+        print(f"[{label}] PROBE: barotropic_implicit_pcg_maxiter = "
+              f"{base_cfg.barotropic.barotropic_implicit_pcg_maxiter}", flush=True)
     step = make_step(model, a.dt)
     from legoesm.coupler.config import CouplerConfig
     from legoesm.training.era5_ocean_forcing import surface_forcing
