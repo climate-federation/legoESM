@@ -4656,10 +4656,10 @@ def si3_o2_scalar_initial_state(
             "O2 requires ORCA2_SAS_ICE namelist initialization "
             "(ln_iceini=True, nn_iceini_file=0)"
         )
-    if not cfg.ln_teos10:
-        raise ValueError("O2 ORCA2_SAS_ICE requires ln_teos10=True")
+    if type(cfg.ln_teos10) is not bool:
+        raise TypeError("O2 ln_teos10 selector must be a static bool")
     if cfg.ln_ice_embd:
-        raise ValueError("O2 owns only ORCA2_SAS_ICE's levitating-ice branch")
+        raise ValueError("O2 owns only the ORCA2 levitating-ice branch")
     if cfg.ln_rstart:
         raise ValueError("O2 ice_istate is not entered on a restart")
     nn_hls = int(cfg.nn_hls)

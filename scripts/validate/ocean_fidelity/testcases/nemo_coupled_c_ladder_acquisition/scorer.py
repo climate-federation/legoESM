@@ -9,6 +9,7 @@ import re
 import struct
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.core.nemo_namelist import parse_namelist
@@ -44,7 +45,6 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_composition_scorer i
 
 MAGIC = b"CLAD0001"
 UNSCORABLE = "NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP"
-C2_READY = "READY_D225_D226_COMPILED_OBSERVATIONS"
 ADMITTED_ICE_DIMENSIONS = (5, 10, 5)
 C2_VERDICT_KINDS = (3, 4, 5, 6, 15, 16, 19, 20, 34)
 C2_REPORT_ONLY_KINDS = (1, 2)
@@ -263,16 +263,24 @@ def _d225_owned_arrays(got, want, mask: np.ndarray):
     got = np.asarray(got)
     want = np.asarray(want)
     mask = np.asarray(mask, dtype=bool)
-    if got.shape[:2] == mask.shape:
-        if min(mask.shape) <= 4:
+    mask_rank = mask.ndim
+    if got.shape[:mask_rank] == mask.shape:
+        if min(mask.shape[:2]) <= 4:
             raise ValueError(f"D225 full shard is too small for two-cell halos: {mask.shape}")
         owned = (slice(2, -2), slice(2, -2)) + (slice(None),) * (got.ndim - 2)
-        return got[owned], want[owned], mask[2:-2, 2:-2], (2, 2)
-    if mask.shape[0] >= 5 and mask.shape[1] >= 5 and got.shape[:2] == (
-        mask.shape[0] - 4,
-        mask.shape[1] - 4,
+        mask_owned = (slice(2, -2), slice(2, -2)) + (slice(None),) * (mask_rank - 2)
+        return got[owned], want[owned], mask[mask_owned], (2, 2)
+    if (
+        got.shape[0] == mask.shape[0] + 4
+        and got.shape[1] == mask.shape[1] + 4
+        and got.shape[2:mask_rank] == mask.shape[2:]
     ):
-        return got, want, mask[2:-2, 2:-2], (0, 0)
+        owned = (slice(2, -2), slice(2, -2)) + (slice(None),) * (got.ndim - 2)
+        return got[owned], want[owned], mask, (2, 2)
+    owned_mask_shape = (mask.shape[0] - 4, mask.shape[1] - 4, *mask.shape[2:])
+    if min(mask.shape[:2]) >= 5 and got.shape[:mask_rank] == owned_mask_shape:
+        mask_owned = (slice(2, -2), slice(2, -2)) + (slice(None),) * (mask_rank - 2)
+        return got, want, mask[mask_owned], (0, 0)
     raise ValueError(f"D225 mask {mask.shape} cannot cover field {got.shape}")
 
 
@@ -285,7 +293,8 @@ def _d225_field(got, want, wet_mask: np.ndarray) -> dict:
     got, want, wet_base, offset = _d225_owned_arrays(got, want, wet_mask)
     got_bits, want_bits = _bit_words(got), _bit_words(want)
     wet = np.broadcast_to(
-        wet_base.reshape(wet_base.shape + (1,) * (got.ndim - 2)), got.shape
+        wet_base.reshape(wet_base.shape + (1,) * (got.ndim - wet_base.ndim)),
+        got.shape,
     )
     different = got_bits != want_bits
     sign_zero = different & (got == 0.0) & (want == 0.0)
@@ -352,7 +361,11 @@ def score_c2_observations(
     counts: dict[int, dict] = {}
     report_only: dict[int, dict] = {}
     first_failure = None
-    for kind, kt, rank in sorted(required, key=lambda key: (key[1], key[0], key[2])):
+    boundary_order = (1, 2, 3, 15, 16, 19, 20, 34, 4, 5, 6)
+    order_index = {kind: index for index, kind in enumerate(boundary_order)}
+    for kind, kt, rank in sorted(
+        required, key=lambda key: (key[1], order_index[key[0]], key[2])
+    ):
         got_fields = candidate[(kind, kt, rank)]
         want_fields = expected[(kind, kt, rank)]
         if set(got_fields) != set(want_fields):
@@ -373,7 +386,13 @@ def score_c2_observations(
                         f"C2 integer metadata differs kind={kind} field={field} kt={kt} rank={rank}"
                     )
                 continue
-            mask_name = "umask" if field == "uu" else "vmask" if field == "vv" else "tmask"
+            if field in {"uu", "ssu", "utauU", "uu_kbb", "u_ice", "u_oce"}:
+                staggering = "umask"
+            elif field in {"vv", "ssv", "vtauV", "vv_kbb", "v_ice", "v_oce"}:
+                staggering = "vmask"
+            else:
+                staggering = "tmask"
+            mask_name = f"{staggering}_3d" if got.ndim >= 3 and field in {"ts", "uu", "vv"} else staggering
             row = _d225_field(got, want_fields[field], mask_names[mask_name] > 0.5)
             _merge_d225_counts(kind_total, row)
             if (
@@ -428,10 +447,18 @@ def load_c2_expected(evidence: Path) -> tuple[dict, dict]:
                 )
                 expected[(kind, kt, rank)] = record["fields"]
                 if kind == 4:
+                    import netCDF4
+
+                    with netCDF4.Dataset(run / f"mesh_mask_{rank:04d}.nc") as dataset:
+                        mask_3d = {
+                            f"{name}_3d": np.asarray(dataset.variables[name][0], dtype=np.float64).transpose(2, 1, 0)
+                            for name in ("tmask", "umask", "vmask")
+                        }
                     masks[(kt, rank)] = {
                         name: record["fields"][name]
                         for name in ("tmask", "umask", "vmask")
                     }
+                    masks[(kt, rank)].update(mask_3d)
             for kind in (15, 16, 19, 20):
                 if kind in (15, 16) and kt % 2 == 0:
                     continue
@@ -457,6 +484,359 @@ def load_c2_expected(evidence: Path) -> tuple[dict, dict]:
 def score_c2(evidence: Path, candidate: dict[tuple[int, int, int], dict]) -> dict:
     """Score observations emitted by one externally jitted coupled-pair run."""
     expected, masks = load_c2_expected(evidence)
+    return score_c2_observations(candidate, expected, masks)
+
+
+def _c2_cold_start(run: Path):
+    """Build REC_C2 from the deck's K0 ocean and production ice_istate."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    from legoesm.ice.dynamics import SI3CGridAEVPState
+    from legoesm.ice.si3_finalize import SI3UpdateFluxOutputs
+    from legoesm.ice.si3_o17 import SI3O17StepState
+    from legoesm.ice.si3_orca2_state import (
+        SI3O2InitConfig,
+        si3_dom_uniq_t_orca2,
+        si3_o2_scalar_initial_state,
+        si3_update_snwice_mass,
+        si3_var_agg,
+        si3_var_glo2eqv,
+    )
+    from legoesm.ocean import bulk_flux_omip as bulk
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.forcing.nemo_surface import NemoSurfaceMeans
+    from legoesm.ocean.freshwater import NemoRunoffSurface
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round340_score_composed_card as r340_score,
+    )
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round340_standalone_gate as r340,
+    )
+    from scripts.validate.ocean_fidelity.testcases import (
+        nemo_si3_o17_composition_scorer as o17_score,
+    )
+    from scripts.validate.ocean_fidelity.testcases.nemo_si3_o2_orca2_sas_gate import (
+        _load_orca2_sas_ice_bundle_inputs,
+    )
+
+    k0 = bulk.build_nemo_orca2_k0_ocean_card(run)
+    controls = r340.build_real_composed_inputs(
+        k0, run, r340_score.DEFAULT_CORE_MANIFEST, r340_score.DEFAULT_ICE_COVER
+    )
+    receipt = json.loads((run / "C_DECK_RECEIPT.json").read_text())
+    master = Path(receipt["sas_ice_reference"]).parents[1]
+    master_run = master / "record_100step"
+    ice_card = o17_score.card_for(master_run)._replace(ln_drgice_imp=True)
+    ice_dt = 2.0 * float(k0.ocean.dt_s)
+    ice_card = ice_card._replace(
+        state=ice_card.state._replace(nn_fsbc=2, rDt_ice=ice_dt),
+        aevp=ice_card.aevp._replace(dt_s=ice_dt),
+        redistribution=ice_card.redistribution._replace(rdt_ice=ice_dt),
+        correction=ice_card.correction._replace(rdt_ice=ice_dt),
+    )
+    index = o17_score.record_paths(master_run / "o17_master_records")
+    records = o17_score.load_step(index[(1, 0)], 1, 0)
+    o17 = o17_score.live_forcing(records, ice_card)
+    o17 = o17._replace(
+        stress=o17.stress._replace(tmask_k1=o17.aevp_forcing.tmask_t)
+    )
+
+    ocean_state = k0.ocean.recipe.initial_state
+    h = int(ice_card.state.nn_hls)
+    bundle = _load_orca2_sas_ice_bundle_inputs()
+    if bundle is None:
+        raise ValueError("C2 cold start requires the admitted ORCA2 input bundle")
+    sst = bulk._orca2_si3_full_field(
+        ocean_state.T.data[..., 0], ice_card.fold, "T", h
+    )
+    sss = bulk._orca2_si3_full_field(
+        ocean_state.S.data[..., 0], ice_card.fold, "T", h
+    )
+    tmask = jnp.asarray(bundle["tmask"])
+    smask0_i = si3_dom_uniq_t_orca2(nn_hls=h)
+    ssh0 = jnp.zeros_like(tmask)
+    o2 = si3_o2_scalar_initial_state(
+        sst_m=sst,
+        sss_m=sss,
+        tmask=tmask,
+        ff_t=jnp.asarray(bundle["ff_t"]),
+        gphit=jnp.asarray(bundle["gphit"]),
+        e1e2t=jnp.asarray(bundle["e1e2t"]),
+        ssmask=tmask,
+        smask0_i=smask0_i,
+        ssh_before_kbb=ssh0,
+        ssh_before_kmm=ssh0,
+        config=SI3O2InitConfig.for_orca2_omip_l4(nn_hls=h),
+        state_config=ice_card.state,
+    )
+    o3 = o2.o3
+    zero3 = jnp.zeros_like(o3.a_i)
+    eqv = si3_var_glo2eqv(
+        v_i=o3.v_i, v_s=o3.v_s, sv_i=o3.sv_i, a_i=o3.a_i,
+        oa_i=zero3, a_ip=o3.a_ip, v_ip=o3.v_ip, v_il=o3.v_il,
+        e_s=o3.e_s, e_i=o3.e_i, szv_i=o3.szv_i, kn=1,
+        hi_max_top=ice_card.state.rn_himax, sss_m=sss, config=ice_card.state,
+    )
+    agg = si3_var_agg(
+        v_i=o3.v_i, v_s=eqv.v_s, sv_i=o3.sv_i, a_i=eqv.a_i,
+        oa_i=zero3, a_ip=o3.a_ip, v_ip=o3.v_ip, v_il=o3.v_il,
+        t_su=o3.t_su, t_si=zero3, e_s=o3.e_s, e_i=o3.e_i,
+        szv_i=o3.szv_i, a_ip_eff=eqv.a_ip_eff, t_i=eqv.t_i,
+        t_s=eqv.t_s, kn=1, config=ice_card.state,
+    )
+    mass, mass_b, _ = si3_update_snwice_mass(
+        vt_i=agg.vt_i, vt_s=agg.vt_s, vt_ip=agg.vt_ip, vt_il=agg.vt_il,
+        snwice_mass_prev=jnp.zeros_like(agg.vt_i), tmask=tmask,
+        config=ice_card.state, is_init=True,
+    )
+    ice = SI3State.zeros(*tmask.shape, config=ice_card.state)._replace(
+        a_i=eqv.a_i, v_i=o3.v_i, v_s=eqv.v_s, sv_i=o3.sv_i,
+        t_su=o3.t_su, oa_i=zero3, a_ip=o3.a_ip, v_ip=o3.v_ip,
+        v_il=o3.v_il, e_s=o3.e_s, e_i=o3.e_i, szv_i=o3.szv_i,
+        t1_ice=o3.t1_ice, t_si=zero3, equivalent=eqv, aggregated=agg,
+        snwice_mass=mass, snwice_mass_b=mass_b,
+    )
+    zero2 = jnp.zeros_like(tmask)
+    ice_entry = SI3O17StepState(
+        ice, SI3CGridAEVPState(ice.u_ice, ice.v_ice, zero2, zero2, zero2)
+    )
+    eta = o2.ssh_kmm[h:-h, h:-h].T
+    ocean_state = ocean_state._replace(eta=ocean_state.eta.replace(data=eta))
+
+    config = k0.ocean.recipe.model_config
+    vmix = config.physics.vertical_mixing
+    physics = config.physics._replace(
+        vertical_mixing=vmix._replace(tke=vmix.tke._replace(nemo_mxlice=2))
+    )
+    config = config._replace(
+        physics=physics, implicit_ice_ocean_top_drag=True
+    )
+    recipe = k0.ocean.recipe._replace(
+        model_config=config, initial_state=ocean_state
+    )
+    ocean_card = k0.ocean._replace(recipe=recipe)
+    model = LatLonCGridOceanModel(
+        recipe.grid, recipe.z_coord, config, iwm_forcing=recipe.iwm_forcing
+    )
+    s2 = controls[0]["s2"]
+    mask = ocean_state.land_mask.data
+    unique = smask0_i[h:-h, h:-h].T
+    card = bulk.NemoORCA2SI3Card(
+        ocean_card, ice_card, s2.stress_lbc,
+        recipe.z_coord.nemo_e1e2t, unique, s2.runoff_mouth_mask, mask,
+        s2.tmask_east, s2.tmask_north, s2.umask, s2.vmask,
+        s2.runoff_factor, s2.reference_density, s2.restoring_mm_per_day,
+        s2.restoring_bound_mm_per_day, s2.seconds_per_day, jnp.asarray(365.0),
+        s2.salinity_floor, s2.heat_capacity, 2920, 2,
+        jnp.asarray(k0.albedo), jnp.asarray(k0.precip_factor),
+        jnp.asarray(k0.evap_factor), k0.nb_iter,
+    )
+    forcing = tuple(
+        bulk.NemoORCA2SI3Forcing(
+            row["s0f"], o17, row["chl"], row["geothermal_heat_flux_mwm2"]
+        )
+        for row in controls[:2]
+    )
+    owned = ocean_state.eta.data.shape
+    full = tmask.shape
+    ice_owned = (full[0] - 2 * h, full[1] - 2 * h)
+    fluxes = SI3UpdateFluxOutputs(*(
+        jnp.zeros(
+            full if name in ("fr_i", "snwice_mass", "snwice_mass_b", "snwice_fmass")
+            else ice_owned,
+            dtype=jnp.float64,
+        )
+        for name in SI3UpdateFluxOutputs._fields
+    ))
+    stress_inputs = o17.stress
+    stress = SI3StressOutputs(
+        jnp.zeros_like(stress_inputs.utau), jnp.zeros_like(stress_inputs.vtau),
+        jnp.zeros((full[0] - 2 * h, full[1] - 2 * h)),
+        jnp.zeros_like(stress_inputs.tmod_io),
+        jnp.zeros((full[0] - 2 * h, full[1] - 2 * h)),
+        jnp.zeros((full[0] - 2 * h, full[1] - 2 * h)), None,
+    )
+    zero_yx = jnp.zeros(owned, dtype=jnp.float64)
+    carry = bulk.nemo_orca2_si3_cold_start(
+        ocean=ocean_state, ice=ice_entry,
+        means=NemoSurfaceMeans(
+            zero_yx, zero_yx, zero_yx, zero_yx, zero_yx, zero_yx,
+            jnp.ones_like(zero_yx),
+        ),
+        stress=stress, fluxes=fluxes,
+        runoff=NemoRunoffSurface(zero_yx, zero_yx, zero_yx),
+        restoring_volume_flux=zero_yx, restoring_heat_flux=zero_yx,
+        restoring_coefficient=jnp.ones_like(zero_yx),
+        rn_fwb0=jnp.asarray(0.0), kt=1,
+    )
+    sponge = (controls[0]["sponge"], controls[1]["sponge"])
+    return carry, forcing, sponge, card, model
+
+
+def _c2_ocean_fields(state) -> dict[str, np.ndarray]:
+    ts = jnp.stack((state.T.data, state.S.data), axis=-1)
+    return {
+        "ts": np.asarray(ts.transpose(1, 0, 2, 3)),
+        "uu": np.asarray(state.u.data[:, 1:, :].transpose(1, 0, 2)),
+        "vv": np.asarray(state.v.data[1:, :, :].transpose(1, 0, 2)),
+        "ssh": np.asarray(state.eta.data.T),
+    }
+
+
+def _c2_trace_fields(trace, card, kind: int) -> dict[str, object]:
+    """Pure observation adapter: names/indexing only, no physical arithmetic."""
+    if kind == 1:
+        entry = trace.ssm_entry
+        out = {
+            name: int(getattr(entry, name))
+            for name, _ in _KIND1_FLAGS
+        }
+        for name in (
+            "temperature_now", "salinity_now", "u_before", "v_before",
+            "ssh_now", "e3t_reference", "r3t_now", "surface_mask",
+            "shortwave_fraction_top",
+        ):
+            out[name] = np.asarray(getattr(entry, name)).T
+        out.update({
+            f"{name}_prior": np.asarray(getattr(entry.prior, name)).T
+            for name in NemoSurfaceMeans._fields
+        })
+        return out
+    if kind in (2, 3):
+        return {
+            name: np.asarray(getattr(trace.means, name)).T
+            for name in NemoSurfaceMeans._fields
+        }
+    if kind == 4:
+        tail, flux = trace.surface, trace.ice_fluxes
+        return {
+            "utau": np.asarray(tail.utau).T,
+            "vtau": np.asarray(tail.vtau).T,
+            "taum": np.asarray(tail.taum).T,
+            "utauU": np.asarray(tail.utau_u).T,
+            "vtauV": np.asarray(tail.vtau_v).T,
+            "qsr": np.asarray(tail.qsr).T,
+            "qns": np.asarray(tail.qns).T,
+            "emp": np.asarray(tail.emp).T,
+            "sfx": np.asarray(tail.sfx).T,
+            "fr_i": np.asarray(flux.fr_i),
+            "fwfice": np.asarray(flux.fwfice),
+            "tmask": np.asarray(card.surface_mask).T,
+            "umask": np.asarray(card.umask).T,
+            "vmask": np.asarray(card.vmask).T,
+        }
+    if kind == 5:
+        return _c2_ocean_fields(trace.ocean_entry)
+    if kind == 6:
+        return _c2_ocean_fields(trace.ocean_exit)
+    if trace.ice_core is None and kind in (15, 16):
+        raise ValueError(f"kind {kind} is unavailable on an even ocean step")
+    if kind == 15:
+        from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer import (
+            _state_score_fields,
+        )
+
+        core = trace.ice_core
+        h = int(card.ice.state.nn_hls)
+        out = dict(_state_score_fields(core.final.state, interior_halo=h))
+        out.update({name: getattr(core.final.fluxes, name) for name in core.final.fluxes._fields})
+        out.update({name: getattr(core.update_forcing, name) for name in core.update_forcing._fields})
+        out["tmask_k1"] = core.update_forcing.tmask
+        out["snwice_mass"] = core.final.state.snwice_mass
+        out["snwice_mass_b"] = core.final.state.snwice_mass_b
+        return out
+    if kind == 16:
+        return {
+            name: getattr(trace.ice_core.final.outputs, name)
+            for name in trace.ice_core.final.outputs._fields
+        }
+    if kind == 19:
+        return {
+            name: getattr(trace.stress_inputs, name)
+            for name in SI3StressInputs._fields
+        }
+    if kind == 20:
+        return {
+            name: getattr(trace.stress, name)
+            for name in ("utau", "vtau", "taum")
+        }
+    if kind == 34:
+        return {
+            name: getattr(trace.stress, name)
+            for name in ("tmod_io", "utau_oce", "vtau_oce")
+        }
+    raise ValueError(f"unsupported C2 observation kind {kind}")
+
+
+def _c2_shard(value, shape: tuple[int, ...], rank: int) -> np.ndarray:
+    """Index a global ORCA2 observation into one two-rank D225 shard."""
+    value = np.asarray(value, dtype=np.float64)
+    # NEMO stores jpk=31 including its all-zero bottom dummy level; legoESM's
+    # prognostic state stores the 30 live levels.  This is record indexing, not
+    # a physical transformation.
+    if (
+        len(shape) >= 3
+        and value.ndim == len(shape)
+        and value.shape[2] + 1 == shape[2]
+    ):
+        value = np.concatenate(
+            (value, np.zeros(value.shape[:2] + (1,) + value.shape[3:], dtype=value.dtype)),
+            axis=2,
+        )
+    if value.shape == shape:
+        return value
+    tail = shape[2:]
+    if value.shape[:2] == (184, 152):
+        owned = value[2:-2, 2:-2]
+    elif value.shape[:2] == (180, 148):
+        owned = value
+    else:
+        raise ValueError(f"cannot shard global C2 field {value.shape} as {shape}")
+    owned = owned[rank * 90:(rank + 1) * 90]
+    if shape[:2] == (90, 148) and owned.shape == shape:
+        return owned
+    if shape[:2] != (94, 152) or owned.shape != (90, 148, *tail):
+        raise ValueError(f"C2 shard shape mismatch: global={value.shape}, target={shape}")
+    result = np.zeros(shape, dtype=np.float64)
+    result[2:-2, 2:-2] = owned
+    return result
+
+
+def run_c2_compiled(evidence: Path) -> dict:
+    """Run the two-step cold C2 trajectory once under ``jax.jit`` and score it."""
+    from legoesm.ocean import bulk_flux_omip as bulk
+
+    expected, masks = load_c2_expected(evidence)
+    carry, forcing, sponge, card, model = _c2_cold_start(evidence / "REC_C2")
+
+    @jax.jit
+    def compiled_pair(entry):
+        odd, odd_trace = bulk.nemo_orca2_si3_coupled_step(
+            entry, forcing[0], card, model=model, sponge=sponge[0]
+        )
+        even, even_trace = bulk.nemo_orca2_si3_coupled_step(
+            odd, forcing[1], card, model=model, sponge=sponge[1]
+        )
+        return even, (odd_trace, even_trace)
+
+    final, traces = compiled_pair(carry)
+    jax.block_until_ready(final)
+    candidate: dict[tuple[int, int, int], dict[str, object]] = {}
+    for kt, trace in enumerate(traces, start=1):
+        for kind in (*C2_REPORT_ONLY_KINDS, *C2_VERDICT_KINDS):
+            if kind in (15, 16) and kt % 2 == 0:
+                continue
+            global_fields = _c2_trace_fields(trace, card, kind)
+            for rank in (0, 1):
+                want = expected[(kind, kt, rank)]
+                fields = {}
+                for name, reference in want.items():
+                    if np.asarray(reference).dtype.kind != "f":
+                        fields[name] = global_fields[name]
+                    else:
+                        fields[name] = _c2_shard(
+                            global_fields[name], np.asarray(reference).shape, rank
+                        )
+                candidate[(kind, kt, rank)] = fields
     return score_c2_observations(candidate, expected, masks)
 
 
@@ -737,7 +1117,7 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
 
 
 def status_report() -> dict:
-    return {"C2": C2_READY, "C3": UNSCORABLE, "C4": UNSCORABLE}
+    return {"C3": UNSCORABLE, "C4": UNSCORABLE}
 
 
 def self_test(plant: str | None, scratch: Path) -> dict:
@@ -808,6 +1188,7 @@ def main() -> int:
             plant=args.plant if args.plant == "numeric" else None,
         ),
         "C1": score_c1(args.evidence, plant=args.plant),
+        "C2": run_c2_compiled(args.evidence),
         **status_report(),
     }
     print(json.dumps(report, indent=2, sort_keys=True))

@@ -17559,6 +17559,77 @@ _merge_resolution_repin(
     ],
 )
 
+# Coupled-step integration re-pins legacy semantic anchors after the new
+# source-ordered ORCA2+SI3 recipe.  Citation labels remain historical receipt
+# coordinates; these live ranges are checked symbol-by-symbol by audit_map.
+for _citation, _lines in (
+    ("packages/ice/legoesm/ice/si3_orca2_state.py:4823-4830", "4874-4881"),
+    ("packages/ice/legoesm/ice/si3_orca2_state.py:4804-4811", "4874-4881"),
+    ("packages/ice/legoesm/ice/si3_o17.py:395-398", "427-433"),
+    ("packages/ice/legoesm/ice/si3_o17.py:484-488", "407-411"),
+    ("packages/ice/legoesm/ice/si3_o17.py:1117-1124", "1179-1186"),
+    ("packages/ice/legoesm/ice/si3_o17.py:1125-1130", "1187-1192"),
+    ("packages/ice/legoesm/ice/si3_o17.py:1131-1136", "1193-1247"),
+    ("packages/ice/legoesm/ice/si3_o17.py:1138-1152", "1273-1287"),
+    ("packages/ice/legoesm/ice/si3_o17.py:559-568", "1242-1251"),
+    ("packages/ice/legoesm/ice/si3_o17.py:587-589", "624-626"),
+    ("packages/ice/legoesm/ice/si3_o17.py:610-619", "647-656"),
+    ("packages/ice/legoesm/ice/si3_o17.py:744-760", "781-797"),
+    ("packages/ice/legoesm/ice/si3_o17.py:761-781", "798-818"),
+    ("packages/ice/legoesm/ice/si3_o17.py:164-291", "188-315"),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1030-1114", "1609-1693"),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1132-1153", "1702-1723"),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1168-1171", "1738-1741"),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1176-1219", "1746-1789"),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1320-1581", "1890-2151"),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1401-1473", "1971-2043"),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1402-1474", "1972-2044"),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:901-974", "912-985"),
+    ("packages/ocean/legoesm/ocean/forcing/nemo_surface.py:143-187", "271-315"),
+    ("packages/ocean/legoesm/ocean/forcing/nemo_surface.py:27-34", "26-33"),
+    ("packages/ocean/legoesm/ocean/forcing/nemo_surface.py:348-358", "542-552"),
+    ("packages/ocean/legoesm/ocean/forcing/nemo_surface.py:406-414", "600-608"),
+):
+    _merge_resolution_repin(_citation, _lines)
+
+for _citation, _lines, _anchors in (
+    ("packages/ice/legoesm/ice/si3_orca2_state.py:4823-4830", "4882-4890",
+     ["new_state = si3_o1_step(", "    return new_state, o2_istate"]),
+    ("packages/ice/legoesm/ice/si3_orca2_state.py:4804-4811", "4882-4890",
+     ["new_state = si3_o1_step(", "    return new_state, o2_istate"]),
+    ("packages/ice/legoesm/ice/si3_o17.py:1117-1124", "1179-1185",
+     ["    final = si3_o16_step(", "        surface_config=card.surface,"]),
+    ("packages/ice/legoesm/ice/si3_o17.py:1131-1136", "1193-1272",
+     ["stress_inputs = forcing.stress._replace(",
+      "    finalize = SI3FinalizeResponse(core.correction, core.final, stress)"]),
+    ("packages/ice/legoesm/ice/si3_o17.py:1138-1152", "1273-1286",
+     ["    return core.state, SI3O17Trace(", "        finalize,"]),
+    ("packages/ice/legoesm/ice/si3_o17.py:744-760", "781-794",
+     ["    eqv = si3_var_glo2eqv(", "        hi_max_top=state.bounds.hi_max[-1],"]),
+    ("packages/ice/legoesm/ice/si3_o17.py:164-291", "188-314",
+     ["def build_orca2_sas_ice_o17_card(*, surface: SI3SurfaceConfig, thermo_namelist: dict) -> SI3O17Card:",
+      "        core2_precipitation_closure=False,"]),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1030-1114", "1609-1684",
+     ["def nemo_orca2_k0_ocean_step(",
+      "        surface=surface, ocean=stepped, next_s0=next_s0, next_s2=next_s2)"]),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1132-1153", "1702-1724",
+     ["temperature = jnp.asarray(temperature, dtype=jnp.float64)",
+      "    ice_if = ice_if._replace(ts_surface=temperature[..., 0])"]),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1176-1219", "1746-1788",
+     ["def _nemo_orca2_k0_next_fraqsr_compiled(",
+      "        shortwave_penetration,"]),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:1402-1474", "1972-2043",
+     ["if not update:", "                ice_if=retained_iif,"]),
+    ("packages/ocean/legoesm/ocean/bulk_flux_omip.py:901-974", "912-985",
+     ["next_s2: NemoS2Inputs", "    _dynamic_fields = __slots__[:-1]"]),
+    ("packages/ocean/legoesm/ocean/forcing/nemo_surface.py:143-187", "271-314",
+     ["first_from_rest = jnp.logical_and(",
+      "        *(_sr(jnp.where(divide, _sr(value * zcoef), value)) for value in accumulated)"]),
+    ("packages/ocean/legoesm/ocean/forcing/nemo_surface.py:348-358", "542-551",
+     ["utau_u, vtau_v = nemo_t_stress_to_uv(", "        vmask,"]),
+):
+    _merge_resolution_repin(_citation, _lines, _anchors)
+
 def audit_map() -> list[dict]:
     """EVERY entry in the map must resolve cleanly, cited this round or not.
 
