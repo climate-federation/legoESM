@@ -1,4 +1,9 @@
-"""CATKE core vs the ORIGINAL reference code, Oceananigans v0.116.1 CATKEVerticalDiffusivity.
+"""CATKE closure KERNEL vs the ORIGINAL reference code, Oceananigans v0.116.1 CATKEVerticalDiffusivity.
+
+Scope: kernel parity with oracle-fed state only.  It does NOT certify column parity: the port carries
+e on interfaces and Oceananigans at centres; a one-step column comparison (report-only, in
+oracle_audit/catke_carbonate_oracle) differs by a median 0.3-0.8 % in κc on the 128 m fixtures and
+37 % on the 24 m column.
 
 ``oracle_fixtures/catke_oceananigans_v0_116_1.npz`` holds Oceananigans' own face/centre inputs and
 outputs on six single-column fixtures (free convection, wind, stable heating, entrainment, quiescent,
@@ -40,6 +45,7 @@ def _faces(n):
 
 
 def test_default_bottom_coefficient_is_reference():
+    # Tripwire on the default value only; the oracle gates below carry the behaviour.
     assert _CFG.c_bottom_shear == 0.967
 
 

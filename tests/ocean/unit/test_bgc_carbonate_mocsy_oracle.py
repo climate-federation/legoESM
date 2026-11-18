@@ -6,9 +6,10 @@ built by a Fortran driver with optB='u74', optK1K2='l', optKf='dg', optGAS='Pzer
 silicate = phosphate = 0 (provenance string stored in the fixture).
 
 - K0, K1, K2, K_B and B_T must match mocsy to rel 1e-12.
-- The Follows (2006) solver omits the water, phosphate and silicate alkalinity terms and the
-  fugacity correction (module docstring).  Its pCO2 departure from mocsy's pCO2 and fCO2 is a
-  KNOWN DIFFERENCE pinned per case (rel 1e-6, abs floor 1e-12): the test fails if the port drifts.
+- The Follows (2006) solver omits the water (and phosphate/silicate) alkalinity terms and the
+  fugacity correction (module docstring).  With phosphate = silicate = 0 here, its pCO2 departure
+  from mocsy (-0.9 % to -4.8 %) comes from the water alkalinity and fugacity terms only.  That open
+  deficit is pinned per case as a change detector (rel 1e-6, abs floor 1e-12), not accepted as correct.
 """
 from pathlib import Path
 
