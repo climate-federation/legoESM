@@ -504,18 +504,23 @@ def _boundary_layer_depth(
     # the unresolved-shear variance (LMD94 / CVMix); convective layers (N^2 < 0)
     # give V_t^2 = 0 there.  (Floored at 1e-30 for an AD-safe gradient.)
     N_full = jnp.sqrt(jnp.maximum(N2_full, 1e-30))  # [1/s]
+    if cfg.bld_structure == "cvmix":
+        # MOM6 KPP_compute_BLD (Vt_layer = 1): w_s at sigma = 1 with each
+        # trial depth as the OBL depth, not at d / h_est.
+        _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, z_depth, cfg,
+                                         ice_frac=ice_frac)
+        V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)
+        V_t2 = _cvmix_min_vt2(V_t2, cfg)
+        Ri_b = _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g)
+        h = _cvmix_first_crossing_depth(Ri_b, z_depth, cfg)
+        return jnp.maximum(h, dz_actual[..., 0])
+
     max_depth = z_depth[..., -1]
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
     _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg,
                                      ice_frac=ice_frac)
     V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)
-
-    if cfg.bld_structure == "cvmix":
-        V_t2 = _cvmix_min_vt2(V_t2, cfg)
-        Ri_b = _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g)
-        h = _cvmix_first_crossing_depth(Ri_b, z_depth, cfg)
-        return jnp.maximum(h, dz_actual[..., 0])
 
     # Bulk Richardson number
     Ri_b = (g * delta_rho * z_depth) / (

@@ -210,6 +210,43 @@ def test_still_column_fp32_gradients_finite():
         set_policy(prev)
 
 
+# CVMix compute_turbulent_scales(sigma=1, OBL_depth=d) -- MOM6 KPP_compute_BLD's
+# V_t^2 velocity scale (Vt_layer = 1) -- u* 0.005, at centre depths 0.5..50 m.
+_WS_DEPTHS = [0.5, 1.5, 3.0, 6.0, 12.0, 25.0, 50.0]
+_WS_CVMIX = {  # port B_f (positive = destabilising) -> CVMix w_s
+    1e-7: [2.24142811617950369e-03, 2.65932322217514623e-03, 3.18496467798310172e-03,
+           4.03583944180142123e-03, 5.34565243913219697e-03, 7.42967024840268317e-03,
+           1.01176899184491267e-02],
+    -1e-8: [1.98412698412698445e-03, 1.95312500000000000e-03, 1.90839694656488542e-03,
+            1.82481751824817512e-03, 1.67785234899328877e-03, 1.42857142857142879e-03,
+            1.11111111111111111e-03],
+}
+
+
+@pytest.mark.parametrize("B_f", [1e-7, -1e-8])
+def test_vt2_velocity_scale_is_mom6_sigma_one(monkeypatch, B_f):
+    """cvmix mode feeds V_t^2 the w_s MOM6 uses (sigma = 1 at each trial depth),
+    not w_s at d / column bottom.  Tolerance: LMD94 rounded constants (w_s <= 1.2e-4)."""
+    seen = []
+    orig = K._kpp_unresolved_shear_variance
+
+    def spy(N, d, w_s, cfg, eps):
+        seen.append(np.asarray(w_s))
+        return orig(N, d, w_s, cfg, eps)
+
+    monkeypatch.setattr(K, "_kpp_unresolved_shear_variance", spy)
+    dz = np.array([1.0, 1.0, 2.0, 4.0, 8.0, 18.0, 32.0])
+    np.testing.assert_allclose(_centres(dz), _WS_DEPTHS, rtol=0, atol=1e-12)
+    zc = create_z_star_from_thicknesses(dz)
+    T = jnp.asarray(20.0 - 0.01 * _centres(dz))[None]
+    S = jnp.full((1, dz.size), 35.0)
+    z0 = jnp.zeros_like(T)
+    K._boundary_layer_depth(wright_eos(T, S, z0), T, S, z0, z0, zc, jnp.ones(1),
+                            jnp.array([0.005]), jnp.array([B_f]), CFG)
+    assert len(seen) == 1
+    np.testing.assert_allclose(seen[0][0], _WS_CVMIX[B_f], rtol=2e-4)
+
+
 def test_bulk_richardson_matches_cvmix():
     """CVMix compute_bulk_Richardson (N=0 -> V_t^2 = minVtsqr 1e-10)."""
     zc = np.array([-0.5, -1.5, -2.5])
