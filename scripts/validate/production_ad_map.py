@@ -685,34 +685,53 @@ def time_compiled(fn, args, repeats):
     return t_c, t_1, reps, out
 
 
-def window_check(exps, g_batch, n, kw):
-    """The first and last window's gradient from a true standalone run (its
-    OWN export: own physics closures, forcing, and clock built inside; no
-    vmap; one compile per window) against its slice of the batched gradient
-    ``g_batch``.  Prints max|diff| / max|alone| per leaf (numbers only: vmap
-    may reorder fp32 reductions, so not bitwise)."""
+def grad_diff(got, ref):
+    """Per leaf: max|got-ref|/max|ref|, ||got-ref||/||ref|| and the cosine
+    of the two (fp64 on host; NaN where either side is non-finite)."""
+    out = {}
+    for k in ref:
+        r = np.asarray(ref[k], np.float64).ravel()
+        g = np.asarray(got[k], np.float64).ravel()
+        d = g - r
+        nr, ng = np.linalg.norm(r), np.linalg.norm(g)
+        out[k] = dict(max_rel=float(np.max(np.abs(d)) / np.max(np.abs(r))),
+                      norm_rel=float(np.linalg.norm(d) / nr),
+                      cos=float(r @ g / (nr * ng)))
+    return out
+
+
+def window_check(exps, g_batch, losses_batch, n, kw, ids):
+    """Windows ``ids`` from a true standalone run (each its OWN export: own
+    physics closures, forcing, clock built inside; no vmap; one compile per
+    window) against the batched run: the forward loss (batched per-window
+    ``losses_batch``) and the gradient (its slice of ``g_batch``).  The
+    first id's standalone gradient is also compiled a second way (jax.vmap
+    over a batch of one, same export): the gap between the two is the
+    rounding noise of the gradient itself, the floor any batched-vs-alone
+    difference is read against.  Numbers only, no tolerance."""
     from legoesm.driver.mpas_diff_step import mpas_segment
-    for b in sorted({0, len(exps) - 1}):
+    for i, b in enumerate(ids):
         e = exps[b]
 
         def one(x_, _e=e):
             out, _ = mpas_segment(_e, _with_x(_e["state"], x_),
                                   _e["phys_state"], n, **kw)
             return _proj_loss(out)
+        x = _state_x(e["state"])
         t0 = time.time()
-        gb = jax.block_until_ready(jax.jit(jax.grad(one))(_state_x(e["state"])))
-        rel = {}
-        for k in gb:
-            ref = np.asarray(gb[k], np.float64)
-            got = np.asarray(g_batch[k][b], np.float64)
-            scale = np.max(np.abs(ref))
-            rel[k] = (float(np.max(np.abs(got - ref)) / scale) if scale > 0
-                      else float(np.max(np.abs(got))))
-        print("WINDOW_CHECK " + json.dumps(dict(
-            window=b, seconds=time.time() - t0,
-            alone_finite=bool(all(np.all(np.isfinite(np.asarray(v)))
-                                  for v in gb.values())),
-            rel_max_diff=rel)), flush=True)
+        loss, gb = jax.block_until_ready(jax.jit(jax.value_and_grad(one))(x))
+        row = dict(window=b, seconds=time.time() - t0,
+                   loss_alone=float(loss), loss_batched=float(losses_batch[b]),
+                   alone_finite=bool(all(np.all(np.isfinite(np.asarray(v)))
+                                         for v in gb.values())),
+                   batched_vs_alone=grad_diff({k: g_batch[k][b] for k in gb}, gb))
+        if i == 0:
+            xb = jax.tree_util.tree_map(lambda t: t[None], x)
+            g1 = jax.block_until_ready(jax.jit(jax.grad(
+                lambda z: jnp.sum(jax.vmap(one)(z))))(xb))
+            row["vmap1_vs_alone"] = grad_diff(
+                {k: v[0] for k, v in g1.items()}, gb)
+        print("WINDOW_CHECK " + json.dumps(row), flush=True)
 
 
 def memory_report(label, fn, args, ncol):
@@ -813,6 +832,9 @@ def build_parser():
                     help="timing stage with --batch: window b is the driver "
                          "started this many days * b after the deck's start "
                          "day (required with --batch)")
+    ap.add_argument("--check-window-ids", default="",
+                    help="--check-windows: comma-separated window indices "
+                         "(default: first and last)")
     ap.add_argument("--check-windows", action="store_true",
                     help="timing stage with --batch: also take the first and "
                          "last window's gradient from a standalone run and "
@@ -964,12 +986,13 @@ def main(argv=None):
             else:
                 sb, pb, fb, cb = stack_windows(exps, n)
 
-                def fwd(x, s, p, f, c, _n=n):
-                    def one(x_, s_, p_, f_, c_):
-                        out, _ = mpas_segment(exp, _with_x(s_, x_), p_, _n,
-                                              forcing=f_, clock=c_, **kw)
-                        return _proj_loss(out)
-                    return jnp.sum(jax.vmap(one)(x, s, p, f, c))
+                def one_b(x_, s_, p_, f_, c_, _n=n):
+                    out, _ = mpas_segment(exp, _with_x(s_, x_), p_, _n,
+                                          forcing=f_, clock=c_, **kw)
+                    return _proj_loss(out)
+
+                def fwd(x, s, p, f, c):
+                    return jnp.sum(jax.vmap(one_b)(x, s, p, f, c))
                 args = (_state_x(sb), sb, pb, fb, cb)
             tf_c, tf_1, tf_r, _ = time_compiled(fwd, args, a.repeats)
             tg_c, tg_1, tg_r, g = time_compiled(jax.grad(fwd), args, a.repeats)
@@ -987,7 +1010,10 @@ def main(argv=None):
                 grad_over_fwd=med_g / med_f, grad_finite=fin,
                 peak_gib=peak_gib())), flush=True)
             if a.check_windows and nb > 1:
-                window_check(exps, g, n, kw)
+                losses = np.asarray(jax.jit(jax.vmap(one_b))(*args))
+                ids = ([int(t) for t in a.check_window_ids.split(",")]
+                       if a.check_window_ids else sorted({0, nb - 1}))
+                window_check(exps, g, losses, n, kw, ids)
     elif a.stage == "loops":
         # trace-only: which loops stack per-iteration residuals in the
         # gradient of one full-physics step (no compile, no device run)

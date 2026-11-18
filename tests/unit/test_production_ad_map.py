@@ -362,12 +362,12 @@ def test_nonfinite_census_names_windows_and_columns(capsys):
     assert "windows" not in capsys.readouterr().out
 
 
-def test_window_check_runs_first_and_last_window_from_their_own_export(
+def test_window_check_compares_chosen_windows_with_their_own_export(
         monkeypatch, capsys):
     """Fake segment: x scaled by the export's own factor * n_steps, no clock
-    or forcing passed (the export's own).  A correct batched gradient shows
-    zero difference, a corrupted last window a nonzero one; middle windows
-    are not run."""
+    or forcing passed (the export's own).  Checks the chosen windows only:
+    loss alone vs batched, gradient diffs (zero for a correct window, 0.5 max
+    for a corrupted one), and the vmap-of-one noise floor on the first."""
     import json
     import numpy as np
     import legoesm.driver.mpas_diff_step as mds
@@ -380,18 +380,33 @@ def test_window_check_runs_first_and_last_window_from_their_own_export(
     monkeypatch.setattr(pam, "_state_x", lambda s: s)
     monkeypatch.setattr(pam, "_proj_loss",
                         lambda s: sum(jnp.sum(v ** 2) for v in s.values()))
-    xs = jnp.arange(6.0).reshape(3, 2)
+    xs = jnp.arange(6.0).reshape(3, 2) + 1.0
     exps = [dict(fac=float(b + 1), state={"T": xs[b]}, phys_state=None)
             for b in range(3)]
     fac = jnp.arange(1.0, 4.0)[:, None] * 4
     g = {"T": (2 * xs * fac ** 2).at[2, 1].multiply(1.5)}
-    pam.window_check(exps, g, 4, {})
+    losses = np.asarray(jnp.sum((xs * fac) ** 2, axis=1))
+    pam.window_check(exps, g, losses, 4, {}, [2, 0])
     rows = [json.loads(line[len("WINDOW_CHECK "):])
             for line in capsys.readouterr().out.splitlines()]
-    assert [r["window"] for r in rows] == [0, 2]
-    assert rows[0]["rel_max_diff"]["T"] == 0.0
-    np.testing.assert_allclose(rows[1]["rel_max_diff"]["T"], 0.5)
-    assert all(r["alone_finite"] for r in rows)
+    assert [r["window"] for r in rows] == [2, 0]
+    for r in rows:
+        np.testing.assert_allclose(r["loss_alone"], r["loss_batched"], rtol=1e-12)
+        assert r["alone_finite"]
+    d2, d0 = rows[0]["batched_vs_alone"]["T"], rows[1]["batched_vs_alone"]["T"]
+    np.testing.assert_allclose(d2["max_rel"], 0.5, rtol=1e-12)
+    assert d2["norm_rel"] > 0 and d2["cos"] < 1.0
+    assert d0["max_rel"] == 0.0 and d0["norm_rel"] == 0.0
+    assert "vmap1_vs_alone" in rows[0] and "vmap1_vs_alone" not in rows[1]
+    assert rows[0]["vmap1_vs_alone"]["T"]["max_rel"] == 0.0
+
+
+def test_grad_diff_metrics():
+    import numpy as np
+    d = pam.grad_diff({"a": np.array([1.0, 2.0])}, {"a": np.array([1.0, 1.0])})["a"]
+    np.testing.assert_allclose(d["max_rel"], 1.0)
+    np.testing.assert_allclose(d["norm_rel"], 1.0 / np.sqrt(2.0))
+    np.testing.assert_allclose(d["cos"], 3.0 / (np.sqrt(5.0) * np.sqrt(2.0)))
 
 
 def test_parser_check_windows():
@@ -403,3 +418,8 @@ def test_parser_window_spacing_days():
     assert ap.parse_args(["--stage", "timing"]).window_spacing_days is None
     assert ap.parse_args(["--stage", "timing", "--window-spacing-days",
                           "30"]).window_spacing_days == 30.0
+
+
+def test_parser_check_window_ids():
+    a = pam.build_parser().parse_args(["--stage", "timing", "--check-window-ids", "0,5,7"])
+    assert a.check_window_ids == "0,5,7"
