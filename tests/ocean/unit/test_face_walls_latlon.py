@@ -162,7 +162,8 @@ def _lateral_tendencies(walls, T, S, H_east=3000.0, eta=None, land=None, **flat)
     mask = s.land_mask.data if land is None else s.land_mask.data.at[land].set(0.0)
     dT, dS = _bc_tracer_tendencies(jnp.asarray(T), jnp.asarray(S), cfg, grid, mask,
                                    jnp.ones((N_LAT, N_LON)), z, h_k,
-                                   compute_face_masks_3d(z.is_active, grid))
+                                   compute_face_masks_3d(z.is_active, grid),
+                                   compute_face_masks(mask, grid))
     return np.asarray(dT), np.asarray(dS), np.asarray(grid.area_T)[..., None] * np.asarray(h_k)
 
 

@@ -132,7 +132,6 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     viscous_tendency_cgrid,
     leith_biharmonic_tendency_cgrid,
     compute_vertex_mask,
-    compute_face_masks,
     compute_face_masks_3d,
     wall_faces,
     per_level_viscosity_masks,
@@ -2421,7 +2420,8 @@ def _nemo_hpg_tendency_from_pressure_or_direct(
     return -pressure_gradient / rho_0
 
 
-def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord, h_k, face_masks):
+def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord, h_k, face_masks,
+                          face_masks_2d):
     """Stage 9: horizontal (Laplacian / biharmonic) + explicit vertical tracer
     diffusion for T and S. Pure verbatim extraction (Q8). Returns ``(dT_dt,
     dS_dt)`` (advection + physics are added by the caller / step function)."""
@@ -2454,9 +2454,10 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord, h_k, face_masks)
     _hf = (_rep(min_cell_to_uface(h_k, grid)), _rep(min_cell_to_vface(h_k, grid)))
     # A face next to land is closed whatever the level masks say (land columns can
     # be level-active): otherwise tracer drains into land cells, whose tendency is
-    # masked, and heat and salt are lost.
+    # masked, and heat and salt are lost.  ``face_masks_2d`` are the STATE's 2-D face
+    # masks (halo-correct under MPI / sharding), not rebuilt from the cell mask.
     _fm = tuple(_rep(m) * m2[..., jnp.newaxis]
-                for m, m2 in zip(face_masks, compute_face_masks(mask, grid)))
+                for m, m2 in zip(face_masks, face_masks_2d))
     _h, _cm = _rep(h_k), mask[..., jnp.newaxis]
 
     def _lap(q):
@@ -6368,7 +6369,7 @@ def _latlon_tendencies_outside_core(
         _S_ldf_local = S if ldf_state is None else ldf_state[1]
         dT_dt, dS_dt = _bc_tracer_tendencies(
             _T_ldf_local, _S_ldf_local, config, grid, mask, J, z_coord, h_k,
-            (u_mask_3d, v_mask_3d))
+            (u_mask_3d, v_mask_3d), (u_mask, v_mask))
     # AB2 "advective" scope: snapshot the LATERAL tracer-diffusion tendency
     # (computed from the pre-step tracer T^n/S^n, exactly Veros's
     # ``tr[tau]``-evaluated ``hor_diffusion``) BEFORE surface forcing / sponge /
