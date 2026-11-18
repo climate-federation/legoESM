@@ -151,14 +151,18 @@ def test_two_basin_deep_wall_blocks_flow_and_conserves_volume():
 
 # ---------------------------------------------------------------- lateral tracer mixing
 
-def _lateral_tendencies(walls, T, S, **flat):
+def _lateral_tendencies(walls, T, S, H_east=3000.0, eta=None, **flat):
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_tracer_tendencies
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    grid, z, s = _setup(walls)
+    from legoesm.ocean.vertical import compute_layer_thickness
+    grid, z, s = _setup(walls, H_east=H_east)
     cfg = LatLonCGridOceanConfig.from_flat(implicit_vertical_mixing=True, **flat)
+    eta = s.eta.data if eta is None else jnp.asarray(eta)
+    h_k = compute_layer_thickness(eta, s.H_bathy.data, z)
     dT, dS = _bc_tracer_tendencies(jnp.asarray(T), jnp.asarray(S), cfg, grid, s.land_mask.data,
-                                   jnp.ones((N_LAT, N_LON)), z)
-    return np.asarray(dT), np.asarray(dS), np.asarray(grid.area_T)
+                                   jnp.ones((N_LAT, N_LON)), z, h_k,
+                                   compute_face_masks_3d(z.is_active, grid))
+    return np.asarray(dT), np.asarray(dS), np.asarray(grid.area_T)[..., None] * np.asarray(h_k)
 
 
 @pytest.mark.parametrize("coef", [dict(K_h=1.0e3), dict(K_bih=1.0e13),
@@ -166,8 +170,7 @@ def _lateral_tendencies(walls, T, S, **flat):
 def test_lateral_tracer_diffusion_does_not_cross_walls(coef):
     """Budget: heat and salt.  Laplacian / biharmonic tracer fluxes are zero through a
     closed face level, so a basin-uniform deep tracer does not relax toward the
-    neighbour basin.  Only what the walls change is asserted: this operator is not
-    thickness-weighted and does not close the global heat budget, walls or not."""
+    neighbour basin.  Global closure is the next test."""
     T, S = _basin_tracers()
     dT, dS, area = _lateral_tendencies(True, T, S, **coef)
     dT0, dS0, _ = _lateral_tendencies(False, T, S, **coef)
@@ -183,6 +186,24 @@ def test_lateral_tracer_diffusion_does_not_cross_walls(coef):
         assert np.abs(dT[2:4, 1:3, K_WALL:]).max() == 0.0
         assert np.abs(dS[2:4, 1:3, K_WALL:]).max() == 0.0
         assert np.abs(dT[2:4, 6, K_WALL:]).max() > 0.0
+
+
+@pytest.mark.parametrize("walls", [True, False])
+@pytest.mark.parametrize("coef", [dict(K_h=1.0e3), dict(K_bih=1.0e13),
+                                  dict(K_h=1.0e3, K_bih=1.0e13)])
+def test_lateral_tracer_diffusion_conserves_heat_and_salt(coef, walls):
+    """Budget: sum(area * h * dT/dt) = 0 and the same for S (in - out - d(storage) = 0),
+    with unequal partial bottom cells, a tilted sea surface and random tracers.
+    Bound: 1e-12 of the gross sum(area * h * |tendency|)."""
+    rng = np.random.default_rng(0)
+    T = 10.0 + rng.standard_normal((N_LAT, N_LON, NLEV))
+    S = 35.0 + 0.5 * rng.standard_normal((N_LAT, N_LON, NLEV))
+    eta = 0.5 * rng.standard_normal((N_LAT, N_LON))
+    dT, dS, vol = _lateral_tendencies(walls, T, S, H_east=2600.0, eta=eta, **coef)
+    for d in (dT, dS):
+        gross = np.sum(vol * np.abs(d))
+        assert gross > 0.0
+        assert abs(np.sum(vol * d)) <= 1e-12 * gross
 
 
 def _gm(walls, T, S, cfg=None):

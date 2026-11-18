@@ -82,6 +82,7 @@ from legoesm.ocean.dynamics.ocean_pe_generic import (
     OceanPECoeffs,
     OceanPEOperators,
     ocean_baroclinic_tendencies,
+    thickness_weighted_laplacian,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_sponge_tracer_relaxation,
@@ -99,8 +100,6 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vface_zonal_cos_lat,
     gradient_x_cgrid,
     gradient_y_cgrid,
-    bilaplacian_cgrid,
-    laplacian_cgrid,
     flux_divergence_bilaplacian_cgrid,
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
@@ -134,7 +133,6 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     leith_biharmonic_tendency_cgrid,
     compute_vertex_mask,
     compute_face_masks_3d,
-    face_wall_gates,
     wall_faces,
     per_level_viscosity_masks,
     nemo_shlat_vertex_mask,
@@ -2422,7 +2420,7 @@ def _nemo_hpg_tendency_from_pressure_or_direct(
     return -pressure_gradient / rho_0
 
 
-def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
+def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord, h_k, face_masks):
     """Stage 9: horizontal (Laplacian / biharmonic) + explicit vertical tracer
     diffusion for T and S. Pure verbatim extraction (Q8). Returns ``(dT_dt,
     dS_dt)`` (advection + physics are added by the caller / step function)."""
@@ -2434,8 +2432,7 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     #
     # The tendency here includes only: diffusion and physics.
     # Stack T, S along a trailing tracer axis and fold it into the level
-    # axis so ``laplacian_cgrid`` (and ``bilaplacian_cgrid`` which is two
-    # laplacian calls) runs ONCE on the thicker
+    # axis so the Laplacian runs ONCE on the thicker
     # ``(n_lat, n_lon, nlev*2)`` field — the prior vmap-over-(T,S)
     # pattern issued separate halo pads + 5-point stencils per tracer.
     # Vertical diffusion stays per-tracer because it hard-codes the
@@ -2443,35 +2440,30 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     tracer_stack = jnp.stack([T, S], axis=-1)  # (n_lat, n_lon, nlev, 2)
     n_lat_t, n_lon_t, nlev_t, n_tracers = tracer_stack.shape
     tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
-    # Depth-limited walls: no diffusive flux through a closed face level (heat and
-    # salt would otherwise mix across a sill the velocities cannot cross).  The
-    # gates follow the flat (level, tracer) layout; ``None`` without walls.
-    _gates = face_wall_gates(grid, nlev_t, tracer_flat.dtype)
-    if _gates[0] is not None:
-        _gates = tuple(jnp.repeat(_g, n_tracers, axis=-1) for _g in _gates)
-    else:
-        _gates = None
+    # Flux form, thickness-weighted: div(h_face * mask_face * grad q) / h, so
+    # sum(area * h * tendency) telescopes to zero (heat and salt conserved where
+    # layer thickness differs between neighbours: partial bottom cells, z* stretch).
+    # The min-rule face thickness is zero where either neighbour's level is below
+    # its bottom or below a depth-limited wall, so no flux crosses a closed face.
+    # Budget: in - out - d(storage) = 0 for sum(area * h * T) and sum(area * h * S).
+    def _rep(a):  # flat column index is n_tracers * k + tracer
+        return a if a.shape[-1] == 1 else jnp.repeat(a, n_tracers, axis=-1)
+
+    _gops = latlon_sw_grid_operators(grid)
+    _hf = (_rep(min_cell_to_uface(h_k, grid)), _rep(min_cell_to_vface(h_k, grid)))
+    _fm = tuple(_rep(m) for m in face_masks)
+    _h, _cm = _rep(h_k), mask[..., jnp.newaxis]
+
+    def _lap(q):
+        return thickness_weighted_laplacian(q, _gops, _hf, _fm, _h, _cm)
 
     horiz_flat = jnp.zeros_like(tracer_flat)
-    if is_active(config.K_h) and is_active(config.K_bih):
-        # Both Laplacian and biharmonic active: bilaplacian's *inner*
-        # ∇² is identical to the K_h Laplacian, so compute ∇²(tracer_flat)
-        # ONCE and feed it to both branches.  Saves one full
-        # laplacian_cgrid call (2 gradients + 1 divergence + masking)
-        # per RHS evaluation.
-        _lap_tr = laplacian_cgrid(tracer_flat, grid, mask=mask, face_gates=_gates)
-        horiz_flat = horiz_flat + config.K_h * _lap_tr
-        horiz_flat = horiz_flat - config.K_bih * laplacian_cgrid(
-            _lap_tr, grid, mask=mask, face_gates=_gates,
-        )
-    elif is_active(config.K_h):
-        horiz_flat = horiz_flat + config.K_h * laplacian_cgrid(
-            tracer_flat, grid, mask=mask, face_gates=_gates,
-        )
-    elif is_active(config.K_bih):
-        horiz_flat = horiz_flat - config.K_bih * bilaplacian_cgrid(
-            tracer_flat, grid, mask=mask, face_gates=_gates,
-        )
+    if is_active(config.K_h) or is_active(config.K_bih):
+        _lap_tr = _lap(tracer_flat)
+        if is_active(config.K_h):
+            horiz_flat = horiz_flat + config.K_h * _lap_tr
+        if is_active(config.K_bih):
+            horiz_flat = horiz_flat - config.K_bih * _lap(_lap_tr)
     horiz_stack = horiz_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
 
     # Vertical tracer diffusion (per-tracer; axis -1 of ``tr`` is nlev).
@@ -6370,7 +6362,8 @@ def _latlon_tendencies_outside_core(
         _T_ldf_local = T if ldf_state is None else ldf_state[0]
         _S_ldf_local = S if ldf_state is None else ldf_state[1]
         dT_dt, dS_dt = _bc_tracer_tendencies(
-            _T_ldf_local, _S_ldf_local, config, grid, mask, J, z_coord)
+            _T_ldf_local, _S_ldf_local, config, grid, mask, J, z_coord, h_k,
+            (u_mask_3d, v_mask_3d))
     # AB2 "advective" scope: snapshot the LATERAL tracer-diffusion tendency
     # (computed from the pre-step tracer T^n/S^n, exactly Veros's
     # ``tr[tau]``-evaluated ``hor_diffusion``) BEFORE surface forcing / sponge /

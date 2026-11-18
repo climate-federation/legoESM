@@ -411,7 +411,6 @@ def bilaplacian_cgrid(
     grid: LatLonGrid,
     *,
     mask: jnp.ndarray | None = None,
-    face_gates: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> jnp.ndarray:
     """Scalar bilaplacian (∇⁴f) on C-grid cell centers.
 
@@ -427,8 +426,8 @@ def bilaplacian_cgrid(
     -------
     bilap_f : array, same shape as f
     """
-    lap_f = laplacian_cgrid(f, grid, mask=mask, face_gates=face_gates)
-    return laplacian_cgrid(lap_f, grid, mask=mask, face_gates=face_gates)
+    lap_f = laplacian_cgrid(f, grid, mask=mask)
+    return laplacian_cgrid(lap_f, grid, mask=mask)
 
 
 # =============================================================================
