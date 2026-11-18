@@ -168,7 +168,7 @@ def test_mg_preset_never_overwrites_an_explicit_ice_to_snow_choice():
             r(morrison_flavor="mg", ice_to_snow_scheme=bad)
 
 
-def _lane(n=2):
+def _lane(n=2, module_checkpoint=True):
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.convection import ConvectionConfig
@@ -179,6 +179,7 @@ def _lane(n=2):
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     from tests.atmosphere.hydrostatic.unit.test_cam6_dropmixnuc_oracle import _parse
     cfg = PhysicsConfig(
+        module_checkpoint=module_checkpoint,
         radiation=RadiationConfig(scheme="none", cloud_config=CloudConfig(scheme="cam6_clubb")),
         convection=ConvectionConfig(scheme="none"),
         turbulence=TurbulenceConfig(scheme="clubb", liquid_partition=True,
@@ -240,7 +241,8 @@ def test_activation_runs_before_microphysics_with_carried_inputs(monkeypatch):
     monkeypatch.setattr(D, "cam6_microp_aero_npccn", act)
     monkeypatch.setattr(mi, "morrison_microphysics", micro)
     monkeypatch.setattr(ti, "_carry_update_with_cloud_fraction", upd)
-    fn, cfg, nlevf = _lane()
+    # the spies read concrete values: no module remat (it traces its body)
+    fn, cfg, nlevf = _lane(module_checkpoint=False)
     mesh, sigma, state = _moist_mg2_state()
     ncol, nlev = state.T.data.shape
     ps = init_physics_state(ncol, nlev, cfg)

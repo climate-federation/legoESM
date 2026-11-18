@@ -408,6 +408,8 @@ def test_combined_count_is_the_max_over_the_macmic_window(monkeypatch):
                                     **{k: zeros.replace(name=k) for k in
                                        ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}})
     cfg = cmb.PhysicsConfig(
+        # the spy reads concrete values: no module remat (it traces its body)
+        module_checkpoint=False,
         turbulence=TurbulenceConfig(scheme="tke"),
         microphysics=MicrophysicsConfig(scheme="morrison",
                                         morrison=MorrisonConfig(warm_rain_scheme="kk2000",
