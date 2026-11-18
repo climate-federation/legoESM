@@ -557,13 +557,14 @@ def main(argv=None):
             ls, gs = vg(params, xs)
             print(f"[{label}] sample {j} ({dates[j]}) loss {float(ls):.6f} raw-space grad "
                   f"{ {n: float(gs.raw[i]) for i, n in enumerate(kn)} }", flush=True)
-        x = samples[0]
+        js = int(os.environ.get("OWB_FD_SAMPLE", "0"))
+        x = samples[js]
         lf = jax.jit(loss_fn)
         l0, g = vg(params, x)
-        print(f"[{label}] FD check, sample 0 ({dates[0]}), loss {float(l0):.10f}", flush=True)
+        print(f"[{label}] FD check, sample {js} ({dates[js]}), loss {float(l0):.10f}", flush=True)
         for n in os.environ["OWB_FD_CHECK"].split(","):
             i = kn.index(n)
-            for eps in (1e-2, 1e-3, 1e-4):
+            for eps in (1e-2, 1e-3, 1e-4, 1e-5, 1e-6):
                 lp, lm = (float(lf(eqx.tree_at(lambda q: q.raw, params, params.raw.at[i].add(e)), x))
                           for e in (eps, -eps))
                 fd = (lp - lm) / (2 * eps)
