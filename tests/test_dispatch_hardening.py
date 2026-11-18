@@ -135,6 +135,10 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # KPP boundary-layer structure ("legacy" | "cvmix"): an unknown value
+        # must raise, never run the legacy structure silently.
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py",
+         "_boundary_layer_depth"),
         # RRTMGP gas-table set: an unknown name must raise, never fall back
         # to the reduced tables.
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py",

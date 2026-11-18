@@ -129,7 +129,7 @@ def test_shipped_global_ocean_templates_load_with_their_eos():
 
     from legoesm.ocean.config import OceanExperimentConfig
 
-    for name in ("omip_latlon.yaml", "omip_latlon_kpp.yaml"):
+    for name in ("omip_latlon.yaml", "omip_latlon_kpp.yaml", "omip_latlon_kpp_cvmix.yaml"):
         p = Path("config/templates/global_ocean") / name
         if not p.exists():
             pytest.skip(f"{p} not present")
@@ -137,6 +137,18 @@ def test_shipped_global_ocean_templates_load_with_their_eos():
         assert rt.eos in VALID_EOS_SCHEMES, (
             f"{name} resolved eos={rt.eos!r} not in VALID_EOS_SCHEMES"
         )
+
+
+def test_kpp_cvmix_template_selects_cvmix_structure():
+    """The committed cvmix KPP template reaches KPPConfig.bld_structure."""
+    from pathlib import Path
+
+    from legoesm.ocean.config import OceanExperimentConfig
+
+    p = Path("config/templates/global_ocean/omip_latlon_kpp_cvmix.yaml")
+    rt = OceanExperimentConfig.from_yaml(str(p)).to_ocean_config()
+    assert rt.physics.vertical_mixing.scheme == "kpp"
+    assert rt.physics.vertical_mixing.kpp.bld_structure == "cvmix"
 
 
 def test_vertical_mixing_reachable_via_the_yaml_ocean_key():
