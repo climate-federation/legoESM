@@ -152,6 +152,9 @@ def materialize_sub_config(config: TurbulenceConfig) -> TurbulenceConfig:
         # import here would close a cycle.
         from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
         return config._replace(clubb=CLUBBConfig())
+    if config.scheme == "ifs_vdf" and config.ifs_vdf is None:
+        from legoesm.atmosphere.physics.turbulence.ifs_vdf import IFSVDFLaneConfig
+        return config._replace(ifs_vdf=IFSVDFLaneConfig())
     return config
 
 
@@ -204,6 +207,9 @@ def get_turbulence_fn(config: TurbulenceConfig):
         return "ysu", ysu_turbulence, config.ysu
     elif config.scheme == "edmf":
         return "edmf", edmf_turbulence, config.edmf
+    elif config.scheme == "ifs_vdf":
+        from legoesm.atmosphere.physics.turbulence.ifs_vdf import ifs_vdf_turbulence
+        return "ifs_vdf", ifs_vdf_turbulence, materialize_sub_config(config).ifs_vdf
     elif config.scheme == "none":
         return "none", None, None
     else:
@@ -231,7 +237,7 @@ def schemes_accepting_surface_flux() -> tuple[str, ...]:
     """
     names = []
     for name in ("smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
-                 "clubb", "holtslag_boville", "ysu", "edmf"):
+                 "clubb", "holtslag_boville", "ysu", "edmf", "ifs_vdf"):
         _n, fn, _cfg = get_turbulence_fn(TurbulenceConfig(scheme=name))
         if kernel_accepts_surface_flux(fn):
             names.append(name)
@@ -423,6 +429,29 @@ def _ysu_lane_kwargs(carry_field, ncol, *, land_fraction=None, cell_area=None):
     kw = {"land_fraction": land_fraction, "cell_area": cell_area}
     return {k: jnp.reshape(jnp.asarray(v), (ncol,)) for k, v in kw.items()
             if v is not None}
+
+
+def _ifs_vdf_lane_kwargs(scheme_name, tracers, phys_state, mesh, ncol, nlev, land_fraction):
+    """turbulence=ifs_vdf lane inputs (vote 9 G1/G9, vote 11 G12), else ``{}``:
+    cloud liquid/ice, the lagged total radiative heating, the filtered-orography
+    std (``mesh.subgrid_topo_filt_stddev``) and the land fraction.  An absent
+    one is passed as ``None`` and refused by the kernel."""
+    if scheme_name != "ifs_vdf":
+        return {}
+    if tracers is None or "q_v" not in tracers:
+        # the bridge would substitute zero vapour and drop its tendency (vote 13 G24)
+        raise ValueError("turbulence=ifs_vdf needs the q_v tracer; this state carries none.")
+
+    def col(x, shape):
+        if x is None:
+            return None
+        return jnp.reshape(jnp.asarray(x.data if hasattr(x, "data") else x), shape)
+
+    trc = tracers or {}
+    return {"q_c": col(trc.get("q_c"), (ncol, nlev)), "q_i": col(trc.get("q_i"), (ncol, nlev)),
+            "rad_heating": col(getattr(phys_state, "rad_heating", None), (ncol, nlev)),
+            "sigflt": col(getattr(mesh, "subgrid_topo_filt_stddev", None), (ncol,)),
+            "land_fraction": col(land_fraction, (ncol,))}
 
 
 def _resolve_T_sfc(T_col, phys_state):
@@ -1225,6 +1254,7 @@ def _make_mpas_turbulence(
         # the ocean/ice fraction keep the scheme's own bulk computation.
         _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
         _surface_flux = None
+        _ow_flux = None
         if _shf_land is not None:
             if f_land is None:
                 raise ValueError(
@@ -1295,17 +1325,33 @@ def _make_mpas_turbulence(
                 forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
             _ev_land = jnp.where(_fl > 0.0, _ev_land, 0.0)
             _lh_land = jnp.where(_fl > 0.0, _lh_land, 0.0)   # 0 * NaN would poison the blend
-            _ev_blend = ((1.0 - _fl) * _lh / charged_latent_heat(
+            # Coupled column lane with the atmosphere owning land and open
+            # water (P5c): the bulk law covers only the open-water fraction
+            # ``f_ow``; the coupler's ice+lake handback (per grid cell, already
+            # weighted by those tiles' area) supplies the rest.  Absent keys:
+            # the bulk law covers every non-land fraction, as before.
+            _hb = forcing.get("shflx_hb")
+            if _hb is not None:
+                _hb_cells = lambda k: jnp.asarray(  # noqa: E731
+                    forcing[k], dtype=q_sfc.dtype).reshape(nCells)
+                _w_bulk = _hb_cells("f_ow")
+                _hb_sh, _hb_lh, _hb_ev = (_hb_cells("shflx_hb"),
+                                          _hb_cells("lhflx_hb"),
+                                          _hb_cells("evap_hb"))
+            else:
+                _w_bulk = 1.0 - _fl
+                _hb_sh = _hb_lh = _hb_ev = 0.0
+            _ev_blend = (_w_bulk * _lh / charged_latent_heat(
                              step_config.surface.bulk_scheme, _T_bulk)
-                         + _fl * _ev_land)
+                         + _fl * _ev_land + _hb_ev)
             step_config = step_config._replace(surface=step_config.surface._replace(
                 prescribed_evap_kg_m2_s=_ev_blend))
             _sh_land = jnp.where(
                 _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0)
             _surface_flux = (
                 _tx, _ty,
-                (1.0 - _fl) * _sh + _fl * _sh_land,
-                (1.0 - _fl) * _lh + _fl * _lh_land,
+                _w_bulk * _sh + _fl * _sh_land + _hb_sh,
+                _w_bulk * _lh + _fl * _lh_land + _hb_lh,
                 _us,
             )
             # ``forcing["taumag_land"]`` (land_stress_from_land): the land
@@ -1334,6 +1380,25 @@ def _make_mpas_turbulence(
                     _cells("z0m_land"), _cells("d_land"),
                     u_col[:, -1], v_col[:, -1],
                     z_full[:, -1] - z_half[:, -1], _fl, rho[:, -1])
+            if _hb is not None:
+                from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                    handback_into_surface_flux,
+                )
+                _surface_flux = handback_into_surface_flux(
+                    _surface_flux, _tx, _ty, 1.0 - _fl - _w_bulk,
+                    _hb_cells("taux_hb"), _hb_cells("tauy_hb"), rho[:, -1])
+                # The open-water share, exactly the terms blended above: the
+                # ocean is debited this (P5c K3 export).
+                _ow_flux = (
+                    _w_bulk * _sh, _w_bulk * _lh,
+                    _w_bulk * _lh / charged_latent_heat(
+                        step_config.surface.bulk_scheme, _T_bulk),
+                    _w_bulk * _tx, _w_bulk * _ty)
+        elif forcing is not None and forcing.get("shflx_hb") is not None:
+            raise ValueError(
+                "forcing['shflx_hb'] (coupler ice/lake flux handback) is only "
+                "consumed together with the land's own heat fluxes "
+                "(forcing['shflx_land']); without them it would be ignored.")
         elif forcing is not None and forcing.get("T_sfc_ocean") is not None:
             raise ValueError(
                 "forcing['T_sfc_ocean'] (non-land surface anchor) is only "
@@ -1408,6 +1473,8 @@ def _make_mpas_turbulence(
                 **_sfc_kw,
                 **_smagorinsky_condensate_kwargs(
                     scheme_name, state.tracers, (nCells, nlev)),
+                **_ifs_vdf_lane_kwargs(scheme_name, state.tracers, phys_state, mesh,
+                                       nCells, nlev, f_land),
             )
         if _liquid_partition and turb_out.dq_c_dt is None:
             raise ValueError(
@@ -1497,9 +1564,10 @@ def _make_mpas_turbulence(
                 )
             else:
                 tracer_tends["q_c"] = turb_out.dq_c_dt.reshape(_qc_raw.shape)
-        if scheme_name == "mynn25":
+        if scheme_name in ("mynn25", "ifs_vdf"):
             # WRF MYNN-EDMF condensate tendencies (vote N6); the lane kwargs
             # refused a state without q_c, q_i is None without an ice tracer.
+            # IFS VDF: its REPQMI correction moves cloud water to vapour.
             for _nm, _dq in (("q_c", turb_out.dq_c_dt),
                              ("q_i", turb_out.dq_i_dt)):
                 if _dq is None:
@@ -1550,6 +1618,12 @@ def _make_mpas_turbulence(
             evap_sfc=None if _evp is None else state.p_s.replace(
                 data=_evp.reshape(p_s.shape), name="evap_sfc_turb",
                 units="kg/m^2/s"),
+            **({} if _ow_flux is None else {
+                _k: state.p_s.replace(data=_v.reshape(p_s.shape),
+                                      name=f"{_k}_turb", units=_u)
+                for _k, _v, _u in zip(
+                    ("shflx_ow", "lhflx_ow", "evap_ow", "taux_ow", "tauy_ow"),
+                    _ow_flux, ("W/m^2", "W/m^2", "kg/m^2/s", "Pa", "Pa"))}),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)

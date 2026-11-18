@@ -171,7 +171,6 @@ def test_fv_pipeline_diffuses_every_carried_constituent():
             1.0e-3, rtol=0, atol=1e-15)
 
 
-
 def test_fv_pipeline_all_ocean_run_passes_zero_land_fraction():
     """A run with no land (pipeline ``f_land`` None) hands McFarlane an
     explicit zero land fraction (CAM landfrac = 0: no orographic drag)
@@ -316,21 +315,3 @@ def test_mpas_column_lane_zero_top_raises_under_jit(mpas_lane):
     fn = gi._make_mpas_gwd(GravityWaveDragConfig(scheme="mcfarlane"), 300.0)
     with pytest.raises(ValueError, match="model-top"):
         jax.jit(lambda st: fn(st, mesh, coord0))(state)
-
-
-@pytest.mark.parametrize("mark", [False, True])
-def test_tile_pipeline_carries_the_driver_land_free_mark(mark):
-    """The tiled-cube lane builds its own pipeline; the driver's land-free
-    mark must reach it (or an all-ocean run with McFarlane refuses there),
-    and an unmarked build stays unmarked."""
-    from legoesm.driver.tiled_operator_split_step import (
-        build_tile_step_unified)
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.vertical import create_sigma_coordinate
-    from tests.unit.test_convection_config_for import _cfg
-
-    kw = {"run_has_no_land": True} if mark else {}
-    _, pipe = build_tile_step_unified(
-        create_cubed_sphere(8), create_sigma_coordinate(8),
-        _cfg(convection="none"), 2, **kw)
-    assert pipe.run_has_no_land is mark

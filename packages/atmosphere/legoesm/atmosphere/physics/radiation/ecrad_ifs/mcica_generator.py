@@ -244,8 +244,8 @@ def _generate_column(frac, overlap_param, fractional_std, rand_top, rand_cloud,
     keep = at_or_below
 
     def step(carry, xs):
-        found_prev, c_prev, u_prev = carry
-        (stop_l, r_cloud, r1, r2, f_l, f_u, p_u, c_u, o_u, opi_u, fsd_l, keep_l) = xs
+        found_prev, c_prev = carry
+        (stop_l, r_cloud, f_l, f_u, p_u, c_u, o_u, keep_l) = xs
         first = (1.0 - found_prev) * stop_l
         # generate_column_exp_ran lines 318-334: transition probabilities
         # given cloud (c_prev) or clear sky above.
@@ -254,26 +254,49 @@ def _generate_column(frac, overlap_param, fractional_std, rand_top, rand_cloud,
         to_cloud_from_clear = _lt(r_cloud * (c_u - f_u), p_u - o_u - f_u)
         markov = c_prev * to_cloud + (1.0 - c_prev) * to_cloud_from_clear
         c = (first + found_prev * markov) * keep_l
-        # lines 350-363: within a contiguous cloud, repeat the random number
-        # of the layer above with probability op_inhom.
-        w = c_prev * _lt(r2, opi_u)                          # exact (M4)
-        u = w * u_prev + (1.0 - w) * r1
-        od = c * sample_from_pdf(fsd_l, u, sampler, sharpness)
-        return (found_prev + first, c, u), od
+        return (found_prev + first, c), c
 
     ng = rand_top.shape[0]
     zeros = jnp.zeros((ng,), frac.dtype)
     bcast = lambda a: jnp.broadcast_to(a[:, None], (nlev, ng))  # noqa: E731
     rc_up = jnp.concatenate([rand_cloud[:, :1], rand_cloud[:, :-1]], axis=1)  # slot l-1
-    xs = (stop.T, rc_up.T, rand_inhom1.T, rand_inhom2.T,
-          bcast(frac), bcast(f_up), bcast(pair_up), bcast(cum_up), bcast(over_up),
-          bcast(opi_up), bcast(fractional_std), bcast(keep))
-    _, od = jax.lax.scan(step, (zeros, zeros, zeros), xs)
+    xs = (stop.T, rc_up.T, bcast(frac), bcast(f_up), bcast(pair_up), bcast(cum_up),
+          bcast(over_up), bcast(keep))
+    _, cloud = jax.lax.scan(step, (zeros, zeros), xs)
+    # lines 350-363, exact switch (M4)
+    od = inhomogeneity_od_scaling(cloud.T, _lt(rand_inhom2, opi_up[None, :]),
+                                  fractional_std[None, :], rand_inhom1, sampler, sharpness)
 
     # cloud_generator lines 166-169: clear column below the threshold
     # (tcc = 0 if tcc < threshold); smooth width 1 % of the threshold (vote G7).
     tcc = tcc * sigmoid_switch((tcc - frac_threshold) / frac_threshold, sharpness)
-    return od.T, tcc
+    return od, tcc
+
+
+def inhomogeneity_od_scaling(cloud, repeat, fractional_std, rand_inhom1, sampler=None,
+                             sharpness=100.0):
+    """radiation_cloud_generator.F90 lines 350-363 along the last (layer) axis.
+
+    Within a contiguous cloud a layer reuses the uniform of the layer above
+    where ``repeat`` (the oracle's ``rand_inhom2 < op_inhom`` of the interface
+    above) and draws ``rand_inhom1`` otherwise; returns
+    ``cloud * sample_from_pdf(fractional_std, u)``.  Inputs broadcast to
+    ``cloud.shape``; index 0 of the layer axis is the model top.
+    """
+    sampler = load_pdf_sampler() if sampler is None else sampler
+    lev_first = lambda a: jnp.moveaxis(jnp.broadcast_to(a, cloud.shape), -1, 0)  # noqa: E731
+
+    def step(carry, xs):
+        c_prev, u_prev = carry
+        c, rep, r1, fsd = xs
+        w = c_prev * rep
+        u = w * u_prev + (1.0 - w) * r1
+        return (c, u), c * sample_from_pdf(fsd, u, sampler, sharpness)
+
+    zeros = jnp.zeros(cloud.shape[:-1], cloud.dtype)
+    _, od = jax.lax.scan(step, (zeros, zeros), tuple(
+        lev_first(a) for a in (cloud, repeat, rand_inhom1, fractional_std)))
+    return jnp.moveaxis(od, 0, -1)
 
 
 def cloud_generator(cloud_fraction, overlap_param, fractional_std, rand_top,

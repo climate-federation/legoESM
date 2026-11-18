@@ -1169,21 +1169,45 @@ def si3_var_agg(
     sm_i = sr(st_i * z1_vt_i) * interior
 
     r1_nlay_i = sr(jnp.asarray(1.0 / float(nlay_i), dtype=dtype))
-    tm_i_acc = jnp.zeros((jpi, jpj), dtype=dtype)
-    for jl in range(jpl):
-        v_i_cat = v_i[:, :, jl]
-        for jk in range(nlay_i):
-            contrib = sr(sr(sr(r1_nlay_i * t_i[:, :, jk, jl]) * v_i_cat) / vt_i_safe)
-            tm_i_acc = jnp.where(vt_i > _EPSI20, sr(tm_i_acc + contrib), rt0)
-
     r1_nlay_s = sr(jnp.asarray(1.0 / float(nlay_s), dtype=dtype))
     vt_s_safe = jnp.where(vt_s > _EPSI20, vt_s, 1.0)
+    tm_i_acc = jnp.zeros((jpi, jpj), dtype=dtype)
     tm_s_acc = jnp.zeros((jpi, jpj), dtype=dtype)
-    for jl in range(jpl):
-        v_s_cat = v_s[:, :, jl]
-        for jk in range(nlay_s):
-            contrib = sr(sr(sr(r1_nlay_s * t_s[:, :, jk, jl]) * v_s_cat) / vt_s_safe)
-            tm_s_acc = jnp.where(vt_s > _EPSI20, sr(tm_s_acc + contrib), rt0)
+    if _si3_traced(v_i, v_s, vt_i, vt_s, t_i, t_s):
+        # DECISION 198: traced callers run the `DO jl = 1, jpl` / `DO jk = 1, nlay_i`
+        # (`src/ICE/icevar.F90:181-191`) and `DO jl = 1, jpl` / `DO jk = 1, nlay_s`
+        # (`src/ICE/icevar.F90:192-200`) accumulations as static-trip `lax.scan`
+        # carries in exact `(jl, jk)` order; eager calls keep the Python loops.
+        def _scan_layer_temp(
+            acc0: Field, t_arr: Field, v_arr: Field, vt_arr: Field, vt_safe: Field, r1_nlay: Field, nlay: int
+        ) -> Field:
+            has_vol = vt_arr > _EPSI20
+            t_seq = jnp.moveaxis(t_arr, (3, 2), (0, 1)).reshape(jpl * nlay, jpi, jpj)
+            v_seq = jnp.broadcast_to(
+                jnp.moveaxis(v_arr, 2, 0)[:, None, :, :], (jpl, nlay, jpi, jpj)
+            ).reshape(jpl * nlay, jpi, jpj)
+
+            def _step(acc: Field, xs: tuple[Field, Field]) -> tuple[Field, None]:
+                t_lay, v_cat = xs
+                contrib = sr(sr(sr(r1_nlay * t_lay) * v_cat) / vt_safe)
+                return jnp.where(has_vol, sr(acc + contrib), rt0), None
+
+            out, _ = jax.lax.scan(_step, acc0, (t_seq, v_seq))
+            return out
+
+        tm_i_acc = _scan_layer_temp(tm_i_acc, t_i, v_i, vt_i, vt_i_safe, r1_nlay_i, nlay_i)
+        tm_s_acc = _scan_layer_temp(tm_s_acc, t_s, v_s, vt_s, vt_s_safe, r1_nlay_s, nlay_s)
+    else:
+        for jl in range(jpl):
+            v_i_cat = v_i[:, :, jl]
+            for jk in range(nlay_i):
+                contrib = sr(sr(sr(r1_nlay_i * t_i[:, :, jk, jl]) * v_i_cat) / vt_i_safe)
+                tm_i_acc = jnp.where(vt_i > _EPSI20, sr(tm_i_acc + contrib), rt0)
+        for jl in range(jpl):
+            v_s_cat = v_s[:, :, jl]
+            for jk in range(nlay_s):
+                contrib = sr(sr(sr(r1_nlay_s * t_s[:, :, jk, jl]) * v_s_cat) / vt_s_safe)
+                tm_s_acc = jnp.where(vt_s > _EPSI20, sr(tm_s_acc + contrib), rt0)
 
     no_ice = at_i <= _EPSI20
     tm_si = jnp.where(no_ice, rt0, tm_si_raw) * interior
@@ -2616,7 +2640,10 @@ def _si3_one_pra_subcycle_step(
         jnp.concatenate(m_list, axis=2) for m_list in m_3d_lists
     )
 
-    if x_first:
+    # Alternating sweep order (`:267-367`).  DECISION 198: a traced ``x_first``
+    # (the subcycle scan) selects the order with ``lax.cond``; a Python bool
+    # (eager calls) runs the same branch directly.
+    def _sweep_x_then_y(_):
         zarea_mid, c_mid, m_mid = si3_adv_x(
             ihls,
             zdt,
@@ -2645,7 +2672,9 @@ def _si3_one_pra_subcycle_step(
             _plant_omit_donor_readjust=_plant_omit_donor_readjust,
             _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
         )
-    else:
+        return c_packed_out, m_packed_out
+
+    def _sweep_y_then_x(_):
         zarea_mid, c_mid, m_mid = si3_adv_y(
             ihls,
             zdt,
@@ -2674,6 +2703,12 @@ def _si3_one_pra_subcycle_step(
             _plant_omit_donor_readjust=_plant_omit_donor_readjust,
             _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
         )
+        return c_packed_out, m_packed_out
+
+    if isinstance(x_first, bool):
+        c_packed_out, m_packed_out = (_sweep_x_then_y if x_first else _sweep_y_then_x)(None)
+    else:
+        c_packed_out, m_packed_out = jax.lax.cond(x_first, _sweep_x_then_y, _sweep_y_then_x, None)
 
     swept_map: dict[str, tuple[Field, SI3PratherMoments]] = {}
     offset = 0
@@ -3082,11 +3117,16 @@ def _si3_pra_subcycle_cond_dispatch(
 ):
     moment_signs = _moment_nfd_signs(_plant_wrong_nfd_sign, dtype=h_i.dtype)
 
-    def _call_step(op, jt_val: int, ihls_val: int | Field):
-        x_first = int(kt_parity) == ((jt_val - 1) % 2)
-        if _plant_invert_sweep_order:
-            x_first = not x_first
-        return _si3_one_pra_subcycle_step(
+    def _call_step(op, jt_val: int, ihls_val: int | Field, x_first: bool | Field | None = None):
+        if x_first is None:
+            x_first = int(kt_parity) == ((jt_val - 1) % 2)
+            if _plant_invert_sweep_order:
+                x_first = not x_first
+        # A traced sweep parity cannot be a jit static argument: the scan body
+        # calls the unjitted step, which the enclosing trace inlines.
+        step = (_si3_one_pra_subcycle_step if isinstance(x_first, bool)
+                else _si3_one_pra_subcycle_step.__wrapped__)
+        return step(
             op,
             jnp.asarray(ihls_val, dtype=jnp.int32),
             x_first=x_first,
@@ -3121,6 +3161,25 @@ def _si3_pra_subcycle_cond_dispatch(
         jnp.int32(0),
         jnp.int32(max(0, nn_hls - 1)),
     )
+    if any(isinstance(leaf, jax.core.Tracer)
+           for leaf in jax.tree_util.tree_leaves((init_ops, icycle_arr))):
+        # DECISION 198: traced callers run `DO jt = 1, icycle` (`:156-498`) as one
+        # three-step lax.scan with the same per-jt ihls, sweep parity and
+        # `icycle >= jt` selection as the unrolled calls below; the body is
+        # checkpointed so reverse mode keeps only the carry.  Eager calls keep
+        # the unrolled calls.
+        ihls_tab = jnp.stack([ihls_1, jnp.int32(max(0, nn_hls - 2)), jnp.int32(max(0, nn_hls - 3))])
+
+        def _subcycle(carry, jt):
+            x_first = jnp.int32(kt_parity) == (jt - 1) % 2
+            if _plant_invert_sweep_order:
+                x_first = ~x_first
+            new = _call_step((carry,) + init_ops[1:], 0, ihls_tab[jt - 1], x_first=x_first)[0]
+            keep = icycle_arr >= jt
+            return jax.tree_util.tree_map(lambda n, o: jnp.where(keep, n, o), new, carry), None
+
+        out, _ = jax.lax.scan(jax.checkpoint(_subcycle), init_carry, jnp.arange(1, 4, dtype=jnp.int32))
+        return out
     ops_1 = _call_step(init_ops, 1, ihls_1)
     ops_2_cand = _call_step(ops_1, 2, jnp.int32(max(0, nn_hls - 2)))
     cond_2 = icycle_arr >= jnp.int32(2)
@@ -3387,6 +3446,7 @@ def si3_dyn_orca2(
     diag_adv_mass: Field,
     diag_adv_salt: Field,
     diag_adv_heat: Field,
+    dynamics_path: str = "np_dynADV2D",
     _plant_invert_sweep_order: bool = False,
     _plant_perturb_hbig_cap: bool = False,
     _plant_omit_subcycle_lbc: bool = False,
@@ -3395,7 +3455,7 @@ def si3_dyn_orca2(
     _plant_wrong_nfd_sign: bool | str = False,
     _plant_ignore_mppdelay: bool = False,
 ) -> tuple[SI3State, SI3AdvectionDiagnostics]:
-    """Execute NEMO SI3 `ice_dyn` (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn.f90:126-265`).
+    """Execute NEMO SI3 Prather advection within the selected ``ice_dyn`` path.
 
     Follows NEMO's exact statement order:
     1. Pre-advection intensive thickness recovery (`icedyn.f90:156-170`)
@@ -3405,8 +3465,11 @@ def si3_dyn_orca2(
        `icedyn_adv_pra.f90:70-510`)
     4. Transport diagnostics `diag_trp_ei, diag_trp_es, diag_trp_sv, diag_trp_vi, diag_trp_vs`
        on `A2D(0)` (`icedyn_adv.f90:156-164`)
-    5. `ice_var_zapsmall` (`icedyn.f90:225`, `icevar.f90:615-737`)
-    6. End-of-`ice_dyn` `lbc_lnk(..., ldfull = .TRUE.)` (`icedyn.f90:254-260`).
+    5. For ``np_dynADV2D``, `ice_var_zapsmall` (`icedyn.f90:167`) before the
+       common end-of-`ice_dyn` halo exchange (`icedyn.f90:191-201`).
+
+    ``np_dynALL`` returns at `icedyn.f90:133`, before ridging, correction (whose
+    `ice_var_zapsmall` is `icecor.f90:111-115`), and the common halo exchange.
 
     ``rn_uice``/``rn_vice`` both given select the `np_dynADV2D` velocities; both
     explicitly ``None`` replay ``state.u_ice``/``state.v_ice`` as exact input.
@@ -3419,6 +3482,8 @@ def si3_dyn_orca2(
         raise ValueError("si3_dyn_orca2 requires an explicit SI3ORCA2StateConfig")
     if (rn_uice is None) != (rn_vice is None):
         raise ValueError("si3_dyn_orca2 requires rn_uice and rn_vice both given or both None")
+    if dynamics_path not in {"np_dynADV2D", "np_dynALL"}:
+        raise ValueError(f"unknown SI3 dynamics path {dynamics_path!r}")
     cfg = config
     sr = nemo_source_round
     consts = cfg.ice_constants
@@ -3574,74 +3639,87 @@ def si3_dyn_orca2(
         _SI3_PRA_ZERO,
     )
 
-    # 5. `ice_var_zapsmall` (`icedyn.f90:225`, `icevar.f90:615-737`)
-    (
-        v_i,
-        v_s,
-        sv_i,
-        oa_i,
-        a_i,
-        a_ip,
-        v_ip,
-        v_il,
-        t_su,
-        h_i_post,
-        h_s_post,
-        h_ip_post,
-        h_il_post,
-        e_s,
-        e_i,
-        szv_i,
-        sz_i_post,
-        t_i_post,
-        t_s_post,
-        at_i_post,
-        vt_i_post,
-        ato_i_dyn,
-        wfx_res,
-        hfx_res,
-        sfx_res,
-    ) = si3_var_zapsmall(
-        v_i=v_i,
-        v_s=v_s,
-        sv_i=sv_i,
-        oa_i=oa_i,
-        a_i=a_i,
-        a_ip=a_ip,
-        v_ip=v_ip,
-        v_il=v_il,
-        t_su=state.t_su,
-        h_i=h_i_pre,
-        h_s=h_s_pre,
-        h_ip=h_ip_pre,
-        h_il=h_il_pre,
-        e_s=e_s,
-        e_i=e_i,
-        szv_i=szv_i,
-        sz_i=state.equivalent.sz_i,
-        t_i=state.equivalent.t_i,
-        t_s=state.equivalent.t_s,
-        at_i=state.aggregated.at_i,
-        vt_i=state.aggregated.vt_i,
-        ato_i=ato_i_adv,
-        wfx_res=wfx_res,
-        hfx_res=hfx_res,
-        sfx_res=sfx_res,
-        rDt_ice=rDt_ice,
-        sss_m=sss_m,
-        sst_m=sst_m,
-        nn_hls=nn_hls,
-        nn_icesal=cfg.nn_icesal,
-        rn_simin=cfg.rn_simin,
-        rn_sinew=cfg.rn_sinew,
-        rt0=consts.T0,
-        rhoi=consts.rho_ice,
-        rhos=consts.rho_snow,
-        rhow=canonical_constants.rho_water,
-    )
+    # Only the ADV2D diagnostic path zaps here (icedyn.F90:159-167).
+    # np_dynALL continues to ridging and zaps inside ice_cor(kt,1), after it
+    # (icedyn.F90:130-135; icecor.F90:111-115).
+    if dynamics_path == "np_dynADV2D":
+        (
+            v_i,
+            v_s,
+            sv_i,
+            oa_i,
+            a_i,
+            a_ip,
+            v_ip,
+            v_il,
+            t_su,
+            h_i_post,
+            h_s_post,
+            h_ip_post,
+            h_il_post,
+            e_s,
+            e_i,
+            szv_i,
+            sz_i_post,
+            t_i_post,
+            t_s_post,
+            at_i_post,
+            vt_i_post,
+            ato_i_dyn,
+            wfx_res,
+            hfx_res,
+            sfx_res,
+        ) = si3_var_zapsmall(
+            v_i=v_i,
+            v_s=v_s,
+            sv_i=sv_i,
+            oa_i=oa_i,
+            a_i=a_i,
+            a_ip=a_ip,
+            v_ip=v_ip,
+            v_il=v_il,
+            t_su=state.t_su,
+            h_i=h_i_pre,
+            h_s=h_s_pre,
+            h_ip=h_ip_pre,
+            h_il=h_il_pre,
+            e_s=e_s,
+            e_i=e_i,
+            szv_i=szv_i,
+            sz_i=state.equivalent.sz_i,
+            t_i=state.equivalent.t_i,
+            t_s=state.equivalent.t_s,
+            at_i=state.aggregated.at_i,
+            vt_i=state.aggregated.vt_i,
+            ato_i=ato_i_adv,
+            wfx_res=wfx_res,
+            hfx_res=hfx_res,
+            sfx_res=sfx_res,
+            rDt_ice=rDt_ice,
+            sss_m=sss_m,
+            sst_m=sst_m,
+            nn_hls=nn_hls,
+            nn_icesal=cfg.nn_icesal,
+            rn_simin=cfg.rn_simin,
+            rn_sinew=cfg.rn_sinew,
+            rt0=consts.T0,
+            rhoi=consts.rho_ice,
+            rhos=consts.rho_snow,
+            rhow=canonical_constants.rho_water,
+        )
+    else:
+        h_i_post, h_s_post = h_i_pre, h_s_pre  # icedyn.F90:132-134
+        h_ip_post, h_il_post = h_ip_pre, h_il_pre  # icedyn.F90:132-134
+        t_su = state.t_su  # icedyn.F90:132-134
+        sz_i_post = state.equivalent.sz_i  # icedyn.F90:132-134
+        t_i_post, t_s_post = state.equivalent.t_i, state.equivalent.t_s  # icedyn.F90:132-134
+        at_i_post = fortran_sum_categories(a_i, axis=-1)  # icedyn_rdgrft.F90:209
+        vt_i_post = fortran_sum_categories(v_i, axis=-1)  # icedyn.F90:132-134
+        ato_i_dyn = ato_i_adv  # icedyn.F90:133-134
 
-    # 6. End-of-`ice_dyn` `lbc_lnk(..., ldfull = .TRUE.)` (`icedyn.f90:254-260`)
-    if not _plant_omit_subcycle_lbc:
+    # np_dynALL reaches this common exchange only after rdgrft + ice_cor(kt,1)
+    # (icedyn.F90:132-135,191-201); O17 applies it at that production boundary.
+    if dynamics_path == "np_dynADV2D" and not _plant_omit_subcycle_lbc:
         dyn_entries: list[tuple[Field, tuple[int, ...]]] = [
             (a_i, a_i.shape),
             (v_i, v_i.shape),
@@ -4946,6 +5024,10 @@ def si3_ice_cons_hsm_check(
         and cd_routine not in ("icedyn_adv", "icedyn_rdgrft")
     )
     return {"diag": diag, "violations": violations}
+
+
+def _si3_traced(*xs: object) -> bool:
+    return any(isinstance(x, jax.core.Tracer) for x in xs)
 
 
 __all__.extend((

@@ -156,6 +156,26 @@ def _ic_grid(grid_type: str, resolution: int):
     return create_grid(grid_type, resolution=resolution)
 
 
+def _target_grid(grid_type: str, resolution: int):
+    """The target grid with float64 coordinates, as the production decks build
+    it (``precision: fp64``).  The default float32 storage moves centres off
+    exact values (3.75 deg -> 3.7500001), and a centre exactly halfway between
+    two CLM cells then picks the other cell than the run (159 of 2427 lat-lon
+    land columns)."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.precision import get_policy, set_policy
+    if not jax.config.jax_enable_x64:
+        raise SystemExit("regridding needs JAX_ENABLE_X64=1: the run builds its "
+                         "grid in float64.")
+    old = get_policy()
+    set_policy(old._replace(storage=jnp.float64))
+    try:
+        return _ic_grid(grid_type, resolution)
+    finally:
+        set_policy(old)
+
+
 def _source_land_mask(surfdata: str, grid, land_ncol: int) -> np.ndarray:
     """The spin-up's own land definition on its own grid.
 
@@ -230,7 +250,7 @@ def main_era5_soil_t(args) -> int:
             "source IC has no soil-hydraulics stamp, so the output would be "
             "refused by the model; stamp it first (--stamp-only).")
     ncol = src["T_soil"].shape[0]
-    grid = _ic_grid(args.target_grid, args.target_resolution)
+    grid = _target_grid(args.target_grid, args.target_resolution)
     lat, lon = _cols_rad(grid)
     if lat.size != ncol:
         raise SystemExit(f"grid has {lat.size} columns, the IC has {ncol}.")
@@ -308,6 +328,159 @@ def main_era5_soil_t(args) -> int:
     return 0
 
 
+def lift_to_dry_floor(theta, soil_dz, hydraulics):
+    """Columns whose TOTAL water is below the run's Richards dry floor (the
+    loader refuses them rather than create water) are set to that floor in
+    every layer: the least water that makes them loadable.  Every other column
+    is returned unchanged.  The floor is the loader's own
+    (``theta_from_psi(psi_dry_floor(h), h)``).  Returns ``(theta, lifted,
+    added_m)``: lifted column mask and water added per column [m]."""
+    import jax
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import theta_from_psi
+    if not jax.config.jax_enable_x64:
+        # a float32 floor sits below the float64 run's and is refused there
+        raise SystemExit("lift_to_dry_floor needs JAX_ENABLE_X64=1: the run "
+                         "computes its dry floor in float64.")
+    theta = np.asarray(theta, dtype=np.float64)
+    dz = np.asarray(soil_dz, dtype=np.float64).reshape(1, -1)
+    lo = np.broadcast_to(np.asarray(
+        theta_from_psi(psi_dry_floor(hydraulics), hydraulics),
+        dtype=np.float64), theta.shape)
+    added = (lo * dz).sum(1) - (theta * dz).sum(1)
+    lifted = added > 0.0
+    return (np.where(lifted[:, None], lo, theta), lifted,
+            np.where(lifted, added, 0.0))
+
+
+def floor_and_saturation(hydraulics, shape):
+    """``(lo, sat)``: the loader's Richards dry floor and ``theta_sat`` per
+    (col, layer), float64.  Needs x64: a float32 floor sits below the float64
+    run's and is refused there."""
+    import jax
+    from legoesm.land.richards import dry_floor
+    if not jax.config.jax_enable_x64:
+        raise SystemExit("the soil-water rebuild needs JAX_ENABLE_X64=1: the run "
+                         "computes its dry floor in float64.")
+    lo = np.broadcast_to(np.asarray(dry_floor(hydraulics)[1], np.float64), shape)
+    sat = np.broadcast_to(np.asarray(hydraulics.theta_sat, np.float64), shape)
+    return lo, sat
+
+
+def rebuild_relative_wetness(theta, lo_src, sat_src, lo_tgt, sat_tgt):
+    """Carry each layer's wetness from the donor's soil onto the target's.
+
+    ``w = (theta - lo_src) / (sat_src - lo_src)``, clipped to [0, 1] (vote
+    2026-11-12), then ``lo_tgt + w (sat_tgt - lo_tgt)``: every rebuilt layer
+    lies between the target soil's dry floor and saturation.  Where floor and
+    saturation agree the layer is copied unchanged (bit-identical).  Returns
+    ``(theta, n_clipped)``."""
+    theta = np.asarray(theta, dtype=np.float64)
+    if np.any(sat_src <= lo_src) or np.any(sat_tgt <= lo_tgt):
+        raise SystemExit("a soil layer has theta_sat at or below its dry floor; "
+                         "relative wetness is undefined there.")
+    raw = (theta - lo_src) / (sat_src - lo_src)
+    w = np.clip(raw, 0.0, 1.0)
+    same = (lo_src == lo_tgt) & (sat_src == sat_tgt)
+    out = np.where(same, theta, lo_tgt + w * (sat_tgt - lo_tgt))
+    return out, int(((w != raw) & ~same).sum())
+
+
+def check_above_dry_floor(theta, soil_dz, lo):
+    """Refuse a file the run's loader would refuse: a column holding less
+    water than its dry floor in every layer (vote 2026-11-12: a hard check,
+    not a silent lift)."""
+    dz = np.asarray(soil_dz, dtype=np.float64).reshape(1, -1)
+    short = ((lo - theta) * dz).sum(1)
+    if np.any(short > 0.0):
+        raise SystemExit(
+            f"{int((short > 0).sum())} column(s) below the target dry floor "
+            f"after the rebuild (largest {1e3 * float(short.max()):.3g} mm).")
+
+
+def _target_hydraulics(args, lat, lon):
+    """The hydraulics the RUN builds from ``--target-clm-surfdata`` with
+    air-entry head ``--vg-air-entry-m`` (the run's
+    ``land_soil_vg_air_entry_m``: the dry floor depends on it)."""
+    from legoesm.land.clm_surface_map import clm_hydraulics_config, load_clm_surface
+    h_a = args.vg_air_entry_m
+    return clm_hydraulics_config(load_clm_surface(
+        args.target_clm_surfdata, np.degrees(lat), np.degrees(lon),
+        vg_air_entry_m=h_a))._replace(vg_air_entry_m=h_a)
+
+
+def _lift_against_surfdata(theta, soil_dz, args, lat, lon):
+    """:func:`lift_to_dry_floor` against the hydraulics the RUN builds from
+    ``--target-clm-surfdata`` with air-entry head ``--vg-air-entry-m`` (the
+    run's ``land_soil_vg_air_entry_m``: the dry floor depends on it).
+    Returns ``(theta, floor_report)``."""
+    from legoesm.land.restart import file_md5
+    h_a = args.vg_air_entry_m
+    theta, lifted, added = lift_to_dry_floor(
+        theta, soil_dz, _target_hydraulics(args, lat, lon))
+    return theta, {
+        "checked_against": pathlib.Path(args.target_clm_surfdata).name,
+        "checked_against_md5": file_md5(args.target_clm_surfdata),
+        "vg_air_entry_m": h_a,
+        "n_lifted": int(lifted.sum()),
+        "floor_precision": "float64",
+        "lifted_columns_water_added_mm": {
+            str(int(i)): 1e3 * float(added[i]) for i in np.flatnonzero(lifted)},
+    }
+
+
+def main_lift_only(args) -> int:
+    """Lift an IC ALREADY on its target grid to the run's dry floor: only
+    ``theta_soil`` of the columns below the floor in total changes; every other
+    array is copied unchanged.  For an IC built before the floor moved."""
+    src = np.load(args.source, allow_pickle=False)
+    if "soil_dz" not in src.files:
+        raise SystemExit("source IC has no soil_dz stamp; regrid it first.")
+    if "soil_hydraulics_json" not in src.files:
+        raise SystemExit("source IC has no soil-hydraulics stamp; the loader "
+                         "would refuse the output (stamp it first).")
+    if "soil_hydraulics_column_sig" in src.files:
+        # a matching signature lets the loader skip conversion, leaving psi
+        # stale on the lifted columns (codex)
+        raise SystemExit("source IC carries soil_hydraulics_column_sig; "
+                         "--lift-only would leave psi_soil stale on load.")
+    if src["theta_soil"].dtype != np.float64:
+        raise SystemExit("source theta_soil is not float64: the lifted floor "
+                         "would be rounded below the run's float64 floor.")
+    meta_src = json.loads(str(src["metadata_json"]))
+    if (meta_src.get("grid_type"), str(meta_src.get("resolution"))) != (
+            args.target_grid, str(args.target_resolution)):
+        raise SystemExit(
+            f"source IC is on {meta_src.get('grid_type')} "
+            f"{meta_src.get('resolution')}, not {args.target_grid} "
+            f"{args.target_resolution}.")
+    lat, lon = _cols_rad(_target_grid(args.target_grid, args.target_resolution))
+    if lat.size != src["theta_soil"].shape[0]:
+        raise SystemExit(f"grid has {lat.size} columns, the IC has "
+                         f"{src['theta_soil'].shape[0]}.")
+    out = {k: src[k] for k in src.files}
+    theta, report = _lift_against_surfdata(
+        src["theta_soil"], src["soil_dz"], args, lat, lon)
+    out["theta_soil"] = theta.astype(src["theta_soil"].dtype)
+    print(f"dry-floor lift: {report}")
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                             text=True, check=True).stdout.strip()
+    except Exception:
+        sha = "unknown"
+    from legoesm.land.restart import file_md5
+    meta = meta_src
+    meta["dry_floor_lift_only"] = dict(
+        report, from_ic=pathlib.Path(args.source).name,
+        from_ic_md5=file_md5(args.source), git_sha=sha,
+        script="scripts/data/regrid_land_ic.py --lift-only",
+        target_grid=f"{args.target_grid} {args.target_resolution}")
+    out["metadata_json"] = np.str_(json.dumps(meta))
+    np.savez_compressed(args.out, **out)
+    print(f"wrote {args.out}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -348,11 +521,42 @@ def main(argv=None) -> int:
                          "data/legoesm_surfdata_c260716.nc. Refused when the "
                          "source already carries a stamp. Recorded as attested, "
                          "with the source's md5.")
+    ap.add_argument("--target-clm-surfdata", default=None,
+                    help="the CLM surfdata the RUN builds its soil hydraulics "
+                         "from (its clm_surfdata_path).  A regridded column's "
+                         "water came from another soil, so each layer's "
+                         "wetness between the donor soil's dry floor and "
+                         "saturation is rebuilt on this soil (user "
+                         "2026-11-12); a column still below its dry floor is "
+                         "refused.  Without this flag the water is copied "
+                         "as is and the metadata says so.")
+    ap.add_argument("--vg-air-entry-m", type=float, default=None,
+                    help="the run's land_soil_vg_air_entry_m [m]; the dry floor "
+                         "depends on it.  Required with --target-clm-surfdata.")
+    ap.add_argument("--lift-only", action="store_true",
+                    help="do not regrid: --source is an IC already on "
+                         "--target-grid/--target-resolution; only its columns "
+                         "below the run's dry floor are lifted (needs "
+                         "--target-clm-surfdata and --vg-air-entry-m).")
     ap.add_argument("--stamp-only", action="store_true",
                     help="do not regrid: write --source unchanged plus the "
                          "attested soil-hydraulics stamp to --out (for an IC "
                          "already on its target grid).")
     args = ap.parse_args(argv)
+    if args.target_clm_surfdata and args.vg_air_entry_m is None:
+        ap.error("--target-clm-surfdata needs --vg-air-entry-m (the run's "
+                 "land_soil_vg_air_entry_m)")
+    if args.lift_only:
+        missing = [f for f in ("target_clm_surfdata", "target_grid",
+                               "target_resolution") if getattr(args, f) is None]
+        if missing:
+            ap.error("--lift-only needs " + ", ".join(
+                "--" + m.replace("_", "-") for m in missing))
+        if args.era5_soil_t or args.stamp_only or args.source_soil_hydraulics:
+            ap.error("--lift-only takes a stamped IC on its target grid; "
+                     "--era5-soil-t / --stamp-only / --source-soil-hydraulics "
+                     "do not apply")
+        return main_lift_only(args)
     if args.era5_soil_t:
         missing = [f for f in ("era5_lsm", "era5_time", "surfdata", "target_grid",
                                "target_resolution") if getattr(args, f) is None]
@@ -413,7 +617,7 @@ def main(argv=None) -> int:
             f"reconstructed source grid has {src_lat.size} columns, the state "
             f"has {ncol_src}: the metadata does not describe this file.")
 
-    dst_grid = _ic_grid(args.target_grid, args.target_resolution)
+    dst_grid = _target_grid(args.target_grid, args.target_resolution)
     dst_lat, dst_lon = _cols_rad(dst_grid)
 
     from legoesm.coupler.grid_remap import nearest_column_map
@@ -456,6 +660,71 @@ def main(argv=None) -> int:
             f"says {attested.n_layers}.")
     out["soil_dz"] = np.asarray(make_soil_grid(cal_grid).dz, dtype=np.float64)
 
+    if args.target_clm_surfdata:
+        import jax.numpy as jnp
+        from legoesm.land.boundary_data import init_land_surface_data
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.restart import (
+            HYDRAULICS_SOURCE_CLM_MAP, HYDRAULICS_SOURCE_SURFDATA_COSBY)
+        from legoesm.land.richards import psi_dry_floor
+        from legoesm.land.soil_hydraulics import psi_from_theta
+        src_stamp = json.loads(str(hyd_json if hyd_json is not None
+                                   else src["soil_hydraulics_json"]))
+        if (src_stamp.get("parameter_source") != HYDRAULICS_SOURCE_SURFDATA_COSBY
+                or src_stamp.get("parameter_md5") != file_md5(args.surfdata)):
+            raise SystemExit(
+                "the relative-wetness rebuild rebuilds the source soil from "
+                "--surfdata (Cosby); the source's stamp names other hydraulics: "
+                f"{src_stamp}")
+        h_a = args.vg_air_entry_m
+        cfg_src = MultiLayerLandConfig(soil_grid=cal_grid)
+        cfg_src = cfg_src._replace(
+            hydraulics=cfg_src.hydraulics._replace(vg_air_entry_m=h_a))
+        h_src = init_land_surface_data(args.surfdata, src_grid, cfg_src,
+                                       0.0)[0].hydraulics
+        if src_stamp.get("retention_curve") != h_src.retention_curve:
+            raise SystemExit(
+                f"the source's stamp names a {src_stamp.get('retention_curve')} "
+                f"retention curve; the rebuilt Cosby soil is "
+                f"{h_src.retention_curve}.")
+        h_tgt = _target_hydraulics(args, dst_lat, dst_lon)
+        shape_src = np.shape(src["theta_soil"])
+        theta = out["theta_soil"]
+        lo_s, sat_s = (a[nearest] for a in floor_and_saturation(h_src, shape_src))
+        lo_t, sat_t = floor_and_saturation(h_tgt, np.shape(theta))
+        theta_new, n_clipped = rebuild_relative_wetness(theta, lo_s, sat_s,
+                                                        lo_t, sat_t)
+        check_above_dry_floor(theta_new, out["soil_dz"], lo_t)
+        dz = np.asarray(out["soil_dz"], np.float64).reshape(1, -1)
+        dw = ((theta_new - np.asarray(theta, np.float64)) * dz).sum(1)
+        t64 = np.asarray(theta, np.float64)    # donor water the [0, 1] clip set aside
+        clip_m = ((np.clip(t64, lo_s, sat_s) - t64) * dz).sum(1)
+        out["theta_soil"] = theta_new
+        out["psi_soil"] = np.asarray(jnp.maximum(
+            psi_from_theta(jnp.asarray(theta_new), h_tgt), psi_dry_floor(h_tgt)),
+            dtype=np.float64)
+        out["soil_hydraulics_json"] = np.array(json.dumps(soil_hydraulics_stamp(
+            h_tgt.retention_curve, HYDRAULICS_SOURCE_CLM_MAP,
+            args.target_clm_surfdata)))
+        floor_report = {
+            "method": "relative wetness between dry floor and saturation, "
+                      "donor soil -> target soil (user 2026-11-12)",
+            "target_soil": pathlib.Path(args.target_clm_surfdata).name,
+            "target_soil_md5": file_md5(args.target_clm_surfdata),
+            "source_soil_hydraulics": src_stamp,
+            "vg_air_entry_m": h_a,
+            "precision": "float64",
+            "n_layers_clipped": n_clipped,
+            "clipped_donor_water_mm_max_per_column": 1e3 * float(
+                np.abs(clip_m).max()),
+            "column_water_change_mm": {
+                "min": 1e3 * float(dw.min()), "max": 1e3 * float(dw.max()),
+                "mean": 1e3 * float(dw.mean())},
+        }
+    else:
+        floor_report = "not rebuilt (no --target-clm-surfdata)"
+    print(f"soil-water rebuild: {floor_report}")
+
     try:
         sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
                              text=True, check=True).stdout.strip()
@@ -471,6 +740,7 @@ def main(argv=None) -> int:
         "regrid_git_sha": sha,
         "regrid_n_source_land": n_land,
         "source_soil_column_attested": args.source_soil_column,
+        "soil_water_rebuild": floor_report,
     })
     out["metadata_json"] = np.str_(json.dumps(meta))
 

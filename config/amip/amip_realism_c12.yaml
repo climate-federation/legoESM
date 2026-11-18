@@ -19,7 +19,10 @@
 # =============================================================================
 
 # --- Grid + dycore: coarse C12/L20 for cheap iteration -----------------------
+# Legacy atmosphere retired: fv3_duo deliberately refuses this main-path
+# full-physics/L20 setup until a separate port supplies parity.
 grid_type: cubed_sphere
+discretization: fv3_duo
 persistent_dgrid: true       # #1028: carry D-staggered winds between steps; the cc round trip damps eddies (C36 HS jet 13 -> 39-41 m/s). Single-process cube only.
 energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
 resolution: 12

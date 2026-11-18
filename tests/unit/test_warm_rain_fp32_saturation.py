@@ -19,9 +19,14 @@ jax.config.update("jax_enable_x64", True)  # before any array is created
 
 import jax.numpy as jnp  # noqa: E402
 
+import functools  # noqa: E402
+
+from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.physics.microphysics._warm_rain import (  # noqa: E402
-    saturation_adjustment,
+    saturation_adjustment as _saturation_adjustment,
 )
+
+saturation_adjustment = functools.partial(_saturation_adjustment, l_v=constants.L_v)
 from legoesm.thermo import saturation_mixing_ratio  # noqa: E402
 
 # BOMEX-like marginal warm cumulus: T ~ 298 K, p ~ 970 hPa, q_sat ~ 21 g/kg.

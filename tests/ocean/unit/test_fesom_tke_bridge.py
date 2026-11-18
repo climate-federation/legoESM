@@ -106,6 +106,32 @@ def test_profiles_layout_and_wind_response(flat_mesh, z_shim):
     assert model._tke_profiles_fn is not None
 
 
+def test_langmuir_rhs_coupling_reaches_the_fesom_kernel(flat_mesh):
+    """The FESOM bridge hands config.tke straight to tke_vertical_mixing, so
+    the NEMO Langmuir/dissipation ordering must change the forced profiles
+    (identical profiles = the knob was dropped on this grid).  Needs a column
+    that resolves the Langmuir layer: the module's 6-level / 600 m mesh puts
+    it inside the 100 m top cell and is inert by construction."""
+    from fesom_jax.mesh import DEFAULT_PI_MESH_DIR, load_mesh
+    from scripts.run.run_omip_core2 import orca1_zdftke_config
+    mesh = build_flat_bottom_mesh(load_mesh(mesh_dir=DEFAULT_PI_MESH_DIR), H_max=200.0, nlev=20)
+    z = np.asarray(mesh.Z, dtype=np.float64)
+    zs = SimpleNamespace(z_full_ref=z, n_levels=int(z.size))
+    state = create_rest_state(mesh, zs, stratified=True, vertical_coordinate="zstar")
+    zg = fesom_zgeom(mesh)
+    flat_mesh = mesh
+
+    def run(c):
+        vm = VerticalMixingConfig(scheme="tke", tke=orca1_zdftke_config(
+            prognostic=True)._replace(eice=0, tke_langmuir_rhs_coupling=c))
+        return make_tke_profiles_fesom(vm)(state, flat_mesh, zg, _wind(flat_mesh), dt_tke=DT)
+    Kv_s, _, tke_s = run("separate")
+    Kv_s2, _, _ = run("separate")
+    Kv_p, _, tke_p = run("nemo_pre_solve")
+    assert bool(jnp.all(Kv_s2 == Kv_s))
+    assert float(jnp.max(jnp.abs(tke_p - tke_s))) > 0.0
+
+
 def test_model_step_injects_and_carries_tke(flat_mesh, z_shim):
     model = _model(flat_mesh, z_shim)
     state = create_rest_state(flat_mesh, z_shim, stratified=True,
@@ -231,3 +257,58 @@ def test_run_manifest_records_overridden_k_ver_a_ver(flat_mesh, z_shim, tmp_path
         read_run_manifest(path)["config"]["resolved_config"])
     assert (rec.k_ver, rec.a_ver) == (2.5e-5, 3.5e-4)
     assert rec.vmix_config is None
+def test_iwm_n2_mode_is_consumed_on_fesom(flat_mesh, z_shim):
+    """FESOM's IWM splice honours n2_mode: nemo_bn2 (default) and insitu give
+    different K, and an unknown mode raises instead of falling back."""
+    from legoesm.ocean.physics.vertical_mixing.config import IWMConfig
+    state = create_rest_state(flat_mesh, z_shim, stratified=True, vertical_coordinate="zstar")
+    zg = fesom_zgeom(flat_mesh)
+    K = {}
+    for mode in ("nemo_bn2", "insitu"):
+        prof = make_tke_profiles_fesom(_vmix()._replace(iwm=IWMConfig(
+            enabled=True, n2_mode=mode, power_nsq_wm2=1.0e-3, power_cri_wm2=1.0e-3,
+            power_bot_wm2=1.0e-3)))
+        K[mode] = np.asarray(prof(state, flat_mesh, zg, _wind(flat_mesh), dt_tke=DT)[0])
+        assert np.isfinite(K[mode]).all()
+    assert float(np.abs(K["nemo_bn2"] - K["insitu"]).max()) > 0.0
+    bad = make_tke_profiles_fesom(_vmix()._replace(iwm=IWMConfig(
+        enabled=True, n2_mode="potential", power_nsq_wm2=1.0e-3)))
+    with pytest.raises(ValueError, match="unknown on the FESOM lane"):
+        bad(state, flat_mesh, zg, _wind(flat_mesh), dt_tke=DT)
+
+
+def test_nemo_evd_replaces_the_closure_before_iwm(flat_mesh, z_shim):
+    """NEMO zdfphy order on the FESOM bridge: closure, then zdf_evd REPLACES
+    avt with rn_evd where bn2 fires (zdfevd.F90:107-110), then zdf_iwm ADDS.
+    A warm layer planted under a cold one at every node must read exactly
+    rn_evd + K_iwm there, and the evd card must change nothing elsewhere."""
+    import dataclasses
+    from legoesm.ocean.physics.convection.config import EnhancedDiffusionConfig
+    from legoesm.ocean.physics.vertical_mixing.config import IWMConfig
+    state = create_rest_state(flat_mesh, z_shim, stratified=True,
+                              vertical_coordinate="zstar")
+    T = np.array(state.inner.T, dtype=np.float64)
+    T[:, 2] = T[:, 1] + 3.0                      # warm below cold: iface 1 unstable
+    state = dataclasses.replace(
+        state, inner=dataclasses.replace(state.inner, T=jnp.asarray(T)))
+    evd = EnhancedDiffusionConfig(
+        K_conv=100.0, K_bg=0.0, nu_conv=0.0, nu_bg=0.0, n2_mode="nemo_bn2",
+        n2_eos_form="teos10", smooth_transition=False, n2_threshold=-1e-12,
+        evd_composition="nemo_replace")
+    zg = fesom_zgeom(flat_mesh)
+    base = _vmix()._replace(iwm=IWMConfig(enabled=True))
+    f = _wind(flat_mesh)
+    Kv_off, Av_off, _ = make_tke_profiles_fesom(base)(state, flat_mesh, zg, f, dt_tke=DT)
+    Kv_on, Av_on, _ = make_tke_profiles_fesom(base, evd_config=evd)(
+        state, flat_mesh, zg, f, dt_tke=DT)
+    noiwm = _vmix()
+    Kv_cl, _, _ = make_tke_profiles_fesom(noiwm)(state, flat_mesh, zg, f, dt_tke=DT)
+    k_iwm = np.asarray(Kv_off - Kv_cl)
+    on, off = np.asarray(Kv_on), np.asarray(Kv_off)
+    fired = np.abs(on - off) > 0.0
+    # Kv slot j is legoESM interface j-1 (surface slot 0): iface 1 -> slot 2
+    expected = np.zeros_like(fired)
+    expected[:, 2] = True
+    np.testing.assert_array_equal(fired, expected)   # only the planted interface
+    np.testing.assert_allclose(on[:, 2], 100.0 + k_iwm[:, 2], rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(np.asarray(Av_on), np.asarray(Av_off))  # nn_evdm=0

@@ -68,8 +68,11 @@ EXACT_SWITCHES = {f: math.inf for f in EPBLConfig._fields
 
 
 def _epbl_case_config(dt: float, smooth=None,
-                      shortwave=None) -> OceanPhysicsConfig:
-    """The PR #2122 case options (docs/ocean/specs/epbl_energetic_pbl.md)."""
+                      shortwave=None, variant=None) -> OceanPhysicsConfig:
+    """The PR #2122 case options (docs/ocean/specs/epbl_energetic_pbl.md).
+
+    ``variant`` overrides EPBLConfig fields for the branch-variant cases
+    (``VARIANTS``)."""
     epbl = EPBLConfig(
         dt_s=dt, k_after_surface_flux=True,
         mstar_scheme="reichl_h18", wt_scheme="reichl_h18", nstar=0.06,
@@ -80,6 +83,8 @@ def _epbl_case_config(dt: float, smooth=None,
         mld_tol=0.1, eqdisc_shape=True, eqdisc_v0h=True,
         K_bg=1.0e-5, A_bg=1.0e-4,
         **(EXACT_SWITCHES if smooth is None else smooth))
+    if variant:
+        epbl = epbl._replace(**variant)
     return OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="epbl", epbl=epbl),
         convection=OceanConvectionConfig(scheme="none"),
@@ -87,7 +92,7 @@ def _epbl_case_config(dt: float, smooth=None,
 
 
 def _legoesm_T_8h(q: float, dt: float, T0, S0, smooth=None,
-                  sw_down=None) -> np.ndarray:
+                  sw_down=None, variant=None) -> np.ndarray:
     zc = create_ocean_z_star(n_levels=50, H_max=50.0, dz_surface=1.0,
                              dz_deep=1.0)
     f40 = 2.0 * constants.Omega * np.sin(np.deg2rad(40.0))
@@ -100,7 +105,8 @@ def _legoesm_T_8h(q: float, dt: float, T0, S0, smooth=None,
         scheme="jerlov_2band", water_type="I"))
     scm = OceanColumnModel.create(
         nlev=50, dt=dt, T_profile=jnp.asarray(T0), S_profile=jnp.asarray(S0),
-        physics_config=_epbl_case_config(dt, smooth, shortwave), z_coord=zc,
+        physics_config=_epbl_case_config(dt, smooth, shortwave, variant),
+        z_coord=zc,
         latitude_deg=40.0,
         forcing=forcing, implicit_vertical_mixing=True,
         K_v_background=0.0, A_v_background=0.0)
@@ -215,6 +221,52 @@ MEASURED_GAP_SW = {
     ],
 }
 _SW_DOWN = 200.0
+
+# Branch-variant cases (#2180): the same column with one ePBL option switched,
+# so the switches only those branches reach are exercised (MOM6 fields in
+# ``mom6_epbl_scm_variants_0e9a561.npz``; overrides in provenance.json).
+FIXTURE_VARIANTS = FIXTURE.with_name("mom6_epbl_scm_variants_0e9a561.npz")
+VARIANTS = {
+    "om4": {"mstar_scheme": "om4"},
+    "v0": {"eqdisc_v0h": False, "eqdisc_v0": True},
+    "lin": {"eqdisc_shape": False, "eqdisc_v0h": False},
+}
+# Measured max |T_legoESM - T_MOM6| at 8 h [degC], fp64 policy, exact
+# switches (SLURM job 28806604; JAX_ENABLE_X64=1).
+MEASURED_GAP_VARIANTS = {
+    ("om4", "q-200", 1200): 0.000260388734972139,
+    ("om4", "q-200", 300): 8.649626490608853e-06,
+    ("om4", "q0", 1200): 4.618527782440651e-14,
+    ("om4", "q0", 300): 1.2043699371133698e-12,
+    ("om4", "q200", 1200): 0.001309758162406638,
+    ("om4", "q200", 300): 0.00026504355020406933,
+    ("v0", "q-200", 1200): 0.0003285928493212964,
+    ("v0", "q-200", 300): 1.6560177758861983e-05,
+    ("v0", "q0", 1200): 1.4566126083082054e-13,
+    ("v0", "q0", 300): 4.902744876744691e-13,
+    ("v0", "q200", 1200): 0.00135816990962212,
+    ("v0", "q200", 300): 0.00017245949263156035,
+    ("lin", "q-200", 1200): 0.00025758760738270325,
+    ("lin", "q-200", 300): 2.6455125510693733e-05,
+    ("lin", "q0", 1200): 2.4158453015843406e-13,
+    ("lin", "q0", 300): 5.471179065352771e-13,
+    ("lin", "q200", 1200): 0.001714411655004966,
+    ("lin", "q200", 300): 0.0003226003538401301,
+}
+
+
+@pytest.mark.parametrize("variant,case,dt", sorted(MEASURED_GAP_VARIANTS))
+def test_epbl_scm_variant_reproduces_its_measured_gap_to_mom6(variant, case,
+                                                              dt):
+    key = f"{variant}_{case}_dt{dt}"
+    with np.load(FIXTURE_VARIANTS) as fx:
+        T_mom6, T0, S0 = (fx[f"{key}_T_8h"], fx[f"{key}_T_init"],
+                          fx[f"{key}_S_init"])
+    T_lego = _legoesm_T_8h(_Q[case], float(dt), T0, S0,
+                           variant=VARIANTS[variant])
+    gap = float(np.max(np.abs(T_lego - T_mom6)))
+    np.testing.assert_allclose(gap, MEASURED_GAP_VARIANTS[(variant, case, dt)],
+                               rtol=1e-6, atol=1e-12)
 
 
 @pytest.mark.parametrize("case,dt", sorted(MEASURED_GAP_SW))

@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
 from legoesm.ocean.bulk_flux_omip import air_sea_fluxes, blk_oce_2
 from legoesm.ocean.eos import VALID_FREEZE_SCHEMES, freezing_point
 
@@ -713,15 +714,22 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
     area integral of precip / sw_down after either point sampling is within
     0.4% of the first-order conservative integral, so no renormalisation.
     """
-    if forcing_remap not in ("bilinear", "nemo_scrip"):
+    if forcing_remap not in ("bilinear", "nemo_scrip", "nemo_weights"):
         raise ValueError(
-            f"unknown forcing_remap {forcing_remap!r}; expected 'bilinear' "
-            f"or 'nemo_scrip'")
+            f"unknown forcing_remap {forcing_remap!r}; expected 'bilinear', "
+            f"'nemo_scrip' or 'nemo_weights'")
     if forcing_remap == "nemo_scrip" and grid_type != "tripole":
         raise ValueError(
             f"forcing_remap='nemo_scrip' is wired for the tripole only; the "
             f"oracle's weights target that grid. Got grid_type={grid_type!r}.")
+    # "nemo_weights" = the oracle's per-channel split (bicubic winds, bilinear
+    # rest) computed at any grid's points, so every point grid can get it.
+    pt_method = "nemo_weights" if forcing_remap == "nemo_weights" else "bilinear"
     if grid_type in ("latlon", "latlon_regional"):
+        if forcing_remap != "bilinear":
+            raise ValueError(
+                f"forcing_remap={forcing_remap!r} is a point sampler; the "
+                f"{grid_type!r} grid uses the conservative regrid.")
         lat_deg = np.degrees(np.asarray(grid.lat))
         lon_deg = np.degrees(np.asarray(grid.lon))
         return _sample_forcing_latlon(forcing, idx_t, lat_deg, lon_deg)
@@ -738,7 +746,7 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
                     f"would give a plausible wrong field, not an error.")
             return sample_forcing_tripole_scrip(forcing, idx_t)
         forc = _sample_forcing_points(
-            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method="bilinear",
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method=pt_method,
         )
         return {k: v.reshape(shp) for k, v in forc.items()}
     if grid_type == "cubed_sphere":
@@ -747,14 +755,14 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
         shp = lat_pts.shape
         forc = _sample_forcing_points(
             forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
-            method="bilinear",
+            method=pt_method,
         )
         return {k: v.reshape(shp) for k, v in forc.items()}
     if grid_type in ("mpas", "mpas_regional"):
         lat_pts = np.degrees(np.asarray(grid.latCell))
         lon_pts = np.degrees(np.asarray(grid.lonCell))
         return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts,
-                                      method="bilinear")
+                                      method=pt_method)
     if grid_type == "fesom":
         # FESOM triangular mesh: 1-D PAIRED node (lat, lon) points (radians
         # on the FesomOceanGrid facade) — same bilinear treatment as the
@@ -762,7 +770,7 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
         lat_pts = np.degrees(np.asarray(grid.lat))
         lon_pts = np.degrees(np.asarray(grid.lon))
         return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts,
-                                      method="bilinear")
+                                      method=pt_method)
     raise NotImplementedError(
         f"_sample_omip2_forcing does not support grid_type={grid_type!r}"
     )
@@ -797,7 +805,8 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
                                      rho_air: float = constants.rho_air,
                                      u_oce=None, v_oce=None,
                                      wind_current_feedback_vfac: float = 0.0,
-                                     forcing_remap: str = "bilinear"):
+                                     forcing_remap: str = "bilinear",
+                                     zeta_cap_width: float = MOST_ZETA_CAP_WIDTH):
     """Build a :class:`FreshwaterForcing` (P, E, runoff) for the OMIP-2 run.
 
     Delivered to the ocean via the in-core channel
@@ -865,6 +874,7 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
         T_sfc_K=jnp.asarray(T_sfc_K),
         slp_Pa=None if slp is None else jnp.asarray(slp),
         u_oce=u_oce, v_oce=v_oce, vfac=wind_current_feedback_vfac,
+        zeta_cap_width=zeta_cap_width,
     )
     if emp:
         precip = np.asarray(forc["precip"], dtype=np.float64)
@@ -1065,7 +1075,8 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   dm2dc_window=None,
                                   u_oce=None, v_oce=None,
                                   wind_current_feedback_vfac: float = 0.0,
-                                  forcing_remap: str = "bilinear"):
+                                  forcing_remap: str = "bilinear",
+                                  zeta_cap_width: float = MOST_ZETA_CAP_WIDTH):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
@@ -1112,7 +1123,8 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     ``"bilinear"`` (default, unchanged) or ``"nemo_scrip"``, which reads NEMO's
     own SCRIP weight files so the winds arrive through the oracle's exact
     interpolation -- bicubic for u10/v10, bilinear for the rest, as ORCA1's
-    namsbc_blk specifies. Tripole only; the sampler raises otherwise.
+    namsbc_blk specifies (tripole only; the sampler raises otherwise), or
+    ``"nemo_weights"``, the same split computed at any point grid's centres.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
     T_freeze = float(constants.T_freeze)
@@ -1146,6 +1158,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         T_sfc_K=jnp.asarray(T_sfc_K),
         slp_Pa=None if slp is None else jnp.asarray(slp),
         u_oce=u_oce, v_oce=v_oce, vfac=wind_current_feedback_vfac,
+        zeta_cap_width=zeta_cap_width,
     )
     # Non-solar open-water heat flux, assembled EXACTLY like NEMO blk_oce_2:
     #   qns = eps_w*(LW_down - sigma*T_s^4)            net LW (Kirchhoff: the
@@ -1283,7 +1296,7 @@ def build_core2_forcing_device_stack(forcing, grid, grid_type: str):
 
 def compute_omip2_surface_forcing_jax(
     state, *, forcing_stack, nn_i, nn_j, grid_shape, idx_t, rho_air=constants.rho_air,
-    nn_w=None,
+    nn_w=None, zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
 ):
     """Pure-JAX, ``lax.scan``-traceable form of
     :func:`compute_omip2_surface_forcing` for the tripole grid (issue #354).
@@ -1329,7 +1342,7 @@ def compute_omip2_surface_forcing_jax(
     T_sfc_K = state.T.data[..., 0] + T_freeze
     tau_x, tau_y, sh, lh, evap = air_sea_fluxes(
         u10=u10, v10=v10, T_air_K=T_air, q_air=q_air,
-        T_sfc_K=T_sfc_K, slp_Pa=slp,
+        T_sfc_K=T_sfc_K, slp_Pa=slp, zeta_cap_width=zeta_cap_width,
     )
     # Non-solar assembly: EXACT jnp mirror of the host
     # ``compute_omip2_surface_forcing`` (NEMO blk_oce_2 form) -- net-LW
@@ -1349,6 +1362,7 @@ def compute_omip2_surface_forcing_jax(
 
 def build_omip2_scan_block_fn(
     model, dt, grid_shape, *, rho_air=constants.rho_air, ramp_s=0.0,
+    zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
 ):
     """Build a JIT-compiled ``lax.scan`` block-step function for the tripole
     OMIP time loop (issue #354).
@@ -1385,6 +1399,7 @@ def build_omip2_scan_block_fn(
                 st, forcing_stack=forcing_stack, nn_i=nn_i, nn_j=nn_j,
                 nn_w=nn_w,
                 grid_shape=grid_shape, idx_t=idx_t, rho_air=rho_air,
+                zeta_cap_width=zeta_cap_width,
             )
             if apply_ramp:
                 ramp = jnp.minimum(

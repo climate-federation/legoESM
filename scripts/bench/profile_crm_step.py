@@ -1,7 +1,7 @@
 """Profile the plane CRM (f-plane compressible Euler) step on GPU.
 
-Mirrors ``scripts/bench/profile_cs_dycore.py`` but for the plane non-hydrostatic
-dycore at N=96 / nlev=30 (276 480 horizontal cells x 30 levels), the same
+Profiles the plane non-hydrostatic dycore at N=96 / nlev=30
+(276 480 horizontal cells x 30 levels), the same
 configuration used by ``scripts/bench/bench_crm_gpu_scaling.py``.
 
 For each stage we report ``ms/step`` measured via

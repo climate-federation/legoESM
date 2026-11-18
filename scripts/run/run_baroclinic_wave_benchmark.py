@@ -538,42 +538,7 @@ def main():
         model = MPASPrimitiveEquationModel(grid, sigma, config)
 
     else:
-        from legoesm.grids.cubed_sphere import (
-            CubedSphereGrid,
-            create_cubed_sphere,
-            rotate_winds_grid_to_geo,
-        )
-        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.operators_cdgrid import dgrid_vorticity, dgrid_to_center_vector
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationModel,
-            CDGridPrimitiveEquationConfig,
-            hydrostatic_to_fv3,
-            fv3_to_hydrostatic,
-        )
-        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
-
-        grid = create_cubed_sphere(N_GRID)
-        cdgrid = create_cubed_sphere_cdgrid(grid)
-
-        print("Initializing Jablonowski-Williamson baroclinic wave...")
-        state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
-        ps_init = np.array(state_cc.p_s.data)
-        print(f"  Initial max |u|: {float(jnp.max(jnp.abs(state_cc.u.data))):.1f} m/s")
-        print(f"  Initial mean T:  {float(jnp.mean(state_cc.T.data)):.1f} K")
-        print(f"  Initial p_s:     {float(jnp.mean(state_cc.p_s.data)) / 100:.1f} hPa")
-
-        state = hydrostatic_to_fv3(state_cc, cdgrid)
-
-        config = CDGridPrimitiveEquationConfig(
-            hyperdiff_coeff=nu4,
-            hyperdiff_ps_coeff=nu4,
-            use_conservation_fixer=True,
-            fix_mass=True,
-            anchor_mass_to_initial=True,
-            time_integrator="ssp_rk3",
-        )
-        model = CDGridPrimitiveEquationModel(grid, sigma, config)
+        raise ValueError("fv3_duo replaces this retired cube atmosphere adapter; no duo equivalent is wired here.")
 
     # -----------------------------------------------------------------------
     # Helper closures for grid-dependent diagnostics
@@ -586,10 +551,6 @@ def main():
         elif USE_ICOSAHEDRAL:
             u_e, v_n = reconstruct_cell_velocity(st.u.data, grid)
             return st.p_s.data, u_e, v_n, st.T.data
-        else:
-            cc = fv3_to_hydrostatic(st, cdgrid)
-            u_c, v_c = dgrid_to_center_vector(st.u_d.data, st.v_d.data)
-            return cc.p_s.data, u_c, v_c, cc.T.data
 
     def _blowup_check(st):
         ps, _, _, _ = _get_grid_fields(st)
@@ -638,10 +599,6 @@ def main():
             jnp.sum((KE0 + constants.c_vd * T0) * dp0 / constants.g, axis=-1)
             * area
         ))
-    else:
-        state_cc_init = fv3_to_hydrostatic(state, cdgrid)
-        mass_init = compute_dry_mass(state_cc_init, grid)
-        energy_init = compute_total_energy(state_cc_init, grid, sigma)
 
     diag_times.append(0.0)
     diag_dry_mass.append(mass_init)
@@ -725,10 +682,6 @@ def main():
                     jnp.sum((KE_now + constants.c_vd * T_now) * dp_now / constants.g, axis=-1)
                     * area
                 ))
-            else:
-                cc_now = fv3_to_hydrostatic(state, cdgrid)
-                mass_now = compute_dry_mass(cc_now, grid)
-                energy_now = compute_total_energy(cc_now, grid, sigma)
 
             diag_times.append(day)
             diag_dry_mass.append(mass_now)

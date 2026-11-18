@@ -243,7 +243,7 @@ BASELINE_SCHEMES = {
 
 SCHEME_SWEEPS = {
     "turbulence": (
-        "louis", "smagorinsky", "tke", "mynn25", "clubb_lite", "clubb",
+        "louis", "smagorinsky", "tke", "mynn25", "clubb",
         "holtslag_boville", "ysu", "edmf",
     ),
     "microphysics": (

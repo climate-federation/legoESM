@@ -111,6 +111,12 @@ class SurfaceFluxOutput(NamedTuple):
     # ``None`` when interception is off.
     LE_wet_canopy: jax.Array | None = None
     LE_soil: jax.Array | None = None
+    # Canopy-air condensation (dew limit) [kg m-2 s-1, >= 0], already netted
+    # out of ``lhflx`` (at the snow-weighted ground charge ``L_soil``) and added
+    # to ``shflx``.  The land step deposits it: the snow-covered share on the
+    # pack as ice, the rest in the canopy-water store (overflow to the soil).
+    # None for schemes without a canopy-air node.
+    condensation: jax.Array | None = None
     # SimpleSEB over a layered pack (fractional cover f): the pack's share of
     # ``lhflx`` [W/m^2 per cell area], f times the snow surface's own latent
     # flux.  ``None`` on the binary snow path and for the canopy schemes.

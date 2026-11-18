@@ -106,7 +106,7 @@ def test_2d_polar_filter_lon_split_matches_full_lon():
     if n != 4:
         pytest.skip("needs exactly 4 ranks (4x1 and 2x2 both span the world)")
 
-    grid = create_latlon_grid(8)                       # n_lat=8, n_lon=16
+    grid = create_latlon_grid(12)                      # n_lat=12, n_lon=24 (3-row bands on 4 ranks)
     sigma = create_sigma_coordinate(n_levels=4)
 
     def _cfg(flt):

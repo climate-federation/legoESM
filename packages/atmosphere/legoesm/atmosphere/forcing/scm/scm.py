@@ -59,6 +59,7 @@ from legoesm.core.column_stepping import (
 )
 from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+from legoesm.atmosphere.physics.turbulence.config import refuse_retired_turbulence
 from legoesm.atmosphere.physics.microphysics.integration import (
     make_microphysics_physics,
     min_tracer_slots,
@@ -587,6 +588,14 @@ class SingleColumnModel:
         # ``physics_fn`` was built from a single validated
         # ``physics_config`` (which only ``create`` can enforce).
         self._built_by_create = bool(_built_by_create)
+        # Direct construction cannot inspect ``physics_fn``; the config is the
+        # only record of the scheme it was built from, so it is required.
+        if physics_config is None:
+            raise ValueError(
+                "SingleColumnModel: pass the physics_config physics_fn was "
+                "built from, or route through SingleColumnModel.create.")
+        refuse_retired_turbulence(
+            physics_config.turbulence.scheme, "SingleColumnModel")
         if time_integrator not in TIME_INTEGRATORS:
             raise ValueError(
                 f"Unknown time_integrator: {time_integrator!r}. "

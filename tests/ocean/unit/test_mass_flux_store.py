@@ -1435,6 +1435,8 @@ def test_store_mass_flux_is_the_last_config_field():
             "lateral_viscosity_mask_levels",
             "lateral_shlat",
             "runoff_temperature_floor_sharpness",
+            # NEMO eddy_viscosity_3D coastal closure (OMIP card port, #2472)
+            "lateral_viscosity_file_coastal",
             )
     assert fields[-len(tail):] == tail, (
         f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "

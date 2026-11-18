@@ -43,7 +43,7 @@ SVP = (0.6112, 17.67, 29.65)   # WRF module_model_constants SVP1-3
 
 def constants_vector():
     # cp g rovcp r xlv svp1 svp2 svp3 svpt0 ep1 ep2 karman p1000mb (driver order)
-    return [C.c_pd, C.g, C.R_d / C.c_pd, C.R_d, C.L_v, *SVP, C.T_freeze,
+    return [C.c_pd, C.g, C.R_d / C.c_pd, C.R_d, C.L_v, *SVP, C.T_freeze,  # latent-ok: WRF sfclayrev oracle constant
             C.R_v / C.R_d - 1.0, C.R_d / C.R_v, C.kappa_von_karman, C.p_ref]
 
 

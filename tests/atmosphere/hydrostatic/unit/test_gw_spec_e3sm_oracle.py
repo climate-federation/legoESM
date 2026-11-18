@@ -15,8 +15,10 @@ dt 112.5 s and 1800 s), frontal with cos(lat) taper, Beres+frontal, and
 Beres+frontal+orographic (E3SM's orographic member of a spectral suite).
 The Beres table is a seeded harness table, regenerated here.
 
-Acceptance (user decision 2026-10-19): max relative error <= 1e-10 in fp64.
-The scheme has no smoothing fields, so the hard limit is the default config.
+Acceptance (user decision 2026-10-19): max relative error <= 1e-10 in fp64,
+at the hard limit of the RULE 5 smoothing (#2241: every sharpness 1e12,
+``crit_level_floor`` 0).  The smooth default's per-(arm, column) gap is pinned
+in ``_DEFAULT_GAP`` and its gradient checked at the hard limit's kinks.
 Metric reused unchanged from test_gw_oro_cam6_oracle.py: wind tendencies per
 column max|ours - oracle| / max|oracle| (absolute where the oracle column is
 zero); heating as the field max-norm, because the implicit dse diffusion
@@ -42,6 +44,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.test_util import check_grads
 
 from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import (
@@ -79,11 +82,19 @@ def fx():
     return z, meta, t
 
 
-def _config(ours):
+_HARD = dict(softmin_sharpness=1.0e12, crit_level_sharpness=1.0e12, crit_level_floor=0.0,
+             umcfac_abs_width=0.0, umcfac_sign_width=0.0, taumin_ramp_width=0.0)
+
+
+def _config(ours, hard=True):
     o = dict(ours)
     fr = E3SMFrontalConfig()._replace(**o.pop("frontal", {}))
     br = E3SMBeresConfig()._replace(**o.pop("beres", {}))
-    return E3SMCAMConfig()._replace(frontal=fr, beres=br, **o)
+    cfg = E3SMCAMConfig()._replace(frontal=fr, beres=br, **o)
+    if not hard:
+        return cfg
+    return cfg._replace(beres=br._replace(index_round_width=0.0,
+                                          crit_minmax_sharpness=float("inf")), **_HARD)
 
 
 def _inputs(z, ds, dtype=jnp.float64):
@@ -113,10 +124,10 @@ def test_fixture_matches_the_shipped_defaults(fx):
     assert meta["constants"] == dict(g=constants.g, R_d=constants.R_d, c_pd=constants.c_pd)
 
 
-def _arm(fx, arm, ds):
+def _arm(fx, arm, ds, hard=True):
     z, meta, table = fx
     m = meta["arms"][arm]
-    out = _run(_inputs(z, ds), _config(m["ours"]), m["dt"], table if m["mfcc"] else None)
+    out = _run(_inputs(z, ds), _config(m["ours"], hard), m["dt"], table if m["mfcc"] else None)
     ref = {k: z[f"{arm}/{ds}/ptend_{k}"] for k in "uvs"}
     ref["s0"] = z.get(f"{arm}/{ds}/ptend_s_nophis", ref["s"])
     return out, ref, z[f"{ds}/phis"] == 0.0
@@ -135,6 +146,174 @@ def test_matches_e3sm_oracle(fx, arm, ds):
     assert max(errs.values()) <= _TOL, errs
 
 
+# Per-(arm, dataset) gap of the RULE 5 smooth default (E3SMCAMConfig():
+# softmin_sharpness 50, crit_level_sharpness 100, crit_level_floor 0) vs the
+# oracle: du/dv per column (metric of _rel_err, per column), dT as the field
+# max-norm over flat columns.  Measured 2026-11-12, re-measured 2026-11-16 when the
+# umcfac |c - u| (0.01 m/s), sign (1e-3 m/s) and taumin (1e-10 Pa) widths
+# landed (#2241: only background_dt1800 moved beyond 1e-5 relative, max du
+# 2.65e-3 -> 7.88e-3, dT field 1.02e-3 -> 6.74e-3; flat-column dT in three
+# other L36 arms moved < 5e-6 relative); a change to a smooth
+# form or a default width re-measures these (CLAUDE.md RULE 5).
+# Re-measured 2026-11-17 (#2546): the stress below a limited layer now adds
+# |gwut| (momentum-exact); only background_dt1800 (umcfac binds) moved.
+# Re-measured 2026-11-16 when the Beres NINT/INT staircases landed (#2545,
+# index_round_width 0.1, crit_minmax_sharpness 100): only the four Beres
+# (convective) entries moved.
+_DEFAULT_GAP = {
+    'background/l36': {
+        'du': [0.002108721345086995, 0.0010616902333161087, 0.002646053370863181, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071295903564, 0.0004652215882224963],
+        'dv': [0.0021087213450869256, 0.0010616902333162653, 0.002646053370863179, 0.002210858303638304, 0.0, 0.0, 0.00124560712959019, 0.0],
+        'dT_field': 0.001020719281732452,
+        'dT_cols_flat': [0.00390124423025145, 0.0008934157396024475, 0.0029192506608293665, 0.00902431375659232, 0.0008366744401474168, 0.0033678790304886926, 0.0004088565224634661],
+    },
+    'background/l32': {
+        'du': [0.0017106779342957862, 0.001092933815946785, 0.002448257744577537],
+        'dv': [0.001710677934295963, 0.0010929338159467632, 0.002448257744577592],
+        'dT_field': 0.001807693020653454,
+        'dT_cols_flat': [0.004082420000327104, 0.0005339347503535069, 0.0015094902321471752],
+    },
+    'background_dt1800/l36': {
+        'du': [0.002108721345086995, 0.0010616902333161087, 0.0026460533886112528, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071295903564, 0.007890662689603267],
+        'dv': [0.0021087213450869256, 0.0010616902333162653, 0.0026460533886112675, 0.002210858303638304, 0.0, 0.0, 0.00124560712959019, 0.0],
+        'dT_field': 0.0067412484444515555,
+        'dT_cols_flat': [0.0039012106087277254, 0.0008934106656589562, 0.002919245822167362, 0.009024134388708792, 0.0008366734677625923, 0.003367887182159502, 0.0067412484444515555],
+    },
+    'frontal_taper/l36': {
+        'du': [0.0, 0.0, 0.0019715720332921342, 0.002044083485452372, 0.0, 0.0, 0.002221890296605758, 0.0],
+        'dv': [0.0, 0.0, 0.001971572033292119, 0.0020440834854523883, 0.0, 0.0, 0.0022218902966057775, 0.0],
+        'dT_field': 0.004737198616929807,
+        'dT_cols_flat': [0.0, 0.0, 0.0018477747024415305, 0.0, 0.0, 0.004737198616929807, 0.0],
+    },
+    'frontal_taper/l32': {
+        'du': [0.0030392863618121557, 0.0, 0.0034188551369078216],
+        'dv': [0.0030392863618120022, 0.0, 0.0034188551369078706],
+        'dT_field': 0.004674693184129954,
+        'dT_cols_flat': [0.006114392768353289, 0.0, 0.004650292706994736],
+    },
+    'convective_frontal/l36': {
+        'du': [0.00968506344532093, 0.0, 0.005858737822303813, 0.0020440834854522794, 0.0, 2.3725363871957644e-05, 0.0021661630212110347, 0.0014267022035004402],
+        'dv': [0.009685063445320928, 0.0, 0.008934473740157923, 0.0020440834854522556, 0.0, 0.0, 0.0021698027258529816, 0.0],
+        'dT_field': 0.0012500463992782592,
+        'dT_cols_flat': [0.004947481047096745, 0.0, 0.0018477619841124214, 0.0, 8.291689284458155e-06, 0.0046367786014093375, 0.0012500463992782592],
+    },
+    'convective_frontal/l32': {
+        'du': [0.003075873588991349, 0.014712869840803975, 0.0034188551369078723],
+        'dv': [0.003103679939416202, 0.014712869840804048, 0.0034188551369078637],
+        'dT_field': 0.004650291917694309,
+        'dT_cols_flat': [0.006320173795203495, 0.016071651848465648, 0.004650291917694309],
+    },
+    'oro_frontal_convective/l36': {
+        'du': [0.0003043488644979132, 1.8518663263341885e-08, 0.0016393612601961426, 0.0003877750536236757, 0.0, 0.03623998594747442, 0.02095917721888361, 0.0014267022035004402],
+        'dv': [4.874869829723612e-05, 1.8518663530970958e-08, 0.001728609584596463, 0.00014249684694425498, 0.0, 0.0, 0.020913701834633598, 0.0],
+        'dT_field': 0.021182235750415664,
+        'dT_cols_flat': [0.00047237119349770605, 1.8506302522747416e-08, 7.625469381429111e-05, 0.0, 0.010386135606333273, 0.021182235750415664, 0.0009508738097634513],
+    },
+    'oro_frontal_convective/l32': {
+        'du': [0.008081968235471854, 0.0009085328109832815, 0.000606868850477048],
+        'dv': [0.008661040495514829, 0.00016603752887341445, 0.000648888639421392],
+        'dT_field': 0.003036434574326499,
+        'dT_cols_flat': [0.009992116437032413, 0.001986870862181404, 0.0003929395193558013],
+    },
+}
+
+
+def _per_column(ours, oracle):
+    diff = np.abs(np.asarray(ours) - oracle).max(axis=-1)
+    scale = np.abs(oracle).max(axis=-1)
+    return np.where(scale > 0, diff / np.where(scale > 0, scale, 1.0), diff)
+
+
+@pytest.mark.parametrize("arm,ds", _cases())
+def test_default_smoothing_gap_per_case(fx, arm, ds):
+    out, ref, flat = _arm(fx, arm, ds, hard=False)
+    want = _DEFAULT_GAP[f"{arm}/{ds}"]
+    np.testing.assert_allclose(_per_column(out.du_dt, ref["u"]), want["du"], rtol=1e-6, atol=1e-12)
+    np.testing.assert_allclose(_per_column(out.dv_dt, ref["v"]), want["dv"], rtol=1e-6, atol=1e-12)
+    s = np.asarray(out.dT_dt) * constants.c_pd
+    np.testing.assert_allclose(_rel_err_field(s[flat], ref["s"][flat]), want["dT_field"],
+                               rtol=1e-6, atol=1e-12)
+    # Per flat column too (codex): absolute allowance _TOL for the oracle's
+    # dse-diffusion round-off floor (module docstring); elevated columns carry
+    # the known phis ulp gap and are covered by the field metric above.
+    np.testing.assert_allclose(_per_column(s[flat], ref["s"][flat]), want["dT_cols_flat"],
+                               rtol=1e-6, atol=_TOL)
+
+
+# (arm/dataset, column, s*): wind scales s (u, v of every column times s) where
+# the HARD-limit tendency of that column has a derivative jump, found
+# 2026-11-12 by scanning s in [0.8, 1.2] (step 5e-4) and bisecting; check_grads
+# fails there at the hard limit and passes at the default (#2241).
+_KINKS = (("convective_frontal/l36", 3, 0.8178145073179883, 1e-5),
+          ("frontal_taper/l36", 3, 0.8178145073179883, 1e-5),
+          ("oro_frontal_convective/l36", 0, 0.9330450443017286, 1e-5),
+          ("oro_frontal_convective/l36", 3, 0.8178145073179883, 1e-5),
+          # #2241 (2026-11-16, scan of d f/ds at the default +-5e-5 around each
+          # earlier candidate, patched variants): the |c - u| of the umcfac
+          # limit (43 of 66 candidates; this one was the unattributed kink) and
+          # the taumin zeroing (3 of 66).  Each is removed by its width field.
+          # eps 1e-6 at the umcfac cases: the smooth sign is 1e-3 m/s wide,
+          # finer than u*1e-5 resolves (f'' measured continuous; vote 3-0).
+          ("background/l36", 0, 0.8228612252375684, 1e-6),      # umcfac |c - u|
+          # order 1 here (#2546, vote 3-0): the momentum-exact carry |gwut|
+          # (CAM's abs) is C1, not C2, where this layer's unlimited
+          # non-positive divergence crosses the critical level.
+          ("background/l32", 1, 0.8298968, 1e-6, 1),            # umcfac |c - u|, sign
+          ("background/l36", 3, 0.8242109368577084, 1e-5),      # taumin zeroing
+          # #2545 (2026-11-16): the Beres source's E3SM NINT/INT of traced wind,
+          # each flip located to 2e-7 in s on the shipped code: critical-level
+          # bin bounds, table column NINT(uh), and NINT(uh) with INT(CS) /
+          # NINT(CS/dc).  Removed by beres.index_round_width (the hard limit
+          # here sets it 0); a rescan of every Beres-arm column at the default
+          # finds no kink left.
+          ("convective_frontal/l36", 0, 0.9885033894328875, 1e-5),      # NINT(Umin/dc)
+          ("convective_frontal/l36", 2, 0.8062826495054753, 1e-5),      # NINT(uh), INT(CS)
+          ("convective_frontal/l32", 0, 0.8528525390220053, 1e-5),      # NINT(uh), CS, shift
+          ("convective_frontal/l32", 1, 0.8008877124605397, 1e-5),      # NINT(uh)
+          ("convective_frontal/l32", 1, 0.8512297290955184, 1e-5),      # NINT(Umax/dc)
+          ("oro_frontal_convective/l36", 2, 0.8062826495054753, 1e-5),  # NINT(uh), INT(CS)
+          ("oro_frontal_convective/l32", 0, 0.8152495757979976, 1e-5),  # NINT(uh)
+          ("oro_frontal_convective/l32", 0, 0.8528525390220053, 1e-5),  # as convective
+          ("oro_frontal_convective/l32", 1, 0.8008877124605397, 1e-5),  # l32 (same
+          ("oro_frontal_convective/l32", 1, 0.8512297290955184, 1e-5))  # columns)
+
+
+@pytest.mark.parametrize("case,col,s_star,eps,order",
+                         [k if len(k) == 5 else (*k, 2) for k in _KINKS])
+def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps, order):
+    """RULE 5 gradient test at the default; reverse mode, eps 1e-5 (Lindzen)
+    unless the switch's width needs a finer step."""
+    z, meta, table = fx
+    arm, ds = case.split("/")
+    m = meta["arms"][arm]
+    j0 = _inputs(z, ds)
+
+    def make(cfg):
+        def f(s):
+            o = _run(dict(j0, u=j0["u"] * s, v=j0["v"] * s), cfg, m["dt"],
+                     table if m["mfcc"] else None)
+            return jnp.sum(o.du_dt[col]) + jnp.sum(o.dv_dt[col]) + jnp.sum(o.dT_dt[col])
+        return jax.jit(f)
+
+    f = make(_config(m["ours"], hard=False))
+    s0 = jnp.asarray(s_star)
+    check_grads(f, (s0,), order=order, modes=("rev",), eps=eps)
+    assert float(jax.grad(f)(s0)) != 0.0
+    with pytest.raises(AssertionError):          # the hard limit has the kink
+        check_grads(make(_config(m["ours"])), (s0,), order=order, modes=("rev",), eps=eps)
+
+
+@pytest.mark.parametrize("field", ["umcfac_abs_width", "umcfac_sign_width", "taumin_ramp_width"])
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), 1.0e-30])
+def test_smoothing_widths_validated(fx, field, bad):
+    """0 (E3SM) or a usable width; a negative/NaN/sub-fp32 width raises (#2241)."""
+    z, meta, table = fx
+    m = meta["arms"]["background"]
+    cfg = _config(m["ours"], hard=False)._replace(**{field: bad})
+    with pytest.raises(ValueError, match=field):
+        _run(_inputs(z, "l36"), cfg, m["dt"], None)
+
+
 @pytest.mark.xfail(strict=True, reason="kernel dse omits phis (asked): 2 ulp(dse)/dt")
 @pytest.mark.parametrize("arm", [a for a, ds in _cases() if ds == "l36"])
 def test_heating_matches_e3sm_oracle_with_surface_height(fx, arm):
@@ -149,7 +328,7 @@ def test_heating_matches_e3sm_oracle_with_surface_height(fx, arm):
 def test_gradient_finite_on_oracle_columns(fx, dtype):
     z, meta, table = fx
     m = meta["arms"]["oro_frontal_convective"]
-    cfg = _config(m["ours"])
+    cfg = _config(m["ours"], hard=False)
     for ds in m["datasets"]:
         j = _inputs(z, ds, dtype)
 
@@ -165,7 +344,7 @@ def test_gradient_finite_on_oracle_columns(fx, dtype):
 def test_jit_matches_eager(fx):
     z, meta, table = fx
     m = meta["arms"]["oro_frontal_convective"]
-    cfg = _config(m["ours"])
+    cfg = _config(m["ours"], hard=False)
     j = _inputs(z, "l36")
     eager = _run(j, cfg, m["dt"], table)
     jitted = jax.jit(lambda jj: _run(jj, cfg, m["dt"], table))(j)

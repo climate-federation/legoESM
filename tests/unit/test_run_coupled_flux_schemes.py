@@ -337,6 +337,31 @@ def test_couple_surface_fluxes_reaches_the_driver_config(monkeypatch, argv, want
     assert captured["args"][1].couple_surface_fluxes is want
 
 
+@pytest.mark.parametrize("argv,want", [
+    ([], False),
+    (["--atm-owns-surface"], True),
+])
+def test_atm_owns_surface_reaches_the_driver_config(monkeypatch, argv, want):
+    """--atm-owns-surface reaches the CoupledConfig the driver gets; unset
+    keeps the library default off."""
+    import legoesm.driver.coupled_esm_driver as ced
+
+    captured = {}
+
+    class _StopError(Exception):
+        pass
+
+    def _recorder(*a, **kw):
+        captured["args"] = a
+        raise _StopError
+
+    monkeypatch.setattr(ced, "CoupledESMDriver", _recorder)
+    monkeypatch.setattr(sys, "argv", ["run_coupled", "--days", "1"] + argv)
+    with pytest.raises(_StopError):
+        mod.main()
+    assert captured["args"][1].atm_owns_surface is want
+
+
 def test_land_runoff_cli_rejects_unknown():
     with pytest.raises(SystemExit):
         mod.build_parser().parse_args(["--land-runoff-scheme", "garbage"])
@@ -668,7 +693,7 @@ def test_large_yeager_width_defaults_match_both_configs():
         assert v == getattr(CouplerConfig(), f"large_yeager_{f}_width")
 
 
-def test_large_yeager_widths_reach_the_coupler_ocean_tile():
+def test_surface_flux_widths_reach_the_coupler_ocean_tile():
     """The widths reach the coupler ocean tile config main() hands the driver."""
     cpl = mod.build_coupler_config(mod.build_parser().parse_args(_LY_FLAGS))
     assert cpl.bulk_scheme == "large_yeager"
@@ -677,7 +702,7 @@ def test_large_yeager_widths_reach_the_coupler_ocean_tile():
     assert cpl.large_yeager_cd_cutoff_width == 0.25
 
 
-def test_main_really_passes_large_yeager_widths_to_both_sides(monkeypatch):
+def test_main_really_passes_surface_flux_widths_to_both_sides(monkeypatch):
     """PRODUCTION reachability: main() hands the driver an atmosphere config
     and a coupler config both carrying the CLI widths (no air-sea split)."""
     import legoesm.driver.coupled_esm_driver as ced

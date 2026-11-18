@@ -44,7 +44,10 @@ from legoesm.grids.vertical import (
 )
 from legoesm.atmosphere.physics._shared import (compute_layer_dz, compute_rho,
                                                 virtual_temperature)
-from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
+from legoesm.atmosphere.physics.microphysics.config import (
+    MICROPHYSICS_PRECISION_MODULE, KesslerConfig,
+)
+from legoesm.core.precision import with_precision_override
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
 
@@ -127,7 +130,8 @@ def kessler_column_tendencies_pressure(T, p_full, p_half, q_v, q_c, q_r, *,
     hydro = make_zero_hydrometeors(ncol, nlev, dtype=T.dtype)._replace(
         q_c=q_c, q_r=q_r,
     )
-    out = kessler_microphysics(
+    out = with_precision_override(MICROPHYSICS_PRECISION_MODULE)(
+        kessler_microphysics)(
         T=T, q_v=q_v, hydrometeors=hydro,
         p_full=p_full, p_half=p_half, rho=rho, dz=dz,
         dt=dt, config=config,
@@ -484,7 +488,7 @@ def make_kessler_forcing_latlon(dt, config: KesslerConfig | None = None):
     :func:`make_kessler_forcing_gridspace` binding the lat-lon dim labels.
 
     The lat-lon C-grid dycore already advects ``q_v``/``q_c``/``q_r`` in
-    mass-weighted flux form (``cgrid_latlon_hydrostatic_tendencies``), so this
+    mass-weighted flux form (``latlon_legacy_pe_tendencies``), so this
     supplies only the column microphysics source.
     """
     return make_kessler_forcing_gridspace(

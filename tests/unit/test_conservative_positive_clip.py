@@ -768,7 +768,6 @@ class TestNonConservingFormsWarn:
         # production: MPAS, flag on, conserving clamp -> borrow, silent
         (True, True, "mpas_primitive_equations", False),
         (True, False, "mpas_primitive_equations", True),
-        (True, False, "cdgrid_primitive_equations", True),
         (True, False, "latlon_cgrid_primitive_equations", True),
         # spectral passes energy_consistent=False: the flag's floor never runs
         (True, False, "spectral_primitive_equations", False),

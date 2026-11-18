@@ -186,9 +186,11 @@ def test_wrapper_matches_openifs(fix):
     surface fluxes negated into the IFS sign, PGAW from dx_m, hydrostatic
     geopotential, SATUR saturation, PLITOT = 0), against the oracle run on
     the same inputs with PLITOT = 0 (arm L0).  Runs the source no-supply
-    shallow closure ("first_guess"); the default "zero" ramp (main #2253) is
-    a recorded departure whose per-column gap is
-    test_nosupply_default_gap_per_case."""
+    shallow closure ("first_guess") with the exact switches
+    (ifs_hard_switches=True, the RULE 5 hard limit, #2281); the default "zero"
+    ramp (main #2253) and the default smooth switches are recorded departures
+    whose per-column gaps are test_nosupply_default_gap_per_case and
+    test_smooth_switches_default_gap_per_case."""
     from legoesm.atmosphere.physics.convection._ifs_faithful import ifs_faithful_convection
     from legoesm.atmosphere.physics.convection.config import BechtoldConfig
     from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -197,7 +199,8 @@ def test_wrapper_matches_openifs(fix):
         a = lambda k: jnp.asarray(fix[f"{g}_{k}"])
         out, mu = ifs_faithful_convection(
             a("T"), a("q"), a("p_full"), a("p_half"), a("u"), a("v"), float(fix["dt"]),
-            BechtoldConfig(use_ifs_ascent=True, dx_m=_DX, ifs_shallow_nosupply="first_guess"),
+            BechtoldConfig(use_ifs_ascent=True, dx_m=_DX, ifs_shallow_nosupply="first_guess",
+                           ifs_hard_switches=True),
             a("shf_up"), a("lhf_up"),
             a("land"), a("dT_adv"), a("dq_adv"), a("dT_other"), a("dq_other"), a("omega"),
             ConvectionOutput)
@@ -241,8 +244,9 @@ def test_wrapper_tunable_defaults_are_sucumf():
 
     tun = _tunables(BechtoldConfig(use_ifs_ascent=True, dx_m=_DX))
     # main #2253 (user 2026-10-28): the run's default no-supply shallow mode
-    # is "zero", a recorded departure; everything else is sucumf's.
-    assert tun == IfsTunables()._replace(shallow_nosupply="zero")
+    # is "zero", a recorded departure; the default smooth switches (RULE 5,
+    # #2281) another; everything else is sucumf's.
+    assert tun == IfsTunables()._replace(shallow_nosupply="zero", hard_switches=False)
 
 
 def _wrapper_out(fix, cfg, g="L32"):
@@ -494,7 +498,8 @@ def _per_column_gap(a, ref):
 
 @pytest.mark.parametrize("g", _GROUPS)
 def test_nosupply_first_guess_is_the_oracle(fix, g):
-    dT, dq, mu = _wrapper_cols(fix, g, ifs_shallow_nosupply="first_guess")
+    dT, dq, mu = _wrapper_cols(fix, g, ifs_shallow_nosupply="first_guess",
+                               ifs_hard_switches=True)
     o = lambda t: fix[f"L0_{g}_{t}"]
     assert _err(dT, o("PTENT") - fix[f"{g}_dT_other"]) <= _TOL
     assert _err(dq, o("PTENQ") - fix[f"{g}_dq_other"]) <= _TOL
@@ -524,7 +529,7 @@ _NOSUPPLY_GAP = {
 
 @pytest.mark.parametrize("g", _GROUPS)
 def test_nosupply_default_gap_per_case(fix, g):
-    dT, dq, mu = _wrapper_cols(fix, g)
+    dT, dq, mu = _wrapper_cols(fix, g, ifs_hard_switches=True)
     o = lambda t: fix[f"L0_{g}_{t}"]
     got = (_per_column_gap(dT, o("PTENT") - fix[f"{g}_dT_other"]),
            _per_column_gap(dq, o("PTENQ") - fix[f"{g}_dq_other"]),
@@ -587,7 +592,7 @@ def test_nosupply_gradient_through_the_supply_ramp(fix):
     a = lambda k: jnp.asarray(fix[f"L137_{k}"])[:1]  # noqa: E731
 
     def f(scale, width):
-        cfg = BechtoldConfig(use_ifs_ascent=True, dx_m=_DX,
+        cfg = BechtoldConfig(use_ifs_ascent=True, dx_m=_DX, ifs_hard_switches=True,
                              ifs_shallow_supply_width_w_m2=width)
         _, mu = ifs_faithful_convection(
             a("T"), a("q"), a("p_full"), a("p_half"), a("u"), a("v"), float(fix["dt"]),
@@ -601,3 +606,280 @@ def test_nosupply_gradient_through_the_supply_ramp(fix):
     g = float(jax.grad(lambda s: f(s, width))(one))
     g_hard = float(jax.grad(lambda s: f(s, 0.0))(one))
     assert np.isfinite(g) and g != 0.0 and g != g_hard
+
+
+# --- RULE 5, faithful chain's elementwise switches (#2281) -----------------
+# Per-column gap of the default smooth switches (ifs_hard_switches=False)
+# against the oracle (arm L0), the no-supply closure held at the source
+# ("first_guess") so only the switches differ: (dT_dt, dq_v_dt, M_u, surface
+# precipitation) per fixture column, measured (x64, CPU) by switch_gaps().
+_SWITCH_GAP = {
+    "L32": (
+        [1.155408049270849e-13, 6.382851606121968e-13, 9.329321598065945e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.527033819234069e-16, 4.2997772808050026e-14, 0.0, 0.0, 4.061234644816772e-12, 8.597091978769083e-13, 1.5572484289018971e-12],
+        [1.2208611804052711e-14, 8.208652670311285e-14, 3.7711641379674507e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.768519006471387e-15, 0.0, 0.0, 7.768887789727816e-13, 5.056799592526267e-14, 1.101205278761102e-13],
+        [1.4776039621664564e-14, 9.01139097311247e-14, 3.81658947462115e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0292097072507253e-15, 6.920393684326509e-16, 0.0, 0.0, 7.544410353326226e-13, 4.6335526034809616e-14, 3.560926557233197e-14],
+        [7.228524788231107e-15, 9.835763388781988e-14, 3.4814984448074187e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.6066020765652573e-14, 1.0220917382663544e-15, 0.0, 0.0, 7.373443210654421e-13, 3.8308962631369565e-14, 0.0],
+    ),
+    "L137": (
+        [1.661612930475599e-11, 0.0, 0.0, 0.0, 0.0],
+        [1.2046143070100942e-13, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+    ),
+    "STRESS": (
+        [3.4442221391695113e-13, 4.5420032351625236e-14, 1.775404919440501e-12],
+        [3.9701823491282336e-14, 7.704682611898458e-15, 4.996926756862235e-13],
+        [1.1354137486081727e-13, 6.838908281453185e-16, 5.255835484158918e-13],
+        [1.2160758858600408e-15, 3.2671250364719703e-15, 4.0989188218272814e-13],
+    ),
+}
+
+
+def _switch_cols(fix, g, hard):
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    out, mu = _wrapper_out(fix, BechtoldConfig(use_ifs_ascent=True, dx_m=_DX,
+                                               ifs_shallow_nosupply="first_guess",
+                                               ifs_hard_switches=hard), g)
+    return (np.asarray(out.dT_dt), np.asarray(out.dq_v_dt), np.asarray(mu),
+            np.asarray(out.dq_r_conv_dt), out)
+
+
+def switch_gaps(fix, g):
+    """(dT_dt, dq_v_dt, M_u, surface precip) per-column gaps, default vs oracle."""
+    dT, dq, mu, _, out = _switch_cols(fix, g, False)
+    o = lambda t: fix[f"L0_{g}_{t}"]  # noqa: E731
+    sfc = np.asarray(o("PMFLXR"))[:, -1] + np.asarray(o("PMFLXS"))[:, -1]
+    dp = np.diff(fix[f"{g}_p_half"], axis=1)
+    got_sfc = np.sum(np.asarray(out.dq_r_conv_dt) * dp, axis=1) / lego_thermo().RG
+    return (_per_column_gap(dT, o("PTENT") - fix[f"{g}_dT_other"]),
+            _per_column_gap(dq, o("PTENQ") - fix[f"{g}_dq_other"]),
+            _per_column_gap(mu, o("PMFU")),
+            _per_column_gap(got_sfc[:, None], sfc[:, None]))
+
+
+@pytest.mark.parametrize("g", _GROUPS)
+def test_smooth_switches_default_gap_per_case(fix, g):
+    for a, want in zip(switch_gaps(fix, g), _SWITCH_GAP[g]):
+        np.testing.assert_allclose(a, np.asarray(want), rtol=1e-6, atol=1e-12)
+
+
+def test_smooth_switches_are_the_default():
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+    from legoesm.atmosphere.physics.convection._ifs_faithful import _tunables
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    assert BechtoldConfig().ifs_hard_switches is False
+    assert _tunables(BechtoldConfig(use_ifs_ascent=True, dx_m=_DX)).hard_switches is False
+    assert IfsTunables().hard_switches is True   # the source, for direct oracle calls
+    with pytest.raises(ValueError, match="hard_switches"):
+        cumastrn(None, 1.0, *([None] * 21), tun=IfsTunables(hard_switches=1))
+
+
+def _probe(name):
+    import importlib.util
+
+    path = (Path(__file__).resolve().parents[2] / "scripts" / "validate" / "oracle"
+            / "bechtold_ifs" / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# Per switch SITE (stripped source line, IfsSmooth method):
+# (group, column, mode, direction, value, fd step, partners), found by
+# scripts/validate/oracle/bechtold_ifs/switch_sites.py.  mode "input": the
+# input perturbation ``direction`` at ``value`` puts the site inside its
+# window and the test variable is that perturbation.  mode "inject" (sites no
+# input perturbation reached: floors and caps real columns rarely hit; vote
+# 2026-11-14): the column (optionally perturbed by ``direction``/``value``)
+# with only this site's switched operand moved to mid-window at s = 1 (offset
+# under stop_gradient; s spans the window in units of 1) and each ``partners``
+# site held mid-window, so the switch reaches the output.
+_SITE_POINTS = {
+    ('* (1.0 - sm.lt(kget(pvervel, njkt5), ZOMEGA_RES, _W_OMEGA)))', 'lt'):
+        ('L32', 1, 'inject', 'q', 1.0586956521739133, 0.0001, ()),
+    ('/ ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)', 'min'):
+        ('L32', 9, 'input', 'q', 1.1985054347826085, 1.9621876652955546e-08, ()),
+    ('llo1 = sm.lt(paph[K + 1] - kget(paph, ikd), ZPBL_DP, _W_PRES)', 'lt'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('m = sm.min(zm, r, _W_REL * r)', 'min'):
+        ('L32', 12, 'input', 'omega', -11.82065217391305, 1.1745622232621571e-05, ()),
+    ('sm.max(zcape - zcapdcycl, RMINCAPE * zcape, _W_CAPE))', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'):
+        ('L137', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)', 'max'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
+    ('zcape_c = sm.min(zcape_c, ZCAPE_MAX, _W_CAPE)', 'min'):
+        ('L32', 9, 'inject', 'q', 1.075, 0.0001, ()),
+    ('zcape_c = sm.sel(br, sm.max(zcape2 - zcapdcycl + zdqcv, RMINCAPE * zcape, _W_CAPE),', 'max'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
+    ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
+        ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
+    ('zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)', 'min'):
+        ('STRESS', 0, 'inject', 'q', 1.225, 0.0001, ()),
+    ('zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ztaupbl = sm.min(kget(pgeoh, ikb) - pgeoh[K + 1], ZDCYC_DZ, _W_GEO) / (rg * zduten)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'max'):
+        ('L32', 2, 'input', 'sflux', 3.5652173913043477, 1.2682412999266035e-05, ()),
+    ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+}
+
+
+# Sites no full-scheme column reaches (no fixture column, input
+# perturbation or single-site injection gives a resolvable derivative through
+# them): a direct gradient test of the smoothed expression inside its window
+# at the default width (coordinator ruling 2026-11-15), with the reason.
+# Values: (bound b, or a representative value where the bound is traced, and
+# the width, as expressions in _ifs_cumastrn's namespace plus RG = g and
+# RCPD = c_pd; reason).
+_SITE_SYNTHETIC = {
+    ('br = 1.0 - ((1.0 - sm.le(zsatfr, ZSATFR_MAX, _W_SATFR))', 'le'):
+        ('ZSATFR_MAX', '_W_SATFR', 'full-scheme point found, but check_grads through the whole scheme does not agree with autodiff to 1e-3 relative there'),
+    ('m2 = sm.min(m2, zmfmax, _W_MF)', 'min'):
+        ('0.3', '_W_MF', 'full-scheme point found, but check_grads through the whole scheme does not agree with autodiff to 1e-3 relative there'),
+    ('zeps = (sm.pos(-pmfd_b, w_mfub)', 'pos'):
+        ('0.0', '_W_REL * 1.0e-6', 'full-scheme point found, but check_grads through the whole scheme does not agree with autodiff to 1e-3 relative there'),
+    ('m3 = sm.max(ZMID_MF * zkhfl / kget(pgeoh, ikb), zmfub, w_mfub) * (1.0 + zeps)', 'max'):
+        ('1.0e-6', '_W_REL * 1.0e-6', 'full-scheme point found, but check_grads through the whole scheme does not agree with autodiff to 1e-3 relative there'),
+    ('* sm.lt(zdh, ZSHAL_DH * rg * rcpd, rg * _W_DH))', 'lt'):
+        ('ZSHAL_DH * RG * RCPD', 'RG * _W_DH', "shallow 'weak' branch: needs a shallow flux above 0.3 x the CFL limit with a cloud-base energy excess below half its scale at once; no fixture column has both"),
+    ('m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),', 'lt'):
+        ('ZMID_GEO', '_W_GEO', "mid-level cap choice by cloud-base geopotential: the fixture's one mid-level cloud has its base far above 1500 m2/s2 and its flux far below either cap"),
+    ('sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),', 'min'):
+        ('0.1', '_W_MF', "mid-level flux cap (low base): binds only for a mid-level cloud near the CFL limit; the fixture's one mid-level flux is ~1e-6"),
+    ('sm.min(m3, zmfmax, _W_MF))', 'min'):
+        ('0.3', '_W_MF', "mid-level flux cap: binds only for a mid-level cloud near the CFL limit; the fixture's one mid-level flux is ~1e-6"),
+    ('zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)', 'min'):
+        ('0.3', '_W_MF', 'deep closure CFL cap: where it binds the final limiter re-caps the flux level by level, masking its derivative'),
+    ('zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)', 'max'):
+        ('ZHEAT_MIN', '_W_HEAT', 'ZHEAT_MIN floor of the deep-closure heating: convecting columns heat orders of magnitude above it'),
+    ('zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),', 'min'):
+        ("0.3", "_W_MF", "first-guess shallow flux: the final closure rescales the profile "
+                       "by ZMFUB1/ZMFUB, so the outputs are invariant to it to first order"),
+    ('zheat = jnp.sum(jnp.where(llo3, sm.pos(', 'pos'):
+        ("0.0", "_W_HEAT", "per-level heating summand: its window (4.7e-10) sits ~5 orders "
+                         "below the ZHEAT_MIN floor of the summed heating"),
+    ('zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)', 'max'):
+        ("0.1", "_W_DH", "first-guess energy floor: feeds only the first-guess shallow "
+                       "flux, which cancels in the closure rescale"),
+}
+
+
+@pytest.mark.parametrize("site", sorted(_SITE_SYNTHETIC), ids=lambda t: f"{t[1]}:{t[0][:60]}")
+def test_switch_site_synthetic_gradient(site):
+    """RULE 5 gradient test of an unreached site's smoothed expression, alone,
+    at mid-window and the default width: check_grads passes and the
+    derivative differs from the exact switch's."""
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+
+    sp = _probe("switch_sites")
+    method = site[1]
+    bexpr, wexpr, reason = _SITE_SYNTHETIC[site]
+    assert reason
+    th = lego_thermo()
+    ns = {**vars(M), "RG": th.RG, "RCPD": th.RCPD}
+    b, w = float(eval(bexpr, ns)), float(eval(wexpr, ns))
+
+    def f(a, hard=False):
+        sm = IfsSmooth(hard)
+        args = (a, w) if method in ("pos", "neg1") else (a, jnp.asarray(b), w)
+        return getattr(sm, method)(*args)
+
+    a0 = jnp.asarray(float(sp._mid(method, b, w)))
+    gs = float(jax.grad(f)(a0))
+    gh = float(jax.grad(lambda a: f(a, True))(a0))
+    check_grads(f, (a0,), order=1, modes=("rev",), eps=1e-3 * w, atol=1e-3 * abs(gs), rtol=1e-3)
+    assert np.isfinite(gs) and abs(gs - gh) > 1e-3 * max(abs(gs), abs(gh))
+
+
+_SITE_PENDING: set = set()   # none left
+
+
+def test_every_switch_site_has_a_gradient_point():
+    """A new or edited smooth switch in CUMASTRN must get its own point."""
+    sets = (set(_SITE_POINTS), _SITE_PENDING, set(_SITE_SYNTHETIC))
+    assert _probe("switch_sites").sites() == set.union(*sets)
+    assert sum(map(len, sets)) == len(set.union(*sets))
+
+
+@pytest.fixture
+def _fresh_jit():
+    """Each per-site test compiles a fresh instrumented scheme; drop the
+    compiled code after it (XLA's CPU JIT runs out of code memory otherwise)."""
+    yield
+    jax.clear_caches()
+
+
+@pytest.mark.parametrize("site", sorted(_SITE_POINTS), ids=lambda t: f"{t[1]}:{t[0][:60]}")
+def test_switch_site_gradient_at_default(fix, site, _fresh_jit):
+    """RULE 5 gradient test, per switch site, at the default (smooth): at the
+    site's point it is inside its window, check_grads (order 1, reverse)
+    passes on the scheme's heating + drying + mass flux with respect to the
+    test variable, and the derivative changes when only this site is exact."""
+    from jax.test_util import check_grads
+
+    sp = _probe("switch_sites")
+    g, c, mode, direction, value, h, partners = _SITE_POINTS[site]
+    if mode == "input":
+        s0 = value
+        x_of = lambda s: sp.point_value(fix, g, c, direction, s)  # noqa: E731
+        inj_of = lambda s: {}  # noqa: E731
+    else:
+        s0 = 1.0
+        base = sp.column(fix, g, c) if direction is None else sp.point_value(
+            fix, g, c, direction, value)
+        x_of = lambda s: base  # noqa: E731
+        inj_of = lambda s: {**{p: jnp.asarray(1.0) for p in partners}, site: s}  # noqa: E731
+
+    def run(s, hard=()):
+        with sp.instrument(hard_sites=hard, inject=inj_of(s)):
+            return sp.output(fix, x_of(s))
+
+    x0 = jnp.asarray(s0)
+    pos = {}
+    with sp.instrument(lambda k, d: pos.setdefault(k, []).append(d.ravel()), inject=inj_of(x0)):
+        sp.output(fix, x_of(x0))
+        jax.effects_barrier()
+    assert np.any(sp.in_window(site, np.concatenate(pos[site])))
+    gs = float(jax.grad(run)(x0))
+    gh = float(jax.grad(lambda s: run(s, hard=[site]))(x0))
+    # tolerances relative to this site's derivative (the default atol 1e-5
+    # would pass a derivative of 1e-6 that is wrong by 90 %)
+    check_grads(run, (x0,), order=1, modes=("rev",), eps=h, atol=1e-3 * abs(gs), rtol=1e-3)
+    # the derivative changes by more than round-off: 1e-3 relative, and above a
+    # floor 1e-12 (the loss is O(100); a site that only reaches the output at
+    # round-off level gets a synthetic test, see _SITE_SYNTHETIC)
+    big = max(abs(gs), abs(gh))
+    assert np.isfinite(gs) and big > 1e-12 and abs(gs - gh) > 1e-3 * big
+
+
+def test_switch_scales_probe_covers_every_class(fix):
+    """scripts/validate/oracle/bechtold_ifs/switch_scales.py (the probe the
+    _S_* scales came from) samples every width class on the fixture and
+    restores the widths and IfsSmooth it patched."""
+    import importlib.util
+
+    from legoesm.atmosphere.physics import _ifs_smooth
+    from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+
+    path = (Path(__file__).resolve().parents[2] / "scripts" / "validate" / "oracle"
+            / "bechtold_ifs" / "switch_scales.py")
+    spec = importlib.util.spec_from_file_location("switch_scales", path)
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    before = (M._W_MF, _ifs_smooth.IfsSmooth.max)
+    scales = probe.p2(probe.measure(fix, ("L32",)))
+    assert (M._W_MF, _ifs_smooth.IfsSmooth.max) == before
+    want = {n[3:] for n in dir(M) if n.startswith("_S_") and hasattr(M, "_W_" + n[3:])}
+    assert set(scales) == want
+    # omega is 0 in every fixture column: no sample (its scale is 0.01 x |threshold|)
+    assert scales.pop("OMEGA")[1] == 0
+    assert all(np.isfinite(s) and s > 0.0 and n > 0 for s, n in scales.values())

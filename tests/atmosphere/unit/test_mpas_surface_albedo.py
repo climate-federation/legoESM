@@ -287,7 +287,8 @@ def test_clm_tuned_albedo_branch_reaches_physics(tmp_path, monkeypatch):
     sentinel = np.array([0.111, 0.222, 0.333])
     calls = {}
 
-    def fake_provider(lat_deg, lon_deg, surfdata_path=None, variant=None):
+    def fake_provider(lat_deg, lon_deg, surfdata_path=None, variant=None, *,
+                      vg_air_entry_m):
         calls["variant"] = variant
         calls["path"] = surfdata_path
 
@@ -304,7 +305,7 @@ def test_clm_tuned_albedo_branch_reaches_physics(tmp_path, monkeypatch):
     lp = clm_surface_provider(
         np.degrees(np.asarray(_Grid.grid_lat)),
         np.degrees(np.asarray(_Grid.grid_lon)),
-        surfdata_path="/fake/path.nc", variant="multilayer")()
+        surfdata_path="/fake/path.nc", variant="multilayer", vg_air_entry_m=-0.02)()
     alb = jnp.asarray(lp.albedo_veg).reshape(_Grid.grid_lat.shape)
     alb = jnp.where(jnp.isfinite(alb), alb, lat_albedo)
     np.testing.assert_allclose(np.asarray(alb), sentinel)

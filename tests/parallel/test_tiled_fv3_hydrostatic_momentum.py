@@ -57,9 +57,6 @@ from legoesm.core.operators_cdgrid import (
 )
 from legoesm.core.precision import resolve_dtype
 from legoesm import constants
-from legoesm.parallel.tiled_production_cdgrid import (
-    make_tiled_fv3_hydrostatic_momentum_stage_2d,
-)
 
 N = 24  # divisible by kt=2 (nl=12) and kt=3 (nl=8)
 NLEV = 6
@@ -144,46 +141,6 @@ def _compare_corner_staggered(du_t, dv_t, du_g, dv_g, kt, nl):
     scale_du = float(np.max(np.abs(du_g))) + 1e-300
     scale_dv = float(np.max(np.abs(dv_g))) + 1e-300
     return worst_du / scale_du, worst_dv / scale_dv
-
-
-@pytest.mark.parametrize("hybrid", [False, True])
-@pytest.mark.parametrize("KT", [2, 3])
-def test_tiled_momentum_matches_global(cdg, KT, hybrid):
-    ndev = 6 * KT * KT
-    if len(jax.devices()) < ndev:
-        pytest.skip(
-            f"kt={KT} needs {ndev} host devices "
-            f"(--xla_force_host_platform_device_count={ndev})")
-    nl = N // KT
-    coord = make_hybrid_levels(NLEV) if hybrid else create_sigma_coordinate(NLEV)
-    u_d, v_d, T, p_s, phis = _inputs(N, NLEV, (10 if hybrid else 20) + KT)
-    du_g, dv_g = _global_momentum(u_d, v_d, T, p_s, phis, cdg, coord, hybrid)
-
-    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-
-    dev = np.array(jax.devices()[:ndev]).reshape(6, KT, KT)
-    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
-    stage = make_tiled_fv3_hydrostatic_momentum_stage_2d(
-        mesh, cdg, coord, N, KT, NLEV)
-
-    fw = NamedSharding(mesh, P("face", None, None, None))
-    fo = NamedSharding(mesh, P("face", None, None))
-    du_t, dv_t = stage(
-        jax.device_put(u_d, fw), jax.device_put(v_d, fw),
-        jax.device_put(T, fw), jax.device_put(p_s, fo),
-        jax.device_put(phis, fo))
-
-    def _re(arr):
-        # gathered (6, KT*(nl+1), KT*(nl+1), nlev): keep per-tile blocks intact
-        # (corner-staggered -> overlap comparison, NOT a cc reshape).
-        return np.asarray(arr)
-
-    rel_du, rel_dv = _compare_corner_staggered(
-        _re(du_t), _re(dv_t), du_g, dv_g, KT, nl)
-    # FMA-robust relative tolerance: the in-stage ppermute receives reorder the
-    # global pad's contiguous arithmetic -> O(1e-13) ULP drift, not algorithmic.
-    assert rel_du < 1e-10, f"du_d_dt rel {rel_du:.3e} (kt={KT}, hybrid={hybrid})"
-    assert rel_dv < 1e-10, f"dv_d_dt rel {rel_dv:.3e} (kt={KT}, hybrid={hybrid})"
 
 
 @pytest.mark.parametrize("hybrid", [False, True])

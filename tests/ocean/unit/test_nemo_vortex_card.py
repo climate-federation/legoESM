@@ -651,11 +651,15 @@ _CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
 # GYRE resolves vertical_mixing.scheme = "tke"); the non-config part of the
 # digest is identical.
 _CERTIFIED_CARD_DIGESTS = {
-    # The appended config fields move the printed NamedTuple digest; the
-    # surrounding field-by-field guards pin their resolved values below.
-    "GYRE-zco": "6bb18cf2c428e5ab",
-    "LOCK_EXCHANGE-zco": "9f64d2b817f72f5e",
-    "OVERFLOW-zps": "f3ca241ed2a098b7",
+    # Main's NamedTuple field order: the config re-printed in e3fd562b8's order
+    # gives that lane's pins (6e62ad9e2f13da2b, fe969dad638d27b6, 7a4559a730c1079d).
+    "GYRE-zco": "2efa6ac0692b7ff4",
+    # LOCK/OVERFLOW re-pinned for the appended lateral_viscosity_file_coastal
+    # field (default "four_cell"); with that field dropped from the repr they
+    # reproduce the previous pins 3f8ec523690fbe51 / a1fd1ae1b93dab73 exactly.
+    # GYRE-zco is red on main too and is left as main has it.
+    "LOCK_EXCHANGE-zco": "8f0f10523a1d4641",
+    "OVERFLOW-zps": "be68a39f58cc44ee",
 }
 
 

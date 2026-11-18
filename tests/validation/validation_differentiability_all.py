@@ -155,37 +155,3 @@ class TestShallowWaterDifferentiability:
         grads = _run_grad_test(model, sw_state, DT_SW, grad_field="h")
         assert jnp.all(jnp.isfinite(grads)), "non-finite gradients"
         assert not jnp.allclose(grads, 0.0), "gradients are all zero"
-
-
-class TestHydrostaticDifferentiability:
-
-    def test_cdgrid(self, grid, sigma):
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
-        )
-        pe_state = make_pe_state(sigma)
-        model = CDGridPrimitiveEquationModel(grid, sigma, CDGridPrimitiveEquationConfig(
-            hyperdiff_coeff=0.0, use_conservation_fixer=False,
-        ))
-        grads = _run_grad_test(model, pe_state, DT_PE)
-        assert jnp.all(jnp.isfinite(grads)), "non-finite gradients"
-        assert not jnp.allclose(grads, 0.0), "gradients are all zero"
-
-
-class TestNonHydrostaticDifferentiability:
-
-    @pytest.mark.xfail(reason="Zero initial perturbation produces zero gradients")
-    def test_cdgrid(self, grid, height_coord, terrain_metric):
-        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
-            CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
-        )
-        ce_state = make_ce_state(height_coord)
-        model = CDGridCompressibleEulerModel(
-            grid, height_coord, terrain_metric,
-            CDGridCompressibleEulerConfig(
-                hyperdiff_coeff=0.0, sponge_coeff=0.0,
-            ),
-        )
-        grads = _run_grad_test(model, ce_state, DT_CE, grad_field="theta_prime")
-        assert jnp.all(jnp.isfinite(grads)), "non-finite gradients"
-        assert not jnp.allclose(grads, 0.0), "gradients are all zero"

@@ -69,6 +69,7 @@ from legoesm.driver.config import (
     DycoreConfig,
     GridConfig,
     ZM_SCALAR_FIELDS,
+    ZM_TRIGGER_FIELDS,
     ZM_WIDTH_FIELDS,
     ExperimentConfig,
 )
@@ -162,6 +163,7 @@ _STRING_ALTS = {
     "surface_bulk_scheme": "coare3",
     "surface_thermo_convention": "aerobulk",
     "surface_stability_scheme": "grachev2007_sheba",
+    "surface_unstable_scheme": "coare3",
     "convective_precip_split": "autoconversion",
     "bechtold_subsidence_solve": "advective",
     "morrison_flavor": "sam",
@@ -226,6 +228,7 @@ def _reads(fn, _seen: set[str] | None = None) -> set[str]:
 _CFG_NAMES = ("config", "cfg")
 _FIELD_TABLES = {"ZM_SCALAR_FIELDS": ZM_SCALAR_FIELDS,
                  "ZM_WIDTH_FIELDS": ZM_WIDTH_FIELDS,
+                 "ZM_TRIGGER_FIELDS": ZM_TRIGGER_FIELDS,
                  "CLUBB_SCALAR_FIELDS": CLUBB_SCALAR_FIELDS}
 
 

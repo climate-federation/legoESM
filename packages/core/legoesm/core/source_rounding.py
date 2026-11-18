@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.numerics_mode import current_numerics
 
 
 def nemo_source_round(value: jax.Array) -> jax.Array:
@@ -17,8 +18,15 @@ def nemo_source_round(value: jax.Array) -> jax.Array:
     XLA strips ``optimization_barrier`` from optimized HLO.  The surviving
     ``isfinite``/``select``/``copysign`` chain is the operative contraction
     guard.  It is an IEEE identity, including signed infinities and NaNs, and
-    remains differentiable for finite physical inputs.
+    remains differentiable for finite physical inputs.  Under the
+    ``"nemo_fast"`` numerics mode a real floating input comes back unguarded
+    as a JAX array; any other input keeps the guard and behaves exactly as
+    under ``"nemo_exact"`` (an integer comes back as a float, a complex raises).
     """
+    if current_numerics() == "nemo_fast":
+        value = jnp.asarray(value)
+        if jnp.issubdtype(value.dtype, jnp.floating):
+            return value
     value = jax.lax.optimization_barrier(value)
     return jnp.where(
         jnp.isfinite(value),
@@ -30,6 +38,25 @@ def nemo_source_round(value: jax.Array) -> jax.Array:
 def nemo_source_barrier(value: jax.Array) -> jax.Array:
     """Prevent XLA from rewriting one source operand before an FP operation."""
     return jax.lax.optimization_barrier(jnp.asarray(value))
+
+
+def nemo_source_store(fn, *operands):
+    """Evaluate ``fn(*operands)`` once into a stored array its consumers read.
+
+    XLA CPU fuses an elementwise producer into every consumer kernel and
+    re-evaluates it there; ``optimization_barrier`` does not stop this (it is
+    stripped before fusion).  A conditional's result is a stored buffer, so
+    ``fn`` is evaluated inside both branches of a ``lax.cond`` whose predicate
+    is a runtime value (round-351 store microbench, arm ``c2``).  Both branches
+    are the same ``fn``, so the predicate's value cannot change the result.
+    The predicate reads one element of the first operand, which must be a
+    runtime array: a compile-time-constant predicate is folded away, and the
+    store with it.
+    """
+    # ponytail: under vmap a batched predicate turns the cond into a select
+    # that evaluates both branches; no caller vmaps today.
+    first = jnp.ravel(jax.tree_util.tree_leaves(operands)[0])[0]
+    return jax.lax.cond(jnp.isfinite(first), fn, fn, *operands)
 
 
 def nemo_fortran_sign(magnitude: jax.Array, sign_source: jax.Array) -> jax.Array:
@@ -59,4 +86,5 @@ __all__ = (
     "nemo_fortran_sign",
     "nemo_source_barrier",
     "nemo_source_round",
+    "nemo_source_store",
 )

@@ -487,7 +487,8 @@ def test_known_deviations_are_exactly_these():
     non_cmip6 = {
         (t, v) for t, vs in tables.NON_CMIP6_VARIABLES.items() for v in vs
     }
-    assert non_cmip6 == {("Lmon", "nee"), ("Omon", "rhopoto"), ("Omon", "sic")}
+    assert non_cmip6 == {("Amon", "o3_ifs"), ("Amon", "toz_ifs"), ("Lmon", "nee"),
+                         ("Omon", "rhopoto"), ("Omon", "sic")}
 
 
 # --- nominal_resolution: CMIP6 global-attributes document, Appendix 2 ---

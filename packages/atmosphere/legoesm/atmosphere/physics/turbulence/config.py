@@ -34,11 +34,13 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from legoesm.atmosphere.physics.turbulence.myj_wrf import MYJConfig
 
-from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
+                                      NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH)
 
-if TYPE_CHECKING:  # avoid a config <-> clubb import cycle at runtime
+if TYPE_CHECKING:  # avoid config <-> clubb / ifs_vdf import cycles at runtime
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    from legoesm.atmosphere.physics.turbulence.ifs_vdf import IFSVDFLaneConfig
 
 
 # Machine-readable tunable/fixed split for the turbulence scheme configs.
@@ -134,6 +136,8 @@ __param_spec__ = {
             "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
             "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
             "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
+            "most_zeta_cap_width": "numerics: RULE 5 half-width of the smooth |zeta| cap at 10 (0 = hard clip)",
+            "gfs_unstable_join_width": "numerics: RULE 5 width of the GFS unstable smooth join at zeta = -0.5 (0 = exact step)",
             # gustiness_w_zi is no longer spec-eligible: annotated
             # ``float | None`` (None = scheme-native default), and a
             # scheme-enable / BL-depth convention was never trainable anyway.
@@ -357,6 +361,16 @@ class SurfaceLayerConfig(NamedTuple):
     large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
     large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
     large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # Unstable-regime (zeta < 0) MOST form, chosen independently of
+    # ``stability_scheme``: "native" (each bulk path's own form, byte-identical:
+    # Businger-Dyer on most/large_yeager, Fairall blend on coare3) |
+    # "businger_dyer" | "coare3".  Unknown -> ValueError at dispatch.  Appended
+    # last (positional order).
+    unstable_scheme: str = "native"
+    # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10) and the GFS
+    # unstable smooth-join width (0 = the exact GFS step); bulk_flux constants.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
+    gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH
 
 
 class SmagorinskyConfig(NamedTuple):
@@ -765,7 +779,7 @@ class TurbulenceConfig(NamedTuple):
     scheme : str
         Active turbulence scheme: "smagorinsky", "louis", "tke",
         "mynn25", "clubb_lite", "holtslag_boville", "ysu", "edmf",
-        or "none".
+        "ifs_vdf" (OpenIFS 49r1 VDF, MPAS lane only), or "none".
     smagorinsky : SmagorinskyConfig
         Configuration for Smagorinsky scheme.
     louis : LouisConfig
@@ -775,7 +789,8 @@ class TurbulenceConfig(NamedTuple):
     mynn25 : MYNN25Config
         Configuration for MYNN-2.5 scheme (Nakanishi-Niino 2009).
     clubb_lite : CLUBBLiteConfig
-        Configuration for CLUBB-lite scheme.
+        Configuration for CLUBB-lite, the LES-correction campaign's stand-in
+        (not a CLUBB port; see ``CLUBB_LITE_STANDIN_NOTE``).
     clubb : CLUBBConfig or None
         Configuration for the fuller CLUBB scheme (``scheme="clubb"``). ``None``
         selects the CAM-default ``CLUBBConfig()`` (resolved in the dispatcher);
@@ -786,6 +801,9 @@ class TurbulenceConfig(NamedTuple):
         Configuration for YSU scheme.
     edmf : TurbulentEDMFConfig
         Configuration for EDMF scheme.
+    ifs_vdf : IFSVDFLaneConfig or None
+        Configuration for the OpenIFS VDF port; ``None`` selects the default
+        ``IFSVDFLaneConfig()`` (resolved in the dispatcher, like ``clubb``).
     update_interval_steps : int
         NOT YET IMPLEMENTED in the production physics pipeline — turbulence
         is recomputed EVERY step regardless of this value.  Only the SCM
@@ -812,3 +830,17 @@ class TurbulenceConfig(NamedTuple):
     # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
     # turbulence runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1
+    # appended last (positional ABI)
+    ifs_vdf: IFSVDFLaneConfig | None = None
+
+
+CLUBB_LITE_STANDIN_NOTE = (
+    "turbulence 'clubb_lite' is a reduced stand-in (one wp2 moment), not a "
+    "CLUBB port; it is kept only for the LES-informed coefficient-correction "
+    "campaign. Use 'clubb' for the faithful CAM CLUBB.")
+
+
+def refuse_retired_turbulence(scheme: str, where: str) -> None:
+    """Raise if ``scheme`` is ``clubb_lite`` outside the LES-correction campaign."""
+    if scheme == "clubb_lite":
+        raise ValueError(f"{where}: {CLUBB_LITE_STANDIN_NOTE} It is retired here.")

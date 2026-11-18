@@ -1,0 +1,52 @@
+ONE REVIEW. Adversarial. Do not fix anything. Answer in under 400 words.
+
+Review a CLAIM before it drives work, not a diff.
+
+Setting: legoESM OMIP run on the eORCA1 tripole, scored against NEMO 5.0.1
+ORCA1 as oracle. Equatorial Pacific box, |lat|<=2, 200-260E, 660 columns.
+Our side is an INSTANTANEOUS snapshot; NEMO's is a FIVE-DAY MEAN record.
+Measured at two days (25 and 30) against the matched records (4 and 5).
+Probe: scripts/validate/ocean_fidelity/equatorial_diffusivity_oracle.py
+Card:  scripts/cluster/omip_nemo/_eq_prandtl_oracle.sbatch
+Ours from snapshot K_M_diag / K_H_diag; NEMO from grid_W avm / avt.
+
+The numbers (median over the box, m2/s):
+  surface 5-65 m      ours avm 0.0019 -> 6.37e-06 between d25 and d30
+                      NEMO avm 0.0087 -> 0.00168
+  entrainment 65-105m ours avm 3.11e-06 -> 3.04e-06 ; NEMO 2.53e-06 -> 2.45e-06
+                      ours avt 5.37e-07 -> 3.44e-07 ; NEMO 1.13e-06 -> 1.12e-06
+  deep background     ours avm 3.01e-06 avt 2.13e-07 ; NEMO avm 2.30e-06 avt 9.05e-07
+  convective fraction ours 0.000 at every depth ; NEMO up to 0.90 at 1 m,
+                      0.058-0.082 at 65-105 m
+
+The claim, in four parts:
+1. The surface band is UNUSABLE because our value moves a factor 300 between
+   the two days and NEMO's own five-day mean moves a factor 5.2.
+2. The 65-105 m band IS usable because both sides move about 3% there.
+3. In that band our VISCOSITY matches (1.23x, 1.24x) so vertical viscosity is
+   NOT the carrier of a separate finding that our equatorial undercurrent is
+   a third to a half of NEMO's; but our HEAT DIFFUSIVITY is 0.31-0.48x, i.e.
+   the closure's momentum/heat PARTITION is wrong rather than its magnitude.
+4. This explains a separate surface heat budget which found we put ~30 W/m2
+   LESS heat into this box than NEMO while running 1.15 C too warm: heat
+   leaves a tropical surface layer downward, and our downward heat diffusivity
+   is a third of the oracle's.
+
+Attack these specifically:
+(a) Is a median over 660 columns of an instantaneous field comparable to a
+    median of a five-day mean, given a diffusivity is intermittent and
+    lognormal? Does averaging order (mean-of-median vs median-of-mean) break
+    part 2 or part 3?
+(b) Our convective fraction is 0.000 everywhere while NEMO's is 0.90 at the
+    surface. Does that mean our enhanced-vertical-diffusion / convection path
+    is not firing at all here, and if so does it contaminate part 3?
+(c) Are K_M_diag / K_H_diag sampled at the same point in the timestep as
+    NEMO's avm / avt (before or after the implicit solve, before or after
+    any convective adjustment)? If not, what does that do to the ratios?
+(d) Our deep Prandtl number is 13.9 while NEMO's documented mapping caps it
+    at 10. Is that a real inconsistency in our background coefficients, or an
+    artifact of comparing a ratio of medians to a median of ratios?
+(e) Does part 4 survive? Name any step where the sign or the magnitude does
+    not follow.
+
+Say which parts you would REJECT and what single measurement would settle it.

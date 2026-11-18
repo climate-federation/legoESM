@@ -74,6 +74,41 @@ def _fill(a):
     return a.astype(np.float64)
 
 
+IWM_VARS = ("power_bot", "power_cri", "power_nsq", "power_sho",
+            "scale_bot", "scale_cri")
+
+
+def load_iwm_forcing(path: str):
+    """ORCA1's OWN de Lavergne wave-power maps (namzdf_iwm sn_mpb..sn_dsc).
+
+    ORCA1 runs ``ln_zdfiwm = .true.`` (namelist_cfg:434), so NEMO's avt and
+    avm both carry a wave-driven diffusivity that a TKE-only probe does not.
+    Comparing the two Prandtl numbers without it compares different things.
+
+    The six variable names are the ones the namelist itself lists against
+    ``zdfiwm_forcing_TRA.nc``; a missing one RAISES rather than falling back
+    to the uniform-power defaults, because that fallback is a different
+    physical field and would silently answer a different question.
+    """
+    import netCDF4 as nc
+
+    ds = nc.Dataset(path)
+    out = {}
+    for v in IWM_VARS:
+        if v not in ds.variables:
+            raise KeyError(
+                f"{path} has no {v!r}; ORCA1's namzdf_iwm names all of "
+                f"{IWM_VARS} in zdfiwm_forcing_TRA.nc. Refusing to substitute "
+                "the uniform-power fallback, which is a different field.")
+        a = _fill(ds.variables[v][:])
+        if a.ndim == 3:
+            # monthly climatology (namelist frequency -12). The Mode-A state
+            # is NEMO's step-8760 restart = 1 January, so record 0.
+            a = a[0]
+        out[v] = a.reshape(-1)
+    return out
+
+
 def load_pair(tfile: str, ufile: str, vfile: str, rec: int):
     """State at record ``rec-1`` + target avt/trends at record ``rec``."""
     import netCDF4 as nc
@@ -137,6 +172,94 @@ def v_to_T(v):
     with np.errstate(invalid="ignore"):
         vT = np.where(den > 0, num / np.maximum(den, 1), 0.0)
     return vT
+
+
+def shear_order_squared(un, vn):
+    """Shear-squared under NEMO's order vs the centred-average order.
+
+    Both are built from the SAME native C-grid velocities and, critically,
+    from the SAME set of faces with the SAME denominator, so the ONLY thing
+    that differs is where the square is taken:
+
+      NEMO (zdfsh2)   square the vertical difference AT EACH FACE, then
+                      average over the contributing faces
+      ours            average the velocity over those faces FIRST, then
+                      difference and square
+
+    Jensen then gives ratio >= 1 pointwise, with equality where the two faces
+    carry the identical vertical difference (including every one-face coastal
+    column). The caller asserts that floor.
+
+    THE FACE SET IS MASK-AWARE, AND THE FIRST VERSION OF THIS FUNCTION WAS NOT.
+    It averaged the NEMO side over 2 faces unconditionally while ``u_to_T``
+    divides by the number of FINITE neighbours, so a column with one dry face
+    returned exactly 0.5 and tripped the assertion on the first run. A face
+    counts here only when BOTH of its levels are finite, and both sides then
+    divide by that same count. (NEMO's real zdfsh2 instead DOUBLES production
+    next to coasts via ``2 - umask*umask``; that compensation is deliberately
+    NOT reproduced, because this probe isolates the squaring order alone.)
+
+    The common 1/e3w^2 multiplies both sides identically and is omitted, so
+    the ratio needs no depth ladder and inherits no e3w approximation.
+
+    Returns ``(sh2_nemo, sh2_ours)`` as ``(ncol, z-1)`` on the interior
+    interfaces, matching the wet_pair/lat_col layout the reports use.
+    """
+    z, ny, nx = un.shape
+
+    def _pair(vel, axis):
+        v = np.nan_to_num(vel, nan=0.0)
+        fin = np.isfinite(vel).astype(np.float64)
+        face = fin[:-1] * fin[1:]                 # both levels finite
+        dv = (v[:-1] - v[1:]) * face
+        den = face + np.roll(face, 1, axis=axis)
+        den_s = np.maximum(den, 1.0)
+        # NEMO order: square at the face, then average over live faces
+        sq = (dv ** 2 + np.roll(dv ** 2, 1, axis=axis)) / den_s
+        # our order: average the two levels over the SAME live faces, then
+        # difference and square
+        up = (v[:-1] * face + np.roll(v[:-1] * face, 1, axis=axis)) / den_s
+        lo = (v[1:] * face + np.roll(v[1:] * face, 1, axis=axis)) / den_s
+        ct = (up - lo) ** 2
+        live = den > 0
+        return np.where(live, sq, 0.0), np.where(live, ct, 0.0)
+
+    su_n, su_o = _pair(un, -1)
+    sv_n, sv_o = _pair(vn, -2)
+    sh2_n = su_n + sv_n
+    sh2_o = su_o + sv_o
+
+    def _cols(a):
+        return np.transpose(a.reshape(z - 1, ny * nx), (1, 0))
+
+    return _cols(sh2_n), _cols(sh2_o)
+
+
+def shear_order_report(sh2_n, sh2_o, wet, lat_col, regions_def):
+    """Median sh2_nemo/sh2_ours by band, plus the share of shear we discard.
+
+    Ri = N^2 / shear^2, so a ratio of R here means the centred order inflates
+    the Richardson number by R relative to NEMO's on the same velocities. That
+    is the number which says whether the Prandtl ceiling we sit on is a
+    discretisation artifact or a real deficit in the resolved flow.
+    """
+    rows = []
+    for name, lo, hi in regions_def:
+        band = (lat_col >= lo) & (lat_col <= hi)
+        m = wet & band[:, None] & (sh2_o > 1e-20) & np.isfinite(sh2_n)
+        n = int(m.sum())
+        if n < 10:
+            continue
+        r = sh2_n[m] / sh2_o[m]
+        rows.append({
+            "region": name, "n": n,
+            "sh2_ratio_median": float(np.median(r)),
+            "sh2_ratio_p90": float(np.percentile(r, 90)),
+            "sh2_ratio_mean": float(r.mean()),
+            "sh2_ratio_min": float(r.min()),
+            "frac_ratio_above_2": float((r > 2.0).mean()),
+        })
+    return rows
 
 
 def run_stage_a(d, cfg):
@@ -209,6 +332,10 @@ def run_stage_a(d, cfg):
         # this gap was found (job 9411221).
         t_depth=jnp.asarray(zc),
         w_depth=jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
+        # e3w_int: the same centre-to-centre spacing already handed in above,
+        # bounded by the 6.6e-4 divisor error noted there. Required since the
+        # card selects n2_mode="nemo_bn2"; without it the closure raises.
+        e3w_int=jnp.asarray(dz_half),
     )
     K_H = np.asarray(out.K_H).reshape(ncol, z - 1)
     K_M = np.asarray(out.K_M).reshape(ncol, z - 1)
@@ -221,7 +348,55 @@ def run_stage_a(d, cfg):
     return K_H, avt_i, wet_pair, (z, ny, nx), K_M, avm_i
 
 
-def run_stage_a2_mode_a(d, rst, cfg_prog):
+def _bathy_kwargs(T_raw, e3t_raw, cfg):
+    """Per-column seafloor index and wet-interface mask, from the state itself.
+
+    NEMO's land cells arrive as NaN, so the wet-cell count per column IS the
+    bathymetry on this ladder -- no separate bathymetry file is needed and
+    none can disagree with the state being stepped.
+
+    ``w_active`` is the interior wmask: an interface is live only when the
+    T-cells on both sides of it are wet, the same pairing the reports use.
+    """
+    import jax.numpy as jnp   # module scope has numpy only; see load_pair
+
+    # T_raw and e3t_raw MUST still carry their NaNs. run_stage_a2_mode_a fills
+    # them (nan_to_num on T, 35.0 on S, 1.0 on e3t) before stepping, and an
+    # earlier version of this helper read the FILLED arrays: every column then
+    # measured 75 of 75 levels wet and the mask was all ones, which is why the
+    # first --use-bathy arm came back bit-identical. The print below exists to
+    # catch exactly that, and did.
+    wet_cell = np.isfinite(T_raw) & np.isfinite(e3t_raw) & (e3t_raw > 1e-6)
+    n_wet = wet_cell.sum(axis=1)
+    n_iface = wet_cell.shape[1] - 1
+    w_active = (wet_cell[:, :-1] & wet_cell[:, 1:]).astype(np.float64)
+    print(f"[bathy] wet interfaces {w_active.mean():.4f} of the array; "
+          f"median column depth {int(np.median(n_wet))} of {wet_cell.shape[1]} "
+          f"levels; shallowest wet column {int(n_wet[n_wet > 0].min())}")
+    # bottom_level places NEMO's bottom TKE pin at the PER-COLUMN seafloor
+    # instead of the array floor. The closure refuses it without a Dirichlet
+    # VALUE, and NEMO's is MAX(0.001875 * CdU_bot * |u_bot|, rn_emin) — the
+    # first term needs a bottom drag coefficient a diagnostic has no business
+    # choosing, so the FLOOR alone is used. That is not an invented number:
+    # cfg.tke_background is 1.0e-6 and ORCA1's rn_emin is 1.e-6
+    # (namelist_ref:1228), the same value, and NEMO's expression can never
+    # fall below it. So this is a LOWER BOUND on NEMO's boundary condition,
+    # and the arm tests WHERE the pin lands rather than its exact magnitude.
+    n_iface = wet_cell.shape[1] - 1
+    bottom_level = np.clip(n_wet - 1, 0, n_iface - 1).astype(np.int32)
+    return {"w_active": jnp.asarray(w_active),
+            "bottom_level": jnp.asarray(bottom_level),
+            "bottom_dirichlet": float(cfg.tke_background)}
+
+
+def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
+                        ice_frac=None, use_bathy=False):
+    # The closure gates bottom_dirichlet behind TKEConfig.bottom_tke_bc and
+    # raises if the value is supplied with the gate off -- a second
+    # silent-no-op guard, and it fired. Enabling it is part of THIS arm's one
+    # variable ("give the closure the bottom boundary"), not a separate knob.
+    if use_bathy:
+        cfg_prog = cfg_prog._replace(bottom_tke_bc=True)
     """EXACT Mode-A closure test: NEMO's own restart state INCLUDING the
     prognostic ``en`` -> ONE legoESM en-step (dt=3600, n_iterations=1) ->
     K_H vs NEMO's avt of the very next step (hourly record 0). Same state,
@@ -239,7 +414,8 @@ def run_stage_a2_mode_a(d, rst, cfg_prog):
         return np.transpose(a.reshape(z, ncol), (1, 0))
 
     e3t = d["e3t"]  # rec r0 geometry (ssh drift over 1 h is negligible)
-    T_c = np.nan_to_num(cols(T3), nan=0.0)
+    T_raw = cols(T3)            # KEEP the NaNs: they ARE the land mask
+    T_c = np.nan_to_num(T_raw, nan=0.0)
     S_c = np.where(np.isfinite(cols(S3)), cols(S3), 35.0)
     u_c = np.nan_to_num(cols(u_to_T(rst["un"])), nan=0.0)
     v_c = np.nan_to_num(cols(v_to_T(rst["vn"])), nan=0.0)
@@ -266,13 +442,32 @@ def run_stage_a2_mode_a(d, rst, cfg_prog):
         n_iterations=1,
         z_interface=jnp.asarray(z_interface),
         lat_deg=jnp.asarray(lat_deg),
-        ice_frac=None,
+        # NEMO's OWN ice concentration at this instant when supplied. Passing
+        # None here runs the polar ocean with NO SEA ICE: the closure damps
+        # its surface TKE flux by (1 - ice fraction) at tke.py:2090/2171, and
+        # None turns that damping identically off, injecting full wind-driven
+        # TKE into water the oracle has under ice. In January that is the
+        # entire Arctic and the Antarctic coast -- the two bands where the
+        # Prandtl comparison fails.
+        ice_frac=(None if ice_frac is None else jnp.asarray(ice_frac)),
+        # WHERE EACH COLUMN'S SEAFLOOR IS. Left None, the closure pins its
+        # bottom TKE boundary condition at the LAST row of the array
+        # unconditionally -- exact on a flat-bottom column and wrong on every
+        # shelf, where the real seafloor is hundreds of metres above it -- and
+        # without w_active there is no wet-interface mask to stop the sweeps
+        # at the bottom either. ORCA1's Antarctic shelf is a few hundred
+        # metres deep on a 75-level ladder reaching ~5000 m.
+        **(_bathy_kwargs(T_raw, cols(e3t), cfg_prog) if use_bathy else {}),
         dz_ref=jnp.asarray(dz_ref_1d),
         jacobian=jnp.asarray(np.ones((ncol,), dtype=dz_c.dtype)),
         # Same ladders as Stage A, for the same reason -- built from NEMO's
         # own e3t so they carry the live z* stretch.
         t_depth=jnp.asarray(zc),
         w_depth=jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
+        # e3w_int: the same centre-to-centre spacing already handed in above,
+        # bounded by the 6.6e-4 divisor error noted there. Required since the
+        # card selects n2_mode="nemo_bn2"; without it the closure raises.
+        e3w_int=jnp.asarray(dz_half),
     )
     K_H = np.asarray(out.K_H).reshape(ncol, z - 1)
     # K_M too: Stage A (Mode-B, our own equilibrium TKE) measures K_M/avm 0.47
@@ -282,7 +477,52 @@ def run_stage_a2_mode_a(d, rst, cfg_prog):
     # or the equilibrium. Mode-A takes NEMO's own en on NEMO's own state and is
     # the control that separates them.
     K_M = np.asarray(out.K_M).reshape(ncol, z - 1)
-    return K_H, K_M
+    # N^2 on the SAME state, from the SAME shared helper the closure calls
+    # (legoesm.ocean.eos via _shared), with the SAME arguments -- not a second
+    # implementation. TKEOutput does not expose N^2, and Ri = N^2/shear^2 is
+    # the quantity the Prandtl ceiling is really reporting, so it has to be
+    # recomputed here to be seen at all.
+    from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+    n2 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        jnp.asarray(T_c), jnp.asarray(S_c), jnp.asarray(zc),
+        jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
+        g=constants.g, eos_form=getattr(cfg_prog, "n2_eos_form", "seos"),
+        e3w_int=jnp.asarray(dz_half)))
+    if iwm_maps is not None:
+        # NEMO's zdfphy ordering: the closure runs, then zdf_iwm ADDS onto
+        # avt/avs/avm. k_profiles.py:461-462 does exactly this, adding the
+        # SAME K_iwm to both the tracer and the momentum total -- which is
+        # why leaving it out drives our Prandtl ratio away from NEMO's.
+        from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+            IWMConfig, IWMForcing, compute_iwm_diffusivity)
+        H = np.sum(np.where(np.isfinite(cols(e3t)), cols(e3t), 0.0), axis=1)
+        forcing = IWMForcing(
+            ebot=jnp.asarray(iwm_maps["power_bot"]),
+            ecri=jnp.asarray(iwm_maps["power_cri"]),
+            ensq=jnp.asarray(iwm_maps["power_nsq"]),
+            esho=jnp.asarray(iwm_maps["power_sho"]),
+            hbot=jnp.asarray(iwm_maps["scale_bot"]),
+            # zdfiwm.F90:421 stores the INVERSE of the file's scale_cri.
+            hcri_inv=jnp.asarray(
+                1.0 / np.maximum(iwm_maps["scale_cri"], 1e-6)))
+        # ORCA1 namzdf_iwm: ln_mevar=.false., ln_tsdiff=.false. (both read
+        # from namelist_cfg:459-460, and both are the IWMConfig defaults).
+        K_wave = np.asarray(compute_iwm_diffusivity(
+            forcing, jnp.asarray(zc), jnp.asarray(dz_half), jnp.asarray(H),
+            jnp.asarray(n2),
+            cfg=IWMConfig(enabled=True, mevar=False, tsdiff=False),
+            rho_0=constants.rho_ocean)[0])
+        print(f"[iwm] K_wave median {np.median(K_wave):.3e} "
+              f"p90 {np.percentile(K_wave, 90):.3e} m2/s; added to BOTH K_H "
+              "and K_M, as zdf_iwm does to avt and avm")
+        K_H = K_H + K_wave
+        K_M = K_M + K_wave
+    # K = c_k * l * sqrt(e), and we SEED NEMO's own en but then step it, so a
+    # diffusivity excess is either the LENGTH or the stepped ENERGY. Returning
+    # both decomposes it instead of leaving it to argument.
+    _leps = np.asarray(out.l_eps).reshape(ncol, z - 1)
+    _enew = np.asarray(out.tke_new).reshape(ncol, z - 1)
+    return K_H, K_M, n2, dz_half, _leps, _enew, en_i
 
 
 def run_stage_b(d):
@@ -571,6 +811,34 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
     def _rms(x):
         return float(np.sqrt(np.mean(x ** 2)))
 
+    def _pr_at_our_ceiling(pr_o, pr_n):
+        """NEMO's Prandtl ON THE INTERFACES WHERE OURS IS CLAMPED.
+
+        ``_ri_ratio`` below selects interfaces where BOTH Prandtl numbers are
+        free, i.e. exactly the ones where we are NOT clamped -- a subset
+        defined by the absence of the effect, which cannot measure it. In the
+        Antarctic that subset is 8114 of 310244 interfaces and it reported
+        Ri_ours/Ri_nemo = 1.085, which reads as agreement while 95% of the
+        basin sits on our ceiling.
+
+        This is the pairing that discriminates. Where OUR Pr is at the
+        ceiling: NEMO's Pr also high means our Richardson number is right and
+        the difference lives in the Prandtl formula; NEMO's Pr near its median
+        means our Ri is too large on exactly those interfaces, and the first
+        suspect is the shear -- this probe feeds the closure cell-centred
+        u/v from u_to_T/v_to_T, which removes sub-cell shear and inflates Ri.
+        """
+        ours_ceil = pr_o > 9.99
+        n = int(ours_ceil.sum())
+        if n < 10:
+            return {"n_ours_at_ceiling": n,
+                    "Pr_nemo_median_where_ours_ceil": float("nan"),
+                    "Pr_nemo_frac_ceil_where_ours_ceil": float("nan")}
+        pn = pr_n[ours_ceil]
+        return {"n_ours_at_ceiling": n,
+                "Pr_nemo_median_where_ours_ceil": float(np.median(pn)),
+                "Pr_nemo_frac_ceil_where_ours_ceil": float((pn > 9.99).mean())}
+
     def _ri_ratio(pr_o, pr_n):
         """Ri(ours)/Ri(NEMO) on the both-unclamped subset, or NaN if empty."""
         free_both = ((pr_o > 1.001) & (pr_o < 9.99)
@@ -601,6 +869,7 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
                     "K_M_over_avm_rms": _rms(K_M[m]) / _rms(avm_i[m]),
                     "K_H_over_avt_mean": float(K_H[m].mean() / avt_i[m].mean()),
                     "K_M_over_avm_mean": float(K_M[m].mean() / avm_i[m].mean()),
+                    **_pr_at_our_ceiling(pr_o, pr_n),
                     "Pr_nemo_median": float(np.median(pr_n)),
                     "Pr_ours_median": float(np.median(pr_o)),
                     "Pr_ours_p10": float(np.percentile(pr_o, 10)),
@@ -749,6 +1018,33 @@ def main():
                          "EQUALS the card value -- a no-op arm reported as "
                          "'no effect' is the worst outcome here. Ported from "
                          "nemo_zero_step_closure.py, same semantics.")
+    ap.add_argument("--iwm-forcing", default=None,
+                    help="Path to ORCA1's zdfiwm_forcing_TRA.nc. ORCA1 runs "
+                         "ln_zdfiwm=.true., so its avt AND avm both carry a "
+                         "wave-driven diffusivity; without this the Stage-A2 "
+                         "Prandtl comparison is TKE-only on our side and "
+                         "TKE+wave on NEMO's. Default off keeps every "
+                         "existing number byte-identical.")
+    ap.add_argument("--ice-restart-npz", default=None,
+                    help="rebuild_nemo_restart.py output carrying 'a_i' from "
+                         "NEMO's ice restart at the SAME step as the ocean "
+                         "restart. Without it Stage A2 runs with no sea ice, "
+                         "so the surface TKE flux is undamped in every "
+                         "ice-covered column. Default off keeps existing "
+                         "numbers byte-identical.")
+    ap.add_argument("--variance-budget", default=None, metavar="MESH_MASK",
+                    help="path to eORCA1 mesh_mask; enables the tracer-"
+                         "variance comparison chi = 2*int(theta' dtheta/dt)dV "
+                         "between OUR Mode-A closure and NEMO's ttrd_zdf on "
+                         "NEMO's OWN state. Needs the mesh for e1t*e2t: "
+                         "an unweighted integral on a tripole grid is wrong.")
+    ap.add_argument("--use-bathy", action="store_true",
+                    help="Tell the closure where each column's seafloor is "
+                         "(bottom_level + w_active, derived from the state's "
+                         "own land mask). Without it the bottom TKE boundary "
+                         "condition is pinned at the array floor on every "
+                         "column, which is wrong by kilometres on a shelf. "
+                         "Default off keeps existing numbers byte-identical.")
     ap.add_argument("--restart-npz", default=None,
                     help="rebuild_nemo_restart.py output; enables the EXACT "
                          "Mode-A closure test (Stage A2, forces --rec 1: the "
@@ -861,7 +1157,27 @@ def main():
         # prognostic=True card, THEN the same overrides Stage A got.
         cfg_a2 = _apply_overrides(
             orca1_zdftke_config(iwm_enabled=args.iwm_backgrounds), "stage_a2")
-        K_H2, K_M2 = run_stage_a2_mode_a(d2_for_a2(d), rst, cfg_a2)
+        _iwm = load_iwm_forcing(args.iwm_forcing) if args.iwm_forcing else None
+        _ice = None
+        if args.ice_restart_npz:
+            _ir = dict(np.load(args.ice_restart_npz))
+            if "a_i" not in _ir:
+                raise KeyError(
+                    f"{args.ice_restart_npz} has no 'a_i'; NEMO's ice restart "
+                    "stores concentration per category as a_i.")
+            _ai = np.asarray(_ir["a_i"], dtype=np.float64)
+            # (numcat, y, x) -> total concentration per column. ORCA1's ice
+            # restart at this step carries a single category, but summing is
+            # correct for any number of them.
+            _ice = np.nan_to_num(_ai, nan=0.0).reshape(-1, _ai.shape[-2]
+                                                       * _ai.shape[-1]).sum(0)
+            _ice = np.clip(_ice, 0.0, 1.0)
+            print(f"[ice] a_i: mean {_ice.mean():.4f}, "
+                  f"frac>0.15 {(_ice > 0.15).mean():.4f}")
+        (K_H2, K_M2, n2_ours, e3w_a2, leps2, enew2,
+         eseed2) = run_stage_a2_mode_a(
+            d2_for_a2(d), rst, cfg_a2, iwm_maps=_iwm, ice_frac=_ice,
+            use_bathy=args.use_bathy)
         result["stage_a2_mode_a"] = region_report(
             # LABEL FIX 2026-08-13: this said "rec 0", but avt_a2() returns
             # d["avt"], and load_pair(--rec 1) puts NEMO's RECORD 1 avt there —
@@ -889,6 +1205,177 @@ def main():
             K_H2, K_M2, avt_a2(d), avm_i, wet_pair, lat_col,
             d["lon"].reshape(-1), evd_cols=evd_cols, z_iface=_z_iface,
             z_cuts_m=(300.0, 100.0), stage="Stage A2 (Mode-A, NEMO's own en)")
+        # WHY OUR RICHARDSON NUMBER IS LARGER THAN NEMO'S, measured rather
+        # than argued. The Prandtl split above shows our Pr pinned at its
+        # ceiling of 10 across ~95% of the Antarctic while NEMO sits near 1.7
+        # on those SAME interfaces, which says our Ri = N^2/shear^2 is too
+        # large there. Ri has exactly two inputs, and this isolates the shear
+        # one: the same native velocities squared in NEMO's order and in ours.
+        # No model step, no oracle diffusivity, no depth ladder -- pure
+        # discretisation arithmetic, so it cannot be confounded by the closure.
+        sh2_n, sh2_o = shear_order_squared(rst["un"], rst["vn"])
+        _fin = np.isfinite(sh2_n) & np.isfinite(sh2_o) & (sh2_o > 1e-20)
+        _worst = float((sh2_n[_fin] / sh2_o[_fin]).min()) if _fin.any() else 1.0
+        # Jensen makes ratio >= 1 pointwise; below 1 means this probe is wrong,
+        # so it fails loudly instead of reporting a number nobody can trust.
+        assert _worst > 1.0 - 1e-9, (
+            f"shear_order_squared violated Jensen (min ratio {_worst:.6f}); "
+            "the face/centre pairing or an axis is wrong")
+        result["shear_order"] = shear_order_report(
+            sh2_n, sh2_o, wet_pair, lat_col, REGIONS)
+        print("\n--- Shear-squared: NEMO's face-native order / our centred "
+              "order, SAME velocities. Ri = N^2/shear^2, so ratio R means the "
+              "centred order inflates Ri by R. Jensen floor 1.0 asserted; "
+              f"observed min {_worst:.4f}.")
+        for _r in result["shear_order"]:
+            print(f"  {_r['region']:12s} n={_r['n']:8d} "
+                  f"median={_r['sh2_ratio_median']:7.3f} "
+                  f"p90={_r['sh2_ratio_p90']:8.3f} "
+                  f"frac>2={_r['frac_ratio_above_2']:5.3f}")
+
+        # WHICH INPUT TO Ri IS ANOMALOUS *WHERE THE DEFECT IS*?
+        #
+        # The shear-order ratio was reported as a WHOLE-BAND median and came
+        # out 1.026 in the Antarctic, which retired the squaring order. But
+        # the defect is a coastal rim, and coastal columns are exactly where
+        # the centred average loses the most: a T-column with one dry face
+        # keeps a single velocity difference where the open ocean averages
+        # two. The band median is dominated by open water and can hide that
+        # completely -- the same p90 is 1.799 with 5.6% of interfaces above 2.
+        #
+        # Two reviewers split on what to do next. Codex wants NEMO's own bn2
+        # (a rerun) to test N^2. GLM argued a 4.5x N^2 error from IDENTICAL
+        # T and S is implausible and something must be adding to avt but not
+        # avm; its candidate was double diffusion, which ORCA1's namelist
+        # refutes outright (ln_zdfddm = .false., namelist_cfg:431). The
+        # disagreement is still the signal, and this is the measurement that
+        # settles it from data already in hand, BEFORE paying for a rerun:
+        #   ratio large on the shelf  -> the shear explains Ri, no rerun
+        #   ratio ~1 on the shelf     -> N^2 is the suspect, rerun justified
+        _shallow = _z_iface < 100.0
+        _nonevd = (~evd_cols)[:, None]
+        _sh_rows = []
+        for _nm, _lo, _hi in REGIONS:
+            _bd = (lat_col >= _lo) & (lat_col <= _hi)
+            # NEMO'S OWN TKE MUST BE PHYSICAL IN THE CELL, or the comparison
+            # is against a mask value. NEMO floors wet en at rn_emin = 1e-6
+            # (namelist_ref:1228); measured over the whole restart, 69.3% of
+            # its finite en is <= 1e-10 and the median is exactly 0.0 — those
+            # are dry rows, and 1e-10 is avtb, a DIFFUSIVITY background, not a
+            # TKE floor. The antarctic<100m seed median was exactly 1.000e-10,
+            # i.e. MOST of that set was dry in NEMO's accounting while passing
+            # the T-file wet mask, so its avm was a background and the 20x
+            # ratio was measured against it.
+            _en_phys = eseed2 > 1.0e-6
+            _m = (wet_pair & _bd[:, None] & _shallow & _nonevd & _en_phys
+                  & (sh2_o > 1e-20) & np.isfinite(sh2_n))
+            if int(_m.sum()) < 10:
+                continue
+            _r = sh2_n[_m] / sh2_o[_m]
+            _sh_rows.append({
+                "region": _nm + "/calm<100m", "n": int(_m.sum()),
+                "n_dropped_en_unphysical": int(
+                    (wet_pair & _bd[:, None] & _shallow & _nonevd
+                     & ~_en_phys).sum()),
+                "sh2_ratio_median": float(np.median(_r)),
+                "sh2_ratio_p90": float(np.percentile(_r, 90)),
+                "frac_above_2": float((_r > 2.0).mean()),
+                "n2_ours_median": float(np.median(n2_ours[_m])),
+                "shear2_ours_median": float(np.median(
+                    sh2_o[_m] / np.maximum(e3w_a2, 1e-12)[_m] ** 2)),
+                # The four diffusivities on the SAME cells. If our Ri is huge
+                # because the shelf is quiescent, and NEMO's Prandtl is
+                # nonetheless ~2, then NEMO's avt must carry something its avm
+                # does not -- and these four numbers say so directly instead
+                # of by inference.
+                "K_H_ours_median": float(np.median(K_H2[_m])),
+                "K_M_ours_median": float(np.median(K_M2[_m])),
+                "avt_nemo_median": float(np.median(avt_a2(d)[_m])),
+                "avm_nemo_median": float(np.median(avm_i[_m])),
+                # THE DECOMPOSITION. K ~ l * sqrt(e). en_seed is NEMO's own
+                # TKE as handed in; tke_new is what one 3600 s step made of
+                # it. If l_eps is the outlier the length is the problem; if
+                # tke_new/en_seed is, the step is amplifying energy NEMO's
+                # does not have.
+                "l_eps_median": float(np.median(leps2[_m])),
+                "en_seed_median": float(np.median(eseed2[_m])),
+                "tke_new_median": float(np.median(enew2[_m])),
+                "tke_growth_median": float(np.median(
+                    enew2[_m] / np.maximum(eseed2[_m], 1e-30))),
+            })
+        result["shear_order_shallow"] = _sh_rows
+        print("\n--- Shear order RESTRICTED to the defect geometry "
+              "(<100 m, nonconvecting). If the Antarctic/Arctic rows are far "
+              "above the 1.026 whole-band median, the coastal shear "
+              "discretisation explains the Prandtl gap and no NEMO rerun is "
+              "needed.")
+        for _r in _sh_rows:
+            print(f"  {_r['region']:22s} n={_r['n']:8d} "
+                  f"l_eps={_r['l_eps_median']:9.3f} m  "
+                  f"en_seed={_r['en_seed_median']:9.3e} "
+                  f"tke_new={_r['tke_new_median']:9.3e} "
+                  f"growth={_r['tke_growth_median']:8.3f} "
+                  f"K_M/avm={_r['K_M_ours_median']/_r['avm_nemo_median']:8.2f}")
+
+        # THE OTHER INPUT TO Ri. With the shear order worth only ~2-7% and the
+        # Mode-A state being NEMO's OWN velocities, the remaining way for our
+        # Ri to exceed NEMO's is N^2. NEMO's rn2 is not in the files this
+        # comparator reads, but it does not need to be: where NEMO's Prandtl is
+        # strictly inside its bounds the pdl transform is INVERTIBLE, so
+        #     Ri_nemo = Pr_nemo / prandtl_ri_coeff,  Pr_nemo = avm/avt
+        # and NEMO's own N^2 follows as Ri_nemo * shear^2_nemo.
+        # The unclamped restriction here is forced by invertibility -- outside
+        # it Pr carries no Ri information at all -- unlike the _ri_ratio subset,
+        # which was merely convenient and was therefore vacuous.
+        _coeff = float(getattr(cfg_a2, "prandtl_ri_coeff", 4.5))
+        _e3w2 = np.maximum(e3w_a2, 1e-12) ** 2
+        _sh2_n_real = sh2_n / _e3w2          # NEMO's order, real units s^-2
+        _sh2_o_real = sh2_o / _e3w2          # centred order, what we feed
+        _avt2, _avm2 = avt_a2(d), avm_i
+        with np.errstate(divide="ignore", invalid="ignore"):
+            _pr_n = _avm2 / _avt2
+            _ri_n = _pr_n / _coeff
+            _n2_nemo = _ri_n * _sh2_n_real
+            _ri_o = n2_ours / np.maximum(_sh2_o_real, 1e-20)
+        # END-TO-END CONTROL: the Pr this predicts from our own N^2 and shear
+        # must reproduce the Pr the closure actually produced (K_M/K_H). If it
+        # does not, the inference chain below is broken and its numbers mean
+        # nothing, so it is reported next to them rather than assumed.
+        _pr_pred = np.clip(_coeff * _ri_o, 1.0, 10.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            _pr_act = K_M2 / K_H2
+        _rows = []
+        for _nm, _lo, _hi in REGIONS:
+            _band = (lat_col >= _lo) & (lat_col <= _hi)
+            _inv = (_pr_n > 1.001) & (_pr_n < 9.99)     # NEMO invertible
+            _m = (wet_pair & _band[:, None] & _inv
+                  & np.isfinite(_n2_nemo) & np.isfinite(n2_ours)
+                  & (np.abs(_n2_nemo) > 1e-12))
+            if int(_m.sum()) < 10:
+                continue
+            _ctl = np.isfinite(_pr_pred) & np.isfinite(_pr_act) & _m
+            _rows.append({
+                "region": _nm, "n": int(_m.sum()),
+                "n2_ours_over_nemo_median": float(np.median(
+                    n2_ours[_m] / _n2_nemo[_m])),
+                "n2_ours_median": float(np.median(n2_ours[_m])),
+                "n2_nemo_implied_median": float(np.median(_n2_nemo[_m])),
+                "ri_ours_median": float(np.median(_ri_o[_m])),
+                "ri_nemo_median": float(np.median(_ri_n[_m])),
+                "control_pr_pred_minus_actual_median": float(np.median(
+                    _pr_pred[_ctl] - _pr_act[_ctl])) if _ctl.any() else float("nan"),
+            })
+        result["n2_split"] = _rows
+        print("\n--- Ri = N^2/shear^2, the N^2 half. NEMO's N^2 is INFERRED by "
+              f"inverting its own pdl (Pr=avm/avt, coeff {_coeff}) on the "
+              "interfaces where that inverse exists.  CONTROL: pr_pred-pr_act "
+              "must be ~0 or the inference is broken.")
+        for _r in _rows:
+            print(f"  {_r['region']:12s} n={_r['n']:8d} "
+                  f"N2_ours/N2_nemo={_r['n2_ours_over_nemo_median']:8.3f} "
+                  f"Ri_ours={_r['ri_ours_median']:8.4f} "
+                  f"Ri_nemo={_r['ri_nemo_median']:7.4f} "
+                  f"CTL={_r['control_pr_pred_minus_actual_median']:+8.4f}")
 
     dT, dS, ttrd, strd, wet_c, _, dT2, dS2 = run_stage_b(d)
     result["stage_b_T"] = region_report(
@@ -903,6 +1390,80 @@ def main():
     result["stage_b2_S"] = region_report(
         "Stage B2: operator on PRE-ZDF state dS vs strd_zdf [PSU/s]",
         dS2, strd, wet_c & np.isfinite(strd), lat_col, evd_cols=evd_cols)
+
+    # --- Variance budget: OUR closure vs NEMO's, on NEMO's OWN state ------
+    # The operator-resolved budget on NEMO's archived trends showed vertical
+    # mixing is its dominant tracer-variance destroyer. The question that
+    # matters for us is whether OUR closure destroys variance at the same
+    # rate. Because Mode-A already evaluated our K on NEMO's state, the state
+    # is shared by construction and there is NO state-difference confound --
+    # the single cleanest comparison available.
+    #
+    # chi = 2 * integral(theta' * dtheta/dt) dV, theta' about the
+    # VOLUME-WEIGHTED mean. Ratio near 1 means our closure removes tracer
+    # variance at NEMO's rate; below 1 means we under-mix, above 1 over-mix.
+    if args.variance_budget:
+        import jax.numpy as jnp
+        from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+            implicit_vertical_diffusion_ocean,
+        )
+        from global_tracer_content import load_mesh_metrics
+        e1t, e2t, _e3ref, _tm = load_mesh_metrics(args.variance_budget)
+        zc, nyc, nxc = d["T"].shape
+        ncolc = nyc * nxc
+
+        def _cols(a):
+            return np.transpose(np.asarray(a).reshape(zc, ncolc), (1, 0))
+
+        dz_c = np.where(np.isfinite(_cols(d["e3t"])), _cols(d["e3t"]), 1.0)
+        dz_h = 0.5 * (dz_c[:, :-1] + dz_c[:, 1:])
+        T_c = np.nan_to_num(_cols(d["T"]), nan=0.0)
+        area = (e1t * e2t).reshape(ncolc)[:, None]
+        dVc = area * dz_c
+        wetv = (_cols(np.isfinite(d["T"]).astype(float)) > 0.5) & np.isfinite(
+            _cols(d["ttrd_zdf"]))
+
+        # DRY CELLS MUST NOT DIFFUSE. `T_c` carries 0.0 below the sea floor
+        # (nan_to_num), so an unmasked solve sees a ~20 K jump at the last wet
+        # interface and manufactures an enormous tendency in the deepest wet
+        # cell. The first run of this budget returned a ratio of 414, which no
+        # closure whose diffusivity is 0.89-1.49x NEMO's could produce -- an
+        # instrument defect, not a result. K is therefore zeroed at every
+        # interface whose two adjacent cells are not both wet.
+        wet_cell = _cols(np.isfinite(d["T"]).astype(float)) > 0.5
+        iface_wet = wet_cell[:, :-1] & wet_cell[:, 1:]
+        K_use = np.where(iface_wet, np.nan_to_num(K_H2, nan=0.0), 0.0)
+        print(f"[variance] K interfaces kept {int(iface_wet.sum())} of "
+              f"{iface_wet.size}; K_use max {K_use.max():.4e} m2/s")
+
+        T_ours = np.asarray(implicit_vertical_diffusion_ocean(
+            jnp.asarray(T_c), jnp.asarray(K_use), jnp.asarray(dz_c),
+            jnp.asarray(dz_h), 3600.0))
+        dT_ours = (T_ours - T_c) / 3600.0
+        _nm = _cols(d["ttrd_zdf"])
+        print(f"[variance] |dT| ours max {np.abs(np.where(wetv, dT_ours, 0)).max():.4e}"
+              f"  NEMO max {np.abs(np.where(wetv, np.nan_to_num(_nm), 0)).max():.4e} K/s")
+
+        def _chi(tend):
+            w = np.where(wetv, dVc, 0.0)
+            vol = w.sum()
+            mu = float((np.where(wetv, T_c, 0.0) * w).sum() / vol)
+            return float(2.0 * (np.where(wetv, T_c - mu, 0.0)
+                                * np.where(wetv, tend, 0.0) * w).sum())
+
+        chi_ours = _chi(dT_ours)
+        chi_nemo = _chi(_cols(d["ttrd_zdf"]))
+        ratio = chi_ours / chi_nemo if chi_nemo else float("nan")
+        print(f"\n[variance] chi_zdf(theta) ours {chi_ours:+.6e}  "
+              f"NEMO {chi_nemo:+.6e}  ratio {ratio:.4f}")
+        print("[variance] ratio < 1 = we under-mix, > 1 = we over-mix; "
+              "state is NEMO's own, so this is not confounded by the state.")
+        result["variance_budget_zdf_theta"] = {
+            "chi_ours": chi_ours, "chi_nemo": chi_nemo, "ratio": ratio,
+            "n_cells": int(wetv.sum()),
+            "note": "our K from the Mode-A closure, NEMO's from ttrd_zdf, "
+                    "same state, same volumes, same BE solver",
+        }
 
     with open(out_dir / f"tendency_match_rec{args.rec}.json", "w") as f:
         json.dump(result, f, indent=1)
@@ -937,6 +1498,66 @@ def main():
         png = out_dir / f"tendency_match_rec{args.rec}.png"
         fig.savefig(png, dpi=110)
         print(f"[maps] {png}")
+
+        if args.restart_npz:
+            # WHERE THE PRANDTL DEFECT LIVES. The band table says our effective
+            # tracer-to-momentum ratio matches NEMO within 1-9% in ten bands
+            # and is 4.5-5.7x too large in the polar upper 100 m. A band mean
+            # cannot say whether that is the whole polar cap or a rim -- e.g.
+            # the marginal ice zone, or shelves -- and those imply different
+            # causes, so it is plotted.
+            # MASK THE MAP THE WAY THE TABLE IS MASKED. The band rows quoted
+            # as "calm" EXCLUDE columns where NEMO's EVD fired; an unmasked
+            # map beside a masked table compares two different reductions and
+            # invites exactly the misreading this session has already made
+            # twice. January is northern winter, so the northern basins are
+            # full of convecting columns whose avt carries an EVD our probe
+            # has no counterpart for -- unmasked, they dominate the picture
+            # and look like a defect the table explicitly set aside.
+            # SAME GATE AS THE TABLE: NEMO's own en must exceed its rn_emin
+            # floor, or the cell is one NEMO treats as dry and its avm/avt are
+            # background fills. Without this the figure showed a bright
+            # Antarctic shelf band that was entirely our real closure divided
+            # by NEMO's mask values (job 9877224: the Antarctic momentum ratio
+            # goes from 20.16 to 0.92 once the gate is applied).
+            _en_ok = (eseed2 > 1.0e-6)
+            wm2 = np.isfinite(d["T"][0]) & (~evd_cols).reshape(ny, nx)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _pro = K_M2 / np.maximum(K_H2, 1e-30)
+                _prn = avm_i / np.maximum(avt_a2(d), 1e-30)
+                _rat = np.log10(np.maximum(_pro, 1e-6)
+                                / np.maximum(_prn, 1e-6))
+            # ABSOLUTE ratios, not just the Prandtl one. Reading the ratio
+            # alone inverted the physics once already: the Prandtl number is
+            # off because K_M is excessive by MORE than K_H is, not because
+            # tracer mixing is weak. Both diffusivities are plotted against
+            # the oracle's own so the sign cannot be misread again.
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _rkm = np.log10(np.maximum(K_M2, 1e-30)
+                                / np.maximum(avm_i, 1e-30))
+                _rkh = np.log10(np.maximum(K_H2, 1e-30)
+                                / np.maximum(avt_a2(d), 1e-30))
+            fig2, ax2 = plt.subplots(2, 2, figsize=(13, 8.4))
+            for _ax, _fld, _kk, _ttl in (
+                    (ax2[0][0], _rkm, 3, "log10(K_M ours / avm NEMO)  ~10-30 m"),
+                    (ax2[0][1], _rkm, 8, "log10(K_M ours / avm NEMO)  ~100 m"),
+                    (ax2[1][0], _rkh, 3, "log10(K_H ours / avt NEMO)  ~10-30 m"),
+                    (ax2[1][1], _rkh, 8, "log10(K_H ours / avt NEMO)  ~100 m")):
+                _f = np.where(wm2 & _en_ok[:, _kk].reshape(ny, nx),
+                              _fld[:, _kk].reshape(ny, nx), np.nan)
+                _im = _ax.pcolormesh(_f, vmin=-2, vmax=2, cmap="RdBu_r")
+                _ax.set_title(_ttl, fontsize=9)
+                plt.colorbar(_im, ax=_ax, shrink=0.85)
+            fig2.suptitle(
+                "Vertical diffusivity vs NEMO, Mode-A (NEMO's own state, ice, "
+                "wave mixing and backgrounds; convecting columns masked). "
+                "RED = WE MIX MORE THAN NEMO, 0 = match, +2 is a hundredfold "
+                "excess. Top momentum, bottom tracer. White = no data or NEMO "
+                "inactive there.", fontsize=10)
+            fig2.tight_layout()
+            png2 = out_dir / f"prandtl_ratio_rec{args.rec}.png"
+            fig2.savefig(png2, dpi=110)
+            print(f"[maps] {png2}")
     return 0
 
 

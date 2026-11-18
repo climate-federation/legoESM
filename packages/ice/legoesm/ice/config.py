@@ -10,7 +10,8 @@ from legoesm.ice.constants_config import (
     NEMO_SI3_CONSTANTS_CONFIG,
     IceConstantsConfig,
 )
-from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
+                                      NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH)
 
 __param_spec__ = {
@@ -132,6 +133,8 @@ __param_spec__ = {
             "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
             "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
             "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
+            "most_zeta_cap_width": "numerics: RULE 5 half-width of the smooth |zeta| cap at 10 (0 = hard clip)",
+            "gfs_unstable_join_width": "numerics: RULE 5 width of the GFS unstable smooth join at zeta = -0.5 (0 = exact step)",
             "h_ice_min": "numerics: min ice thickness for smooth ops",
             "T_ice_min": "numerics: lower temperature bound for stability",
             "z_ref": "convention: MOST reference height (10 m standard)",
@@ -139,6 +142,7 @@ __param_spec__ = {
             "alpha_mevp": "numerics: mEVP stress relaxation (stability-coupled to N_mevp)",
             "beta_mevp": "numerics: mEVP velocity relaxation (stability-coupled to N_mevp)",
             "T_evp": "numerics: EVP damping ratio coupled to the N_evp subcycle count (E_factor = 1/(2*T_evp*N_evp))",
+            "ocean_heat_ch_nemo": "fixed oracle constant: NEMO SI3 zch PARAMETER (icesbc.F90:321); active only under ocean_heat_flux_scheme='nemo_ustar', so a trainable leaf would be inert under the default scheme",
             "sw_transmittance_const": "constant-scheme SW transmittance, default 0.0 (off — delta_eddington computes its own) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
@@ -606,6 +610,15 @@ class SeaIceConfig(NamedTuple):
     #    to Tf (frazil).  Needs q_open_top + ocean_dz_top_m from the
     #    caller (step_sea_ice kwargs); the OMIP driver passes them.
     lead_freeze_source: str = "ice_skin"
+    # Ocean-to-ice basal sensible heat flux (new-physics path only):
+    #  * "constant" (default, unchanged): ocean_heat_transfer_coeff*max(SST-Tf,0).
+    #  * "nemo_ustar": NEMO SI3 icesbc.F90:327-386, rho0*rcp*zch*u_star*(SST-Tf)
+    #    with u_star^2 = drag_ocean*|u_ice-u_oce|^2 (|tau|/rho0 when
+    #    dynamics="none"), capped so the top cell cannot cool below Tf within
+    #    one ice step.  Needs ocean_dz_top_m (step_sea_ice kwarg).
+    ocean_heat_flux_scheme: str = "constant"
+    # NEMO zch, ocean-ice heat transfer coefficient (icesbc.F90:321 PARAMETER).
+    ocean_heat_ch_nemo: float = constants.ice_ocean_heat_transfer_nemo
     # Layered SI3 is an option inside this existing model.
     # ORDER, decided at the 2026-09-25 merge: both sides appended fields at
     # the tail claiming to preserve positional SeaIceConfig constructors, and
@@ -635,6 +648,18 @@ class SeaIceConfig(NamedTuple):
     # snowfall, and the post-thermo cover reported to the coupler).  Disable
     # only in a NEMO-comparison config that requires the legacy paths.
     core2_precipitation_closure: bool = True
+    # Frozen O17 full-deck composition card.  Kept opaque here to avoid a
+    # config -> dynamics -> config import cycle; the dispatcher checks its
+    # concrete SI3O17Card contract before use.
+    si3_o17: object | None = None
+    # Unstable-regime (zeta<0) MOST form, chosen independently of
+    # stability_scheme: "native" (default, byte-identical: each bulk path's own
+    # form) | "businger_dyer" | "coare3".  Unknown -> ValueError at dispatch.
+    unstable_scheme: str = "native"
+    # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10) and the GFS
+    # unstable smooth-join width (0 = the exact GFS step); bulk_flux constants.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
+    gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH
 
 
 from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E402,F401
@@ -676,7 +701,11 @@ def _validate_si3_orca2_o1_config(config: "SeaIceConfig") -> None:
             "ln_icedyn and ln_icethd must both be False at rung O1 "
             "(icestp.F90:167,199; active dynamics/thermo enter at rungs O4-O16 and O17/C0-C4)"
         )
-    if config.thermo_scheme == "si3_orca2_o2" and orca2_cfg.ln_icedyn:
+    if (
+        config.thermo_scheme == "si3_orca2_o2"
+        and orca2_cfg.ln_icedyn
+        and config.si3_o17 is None
+    ):
         conflicts.append(
             "ln_icedyn must be False on the O2/O15/O16 state-and-finalization entry"
         )
@@ -712,6 +741,28 @@ def build_si3_orca2_o2_config(
         ice_constants=cfg.ice_constants,
         si3_orca2=cfg,
     )
+
+
+def build_si3_orca2_o17_config(card: object) -> SeaIceConfig:
+    """Return the frozen full-production O17 config; no selector is inferred."""
+    from legoesm.ice.si3_o17 import SI3O17Card
+
+    if not isinstance(card, SI3O17Card):
+        raise TypeError("O17 requires an explicit SI3O17Card")
+    if card.core2_precipitation_closure is not False:
+        raise ValueError("O17 freezes core2_precipitation_closure=False")
+    cfg = SeaIceConfig(
+        dynamics="none",
+        transport="none",
+        thermo_scheme="si3_orca2_o2",
+        si3_switches=card.surface.switches,  # one source: the step computes with card.surface
+        ice_constants=card.constants,
+        si3_orca2=card.state,
+        core2_precipitation_closure=False,
+        si3_o17=card,
+    )
+    _validate_si3_orca2_o1_config(cfg)
+    return cfg
 
 
 class SI3LateralMeltConfig(NamedTuple):

@@ -1,0 +1,56 @@
+ONE REVIEW. Adversarial. Do not fix anything. Answer in under 450 words.
+
+Review an UNCOMMITTED change to a production ocean driver. It is in this
+worktree's working tree (uncommitted), so read the files directly:
+  scripts/run/run_omip_core2.py
+  tests/ocean/unit/test_surface_flux_accumulator.py
+
+WHAT IT DOES AND WHY. legoESM runs OMIP CORE-II against NEMO ORCA1. A snapshot
+pair gives the state change but not the boundary fluxes that drove it, so no
+heat budget can be closed from snapshots -- omip_conservation_closure.py says
+so and refuses to fake the term. New flag --flux-accumulate adds
+_SurfaceFluxAccumulator: device-side running sums of q_net, sw_down, tau_x,
+tau_y taken from the OceanSurfaceForcing HANDED TO THE STEP, emitted as the
+window mean into the existing `extra` snapshot channel as q_net_mean etc. plus
+flux_mean_n_steps. A helper _snapshot_extra merges it with the pre-existing
+--kprofile-snapshots dict. The flag is added to _RESTART_FP_EXCLUDE (a LOCAL
+frozenset inside main()) because a read-only diagnostic that gets hashed into
+the restart fingerprint makes a chained leg un-resumable -- this driver already
+lost a two-day control that way.
+
+It is wired at two step sites: the cubed_sphere branch (model.step) and the
+tripole/latlon/MPAS branch (_ocean_step, after blend_ice_ocean_forcing, so the
+accumulated flux is the ice-partitioned one the ocean actually receives).
+
+9 tests pass.
+
+ATTACK THESE SPECIFICALLY:
+
+(a) IS THE ACCUMULATED QUANTITY THE ONE A HEAT BUDGET NEEDS? The intent is the
+    APPLIED ocean surface heat flux. Does sf.q_net at the step call site
+    actually equal what the ocean model applies, or does the model derive its
+    own top-cell heating from sw_down plus penetration optics (see _q_open_top
+    and shortwave_penetration) so that q_net alone double-counts or misses the
+    penetrative part? Name what a budget built on these keys would get wrong.
+
+(b) TIMING. The add() happens immediately BEFORE the step. Is sf at that point
+    final on every path, or can a later _replace mutate it after the add for
+    some configuration? Check the ice branch and the freshwater branch.
+
+(c) SHARDING AND MEMORY. Sums are jnp arrays held across the whole window. On
+    the persistent SPMD lane the state is sharded and gathered only at output
+    boundaries. Does holding a device-resident running sum across steps break
+    sharding, donation, or retrace the step? Does np.asarray in drain() force a
+    gather that could fail or silently give a per-rank partial result under MPI?
+
+(d) THE WINDOW. drain() is called from the snapshot writer. Snapshots are
+    written at a day cadence AND at year boundaries AND at run end AND on
+    blowup. Which of those drain and which do not, and can a window therefore
+    span an unintended interval or be double-counted? Is flux_mean_n_steps
+    sufficient to detect that from the file alone?
+
+(e) TEST QUALITY. Which of the 9 tests would still pass if the feature were
+    reverted? Is the restart-fingerprint source-scraping test sound, or can it
+    pass vacuously?
+
+Say what you would REJECT and the single highest-value fix.

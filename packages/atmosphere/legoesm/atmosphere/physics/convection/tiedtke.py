@@ -259,7 +259,7 @@ def _wrf_cuadjtq(T, q, p, flag, kcall):
     second pass runs where the first changed the state (kcall 1/2) or always
     (kcall 0), exactly as the Fortran ``isum``/``zcond.ne.0`` logic per column.
     """
-    ldcp = constants.L_v / constants.c_pd
+    ldcp = constants.L_v / constants.c_pd  # latent-ok: WRF Tiedtke oracle constant
 
     def cond(T, q):
         qs, cor = _wrf_qsat(T, p)
@@ -293,7 +293,7 @@ def _wrf_cuasc(c, s):
     """
     K = c["K"]
     g, cpd, rd, rv, alv = (constants.g, constants.c_pd, constants.R_d,
-                           constants.R_v, constants.L_v)
+                           constants.R_v, constants.L_v)  # latent-ok: WRF Tiedtke oracle constant
     rcpd = 1.0 / cpd
     zrg = 1.0 / g
     vtmpc1 = rv / rd - 1.0
@@ -553,7 +553,7 @@ def _wrf_column(pten, pqen, puen, pven, pverv, pap, paph, pgeo, pqvf, pqvbl,
     """tiecnv + cumastr_new for ONE column, 1-based padded arrays."""
     K = pten.shape[0] - 1
     g, cpd, rd, rv, alv = (constants.g, constants.c_pd, constants.R_d,
-                           constants.R_v, constants.L_v)
+                           constants.R_v, constants.L_v)  # latent-ok: WRF Tiedtke oracle constant
     rcpd = 1.0 / cpd
     vtmpc1 = rv / rd - 1.0
     zcons2 = 1.0 / (g * ztmst)

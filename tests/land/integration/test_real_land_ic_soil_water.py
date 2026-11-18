@@ -43,7 +43,7 @@ def test_one_day_of_soil_water_keeps_the_ic_deep_root_zone():
     g = create_grid("mpas", resolution=6)
     lat = np.rad2deg(np.asarray(g.latCell))
     lon = np.rad2deg(np.asarray(g.lonCell))
-    h = clm_hydraulics_config(load_clm_surface(str(_CLM), lat, lon))
+    h = clm_hydraulics_config(load_clm_surface(str(_CLM), lat, lon, vg_air_entry_m=-0.02))
     grid = make_soil_grid(SoilGridConfig(n_layers=10, total_depth=3.0,
                                          growth_factor=2.0))
     st, meta = load_land_restart(_IC, expected_land_mode="multilayer",

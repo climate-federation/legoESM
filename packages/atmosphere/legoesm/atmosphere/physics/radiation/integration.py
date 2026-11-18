@@ -1112,6 +1112,8 @@ def _call_radiation_backend(
             conv_icwmr=conv_icwmr,
             p_half=p_half,
             clubb_config=clubb_config,
+            subcolumn_inhomogeneity=(getattr(cloud_config, "cloud_vertical_overlap_optics",
+                                             "none") == "max_random"),
             mg2_ice_dcs_m=mg2_ice_dcs_m,
             mg2_ice_slope_log_width=mg2_ice_slope_log_width,
         )
@@ -1179,11 +1181,25 @@ def _call_radiation_backend(
         # CAM draws different uniforms in every column; the per-column shift
         # (seeded from the bottom pressure, as for mcica) does the same, so a
         # layer with cf < 1/n_sub is cloudy in some columns instead of never.
+        _shift = _sub.cam_seed_shift(p_full)
         _mask = _sub.generate_subcolumns(
-            cloud_props.cloud_fraction, _n_sub, shift=_sub.cam_seed_shift(p_full),
+            cloud_props.cloud_fraction, _n_sub, shift=_shift,
             width=float(cloud_config.cloud_subcolumn_mask_width))
-        _lwp, _iwp = _sub.subcolumn_paths(
-            _mask, cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
+        if cloud_config.cloud_optics_inhomogeneity == "two_region":
+            # ecRad McICA gamma-PDF scaling of each cloudy cell's optical depth
+            # (liquid and ice alike), replacing the mask in the paths.
+            from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+                cam_interface_temperature)
+            _od = _sub.ecrad_inhomogeneity_scaling(
+                _mask, cloud_config.cloud_fsd, lat, p_half,
+                cam_interface_temperature(T, p_full, p_half, sfc_temperature), shift=_shift)
+            _lwp, _iwp = (
+                jnp.reshape(_od * ic[None], (_n_sub * T.shape[0], T.shape[1]))
+                for ic in _sub.in_cloud_paths(
+                    cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp))
+        else:
+            _lwp, _iwp = _sub.subcolumn_paths(
+                _mask, cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
         _rad_kwargs = _sub.expand_kwargs(_rad_kwargs, _n_sub, _ncol)
         _rad_kwargs["cloud_path_liq"] = _lwp
         _rad_kwargs["cloud_path_ice"] = _iwp

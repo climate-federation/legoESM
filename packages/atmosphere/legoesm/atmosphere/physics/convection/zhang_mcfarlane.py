@@ -50,6 +50,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.smooth import validate_smoothing_width
 from legoesm.atmosphere.physics.convection._zm_cam6 import (
     Q_MIN_VAPOR,
     convtran,
@@ -65,7 +66,8 @@ from legoesm.core.smooth import smooth_clamp, smooth_relu
 
 
 __all__ = ("CONVTRAN1_TRACERS", "cam6_detrain_condensate",
-           "validate_detrain_widths", "zhang_mcfarlane_convection")
+           "validate_detrain_widths", "validate_trigger_width",
+           "zhang_mcfarlane_convection")
 
 # CAM6 constituents with ``is_convtran1`` (micro_mg_cam.F90:416-435, MG2) that
 # zm_conv_intr.F90:829-846 transports with ``convtran``, mapped to legoESM
@@ -111,7 +113,7 @@ __physics_contract__ = {
                         "evaporation of rain from above; signed per layer, "
                         "column-integrates to the surface rain; never a "
                         "per-layer tracer source)",
-        "cape": "J/kg", "convective_mask": "1 (cape > capelmt)",
+        "cape": "J/kg", "convective_mask": "1 (trigger weight in [0, 1]; cape > capelmt at width 0)",
         "du_dt_conv": "m/s^2 (None if enable_cmt=False)",
         "dv_dt_conv": "m/s^2 (None if enable_cmt=False)",
         "conv_prog_profile_new": "kg/m^2/s (diagnosed mb at [:, -1])",
@@ -192,6 +194,7 @@ def zhang_mcfarlane_convection(
         ``{name: (ncol, nlev)}`` moist tracers to transport with ``convtran``
         (the host passes the ``CONVTRAN1_TRACERS`` it carries).
     """
+    validate_trigger_width(config.trigger_width_J_kg)
     ncol, nlev = T.shape
     dtype = T.dtype
     q_v, p_full, p_half, u, v = (jnp.asarray(a, dtype) for a in (q_v, p_full, p_half, u, v))
@@ -231,7 +234,7 @@ def zhang_mcfarlane_convection(
         num_cin=int(config.num_cin), dmpdz=config.dmpdz,
         tiedke_add=config.tiedke_add, lwmax=LWMAX, c0_lnd=config.c0_lnd,
         c0_ocn=config.c0_ocn, alfa=config.alfa, limcnv_p_pa=config.limcnv_p_pa,
-        pref_edge=pref_edge)
+        trigger_width=config.trigger_width_J_kg, pref_edge=pref_edge)
 
     # zm_conv_tend: physics_update before zm_conv_evap (zm_conv_intr.F90:686).
     T1 = T + conv.heat / cp * dt
@@ -265,7 +268,8 @@ def zhang_mcfarlane_convection(
         dq_v_dt=dq_v_dt,
         dq_c_conv_dt=conv.dlf,
         cape=conv.cape,
-        convective_mask=conv.ideep.astype(dtype),
+        # the trigger weight (== ideep at width 0); diagnostic only
+        convective_mask=conv.deep_weight,
         du_dt_conv=du_dt_conv,
         dv_dt_conv=dv_dt_conv,
         dq_r_conv_dt=evap.ntprprd,
@@ -286,6 +290,12 @@ def zhang_mcfarlane_convection(
     mb_kg = conv.mb * 100.0 / constants.g
     conv_prog_profile_new = jnp.zeros_like(conv_prog_profile).at[:, -1].set(mb_kg)
     return out, conv_prog_profile_new
+
+
+def validate_trigger_width(w) -> None:
+    """The one legal range of ``trigger_width_J_kg`` (0 = CAM's hard switch):
+    :func:`legoesm.core.smooth.validate_smoothing_width`."""
+    validate_smoothing_width("ZhangMcFarlaneConfig trigger_width_J_kg", w)
 
 
 def validate_detrain_widths(w_T, w_n) -> None:
@@ -360,5 +370,5 @@ def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array,
         4.0 * _DETRAIN_PI * _DETRAIN_R_LIQ_M**3 * _DETRAIN_RHO_LIQ)
     dN_i = 3.0 * (dlf_pos * dum1) / (
         4.0 * _DETRAIN_PI * _DETRAIN_R_ICE_M**3 * _DETRAIN_RHO_ICE)
-    dT = dlf * dum1 * constants.L_f / constants.c_pd
+    dT = dlf * dum1 * constants.L_f / constants.c_pd  # latent-ok: CAM6 ZM oracle constant
     return dT, dq_c, dq_i, dN_c, dN_i

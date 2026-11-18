@@ -112,7 +112,7 @@ def write_input(path, dt, rho, z, pk, theta, qv, qc, qr):
     from legoesm import constants as C
     ncol, nz = rho.shape
     with open(path, "w") as f:
-        f.write(f"{ncol} {nz} {dt!r} {C.c_pd!r} {C.R_d!r} {C.L_v!r} "
+        f.write(f"{ncol} {nz} {dt!r} {C.c_pd!r} {C.R_d!r} {C.L_v!r} "  # latent-ok: Kessler oracle constant
                 f"{C.p_ref!r} {C.rho_water!r}\n")
         for i in range(ncol):
             for k in range(nz):

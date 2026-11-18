@@ -1234,6 +1234,76 @@ class TestAvmWeightingWiring:
             rtol=1e-12, atol=0,
             err_msg="uniform K_M: nemo_face must equal tpoint to round-off")
 
+    @pytest.mark.parametrize("prandtl_mode", ["richardson", "nemo_ri"])
+    def test_nemo_face_on_rk3_nbb2_geometry(self, prandtl_mode):
+        """key_RK3 arm: zdf_sh2(Nbb,Nbb) = the face geometry with the
+        "before" faces equal to the "now" faces.  nemo_face must be accepted
+        there, differ from tpoint under a horizontal K_M contrast, and equal
+        it to round-off under uniform K_M (same contract as the MLF arm)."""
+        kwargs = _face_native_orchestrator_inputs()
+        kwargs = {k: v for k, v in kwargs.items()
+                  if k not in ("u_before_cell", "v_before_cell")}
+        kwargs["u_face_before"] = kwargs["u_face_now"]
+        kwargs["v_face_before"] = kwargs["v_face_now"]
+        cfg_tpoint = TKEConfig(tke_shear_production="nemo_face_native_nbb2",
+                               prandtl_mode=prandtl_mode)
+        cfg_face = TKEConfig(tke_shear_production="nemo_face_native_nbb2",
+                             tke_shear_avm_weighting="nemo_face",
+                             prandtl_mode=prandtl_mode)
+
+        def _run(cfg, tke_old):
+            return np.asarray(tke_vertical_mixing(
+                cfg=cfg, tke_old=tke_old, dt=3600.0, rho_0=_RHO0,
+                n_iterations=1, **kwargs).tke_new)
+
+        shape = kwargs["dz_half"].shape
+        bump = np.ones(shape)
+        bump[:, : shape[1] // 2, :] = 50.0
+        tke_varying = jnp.asarray(1e-2 * bump)
+        out_face = _run(cfg_face, tke_varying)
+        assert bool(np.all(np.isfinite(out_face)))
+        assert not np.allclose(_run(cfg_tpoint, tke_varying), out_face)
+        tke_uniform = jnp.full(shape, 1e-2)
+        np.testing.assert_allclose(
+            _run(cfg_tpoint, tke_uniform), _run(cfg_face, tke_uniform),
+            rtol=1e-12, atol=0)
+
+    def test_lane_supplied_p_sh2_fn(self):
+        """Unstructured lanes hand in their own zdf_sh2 as K_M -> p_sh2.
+        Supplying K_M * (the kernel's own cell shear^2) must reproduce the
+        tpoint path; a different production must change the result; and the
+        hook refuses to be a silent no-op under tpoint weighting."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_squared,
+        )
+        kwargs = _face_native_orchestrator_inputs()
+        base = {k: v for k, v in kwargs.items()
+                if k not in ("u_before_cell", "v_before_cell", "u_face_now",
+                             "v_face_now", "u_face_before", "v_face_before",
+                             "face_masks_3d")}
+        s2 = vertical_shear_squared(base["u_cell"], base["v_cell"],
+                                    base["dz_half"])
+        tke0 = jnp.full(base["dz_half"].shape, 1e-2)
+
+        def run(cfg, fn=None):
+            return np.asarray(tke_vertical_mixing(
+                cfg=cfg, tke_old=tke0, dt=3600.0, rho_0=_RHO0, n_iterations=2,
+                p_sh2_fn=fn, **base).tke_new)
+
+        face = TKEConfig(tke_shear_avm_weighting="nemo_face",
+                         prandtl_mode="nemo_ri")
+        tpoint = run(TKEConfig(prandtl_mode="nemo_ri"))
+        np.testing.assert_allclose(run(face, lambda K: K * s2), tpoint,
+                                   rtol=1e-12, atol=0)
+        assert not np.allclose(run(face, lambda K: 3.0 * K * s2), tpoint)
+        with pytest.raises(ValueError, match="silent-no-op"):
+            run(TKEConfig(prandtl_mode="nemo_ri"), lambda K: K * s2)
+        with pytest.raises(ValueError, match="step_entry"):
+            tke_vertical_mixing(
+                cfg=face._replace(tke_shear_evaluation_stage="step_entry"),
+                tke_old=tke0, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+                p_sh2_fn=lambda K: K * s2, precomputed_p_sh2=s2, **base)
+
     def test_final_K_call_gets_face_weighted_override(self):
         """Regression (#1455 review B1): EVERY compute_K_from_tke call —
         including the post-loop one producing the RETURNED K_M/K_H — must
