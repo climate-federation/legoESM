@@ -221,6 +221,23 @@ def isf_prescribed_melt_tendencies(
     ``ρ0·c_sw·Σ dT_k·h_k = pqoce + pqhc`` and
     ``ρ0·Σ dS_k·h_k = −fwf·⟨S⟩_w`` (locked by tests).
 
+    Oracle (``tests/ocean/unit/test_ice_shelf_nemo_oracle.py``, compiled
+    NEMO 5.0.1 eORCA1 build): the TBL deposition pattern and the volume
+    source match to 1e-12.  KNOWN DIFFERENCES:
+
+    * NEMO 5.0.1's 3-D ``eos_fzp`` (the call ``isf_par`` makes) writes
+      ``P(zs)·zs − 5.87701e-2·S`` — the ``S`` factor binds only the last
+      coefficient (operator precedence; fixed in 5.0.2).  Its TBL freezing
+      point is ~0.14 K colder than the TEOS-10 form used here, so the
+      temperature tendency differs by ~0.16 % per case (pinned).  Matching
+      5.0.1 would need the slipped formula; not done.
+    * Salinity: NEMO adds no salt tendency (z* volume change dilutes the
+      whole column); here melt water dilutes the TBL cells only (virtual
+      salt).  The column salt integral is the same.
+    * The ``fwf > 0`` gate drops refreezing, which NEMO would apply; the
+      eORCA1 forcing ``sornfisf`` has no negative values, so it never binds
+      there.
+
     TBL construction (EXACT NEMO isftbl semantics — isfpar.F90 +
     isftbl.F90, codex r3 #3):
 
@@ -345,6 +362,17 @@ def three_equation_melt(
     substituting the freezing-point relation + the salt equation
     into the heat equation.  Assumes the ice has zero salinity and
     neglects the (small) sensible-heat ice-conduction term.
+
+    Oracle (``tests/ocean/unit/test_ice_shelf_nemo_oracle.py``): with
+    NEMO's constants passed through ``config``, melt, heat flux and
+    interface temperature match compiled NEMO 5.0.1 ``isfcav_mlt`` '3eq'
+    rebuilt without conduction to 1e-12.  KNOWN DIFFERENCE vs the stock
+    build (conduction ``ρ_i c_i κ (T_b − T_s)/draft``, κ = 1.54e-6 m²/s,
+    T_s = −20 °C): heat flux differs by at most 0.43 W/m² on the fixture
+    grid; relative to the flux that is ≤0.12 % for T ≥ 0 °C but up to 32 %
+    near freezing (T = −1.9 °C, 100 m draft) where the melt itself is tiny.
+    Pinned per case.  The default ``freeze_c`` (−7.61e-4 °C/dbar, Jenkins
+    1991) also differs from NEMO's −7.577e-4 °C/m.
 
     Parameters
     ----------
