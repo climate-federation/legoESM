@@ -113,20 +113,22 @@ if [[ "${LAUNCHER:-srun}" == "hpcx" ]]; then
   # srun on these nodes (probe job 29077883).  One GPU per local rank via the
   # wrapper.  CUDA_MPI=1 hands device buffers to MPI (GPU-direct halos),
   # CUDA_MPI=0 stages them through the host as the production stack does.
-  # Profiler traces are switched OFF here: the driver picks the traced rank
-  # from SLURM_PROCID, which mpirun does not set per rank.
+  # Every mpirun process inherits the ONE SLURM_PROCID of the step that
+  # started mpirun's helper, and the driver reads SLURM_PROCID before its
+  # OMPI_COMM_WORLD_RANK fallback when it picks the traced rank; the wrapper
+  # unsets it so each process reports its own MPI rank.
   source "${REPO}/scripts/cluster/levante/hpcx_gdr_env.sh"
   export MPI4JAX_USE_CUDA_MPI="${CUDA_MPI:?LAUNCHER=hpcx needs CUDA_MPI=0|1}"
-  unset LEGOESM_TRACE_STEPS LEGOESM_TRACE_RANKS
   CMD[0]="${REPO}/.venv-gdr/bin/python"
   _WRAP="${OUTDIR}/gpu_local_rank.sh"
-  printf '#!/bin/bash\nexport CUDA_VISIBLE_DEVICES=${OMPI_COMM_WORLD_LOCAL_RANK}\nexec "$@"\n' > "${_WRAP}"
+  printf '#!/bin/bash\nunset SLURM_PROCID\nexport CUDA_VISIBLE_DEVICES=${OMPI_COMM_WORLD_LOCAL_RANK}\nexec "$@"\n' > "${_WRAP}"
   chmod +x "${_WRAP}"
   echo "launch via HPC-X mpirun, MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI}: ${CMD[*]}"
   mpirun -np "${N_GPUS}" --bind-to none \
     -x PYTHONPATH -x JAX_PLATFORMS -x JAX_ENABLE_X64 -x XLA_PYTHON_CLIENT_PREALLOCATE \
     -x XLA_PYTHON_CLIENT_MEM_FRACTION -x LEGOESM_JIT_CACHE_DIR -x LEGOESM_PHASE_TIMERS \
     -x MPI4JAX_USE_CUDA_MPI -x LD_LIBRARY_PATH -x PATH -x OPAL_PREFIX \
+    -x LEGOESM_TRACE_STEPS -x LEGOESM_TRACE_RANKS \
     -x AMIP_SURFDATA -x ERA5_IC "${_WRAP}" "${CMD[@]}"
 else
   srun --ntasks="${N_GPUS}" --ntasks-per-node="${N_GPUS}" --gpus-per-node="${N_GPUS}" \
