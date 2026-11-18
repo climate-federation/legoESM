@@ -16213,8 +16213,9 @@ class LatLonCGridOceanModel:
         mask_v = compute_polar_filter_mask(pf_grid, is_v_face=True, **kw)
 
         def _masked_filter_3d(data, wet2d, fmask):
-            # wet2d: (n_lat_f, n_lon_f) wet=1/land=0 on the field's stagger.
-            wet = wet2d[:, :, None]
+            # wet2d: (n_lat_f, n_lon_f) wet=1/land=0 on the field's stagger, or
+            # per level (n_lat_f, n_lon_f, nlev) under depth-limited walls.
+            wet = wet2d[:, :, None] if wet2d.ndim == 2 else wet2d
             ocean_cnt = jnp.maximum(jnp.sum(wet, axis=1, keepdims=True), 1.0)
             zmean = jnp.sum(data * wet, axis=1, keepdims=True) / ocean_cnt
             filled = jnp.where(wet > 0.0, data, zmean)
@@ -16250,13 +16251,19 @@ class LatLonCGridOceanModel:
         if getattr(self.config, "prescribed_flow", None) is not None:
             return state._replace(
                 T=state.T.replace(data=T), S=state.S.replace(data=S))
+        # Depth-limited walls: a closed face level is land to the filter (filled with
+        # the open-face zonal mean, left out of the mean it restores, not written), so
+        # the filter neither spreads momentum onto it nor loses any there.  Without
+        # walls the masks stay 2-D: bit-identical.
+        if getattr(_grid, "face_nlev_u", None) is not None:
+            u_mask, v_mask = wall_faces(
+                u_mask[..., jnp.newaxis], v_mask[..., jnp.newaxis], _grid,
+                state.u.data.shape[-1])
         v = _masked_filter_3d(state.v.data, v_mask, mask_v)
         # u-face is periodic with a duplicated wrap column (u[:, n_lon] == u[:, 0]);
         # filter the n_lon-wide interior with the cell mask, then re-append col 0.
         u_int = _masked_filter_3d(state.u.data[:, :-1], u_mask[:, :-1], mask_c)
         u = jnp.concatenate([u_int, u_int[:, 0:1]], axis=1)
-        # The zonal filter spans walled faces; keep their closed levels at rest.
-        u, v = wall_faces(u, v, _grid)
         eta = _masked_filter_2d(state.eta.data, land, mask_c)
 
         return state._replace(

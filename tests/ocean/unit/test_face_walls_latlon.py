@@ -262,3 +262,19 @@ def test_walls_refuse_a_pure_zstar_coordinate():
         _model(grid, z)
     grid0, z0, _ = _setup(False, partial=False)
     _model(grid0, z0)                                          # no walls: unaffected
+
+
+def test_polar_filter_keeps_open_face_momentum_and_closed_levels_at_rest():
+    """Budget: momentum.  At a filtered latitude the zonal sum of velocity over each
+    level's OPEN faces is unchanged, and closed levels stay exactly zero."""
+    grid, z, s = _setup()
+    u, v, gu, gv = _open_velocity(s, grid, 4)
+    s = s._replace(u=s.u.replace(data=jnp.asarray(u)), v=s.v.replace(data=jnp.asarray(v)))
+    model = _model(grid, z, use_polar_filter=True, polar_filter_cutoff_lat_deg=50.0)
+    n = model._apply_polar_filter(s, 7200.0)
+    un, vn = np.asarray(n.u.data), np.asarray(n.v.data)
+    for old, new, g, rows in ((u[:, :-1], un[:, :-1], gu[:, :-1], [0, N_LAT - 1]),
+                              (v, vn, gv, [1, N_LAT - 1])):
+        assert np.abs(new - old)[rows].max() > 1e-6            # the filter does act there
+        assert np.abs(new * (1 - g)).max() == 0.0
+        assert np.abs((new - old).sum(1)).max() <= 1e-12 * np.abs(old).sum(1).max()
