@@ -1053,11 +1053,12 @@ class CATKEConfig(NamedTuple):
 
     Field names map 1:1 to Oceananigans ``CATKEMixingLength`` / ``CATKEEquation``
     (Cˢ→c_surface_shear, Cᶜc→c_conv_c, CʰⁱD→c_hi_diss, ...); defaults are the
-    LES-calibrated values from Wagner et al. (2025).
+    LES-calibrated values from Wagner et al. (2025), except ``c_bottom_shear``, which
+    the LES do not constrain and Oceananigans sets so the bottom von Kármán constant is 0.4.
     """
     # --- stable (shear) mixing length: surface/bottom + stratification ---
     c_surface_shear: float = 1.131       # Cˢ  surface-distance coefficient
-    c_bottom_shear: float = 0.28         # Cᵇ  bottom-distance coefficient
+    c_bottom_shear: float = 0.967        # Cᵇ  bottom-distance coefficient (κ = 0.4 at the bottom; Oceananigans v0.116.1)
     c_ri_lower: float = 0.254            # CRi⁰ stability-function lower Ri
     c_ri_width: float = 1.02             # CRiᵟ stability-function width
     c_sheared_plume: float = 0.505       # Cˢᵖ sheared-convective-plume coefficient
