@@ -3945,6 +3945,14 @@ class LatLonCGridOceanModel:
                 f"{_gm_walls.slope_scheme!r} builds its face masks without the walls "
                 "and would mix heat and salt through them; only slope_scheme='triads' "
                 "(per-level face masks from compute_face_masks_3d) honours them.")
+        if (getattr(self.grid, "face_nlev_u", None) is not None
+                and getattr(self.z_coord, "is_active", None) is None):
+            raise ValueError(
+                "depth-limited face walls count open z-LEVELS and need a partial-cell "
+                "coordinate (z_coord.is_active): on a pure z-star coordinate the "
+                "implicit vertical friction and the GM/Redi triads build their level "
+                "masks without them (momentum lost into closed levels, tracer flux "
+                "through the wall).")
         _gm_init = getattr(self.config, "gm_redi", None)
         if (_gm_init is not None and getattr(_gm_init, "implicit_K33", False)
                 and not getattr(self.config, "implicit_vertical_mixing", False)):

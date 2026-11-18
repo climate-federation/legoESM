@@ -19,7 +19,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.latlon import create_latlon_grid, ensure_geometry  # noqa: E402
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (  # noqa: E402
-    compute_face_masks, compute_face_masks_3d, min_cell_to_uface,
+    compute_face_masks, compute_face_masks_3d, face_wall_gates, min_cell_to_uface,
     min_cell_to_vface, walled_face_depth,
 )
 
@@ -226,3 +226,39 @@ def test_walls_refuse_gm_redi_schemes_that_ignore_them(scheme):
     if scheme == "centered":
         grid0, z0, _ = _setup(False)
         _model(grid0, z0, gm_redi=GMRediConfig(slope_scheme=scheme))   # no walls: unaffected
+
+
+# ---------------------------------------------------------------- momentum
+
+def _open_velocity(s, grid, seed):
+    """Random u, v on open face levels, zero on closed ones."""
+    rng = np.random.default_rng(seed)
+    gu, gv = (np.asarray(g) for g in face_wall_gates(grid, NLEV, jnp.float64))
+    u = rng.normal(0, 0.1, (N_LAT, N_LON + 1, NLEV))
+    u[:, -1] = u[:, 0]
+    u = u * gu * np.asarray(s.u_mask.data)[..., None]
+    v = rng.normal(0, 0.1, (N_LAT + 1, N_LON, NLEV)) * gv * np.asarray(s.v_mask.data)[..., None]
+    return u, v, gu, gv
+
+
+def test_vertical_friction_keeps_open_column_momentum():
+    """Budget: momentum.  With no drag and no stress the implicit vertical friction only
+    redistributes momentum among a face's OPEN levels (sum_k dz_k u_k unchanged)."""
+    grid, z, s = _setup()
+    u, v, gu, gv = _open_velocity(s, grid, 3)
+    s = s._replace(u=s.u.replace(data=jnp.asarray(u)), v=s.v.replace(data=jnp.asarray(v)))
+    n = _model(grid, z, A_v=1.0e-2)._apply_implicit_vertical_mixing(
+        s, 1800.0, None, do_tracers=False)
+    dz = np.asarray(z.dz_ref)
+    for old, new, g in ((u, np.asarray(n.u.data), gu), (v, np.asarray(n.v.data), gv)):
+        assert np.abs(new - old).max() > 1e-6
+        assert np.abs(new * (1 - g)).max() == 0.0
+        assert np.abs(((new - old) * dz).sum(-1)).max() <= 1e-12 * (np.abs(old) * dz).sum(-1).max()
+
+
+def test_walls_refuse_a_pure_zstar_coordinate():
+    grid, z, _ = _setup(partial=False)
+    with pytest.raises(ValueError, match="partial-cell"):
+        _model(grid, z)
+    grid0, z0, _ = _setup(False, partial=False)
+    _model(grid0, z0)                                          # no walls: unaffected
