@@ -73,7 +73,9 @@ _O_DC_PREF_NEMO = 1.3635e-6  # NEMO zavdt literal (== _O_DC_PREF*_O_DC_C0)
 # so a regression changing _EPS (e.g. -> 1e-7) is caught by the canary, not hidden.
 _O_EPS = 1.1920928955078125e-7
 
-_CFG = DoubleDiffusionConfig(enabled=True, rn_avts=1e-4, rn_hsbfr=1.6, k_max=1e-2)
+# Widths 0: the hard Large/CVMix reference (RULE 5 smooth default tested in
+# test_cfam_smooth_switches.py).
+_CFG = DoubleDiffusionConfig(enabled=True, rn_avts=1e-4, rn_hsbfr=1.6, k_max=1e-2, regime_width=0.0, n2_gate_width=0.0, k_max_width=0.0)
 
 
 def _finger_oracle(R, rn_avts, Rc):
@@ -137,7 +139,7 @@ def test_salt_fingering_matches_oracle(R):
 def test_salt_fingering_matches_oracle_nondefault_cfg(R):
     """A non-default (rn_avts, rn_hsbfr) still matches the oracle to round-off, so
     a regression hard-coding the classic defaults is caught."""
-    cfg = DoubleDiffusionConfig(enabled=True, rn_avts=3e-4, rn_hsbfr=2.55, k_max=1e-2)
+    cfg = DoubleDiffusionConfig(enabled=True, rn_avts=3e-4, rn_hsbfr=2.55, k_max=1e-2, regime_width=0.0, n2_gate_width=0.0, k_max_width=0.0)
     if not (1.0 < R < cfg.rn_hsbfr):
         pytest.skip("R outside this cfg's fingering window")
     avt, avs = _ddm(R, cfg=cfg)
@@ -424,7 +426,7 @@ def test_kmax_cap_departs_from_raw_oracle():
     departure); the default k_max=1e-2 >> the fingering/DC magnitudes so it is
     inactive on the pins above.  When BOTH avt and avs cap, the 0.7/R heat ratio
     is broken toward 1 (avt/avs -> k_max/k_max = 1)."""
-    cfg = DoubleDiffusionConfig(enabled=True, rn_avts=1e-4, rn_hsbfr=1.6, k_max=1e-5)
+    cfg = DoubleDiffusionConfig(enabled=True, rn_avts=1e-4, rn_hsbfr=1.6, k_max=1e-5, regime_width=0.0, n2_gate_width=0.0, k_max_width=0.0)
     avt, avs = _ddm(1.05, cfg=cfg)
     avt_raw, avs_raw = _finger_oracle(1.05, cfg.rn_avts, cfg.rn_hsbfr)
     assert avs_raw > cfg.k_max                       # raw exceeds the cap
