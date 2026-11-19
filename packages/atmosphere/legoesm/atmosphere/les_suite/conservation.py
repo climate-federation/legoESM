@@ -25,10 +25,13 @@ step_budget`):
   ``OWN_BOUNDARY_TOL``.
 
 Any non-finite budget term fails the run. The SCM forcing (subsidence, advection,
-nudging, wind relaxation, radiation) is an external source prescribed as in the LES:
-its own column change is its declared supply, so the gate certifies that nothing
-outside turbulence, microphysics and forcing changes the column, not what the
+nudging, wind relaxation) is an external source prescribed as in the LES: its own
+column change is its declared supply, so the gate certifies that nothing outside
+turbulence, microphysics, forcing and radiation changes the column, not what the
 forcing itself does (e.g. subsidence carrying vapour through the column top).
+Interactive radiation (CloudBench) is a process of its own, held like turbulence
+to its boundary supply: the net downward radiative flux at the column top minus
+that at the surface.
 """
 from __future__ import annotations
 
@@ -39,7 +42,7 @@ import numpy as np
 
 from legoesm import constants
 
-from .candidate_eval import BUDGET_QUANTITIES, RolloutRecord
+from .candidate_eval import BUDGET_PROCESSES, BUDGET_QUANTITIES, RolloutRecord
 
 #: Tolerances from the float64 floor measured over five-day CloudBench runs in
 #: energy form. STEP_REL_TOL: ~10x the worst step residual over 3 cases x 4
@@ -80,18 +83,19 @@ class ConservationVerdict(NamedTuple):
 _PROCESS_SUPPLY = {
     "turbulence": lambda b, q: b["sfc_" + q],
     "microphysics": lambda b, q: -b["precip"] if q == "water" else 0.0 * b["precip"],
+    "radiation": lambda b, q: b["rad_" + q],
 }
 _OWN_FLUX = {"wtheta": ("energy", "w_theta_s"), "wqt": ("water", "w_qt_s"),
              "uw": ("u", "uw_s"), "vw": ("v", "vw_s")}
 
 
 def _supply(b: dict, q: str):
-    out = b[f"sfc_{q}"] + b[f"forcing_{q}"]
+    out = b[f"sfc_{q}"] + b[f"forcing_{q}"] + b[f"rad_{q}"]
     return out - b["precip"] if q == "water" else out
 
 
 def _supply_scale(b: dict, q: str):
-    out = jnp.abs(b[f"sfc_{q}"]) + jnp.abs(b[f"forcing_{q}"])
+    out = jnp.abs(b[f"sfc_{q}"]) + jnp.abs(b[f"forcing_{q}"]) + jnp.abs(b[f"rad_{q}"])
     return out + jnp.abs(b["precip"]) if q == "water" else out
 
 
@@ -144,7 +148,7 @@ def check_conservation(rec: RolloutRecord, dt: float, *, step_rel_tol: float = S
 
     for q in BUDGET_QUANTITIES:
         rate, sup = b[f"rate_{q}"], np.asarray(_supply(b, q))
-        gross_q = sum(b[f"gross_{p}_{q}"] for p in ("turbulence", "microphysics", "forcing"))
+        gross_q = sum(b[f"gross_{p}_{q}"] for p in BUDGET_PROCESSES)
         rel = _rel(rate - sup, np.abs(rate) + np.asarray(_supply_scale(b, q)) + gross_q)
         worst[q] = judge(q, rel, step_rel_tol)
         where[q] = int(np.argmax(np.nan_to_num(rel, nan=np.inf)))

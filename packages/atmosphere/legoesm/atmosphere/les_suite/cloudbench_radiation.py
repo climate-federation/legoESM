@@ -26,7 +26,9 @@ trace gases the swirl-lm ``vmr_global_means.json`` values, not the per-case GCM
 profiles (not public); the extension above the column stops at the GCM sounding's
 top level (~2.5 hPa) and is held at the sounding's T and q, its q all vapour (no
 cloud above the column); radiation is called
-every column step (600 s), not every 240 s.
+every column step (600 s), not every 240 s; the droplet and ice radii use the
+column's own moist-air density (vote 2026-11-19: author, GLM keep; codex: the LES's
+anelastic reference density), not the LES's reference density.
 
 KNOWN DIFFERENCE (RULE 5, differentiability kept): swirl-lm's liquid fraction is
 ``clip((T - 233) / (T_freeze - 233), 0, 1)``, kinked at both ends. The default here

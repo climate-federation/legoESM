@@ -11,7 +11,10 @@ case's GCM sounding into a column:
 * forcing (swirl-lm ``gcm_forcing.py``, profiles fixed at the starting heights):
   θ_l/q_t subsidence by the GCM w, the recorded horizontal advection, θ_l/q_t
   nudging to frame 0 at the recorded rate, winds relaxed to frame 0 with the
-  recipe's τ_wind, the LES radiative heating (:func:`.bridge.rad_tendency_fn`);
+  recipe's τ_wind;
+* radiation: interactive RRTMGP on the column every step, configured as the runs
+  (:mod:`.cloudbench_radiation`; user 2026-11-18, replacing the LES's day-5
+  heating applied on every day);
 * surface: swirl-lm's MOST (:mod:`~legoesm.atmosphere.physics.turbulence.swirl_most`)
   on the lowest level every stage, from the run's surface θ_li and q_t (θ_li
   converted to our θ_l through the surface temperature it implies), with the LES's
@@ -50,9 +53,12 @@ from legoesm.grids.vertical import create_sigma_coordinate
 
 from legoesm import constants
 
-from .bridge import LESReferenceArtifact, is_cloudbench, rad_tendency_fn
+from .bridge import LESReferenceArtifact, is_cloudbench
+from .cloudbench_radiation import CaseRadiation, case_radiation, column_radiation
 from .cloudbench import (
     DOMAIN_TOP_M,
+    NUDGE_RECIPE,
+    nudge_rate,
     SWIRL_G_M_S2,
     parse_case_name,
     read_sounding,
@@ -68,6 +74,8 @@ from .scm_runner import SCMGridSpec, moist_scm_microphysics, scm_physics_config,
 _CB_MOST_BETA_M = 4.8
 _CB_MOST_BETA_H = 7.8
 _CB_MOST_GAMMA = 15.0
+#: rate scale of the nudge_rate consistency check [s]: 1e-12 relative to 1/(1 day)
+_CB_TAU_FLOOR_S = 86400.0
 
 
 def _require_cloudbench(artifact: LESReferenceArtifact) -> dict:
@@ -81,6 +89,17 @@ def _require_cloudbench(artifact: LESReferenceArtifact) -> dict:
         if recipe.get(key) != want:
             raise ValueError(f"{artifact.case_name}: forcing recipe {key}="
                              f"{recipe.get(key)!r}, the builder implements {want!r}")
+    # an artifact built with the public swirl-lm relaxation defaults (3.0-3.5 km,
+    # 1 day) records a relaxation the runs never applied: refuse it
+    for key, want in NUDGE_RECIPE.items():
+        if recipe.get(key) != want:
+            raise ValueError(f"{artifact.case_name}: forcing recipe {key}="
+                             f"{recipe.get(key)!r}, the runs' relaxation is {want!r} "
+                             "(migrate the artifact's nudging)")
+    z_node = np.asarray(artifact.heights_m) - float(setup["height_offset_m"])
+    if not np.allclose(np.asarray(artifact.nudge_rate), nudge_rate(z_node),
+                       rtol=0.0, atol=1e-12 / _CB_TAU_FLOOR_S):
+        raise ValueError(f"{artifact.case_name}: nudge_rate is not the recorded recipe's")
     if float(artifact.f_c) != 0.0:
         raise ValueError(f"{artifact.case_name}: CloudBench runs have no Coriolis")
     return setup
@@ -110,6 +129,24 @@ def surface_record_fn(cfg: SwirlMOSTConfig, theta_l_s: float, q_t_s: float):
             rho[-1], z_full[0, -1] - z_half[0, -1], theta_l_s, q_t_s, cfg)
         return SurfaceFluxRecord(w_theta_l=f.w_theta_l, w_q_t=f.w_q_t, uw=f.uw, vw=f.vw,
                                  rho_s=rho[-1], exner_s=exner_function(p_half[-1]))
+    return fn
+
+
+def radiation_column_fn(case: CaseRadiation):
+    """``SCMForcing.rad_column_fn``: :func:`.cloudbench_radiation.column_radiation` on
+    the stage's column (moist density, as the surface law uses)."""
+
+    def fn(state, sigma_coord, _t):
+        temp = jnp.asarray(state.T.data).reshape(-1)
+        p_s = jnp.asarray(state.p_s.data).reshape(())
+        tr = state.tracers or {}
+        q_v = jnp.asarray(tr["q_v"].data).reshape(-1)
+        q_c = (jnp.asarray(tr["q_c"].data).reshape(-1) if "q_c" in tr
+               else jnp.zeros_like(temp))
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
+        rho = compute_rho(temp[None], p_full[None], q_v=q_v[None])[0]
+        return column_radiation(case, temp, q_v, q_c, p_full, p_half, rho)
     return fn
 
 
@@ -173,7 +210,7 @@ def build_cloudbench_scm(artifact: LESReferenceArtifact, turbulence, *, forcing_
         return lambda _t: prof
 
     recipe = setup["forcing_recipe"]
-    rad = rad_tendency_fn(artifact, dt_s=dt)
+    rad_case = case_radiation(par, sounding, float(grid.p_half_pa[0]))
     most = SwirlMOSTConfig(
         z0_m=float(setup["z0_m"]), gamma_m=_CB_MOST_GAMMA, gamma_h=_CB_MOST_GAMMA,
         beta_m=_CB_MOST_BETA_M, beta_h=_CB_MOST_BETA_H,
@@ -194,7 +231,7 @@ def build_cloudbench_scm(artifact: LESReferenceArtifact, turbulence, *, forcing_
         wind_relax_rate=1.0 / float(recipe["tau_wind_s"]),
         u_target=const(u0),
         v_target=const(v0),
-        rad_T_tendency=lambda t: interp_profile(rad(t), z_les, z_scm),
+        rad_column_fn=radiation_column_fn(rad_case),
         prescribe="fluxes",
         flux_to_closure=True,
         surface_flux_fn=surface_record_fn(most, theta_l_s, float(par["q_t_sfc"])),

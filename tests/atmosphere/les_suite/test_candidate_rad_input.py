@@ -39,11 +39,11 @@ def _cand(tmp_path, flag):
 def test_cloudbench_column_carries_the_forcings_radiation(case):  # noqa: F811
     art, _ = case
     scm, _ = _build(case)
-    nlev = int(scm.forcing_arg.rad_T_tendency(0.0).shape[0])
+    nlev = int(scm.state.T.data.reshape(-1).shape[0])
 
     def rad_fn(t):  # varies in time and height: catches a shifted step or no reversal
         return -1e-5 * (1.0 + t / 1000.0) * jnp.linspace(0.2, 1.0, nlev)
-    scm.forcing_arg = scm.forcing_arg._replace(rad_T_tendency=rad_fn)
+    scm.forcing_arg = scm.forcing_arg._replace(rad_T_tendency=rad_fn, rad_column_fn=None)
     rec, _ = rollout(scm, scm_physics_config(art, _turb()), _NSTEPS,
                      energy_form_baseline=True)
     got = np.asarray(rec.inputs.rad_T_tendency)              # (steps, n) surface-first
@@ -62,6 +62,25 @@ def test_cloudbench_column_carries_the_forcings_radiation(case):  # noqa: F811
     np.testing.assert_allclose(added, np.asarray(rad_fn(t0))[::-1], rtol=1e-12, atol=0.0)
 
 
+def test_cloudbench_column_carries_its_interactive_radiation(case):  # noqa: F811
+    art, _ = case
+    scm, _ = _build(case)
+    rad = scm.forcing_arg.rad_column_fn
+    rec, _ = rollout(scm, scm_physics_config(art, _turb()), _NSTEPS,
+                     energy_form_baseline=True)
+    got = np.asarray(rec.inputs.rad_T_tendency)              # (steps, n) surface-first
+    want = np.asarray(rad(scm.state, scm.sigma_coord, 0.0).dT_dt)[::-1]   # first step's state
+    np.testing.assert_allclose(got[0], want, rtol=1e-12, atol=0.0)
+    assert not np.allclose(got[0], got[-1])                  # it follows the evolving column
+    from legoesm.atmosphere.forcing.scm.scm_forcing import compute_forcing_tendencies
+    t0 = scm.t_seconds
+    with_rad = compute_forcing_tendencies(scm.state, scm.sigma_coord, scm.forcing_arg, t0)
+    no_rad = compute_forcing_tendencies(scm.state, scm.sigma_coord,
+                                        scm.forcing_arg._replace(rad_column_fn=None), t0)
+    added = np.asarray(with_rad.dT_dt.data - no_rad.dT_dt.data)[0, 0, 0][::-1]
+    np.testing.assert_allclose(added, got[0], rtol=1e-12, atol=1e-20)
+
+
 def test_a_column_without_a_radiation_channel_carries_nan():
     one = jnp.ones((2,))
     inp = column_inputs(z_full=one, z_half=jnp.arange(3.0), rho_full=one,
@@ -75,7 +94,7 @@ def test_a_column_without_a_radiation_channel_carries_nan():
 def test_a_radiation_reading_candidate_refuses_a_case_without_the_channel(case, tmp_path):  # noqa: F811
     art, _ = case
     scm, _ = _build(case)
-    scm.forcing_arg = scm.forcing_arg._replace(rad_T_tendency=None)
+    scm.forcing_arg = scm.forcing_arg._replace(rad_T_tendency=None, rad_column_fn=None)
     cand = _cand(tmp_path, True)
     with pytest.raises(ValueError, match="READS_RAD"):
         rollout(scm, scm_physics_config(art, _turb()), _NSTEPS, candidate=cand,
@@ -85,7 +104,7 @@ def test_a_radiation_reading_candidate_refuses_a_case_without_the_channel(case, 
 def test_a_candidate_not_reading_radiation_runs_without_the_channel(case, tmp_path):  # noqa: F811
     art, _ = case
     scm, _ = _build(case)
-    scm.forcing_arg = scm.forcing_arg._replace(rad_T_tendency=None)
+    scm.forcing_arg = scm.forcing_arg._replace(rad_T_tendency=None, rad_column_fn=None)
     cand = _cand(tmp_path, False)
     assert cand.reads_rad is False
     rec, _ = rollout(scm, scm_physics_config(art, _turb()), _NSTEPS, candidate=cand,
@@ -98,3 +117,11 @@ def test_read_rad_flag_must_be_a_bool(tmp_path):
     p.write_text(_CAND.format(flag='"yes"'))
     with pytest.raises(ValueError, match="READS_RAD must be a bool"):
         load_candidate(p)
+
+
+def test_a_forcing_with_both_radiations_is_refused(case):  # noqa: F811
+    art, _ = case
+    scm, _ = _build(case)
+    scm.forcing_arg = scm.forcing_arg._replace(rad_T_tendency=lambda t: 0.0)
+    with pytest.raises(ValueError, match="exclusive"):
+        rollout(scm, scm_physics_config(art, _turb()), _NSTEPS, energy_form_baseline=True)

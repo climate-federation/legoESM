@@ -140,10 +140,11 @@ def _sounding(saturated=False):
             "T_adv_src": np.full(5, -1.0e-5), "q_t_adv_src": np.full(5, -2.0e-8)}
 
 
-def test_nudge_rate_is_swirl_lms_cosine_ramp_over_one_day():
-    z = np.array([0.0, 2999.0, 3000.0, 3250.0, 3500.0, 5000.0])
-    r = cb.nudge_rate(z) * 86400.0
-    assert np.allclose(r, [0.0, 0.0, 0.0, 0.5, 1.0, 1.0], atol=1e-12)
+def test_nudge_rate_is_the_papers_cosine_ramp_from_4_to_6_km_over_6_hours():
+    z = np.array([0.0, 3500.0, 3999.0, 4000.0, 5000.0, 6000.0, 7000.0])
+    r = cb.nudge_rate(z) * 21600.0
+    assert np.allclose(r, [0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0], atol=1e-12)
+    assert cb.NUDGE_RECIPE["nudge_z_i_m"] == 4000.0 and cb.NUDGE_RECIPE["tau_scalar_s"] == 21600.0
 
 
 def test_gcm_forcing_matches_swirl_lms_recipe_on_linear_profiles():
@@ -160,7 +161,7 @@ def test_gcm_forcing_matches_swirl_lms_recipe_on_linear_profiles():
                        exner_inv * (-1.0e-5 + w * gam + w * cb._CB_G / cb._CB_CP_D),
                        rtol=1e-12)
     assert np.allclose(f["qv_adv"], -2.0e-8 + w * dq, rtol=1e-12, atol=0.0)
-    assert np.allclose(f["nudge_rate"] * 86400.0, [0.0, 0.5, 1.0], atol=1e-12)
+    assert np.allclose(f["nudge_rate"], cb.nudge_rate(zc), rtol=0.0, atol=0.0)
 
 
 def test_gcm_forcing_takes_the_upwind_side_for_either_sign_of_w():
@@ -226,13 +227,19 @@ def _write_case(tmp_path, nx=6, ny=6, nz=16, nt=2, z_scale=1.0, t_int_units=None
     fdir = tmp_path / "forcing" / "0" / "7" / "amip"
     fdir.mkdir(parents=True)
     s = _sounding()
+    # the GCM column above the LES top, which the column radiation reads
+    up = {"z": [10000.0, 20000.0], "T": [230.0, 215.0], "q_t": [1.0e-4, 3.0e-6],
+          "p": [2.6e4, 5.5e3]}
+    s = {k: np.concatenate([v, up.get(k, up["T"] if k in ("theta_li", "temperature")
+                                         else [0.0, 0.0])]) for k, v in s.items()}
     cols = ["z", "theta_li", "temperature", "q_t", "u", "v", "w", "T_adv_src",
             "q_t_adv_src", "T", "p"]
     lines = [",".join(cols)] + [",".join(f"{s[c][i]:.6e}" for c in cols)
                                 for i in range(len(s["z"]))]
     (fdir / "sounding.csv").write_text("\n".join(lines) + "\n")
     (fdir / "parameters.json").write_text(json.dumps(
-        {"experiment": "amip", "month": 7, "sst": 298.33, "latitude": 16.5}))
+        {"experiment": "amip", "month": 7, "sst": 298.33, "latitude": 16.5,
+         "zenith": 0.9, "irrad": 500.0}))
     return store, tmp_path / "forcing", dz, nz
 
 

@@ -230,23 +230,28 @@ def _tend_arrays(t, like):
 
 
 #: The processes :func:`step_budget` splits a step into.
-BUDGET_PROCESSES = ("turbulence", "microphysics", "forcing")
+BUDGET_PROCESSES = ("turbulence", "microphysics", "forcing", "radiation")
 
 
-def step_budget(out, tend_full, tend_turb, ftend, inputs: ColumnInputs, record) -> dict:
+def step_budget(out, tend_full, tend_turb, ftend, inputs: ColumnInputs, record,
+                rad=None) -> dict:
     """One forward-Euler step's column budget, per unit area per second.
 
     The step's tendency is split by process: ``turbulence`` (what the harness
     applied for the closure: ``out − (tend_full − tend_turb)``), ``microphysics``
-    (the rest of the physics, ``tend_full − tend_turb``) and ``forcing`` (the SCM
-    forcing ``ftend``). For each process and quantity (water q_v + q_c + q_r, moist
+    (the rest of the physics, ``tend_full − tend_turb``), ``forcing`` (the SCM
+    forcing ``ftend`` without its interactive radiation) and ``radiation`` (``rad``,
+    the column's ``RadiationRecord`` of this step: its heating ``rad.dT_dt``,
+    top-first; zero without one). For each process and quantity (water q_v + q_c + q_r, moist
     energy c_pd T + L_v q_v + ½|u|², u, v): ``<process>_<q>`` the mass-weighted
     column integral of its tendency (kinetic energy at the step's midpoint winds,
     so the total is the exact change over the step) and ``gross_<process>_<q>`` the
     integral of its absolute terms (the round-off scale). ``rate_<q>`` is the total.
     Declared supply: ``sfc_<q>`` the surface law at the surface interface (enthalpy
     ``ρ_s c_pd Π_s w'θ_l'``, latent ``L_v ρ_s w'q_t'``, stress ``ρ_s u'w'`` and its
-    work), ``precip`` the rain reaching the ground. ``record_rho_rel`` /
+    work), ``precip`` the rain reaching the ground, ``rad_<q>`` the radiation's
+    supply (energy: the net downward flux at the column top minus that at the
+    surface; zero for water and momentum). ``record_rho_rel`` /
     ``record_exner_rel``: how far the record's ``rho_s``/``exner_s`` are from the
     column's surface interface values, which the closures and this budget use.
     No turbulent flux leaves through the column top (the turbulence share is held
@@ -255,10 +260,13 @@ def step_budget(out, tend_full, tend_turb, ftend, inputs: ColumnInputs, record) 
     m, rh, ex = inputs.mass, inputs.rho_half[0], inputs.exner_half[0]
     full, turb_t = _tend_arrays(tend_full, m), _tend_arrays(tend_turb, m)
     applied, forc = _tend_arrays(out, m), _tend_arrays(ftend, m)
+    zero = {k: jnp.zeros_like(v) for k, v in full.items()}
+    radp = zero if rad is None else {**zero, "T": jnp.asarray(rad.dT_dt)[::-1]}
     parts = {
         "turbulence": {k: applied[k] - full[k] + turb_t[k] for k in full},
         "microphysics": {k: full[k] - turb_t[k] for k in full},
         "forcing": forc,
+        "radiation": radp,
     }
     # a process share that is a difference of tendencies carries the round-off of
     # its operands, so its scale is the operands' magnitude, not the difference's
@@ -267,6 +275,7 @@ def step_budget(out, tend_full, tend_turb, ftend, inputs: ColumnInputs, record) 
                        for k in full},
         "microphysics": {k: jnp.abs(full[k]) + jnp.abs(turb_t[k]) for k in full},
         "forcing": {k: jnp.abs(v) for k, v in forc.items()},
+        "radiation": {k: jnp.abs(v) for k, v in radp.items()},
     }
     du = sum(p["u"] for p in parts.values())
     dv = sum(p["v"] for p in parts.values())
@@ -295,6 +304,9 @@ def step_budget(out, tend_full, tend_turb, ftend, inputs: ColumnInputs, record) 
                          + rh * (u_mid[0] * inputs.uw_s + v_mid[0] * inputs.vw_s))
     res["sfc_u"] = rh * inputs.uw_s
     res["sfc_v"] = rh * inputs.vw_s
+    zs = jnp.zeros((), m.dtype)
+    res["rad_energy"] = zs if rad is None else rad.net_down_top - rad.net_down_sfc
+    res["rad_water"] = res["rad_u"] = res["rad_v"] = zs
     res["record_rho_rel"] = jnp.abs(record.rho_s / rh - 1.0)
     res["record_exner_rel"] = jnp.abs(record.exner_s / ex - 1.0)
     return res
@@ -360,7 +372,14 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
     forcing = scm.forcing_arg
     record_fn = None if forcing is None else forcing.surface_flux_fn
     rad_fn = None if forcing is None else forcing.rad_T_tendency
-    if candidate is not None and candidate.reads_rad and rad_fn is None:
+    rad_col = None if forcing is None else forcing.rad_column_fn
+    # the forcing without its interactive radiation (radiation is its own budget process)
+    forcing_norad = None if forcing is None else forcing._replace(rad_column_fn=None)
+    if rad_fn is not None and rad_col is not None:
+        raise ValueError("the forcing carries both a prescribed and an interactive "
+                         "radiation; they are exclusive")
+    if (candidate is not None and candidate.reads_rad and rad_fn is None
+            and rad_col is None):
         raise ValueError(f"candidate {candidate.name!r} declares READS_RAD but this "
                          "case's forcing has no radiative tendency channel")
 
@@ -377,7 +396,10 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
     _surf = getattr(physics_config.turbulence, physics_config.turbulence.scheme).surface
     z0_m, z0h_m = _surf.z0, _surf.z0 * _surf.z0h_z0_ratio
 
-    def _inputs(state, phys_state, tend_turb, t):
+    def _rad(state, t):
+        return None if rad_col is None else rad_col(state, sigma, t)
+
+    def _inputs(state, phys_state, tend_turb, t, rad):
         zero = jnp.zeros((), jnp.asarray(state.T.data).dtype)
         ug, vg = _geo(t)
         base = scm_column_inputs(state, sigma, phys_state, f_c=f_c, u_geo=ug,
@@ -386,6 +408,9 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
         if rad_fn is not None:  # the profile the SCM forcing applies this step
             base = base._replace(rad_T_tendency=jnp.asarray(
                 rad_fn(t), base.theta_l.dtype)[::-1])
+        if rad is not None:  # the interactive heating the SCM forcing applies this step
+            base = base._replace(rad_T_tendency=jnp.asarray(
+                rad.dT_dt, base.theta_l.dtype)[::-1])
         imp = implied_fluxes(tend_turb, base)
         if record_fn is not None:  # the surface law gives every closure its fluxes
             rec = record_fn(state, sigma, t)
@@ -401,8 +426,8 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
         baseline's non-turbulent physics plus the SCM forcing the step adds."""
         du = _col(tend_full.du_dt.data) - _col(tend_turb.du_dt.data)
         dv = _col(tend_full.dv_dt.data) - _col(tend_turb.dv_dt.data)
-        if forcing is not None:
-            ftend = compute_forcing_tendencies(st, sc, forcing, t)
+        if forcing is not None:   # winds only: the radiation does not touch them
+            ftend = compute_forcing_tendencies(st, sc, forcing_norad, t)
             du = du + _col(ftend.du_dt.data)
             dv = dv + _col(ftend.dv_dt.data)
         return du, dv
@@ -421,7 +446,7 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
             tend_full, phys_out = physics_full(st, grid, sc, phys_state=phys_state)
             probe["inputs"], _ = _inputs(st, phys_state,
                                          _turb_tend(st, grid, sc, phys_state, tend_full),
-                                         scm.t_seconds)
+                                         scm.t_seconds, _rad(st, scm.t_seconds))
             return tend_full, phys_out
 
         scm.pure_step_with_physics(scm.state, scm.phys_state, scm.t_seconds, probe_fn)
@@ -436,16 +461,17 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
                 raise RuntimeError("rollout: physics called twice in one step")
             tend_full, phys_out = physics_full(st, grid, sc, phys_state=phys_state)
             tend_turb = _turb_tend(st, grid, sc, phys_state, tend_full)
-            inputs, imp = _inputs(st, phys_state, tend_turb, t)
+            rad = _rad(st, t)
+            inputs, imp = _inputs(st, phys_state, tend_turb, t, rad)
             stash["inputs"] = inputs
             stash["other"] = None
             stash["budget"] = None
 
             def _done(out, own):
                 if record_fn is not None:
-                    ftend = compute_forcing_tendencies(st, sc, forcing, t)
+                    ftend = compute_forcing_tendencies(st, sc, forcing_norad, t)
                     stash["budget"] = step_budget(out, tend_full, tend_turb, ftend, inputs,
-                                                  record_fn(st, sc, t))
+                                                  record_fn(st, sc, t), rad)
                     # the surface value of each flux the closure itself produced,
                     # before the harness set it to the surface law (diagnostic)
                     for k, f in own.items():
@@ -479,7 +505,7 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
     (fstate, fphys, t_f, aux_f), (inputs_rec, flux_rec, other_rec, budget_rec) = lax.scan(
         body, (scm.state, scm.phys_state, scm.t_seconds, aux0), None, length=nsteps)
     tend_f, _ = physics_turb(fstate, scm.grid, sigma, phys_state=fphys)
-    final_inputs, _ = _inputs(fstate, fphys, tend_f, t_f)
+    final_inputs, _ = _inputs(fstate, fphys, tend_f, t_f, _rad(fstate, t_f))
     return RolloutRecord(inputs=inputs_rec, fluxes=flux_rec, final_inputs=final_inputs,
                          other_accel=other_rec, budget=budget_rec), aux_f
 

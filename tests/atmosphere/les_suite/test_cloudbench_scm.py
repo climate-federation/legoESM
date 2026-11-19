@@ -9,8 +9,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.atmosphere.les_suite import cloudbench as cb
-from legoesm.atmosphere.les_suite.bridge import rad_tendency_fn
 from legoesm.atmosphere.les_suite.candidate_eval import rollout, scm_column_inputs
+from legoesm.atmosphere.les_suite.cloudbench_radiation import column_radiation
 from legoesm.atmosphere.les_suite.cloudbench_scm import build_cloudbench_scm
 from legoesm.atmosphere.les_suite.conservation import check_conservation
 from legoesm.atmosphere.les_suite.scm_coupling import interp_profile
@@ -31,7 +31,8 @@ from tests.atmosphere.les_suite.test_cloudbench import _sounding, _write_case
 jax.config.update("jax_enable_x64", True)
 
 _PARAMS = {"experiment": "amip", "month": 7, "sst": 298.33, "latitude": 16.5,
-           "p_sfc": 100200.0, "theta_li_sfc": 297.6, "q_t_sfc": 0.0185}
+           "p_sfc": 100200.0, "theta_li_sfc": 297.6, "q_t_sfc": 0.0185,
+           "zenith": 0.9, "irrad": 500.0}
 _DT = 600.0
 _NLEV = 12
 _P_SCALE = 1.002     # the test sounding's pressure scaled so p_sfc != 1000 hPa
@@ -121,9 +122,36 @@ def test_forcing_channels_are_the_recipes(case):
     assert np.allclose(np.asarray(f.theta_l_target(1e5)), on(np.asarray(art.theta)[0]))
     assert np.allclose(np.asarray(f.qt_target(1e5)), on(np.asarray(art.qt)[0]))
     assert np.allclose(np.asarray(f.u_target(1e5)), on(np.asarray(art.u)[0]))
-    rad = rad_tendency_fn(art, dt_s=_DT)
-    for t in (0.0, 96 * 3600.0 + 600.0):
-        assert np.allclose(np.asarray(f.rad_T_tendency(t)), on(rad(t)), rtol=1e-13)
+    assert f.rad_T_tendency is None and f.rad_column_fn is not None
+
+
+def test_radiation_is_interactive_on_the_columns_state_and_closes_on_its_fluxes(case):
+    scm, grid = _build(case)
+    st, sc = scm.state, scm.sigma_coord
+    rec = scm.forcing_arg.rad_column_fn(st, sc, 0.0)
+    p_s = st.p_s.data.reshape(())
+    dp = np.diff(np.asarray(sc.pressure_at_half(p_s)))
+    heat = constants.c_pd / constants.g * np.sum(dp * np.asarray(rec.dT_dt))
+    supply = float(rec.net_down_top - rec.net_down_sfc)
+    assert abs(heat - supply) <= 1e-12 * (abs(supply) + float(np.sum(
+        constants.c_pd / constants.g * dp * np.abs(np.asarray(rec.dT_dt)))))
+    assert np.all(np.isfinite(np.asarray(rec.dT_dt))) and abs(supply) > 1.0
+    # a warmer column radiates more: the state reaches the radiation
+    warm = st._replace(T=st.T.replace(data=st.T.data + 5.0))
+    assert float(scm.forcing_arg.rad_column_fn(warm, sc, 0.0).net_down_top) < float(rec.net_down_top)
+
+
+def test_builder_refuses_an_artifact_with_the_public_default_nudging(case):
+    import dataclasses
+    art, forcing = case
+    old = dataclasses.replace(art, les_setup={
+        **art.les_setup, "forcing_recipe": {**art.les_setup["forcing_recipe"],
+                                            "nudge_z_i_m": 3000.0}})
+    with pytest.raises(ValueError, match="relaxation"):
+        build_cloudbench_scm(old, _turb(), forcing_dir=forcing, nlev=_NLEV, dt=_DT)
+    stale = dataclasses.replace(art, nudge_rate=np.asarray(art.nudge_rate) * 4.0)
+    with pytest.raises(ValueError, match="nudge_rate"):
+        build_cloudbench_scm(stale, _turb(), forcing_dir=forcing, nlev=_NLEV, dt=_DT)
 
 
 def test_surface_record_is_swirl_most_on_the_lowest_level(case):
@@ -230,6 +258,37 @@ def test_a_planted_source_fails_the_gate(case, what, quantity):
     assert v.worst_step_rel[quantity] > 1e-6
     assert v.worst_process_rel["microphysics_" + quantity] > 1e-6
     assert v.worst_process_rel["turbulence_" + quantity] < 1e-12
+
+
+def test_radiation_is_held_to_its_boundary_fluxes(case):
+    rec = _run(case)
+    v = check_conservation(rec, _DT)
+    assert v.passed, v.reason
+    assert np.all(np.abs(np.asarray(rec.budget["rad_energy"])) > 1.0)
+    assert v.worst_process_rel["radiation_energy"] < 1e-12
+    # the radiation's heating no longer matching its fluxes fails the gate
+    b = dict(rec.budget)
+    b["radiation_energy"] = b["radiation_energy"] * (1.0 + 1e-6)
+    v = check_conservation(rec._replace(budget=b), _DT)
+    assert not v.passed and "radiation energy" in v.reason
+
+
+def test_a_column_that_loses_its_radiation_fails_the_gate(case):
+    # the SCM applies no radiation while the record still declares its supply
+    art, _ = case
+    scm, _ = _build(case)
+    rad = scm.forcing_arg.rad_column_fn
+    base = scm.physics_fn
+
+    def drop(st, grid, sc, phys_state=None):
+        tend, out = base(st, grid, sc, phys_state=phys_state)
+        heat = jnp.asarray(rad(st, sc, 0.0).dT_dt).reshape(tend.dT_dt.data.shape)
+        return tend._replace(dT_dt=tend.dT_dt.replace(data=tend.dT_dt.data - heat)), out
+    scm.physics_fn = drop
+    rec, _ = rollout(scm, scm_physics_config(art, _turb()), _NSTEPS,
+                     energy_form_baseline=True)
+    v = check_conservation(rec, _DT)
+    assert not v.passed and "energy" in v.reason
 
 
 def test_opposite_errors_in_two_processes_do_not_cancel(case):
@@ -348,6 +407,8 @@ def _one_layer_record(precip_in_budget):
         for c in ("u", "v"):
             budget[f"{p}_{c}"] = z
             budget[f"gross_{p}_{c}"] = z
+    for q in ("water", "energy", "u", "v"):           # no radiation in this column
+        budget[f"radiation_{q}"] = budget[f"gross_radiation_{q}"] = budget[f"rad_{q}"] = z
     stack = jax.tree_util.tree_map(lambda x: x[None], c0)
     return RolloutRecord(inputs=stack, fluxes=None, final_inputs=c1, budget=budget)
 
@@ -371,7 +432,8 @@ def _drifting_record(nsteps, rel_per_step):
     cols = [col(q0 * (1.0 + k * rel_per_step)) for k in range(nsteps + 1)]
     z = jnp.zeros((nsteps,))
     keys = ["rate", "sfc", "turbulence", "gross_turbulence", "microphysics",
-            "gross_microphysics", "forcing", "gross_forcing"]
+            "gross_microphysics", "forcing", "gross_forcing", "radiation",
+            "gross_radiation", "rad"]
     budget = {f"{k}_{q}": z for k in keys for q in ("water", "energy", "u", "v")}
     budget.update({k: z for k in ("precip", "record_rho_rel", "record_exner_rel",
                                   "own_sfc_wtheta", "own_sfc_wqt", "own_sfc_uw",

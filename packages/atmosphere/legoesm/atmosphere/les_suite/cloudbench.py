@@ -36,13 +36,15 @@ Conversions (PI 2026-10-31):
   ``k·dz`` (what each node received) and stored at its physical height, condensed
   with OUR saturation curve; its fluxes are zero and its radiative heating and
   cloud fraction are NaN (never scored).
-- GCM forcing (swirl-lm ``cloud_feedback/gcm_forcing.py``, ``gcm_settings.py``
-  defaults, which the run does not override), on the same node coordinates:
+- GCM forcing (swirl-lm ``cloud_feedback/gcm_forcing.py``), on the same node
+  coordinates:
   ``subsidence_w`` = the GCM w; ``theta_adv`` = the horizontal part of the GCM
   temperature advection, (T_adv + w ∂T/∂z + w g/c_pd) times swirl-lm's dry Exner
   inverse (p_ref/p00)^(-R_d/c_pd); ``qv_adv`` = q_t_adv + w ∂q_t/∂z (first-order
   upwind derivatives, as swirl-lm); ``nudge_rate`` = r(z)/τ with r = 0 below z_i,
-  a cosine ramp to 1 at z_r, τ = 1 day. The nudging targets are frame 0's θ_l and
+  a cosine ramp to 1 at z_r, with the paper's z_i = 4 km, z_r = 6 km, τ = 6 h (the
+  public ``gcm_settings.py`` defaults, 3.0-3.5 km and 1 day, are not what the runs
+  used; ``NUDGE_RECIPE_SOURCE``). The nudging targets are frame 0's θ_l and
   q_t (the GCM column is unsaturated, so frame 0 is the GCM state); the winds relax
   to frame 0's u, v with τ_wind everywhere (``les_setup["forcing_recipe"]``).
 - Momentum fluxes are not stored: CloudBench did not save its SGS momentum flux
@@ -86,11 +88,20 @@ _CB_CP_D = 728.31 + 286.69      # cv_d + R_d (water.py cp_d)
 _CB_CP_V = 1859.0               # thermodynamics.proto water.cp_v default
 _CB_P00 = 1.0e5                 # thermodynamics.proto p00 default
 _BUDGET_TOP_M = 1000.0          # lowest-km band of the recorded budget check
-# --- swirl-lm cloud_feedback gcm_settings.py defaults (not overridden by the run) ---
-_CB_NUDGE_Z_I_M = 3000.0
-_CB_NUDGE_Z_R_M = 3500.0
-_CB_TAU_SCALAR_S = 86400.0
+# --- free-troposphere relaxation of the CloudBench runs: Chammas et al., Sci. Adv. 12,
+# eaec8488 (2026), Methods "Nudging and sponge layer": theta_li and q_t relaxed above
+# z_i = 4 km with tau_r = 6 h, ramped over 2 km; winds 6 h everywhere. The public
+# gcm_settings.py defaults (3.0-3.5 km, 1 day) were overridden; the LES day-5 budget
+# (cloudbench_micro_budget.py) shows no relaxation at 3-4 km, as this ramp says ---
+_CB_NUDGE_Z_I_M = 4000.0
+_CB_NUDGE_Z_R_M = 6000.0
+_CB_TAU_SCALAR_S = 21600.0
 _CB_TAU_WIND_S = 21600.0
+NUDGE_RECIPE_SOURCE = ("Chammas et al. 2026 Sci. Adv. eaec8488 Methods (z_i 4 km, 2 km "
+                       "cosine ramp as swirl-lm gcm_forcing.py, tau_r 6 h)")
+#: The relaxation an artifact's forcing recipe must record for the column builder.
+NUDGE_RECIPE = {"source": NUDGE_RECIPE_SOURCE, "nudge_z_i_m": _CB_NUDGE_Z_I_M,
+                "nudge_z_r_m": _CB_NUDGE_Z_R_M, "tau_scalar_s": _CB_TAU_SCALAR_S}
 
 CASE_NAME = "cloudbench_s{site:03d}_m{month:02d}_{exp}"
 #: The column-model microphysics recorded for CloudBench (PI 2026-11-01): our
@@ -303,8 +314,9 @@ def run_surface_settings(pbtxt: str) -> dict:
 
 
 def nudge_rate(z):
-    """swirl-lm's free-troposphere relaxation coefficient [1/s] at coordinate ``z``:
-    0 below z_i, ½(1 - cos(π (z - z_i)/(z_r - z_i))) up to z_r, then 1; over τ."""
+    """The runs' free-troposphere relaxation coefficient [1/s] at coordinate ``z``:
+    swirl-lm's form, 0 below z_i, ½(1 - cos(π (z - z_i)/(z_r - z_i))) up to z_r, then
+    1; over τ, with the paper's z_i, z_r and τ."""
     ramp = 0.5 * (1.0 - np.cos(np.pi * (z - _CB_NUDGE_Z_I_M)
                                / (_CB_NUDGE_Z_R_M - _CB_NUDGE_Z_I_M)))
     r = np.where(z < _CB_NUDGE_Z_I_M, 0.0, np.where(z <= _CB_NUDGE_Z_R_M, ramp, 1.0))
@@ -453,9 +465,7 @@ def build_artifact(site, month, exp, forcing_dir, store=None, time_indices=None)
         "z0_m": surface["z_0"], "surface_gustiness_m_s": surface["surface_gustiness"],
         "microphysics": microphysics_record(MICROPHYSICS),
         "forcing_recipe": {
-            "source": "swirl-lm cloud_feedback gcm_forcing.py / gcm_settings.py defaults",
-            "nudge_z_i_m": _CB_NUDGE_Z_I_M, "nudge_z_r_m": _CB_NUDGE_Z_R_M,
-            "tau_scalar_s": _CB_TAU_SCALAR_S, "tau_wind_s": _CB_TAU_WIND_S,
+            **NUDGE_RECIPE, "tau_wind_s": _CB_TAU_WIND_S,
             "nudge_targets": "frame 0 theta_l and q_t", "wind_targets": "frame 0 u, v",
             "subsidence": "theta_l and q_t, first-order upwind",
             "frame0_max_qc": float(np.max(arr["qc"][0])),

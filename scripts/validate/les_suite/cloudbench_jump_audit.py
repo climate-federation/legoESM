@@ -26,6 +26,7 @@ Run with JAX_ENABLE_X64=1 from the repo worktree on a compute node.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -50,7 +51,9 @@ from legoesm import constants  # noqa: E402
 
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
     "/glade/derecho/scratch/pg2328/cosci/round2/audit")
-ART = Path("/glade/derecho/scratch/pg2328/les_suite/artifacts/cloudbench")
+#: the artifact directory (CLOUDBENCH_ARTIFACTS overrides, e.g. the migrated set)
+ART = Path(os.environ.get("CLOUDBENCH_ARTIFACTS",
+                          "/glade/derecho/scratch/pg2328/les_suite/artifacts/cloudbench"))
 FORCING = Path("/glade/derecho/scratch/pg2328/les_suite/external/cloudbench/forcing")
 STATS = Path("/glade/derecho/scratch/pg2328/les_suite/external/cloudbench/cloudbench_statistics.nc")
 NLEV, DT = 32, 600.0
