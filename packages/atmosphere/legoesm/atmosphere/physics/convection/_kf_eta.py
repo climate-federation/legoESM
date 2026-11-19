@@ -2460,13 +2460,17 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
                 FABE, c["FABEOLD"], c["AINC"], c["AINCOLD"], AINCMX, ainc_new, c["NOITR"],
                 stop_here, deep, later, last, cyc2, sm)
             n = dict(c)
-            n["OMG"] = _lerp(A, OMG, c["OMG"])
-            n["FXM"] = _lerp(A, FXM, c["FXM"])
+            # the adjusted sounding is a function of the mixture F: recomputed
+            # while any share lives (it equals the old one once F is frozen), so
+            # the sounding, condensate and rain all derive from one F and the
+            # column water closes as in the oracle
+            n["OMG"] = _w(a, OMG, c["OMG"])  # kfsw: B4s
+            n["FXM"] = _w(a, FXM, c["FXM"])  # kfsw: B4s
             n["NSTEP"] = _w(a, NSTEP, c["NSTEP"])  # kfsw: B4s
             n["DTIME"] = _w(a, DTIME, c["DTIME"])  # kfsw: B4s
             n["overflow"] = overflow
-            n["TG"] = _lerp(A, TG, c["TG"])
-            n["QG"] = _lerp(A, QG, c["QG"])
+            n["TG"] = _w(a, TG, c["TG"])  # kfsw: B4s
+            n["QG"] = _w(a, QG, c["QG"])  # kfsw: B4s
             n["fatal"] = fatal_new
             nonstop = a & ~stop_here
             n["KLCL"] = _w(nonstop, klcl, c["KLCL"])  # kfsw: B4s
