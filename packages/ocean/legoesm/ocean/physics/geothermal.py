@@ -192,6 +192,11 @@ def nemo_geothermal_bottom_heating_tendency(
     because this NEMO-named identity must receive the constants resolved by the
     calling card rather than the shared library defaults.  Dry columns remain
     canonical zero.
+
+    Matches compiled NEMO 5.0.1 ``tra_bbc`` bitwise on wet columns
+    (``tests/ocean/unit/test_geothermal_nemo_oracle.py``).  KNOWN DIFFERENCE:
+    NEMO also adds ``qgh_trd0/e3t`` to level 1 of land columns (``mbkt = 1``,
+    ``tmask = 0``), an inert write on a masked point; here land stays zero.
     """
 
     e3t = jnp.asarray(e3t_kmm)
