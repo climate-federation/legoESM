@@ -94,7 +94,10 @@ def _config(ours, hard=True):
     if not hard:
         return cfg
     return cfg._replace(beres=br._replace(index_round_width=0.0,
-                                          crit_minmax_sharpness=float("inf")), **_HARD)
+                                          crit_minmax_sharpness=float("inf"),
+                                          heating_ramp_width=0.0,
+                                          q0_max_sharpness=float("inf"),
+                                          hdepth_gate_width=0.0), **_HARD)
 
 
 def _inputs(z, ds, dtype=jnp.float64):

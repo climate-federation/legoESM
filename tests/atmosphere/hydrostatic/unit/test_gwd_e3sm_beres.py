@@ -128,7 +128,7 @@ def test_beres_matches_oracle():
         to(u), to(v), to(netdt), to(zm), jnp.zeros(1), k700, mfcc,
         NGWV, DC, beres,
     )
-    tau0_full, src, tend, xv, yv, c, ubm, ubi, hdepth, maxq0 = out
+    tau0_full, src, tend, xv, yv, c, ubm, ubi, hdepth, maxq0, _t = out
     assert int(src[0]) == _ORACLE_SRC_LEVEL
     assert int(tend[0]) == _ORACLE_SRC_LEVEL
     np.testing.assert_allclose(float(hdepth[0]), _ORACLE_HDEPTH, rtol=1e-12)

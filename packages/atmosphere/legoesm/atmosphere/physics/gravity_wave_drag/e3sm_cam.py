@@ -725,6 +725,8 @@ def gw_beres_src(
     ubm, ubi: projected winds (ncol,nlev)/(ncol,nlev+1).
     hdepth  : (ncol,) heating depth [km] (diagnostic).
     maxq0   : (ncol,) max heating rate [K/day] (diagnostic).
+    launch_t : (ncol,) weight of the launch at interface ``src_level + 1``
+              (the RULE 5 launch-level blend, #2569; 0 with hard indicators).
     """
     ncol, nlev = u.shape
     nwav = 2 * pgwv + 1
@@ -749,86 +751,75 @@ def gw_beres_src(
     ubm = u * xv[:, None] + v * yv[:, None]                # (ncol, nlev)
     ubi = _interface_proj(ubm, mag700)                     # (ncol, nlev+1)
 
-    # --- Heating depth.  E3SM scans k=pver..1 (surface upward); mini = first
-    # level (from bottom) with netdt>0, maxi = first level above mini where
-    # heating stops; either bounded by z>=z_heat_max.  In 0-based top-down
-    # indexing the surface midpoint is nlev-1; "from the bottom" = decreasing
-    # index.  We reproduce the same first-continuously-positive-range logic
-    # vectorially (no Python control flow on traced values).
-    # Precondition (codex beres-1 #4): E3SM's scan assumes the heating run
-    # either terminates (a non-heating level above) or hits the z_heat_max cap
-    # before the model top.  If the model top is BELOW z_heat_max and a positive
-    # heating run reaches the top without terminating, E3SM never sets maxi and
-    # the column launches no waves; our `found = mini_set & maxi_set` mask
-    # reproduces that (such a column gets hdepth=0, zero source) — this is the
-    # same E3SM precondition, not a JAX-specific behaviour.
-    heat = netdt > 0.0                                     # (ncol, nlev) bool
-    # Bottom level of the heating range (mini): the lowest (largest-index)
-    # interior level that is both heating and in-window AND whose run of
-    # heating reaches the surface-most heating cell continuously.  E3SM finds
-    # the first netdt>0 from the bottom, OR the first z>=z_heat_max.  Build a
-    # bottom-up scan via lax.scan over k = nlev-1 .. 0.
-    big = nlev
+    # --- Heating range (E3SM gw_convect.F90:186-245).  Scanning up from the
+    # surface (0-based top-down: k = nlev-1 .. 0), mini = first level with
+    # netdt > 0, maxi = first level above it that is not heating; a level at
+    # or above z_heat_max sets mini = maxi there (before mini) or maxi (after).
+    # The range [maxi, mini] includes the non-heating maxi level.  A run that
+    # reaches the model top unterminated launches nothing (E3SM's maxi stays
+    # 0; the precondition is a model top above z_heat_max).
+    # RULE 5 (#2569): each level's ``netdt > 0`` becomes the indicator
+    # h = smoothstep_quintic(netdt/heating_ramp_width) (exactly 0 for
+    # netdt <= 0 and 1 from the width up; width 0 = E3SM) and the scan a
+    # survival recurrence over the two scan states, A (no heating found yet)
+    # and B (in the run).  Treating the levels' indicators as independent,
+    # it gives each level's probability of being mini (pm, on runs that
+    # terminate), maxi (e) and in the range (r); every reader below takes
+    # these weights, so all of them are E3SM exactly when h is 0/1.
+    hw = beres.heating_ramp_width
+    validate_smoothing_width("heating_ramp_width", hw)
+    if hw == 0:
+        h = (netdt > 0.0).astype(dtype)
+    else:
+        h = smoothstep_quintic(netdt / hw)
+    win = zm >= beres.z_heat_max                           # hard: zm is not smoothed
+    ks_idx = jnp.arange(nlev)
 
-    def _depth_step(carry, k):
-        # carry: (mini, maxi, mini_set, maxi_set) per column, int/bool arrays.
-        mini, maxi, mini_set, maxi_set = carry
-        k = k.astype(jnp.int32)
-        z_k = zm[:, k]
-        heat_k = heat[:, k]
-        out_window = z_k >= beres.z_heat_max
-        # Phase 1: locate mini (bottom of heating range).
-        # mini not yet set:
-        set_mini_now = (~mini_set) & (out_window | heat_k)
-        new_mini = jnp.where(set_mini_now, k, mini)
-        # if out_window triggers it, E3SM also sets maxi=k immediately.
-        set_maxi_via_window = set_mini_now & out_window
-        # Phase 2: mini set, maxi not yet set -> first non-heating (or window).
-        in_phase2 = mini_set & (~maxi_set)
-        set_maxi_now = in_phase2 & (out_window | (~heat_k))
-        new_maxi = jnp.where(
-            set_maxi_via_window, k,
-            jnp.where(set_maxi_now, k, maxi),
-        )
-        new_mini_set = mini_set | set_mini_now
-        new_maxi_set = maxi_set | set_maxi_via_window | set_maxi_now
-        return (new_mini, new_maxi, new_mini_set, new_maxi_set), None
+    # G[:, k] = P(a run in progress entering level k terminates at or above
+    # k); top-down, G = 0 above the model top.
+    def _term_step(g_above, k):
+        g = jnp.where(win[:, k], 1.0, (1.0 - h[:, k]) + h[:, k] * g_above)
+        return g, g_above                                  # emit G above level k
 
-    z0 = (
-        jnp.full((ncol,), big, dtype=jnp.int32),   # mini
-        jnp.full((ncol,), big, dtype=jnp.int32),   # maxi
-        jnp.zeros((ncol,), dtype=bool),            # mini_set
-        jnp.zeros((ncol,), dtype=bool),            # maxi_set
-    )
-    (mini, maxi, mini_set, maxi_set), _ = jax.lax.scan(
-        _depth_step, z0, jnp.arange(nlev - 1, -1, -1, dtype=jnp.int32)
-    )
-    # E3SM leaves mini/maxi = 0 when no heating found -> hdepth = 0.  Our
-    # "unset" sentinel is `big`; map unset columns to a benign in-range level
-    # so the gathers below are valid, but force hdepth = 0 there.
-    found = mini_set & maxi_set
-    mini_g = jnp.where(found, mini, nlev - 1).astype(jnp.int32)
-    maxi_g = jnp.where(found, maxi, nlev - 1).astype(jnp.int32)
+    _, g_above = jax.lax.scan(_term_step, jnp.zeros((ncol,), dtype), ks_idx)
+    g_above = g_above.T                                    # (ncol, nlev)
 
-    zm_mini = jnp.take_along_axis(zm, mini_g[:, None], axis=1)[:, 0]
-    zm_maxi = jnp.take_along_axis(zm, maxi_g[:, None], axis=1)[:, 0]
-    # E3SM hdepth = (zm(maxi) - zm(mini))/1000.  In our 0-based top-down
-    # indexing maxi_g is the TOP of the heating range (smaller index, higher
-    # altitude) and mini_g the BOTTOM (larger index, lower altitude), so
-    # zm[maxi_g] > zm[mini_g] and hdepth > 0.
-    hdepth = jnp.where(found, (zm_maxi - zm_mini) / 1000.0, 0.0)  # km
+    def _range_step(carry, k):
+        a, b = carry                                       # P(state A), P(state B)
+        hk, wk, gk = h[:, k], win[:, k], g_above[:, k]
+        pm = jnp.where(wk, a, a * hk * gk)                 # mini here, run terminates
+        e = jnp.where(wk, a + b, b * (1.0 - hk))           # maxi here
+        r = jnp.where(wk, a + b, (a + b) * hk * gk + b * (1.0 - hk))
+        a_new = jnp.where(wk, 0.0, a * (1.0 - hk))
+        b_new = jnp.where(wk, 0.0, (a + b) * hk)
+        return (a_new, b_new), (pm, e, r)
+
+    one = jnp.ones((ncol,), dtype)
+    _, (pm, e, r) = jax.lax.scan(
+        _range_step, (one, jnp.zeros((ncol,), dtype)), ks_idx[::-1])
+    pm, e, r = (x[::-1].T for x in (pm, e, r))             # (ncol, nlev), top-down
+    found = jnp.sum(e, axis=1)                             # P(the range exists)
+
+    # E3SM hdepth = (zm(maxi) - zm(mini))/1000 [km]; 0 when nothing is found.
+    hdepth = jnp.sum((e - pm) * zm, axis=1) / 1000.0
     hdepth = jnp.minimum(hdepth, float(maxh))
     hdepth = hdepth * beres.hdepth_scaling_factor
 
-    # --- Heating-range mean wind uh and max heating q0.  E3SM averages over
-    # the inclusive index range [maxi, mini] (maxi above, mini below).
-    k_idx = jnp.arange(nlev)[None, :]                      # (1, nlev)
-    in_range = (
-        (k_idx >= maxi_g[:, None]) & (k_idx <= mini_g[:, None]) & found[:, None]
-    )                                                      # (ncol, nlev) bool
-    n_in = jnp.maximum(jnp.sum(in_range, axis=1), 1)       # = mini-maxi+1
-    q0 = jnp.max(jnp.where(in_range, netdt, -jnp.inf), axis=1)
-    q0 = jnp.where(found, q0, 0.0)
+    # --- Max heating q0 over the range, from E3SM's q0 = 0 start
+    # (gw_convect.F90:153, :222-227).  RULE 5 (#2569): the r-weighted
+    # log-sum-exp (1/s)*log(1 + sum_k r_k*exp(s*netdt_k)), s =
+    # q0_max_sharpness [s/K]: exactly 0 with no range, above the max by at most
+    # ln(n_range + 1)/s; inf = E3SM's max.
+    qs = beres.q0_max_sharpness
+    if isinstance(qs, bool) or not isinstance(qs, (int, float)) or not qs > 0.0:
+        raise ValueError(f"q0_max_sharpness must be > 0 (inf = E3SM); got {qs!r}.")
+    if math.isinf(qs):
+        q0 = jnp.maximum(jnp.max(jnp.where(r > 0.0, netdt, 0.0), axis=1), 0.0)
+    else:
+        validate_smoothing_width("q0_max_sharpness (as 1/sharpness)", 1.0 / qs)
+        q0 = jax.nn.logsumexp(
+            jnp.concatenate([jnp.zeros((ncol, 1), dtype), qs * netdt], axis=1),
+            axis=1, b=jnp.concatenate([one[:, None], r], axis=1)) / qs
     maxq0 = q0 * 24.0 * 3600.0  # coeff-ok: hours/day x s/hr -> K/day diagnostic
     q0 = q0 * beres.cf                                     # convert to source amp
 
@@ -841,9 +832,10 @@ def gw_beres_src(
     # (gw_convect.F90:217) keeps it real.  Static Python switch.
     cs = smooth_trunc(cs_f, rw) if beres.storm_speed_truncate else cs_f
 
-    uh = jnp.sum(
-        jnp.where(in_range, ubm, 0.0), axis=1
-    ) / n_in.astype(dtype)
+    # Range-mean wind uh = sum_range ubm/(mini-maxi+1); the denominator
+    # sum(r) + (1 - found) is the range length when found (an integer >= 1)
+    # and 1 when not (uh = 0, E3SM's start value), and >= 1 in between.
+    uh = jnp.sum(r * ubm, axis=1) / (jnp.sum(r, axis=1) + (1.0 - found))
     uh = uh - cs
     uh = jnp.clip(uh, -float(maxuh), float(maxuh))
 
@@ -852,30 +844,25 @@ def gw_beres_src(
     if isinstance(ks, bool) or not isinstance(ks, (int, float)) or not ks > 0.0:
         raise ValueError(f"crit_minmax_sharpness must be > 0 (inf = E3SM); got {ks!r}.")
     if math.isinf(ks):
-        umin = jnp.where(
-            in_range, ubm, jnp.asarray(pgwv * dc, dtype)
-        )
-        umin = jnp.where(found[:, None], umin, jnp.asarray(pgwv * dc, dtype))
-        umin = jnp.min(umin, axis=1)
-        umax = jnp.where(
-            in_range, ubm, jnp.asarray(-pgwv * dc, dtype)
-        )
-        umax = jnp.where(found[:, None], umax, jnp.asarray(-pgwv * dc, dtype))
-        umax = jnp.max(umax, axis=1)
+        in_range = r > 0.0
+        umin = jnp.min(jnp.where(in_range, ubm, jnp.asarray(pgwv * dc, dtype)), axis=1)
+        umin = jnp.minimum(umin, pgwv * dc)
+        umax = jnp.max(jnp.where(in_range, ubm, jnp.asarray(-pgwv * dc, dtype)), axis=1)
+        umax = jnp.maximum(umax, -pgwv * dc)
     else:
-        # RULE 5 (#2545, vote 3-0): masked log-sum-exp soft min/max over the
+        # RULE 5 (#2545, vote 3-0): log-sum-exp soft min/max over the
         # heating-range levels plus E3SM's sentinel +-pgwv*dc (the value of
-        # an empty range and of the masked levels), C-infinity in the winds;
-        # overestimates |extremum| by <= ln(n)/ks.  inf = E3SM's min/max.
+        # an empty range), weighted by the range weights r (#2569; a weight,
+        # not a log-mask, so a zero weight has a finite derivative);
+        # overestimates |extremum| by <= ln(n+1)/ks.  inf = E3SM's min/max.
         # 1/ks is the soft extremum's width [m/s]: the same fp32-safe range
         # as every RULE 5 width (codex review 2: 1e-50 / 1e40 gave NaN).
         validate_smoothing_width("crit_minmax_sharpness (as 1/sharpness)", 1.0 / ks)
-        lev = (in_range & found[:, None])
-        keep = jnp.concatenate([lev, jnp.ones((ncol, 1), dtype=bool)], axis=1)
+        wts = jnp.concatenate([r, one[:, None]], axis=1)
 
         def soft_max(x, sentinel):
             x = jnp.concatenate([x, jnp.full((ncol, 1), sentinel, dtype)], axis=1)
-            return jax.nn.logsumexp(ks * x, axis=1, where=keep) / ks
+            return jax.nn.logsumexp(ks * x, axis=1, b=wts) / ks
 
         umin = -soft_max(-ubm, -pgwv * dc)
         umax = soft_max(ubm, -pgwv * dc)
@@ -985,17 +972,34 @@ def gw_beres_src(
         tau0 = tau0 * (1.0 - crit)
 
     # Only launch where hdepth >= hdepth_min and |lat| < pi/2 (E3SM gate).
-    launch = (hdepth >= beres.hdepth_min_km) & (jnp.abs(lat) < (0.5 * math.pi))
-    tau_launch = jnp.where(launch[:, None], tau0, 0.0)     # (ncol, nwav)
+    # RULE 5 (#2569): the depth gate ramps by smoothstep_quintic over
+    # [hdepth_min - hdepth_gate_width, hdepth_min] (E3SM's value kept at and
+    # above the threshold); width 0 = E3SM.  The latitude test is geometry.
+    gw_ = beres.hdepth_gate_width
+    validate_smoothing_width("hdepth_gate_width", gw_)
+    if gw_ == 0:
+        gate = (hdepth >= beres.hdepth_min_km).astype(dtype)
+    else:
+        gate = smoothstep_quintic((hdepth - beres.hdepth_min_km) / gw_ + 1.0)
+    gate = jnp.where(jnp.abs(lat) < (0.5 * math.pi), gate, 0.0)
+    tau_launch = tau0 * gate[:, None]                      # (ncol, nwav)
 
     # Place launched stress at interface maxi via one-hot (jit-safe), and set
     # src/tend levels = maxi.  E3SM uses the 1-based midpoint index ``maxi``
     # directly as an INTERFACE index in tau(:,:,maxi) / src_level=maxi.  In our
     # 0-based top-down convention E3SM's interface index ``maxi`` is the
-    # interface BELOW our midpoint ``maxi_g`` (= maxi-1), i.e. our interface
-    # index ``maxi_g + 1``.  Non-launching columns keep this valid index but
-    # carry zero tau.
-    src_iface = (maxi_g + 1).astype(jnp.int32)             # (ncol,)
+    # interface BELOW our midpoint ``maxi`` (0-based), i.e. our interface
+    # ``maxi + 1``.  Non-launching columns get interface nlev and carry zero
+    # tau.  RULE 5 (#2569): the launch interface is the expected one,
+    # x = sum_k e_k*(k + 1) + (1 - found)*nlev, made a C2 staircase by
+    # smooth_round(x, index_round_width); ``launch_t`` is the weight of the
+    # interface below (src_level + 1), which e3sm_cam_gwd blends in.  With
+    # 0/1 indicators x is an integer and launch_t = 0.
+    x = jnp.sum(e * (ks_idx + 1.0), axis=1) + (1.0 - found) * nlev
+    x = jnp.clip(smooth_round(x, rw), 0.0, float(nlev))   # rw 0: NINT
+    lo = jnp.floor(x)
+    launch_t = x - lo
+    src_iface = lo.astype(jnp.int32)                       # (ncol,)
     iface_idx = jnp.arange(nlev + 1)[None, :]              # (1, nlev+1)
     iface_onehot = (iface_idx == src_iface[:, None]).astype(dtype)
     tau0_full = tau_launch[:, :, None] * iface_onehot[:, None, :]
@@ -1005,7 +1009,8 @@ def gw_beres_src(
     # Phase speeds: just the reference speeds (E3SM c = spread(cref,...)).
     cref = (jnp.arange(-pgwv, pgwv + 1, dtype=dtype) * dc)[None, :]
     c = jnp.broadcast_to(cref, (ncol, nwav))
-    return tau0_full, src_level, tend_level, xv, yv, c, ubm, ubi, hdepth, maxq0
+    return (tau0_full, src_level, tend_level, xv, yv, c, ubm, ubi, hdepth, maxq0,
+            launch_t)
 
 
 def _nint(x: jax.Array) -> jax.Array:
@@ -1788,6 +1793,7 @@ def momentum_energy_conservation(
     tau_net: jax.Array,
     xv: jax.Array,
     yv: jax.Array,
+    apply_energy: bool = True,
 ):
     """C.-C. Chen column momentum & energy fixer (``momentum_energy_conservation``).
 
@@ -1804,7 +1810,9 @@ def momentum_energy_conservation(
        momentum correction) is removed uniformly from ``dsdt`` below source so
        the column total-energy budget self-closes.
 
-    Returns the corrected ``(dudt, dvdt, dsdt)``.
+    Returns the corrected ``(dudt, dvdt, dsdt)``; ``apply_energy=False``
+    stops after step 1 (the Beres launch blend applies step 2 once to the
+    blended tendencies, #2569).
 
     Index convention (codex ediff-1 #1): ``tend_level`` is an INTERFACE index.
     The below-source region is our 0-based midpoints ``m >= tend_level`` and
@@ -1827,8 +1835,19 @@ def momentum_energy_conservation(
     dudt = dudt + add_u
     dvdt = dvdt + add_v
 
+    if not apply_energy:
+        return dudt, dvdt, dsdt
     # --- 2. Energy: remove the net column total-energy change below source. ---
-    dE_int = jnp.sum(
+    dE_int = _column_energy_change(dt, pdel, u, v, dudt, dvdt, dsdt)
+    dE = dE_int / _below_source_dp(tend_level, pint)       # (ncol,)
+    dsdt = jnp.where(below, dsdt - dE[:, None], dsdt)
+    return dudt, dvdt, dsdt
+
+
+def _column_energy_change(dt, pdel, u, v, dudt, dvdt, dsdt):
+    """Column total-energy change rate times g, ``sum pdel*(dsdt + KE step)``,
+    with E3SM's discrete finite-step kinetic energy (gw_common.F90:249)."""
+    return jnp.sum(
         pdel * (
             dsdt
             + dudt * (u + 0.5 * dt * dudt)
@@ -1836,16 +1855,16 @@ def momentum_energy_conservation(
         ),
         axis=1,
     )                                                      # (ncol,)
-    # Below-source pressure interval: E3SM pint(pver+1)-pint(tend_level+1) in
-    # 1-based pint -> our pint[nlev]-pint[tend_level].
+
+
+def _below_source_dp(tend_level, pint):
+    """Below-source pressure interval: E3SM pint(pver+1)-pint(tend_level+1)
+    in 1-based pint -> our pint[nlev]-pint[tend_level] (1 where it is 0)."""
     pint_tend = jnp.take_along_axis(
         pint, tend_level[:, None], axis=1
     )[:, 0]
-    denom = pint[:, nlev] - pint_tend
-    denom = jnp.where(jnp.abs(denom) > 0.0, denom, 1.0)
-    dE = dE_int / denom                                    # (ncol,)
-    dsdt = jnp.where(below, dsdt - dE[:, None], dsdt)
-    return dudt, dvdt, dsdt
+    denom = pint[:, -1] - pint_tend
+    return jnp.where(jnp.abs(denom) > 0.0, denom, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1983,6 +2002,7 @@ def _e3sm_cam_gwd_one_source(
     dv_prior: jax.Array | None = None,
     p_ref_half: jax.Array | None = None,
     orographic_only: bool = True,
+    _launch_shift: int | None = None,
 ) -> GWDOutput:
     """Faithful E3SM/CAM gravity-wave drag (gw_drag_prof solver), ONE source.
 
@@ -2042,11 +2062,47 @@ def _e3sm_cam_gwd_one_source(
         :func:`e3sm_cam_gwd`: ``False`` when spectral waves run in the same
         call, which switches the orographic member to the spectral
         ``gw_drag_prof`` semantics and the alpha profile.
+    _launch_shift : internal
+        RULE 5 (#2569) Beres launch-level blend: with a smooth heating
+        indicator (``beres.heating_ramp_width > 0``) this function runs
+        itself at the source's launch interface (0) and the one below (1),
+        each stopping before the fixer's energy step, blends the two by the
+        source's ``launch_t`` and applies the energy step once to the blend
+        (so the column energy closes; blending two closed branches would
+        leave ``-dt/2*t*(1-t)*sum pdel*|du_1 - du_0|^2``).
 
     Returns
     -------
     GWDOutput
     """
+    if (config.source == "convective" and config.beres.heating_ramp_width > 0
+            and _launch_shift is None):
+        args = (u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, config)
+        kw = dict(h_topo_col=h_topo_col, frontgf_col=frontgf_col,
+                  netdt_col=netdt_col, mfcc_table=mfcc_table,
+                  land_frac_col=land_frac_col, du_prior=du_prior,
+                  dv_prior=dv_prior, p_ref_half=p_ref_half,
+                  orographic_only=orographic_only)
+        du0, dv0, ds0, tend0, t = _e3sm_cam_gwd_one_source(*args, **kw, _launch_shift=0)
+        du1, dv1, ds1, tend1, _ = _e3sm_cam_gwd_one_source(*args, **kw, _launch_shift=1)
+        w = t[:, None]
+        du_dt, dv_dt, dsdt = ((1.0 - w) * a + w * b for a, b in
+                              ((du0, du1), (dv0, dv1), (ds0, ds1)))
+        if config.do_energy_conservation:
+            # The fixer's energy step once, on the blend, removing the column
+            # change from each branch's below-source region in proportion.
+            u_ke = u if du_prior is None else u + dt * du_prior
+            v_ke = v if dv_prior is None else v + dt * dv_prior
+            dpm = jnp.maximum(jnp.abs(p_half[:, 1:] - p_half[:, :-1]), 1.0)
+            dE_int = _column_energy_change(dt, dpm, u_ke, v_ke, du_dt, dv_dt, dsdt)
+            k_idx = jnp.arange(u.shape[1])[None, :]
+            prof = sum(wt * (k_idx >= tl[:, None]) / _below_source_dp(tl, p_half)[:, None]
+                       for wt, tl in ((1.0 - w, tend0), (w, tend1)))
+            dsdt = dsdt - dE_int[:, None] * prof
+        dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
+        eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
+        return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dsdt / constants.c_pd,
+                         eps_gwd=eps_gwd)
     ncol, nlev = u.shape
     needs_ref = config.source != "orographic" or (
         not orographic_only and config.use_newtonian_profile)
@@ -2154,10 +2210,19 @@ def _e3sm_cam_gwd_one_source(
             config.beres.source_level_rule,
         )
         (tau0, src_level, tend_level, xv, yv, c, ubm, ubi,
-         _hdepth, _maxq0) = gw_beres_src(
+         _hdepth, _maxq0, launch_t) = gw_beres_src(
             u, v, netdt_col, zm, lat, k700, mfcc,
             config.pgwv, config.dc, config.beres,
         )
+        if _launch_shift == 1:
+            # The blend's second branch: the same spectrum launched one
+            # interface lower (clipped at the surface interface, where its
+            # weight launch_t is 0).
+            spec = jnp.sum(tau0, axis=2, keepdims=True)    # tau0 is one-hot in k
+            src_level = jnp.minimum(src_level + 1, nlev)
+            tend_level = src_level
+            tau0 = spec * (jnp.arange(nlev + 1)[None, None, :]
+                           == src_level[:, None, None]).astype(tau0.dtype)
         orographic_only = False
         # E3SM does NOT latitude-taper the Beres source (do_latitude_taper=F).
         do_taper = False
@@ -2362,9 +2427,11 @@ def _e3sm_cam_gwd_one_source(
             dsdt = cpair * dT_dt
             du_dt, dv_dt, dsdt = momentum_energy_conservation(
                 tend_level, dt, dpm, u_ke, v_ke, du_dt, dv_dt, dsdt, pint,
-                gravit, tau_net, xv, yv,
+                gravit, tau_net, xv, yv, apply_energy=_launch_shift is None,
             )
             dT_dt = dsdt / cpair
+        if _launch_shift is not None:                    # a launch-blend branch
+            return du_dt, dv_dt, cpair * dT_dt, tend_level, launch_t
 
     # Column mean-flow KE removal rate = -integral rho*(u*du+v*dv)*dz. Positive
     # (dissipative) for the orographic path; for a spectral source it is SIGNED
