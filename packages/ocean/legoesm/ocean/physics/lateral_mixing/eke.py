@@ -627,9 +627,9 @@ def eke_apply_local_source(
     production uses the one-sided ``positive_part_c1`` (exactly 0 for ``P <= 0``)
     and the positive/negative split of a signed source uses
     ``smooth_max_c1(x, 0, source_split_width)`` with ``neg = pos - x`` (the split
-    still sums to ``x`` exactly and both parts stay >= 0, so ``E_{n+1} >= 0``
+    sums to ``x`` up to one rounding and both parts stay >= 0, so ``E_{n+1} >= 0``
     holds at the defaults; at ``x = 0`` the explicit ``w/8`` and the implicit
-    ``w/8`` sink cancel exactly when dissipation is off).  The square root is Veros's ``sqrt(max(0, E))``
+    ``w/8`` sink cancel up to rounding when dissipation is off).  The square root is Veros's ``sqrt(max(0, E))``
     (no ``+1e-30`` offset).  Kept hard: the ``>= 0`` guards on
     ``production_scale`` and ``extra_source`` (inputs >= 0 by construction) and
     the ``1e-30`` divisor guard of the negative-part rate, which binds only where
@@ -638,7 +638,7 @@ def eke_apply_local_source(
     explicitly to ``E`` (not ``max(E, 0)``) and relies on later re-flooring;
     this step folds the negative part implicitly.  The two agree (width 0) on
     cells with ``E >= 0`` and forcing ``>= 0``; at the defaults the per-cell
-    gaps are pinned in ``tests/ocean/unit/test_eke_veros_oracle.py``.
+    gaps are pinned in ``tests/ocean/unit/test_eke_source_step_rule5.py``.
 
     When ``return_dissipation`` is True, returns ``(E_new, eke_diss_iw)`` where
     ``eke_diss_iw = c_eps·√E_n·E_{n+1}/L = diss_rate·E_new`` [m²/s³] ≥ 0 is the
@@ -665,7 +665,8 @@ def eke_apply_local_source(
     # scalar-dtype interaction — bit-identical by construction.
     extra_sink_rate = None
     if production_override is None:
-        production = eke_kappa_gm(E_pos, L, cfg) * sigma ** 2
+        # eke_kappa_gm takes its own positive part of E (codex r1: not E_pos twice)
+        production = eke_kappa_gm(E, L, cfg) * sigma ** 2
         if production_scale is not None:
             # Resolution-function budget coupling: the SAME f_res ∈ (0, 1]
             # the GM/Redi tracer flux applies to kappa_GM scales the

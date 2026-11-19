@@ -153,12 +153,69 @@ def test_zero_production_creates_no_energy():
         assert float(_src(SMOOTH, production_override=jnp.asarray(p))) == hard
 
 
-def test_split_sums_to_the_source_and_stays_nonnegative():
-    e = jnp.asarray([0.0, 1e-12, 1e-6, 1.0])
-    for x in (-W_S, -W_S / 4, 0.0, W_S / 4):
-        out = np.asarray(E.eke_apply_local_source(e, jnp.zeros(4), jnp.full(4, _L0), SMOOTH, DT,
-                                                  signed_source=jnp.full(4, x)))
-        assert np.all(out >= 0.0) and np.all(np.isfinite(out))
+@pytest.mark.parametrize("entry", ["signed_source", "signed_override"])
+def test_split_update_reconstructs_the_source(entry):
+    """E_new is the fold of pos = smooth_max_c1(x, 0, w) and neg = pos - x, with
+    pos - neg == x to rounding and both >= 0 (deleting the source would fail)."""
+    from legoesm.core.smooth import smooth_max_c1
+    e = jnp.asarray([1e-12, 1e-6, 1e-3, 1.0])
+    for x in (-W_S, -W_S / 4, 0.0, W_S / 4, 3e-7):
+        kw = (dict(signed_source=jnp.full(4, x)) if entry == "signed_source"
+              else dict(production_override=jnp.full(4, x), clamp_production=False))
+        out = np.asarray(E.eke_apply_local_source(e, jnp.zeros(4), jnp.full(4, _L0), SMOOTH, DT, **kw))
+        pos = float(smooth_max_c1(jnp.asarray(x), 0.0, W_S))
+        neg = pos - x
+        assert pos >= 0.0 and neg >= 0.0 and abs((pos - neg) - x) <= 1e-30 + 1e-15 * abs(x)
+        en = np.asarray(e)
+        want = (en + DT * pos) / (1.0 + DT * (C_EPS * np.sqrt(en) / _L0 + neg / en))
+        np.testing.assert_allclose(out, want, rtol=1e-12, atol=0.0)
+        assert np.all(out >= 0.0)
+
+
+_SYN = ("clamp", "signed_override", "signed_source", "l_floor", "floor", "geometric")
+
+
+def _syn(cfg):
+    EE, XX = jnp.asarray(FIX["syn_E"]), jnp.asarray(FIX["syn_X"])
+    z, L0 = jnp.zeros_like(EE), jnp.full_like(EE, 1e3)
+    o = dict(clamp=E.eke_apply_local_source(EE, z, L0, cfg, DT, production_override=XX),
+             signed_override=E.eke_apply_local_source(EE, z, L0, cfg, DT, production_override=XX,
+                                                      clamp_production=False),
+             signed_source=E.eke_apply_local_source(EE, z, L0, cfg, DT, signed_source=XX))
+    Ls = jnp.asarray(FIX["syn_L"])
+    o["l_floor"] = E.eke_apply_local_source(jnp.full_like(Ls, 1e-3), jnp.zeros_like(Ls), Ls, cfg, DT)
+    o["floor"] = E.eke_floor(jnp.asarray(FIX["syn_floor_E"]), cfg)
+    ge, gp = [a.ravel() for a in np.meshgrid(FIX["syn_geo_E"], FIX["syn_geo_P"], indexing="ij")]
+    gcfg = cfg._replace(c_eps=E.GeometricConfig().c_eps_geometric)
+    o["geometric"] = E.eke_apply_local_source(jnp.asarray(ge), jnp.zeros(ge.size), jnp.full(ge.size, 3e4 * 60.0),
+                                              gcfg, 86400.0, production_override=jnp.asarray(gp))
+    return {k: np.asarray(v) for k, v in o.items()}
+
+
+@pytest.mark.parametrize("case", _SYN)
+def test_synthetic_default_gap_pinned_per_case(case):
+    """Every switch's per-case gap (defaults - widths 0) on transition grids, pinned."""
+    got = _syn(SMOOTH)[case] - _syn(HARD)[case]
+    np.testing.assert_allclose(got, FIX[f"pin_syn_{case}"], rtol=1e-6, atol=1e-12 * 1e-6)
+    assert np.any(FIX[f"pin_syn_{case}"] != 0.0)
+
+
+@pytest.mark.parametrize("e", [-1e-8, -5e-9, 0.0, 5e-9])
+@pytest.mark.parametrize("x", [-1e-10, 0.0, 1e-10])
+def test_gradients_finite_on_the_transition_grid(e, x):
+    f = lambda a: E.eke_apply_local_source(a[0], jnp.asarray(1e-6), a[1], SMOOTH, DT,  # noqa: E731
+                                           signed_source=a[2])
+    g = jax.grad(f)(jnp.asarray([e, L_MIN, x]))
+    assert np.all(np.isfinite(np.asarray(g)))
+
+
+def test_production_uses_the_closure_kappa_once_near_zero_energy():
+    """sigma != 0: the parameterized production is eke_kappa_gm(E) * sigma^2 (E smoothed once)."""
+    e, sig, L = jnp.asarray(0.0), jnp.asarray(1e-5), jnp.asarray(_L0)
+    cfg = SMOOTH._replace(c_eps=1e-30)
+    got = float(E.eke_apply_local_source(e, sig, L, cfg, DT)) - float(E.eke_positive_part(e, cfg))
+    want = DT * float(E.eke_kappa_gm(e, L, cfg)) * 1e-10
+    np.testing.assert_allclose(got, want, rtol=1e-6)
 
 
 def test_driver_uses_eke_floor():
