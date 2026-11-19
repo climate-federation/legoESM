@@ -191,8 +191,9 @@ def solar_declination(
     if orbit is not None:
         eps = orbit.obliquity_deg * constants.DEG_TO_RAD
         lam = _orbital_solar_longitude(day_of_year, orbit)
-        # |sin(eps) sin(lam)| <= sin(23.4 deg) ≈ 0.40, so arcsin is well
-        # inside (-1, 1): no AD-singular clip needed.
+        # |sin(eps) sin(lam)| <= sin(eps): strictly inside (-1, 1) unless the
+        # obliquity is exactly 90 deg, where d(arcsin)/dx is infinite at the
+        # solstice instant (forward value exact).
         return jnp.arcsin(jnp.sin(eps) * jnp.sin(lam))
     obliquity_rad = obliquity * constants.DEG_TO_RAD
     return obliquity_rad * jnp.sin(2.0 * jnp.pi * (day_of_year - _SOLSTICE_OFFSET_DAYS) / _DAYS_PER_YEAR)

@@ -1151,6 +1151,27 @@ def test_orbital_insolation_flag_flows_to_config():
     assert cfg_on.orbital_insolation is True
 
 
+def test_orbit_flags_round_trip_and_validate():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--orbital-insolation",
+        "--orbit-eccentricity", "0.05", "--orbit-obliquity", "60",
+        "--orbit-perihelion", "90",
+    ]), parser))
+    assert (cfg.orbit_eccentricity, cfg.orbit_obliquity_deg,
+            cfg.orbit_long_perihelion_deg, cfg.orbit_year) == (0.05, 60.0, 90.0, None)
+    cfg.validate_strict()
+    cfg_y = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--orbital-insolation", "--orbit-year", "-4050",
+    ]), parser))
+    assert cfg_y.orbit_year == -4050
+    cfg_y.validate_strict()
+    with pytest.raises(ValueError, match="orbital_insolation"):
+        build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--orbit-obliquity", "60",
+        ]), parser)).validate_strict()
+
+
 def test_convective_cloud_boolean_optional_action_can_disable_config_default():
     """--no-convective-cloud must override a config-file-enabled default.
 
