@@ -1,0 +1,10 @@
+requests
+xarray
+netCDF4
+pandas
+numpy
+scipy
+dask
+tqdm
+pytest
+matplotlib
