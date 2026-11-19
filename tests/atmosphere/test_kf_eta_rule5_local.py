@@ -1478,3 +1478,41 @@ if __name__ == "__main__":
     data["gaps"][sys.argv[2]] = measure_case(dict(np.load(_FIX)), sys.argv[2])
     _GAPS.write_text(json.dumps(data, indent=0) + "\n")
     print("wrote", sys.argv[2], "to", _GAPS)
+
+
+def test_cyc1_returns_ainc_to_its_previous_value(monkeypatch):
+    """Forced apply on pass 1, cyc1 on pass 2 (AINC != AINCOLD), stop once
+    NOITR latches: cyc1 must put AINC back to its pre-apply value, i.e. the
+    AINC a column stopped on pass 1 reports."""
+    fx = dict(np.load(_FIX))
+    orig = kfe._soft_closure_weights
+
+    def pattern(mode):
+        def forced(*a):
+            p = orig(*a)
+            live = p["live"]
+            n = jnp.minimum(a[6], 1.0)
+            c = (jnp.abs(a[2] - a[3]) > 0.0).astype(live.dtype)
+            q = {k: jnp.zeros_like(v) for k, v in p.items()}
+            q["live"] = live
+            if mode == "stopped":
+                q["stop"] = live
+                return q
+            q["stop"] = n * live + ((1.0 - n) * c * live if mode == "applied" else 0.0)
+            q["cyc1"] = (1.0 - n) * c * live if mode == "cycled" else 0.0 * live
+            q["apply"] = q["rescale"] = (1.0 - n) * (1.0 - c) * live
+            return q
+        return forced
+
+    ainc = {}
+    for name in ("stopped", "applied", "cycled"):
+        monkeypatch.setattr(kfe, "_soft_closure_weights", pattern(name))
+        jax.clear_caches()
+        o, _ = _sweep_column(fx, 68)
+        assert bool(o["fired"][0])
+        ainc[name] = float(o["ainc"][0])
+    monkeypatch.setattr(kfe, "_soft_closure_weights", orig)
+    jax.clear_caches()
+    assert ainc["stopped"] > 0.0
+    assert abs(ainc["applied"] - ainc["stopped"]) > 1e-6 * ainc["stopped"]
+    assert ainc["cycled"] == pytest.approx(ainc["stopped"], rel=1e-12)
