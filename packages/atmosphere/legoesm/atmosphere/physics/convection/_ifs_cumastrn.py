@@ -423,14 +423,15 @@ def _nonneg_precip(sm, r1, s1, dpmel):
     -4w/27 there (water handed back to the same sink; r2 + s2 - deficit = T
     still holds exactly).  pos(T) is split in proportion to pos(r1),
     pos(s1), so r2 + s2 = pos(T) exactly; at the hard limit this is the three
-    OpenIFS branches.  Melting goes with the surviving flux."""
+    OpenIFS branches.  Melting goes with the surviving flux; it is dropped
+    only for T < 0 (OpenIFS keeps it at T = 0)."""
     t_new = sm.pos(r1 + s1, _W_PFLX)
     pr = sm.pos(r1, _W_PFLX)
     ps = sm.pos(s1, _W_PFLX)
     ok = pr + ps > 0.0
     r2 = t_new * sdiv(pr, pr + ps, ok) * ok
     s2 = t_new - r2
-    return r2, s2, t_new - (r1 + s1), dpmel * sm.on(r1 + s1, 0.0, _W_PFLX)
+    return r2, s2, t_new - (r1 + s1), dpmel * sm.on(r1 + s1, 0.0, _W_PFLX, strict=False)
 
 
 # ---------------------------------------------------------------------------

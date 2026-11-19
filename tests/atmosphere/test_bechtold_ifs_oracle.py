@@ -626,10 +626,10 @@ def test_nosupply_gradient_through_the_supply_ramp(fix):
 # ("first_guess") so only the switches differ: (dT_dt, dq_v_dt, M_u, surface
 # precipitation) per fixture column, measured (x64, CPU) by switch_gaps().
 # Re-measured for #2281 part 3 (downdraught, CUFLXN and post-fixer switches
-# smoothed): L32 column 12 heating gap 0.070 -> 0.97 -- its whole
+# smoothed): L32 column 12 heating gap 0.070 -> 0.97, drying 0.013 -> 0.18 -- its whole
 # precipitation flux (1.3e-9 kg m-2 s-1) lies inside the flux window
 # (0.01 x 2.27e-7), so the smooth positive part suppresses it; KNOWN
-# DIFFERENCE, kept (vote 2 Q6, 2026-11-19).  Other changes <= 3.5e-6.
+# DIFFERENCE, kept (vote 2 Q6, 2026-11-19).  Other changes <= 6.6e-6.
 _SWITCH_GAP = {
     "L32": (
         [1.155408049270849e-13, 3.1927949260996204e-13, 0.0011130719528878582, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.4927806518186066e-06, 4.19866852170346e-05, 0.0, 0.9734300882432095, 4.049624669431736e-12, 7.90455117410403e-08, 3.1143115208075958e-12],
@@ -834,7 +834,7 @@ _SITE_POINTS = {
         ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
     ('ps = sm.pos(s1, _W_PFLX)', 'pos'):
         ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
-    ('return r2, s2, t_new - (r1 + s1), dpmel * sm.on(r1 + s1, 0.0, _W_PFLX)', 'on'):
+    ('return r2, s2, t_new - (r1 + s1), dpmel * sm.on(r1 + s1, 0.0, _W_PFLX, strict=False)', 'on'):
         ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
     ('sn1 = jnp.where(dsn, sm.pos(sn1, _W_PFLX), 0.0)', 'pos'):
         ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
