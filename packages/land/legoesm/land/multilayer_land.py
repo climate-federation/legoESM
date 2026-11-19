@@ -1552,7 +1552,8 @@ def _step_multilayer_land_impl(
             # The same flux leaves to the atmosphere as sensible heat (#2542; see
             # the bulk branch's final solve).  Sign: _robin_flux > 0 = the
             # surface lost more than the explicit balance (less INTO the column,
-            # more UP); SH positive up.
+            # more UP); SH positive up.  Exact for the single combined solve
+            # above; a sub-stepped one would need the solver's step mean.
             shflx = shflx + _robin_flux
         pack, snow_drainage, snow_drainage_heat = snow_phase_and_percolate(
             pack._replace(T=T_pack_solved), scc)
