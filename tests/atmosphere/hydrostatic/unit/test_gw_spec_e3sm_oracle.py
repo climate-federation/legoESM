@@ -356,13 +356,16 @@ _HW, _GATE = _BERES.heating_ramp_width, _BERES.hdepth_gate_width
 _SWITCHES = {
     # name: (column, perturbation, s at the switch, s inside the ramp, eps at
     #        the switch, eps inside, the field's hard value)
-    # Inside the heating ramp the launch interface moves ~19 levels per unit
-    # s; s = 0.3 sits 0.013 in s from its nearest staircase step.
-    "heating_range": (_C0, _set_netdt(_CUT, _HW), 0.0, 0.3, 3.0e-5, 1.0e-4,
+    # The drag sees the heating ramp through staircased indices, so it moves
+    # only where one of them steps: inside the ramp the point is s = 1/2,
+    # where the launch interface (moving ~21 levels per unit s) sits on the
+    # middle of a step 0.1 levels wide, hence eps 1e-7 there.  The depth-gate
+    # point (hdepth 2.42 km) is clear of the table row's NINT(hdepth) steps.
+    "heating_range": (_C0, _set_netdt(_CUT, _HW), 0.0, 0.5, 3.0e-5, 1.0e-7,
                       dict(heating_ramp_width=0.0)),
-    "launch_staircase": (_C0, _set_netdt(_CUT, _HW), 0.5, 0.5, 1.0e-5, 1.0e-5,
+    "launch_staircase": (_C0, _set_netdt(_CUT, _HW), 0.5, 0.5, 1.0e-7, 1.0e-7,
                          dict(index_round_width=0.0)),
-    "depth_gate": (_C1, _scale_z, 2.5 / _HD1, (2.5 - _GATE / 2) / _HD1, 1.0e-5, 1.0e-5,
+    "depth_gate": (_C1, _scale_z, 2.5 / _HD1, 2.42 / _HD1, 1.0e-5, 1.0e-5,
                    dict(hdepth_gate_width=0.0)),
 }
 
