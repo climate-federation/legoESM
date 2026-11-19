@@ -166,7 +166,7 @@ def test_split_update_reconstructs_the_source(entry):
         pos = float(smooth_max_c1(jnp.asarray(x), 0.0, W_S))
         neg = pos - x
         assert pos >= 0.0 and neg >= 0.0 and abs((pos - neg) - x) <= 1e-30 + 1e-15 * abs(x)
-        en = np.asarray(e)
+        en = np.asarray(E.eke_positive_part(e, SMOOTH))
         want = (en + DT * pos) / (1.0 + DT * (C_EPS * np.sqrt(en) / _L0 + neg / en))
         np.testing.assert_allclose(out, want, rtol=1e-12, atol=0.0)
         assert np.all(out >= 0.0)
