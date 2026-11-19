@@ -3760,7 +3760,8 @@ class ModelDriver:
 
         if self._f_land is not None:
             # every land-fraction source above, once: roundoff below 1 left a
-            # 1e-14 water fraction the slab divided by (SST to 4.7e9 K)
+            # 1e-14 water fraction the slab divided by (SST to 4.7e9 K).  The
+            # sources bin in fp64; an fp32 cast already rounds such values to 1.
             from legoesm.grids.topography import snap_land_fraction_roundoff
             self._f_land = snap_land_fraction_roundoff(self._f_land).astype(_sd)
 
