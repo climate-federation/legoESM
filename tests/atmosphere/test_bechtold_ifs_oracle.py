@@ -410,7 +410,12 @@ def test_wrapper_hands_the_host_water_that_closes(fix, g):
     if np.max(np.abs(dry)) == 0.0:
         assert np.max(np.abs(res)) == 0.0
         return
-    assert np.max(np.abs(res)) / np.max(np.abs(dry)) <= _TOL
+    # drying floor 1e-9 kg m-2 s-1 (vote 2026-11-18): a barely convecting
+    # group's fp64 round-off (5e-20) is not a relative error of its drying
+    assert np.max(np.abs(res)) / max(np.max(np.abs(dry)), _DRY_FLOOR) <= _TOL
+
+
+_DRY_FLOOR = 1.0e-9   # kg m-2 s-1
 
 
 @pytest.mark.parametrize("g", _GROUPS)
@@ -615,10 +620,10 @@ def test_nosupply_gradient_through_the_supply_ramp(fix):
 # precipitation) per fixture column, measured (x64, CPU) by switch_gaps().
 _SWITCH_GAP = {
     "L32": (
-        [1.155408049270849e-13, 6.382851606121968e-13, 9.329321598065945e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.527033819234069e-16, 4.2997772808050026e-14, 0.0, 0.0, 4.061234644816772e-12, 8.597091978769083e-13, 1.5572484289018971e-12],
-        [1.2208611804052711e-14, 8.208652670311285e-14, 3.7711641379674507e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.768519006471387e-15, 0.0, 0.0, 7.768887789727816e-13, 5.056799592526267e-14, 1.101205278761102e-13],
-        [1.4776039621664564e-14, 9.01139097311247e-14, 3.81658947462115e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0292097072507253e-15, 6.920393684326509e-16, 0.0, 0.0, 7.544410353326226e-13, 4.6335526034809616e-14, 3.560926557233197e-14],
-        [7.228524788231107e-15, 9.835763388781988e-14, 3.4814984448074187e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.6066020765652573e-14, 1.0220917382663544e-15, 0.0, 0.0, 7.373443210654421e-13, 3.8308962631369565e-14, 0.0],
+        [1.155408049270849e-13, 3.1927949260996204e-13, 0.0011130719528878582, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.6723091836596204e-16, 4.198668525995863e-05, 0.0, 0.07037075107906984, 4.049624669431736e-12, 1.7179434496712484e-12, 3.1143115208075958e-12],
+        [1.7172552867238978e-14, 1.163127531864268e-13, 0.0010985278742337056, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.3674537767162897e-13, 4.689802829971999e-05, 0.0, 0.013070933253375527, 4.1134943022347197e-13, 5.056799592526267e-14, 1.101205278761102e-13],
+        [1.4365594076618328e-14, 1.340269644731608e-13, 0.0011884180672240485, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.470103297401741e-15, 5.127344626210799e-05, 0.0, 0.0, 4.239592100981241e-13, 4.719359133175054e-14, 6.594308439320736e-14],
+        [3.975688633527109e-15, 1.3571569211051792e-13, 0.0010549443125622503, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.344751639650026e-14, 5.1273446260288524e-05, 0.0, 1.6870632593248073e-25, 4.206675081458067e-13, 3.8886484681088704e-14, 0.0],
     ),
     "L137": (
         [1.661612930475599e-11, 0.0, 0.0, 0.0, 0.0],
@@ -627,10 +632,10 @@ _SWITCH_GAP = {
         [0.0, 0.0, 0.0, 0.0, 0.0],
     ),
     "STRESS": (
-        [3.4442221391695113e-13, 4.5420032351625236e-14, 1.775404919440501e-12],
-        [3.9701823491282336e-14, 7.704682611898458e-15, 4.996926756862235e-13],
-        [1.1354137486081727e-13, 6.838908281453185e-16, 5.255835484158918e-13],
-        [1.2160758858600408e-15, 3.2671250364719703e-15, 4.0989188218272814e-13],
+        [1.722849855972394e-13, 0.012694584019058777, 8.875598874530435e-13],
+        [4.41178551951255e-14, 0.014005735274384364, 1.990163333564079e-13],
+        [1.2783764286336544e-13, 0.015307609436948059, 2.0573300977747443e-13],
+        [9.120569143950305e-16, 0.015307609436951737, 1.541579152082197e-13],
     ),
 }
 
@@ -700,8 +705,6 @@ def _probe(name):
 _SITE_POINTS = {
     ('* (1.0 - sm.lt(kget(pvervel, njkt5), ZOMEGA_RES, _W_OMEGA)))', 'lt'):
         ('L32', 1, 'inject', 'q', 1.0586956521739133, 0.0001, ()),
-    ('/ ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)', 'min'):
-        ('L32', 9, 'input', 'q', 1.1985054347826085, 1.9621876652955546e-08, ()),
     ('llo1 = sm.lt(paph[K + 1] - kget(paph, ikd), ZPBL_DP, _W_PRES)', 'lt'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('m = sm.min(zm, r, _W_REL * r)', 'min'):
@@ -710,14 +713,10 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)', 'gt'):
         ('L137', 0, 'inject', None, 0.0, 0.0001, ()),
-    ('zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)', 'max'):
-        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
     ('zcape_c = sm.min(zcape_c, ZCAPE_MAX, _W_CAPE)', 'min'):
         ('L32', 9, 'inject', 'q', 1.075, 0.0001, ()),
     ('zcape_c = sm.sel(br, sm.max(zcape2 - zcapdcycl + zdqcv, RMINCAPE * zcape, _W_CAPE),', 'max'):
         ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
-    ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
-        ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
     ('zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)', 'min'):
         ('STRESS', 0, 'inject', 'q', 1.225, 0.0001, ()),
     ('zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1', 'max'):
@@ -726,6 +725,80 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'max'):
         ('L32', 2, 'input', 'sflux', 3.5652173913043477, 1.2682412999266035e-05, ()),
+    ('* sm.ge(rtt, kget(pten, jk), _W_T)', 'ge'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('* sm.lt(kget(zqenh, jkk) / kget(pqsen, jkk), ZRH_ADV, _W_RH))', 'lt'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('* sm.min(kget(pqsen, jk) / kget(pqsen, s["kcbot"]), 1.0, _W_ONE) ** 3)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zqex = sm.max(-ZWS_FAC * pqhfl_sfc / (zrho_s * zws_ok), ZQEXC0, _W_VAP)', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zqex = sm.min(zqex, ZQEX_MAX, _W_VAP)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zqexc = jnp.where(km1, sm.min(sm.max(st["zqex"], zqexc, _W_VAP), ZQEX_MAX, _W_VAP),', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zqexc = jnp.where(km1, sm.min(sm.max(st["zqex"], zqexc, _W_VAP), ZQEX_MAX, _W_VAP),', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ztex = sm.max(-ZWS_FAC * pahfs_sfc / (zrho_s * zws_ok * rcpd), ZTEXC0, _W_TEX)', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ztex = sm.min(ztex, ZTEX_MAX, _W_TEX)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ztexc = jnp.where(km1, sm.min(sm.max(st["ztex"], ztexc, _W_TEX), ZTEX_MAX, _W_TEX),', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ztexc = jnp.where(km1, sm.min(sm.max(st["ztex"], ztexc, _W_TEX), ZTEX_MAX, _W_TEX),', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk + 1), ZKE_PRC_MIN, _W_KE)),', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zxe = sm.pos(zchange - zxs, _W_MF)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zzzmb = sm.min(sm.max(-kget(pvervel, kk) * zrg, ZMID_MF_MIN, _W_MF), RMFLIA, _W_MF)', 'max'):
+        ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
+    ('zzzmb = sm.min(sm.max(-kget(pvervel, kk) * zrg, ZMID_MF_MIN, _W_MF), RMFLIA, _W_MF)', 'min'):
+        ('L32', 12, 'inject', None, 0.0, 0.0001, ()),
+    ('de_n = sm.max(mfu1 * (1.0 - zmfun), zdmfde, _W_MF)', 'max'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
+    ('ent = sm.sel(sm.on(zdmfen, 0.0, _W_MF), zdmfen, zdmfde)', 'on'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('mix_d = ZMIX_DEEP * entrorg * zdz * sm.min(', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('neg = sm.lt(zbuoc, 0.0, _W_BUOC)', 'lt'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('pqenh = jnp.where(adj, sm.pos(sm.min(qup, qsup, _W_VAP) + (pqsenh - qsup), _W_VAP), pqenh)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('ptenh = (sm.max(rcpd * pten + pgeo, rcpd * up + gup, _W_SE) - pgeoh[:K + 1]) * zorcpd', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('reset, safe_sqrt_nan(sm.pos(kget(st["zwu2h"], st["icbot"]), _W_KE)),', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('rh = sm.min(kget(pqen, jk) / kget(pqsen, jk), 1.0, _W_ONE)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('rhm1 = sm.min(kget(pqen, jk - 1) / kget(pqsen, jk - 1), 1.0, _W_ONE)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zadv = sm.min(sm.pos(kget(ptenqa, jkk) * ZQADV_TAU, _W_VAP), ZQADV_MAX, _W_VAP)', 'min'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zadv = sm.min(sm.pos(kget(ptenqa, jkk) * ZQADV_TAU, _W_VAP), ZQADV_MAX, _W_VAP)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zdken = sm.min((1.0 + Z_CWDRAG) * ent / mfden, 1.0, _W_ONE)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zoe = sm.min(zoe, ZOENTR_MAX, _W_OENTR) * mfu_ic', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('return jnp.minimum(1.0, x) if sm.hard else 1.0 - sm.pos(1.0 - x, _W_ONE)', 'pos'):
+        ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
+    ('pqenh = jnp.where(adj, sm.pos(sm.min(qup, qsup, _W_VAP) + (pqsenh - qsup), _W_VAP), pqenh)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('pw = sm.max(st["pwmean"] / jnp.maximum(ZDPMEAN_MIN, st["zdpmean"]), ZWMEAN_MIN, _W_VEL)', 'max'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)', 'max'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
+    ('zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)', 'max'):
+        ('L32', 15, 'inject', None, 0.0, 0.0001, ()),
+    ('zdt = sm.min(sm.pos(th.RTBERCU - tuk, _W_T), th.RTBERCU - th.RTICECU, _W_T)', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zkedke = sm.pos(sm.min(zkedke, 1.0, _W_ONE), _W_ONE)', 'min'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
+    ('zkedke = sm.pos(sm.min(zkedke, 1.0, _W_ONE), _W_ONE)', 'pos'):
+        ('L32', 1, 'inject', None, 0.0, 0.0001, ()),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk), ZKE_RAIN_MIN, _W_KE)),', 'min'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
 }
@@ -736,8 +809,9 @@ _SITE_POINTS = {
 # them): a direct gradient test of the smoothed expression inside its window
 # at the default width (coordinator ruling 2026-11-15), with the reason.
 # Values: (bound b, or a representative value where the bound is traced, and
-# the width, as expressions in _ifs_cumastrn's namespace plus RG = g and
-# RCPD = c_pd; reason).
+# the width, as expressions in the site module's namespace plus RG = g and
+# RCPD = c_pd; reason; optional module: "cuascent" or "thermo", else
+# _ifs_cumastrn).
 _SITE_SYNTHETIC = {
     ('br = 1.0 - ((1.0 - sm.le(zsatfr, ZSATFR_MAX, _W_SATFR))', 'le'):
         ('ZSATFR_MAX', '_W_SATFR', 'full-scheme point found, but check_grads through the whole scheme does not agree with autodiff to 1e-3 relative there'),
@@ -768,6 +842,102 @@ _SITE_SYNTHETIC = {
     ('zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)', 'max'):
         ("0.1", "_W_DH", "first-guess energy floor: feeds only the first-guess shallow "
                        "flux, which cancels in the closure rescale"),
+    ('/ ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)', 'min'):
+        ('ZTAU_WMAX', '_W_VEL',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)'),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk + 1), ZKE_PRC_MIN, _W_KE)),', 'max'):
+        ('ZKE_PRC_MIN', '_W_KE',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'cuascent'),
+    ('zwu = sm.min(jnp.sqrt(2.0 * sm.max(kget(s["pkineu"], jk), ZKE_RAIN_MIN, _W_KE)),', 'max'):
+        ('ZKE_RAIN_MIN', '_W_KE',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'cuascent'),
+    ('lrain = kget(s["plrain"], jk + 1) * sm.pos(mfu1 - zdmfde, _W_MF) * zfac', 'pos'):
+        ('0.0', '_W_MF',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'cuascent'),
+    ('newmfub = sm.min(s["pmfub"], zmfmax, _W_MF)', 'min'):
+        ('0.3', '_W_MF',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture) (bound traced: representative value)', 'cuascent'),
+    ('org = sm.gt(zbuo, ZBUO_ORG, _W_BUO)', 'gt'):
+        ('ZBUO_ORG', '_W_BUO',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'cuascent'),
+    ('return jnp.maximum(x, 0.0) if sm is None else sm.pos(x, _W_CONDCU)', 'pos'):
+        ('0.0', '_W_CONDCU',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'thermo'),
+    ('return zcond1 * sm.on(zcond, 0.0, _W_CONDCU)', 'on'):
+        ('0.0', '_W_CONDCU',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'thermo'),
+    ('wpr = sm.on(luk, zdnoprc, _W_COND)', 'on'):
+        ('ZDNOPRC', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'cuascent'),
+    ('wre = sm.lt(zbuo, ZBUO_REINT, _W_BUO)', 'lt'):
+        ('ZBUO_REINT', '_W_BUO',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'cuascent'),
+    ('wrf = sm.on(lr, 0.0, _W_COND)', 'on'):
+        ('0.0', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'cuascent'),
+    ('zchange = sm.pos(zmftest - zmfmax, _W_MF)', 'pos'):
+        ('0.0', '_W_MF',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'cuascent'),
+    ('zdmfde_f = sm.min(zdmfde, ZDETR_MAX * mfu1, _W_MF)', 'min'):
+        ('ZDETR_MAX * 0.03', '_W_MF',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture) (bound traced: representative value)', 'cuascent'),
+    ('zdq = sm.pos(zqold - qu, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'cuascent'),
+    ('zdt = sm.min(sm.pos(th.RTBERCU - tuk, _W_T), th.RTBERCU - th.RTICECU, _W_T)', 'pos'):
+        ('0.0', '_W_T',
+         'full-scheme injection point found, but the per-site test does not hold there (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative; re-checked 2026-11-18 with the cache-clearing fixture)', 'cuascent'),
+    ('* sm.pos(c1, _W_CONDCU), sm)', 'pos'):
+        ('0.0', '_W_CONDCU',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
+    ('+ sm.pos(zbuof * zdz, _W_CAPEL), on)', 'pos'):
+        ('0.0', '_W_CAPEL',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('1.0 - kt3 * sm.gt(kget(pten, s["kcbot"]), rtt - ZLSCV_DT, _W_T))', 'gt'):
+        ('th.RTT - ZLSCV_DT', '_W_T',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('ke = sm.max((kget(s["pkineu"], jk + 1) * (1.0 - zdken) + zdkbuo) / (1.0 + zdken),', 'max'):
+        ('ZKE_MIN', '_W_KE',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('lambda c1, c: c1 - (1.0 - sm.on(-c, 0.0, _W_CONDCU))', 'on'):
+        ('0.0', '_W_CONDCU',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
+    ('return jnp.minimum(QSAT_CAP, x) if sm is None else sm.min(x, QSAT_CAP, _W_EPCU)', 'min'):
+        ('QSAT_CAP', '_W_EPCU',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
+    ('th, psp, t, q, lambda c: -sm.pos(-c, _W_CONDCU),', 'pos'):
+        ('0.0', '_W_CONDCU',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'thermo'),
+    ('wub = safe_sqrt_nan(sm.pos(kget(st["zwu2h"], jkb), _W_KE))', 'pos'):
+        ('0.0', '_W_KE',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('zoentr_b = sm.min(zoentr_b, ZOENTR_MAX, _W_OENTR) * mfu1', 'min'):
+        ('ZOENTR_MAX', '_W_OENTR',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('zxs = sm.pos(mfu1 - zmfmax, _W_MF)', 'pos'):
+        ('0.0', '_W_MF',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)', 'cuascent'),
+    ('tc = th.RTWAT - sm.pos(th.RTWAT - t, _W_TCU)    # <= RTWAT: fraction <= 1', 'pos'):
+        ('0.0', '_W_TCU',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'thermo'),
+    ('zleen = sm.sel(sm.on(lit, RLMIN, _W_COND), lit * zdmfen, 0.0)', 'on'):
+        ('RLMIN', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('zlnew = Z_CLDMAX - sm.pos(Z_CLDMAX - zlnew, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('zlnew = luk - sm.pos(luk - zlnew, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('zlnew = sm.pos(zlnew, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('zrnew = lr - sm.pos(lr - zrnew, _W_COND)   # <= lr', 'pos'):
+        ('0.0', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('zrnew = sm.pos(zrnew, _W_COND)', 'pos'):
+        ('0.0', '_W_COND',
+         'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
 }
 
 
@@ -778,14 +948,17 @@ def test_switch_site_synthetic_gradient(site):
     derivative differs from the exact switch's."""
     from jax.test_util import check_grads
     from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics import _ifs_thermo
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent
     from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
 
     sp = _probe("switch_sites")
     method = site[1]
-    bexpr, wexpr, reason = _SITE_SYNTHETIC[site]
+    bexpr, wexpr, reason, *mod = _SITE_SYNTHETIC[site]
     assert reason
+    mod = {"cuascent": _ifs_cuascent, "thermo": _ifs_thermo}[mod[0]] if mod else M
     th = lego_thermo()
-    ns = {**vars(M), "RG": th.RG, "RCPD": th.RCPD}
+    ns = {**vars(mod), "RG": th.RG, "RCPD": th.RCPD, "th": th}
     b, w = float(eval(bexpr, ns)), float(eval(wexpr, ns))
 
     def f(a, hard=False):
@@ -810,16 +983,19 @@ def test_every_switch_site_has_a_gradient_point():
     assert sum(map(len, sets)) == len(set.union(*sets))
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def _fresh_jit():
-    """Each per-site test compiles a fresh instrumented scheme; drop the
-    compiled code after it (XLA's CPU JIT runs out of code memory otherwise)."""
+    """Every test starts and ends with empty JAX caches: traces are cached by
+    function identity, blind to the IfsSmooth methods and widths the probes
+    patch, so a trace made under instrumentation (or before it) would be
+    reused across tests; and XLA's CPU JIT runs out of code memory otherwise."""
+    jax.clear_caches()
     yield
     jax.clear_caches()
 
 
 @pytest.mark.parametrize("site", sorted(_SITE_POINTS), ids=lambda t: f"{t[1]}:{t[0][:60]}")
-def test_switch_site_gradient_at_default(fix, site, _fresh_jit):
+def test_switch_site_gradient_at_default(fix, site):
     """RULE 5 gradient test, per switch site, at the default (smooth): at the
     site's point it is inside its window, check_grads (order 1, reverse)
     passes on the scheme's heating + drying + mass flux with respect to the
@@ -861,6 +1037,199 @@ def test_switch_site_gradient_at_default(fix, site, _fresh_jit):
     assert np.isfinite(gs) and big > 1e-12 and abs(gs - gh) > 1e-3 * big
 
 
+def test_ascent_smooth_cloud_to_rain_conserves_water():
+    """At the smooth default the rain gains exactly what the cloud loses, and
+    0 <= new cloud <= cloud, inside and around both cap windows."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent as A
+
+    sm, w = IfsSmooth(False), A._W_COND
+    for luk in (5.0e-4, A.Z_CLDMAX, A.Z_CLDMAX + 0.5 * w, 3.0 * A.Z_CLDMAX):
+        z0 = jnp.linspace(-3.0 * w, 3.0 * w, 61)
+        for zl in (luk + z0, A.Z_CLDMAX + z0, z0):
+            for wpr in (0.0, 0.3, 1.0):
+                zlnew, zprecip, _ = A.cloud_to_rain(
+                    sm, True, jnp.asarray(luk), 0.0, jnp.asarray(luk), zl, wpr, A.ZDNOPRC)
+                cloud = wpr * zlnew + (1.0 - wpr) * luk
+                np.testing.assert_allclose(cloud + zprecip, luk, rtol=1e-14, atol=0.0)
+                assert np.all(np.asarray(zlnew) >= 0.0) and np.all(np.asarray(zlnew) <= luk)
+
+
+def test_exact_cloud_to_rain_makes_no_rain_below_the_onset():
+    """Exact form: no precipitation where the cloud water is at or below the
+    onset ZDNOPRC (OpenIFS sets ZPRECIP = 0 there), so existing rain is not
+    fed from a level that does not precipitate."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent as A
+
+    luk = jnp.asarray([0.5, 1.0, 2.0]) * A.ZDNOPRC
+    zlnew, zprecip, pr = A.cloud_to_rain(IfsSmooth(True), True, luk, 0.2 * luk,
+                                         0.8 * luk, 0.3 * luk, 1.0, A.ZDNOPRC)
+    np.testing.assert_array_equal(np.asarray(pr), [False, False, True])
+    np.testing.assert_array_equal(np.asarray(zprecip)[:2], 0.0)
+    assert float(zprecip[2]) > 0.0
+
+
+def test_smooth_mixing_fraction_keeps_the_parcel_blend_convex():
+    """The test parcel's entrainment mixing fraction stays <= 1 inside the
+    smooth window, so vapour and static energy of the blended parcel stay
+    between the parcel's and the environment's (no negative vapour)."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent as A
+
+    x = 1.0 + jnp.linspace(-3.0, 3.0, 601) * A._W_ONE
+    m = A.mixing_fraction(IfsSmooth(False), x)
+    assert np.all(np.asarray(m) <= 1.0) and np.all(np.asarray(m) >= 0.0)
+    q_parcel, q_env = 1.0e-2, 1.0e-6
+    q = q_parcel * (1.0 - m) + q_env * m
+    assert np.all(np.asarray(q) >= q_env)
+    np.testing.assert_array_equal(np.asarray(A.mixing_fraction(IfsSmooth(True), x)),
+                                  np.minimum(1.0, np.asarray(x)))
+
+
+@pytest.mark.parametrize("site", [
+    ("zlnew = luk - sm.pos(luk - zlnew, _W_COND)", "pos"),
+    ("zlnew = Z_CLDMAX - sm.pos(Z_CLDMAX - zlnew, _W_COND)", "pos"),
+    ("zrnew = lr - sm.pos(lr - zrnew, _W_COND)   # <= lr", "pos"),
+    ("return jnp.minimum(1.0, x) if sm.hard else 1.0 - sm.pos(1.0 - x, _W_ONE)", "pos"),
+])
+def test_host_water_closes_with_a_bounded_cap_active(fix, site):
+    """RULE 0 with the smooth caps inside their windows: every level's capped
+    operand is moved to mid-window (L32, smooth default) and the water the
+    host receives still sums to zero over each column (fp64, _TOL)."""
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    sp = _probe("switch_sites")
+    with sp.instrument(inject={site: jnp.asarray(1.0)}):
+        out, _ = _wrapper_out(fix, BechtoldConfig(use_ifs_ascent=True, dx_m=_DX), "L32")
+    dp = np.diff(fix["L32_p_half"], axis=1)
+    col = lambda a: np.sum(np.asarray(a) * dp, axis=1) / _thermo(fix, "L").RG  # noqa: E731
+    dry = col(out.dq_v_dt)
+    res = (dry + col(out.dq_c_conv_dt) + col(out.dq_r_conv_dt)
+           + col(out.dq_r_detr_dt) + col(out.dq_s_detr_dt))
+    assert np.max(np.abs(dry)) > 0.0
+    assert np.max(np.abs(res)) / np.max(np.abs(dry)) <= _TOL
+
+
+def test_ascent_cap_helpers_gradient_at_default():
+    """check_grads through the two cap helpers themselves (not only the
+    generic smooth forms), at points inside their windows."""
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent as A
+
+    sm, wc = IfsSmooth(False), A._W_COND
+    for luk, z0 in ((1.0e-3, 1.0e-3 - 0.5 * wc), (2.0 * A.Z_CLDMAX, A.Z_CLDMAX - 0.5 * wc)):
+        luk = jnp.asarray(luk)
+        cloud = lambda z, luk=luk: A.cloud_to_rain(sm, True, luk, 0.0, luk, z, 0.7,  # noqa: E731
+                                                   A.ZDNOPRC)[0]
+        check_grads(cloud, (jnp.asarray(z0),), order=1, modes=("rev",), eps=1e-3 * wc)
+        g = float(jax.grad(cloud)(jnp.asarray(z0)))
+        g_hard = float(jax.grad(lambda z, luk=luk: A.cloud_to_rain(
+            IfsSmooth(True), True, luk, 0.0, luk, z, 0.7, A.ZDNOPRC)[0])(jnp.asarray(z0)))
+        assert g > 0.0 and abs(g - g_hard) > 1e-3 * max(abs(g), abs(g_hard))
+    x0 = jnp.asarray(1.0 - 0.5 * A._W_ONE)
+    check_grads(lambda x: A.mixing_fraction(sm, x), (x0,), order=1, modes=("rev",),
+                eps=1e-3 * A._W_ONE)
+    g = float(jax.grad(lambda x: A.mixing_fraction(sm, x))(x0))
+    g_hard = float(jax.grad(lambda x: A.mixing_fraction(IfsSmooth(True), x))(x0))
+    assert g > 0.0 and abs(g - g_hard) > 1e-3 * max(abs(g), abs(g_hard))
+
+
+def test_smooth_liquid_fraction_never_exceeds_one():
+    """FOEALFCU's smooth upper clip sits on the cold side of RTWAT: the
+    fraction stays <= 1 and is exact outside the window."""
+    from legoesm.atmosphere.physics import _ifs_thermo as T
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+
+    th = lego_thermo()
+    t = th.RTWAT + jnp.linspace(-3.0, 3.0, 601) * T._W_TCU
+    a = np.asarray(T.foealfcu(th, t, IfsSmooth(False)))
+    exact = np.asarray(T.foealfcu(th, t))
+    assert np.all(a <= 1.0)
+    out = np.asarray(t < th.RTWAT - T._W_TCU) | np.asarray(t >= th.RTWAT)
+    np.testing.assert_allclose(a[out], exact[out], rtol=1e-12)
+    assert np.any(a[~out] != exact[~out])
+
+
+def _mse_residual(fix, g, dT, dq, snow_sfc, ice_det, snow_det, diss):
+    """Per column [W m-2]: integral of (cp dT/dt + Lv dq/dt) dp/g minus Lf x
+    (surface snow + detrained ice + detrained snow) minus the convective
+    kinetic-energy dissipation heating PVDISCU (LMFUVDIS) -- frozen moist
+    static energy, liquid reference (cudtdqn.F90: detrained liquid/rain at
+    RLVTT, ice/snow at RLSTT; surface rain/snow at RLVTT/RLSTT, :299).
+    Zero if the scheme closes it; with LMFENTHCONS off (sucumf.F90:208) the
+    in-cloud heating uses the mixed-phase FOELHMCU, so mixed-phase columns
+    need not close."""
+    th = _thermo(fix, "L")
+    dp = np.diff(fix[f"{g}_p_half"], axis=1)
+    col = lambda a: np.sum(np.asarray(a) * dp, axis=1) / th.RG  # noqa: E731
+    return (th.RCPD * col(np.asarray(dT) - fix[f"{g}_dT_other"])
+            + th.RLVTT * col(np.asarray(dq) - fix[f"{g}_dq_other"])
+            - th.RLMLT * (np.asarray(snow_sfc) + np.asarray(ice_det) + np.asarray(snow_det))
+            - np.asarray(diss))
+
+
+def mse_residuals(fix, g):
+    """(OpenIFS arm L, exact port, smooth default) column MSE residuals and
+    the largest column heating [W m-2] (the metric's scale)."""
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    o = lambda t: np.asarray(fix[f"L_{g}_{t}"])  # noqa: E731
+    ref = _mse_residual(fix, g, o("PTENT"), o("PTENQ"), o("PMFLXS")[:, -1],
+                        o("PLUDELI2").sum(1), o("PSNDE2").sum(1), o("PVDISCU"))
+    th, x = _thermo(fix, "L"), _inputs(fix, g, jnp.float64)
+    res = []
+    for hard in (True, False):
+        out = cumastrn(th, float(fix["dt"]), qsat=satur_qsat(th, x["T"], x["p_full"]),
+                       tun=IfsTunables(hard_switches=hard), **x)
+        res.append(_mse_residual(fix, g, out.ptent, out.ptenq, np.asarray(out.pmflxs)[:, -1],
+                                 np.asarray(out.pludeli)[:, 1].sum(1),
+                                 np.asarray(out.psnde)[:, 1].sum(1), out.pvdiscu))
+    dp = np.diff(fix[f"{g}_p_half"], axis=1)
+    heat = th.RCPD * np.sum((o("PTENT") - fix[f"{g}_dT_other"]) * dp, axis=1) / th.RG
+    return ref, res[0], res[1], float(np.max(np.abs(heat)))
+
+
+# Smooth default minus exact column frozen-MSE residual [W m-2] per fixture
+# column (RULE 0 x RULE 5: what the smoothing adds to the column energy
+# budget), measured (x64, CPU) by mse_residuals().  KNOWN DEFECT of the
+# reference (claim reviewed by codex and GLM, 2026-11-18): with LMFENTHCONS
+# off (sucumf.F90:208) the column does not close -- up to -228 W m-2 (1 % of
+# the column heating) on the deep fixture columns; it is the source's own
+# enthalpy-correction numerator (cudtdqn.F90:290-299).  The exact port
+# reproduces it (first assertion).
+_MSE_SMOOTH_GAP = {
+    "L32": [-5.431957106338814e-10, -9.727429972627988e-10, -0.027704053871804746, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.794919768371983e-11, -0.011967617924881324, 0.0, 2.3062560541853294e-11, -1.8975043758473475e-10, -6.591278634004993e-10, 1.7271485619062517e-10],
+    "L137": [1.2356137814306667e-11, 0.0, 0.0, 0.0, 0.0],
+    "STRESS": [1.0560086138866609e-09, 3.4830013889908003, 1.8132695345229877e-10],
+}
+
+
+_MSE_HEAT_FLOOR = 1.0   # W m-2 (vote 2026-11-18: L137 heats < 1e-3 W m-2)
+
+
+@pytest.mark.parametrize("g", _GROUPS)
+def test_column_moist_static_energy_smooth_vs_exact(fix, g):
+    """The exact port leaves the reference's residual (max |difference| /
+    max(the group's largest column heating, 1 W m-2) <= _TOL) and the smooth
+    default adds the stored per-column amount."""
+    ref, hard, smooth, heat = mse_residuals(fix, g)
+    if heat == 0.0:
+        np.testing.assert_array_equal(hard, ref)
+    else:
+        assert np.max(np.abs(hard - ref)) / max(heat, _MSE_HEAT_FLOOR) <= _TOL
+    np.testing.assert_allclose(smooth - hard, np.asarray(_MSE_SMOOTH_GAP[g]),
+                               rtol=1e-6, atol=1e-12)
+
+
+def test_ascent_mass_flux_width_is_the_closure_one():
+    """The ascent reuses the closure's mass-flux scale (vote 2026-11-14)."""
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent, _ifs_cumastrn
+
+    assert _ifs_cuascent._S_MF == _ifs_cumastrn._S_MF
+
+
 def test_switch_scales_probe_covers_every_class(fix):
     """scripts/validate/oracle/bechtold_ifs/switch_scales.py (the probe the
     _S_* scales came from) samples every width class on the fixture and
@@ -878,8 +1247,5 @@ def test_switch_scales_probe_covers_every_class(fix):
     before = (M._W_MF, _ifs_smooth.IfsSmooth.max)
     scales = probe.p2(probe.measure(fix, ("L32",)))
     assert (M._W_MF, _ifs_smooth.IfsSmooth.max) == before
-    want = {n[3:] for n in dir(M) if n.startswith("_S_") and hasattr(M, "_W_" + n[3:])}
-    assert set(scales) == want
-    # omega is 0 in every fixture column: no sample (its scale is 0.01 x |threshold|)
-    assert scales.pop("OMEGA")[1] == 0
+    assert set(scales) == set(probe._classes().values())
     assert all(np.isfinite(s) and s > 0.0 and n > 0 for s, n in scales.values())

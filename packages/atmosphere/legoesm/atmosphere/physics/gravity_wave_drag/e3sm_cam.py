@@ -114,17 +114,45 @@ deliberate departures / version choices (canaries in
   min/max, ``crit_level_sharpness`` = 100 s/m, ``crit_level_floor`` = 0;
   Lindzen passes its own ``Fr_sharpness``/``crit_level_*``).  Sharpness 1e12
   is E3SM's hard switch and matches the E3SM v3.0.1 oracle to <= 5e-14.
-  KNOWN DIFFERENCE at the defaults (measured 2026-11-12, per column, pinned
-  in ``test_gw_spec_e3sm_oracle.py``): spectral arms up to 3.4e-3 in du/dt,
-  4.7e-3 in the dT field and 9.0e-3 in a single flat column's dT (the p-norm
-  diffusivity max); the orographic member of the spectral suite up to 3.6e-2
-  du/dt, 2.1e-2 dT.  Kept hard: the
-  ``taumin``/``ubmc2mn`` floors, the static mountain-height gate and the
+  Since 2026-11-16 (#2241, widths voted 3-0 by Claude/GLM/codex) the
+  ``|c - u|`` of the ``umcfac`` limit is ``(c-u)*tanh((c-u)/w)``
+  (``umcfac_abs_width`` 0.01 m/s; its E3SM kink at a critical level was 43 of
+  66 kinks of a wind-scale scan, incl. the one left unattributed on
+  2026-11-12), the tendency's ``sign(c - u)`` is ``tanh((c-u)/ws)``
+  (``umcfac_sign_width`` 1e-3 m/s; with the smooth ``|c - u|`` alone the
+  signed tendency is only C1) and the ``taumin`` zeroing is a one-sided quintic ramp
+  (``taumin_ramp_width`` 1e-10 Pa; 3 of 66); 0 = E3SM for each.
+  Since #2546 the stress redetermined below a limited layer adds E3SM's
+  ``abs(gwut)`` (= ``|tanh|*ubtl`` under the smooth sign), so the stress drop
+  equals the momentum the layer receives (RULE 0; carrying ``ubtl``, as
+  #2241 did, lost up to 24 % of a layer's deposit).  It is C1, not C2, where
+  a layer's unlimited non-positive divergence crosses a critical level (one
+  test point; vote 3-0).
+  KNOWN DIFFERENCE at the defaults (measured 2026-11-16, per column, pinned
+  in ``test_gw_spec_e3sm_oracle.py``): spectral arms up to 7.9e-3 in du/dt
+  and 6.7e-3 in the dT field (background at dt = 1800 s, where the umcfac
+  limit binds; 2.6e-3 and 1.0e-3 before the |c - u| width) and 9.0e-3 in a
+  single flat column's dT (the p-norm diffusivity max); the orographic member
+  of the spectral suite up to 3.6e-2 du/dt, 2.1e-2 dT.  Kept hard: the
+  ``ubmc2mn`` floor, the static mountain-height gate and the
   defensive clamps (e.g. ``mi>=0``) that bind only for pathological inputs
-  (see below).  The ``taumin`` zeroing leaves derivative kinks at the
-  default on the spectral arms (a wind-scale scan, 2026-11-12: setting
-  ``taumin = 0`` removes them, but then ``dscal`` divides by zero); one more
-  kink (background L36, column 0, s = 0.8229) is not attributed.
+  (see below).  The 10 kinks of that scan on the convective (Beres) arms are
+  the Beres source's E3SM ``NINT``/``INT`` of traced state (MEASURED
+  2026-11-16, #2545: critical-level bin bounds, table column ``NINT(uh)``,
+  cell speed ``INT(CS)`` and Doppler shift ``NINT(CS/dc)``); since #2545 each
+  is a C2 staircase with linear neighbour blending, ``beres.index_round_width``
+  0.1 index units (vote 3-0; 0 = E3SM), the table row ``NINT(hdepth)`` too;
+  the bounds' ``min``/``max`` over the heating-range levels are a masked
+  log-sum-exp (``beres.crit_minmax_sharpness`` 100 s/m, inf = E3SM; a level
+  swap inside a rounding window kinked, codex review).  A rescan of every Beres-arm column at the default finds no kink left.
+  KNOWN DIFFERENCE (#2545, pinned per case in ``test_gw_spec_e3sm_oracle.py``):
+  on the Beres arms the max per-column du/dt gap goes 2.2e-3 -> 9.7e-3 (L36)
+  and 3.4e-3 -> 1.5e-2 (L32, convective+frontal), flat-column dT 6.1e-3 ->
+  1.6e-2; the oro+frontal+convective L36 maximum (3.6e-2) is unchanged.
+  Width 0.5 gave 0.39 and 1.0 gave 0.46 (not chosen).  STILL HARD on traced
+  state (recorded, follow-up issue): the heating-range level detection
+  (``netdt > 0`` per level), ``q0 = max`` over the range and the
+  ``hdepth >= hdepth_min_km`` launch gate.
 
 Conservation (see ``__physics_contract__`` energy note): ``conserves=["none"]``
 as the static INTERSECTION over all selectable sources (a contract must hold
@@ -183,7 +211,17 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
-from legoesm.core.smooth import pnorm_smooth_min, smoothstep_quintic
+from legoesm.core.smooth import (
+    abs_tanh,
+    blend_integer_index,
+    pnorm_smooth_min,
+    sign_tanh,
+    smooth_round,
+    smooth_trunc,
+    smoothstep_quintic,
+    validate_smoothing_width,
+    zero_at_or_below,
+)
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
 # to the top-level driver ``e3sm_cam_gwd``; the ``gw_*`` functions above/below
@@ -694,6 +732,14 @@ def gw_beres_src(
     maxh = beres.maxh
     dtype = u.dtype
     k700_i = jnp.asarray(k700, dtype=jnp.int32)
+    # RULE 5 (#2545): width of the smooth integer staircases that replace
+    # E3SM's NINT/INT of traced winds and heating depth (0 = exact E3SM).
+    rw = beres.index_round_width
+    validate_smoothing_width("index_round_width", rw)      # 0, or fp32-safe
+    if rw > 1.0:
+        raise ValueError(
+            f"index_round_width must be 0 (E3SM NINT/INT) or in (0, 1] index "
+            f"units; got {rw!r}.")
 
     # --- Source-wind direction from the 700 hPa winds (E3SM uses u(:,k700)).
     u700 = jnp.take(u, k700_i, axis=1)                     # (ncol,)
@@ -793,7 +839,7 @@ def gw_beres_src(
     )
     # E3SM truncates CS to an integer (``int(sign(...))``); CAM6
     # (gw_convect.F90:217) keeps it real.  Static Python switch.
-    cs = jnp.trunc(cs_f) if beres.storm_speed_truncate else cs_f
+    cs = smooth_trunc(cs_f, rw) if beres.storm_speed_truncate else cs_f
 
     uh = jnp.sum(
         jnp.where(in_range, ubm, 0.0), axis=1
@@ -802,16 +848,37 @@ def gw_beres_src(
     uh = jnp.clip(uh, -float(maxuh), float(maxuh))
 
     # Speeds for critical-level filtering (min/max projected wind in range).
-    umin = jnp.where(
-        in_range, ubm, jnp.asarray(pgwv * dc, dtype)
-    )
-    umin = jnp.where(found[:, None], umin, jnp.asarray(pgwv * dc, dtype))
-    umin = jnp.min(umin, axis=1)
-    umax = jnp.where(
-        in_range, ubm, jnp.asarray(-pgwv * dc, dtype)
-    )
-    umax = jnp.where(found[:, None], umax, jnp.asarray(-pgwv * dc, dtype))
-    umax = jnp.max(umax, axis=1)
+    ks = beres.crit_minmax_sharpness
+    if isinstance(ks, bool) or not isinstance(ks, (int, float)) or not ks > 0.0:
+        raise ValueError(f"crit_minmax_sharpness must be > 0 (inf = E3SM); got {ks!r}.")
+    if math.isinf(ks):
+        umin = jnp.where(
+            in_range, ubm, jnp.asarray(pgwv * dc, dtype)
+        )
+        umin = jnp.where(found[:, None], umin, jnp.asarray(pgwv * dc, dtype))
+        umin = jnp.min(umin, axis=1)
+        umax = jnp.where(
+            in_range, ubm, jnp.asarray(-pgwv * dc, dtype)
+        )
+        umax = jnp.where(found[:, None], umax, jnp.asarray(-pgwv * dc, dtype))
+        umax = jnp.max(umax, axis=1)
+    else:
+        # RULE 5 (#2545, vote 3-0): masked log-sum-exp soft min/max over the
+        # heating-range levels plus E3SM's sentinel +-pgwv*dc (the value of
+        # an empty range and of the masked levels), C-infinity in the winds;
+        # overestimates |extremum| by <= ln(n)/ks.  inf = E3SM's min/max.
+        # 1/ks is the soft extremum's width [m/s]: the same fp32-safe range
+        # as every RULE 5 width (codex review 2: 1e-50 / 1e40 gave NaN).
+        validate_smoothing_width("crit_minmax_sharpness (as 1/sharpness)", 1.0 / ks)
+        lev = (in_range & found[:, None])
+        keep = jnp.concatenate([lev, jnp.ones((ncol, 1), dtype=bool)], axis=1)
+
+        def soft_max(x, sentinel):
+            x = jnp.concatenate([x, jnp.full((ncol, 1), sentinel, dtype)], axis=1)
+            return jax.nn.logsumexp(ks * x, axis=1, where=keep) / ks
+
+        umin = -soft_max(-ubm, -pgwv * dc)
+        umax = soft_max(ubm, -pgwv * dc)
 
     # --- Table lookup.  E3SM: tau0 = mfcc(NINT(hdepth), NINT(uh), :).
     # Round-half-away-from-zero like Fortran NINT.  NOTE (codex beres-1 #2):
@@ -823,62 +890,99 @@ def gw_beres_src(
     # the gather is always valid and jit/grad-safe.  For the default
     # hdepth_scaling_factor == 1 this clip is a no-op and the lookup is
     # bit-identical to E3SM.
-    if beres.hd_index_rule == "nint":
-        h_idx = _nint(hdepth)                              # 1..maxh (km)
-    elif beres.hd_index_rule == "nearest_grid":
-        # CAM6 index_of_nearest on hd = 1..maxh km: interfaces at k + 0.5,
-        # idx = 1 + count(hdepth > interface)  (exact ties -> lower row).
-        interfaces = jnp.arange(1, maxh, dtype=dtype) + 0.5    # (maxh-1,)
-        h_idx = 1 + jnp.sum(hdepth[:, None] > interfaces[None, :], axis=1)
-    else:
+    if beres.hd_index_rule not in ("nint", "nearest_grid"):
         raise ValueError(
             f"Unknown E3SMBeresConfig.hd_index_rule {beres.hd_index_rule!r}; "
             "expected 'nint' (E3SM) or 'nearest_grid' (CAM6)."
         )
-    h_idx = jnp.clip(h_idx, 1, maxh)
-    h_row = (h_idx - 1).astype(jnp.int32)                  # 0-based table row
-    uh_idx = _nint(uh)
-    uh_idx = jnp.clip(uh_idx, -maxuh, maxuh)
-    uh_col = (uh_idx + maxuh).astype(jnp.int32)            # 0-based table col
-    # gather per column: mfcc[h_row, uh_col, :] -> (ncol, nwav)
-    tau0 = mfcc[h_row, uh_col, :]                          # (ncol, nwav)
-
-    # Doppler shift so the spectrum is ground-relative by -nint(CS/dc):
-    # E3SM ``cshift`` (wraps) or CAM6 ``eoshift`` (zero fill).
-    shift = -_nint(cs / dc).astype(jnp.int32)              # (ncol,)
-    if beres.spectrum_shift == "circular":
-        tau0 = _cshift_rows(tau0, shift)
-    elif beres.spectrum_shift == "end_off":
-        tau0 = _eoshift_rows(tau0, shift)
-    else:
+    if beres.spectrum_shift not in ("circular", "end_off"):
         raise ValueError(
             f"Unknown E3SMBeresConfig.spectrum_shift {beres.spectrum_shift!r}; "
             "expected 'circular' (E3SM cshift) or 'end_off' (CAM6 eoshift)."
         )
+    shift_rows = _cshift_rows if beres.spectrum_shift == "circular" else _eoshift_rows
+    if rw == 0:
+        if beres.hd_index_rule == "nint":
+            h_idx = _nint(hdepth)                              # 1..maxh (km)
+        elif beres.hd_index_rule == "nearest_grid":
+            # CAM6 index_of_nearest on hd = 1..maxh km: interfaces at k + 0.5,
+            # idx = 1 + count(hdepth > interface)  (exact ties -> lower row).
+            interfaces = jnp.arange(1, maxh, dtype=dtype) + 0.5    # (maxh-1,)
+            h_idx = 1 + jnp.sum(hdepth[:, None] > interfaces[None, :], axis=1)
+        h_idx = jnp.clip(h_idx, 1, maxh)
+        h_row = (h_idx - 1).astype(jnp.int32)                  # 0-based table row
+        uh_idx = _nint(uh)
+        uh_idx = jnp.clip(uh_idx, -maxuh, maxuh)
+        uh_col = (uh_idx + maxuh).astype(jnp.int32)            # 0-based table col
+        # gather per column: mfcc[h_row, uh_col, :] -> (ncol, nwav)
+        tau0 = mfcc[h_row, uh_col, :]                          # (ncol, nwav)
 
-    # Adjust magnitude by q0^2/AL.
-    tau0 = tau0 * (q0 * q0 / beres.al)[:, None]
+        # Doppler shift so the spectrum is ground-relative by -nint(CS/dc):
+        # E3SM ``cshift`` (wraps) or CAM6 ``eoshift`` (zero fill).
+        shift = -_nint(cs / dc).astype(jnp.int32)              # (ncol,)
+        if beres.spectrum_shift == "circular":
+            tau0 = _cshift_rows(tau0, shift)
+        elif beres.spectrum_shift == "end_off":
+            tau0 = _eoshift_rows(tau0, shift)
 
-    # Critical-level filtering: zero tau0 for Umini <= l <= Umaxi (bounds
-    # guard below).
-    umini = jnp.maximum(_nint(umin / dc), -pgwv).astype(jnp.int32)  # (ncol,)
-    umaxi = jnp.minimum(_nint(umax / dc), pgwv).astype(jnp.int32)
-    ls = jnp.arange(-pgwv, pgwv + 1)[None, :]              # (1, nwav) wave index
-    # E3SM gw_convect.F90:293-295 guards the slice with ``if (Umaxi > Umini)``,
-    # so equal bounds zero NOTHING; CAM6 gw_convect.F90:285 slices
-    # unconditionally, and ``tau0(Umini:Umaxi) = 0`` with equal bounds zeroes
-    # ONE bin.  The E3SM rule goes with the E3SM ``cshift`` spectrum
-    # (spectrum_shift="circular"), the CAM6 rule with ``eoshift``.
-    if beres.spectrum_shift == "circular":
-        bounds_ok = umaxi[:, None] > umini[:, None]
+        # Adjust magnitude by q0^2/AL.
+        tau0 = tau0 * (q0 * q0 / beres.al)[:, None]
+
+        # Critical-level filtering: zero tau0 for Umini <= l <= Umaxi (bounds
+        # guard below).
+        umini = jnp.maximum(_nint(umin / dc), -pgwv).astype(jnp.int32)  # (ncol,)
+        umaxi = jnp.minimum(_nint(umax / dc), pgwv).astype(jnp.int32)
+        ls = jnp.arange(-pgwv, pgwv + 1)[None, :]              # (1, nwav) wave index
+        # E3SM gw_convect.F90:293-295 guards the slice with ``if (Umaxi > Umini)``,
+        # so equal bounds zero NOTHING; CAM6 gw_convect.F90:285 slices
+        # unconditionally, and ``tau0(Umini:Umaxi) = 0`` with equal bounds zeroes
+        # ONE bin.  The E3SM rule goes with the E3SM ``cshift`` spectrum
+        # (spectrum_shift="circular"), the CAM6 rule with ``eoshift``.
+        if beres.spectrum_shift == "circular":
+            bounds_ok = umaxi[:, None] > umini[:, None]
+        else:
+            bounds_ok = umaxi[:, None] >= umini[:, None]
+        crit_mask = (
+            bounds_ok
+            & (ls >= umini[:, None])
+            & (ls <= umaxi[:, None])
+        )                                                      # (ncol, nwav)
+        tau0 = jnp.where(crit_mask, 0.0, tau0)
     else:
-        bounds_ok = umaxi[:, None] >= umini[:, None]
-    crit_mask = (
-        bounds_ok
-        & (ls >= umini[:, None])
-        & (ls <= umaxi[:, None])
-    )                                                      # (ncol, nwav)
-    tau0 = jnp.where(crit_mask, 0.0, tau0)
+        # RULE 5 (#2545): every NINT above becomes the C2 staircase
+        # smooth_round (width rw, in index units) and every integer lookup /
+        # shift / bin bound a linear blend of the two neighbouring integers,
+        # exact wherever the staircase is flat.  Clamps to the integer table
+        # bounds act BEFORE rounding (equal to E3SM's clamp after NINT), so
+        # their kinks sit on flat steps.  The nint/nearest_grid row rules
+        # differ only at exact half-km ties, a measure-zero set here.
+        h_r = smooth_round(jnp.clip(hdepth, 1.0, float(maxh)), rw) - 1.0
+        uh_r = smooth_round(jnp.clip(uh, -float(maxuh), float(maxuh)), rw) + maxuh
+
+        def take_hu(ui):                                 # (ncol,) -> (ncol, nwav)
+            ui = jnp.clip(ui, 0, 2 * maxuh)
+            return blend_integer_index(
+                h_r, lambda hi: mfcc[jnp.clip(hi, 0, maxh - 1), ui, :])
+
+        tau0 = blend_integer_index(uh_r, take_hu)       # (ncol, nwav)
+        shift_r = -smooth_round(cs / dc, rw)
+        tau0 = blend_integer_index(shift_r, lambda k: shift_rows(tau0, k))
+        tau0 = tau0 * (q0 * q0 / beres.al)[:, None]
+        # The filter keeps E3SM's integer mask (incl. its bounds guard) and
+        # blends the masks of the neighbouring integer bounds, so it is exact
+        # on flat steps and C2 where both bounds move at once (codex vote 1).
+        umini_r = smooth_round(jnp.maximum(umin / dc, -float(pgwv)), rw)
+        umaxi_r = smooth_round(jnp.minimum(umax / dc, float(pgwv)), rw)
+        ls = jnp.arange(-pgwv, pgwv + 1)[None, :]
+        strict = beres.spectrum_shift == "circular"
+
+        def crit_mask(lo, hi):                           # E3SM/CAM6 integer mask
+            ok = (hi > lo) if strict else (hi >= lo)
+            return (ok[:, None] & (ls >= lo[:, None]) & (ls <= hi[:, None])).astype(dtype)
+
+        crit = blend_integer_index(
+            umini_r, lambda lo: blend_integer_index(umaxi_r, lambda hi: crit_mask(lo, hi)))
+        tau0 = tau0 * (1.0 - crit)
 
     # Only launch where hdepth >= hdepth_min and |lat| < pi/2 (E3SM gate).
     launch = (hdepth >= beres.hdepth_min_km) & (jnp.abs(lat) < (0.5 * math.pi))
@@ -1074,6 +1178,9 @@ def gw_drag_prof(
     crit_level_sharpness: float | None = None,
     crit_level_floor: float = 0.0,
     tndmax_per_day: float | None = None,
+    umcfac_abs_width: float = 0.0,
+    umcfac_sign_width: float = 0.0,
+    taumin_ramp_width: float = 0.0,
 ):
     """Stress-profile + tendency solver, faithful to ``gw_drag_prof``.
 
@@ -1099,6 +1206,12 @@ def gw_drag_prof(
         ``(u - c) - crit_level_floor`` sign tests for the critical level.
         Each reduces to the E3SM hard switch at infinite sharpness (floor 0).
         ``None`` (default) = the exact E3SM kinks, unchanged.
+    umcfac_abs_width, umcfac_sign_width, taumin_ramp_width : float
+        RULE 5 (#2241) widths [m/s, m/s, Pa]: ``(c-u)*tanh((c-u)/w)`` for the
+        ``|c - u|`` of the ``umcfac`` limit, ``tanh((c-u)/ws)`` for the
+        sign the tendency takes, and ``tau*smoothstep_quintic(
+        (tau - taumin)/w)`` for the ``taumin`` zeroing of ``tausat``/``taudmp``
+        (the stress cap's p-norm then takes eps 0).  ``0.0`` (default) = E3SM.
     tndmax_per_day : optional
         Tendency ceiling [m/s/day] overriding the E3SM value selected by
         ``orographic_only`` (500 orographic-only, else ``cfg.tndmax_per_day``).
@@ -1118,6 +1231,16 @@ def gw_drag_prof(
     # a single-wave non-orographic call is not silently routed through the
     # orographic branch (codex iter-1 finding #7).
     is_oro = orographic_only
+    validate_smoothing_width("umcfac_abs_width", umcfac_abs_width)
+    validate_smoothing_width("umcfac_sign_width", umcfac_sign_width)
+    validate_smoothing_width("taumin_ramp_width", taumin_ramp_width)
+
+    def zero_below_taumin(tau):
+        return zero_at_or_below(tau, cfg.taumin, taumin_ramp_width)
+
+    # the ramp leaves stresses in (0, taumin], so the cap's eps contract
+    # (inputs <= eps zeroed) needs eps 0 there (pnorm_smooth_min docstring).
+    cap_eps = cfg.taumin if taumin_ramp_width == 0.0 else 0.0
 
     effkwv = cfg.kwv * cfg.fcrit2
     rog = constants.R_d / constants.g
@@ -1182,7 +1305,7 @@ def gw_drag_prof(
             # E3SM's strict test (product > 0) fails at an exactly zero wind,
             # where the sigmoids sit at 1/2 for any sharpness.
             tausat = jnp.where(ubmc * ubmc_below == 0.0, 0.0, tausat)
-        tausat = jnp.where(tausat <= cfg.taumin, 0.0, tausat)
+        tausat = zero_below_taumin(tausat)
 
         # diffusivity: d = max(dback, dscal*dsat) over waves.  alpha is the
         # Newtonian-cooling coefficient at interface k (E3SM alpha(k)).
@@ -1239,7 +1362,7 @@ def gw_drag_prof(
             piln[:, k + 1][:, None] - piln[:, k][:, None]
         )
         taudmp = tau_below * jnp.exp(wrk)
-        taudmp = jnp.where(taudmp <= cfg.taumin, 0.0, taudmp)
+        taudmp = zero_below_taumin(taudmp)
         if softmin_sharpness is None:
             tau_computed = jnp.minimum(taudmp, tausat)
         else:
@@ -1247,7 +1370,7 @@ def gw_drag_prof(
             # p = softmin_sharpness (shared with mcfarlane.py; user decision
             # 2026-10-28).  C-infinity for positive stresses, in
             # [0, min(taudmp, tausat)]; exact min at p -> inf.
-            tau_computed = pnorm_smooth_min(taudmp, tausat, softmin_sharpness, cfg.taumin)
+            tau_computed = pnorm_smooth_min(taudmp, tausat, softmin_sharpness, cap_eps)
             tau_computed = jnp.where(tausat > 0.0, tau_computed, 0.0)
         # In the source region keep the launched value at interface k.
         tau_k = jnp.where(active, tau_computed, tau_launched_iface[:, :, k])
@@ -1281,7 +1404,12 @@ def gw_drag_prof(
         ubtl_raw = gravit * (tau_below - tau_above) * rdpm[:, m][:, None]
 
         cmu = c_col - ubm_m[:, m][:, None]           # (ncol, nwav)
-        limits = [cfg.umcfac * jnp.abs(cmu) / dt, jnp.full_like(cmu, tndmax)]
+        # RULE 5 (#2241): |c-u| -> (c-u)*tanh((c-u)/w) and, below, sign(c-u)
+        # -> tanh((c-u)/ws); smoothing only the |.| would leave the signed
+        # tendency ~ sign(x)*x^2/w, C1 but not C2, at a critical level.
+        abs_cmu = abs_tanh(cmu, umcfac_abs_width)
+        sign_cmu = sign_tanh(cmu, umcfac_sign_width)
+        limits = [cfg.umcfac * abs_cmu / dt, jnp.full_like(cmu, tndmax)]
         if is_oro:
             limits.insert(0, effkwv * jnp.abs(cmu) ** 3 / (
                 2.0 * rog * t[:, m][:, None] * nm_m[:, m][:, None]
@@ -1302,7 +1430,7 @@ def gw_drag_prof(
                     ubtl)
 
         within = (m < tend_level)[:, None]           # midpoint m below tend
-        signed = jnp.sign(cmu) * ubtl
+        signed = sign_cmu * ubtl
         ptap = ptaper[:, None]                        # (ncol,1)
         if is_oro:
             # E3SM: gwut = sign(ubtl,c-ubm)*effgw*ptaper, but ubt accumulates
@@ -1315,10 +1443,14 @@ def gw_drag_prof(
             gwut = jnp.where(within, signed * effgw * ptap, 0.0)
             ubt = jnp.sum(gwut, axis=1)
 
-        # re-derive stress on the interface below from the bounded tendency.
+        # re-derive stress on the interface below from the bounded tendency
+        # (E3SM: abs(gwut)/(effgw*ptaper) = ubtl).  Under the smooth sign the
+        # deposited divergence is |tanh|*ubtl; carrying ubtl would drop
+        # (1-|tanh|)*ubtl of momentum (RULE 0, #2546 review).
+        deposited = ubtl if umcfac_sign_width == 0.0 else jnp.abs(sign_cmu) * ubtl
         tau_below_new = jnp.where(
             within,
-            tau_above + ubtl * dpm[:, m][:, None] / gravit,
+            tau_above + deposited * dpm[:, m][:, None] / gravit,
             tau_below,
         )
         tau_state = tau_state.at[:, :, m + 1].set(tau_below_new)
@@ -2053,6 +2185,9 @@ def _e3sm_cam_gwd_one_source(
         softmin_sharpness=config.softmin_sharpness,
         crit_level_sharpness=config.crit_level_sharpness,
         crit_level_floor=config.crit_level_floor,
+        umcfac_abs_width=config.umcfac_abs_width,
+        umcfac_sign_width=config.umcfac_sign_width,
+        taumin_ramp_width=config.taumin_ramp_width,
     )
 
     du_dt = utgw

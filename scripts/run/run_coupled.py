@@ -789,7 +789,7 @@ def build_parser():
     parser.add_argument("--ice-stability-scheme",
                         choices=["dyer1974", "beljaars_holtslag1991",
                                  "grachev2007_sheba", "gryanik2020", "gfs",
-                                 "wrf_revmm5", "mynn_sfc"],
+                                 "wrf_revmm5", "mynn_sfc", "most_revisit_j3"],
                         default=None,
                         help="Stable-regime MOST functions for the ice tile "
                              "(grachev2007_sheba is the Arctic sea-ice "

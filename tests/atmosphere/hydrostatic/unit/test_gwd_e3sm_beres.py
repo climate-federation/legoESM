@@ -155,8 +155,11 @@ def test_beres_uh_column_lookup():
     pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
     to = lambda a: jnp.asarray(a[None, :])
     slope = 0.02
-    beres0 = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=0.0)
-    beresS = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=slope)
+    # E3SM's integer NINT(uh) column mapping: the RULE 5 hard limit (#2545).
+    beres0 = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=0.0, index_round_width=0.0,
+                             crit_minmax_sharpness=float("inf"))
+    beresS = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=slope, index_round_width=0.0,
+                             crit_minmax_sharpness=float("inf"))
     mfcc0 = build_stand_in_mfcc(NGWV, DC, beres0, jnp.float64)
     mfccS = build_stand_in_mfcc(NGWV, DC, beresS, jnp.float64)
     out0 = gw_beres_src(to(u), to(v), to(netdt), to(zm), jnp.zeros(1),
@@ -290,3 +293,46 @@ def test_beres_driver_dissipative():
     assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0
     # eps_gwd is column KE dissipation, must be >= 0 (drag removes KE).
     assert jnp.all(out.eps_gwd >= -1e-9)
+
+
+def test_level_swap_of_the_crit_bound_is_smooth_at_default():
+    """RULE 5 (#2545, codex review): two heating-range levels swap as the
+    minimum projected wind (3.74 + s, 3.74 - s/2 m/s) while Umin/dc = 1.496 sits inside
+    the smooth NINT window; the hard min kinks there, the default soft min
+    (crit_minmax_sharpness) does not."""
+    from jax.test_util import check_grads
+    p = 8
+    z = jnp.array([[6000.0, 4500.0, 3000.0, 1500.0, 0.0]])
+    h = jnp.array([[0.0, 1e-4, 1e-4, 1e-4, 1e-4]])
+    t = jnp.ones((20, 81, 2 * p + 1)).at[:, :, p].set(0.0)
+
+    def make(beres):
+        def f(s):
+            u = jnp.array([[8.0, 0.0, 0.0, 5.0, 10.0]]).at[0, 1].set(3.74 + s).at[0, 2].set(3.74 - 0.5 * s)
+            return 1e10 * gw_beres_src(u, jnp.zeros_like(u), h, z, jnp.zeros(1), 4, t, p, 2.5,
+                                       beres)[0].sum()
+        return jax.jit(f)
+
+    s0 = jnp.asarray(0.0)
+    f = make(E3SMBeresConfig())
+    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-5)
+    assert float(jax.grad(f)(s0)) != 0.0
+    with pytest.raises(AssertionError):
+        check_grads(make(E3SMBeresConfig(crit_minmax_sharpness=float("inf"))), (s0,),
+                    order=2, modes=("rev",), eps=1e-5)
+
+
+@pytest.mark.parametrize("field,bad", [("index_round_width", -0.1), ("index_round_width", 1.5),
+                                       ("index_round_width", 1e-50),
+                                       ("crit_minmax_sharpness", 0.0), ("crit_minmax_sharpness", 1e-50),
+                                       ("crit_minmax_sharpness", float("-inf")),
+                                       ("crit_minmax_sharpness", True),
+                                       ("crit_minmax_sharpness", 1e40)])
+def test_beres_smoothing_fields_validated(field, bad):
+    """#2545: 0/inf (E3SM) or an fp32-safe width/sharpness; anything else raises."""
+    pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
+    to = lambda a: jnp.asarray(a[None, :])
+    beres = E3SMBeresConfig(use_stand_in_table=True, **{field: bad})
+    mfcc = build_stand_in_mfcc(NGWV, DC, beres, jnp.float64)
+    with pytest.raises(ValueError, match=field):
+        gw_beres_src(to(u), to(v), to(netdt), to(zm), jnp.zeros(1), k700, mfcc, NGWV, DC, beres)

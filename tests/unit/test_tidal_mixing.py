@@ -113,7 +113,8 @@ class TestComputeTidalDiffusivity:
 
     def test_K_max_cap(self):
         d, h, H, _ = self._make_column()
-        cfg = TidalMixingConfig(enabled=True, K_max=1.0e-4)
+        cfg = TidalMixingConfig(enabled=True, K_max=1.0e-4, n2_floor_width=0.0,
+                                k_max_width=0.0, n2_gate_width=0.0)
         # Tiny N² → would-be K huge; capped at K_max.
         N2 = jnp.full((d.shape[0],), 1.0e-9)
         K = compute_tidal_diffusivity(

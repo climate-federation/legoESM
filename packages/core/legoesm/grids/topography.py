@@ -1222,13 +1222,28 @@ def load_subgrid_orography(
         Subgrid orographic stddev [m], clipped to >= 0, shape ``(6, n, n)``
         for cubed-sphere or ``(n_lat, n_lon)`` for Gaussian.
     """
+    sso_grid = _read_regridded_sso_field(grid, path, var_name, aliases=var_name == "SSO_STDH",
+                                         scale_check=scale_check)
+    return jnp.asarray(np.maximum(sso_grid, 0.0))
+
+
+_NO_SCALE_CHECK = object()   # tensor components: the check runs once, on SSO_STDH
+
+
+def _read_regridded_sso_field(grid, path, var_name, *, aliases=False,
+                              scale_check=_NO_SCALE_CHECK):
+    """One subgrid-orography field from ``path``, NaN -> 0, sampled bilinearly
+    onto ``grid`` (unclipped: tensor components are signed).  With
+    ``scale_check`` the #1712 scale check runs before regridding.  The legacy
+    alias names stand in only when the caller passes ``aliases``
+    (``load_subgrid_orography`` does for its default SSO_STDH)."""
     import xarray as xr
 
     ds = xr.open_dataset(path)
     try:
         all_names = set(ds.data_vars) | set(ds.coords)
         sso_var = var_name if var_name in all_names else None
-        if sso_var is None:
+        if sso_var is None and aliases:
             for c in ("SSO_STDH", "sso_stdh", "stddev_orography", "sgh"):
                 if c in all_names:
                     sso_var = c
@@ -1238,7 +1253,6 @@ def load_subgrid_orography(
                 f"Cannot find subgrid orography variable in {path}; "
                 f"available: {sorted(ds.data_vars)}"
             )
-
         lat_var = None
         for c in ("lat", "latitude", "y", "Y"):
             if c in all_names:
@@ -1262,10 +1276,11 @@ def load_subgrid_orography(
     finally:
         ds.close()
 
-    # #1712: does this file's scale decomposition belong to THIS grid?
-    _, _, _, _grid_spacing_deg = _target_grid_degrees(grid)
-    _check_sso_scale_decomposition(
-        built, float(_grid_spacing_deg), path, scale_check)
+    if scale_check is not _NO_SCALE_CHECK:
+        # #1712: does this file's scale decomposition belong to THIS grid?
+        _, _, _, _grid_spacing_deg = _target_grid_degrees(grid)
+        _check_sso_scale_decomposition(
+            built, float(_grid_spacing_deg), path, scale_check)
 
     while sso_data.ndim > 2:
         sso_data = sso_data[0]
@@ -1285,8 +1300,43 @@ def load_subgrid_orography(
     sso_grid = _regrid_to_target(
         lat_src, lon_src, sso_data, target_lat_2d, target_lon_2d
     )
-    sso_grid = np.maximum(sso_grid, 0.0)
-    return jnp.asarray(sso_grid)
+    return sso_grid
+
+
+class SSOFields(NamedTuple):
+    """IFS Lott-Miller subgrid-orography inputs on a model grid."""
+
+    std: jnp.ndarray      # m, subgrid height standard deviation
+    gamma: jnp.ndarray    # 1, anisotropy
+    theta: jnp.ndarray    # rad, principal-axis angle
+    sigma: jnp.ndarray    # 1, mean slope
+
+
+def sso_from_tensor(K, L, M):
+    """Baines-Palmer tensor -> (sigma, gamma, theta); flat cells give sigma 0,
+    gamma 1, theta 0 (the ERA5 builder's convention, scripts/data/
+    prep_era5_sso_fields.py)."""
+    K = np.asarray(K, dtype=np.float64)
+    s = np.hypot(L, M)
+    major = K + s
+    flat = major <= 0.0
+    safe = np.where(flat, 1.0, major)
+    sigma = np.where(flat, 0.0, np.sqrt(np.maximum(major, 0.0)))
+    gamma = np.where(flat, 1.0, np.sqrt(np.clip((K - s) / safe, 0.0, 1.0)))
+    theta = np.where(flat, 0.0, 0.5 * np.arctan2(M, L))
+    return sigma, gamma, theta
+
+
+def load_sso_lott_miller(grid, path: str, *, scale_check: str = "warn") -> SSOFields:
+    """The Lott-Miller inputs from an ERA5 SSO file (SSO_STDH, SSO_K, SSO_L,
+    SSO_M; scripts/data/prep_era5_sso_fields.py) on ``grid``.  The tensor
+    components are sampled and gamma/theta/sigma rebuilt from them, so an
+    angle is never interpolated.  Every variable is required (no aliases)."""
+    std = _read_regridded_sso_field(grid, path, "SSO_STDH", scale_check=scale_check)
+    K, L, M = (_read_regridded_sso_field(grid, path, v) for v in ("SSO_K", "SSO_L", "SSO_M"))
+    sigma, gamma, theta = sso_from_tensor(K, L, M)
+    return SSOFields(jnp.asarray(np.maximum(std, 0.0)), jnp.asarray(gamma), jnp.asarray(theta),
+                     jnp.asarray(sigma))
 
 
 def load_real_topography(

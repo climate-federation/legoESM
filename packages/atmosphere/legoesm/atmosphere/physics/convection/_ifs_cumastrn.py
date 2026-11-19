@@ -27,7 +27,8 @@ the closure's floors, caps and branch selections -- take the C1 forms of
 scale of the switched quantity (``_S_*`` below); True gives OpenIFS's exact
 switches (the oracle match).  Division guards and safety floors
 (RMFCMIN, ZEPS_MF, ZMFS_MIN, ZDQMIN_FLOOR) stay hard.  #2281 part 1 smooths
-the closure; the ascent thermodynamics and the fluxes follow.
+the closure, part 2 the ascent (:mod:`._ifs_cuascent`, CUADJTQ/FOEALFCU in
+:mod:`.._ifs_thermo`); the fluxes follow.
 KNOWN DIFFERENCE, kept hard in both modes: the level/flag structure.  Cloud
 base and top, departure level, downdraught top and base, the cloud type
 KTYPE, LDCUM/LDDRAF and every level mask built from them are chosen from
@@ -746,11 +747,12 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
 
     # 2. CUININ, :436-445
     ztenh, zqenh, _zqsenh, zuu, zvu = cuinin(
-        th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2)
+        th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2, sm=sm)
     zud, zvd, ztd, zqd = zuu, zvu, ztenh, zqenh
     # 3. CUBASEN, :450-461 (ZKMFL = 0)
     b = cubasen(th, K, ztenh, zqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
-                pten, pqen, pqsen, pgeo, land, njkt1, njkt2, njkt6, entrorg=tun.entrorg)
+                pten, pqen, pqsen, pgeo, land, njkt1, njkt2, njkt6, entrorg=tun.entrorg,
+                sm=sm)
     ldcum, kcbot, ictop0, idpl = b["ldcum"], b["kcbot"], b["kctop"], b["kdpl"]
     # sub-cloud budgets, :463-479
     zkhfl = -pahfs_sfc - rlvtt * pqhfl_sfc
@@ -781,7 +783,7 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
                pap, paph, pvervel, b["pwubase"], ldcum, ktype, b["klab"], b["ptu"],
                b["pqu"], b["plu"], zmfub, kcbot, idpl, njkt7, rprcon=tun.rprcon,
                zdnoprc=tun.zdnoprc, entrorg=tun.entrorg, detrpen=tun.detrpen,
-               entshalp=tun.entshalp)
+               entshalp=tun.entshalp, sm=sm)
     ztenh, zqenh = a["ptenh"], a["pqenh"]
     ldcum, ktype, kcbot, kctop = a["ldcum"], a["ktype"], a["kcbot"], a["kctop"]
     ptu, pqu, plu, plrain = a["ptu"], a["pqu"], a["plu"], a["plrain"]

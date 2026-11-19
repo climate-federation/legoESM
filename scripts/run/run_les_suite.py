@@ -102,6 +102,22 @@ def frame_step_schedule(n_steps: int, frames: int) -> list[int]:
     return sorted({int(round(k * n_steps / n_out)) for k in range(1, n_out + 1)})
 
 
+def cbl_les_config(grid, args, sgs):
+    """Dry-CBL ``SpectralLESConfig`` on ``grid`` (an ``LESGrid``) from the CLI ``args``."""
+    return sl.SpectralLESConfig(
+        nx=grid.nx, ny=grid.ny, nz=grid.nz,
+        Lx=grid.Lx_m, Ly=grid.Ly_m, Lz=grid.Lz_m,
+        z0=args.z0, dealias=True, **_sgs_les_config(sgs),
+        time_scheme="rk3",
+        buoyancy=True, theta_ref0=args.theta0, pr_sgs=args.pr_sgs,
+        # sgs_buoyancy MUST stay off: emit.sgs_vertical_scalar_flux_mean reconstructs
+        # the SGS heat flux from eddy_viscosity() with K_h=ν_t/Pr, matching the core's
+        # scalar_rhs. If sgs_buoyancy were on, the core rescales ν_t by the Lilly
+        # factor (spectral_les_plane rhs) and the emitted SGS flux would no longer
+        # equal the flux the model integrated.
+        sgs_buoyancy=False)
+
+
 def _build_cbl(case, args, dtype, sgs="lasd", u_geo_mag=0.0):
     """Dry CBL IC + config (mirrors run_spectral_cbl.build).
 
@@ -111,18 +127,7 @@ def _build_cbl(case, args, dtype, sgs="lasd", u_geo_mag=0.0):
     drag builds the Ekman spiral. ``0`` reproduces the free-convective IC (u=v=0).
     """
     theta0 = args.theta0
-    cfg = sl.SpectralLESConfig(
-        nx=case.grid.nx, ny=case.grid.ny, nz=case.grid.nz,
-        Lx=case.grid.Lx_m, Ly=case.grid.Ly_m, Lz=case.grid.Lz_m,
-        z0=args.z0, dealias=True, **_sgs_les_config(sgs),
-        time_scheme="rk3",
-        buoyancy=True, theta_ref0=theta0, pr_sgs=args.pr_sgs,
-        # sgs_buoyancy MUST stay off: emit.sgs_vertical_scalar_flux_mean reconstructs
-        # the SGS heat flux from eddy_viscosity() with K_h=ν_t/Pr, matching the core's
-        # scalar_rhs. If sgs_buoyancy were on, the core rescales ν_t by the Lilly
-        # factor (spectral_les_plane rhs) and the emitted SGS flux would no longer
-        # equal the flux the model integrated.
-        sgs_buoyancy=False)
+    cfg = cbl_les_config(case.grid, args, sgs)
     g = sl.make_grid(cfg, dtype=dtype)
     z = g.z_c
     th = jnp.where(z > args.zi0, theta0 + args.gamma * (z - args.zi0),
@@ -255,7 +260,8 @@ def _mean_profiles(st, g, pr_sgs, Q0):
     return z, theta_m, u_m, v_m, wth_res, wth_sgs
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
+    """The emission CLI (shared with the scaling bench)."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--case", required=True, help="registry LESCase name")
@@ -297,6 +303,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="background eddy-viscosity floor [m^2/s] (SBL stability)")
     p.add_argument("--f32", action="store_true")
     p.add_argument("--output", type=Path, default=Path("results/les_suite/artifacts"))
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = build_arg_parser()
     args = p.parse_args(argv)
 
     if args.frames < 2:

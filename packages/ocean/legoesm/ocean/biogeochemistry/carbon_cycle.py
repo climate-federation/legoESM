@@ -49,8 +49,8 @@ def compute_biogeo_tendencies(
         Reference layer thicknesses [m].
     z_full_ref : array (nlev,)
         Reference depths [m], negative.
-    ocean_mask : array (...)
-        1=ocean, 0=land.
+    ocean_mask : array (...) or (..., nlev)
+        1=ocean, 0=land. 2-D: whole column wet; 3-D: per-cell sea mask.
     cfg : BiogeoConfig
     U10 : array (...), optional
         10-m wind speed [m/s]. If None, uses cfg.wind_speed.
@@ -65,16 +65,22 @@ def compute_biogeo_tendencies(
         Air-sea CO2 flux diagnostics.
     """
     shape = state.DIC.shape
-    mask_3d = ocean_mask[..., jnp.newaxis] if ocean_mask.ndim < state.DIC.ndim else ocean_mask
+    # 2-D mask (...): every level of an ocean column is wet. 3-D mask
+    # (..., nlev): wet cells, with the sea floor above the array bottom.
+    if ocean_mask.ndim < state.DIC.ndim:
+        mask_3d = jnp.broadcast_to(ocean_mask[..., jnp.newaxis], shape)
+    else:
+        mask_3d = ocean_mask
+    surf_mask = mask_3d[..., 0]
     # Pin default forcing dtype to match the BGC state precision so a
     # missing forcing input does not silently widen the column path.
     _state_dtype = state.DIC.dtype
 
     # Default forcing if not provided
     if U10 is None:
-        U10 = jnp.full(ocean_mask.shape, cfg.wind_speed, dtype=_state_dtype)
+        U10 = jnp.full(surf_mask.shape, cfg.wind_speed, dtype=_state_dtype)
     if PAR_surf is None:
-        PAR_surf = jnp.full(ocean_mask.shape, 200.0, dtype=_state_dtype)
+        PAR_surf = jnp.full(surf_mask.shape, 200.0, dtype=_state_dtype)
 
     # ---- 1. Air-sea CO2 flux (surface layer only) ----
     DIC_surf = state.DIC[..., 0]
@@ -97,7 +103,7 @@ def compute_biogeo_tendencies(
     dALK_dt = jnp.zeros(shape, dtype=_state_dtype)
 
     # Add gas exchange to surface layer
-    dDIC_dt = dDIC_dt.at[..., 0].add(dDIC_gas * ocean_mask)
+    dDIC_dt = dDIC_dt.at[..., 0].add(dDIC_gas * surf_mask)
 
     # ---- 2. NPZD source/sink (if scheme == "npzd") ----
     dNO3_dt = None
@@ -112,7 +118,7 @@ def compute_biogeo_tendencies(
         (dNO3_bio, dPhyto_bio, dZoo_bio, dDet_bio,
          dDIC_bio, dALK_bio) = npzd_source_sink(
             state.NO3, state.Phyto, state.Zoo, state.Det,
-            state.DIC, state.ALK, T_degC, PAR, dz_ref, cfg,
+            state.DIC, state.ALK, T_degC, PAR, dz_ref, cfg, mask_3d,
         )
 
         dDIC_dt = dDIC_dt + dDIC_bio * mask_3d
@@ -169,8 +175,8 @@ def step_ocean_biogeochemistry(
         Reference layer thickness [m].
     z_full_ref : array (nlev,)
         Reference depths [m], negative.
-    ocean_mask : array (...)
-        1=ocean, 0=land.
+    ocean_mask : array (...) or (..., nlev)
+        1=ocean, 0=land (see ``compute_biogeo_tendencies``).
     dt : float
         Timestep [s].
     cfg : BiogeoConfig

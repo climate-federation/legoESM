@@ -52,6 +52,14 @@ def _run_hydraulics_stamp(drv):
         HYDRAULICS_SOURCE_CLM_MAP, __file__)
 
 
+def _grid_lat(grid):
+    """Per-column latitude in the driver's column layout: ``lat2d`` on lat-lon
+    (``lat`` is the 1-D axis there), ``lat`` on the cube, ``latCell`` on MPAS."""
+    for name in ("lat2d", "lat", "latCell"):
+        if getattr(grid, name, None) is not None:
+            return getattr(grid, name)
+
+
 def _patch_land_loaders(monkeypatch):
     """Replace the CLM-surfdata + land-mask loaders with synthetic data."""
     import legoesm.land.clm_surface_map as clm
@@ -82,9 +90,7 @@ def _patch_land_loaders(monkeypatch):
         from legoesm.land.boundary_data.gap_fill import (
             bare_canopy_params, bare_land_surface_params,
         )
-        _lat = getattr(grid, "lat", None)
-        _lat = grid.latCell if _lat is None else _lat
-        n = int(jnp.asarray(_lat).size)
+        n = int(jnp.asarray(_grid_lat(grid)).size)
         f = lambda v: jnp.full(n, v)
         from legoesm.land.canopy import CanopyConfig
         from legoesm.land.canopy.config import CLMMLCanopyConfig
@@ -117,9 +123,7 @@ def _patch_land_loaders(monkeypatch):
     monkeypatch.setattr(
         topo, "load_land_fraction",
         lambda grid, path, *a, **k: jnp.full(
-            jnp.asarray(getattr(grid, "lat", None)
-                        if getattr(grid, "lat", None) is not None
-                        else grid.latCell).shape, 0.5))
+            jnp.asarray(_grid_lat(grid)).shape, 0.5))
 
 
 def _small_cfg():
@@ -128,8 +132,9 @@ def _small_cfg():
         # fixture above supplies them synthetically; this names the source the
         # guard checks for.
         surfdata_path="synthetic",
-        grid=GridConfig(resolution=8, nlev=8),
-        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=8),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0,
+                            discretization="latlon_cgrid"),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical",
         radiation="gray",
@@ -143,6 +148,10 @@ def _small_cfg():
         # the default meant that flipping it turned twenty of them red
         # at once for a reason none of them is about.
         land_surface_scheme="simple_seb",
+        # Moist physics with multilayer land off the column loop runs only on
+        # the ML-training pipeline lane, and on the cube that lane is now the
+        # dry FV3 duo (e137cbf996, #2523): drive the lat-lon pipeline instead.
+        ml_pipeline=True,
     )
 
 
@@ -167,7 +176,7 @@ def test_setup_wires_multilayer_land(monkeypatch, tmp_path):
     driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
     driver.setup()
 
-    ncol = driver.grid.lat.size
+    ncol = int(jnp.asarray(_grid_lat(driver.grid)).size)
     assert driver.physics.land_ml_cfg is not None
     assert driver.physics.land_ml_params is not None
     assert driver.physics.land_ml_lat is not None
@@ -261,7 +270,7 @@ def test_setup_clm_ml_warm_starts_and_threads_gridinfo(monkeypatch, tmp_path):
     _patch_land_loaders(monkeypatch)
     # A tiny grid keeps the eager warm-start + O(ncol) machinery cheap.
     cfg = _canopy_cfg()._replace(land_surface_scheme="clm_ml",
-                                 grid=GridConfig(resolution=2, nlev=8))
+                                 grid=GridConfig(grid_type="latlon", resolution=2, nlev=8))
     driver_clm = ModelDriver(cfg, output_dir=tmp_path / "clmml")
     driver_clm.setup()
 
@@ -297,7 +306,7 @@ def test_clm_ml_pipeline_step_jits(monkeypatch, tmp_path):
 
     _patch_land_loaders(monkeypatch)
     cfg = _canopy_cfg()._replace(land_surface_scheme="clm_ml",
-                                 grid=GridConfig(resolution=2, nlev=8))
+                                 grid=GridConfig(grid_type="latlon", resolution=2, nlev=8))
     driver = ModelDriver(cfg, output_dir=tmp_path)
     driver.setup()
     ncol = int(driver._land_ml_state.T_soil.shape[0])
@@ -432,7 +441,7 @@ def test_build_training_segment_land_gradient(monkeypatch, tmp_path):
     pipe.land_ml_cfg = pipe.land_ml_cfg._replace(
         bulk_scheme="most", stomata=StomataConfig(enabled=True),
         carbon=CarbonConfig(scheme="differland"))
-    ncol = int(driver.grid.lat.size)
+    ncol = int(jnp.asarray(_grid_lat(driver.grid)).size)
     pipe.land_ml_carbon = init_carbon_state((ncol,), pipe.land_ml_cfg.carbon)
     base_lp = pipe.land_ml_params
 
@@ -462,8 +471,10 @@ def test_multilayer_elevation_land_enables_tiled_flux_without_slab_or_mask(monke
         lambda grid, config: (jnp.zeros(grid.grid_shape_2d),
                               jnp.full(grid.grid_shape_2d, 0.5)))
     cfg = ExperimentConfig(
-        grid=GridConfig(resolution=8, nlev=8),
-        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=8),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0,
+                            discretization="latlon_cgrid"),
+        ml_pipeline=True,                     # see _small_cfg
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical", radiation="gray",
         topography="synthetic_elevation.nc",  # file loader patched above
@@ -527,14 +538,6 @@ def test_setup_seeds_aridity_aware_soil_moisture(monkeypatch, tmp_path):
     assert not np.allclose(theta, 0.5 * np.asarray(driver.physics.land_ml_cfg.hydraulics.theta_sat))
 
 
-# NOTE: multilayer land on the LAT-LON grid is a separate, pre-existing setup
-# limitation (``_setup_multilayer_land`` flattens the 2-D-per-cell ``grid.lat``
-# via the adapter, but lat-lon ``grid.lat`` is 1-D, so the setup crashes BEFORE
-# the aridity seeding runs).  #837's aridity fix is validated on the cubed-sphere
-# path (``test_setup_seeds_aridity_aware_soil_moisture``); enabling multilayer
-# land on lat-lon is an out-of-scope follow-up.
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
 
@@ -554,7 +557,7 @@ def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
     #    mix two configs' provenance in one directory.)
     src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
     src.setup()
-    ncol = src.grid.lat.size
+    ncol = int(jnp.asarray(_grid_lat(src.grid)).size)
     n_layers = 6
     seed = src._land_ml_state
     spun = seed._replace(
@@ -760,7 +763,7 @@ def test_transient_cover_setup_reweights_by_year(monkeypatch, tmp_path):
 
     cover, years, rebuild = driver._land_cover_transient
     assert list(np.asarray(years)) == [2000.0, 2010.0]
-    ncol = driver.grid.lat.size
+    ncol = int(jnp.asarray(_grid_lat(driver.grid)).size)
     assert cover.shape == (2, ncol, 17)
 
     lp_2000 = driver._transient_land_ml_params(0.0)          # cover_year 2000
@@ -818,15 +821,15 @@ def test_jitted_radiation_reads_traced_land_ml_params(monkeypatch, tmp_path):
     pipe = driver.physics
     land_ml = driver._land_ml_state
 
-    g2 = tuple(driver.grid.lat.shape)
+    g2 = tuple(jnp.asarray(_grid_lat(driver.grid)).shape)
     nlev = _small_cfg().grid.nlev
     T = jnp.full((*g2, nlev), 285.0)
     p_s = jnp.full(g2, 1.0e5)
     q_v = jnp.full((*g2, nlev), 0.005)
     sst = jnp.full(g2, 290.0)
     sic = jnp.zeros(g2)
-    lat = jnp.asarray(driver.grid.lat)
-    lon = jnp.asarray(driver.grid.lon)
+    lat = jnp.asarray(_grid_lat(driver.grid))
+    lon = jnp.asarray(driver.grid.lon2d)
     u = jnp.full((*g2, nlev), 3.0)
     v = jnp.zeros((*g2, nlev))
 
@@ -900,7 +903,7 @@ def test_clm_ml_use_surfdata_pft_derives_mixed_pft_columns(monkeypatch, tmp_path
 
     cfg = _canopy_cfg()._replace(land_surface_scheme="clm_ml",
                                 clm_ml_use_surfdata_pft=True,
-                                grid=GridConfig(resolution=2, nlev=8))
+                                grid=GridConfig(grid_type="latlon", resolution=2, nlev=8))
     driver = ModelDriver(cfg, output_dir=tmp_path)
     driver.setup()
 
@@ -1393,3 +1396,146 @@ def test_multilayer_land_off_the_column_loop_needs_ml_pipeline():
     # the opt-in covers land only: CAM6 clouds were never wired on the pipeline
     assert "cam6_clubb' is wired on the MPAS lane only" in _strict_errors(
         ExperimentConfig(ml_pipeline=True, cloud_scheme="cam6_clubb", **pipe))
+
+
+def _floor_off(monkeypatch):
+    """The driver's seed lift disabled: the floor it reads becomes -1."""
+    import legoesm.land.richards as rich
+    real = rich.dry_floor
+    monkeypatch.setattr(rich, "dry_floor", lambda h: (real(h)[0], -1.0))
+
+
+def _dry_seed_cfg():
+    """A cold-start seed at the residual (porosity fraction 0.1 = 0.045, clipped up to theta_r plus
+    the edge guard, 0.051), below this soil's Richards dry floor (0.0512)."""
+    return _small_cfg()._replace(land_soil_init="saturation_fraction",
+                                 land_soil_moisture_init_frac=0.1)
+
+
+def test_cold_start_seed_below_dry_floor_creates_no_water(monkeypatch, tmp_path):
+    """A cold-start seed below the Richards dry floor starts AT the floor, so
+    the first solve creates no water (it used to lift the column for free)."""
+    from legoesm.land.richards import dry_floor, solve_richards
+    from legoesm.land.soil_grid import make_soil_grid
+
+    _patch_land_loaders(monkeypatch)
+    drv = ModelDriver(_dry_seed_cfg(), output_dir=tmp_path)
+    drv.setup()
+    cfg = drv.physics.land_ml_cfg
+    st = drv._land_ml_state
+    floor = np.asarray(dry_floor(cfg.hydraulics)[1])
+    seed = 0.0 * np.asarray(cfg.hydraulics.theta_sat) + np.asarray(
+        cfg.hydraulics.theta_r) + 1.0e-3
+    assert float(np.max(seed - floor)) < 0.0      # the seed IS below the floor
+    theta = np.asarray(st.theta_soil)
+    # storage dtype may be fp32: equal to the floor to its rounding
+    np.testing.assert_allclose(theta, np.broadcast_to(floor, theta.shape),
+                               rtol=1e-6)
+
+    ncol, nl = theta.shape
+    out = solve_richards(
+        st.psi_soil, st.theta_soil, make_soil_grid(cfg.soil_grid),
+        cfg.hydraulics, cfg.richards, jnp.zeros(ncol), jnp.zeros((ncol, nl)),
+        600.0, surface_water=st.surface_water)
+    # without the lift the column gains (floor - seed) x 2.5 m, ~5e-4 m here
+    assert float(np.max(np.abs(np.asarray(out.water_created)))) < 1e-7
+
+
+def test_cold_start_seed_above_floor_is_bitwise_unchanged(monkeypatch, tmp_path):
+    from legoesm.land.richards import dry_floor
+
+    _patch_land_loaders(monkeypatch)
+    on = ModelDriver(_small_cfg(), output_dir=tmp_path / "on")
+    on.setup()
+    floor = np.asarray(dry_floor(on.physics.land_ml_cfg.hydraulics)[1])
+    assert np.all(np.asarray(on._land_ml_state.theta_soil) > floor)
+    _floor_off(monkeypatch)
+    off = ModelDriver(_small_cfg(), output_dir=tmp_path / "off")
+    off.setup()
+    for name in ("theta_soil", "psi_soil", "T_soil"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(on._land_ml_state, name)),
+            np.asarray(getattr(off._land_ml_state, name)), err_msg=name)
+
+
+def _land_ic_at(theta, monkeypatch, tmp_path):
+    """A same-hydraulics land start file with uniform soil water ``theta``."""
+    from legoesm.land.restart import save_land_restart
+
+    _patch_land_loaders(monkeypatch)
+    src = ModelDriver(_dry_seed_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    spun = src._land_ml_state._replace(
+        theta_soil=jnp.full_like(src._land_ml_state.theta_soil, theta),
+        T_soil=jnp.asarray(np.asarray(src._land_ml_state.T_soil) + 3.0))
+    ic = tmp_path / f"land_ic_{theta}.npz"
+    save_land_restart(ic, spun, land_mode="multilayer",
+                      t_end_s=365 * 86400.0, n_steps_completed=1, metadata={},
+                      soil_grid=src.physics.land_ml_cfg.soil_grid,
+                      soil_hydraulics=_run_hydraulics_stamp(src),
+                      hydraulics=src.physics.land_ml_cfg.hydraulics)
+    return _dry_seed_cfg()._replace(land_ic_path=str(ic))
+
+
+def test_land_ic_file_start_is_bitwise_unchanged_by_the_floor_lift(
+        monkeypatch, tmp_path):
+    """A start file at or above the dry floor loads as written, bitwise the
+    same with the cold-start lift disabled."""
+    cfg = _land_ic_at(0.06, monkeypatch, tmp_path)   # floor here is 0.0512
+    on = ModelDriver(cfg, output_dir=tmp_path / "on")
+    on.setup()
+    np.testing.assert_allclose(np.asarray(on._land_ml_state.theta_soil),
+                               0.06, rtol=1e-6)
+    _floor_off(monkeypatch)
+    off = ModelDriver(cfg, output_dir=tmp_path / "off")
+    off.setup()
+    for name in ("theta_soil", "psi_soil", "T_soil", "snow_depth"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(on._land_ml_state, name)),
+            np.asarray(getattr(off._land_ml_state, name)), err_msg=name)
+
+
+def test_land_ic_file_below_the_dry_floor_is_refused(monkeypatch, tmp_path):
+    """A same-hydraulics start file below the floor would have the first
+    solve create the difference; setup refuses it, naming the amount."""
+    cfg = _land_ic_at(0.0505, monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="below this run's Richards dry floor"):
+        ModelDriver(cfg, output_dir=tmp_path / "dst").setup()
+
+
+def test_every_land_forcing_field_is_classed_extensive_or_intensive():
+    """A new AtmToSurface field must be classed: an amount the land books
+    over its step (scaled at the bootstrap) or a state it reads as is."""
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.driver.model_driver import (
+        LAND_EXTENSIVE_FORCING, LAND_INTENSIVE_FORCING)
+    ext, inten = set(LAND_EXTENSIVE_FORCING), set(LAND_INTENSIVE_FORCING)
+    assert not ext & inten
+    assert ext | inten == set(AtmToSurface._fields)
+
+
+def test_bootstrap_then_regular_call_books_each_sample_once():
+    """Energy and water booking across a start: the bootstrap call (one
+    sample, advances K*DT) plus the next regular call (samples 2..K+1, K*DT)
+    book exactly the sum of the samples' amounts x DT for rain, snow and
+    downward SW/LW."""
+    import jax
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.driver.model_driver import land_bootstrap_forcing
+    K, DT = 3, 300.0
+    rng = np.random.default_rng(0)
+
+    def sample():
+        return AtmToSurface(**{f: jnp.asarray(rng.uniform(0.0, 400.0, 4))
+                               for f in AtmToSurface._fields})
+    s = [sample() for _ in range(K + 1)]
+    boot = land_bootstrap_forcing(s[0], 1, K)
+    reg = jax.tree_util.tree_map(lambda *x: sum(x) / K, *s[1:])
+    # named here, not read from the module, so dropping one there fails here
+    for f in ("sw_down", "lw_down", "precip_total", "precip_snow"):
+        booked = (np.asarray(getattr(boot, f))
+                  + np.asarray(getattr(reg, f))) * K * DT
+        fell = sum(np.asarray(getattr(x, f)) for x in s) * DT
+        np.testing.assert_allclose(booked, fell, rtol=1e-12, err_msg=f)
+    np.testing.assert_array_equal(np.asarray(boot.T_lowest),
+                                  np.asarray(s[0].T_lowest))
