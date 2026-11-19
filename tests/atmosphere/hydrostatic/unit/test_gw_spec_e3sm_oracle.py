@@ -395,26 +395,32 @@ def test_beres_heating_switches_smooth_at_default(fx, name):
 
 def _surface_half_launch(j, s):
     """Column 3 heated (1e-4 K/s) at every level except the second lowest, at
-    s*heating_ramp_width.  With no z_heat_max window (set by the test), half
-    the scans end the run there (launch interface nlev - 1) and half run to
-    the model top unterminated (no launch, interface nlev): the blend's
-    second branch launches at the surface interface, with no region below."""
+    s*heating_ramp_width.  With no z_heat_max window (set by the test), a
+    fraction of the scans ends the run there (launch interface nlev - 1) and
+    the rest run to the model top unterminated (no range, no launch)."""
     nd = j["netdt"].at[3].set(1.0e-4).at[3, -2].set(s * _HW)
     return dict(j, netdt=nd)
 
 
-@pytest.mark.parametrize("case", ["interior", "surface"])
-def test_beres_launch_blend_closes_column_energy(fx, case):
-    """RULE 0 (#2569): at a launch weight of 1/2 the blended convective source
-    still closes the discrete column total energy (the fixer's energy step runs
-    once, on the blend), also when one branch launches at the surface."""
+# interior: column 0 at launch weight 1/2.  surface: at s = 0.5267 the
+# expected launch over ALL scans (counting the unterminated ones at the
+# surface interface) reached the surface interface while the drag was nonzero
+# and the fixer's energy step had no region below the source: residual 1
+# (codex review 2); the launch is now the expectation over the scans that
+# find a range.
+@pytest.mark.parametrize("case,s", [("interior", 0.5), ("surface", 0.5),
+                                    ("surface", 0.526717480630108)])
+def test_beres_launch_blend_closes_column_energy(fx, case, s):
+    """RULE 0 (#2569): the blended convective source closes the discrete column
+    total energy (the fixer's energy step runs once, on the blend), also when
+    most scans find no range."""
     z, meta, table = fx
     m = meta["arms"]["convective_frontal"]
     cfg = _config(m["ours"], hard=False)._replace(source="convective")
     if case == "interior":
-        col, j = _C0, _set_netdt(_CUT, _HW)(_inputs(z, "l36"), jnp.asarray(0.5))
+        col, j = _C0, _set_netdt(_CUT, _HW)(_inputs(z, "l36"), jnp.asarray(s))
     else:   # no window and the gate open at any depth, so the shallow range launches
-        col, j = 3, _surface_half_launch(_inputs(z, "l36"), jnp.asarray(0.5))
+        col, j = 3, _surface_half_launch(_inputs(z, "l36"), jnp.asarray(s))
         cfg = cfg._replace(beres=cfg.beres._replace(hdepth_min_km=0.0, z_heat_max=1.0e7))
     assert cfg.do_energy_conservation
     o = _run(j, cfg, m["dt"], table)

@@ -1002,12 +1002,17 @@ def gw_beres_src(
     # 0-based top-down convention E3SM's interface index ``maxi`` is the
     # interface BELOW our midpoint ``maxi`` (0-based), i.e. our interface
     # ``maxi + 1``.  Non-launching columns get interface nlev and carry zero
-    # tau.  RULE 5 (#2569): the launch interface is the expected one,
-    # x = sum_k e_k*(k + 1) + (1 - found)*nlev, made a C2 staircase by
-    # smooth_round(x, index_round_width); ``launch_t`` is the weight of the
-    # interface below (src_level + 1), which e3sm_cam_gwd blends in.  With
-    # 0/1 indicators x is an integer and launch_t = 0.
-    x = jnp.sum(e * (ks_idx + 1.0), axis=1) + (1.0 - found) * nlev
+    # tau.  RULE 5 (#2569): the launch interface is the expected one over the
+    # scans that find a range, x = sum_k e_k*(k + 1)/found (nlev when none
+    # does; tau is then 0), made a C2 staircase by smooth_round(x,
+    # index_round_width); ``launch_t`` is the weight of the interface below
+    # (src_level + 1), which e3sm_cam_gwd blends in.  maxi < mini <= nlev - 1
+    # keeps x <= nlev - 1, so a launching blend never reaches the surface
+    # interface, where the fixer has no region below the source (codex
+    # review 2).  With 0/1 indicators x is an integer and launch_t = 0.
+    has = found > 0.0
+    x = jnp.where(has, jnp.sum(e * (ks_idx + 1.0), axis=1) / jnp.where(has, found, 1.0),
+                  float(nlev))
     x = jnp.clip(smooth_round(x, rw), 0.0, float(nlev))   # rw 0: NINT
     lo = jnp.floor(x)
     launch_t = x - lo
@@ -2128,12 +2133,7 @@ def _e3sm_cam_gwd_one_source(
             k_idx = jnp.arange(u.shape[1])[None, :]
             prof = sum(wt * (k_idx >= tl[:, None]) / _below_source_dp(tl, p_half)[:, None]
                        for wt, tl in ((1.0 - w, tend0), (w, tend1)))
-            # Normalised so the removal integrates to dE_int even when one
-            # branch launches at the surface interface and has no region
-            # below it (codex review 1); no region at all = no correction,
-            # as in the unblended fixer.
-            norm = jnp.sum(dpm * prof, axis=1, keepdims=True)
-            dsdt = dsdt - dE_int[:, None] * prof / jnp.where(norm > 0.0, norm, 1.0)
+            dsdt = dsdt - dE_int[:, None] * prof
         dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
         eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
         return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dsdt / constants.c_pd,
