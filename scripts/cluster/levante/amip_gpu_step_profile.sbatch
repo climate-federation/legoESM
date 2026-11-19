@@ -20,9 +20,9 @@
 # radiation step at rad_update_steps=32, three physics steps).  The
 # steady-state s/step of the second half-day is the baseline every speed-up
 # on perf/amip-speedup is measured against.
-#   array 0: the deck as committed (rrtmgp_gpoint_batch_size 0 = the CPU
-#            recipe: one g-point per scan step)
-#   array 1: + --rrtmgp-gpoint-batch-size 16 (the code's GPU default)
+#   array 0: --rrtmgp-gpoint-batch-size 0 (one g-point per scan step; the
+#            deck's value until 2026-11-18)
+#   array 1: --rrtmgp-gpoint-batch-size 16 (the deck's value since then)
 #   array 2/3: the same two arms on ONE GPU, serial driver (user 2026-11-12:
 #            single-GPU is a production target too); submit with
 #            sbatch --ntasks=1 --ntasks-per-node=1 --gpus-per-node=1 \
@@ -50,8 +50,8 @@ set -uo pipefail
 : "${LAND_IC:=/scratch/b/b384341/amip_gpu_profile/data/soil_ic_mpas6_era5T_19790101_lifted.npz}"
 export AMIP_SURFDATA ERA5_IC
 : "${ARM_ID:=${SLURM_ARRAY_TASK_ID:-0}}"
-ARMS=( "" "--rrtmgp-gpoint-batch-size 16" "" "--rrtmgp-gpoint-batch-size 16" )
-ARM_NAMES=( deck4 gpt16_4 deck1 gpt16_1 )
+ARMS=( "--rrtmgp-gpoint-batch-size 0" "--rrtmgp-gpoint-batch-size 16" "--rrtmgp-gpoint-batch-size 0" "--rrtmgp-gpoint-batch-size 16" )
+ARM_NAMES=( gpt0_4 gpt16_4 gpt0_1 gpt16_1 )
 [[ -n "${TRACE_SPEC:-}" ]] && ARM_NAMES=( "${ARM_NAMES[@]/%/_t${TRACE_SPEC%%:*}}" )
 N_GPUS="${SLURM_NTASKS:-4}"
 if (( ARM_ID >= 2 && N_GPUS != 1 )) || (( ARM_ID < 2 && N_GPUS != 4 )); then

@@ -252,11 +252,17 @@ cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
                                      # reference: bias within sampling noise,
                                      # per-column scatter ~1.8x the 8-subcolumn one.
 cloud_n_subcolumns: 8                # read only by max_random; inert under mcica
-rrtmgp_gpoint_batch_size: 0          # CPU: one g-point at a time (code default 16 is
-                                     # for GPU). Measured 2026-10-06, res6 16 ranks x 8
-                                     # cores: radiation step 13.8 s at 16, 7.9 s at 0
-                                     # (~139 s per simulated day); fluxes differ only by
-                                     # summation order (<= 6.1e-4 W/m2).
+rrtmgp_gpoint_batch_size: 16         # GPU: 16 g-points per vmap block (production
+                                     # runs on GPU; user decision 2026-11-18).
+                                     # Measured on A100, MPAS res6, 1 simulated day, 0 vs
+                                     # 16 only: 0.161 -> 0.132 s/step on 1 GPU, 0.112 ->
+                                     # 0.092 on 4 (2026-11-13, before the full gas
+                                     # tables); 16/32/64/128 within 3% (2026-11-16).
+                                     # COSTS CPU runs: 2026-10-06, res6 16 ranks x 8
+                                     # cores, radiation step 13.8 s at 16 vs 7.9 s at 0
+                                     # (~139 s per simulated day) -- a CPU run passes
+                                     # --rrtmgp-gpoint-batch-size 0.  Fluxes differ
+                                     # only by summation order (<= 6.1e-4 W/m2).
 rrtmgp_use_scan: true                # scan the RRTMGP column recurrence (code default:
                                      # unrolled on CPU, scan on GPU, so GPU is unchanged).
                                      # Measured 2026-10-29, this deck, MPAS res6 CPU: step
