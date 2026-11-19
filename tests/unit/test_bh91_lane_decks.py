@@ -1,5 +1,5 @@
 """#2574: every lane whose surface fluxes read the stable MOST selector pins
-Beljaars-Holtslag 1991 in its committed deck, and run_omip defaults to it."""
+Beljaars-Holtslag 1991 in its committed deck."""
 from __future__ import annotations
 
 import pathlib
@@ -33,10 +33,8 @@ def test_deck_pins_bh91(deck, driver):
     assert cfg["surface_stability_scheme"] == _BH91
 
 
-def test_omip_deck_and_default_are_bh91():
-    from scripts.run.run_omip import parse_args
-    assert parse_args(["--grid", "latlon"]).surface_stability_scheme == _BH91
-    # The deck must carry the key itself, not inherit the parser default.
+def test_omip_deck_pins_bh91():
+    # The deck carries the key itself; run_omip's parser default stays dyer1974.
     from legoesm.driver.run_config_yaml import read_yaml_with_includes
     raw = read_yaml_with_includes(str(_REPO / "config/omip/omip_example.yaml"))
     assert raw["surface_stability_scheme"] == _BH91

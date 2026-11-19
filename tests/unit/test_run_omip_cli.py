@@ -152,10 +152,10 @@ def test_jra55_sea_ice_flag_parses():
 
 
 def test_surface_stability_scheme_flag_round_trip():
-    """--surface-stability-scheme parses, defaults to beljaars_holtslag1991
-    (#2574), and rejects unknown names (dispatch hardening at argparse)."""
+    """--surface-stability-scheme parses, defaults byte-identically to
+    dyer1974, and rejects unknown names (dispatch hardening at argparse)."""
     assert (parse_args(["--grid", "latlon"]).surface_stability_scheme
-            == "beljaars_holtslag1991")
+            == "dyer1974")
     assert (parse_args(["--grid", "latlon", "--surface-stability-scheme",
                         "grachev2007_sheba"]).surface_stability_scheme
             == "grachev2007_sheba")

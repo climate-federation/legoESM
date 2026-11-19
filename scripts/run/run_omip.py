@@ -528,19 +528,18 @@ def parse_args(argv: list[str] | None = None):
                         "validated against each scheme's __param_spec__ bounds "
                         "and spliced into the nested *Config (here the vertical-"
                         "mixing configs, e.g. KPPConfig). (issue #691)")
-    p.add_argument("--surface-stability-scheme",
-                   default="beljaars_holtslag1991",
+    p.add_argument("--surface-stability-scheme", default="dyer1974",
                    choices=["dyer1974", "beljaars_holtslag1991",
                             "grachev2007_sheba", "gryanik2020", "gfs",
                             "wrf_revmm5", "mynn_sfc", "most_revisit_j3"],
                    help="Stable-regime (zeta>0) MOST similarity functions for "
                         "the air-sea (CouplerConfig, LY09 bulk) AND air-ice "
-                        "(SeaIceConfig) turbulent fluxes. 'beljaars_holtslag1991' "
-                        "(default since #2574) avoids stable flux collapse; "
-                        "'dyer1974' = historical -5*zeta; "
+                        "(SeaIceConfig) turbulent fluxes. 'dyer1974' (default) "
+                        "= historical -5*zeta, byte-identical; "
                         "'grachev2007_sheba' = SHEBA Arctic stable functions "
                         "(the sea-ice reference); 'gryanik2020' = modified "
-                        "SHEBA. Unstable branch stays Businger-Dyer "
+                        "SHEBA; 'beljaars_holtslag1991' avoids stable flux "
+                        "collapse. Unstable branch stays Businger-Dyer "
                         "(heat scaled by Pr0 = 0.98 for gryanik2020, as in "
                         "SurfaceFluxes.jl) unless --surface-unstable-scheme "
                         "is set.")
