@@ -10,7 +10,7 @@ or the land-atmosphere exchange does not close:
     Rn - SH_atm - LE_atm - snow_ground_heat_applied = 0  (layered snow)
 
 with Rn = sw_net + lw_net the scheme's net radiation.  Before the fix the
-residual equals the Robin flux (tens of W/m2 on these columns).  float64.
+residual equals the Robin flux (measured 28-344 W/m2 on these columns).  float64.
 """
 from __future__ import annotations
 
@@ -70,14 +70,16 @@ def _run(cfg, forcing, st=None):
     return st, new, r, so, robin
 
 
-def _residual(label, r, so, heat_gain, robin):
+def _residual(label, r, so, heat_gain, robin, new):
     """Rn - SH_atm - LE_atm - (heat the column received from the surface) [W m-2].
     Sign: Rn, heat_gain positive INTO the land; SH, LE positive UP."""
     terms = dict(sw_net=so.sw_net, lw_net=so.lw_net, SH_atm=r.shflx, LE_atm=r.lhflx,
                  G_explicit=so.G_soil, heat_gain=heat_gain, lam_dT=robin)
     resid = np.asarray(so.sw_net + so.lw_net - r.shflx - r.lhflx) - np.asarray(heat_gain)
     print(label, {k: float(np.asarray(v)[0]) for k, v in terms.items()},
-          "resid", resid, "resid-lam_dT", resid - robin)
+          "resid", resid, "resid-lam_dT", resid - robin,
+          "state_sum", repr(float(jnp.sum(new.T_soil) + jnp.sum(new.theta_soil)
+                                  + jnp.sum(new.snow_depth))))
     for v in terms.values():        # every term is a plausible surface flux
         assert np.all(np.abs(np.asarray(v)) < 1500.0), terms
     return resid
@@ -100,13 +102,13 @@ def test_bulk_snow_column_energy_closes_against_atmosphere_fluxes(freeze_thaw, s
             T, new.theta_soil, cfg.hydraulics, cfg.thermal), C, rtol=1e-15)
     dS = np.asarray(jnp.sum(C * grid.dz * (new.T_soil - st.T_soil), axis=-1)) / _DT
     resid = _residual(f"bulk sw={sw} ft={freeze_thaw}", r, so,
-                      dS - cfg.thermal.Q_geothermal, robin)
+                      dS - cfg.thermal.Q_geothermal, robin, new)
     np.testing.assert_allclose(resid, 0.0, rtol=0, atol=_ATOL)
 
 
-@pytest.mark.parametrize("swe", [0.0, 15.0])
+@pytest.mark.parametrize("swe", [0.0, 1.0, 15.0])
 def test_layered_snow_column_energy_closes_against_atmosphere_fluxes(swe):
-    """Snow-free and snow-covered.  ``snow_ground_heat_applied`` is the flux the
+    """Snow-free, partial cover and full cover.  ``snow_ground_heat_applied`` is the flux the
     pack + soil received from the surface; that it equals the column's enthalpy
     change is asserted by test_layered_snowpack::
     test_land_step_closes_pack_plus_soil_energy."""
@@ -117,5 +119,9 @@ def test_layered_snow_column_energy_closes_against_atmosphere_fluxes(swe):
         st, new, r, so, robin = _run(cfg, _forcing(2, T=265.0, q=0.0015, sw=400.0), st)
     else:
         st, new, r, so, robin = _run(cfg, _forcing(2))
-    resid = _residual(f"layered swe={swe}", r, so, so.snow_ground_heat_applied, robin)
+    f_snow = float(ml.snow_cover_fraction(st.snow_depth, cfg.land_albedo)[0])
+    assert (f_snow == 0.0) if swe == 0.0 else (0.0 < f_snow < 1.0) if swe == 1.0 else (
+        f_snow > 0.9), f_snow
+    resid = _residual(f"layered swe={swe} f_snow={f_snow:.3f}", r, so,
+                      so.snow_ground_heat_applied, robin, new)
     np.testing.assert_allclose(resid, 0.0, rtol=0, atol=_ATOL)
