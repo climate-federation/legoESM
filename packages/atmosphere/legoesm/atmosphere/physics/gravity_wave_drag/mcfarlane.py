@@ -50,9 +50,17 @@ p = 50), ``crit_level_sharpness`` / ``crit_level_floor``
 defaults to CAM's ``c = 0``.  ``softmin_sharpness`` is also p of the same
 p-norm smooth min for the ``umcfac`` and ``tndmax`` tendency limiters (#2241,
 2026-11-07; one knob: GLM + Claude majority, codex preferred a separate field), and of the
-launch Froude cap ``min(hdsp^2, fcrit2 (U/N)^2)`` (#2241, 2026-11-12).  The ``hdsp > 10 m`` gate (static
-orography), ``n2min``, ``taumin`` (a 1e-10 Pa jump) and ``ubmc2mn`` are hard,
-as in CAM (piecewise smooth; finite gradients).  The production smoothing values are NOT the hard limit.
+launch Froude cap ``min(hdsp^2, fcrit2 (U/N)^2)`` (#2241, 2026-11-12).  Since
+#2546 (2026-11-16) the forms and widths of the E3SM port (#2241) also smooth
+the ``|0 - ubm|`` of the ``umcfac`` limit (``umcfac_abs_width`` 0.01 m/s,
+``x*tanh(x/w)``), the sign the limited tendency takes (``umcfac_sign_width``
+1e-3 m/s, ``tanh``) and the ``taumin`` zeroing (``taumin_ramp_width`` 1e-10 Pa,
+quintic ramp; the stress cap's p-norm then takes eps 0); 0 = CAM for each.
+The redetermined stress below a limited layer adds CAM's ``|gwut|``
+(``|tanh|*ubtl`` under the smooth sign), so the stress drop equals the
+momentum the layer receives (RULE 0).  The ``hdsp > 10 m`` gate (static
+orography), ``n2min`` and ``ubmc2mn`` are hard, as in CAM (piecewise smooth;
+finite gradients).  The production smoothing values are NOT the hard limit.
 KNOWN DIFFERENCE at the defaults (vs the CAM6 oracle, 14 columns, pinned per
 column in the oracle test): field max-norm relative 3.7e-3 in du/dt, 4.5e-3 in
 dT/dt, 3.4e-5 in dq/dt; per column up to 2.9e-2 in du/dt and 2.7e-2 in dT/dt
@@ -60,7 +68,15 @@ dT/dt, 3.4e-5 in dq/dt; per column up to 2.9e-2 in du/dt and 2.7e-2 in dT/dt
 the limiter column 10 moved (du/dt 3.52e-3 -> 3.66e-3, dT/dt 4.23e-3 ->
 4.46e-3; field max-norm was 3.5e-3 / 4.2e-3); re-measured 2026-11-12 with the
 smooth Froude cap: columns 0, 9 and 10 move only in the 6th-7th digit (field
-max-norm unchanged).  Measured 2026-10-29 when the smooth min became the p-norm
+max-norm unchanged); re-measured 2026-11-16 with the #2546 widths: all 14
+columns bitwise unchanged (no column has a projected-wind zero in a limited
+layer or a stress within 1e-10 Pa of taumin).  KNOWN DIFFERENCE at the
+production setting (#2546; one call on the production deck's ERA5 1979-01-01
+state, MPAS res 6, 40962 columns, dt 1800 s, widths 0 vs default): 671
+columns (1.6 %) change; max |d(du/dt)| 7.5e-7 m/s^2 (field max-norm relative
+2.6e-4), area-mean |d(du/dt)| 3.8e-10 vs 1.3e-5 m/s^2 (3e-5 relative); dT/dt
+field relative 1.5e-4; stress field relative 4.6e-4.  Per column the change
+is large only where the column's drag is near zero.  Measured 2026-10-29 when the smooth min became the p-norm
 (#2241), re-measured on the #2238 merge (``crit_level_floor = 0`` among its
 changes; dq/dt was 1.3e-4 before it, du/dt and dT/dt unchanged); the earlier sigmoid blend, not C1 at taudmp = tausat, gave field
 max-norm 1.2e-2 in du/dt.  The hard limit is every sharpness -> inf (1e12)
@@ -107,7 +123,13 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
-from legoesm.core.smooth import pnorm_smooth_min
+from legoesm.core.smooth import (
+    abs_tanh,
+    pnorm_smooth_min,
+    sign_tanh,
+    validate_smoothing_width,
+    zero_at_or_below,
+)
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
 __physics_contract__ = {
@@ -335,6 +357,8 @@ def mcfarlane_gwd(
                 "(or negative) model top.  Use a vertical coordinate with a "
                 "positive top pressure."
             )
+    for _w in ("umcfac_abs_width", "umcfac_sign_width", "taumin_ramp_width"):
+        validate_smoothing_width(_w, getattr(config, _w))
     config = config._replace(
         use_e3sm_hdsp=(_hdsp is True)
         or (_hdsp == "auto" and h_topo_col is not None),
@@ -394,6 +418,7 @@ def mcfarlane_gwd(
     )[0]
     kwv = config.k_wave
     floor = config.crit_level_floor
+    cap_eps = _TAUMIN_PA if config.taumin_ramp_width == 0.0 else 0.0
 
     def stress_step(tau_below, j):
         ub = ubi[:, j]
@@ -409,11 +434,13 @@ def mcfarlane_gwd(
         mi = ni[:, j] / (2.0 * kwv * ubmc2) * (alpha[j] + ni[:, j] ** 2 / ubmc2 * _DBACK)
         taudmp = tau_below * jnp.exp(
             -2.0 * mi * (R_d / g) * T[:, j] * (piln[:, j + 1] - piln[:, j]))
-        tausat = jnp.where(tausat <= _TAUMIN_PA, 0.0, tausat)
-        taudmp = jnp.where(taudmp <= _TAUMIN_PA, 0.0, taudmp)
+        tausat = zero_at_or_below(tausat, _TAUMIN_PA, config.taumin_ramp_width)
+        taudmp = zero_at_or_below(taudmp, _TAUMIN_PA, config.taumin_ramp_width)
         # Smooth min(taudmp, tausat): p-norm, p = softmin_sharpness (the
-        # Lindzen form, #2241); exact min at softmin_sharpness -> inf.
-        tau_new = pnorm_smooth_min(taudmp, tausat, config.softmin_sharpness, _TAUMIN_PA)
+        # Lindzen form, #2241); exact min at softmin_sharpness -> inf.  The
+        # taumin ramp leaves stresses in (0, taumin], so the cap's eps
+        # contract (inputs <= eps zeroed) takes eps 0 there (as e3sm_cam).
+        tau_new = pnorm_smooth_min(taudmp, tausat, config.softmin_sharpness, cap_eps)
         tau_new = jnp.where(tausat > 0.0, tau_new, 0.0)
         # Interfaces at and below src_level hold tau0 (gw_oro.F90 source hold).
         tau_new = jnp.where(j < src_level, tau_new, tau_below)
@@ -430,13 +457,23 @@ def mcfarlane_gwd(
         ubtl = g * (tau[:, j + 1] - tau_top) / dp[:, j]
         # umcfac and tndmax limiters: the same p-norm smooth min as the
         # stress cap (#2241), exact min at softmin_sharpness -> inf.
-        ubtl = pnorm_smooth_min(jnp.abs(ubtl), config.umcfac * jnp.abs(0.0 - ubm[:, j]) / dt,
+        # RULE 5 (#2546): |0 - ubm| -> x*tanh(x/w) and its sign -> tanh(x/ws)
+        # (the E3SM forms of #2241); widths 0 are CAM's abs and sign.
+        cmu = 0.0 - ubm[:, j]
+        ubtl = pnorm_smooth_min(jnp.abs(ubtl),
+                                config.umcfac * abs_tanh(cmu, config.umcfac_abs_width) / dt,
                                 config.softmin_sharpness, 0.0)
         ubtl = pnorm_smooth_min(ubtl, jnp.full_like(ubtl, tndmax),
                                 config.softmin_sharpness, 0.0)
-        gwut = jnp.where((0.0 - ubm[:, j]) >= 0.0, ubtl, -ubtl)
+        if config.umcfac_sign_width == 0.0:
+            gwut = jnp.where(cmu >= 0.0, ubtl, -ubtl)
+        else:
+            gwut = sign_tanh(cmu, config.umcfac_sign_width) * ubtl
         # The limited stress divergence is carried to the layer below
         # (CAM "redetermine the effective stress on the interface below").
+        # |gwut|, not ubtl: under the smooth sign |gwut| = |tanh|*ubtl, and
+        # carrying ubtl would drop (1-|tanh|)*ubtl of momentum (#2546 review,
+        # 24% of the layer's deposit at column 9's switch); C2 (~|ubm|^3).
         tau_below = tau_top + jnp.abs(gwut) * dp[:, j] / g
         return tau_below, (gwut, tau_below)
 

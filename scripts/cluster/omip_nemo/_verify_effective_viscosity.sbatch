@@ -25,6 +25,8 @@
 # formula would prove only that I can multiply.  The point is to execute the
 # function the job executes.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 WT=/burg-archive/glab/users/pg2328/_omip_wt
 cd $WT || exit 1
 export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
@@ -90,3 +92,4 @@ print(f"VERDICT: final segment {'MATCHES' if ok else 'DOES NOT MATCH'} NEMO's "
       f"field at the profile maximum ({max(final):.6g} vs {a.max():.6g})")
 PY
 echo "=== rc=$? ==="
+exit ${RC:-0}

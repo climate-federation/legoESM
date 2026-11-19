@@ -992,6 +992,19 @@ def test_land_snow_insulation_with_clm_ml_canopy_is_refused():
         cfg.validate_strict()
 
 
+def test_land_snow_insulation_with_simple_seb_is_accepted():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--use-multilayer-land",
+         "--land-surface-scheme", "simple_seb",
+         "--land-snow-insulation"]), parser))
+    assert cfg.land_snow_insulation and cfg.land_surface_scheme == "simple_seb"
+    try:          # this bare analytical deck fails other checks (no land mask)
+        cfg.validate_strict()
+    except ValueError as err:
+        assert "land_snow_insulation" not in str(err)
+
+
 def test_land_snow_insulation_with_layered_snowpack_is_refused():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(

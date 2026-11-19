@@ -76,7 +76,9 @@ _O_N2MIN_MODULE = 1.0e-7    # the module's (stronger) floor — a documented dep
 _O_H_DECAY_FLOOR = 1.0e-6   # module AD guard floor on h_decay
 _O_RHO_DEFAULT = float(constants.rho_ocean)  # Boussinesq reference density
 
-_CFG = TidalMixingConfig()
+# Widths 0: the hard floor / cap / N^2 > 0 gate (RULE 5 smooth default tested in
+# test_cfam_smooth_switches.py).
+_CFG = TidalMixingConfig(n2_floor_width=0.0, k_max_width=0.0, n2_gate_width=0.0)
 
 
 def _uniform_column(nlev=10, dz=100.0):
@@ -363,7 +365,7 @@ def test_compute_tidal_diffusivity_matches_oracle():
 
 def test_compute_tidal_diffusivity_nondefault_cfg_incl_rho0():
     cfg = TidalMixingConfig(Gamma=0.3, q_local=0.25, h_decay_m=300.0, K_max=1e-2,
-                            N_squared_min=1e-9, rho_0=1000.0)   # rho_0 varied
+                            N_squared_min=1e-9, rho_0=1000.0, n2_floor_width=0.0, k_max_width=0.0, n2_gate_width=0.0)   # rho_0 varied
     z, h, H = _uniform_column()
     E = jnp.array([0.04])
     N2 = jnp.full((1, 10), 2.0e-4)
