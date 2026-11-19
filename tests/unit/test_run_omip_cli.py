@@ -42,11 +42,17 @@ def test_langmuir_flag_flows_to_config():
     assert off.vertical_mixing.kpp.enable_langmuir is False
     on = build_config_from_args(parse_args([
         "--grid", "latlon", "--langmuir",
-        "--langmuir-coeff", "0.12", "--langmuir-number-default", "0.25",
+        "--langmuir-number-default", "0.25",
     ]))
     assert on.vertical_mixing.kpp.enable_langmuir is True
-    assert on.vertical_mixing.kpp.langmuir_coeff == 0.12
+    assert on.vertical_mixing.kpp.langmuir_c1 == 3.1
+    assert on.vertical_mixing.kpp.langmuir_c2 == 5.4
     assert on.vertical_mixing.kpp.langmuir_number_default == 0.25
+
+
+def test_removed_langmuir_coefficient_is_not_silently_reinterpreted():
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "latlon", "--langmuir-coeff", "0.12"])
 
 
 def test_default_nlev_is_40_for_climate_fidelity():

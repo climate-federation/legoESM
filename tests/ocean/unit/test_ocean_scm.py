@@ -48,6 +48,66 @@ def _x64():
 _NLEV = 24
 
 
+def test_stokes_forcing_channel_reaches_kpp_and_preserves_gradient():
+    from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+    from legoesm.ocean.eos import linear_eos
+    cfg = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="kpp", kpp=KPPConfig(enable_langmuir=True)),
+        convection=OceanConvectionConfig(scheme="none"))
+
+    def objective(stokes):
+        forcing = OceanSCMForcing(
+            tau_x=lambda t: 0.036, tau_y=lambda t: 0.0,
+            q_net=lambda t: -5.0, u_stokes=lambda t: stokes)
+        model = OceanColumnModel.create(
+            nlev=24, dt=60.0, H_max=120.0, dz_surface=5.0, dz_deep=5.0,
+            T_profile=jnp.concatenate([jnp.full(8, 12.0), jnp.linspace(12.0, 10.0, 16)]),
+            physics_config=cfg, forcing=forcing, eos_fn=linear_eos,
+            K_v_background=0.0, A_v_background=0.0)
+        tendency, _ = model._tend_fn(model.state, None, 0.0)
+        return jnp.mean(tendency.K_v)
+
+    value, derivative = jax.value_and_grad(objective)(0.04)
+    assert jnp.isfinite(value) and jnp.isfinite(derivative)
+    assert derivative > 0.0
+    fd = (objective(0.040001) - objective(0.039999)) / 0.000002
+    assert jnp.allclose(derivative, fd, rtol=1e-4, atol=1e-10)
+
+
+def test_explicit_scm_eos_reaches_physics(monkeypatch):
+    import legoesm.ocean.scm as impl
+    from legoesm.ocean.eos import linear_eos
+    seen = []
+    original = impl.make_ocean_physics
+
+    def capture(*args, **kwargs):
+        seen.append(kwargs.get("eos_fn"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(impl, "make_ocean_physics", capture)
+    OceanColumnModel.create(nlev=4, dt=60, T_profile=jnp.full(4, 12.0), eos_fn=linear_eos)
+    assert seen == [linear_eos]
+
+
+def test_compiling_scm_operators_preserves_one_step():
+    models = [OceanColumnModel.create(
+        nlev=4, dt=60.0, T_profile=jnp.linspace(12.0, 10.0, 4),
+        forcing=OceanSCMForcing(f_c=1.028e-4, tau_x=lambda t: 0.036,
+                                q_net=lambda t: -5.0),
+        K_v_background=0.0, A_v_background=0.0) for _ in range(2)]
+    compiled = models[1]
+    compiled._tend_fn = jax.jit(compiled._tend_fn)
+    compiled._apply_implicit_vertical_mixing = jax.jit(compiled._apply_implicit_vertical_mixing)
+    compiled._apply_coriolis_rotation = jax.jit(compiled._apply_coriolis_rotation)
+    for model in models:
+        model.step()
+    for name in ("T", "S", "u", "v", "eta"):
+        np.testing.assert_allclose(getattr(models[0].state, name).data,
+                                   getattr(models[1].state, name).data,
+                                   rtol=1e-12, atol=1e-12)
+
+
 def _no_mixing_cfg():
     return OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="none"),

@@ -22,6 +22,15 @@ The coupled driver owns the atmosphere/ocean side: 10 m neutral wind from the
 coupler stress, the Stokes-drift magnitude into KPP Langmuir, and restart of
 the spectrum and spatial-order phase.
 
+The optional ocean feedback extends the upstream LMD94-style KPP with
+VR12-AL (aligned wind/waves): Li et al. (2016), Table 2 / Eq. (12),
+doi:10.1016/j.ocemod.2015.07.020, following Van Roekel et al. (2012),
+doi:10.1029/2011JC007516. Both diffusivity velocity scales and the unresolved
+shear used to diagnose boundary-layer depth receive the same multiplier.
+The fixed published coefficients are 3.1 and 5.4; `--langmuir-coeff` and
+`KPPConfig.langmuir_coeff` are removed. `None` Stokes retains prescribed-La
+mixing when enabled; use `enable_langmuir=False` for a no-feedback control.
+
 ## Example
 
 ```python

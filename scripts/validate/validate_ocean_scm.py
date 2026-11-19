@@ -170,9 +170,20 @@ _CASES = {"convective_deepening": run_convective_deepening}
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--case", choices=sorted(_CASES), default="convective_deepening")
+    ap.add_argument("--case", choices=sorted([*_CASES, "wave_langmuir"]), default="convective_deepening")
     ap.add_argument("--plot", action="store_true")
+    ap.add_argument("--output-dir", default="results/wave_kpp_s_l2")
+    ap.add_argument("--upstream-root", help="export of the preregistered upstream packages/src")
     args = ap.parse_args(argv)
+    if args.case == "wave_langmuir":
+        if not args.upstream_root:
+            ap.error("wave_langmuir requires --upstream-root (fixed upstream snapshot)")
+        # Lazy import preserves the existing independent SCM cases.
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from scripts.validate.wave_kpp_coupling import run_suite
+        run_suite(args.output_dir, args.upstream_root, plot=args.plot)
+        return 0
     jax.config.update("jax_enable_x64", True)
     result = _CASES[args.case]()
     ok = report(result, plot=args.plot)

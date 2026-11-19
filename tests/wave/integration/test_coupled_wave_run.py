@@ -44,7 +44,21 @@ def _kpp_ocean_config():
 
 
 @pytest.mark.parametrize("physics_only", [False, True])
-def test_dynamic_ocean_kpp_wave_run(tmp_path, physics_only):
+def test_dynamic_ocean_kpp_wave_run(tmp_path, physics_only, monkeypatch):
+    # Observe the actual driver -> surface forcing -> KPP call chain. A
+    # dropped Stokes field can still produce a finite default-La simulation,
+    # so finiteness alone would not validate coupling.
+    import legoesm.ocean.physics.vertical_mixing.kpp as kpp_impl
+    import legoesm.ocean.physics.vertical_mixing.integration as kpp_pipeline
+    seen_stokes = []
+    original_kpp = kpp_impl.kpp_vertical_mixing
+
+    def record_stokes(*args, **kwargs):
+        seen_stokes.append(kwargs.get("u_stokes") is not None)
+        return original_kpp(*args, **kwargs)
+
+    monkeypatch.setattr(kpp_impl, "kpp_vertical_mixing", record_stokes)
+    monkeypatch.setattr(kpp_pipeline, "kpp_vertical_mixing", record_stokes)
     wave_cfg = _global_wave_config(lon_step=45.0, lat_step=45.0)._replace(
         time=WaveTimeConfig(
             dt_global_s=600, dt_x_s=600, dt_y_s=600,
@@ -93,6 +107,7 @@ def test_dynamic_ocean_kpp_wave_run(tmp_path, physics_only):
     assert driver._wave_stokes.shape == (8, 16)
     assert bool(jnp.all(jnp.isfinite(driver._wave_stokes)))
     assert bool(jnp.any(driver._wave_stokes > 0))
+    assert any(seen_stokes), "real driver never forwarded the Wave Stokes field to KPP"
     assert bool(jnp.all(jnp.isfinite(driver.ocean_state.T.data)))
     assert driver.resolved_component_configs()["wave"] == wave_cfg
 

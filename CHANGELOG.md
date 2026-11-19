@@ -46,12 +46,26 @@ All notable changes to legoESM. Format roughly follows
 
 ### Changed
 
+- **KPP wave feedback follows VR12-AL.** The opt-in Langmuir extension now
+  uses the aligned LES scaling in Li et al. (2016), including its effect on
+  unresolved shear in the boundary-layer diagnosis. Published coefficients
+  3.1 and 5.4 replace `langmuir_coeff` / `--langmuir-coeff`; the old option
+  is removed. Single-column forcing accepts surface Stokes magnitude and an
+  explicit EOS. A preregistered comparison retains unmodified upstream KPP
+  separately from the weak-buoyancy correction and the wave-feedback arm.
+
 - **License: MIT.** legoESM is now released under the MIT License, replacing
   PolyForm Noncommercial 1.0.0; the separate commercial license is withdrawn.
   The root package metadata now matches the component packages, which already
   declared MIT. Bundled third-party code keeps its own license.
 
 ### Fixed
+
+- **Weak KPP buoyancy forcing retains its physical magnitude.** Computing
+  the Monin-Obukhov coordinate directly avoids dividing by buoyancy flux;
+  the former single-precision-epsilon floor on that dimensional flux is
+  removed. This affects weak-forcing runs even with Langmuir disabled and is
+  isolated as a separate control in the wave-coupling comparison.
 
 - **Hines gravity-wave drag no longer launches at the surface.** The launch
   level now defaults to 700 hPa and must lie in 300–900 hPa; the surface-launch

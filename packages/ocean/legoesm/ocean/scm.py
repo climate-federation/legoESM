@@ -467,6 +467,7 @@ class OceanColumnModel:
         A_v_background: float = 1.0e-4,
         dtype=None,
         t0_seconds: float = 0.0,
+        eos_fn: Callable | None = None,
     ) -> "OceanColumnModel":
         """Build a single-column ocean model with sensible defaults.
 
@@ -488,6 +489,10 @@ class OceanColumnModel:
             ``surface_forcing.scheme`` must be ``"none"`` or ``"restoring"``
             — prescribed / combined / bulk schemes would double-count the
             :class:`OceanSCMForcing` surface fluxes and are rejected.
+        eos_fn
+            Optional equation-of-state callable ``(T, S, p) -> density``.
+            Passed to the existing physics factory for density, buoyancy
+            forcing and KPP depth diagnosis; ``None`` retains Wright (1997).
         z_coord
             Vertical coordinate.  When ``None`` a stretched z* coordinate
             is built from ``H_max`` / ``dz_surface`` / ``dz_deep``.
@@ -602,6 +607,7 @@ class OceanColumnModel:
         physics_fn = make_ocean_physics(
             physics_config,
             apply_vertical_diffusion=not implicit_vertical_mixing,
+            eos_fn=eos_fn,
             # The SCM's q_net is non-solar and this scheme deposits sw_down,
             # so ePBL can price the penetrating shortwave (#2178).
             epbl_shortwave=physics_config.shortwave_penetration,

@@ -189,6 +189,51 @@ and needs a separate proposal and scientific validation.
 
 ## Coupling and release review
 
+### VR12-AL and the original upstream KPP control
+
+The KPP foundation, including the earlier opt-in Langmuir extension, predates
+this contribution. The wave port originally supplied the missing Stokes
+forcing connection. The revised closure follows the VR12-AL aligned variant
+in Li et al. (2016), Table 2 / Eq. (12),
+[doi:10.1016/j.ocemod.2015.07.020](https://doi.org/10.1016/j.ocemod.2015.07.020),
+based on Van Roekel et al. (2012),
+[doi:10.1029/2011JC007516](https://doi.org/10.1029/2011JC007516).
+The published constants 3.1 and 5.4 replace the former `langmuir_coeff` field
+and `--langmuir-coeff` CLI option; these old settings must be removed from
+scripts/configurations rather than interpreted as a VR12 tuning coefficient.
+
+The preregistration, exact forcing/configuration and attributed author input
+profiles are committed in `scripts/validate/wave_kpp_s_l2/`. The existing SCM
+entrypoint dispatches the controlled experiment; it uses the production SCM,
+EOS, KPP, implicit diffusion and Coriolis rotation. A runs an independently
+exported, unmodified upstream source snapshot; B contains only the weak-flux
+numerical correction, and C adds diagnosed monochromatic-wave Stokes and
+VR12-AL. A→C measures total contribution; A→B isolates the numerical correction;
+B→C isolates wave / Langmuir feedback. Prescribed waves in the scientific
+column and actual Wave advancement in short integration tests are distinct.
+
+```bash
+mkdir -p /tmp/legoesm-wave-kpp-upstream
+git archive 890e837200b2b3534c3c18537cd1ccd56b2737f9 packages src | tar -x -C /tmp/legoesm-wave-kpp-upstream
+JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python scripts/validate/validate_ocean_scm.py \
+  --case wave_langmuir --upstream-root /tmp/legoesm-wave-kpp-upstream \
+  --output-dir results/wave_kpp_s_l2 --plot
+```
+
+Workers verify imported module origins and contents against the selected Git
+tree. The instrument/configuration/inputs must be committed before integration.
+Both `PrecisionPolicy.fp64()` and fp64 state arrays are enforced. JSON/NPZ/CSV
+outputs retain provenance, histories and budget residuals; plots compare
+density-threshold MLD, temperatures and diffusivities. The source hypothesis
+and limitations are preregistered; this lane reports column responses and
+literature trends, without asserting exact LES agreement or global skill.
+
+The weak-buoyancy correction also changes the no-wave KPP at small imposed
+fluxes. Results from the old and revised schemes must retain their respective
+source/configuration identities when comparing or continuing experiments.
+
+### Short coupled execution
+
 Tests cover the real atmospheric stress producer's sign, shore/no-inflow faces,
 physical global edges, nonuniform frequency budgets, area-weighted GSE with
 blocked transfers, GSE footprint refusal/subdivision, prescribed zero boundaries,

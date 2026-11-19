@@ -220,7 +220,6 @@ def build_vertical_mixing_config_from_args(
             K_conv=args.kpp_k_conv,
             A_bg=args.kpp_a_bg,
             enable_langmuir=args.langmuir,
-            langmuir_coeff=args.langmuir_coeff,
             langmuir_number_default=args.langmuir_number_default,
         ),
         iwm=build_iwm_config_from_args(args),
@@ -818,10 +817,8 @@ def parse_args(argv: list[str] | None = None):
                    help="KPP critical bulk Richardson number")
     p.add_argument("--langmuir", action="store_true",
                    help="Enable KPP-Langmuir wave-enhanced surface mixing "
-                        "(eps_L = sqrt(1 + C_L/La_t^2) on the KPP velocity scales).")
-    p.add_argument("--langmuir-coeff", type=float,
-                   default=_DEFAULT_KPP_CONFIG.langmuir_coeff,
-                   help="KPP-Langmuir enhancement coefficient C_L")
+                        "(VR12-AL, Li et al. 2016 Table 2 / Eq. 12; "
+                        "fixed coefficients 3.1 and 5.4).")
     p.add_argument("--langmuir-number-default", type=float,
                    default=_DEFAULT_KPP_CONFIG.langmuir_number_default,
                    help="Fallback turbulent Langmuir number (no Stokes-drift input)")
