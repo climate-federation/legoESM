@@ -535,7 +535,8 @@ def test_soil_can_be_started_near_saturation():
 
     wet = build_config_from_args(_postprocess_args(parser.parse_args(
         base + ["--land-soil-init", "saturation_fraction",
-                "--land-soil-moisture-init-frac", "0.9"]), parser))
+                "--land-soil-moisture-init-frac", "0.9"]), parser)
+    )._replace(ml_pipeline=True)
     assert wet.land_soil_init == "saturation_fraction"
     assert wet.land_soil_moisture_init_frac == pytest.approx(0.9)
     wet.validate_strict()
@@ -622,7 +623,7 @@ def test_a_canopy_gets_per_pft_canopy_parameters(monkeypatch, tmp_path):
     """
     import sys
     sys.path.insert(0, "tests/unit")
-    from test_multilayer_land_driver import _patch_land_loaders, _small_cfg
+    from test_multilayer_land_driver import _grid_lat, _patch_land_loaders, _small_cfg
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.land.canopy.config import CanopyLandParams
 
@@ -665,7 +666,7 @@ def test_a_canopy_gets_per_pft_canopy_parameters(monkeypatch, tmp_path):
         "emissivity now varies by column — if that is intended, this test is "
         "stale and the tuned emissivity may finally be reaching the canopy")
     # And the two datasets agreed on the column count.
-    assert np.asarray(params.hc).shape[0] == int(driver.grid.lat.size)
+    assert np.asarray(params.hc).shape[0] == int(np.asarray(_grid_lat(driver.grid)).size)
 
 
 def test_a_canopy_without_its_surfdata_is_refused(monkeypatch, tmp_path):

@@ -41,7 +41,7 @@ from legoesm.atmosphere.physics import TurbulenceConfig
 
 # The four K-closures that expose TurbulenceOutput.wtheta_flux, split by transport type.
 LOCAL_SCHEMES = ("smagorinsky", "louis")
-NONLOCAL_SCHEMES = ("holtslag_boville", "ysu")
+NONLOCAL_SCHEMES = ("holtslag_boville",)
 SGS_VARIANTS = ("lasd", "smagorinsky", "vreman")
 
 

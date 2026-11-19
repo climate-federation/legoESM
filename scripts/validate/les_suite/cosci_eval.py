@@ -85,6 +85,7 @@ from legoesm.atmosphere.les_suite.candidate_eval import (  # noqa: E402
 )
 from legoesm.atmosphere.les_suite.scm_coupling import interp_profile  # noqa: E402
 from legoesm.atmosphere.les_suite.scm_runner import (  # noqa: E402
+    WARM_RAIN_SCHEMES,
     build_cbl_scm_from_artifact,
     moist_scm_microphysics,
     scm_physics_config,
@@ -151,14 +152,17 @@ def _case_turb(turb, artifact):
 
 
 def _require_kessler(artifact):
-    """User 2026-10-19: every moist case is scored with Kessler. A moist reference
-    must record its LES scheme (no legacy fallback) and that scheme must be Kessler."""
+    """User 2026-10-19, 2026-11-19: every moist case is scored with a warm-rain
+    scheme in ``WARM_RAIN_SCHEMES`` (the Kessler port, or the CloudBench set for
+    CloudBench). A moist reference must record its LES scheme (no legacy fallback)
+    and that scheme must be one of them."""
     if not artifact.is_moist:
         return
     scheme = moist_scm_microphysics(artifact).scheme   # raises with no record
-    if scheme != "kessler":
+    if scheme not in WARM_RAIN_SCHEMES:
         raise ValueError(f"{artifact.case_name}: the reference records microphysics "
-                         f"{scheme!r}; the harness scores moist cases with Kessler only")
+                         f"{scheme!r}; the harness scores moist cases with "
+                         f"{WARM_RAIN_SCHEMES} only")
 
 
 def _sha256(path) -> str:

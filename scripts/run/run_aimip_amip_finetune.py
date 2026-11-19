@@ -32,7 +32,6 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import logging
-import os
 from pathlib import Path
 
 import equinox as eqx
@@ -134,10 +133,11 @@ def main():
         open_arco_era5, ozone_vmr_at_date, regrid_monthly_forcing_to_gaussian,
     )
     from legoesm.training.aimip_params import (
-        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+        AIMIPClassicalParams, aimip_spatial_unread_fields,
+        make_aimip_classical_spectral_physics,
     )
     from legoesm.training.campaign_driver import parse_bool_flag
-    from legoesm.training.aimip_spatial import era5_land_fraction, grid_with_zm_land_fraction
+    from legoesm.training.aimip_spatial import era5_land_fraction, grid_with_land_fraction
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, era5_to_spectral_carry, load_era5_ic,
     era5_terrain_product,
@@ -262,8 +262,7 @@ def main():
     sizing_ps = None
     if not is_nn:
         land_mask = era5_land_fraction(grid)
-        grid = grid_with_zm_land_fraction(
-            grid, str(cfg["aimip_convection"]), land_mask)
+        grid = grid_with_land_fraction(grid, land_mask)
         sizing_ps = init_physics_state(
             ncol, nlev,
             PhysicsConfig(
@@ -317,7 +316,14 @@ def main():
         _make_nn_physics = make_sfno_spectral_physics
     else:
         params0 = load_checkpoint(
-            AIMIPClassicalParams.from_defaults(spatial_surface=True),
+            AIMIPClassicalParams.from_defaults(
+                spatial_surface=True,
+                # fields the trained schemes never read are not in the
+                # checkpoint (and are not trained here either)
+                spatial_unread=aimip_spatial_unread_fields(
+                    turbulence=str(cfg["aimip_turbulence"]),
+                    surface_bulk_scheme=str(
+                        cfg.get("aimip_surface_bulk_scheme", "constant")))),
             args.init_ckpt,
         )
         _make_nn_physics = None
@@ -487,11 +493,10 @@ def main():
             # not lose the whole fine-tune. The bias-corrected EMA is only
             # meaningful at the end; the resumable artifact is the raw
             # params. (~10 KB — cheap.)
+            # save_checkpoint is itself atomic (tmp + rename) and writes the
+            # knob record beside its own path, so it saves to _ck directly.
             _ck = args.out_ckpt.with_name(args.out_ckpt.stem + "_latest_raw.eqx")
-            _tmp = _ck.with_suffix(".eqx.tmp")
-            _ck.parent.mkdir(parents=True, exist_ok=True)
-            save_checkpoint(params, _tmp)
-            os.replace(_tmp, _ck)
+            save_checkpoint(params, _ck)
             # BEST-drift raw params across the whole fine-tune: a late-phase
             # divergence (colnn v3: 15d drift 4.2 -> 424 K^2) must not
             # overwrite the best stability state. Drift normalised by the
@@ -501,9 +506,7 @@ def main():
             if _drift_per_day < best_drift_per_day:
                 best_drift_per_day = _drift_per_day
                 _bk = args.out_ckpt.with_name(args.out_ckpt.stem + "_best_raw.eqx")
-                _btmp = _bk.with_suffix(".eqx.tmp")
-                save_checkpoint(params_at_drift, _btmp)  # the params that produced it
-                os.replace(_btmp, _bk)
+                save_checkpoint(params_at_drift, _bk)  # the params that produced it
                 logger.info(
                     f"  new BEST drift/day^2 {_drift_per_day:.4f} "
                     f"[K^2/d^2 @rd={rd}d] -> {_bk.name}"

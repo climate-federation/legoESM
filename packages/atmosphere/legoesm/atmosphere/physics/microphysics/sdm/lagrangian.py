@@ -1,5 +1,9 @@
 """Advected-Lagrangian Super-Droplet Method for the spectral plane LES.
 
+NOT YET FAITHFUL as a whole to ERF 26.09 (advection, cell pairing, coupling
+and sedimentation are legoESM's); only the particle physics it calls is
+oracle-tested.
+
 This module is the persistent-particle SDM path. It carries a fixed-size
 structure-of-arrays particle population across LES steps, advects it with the
 resolved wind, adds terminal-velocity sedimentation, applies Shima

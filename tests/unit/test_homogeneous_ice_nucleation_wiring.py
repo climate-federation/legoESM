@@ -97,7 +97,7 @@ class TestPipelineReachability:
     def _fv(self, **kw):
         from legoesm.driver.config import ExperimentConfig
         from legoesm.driver.physics_pipeline import _resolve_microphysics
-        cfg = ExperimentConfig(microphysics="morrison", **kw)
+        cfg = ExperimentConfig(microphysics="morrison", morrison_warm_rain_scheme="kk2000", **kw)
         _fn, micro = _resolve_microphysics(cfg)
         return micro
 
@@ -208,13 +208,13 @@ class TestMorrisonScalarOverlay:
         from legoesm.driver.config import ExperimentConfig
         from legoesm.driver.physics_pipeline import _resolve_microphysics
         return _resolve_microphysics(
-            ExperimentConfig(microphysics="morrison", **kw))[1]
+            ExperimentConfig(microphysics="morrison", morrison_warm_rain_scheme="kk2000", **kw))[1]
 
     def test_defaults_are_byte_identical(self):
         from legoesm.atmosphere.physics.microphysics.config import (
             MorrisonConfig,
         )
-        assert self._leaf() == MorrisonConfig()
+        assert self._leaf() == MorrisonConfig(warm_rain_scheme="kk2000")
 
     def test_declared_default_matches_the_leaf(self):
         """The cause-2 defect: 1e-8 declared vs 1e-3 real.  Locked equal so
@@ -294,7 +294,7 @@ class TestMorrisonScalarOverlay:
         from legoesm.driver.config import (
             ExperimentConfig, experiment_config_from_dict,
         )
-        d = ExperimentConfig(microphysics="morrison")._asdict()
+        d = ExperimentConfig(microphysics="morrison", morrison_warm_rain_scheme="kk2000")._asdict()
         d["morrison_dep_coeff"] = 1e-8
         d = {k: v for k, v in d.items() if not hasattr(v, "_asdict")}
         with pytest.warns(UserWarning, match="Migrating to 1e-3"):
@@ -311,7 +311,7 @@ class TestMorrisonScalarOverlay:
         from legoesm.driver.config import ExperimentConfig
         for bad in (float("nan"), 1e-8, 1.0):
             with pytest.raises(Exception, match="morrison_dep_coeff"):
-                ExperimentConfig(microphysics="morrison",
+                ExperimentConfig(microphysics="morrison", morrison_warm_rain_scheme="kk2000",
                                  morrison_dep_coeff=bad).validate_strict()
 
     def test_flavor_sam_reaches_the_leaf(self):
@@ -322,7 +322,7 @@ class TestMorrisonScalarOverlay:
         from legoesm.atmosphere.physics.microphysics.config import (
             MorrisonConfig,
         )
-        assert self._leaf(morrison_flavor="mg") == MorrisonConfig()
+        assert self._leaf(morrison_flavor="mg") == MorrisonConfig(warm_rain_scheme="kk2000")
 
     def test_flavor_on_non_morrison_raises(self):
         from legoesm.driver.config import ExperimentConfig
@@ -337,7 +337,7 @@ class TestMorrisonScalarOverlay:
     def test_flavor_membership_validated(self):
         from legoesm.driver.config import ExperimentConfig
         with pytest.raises(ValueError, match="morrison_flavor"):
-            ExperimentConfig(microphysics="morrison",
+            ExperimentConfig(microphysics="morrison", morrison_warm_rain_scheme="kk2000",
                              morrison_flavor="gcm").validate_strict()
 
     def test_hom_nuc_N_override_requires_the_flag(self):
@@ -347,9 +347,9 @@ class TestMorrisonScalarOverlay:
         refuse the combination and accept it once the flag is on."""
         from legoesm.driver.config import ExperimentConfig
         with pytest.raises(ValueError, match="morrison_hom_ice_nuc_N"):
-            ExperimentConfig(microphysics="morrison",
+            ExperimentConfig(microphysics="morrison", morrison_warm_rain_scheme="kk2000",
                              morrison_hom_ice_nuc_N=1e5).validate_strict()
-        ExperimentConfig(microphysics="morrison",
+        ExperimentConfig(microphysics="morrison", morrison_warm_rain_scheme="kk2000",
                          homogeneous_ice_nucleation=True,
                          morrison_hom_ice_nuc_N=1e5).validate_strict()
 
@@ -362,7 +362,7 @@ class TestMorrisonScalarOverlay:
                 kw = {field: bad}
                 if field == "morrison_hom_ice_nuc_N":
                     kw["homogeneous_ice_nucleation"] = True
-                ExperimentConfig(microphysics="morrison",
+                ExperimentConfig(microphysics="morrison", morrison_warm_rain_scheme="kk2000",
                                  **kw).validate_strict()
 
     def test_params_map_carries_all_five(self):
@@ -416,7 +416,7 @@ class TestRound2Findings:
         carrying it must be legacy)."""
         from legoesm.driver.config import ExperimentConfig
         with pytest.raises(ValueError, match="morrison_dep_coeff"):
-            ExperimentConfig(microphysics="morrison",
+            ExperimentConfig(microphysics="morrison", morrison_warm_rain_scheme="kk2000",
                              morrison_dep_coeff=1e-8).validate_strict()
 
     def test_sub_tolerance_perturbation_is_uniformly_the_default(self):
@@ -429,15 +429,15 @@ class TestRound2Findings:
         from legoesm.driver.config import ExperimentConfig
         from legoesm.driver.physics_pipeline import _resolve_microphysics
         got = _resolve_microphysics(ExperimentConfig(
-            microphysics="morrison",
+            microphysics="morrison", morrison_warm_rain_scheme="kk2000",
             morrison_dep_coeff=1e-3 * (1 + 4.7e-8)))[1]   # f32 storage noise
-        assert got == MorrisonConfig()
+        assert got == MorrisonConfig(warm_rain_scheme="kk2000")
 
     def test_above_tolerance_retune_is_applied(self):
         from legoesm.driver.config import ExperimentConfig
         from legoesm.driver.physics_pipeline import _resolve_microphysics
         got = _resolve_microphysics(ExperimentConfig(
-            microphysics="morrison",
+            microphysics="morrison", morrison_warm_rain_scheme="kk2000",
             morrison_dep_coeff=1e-3 * 1.01))[1]
         assert got.dep_coeff == pytest.approx(1.01e-3)
 
@@ -499,7 +499,7 @@ class TestRound3Findings:
         from legoesm.driver.config import (
             ExperimentConfig, config_to_dict, experiment_config_from_dict,
         )
-        d = config_to_dict(ExperimentConfig(microphysics="morrison"))
+        d = config_to_dict(ExperimentConfig(microphysics="morrison", morrison_warm_rain_scheme="kk2000"))
         assert d["config_schema_version"] == 2
         got = experiment_config_from_dict(d)
         assert got.morrison_dep_coeff == 1e-3

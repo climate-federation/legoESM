@@ -375,20 +375,53 @@ def test_run_atm_latlon_spmd_compiled_segments_on_segment_cadence():
 # dispatch hardening
 # ==============================================================================
 
-def test_segment_rejects_bad_nsteps_and_stateful_carry():
+def test_segment_rejects_bad_nsteps():
     mesh = _mesh()
-    model, c0 = _model_and_state()
+    model, _ = _model_and_state()
     with pytest.raises(ValueError, match="n_steps"):
         make_sharded_atm_latlon_segment(model, mesh, 0)
     with pytest.raises(ValueError, match="n_steps"):
         make_sharded_atm_latlon_segment(model, None, 0)
 
-    seg = make_sharded_atm_latlon_segment(model, mesh, 2)
-    with pytest.raises(NotImplementedError, match="PhysicsState"):
-        seg(shard_state_atm_latlon(c0, mesh), DT, phys_state=object())
-    seg0 = make_sharded_atm_latlon_segment(model, None, 2)
-    with pytest.raises(NotImplementedError, match="PhysicsState"):
-        seg0(c0, DT, phys_state=object())
+
+def _counting_hs_physics():
+    """Held-Suarez plus a per-column carry advanced once per physics call."""
+    from legoesm.atmosphere.forcing.idealized.held_suarez import (
+        held_suarez_forcing_latlon)
+
+    def phys(hs, grid, sigma_coord, ps):
+        return (held_suarez_forcing_latlon(hs, grid, sigma_coord),
+                {"n": ps["n"] + 1.0})
+    phys._requires_phys_state = True
+    return phys
+
+
+@pytest.mark.parametrize("sharded", [True, False])
+def test_segment_threads_the_carry_like_the_per_step_loop(sharded):
+    """The compiled segment threads a physics carry through its scan exactly
+    as the per-step factory does: same state, same carry-out."""
+    mesh = _mesh() if sharded else None
+    model, c0 = _model_and_state()
+    phys = _counting_hs_physics()
+    ps0 = {"n": jnp.zeros(N_LAT * N_LON)}
+    cs = shard_state_atm_latlon(c0, mesh) if sharded else c0
+
+    step = make_sharded_atm_latlon_step(model, mesh, physics_fn=phys)
+    c_ref, ps_ref = cs, ps0
+    for _ in range(3):
+        c_ref, ps_ref = step(c_ref, DT, phys_state=ps_ref)
+    seg = make_sharded_atm_latlon_segment(model, mesh, 3, physics_fn=phys)
+    c_seg, ok, ps_seg = seg(cs, DT, phys_state=ps0)
+
+    assert bool(ok)
+    np.testing.assert_array_equal(np.asarray(ps_seg["n"]), 3.0)
+    np.testing.assert_array_equal(np.asarray(ps_ref["n"]), 3.0)
+    for a, b in zip(jax.tree_util.tree_leaves(c_seg),
+                    jax.tree_util.tree_leaves(c_ref)):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b),
+                                   rtol=0, atol=1e-12)
+    with pytest.raises(NotImplementedError):
+        seg(cs, DT)                     # stateful physics without its carry
 
 
 def test_segment_factory_rejects_anchor_mass():

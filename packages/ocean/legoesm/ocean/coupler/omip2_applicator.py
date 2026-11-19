@@ -29,7 +29,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
+from legoesm.ocean.bulk_flux_omip import air_sea_fluxes, blk_oce_2
 from legoesm.ocean.eos import VALID_FREEZE_SCHEMES, freezing_point
 
 # --- per-step host-transfer ledger (scaling-M2 honest-cost accounting) ------
@@ -713,15 +714,22 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
     area integral of precip / sw_down after either point sampling is within
     0.4% of the first-order conservative integral, so no renormalisation.
     """
-    if forcing_remap not in ("bilinear", "nemo_scrip"):
+    if forcing_remap not in ("bilinear", "nemo_scrip", "nemo_weights"):
         raise ValueError(
-            f"unknown forcing_remap {forcing_remap!r}; expected 'bilinear' "
-            f"or 'nemo_scrip'")
+            f"unknown forcing_remap {forcing_remap!r}; expected 'bilinear', "
+            f"'nemo_scrip' or 'nemo_weights'")
     if forcing_remap == "nemo_scrip" and grid_type != "tripole":
         raise ValueError(
             f"forcing_remap='nemo_scrip' is wired for the tripole only; the "
             f"oracle's weights target that grid. Got grid_type={grid_type!r}.")
+    # "nemo_weights" = the oracle's per-channel split (bicubic winds, bilinear
+    # rest) computed at any grid's points, so every point grid can get it.
+    pt_method = "nemo_weights" if forcing_remap == "nemo_weights" else "bilinear"
     if grid_type in ("latlon", "latlon_regional"):
+        if forcing_remap != "bilinear":
+            raise ValueError(
+                f"forcing_remap={forcing_remap!r} is a point sampler; the "
+                f"{grid_type!r} grid uses the conservative regrid.")
         lat_deg = np.degrees(np.asarray(grid.lat))
         lon_deg = np.degrees(np.asarray(grid.lon))
         return _sample_forcing_latlon(forcing, idx_t, lat_deg, lon_deg)
@@ -738,7 +746,7 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
                     f"would give a plausible wrong field, not an error.")
             return sample_forcing_tripole_scrip(forcing, idx_t)
         forc = _sample_forcing_points(
-            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method="bilinear",
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method=pt_method,
         )
         return {k: v.reshape(shp) for k, v in forc.items()}
     if grid_type == "cubed_sphere":
@@ -747,14 +755,14 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
         shp = lat_pts.shape
         forc = _sample_forcing_points(
             forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
-            method="bilinear",
+            method=pt_method,
         )
         return {k: v.reshape(shp) for k, v in forc.items()}
     if grid_type in ("mpas", "mpas_regional"):
         lat_pts = np.degrees(np.asarray(grid.latCell))
         lon_pts = np.degrees(np.asarray(grid.lonCell))
         return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts,
-                                      method="bilinear")
+                                      method=pt_method)
     if grid_type == "fesom":
         # FESOM triangular mesh: 1-D PAIRED node (lat, lon) points (radians
         # on the FesomOceanGrid facade) — same bilinear treatment as the
@@ -762,13 +770,14 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
         lat_pts = np.degrees(np.asarray(grid.lat))
         lon_pts = np.degrees(np.asarray(grid.lon))
         return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts,
-                                      method="bilinear")
+                                      method=pt_method)
     raise NotImplementedError(
         f"_sample_omip2_forcing does not support grid_type={grid_type!r}"
     )
 
 
-def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
+def sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                         forcing_remap="bilinear"):
     """Public wrapper for :func:`_sample_omip2_forcing`.
 
     Returns the CORE-II / JRA forcing channels (``u10``, ``v10``, ``T_air`` [K],
@@ -779,8 +788,13 @@ def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
     coupler driver (e.g. the prognostic sea-ice glue in
     ``scripts/run/run_omip_core2.py``) can populate an ``AtmToSurface`` from the
     identical sampled fields rather than re-deriving the regrid (cross-module
-    callers must not import the private ``_sample_omip2_forcing``)."""
-    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    callers must not import the private ``_sample_omip2_forcing``).
+
+    ``forcing_remap`` MUST be the value the ocean forcing uses, so the ice and
+    the ocean see the same sampled fields (review 2026-10-10 F19 residual: the
+    prognostic ice saw bilinear while the ocean saw ``nemo_scrip``)."""
+    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                                 forcing_remap=forcing_remap)
 
 
 def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
@@ -791,7 +805,8 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
                                      rho_air: float = constants.rho_air,
                                      u_oce=None, v_oce=None,
                                      wind_current_feedback_vfac: float = 0.0,
-                                     forcing_remap: str = "bilinear"):
+                                     forcing_remap: str = "bilinear",
+                                     zeta_cap_width: float = MOST_ZETA_CAP_WIDTH):
     """Build a :class:`FreshwaterForcing` (P, E, runoff) for the OMIP-2 run.
 
     Delivered to the ocean via the in-core channel
@@ -859,6 +874,7 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
         T_sfc_K=jnp.asarray(T_sfc_K),
         slp_Pa=None if slp is None else jnp.asarray(slp),
         u_oce=u_oce, v_oce=v_oce, vfac=wind_current_feedback_vfac,
+        zeta_cap_width=zeta_cap_width,
     )
     if emp:
         precip = np.asarray(forc["precip"], dtype=np.float64)
@@ -1059,7 +1075,8 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   dm2dc_window=None,
                                   u_oce=None, v_oce=None,
                                   wind_current_feedback_vfac: float = 0.0,
-                                  forcing_remap: str = "bilinear"):
+                                  forcing_remap: str = "bilinear",
+                                  zeta_cap_width: float = MOST_ZETA_CAP_WIDTH):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
@@ -1106,10 +1123,10 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     ``"bilinear"`` (default, unchanged) or ``"nemo_scrip"``, which reads NEMO's
     own SCRIP weight files so the winds arrive through the oracle's exact
     interpolation -- bicubic for u10/v10, bilinear for the rest, as ORCA1's
-    namsbc_blk specifies. Tripole only; the sampler raises otherwise.
+    namsbc_blk specifies (tripole only; the sampler raises otherwise), or
+    ``"nemo_weights"``, the same split computed at any point grid's centres.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
-    sigma_sb = float(constants.sigma_sb)
     T_freeze = float(constants.T_freeze)
 
     forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
@@ -1141,6 +1158,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         T_sfc_K=jnp.asarray(T_sfc_K),
         slp_Pa=None if slp is None else jnp.asarray(slp),
         u_oce=u_oce, v_oce=v_oce, vfac=wind_current_feedback_vfac,
+        zeta_cap_width=zeta_cap_width,
     )
     # Non-solar open-water heat flux, assembled EXACTLY like NEMO blk_oce_2:
     #   qns = eps_w*(LW_down - sigma*T_s^4)            net LW (Kirchhoff: the
@@ -1154,31 +1172,24 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     # (NEMO blk_oce_2 receives theta_air_zt for the rain/snow terms and the
     # ABSOLUTE skin/bulk SST for LW + evap heat content; rcp/rcpi/rLfus are
     # the NEMO-parity values.)
-    lw_net = constants.emissivity_seawater_lw * (
-        np.asarray(forc["lw_down"], dtype=np.float64) - sigma_sb * T_sfc_K ** 4
-    )
     precip_np = np.asarray(forc["precip"], dtype=np.float64)
     snow_np = (np.asarray(forc["snow"], dtype=np.float64)
                if forc.get("snow") is not None else np.zeros_like(precip_np))
-    # CORE-II precip = RAIN+SNOW; guard tiny negative rain from regridding.
-    rain_np = np.maximum(precip_np - snow_np, 0.0)
     from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
     theta_air_j, _ = potential_air_temperature_10m(
         jnp.asarray(forc["T_air"]), jnp.asarray(forc["q_air"]),
         None if slp is None else jnp.asarray(slp))
-    theta_air_C = np.asarray(theta_air_j, dtype=np.float64) - T_freeze
-    T_sfc_C = T_sfc_K - T_freeze
-    q_precip_evap = (
-        - snow_np * float(constants.L_fus_nemo)
-        - np.asarray(evap, dtype=np.float64) * float(constants.c_p_seawater) * T_sfc_C
-        + rain_np * float(constants.c_p_seawater) * theta_air_C
-        + snow_np * float(constants.c_p_ice_nemo) * np.minimum(theta_air_C, 0.0)
+    surface = blk_oce_2(
+        np.asarray(theta_air_j, dtype=np.float64), T_sfc_K - T_freeze,
+        np.asarray(forc["lw_down"], dtype=np.float64), precip_np, snow_np,
+        np.asarray(evap, dtype=np.float64), np.asarray(sh), np.asarray(lh),
+        array_namespace=np,
     )
     # Under a prescribed-ice boundary (under_ice) ``_ice_surface_heat``
     # suppresses this on the ice-covered fraction (snow falling on ice does
     # NOT cool the ocean) and cuts the under-ice SW; otherwise it is the
     # albedo-only surrogate.
-    q_non_sw = np.asarray(sh) + np.asarray(lh) + lw_net + q_precip_evap
+    q_non_sw = surface.qns
     sw_net, q_net = _ice_surface_heat(
         forc["sw_down"], q_non_sw, ice_albedo,
         under_ice=under_ice, tau_ice_sw=tau_ice_sw)
@@ -1285,7 +1296,7 @@ def build_core2_forcing_device_stack(forcing, grid, grid_type: str):
 
 def compute_omip2_surface_forcing_jax(
     state, *, forcing_stack, nn_i, nn_j, grid_shape, idx_t, rho_air=constants.rho_air,
-    nn_w=None,
+    nn_w=None, zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
 ):
     """Pure-JAX, ``lax.scan``-traceable form of
     :func:`compute_omip2_surface_forcing` for the tripole grid (issue #354).
@@ -1308,7 +1319,6 @@ def compute_omip2_surface_forcing_jax(
     until the freshwater channel is wired into the scan body.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
-    sigma_sb = float(constants.sigma_sb)
     T_freeze = float(constants.T_freeze)
 
     def _sample(name):
@@ -1332,26 +1342,19 @@ def compute_omip2_surface_forcing_jax(
     T_sfc_K = state.T.data[..., 0] + T_freeze
     tau_x, tau_y, sh, lh, evap = air_sea_fluxes(
         u10=u10, v10=v10, T_air_K=T_air, q_air=q_air,
-        T_sfc_K=T_sfc_K, slp_Pa=slp,
+        T_sfc_K=T_sfc_K, slp_Pa=slp, zeta_cap_width=zeta_cap_width,
     )
     # Non-solar assembly: EXACT jnp mirror of the host
     # ``compute_omip2_surface_forcing`` (NEMO blk_oce_2 form) -- net-LW
     # Kirchhoff eps_w, snow fusion, rain/snow heat content at theta_air,
     # evap heat content at the absolute SST.
     from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
-    lw_net = constants.emissivity_seawater_lw * (
-        lw_down - sigma_sb * T_sfc_K ** 4)
-    rain = jnp.maximum(precip - snow, 0.0)
     theta_air, _ = potential_air_temperature_10m(T_air, q_air, slp)
-    theta_air_C = theta_air - T_freeze
-    T_sfc_C = T_sfc_K - T_freeze
-    q_precip_evap = (
-        - snow * constants.L_fus_nemo
-        - evap * constants.c_p_seawater * T_sfc_C
-        + rain * constants.c_p_seawater * theta_air_C
-        + snow * constants.c_p_ice_nemo * jnp.minimum(theta_air_C, 0.0)
+    surface = blk_oce_2(
+        theta_air, T_sfc_K - T_freeze, lw_down, precip, snow,
+        evap, sh, lh, array_namespace=jnp,
     )
-    q_net = sh + lh + lw_net + q_precip_evap + sw_down
+    q_net = surface.qns + sw_down
     return OceanSurfaceForcing(
         tau_x=tau_x, tau_y=tau_y, q_net=q_net, sw_down=sw_down,
     )
@@ -1359,6 +1362,7 @@ def compute_omip2_surface_forcing_jax(
 
 def build_omip2_scan_block_fn(
     model, dt, grid_shape, *, rho_air=constants.rho_air, ramp_s=0.0,
+    zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
 ):
     """Build a JIT-compiled ``lax.scan`` block-step function for the tripole
     OMIP time loop (issue #354).
@@ -1395,6 +1399,7 @@ def build_omip2_scan_block_fn(
                 st, forcing_stack=forcing_stack, nn_i=nn_i, nn_j=nn_j,
                 nn_w=nn_w,
                 grid_shape=grid_shape, idx_t=idx_t, rho_air=rho_air,
+                zeta_cap_width=zeta_cap_width,
             )
             if apply_ramp:
                 ramp = jnp.minimum(

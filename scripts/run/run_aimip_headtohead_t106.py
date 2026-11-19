@@ -95,6 +95,7 @@ def _load_winner(repo_root: Path, metric: str) -> tuple[dict, list[dict]]:
 
 def _write_base_yaml(repo_root: Path, winning_overrides: dict) -> Path:
     """Write the T106 + RRTMGP + multi-day base config (winner-aware)."""
+    from legoesm.training.aimip_params import declare_sundqvist_rate
     base = {
         "era5_zarr": (
             "gs://weatherbench2/datasets/era5/"
@@ -158,7 +159,7 @@ def _write_base_yaml(repo_root: Path, winning_overrides: dict) -> Path:
     path = repo_root / HEADTOHEAD_DIR_REL / "base.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as fh:
-        yaml.safe_dump(base, fh, sort_keys=False)
+        yaml.safe_dump(declare_sundqvist_rate(base), fh, sort_keys=False)
     return path
 
 

@@ -395,3 +395,37 @@ def test_phis_adjust_refuses_a_zero_filled_raw_geopotential():
         _apply_phis_hydrostatic_adjustment(
             np.zeros((4, 8)), np.full((4, 8), 5000.0), np.full((4, 8), 1.0e5),
             np.full((4, 8), 280.0), sigma, False)
+
+
+def test_latlon_carry_seeds_the_ice_skin_like_a_restart():
+    """With the prognostic ice skin on, the ERA5 initial carry seeds it at the
+    seawater freezing point (the restart seed); off, the carry has none."""
+    from legoesm import constants
+    from legoesm.grids.vertical import create_sigma_coordinate
+    grid = create_grid("latlon", 24)
+    sigma = create_sigma_coordinate(10)
+    tp = jnp.zeros(np.shape(grid.grid_lat))
+    on = era5_to_latlon_carry(_synthetic_era5(), grid, sigma, target_phis=tp,
+                              ice_skin_prognostic=True)
+    off = era5_to_latlon_carry(_synthetic_era5(), grid, sigma, target_phis=tp)
+    assert off.ice_T_skin is None
+    skin = np.asarray(on.ice_T_skin)
+    assert skin.shape == (grid.n_lat, grid.n_lon)
+    np.testing.assert_array_equal(skin, constants.T_freeze_ocean)
+
+
+def test_scale_build_latlon_samples_seed_the_ice_skin():
+    """Source-level: the WB lat-lon sample builder passes the run's
+    ice_skin_prognostic to every ERA5 lat-lon carry it builds (#2106)."""
+    import ast
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "packages" / "ml" / "legoesm"
+           / "training" / "scale_build.py").read_text()
+    tree = ast.parse(src)
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", None) == "era5_to_latlon_carry"]
+    assert calls
+    for n in calls:
+        kws = {k.arg: ast.unparse(k.value) for k in n.keywords if k.arg}
+        assert kws.get("ice_skin_prognostic") == "_skin"
+    assert "_skin = bool(config.ice_skin_prognostic)" in src

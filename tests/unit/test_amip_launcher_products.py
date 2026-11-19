@@ -21,7 +21,7 @@ REPO = Path(__file__).resolve().parents[2]
 LAUNCHERS = ("config/amip/amip_production.sh",
              "config/amip/amip_production.ginsburg.sh")
 SAME_PRODUCT = ("--aerosol-file", "--aerosol-ccn-file", "--land-mask-file",
-                "--subgrid-orography-file", "--ic-path", "--volcanic-aerosol-file")
+                "--default-subgrid-orography-file", "--ic-path", "--volcanic-aerosol-file")
 # Forcing channels every Levante entry point must pass as the Ginsburg twin does.
 FORCING_PRODUCTS = ("--aerosol-file", "--aerosol-ccn-file", "--volcanic-aerosol-file")
 
@@ -79,6 +79,24 @@ def test_levante_python_launcher_names_the_production_products(monkeypatch, caps
     # Production deck sets no reference AOD, so it runs run_amip.py's
     # default 0.03; this launcher passed 0.05 (user decision 3a, 2026-10-14).
     assert cmd[cmd.index("--aerosol-reference-aod") + 1] == "0.03"
+
+
+def test_levante_python_launcher_forwards_distributed(monkeypatch, capsys):
+    """run_amip federates the SPMD lane only when --distributed is on ITS
+    command line (user decision 2026-10-28), so the wrapper's --distributed
+    must reach it."""
+    spec = importlib.util.spec_from_file_location(
+        "run_amip_levante", REPO / "scripts" / "run" / "run_amip_levante.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "_check_files", lambda files: [])   # Levante paths
+    assert mod.main(["--year", "1979", "--days", "1", "--distributed",
+                     "--n-ranks", "2", "--dry-run",
+                     "--extra", "--distributed-mode", "spmd"]) == 0
+    printed = capsys.readouterr().out.split("[levante] Command:")[1]
+    cmd = [tok for tok in printed.split() if tok != "\\"]
+    assert cmd[0] == "srun"
+    assert "--distributed" in cmd[cmd.index(next(t for t in cmd if t.endswith("run_amip.py"))):]
 
 
 def test_levante_chain_does_not_swap_one_forcing_channel():

@@ -28,20 +28,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.conservation import fix_energy_mpas, fix_mass_mpas
-from legoesm.core.operators_voronoi import (
-    apvm_correction,
-    kinetic_energy_cell,
-    potential_vorticity_vertex,
-    pv_flux_energy_conserving,
-    pv_flux_enstrophy_conserving,
-    thickness_flux,
-    vector_laplacian_del2,
-    vector_laplacian_del4,
-)
 from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASShallowWaterState, MPASShallowWaterTendencies
-from legoesm.grids.operator_adapters import mpas_edge_operators
 from legoesm.grids.voronoi import VoronoiMesh
+from legoesm.atmosphere.dynamics.gcm.shallow_water_generic import mpas_shallow_water_tendencies
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 
@@ -59,91 +49,6 @@ class MPASShallowWaterConfig(NamedTuple):
     fix_energy: bool = False
     time_integrator: str = "rk4"  # "rk4", "ssp_rk3"
 
-
-def mpas_shallow_water_tendencies(
-    state: MPASShallowWaterState,
-    mesh: VoronoiMesh,
-    config: MPASShallowWaterConfig = MPASShallowWaterConfig(),
-    dt: float = 0.0,
-) -> MPASShallowWaterTendencies:
-    """Compute tendencies for the MPAS shallow water equations.
-
-    Parameters
-    ----------
-    state : MPASShallowWaterState
-    mesh : VoronoiMesh
-    config : MPASShallowWaterConfig
-    dt : float
-        Time step (needed for APVM correction).
-
-    Returns
-    -------
-    MPASShallowWaterTendencies
-    """
-    h = state.h.data       # (nCells,)
-    u = state.u.data       # (nEdges,)
-    h_s = state.h_s.data   # (nCells,)
-    g = config.g
-
-    # The grid-dispatched edge-normal operator interface (B2): the TRiSK
-    # divergence/gradient flow through ``ops`` rather than the bare free functions,
-    # so the core calls operators without naming the mesh (design L2).  The adapter
-    # delegates to the same core.operators_voronoi kernels -> byte-identical (its
-    # delegation is pinned in test_grid_operators_adapter).
-    ops = mpas_edge_operators(mesh)
-
-    # --- Thickness tendency: dh/dt = -div(h_edge * u) ---
-    h_flux = thickness_flux(h, u, mesh, order=config.thickness_order)
-    dh_dt_data = -ops.divergence(h_flux)
-
-    # --- Kinetic energy at cells ---
-    ke = kinetic_energy_cell(u, mesh)  # (nCells,)
-
-    # --- Bernoulli function: B = KE + g*(h + h_s) ---
-    bernoulli = ke + g * (h + h_s)
-
-    # --- Pressure/Bernoulli gradient ---
-    grad_B = ops.gradient(bernoulli)  # (nEdges,)
-
-    # --- Potential vorticity ---
-    q = potential_vorticity_vertex(u, h, mesh.fVertex, mesh)
-
-    # Apply APVM if requested
-    if config.apvm_scale > 0 and dt > 0:
-        q = apvm_correction(q, u, mesh, config.apvm_scale * dt)
-
-    # --- PV flux ---
-    if config.pv_scheme == "energy":
-        F_pv = pv_flux_energy_conserving(u, h, q, mesh)
-    elif config.pv_scheme == "enstrophy":
-        F_pv = pv_flux_enstrophy_conserving(u, h, q, mesh)
-    else:
-        raise ValueError(
-            f"Unknown pv_scheme {config.pv_scheme!r}; "
-            "expected one of: 'energy', 'enstrophy'."
-        )
-
-    # --- Velocity tendency ---
-    du_dt_data = -grad_B + F_pv
-
-    # --- Diffusion ---
-    if config.nu_del2 > 0:
-        del2_u = vector_laplacian_del2(u, mesh)
-        du_dt_data = du_dt_data + config.nu_del2 * del2_u
-
-    if config.nu_del4 > 0:
-        del4_u = vector_laplacian_del4(u, mesh)
-        du_dt_data = du_dt_data + config.nu_del4 * del4_u
-
-    dh_dt = state.h.replace(data=dh_dt_data, name="dh_dt", units="m/s")
-    du_dt = state.u.replace(data=du_dt_data, name="du_dt", units="m/s^2")
-
-    return MPASShallowWaterTendencies(dh_dt=dh_dt, du_dt=du_dt)
-
-
-# ============================================================================
-# Model class
-# ============================================================================
 
 class MPASShallowWaterModel(IntegrationMixin):
     """MPAS shallow water model using TRiSK discretization.

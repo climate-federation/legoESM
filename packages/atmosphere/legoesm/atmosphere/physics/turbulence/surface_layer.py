@@ -23,6 +23,7 @@ from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.core.bulk_flux import (
     surface_reference_state,
     compute_most_fluxes,
+    surface_flux_widths,
     compute_sam_oceflx_fluxes,
     simple_bulk_fluxes,
     validate_bulk_scheme,
@@ -73,7 +74,7 @@ __physics_contract__ = {
 
 
 def surface_fluxes_at_lowest_level(u, v, T, q_v, T_sfc, q_sfc, rho, config,
-                                   z_low):
+                                   z_low, *, return_wind_speed=False):
     """``compute_surface_fluxes`` told how high its own input actually is.
 
     Every turbulence kernel feeds the surface solver the LOWEST FULL LEVEL's
@@ -115,10 +116,13 @@ def surface_fluxes_at_lowest_level(u, v, T, q_v, T_sfc, q_sfc, rho, config,
     if (not getattr(config, "z_ref_model_level", False)
             or z_low is None
             or config.bulk_scheme not in _STABILITY_SCHEMES):
-        return compute_surface_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, config)
+        return compute_surface_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, config,
+                                      t_bot=T,
+                                      return_wind_speed=return_wind_speed)
     T_ref, z_ref = surface_reference_state(T, config.z_ref, z_low)
     return compute_surface_fluxes(
-        u, v, T_ref, q_v, T_sfc, q_sfc, rho, config, z_ref=z_ref)
+        u, v, T_ref, q_v, T_sfc, q_sfc, rho, config, z_ref=z_ref, t_bot=T,
+        return_wind_speed=return_wind_speed)
 
 
 def compute_surface_fluxes(
@@ -131,6 +135,8 @@ def compute_surface_fluxes(
     rho: jax.Array,
     config: SurfaceLayerConfig,
     z_ref=None,
+    t_bot=None,
+    return_wind_speed=False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Compute bulk aerodynamic surface fluxes.
 
@@ -159,6 +165,11 @@ def compute_surface_fluxes(
     z_ref : array or None
         Per-column reference height [m] overriding ``config.z_ref`` (MOST
         schemes only; the constant-coefficient path ignores it).
+    t_bot : array or None
+        Lowest-level ABSOLUTE air temperature [K] (``T`` before any
+        reference-height adjustment).  Required by ``large_yeager_cesm``
+        (CESM's cold-air-outbreak wind enhancement reads it); unused by the
+        other schemes.
 
     Returns
     -------
@@ -172,8 +183,19 @@ def compute_surface_fluxes(
         Surface latent heat flux [W/m^2], shape (ncol,). Positive upward.
     ustar : jax.Array
         Friction velocity [m/s], shape (ncol,).
+    wind_speed : jax.Array
+        Only with ``return_wind_speed=True`` (appended last): the wind speed
+        [m/s] the selected scheme put in its flux formulas (gustiness and
+        floors included), the ``wspd`` WRF MYNN pairs with ``ustar``.
     """
     validate_bulk_scheme(config.bulk_scheme)
+    if return_wind_speed and (config.prescribed_tau_x_pa is not None
+                              or config.prescribed_tau_y_pa is not None):
+        raise ValueError(
+            "return_wind_speed pairs the bulk wind speed with the bulk u*; a "
+            "prescribed surface stress rebuilds u* from the stress, so the "
+            "pair would no longer belong to one exchange")
+    _ws = {"return_wind_speed": True} if return_wind_speed else {}
     # Route every stability-dependent bulk scheme — the fixed-roughness
     # Monin-Obukhov land scheme ("most") as well as the ocean air-sea schemes
     # ("coare3"/"large_yeager") — through the iterative MOST solver.  "most"
@@ -185,16 +207,17 @@ def compute_surface_fluxes(
         # fixed-iteration solver, not the generic MOST loop.  ``T`` is the
         # lane's lowest-level temperature (potential-temperature corrected by
         # the caller when ``z_ref_model_level`` is on), as for the other schemes.
-        tau_x, tau_y, shflx, lhflx, ustar = compute_sam_oceflx_fluxes(
+        tau_x, tau_y, shflx, lhflx, ustar, *_w = compute_sam_oceflx_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
-            variant="cesm",
+            variant="cesm", t_bot=t_bot, **_ws,
+            zeta_cap_width=config.most_zeta_cap_width,
         )
         return _apply_prescribed_scalar_fluxes(
-            config, tau_x, tau_y, shflx, lhflx, ustar, rho)
+            config, tau_x, tau_y, shflx, lhflx, ustar, rho) + tuple(_w)
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        tau_x, tau_y, shflx, lhflx, ustar = compute_most_fluxes(
-            u, v, T, q_v, T_sfc, q_sfc, rho,
+        tau_x, tau_y, shflx, lhflx, ustar, *_w = compute_most_fluxes(
+            u, v, T, q_v, T_sfc, q_sfc, rho, **_ws,
             z_ref=(config.z_ref if z_ref is None else z_ref),
             z0_init=config.z0,
             scheme=config.bulk_scheme,
@@ -202,9 +225,11 @@ def compute_surface_fluxes(
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
+            unstable_scheme=config.unstable_scheme,
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
+            **surface_flux_widths(config),
         )
         # The prescribed-flux override applies on THIS branch too. Returning
         # early without it would let a config that sets both a MOST scheme and
@@ -212,7 +237,7 @@ def compute_surface_fluxes(
         # would run on MOST-derived fluxes while the caller believed it had
         # pinned them to the deck.
         return _apply_prescribed_scalar_fluxes(
-            config, tau_x, tau_y, shflx, lhflx, ustar, rho)
+            config, tau_x, tau_y, shflx, lhflx, ustar, rho) + tuple(_w)
 
     # Constant neutral coefficients (default)
     Cd = config.Cd_neutral
@@ -235,7 +260,8 @@ def compute_surface_fluxes(
     )
 
     return _apply_prescribed_scalar_fluxes(
-        config, tau_x, tau_y, shflx, lhflx, ustar, rho)
+        config, tau_x, tau_y, shflx, lhflx, ustar, rho) + (
+            (wind_speed,) if return_wind_speed else ())
 
 
 # Floor on the prescribed stress magnitude inside ustar's nested roots; far
@@ -278,6 +304,47 @@ def latent_enthalpy_correction(lhflx, evap):
     the surface charged the constant.
     """
     return lhflx - constants.L_v * evap   # latent-ok: moist-enthalpy reference L_v of the atmosphere
+
+
+# --- constant-coefficient bulk exchange (ExperimentConfig.C_H / C_E defaults) ---
+# The one home of the default neutral transfer coefficients; the experiment
+# config's C_H / C_E defaults reference these.
+C_H_BULK_DEFAULT = 0.0044
+C_E_BULK_DEFAULT = 0.0044
+
+
+def constant_bulk_surface_fluxes(T_low, q_low, u_low, v_low, p_low, p_s,
+                                 T_sfc, C_H, C_E):
+    """Constant-coefficient bulk ``(shflx, lhflx)`` [W/m2, positive up] at the
+    lowest model level: the ONE law every lane without a turbulence scheme
+    applies.  Latent heat is charged with
+    :func:`legoesm.thermo.charged_latent_heat` (``"constant"``) and the
+    surface humidity is saturation at ``(T_sfc, p_s)``; the wind carries a
+    1 m/s gustiness floor.
+    """
+    from legoesm.thermo import charged_latent_heat, saturation_specific_humidity
+    rho_low = p_low / (constants.R_d * T_low)
+    wind_speed = jnp.sqrt(u_low ** 2 + v_low ** 2 + 1.0)
+    shflx = rho_low * constants.c_pd * C_H * wind_speed * (T_sfc - T_low)
+    q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
+    lhflx = (rho_low * charged_latent_heat("constant", T_sfc) * C_E
+             * wind_speed * (q_sat_sfc - q_low))
+    return shflx, lhflx
+
+
+def bottom_layer_surface_kick(shflx, lhflx, T_sfc, dp_low, evap=None):
+    """Lowest-layer ``(dT/dt [K/s], dq_v/dt [1/s], evap [kg/m2/s])`` from
+    surface fluxes (positive up = into the column).  ``evap`` defaults to the
+    inverse of the SAME latent heat the bulk law charged; the heat kick
+    carries :func:`latent_enthalpy_correction`.
+    """
+    if evap is None:
+        from legoesm.thermo import charged_latent_heat
+        evap = lhflx / charged_latent_heat("constant", T_sfc)
+    dT = (constants.g * (shflx + latent_enthalpy_correction(lhflx, evap))
+          / (constants.c_pd * dp_low))
+    dq = constants.g * evap / dp_low
+    return dT, dq, evap
 
 
 def prescribed_into_surface_flux(surface_flux, rho_sfc, *, shflx=None,
@@ -327,7 +394,7 @@ def neutral_land_stress(z0m, d, z_low, u, v, rho):
     displacement ``d`` for a wind ``(u, v)`` at height ``z_low`` above the local
     surface: rho (kappa |V| / ln((z_low - d)/z0m))^2, the log bounded below by 2."""
     arg = jnp.maximum((z_low - d) / z0m, _NEUTRAL_LOG_ARG_MIN)
-    cd = (constants.kappa_vk / jnp.log(arg)) ** 2
+    cd = (constants.kappa_von_karman / jnp.log(arg)) ** 2
     return rho * cd * (u * u + v * v)
 
 
@@ -383,6 +450,25 @@ def land_stress_into_surface_flux(surface_flux, tau_land_mag, land_valid,
     rebuilt = prescribed_into_surface_flux(
         surface_flux, rho_sfc, tau_x=tx, tau_y=ty)
     return rebuilt[:4] + (jnp.where(has_land, rebuilt[4], surface_flux[4]),)
+
+
+def handback_into_surface_flux(surface_flux, bulk_tau_x, bulk_tau_y,
+                               f_handback, tau_x_hb, tau_y_hb, rho_sfc):
+    """``(tau_x, tau_y, shflx, lhflx, ustar)`` with the coupler's ice+lake
+    stress handback in place of the bulk stress over that fraction.
+
+    ``surface_flux`` carries the bulk stress over every non-land fraction
+    (with the land stress already blended in, or the bulk over land too);
+    ``f_handback`` x the bulk stress is removed and the handback stress
+    (per grid cell, already weighted by the ice/lake area) added.  ``ustar``
+    is rebuilt from the blended stress in EVERY column, so it moves
+    continuously as the prognostic ice fraction goes to zero (vote V14).
+    Heat fluxes pass through unchanged.
+    """
+    tx = surface_flux[0] - f_handback * bulk_tau_x + tau_x_hb
+    ty = surface_flux[1] - f_handback * bulk_tau_y + tau_y_hb
+    return prescribed_into_surface_flux(surface_flux, rho_sfc,
+                                        tau_x=tx, tau_y=ty)
 
 
 def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar, rho):
@@ -545,6 +631,7 @@ def _single_tile_flux(
     rho: jax.Array,
     config: SurfaceLayerConfig,
     z_ref=None,
+    t_bot=None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Single-tile surface flux with correct fixed-roughness MOST routing.
 
@@ -561,7 +648,8 @@ def _single_tile_flux(
         return compute_sam_oceflx_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
-            variant="cesm",
+            variant="cesm", t_bot=t_bot,
+            zeta_cap_width=config.most_zeta_cap_width,
         )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(
@@ -573,9 +661,11 @@ def _single_tile_flux(
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
+            unstable_scheme=config.unstable_scheme,
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
+            **surface_flux_widths(config),
         )
 
     # Constant neutral coefficients.
@@ -657,10 +747,10 @@ def compute_tiled_surface_fluxes(
                 or not getattr(cfg, "z_ref_model_level", False)
                 or cfg.bulk_scheme not in _STABILITY_SCHEMES):
             return _single_tile_flux(u, v, T, q_v, T_sfc_tile, q_sfc_tile,
-                                     rho, cfg)
+                                     rho, cfg, t_bot=T)
         return _single_tile_flux(
             u, v, T + (constants.g / constants.c_pd) * z_low, q_v,
-            T_sfc_tile, q_sfc_tile, rho, cfg, z_ref=z_low)
+            T_sfc_tile, q_sfc_tile, rho, cfg, z_ref=z_low, t_bot=T)
 
     f_ocean = _tile(tiles.T_ocean, tiles.q_sfc_ocean, config_ocean)
     f_ice = _tile(tiles.T_ice, tiles.q_sfc_ice, config_ice)

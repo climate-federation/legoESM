@@ -2,12 +2,27 @@
 
 Two variants, routed by ``DCAConfig.variant``:
 
-* ``"manabe"`` (default): the Manabe-Smagorinsky-Strickler (1965)
-  pairwise moist-adiabatic adjustment.  Scans from bottom to top,
-  adjusting adjacent layer pairs toward moist-adiabatic neutrality;
-  excess moisture is removed as precipitation.  Uses ``jax.lax.scan``
-  for JIT-friendliness and differentiability with smooth sigmoid
-  triggers.
+* ``"manabe"`` (default): Manabe moist convective adjustment, a port of
+  GFDL ``atmos_phys`` tag ``2021.02`` (commit
+  46817a12232ed54d1a5d5a4394a695621f575812)
+  ``atmos_param/moist_conv/moist_conv.F90`` (``moist_conv``, coldT = F, no
+  cloud-tracer detrainment, namelist defaults).  Layer pairs where BOTH levels
+  are supersaturated and the lapse rate exceeds the moist adiabat by more than
+  ``ALTOL`` form unstable blocks; each block is set to the moist adiabat
+  conserving moist enthalpy with the saturation humidity linearised in T
+  (block solve), ``ITSMOD = 30`` iterations per tolerance, ``ALTOL`` doubling
+  from 0.02 K while <= 0.10 K.  Unsaturated layers are never adjusted.  The
+  oracle's quirks are kept: within an iteration the column is finished as
+  soon as the block search finds no further block, so a column is re-tested
+  only when its lowest block reaches the bottom two levels.  Precipitation is
+  ``max(column drying, 0)``.  Saturation curve and constants are legoESM's
+  (the oracle fixture was produced with them).  The existing smooth CAPE gate
+  (``cape_threshold``, ``cape_sharpness``; no counterpart in the oracle) still
+  scales the result; ``cape_threshold < 0`` with a hard sharpness is the
+  oracle.  Matched to the RUNNING oracle in
+  ``tests/atmosphere/test_dca_moist_conv_oracle.py`` (fixture from
+  ``scripts/validate/oracle/dca_moist_conv/``).  Piecewise differentiable
+  (hard switches as ``jnp.where``; fixed 90-iteration ``lax.scan``).
 
 * ``"ahmed_neelin"``: the Ahmed-Neelin-Adames (2020) lower-tropospheric-
   buoyancy (B_L) precipitation-buoyancy closure (``ahmed_neelin_dca``).
@@ -20,85 +35,52 @@ Two variants, routed by ``DCAConfig.variant``:
   derived from observational EOF structures unavailable in-model).  See
   :func:`ahmed_neelin_dca`.
 
-Planned: a DRY convective-adjustment mode (DCAConfig.dry=False default)
---------------------------------------------------------------------
-The gray radiative–convective-equilibrium column
-(``atmosphere.idealized.radiative_convective_column``) needs a *dry* adjustment,
-but this scheme currently always targets the SATURATED MOIST adiabat (the
-``gamma_m = moist_adiabat_lapse_rate(T_mid, p_mid)`` target in
-``_adjust_one_iteration`` uses ``q_sat(T,p)``, NOT the supplied ``q_v``) and gates
-by moist CAPE — so ``q_v=0`` does NOT yield a dry adjustment.  To add a correct
-dry mode (additive, default-off, existing moist path byte-identical):
-
-1. ``DCAConfig.dry: bool = False``.
-2. In ``_adjust_one_iteration`` (thread ``dry`` through), when ``dry``:
-   * use the dry-adiabatic target ``gamma = gamma_dry = R_d*T_mid/(c_pd*p_mid)``
-     (already computed) for both the instability metric and ``T_target_upper``;
-   * SKIP the moisture branch entirely (no ``q_sat`` saturation/removal, no
-     ``delta_T_lh`` latent warming) — ``q`` unchanged, precip 0.  This makes the
-     pair adjustment conserve dry static energy ``c_p*T*dp`` exactly.
-3. In ``dca_convection``: when ``dry``, replace the moist-CAPE gate
-   (``compute_cape`` vs ``cape_threshold``) with a DRY static-stability gate —
-   e.g. a smooth sigmoid on the column's max super-adiabatic excess
-   ``(actual_dTdp - gamma_dry)`` — so the adjustment actually fires for a dry
-   super-adiabatic column (moist CAPE is ~0 there and would suppress it).
-4. Validate (new test): a super-adiabatic dry column relaxes to dry-adiabatic
-   NEUTRALITY (constant potential temperature ``theta`` to tol), column dry
-   enthalpy ``sum(c_p*T*dp)`` conserved (no precip), jax.grad finite; then
-   re-enable the column's ``convective_adjustment=True`` path against it.
+Not ported (remainder): the oracle's ``coldT`` path (sublimation latent heat
+and snow) and its stratiform-cloud detrainment (``beta``, cloud tracers).
+There is no dry convective adjustment here; the gray RCE column refuses one.
 
 References
 ----------
+- GFDL atmos_phys 2021.02, atmos_param/moist_conv/moist_conv.F90.
 - Manabe, S., Smagorinsky, J., & Strickler, R. F. (1965).
   Simulated climatology of a general circulation model with a
   hydrological cycle. Mon. Wea. Rev., 93, 769-798.
 - Ahmed, F., Adames, A. F., & Neelin, J. D. (2020). Deep convective
   adjustment of temperature and moisture. J. Atmos. Sci., 77, 2163-2186.
 
-Faithfulness
-------------
-The Manabe path (``_manabe_dca_convection`` / ``_adjust_one_iteration``) is
-oracle-faithfulness-pinned in
-``tests/atmosphere/hydrostatic/unit/test_dca_manabe_faithful.py``: the full
-``ConvectionOutput`` matches an independent (original-coord Python-loop) oracle
-to rel 1e-12 on a nonuniform mass grid; column moist static energy
-(``c_pd*dT_dt + L_v*dq_v_dt``) and total water (``dq_v_dt + dq_c_conv_dt``) are
-conserved to round-off; and the per-column CAPE-gate application (output ==
-gate * pre-gate sweep, gated across the (33,300) J/kg tunable range), the
-latent-heat closure, the moist-adiabatic target, and the pair level assignment
-each carry a load-bearing canary.  (Ahmed-Neelin variant: see
-``test_dca_ahmed_neelin.py``.)
 """
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
-from legoesm.thermo import saturation_specific_humidity
-from legoesm.atmosphere.physics.thermodynamics import (
-    moist_adiabat_lapse_rate,
-    compute_cape,
+from legoesm.thermo import (
+    saturation_specific_humidity,
+    saturation_specific_humidity_dT,
+    saturation_vapor_pressure,
 )
+from legoesm.atmosphere.physics.thermodynamics import compute_cape
 from legoesm.atmosphere.physics.convection.config import (
     AhmedNeelinDCAConfig,
     DCAConfig,
 )
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection._triggers import cape_trigger
-from legoesm.atmosphere.physics.convection.mass_flux import (
-    stratosphere_mass_flux_gate,
-)
 from legoesm.atmosphere.physics._shared import safe_divide
 
 __physics_contract__ = {
     "summary": (
-        "Deep convective adjustment (variant dispatch): Manabe-Smagorinsky-"
-        "Strickler (1965) pairwise moist-adiabatic adjustment or the "
+        "Deep convective adjustment (variant dispatch): Manabe moist "
+        "convective adjustment (port of GFDL atmos_phys 2021.02 moist_conv: "
+        "supersaturated unstable blocks set to the moist adiabat, moist "
+        "enthalpy conserved, excess vapour precipitated) or the "
         "Ahmed-Neelin-Adames (2020) lower-tropospheric-buoyancy precipitation "
-        "closure; both relax the column toward neutrality and convert the "
-        "dried vapor to cloud water."
+        "closure; the dried vapor is handed out as cloud water."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa", "dt": "s",
@@ -109,13 +91,13 @@ __physics_contract__ = {
         "convective_mask": "1 (0-1 convective indicator)",
     },
     "sign_convention": (
-        "Warms and dries where it stabilizes (dT_dt>0, dq_v_dt<0 in the "
-        "convecting layer); the condensed vapor becomes cloud water "
-        "(dq_c_conv_dt>=0, handed to microphysics); column moist static "
-        "energy is conserved per adjusted pair/level (c_pd*dT_dt + "
-        "L_v*dq_v_dt integrates to 0) and column total water is closed "
-        "(integral of dq_v_dt + dq_c_conv_dt = 0); surface at the last "
-        "vertical index."
+        "Warms and dries where it stabilizes; the condensed vapor becomes "
+        "cloud water (dq_c_conv_dt>=0, handed to microphysics) whose column "
+        "integral is the oracle precipitation max(-int(dq_v) dp/g, 0); each "
+        "Manabe block conserves int(c_pd dT + L_v dq_v) dp exactly (the new "
+        "humidity is q_sat + dq_sat/dT * (T_new - T) and the block temperature "
+        "solves the enthalpy balance with it); surface at the last vertical "
+        "index."
     ),
     "conserves": ["energy", "moisture"],
     "differentiable": True,
@@ -124,187 +106,142 @@ __physics_contract__ = {
         "Ahmed, Adames & Neelin (2020), J. Atmos. Sci. 77, 2163-2186"
     ),
     "idealized_test": (
-        "A super-adiabatic saturated column relaxes toward moist-adiabatic "
-        "neutrality with column moist static energy conserved and total water "
-        "(vapor+cloud) closed; a stable / rest column yields zero tendency."
+        "tests/atmosphere/test_dca_moist_conv_oracle.py: 23 columns vs the "
+        "running GFDL moist_conv to 1e-10 with the CAPE gate off; unsaturated "
+        "columns are untouched."
     ),
 }
 
 
-def _adjust_one_iteration(
-    T: jax.Array,
-    q_v: jax.Array,
-    p_full: jax.Array,
-    dp: jax.Array,
-    mixing_fraction: float,
-    instability_blend_sharpness: float,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """One bottom-to-top sweep adjusting unstable layer pairs.
+# --- GFDL atmos_phys 2021.02 moist_conv namelist defaults (moist_conv.F90 l.38-42) ---
+_MCA_HC = 1.00          # HC: relative humidity at which saturation is assumed
+_MCA_TOL_MIN_K = 0.02   # TOLmin: initial lapse-rate tolerance ALTOL [K]
+_MCA_TOL_MAX_K = 0.10   # TOLmax: largest ALTOL before giving up [K]
+_MCA_ITSMOD = 30        # ITSMOD: iterations per tolerance
+# ALTOL doubles from TOLmin while <= TOLmax: 0.02, 0.04, 0.08 -> three stages.
+_MCA_N_TOL_STAGES = 1 + int(math.floor(math.log2(_MCA_TOL_MAX_K / _MCA_TOL_MIN_K)))
 
-    Scans from the bottom-most pair upward using jax.lax.scan.
-    For each adjacent pair (k, k-1) with k being lower:
-    - Compare actual lapse rate to moist adiabatic
-    - If unstable, adjust toward neutral with smooth blending
-    - Redistribute excess moisture as precipitation
+_INERT_MANABE_FIELDS = ("n_iterations", "mixing_fraction", "instability_blend_sharpness")
 
-    Parameters
-    ----------
-    T : jax.Array
-        Temperature [K], shape (ncol, nlev).
-    q_v : jax.Array
-        Water vapor specific humidity [kg/kg], shape (ncol, nlev).
-    p_full : jax.Array
-        Pressure at full levels [Pa], shape (ncol, nlev).
-    dp : jax.Array
-        Layer thickness [Pa], shape (ncol, nlev).
-    mixing_fraction : float
-        Fraction of adjustment per iteration.
-    instability_blend_sharpness : float
-        Sigmoid sharpness on the dimensionless superadiabatic-instability
-        metric controlling adjustment blending.
 
-    Returns
-    -------
-    T_new : jax.Array
-        Adjusted temperature, shape (ncol, nlev).
-    q_v_new : jax.Array
-        Adjusted moisture, shape (ncol, nlev).
-    precip_col : jax.Array
-        Precipitation from this sweep [kg/m^2/s equivalent: kg/kg * Pa/g],
-        shape (ncol,).
-    """
-    ncol, nlev = T.shape
+def _es_des(T):
+    """``lookup_es_des``: e_s and de_s/dT of legoESM's Tetens curve."""
+    return jax.jvp(saturation_vapor_pressure, (T,), (jnp.ones_like(T),))
 
-    # Reverse to scan from bottom to top
-    # Level indices: 0=top, nlev-1=bottom
-    # Reversed: 0=bottom, nlev-1=top
-    T_rev = T[:, ::-1]          # (ncol, nlev)
-    q_v_rev = q_v[:, ::-1]      # (ncol, nlev)
-    p_rev = p_full[:, ::-1]     # (ncol, nlev)
-    dp_rev = dp[:, ::-1]        # (ncol, nlev)
 
-    def scan_step(carry, k):
-        """Adjust adjacent pair (k-1, k) using progressively updated profiles."""
-        T_work, q_work, precip_accum = carry
+def _compute_qs(T, p):
+    """``compute_qs(T, p, qs, dqsdT, hc, esat)`` with legoESM's q_sat curve."""
+    qs = saturation_specific_humidity(T, p)
+    dqs = saturation_specific_humidity_dT(T, p)
+    es = saturation_vapor_pressure(T) * _MCA_HC
+    return qs, dqs, es
 
-        T_below = T_work[:, k - 1]
-        q_below = q_work[:, k - 1]
-        p_below = p_rev[:, k - 1]
-        dp_below = dp_rev[:, k - 1]
 
-        T_upper = T_work[:, k]
-        q_upper = q_work[:, k]
-        p_upper = p_rev[:, k]
-        dp_upper = dp_rev[:, k]
+def _alrm(T, pf, ph, HL):
+    """Moist-adiabatic temperature difference between adjacent levels, ALRM(k)."""
+    rd, rv, cp = constants.R_d, constants.R_v, constants.c_pd
+    d622 = rd / rv
+    rocp = rd / cp
+    delpop = (pf[1:] - pf[:-1]) / ph[1:-1]
+    thaf = 0.50 * (T[:-1] + T[1:])
+    es, des = _es_des(thaf)
+    esm = _MCA_HC * es
+    esd = _MCA_HC * des
+    return (rocp * delpop * thaf * (ph[1:-1] + d622 * HL * esm / thaf / rd)
+            / (ph[1:-1] + d622 * HL * esd / cp))
 
-        # Midpoint for lapse rate
-        p_mid = 0.5 * (p_below + p_upper)
-        T_mid = 0.5 * (T_below + T_upper)
-        dp_pair = p_below - p_upper  # pressure difference (positive)
-        dp_pair = jnp.clip(dp_pair, 1.0, None)
 
-        # Actual lapse rate: dT/dp (temperature decrease per pressure decrease)
-        actual_dTdp = (T_below - T_upper) / dp_pair
+def _ivf(T, Qdif, Qsat, ALRM, altol):
+    """IVF(k) = 1 where levels k and k+1 are both supersaturated and the
+    layer is unstable beyond the tolerance; IVF(KX) = 0."""
+    sat = Qdif * Qsat > 0.0
+    ivf = sat[:-1] & sat[1:] & ((T[1:] - T[:-1]) > (ALRM + altol))
+    return jnp.concatenate([ivf, jnp.zeros((1,), bool)])
 
-        # Moist adiabatic lapse rate
-        gamma_m = moist_adiabat_lapse_rate(T_mid, p_mid)
 
-        # Dry adiabatic lapse rate for normalization
-        gamma_dry = constants.R_d * T_mid / (constants.c_pd * p_mid)
+def _row_seq_sums(mask, vals):
+    """out[k] = sum over kk (in increasing kk) of vals[kk] where mask[k, kk]."""
+    def add(c, x):
+        m, v = x
+        return c + jnp.where(m, v, 0.0), None
+    return jax.lax.scan(add, jnp.zeros(mask.shape[0], vals.dtype), (mask.T, vals))[0]
 
-        # Dimensionless instability: positive means superadiabatic
-        instability = (actual_dTdp - gamma_m) / jnp.clip(gamma_dry, 1e-10, None)
 
-        # Smooth trigger: sigmoid on the dimensionless super-adiabatic
-        # metric, times the per-iteration mixing fraction, AND gated out
-        # of the stratosphere.  The pressure gate multiplies ``blend``
-        # BEFORE the thermodynamics so the thin upper-model layers (small
-        # Δp/g) are never adjusted: an ungated solve concentrated the
-        # pair's compensating heat in the top layer and spiked it to
-        # ~519 K → NaN within the first RCE day (codex adversarial review).
-        strat_gate_pair = stratosphere_mass_flux_gate(p_mid)
-        blend = (
-            jax.nn.sigmoid(instability_blend_sharpness * instability)
-            * mixing_fraction * strat_gate_pair
-        )
+def _moist_conv_column(Tin, Qin, pf, ph):
+    """``moist_conv`` for one column (coldT = F, no cloud tracers, Lbot absent):
+    returns the adjustments Tdel, Qdel and Rain [kg/m2] (before ``dtinv``)."""
+    cp, HL = constants.c_pd, constants.L_v
+    d378 = 1.0 - constants.R_d / constants.R_v
+    kx = Tin.shape[0]
+    lev = jnp.arange(kx)
+    zero = jnp.zeros((), Tin.dtype)
+    pdelta = ph[1:] - ph[:-1]
+    Qsat, Esdv, Esat = _compute_qs(Tin, pf)
+    Qdif = jnp.maximum(0.0, Qin - Qsat)
+    ALRM = _alrm(Tin, pf, ph, HL)
+    IVF = _ivf(Tin, Qdif, Qsat, ALRM, _MCA_TOL_MIN_K)
 
-        # Simultaneous two-level solve enforcing BOTH the moist-adiabatic
-        # target lapse and mass-weighted (dry) enthalpy conservation:
-        #     T_below_new − T_upper_new = gamma_m · dp_pair        (lapse)
-        #     dp_b·T_below_new + dp_u·T_upper_new
-        #         = dp_b·T_below + dp_u·T_upper                  (enthalpy)
-        # The earlier code derived ``T_target_upper`` from the OLD
-        # ``T_below`` and then moved ``T_below`` independently, so at
-        # ``blend = 1`` the achieved lapse overshot/inverted the target and
-        # dumped the compensating heat into the thin top layer (codex
-        # must-fix; the discarded ``delta_mean``/``T_new_upper`` lines were
-        # also dead code).  Solving the 2×2 system makes ``blend = 1``
-        # impose the target lapse exactly while conserving pair enthalpy.
-        total_dp = dp_below + dp_upper
-        enthalpy = T_below * dp_below + T_upper * dp_upper
-        T_new_upper = (enthalpy - dp_below * gamma_m * dp_pair) / total_dp
-        T_new_below = T_new_upper + gamma_m * dp_pair
+    def iteration(state, s):
+        Temp, Qmix, Qsat, Esdv, Esat, Qdif, ALRM, IVF, active = state
+        it = s % _MCA_ITSMOD + 1
+        altol = _MCA_TOL_MIN_K * 2.0 ** (s // _MCA_ITSMOD)
+        # Unstable blocks KTOP..KBOT: a run of IVF = 1 at KTOP..KBOT-1 plus
+        # KBOT, the first level below with IVF = 0.  Blocks are disjoint and
+        # each solve reads only its own levels, so all are solved at once.
+        in_blk = IVF | jnp.concatenate([jnp.zeros((1,), bool), IVF[:-1]])
 
-        # Blend between original and adjusted
-        T_adj_upper = T_upper + blend * (T_new_upper - T_upper)
-        T_adj_below = T_below + blend * (T_new_below - T_below)
+        def first_zero(c, x):
+            k, v = x
+            c = jnp.where(v, c, k)
+            return c, c
+        kbot = jax.lax.scan(first_zero, kx - 1, (lev[::-1], IVF[::-1]))[1][::-1]
+        C = jnp.where(pf - d378 * Esat <= 0.0, 0.0, Esdv)
+        alrm_k = jnp.concatenate([ALRM, jnp.zeros((1,), ALRM.dtype)])
+        sum0 = _row_seq_sums((lev[None, :] >= lev[:, None]) & (lev[None, :] <= kbot[:, None] - 1),
+                             alrm_k)
+        t1 = pdelta * ((cp + HL * C) * (Temp + sum0) + HL * (Qmix - Qsat))
+        t2 = pdelta * (cp + HL * C)
+        prev_same = jnp.concatenate([jnp.zeros((1,), bool), in_blk[:-1] & (kbot[:-1] == kbot[1:])])
+        start = in_blk & ~prev_same
 
-        # Moisture adjustment: saturate at the new temperature
-        q_sat_upper = saturation_specific_humidity(T_adj_upper, p_upper)
-        q_sat_below = saturation_specific_humidity(T_adj_below, p_below)
+        def block_sums(c, x):
+            st, ib, a, b = x
+            s1 = jnp.where(st, zero, c[0]) + jnp.where(ib, a, zero)
+            s2 = jnp.where(st, zero, c[1]) + jnp.where(ib, b, zero)
+            return (s1, s2), (s1, s2)
+        S1, S2 = jax.lax.scan(block_sums, (zero, zero), (start, in_blk, t1, t2))[1]
+        ta_bot = (S1 / jnp.where(in_blk, S2, 1.0))[kbot]
+        Ta = jnp.where(lev == kbot, ta_bot, ta_bot - sum0)
+        Qa = Qsat + C * (Ta - Temp)
+        upd = active & in_blk
+        Temp_n = jnp.where(upd, Ta, Temp)
+        Qmix_n = jnp.where(upd, Qa, Qmix)
+        qs, dqs, es = _compute_qs(Temp_n, pf)
+        Qsat_n = jnp.where(upd, qs, Qsat)
+        Esdv_n = jnp.where(upd, dqs, Esdv)
+        Esat_n = jnp.where(upd, es, Esat)
+        Qdif_n = jnp.where(upd, jnp.maximum(0.0, Qmix_n - Qsat_n), Qdif)
+        alrm_new = _alrm(Temp_n, pf, ph, HL)
+        ALRM_n = jnp.where(upd[:-1] & (lev[:-1] < kbot[:-1]), alrm_new, ALRM)
+        # The block search ends the column unless the last block reached
+        # KBOT >= MXLEV1 (kstart > MXLEV1): only then the column is re-tested.
+        fall = IVF[kx - 2] | IVF[kx - 3]
+        retest = active & fall & (it < _MCA_ITSMOD)
+        ALRM_r = jnp.where(retest, alrm_new, ALRM_n)
+        IVF_r = jnp.where(retest, _ivf(Temp_n, Qdif_n, Qsat_n, alrm_new, altol), IVF)
+        last_stage = s // _MCA_ITSMOD == _MCA_N_TOL_STAGES - 1
+        active_n = active & fall & jnp.where(it < _MCA_ITSMOD, jnp.any(IVF_r), ~last_stage)
+        return (Temp_n, Qmix_n, Qsat_n, Esdv_n, Esat_n, Qdif_n, ALRM_r, IVF_r, active_n), None
 
-        # Remove excess moisture (precipitation)
-        q_new_upper = jnp.minimum(q_upper, q_sat_upper)
-        q_new_below = jnp.minimum(q_below, q_sat_below)
+    state = (Tin, Qin, Qsat, Esdv, Esat, Qdif, ALRM, IVF, jnp.any(IVF))
+    state = jax.lax.scan(iteration, state, jnp.arange(_MCA_ITSMOD * _MCA_N_TOL_STAGES))[0]
+    Tdel = state[0] - Tin
+    Qdel = state[1] - Qin
 
-        # Blend moisture adjustment
-        q_adj_upper = q_upper + blend * (q_new_upper - q_upper)
-        q_adj_below = q_below + blend * (q_new_below - q_below)
-
-        # Accumulate precipitation from moisture removal
-        dq_upper_pa = (q_upper - q_adj_upper) * dp_upper  # kg/kg · Pa
-        dq_below_pa = (q_below - q_adj_below) * dp_below  # kg/kg · Pa
-        precip_new = precip_accum + (dq_upper_pa + dq_below_pa) / constants.g
-
-        # Moist static energy conservation: condensed water releases L_v
-        # energy per unit mass.  The previous implementation conserved
-        # only dry static energy (mass-weighted T preserved), losing
-        # L_v · ⟨Δq⟩ ≈ 2.5 K per g/kg of column-mean condensed water.
-        # Adding the latent warming uniformly to the pair preserves the
-        # moist-adiabatic lapse rate just imposed via T_target while
-        # closing the moist static energy budget:
-        #   c_p ⟨ΔT⟩ + L_v ⟨Δq⟩ = 0  (column mean over the pair).
-        delta_T_lh = (
-            constants.L_v * (dq_upper_pa + dq_below_pa)
-            / (constants.c_pd * (dp_below + dp_upper))
-        )
-        T_adj_upper = T_adj_upper + delta_T_lh
-        T_adj_below = T_adj_below + delta_T_lh
-
-        T_work = T_work.at[:, k - 1].set(T_adj_below)
-        T_work = T_work.at[:, k].set(T_adj_upper)
-        q_work = q_work.at[:, k - 1].set(q_adj_below)
-        q_work = q_work.at[:, k].set(q_adj_upper)
-
-        return (T_work, q_work, precip_new), None
-
-    # Pin the precip carry dtype to whatever ``q * dp`` actually
-    # produces inside the scan body — under standard promotion the
-    # compute precision wins when ``q_v`` is at storage precision but
-    # ``dp_rev`` comes from sigma-coord arrays at compute precision.
-    # ``jnp.result_type`` resolves this without materializing a scalar.
-    _precip_dtype = jnp.result_type(q_v_rev, dp_rev)
-    init_carry = (T_rev, q_v_rev, jnp.zeros(ncol, dtype=_precip_dtype))
-    level_indices = jnp.arange(1, nlev)
-    (T_adj_rev, q_adj_rev, precip_col), _ = jax.lax.scan(
-        scan_step, init_carry, level_indices,
-    )
-
-    # Un-reverse to original top-to-bottom ordering
-    T_new = T_adj_rev[:, ::-1]
-    q_new = q_adj_rev[:, ::-1]
-
-    return T_new, q_new, precip_col
+    def add(c, x):
+        return c + x, None
+    rain = jax.lax.scan(add, zero, (ph[:-1] - ph[1:]) * Qdel * (1.0 / constants.g))[0]
+    return Tdel, Qdel, jnp.maximum(rain, 0.0)
 
 
 def _manabe_dca_convection(
@@ -315,107 +252,67 @@ def _manabe_dca_convection(
     dt: float,
     config: DCAConfig = DCAConfig(),
 ) -> ConvectionOutput:
-    """Compute Manabe-style Deep Convective Adjustment tendencies.
+    """Manabe moist convective adjustment (GFDL ``moist_conv``) tendencies.
 
     Parameters
     ----------
-    T : jax.Array
-        Temperature at full levels [K], shape (ncol, nlev).
-    q_v : jax.Array
-        Water vapor specific humidity [kg/kg], shape (ncol, nlev).
-    p_full : jax.Array
-        Pressure at full levels [Pa], shape (ncol, nlev).
-    p_half : jax.Array
-        Pressure at half levels [Pa], shape (ncol, nlev+1).
+    T, q_v : jax.Array
+        Temperature [K] and water-vapour specific humidity [kg/kg] at full
+        levels, shape (ncol, nlev), level 0 = model top.
+    p_full, p_half : jax.Array
+        Full- and half-level pressure [Pa], shapes (ncol, nlev), (ncol, nlev+1).
     dt : float
-        Model time step [s].
+        Model time step [s]; adjustments are returned per second (``dtinv``).
     config : DCAConfig
-        Convection configuration.
+        ``cape_threshold`` / ``cape_sharpness`` set the existing CAPE gate
+        (no oracle counterpart; ``cape_threshold < 0`` with a hard sharpness
+        disables it).  ``n_iterations``, ``mixing_fraction`` and
+        ``instability_blend_sharpness`` belonged to the replaced pairwise
+        sweep and must stay at their defaults.
 
     Returns
     -------
     ConvectionOutput
-        Convective tendencies and diagnostics.
     """
-    ncol, nlev = T.shape
-    dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
-
-    # Apply adjustment iterations.  ``prec_iter`` returned by the inner
-    # scan inherits ``q * dp`` precision (compute precision wins when
-    # state is f32 but sigma-coord-derived dp is f64), so pin
-    # ``precip_total`` to the same result-type so the outer scan carry
-    # input matches its output.
-    T_adj = T
-    q_adj = q_v
-    precip_total = jnp.zeros(ncol, dtype=jnp.result_type(q_v, dp))
-
-    def body_fn(carry, _):
-        T_c, q_c, prec = carry
-        T_new, q_new, prec_iter = _adjust_one_iteration(
-            T_c, q_c, p_full, dp, config.mixing_fraction,
-            config.instability_blend_sharpness,
-        )
-        return (T_new, q_new, prec + prec_iter), None
-
-    (T_adj, q_adj, precip_total), _ = jax.lax.scan(
-        body_fn,
-        (T_adj, q_adj, precip_total),
-        jnp.arange(config.n_iterations),
-    )
-
-    # CAPE diagnostic BEFORE gating (using original profiles)
-    cape = compute_cape(T, T_adj, p_full, p_half)
-
-    # Gate tendencies by CAPE: only adjust where CAPE exceeds threshold.
-    # cape_trigger == sigmoid(sharpness * (CAPE - threshold)) — differentiable.
-    cape_gate = cape_trigger(
-        cape, config.cape_threshold, config.cape_sharpness
-    )  # (ncol,)
-
-    # Convert to tendencies, gated by CAPE (a per-column scalar, so it
-    # preserves the per-pair MSE balance below).  The stratosphere is
-    # already suppressed inside the sweep, where ``blend`` is multiplied
-    # by the pressure gate *per adjusting pair* (uniformly across the
-    # pair's two levels) — that keeps ``c_p·ΔT + L_v·Δq = 0`` per pair, so
-    # column MSE is conserved.  Gating the OUTPUT tendencies by the
-    # per-level pressure factor instead would break that conservation
-    # (∫ gate·[c_p·dT + L_v·dq] dp ≠ 0 for a level-varying gate).
-    dT_dt = cape_gate[:, None] * (T_adj - T) / dt
-    dq_v_dt = cape_gate[:, None] * (q_adj - q_v) / dt
-    # Convective source for cloud water — column-conservative
-    # rescaling so that ∫ dq_c_conv_dt dp/g equals the column-net
-    # drying (matches the legacy ``precipitation`` formula). Naive
-    # per-level ``max(-dq_v_dt, 0)`` would create water column-wide
-    # whenever the adjustment has mixed-sign vapor tendencies; this
-    # rescaling removes that bug while keeping the field non-negative
-    # at every level. ``precip_total`` (the scan-accumulated column
-    # total) is no longer surfaced — microphysics owns the surface
-    # precipitation diagnostic.
-    del precip_total
+    traced_inert = []
+    for name in _INERT_MANABE_FIELDS:
+        v = getattr(config, name)
+        if isinstance(v, jax.core.Tracer):
+            traced_inert.append(jnp.any(v != DCAConfig._field_defaults[name]))
+        elif np.any(np.asarray(v) != DCAConfig._field_defaults[name]):
+            raise ValueError(
+                f"DCAConfig.{name} belonged to the replaced pairwise sweep; the "
+                "GFDL moist_conv port has no counterpart, so the field is inert "
+                f"and must stay at its default {DCAConfig._field_defaults[name]}")
+    dtype = jnp.result_type(T, q_v, p_full, p_half)
+    T, q_v, p_full, p_half = (jnp.asarray(x, dtype) for x in (T, q_v, p_full, p_half))
+    Tdel, Qdel, rain = jax.vmap(_moist_conv_column)(T, q_v, p_full, p_half)
+    dtinv = 1.0 / dt
+    dT, dq, rain = Tdel * dtinv, Qdel * dtinv, rain * dtinv
+    # Existing CAPE gate (no counterpart in moist_conv): R_d * positive part of
+    # the adjustment's warming, integrated in dp/p.
+    cape = compute_cape(T, T + Tdel, p_full, p_half)
+    if traced_inert:
+        # traced config (jit argument): a non-default inert field cannot raise,
+        # so it poisons the outputs instead of being ignored
+        cape = jnp.where(jnp.any(jnp.stack(traced_inert)), jnp.nan, cape)
+    cape_gate = cape_trigger(cape, config.cape_threshold, config.cape_sharpness)
+    dT_dt = cape_gate[:, None] * dT
+    dq_v_dt = cape_gate[:, None] * dq
+    # Condensate source: local drying rescaled so its column integral is the
+    # oracle Rain (AD-safe divide, issue #249).
+    dp = p_half[:, 1:] - p_half[:, :-1]
     local_cond = jnp.maximum(-dq_v_dt, 0.0)
-    # Both column reductions share the ``* dp / g`` weight on the level
-    # axis — stack the two integrands and reduce once.
-    _col_pair = jnp.sum(
-        jnp.stack([local_cond, dq_v_dt], axis=-1) * (dp / constants.g)[..., None],
-        axis=-2,
-    )
-    col_local_cond = _col_pair[..., 0:1]
-    col_net_drying = jnp.clip(-_col_pair[..., 1:2], 0.0, None)
-    # AD-safe column rescaling — see sbm.py for derivation; issue #249.
+    col_local_cond = jnp.sum(local_cond * dp / constants.g, axis=1, keepdims=True)
     dq_c_conv_dt = local_cond * safe_divide(
-        col_net_drying, col_local_cond, eps=1e-20,
-    )  # (ncol, nlev) [kg/kg/s]
-
-    # Convective mask: CAPE-gated
-    convective_mask = cape_gate
-
+        (cape_gate * rain)[:, None], col_local_cond, eps=1e-20)
     return ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
         dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
-        convective_mask=convective_mask,
-        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
+        convective_mask=cape_gate,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # coldT = F: liquid only
     )
 
 
@@ -802,8 +699,7 @@ def dca_convection(
     Routes on ``config.variant``:
 
     * ``"manabe"`` (default): :func:`_manabe_dca_convection` — the
-      Manabe-Smagorinsky-Strickler (1965) pairwise moist-adiabatic
-      adjustment (legacy legoESM ``dca`` behaviour, unchanged).
+      Manabe moist convective adjustment (port of GFDL ``moist_conv``).
     * ``"ahmed_neelin"``: :func:`ahmed_neelin_dca` — the
       Ahmed-Neelin-Adames (2020) B_L precipitation-buoyancy closure,
       using ``config.ahmed_neelin``.

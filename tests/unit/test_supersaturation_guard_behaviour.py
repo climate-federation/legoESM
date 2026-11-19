@@ -21,12 +21,12 @@ are quoted here so a future change of behaviour shows up as a diff rather than
 as a silent re-tune of an assertion.
 
     scheme          hard=False  hard=True   (RH after 1 step from RH0 = 1.4)
-    kessler            1.0589      1.0000
-    seifert_beheng     1.0589      1.0000
+    kessler            1.0589      1.0000   (pre-port surrogate; now exempt)
+    seifert_beheng     1.0589      1.0000   (pre-port proxy; now exempt)
     morrison           1.0589      1.0000
     thompson           1.0589      1.0000
     p3                 1.0589      1.0000
-    sundqvist          0.2255      1.0000
+    sundqvist          0.2255      1.0000   (pre-port surrogate; now exempt)
     ml_emulator        1.2459      1.0000
 
 Two honest readings of that table, both of which the assertions encode:
@@ -60,17 +60,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from legoesm.atmosphere.physics.microphysics.cloudbench_warm_rain import (
+    cloudbench_warm_rain_microphysics,
+)
 from legoesm.atmosphere.physics.microphysics.config import (
     HARD_SAT_GUARD_SCHEMES,
-    KesslerConfig,
+    CloudBenchWarmRainConfig,
     MicrophysicsMLEmulatorConfig,
     MorrisonConfig,
     P3Config,
     SeifertBehengConfig,
-    SundqvistConfig,
-    ThompsonConfig,
 )
-from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     MicrophysicsEmulator,
     ml_microphysics,
@@ -81,8 +81,6 @@ from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
     seifert_beheng_microphysics,
 )
-from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
-from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.thermo import saturation_specific_humidity
 
 from legoesm import constants
@@ -98,33 +96,35 @@ _P0 = 90000.0
 _RH0 = 1.4
 
 _SCHEMES = {
-    "kessler": (kessler_microphysics, KesslerConfig),
-    "sundqvist": (sundqvist_microphysics, SundqvistConfig),
+    "cloudbench_warm_rain": (cloudbench_warm_rain_microphysics,
+                             CloudBenchWarmRainConfig),
     "seifert_beheng": (seifert_beheng_microphysics, SeifertBehengConfig),
     "morrison": (morrison_microphysics, MorrisonConfig),
-    "thompson": (thompson_microphysics, ThompsonConfig),
     "p3": (p3_microphysics, P3Config),
     "ml_emulator": (ml_microphysics, MicrophysicsMLEmulatorConfig),
 }
 
 # Schemes whose DEFAULT (smooth) branch leaves the column still super-saturated
-# after one step. Sundqvist is excluded because it OVERSHOOTS instead (see the
-# module docstring); it gets its own, stricter assertion below.
+# after one step.
+# seifert_beheng is not guarded (it runs gSAM's exact satadj_liquid every call
+# and refuses the opt-in guard; HARD_SAT_GUARD_EXEMPT).
 _DEFAULT_LEAVES_SUPERSATURATED = tuple(
-    s for s in _SCHEMES if s != "sundqvist")
+    s for s in _SCHEMES if s in HARD_SAT_GUARD_SCHEMES)
 
 
 def _column():
     shape = (1, 4)
     T = jnp.full(shape, _T0, dtype=jnp.float64)
     p_full = jnp.full(shape, _P0, dtype=jnp.float64)
-    p_half = jnp.full((1, 5), _P0, dtype=jnp.float64)
     q_v = _RH0 * saturation_specific_humidity(T, p_full)
     z = jnp.zeros(shape, dtype=jnp.float64)
     hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
                            N_c=z, N_r=z, N_i=z)
     rho = p_full / (constants.R_d * T)
     dz = jnp.full(shape, 500.0, dtype=jnp.float64)
+    # top-down interfaces around _P0 with dp/g == rho*dz in every layer
+    p_half = _P0 + constants.g * rho[:, :1] * 500.0 * (
+        jnp.arange(5, dtype=jnp.float64) - 2.0)
     return T, q_v, hyd, p_full, p_half, rho, dz
 
 
@@ -196,36 +196,13 @@ def test_default_leaves_the_column_supersaturated_after_one_step(scheme):
     )
 
 
-def test_sundqvist_default_overshoots_and_the_guard_fixes_it():
-    """Sundqvist's own failure mode, asserted as what it IS.
-
-    Its smooth branch removes the whole excess toward q_sat(T_old) in one step
-    and ignores the latent heating that raises q_sat, so from RH 1.4 it lands
-    at RH ~0.23 with a ~20 K one-step heating spike and rains out ~28 % of the
-    column water. With the guard the landing point is the enthalpy-consistent
-    equilibrium and the per-step heating is capped."""
-    rh_off, tw_off = _integrate("sundqvist", hard=False, nstep=40)
-    rh_on, tw_on = _integrate("sundqvist", hard=True, nstep=40)
-    assert rh_off[0] < 0.4, (
-        f"expected the documented one-step overshoot; got RH = {rh_off[0]}")
-    assert 0.99 <= rh_on[0] <= 1.001, (
-        f"guarded arm should land ON the curve; got RH = {rh_on[0]}")
-    # The overshoot is not free: it dumps condensate into autoconversion, so
-    # far more column water leaves as precipitation.
-    assert tw_off[-1] < tw_on[-1], (
-        f"guarded arm should retain MORE column water ({tw_on[-1]}) than the "
-        f"overshooting default ({tw_off[-1]})")
-    assert tw_off[-1] / tw_off[0] < 0.9
-
-
 @pytest.mark.parametrize(
     "scheme", sorted(set(HARD_SAT_GUARD_SCHEMES) - {"ml_emulator"}))
 def test_guard_never_creates_column_water(scheme):
     """Sign/conservation check. Both arms are compared at the IDENTICAL window
     (step 1) against the IDENTICAL initial state -- differing spans would be a
     confound (CLAUDE.md). Note the two arms are NOT expected to land on the
-    same total water: Sundqvist's overshooting default rains out far more (that
-    is the defect, asserted separately). What must hold in EVERY arm is that
+    same total water. What must hold in EVERY arm is that
     total water never exceeds what the column started with.
 
     ml_emulator is excluded here and covered by the exact-equality test below:
@@ -273,9 +250,14 @@ def test_ml_emulator_guard_is_exactly_water_neutral_and_actually_fires():
         "with the feature removed, so it proves nothing. Check the wiring."
     )
     np.testing.assert_allclose(d_qc, -d_qv, rtol=1e-12, atol=0.0)
-    # ... and the heating that accompanies it is the matching latent release.
+    # ... and the heating that accompanies it is the matching latent release,
+    # Kirchhoff L_v at the post-emulator temperature the guard solves at.
+    from legoesm.thermo import latent_heat_vaporization
+    T = _column()[0]
+    T_post = np.asarray(T + off.dT_dt * _DT)
     np.testing.assert_allclose(
-        d_T, (constants.L_v / constants.c_pd) * (-d_qv), rtol=1e-12, atol=0.0)
+        d_T, np.asarray(latent_heat_vaporization(T_post)) / constants.c_pd * (-d_qv),
+        rtol=1e-12, atol=0.0)
 
 
 def test_ml_emulator_guard_uses_the_smooth_gate_not_the_eager_hard_gate():
@@ -336,12 +318,15 @@ def test_ml_emulator_guard_gradient_is_finite_through_the_gate():
 
 def test_guard_conserves_moist_enthalpy_in_the_bulk_schemes():
     """c_pd*T + L_v*q_v is conserved by the adjustment (the identity the shared
-    core promises). Checked on Kessler at step 1 with no rain formed yet, so
-    condensation is the only active vapour term."""
-    fn, cfg_cls = _SCHEMES["kessler"]
+    core promises). Checked on Morrison at step 1 with no condensate yet, so
+    condensation is the only active vapour term.  (Kessler, Seifert-Beheng and
+    Sundqvist, the earlier subjects, are now faithful oracle ports that refuse
+    the guard: HARD_SAT_GUARD_EXEMPT.)"""
+    fn, cfg_cls = _SCHEMES["morrison"]
     T, q_v, hyd, p_full, p_half, rho, dz = _column()
     cfg = cfg_cls(hard_saturation_adjustment=True)
     out = fn(T, q_v, hyd, p_full, p_half, rho, dz, _DT, cfg)
+    assert float(np.min(np.asarray(out.dq_v_dt))) < 0.0   # it condenses
     dh = (constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt) * _DT
     h0 = constants.c_pd * T + constants.L_v * q_v
     np.testing.assert_allclose(np.asarray(dh) / np.asarray(h0), 0.0, atol=1e-12)
@@ -350,26 +335,6 @@ def test_guard_conserves_moist_enthalpy_in_the_bulk_schemes():
 # ---------------------------------------------------------------------------
 # Byte-identity of the OFF path (P1's explicit requirement)
 # ---------------------------------------------------------------------------
-def test_sundqvist_off_path_never_touches_the_guard(monkeypatch):
-    """PROOF that ``hard_saturation_adjustment=False`` is byte-identical: the
-    shared blend is replaced with a bomb. Default config must not detonate it
-    (=> the new code is not merely a no-op, it is not EXECUTED, so no float
-    op differs); hard=True must."""
-    import legoesm.atmosphere.physics.microphysics.sundqvist as sq
-
-    def _bomb(*a, **k):
-        raise AssertionError("hard_saturation_blend called on the OFF path")
-
-    monkeypatch.setattr(sq, "hard_saturation_blend", _bomb)
-    T, q_v, hyd, p_full, p_half, rho, dz = _column()
-    sq.sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, _DT,
-                              SundqvistConfig())          # must NOT raise
-    with pytest.raises(AssertionError, match="OFF path"):
-        sq.sundqvist_microphysics(
-            T, q_v, hyd, p_full, p_half, rho, dz, _DT,
-            SundqvistConfig(hard_saturation_adjustment=True))
-
-
 def test_ml_emulator_off_path_never_touches_the_guard(monkeypatch):
     """Same byte-identity proof for the emulator's post-step drain.
 
@@ -423,7 +388,8 @@ def test_guard_positivity_claim_is_exactly_what_the_rate_limit_gives():
                                 -1.0e-4 * jnp.ones((1, 1), dtype=jnp.float64)],
                                axis=1)
     rate = hard_saturation_blend(jnp.zeros_like(q_v_post), T, q_v_post, p,
-                                 _DT, q_sat, 1.1, 5.0)
+                                 _DT, q_sat, 1.1, 5.0,
+                                 l_over_cp=constants.L_v / constants.c_pd)
     r = np.asarray(rate)
     assert r[0, 0] > 0.0, "super-saturated cell was not drained at all"
     # No drain can be manufactured from zero or negative vapour.
@@ -434,80 +400,16 @@ def test_guard_positivity_claim_is_exactly_what_the_rate_limit_gives():
     assert q_v_final[0, 2] == np.asarray(q_v_post)[0, 2]   # negative untouched
 
 
-# Values below were produced by scripts/tmp/_probe_ssguard_byteid.py at
-# origin/main 5b74b65128b04d7ad1c2de8df8dcefd99e531b84 (SLURM job 9331695,
-# JAX_ENABLE_X64=1, CPU) — i.e. BEFORE the guard existed. Pinning them here
-# turns the byte-identity claim from a one-off manual diff into a CI gate. The
-# cells span sub-saturated, marginal and strongly super-saturated at 300 K.
-#
-# TOLERANCE, deliberately not exact equality. The TRUE byte-identity proof is
-# the same-platform base-vs-branch array diff (0 differing lines) plus the
-# monkeypatch bomb showing the guard code is never executed; this constant is
-# a CI TRIPWIRE, and an exact `assert_array_equal` on a float64 exp/division
-# chain would be brittle to a backend or jax-version ULP change and would get
-# "fixed" by re-pinning the numbers — quietly destroying the tripwire. rtol
-# 1e-13 is ~2 orders above fp64 ULP noise and ~12 orders below the smallest
-# effect the guard could have (enabling it changes these tendencies by O(1)),
-# so it cannot mask a real perturbation.
-_PREGUARD_RTOL = 1.0e-13
-_SUNDQVIST_PREGUARD_DT_DT = (0.07790655134982057, 0.0042109453424112216, -2.6370890683278935e-06, 0.00120314759851969, 0.00021895372484426559)  # re-measured 2026-09-29 (specific q_sat inputs, x64 CPU)
-_SUNDQVIST_PREGUARD_DQ_V_DT = (-3.129469722034535e-05, -1.6915170447021228e-06, 1.0593063421051318e-09, -4.832987618459902e-07, -8.79526869762267e-08)
-
-
-def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
-    """Numeric byte-identity against values computed BEFORE the guard existed.
-
-    The monkeypatch "bomb" tests prove the new code is not INVOKED; this proves
-    the numbers are unchanged, which is the claim that actually protects every
-    tuned parameter set and prior comparison. Arrays are compared, never
-    printed summaries (CLAUDE.md)."""
-    T = jnp.array([[300.0, 285.0, 260.0, 230.0, 205.0]], dtype=jnp.float64)
-    p = jnp.array([[95000.0, 85000.0, 60000.0, 35000.0, 15000.0]],
-                  dtype=jnp.float64)
-    rh = jnp.array([[1.40, 1.05, 0.90, 1.60, 2.00]], dtype=jnp.float64)
-    q_v = rh * saturation_specific_humidity(T, p)
-    shape = T.shape
-    z = jnp.zeros(shape, dtype=jnp.float64)
-    hyd = HydrometeorState(
-        q_c=jnp.full(shape, 3.0e-4, dtype=jnp.float64),
-        q_r=jnp.full(shape, 1.0e-5, dtype=jnp.float64),
-        q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
-    rho = p / (constants.R_d * T)
-    dz = jnp.full(shape, 400.0, dtype=jnp.float64)
-    p_half = jnp.concatenate([p, p[:, -1:]], axis=1)
-
-    out = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
-                                 SundqvistConfig())
-    np.testing.assert_allclose(
-        np.asarray(out.dT_dt).ravel(), np.array(_SUNDQVIST_PREGUARD_DT_DT),
-        rtol=_PREGUARD_RTOL, atol=0.0)
-    np.testing.assert_allclose(
-        np.asarray(out.dq_v_dt).ravel(), np.array(_SUNDQVIST_PREGUARD_DQ_V_DT),
-        rtol=_PREGUARD_RTOL, atol=0.0)
-
-    # NON-VACUITY: the tripwire must actually be tight enough to SEE the guard.
-    # Turning it on must violate the same tolerance by a wide margin — without
-    # this, a loosened rtol could silently render the whole test decorative.
-    on = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
-                                SundqvistConfig(hard_saturation_adjustment=True))
-    rel = np.max(np.abs(
-        (np.asarray(on.dT_dt).ravel() - np.array(_SUNDQVIST_PREGUARD_DT_DT))
-        / np.array(_SUNDQVIST_PREGUARD_DT_DT)))
-    assert rel > 1.0e6 * _PREGUARD_RTOL, (
-        f"enabling the guard moved dT_dt by only rel={rel}; the pinned "
-        "baseline is too loose to detect a real change."
-    )
-
-
 def test_guard_is_differentiable_end_to_end():
     """The overlay must not break autodiff (end-to-end jax.grad is a repo
-    invariant). Gradient of column condensate wrt initial vapour, guard ON."""
+    invariant). Gradient of column condensate wrt initial vapour, guard ON
+    (Morrison; Sundqvist, the earlier subject, now refuses the guard)."""
+    fn, cfg_cls = _SCHEMES["morrison"]
     T, q_v, hyd, p_full, p_half, rho, dz = _column()
 
     def loss(qv):
-        out = sundqvist_microphysics(
-            T, qv, hyd, p_full, p_half, rho, dz, _DT,
-            SundqvistConfig(hard_saturation_adjustment=True))
+        out = fn(T, qv, hyd, p_full, p_half, rho, dz, _DT,
+                 cfg_cls(hard_saturation_adjustment=True))
         return jnp.sum(out.dq_c_dt ** 2)
 
     g = jax.grad(loss)(q_v)

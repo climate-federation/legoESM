@@ -202,7 +202,8 @@ def test_round6_independent_trajectory_uses_production_step_and_only_bridges_ssh
     source = Path(gate.__file__).read_text()
     assert "state = state._replace(" in source
     assert "eta=state.eta.replace(data=" in source
-    assert "_NEMOWSRK3TestHooks(expose_live_stage_operands=True)" in source
+    assert "_NEMOWSRK3TestHooks(" in source
+    assert "expose_live_stage_operands=True" in source
     assert "trace = model.step(" in source
     assert "state = trace.state_after" in source
     assert '"claim_label": claim_label' in source

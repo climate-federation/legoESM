@@ -186,7 +186,16 @@ def test_gyre_whole_step_rk3_dump_registry_is_complete_and_fail_closed():
     assert time_level_for_dump(
         "oracle_bt_ordered_operands_kt00000001.bin") == "now"
     with pytest.raises(ValueError, match="no registered NEMO time level"):
-        time_level_for_dump("oracle_stage_kt00000002_s1.bin")
+        time_level_for_dump("oracle_stage_kt00000003_s1.bin")
+
+
+def test_gyre_common_state_stage_dump_registry_is_exact_and_fail_closed():
+    assert time_level_for_dump("oracle_bt_frames_kt00004321.bin") == "after"
+    for stage in range(1, 4):
+        assert time_level_for_dump(
+            f"oracle_stage_kt00004321_s{stage}.bin") == "after"
+    with pytest.raises(ValueError, match="no registered NEMO time level"):
+        time_level_for_dump("oracle_stage_kt00004322_s1.bin")
 
 
 def test_round139_developed_slow_forcing_split_is_before_level():

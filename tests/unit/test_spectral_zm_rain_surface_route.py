@@ -78,7 +78,8 @@ def _fake_zm(ncol, nlev, dq_v, dq_c, dq_r):
     z = jnp.zeros((ncol, nlev))
 
     def fake(*, T, q_v, p_full, p_half, u, v, conv_prog_profile, dt, config,
-             land_frac=None, cld_frac=None, pref_edge=None):
+             land_frac=None, cld_frac=None, pblh=None, pref_edge=None,
+             tracers=None):
         return ConvectionOutput(
             dT_dt=z, dq_v_dt=dq_v, dq_c_conv_dt=dq_c, cape=jnp.zeros((ncol,)),
             convective_mask=jnp.ones((ncol,)), dq_r_conv_dt=dq_r), z
@@ -92,7 +93,11 @@ def _run(monkeypatch, name, fake, state, grid, sigma):
     if name == "zhang_mcfarlane":   # the test grid carries no land fraction
         cc = cc._replace(zhang_mcfarlane=cc.zhang_mcfarlane._replace(land_fraction="none"))
     fn = convint.make_convection_physics(cc, "spectral_pe", _DT)
-    tend, _prog = fn(state, grid, sigma)
+    ps = None
+    if name == "zhang_mcfarlane":   # ZM needs the carried pblh: CAM cold start
+        from tests._zm_cold_start import cold_phys_state
+        ps = cold_phys_state(jnp.zeros((grid.n_lat * grid.n_lon, sigma.n_levels)))
+    tend, _prog = fn(state, grid, sigma, phys_state=ps)
     return {k: np.asarray(getattr(v, "data", v)) for k, v in tend.tracers.items()}
 
 
@@ -125,28 +130,6 @@ def test_zm_refuses_a_state_without_a_cloud_tracer(monkeypatch):
     with pytest.raises(ValueError, match="must carry both tracers"):
         _run(monkeypatch, "zhang_mcfarlane", _fake_zm(ncol, _N_LEV, dq_v, dq_c, dq_r),
              state, grid, sigma)
-
-
-@pytest.mark.parametrize("with_qr", [False, True])
-def test_tiedtke_rain_split_route_is_unchanged(monkeypatch, with_qr):
-    tracers = ("q_v", "q_c", "q_r") if with_qr else ("q_v", "q_c")
-    grid, sigma, state, ncol = _setup(tracers=tracers)
-    dq_v, dq_c, _ = _patterns(ncol, _N_LEV)
-    dq_r = jnp.abs(_patterns(ncol, _N_LEV)[2])  # a >=0 per-layer rain SOURCE
-    z = jnp.zeros((ncol, _N_LEV))
-
-    def fake(*, T, q_v, p_full, p_half, u, v, conv_prog_profile, dt, config,
-             moisture_convergence=None):
-        return ConvectionOutput(
-            dT_dt=z, dq_v_dt=dq_v, dq_c_conv_dt=dq_c, cape=jnp.zeros((ncol,)),
-            convective_mask=jnp.ones((ncol,)), dq_r_conv_dt=dq_r), z
-    tt = _run(monkeypatch, "tiedtke", fake, state, grid, sigma)
-    shp = (grid.n_lat, grid.n_lon, _N_LEV)
-    if with_qr:
-        np.testing.assert_array_equal(tt["q_r"], np.asarray(dq_r).reshape(shp))
-        np.testing.assert_array_equal(tt["q_c"], np.asarray(dq_c).reshape(shp))
-    else:
-        np.testing.assert_array_equal(tt["q_c"], np.asarray(dq_c + dq_r).reshape(shp))
 
 
 def test_real_zm_kernel_closes_column_water_on_the_spectral_bridge(monkeypatch):

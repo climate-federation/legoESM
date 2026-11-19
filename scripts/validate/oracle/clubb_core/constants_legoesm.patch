@@ -1,0 +1,32 @@
+diff --git a/src/CLUBB_core/constants_clubb.F90 b/src/CLUBB_core/constants_clubb.F90
+index 2af6daabf..3876ed0b4 100644
+--- a/src/CLUBB_core/constants_clubb.F90
++++ b/src/CLUBB_core/constants_clubb.F90
+@@ -204,12 +204,12 @@ module constants_clubb
+ #else
+ 
+   real( kind = core_rknd ), parameter, public ::  & 
+-    Cp = 1004.67_core_rknd,  & ! Dry air specific heat at constant p [J/kg/K]
+-    Lv = 2.5e6_core_rknd,    & ! Latent heat of vaporization         [J/kg]
+-    Ls = 2.834e6_core_rknd,  & ! Latent heat of sublimation          [J/kg]
+-    Lf = 3.33e5_core_rknd,   & ! Latent heat of fusion               [J/kg]
+-    Rd = 287.04_core_rknd,   & ! Dry air gas constant                [J/kg/K]
+-    Rv = 461.5_core_rknd       ! Water vapor gas constant            [J/kg/K]
++    Cp = 1004.64_core_rknd,  & ! Dry air specific heat at constant p [J/kg/K]
++    Lv = 2.501e6_core_rknd,    & ! Latent heat of vaporization         [J/kg]
++    Ls = 2.8347e6_core_rknd,  & ! Latent heat of sublimation          [J/kg]
++    Lf = 3.337e5_core_rknd,   & ! Latent heat of fusion               [J/kg]
++    Rd = 287.05_core_rknd,   & ! Dry air gas constant                [J/kg/K]
++    Rv = 461.51_core_rknd      ! Water vapor gas constant            [J/kg/K]
+ 
+ 
+   real( kind = core_rknd ), parameter, public :: &
+@@ -231,7 +231,7 @@ module constants_clubb
+   ! real, parameter, public :: grav  = 9.80665_core_rknd ! Gravitational acceleration [m/s^2]
+   real( kind = core_rknd ), parameter, public :: &
+     omega_planet = 7.292e-5_core_rknd, & ! Planetary rotation rate [s^-1]
+-    grav = 9.81_core_rknd, & ! Gravitational acceleration     [m/s^2]
++    grav = 9.80616_core_rknd, & ! Gravitational acceleration     [m/s^2]
+     p0   = 1.0e5_core_rknd   ! Reference pressure             [Pa]
+ 
+   ! Von Karman's constant

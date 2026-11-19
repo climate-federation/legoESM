@@ -131,7 +131,9 @@ def test_wide_halo_refuses_ab3_time_filters(setup, filt):
     nine orders above this suite's 1e-12 parity gate.
     """
     grid, z_coord, state = setup
-    cfg = _cfg(barotropic_time_filter=filt)
+    # The AB3 family needs the card's rn_bt_alpha stated; 0.07 is the value
+    # the library default supplied before it became a required card field.
+    cfg = _cfg(barotropic_time_filter=filt, nemo_barotropic_filter_alpha=0.07)
     # The standard path still runs it -- the refusal is specific to the twin.
     barotropic_substeps_latlon_cgrid(state, 30.0, 12, grid, z_coord, cfg)
     with pytest.raises(NotImplementedError, match="barotropic_time_filter"):

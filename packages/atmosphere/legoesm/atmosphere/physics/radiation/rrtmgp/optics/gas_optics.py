@@ -15,6 +15,7 @@
 """Utility functions for computing optical properties of atmospheric gases."""
 
 import collections
+import math
 from typing import TypeAlias
 
 import jax
@@ -25,11 +26,11 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_gas_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_gas_optics_shortwave
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_volume_mixing_ratio
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import optics_utils
+from legoesm.core.smooth import positive_part_c1, smoothstep_cubic
 
 
 Array: TypeAlias = jax.Array
 Interpolant: TypeAlias = optics_utils.Interpolant
-IndexAndWeight: TypeAlias = optics_utils.IndexAndWeight
 # pylint: disable=line-too-long
 AbstractLookupGasOptics: TypeAlias = (
     lookup_gas_optics_base.AbstractLookupGasOptics
@@ -54,7 +55,8 @@ _M2_TO_CM2_FACTOR = 1e4
 _VMR_SAFE_DIV_EPS = 1.0e-30
 
 
-def _clip_to_table_range(temperature: Array, t_ref: Array) -> Array:
+def _clip_to_table_range(temperature: Array, t_ref: Array,
+                         sharpness: float = math.inf) -> Array:
   """Clip temperature into the lookup-table reference range.
 
   RRTMGP tables (``kmajor``, ``kminor_*``, ``krayl_*``,
@@ -71,19 +73,88 @@ def _clip_to_table_range(temperature: Array, t_ref: Array) -> Array:
   table range before interpolation.  Halo cells produced by linear
   extrapolation (``2*T[-1]-T[-2]``) are the most common offender; they
   are stripped from the returned fluxes anyway.
+
+  ``sharpness`` (static; ``math.inf`` = the hard clip, bitwise): a finite
+  value smooths each end with a C1 band of width |bound|/sharpness on the
+  INSIDE of the table (the interpolant mirrors below the first point and is
+  flat above the last), exact for T in [t0 + t0/s, tN - tN/s].
   """
-  return jnp.clip(temperature, t_ref[0], t_ref[-1])
+  if sharpness == math.inf:
+    return jnp.clip(temperature, t_ref[0], t_ref[-1])
+  lo, hi = t_ref[0], t_ref[-1]
+  u = (temperature - lo) / lo                 # exactly T where u >= 1/s
+  t = jnp.where(u * sharpness >= 1.0, temperature,
+                lo + lo * positive_part_c1(u, sharpness))
+  v = (hi - t) / hi
+  return jnp.where(v * sharpness >= 1.0, t, hi - hi * positive_part_c1(v, sharpness))
 
 
 def _pressure_interpolant(
     p: Array, p_ref: Array, troposphere_offset: Array | None = None
 ) -> Interpolant:
-  """Create a pressure interpolant based on reference pressure values."""
+  """Pressure interpolant in ln p.
+
+  Inside the table, including its end nodes, this is the generic linear
+  interpolant, unchanged.  Outside ``[p_ref.min(), p_ref.max()]`` (1.005 Pa ..
+  1096.6 hPa) it follows upstream RTE+RRTMGP with its value checks off
+  (mo_gas_optics_rrtmgp_kernels.F90:115-117, ``jpress = min(npres-1, max(1,
+  int(locpress)))``, ``fpress = locpress - jpress``): the end interval, with
+  the weight not clamped, i.e. linear extrapolation.  The generic interpolant
+  alone mirrors above the table (``abs`` weight) and reads flat below it.
+  In/out is decided on the actual table ends, not on the floor index: ln p_ref
+  is not exactly uniform, so a pressure just inside p_ref.min() can carry the
+  last index (votes: author/codex/GLM).
+  """
   log_p = jnp.log(p)
   log_p_ref = jnp.log(p_ref)
-  return optics_utils.create_linear_interpolant(
-      log_p, log_p_ref, offset=troposphere_offset
-  )
+  size = log_p_ref.shape[0]
+  delta = log_p_ref[1] - log_p_ref[0]
+  below = log_p < log_p_ref[-1]           # p < p_ref.min(): beyond the low-pressure end
+  outside = below | (log_p > log_p_ref[0])
+  idx_low = jnp.where(below, size - 2, optics_utils.floor_idx(log_p, log_p_ref))
+  idx_high = jnp.minimum(idx_low + 1, size - 1)
+  weight2 = (log_p - (log_p_ref[0] + delta * idx_low.astype(log_p_ref.dtype))) / delta
+  weight2 = jnp.where(outside, weight2, jnp.abs(weight2))
+  if troposphere_offset is not None:
+    idx_low = idx_low + troposphere_offset
+    idx_high = idx_high + troposphere_offset
+  return optics_utils.Interpolant(
+      optics_utils.IndexAndWeight(idx_low, 1.0 - weight2),
+      optics_utils.IndexAndWeight(idx_high, weight2))
+
+
+def _branch_pressure_interpolant(p: Array, p_ref: Array, p_tropo, tropo: int) -> Interpolant:
+  """Pressure interpolant of ONE side of the tropopause split, extended past it.
+
+  As ``_pressure_interpolant`` with offset ``tropo`` (identical bits for cells on
+  that side), but the interval is held to the side's own half of the table:
+  the lower branch keeps its last interval ending at ``p_tropo`` for p < p_tropo,
+  the upper branch its first interval starting there for p > p_tropo, and the
+  weights of that extension are signed (linear extrapolation;
+  ``create_linear_interpolant``'s ``abs`` would mirror).  Used only by the
+  smoothed split (vote J1).
+  """
+  log_p, log_p_ref = jnp.log(p), jnp.log(p_ref)
+  size = log_p_ref.shape[0]
+  delta = log_p_ref[1] - log_p_ref[0]
+  k_tropo = optics_utils.floor_idx(jnp.log(p_tropo) + 0.5 * delta, log_p_ref)
+  # own-side index and out-of-table rule exactly as ``_pressure_interpolant``
+  below = log_p < log_p_ref[-1]
+  outside = below | (log_p > log_p_ref[0])
+  own = jnp.where(below, size - 2, optics_utils.floor_idx(log_p, log_p_ref))
+  if tropo == 0:
+    idx_low = jnp.minimum(own, k_tropo - 1)
+  else:
+    idx_low = jnp.maximum(own, k_tropo)
+  idx_high = jnp.minimum(idx_low + 1, size - 1)
+  lower_reference_vals = log_p_ref[0] + delta * idx_low.astype(log_p_ref.dtype)
+  weight2 = (log_p - lower_reference_vals) / delta
+  # signed where the branch is extended past the tropopause or the cell is beyond
+  # the table ends; elsewhere abs, so own-side cells are bit-identical to
+  # ``_pressure_interpolant``.
+  weight2 = jnp.where((idx_low == own) & ~outside, jnp.abs(weight2), weight2)
+  return Interpolant(optics_utils.IndexAndWeight(idx_low + tropo, 1.0 - weight2),
+                     optics_utils.IndexAndWeight(idx_high + tropo, weight2))
 
 
 def _mixing_fraction_interpolant(
@@ -246,464 +317,12 @@ def _compute_relative_abundance_interpolant(
   return interpolant
 
 
-def compute_major_optical_depth(
-    lookup_gas_optics: AbstractLookupGasOptics,
-    vmr: LookupVolumeMixingRatio,
-    molecules: Array,
-    temperature: Array,
-    p: Array,
-    igpt: Array,
-    vmr_fields: dict[int, Array] | None = None,
-) -> Array:
-  """Compute the optical depth contributions from major gases.
-
-  Args:
-    lookup_gas_optics: An `AbstractLookupGasOptics` object containing a RRTMGP
-      index for all major gas species.
-    vmr: A `LookupVolumeMixingRatio` object containing the volume mixing ratio
-      of all relevant atmospheric gases.
-    molecules: The number of molecules in an atmospheric grid cell per area
-      [molecules/m^2]
-    temperature: An `Array` containing temperature values (in K).
-    p: An `Array` containing pressure values (in Pa).
-    igpt: The absorption variable index (g-point) for which the optical depth is
-      computed.
-    vmr_fields: An optional dictionary containing precomputed volume mixing
-      ratio fields, keyed by gas index, that will overwrite the global means for
-      those gases that have a vmr field already available.
-
-  Returns:
-    An `Array` with the pointwise optical depth contributions from the major
-    species.
-  """
-  # Take the troposphere limit into account when indexing into the major species
-  # and absorption coefficients.
-  # The troposphere index is 1 for levels above the troposphere limit and 0
-  # otherwise.
-  troposphere_idx = jnp.where(p <= lookup_gas_optics.p_ref_tropo, 1, 0)
-  # Clip temperature to the table range before interpolation; halo cells and
-  # cold mesospheric layers can sit below ``t_ref[0]=160K`` where the linear
-  # interpolant otherwise extrapolates with ``weight > 1`` (see
-  # ``_clip_to_table_range`` docstring).
-  t_for_table = _clip_to_table_range(temperature, lookup_gas_optics.t_ref)
-  t_interp = optics_utils.create_linear_interpolant(
-      t_for_table, lookup_gas_optics.t_ref
-  )
-  p_interp = _pressure_interpolant(
-      p=p, p_ref=lookup_gas_optics.p_ref, troposphere_offset=troposphere_idx
-  )
-  # The frequency band for which the optical depth is computed.
-  ibnd = lookup_gas_optics.g_point_to_bnd[igpt]
-
-  def mix_interpolant_fn(t: IndexAndWeight) -> Interpolant:
-    """Relative abundance interpolant function that depends on temperature.
-
-    The arg name 't' is used throughout the interpolation logic to refer to the
-    temperature index variable. The relative abundance variable is the only
-    indexing variable that depends on another variable used to index the lookup
-    tables.
-
-    Args:
-      t: An instance of `IndexAndWeight` encapsulating a point on the uniform
-      temperature grid and its interpolation weight.
-
-    Returns:
-      An instance of `Interpolant` encapsulating the linear interpolation
-      interval and weights on the relative abundance uniform grid.
-    """
-    return _compute_relative_abundance_interpolant(
-        lookup_gas_optics,
-        vmr,
-        troposphere_idx,
-        t.idx,
-        ibnd,
-        scale_by_mixture=True,
-        vmr_fields=vmr_fields,
-    )
-
-  # Interpolant functions ordered according to the axes in `kmajor`.
-  interpolant_fn_dict = collections.OrderedDict((
-      ('t', lambda: t_interp),
-      ('p', lambda: p_interp),
-      ('m', mix_interpolant_fn),
-  ))
-  return (
-      molecules
-      / _M2_TO_CM2_FACTOR
-      * optics_utils.interpolate(
-          # ``optimization_barrier`` keeps XLA from CONSTANT-FOLDING the
-          # per-g-point slice/gather of the (large, compile-time-constant)
-          # k-distribution table into the kernel: without it XLA bakes folded
-          # table kernels that overflow the CPU LLVM-JIT executable code region
-          # (``Failed to materialize symbols`` / ``Cannot allocate memory``)
-          # and make GPU/TPU compile pathologically slow.  The barrier is the
-          # IDENTITY at runtime (answer-preserving) and turns the table read
-          # into a cheap RUNTIME gather on all backends.
-          jax.lax.optimization_barrier(lookup_gas_optics.kmajor)[..., igpt],
-          interpolant_fns=interpolant_fn_dict,
-      )
-  )
-
-
-def _compute_minor_optical_depth(
-    lookup: AbstractLookupGasOptics,
-    vmr_lib: LookupVolumeMixingRatio,
-    molecules: Array,
-    temperature: Array,
-    p: Array,
-    igpt: Array,
-    is_lower_atmosphere: bool,
-    vmr_fields: dict[int, Array] | None = None,
-    n_trips: int | None = None,
-) -> Array:
-  """Compute the optical depth from minor gases given atmosphere region.
-
-  Args:
-    lookup: An `AbstractLookupGasOptics` object containing a RRTMGP index for
-      all relevant gases and a lookup table for minor absorption coefficients.
-    vmr_lib: A `LookupVolumeMixingRatio` object containing the volume mixing
-      ratio of all relevant atmospheric gases.
-    molecules: The number of molecules in an atmospheric grid cell per area
-      [molecules/m^2]
-    temperature: The temperature of the flow field [K].
-    p: The pressure field (in Pa).
-    igpt: The absorption rank (g-point) index for which the optical depth will
-      be computed.
-    is_lower_atmosphere: A boolean indicating whether in the lower atmosphere.
-    vmr_fields: An optional dictionary containing precomputed volume mixing
-      ratio fields, keyed by gas index, that will overwrite the global means for
-      those gases that have a vmr field already available.
-    n_trips: Python-int loop trip count (never traced: a traced bound would
-      make the loop non-reverse-differentiable).  ``None`` (every caller)
-      uses the widest band's absorber range; tests pass a larger value to
-      check the result matches a longer masked loop.
-
-  Returns:
-    An `Array` with the pointwise optical depth contributions from the minor
-    species.
-  """
-  # The troposphere index is 1 for levels above the troposphere limit and 0
-  # otherwise.
-  tropo_idx = jnp.where(p <= lookup.p_ref_tropo, 1, 0)
-  if is_lower_atmosphere:
-    minor_absorber_intervals = lookup.n_minor_absrb_lower
-    minor_bnd_start = lookup.minor_lower_bnd_start
-    minor_bnd_end = lookup.minor_lower_bnd_end
-    idx_gases_minor = lookup.idx_minor_gases_lower
-    minor_scales_with_density = lookup.minor_lower_scales_with_density
-    idx_scaling_gas = lookup.idx_scaling_gases_lower
-    scale_by_complement = lookup.lower_scale_by_complement
-    minor_gpt_shift = lookup.minor_lower_gpt_shift
-    kminor = jax.lax.optimization_barrier(lookup.kminor_lower)
-  else:
-    minor_absorber_intervals = lookup.n_minor_absrb_upper
-    minor_bnd_start = lookup.minor_upper_bnd_start
-    minor_bnd_end = lookup.minor_upper_bnd_end
-    idx_gases_minor = lookup.idx_minor_gases_upper
-    minor_scales_with_density = lookup.minor_upper_scales_with_density
-    idx_scaling_gas = lookup.idx_scaling_gases_upper
-    scale_by_complement = lookup.upper_scale_by_complement
-    minor_gpt_shift = lookup.minor_upper_gpt_shift
-    kminor = jax.lax.optimization_barrier(lookup.kminor_upper)
-
-  ibnd = lookup.g_point_to_bnd[igpt]
-  loc_in_bnd = igpt - lookup.bnd_lims_gpt[ibnd, 0]
-  # Clip temperature to the table range before interpolation.  See
-  # ``_clip_to_table_range`` docstring for rationale.  Note: only the
-  # **kminor table lookup** uses the clipped temperature; the
-  # density-scaling factor ``p / T`` in ``scale_with_density_fn``
-  # below uses the **physical** temperature (not clipped) because the
-  # Lorentz line-shape density scaling is a real-physics relation
-  # meaningful outside the table range.  Consequence: minor OD does
-  # not fully saturate at the table boundary — see test
-  # ``test_out_of_range_T_saturates_major_OD``'s docstring for
-  # rationale.
-  t_for_table = _clip_to_table_range(temperature, lookup.t_ref)
-  temperature_interpolant = optics_utils.create_linear_interpolant(
-      t_for_table, lookup.t_ref
-  )
-
-  # Working dtype — all table lookups are cast to this to ensure consistent
-  # dtypes through jax.lax.cond and jax.lax.fori_loop (which require matching
-  # carry dtypes).  Without this, x64-mode tables (float64) mixed with float32
-  # inputs crash in minor-gas loops.
-  _wdtype = temperature.dtype
-
-  if vmr_fields is not None and lookup.idx_h2o in vmr_fields:
-    dry_factor = 1.0 / (1.0 + vmr_fields[lookup.idx_h2o].astype(_wdtype))
-  else:
-    dry_factor = 1.0
-
-  def mix_interpolant_fn(t: IndexAndWeight) -> Interpolant:
-    """Relative abundance interpolant that depends on `t`."""
-    return _compute_relative_abundance_interpolant(
-        lookup, vmr_lib, tropo_idx, t.idx, ibnd, False, vmr_fields
-    )
-
-  def scale_with_gas_fn(i):
-    sgas = jnp.maximum(idx_scaling_gas[i], 0)
-    sgas_idx = sgas * jnp.ones_like(tropo_idx)
-    scaling_vmr = get_vmr(lookup, vmr_lib, sgas_idx, vmr_fields).astype(_wdtype)
-    scaling = jax.lax.cond(
-        scale_by_complement[i] == 1,
-        lambda: (1.0 - scaling_vmr * dry_factor),
-        lambda: scaling_vmr * dry_factor,
-    )
-    return lambda: scaling
-
-  def scale_with_density_fn(i):
-    scaling = _PASCAL_TO_HPASCAL_FACTOR * p / temperature
-    scaling *= jax.lax.cond(
-        idx_scaling_gas[i] > 0,
-        scale_with_gas_fn(i),
-        lambda: jnp.ones_like(scaling),
-    )
-    return lambda: scaling
-
-  # Optical depth is aggregated over the minor absorbers i in [start, end]
-  # of the band (empty band: start = end = n, the sentinel).  The loop walks
-  # that range from its start with a STATIC trip count -- the widest range
-  # over all bands, read from the (concrete) table -- and masks the tail, so
-  # it adds exactly the same terms in the same order as a loop over all n
-  # absorbers masked to [start, end], minus the exact +0.0 additions (60 trips
-  # where 11 suffice for the LW lower table: most of the radiation step).
-  # A static trip count keeps reverse-mode AD (a dynamic-stop while_loop is
-  # not reverse-differentiable).
-  n_minor = minor_absorber_intervals
-  _starts, _ends = np.asarray(minor_bnd_start), np.asarray(minor_bnd_end)
-  if np.any(_starts < 0) or np.any(_ends[_starts < n_minor] >= n_minor):
-    raise ValueError(
-        'minor absorber band limits must lie in [0, n) with n as the '
-        'empty-band sentinel')
-  _has = _starts < n_minor
-  if n_trips is None:
-    n_trips = int(np.max(_ends[_has] - _starts[_has] + 1)) if _has.any() else 0
-  i0 = minor_bnd_start[ibnd]
-  bnd_end = minor_bnd_end[ibnd]
-
-  def body_fn(j, tau_minor):
-    i_run = i0 + j
-    active = jnp.logical_and(i_run <= bnd_end, i_run < n_minor)
-    i = jnp.minimum(i_run, n_minor - 1)
-    # Map the minor contributor to the RRTMGP gas index.
-    gas_idx = idx_gases_minor[i] * jnp.ones_like(tropo_idx)
-    vmr_minor = get_vmr(lookup, vmr_lib, gas_idx, vmr_fields).astype(_wdtype)
-    scaling = vmr_minor * molecules / _M2_TO_CM2_FACTOR
-    scaling *= jax.lax.cond(
-        minor_scales_with_density[i] == 1,
-        scale_with_density_fn(i),
-        lambda: jnp.ones_like(temperature),
-    )
-    # Obtain the global contributor index needed to index into the `kminor`
-    # table.
-    k_loc = minor_gpt_shift[i] + loc_in_bnd
-    delta_tau = (
-        optics_utils.interpolate(
-            kminor[..., k_loc],
-            collections.OrderedDict((
-                ('t', lambda: temperature_interpolant),
-                ('m', mix_interpolant_fn),
-            )),
-        ).astype(_wdtype)
-        * scaling
-    )
-    return tau_minor + jnp.where(active, delta_tau, 0.0)
-
-  tau_minor_0 = jnp.zeros_like(temperature)
-
-  return jax.lax.fori_loop(0, n_trips, body_fn, tau_minor_0)
-
-
-def compute_minor_optical_depth(
-    lookup: AbstractLookupGasOptics,
-    vmr_lib: LookupVolumeMixingRatio,
-    molecules: Array,
-    temperature: Array,
-    p: Array,
-    igpt: Array,
-    vmr_fields: dict[int, Array] | None = None,
-) -> Array:
-  """Compute the optical depth contributions from minor gases.
-
-  Args:
-    lookup: An instance of `AbstractLookupGasOptics` containing a RRTMGP index
-      for all relevant gases and a lookup table for minor absorption
-      coefficients.
-    vmr_lib: A `LookupVolumeMixingRatio` object containing the volume mixing
-      ratio of all relevant atmospheric gases.
-    molecules: The number of molecules in an atmospheric grid cell per area
-      [molecules/m^2]
-    temperature: The temperature of the flow field [K].
-    p: The pressure field (in Pa).
-    igpt: The absorption rank (g-point) index for which the optical depth will
-      be computed.
-    vmr_fields: An optional dictionary containing precomputed volume mixing
-      ratio fields, keyed by gas index, that will overwrite the global means for
-      those gases that have a vmr field already available.
-
-  Returns:
-    An `Array` with the pointwise optical depth contributions from the minor
-    species.
-  """
-
-  # The troposphere index is 1 for levels above the troposphere limit and 0
-  # otherwise.
-  def minor_tau(is_lower_atmos: bool) -> Array:
-    """Compute the minor optical depth assuming an atmosphere level."""
-    return _compute_minor_optical_depth(
-        lookup,
-        vmr_lib,
-        molecules,
-        temperature,
-        p,
-        igpt,
-        is_lower_atmos,
-        vmr_fields,
-    )
-
-  return jnp.where(
-      p > lookup.p_ref_tropo,
-      minor_tau(is_lower_atmos=True),
-      minor_tau(is_lower_atmos=False),
-  )
-
-
-def compute_rayleigh_optical_depth(
-    lkp: LookupGasOpticsShortwave,
-    vmr_lib: LookupVolumeMixingRatio,
-    molecules: Array,
-    temperature: Array,
-    p: Array,
-    igpt: Array,
-    vmr_fields: dict[int, Array] | None = None,
-) -> Array:
-  """Compute the optical depth contribution from Rayleigh scattering.
-
-  Args:
-    lkp: An instance of `AbstractLookupGasOptics` containing a RRTMGP index
-      for all relevant gases and a lookup table for Rayleigh absorption
-      coefficients.
-    vmr_lib: A `LookupVolumeMixingRatio` object containing the volume mixing
-      ratio of all relevant atmospheric gases.
-    molecules: The number of molecules in an atmospheric grid cell per area
-      [molecules/m^2].
-    temperature: Temperature variable (in K).
-    p: The pressure field (in Pa).
-    igpt: The absorption variable index (g-point) for which the optical depth
-      will be computed.
-    vmr_fields: An optional dictionary containing precomputed volume mixing
-      ratio fields, keyed by gas index, that will overwrite the global means for
-      those gases that have a vmr field already available.
-
-  Returns:
-    An `Array` with the pointwise optical depth contributions from Rayleigh
-      scattering.
-  """
-  # The troposphere index is 1 for levels above the troposphere limit and 0
-  # otherwise.
-  tropo_idx = jnp.where(p <= lkp.p_ref_tropo, 1, 0)
-  # Clip temperature to the table range before interpolation.  See
-  # ``_clip_to_table_range`` docstring for rationale.
-  t_for_table = _clip_to_table_range(temperature, lkp.t_ref)
-  temperature_interpolant = optics_utils.create_linear_interpolant(
-      t_for_table, lkp.t_ref
-  )
-  ibnd = lkp.g_point_to_bnd[igpt]
-
-  def mix_interpolant_fn(t: IndexAndWeight) -> Interpolant:
-    """Relative abundance interpolant function that depends on `t` and `p`."""
-    return _compute_relative_abundance_interpolant(
-        lkp, vmr_lib, tropo_idx, t.idx, ibnd, False, vmr_fields
-    )
-
-  interpolant_fns = collections.OrderedDict(
-      (('t', lambda: temperature_interpolant), ('m', mix_interpolant_fn))
-  )
-  # optimization_barrier: prevent XLA constant-folding the per-g-point Rayleigh
-  # table slices (see compute_major_optical_depth) — identity at runtime.
-  rayl_tau_lower = optics_utils.interpolate(
-      jax.lax.optimization_barrier(lkp.rayl_lower)[..., igpt], interpolant_fns
-  )
-  rayl_tau_upper = optics_utils.interpolate(
-      jax.lax.optimization_barrier(lkp.rayl_upper)[..., igpt], interpolant_fns
-  )
-  if vmr_fields is not None and lkp.idx_h2o in vmr_fields:
-    factor = 1.0 + vmr_fields[lkp.idx_h2o]
-  else:
-    factor = 1.0
-
-  return (
-      factor
-      * molecules
-      / _M2_TO_CM2_FACTOR
-      * jnp.where(tropo_idx == 1, rayl_tau_upper, rayl_tau_lower)
-  )
-
-
-def compute_planck_fraction(
-    lookup: LookupGasOpticsLongwave,
-    vmr_lib: LookupVolumeMixingRatio,
-    p: Array,
-    temperature: Array,
-    igpt: Array,
-    vmr_fields: dict[int, Array] | None = None,
-) -> Array:
-  """Computes the Planck fraction that will be used to weight the Planck source.
-
-  Args:
-    lookup: An `LookupGasOpticsLongwave` object containing a RRTMGP index for
-      all relevant gases and a lookup table for the Planck source.
-    vmr_lib: A `LookupVolumeMixingRatio` object containing the volume mixing
-      ratio of all relevant atmospheric gases.
-    p: The pressure of the flow field [Pa].
-    temperature: The temperature at the grid cell center [K].
-    igpt: The absorption rank (g-point) index for which the optical depth will
-      be computed.
-    vmr_fields: An optional dictionary containing precomputed volume mixing
-      ratio fields, keyed by gas index, that will overwrite the global means for
-      those gases that have a vmr field already available.
-
-  Returns:
-    The pointwise Planck fraction associated with the temperature field.
-  """
-  # The troposphere index is 1 for levels above the troposphere limit and 0
-  # otherwise.
-  tropo_idx = jnp.where(p <= lookup.p_ref_tropo, 1, 0)
-  # Clip temperature to the table range before interpolation.  See
-  # ``_clip_to_table_range`` docstring for rationale.
-  t_for_table = _clip_to_table_range(temperature, lookup.t_ref)
-  temperature_interpolant = optics_utils.create_linear_interpolant(
-      t_for_table, lookup.t_ref
-  )
-  pressure_interpolant = _pressure_interpolant(
-      p, lookup.p_ref, tropo_idx
-  )
-  ibnd = lookup.g_point_to_bnd[igpt]
-
-  def mix_interpolant_fn(t: IndexAndWeight) -> Interpolant:
-    """Relative abundance interpolant function that depends on `temperature`."""
-    return _compute_relative_abundance_interpolant(
-        lookup, vmr_lib, tropo_idx, t.idx, ibnd, False, vmr_fields
-    )
-
-  interpolants_fns = collections.OrderedDict((
-      ('t', lambda: temperature_interpolant),
-      ('p', lambda: pressure_interpolant),
-      ('m', mix_interpolant_fn),
-  ))
-
-  # 3-D interpolation of the Planck fraction.
-  return optics_utils.interpolate(
-      jax.lax.optimization_barrier(lookup.planck_fraction)[..., igpt],
-      interpolants_fns
-  )
-
-
 def compute_planck_sources(
     lookup: LookupGasOpticsLongwave,
     planck_fraction: Array,
     temperature: Array,
     igpt: Array,
+    sharpness: float = math.inf,
 ) -> Array:
   """Computes the Planck source for the longwave problem.
 
@@ -728,7 +347,7 @@ def compute_planck_sources(
   # weight2``; for cold halo/mesospheric temperatures ``weight2 ≫ 1``
   # and ``weight1 < 0`` gives nonsense.  Upstream errors out on
   # out-of-range T; we clamp instead to stay differentiable.
-  t_for_planck = _clip_to_table_range(temperature, lookup.t_planck)
+  t_for_planck = _clip_to_table_range(temperature, lookup.t_planck, sharpness)
   interpolant = optics_utils.create_linear_interpolant(
       t_for_planck, lookup.t_planck
   )
@@ -736,3 +355,246 @@ def compute_planck_sources(
       jax.lax.optimization_barrier(lookup.totplnk)[ibnd, :],
       collections.OrderedDict({'t': lambda: interpolant}),
   )
+
+
+# Every g-point is evaluated in one pass: the g-point-independent interpolation
+# runs once per cell and every table read is a row gather over the g-point axis,
+# as in the RRTMGP GPU kernels and jax-rrtmgp 537d97e.  ``optimization_barrier``
+# on a table keeps XLA from constant-folding its reads into the kernels, which
+# overflows the CPU LLVM-JIT code region and makes compiles pathologically slow.
+_SIDES = ('interp_high', 'interp_low')
+
+
+class _Cells:
+  """Per-cell interpolation state shared by every g-point."""
+
+  def __init__(self, lookup, vmr_lib, temperature, p, vmr_fields,
+               sharpness=math.inf, tropo=None):
+    """``tropo`` (0 lower, 1 upper) forces one branch of the tropopause split
+    everywhere; ``None`` takes p <= p_ref_tropo per cell (the oracle)."""
+    self.lookup, self.vmr_lib, self.vmr_fields = lookup, vmr_lib, vmr_fields
+    self.temperature, self.p = temperature, p
+    if tropo is None:
+      self.tropo_idx = jnp.where(p <= lookup.p_ref_tropo, 1, 0)
+    else:
+      assert tropo in (0, 1), tropo
+      self.tropo_idx = jnp.full(p.shape, tropo, dtype=jnp.int32)
+    self.t_interp = optics_utils.create_linear_interpolant(
+        _clip_to_table_range(temperature, lookup.t_ref, sharpness), lookup.t_ref)
+    if tropo is None:
+      self.p_interp = _pressure_interpolant(p, lookup.p_ref, self.tropo_idx)
+    else:
+      self.p_interp = _branch_pressure_interpolant(p, lookup.p_ref, lookup.p_ref_tropo, tropo)
+    self._mix = {}
+
+  def mix(self, ibnd: int, scale_by_mixture: bool) -> dict[str, Interpolant]:
+    """Relative-abundance interpolant at each temperature corner of band ``ibnd``."""
+    key = (tuple(np.asarray(self.lookup.key_species)[ibnd].ravel().tolist()),
+           scale_by_mixture)
+    if key not in self._mix:
+      self._mix[key] = {
+          side: _compute_relative_abundance_interpolant(
+              self.lookup, self.vmr_lib, self.tropo_idx,
+              getattr(self.t_interp, side).idx, ibnd, scale_by_mixture,
+              self.vmr_fields)
+          for side in _SIDES
+      }
+    return self._mix[key]
+
+
+def _rows_tpm(table: Array, cells: _Cells, mix: dict[str, Interpolant]) -> Array:
+  """Eight-corner interpolation of a ``(t, p, eta, n)`` table, ``(*cells, n)``."""
+  total = 0.0
+  for t_side in _SIDES:
+    t = getattr(cells.t_interp, t_side)
+    for p_side in _SIDES:
+      pp = getattr(cells.p_interp, p_side)
+      for m_side in _SIDES:
+        m = getattr(mix[t_side], m_side)
+        total = total + table[t.idx, pp.idx, m.idx] * (
+            t.weight * pp.weight * m.weight)[..., None]
+  return total
+
+
+def _rows_te(table: Array, cells: _Cells, mix: dict[str, Interpolant]) -> Array:
+  """Four-corner interpolation of a ``(t, eta, n)`` table, ``(*cells, n)``."""
+  total = 0.0
+  for t_side in _SIDES:
+    t = getattr(cells.t_interp, t_side)
+    for m_side in _SIDES:
+      m = getattr(mix[t_side], m_side)
+      total = total + table[t.idx, m.idx] * (t.weight * m.weight)[..., None]
+  return total
+
+
+def _band_groups(lookup) -> list[tuple[list[int], np.ndarray]]:
+  """Bands sharing a key-species pair, hence interpolants, with their g-points."""
+  key_species = np.asarray(lookup.key_species)
+  lims = np.asarray(lookup.bnd_lims_gpt)
+  by_pair: dict[tuple[int, ...], list[int]] = {}
+  for ibnd in range(key_species.shape[0]):
+    by_pair.setdefault(tuple(key_species[ibnd].ravel().tolist()), []).append(ibnd)
+  return [
+      (bands, np.concatenate(
+          [np.arange(lims[b, 0], lims[b, 1] + 1) for b in bands]))
+      for bands in by_pair.values()
+  ]
+
+
+def _in_gpt_order(pieces: list[Array], groups) -> Array:
+  """Per-group ``(*cells, n)`` pieces as one ``(n_gpt, *cells)`` array."""
+  order = np.concatenate([gpts for _, gpts in groups])
+  return jnp.moveaxis(jnp.concatenate(pieces, axis=-1), -1, 0)[np.argsort(order)]
+
+
+def _minor_band(lookup, cells: _Cells, molecules, ibnd: int) -> Array | None:
+  """Minor optical depth of band ``ibnd``'s g-points; ``None`` if it has none."""
+  lims = np.asarray(lookup.bnd_lims_gpt)
+  width = int(lims[ibnd, 1] - lims[ibnd, 0]) + 1
+  wdtype = cells.temperature.dtype
+  vmr_fields = cells.vmr_fields
+  if vmr_fields is not None and lookup.idx_h2o in vmr_fields:
+    dry_factor = 1.0 / (1.0 + vmr_fields[lookup.idx_h2o].astype(wdtype))
+  else:
+    dry_factor = 1.0
+  mix = cells.mix(ibnd, False)
+  total = None
+  for lower, table, n_minor, start, end, gases, density, scaling_gases, complement, shift in (
+      (True, lookup.kminor_lower, lookup.n_minor_absrb_lower,
+       lookup.minor_lower_bnd_start, lookup.minor_lower_bnd_end,
+       lookup.idx_minor_gases_lower, lookup.minor_lower_scales_with_density,
+       lookup.idx_scaling_gases_lower, lookup.lower_scale_by_complement,
+       lookup.minor_lower_gpt_shift),
+      (False, lookup.kminor_upper, lookup.n_minor_absrb_upper,
+       lookup.minor_upper_bnd_start, lookup.minor_upper_bnd_end,
+       lookup.idx_minor_gases_upper, lookup.minor_upper_scales_with_density,
+       lookup.idx_scaling_gases_upper, lookup.upper_scale_by_complement,
+       lookup.minor_upper_gpt_shift),
+  ):
+    first, last = int(np.asarray(start)[ibnd]), int(np.asarray(end)[ibnd])
+    if first == n_minor:  # the table's empty-band sentinel
+      continue
+    if first < 0 or first > n_minor or last >= n_minor:
+      raise ValueError(
+          'minor absorber band limits must lie in [0, n) with n as the '
+          'empty-band sentinel')
+    table = jax.lax.optimization_barrier(table)
+    side = None
+    for i in range(first, last + 1):
+      gas = int(np.asarray(gases)[i]) * jnp.ones_like(cells.tropo_idx)
+      scaling = get_vmr(lookup, cells.vmr_lib, gas, vmr_fields).astype(wdtype)
+      scaling = scaling * molecules / _M2_TO_CM2_FACTOR
+      if int(np.asarray(density)[i]) == 1:
+        # The physical temperature, not the clipped one: density scaling is a
+        # real-physics relation outside the table, so minor optical depth does
+        # not fully saturate at the table boundary.
+        scaling = scaling * (_PASCAL_TO_HPASCAL_FACTOR * cells.p / cells.temperature)
+        sgas = int(np.asarray(scaling_gases)[i])
+        if sgas > 0:
+          vmr = get_vmr(lookup, cells.vmr_lib, sgas * jnp.ones_like(cells.tropo_idx),
+                        vmr_fields).astype(wdtype)
+          scaling = scaling * (
+              1.0 - vmr * dry_factor
+              if int(np.asarray(complement)[i]) == 1 else vmr * dry_factor)
+      k0 = int(np.asarray(shift)[i])
+      term = _rows_te(table[..., k0:k0 + width], cells, mix).astype(wdtype) * scaling[..., None]
+      side = term if side is None else side + term
+    if side is not None:
+      in_side = cells.tropo_idx == (0 if lower else 1)    # p > p_ref_tropo for lower
+      side = jnp.where(in_side[..., None], side, 0.0)
+      total = side if total is None else total + side
+  return total
+
+
+def major_optical_depth_all_gpts(lookup, vmr_lib, molecules, temperature, p, vmr_fields=None,
+                                 cells=None):
+  """Major-species optical depth of every g-point, ``(n_gpt, *cells)``."""
+  cells = cells or _Cells(lookup, vmr_lib, temperature, p, vmr_fields)
+  kmajor = jax.lax.optimization_barrier(lookup.kmajor)
+  groups = _band_groups(lookup)
+  return _in_gpt_order(
+      [(molecules / _M2_TO_CM2_FACTOR)[..., None]
+       * _rows_tpm(kmajor[..., gpts], cells, cells.mix(bands[0], True))
+       for bands, gpts in groups], groups)
+
+
+def minor_optical_depth_all_gpts(lookup, vmr_lib, molecules, temperature, p, vmr_fields=None,
+                                 cells=None):
+  """Minor-species optical depth of every g-point, ``(n_gpt, *cells)``."""
+  cells = cells or _Cells(lookup, vmr_lib, temperature, p, vmr_fields)
+  lims = np.asarray(lookup.bnd_lims_gpt)
+  groups = _band_groups(lookup)
+  pieces = []
+  for bands, _ in groups:
+    minors = []
+    for b in bands:
+      minor = _minor_band(lookup, cells, molecules, b)
+      width = int(lims[b, 1] - lims[b, 0]) + 1
+      minors.append(jnp.zeros(molecules.shape + (width,), temperature.dtype)
+                    if minor is None else minor)
+    pieces.append(jnp.concatenate(minors, axis=-1))
+  return _in_gpt_order(pieces, groups)
+
+
+def _tropo_blend(lookup, p, sharpness, fn):
+  """``fn(tropo)`` across the tropopause split p <= p_ref_tropo.
+
+  ``sharpness = math.inf``: ``fn(None)``, the oracle's per-cell switch.  Finite:
+  both branches evaluated everywhere and blended by a centred C1 cubic in ln p
+  of width S/sharpness, S = one p_ref interval in ln p; exactly one branch
+  outside the band (the split is a value jump, measured up to 100 % per
+  g-point).
+  """
+  if sharpness == math.inf:
+    return fn(None)
+  log_p_ref = jnp.log(lookup.p_ref)
+  scale = jnp.abs(log_p_ref[1] - log_p_ref[0])
+  w = smoothstep_cubic((jnp.log(lookup.p_ref_tropo) - jnp.log(p)) * (sharpness / scale) + 0.5)
+  up, lo = fn(1), fn(0)
+  return jnp.where(w >= 1.0, up, jnp.where(w <= 0.0, lo, w * up + (1.0 - w) * lo))
+
+
+def optical_depth_all_gpts(lookup, vmr_lib, molecules, temperature, p, vmr_fields=None,
+                           sharpness=math.inf):
+  """Major plus minor optical depth of every g-point, ``(n_gpt, *cells)``."""
+  def fn(tropo):
+    cells = _Cells(lookup, vmr_lib, temperature, p, vmr_fields, sharpness, tropo)
+    args = (lookup, vmr_lib, molecules, temperature, p, vmr_fields, cells)
+    return minor_optical_depth_all_gpts(*args) + major_optical_depth_all_gpts(*args)
+  return _tropo_blend(lookup, p, sharpness, fn)
+
+
+def planck_fraction_all_gpts(lookup, vmr_lib, p, temperature, vmr_fields=None,
+                             sharpness=math.inf):
+  """Planck fraction of every g-point, ``(n_gpt, *cells)``."""
+  def fn(tropo):
+    cells = _Cells(lookup, vmr_lib, temperature, p, vmr_fields, sharpness, tropo)
+    table = jax.lax.optimization_barrier(lookup.planck_fraction)
+    groups = _band_groups(lookup)
+    return _in_gpt_order(
+        [_rows_tpm(table[..., gpts], cells, cells.mix(bands[0], False))
+         for bands, gpts in groups], groups)
+  return _tropo_blend(lookup, p, sharpness, fn)
+
+
+def rayleigh_optical_depth_all_gpts(lkp, vmr_lib, molecules, temperature, p, vmr_fields=None,
+                                    sharpness=math.inf):
+  """Rayleigh optical depth of every g-point, ``(n_gpt, *cells)``."""
+  lower = jax.lax.optimization_barrier(lkp.rayl_lower)
+  upper = jax.lax.optimization_barrier(lkp.rayl_upper)
+  factor = 1.0
+  if vmr_fields is not None and lkp.idx_h2o in vmr_fields:
+    factor = 1.0 + vmr_fields[lkp.idx_h2o]
+  groups = _band_groups(lkp)
+
+  def fn(tropo):
+    cells = _Cells(lkp, vmr_lib, temperature, p, vmr_fields, sharpness, tropo)
+    pieces = []
+    for bands, gpts in groups:
+      mix = cells.mix(bands[0], False)
+      tau = jnp.where((cells.tropo_idx == 1)[..., None],
+                      _rows_te(upper[..., gpts], cells, mix),
+                      _rows_te(lower[..., gpts], cells, mix))
+      pieces.append((factor * molecules / _M2_TO_CM2_FACTOR)[..., None] * tau)
+    return _in_gpt_order(pieces, groups)
+  return _tropo_blend(lkp, p, sharpness, fn)

@@ -152,6 +152,13 @@ MICROPHYSICS_REGISTRY: dict[str, _Entry] = {
         "legoesm.atmosphere.physics.microphysics.ml_emulator",
         "ml_microphysics",
     ),
+    # OpenIFS 49r1 CLOUDSC: standard contract plus keyword-only
+    # cloud_fraction / land_frac / conv (the CUMASTRN hand-off), which only
+    # the MPAS column lane supplies (microphysics/integration.py).
+    "ifs_cloudsc": (
+        "legoesm.atmosphere.physics.microphysics.ifs_cloudsc",
+        "ifs_cloudsc_microphysics",
+    ),
 }
 
 

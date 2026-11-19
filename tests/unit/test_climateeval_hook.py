@@ -92,3 +92,23 @@ def test_nonzero_exit_is_logged_not_raised(caplog):
         result = maybe_run_climateeval(config, "/tmp/run")
     assert result == 1
     assert any("ClimateEval evaluation failed" in r.message for r in caplog.records)
+
+
+def _ids(cmd):
+    return cmd[cmd.index("--model-id") + 1], cmd[cmd.index("--variant-id") + 1]
+
+
+def test_ids_default_to_the_cmor_writer_settings():
+    """One source of truth: unset evaluation ids follow the CMOR source_id /
+    variant_label the files were written with; explicit ids still win."""
+    out = OutputConfig(cmip_output=True, cmip_source_id="SRC-1-0",
+                       cmip_variant_label="r2i1p1f1",
+                       evaluation=EvaluationConfig(enabled=True))
+    with patch("legoesm.driver.climateeval_hook.subprocess.run",
+               return_value=MagicMock(returncode=0)) as run:
+        maybe_run_climateeval(ExperimentConfig(output=out), "/tmp/run")
+        assert _ids(run.call_args.args[0]) == ("SRC-1-0", "r2i1p1f1")
+        explicit = out._replace(evaluation=EvaluationConfig(
+            enabled=True, model_id="M", variant_id="r3i1p1f1"))
+        maybe_run_climateeval(ExperimentConfig(output=explicit), "/tmp/run")
+        assert _ids(run.call_args.args[0]) == ("M", "r3i1p1f1")

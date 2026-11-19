@@ -87,47 +87,25 @@ def test_out_of_range_is_refused(field, bad):
 
 
 def test_exposing_bechtolds_rate_does_not_expose_tiedtkes():
-    """The two schemes have a field of the same name; only one is tunable.
-
-    Tiedtke's deep base rate is still held fixed in-scheme, so it must stay in
-    that scheme's `excluded` block, and the driver route must be qualified to
-    Bechtold at every hop: the registry key, the flat field name, and the
-    constructor that actually receives it.
-    """
+    """Bechtold's entrainment knobs are routed to Bechtold only.  Tiedtke is
+    the WRF port with no tunable parameters: it has no spec block, no route,
+    and the Tiedtke lane resolves to the empty config whatever the Bechtold
+    knobs are set to."""
     import legoesm.atmosphere.physics.convection.config as cc
-    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
-
-    tiedtke = next(b for b in cc.__param_spec__.values()
-                   if b.get("scheme_key") == "atm.conv.TiedtkeConfig")
-    assert "epsilon_deep" in tiedtke["excluded"]
-    assert "epsilon_deep" not in tiedtke["params"]
-
-    routes = build_atm_scalar_param_map()
-    for field in ("epsilon_deep", "delta_deep"):
-        assert f"atm.conv.TiedtkeConfig.{field}" not in routes
-        # The flat field the Bechtold route lands on is Bechtold-prefixed, so
-        # a Tiedtke run cannot pick it up by accident.
-        assert routes[f"atm.conv.BechtoldConfig.{field}"].startswith("bechtold_")
-
-    # The behavioural half: resolving the TIEDTKE lane with the Bechtold knobs
-    # set must leave Tiedtke's own rates at their in-scheme defaults.  Asserted
-    # on the RESOLVED config, not on a patched constructor: the pipeline reads
-    # a pre-built `ConvectionConfig().tiedtke`, so a constructor spy would
-    # never fire and would pass no matter what the knob did.
     import legoesm.driver.physics_pipeline as pp
     from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
+
+    assert not any(b.get("scheme_key") == "atm.conv.TiedtkeConfig"
+                   for b in cc.__param_spec__.values())
+    routes = build_atm_scalar_param_map()
+    assert not any(k.startswith("atm.conv.TiedtkeConfig.") for k in routes)
+    for field in ("epsilon_deep", "delta_deep"):
+        assert routes[f"atm.conv.BechtoldConfig.{field}"].startswith("bechtold_")
     _kernel, resolved = pp._resolve_convection(ExperimentConfig()._replace(
         convection="tiedtke", bechtold_epsilon_deep=3.0e-3,
         bechtold_delta_deep=1.8e-4))
-    defaults = cc.TiedtkeConfig()
-    for field in ("epsilon_deep", "delta_deep"):
-        assert getattr(resolved, field) == getattr(defaults, field), (
-            f"the Bechtold {field} knob reached the Tiedtke config: "
-            f"{getattr(resolved, field)} != {getattr(defaults, field)}")
-    # And the values it would have carried are genuinely different, or the
-    # assertion above is satisfied by a knob that does nothing anywhere.
-    assert defaults.epsilon_deep != 3.0e-3
-    assert defaults.delta_deep != 1.8e-4
+    assert resolved == cc.TiedtkeConfig() and resolved._fields == ()
 
 
 def test_the_unread_cape_sink_fields_are_gone():

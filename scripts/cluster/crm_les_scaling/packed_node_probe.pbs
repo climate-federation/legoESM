@@ -1,0 +1,64 @@
+#!/bin/bash -l
+#PBS -N crm_packed_node
+#PBS -A UCLB0017
+#PBS -q develop
+#PBS -l select=1:ncpus=128:mpiprocs=128:mem=230GB
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#
+# Packed-node control for the CRM weak ladder: COPIES independent 1-rank CRM
+# runs (no MPI communication between them) started together, each pinned to
+# its own core with the same core spread as crm_les_ladder.pbs. If ms/step
+# grows with COPIES the way the weak ladder does, that much of the ladder's
+# loss is reproducible without inter-rank traffic (shared-node contention:
+# memory bandwidth, cache, frequency are not separated by this probe).
+set -uo pipefail
+
+: "${REPO:=${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/../../.." && pwd)}}"
+: "${COPIES:=1 8 16 32 64 128}"
+: "${PRECISIONS:=float32 float64}"
+: "${OUT:=/glade/derecho/scratch/${USER}/crm_les_scaling/packed_${PBS_JOBID:-local}}"
+
+export LEGOESM_REPO="$REPO"
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-/glade/work/${USER}/conda-envs/legoesm-gpu}"
+export JAX_PLATFORMS=cpu
+# shellcheck source=../scaling_derecho/_env.sh
+source "$REPO/scripts/cluster/scaling_derecho/_env.sh"
+module load gcc cray-mpich >/dev/null 2>&1 || true
+export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+cd "$REPO" || exit 2
+CORES=128
+echo "[packed] sha=$(git rev-parse HEAD) dirty=$(git status --porcelain --untracked-files=no | wc -l) host=$(hostname)"
+echo "[packed] COPIES=[$COPIES] PRECISIONS=[$PRECISIONS] OUT=$OUT"
+
+for C in $COPIES; do
+  if [ "$C" -lt 1 ] || [ "$C" -gt "$CORES" ] || [ $(( CORES % C )) -ne 0 ]; then
+    echo "COPIES entry $C must divide $CORES"; exit 2
+  fi
+done
+# Copies are not synchronised: each copy's timed window is
+# [jsonl mtime - windows*time_steps*ms_per_step, jsonl mtime]; check overlap
+# from that before quoting a number. Settings mirror the ladder's defaults
+# (WEAK_NX=64, CRM_NLEV=64, WARMUP=3, TIME_STEPS=5, WINDOWS=3, no CRM_EXTRA).
+rc_all=0
+for PREC in $PRECISIONS; do
+  for C in $COPIES; do
+    stride=$(( CORES / C )); pids=()
+    echo "--- copies=$C stride=$stride prec=$PREC"
+    for (( i = 0; i < C; i++ )); do
+      taskset -c $(( i * stride )) "$PY" scripts/bench/bench_plane_crm_dd_scaling.py \
+        --mode weak --precision "$PREC" --nx 64 --ny 64 --nlev 64 --semi-implicit \
+        --warmup-steps 3 --time-steps 5 --windows 3 \
+        --output "$OUT/crm_packed_${PREC}_c${C}_$i.jsonl" < /dev/null \
+        > "$OUT/log_${PREC}_c${C}_$i.txt" 2>&1 &
+      pids+=($!)
+    done
+    for p in "${pids[@]}"; do wait "$p" || rc_all=1; done
+  done
+done
+echo "=== DONE rc=$rc_all out=$OUT ==="
+exit $rc_all

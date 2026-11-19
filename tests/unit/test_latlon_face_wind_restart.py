@@ -11,6 +11,7 @@ import glob
 import logging
 from pathlib import Path
 
+import jax
 import numpy as np
 import pytest
 
@@ -173,19 +174,31 @@ def test_checkpoint_with_one_face_wind_is_refused(leg1):
         _resume(tmp, str(half), "leg2_half")
 
 
-def test_resume_on_another_latlon_scheme_drops_the_faces(leg1):
-    """A lat-lon run that does not carry face winds (here 'centered') must
-    not re-save the checkpoint's faces next to its newer state."""
-    tmp, _b1, ckpt = leg1
-    c = _cfg(tmp / "leg2_centered", 2)
-    d = ModelDriver(c._replace(dycore=c.dycore._replace(
-        discretization="centered")))
+_needs_x64 = pytest.mark.skipif(
+    not jax.config.read("jax_enable_x64"),
+    reason="Spectral/Gaussian grids require JAX_ENABLE_X64=True",
+)
+
+
+@_needs_x64
+def test_sfno_run_drops_saved_face_winds(tmp_path):
+    """A run that does not carry face winds (here SFNO) drops saved ones on
+    entering the run, so its checkpoints never re-save them next to a newer
+    state.  The winds are handed over directly: SFNO restarts refuse lat-lon
+    checkpoints, so no normal load brings saved face winds into this guard."""
+    c = _cfg(tmp_path / "sfno", 1)
+    d = ModelDriver(c._replace(
+        grid=GridConfig(grid_type="gaussian", resolution=5, nlev=4),
+        dycore=c.dycore._replace(discretization="sfno", energy_fixer=False)))
     d.setup()
-    step, day = d.load_checkpoint(ckpt)
-    assert d.run(start_step=step, start_day=day, compiled=False) == "COMPLETED"
-    new = sorted(glob.glob(str(tmp / "leg2_centered" / "checkpoint_day_*.npz")))[-1]
-    with np.load(new, allow_pickle=True) as z:
-        assert not any("latlon_" in k for k in z.keys())
+    face = np.zeros((4, 10, 20))
+    d._carry_aux = {"other": np.ones(1)}
+    for k in ModelDriver._FACE_WIND_KEYS:
+        d._carry_aux[k] = face
+        d._carry_aux[k + "_sha256"] = np.asarray("0" * 64)
+    d._enter_persistent_cgrid()
+    assert not any("latlon_" in k for k in d._carry_aux)
+    assert "other" in d._carry_aux
 
 
 def test_load_then_save_keeps_the_saved_winds(leg1):

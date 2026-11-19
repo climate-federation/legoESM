@@ -15,6 +15,7 @@ import pytest
 
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.fast_sbm import (
+    GMIN_DEFAULT,
     bott_coalescence,
     collision_ck_matrix,
     discretize_exponential,
@@ -91,9 +92,10 @@ def test_single_bin_self_collection_target():
     moved = float(g0[b] - g1[b])
     assert moved > 0.0
     deposited = np.asarray(g1)[b + 1:]
-    # rtol covers the oracle's gmin floor lift of touched-empty bins
-    # (≤ a few × 1e-16 kg m⁻³ absolute).
-    np.testing.assert_allclose(deposited.sum(), moved, rtol=1e-9)
+    # atol covers the oracle's gmin floor lift of touched-empty bins
+    # (gmin = 1e-13 kg m⁻³ each; at most the two bins above b+1 here).
+    np.testing.assert_allclose(deposited.sum(), moved, rtol=1e-9,
+                               atol=2 * GMIN_DEFAULT)
     assert float(g1[b + 1]) > 0.99 * moved
     # Nothing leaks downward.
     np.testing.assert_array_equal(np.asarray(g1)[:b], 0.0)

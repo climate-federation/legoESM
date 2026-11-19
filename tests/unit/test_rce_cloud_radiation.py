@@ -51,8 +51,8 @@ def _rrtmgp_available() -> bool:
         required = (
             "rrtmgp-gas-lw-g256.nc",
             "rrtmgp-gas-sw-g224.nc",
-            "cloudysky_lw.nc",
-            "cloudysky_sw.nc",
+            "rrtmgp-clouds-lw-bnd.nc",
+            "rrtmgp-clouds-sw-bnd.nc",
         )
         return all(
             (production_nc_dir / fn).exists() for fn in required

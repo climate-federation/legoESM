@@ -91,6 +91,7 @@ def test_si3_jpl1_matches_independent_written_order_one_shift() -> None:
         jnp.asarray([-1.0e-4], dtype=jnp.float64),
         jnp.asarray([3.0e-4], dtype=jnp.float64),
         30.0,
+        config=SI3JPL1RidgingConfig(open_water_limit_sharpness=math.inf),  # NEMO hard form
     )
     expected = _independent_one_shift(state)
     np.testing.assert_allclose(result.ice_area, [expected["area"]], rtol=0.0, atol=2e-16)

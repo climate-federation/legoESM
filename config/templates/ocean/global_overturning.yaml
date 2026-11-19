@@ -9,7 +9,7 @@ experiment:
   tier: tier2
   complexity: primitive_equation
   extent: global
-  maturity: structurally_validated
+  maturity: run_tested
   description: >
     Idealized global overturning: simplified-continent basin with exponential
     stratification, prescribed wind, and T/S restoring spinning up a meridional

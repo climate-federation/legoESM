@@ -233,11 +233,17 @@ def moist_scm_microphysics(artifact: LESReferenceArtifact,
     return microphysics_from_record(setup["microphysics"])
 
 
+#: The single-moment warm-rain schemes the harness scores moist cases with: the
+#: Kessler port (user 2026-10-19) and the CloudBench set (user 2026-11-19).
+WARM_RAIN_SCHEMES = ("kessler", "cloudbench_warm_rain")
+
+
 def seed_rain(artifact: LESReferenceArtifact, micro: MicrophysicsConfig,
                z_les, z_scm):
     """The rain mass to seed the SCM with at the artifact's t=0, or ``None``.
 
-    The harness scores moist cases with Kessler only (user 2026-10-19). A scheme
+    The harness scores moist cases with the single-moment warm-rain schemes in
+    ``WARM_RAIN_SCHEMES`` only (user 2026-10-19, 2026-11-19). A scheme
     that carries rain or droplet NUMBER is refused outright: seeding its rain mass
     would mean guessing a drop number, and folding the rain into vapour would
     start the column from a state the LES never had. Rain under any other
@@ -250,7 +256,8 @@ def seed_rain(artifact: LESReferenceArtifact, micro: MicrophysicsConfig,
         raise ValueError(
             f"{artifact.case_name}: the reference records microphysics "
             f"{micro.scheme!r}, which carries number concentrations {numbers}; the "
-            "harness scores moist cases with Kessler only (no drop number is guessed)")
+            f"harness scores moist cases with {WARM_RAIN_SCHEMES} only (no drop "
+            "number is guessed)")
     if artifact.qr is None:
         return None
     qr0 = jnp.asarray(artifact.qr)[0]
@@ -264,10 +271,11 @@ def seed_rain(artifact: LESReferenceArtifact, micro: MicrophysicsConfig,
     if not bool(jnp.any(qr0 > 0.0)):
         return None
     q_r = interp_profile(qr0, z_les, z_scm)
-    if micro.scheme != "kessler":
+    if micro.scheme not in WARM_RAIN_SCHEMES:
         raise ValueError(
             f"{artifact.case_name}: the reference carries rain at t=0 but records "
-            f"microphysics {micro.scheme!r}; rain is seeded under Kessler only")
+            f"microphysics {micro.scheme!r}; rain is seeded under "
+            f"{WARM_RAIN_SCHEMES} only")
     return q_r
 
 
@@ -640,8 +648,8 @@ def diagnostic_scheme_flux(
 
     Interior flux is a pure state functional (dt-independent — see ``_DIAG_DT_S``). Dry
     prescribed-flux regimes only (CBL / sheared CBL / SBL): the counter-gradient ceiling is
-    a dry-CBL notion, so a moist artifact is rejected. Restricted to the four K-closures
-    that expose ``wtheta_flux`` (smagorinsky/louis local, holtslag_boville/ysu nonlocal); a
+    a dry-CBL notion, so a moist artifact is rejected. Restricted to the three K-closures
+    that expose ``wtheta_flux`` (smagorinsky/louis local, holtslag_boville nonlocal); a
     TKE-carrying or non-exposing scheme raises.
     """
     if artifact.w_theta_s is None:
@@ -678,7 +686,7 @@ def diagnostic_scheme_flux(
     if turbulence_scheme_traits(name).carries_energy:
         raise ValueError(
             f"{name}: TKE-carrying schemes are not wired for the Q1 diagnostic flux "
-            "(only the four K-closures expose wtheta_flux)")
+            "(only the three K-closures expose wtheta_flux)")
 
     # Impose the LES surface kinematic heat flux (the controlled variable) on this closure.
     base_inputs = (u2, v2, T2, qv2, pf2, ph2, z_full, z_half, rho)
@@ -697,7 +705,7 @@ def diagnostic_scheme_flux(
     if out.wtheta_flux is None:
         raise ValueError(
             f"{name}: does not expose TurbulenceOutput.wtheta_flux; the Q1 diagnostic "
-            "flux is wired only for smagorinsky/louis/holtslag_boville/ysu")
+            "flux is wired only for smagorinsky/louis/holtslag_boville")
     # Regrid on the SAME hydrostatic heights z_full the scheme computed the flux on
     # (NOT the isothermal z_scm proxy used for the θ IC interp — codex #3).
     flux_inc, z_inc = _to_increasing(out.wtheta_flux[0], z_full[0])  # → increasing height

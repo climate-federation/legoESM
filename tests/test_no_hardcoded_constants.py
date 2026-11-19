@@ -123,16 +123,12 @@ LITERAL_BUDGET: dict[str, dict[str, int]] = {
         "ORACLE_CPAIR = 1004.64": 1,
         "ORACLE_G = 9.80616": 1,
     },
-    "tests/atmosphere/hydrostatic/unit/test_semi_implicit_cdgrid.py": {
-        "dx_min = 6.371e6 * (np.pi / 2) / n / np.sqrt(3)": 8,
-        "dx_min = 6.371e6 * (np.pi / 2) / 8 / np.sqrt(3)": 1,
-    },
     "tests/distributed/test_coupler_mpi.py": {
         "ocean_sst = _pattern(shape, base=287.0, face_scale=0.35, x_scale=0.08, y_scale=-0.04)": 1,
     },
     "tests/ocean/unit/test_eos_veros_nonlin2.py": {"_THETA0 = 283.0 - 273.15": 1},
     "tests/ocean/unit/test_eos_veros_nonlin3.py": {"_VEROS_THETA0 = 283.0 - 273.15": 1},
-    "tests/unit/test_kuo_oracle_faithful.py": {"Tc = T - 273.15": 1},
+    "tests/_kuo_sounding.py": {"Tc = T - 273.15": 1},
     "tests/unit/test_m6_ice_nucleation.py": {
         "target = min(5.0 * math.exp(0.304 * (273.15 - T)), 5.0e5) / rho": 1,
         "assert 5.0 * math.exp(0.304 * (273.15 - T)) > 5.0e5": 1,

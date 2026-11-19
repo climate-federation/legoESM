@@ -329,6 +329,7 @@ def test_spectral_core_raw_two_leg_matches_raw():
     from legoesm.training.scale_build import build_mode_components
 
     yml = _yml()
+    yml["classical"] = {"convection": "sbm"}  # tiedtke refused on spectral
     model, grid, sigma, params, make_run_seg, loss_config, dt = (
         build_mode_components(_cfg("physics"), yml))
     ic = _synthetic_carry(grid, int(yml["nlev"]))

@@ -7,8 +7,8 @@ reference (``_isca_frierson_port``) and assert our JAX scheme reproduces it to
 round-off *on the matched subset*: ``lw_diff_factor=1``, Isca tau constants,
 dry LW (``q_v=None``), black surface (``sfc_emissivity=1``), ``sw_exponent=4``,
 Isca ``sw_diff=0`` (our SW has no latitude-diffusivity knob), ``diabatic_acce=1``
-(we have no heating-acceleration factor), ``p_s=p_ref`` (so ``p/p_s`` == Isca's
-``p/p_std``), and ordinary layer thickness (production floors ``dp`` at 1 Pa in
+(we have no heating-acceleration factor), ``p_s=p_ref``, and ordinary layer
+thickness (production floors ``dp`` at 1 Pa in
 the heating divide — irrelevant here). It is NOT a general Isca replica; the
 subset is what these tests certify.
 
@@ -19,10 +19,12 @@ that the module docstring documents — these must fail loudly if a "fix" quietl
 changes them without updating the Faithfulness section.
 
 Convention note: the port uses ``sigma = p/p_s`` (the FHZ06 *paper* form, which
-our scheme also uses), which equals Isca code's ``p/p_std`` fixed reference ONLY
-because we build the column with ``p_s = p_ref``. This isolates the two-stream
-*recurrence + optical-depth forms* from the (separately documented) p_std-vs-p_s
-coordinate departure.
+our scheme also uses). Isca code uses ``p/pstd_mks`` with ``pstd_mks = 101325
+Pa``, which does NOT equal ``constants.p_ref = 1e5 Pa``, so this port is the
+paper form, not an Isca-code replica: against the running Isca v1.0 oracle it
+is 5.6 W/m^2 off at ``p_s = 1e5`` (tier-2 oracle audit). It isolates the
+two-stream *recurrence + optical-depth forms* from the (separately documented)
+p_std-vs-p_s coordinate departure.
 """
 
 from __future__ import annotations
@@ -83,8 +85,8 @@ def _isca_frierson_port(
     Mirrors the B_FRIERSON loops (down: ``F(k+1)=F(k)*t+B(1-t)``; up:
     ``F(k)=F(k+1)*t+B(1-t)`` from a black surface; SW Beer-Lambert down + a
     constant ``albedo*sw_down(sfc)`` up; heating ``g/cp*dF_net_up/dp``). Uses the
-    ``sigma=p/p_s`` coordinate, which equals Isca's ``p/p_std`` only when
-    ``p_s=p_std`` (as ``_columns`` builds it); ``sw_diff`` defaults to 0 (Isca's
+    ``sigma=p/p_s`` coordinate (the paper form; Isca code's ``p/pstd_mks``
+    uses 101325 Pa, which ``_columns``' ``p_s = p_ref = 1e5`` does not match); ``sw_diff`` defaults to 0 (Isca's
     latitude SW-diffusivity factor, which the scheme cannot represent). All
     arithmetic in float64. Interfaces top(0)->surface(nlev); ``B=sigma*T^4``.
     """
@@ -142,7 +144,7 @@ def _columns(nlev=20):
     Returns (T, p_full, p_half, T_sfc, lat, q_v, insolation) as arrays with a
     leading column axis. p_half[:, 0] = 0 (model top) so sum(dtau)=tau0(lat).
     """
-    p_s = constants.p_ref  # = p_std, so sigma=p/p_s matches the Isca reference
+    p_s = constants.p_ref  # NOT Isca pstd_mks (101325 Pa); sigma=p/p_s is the paper form
     sigma_half = np.linspace(0.0, 1.0, nlev + 1)
     sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
     p_half_1d = sigma_half * p_s

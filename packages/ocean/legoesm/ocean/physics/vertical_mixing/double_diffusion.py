@@ -106,6 +106,32 @@ DEPARTURES (documented; canaried where numerically material):
   cubic is flat-maximal at R_rho->1, so it changes avs by only ~1e-13 (documented,
   not a discriminating canary).  [canaried: floor + 3 of the 4 clip layers]
 
+KNOWN DIFFERENCE (RULE 5 smoothing; compiled CVMix/NEMO pinned at the hard
+limit in test_cfam_smooth_switches.py; the scheme is off in every production
+config).  Defaults regime_width = 0.01, n2_gate_width = 1e-8 s^-2,
+k_max_width = 1e-4 m^2/s; outputs equal the hard form outside the ramps
+|R_rho - 1|, |R_rho|, |R_rho - 0.5| < 0.005, |N^2| < 5e-9 s^-2 and
+|avt or avs - k_max| < 5e-5.  Measured inside them (hybrid vs aligned CVMix):
+- R_rho = 1 edge and N^2 gate (they coincide when N^2 is consistent with the
+  gradients): up to 4.4e-5 (avt) / 3.1e-5 (avs) m^2/s, 100 % relative where
+  the hard form is 0 — the smooth form mixes slightly unstable interfaces
+  (-5e-9 < N^2 <= 0) that the reference leaves alone.
+- R_rho = 0 edge: up to 4.8e-7 m^2/s (avt), nonzero for -0.005 < R_rho <= 0.
+- R_rho = 0.5 salt-branch join: avs up to 0.7 % (1.1e-8 m^2/s); avt exact.
+- nemo_literal vs compiled NEMO: 12 % at zrau = 1 +- 0.003, 0.7 % at 0.5, 100 %
+  for |rn2| < 5e-9.
+- nemo_literal avm += MAX(heat, salt) is a one-sided C1 max (``max_c1``) of
+  width avm_max_width = 1e-6 m^2/s: exact where heat <= salt or
+  heat - salt >= 1e-6, never above MAX (structural zeros kept).
+All widths 0 recover the hard reference (CVMix rel <= 1.4e-15, NEMO <= 1.0e-15).
+Not smoothed (singularity guard, not a regime switch): the sign-preserving
+|beta dS/dz| >= eps32 denominator floor flips R_rho's sign as beta dS/dz
+crosses 0; it changes the output only for |alpha dT/dz| below ~R_c*eps32
+(~2e-7 s^-2).
+Likewise not smoothed in nemo_literal: NEMO's |zds| <= 1e-20 floor and the
+zrau >= 1e-20 floor (zdfddm.F90:129-130); they act only when |zds| or zrau is
+~1e-20.
+
 Integration status
 ------------------
 Increment 1 (this module): the leaf tendency ``compute_ddm_diffusivity`` +
@@ -134,9 +160,16 @@ salt-fingering avfs is a rational form, a documented departure (see above).
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax.numpy as jnp
+
+from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.smooth import (
+    max_c1, positive_part_c1, smooth_min_c1, smoothstep_cubic, validate_smoothing_width,
+)
+from legoesm.core.transcendentals import exp as precision_exp
 
 # --- Salt-fingering heat/salt flux ratio (NEMO zdfddm / Merryfield 1999) ---
 # gamma = 0.7 is the salt-finger FLUX ratio -> diffusivity ratio 0.7/R_rho
@@ -152,6 +185,12 @@ _DC_AVS_HI_B = 0.85
 _DC_AVS_LO = 0.15                 # avs/avt slope, R_rho < 0.5
 _DC_RRHO_SPLIT = 0.5
 _EPS = float(jnp.finfo(jnp.float32).eps)
+# --- NEMO zdfddm.f90:129-168 literals (double under -fdefault-real-8) ---
+_NEMO_DDM_TINY = 1.e-20           # :129-130 zds floor and zrau floor
+_NEMO_DDM_N2_EPS = 1.e-12         # :135 stability indicator offset
+_NEMO_DDM_DC_PREFACTOR = 1.3635e-6  # :166 zavdt
+_NEMO_DDM_DC_INNER = -0.54        # :166
+_NEMO_DDM_DC_OUTER = 4.6          # :166
 
 __physics_contract__ = {
     "summary": (
@@ -174,19 +213,11 @@ __physics_contract__ = {
         "column heat and salt via flux-form implicit diffusion, no-flux BC)."
     ),
     "conserves": ["energy", "salt"],
-    # "differentiable": True is the codebase convention = AD-COMPATIBLE / defined
-    # VJP (no stop_gradient / nondiff ops; jax.grad returns finite selected-branch
-    # gradients a.e.), NOT everywhere-smooth. The scheme is NOT even C0 where a
-    # where-mask switches a NONZERO branch on/off: avs JUMPS from 0 (R_rho<=1) to
-    # ~rn_avts as R_rho->1+ (the cubic is maximal at R_rho=1), and there are
-    # analogous jumps at R_rho=0 and the N^2 gate. (At R_c the RAW cubic ->0
-    # continuously, matching the 0 above; the AD clip evaluating at R_c-eps leaves
-    # a negligible O(eps^3) implementation plateau then 0 at R_c — a tiny
-    # implementation jump, not a material one.) The R_rho=0.5 DC join is continuous
-    # in VALUE (both salt branches = 0.075*avt there; the DERIVATIVE differs). These
-    # jumps are BY the Large/CVMix/NEMO piecewise construction (smoothing the gates
-    # would break oracle fidelity); at a gate the gradient is the one-sided
-    # selected-branch value, not a true subgradient.
+    # Smooth by default (RULE 5): the R_rho = 0 / 1 jumps, the 0.5 salt-branch
+    # kink, the N^2 gate and the k_max cap are compact C1 ramps (config widths);
+    # width 0 restores the hard Large/CVMix/NEMO piecewise form, which the
+    # compiled-oracle tests pin.  The R_c edge is C2 already (cubic -> 0 with
+    # zero slope; the AD clip at R_c-eps leaves an O(eps^3) plateau).
     "differentiable": True,
     "reference": (
         "Large et al. (1994) Rev.Geophys. 32 + CVMix Aug-2012 Eqs. 6.6-6.12 "
@@ -204,6 +235,10 @@ __param_spec__ = {
         "scheme_key": "ocean.vm.ddm",
         "excluded": {
             "k_max": "numerics: bound (diffusivity cap)",
+            "regime_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
+            "n2_gate_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
+            "k_max_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
+            "avm_max_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
         },
         "params": {
             "rn_avts": {
@@ -237,6 +272,45 @@ class DoubleDiffusionConfig(NamedTuple):
     rn_avts: float = 1e-4     # max salt-fingering salt diffusivity [m^2/s]
     rn_hsbfr: float = 1.6     # salt-fingering cutoff density ratio R_c [1]
     k_max: float = 1e-2       # diffusivity cap [m^2/s]
+    # "hybrid" (default): compute_ddm_diffusivity above.  "nemo_literal":
+    # nemo_zdf_ddm below, NEMO zdfddm.f90:107-175 statement by statement.
+    form: str = "hybrid"
+    # RULE 5 widths of the traced-state switches (0 = the reference's hard form;
+    # the hard form is the oracle-matched one).  regime_width [1]: the R_rho
+    # window edges at 0, 1 and the 0.5 salt-branch join; n2_gate_width
+    # [s^-2]: the N^2 stability gate; k_max_width [m^2/s]: the k_max cap
+    # (hybrid only).  Compact C1 ramps, exact outside |x| >= width/2.
+    regime_width: float = 0.01
+    n2_gate_width: float = 1e-8
+    k_max_width: float = 1e-4
+    # [m^2/s] nemo_literal only: NEMO's avm += MAX(heat, salt), one-sided C1
+    # max_c1 band heat - salt in (0, width) (0 = hard MAX).
+    avm_max_width: float = 1e-6
+
+
+def _edge(x, width, inclusive=False):
+    """RULE 5 step H(x): compact C1 ramp ``smoothstep_cubic(x/width + 1/2)``,
+    exact 0/1 outside ``|x| >= width/2``; ``width = 0`` is the hard reference
+    step (``x > 0``, or ``x >= 0`` when ``inclusive``; ``inclusive`` matters
+    only at width 0)."""
+    if width == 0:
+        return ((x >= 0.0) if inclusive else (x > 0.0)).astype(jnp.result_type(x))
+    return smoothstep_cubic(x / width + 0.5)
+
+
+def _validate_widths(cfg):
+    validate_smoothing_width("DoubleDiffusionConfig.regime_width", cfg.regime_width)
+    validate_smoothing_width("DoubleDiffusionConfig.n2_gate_width", cfg.n2_gate_width)
+    validate_smoothing_width("DoubleDiffusionConfig.k_max_width", cfg.k_max_width)
+    validate_smoothing_width("DoubleDiffusionConfig.avm_max_width", cfg.avm_max_width)
+    # smooth_min_c1 dips up to width/8 below min(x, k_max): with width <= 2*k_max
+    # an input x >= 0 stays >= x/2 >= 0 (no antidiffusion, no hard clip needed).
+    if isinstance(cfg.k_max, (int, float)) and cfg.k_max_width > 2.0 * cfg.k_max:
+        raise ValueError("DoubleDiffusionConfig.k_max_width must be <= 2*k_max "
+                         f"({cfg.k_max_width!r} > 2*{cfg.k_max!r})")
+    if cfg.regime_width >= 0.5:
+        raise ValueError("DoubleDiffusionConfig.regime_width must be < 0.5 "
+                         f"(the R_rho = 0, 0.5, 1 edges would overlap); got {cfg.regime_width!r}")
 
 
 def compute_ddm_diffusivity(
@@ -247,9 +321,11 @@ def compute_ddm_diffusivity(
 ):
     """Additive double-diffusive (avt_ddm, avs_ddm) at each W-interface.
 
-    Pure, traced-safe: all regime selection via ``jnp.where`` (no Python
-    branching on the arrays).  Zero everywhere when ``N2<=0`` or R_rho is
-    outside both double-diffusive windows.
+    Pure, traced-safe.  RULE 5: the regime edges (R_rho = 0, 0.5, 1), the
+    N^2 gate and the k_max cap are compact C1 ramps of width
+    ``cfg.regime_width`` / ``cfg.n2_gate_width`` / ``cfg.k_max_width``; exact
+    outside the ramps.  All widths 0 = the hard piecewise reference: zero
+    where ``N2<=0`` or R_rho is outside both double-diffusive windows.
     """
     # R_rho = (alpha dT/dz)/(beta dS/dz); floor |denominator| to _EPS while
     # PRESERVING sign, so a vanishing salinity gradient can't blow up the ratio
@@ -258,37 +334,112 @@ def compute_ddm_diffusivity(
                       jnp.maximum(beta_dSdz, _EPS),
                       jnp.minimum(beta_dSdz, -_EPS))
     R_rho = alpha_dTdz / denom
-    stable = N2 > 0.0
+    _validate_widths(cfg)
+    w_r, w_n = cfg.regime_width, cfg.n2_gate_width
+    stable = _edge(N2, w_n)
 
     # --- Salt fingering: 1 < R_rho < R_c ---
     Rc = cfg.rn_hsbfr
-    finger = stable & (R_rho > 1.0) & (R_rho < Rc)
-    # Clip R_rho into (1, Rc) before the cubic so the where-masked-out lanes
+    # Clip R_rho into (1, Rc) before the cubic so lanes outside the window
     # can't produce NaN/negative under the power.
-    Rf = jnp.clip(R_rho, 1.0 + _EPS, Rc - _EPS)
-    frac = (Rf - 1.0) / (Rc - 1.0)                       # in (0,1)
+    # Smooth path: no clip inside the R_rho = 1 ramp (the cubic is even in
+    # R_rho - 1, so it extends smoothly below 1 where the ramp still weighs it).
+    Rf = jnp.clip(R_rho, 1.0 + _EPS if w_r == 0 else 1.0 - 0.5 * w_r, Rc - _EPS)
+    frac = (Rf - 1.0) / (Rc - 1.0)                       # |frac| < 1
     avs_finger = cfg.rn_avts * (1.0 - frac * frac) ** 3   # >= 0
-    # Heat ratio uses the ACTUAL in-window R_rho (Merryfield: 0.7*avs/R_rho),
-    # NOT the clipped Rf (which would err by ~_EPS within eps of 1 / Rc — codex
-    # r1).  In-window R_rho>1 so the divide is safe; out-of-window lanes divide
-    # by 1.0 (finite, AD-safe — a raw R_rho there could be 0/negative and, though
-    # masked below, would poison reverse-mode grads via 0*inf).
-    R_finger = jnp.where(finger, R_rho, 1.0)
+    below_rc = (R_rho < Rc).astype(R_rho.dtype)          # C2 edge: cubic -> 0 there
+    # Heat ratio uses the ACTUAL R_rho (Merryfield: 0.7*avs/R_rho), not the
+    # clipped Rf; outside where the fingering weight can be nonzero the divisor
+    # is held at 1.0 (finite, AD-safe: 0*inf would poison reverse-mode grads).
+    finger_on = _edge(R_rho - 1.0, w_r)
+    R_finger = jnp.where(R_rho > 1.0 - 0.5 * w_r, R_rho, 1.0)
     avt_finger = _FINGER_HEAT_RATIO * avs_finger / R_finger
 
     # --- Diffusive convection: 0 < R_rho < 1 ---
-    dc = stable & (R_rho > 0.0) & (R_rho < 1.0)
-    Rd = jnp.clip(R_rho, _EPS, 1.0 - _EPS)
+    # Width 0: clip into (0, 1) as the hard reference.  Smooth: the diffusive
+    # formulas are evaluated across the whole R_rho = 1 ramp (no clip inside
+    # it, so no slope jump), and the low salt branch uses a C1 positive part
+    # of R_rho (exactly 0 for R_rho <= 0, exactly R_rho above w_r/2).
+    if w_r == 0:
+        Rd = jnp.clip(R_rho, _EPS, 1.0 - _EPS)
+        R_lo = Rd
+    else:
+        Rd = jnp.clip(R_rho, _EPS, 1.0 + 0.5 * w_r)
+        R_lo = positive_part_c1(R_rho, 2.0 / w_r)
     avt_dc = (_DC_AVT_PREFACTOR * _DC_AVT_C0
               * jnp.exp(_DC_AVT_C1 * jnp.exp(_DC_AVT_C2 * (1.0 / Rd - 1.0))))
-    avs_dc = jnp.where(
-        Rd >= _DC_RRHO_SPLIT,
-        avt_dc * (_DC_AVS_HI_A - _DC_AVS_HI_B / Rd) * Rd,
-        avt_dc * _DC_AVS_LO * Rd,
-    )
+    # Each branch keeps main's exact operation order, so hi in {0, 1} (width 0)
+    # reproduces the old where() bit for bit.
+    hi = _edge(Rd - _DC_RRHO_SPLIT, w_r, inclusive=True)
+    avs_dc = (hi * (avt_dc * (_DC_AVS_HI_A - _DC_AVS_HI_B / Rd) * Rd)
+              + (1.0 - hi) * (avt_dc * _DC_AVS_LO * R_lo))
+    if w_r == 0:
+        dc_on = ((R_rho > 0.0) & (R_rho < 1.0)).astype(R_rho.dtype)
+    else:
+        dc_on = _edge(R_rho, w_r) * (1.0 - finger_on)
+    finger_w = stable * finger_on * below_rc
+    dc_w = stable * dc_on
 
-    avt = jnp.where(finger, avt_finger, jnp.where(dc, avt_dc, 0.0))
-    avs = jnp.where(finger, avs_finger, jnp.where(dc, avs_dc, 0.0))
-    avt = jnp.clip(avt, 0.0, cfg.k_max)
-    avs = jnp.clip(avs, 0.0, cfg.k_max)
+    avt = finger_w * avt_finger + dc_w * avt_dc
+    avs = finger_w * avs_finger + dc_w * avs_dc
+    avt = smooth_min_c1(avt, cfg.k_max, cfg.k_max_width)
+    avs = smooth_min_c1(avs, cfg.k_max, cfg.k_max_width)
     return avt, avs
+
+
+def nemo_zdf_ddm(avt, avm, zdt, zds, rn2, wmask, cfg: DoubleDiffusionConfig):
+    """NEMO ``zdf_ddm`` (zdfddm.f90:107-175) on W-interfaces; returns
+    ``(avt, avs, avm)``.
+
+    ``zdt``/``zds`` are ``zaw*dk[T]``/``zbw*dk[S]`` (:127-128), i.e. bn2_t's
+    temperature/salinity contributions (eosbn2.f90:1632-1636 share zrw, zaw,
+    zbw); ``rn2`` the same step's N2; ``wmask`` NEMO's W mask (:136).  Every
+    operation is rounded in source order (the build has no FMA) and EXP is
+    the precision policy's: scalar libm in exact certification, native XLA in
+    fast-literal mode.  The latter changes only transcendental round-off, not
+    this formula or its operation order.
+    """
+    if cfg.form != "nemo_literal":
+        raise ValueError(
+            "nemo_zdf_ddm requires DoubleDiffusionConfig.form='nemo_literal', "
+            f"got {cfg.form!r}")
+    r = nemo_source_round
+    dtype = avt.dtype
+    one = jnp.asarray(1.0, dtype)
+    tiny = jnp.asarray(_NEMO_DDM_TINY, dtype)
+    zds = jnp.where(jnp.abs(zds) <= tiny, tiny, zds)                    # :129
+    zrau = jnp.maximum(tiny, r(zdt / zds))                              # :130
+    # RULE 5: NEMO's 0/1 masks become compact C1 ramps of width
+    # cfg.n2_gate_width (N^2) / cfg.regime_width (zrau); width 0 gives the
+    # masks below exactly (strict inequalities, as NEMO's IF tests).
+    _validate_widths(cfg)
+    w_r, w_n = cfg.regime_width, cfg.n2_gate_width
+    zmsks = _edge(r(rn2 + _NEMO_DDM_N2_EPS), w_n) * r(one * wmask.astype(dtype))  # :135-137
+    zmskf = _edge(zrau - 1.0, w_r)                                      # :139-141
+    zmskd1 = _edge(1.0 - zrau, w_r)                                     # :144-146
+    zmskd2 = _edge(0.5 - zrau, w_r)                                     # :148-150
+    zmskd3 = _edge(zrau - 0.5, w_r) * _edge(1.0 - zrau, w_r)            # :152-154
+    zinr = r(one / zrau)                                                # :159
+    # rn_hsbfr is a runtime namelist value in NEMO: keep it opaque so XLA
+    # cannot fold 1/1.6 into a reciprocal multiply (0.625; off by an ulp).
+    zrr = r(zrau / r(jnp.asarray(cfg.rn_hsbfr, dtype)))                 # :161
+    zrr = r(zrr * zrr)                                                  # :162
+    zavfs = r(r(r(cfg.rn_avts / r(1.0 + r(r(zrr * zrr) * zrr)))
+                * zmsks) * zmskf)                                       # :163
+    zavft = r(r(_FINGER_HEAT_RATIO * zavfs) * zinr)                     # :164
+    inner = precision_exp(r(_NEMO_DDM_DC_INNER * r(zinr - 1.0)))
+    zavdt = r(r(r(_NEMO_DDM_DC_PREFACTOR
+                  * precision_exp(r(_NEMO_DDM_DC_OUTER * inner)))
+                * zmsks) * zmskd1)                                      # :166
+    zavds = r(r(zavdt * zmsks) * r(
+        r(r(r(_DC_AVS_HI_A * zrau) - _DC_AVS_HI_B) * zmskd3)
+        + r(r(_DC_AVS_LO * zrau) * zmskd2)))                            # :167-168
+    avs = r(r(avt + zavfs) + zavds)                                     # :170
+    heat = r(zavft + zavdt)
+    salt = r(zavfs + zavds)
+    avt_new = r(r(avt + zavft) + zavdt)                                 # :171
+    # C1 MAX that is exactly salt for heat <= salt and exactly heat for
+    # heat - salt >= avm_max_width (never above MAX, so heat = salt = 0 stays 0).
+    s_avm = math.inf if cfg.avm_max_width == 0 else 1.0 / cfg.avm_max_width
+    avm_new = r(avm + max_c1(heat, salt, s_avm))                        # :172
+    return avt_new, avs, avm_new

@@ -192,7 +192,8 @@ def barotropic_substeps_mpas(
     # sharp ocean-to-zero jump from masking.
     def _fill_land_cells_mpas(field_cell, mask_cell):
         return fill_land_cells_mpas(field_cell, mask_cell, c1, c2,
-                                    mesh.edgesOnCell, mesh.nEdgesOnCell)
+                                    mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                    band_capacity=config.land_fill_band_capacity)
 
     # --- Fix 2: Barotropic Laplacian diffusion ---
     baro_alpha_val = config.barotropic_diffusion_alpha

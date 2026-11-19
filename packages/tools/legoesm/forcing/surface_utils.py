@@ -171,6 +171,107 @@ def blended_surface_albedo(
     return f_land * albedo_land + (1.0 - f_land) * albedo
 
 
+def handback_surface_boundary(
+    f_land: jnp.ndarray,
+    f_ice: jnp.ndarray,
+    f_lake: jnp.ndarray,
+    T_land: jnp.ndarray,
+    sst: jnp.ndarray,
+    emissivity: "float | jnp.ndarray",
+    emissivity_land: "float | jnp.ndarray",
+    lw_emit_ice_lake: jnp.ndarray,
+    emissivity_ice: jnp.ndarray,
+    emissivity_lake: jnp.ndarray,
+    albedo_land: "float | jnp.ndarray",
+    albedo_ocean: "float | jnp.ndarray",
+    albedo_ice: jnp.ndarray,
+    albedo_lake: jnp.ndarray,
+) -> dict:
+    """Radiative surface boundary of a cell whose land and open water belong
+    to the atmosphere and whose ice and lake belong to the coupler (P5c L2').
+
+    Open water is what the four tiles leave, ``f_ow = 1 - f_land - f_ice -
+    f_lake``.  Albedo and emissivity are area blends; the emitted longwave is
+    the land emission at its radiating pair ``(T_land, emissivity_land)`` (the
+    multilayer land's radiating surface, tier-5 U11-1) and the open-water
+    emission at the SST this step, plus the ice
+    and lake emission the coupler debits for this window (``lw_emit_ice_lake``,
+    per grid cell).  ``T_rad`` is the single temperature with
+    ``eps_eff * sigma * T_rad^4`` equal to that emission, so a solver given
+    ``(eps_eff, T_rad)`` emits exactly it and reflects ``(1 - eps_eff)`` of
+    the downward longwave, the blend of the tiles' reflection.
+
+    Returns a dict with ``f_ow``, ``sfc_albedo``, ``sfc_emissivity`` and
+    ``T_sfc_rad``.  The root is guarded so a cell with no emission would get
+    ``T_rad = 0`` with a finite, zero derivative (vote V5); RRTMGP clips its
+    Planck tables at 160 K, so such a cell would still emit, which is why the
+    ice/lake emission is never zero (vote V15).
+    """
+    f_ow = 1.0 - f_land - f_ice - f_lake
+    eps_eff = (emissivity_land * f_land + emissivity * f_ow
+               + f_ice * emissivity_ice + f_lake * emissivity_lake)
+    sb = constants.sigma_sb
+    emit = (sb * (emissivity_land * f_land * T_land ** 4
+                  + emissivity * f_ow * sst ** 4)
+            + lw_emit_ice_lake)
+    x = emit / (sb * eps_eff)
+    pos = x > 0.0
+    return dict(
+        f_ow=f_ow,
+        sfc_albedo=(f_land * albedo_land + f_ow * albedo_ocean
+                    + f_ice * albedo_ice + f_lake * albedo_lake),
+        sfc_emissivity=eps_eff,
+        T_sfc_rad=jnp.where(pos, jnp.where(pos, x, 1.0) ** 0.25, 0.0),
+    )
+
+
+def handback_tile_radiation(
+    sw_down: jnp.ndarray,
+    lw_down: jnp.ndarray,
+    sw_net: jnp.ndarray,
+    lw_net: jnp.ndarray,
+    f_land: jnp.ndarray,
+    f_ice: jnp.ndarray,
+    f_lake: jnp.ndarray,
+    albedo_land: "float | jnp.ndarray",
+    T_land: jnp.ndarray,
+    emissivity: "float | jnp.ndarray",
+    emissivity_land: "float | jnp.ndarray",
+    lw_emit_ice_lake: jnp.ndarray,
+    albedo_ice: jnp.ndarray,
+    albedo_lake: jnp.ndarray,
+    emissivity_ice: jnp.ndarray,
+    emissivity_lake: jnp.ndarray,
+) -> dict:
+    """Per-tile split of one radiation solve's surface fluxes [W/m2, + into
+    the surface] for the boundary ``handback_surface_boundary`` built (same
+    fractions, albedos, emissivities, land skin and ice/lake emission).
+
+    ``booked_*``: what the ice and lake absorb per unit TILE area (SW, and
+    LW excluding their own emission) -- the coupler's ``OwnedTileForcing``;
+    their albedo, like the land's, is the same for both beams.
+    ``ow_sw_net``/``ow_lw_net``: the open-water share per grid cell area, the
+    solved net minus the land, ice and lake shares (plus the ice/lake
+    emission the coupler debits), so the tiles sum to the net the atmosphere
+    applied exactly -- also when the open-water direct beam sees a
+    zenith-dependent albedo the diffuse blend does not carry (vote K3-V10).
+    """
+    sb = constants.sigma_sb
+    sw_ice, sw_lake = sw_down * (1.0 - albedo_ice), sw_down * (1.0 - albedo_lake)
+    lw_ice, lw_lake = emissivity_ice * lw_down, emissivity_lake * lw_down
+    return dict(
+        ow_sw_net=(sw_net - f_land * sw_down * (1.0 - albedo_land)
+                   - f_ice * sw_ice - f_lake * sw_lake),
+        ow_lw_net=(lw_net
+                   - f_land * emissivity_land * (lw_down - sb * T_land ** 4)
+                   - f_ice * lw_ice - f_lake * lw_lake + lw_emit_ice_lake),
+        booked_sw_net_ice=sw_ice,
+        booked_lw_abs_ice=lw_ice,
+        booked_sw_net_lake=sw_lake,
+        booked_lw_abs_lake=lw_lake,
+    )
+
+
 def surface_temperature_for_lw_boundary(
     radiation: str,
     *,
@@ -466,6 +567,7 @@ def prognostic_ice_skin_temperature(
     T_freeze_K: float = constants.T_freeze_ocean,
     k_ice_W_m_K: float = constants.k_ice_default,
     T_melt_surface_K: float = constants.T_freeze,
+    melt_cap_width_K: float = 0.0,
 ) -> jnp.ndarray:
     """Advance a prescribed-ice AMIP skin temperature one integration step.
 
@@ -540,6 +642,13 @@ def prognostic_ice_skin_temperature(
         open-water snap).
     k_ice_W_m_K : ice thermal conductivity [W/m/K].
     T_melt_surface_K : fresh-ice surface melting point [K] (upper cap).
+    melt_cap_width_K : width [K] of the smooth melt cap.  ``0`` = the hard
+        ``clip`` cap; ``> 0`` = ``smooth_min(T_new, T_melt_surface_K,
+        sharpness=1/width)`` (LogSumExp, never above the melting point), so
+        the skin keeps a nonzero gradient at the cap.  KNOWN DIFFERENCE vs the
+        hard cap: a melting skin sits slightly below 0 C, by about
+        ``width * ln(1 / (1 - exp(-dT/width)))`` for a per-step warming dT
+        (measured per case in tests/unit/test_ice_skin_smooth_cap.py).
 
     Returns
     -------
@@ -550,14 +659,51 @@ def prognostic_ice_skin_temperature(
     r = dt_s / C_areal
     T_new = (T_skin + r * (F_net_down_W_m2 + g_cond * T_freeze_K)) \
         / (1.0 + r * g_cond)
-    T_new = jnp.clip(T_new, _ICE_SKIN_FLOOR_K, T_melt_surface_K)
+    if melt_cap_width_K == 0.0:
+        T_new = jnp.clip(T_new, _ICE_SKIN_FLOOR_K, T_melt_surface_K)
+    else:
+        from legoesm.core.smooth import smooth_min
+        T_new = smooth_min(jnp.maximum(T_new, _ICE_SKIN_FLOOR_K),
+                           T_melt_surface_K, 1.0 / melt_cap_width_K)
     return jnp.where(sic > 0.0, T_new, T_freeze_K)
 
-# NOTE: the model has a SECOND tropopause: the CAM6 aist cloud switch
-# (rhminis/rhmaxis) uses the analytic 25000 - 15000 cos^2(lat) Pa surface
-# (clouds/cloud_fraction.py cam6_tropopause_analytic, CAM's last fallback).
-# This WMO locator places volcanic aerosol only; unifying the two (CAM tries
-# twmo first) is an open follow-up.
+
+def advance_ice_skin(
+    T_skin: jnp.ndarray,
+    sw_net: jnp.ndarray,
+    lw_net: jnp.ndarray,
+    shflx: jnp.ndarray | None,
+    lhflx: jnp.ndarray | None,
+    sic: jnp.ndarray,
+    dt_s: float,
+    h_ice_m: float,
+    melt_cap_width_K: float = 0.0,
+) -> jnp.ndarray:
+    """One step of the prognostic ice skin from a lane's surface fluxes.
+
+    Grid-agnostic per-column physics shared by every lane: ``F_net_down =
+    sw_net + lw_net - shflx - lhflx`` (sw/lw net [W/m^2, +into surface];
+    turbulent fluxes [W/m^2, +upward]; an absent turbulent flux contributes
+    nothing), then :func:`prognostic_ice_skin_temperature`.  Inputs are
+    flattened to columns and the result has the shape of ``T_skin``.
+    """
+    shape = jnp.shape(T_skin)
+    f_net = (jnp.asarray(sw_net).reshape(-1) + jnp.asarray(lw_net).reshape(-1))
+    if shflx is not None:
+        f_net = f_net - jnp.asarray(shflx).reshape(-1)
+    if lhflx is not None:
+        f_net = f_net - jnp.asarray(lhflx).reshape(-1)
+    out = prognostic_ice_skin_temperature(
+        jnp.asarray(T_skin).reshape(-1), f_net, jnp.asarray(sic).reshape(-1),
+        dt_s=dt_s, h_ice_m=h_ice_m, melt_cap_width_K=melt_cap_width_K)
+    return out.reshape(shape)
+
+# NOTE: the model has OTHER tropopauses (clouds/cloud_fraction.py): the CAM6
+# aist cloud switch (rhminis/rhmaxis) uses the analytic 25000 - 15000
+# cos^2(lat) Pa surface (cam6_tropopause_analytic), and CLUBB's clubbtop uses
+# CAM's chemistry tropopause (cam_chem_tropopause_level: twmo + polar rule,
+# that surface as fallback).  This WMO locator places volcanic aerosol only;
+# unifying them is an open follow-up.
 def wmo_tropopause_pressure(p_full_col: jnp.ndarray, temp_col: jnp.ndarray,
                             p_bot: float = 5.0e4,
                             p_top: float = 5.0e3) -> jnp.ndarray:
@@ -636,3 +782,73 @@ def stratospheric_layer_weight(p_half_col: jnp.ndarray,
     top = jnp.minimum(p_half_col[:, :-1], p_half_col[:, 1:])
     bot = jnp.maximum(p_half_col[:, :-1], p_half_col[:, 1:])
     return jnp.where(bot <= p_tp, 1.0, jnp.where(top >= p_tp, 0.0, 0.5))
+
+
+def aerosol_layer_fields(acfg, day, lat_col, p_half_col, w_strat, *,
+                         active, lw_active, dtype, lon_col=None):
+    """Per-layer aerosol forcing for one day: ``(aerosol_od, ccn_aod,
+    aerosol_lw_od)``, as the AMIP driver feeds radiation and the aerosol-CCN
+    droplet number.  ``ccn_aod`` is None when ``active`` is off; the two
+    optical-depth fields are zeros (ncol, nlev) when their switch is off.
+    ``lon_col`` [rad] reads the SW and CCN aerosol at each column's longitude;
+    None reads their zonal mean."""
+    from legoesm.forcing.external import (
+        get_aerosol_at_time,
+        get_aerosol_lw_at_time,
+        get_aerosol_sw_volcanic_at_time,
+    )
+
+    ncol, nlev = p_half_col.shape[0], p_half_col.shape[1] - 1
+    ccn_aod = None
+    aerosol_od = jnp.zeros((ncol, nlev), dtype=dtype)
+    if active:
+        _acfg = acfg
+        # Volcanic SW (CMIP6 ``ext_sun``) is placed at its true
+        # stratospheric pressure like the LW profile below, NOT spread
+        # with the tropospheric column by pressure mass.  A legacy
+        # column-only volcanic file (profile None) stays in the column.
+        volc_sw = get_aerosol_sw_volcanic_at_time(_acfg, day, lat_grid=lat_col)
+        _trop_cfg = _acfg._replace(volcanic_enabled=False)
+        aerosol_col = get_aerosol_at_time(
+            _acfg if volc_sw is None else _trop_cfg, day, lat_grid=lat_col,
+            lon_grid=lon_col,
+        )
+        aerosol_od = distribute_column_aod_to_layers(
+            jnp.asarray(aerosol_col), p_half_col,
+        )
+        if volc_sw is not None:
+            aerosol_od = aerosol_od + (place_stratospheric_aod_profile_to_layers(
+                jnp.asarray(volc_sw[0]), jnp.asarray(volc_sw[1]), p_half_col,
+            ) * w_strat
+            ).astype(aerosol_od.dtype)
+        # AOD->CCN input: TROPOSPHERIC column in the visible (550 nm)
+        # band, volcanic excluded, from ``ccn_path`` if set.  The Andreae 2009
+        # fit is local total AOT: a zonal mean gives polluted E China and the
+        # clean N Pacific one droplet number.
+        ccn_aod = jnp.asarray(get_aerosol_at_time(
+            _trop_cfg._replace(path=_acfg.ccn_path or _acfg.path),
+            day, lat_grid=lat_col, band="vis", lon_grid=lon_col,
+        )).reshape(ncol).astype(dtype)
+
+    # Volcanic stratospheric LONGWAVE aerosol (gap #9): same (ncol,
+    # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
+    # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
+    # and a run without volcanic LW aerosol is byte-identical (zeros LW
+    # od is a RRTMGP no-op).  ``get_aerosol_lw_at_time`` returns the
+    # file's height-resolved ABSORPTION profile (ext*(1-omega), Planck-
+    # weighted gray band collapse) plus its pressure edges; the profile
+    # is placed at its true stratospheric pressure by a conservative
+    # overlap remap -- NOT spread by full-column pressure mass, which
+    # dumped ~90% of a stratospheric aerosol into the troposphere.
+    aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=dtype)
+    if lw_active:
+        aerosol_lw_prof = get_aerosol_lw_at_time(
+            acfg, day, lat_grid=lat_col,
+        )
+        if aerosol_lw_prof is not None:
+            prof_col, p_edges = aerosol_lw_prof
+            aerosol_lw_od = (place_stratospheric_aod_profile_to_layers(
+                jnp.asarray(prof_col), jnp.asarray(p_edges), p_half_col,
+            ) * w_strat
+            ).astype(dtype)
+    return aerosol_od, ccn_aod, aerosol_lw_od

@@ -1,0 +1,238 @@
+{
+  "capture_instant": {
+    "NEMO": "restart kt=N after RK3 stage 3 completes step N; sshn and un/vn level 0 are the completed SWE layer state",
+    "excluded": "NEMO uu_n/vv_n are barotropic workspace arrays and are not used as evidence for layer-velocity identity",
+    "legoESM": "dayNNNN.npz end-of-day snapshot after exactly N production steps in the one-jitted-scan-per-day composition"
+  },
+  "day": 1095,
+  "field_mapping": {
+    "ssh_m": {
+      "grid": "T",
+      "nemo": "sshn",
+      "nemo_index": "[0]"
+    },
+    "u_m_s": {
+      "grid": "U",
+      "nemo": "un",
+      "nemo_index": "[0, 0]"
+    },
+    "v_m_s": {
+      "grid": "V",
+      "nemo": "vn",
+      "nemo_index": "[0, 0]"
+    }
+  },
+  "label": "NEMO-versus-legoESM completed-step restart identity",
+  "provenance": {
+    "NEMO": {
+      "deck": {
+        "executable_sha256": "0be0d4b0846c34b3540105a54eaa6de225e03a9d8927cf5dcc8d85198b88bf09",
+        "manifest_sha256": "a9047425eae0d214fa7d8c5811a166cd3082cfeb8fdfcbbaf6669883e858026f",
+        "matches_2026_10_13_reference_build": true,
+        "namelist_cfg_sha256": "0f6fc303af68549c0c78dc1f22f9e29ed5a6feb3b4fafc88b6ee4281bb42e309",
+        "namelist_ref_sha256": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+        "resolved_namelist_sha256": "deaeaaf6dca96a9d3639839622bebac7ff5cd2a39501112a492b68c7f73ac9e8",
+        "resolved_values": {
+          "jpkglo": "2",
+          "nn_SWG": "16",
+          "nn_write": "1728",
+          "rn_Dt": "50.",
+          "rn_Lv": "10",
+          "rn_Uv": "2.0",
+          "rn_beta": "2.e-11",
+          "rn_domsiz": "4000000",
+          "rn_dx": "100000",
+          "rn_f0": "0.7e-4",
+          "rn_modified_grav": "9.80665",
+          "rn_rfr": "1.e-7",
+          "rn_shlat": "0.",
+          "rn_tau": "0.10"
+        }
+      },
+      "excluded_restart_fields": {
+        "uu_n": {
+          "nonzero_words": 0,
+          "reason": "NEMO SWE restart barotropic workspace; not the completed layer velocity. The compared velocities are un/vn level 0.",
+          "sha256": "8b8dfe0b466d30151a97dcc1e6a57e6d5784aca2cb857bc210e40a4d51c3313b"
+        },
+        "vv_n": {
+          "nonzero_words": 0,
+          "reason": "NEMO SWE restart barotropic workspace; not the completed layer velocity. The compared velocities are un/vn level 0.",
+          "sha256": "8b8dfe0b466d30151a97dcc1e6a57e6d5784aca2cb857bc210e40a4d51c3313b"
+        }
+      },
+      "mesh": {
+        "mask_sha256": {
+          "T": "ac93ad5b89df276089ded1fabfeffe74b85ff264a49b8f8b468b8fbc254f7482",
+          "U": "06097cfd8c201a2d060c7c6f479db72cc8e9dcefb803d97bf24076ea8359cf4f",
+          "V": "311c836bcaa13847c2d40c76e5445eb4dd528e68e32d73edee8a922f04165edf"
+        },
+        "mesh_files_sha256": {
+          "mesh_mask_0000.nc": "775ca5e5ed9772cd9772f91cc1f8a52eb8774a3c41b9e034892de61889e42c8e",
+          "mesh_mask_0001.nc": "f296f225072bcfb0637e42ba0499f81f7ff12c2a49ccc7a03bdd7196321eb21e",
+          "mesh_mask_0002.nc": "77c53b18cdfc1a93306a9acef370f7a9f214021b27c3f6e0c31b1d76dd5d1542",
+          "mesh_mask_0003.nc": "6f449a5a2df4de2af3ceba3a85e17cc2ff83488152cc24cdeedbc872215ef8e5",
+          "mesh_mask_0004.nc": "8baa24a2a39c14c1be0447d6541ec5d6e567ff0568ba6db7c6b27983341d7454",
+          "mesh_mask_0005.nc": "a24b38386d2feee2a07e77f90eeef3b9fdcd5cd8ef4253da11f1ce5445ce8d7f",
+          "mesh_mask_0006.nc": "745d904a555399706e4f2da112a9199b6d7dbe7092d6ddaa1909841e0f70b731",
+          "mesh_mask_0007.nc": "45413807c80adbb994924be4c6a360a1ce554ea5f5d863009aa238a458029a28",
+          "mesh_mask_0008.nc": "e0ccf3ed9c127ac17d80c8fa31a16e28d9fbbe050c69ea3e3ca5927ae7469e67",
+          "mesh_mask_0009.nc": "c3b0bc608034cd417f5544ec67cba1174f7faad57d21de48bb5db5b96fce4ce5",
+          "mesh_mask_0010.nc": "fd222645231e188fad62e9e0faed51aea9ddf6d39264ce1922d916ac9f203bde",
+          "mesh_mask_0011.nc": "4c1e626aadb96a488e3b89b8e3dbdd3b08be20cb3ec59e7185223bfe56035f87",
+          "mesh_mask_0012.nc": "1dfc069568cbeb46450e6b4df0dd4eeac4814100c14d144efc4ee03b12c8f6df",
+          "mesh_mask_0013.nc": "25e3a10918c44bd07d72e3b40798aad938b83b361dc755be861763b2e644f02e",
+          "mesh_mask_0014.nc": "2555ab4fb1f56e8112c2795a5a9e5b42fa0adb4be5803a927680087d074e5331",
+          "mesh_mask_0015.nc": "54a1967c293fff266b566bb978cbdf6c94fed0f549488d7b436ca75de0023bec",
+          "mesh_mask_0016.nc": "fb1eafebe2f9ef1a4d0c203945f45a886a34fff5d00b2746f8f467ec44884c91",
+          "mesh_mask_0017.nc": "5f6ffd7e929f9f3e0c46fd7dcf3fb91a8a6656096c803c8c5d85e79e8ba1952d",
+          "mesh_mask_0018.nc": "c403156318ca83240fb50d847e37e033569ddb89032bab5295ca5ff3b6efbb7c",
+          "mesh_mask_0019.nc": "6ffcc2c4c756aec1ccd7345a0b412ab8414f68a2a61cb6034e64d345e437c3c3",
+          "mesh_mask_0020.nc": "b2efded0106e1415f05352c9deb93fe8256bdf8776d0b60a15736a6729871b14",
+          "mesh_mask_0021.nc": "e08d19520d22d4096227f1d0520f9589b74b6bccb6b73d87b908a4024893c779",
+          "mesh_mask_0022.nc": "a0bcfc3230eff612cd0e61e91bee9052a53697ac1f919b2fcf2c1e6a902b6ab0",
+          "mesh_mask_0023.nc": "32ad171e7c22de3b89f418bf8b46009387fba598e61fd6a15dcbdb4b9485aa0e",
+          "mesh_mask_0024.nc": "bce4f5a87b4a48610d1ed5ede0f4312fc5cd3e499e55335231646d9f8f4b59a0",
+          "mesh_mask_0025.nc": "70addb3884212ff4b24f321412a0b70718db4065c9e4d78d359c0735459f3470",
+          "mesh_mask_0026.nc": "0cb025b8f7db979bdceee92c18d6092d728846215321f4b69f6fe9a820438380",
+          "mesh_mask_0027.nc": "b13224072dc8220dc2ea49289f93a19f0299cecfc036f94c675721d23e1477fe",
+          "mesh_mask_0028.nc": "2cb8a7a35a61477183a59f457247fbe806a0b830a1e0d5ed3be54c0e02e5790e",
+          "mesh_mask_0029.nc": "bc6799b34eadbb168a091179ad24b9b52220cc87e9c600866dff8572cb60b4e2",
+          "mesh_mask_0030.nc": "968b4c9a0c9155afcdf3a99ac40888e640cbe06b88bde09ff62cc786530d957a",
+          "mesh_mask_0031.nc": "1dc0849ce51a38ec62544b091cb67fad6a49e994f3652ef92810675ac7a2ba97"
+        },
+        "rank_files": 32
+      },
+      "rank_files": 32,
+      "restart_files_sha256": {
+        "SWG_01892160_restart_0000.nc": "d4495a9ed1ab2b0a4b4629dc48d8860ea2e37e1d1d7bf6fa895fb5c4898d145b",
+        "SWG_01892160_restart_0001.nc": "4854d95b49bdb615916869a11e2e5a4d20421ac9810cd954d9736d477f6ecd63",
+        "SWG_01892160_restart_0002.nc": "881ac7b6e7a2b979ec4d3e2496b2d99e3fde60d17038734ee19d7b3f53ffaef0",
+        "SWG_01892160_restart_0003.nc": "3915b058baa24406936887df59bbe04501b2b360f771b5e0d5224fb98cc84974",
+        "SWG_01892160_restart_0004.nc": "eccff2c823d3b3536772db223efd772e4eb46322468c4700a60f38c42f489e46",
+        "SWG_01892160_restart_0005.nc": "7316f816cedc2449bb05519199b10f5e14748afd41bfb5f774994071eaa34e95",
+        "SWG_01892160_restart_0006.nc": "44cda5fcac2af356d974a1c957933706f3a8657f709c1c325b947d20681c89be",
+        "SWG_01892160_restart_0007.nc": "12668f490c70c126c03a3ba743d28df854e7d41c548468f114a87211351ee831",
+        "SWG_01892160_restart_0008.nc": "8624b8c481279c4ce388dc1c35043bec9bc19aa5eca83fc831bd468a86cc94ad",
+        "SWG_01892160_restart_0009.nc": "6215780b542031c47b64713dc154fc90cfb3f0086e25e600cd07cf52c6d1e770",
+        "SWG_01892160_restart_0010.nc": "1d203fdfaca754988b476e039958345e72ae2ae6db550b045122a6d8e0a3f813",
+        "SWG_01892160_restart_0011.nc": "ede307b0abf91109eec10ecd48d51dfc71e90cfdd7b1d010d1c46e619e1e1b7d",
+        "SWG_01892160_restart_0012.nc": "052c9443f030b7c5ab7a78db42383384432955b956f2b4c089c3f40e829e4017",
+        "SWG_01892160_restart_0013.nc": "7c6a42311914a378d8903882364d57abd27d6b34e54ed94d326c06d6bc2142ed",
+        "SWG_01892160_restart_0014.nc": "65cc4fde1fe0a7a5667763443b9f6d7251bedda30975807702e6f2dc8d54f040",
+        "SWG_01892160_restart_0015.nc": "b53409c32cdd1743102c117e7228fa054c672ea33119f1078c8d01c1e72a0f6e",
+        "SWG_01892160_restart_0016.nc": "5f096d209323f54a04a3de481b4dbbd1b0b1c1fa061ea12b8451887e8adcce79",
+        "SWG_01892160_restart_0017.nc": "61d3f0ce5a630d4290fe29459f92331e1afe1d38f08d5219cf8d828d1c39befa",
+        "SWG_01892160_restart_0018.nc": "d52e403063517aba539c820420133cfa9b9d12f6e68fc0a6cba073d6d66d5f3f",
+        "SWG_01892160_restart_0019.nc": "d2d2593d109c14c452fbe20a074cedd494da4e5704265a430cf246a985b1ea00",
+        "SWG_01892160_restart_0020.nc": "ac0c0ae3a9b0545211db304b8f8f7d9aa93f7af4bb3d638add45c78c8b800c4b",
+        "SWG_01892160_restart_0021.nc": "ebd13f88169a85b0b979406108ec70d6b5fe464b6e0538c7a0ac123ef138a067",
+        "SWG_01892160_restart_0022.nc": "d2b2c7ff5099148432bcdefc3906bb987fcdf29f99f9faab9fd7b881e3e18d09",
+        "SWG_01892160_restart_0023.nc": "865a5bac231475d5fa0332b832774243b1ac523c87e86df7ee759b12f3eaa1c6",
+        "SWG_01892160_restart_0024.nc": "656d632c94bd66405f14163ee35e71b723e603bc6910297ed5aa70efe18c76a7",
+        "SWG_01892160_restart_0025.nc": "bd36091d5d8f0b413e4aab46c98c33ef2fa310a3cc44d985c5066bee27ba8fcd",
+        "SWG_01892160_restart_0026.nc": "e99dfb6a396ce287e9fa3be40aa0f600c155a5ea69b1c1f452ccf59202d0349c",
+        "SWG_01892160_restart_0027.nc": "f92569d4e16e4552f7661484e31a140fa1c7cd1016722753714085ba2c6cd1e7",
+        "SWG_01892160_restart_0028.nc": "ae8b662f9824fbe84b05041f5061645d0eacfc45b87a646a417481949f0a44a1",
+        "SWG_01892160_restart_0029.nc": "ca35400475285da1a873a27d571e3381312c0207db65551dba9928f8abd0f370",
+        "SWG_01892160_restart_0030.nc": "98b52ec44b6e77a10d314c51e32fbc99de3494acbfcc68898551c88e1a880178",
+        "SWG_01892160_restart_0031.nc": "d8feb6fbd7553a6af6a1b7eead4b86cf269a28e9ee9dc314a8e63f85765a150f"
+      },
+      "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/maddison_deck/md_dg_dx6p25_dt50_3yr",
+      "step": 1892160
+    },
+    "legoESM": {
+      "backend": "gpu",
+      "integration": "one-jitted-scan-per-day",
+      "legoesm_git_sha": "8f8551c8734947ff5b1489eb169f3cfd4cdfcaf2",
+      "manifest_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/legoesm_runs/dg_gpu_1095d_daily_mean/manifest.json",
+      "manifest_sha256": "5b4a10648fc51710d542328b4b16e5f06268bdaf15c563dbe6626cfded93d01c",
+      "mode": "gpu-native",
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/legoesm_runs/dg_gpu_1095d_daily_mean/day1095.npz",
+      "sha256": "57b3f0be83a11f29c4157f697b7527b91ffcaeaf21828dc1f23a7f55702015f9",
+      "transcendentals": "native"
+    }
+  },
+  "rows": {
+    "ssh_m": {
+      "bit_identical": true,
+      "bit_unequal": 0,
+      "candidate_sha256": "7ffd1f337d261dfdcea4e6efafaefc6e6c91c4892c0be91a4d438cd68318eee6",
+      "dtype": "float64",
+      "first_unequal_cell": null,
+      "grid": "T",
+      "legoesm_field": "ssh_m",
+      "mask_sha256": "ac93ad5b89df276089ded1fabfeffe74b85ff264a49b8f8b468b8fbc254f7482",
+      "max_abs": 0.0,
+      "nemo_field": "sshn",
+      "nemo_index": "[0]",
+      "numeric_unequal": 0,
+      "reference_sha256": "7ffd1f337d261dfdcea4e6efafaefc6e6c91c4892c0be91a4d438cd68318eee6",
+      "shape": [
+        409600
+      ],
+      "signed_ulp_histogram": {
+        "0": 409600
+      },
+      "signed_zero_only": 0,
+      "wet_words": 409600
+    },
+    "u_m_s": {
+      "bit_identical": true,
+      "bit_unequal": 0,
+      "candidate_sha256": "7af3a7a8f1115d48ad4e96eab11461e9de0d357e8685f84e49da9e57468358ab",
+      "dtype": "float64",
+      "first_unequal_cell": null,
+      "grid": "U",
+      "legoesm_field": "u_m_s",
+      "mask_sha256": "06097cfd8c201a2d060c7c6f479db72cc8e9dcefb803d97bf24076ea8359cf4f",
+      "max_abs": 0.0,
+      "nemo_field": "un",
+      "nemo_index": "[0, 0]",
+      "numeric_unequal": 0,
+      "reference_sha256": "7af3a7a8f1115d48ad4e96eab11461e9de0d357e8685f84e49da9e57468358ab",
+      "shape": [
+        408960
+      ],
+      "signed_ulp_histogram": {
+        "0": 408960
+      },
+      "signed_zero_only": 0,
+      "wet_words": 408960
+    },
+    "v_m_s": {
+      "bit_identical": true,
+      "bit_unequal": 0,
+      "candidate_sha256": "c440e976a6dc36e76efcd11107c59e7d58036e262caf8081a028ff31e78bad64",
+      "dtype": "float64",
+      "first_unequal_cell": null,
+      "grid": "V",
+      "legoesm_field": "v_m_s",
+      "mask_sha256": "311c836bcaa13847c2d40c76e5445eb4dd528e68e32d73edee8a922f04165edf",
+      "max_abs": 0.0,
+      "nemo_field": "vn",
+      "nemo_index": "[0, 0]",
+      "numeric_unequal": 0,
+      "reference_sha256": "c440e976a6dc36e76efcd11107c59e7d58036e262caf8081a028ff31e78bad64",
+      "shape": [
+        408960
+      ],
+      "signed_ulp_histogram": {
+        "0": 408960
+      },
+      "signed_zero_only": 0,
+      "wet_words": 408960
+    }
+  },
+  "schema": "swg-dg-yearly-restart-identity-v1",
+  "status": "PASS",
+  "step": 1892160,
+  "summary": {
+    "all_bit_identical": true,
+    "bit_unequal": 0,
+    "fields": 3,
+    "max_abs": 0.0,
+    "prognostic_signed_zero_words": 0,
+    "wet_words": 1227520
+  }
+}

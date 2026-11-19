@@ -732,8 +732,10 @@ class TestConfigValidation:
             land_interface_flux="unified",
             slab_land_active=True, topography="etopo",
         )
+        grid = create_cubed_sphere(N_CS)
         fake = SimpleNamespace(
-            config=cfg, grid=create_cubed_sphere(N_CS), sigma=_sigma(),
+            config=cfg, grid=grid, sigma=_sigma(),
+            _coeff_grid=lambda: grid,
             _f_land=None,                      # runtime loaded no land
         )
         with pytest.raises(ValueError, match="did not activate"):

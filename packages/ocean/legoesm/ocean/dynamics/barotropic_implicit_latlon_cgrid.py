@@ -1779,6 +1779,12 @@ def barotropic_implicit_latlon_cgrid(
         u=state.u.replace(data=u_new_3d),
         v=state.v.replace(data=v_new_3d),
     )
+    if bool(config.barotropic.barotropic_implicit_record_true_residual):
+        from legoesm.ocean.dynamics.barotropic_common import (
+            record_true_residual,
+        )
+        jax.debug.callback(record_true_residual,
+                           _rel_resid(A_op, eta_new, rhs))
     if return_residual:
         # Report the residual of the ACTUAL returned eta (after the mass
         # projection + floor clamp), not the raw-solve residual — those

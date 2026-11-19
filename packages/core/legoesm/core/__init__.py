@@ -2,7 +2,7 @@
 
 from legoesm.core.cfl import cfl_check_and_adjust, cfl_max_dt
 from legoesm.core.field import Field
-from legoesm.core.smooth import sigmoid_switch, smooth_max, smooth_min, smooth_clamp
+from legoesm.core.smooth import sigmoid_switch, smooth_max, smooth_min, smooth_clamp, smoothstep_quintic
 
 # Canonical backend utilities live in legoesm.runtime.backend; prefer importing
 # them from there in new code.  They are re-exported here LAZILY (module-level

@@ -103,8 +103,12 @@ def test_absorb_top_conserves_column_momentum_and_zeroes_lid():
 
 
 def test_prognostic_baseline_names_are_roster_schemes():
-    from tune_scm_to_les import _base_turbulence
-    for name in ev.PROGNOSTIC_TURBULENCE:
+    from tune_scm_to_les import _base_turbulence, _cbl_scheme_table
+    table = _cbl_scheme_table()
+    wired = [n for n in ev.PROGNOSTIC_TURBULENCE if n in table]
+    # main retired these two tuner surrogates; any other unwired name is an error
+    assert set(ev.PROGNOSTIC_TURBULENCE) - set(table) == {"tke", "clubb_lite"}
+    for name in wired:
         assert _base_turbulence(name, **_RGH)[0].scheme == name
 
 
@@ -313,7 +317,7 @@ def test_harness_scores_moist_cases_with_recorded_kessler_only():
     sund = dataclasses.replace(art, les_setup=dict(
         art.les_setup, microphysics=microphysics_record(
             MicrophysicsConfig(scheme="sundqvist"))))
-    with pytest.raises(ValueError, match="Kessler only"):
+    with pytest.raises(ValueError, match=r"cloudbench_warm_rain'\) only"):
         arm.prepare(sund, nlev=16, dt=10.0)
     assert arm.prepare(art, nlev=16, dt=10.0)[1].microphysics.scheme == "kessler"
 
@@ -474,7 +478,7 @@ def test_candidate_refuses_a_prognostic_baseline(tmp_path):
     from tune_scm_to_les import _base_turbulence
     cand = _write(tmp_path, "sc_prog", _GOOD_SCALAR)
     with pytest.raises(ValueError, match="prognostic"):
-        Arm(_base_turbulence("tke", **_RGH)[0], cand, "theta", None).run(
+        Arm(_base_turbulence("mynn25", **_RGH)[0], cand, "theta", None).run(
             _cbl_artifact(), 1, params=cand.default_params(), nlev=16, dt=10.0)
 
 
@@ -765,7 +769,7 @@ def test_les_tuned_arm_records_inapplicable_clubb_instead_of_crashing():
     from tune_scm_to_les import _base_turbulence
     tuned, why = cosci_eval.les_tuned_arm(_base_turbulence("clubb", **_RGH)[0])
     assert tuned is None and "PROGNOSTIC" in why
-    tuned, why = cosci_eval.les_tuned_arm(_base_turbulence("tke", **_RGH)[0])
+    tuned, why = cosci_eval.les_tuned_arm(_base_turbulence("louis", **_RGH)[0])
     assert why is None and tuned is not None
 
 

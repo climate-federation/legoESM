@@ -1,4 +1,23 @@
-"""Smagorinsky–Lilly turbulence scheme.
+"""Smagorinsky turbulence scheme.
+
+DEFAULT ARM ``stability_form="wrf_km3"``: port of WRF v4.8.0 ``km_opt = 3``
+(``dyn_em/module_diffusion_em.F``: ``smag_km`` with ``mix_isotropic = 0``,
+``calculate_N2``, and the vertical-shear terms of ``cal_deform_and_div`` for a
+flat, horizontally homogeneous column), see :func:`wrf_km3_coefficients`.
+``K_m = min(max(c_s² dz² √max(0, D² − N²/Pr), 1e-6 dz²), mub dz²/dt)``,
+``K_h = min(K_m/Pr, mub dz²/dt)``, ``c_s = 0.25``, ``Pr = 1/3``, ``mub = 0.1``,
+``dz`` the layer thickness, ``D²`` the mass-level average of the w-level shear
+(zero at the surface and top w-levels), ``N²`` WRF's moist/dry buoyancy
+frequency.  Running-oracle receipt:
+``tests/atmosphere/hydrostatic/unit/test_smagorinsky_wrf_km3_oracle.py``.
+Declared departures: the implicit Thomas solve and our surface-flux boundary
+condition replace WRF's explicit ``vertical_diffusion_2`` (unstable at GCM time
+steps); WRF's eta extrapolation coefficients use ``eta = (p − p_top)/(p_s − p_top)``
+of our hydrostatic column; ``q_c = q_i = 0`` where a lane does not pass them;
+the switches are smooth (repo helpers) outside the oracle test.
+
+The ``"lilly"`` and ``"deardorff"`` arms below are the earlier Smagorinsky–Lilly
+closure, kept selectable (the LES-tuned SCM overlay runs ``"lilly"``).
 
 Strain-dependent (deformation-based) eddy viscosity
 
@@ -60,6 +79,22 @@ DEPARTURES / RE-TUNED (vs the published papers):
     AD-safety sense — the forward is continuous but NON-C¹ at the cutoff (the on-side
     √ slope diverges); a bare ``√(max(·,0))`` would instead leak a 0·∞ NaN.
 Behavior/assembly pins: ``tests/atmosphere/hydrostatic/unit/test_smagorinsky_faithful.py``.
+
+Running-oracle comparison (tier-2 oracle audit, les_sgs_closures, 2026-10-19)
+-------------------------------------------------------------------------------
+The audit fed legoESM's own ``S²`` and ``N²`` to two running kernels (fp64):
+microhh received the length ``C_s·l``, SAM received ``l`` and ``C_s`` separately.  The algebra matches; only the floors differ, and those
+departures are KEPT here pending a user decision (NOT faithful to either kernel):
+  * ``stability_form="lilly"`` vs microhh 2.0.2 (736a2f5e) ``diff_smag2.cxx``
+    ``calc_evisc``: microhh adds ``dsmall = 1e-9`` to ``2 S_ij S_ij``
+    (``include/diff_kernels.h:140``) where this module adds 1e-10, and clamps
+    ``Ri/Pr_t`` at ``1 − 1e-9`` instead of cutting ``K_m`` to exactly 0 at
+    ``Ri ≥ Pr_t``.  Measured: up to 2.0e-4 / 5.2e-4 m²/s (CBL, default /
+    LES-tuned config), 7.7e-3 / 2.6e-2 m²/s at near-zero-shear levels (ratio
+    √0.1), 7.3e-5 / 1.9e-4 m²/s in stable levels (ours 0, microhh its √1e-9
+    residual).  With both microhh floors applied the result is bitwise.
+  * ``stability_form="deardorff"``: see
+    :func:`legoesm.atmosphere.physics._shared.deardorff_stable_eddy_viscosity`.
 """
 
 from __future__ import annotations
@@ -75,6 +110,7 @@ from legoesm.atmosphere.physics._shared import (
     lilly_buoyancy_factor,
     mixing_length,
     virtual_temperature,
+    half_to_iface_zero_ends,
 )
 from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -91,9 +127,21 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion_theta,
 )
 
+from legoesm.core.smooth import positive_part_c1, smooth_max, smooth_min, smoothstep_cubic
+from legoesm.thermo import saturation_vapor_pressure
+
+# --- WRF v4.8.0 calculate_N2 / smag_km fixed literals (dyn_em/module_diffusion_em.F) ---
+_WRF_N2_VAPOUR_COEF = 1.61   # calculate_N2 dry-branch vapour buoyancy coefficient
+_WRF_QC_CR = 1.0e-5          # calculate_N2 cloud-water threshold [kg/kg]
+_WRF_KM_FLOOR = 1.0e-6       # smag_km floor coefficient: K >= 1e-6 dz^2 [1/s]
+# --- RULE 5 smoothing (VOTES D6, D11): relative widths ---
+_WRF_SMOOTH_REL = 0.01       # floor / cap / moist-switch relative width
+
 
 __physics_contract__ = {
     "summary": (
+        "Default: WRF v4.8.0 km_opt=3 Smagorinsky vertical eddy coefficients "
+        "(smag_km, mix_isotropic=0, calculate_N2). Lilly/Deardorff arms: "
         "Smagorinsky-Lilly strain-dependent eddy-viscosity turbulence: "
         "K_m = (C_s l)^2 |S| sqrt(max(0, 1 - Ri/Pr_t)), K_h = K_m/Pr_t, "
         "applied by implicit vertical diffusion with surface-flux boundary "
@@ -102,7 +150,7 @@ __physics_contract__ = {
     "inputs": {
         "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
         "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
-        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s", "q_c": "kg/kg", "q_i": "kg/kg",
     },
     "outputs": {
         "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
@@ -122,6 +170,7 @@ __physics_contract__ = {
     # Ri = Pr_t (the on-side sqrt ramp's slope diverges).
     "differentiable": True,
     "reference": (
+        "WRF v4.8.0 (06d4240ae9) dyn_em/module_diffusion_em.F km_opt=3; "
         "Smagorinsky (1963), Mon. Wea. Rev. 91, 99-164; "
         "Lilly (1962), Tellus 14, 148-172"
     ),
@@ -131,6 +180,144 @@ __physics_contract__ = {
         "surface flux a neutral column gives ~zero tendencies."
     ),
 }
+
+
+def _wrf_eta_extrapolation(p_half_b):
+    """WRF cf1, cf2, cf3 (module_initialize_scm_xy.F 333-349) from the column's
+    eta = (p_half - p_top) / (p_s - p_top) at w-levels, bottom-up (VOTE D10)."""
+    znw = (p_half_b - p_half_b[:, -1:]) / (p_half_b[:, :1] - p_half_b[:, -1:])
+    dnw = znw[:, 1:] - znw[:, :-1]                       # dnw(k), 0-based k = 0..n-1
+    dn1 = 0.5 * (dnw[:, 1] + dnw[:, 0])
+    dn2 = 0.5 * (dnw[:, 2] + dnw[:, 1])
+    fnp1 = .5 * dnw[:, 1] / dn1
+    fnm1 = .5 * dnw[:, 0] / dn1
+    cof1 = (2. * dn1 + dn2) / (dn1 + dn2) * dnw[:, 0] / dn1
+    cof2 = dn1 / (dn1 + dn2) * dnw[:, 0] / dn2
+    return fnp1 + cof1, fnm1 - cof1 - cof2, cof2
+
+
+def wrf_km3_coefficients(u, v, T, q_v, q_c, q_i, p_full, p_half, z_half, dt,
+                         config: SmagorinskyConfig, *, hard: bool = False):
+    """WRF v4.8.0 ``km_opt = 3`` vertical eddy coefficients for a flat,
+    horizontally homogeneous column (``w = 0``, map factors 1).
+
+    Port of ``dyn_em/module_diffusion_em.F``: ``compute_diff_metrics`` (rdz,
+    rdzw), the vertical-shear part of ``cal_deform_and_div`` (``defor13``,
+    ``defor23`` at w-levels, zero at the surface and model top), ``calculate_N2``
+    (dry and moist branches, special lowest level, top copies the level below)
+    and ``smag_km`` with ``mix_isotropic = 0`` (``mlen_v = 1/rdzw``).  WRF's
+    floating-point operation order is kept.
+
+    Inputs are top-down (level -1 at the surface), ``q_*`` SPECIFIC [kg/kg];
+    WRF's mixing ratios are formed as ``q_x / (1 - q_v - q_c - q_i)``.  Outputs
+    are top-down: ``defor13``/``defor23`` (ncol, nlev+1), ``bn2``, ``xkmv``,
+    ``xkhv`` (ncol, nlev).
+
+    ``hard=True`` gives WRF's discontinuous form (oracle tests only); the default
+    replaces each switch by the repo smooth helper: the moist-branch test by a
+    smooth OR of two C1 ramps over ``[-1 %, 0]`` of ``r_v/r_vs - 1`` and
+    ``r_c/qc_cr - 1`` (exact outside that band), the
+    floor / cap by ``smooth_max`` / ``smooth_min`` at 1 % of the floor / cap,
+    and ``max(0, def2 - BN2/pr)`` by ``positive_part_c1`` of width
+    ``(1e-6/c_s^2)^2`` (below it the floor binds anyway).
+    """
+    g, R_d, R_v, cp, xlv = (constants.g, constants.R_d, constants.R_v,
+                            constants.c_pd, constants.L_v)  # latent-ok: WRF km_opt=3 oracle constant
+    flip = lambda a: a[:, ::-1]  # noqa: E731  top-down <-> WRF bottom-up
+    qt_spec = q_v + q_c + q_i
+    dry = 1.0 - qt_spec
+    qv, qc, qi = flip(q_v / dry), flip(q_c / dry), flip(q_i / dry)
+    t, p, ub, vb = flip(T), flip(p_full), flip(u), flip(v)
+    zw, pw = flip(z_half), flip(p_half)
+    if t.shape[1] < 3:
+        raise ValueError("stability_form='wrf_km3' needs >= 3 levels (WRF's "
+                         "surface extrapolation reads three).")
+    pr, c_s, mub = config.wrf_prandtl, config.wrf_c_s, config.mix_upper_bound
+
+    # compute_diff_metrics
+    rdzw = 1.0 / (zw[:, 1:] - zw[:, :-1])                       # mass levels
+    rdz_in = 2.0 / (zw[:, 2:] - zw[:, :-2])                     # w-levels 1..n-1
+
+    # cal_deform_and_div, vertical-shear terms (w = 0, flat, mix_full_fields)
+    zero = jnp.zeros_like(t[:, :1])
+    d13 = jnp.concatenate([zero, (ub[:, 1:] - ub[:, :-1]) * (0.5 * (rdz_in + rdz_in)), zero], 1)
+    d23 = jnp.concatenate([zero, (vb[:, 1:] - vb[:, :-1]) * (0.5 * (rdz_in + rdz_in)), zero], 1)
+
+    # calculate_N2
+    th = t / (p / constants.p_ref) ** (R_d / cp)               # phy_prep th_phy
+    es = saturation_vapor_pressure(t)
+    qvs = constants.epsilon * es / (p - es)
+    tmp1 = qv + qc + qi
+    cf1, cf2, cf3 = (c[:, None] for c in _wrf_eta_extrapolation(pw))
+    tmp1sfc = cf1 * qv[:, :1]
+    for k, sp in enumerate((qv, qc, qi)):     # WRF species loop, its add order
+        if k:
+            tmp1sfc = tmp1sfc + cf1 * sp[:, :1]
+        tmp1sfc = tmp1sfc + cf2 * sp[:, 1:2] + cf3 * sp[:, 2:3]
+    if hard:
+        wet = ((qv >= qvs) | (qc >= _WRF_QC_CR)).astype(t.dtype)
+    else:
+        # C1 ramp on [-1 %, 0] (VOTE S2 b): exactly WRF's >= at and above the
+        # threshold, exactly dry below 0.99 of it.
+        s1 = smoothstep_cubic((qv / qvs - 1.0) / _WRF_SMOOTH_REL + 1.0)
+        s2 = smoothstep_cubic((qc / _WRF_QC_CR - 1.0) / _WRF_SMOOTH_REL + 1.0)
+        wet = 1.0 - (1.0 - s1) * (1.0 - s2)
+    xlvqv = xlv * qv
+    coefa = (1.0 + xlvqv / R_d / t) / (1.0 + xlv * xlvqv / cp / R_v / t / t) / th
+    the = th * (1.0 + xlv * qvs / cp / t)
+    # interior mass levels 1..n-2
+    tmpdz = 1.0 / rdz_in[:, :-1] + 1.0 / rdz_in[:, 1:]
+    dqt = (tmp1[:, 2:] - tmp1[:, :-2]) / tmpdz
+    bn2_m = g * (coefa[:, 1:-1] * (the[:, 2:] - the[:, :-2]) / tmpdz - dqt)
+    bn2_d = g * ((th[:, 2:] - th[:, :-2]) / th[:, 1:-1] / tmpdz
+                 + _WRF_N2_VAPOUR_COEF * (qv[:, 2:] - qv[:, :-2]) / tmpdz - dqt)
+    bn2_in = wet[:, 1:-1] * bn2_m + (1.0 - wet[:, 1:-1]) * bn2_d
+    # lowest mass level
+    # phy_prep: surface T and p extrapolated linearly in z from the two lowest
+    # mass levels (z at mass points = mid-layer of the w-level heights)
+    z1 = 0.5 * (zw[:, :1] + zw[:, 1:2])
+    z2 = 0.5 * (zw[:, 1:2] + zw[:, 2:3])
+    w1 = (zw[:, :1] - z2) / (z1 - z2)
+    w2 = 1. - w1
+    p8w = w1 * p[:, :1] + w2 * p[:, 1:2]
+    t8w = w1 * t[:, :1] + w2 * t[:, 1:2]
+    thetasfc = t8w / (p8w / constants.p_ref) ** (R_d / cp)
+    qvsfc_m = cf1 * qvs[:, :1] + cf2 * qvs[:, 1:2] + cf3 * qvs[:, 2:3]
+    tmpdz_m = 1.0 / rdz_in[:, :1] + 0.5 / rdzw[:, :1]
+    thetaesfc = thetasfc * (1.0 + xlv * qvsfc_m / cp / t8w)
+    b0_m = g * (coefa[:, :1] * (the[:, 1:2] - thetaesfc) / tmpdz_m
+                - (tmp1[:, 1:2] - tmp1sfc) / tmpdz_m)
+    qvsfc_d = cf1 * qv[:, :1] + cf2 * qv[:, 1:2] + cf3 * qv[:, 2:3]
+    tmpdz_d = 1. / rdzw[:, :1]
+    b0_d = g * ((th[:, 1:2] - th[:, :1]) / th[:, :1] / tmpdz_d
+                + _WRF_N2_VAPOUR_COEF * (qv[:, 1:2] - qvsfc_d) / tmpdz_d
+                - (tmp1[:, 1:2] - tmp1sfc) / tmpdz_d)
+    b0 = wet[:, :1] * b0_m + (1.0 - wet[:, :1]) * b0_d
+    bn2 = jnp.concatenate([b0, bn2_in, bn2_in[:, -1:]], 1)
+
+    # smag_km, mix_isotropic = 0
+    t13 = 0.25 * (d13[:, 1:] + d13[:, :-1] + d13[:, 1:] + d13[:, :-1])
+    t23 = 0.25 * (d23[:, 1:] + d23[:, :-1] + d23[:, 1:] + d23[:, :-1])
+    def2 = t13 * t13 + t23 * t23
+    mlen = 1. / rdzw
+    arg = def2 - bn2 / pr
+    floor = _WRF_KM_FLOOR * mlen * mlen
+    cap = mub * mlen * mlen / dt
+    if hard:
+        tmp = jnp.maximum(0., arg) ** 0.5
+        xkmv = jnp.minimum(jnp.maximum(c_s * c_s * mlen * mlen * tmp, floor), cap)
+        xkhv = jnp.minimum(xkmv / pr, cap)
+    else:
+        w0 = (_WRF_KM_FLOOR / (c_s * c_s)) ** 2
+        pos = positive_part_c1(arg / w0, 1.0) * w0
+        ok = pos > 0.0
+        tmp = jnp.where(ok, jnp.sqrt(jnp.where(ok, pos, 1.0)), 0.0)
+        xkmv = c_s * c_s * mlen * mlen * tmp
+        xkmv = smooth_max(xkmv / floor, 1.0, 1.0 / _WRF_SMOOTH_REL) * floor
+        xkmv = smooth_min(xkmv / cap, 1.0, 1.0 / _WRF_SMOOTH_REL) * cap
+        xkhv = smooth_min(xkmv / pr / cap, 1.0, 1.0 / _WRF_SMOOTH_REL) * cap
+    return {"defor13": flip(d13), "defor23": flip(d23), "bn2": flip(bn2),
+            "xkmv": flip(xkmv), "xkhv": flip(xkhv)}
 
 
 def smagorinsky_turbulence(
@@ -147,6 +334,8 @@ def smagorinsky_turbulence(
     rho: jax.Array,
     dt: float,
     config: SmagorinskyConfig,
+    q_c: jax.Array | None = None,
+    q_i: jax.Array | None = None,
 ) -> TurbulenceOutput:
     """Compute turbulence tendencies from the deformation/stability-dependent eddy diffusivity.
 
@@ -175,6 +364,11 @@ def smagorinsky_turbulence(
     dt : float
         Time step [s].
     config : SmagorinskyConfig
+    q_c, q_i : jax.Array, optional
+        Cloud liquid / ice specific contents [kg/kg], (ncol, nlev); read only by
+        the ``"wrf_km3"`` arm (WRF's ``qv + qc + qi`` buoyancy term and its
+        ``qc >= 1e-5`` moist test).  ``None`` = zero (declared departure where a
+        lane does not pass them).
 
     Returns
     -------
@@ -217,7 +411,16 @@ def smagorinsky_turbulence(
     # Stable-stratification treatment.  Dispatch on the STATIC config value at
     # function entry (never a silent ``else``): an unknown value must not run
     # different physics under a typo.
-    if config.stability_form == "lilly":
+    if config.stability_form == "wrf_km3":
+        # WRF km_opt=3 K at mass levels; vertical_diffusion_2 hands the solver
+        # the w-level average 0.5 (K(k) + K(k-1)) (VOTE D5).
+        zeros = jnp.zeros_like(q_v)
+        co = wrf_km3_coefficients(
+            u, v, T, q_v, zeros if q_c is None else q_c, zeros if q_i is None else q_i,
+            p_full, p_half, z_half, dt, config)
+        Km_half = 0.5 * (co["xkmv"][:, :-1] + co["xkmv"][:, 1:])
+        Kh_half = 0.5 * (co["xkhv"][:, :-1] + co["xkhv"][:, 1:])
+    elif config.stability_form == "lilly":
         f_buoy = lilly_buoyancy_factor(Ri, config.Pr_t)
         # K_m = (C_s · l)^2 · |S| · f_buoy ;  K_h = K_m / Pr_t.
         Km_half = (config.C_s * l_mix) ** 2 * S * f_buoy    # (ncol, nlev-1)
@@ -231,9 +434,10 @@ def smagorinsky_turbulence(
     else:
         raise ValueError(
             f"Unknown SmagorinskyConfig.stability_form "
-            f"{config.stability_form!r}; expected 'lilly' or 'deardorff'."
+            f"{config.stability_form!r}; expected 'wrf_km3', 'lilly' or 'deardorff'."
         )
-    Kh_half = Km_half / config.Pr_t
+    if config.stability_form != "wrf_km3":
+        Kh_half = Km_half / config.Pr_t
 
     # Interpolate to full levels for diagnostics (single concat; same
     # pattern as Louis/TKE/Holtslag-Boville/YSU).
@@ -306,4 +510,5 @@ def smagorinsky_turbulence(
         ustar=ustar,
         h_pbl=h_pbl,
         wtheta_flux=wtheta_flux,
+        Kh_iface=half_to_iface_zero_ends(Kh_half),
     )

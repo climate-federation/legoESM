@@ -129,8 +129,8 @@ def main():
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon", "voronoi"],
                         help="Horizontal grid type")
-    parser.add_argument("--discretization", type=str, default="cdgrid",
-                        choices=["cdgrid", "centered", "spectral",
+    parser.add_argument("--discretization", type=str, default=None,
+                        choices=["fv3_duo", "cdgrid", "centered", "spectral",
                                  "latlon_fv", "finite_volume",
                                  "latlon_cgrid", "mpas"],
                         help="Discretization method.  ``latlon_fv`` is a "
@@ -139,9 +139,9 @@ def main():
                              "C-grid solver); using it implies the "
                              "lat-lon grid.  ``finite_volume`` on its own "
                              "stays on whatever ``--grid-type`` is "
-                             "selected (e.g. cubed_sphere → CDGrid FV). "
-                             "``centered`` and ``latlon_cgrid`` are "
-                             "supported aliases on cubed_sphere/latlon "
+                             "selected. Cube requires fv3_duo and refuses the "
+                             "unported RCE adapter. ``centered`` and ``latlon_cgrid`` are "
+                             "supported on latlon "
                              "and latlon respectively.")
     parser.add_argument("--truncation", type=int, default=None,
                         help="Spectral truncation (T21, T42, etc.). Sets grid_type=gaussian.")
@@ -154,6 +154,9 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.discretization is None:
+        args.discretization = ("fv3_duo" if args.grid_type == "cubed_sphere"
+                               else "cdgrid")
 
     # iter-71 (mirrors iter-67/70 on run_rce_mpi_long.py): validate
     # numeric CLI args reject NaN/inf + out-of-range values with
@@ -250,8 +253,12 @@ def main():
     # front so the spectral adapter is never paired with a non-spectral
     # state, etc.  Driver factory would catch this too, but the message
     # here is more direct for a user who wired the script wrong.
+    if args.grid_type == "cubed_sphere" and args.discretization != "fv3_duo":
+        raise ValueError(
+            "Cubed-sphere atmosphere requires fv3_duo; "
+            f"retired or unsupported discretization {args.discretization!r}.")
     _expected_disc = {
-        "cubed_sphere": {"cdgrid", "centered", "finite_volume"},
+        "cubed_sphere": {"fv3_duo"},
         "gaussian": {"spectral"},
         "latlon": {"finite_volume", "centered", "latlon_cgrid"},
         "voronoi": {"mpas"},
@@ -588,7 +595,8 @@ def main():
         from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
         # Warm-phase M2005 on the coarse RCE columns (deep-ice is a follow-up):
         # condense -> q_c, autoconvert/accrete -> q_r, sediment/evaporate rain.
-        morrison_config = MorrisonConfig()
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        morrison_config = MorrisonConfig(warm_rain_scheme="kk2000")
         # Subgrid cloud fraction + condensate floor for the RRTMGP optics. The
         # coarse grid-mean saturation adjustment condenses ~0 in a subsaturated
         # column, so the resolved q_c alone leaves clouds optically inert and RCE
@@ -671,7 +679,8 @@ def main():
                 rad = rrtmgp_radiation(
                     T=T_col, p_full=p_full_col, p_half=p_half_col,
                     sfc_temperature=T_sfc_col, q_v=q_v_col, cos_zenith=mu0,
-                    config=rrtmgp_config, **cloud_props.to_rrtmg_kwargs())
+                    config=rrtmgp_config, cloud_rho_ice=cloud_config.rho_cloud_ice,
+                    **cloud_props.to_rrtmg_kwargs())
             else:
                 rad = rrtmgp_radiation(
                     T=T_col, p_full=p_full_col, p_half=p_half_col,

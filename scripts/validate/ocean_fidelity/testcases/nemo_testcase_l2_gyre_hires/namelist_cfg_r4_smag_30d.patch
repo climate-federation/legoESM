@@ -1,0 +1,13 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -19 +19 @@
+-   cn_exp      =  "GYRE_OMIP_L2_P3_R4_SMAG" ! quarter-degree Smag ten-step oracle
++   cn_exp      =  "GYRE_OMIP_L2_P3_R4_SMAG_30D" ! quarter-degree daily-stage oracle
+@@ -21 +21 @@
+-   nn_itend    =      10   !  last  time step
++   nn_itend    =     721   !  kt=721 entry is the state after 30 complete days
+@@ -23,2 +23,2 @@
+-   nn_stock    =      10   !  frequency of creation of a restart file (modulo referenced to 1)
+-   nn_write    =      10   !  frequency of write in the output file   (modulo referenced to nn_it000)
++   nn_stock    =     721   !  one terminal restart
++   nn_write    =      24   !  daily IOIPSL output at 24 one-hour steps

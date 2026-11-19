@@ -47,12 +47,13 @@ def _sidecar(path, sums, counts, months=((0, 3),), extra=None):
     np.savez(path, **{"monthly.__manifest__": np.array(json.dumps(man))}, **arrays)
 
 
-def _amon(run_dir, var, mean, tag="197903-197903"):
+def _amon(run_dir, var, mean, tag="197903-197903", grid_label="gn"):
     d = run_dir / "cmor" / "Amon"
     d.mkdir(parents=True, exist_ok=True)
     ds = xr.Dataset({var: (("time", "lat", "lon"), mean[None])},
                     coords={"time": [74.5], "lat": LAT, "lon": LON})
-    ds.to_netcdf(d / f"{var}_Amon_legoESM-1-0_amip_r1i1p1f1_gn_{tag}.nc")
+    ds.to_netcdf(
+        d / f"{var}_Amon_legoESM-1-0_amip_r1i1p1f1_{grid_label}_{tag}.nc")
 
 
 def _pattern(a, b):
@@ -226,3 +227,15 @@ def test_p_minus_e_is_derived_in_mm_per_day_and_the_cap_bands_exist(wd):
     assert "evspsbl" in wd.FIELDS and wd.SCALE["evspsbl"] == wd.SCALE["pr"] == 86400.0
     assert wd.BANDS["Arctic 72.5-90N"] == (72.5, 90.0, 0.0, 360.0)
     assert wd.BANDS["Arctic 75-90N"] == (75.0, 90.0, 0.0, 360.0)
+
+
+def test_regridded_gr_files_are_found(wd, tmp_path, monkeypatch):
+    """The writer labels regridded output ``gr`` (CMIP6); runs written
+    before that carry ``gn``. Both must be scorable."""
+    monkeypatch.setattr(wd, "ROOT", tmp_path)
+    for run, label in (("new", "gr"), ("old", "gn")):
+        (tmp_path / run).mkdir()
+        _amon(tmp_path / run, "rsut", _pattern(1.0, 2.0), grid_label=label)
+        assert wd.publishes(run, "rsut")
+        mean, _lat = wd.partial_month(run, "rsut", 0, 3)[:2]
+        np.testing.assert_allclose(mean, _pattern(1.0, 2.0))

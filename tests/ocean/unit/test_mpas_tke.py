@@ -365,6 +365,34 @@ class TestNemoSurfaceTermsOnMPAS:
         assert float(jnp.sum(K0[ocean])) > 0.0
         assert float(jnp.sum(K3[ocean])) < float(jnp.sum(K0[ocean]))
 
+    def test_langmuir_rhs_coupling_reaches_the_mpas_kernel(self, mesh):
+        """NEMO zdftke.F90:367/419 ordering through the MPAS bridge, prognostic
+        (the production mode) on a column fine enough to resolve the Langmuir
+        layer: the card value must change K (a dropped/reset knob gives
+        identical profiles); the 6-level fixture puts the whole Langmuir
+        layer inside the top cell and is inert by construction."""
+        from scripts.run.run_omip_core2 import orca1_zdftke_config
+        z = create_ocean_z_star(n_levels=20, H_max=200.0)
+        st = rest_state_mpas_ocean(mesh, z, T_water_init_C=20.0, T_deep=2.0,
+                                   S_uniform=35.0, H_max=200.0,
+                                   land_lat_threshold=85.0)
+        f = self._ice_wind_forcing(st, ice=0.0)
+
+        def run(c):
+            vm = VerticalMixingConfig(scheme="tke", tke=orca1_zdftke_config(
+                prognostic=True)._replace(eice=0, tke_langmuir_rhs_coupling=c))
+            return make_tke_profiles_mpas(vm)(st, mesh, z, f, dt_tke=150.0)
+        A_s, K_s, e_s = run("separate")
+        A_s2, K_s2, _ = run("separate")
+        A_p, K_p, e_p = run("nemo_pre_solve")
+        assert bool(jnp.all(K_s2 == K_s)) and bool(jnp.all(A_s2 == A_s))
+        assert float(jnp.max(jnp.abs(e_p - e_s))) > 1e-3 * float(jnp.max(e_s))
+        # diagnostic sub-iterated mode is refused (not NEMO's one-step statement)
+        vm_d = VerticalMixingConfig(scheme="tke", tke=orca1_zdftke_config(
+            prognostic=False)._replace(eice=0, tke_langmuir_rhs_coupling="nemo_pre_solve"))
+        with pytest.raises(ValueError, match="needs prognostic=True"):
+            make_tke_profiles_mpas(vm_d)(st, mesh, z, f)
+
     def test_eice_without_ice_fails_fast(self, mesh, z_coord, state):
         """eice!=0 with NO ice field must raise (the KPP-bridge contract) —
         never silently run un-attenuated."""
@@ -872,3 +900,28 @@ class TestNemoBn2OnMPAS:
         with _pytest.raises(NotImplementedError, match="adiabatic"):
             make_tke_profiles_mpas(VerticalMixingConfig(
                 scheme="tke", tke=TKEConfig(n2_mode="adiabatic")))
+
+
+def test_tke_sqrt_s_eos_gradient_finite_at_zero_salinity_land(mesh, z_coord,
+                                                               tke_cfg):
+    """A sqrt(S) EOS (veros_gsw) has an infinite dRho/dS at S = 0; the MPAS
+    TKE bridge builds its density on floored salinity (as the MPAS KPP bridge
+    does, #2283), so d(sum K)/dS stays finite with zero-salinity land cells."""
+    from legoesm.ocean.eos import make_eos_fn
+
+    st = rest_state_mpas_ocean(
+        mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0, land_lat_threshold=60.0)
+    land = st.land_mask.data < 0.5
+    assert bool(jnp.any(land)), "fixture must contain land"
+    fn = make_tke_profiles_mpas(tke_cfg, eos_fn=make_eos_fn(eos="veros_gsw"))
+    forcing = _wind_forcing(st)
+
+    def loss(s):
+        out = fn(st._replace(S=st.S.replace(data=s)), mesh, z_coord, forcing)
+        return sum(jnp.sum(x) for x in out)
+
+    S0 = jnp.where(land[:, None], 0.0, st.S.data)
+    grad = jax.grad(loss)(S0)
+    assert bool(jnp.isfinite(loss(S0)))
+    assert bool(jnp.all(jnp.isfinite(grad)))

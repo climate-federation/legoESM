@@ -274,3 +274,43 @@ def test_interval_mean_without_evaporation_keeps_the_energy_budget():
     assert np.isnan(want["evspsbl"]) and np.isnan(got["evspsbl"])
     assert got["energy_flux_interval_mean"] == 1.0
     _assert_close(got, want, ("energy_toa_net", "sw_net_sfc", "hfss", "hfls"))
+
+
+def test_waits_for_device_work_before_each_host_collective_round(monkeypatch):
+    """Host Allreduce calls share COMM_WORLD with mpi4jax ops that run
+    asynchronously on the XLA thread (the compiled step before entry, the
+    edge exchange inside).  Each host round must start only after a wait,
+    or ranks can enter collectives in different orders."""
+    import jax
+
+    _, d = _serial_and_mpi()
+    events = []
+
+    class _SpyComm(MPI.Intracomm):
+        def Allreduce(self, *a, **k):
+            events.append("Allreduce")
+            return super().Allreduce(*a, **k)
+
+    real_barrier = jax.effects_barrier
+    hx = d._voronoi_layout.halo_exchange
+    real_exchange = hx.exchange_edge_field
+
+    def _barrier():
+        events.append("effects_barrier")
+        real_barrier()
+
+    def _exchange(field):
+        events.append("exchange")
+        return real_exchange(field)
+
+    monkeypatch.setattr(jax, "effects_barrier", _barrier)
+    monkeypatch.setattr(MPI, "COMM_WORLD", _SpyComm(MPI.COMM_WORLD))
+    monkeypatch.setattr(hx, "exchange_edge_field", _exchange)
+    d._mpas_energy_sample(d.state.p_s.data, 0.0)
+
+    assert events.count("exchange") == 1, events
+    first = events.index("Allreduce")
+    assert "effects_barrier" in events[:first], events
+    after = events[events.index("exchange") + 1:]
+    assert "Allreduce" in after, events
+    assert "effects_barrier" in after[:after.index("Allreduce")], events

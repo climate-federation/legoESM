@@ -319,13 +319,14 @@ _SLOT_POLICY: dict[str, str] = {
     # Centred barotropic forcing history.
     "tau_x_prev": _SLOT_PROGNOSTIC, "tau_y_prev": _SLOT_PROGNOSTIC,
     "freshwater_eta_prev": _SLOT_PROGNOSTIC,
-    # --- sea ice (SeaIceState + the 12-field DynamicSeaIceState) -----------
+    # --- sea ice (SeaIceState + the 13-field DynamicSeaIceState) -----------
     "h_ice": _SLOT_PROGNOSTIC, "T_ice": _SLOT_PROGNOSTIC,
     "concentration": _SLOT_PROGNOSTIC, "u_ice": _SLOT_PROGNOSTIC,
     "v_ice": _SLOT_PROGNOSTIC, "sigma_11": _SLOT_PROGNOSTIC,
     "sigma_22": _SLOT_PROGNOSTIC, "sigma_12": _SLOT_PROGNOSTIC,
     "h_snow": _SLOT_PROGNOSTIC, "S_ice": _SLOT_PROGNOSTIC,
     "pond_area": _SLOT_PROGNOSTIC, "pond_depth": _SLOT_PROGNOSTIC,
+    "h_il": _SLOT_PROGNOSTIC,
     # --- static geometry / reference profiles ------------------------------
     "H_bathy": _SLOT_STATIC, "land_mask": _SLOT_STATIC,
     "u_mask": _SLOT_STATIC, "v_mask": _SLOT_STATIC,
@@ -383,7 +384,10 @@ def _iter_state_fields(state) -> list[str]:
     # NamedTuple subclasses expose ``_fields``; fall back to dir() filtered.
     fields = getattr(state, "_fields", None)
     if fields is not None:
-        return list(fields)
+        return [
+            k for k in fields
+            if not (k == "h_il" and getattr(state, k, None) is None)
+        ]
     return [k for k in dir(state) if isinstance(getattr(state, k), Field)]
 
 
@@ -852,7 +856,8 @@ def classify_restart_slots(state) -> tuple[list[str], list[str]]:
     value-only check would pass at setup and only blow up months later, at the
     first checkpoint of the first run that turns the new gate on (codex r1).
     """
-    unclassified = sorted(n for n in _iter_state_fields(state)
+    declared = getattr(state, "_fields", None) or _iter_state_fields(state)
+    unclassified = sorted(n for n in declared
                           if n not in _SLOT_POLICY)
     if unclassified:
         raise KeyError(

@@ -44,9 +44,15 @@ from typing import Any, Dict, Optional, Tuple
 
 _TABLE_DIR = Path(__file__).resolve().parent / "cmor_tables"
 
-# Official CMIP6 table IDs legoESM writes into.
+# Official CMIP6 table IDs legoESM writes into.  ORDER MATTERS:
+# ``lookup_cmor_entry(name)`` without a table returns the FIRST table that
+# holds *name*, and the monthly writer relies on that.  The daily tables
+# (``day``/``CFday``/``Oday``) therefore come LAST, so a variable vendored in
+# both a monthly and a daily table (``snw``: ``LImon`` and ``day``) still
+# resolves to its monthly table; the daily writer always passes its table.
 CMIP6_TABLE_IDS: Tuple[str, ...] = (
-    "Amon", "day", "CFday", "fx", "Lmon", "Omon", "Ofx", "SImon",
+    "Amon", "fx", "Lmon", "Omon", "Ofx", "SImon", "LImon",
+    "day", "CFday", "Oday",
 )
 
 # Legacy table aliases kept so pre-existing callers/tests keep working.
@@ -71,6 +77,35 @@ LEGACY_TABLE_ALIASES: Dict[str, str] = {
 # compliance test refuses to certify them.  ``dimensions`` uses legoESM's
 # internal axis names directly.
 NON_CMIP6_VARIABLES: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "Amon": {
+        "o3_ifs": {
+            "standard_name": "mass_fraction_of_ozone_in_air",
+            "long_name": "IFS Cariolle Prognostic Ozone (tracer only)",
+            "units": "kg kg-1",
+            "cell_methods": "area: time: mean",
+            "cell_measures": "area: areacella",
+            "positive": "",
+            "type": "real",
+            "dimensions": ("time", "plev", "lat", "lon"),
+            "comment": (
+                "NOT a CMIP6 variable; legoESM diagnostic only. Radiation "
+                "uses the prescribed input4MIPs ozone, not this tracer."
+            ),
+        },
+        "toz_ifs": {
+            "standard_name": (
+                "equivalent_thickness_at_stp_of_atmosphere_ozone_content"
+            ),
+            "long_name": "IFS Cariolle Prognostic Total Column Ozone",
+            "units": "DU",
+            "cell_methods": "area: time: mean",
+            "cell_measures": "area: areacella",
+            "positive": "",
+            "type": "real",
+            "dimensions": ("time", "lat", "lon"),
+            "comment": "NOT a CMIP6 variable; legoESM diagnostic only.",
+        },
+    },
     "Lmon": {
         "nee": {
             "standard_name": (
@@ -188,6 +223,7 @@ ALEVEL_EMITTED_ON_PLEV: Tuple[str, ...] = ("cli", "clw")
 UNITS_DEVIATIONS: Dict[Tuple[str, str], str] = {
     ("Omon", "tos"): "K",
     ("Omon", "tosga"): "K",
+    ("Oday", "tos"): "K",
 }
 
 

@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH as W
 
 jax.config.update("jax_enable_x64", True)
 
@@ -264,14 +265,14 @@ def test_most_surface_flux_signs_and_limits():
     un = _neutral_ustar(U, z1, z0)
 
     # Neutral: θ_air == T_sfc.
-    us, ths, q0, cd = sl.most_surface_flux(U, 265.0, 265.0, z1, z0, thref)
+    us, ths, q0, cd = sl.most_surface_flux(U, 265.0, 265.0, z1, z0, thref, zeta_cap_width=W)
     assert abs(float(q0)) < 1e-9
     assert abs(float(ths)) < 1e-9
     assert abs(float(us) - un) < 1e-6
     assert abs(float(cd) - (un / U) ** 2) < 1e-9
 
     # Stable: warmer air over a cooled surface ⇒ w'θ' < 0, u_* and Cd suppressed.
-    us_s, ths_s, q0_s, cd_s = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref)
+    us_s, ths_s, q0_s, cd_s = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, zeta_cap_width=W)
     assert float(q0_s) < 0.0                         # downward (cooling) heat flux
     assert float(ths_s) > 0.0
     assert float(us_s) < un                          # stability reduces u_*
@@ -283,7 +284,7 @@ def test_most_surface_flux_is_differentiable():
     """Reverse-mode AD through the surface-layer solve (legoESM end-to-end AD
     goal): d q0 / d T_sfc is finite and non-zero in the stable regime."""
     def q0_of_tsfc(t_sfc):
-        return sl.most_surface_flux(4.0, 265.0, t_sfc, 2.0, 0.1, 265.0)[2]
+        return sl.most_surface_flux(4.0, 265.0, t_sfc, 2.0, 0.1, 265.0, zeta_cap_width=W)[2]
 
     g = jax.grad(q0_of_tsfc)(263.0)
     assert bool(jnp.isfinite(g)) and abs(float(g)) > 0.0
@@ -298,13 +299,13 @@ def test_most_surface_flux_reuses_shared_psi(monkeypatch):
     re-derived inline ψ would ignore the patch and this test would fail."""
     z1, z0, thref, U = 2.0, 0.1, 265.0, 4.0
     # Strongly stable input — a faithful solver gives u_* well below neutral.
-    us_real = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref)[0])
+    us_real = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref, zeta_cap_width=W)[0])
     un = _neutral_ustar(U, z1, z0)
     assert us_real < 0.95 * un                       # stability correction active
 
-    monkeypatch.setattr(sl, "psi_m", lambda z: jnp.zeros_like(jnp.asarray(z)))
-    monkeypatch.setattr(sl, "psi_h", lambda z: jnp.zeros_like(jnp.asarray(z)))
-    us_patched = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref)[0])
+    monkeypatch.setattr(sl, "psi_m", lambda z, **kw: jnp.zeros_like(jnp.asarray(z)))
+    monkeypatch.setattr(sl, "psi_h", lambda z, **kw: jnp.zeros_like(jnp.asarray(z)))
+    us_patched = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref, zeta_cap_width=W)[0])
     # ψ≡0 ⇒ pure neutral log-law, regardless of the (strong) stratification.
     assert abs(us_patched - un) < 1e-6
 
@@ -322,21 +323,21 @@ def test_most_surface_flux_thermal_roughness():
                   0.5221088251452545, -0.09922605066298044, 0.051806796735452215,
                   0.004259337895226402)}
     for args, ref in frozen.items():
-        np.testing.assert_allclose([float(x) for x in sl.most_surface_flux(*args)], ref,
+        np.testing.assert_allclose([float(x) for x in sl.most_surface_flux(*args, zeta_cap_width=W)], ref,
                                    rtol=1e-13)
     z1, z0, thref, U = 2.0, 0.1, 265.0, 4.0
-    a = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref)
-    b = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, z0h=None)
-    c = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, z0h=z0)
+    a = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, zeta_cap_width=W)
+    b = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, z0h=None, zeta_cap_width=W)
+    c = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, z0h=z0, zeta_cap_width=W)
     for x, y, w in zip(a, b, c):
         assert float(x) == float(y) == float(w)
     # neutral-limit check: tiny Δθ so ψ_h ≈ 0
     dth = 1e-6
     _us, ths, _q, _cd = sl.most_surface_flux(U, 265.0 + dth, 265.0, z1, z0, thref,
-                                             z0h=1e-3)
+                                             z0h=1e-3, zeta_cap_width=W)
     kappa = sl.constants.kappa_von_karman
     np.testing.assert_allclose(float(ths), kappa * dth / np.log(z1 / 1e-3), rtol=1e-6)
-    q_small = float(sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, z0h=1e-3)[2])
+    q_small = float(sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, z0h=1e-3, zeta_cap_width=W)[2])
     assert float(a[2]) < q_small < 0.0      # weaker cooling flux with smaller z0h
 
 
@@ -346,17 +347,17 @@ def test_most_drag_prescribed_flux_limits_and_fixed_point():
     Businger–Dyer relation at the Obukhov length the flux sets; AD finite."""
     z1, z0, thref, U = 10.0, 0.01, 300.0, 10.0
     un = _neutral_ustar(U, z1, z0)
-    us0, cd0 = sl.most_drag_prescribed_flux(U, 0.0, z1, z0, thref)
+    us0, cd0 = sl.most_drag_prescribed_flux(U, 0.0, z1, z0, thref, zeta_cap_width=W)
     np.testing.assert_allclose(float(us0), un, rtol=1e-9)
     np.testing.assert_allclose(float(cd0), (un / U) ** 2, rtol=1e-9)
-    us_u, cd_u = sl.most_drag_prescribed_flux(U, 0.10, z1, z0, thref)
-    us_s, cd_s = sl.most_drag_prescribed_flux(U, -0.01, z1, z0, thref)
+    us_u, cd_u = sl.most_drag_prescribed_flux(U, 0.10, z1, z0, thref, zeta_cap_width=W)
+    us_s, cd_s = sl.most_drag_prescribed_flux(U, -0.01, z1, z0, thref, zeta_cap_width=W)
     assert float(cd_u) > float(cd0) > float(cd_s)
     kappa = sl.constants.kappa_von_karman
     inv_L = -kappa * sl.constants.g * 0.10 / (float(us_u) ** 3 * thref)
     rhs = kappa * U / (np.log(z1 / z0) - float(sl.psi_m(z1 * inv_L)))
     np.testing.assert_allclose(float(us_u), rhs, rtol=1e-6)
-    gq = jax.grad(lambda q: sl.most_drag_prescribed_flux(U, q, z1, z0, thref)[1])(0.1)
+    gq = jax.grad(lambda q: sl.most_drag_prescribed_flux(U, q, z1, z0, thref, zeta_cap_width=W)[1])(0.1)
     assert bool(jnp.isfinite(gq)) and float(gq) > 0.0
 
 
@@ -365,10 +366,10 @@ def test_most_surface_flux_reports_its_convergence_residual():
     relative change an 11th iteration makes."""
     for args in [(4.0, 265.0, 263.0, 2.0, 0.1, 265.0),       # stable, converged
                  (0.5, 300.0, 306.0, 10.0, 0.1, 300.0)]:     # weak wind, strong heating
-        ref = sl.most_surface_flux(*args)
-        *vals, resid = sl.most_surface_flux(*args, return_residual=True)
+        ref = sl.most_surface_flux(*args, zeta_cap_width=W)
+        *vals, resid = sl.most_surface_flux(*args, return_residual=True, zeta_cap_width=W)
         assert [float(x) for x in vals] == [float(x) for x in ref]
-        u11, th11 = (float(x) for x in sl.most_surface_flux(*args, n_iter=11)[:2])
+        u11, th11 = (float(x) for x in sl.most_surface_flux(*args, n_iter=11, zeta_cap_width=W)[:2])
         u10, th10 = float(ref[0]), float(ref[1])
         np.testing.assert_allclose(
             float(resid), max(abs(u11 - u10) / u10, abs(th11 - th10) / abs(th10)),
@@ -383,72 +384,73 @@ def test_most_drag_prescribed_flux_converges_near_free_convection():
     finite differences."""
     for (U, q0, z1, z0), ref in [((1.0, 0.24, 4.0, 0.1), 0.183255152572),
                                  ((0.5, 0.24, 10.0, 0.01), 0.045887479379)]:
-        us, _ = sl.most_drag_prescribed_flux(U, q0, z1, z0, 300.0)
+        us, _ = sl.most_drag_prescribed_flux(U, q0, z1, z0, 300.0, zeta_cap_width=W)
         np.testing.assert_allclose(float(us), ref, rtol=1e-10)
     kappa, gacc = sl.constants.kappa_von_karman, sl.constants.g
     for z1, z0 in [(4.0, 0.1), (10.0, 0.01), (10.0, 0.1), (1.0, 1e-3)]:
         for U in np.r_[1e-6, 1e-3, np.geomspace(0.1, 20.0, 9)]:   # incl. calm start
             for q0 in np.geomspace(1e-5, 0.5, 9):
-                us = float(sl.most_drag_prescribed_flux(U, q0, z1, z0, 300.0)[0])
+                us = float(sl.most_drag_prescribed_flux(U, q0, z1, z0, 300.0, zeta_cap_width=W)[0])
                 inv_L = -kappa * gacc * q0 / (us ** 3 * 300.0)
                 rhs = kappa * U / (np.log(z1 / z0) - float(sl.psi_m(z1 * inv_L)))
                 np.testing.assert_allclose(us, rhs, rtol=1e-9, err_msg=f"{U=} {q0=} {z1=}")
     for q0 in (1e-25, 1e-40):             # root below the bracket: neutral to round-off
-        us = float(sl.most_drag_prescribed_flux(10.0, q0, 10.0, 0.01, 300.0)[0])
+        us = float(sl.most_drag_prescribed_flux(10.0, q0, 10.0, 0.01, 300.0, zeta_cap_width=W)[0])
         np.testing.assert_allclose(us, _neutral_ustar(10.0, 10.0, 0.01), rtol=1e-9)
     from jax.test_util import check_grads
-    grad = jax.grad(lambda U, q: sl.most_drag_prescribed_flux(U, q, 4.0, 0.1, 300.0)[1],
+    grad = jax.grad(lambda U, q: sl.most_drag_prescribed_flux(U, q, 4.0, 0.1, 300.0, zeta_cap_width=W)[1],
                     argnums=(0, 1))
     for U, q0 in [(1e-6, 0.24), (1e-3, 0.24), (1.0, 0.24), (10.0, 1e-25), (10.0, 0.0),
                   (8.0, -0.05)]:       # every branch selected once; none may NaN the others
         assert all(np.isfinite(float(x)) for x in grad(U, q0)), (U, q0)
     for U0 in (1.0, 1e-3):                # bisected root / clamped free-convection root
-        check_grads(lambda U, q: sl.most_drag_prescribed_flux(U, q, 4.0, 0.1, 300.0)[1],
+        check_grads(lambda U, q: sl.most_drag_prescribed_flux(U, q, 4.0, 0.1, 300.0, zeta_cap_width=W)[1],
                     (U0, 0.24), order=2, modes=("fwd", "rev"))
     # Root inside the bracket where the shared ψ is constant (|ζ| < 1e-10): u_* is
     # exactly linear in ⟨U⟩, so its curvature must vanish (implicit 2nd derivative).
     d2 = jax.grad(jax.grad(
-        lambda U: sl.most_drag_prescribed_flux(U, 1e-15, 10.0, 0.01, 300.0)[0]))(10.0)
+        lambda U: sl.most_drag_prescribed_flux(U, 1e-15, 10.0, 0.01, 300.0, zeta_cap_width=W)[0]))(10.0)
     assert abs(float(d2)) < 1e-12, float(d2)
 
 
 def test_most_drag_prescribed_cooling_converges_or_is_nan():
     """Stable prescribed flux: every returned u_* satisfies the Businger–Dyer
-    relation (with the shared ψ, clamped at ζ = 10) to 1e-7, or is NaN — never a
-    wrong stress. Strong cooling (ζ past the clamp) gets the clamped closed form."""
+    relation (with the shared ψ, |ζ| capped at 10, constant past ζ = 10 + W) to
+    1e-7, or is NaN — never a wrong stress. Strong cooling (ζ past the cap's
+    saturation) gets the saturated closed form."""
     kappa, gacc = sl.constants.kappa_von_karman, sl.constants.g
     z1, z0, U = 10.0, 0.01, 10.0
-    us = float(sl.most_drag_prescribed_flux(U, -0.5, z1, z0, 300.0)[0])
+    us = float(sl.most_drag_prescribed_flux(U, -0.5, z1, z0, 300.0, zeta_cap_width=W)[0])
     np.testing.assert_allclose(
-        us, kappa * U / (np.log(z1 / z0) - float(sl.psi_m(10.0))), rtol=1e-12)
+        us, kappa * U / (np.log(z1 / z0) - float(sl.psi_m(10.0 + W))), rtol=1e-12)
     # weak wind, weak cooling: ζ is far past the clamp — no regulariser may bias it
-    us = float(sl.most_drag_prescribed_flux(1e-6, -1e-16, z1, z0, 300.0)[0])
+    us = float(sl.most_drag_prescribed_flux(1e-6, -1e-16, z1, z0, 300.0, zeta_cap_width=W)[0])
     np.testing.assert_allclose(
-        us, kappa * 1e-6 / (np.log(z1 / z0) - float(sl.psi_m(10.0))), rtol=1e-12)
+        us, kappa * 1e-6 / (np.log(z1 / z0) - float(sl.psi_m(10.0 + W))), rtol=1e-12)
     for q0 in (-1e-4, -0.01, -0.05, -0.1, -0.2, -0.3, -0.5, -2.0):
-        us = float(sl.most_drag_prescribed_flux(U, q0, z1, z0, 300.0)[0])
+        us = float(sl.most_drag_prescribed_flux(U, q0, z1, z0, 300.0, zeta_cap_width=W)[0])
         if np.isnan(us):
             continue                      # marginal root: refused loudly, allowed
         inv_L = -kappa * gacc * q0 / (us ** 3 * 300.0)
         rhs = kappa * U / (np.log(z1 / z0) - float(sl.psi_m(z1 * inv_L)))
         np.testing.assert_allclose(us, rhs, rtol=1e-7, err_msg=f"{q0=}")
-    assert np.isfinite(float(sl.most_drag_prescribed_flux(U, -0.05, z1, z0, 300.0)[0]))
+    assert np.isfinite(float(sl.most_drag_prescribed_flux(U, -0.05, z1, z0, 300.0, zeta_cap_width=W)[0]))
 
 
 def test_most_drag_prescribed_flux_outside_its_domain_is_nan():
     """⟨U⟩ below 5e-7 m/s: NaN (loud). The
     calm-start speed surface_boundary produces (sqrt(1e-12) in float32) is inside."""
     for q0 in (0.24, -0.05, 0.0):
-        assert np.isnan(float(sl.most_drag_prescribed_flux(1e-8, q0, 10.0, 0.01, 300.0)[1]))
+        assert np.isnan(float(sl.most_drag_prescribed_flux(1e-8, q0, 10.0, 0.01, 300.0, zeta_cap_width=W)[1]))
     calm = jnp.sqrt(jnp.float32(1e-12))
     assert np.isfinite(float(sl.most_drag_prescribed_flux(
         calm, jnp.float32(0.1), jnp.float32(10.0), jnp.float32(0.01),
-        jnp.float32(300.0))[1]))
+        jnp.float32(300.0), zeta_cap_width=W)[1]))
 
 
 def test_most_drag_prescribed_flux_mixed_precision_under_jit():
     """float32 wind, float64 flux, Python-float geometry: one dtype, any regime."""
-    f = jax.jit(lambda U, q: sl.most_drag_prescribed_flux(U, q, 10.0, 0.01, 300.0)[1])
+    f = jax.jit(lambda U, q: sl.most_drag_prescribed_flux(U, q, 10.0, 0.01, 300.0, zeta_cap_width=W)[1])
     for q0 in (0.1, -0.05, 0.0):
         cd = f(jnp.float32(5.0), jnp.asarray(q0, jnp.float64))
         assert np.isfinite(float(cd))
@@ -456,8 +458,8 @@ def test_most_drag_prescribed_flux_mixed_precision_under_jit():
         assert np.isfinite(float(g))
     # all-float32 weak wind, both signs and the clamped regimes: finite fwd + rev
     f32 = jax.jit(lambda U, q: sl.most_drag_prescribed_flux(
-        U, q, jnp.float32(10.0), jnp.float32(0.01), jnp.float32(300.0))[1])
-    f64 = jax.jit(lambda U, q: sl.most_drag_prescribed_flux(U, q, 10.0, 0.01, 300.0)[1])
+        U, q, jnp.float32(10.0), jnp.float32(0.01), jnp.float32(300.0), zeta_cap_width=W)[1])
+    f64 = jax.jit(lambda U, q: sl.most_drag_prescribed_flux(U, q, 10.0, 0.01, 300.0, zeta_cap_width=W)[1])
     for U, q0 in [(1e-6, -1e-16), (1e-6, 0.24), (1e-3, -0.05), (1e-3, 0.24), (5.0, -0.05)]:
         args = (jnp.float32(U), jnp.float32(q0))
         cd = f32(*args)
@@ -511,3 +513,98 @@ def test_surface_boundary_flux_drag_dispatch():
     g_bad = sl.make_grid(cfg._replace(sfc_flux_drag="nope"))
     with pytest.raises(ValueError, match="sfc_flux_drag"):
         sl.surface_boundary(u, v, th, g_bad, 0.1, None)
+
+
+# --- smooth |zeta| cap in the MOST surface layer (RULE 5) --------------------
+# Inputs (wind, dtheta, z1) + hard-clip outputs (u*, theta*, q0, cd_eff) from the
+# pre-change code, and the default-minus-hard gap per state.  States: GABLS1-like
+# (zeta 0.003), saturated (12.6), four inside the cap ramp (11.1 = the 5.8 %
+# heat-flux maximum of the 9600-state sweep, 8.6 (no gap), 9.6, 10.6), and the state
+# where the hard-clip heat flux has a slope kink in the surface temperature
+# (bisected on the jump of d q0/d T_s; its hard output is the width-0 path, which
+# reproduces the six pre-change states exactly).
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+from jax.test_util import check_grads  # noqa: E402
+
+_CAP_FILE = Path(__file__).parent / "fixtures" / "les_most_zeta_cap_gap.npz"
+
+
+def _cap_outputs(width):
+    ref = np.load(_CAP_FILE)
+    th = float(ref["theta_ref"])
+    return np.array([[float(o) for o in sl.most_surface_flux(
+        jnp.asarray(spd), jnp.asarray(th + dth), jnp.asarray(th), z1,
+        float(ref["z0"]), th, zeta_cap_width=width)]
+        for spd, dth, z1 in ref["inputs"]])
+
+
+def test_most_surface_flux_hard_limit_reproduces_the_clip():
+    np.testing.assert_array_equal(_cap_outputs(0.0), np.load(_CAP_FILE)["hard"])
+
+
+def test_most_surface_flux_default_gap_per_state():
+    ref = np.load(_CAP_FILE)
+    gap = _cap_outputs(W) - ref["hard"]
+    np.testing.assert_allclose(gap, ref["gap"], rtol=1e-6, atol=1e-12)
+    assert np.abs(gap).max() > 1e-6
+
+
+def test_most_surface_flux_check_grads_inside_the_cap_ramp():
+    ref = np.load(_CAP_FILE)
+    spd, dth, z1 = ref["inputs"][6]          # on a kink of the hard clip
+    th = float(ref["theta_ref"])
+
+    def q0(t_sfc, width=W):
+        return sl.most_surface_flux(spd, th + dth, t_sfc, z1, float(ref["z0"]), th,
+                                    zeta_cap_width=width)[2]
+    t0 = jnp.asarray(th)
+    check_grads(q0, (t0,), order=2, modes=("fwd", "rev"), eps=1e-6)
+    assert float(jax.grad(q0)(t0)) != 0.0
+    with pytest.raises(AssertionError):      # the hard clip is not smooth here
+        check_grads(lambda t: q0(t, 0.0), (t0,), order=2, modes=("fwd", "rev"),
+                    eps=1e-6)
+
+
+@pytest.mark.parametrize("mod_cfg", ["spectral", "pseudo"])
+def test_les_configs_carry_the_cap_width(mod_cfg):
+    from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pip
+    dims = dict(nx=4, ny=4, nz=6, Lx=400.0, Ly=400.0, Lz=400.0)
+    cfg = (sl.SpectralLESConfig(**dims) if mod_cfg == "spectral"
+           else pip.PseudoIncompressibleConfig(**dims))
+    assert cfg.most_zeta_cap_width == W
+
+
+def test_both_les_cores_pass_the_config_width(monkeypatch):
+    """The spectral rhs and the pseudo-incompressible surface hand the config's
+    most_zeta_cap_width to most_surface_flux."""
+    from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pip
+    seen = []
+    real = sl.most_surface_flux
+
+    def spy(*a, zeta_cap_width, **kw):
+        seen.append(zeta_cap_width)
+        return real(*a, zeta_cap_width=zeta_cap_width, **kw)
+    monkeypatch.setattr(sl, "most_surface_flux", spy)
+    monkeypatch.setattr(pip, "most_surface_flux", spy)
+    dims = dict(nx=4, ny=4, nz=6, Lx=400.0, Ly=400.0, Lz=400.0)
+    g = sl.make_grid(sl.SpectralLESConfig(**dims, most_zeta_cap_width=1.25),
+                     dtype=jnp.float64)
+    sh = (4, 4, 6)
+    u = jnp.full(sh, 3.0)
+    sl.rhs(u, jnp.zeros(sh), jnp.zeros((4, 4, 7)), g, (3.0, 0.0), 1e-4,
+           theta=jnp.full(sh, 265.0), t_sfc=jnp.asarray(263.0))
+    pcfg = pip.PseudoIncompressibleConfig(**dims, surface="most_cooling",
+                                          most_zeta_cap_width=0.75)
+    pg = pip.make_grid(pcfg, dtype=jnp.float64)
+    pip._surface_state(u, jnp.zeros(sh), jnp.full(sh, 265.0), pg,
+                       pip.PseudoIncompressibleForcing(t_sfc=jnp.asarray(263.0)))
+    assert seen == [1.25, 0.75], seen
+
+
+if __name__ == "__main__":
+    base = dict(np.load(_CAP_FILE))
+    base["gap"] = _cap_outputs(W) - base["hard"]
+    np.savez(_CAP_FILE, **base)
+    print("wrote", _CAP_FILE)

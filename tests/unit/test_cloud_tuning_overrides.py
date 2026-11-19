@@ -168,7 +168,8 @@ def test_pipeline_threads_subgrid_autoconv() -> None:
     sigma = make_hybrid_levels(NLEV)
     pipe = build_physics_pipeline(
         grid, sigma,
-        _config(microphysics="morrison", subgrid_autoconversion=True),
+        _config(microphysics="morrison", subgrid_autoconversion=True,
+                morrison_warm_rain_scheme="kk2000"),
     )
     assert pipe.micro_config.subgrid_autoconversion is True
 

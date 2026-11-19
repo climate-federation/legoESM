@@ -42,7 +42,10 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     nemo_tke_effective_ice_fraction,
     tke_vertical_mixing,
 )
-from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
+from legoesm.ocean.physics.vertical_mixing._shared import (
+    eos_salinity,
+    surface_buoyancy_flux,
+)
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     compute_layer_thickness,
@@ -244,7 +247,8 @@ def _vertical_diffusion_edge_partial(
 
 def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
                                   eos_fn=None,
-                                  constants_config=ConstantsConfig()):
+                                  constants_config=ConstantsConfig(),
+                                  floor_salinity=False):
     """Shared MPAS cell-field prep for the vertical-mixing bridges.
 
     Single-sources the edge→cell velocity reconstruction + land/partial-cell
@@ -260,6 +264,11 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
       ``rho_0``) via the model-selected ``eos_fn`` (``None`` ⇒ Wright default);
     * land-zeroing + the partial-cell sub-seafloor T/S/u/v fill (deepest active
       value) so neither closure sees a spurious T=0/u=0 discontinuity.
+
+    ``floor_salinity=True`` (the KPP and TKE bridges) builds the density on
+    salinity floored as ePBL's (``eos_salinity``; Wright as is): sqrt(S)
+    EOSes have an infinite dRho/dS at S = 0 land cells, and the land
+    ``where`` below does not stop the NaN cotangent (#2243).
 
     Returns ``(u_east_w, v_north_w, T_w, S_w, rho, J, mask)`` — the land-safe
     Jacobian ``J`` is returned because the KPP physics path reuses it for the
@@ -285,7 +294,10 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
     # The run's gravity, not the library's: the hydrostatic pressure this
     # density is built on is linear in it, and the cards this lane is compared
     # against pin a value that differs from the module default.
-    rho_real = compute_ocean_rho(state, z_coord, J_real, eos_fn=eos_fn,
+    rho_state = (state._replace(
+        S=state.S.replace(data=eos_salinity(S_3d, eos_fn)))
+        if floor_salinity else state)
+    rho_real = compute_ocean_rho(rho_state, z_coord, J_real, eos_fn=eos_fn,
                                  g=constants_config.g,
                                  rho0=constants_config.rho_0)
     rho = jnp.where(mask[:, None] > 0.5, rho_real, _RHO_0)
@@ -340,7 +352,7 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
     # ``state.land_mask`` directly, so it is unused here.)
     u_east_w, v_north_w, T_w, S_w, rho, J, _ = _reconstruct_mpas_cell_fields(
         state, mesh, z_coord, eos_fn=eos_fn,
-        constants_config=constants_config)
+        constants_config=constants_config, floor_salinity=True)
     T_3d = state.T.data       # (nCells, nlev) — RAW surface T/S for buoyancy flux
     S_3d = state.S.data
     eta = state.eta.data
@@ -786,6 +798,14 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             "zdfiwm itself — MPASOceanModel applies it additively at the "
             "model level (pass iwm_applied_by_model=True from there); a "
             "standalone caller would silently drop the wave-driven mixing.")
+    # NEMO zdf_sh2 on the Voronoi edges (tke_shear_avm_weighting="nemo_face"):
+    # the kernel takes the edge production through its p_sh2_fn hook; the
+    # cell-reconstructed shear stays the gradient-Ri operand.
+    _avm_weighting = getattr(cfg, "tke_shear_avm_weighting", "tpoint")
+    if _avm_weighting not in ("tpoint", "nemo_face"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_shear_avm_weighting on MPAS: expected "
+            f"'tpoint' or 'nemo_face', got {_avm_weighting!r}.")
 
     def profiles_fn(
         state: MPASOceanState,
@@ -798,7 +818,8 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
         # (the SAME helper KPP uses — one reconstruction on MPAS).
         u_east_w, v_north_w, T_w, S_w, rho, J, mask = (
             _reconstruct_mpas_cell_fields(state, mesh, z_coord, eos_fn=eos_fn,
-                                          constants_config=constants_config)
+                                          constants_config=constants_config,
+                                          floor_salinity=True)
         )
         # Match the lat-lon k_profiles owner rule: partial-cell geometry owns
         # NEMO's level-0 tmask.  The 2-D column mask is equal today for normal
@@ -818,6 +839,22 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
         # kappaH floor (only read on the opt-in Prandtl path; harmless on the
         # default 'unit' path).  z_half_ref is negative-down; drop surface+bottom.
         z_interface = z_coord.z_half_ref[1:-1]
+
+        p_sh2_fn = None
+        if _avm_weighting == "nemo_face":
+            from legoesm.ocean.physics.vertical_mixing._shared import (
+                edge_avm_weighted_shear_production,
+            )
+            _wet_col = jnp.broadcast_to((mask > 0.5)[:, None],
+                                        state.T.data.shape)
+            _active = (_wet_col & jnp.asarray(_is_active, dtype=bool)
+                       if _is_active is not None else _wet_col)
+            _u_edge = state.u.data
+
+            def p_sh2_fn(kappaM):
+                return edge_avm_weighted_shear_production(
+                    _u_edge, dz_half, kappaM, _active, mesh.cellsOnEdge,
+                    mesh.edgesOnCell, mesh.dcEdge, mesh.dvEdge, mesh.areaCell)
 
         # Surface wind stress → TKE surface flux (|tau|/rho_0)^{3/2}; None ⇒
         # unforced (the closure zeroes the surface flux).
@@ -927,6 +964,7 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             # gdept_0*(1+eta/ht_0) stretch the C-grid path applies, so both
             # grids run the SAME stratification.
             **bn2_ladder_kwargs(cfg, z_coord, state),
+            p_sh2_fn=p_sh2_fn,
         )
         A_v_cells = tke_out.K_M   # (nCells, nlev-1) momentum viscosity >= 0
         K_v_cells = tke_out.K_H   # (nCells, nlev-1) tracer diffusivity >= 0

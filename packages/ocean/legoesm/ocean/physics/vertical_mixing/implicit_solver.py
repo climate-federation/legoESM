@@ -323,7 +323,9 @@ def _nemo_ordered_solve(
     diagonal: jax.Array,
     upper: jax.Array,
     rhs: jax.Array,
-) -> jax.Array:
+    *,
+    return_trace: bool = False,
+) -> jax.Array | tuple[jax.Array, tuple[jax.Array, jax.Array]]:
     """NEMO's three source-ordered Thomas recurrences.
 
     Unlike :func:`thomas_solve`, NEMO first eliminates the complete diagonal,
@@ -337,8 +339,14 @@ def _nemo_ordered_solve(
     if rhs.ndim < 1 or rhs.shape[-1] < 1:
         raise ValueError("NEMO literal tridiagonal solve needs at least one row")
     nlev = rhs.shape[-1]
+
+    def pivot(d):
+        # Gradient-only: a zero pivot (dry column) divides by 1; its forward
+        # inf/NaN is masked by every caller, but the reverse pass would not be.
+        return jnp.where(d == 0.0, jnp.ones_like(d), d)
+
     if nlev == 1:
-        return rhs / diagonal
+        return rhs / pivot(diagonal)
 
     diag_inputs = tuple(jnp.moveaxis(x, -1, 0) for x in (
         lower[..., 1:], diagonal[..., 1:], upper[..., :-1]))
@@ -347,7 +355,7 @@ def _nemo_ordered_solve(
         current_lower, current_diagonal, previous_upper = operands
         product = jax.lax.optimization_barrier(
             current_lower * previous_upper)
-        quotient = jax.lax.optimization_barrier(product / previous)
+        quotient = jax.lax.optimization_barrier(product / pivot(previous))
         current = jax.lax.optimization_barrier(
             current_diagonal - quotient)
         return current, current
@@ -364,7 +372,7 @@ def _nemo_ordered_solve(
         source, current_lower, previous_diagonal = operands
         # NEMO writes division before multiplication in both routines.
         quotient = jax.lax.optimization_barrier(
-            current_lower / previous_diagonal)
+            current_lower / pivot(previous_diagonal))
         product = jax.lax.optimization_barrier(
             _round_the_multiply(quotient * previous))
         current = jax.lax.optimization_barrier(source - product)
@@ -374,7 +382,7 @@ def _nemo_ordered_solve(
     work = jnp.concatenate(
         [rhs[..., :1], jnp.moveaxis(work_rows, 0, -1)], axis=-1)
 
-    terminal = work[..., -1] / eliminated[..., -1]
+    terminal = work[..., -1] / pivot(eliminated[..., -1])
     reverse_inputs = tuple(
         jnp.moveaxis(x[..., :-1][..., ::-1], -1, 0)
         for x in (work, upper, eliminated))
@@ -385,14 +393,17 @@ def _nemo_ordered_solve(
             _round_the_multiply(current_upper * next_value))
         numerator = jax.lax.optimization_barrier(source - product)
         current = jax.lax.optimization_barrier(
-            numerator / current_diagonal)
+            numerator / pivot(current_diagonal))
         return current, current
 
     _, reverse_rows = jax.lax.scan(
         reverse_step, terminal, reverse_inputs)
-    return jnp.concatenate(
+    solution = jnp.concatenate(
         [jnp.moveaxis(reverse_rows, 0, -1)[..., ::-1],
          terminal[..., None]], axis=-1)
+    if return_trace:
+        return solution, (eliminated, work)
+    return solution
 
 
 # The three recurrences under a name other modules may import.  It IS
@@ -489,8 +500,16 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     implicit_w: jax.Array | None = None,
     *,
     return_matrix_trace: bool = False,
+    rounded_thickness: bool = False,
+    K_2: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Literal NEMO ``trazdf`` content matrix and paired ordered solves."""
+    """Literal NEMO ``trazdf`` content matrix and paired ordered solves.
+
+    ``K_2`` (salt's avs under ln_zdfddm, trazdf.f90:175,198-213) builds the
+    second tracer's own matrix; None shares the first's (avs = avt).
+    """
+    if K_2 is not None and K_2.shape != K.shape:
+        raise ValueError("K_2 must match K")
     if content_rhs_1.shape != content_rhs_2.shape:
         raise ValueError("tracer content RHS arrays must share shape")
     if content_rhs_1.shape != e3t_after.shape or wet.shape != e3t_after.shape:
@@ -506,21 +525,31 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
                content_rhs_2 / divisor * wet_f)
         if return_matrix_trace:
             zero = jnp.zeros_like(content_rhs_1)
-            return (*out, (zero, divisor, zero))
+            return (*out, (zero, divisor, zero, divisor, content_rhs_1))
         return out
 
     wet_f = jnp.asarray(wet, dtype=content_rhs_1.dtype)
     lower, diagonal, upper = nemo_tracer_tridiagonal(
         K, e3t_after, e3w_now, dt, wet, implicit_w=implicit_w,
-        dtype=content_rhs_1.dtype)
-    out_1 = nemo_ordered_tridiagonal_solve(
-        lower, diagonal, upper, content_rhs_1) * wet_f
+        dtype=content_rhs_1.dtype, rounded_thickness=rounded_thickness)
+    if return_matrix_trace:
+        out_1_raw, (eliminated_1, forward_1) = _nemo_ordered_solve(
+            lower, diagonal, upper, content_rhs_1, return_trace=True)
+        out_1 = out_1_raw * wet_f
+    else:
+        out_1 = nemo_ordered_tridiagonal_solve(
+            lower, diagonal, upper, content_rhs_1) * wet_f
+    if K_2 is not None:
+        lower, diagonal, upper = nemo_tracer_tridiagonal(
+            K_2, e3t_after, e3w_now, dt, wet, implicit_w=implicit_w,
+            dtype=content_rhs_1.dtype, rounded_thickness=rounded_thickness)
     out_2 = nemo_ordered_tridiagonal_solve(
         lower, diagonal, upper, content_rhs_2) * wet_f
     if return_matrix_trace:
         # WRITE-only diagnostic: these are the exact arrays consumed by the
         # two production recurrences above, not a second reconstruction.
-        return out_1, out_2, (lower, diagonal, upper)
+        return out_1, out_2, (
+            lower, diagonal, upper, eliminated_1, forward_1)
     return out_1, out_2
 
 
@@ -533,6 +562,7 @@ def nemo_tracer_tridiagonal(
     *,
     implicit_w: jax.Array | None = None,
     dtype=None,
+    rounded_thickness: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """NEMO ``trazdf``'s three tracer diagonals, exactly as the solve uses them.
 
@@ -580,7 +610,14 @@ def nemo_tracer_tridiagonal(
     lower = jnp.concatenate([zero, coeff], axis=-1)
     upper = jnp.concatenate([coeff, zero], axis=-1)
     coefficient_sum = jax.lax.optimization_barrier(lower + upper)
-    diagonal = jax.lax.optimization_barrier(e3t_after - coefficient_sum)
+    # trazdf.f90:233 rounds the live thickness product before subtracting.
+    # Without this barrier the backend may fuse the caller's product with
+    # the subtraction, changing the last bit of the diagonal.
+    thickness = (
+        _round_the_multiply(e3t_after)
+        if rounded_thickness else e3t_after
+    )
+    diagonal = jax.lax.optimization_barrier(thickness - coefficient_sum)
     if implicit_w is not None:
         if implicit_w.shape != e3t_after.shape[:-1] + (
                 e3t_after.shape[-1] + 1,):
@@ -660,10 +697,16 @@ def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
     evaluation: str = "shared_thomas",
     implicit_w: jax.Array | None = None,
     return_matrix_trace: bool = False,
+    rounded_thickness: bool = False,
+    K_2: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Static production dispatch for the paired tracer ZDF application."""
+    if evaluation == "shared_thomas" and K_2 is not None:
+        raise ValueError("K_2 requires evaluation='nemo_literal'")
     if evaluation == "shared_thomas" and implicit_w is not None:
         raise ValueError("implicit_w requires evaluation='nemo_literal'")
+    if evaluation == "shared_thomas" and rounded_thickness:
+        raise ValueError("rounded_thickness requires evaluation='nemo_literal'")
     if evaluation == "shared_thomas":
         if return_matrix_trace:
             raise ValueError(
@@ -674,7 +717,8 @@ def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
         return implicit_vertical_diffusion_nemo_tracer_pair(
             content_rhs_1, content_rhs_2, K, dz_after, e3w_now, dt, wet,
             implicit_w=implicit_w,
-            return_matrix_trace=return_matrix_trace)
+            return_matrix_trace=return_matrix_trace,
+            rounded_thickness=rounded_thickness, K_2=K_2)
     raise ValueError(
         "unknown ZDF tracer solver evaluation "
         f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")

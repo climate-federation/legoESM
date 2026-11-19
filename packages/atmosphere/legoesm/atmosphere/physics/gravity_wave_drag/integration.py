@@ -42,8 +42,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 )
 from legoesm.grids.gaussian import (
     sh_analysis_3d,
-    sh_analysis_oc2_3d,
-    sh_analysis_dmu_3d,
+    vordiv_from_uv_exact_3d,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.rayleigh import rayleigh_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.lindzen import lindzen_gwd
@@ -53,6 +52,9 @@ from legoesm.atmosphere.physics.gravity_wave_drag.prognostic_spectral import (
     prognostic_spectral_gwd,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import e3sm_cam_gwd
+from legoesm.atmosphere.physics.gravity_wave_drag.ifs_wms import (
+    ifs_wms_gwd, wms_carry_seed, wms_carry_shape,
+)
 from legoesm.atmosphere.physics.gravity_wave_drag.ml_emulator import (
     ml_gwd,
     GWDEmulator,
@@ -81,6 +83,8 @@ def get_gwd_fn(config: GravityWaveDragConfig):
         return "e3sm_cam", e3sm_cam_gwd, config.e3sm_cam
     elif config.scheme == "ml_emulator":
         return "ml_emulator", ml_gwd, config.ml_emulator
+    elif config.scheme == "ifs_wms":
+        return "ifs_wms", ifs_wms_gwd, config.ifs_wms
     elif config.scheme == "none":
         return "none", None, None
     elif "+" in config.scheme:
@@ -117,7 +121,7 @@ def get_gwd_fn(config: GravityWaveDragConfig):
 # composable here (they need extra per-column source fields / a network
 # module the composite signature does not carry).
 _GWD_COMPOSABLE_STATELESS = ("rayleigh", "lindzen", "mcfarlane", "hines", "e3sm_cam")
-_GWD_COMPOSABLE_STATEFUL = ("prognostic_spectral",)
+_GWD_COMPOSABLE_STATEFUL = ("prognostic_spectral", "ifs_wms")
 _GWD_COMPOSABLE = _GWD_COMPOSABLE_STATELESS + _GWD_COMPOSABLE_STATEFUL
 # ``e3sm_cam`` sources; any ``+``-set of them is a valid ``E3SMCAMConfig.source``
 # (CAM6 f09: "orographic+frontal+convective").  In a GWD composite the
@@ -155,6 +159,30 @@ def gwd_carries_spectrum(scheme: str) -> bool:
     predicate is defined in exactly one place.
     """
     return any(p in _GWD_COMPOSABLE_STATEFUL for p in scheme.split("+"))
+
+
+def gwd_carry_shape(gwd_cfg, ncol: int, nlev: int) -> tuple:
+    """Shape of the GWD carry (``PhysicsState.gwd_spectrum``) for a scheme
+    string with a stateful part; ``(ncol, 1, 1)`` placeholder otherwise."""
+    parts = gwd_cfg.scheme.split("+")
+    if "ifs_wms" in parts:
+        return wms_carry_shape(ncol, nlev)
+    if "prognostic_spectral" in parts:
+        sc = gwd_cfg.prognostic_spectral
+        return (ncol, sc.n_azimuths, sc.n_wavenumbers)
+    return (ncol, 1, 1)
+
+
+def gwd_carry_seed(gwd_cfg, ncol: int, nlev: int, dtype=None):
+    """Initial GWD carry: launch-flux spectrum (prognostic_spectral), the
+    first-step-recompute seed (ifs_wms), zeros otherwise."""
+    parts = gwd_cfg.scheme.split("+")
+    if "ifs_wms" in parts:
+        return wms_carry_seed(ncol, nlev, dtype=dtype)
+    if "prognostic_spectral" in parts:
+        return jnp.full(gwd_carry_shape(gwd_cfg, ncol, nlev),
+                        gwd_cfg.prognostic_spectral.launch_flux, dtype=dtype)
+    return jnp.zeros((ncol, 1, 1), dtype=dtype)
 
 
 # Orographic members accept the per-column ``h_topo_col`` launch amplitude
@@ -262,7 +290,8 @@ def _validate_gwd_composite(scheme: str, e3sm_source: str | None = None) -> None
 
 def _combined_gwd(
     u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
-    config, spectrum_in, h_topo_col=None, **e3sm_kwargs,
+    config, spectrum_in, h_topo_col=None, mcfarlane_kwargs=None,
+    wms_kwargs=None, **e3sm_kwargs,
 ):
     """Sum the tendencies of a ``+``-composite GWD scheme (issue #834).
 
@@ -273,10 +302,11 @@ def _combined_gwd(
     composite is a drop-in for the prognostic call path.  ``spectrum_out`` is
     the advanced spectrum when a ``prognostic_spectral`` part is present, else
     ``spectrum_in`` unchanged (harmless passthrough for a stateless
-    composite).
+    composite).  ``mcfarlane_kwargs`` (:func:`mcfarlane_inputs`) reach the
+    ``mcfarlane`` part only; its tracer tendencies are returned in ``dq_dt``.
     """
     parts = config.scheme.split("+")
-    du = dv = dT = eps = None
+    du = dv = dT = eps = dq = None
     spectrum_out = spectrum_in
     for part in parts:
         # Per-part single-scheme dispatch reuses get_gwd_fn (which raises on an
@@ -286,11 +316,13 @@ def _combined_gwd(
             out, spectrum_out = fn(
                 u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
                 sub_cfg, spectrum_in,
+                **((wms_kwargs or {}) if part == "ifs_wms" else {}),
             )
         elif part in _GWD_OROGRAPHIC_PARTS:
             out = fn(
                 u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
                 sub_cfg, h_topo_col=h_topo_col,
+                **((mcfarlane_kwargs or {}) if part == "mcfarlane" else {}),
             )
         elif part == "e3sm_cam":
             # Source fields (frontgf / netdt / mfcc / land_frac) from the
@@ -308,7 +340,12 @@ def _combined_gwd(
         dv = out.dv_dt if dv is None else dv + out.dv_dt
         dT = out.dT_dt if dT is None else dT + out.dT_dt
         eps = out.eps_gwd if eps is None else eps + out.eps_gwd
-    return GWDOutput(du_dt=du, dv_dt=dv, dT_dt=dT, eps_gwd=eps), spectrum_out
+        if out.dq_dt is not None:
+            dq = dict(out.dq_dt) if dq is None else {
+                k: dq.get(k, 0.0) + out.dq_dt.get(k, 0.0)
+                for k in set(dq) | set(out.dq_dt)}
+    return (GWDOutput(du_dt=du, dv_dt=dv, dT_dt=dT, eps_gwd=eps, dq_dt=dq),
+            spectrum_out)
 
 
 def _combined_spec_in(config, phys_state, ncol):
@@ -356,6 +393,11 @@ def make_gwd_physics(
     Callable
         Physics function with the correct signature for the model.
     """
+    if "ifs_wms" in gwd_config.scheme.split("+") and model_type != "mpas":
+        raise ValueError(
+            "gravity_wave_drag 'ifs_wms' runs only on the MPAS column lane "
+            "(it needs the per-cell area and threads its retained-tendency "
+            f"carry there); got model_type={model_type!r}.")
     if model_type == "hydrostatic":
         return _make_hydrostatic_gwd(gwd_config, dt)
     elif model_type == "nonhydrostatic":
@@ -552,7 +594,12 @@ def _make_hydrostatic_gwd(
                                 _mfcc, u, v, T, p_full)
             if _has_e3sm else {}
         )
+        e3sm_kw.update(e3sm_reference_inputs(scheme_name, sigma_coord,
+                                             T_col.dtype))
 
+        _tracers = state.tracers
+        mcf_kw = mcfarlane_inputs(scheme_name, sigma_coord, grid, ncol, nlev,
+                                  _tracers, T_col.dtype)
         if is_combined:
             # Composite GWD (#834): sum McFarlane (orographic) + the
             # non-orographic source(s); thread the spectrum when present.
@@ -564,7 +611,7 @@ def _make_hydrostatic_gwd(
             gwd_out, spec_new = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config, spec_in,
-                h_topo_col=h_topo_col, **e3sm_kw,
+                h_topo_col=h_topo_col, mcfarlane_kwargs=mcf_kw, **e3sm_kw,
             )
             if combined_spectrum:
                 gwd_spectrum_out = spec_new
@@ -613,7 +660,7 @@ def _make_hydrostatic_gwd(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 h_topo_col=h_topo_col,
-                **e3sm_kw,
+                **e3sm_kw, **mcf_kw,
             )
         else:
             gwd_out = gwd_fn(
@@ -631,6 +678,7 @@ def _make_hydrostatic_gwd(
             dT_dt=Field(data=dT_dt, name="dT_dt_gwd", dims=dims_3d, units="K/s"),
             dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=_ps_dtype), name="dp_s_dt_gwd", dims=dims_2d, units="Pa/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_ps_dtype), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
+            tracer_tendencies=_gwd_tracer_tendencies(gwd_out, _tracers),
         )
         return tendencies, gwd_spectrum_out
 
@@ -662,6 +710,64 @@ def _extract_subgrid_topo_stddev(grid, ncol):
     if raw is None:
         return None
     return jnp.asarray(raw).reshape(-1)[:ncol]
+
+
+def reference_interface_pressures(sigma_coord, dtype=None):
+    """CAM/E3SM ``pref_edge``: the vertical coordinate's interface pressures
+    at surface pressure ``constants.p_ref`` (CAM ``psr`` / E3SM ``ps0``),
+    shape ``(nlev+1,)``."""
+    p_ref = jnp.asarray([constants.p_ref], dtype=dtype)
+    return jnp.asarray(sigma_coord.pressure_at_half(p_ref)).reshape(-1)
+
+
+def e3sm_reference_inputs(scheme_name, sigma_coord, dtype=None):
+    """``{"p_ref_half": pref_edge}`` for a scheme with an ``e3sm_cam`` part
+    (E3SM takes its spectral level indices and Newtonian alpha profile from
+    the reference interfaces, gw_drag.F90:313-346); ``{}`` otherwise."""
+    if "e3sm_cam" not in str(scheme_name).split("+"):
+        return {}
+    return {"p_ref_half": reference_interface_pressures(sigma_coord, dtype)}
+
+
+def mcfarlane_inputs(scheme_name, sigma_coord, grid, ncol, nlev,
+                     tracers=None, dtype=None):
+    """CAM6 ``gw_oro`` inputs for a ``mcfarlane`` (or composite-with-
+    ``mcfarlane``) call: ``p_ref_half`` (CAM ``pref_edge`` = the vertical
+    coordinate's interfaces at surface pressure ``constants.p_ref`` = CAM
+    ``psr``), ``land_frac_col`` (grid ``land_frac`` or None) and the
+    ``tracers`` to diffuse (state tracer dict reshaped to (ncol, nlev), or
+    None).  Empty dict for any other scheme."""
+    if "mcfarlane" not in str(scheme_name).split("+"):
+        return {}
+    # Evaluated at trace time when the coordinate is concrete, so the
+    # kernel's model-top check also runs under jit.
+    with jax.ensure_compile_time_eval():
+        p_ref_half = reference_interface_pressures(sigma_coord, dtype)
+    kw = {
+        "p_ref_half": p_ref_half,
+        "land_frac_col": _extract_land_frac(grid, ncol),
+    }
+    if tracers is not None:
+        kw["tracers"] = {
+            k: (q.data if hasattr(q, "data") else q).reshape(ncol, nlev)
+            for k, q in tracers.items()}
+    return kw
+
+
+def _gwd_tracer_tendencies(gwd_out, tracers, suffix="_gwd"):
+    """``GWDOutput.dq_dt`` as a ``tracer_tendencies`` dict shaped like the
+    state tracers (Field leaves keep the tracer's dims/units template)."""
+    if gwd_out.dq_dt is None or tracers is None:
+        return None
+    out = {}
+    for k, dq in gwd_out.dq_dt.items():
+        q = tracers[k]
+        if hasattr(q, "replace"):
+            out[k] = q.replace(data=dq.reshape(q.data.shape),
+                               name=f"d{k}_dt{suffix}")
+        else:
+            out[k] = dq.reshape(q.shape)
+    return out
 
 
 def _extract_land_frac(grid, ncol):
@@ -713,6 +819,7 @@ def _make_mpas_gwd(
     # ``prognostic_spectral`` below).
     is_combined = "+" in scheme_name
     combined_spectrum = is_combined and gwd_carries_spectrum(scheme_name)
+    is_wms = "ifs_wms" in scheme_name.split("+")
     _has_e3sm = bool(e3sm_sources(gwd_config))
     _mfcc = e3sm_mfcc_table(gwd_config)
 
@@ -734,7 +841,19 @@ def _make_mpas_gwd(
             )
             return tendencies, gwd_spectrum_out
 
-        if is_prognostic or is_ml or combined_spectrum:
+        if is_wms:
+            # OpenIFS 49r1 WMS (votes G1-G5): the carry is the retained u/v
+            # tendencies + the time since the last recompute; PGAW from the
+            # cell area (A17); launch level from the coordinate (SUGWWMS).
+            spec_in = None if phys_state is None else phys_state.gwd_spectrum
+            if spec_in is None or tuple(spec_in.shape) != gwd_carry_shape(
+                    gwd_config, state.T.data.shape[0],
+                    sigma_coord.n_levels):
+                raise ValueError(
+                    "ifs_wms needs its carry (init_physics_state seeds it); got "
+                    f"{None if spec_in is None else tuple(spec_in.shape)}")
+            wcfg = _wms_with_launch_level(scheme_config, sigma_coord)
+        if (is_prognostic or is_ml or combined_spectrum) and not is_wms:
             raise NotImplementedError(
                 f"GWD scheme {scheme_name!r} on MPAS Voronoi mesh "
                 "needs the prognostic spectrum / ML model state to "
@@ -788,15 +907,38 @@ def _make_mpas_gwd(
                                 _mfcc, u_col, v_col, T_col, p_full_col)
             if _has_e3sm else {}
         )
+        e3sm_kw.update(e3sm_reference_inputs(scheme_name, sigma_coord,
+                                             T_col.dtype))
 
-        if is_combined:
+        # mcfarlane (CAM6 gw_oro): reference interfaces, land fraction and
+        # every state tracer (CAM diffuses all constituents) — see
+        # mcfarlane_inputs.
+        mcf_kw = mcfarlane_inputs(scheme_name, sigma_coord, mesh, nCells,
+                                  nlev, state.tracers, T_col.dtype)
+        if is_wms:
+            area = jnp.asarray(mesh.areaCell).reshape(nCells)
+            if is_combined:
+                h_topo_col = _extract_subgrid_topo_stddev(mesh, nCells)
+                gwd_out, gwd_spectrum_out = gwd_fn(
+                    u_col, v_col, T_col, p_full_col, p_half_col,
+                    z_full, z_half, rho, lat, dt, wcfg, spec_in,
+                    h_topo_col=h_topo_col, mcfarlane_kwargs=mcf_kw,
+                    wms_kwargs={"cell_area": area}, **e3sm_kw,
+                )
+            else:
+                gwd_out, gwd_spectrum_out = gwd_fn(
+                    u_col, v_col, T_col, p_full_col, p_half_col,
+                    z_full, z_half, rho, lat, dt, wcfg, spec_in,
+                    cell_area=area,
+                )
+        elif is_combined:
             # Stateless composite only (spectrum-carrying case raised above).
             # Orographic parts use the per-cell subgrid-topo stddev.
             h_topo_col = _extract_subgrid_topo_stddev(mesh, nCells)
             gwd_out, _ = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config, None,
-                h_topo_col=h_topo_col, **e3sm_kw,
+                h_topo_col=h_topo_col, mcfarlane_kwargs=mcf_kw, **e3sm_kw,
             )
         elif is_orographic:
             h_topo_col = _extract_subgrid_topo_stddev(mesh, nCells)
@@ -806,7 +948,7 @@ def _make_mpas_gwd(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 h_topo_col=h_topo_col,
-                **e3sm_kw,
+                **e3sm_kw, **mcf_kw,
             )
         else:
             gwd_out = gwd_fn(
@@ -839,6 +981,7 @@ def _make_mpas_gwd(
             dT_dt=state.T.replace(data=dT_cell, name="dT_dt_gwd"),
             dp_s_dt=state.p_s.replace(data=zero_ps, name="dp_s_dt_gwd"),
             dphis_dt=state.phis.replace(data=zero_ps, name="dphis_dt_gwd"),
+            tracer_tendencies=_gwd_tracer_tendencies(gwd_out, state.tracers),
         )
         return tendencies, gwd_spectrum_out
 
@@ -847,6 +990,21 @@ def _make_mpas_gwd(
 
     physics_fn.reset_state = reset_state
     return physics_fn
+
+
+def _wms_with_launch_level(scheme_config, sigma_coord):
+    """``scheme_config`` (IFSWMSConfig, or the composite's full config) with
+    SUGWWMS's launch level set from ``sigma_coord`` at the standard surface
+    pressure (SUSTA VP00; votes V5a, G3a), evaluated at trace time."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.ifs_wms import wms_launch_level
+    with jax.ensure_compile_time_eval():
+        stpre = [float(x) for x in jnp.asarray(sigma_coord.pressure_at_full(
+            jnp.asarray([constants.p_atm_std]))).reshape(-1)]
+    lev = wms_launch_level(stpre)
+    if hasattr(scheme_config, "ifs_wms"):
+        return scheme_config._replace(
+            ifs_wms=scheme_config.ifs_wms._replace(launch_level=lev))
+    return scheme_config._replace(launch_level=lev)
 
 
 def _get_lat_hydrostatic(grid, ncol):
@@ -1093,6 +1251,13 @@ def _make_spectral_pe_gwd(
 
         # Latitude from Gaussian grid
         lat = jnp.broadcast_to(grid.lat[:, None], (n_lat, n_lon)).reshape(ncol)
+        # mcfarlane: reference interfaces, land fraction and every state
+        # tracer (CAM diffuses all constituents) — see mcfarlane_inputs.
+        _tracers = getattr(state, "tracers", None)
+        mcf_kw = mcfarlane_inputs(scheme_name, sigma_coord, grid, ncol, nlev,
+                                  _tracers, T_col.dtype)
+        e3sm_ref_kw = e3sm_reference_inputs(scheme_name, sigma_coord,
+                                            T_col.dtype)
 
         if is_combined:
             # Composite GWD (#834): sum orographic + non-orographic; thread the
@@ -1107,7 +1272,7 @@ def _make_spectral_pe_gwd(
             gwd_out, spec_new = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config, spec_in,
-                h_topo_col=h_topo_col,
+                h_topo_col=h_topo_col, mcfarlane_kwargs=mcf_kw, **e3sm_ref_kw,
             )
             if combined_spectrum:
                 gwd_spectrum_out = spec_new
@@ -1149,6 +1314,8 @@ def _make_spectral_pe_gwd(
                 # only e3sm_cam_gwd accepts the kwarg.  Absent grid attribute
                 # -> None -> no scaling (legacy behaviour).
                 extra["land_frac_col"] = _extract_land_frac(grid, ncol)
+            extra.update(mcf_kw)
+            extra.update(e3sm_ref_kw)
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
@@ -1165,23 +1332,10 @@ def _make_spectral_pe_gwd(
         dv_dt = gwd_out.dv_dt.reshape(n_lat, n_lon, nlev)
         dT_dt = gwd_out.dT_dt.reshape(n_lat, n_lon, nlev)
 
-        # Project wind tendencies to spectral vorticity/divergence
-        a = grid.radius
-        im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-        one_over_a = 1.0 / a
-
-        cos_lat_3d = grid.cos_lat[:, None, None]
-        du_cos = du_dt * cos_lat_3d
-        dv_cos = dv_dt * cos_lat_3d
-
-        dvor_hat = (
-            im_over_a[:, None] * sh_analysis_oc2_3d(grid, dv_cos)
-            + one_over_a * sh_analysis_dmu_3d(grid, du_cos)
-        )
-        ddiv_hat = (
-            im_over_a[:, None] * sh_analysis_oc2_3d(grid, du_cos)
-            - one_over_a * sh_analysis_dmu_3d(grid, dv_cos)
-        )
+        # Exact left-inverse of the dycore's wind synthesis: the plain
+        # Bourke oc2/dmu analysis amplifies a pole-row tendency ~6x per
+        # pass, which the macmic sub-cycle compounds into a blow-up (#976).
+        dvor_hat, ddiv_hat = vordiv_from_uv_exact_3d(grid, du_dt, dv_dt)
 
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
@@ -1191,6 +1345,7 @@ def _make_spectral_pe_gwd(
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+            tracers=_gwd_tracer_tendencies(gwd_out, _tracers),
         )
         return tendencies, gwd_spectrum_out
 

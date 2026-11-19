@@ -21,7 +21,18 @@ from legoesm.atmosphere.physics.microphysics import (
 from legoesm.atmosphere.physics.microphysics.integration import (
     _get_microphysics_fn,
 )
-from legoesm.thermo import saturation_vapor_pressure
+from legoesm.atmosphere.physics.microphysics.fast_sbm.collision import GMIN_DEFAULT
+from legoesm.atmosphere.physics.microphysics.fast_sbm.diffusional_growth import (
+    saturation_vapor_pressure_fast_sbm,
+)
+from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import COL
+
+
+def _q_for(ratio, T):
+    """Vapor mixing ratio at FAST_SBM saturation ratio ``ratio`` (the oracle's
+    e(q) = q p/(0.622 + 0.378 q) inverted on its POLYSVP curve)."""
+    e = ratio * float(saturation_vapor_pressure_fast_sbm(jnp.asarray(T)))
+    return constants.epsilon_fast_sbm * e / (P0 - constants.one_minus_epsilon_fast_sbm * e)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -30,11 +41,17 @@ P0, T0 = 9.0e4, 283.0
 DT = 2.0
 
 
+# Bott gmin floors (oracle coll_xxx_lwf / coll_xyx_lwf: touched empty bins are
+# lifted to gmin) can create at most COL*NKR*gmin [kg m^-3] per call; the
+# column makes 3 Bott calls on ice per cell (snow + graupel riming, snow
+# aggregation).
+_ICE_FLOOR_ATOL = 3 * COL * 33 * GMIN_DEFAULT
+
+
 def _fields(rh, q_c=1.0e-3, q_r=0.0):
     T = jnp.full((NCOL, NLEV), T0)
     p = jnp.full((NCOL, NLEV), P0)
-    e = rh * float(saturation_vapor_pressure(jnp.asarray(T0)))
-    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    q_v = jnp.full((NCOL, NLEV), _q_for(rh, T0))
     rho = jnp.full((NCOL, NLEV), 1.1)
     hyd = make_zero_hydrometeors(NCOL, NLEV)
     hyd = hyd._replace(q_c=jnp.full((NCOL, NLEV), q_c),
@@ -213,8 +230,7 @@ def test_supercooled_cell_freezes_to_ice():
     # with fusion warming.
     T = jnp.full((NCOL, NLEV), constants.T_freeze - 20.0)
     p = jnp.full((NCOL, NLEV), P0)
-    e = 1.05 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
-    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    q_v = jnp.full((NCOL, NLEV), _q_for(1.05, float(T[0, 0])))
     rho = jnp.full((NCOL, NLEV), 1.1)
     hyd = make_zero_hydrometeors(NCOL, NLEV)._replace(
         q_c=jnp.full((NCOL, NLEV), 1.0e-3),
@@ -262,8 +278,7 @@ def test_supercooled_riming_grows_ice_from_cloud():
     p = jnp.full((NCOL, NLEV), P0)
     # Supersaturated → real condensation, so the closure isn't a near-zero
     # cancellation of the (much larger) riming/freezing internal transfers.
-    e = 1.02 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
-    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    q_v = jnp.full((NCOL, NLEV), _q_for(1.02, float(T[0, 0])))
     rho = jnp.full((NCOL, NLEV), 1.1)
     base = make_zero_hydrometeors(NCOL, NLEV)._replace(
         q_c=jnp.full((NCOL, NLEV), 2.0e-3))
@@ -290,8 +305,7 @@ def test_warm_cell_grad_through_discarded_riming():
     # where-trap on the unselected supercooled branch.
     T = jnp.full((NCOL, NLEV), constants.T_freeze + 5.0)
     p = jnp.full((NCOL, NLEV), P0)
-    e = 1.0 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
-    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    q_v = jnp.full((NCOL, NLEV), _q_for(1.0, float(T[0, 0])))
     rho = jnp.full((NCOL, NLEV), 1.1)
     hyd = make_zero_hydrometeors(NCOL, NLEV)._replace(
         q_c=jnp.full((NCOL, NLEV), 1.0e-3),
@@ -330,8 +344,7 @@ def test_supercooled_graupel_rimes_cloud():
     # graupel (freeze-only), with closure holding.
     T = jnp.full((NCOL, NLEV), constants.T_freeze - 15.0)
     p = jnp.full((NCOL, NLEV), P0)
-    e = 1.02 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
-    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    q_v = jnp.full((NCOL, NLEV), _q_for(1.02, float(T[0, 0])))
     rho = jnp.full((NCOL, NLEV), 1.1)
     base = make_zero_hydrometeors(NCOL, NLEV)._replace(
         q_c=jnp.full((NCOL, NLEV), 2.0e-3))
@@ -358,8 +371,7 @@ def test_graupel_precipitates_faster_than_snow():
     # ice mass, routed once as snow (q_i) and once as graupel (q_g).
     T = jnp.full((NCOL, NLEV), constants.T_freeze - 10.0)
     p = jnp.full((NCOL, NLEV), P0)
-    e = 0.8 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
-    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    q_v = jnp.full((NCOL, NLEV), _q_for(0.8, float(T[0, 0])))
     rho = jnp.full((NCOL, NLEV), 1.1)
     dz = jnp.full((NCOL, NLEV), 100.0)
     ph = jnp.zeros((NCOL, NLEV + 1))
@@ -387,8 +399,7 @@ def test_cold_cell_ice_sediments_without_melting():
     # fall speed instead of being trapped). Column ice loss == precip.
     T = jnp.full((NCOL, NLEV), constants.T_freeze - 10.0)
     p = jnp.full((NCOL, NLEV), P0)
-    e = 0.9 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
-    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    q_v = jnp.full((NCOL, NLEV), _q_for(0.9, float(T[0, 0])))
     rho = jnp.full((NCOL, NLEV), 1.1)
     dz = jnp.full((NCOL, NLEV), 100.0)
     hyd = make_zero_hydrometeors(NCOL, NLEV)._replace(
@@ -404,7 +415,8 @@ def test_cold_cell_ice_sediments_without_melting():
     assert np.all(np.asarray(out.precipitation) > 0.0)
     # Column ice loss exactly equals what precipitated (no melt, no source).
     np.testing.assert_allclose(-col(out.dq_i_dt),
-                               np.asarray(out.precipitation), rtol=1e-9)
+                               np.asarray(out.precipitation), rtol=1e-9,
+                               atol=_ICE_FLOOR_ATOL * float(jnp.sum(dz[0])) / DT)
 
 
 def test_reconstruction_conserves_mass_when_floor_binds():
@@ -469,8 +481,7 @@ def test_ice_aggregation_conserves_ice_mass():
     # internal bin redistribution + any sedimentation).
     T = jnp.full((NCOL, NLEV), constants.T_freeze - 10.0)
     p = jnp.full((NCOL, NLEV), P0)
-    e = 0.5 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
-    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    q_v = jnp.full((NCOL, NLEV), _q_for(0.5, float(T[0, 0])))
     rho = jnp.full((NCOL, NLEV), 1.1)
     hyd = make_zero_hydrometeors(NCOL, NLEV)._replace(
         q_i=jnp.full((NCOL, NLEV), 1.0e-3))
@@ -484,7 +495,8 @@ def test_ice_aggregation_conserves_ice_mass():
     np.testing.assert_allclose(np.asarray(out.dq_c_dt), 0.0, atol=1e-12)
     col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
     np.testing.assert_allclose(-col(out.dq_i_dt),
-                               np.asarray(out.precipitation), rtol=1e-9)
+                               np.asarray(out.precipitation), rtol=1e-9,
+                               atol=_ICE_FLOOR_ATOL * float(jnp.sum(dz[0])) / DT)
 
 
 def test_ice_aggregation_redistributes_spectrum():
@@ -527,8 +539,7 @@ def test_multistep_total_water_conserved():
     ncol, nlev = 1, 4
     T = jnp.full((ncol, nlev), constants.T_freeze - 20.0)
     p = jnp.full((ncol, nlev), P0)
-    e = 1.04 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
-    q_v0 = jnp.full((ncol, nlev), constants.epsilon * e / (P0 - e))
+    q_v0 = jnp.full((ncol, nlev), _q_for(1.04, float(T[0, 0])))
     rho = jnp.full((ncol, nlev), 1.1)
     dz = jnp.full((ncol, nlev), 200.0)
     ph = jnp.zeros((ncol, nlev + 1))

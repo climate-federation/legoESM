@@ -18,7 +18,9 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.thermo import saturation_vapor_pressure
+from legoesm.atmosphere.physics.microphysics.sdm.condensation import (
+    saturation_vapor_pressure_erf as saturation_vapor_pressure,
+)
 from legoesm.atmosphere.physics.microphysics.sdm import (
     SDMConfig,
     SuperDropletState,
@@ -34,15 +36,16 @@ from legoesm.atmosphere.physics.microphysics.sdm import (
 def _drsq_dt_oracle(R, S, T, N_s, include_curvature, include_solute):
     """Independent re-implementation of d(R²)/dt for cross-checking the module.
 
-    Same physical constants (values are repo policy, not under test) but a
-    separate algebraic path, so it catches power/sign/coefficient/d_cf bugs:
-    ``α + β/R + γ/R³`` with the full Fukuta-Walter Knudsen correction.
+    Same physical constants (ERF 26.09's water coefficients, pinned against
+    the running oracle in test_sdm_erf_oracle.py) but a separate algebraic
+    path, so it catches power/sign/coefficient/d_cf bugs: ``α + β/R + γ/R³``
+    with the full Fukuta-Walter Knudsen correction.
     """
     D = constants.D_vapor
     K = constants.k_air
-    Rv = constants.R_v
+    Rv = constants.R_v_erf
     rho_l = constants.rho_water
-    L = constants.L_v
+    L = constants.L_v_erf
     e_s = float(saturation_vapor_pressure(jnp.asarray(T)))
     lam = 2.0 * D / np.sqrt(8.0 * T * Rv / np.pi)
     Kn = lam / R
@@ -52,10 +55,10 @@ def _drsq_dt_oracle(R, S, T, N_s, include_curvature, include_solute):
     denom = F_k + F_d
     out = 2.0 * (S - 1.0) / denom
     if include_curvature:
-        a = 2.0 * constants.sigma_water / (Rv * rho_l)
+        a = 2.0 * constants.sigma_water_erf / (Rv * rho_l)
         out -= 2.0 * (a / T) / denom / R
     if include_solute:
-        b = (3.0 / (4.0 * np.pi)) * (constants.M_H2O * 1.0e-3 / rho_l)
+        b = constants.b_solute_water_erf
         out += 2.0 * b * N_s / denom / R**3
     return out
 
@@ -238,7 +241,7 @@ def _jac_oracle(R, T, e_s, N_s, include_curvature, include_solute):
     Jacobian: F_k+F_d incl. d_cf evaluated at R, but its R-dependence
     neglected — so it is NOT jax.grad(drsq_dt), and is 0 for pure Maxwell)."""
     D, K = constants.D_vapor, constants.k_air
-    Rv, rho_l, L = constants.R_v, constants.rho_water, constants.L_v
+    Rv, rho_l, L = constants.R_v_erf, constants.rho_water, constants.L_v_erf
     lam = 2.0 * D / np.sqrt(8.0 * T * Rv / np.pi)
     Kn = lam / R
     dcf = (1.0 + Kn) / (1.0 + 2.0 * Kn * (1.0 + Kn))
@@ -247,10 +250,10 @@ def _jac_oracle(R, T, e_s, N_s, include_curvature, include_solute):
     denom = F_k + F_d
     out = 0.0
     if include_curvature:
-        beta = -2.0 * (2.0 * constants.sigma_water / (Rv * rho_l) / T) / denom
+        beta = -2.0 * (2.0 * constants.sigma_water_erf / (Rv * rho_l) / T) / denom
         out -= 0.5 * beta / R**3
     if include_solute:
-        gamma = 2.0 * (3.0 / (4.0 * np.pi)) * (constants.M_H2O * 1e-3 / rho_l) * N_s / denom
+        gamma = 2.0 * constants.b_solute_water_erf * N_s / denom
         out -= 1.5 * gamma / R**5
     return out
 
@@ -302,7 +305,8 @@ def test_adaptive_handles_stiff_kohler_better_than_fixed():
         st, S, T, dt, cfg0._replace(condensation_integrator="rk4",
                                     n_substeps_condensation=1)).radius[0])
     r_ada = float(integrate_radius(
-        st, S, T, dt, cfg0._replace(condensation_integrator="rk4_adaptive")).radius[0])
+        st, S, T, dt, cfg0._replace(condensation_integrator="rk4_adaptive",
+                                    adaptive_cfl=1.0)).radius[0])
     assert abs(r_ada - ref) <= abs(r_fix - ref)
     assert abs(r_ada - ref) / ref < 1e-3      # adaptive is accurate outright
 
@@ -314,7 +318,8 @@ def test_adaptive_steady_state_exit_at_saturation():
                     condensation_integrator="rk4_adaptive")
     st = make_monodisperse(n_sd=3, radius=8.0e-6, multiplicity=1.0)
     out = integrate_radius(st, 1.0, 283.0, 100.0, cfg)
-    assert jnp.allclose(out.radius, st.radius, rtol=0.0, atol=0.0)
+    # ERF re-derives the radius from the updated masses (round-off only).
+    assert jnp.allclose(out.radius, st.radius, rtol=1e-10, atol=0.0)
 
 
 def test_adaptive_step_cap_counts_accepted_steps_only():
@@ -324,7 +329,7 @@ def test_adaptive_step_cap_counts_accepted_steps_only():
     cap of 100 must give the same converged answer as a huge cap. Before the
     fix, halvings burned the budget and a low cap silently truncated."""
     cfg0 = SDMConfig(include_curvature=True, include_solute=True,
-                     condensation_integrator="rk4_adaptive")
+                     condensation_integrator="rk4_adaptive", adaptive_cfl=1.0)
     st = make_monodisperse(n_sd=1, radius=1.0e-6, multiplicity=1.0,
                            solute_mass=1.0e-16)
     S, T, dt = 0.97, 283.0, 50.0
@@ -348,7 +353,8 @@ def test_be_matches_reference_on_stiff_kohler():
         st, S, T, dt, cfg0._replace(condensation_integrator="euler",
                                     n_substeps_condensation=200000)).radius[0])
     r_be = float(integrate_radius(
-        st, S, T, dt, cfg0._replace(condensation_integrator="be")).radius[0])
+        st, S, T, dt, cfg0._replace(condensation_integrator="be",
+                                    adaptive_cfl=1.0)).radius[0])
     assert r_be == pytest.approx(ref, rel=1e-3)
 
 
@@ -385,7 +391,8 @@ def test_all_adaptive_integrators_agree_on_stiff_kohler(method):
         st, S, T, dt, cfg0._replace(condensation_integrator="euler",
                                     n_substeps_condensation=200000)).radius[0])
     got = float(integrate_radius(
-        st, S, T, dt, cfg0._replace(condensation_integrator=method)).radius[0])
+        st, S, T, dt, cfg0._replace(condensation_integrator=method,
+                                    adaptive_cfl=1.0)).radius[0])
     assert got == pytest.approx(ref, rel=2e-3)
 
 
@@ -451,7 +458,7 @@ def test_cn_dirk2_steady_noop_and_growth(method):
                     condensation_integrator=method)
     st = make_monodisperse(n_sd=2, radius=8.0e-6, multiplicity=1.0)
     out = integrate_radius(st, 1.0, 283.0, 100.0, cfg)
-    assert jnp.allclose(out.radius, st.radius, rtol=0.0, atol=0.0)  # S=1 no-op
+    assert jnp.allclose(out.radius, st.radius, rtol=1e-10, atol=0.0)  # S=1 no-op
     out2 = integrate_radius(st, 1.02, 283.0, 2.0, cfg)
     assert bool(jnp.all(out2.radius > st.radius))                    # grows
     # matches the dense reference for the smooth case
@@ -470,7 +477,7 @@ def test_be_steady_and_haze_equilibrium():
                     condensation_integrator="be")
     st = make_monodisperse(n_sd=2, radius=8.0e-6, multiplicity=1.0)
     out = integrate_radius(st, 1.0, 283.0, 100.0, cfg)
-    assert jnp.allclose(out.radius, st.radius, rtol=0.0, atol=0.0)
+    assert jnp.allclose(out.radius, st.radius, rtol=1e-10, atol=0.0)
 
     cfg2 = SDMConfig(include_curvature=True, include_solute=True,
                      condensation_integrator="be")
@@ -484,7 +491,7 @@ def test_be_steady_and_haze_equilibrium():
 
 
 def test_adaptive_jit_and_unknown_integrator():
-    cfg = SDMConfig(condensation_integrator="rk4_adaptive",
+    cfg = SDMConfig(condensation_integrator="rk4_adaptive", adaptive_cfl=1.0,
                     include_curvature=True, include_solute=False)
     st = make_monodisperse(n_sd=16, radius=1.0e-5, multiplicity=1.0)
     run = jax.jit(integrate_radius, static_argnames=("cfg",))
@@ -493,7 +500,7 @@ def test_adaptive_jit_and_unknown_integrator():
     assert bool(jnp.all(out.radius > st.radius))   # supersaturated -> grew
     with pytest.raises(ValueError, match="Unknown SDM condensation_integrator"):
         integrate_radius(st, 1.0, 283.0, 1.0,
-                         cfg._replace(condensation_integrator="rk3bs"))
+                         cfg._replace(condensation_integrator="rk3"))
 
 
 # --------------------------------------------------------------------------

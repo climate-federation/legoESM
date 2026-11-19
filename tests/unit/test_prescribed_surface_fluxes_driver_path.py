@@ -114,7 +114,8 @@ def test_fold_is_identity_without_fluxes_and_writes_the_four_slots():
 
 # ---------------------------------------------------------------- surface schemes
 
-@pytest.mark.parametrize("turbulence", ["louis", "ysu"])
+# ysu: the driver pipeline refuses it (test_ysu_route::test_driver_pipeline_refuses_ysu).
+@pytest.mark.parametrize("turbulence", ["louis"])
 def test_prescribed_fluxes_are_the_kernels_lower_bc(grid, turbulence):
     """Heat: the kernel echoes the prescribed flux and the lowest level
     warms/cools with its sign.  Momentum: +stress accelerates, -stress
@@ -222,7 +223,8 @@ def test_pack_forcing_carries_the_planes_and_defaults_to_none():
 
 # ---------------------------------------------------------------- no double count
 
-@pytest.mark.parametrize("turbulence", ["louis", "ysu"])
+# ysu: the driver pipeline refuses it (test_ysu_route::test_driver_pipeline_refuses_ysu).
+@pytest.mark.parametrize("turbulence", ["louis"])
 def test_prescribed_flux_enters_the_column_exactly_once(grid, turbulence):
     """Column budget: the water and momentum the column gains per unit time
     equal the prescribed surface fluxes (implicit vertical diffusion is

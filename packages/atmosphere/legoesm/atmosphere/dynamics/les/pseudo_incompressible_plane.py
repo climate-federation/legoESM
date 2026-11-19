@@ -52,7 +52,9 @@ from legoesm import constants
 from legoesm.atmosphere.dynamics.les import plane_fd_advection as _adv
 from legoesm.atmosphere.dynamics.les import pseudo_incompressible_poisson as _poisson
 from legoesm.atmosphere.dynamics.les.spectral_les_plane import most_surface_flux
-from legoesm.atmosphere.physics.turbulence.vreman import vreman_nu_t
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
+from legoesm.atmosphere.physics.turbulence.vreman import (
+    VREMAN_BBETA_GUARD_WIDTH, vreman_nu_t)
 from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2
 
 _AY, _AX, _AZ = 0, 1, 2
@@ -89,6 +91,9 @@ class PseudoIncompressibleConfig(NamedTuple):
     sgs: str = "none"                # SGS closure: "none"|"smagorinsky"|"vreman"|"lasd"
     c_s: float = 0.16                # Smagorinsky constant
     c_vreman: float = 0.07           # Vreman constant (≈2.5 C_s²)
+    vreman_bbeta_guard_width: float = VREMAN_BBETA_GUARD_WIDTH  # Vreman zero-guard
+    #                                 smoothstep half-width [m^4/s^4] (RULE 5 smooth
+    #                                 default 1e-13; 0.0 = the author's hard switch)
     cs_max: float = 1.0              # upper clip on the LASD dynamic C_s² (oracle mask)
     pr_sgs: float = 1.0              # SGS Prandtl number (K_h = ν_t/Pr)
     nu_floor: float = 0.0            # background eddy-viscosity floor [m²/s] — keeps a
@@ -135,6 +140,8 @@ class PseudoIncompressibleConfig(NamedTuple):
     sfc_theta_flux: float = 0.0      # prescribed kinematic heat flux ⟨w'θ'⟩₀ [K m/s]
     sfc_qv_flux: float = 0.0         # prescribed kinematic moisture flux ⟨w'q_v'⟩₀ [m/s]
     #                                  into tracer slot 0 (BOMEX LHF). 0 ⇒ off.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH  # RULE 5 half-width of the smooth
+    #                                  |zeta| cap at 10 (most_cooling surface); 0 = hard clip.
 
 
 class PseudoIncompressibleForcing(NamedTuple):
@@ -396,7 +403,8 @@ def eddy_viscosity(uc, vc, wc, g: PseudoIncompressibleGrid):
     a11, a12, a13, a21, a22, a23, a31, a32, a33 = _velocity_gradients(uc, vc, wc, g)
     if cfg.sgs == "vreman":
         return vreman_nu_t(a11, a12, a13, a21, a22, a23, a31, a32, a33,
-                           g.dx, g.dy, g.dz, cfg.c_vreman, nu_floor=cfg.nu_floor)
+                           g.dx, g.dy, g.dz, cfg.c_vreman, nu_floor=cfg.nu_floor,
+                           bbeta_guard_width=cfg.vreman_bbeta_guard_width)
     # shared strain + |S| for the Smagorinsky family (smagorinsky, lasd)
     s11, s22, s33 = a11, a22, a33
     s12 = 0.5 * (a12 + a21); s13 = 0.5 * (a13 + a31); s23 = 0.5 * (a23 + a32)
@@ -501,7 +509,8 @@ def _surface_state(u, v, theta, g: PseudoIncompressibleGrid, forcing, sfc_means=
         spd_mean = jnp.mean(jnp.sqrt(uc[..., 0] ** 2 + vc[..., 0] ** 2 + 1e-12))
         th1_mean = jnp.mean(theta[..., 0])
     _us, _ths, q0, cd_eff = most_surface_flux(
-        spd_mean, th1_mean, forcing.t_sfc, g.z_c[0], cfg.z0, cfg.theta_ref0)
+        spd_mean, th1_mean, forcing.t_sfc, g.z_c[0], cfg.z0, cfg.theta_ref0,
+        zeta_cap_width=cfg.most_zeta_cap_width)
     return q0, cd_eff
 
 

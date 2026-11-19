@@ -24,7 +24,9 @@ import numpy as np
 import pytest
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-    MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies)
+    MPASPrimitiveEquationConfig,
+)
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
 from legoesm.core.operators_voronoi import (
     curl_vertex_3d, div_damp_del4_3d, divergence_cell_3d)
 from legoesm.driver.component_factory import compute_diffusion
@@ -121,7 +123,7 @@ def test_off_state_is_byte_identical_and_on_state_moves_only_the_wind():
     base = MPASPrimitiveEquationConfig(nu_del2=1.0e5, nu_del4=1.0e17)
 
     def tend(cfg):
-        return mpas_hydrostatic_tendencies(state, mesh, sig, cfg)
+        return mpas_pe_tendencies(state, mesh, sig, cfg, vertical_form="legacy")
 
     off, on = tend(base), tend(base._replace(nu_div4=1.0e16))
     assert MPASPrimitiveEquationConfig().nu_div4 == 0.0
@@ -171,6 +173,22 @@ def test_config_default_off_guards_and_cli_round_trip():
         with pytest.raises(ValueError, match="mpas_div_damp4_scale"):
             ExperimentConfig(dycore=DycoreConfig(mpas_div_damp4_scale=1.0, **bad),
                              grid=grid).validate_strict()
+    # The lat-lon C-grid PE consumes it too (its own per-row coefficient),
+    # under every discretization alias the factory routes to that solver;
+    # the lat-lon SHALLOW-WATER solver does not, and stays refused.
+    ll = GridConfig(grid_type="latlon", vertical_coord="sigma", nlev=36, resolution=48)
+
+    def _dd4_errors(dc):
+        try:
+            ExperimentConfig(dycore=dc, grid=ll).validate_strict()
+        except ValueError as exc:
+            return [ln for ln in str(exc).splitlines() if "mpas_div_damp4_scale" in ln]
+        return []
+    for disc in ("latlon_cgrid", "finite_volume", "centered"):
+        assert _dd4_errors(DycoreConfig(discretization=disc,
+                                        mpas_div_damp4_scale=1.0)) == [], disc
+    assert _dd4_errors(DycoreConfig(discretization="latlon_cgrid", model_type="shallow_water",
+                                    mpas_div_damp4_scale=1.0))
     args = build_arg_parser().parse_args(["--mpas-div-damp4-scale", "1.0"])
     assert build_config_from_args(args).dycore.mpas_div_damp4_scale == 1.0
     assert build_config_from_args(
@@ -240,15 +258,15 @@ def test_conservative_hybrid_transport_is_selectable_and_conserves():
 
     def dT(scheme, crd):
         cfg = base._replace(vert_advection_scheme=scheme)
-        return np.asarray(mpas_hydrostatic_tendencies(state, mesh, crd, cfg).dT_dt.data)
+        return np.asarray(mpas_pe_tendencies(state, mesh, crd, cfg, vertical_form="legacy").dT_dt.data)
 
     assert not np.array_equal(dT("upwind", coord), dT("sb", coord))
     assert MPASPrimitiveEquationConfig().vert_advection_scheme == "upwind"
     with pytest.raises(ValueError, match="sb"):
         s8 = h._add_perturbation_hydro(h._make_hydrostatic_state(mesh, 8), mesh, 8)
-        mpas_hydrostatic_tendencies(
+        mpas_pe_tendencies(
             s8, mesh, create_sigma_coordinate(8, dtype=jnp.float64),
-            base._replace(vert_advection_scheme="sb"))
+            base._replace(vert_advection_scheme="sb"), vertical_form="legacy")
 
 
 def test_production_deck_selects_both_levers_and_no_other_deck_does():
@@ -256,8 +274,9 @@ def test_production_deck_selects_both_levers_and_no_other_deck_does():
     physics-off A/B, and on the same day made the CAM6 suite the production
     default, so the levers now live in amip_production.yaml.  This pins that
     decision: the production deck carries both, every other committed deck
-    carries neither, and the CODE defaults stay off -- the deck selects them,
-    a default is not a record.  It goes red if a lever leaks into another deck
+    carries neither (except the lat-lon production deck, which carries the
+    same div-4 scale on its own per-row operator, 2026-10-13), and the CODE
+    defaults stay off -- the deck selects them, a default is not a record.  It goes red if a lever leaks into another deck
     or into a default.
 
     The outgoing Sundqvist/L36 deck is named explicitly rather than matched by
@@ -289,6 +308,11 @@ def _assert_no_other_deck_carries_a_lever(cfgdir):
     """
     from legoesm.driver.run_config_yaml import read_yaml_with_includes
     production = (cfgdir / "amip" / "amip_production.yaml").resolve()
+    # The lat-lon production deck carries the SAME div-4 scale as MPAS (lat-lon
+    # ldiv4 design, 2026-10-13: one meaning, one value on every grid; its
+    # dycore builds a per-row coefficient).  Exempted by canonical path, div-4
+    # only; it must carry exactly the production value.
+    latlon48 = (cfgdir / "amip" / "amip_production_latlon48.yaml").resolve()
     for deck in sorted(cfgdir.rglob("*.yaml")):
         # Exempt the canonical PATH, not the basename: a file named
         # amip_production.yaml anywhere else under config/ would otherwise be
@@ -303,7 +327,10 @@ def _assert_no_other_deck_carries_a_lever(cfgdir):
         other = read_yaml_with_includes(deck) or {}
         if not isinstance(other, dict):
             continue
-        assert other.get("mpas_div_damp4_scale", 0.0) == 0.0, deck
+        if deck.resolve() == latlon48:
+            assert other["mpas_div_damp4_scale"] == 1.0, deck
+        else:
+            assert other.get("mpas_div_damp4_scale", 0.0) == 0.0, deck
         assert other.get("mpas_vert_advection_scheme", "upwind") != "sb", deck
 
 

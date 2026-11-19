@@ -31,6 +31,10 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.clouds.CloudConfig.q_cloud_resolved_ref',
     'atm.clouds.CloudConfig.r_eff_ice',
     'atm.clouds.CloudConfig.r_eff_liq',
+    # atm.micro: CloudBenchWarmRainConfig (2) -- CloudBench harness-only scheme,
+    # not selectable in the production drivers.
+    'atm.micro.CloudBenchWarmRainConfig.hard_sat_adjust_threshold',
+    'atm.micro.CloudBenchWarmRainConfig.hard_sat_max_heating_K',
     # atm.pblh: PBLHeightConfig (1)
     'atm.pblh.PBLHeightConfig.Ri_crit',
     # atm.rad: GrayRadiationConfig — none: every gray param is tier 0

@@ -201,7 +201,9 @@ def _starts_a_known_array(raw: bytes, off: int, *, eof_counts: bool) -> bool:
 
 
 def read_trazdf_matrix(path: Path, *, expect_kt: int = 1,
-                       truncate: bool = False) -> dict:
+                       truncate: bool = False,
+                       expected_domain: tuple[int, int, int] = EXPECTED_DOMAIN,
+                       ) -> dict:
     """Parse the self-describing record to EOF, refusing anything malformed.
 
     Nothing here knows the array list in advance; the list is only used
@@ -258,10 +260,10 @@ def read_trazdf_matrix(path: Path, *, expect_kt: int = 1,
             f"{header['jpi']}x{header['jpj']} domain is not the whole domain "
             f"minus one symmetric halo; a sub-box would score a fraction of "
             f"the cells and report the same verdict")
-    require((header["jpi"], header["jpj"], header["jpk"]) == EXPECTED_DOMAIN,
+    require((header["jpi"], header["jpj"], header["jpk"]) == expected_domain,
             f"{path}: domain "
             f"{(header['jpi'], header['jpj'], header['jpk'])} is not "
-            f"{CASE}'s {EXPECTED_DOMAIN}; a smaller domain passes the "
+            f"the caller-pinned {expected_domain}; a smaller domain passes the "
             "symmetric-halo check above and then scores a handful of cells "
             "while reporting the same verdict")
     header["halo"] = halo_i

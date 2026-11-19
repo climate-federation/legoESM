@@ -7,7 +7,8 @@ Contract under test (CAM ``tphysbc`` macmic loop, physpkg.F90):
     an intermediate state first, then N turbulence->microphysics sub-steps at
     dt/N on the running state (each increment applied before the next), the
     sub-cycled tendencies / precip / carries averaged (CAM's 1/N scaling),
-    radiation and GWD once on the pre-physics state;
+    then radiation and GWD once, each on the state the loop (and the module
+    before it) left (CAM tphysbc/tphysac);
   * the sub-cycle is NOT a rate re-scaling: N=3 differs from N=1 (the
     intermediate state matters), jit parity, finite gradient;
   * the held-radiation variant, the cadence cache and the ledger rows all
@@ -96,7 +97,8 @@ def _reference(cfg, state, mesh, sigma, ps, dt, n):
     for _ in range(n):
         t_t, tke = turb(state_m, mesh, sigma, phys_state=ps_m)
         state_m = _advance(state_m, t_t, dt / n)
-        ps_m = update_physics_state(ps_m, {"tke": tke})
+        # multi-field carry (tke + the published pblh) merges as combined.py does
+        ps_m = update_physics_state(ps_m, tke if isinstance(tke, dict) else {"tke": tke})
         t_m = micro(state_m, mesh, sigma)
         state_m = _advance(state_m, t_m, dt / n)
         dT = dT + (t_t.dT_dt.data + t_m.dT_dt.data) / n

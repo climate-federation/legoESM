@@ -121,18 +121,22 @@ def pad_to_shardable(ncol: int, n_devices: int) -> tuple[int, int]:
 
 
 def shard_columns(field: jax.Array, mesh: Mesh) -> jax.Array:
-    """Place ``field`` with leading axis sharded across ``mesh['col']``.
+    """Place ``field`` with leading axis sharded across ALL axes of ``mesh``
+    (the 1-D ``'col'`` mesh, or a dycore's own step mesh such as the FV3 duo
+    ``'face'`` / 3-D window mesh, so a compiled step keeps one mesh).
 
     The leading axis is treated as the column index.  Trailing axes
     (vertical levels, bands, etc.) are replicated on each device.
 
-    The caller is responsible for ensuring ``field.shape[0]`` divides
-    ``mesh.shape['col']`` — use ``pad_to_shardable`` first if not.
+    The caller is responsible for ensuring ``field.shape[0]`` is divisible
+    by ``mesh.size`` — use ``pad_to_shardable`` first if not.
     """
     if field.ndim == 0:
         return jax.device_put(field, NamedSharding(mesh, P()))
+    names = mesh.axis_names
+    axis = names[0] if len(names) == 1 else tuple(names)
     trailing = (None,) * (field.ndim - 1)
-    return jax.device_put(field, NamedSharding(mesh, P("col", *trailing)))
+    return jax.device_put(field, NamedSharding(mesh, P(axis, *trailing)))
 
 
 def replicate(field: jax.Array, mesh: Mesh) -> jax.Array:

@@ -457,6 +457,7 @@ def make_sharded_operator_split_step(
         band_statics = dataclasses.replace(
             statics, grid=band_geom,
             lat=band_geom.grid_lat, lon=band_geom.grid_lon,
+            cell_area=band_geom.grid_area,
             forcing=forcing_band)
         # Rebuild ghg_vmr_override from THIS segment's forcing (the serial
         # _make_single_step derives it from forcing.ghg_vmr; the baked statics

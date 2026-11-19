@@ -288,9 +288,9 @@ def _synthetic_root(tmp_path: Path, card: str, *, perturb_target=False) -> Path:
     # ascending k rather than letting XLA pick a tree, which moved those same
     # 5 columns; a jnp.sum here would now reintroduce exactly that difference.
     import jax.numpy as jnp
-    from legoesm.ocean.dynamics.barotropic_common import _ascending_level_sum
+    from legoesm.ocean.dynamics.barotropic_common import ascending_level_sum
     own_mean = np.asarray(
-        _ascending_level_sum(jnp.asarray(field * h_face)) * scored["r1_hu_0"])
+        ascending_level_sum(jnp.asarray(field * h_face)) * scored["r1_hu_0"])
     if perturb_target:
         own_mean = own_mean + 1.0e-9
     field_f = np.zeros((nx, ny, nz), dtype=np.float64)

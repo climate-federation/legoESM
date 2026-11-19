@@ -37,9 +37,6 @@ from legoesm.atmosphere.physics.microphysics.morrison import (
     morrison_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-from legoesm.atmosphere.physics.microphysics.thompson import (
-    thompson_microphysics,
-)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -115,18 +112,6 @@ def test_morrison_runs_in_rce_column():
         )
 
 
-def test_thompson_runs_in_rce_column():
-    T, q_v, hydro, p, ph, rho, dz = _rce_column()
-    out = thompson_microphysics(T, q_v, hydro, p, ph, rho, dz, dt=60.0)
-    for fld in (out.dT_dt, out.dq_v_dt, out.dq_i_dt, out.dq_s_dt,
-                out.dq_g_dt, out.precipitation):
-        assert bool(jnp.all(jnp.isfinite(fld)))
-
-
-# ----------------------------------------------------------------------
-# Physics sanity: ice + ice-supersaturated → q_i grows.
-# ----------------------------------------------------------------------
-
 def test_morrison_grows_ice_in_supersaturated_cirrus():
     """Cirrus layer with q_i > 0 + S_i > 0 must show dq_i > 0
     somewhere in the cirrus levels (or at least not strongly
@@ -141,20 +126,6 @@ def test_morrison_grows_ice_in_supersaturated_cirrus():
     # Net positive ice tendency in cirrus (deposition exceeds sinks).
     assert float(jnp.mean(cirrus_dq_i)) > 0.0
 
-
-def test_thompson_grows_ice_in_supersaturated_cirrus():
-    T, q_v, hydro, p, ph, rho, dz = _rce_column()
-    q_v_boost = q_v.at[:, 2:4].add(1.0e-4)
-    out = thompson_microphysics(
-        T, q_v_boost, hydro, p, ph, rho, dz, dt=60.0,
-    )
-    cirrus_dq_i = out.dq_i_dt[:, 2:4]
-    assert float(jnp.mean(cirrus_dq_i)) > 0.0
-
-
-# ----------------------------------------------------------------------
-# Latent heating consistency: heating sign tracks net condensate change.
-# ----------------------------------------------------------------------
 
 def test_morrison_latent_heating_finite_and_signed():
     """Surface-layer warm condensation → dT/dt finite + signed (cannot
@@ -210,17 +181,6 @@ def test_morrison_jit_compilable():
     assert bool(jnp.all(jnp.isfinite(out.dT_dt)))
 
 
-def test_thompson_jit_compilable():
-    T, q_v, hydro, p, ph, rho, dz = _rce_column()
-    fn = jax.jit(
-        lambda T, qv, h: thompson_microphysics(
-            T, qv, h, p, ph, rho, dz, dt=60.0,
-        ),
-    )
-    out = fn(T, q_v, hydro)
-    assert bool(jnp.all(jnp.isfinite(out.dT_dt)))
-
-
 def test_morrison_supports_jax_grad_through_qi():
     T, q_v, hydro, p, ph, rho, dz = _rce_column()
 
@@ -263,35 +223,3 @@ def test_morrison_works_at_float32():
 
 
 # Codex iter-2: Thompson parity for grad + float32.
-def test_thompson_supports_jax_grad_through_qi():
-    T, q_v, hydro, p, ph, rho, dz = _rce_column()
-
-    def loss_fn(q_i_data):
-        h = hydro._replace(q_i=q_i_data)
-        out = thompson_microphysics(T, q_v, h, p, ph, rho, dz, dt=60.0)
-        return jnp.sum(out.precipitation ** 2)
-
-    g = jax.grad(loss_fn)(hydro.q_i)
-    assert g.shape == hydro.q_i.shape
-    assert bool(jnp.all(jnp.isfinite(g)))
-
-
-def test_thompson_works_at_float32():
-    T, q_v, hydro, p, ph, rho, dz = _rce_column()
-    T_f32 = T.astype(jnp.float32)
-    q_v_f32 = q_v.astype(jnp.float32)
-    hydro_f32 = jax.tree_util.tree_map(
-        lambda x: x.astype(jnp.float32), hydro,
-    )
-    p_f32 = p.astype(jnp.float32)
-    ph_f32 = ph.astype(jnp.float32)
-    rho_f32 = rho.astype(jnp.float32)
-    dz_f32 = dz.astype(jnp.float32)
-    out = thompson_microphysics(
-        T_f32, q_v_f32, hydro_f32, p_f32, ph_f32, rho_f32, dz_f32,
-        dt=60.0,
-    )
-    assert out.dT_dt.dtype == jnp.float32
-    assert out.dq_i_dt.dtype == jnp.float32
-    assert bool(jnp.all(jnp.isfinite(out.dT_dt)))
-    assert bool(jnp.all(jnp.isfinite(out.dq_i_dt)))

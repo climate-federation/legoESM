@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm-land"
-version = "1.0.0"
+version = "1.0.1"
 description = "legoESM land component: multilayer soil thermal/hydrology, snow budget, stomatal conductance, carbon cycle, slab + lake surfaces."
 readme = "README.md"
 license = { text = "MIT" }
@@ -40,6 +40,9 @@ legoesm-core = { workspace = true }
 # legoesm/land into the shared `legoesm` namespace, so it imports as legoesm.land.
 [tool.hatch.build.targets.wheel]
 packages = ["legoesm"]
+
 # Ship the vendored CLM-ML-JAX RSL psihat look-up table (importlib.resources reads
-# it at runtime) in the built wheel — .py-only packaging would drop the .nc.
+# it at runtime). *.nc is git-ignored, so hatch drops it unless listed as an
+# artifact; set for every target because the wheel is built from the sdist.
+[tool.hatch.build]
 artifacts = ["legoesm/land/canopy/clm_ml_backend/multilayer_canopy/data/*.nc"]

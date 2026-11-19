@@ -510,8 +510,12 @@ def test_tier0_stays_excluded_without_the_optin():
         dtype=jnp.float64)
     names = {c.name for c in params.constraints}
     assert "atm.conv.EmanuelConfig.downdraft_dhdp_min" not in names
-    # ...while the promoted threshold IS now reachable by tier alone.
-    assert "atm.conv.EmanuelConfig.cape_threshold" in names
+    # ...while a promoted threshold IS reachable by tier alone (Bechtold's;
+    # Emanuel's CAPE threshold now shapes only a diagnostic and is excluded).
+    params = build_trainable_params(
+        active_scheme_keys={"atm.conv.BechtoldConfig"}, tier="aggressive",
+        dtype=jnp.float64)
+    assert "atm.conv.BechtoldConfig.cape_threshold" in {c.name for c in params.constraints}
 
 
 # --------------------------------------------------------------------------- #

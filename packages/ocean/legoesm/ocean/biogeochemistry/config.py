@@ -62,7 +62,17 @@ class BiogeoConfig(NamedTuple):
     R_CN : float
         Redfield C:N ratio [mol C / mol N]. Default 6.625.
     R_CaP : float
-        Rain ratio (CaCO3 production / organic C export). Default 0.07.
+        Rain ratio: CaCO3 formed per mol of particulate organic carbon
+        formed (detritus formation x R_CN). Default 0.07 (OCMIP-2 /
+        MITgcm ``rainRatioUniform``).
+    caco3_remin_depth : float
+        e-folding depth [m] of the implicit CaCO3 dissolution profile
+        below the layer where it formed. Default 3500 (OCMIP-2 / MITgcm
+        ``zca``).
+    caco3_zcrit : float
+        Depth [m] bounding the CaCO3 production levels: every level down
+        to and including the first whose centre is deeper than this.
+        Default 500 (MITgcm ``zcrit``).
 
     Initial conditions
     ------------------
@@ -111,6 +121,10 @@ class BiogeoConfig(NamedTuple):
     Phyto_init: float = 0.1e-3
     Zoo_init: float = 0.05e-3
     Det_init: float = 0.01e-3
+
+    # Implicit CaCO3 (appended: keeps positional construction unchanged)
+    caco3_remin_depth: float = 3500.0
+    caco3_zcrit: float = 500.0
 
 
 class OceanBiogeoState(NamedTuple):

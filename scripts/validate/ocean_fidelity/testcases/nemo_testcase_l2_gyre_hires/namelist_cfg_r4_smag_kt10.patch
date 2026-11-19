@@ -1,0 +1,65 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -16,7 +16,7 @@
+ !-----------------------------------------------------------------------
+ &namrun        !   parameters of the run
+ !-----------------------------------------------------------------------
+-   cn_exp      =  "GYRE_OMIP_L2_P3"   !  phase-3 ten-step oracle
++   cn_exp      =  "GYRE_OMIP_L2_P3_R4_SMAG" ! quarter-degree Smag ten-step oracle
+    nn_it000    =       1   !  first time step
+    nn_itend    =      10   !  last  time step
+    nn_leapy    =      30   !  Leap year calendar (1) or not (0)
+@@ -37,6 +37,6 @@
+ &namusr_def    !   GYRE user defined namelist  
+ !-----------------------------------------------------------------------
+-   nn_GYRE     =     1     !  GYRE resolution [1/degrees]
++   nn_GYRE     =     4     !  GYRE resolution [1/degrees]
+    ln_bench    = .false.   !  ! =T benchmark with gyre: the gridsize is kept constant
+    jpkglo      =    31     !  number of model levels
+ /
+@@ -44,7 +44,7 @@
+ &namdom        !   time and space domain
+ !-----------------------------------------------------------------------
+ !MLF   rn_Dt      = 7200.     !  time step for the dynamics
+-   rn_Dt      = 14400.     !  time step for the dynamics
++   rn_Dt      = 3600.      !  time step for the dynamics
+ /
+ !!======================================================================
+ !!            ***  Surface Boundary Condition namelists  ***          !!
+@@ -141,7 +141,7 @@
+    ln_traldf_iso   =  .true.   !  iso-neutral (standard operator)
+    nn_aht_ijk_t    = 0         !  = 0   constant = 1/2  Ud*Ld   (lap case) 
+       rn_Ud        = 0.02           !  lateral diffusive velocity [m/s]
+-      rn_Ld        = 100.e+3        !  lateral diffusive length   [m]
++      rn_Ld        = 25000.         !  lateral diffusive length   [m]
+ /
+ !!======================================================================
+ !!                      ***  Dynamics namelists  ***                  !!
+@@ -184,10 +184,12 @@
+-&namdyn_ldf    !   lateral diffusion on momentum                        (default: NO selection)
++&namdyn_ldf    !   lateral diffusion on momentum (DINO R4 closure, gyre_dino_closure_run.sh)
+ !-----------------------------------------------------------------------
+-   ln_dynldf_lap =  .true.     !    laplacian operator
+-   ln_dynldf_lev =  .true.     !  iso-level
+-   nn_ahm_ijk_t  = 0           !  = 0  constant = 1/2  Uv*Lv   (lap case) 
+-      rn_Uv      = 2.0              !  lateral viscous velocity [m/s] 
+-      rn_Lv      = 100.e+3          !  lateral viscous length   [m]
++   ln_dynldf_lap = .false.
++   ln_dynldf_blp = .true.
++   ln_dynldf_lev = .true.
++   nn_ahm_ijk_t  = 32
++      rn_csmc    = 3.5
++      rn_minfac  = 1.0
++      rn_maxfac  = 1.0
+ /
+ !!======================================================================
+ !!                     vertical physics namelists                     !!
+@@ -245,6 +247,8 @@
+ !-----------------------------------------------------------------------
+ &namctl        !   Control prints                                       (default: OFF)
+ !-----------------------------------------------------------------------
++   sn_cfctl%l_runstat = .TRUE.
++   sn_cfctl%ptimincr = 1
+ /
+ !-----------------------------------------------------------------------
+ &namsto        ! Stochastic parametrization of EOS                      (default: OFF)

@@ -204,11 +204,18 @@ class CoupledESMDriver:
         lake_config=None,
         ocean_grid=None,
         output_dir=None,
+        *,
+        expected_resolved_physics: dict | None = None,
+        atm_manifest_runner_tag: str | None = None,
     ):
         self.atm_config = atm_config
         self.coupled_cfg = coupled_config or CoupledConfig()
         validate_air_sea_consistency(atm_config, coupler_config)
-        self._atm = ModelDriver(atm_config, output_dir=output_dir)
+        # expected_resolved_physics: the atmosphere record a reproduce rerun
+        # must resolve to (ModelDriver refuses before stepping otherwise).
+        self._atm = ModelDriver(atm_config, output_dir=output_dir,
+                                expected_resolved_physics=expected_resolved_physics,
+                                manifest_runner_tag=atm_manifest_runner_tag)
         # This driver's _build_atm_forcing READS held_sw_net_sfc /
         # held_lw_net_sfc / seg_precip out of the atmosphere's _carry_aux, so
         # atmosphere lanes that never write them must refuse to run rather
@@ -217,6 +224,9 @@ class CoupledESMDriver:
         # diagnostic samplers) is what ModelDriver._reject_coupled_lane gates
         # on.
         self._atm._requires_surface_flux_export = True
+        # The column loop calls _segment_hook every coupling_dt with
+        # window-mean surface fluxes (P5b); other lanes ignore it.
+        self._atm._coupling_dt_s = float(self.coupled_cfg.coupling_dt)
         self._coupler_config = coupler_config
         self._ice_config = ice_config
         self._lake_config = lake_config
@@ -238,6 +248,10 @@ class CoupledESMDriver:
         # F38: segment-mean (shflx, lhflx, E, tau_x, tau_y) handed back to the
         # atmosphere when couple_surface_fluxes (set by _segment_hook).
         self._sfc_flux_handback = None
+        # atm_owns_surface: the ice/lake handback the atmosphere reads this
+        # window, and the ice/lake->ocean channels of the last exchange.
+        self._surface_handback = None
+        self._owned_to_ocean = None
         self._coupled_diag = []
         self._sst_mean_init = None  # set on first diag — SST-drift reference
         # F2 water-conservation tripwire state (diagnostics-only, host-side).
@@ -293,6 +307,15 @@ class CoupledESMDriver:
 
     def setup(self) -> None:
         """Initialize all components."""
+        # 0. The CO2 box needs float64: an hourly increment is ~1e-6 of the
+        #    box, below what a float32 scalar can accumulate without
+        #    percent-level loss.  Refuse BEFORE any component is initialised.
+        if self.coupled_cfg.co2_tracer and not jax.config.read("jax_enable_x64"):
+            raise RuntimeError(
+                "The coupled CO2 box (co2_tracer=True) needs float64: enable "
+                "JAX x64 (JAX_ENABLE_X64=1 or "
+                "jax.config.update('jax_enable_x64', True)) before setup.")
+
         # 1. Atmosphere
         self._atm.setup()
 
@@ -972,7 +995,8 @@ class CoupledESMDriver:
         """Initialize coupler, land, ice, lake surface states."""
         from legoesm.core.precision import get_policy
         from legoesm.coupler.config import CouplerConfig, TileConfig
-        from legoesm.coupler.coupler import init_surface_state, make_coupler
+        from legoesm.coupler.coupler import (
+            ATM_OWNS_LAND_OCEAN, init_surface_state, make_coupler)
         from legoesm.coupler.lake.config import LakeConfig
         from legoesm.ice.config import SeaIceConfig
         from legoesm.land.config import LandConfig, MultiLayerLandConfig
@@ -1046,7 +1070,8 @@ class CoupledESMDriver:
             lat = self._atm._grid_lat; lon = self._atm._grid_lon
             lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
             lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
-            smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d)
+            smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d,
+                                    vg_air_entry_m=land_cfg.hydraulics.vg_air_entry_m)
             # per-cell calibrated soil hydraulics (van-Genuchten), thermal inertia
             # (C_soil/k_solid -> seasonal cycle) and bulk exchange Ch.  Cast to the
             # storage dtype so the (float64) PFT-table matmuls do not silently down-
@@ -1064,7 +1089,10 @@ class CoupledESMDriver:
                    @ jnp.asarray(TUNED_PFT_SNOWMASK_MULTILAYER))
                 + jnp.asarray(smap["glacier_frac"])).astype(_sd)
             land_cfg = land_cfg._replace(
-                hydraulics=cast(clm_hydraulics_config(smap)),
+                # keep the configured air-entry head: the map's wilting point /
+                # field capacity above were built on it (user 2026-10-18)
+                hydraulics=cast(clm_hydraulics_config(smap)._replace(
+                    vg_air_entry_m=land_cfg.hydraulics.vg_air_entry_m)),
                 thermal=cast(clm_multilayer_thermal_config(smap)),
                 land_albedo=land_cfg.land_albedo._replace(
                     snow_cover_scale=_mask_cell),
@@ -1157,6 +1185,7 @@ class CoupledESMDriver:
             grid=self._atm.grid,
             land_param_provider=land_param_provider,
             land_soil_frozen_fraction=land_soil_frozen_fraction,
+            atm_owns=(ATM_OWNS_LAND_OCEAN if cfg.atm_owns_surface else ()),
         )
 
         # Initialize surface state.  Optionally warm-start the soil at the
@@ -1255,6 +1284,9 @@ class CoupledESMDriver:
         # a silently dead land tile.
         assert_land_tile_reachable(cfg.land_mode, cfg.f_land_mode, f_land)
 
+        if cfg.atm_owns_surface:
+            self._install_surface_handback(ice_cfg, lake_cfg)
+
         land_frac = float(jnp.mean(f_land))
         pft_str = " (PFT)" if land_param_provider is not None else ""
         logger.info(f"  Land: mode={cfg.land_mode}{pft_str}, "
@@ -1295,6 +1327,11 @@ class CoupledESMDriver:
             # surface-energy params against a different soil forward).
             variant = ("multilayer" if self.coupled_cfg.land_mode == "multilayer"
                        else "slab")
+            # Air-entry head for the map's soil wilting point / field capacity: the
+            # multilayer land's own; the slab land solves no van Genuchten soil
+            # water, so the classic curve (0.0) as before (user 2026-10-18).
+            head = (self._land_cfg.hydraulics.vg_air_entry_m if variant == "multilayer"
+                    else 0.0)
             # Transient land-use cover (opt-in): the vegetation params re-weight per
             # segment from a transient legoesm_surfdata cover; soil frozen.  Base +
             # per-year both go through clm_provider_rebuild so their albedo treatment
@@ -1306,7 +1343,7 @@ class CoupledESMDriver:
                     load_transient_cover_on_columns, TransientCoverProvider)
                 clm_path = getattr(self.coupled_cfg, "clm_surfdata_path", "") \
                     or download_clm_surfdata()
-                m = load_clm_surface(clm_path, lat_deg, lon_deg)
+                m = load_clm_surface(clm_path, lat_deg, lon_deg, vg_air_entry_m=head)
                 # Match the non-transient coupled provider (clm_surface_provider omits
                 # the soil-colour albedo) so an unchanged cover slice is a no-op.
                 rebuild = clm_provider_rebuild(m, variant=variant,
@@ -1325,7 +1362,8 @@ class CoupledESMDriver:
                     f"{cover.shape[0]} years {int(years[0])}-{int(years[-1])}, "
                     f"{variant} tuning), {lat_deg.size} columns")
                 return provider
-            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant)
+            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant,
+                                            vg_air_entry_m=head)
             logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
                         f"reference soil, {variant} tuning), {lat_deg.size} columns")
             return provider
@@ -1383,23 +1421,16 @@ class CoupledESMDriver:
         if not cfg.co2_tracer:
             return
 
-        # CO2 as a prognostic atmospheric tracer.
-        # Mixing ratio: co2_ppmv * 1e-6 * (M_CO2 / M_air).
-        # Molar masses come from ``legoesm.constants`` per CLAUDE.md
-        # (no hardcoded physical constants in production code).
-        co2_init_kgkg = (
-            cfg.co2_ppmv_init * 1.0e-6
-            * (constants.M_CO2 / constants.M_air)
-        )
-
-        # Get 3D shape from atmosphere state
-        T_data = self._atm.state.T.data
-        shape_3d = T_data.shape
-
-        self._co2_field = jnp.full(shape_3d, co2_init_kgkg,
-                                   dtype=T_data.dtype)
-        logger.info(f"  CO2 tracer: init={cfg.co2_ppmv_init:.1f} ppmv "
-                    f"({co2_init_kgkg:.6e} kg/kg), shape={shape_3d}")
+        # CO2 as ONE global well-mixed box (#1817, user decisions 2026-10-26):
+        # the prognostic state is the total atmospheric CO2 MASS [kg]; the
+        # mole fraction is derived from the CURRENT total air mass at each
+        # use, so the surface flux is the only thing that changes CO2 mass.
+        # float64 is required (checked at the top of ``setup``).
+        self._co2_mass = (jnp.asarray(cfg.co2_ppmv_init * 1.0e-6, jnp.float64)
+                          * (constants.M_CO2 / constants.M_air)
+                          * self._co2_air_mass(self._atm.state.p_s.data))
+        logger.info(f"  CO2 box: init={cfg.co2_ppmv_init:.1f} ppmv "
+                    f"(global well-mixed CO2 mass {float(self._co2_mass):.4e} kg)")
 
     def _override_sst(self):
         """Replace the atmosphere's file-based SST with slab ocean SST."""
@@ -1714,7 +1745,7 @@ class CoupledESMDriver:
             q_low = (_qgd[..., -1] if _qgd is not None
                      else jnp.zeros_like(T_low))
         else:
-            q_v = self._atm.q_v
+            q_v = self._atm.current_tracer("q_v")
             p_s = state.p_s.data
             T_low = state.T.data[..., -1]
             if state.v is not None:
@@ -1897,11 +1928,9 @@ class CoupledESMDriver:
             cos_zen = jnp.full_like(p_s, 0.5)
 
         # CO2: prognostic or constant
-        if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field'):
-            co2_lowest = self._co2_field[..., -1]
-            co2_ppmv = (
-                co2_lowest / (constants.M_CO2 / constants.M_air) * 1.0e6
-            )
+        if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_mass'):
+            # Well-mixed box: the surface sees the global scalar everywhere.
+            co2_ppmv = jnp.full_like(p_s, self._co2_box_vmr() * 1.0e6)
         else:
             # Radiation's CO2 (GHG file / experiment trajectory, else config).
             from legoesm.core.coupling_fields import land_co2_ppmv
@@ -1968,6 +1997,8 @@ class CoupledESMDriver:
             self._ocean_state, sst_new, u_sfc, v_sfc = self._ocean_step(
                 self._ocean_state, atm_forcing, dt, q_flux=q_flux,
                 open_water_frac=self._slab_open_water_frac(),
+                surface_flux=(self._owned_slab_surface_flux()
+                              if self.coupled_cfg.atm_owns_surface else None),
             )
             self._ocean_u_sfc = u_sfc
             self._ocean_v_sfc = v_sfc
@@ -1977,7 +2008,9 @@ class CoupledESMDriver:
         # and SUBSTEP the ocean at ocean_dt_s (the 3D ocean CFL forbids stepping
         # at coupling_dt; OMIP runs ~300 s at 1°).  SST/currents are read from
         # the 3D state by ``_ocean_surface_KuvC`` (no stored slab tuple).
-        sf, fw = self._assemble_ocean_forcing(atm_forcing)
+        sf, fw = (self._assemble_owned_ocean_forcing()
+                  if self.coupled_cfg.atm_owns_surface
+                  else self._assemble_ocean_forcing(atm_forcing))
         # CEIL (not round) so the actual substep odt <= ocean_dt_s — never
         # exceed the ocean CFL for a non-divisor coupling_dt (codex MED).
         import math
@@ -2441,56 +2474,232 @@ class CoupledESMDriver:
         )
         return sf, fw
 
-    def _step_co2_tracer(self, dt):
-        """Apply blended surface CO2 flux to lowest atmospheric level."""
-        if not self.coupled_cfg.co2_tracer or not hasattr(self, '_co2_field'):
-            return
-        if self._last_sfc_response is None:
-            return
+    def _owned_area_sum(self, x):
+        """Global sum of ``x * cell_area`` [x*m2] over OWNED columns (float64).
 
-        co2_flux = self._last_sfc_response.co2_flux  # kgCO2/m2/s, +up
-        p_s = self._atm.state.p_s.data
-        # Layer mass of lowest level: dp / g [kg/m2]
-        dp = self._atm.sigma.layer_thickness_dp(p_s)[..., -1]
-        mass_air = dp / constants.g
-        dco2 = co2_flux / jnp.maximum(mass_air, 1.0) * dt
-        self._co2_field = self._co2_field.at[..., -1].add(dco2)
-
-    def _co2_global_mean_kgkg(self):
-        """Air-mass-weighted global-mean CO2 mixing ratio [kg/kg].
-
-        sum(q dp A) / sum(dp A): total CO2 mass over total air mass.  An
-        unweighted mean counts the flux-receiving lowest layer as 1/nlev of
-        the atmosphere instead of dp_low/p_s (#1817).  Under MPI only owned
-        columns enter the partial sums (cube: owned faces of the replicated
-        state; MPAS: owned cells, halos are duplicates; lat-lon bands are
-        owned-only already), which are then all-reduced.
+        Under MPI only owned columns enter the partial sums (cube: owned faces
+        of the replicated state; MPAS: owned cells, halos are duplicates;
+        lat-lon bands are owned-only already), which are then all-reduced.
         """
         from legoesm.parallel.reductions import global_sum_if_distributed
-        q = self._co2_field
-        dp = self._atm.sigma.layer_thickness_dp(self._atm.state.p_s.data)
-        area = getattr(self._atm.grid, "grid_area", None)
-        w = jnp.ones(dp.shape[:-1], dp.dtype) if area is None else jnp.asarray(area)
+        x = jnp.asarray(x, jnp.float64)
+        w = jnp.asarray(self._atm.grid.grid_area, jnp.float64)
         faces = getattr(self._atm, "_owned_face_ids", None)
         if faces is not None:
-            q, dp, w = q[faces], dp[faces], w[faces]
+            x, w = x[faces], w[faces]
         layout = getattr(self._atm, "_voronoi_layout", None)
         if layout is not None:
             # Mask the INPUTS, not the products: a NaN halo would otherwise
-            # leak into the reverse pass through q*dp.
+            # leak into the reverse pass through x*w.
             own = layout.owned_mask_cells
-            q = jnp.where(own[..., None], q, 0.0)
-            dp = jnp.where(own[..., None], dp, 0.0)
+            x = jnp.where(own, x, 0.0)
             w = jnp.where(own, w, 0.0)
-        num = jnp.sum(w * jnp.sum(q * dp, axis=-1))
-        den = jnp.sum(w * jnp.sum(dp, axis=-1))
-        return global_sum_if_distributed(num) / global_sum_if_distributed(den)
+        return global_sum_if_distributed(jnp.sum(w * x))
+
+    def _co2_air_mass(self, p_s):
+        """Total atmospheric air mass [kg] = sum(dp_col * A) / g.
+
+        KNOWN DIFFERENCE (user decision 2026-10-26): this is the TOTAL (moist)
+        air mass from p_s, as the retired 3-D tracer used.  A dry-air
+        denominator would give a mole fraction larger by the column water
+        vapour mass fraction (arithmetic estimate: ~25 kg/m2 of
+        ~1e4 kg/m2 of air, i.e. ~0.25 %; not measured in this model).
+        """
+        dp_col = jnp.sum(self._atm.sigma.layer_thickness_dp(p_s), axis=-1)
+        return self._owned_area_sum(dp_col) / constants.g
+
+    def _co2_vmr_from_mass(self, co2_mass, p_s):
+        """Box CO2 mole fraction [mol/mol] from CO2 mass [kg] and current p_s."""
+        return co2_mass / self._co2_air_mass(p_s) / (
+            constants.M_CO2 / constants.M_air)
+
+    def _co2_box_vmr(self):
+        """Current box CO2 mole fraction [mol/mol] (air mass from current p_s)."""
+        return self._co2_vmr_from_mass(self._co2_mass, self._atm.state.p_s.data)
+
+    def _step_co2_tracer(self, dt):
+        """Add the area-integrated surface CO2 flux to the box CO2 mass.
+
+        Sign convention: ``co2_flux`` [kgCO2/m2/s] is POSITIVE INTO THE
+        ATMOSPHERE (upward); d(CO2 mass) [kg] = sum(F * A) * dt.  No surface
+        response yet -> nothing is added.
+        """
+        if not self.coupled_cfg.co2_tracer or not hasattr(self, '_co2_mass'):
+            return
+        if self._last_sfc_response is None:
+            return
+        self._co2_mass = self._co2_mass + self._owned_area_sum(
+            self._last_sfc_response.co2_flux) * dt
 
     def _update_co2_radiation(self):
-        """Feed the prognostic CO2 (mole fraction) to the next segment's radiation."""
-        if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field'):
-            self._atm._co2_vmr_override = float(self._co2_global_mean_kgkg()) / (
-                constants.M_CO2 / constants.M_air)
+        """Feed the CO2 box mole fraction to the next segment's radiation."""
+        if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_mass'):
+            self._atm._co2_vmr_override = float(self._co2_box_vmr())
+
+    # ------------------------------------------------------------------
+    # Atmosphere-owned land and open water (P5c, D4)
+    # ------------------------------------------------------------------
+    def _install_surface_handback(self, ice_cfg, lake_cfg):
+        """``atm_owns_surface``: serve the coupler's ice/lake handback to the
+        atmosphere column loop, starting from the zero-exchange window-0
+        handback (plan P2), and zero the lagged ice/lake->ocean channels the
+        first ocean step reads (no exchange has happened, as today)."""
+        from legoesm.coupler.coupler import (
+            OwnedOceanExchange, initial_handback)
+        cfg = self.coupled_cfg
+        for flag in ("couple_surface_fluxes", "couple_surface_radiation",
+                     "co2_tracer", "carbon_active"):
+            if getattr(cfg, flag):
+                raise ValueError(
+                    f"atm_owns_surface: {flag}=True is not supported; the "
+                    "atmosphere owns the land and open-water fluxes and builds "
+                    "its own surface boundary from the ice/lake handback, and "
+                    "the coupler steps no land tile.")
+        rem = getattr(self, "_grid_remapper", None)
+        if (not getattr(self, "_is_dynamic_ocean", False)
+                and rem is not None and not rem.identity):
+            raise ValueError(
+                "atm_owns_surface with a slab ocean needs the ocean on the "
+                "atmosphere grid: the slab's per-water-area flux is the "
+                "atmosphere's per-cell open-water flux over the cell's water "
+                "fraction, defined only cell by cell.")
+        # The atmosphere weights its exports by ITS land fraction, the
+        # coupler its ice/lake exchange and the slab normalisation by the
+        # tile config's: one partition, or water and energy are split twice.
+        atm_fl = getattr(self._atm, "_f_land", None)
+        tile_fl = np.asarray(self._tile_config.f_land)
+        if atm_fl is None or not np.array_equal(
+                np.asarray(atm_fl).reshape(tile_fl.shape), tile_fl):
+            raise ValueError(
+                "atm_owns_surface: the coupler's land fraction is not the "
+                "atmosphere's (f_land_mode="
+                f"{cfg.f_land_mode!r}); use f_land_mode='analytical' with "
+                "the atmosphere's land mask so both read one partition.")
+        self._surface_handback = initial_handback(
+            self._sfc_state, self._tile_config, ice_cfg, lake_cfg)
+        z = jnp.zeros_like(self._tile_config.f_land)
+        self._owned_to_ocean = OwnedOceanExchange(*([z] * 5))
+        self._atm.get_surface_handback = lambda: self._surface_handback
+        logger.info("  Surface ownership: atmosphere owns land + open water; "
+                    "coupler steps ice + lake and hands them back")
+
+    def _owned_exports_to_ocean(self, x):
+        """A per-atm-cell flux the atmosphere exported, on the OCEAN grid:
+        the conservative a2o remap, then the dry->wet route, so its area
+        integral over the wet ocean equals the exported integral.  Never
+        multiplied by an open-water fraction again (the export carries it)."""
+        from legoesm.coupler.grid_remap import remap_field
+        rem = getattr(self, "_grid_remapper", None)
+        if rem is not None and getattr(rem, "a2o", None) is not None:
+            x = remap_field(x, rem.a2o)
+        route = getattr(self, "_dry_to_wet_map", None)
+        if route is not None:
+            from legoesm.ocean.forcing.runoff_mapper import apply_runoff_map
+            x = apply_runoff_map(x, route)
+        return x
+
+    def _owned_open_water_heat(self, aux):
+        """Net heat into the open water [W/m2 per atm cell, + into the
+        ocean] and its absorbed shortwave, as the atmosphere exported them."""
+        sw = aux["seg_ow_sw_net"]
+        return (sw + aux["seg_ow_lw_net"] - aux["seg_shflx_ow"]
+                - aux["seg_lhflx_ow"]), sw
+
+    def _assemble_owned_ocean_forcing(self):
+        """``(OceanSurfaceForcing, FreshwaterForcing)`` from the window the
+        atmosphere exported: open-water heat, shortwave, stress and
+        evaporation, open-water + ice-fraction precipitation (slab ice keeps
+        no snow, vote K4-V5), land runoff as the river channel, and the
+        previous exchange's ice/lake->ocean channels (one exchange lag, as the
+        blended path)."""
+        from legoesm.ocean.freshwater import FreshwaterForcing
+        from legoesm.ocean.state import OceanSurfaceForcing
+        aux = self._atm._carry_aux
+        to_o = self._owned_exports_to_ocean
+        q_cell, sw_cell = self._owned_open_water_heat(aux)
+        prev = self._owned_to_ocean
+        q_net = to_o(q_cell) - to_o(prev.ocean_heat_extraction)
+        # stress: export is ON the atmosphere = the ocean core's -tau
+        # convention; the ice stress is the force ON the ocean, fed as -stress
+        tau_x = to_o(aux["seg_taux_ow"]) - to_o(prev.ocean_stress_x)
+        tau_y = to_o(aux["seg_tauy_ow"]) - to_o(prev.ocean_stress_y)
+        precip_cell = aux["seg_precip_ow"] + aux["seg_precip_ice"]
+        fw = FreshwaterForcing(
+            precip=to_o(precip_cell),
+            evap=to_o(aux["seg_evap_ow"]),
+            runoff=to_o(aux["seg_runoff_land"]),
+            ice_fw=to_o(prev.ice_lake_freshwater_flux))
+        sf = OceanSurfaceForcing(
+            sw_down=to_o(sw_cell), q_net=q_net, tau_x=tau_x, tau_y=tau_y,
+            salt_flux=to_o(prev.salt_flux), freshwater=None)
+        self._owned_exchange_tripwire(
+            {"heat": (q_cell, to_o(q_cell)), "sw": (sw_cell, sf.sw_down),
+             "evap": (aux["seg_evap_ow"], fw.evap),
+             "precip": (precip_cell, fw.precip),
+             "runoff": (aux["seg_runoff_land"], fw.runoff)})
+        return sf, fw
+
+    def _owned_exchange_tripwire(self, pairs):
+        """Exported (atm grid) minus applied (ocean grid, wet cells) area
+        integral of each atmosphere export, for the segment diagnostic (vote
+        K4-V7: runtime tripwire beside the tests); globally reduced.  JAX
+        scalars, so the assembly stays differentiable; the diagnostic converts
+        them."""
+        from legoesm.diagnostics.water_budget import area_integral
+        a_atm = self._atm.grid.grid_area
+        a_oc = self._ocean_area_w
+        wet = getattr(self, "_ocean_land_mask", None)
+        self._last_owned_exchange_residual = {
+            k: area_integral(x, a_atm) - area_integral(
+                y if wet is None else y * jnp.clip(wet, 0.0, 1.0), a_oc)
+            for k, (x, y) in pairs.items()}
+
+    def _owned_slab_surface_flux(self):
+        """The slab's per-water-area surface heat flux: the atmosphere's
+        per-cell open-water heat over the cell's water fraction (1 - f_land -
+        f_lake, a static mask), zero on cells with no water."""
+        q_cell, _ = self._owned_open_water_heat(self._atm._carry_aux)
+        tc = self._tile_config
+        f_w = 1.0 - tc.f_land - tc.f_lake
+        wet = f_w > 0.0
+        return jnp.where(wet, q_cell / jnp.where(wet, f_w, 1.0), 0.0)
+
+    def _owned_segment(self, day, dt_segment):
+        """One coupling window with the atmosphere owning land and open
+        water: the ocean takes the window's exports, then ice and lake step
+        with the radiation the atmosphere booked for them and hand their
+        fluxes back for the next window."""
+        from legoesm.coupler.coupler import OwnedTileForcing
+        from legoesm.coupler.grid_remap import remap_field, remap_surface_fields
+        win = float(self.coupled_cfg.coupling_dt)
+        if abs(dt_segment - win) > 1.0e-6 * win:
+            raise ValueError(
+                f"atm_owns_surface: segment {dt_segment} s != coupling_dt "
+                f"{win} s; the atmosphere's exports are the means of ONE "
+                "coupling window.")
+        atm_forcing = self._build_atm_forcing(day)
+        self._last_atm_precip = atm_forcing.precip_total
+        q_flux_now = None
+        if getattr(self, "_qflux_forcing", None) is not None:
+            from legoesm.ocean.forcing.qflux import qflux_at_time
+            q_flux_now = qflux_at_time(self._qflux_forcing, day)
+        self._step_ocean(
+            remap_surface_fields(atm_forcing, self._grid_remapper.a2o),
+            dt_segment, q_flux=q_flux_now)
+        sst_o, u_o, v_o = self._ocean_surface_KuvC()
+        o2a = self._grid_remapper.o2a
+        aux = self._atm._carry_aux
+        owned = OwnedTileForcing(*(aux[f"seg_booked_{k}"] for k in (
+            "sw_net_ice", "lw_abs_ice", "sw_net_lake", "lw_abs_lake")))
+        doy, _ = self._atm._calendar_for_radiation(day)
+        (self._sfc_state, self._surface_handback,
+         self._owned_to_ocean) = self._step_surface(
+            self._sfc_state, atm_forcing, self._tile_config,
+            ocean_sst=remap_field(sst_o, o2a),
+            ocean_u_sfc=remap_field(u_o, o2a),
+            ocean_v_sfc=remap_field(v_o, o2a),
+            dt=dt_segment, doy=float(doy), owned_forcing=owned)
+        self._log_coupled_diag(day, dt_segment)
 
     def _segment_hook(self, driver, day, dt_segment):
         """Callback at each segment boundary: step ocean + coupler.
@@ -2501,6 +2710,8 @@ class CoupledESMDriver:
         so that the carbon cycle's forward-Euler integration remains
         stable and fluxes are physically consistent.
         """
+        if self.coupled_cfg.atm_owns_surface:
+            return self._owned_segment(day, dt_segment)
         coupling_dt = self.coupled_cfg.coupling_dt  # default 3600 s
         n_sub = max(1, int(round(dt_segment / coupling_dt)))
         sub_dt = dt_segment / n_sub
@@ -2622,14 +2833,14 @@ class CoupledESMDriver:
         GPU stalls per coupling segment.
         """
         sst = self._ocean_surface_KuvC()[0]
-        has_co2 = self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field')
+        has_co2 = self.coupled_cfg.co2_tracer and hasattr(self, '_co2_mass')
         has_T_sfc = self._last_sfc_response is not None
 
         terms = [area_weighted_mean(sst, self._ocean_area_w),
                  jnp.min(sst), jnp.max(sst)]
-        # co2 uses the same air-mass-weighted mean that forces the radiation.
+        # co2: the box value that forces the radiation.
         if has_co2:
-            terms.append(self._co2_global_mean_kgkg())
+            terms.append(jnp.asarray(self._co2_box_vmr(), sst.dtype))
         if has_T_sfc:
             terms.append(jnp.mean(self._last_sfc_response.T_sfc))
         host = np.asarray(jnp.stack(terms))
@@ -2650,10 +2861,7 @@ class CoupledESMDriver:
         diag["sst_drift_K"] = diag["sst_mean"] - self._sst_mean_init
         idx = 3
         if has_co2:
-            diag["co2_ppmv_mean"] = (
-                float(host[idx])
-                / (constants.M_CO2 / constants.M_air) * 1e6
-            )
+            diag["co2_ppmv_mean"] = float(host[idx]) * 1e6
             idx += 1
         if has_T_sfc:
             diag["T_sfc_mean"] = float(host[idx])
@@ -2692,7 +2900,7 @@ class CoupledESMDriver:
                 _qv = (jnp.zeros_like(_f["T"]) if _qv is None
                        else getattr(_qv, "data", _qv))
             else:
-                _ps, _qv = _st.p_s.data, self._atm.q_v
+                _ps, _qv = _st.p_s.data, self._atm.current_tracer("q_v")
             cwv_now = column_water_vapor(
                 _qv, _ps, jnp.asarray(self._atm.sigma.dsigma),
             )
@@ -2706,6 +2914,9 @@ class CoupledESMDriver:
                     )
                 )
             self._cwv_prev = cwv_now
+        for _k, _v in (getattr(self, "_last_owned_exchange_residual", None)
+                       or {}).items():
+            diag[f"owned_{_k}_residual_global"] = float(_v)
         _rexp = getattr(self, "_last_runoff_export_integral_ranklocal", None)
         _rapp = getattr(self, "_last_runoff_applied_integral_ranklocal", None)
         if _rexp is not None and _rapp is not None:
@@ -2749,9 +2960,9 @@ class CoupledESMDriver:
                     # W_atm = column vapour + any CARRIED condensate tracers
                     # (same (1/g) INT q dp mass weighting); each accessor is
                     # None when that species is not carried (dry/kessler).
-                    w_atm = column_water_vapor(self._atm.q_v, p_s, dsig)
+                    w_atm = column_water_vapor(self._atm.current_tracer("q_v"), p_s, dsig)
                     for _qn in ("q_c", "q_r", "q_i", "q_s", "q_g"):
-                        _qx = getattr(self._atm, _qn, None)
+                        _qx = self._atm.current_tracer(_qn)
                         if _qx is not None:
                             w_atm = w_atm + column_water_vapor(_qx, p_s, dsig)
                     # Whole-cell tile weights on the ATM grid: the ice-tile
@@ -2847,8 +3058,8 @@ class CoupledESMDriver:
 
     @property
     def q_v(self):
-        """Atmospheric specific humidity ``q_v`` (stored outside the dycore state)."""
-        return self._atm.q_v
+        """Atmospheric specific humidity ``q_v`` as the running lane holds it."""
+        return self._atm.current_tracer("q_v")
 
     @property
     def ocean_state(self):
@@ -2899,6 +3110,22 @@ class CoupledESMDriver:
     #       behavior (explicit in load_coupled_checkpoint, not silent).
     _CKPT_VERSION = 3
 
+    def resolved_component_configs(self) -> dict:
+        """The component configs this driver resolved in ``setup()`` (the run
+        manifest's ``config.resolved_physics`` for a coupled run)."""
+        from legoesm.coupler.lake.config import LakeConfig
+        from legoesm.ice.config import SeaIceConfig
+        ocean_model = getattr(self, "_ocean_model", None)
+        return {
+            "ocean": (ocean_model.config if ocean_model is not None
+                      else self.coupled_cfg.ocean_config),
+            "land": getattr(self, "_land_cfg", None),
+            "tile": getattr(self, "_tile_config", None),
+            "coupler": getattr(self, "_coupler_cfg", None),
+            "sea_ice": self._ice_config or SeaIceConfig(),
+            "lake": self._lake_config or LakeConfig(),
+        }
+
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save atmosphere + ocean + surface + CO2 state."""
         self._atm.save_checkpoint(step, day)
@@ -2906,6 +3133,18 @@ class CoupledESMDriver:
         # Save coupled state alongside the atmosphere checkpoint.
         elapsed_day = day - self.atm_config.start_day
         coupled_path = self.output_dir / f"coupled_day_{int(elapsed_day):04d}.npz"
+        arrays = self.coupled_checkpoint_arrays()
+        if arrays:
+            # The atmosphere step this file pairs with: sub-daily saves can
+            # reuse this name under a different atmosphere file name, and the
+            # resume refuses a mismatched pair (P5b).
+            arrays["_atm_step"] = np.asarray(int(step), dtype=np.int64)
+            np.savez(coupled_path, **arrays)
+            logger.info(f"  Coupled checkpoint: {coupled_path.name}")
+
+    def coupled_checkpoint_arrays(self) -> dict:
+        """Every non-atmosphere array a coupled checkpoint saves (also what the
+        coupled run manifest's final digest covers)."""
         arrays = {}
         # Provenance for load-time validation (version + ocean grid shape so a
         # checkpoint from a different ocean_grid / config is caught, not silently
@@ -2932,9 +3171,9 @@ class CoupledESMDriver:
                 arrays["ocean_T_deep"] = np.asarray(
                     self._ocean_state.T_deep.data)
 
-        # CO2 tracer field
-        if hasattr(self, '_co2_field') and self._co2_field is not None:
-            arrays["co2_field"] = np.asarray(self._co2_field)
+        # CO2 well-mixed box (scalar CO2 mass [kg])
+        if hasattr(self, '_co2_mass') and self._co2_mass is not None:
+            arrays["co2_mass"] = np.asarray(self._co2_mass)
 
         # Surface state (land, ice, lake, accumulator, carbon) — flatten
         # the pytree into a dict of named arrays for serialization.
@@ -2951,6 +3190,13 @@ class CoupledESMDriver:
             arrays.update(
                 _flatten_pytree_to_npz(self._last_sfc_response, "sfcresp_"))
 
+        # atm_owns_surface: the last exchange's ice/lake->ocean channels the
+        # next ocean step reads (the handback itself rides the atmosphere's
+        # checkpoint, cpl_win_hb_*).
+        if self._owned_to_ocean is not None:
+            arrays.update(
+                _flatten_pytree_to_npz(self._owned_to_ocean, "owned2ocean_"))
+
         # Flux handback (F38): the segment-mean surface fluxes the NEXT
         # atmosphere segment consumes; without it a resumed run's first segment
         # would fall back to the atmosphere's own bulk fluxes.
@@ -2964,13 +3210,12 @@ class CoupledESMDriver:
         if self._sst_mean_init is not None:
             arrays["sst_mean_init"] = np.asarray(
                 self._sst_mean_init, dtype=np.float64)
-
-        if arrays:
-            np.savez(coupled_path, **arrays)
-            logger.info(f"  Coupled checkpoint: {coupled_path.name}")
+        return arrays
 
     def load_coupled_checkpoint(self, step_day: float,
-                               checkpoint_dir: str | Path | None = None) -> None:
+                               checkpoint_dir: str | Path | None = None,
+                               *, required: bool = False,
+                               atm_step: int | None = None) -> None:
         """Load coupled state saved alongside an atmosphere checkpoint.
 
         Parameters
@@ -2986,10 +3231,24 @@ class CoupledESMDriver:
         base = Path(checkpoint_dir) if checkpoint_dir is not None else self.output_dir
         coupled_path = base / f"coupled_day_{int(step_day):04d}.npz"
         if not coupled_path.exists():
+            if required:
+                # A resume without it would restart ocean/land/ice/CO2 from
+                # their initial state under a continued atmosphere.
+                raise RuntimeError(
+                    f"No coupled checkpoint at {coupled_path} for the "
+                    f"atmosphere checkpoint being resumed; refusing to resume "
+                    f"with freshly initialised ocean/surface state.")
             logger.warning(f"No coupled checkpoint at {coupled_path}")
             return
 
         data = np.load(coupled_path)
+        if (atm_step is not None and "_atm_step" in data.files
+                and int(data["_atm_step"]) != int(atm_step)):
+            raise ValueError(
+                f"Coupled checkpoint {coupled_path.name} was saved with "
+                f"atmosphere step {int(data['_atm_step'])}, but the atmosphere "
+                f"checkpoint being resumed is step {int(atm_step)}: refusing "
+                "a mismatched atmosphere/ocean pair.")
 
         # Validate provenance FIRST — a checkpoint from a different format
         # version or a different ocean grid must NOT be mapped into a mismatched
@@ -3003,6 +3262,18 @@ class CoupledESMDriver:
                 f"Coupled checkpoint {coupled_path.name}: format version "
                 f"{saved_ver} != current {self._CKPT_VERSION}; restore may be "
                 f"unreliable.")
+        # Refuse BEFORE any state is restored, so a refused load mutates nothing.
+        if "co2_field" in data:
+            raise ValueError(
+                f"Coupled checkpoint {coupled_path.name} carries the retired 3-D "
+                "'co2_field' CO2 tracer; atmospheric CO2 is now one global "
+                "well-mixed box ('co2_mass', #1817).  Old CO2 checkpoints are "
+                "refused, not converted: restart this run from scratch.")
+        if self.coupled_cfg.co2_tracer and "co2_mass" not in data:
+            raise ValueError(
+                f"Coupled checkpoint {coupled_path.name} has no 'co2_mass' CO2 "
+                "box value but this run has co2_tracer=True; refusing to "
+                "restart CO2 from its initial value under a continued run.")
 
         # Dynamic 3D ocean (ckpt v2): restore the PROGNOSTIC LatLonCGridOceanState
         # leaves (T,S,u,v,eta,w + any active AB2/SOM/EKE/TKE history) from the
@@ -3086,8 +3357,15 @@ class CoupledESMDriver:
                 ),
             )
 
-        if "co2_field" in data:
-            self._co2_field = jnp.asarray(data["co2_field"])
+        if "co2_mass" in data:
+            self._co2_mass = jnp.asarray(data["co2_mass"], jnp.float64)
+            # Exact continuation (#1817, user decision 2026-10-26): the first
+            # resumed segment's radiation must see the restored box, as the
+            # uninterrupted run's did (its override was set at the end of the
+            # checkpointed segment).  Callers restore the atmosphere first, so
+            # the mole fraction uses the restored p_s.  The air-mass sum is an
+            # MPI collective: every rank must call this load (all do today).
+            self._update_co2_radiation()
 
         # Restore surface state (land, ice, lake, accumulator, carbon) from its
         # flattened pytree leaves — atomic + drift-warned via the same helper
@@ -3145,6 +3423,31 @@ class CoupledESMDriver:
             self._sst_mean_init = float(data["sst_mean_init"])
         # else: pre-v3 checkpoint — keep None: the drift re-references at the
         # restart point (the pre-v3 resume behavior), explicit not silent.
+
+        if self.coupled_cfg.atm_owns_surface:
+            if not any(k.startswith("owned2ocean_") for k in data.files):
+                raise ValueError(
+                    f"Coupled checkpoint {coupled_path.name}: atm_owns_surface "
+                    "but no ice/lake->ocean channels (owned2ocean_*) saved; "
+                    "the first resumed ocean step cannot be reproduced.")
+            from legoesm.coupler.coupler import OwnedOceanExchange
+            # template in the SAVED dtypes (an exchange emits float64 under
+            # x64 whatever the storage policy), so a resume is bitwise
+            _shp = jnp.shape(self._tile_config.f_land)
+            _tmpl = OwnedOceanExchange(*(
+                jnp.zeros(_shp, dtype=jnp.zeros(
+                    (), data[f"owned2ocean_.{k}"].dtype).dtype)
+                if f"owned2ocean_.{k}" in data.files else jnp.zeros(_shp)
+                for k in OwnedOceanExchange._fields))
+            self._owned_to_ocean, _ = _restore_pytree_from_npz(
+                _tmpl, data, "owned2ocean_", coupled_path.name, strict=True)
+            hb = self._atm.surface_handback_from_checkpoint()
+            if hb is None:
+                raise ValueError(
+                    f"Coupled checkpoint {coupled_path.name}: atm_owns_surface "
+                    "but the atmosphere checkpoint carries no ice/lake "
+                    "handback (cpl_win_hb_*); load the atmosphere first.")
+            self._surface_handback = hb
 
         # F38 flux handback: all five keys or none (saved dtype kept).
         _hb = ["handback_" + k for k in _HANDBACK_KEYS]

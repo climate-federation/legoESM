@@ -52,8 +52,8 @@ from legoesm.atmosphere.physics.convection.dca import (
     dca_convection,
 )
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
-from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
-    zhang_mcfarlane_convection,
+from tests._zm_cold_start import (  # ZM at CAM's cold-start pblh = 0
+    zm_cold_start as zhang_mcfarlane_convection,
 )
 from legoesm.atmosphere.physics.convection.emanuel import emanuel_convection
 from legoesm.atmosphere.physics.convection.kain_fritsch import (
@@ -118,8 +118,14 @@ def _stable_dry_column(ncol: int = 2, nlev: int = 24):
 
 
 # Schemes whose parcel needs a level of neutral buoyancy inside the column
-# (KF: cloud-top search; CAM6 ZM: buoyan_dilute tentative-top search).
-_LNB_SCHEMES = ("kain_fritsch", "zhang_mcfarlane")
+# (KF: cloud-top search; CAM6 ZM: buoyan_dilute tentative-top search; SBM =
+# Isca qe_moist_convection: a parcel still buoyant at the model top leaves
+# kLZB = 0 and the oracle writes outside its arrays -- its binary aborts on
+# ``_column()`` -- so the port returns NaN there).
+# Emanuel (CONVECT v4.3c) needs the cap for a different reason: on the uncapped
+# column the moist static energy falls to the model top, and CONVECT rejects a
+# column whose HM minimum is not below level NL-1 (its IHMIN gate).
+_LNB_SCHEMES = ("kain_fritsch", "zhang_mcfarlane", "sbm", "emanuel")
 
 
 def _capped_column(
@@ -194,8 +200,10 @@ def _run_dca_ahmed(T, q, pf, ph, **kw):
 
 
 def _run_kuo(T, q, pf, ph, mc=None, **kw):
+    # resolved ascent for the w_lcl > 0 gate wherever a convergence is given
+    w = None if mc is None else jnp.full_like(mc, 0.01)
     return kuo_convection(
-        T, q, pf, ph, DT, KuoConfig(**kw), moisture_convergence=mc,
+        T, q, pf, ph, DT, KuoConfig(**kw), moisture_convergence=mc, w_grid=w,
     )
 
 
@@ -210,8 +218,12 @@ def _run_zm(T, q, pf, ph, u, v, **kw):
 
 
 def _run_emanuel(T, q, pf, ph, **kw):
+    # Warm start (carried cloud-base mass flux 0.01 kg/m^2/s, the oracle
+    # fixture's warm value): from rest, CONVECT's DTMA closure stays off on
+    # these columns, whose 7.5 K/km sub-cloud layer leaves the lifted parcel
+    # colder than DTMAX at the LCL (oracle cold-start stable exit).
     ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
+    cpp = jnp.zeros((ncol, nlev)).at[:, -1].set(0.01)
     out, _ = emanuel_convection(T, q, pf, ph, cpp, DT, EmanuelConfig(**kw))
     return out
 
@@ -264,7 +276,7 @@ SCHEME_NAMES = [
 
 @pytest.mark.parametrize("name", SCHEME_NAMES)
 def test_tier1_outputs_finite_and_shaped(name):
-    T, q, pf, ph, u, v = _column()
+    T, q, pf, ph, u, v = _capped_column() if name in _LNB_SCHEMES else _column()
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)               # gentle resolved ascent
     mc = jnp.full((ncol, nlev), 2.0e-6)            # +moisture convergence
@@ -297,11 +309,12 @@ def test_tier1_outputs_finite_and_shaped(name):
 # Tier 2 — SIGNS
 # ===========================================================================
 
-@pytest.mark.parametrize("name", SCHEME_NAMES)
+@pytest.mark.parametrize("name", [n for n in SCHEME_NAMES if n != "kuo"])
 def test_tier2_cloud_water_source_non_negative(name):
     """The convective condensate source handed to microphysics must be >= 0
-    for EVERY scheme (documented invariant of ConvectionOutput)."""
-    T, q, pf, ph, u, v = _column()
+    (ConvectionOutput) for every scheme except Kuo, whose source is the
+    oracle's SIGNED rain integrand dT_dt/alpha (#2213 split decision)."""
+    T, q, pf, ph, u, v = _capped_column() if name in _LNB_SCHEMES else _column()
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)
     mc = jnp.full((ncol, nlev), 2.0e-6)
@@ -372,17 +385,16 @@ def test_tier2_mass_flux_schemes_net_dry(name):
     "name",
     # Schemes that claim exact column total-water conservation
     # (vapor removed reappears as cloud water in the column).
-    # NB: emanuel is intentionally EXCLUDED here. With use_genuine_mixing=True
-    # (the default) it is a PRECIPITATING scheme — the net vapor removal is the
-    # reference EP*CLW precipitation sink (emanuel.py:464-498, 534-549), NOT
-    # reinserted as in-column cloud water — so it does not close column total
-    # water in-scheme. Its behavioral contract is gated in the tier1/tier2 lists.
+    # NB: emanuel is intentionally EXCLUDED here: it is a PRECIPITATING scheme
+    # (CONVECT's EP*CLW leaves as the rain source dq_r_conv_dt, not as cloud
+    # water), so vapor + cloud alone does not close; vapor + cloud + rain does
+    # (tests/unit/test_emanuel.py, tests/atmosphere/test_emanuel_convect43c_oracle.py).
     ["sbm", "dca_manabe", "dca_ahmed_neelin"],
 )
 def test_tier3_total_water_conserved(name):
     """∫(dq_v + dq_c) dp/g ≈ 0: every kg of vapor removed reappears as
     in-column cloud water (nothing precipitates in-scheme)."""
-    T, q, pf, ph, u, v = _column()
+    T, q, pf, ph, u, v = _capped_column() if name in _LNB_SCHEMES else _column()
     ncol, nlev = T.shape
     mc = jnp.full((ncol, nlev), 3.0e-6)
     out = _all_schemes(T, q, pf, ph, u, v, None, mc)[name]()
@@ -546,30 +558,22 @@ def test_tier3_kf_vapor_stays_nonnegative(dt, q_scale):
         f"KF column-water residual {water} at dt={dt}, q_scale={q_scale}"
 
 
-def test_tier3_sbm_conserves_water_but_not_instantaneous_mse():
-    """SBM (Betts-Miller) conserves column total water EXACTLY (the cloud-water
-    source is the rescaled column-net drying) but does NOT instantaneously
-    conserve column MSE: it relaxes T→T_ref and q→q_ref INDEPENDENTLY, so
-    c_p dT + L_v dq ≠ 0 per step.  The enthalpy correction (sbm.py Newton
-    iteration) is applied to the REFERENCE PROFILE, not the tendencies — this
-    is the documented BM design, so SBM is excluded from the MSE tier.  We
-    pin both facts here (codex review-1 #5)."""
-    T, q, pf, ph, u, v = _column()
+def test_tier3_sbm_conserves_water_and_mse():
+    """SBM (Isca qe_moist_convection) closes column total water (the cloud-water
+    source is the column precipitation Pq = column drying) AND column moist
+    enthalpy: the deep branch either shifts T_ref uniformly to close it or
+    rescales dq so that Pq = Pt; the shallower branch zeroes both integrals.
+    (The replaced surrogate left a Newton residual of 1-3 % here.)"""
+    T, q, pf, ph, u, v = _capped_column()
     out = _run_sbm(T, q, pf, ph)
     dp = _dp(ph)
-    # total water conserved to machine precision
     net_water = _col_int(out.dq_v_dt + out.dq_c_conv_dt, dp)
     assert jnp.all(jnp.abs(net_water) < 1e-12), \
         f"SBM total-water not conserved: {net_water}"
-    # MSE residual is small but non-zero (~1-3% of column heating) — NOT
-    # conserved instantaneously, as the BM design implies.
     mse = _col_int(C_PD * out.dT_dt + L_V * out.dq_v_dt, dp)
-    heat = _col_int(jnp.abs(C_PD * out.dT_dt), dp) + 1e-9
-    rel = jnp.abs(mse) / heat
-    assert jnp.all(rel > 5e-3), \
-        f"SBM unexpectedly MSE-conserving (rel={rel}); revisit exclusion"
-    assert jnp.all(rel < 0.1), \
-        f"SBM MSE residual implausibly large (rel={rel})"
+    heat = _col_int(jnp.abs(C_PD * out.dT_dt), dp)
+    assert jnp.all(heat > 0.0)
+    assert jnp.all(jnp.abs(mse) <= 1e-10 * heat), f"SBM MSE residual {mse / heat}"
 
 
 def test_tier3_kuo_consumes_supplied_convergence():
@@ -611,14 +615,16 @@ def _scalar_loss(out):
 _GRAD_CASES = {
     "sbm": (7200.0, lambda T, q, pf, ph, u, v, w, mc, x:
             _scalar_loss(_run_sbm(T, q, pf, ph, tau_c=x))),                 # tau_c [s]
-    "dca_manabe": (10.0, lambda T, q, pf, ph, u, v, w, mc, x:
-                   _scalar_loss(_run_dca_manabe(
-                       T, q, pf, ph, instability_blend_sharpness=x))),       # blend sharpness
+    # dca_manabe is not probed: GFDL moist_conv adjusts to a tolerance and has
+    # no rate or slope prefactor; its only float is the CAPE gate, whose
+    # gradient tests/unit/test_cape_trigger_gradient.py covers.
     "dca_ahmed_neelin": (0.6, lambda T, q, pf, ph, u, v, w, mc, x:
                          _scalar_loss(_run_dca_ahmed(T, q, pf, ph, a_mm_per_hr=x))),  # slope a
     "zhang_mcfarlane": (3600.0, lambda T, q, pf, ph, u, v, w, mc, x:
                         _scalar_loss(_run_zm(T, q, pf, ph, u, v, tau=x))),  # tau [s]
-    "emanuel": (1.0, lambda T, q, pf, ph, u, v, w, mc, x:
+    # CBMF closure slope at CONVECT's ALPHA=0.2: at 1.0 the closure's negative
+    # DTMA on this warm-started column drives CBMF to its zero floor.
+    "emanuel": (0.2, lambda T, q, pf, ph, u, v, w, mc, x:
                 _scalar_loss(_run_emanuel(T, q, pf, ph, alpha_closure=x))),   # CBMF closure slope
     "kain_fritsch": (1800.0, lambda T, q, pf, ph, u, v, w, mc, x:
                      _scalar_loss(_run_kf(T, q, pf, ph, w=w,
@@ -740,7 +746,7 @@ def test_tier4_grad_through_state_finite(name):
 
 @pytest.mark.parametrize("name", SCHEME_NAMES)
 def test_tier4_jit_matches_eager(name):
-    T, q, pf, ph, u, v = _column()
+    T, q, pf, ph, u, v = _capped_column() if name in _LNB_SCHEMES else _column()
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)
     mc = jnp.full((ncol, nlev), 3.0e-6)

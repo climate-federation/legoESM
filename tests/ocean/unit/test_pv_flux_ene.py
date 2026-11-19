@@ -29,6 +29,7 @@ import jax.numpy as jnp
 
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     pv_flux_ene,
+    pv_flux_ens,
     pv_flux_al81_partial_cell,
     curl_vertex_cgrid,
     nemo_vor_ene_vorticity_cgrid,
@@ -111,6 +112,318 @@ def test_ene_exact_2pt_form():
         + q[j, i + 1, 0] * (uN[j - 1, i + 1, 0] + uN[j, i + 1, 0])
     )
     assert np.isclose(dv[j, i, 0], exp_dv, rtol=1e-12, atol=1e-12), (dv[j, i, 0], exp_dv)
+
+
+def test_ens_exact_total_vorticity_form_and_relative_only_mask():
+    """Compiled vor_ens: mean(q) times mean(transport), with -V sign."""
+    n_lat, n_lon, nlev = 6, 8, 1
+    rng = np.random.default_rng(21)
+    u = jnp.asarray(rng.standard_normal((n_lat, n_lon + 1, nlev)))
+    v = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon, nlev)))
+    zeta = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon + 1, nlev)))
+    f_vtx = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon + 1)))
+    relmask = np.ones((n_lat + 1, n_lon + 1), dtype=np.float64)
+    relmask[2, 3] = 0.0
+    ones_vtx = jnp.ones_like(zeta)
+    ones_u = jnp.ones_like(u)
+    ones_v = jnp.ones_like(v)
+
+    du, dv = pv_flux_ens(
+        zeta, ones_vtx, ones_v, v, ones_u, u, ones_u, ones_v,
+        jnp.asarray(relmask), ln_dynvor_msk=True,
+        f_vtx=f_vtx,
+    )
+    du, dv = np.asarray(du), np.asarray(dv)
+    f_np = np.asarray(f_vtx)[..., None]
+    # Independent literal port of dynvor.f90:641-646: form CRV first, then
+    # subtract f, mask only that recovered relative part, and add f again.
+    total = np.add(f_np, np.asarray(zeta))
+    relative = np.subtract(total, f_np)
+    q = np.add(np.multiply(relative, relmask[..., None]), f_np)
+    u_np, v_np = np.asarray(u), np.asarray(v)
+
+    j, i = 2, 3
+    expected_u = 0.125 * (q[j, i, 0] + q[j + 1, i, 0]) * (
+        v_np[j, i - 1, 0] + v_np[j, i, 0]
+        + v_np[j + 1, i - 1, 0] + v_np[j + 1, i, 0]
+    )
+    assert du[j, i, 0] == expected_u
+
+    j, i = 2, 2
+    expected_v = -0.125 * (q[j, i, 0] + q[j, i + 1, 0]) * (
+        u_np[j - 1, i, 0] + u_np[j, i, 0]
+        + u_np[j - 1, i + 1, 0] + u_np[j, i + 1, 0]
+    )
+    assert dv[j, i, 0] == expected_v
+    # The zero relative mask must retain the planetary term at that vertex.
+    assert q[2, 3, 0] == np.asarray(f_vtx)[2, 3]
+    unmasked_u, unmasked_v = pv_flux_ens(
+        zeta, ones_vtx, ones_v, v, ones_u, u, ones_u, ones_v,
+        jnp.asarray(relmask), ln_dynvor_msk=False, f_vtx=f_vtx)
+    assert any(not np.array_equal(masked, np.asarray(unmasked))
+               for masked, unmasked in zip((du, dv), (unmasked_u, unmasked_v),
+                                           strict=True))
+
+
+def test_ens_is_jit_and_autodiff_safe_and_differs_from_ene():
+    state = _build_test_state(n_lat=8, n_lon=12, partial_cells=False, seed=23)
+    from legoesm.grids.latlon import ensure_geometry
+    grid = ensure_geometry(state["grid"])
+    f_vtx = jnp.ones(state["h_vtx"].shape[:2]) * 1.0e-4
+    relmask = state["vtx_mask"]
+
+    def operator(u):
+        zeta = nemo_vor_ene_vorticity_cgrid(u, state["v"], grid)
+        return pv_flux_ens(
+            zeta, state["h_vtx"], state["h_v"], state["v"],
+            state["h_u"], u, state["u_mask_3d"], state["v_mask_3d"],
+            state["vtx_mask"], ln_dynvor_msk=True,
+            f_vtx=f_vtx,
+        )
+
+    eager = operator(state["u"])
+    compiled = jax.jit(operator)(state["u"])
+    for left, right in zip(eager, compiled, strict=True):
+        assert np.allclose(
+            np.asarray(left), np.asarray(right), rtol=1.0e-14, atol=0.0)
+
+    def loss(u):
+        du, dv = operator(u)
+        return jnp.sum(du * du) + jnp.sum(dv * dv)
+
+    grad = jax.jit(jax.grad(loss))(state["u"])
+    assert np.all(np.isfinite(np.asarray(grad)))
+
+    zeta = curl_vertex_cgrid(state["u"], state["v"], state["grid"])
+    ene = pv_flux_ene(
+        zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
+        state["u"], state["u_mask_3d"], state["v_mask_3d"],
+        state["vtx_mask"], f_vtx=f_vtx,
+    )
+    assert any(not np.array_equal(np.asarray(a), np.asarray(b))
+               for a, b in zip(eager, ene, strict=True))
+
+
+def test_ens_total_production_dispatch_matches_direct_operator():
+    """The shared dynamics dispatcher selects ENS, not an ENE/EEN alias."""
+    from legoesm.grids.latlon import ensure_geometry
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+
+    state = _build_test_state(n_lat=8, n_lon=12, partial_cells=False, seed=29)
+    grid = ensure_geometry(state["grid"])
+    f_vtx = jnp.full(state["h_vtx"].shape[:2], 1.0e-4)
+    reciprocals = (1.0 / grid.dx_u, 1.0 / grid.dy_v)
+    zeros_u, zeros_v = jnp.zeros_like(state["u"]), jnp.zeros_like(state["v"])
+    _, _, dispatched_u, dispatched_v = _bc_pv_flux(
+        zeros_u, zeros_v, state["u"], state["v"],
+        state["h_u"], state["h_v"], state["h_T"],
+        state["u_mask_3d"], state["v_mask_3d"], None, grid,
+        "vector_invariant", vertex_mask=state["vtx_mask"],
+        vorticity_scheme="ens_total", een_q_boundary="nemo_live",
+        ln_dynvor_msk=True,
+        een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
+        dz_ref=jnp.asarray([4000.0]),
+        h_vtx_override=state["h_vtx"], f_vtx_override=f_vtx,
+        metric_reciprocals=reciprocals,
+    )
+    zeta = nemo_vor_ene_vorticity_cgrid(state["u"], state["v"], grid)
+    direct_u, direct_v = pv_flux_ens(
+        zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
+        state["u"], state["u_mask_3d"], state["v_mask_3d"],
+        state["vtx_mask"], ln_dynvor_msk=True, f_vtx=f_vtx,
+        q_boundary="nemo_live",
+        metric_widths=(grid.dx_u, grid.dx_v, grid.dy_u, grid.dy_v),
+        metric_reciprocals=reciprocals,
+    )
+    np.testing.assert_array_equal(np.asarray(dispatched_u), np.asarray(direct_u))
+    np.testing.assert_array_equal(np.asarray(dispatched_v), np.asarray(direct_v))
+
+
+def test_ens_requires_explicit_boolean_mask_switch_before_array_use():
+    """The production ENS dispatcher has no implicit mask selection."""
+    import pytest
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+
+    for absent_or_unknown in (None, "true", 1):
+        with pytest.raises(ValueError, match="explicit boolean ln_dynvor_msk"):
+            _bc_pv_flux(
+                None, None, None, None, None, None, None, None, None,
+                None, None, None, vorticity_scheme="ens_total",
+                ln_dynvor_msk=absent_or_unknown,
+            )
+
+
+def test_mask_switch_refused_outside_ens():
+    """ln_dynvor_msk is consumed only by ens_total; elsewhere it would be inert."""
+    import pytest
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+
+    for scheme in ("al81", "ene", "ene_total", "een_total", "een_planetary"):
+        with pytest.raises(ValueError, match="only for ens_total"):
+            _bc_pv_flux(
+                None, None, None, None, None, None, None, None, None,
+                None, None, None, vorticity_scheme=scheme,
+                ln_dynvor_msk=True,
+            )
+
+
+def test_ens_direct_thickness_division_bypasses_ene_floor():
+    """Compiled dynvor.f90:659-660 divides by e3f without a floor."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+
+    swg_mask_switch = (
+        build_swg_card().recipe.model_config.vorticity_scheme.ln_dynvor_msk)
+    assert swg_mask_switch is True
+    n_lat, n_lon, nlev = 3, 4, 1
+    tiny = np.float64(1.0e-20)
+    zeta = jnp.zeros((n_lat + 1, n_lon + 1, nlev), dtype=jnp.float64)
+    f_vtx = jnp.ones((n_lat + 1, n_lon + 1), dtype=jnp.float64)
+    h_vtx = jnp.full_like(zeta, tiny)
+    u = jnp.ones((n_lat, n_lon + 1, nlev), dtype=jnp.float64)
+    v = jnp.ones((n_lat + 1, n_lon, nlev), dtype=jnp.float64)
+    ones_u, ones_v = jnp.ones_like(u), jnp.ones_like(v)
+    vtx_mask = jnp.ones((n_lat + 1, n_lon + 1), dtype=jnp.float64)
+
+    ens = pv_flux_ens(
+        zeta, h_vtx, ones_v, v, ones_u, u, ones_u, ones_v, vtx_mask,
+        ln_dynvor_msk=swg_mask_switch, f_vtx=f_vtx,
+        q_boundary="nemo_live")
+    guarded = pv_flux_ene(
+        zeta, h_vtx, ones_v, v, ones_u, u, ones_u, ones_v, vtx_mask,
+        f_vtx=f_vtx, q_boundary="nemo_live")
+    assert all(np.all(np.isfinite(np.asarray(a))) for a in ens)
+    assert any(not np.array_equal(np.asarray(a), np.asarray(b))
+               for a, b in zip(ens, guarded, strict=True))
+    # The 1e-10 historical ENE denominator versus the 1e-20 direct NEMO
+    # denominator yields exactly the planted ten-order response separation.
+    assert np.max(np.abs(np.asarray(ens[0]))) > 1.0e9 * np.max(
+        np.abs(np.asarray(guarded[0])))
+
+
+def test_ene_default_total_vorticity_path_is_byte_identical_with_override_seam():
+    """Rule 12: the new ENS-only operand seam cannot move an ENE caller."""
+    state = _build_test_state(n_lat=8, n_lon=12, partial_cells=False, seed=31)
+    f_vtx = jnp.full(state["h_vtx"].shape[:2], 1.0e-4)
+    zeta = curl_vertex_cgrid(state["u"], state["v"], state["grid"])
+    args = (
+        zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
+        state["u"], state["u_mask_3d"], state["v_mask_3d"],
+        state["vtx_mask"],
+    )
+    historical = pv_flux_ene(*args, f_vtx=f_vtx)
+    explicit = pv_flux_ene(
+        *args, f_vtx=f_vtx,
+        total_vorticity_override=zeta + f_vtx[..., jnp.newaxis])
+    for left, right in zip(historical, explicit, strict=True):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+
+def test_ene_formed_q_override_is_one_variable_and_active():
+    """Round 17 replaces q alone and retains the live transport/stencil."""
+    state = _build_test_state(n_lat=8, n_lon=12, partial_cells=False, seed=37)
+    f_vtx = jnp.full(state["h_vtx"].shape[:2], 1.0e-4)
+    zeta = curl_vertex_cgrid(state["u"], state["v"], state["grid"])
+    args = (
+        zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
+        state["u"], state["u_mask_3d"], state["v_mask_3d"],
+        state["vtx_mask"],
+    )
+    du, dv, (q, live_fu, live_fv) = pv_flux_ene(
+        *args, f_vtx=f_vtx, q_boundary="nemo_live", return_operands=True)
+    same_du, same_dv, (same_q, same_fu, same_fv) = pv_flux_ene(
+        *args, f_vtx=f_vtx, q_boundary="nemo_live", return_operands=True,
+        potential_vorticity_override=q)
+    for left, right in ((du, same_du), (dv, same_dv), (q, same_q),
+                        (live_fu, same_fu), (live_fv, same_fv)):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+    planted_q = q.at[3, 4, 0].add(1.0)
+    planted_du, planted_dv, (_, planted_fu, planted_fv) = pv_flux_ene(
+        *args, f_vtx=f_vtx, q_boundary="nemo_live", return_operands=True,
+        potential_vorticity_override=planted_q)
+    assert (not np.array_equal(np.asarray(dv), np.asarray(planted_dv))
+            or not np.array_equal(np.asarray(du), np.asarray(planted_du)))
+    np.testing.assert_array_equal(np.asarray(live_fu), np.asarray(planted_fu))
+    np.testing.assert_array_equal(np.asarray(live_fv), np.asarray(planted_fv))
+
+
+def test_ene_formed_q_override_refuses_ambiguous_or_wrong_shape_input():
+    """A malformed causal arm RAISES instead of scoring another boundary."""
+    import pytest
+
+    state = _build_test_state(n_lat=4, n_lon=6, partial_cells=False, seed=41)
+    f_vtx = jnp.full(state["h_vtx"].shape[:2], 1.0e-4)
+    zeta = curl_vertex_cgrid(state["u"], state["v"], state["grid"])
+    args = (
+        zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
+        state["u"], state["u_mask_3d"], state["v_mask_3d"],
+        state["vtx_mask"],
+    )
+    with pytest.raises(ValueError, match="cannot be selected together"):
+        pv_flux_ene(
+            *args, f_vtx=f_vtx, q_boundary="nemo_live",
+            total_vorticity_override=zeta + f_vtx[..., None],
+            potential_vorticity_override=zeta)
+    with pytest.raises(ValueError, match="shape differs"):
+        pv_flux_ene(
+            *args, f_vtx=f_vtx, q_boundary="nemo_live",
+            potential_vorticity_override=zeta[:-1])
+
+
+def test_ene_metric_transport_override_is_directional_and_active():
+    """Round 18 replaces formed transports without rebuilding the stencil."""
+    state = _build_test_state(n_lat=8, n_lon=12, partial_cells=False, seed=43)
+    f_vtx = jnp.full(state["h_vtx"].shape[:2], 1.0e-4)
+    zeta = curl_vertex_cgrid(state["u"], state["v"], state["grid"])
+    args = (
+        zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
+        state["u"], state["u_mask_3d"], state["v_mask_3d"],
+        state["vtx_mask"],
+    )
+    du, dv, (q, live_fu, live_fv) = pv_flux_ene(
+        *args, f_vtx=f_vtx, q_boundary="nemo_live", return_operands=True)
+    same_du, same_dv, same_operands = pv_flux_ene(
+        *args, f_vtx=f_vtx, q_boundary="nemo_live", return_operands=True,
+        metric_transport_override=(live_fu, live_fv))
+    for left, right in zip(
+            (du, dv, q, live_fu, live_fv),
+            (same_du, same_dv, *same_operands), strict=True):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+    planted_fu = live_fu.at[3, 4, 0].add(1.0)
+    fu_du, fu_dv, (_, got_fu, got_fv) = pv_flux_ene(
+        *args, f_vtx=f_vtx, q_boundary="nemo_live", return_operands=True,
+        metric_transport_override=(planted_fu, None))
+    np.testing.assert_array_equal(np.asarray(du), np.asarray(fu_du))
+    assert not np.array_equal(np.asarray(dv), np.asarray(fu_dv))
+    np.testing.assert_array_equal(np.asarray(planted_fu), np.asarray(got_fu))
+    np.testing.assert_array_equal(np.asarray(live_fv), np.asarray(got_fv))
+
+    planted_fv = live_fv.at[3, 4, 0].add(1.0)
+    fv_du, fv_dv = pv_flux_ene(
+        *args, f_vtx=f_vtx, q_boundary="nemo_live",
+        metric_transport_override=(None, planted_fv))
+    assert not np.array_equal(np.asarray(du), np.asarray(fv_du))
+    np.testing.assert_array_equal(np.asarray(dv), np.asarray(fv_dv))
+
+
+def test_ene_metric_transport_override_refuses_malformed_inputs():
+    import pytest
+
+    state = _build_test_state(n_lat=4, n_lon=6, partial_cells=False, seed=47)
+    f_vtx = jnp.full(state["h_vtx"].shape[:2], 1.0e-4)
+    zeta = curl_vertex_cgrid(state["u"], state["v"], state["grid"])
+    args = (
+        zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
+        state["u"], state["u_mask_3d"], state["v_mask_3d"],
+        state["vtx_mask"],
+    )
+    with pytest.raises(ValueError, match="must be a .* tuple"):
+        pv_flux_ene(*args, f_vtx=f_vtx,
+                    metric_transport_override=(state["u"],))
+    with pytest.raises(ValueError, match="F_u override shape differs"):
+        pv_flux_ene(*args, f_vtx=f_vtx,
+                    metric_transport_override=(state["u"][..., :-1], None))
 
 
 def test_ene_energy_conservation_flat_bottom():
@@ -205,3 +518,29 @@ def test_bc_pv_flux_rejects_unknown_vorticity_scheme():
             None, None, None, None, None, None, None, None, None, None, None, None,
             vorticity_scheme="bogus",
         )
+
+
+def test_nemo_curl_top_f_row_reads_u_fold_halo():
+    """vor_een np_CRV: the top F row reads NEMO's U fold halo."""
+    from legoesm.grids.tripole import create_synthetic_tripole_pivot
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        nemo_vor_ene_vorticity_cgrid,
+    )
+
+    grid = create_synthetic_tripole_pivot(8, 12)
+    n = grid.n_lon
+    rng = np.random.default_rng(3)
+    u = rng.standard_normal((grid.n_lat, n + 1))
+    u[:, 0] = u[:, -1]
+    v = np.zeros((grid.n_lat + 1, n))
+    off = np.asarray(nemo_vor_ene_vorticity_cgrid(
+        jnp.asarray(u), jnp.asarray(v), grid))
+    on = np.asarray(nemo_vor_ene_vorticity_cgrid(
+        jnp.asarray(u), jnp.asarray(v), grid, north_fold_u=True))
+    np.testing.assert_array_equal(on[:-1], off[:-1])
+    zu = np.asarray(grid.dx_u) * u
+    halo_east = -zu[-2, 1:][n - 1 - np.arange(n)]
+    halo = np.concatenate([halo_east[-1:], halo_east])
+    want = (zu[-1] - halo) / np.asarray(grid.area_q)[-1]
+    np.testing.assert_allclose(on[-1], want, rtol=1e-14, atol=0.0)
+    assert not np.allclose(off[-1], want, rtol=1e-14, atol=0.0)

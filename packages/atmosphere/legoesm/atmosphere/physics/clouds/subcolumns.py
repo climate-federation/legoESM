@@ -1,4 +1,4 @@
-"""Deterministic maximum-random-overlap subcolumns for cloud radiation.
+"""Maximum-random-overlap subcolumns for cloud radiation (CAM McICA generator).
 
 WHY THIS EXISTS.  The RRTMGP path carries no McICA, subcolumn or overlap
 machinery: every layer's GRID-MEAN water path is handed to a single
@@ -14,16 +14,38 @@ Monte-Carlo independent-column reference on a real model state (prodA day 310,
 i.e. ~30% of the cloud albedo, and it moves the SW and LW errors toward
 observations together.
 
-WHY DETERMINISTIC.  Classical McICA draws ``u ~ U(0,1)`` per (subcolumn,
-layer).  That injects sampling noise into every radiation call and needs a PRNG
-threaded through the hot loop -- both hostile to a differentiable model.  Here
-``u`` is the stratified set ``(i+0.5)/n_sub``, independently permuted per layer
-from a table fixed at import.  Each layer keeps the exact uniform marginal, the
-layers stay decorrelated, and the result is reproducible and jax.grad-safe.
-Validated to reproduce the Monte-Carlo answer to +0.0026 in cloud albedo and
-+0.38 W/m2 in OLR.
+ORACLE.  :func:`generate_subcolumns` is CAM's maximum-random generator,
+``generate_stochastic_clouds_sw`` case(2) in
+``rrtmg/aer_src/mcica_subcol_gen_sw.f90`` (cam_cesm2_1_rel_60, a03b84b7):
+the recursion keeps the layer above's CDF value when that subcolumn was cloudy
+(strict ``>``, line 365) and rescales the uniform into the clear part
+otherwise, and a cell is cloudy when ``CDF >= 1 - cf`` (``>=``, line 398).
+Given the same uniforms the masks are identical to the running CAM code
+(``tests/atmosphere/test_max_random_subcolumns_oracle.py``).
 
-WHY EIGHT.  Measured subcolumn-count sweep against the same reference:
+UNIFORMS.  CAM draws fresh KISS uniforms per (subcolumn, column, layer),
+seeded from the fractional parts of the bottom four layer pressures, so
+columns with different pressure digits sample different subcolumns.  Here the uniforms are the
+stratified set ``(i+0.5)/n_sub``, independently permuted per layer from a
+table fixed at import, offset per column and layer by a shift seeded from the
+fractional part of the bottom-layer pressure (:func:`cam_seed_shift`; the
+same uniforms the ``mcica`` path uses; CAM seeds from four bottom pressures).  Over
+columns whose shifts spread over [0, 1), a layer with ``cf < 1/n_sub`` is
+cloudy in some columns and its cloud is kept on average to within the
+shift's non-uniformity: layer ``k`` offsets by
+``frac((1 + k*sqrt2)*shift + k*golden)``, which is not exactly uniform (for
+an isolated cf = 0.01 in the second layer the mean cloudy fraction over
+uniform shifts is 0.00984).  Columns with the same bottom
+pressure (e.g. an idealized uniform state, or integer pressures, which
+give a zero shift) share one set of subcolumns.  There is
+no PRNG state in the hot loop, and the result is reproducible.  Without the
+per-column shift (``shift=None``) every column would reuse ONE table and a
+layer with ``0 < cf < 1/(2 n_sub)`` could never be cloudy unless cloud is
+carried from the layer above (tier-2 oracle audit: -8.9 W/m2 TOA reflected
+SW at ``n_sub = 8``).
+
+WHY EIGHT (measured with the earlier, unshifted generator).  Subcolumn-count
+sweep against the same reference:
 
     n_sub =  4   cloud albedo diff -0.0224   OLR diff +1.90 W/m2
     n_sub =  8   cloud albedo diff -0.0030   OLR diff +0.43 W/m2
@@ -42,12 +64,15 @@ from __future__ import annotations
 
 import functools
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.core.smooth import smoothstep_quintic
+
 __physics_contract__ = {
     "summary": (
-        "Deterministic maximum-random-overlap subcolumn generator for cloud "
+        "CAM McICA maximum-random-overlap subcolumn generator for cloud "
         "radiation: turns a layer cloud-fraction profile into n_sub binary "
         "cloud masks and the matching in-cloud water paths, so a partly "
         "cloudy sky is solved as independent columns instead of one "
@@ -75,8 +100,10 @@ __physics_contract__ = {
     "differentiable": True,
     "reference": (
         "Raisanen, Barker, Khairoutdinov, Li & Randall (2004, QJRMS 130) "
-        "maximum-random overlap subcolumn generator; deterministic stratified "
-        "variant in place of the McICA random draw"
+        "maximum-random overlap subcolumn generator, as CAM implements it "
+        "(cam_cesm2_1_rel_60 rrtmg/aer_src/mcica_subcol_gen_sw.f90 case(2)); "
+        "stratified uniforms with a CAM-seeded per-column shift in place of "
+        "the KISS draw"
     ),
     "idealized_test": (
         "tests/unit/test_cloud_subcolumns.py; cf=0 -> all clear, cf=1 -> all "
@@ -92,17 +119,29 @@ _CF_FLOOR = 1.0e-3             # matches clouds.cloud_fraction._INHOM_CF_FLOOR
 # Per-layer McICA shift: irrational slope and step decorrelate layer offsets.
 _SHIFT_LAYER_SLOPE = 2.0 ** 0.5
 _SHIFT_LAYER_STEP = (5.0 ** 0.5 - 1.0) / 2.0
+# ecRad inhomogeneity uniforms (rand_inhom1, rand_inhom2): own permutation
+# tables plus a per-(column, layer) offset hashed in uint32 from the column
+# shift, so a cloudy cell's draw is independent of the mask draw, each layer's
+# offset is uniform, and eager and jit give the same bits within a dtype
+# (float offsets of large arguments wrapped differently under jit in fp32).
+_INHOM_PERM_SEEDS = (_PERM_SEED + 1, _PERM_SEED + 2)
+_HASH_SHIFT_BITS = 24
+_HASH_WORD_BITS = 32
+_HASH_GOLDEN = 0x9E3779B9          # splitmix / lowbias32 constants
+_HASH_LAYER = 0x85EBCA6B
+_HASH_MUL1 = 0x7FEB352D
+_HASH_MUL2 = 0x846CA68B
 
 
 @functools.lru_cache(maxsize=32)
-def _stratified_table_cached(n_sub: int, nlev: int) -> np.ndarray:
+def _stratified_table_cached(n_sub: int, nlev: int, seed: int = _PERM_SEED) -> np.ndarray:
     """``(n_sub, nlev)`` stratified uniforms, independently permuted per layer.
 
     Cached on the STATIC ``(n_sub, nlev)`` pair, so it is built once per shape
     and enters the traced graph as a constant -- no PRNG state in the hot loop.
     """
     base = (np.arange(n_sub, dtype=np.float64) + 0.5) / n_sub
-    rng = np.random.default_rng(_PERM_SEED)
+    rng = np.random.default_rng(seed)
     tab = np.stack([base[rng.permutation(n_sub)] for _ in range(nlev)], axis=1)
     # The cache hands the SAME object back on every hit, so make it read-only:
     # a caller mutating it would silently corrupt every later radiation call.
@@ -110,7 +149,7 @@ def _stratified_table_cached(n_sub: int, nlev: int) -> np.ndarray:
     return tab
 
 
-def _stratified_table(n_sub: int, nlev: int) -> np.ndarray:
+def _stratified_table(n_sub: int, nlev: int, seed: int = _PERM_SEED) -> np.ndarray:
     """Fresh copy of the cached table.
 
     The cache would otherwise hand the SAME object to every caller, and a
@@ -118,12 +157,33 @@ def _stratified_table(n_sub: int, nlev: int) -> np.ndarray:
     change every later radiation call. The table is n_sub x nlev floats, so
     copying costs nothing next to the solve it feeds.
     """
-    return np.array(_stratified_table_cached(int(n_sub), int(nlev)), copy=True)
+    return np.array(_stratified_table_cached(int(n_sub), int(nlev), int(seed)), copy=True)
+
+
+def _shifted_uniforms(n_sub, nlev, shift, dtype, seed=_PERM_SEED):
+    """``(n_sub, ncol or 1, nlev)`` stratified uniforms, per-layer column shift."""
+    u = jnp.asarray(_stratified_table(int(n_sub), int(nlev), seed), dtype=dtype)
+    u = u[:, None, :]                                   # (n_sub, 1, nlev)
+    if shift is not None:
+        if n_sub == 1:
+            # One subcolumn has no stratification to even out frac(shift*slope),
+            # which is not uniform for a uniform shift (measured cover bias
+            # 0.026 at cf 0.3, 5 SE): hash (shift, layer) instead.
+            off = _hashed_layer_offsets(shift, nlev, dtype, seed)
+        else:
+            k = jnp.arange(nlev, dtype=dtype)
+            off = (jnp.asarray(shift, dtype=dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
+                   + k * _SHIFT_LAYER_STEP)              # (ncol, nlev)
+        u = jnp.mod(u + off[None, :, :], 1.0)
+    return u
 
 
 def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
-                        shift=None):
-    """Boolean cloud mask ``(n_sub, ncol, nlev)`` under maximum-random overlap.
+                        shift=None, *, width):
+    """Cloud mask ``(n_sub, ncol, nlev)`` under maximum-random overlap.
+
+    ``width`` (``CloudConfig.cloud_subcolumn_mask_width``): 0 returns CAM's
+    boolean mask; > 0 the smooth weights of :func:`max_random_mask`.
 
     Descending from the model top (index 0), a subcolumn already cloudy in the
     layer above keeps its CDF value, so adjacent cloudy layers overlap
@@ -147,25 +207,148 @@ def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
         Plain arithmetic, so CPU and GPU give the same masks.
     """
     cf = jnp.clip(jnp.asarray(cloud_fraction), 0.0, 1.0)
+    return max_random_mask(_shifted_uniforms(n_sub, cf.shape[1], shift, cf.dtype), cf,
+                           width=width)
+
+
+def _lowbias32(h):
+    u32 = jnp.uint32
+    h = h ^ (h >> u32(16))
+    h = h * u32(_HASH_MUL1)
+    h = h ^ (h >> u32(15))
+    h = h * u32(_HASH_MUL2)
+    return h ^ (h >> u32(16))
+
+
+def _hashed_layer_offsets(shift, nlev, dtype, seed):
+    """``(ncol, nlev)`` offsets in [0, 1), uniform per layer for a uniform
+    ``shift``: uint32 lowbias32 hash of (column shift, seed, layer), so eager
+    and jit give the same bits within a dtype."""
+    u32 = jnp.uint32
+    q = (jnp.asarray(shift, dtype) * float(1 << _HASH_SHIFT_BITS)).astype(u32)[:, None]
+    k = jnp.arange(nlev, dtype=u32)[None, :]
+    h = _lowbias32(q ^ (u32(seed) * u32(_HASH_GOLDEN) + k * u32(_HASH_LAYER)))
+    return (h >> u32(_HASH_WORD_BITS - _HASH_SHIFT_BITS)).astype(dtype) * (
+        1.0 / (1 << _HASH_SHIFT_BITS))
+
+
+def inhomogeneity_uniforms(n_sub, nlev, shift, dtype):
+    """``(rand_inhom1, rand_inhom2)``, each ``(n_sub, ncol or 1, nlev)``.
+
+    Stratified permutation table of the stream, plus a uint32-hashed offset of
+    ``(column shift, stream, layer)``.  Same bits eager and under jit for a
+    given dtype; the shift's own resolution (fp32: ~1/128) still bounds how
+    many distinct columns there are, as for the mask.
+    """
+    s = jnp.zeros((1,), dtype) if shift is None else shift
+    out = []
+    for seed in _INHOM_PERM_SEEDS:
+        off = _hashed_layer_offsets(s, nlev, dtype, seed)
+        table = jnp.asarray(_stratified_table(int(n_sub), int(nlev), seed), dtype=dtype)
+        out.append(jnp.mod(table[:, None, :] + off[None], 1.0))
+    return tuple(out)
+
+
+def ecrad_inhomogeneity_scaling(mask, fractional_std, lat, p_half, T_half, shift=None):
+    """ecRad McICA in-cloud optical-depth scaling per subcolumn cell.
+
+    ecRad 49r1 radiation_cloud_generator lines 187-194 and 350-363 applied to
+    the given ``mask`` ``(n_sub, ncol, nlev)`` (index 0 = model top): within a
+    contiguous cloud a cell repeats the gamma-PDF draw of the cell above with
+    probability ``op**(1/ratio)``, where ``op`` is ecRad's set_overlap_param
+    with the IFS decorrelation length 0.75 + 2.149 cos^2(lat) km and ratio 0.5
+    (cloud_overlap_decorr_len, NDECOLAT=2), R/g from legoesm constants.
+    Returns ``mask * x`` with ``x`` drawn from the gamma table (mean 1) at
+    ``fractional_std``; ``lat`` [rad] ``(ncol,)``, ``p_half``/``T_half``
+    ``(ncol, nlev+1)`` top first.  The draw is a sampling device: ``op`` only
+    enters an exact switch, so it carries no gradient.
+    """
+    from legoesm import constants
+    from legoesm.atmosphere.physics.radiation.ecrad_ifs.ifs_interface import (
+        cloud_overlap_decorr_len, overlap_param)
+    from legoesm.atmosphere.physics.radiation.ecrad_ifs.mcica_generator import (
+        inhomogeneity_od_scaling)
+    mask = jnp.asarray(mask)
+    n_sub, _, nlev = mask.shape
+    if nlev < 2:
+        raise ValueError(f"ecrad_inhomogeneity_scaling needs >= 2 layers, got {nlev}")
+    dtype = mask.dtype if jnp.issubdtype(mask.dtype, jnp.floating) else jnp.asarray(p_half).dtype
+    decorr_km, ratio = cloud_overlap_decorr_len(jnp.sin(jnp.asarray(lat)))
+    op = overlap_param(jnp.asarray(p_half), jnp.asarray(T_half), decorr_km * 1000.0,
+                       r_over_g=constants.R_d / constants.g)          # (ncol, nlev-1)
+    op_inhom_above = jnp.concatenate([jnp.ones_like(op[:, :1]), op ** (1.0 / ratio)], axis=1)
+    r1, r2 = inhomogeneity_uniforms(n_sub, nlev, shift, dtype)
+    repeat = (r2 < op_inhom_above[None]).astype(dtype)
+    return inhomogeneity_od_scaling(mask.astype(dtype), repeat, jnp.asarray(fractional_std, dtype),
+                                    r1)
+
+
+def max_random_mask(u, cloud_fraction, *, width):
+    """CAM case(2) maximum-random recursion on given uniforms.
+
+    ``u`` is ``(n_sub, ncol or 1, nlev)`` uniforms in [0, 1) (CAM's ``CDF``
+    before the recursion), ``cloud_fraction`` ``(ncol, nlev)``, index 0 =
+    model top.  ``width == 0`` returns CAM's boolean cloud mask
+    ``(n_sub, ncol, nlev)``.
+
+    KNOWN DIFFERENCE (RULE 5): both switches compare against the traced cloud
+    fraction, so for ``width > 0`` (the default,
+    ``CloudConfig.cloud_subcolumn_mask_width`` = 1e-3) they are smooth: with
+    ``s(d) = smoothstep_quintic(d/width + 1/2)`` (C2, EXACTLY 0 for
+    d <= -width/2 and 1 for d >= width/2) the recursion keeps
+    ``a*CDF_above + (1-a)*u*clear_above`` with ``a = s(CDF_above -
+    clear_above)`` and the returned float weights are ``s(CDF - clear)``.
+    Only cells whose CDF lies within width/2 of the threshold differ from
+    CAM's 0/1 (an exact tie gives 1/2 where CAM's ``>=`` gives 1).  An
+    overcast layer (cf = 1) is fully cloudy except in a subcolumn whose CDF
+    is below width/2.  Per-case gaps:
+    tests/atmosphere/test_max_random_subcolumns_oracle.py.
+    """
+    if not width >= 0.0:
+        raise ValueError(f"cloud_subcolumn_mask_width must be >= 0, got {width!r}")
+    cf = jnp.clip(jnp.asarray(cloud_fraction), 0.0, 1.0)
     ncol, nlev = cf.shape
-    u = jnp.asarray(_stratified_table(int(n_sub), int(nlev)), dtype=cf.dtype)
-    u = u[:, None, :]                                   # (n_sub, 1, nlev)
-    if shift is not None:
-        k = jnp.arange(nlev, dtype=cf.dtype)
-        off = (jnp.asarray(shift, dtype=cf.dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
-               + k * _SHIFT_LAYER_STEP)                  # (ncol, nlev)
-        u = jnp.mod(u + off[None, :, :], 1.0)
+    u = jnp.asarray(u, dtype=cf.dtype)
     clear = 1.0 - cf                                    # (ncol, nlev)
+    if width > 0.0:
+        def s(d):
+            return smoothstep_quintic(d / width + 0.5)
+        col = u[:, :, 0] * jnp.ones((1, ncol), dtype=cf.dtype)
+        cdf = [col]
+        for k in range(1, nlev):
+            a = s(cdf[k - 1] - clear[None, :, k - 1])
+            cdf.append(a * cdf[k - 1] + (1.0 - a) * u[:, :, k] * clear[None, :, k - 1])
+        return s(jnp.stack(cdf, axis=-1) - clear[None, :, :])
 
     # nlev is static and small, so the recursion unrolls; a lax.scan would add
     # a carry for no benefit at this size.
     col = u[:, :, 0] * jnp.ones((1, ncol), dtype=cf.dtype)
     cdf = [col]
     for k in range(1, nlev):
+        # CAM mcica_subcol_gen_sw.f90:365-369 (strict ``>``).
         above_cloudy = cdf[k - 1] > clear[None, :, k - 1]
         cdf.append(jnp.where(above_cloudy, cdf[k - 1],
                              u[:, :, k] * clear[None, :, k - 1]))
-    return jnp.stack(cdf, axis=-1) > clear[None, :, :]
+    # CAM mcica_subcol_gen_sw.f90:398: isCloudy = (CDF >= 1 - cldf).  ``>=``
+    # (not ``>``) matters only at exact ties, which stratified dyadic
+    # uniforms and quantised cloud fractions (e.g. cf = 0.0625) do produce.
+    return jnp.stack(cdf, axis=-1) >= clear[None, :, :]
+
+
+def cam_seed_shift(p_full):
+    """Per-column subcolumn shift ``(ncol,)`` in [0, 1), state-seeded like CAM.
+
+    CAM's McICA seeds KISS from the fractional parts of the bottom FOUR
+    layer pressures (mcica_subcol_gen_sw.f90:293-296), so its draw is
+    state-derived: independent of the domain decomposition, with no PRNG
+    state to carry.  This shift (the one the ``mcica`` path has used) takes
+    only the fractional part of the lowest-layer pressure [Pa] (index -1 =
+    model bottom): columns with identical bottom pressure share a shift even
+    where CAM's seeds would differ, and an fp32 pressure quantises it (to
+    1/128 near 1e5 Pa).  Gradient-stopped: the mask is a sampling device,
+    not a function of pressure.
+    """
+    return jax.lax.stop_gradient(jnp.mod(jnp.asarray(p_full)[:, -1], 1.0))
 
 
 def expand_to_subcolumns(mask, *fields):
@@ -204,8 +387,15 @@ def subcolumn_paths(mask, cloud_fraction, lwp, iwp,
     """
     n_sub, ncol, nlev = mask.shape
     return tuple(
-        jnp.reshape(jnp.where(mask, ic[None, :, :], 0.0), (n_sub * ncol, nlev))
+        jnp.reshape(apply_mask(mask, ic[None, :, :]), (n_sub * ncol, nlev))
         for ic in in_cloud_paths(cloud_fraction, lwp, iwp, cf_floor))
+
+
+def apply_mask(mask, x):
+    """``x`` on cloudy cells: a boolean mask selects, smooth weights scale."""
+    if mask.dtype == jnp.bool_:
+        return jnp.where(mask, x, 0.0)
+    return mask * x
 
 
 def average_over_subcolumns(field, n_sub: int, ncol: int):
@@ -221,7 +411,7 @@ def average_over_subcolumns(field, n_sub: int, ncol: int):
 #: array of order 112, so a 112-column case would have corrupted it.
 PER_COLUMN_SOLVER_KEYS = frozenset({
     "T", "p_full", "p_half", "sfc_temperature", "q_v", "cos_zenith",
-    "sfc_albedo", "sfc_emissivity", "o3_vmr", "o3_top_vmr",
+    "sfc_albedo", "sfc_albedo_direct", "sfc_emissivity", "o3_vmr", "o3_top_vmr",
     "aerosol_optical_depth", "aerosol_absorption_optical_depth_lw",
     "cloud_path_liq", "cloud_path_ice", "cloud_r_eff_liq", "cloud_r_eff_ice",
     "cloud_fraction",

@@ -122,7 +122,8 @@ def radiation_paths(cloud_props, cloud_cfg):
     from legoesm.atmosphere.physics.clouds import subcolumns as sub
     n_sub = int(cloud_cfg.cloud_n_subcolumns)
     ncol = cloud_props.cloud_fraction.shape[0]
-    mask = sub.generate_subcolumns(cloud_props.cloud_fraction, n_sub)
+    mask = sub.generate_subcolumns(cloud_props.cloud_fraction, n_sub,
+                                   width=float(cloud_cfg.cloud_subcolumn_mask_width))
     lwp, iwp = sub.subcolumn_paths(mask, cloud_props.cloud_fraction,
                                    cloud_props.lwp, cloud_props.iwp)
     return (np.asarray(sub.average_over_subcolumns(lwp, n_sub, ncol)),

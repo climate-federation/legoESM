@@ -6,7 +6,7 @@ experiment:
   tier: tier2
   complexity: primitive_equation
   extent: channel
-  maturity: structurally_validated
+  maturity: run_tested
   description: >
     Eady baroclinic instability: a uniformly-sheared, uniformly-stratified
     channel grows the Eady mode at the analytic rate — a mesoscale baroclinic-

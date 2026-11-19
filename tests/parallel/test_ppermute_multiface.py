@@ -360,9 +360,11 @@ def test_cache_key_distinguishes_layout_and_variant():
     k_d = cx._get_exchange(mesh2, 3, False, halo=1)
     assert len({id(k_a), id(k_b), id(k_c), id(k_d)}) == 4
     keys = list(cx._cache.keys())
-    assert all(len(k) == 6 for k in keys)  # (id, ndim, variant, halo, offs, k)
+    # mesh_shape was added to the key when tiled meshes were introduced.
+    assert all(len(k) == 7 for k in keys)  # (id, ndim, variant, halo, offs, k, shape)
     assert {k[2] for k in keys} == {"ppermute_multiface", "allgather"}
     assert {k[5] for k in keys} == {2, 3}
+    assert {k[6] for k in keys} == {(2,), (3,)}
 
 
 # =======================================================================

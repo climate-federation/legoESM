@@ -104,6 +104,8 @@ def write_sweep_plan(
     dict to add its repo-relative ``suite`` path (recorded in the
     manifest; the array runner indexes it).
     """
+    from legoesm.training.aimip_params import declare_sundqvist_rate
+
     for combo in combos:
         combo_dir = repo_root / sweep_dir_rel / combo["name"]
         combo_dir.mkdir(parents=True, exist_ok=True)
@@ -115,7 +117,8 @@ def write_sweep_plan(
         with (combo_dir / "suite.yaml").open("w") as fh:
             yaml.safe_dump(suite_yaml, fh, sort_keys=False)
         with (combo_dir / "variant_classical.yaml").open("w") as fh:
-            yaml.safe_dump(dict(combo["overrides"]), fh, sort_keys=False)
+            yaml.safe_dump(declare_sundqvist_rate(combo["overrides"]), fh,
+                           sort_keys=False)
         combo["suite"] = str(sweep_dir_rel / combo["name"] / "suite.yaml")
 
     manifest = {

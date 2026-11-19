@@ -125,3 +125,46 @@ class TestCommand:
         assert a != b
         c = setup_signature(OCEAN, {"name": "c", "grid": "latlon", "quick": False})
         assert c == a  # disabled control is a no-op
+
+
+# harness-like spec (#2113): no case filter, runner-only extra keys
+HARNESS = MatrixRunnerSpec(runner_path="scripts/run/run_bench.py",
+                           valid_grids=("latlon", "tripole"), case_flag=None,
+                           days_flag=None, resolution_flag=None,
+                           output_flag=None, quick_flag=None,
+                           extra_keys=(("preset", "--preset"),
+                                       ("warmup_steps", "--warmup-steps")))
+
+
+class TestRunnerExtraKeys:
+    def test_extra_keys_only_for_declaring_spec(self):
+        s = {"name": "bench", "grid": "latlon", "preset": "p1"}
+        validate_setup(s, HARNESS)
+        with pytest.raises(ValueError, match="unknown setup field"):
+            validate_setup(s, OCEAN)
+
+    def test_no_case_flag_omits_name_and_maps_extras(self):
+        cmd = build_matrix_command(
+            HARNESS, {"name": "bench", "grid": "tripole", "preset": "p1",
+                      "warmup_steps": 0}, output_path="out/")
+        assert cmd == ("python scripts/run/run_bench.py --grid tripole "
+                       "--preset=p1 --warmup-steps=0")
+
+
+# single-column-like spec (#2103): positional case, no grid flag
+SCM = MatrixRunnerSpec(runner_path="scripts/matrix/run_scm_test_matrix.py",
+                       valid_grids=("column",), case_flag="", exact_prefix="",
+                       grid_flag=None, levels_flag=None, dt_flag=None,
+                       days_flag=None, resolution_flag=None, output_flag=None,
+                       quick_flag=None)
+
+
+class TestPositionalCaseNoGrid:
+    def test_command(self):
+        cmd = build_matrix_command(SCM, {"name": "c1", "grid": "column"},
+                                   output_path="out/")
+        assert cmd == "python scripts/matrix/run_scm_test_matrix.py c1"
+
+    def test_grid_still_validated(self):
+        with pytest.raises(ValueError, match="not a valid matrix grid"):
+            validate_setup({"name": "c1", "grid": "latlon"}, SCM)

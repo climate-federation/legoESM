@@ -280,7 +280,9 @@ def load_training_data(diurnal_npz: str, n_sub: int, seed: int = 0) -> dict:
     lonc = lon1[lidx % nlon]
     nh = D["hours"].size
     mh = lambda k: D[k].reshape(12, nh, -1)[:, :, lidx].mean(1)
-    cmap = load_clm_surface(download_clm_surfdata(), np.rad2deg(latc), lonc)
+    # slab land: no van Genuchten soil water, so the classic curve (as before)
+    cmap = load_clm_surface(download_clm_surfdata(), np.rad2deg(latc), lonc,
+                            vg_air_entry_m=0.0)
     sub = np.random.default_rng(seed).choice(lidx.size, size=min(n_sub, lidx.size),
                                              replace=False)
     return _pack(mh, latc, np.asarray(cmap["pft_fractions"]),

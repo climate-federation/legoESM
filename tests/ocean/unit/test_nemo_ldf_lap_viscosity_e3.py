@@ -182,6 +182,7 @@ def test_dispatch_unknown_e3_weighting_raises():
     geo = _geo()
     cfg = LatLonCGridOceanConfig.from_flat(
         lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_mask_levels="surface",
         lateral_viscosity_e3_weighting="typo",
         A_h=1.5e4, A_h_lat_scaling=True)
     with pytest.raises(ValueError):
@@ -210,6 +211,7 @@ def test_dispatch_routes_to_e3_weighted_operator():
 
     cfg = LatLonCGridOceanConfig.from_flat(
         lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_mask_levels="surface",
         lateral_viscosity_e3_weighting="nemo_e3",
         A_h=1.5e4, A_h_lat_scaling=True)
     du = np.asarray(_call_visc_e3(geo, cfg, h_k=h_k))[..., 0]
@@ -233,6 +235,7 @@ def test_e3_weighting_missing_h_k_raises():
     geo = _geo()
     cfg = LatLonCGridOceanConfig.from_flat(
         lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_mask_levels="surface",
         lateral_viscosity_e3_weighting="nemo_e3",
         A_h=1.5e4, A_h_lat_scaling=True)
     with pytest.raises(ValueError):

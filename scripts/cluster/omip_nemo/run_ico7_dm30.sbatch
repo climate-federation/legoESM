@@ -22,7 +22,7 @@ WTIC=$ROOT/data/woce_gouretski/woce_t_woa57_annual.nc
 WSIC=$ROOT/data/woce_gouretski/woce_s_woa57_annual.nc
 echo "=== HOST ==="; hostname; nvidia-smi -L 2>/dev/null | head -1; date
 git -C $WT log --oneline -1
-GA="--grid mpas --mpas-level 7 --mpas-lloyd 20 --dt 150"
+GA="--grid mpas --mpas-level 7 --mpas-lloyd 50 --dt 150"
 COMMON="--nemo-vertical --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv \
   --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 \
   --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice \

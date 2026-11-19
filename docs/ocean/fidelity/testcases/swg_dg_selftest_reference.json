@@ -1,0 +1,130 @@
+{
+  "schema": "swg-dg-selftest-reference-v1",
+  "measured_on": "2026-10-14",
+  "host_cpu": "Intel Xeon Gold 6242R",
+  "command": "the guide's step-1 loop: one `python -m pytest -q -p no:cacheprovider <file>` per file with PYTHONPATH set to the checkout's package roots, JAX_PLATFORMS=cpu and JAX_ENABLE_X64=1 (plus -rs to list skip reasons, PYTHONDONTWRITEBYTECODE=1 and GIT_OPTIONAL_LOCKS=0 because the checkout was mounted read-only)",
+  "python_environment": "conda-forge Python 3.13.0 h9ebbce0_101_cp313 venv whose only distributions are the 45 pins of python-gpu-requirements.txt and python-selftest-requirements.txt, linked from the reference environment's installed files",
+  "external_evidence": "hidden: a private mount namespace put an empty tmpfs over the directory tree holding every external evidence root and, through its symlink, the NEMO oracle tree; only the checkout (read-only), its git metadata (read-only) and the measuring scratch directory were bound back, for the pytest processes and all their children",
+  "peak_memory_basis": "ru_maxrss of RUSAGE_CHILDREN around each file: the resident peak of the largest single process the file started",
+  "files": [
+    {
+      "path": "tests/ocean/fidelity/test_swg_dg_reproduction_guards.py",
+      "passed": 33,
+      "skipped": 1,
+      "failed": 0,
+      "pytest_final_line": "33 passed, 1 skipped in 24.99s",
+      "wall_seconds": 27.2,
+      "peak_rss_kb": 1244200,
+      "skip_reasons": [
+        "tests/ocean/fidelity/test_swg_dg_reproduction_guards.py:441: set SWG_DG_PPSRC to a built tests/SWG_DG/BLD/ppsrc/nemo tree to re-derive the committed compiled-read inventory"
+      ]
+    },
+    {
+      "path": "tests/ocean/fidelity/test_swg_dg_reproduction_shell.py",
+      "passed": 23,
+      "skipped": 0,
+      "failed": 0,
+      "pytest_final_line": "23 passed in 36.04s",
+      "wall_seconds": 37.3,
+      "peak_rss_kb": 608656,
+      "skip_reasons": []
+    },
+    {
+      "path": "tests/ocean/fidelity/test_swg_double_gyre_movie.py",
+      "passed": 2,
+      "skipped": 0,
+      "failed": 0,
+      "pytest_final_line": "2 passed in 8.90s",
+      "wall_seconds": 11.5,
+      "peak_rss_kb": 1181004,
+      "skip_reasons": []
+    },
+    {
+      "path": "tests/ocean/fidelity/test_run_swg_double_gyre.py",
+      "passed": 8,
+      "skipped": 0,
+      "failed": 0,
+      "pytest_final_line": "8 passed in 54.73s",
+      "wall_seconds": 57.1,
+      "peak_rss_kb": 1220496,
+      "skip_reasons": []
+    },
+    {
+      "path": "tests/ocean/fidelity/test_nemo_swg_dg_climate.py",
+      "passed": 9,
+      "skipped": 0,
+      "failed": 0,
+      "pytest_final_line": "9 passed in 7.94s",
+      "wall_seconds": 9.9,
+      "peak_rss_kb": 808596,
+      "skip_reasons": []
+    },
+    {
+      "path": "tests/ocean/fidelity/test_nemo_swg_dg_restart_identity.py",
+      "passed": 10,
+      "skipped": 0,
+      "failed": 0,
+      "pytest_final_line": "10 passed in 1.65s",
+      "wall_seconds": 3.0,
+      "peak_rss_kb": 631920,
+      "skip_reasons": []
+    },
+    {
+      "path": "tests/ocean/fidelity/test_nemo_swg_dg_composition.py",
+      "passed": 3,
+      "skipped": 0,
+      "failed": 0,
+      "pytest_final_line": "3 passed in 1.55s",
+      "wall_seconds": 2.9,
+      "peak_rss_kb": 613060,
+      "skip_reasons": []
+    },
+    {
+      "path": "tests/ocean/fidelity/test_nemo_swg_dg_round6.py",
+      "passed": 6,
+      "skipped": 0,
+      "failed": 0,
+      "pytest_final_line": "6 passed in 9.13s",
+      "wall_seconds": 11.2,
+      "peak_rss_kb": 980816,
+      "skip_reasons": []
+    },
+    {
+      "path": "tests/ocean/fidelity/test_nemo_swg_dg_round7.py",
+      "passed": 6,
+      "skipped": 0,
+      "failed": 0,
+      "pytest_final_line": "6 passed in 1.22s",
+      "wall_seconds": 2.5,
+      "peak_rss_kb": 197760,
+      "skip_reasons": []
+    },
+    {
+      "path": "tests/ocean/fidelity/test_nemo_swg_check_records.py",
+      "passed": 22,
+      "skipped": 0,
+      "failed": 0,
+      "pytest_final_line": "22 passed in 1.72s",
+      "wall_seconds": 3.2,
+      "peak_rss_kb": 631460,
+      "skip_reasons": []
+    },
+    {
+      "path": "tests/ocean/unit/test_nemo_swg_card.py",
+      "passed": 157,
+      "skipped": 0,
+      "failed": 0,
+      "pytest_final_line": "157 passed in 9.02s",
+      "wall_seconds": 10.9,
+      "peak_rss_kb": 1041532,
+      "skip_reasons": []
+    }
+  ],
+  "total": {
+    "passed": 279,
+    "skipped": 1,
+    "failed": 0,
+    "wall_seconds": 176.7,
+    "peak_rss_kb_largest_file": 1244200
+  }
+}

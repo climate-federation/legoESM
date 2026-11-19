@@ -193,6 +193,15 @@ class HydrostaticTendencies(NamedTuple):
     # when a precipitating module does not (the sum would be incomplete).
     # Appended LAST so no field index moves.
     precip_frozen: Field | None = None
+    # Open-water share of the surface turbulent exchange when the coupler's
+    # ice/lake handback is consumed (P5c): f_ow x the bulk law on the SST,
+    # per grid cell area -- SH/LH [W/m2, +up], water [kg/m2/s, +up], stress
+    # [Pa, on the atmosphere].  The ocean's forcing.  None otherwise.
+    shflx_ow: Field | None = None
+    lhflx_ow: Field | None = None
+    evap_ow: Field | None = None
+    taux_ow: Field | None = None
+    tauy_ow: Field | None = None
 
 
 # Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
@@ -231,6 +240,9 @@ MPAS_SFC_DIAG_EXTRA_KEYS = (
     # slot 14: the FROZEN part of the slot-2 precip [kg/m2/s] (F29): the
     # interactive land's snowfall.  Appended at the END, no index moves.
     "precip_frozen",
+    # slots 15-19: the open-water share of the turbulent exchange under the
+    # coupler ice/lake handback (P5c), None otherwise.  Appended at the END.
+    "shflx_ow", "lhflx_ow", "evap_ow", "taux_ow", "tauy_ow",
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their
@@ -716,3 +728,26 @@ class MPASOceanTendencies(NamedTuple):
     dS_dt: Field
     deta_dt: Field
     F_slow_u: Field | None = None
+
+
+def with_dyn_tendencies(phys_state, state_before, state_after, dt):
+    """Write the dynamics tendencies a process-split step hands to physics.
+
+    ``dyn_tendency_T`` / ``dyn_tendency_qv`` = ``(state_after - state_before)
+    / dt`` in the state's own array layout (convection reshapes them like T).
+    ``state_before`` is the state just after the previous physics increment
+    and ``state_after`` the state physics now receives (post dycore energy
+    fixer), so ``dt`` spans the whole interval and only dynamics changes are
+    counted.  No-op when ``phys_state`` is None or the state carries no
+    ``q_v`` tracer (the consumers then raise).  Duck-typed on
+    ``phys_state._replace`` so core needs no physics import.
+    """
+    if phys_state is None:
+        return phys_state
+    tr_b, tr_a = state_before.tracers, state_after.tracers
+    if tr_b is None or tr_a is None or "q_v" not in tr_b or "q_v" not in tr_a:
+        return phys_state
+    inv_dt = 1.0 / dt
+    dT = (state_after.T.data - state_before.T.data) * inv_dt
+    dq = (tr_a["q_v"].data - tr_b["q_v"].data) * inv_dt
+    return phys_state._replace(dyn_tendency_T=dT, dyn_tendency_qv=dq)

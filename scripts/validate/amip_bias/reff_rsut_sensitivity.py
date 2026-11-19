@@ -178,7 +178,8 @@ def main(argv=None) -> int:
                 cloud_path_liq=kwx["cloud_path_liq"],
                 cloud_path_ice=kwx["cloud_path_ice"],
                 cloud_r_eff_liq=r_eff_liq,
-                cloud_r_eff_ice=kwx.get("cloud_r_eff_ice"))
+                cloud_r_eff_ice=kwx.get("cloud_r_eff_ice"),
+                cloud_rho_ice=ccfg.rho_cloud_ice)
             # Night columns: SW up is 0 when mu ~ 0; the 1e-4 floor keeps the
             # solver defined and contributes ~0 flux.
             day_mask = jnp.asarray(mu > 0.0)

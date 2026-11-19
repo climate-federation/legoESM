@@ -56,6 +56,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 from legoesm import constants
 from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
+from legoesm.ml.checkpoint_io import deserialise_knob_aware
 from legoesm.core.tracers import (
     make_full_moisture_registry,
     make_moisture_registry,
@@ -297,31 +298,11 @@ def has_spatial_surface_leaves(model) -> bool:
     )
 
 
-def freeze_spatial_updates(optimizer, model):
-    """Zero every optimizer update of the spatial-surface fields ``model``
-    froze as unread (``AIMIPSpatialSurfaceParams.frozen``), AdamW's decoupled
-    weight decay included: their gradient is already cut, this keeps their
-    VALUES fixed too.  ``optimizer`` unchanged when nothing is frozen."""
-    sp = getattr(model, "spatial_surface", None)
-    if sp is None:
-        sp = getattr(getattr(model, "classical", None), "spatial_surface", None)
-    names = frozenset(getattr(sp, "frozen", ()) or ())
-    if not names:
-        return optimizer
-
-    def _mask(tree):
-        def _m(path, _leaf):
-            k = jax.tree_util.keystr(path)
-            return "spatial_surface" in k and any(f"['{n}']" in k for n in names)
-        return jax.tree_util.tree_map_with_path(_m, tree)
-    return optax.chain(optimizer, optax.masked(optax.set_to_zero(), _mask))
-
-
 def _trainable_raw_values(grads) -> dict:
     """``{name: grad}`` of the trainable leaves the no-inert gate judges: the
     ``raw_values`` of a bare physics-params model or of an
     ``AIMIPTrainableBundle`` (classical + spec-driven scheme halves), plus the
-    AIMIP spatial-surface coefficients not frozen as unread.  Frozen
+    AIMIP spatial-surface coefficients (unread fields are never built).  Frozen
     (non-array) knobs carry no gradient (``None``) and are not judged."""
     parts = ([("", grads.raw_values)] if hasattr(grads, "raw_values") else
              [("classical.", grads.classical.raw_values),
@@ -448,11 +429,11 @@ def _load_midepoch_checkpoint(
     _tmpl5 = (model_template, opt_state_template, _ema_t, _zero, _zero)
 
     def _read4():
-        m, o, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl4)
+        m, o, e, c = deserialise_knob_aware(path, _tmpl4)
         return m, o, None, int(e), int(c)
 
     def _read5():
-        m, o, em, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl5)
+        m, o, em, e, c = deserialise_knob_aware(path, _tmpl5)
         return m, o, em, int(e), int(c)
 
     # ALWAYS attempt the 5-tuple layout FIRST, then fall back to 4-tuple.
@@ -464,12 +445,12 @@ def _load_midepoch_checkpoint(
     # 5-tuple template RELIABLY raises (the file's int32 epoch scalar lands
     # where the 5-tuple template expects the EMA model's float array leaf,
     # a dtype/shape mismatch), so control reaches the 4-tuple fallback.
-    _last_exc = None
+    _excs = []
     for _reader in (_read5, _read4):
         try:
             m, o, em, e, c = _reader()
         except Exception as exc:  # equinox mismatch: broad by design
-            _last_exc = exc
+            _excs.append(exc)
             continue
         if ema_template is None:
             # Caller does not want the EMA (EMA disabled this run) — drop it.
@@ -477,7 +458,7 @@ def _load_midepoch_checkpoint(
         return m, o, em, int(e), int(c)
     raise RuntimeError(
         f"Could not deserialise {path} as either the 5-tuple or 4-tuple "
-        f"mid-epoch layout: {_last_exc!r}"
+        f"mid-epoch layout: 5-tuple {_excs[0]!r}; 4-tuple {_excs[1]!r}"
     )
 
 
@@ -969,14 +950,14 @@ def make_turbulence_only_spectral_physics(dt,
     # prognostic TKE from the floor on EVERY call — a silently different
     # closure, not the one named (codex). Refuse rather than run it wrong;
     # threading the carry is the fix if one of these is ever wanted here.
-    _STATEFUL = ("tke", "mynn25", "clubb", "clubb_lite", "edmf")
+    _STATEFUL = ("tke", "mynn25", "clubb", "clubb_lite", "edmf", "ysu")
     if turb.scheme in _STATEFUL:
         raise ValueError(
             f"make_turbulence_only_spectral_physics: {turb.scheme!r} is a "
             f"PROGNOSTIC scheme and this builder threads no PhysicsState, so "
             f"its carry would be re-seeded from the floor every step. Use a "
             f"stateless scheme (e.g. 'smagorinsky', 'louis', "
-            f"'holtslag_boville', 'ysu') or thread the carry first.")
+            f"'holtslag_boville') or thread the carry first.")
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme="none"),
@@ -984,7 +965,8 @@ def make_turbulence_only_spectral_physics(dt,
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
-    raw_fn = make_physics(cfg, model_type="spectral_pe", dt=dt)
+    raw_fn = make_physics(cfg, model_type="spectral_pe", dt=dt,
+                          surface_bulk_coeffs=None)   # turbulence owns it
 
     from legoesm.atmosphere.physics.physics_state import (
         NO_SFC_T_OVERRIDE,
@@ -1110,8 +1092,9 @@ def make_physics_params_spectral_physics(params, grid, dt, *,
     _kwargs = {}
     if _albedo is not None and radiation == "rrtmgp":
         _kwargs["sfc_albedo_override"] = _albedo
+    # this lane runs its own surface flux (C_H / C_E above)
     raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt,
-                          **_kwargs)
+                          surface_bulk_coeffs=None, **_kwargs)
 
     def physics_fn(state, grid_, sigma_coord):
         result = raw_fn(state, grid_, sigma_coord)
@@ -1202,8 +1185,10 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
     # Refuse configs whose explicit advection is unstable (the T63 dt=1800
     # blowup class): the CI deck gate cannot see ad-hoc YAMLs or CLI dt
     # overrides, so the bound is enforced where the integrator is built.
-    from legoesm.atmosphere.dynamics.gcm.spectral_pe import check_advective_cfl
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        check_advective_cfl, refuse_semi_implicit_hybrid)
     check_advective_cfl(int(grid.n_max), dt, pe_config)
+    refuse_semi_implicit_hybrid(pe_config, sigma_coord)
 
     if not pe_config.semi_implicit:
         def _integrate_explicit(state, tendency_fn):
@@ -2131,6 +2116,13 @@ def spectral_amip_rollout(
     ``make_aimip_classical_spectral_physics(..., split_rad=True)``; both forward
     the optional ``phys_state`` / ``forcing`` kwargs used here.
     """
+    if sizing_phys_state.sfclay is not None:
+        # R4 vote J4: this rollout hands the SAME physics state to every step,
+        # so the WRF surface-layer carry of turbulence=ysu would restart each step.
+        raise ValueError(
+            "spectral_amip_rollout does not thread the physics state between steps; "
+            "turbulence='ysu' carries the WRF surface-layer state (PhysicsState.sfclay) "
+            "and is refused here.")
     integrator_name = pe_config.time_integrator
     # #817: explicit dispatch_integrator, or the semi-implicit SSP-RK3-SI step
     # (precomputed ONCE, outside the scan) when pe_config.semi_implicit.
@@ -3630,7 +3622,6 @@ def _train_spectral_loop(
     else:
         optimizer = base_optimizer
 
-    optimizer = freeze_spatial_updates(optimizer, model)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
     # --- mid-epoch (per-chunk) resume (#942) ---------------------------------
@@ -3733,7 +3724,7 @@ def _train_spectral_loop(
                 Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
             )
             if _cand.exists():
-                ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
+                ema_model = deserialise_knob_aware(_cand, ema_model)
                 logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(
@@ -5611,7 +5602,7 @@ def _train_sfno_full_loop(
                 / f"epoch_{start_epoch - 1:04d}_ema.eqx"
             )
             if _cand.exists():
-                ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
+                ema_model = deserialise_knob_aware(_cand, ema_model)
                 logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(

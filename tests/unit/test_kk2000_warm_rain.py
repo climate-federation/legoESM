@@ -92,7 +92,7 @@ def test_morrison_dispatch_kk2000_default_and_differs_from_sb():
     )
     from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 
-    assert MorrisonConfig().warm_rain_scheme == "kk2000"
+    assert MorrisonConfig().warm_rain_scheme is None   # unset: by flavour
 
     ncol, nlev = 1, 4
     T = jnp.full((ncol, nlev), 295.0)

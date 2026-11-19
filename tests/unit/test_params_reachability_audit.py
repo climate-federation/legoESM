@@ -138,7 +138,10 @@ def _atm_pipeline_keys() -> set:
 
     selections = [dict()]
     selections += [{"convection": s} for s in sorted(CONVECTION_REGISTRY)]
-    selections += [{"microphysics": s} for s in sorted(MICROPHYSICS_REGISTRY)]
+    # morrison names kk2000: the unset mg law (kk2000_cam6) needs CLUBB relvar
+    selections += [{"microphysics": s, **({"morrison_warm_rain_scheme": "kk2000"}
+                                         if s == "morrison" else {})}
+                   for s in sorted(MICROPHYSICS_REGISTRY)]
     selections += [{"turbulence": s} for s in VALID_TURBULENCE]
     # '+'-composed GWD sources are combinations of the atoms; auditing the
     # atoms covers every composed config's classes.

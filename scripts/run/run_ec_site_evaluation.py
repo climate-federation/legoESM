@@ -9,7 +9,8 @@ fluxes that ``scripts/plot/plot_ec_site_combined.py`` reads:
     observed : gpp_obs, le_obs, h_obs, ustar_obs, swc_obs, plus the energy-balance
                closure-corrected le_obs_corr / h_obs_corr (band edge in the figures)
     a ``valid`` mask (all-inputs-observed steps), a ``reverted`` mask (steps the
-    NaN guard rolled back, so a model blow-up is distinguishable from missing
+    NaN guard rolled back, or the land step HELD because its unsolved canopy's
+    fallback was rejected, so a model failure is distinguishable from missing
     observations), and the site attrs.
 
 Per-site physics (tower height, rooting/column depth) come from the consolidated
@@ -44,9 +45,11 @@ import xarray as xr
 from legoesm import constants
 from legoesm.land.boundary_data.ec_site import read_ec_site_driver
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+from legoesm.land.canopy.config import VALID_SW_SCHEMES
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.multilayer_land import (
     init_multilayer_land_state, step_multilayer_land_with_diagnostics)
+from legoesm.thermo import latent_heat_vaporization
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 from run_ec_site import (  # noqa: E402
@@ -73,7 +76,7 @@ def _find_driver(driver_dir: str, site: str) -> str:
 
 def run_evaluation(site: str, out_path: str, driver_dir: str,
                    year_lo: int = 0, year_hi: int = 9999,
-                   stress_b0: bool = False) -> str:
+                   stress_b0: bool = False, sw_scheme: str = "ryu") -> str:
     """Run the site and write the evaluation NetCDF; returns the output path."""
     nc = _find_driver(driver_dir, site)
     t = pd.DatetimeIndex(xr.open_dataset(nc)["time"].values)
@@ -104,7 +107,7 @@ def run_evaluation(site: str, out_path: str, driver_dir: str,
     # stress_b0=False keeps the Ball-Berry cuticular intercept unstressed (the
     # validated default: a live canopy sustains a baseline transpiration; a
     # dormant/deciduous canopy self-limits via LAI -> 0).
-    cc = TwoLeafCanopyConfig(max_iters=30, stress_b0=stress_b0)
+    cc = TwoLeafCanopyConfig(max_iters=30, stress_b0=stress_b0, sw_scheme=sw_scheme)
     land = _build_land_config(
         cc, soil="auto", bottom_bc="free_drainage", depth_m=phys["soil_depth_m"],
         root_depth=phys["root_depth"], z_ref=phys["z_ref"], texture=tex)
@@ -132,6 +135,10 @@ def run_evaluation(site: str, out_path: str, driver_dir: str,
             doy=doy, land_params=p)
         rev = _nonfinite(ns)                     # revert to last good state on NaN
         safe = jax.tree_util.tree_map(lambda a, b: jnp.where(rev, b, a), ns, state)
+        # A held column already kept its state, but ``out`` still carries its
+        # rejected fallback fluxes; emit it as reverted, never as model output.
+        held = jnp.any(out.held) if out.held is not None else jnp.array(False)
+        rev = rev | held
         m = lambda v: jnp.where(rev, jnp.array(jnp.nan), v)
         ustar = jnp.sqrt(jnp.sqrt(out.tau_x ** 2 + out.tau_y ** 2)
                          / jnp.maximum(f.rho_lowest, 1e-3))
@@ -154,7 +161,7 @@ def run_evaluation(site: str, out_path: str, driver_dir: str,
 
     obs = {k: np.asarray(d.obs[k]).ravel()[sl] for k in d.obs}
     # Energy-balance-closure-corrected turbulent fluxes (FLUXNET ET_CORR/H_CORR);
-    # ET_CORR is mm/day -> W/m2 via L_v/86400.  Mask only clearly-corrupt DAYTIME
+    # ET_CORR is mm/day -> W/m2 via L_v(TA)/86400 at the site air temperature.  Mask only clearly-corrupt DAYTIME
     # closure ratios (ET>1) so nighttime (ratio undefined at ET~0) is not masked.
     raw = xr.open_dataset(nc)
     def rawslice(name):
@@ -170,7 +177,9 @@ def run_evaluation(site: str, out_path: str, driver_dir: str,
     hcorr = _inrange(rawslice("H_CORR"), _H_RANGE_W_M2)
     ratio = np.where(et > 1.0, etc / np.maximum(et, 1e-6), np.nan)
     bad = np.isfinite(ratio) & ((ratio < 0.3) | (ratio > 3.0))
-    le_obs_corr = np.where(bad, np.nan, etc) * constants.L_v / 86400.0
+    ta_kelvin = np.asarray(d.forcing.T_lowest).ravel()[sl]
+    le_obs_corr = (np.where(bad, np.nan, etc)
+                   * np.asarray(latent_heat_vaporization(ta_kelvin)) / 86400.0)
     h_obs_corr = np.where(bad, np.nan, hcorr)
 
     ds = xr.Dataset(
@@ -190,6 +199,7 @@ def run_evaluation(site: str, out_path: str, driver_dir: str,
          "valid": ("time", np.asarray(d.valid).ravel()[sl].astype(float))},
         coords={"time": t.values, "z": znode})
     ds.attrs.update(site=site, dt_s=float(d.dt_s), pft=str(getattr(d, "pft", "?")),
+                    canopy_sw_scheme=sw_scheme,
                     theta_sat=tsat, theta_r=tr,
                     theta_fc=float(land.theta_fc), theta_wp=float(land.theta_wp))
     # Lossless zlib: keeps the checked-in example outputs small without changing values.
@@ -208,9 +218,13 @@ def main() -> int:
     ap.add_argument("--year-hi", type=int, default=9999, help="last calendar year")
     ap.add_argument("--stress-b0", action="store_true",
                     help="legacy: also stress the Ball-Berry cuticular intercept")
+    ap.add_argument("--canopy-sw-scheme", choices=VALID_SW_SCHEMES, default="ryu",
+                    help="canopy shortwave partition: ryu (default) or two_stream "
+                         "(Sellers two-stream with CLM5 per-PFT leaf optics)")
     args = ap.parse_args()
     p = run_evaluation(args.site, args.out, args.driver_dir,
-                       args.year_lo, args.year_hi, stress_b0=args.stress_b0)
+                       args.year_lo, args.year_hi, stress_b0=args.stress_b0,
+                       sw_scheme=args.canopy_sw_scheme)
     ds = xr.open_dataset(p)
     print(f"saved {p}  n={ds.dims['time']}  site={ds.attrs['site']} pft={ds.attrs['pft']}")
     return 0

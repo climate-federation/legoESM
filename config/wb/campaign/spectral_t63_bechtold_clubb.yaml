@@ -256,3 +256,8 @@ classical:
   # the limit of an 80 GB card and a run died on it; 8 buys ~5.8 GiB of
   # margin for the cost of walking twice as many blocks.
   rrtmgp_gpoint_batch_size: 8
+  param_fixed:
+    atm.micro.MorrisonConfig:
+      # Explicit kk2000 (SAM/E3SM KK2000): the unset default resolves to the
+      # CAM6 kk2000_cam6 law under mg, which needs CLUBB relvar this lane lacks.
+      warm_rain_scheme: kk2000

@@ -18,7 +18,7 @@ _IC = pathlib.Path(os.environ.get(
     "LEGOESM_LAND_IC_MPAS6", _REPO / "data/lmip_soil_ic/soil_ic_mpas6.npz"))
 _CLM = pathlib.Path(os.environ.get(
     "LEGOESM_CLM_SURFDATA",
-    "/work/bd1083/b309178/diffESM/legoesm_ap/data/clm/"
+    "/work/bb1596/b309178/diffESM/legoesm_ap/data/clm/"
     "surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc"))
 
 pytestmark = [
@@ -43,7 +43,7 @@ def test_one_day_of_soil_water_keeps_the_ic_deep_root_zone():
     g = create_grid("mpas", resolution=6)
     lat = np.rad2deg(np.asarray(g.latCell))
     lon = np.rad2deg(np.asarray(g.lonCell))
-    h = clm_hydraulics_config(load_clm_surface(str(_CLM), lat, lon))
+    h = clm_hydraulics_config(load_clm_surface(str(_CLM), lat, lon, vg_air_entry_m=-0.02))
     grid = make_soil_grid(SoilGridConfig(n_layers=10, total_depth=3.0,
                                          growth_factor=2.0))
     st, meta = load_land_restart(_IC, expected_land_mode="multilayer",

@@ -1,0 +1,10 @@
+{
+ "oracle": "NEMO 5.0.1 ORCA1_T4DYN dom_hgr metrics (in-memory, tier-4 rhg records ctl_on kt 17281, 32 ranks)",
+ "inputs": "domain_cfg.nc rows global j 1-4 and 328-331, (j,i)",
+ "domain_cfg": "/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/domain_cfg.nc",
+ "band_ext_rows": "0-5 and 329-334 of the (364,335) nn_hls=2 extended grid",
+ "scored": "owner cells + recorded halo cells next to a wet T cell (i cyclic, j not); no exclusions; no wet T within 4 rows of the south edge, so the south halo is unscored",
+ "n_scored": 2382,
+ "extractor": "/burg/glab/users/pg2328/oracle_audit/si3wire/w1b/make_fixture.py",
+ "npz_sha256": "bc658a85e3906c5e499e52fb0ca519610979668713a9985540a4c20d8cdb383f"
+}

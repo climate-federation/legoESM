@@ -42,12 +42,11 @@ def test_melt_fraction_ladder_matches_oracle():
     frac = np.asarray(melt_fraction(33, dt, cfg))
     # Small bins melt fully.
     assert np.all(frac[:cfg.melt_full_bin + 1] == 1.0)
-    # Mid bins at min(rate_mid·dt, 1).
+    # Mid bins at rate_mid·dt, large bins at rate_high·dt (oracle: no clamp).
     mid = slice(cfg.melt_full_bin + 1, cfg.melt_mid_bin + 1)
-    np.testing.assert_allclose(frac[mid], min(cfg.melt_rate_mid * dt, 1.0))
-    # Large bins at min(rate_high·dt, 1).
+    np.testing.assert_allclose(frac[mid], cfg.melt_rate_mid * dt)
     np.testing.assert_allclose(frac[cfg.melt_mid_bin + 1:],
-                               min(cfg.melt_rate_high * dt, 1.0))
+                               cfg.melt_rate_high * dt)
 
 
 def test_melting_conserves_mass_and_cools():
@@ -61,7 +60,7 @@ def test_melting_conserves_mass_and_cools():
     assert float(mass_density(out.f_liquid, m)) > 0.0
     dq_melt = float(mass_density(out.f_liquid, m)) / float(rho)
     assert float(out.dT) == pytest.approx(
-        -(constants.L_f / constants.c_pd) * dq_melt, rel=1e-12)
+        -constants.lf_over_cp_fast_sbm * dq_melt, rel=1e-12)   # oracle 333 K
     assert float(out.dT) < 0.0                       # cooling
     assert np.all(np.asarray(out.f_ice) >= 0.0)
 
@@ -81,8 +80,10 @@ def test_small_bins_fully_melt_one_step():
 
 
 def test_freeze_melt_round_trip_conserves():
-    # Freeze drops then melt the ice back: total condensed mass preserved,
-    # heat releases then re-absorbs (net ~0 if fully reversed).
+    # Freeze drops then melt part of the ice back: total condensed mass is
+    # preserved and the net fusion heating is 333 K x (frozen - melted)
+    # (oracle FREEZ / J_W_MELT share the 333 literal). The oracle ladder never
+    # melts every bin in one step at a physical dt, so no full reversal.
     from legoesm.atmosphere.physics.microphysics.fast_sbm.freezing import (
         freeze_step)
     m, _ = _ice()
@@ -93,21 +94,19 @@ def test_freeze_melt_round_trip_conserves():
     frz = freeze_step(f_liq, m, jnp.asarray(constants.T_freeze - 30.0),
                       rho, 2.0)
     melt = melt_step(frz.f_ice, m, jnp.asarray(constants.T_freeze + 5.0),
-                     rho, 200.0)          # long dt → melt all
+                     rho, 60.0)
     total_before = float(mass_density(f_liq, m))
     total_after = float(mass_density(frz.f_liquid, m)
                         + mass_density(melt.f_liquid, m)
                         + mass_density(melt.f_ice, m))
     np.testing.assert_allclose(total_after, total_before, rtol=1e-12)
-    # Heat cancellation: fully melting back exactly the frozen mass releases
-    # then re-absorbs the same fusion heat → net ~0 (codex iter-12: round
-    # trip must check energy, not just mass). At 200 s every frozen bin
-    # melts (frac=1), so melt mass == frozen mass and dT_freeze+dT_melt=0.
-    np.testing.assert_allclose(
-        float(mass_density(melt.f_liquid, m)),
-        float(mass_density(frz.f_ice, m)), rtol=1e-12)   # all ice melted
+    frozen = float(mass_density(frz.f_ice, m)) / float(rho)
+    melted = float(mass_density(melt.f_liquid, m)) / float(rho)
+    assert 0.0 < melted < frozen
     assert float(frz.dT) > 0.0 and float(melt.dT) < 0.0
-    np.testing.assert_allclose(float(frz.dT + melt.dT), 0.0, atol=1e-12)
+    np.testing.assert_allclose(float(frz.dT + melt.dT),
+                               constants.lf_over_cp_fast_sbm * (frozen - melted),
+                               rtol=1e-12)
 
 
 def test_melting_gradient_in_f_ice_is_melt_fraction():

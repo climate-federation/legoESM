@@ -538,7 +538,8 @@ class TestNemoSshAvgFaceDepthGate:
         state = self._perturbed_state(grid, partial_coord, H_bathy, z_coord)
         cfg = self._cfg(face_depth)
         cfg = cfg._replace(barotropic=cfg.barotropic._replace(
-            barotropic_time_filter=time_filter))
+            barotropic_time_filter=time_filter,
+            nemo_barotropic_filter_alpha=0.0))   # DINO kamm deck rn_bt_alpha
 
         h_k_old = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, partial_coord,
@@ -672,6 +673,7 @@ class TestBarotropicReconcileTarget:
     _KAMM_MLF_BARO = dict(
         barotropic_solver="explicit_substep",
         barotropic_time_filter="nemo_boxcar_ab3",
+        nemo_barotropic_filter_alpha=0.0,   # DINO kamm deck rn_bt_alpha
         barotropic_coriolis="een_metric",
         barotropic_diffusion_alpha=0.0,
         n_barotropic_substeps=23,

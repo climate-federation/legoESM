@@ -44,7 +44,7 @@ def test_candidate_overrides_include_default_and_probes():
     m = _tuner()
     from legoesm.training.param_collector import build_registry
     metas = [x for x in build_registry()
-             if x.scheme_key == "atm.turb.MYNN25Config" and x.shape_key is None
+             if x.scheme_key == "atm.turb.TKEConfig" and x.shape_key is None
              and x.tunable_tier == 1]
     cands = m._candidate_overrides(metas, n_random=3, seed=0)
     # default (empty) + 2 probes per param + 3 random
@@ -60,17 +60,17 @@ def test_candidate_overrides_include_default_and_probes():
 
 def test_tune_returns_best_no_worse_than_default():
     m = _tuner()
-    base, scheme_key = m._base_turbulence("mynn25", **_RGH)
+    base, scheme_key = m._base_turbulence("louis", **_RGH)
     result = m.tune_closure_derivative_free(
         _cbl_artifact(), base, scheme_key,
         tiers=(1,), n_random=2, nlev=NZ, dt=20.0, seed=0,
     )
-    assert result.scheme == "mynn25"
+    assert result.scheme == "louis"
     assert np.isfinite(result.best_loss)
     # the default is always among the candidates, so best <= default
     assert result.best_loss <= result.default_loss + 1e-9
     assert result.n_evaluated >= 3
-    # best_overrides is a dict of mynn25 fields (or empty if default won)
+    # best_overrides is a dict of louis fields (or empty if default won)
     assert isinstance(result.best_overrides, dict)
 
 
@@ -94,9 +94,9 @@ def test_clubb_no_cloud_buoyancy_flag_builds_control_arm():
     assert base_native.clubb.cloud_source == "native"
     assert base_shared.clubb.cloud_source == "shared"
     # non-clubb schemes ignore the kwargs (no cloud_buoyancy/cloud_source field to set)
-    base_mynn, _ = m._base_turbulence("mynn25", **_RGH, clubb_cloud_buoyancy=False,
-                                      clubb_cloud_source="shared")
-    assert base_mynn.scheme == "mynn25"
+    base_louis, _ = m._base_turbulence("louis", **_RGH, clubb_cloud_buoyancy=False,
+                                       clubb_cloud_source="shared")
+    assert base_louis.scheme == "louis"
 
 
 def test_scm_les_loss_jax_is_differentiable():
@@ -115,7 +115,8 @@ def test_scm_les_loss_jax_is_differentiable():
 
     def loss(cs):
         turb = TurbulenceConfig(scheme="smagorinsky",
-                                smagorinsky=SmagorinskyConfig(surface=surf, C_s=cs))
+                                smagorinsky=SmagorinskyConfig(surface=surf, C_s=cs,
+                                                                    stability_form="lilly"))
         # dt=100 (few steps) keeps the jax.grad UNROLL of the Python step-loop small so
         # the backward compile is a fast smoke test, not a full-resolution run.
         return scm_les_loss_jax(art, turb, nlev=NZ, dt=100.0)
@@ -131,7 +132,7 @@ def test_scm_les_loss_jax_penalises_divergence(monkeypatch):
     import jax.numpy as jnp
     from legoesm.atmosphere.les_suite import scm_runner as scmr
     from legoesm.atmosphere.physics import TurbulenceConfig
-    from legoesm.atmosphere.physics.turbulence.config import MYNN25Config, SurfaceLayerConfig
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig, TKEConfig
 
     def _nan_final(scm, grid, nsteps, z_eval):
         nan = jnp.full_like(jnp.asarray(z_eval, float), jnp.nan)
@@ -139,7 +140,7 @@ def test_scm_les_loss_jax_penalises_divergence(monkeypatch):
 
     monkeypatch.setattr(scmr, "scm_final_theta_on", _nan_final)
     surf = SurfaceLayerConfig(z0=0.1, Cd_neutral=1.5e-3, Ch_neutral=0.0)
-    turb = TurbulenceConfig(scheme="mynn25", mynn25=MYNN25Config(surface=surf))
+    turb = TurbulenceConfig(scheme="tke", tke=TKEConfig(surface=surf))
     loss = float(scmr.scm_les_loss_jax(_cbl_artifact(), turb, nlev=NZ, dt=20.0))
     assert loss >= 0.5 * scmr._AD_DIVERGE_PENALTY  # penalised, NOT a spurious ~0 "perfect fit"
 
@@ -162,8 +163,8 @@ def test_all_wired_schemes_build_with_registry_key():
     # every CBL-wired closure builds a TurbulenceConfig with the right scheme and a
     # registry scheme_key that has scalar tunable params.
     m = _tuner()
-    for scheme in ("smagorinsky", "louis", "holtslag_boville", "ysu", "tke",
-                   "mynn25", "clubb_lite", "edmf", "clubb"):
+    for scheme in ("smagorinsky", "louis", "holtslag_boville",
+                   "edmf", "clubb"):
         base, key = m._base_turbulence(scheme, **_RGH)
         assert base.scheme == scheme
         assert getattr(base, scheme) is not None
@@ -191,16 +192,16 @@ def test_clubb_override_descends_into_nested_params():
 def test_apply_overrides_flat_scheme_lands_on_config():
     # for a flat scheme the same apply-site sets the field on the sub-config directly.
     m = _tuner()
-    base, key = m._base_turbulence("mynn25", **_RGH)
+    base, key = m._base_turbulence("louis", **_RGH)
     field = m._scheme_tunable_metas(key, tiers=(1,))[0].field
     cfg = m.apply_overrides_to_base(base, {field: 0.4321})
-    assert getattr(cfg.mynn25, field) == pytest.approx(0.4321)
+    assert getattr(cfg.louis, field) == pytest.approx(0.4321)
 
 
 def test_no_tunable_params_raises():
     m = _tuner()
     with pytest.raises(SystemExit):
-        m._scheme_tunable_metas("atm.turb.MYNN25Config", tiers=(99,))
+        m._scheme_tunable_metas("atm.turb.TKEConfig", tiers=(99,))
 
 
 def test_main_stamps_flux_provenance(tmp_path):
@@ -213,7 +214,7 @@ def test_main_stamps_flux_provenance(tmp_path):
     save_artifact(_cbl_artifact(), art)
     out = tmp_path / "tuned.json"
     rc = m.main([
-        "--artifact", str(art), "--scheme", "mynn25", "--tiers", "1",
+        "--artifact", str(art), "--scheme", "louis", "--tiers", "1",
         "--n-random", "1", "--dt", "20", "--nlev", str(NZ), "--output", str(out),
     ])
     assert rc == 0
@@ -244,12 +245,12 @@ def test_main_drives_the_scm_with_the_artifacts_roughness(tmp_path, monkeypatch)
         pass
 
     def capture(artifact, base, *a, **k):
-        seen["surface"] = base.mynn25.surface
+        seen["surface"] = base.louis.surface
         raise _Stop
 
     monkeypatch.setattr(m, "tune_closure_derivative_free", capture)
     with pytest.raises(_Stop):
-        m.main(["--artifact", str(art), "--scheme", "mynn25", "--n-random", "1"])
+        m.main(["--artifact", str(art), "--scheme", "louis", "--n-random", "1"])
     assert seen["surface"].z0 == 0.01
     assert seen["surface"].z0h_z0_ratio == pytest.approx(0.1)
 
@@ -261,4 +262,4 @@ def test_main_refuses_an_artifact_without_roughness(tmp_path):
     m = _tuner()
     art = tmp_path / "bare.npz"
     save_artifact(dataclasses.replace(_cbl_artifact(), les_setup=None), art)
-    assert m.main(["--artifact", str(art), "--scheme", "mynn25"]) == 2
+    assert m.main(["--artifact", str(art), "--scheme", "louis"]) == 2

@@ -11,8 +11,9 @@ as MG2's lcldm.  The applied autoconversion / accretion of
 transcription in ``tests/unit/test_morrison_warm_rain_incloud.py``
 (``mg2_oracle``) to rtol 1e-12, for both warm-rain laws and several specified
 droplet numbers (production droplet number is specified, not stored).  Also
-reported: cf=1 vs the switch-off path (must be bitwise on real states within
-the documented domain), and the grid-mean/in-cloud rate ratio.
+reported: cf=1 vs the switch-off path (autoconversion and accretion must be
+bitwise on real states within the documented domain), and the
+grid-mean/in-cloud rate ratio.
 
     mg2_incloud_oracle.py <checkpoint.npz> [--ncol 64]
 """
@@ -79,13 +80,19 @@ def main(argv=None):
     # state, default cam6 ramps (the production deck sets none).  The
     # checkpoint has no latitudes: aist is evaluated at the two extreme
     # analytic tropopauses (lat 0 -> 100 hPa, lat 90 -> 250 hPa) and cells
-    # where they differ are dropped from the gate (counted).
+    # where they differ are dropped from the gate (counted).  The CLUBB top
+    # cut (clubb_intr.F90:2535) uses the CLUBBConfig defaults, like the ramps.
     from legoesm.atmosphere.physics.clouds.cloud_fraction import cam6_ice_stratus_fraction
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     cc = CloudConfig(scheme="cam6_clubb")
+    ccl = CLUBBConfig()
     ai = [np.asarray(cam6_ice_stratus_fraction(
         jnp.asarray(qv), jnp.asarray(T), jnp.asarray(p), jnp.asarray(np.maximum(qi, 0.0)),
-        jnp.full(T.shape[0], la), cc, jnp.asarray(ph[:, :-1]))) for la in (0.0, np.pi / 2)]
+        jnp.full(T.shape[0], la), cc, jnp.asarray(ph[:, :-1]),
+        trop_cloud_top_press=ccl.trop_cloud_top_press,
+        trop_cloud_taper_lnp_width=ccl.trop_cloud_taper_lnp_width))
+        for la in (0.0, np.pi / 2)]
     lat_free = ai[0] == ai[1]
     aist = ai[0]
     cf = np.maximum(np.clip(alst, 0.0, 1.0), aist)
@@ -129,8 +136,10 @@ def main(argv=None):
         # it cannot bind, i.e. applied sinks x dt < q_c; count the rest.
         sinks = sum(np.minimum(np.asarray(v), 0.0) for v in b.values())
         # donor_clamp_scale = min(1, q_c / max(sink dt, 1e-15)): exactly 1
-        # only if q_c >= 1e-15 as well
-        free = ((-sinks * 1.0e-3 < np.clip(qc, 0, None) * (1 - 1e-9))
+        # only if q_c >= 1e-15 as well.  Under warm_rain_incloud the q_c
+        # limiter is MG2's, which leaves (1 - omsm) = 1e-5 of q_c when it
+        # binds (micro_mg2_0.F90:1574), so a bound cell applies q_c*(1-1e-5).
+        free = ((-sinks * 1.0e-3 < np.clip(qc, 0, None) * (1 - 1e-5) * (1 - 1e-9))
                 & (qc >= 1e-15) & lat_free)
         ours = np.stack([-np.asarray(b["autoconversion"]), -np.asarray(b["accretion"])])[:, free]
         ref = np.stack([prc, pra])[:, free]
@@ -151,10 +160,11 @@ def main(argv=None):
               "grid-mean/in-cloud (oracle, 0.01<cf<0.99, qc>=1e-6) autoconv median "
               f"{np.median(g[m] / prc[m]):.3f}, accretion "
               f"{np.median(g_a[m & (pra > 0)] / pra[m & (pra > 0)]):.3f}")
-    # REPORTED, not gated: MG2's size_dist_param_liq resets ncic to keep the
-    # mean droplet diameter in [2, 50] um before autoconversion; neither our
-    # kernel nor this port applies it (it acts at cf = 1 too).  How often and
-    # how much, on these cells, MG2 law, relvar 10:
+    # REPORTED: MG2's size_dist_param_liq resets ncic to keep the mean
+    # droplet diameter in [2, 50] um before autoconversion (ported in the
+    # kk2000_cam6 kernel and in the transcription since 2026-10-19; it acts
+    # at cf = 1 too).  How often and how much, on these cells, MG2 law,
+    # relvar 10:
     lc = np.maximum(cf, 1e-4)
     cells = (qc >= 1e-6)
     for nc in NC_CM3:
@@ -168,19 +178,26 @@ def main(argv=None):
             print(f"size bound, {name:9s} Nc {nc:5.0f}/cm3: binds in {bind.mean():.1%} of "
                   f"{bind.size} cells (qc>=1e-6); prc x{np.median(f[bind]) if bind.any() else 1:.3f} "
                   f"median where it binds, min x{f.min():.3f}")
-    # cf = 1 bitwise vs the switch-off path, on columns inside the documented
-    # domain (q_c in {0} U [1e-18, 5e-3], q_r in {0} U [1e-18, 0.01))
+    # cf = 1 bitwise vs the switch-off path for the autoconversion and
+    # accretion rates, on columns inside the documented domain (q_c in {0} U
+    # [1e-18, 5e-3], q_r in {0} U [1e-18, 0.01)).  The other outputs differ by
+    # design: the switch is also the CAM6 MG2 rain mode (clear-air rain
+    # evaporation, post-source rain sedimentation, MG2 limiters).
     out_dom = (((qc < 1e-18) & (qc != 0)) | (qc > 5e-3)
                | ((qr < 1e-18) & (qr != 0)) | (qr >= 0.01))
     keep = ~out_dom.any(1)
     bit = bool(keep.any())
     for scheme in ("kk2000", "kk2000_cam6"):
-        on = run(dict(warm_rain_scheme=scheme, warm_rain_incloud=True), np.ones_like(cf), 100.0)
-        off = run(dict(warm_rain_scheme=scheme), None, 100.0)
-        for x, y in zip(jax.tree_util.tree_leaves(on), jax.tree_util.tree_leaves(off)):
-            x, y = np.asarray(x), np.asarray(y)
-            if x.ndim and x.shape[0] == T.shape[0]:
-                x, y = x[keep], y[keep]
+        # supersaturated vapour: no cloud-evaporation sink, so neither arm's
+        # q_c limiter binds at dt = 1e-3 s (the two limiter forms differ by
+        # MG2's omsm when they bind)
+        qv_ss = np.full(T.shape, 0.05)
+        on = run(dict(warm_rain_scheme=scheme, warm_rain_incloud=True),
+                 np.ones_like(cf), 100.0, qv_ss)
+        off = run(dict(warm_rain_scheme=scheme), None, 100.0, qv_ss)
+        for k in ("autoconversion", "accretion"):
+            x = np.asarray(on.qc_budget[k])[keep]
+            y = np.asarray(off.qc_budget[k])[keep]
             bit &= bool(np.array_equal(x, y))
     print(f"cf=1 vs switch off: {'BITWISE' if bit else 'DIFFERS'} on {int(keep.sum())} of "
           f"{keep.size} columns (the rest hold q_c/q_r outside the documented domain)")

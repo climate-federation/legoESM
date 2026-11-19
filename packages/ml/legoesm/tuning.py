@@ -234,8 +234,8 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     ),
     "sundqvist_auto_rate": TuningParameter(
         name="sundqvist_auto_rate",
-        default=1e-3,
-        min_val=2e-4,
+        default=1.5e-4,
+        min_val=1e-4,
         max_val=5e-3,
         units="1/s",
         description="Sundqvist autoconversion rate (cloud water -> rain)",
@@ -280,19 +280,22 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     ),
     "sundqvist_evap_coeff": TuningParameter(
         name="sundqvist_evap_coeff",
-        default=5e-4,
-        min_val=1e-4,
-        max_val=2e-3,
+        default=2e-5,
+        min_val=1e-5,
+        max_val=1.5e-3,  # = SundqvistConfig __param_spec__ bound (one range)
         units="1",
         description="Sundqvist sub-cloud rain evaporation coefficient",
         category="convection",
         sensitivity="high",
         notes=(
             "Rate at which falling rain re-evaporates in subsaturated "
-            "layers: evap = evap_coeff * subsaturation * P_total. Higher "
-            "= more rain lost to evaporation, drier surface precip and "
-            "moister mid-troposphere; lower = more rain reaches the "
-            "surface. Sundqvist et al. (1989)."
+            "layers (Zhao-Carr form, GFS evpco): before the RH_crit gate "
+            "and the caps, rain evaporated per step [kg/m^2] ~ evap_coeff "
+            "* sqrt(1/dt) * (rh_crit - RH) * (dp/g) * dt * sqrt(P_r), P_r "
+            "the rain amount per step [kg/m^2] in the layer after its own "
+            "autoconversion (not a flux). Higher = more rain lost to evaporation, "
+            "drier surface precip and moister mid-troposphere; lower = more "
+            "rain reaches the surface. Zhao and Carr (1997)."
         ),
     ),
     "sbm_cape_threshold": TuningParameter(
@@ -421,20 +424,6 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         category="gwd",
         sensitivity="low",
         notes="Spreads the launched wave stress over multiple directions.",
-    ),
-    "mcfarlane_tau_max": TuningParameter(
-        name="mcfarlane_tau_max",
-        default=10.0,
-        min_val=1.0,
-        max_val=30.0,
-        units="Pa",
-        description="McFarlane GWD upper clip on launch stress",
-        category="gwd",
-        sensitivity="low",
-        notes=(
-            "Upper bound on orographic launch stress; protects against "
-            "runaway drag in pathological columns."
-        ),
     ),
 
 

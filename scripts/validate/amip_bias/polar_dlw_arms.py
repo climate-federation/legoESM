@@ -151,13 +151,15 @@ def main(argv=None) -> int:
         if cfg.cloud_vertical_overlap_optics == "max_random":
             from legoesm.atmosphere.physics.clouds import subcolumns as sub
             n_sub = int(cfg.cloud_n_subcolumns)
-            mask = sub.generate_subcolumns(props.cloud_fraction, n_sub)
+            mask = sub.generate_subcolumns(props.cloud_fraction, n_sub,
+                                           width=float(cfg.cloud_subcolumn_mask_width))
             kw["cloud_path_liq"], kw["cloud_path_ice"] = sub.subcolumn_paths(
                 mask, props.cloud_fraction, props.lwp, props.iwp)
             kw = sub.expand_kwargs(kw, n_sub, props.cloud_fraction.shape[0],
                                    keys={"cloud_r_eff_liq", "cloud_r_eff_ice"})
         else:
             kw["cloud_path_liq"], kw["cloud_path_ice"] = jnp.asarray(lwp), jnp.asarray(iwp)
+        kw["cloud_rho_ice"] = cfg.rho_cloud_ice   # ice table size at the run's density
         cf = np.asarray(props.cloud_fraction)
         return kw, cf, lwp, iwp, n_sub
 

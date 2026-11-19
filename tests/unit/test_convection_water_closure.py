@@ -52,13 +52,15 @@ KNOWN_LEAKING: dict[str, str] = {
     # the leaf.  Tracing that is the open follow-up; until it is traced, the
     # honest statement is "leaf-level residual, model-level closure unverified".
     "mass_flux": "leaf residual 1.114 mm/day; closes in the SCM, path untraced",
-    "tiedtke": "leaf residual 0.116 mm/day; closes in the SCM, path untraced",
 }
 
 SCHEMES = (
     "sbm", "dca", "kuo", "mass_flux", "edmf",
-    "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
+    "zhang_mcfarlane", "kain_fritsch", "emanuel", "bechtold",
 )
+# tiedtke (WRF port) needs omega / dynamics / lagged PBL inputs this leaf
+# probe lacks; it is certified against the Fortran instead
+# (tests/atmosphere/test_tiedtke_wrf_oracle.py).
 
 
 def _column(n=40):
@@ -113,6 +115,8 @@ def _leaf_kwargs(conv_fn, scheme_cfg, p_full, p_half, T, q_v):
         "M_c": jnp.zeros((ncol,)),
         "a_u": jnp.zeros((ncol,)),
         "w_grid": zeros_2d,
+        # ZM's PBL height: CAM's cold-start value (ZM refuses a call without)
+        "pblh": jnp.zeros((ncol,)),
     }
     sig = inspect.signature(conv_fn)
     kwargs, missing = {}, []

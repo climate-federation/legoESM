@@ -600,6 +600,34 @@ class MPASOceanConfig(NamedTuple):
     # saved configuration records WHICH mesh its coefficient belongs to and a
     # replay on another mesh is visible rather than a silent re-pin.
     K_zeta_bih_dx_m: float = 0.0
+    # Land-fill band capacity (performance only; results identical): None =
+    # the Neumann land fill sweeps every cell; an int K = it sweeps only the
+    # land cells within its reach of ocean, up to K per rank (more -> all
+    # cells).  make_sharded_mpas_ocean_step(land_mask=...) sets it on the
+    # local model from the run's mask; the SPMD bench receipt and the OMIP
+    # log record the value.
+    land_fill_band_capacity: int | None = None
+    # NEMO ln_rnf_depth_ini WHOLE-LEVEL runoff spread (int map nk_rnf or
+    # None): runoff enters the top nk wet levels (sbcrnf.F90:426-441) instead
+    # of the fractional runoff_depth_spread_map depth.  Build with
+    # forcing.runoff_depth.nemo_runoff_level_count; mutually exclusive with
+    # runoff_depth_spread_map / runoff_depth_spread_m (validated).  Appended
+    # to preserve positional callers.
+    runoff_depth_spread_levels: object = None
+    # Width of the smooth runoff-water temperature floor max(SST, 0 degC)
+    # (NEMO sbcrnf.F90:148, ln_rnf_tem=.false.) in the real-freshwater
+    # closure: LogSumExp sharpness [1/K], 100 = 0.01 K (user rule
+    # 2026-10-27, RULE 5); math.inf = NEMO's hard MAX.  Appended to preserve
+    # positional callers.
+    runoff_temperature_floor_sharpness: float = 100.0
+
+    # Vertical momentum advection (appended at the END: positional callers stay
+    # valid). "upwind_perturbation" (default, bit-identical) = 1st-order upwind
+    # flux form of u' = u - u_bar; "nemo_advective" = NEMO dynzad, centered
+    # advective form w*du/dz on the FULL velocity with the cell-area-weighted w
+    # at the edge (NEMO ln_dynadv_vec; explicit, as NEMO is below Aimp's Courant
+    # threshold).
+    vertical_momentum_scheme: str = "upwind_perturbation"
 
 class MPASSimpleOceanConfig(NamedTuple):
     """Configuration for simplified ocean on Voronoi mesh.

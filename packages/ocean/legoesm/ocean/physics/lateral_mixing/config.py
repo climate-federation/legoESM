@@ -67,6 +67,7 @@ __param_spec__ = {
             "resfn_gamma": {"units": "1", "bounds": (1.0, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 (Ocean Modelling 72, 92) resolution function: grid points per deformation radius at half-suppression", "shape": None},
             "resfn_cbcl_ms": {"units": "m s-1", "bounds": (0.5, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 / Chelton et al. 1998 (JPO 28, 433): fixed first-baroclinic gravity-wave speed for L_d = c/|f|", "shape": None},
             "redi_aht0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO 5.0.1 ldftra.F90:415-441 nn_aht_ijk_t=21 (Treguier 1997 scaling); aht0 = 1/2*rn_Ud*rn_Ld; ORCA1 = 900 (0.5*0.018 m/s*100 km); bounds as the eddy-induced aei0", "shape": None},
+            "kappa_redi_diffusive_velocity": {"units": "m s-1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO rn_Ud (DECISION 149): mode 20 aht = 1/2 rn_Ud max(e1,e2), aht0 = 1/2 rn_Ud rn_Ld (ldftra.f90:354-357); bounds = kappa_Redi's (330, 3000) m2/s at ORCA2's rn_Ld = 200 km; ORCA2 0.018", "shape": None, "explicit_only": True},
         },
     },
 }
@@ -399,8 +400,10 @@ class GMRediConfig(NamedTuple):
     slope_prd_geometry_stage: str = "current_step"
     # Construction of the dimensionless density anomaly entering ldf_slp.
     # ``"density_roundtrip"`` preserves the historical rho/rho0-1 path.
-    # ``"nemo_literal"`` evaluates eosbn2.F90's zn*r1_rho0 directly and is
-    # selected only by the DINO NEMO cards.
+    # ``"nemo_literal"`` evaluates the simplified-EOS eosbn2.F90
+    # zn*r1_rho0 directly and is selected only by the DINO NEMO cards.
+    # ``"nemo_eos80_literal"`` evaluates the corresponding EOS-80
+    # polynomial used by ORCA2 before ldf_slp (stprk3.f90:188-189).
     slope_prd_evaluation: str = "density_roundtrip"
     # Arithmetic form of ldfslp's horizontal metric application. ``division``
     # is the historical path. ``nemo_reciprocal`` evaluates and carries the
@@ -418,6 +421,12 @@ class GMRediConfig(NamedTuple):
     # dilated by NOW SSH, matching traldf_iso_scheme.h90:73/90. Only the two
     # DINO NEMO cards opt in.
     redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
+    # T-point thickness used by traldf_iso's final flux-divergence divisor.
+    # ``reference_jacobian`` preserves the historical reference/Jacobian
+    # thickness. ``nemo_qco_live`` uses NEMO's live e3t(Kmm), independently
+    # of the horizontal face-thickness choice above. NEMO-identity cards state
+    # this field explicitly; the library default preserves pre-round-237 runs.
+    redi_divisor_thickness_evaluation: str = "reference_jacobian"
     # Live depths and U/V-point depth accumulation used by ldfslp's mixed-
     # layer ramp. ``legacy_jacobian_t_surface`` preserves the historical
     # Jacobian and T-column subtraction. ``nemo_qco_live_literal`` uses raw
@@ -610,6 +619,36 @@ class GMRediConfig(NamedTuple):
     # (rather than the flow-dependent ``int(N dz)/pi``) so the resolution
     # function applies uniformly to ALL closures incl. constant-kappa, which
     # never computes ``int(N dz)``.
+
+    # Preserve the compiled scalar assignment boundaries in ldfslp's U/V
+    # slope and Shapiro statements under JIT.  False is the historical graph;
+    # ORCA2 L2 selects True after its instrumented slope record exposed the
+    # otherwise last-bit-only fused discrepancy.
+    slope_uv_source_rounding: bool = False
+    # Reference face ladder consumed by the live traldf_iso thickness build.
+    # ``tpoint_alias`` preserves the historical e3t_0 alias.  ``nemo_native``
+    # resolves the separately-carried e3u_0/e3v_0 arrays and their masks; the
+    # ORCA2 L2 card selects it because its partial-cell face ladders differ from
+    # e3t_0 at coastal and bottom steps.
+    redi_flux_reference_thickness_evaluation: str = "tpoint_alias"
+    # Sea-level time level used by the live face ladder.  ``step_entry`` is the
+    # historical path.  ``rk3_kmm`` selects the materialized stage-2 half-step
+    # state consumed as Kmm by stage-3 tra_ldf; ORCA2 L2 alone opts in.
+    redi_flux_geometry_stage: str = "step_entry"
+    # Apply ORCA's stored T-pivot north fold to native ldf_slp operands,
+    # Shapiro halos, and the four returned slope fields (ldfslp.f90:338).
+    # L2 selects it; closed-channel DINO/VORTEX cards retain the old path.
+    nemo_slope_north_fold: bool = False
+    # Preserve the materialized ahtu/ahtv values and NEMO's two-pair
+    # diffusivity reduction in traldf_iso_a33.  False keeps the shared
+    # historical graph; ORCA2 L2 alone selects the source-ordered path.
+    redi_a33_source_ordering: bool = False
+    # Feed traldf_iso's Kmm face thickness with the stored WS-RK3 r3u/r3v
+    # ratios rather than re-deriving them from the interpolated SSH.  The
+    # stored north-fold row is not a valid ldf face operand, so the consumer
+    # retains the fold-aware reconstruction there.  ORCA2 L2 alone opts in.
+    redi_flux_stored_face_ratios: bool = False
+
 
 
 class LateralMixingConfig(NamedTuple):

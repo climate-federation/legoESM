@@ -98,6 +98,7 @@ def _compute_local_properties_lw(
     lw_diffusive_factor: float | Array = monochromatic_two_stream._LW_DIFFUSIVE_FACTOR,
     precomputed_lw_optical_props: dict[str, Array] | None = None,
     precomputed_planck_srcs: dict[str, Array] | None = None,
+    level_temperature: Array | None = None,
 ) -> dict[str, Array]:
   """Compute local optical properties for longwave radiative transfer.
 
@@ -140,7 +141,8 @@ def _compute_local_properties_lw(
     planck_srcs = precomputed_planck_srcs
   else:
     planck_srcs = optics_lib.compute_planck_sources(
-        pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_temperature
+        pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_temperature,
+        level_temperature=level_temperature,
     )
 
   halo_width = 1
@@ -248,6 +250,10 @@ def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
   per-g-point map-reduce body of :func:`solve_lw` / :func:`solve_sw`.  The
   g-point axis is embarrassingly parallel; only the vertical recurrence
   *inside* ``step_fn`` is sequential.
+
+  The memory bounds below cover the transport inside ``step_fn``.  Gas optics are
+  held for all g-points outside it, ``(n_gpt, ncol, nlay)`` per array, so only
+  ``column_chunk_size`` bounds those.
 
   ``gpoint_batch_size <= 0`` (default) — the memory-frugal path: a
   ``jax.lax.scan`` over g-points with each step wrapped in
@@ -357,6 +363,7 @@ def solve_lw(
     gpoint_checkpoint: bool = True,
     cloud_path_fn=None,
     clear_sky: bool = False,
+    level_temperature: Array | None = None,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
 
@@ -397,6 +404,8 @@ def solve_lw(
       (1 − ω) before passing it here.  ``None`` (the default) leaves the
       longwave solution byte-identical.
     use_scan: Whether to use scan or for loops for the recurrent operation.
+    level_temperature: ``(ncol, 1, nlev+1)`` level (interface) temperature
+      [K], surface first: the host's tlev (``rrtmgp.cam_interface_temperature``).
 
   Returns:
     A dictionary with the following entries (in units of W/m²):
@@ -499,6 +508,7 @@ def solve_lw(
         lw_diffusive_factor=lw_diffusive_factor,
         precomputed_lw_optical_props=precomputed_props,
         precomputed_planck_srcs=planck_srcs,
+        level_temperature=level_temperature,
     )
 
     # Boundary conditions.
@@ -517,6 +527,8 @@ def solve_lw(
         use_scan,
     )
     return fluxes
+
+  optics_lib = optics_lib.with_all_gpts(True, pressure, temperature, molecules, vmr_fields)
 
   def step_fn(igpt, cumulative_flux):
     liq_g, ice_g = _gpoint_cloud_paths(
@@ -544,7 +556,8 @@ def solve_lw(
       if isinstance(sfc_t, float):
         sfc_t = sfc_t * jnp.ones(temperature.shape[:2], dtype=temperature.dtype)
       planck_srcs = optics_lib.compute_planck_sources(
-          pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_t)
+          pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_t,
+          level_temperature=level_temperature)
       fluxes = _lw_gpoint_fluxes(igpt, cloudy_props, liq_g, ice_g, planck_srcs)
       fluxes_clr = _lw_gpoint_fluxes(igpt, gas_props, None, None, planck_srcs)
       fluxes = {**fluxes, **{k + '_clr': v for k, v in fluxes_clr.items()}}
@@ -728,6 +741,7 @@ def compute_sw_optical_field(
   if vmr_fields is not None:
     vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_sw)
   n_gpt = optics_lib.n_gpt_sw
+  optics_lib = optics_lib.with_all_gpts(False, pressure, temperature, molecules, vmr_fields)
 
   def gpt_props(igpt):
     props = compute_sw_optical_props_gpt(
@@ -739,8 +753,7 @@ def compute_sw_optical_field(
     # Gas Rayleigh scattering optical depth (the gas scatter is ALL Rayleigh) as
     # a fraction of TOTAL scattering (gas + cloud + aerosol) -> the per-cell
     # probability that a scatter event is Rayleigh, for the explicit-phase split.
-    rayl_scat = optics_lib.rayleigh_scattering_fn(igpt)(
-        molecules, temperature, pressure, vmr_fields)
+    rayl_scat = optics_lib.gas_gpt('rayleigh', igpt)
     tot_scat = props['ssa'] * props['optical_depth']
     # safe_divide (not a floored raw divide) so the masked-branch VJP can't
     # overflow as tot_scat -> 0, consistent with ssa/g above. fill=1.0: a cell
@@ -750,9 +763,7 @@ def compute_sw_optical_field(
         safe_divide(rayl_scat, tot_scat, eps=1.0e-30, fill=1.0), 0.0, 1.0)
     return {**props, 'rayleigh_frac': rayleigh_frac}
 
-  # Sequential map over g-points (memory-frugal, like the solve_sw scan):
-  # stacks leaves to (n_gpt, X, Y, Z) without materializing all g-points'
-  # table lookups concurrently.
+  # Sequential map over g-points: stacks leaves to (n_gpt, X, Y, Z).
   return jax.lax.map(gpt_props, jnp.arange(n_gpt))
 
 
@@ -769,6 +780,7 @@ def compute_lw_optical_field(
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
     aerosol_absorption_optical_depth: Array | None = None,
+    level_temperature: Array | None = None,
 ) -> dict[str, Array]:
   """Stack per-g-point longwave ABSORPTION optical depth + Planck sources for
   the 3D Monte-Carlo emission tracer.
@@ -784,6 +796,7 @@ def compute_lw_optical_field(
   if vmr_fields is not None:
     vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_lw)
   n_gpt = optics_lib.n_gpt_lw
+  optics_lib = optics_lib.with_all_gpts(True, pressure, temperature, molecules, vmr_fields)
 
   def gpt_field(igpt):
     props = optics_lib.compute_lw_optical_properties(
@@ -792,7 +805,7 @@ def compute_lw_optical_field(
         cloud_fraction=cloud_fraction)
     planck = optics_lib.compute_planck_sources(
         pressure, temperature, igpt, vmr_fields,
-        sfc_temperature=sfc_temperature)
+        sfc_temperature=sfc_temperature, level_temperature=level_temperature)
     ssa = jnp.clip(props['ssa'], 0.0, 1.0)
     abs_od = jnp.maximum(props['optical_depth'], 0.0) * (1.0 - ssa)
     if aerosol_absorption_optical_depth is not None:
@@ -880,11 +893,12 @@ def solve_sw(
 
   # --- Per-column day/night handling ---
   # ``zenith`` may be a scalar (single-column) or an array with a column
-  # dimension, e.g. shape ``(ncol, 1)``.  To avoid division-by-zero in
-  # ``exp(-tau / cos(zenith))`` for nighttime columns (cos(zenith) ~ 0),
-  # we clamp the zenith used in the solve to at most ~89.4 degrees
-  # (cos > 0.01).  After the solve, nighttime columns are zeroed out.
-  _ZENITH_MAX = jnp.arccos(jnp.asarray(0.01, dtype=temperature.dtype))  # coeff-ok: min cos(zenith) floor
+  # dimension, e.g. shape ``(ncol, 1)``.  The slant path (exp(-tau/mu) and the
+  # two-stream R/T) uses max(mu0, sqrt(eps)), as RTE sw_dif_and_source does; the
+  # incident beam is projected with the true cos(zenith) (sw_solver_2stream:
+  # flux_dir(top) = inc_flux_dir * mu0).  After the solve, nighttime columns are
+  # zeroed out.
+  _ZENITH_MAX = jnp.arccos(jnp.sqrt(jnp.finfo(temperature.dtype).eps))
   safe_zenith = jnp.minimum(zenith, _ZENITH_MAX)
 
   # Build a per-column boolean mask that is True for daytime columns.
@@ -931,6 +945,7 @@ def solve_sw(
         sfc_albedo_direct=sfc_albedo_dir,
         zenith=safe_zenith,
         use_scan=use_scan,
+        mu_incident=jnp.cos(zenith),
     )
 
     sw_fluxes = monochromatic_two_stream.sw_transport(
@@ -944,6 +959,8 @@ def solve_sw(
         use_scan=use_scan,
     )
     return sw_fluxes
+
+  optics_lib = optics_lib.with_all_gpts(False, pressure, temperature, molecules, vmr_fields)
 
   def step_fn(igpt, partial_fluxes):
     liq_g, ice_g = _gpoint_cloud_paths(

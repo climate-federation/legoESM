@@ -152,3 +152,100 @@ def test_prewarm_refuses_when_disabled(cache_dir, monkeypatch):
     monkeypatch.setenv("LEGOESM_MESH_CACHE_DISABLE", "1")
     with pytest.raises(RuntimeError, match="disabled cache"):
         prewarm_voronoi_cache(_LEVEL, radius=1.0, lloyd_iterations=_LLOYD, omega=1e-4)
+
+
+@pytest.fixture()
+def precision():
+    """Yield the precision module; restore the active policy afterwards."""
+    from legoesm.core import precision as P
+    saved = P.get_policy()
+    yield P
+    P.set_policy(saved)
+
+
+def _mesh(pol, precision):
+    precision.set_policy(pol)
+    return create_voronoi_mesh(_LEVEL, radius=1.0, lloyd_iterations=_LLOYD, omega=1e-4)
+
+
+def test_cache_serves_each_precision_its_fresh_build(cache_dir, monkeypatch, precision):
+    """A float32 file under the x64 key must not reach a float64 run.
+
+    Production failure: a default-policy (float32 storage) process wrote float32
+    geometry under ``_x641``; fp64 runs then loaded it and built a terrain
+    7e-2 m2/s2 off. Each policy must get exactly its uncached build, and the
+    file must end up float64 so it serves both.
+    """
+    import jax
+    from legoesm.grids import voronoi
+    if not jax.config.read("jax_enable_x64"):
+        pytest.skip("needs JAX_ENABLE_X64=1")
+    fp32, fp64 = precision.PrecisionPolicy.fp32(), precision.PrecisionPolicy.fp64()
+    monkeypatch.setenv("LEGOESM_MESH_CACHE_DISABLE", "1")
+    fresh32, fresh64 = _mesh(fp32, precision), _mesh(fp64, precision)
+    monkeypatch.delenv("LEGOESM_MESH_CACHE_DISABLE")
+    assert fresh32.xCell.dtype == np.float32 and fresh64.xCell.dtype == np.float64
+    path = _voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 1e-4)
+
+    # Legacy poisoned file: float32 geometry under the x64 key.
+    _save_voronoi_cache(path, fresh32)
+    m = _mesh(fp64, precision)
+    assert m.xCell.dtype == np.float64
+    _mesh_fields_equal(m, fresh64)
+    assert np.load(path)["xCell"].dtype == np.float64, "rebuild did not heal the file"
+
+    # A float32-storage process on a cold cache still writes float64.
+    os.remove(path)
+    _mesh_fields_equal(_mesh(fp32, precision), fresh32)
+    assert np.load(path)["xCell"].dtype == np.float64
+
+    # From here every call must be a true cache hit, for both policies.
+    def _no_build(*a, **k):
+        raise AssertionError("cache miss: mesh was rebuilt")
+    monkeypatch.setattr(voronoi, "_build_mesh_from_generators", _no_build)
+    for pol, fresh in ((fp64, fresh64), (fp32, fresh32)):
+        m = _mesh(pol, precision)
+        assert m.xCell.dtype == fresh.xCell.dtype
+        _mesh_fields_equal(m, fresh)
+
+
+def test_cache_rounds_geometry_once_for_half_precision(cache_dir, monkeypatch, precision):
+    """A float16-storage run gets its uncached build bit-for-bit, cold or warm.
+
+    With x64 off the file used to be float32, so float16 runs rounded twice
+    (float64 -> float32 -> float16) and differed from a fresh build by one
+    float16 ulp in some cells. The file is now always float64; a legacy
+    float32 file is a miss for a float16 run.
+    """
+    import jax.numpy as jnp
+    fp16 = precision.PrecisionPolicy(storage=jnp.float16)
+    monkeypatch.setenv("LEGOESM_MESH_CACHE_DISABLE", "1")
+    fresh16 = _mesh(fp16, precision)
+    monkeypatch.delenv("LEGOESM_MESH_CACHE_DISABLE")
+    assert fresh16.xCell.dtype == np.float16
+    path = _voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 1e-4)
+
+    _mesh_fields_equal(_mesh(fp16, precision), fresh16)      # cold: build + save
+    assert np.load(path)["xCell"].dtype == np.float64
+    _mesh_fields_equal(_mesh(fp16, precision), fresh16)      # warm: load + cast
+
+    # Legacy float32 file: must be rebuilt, not double-rounded.
+    precision.set_policy(precision.PrecisionPolicy.fp32())
+    monkeypatch.setenv("LEGOESM_MESH_CACHE_DISABLE", "1")
+    fresh32 = _mesh(precision.PrecisionPolicy.fp32(), precision)
+    monkeypatch.delenv("LEGOESM_MESH_CACHE_DISABLE")
+    _save_voronoi_cache(path, fresh32)
+    _mesh_fields_equal(_mesh(fp16, precision), fresh16)
+    assert np.load(path)["xCell"].dtype == np.float64
+
+
+def test_cache_version_in_name_separates_formats(cache_dir, monkeypatch):
+    """A format bump must change the file name, so old and new code never share a file."""
+    import legoesm.grids.voronoi as vor
+
+    new = vor._voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 0.0)
+    assert os.path.basename(new).startswith("scvt_v2_")
+    monkeypatch.setattr(vor, "_MESH_CACHE_VERSION", 1)
+    old = vor._voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 0.0)
+    assert os.path.basename(old).startswith("scvt_v1_")
+    assert old != new

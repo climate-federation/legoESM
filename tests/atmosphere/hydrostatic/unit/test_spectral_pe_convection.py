@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.grids.gaussian import (
@@ -34,7 +35,6 @@ from legoesm.atmosphere.physics.convection.config import (
     ZhangMcFarlaneConfig,
     KainFritschConfig,
     EmanuelConfig,
-    TiedtkeConfig,
     BechtoldConfig,
 )
 from legoesm.atmosphere.physics.convection.integration import (
@@ -260,164 +260,25 @@ class TestSpectralPECMT:
         zeros = jnp.zeros((grid.n_lat, grid.n_lon, sigma_coord.n_levels))
         q_v = Field(data=zeros, name="q_v", dims=("lat", "lon", "level"), units="kg/kg")
         q_c = Field(data=zeros, name="q_c", dims=("lat", "lon", "level"), units="kg/kg")
+        from tests._zm_cold_start import cold_phys_state
+        ps = cold_phys_state(zeros)  # ZM needs the carried pblh: CAM cold start
         tendencies, _ = physics_fn(
-            _state_with_tracers(rest_state, {"q_v": q_v, "q_c": q_c}), grid, sigma_coord)
+            _state_with_tracers(rest_state, {"q_v": q_v, "q_c": q_c}), grid, sigma_coord,
+            phys_state=ps)
         assert set(tendencies.tracers) == {"q_v", "q_c"}
         for k in ("q_v", "q_c"):
             assert bool(jnp.all(jnp.isfinite(tendencies.tracers[k].data)))
         with pytest.raises(ValueError, match="must carry both tracers"):
-            physics_fn(_state_with_tracers(rest_state, {"q_v": q_v}), grid, sigma_coord)
+            physics_fn(_state_with_tracers(rest_state, {"q_v": q_v}), grid, sigma_coord,
+                       phys_state=ps)
 
-    def test_tiedtke_with_cape_and_winds_yields_nonzero_cmt(
-        self, grid, sigma_coord, rest_state,
-    ):
-        """Inject CAPE + winds → the CMT scheme should fire and produce non-zero CMT.
-
-        Constructs a state with non-zero u (solid-body rotation) and
-        attaches a tracers dict with q_v close to saturation.  The
-        bridge then sees: q_v > 0, T positive CAPE structure, u > 0 →
-        plume mass flux > 0 → non-zero du_dt_conv → non-zero
-        d(vor_hat) and d(div_hat).
-        """
-        # Build a state with non-zero, vertically-sheared u (necessary
-        # because Gregory CMT vanishes for uniform-wind columns).
-        state_w_u = _state_with_sheared_winds(
-            rest_state, grid, sigma_coord, u_top=20.0, u_sfc=2.0,
-        )
-
-        # Build a CAPE-positive temperature profile in grid space.
-        nlev = sigma_coord.n_levels
-        sigma_full = sigma_coord.sigma_full
-        T_col = 300.0 * jnp.power(jnp.clip(sigma_full, 0.05, None), 0.19)
-        T_col = jnp.maximum(T_col, 200.0)
-        T_grid = jnp.broadcast_to(
-            T_col[None, None, :], (grid.n_lat, grid.n_lon, nlev),
-        )
-        T_hat = sh_analysis_3d(grid, T_grid)
-        state_w_uT = state_w_u._replace(
-            T_hat=state_w_u.T_hat.replace(data=T_hat),
-        )
-
-        # Build a near-saturated q_v field; attach as a tracers dict to
-        # the spectral state via the duck-typed wrapper.  Match the
-        # bridge's expected raw-array shape (state.tracers["q_v"].data,
-        # shape (n_lat, n_lon, nlev) — the bridge calls .reshape so the
-        # leading 2D layout is fine).
-        from legoesm.thermo import saturation_mixing_ratio
-        p_full_3d = jnp.broadcast_to(
-            (sigma_full * 1e5)[None, None, :],
-            (grid.n_lat, grid.n_lon, nlev),
-        )
-        q_sat = saturation_mixing_ratio(T_grid, p_full_3d)
-        rh_profile = jnp.where(sigma_full > 0.7, 0.95, 0.5)
-        q_v_grid = rh_profile[None, None, :] * q_sat
-        q_v_field = Field(
-            data=q_v_grid, name="q_v",
-            dims=("lat", "lon", "level"), units="kg/kg",
-        )
-        state_with_tracers = _state_with_tracers(state_w_uT, {"q_v": q_v_field})
-
-        # Tiedtke: the CMT-capable scheme this bridge can run (ZM's net rain
-        # flux needs a surface sink this bridge lacks; see the refusal test).
-        physics_fn = make_convection_physics(
-            ConvectionConfig(
-                scheme="tiedtke",
-                tiedtke=TiedtkeConfig(precip_efficiency=0.0),
-            ),
-            model_type="spectral_pe", dt=300.0,
-        )
-
-        tendencies, _ = physics_fn(state_with_tracers, grid, sigma_coord)
-
-        # Plume should fire somewhere — vor/div tendencies must be
-        # non-zero in at least one mode/level.
-        assert float(jnp.max(jnp.abs(tendencies.T_hat.data))) > 0.0, (
-            "Tiedtke should produce non-zero T tendencies on a CAPE column"
-        )
-        assert float(jnp.max(jnp.abs(tendencies.vor_hat.data))) > 0.0, (
-            "Tiedtke should produce non-zero vor_hat tendencies via CMT"
-        )
-        assert float(jnp.max(jnp.abs(tendencies.div_hat.data))) > 0.0, (
-            "Tiedtke should produce non-zero div_hat tendencies via CMT"
-        )
-
-    def test_tiedtke_responds_to_moisture_convergence(
-        self, grid, sigma_coord, rest_state,
-    ):
-        """Tiedtke's deep closure consumes ``moisture_convergence``.  Two
-        spectral states with the same temperature/q_v but different
-        wind divergences produce different ``q_v`` flux divergences →
-        different Tiedtke tendencies.
-
-        The pre-fix bridge passed ``mc_col=zeros`` regardless of state,
-        so this test would have shown identical tendencies.  With the
-        spectral-MC plumbing the two columns now differ.
-        """
-        nlev = sigma_coord.n_levels
-
-        # CAPE-positive temperature profile.
-        sigma_full = sigma_coord.sigma_full
-        T_col = 300.0 * jnp.power(jnp.clip(sigma_full, 0.05, None), 0.19)
-        T_col = jnp.maximum(T_col, 200.0)
-        T_grid = jnp.broadcast_to(
-            T_col[None, None, :], (grid.n_lat, grid.n_lon, nlev),
-        )
-        T_hat = sh_analysis_3d(grid, T_grid)
-
-        from legoesm.thermo import saturation_mixing_ratio
-        p_full_3d = jnp.broadcast_to(
-            (sigma_full * 1e5)[None, None, :],
-            (grid.n_lat, grid.n_lon, nlev),
-        )
-        q_sat = saturation_mixing_ratio(T_grid, p_full_3d)
-        rh_profile = jnp.where(sigma_full > 0.7, 0.95, 0.5)
-        q_v_grid = rh_profile[None, None, :] * q_sat
-        q_v_field = Field(
-            data=q_v_grid, name="q_v",
-            dims=("lat", "lon", "level"), units="kg/kg",
-        )
-
-        state_no_div = rest_state._replace(
-            T_hat=rest_state.T_hat.replace(data=T_hat),
-        )
-        state_no_div = _state_with_tracers(state_no_div, {"q_v": q_v_field})
-
-        # Wave-1 divergence as in test_kf_w_grid_responds_to_divergence.
-        a = grid.radius
-        u0 = 5.0
-        lon = grid.lon[None, :]
-        cos_lat_safe = jnp.clip(grid.cos_lat[:, None], 0.05, None)
-        div_grid_2d = -u0 * jnp.sin(lon) / (a * cos_lat_safe)
-        div_hat_2d = sh_analysis(grid, div_grid_2d.astype(jnp.float64))
-        div_hat_3d = jnp.broadcast_to(
-            div_hat_2d[:, None], (grid.n_sh, nlev),
-        ).astype(rest_state.div_hat.data.dtype)
-        state_w_div = rest_state._replace(
-            T_hat=rest_state.T_hat.replace(data=T_hat),
-            div_hat=rest_state.div_hat.replace(data=div_hat_3d),
-        )
-        state_w_div = _state_with_tracers(state_w_div, {"q_v": q_v_field})
-
-        physics_fn = make_convection_physics(
-            ConvectionConfig(scheme="tiedtke"),
-            model_type="spectral_pe", dt=300.0,
-        )
-
-        tend_a, prog_a = physics_fn(state_no_div, grid, sigma_coord)
-        tend_b, prog_b = physics_fn(state_w_div, grid, sigma_coord)
-
-        # The cloud-base mass-flux carry should differ — Tiedtke's
-        # closure ``M_b ∝ MC`` reads the spectral-derived MC, which is
-        # zero in state_a (no div) and non-zero in state_b (wave-1).
-        a_carry_max = float(jnp.max(jnp.abs(prog_a)))
-        b_carry_max = float(jnp.max(jnp.abs(prog_b)))
-        # b_carry should differ from a_carry — proves the MC plumbing
-        # is active.
-        max_diff = float(jnp.max(jnp.abs(prog_a - prog_b)))
-        assert max_diff > 0.0, (
-            "Tiedtke carry should respond to spectral-derived MC "
-            f"(no-div max={a_carry_max}, w-div max={b_carry_max})"
-        )
+    def test_tiedtke_refused_on_spectral(self):
+        """The WRF Tiedtke port needs omega, the dynamics and boundary-layer
+        q_v tendencies and the surface water flux, which the spectral lane
+        does not supply: the bridge refuses it."""
+        with pytest.raises(ValueError, match="spectral lane does not supply"):
+            make_convection_physics(ConvectionConfig(scheme="tiedtke"),
+                                    model_type="spectral_pe", dt=300.0)
 
     def test_kf_w_grid_responds_to_divergence(
         self, grid, sigma_coord, rest_state,
@@ -538,7 +399,7 @@ class TestSpectralPECMT:
         )
 
         physics_fn = make_convection_physics(
-            ConvectionConfig(scheme="tiedtke"),
+            ConvectionConfig(scheme="kain_fritsch"),
             model_type="spectral_pe", dt=300.0,
         )
 
@@ -553,7 +414,7 @@ class TestSpectralPECMT:
             state_with_T_and_q, dt=300.0, physics_fn=physics_fn,
         )
 
-        # With the new tracer-aware dycore, Tiedtke's q_v sink is
+        # With the new tracer-aware dycore, the convective q_v sink is
         # actually applied across the SSP-RK stages.  We expect the
         # boundary-layer q_v to *drop* slightly (convection consumes
         # vapor) — but stay finite and bounded by the initial q_v.
@@ -584,8 +445,7 @@ class TestSpectralPECMT:
         holomorphic-input dance with a complex T_hat).
         """
         physics_fn = make_convection_physics(
-            ConvectionConfig(scheme="tiedtke",
-                             tiedtke=TiedtkeConfig(precip_efficiency=0.0)),
+            ConvectionConfig(scheme="kain_fritsch"),
             model_type="spectral_pe", dt=300.0,
         )
 
@@ -625,22 +485,17 @@ class TestSpectralPECMT:
         # bridge in tests/unit/test_spectral_zm_rain_surface_route.py.
         ("kain_fritsch", "kain_fritsch", KainFritschConfig),
         ("emanuel", "emanuel", EmanuelConfig),
-        ("tiedtke", "tiedtke", TiedtkeConfig),
         ("bechtold", "bechtold", BechtoldConfig),
     ],
-    ids=["kain_fritsch", "emanuel", "tiedtke", "bechtold"],
+    ids=["kain_fritsch", "emanuel", "bechtold"],
 )
 def profile_scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each new scheme."""
     name, scheme_field, scheme_cls = request.param
-    # #929: this dispatch / finite-output regression shares one condensate-less
-    # (``q_v``-only) spectral state across all five schemes.  Default Bechtold
-    # now emits an in-updraft rain split (``precip_efficiency=0.7``) that the
-    # spectral bridge REQUIRES a ``q_c``/``q_r`` tracer to receive — otherwise
-    # it raises loudly rather than silently leaking the un-booked rain water.
-    # Pin ``precip_efficiency=0.0`` here so Bechtold exercises its pre-#929
-    # no-split dispatch path on this condensate-less state; the rain-split
-    # routing and the raise are covered by
+    # #929: the spectral bridge raises whenever a scheme emits a rain-split
+    # field (even all-zero), so the shared state carries a zero ``q_c`` tracer
+    # to receive it.  ``precip_efficiency=0.0`` pins Bechtold's no-split
+    # amount; the rain-split routing and the raise are covered by
     # ``test_convection_rain_split_bridges.py``.
     if scheme_cls is BechtoldConfig:
         kwargs = {scheme_field: scheme_cls(precip_efficiency=0.0)}
@@ -681,9 +536,14 @@ class TestSpectralPEAllProfileSchemes:
             data=q_v_grid, name="q_v",
             dims=("lat", "lon", "level"), units="kg/kg",
         )
+        # q_c receives the convective rain split (#929 raises without one).
+        q_c_field = Field(
+            data=jnp.zeros_like(q_v_grid), name="q_c",
+            dims=("lat", "lon", "level"), units="kg/kg",
+        )
         return rest_state._replace(
             T_hat=rest_state.T_hat.replace(data=T_hat),
-            tracers={"q_v": q_v_field},
+            tracers={"q_v": q_v_field, "q_c": q_c_field},
         )
 
     def test_bridge_call_succeeds(
@@ -752,3 +612,47 @@ class TestSpectralPEAllProfileSchemes:
         tend, _ = physics_fn(state, grid, sigma_coord)
         # And the resulting T tendency must be finite (no NaN).
         assert bool(jnp.all(jnp.isfinite(tend.T_hat.data)))
+
+
+class TestSpectralRainToSurface:
+    """``rain_to_surface`` on the spectral bridge: a mass-flux scheme's survivor
+    rain leaves the column (the bridge's existing surface route) instead of
+    entering q_r, where the microphysics would evaporate it a second time.
+    The kernel's ``dq_r_conv_dt`` is overridden with a fixed positive profile
+    (spy) so the rain source is known exactly."""
+
+    def _run(self, grid, sigma_coord, rest_state, flag):
+        from legoesm.atmosphere.physics.convection import integration as ci
+        shape = (grid.n_lat, grid.n_lon, sigma_coord.n_levels)
+        dq_r = jnp.full((grid.n_lat * grid.n_lon, sigma_coord.n_levels), 2.0e-7)
+        real = ci.bechtold_convection
+
+        def spy(*a, **k):
+            out, m_u, stoch = real(*a, **k)
+            return out._replace(dq_r_conv_dt=dq_r), m_u, stoch
+
+        zeros = jnp.zeros(shape)
+        tracers = {n: Field(data=zeros, name=n, dims=("lat", "lon", "level"), units="kg/kg")
+                   for n in ("q_v", "q_c", "q_r")}
+        ci.bechtold_convection = spy
+        try:
+            fn = make_convection_physics(
+                ConvectionConfig(scheme="bechtold", rain_to_surface=flag),
+                model_type="spectral_pe", dt=300.0)
+            tend, _ = fn(_state_with_tracers(rest_state, tracers), grid, sigma_coord)
+        finally:
+            ci.bechtold_convection = real
+        return tend, np.asarray(dq_r).reshape(shape)
+
+    def test_flag_off_hands_the_rain_to_q_r(self, grid, sigma_coord, rest_state):
+        tend, dq_r = self._run(grid, sigma_coord, rest_state, False)
+        np.testing.assert_array_equal(np.asarray(tend.tracers["q_r"].data), dq_r)
+
+    def test_flag_on_sends_the_rain_out_of_the_column(self, grid, sigma_coord, rest_state):
+        off, _ = self._run(grid, sigma_coord, rest_state, False)
+        on, _ = self._run(grid, sigma_coord, rest_state, True)
+        if "q_r" in on.tracers:
+            assert float(jnp.max(jnp.abs(on.tracers["q_r"].data))) == 0.0
+        for k in ("q_v", "q_c"):
+            np.testing.assert_array_equal(np.asarray(on.tracers[k].data),
+                                          np.asarray(off.tracers[k].data))

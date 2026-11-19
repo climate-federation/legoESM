@@ -144,7 +144,8 @@ def test_width_zero_column_is_the_les_split(name):
         jnp.asarray([case.sst]), jnp.asarray(np.concatenate([case.ext_q, q_v]))[None],
         jnp.asarray([case.cos_zenith]), cr.rrtmgp_config(case.irrad),
         sfc_albedo_override=cr.CB_SFC_ALBEDO, sfc_emissivity_override=cr.CB_SFC_EMISSIVITY,
-        o3_vmr=cr.mls_ozone_vmr(jnp.asarray(np.concatenate([case.ext_p_full, pf])))[None],
+        o3_vmr=cr.mls_ozone_layer_vmr(
+            jnp.asarray(np.concatenate([case.ext_p_half[:-1], ph]))[None])[0],
         cloud_path_liq=jnp.asarray(np.concatenate([z, q_c * f * dpg]))[None],
         cloud_r_eff_liq=jnp.asarray(r(q_c * f, constants.rho_water))[None],
         cloud_path_ice=jnp.asarray(np.concatenate([z, q_c * (1 - f) * dpg]))[None],

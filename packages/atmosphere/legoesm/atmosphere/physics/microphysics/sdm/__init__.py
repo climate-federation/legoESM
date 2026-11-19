@@ -40,6 +40,25 @@ identical real droplets it stands for). The processes are:
 The default Eulerian column path is still quiescent and stateless; resolved-wind
 particle transport is only active when callers explicitly carry a
 ``LagrangianSDMState`` and invoke the Lagrangian coupling.
+
+Oracle-faithfulness status (ERF 26.09, 6d09aeb1; fixture test
+``tests/atmosphere/microphysics/unit/test_sdm_erf_oracle.py``):
+
+* FAITHFUL (max relative error <= 1e-10 vs the running oracle): terminal
+  velocities, collision kernels (incl. Brownian), ``erf_esatw``, the growth
+  ODE and its Jacobian, every ERF ``TI`` integrator inside the
+  ``MassChange_LV`` particle update, and the Shima coalescence rate and
+  attribute update for given pairs and uniform draws.
+* NOT YET FAITHFUL: the particle <-> grid coupling (``coupling.py``: ERF
+  updates theta through its own EOS and builds the saturation ratio as
+  ``q_v/q_sat(erf_qsatw)``; legoESM's water-mass bookkeeping counts solute
+  as water), the stateless column adapter ``column.py`` (a reconstructed
+  mean-droplet / per-step box closure, not ERF SDM, which needs persistent
+  particles), the parcel/box drivers, the Lagrangian LES driver, sedimentation
+  and recycling, ERF's ice / mixed-phase processes, and the legoESM
+  fixed-substep ``rk4``/``euler`` integrators (no ERF counterpart; ``rk4`` with
+  one substep is still the default because the ERF integrators are not
+  reverse-mode differentiable).
 """
 
 from __future__ import annotations

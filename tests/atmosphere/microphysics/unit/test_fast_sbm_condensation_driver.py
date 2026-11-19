@@ -18,9 +18,12 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm import (
     number_density,
 )
 from legoesm.atmosphere.physics.microphysics.fast_sbm.condensation_driver import (
+    saturation_ratio_fast_sbm,
     warm_condensation_step,
 )
-from legoesm.thermo import relative_humidity, saturation_vapor_pressure
+from legoesm.atmosphere.physics.microphysics.fast_sbm.diffusional_growth import (
+    saturation_vapor_pressure_fast_sbm,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -32,9 +35,10 @@ DT = 0.5
 def _cloudy_state(rh_target):
     m = mass_doubling_grid()
     f = discretize_lognormal(m, 1.0e8, 10.0e-6, 1.4)   # ~100 cm^-3, 10 um
-    # Mixing ratio giving the requested saturation ratio (invert e(q)).
-    e = rh_target * float(saturation_vapor_pressure(jnp.asarray(T0)))
-    q = constants.epsilon * e / (P0 - e)
+    # Mixing ratio giving the requested FAST_SBM saturation ratio (invert the
+    # oracle's e(q) = q p/(0.622 + 0.378 q) on its POLYSVP curve).
+    e = rh_target * float(saturation_vapor_pressure_fast_sbm(jnp.asarray(T0)))
+    q = constants.epsilon_fast_sbm * e / (P0 - constants.one_minus_epsilon_fast_sbm * e)
     return m, f, jnp.asarray(T0), jnp.asarray(q), jnp.asarray(P0), \
         jnp.asarray(1.1)
 
@@ -49,10 +53,11 @@ def test_supersaturated_condenses_with_exact_closure():
     lwc_q = lambda fx: float(mass_density(fx, m)) / float(rho)
     assert (float(out.q_v) + lwc_q(out.f)) == pytest.approx(
         float(q) + lwc_q(f), rel=1e-13)
-    assert float(constants.c_pd * (out.T - T)) == pytest.approx(
-        float(-constants.L_v * (out.q_v - q)), rel=1e-12)
+    # Oracle ONECOND1 heat closure: TPN = TOLD + AL1*DELMASSL1, AL1 = 2500 K.
+    assert float(out.T - T) == pytest.approx(
+        float(-constants.lv_over_cp_fast_sbm * (out.q_v - q)), rel=1e-12)
     # Supersaturation decayed toward equilibrium, not past it.
-    S0 = float(relative_humidity(T, p, q)) - 1.0
+    S0 = float(saturation_ratio_fast_sbm(T, p, q)) - 1.0
     assert 0.0 <= float(out.S_new) < S0
     assert float(out.min_psi) >= 0.0
 
@@ -70,8 +75,9 @@ def test_subsaturated_evaporates():
 
 def test_saturated_empty_spectrum_fixed_point():
     m, _, T, _, p, rho = _cloudy_state(1.0)
-    e_s = float(saturation_vapor_pressure(jnp.asarray(T0)))
-    q_sat_exact = jnp.asarray(float(constants.epsilon) * e_s / (P0 - e_s))
+    e_s = float(saturation_vapor_pressure_fast_sbm(jnp.asarray(T0)))
+    q_sat_exact = jnp.asarray(float(constants.epsilon_fast_sbm) * e_s
+                              / (P0 - constants.one_minus_epsilon_fast_sbm * e_s))
     f0 = jnp.zeros_like(m)
     out = warm_condensation_step(f0, T, q_sat_exact, p, rho, DT, m)
     # No spectrum → SFN = 0 → R = 0 → S frozen → no growth at S≈0.

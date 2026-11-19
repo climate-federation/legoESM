@@ -6,6 +6,7 @@ checkpointing into a single reusable class.
 """
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import sys
@@ -21,6 +22,7 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.forcing.time_utils import daily_forcing_bucket, day_to_calendar
 
+from legoesm.core.bulk_flux import GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH
 from legoesm.core.conservation import (
     compute_global_moisture, fix_moisture_hydrostatic,
     energy_consistent_moisture_floor,
@@ -31,13 +33,17 @@ from legoesm.core.tracers import (
     init_tracers,
 )
 from legoesm.driver.config import ExperimentConfig
+from legoesm.core.precision import cast_pytree, match_leaf_dtypes
 from legoesm.driver.physics_pipeline import (
     refuse_cap_floor_on_fv,
+    rrtmgp_config_from_experiment,
+    solar_config_from_experiment,
     convection_config_for,
     build_physics_pipeline,
     gwd_config_for,
     mean_grid_spacing_m,
     moisture_registry_for,
+    registry_scheme_config,
     turbulence_config_for,
     validate_microphysics_tracer_slots,
 )
@@ -46,6 +52,12 @@ from legoesm.driver.mpas_diff_step import mpas_cadence, pick_physics_fn
 from legoesm.driver.restart import save_restart, load_restart
 
 logger = logging.getLogger("legoesm.driver")
+
+# precision-override module name of the MPAS-lane multilayer land step
+LAND_PRECISION_MODULE = "multilayer_land"
+
+# Set once an MPAS run has frozen its long-lived objects (gc.freeze).
+_GC_FROZEN = [False]
 
 # Keeps a seeded soil moisture strictly inside the van-Genuchten retention
 # range: psi_from_theta is singular at saturation and at the residual.
@@ -187,6 +199,32 @@ def _land_columns_to_local(arr, partition):
     return arr
 
 
+def _wait_for_mpi_device_work():
+    """Block until every dispatched mpi4jax op has run.  Host mpi4py
+    collectives share COMM_WORLD with mpi4jax, whose ops execute on the XLA
+    thread after async dispatch; issuing a host collective while one is in
+    flight lets ranks enter collectives in different orders (Cray MPICH:
+    "collective tags ... do not match", or a hang).  mpi4jax ops carry an
+    ordered effect, so effects_barrier waits for them.  A failure it
+    surfaces may be on this rank only, while peers walk into the next host
+    collective, so under MPI it aborts the job rather than strand them."""
+    try:
+        jax.effects_barrier()
+    except BaseException as exc:  # noqa: BLE001 - re-raised after Abort
+        try:
+            from mpi4py import MPI
+        except ImportError:
+            raise exc from None
+        comm = MPI.COMM_WORLD
+        if comm.Get_size() > 1:
+            logger.critical(
+                "  queued device work FAILED on rank %d before a host "
+                "collective (%s: %s); aborting so peers do not hang.",
+                comm.Get_rank(), type(exc).__name__, exc)
+            comm.Abort(1)
+        raise
+
+
 def _exchange_halo_cell_fields(halo_ex, fields):
     """Refresh the halo rows of several ``(n_local_cells,)`` cell fields from
     their owners in ONE message: stack the non-None fields along a trailing
@@ -217,6 +255,233 @@ def _exchange_halo_cell_fields(halo_ex, fields):
         col = out[:, k]
         result[i] = (col > 0.5) if a.dtype == bool else col.astype(a.dtype)
     return tuple(result)
+
+
+def split_land_columns(idx, n_proc, proc):
+    """Split the packed land columns ``idx`` into ``n_proc`` near-equal
+    contiguous shares.  Returns ``(mine, padded)``: this process's columns,
+    and the ``(n_proc, L)`` table of every share padded to one length L by
+    repeating the share's last column (a duplicate write of the same value),
+    so the gather is one fixed-shape collective on every process."""
+    shares = np.array_split(np.asarray(idx), n_proc)
+    if min(s.size for s in shares) == 0:
+        raise ValueError(
+            f"{np.size(idx)} land columns cannot be split over {n_proc} "
+            "processes (a share would be empty)")
+    L = max(s.size for s in shares)
+    padded = np.stack([np.concatenate([s, np.full(L - s.size, s[-1])])
+                       for s in shares])
+    return shares[proc], padded
+
+
+def land_radiating_surface(T_sea, f_land, E_sea, T_rad_land, eps_land):
+    """Radiating surface ``(T_g, eps_g)`` of a sea/land cell (tier-5 U11-1).
+
+    The coupler's tile-blend rule (``coupler/tile_fractions.py``) for two
+    tiles: ``eps_g = (1-f)*E_sea + f*eps_land`` and ``eps_g*sigma*T_g^4 =
+    (1-f)*E_sea*sigma*T_sea^4 + f*eps_land*sigma*T_rad_land^4``, so a solver
+    boundary ``eps_g*sigma*T_g^4 + (1-eps_g)*La`` is EXACTLY the area sum of
+    the two tiles' grey-body upward LW at any La.  Written relative to
+    ``T_sea`` so an ``f == 0`` cell returns ``(T_sea, E_sea)`` bitwise
+    (``E_sea/E_sea == 1``).  No floor: every temperature and emissivity is
+    positive on the domain (vote V7a), so the map is smooth there.
+
+    Formed at the promoted precision of all inputs (a float32 land mask must
+    not round ``(1-f)*E_sea`` before the float64 fields join it) and
+    returned in ``T_sea``'s dtype, the dtype of the cold-start seed, so the
+    forcing pytree keeps one dtype from the first step.
+    """
+    wdt = jnp.result_type(T_sea, f_land, T_rad_land, eps_land)
+    T_s, f, T_l, e_l = (jnp.asarray(x, wdt)
+                        for x in (T_sea, f_land, T_rad_land, eps_land))
+    eps_g = (1.0 - f) * E_sea + f * e_l
+    T_g = T_s * (((1.0 - f) * E_sea + f * e_l * (T_l / T_s) ** 4)
+                 / eps_g) ** 0.25
+    out_dt = jnp.asarray(T_sea).dtype
+    return T_g.astype(out_dt), eps_g.astype(out_dt)
+
+
+# Per-cell fields of the MPAS land step tuple, after the state: T_sfc, albedo,
+# q_surface, shflx, lhflx, surface_mass_flux, stress, held, T_rad, emissivity.
+_LAND_STEP_N_CELL = 10
+
+
+def gather_land_step(run, ncol, padded, proc, allgather):
+    """Run this process's share of the land step and rebuild the full output
+    on every process (shares from ``split_land_columns``).  ``run()`` returns
+    the land step tuple ``(state, _LAND_STEP_N_CELL per-cell fields, 5 counts,
+    iter max)``;
+    every per-column leaf (leading axis ``ncol``) takes each column from the
+    process that solved it, counts are summed, the iteration max is maxed.
+
+    ``allgather(tree)`` stacks a pytree across processes on a new axis 0 and
+    is a collective: every process calls it twice per land call.  All local
+    work that can fail (the step, the payload) runs BEFORE the first one, a
+    success flag, so a failure on one process raises on every process
+    instead of leaving the others blocked in the payload gather."""
+    err = None
+    try:
+        out = run()
+        mine = jnp.asarray(padded[proc])
+        flat = jnp.asarray(padded.reshape(-1))
+        leaves, tdef = jax.tree_util.tree_flatten(out[:_LAND_STEP_N_CELL + 1])
+        # A leaf that is not per column would keep only this process's
+        # share's update and silently differ across processes: refuse it.
+        bad = [np.shape(x) for x in leaves
+               if not (hasattr(x, "shape") and x.ndim >= 1
+                       and x.shape[0] == ncol)]
+        if bad:
+            raise ValueError(
+                f"land step output leaves {bad} are not per-column "
+                f"(ncol={ncol}); the split land solve cannot gather them")
+        # ONE (L, K) float64 buffer for every per-column leaf (exact for the
+        # float/bool/small-int leaves the land carries).
+        rows = [jnp.asarray(x)[mine].reshape(mine.shape[0], -1)
+                for x in leaves]
+        widths = [r.shape[1] for r in rows]
+        payload = jax.block_until_ready(
+            (jnp.concatenate([r.astype(jnp.float64) for r in rows], axis=1),
+             jnp.stack([jnp.asarray(x, jnp.float64)
+                        for x in out[_LAND_STEP_N_CELL + 1:]])))
+    except Exception as exc:  # noqa: BLE001 - agreed across processes below
+        err = exc
+    flags = allgather(jnp.asarray(0.0 if err is None else 1.0))
+    if err is not None:
+        raise err
+    if float(np.max(np.asarray(flags))) != 0.0:
+        raise RuntimeError("split land solve failed on another process "
+                           "(see its traceback); stopping in lockstep")
+    g_rows, g_cnt = allgather(payload)
+    g_rows = jnp.asarray(g_rows).reshape(flat.shape[0], -1)
+    full, k = [], 0
+    for x, w in zip(leaves, widths):
+        blk = g_rows[:, k:k + w].reshape((-1,) + x.shape[1:])
+        full.append(jnp.asarray(x).at[flat].set(blk.astype(x.dtype)))
+        k += w
+    g_cnt = jnp.asarray(g_cnt)
+    counts = tuple(jnp.sum(g_cnt[:, i]).astype(
+                       jnp.asarray(out[_LAND_STEP_N_CELL + 1 + i]).dtype)
+                   for i in range(len(out) - _LAND_STEP_N_CELL - 2))
+    return (tuple(jax.tree_util.tree_unflatten(tdef, full)) + counts
+            + (jnp.max(g_cnt[:, -1]).astype(jnp.asarray(out[-1]).dtype),))
+
+
+def radiation_column_mesh(step_mesh, n_devices):
+    """The mesh radiation splits its columns over.  A dycore that runs on its
+    own step mesh (the FV3 duo face / window layouts) gets that SAME mesh:
+    JAX lowers a compiled step against one mesh only, and the physics runs
+    inside the duo step's jit.  Every other lane gets a new 1-D ``'col'``
+    mesh over ``n_devices`` devices, as before."""
+    if step_mesh is not None:
+        return step_mesh
+    from legoesm.parallel.column_shard import create_column_mesh
+    return create_column_mesh(n_devices)
+
+
+def land_device_mesh(step_mesh, local_devices):
+    """The mesh the land device split runs on: the step mesh itself when this
+    process owns all of its devices (one mesh per compiled step, as for
+    radiation), else a 1-D ``'land'`` mesh over this process's devices.
+    KNOWN GAP: several processes each driving more than one device still
+    get that per-process ``'land'`` mesh, which differs from the step mesh
+    inside the duo physics jit."""
+    if step_mesh is not None and len(local_devices) == step_mesh.size:
+        return step_mesh
+    from jax.sharding import Mesh
+    return Mesh(np.array(local_devices), ("land",))
+
+
+def shard_land_columns(cols, n_dev):
+    """This process's land columns ``cols`` laid out for ``n_dev`` local
+    devices: the same near-equal contiguous shares as the process split
+    (``split_land_columns``), each padded to one length so every device holds
+    one equal shard.  Returns ``(slots, keep)``: the column of every slot
+    (device-major) and the positions of the real slots, in ``cols`` order; a
+    padding slot repeats its share's last column and its result is dropped."""
+    _, padded = split_land_columns(cols, n_dev, 0)
+    width = padded.shape[1]
+    sizes = [s.size for s in np.array_split(np.asarray(cols), n_dev)]
+    keep = np.concatenate([d * width + np.arange(n)
+                           for d, n in enumerate(sizes)])
+    slots = padded.reshape(-1)
+    if not np.array_equal(slots[keep], np.asarray(cols)):
+        raise AssertionError("land device shares do not reproduce the "
+                             "process's columns (split rule changed?)")
+    return slots, keep
+
+
+def solve_land_on_devices(step, args, is_col, mesh, keep):
+    """``step(*args)`` (the land step on packed slots, leading axis = slot)
+    run one equal shard per device of ``mesh`` (split over all its axes, so
+    the duo's 3-D window mesh works too) under a shard_map,
+    then cut to the real slots ``keep``.  ``is_col`` is ``args``' tree of
+    booleans marking the per-column array leaves (split over the devices);
+    every other leaf is shared.  Every OUTPUT leaf must be per column (its
+    leading axis follows the column count, traced at two counts), else
+    ValueError.
+    The step's whole-run
+    counters would be per shard there, so they are recounted from their
+    masks over the real slots.  Returns ``(state, response, carbon,
+    surface)`` like the step."""
+    from jax.sharding import PartitionSpec as P
+    from legoesm.parallel.shard_map_compat import shard_map
+
+    n_dev = int(np.prod(mesh.devices.shape))
+    names = mesh.axis_names
+    axis = names[0] if len(names) == 1 else tuple(names)
+    leaves, tdef = jax.tree_util.tree_flatten(args)
+    cols = jax.tree_util.tree_leaves(is_col)
+    if len(cols) != len(leaves):
+        raise ValueError("is_col does not match the land step arguments")
+    is_arr = [hasattr(x, "shape") and hasattr(x, "dtype") for x in leaves]
+    arrs = [x for x, a in zip(leaves, is_arr) if a]
+    arr_col = [c for c, a in zip(cols, is_arr) if a]
+    n_slot = {x.shape[0] for x, c in zip(arrs, arr_col) if c}
+    if len(n_slot) != 1 or next(iter(n_slot)) % n_dev:
+        raise ValueError(f"per-column land leaves have leading sizes {n_slot}"
+                         f"; need one size divisible by {n_dev} devices")
+    n_slot = n_slot.pop()
+
+    def body(*a):
+        it = iter(a)
+        o = step(*tdef.unflatten([next(it) if t else x
+                                  for x, t in zip(leaves, is_arr)]))
+        return o[:3] + (o[3]._replace(n_held=None, n_fallback=None,
+                                      n_fallback_rejected=None),)
+
+    def shapes(n):
+        return [jax.ShapeDtypeStruct(((n,) + tuple(x.shape[1:])) if c
+                                     else x.shape, x.dtype)
+                for x, c in zip(arrs, arr_col)]
+    # an output is per column when its LEADING axis follows the column count
+    a_out = jax.eval_shape(body, *shapes(n_slot))
+    b_out = jax.eval_shape(body, *shapes(n_slot + 1))
+    shared = [jax.tree_util.keystr(k) for (k, a), b in zip(
+        jax.tree_util.tree_flatten_with_path(a_out)[0],
+        jax.tree_util.tree_leaves(b_out))
+        if not a.shape or b.shape != (a.shape[0] + 1,) + a.shape[1:]]
+    if shared:
+        raise ValueError(
+            f"land step outputs {shared} are not per column; the device "
+            "split can only return per-column outputs (and the three "
+            "fallback/held counters, recounted here)")
+    # check_vma off: the canopy scan carries start replicated.  Safe only
+    # because every output is per column (checked above).
+    out = shard_map(
+        body, mesh=mesh,
+        in_specs=tuple(P(axis) if c else P() for c in arr_col),
+        out_specs=jax.tree_util.tree_map(lambda _: P(axis), a_out),
+        check_vma=False)(*arrs)
+    keep = jnp.asarray(keep)
+    out = jax.tree_util.tree_map(lambda o: o[keep], out)
+    state, resp, carbon, sfc = out
+
+    def count(m):
+        return None if m is None else jnp.sum(
+            jnp.asarray(m).astype(jnp.int32))
+    return state, resp, carbon, sfc._replace(
+        n_held=count(sfc.held), n_fallback=count(sfc.fallback),
+        n_fallback_rejected=count(sfc.fallback_rejected))
 
 
 def _map_flat_column_leaves(tree, n_tile, global_ncol, fn):
@@ -269,6 +534,41 @@ def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> boo
     before SLURM kills the job (so a dependency chain can resume).
     """
     return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
+
+
+def trace_windows(spec: str | None, rank: str, n_windows: str | None = None,
+                  ranks: str | None = None) -> list[tuple[int, int, str]]:
+    """Profiler windows (start_step, stop_step, out_dir) for this rank.
+
+    ``spec`` is LEGOESM_TRACE_STEPS="first:count:dir" (dir may contain ':').
+    ``n_windows`` (LEGOESM_TRACE_WINDOWS) splits the trace into back-to-back
+    windows of ``count`` steps written to dir/rank<r>/wNN; unset keeps one
+    window in dir/rank<r>.  ``ranks`` (LEGOESM_TRACE_RANKS, comma list)
+    limits tracing to those ranks; unset traces every rank.
+    """
+    if not spec:
+        return []
+    try:
+        t0, tn, tdir = spec.split(":", 2)
+        t0, tn = int(t0), int(tn)
+        nw = 1 if n_windows is None else int(n_windows)
+        sel = None if ranks is None else {int(r) for r in ranks.split(",")}
+    except ValueError:
+        raise ValueError(
+            f"LEGOESM_TRACE_STEPS={spec!r} / LEGOESM_TRACE_WINDOWS="
+            f"{n_windows!r} / LEGOESM_TRACE_RANKS={ranks!r}: expected "
+            "'first:count:dir', an integer and a comma list of integers") from None
+    if t0 < 0 or tn < 1 or nw < 1:
+        raise ValueError(
+            f"LEGOESM_TRACE_STEPS={spec!r}, LEGOESM_TRACE_WINDOWS={n_windows!r}:"
+            " need first >= 0, count >= 1, windows >= 1")
+    if sel is not None and int(rank) not in sel:
+        return []
+    base = os.path.join(tdir, "rank" + rank)
+    if n_windows is None:
+        return [(t0, t0 + tn, base)]
+    return [(t0 + k * tn, t0 + (k + 1) * tn, os.path.join(base, f"w{k:02d}"))
+            for k in range(nw)]
 
 
 def _standalone_cloud_config(cfg, cloud_scheme: str,
@@ -501,16 +801,23 @@ def warn_sed_substeps_unreported(cfg, lane: str = "current",
     return True
 
 
-def _evap_sfc_slot() -> int:
-    """Index of ``evap_sfc`` (the column's surface water flux) in the MPAS
-    ``_sfc_diag`` tuple, derived from the SHARED slot contract like
-    ``_sed_substeps_slot`` -- never hand-counted."""
+def _sfc_diag_slot(key: str) -> int:
+    """Index of *key* in the MPAS ``_sfc_diag`` tuple, derived from the
+    SHARED slot contract like ``_sed_substeps_slot`` -- never hand-counted."""
     from legoesm.core.state import (
         MPAS_SFC_DIAG_BASE_KEYS,
         MPAS_SFC_DIAG_EXTRA_KEYS,
     )
+    if key in MPAS_SFC_DIAG_BASE_KEYS:
+        return MPAS_SFC_DIAG_BASE_KEYS.index(key)
     return (len(MPAS_SFC_DIAG_BASE_KEYS)
-            + MPAS_SFC_DIAG_EXTRA_KEYS.index("evap_sfc"))
+            + MPAS_SFC_DIAG_EXTRA_KEYS.index(key))
+
+
+def _evap_sfc_slot() -> int:
+    """Index of ``evap_sfc`` (the column's surface water flux) in the MPAS
+    ``_sfc_diag`` tuple."""
+    return _sfc_diag_slot("evap_sfc")
 
 
 def land_snowfall_from_sfc_diag(sfc_diag, precip):
@@ -629,7 +936,9 @@ _HARD_SAT_LOG_QV_EPS = 1.0e-9        # [kg/kg] count a point as "drained" above 
 
 def _mpas_zenith_ocean_albedo(lat, day, orbit=None):
     """Briegleb (1992) open-ocean albedo at the daytime-effective daily-mean
-    solar cosine, per cell.
+    solar cosine, per cell -- the MPAS ``dynamic_albedo`` path for the
+    single-albedo (non-rrtmgp) radiation schemes.  With rrtmgp the lane uses
+    the CESM2.1 direct/diffuse split instead (integration.cesm_ocean_albedo_direct).
 
     ``mu = Q_day / (S_0 * f_day)`` is the cosine a column sees AVERAGED OVER
     ITS SUNLIT HOURS, which is the right weighting for an albedo that is held
@@ -936,7 +1245,18 @@ class _MPASSfcFluxAccum:
     # per step per slot and is what makes the budget answerable at all.
     # 13 = evap_sfc (the column's surface water flux): accumulated like hfls
     # so CMOR evspsbl and the moisture closure get the same window MEAN.
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 13)
+    # 8/9 = sw_down_sfc / lw_down_sfc: CMOR rsds/rlds, and with slots 0/1
+    # the upwelling pair rsus/rlus (down - net).  Strongly diurnal, so a
+    # fixed-clock snapshot would carry the #1353 defect under a mean label.
+    # 14 = precip_frozen (the frozen part of slot 2): CMOR prsn, a flux
+    # averaged like pr.  KNOWN BEHAVIOUR (user decision, PR #2204): a run
+    # resumed MID-WINDOW from a checkpoint written before slot 14 existed
+    # publishes prsn for that one window as the mean of the post-restart
+    # steps only (the CMOR feed gates on the window's step count,
+    # ``is_complete``, not on per-slot counts), while pr covers the whole
+    # window -- the same behaviour slots 8/9/13 shipped with.  Later
+    # windows are complete.
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14)
     #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
     #: sw_dn, hfss, hfls).  After the first radiation call every one of them
     #: is non-None on EVERY step (the MPAS model holds the last radiation
@@ -1004,9 +1324,13 @@ class _MPASSfcFluxAccum:
         before a slot existed restores the others with a full count while
         the new slot only sees the post-restart remainder; ``is_complete()``
         passes (it counts steps, not per-slot samples) and the short slot
-        would be published as a full interval mean (codex, #1354)."""
+        would be published as a full interval mean (codex, #1354).  Each
+        slot must also have been fed on EVERY counted step: a step where
+        the physics exported none of *slots* leaves equal but short counts,
+        a mean over fewer steps than the window (#1902)."""
         counts = {self._n.get(i, 0) for i in slots}
-        return self.is_complete() and len(counts) == 1 and counts != {0}
+        return (self.is_complete() and self._steps > 0
+                and counts == {self._steps})
 
     def is_complete(self) -> bool:
         """True iff this interval saw EXACTLY the step count a complete
@@ -1224,8 +1548,8 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_full, dt,
         total water is conserved.
     """
     from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        drain_l_over_cp,
         hard_saturation_drain,
-        mixed_phase_l_over_cp,
         mixed_phase_liquid_fraction,
     )
     if p_full.shape != T.shape:
@@ -1252,19 +1576,26 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_full, dt,
         # (Landing q_c below the LIQUID curve at cold T would re-evaporate, so
         # the ice fraction MUST go to q_i for the drain to stick; the caller
         # seeds N_i for that ice mass.)
-        _l_cp = mixed_phase_l_over_cp(T).astype(T.dtype)
+        _l_cp = drain_l_over_cp(T, True).astype(T.dtype)
         T_new = T + _l_cp * dq
         w_liq = mixed_phase_liquid_fraction(T).astype(q_v.dtype)
         q_c_new = q_c + w_liq * dq
         q_i_new = q_i + (1.0 - w_liq) * dq
     else:
         # Liquid path (ice_curve off, or requested without a cloud-ice
-        # reservoir): condense to q_c with L_v -> c_pd*T + L_v*q_v exact.
-        T_new = T + (constants.L_v / constants.c_pd) * dq
+        # reservoir): condense to q_c with L_v(T0) -> c_pd*T + L_v(T0)*q_v exact.
+        T_new = T + drain_l_over_cp(T, False).astype(T.dtype) * dq
         q_c_new = q_c + dq
         q_i_new = q_i
     q_v_new = q_v - dq
     return T_new, q_v_new, q_c_new, q_i_new, dq
+
+
+# The run loop calls the drain every step outside any jit; eagerly its fixed
+# 30-pass bisection dispatched op by op (~140 ms/step on the lat-lon lane).
+_mpas_hard_saturation_poststep_jit = jax.jit(
+    _mpas_hard_saturation_poststep,
+    static_argnames=("dt", "hard_threshold", "hard_max_heating_K", "ice_curve"))
 
 
 # Air-density floor for the Cooper ice-number/mass conversion, matching
@@ -1280,6 +1611,10 @@ _ICE_SEED_RHO_FLOOR = 0.1        # [kg/m^3]
 # layer (last valid magnitude, valid mask, value-from-latest-solve mask).
 _LAND_STRESS_CKPT_KEYS = ("land_taumag", "land_taumag_valid", "land_taumag_fresh")
 _LAND_ML_CACHE_FIELDS = ("canopy_x",)
+# Prognostic fields a checkpoint written WITHOUT them may lack: the restore
+# initialises them from the restored state instead of refusing.  ``T_snow``
+# (the opt-in snow thermal node) -> ``init_snow_temperature`` (user 2026-10-03).
+_LAND_ML_INIT_ON_RESTORE = ("T_snow",)
 # Restart-exactness payload of the column loop (R-ex), beyond the land
 # cadence window below (which carries the land boundary outputs the loop
 # holds between land steps).  The held RADIATION slots are NOT persisted
@@ -1309,13 +1644,112 @@ def _sfc_flux_lag_slots() -> tuple[int, int]:
 # the land outputs the surface blend holds between land calls.  Without them
 # every restart dropped the pending samples (precipitation and radiation the
 # land never received) and re-ran the one-step bootstrap.
-_LAND_WIN_PREFIXES = ("land_win_", "land_held_")
+_LAND_WIN_PREFIXES = ("land_win_", "land_held_", "cpl_win_")
+
+# AtmToSurface fields a land call books as an amount over its step (mean rate
+# x DT_LAND); every other field is a state or flag the call reads as is.
+LAND_EXTENSIVE_FORCING = ("sw_down", "lw_down", "precip_total", "precip_snow")
+LAND_INTENSIVE_FORCING = ("T_lowest", "q_lowest", "u_lowest", "v_lowest",
+                          "p_lowest", "p_surface", "rho_lowest", "cos_zenith",
+                          "co2_ppmv", "has_radiation", "has_precipitation",
+                          "z_lowest")
+
+
+# Of those, the ones a bootstrap call scales: water only.  Downward SW/LW stay
+# at the samples' mean rate over the whole first interval (user 2026-11-19):
+# scaling them by n/k ran the land ~DT_LAND nearly dark, up to ~30 K too cold
+# at sunlit cells after 1 h.  The radiation booked is then off by the first
+# sample(s) standing in for the interval's later ones, once per start (zero
+# when the radiation is held across the whole first interval).
+LAND_BOOT_SCALED_FORCING = ("precip_total", "precip_snow")
+
+
+def land_bootstrap_forcing(a2s, n_samples, k):
+    """A bootstrap land call's forcing: it advances DT_LAND = k host steps on
+    ``n_samples`` (< k) samples, so the rain and snow it books are scaled by
+    n_samples / k and each sample's water is booked once (the next call books
+    the later ones).  Downward radiation is passed as is."""
+    f = n_samples / k
+    return a2s._replace(**{name: getattr(a2s, name) * f
+                           for name in LAND_BOOT_SCALED_FORCING})
+# Per-run scalars among those keys (every other key is a per-cell field).
+_WIN_SCALAR_KEYS = ("land_win_n", "cpl_win_n", "cpl_win_k")
+# Coupling window (P5b): per-step sums of the fluxes the coupler consumes as
+# window MEANS, in the order (net SW, net LW, precip, frozen precip).
+_CPL_WIN_FIELDS = ("sw_net_sfc", "lw_net_sfc", "precip", "precip_frozen")
+# Extra window sums under the coupler ice/lake handback (P5c K3): the
+# open-water share of the radiation and turbulent exchange (per grid cell),
+# the radiation booked for the ice and lake (per unit tile area) and the land
+# runoff (per grid cell).
+_CPL_HB_RAD_FIELDS = ("ow_sw_net", "ow_lw_net", "booked_sw_net_ice",
+                      "booked_lw_abs_ice", "booked_sw_net_lake",
+                      "booked_lw_abs_lake")
+_CPL_HB_OW_FIELDS = ("shflx_ow", "lhflx_ow", "evap_ow", "taux_ow", "tauy_ow")
+_CPL_HB_FIELDS = _CPL_HB_RAD_FIELDS + _CPL_HB_OW_FIELDS + ("runoff_land",)
+# Coupler ice/lake handback (P5c): how far below zero the open-water fraction
+# 1 - f_land - f_ice - f_lake may sit (round-off) before the atmosphere's land
+# fraction and the coupler's tile fractions are declared different partitions
+# (vote V2 2026-11-08: GLM/codex/Claude raise, no clipping).
+_HB_PARTITION_TOL = 1.0e-9
+
+
+def coupling_window_from_checkpoint(payload, cpl_k, n_cells,
+                                    fields=_CPL_WIN_FIELDS):
+    """``(sums, n)`` of a persisted coupling window (``cpl_win_*`` keys).
+
+    Refuses a window written under a different cadence (``cpl_win_k`` !=
+    ``cpl_k``) and per-cell arrays not shaped ``(n_cells,)``.  ``sums`` holds
+    ``None`` for a field the window never received (dry run), in ``fields``
+    order."""
+    n = int(payload.get("cpl_win_n", 0))
+    k = int(payload.get("cpl_win_k", cpl_k))
+    if k != cpl_k or not 0 <= n < cpl_k:
+        raise ValueError(
+            f"checkpoint coupling window: {n} pending step(s) of a "
+            f"{k}-step window, but this run couples every {cpl_k} step(s); "
+            "the coupling interval changed across the restart.")
+    sums = []
+    for f in fields:
+        v = payload.get(f"cpl_win_sum_{f}")
+        if v is not None and np.shape(v) != (n_cells,):
+            raise ValueError(
+                f"checkpoint cpl_win_sum_{f} shape {np.shape(v)} != "
+                f"(nCells={n_cells},) -- mesh mismatch.")
+        sums.append(None if v is None else jnp.asarray(v))
+    return sums, n
+
+
+def surface_handback_payload(H):
+    """Checkpoint keys of the coupler ice/lake handback the column loop is
+    consuming (``cpl_win_hb_<field>``): the pending exchange H_n (plan P1),
+    which the next window cannot recompute."""
+    return {f"cpl_win_hb_{f}": getattr(H, f) for f in H._fields}
+
+
+def surface_handback_from_payload(payload):
+    """The ``SurfaceHandback`` a checkpoint carries, or ``None`` when it
+    carries none; a partial set is refused."""
+    from legoesm.coupler.coupler import SurfaceHandback
+    keys = [f"cpl_win_hb_{f}" for f in SurfaceHandback._fields]
+    have = [k for k in keys if k in payload]
+    if not have:
+        return None
+    if len(have) != len(keys):
+        raise ValueError(
+            "checkpoint carries a partial coupler handback: "
+            f"{sorted(set(keys) - set(have))} missing.")
+    return SurfaceHandback(*(jnp.asarray(payload[k]) for k in keys))
+
+
 _LAND_HELD_NAMES = ("T_skin", "albedo", "qsfc_last", "qsfc", "shflx", "lhflx",
-                    "evap", "beta")
+                    "evap", "beta", "T_rad", "emis")
 # ``beta`` (R-ex): once the solved-humidity channel is live the loop stops
 # refreshing the traced beta, so it is NOT a function of the restored soil
 # state; without it a restart re-derives it and the restart set differs.
 _LAND_HELD_FLUX = ("qsfc", "shflx", "lhflx", "evap")
+# The land's radiating pair (U11-1): persisted together (vote V8a); a
+# checkpoint written before it existed carries neither.
+_LAND_HELD_RAD = ("T_rad", "emis")
 
 
 def land_window_checkpoint_payload(a2s_sum, n, cz_wsum, w_sum, held):
@@ -1352,7 +1786,7 @@ def land_window_from_checkpoint(payload, land_k, n_cells):
     """
     from legoesm.core.coupling_fields import AtmToSurface
     for k, v in payload.items():
-        if k != "land_win_n" and np.shape(v) != (n_cells,):
+        if k not in _WIN_SCALAR_KEYS and np.shape(v) != (n_cells,):
             raise ValueError(
                 f"checkpoint {k} shape {np.shape(v)} != (nCells={n_cells},) "
                 "-- mesh mismatch.")
@@ -1391,7 +1825,8 @@ def land_window_from_checkpoint(payload, land_k, n_cells):
     # needs the skin T and albedo it was solved with.
     _hk = {nm for nm in _LAND_HELD_NAMES if f"land_held_{nm}" in payload}
     if ((_hk and not {"T_skin", "albedo"} <= _hk)
-            or (_hk & set(_LAND_HELD_FLUX)) not in (set(), set(_LAND_HELD_FLUX))):
+            or (_hk & set(_LAND_HELD_FLUX)) not in (set(), set(_LAND_HELD_FLUX))
+            or (_hk & set(_LAND_HELD_RAD)) not in (set(), set(_LAND_HELD_RAD))):
         raise ValueError(
             f"checkpoint carries a partial held land-output set {sorted(_hk)}: "
             "incomplete land cadence state.")
@@ -1482,8 +1917,6 @@ def _is_mpas_cell_partitioned(drv) -> bool:
     * :meth:`ModelDriver._create_diagnostics` — give the collector the GLOBAL
       mesh + globally-gathered ``fx`` fields;
     * :meth:`ModelDriver._feed_mpas_cmip_accumulators` — route to the gather;
-    * :meth:`ModelDriver.save_checkpoint` / :meth:`ModelDriver._run_column` — do
-      NOT persist or resume the rank-local per-cell CMOR flux sums.
 
     A module function rather than a method so the diagnostic-feed test doubles
     (plain ``SimpleNamespace`` stand-ins) evaluate it identically to the real
@@ -1520,6 +1953,450 @@ def _validate_number_convention(payload, tracer_names) -> None:
         )
 
 
+def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
+    """Land config, per-column parameters and prescribed carbon state of the
+    multilayer land tile, exactly as the AMIP driver deploys it.
+
+    ``config`` is the experiment config, ``lat_rad``/``lon_rad`` the (ncol,) column
+    coordinates and ``surfdata_grid`` the grid the harmonized surfdata is regridded
+    onto.  Shared by the driver and the offline land calibrator so the fitted and
+    the deployed land model cannot drift apart.  Returns a dict with ``cfg``,
+    ``params``, ``carbon`` (None unless a differland state is seeded),
+    ``params_update_factory`` (None unless the two-leaf canopy is selected),
+    ``surface_map`` and ``surfdata_file``."""
+    import numpy as _np
+    from legoesm.land.clm_surface_map import (
+        load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
+    )
+    from legoesm.land.stomata import StomataConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.surface_scheme import (
+        SimpleSEBConfig, TwoLeafCanopyConfig,
+    )
+    lat_deg = _np.degrees(lat_rad)
+    lon_deg = _np.degrees(lon_rad)
+    params_update_factory = None
+    carbon = None
+    # Land surface-scheme dispatch (#730). "simple_seb" (default) = bulk SEB
+    # with the beta_soil moisture path; "two_leaf" = DifferBESS two-leaf canopy
+    # (Kelvin h_r bare-soil + two-leaf stomatal transpiration), which limits
+    # land ET below potential and breaks the over-evaporation wet loop.
+    _scheme_name = config.land_surface_scheme
+    if _scheme_name == "simple_seb":
+        _surface_scheme = SimpleSEBConfig()
+    elif _scheme_name == "two_leaf":
+        _surface_scheme = TwoLeafCanopyConfig(
+            max_iters=int(config.land_canopy_max_iters))
+    elif _scheme_name == "clm_ml":
+        # CLM-ML-JAX multilayer canopy.  The ncol>1 traceable path (S2) makes
+        # the coupled land tile steppable over all model columns inside the
+        # jitted segment: the canopy is warm-started once (eager) at setup and
+        # a concrete per-column ``grid_info`` is threaded into the jitted step
+        # (see the warm-start block at the end of this method + the pipeline's
+        # clm_ml_grid_info).  NOTE the two current limitations: (a) the land
+        # tile's cos_zenith is the same 0.5 placeholder the two_leaf canopy
+        # uses here (faithful diurnal zenith is a shared follow-up), and (b)
+        # the per-column Python loop unrolls O(ncol) in the trace, so this is
+        # for MODEST column counts, not full-AMIP resolution (the masked-vmap
+        # rewrite, S3, removes the unroll).  MPI/SPMD is refused at the scatter
+        # (the 1-based mlcanopy array does not match the per-column remap).
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        _surface_scheme = CLMMLCanopyConfig(
+            use_surfdata_pft=bool(getattr(
+                config, "clm_ml_use_surfdata_pft", False)))
+    else:
+        raise ValueError(
+            f"Unknown land_surface_scheme {_scheme_name!r}; "
+            "expected 'simple_seb', 'two_leaf', or 'clm_ml'."
+        )
+
+    # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
+    # the CLM reference surfdata onto the model columns.  A pre-staged path
+    # (``clm_surfdata_path``) is required on compute nodes with no outbound
+    # internet (the default fetches from UCAR, which fails on such nodes).
+    surfdata_path = config.clm_surfdata_path
+    if surfdata_path:
+        # A staged path is set: use it, and FAIL LOUDLY if absent rather than
+        # attempting a (compute-node-blocked) network fetch to that exact path.
+        if not os.path.exists(surfdata_path):
+            raise FileNotFoundError(
+                f"clm_surfdata_path={surfdata_path!r} does not exist; stage the "
+                "CLM surfdata NetCDF there (compute nodes have no outbound "
+                "internet to download it).")
+        surfdata_file = surfdata_path
+    else:
+        surfdata_file = download_clm_surfdata()
+    surface_map = load_clm_surface(
+        surfdata_file, lat_deg, lon_deg,
+        vg_air_entry_m=float(config.land_soil_vg_air_entry_m))
+
+    # Non-spatial defaults from the config; clm_multilayer_setup overwrites only
+    # hydraulics/thermal.  Thread the active snow-albedo + stomata features the
+    # slab land already uses (snow_albedo_feedback, land_stomatal_beta) so
+    # ``use_multilayer_land`` is a strict UPGRADE (adds Richards multilayer soil
+    # + CLM texture/PFT maps) rather than a partial regression to a
+    # no-snow-albedo / no-stomata surface.  The soil SEB uses land MOST (with
+    # the CLM per-cell z0) to MATCH the atmospheric tiled LAND tile, which
+    # hard-codes land "most"; surface_bulk_scheme (coare3/large_yeager) is the
+    # OCEAN surface-layer scheme and must NOT drive the land skin-T (it would
+    # evolve T_sfc with ocean-roughness logic, inconsistent with the atmosphere
+    # land-flux exchange law — the T_sfc now feeds T_land, so consistency here
+    # matters).
+    base = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(
+            n_layers=config.multilayer_n_layers,
+            total_depth=config.multilayer_soil_depth,
+        ),
+        bulk_scheme="most",
+        snow_albedo_feedback=config.snow_albedo_feedback,
+        surface_scheme=_surface_scheme,
+        stomata=StomataConfig(
+            enabled=config.land_stomatal_beta,
+            gs_max=config.land_gs_max,
+        ),
+    )
+    # Deploy the tile in EXACTLY the model its parameters were calibrated
+    # under: the biophysics LMIP two-leaf canopy
+    # (``templates/land/biophysics/lmip_biophys_2deg.yaml``), which is the
+    # offline configuration scored against observed land fluxes.
+    #
+    # AMIP no longer has a route to the legacy SimpleSEB-fitted bake. That
+    # pairing — SimpleSEB tables under a coupled run — is what produced the
+    # land surface-flux bias, and keeping a switch for it only preserved the
+    # chance of selecting it again. ``calibrated_multilayer_setup`` remains
+    # in the land package for reproducing old OFFLINE runs; nothing coupled
+    # reaches it.
+    if getattr(config, "land_calibrated_physics", False):
+        from legoesm.land.config import apply_biophysics_lmip_two_leaf
+        base = apply_biophysics_lmip_two_leaf(base)
+
+    params, cfg = clm_multilayer_setup(surface_map, base_config=base)
+
+    # RE-APPLY THE CALIBRATION'S ALBEDO SCALARS, AFTER the bake.
+    # ``clm_multilayer_setup`` rebuilds ``land_albedo`` and overwrites all
+    # five scalar fields with its own values, so applying them before it
+    # loses them without a word: a run asking for a fresh-snow albedo of
+    # 0.8077 was measured getting 0.8362. The bake's per-column
+    # ``snow_cover_scale`` map is built here and must survive, so replace
+    # the SCALARS on the object the bake just produced.
+    if getattr(config, "land_calibrated_physics", False):
+        from legoesm.land.clm_surface_map import biophysics_lmip_albedo_scalars
+        cfg = cfg._replace(
+            land_albedo=cfg.land_albedo._replace(
+                **biophysics_lmip_albedo_scalars()))
+
+    # Temperature-dependent snow ageing (opt-in): applied LAST, so it
+    # survives both the bake and the calibration re-apply above. The
+    # calibration fitted only the calendar-clock scalars and never saw this
+    # field, so it cannot be overwritten by it.
+    _act = getattr(config, "snow_age_activation_K", None)
+    if _act is not None:
+        cfg = cfg._replace(
+            land_albedo=cfg.land_albedo._replace(
+                snow_age_activation_K=float(_act)))
+    # Snow-age e-folding time, same placement and for the same reason: the
+    # calibration re-apply above sets tau_snow_decay, so an override has to
+    # land after it or it is silently discarded.
+    _tau_d = getattr(config, "land_snow_tau_days", None)
+    if _tau_d is not None:
+        cfg = cfg._replace(
+            land_albedo=cfg.land_albedo._replace(
+                tau_snow_decay=float(_tau_d) * 86400.0))
+        logger.info("  land snow-albedo age e-folding: %.3g days "
+                    "(overrides the calibration)", float(_tau_d))
+    # Soil freeze/thaw, same placement: the bake rebuilds ``thermal`` with
+    # the switch at its library default, so it must be set after it.
+    _ft = bool(config.land_soil_freeze_thaw)
+    cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=_ft))
+    logger.info("  land soil freeze/thaw: %s", "ON" if _ft else "off")
+    _csm = bool(config.land_canopy_snow_masking)
+    cfg = cfg._replace(canopy_snow_masking=_csm)
+    logger.info("  land canopy snow masking (trees hide snow): %s",
+                "ON" if _csm else "off")
+    # Snowpack scheme + snow emissivity, same placement (after the bake).
+    cfg = cfg._replace(
+        snow_scheme=str(config.land_snow_scheme),
+        snow_column=cfg.snow_column._replace(
+            emissivity_snow=float(config.land_snow_emissivity)))
+    logger.info("  land snowpack: %s (snow emissivity %.3f)",
+                cfg.snow_scheme, cfg.snow_column.emissivity_snow)
+    from legoesm.land.multilayer_land import FINAL_THERMAL_SUBSTEPS
+    logger.info("  land soil thermal sub-steps per land step: %d",
+                FINAL_THERMAL_SUBSTEPS if _ft else 1)
+    _e_ice = float(config.land_soil_ice_impedance_exponent)
+    cfg = cfg._replace(
+        richards=cfg.richards._replace(ice_impedance_exponent=_e_ice))
+    logger.info("  land soil ice impedance exponent: %g (active only with "
+                "freeze/thaw ON)", _e_ice)
+    if not _ft and _e_ice != type(config)._field_defaults[
+            "land_soil_ice_impedance_exponent"]:
+        logger.warning("  land soil ice impedance exponent set but soil "
+                       "freeze/thaw is off: it has no effect")
+    # Soil-water numerics, same placement: the bake rebuilds ``hydraulics``
+    # from the CLM map with library defaults, so set them after it.
+    cfg = cfg._replace(
+        hydraulics=cfg.hydraulics._replace(
+            vg_air_entry_m=float(config.land_soil_vg_air_entry_m)))
+    logger.info("  land soil water: retention curve %s, air-entry head %g m",
+                cfg.hydraulics.retention_curve, cfg.hydraulics.vg_air_entry_m)
+    # Canopy solver smoothing widths, same placement: the calibration above
+    # replaces surface_scheme with a fresh TwoLeafCanopyConfig, so a deck
+    # value set any earlier would be discarded.
+    _w_over = {k: float(v) for k, v in (
+        ("rh_cap_smoothing_width",
+         getattr(config, "land_canopy_rh_cap_smoothing_width", None)),
+        ("zeta_cap_smoothing_width",
+         getattr(config, "land_canopy_zeta_cap_smoothing_width", None)),
+    ) if v is not None}
+    _mi = getattr(config, "land_canopy_most_n_iters", None)
+    if _mi is not None:
+        _w_over["most_n_iters"] = int(_mi)
+    _sg = getattr(config, "land_canopy_solve_group", None)
+    if _sg is not None:
+        _w_over["solve_group"] = int(_sg)
+    if _w_over:
+        from legoesm.land.canopy.config import CanopyConfig as _CanopyCfg
+        if not isinstance(cfg.surface_scheme, _CanopyCfg):
+            raise ValueError(
+                f"land canopy settings {sorted(_w_over)} set but the "
+                f"surface scheme is {type(cfg.surface_scheme).__name__}")
+        cfg = cfg._replace(
+            surface_scheme=cfg.surface_scheme._replace(**_w_over).validate())
+    if isinstance(cfg.surface_scheme, TwoLeafCanopyConfig):
+        logger.info("  land canopy smoothing widths: RH cap %.3g, zeta cap %.3g; "
+                    "MOST iterations %d; solve group %d (0 = one batch)",
+                    cfg.surface_scheme.rh_cap_smoothing_width,
+                    cfg.surface_scheme.zeta_cap_smoothing_width,
+                    cfg.surface_scheme.most_n_iters,
+                    cfg.surface_scheme.solve_group)
+    # One-layer snow thermal node, same placement and reason.
+    _sn = bool(config.land_snow_insulation)
+    cfg = cfg._replace(thermal=cfg.thermal._replace(snow_insulation=_sn))
+    logger.info("  land snow thermal node: %s",
+                "ON (bulk density %.0f kg/m3)"
+                % cfg.thermal.snow_bulk_density_kg_m3 if _sn else "off")
+    if _ft and getattr(config, "land_calibrated_physics", False):
+        logger.warning("  land soil freeze/thaw ON with the calibrated land "
+                       "tables, which were fitted with it OFF")
+    # Two-leaf canopy b0 stress and rain interception, same placement: the
+    # calibration bake rebuilds ``surface_scheme`` at its library default.
+    if isinstance(cfg.surface_scheme, TwoLeafCanopyConfig):
+        _sb0 = bool(config.land_canopy_stress_b0)
+        cfg = cfg._replace(
+            surface_scheme=cfg.surface_scheme._replace(stress_b0=_sb0))
+        logger.info("  land canopy b0 soil-moisture stress: %s",
+                    "ON" if _sb0 else "off")
+    if config.land_canopy_interception:
+        from legoesm.land.canopy.interception import InterceptionConfig
+        cfg = cfg._replace(interception=InterceptionConfig())
+        logger.info("  land canopy rain interception: ON")
+
+    # A CANOPY SCHEME GETS CANOPY PARAMETERS.
+    #
+    # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
+    # roughness, albedo and emissivity for a bulk surface.  A canopy scheme
+    # reads different quantities (canopy height, clumping, band albedos,
+    # roughness RATIO, per-PFT Vcmax25) and, given soil parameters, silently
+    # falls back to generic constants, leaving the tuned values inert.
+    #
+    # Those canopy parameters already exist and are already per-PFT:
+    # ``surface_data_to_land_params`` dispatches on the surface scheme and
+    # builds ``CanopyLandParams`` from the harmonized surfdata — the same
+    # route the offline LMIP simulations use, which is why THEY reproduce
+    # observed latent heat and photosynthesis.  The coupled driver simply
+    # never called it; it read the CLM provider, whose only variants are
+    # "slab" and "multilayer".  This is that missing call, not new physics.
+    #
+    # Soil hydraulics / thermal / albedo stay with the CLM map: only the
+    # SURFACE parameters come from the canopy builder.
+    from legoesm.land.canopy import CanopyConfig
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    # Both canopy schemes take their per-PFT SURFACE params from
+    # init_land_surface_data: a two-leaf CanopyConfig -> CanopyLandParams
+    # (hc/rz0m); the CLM-ML canopy -> LandSurfaceParams with PRESCRIBED
+    # LAI/SAI/htop (the accurate per-plant structure its interface requires,
+    # vs the LAI-only clm_multilayer_setup fallback that left htop at the 5 m
+    # scalar default).  Explicit positive dispatch on the two canopy types
+    # (not `not SimpleSEBConfig`) so an unknown scheme cannot slip in.  #1624
+    # read params.hc here unconditionally, which crashed CLM-ML (no hc); the
+    # reads below dispatch on the actual struct.
+    if isinstance(cfg.surface_scheme, (CanopyConfig, CLMMLCanopyConfig)):
+        _sd_path = getattr(config, "surfdata_path", "")
+        if not _sd_path:
+            raise ValueError(
+                f"land_surface_scheme selects {type(cfg.surface_scheme).__name__}, "
+                "which needs per-PFT CANOPY parameters (canopy height, band "
+                "albedos, roughness ratio, Vcmax25). Those are built from the "
+                "harmonized surfdata, so --surfdata is required. Without it the "
+                "canopy would run on generic constants and every tuned per-PFT "
+                "value would be inert — refusing rather than doing that quietly.")
+        from legoesm.land.boundary_data import init_land_surface_data
+        _clm_params = params
+        # THE CALIBRATION'S OWN TABLES, or none. Without these the builder
+        # leaves the root fields unset and the code below fills them from
+        # the CLM map — i.e. the LEGACY tables — so the calibration's root
+        # depth, wilting point and field capacity never reached the model.
+        # Same for the glacier albedo, which otherwise takes the 0.70/0.50
+        # default instead of the calibrated pair.
+        _cal_on = getattr(config, "land_calibrated_physics", False)
+        _pft_root, _glacier_alb = None, None
+        if _cal_on:
+            from legoesm.land.clm_surface_map import (
+                biophysics_lmip_pft_root_params,
+                biophysics_lmip_glacier_albedo)
+            _pft_root = biophysics_lmip_pft_root_params()
+            _glacier_alb = biophysics_lmip_glacier_albedo()
+        _, params, _gsd = init_land_surface_data(
+            _sd_path, surfdata_grid, cfg, float(config.start_day),
+            year=(None if getattr(config, "start_year", None) is None
+                  else float(config.start_year)),
+            pft_root_params=_pft_root, glacier_alb=_glacier_alb)
+        # Per-step rebuild of the same parameters (seasonal LAI / canopy
+        # height, wet-soil albedo), built from the SAME gsd, root tables and
+        # glacier pair as ``params`` -- the offline calibration's updater
+        # (run_lmip_biophys) -- so a refresh cannot revert the calibration.
+        # Two-leaf only: the CLM-ML canopy's params carry SAI/htop the
+        # updater does not build.
+        if isinstance(cfg.surface_scheme, CanopyConfig):
+            _upd_scheme = cfg.surface_scheme
+            _upd_start_year = getattr(config, "start_year", None)
+
+            def _build_params_update(_gsd=_gsd, _scheme=_upd_scheme,
+                                     _alb=_glacier_alb, _roots=_pft_root,
+                                     _y0=_upd_start_year):
+                if _y0 is None and int(np.asarray(_gsd.years).size) > 1:
+                    raise ValueError(
+                        "land_params_refresh needs start_year with a "
+                        "transient surfdata: the start-day parameters are "
+                        "the cover's year-MEAN, which the per-step rebuild "
+                        "(one calendar year per step) cannot reproduce.")
+                from legoesm.land.boundary_data import (
+                    make_step_land_params_updater)
+                return make_step_land_params_updater(
+                    _gsd, _scheme, glacier_alb=_alb, pft_root_params=_roots)
+
+            # Built lazily by the lane that consumes it (the MPAS land step).
+            params_update_factory = _build_params_update
+        # KEEP THE SOIL-WATER THRESHOLDS THE COMMENT ABOVE PROMISES.
+        # Replacing the parameter object wholesale also dropped the CLM
+        # per-column ROOT DEPTH, WILTING POINT and FIELD CAPACITY, which the
+        # canopy parameter object leaves unset — so the land step silently
+        # fell back to one scalar value per field for the whole globe, and
+        # every column's root-zone moisture stress changed. Those are soil
+        # properties, not surface ones; carry them across (found by both
+        # reviewers).
+        _root_fields = {
+            f: getattr(_clm_params, f)
+            for f in ("root_depth", "theta_wp", "theta_fc")
+            if getattr(params, f, None) is None
+            and getattr(_clm_params, f, None) is not None}
+        if _root_fields:
+            params = params._replace(**_root_fields)
+            logger.info(
+                "  Land tile: kept the CLM per-column %s with the canopy "
+                "parameters (they are soil properties, not surface ones).",
+                ", ".join(sorted(_root_fields)))
+        # TWO PROVIDERS, ONE COLUMN INDEX.  The canopy parameters come from
+        # one dataset and the soil beneath them from another, each regridded
+        # independently.  A differing column COUNT or ORDER would attach every
+        # canopy property to the wrong column and the run would still look
+        # entirely healthy — so check the count structurally, at t=0, rather
+        # than hope (GLM).
+        # Struct differs by scheme: two-leaf -> CanopyLandParams (hc, rz0m);
+        # CLM-ML -> LandSurfaceParams (htop, LAI, NO hc).  Read the column
+        # count off whichever per-column height field the provider set, and
+        # log the fields that exist for that struct.
+        _hc = getattr(params, "hc", None)
+        _height_field = _hc if _hc is not None else params.htop
+        _n_canopy = int(jnp.asarray(_height_field).shape[0])
+        _n_soil = int(jnp.asarray(lat_rad).size)
+        if _n_canopy != _n_soil:
+            raise ValueError(
+                f"canopy parameters have {_n_canopy} columns but the soil map "
+                f"has {_n_soil}: the two surface datasets did not regrid onto "
+                "the same columns, so every canopy property would sit on the "
+                "wrong one. Check --surfdata and --clm-surfdata-path cover "
+                "this grid.")
+        if _hc is not None:
+            logger.info(
+                "  Land tile: %s on per-PFT CANOPY parameters from %s "
+                "(canopy height %.2f-%.2f m, roughness ratio %.3f-%.3f). NOTE "
+                "emissivity is a single constant in this builder and the canopy "
+                "computes its own radiation from soil colour + leaf optics, so "
+                "the tuned per-PFT emissivity and vegetation albedo do NOT apply "
+                "to it — those are re-fit items, not wiring.",
+                type(cfg.surface_scheme).__name__, _sd_path,
+                float(jnp.min(_hc)), float(jnp.max(_hc)),
+                float(jnp.min(params.rz0m)), float(jnp.max(params.rz0m)))
+        else:
+            logger.info(
+                "  Land tile: %s on per-PFT CLM-ML surface parameters from %s "
+                "(prescribed canopy-top height %.2f-%.2f m, LAI %.2f-%.2f) — "
+                "the accurate per-plant structure the multilayer canopy needs.",
+                type(cfg.surface_scheme).__name__, _sd_path,
+                float(jnp.min(params.htop)), float(jnp.max(params.htop)),
+                float(jnp.min(params.LAI)), float(jnp.max(params.LAI)))
+
+    # A CANOPY SCHEME MUST NOT SILENTLY RUN ON SOIL PARAMETERS.
+    #
+    # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
+    # roughness, albedo and emissivity.  The two-leaf and CLM-ML canopies
+    # read CANOPY properties (canopy height, band albedos, roughness ratio)
+    # and, finding none, fall back to generic constants: the tuned per-PFT
+    # values are then INERT, which a gradient test caught as exactly zero
+    # sensitivity to the trained roughness.  Inert trained parameters are a
+    # defect here, not a nuisance, and a comment in a document is not a
+    # control (GLM).  Say it at startup, every run, so nobody reports a
+    # canopy run as validating tuned land parameters it never used.
+    from legoesm.land.canopy import CanopyConfig
+    # Two-leaf only: it reads CanopyLandParams (hc/ALB/rz0m).  CLM-ML runs on
+    # a LandSurfaceParams by design (its canopy structure is LAI/SAI/htop),
+    # so this "running on SOIL parameters" check does not apply to it.
+    if isinstance(cfg.surface_scheme, CanopyConfig):
+        _canopy_fields = [f for f in ("hc", "ALB_VIS", "ALB_NIR", "rz0m")
+                          if getattr(params, f, None) is not None]
+        if not _canopy_fields:
+            logger.warning(
+                "  Land tile: %s is running on SOIL parameters — it reads "
+                "canopy height, band albedos and roughness ratio, none of "
+                "which are present, so it is using GENERIC canopy constants "
+                "and the tuned per-PFT roughness / albedo / emissivity are "
+                "INERT. Do not report this run as validating tuned land "
+                "parameters. Use --land-surface-scheme simple_seb to run the "
+                "scheme those parameters belong to.",
+                type(cfg.surface_scheme).__name__)
+
+    # The Farquhar branch needs a non-None carbon state at the call site as
+    # well as the differland scheme.  Seed a PRESCRIBED one (fixed leaf
+    # carbon -> fixed LAI = C_fol/LCMA); the pipeline discards the evolved
+    # pools every step, which is exactly what the calibrator does, so the
+    # baked Vc_max25/g1/LCMA act on the same LAI they were fitted with and no
+    # multi-decade carbon spin-up is needed.  Left None otherwise, so a run
+    # without the flag is byte-identical.
+    # A canopy scheme carries its OWN photosynthesis (Farquhar GPP), so it
+    # also needs the differland carbon state seeded even though the bulk
+    # ``cfg.stomata`` throttle is off — otherwise the calibrated two-leaf
+    # run, fitted WITH differland, would deploy under a "none" carbon cycle.
+    from legoesm.land.surface_scheme import SimpleSEBConfig as _SimpleSEBConfig
+    _is_canopy = not isinstance(cfg.surface_scheme, _SimpleSEBConfig)
+    if (cfg.stomata.enabled or _is_canopy) and cfg.carbon.scheme == "differland":
+        from legoesm.land.carbon.carbon_cycle import init_carbon_state
+        carbon = init_carbon_state(
+            (int(lat_rad.size),), cfg.carbon)
+        logger.info(
+            "  Land stomata: FARQUHAR (prescribed carbon state, "
+            f"LAI = C_fol/LCMA from C_fol={cfg.carbon.C_fol_init:g} gC/m2) "
+            "— the baked Vc_max25/g1/LCMA are ACTIVE")
+    elif cfg.stomata.enabled:
+        logger.info(
+            "  Land stomata: JARVIS (no differland carbon state) — the baked "
+            "Farquhar Vc_max25/g1/LCMA are NOT used")
+    return dict(cfg=cfg, params=params, carbon=carbon,
+                params_update_factory=params_update_factory,
+                surface_map=surface_map, surfdata_file=surfdata_file)
+
+
 class ModelDriver:
     """Top-level simulation driver.
 
@@ -1536,7 +2413,8 @@ class ModelDriver:
     """
 
     def __init__(self, config: ExperimentConfig, output_dir: str | Path | None = None,
-                 *, expected_resolved_physics: dict | None = None):
+                 *, expected_resolved_physics: dict | None = None,
+                 manifest_runner_tag: str | None = None):
         # Defensive canonical-name normalization at the driver entry:
         # callers that bypass run_amip's argparse postprocessor (direct
         # test fixtures, ad-hoc scripts, older YAML loaders) might still
@@ -1568,6 +2446,12 @@ class ModelDriver:
         # ``legoesm reproduce`` passes the reference run's resolved physics;
         # the run refuses to start if its own resolves differently.
         self._expected_resolved_physics = expected_resolved_physics
+        # The runner that drives this atmosphere, recorded in its manifest
+        # (run_coupled: so its atmosphere record is not replayed alone).
+        self._manifest_runner_tag = manifest_runner_tag
+        # The final-state digest THIS run recorded in its manifest (None
+        # until then, or when it could not); the coupled record pairs it.
+        self.final_state_digest = None
         # export_mpas_step's hand-off dict; None = a normal run (review F9).
         self._mpas_step_export = None
         self._mpas_step_exported = False   # export consumes the driver
@@ -1585,11 +2469,20 @@ class ModelDriver:
         self._persistent_cgrid = False
         self.tracers: dict[str, jax.Array] = {}
         self.tracer_registry: TracerRegistry = moisture_registry_for(
-            config.microphysics)
+            config.microphysics, registry_scheme_config(config))
+        if getattr(config, "ifs_ozone_chem", False):
+            # IFS Cariolle ozone (tracer only), a passenger after the water
+            # slots like cloud_fraction_ifs.
+            from legoesm.core.tracers import TracerInfo
+            self.tracer_registry = TracerRegistry(
+                tracers=self.tracer_registry.tracers + (TracerInfo(
+                    "o3_ifs", "kg/kg", True, True,
+                    "IFS Cariolle prognostic ozone"),))
         validate_microphysics_tracer_slots(
             config.microphysics,
             self.tracer_registry.n_tracers,
             context="ModelDriver tracer registry",
+            scheme_config=registry_scheme_config(config),
         )
         self.get_sst_sic = None
         # Seasonal insolation offset (days): align model day 0 to
@@ -1619,9 +2512,19 @@ class ModelDriver:
         # None (AMIP / standalone) means the atmosphere computes its own bulk
         # surface fluxes (byte-identical to the pre-shared-flux behaviour).
         self.get_sfc_flux_override = None
+        # Optional coupler ice/lake handback hook (P5c, atmosphere owns land
+        # and open water): a callable ``() -> SurfaceHandback`` returning the
+        # handback for the CURRENT coupling window, read by the MPAS column
+        # loop every step.  None = the atmosphere's own bulk law covers every
+        # non-land fraction (byte-identical).
+        self.get_surface_handback = None
         self.diagnostics = None
         self._phis_data = None
         self._f_land = None
+        # Voronoi MPI: does the GLOBAL mesh hold any land (None = not known,
+        # use this rank's own cells).  Every rank holds the global product,
+        # so the answer is rank-uniform with no collective.
+        self._f_land_global_any = None
         # Prognostic multilayer (Richards) land state, carried in SegmentCarry.land_ml
         # and persisted across segments.  None ⇒ slab-land (scalar T_land) path.
         self._land_ml_state = None
@@ -1708,6 +2611,30 @@ class ModelDriver:
         undamped training rollout produces NaN gradients (#797 bug 11).
         """
         return self._fric_decay
+
+    def surface_handback_from_checkpoint(self):
+        """The coupler ice/lake handback a loaded checkpoint carries (the H
+        the column loop was consuming when it was written), or ``None``.
+
+        A coupled driver resuming a handback run serves this from its hook
+        until its next exchange.  Read it after ``load_checkpoint`` and
+        before ``run``, which consumes the checkpoint's coupling keys."""
+        ck = self._carry_aux if isinstance(self._carry_aux, dict) else {}
+        return surface_handback_from_payload(ck)
+
+    def current_tracer(self, name: str):
+        """Grid-space tracer ``name`` as the running lane holds it (None if absent).
+
+        The column loop (MPAS grid or ``dycore.column_lane``) advances the
+        tracers it carries in ``state.tracers``; the driver's own store keeps
+        their initial copy there.  A tracer the loop does not carry (e.g. a dry
+        run's ``q_v``) only exists in the driver store.
+        """
+        if self.config.dycore.column_lane or self.config.grid.grid_type == "mpas":
+            x = (getattr(self.state, "tracers", None) or {}).get(name)
+            if x is not None:
+                return getattr(x, "data", x)
+        return self.tracers.get(name)
 
     # Backward-compatible accessors for individual tracers.
     @property
@@ -1946,8 +2873,9 @@ class ModelDriver:
         as the land stress).  Rank-local under MPI; the caller gathers.
         """
         win = getattr(self, "_land_window", None)
-        if win is not None:
-            return win
+        cpl = getattr(self, "_cpl_window", None)
+        if win is not None or cpl is not None:
+            return {**(win or {}), **(cpl or {})}
         ck = self._carry_aux if isinstance(self._carry_aux, dict) else {}
         staged = {k: v for k, v in ck.items()
                   if k.startswith(_LAND_WIN_PREFIXES)}
@@ -2148,6 +3076,14 @@ class ModelDriver:
         got = set(popped) - set(_LAND_ML_CACHE_FIELDS)
         _snow_layer_fields = {"snow_ice_layers", "snow_liq_layers",
                               "snow_T_layers", "snow_rho_layers"}
+        # A BULK-snow checkpoint restarting a LAYERED run: build the pack from
+        # the restored snow water, as a land IC without layers does (user
+        # 2026-10-06), once the rest of the state is restored (below).
+        _land_cfg = getattr(getattr(self, "physics", None), "land_ml_cfg", None)
+        _seed_pack = (got != expected and (expected - got) == _snow_layer_fields
+                      and _land_cfg is not None)
+        if _seed_pack:
+            expected = expected - _snow_layer_fields
         if got != expected and (expected - got) == _snow_layer_fields:
             raise ValueError(
                 "This checkpoint was written with the BULK snowpack but the run "
@@ -2155,6 +3091,9 @@ class ModelDriver:
                 "state to restart from. Restart with land_snow_scheme: bulk, or "
                 "start the land from a land IC (the pack is then seeded from "
                 "its snow water).")
+        _init_missing = {f for f in _LAND_ML_INIT_ON_RESTORE
+                         if f in expected and f not in got}
+        expected = expected - _init_missing
         if got != expected:
             raise ValueError(
                 "land_ml checkpoint field set does not match the current "
@@ -2187,6 +3126,21 @@ class ModelDriver:
                     "(resolution / soil-layer-count skew)")
             fields[name] = arr
         self._land_ml_state = template._replace(**fields)
+        if _seed_pack:
+            from legoesm.land.multilayer_land import seed_snow_layers
+            self._land_ml_state = seed_snow_layers(self._land_ml_state, _land_cfg)
+            logger.warning(
+                "  land_ml restore: checkpoint written with the BULK snowpack; the "
+                "LAYERED pack is built from its snow water (%d layers, all ice at "
+                "min(top soil T, freezing), density %.0f kg/m3) -- a seeded, not "
+                "spun-up, pack", _land_cfg.snow_column.n_layers,
+                _land_cfg.snow_column.seed_density)
+        if "T_snow" in _init_missing:
+            from legoesm.land.multilayer_land import init_snow_temperature
+            self._land_ml_state = init_snow_temperature(self._land_ml_state)
+            logger.info("  land_ml restore: checkpoint has no snow-node "
+                        "temperature; initialised from the restored soil "
+                        "(top soil, capped at freezing under snow)")
 
     def _validate_microphysics_tracer_state(
         self,
@@ -2205,6 +3159,7 @@ class ModelDriver:
             self.config.microphysics,
             have_slots,
             context=context,
+            scheme_config=registry_scheme_config(self.config),
         )
 
     def _preflight_land_inputs(self) -> None:
@@ -2303,6 +3258,55 @@ class ModelDriver:
                 "`scripts/matrix/run_atmosphere_test_matrix.py --only sw` "
                 "(both construct the SW model + initial state directly).")
 
+    def _resolve_ice_skin(self) -> None:
+        """Resolve the ice skin and the sea-ice albedo "auto" settings (#2106).
+
+        Runs after the runtime bootstrap (the lat-lon MPI layout and the
+        coupled-driver marker are known) and before physics, the manifest and
+        the saved config, so all of them record the resolved values; the
+        input-config snapshot gets the same values so a replay resolves
+        identically.
+        """
+        from legoesm.driver.config import (
+            resolve_ice_skin_prognostic, resolve_sea_ice_albedo_scheme)
+        latlon_mpi = False
+        if (self._device_config is not None
+                and self._device_config.is_distributed
+                and self.config.grid.grid_type == "latlon"):
+            from legoesm.grids.halo import get_mpi_topology
+            from legoesm.parallel.latlon_mpi import LatLonBandLayout
+            latlon_mpi = isinstance(get_mpi_topology(), LatLonBandLayout)
+        skin, why = resolve_ice_skin_prognostic(
+            self.config, latlon_mpi=latlon_mpi,
+            coupled=bool(getattr(self, "_requires_surface_flux_export", False)))
+        upd = {"ice_skin_prognostic": skin}
+        cfg = self.config._replace(**upd)
+        upd["sea_ice_albedo_scheme"] = resolve_sea_ice_albedo_scheme(cfg)
+        self.config = self.config._replace(**upd)
+        self._input_config = self._input_config._replace(**upd)
+        logger.info("  Sea-ice albedo scheme: %s (ice skin %s: %s)",
+                    upd["sea_ice_albedo_scheme"], "ON" if skin else "OFF", why)
+        # Resolved values must pass the same checks as explicit ones.
+        self.config.validate_strict()
+
+    def _resolve_ocean_flux_surface(self) -> None:
+        """Resolve ``ocean_flux_on_ocean_surface`` AUTO (None) to a boolean
+        in the config and the input-config snapshot, as ``_resolve_ice_skin``
+        does, so the manifest, saved config and a replay record it (#1320)."""
+        from legoesm.driver.config import (
+            ocean_flux_surface_eligibility, resolve_ocean_flux_on_ocean_surface)
+        auto = self.config.ocean_flux_on_ocean_surface is None
+        upd = {"ocean_flux_on_ocean_surface":
+               resolve_ocean_flux_on_ocean_surface(self.config)}
+        self.config = self.config._replace(**upd)
+        self._input_config = self._input_config._replace(**upd)
+        if auto:
+            logger.info("  ocean_flux_on_ocean_surface: auto -> %s%s",
+                        upd["ocean_flux_on_ocean_surface"],
+                        "" if upd["ocean_flux_on_ocean_surface"] else
+                        f" ({ocean_flux_surface_eligibility(self.config)[1]})")
+        self.config.validate_strict()
+
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
         # SW is not a runnable ModelDriver equation set — reject before any
@@ -2315,6 +3319,8 @@ class ModelDriver:
         # This is the canonical single entry point — handles everything before
         # any JAX array creation.
         self._bootstrap_runtime()
+        self._resolve_ice_skin()
+        self._resolve_ocean_flux_surface()
         # Collective, so it runs before the first step where ranks diverge.
         self._check_resume_version_drift()
 
@@ -2462,15 +3468,17 @@ class ModelDriver:
         # dy) rather than a single resolution.
         from legoesm.grids.factory import create_grid
 
-        if gc.grid_type == "latlon" and self.config.dycore.column_lane:
-            # lat-lon COLUMN lane: the driver's grid is the column mesh of
-            # the native lat-lon grid (row-major cells), so every setup-time
-            # regrid lands on the columns the model steps; the native grid
-            # goes to the dycore factory
+        if (gc.grid_type in ("latlon", "gaussian")
+                and self.config.dycore.column_lane):
+            # lat-lon / spectral COLUMN lane: the driver's grid is the column
+            # mesh of the native lat-lon or Gaussian grid (row-major cells),
+            # so every setup-time regrid lands on the columns the model
+            # steps; the native grid (held in _latlon_native_grid on both
+            # lanes) goes to the dycore factory
             from legoesm.atmosphere.dynamics.gcm.latlon_cgrid_column import (
                 build_latlon_column_mesh,
             )
-            self._latlon_native_grid = create_grid("latlon", gc.resolution)
+            self._latlon_native_grid = create_grid(gc.grid_type, gc.resolution)
             self.grid = build_latlon_column_mesh(self._latlon_native_grid)
         elif gc.grid_type == "latlon":
             global_grid = create_grid("latlon", gc.resolution)
@@ -2661,6 +3669,7 @@ class ModelDriver:
                         "the terrain product cannot be indexed onto it")
                 self._phis_data = jnp.asarray(np.asarray(_phis_g)[_ids])
                 self._f_land = jnp.asarray(np.asarray(_fl_g)[_ids])
+                self._f_land_global_any = bool(np.any(np.asarray(_fl_g) > 0.0))
             elif getattr(self, "_latlon_native_grid", None) is not None:
                 # lat-lon column lane: the product on the NATIVE lat-lon grid
                 # (its own binning + neighbour filter, the lat-lon lane's
@@ -2677,9 +3686,14 @@ class ModelDriver:
                 # the spectral dynamics feel the TRUNCATED field; the product
                 # (dynamics, CMOR orog, restart check) is that field, once
                 # round-tripped so the carry's own truncation is idempotent
+                # (the spectral column lane: on the native Gaussian grid,
+                # flattened back to the mesh's row-major columns)
                 from legoesm.grids.gaussian import sh_analysis, sh_synthesis
-                self._phis_data = sh_synthesis(self.grid, sh_analysis(
-                    self.grid, jnp.asarray(self._phis_data, jnp.float64)))
+                _sg = getattr(self, "_latlon_native_grid", None) or self.grid
+                self._phis_data = sh_synthesis(_sg, sh_analysis(
+                    _sg, jnp.reshape(jnp.asarray(self._phis_data, jnp.float64),
+                                     (_sg.n_lat, _sg.n_lon)))
+                ).reshape(jnp.shape(self._phis_data))
             self._phis_data = self._phis_data.astype(_sd)
             self._f_land = self._f_land.astype(_sd)
             if self._voronoi_layout is not None:
@@ -2714,11 +3728,35 @@ class ModelDriver:
             self._f_land = load_land_fraction(
                 self.grid, land_mask_path
             ).astype(_sd)
+            if self._voronoi_layout is not None:
+                self._f_land_global_any = bool(jnp.any(load_land_fraction(
+                    self._grid_global, land_mask_path) > 0.0))
         if land_mask_path:
             logger.info(
                 f"  Land-sea mask: {land_mask_path} "
                 f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
             )
+        _lf_src = self.config.land_fraction_source
+        if _lf_src != "topography":
+            # validate_strict keeps era5/zero to lat-lon grids
+            if _lf_src == "era5":
+                from legoesm.training.aimip_spatial import era5_land_fraction
+                from legoesm.training.era5_to_state import TrainingERA5Config
+                # column lane: regrid on the native grid, then flatten
+                _nat = getattr(self, "_latlon_native_grid", None)
+                self._f_land = era5_land_fraction(
+                    self.grid if _nat is None else _nat, TrainingERA5Config(
+                        zarr_store=self.config.land_fraction_era5_zarr,
+                        flux_zarr="")   # "" = the named store, no other
+                ).reshape(shape_2d).astype(_sd)
+            elif _lf_src == "zero":
+                self._f_land = jnp.zeros(shape_2d, dtype=_sd)
+            else:
+                raise ValueError(
+                    f"unknown land_fraction_source {_lf_src!r}")
+            logger.info(
+                f"  Land fraction source: {_lf_src} "
+                f"(mean={float(jnp.mean(self._f_land)):.3f})")
 
         # Attach land_frac for convection and orographic GWD on grids carrying
         # the field (VoronoiMesh and GaussianGrid).  Where it comes from:
@@ -2823,8 +3861,39 @@ class ModelDriver:
             if _msg is not None:
                 logger.warning("  %s", _msg)
 
+        if getattr(self.config, "turbulence", "none") == "ifs_vdf":
+            self._attach_ifs_vdf_sigflt(sso_path, _sd)
+
         self._assert_vertical_coordinate_supports_this_orography()
         self._check_zm_land_fraction()
+
+    def _attach_ifs_vdf_sigflt(self, sso_path, dtype) -> None:
+        """turbulence=ifs_vdf: the filtered subgrid-orography std (IFS sigflt,
+        ``SSO_STDH_FILT``) for its turbulent orographic form drag, read from
+        ``subgrid_orography_path`` through the same loader and remap as the
+        GWD's ``SSO_STDH``.  Required; never defaulted (vote 9 G9)."""
+        if not sso_path:
+            raise ValueError(
+                "turbulence=ifs_vdf needs subgrid_orography_path: a file carrying "
+                "SSO_STDH_FILT (the filtered subgrid orography std for its form drag).")
+        from legoesm.grids.topography import load_subgrid_orography
+        filt = load_subgrid_orography(self.grid, sso_path, var_name="SSO_STDH_FILT").astype(dtype)
+        try:
+            self.grid = self.grid._replace(subgrid_topo_filt_stddev=filt)
+        except (TypeError, ValueError, AttributeError) as e:
+            raise ValueError(
+                "turbulence=ifs_vdf runs on the MPAS lane only; grid type "
+                f"{type(self.grid).__name__} has no subgrid_topo_filt_stddev field") from e
+        if self._voronoi_layout is not None:
+            _lm = self._voronoi_layout.local_mesh
+            if filt.shape[0] != int(_lm.nCells):
+                raise ValueError(
+                    f"filtered subgrid orography has {filt.shape[0]} columns "
+                    f"but the rank-local mesh has {int(_lm.nCells)}")
+            self._voronoi_layout = self._voronoi_layout._replace(
+                local_mesh=_lm._replace(subgrid_topo_filt_stddev=filt))
+        logger.info("  Filtered subgrid orography (IFS VDF form drag): %s (max=%.0f m)",
+                    sso_path, float(jnp.max(filt)))
 
     def _check_zm_land_fraction(self) -> None:
         """Zhang-McFarlane land policy means the same on every lane: "required"
@@ -3452,6 +4521,10 @@ class ModelDriver:
                 f"  IC: loading ERA5 from {cfg.ic_path} "
                 f"(year={cfg.start_year})"
             )
+            # seed-state dtypes: the ERA5 IC is built in float64 and is cast
+            # back to them once, below (an fp32 run must start in fp32)
+            _seed_state = self.state
+            _seed_qv = self.tracers.get("q_v")
             era5_slice = load_era5_ic(cfg.ic_path, cfg.start_year,
                                       allow_flat_phis=cfg.era5_allow_flat_phis)
 
@@ -3617,6 +4690,21 @@ class ModelDriver:
                 f"CWV={_h2[1]:.1f} kg/m2"
             )
 
+            # One cast of the IC to the seed state's per-leaf dtypes (no-op
+            # when they agree, e.g. every fp64 run).  p_s goes to
+            # promote_types(seed p_s dtype, policy accumulate), as the MPAS
+            # mass fixer stores it ('mixed' keeps a float64 p_s, #1675).
+            from legoesm.core.precision import resolve_dtype
+            _ic_ps = getattr(self.state, "p_s", None)
+            self.state = match_leaf_dtypes(self.state, _seed_state)
+            if _ic_ps is not None and getattr(_seed_state, "p_s", None) is not None:
+                _ps_dt = jnp.promote_types(_seed_state.p_s.data.dtype,
+                                           resolve_dtype(None, "accumulate"))
+                self.state = self.state._replace(
+                    p_s=self.state.p_s.replace(data=_ic_ps.data.astype(_ps_dt)))
+            if _seed_qv is not None and "q_v" in self.tracers:
+                self.tracers["q_v"] = self.tracers["q_v"].astype(_seed_qv.dtype)
+
             # ERA5 phis is kept for dynamics — substituting ETOPO phis at t=0
             # while keeping ERA5 winds creates a pressure-gradient imbalance
             # (local delta can reach ~15 % p_s over Tibet/Andes) that drives
@@ -3681,11 +4769,18 @@ class ModelDriver:
         if _sso is not None:
             self.physics.subgrid_topo_stddev = _sso
 
+        # Under cell-partition MPI the land setup must be rank-uniform: a rank
+        # whose cells are all ocean still builds the land tile (solving no
+        # columns), or its neighbours' land halo exchanges and checkpoint
+        # gathers have no partner and the run hangs.
         _has_land = (
             self._f_land is not None
-            and bool(jnp.any(self._f_land > 0))
+            and (self._f_land_global_any
+                 if self._f_land_global_any is not None
+                 else bool(jnp.any(self._f_land > 0)))
         )
         self._has_land_anywhere = _has_land
+        self.physics.run_has_no_land = not _has_land
         if _has_land:
             from legoesm.surface_albedo import land_vegetation_albedo
             from legoesm.core.precision import get_policy
@@ -3733,7 +4828,8 @@ class ModelDriver:
                 _lp = clm_surface_provider(
                     _lat_deg, _lon_deg,
                     surfdata_path=self.config.clm_surfdata_path,
-                    variant="multilayer")()
+                    variant="multilayer",
+                    vg_air_entry_m=float(self.config.land_soil_vg_air_entry_m))()
                 _alb = jnp.asarray(_lp.albedo_veg).reshape(
                     jnp.asarray(self.grid.grid_lat).shape)
                 # Defensive only: the provider floors/normalises PFT cover, so
@@ -3954,47 +5050,6 @@ class ModelDriver:
         import numpy as _np
         from legoesm.land import init_multilayer_land_state, aridity_theta_init
         from legoesm.thermo import saturation_mixing_ratio
-        from legoesm.land.clm_surface_map import (
-            load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
-        )
-        from legoesm.land.stomata import StomataConfig
-        from legoesm.land.config import MultiLayerLandConfig
-        from legoesm.land.soil_grid import SoilGridConfig
-        from legoesm.land.surface_scheme import (
-            SimpleSEBConfig, TwoLeafCanopyConfig,
-        )
-        # Land surface-scheme dispatch (#730). "simple_seb" (default) = bulk SEB
-        # with the beta_soil moisture path; "two_leaf" = DifferBESS two-leaf canopy
-        # (Kelvin h_r bare-soil + two-leaf stomatal transpiration), which limits
-        # land ET below potential and breaks the over-evaporation wet loop.
-        _scheme_name = self.config.land_surface_scheme
-        if _scheme_name == "simple_seb":
-            _surface_scheme = SimpleSEBConfig()
-        elif _scheme_name == "two_leaf":
-            _surface_scheme = TwoLeafCanopyConfig(
-                max_iters=int(self.config.land_canopy_max_iters))
-        elif _scheme_name == "clm_ml":
-            # CLM-ML-JAX multilayer canopy.  The ncol>1 traceable path (S2) makes
-            # the coupled land tile steppable over all model columns inside the
-            # jitted segment: the canopy is warm-started once (eager) at setup and
-            # a concrete per-column ``grid_info`` is threaded into the jitted step
-            # (see the warm-start block at the end of this method + the pipeline's
-            # clm_ml_grid_info).  NOTE the two current limitations: (a) the land
-            # tile's cos_zenith is the same 0.5 placeholder the two_leaf canopy
-            # uses here (faithful diurnal zenith is a shared follow-up), and (b)
-            # the per-column Python loop unrolls O(ncol) in the trace, so this is
-            # for MODEST column counts, not full-AMIP resolution (the masked-vmap
-            # rewrite, S3, removes the unroll).  MPI/SPMD is refused at the scatter
-            # (the 1-based mlcanopy array does not match the per-column remap).
-            from legoesm.land.canopy.config import CLMMLCanopyConfig
-            _surface_scheme = CLMMLCanopyConfig(
-                use_surfdata_pft=bool(getattr(
-                    self.config, "clm_ml_use_surfdata_pft", False)))
-        else:
-            raise ValueError(
-                f"Unknown land_surface_scheme {_scheme_name!r}; "
-                "expected 'simple_seb', 'two_leaf', or 'clm_ml'."
-            )
 
         # Unstructured (Voronoi/MPAS) meshes carry per-cell 1-D coordinates and
         # per-cell (nCells, ...) state — already the flattened (ncol,) column
@@ -4032,370 +5087,16 @@ class ModelDriver:
             lon_rad = _np.asarray(ad.flatten_2d(_glon)).reshape(-1)
         lat_deg = _np.degrees(lat_rad)
         lon_deg = _np.degrees(lon_rad)
-        # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
-        # the CLM reference surfdata onto the model columns.  A pre-staged path
-        # (``clm_surfdata_path``) is required on compute nodes with no outbound
-        # internet (the default fetches from UCAR, which fails on such nodes).
-        surfdata_path = self.config.clm_surfdata_path
-        if surfdata_path:
-            # A staged path is set: use it, and FAIL LOUDLY if absent rather than
-            # attempting a (compute-node-blocked) network fetch to that exact path.
-            if not os.path.exists(surfdata_path):
-                raise FileNotFoundError(
-                    f"clm_surfdata_path={surfdata_path!r} does not exist; stage the "
-                    "CLM surfdata NetCDF there (compute nodes have no outbound "
-                    "internet to download it).")
-            surfdata_file = surfdata_path
-        else:
-            surfdata_file = download_clm_surfdata()
-        surface_map = load_clm_surface(surfdata_file, lat_deg, lon_deg)
-
-        # Non-spatial defaults from the config; clm_multilayer_setup overwrites only
-        # hydraulics/thermal.  Thread the active snow-albedo + stomata features the
-        # slab land already uses (snow_albedo_feedback, land_stomatal_beta) so
-        # ``use_multilayer_land`` is a strict UPGRADE (adds Richards multilayer soil
-        # + CLM texture/PFT maps) rather than a partial regression to a
-        # no-snow-albedo / no-stomata surface.  The soil SEB uses land MOST (with
-        # the CLM per-cell z0) to MATCH the atmospheric tiled LAND tile, which
-        # hard-codes land "most"; surface_bulk_scheme (coare3/large_yeager) is the
-        # OCEAN surface-layer scheme and must NOT drive the land skin-T (it would
-        # evolve T_sfc with ocean-roughness logic, inconsistent with the atmosphere
-        # land-flux exchange law — the T_sfc now feeds T_land, so consistency here
-        # matters).
-        base = MultiLayerLandConfig(
-            soil_grid=SoilGridConfig(
-                n_layers=self.config.multilayer_n_layers,
-                total_depth=self.config.multilayer_soil_depth,
-            ),
-            bulk_scheme="most",
-            snow_albedo_feedback=self.config.snow_albedo_feedback,
-            surface_scheme=_surface_scheme,
-            stomata=StomataConfig(
-                enabled=self.config.land_stomatal_beta,
-                gs_max=self.config.land_gs_max,
-            ),
-        )
-        # Deploy the tile in EXACTLY the model its parameters were calibrated
-        # under: the biophysics LMIP two-leaf canopy
-        # (``templates/land/biophysics/lmip_biophys_2deg.yaml``), which is the
-        # offline configuration scored against observed land fluxes.
-        #
-        # AMIP no longer has a route to the legacy SimpleSEB-fitted bake. That
-        # pairing — SimpleSEB tables under a coupled run — is what produced the
-        # land surface-flux bias, and keeping a switch for it only preserved the
-        # chance of selecting it again. ``calibrated_multilayer_setup`` remains
-        # in the land package for reproducing old OFFLINE runs; nothing coupled
-        # reaches it.
-        if getattr(self.config, "land_calibrated_physics", False):
-            from legoesm.land.config import apply_biophysics_lmip_two_leaf
-            base = apply_biophysics_lmip_two_leaf(base)
-
-        params, cfg = clm_multilayer_setup(surface_map, base_config=base)
-
-        # RE-APPLY THE CALIBRATION'S ALBEDO SCALARS, AFTER the bake.
-        # ``clm_multilayer_setup`` rebuilds ``land_albedo`` and overwrites all
-        # five scalar fields with its own values, so applying them before it
-        # loses them without a word: a run asking for a fresh-snow albedo of
-        # 0.8077 was measured getting 0.8362. The bake's per-column
-        # ``snow_cover_scale`` map is built here and must survive, so replace
-        # the SCALARS on the object the bake just produced.
-        if getattr(self.config, "land_calibrated_physics", False):
-            from legoesm.land.clm_surface_map import biophysics_lmip_albedo_scalars
-            cfg = cfg._replace(
-                land_albedo=cfg.land_albedo._replace(
-                    **biophysics_lmip_albedo_scalars()))
-
-        # Temperature-dependent snow ageing (opt-in): applied LAST, so it
-        # survives both the bake and the calibration re-apply above. The
-        # calibration fitted only the calendar-clock scalars and never saw this
-        # field, so it cannot be overwritten by it.
-        _act = getattr(self.config, "snow_age_activation_K", None)
-        if _act is not None:
-            cfg = cfg._replace(
-                land_albedo=cfg.land_albedo._replace(
-                    snow_age_activation_K=float(_act)))
-        # Snow-age e-folding time, same placement and for the same reason: the
-        # calibration re-apply above sets tau_snow_decay, so an override has to
-        # land after it or it is silently discarded.
-        _tau_d = getattr(self.config, "land_snow_tau_days", None)
-        if _tau_d is not None:
-            cfg = cfg._replace(
-                land_albedo=cfg.land_albedo._replace(
-                    tau_snow_decay=float(_tau_d) * 86400.0))
-            logger.info("  land snow-albedo age e-folding: %.3g days "
-                        "(overrides the calibration)", float(_tau_d))
-        # Soil freeze/thaw, same placement: the bake rebuilds ``thermal`` with
-        # the switch at its library default, so it must be set after it.
-        _ft = bool(self.config.land_soil_freeze_thaw)
-        cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=_ft))
-        logger.info("  land soil freeze/thaw: %s", "ON" if _ft else "off")
-        _csm = bool(self.config.land_canopy_snow_masking)
-        cfg = cfg._replace(canopy_snow_masking=_csm)
-        logger.info("  land canopy snow masking (trees hide snow): %s",
-                    "ON" if _csm else "off")
-        # Snowpack scheme + snow emissivity, same placement (after the bake).
-        cfg = cfg._replace(
-            snow_scheme=str(self.config.land_snow_scheme),
-            snow_column=cfg.snow_column._replace(
-                emissivity_snow=float(self.config.land_snow_emissivity)))
-        logger.info("  land snowpack: %s (snow emissivity %.3f)",
-                    cfg.snow_scheme, cfg.snow_column.emissivity_snow)
-        from legoesm.land.multilayer_land import FINAL_THERMAL_SUBSTEPS
-        logger.info("  land soil thermal sub-steps per land step: %d",
-                    FINAL_THERMAL_SUBSTEPS if _ft else 1)
-        _e_ice = float(self.config.land_soil_ice_impedance_exponent)
-        cfg = cfg._replace(
-            richards=cfg.richards._replace(ice_impedance_exponent=_e_ice))
-        logger.info("  land soil ice impedance exponent: %g (active only with "
-                    "freeze/thaw ON)", _e_ice)
-        if not _ft and _e_ice != type(self.config)._field_defaults[
-                "land_soil_ice_impedance_exponent"]:
-            logger.warning("  land soil ice impedance exponent set but soil "
-                           "freeze/thaw is off: it has no effect")
-        # Canopy solver smoothing widths, same placement: the calibration above
-        # replaces surface_scheme with a fresh TwoLeafCanopyConfig, so a deck
-        # value set any earlier would be discarded.
-        _w_over = {k: float(v) for k, v in (
-            ("rh_cap_smoothing_width",
-             getattr(self.config, "land_canopy_rh_cap_smoothing_width", None)),
-            ("zeta_cap_smoothing_width",
-             getattr(self.config, "land_canopy_zeta_cap_smoothing_width", None)),
-        ) if v is not None}
-        _mi = getattr(self.config, "land_canopy_most_n_iters", None)
-        if _mi is not None:
-            _w_over["most_n_iters"] = int(_mi)
-        if _w_over:
-            from legoesm.land.canopy.config import CanopyConfig as _CanopyCfg
-            if not isinstance(cfg.surface_scheme, _CanopyCfg):
-                raise ValueError(
-                    f"land canopy settings {sorted(_w_over)} set but the "
-                    f"surface scheme is {type(cfg.surface_scheme).__name__}")
-            cfg = cfg._replace(
-                surface_scheme=cfg.surface_scheme._replace(**_w_over).validate())
-        if isinstance(cfg.surface_scheme, TwoLeafCanopyConfig):
-            logger.info("  land canopy smoothing widths: RH cap %.3g, zeta cap %.3g; "
-                        "MOST iterations %d",
-                        cfg.surface_scheme.rh_cap_smoothing_width,
-                        cfg.surface_scheme.zeta_cap_smoothing_width,
-                        cfg.surface_scheme.most_n_iters)
-        if _ft and getattr(self.config, "land_calibrated_physics", False):
-            logger.warning("  land soil freeze/thaw ON with the calibrated land "
-                           "tables, which were fitted with it OFF")
-        # Two-leaf canopy b0 stress and rain interception, same placement: the
-        # calibration bake rebuilds ``surface_scheme`` at its library default.
-        if isinstance(cfg.surface_scheme, TwoLeafCanopyConfig):
-            _sb0 = bool(self.config.land_canopy_stress_b0)
-            cfg = cfg._replace(
-                surface_scheme=cfg.surface_scheme._replace(stress_b0=_sb0))
-            logger.info("  land canopy b0 soil-moisture stress: %s",
-                        "ON" if _sb0 else "off")
-        if self.config.land_canopy_interception:
-            from legoesm.land.canopy.interception import InterceptionConfig
-            cfg = cfg._replace(interception=InterceptionConfig())
-            logger.info("  land canopy rain interception: ON")
-
-        # A CANOPY SCHEME GETS CANOPY PARAMETERS.
-        #
-        # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
-        # roughness, albedo and emissivity for a bulk surface.  A canopy scheme
-        # reads different quantities (canopy height, clumping, band albedos,
-        # roughness RATIO, per-PFT Vcmax25) and, given soil parameters, silently
-        # falls back to generic constants, leaving the tuned values inert.
-        #
-        # Those canopy parameters already exist and are already per-PFT:
-        # ``surface_data_to_land_params`` dispatches on the surface scheme and
-        # builds ``CanopyLandParams`` from the harmonized surfdata — the same
-        # route the offline LMIP simulations use, which is why THEY reproduce
-        # observed latent heat and photosynthesis.  The coupled driver simply
-        # never called it; it read the CLM provider, whose only variants are
-        # "slab" and "multilayer".  This is that missing call, not new physics.
-        #
-        # Soil hydraulics / thermal / albedo stay with the CLM map: only the
-        # SURFACE parameters come from the canopy builder.
-        from legoesm.land.canopy import CanopyConfig
-        from legoesm.land.canopy.config import CLMMLCanopyConfig
-        # Both canopy schemes take their per-PFT SURFACE params from
-        # init_land_surface_data: a two-leaf CanopyConfig -> CanopyLandParams
-        # (hc/rz0m); the CLM-ML canopy -> LandSurfaceParams with PRESCRIBED
-        # LAI/SAI/htop (the accurate per-plant structure its interface requires,
-        # vs the LAI-only clm_multilayer_setup fallback that left htop at the 5 m
-        # scalar default).  Explicit positive dispatch on the two canopy types
-        # (not `not SimpleSEBConfig`) so an unknown scheme cannot slip in.  #1624
-        # read params.hc here unconditionally, which crashed CLM-ML (no hc); the
-        # reads below dispatch on the actual struct.
-        if isinstance(cfg.surface_scheme, (CanopyConfig, CLMMLCanopyConfig)):
-            _sd_path = getattr(self.config, "surfdata_path", "")
-            if not _sd_path:
-                raise ValueError(
-                    f"land_surface_scheme selects {type(cfg.surface_scheme).__name__}, "
-                    "which needs per-PFT CANOPY parameters (canopy height, band "
-                    "albedos, roughness ratio, Vcmax25). Those are built from the "
-                    "harmonized surfdata, so --surfdata is required. Without it the "
-                    "canopy would run on generic constants and every tuned per-PFT "
-                    "value would be inert — refusing rather than doing that quietly.")
-            from legoesm.land.boundary_data import init_land_surface_data
-            _clm_params = params
-            # THE CALIBRATION'S OWN TABLES, or none. Without these the builder
-            # leaves the root fields unset and the code below fills them from
-            # the CLM map — i.e. the LEGACY tables — so the calibration's root
-            # depth, wilting point and field capacity never reached the model.
-            # Same for the glacier albedo, which otherwise takes the 0.70/0.50
-            # default instead of the calibrated pair.
-            _cal_on = getattr(self.config, "land_calibrated_physics", False)
-            _pft_root, _glacier_alb = None, None
-            if _cal_on:
-                from legoesm.land.clm_surface_map import (
-                    biophysics_lmip_pft_root_params,
-                    biophysics_lmip_glacier_albedo)
-                _pft_root = biophysics_lmip_pft_root_params()
-                _glacier_alb = biophysics_lmip_glacier_albedo()
-            _, params, _gsd = init_land_surface_data(
-                _sd_path, self._surface_data_grid(), cfg, float(self.config.start_day),
-                year=(None if getattr(self.config, "start_year", None) is None
-                      else float(self.config.start_year)),
-                pft_root_params=_pft_root, glacier_alb=_glacier_alb)
-            # Per-step rebuild of the same parameters (seasonal LAI / canopy
-            # height, wet-soil albedo), built from the SAME gsd, root tables and
-            # glacier pair as ``params`` -- the offline calibration's updater
-            # (run_lmip_biophys) -- so a refresh cannot revert the calibration.
-            # Two-leaf only: the CLM-ML canopy's params carry SAI/htop the
-            # updater does not build.
-            if isinstance(cfg.surface_scheme, CanopyConfig):
-                _upd_scheme = cfg.surface_scheme
-                _upd_start_year = getattr(self.config, "start_year", None)
-
-                def _build_params_update(_gsd=_gsd, _scheme=_upd_scheme,
-                                         _alb=_glacier_alb, _roots=_pft_root,
-                                         _y0=_upd_start_year):
-                    if _y0 is None and int(np.asarray(_gsd.years).size) > 1:
-                        raise ValueError(
-                            "land_params_refresh needs start_year with a "
-                            "transient surfdata: the start-day parameters are "
-                            "the cover's year-MEAN, which the per-step rebuild "
-                            "(one calendar year per step) cannot reproduce.")
-                    from legoesm.land.boundary_data import (
-                        make_step_land_params_updater)
-                    return make_step_land_params_updater(
-                        _gsd, _scheme, glacier_alb=_alb, pft_root_params=_roots)
-
-                # Built lazily by the lane that consumes it (the MPAS land step).
-                self.physics.land_ml_params_update_factory = _build_params_update
-            # KEEP THE SOIL-WATER THRESHOLDS THE COMMENT ABOVE PROMISES.
-            # Replacing the parameter object wholesale also dropped the CLM
-            # per-column ROOT DEPTH, WILTING POINT and FIELD CAPACITY, which the
-            # canopy parameter object leaves unset — so the land step silently
-            # fell back to one scalar value per field for the whole globe, and
-            # every column's root-zone moisture stress changed. Those are soil
-            # properties, not surface ones; carry them across (found by both
-            # reviewers).
-            _root_fields = {
-                f: getattr(_clm_params, f)
-                for f in ("root_depth", "theta_wp", "theta_fc")
-                if getattr(params, f, None) is None
-                and getattr(_clm_params, f, None) is not None}
-            if _root_fields:
-                params = params._replace(**_root_fields)
-                logger.info(
-                    "  Land tile: kept the CLM per-column %s with the canopy "
-                    "parameters (they are soil properties, not surface ones).",
-                    ", ".join(sorted(_root_fields)))
-            # TWO PROVIDERS, ONE COLUMN INDEX.  The canopy parameters come from
-            # one dataset and the soil beneath them from another, each regridded
-            # independently.  A differing column COUNT or ORDER would attach every
-            # canopy property to the wrong column and the run would still look
-            # entirely healthy — so check the count structurally, at t=0, rather
-            # than hope (GLM).
-            # Struct differs by scheme: two-leaf -> CanopyLandParams (hc, rz0m);
-            # CLM-ML -> LandSurfaceParams (htop, LAI, NO hc).  Read the column
-            # count off whichever per-column height field the provider set, and
-            # log the fields that exist for that struct.
-            _hc = getattr(params, "hc", None)
-            _height_field = _hc if _hc is not None else params.htop
-            _n_canopy = int(jnp.asarray(_height_field).shape[0])
-            _n_soil = int(jnp.asarray(lat_rad).size)
-            if _n_canopy != _n_soil:
-                raise ValueError(
-                    f"canopy parameters have {_n_canopy} columns but the soil map "
-                    f"has {_n_soil}: the two surface datasets did not regrid onto "
-                    "the same columns, so every canopy property would sit on the "
-                    "wrong one. Check --surfdata and --clm-surfdata-path cover "
-                    "this grid.")
-            if _hc is not None:
-                logger.info(
-                    "  Land tile: %s on per-PFT CANOPY parameters from %s "
-                    "(canopy height %.2f-%.2f m, roughness ratio %.3f-%.3f). NOTE "
-                    "emissivity is a single constant in this builder and the canopy "
-                    "computes its own radiation from soil colour + leaf optics, so "
-                    "the tuned per-PFT emissivity and vegetation albedo do NOT apply "
-                    "to it — those are re-fit items, not wiring.",
-                    type(cfg.surface_scheme).__name__, _sd_path,
-                    float(jnp.min(_hc)), float(jnp.max(_hc)),
-                    float(jnp.min(params.rz0m)), float(jnp.max(params.rz0m)))
-            else:
-                logger.info(
-                    "  Land tile: %s on per-PFT CLM-ML surface parameters from %s "
-                    "(prescribed canopy-top height %.2f-%.2f m, LAI %.2f-%.2f) — "
-                    "the accurate per-plant structure the multilayer canopy needs.",
-                    type(cfg.surface_scheme).__name__, _sd_path,
-                    float(jnp.min(params.htop)), float(jnp.max(params.htop)),
-                    float(jnp.min(params.LAI)), float(jnp.max(params.LAI)))
-
-        # A CANOPY SCHEME MUST NOT SILENTLY RUN ON SOIL PARAMETERS.
-        #
-        # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
-        # roughness, albedo and emissivity.  The two-leaf and CLM-ML canopies
-        # read CANOPY properties (canopy height, band albedos, roughness ratio)
-        # and, finding none, fall back to generic constants: the tuned per-PFT
-        # values are then INERT, which a gradient test caught as exactly zero
-        # sensitivity to the trained roughness.  Inert trained parameters are a
-        # defect here, not a nuisance, and a comment in a document is not a
-        # control (GLM).  Say it at startup, every run, so nobody reports a
-        # canopy run as validating tuned land parameters it never used.
-        from legoesm.land.canopy import CanopyConfig
-        # Two-leaf only: it reads CanopyLandParams (hc/ALB/rz0m).  CLM-ML runs on
-        # a LandSurfaceParams by design (its canopy structure is LAI/SAI/htop),
-        # so this "running on SOIL parameters" check does not apply to it.
-        if isinstance(cfg.surface_scheme, CanopyConfig):
-            _canopy_fields = [f for f in ("hc", "ALB_VIS", "ALB_NIR", "rz0m")
-                              if getattr(params, f, None) is not None]
-            if not _canopy_fields:
-                logger.warning(
-                    "  Land tile: %s is running on SOIL parameters — it reads "
-                    "canopy height, band albedos and roughness ratio, none of "
-                    "which are present, so it is using GENERIC canopy constants "
-                    "and the tuned per-PFT roughness / albedo / emissivity are "
-                    "INERT. Do not report this run as validating tuned land "
-                    "parameters. Use --land-surface-scheme simple_seb to run the "
-                    "scheme those parameters belong to.",
-                    type(cfg.surface_scheme).__name__)
-
+        _tile = build_multilayer_land_tile(
+            self.config, lat_rad, lon_rad, self._surface_data_grid())
+        cfg, params = _tile["cfg"], _tile["params"]
+        surface_map, surfdata_file = _tile["surface_map"], _tile["surfdata_file"]
+        if _tile["params_update_factory"] is not None:
+            self.physics.land_ml_params_update_factory = _tile["params_update_factory"]
+        if _tile["carbon"] is not None:
+            self.physics.land_ml_carbon = _tile["carbon"]
         self.physics.land_ml_cfg = cfg
         self.physics.land_ml_params = params
-        # The Farquhar branch needs a non-None carbon state at the call site as
-        # well as the differland scheme.  Seed a PRESCRIBED one (fixed leaf
-        # carbon -> fixed LAI = C_fol/LCMA); the pipeline discards the evolved
-        # pools every step, which is exactly what the calibrator does, so the
-        # baked Vc_max25/g1/LCMA act on the same LAI they were fitted with and no
-        # multi-decade carbon spin-up is needed.  Left None otherwise, so a run
-        # without the flag is byte-identical.
-        # A canopy scheme carries its OWN photosynthesis (Farquhar GPP), so it
-        # also needs the differland carbon state seeded even though the bulk
-        # ``cfg.stomata`` throttle is off — otherwise the calibrated two-leaf
-        # run, fitted WITH differland, would deploy under a "none" carbon cycle.
-        from legoesm.land.surface_scheme import SimpleSEBConfig as _SimpleSEBConfig
-        _is_canopy = not isinstance(cfg.surface_scheme, _SimpleSEBConfig)
-        if (cfg.stomata.enabled or _is_canopy) and cfg.carbon.scheme == "differland":
-            from legoesm.land.carbon.carbon_cycle import init_carbon_state
-            self.physics.land_ml_carbon = init_carbon_state(
-                (int(lat_rad.size),), cfg.carbon)
-            logger.info(
-                "  Land stomata: FARQUHAR (prescribed carbon state, "
-                f"LAI = C_fol/LCMA from C_fol={cfg.carbon.C_fol_init:g} gC/m2) "
-                "— the baked Vc_max25/g1/LCMA are ACTIVE")
-        elif cfg.stomata.enabled:
-            logger.info(
-                "  Land stomata: JARVIS (no differland carbon state) — the baked "
-                "Farquhar Vc_max25/g1/LCMA are NOT used")
         self.physics.land_ml_lat = jnp.asarray(lat_rad, dtype=storage_dtype)
         self.physics.land_ml_doy = 0.0
         # CONCRETE dynamics timestep [s].  The jitted segment passes ``dt`` as a
@@ -4495,6 +5196,24 @@ class ModelDriver:
             logger.warning(
                 "  Land tile: IC has no q_v tracer; multilayer soil seeded at "
                 "land_soil_moisture_init_frac*theta_sat (aridity-aware skipped).")
+        # The Richards solve clips theta up to its dry floor and a column at the
+        # floor has nothing to repay it with, so a seed below the floor would
+        # create that water on the first solve.  Start at the floor instead,
+        # read from the hydraulics the solver itself uses.
+        from legoesm.land.richards import dry_floor
+        from legoesm.land.soil_grid import make_soil_grid
+        _theta_floor = jnp.asarray(dry_floor(cfg.hydraulics)[1]).astype(
+            storage_dtype)
+        _seed = theta_init
+        theta_init = jnp.maximum(_seed, _theta_floor)
+        _lift = (_np.asarray(theta_init - _seed, dtype=_np.float64)
+                 * float(_np.sum(make_soil_grid(cfg.soil_grid).dz))
+                 * constants.rho_water)
+        logger.info(
+            "  Land tile: cold-start soil seed lifted to the Richards dry floor "
+            "in %d of %d columns (max %.3g, column-sum %.6g kg/m2)",
+            int(_np.count_nonzero(_lift > 0)), ncol, float(_np.max(_lift)),
+            float(_np.sum(_lift)))
         # Canonical cold-start template — always built so the spun-up land-IC
         # path (below) has the correct pytree STRUCTURE to graft onto (the
         # restart round-trips only the core prognostic fields; the optional
@@ -4583,6 +5302,31 @@ class ModelDriver:
                     make_soil_grid(cfg.soil_grid).dz,
                     land_mask=_f_land_ic > 0.0, file_column_sig=_sig_ic,
                     path=_land_ic_path)
+                # Soil water below the Richards dry floor would be lifted for free
+                # on the first solve (water created).  The conversion above lifts
+                # files on other hydraulics; one on this run's hydraulics must
+                # already be at or above the floor.  1e-12 absorbs fp64 roundoff
+                # of the floor recomputed at run time.
+                _th_ic = np.asarray(_merged.theta_soil, dtype=np.float64)
+                _fl_ic = np.asarray(dry_floor(cfg.hydraulics)[1], dtype=np.float64)
+                _gap_ic = np.where((_f_land_ic > 0.0)[:, None],
+                                   np.broadcast_to(_fl_ic, _th_ic.shape) - _th_ic,
+                                   0.0)
+                _bad_ic = ((_f_land_ic > 0.0)[:, None]
+                           & ~(_th_ic >= np.broadcast_to(_fl_ic, _th_ic.shape)
+                               - 1.0e-12))
+                if np.any(_bad_ic):
+                    _dz_ic = np.asarray(make_soil_grid(cfg.soil_grid).dz)
+                    _kg_ic = np.sum(np.where(_bad_ic, _gap_ic, 0.0) * _dz_ic,
+                                    axis=-1) * constants.rho_water
+                    raise ValueError(
+                        f"land IC {_land_ic_path}: {int(_bad_ic.sum())} soil "
+                        f"layers in {int(np.any(_bad_ic, axis=-1).sum())} land "
+                        "columns are below this run's Richards dry floor (max "
+                        f"{float(_gap_ic.max()):.3g} m3/m3, {float(_kg_ic.max()):.3g}"
+                        " kg/m2 in one column); the first solve would create that "
+                        "water.  Rebuild the file lifted to the floor "
+                        "(regrid_land_ic --lift-only).")
             except Exception:
                 # The conversion is per column, so its refusals are rank-local
                 # while the other ranks walk on into the next collective.  Take
@@ -4775,26 +5519,28 @@ class ModelDriver:
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
         from legoesm.forcing.external import (
-            SolarConfig, OzoneConfig, AerosolConfig, GHGConfig,
+            OzoneConfig, AerosolConfig, GHGConfig,
             get_solar_forcing_at_time,
             get_ghg_at_time,
         )
 
         cfg = self.config
-        self._solar_config = SolarConfig(
-            S_0=cfg.S_0, source=cfg.solar_source,
-            path=cfg.solar_file, tsi_var=cfg.solar_tsi_var,
-            spectral_var=cfg.solar_spectral_var,
-            spectral_band_order=getattr(
-                cfg, "solar_spectral_band_order", "auto",
-            ),
-            start_year=cfg.start_year,
-        )
+        self._solar_config = solar_config_from_experiment(cfg)
         self._use_solar_spectral = (cfg.solar_source == "spectral_file")
 
         # Ozone external forcing
-        self._ozone_ext_active = (cfg.radiation in ("rrtmg", "rrtmgp")
-                                  and cfg.ozone_forcing == "external")
+        # ecrad_ifs reads the same input4MIPs ozone and GHG (user 2026-11-04,
+        # vote M6a); aerosols and the GHG overrides stay rrtmg/rrtmgp-only.
+        self._ozone_ext_active = (
+            cfg.radiation in ("rrtmg", "rrtmgp", "ecrad_ifs")
+            and cfg.ozone_forcing == "external")
+        if (self._ozone_ext_active and cfg.radiation == "ecrad_ifs"
+                and not cfg.ozone_file):
+            # the loader would substitute its built-in reference profile
+            # (use_reference_if_missing below) for the input4MIPs file
+            raise ValueError(
+                "radiation='ecrad_ifs' reads the input4MIPs ozone file; "
+                "ozone_file is empty (--ozone-file).")
         self._ozone_ext_config = OzoneConfig(
             enabled=self._ozone_ext_active,
             source="climatology", path=cfg.ozone_file,
@@ -4867,7 +5613,7 @@ class ModelDriver:
                   f"CO2={co2:.1f} ppmv")
 
         # GHG forcing config
-        self._ghg_active = (cfg.radiation in ("rrtmg", "rrtmgp")
+        self._ghg_active = (cfg.radiation in ("rrtmg", "rrtmgp", "ecrad_ifs")
                             and cfg.ghg_forcing == "external")
         if self._ghg_active:
             self._ghg_config = GHGConfig(
@@ -4917,6 +5663,12 @@ class ModelDriver:
             p_s = self._gather_spmd_tree_to_host(p_s)
         return p_s, lat
 
+    def _owned_lon(self):
+        """Longitude [rad] in the ``_owned_p_s_and_lat`` layout."""
+        if self._owned_face_ids is not None:
+            return self._physics_lon
+        return self._grid_lon
+
     def _owned_temp(self):
         """Grid-point air temperature in the ``_owned_p_s_and_lat`` layout;
         None when the state carries no grid-point ``T`` (e.g. spectral)."""
@@ -4927,15 +5679,91 @@ class ModelDriver:
             return temp[self._owned_face_ids]
         return self._gather_spmd_tree_to_host(temp)
 
-    def _precompute_external_forcing(self, day, p_s, lat, temp=None):
-        """Pre-compute ozone/aerosol/GHG fields outside JIT boundary."""
-        from legoesm.forcing.external import (
-            get_ozone_at_time, get_aerosol_at_time, get_aerosol_lw_at_time,
-            get_aerosol_sw_volcanic_at_time,
-        )
+    def _cam6_activation_setup(self, phys_cfg, dt_micro):
+        """Start-up constants of CAM6 prescribed-aerosol droplet activation
+        (Morrison ``prognostic_droplet_number``, MPAS lane) plus the host
+        horizontal weights of the aerosol climatology for the physics columns.
+        ``n_max`` is evaluated on this start-up state (user decision B10)."""
+        from legoesm.atmosphere.physics.microphysics.cam6_aerosol_climatology import (
+            PPE_RAW_FILE, PPE_SHA256, Cam6AerosolActivation, horizontal_weights,
+            read_hybrid_coefficients, trop_cloud_top_lev)
+        from legoesm.atmosphere.physics.microphysics.cam6_dropmixnuc import (
+            nsubmix_upper_bound)
+        from legoesm.atmosphere.physics.microphysics.cam6_modal_aerosol import (
+            load_cam6_mode_props, read_pinned_netcdf)
+        from legoesm.atmosphere.physics.microphysics.integration import (
+            cam6_activation_columns)
+        from legoesm.atmosphere.physics.turbulence.integration import (
+            resolved_clubb_config)
+        from pathlib import Path
+        data_dir = self.config.cam6_aerosol_dir
+        hyam, hybm, p0 = read_hybrid_coefficients(data_dir)
+        # CAM ref_pres: pref_mid = hyam*ps0 + hybm*psr, ps0 = psr = 1e5 Pa (hycoef.F90:122)
+        pref_mid = np.asarray(self.sigma.pressure_at_full(jnp.asarray(constants.p_ref)))
+        top_lev = trop_cloud_top_lev(
+            pref_mid, resolved_clubb_config(phys_cfg.turbulence).trop_cloud_top_press)
+        p_s, lat = self._owned_p_s_and_lat()
+        T = jnp.asarray(self._owned_temp())
+        q_v = self.state.tracers["q_v"].data
+        q_v = (q_v[self._owned_face_ids] if self._owned_face_ids is not None
+               else self._gather_spmd_tree_to_host(q_v))
+        nlev = self.sigma.sigma_full.shape[0]
+        ncol = int(np.prod(np.shape(p_s)))
+        p_s = jnp.asarray(p_s).reshape(ncol)
+        T_col = T.reshape(ncol, nlev)
+        q_v_col = jnp.asarray(q_v).reshape(ncol, nlev)
+        p_full = self.sigma.pressure_at_full(p_s).reshape(ncol, nlev)
+        p_half = self.sigma.pressure_at_half(p_s).reshape(ncol, nlev + 1)
+        pmid, pint, rpdel, zm = cam6_activation_columns(T_col, q_v_col, p_full, p_half)
+        n_max = nsubmix_upper_bound(T_col, pmid, pint, rpdel, zm, dt_micro, top_lev)
+        with read_pinned_netcdf(Path(data_dir) / PPE_RAW_FILE, PPE_SHA256) as d:
+            file_lat = np.asarray(d["lat"][:], dtype=np.float64)
+            file_lon = np.asarray(d["lon"][:], dtype=np.float64)
+        lon_w, lat_w = horizontal_weights(
+            file_lat, file_lon, np.asarray(lat).reshape(ncol),
+            np.asarray(self._owned_lon()).reshape(ncol))
+        setup = Cam6AerosolActivation(load_cam6_mode_props(data_dir), hyam, hybm, p0,
+                                      top_lev, n_max)
+        return setup, (lon_w, lat_w)
+
+    def _ecrad_aerosol_forcing(self, day):
+        """ecrad_ifs aerosols (user 2026-11-04 item 3, votes C2-C8): the IFS
+        49r1 NAERMACC=1 climatology half that is static per call --
+        UPDECAEC month weight + 2D CAMS update + bilinear column mass -- on
+        this rank's columns for the forcing day ``day``.  NINDAT = the run
+        start date on the insolation calendar (the McICA seed's, S3a), minute
+        = elapsed minutes at ``day`` (C4a); eta = the lane's hybrid half
+        levels at p_atm_std / p_atm_std (C6a: the mass above the model top
+        is dropped).  Elapsed minutes go through updecaec.F90's own
+        365.25-day year (the IFS's leap-day wobble, kept for parity).  Returns
+        the two forcing arrays (C8a)."""
+        from legoesm.atmosphere.physics.radiation.ecrad_ifs import ifs_aerosol
+        from legoesm.forcing.time_utils import day_to_date
+        cfg = self.config
+        if getattr(self, "_ecrad_cams", None) is None:
+            self._ecrad_cams = ifs_aerosol.load_cams_2d(cfg.ecrad_ifs_aerosol_file)
+        y, m, d = day_to_date(self._insolation_day(0.0),
+                              ref_year=int(cfg.start_year))[:3]
+        nindat = int(y) * 10000 + int(m) * 100 + int(d)  # coeff-ok: YYYYMMDD packing
+        minute = int(round(float(day) * 1440.0))  # coeff-ok: minutes per day
+        eta = np.asarray(self.sigma.pressure_at_half(
+            jnp.asarray([constants.p_atm_std])))[0] / constants.p_atm_std
+        _, lat = self._owned_p_s_and_lat()
+        lat = np.asarray(lat).reshape(-1)
+        lon = np.asarray(self._owned_lon()).reshape(-1)
+        cm, cum = ifs_aerosol.climatology_at_columns(
+            self._ecrad_cams, nindat, minute, eta, np.sin(lat), lon)
+        return {"ecrad_aerosol_column_mass": jnp.asarray(cm),
+                "ecrad_aerosol_cum_fraction": jnp.asarray(cum)}
+
+    def _precompute_external_forcing(self, day, p_s, lat, temp=None, lon=None):
+        """Pre-compute ozone/aerosol/GHG fields outside JIT boundary.
+
+        ``lon`` [rad] matches ``lat``; None -> :meth:`_owned_lon` (the layout
+        of :meth:`_owned_p_s_and_lat`, which every caller but spectral uses)."""
+        from legoesm.forcing.external import get_ozone_at_time
         from legoesm.forcing.surface_utils import (
-            distribute_column_aod_to_layers,
-            place_stratospheric_aod_profile_to_layers,
+            aerosol_layer_fields,
             stratospheric_layer_weight,
         )
 
@@ -4951,8 +5779,9 @@ class ModelDriver:
         # Ozone is evaluated on the model levels PLUS 16 midpoints of equal
         # pressure sub-layers above the model top (0 < p < p_top); their mean
         # is the overhead column-mean VMR for the RRTMGP overhead layer
-        # (RRTMGPConfig.overhead_layer; unused when that is off).  All ozone sources are pointwise in
-        # p, so the model-level values are unchanged.
+        # (RRTMGPConfig.overhead_layer; unused when that is off).  The inline sources other than
+        # "mls" are pointwise in p, so the model-level values are unchanged;
+        # "mls" (gSAM layer means) is handled from the interfaces below.
         _p_o3 = jnp.concatenate([
             p_full_col,
             p_half_col[:, :1] * ((jnp.arange(16) + 0.5) / 16.0),
@@ -5001,10 +5830,32 @@ class ModelDriver:
             from legoesm.atmosphere.physics.radiation.config import (
                 OzoneProfileConfig,
             )
-            _o3_inline = _compute_ozone_vmr(
-                _p_o3, lat_col,
-                OzoneProfileConfig(source=self.config.ozone_source),
-            )
+            if self.config.ozone_source == "mls":
+                # gSAM layer means are not pointwise in p: evaluate them on the
+                # model interfaces; the overhead layer takes gSAM's own extra
+                # layer above the model top (p_top to min(1e-4 hPa, p_top/8)).
+                # With p_top = 0 there is no overhead layer: it keeps the top
+                # model layer's value, and the extra layer's 0/0 is never formed
+                # (p_top replaced by 1 Pa only inside that branch).
+                from legoesm.atmosphere.physics.radiation.ozone_mls import (
+                    mls_ozone_layer_vmr,
+                )
+                _lay = _compute_ozone_vmr(
+                    p_full_col, lat_col, OzoneProfileConfig(source="mls"),
+                    p_half=p_half_col,
+                )
+                _ptop = p_half_col[:, 0]
+                _ph_safe = p_half_col.at[:, 0].set(jnp.where(_ptop > 0.0, _ptop, 1.0))
+                _above = jnp.where(_ptop > 0.0, mls_ozone_layer_vmr(_ph_safe)[1],
+                                   _lay[:, 0])
+                _o3_inline = jnp.concatenate(
+                    [_lay, jnp.broadcast_to(_above[:, None], (ncol, _p_o3.shape[1] - nlev))],
+                    axis=1)
+            else:
+                _o3_inline = _compute_ozone_vmr(
+                    _p_o3, lat_col,
+                    OzoneProfileConfig(source=self.config.ozone_source),
+                )
             if _o3_inline is None:
                 # source="standard": the backend contract is o3_vmr=None →
                 # its built-in US Std Atm 1976 fit; materialize the same
@@ -5017,57 +5868,17 @@ class ModelDriver:
         self._o3_top_vmr = jnp.mean(o3_vmr[:, nlev:], axis=1)
         o3_vmr = o3_vmr[:, :nlev]
 
-        aerosol_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
-        if self._aerosol_active:
-            _acfg = self._aerosol_config
-            # Volcanic SW (CMIP6 ``ext_sun``) is placed at its true
-            # stratospheric pressure like the LW profile below, NOT spread
-            # with the tropospheric column by pressure mass.  A legacy
-            # column-only volcanic file (profile None) stays in the column.
-            volc_sw = get_aerosol_sw_volcanic_at_time(_acfg, day, lat_grid=lat_col)
-            _trop_cfg = _acfg._replace(volcanic_enabled=False)
-            aerosol_col = get_aerosol_at_time(
-                _acfg if volc_sw is None else _trop_cfg, day, lat_grid=lat_col,
-            )
-            aerosol_od = distribute_column_aod_to_layers(
-                jnp.asarray(aerosol_col), p_half_col,
-            )
-            if volc_sw is not None:
-                aerosol_od = aerosol_od + (place_stratospheric_aod_profile_to_layers(
-                    jnp.asarray(volc_sw[0]), jnp.asarray(volc_sw[1]), p_half_col,
-                ) * w_strat
-                ).astype(aerosol_od.dtype)
-            # AOD->CCN input: TROPOSPHERIC column in the visible (550 nm)
-            # band, volcanic excluded, from ``ccn_path`` (fine mode) if set.
-            self._aerosol_ccn_aod = jnp.asarray(get_aerosol_at_time(
-                _trop_cfg._replace(path=_acfg.ccn_path or _acfg.path),
-                day, lat_grid=lat_col, band="vis",
-            )).reshape(ncol).astype(p_s.dtype)
-
-        # Volcanic stratospheric LONGWAVE aerosol (gap #9): same (ncol,
-        # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
-        # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
-        # and a run without volcanic LW aerosol is byte-identical (zeros LW
-        # od is a RRTMGP no-op).  ``get_aerosol_lw_at_time`` returns the
-        # file's height-resolved ABSORPTION profile (ext*(1-omega), Planck-
-        # weighted gray band collapse) plus its pressure edges; the profile
-        # is placed at its true stratospheric pressure by a conservative
-        # overlap remap -- NOT spread by full-column pressure mass, which
-        # dumped ~90% of a stratospheric aerosol into the troposphere.
-        # Stored as an instance attribute (NOT added to the 3-tuple return)
-        # so the five existing unpack call sites keep their arity.
-        aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
-        if self._aerosol_lw_active:
-            aerosol_lw_prof = get_aerosol_lw_at_time(
-                self._aerosol_config, day, lat_grid=lat_col,
-            )
-            if aerosol_lw_prof is not None:
-                prof_col, p_edges = aerosol_lw_prof
-                aerosol_lw_od = (place_stratospheric_aod_profile_to_layers(
-                    jnp.asarray(prof_col), jnp.asarray(p_edges), p_half_col,
-                ) * w_strat
-                ).astype(p_s.dtype)
-        self._aerosol_lw_od = aerosol_lw_od
+        # Radiation and the droplet proxy read the aerosol at each column's
+        # own longitude, as CAM's prescribed aerosol reaches radiation
+        # (tracer_data.F90 bilinear lon/lat lininterp).
+        lon_col = (jnp.asarray(self._owned_lon() if lon is None else lon)
+                   .reshape(ncol) if self._aerosol_active else None)
+        aerosol_od, _ccn_aod, self._aerosol_lw_od = aerosol_layer_fields(
+            self._aerosol_config, day, lat_col, p_half_col, w_strat,
+            active=self._aerosol_active, lw_active=self._aerosol_lw_active,
+            dtype=p_s.dtype, lon_col=lon_col)
+        if _ccn_aod is not None:
+            self._aerosol_ccn_aod = _ccn_aod
 
         ghg_vmr = self.radiation_ghg_vmr(day)
         return o3_vmr, aerosol_od, ghg_vmr
@@ -5134,6 +5945,15 @@ class ModelDriver:
         # ``cloud_scheme == 'none'`` => ``None`` => clt not published.
         _cloud_scheme = getattr(self.config, "cloud_scheme", "none")
         diag_cloud_config = None
+        diag_clubb_config = None
+        if _cloud_scheme == "cam6_clubb":
+            # CLUBB's top cuts the ice-stratus fraction in clt / clivi exactly
+            # as in radiation and MG2 (clubb_intr.F90:2535).
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                resolved_clubb_config,
+            )
+            diag_clubb_config = resolved_clubb_config(
+                turbulence_config_for(self.config))
         if _cloud_scheme != "none":
             from legoesm.atmosphere.physics.clouds.config import (
                 build_cloud_config,
@@ -5179,8 +5999,13 @@ class ModelDriver:
             n_days=self.config.days,
             output_dir=self._output_dir,
             cmip_resolution_deg=self.config.output.cmip_resolution_deg,
+            cmip_drs_tree=self.config.output.cmip_drs_tree,
+            cmip_institution_id=self.config.output.cmip_institution_id,
+            cmip_source_id=self.config.output.cmip_source_id,
+            cmip_variant_label=self.config.output.cmip_variant_label,
             start_year=self.config.start_year,
             cloud_config=diag_cloud_config,
+            clubb_config=diag_clubb_config,
             # tas 2 m profile uses the SAME MOST bulk scheme and stable-branch
             # functions as the surface fluxes (defaults are byte-identical:
             # "constant" keeps the historical coare3 profile stand-in).
@@ -5188,6 +6013,12 @@ class ModelDriver:
                 self.config, "surface_stability_scheme", "dyer1974"),
             surface_bulk_scheme=getattr(
                 self.config, "surface_bulk_scheme", "constant"),
+            surface_unstable_scheme=getattr(
+                self.config, "surface_unstable_scheme", "native"),
+            surface_most_zeta_cap_width=getattr(
+                self.config, "surface_most_zeta_cap_width", MOST_ZETA_CAP_WIDTH),
+            surface_gfs_unstable_join_width=getattr(
+                self.config, "surface_gfs_unstable_join_width", GFS_UNSTABLE_JOIN_WIDTH),
         )
         # Register per-cell horizontal areas so every global-mean diagnostic
         # (<R_TOA>, <SST>, <CWV>, ...) is area-weighted.  On a lat-lon grid an
@@ -5582,6 +6413,9 @@ class ModelDriver:
           (a legitimate resume/retry of the same run). An existing manifest that
           is invalid, or written for a *different* config, is fatal — one output
           directory holds one run; mixing two runs' provenance is refused.
+          Exception: an atmosphere driven by a runner with a replay spec
+          (run_coupled) continues when only that runner's ``atmosphere.*``
+          continuation controls differ (:meth:`_continue_driving_runner`).
         * **Required, not best-effort:** a write failure aborts ``setup()``.
           This is cheap — setup() has not yet entered the time loop — and upholds
           the A1 guarantee that a run which proceeds is always reconstructible.
@@ -5635,18 +6469,19 @@ class ModelDriver:
         # Atomic-exclusive create: wins the race against a concurrent start into
         # the same directory.  The winner creates the manifest; everyone else
         # (this run on retry/resume, or a racing process) takes the validate path.
+        manifest_kwargs = dict(
+            rng_seeds={"master": self._input_config.seed},
+            dataset_provenance=datasets,
+            # #1509: the --params values this run actually applied, so the
+            # manifest does not depend on the referenced file surviving
+            # unmodified. Absent (-> {}) when no --params were given.
+            params_applied=getattr(self, "_params_applied", None),
+            **({"runner_tag": self._manifest_runner_tag}
+               if getattr(self, "_manifest_runner_tag", None) else {}),
+        )
         try:
-            write_run_manifest(
-                self._output_dir,
-                self._input_config,
-                exclusive=True,
-                rng_seeds={"master": self._input_config.seed},
-                dataset_provenance=datasets,
-                # #1509: the --params values this run actually applied, so the
-                # manifest does not depend on the referenced file surviving
-                # unmodified. Absent (-> {}) when no --params were given.
-                params_applied=getattr(self, "_params_applied", None),
-            )
+            write_run_manifest(self._output_dir, self._input_config,
+                               exclusive=True, **manifest_kwargs)
             return
         except FileExistsError:
             pass
@@ -5663,20 +6498,81 @@ class ModelDriver:
                 f"refusing to start a run without valid run-start provenance. "
                 f"Remove or repair it to continue."
             ) from exc
+        tag = self._manifest_runner_tag or ""
+        old_tag = (existing.get("reproducibility") or {}).get("runner_tag") or ""
+        # An untagged record beside a coupled record is a coupled run's
+        # atmosphere written before the tag existed: still this run.
+        # It belongs to run_coupled, so it is not a standalone run's either.
+        coupled_beside = not old_tag and (
+            self._output_dir / "coupled" / manifest_file.name).exists()
+        owner = "run_coupled" if coupled_beside else old_tag
+        same_runner = tag == owner
         if not config_hash_matches(
                 existing["config"]["config_hash"],
                 existing["config"].get("resolved_config") or {},
                 self._input_config):
+            if same_runner and self._continue_driving_runner(
+                    existing, manifest_file, manifest_kwargs):
+                return
             raise RuntimeError(
                 f"Output directory {self._output_dir} already holds a run "
                 f"manifest written for a DIFFERENT config; refusing to mix two "
                 f"runs' provenance in one directory. Use a fresh output "
                 f"directory, or remove the existing run_manifest.json."
             )
+        if not same_runner:
+            # One output directory holds one run: a record another runner (or
+            # a standalone run) wrote is not this run's, even at equal config.
+            raise RuntimeError(
+                f"{manifest_file} was written by the {owner or 'standalone'!r} "
+                f"runner, this run is {tag or 'standalone'!r}; one output "
+                f"directory holds one run. Use a fresh output directory.")
         logger.info(
             f"Run manifest already present at {manifest_file}; preserving it "
             f"(same config — resume/retry)."
         )
+
+    def _continue_driving_runner(self, existing: dict, manifest_file: Path,
+                                 manifest_kwargs: dict) -> bool:
+        """A continuation of the run that drives this atmosphere (run_coupled):
+        when the existing record differs only in the atmosphere keys that
+        runner's continuation controls name (run length, checkpoint
+        frequency, wallclock budget), archive it by a hard link and write
+        this run's record.  False (caller refuses) otherwise."""
+        from datetime import datetime, timezone
+
+        from legoesm.driver.restart import (
+            RUNNER_REPLAY_SPECS,
+            config_drift_rows,
+            resolved_config_record,
+            write_run_manifest,
+        )
+        spec = RUNNER_REPLAY_SPECS.get(self._manifest_runner_tag or "")
+        prefix = "atmosphere."
+        keys = [k[len(prefix):] for k in (spec.continuation_keys if spec else ())
+                if k.startswith(prefix)]
+        if not keys:        # (the caller checked the record is this runner's)
+            return False
+        rows = [r for r in config_drift_rows(
+                    existing["config"].get("resolved_config") or {},
+                    resolved_config_record(self._input_config))
+                if not any(r[0] == k or r[0].startswith(k + ".") for k in keys)]
+        if rows:
+            return False
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        prev = manifest_file.with_name(
+            f"{manifest_file.stem}.prev-{stamp}-{os.getpid()}.json")
+        os.link(manifest_file, prev)       # the old record stays live until
+        try:                               # the new one replaces it
+            write_run_manifest(self._output_dir, self._input_config,
+                               **manifest_kwargs)
+        except BaseException:
+            prev.unlink(missing_ok=True)
+            raise
+        logger.info(f"Run manifest at {manifest_file} continued "
+                    f"({self._manifest_runner_tag}); previous record kept at "
+                    f"{prev.name}")
+        return True
 
     def _lane_builds_own_physics(self) -> bool:
         """True on the lanes that build the scheme configs their kernels use
@@ -5840,6 +6736,7 @@ class ModelDriver:
             from legoesm.grids.halo import traced_corner_fill_modes
             record_state_digest(manifest_file, digest,
                                 corner_fill_traced=traced_corner_fill_modes())
+            self.final_state_digest = digest
         except Exception as exc:  # pragma: no cover - provenance best-effort
             logger.warning(f"Could not record final state digest: {exc}")
 
@@ -5895,109 +6792,9 @@ class ModelDriver:
 
 
     def _maybe_build_tiled_step(self, dt):
-        """Build the sub-face-tiled dynamics step (P4 increment 1b) or None.
-
-        Returns ``make_tiled_cc_step`` over this driver's model + device
-        mesh when ``config.enable_tiled_dycore`` is on and the device
-        layout is sub-face tiled; ``None`` (the default) leaves the
-        compiled segment on ``_dynamics_model.step``.  The model copy
-        mirrors ``build_segment_fn``'s inner dynamics copy under the SAME
-        predicate (outer ``cfg.dycore.fix_mass`` AND model-config
-        ``fix_mass`` -> disable inner fixer + per-stage zero-mean; the
-        segment applies the target-anchored fixer OUTSIDE the dynamics),
-        so the tiled numerics match the untiled inner model exactly; a
-        config whose EFFECTIVE inner model still applies per-stage
-        ``zero_mean_ps_tendency`` is refused (the tiled base cut omits
-        that term).  Flag-on with no tiled layout is a LOUD error, never
-        a silent untiled fallback, and the whole path is gated behind
-        ``LEGOESM_TILED_DYCORE_EXPERIMENTAL=1`` until the outer segment
-        sharding composition is device-validated (increment 1c).
-        """
-        if not getattr(self.config, "enable_tiled_dycore", False):
-            return None
-        if self.config.dycore.energy_fixer:
-            # the tiled dynamics re-implements the cube step without the
-            # dycore energy fixer (F15): refuse, never an open sink
-            raise ValueError(
-                "enable_tiled_dycore: DycoreConfig.energy_fixer=True is not wired on the "
-                "sub-face-TILED cube dynamics; set energy_fixer=False "
-                "(--no-energy-fixer) to accept the open sink explicitly, "
-                "or run on <=6 devices.")
-        dc = self._device_config
-        if (dc is None or getattr(dc, "mesh", None) is None
-                or tuple(getattr(dc, "tiling", (1, 1))) == (1, 1)):
-            raise ValueError(
-                "enable_tiled_dycore=True requires a sub-face-tiled device "
-                "layout (n_devices = 6*kt^2 > 6); got "
-                f"tiling={getattr(dc, 'tiling', None)!r}. Disable the flag "
-                "or launch with a tiled device count."
-            )
-        kt_i, kt_j = dc.tiling
-        if kt_i != kt_j:
-            raise ValueError(
-                f"enable_tiled_dycore: tiling must be square, got {dc.tiling}")
-        import os as _os
-        if _os.environ.get("LEGOESM_TILED_DYCORE_EXPERIMENTAL") != "1":
-            raise NotImplementedError(
-                "enable_tiled_dycore: the OUTER compiled-segment sharding "
-                "composition around the tiled core is not yet device-"
-                "validated (the segment currently runs with "
-                "device_config=None under sub-face tiling — codex round-14 "
-                "HIGH; increment 1c is the real-device full-segment parity "
-                "lane).  Set LEGOESM_TILED_DYCORE_EXPERIMENTAL=1 to run "
-                "anyway."
-            )
-        import copy as _copy
-        from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
-            make_tiled_cc_step,
-        )
-        _m = _copy.copy(self.model)
-        _mc = getattr(_m, "config", None)
-        # Mirror build_segment_fn's inner-copy predicate EXACTLY (codex
-        # round-14 Medium): the outer target-anchored fixer path
-        # (cfg.dycore.fix_mass True) disables the inner fixer + per-stage
-        # zero-mean; when the outer fixer is OFF the untiled inner model
-        # KEEPS zero_mean_ps_tendency active — a per-stage global-mean
-        # term the tiled base cut does not implement, so that case is
-        # refused rather than silently dropped.
-        _outer_fix_mass = bool(getattr(self.config.dycore, "fix_mass", False))
-        if (
-            _outer_fix_mass
-            and getattr(_mc, "fix_mass", False)
-            and hasattr(_mc, "_replace")
-        ):
-            _kw = {"fix_mass": False}
-            if hasattr(_mc, "zero_mean_ps_tendency"):
-                _kw["zero_mean_ps_tendency"] = False
-            _m.config = _mc._replace(**_kw)
-            _mc = _m.config
-        # The EFFECTIVE inner model (post-mirror) must not apply the
-        # per-RK-stage zero-mean (gate in primitive_eq_cdgrid:
-        # ``zm and not (ucf and fm)``): the tiled base cut integrates the
-        # RAW dp_s/dt, and silently dropping the term would change the
-        # untiled-vs-tiled numerics.  (The tiled psum primitive
-        # ``make_tiled_zero_mean_tendency_stage_2d`` exists but is not
-        # wired into the step stage — increment 1c+.)
-        _zm_active = (
-            bool(getattr(_mc, "zero_mean_ps_tendency", False))
-            and not (bool(getattr(_mc, "use_conservation_fixer", False))
-                     and bool(getattr(_mc, "fix_mass", False)))
-        )
-        if _zm_active:
-            raise NotImplementedError(
-                "enable_tiled_dycore: this config leaves per-RK-stage "
-                "zero_mean_ps_tendency ACTIVE on the inner model, which "
-                "the tiled base cut does not implement — enable the outer "
-                "mass fixer (conservation_fixer + fix_mass) or set "
-                "zero_mean_ps_tendency=False."
-            )
-        logger.info(
-            "Tiled dycore step ROUTED into the compiled segment "
-            "(P4 increment 1b, experimental): kt=%d, dt=%.1f s, "
-            "mesh axes %s.", int(kt_i), float(dt),
-            getattr(dc.mesh, "axis_names", None),
-        )
-        return make_tiled_cc_step(_m, dc.mesh, kt=int(kt_i), dt=float(dt))
+        if self.config.enable_tiled_dycore:
+            raise ValueError("fv3_duo replaces the retired tiled C/D-grid atmosphere lane.")
+        return None
 
     def _bootstrap_runtime(self) -> None:
         """Bootstrap the full runtime: precision, backend, devices, MPI.
@@ -6023,8 +6820,31 @@ class ModelDriver:
             # can build the rank's LatLonBandLayout.  Other grids ignore
             # this — cubed-sphere uses the per-face N via its own path.
             grid_n=self.config.grid.resolution,
+            # float64 land inside a lower-precision run needs x64 on; the
+            # rest of the run keeps its policy dtypes (as in 'mixed').
+            x64=(True if "fp64" in (self.config.land_compute_precision,
+                                     self.config.microphysics_compute_precision)
+                 else None),
         )
         self._device_config = rc.device_config
+        import jax.numpy as _jnp
+        from legoesm.core.precision import resolve_dtype, set_module_override
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MICROPHYSICS_PRECISION_MODULE,
+        )
+        # Set (or clear: None) every run, so a previous driver in the same
+        # process cannot leak its override into this one.
+        for _mod, _sel in ((LAND_PRECISION_MODULE,
+                            self.config.land_compute_precision),
+                           (MICROPHYSICS_PRECISION_MODULE,
+                            self.config.microphysics_compute_precision)):
+            set_module_override(
+                _mod, compute=("float64" if _sel == "fp64" else None))
+            if _sel == "fp64" and resolve_dtype(_mod, "compute") != _jnp.float64:
+                raise RuntimeError(
+                    f"{_mod} compute precision 'fp64' requested but this "
+                    "backend has no float64 (or x64 is off); it would "
+                    "silently run in float32")
 
         # Multi-controller SPMD (distributed_mode='spmd'): rank/world
         # come from jax.distributed — no mpi4jax topology exists (and
@@ -6264,6 +7084,10 @@ class ModelDriver:
                             self.physics.f_land, layout)
                         self.physics.albedo_land = scatter(
                             self.physics.albedo_land, layout)
+                    # rank-local cell areas (Sundqvist's GFS area blend)
+                    if self.physics.grid_area is not None:
+                        self.physics.grid_area = scatter(
+                            self.physics.grid_area, layout)
                     # Rank-local SSO for the pipeline's column GWD path
                     # (same ownership as f_land / _physics_lat).
                     if getattr(self.physics, "subgrid_topo_stddev", None) \
@@ -6985,80 +7809,8 @@ class ModelDriver:
         return bool(getattr(self, "_persistent_dgrid", False))
 
     def _enter_persistent_dgrid(self) -> None:
-        """Convert the prognostic state to FV3 D staggering, once, at run start.
-
-        Refuses LOUDLY on every lane this does not cover rather than silently
-        running the damped cell-centre path (dispatch discipline): the whole
-        point of the flag is the staggering the run actually carries, so a
-        silent fall-back would be the defect it exists to remove.
-        """
-        self._persistent_dgrid = False
-        if not getattr(self.config.dycore, "persistent_dgrid", False):
-            # Saved D winds this run will not carry: drop them, so this run's
-            # checkpoints do not re-save them next to a newer state.
-            self._pop_native_winds(self._CORNER_WIND_KEYS)
-            return
-        cfg = self.config
-        _why = None
-        if cfg.grid.grid_type != "cubed_sphere":
-            _why = (f"grid_type={cfg.grid.grid_type!r}: D staggering is the "
-                    "cubed-sphere FV3 wind layout")
-        elif cfg.dycore.model_type != "hydrostatic":
-            _why = (f"model_type={cfg.dycore.model_type!r}: only the "
-                    "hydrostatic cube dycore carries FV3HydrostaticState")
-        elif cfg.dycore.discretization not in ("cdgrid", "centered",
-                                               "finite_volume"):
-            _why = (f"discretization={cfg.dycore.discretization!r}: the "
-                    "fv3_duo / spectral / sfno lanes carry their own state")
-        elif getattr(self, "_ensemble_size", 1) not in (None, 1):
-            _why = ("an ensemble run: the member axis would have to ride the "
-                    "corner arrays and no gate covers that yet")
-        elif getattr(self, "_owned_face_ids", None) is not None:
-            _why = ("MPI face sharding: the corner arrays are (n+1) in both "
-                    "horizontal directions and the owned-face slicing this "
-                    "driver applies is written for (n)")
-        elif self._is_spmd_multiprocess():
-            _why = "multi-process SPMD (the corner sharding is unvalidated)"
-        elif getattr(self, "_requires_surface_flux_export", False):
-            _why = ("a COUPLED run: the coupled driver reads the atmosphere's "
-                    "lowest-level winds straight off the state "
-                    "(coupled_esm_driver) and has no cell-centre view yet")
-        elif (self._device_config is not None
-              and getattr(self._device_config, "mesh", None) is not None
-              and tuple(getattr(self._device_config, "tiling", (1, 1)))
-              != (1, 1)):
-            _why = ("sub-face tiling: the tiled adapter converts to cell "
-                    "centres by construction (tiled_step_adapter)")
-        if _why is not None:
-            raise SystemExit(
-                "dycore.persistent_dgrid=True is not supported on this lane: "
-                f"{_why}.  Persistent D-grid winds (#1028) are wired for the "
-                "single-process cubed-sphere hydrostatic lane only.  Unset the "
-                "flag to run the (eddy-damped) cell-centre path knowingly.")
-
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            FV3HydrostaticState, fv3_to_hydrostatic, hydrostatic_to_fv3,
-        )
-        cdgrid = getattr(self.model, "cdgrid", None)
-        if cdgrid is None:
-            raise SystemExit(
-                "dycore.persistent_dgrid=True but the dynamics model exposes "
-                "no cdgrid; the cc->D lift has no geometry to use.")
-        if isinstance(self.state, FV3HydrostaticState):
-            self._refuse_staged_native_winds(
-                self._CORNER_WIND_KEYS, "the state already carries D winds")
-            self._persistent_dgrid = True
-            return
-        self.state = self._resume_native_winds(
-            hydrostatic_to_fv3(self.state, cdgrid),
-            self._CORNER_WIND_KEYS, ("u_d", "v_d"),
-            lambda st: fv3_to_hydrostatic(st, cdgrid), "D-grid winds")
-        self._persistent_dgrid = True
-        self._pop_native_winds(self._CORNER_WIND_KEYS)
-        logger.info(
-            "#1028 persistent D-grid winds: the cube state stays in FV3 D "
-            "staggering between steps (one cc->D lift at run start; the "
-            "per-step cc round trip is gone).")
+        if self.config.dycore.persistent_dgrid:
+            raise ValueError("fv3_duo carries native winds; legacy persistent_dgrid is retired.")
 
     def cell_centre_state(self, state=None):
         """Cell-centre VIEW of the prognostic state — read-only.
@@ -7075,14 +7827,7 @@ class ModelDriver:
             if isinstance(st, LatLonFaceWindState):
                 return facewind_to_hydrostatic(st, self.grid)
             return st
-        if not self._persistent_dgrid_active():
-            return st
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            FV3HydrostaticState, fv3_to_hydrostatic,
-        )
-        if not isinstance(st, FV3HydrostaticState):
-            return st
-        return fv3_to_hydrostatic(st, self.model.cdgrid)
+        return st
 
     def _add_cc_wind_increment(self, du_cc, dv_cc, dt):
         """Add an operator-split CELL-CENTRE wind tendency to ``self.state``.
@@ -7174,9 +7919,8 @@ class ModelDriver:
         """
         self._persistent_cgrid = False
         cfg = self.config
-        if not (cfg.grid.grid_type == "latlon"
-                and cfg.dycore.discretization == "latlon_cgrid"
-                and cfg.dycore.model_type == "hydrostatic"):
+        from legoesm.driver.component_factory import driver_solver_name
+        if driver_solver_name(cfg) != "latlon_cgrid_primitive_equations":
             # Saved face winds this run will not carry: drop them, so this
             # run's checkpoints do not re-save them next to a newer state.
             self._pop_native_winds(self._FACE_WIND_KEYS)
@@ -7329,6 +8073,7 @@ class ModelDriver:
         canonical file.  For replicated state, only rank 0 writes and
         signals completion via a lightweight barrier.
         """
+        _wait_for_mpi_device_work()
         self._last_checkpoint_step = step
         elapsed_day = day - self.config.start_day
 
@@ -7392,6 +8137,7 @@ class ModelDriver:
             # each gather (collective); non-root ranks then bail before I/O.
             _land_ml_save = None      # set to the GLOBAL gather under MPI
             _skin_save = None         # ditto for the prognostic ice skin
+            _facc_save = None         # ditto for the CMOR flux interval sums
             if self._voronoi_layout is not None:
                 from legoesm.parallel.voronoi_mpi import gather_voronoi_field
                 part = self._voronoi_layout.partition
@@ -7421,7 +8167,13 @@ class ModelDriver:
                         # (allow_pickle=False).  Skip by NAME so BOTH None and
                         # a concrete-array carry are excluded (load re-seeds
                         # them None).
-                        if _name in PHYSSTATE_INPUT_FIELDS:
+                        if _name in PHYSSTATE_INPUT_FIELDS or _val is None:
+                            # None = a field inactive on this run
+                            # (ecrad_carry off ecrad_ifs): no array to save
+                            continue
+                        # scheme-conditional memory absent for this run
+                        # (e.g. the WRF Tiedtke lags): nothing to persist
+                        if _val is None:
                             continue
                         if _name == "prng_key":
                             ps_d_carry[_name] = _val
@@ -7507,10 +8259,28 @@ class ModelDriver:
                 _lw_save = self._land_window_for_checkpoint()
                 if _lw_save is not None:
                     _lw_save = {
-                        _k: (_v if _k == "land_win_n" else
+                        _k: (_v if _k in _WIN_SCALAR_KEYS else
                              gather_voronoi_field(jnp.asarray(_v).reshape(-1),
                                                   part, "cell"))
                         for _k, _v in sorted(_lw_save.items())}
+                # Partial CMOR flux interval (#1353, #2171): per-cell sums
+                # gather like the R-ex payload.  The key set is the same on
+                # every rank (every rank steps the same window, and a staged
+                # payload comes from the one checkpoint every rank loaded),
+                # iterated SORTED so the collectives line up.
+                _facc_live = getattr(self, "_mpas_sfc_accum", None)
+                if _facc_live is not None and _facc_live.has_samples():
+                    _facc_src = _facc_live.dump()
+                elif isinstance(self._carry_aux, dict):
+                    _facc_src = {k: v for k, v in self._carry_aux.items()
+                                 if k.startswith("cmor_flux")}
+                else:
+                    _facc_src = {}
+                # Scalars (counts, window identity) stay NumPy: a JAX round
+                # trip with x64 off rounds the start day past the resume
+                # tolerance and the next link would discard the window.
+                _facc_save = {k: (v if np.ndim(v) == 0 else _g_rex(v))
+                              for k, v in sorted(_facc_src.items())}
                 if self._mpi_rank != 0:
                     return
             else:
@@ -7572,11 +8342,15 @@ class ModelDriver:
                     # already dropped them).  Skip by NAME so a concrete-array
                     # carry is excluded too, not only None (``np.asarray(None)``
                     # is an unloadable object array under allow_pickle=False).
-                    if _name in PHYSSTATE_INPUT_FIELDS:
+                    if _name in PHYSSTATE_INPUT_FIELDS or _val is None:
                         continue
                     _save[f"physstate_{_name}"] = np.asarray(_val)
                 _save["physstate_meta_conv_scheme"] = np.asarray(
                     str(getattr(self.config, "convection", "none")))
+                if (getattr(self.config, "turbulence", "none") == "mynn25"
+                        and not getattr(self, "_mynn_col_pending", True)):
+                    # the cold-start step has run (vote R2a)
+                    _save["physstate_meta_mynn_initialized"] = np.asarray(True)
             # Persist moisture tracers too (moist MPAS runs), so a chained
             # restart does not silently drop water.  The ``trc_`` prefix avoids
             # colliding with u/T/p_s/phis; ``tracer_names`` lets load rebuild
@@ -7669,25 +8443,15 @@ class ModelDriver:
             # payload from _carry_aux so a no-step re-save cannot strip the
             # partial interval (same rule as the ice skin above).
             #
-            # NOT persisted under a MULTI-rank cell partition: the sums are
-            # per-LOCAL-cell ``(n_local_cells,)`` and are NOT gathered, while
-            # everything else in this checkpoint is global and only rank 0
-            # writes it.  Persisting them would hand every rank of the next
-            # link RANK 0's cells attributed to its own — and because RCB
-            # partitions are near-equal, ``n_local_cells`` often MATCHES, so
-            # the shape guard would pass and the fluxes would be silently
-            # scrambled.  Dropping costs at most ONE partial diagnostic
-            # interval of flux samples per restart, which the reset below
-            # already treats as an accepted, bounded loss.
+            # Under a Voronoi layout (any rank count) the per-cell sums were
+            # gathered to GLOBAL above with the other collectives (#2171);
+            # the rank-local arrays must never be written directly — with
+            # near-equal RCB partitions their length often matches another
+            # rank's, so a shape guard could not catch the scramble.
             _facc = getattr(self, "_mpas_sfc_accum", None)
-            if _is_mpas_cell_partitioned(self):
-                if _facc is not None and _facc.has_samples():
-                    logger.warning(
-                        "  CMOR flux accumulator: NOT persisted (%d-rank cell "
-                        "partition — the per-cell sums are rank-local and "
-                        "ungathered). The next link restarts this diagnostic "
-                        "interval; at most one interval of flux samples is "
-                        "lost.", getattr(self, "_mpi_world_size", 1))
+            if _facc_save is not None:
+                _save.update({_k: np.asarray(_v)
+                              for _k, _v in _facc_save.items()})
             elif _facc is not None and _facc.has_samples():
                 _save.update(_facc.dump())
             elif isinstance(self._carry_aux, dict):
@@ -7729,12 +8493,34 @@ class ModelDriver:
             if _llc is not None:
                 _nat = _llc.to_bundle(s)
                 _save["latloncol_schema"] = np.asarray("latloncol_ckpt_v1")
+                # the div-4 scale the run stepped with (a resume refuses a
+                # different one; user decision 2026-10-26)
+                _save["latloncol_div4_scale"] = np.asarray(
+                    float(_llc.dyn.config.nu_div4_scale))
                 for _k in ("u", "v", "T", "p_s", "phis"):
                     _save[f"latloncol_{_k}"] = np.asarray(getattr(_nat, _k))
                 _names = sorted(_nat.tracers)
                 _save["latloncol_tracer_names"] = np.asarray(_names)
                 for _i, _nm in enumerate(_names):
                     _save[f"latloncol_q_{_i}"] = np.asarray(_nat.tracers[_nm])
+            # spectral COLUMN lane: the columns are a SYNTHESIS of the
+            # coefficients, so the coefficients (driver post-step T edits
+            # written back as an SH increment) and the anchored dry-mass
+            # target ride along; T above stays the column view the run held
+            _spc = self._spectral_column_model()
+            if _spc is not None:
+                _nat = _spc.to_bundle(s)
+                _save["spectralcol_schema"] = np.asarray("spectralcol_ckpt_v1")
+                for _k in self._SPECTRALCOL_COEFFS:
+                    _save[f"spectralcol_{_k}"] = np.asarray(getattr(_nat, _k).data)
+                _names = sorted(_nat.tracers or ())
+                _save["spectralcol_tracer_names"] = np.asarray(_names)
+                for _i, _nm in enumerate(_names):
+                    _save[f"spectralcol_q_{_i}"] = np.asarray(
+                        _nat.tracers[_nm].data)
+                if _spc.dyn._target_mass is not None:
+                    _save["spectralcol_target_mass"] = np.asarray(
+                        _spc.dyn._target_mass, dtype=np.float64)
             # multi-process SPMD (M7 column lane): every process holds the
             # same host payload; process 0 writes, the others rendezvous
             # on its success (a root-only exception must not leave them
@@ -7850,6 +8636,14 @@ class ModelDriver:
             # expected by ``--restart-from`` in run_amip.py and the
             # checkpoint-glob in ``run_amip_1deg_latlon_mpi.sbatch``.
             if self._is_latlon_mpi():
+                # Same limitation for the banded prognostic ice skin (#2106).
+                if getattr(self.config, "ice_skin_prognostic", False):
+                    raise ValueError(
+                        "Lat-lon MPI checkpointing does not gather the banded "
+                        "prognostic ice skin (ice_T_skin) into the global "
+                        "checkpoint — a restart would corrupt it. Run "
+                        "single-process, or set checkpoint_days=0, with "
+                        "ice_skin_prognostic.")
                 # The lat-lon MPI gather path writes a single global-shape
                 # checkpoint from rank 0's carry_aux, which holds the
                 # prognostic slab-land T_land as a rank-LOCAL latitude
@@ -7898,7 +8692,8 @@ class ModelDriver:
                                   or _ct.is_stochastic)
                 if (isinstance(self._carry_aux, dict)
                         and (any(k in self._carry_aux
-                                 for k in ("tke", "qke", "gwd_spectrum"))
+                                 for k in ("tke", "qke", "gwd_spectrum",
+                                           "tiedtke_turb_dq_v_prev"))
                              or (_conv_is_carry
                                  and "conv_prog" in self._carry_aux))):
                     raise ValueError(
@@ -8020,6 +8815,14 @@ class ModelDriver:
                 "slab-land runs (or add carry_aux support to the zarr "
                 "backend)."
             )
+        if backend == "zarr" and getattr(self.config, "ice_skin_prognostic",
+                                         False):
+            raise ValueError(
+                "checkpoint_format='zarr' cannot persist the prognostic ice "
+                "skin (ice_T_skin, carried in carry_aux) — a restart would "
+                f"re-seed it at {constants.T_freeze_ocean} K (#2106). Use "
+                "checkpoint_format='npz' "
+                "with ice_skin_prognostic.")
         # Same zarr carry_aux limitation for the evolved double-moment tracers:
         # they ride carry_aux (dmtr_*), which zarr does not round-trip, so a
         # zarr restart would silently reset q_i/q_s/q_g/N_c/N_r/N_i to zeros.
@@ -8051,7 +8854,8 @@ class ModelDriver:
             backend == "zarr"
             and isinstance(self._carry_aux, dict)
             and (any(k in self._carry_aux
-                     for k in ("tke", "qke", "gwd_spectrum"))
+                     for k in ("tke", "qke", "gwd_spectrum",
+                               "tiedtke_turb_dq_v_prev"))
                  or (_conv_is_carry and "conv_prog" in self._carry_aux))
         ):
             raise ValueError(
@@ -8148,31 +8952,21 @@ class ModelDriver:
                 f"in-progress month): {exc}")
 
     def _moisture_advection_active(self) -> bool:
-        """True iff resolved-wind moisture advection is on (issue #771).
-
-        Config-gated to the tracer-capable dycore: cubed_sphere + cdgrid
-        (the only PE step whose RHS advects ``state.tracers``).  Other
-        grid/discretization combos keep the legacy column-locked moisture
-        and log a notice once so the gap is visible, not silent.
-        """
+        """The retired C/D-grid moisture switch cannot select duo transport."""
         cfg = self.config
         if not getattr(cfg, "moisture_advection", False):
             return False
-        # ``centered``/``finite_volume`` resolve to the cdgrid PE dycore (see
-        # atmosphere.dynamics DISPATCH), so they are tracer-capable too — the
-        # gate must accept them or an opt-in run on those aliases would drop to
-        # the legacy column-locked path despite running a cdgrid step (#771).
-        supported = (cfg.grid.grid_type == "cubed_sphere"
-                     and cfg.dycore.discretization
-                     in ("cdgrid", "centered", "finite_volume"))
-        if not supported and not getattr(self, "_warned_no_advection", False):
+        if cfg.grid.grid_type == "cubed_sphere":
+            raise ValueError(
+                "fv3_duo: legacy moisture_advection switch is retired; "
+                "native duo tracer transport follows its own lane contract.")
+        if not getattr(self, "_warned_no_advection", False):
             self._warned_no_advection = True
             logger.info(
-                "  moisture_advection: not available on %s/%s (tracer "
-                "advection is wired for cubed_sphere+cdgrid only, #771) — "
-                "running legacy column-locked moisture.",
+                "  legacy moisture_advection switch is unavailable on %s/%s; "
+                "the lane's native transport is unchanged.",
                 cfg.grid.grid_type, cfg.dycore.discretization)
-        return supported
+        return False
 
     def _is_spmd_multiprocess(self) -> bool:
         """True iff this run is multi-controller SPMD across >1 process
@@ -8320,21 +9114,12 @@ class ModelDriver:
         there means the writing code is unknown, which counts as drift.
         """
         from legoesm.driver.restart import (
-            RUN_MANIFEST_FILENAME,
             collective_version_drift_gate,
-            manifest_file_version_drift,
+            restart_version_drift,
         )
-        manifest_file = path.parent / RUN_MANIFEST_FILENAME
-
-        def reasons():
-            if not path.exists():
-                return []  # the loader reports the missing checkpoint itself
-            if manifest_file.is_file():
-                return manifest_file_version_drift(manifest_file)
-            return [f"no {RUN_MANIFEST_FILENAME} beside the checkpoint, so the "
-                    f"code that wrote it is unknown (copy the writing run's "
-                    f"{RUN_MANIFEST_FILENAME} next to it)"]
-        collective_version_drift_gate(reasons, f"checkpoint {path}")
+        collective_version_drift_gate(
+            lambda: restart_version_drift(path, [path.parent]),
+            f"checkpoint {path}")
 
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
         """Load state from a checkpoint using unified restart API.
@@ -8498,6 +9283,19 @@ class ModelDriver:
                         "view cannot rebuild the face winds, so only a "
                         "checkpoint written by the lat-lon column lane can "
                         "restart it.")
+                # div-4 stamp (user decision 2026-10-26): a checkpoint
+                # without it predates the damping, i.e. scale 0
+                _ck_dd4 = (float(d["latloncol_div4_scale"])
+                           if "latloncol_div4_scale" in d.files else 0.0)
+                _run_dd4 = float(_llc.dyn.config.nu_div4_scale)
+                if _ck_dd4 != _run_dd4:
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} was written with div-4 "
+                        f"damping scale {_ck_dd4} (0 when the file carries no "
+                        f"latloncol_div4_scale) but this run steps with "
+                        f"{_run_dd4}: the trajectory would change at the "
+                        "restart.  Resume with the checkpoint's scale, or "
+                        "start a new run.")
                 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
                     CGridLatLonHydrostaticState,
                 )
@@ -8530,6 +9328,77 @@ class ModelDriver:
                         "differs from this run's; restart on the same "
                         "--topography / --topo-smoothing or start fresh")
                 self.state = _llc.from_bundle(_nat)
+                self._fv3_duo_column_restored = True
+            elif self._spectral_column_model() is not None:
+                _spc = self._spectral_column_model()
+                if "spectralcol_schema" not in d.files:
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} carries no spectral "
+                        "coefficients (spectralcol_schema absent): the column "
+                        "view cannot rebuild them, so only a checkpoint "
+                        "written by the spectral column lane can restart it.")
+                if str(d["spectralcol_schema"]) != "spectralcol_ckpt_v1":
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name}: unknown spectral column "
+                        f"schema {str(d['spectralcol_schema'])!r}")
+                _need = ["spectralcol_tracer_names"] + [
+                    f"spectralcol_{_k}" for _k in self._SPECTRALCOL_COEFFS]
+                if "spectralcol_tracer_names" in d.files:
+                    _need += [f"spectralcol_q_{_i}" for _i in
+                              range(len(d["spectralcol_tracer_names"]))]
+                _anchored = (_spc.config.fix_mass
+                             and _spc.config.anchor_mass_to_initial)
+                if _anchored:
+                    _need.append("spectralcol_target_mass")
+                _miss = [_k for _k in _need if _k not in d.files]
+                if _miss:
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name}: spectral column state "
+                        f"incomplete, missing {_miss}")
+                _names = [str(n) for n in d["spectralcol_tracer_names"]]
+                _cur = self.state.native
+                if sorted(_cur.tracers or ()) != _names:
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} tracers {_names} != "
+                        f"the run's {sorted(_cur.tracers or ())}")
+                _arrs = {_k: jnp.asarray(d[f"spectralcol_{_k}"],
+                                         dtype=getattr(_cur, _k).data.dtype)
+                         for _k in self._SPECTRALCOL_COEFFS}
+                _trc = {_nm: jnp.asarray(d[f"spectralcol_q_{_i}"],
+                                         dtype=_cur.tracers[_nm].data.dtype)
+                        for _i, _nm in enumerate(_names)}
+                for _k, _a, _b in (
+                        [(_k, _arrs[_k], getattr(_cur, _k).data)
+                         for _k in self._SPECTRALCOL_COEFFS]
+                        + [(f"q {_nm}", _trc[_nm], _cur.tracers[_nm].data)
+                           for _nm in _names]):
+                    if _a.shape != _b.shape:
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name}: spectral {_k} shape "
+                            f"{_a.shape} != the run's {_b.shape}")
+                if not np.array_equal(np.asarray(_arrs["phis_hat"]),
+                                      np.asarray(_cur.phis_hat.data)):
+                    raise RuntimeError(
+                        "spectral column restart: the checkpoint's terrain "
+                        "differs from this run's; restart on the same "
+                        "--topography / --topo-smoothing or start fresh")
+                _nat = _cur._replace(
+                    **{_k: getattr(_cur, _k).replace(data=_arrs[_k])
+                       for _k in self._SPECTRALCOL_COEFFS},
+                    tracers={_nm: _cur.tracers[_nm].replace(data=_trc[_nm])
+                             for _nm in _names} or _cur.tracers)
+                if _anchored:
+                    # the ORIGINAL anchor, never a re-snapshot of the loaded mass
+                    _spc.dyn.set_target_mass(
+                        float(np.asarray(d["spectralcol_target_mass"])))
+                # T and its write-back base are the column view the
+                # continuous run held (any pending edit is already in
+                # T_hat): the resumed step neither re-analyses nor
+                # re-applies it
+                _st = _spc.from_bundle(_nat)
+                _T = _st.T.replace(data=jnp.asarray(
+                    d["T"], dtype=_st.T.data.dtype))
+                self.state = _st._replace(T=_T, T_view=_T)
                 self._fv3_duo_column_restored = True
             elif _mpi:
                 from legoesm.parallel.voronoi_partition import scatter_to_local
@@ -8583,6 +9452,42 @@ class ModelDriver:
                     phis=Field(data=_phis, name="phis",
                                dims=("nCells",), units="m2/s2"),
                 )
+            # A checkpoint written before the run's N_s tracer (CAM6 MG2
+            # two-moment snow), or with no tracers at all, is REFUSED (oracle
+            # row 22, user pick 'hard error'; replaces the zero-number seed of
+            # 2026-10-20).  Column lanes check their own slot list above.
+            if (self._column_model() is None
+                    and "N_s" in self.tracer_registry.names
+                    and ("tracer_names" not in d
+                         or "N_s" not in [str(n) for n in d["tracer_names"]])):
+                raise ValueError(
+                    f"MPAS checkpoint {path.name} has no snow number N_s, "
+                    f"which this run carries (CAM6 MG2 two-moment snow, "
+                    f"morrison_warm_rain_incloud); restart from a "
+                    f"checkpoint written with N_s or start cold.")
+            # Same rule for IFS CLOUDSC's advected cloud fraction (vote VC26):
+            # a checkpoint without it cannot continue this run.
+            if (self._column_model() is None
+                    and "cloud_fraction_ifs" in self.tracer_registry.names
+                    and ("tracer_names" not in d
+                         or "cloud_fraction_ifs"
+                         not in [str(n) for n in d["tracer_names"]]
+                         or "trc_cloud_fraction_ifs" not in d.files)):
+                raise ValueError(
+                    f"MPAS checkpoint {path.name} has no cloud_fraction_ifs, "
+                    f"which this run carries (microphysics='ifs_cloudsc'); "
+                    f"restart from a checkpoint written with it or start "
+                    f"cold.")
+            # Same rule for the IFS Cariolle ozone tracer (vote O5a).
+            if (self._column_model() is None
+                    and "o3_ifs" in self.tracer_registry.names
+                    and ("tracer_names" not in d
+                         or "o3_ifs" not in [str(n) for n in d["tracer_names"]]
+                         or "trc_o3_ifs" not in d.files)):
+                raise ValueError(
+                    f"MPAS checkpoint {path.name} has no o3_ifs, which this "
+                    f"run carries (ifs_ozone_chem); restart from a checkpoint "
+                    f"written with it or start cold.")
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
             # (column lane: the tracers are the bundle's own q slots, already
             # in the view built above)
@@ -8595,7 +9500,8 @@ class ModelDriver:
                                   jnp.asarray(d[f"trc_{_k}"]), part, "cell")
                               if _mpi else jnp.asarray(d[f"trc_{_k}"])),
                         name=_k, dims=("nCells", "nlev"),
-                        units=("1/kg" if _k in ("N_c", "N_r", "N_i")
+                        units=("1/kg" if _k in ("N_c", "N_r", "N_i", "N_s")
+                               else "1" if _k == "cloud_fraction_ifs"
                                else "kg/kg"))
                     for _k in _names
                 })
@@ -8717,11 +9623,12 @@ class ModelDriver:
                            if k.startswith(_LAND_WIN_PREFIXES)]:
                 del self._carry_aux[_stale]
             self._land_window = None
+            self._cpl_window = None
             for _k in d.files:
                 if not _k.startswith(_LAND_WIN_PREFIXES):
                     continue
                 _a = np.asarray(d[_k])
-                if _mpi and _k != "land_win_n":
+                if _mpi and _k not in _WIN_SCALAR_KEYS:
                     if _a.shape != (part.nCells_global,):
                         raise ValueError(
                             f"MPAS checkpoint {path.name} {_k} shape "
@@ -8748,7 +9655,16 @@ class ModelDriver:
             self._mpas_sfc_accum = None
             for _k in d.files:
                 if _k in _flux_keys:
-                    self._carry_aux[_k] = np.asarray(d[_k])
+                    _a = np.asarray(d[_k])
+                    if _mpi and _a.ndim >= 1:
+                        if _a.shape != (part.nCells_global,):
+                            raise ValueError(
+                                f"MPAS checkpoint {path.name} {_k} shape "
+                                f"{_a.shape} != global mesh "
+                                f"({part.nCells_global},)")
+                        _a = np.asarray(scatter_to_local(
+                            jnp.asarray(_a), part, "cell"))
+                    self._carry_aux[_k] = _a
                 elif _k.startswith("cmor_flux"):
                     raise ValueError(
                         f"checkpoint has unrecognised CMOR flux key {_k!r} "
@@ -9069,7 +9985,8 @@ class ModelDriver:
                               or _ct.is_stochastic)
             if isinstance(self._carry_aux, dict) and (
                 any(k in self._carry_aux
-                    for k in ("tke", "qke", "gwd_spectrum"))
+                    for k in ("tke", "qke", "gwd_spectrum",
+                              "tiedtke_turb_dq_v_prev"))
                 or (_conv_is_carry and "conv_prog" in self._carry_aux)
             ):
                 raise ValueError(
@@ -9089,7 +10006,13 @@ class ModelDriver:
         result = load_restart(
             path, self.grid, self.sigma, strict=True,
         )
-        state, q_v, step, day, _, _, q_c, q_r, metadata, carry_aux = result
+        state, q_v, step, day, ck_cfg, _, q_c, q_r, metadata, carry_aux = result
+        ck_grid = getattr(getattr(ck_cfg, "grid", None), "grid_type", None)
+        if self.config.dycore.discretization == "sfno" and ck_grid == "latlon":
+            # A same-shape lat-lon field would load as Gaussian-grid data.
+            raise ValueError(
+                f"restart: {path.name} was written by a lat-lon run; an SFNO "
+                "run on the Gaussian grid cannot start from a lat-lon state")
         self.state = state
         self.q_v = q_v
         if q_c is not None:
@@ -9222,7 +10145,10 @@ class ModelDriver:
                 and getattr(self._device_config, "mesh", None) is not None
                 and tuple(getattr(self._device_config, "tiling", (1, 1))) != (1, 1)
             )
-            if _disc == "spectral" or _latlon_spmd or _tiled_cube:
+            # (the spectral COLUMN lane runs the column loop, which carries it)
+            _spectral = (_disc == "spectral"
+                         and not self.config.dycore.column_lane)
+            if _spectral or _latlon_spmd or _tiled_cube:
                 raise NotImplementedError(
                     "use_clubb_cloud_fraction is wired through the single-device "
                     "per-step AND fused-compiled rollouts and the MPAS lane, but "
@@ -9282,6 +10208,13 @@ class ModelDriver:
                 # discovering its host callback has nowhere to land
                 # (GLM 2026-09-22)
                 require_cpu_for_strict_sedimentation()
+            if (self.get_surface_handback is not None
+                    and not (self.config.dycore.column_lane
+                             or self.config.grid.grid_type == "mpas")):
+                raise NotImplementedError(
+                    "a coupler ice/lake handback (get_surface_handback) is set "
+                    "but only the MPAS column loop reads it; this lane would "
+                    "keep its own bulk fluxes over ice and lakes.")
             if self.config.dycore.column_lane:
                 self._reject_unconsumed_flux_override("the FV3-duo column lane")
                 status = self._run_column_lane(start_step, start_day)
@@ -9405,7 +10338,7 @@ class ModelDriver:
             if (_facc_e is not None and _facc_e.is_complete()
                     and not _use_accum):
                 print("  energy tracker: complete window but energy "
-                      "slots have unequal sample counts -- this sample "
+                      "slots were not fed on every step -- this sample "
                       "falls back to SNAPSHOT fluxes (stamped 0)")
             _qv_e = (self.state.tracers["q_v"].data
                      if (self.state.tracers is not None
@@ -9527,6 +10460,7 @@ class ModelDriver:
         from legoesm.diagnostics.energy_budget import (
             column_moist_static_energy,
         )
+        _wait_for_mpi_device_work()
         comm = _MPI.COMM_WORLD
         root = comm.Get_rank() == 0
         nan_out = {k: float("nan") for k in self._ENERGY_SERIES_KEYS}
@@ -9542,6 +10476,7 @@ class ModelDriver:
         # --- B: edge halo refresh (collective).
         try:
             u_ex = vl.halo_exchange.exchange_edge_field(self.state.u.data)
+            _wait_for_mpi_device_work()
         except BaseException as exc:  # noqa: BLE001 - re-raised after Abort
             logger.critical(
                 "  energy tracker: the edge halo exchange FAILED on rank %d "
@@ -9619,6 +10554,23 @@ class ModelDriver:
                         else float("nan"))
         return out
 
+    def _checkpoint_state_finite(self) -> bool:
+        """True iff every prognostic (u, T, p_s, phis) is finite.  Under a
+        cell partition each rank sees only its own cells, so the verdict is
+        AND-reduced across ranks: a NaN on one rank must stop every rank,
+        or that rank breaks out while its peers walk into the checkpoint's
+        collectives and hang."""
+        s = self.state
+        ok = bool(jnp.all(jnp.isfinite(s.u.data))
+                  & jnp.all(jnp.isfinite(s.T.data))
+                  & jnp.all(jnp.isfinite(s.p_s.data))
+                  & jnp.all(jnp.isfinite(s.phis.data)))
+        if _is_mpas_cell_partitioned(self):
+            from mpi4py import MPI as _MPI
+            _wait_for_mpi_device_work()
+            ok = bool(_MPI.COMM_WORLD.allreduce(ok, op=_MPI.LAND))
+        return ok
+
     def _mpas_global_diag(self, T_data, p_s_data, u_data, cwv_field,
                           ni_field=None):
         """Global owned-cell diagnostics for an MPAS cell-partition MPI run.
@@ -9639,6 +10591,7 @@ class ModelDriver:
         quasi-uniform SCVT).
         """
         from mpi4py import MPI as _MPI
+        _wait_for_mpi_device_work()
         vl = self._voronoi_layout
         om_c = vl.owned_mask_cells          # (n_local_cells,) bool
         om_e = vl.owned_mask_edges          # (n_local_edges,) bool
@@ -9978,7 +10931,9 @@ class ModelDriver:
         )
 
     def _mpas_surface_temperatures(self, day, diag, u_east, v_north):
-        """Shared native whole-cell tas and skin ts for both sample cadences."""
+        """Shared native whole-cell tas, skin ts, prescribed sea-ice fraction
+        sic and prescribed SST sst (None without a forcing) for both sample
+        cadences."""
         state = self.state
         q_v = (state.tracers["q_v"].data
                if state.tracers is not None and "q_v" in state.tracers else None)
@@ -9991,12 +10946,16 @@ class ModelDriver:
         # drops the whole CMOR feed.
         tas = None
         ts = None
+        sic = None
+        sst = None
         _get_sst_sic = getattr(self, "get_sst_sic", None)
         if _get_sst_sic is not None:
             try:
                 _sst, _sic = _get_sst_sic(day)
                 _sst = jnp.asarray(_sst).reshape(-1)
                 _sic = jnp.asarray(_sic).reshape(-1)
+                sic = _sic
+                sst = _sst
                 # Report tas off the SAME ice surface the radiation +
                 # turbulence saw: the per-cell prognostic skin when the
                 # feature is on, else the constant T_ice.  Otherwise the
@@ -10036,7 +10995,7 @@ class ModelDriver:
                         "lowest model level as the tas proxy.", exc)
                     self._logged_tas2m_fallback = True
                 tas = None
-        return (state.T.data[..., -1] if tas is None else tas), ts
+        return (state.T.data[..., -1] if tas is None else tas), ts, sic, sst
 
     def _mpas_cmip_native_kwargs(self, day: float, diag,
                                  u_override=None, *, state_only=False) -> dict:
@@ -10081,8 +11040,38 @@ class ModelDriver:
         u_east, v_north = _cell_winds(
             state, self.grid,
             u_override=u_override)
-        tas, ts = ModelDriver._mpas_surface_temperatures(
+        tas, ts, sic, sst = ModelDriver._mpas_surface_temperatures(
             self, day, diag, u_east, v_north)
+        # CMOR tos [K, the repo's documented Omon/Oday deviation]: the
+        # prescribed AMIP SST, unmasked like siconc.
+        tos = None if sst is None else np.asarray(sst)
+        # CMOR siconc [%] from the prescribed AMIP forcing (unmasked, like the
+        # cube collect() path); snw [kg/m2] is the interactive land's snow
+        # water equivalent, published as a mean WHERE LAND via the native
+        # land fraction (the collector does the land-weighted regrid).
+        siconc = None if sic is None else np.asarray(sic) * 100.0
+        # CMOR zg: the dycore's OWN geopotential (same function pair and
+        # the same dry T it integrates with, primitive_eq_mpas), over g.
+        zg = None
+        _zg_coord = getattr(self, "sigma", None)
+        if _zg_coord is not None and self._column_model() is None:
+            from legoesm.grids.vertical import (
+                HybridSigmaPressureCoordinate,
+                compute_geopotential,
+                compute_geopotential_hybrid,
+            )
+            _gp_fn = (compute_geopotential_hybrid
+                      if isinstance(_zg_coord, HybridSigmaPressureCoordinate)
+                      else compute_geopotential)
+            zg = np.asarray(_gp_fn(state.T.data, state.p_s.data, _zg_coord,
+                                   state.phis.data)) / constants.g
+        _lml = getattr(self, "_land_ml_state", None)
+        _f_land = getattr(self, "_f_land", None)
+        snw = None
+        land_fraction = None
+        if _lml is not None and _f_land is not None:
+            snw = np.asarray(_lml.snow_depth).reshape(-1)
+            land_fraction = np.asarray(_f_land).reshape(-1)
 
         # Pressure vertical velocity, for the subsidence the scorecard could
         # previously only guess at.  Built from the SAME halo-refreshed edge
@@ -10188,11 +11177,28 @@ class ModelDriver:
         hfss = _sfc_slot(6)
         hfls = _sfc_slot(7)
         evspsbl = _sfc_slot(_evap_sfc_slot())   # the column's water flux, window mean
+        # Snowfall: the physics' own frozen surface flux (microphysics
+        # ice+snow+graupel + convective snow, the slot the land's snowfall
+        # reads), published raw like pr; None when not exported.
+        prsn = _sfc_slot(_sfc_diag_slot("precip_frozen"))
         # Clear-sky TOA pair (#843): slots populated only when
         # --clear-sky-diag is on, so these are None (fields absent from the
         # CMOR output, byte-identical) in the default configuration.
         rsutcs = _sfc_slot(10)
         rlutcs = _sfc_slot(11)
+        # Surface radiation: the downwelling pair the land tile reads, and
+        # the upwelling pair as down minus the ``+into surface`` net from the
+        # same radiation call (net = down - up, radiation/integration.py).
+        # Published only when the physics exports the downwelling slots; a
+        # net flux is never published under a down/up CMOR name.
+        rsds = _sfc_slot(_sfc_diag_slot("sw_down_sfc"))
+        rlds = _sfc_slot(_sfc_diag_slot("lw_down_sfc"))
+        _sw_net = _sfc_slot(_sfc_diag_slot("sw_net_sfc"))
+        _lw_net = _sfc_slot(_sfc_diag_slot("lw_net_sfc"))
+        rsus = (None if rsds is None or _sw_net is None
+                else np.asarray(rsds) - np.asarray(_sw_net))
+        rlus = (None if rlds is None or _lw_net is None
+                else np.asarray(rlds) - np.asarray(_lw_net))
         lat_deg = np.degrees(np.asarray(self.grid.latCell))
         # Interval-mean flux fields carry their averaging window so the
         # feed can calendar-bin them at the interval MIDPOINT (#1353
@@ -10242,9 +11248,17 @@ class ModelDriver:
                 conv_mass_flux_up=_ps_carry.conv_mass_flux_up,
                 conv_icwmr=_ps_carry.conv_icwmr,
             )
+        elif "cloud_fraction_ifs" in (getattr(state, "tracers", None) or {}):
+            # IFS CLOUDSC: clt/clivi read the advected fraction radiation
+            # reads (votes VC24, VC40)
+            _cam6_carry = dict(
+                cloud_fraction=state.tracers["cloud_fraction_ifs"].data)
+        _o3_kw = ({"o3": state.tracers["o3_ifs"].data}
+                  if "o3_ifs" in (getattr(state, "tracers", None) or {}) else {})
         return dict(
             T=state.T.data,
             p_s=state.p_s.data,
+            **_o3_kw,
             lat_deg=lat_deg,
             **_cam6_carry,
             q_v=q_v,
@@ -10253,6 +11267,7 @@ class ModelDriver:
             u_east=u_east,
             v_north=v_north,
             precip=precip,
+            prsn=prsn,
             phis=state.phis.data,
             tas=tas,
             ts=ts,
@@ -10264,6 +11279,15 @@ class ModelDriver:
             evspsbl=evspsbl,
             rsutcs=rsutcs,
             rlutcs=rlutcs,
+            rsds=rsds,
+            rsus=rsus,
+            rlds=rlds,
+            rlus=rlus,
+            siconc=siconc,
+            snw=snw,
+            land_fraction=land_fraction,
+            zg=zg,
+            tos=tos,
             wap=wap,
             flux_interval_days=_flux_days,
         )
@@ -10356,6 +11380,15 @@ class ModelDriver:
         owned_ids = None
         n_owned = 0
         try:
+            # Drain queued device work FIRST.  The compiled step's mpi4jax
+            # collectives run on COMM_WORLD on an XLA thread after Python has
+            # returned; a host collective issued below on the same
+            # communicator can then cross-match it ("collective tags 2 and 14
+            # do not match", or a hang) — seen 3/3 at 4 nodes, gone 2/2 with
+            # this wait.  effects_barrier covers mpi4jax's ordered effects,
+            # live_arrays any computation whose outputs nobody holds here.
+            jax.effects_barrier()
+            jax.block_until_ready(jax.live_arrays())
             # The gather helper uses COMM_WORLD; a partition built on a
             # different communicator would silently mis-assemble (or hang).
             # Checked HERE, inside the preflight, so a mismatch on one rank
@@ -10406,6 +11439,7 @@ class ModelDriver:
         # deadlocking it.
         try:
             u_ex = vlayout.halo_exchange.exchange_edge_field(u_local)
+            _wait_for_mpi_device_work()
         except BaseException as exc:  # noqa: BLE001 - re-raised after Abort
             logger.critical(
                 "  CMOR feed at day %.2f: the edge halo exchange FAILED on "
@@ -11377,6 +12411,18 @@ class ModelDriver:
         g = getattr(self, "_latlon_native_grid", None)
         return self.grid if g is None else g
 
+    _SPECTRALCOL_COEFFS = ("vor_hat", "div_hat", "T_hat", "lnps_hat",
+                           "phis_hat")
+
+    def _spectral_column_model(self):
+        """The SpectralColumnModel when the driver runs the spectral column
+        lane, else None."""
+        from legoesm.atmosphere.dynamics.gcm.spectral_column import (
+            SpectralColumnModel,
+        )
+        m = getattr(self, "model", None)
+        return m if isinstance(m, SpectralColumnModel) else None
+
     def _latlon_column_model(self):
         """The LatLonCGridColumnModel when the driver runs the lat-lon
         column lane, else None."""
@@ -11448,9 +12494,11 @@ class ModelDriver:
                 "fv3_duo column lane threads no ensemble axis")
 
     def _latlon_column_init_state(self, col) -> None:
-        """The lat-lon column lane's fresh IC: the lat-lon lane's own IC
-        (``_init_state`` on the NATIVE grid with the native-shaped terrain),
-        lifted to the C-grid once and seen through the column view."""
+        """The lat-lon / spectral column lane's fresh IC: the native lane's
+        own IC (``_init_state`` on the NATIVE grid with the native-shaped
+        terrain; the spectral one is already the coefficient state), lifted
+        to the C-grid once on the lat-lon lane, and seen through the column
+        view."""
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             hydrostatic_to_cgrid,
         )
@@ -11471,7 +12519,9 @@ class ModelDriver:
             hs = hs._replace(tracers={
                 k: Field(data=v, name=k, units="kg/kg")
                 for k, v in self.tracers.items()})
-        self.state = col.from_bundle(hydrostatic_to_cgrid(hs, col.grid))
+        self.state = col.from_bundle(
+            hs if self._latlon_column_model() is None
+            else hydrostatic_to_cgrid(hs, col.grid))
         self.tracers = {nm: f.data for nm, f in (self.state.tracers or {}).items()}
         self._state_template = self.state
 
@@ -12042,7 +13092,7 @@ class ModelDriver:
         (then-misleading) fail-fast.  Requires a real aerosol source."""
         cfg = self.config
         return bool(_external_forcing_active(
-            cfg.radiation in ("rrtmg", "rrtmgp"),
+            cfg.radiation in ("rrtmg", "rrtmgp", "ecrad_ifs"),
             self._ozone_ext_active, self._aerosol_active,
             self._aerosol_lw_active, self._ghg_active, bool(self._experiment),
         ) or (cfg.nc_from_aerosol and self._aerosol_active))
@@ -12079,23 +13129,9 @@ class ModelDriver:
         # ``_step_jit``; the eager loop below accumulates the per-step ledger
         # and writes ``budget_ledger_columns.npz`` (per-column schema — a
         # deliberately DIFFERENT filename from the FV lane's global-row
-        # ``budget_ledger.npz``) at the diagnostic cadence.  The
-        # historical refusal (SILENTLY-inert flag -> loud refusal -> now a
-        # working path) is retained below only for MPI, where the per-rank
-        # ledger gather is not yet wired.
-        # NOTE: _mpi_world_size EXISTS-but-is-None on the serial lane, so the
-        # getattr default never applies — the `or 1` covers the None.
-        if (bool(getattr(self.config.output, "budget_ledger", False))
-                and ((getattr(self, "_mpi_world_size", 1) or 1) > 1
-                     or getattr(self, "_voronoi_layout", None) is not None)):
-            raise ValueError(
-                "--budget-ledger on the MPAS lane is serial-only for now "
-                "(#1311): the per-column ledger rides model.step's eager "
-                "side-channel, which the cell-partition MPI step bypasses "
-                "(even at -np 1 — the flag would be SILENTLY inert there, "
-                "the exact #1311 failure mode this refusal exists to "
-                "prevent).  Run the serial lane, or drop the flag."
-            )
+        # ``budget_ledger.npz``) at the diagnostic cadence.  The cell-partition
+        # MPI step publishes the same per-step rows (rank-local); the writer
+        # gathers the owned rows to the global mesh (#2171).
         import time
 
         cfg = self.config
@@ -12183,8 +13219,7 @@ class ModelDriver:
                               window_start_day=START_DAY, dt_s=DT)
             if self._mpas_cmip_feed_on else None)
         if isinstance(self._carry_aux, dict):
-            if (self._mpas_sfc_accum is not None
-                    and not _is_mpas_cell_partitioned(self)):
+            if self._mpas_sfc_accum is not None:
                 _n_res = self._mpas_sfc_accum.restore(
                     self._carry_aux, resume_day=START_DAY, dt_s=DT)
                 if _n_res:
@@ -12192,15 +13227,11 @@ class ModelDriver:
                         "  CMOR flux accumulator: resumed a partial diag "
                         "interval from the checkpoint (%d slots)", _n_res)
             else:
-                # Either the feed is OFF for this run, or this is a MULTI-rank
-                # cell partition — where a staged payload is a GLOBAL-length
-                # (serial-written) or RANK-0-local array that this rank must
-                # never adopt as its own cells.  Either way the checkpoint may
-                # carry a partial interval from a feed-ON link: DROP it.
-                # Forwarding it would let a later link resume samples that
-                # skip this link's steps — a wrong interval mean (codex-5) —
-                # or, multi-rank, attribute one rank's cells to another.
-                # Loud: bounded (one diagnostic interval) but real data loss.
+                # The feed is OFF for this run, but the checkpoint may carry a
+                # partial interval from a feed-ON link: DROP it.  Forwarding
+                # it would let a later link resume samples that skip this
+                # link's steps — a wrong interval mean (codex-5).  Loud:
+                # bounded (one diagnostic interval) but real data loss.
                 _stale_flux = [k for k in self._carry_aux
                                if k.startswith("cmor_flux")]
                 if _stale_flux:
@@ -12209,14 +13240,15 @@ class ModelDriver:
                     logger.warning(
                         "  CMOR flux accumulator: DROPPED a partial diag "
                         "interval staged in the checkpoint — the CMOR feed "
-                        "is OFF on this run (cmip_output/monthly_means off) "
-                        "or this is a multi-rank cell partition (the per-cell "
-                        "sums are rank-local), so those samples cannot be "
-                        "continued consistently across this link.")
+                        "is OFF on this run (cmip_output/monthly_means off), "
+                        "so those samples cannot be continued consistently "
+                        "across this link.")
         # Build MPAS-compatible physics via make_physics (same code path as
         # cubed-sphere/lat-lon).  Includes RRTMGP + Held-Suarez forcing
         # when radiation is configured.
         from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+        from legoesm.atmosphere.physics.methane_oxidation import MethoxConfig
+        from legoesm.atmosphere.physics.radiation.ozone_cariolle import OzoneCariolleConfig
         from legoesm.atmosphere.physics.radiation.config import RadiationConfig
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
@@ -12224,7 +13256,7 @@ class ModelDriver:
             MicrophysicsConfig, apply_microphysics_experiment_flags,
         )
         from legoesm.atmosphere.physics.radiation.config import (
-            RRTMGPConfig, OzoneProfileConfig, GrayRadiationConfig,
+            OzoneProfileConfig, GrayRadiationConfig,
         )
 
         # Phase D: wire the CMIP6 / experiment greenhouse-gas concentrations
@@ -12337,6 +13369,19 @@ class ModelDriver:
                     cfg, cfg.microphysics,
                     getattr(_micro_cfg, cfg.microphysics)),
             })
+        if cfg.microphysics == "ifs_cloudsc":
+            # NCLDTOP by the sucldp.F90:631-634 rule on THIS lane's level
+            # table at the standard surface pressure (vote VC11a), static.
+            from legoesm.atmosphere.physics.microphysics.ifs_cloudsc import (
+                ncldtop_from_reference_pressure,
+            )
+            _ncldtop = ncldtop_from_reference_pressure(np.asarray(
+                self.sigma.pressure_at_full(
+                    jnp.asarray([constants.p_atm_std]))))
+            _micro_cfg = _micro_cfg._replace(
+                ifs_cloudsc=_micro_cfg.ifs_cloudsc._replace(ncldtop=_ncldtop))
+            logger.info("  ifs_cloudsc: NCLDTOP = %d (sucldp rule, "
+                        "RCLDTOPP = 100 Pa)", _ncldtop)
         # The cap the lane ACTUALLY runs -- read from the THREADED scheme
         # config (_micro_cfg above), not from the flat field, which a deck's
         # own microphysics sub-config can override.
@@ -12399,22 +13444,9 @@ class ModelDriver:
                 # the compiled pipeline already builds with it, this lane used
                 # the radiation-module default (gridaudit 2026-10-09).
                 gray=GrayRadiationConfig(S_0=cfg.S_0),
-                rrtmgp=RRTMGPConfig(
-                    co2_ppmv=cfg.co2_ppmv,
-                    ch4_ppbv=cfg.ch4_ppbv,
-                    n2o_ppbv=cfg.n2o_ppbv,
-                    S_0=cfg.S_0,
-                    compute_fp32=_rrtmgp_fp32,
-                    include_clouds=(_cloud_scheme != "none"),
-                    gpoint_batch_size=getattr(
-                        cfg, "rrtmgp_gpoint_batch_size", 0),
-                    gpoint_checkpoint=getattr(
-                        cfg, "rrtmgp_gpoint_checkpoint", True),
-                    column_chunk_size=getattr(
-                        cfg, "rrtmgp_column_chunk_size", 0),
-                    overhead_layer=bool(getattr(
-                        cfg, "rrtmgp_overhead_layer", False)),
-                ),
+                rrtmgp=rrtmgp_config_from_experiment(
+                    cfg, compute_fp32=_rrtmgp_fp32,
+                    include_clouds=(_cloud_scheme != "none")),
                 cloud_scheme=_cloud_scheme,
                 # Tuned cloud scalars (rh_crit / q_c_diagnostic / Xu-Randall)
                 # reach the MPAS radiation clouds too (#870 Phase 1).
@@ -12457,6 +13489,13 @@ class ModelDriver:
             turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
             gravity_wave_drag=gwd_config_for(cfg),
+            # IFS METHOX: the CH4 radiation reads -- the per-step forcing
+            # under ghg_forcing='external', ch4_ppbv under 'constant' (R5a).
+            methox=MethoxConfig(
+                enabled=bool(cfg.ifs_methox),
+                ch4_vmr_constant=(cfg.ch4_ppbv * 1e-9
+                                  if cfg.ghg_forcing == "constant" else None)),
+            cariolle=OzoneCariolleConfig(enabled=bool(cfg.ifs_ozone_chem)),
         )
         self._record_resolved_physics(
             convection=phys_cfg.convection,
@@ -12493,12 +13532,13 @@ class ModelDriver:
         _column_mesh = None
         _single_process = (self._device_config is None
                            or not self._device_config.is_distributed)
-        _n_dev = len(jax.devices())
+        _rad_step_mesh = getattr(self.model, "step_spmd_mesh", None)
+        _n_dev = (int(_rad_step_mesh.size) if _rad_step_mesh is not None
+                  else len(jax.devices()))
         _ncell = int(self.state.T.data.shape[0])
         if (_rad_scheme == "rrtmgp" and _single_process
                 and _n_dev > 1 and _ncell % _n_dev == 0):
-            from legoesm.parallel.column_shard import create_column_mesh
-            _column_mesh = create_column_mesh(_n_dev)
+            _column_mesh = radiation_column_mesh(_rad_step_mesh, _n_dev)
             logger.info(
                 f"  RRTMGP column-sharding: {_ncell} cells / {_n_dev} devices "
                 f"= {_ncell // _n_dev} cols/device"
@@ -12662,17 +13702,43 @@ class ModelDriver:
                 f"({CHECKPOINT_INTERVAL} steps) must both be multiples of the "
                 "cadence so every checkpoint is a resumable window boundary")
         DT_PHYS = DT * PHYS_UPDATE_STEPS
+        # No turbulence scheme: the lane applies the same constant-coefficient
+        # surface exchange as the lat-lon/cube pipeline (which skips it when a
+        # turbulence scheme or the learned parameterization owns the surface).
+        # A dry FV3-duo deck ignores humidity in its dycore: sensible heat only.
+        _sfc_bulk_coeffs = (
+            (float(cfg.C_H), float(cfg.C_E),
+             bool(getattr(getattr(self.model, "config", None), "moist", True)))
+            if (cfg.turbulence == "none" and cfg.surface_bulk_scheme == "constant"
+                and cfg.physics_parameterization == "none")
+            else None)
         if cfg.cld_macmic_num_steps > 1:
             logger.info(
                 f"  CAM macmic sub-cycle: turbulence + microphysics run "
                 f"{cfg.cld_macmic_num_steps} x at "
                 f"{DT_PHYS / cfg.cld_macmic_num_steps:.1f} s inside each "
                 "physics step, after the convective increment")
-        def _build_physics(_cfg, need_rad=True):
+        _cam6_act, _cam6_hw = None, None
+        if cfg.morrison_prognostic_droplet_number:
+            _cam6_act, _cam6_hw = self._cam6_activation_setup(
+                phys_cfg, DT_PHYS / cfg.cld_macmic_num_steps)
+            logger.info(
+                f"  CAM6 droplet activation: prescribed aerosol from "
+                f"{cfg.cam6_aerosol_dir}, top_lev={_cam6_act.top_lev}, "
+                f"mixing substeps <= {_cam6_act.n_max}")
+
+        _mynn_col = getattr(cfg, "turbulence", "none") == "mynn25"
+
+        def _build_physics(_cfg, need_rad=True,
+                           mynn_initflag=(False if _mynn_col else None)):
             """The lane's make_physics call (one copy for the full and the
             held-radiation variants; exported to mpas_diff_step so a caller
-            can rebuild the SAME physics from a config with traced params)."""
+            can rebuild the SAME physics from a config with traced params).
+            ``mynn_initflag``: turbulence='mynn25' only; True builds the
+            peeled cold-start step (votes M3/R3a)."""
             return make_physics(_cfg, model_type="mpas", dt=DT_PHYS,
+                                mynn_initflag=mynn_initflag,
+                                cam6_activation=_cam6_act,
                                 budget_ledger_level_weight=_ledger_weight,
                                 column_mesh=_column_mesh, need_rad=need_rad,
                                 f_land=(_f_land_cells
@@ -12683,7 +13749,8 @@ class ModelDriver:
                                 budget_ledger=_budget_ledger_on,
                                 physics_cadence=_phys_cadence_write,
                                 physics_cadence_steps=PHYS_UPDATE_STEPS,
-                                cld_macmic_num_steps=cfg.cld_macmic_num_steps)
+                                cld_macmic_num_steps=cfg.cld_macmic_num_steps,
+                                surface_bulk_coeffs=_sfc_bulk_coeffs)
 
         physics_fn = _build_physics(phys_cfg)
         if _hold_phys:
@@ -12776,8 +13843,51 @@ class ModelDriver:
                 "the restart day -- bitwise only if that reconstruction is "
                 "exact.", _DAY_ORIGIN)
         self._clock_day_origin = _DAY_ORIGIN
+        # IFS Cariolle ozone (tracer only; radiation keeps its own ozone):
+        # monthly coefficients on this run's columns, refreshed daily below
+        # on the radiation calendar (votes C3a, P1a); a cold start sets the
+        # tracer to k1 at the start day (C4a).
+        _cariolle_monthly = None
+        if cfg.ifs_ozone_chem:
+            from legoesm.atmosphere.physics.radiation.ozone_cariolle import (
+                CARIOLLE_TRACER, cariolle_daily_coefficients,
+                load_cariolle_coefficients)
+            # (a later function-local import makes the name local here too)
+            from legoesm.forcing.time_utils import daily_forcing_bucket
+            _trc0 = self.state.tracers[CARIOLLE_TRACER]
+            _car_lat = np.rad2deg(np.asarray(self._owned_p_s_and_lat()[1])).reshape(-1)
+            if _car_lat.size != _trc0.data.shape[0]:
+                raise ValueError(
+                    f"ifs_ozone_chem: {_car_lat.size} column latitudes for "
+                    f"{_trc0.data.shape[0]} tracer columns")
+            _cariolle_monthly = load_cariolle_coefficients(
+                self.sigma.pressure_at_full(
+                    jnp.asarray([constants.p_atm_std], jnp.float64)),
+                _car_lat)
+            if start_step == 0 and self._loaded_checkpoint_step_day is None:
+                _k1 = cariolle_daily_coefficients(
+                    _cariolle_monthly, self._calendar_for_radiation(
+                        float(daily_forcing_bucket(_DAY_ORIGIN)))[0])[..., 0]
+                self.state = self.state._replace(tracers={
+                    **self.state.tracers,
+                    CARIOLLE_TRACER: _trc0.replace(
+                        data=jnp.asarray(_k1, _trc0.data.dtype))})
         physics_fn_norad = (_build_physics(phys_cfg, need_rad=False)
                             if _subcycle_rad else None)
+        # turbulence='mynn25': the cold-start builds for the ONE peeled
+        # first physics step of an uninitialised run (votes M3/R1a/R3a).
+        physics_fn_init = physics_fn_norad_init = None
+        self._mynn_col_pending = False
+        if _mynn_col:
+            self._mynn_col_pending = self._mynn_peel_pending(
+                qke_key="physstate_qke",
+                flag_key="physstate_meta_mynn_initialized")
+            if self._mynn_col_pending:
+                physics_fn_init = _build_physics(phys_cfg, mynn_initflag=True)
+                physics_fn_norad_init = (
+                    _build_physics(phys_cfg, need_rad=False,
+                                   mynn_initflag=True)
+                    if _subcycle_rad else None)
         if _subcycle_rad:
             logger.info(
                 "  Radiation sub-cycle: RRTMGP solved every "
@@ -12962,7 +14072,15 @@ class ModelDriver:
                         f"nu4={_qv_smooth_nu4:g} m^4/s, dt={DT:g}s, "
                         f"g_max={_g_max:.3e} 1/m^2)."
                     )
-        _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
+        # The bulk surface exchange reads forcing["T_sfc"] too, radiation or not.
+        if _sfc_bulk_coeffs is not None and self.get_sst_sic is None:
+            raise ValueError(
+                "turbulence='none' with surface_bulk_scheme='constant' applies "
+                "the bulk surface exchange, which needs a prescribed SST/SIC "
+                "source; this run has none. Set surface_bulk_scheme='none' to "
+                "run without surface fluxes.")
+        _sst_forcing = ((cfg.radiation != "none" or _sfc_bulk_coeffs is not None)
+                        and self.get_sst_sic is not None)
         _sic_day = None            # (nCells,) ice fraction of the last forcing day
         _ice_skin_on = bool(getattr(cfg, "ice_skin_prognostic", False))
         if _ice_skin_on and not _sst_forcing:
@@ -12990,9 +14108,7 @@ class ModelDriver:
             # -25 W/m^2) — declare the spin-up in experiment metadata; the
             # scorecard's month-3-onward window clears it.
             if _ice_skin_on:
-                from legoesm.forcing.surface_utils import (
-                    prognostic_ice_skin_temperature,
-                )
+                from legoesm.forcing.surface_utils import advance_ice_skin
                 _h_ice = float(cfg.ice_thickness_m)
                 _staged_skin = None
                 if isinstance(self._carry_aux, dict):
@@ -13138,6 +14254,9 @@ class ModelDriver:
         from legoesm.forcing.surface_utils import (
             blend_surface_property, blended_surface_albedo,
         )
+        from legoesm.atmosphere.physics.radiation.integration import (
+            OCEAN_ALBEDO_DIFFUSE_CESM,
+        )
         # dynamic_albedo is a REAL ExperimentConfig option that the FV lane
         # honours (physics_pipeline applies a zenith-angle-dependent ocean
         # albedo). The MPAS blend below is static, so selecting it here would
@@ -13151,22 +14270,46 @@ class ModelDriver:
         # shortwave bias, i.e. the surface reflects too little, and a flat
         # ocean albedo is one of three candidate causes.
         #
-        # Cadence: the MPAS surface albedo is assembled ONCE PER FORCING DAY
-        # (with the SST/sea-ice sample), not per radiation call, so the cosine
-        # used here is the DAYTIME-EFFECTIVE daily mean
-        # ``mu = Q_day / (S_0 * f_day)`` -- exactly the quantity the FV lane
-        # uses on its non-diurnal path, and consistent with the daily cadence
-        # of the field it feeds.  Under a diurnal cycle this is an average over
-        # the sunlit day rather than the instantaneous value; that is an
-        # approximation of the ALBEDO, not of the insolation, and it is stated
-        # rather than hidden.
+        # rrtmgp: CESM2.1 form (cime5.6.47 seq_flux_mct.F90 L881-894): the
+        # DIRECT beam takes the zenith curve at the radiation time's own
+        # cos(zenith) (orbit-consistent: the radiation call's cosine), the
+        # DIFFUSE beam a fixed 0.06.  The daily blend below is the diffuse
+        # albedo; radiation forms the direct one per call from
+        # ``open_ocean_frac`` (integration.cesm_ocean_albedo_direct).
+        # Single-albedo schemes (gray) keep the daily-mean-cosine curve
+        # (_mpas_zenith_ocean_albedo) on both beams, unchanged.
         _zenith_ocean_alb = bool(getattr(cfg, "dynamic_albedo", False))
+        _cesm_ocean_alb = _zenith_ocean_alb and _rad_scheme == "rrtmgp"
         _alb_lat = None
-        if _zenith_ocean_alb:
+        if _zenith_ocean_alb and not _cesm_ocean_alb:
             _, _alb_lat_np = self._owned_p_s_and_lat()
             _alb_lat = jnp.asarray(_alb_lat_np).reshape(-1)
         _albedo_ocean = float(cfg.albedo_ocean)
         _albedo_ice = float(cfg.albedo_ice)
+        from legoesm.driver.config import resolve_sea_ice_albedo_scheme
+        from legoesm.ice.shortwave import sea_ice_albedo
+        _sia_scheme = resolve_sea_ice_albedo_scheme(cfg)
+        if _sia_scheme not in ("constant", "maykut_untersteiner"):
+            raise ValueError(
+                f"sea_ice_albedo_scheme={_sia_scheme!r} unknown; choose "
+                "'auto', 'constant' or 'maykut_untersteiner'.")
+        _ice_alb_melt = _sia_scheme == "maykut_untersteiner"
+        if _ice_alb_melt and not bool(getattr(cfg, "ice_skin_prognostic",
+                                               False)):
+            raise ValueError(
+                "sea_ice_albedo_scheme='maykut_untersteiner' needs "
+                "ice_skin_prognostic=True (it reads the ice skin).")
+
+        def _ice_albedo_now():
+            # Sea-ice albedo seen by radiation, refreshed every step with the
+            # skin (same cadence as the T_sfc re-anchor).
+            return sea_ice_albedo(
+                _sia_scheme, _albedo_ice,
+                T_skin=getattr(self, "_ice_T_skin", None),
+                h_ice_m=float(cfg.ice_thickness_m),
+                melt_width_K=float(cfg.sea_ice_melt_ramp_width_K))
+
+        _alb_ocean_cur = None    # open-ocean albedo of the current forcing day
         _albedo_land_static = None
         # RANK-LOCAL land test, computed here rather than reusing ``_has_land``
         # (which only exists inside the land_beta / lapse guard above and
@@ -13241,6 +14384,22 @@ class ModelDriver:
         # phase-2b follow-up (see the port plan).
         _land_ml_on = (bool(getattr(cfg, "use_multilayer_land", False))
                        and self._land_ml_state is not None)
+        # The emissivity radiation gives every column without a per-column
+        # one (rrtmgp and ecrad_ifs both read it): the sea part of the
+        # radiating-surface blend keeps it, so ocean/ice radiate as before
+        # (vote V12a, 3-0).
+        _E_sfc_rad = float(phys_cfg.radiation.rrtmgp.sfc_emissivity)
+        # Only rrtmgp / ecrad_ifs take a per-column emissivity; gray keeps
+        # its scalar boundary and is not closed (vote V11b, 2-1).
+        _land_rad_bc_on = _land_ml_on and _rad_scheme in ("rrtmgp", "ecrad_ifs")
+        if _land_ml_on and not _land_rad_bc_on and _rad_scheme != "none":
+            logger.warning(
+                "  multilayer land with radiation=%r: the radiation takes no "
+                "per-column emissivity, so it emits upward LW from the "
+                "canopy-air temperature at its own scalar emissivity, NOT the "
+                "land's radiating temperature/emissivity -- the land-"
+                "atmosphere longwave exchange does not close on this lane "
+                "(it does with rrtmgp / ecrad_ifs).", _rad_scheme)
         if _land_beta_soil_on and not bool(
                 getattr(cfg, "use_multilayer_land", False)):
             # CONFIG-ONLY test, deliberately: it is the same on every rank, so
@@ -13267,6 +14426,10 @@ class ModelDriver:
         _land_step_fn = None
         _land_T_skin = None            # (nCells,) land skin T of the last step
         _land_albedo_cells = None      # (nCells,) land albedo of the last step
+        # (nCells,) the land's radiating pair of the last step (T_rad, eps):
+        # what its LW_out = eps*sigma*T_rad^4 + (1-eps)*La was solved with.
+        _land_Trad_cells = None
+        _land_emis_cells = None
         _land_beta_fn = None           # jitted land-state -> per-cell beta_soil
         _land_beta_cells = None        # (nCells,) traced beta of the last step
         _land_qsfc_cells = None        # (nCells,) land's solved q_sfc, last step
@@ -13281,7 +14444,8 @@ class ModelDriver:
         _ls_reused_win = None          # device: reused land column-steps, window
         _land_z0m_cells = None         # (nCells,) static land roughness [m]
         _land_d_cells = None           # (nCells,) static displacement [m]
-        from legoesm.driver.config import resolve_land_stress_from_land
+        from legoesm.driver.config import (
+            resolve_land_stress_from_land, resolve_ocean_flux_on_ocean_surface)
         from legoesm.land.multilayer_land import solved_stress_magnitude
         from legoesm.atmosphere.physics.turbulence.surface_layer import (
             hold_last_valid_land_stress,
@@ -13289,7 +14453,34 @@ class ModelDriver:
         _land_stress_on = resolve_land_stress_from_land(cfg)
         # Validated (validate_strict) to imply the land-flux handoff, so the
         # turbulence always receives T_sfc_ocean together with shflx_land.
-        _ocean_sfc_on = bool(cfg.ocean_flux_on_ocean_surface)
+        _ocean_sfc_on = resolve_ocean_flux_on_ocean_surface(cfg)
+        # Coupler ice/lake handback (P5c K2): the atmosphere owns land and
+        # open water; the bulk law covers the open-water fraction only and
+        # the coupler's ice+lake fluxes, emission, albedo and emissivity fill
+        # the rest (plan L2'/P2).  Needs the land model's own fluxes (the
+        # only channel that hands the kernel a surface flux), the SST, and
+        # rrtmgp (the only scheme that takes a per-column emissivity).
+        _hb_fn = self.get_surface_handback
+        _hb_last = None
+        if _hb_fn is not None:
+            _hb_missing = [_nm for _nm, _ok in (
+                ("the interactive land model's own fluxes "
+                 "(use_multilayer_land)", _land_ml_on),
+                ("a land fraction", _f_land_cells is not None),
+                ("the SST surface forcing", _sst_forcing),
+                ("rrtmgp radiation", _rad_scheme == "rrtmgp"),
+            ) if not _ok]
+            if _hb_missing:
+                raise ValueError(
+                    "the coupler ice/lake handback needs "
+                    + ", ".join(_hb_missing) + " on the MPAS column loop.")
+            _hb_eps = phys_cfg.radiation.rrtmgp.sfc_emissivity
+            if (isinstance(_hb_eps, (int, float))
+                    and not 0.0 < float(_hb_eps) <= 1.0):
+                raise ValueError(
+                    "the handback's radiating temperature divides by the "
+                    "land/open-water emissivity; rrtmgp sfc_emissivity must be "
+                    f"in (0, 1], got {_hb_eps!r}")
         print(f"  Non-land surface fluxes evaluated on: "
               f"{'OCEAN/ICE surface' if _ocean_sfc_on else 'land-blended surface'}"
               f" (ocean_flux_on_ocean_surface={_ocean_sfc_on})")
@@ -13382,9 +14573,66 @@ class ModelDriver:
             # not repack.
             _land_pack_idx_np = np.nonzero(
                 np.asarray(self._f_land).reshape(-1) > 0.0)[0]
+            if _is_mpas_cell_partitioned(self):
+                # Owned columns only.  After every land call the land halo
+                # exchange below overwrites the halo rows of every consumed
+                # output with the owner's, so solving the halo copies was
+                # discarded work (about a third of the land solve at 8
+                # nodes).  Halo rows of the land STATE stay frozen: what is
+                # derived from them (soil beta) is exchanged with the outputs,
+                # and checkpoints, digests and the CMOR feed take owned rows.
+                _land_pack_idx_np = _land_pack_idx_np[
+                    _land_pack_idx_np
+                    < int(self._voronoi_layout.partition.n_owned_cells)]
+            # Multi-controller SPMD (the FV3 duo lane): every process holds
+            # the whole globe's land, so each solves only its share of the
+            # land columns and one gather per land call rebuilds the full
+            # copy.  All processes take this branch (config + process count
+            # only), so the gather is reached by every one of them.
+            _land_split = None
+            if (self._is_spmd_multiprocess()
+                    and str(getattr(cfg, "land_surface_scheme", "")) != "clm_ml"
+                    and _land_pack_idx_np.size >= jax.process_count()):
+                _land_pack_idx_np, _land_split = split_land_columns(
+                    _land_pack_idx_np, jax.process_count(),
+                    jax.process_index())
+            # One process driving several devices (the duo's face-shard or
+            # window layouts on one host): this process's land columns are
+            # split over its devices the same way and solved under a
+            # shard_map, one equal shard per device.
+            _land_keep = _land_mesh = None
+            _step_mesh = getattr(self.model, "step_spmd_mesh", None)
+            _land_devs = ([d for d in _step_mesh.devices.flat
+                           if d.process_index == jax.process_index()]
+                          if _step_mesh is not None else [])
+            _land_clm = str(getattr(cfg, "land_surface_scheme", "")) == "clm_ml"
+            if (len(_land_devs) > 1 and not _land_clm
+                    and (_land_split is not None
+                         or not self._is_spmd_multiprocess())
+                    and _land_pack_idx_np.size >= len(_land_devs)):
+                _land_pack_idx_np, _land_keep = shard_land_columns(
+                    _land_pack_idx_np, len(_land_devs))
+                _land_mesh = land_device_mesh(_step_mesh, _land_devs)
+            # the device fallback is per process (shares differ by one
+            # column), the process fallback is the same on every process
+            if _land_mesh is None and (
+                    len(_land_devs) > 1
+                    or (jax.process_index() == 0
+                        and self._is_spmd_multiprocess()
+                        and _land_split is None)):
+                logger.warning(
+                    "land: every device solves ALL its land columns "
+                    "(replicated, no speed-up from extra devices): %s",
+                    "clm_ml land is not split" if _land_clm else
+                    "too few land columns to give every device a share")
             _land_pack_on = (
-                str(getattr(cfg, "land_surface_scheme", "")) != "clm_ml"
-                and 0 < _land_pack_idx_np.size < _f_land_cols.shape[0])
+                not _land_clm
+                and (_land_keep is not None
+                     or 0 < _land_pack_idx_np.size < _f_land_cols.shape[0]))
+            # An all-ocean MPI rank: nothing to solve.  Its outputs are the
+            # packed path's ocean-column fills (zeros, state unchanged), so it
+            # costs nothing instead of solving every ocean column.
+            _land_none = _land_pack_idx_np.size == 0
             _land_ncol_full = int(_f_land_cols.shape[0])
             # Owned (non-halo) columns: under MPAS MPI local cells are owned
             # first, then halo copies, which must not be counted twice.
@@ -13399,6 +14647,10 @@ class ModelDriver:
                 int(_vl_land.partition.n_owned_cells) if _vl_land is not None
                 else _land_ncol_full)
             _land_pack_idx = jnp.asarray(_land_pack_idx_np)
+            # Split over devices: the scatter-back writes the REAL slots only
+            # (a padding slot repeats a real column; its result is dropped).
+            _land_out_idx = (_land_pack_idx if _land_keep is None
+                             else jnp.asarray(_land_pack_idx_np[_land_keep]))
 
             from legoesm.land.multilayer_land import (
                 gather_land_columns, scatter_land_columns, scatter_cells)
@@ -13417,8 +14669,8 @@ class ModelDriver:
                 _lml_lat_p = _land_pack(_lml_lat)
                 _lml_carbon_p = (_land_pack(_lml_carbon)
                                  if _lml_carbon is not None else None)
-                _f_land_cols_p = _f_land_cols[_land_pack_idx]
-                _owned_cols_p = _owned_cols[_land_pack_idx]
+                _f_land_cols_p = _f_land_cols[_land_out_idx]
+                _owned_cols_p = _owned_cols[_land_out_idx]
             else:
                 _lml_cfg_p = _lml_cfg
                 _lml_params_p, _lml_lat_p = _lml_params, _lml_lat
@@ -13440,6 +14692,8 @@ class ModelDriver:
                 else 1)
             DT_LAND = _LAND_K * DT
 
+            _land64 = cfg.land_compute_precision == "fp64"
+
             def _make_land_step(_dt_land):
               @jax.jit
               def _land_step(land_state, a2s, doy, lai_doy, lai_year):
@@ -13457,11 +14711,48 @@ class ModelDriver:
                     _params_in = _land_pack(_p) if _land_pack_on else _p
                 else:
                     _params_in = _lml_params_p
-                new_state, resp, _carbon, _sfc = (
-                    step_multilayer_land_with_diagnostics(
-                        _state_in, _a2s_in, _lml_cfg_p, _lml_umin, _dt_land,
-                        lat=_lml_lat_p, doy=doy, land_params=_params_in,
-                        carbon_state=_lml_carbon_p))
+                _lml_cfg_in, _lml_lat_in, _lml_carbon_in = (
+                    _lml_cfg_p, _lml_lat_p, _lml_carbon_p)
+                if _land64:
+                    _state_carry, _carbon_carry = _state_in, _lml_carbon_p
+                    (_state_in, _a2s_in, _lml_cfg_in, _params_in,
+                     _lml_lat_in, _lml_carbon_in) = cast_pytree(
+                        (_state_in, _a2s_in, _lml_cfg_p, _params_in,
+                         _lml_lat_p, _lml_carbon_p),
+                        LAND_PRECISION_MODULE, "compute")
+                if _land_mesh is None:
+                    new_state, resp, _carbon, _sfc = (
+                        step_multilayer_land_with_diagnostics(
+                            _state_in, _a2s_in, _lml_cfg_in, _lml_umin,
+                            _dt_land, lat=_lml_lat_in, doy=doy,
+                            land_params=_params_in,
+                            carbon_state=_lml_carbon_in))
+                else:
+                    # per-column = the leaves the packing gathered (leading
+                    # axis = the full column count before packing)
+                    _full = (land_state, a2s, _lml_cfg,
+                             _p if _lml_update is not None else _lml_params,
+                             _lml_lat, _lml_carbon, doy)
+                    new_state, resp, _carbon, _sfc = solve_land_on_devices(
+                        lambda st, a2s, c, p, la, cb, d: (
+                            step_multilayer_land_with_diagnostics(
+                                st, a2s, c, _lml_umin, _dt_land, lat=la,
+                                doy=d, land_params=p, carbon_state=cb)),
+                        (_state_in, _a2s_in, _lml_cfg_in, _params_in,
+                         _lml_lat_in, _lml_carbon_in, doy),
+                        jax.tree_util.tree_map(
+                            lambda x: (hasattr(x, "shape") and len(x.shape) >= 1
+                                       and x.shape[0] == _land_ncol_full),
+                            _full),
+                        _land_mesh, _land_keep)
+                if _land64:
+                    # state back to the carry's own per-leaf dtypes; the
+                    # fluxes/diagnostics to the run's storage dtype
+                    new_state = match_leaf_dtypes(new_state, _state_carry)
+                    if _carbon is not None and _carbon_carry is not None:
+                        _carbon = match_leaf_dtypes(_carbon, _carbon_carry)
+                    resp, _sfc = cast_pytree(
+                        (resp, _sfc), None, "storage", allow_downcast=True)
                 # resp.albedo is the END-OF-STEP land albedo, already
                 # snow-brightened by the tile (band_albedo / snow_albedo) and
                 # dry-soil-brightened.  It used to be discarded here, so the
@@ -13548,6 +14839,14 @@ class ModelDriver:
                             .astype(jnp.int32))
                     if _unconv_mask is not None
                     else jnp.zeros((), jnp.int32))
+                # The land's RADIATING pair (emission-equivalent temperature
+                # and column emissivity) its energy balance closed with:
+                # LW_out = eps*sigma*T_rad^4 + (1 - eps)*La.  The surface
+                # blend hands both to radiation (tier-5 U11-1), so the
+                # atmosphere's upward LW is the one the land lost.
+                _emis = jnp.broadcast_to(
+                    jnp.asarray(resp.emissivity, resp.T_rad.dtype),
+                    resp.T_rad.shape)
                 if _land_pack_on:
                     # Scatter the advanced columns back into the full-grid
                     # state (ocean columns keep their frozen init values,
@@ -13556,29 +14855,61 @@ class ModelDriver:
                     # response fields into zero-filled cell arrays.
                     new_state = scatter_land_columns(
                         land_state, new_state,
-                        _land_pack_idx, _land_ncol_full)
+                        _land_out_idx, _land_ncol_full)
                     return ((new_state,)
                             + tuple(scatter_cells(
-                                o, _land_pack_idx, _land_ncol_full)
+                                o, _land_out_idx, _land_ncol_full)
                                 for o in (
                                     resp.T_sfc, resp.albedo, resp.q_surface,
                                     resp.shflx, resp.lhflx, resp.surface_mass_flux,
-                                    _taumag, _held_f))
+                                    _taumag, _held_f, resp.T_rad, _emis))
                             + (_n_held, _n_held_land, _n_fb_land,
                                _n_fb_rej, _n_unconv_land, _n_iter_max))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
                         resp.shflx, resp.lhflx, resp.surface_mass_flux,
-                        _taumag, _held_f,
+                        _taumag, _held_f, resp.T_rad, _emis,
                         _n_held, _n_held_land, _n_fb_land, _n_fb_rej,
                         _n_unconv_land, _n_iter_max)
-              return _land_step
+              if not _land_none:
+                  return _land_step
+
+              @jax.jit
+              def _land_step_none(land_state, a2s, doy, lai_doy, lai_year):
+                  # Same output structure and dtypes as the solve (traced
+                  # shape-only, never run), so the land halo exchange packs
+                  # the same message on every rank.
+                  out = jax.eval_shape(
+                      _land_step, land_state, a2s, doy, lai_doy, lai_year)
+                  return (land_state,) + tuple(
+                      jnp.zeros(o.shape, o.dtype) for o in out[1:])
+              return _land_step_none
 
             _land_step_fn = _make_land_step(DT_LAND)
-            # Bootstrap variant: one host step's forcing, tile advanced by
-            # DT — used only for the first call after a (re)start so the
-            # surface blend never runs land-free for a whole interval.
-            _land_step_boot_fn = (
-                _land_step_fn if _LAND_K == 1 else _make_land_step(DT))
+            # Bootstrap call (first call after a (re)start with no held
+            # outputs, so the surface blend never runs land-free): one host
+            # step's forcing, tile advanced DT_LAND like every call, because
+            # its evaporation is debited AHEAD for the K steps the atmosphere
+            # then holds it.  Its precipitation fell for one step only, so the
+            # call site scales that sample's rain and snow by 1/K.  A DT boot
+            # step debited one step and was held K: (K-1)*DT*E created.
+            # Its downward radiation is NOT scaled (land_bootstrap_forcing).
+            _land_step_boot_fn = _land_step_fn
+            if _land_split is not None:
+                from jax.experimental import multihost_utils as _mhu
+                _proc = jax.process_index()
+
+                def _with_gather(step):
+                    def _step(*a):
+                        return gather_land_step(
+                            lambda: step(*a), _land_ncol_full, _land_split,
+                            _proc, _mhu.process_allgather)
+                    return _step
+                _land_step_boot_fn = (
+                    _with_gather(_land_step_boot_fn)
+                    if _land_step_boot_fn is not _land_step_fn else None)
+                _land_step_fn = _with_gather(_land_step_fn)
+                if _land_step_boot_fn is None:
+                    _land_step_boot_fn = _land_step_fn
 
             # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
             # ``forcing["beta_land"]`` the turbulence surface flux consumes.
@@ -13786,6 +15117,10 @@ class ModelDriver:
             physics_fn = _wrap_hs(physics_fn)
             if physics_fn_norad is not None:
                 physics_fn_norad = _wrap_hs(physics_fn_norad)
+            if physics_fn_init is not None:
+                physics_fn_init = _wrap_hs(physics_fn_init)
+            if physics_fn_norad_init is not None:
+                physics_fn_norad_init = _wrap_hs(physics_fn_norad_init)
             # Physics cadence: HS forcing is analytic and cheap, so it is
             # recomputed on held steps (the cache holds physics only).
             if physics_fn_held is not None:
@@ -13845,6 +15180,7 @@ class ModelDriver:
             False)) or bool(getattr(self.config, "bechtold_use_ifs_capdcycl",
                                     False))
         _last_force_day = None
+        _cam6_held = None
         # External CMIP6 forcing (ozone file / aerosol / transient GHG) on
         # the MPAS path: threaded through the same per-step TRACED
         # ``forcing`` dict as T_sfc, refreshed at daily cadence.  The
@@ -13981,8 +15317,8 @@ class ModelDriver:
                         "fresh seed."
                     )
             # Codex adversarial (#413): the MPAS save writes EVERY
-            # PhysicsState field together (all are concrete arrays —
-            # init_physics_state never leaves one None) AND the
+            # PhysicsState field together (every concrete array; a field the
+            # configuration does not carry is None and never saved) AND the
             # ``physstate_meta_conv_scheme`` tag, all inside one
             # ``if carry is not None`` block.  So the PRESENCE of ANY
             # ``physstate_*`` key — including the meta tag alone — means
@@ -14024,6 +15360,29 @@ class ModelDriver:
                 # the correct pre-feature state (deepcu exactly 0).
                 "conv_mass_flux_up",
                 "conv_icwmr",
+                # NOT pblh (user decision 2026-10-20, oracle row 47): CAM
+                # zero-seeds PBLH only on an initial run (physpkg.F90:419-424
+                # via phys_inidat, called only if initial_run, :803); a
+                # restart without the pbuf field is an error
+                # (physics_buffer.F90.in:1591).  A pre-#2045 checkpoint is
+                # therefore INCOMPLETE below.
+                # relvar (2026-10-19): CAM6 MG2 relative cloud-water variance;
+                # seeds at its fresh init (CAM pbuf value 2) and is rewritten
+                # by CLUBB before the microphysics reads it in every sub-step.
+                "relvar",
+                # clubb_wp2_iface / clubb_kh_iface / cloud_fraction_old
+                # (2026-10-24, user decision 3a): CAM6 droplet-activation
+                # inputs; the CLUBB pair is rewritten before every read and a
+                # zero CLDO is CAM's cold start (micro_mg_cam.F90:1047).
+                "clubb_wp2_iface",
+                "clubb_kh_iface",
+                "cloud_fraction_old",
+                # zc_* (2026-11-04): the Sundqvist gscond previous-step state;
+                # a zero carry is a fresh start (no other-process tendency
+                # on the first step, zhaocarr_gscond.f:168-181).
+                "zc_T_prev",
+                "zc_q_v_prev",
+                "zc_p_s_prev",
             })
             if _any_physstate:
                 from legoesm.atmosphere.physics.physics_state import (
@@ -14040,9 +15399,16 @@ class ModelDriver:
                 # (the save skips their None), re-seeded fresh.  Every
                 # EVOLVING field stays mandatory.
                 _exempt_ps = {"col_index"} | PHYSSTATE_INPUT_FIELDS
+                # A field whose fresh seed is None (scheme-conditional
+                # memory this configuration does not carry, e.g. the WRF
+                # Tiedtke lags, or ecrad_carry off ecrad_ifs) has nothing to
+                # restore; the save skips it.  An ecrad_ifs run seeds an
+                # array, so a checkpoint without its carry is INCOMPLETE
+                # below (vote L23a).
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields
-                            and f not in _exempt_ps]
+                            and f not in _exempt_ps
+                            and getattr(_phys_state, f) is not None]
                 _new_missing = [f for f in _missing
                                 if f in _NEW_OPTIONAL_PS_FIELDS]
                 _missing = [f for f in _missing
@@ -14085,6 +15451,14 @@ class ModelDriver:
                 if _name in PHYSSTATE_INPUT_FIELDS:
                     continue
                 _seed_field = getattr(_phys_state, _name)
+                if _seed_field is None:
+                    # a field inactive on THIS run (e.g. ecrad_carry without
+                    # radiation='ecrad_ifs'): dropped, loudly (vote U2b)
+                    logger.warning(
+                        "  MPAS restart: DROPPED physics-state field %r from "
+                        "the checkpoint; it is inactive on this run (e.g. "
+                        "ecrad_carry without radiation='ecrad_ifs').", _name)
+                    continue
                 _val = jnp.asarray(_v)
                 if tuple(_val.shape) != tuple(_seed_field.shape):
                     raise ValueError(
@@ -14176,8 +15550,10 @@ class ModelDriver:
                 _ph0 = self.sigma.pressure_at_half(
                     jnp.asarray(self.state.p_s.data).reshape(-1))
                 _p_low0 = 0.5 * (_ph0[..., -1] + _ph0[..., -2])
+                from legoesm.land.multilayer_land import land_skin_temperature
                 _T_land0 = jnp.asarray(
-                    self._land_ml_state.T_soil[:, 0]).reshape(-1)
+                    land_skin_temperature(self._land_ml_state,
+                                          self.physics.land_ml_cfg)).reshape(-1)
                 _qsat0 = _satmr0(_T_land0, _p_low0)
                 _land_qsfc_cells = (
                     _q_air0 + _land_beta_cells * (_qsat0 - _q_air0))
@@ -14305,16 +15681,103 @@ class ModelDriver:
         _lw_ck = ({k: self._carry_aux.pop(k) for k in list(self._carry_aux)
                    if k.startswith(_LAND_WIN_PREFIXES)}
                   if isinstance(self._carry_aux, dict) else {})
+        # Coupling window (P5b): a coupler that sets ``_coupling_dt_s`` is
+        # called every coupling_dt with window-MEAN surface fluxes, at the end
+        # of the step that closes the window; any other segment_callback keeps
+        # the daily call.
+        _cpl_ck = {k: _lw_ck.pop(k) for k in list(_lw_ck)
+                   if k.startswith("cpl_win_")}
+        # The pending ice/lake exchange cannot be dropped silently: a run
+        # resuming it must consume a handback (vote K3-V12).
+        if _hb_fn is None and any(k.startswith("cpl_win_hb_") for k in _cpl_ck):
+            raise ValueError(
+                "checkpoint carries a pending coupler ice/lake handback "
+                "(cpl_win_hb_*), but no handback is set on this run.")
+        self._cpl_window = None
+        _cpl_dt = getattr(self, "_coupling_dt_s", None)
+        _CPL_K = None
+        # Window sums in ``_cpl_fields`` order; the handback adds the
+        # open-water, booked ice/lake and land-runoff sums (P5c K3).
+        _cpl_fields = _CPL_WIN_FIELDS + (_CPL_HB_FIELDS if _hb_fn is not None
+                                         else ())
+        _cpl_sums, _cpl_n = [None] * len(_cpl_fields), 0
+        # Handback radiation split of the latest radiation solve, held across
+        # held-radiation steps like the solve's net fluxes; the boundary
+        # inputs it is split with; this step's land runoff impulse.
+        _hb_rad_in = _hb_rad_held = _hb_runoff_now = None
+        # Not persisted: a resumed link's first step re-samples SST/SIC from
+        # the restored ocean anyway (_last_force_day starts None).
+        _cpl_sst_due = False
+        if self._segment_callback is not None and _cpl_dt is not None:
+            _k = float(_cpl_dt) / DT
+            if (not np.isfinite(_k) or _k < 1 or _k != round(_k)
+                    or float(_cpl_dt) % 1800.0 != 0.0):
+                raise ValueError(
+                    f"coupling_dt={_cpl_dt!r} s must be a positive multiple "
+                    f"of 1800 s and of the atmosphere step DT={DT} s.")
+            _CPL_K = int(round(_k))
+        if _hb_fn is not None:
+            # The handback changes at window boundaries; each window must open
+            # on a radiation and physics solve, or the held radiation / physics
+            # would keep the previous window's ice and lake (vote V16).
+            _hb_rad = RAD_UPDATE_STEPS if _subcycle_rad else 1
+            _hb_phys = PHYS_UPDATE_STEPS if _hold_phys else 1
+            if _CPL_K is None or _CPL_K % _hb_rad or _CPL_K % _hb_phys:
+                raise ValueError(
+                    "the coupler ice/lake handback needs a coupling window "
+                    "(coupling_dt) whose length in steps is a multiple of the "
+                    f"radiation ({_hb_rad}) and physics ({_hb_phys}) update "
+                    f"intervals; window = {_CPL_K} steps.")
+        if _CPL_K is not None:
+            if _cpl_ck:
+                _cpl_sums, _cpl_n = coupling_window_from_checkpoint(
+                    _cpl_ck, _CPL_K,
+                    int(jnp.asarray(self.state.p_s.data).reshape(-1).shape[0]),
+                    fields=_cpl_fields)
+                # A handback window cannot be resumed without its own sums,
+                # nor its sums under a run that no longer consumes a handback
+                # (votes K3-V6/V9).
+                _hb_ck = [f"cpl_win_sum_{f}" in _cpl_ck for f in _CPL_HB_FIELDS]
+                if _hb_fn is not None and _cpl_n > 0 and not all(_hb_ck):
+                    raise ValueError(
+                        "checkpoint coupling window: the coupler ice/lake "
+                        f"handback is set and {_cpl_n} step(s) are pending, "
+                        "but the checkpoint carries no open-water / booked "
+                        "ice-lake / runoff sums; the window cannot be "
+                        "resumed.")
+                if _hb_fn is None and any(_hb_ck):
+                    raise ValueError(
+                        "checkpoint coupling window was written by a run "
+                        "consuming a coupler ice/lake handback, but no "
+                        "handback is set on this run.")
+            elif start_step > 0:
+                logger.warning(
+                    "  Coupling window: the checkpoint carries no coupling "
+                    "window (written before it was persisted); the pending "
+                    "steps of the previous link are lost.")
         if _land_ml_on and _lw_ck:
             (_land_a2s_sum, _land_a2s_n, _land_cz_wsum, _land_w_sum,
              (_lw_T, _lw_alb, _lw_qlast, _lw_qs, _lw_sh, _lw_lh,
-              _lw_ev, _lw_beta)) = land_window_from_checkpoint(
+              _lw_ev, _lw_beta, _lw_Trad, _lw_emis)) = land_window_from_checkpoint(
                 _lw_ck, _LAND_K,
                 int(jnp.asarray(self.state.p_s.data).reshape(-1).shape[0]))
             if _lw_T is not None:
                 _land_T_skin = self._land_T_skin_last = _lw_T
                 _land_albedo_cells = _lw_alb
                 self._land_qsfc_last = _lw_qlast
+                # A checkpoint written before the radiating pair was
+                # persisted: seed it with the held skin T and the radiation's
+                # own emissivity (vote V2a, 3-0) until the first land call.
+                _land_Trad_cells = _lw_T if _lw_Trad is None else _lw_Trad
+                _land_emis_cells = (
+                    jnp.full_like(_lw_T, _E_sfc_rad) if _lw_emis is None
+                    else _lw_emis)
+                if _lw_Trad is None:
+                    logger.warning(
+                        "  MPAS land window: the checkpoint carries no held "
+                        "land radiating pair (written before it was "
+                        "persisted); radiation uses the held skin T at the "
+                        "radiation emissivity until the first land call.")
             # The flux channel exists only with the land beta handoff; its
             # seeds above are replaced by the held solved values when the
             # checkpoint carries them.
@@ -14415,30 +15878,20 @@ class ModelDriver:
                 state = state._replace(tracers=_new_trc_sm)
             return state
 
-        # Profiling window, off unless LEGOESM_TRACE_STEPS="first:count:dir"
-        # (loop-step indices; each rank writes dir/rank<N>).  Blocks on the
-        # state at both ends so the trace holds exactly those steps; a window
-        # running past the end is stopped after the loop.
-        _trace_spec = os.environ.get("LEGOESM_TRACE_STEPS")
-        _trace_win = None
+        # Profiling windows, off unless LEGOESM_TRACE_STEPS="first:count:dir"
+        # (loop-step indices; see ``trace_windows`` for LEGOESM_TRACE_WINDOWS /
+        # LEGOESM_TRACE_RANKS).  Blocks on the state at each window edge so a
+        # trace holds exactly its steps; a window running past the end is
+        # stopped after the loop.
+        _trace_wins = trace_windows(
+            os.environ.get("LEGOESM_TRACE_STEPS"),
+            os.environ.get("SLURM_PROCID")
+            or os.environ.get("OMPI_COMM_WORLD_RANK")
+            or os.environ.get("PMI_RANK", "0"),
+            os.environ.get("LEGOESM_TRACE_WINDOWS"),
+            os.environ.get("LEGOESM_TRACE_RANKS"))
+        _trace_edges = {s for w in _trace_wins for s in w[:2]}
         _trace_on = False
-        if _trace_spec:
-            try:
-                _t0, _tn, _tdir = _trace_spec.split(":", 2)
-                _t0, _tn = int(_t0), int(_tn)
-            except ValueError:
-                raise ValueError(
-                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: expected "
-                    "'first:count:dir' with integer first and count") from None
-            if _t0 < 0 or _tn < 1:
-                raise ValueError(
-                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: need first >= 0, "
-                    "count >= 1")
-            _trace_rank = (os.environ.get("SLURM_PROCID")
-                           or os.environ.get("OMPI_COMM_WORLD_RANK")
-                           or os.environ.get("PMI_RANK", "0"))
-            _trace_win = (_t0, _t0 + _tn,
-                          os.path.join(_tdir, "rank" + _trace_rank))
         if _land_stress_on and _land_taumag_cells is None:
             raise RuntimeError(
                 "land_stress_from_land resolved ON but the land stress "
@@ -14458,14 +15911,15 @@ class ModelDriver:
         # (bitwise gate of refactors); off by default
         _DIGEST_EVERY = int(os.environ.get("LEGOESM_DIGEST_EVERY_STEPS", "0"))
         for step in range(n_steps_total):
-            if _trace_win is not None and step in _trace_win[:2]:
+            if step in _trace_edges:
                 jax.block_until_ready(self.state)
-                if step == _trace_win[0]:
-                    jax.profiler.start_trace(_trace_win[2])
-                    _trace_on = True
-                else:
+                if _trace_on:
                     jax.profiler.stop_trace()
                     _trace_on = False
+                for _w0, _w1, _wdir in _trace_wins:
+                    if step == _w0:
+                        jax.profiler.start_trace(_wdir)
+                        _trace_on = True
             if _PHASE_TIMERS:
                 _now = time.perf_counter()
                 if _phase_n:
@@ -14489,7 +15943,9 @@ class ModelDriver:
             # radiation=none (where _sst_forcing is False) — else coupling would
             # silently freeze. SST re-sampling below stays gated on _sst_forcing.
             if (_sst_forcing or _ext_forcing or _solar_ext
-                    or self._segment_callback is not None):
+                    or self._segment_callback is not None
+                    or _cam6_act is not None
+                    or _cariolle_monthly is not None):
                 # Anchored on the ABSOLUTE step from the run's day-0 origin:
                 # ``START_DAY + step*DT`` rounds differently from the unbroken
                 # run's ``0 + (start_step+step)*DT`` (1 ulp at step 219 of a
@@ -14503,7 +15959,8 @@ class ModelDriver:
                 # truncation; day_to_calendar already handles negative
                 # days via modulo).
                 _fd_int = daily_forcing_bucket(_force_day)
-                if _fd_int != _last_force_day:
+                _new_day = _fd_int != _last_force_day
+                if _new_day or _cpl_sst_due:
                     # Coupled ocean/land: step the coupler's (grid-agnostic) slab
                     # ocean + land for the elapsed day BEFORE re-sampling SST, so
                     # the daily SST resample below reads the just-updated ocean
@@ -14511,6 +15968,7 @@ class ModelDriver:
                     # Daily coupling cadence, matching the SST-refresh cadence.
                     # step 0 has nothing to step yet (_last_force_day is None).
                     if (self._segment_callback is not None
+                            and _CPL_K is None and _new_day
                             and _last_force_day is not None):
                         # Export the surface net radiative fluxes the MPAS
                         # physics computed (sw/lw net [W/m^2, +into surface])
@@ -14570,7 +16028,10 @@ class ModelDriver:
                     # starting at integer days (all production configs) are
                     # bit-identical to before.
                     _force_day_canonical = float(_fd_int)
-                    _forcing_daily = {}
+                    # A post-exchange SST refresh (P5b) re-samples only the
+                    # surface fields below into the held daily dict.
+                    if _new_day:
+                        _forcing_daily = {}
                     if _sst_forcing:
                         # Prognostic ice skin: cache THIS forcing day's SST+SIC
                         # for the PER-STEP re-anchor + advance in the step loop.
@@ -14614,18 +16075,31 @@ class ModelDriver:
                         # to the scalar config albedo (0.06 = open ocean) for
                         # EVERY column, land included.
                         if _sfc_albedo_on:
+                            # dynamic_albedo (CESM2.1 seq_flux_mct): this
+                            # daily blend is the DIFFUSE albedo (open ocean
+                            # 0.06); radiation swaps the open-ocean part of
+                            # the DIRECT beam for the zenith curve at each
+                            # call's own cos(zenith), via open_ocean_frac.
                             _alb_ocean_day = _albedo_ocean
-                            if _zenith_ocean_alb:
+                            if _cesm_ocean_alb:
+                                _alb_ocean_day = OCEAN_ALBEDO_DIFFUSE_CESM
+                            elif _zenith_ocean_alb:
                                 _alb_ocean_day = _mpas_zenith_ocean_albedo(
                                     _alb_lat, _force_day_canonical,
                                     getattr(self, "orbit", None))
+                            _alb_ocean_cur = _alb_ocean_day
+                            _alb_ice_day = _ice_albedo_now()
                             _sea_albedo_day = blend_surface_property(
-                                _sic_day, _albedo_ice, _alb_ocean_day)
+                                _sic_day, _alb_ice_day, _alb_ocean_day)
                             _forcing_daily["sfc_albedo"] = (
                                 blended_surface_albedo(
-                                    _sic_day, _alb_f_land, _albedo_ice,
+                                    _sic_day, _alb_f_land, _alb_ice_day,
                                     _alb_ocean_day, _albedo_land_static))
-                    if _ext_forcing:
+                            if _cesm_ocean_alb:
+                                _forcing_daily["open_ocean_frac"] = (
+                                    (1.0 - _sic_day) if _alb_f_land is None
+                                    else (1.0 - _alb_f_land) * (1.0 - _sic_day))
+                    if _ext_forcing and _new_day:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
                             _force_day_canonical, _ext_p_s,
@@ -14650,7 +16124,14 @@ class ModelDriver:
                             _forcing_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
                             }
-                    if _solar_ext:
+                    if _cariolle_monthly is not None and _new_day:
+                        _forcing_daily["cariolle_coef"] = jnp.asarray(
+                            cariolle_daily_coefficients(
+                                _cariolle_monthly,
+                                self._calendar_for_radiation(
+                                    _force_day_canonical)[0]),
+                            self.state.T.data.dtype)
+                    if _solar_ext and _new_day:
                         # Same canonical-day sampling as SST/ozone
                         # (FIX_RESTART_TIME: bit-exact restart continuation).
                         from legoesm.forcing.external import (
@@ -14665,7 +16146,12 @@ class ModelDriver:
                                 is not None):
                             _forcing_daily["solar_spectral_fraction"] = (
                                 jnp.asarray(_sol["solar_fraction_by_gpt"]))
+                    if cfg.radiation == "ecrad_ifs":
+                        # same canonical-day bucket as ozone (vote C5a)
+                        _forcing_daily.update(self._ecrad_aerosol_forcing(
+                            _force_day_canonical))
                     _last_force_day = _fd_int
+                    _cpl_sst_due = False
                 # Per-STEP traced calendar time: the radiation factory
                 # closure (``set_time``) is baked at trace time inside the
                 # JIT'd MPAS step, so without these two traced scalars the
@@ -14676,6 +16162,27 @@ class ModelDriver:
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
+                if cfg.radiation == "ecrad_ifs":
+                    # McICA seed time (radiation_scheme.F90:390-405, vote
+                    # S3a): NINDAT = the run start date (model day 0 on the
+                    # insolation calendar), NSTEP*TSTEP = elapsed model time
+                    from legoesm.forcing.time_utils import day_to_date
+                    _forcing["model_seconds"] = jnp.asarray(
+                        float(_force_day) * 86400.0)  # coeff-ok: s per day
+                    _forcing["model_start_day_of_month"] = jnp.asarray(
+                        day_to_date(self._insolation_day(0.0),
+                                    ref_year=int(cfg.start_year))[2],
+                        dtype=jnp.int32)
+                if _cam6_act is not None:
+                    # CAM prescribed_aero_adv: the two monthly records held on
+                    # device, reloaded when the bracket moves, linearly
+                    # interpolated to this step's start time (noleap days since
+                    # Jan 1; user decision 2026-10-24, 1 and 2a).
+                    from legoesm.atmosphere.physics.microphysics.cam6_aerosol_climatology import (  # noqa: E501
+                        NOLEAP_ONE_YR, cam6_aerosol_forcing)
+                    _cam6_held, _forcing["cam6_aerosol"] = cam6_aerosol_forcing(
+                        cfg.cam6_aerosol_dir, _force_day % NOLEAP_ONE_YR,
+                        *_cam6_hw, held=_cam6_held)
                 # Surface heat fluxes for the convective diurnal-cycle CAPE
                 # subtraction, which is what delays land storms from noon to
                 # late afternoon.  They are the PREVIOUS step's: turbulence
@@ -14704,11 +16211,29 @@ class ModelDriver:
                 # before the first land step (_land_T_skin None) the anchor is
                 # the unmodified SST field (incl. the lapse fallback) — the
                 # cold-start value the land tile itself was initialized from.
-                if (_land_ml_on and _land_T_skin is not None
-                        and "T_sfc" in _forcing):
-                    _forcing["T_sfc"] = (
-                        (1.0 - _f_land_cells) * _forcing["T_sfc"]
-                        + _f_land_cells * _land_T_skin)
+                if _land_ml_on and "T_sfc" in _forcing:
+                    _T_sea = _forcing["T_sfc"]
+                    if _land_T_skin is not None:
+                        _forcing["T_sfc"] = (
+                            (1.0 - _f_land_cells) * _T_sea
+                            + _f_land_cells * _land_T_skin)
+                    # Radiating surface (tier-5 U11-1): the sea part (the
+                    # anchor above, at the radiation's own emissivity, as
+                    # before) blended with the land's radiating pair in
+                    # emission-flux space (land_radiating_surface), so the
+                    # radiation's upward LW is the LW the land balanced its
+                    # energy with.  Before the first land call (cold start): the sea anchor
+                    # at E, exactly today's boundary; the keys are always
+                    # present so the forcing pytree never changes structure.
+                    if _land_rad_bc_on and _land_Trad_cells is None:
+                        _forcing["T_sfc_rad"] = _T_sea
+                        _forcing["sfc_emissivity"] = jnp.full_like(
+                            _T_sea, _E_sfc_rad)
+                    elif _land_rad_bc_on:
+                        (_forcing["T_sfc_rad"],
+                         _forcing["sfc_emissivity"]) = land_radiating_surface(
+                            _T_sea, _f_land_cells, _E_sfc_rad,
+                            _land_Trad_cells, _land_emis_cells)
                 # Interactive land ALBEDO (same one-step lag as the skin T
                 # above): the multilayer tile's end-of-step albedo already
                 # carries the snow brightening and the dry-soil brightening, so
@@ -14750,6 +16275,69 @@ class ModelDriver:
                     _ls_reused_win = _ls_reused_win + jnp.sum(
                         _land_stress_landcell & _land_taumag_valid
                         & ~_land_taumag_fresh, dtype=jnp.int32)
+                if _hb_fn is not None:
+                    # Coupler ice/lake handback for this window (P5c K2).  Its
+                    # fluxes are per grid cell, already weighted by the tile
+                    # area; the open-water fraction is what the coupler's
+                    # post-exchange ice and lake leave (vote V1).
+                    _H = _hb_fn()
+                    _hdt = _sst_day.dtype
+                    _hc = lambda a: jnp.asarray(  # noqa: E731
+                        a, dtype=_hdt).reshape(-1)
+                    _fl_hb = _f_land_cells.astype(_hdt)
+                    _fi_hb, _fk_hb = _hc(_H.f_ice), _hc(_H.f_lake)
+                    _fow = 1.0 - _fl_hb - _fi_hb - _fk_hb
+                    if _H is not _hb_last:
+                        _fow_min = float(jnp.min(_fow))
+                        if _fow_min < -_HB_PARTITION_TOL:
+                            raise ValueError(
+                                "coupler handback: 1 - f_land - f_ice - f_lake "
+                                f"reaches {_fow_min:.3e}; the atmosphere's land "
+                                "fraction and the coupler's tile fractions are "
+                                "not the same partition.")
+                        _hb_last = _H
+                    _forcing["T_sfc_ocean"] = _sst_day
+                    _forcing["f_ow"] = _fow
+                    for _k, _v in (("shflx_hb", _H.shflx),
+                                   ("lhflx_hb", _H.lhflx),
+                                   ("evap_hb", _H.evap),
+                                   ("taux_hb", _H.tau_x),
+                                   ("tauy_hb", _H.tau_y)):
+                        _forcing[_k] = _hc(_v)
+                    # Radiative boundary (plan L2'): land and open water emit
+                    # at their own skin this step, ice and lake what the
+                    # coupler debits for this window (V15).  No land albedo
+                    # only where this rank has no land (checked above).
+                    from legoesm.forcing.surface_utils import (
+                        handback_surface_boundary,
+                    )
+                    _alb_l = (_land_albedo_cells if _land_albedo_cells
+                              is not None else _albedo_land_static)
+                    # Land radiates with its own pair (tier-5 U11-1); before
+                    # the first land call, the skin T at the radiation's
+                    # emissivity (main's cold-start rule).
+                    if _land_Trad_cells is not None:
+                        _T_l_hb = _hc(_land_Trad_cells)
+                        _eps_l_hb = _hc(_land_emis_cells)
+                    else:
+                        _T_l_hb = _hc(_land_T_skin if _land_T_skin is not None
+                                      else _forcing["T_sfc"])
+                        _eps_l_hb = _hb_eps
+                    _alb_l_hb = 0.0 if _alb_l is None else _hc(_alb_l)
+                    _bnd = handback_surface_boundary(
+                        _fl_hb, _fi_hb, _fk_hb, _T_l_hb,
+                        _sst_day, _hb_eps, _eps_l_hb, _hc(_H.lw_emit),
+                        _hc(_H.emissivity_ice), _hc(_H.emissivity_lake),
+                        _alb_l_hb,
+                        _alb_ocean_cur, _hc(_H.albedo_ice),
+                        _hc(_H.albedo_lake))
+                    _forcing["sfc_albedo"] = _bnd["sfc_albedo"]
+                    _forcing["sfc_emissivity"] = _bnd["sfc_emissivity"]
+                    _forcing["T_sfc_rad"] = _bnd["T_sfc_rad"]
+                    _hb_rad_in = (_fow, _fl_hb, _alb_l_hb, _T_l_hb, _hb_eps,
+                                  _H, _eps_l_hb)
+                    if "open_ocean_frac" in _forcing:
+                        _forcing["open_ocean_frac"] = _fow
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -14783,6 +16371,10 @@ class ModelDriver:
                 # Differentiable-step export (review F9): hand the production
                 # closures built above to mpas_diff_step and stop BEFORE the
                 # first step; the driver state is untouched.
+                if self._mynn_col_pending:
+                    raise NotImplementedError(
+                        "export_mpas_step: turbulence='mynn25' cold-start "
+                        "peel is not part of the exported differentiable step")
                 if (_mpi_step is not None or _hard_sat_on
                         or _budget_ledger_on or cfg.held_suarez_forcing
                         or not hasattr(self.model, "step_pure")):
@@ -14806,19 +16398,37 @@ class ModelDriver:
                     # The eager loop's clock (R-ex absolute-step origin).
                     calendar=lambda k: self._calendar_for_radiation(
                         _DAY_ORIGIN + (start_step + k) * DT / 86400.0),
+                    # ecrad_ifs McICA seed clock (vote S3a), same origin
+                    model_seconds=lambda k: (
+                        _DAY_ORIGIN + (start_step + k) * DT / 86400.0) * 86400.0,
                     land_step=_land_step_fn if _land_ml_on else None,
                     land_state=self._land_ml_state if _land_ml_on else None,
                     marshal_land=_marshal_land_forcing if _land_ml_on else None,
                     land_k=_LAND_K if _land_ml_on else None)
                 return "EXPORTED"
             if _mpi_step is not None:
+                if self._mynn_col_pending:
+                    raise NotImplementedError(
+                        "turbulence='mynn25' cold-start peel is not wired on "
+                        "the MPAS cell-partition MPI step; run serial")
                 _mstep = ((_mpi_step if _use_rad else _mpi_step_norad)
                           if _is_phys_step else _mpi_step_held)
                 self.state, _phys_state = _mstep(
                     self.state, DT, _forcing, _phys_state)
+                if _budget_ledger_on:
+                    _ls = getattr(self.model, "_step_ledger", None)
+                    if _ls is not None:
+                        _led_accum = (_ls if _led_accum is None
+                                      else _led_accum + _ls)
+                        _led_nsteps += 1
             else:
                 _pfn = pick_physics_fn(_use_rad, _is_phys_step, physics_fn,
                                        physics_fn_norad, physics_fn_held)
+                if self._mynn_col_pending and _is_phys_step:
+                    # the peeled cold-start physics step (initflag=True)
+                    _pfn = pick_physics_fn(_use_rad, True, physics_fn_init,
+                                           physics_fn_norad_init, None)
+                    self._mynn_col_pending = False
                 _pt0 = time.perf_counter() if _PHASE_TIMERS else 0.0
                 self.state = self.model.step(
                     self.state, DT, physics_fn=_pfn, forcing=_forcing,
@@ -14855,17 +16465,15 @@ class ModelDriver:
                 _lwn = (_sd[1].data if (_sd is not None and len(_sd) > 1
                                         and _sd[1] is not None) else None)
                 if _swn is not None and _lwn is not None:
-                    _f_net = (jnp.asarray(_swn).reshape(-1)
-                              + jnp.asarray(_lwn).reshape(-1))
-                    if len(_sd) > 6 and _sd[6] is not None:
-                        _f_net = _f_net - jnp.asarray(
-                            _sd[6].data).reshape(-1)
-                    if len(_sd) > 7 and _sd[7] is not None:
-                        _f_net = _f_net - jnp.asarray(
-                            _sd[7].data).reshape(-1)
-                    self._ice_T_skin = prognostic_ice_skin_temperature(
-                        self._ice_T_skin, _f_net, _ice_sic_cur,
-                        dt_s=DT, h_ice_m=_h_ice)
+                    self._ice_T_skin = advance_ice_skin(
+                        self._ice_T_skin, _swn, _lwn,
+                        (_sd[6].data if len(_sd) > 6 and _sd[6] is not None
+                         else None),
+                        (_sd[7].data if len(_sd) > 7 and _sd[7] is not None
+                         else None),
+                        _ice_sic_cur, dt_s=DT, h_ice_m=_h_ice,
+                        melt_cap_width_K=float(
+                            cfg.ice_skin_melt_cap_width_K))
                 # Re-anchor the NEXT step's T_sfc from the cached daily
                 # SST/SIC against the (advanced) skin, so the physics
                 # consumes the CURRENT skin every step (per-step feedback,
@@ -14875,6 +16483,18 @@ class ModelDriver:
                 # the advance for missing fluxes) so T_sfc stays consistent
                 # with self._ice_T_skin.
                 _write_sfc_anchors(_forcing_daily, _ice_sst_cur, _ice_sic_cur)
+                # Melt-dependent sea-ice albedo: refresh from the advanced
+                # skin at the same per-step cadence as T_sfc.  The land
+                # re-blend reads _sea_albedo_day, so both carry the new ice
+                # albedo.
+                if (_ice_alb_melt and _sfc_albedo_on
+                        and _alb_ocean_cur is not None):
+                    _alb_ice_day = _ice_albedo_now()
+                    _sea_albedo_day = blend_surface_property(
+                        _ice_sic_cur, _alb_ice_day, _alb_ocean_cur)
+                    _forcing_daily["sfc_albedo"] = blended_surface_albedo(
+                        _ice_sic_cur, _alb_f_land, _alb_ice_day,
+                        _alb_ocean_cur, _albedo_land_static)
             # Interactive multilayer land step (MPAS port): advance the soil/
             # snow columns with the surface fluxes this step just exported
             # (sw/lw down refresh on radiation steps; precip every step) and
@@ -14888,7 +16508,9 @@ class ModelDriver:
                     # Cadence accumulator: sum the forcing on-device; the
                     # tile consumes the interval MEAN, so the interval's
                     # precip mass and radiant energy are conserved exactly
-                    # (mean rate x DT_LAND = sum of per-step rate x DT).
+                    # (mean rate x DT_LAND = sum of per-step rate x DT) on
+                    # every full interval; the bootstrap call after a start
+                    # books its radiation unscaled (land_bootstrap_forcing).
                     # With _LAND_K == 1 the mean is the identity and the
                     # trajectory is unchanged.  cos_zenith is accumulated
                     # SW-WEIGHTED separately (weight sw_down + 1 W/m2, so it
@@ -14925,8 +16547,17 @@ class ModelDriver:
                             lambda s: s / _land_a2s_n, _land_a2s_sum))
                     _a2s_mean = _a2s_mean._replace(
                         cos_zenith=_land_cz_wsum / _land_w_sum)
+                    if _land_a2s_n < _LAND_K:
+                        # bootstrap: the samples' rain and snow spread over
+                        # DT_LAND, so each sample is booked once (the next
+                        # call books the later ones); radiation as is
+                        _a2s_mean = land_bootstrap_forcing(
+                            _a2s_mean, _land_a2s_n, _LAND_K)
                     _land_fn = (_land_step_fn if _land_a2s_n >= _LAND_K
                                 else _land_step_boot_fn)
+                    # every call advances the tile DT_LAND, so its runoff
+                    # rate spans _LAND_K host steps
+                    _land_call_n = _LAND_K
                     _land_a2s_sum = None
                     _land_a2s_n = 0
                     _pt0 = time.perf_counter() if _PHASE_TIMERS else 0.0
@@ -14934,6 +16565,7 @@ class ModelDriver:
                      _land_albedo_cells, _land_qsfc_step,
                      _land_shflx_step, _land_lhflx_step, _land_evap_step,
                      _land_taumag_step, _land_held_step,
+                     _land_Trad_cells, _land_emis_cells,
                      _land_n_held_step, _land_n_held_land_step,
                      _land_n_fb_step, _land_n_fb_rej_step,
                      _land_n_unconv_step, _land_n_iter_max) = _land_fn(
@@ -14945,6 +16577,20 @@ class ModelDriver:
                         jnp.asarray(_doy - 1.0, dtype=jnp.float64),
                         jnp.asarray(_lml_year0 + _force_day / 365.0,
                                     dtype=jnp.float64))
+                    if _hb_fn is not None:
+                        # Land runoff [kg/m2/s per land area] over this call's
+                        # samples, booked as one impulse in the coupling
+                        # window the land debited it in (K3-V4).
+                        # A reverted column keeps its old state, runoff
+                        # included, and discharges nothing (K3-V11).
+                        _ro = jnp.asarray(
+                            self._land_ml_state.runoff_surface
+                            + self._land_ml_state.runoff_subsurface
+                        ).reshape(-1)
+                        _rv = jnp.asarray(_land_held_step).reshape(-1) > 0.5
+                        _hb_runoff_now = jnp.where(
+                            (_f_land_cells > 0.0) & ~_rv,
+                            _f_land_cells * _ro * _land_call_n, 0.0)
                     if _PHASE_TIMERS:
                         jax.block_until_ready(_land_T_skin)
                         _phase_t["land"] += time.perf_counter() - _pt0
@@ -15010,7 +16656,8 @@ class ModelDriver:
                          _land_qsfc_cells, _land_shflx_cells,
                          _land_lhflx_cells, _land_evap_cells,
                          _land_beta_cells, _land_taumag_cells,
-                         _land_taumag_valid, _land_taumag_fresh
+                         _land_taumag_valid, _land_taumag_fresh,
+                         _land_Trad_cells, _land_emis_cells
                          ) = _exchange_halo_cell_fields(
                             self._voronoi_layout.halo_exchange,
                             (_land_T_skin, _land_albedo_cells,
@@ -15018,7 +16665,8 @@ class ModelDriver:
                              _land_shflx_cells, _land_lhflx_cells,
                              _land_evap_cells, _land_beta_cells,
                              _land_taumag_cells, _land_taumag_valid,
-                             _land_taumag_fresh))
+                             _land_taumag_fresh,
+                             _land_Trad_cells, _land_emis_cells))
                         self._land_T_skin_last = _land_T_skin
                         self._land_qsfc_last = _land_qsfc_step
                         if _land_taumag_cells is not None:
@@ -15034,7 +16682,8 @@ class ModelDriver:
                     (_land_T_skin, _land_albedo_cells,
                      getattr(self, "_land_qsfc_last", None),
                      _land_qsfc_cells, _land_shflx_cells,
-                     _land_lhflx_cells, _land_evap_cells, _land_beta_cells))
+                     _land_lhflx_cells, _land_evap_cells, _land_beta_cells,
+                     _land_Trad_cells, _land_emis_cells))
                 if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
                     if _ls_seed_win is not None:
                         self._flush_land_stress_counts(
@@ -15132,7 +16781,7 @@ class ModelDriver:
                 _qc_fld = _trc["q_c"]
                 _qi_fld = _trc.get("q_i") if _hard_sat_ice_curve else None
                 (_T_hs, _qv_hs, _qc_hs, _qi_hs,
-                 _dq_hs) = _mpas_hard_saturation_poststep(
+                 _dq_hs) = _mpas_hard_saturation_poststep_jit(
                     self.state.T.data, _trc["q_v"].data, _qc_fld.data,
                     self.sigma.pressure_at_full(self.state.p_s.data), DT,
                     _hard_sat_threshold, _hard_sat_max_heating,
@@ -15208,10 +16857,22 @@ class ModelDriver:
             # Flux means keep their independent per-step sums and diagnostic cadence.
             _sample_day = START_DAY + (step + 1) * DT / 86400.0
             _previous_day = START_DAY + step * DT / 86400.0
-            if (self._mpas_cmip_feed_on
-                    and int(np.floor(_sample_day * 24.0 + 1e-9))
-                    > int(np.floor(_previous_day * 24.0 + 1e-9))):
+            _hour_crossed = (int(np.floor(_sample_day * 24.0 + 1e-9))
+                             > int(np.floor(_previous_day * 24.0 + 1e-9)))
+            if self._mpas_cmip_feed_on and _hour_crossed:
                 self._feed_mpas_cmip_accumulators(_sample_day, state_only=True)
+            if (_hour_crossed and not _GC_FROZEN[0]
+                    and not self.config.dycore.column_lane):
+                # By the first hourly output step every compiled step,
+                # radiation and output path exists and lives for the run.
+                # Frozen, the full collections skip it; unfrozen, each one
+                # scanned it all and paused one rank for 0.7-0.9 s while the
+                # other 127 waited at the next exchange (8 nodes: about one
+                # hourly output step in four).  Collect first so no dead
+                # cycle is frozen; once per process.
+                gc.collect()
+                gc.freeze()
+                _GC_FROZEN[0] = True
 
             # Diagnostics at intervals — phased by DIAG_PHASE (= start_step
             # for a real periodic cadence, 0 for the once-at-the-end
@@ -15330,15 +16991,13 @@ class ModelDriver:
                 for _ek, _ev in self._mpas_energy_sample(
                         p_s_data, elapsed_day).items():
                     _ts[_ek].append(_ev)
-                # Latest closure the CMOR feed recorded, or NaN before the
-                # first complete diagnostic window.  NaN, never 0: a zero here
-                # reads as "the budget closes", which is the one answer this
-                # series must never invent.
-                _mt = getattr(getattr(self, "diagnostics", None),
-                              "moisture_tracker", None)
-                _ts["moisture_residual"].append(
-                    float(_mt.residual[-1])
-                    if _mt is not None and _mt.residual else float("nan"))
+                # Moisture closure: a NaN placeholder keeps the series aligned
+                # if the guard below breaks first; the CMOR feed further down
+                # records THIS interval's closure and overwrites it (#2171:
+                # reading the tracker here returned the PREVIOUS interval).
+                # NaN, never 0: a zero reads as "the budget closes", which is
+                # the one answer this series must never invent.
+                _ts["moisture_residual"].append(float("nan"))
 
                 # Ice-crystal number telemetry (2026-07-28, century3 day-803
                 # NaN): N_i grew x2/day for 800 days with every CLIMATE
@@ -15389,15 +17048,32 @@ class ModelDriver:
                     if _area_w_led is not None:
                         _area_w_led = np.asarray(
                             _area_w_led, dtype=np.float64).ravel().copy()
+                    if _is_mpas_cell_partitioned(self):
+                        # Owned rows -> global slots (#2171), on every rank
+                        # (collective); the rows and their weights must be the
+                        # same global columns.  Only rank 0 logs and writes.
+                        from legoesm.parallel.voronoi_mpi import (
+                            gather_voronoi_field,
+                        )
+                        _led_part = self._voronoi_layout.partition
+                        _led_rates = np.asarray(gather_voronoi_field(
+                            jnp.asarray(_led_rates), _led_part, "cell"))
+                        if (_area_w_led is not None and _area_w_led.size
+                                == _led_part.n_local_cells):
+                            _area_w_led = np.asarray(gather_voronoi_field(
+                                jnp.asarray(_area_w_led), _led_part, "cell"),
+                                dtype=np.float64)
                     _tot_e = _led_rates.sum(axis=1)[:, 1]     # (ncol,) W/m^2
                     _hot = int(np.argmax(np.abs(_tot_e)))
                     _hot_rows = _led_rates[_hot, :, 1]
                     _hot_row = int(np.argmax(np.abs(_hot_rows)))
-                    logger.info(
-                        "  Ledger: max|column dE/dt|=%.3e W/m^2 at cell %d "
-                        "(top row: %s %.3e; steps=%d)",
-                        _tot_e[_hot], _hot, LEDGER_PROCESSES[_hot_row],
-                        _hot_rows[_hot_row], _led_nsteps)
+                    _led_root = getattr(self, "_mpi_rank", 0) in (0, None)
+                    if _led_root:
+                        logger.info(
+                            "  Ledger: max|column dE/dt|=%.3e W/m^2 at cell "
+                            "%d (top row: %s %.3e; steps=%d)",
+                            _tot_e[_hot], _hot, LEDGER_PROCESSES[_hot_row],
+                            _hot_rows[_hot_row], _led_nsteps)
                     # PER-COLUMN schema, deliberately a DIFFERENT filename
                     # from the FV lane's global-row ``budget_ledger.npz``
                     # (days/rates history): a consumer reading one schema
@@ -15432,7 +17108,7 @@ class ModelDriver:
                             "area_hash48": np.asarray(
                                 _content_hash48(_area_w_led)),
                         }
-                    if self.output_dir is not None:
+                    if _led_root and self.output_dir is not None:
                         np.savez(
                             str(self.output_dir
                                 / "budget_ledger_columns.npz"),
@@ -15442,21 +17118,12 @@ class ModelDriver:
                                 ("water_kg_m2_s", "energy_W_m2")),
                             n_steps=_led_nsteps,
                             day=elapsed_day + START_DAY,
-                            # Rank locality is part of the reduction: under
-                            # cell partitioning these rows would be ONE rank's
-                            # columns, and no weighting makes that a global
-                            # budget.  Today this is always False -- setup
-                            # already REFUSES --budget-ledger whenever the
-                            # world size exceeds one or a Voronoi layout
-                            # exists, which is strictly broader than this
-                            # predicate.  It is stamped anyway because that
-                            # refusal is documented as "serial-only FOR NOW":
-                            # when the ledger gather is wired the artifact
-                            # becomes rank-local, and the reader should refuse
-                            # at that moment rather than print a per-rank
-                            # table as a global one.
-                            cell_partitioned=bool(
-                                _is_mpas_cell_partitioned(self)),
+                            # Rank locality is part of the reduction: a
+                            # file of ONE rank's columns is not a global
+                            # budget, and the reader refuses it.  The rows
+                            # written here are always global (gathered above
+                            # under a cell partition, #2171).
+                            cell_partitioned=False,
                             # The reduction the reader MUST use (#1354).  The
                             # rows are per-column, so a consumer picks the
                             # weighting -- and an unweighted mean is not a
@@ -15511,8 +17178,127 @@ class ModelDriver:
                 # path). This interval feed adds flux means only; state
                 # means were already sampled by the independent hourly hook.
                 if self._mpas_cmip_feed_on:
+                    _mt = getattr(getattr(self, "diagnostics", None),
+                                  "moisture_tracker", None)
+                    _n_mt = len(_mt.residual) if _mt is not None else 0
                     self._feed_mpas_cmip_accumulators(
                         START_DAY + elapsed_day, flux_only=True)
+                    # Publish the closure only if THIS feed recorded one; a
+                    # skipped window must not inherit the previous window's
+                    # number, and the next closure must not difference water
+                    # across the gap.
+                    if _mt is not None:
+                        if len(_mt.residual) > _n_mt:
+                            _ts["moisture_residual"][-1] = float(_mt.residual[-1])
+                        else:
+                            _mt.drop_baseline()
+
+            # Coupling window (P5b): sum this step's net surface SW/LW [W/m2,
+            # +into surface] and precip [kg/m2/s, +down] as RATES; the step
+            # that closes the window hands the coupler their window means,
+            # then the next step re-samples SST/SIC from the coupler's ocean.
+            # After this step's ice/land updates, before the checkpoint, so a
+            # checkpoint on a window boundary holds the post-exchange ocean
+            # and an empty window.
+            if _CPL_K is not None:
+                _sd = getattr(self.model, "_sfc_diag", None)
+                _cpl_now = [None] * len(_cpl_fields)
+                if _sd is not None:
+                    for _i in range(3):
+                        if len(_sd) > _i and _sd[_i] is not None:
+                            _cpl_now[_i] = jnp.asarray(
+                                _sd[_i].data).reshape(-1)
+                    if (_cpl_now[2] is not None and getattr(
+                            self, "_requires_surface_flux_export", False)):
+                        _cpl_now[3] = land_snowfall_from_sfc_diag(
+                            _sd, _cpl_now[2]).reshape(-1)
+                if _hb_fn is not None:
+                    # Coupler handback (P5c K3): split each radiation solve
+                    # with the boundary it was fed and hold the split across
+                    # held-radiation steps, as the solve's net fluxes are
+                    # held (K3-V2); the open-water turbulent share as the
+                    # kernel published it; the land runoff impulse (zero on a
+                    # step without a land call).
+                    _sdv = lambda k: jnp.asarray(  # noqa: E731
+                        _sd[_sfc_diag_slot(k)].data).reshape(-1)
+                    if _use_rad:
+                        from legoesm.forcing.surface_utils import (
+                            handback_tile_radiation,
+                        )
+                        _fo, _flr, _alr, _Tlr, _eo, _Hr, _elr = _hb_rad_in
+                        _hc = lambda a: jnp.asarray(  # noqa: E731
+                            a, dtype=_fo.dtype).reshape(-1)
+                        _tr = handback_tile_radiation(
+                            _sdv("sw_down_sfc"), _sdv("lw_down_sfc"),
+                            _sdv("sw_net_sfc"), _sdv("lw_net_sfc"), _flr,
+                            _hc(_Hr.f_ice), _hc(_Hr.f_lake), _alr, _Tlr, _eo,
+                            _elr, _hc(_Hr.lw_emit), _hc(_Hr.albedo_ice),
+                            _hc(_Hr.albedo_lake), _hc(_Hr.emissivity_ice),
+                            _hc(_Hr.emissivity_lake))
+                        _hb_rad_held = [_tr[f] for f in _CPL_HB_RAD_FIELDS]
+                    _nb = len(_CPL_WIN_FIELDS)
+                    _cpl_now[_nb:] = (
+                        _hb_rad_held + [_sdv(f) for f in _CPL_HB_OW_FIELDS]
+                        + [jnp.zeros_like(_hb_rad_held[0])
+                           if _hb_runoff_now is None else _hb_runoff_now])
+                    _hb_runoff_now = None
+                _cpl_sums = [
+                    s if v is None else (v if s is None else s + v)
+                    for s, v in zip(_cpl_sums, _cpl_now)]
+                _cpl_n += 1
+                if _cpl_n == _CPL_K:
+                    if not isinstance(self._carry_aux, dict):
+                        self._carry_aux = {}
+                    _shp = jnp.shape(self.state.p_s.data)
+                    for _key, _s in zip(
+                            ("seg_sw_net_sfc", "seg_lw_net_sfc", "seg_precip",
+                             "seg_precip_frozen"), _cpl_sums):
+                        if _s is not None:
+                            self._carry_aux[_key] = jnp.reshape(
+                                _s / _cpl_n, _shp)
+                    if _hb_fn is not None:
+                        # Window means of the handback exports (K3-V5), and
+                        # the precipitation split by the window's tile
+                        # fractions, constant within a window (K3-V3).
+                        _nb = len(_CPL_WIN_FIELDS)
+                        for _f, _s in zip(_CPL_HB_FIELDS, _cpl_sums[_nb:]):
+                            self._carry_aux[f"seg_{_f}"] = jnp.reshape(
+                                _s / _cpl_n, _shp)
+                        _fo = _hb_rad_in[0]
+                        _Hr = _hb_rad_in[5]
+                        _hc = lambda a: jnp.asarray(  # noqa: E731
+                            a, dtype=_fo.dtype).reshape(-1)
+                        _tiles = (("ow", _fo), ("ice", _hc(_Hr.f_ice)),
+                                  ("lake", _hc(_Hr.f_lake)),
+                                  ("land", _f_land_cells.astype(_fo.dtype)))
+                        for _key, _s in (("precip", _cpl_sums[2]),
+                                         ("precip_frozen", _cpl_sums[3])):
+                            if _s is None:
+                                continue
+                            for _t, _ft in _tiles:
+                                self._carry_aux[f"seg_{_key}_{_t}"] = (
+                                    jnp.reshape(_ft * _s / _cpl_n, _shp))
+                    for _key, _v in zip(("held_sw_net_sfc", "held_lw_net_sfc"),
+                                        _cpl_now[:2]):
+                        if _v is not None:
+                            self._carry_aux[_key] = jnp.reshape(_v, _shp)
+                    _cpl_day = (_DAY_ORIGIN
+                                + (start_step + step + 1) * DT / 86400.0)
+                    self._current_day = _cpl_day
+                    self._segment_callback(self, _cpl_day, _cpl_n * DT)
+                    _cpl_sums = [None] * len(_cpl_fields)
+                    _cpl_n = 0
+                    _cpl_sst_due = True
+                self._cpl_window = {
+                    "cpl_win_n": np.asarray(_cpl_n, dtype=np.int64),
+                    "cpl_win_k": np.asarray(_CPL_K, dtype=np.int64),
+                    **{f"cpl_win_sum_{f}": s
+                       for f, s in zip(_cpl_fields, _cpl_sums)
+                       if s is not None},
+                    # The pending exchange the next steps consume: after an
+                    # exchange the hook already serves the new one (K3-V7).
+                    **(surface_handback_payload(_hb_fn())
+                       if _hb_fn is not None else {})}
 
             if _DIGEST_EVERY > 0 and (step + 1) % _DIGEST_EVERY == 0:
                 _lv = locals()
@@ -15526,8 +17312,11 @@ class ModelDriver:
                         "_land_lhflx_cells", "_land_evap_cells",
                         "_land_beta_cells", "_land_taumag_cells",
                         "_land_taumag_valid", "_land_taumag_fresh",
+                        "_land_Trad_cells", "_land_emis_cells",
                         "_land_a2s_sum", "_land_a2s_n", "_land_cz_wsum",
-                        "_land_w_sum")],
+                        "_land_w_sum",
+                        *(("_cpl_sums", "_cpl_n") if _CPL_K is not None
+                          else ()))],
                     ice=getattr(self, "_ice_T_skin", None),
                     sfc=getattr(self.model, "_sfc_diag", None),
                     forcing=_lv.get("_forcing"), carry=self._carry_aux,
@@ -15547,12 +17336,7 @@ class ModelDriver:
                 # diagnostic steps, so a u-only guard could persist a state
                 # with finite u but NaN T — poisoning every subsequent chain
                 # link.
-                _s = self.state
-                _finite = (jnp.all(jnp.isfinite(_s.u.data))
-                           & jnp.all(jnp.isfinite(_s.T.data))
-                           & jnp.all(jnp.isfinite(_s.p_s.data))
-                           & jnp.all(jnp.isfinite(_s.phis.data)))
-                if not bool(_finite):
+                if not self._checkpoint_state_finite():
                     _bad_day = START_DAY + (step + 1) * DT / 86400.0
                     run_status = f"BLOWUP at day {_bad_day - START_DAY:.1f}"
                     logger.error(
@@ -15635,7 +17419,9 @@ class ModelDriver:
                 logger.warning(_msg)
                 print(f"WARNING: {_msg}", file=sys.stderr)
             else:
-                self.save_checkpoint(start_step + n_steps_total, _final_day)
+                (getattr(self, "_checkpoint_callback", None)
+                 or self.save_checkpoint)(start_step + n_steps_total,
+                                          _final_day)
 
         elapsed = time.time() - t_start
         logger.info(f"MPAS run {run_status} in {elapsed:.1f}s")
@@ -15684,6 +17470,8 @@ class ModelDriver:
         _conv = getattr(_conv, "scheme", _conv)
         _gwd = getattr(cfg, "gravity_wave_drag", "none")
         _gwd = getattr(_gwd, "scheme", _gwd)
+        _micro = getattr(cfg, "microphysics", "none")
+        _micro = getattr(_micro, "scheme", _micro)
         # Convection: scalar-prognostic (mass_flux/edmf M_c / a_u),
         # profile-prognostic (ZM/KF/Emanuel/Tiedtke/Bechtold read and
         # relax conv_prog_profile — Tiedtke concretely carries updraft
@@ -15698,14 +17486,18 @@ class ModelDriver:
                 or _ct.is_scalar_prognostic
                 or _ct.is_profile_prognostic
                 or _ct.is_stochastic
-                or gwd_carries_spectrum(_gwd)):
+                or gwd_carries_spectrum(_gwd)
+                # Zhao-Carr gscond condenses the tendencies since its
+                # previous call (zc_* carry)
+                or _micro == "sundqvist"):
             raise NotImplementedError(
                 f"turbulence={_turb!r} / convection={_conv!r} / "
-                f"gwd={_gwd!r} carry prognostic physics state, which "
+                f"gwd={_gwd!r} / microphysics={_micro!r} carry prognostic "
+                "physics state, which "
                 "this run loop does not thread between steps yet "
                 "(issue #405) — the carry would silently reseed every "
                 "timestep.  Use a diagnostic scheme (louis / "
-                "holtslag_boville; sbm / kuo / dca; linear GWD), or a "
+                "holtslag_boville; sbm / kuo / dca; linear GWD; kessler), or a "
                 "driver path that threads PhysicsState (the MPAS, "
                 "compiled, and per-step loops)."
             )
@@ -15799,6 +17591,14 @@ class ModelDriver:
         S_0 = float(cfg.S_0)
         T_ice = cfg.T_ice
 
+        # No turbulence scheme: the same constant-coefficient surface exchange
+        # as the lat-lon/cube pipeline (sensible heat only on the dry path).
+        _sp_bulk = (
+            (float(cfg.C_H), float(cfg.C_E))
+            if (cfg.turbulence == "none" and cfg.surface_bulk_scheme == "constant"
+                and cfg.physics_parameterization == "none")
+            else None)
+
         # Precompute spectral transform constants
         _im_over_a = 1j * self.grid.ms.astype(jnp.float64) / a
         _one_over_a = 1.0 / a
@@ -15869,6 +17669,18 @@ class ModelDriver:
                 dT_dt_rad = dT_dt_rad + self._hs_newtonian_relax(
                     T_g, p_s_g, self._grid_lat)
 
+            if _sp_bulk is not None:
+                from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                    bottom_layer_surface_kick, constant_bulk_surface_fluxes)
+                _zero_low = jnp.zeros_like(T_g[..., -1])
+                _shflx, _ = constant_bulk_surface_fluxes(
+                    T_g[..., -1], _zero_low, u_g[..., -1], v_g[..., -1],
+                    p_full[..., -1], p_s_g, T_sfc, *_sp_bulk)
+                _dT_low, _, _ = bottom_layer_surface_kick(
+                    _shflx, _zero_low, T_sfc,
+                    self.sigma.layer_thickness_dp(p_s_g)[..., -1])
+                dT_dt_rad = dT_dt_rad.at[..., -1].add(_dT_low)
+
             # Rayleigh friction
             du_dt = -k_f * u_g
             dv_dt = -k_f * v_g
@@ -15927,7 +17739,7 @@ class ModelDriver:
                 PhysicsConfig, make_physics,
             )
             from legoesm.atmosphere.physics.radiation.config import (
-                RadiationConfig, RRTMGPConfig, OzoneProfileConfig,
+                RadiationConfig, OzoneProfileConfig,
             )
             from legoesm.atmosphere.physics.convection.config import (
                 ConvectionConfig,
@@ -15960,21 +17772,8 @@ class ModelDriver:
                     scheme=_rad_scheme,
                     # cfg.S_0: same constant-solar TSI as the compiled lanes.
                     gray=GrayRadiationConfig(S_0=cfg.S_0),
-                    rrtmgp=RRTMGPConfig(
-                        co2_ppmv=cfg.co2_ppmv,
-                        ch4_ppbv=cfg.ch4_ppbv,
-                        n2o_ppbv=cfg.n2o_ppbv,
-                        S_0=cfg.S_0,
-                        include_clouds=(_cloud_scheme != "none"),
-                        gpoint_batch_size=getattr(
-                            cfg, "rrtmgp_gpoint_batch_size", 0),
-                        gpoint_checkpoint=getattr(
-                            cfg, "rrtmgp_gpoint_checkpoint", True),
-                        column_chunk_size=getattr(
-                            cfg, "rrtmgp_column_chunk_size", 0),
-                        overhead_layer=bool(getattr(
-                            cfg, "rrtmgp_overhead_layer", False)),
-                    ),
+                    rrtmgp=rrtmgp_config_from_experiment(
+                        cfg, include_clouds=(_cloud_scheme != "none")),
                     cloud_scheme=_cloud_scheme,
                     # Tuned cloud scalars for the spectral standalone
                     # radiation path (#870 Phase 1).
@@ -15999,15 +17798,22 @@ class ModelDriver:
             )
             _combined_fn = make_physics(
                 phys_cfg, model_type="spectral_pe", dt=DT,
+                surface_bulk_coeffs=(None if _sp_bulk is None
+                                     else (*_sp_bulk, True)),
             )
 
-            def _amip_physics_fn(state, grid, sigma_coord, forcing_data=None):
+            def _amip_physics_fn(state, grid, sigma_coord, forcing_data=None,
+                                 return_sfc_precip=False):
                 # The spectral step extracts ``result[0]`` from tuple
                 # returns, so the (tendency, phys_state_out) pair from
                 # the combined pipeline is handled; phys_state_out is
-                # dropped (stateless schemes only — guarded above).
+                # dropped (stateless schemes only — guarded above).  With
+                # ``return_sfc_precip`` the surface precip rides last (#2277).
                 return _combined_fn(state, grid, sigma_coord,
-                                    phys_state=None, forcing=forcing_data)
+                                    phys_state=None, forcing=forcing_data,
+                                    return_sfc_precip=return_sfc_precip)
+
+            _amip_physics_fn._emits_sfc_precip = True
 
             # #405: thread the prognostic PhysicsState carry on the leapfrog
             # path — pass the COMBINED fn DIRECTLY (its (state, grid, sigma,
@@ -16101,6 +17907,8 @@ class ModelDriver:
         else:
             _lat_2d_loop = self._grid_lat
         _lat_col_loop = _lat_2d_loop.reshape(-1)
+        _lon_2d_loop = (jnp.broadcast_to(self._grid_lon[None, :], shape_2d)
+                        if self._grid_lon.ndim == 1 else self._grid_lon)
 
         # Light-weight time series for AMIP / validation.  The spectral
         # path is otherwise diagnostic-free; without these arrays the
@@ -16125,7 +17933,7 @@ class ModelDriver:
         # Gated on a PRESENT callback → the standalone spectral path is
         # byte-identical (no callback ⇒ this whole block is dead).
         _has_segcb = getattr(self, "_segment_callback", None) is not None
-        _last_coupling_day = None
+        _seg_n = 0   # steps since the last coupling boundary
 
         def _spectral_sfc_net_rad(state, day):
             """(sw_net_sfc, lw_net_sfc) [W/m^2, +into surface] from the current
@@ -16164,48 +17972,81 @@ class ModelDriver:
             _lw = (_rad.lw_flux_down[:, -1] - _rad.lw_flux_up[:, -1])
             return _sw.reshape(shape_2d), _lw.reshape(shape_2d)
 
+        # Surface precip accumulators (#2277), full physics only: sum of the
+        # step's rate x DT [kg/m^2] since the last reseed, per coupling segment
+        # and per diagnostic window.  ``frozen`` None = some step's frozen part
+        # was unknown; ``ok`` False = some step published no precip (an
+        # integrator path that cannot integrate it).  Not checkpointed: a
+        # restart starts a fresh partial segment over the steps it takes.
+        def _sp_acc_new():
+            return {"p": None, "frozen": 0.0, "n": 0, "ok": True}
+
+        def _sp_acc_add(acc, sfc):
+            acc["n"] += 1
+            if sfc is None:
+                acc["ok"] = False
+                return
+            _p, _pf = sfc
+            acc["p"] = _p * DT if acc["p"] is None else acc["p"] + _p * DT
+            acc["frozen"] = (None if (_pf is None or acc["frozen"] is None)
+                             else acc["frozen"] + _pf * DT)
+
+        _sp_seg = _sp_acc_new()
+        _sp_diag = _sp_acc_new()
+
+        def _state_finite(st, every_leaf=False):
+            """Spectral coefficients finite (complex: both parts); with
+            ``every_leaf`` every inexact array of the state, tracers included."""
+            arrs = ([x for x in jax.tree.leaves(st)
+                     if jnp.issubdtype(jnp.result_type(x), jnp.inexact)]
+                    if every_leaf else
+                    [f.data for f in (st.vor_hat, st.div_hat, st.T_hat,
+                                      st.lnps_hat)])
+            return all(bool(jnp.all(jnp.isfinite(a))) for a in arrs)
+
+        def _couple(n):
+            """Hand the coupler the ``n`` steps since the last boundary (#2290).
+
+            Called at the END of the step that closes a day or the run.
+            """
+            _sw_net, _lw_net = _spectral_sfc_net_rad(
+                self.state, float(daily_forcing_bucket(self._current_day)))
+            if not isinstance(self._carry_aux, dict):
+                self._carry_aux = {}
+            self._carry_aux["held_sw_net_sfc"] = _sw_net
+            self._carry_aux["held_lw_net_sfc"] = _lw_net
+            # Surface precipitation export [kg/m^2/s, +down] (#2277): the
+            # segment-MEAN rate over the steps since the last boundary (the
+            # compiled lanes' segment_accum_to_rate semantics).  Its frozen
+            # part is None when a precipitating module does not publish one
+            # -- the coupler then refuses (require_surface_radiation_aux).
+            # The dry legacy path precipitates nothing: an exact zero.
+            if _full_physics:
+                if not _sp_seg["ok"] or _sp_seg["p"] is None:
+                    raise RuntimeError(
+                        "coupled spectral lane: a step since the last "
+                        "coupling boundary published no surface "
+                        "precipitation (model._sfc_precip is None: the "
+                        "step path does not integrate it, e.g. the "
+                        "semi-implicit RK); run the driver's explicit "
+                        "ssp_rk54 or leapfrog_si integrator.")
+                _seg_s = _sp_seg["n"] * DT
+                self._carry_aux["seg_precip"] = (
+                    _sp_seg["p"] / _seg_s).reshape(shape_2d)
+                self._carry_aux["seg_precip_frozen"] = (
+                    None if _sp_seg["frozen"] is None
+                    else (_sp_seg["frozen"] / _seg_s).reshape(shape_2d))
+                _sp_seg.update(_sp_acc_new())
+            else:
+                self._carry_aux["seg_precip"] = jnp.zeros_like(_sw_net)
+                # nothing falls, nothing frozen (F29: the coupler needs it)
+                self._carry_aux["seg_precip_frozen"] = jnp.zeros_like(_sw_net)
+            # The segment's real length: a full day, or the steps a restart
+            # link or the run's last partial day actually took.
+            self._segment_callback(self, self._current_day, n * DT)
+
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
-
-            # Coupled daily boundary (explicit coupling, mirrors _run_column): at
-            # the first step of a new day, recompute + stash the surface fluxes
-            # from the CURRENT (end-of-elapsed-day) state and step the coupler's
-            # ocean/land for that day BEFORE this step advances the atmosphere.
-            # The fluxes are recomputed from the SAME state the callback's
-            # _build_atm_forcing reads, so forcing + state are self-consistent.
-            # Step 0 has nothing to step yet (_last_coupling_day is None).
-            if _has_segcb:
-                _cd_int = daily_forcing_bucket(self._current_day)
-                if (_last_coupling_day is not None
-                        and _cd_int != _last_coupling_day):
-                    _sw_net, _lw_net = _spectral_sfc_net_rad(
-                        self.state, float(_cd_int))
-                    if not isinstance(self._carry_aux, dict):
-                        self._carry_aux = {}
-                    self._carry_aux["held_sw_net_sfc"] = _sw_net
-                    self._carry_aux["held_lw_net_sfc"] = _lw_net
-                    # Surface precipitation export: the spectral lane recomputes
-                    # only the surface RADIATION at the coupling boundary (above),
-                    # not an accumulated precip rate.  Stash an EXPLICIT zero
-                    # seg_precip (not a silent absence — the coupler's
-                    # require_surface_radiation_aux guard forbids the SILENT
-                    # zero-fill that would go unnoticed).  This is EXACT for the
-                    # slab / two-layer ocean (no prognostic salinity, so P-E is
-                    # unused); a 3-D dynamic ocean on the spectral grid is gated
-                    # off (run_coupled), so no freshwater budget depends on it.
-                    # Accumulating the true segment precip through the spectral
-                    # step is the follow-up for a coupled spectral dynamic ocean.
-                    self._carry_aux["seg_precip"] = jnp.zeros_like(_sw_net)
-                    # nothing falls, nothing frozen (F29: the coupler needs it)
-                    self._carry_aux["seg_precip_frozen"] = jnp.zeros_like(_sw_net)
-                    if not getattr(self, "_logged_spectral_precip", False):
-                        logger.info(
-                            "  Coupled spectral lane: surface precip export is "
-                            "0 (exact for the slab ocean; the spectral 3-D ocean "
-                            "is gated). Radiation is exported.")
-                        self._logged_spectral_precip = True
-                    self._segment_callback(self, self._current_day, 86400.0)
-                _last_coupling_day = _cd_int
 
             if _full_physics:
                 # Traced forcing for the unified pipeline: SST/SIC-blend
@@ -16231,7 +18072,7 @@ class ModelDriver:
                         # daily_forcing_bucket / FIX_RESTART_TIME).
                         _o3, _aer, _ghg = self._precompute_external_forcing(
                             float(_fd_int), _f_now['p_s'], _lat_2d_loop,
-                            temp=_f_now['T'],
+                            temp=_f_now['T'], lon=_lon_2d_loop,
                         )
                         _ext_daily = {"o3_vmr": _o3, "aerosol_od": _aer}
                         # Volcanic LONGWAVE aerosol (gap #9): only when active
@@ -16297,6 +18138,9 @@ class ModelDriver:
             # / ssp_rk3 path, where this is a byte-identical no-op).
             if _spectral_prognostic:
                 _spectral_phys_state = self.model._phys_state
+            if _full_physics:
+                _sp_acc_add(_sp_seg, self.model._sfc_precip)
+                _sp_acc_add(_sp_diag, self.model._sfc_precip)
 
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
                 elapsed_day = (step + 1) * DT / 86400.0
@@ -16332,6 +18176,19 @@ class ModelDriver:
                 _ts["max_wind"].append(max_wind)
                 _ts["dry_mass_ps"].append(mean_ps)
                 _ts["T_finite"].append(T_finite)
+                if _full_physics:
+                    # Area-weighted global-mean surface precip [mm/day] over
+                    # this diagnostic window (#2277); NaN when a step
+                    # published none.
+                    from legoesm.diagnostics.energy_budget import (
+                        area_weighted_mean)
+                    _ts.setdefault("precip", []).append(
+                        float(area_weighted_mean(
+                            _sp_diag["p"] / (_sp_diag["n"] * DT),
+                            self.grid.grid_area)) * 86400.0
+                        if _sp_diag["ok"] and _sp_diag["p"] is not None
+                        else float("nan"))
+                    _sp_diag = _sp_acc_new()
 
                 elapsed = time.time() - t_start
                 rate = elapsed_day / (elapsed + 1e-10)
@@ -16353,6 +18210,27 @@ class ModelDriver:
                     self._write_blowup_state(step + 1, self._current_day)
                     break
 
+            # Coupled boundary (explicit coupling, as _run_column): the step
+            # whose end enters a new day closes the segment, so the coupler
+            # sees the state after the whole day; the run's last step closes
+            # a trailing partial day.  After the blow-up check (never hand the
+            # coupler a state that check rejects), before the checkpoint (it
+            # then holds the post-coupling ocean/land).
+            if _has_segcb:
+                _seg_n += 1
+                if (step == n_steps_total - 1
+                        or daily_forcing_bucket(self._current_day)
+                        != daily_forcing_bucket(
+                            START_DAY + step * DT / 86400.0)):
+                    if not _state_finite(self.state, every_leaf=True):
+                        run_status = (
+                            f"BLOWUP at day {self._current_day - START_DAY:.1f}")
+                        logger.error(f"{run_status} (at the coupling boundary)")
+                        self._write_blowup_state(step + 1, self._current_day)
+                        break
+                    _couple(_seg_n)
+                    _seg_n = 0
+
             # Periodic checkpoint (FIX_RESTART_TIME iteration 4) —
             # cadence on ABSOLUTE steps, independent of the diagnostic
             # interval.  Guard finiteness FIRST (MPAS pattern): the
@@ -16362,18 +18240,7 @@ class ModelDriver:
             # subsequent chain link).
             if (CHECKPOINT_INTERVAL > 0
                     and (step + 1) % CHECKPOINT_INTERVAL == 0):
-                _s = self.state
-
-                def _all_finite_c(arr):
-                    # Complex coefficients: finite iff BOTH parts are.
-                    return (jnp.all(jnp.isfinite(arr.real))
-                            & jnp.all(jnp.isfinite(arr.imag)))
-
-                _finite = (_all_finite_c(_s.vor_hat.data)
-                           & _all_finite_c(_s.div_hat.data)
-                           & _all_finite_c(_s.T_hat.data)
-                           & _all_finite_c(_s.lnps_hat.data))
-                if not bool(_finite):
+                if not _state_finite(self.state):
                     run_status = (
                         f"BLOWUP at day {self._current_day - START_DAY:.1f}")
                     logger.error(
@@ -16398,6 +18265,16 @@ class ModelDriver:
         # `DiagnosticCollector.save` for the keys we actually populate;
         # other keys are filled with NaN of the same length so the
         # downstream consumer can iterate without ``KeyError``.
+        if _full_physics and not _ts["days"]:
+            # Run shorter than one diagnostic interval: its single end-of-run
+            # sample carries the run-mean precip (#2277).
+            from legoesm.diagnostics.energy_budget import area_weighted_mean
+            _ts["precip"] = [
+                float(area_weighted_mean(
+                    _sp_diag["p"] / (_sp_diag["n"] * DT),
+                    self.grid.grid_area)) * 86400.0
+                if _sp_diag["ok"] and _sp_diag["p"] is not None
+                else float("nan")]
         self._save_lightweight_timeseries(_ts, run_status, t_start)
         return run_status
 
@@ -16495,6 +18372,9 @@ class ModelDriver:
                 "max_wind": [u_final],
                 "dry_mass_ps": [ps_final],
                 "T_finite": [T_finite],
+                # the run-mean precip the spectral loop passes (#2277)
+                **({"precip": ts["precip"]}
+                   if len(ts.get("precip", ())) == 1 else {}),
             }
             n = 1
         nan = np.full(n, np.nan, dtype=np.float64)
@@ -16621,6 +18501,68 @@ class ModelDriver:
             from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
             return held_suarez_forcing_latlon
         return None                         # dynamics-only (dry)
+
+    def _with_segment_bulk_surface(self, physics_fn, day_of):
+        """Wrap a STATELESS lane physics with the constant-coefficient surface
+        exchange the lat-lon/cube pipeline applies when no turbulence scheme
+        runs.  The surface temperature is the SST/sea-ice blend sampled at
+        each segment start (``day_of(step_done)``), handed in per segment so
+        it follows the forcing without recompiling.
+
+        Returns ``(physics_fn, segment_forcing)``; unchanged
+        ``(physics_fn, None)`` when the run selects no bulk exchange.
+        """
+        cfg = self.config
+        if not (cfg.turbulence == "none" and cfg.surface_bulk_scheme == "constant"
+                and cfg.physics_parameterization == "none"):
+            return physics_fn, None
+        if self.get_sst_sic is None:
+            raise ValueError(
+                "turbulence='none' with surface_bulk_scheme='constant' applies "
+                "the bulk surface exchange, which needs a prescribed SST/SIC "
+                "source; this run has none. Set surface_bulk_scheme='none' to "
+                "run without surface fluxes.")
+        from legoesm.atmosphere.physics.turbulence.integration import (
+            make_surface_bulk_physics)
+        from legoesm.forcing.surface_utils import blend_surface_temperature
+        bulk = make_surface_bulk_physics(float(cfg.C_H), float(cfg.C_E))
+        n_lat, n_lon = int(self.grid.n_lat), int(self.grid.n_lon)
+
+        def _flat(x):
+            x = jnp.asarray(x)
+            if x.ndim == 1 and x.shape[0] == n_lat:
+                x = jnp.broadcast_to(x[:, None], (n_lat, n_lon))
+            if x.size != n_lat * n_lon:
+                raise ValueError(
+                    f"SST/SIC forcing has {x.size} values, the lat-lon grid "
+                    f"{n_lat * n_lon} columns.")
+            return x.reshape(-1)
+
+        def segment_forcing(done):
+            sst, sic = self.get_sst_sic(day_of(done))
+            return {"T_sfc": blend_surface_temperature(
+                _flat(sst), _flat(sic), float(cfg.T_ice))}
+
+        def physics(hs, grid, sigma_coord, forcing):
+            t = bulk(hs, grid, sigma_coord, forcing=forcing)
+            if physics_fn is not None:
+                b = physics_fn(hs, grid, sigma_coord)
+                t = t._replace(
+                    du_dt=t.du_dt.replace(data=t.du_dt.data + b.du_dt.data),
+                    dv_dt=t.dv_dt.replace(data=t.dv_dt.data + b.dv_dt.data),
+                    dT_dt=t.dT_dt.replace(data=t.dT_dt.data + b.dT_dt.data),
+                    dp_s_dt=t.dp_s_dt.replace(
+                        data=t.dp_s_dt.data + b.dp_s_dt.data),
+                    dphis_dt=t.dphis_dt.replace(
+                        data=t.dphis_dt.data + b.dphis_dt.data))
+                if b.tracer_tendencies is not None:
+                    raise NotImplementedError(
+                        "the lane physics returned tracer tendencies; summing "
+                        "them with the surface exchange is not wired.")
+            return t, forcing
+
+        physics._requires_phys_state = True
+        return physics, segment_forcing
 
     def _reject_unconsumed_flux_override(self, lane: str) -> None:
         """Refuse a coupler flux handback (``get_sfc_flux_override``, set by
@@ -16777,11 +18719,15 @@ class ModelDriver:
             if self._segment_callback is not None:
                 self._segment_callback(self, day, DT * seg_n)
 
+        physics_fn, segment_forcing = self._with_segment_bulk_surface(
+            physics_fn,
+            lambda done: START_DAY + (start_step + done) * DT / 86400.0)
+
         t0 = time.time()
         hs_final, status = run_atm_latlon_spmd(
             self.model, mesh, self.state, DT, n_run,
             segment_steps=seg_len, physics_fn=physics_fn,
-            on_segment=_on_segment,
+            on_segment=_on_segment, segment_forcing=segment_forcing,
             # M2b opt-in (--latlon-spmd-compiled-segments): one compiled
             # lax.scan per segment; default False = per-step path.
             compiled_segments=cfg.latlon_spmd_compiled_segments)
@@ -16789,587 +18735,15 @@ class ModelDriver:
         logger.info("lat-lon SPMD run: %s (%.1fs)", status, time.time() - t0)
         return status
 
-    def _tiled_cube_column_physics_fn(self):
-        """Select the per-tile COLUMN physics for the tiled cube SPMD run,
-        or raise if the configured physics is outside the tiled envelope.
 
-        Supported: dynamics-only (all parameterizations ``'none'``) ->
-        ``None``; Kessler warm-rain microphysics ALONE -> the shared
-        column bridge (``make_kessler_column_physics_fn`` — the SAME
-        ``kessler_column_tendencies`` core the face-sharded lanes run).
-        Anything else (the stateful unified pipeline, Held-Suarez on the
-        cube) is not tiled-routed — refuse loudly, never silently drop a
-        parameterization.
-        """
-        cfg = self.config
-        active = {
-            name: val for name, val in (
-                ("radiation", cfg.radiation),
-                ("convection", cfg.convection),
-                ("turbulence", cfg.turbulence),
-                ("microphysics", cfg.microphysics),
-                ("gravity_wave_drag", cfg.gravity_wave_drag),
-                ("cloud_scheme", cfg.cloud_scheme),
-            ) if val not in (None, "none")
-        }
-        if getattr(cfg, "held_suarez_forcing", False):
-            raise NotImplementedError(
-                "tiled cube SPMD: held_suarez_forcing is not tiled-routed "
-                "(the HS closure is a full-state physics_fn, not a column "
-                "fn); run dynamics-only or <=6 devices.")
-        if not active:
-            return None                     # dynamics-only (dry)
-        if active == {"microphysics": "kessler"}:
-            from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
-                make_kessler_column_physics_fn,
-            )
-            return make_kessler_column_physics_fn(
-                self.sigma, float(cfg.dycore.dt),
-                config=_spectral_micro_config(
-                    cfg, lane="tiled-cube Kessler").kessler)
-        raise NotImplementedError(
-            "tiled cube SPMD (6*kt^2 devices): this SIMPLE lane supports "
-            "dynamics-only (all parameterizations 'none') or Kessler "
-            f"microphysics alone; the configured physics {active} should "
-            "have dispatched to the operator-split tiled lane "
-            "(_run_operator_split_tiled_cube) — reaching this raise means "
-            "the dispatch predicate and this selector disagree (a bug).")
-
-    def _tiled_cube_unified_active(self) -> bool:
-        """True when a tiled cube run must use the OPERATOR-SPLIT lane —
-        the general run_amip column-local unified physics (or Held-Suarez,
-        which rides the operator-split statics' hs_newtonian_relax) is
-        active.  False for dynamics-only and for Kessler-ALONE, which the
-        simple blocked-loop lane handles (its shipped parity gates)."""
-        cfg = self.config
-        if getattr(cfg, "held_suarez_forcing", False):
-            return True
-        active = {
-            name: val for name, val in (
-                ("radiation", cfg.radiation),
-                ("convection", cfg.convection),
-                ("turbulence", cfg.turbulence),
-                ("microphysics", cfg.microphysics),
-                ("gravity_wave_drag", cfg.gravity_wave_drag),
-                ("cloud_scheme", cfg.cloud_scheme),
-            ) if val not in (None, "none")
-        }
-        return bool(active) and active != {"microphysics": "kessler"}
 
     def _run_operator_split_tiled_cube(self, start_step, start_day,
                                        mesh, kt: int) -> str:
-        """Sub-face-TILED operator-split run: the cube twin of
-        :meth:`_run_operator_split_spmd` (the faithful multi-device
-        ``_run_compiled`` twin) over
-        ``driver/tiled_operator_split_step.make_tiled_operator_split_step``
-        — the REAL unified PhysicsPipeline built at TILE ncol
-        (``build_tile_step_unified``), the ``SegmentCarry`` tile-sharded
-        and THREADED across segments, per-segment external forcing as a
-        traced argument, per-segment gather for the callback + blowup
-        guard only.
-
-        Refused loudly: ensembles, multilayer land, the diagnostics /
-        checkpoint writers (this lane; the simple tiled lane has them),
-        and — inside ``build_tile_step_unified`` — land-active pipelines
-        and horizontal-operator convection schemes.
-        """
-        import time
-        from legoesm.forcing.external import get_solar_forcing_at_time
-        from legoesm.driver.compiled_segments import (
-            pack_carry, pack_forcing, unpack_carry,
-            build_operator_split_statics, GHG_SPECIES_ORDER,
-        )
-        from legoesm.driver.tiled_operator_split_step import (
-            build_tile_step_unified, make_tiled_operator_split_step,
-            shard_tiled_split_carry, unpack_carry_tiled,
-        )
-        from legoesm.core.conservation import compute_global_moisture
-
-        cfg = self.config
-        n = int(self.grid.n)
-        if jax.process_count() > 1:
-            raise NotImplementedError(
-                "operator-split tiled cube: multicontroller (route-B "
-                "cross-process) is a follow-up; run single-process "
-                "multi-device.")
-        if self._ensemble_size > 1:
-            raise NotImplementedError(
-                "operator-split tiled cube does not support ensembles "
-                "(the vmap'd carry's leading axis is the ensemble, not a "
-                "tile).")
-        if self._land_ml_state is not None:
-            raise NotImplementedError(
-                "operator-split tiled cube does not support multilayer "
-                "(Richards) land (land_ml has no tile packing).")
-        if self._moisture_advection_active():
-            raise NotImplementedError(
-                "operator-split tiled cube: resolved-wind moisture "
-                "advection (moisture_advection=True) is not tiled — the "
-                "tiled dynamics advects no tracers, so the serial and "
-                "tiled trajectories would diverge O(1). Run column-locked "
-                "moisture or <=6 devices.")
-        if cfg.output.checkpoint_days > 0 or cfg.output.diag_days > 0:
-            raise NotImplementedError(
-                "operator-split tiled cube does not yet run the "
-                "diagnostics / checkpoint writers (set diag_days=0, "
-                "checkpoint_days=0; use the segment_callback for I/O).")
-
-        ctx = self._prepare_run_context(start_step, start_day,
-                                        restore_carry=True)
-        DT = ctx["DT"]
-        START_DAY = ctx["START_DAY"]
-        n_steps_total = ctx["n_steps_total"]
-        dsigma = ctx["dsigma"]
-        shape_2d = ctx["shape_2d"]
-        _sd = ctx["_sd"]
-
-        # REAL unified physics at TILE ncol (refuses land / horizontal-
-        # operator convection inside).
-        tile_su, _tile_pipeline = build_tile_step_unified(
-            self.grid, self.sigma, cfg, kt)
-        self._record_pipeline_physics(_tile_pipeline)
-
-        ghg_vmr = ctx["ghg_vmr"]
-        ghg_keys: tuple = ()
-        if isinstance(ghg_vmr, dict):
-            ghg_keys = tuple(k for k in GHG_SPECIES_ORDER if k in ghg_vmr)
-        ghg_keys = ghg_keys or None
-
-        _carry_aux = self._carry_aux
-        _target_moisture = _carry_aux.get("target_moisture",
-                                          jnp.asarray(0.0))
-        if cfg.fix_moisture and float(_target_moisture) == 0.0:
-            _target_moisture = compute_global_moisture(
-                self.q_v, self.state.p_s.data, dsigma, self.grid)
-        # DRY-mass anchor (F13); an old checkpoint's TOTAL-mass
-        # ``target_mass`` is never reused (different integral).
-        _target_mass = _carry_aux.get("target_dry_mass", jnp.asarray(0.0))
-        if cfg.dycore.fix_mass and float(_target_mass) == 0.0:
-            _target_mass = self._segment_dry_mass_target(dsigma)
-
-        statics = build_operator_split_statics(
-            step_unified=tile_su, forcing=None,
-            lat=self.grid.grid_lat, lon=self.grid.grid_lon, dt=DT,
-            tau_equator=cfg.tau_equator, tau_pole=cfg.tau_pole,
-            sbm_tau_c=cfg.sbm_tau_c, sbm_RH_ref=cfg.sbm_RH_ref,
-            C_H=cfg.C_H, C_E=cfg.C_E,
-            albedo_ice=cfg.albedo_ice, albedo_ocean=cfg.albedo_ocean,
-            ghg_vmr_override=None,
-            hs_newtonian_relax=self._hs_newtonian_relax,
-            energy_consistent_moisture_clip=(
-                cfg.energy_consistent_moisture_clip),
-            do_sat_adjust=(cfg.microphysics == "none"),
-            fix_moisture=cfg.fix_moisture,
-            sigma_full=ctx["sigma_full"], dsigma=dsigma, grid=self.grid,
-            owned_mask=None, qv_smooth_coeff=self._qv_smooth_coeff,
-            fric_decay=self._fric_decay,
-            hyperdiffusion_3d=self._hyperdiffusion_3d_fn,
-        )
-        tiled_step = make_tiled_operator_split_step(
-            self.model, mesh, statics,
-            fix_mass=cfg.dycore.fix_mass,
-            rad_update_steps=ctx["RAD_UPDATE_STEPS"],
-            start_day=START_DAY + self._insolation_day_offset, kt=kt, ghg_keys=ghg_keys)
-
-        _dm = ({k: self.tracers.get(k)
-                for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
-               if isinstance(self.tracers, dict) else {})
-        carry = pack_carry(
-            self.state, self.q_v, self.q_c, self.q_r,
-            conv_prog=ctx["conv_prog"],
-            held_dT_rad=ctx["held_dT_rad"],
-            held_sw_net_sfc=ctx["held_sw_net_sfc"],
-            held_lw_net_sfc=ctx["held_lw_net_sfc"],
-            held_sw_up_toa=ctx["held_sw_up_toa"],
-            held_lw_up_toa=ctx["held_lw_up_toa"],
-            held_sw_down_toa=ctx["held_sw_down_toa"],
-            step_index=start_step,
-            conv_precip_prev=getattr(self, "_conv_precip_prev", None),
-            target_moisture=_target_moisture, target_mass=_target_mass,
-            precip_accum=jnp.zeros(shape_2d, dtype=_sd),
-            T_land=ctx["T_land"], w_land=ctx["w_land"],
-            snow=ctx.get("snow"),
-            tke=ctx["tke"], qke=ctx["qke"],
-            gwd_spectrum=ctx["gwd_spectrum"],
-            **_dm,
-        )
-        carry_template = carry
-        carry = shard_tiled_split_carry(carry, mesh, n)
-
-        logger.info(
-            "operator-split TILED cube: (6, %d, %d) tiles over %d devices "
-            "(%s).", kt, kt, mesh.devices.size, jax.default_backend())
-
-        current_s_0 = ctx["current_s_0"]
-        solar_weights = ctx["solar_weights"]
-        o3_vmr, aerosol_od = ctx["o3_vmr"], ctx["aerosol_od"]
-
-        seg_len = max(1, int(86400.0 / DT))
-        current_step = start_step
-        status = "COMPLETED"
-        seg_idx = -1
-        # #921: prime every NCCL clique this step uses (the halo
-        # collective-permutes + the target-mass / moisture-fixer psums) in a
-        # fixed, rank-independent order before the first real step, so
-        # multi-process (route-B) comm-init cannot deadlock.  No-op
-        # single-process (CPU-virtual / single-GPU) — those lanes are unchanged.
-        from legoesm.parallel.tiled_production_cdgrid import (
-            warmup_tiled_cube_comms,
-        )
-        warmup_tiled_cube_comms(mesh, kt)
-        t0 = time.time()
-        while current_step < n_steps_total:
-            seg_idx += 1
-            seg_steps = min(seg_len, n_steps_total - current_step)
-            seg_end_step = current_step + seg_steps
-            day = START_DAY + seg_end_step * DT / 86400.0
-            _fday = float(daily_forcing_bucket(START_DAY + current_step * DT / 86400.0))  # = _run_compiled
-            doy, sod = self._calendar_for_radiation(day)
-            sst, sic = self.get_sst_sic(_fday)
-            if seg_idx > 0 or start_step > 0:
-                _solar_now = get_solar_forcing_at_time(
-                    self._solar_config, _fday)
-                current_s_0 = float(_solar_now["tsi"])
-                if self._use_solar_spectral:
-                    solar_weights = jnp.asarray(
-                        _solar_now["solar_fraction_by_gpt"])
-                _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
-                o3_vmr, aerosol_od, ghg_vmr = (
-                    self._precompute_external_forcing(
-                        _fday, _phys_p_s, _phys_lat))
-            _alb, _T, _emis = (None, None, None)
-            if self.get_sfc_override is not None:
-                _alb, _T, _emis = self.get_sfc_override(day)
-            _shflx, _lhflx, _evap, _taux, _tauy = (None,) * 5
-            if self.get_sfc_flux_override is not None:
-                (_shflx, _lhflx, _evap, _taux, _tauy) = \
-                    self.get_sfc_flux_override(day)
-            forcing = pack_forcing(
-                sst=jnp.asarray(sst), sic=jnp.asarray(sic),
-                day_of_year=doy, seconds_of_day=sod,
-                solar_weights=solar_weights, s_0=current_s_0,
-                o3_vmr=o3_vmr, aerosol_od=aerosol_od,
-                aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
-                aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
-                o3_top_vmr=getattr(self, "_o3_top_vmr", None),
-                ghg_vmr=ghg_vmr,
-                sfc_albedo_override=_alb, sfc_T_override=_T,
-                sfc_emissivity_override=_emis,
-                sfc_shflx_override=_shflx, sfc_lhflx_override=_lhflx,
-                sfc_evap_override=_evap,
-                # stress ON the atmosphere [Pa] (F38: coupler handback)
-                sfc_taux_override=_taux, sfc_tauy_override=_tauy,
-            )
-
-            if seg_idx == 0:
-                _t_jit = time.time()
-            for _ in range(seg_steps):
-                carry = tiled_step(carry, forcing)
-            if seg_idx == 0:
-                jax.block_until_ready(carry.u)
-                logger.info("  operator-split tiled segment 0 (incl. JIT) "
-                            "in %.1fs", time.time() - _t_jit)
-            current_step += seg_steps
-
-            # Gather: tile layout -> serial layout -> cc state for the
-            # callback + blowup guard (the threaded carry never gathers).
-            carry_serial = unpack_carry_tiled(carry, n, carry_template)
-            state, self.q_v, self.q_c, self.q_r = unpack_carry(
-                carry_serial, self.state)[:4]
-            self.state = state
-            self._conv_precip_prev = carry_serial.conv_precip_prev
-            if isinstance(self.tracers, dict):
-                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                    _v = getattr(carry_serial, _nm)
-                    if _v is not None:
-                        self.tracers[_nm] = _v
-            finite = bool(jnp.isfinite(state.p_s.data).all()
-                          & jnp.isfinite(state.T.data).all())
-            if not finite:
-                status = f"BLOWUP at step {current_step}"
-                logger.info("operator-split tiled cube: %s (%.1fs)",
-                            status, time.time() - t0)
-                self._write_blowup_state(current_step, day)
-                return status
-            self._current_day = day
-            if self._segment_callback is not None:
-                self._segment_callback(self, day, DT * seg_steps)
-                # Fold callback mutations back into the threaded tiled
-                # carry (the lat-band lane's contract — _run_compiled
-                # re-packs from self.* every segment; codex).  The
-                # driver-visible fields are grid-shaped carry leaves
-                # (exact tile partition), so a per-leaf device_put onto
-                # the carry's existing sharding suffices; a no-op
-                # resharding when the callback does not mutate.  The
-                # threaded physics carry (held radiation / tke /
-                # conv_prog) keeps its sharded values.
-                _fold = dict(
-                    u=jax.device_put(self.state.u.data, carry.u.sharding),
-                    v=jax.device_put(self.state.v.data, carry.v.sharding),
-                    T=jax.device_put(self.state.T.data, carry.T.sharding),
-                    p_s=jax.device_put(self.state.p_s.data,
-                                       carry.p_s.sharding),
-                    q_v=jax.device_put(self.q_v, carry.q_v.sharding),
-                    q_c=jax.device_put(self.q_c, carry.q_c.sharding),
-                    q_r=jax.device_put(self.q_r, carry.q_r.sharding))
-                if isinstance(self.tracers, dict):
-                    for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                        _cv = getattr(carry, _nm)
-                        _sv = self.tracers.get(_nm)
-                        if _cv is not None and _sv is not None:
-                            _fold[_nm] = jax.device_put(_sv, _cv.sharding)
-                carry = carry._replace(**_fold)
-        logger.info("operator-split tiled cube: %s (%.1fs)", status,
-                    time.time() - t0)
-        return status
+        raise ValueError('fv3_duo is the only cubed-sphere atmosphere core; this legacy driver adapter has no duo equivalent.')
 
     def _run_tiled_cube_spmd(self, start_step: int = 0,
                              start_day: float | None = None) -> str:
-        """Sub-face-tiled cube SPMD run (``n_devices = 6*kt^2 > 6``).
-
-        Integrates via the BLOCKED persistent tiled loop
-        (:func:`legoesm.atmosphere.dynamics.gcm.tiled_step_adapter.make_tiled_cc_loop`)
-        scanned into per-SEGMENT executables
-        (:func:`legoesm.atmosphere.dynamics.gcm.tiled_step_adapter.scan_tiled_cc_steps`,
-        M3b increment 1): state stays TILE-SHARDED across steps AND each
-        segment is ONE ``lax.scan`` dispatch (no per-step host dispatch,
-        no full-face all-gather inside the scan — HLO-gated by
-        ``tests/parallel/test_cube_tile_native_segment.py``); a
-        cell-centred ``HydrostaticState`` is gathered once per SEGMENT for
-        the coupler callback + a host-side NaN-blowup guard.  A dedicated
-        path, NOT the jitted ``compiled_segments`` scan — the exact
-        precedent of ``_run_compiled_latlon_spmd`` (zero surgical risk to
-        the shared hot loop).
-
-        Supports DYNAMICS-ONLY or Kessler-microphysics-only configs (the
-        tiled envelope; anything else is refused loudly by
-        ``_tiled_cube_column_physics_fn`` / the adapter's envelope
-        validation).  Writers: the lightweight ``timeseries.npz``
-        diagnostics (``diag_days``) and the checkpoint writer
-        (``checkpoint_days``, via the ``_checkpoint_callback``-or-
-        ``save_checkpoint`` hook contract) fire on segment boundaries —
-        the segment length is the gcd of the active cadences with the
-        1-day coupling cadence, so every writer sees the gathered cc
-        state, never the blocked in-loop state.
-        """
-        import time as _time
-
-        import jax
-        import numpy as _np
-
-        from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
-            make_tiled_cc_loop, scan_tiled_cc_steps,
-        )
-
-        if self.config.dycore.energy_fixer:
-            # the tiled dynamics re-implements the cube step without the
-            # dycore energy fixer (F15): refuse, never an open sink
-            raise ValueError(
-                "tiled cube SPMD: DycoreConfig.energy_fixer=True is not wired on the "
-                "sub-face-TILED cube dynamics; set energy_fixer=False "
-                "(--no-energy-fixer) to accept the open sink explicitly, "
-                "or run on <=6 devices.")
-        cfg = self.config
-        dc = self._device_config
-        tiling = tuple(getattr(dc, "tiling", (1, 1)))
-        kt = int(tiling[0])
-        if (tiling[0] != tiling[1] or kt < 2
-                or dc.n_devices != 6 * kt * kt):
-            raise ValueError(
-                f"tiled cube SPMD: device config tiling={tiling}, "
-                f"n_devices={dc.n_devices} is not a (kt, kt) sub-face "
-                f"tiling with 6*kt^2 devices.")
-        mesh = dc.mesh
-        if tuple(getattr(mesh, "axis_names", ())) != (
-                "face", "tile_i", "tile_j"):
-            raise ValueError(
-                f"tiled cube SPMD: mesh axes {getattr(mesh, 'axis_names', None)} "
-                f"!= ('face', 'tile_i', 'tile_j') — build the device mesh "
-                f"via create_device_mesh(n_devices=6*kt^2).")
-
-        # Unified-pipeline physics (anything beyond dynamics-only /
-        # Kessler-alone / HS) routes to the OPERATOR-SPLIT tiled lane —
-        # the faithful _run_compiled twin (tile-sharded SegmentCarry,
-        # real step_unified built at tile ncol).  Kessler-alone stays on
-        # this simple blocked-loop lane (its shipped parity gates).
-        if self._tiled_cube_unified_active():
-            return self._run_operator_split_tiled_cube(
-                start_step, start_day, mesh, kt)
-        self._reject_unconsumed_flux_override(
-            "the simple blocked-loop tiled-cube sub-lane")
-        self._record_idealized_kessler_physics("tiled-cube Kessler")
-
-        column_physics_fn = self._tiled_cube_column_physics_fn()
-        DT = cfg.dycore.dt
-        n_steps_total = int(cfg.days * 86400.0 / DT)
-        START_DAY = start_day if start_day is not None else cfg.start_day
-        # Restart-time normalization (mirrors _run_compiled_latlon_spmd).
-        if (start_day is not None and start_step > 0
-                and getattr(self, "_loaded_checkpoint_step_day", None)
-                == (start_step, start_day)):
-            START_DAY = start_day - start_step * DT / 86400.0
-        # Writer cadences (steps).  0 = off.  The segment length is the gcd
-        # of the ACTIVE cadences with the 1-day coupling cadence, so every
-        # writer fires exactly on a segment boundary (where the gathered cc
-        # state exists) — never mid-loop on the blocked state.
-        import math as _math
-
-        day_steps = max(1, int(86400.0 / DT))
-        # NOT routed through ``diagnostic_interval_steps``: this lane REFUSES a
-        # sub-step cadence (below) instead of flooring it, because its segment
-        # length is the gcd of the cadences — flooring to one step here would
-        # silently run the whole lane one step per segment.  It still borrows
-        # that helper's finiteness check, because ``NaN > 0`` is False and a
-        # NaN cadence would otherwise slip past as "no cadence" (review).
-        if not _math.isfinite(cfg.output.diag_days):
-            raise ValueError(
-                f"tiled cube SPMD: diag_days must be a finite number of days; "
-                f"got {cfg.output.diag_days!r}.")
-        diag_steps = (int(cfg.output.diag_days * 86400.0 / DT)
-                      if cfg.output.diag_days > 0 else 0)
-        ckpt_steps = (int(cfg.output.checkpoint_days * 86400.0 / DT)
-                      if cfg.output.checkpoint_days > 0 else 0)
-        for _nm, _cad in (("diag_days", diag_steps),
-                          ("checkpoint_days", ckpt_steps)):
-            if _cad < 0 or (getattr(cfg.output, _nm) > 0 and _cad == 0):
-                raise ValueError(
-                    f"tiled cube SPMD: {_nm}={getattr(cfg.output, _nm)} is "
-                    f"shorter than one step (dt={DT}s).")
-        seg_len = day_steps
-        for _cad in (diag_steps, ckpt_steps):
-            if _cad > 0:
-                seg_len = _math.gcd(seg_len, _cad)
-        seg_len = max(1, seg_len)
-        n_run = n_steps_total - start_step
-        if n_run < 1:
-            return "COMPLETED"
-        # Lightweight timeseries (the spectral/MPAS fallback writer's schema
-        # — the AMIP validation harness's minimum contract).
-        _ts: dict[str, list] = {
-            "days": [], "T_atm": [], "T_min": [], "T_max": [],
-            "max_wind": [], "dry_mass_ps": [], "T_finite": [],
-        }
-
-        logger.info(
-            "tiled cube SPMD run: %d steps, %d-step segments, kt=%d "
-            "(%d devices), physics=%s",
-            n_run, seg_len, kt, dc.n_devices,
-            "kessler" if column_physics_fn is not None else "dynamics-only")
-
-        enter, tiled_step, tiled_exit = make_tiled_cc_loop(
-            self.model, mesh, kt=kt, dt=float(DT),
-            column_physics_fn=column_physics_fn)
-        # M3b increment 1: each segment is ONE compiled lax.scan of the
-        # blocked step — one host dispatch per SEGMENT instead of per step,
-        # carry persistently tile-sharded, donated between segments.  At
-        # most TWO distinct lengths compile (the regular segment + the
-        # final remainder); the FIRST segment additionally compiles its own
-        # signature (the enter carry is f32-compute until the fixer's f64
-        # p_s promotion — scan_tiled_cc_steps' dtype fixed-point unroll),
-        # exactly as the prior per-step lane compiled two step signatures.
-        _segments: dict[int, object] = {}
-
-        def _scanned(k: int):
-            fn = _segments.get(k)
-            if fn is None:
-                fn = _segments[k] = scan_tiled_cc_steps(tiled_step, k)
-            return fn
-        # Moist: the driver keeps tracers in ``self.tracers`` (raw arrays,
-        # the tracer-property store) — ``self.state.tracers`` is None after
-        # cube setup.  Attach exact {q_v,q_c,q_r} Fields for the loop's
-        # tracer contract (codex BLOCKER: without this, a REAL driver init
-        # can never enter the advertised Kessler lane).
-        if (column_physics_fn is not None
-                and getattr(self.state, "tracers", None) is None):
-            from legoesm.core.field import Field
-
-            missing = [nm for nm in ("q_v", "q_c", "q_r")
-                       if self.tracers.get(nm) is None]
-            if missing:
-                raise NotImplementedError(
-                    f"tiled cube SPMD (kessler): driver tracers missing "
-                    f"{missing} — initialize a moist cube state (moist IC) "
-                    f"or run dynamics-only.")
-            self.state = self.state._replace(tracers={
-                nm: Field(data=self.tracers[nm], name=nm,
-                          dims=self.state.T.dims, units="kg/kg")
-                for nm in ("q_v", "q_c", "q_r")
-            })
-        template = self.state
-        blocked = enter(self.state)
-
-        # #921: prime every NCCL clique the blocked step uses (the halo
-        # collective-permutes + the in-stage mass-fixer psum) in a fixed,
-        # rank-independent order before the first real step, so multi-process
-        # (route-B one-process-per-GPU) comm-init cannot deadlock.  No-op
-        # single-process (CPU-virtual / single-GPU) — those lanes are unchanged.
-        from legoesm.parallel.tiled_production_cdgrid import (
-            warmup_tiled_cube_comms,
-        )
-        warmup_tiled_cube_comms(mesh, kt)
-
-        t0 = _time.time()
-        step_done = 0
-        while step_done < n_run:
-            seg_n = min(seg_len, n_run - step_done)
-            blocked = _scanned(seg_n)(blocked)
-            step_done += seg_n
-            # Per-SEGMENT gather: coupler callback + host blowup guard
-            # (the in-loop state never gathers).  Callbacks CONSUME the
-            # gathered state (the lat-lon SPMD lane's contract); mutations
-            # are NOT folded back into the blocked loop state.
-            self.state = tiled_exit(blocked, template)
-            if self.state.tracers is not None:
-                # Keep the canonical driver tracer-property store
-                # (self.tracers -> q_v/q_c/q_r properties, used by
-                # callbacks/diagnostics) in sync with the advanced
-                # moisture (codex MAJOR: it otherwise holds the INITIAL
-                # fields for the whole run).
-                for _nm, _f in self.state.tracers.items():
-                    self.tracers[_nm] = _f.data
-            day = START_DAY + (start_step + step_done) * DT / 86400.0
-            self._current_day = day
-            if not bool(_np.all(_np.isfinite(
-                    _np.asarray(self.state.T.data)))):
-                logger.error("tiled cube SPMD: non-finite T at day %.3f",
-                             day)
-                if diag_steps > 0:
-                    self._save_lightweight_timeseries(
-                        _ts, f"BLOWUP at day {day:.3f}", t0)
-                # State is gathered at this point (tiled_exit above), so the
-                # forensic dump sees the full failing state.
-                self._write_blowup_state(start_step + step_done, day)
-                return f"BLOWUP at day {day:.3f}"
-            abs_step = start_step + step_done
-            if diag_steps > 0 and abs_step % diag_steps == 0:
-                s = self.state
-                _stats = _np.asarray(jnp.stack([
-                    jnp.mean(s.T.data), jnp.min(s.T.data),
-                    jnp.max(s.T.data), jnp.mean(s.p_s.data),
-                    jnp.max(jnp.sqrt(s.u.data ** 2 + s.v.data ** 2)),
-                ]))
-                _ts["days"].append(day - self.config.start_day)
-                _ts["T_atm"].append(float(_stats[0]))
-                _ts["T_min"].append(float(_stats[1]))
-                _ts["T_max"].append(float(_stats[2]))
-                _ts["dry_mass_ps"].append(float(_stats[3]))
-                _ts["max_wind"].append(float(_stats[4]))
-                _ts["T_finite"].append(True)   # guarded above
-            if ckpt_steps > 0 and abs_step % ckpt_steps == 0:
-                # run()'s established hook contract (the _run_compiled
-                # pattern): a coupled driver's _checkpoint_callback owns the
-                # FULL coupled state; else the driver's own writer on the
-                # gathered cc state.
-                _ckpt = (getattr(self, "_checkpoint_callback", None)
-                         or self.save_checkpoint)
-                _ckpt(abs_step, day)
-            if self._segment_callback is not None:
-                self._segment_callback(self, day, DT * seg_n)
-        if diag_steps > 0:
-            self._save_lightweight_timeseries(_ts, "COMPLETED", t0)
-        logger.info("tiled cube SPMD run: COMPLETED (%.1fs)",
-                    _time.time() - t0)
-        return "COMPLETED"
+        raise ValueError('fv3_duo is the only cubed-sphere atmosphere core; this legacy driver adapter has no duo equivalent.')
 
     def _operator_split_spmd_active(self) -> bool:
         """True when the lat-band SPMD run must use the OPERATOR-SPLIT lane — the
@@ -17438,6 +18812,12 @@ class ModelDriver:
         _io_rank = jax.process_index() == 0
 
         # --- Refusals: the carry has no lat-band partition spec for these ---
+        if cfg.convection == "tiedtke":
+            raise NotImplementedError(
+                "convection='tiedtke' is not wired on the lat-band SPMD lane: "
+                "its omega is a horizontal divergence the band-local physics "
+                "grid cannot form across band edges; use the single-rank "
+                "compiled lane")
         if self._ensemble_size > 1:
             raise NotImplementedError(
                 "operator-split lat-band SPMD does not support ensembles (the "
@@ -17485,6 +18865,10 @@ class ModelDriver:
         band_grid = build_band_grids_atm(self.grid, n_dev)[0]
         band_physics = build_physics_pipeline(
             band_grid, self.sigma, cfg, spacing_grid=self.grid)
+        # the band pipeline carries no f_land; a land-free run's mark still
+        # holds per band (McFarlane then gets zeros, a land run gets None
+        # and refuses)
+        band_physics.run_has_no_land = self.physics.run_has_no_land
         self._record_pipeline_physics(band_physics)
         # Radiation cadence.  ``make_sharded_operator_split_step`` computes the
         # serial prologue's predicate per step (``_need_rad_and_time``,
@@ -17609,6 +18993,7 @@ class ModelDriver:
                 if getattr(self, "_requires_surface_flux_export", False)
                 else None),
             T_land=ctx["T_land"], w_land=ctx["w_land"], snow=ctx.get("snow"),
+            ice_T_skin=ctx["ice_T_skin"],
             tke=ctx["tke"], qke=ctx["qke"], gwd_spectrum=ctx["gwd_spectrum"],
             **_dm,
         )
@@ -17733,6 +19118,8 @@ class ModelDriver:
             # ``jnp.zeros_like(p_s)`` in _build_atm_forcing.
             self._carry_aux["held_sw_net_sfc"] = carry_full.held_sw_net_sfc
             self._carry_aux["held_lw_net_sfc"] = carry_full.held_lw_net_sfc
+            if carry_full.ice_T_skin is not None:
+                self._carry_aux["ice_T_skin"] = carry_full.ice_T_skin
             self._carry_aux["seg_precip"] = segment_accum_to_rate(
                 carry_full.precip_accum, seg_steps, DT)
             if carry_full.precip_frozen_accum is not None:
@@ -17836,6 +19223,23 @@ class ModelDriver:
                 jax.process_count(), _maxT, _maxU, time.time() - t0)
         return status
 
+    def _mynn_peel_pending(self, qke_key="qke", flag_key="mynn_initialized"):
+        """turbulence='mynn25': True when this run still owes its cold-start
+        (initflag) step, from the host flag carried in ``carry_aux`` and the
+        checkpoint (vote R2a).  A restored packed qke without the flag, or the
+        flag without the qke, is refused."""
+        aux = self._carry_aux if isinstance(self._carry_aux, dict) else {}
+        has_flag = flag_key in aux
+        has_qke = qke_key in aux
+        if has_flag != has_qke:
+            raise ValueError(
+                "turbulence='mynn25': the restored state has "
+                + ("the initialized flag but no (qke, qsq, el) carry"
+                   if has_flag else
+                   "a (qke, qsq, el) carry but no mynn_initialized flag")
+                + "; a checkpoint carries both or neither")
+        return not (has_flag and bool(np.asarray(aux[flag_key])))
+
     def _prepare_run_context(self, start_step, start_day, restore_carry=False):
         """Prepare shared state for a run loop.
 
@@ -17909,11 +19313,25 @@ class ModelDriver:
         # When ``rad_update_steps <= 1`` the no-rad variant is unused
         # but the rad-only variant still helps by collapsing the
         # legacy ``lax.cond(True, _, _)`` to a single branch.
-        step_unified = self.physics.build_step_unified(static_need_rad=True)
+        # turbulence='mynn25' (WRF MYNN-EDMF): every-step builds carry
+        # initflag=False; the cold-start pair (initflag=True) runs the ONE
+        # peeled first step of an uninitialised run (votes M3/N4/R1).
+        _mynn = getattr(cfg, "turbulence", "none") == "mynn25"
+        _mk = {"mynn_initflag": False} if _mynn else {}
+        step_unified = self.physics.build_step_unified(
+            static_need_rad=True, **_mk)
         step_unified_no_rad = (
-            self.physics.build_step_unified(static_need_rad=False)
+            self.physics.build_step_unified(static_need_rad=False, **_mk)
             if RAD_UPDATE_STEPS > 1 else None
         )
+        mynn_init_steps = None
+        if _mynn:
+            mynn_init_steps = (
+                self.physics.build_step_unified(
+                    static_need_rad=True, mynn_initflag=True),
+                (self.physics.build_step_unified(
+                    static_need_rad=False, mynn_initflag=True)
+                 if RAD_UPDATE_STEPS > 1 else None))
 
         # Held radiation arrays — restore from carry or zero-init
         _ens = self._ensemble_size
@@ -18019,13 +19437,53 @@ class ModelDriver:
                 # seam, undoing part of the spin-up.  T_soil[:, 0] is (ncol,);
                 # reshape to the gridded T_land layout (row-major, the inverse
                 # of the flatten the land init used).
+                from legoesm.land.multilayer_land import land_skin_temperature
                 T_land = jnp.asarray(
-                    self._land_ml_state.T_soil[:, 0]
+                    land_skin_temperature(self._land_ml_state,
+                                          self.physics.land_ml_cfg)
                 ).reshape(self.state.T.data[..., -1].shape).astype(_sd)
             else:
                 T_land = self.state.T.data[..., -1].astype(_sd)
         else:
             T_land = None
+
+        # Prognostic sea-ice skin [K] (#2106) — restored from the checkpoint
+        # when it carries one, else seeded at the seawater freezing point (the
+        # MPAS column lane's seed).  ``None`` (byte-identical carry) when off.
+        ice_T_skin = None
+        if getattr(self.config, "ice_skin_prognostic", False):
+            # Fail at run start, not at the first checkpoint: these writers
+            # cannot store the skin (the checkpoint-time raises stay as the
+            # backstop).
+            _out = self.config.output
+            if _out.checkpoint_days > 0 and (
+                    _out.checkpoint_format == "zarr" or self._is_latlon_mpi()):
+                raise ValueError(
+                    "ice_skin_prognostic: this checkpoint writer cannot store "
+                    "the ice skin (zarr drops carry_aux; the lat-lon MPI "
+                    "global gather does not gather it). Use "
+                    "checkpoint_format='npz' (single-process or cube MPI), "
+                    "or checkpoint_days=0.")
+            _skin_shape = self.state.T.data[..., -1].shape
+            if "ice_T_skin" in _aux:
+                _skin = jnp.asarray(_aux["ice_T_skin"])
+                if _skin.size != int(np.prod(_skin_shape)):
+                    raise ValueError(
+                        f"checkpoint ice_T_skin has {_skin.size} values, the "
+                        f"grid has {int(np.prod(_skin_shape))} columns — mesh "
+                        "or resolution mismatch.")
+                if not bool(jnp.all(jnp.isfinite(_skin))):
+                    raise ValueError(
+                        "checkpoint ice_T_skin has non-finite values — "
+                        "refusing to resume from a corrupt skin.")
+                ice_T_skin = _skin.reshape(_skin_shape).astype(_sd)
+                logger.info("  Ice skin: resumed from checkpoint (min %.1f K)",
+                            float(jnp.min(ice_T_skin)))
+            else:
+                ice_T_skin = jnp.full(_skin_shape, constants.T_freeze_ocean,
+                                      dtype=_sd)
+                logger.info("  Ice skin ON (h=%.2f m): seeded at "
+                            "T_freeze_ocean", float(self.config.ice_thickness_m))
 
         # Prognostic soil-water bucket [kg/m^2] — restored from the
         # checkpoint when available, otherwise seeded at a fraction of the
@@ -18181,6 +19639,7 @@ class ModelDriver:
             "current_s_0": current_s_0, "solar_weights": solar_weights,
             "step_unified": step_unified,
             "step_unified_no_rad": step_unified_no_rad,
+            "mynn_init_steps": mynn_init_steps,
             "held_dT_rad": held_dT_rad,
             "held_sw_net_sfc": held_sw_net_sfc,
             "held_lw_net_sfc": held_lw_net_sfc,
@@ -18191,6 +19650,7 @@ class ModelDriver:
             "held_lw_up_toa_clr": held_lw_up_toa_clr,
             "conv_prog": conv_prog,
             "T_land": T_land,
+            "ice_T_skin": ice_T_skin,
             "w_land": w_land,
             "snow": snow,
             "tke": tke,
@@ -18297,7 +19757,7 @@ class ModelDriver:
         production segment.  Single-rank / single-device only (the carry has no
         SPMD/MPI partition spec)."""
         from legoesm.driver.compiled_segments import (
-            pack_carry, build_segment_fn, pack_forcing,
+            pack_carry, tiedtke_lag_seeds, build_segment_fn, pack_forcing,
         )
         if (self._device_config is not None
                 and getattr(self._device_config, "is_distributed", False)):
@@ -18326,9 +19786,8 @@ class ModelDriver:
         # segment never enters run(), so it would integrate the cell-centre
         # (eddy-damped) path production no longer runs.  Refuse (approved hard
         # error) rather than fit a model to a different discretisation.
-        if (self.config.grid.grid_type == "latlon"
-                and self.config.dycore.discretization == "latlon_cgrid"
-                and self.config.dycore.model_type == "hydrostatic"):
+        from legoesm.driver.component_factory import driver_solver_name
+        if driver_solver_name(self.config) == "latlon_cgrid_primitive_equations":
             raise NotImplementedError(
                 "build_training_segment does not carry the lat-lon C-grid face "
                 "winds production runs carry between steps, so it would train "
@@ -18410,6 +19869,7 @@ class ModelDriver:
             target_moisture=target_moisture, target_mass=target_mass,
             precip_accum=jnp.zeros(ctx["shape_2d"], dtype=_sd),
             T_land=ctx["T_land"], w_land=ctx["w_land"],
+            ice_T_skin=ctx["ice_T_skin"],
             land_ml=self._land_ml_state,
             tke=ctx["tke"], qke=ctx["qke"], gwd_spectrum=ctx["gwd_spectrum"],
             **(
@@ -18417,6 +19877,7 @@ class ModelDriver:
                  for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
                 if isinstance(self.tracers, dict) else {}
             ),
+            **tiedtke_lag_seeds(cfg.convection, self.q_v, self.state.p_s),
         )
 
         if self.get_sst_sic is not None:
@@ -18459,7 +19920,7 @@ class ModelDriver:
         """
         from legoesm.forcing.external import get_solar_forcing_at_time
         from legoesm.driver.compiled_segments import (
-            pack_carry, unpack_carry,
+            pack_carry, tiedtke_lag_seeds, unpack_carry,
             compute_segment_length, build_segment_fn, pack_forcing,
             shard_forcing, segment_accum_to_rate,
         )
@@ -18486,6 +19947,7 @@ class ModelDriver:
         solar_weights = ctx["solar_weights"]
         step_unified = ctx["step_unified"]
         step_unified_no_rad = ctx.get("step_unified_no_rad")
+        mynn_init_steps = ctx.get("mynn_init_steps")
         held_dT_rad = ctx["held_dT_rad"]
         held_sw_net_sfc = ctx["held_sw_net_sfc"]
         held_lw_net_sfc = ctx["held_lw_net_sfc"]
@@ -18501,6 +19963,7 @@ class ModelDriver:
             "held_lw_up_toa_clr", jnp.zeros_like(held_lw_up_toa))
         conv_prog = ctx["conv_prog"]
         T_land = ctx["T_land"]
+        ice_T_skin = ctx["ice_T_skin"]
         w_land = ctx["w_land"]
         snow = ctx.get("snow")
         phys_tke = ctx["tke"]
@@ -18635,54 +20098,66 @@ class ModelDriver:
         ):
             _seg_device_config = self._device_config
 
-        run_segment = build_segment_fn(
-            model=self.model,
-            persistent_dgrid=self._persistent_dgrid_active(),   # #1028
-            persistent_cgrid=self._persistent_cgrid_active(),
-            tiled_step_fn=self._maybe_build_tiled_step(DT),
-            step_unified=step_unified,
-            step_unified_no_rad=step_unified_no_rad,
-            grid=self.grid,
-            sigma_full=sigma_full,
-            dsigma=dsigma,
-            dt=DT,
-            rad_update_steps=RAD_UPDATE_STEPS,
-            microphysics=cfg.microphysics,
-            fix_moisture=cfg.fix_moisture,
-            fix_mass=cfg.dycore.fix_mass,
-            fric_decay=self._fric_decay,
-            qv_smooth_coeff=self._qv_smooth_coeff,
-            lat=_seg_lat,
-            lon=_seg_lon,
-            start_day=START_DAY + self._insolation_day_offset,
-            gradient_checkpoint=(
-                cfg.gradient_checkpoint
-                if cfg.gradient_checkpoint
-                else segment_length > 50
-            ),
-            hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
-            tau_equator=cfg.tau_equator,
-            tau_pole=cfg.tau_pole,
-            sbm_tau_c=cfg.sbm_tau_c,
-            sbm_RH_ref=cfg.sbm_RH_ref,
-            C_H=cfg.C_H,
-            C_E=cfg.C_E,
-            albedo_ice=cfg.albedo_ice,
-            albedo_ocean=cfg.albedo_ocean,
-            ghg_vmr_override=ghg_vmr,
-            owned_face_ids=self._owned_face_ids,
-            hs_newtonian_relax=self._hs_newtonian_relax,
-            device_config=_seg_device_config,
-            energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
-            advect_moisture=self._moisture_advection_active(),
-            # Un-fused-radiation host path (ExperimentConfig.unfused_radiation,
-            # default OFF): the pipeline lets build_segment_fn expose
-            # run_norad_scan / run_rad so rrtmgp and the no-rad scan compile
-            # as two separate executables.  Passing it is harmless when the
-            # flag is off (the attributes are simply never invoked).
-            pipeline=self.physics,
-            budget_ledger=cfg.output.budget_ledger,
-        )
+        def _build_run_segment(_su, _su_norad):
+            # one build recipe for the every-step and the mynn25
+            # cold-start segment fns (they differ only in these two)
+            return build_segment_fn(
+                model=self.model,
+                persistent_dgrid=self._persistent_dgrid_active(),   # #1028
+                persistent_cgrid=self._persistent_cgrid_active(),
+                tiled_step_fn=self._maybe_build_tiled_step(DT),
+                step_unified=_su,
+                step_unified_no_rad=_su_norad,
+                grid=self.grid,
+                sigma_full=sigma_full,
+                dsigma=dsigma,
+                dt=DT,
+                rad_update_steps=RAD_UPDATE_STEPS,
+                microphysics=cfg.microphysics,
+                fix_moisture=cfg.fix_moisture,
+                fix_mass=cfg.dycore.fix_mass,
+                fric_decay=self._fric_decay,
+                qv_smooth_coeff=self._qv_smooth_coeff,
+                lat=_seg_lat,
+                lon=_seg_lon,
+                start_day=START_DAY + self._insolation_day_offset,
+                gradient_checkpoint=(
+                    cfg.gradient_checkpoint
+                    if cfg.gradient_checkpoint
+                    else segment_length > 50
+                ),
+                hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
+                tau_equator=cfg.tau_equator,
+                tau_pole=cfg.tau_pole,
+                sbm_tau_c=cfg.sbm_tau_c,
+                sbm_RH_ref=cfg.sbm_RH_ref,
+                C_H=cfg.C_H,
+                C_E=cfg.C_E,
+                albedo_ice=cfg.albedo_ice,
+                albedo_ocean=cfg.albedo_ocean,
+                ghg_vmr_override=ghg_vmr,
+                owned_face_ids=self._owned_face_ids,
+                hs_newtonian_relax=self._hs_newtonian_relax,
+                device_config=_seg_device_config,
+                energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+                advect_moisture=self._moisture_advection_active(),
+                # Un-fused-radiation host path (ExperimentConfig.unfused_radiation,
+                # default OFF): the pipeline lets build_segment_fn expose
+                # run_norad_scan / run_rad so rrtmgp and the no-rad scan compile
+                # as two separate executables.  Passing it is harmless when the
+                # flag is off (the attributes are simply never invoked).
+                pipeline=self.physics,
+                budget_ledger=cfg.output.budget_ledger,
+            )
+        run_segment = _build_run_segment(step_unified, step_unified_no_rad)
+        # turbulence='mynn25': the peeled cold-start step (vote R1a) runs
+        # once, through its own 1-step segment, unless a restored carry_aux
+        # says the run is already initialised (R2a).
+        _mynn_peel = None
+        if mynn_init_steps is not None:
+            _mynn_peel = self._mynn_peel_pending()
+            if _mynn_peel:
+                run_segment_init = _build_run_segment(*mynn_init_steps)
 
         logger.info(
             f"Starting compiled run: {n_steps_remaining} steps, "
@@ -18873,6 +20348,7 @@ class ModelDriver:
                     if getattr(self, "_requires_surface_flux_export", False)
                     else None),
                 T_land=T_land,
+                ice_T_skin=ice_T_skin,
                 # Prognostic multilayer land state (None ⇒ slab path, byte-identical
                 # carry).  Seeded in _setup_multilayer_land; the segment advances it
                 # and the readback below persists it across segment boundaries.
@@ -18893,6 +20369,13 @@ class ModelDriver:
                      for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
                     if isinstance(self.tracers, dict) else {}
                 ),
+                # WRF Tiedtke's lagged turbulence pair (qvpblten, qfx): carried
+                # across segments AND restarts via carry_aux, as WRF restarts
+                # RQVBLTEN / QFX (vote V13b); zeros on a cold start.
+                **tiedtke_lag_seeds(
+                    self.config.convection, self.q_v, self.state.p_s,
+                    prev=(self._carry_aux.get("tiedtke_turb_dq_v_prev"),
+                          self._carry_aux.get("tiedtke_evap_sfc_prev"))),
             )
 
             # Shard carry across devices for SPMD execution
@@ -18904,12 +20387,27 @@ class ModelDriver:
             if seg_idx == 0:
                 t_jit_start = time.time()
 
+            # turbulence='mynn25' cold start (votes M3/R1a): ONE peeled step
+            # through the initflag=True build, outside the segment scan; the
+            # rest of this segment runs the every-step build (the radiation
+            # phase gate below keys on the absolute step, so cadence holds).
+            _seg_run_steps = seg_steps
+            if _mynn_peel:
+                if self._ensemble_size > 1:
+                    raise NotImplementedError(
+                        "turbulence='mynn25' cold-start peel is single-member "
+                        "only on the compiled lane")
+                carry = run_segment_init(carry, 1, forcing)
+                _seg_run_steps = seg_steps - 1
+                _mynn_peel = False
             # Execute compiled segment (vmap over ensemble if needed)
-            if self._ensemble_size > 1:
+            if _seg_run_steps == 0:
+                pass
+            elif self._ensemble_size > 1:
                 carry = jax.vmap(run_segment, in_axes=(0, None, None))(carry, seg_steps, forcing)
             elif (cfg.unfused_radiation
                     and RAD_UPDATE_STEPS > 1
-                    and seg_steps % RAD_UPDATE_STEPS == 0
+                    and _seg_run_steps % RAD_UPDATE_STEPS == 0
                     # PHASE gate.  The host loop below hardcodes "advance
                     # exactly RAD_UPDATE_STEPS held steps, then refresh", which
                     # only lands on the configured boundary when the segment
@@ -18939,14 +20437,14 @@ class ModelDriver:
                 # refresh lands at the cycle boundary.  This is the intended
                 # one-step phase shift (numerically equivalent to ~1e-6; same
                 # kernels, different compile boundary).
-                n_outer = seg_steps // RAD_UPDATE_STEPS
+                n_outer = _seg_run_steps // RAD_UPDATE_STEPS
                 for _ic in range(n_outer):
                     # advance RAD_UPDATE_STEPS no-rad steps w/ current held_*
                     carry = run_segment.run_norad_scan(carry, forcing)
                     # recompute fresh held_*/T_land from post-cycle state
                     carry = run_segment.run_rad(carry, forcing)
             else:
-                carry = run_segment(carry, seg_steps, forcing)           # legacy fused path (byte-identical)
+                carry = run_segment(carry, _seg_run_steps, forcing)      # legacy fused path (byte-identical)
 
             # Carry the lagged convective-cloud precip into the next segment
             # (single-member only — see pack_carry above).
@@ -19098,6 +20596,9 @@ class ModelDriver:
             if carry.T_land is not None:
                 T_land = carry.T_land
                 self._carry_aux["T_land"] = T_land
+            if carry.ice_T_skin is not None:
+                ice_T_skin = carry.ice_T_skin
+                self._carry_aux["ice_T_skin"] = ice_T_skin
             # Soil-water bucket: carry to the next segment + checkpoint.
             if carry.w_land is not None:
                 w_land = carry.w_land
@@ -19114,12 +20615,18 @@ class ModelDriver:
             if carry.qke is not None:
                 phys_qke = carry.qke
                 self._carry_aux["qke"] = phys_qke
+                if mynn_init_steps is not None and not _mynn_peel:
+                    # the cold-start step has run (vote R2a), checkpointed with qke
+                    self._carry_aux["mynn_initialized"] = np.asarray(True)
             if carry.gwd_spectrum is not None:
                 phys_gwd_spectrum = carry.gwd_spectrum
                 self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
             if carry.cloud_fraction is not None:
                 phys_cloud_fraction = carry.cloud_fraction
                 self._carry_aux["cloud_fraction"] = phys_cloud_fraction
+            if carry.turb_dq_v_prev is not None:
+                self._carry_aux["tiedtke_turb_dq_v_prev"] = carry.turb_dq_v_prev
+                self._carry_aux["tiedtke_evap_sfc_prev"] = carry.evap_sfc_prev
 
             current_step = seg_end_step
 
@@ -19268,7 +20775,7 @@ class ModelDriver:
                     sw_net_sfc=seg_sw_net_sfc,
                     lw_net_sfc=seg_lw_net_sfc,
                     sw_down_toa=seg_sw_down_toa,
-                    T_ice=cfg.T_ice,
+                    T_ice=(cfg.T_ice if ice_T_skin is None else ice_T_skin),
                     lat_deg_grid=lat_deg_grid,
                     shflx=seg_shflx_rate,
                     lhflx=seg_lhflx_rate,
@@ -19441,6 +20948,16 @@ class ModelDriver:
         # prognostic slab-land T_land from self._carry_aux; on a fresh
         # start self._carry_aux is empty so this is a no-op (#325
         # restart-safety for the non-compiled reference path).
+        if self.config.convection == "tiedtke":
+            raise NotImplementedError(
+                "convection='tiedtke' is wired on the compiled-segment and "
+                "column lanes only; this per-step reference loop does not "
+                "carry its dynamics q_v tendency / lagged turbulence inputs")
+        if getattr(self.config, "turbulence", "none") == "mynn25":
+            raise NotImplementedError(
+                "turbulence='mynn25' (WRF MYNN-EDMF) is wired on the compiled-"
+                "segment and column lanes only; this per-step reference loop "
+                "does not peel its cold-start step (vote P6/R1a)")
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         cfg = ctx["cfg"]
         # Issue #405/#413: this loop now seeds and threads the
@@ -19486,6 +21003,7 @@ class ModelDriver:
         # T_sfc consistently with the compiled-segment path.  ``None``
         # when the land tile is inactive.
         T_land = ctx["T_land"]
+        ice_T_skin = ctx["ice_T_skin"]
         # Soil-water bucket (None unless active): threaded like T_land.
         w_land = ctx["w_land"]
         snow = ctx.get("snow")
@@ -19625,7 +21143,7 @@ class ModelDriver:
         # arity mismatch.
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), \
-            T_land, land_ml = \
+            T_land, land_ml, *_skin_ret = \
             _warmup_step_fn(
                 jnp.bool_(warmup_need_rad),
                 self.state.T.data, self.state.p_s.data,
@@ -19645,7 +21163,10 @@ class ModelDriver:
                          if self._ensemble_size == 1 else None),
                 T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
                 **_phys_carry_step_inputs(),
+                **({} if ice_T_skin is None else {"ice_T_skin": ice_T_skin}),
             )
+        if _skin_ret:
+            ice_T_skin = _skin_ret[0]
         conv_prog = phys_out.conv_prog
         if phys_out.w_land is not None:
             w_land = phys_out.w_land
@@ -19667,6 +21188,8 @@ class ModelDriver:
         })
         if T_land is not None:
             self._carry_aux["T_land"] = T_land
+        if ice_T_skin is not None:
+            self._carry_aux["ice_T_skin"] = ice_T_skin
         if w_land is not None:
             self._carry_aux["w_land"] = w_land
         if snow is not None:
@@ -19765,7 +21288,7 @@ class ModelDriver:
             # state like the compiled-segment path (single-member only).
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), \
-                T_land, land_ml = \
+                T_land, land_ml, *_skin_ret = \
                 _step_fn(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
@@ -19785,7 +21308,11 @@ class ModelDriver:
                              if self._ensemble_size == 1 else None),
                     T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
                     **_phys_carry_step_inputs(),
+                    **({} if ice_T_skin is None
+                       else {"ice_T_skin": ice_T_skin}),
                 )
+            if _skin_ret:
+                ice_T_skin = _skin_ret[0]
             conv_prog = phys_out.conv_prog
             # Sedimentation sub-steps: same window-maximum + cadence report as
             # the MPAS loop, from the count this lane returns directly
@@ -19824,6 +21351,8 @@ class ModelDriver:
             })
             if T_land is not None:
                 self._carry_aux["T_land"] = T_land
+            if ice_T_skin is not None:
+                self._carry_aux["ice_T_skin"] = ice_T_skin
             if w_land is not None:
                 self._carry_aux["w_land"] = w_land
             if snow is not None:
@@ -19899,7 +21428,7 @@ class ModelDriver:
                     sw_net_sfc=phys_out.sw_net_sfc,
                     lw_net_sfc=phys_out.lw_net_sfc,
                     sw_down_toa=phys_out.sw_down_toa,
-                    T_ice=cfg.T_ice,
+                    T_ice=(cfg.T_ice if ice_T_skin is None else ice_T_skin),
                     lat_deg_grid=lat_deg_grid,
                     q_s=self.tracers.get("q_s") if isinstance(self.tracers, dict) else None,
                     q_g=self.tracers.get("q_g") if isinstance(self.tracers, dict) else None,

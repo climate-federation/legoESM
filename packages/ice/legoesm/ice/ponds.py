@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.ice.config import MeltPondConfig
+from legoesm.core.source_rounding import nemo_source_round
+from legoesm.ice.config import MeltPondConfig, SI3PondConfig
+from legoesm.ice.constants_config import IceConstantsConfig
+from legoesm.ice.si3_thd_pnd import si3_ice_thd_pnd
 
 # Canonical melt-pond defaults (single source of truth callers pass in).
 _POND_DEFAULTS = MeltPondConfig()
@@ -44,6 +47,26 @@ def step_ponds(
     depth_to_area_ratio: float,
     snow_block_threshold: float = _POND_DEFAULTS.snow_block_threshold,
     refreeze_width_K: float = _POND_DEFAULTS.refreeze_width_K,
+    scheme: str = _POND_DEFAULTS.scheme,
+    at_i: jnp.ndarray | None = None,
+    a_i: jnp.ndarray | None = None,
+    h_i: jnp.ndarray | None = None,
+    t_su: jnp.ndarray | None = None,
+    h_il: jnp.ndarray | None = None,
+    dh_i_sum: jnp.ndarray | None = None,
+    dh_s_sum: jnp.ndarray | None = None,
+    sz_i: jnp.ndarray | None = None,
+    t_i: jnp.ndarray | None = None,
+    namthd_pnd: SI3PondConfig | None = None,
+    rho_w: float | None = None,
+    gravity: float | None = None,
+    ice_constants: IceConstantsConfig | None = None,
+    v_i: jnp.ndarray | None = None,
+    a_ip: jnp.ndarray | None = None,
+    v_ip: jnp.ndarray | None = None,
+    v_il: jnp.ndarray | None = None,
+    wfx_pnd: jnp.ndarray | None = None,
+    nn_hls: int = 0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advance pond area + depth one time step.
 
@@ -57,6 +80,8 @@ def step_ponds(
         liquid water].
     rain_water_m : array
         Water input from precipitation this step [m liquid].
+        ``scheme='si3_lev'`` ignores this: ``pnd_LEV`` fills from melt only
+        (``icethd_pnd.f90:454``), and the caller routes all rain to the ocean.
     ice_mask : bool array
         True where ice exists.
     h_snow : array
@@ -98,6 +123,191 @@ def step_ponds(
         gain on the per-ice-area column ``h`` (white-ice gain; no FW
         exchange with the ocean).
     """
+    if scheme not in ("cesm", "si3_lev"):
+        raise ValueError(
+            f"Unknown MeltPondConfig.scheme={scheme!r}; expected 'cesm' or 'si3_lev'"
+        )
+    if scheme == "si3_lev":
+        if not isinstance(namthd_pnd, SI3PondConfig):
+            raise ValueError(
+                "step_ponds(scheme='si3_lev') requires MeltPondConfig.namthd_pnd "
+                "to be an explicit SI3PondConfig; no defaults"
+            )
+        if any(
+            x is None
+            for x in (
+                at_i,
+                a_i,
+                h_i,
+                t_su,
+                h_il,
+                dh_i_sum,
+                dh_s_sum,
+                sz_i,
+                t_i,
+                rho_w,
+                gravity,
+                ice_constants,
+            )
+        ):
+            raise ValueError(
+                "step_ponds(scheme='si3_lev') requires at_i, a_i, h_i, t_su, "
+                "h_il, melt totals, sz_i, t_i, rho_w, gravity, and ice_constants"
+            )
+        a_i_f64 = jnp.asarray(a_i, dtype=jnp.float64)
+        # One category per call on any spatial layout: lat-lon, cube (6, n, n), MPAS (ncol,).
+        spatial_shape = a_i_f64.shape
+        if jnp.shape(at_i) != spatial_shape:
+            raise ValueError(
+                "step_ponds(scheme='si3_lev') takes one category per call: at_i "
+                f"shape {jnp.shape(at_i)} must equal a_i shape {spatial_shape}"
+            )
+
+        def grid_2d(field):
+            return field if field.ndim == 2 else field.reshape(-1, 1)
+
+        pond_area_f64 = jnp.asarray(pond_area, dtype=jnp.float64)
+        h_ip_in = jnp.asarray(pond_depth, dtype=jnp.float64)
+        h_il_in = jnp.asarray(h_il, dtype=jnp.float64)
+        h_i_in = jnp.asarray(h_i, dtype=jnp.float64)
+        t_su_in = jnp.asarray(t_su, dtype=jnp.float64)
+        dh_i_sum_in = jnp.asarray(dh_i_sum, dtype=jnp.float64)
+        dh_s_sum_in = jnp.asarray(dh_s_sum, dtype=jnp.float64)
+        at_i_in = jnp.asarray(at_i, dtype=jnp.float64)
+        a_ip_in = (
+            nemo_source_round(pond_area_f64 * a_i_f64)
+            if a_ip is None
+            else jnp.asarray(a_ip, dtype=jnp.float64)
+        )
+        v_i_in = (
+            nemo_source_round(h_i_in * a_i_f64)
+            if v_i is None
+            else jnp.asarray(v_i, dtype=jnp.float64)
+        )
+        v_ip_in = (
+            nemo_source_round(h_ip_in * a_ip_in)
+            if v_ip is None
+            else jnp.asarray(v_ip, dtype=jnp.float64)
+        )
+        v_il_in = (
+            nemo_source_round(h_il_in * a_ip_in)
+            if v_il is None
+            else jnp.asarray(v_il, dtype=jnp.float64)
+        )
+        sz_i_f64 = jnp.asarray(sz_i, dtype=jnp.float64)
+        t_i_f64 = jnp.asarray(t_i, dtype=jnp.float64)
+        if sz_i_f64.ndim == h_ip_in.ndim:
+            sz_i_f64 = sz_i_f64[..., None]
+        if t_i_f64.ndim == h_ip_in.ndim:
+            t_i_f64 = t_i_f64[..., None]
+        if sz_i_f64.shape[:-1] != spatial_shape or t_i_f64.shape != sz_i_f64.shape:
+            raise ValueError(
+                f"step_ponds(scheme='si3_lev') requires sz_i and t_i shape {spatial_shape} "
+                f"plus an optional layer axis; got {sz_i_f64.shape}, {t_i_f64.shape}"
+            )
+        wfx_in = (
+            jnp.zeros(spatial_shape, dtype=jnp.float64)
+            if wfx_pnd is None
+            else jnp.asarray(wfx_pnd, dtype=jnp.float64)
+        )
+        at_i_2d = grid_2d(at_i_in)
+        wfx_2d = grid_2d(wfx_in)
+        a_i_3d = grid_2d(a_i_f64)[..., None]
+        v_i_3d = grid_2d(v_i_in)[..., None]
+        h_i_3d = grid_2d(h_i_in)[..., None]
+        t_su_3d = grid_2d(t_su_in)[..., None]
+        a_ip_3d = grid_2d(a_ip_in)[..., None]
+        v_ip_3d = grid_2d(v_ip_in)[..., None]
+        h_ip_3d = grid_2d(h_ip_in)[..., None]
+        v_il_3d = grid_2d(v_il_in)[..., None]
+        h_il_3d = grid_2d(h_il_in)[..., None]
+        a_ip_frac_3d = grid_2d(pond_area_f64)[..., None]
+        dh_i_sum_3d = grid_2d(dh_i_sum_in)[..., None]
+        dh_s_sum_3d = grid_2d(dh_s_sum_in)[..., None]
+        sz_i_4d = sz_i_f64.reshape(at_i_2d.shape + (sz_i_f64.shape[-1], 1))
+        t_i_4d = t_i_f64.reshape(at_i_2d.shape + (t_i_f64.shape[-1], 1))
+        dt_f64 = jnp.asarray(dt, dtype=jnp.float64)
+        r1_dt = nemo_source_round(jnp.float64(1.0) / dt_f64)
+        nml = {
+            "ln_icedH": True,
+            "ln_pnd": True,
+            "ln_pnd_LEV": True,
+            "rn_apnd_min": namthd_pnd.rn_apnd_min,
+            "rn_apnd_max": namthd_pnd.rn_apnd_max,
+            "rn_pnd_flush": namthd_pnd.rn_pnd_flush,
+            "rn_himin": namthd_pnd.rn_himin,
+            "ln_pnd_lids": namthd_pnd.ln_pnd_lids,
+            "ln_pnd_rain": True,
+            "ln_pnd_alb": True,
+            "ln_pnd_CST": False,
+            "ln_pnd_TOPO": False,
+            "rn_apnd": 0.0,
+            "rn_hpnd": 0.0,
+            "rn_pnd_hl_min": 0.0,
+            "rn_pnd_hl_max": 0.0,
+            "ln_icediachk": False,
+        }
+        pnd_out = si3_ice_thd_pnd(
+            a_i=a_i_3d,
+            v_i=v_i_3d,
+            h_i=h_i_3d,
+            t_su=t_su_3d,
+            a_ip=a_ip_3d,
+            v_ip=v_ip_3d,
+            h_ip=h_ip_3d,
+            v_il=v_il_3d,
+            h_il=h_il_3d,
+            a_ip_frac=a_ip_frac_3d,
+            dh_i_sum_2d=dh_i_sum_3d,
+            dh_s_sum_2d=dh_s_sum_3d,
+            t_i=t_i_4d,
+            sz_i=sz_i_4d,
+            wfx_pnd=wfx_2d,
+            namelist=nml,
+            rDt_ice=dt_f64,
+            r1_Dt_ice=r1_dt,
+            rho_w=rho_w,
+            gravity=gravity,
+            nn_hls=nn_hls,
+            constants=ice_constants,
+            _allow_general_shape=True,
+            _at_i_override=at_i_2d,
+        )
+        a_ip_out = pnd_out.a_ip[..., 0].reshape(spatial_shape)
+        h_ip_out = pnd_out.h_ip[..., 0].reshape(spatial_shape)
+        h_il_out = pnd_out.h_il[..., 0].reshape(spatial_shape)
+        wfx_out = pnd_out.wfx_pnd.reshape(spatial_shape)
+        has_ice = a_i_f64 > 0.0
+        safe_ai = jnp.where(has_ice, a_i_f64, jnp.ones_like(a_i_f64))
+        pond_area_new = jnp.where(
+            has_ice,
+            nemo_source_round(a_ip_out / safe_ai),
+            jnp.zeros_like(a_ip_out),
+        )
+        pond_depth_new = h_ip_out
+        h_il_new = h_il_out
+        rho_w_f64 = jnp.asarray(rho_w, dtype=jnp.float64)
+        drain_cell_m = nemo_source_round(
+            nemo_source_round(wfx_out * dt_f64) / rho_w_f64
+        )
+        drain_to_ocean_m = jnp.where(
+            has_ice,
+            nemo_source_round(drain_cell_m / safe_ai),
+            jnp.zeros_like(pond_depth_new),
+        )
+        refreeze_m = jnp.zeros_like(pond_depth_new)
+        return (
+            pond_area_new.astype(pond_area.dtype),
+            pond_depth_new.astype(pond_depth.dtype),
+            drain_to_ocean_m.astype(pond_depth.dtype),
+            refreeze_m.astype(pond_depth.dtype),
+            h_il_new.astype(jnp.asarray(h_il).dtype),
+        )
+    if namthd_pnd is not None:
+        raise ValueError(
+            "step_ponds(scheme='cesm') does not accept namthd_pnd; "
+            "set MeltPondConfig.scheme='si3_lev'"
+        )
     # Input water this step.  Snow thicker than the configured
     # threshold blocks pond formation; thinner snow / deposition
     # patches do not.

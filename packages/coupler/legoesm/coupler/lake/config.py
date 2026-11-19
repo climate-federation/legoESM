@@ -5,11 +5,21 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
+from legoesm.core.bulk_flux import (MOST_ZETA_CAP_WIDTH,
+                                      NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+                                      NCAR_NEUTRAL_WIDTH)
 
 __param_spec__ = {
     "LakeConfig": {
         "scheme_key": "coupler.lake",
-        "excluded": {"z_ref": "convention: reference height [m]"},
+        "excluded": {
+            "z_ref": "convention: reference height [m]",
+            "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
+            "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
+            "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
+            "most_zeta_cap_width": "numerics: RULE 5 half-width of the smooth |zeta| cap at 10 (0 = hard clip)",
+            "freeze_switch_width_K": "numerics: RULE 5 smoothing band of the frozen/open-water switch above T_freeze [K]",
+        },
         "params": {
             "h_epi": {
                 "units": "m", "bounds": (1.0, 20.0), "tunable_tier": 2,
@@ -81,6 +91,10 @@ class LakeConfig(NamedTuple):
     Cd_lake: float = 1.5e-3         # Drag coefficient (constant scheme)
     Ch_lake: float = 1.5e-3         # Heat transfer coefficient (constant)
     T_freeze: float = constants.T_freeze
+    # RULE 5 band [K] above T_freeze over which albedo, surface q_sat and latent
+    # heat ramp from the frozen to the open-water value (C1 cubic).  0.0 = the
+    # hard ``T_epi <= T_freeze`` switch.
+    freeze_switch_width_K: float = 0.01
     # Freshwater EOS parameters (T_freshwater_max_density and
     # rho_freshwater_curvature) live in legoesm.constants and are not
     # repeated here — physical constants belong in the constants
@@ -88,3 +102,12 @@ class LakeConfig(NamedTuple):
     bulk_scheme: str = "constant"   # "constant" or "most"
     z_ref: float = 10.0             # Reference height for MOST [m]
     bulk_n_iter: int = 5            # MOST iterations
+    # Large-Yeager (bulk_scheme="large_yeager", AeroBulk TURB_NCAR) RULE 5
+    # smooth-switch widths (#2241): in-loop neutral Stanton switch half-width
+    # in zeta_u, first-guess switch half-width in dthv [K], 33 m/s drag-cutoff
+    # band [m/s]; 0.0 = AeroBulk's hard switch.  Read only by that scheme.
+    large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
+    large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
+    large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10); bulk_flux constant.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH

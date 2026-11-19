@@ -103,7 +103,7 @@ def test_stable_stratification_suppresses_mixing():
 
 def test_unknown_stability_form_raises():
     from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
-    assert SmagorinskyConfig().stability_form == "lilly"   # default unchanged
+    assert SmagorinskyConfig().stability_form == "wrf_km3"   # WRF km_opt=3 port is the default
     cfg = SmagorinskyConfig(stability_form="deardorf")     # typo
     ncol, nlev = 1, 8
     from legoesm.atmosphere.physics.turbulence.smagorinsky import (

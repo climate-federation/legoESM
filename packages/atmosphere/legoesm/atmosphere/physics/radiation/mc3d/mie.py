@@ -41,7 +41,9 @@ class MieSamplingLUT(NamedTuple):
   n_mie: int
 
 
-_LUT_CACHE: dict[str, MieSamplingLUT] = {}
+# Host (numpy) arrays only: a jnp array built inside a jit trace is a tracer, and
+# caching it leaks into the next trace (UnexpectedTracerError on recompile).
+_LUT_CACHE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
 
 def _default_lut_path() -> pathlib.Path:
@@ -49,22 +51,19 @@ def _default_lut_path() -> pathlib.Path:
 
 
 def load_mie_sampling_lut(path: str | None = None, dtype=None) -> MieSamplingLUT:
-  """Load microhh's Mie sampling LUT (cached). Heavy/static -> load outside JIT."""
+  """Load microhh's Mie sampling LUT (file read cached; safe inside JIT)."""
   p = str(path) if path is not None else str(_default_lut_path())
-  if p in _LUT_CACHE:
-    return _LUT_CACHE[p]
-  with np.load(p) as data:
-    cdf = np.asarray(data["phase_cdf"])
-    ang = np.asarray(data["phase_cdf_angle"])
+  if p not in _LUT_CACHE:
+    with np.load(p) as data:
+      _LUT_CACHE[p] = (np.asarray(data["phase_cdf"]), np.asarray(data["phase_cdf_angle"]))
+  cdf, ang = _LUT_CACHE[p]
   dt = dtype or (jnp.float64 if jax.config.jax_enable_x64 else jnp.float32)
-  lut = MieSamplingLUT(
+  return MieSamplingLUT(
       phase_cdf=jnp.asarray(cdf, dt),
       phase_cdf_angle=jnp.asarray(ang, dt),
       n_band=int(cdf.shape[0]),
       n_mie=int(cdf.shape[1]),
   )
-  _LUT_CACHE[p] = lut
-  return lut
 
 
 def mie_sample_cos(
@@ -84,7 +83,9 @@ def mie_sample_cos(
   dtype = cdf_band.dtype
   # r_eff interpolation: lower bin index + fractional remainder.
   r_idx = jnp.clip((r_eff - _R_EFF_MIN).astype(jnp.int32), 0, _R_IDX_MAX)
-  r_rest = jnp.mod(r_eff - _R_EFF_MIN, 1.0).astype(dtype)
+  # C fmod (sign of the dividend), as the oracle: below 2.5 um the remainder
+  # is negative, so the r_eff rows 0/1 are extrapolated, not wrapped.
+  r_rest = jnp.fmod(r_eff - _R_EFF_MIN, 1.0).astype(dtype)
   # find_index on the DESCENDING CDF == (#{cdf > u}) - 1, clipped to [0,n_mie-2].
   i = jnp.clip(jnp.sum(cdf_band > u).astype(jnp.int32) - 1, 0, n_mie - 2)
 

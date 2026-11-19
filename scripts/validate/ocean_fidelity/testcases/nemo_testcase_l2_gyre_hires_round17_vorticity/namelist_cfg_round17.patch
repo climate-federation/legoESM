@@ -1,0 +1,23 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -16,12 +16,15 @@
+ !-----------------------------------------------------------------------
+ &namrun        !   parameters of the run
+ !-----------------------------------------------------------------------
+-   cn_exp      =  "GYRE_OMIP_L2_P3_R4_SMAG" ! quarter-degree Smag ten-step oracle
+-   nn_it000    =       1   !  first time step
+-   nn_itend    =      10   !  last  time step
++   cn_exp      =  "GYRE_R17_VORTEX" ! common-state stage-3 discriminator
++   nn_it000    =    4321   !  first time step after the shared day-180 restart
++   nn_itend    =    4321   !  exactly one time step
+    nn_leapy    =      30   !  Leap year calendar (1) or not (0)
+-   nn_stock    =      10   !  frequency of creation of a restart file (modulo referenced to 1)
+-   nn_write    =      10   !  frequency of write in the output file   (modulo referenced to nn_it000)
++   ln_rstart   = .true.
++   nn_rstctl   =       2
++   cn_ocerst_in = "GYRE_R4_SMAG_R14_BUDGET_00004320_restart"
++   nn_stock    =    4321   !  terminal restart for passivity comparison
++   nn_write    =    4321   !  terminal state only
+    nn_istate   =       0   !  output the initial state (1) or not (0)
+ /
+ !-----------------------------------------------------------------------

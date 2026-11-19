@@ -222,12 +222,13 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
         from legoesm.land import soil_texture as _st
         sand, clay = float(texture[0]), float(texture[1])
         vg = _st.vg_params_from_index(int(_st.usda_texture_index(sand, clay)))
-        wp, fc = _st.wilting_field_capacity(vg)
         kw["hydraulics"] = SoilHydraulicsConfig(
             retention_curve="van_genuchten",
             theta_r=float(vg["theta_r"]), theta_sat=float(vg["theta_sat"]),
             alpha_vg=float(vg["alpha_vg"]), n_vg=float(vg["n_vg"]),
             K_sat=float(vg["K_sat"]), k_sat_decay_m=k_sat_decay_m)
+        wp, fc = _st.wilting_field_capacity(
+            vg, vg_air_entry_m=kw["hydraulics"].vg_air_entry_m)
         kw["theta_fc"], kw["theta_wp"] = float(fc), float(wp)
     elif soil != "default" and soil != "auto":
         h = dict(_SOIL_HYDRAULICS[soil])

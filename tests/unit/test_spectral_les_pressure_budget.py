@@ -188,7 +188,8 @@ def test_surface_boundary_matches_most_and_prescribed():
     cd, q = sl.surface_boundary(st.u, st.v, st.theta, g, -0.01, jnp.asarray(263.0))
     spd = jnp.mean(jnp.sqrt(st.u[..., 0] ** 2 + st.v[..., 0] ** 2 + 1e-12))
     _us, _ts, q_ref, cd_ref = sl.most_surface_flux(
-        spd, jnp.mean(st.theta[..., 0]), 263.0, g.z_c[0], 0.1, 265.0)
+        spd, jnp.mean(st.theta[..., 0]), 263.0, g.z_c[0], 0.1, 265.0,
+        zeta_cap_width=g.cfg.most_zeta_cap_width)
     assert float(q) < 0.0     # warm air over a colder surface → downward heat flux
     np.testing.assert_allclose(float(q), float(q_ref), rtol=1e-12)
     np.testing.assert_allclose(float(cd), float(cd_ref), rtol=1e-12)

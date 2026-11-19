@@ -1,6 +1,6 @@
 """WeatherBench ERA5-surface-flux + spatial-embedding config plumbing.
 
-Pins the scale_build helpers (``wb_needs_land_frac``, ``_era5_config``,
+Pins the scale_build helpers (``wb_needs_land_frac``, ``wb_era5_config``,
 campaign-YAML key validation), the committed campaign decks' flag settings,
 and the inert_params
 policy-freeze helpers on the real classical parameter pytree.
@@ -41,18 +41,18 @@ def test_era5_config_maps_the_flux_keys():
     from types import SimpleNamespace
 
     base = {"era5_zarr": "dummy"}
-    cfg = scale_build._era5_config(None, base)
+    cfg = scale_build.wb_era5_config(None, base)
     assert cfg.load_surface_fluxes is False
-    assert scale_build._era5_config(SimpleNamespace(mode="physics"), base).load_land_frac
+    assert scale_build.wb_era5_config(SimpleNamespace(mode="physics"), base).load_land_frac
     default_flux_zarr = cfg.flux_zarr
-    cfg = scale_build._era5_config(
+    cfg = scale_build.wb_era5_config(
         None, {**base, "era5_surface_fluxes": True,
                "era5_flux_zarr": "gs://bucket/flux"})
     assert cfg.load_surface_fluxes is True
     assert cfg.flux_zarr == "gs://bucket/flux" != default_flux_zarr
     # An explicit "" means "the state store is the flux store" and must
     # survive the mapping (a falsy check would silently restore ARCO).
-    cfg = scale_build._era5_config(None, {**base, "era5_flux_zarr": ""})
+    cfg = scale_build.wb_era5_config(None, {**base, "era5_flux_zarr": ""})
     assert cfg.flux_zarr == ""
 
 
@@ -123,11 +123,11 @@ def test_prescribed_surface_frozen_names_are_exactly_the_surface_leaves():
     for knob in _SURFACE_KNOBS:
         assert sum(knob in n for n in names) >= 1, knob
     # nothing else: every returned name carries a marker, and a non-surface
-    # knob (a convection timescale) is NOT in the list
+    # knob (a turbulence mixing length) is NOT in the list
     markers = inert_params.PRESCRIBED_SURFACE_LEAF_MARKERS
     assert all(any(m in n for m in markers) for n in names)
-    assert not any("tiedtke" in n for n in names)
-    assert any("tiedtke" in n for n in _leaf_names(params))
+    assert not any("louis_l_mix_max" in n for n in names)
+    assert any("louis_l_mix_max" in n for n in _leaf_names(params))
 
 
 def test_apply_forced_freeze_removes_the_surface_leaves_from_the_trainable_set():

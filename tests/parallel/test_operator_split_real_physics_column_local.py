@@ -170,3 +170,25 @@ def test_real_step_unified_is_column_local():
     dT = np.asarray(phys_g.dT_dt.data if hasattr(phys_g.dT_dt, "data")
                     else phys_g.dT_dt)
     assert float(np.max(np.abs(dT))) > 0.0, "physics inert — vacuous locality"
+
+
+def test_sundqvist_refuses_the_coupled_pipeline_lane():
+    """The coupled physics pipeline threads no PhysicsState, so it cannot
+    carry Sundqvist's gscond previous-step state (the other-process tendencies
+    its condensation needs): the scheme refuses there (port 2026-11-04).  The
+    band-area test this replaces checked the GFS area blend on this lane."""
+    grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON,
+                              radius=constants.R_earth / 30.0,
+                              omega=constants.Omega)
+    sigma = create_sigma_coordinate(n_levels=NLEV)
+    cfg = _experiment()._replace(microphysics="sundqvist")
+    su = build_physics_pipeline(grid, sigma, cfg).build_step_unified(
+        static_need_rad=True, jit=True)
+    i = _inputs(N_LAT, N_LON, NLEV, np.random.default_rng(4243))
+    lat, lon = _grid_lat_lon(grid)
+    with pytest.raises(ValueError, match="previous step's carry"):
+        su(jnp.bool_(True), i["T"], i["p_s"], i["q_v"], i["q_c"], i["q_r"],
+           None, i["u"], i["v"], i["sst"], i["sic"], lat, lon,
+           1.0, 0.0, 600.0, jnp.ones(14), constants.S_0, i["o3"], i["aod"],
+           i["held3"], i["held2"], i["held2"], i["held2"], i["held2"],
+           i["held2"], tke=i["tke"])

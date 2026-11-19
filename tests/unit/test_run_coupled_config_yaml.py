@@ -138,6 +138,23 @@ def test_orbital_insolation_flag_and_yaml_roundtrip(tmp_path):
     assert parser2.parse_args(["--orbital-insolation"]).orbital_insolation is True
 
 
+def test_morrison_warm_rain_flag_and_cmip_configs_name_the_law():
+    """The coupled lane has no CLUBB relvar: the CMIP configs name kk2000
+    (an unset law resolves to kk2000_cam6 under mg); the flag is unset by
+    default and an explicit CLI law wins over the config."""
+    assert "morrison_warm_rain_scheme" in _dests()
+    parser = mod.build_parser()
+    assert parser.parse_args([]).morrison_warm_rain_scheme is None
+    for cfg in CMIP_CONFIGS:
+        loaded = load_yaml_config(str(cfg), mod.build_parser())
+        assert loaded["morrison_warm_rain_scheme"] == "kk2000", cfg.name
+    parser.set_defaults(**load_yaml_config(str(CMIP_CONFIGS[0]), parser))
+    assert parser.parse_args([]).morrison_warm_rain_scheme == "kk2000"
+    assert parser.parse_args(
+        ["--morrison-warm-rain-scheme", "seifert_beheng_sb2001"]
+    ).morrison_warm_rain_scheme == "seifert_beheng_sb2001"
+
+
 def test_config_sets_defaults_cli_overrides():
     """--config supplies defaults; an explicit CLI flag still wins (precedence
     CLI > config-file > included base > parser default)."""

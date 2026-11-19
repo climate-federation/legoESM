@@ -338,6 +338,11 @@ def refuse_unsupported_spmd_config(config) -> None:
             "MPAS ocean SPMD: runoff_depth_spread_map is unsupported — the "
             "model bakes this per-cell static in at construction, so it is "
             "not re-sliced per device.")
+    if getattr(config, "runoff_depth_spread_levels", None) is not None:
+        raise NotImplementedError(
+            "MPAS ocean SPMD: runoff_depth_spread_levels is unsupported — the "
+            "model bakes this per-cell static in at construction, so it is "
+            "not re-sliced per device.")
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +496,8 @@ def spmd_vertex_refresh_probe(layout: MPASOceanSPMDLayout, stacked_vertex_field)
 # The step
 # ---------------------------------------------------------------------------
 
-def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable:
+def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout, *,
+                                 land_mask=None) -> Callable:
     """Build ``spmd_step(state, dt, aux=None, *, freshwater=None,
     surface_forcing=None, sponge=None) -> state`` for a model whose ``mesh`` is
     the reordered + padded GLOBAL mesh of ``layout``.
@@ -501,6 +507,12 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
     ``ppermute`` pack; CONCRETE per-cell arrays (closure constants such as the
     sponge's ``T_ref`` / ``S_ref``) are localised once per array identity and
     passed as stacked device operands; scalars replicate.
+
+    ``land_mask`` (the run's concrete global mask, optional) sets the local
+    model's ``land_fill_band_capacity`` to the largest per-rank count of
+    local slots holding global land-fill band cells (an upper bound of each
+    local band: the local graph is a subgraph), exposed as
+    ``spmd_step.land_fill_band_capacity``.
     """
     from legoesm.parallel.reductions import batch_psum_spmd
     from legoesm.parallel.shard_map_compat import shard_map
@@ -518,6 +530,15 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
 
     n_dev = layout.n_devices
     cells_per, edges_per = layout.cells_per, layout.edges_per
+    local_config = model.config
+    if land_mask is not None:
+        from legoesm.ocean.dynamics.mpas_fill import land_fill_band
+        m = model.mesh
+        band = np.asarray(land_fill_band(land_mask, m.cellsOnEdge[0], m.cellsOnEdge[1],
+                                         m.edgesOnCell, m.nEdgesOnCell))
+        # Count local SLOTS (padding may repeat a cell): >= every local band.
+        local_config = local_config._replace(land_fill_band_capacity=int(
+            max(np.count_nonzero(band[g]) for g in layout.gather_cells)))
     max_lc, max_le, max_lv = layout.max_lc, layout.max_le, layout.max_lv
     perms, vperms = layout.ppermute_perms, layout.vppermute_perms
     jax_mesh = layout.dev_config.mesh
@@ -660,6 +681,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
         my_mesh = jax.tree.map(lambda x: x[0], mesh_sl)._replace(**statics)
         model_l = copy.copy(model)
         model_l.mesh = my_mesh
+        model_l.config = local_config
         it_z = iter(z_sl)
         model_l.z_coord = jax.tree.unflatten(
             z_tree, [next(it_z)[0] if k != "rep" else x
@@ -796,4 +818,5 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
 
     spmd_step.layout = layout
     spmd_step.aux = default_aux
+    spmd_step.land_fill_band_capacity = local_config.land_fill_band_capacity
     return spmd_step

@@ -1,0 +1,16 @@
+{
+ "source": "tier-3 ORCA1 BLK unit record /burg/glab/users/pg2328/oracle_audit/tier3/blk/ctl_on/t3_blk_record_*.bin (32 ranks)",
+ "recorder_cfg": "nemo_5.0.1/cfgs/ORCA1_T3BLK (MY_SRC sbcblk recorder at sbc_blk pre-conversion, vote V1)",
+ "nemo": "NEMO 5.0.1 ORCA1, kt 17281 from the day-30 restart, 32 MPI tiles",
+ "legoesm_extract_sha": "ee8534602be3ffdff9b3f66dde1ee6397d3ab877",
+ "selection": "all wet cells with NEMO-transliteration min iterated UN10 < 0.5 m/s (calm) + 2 seeded (20261103) random ordinary wet cells per rank",
+ "index": "ii/jj = 1-based NEMO local (Nis0+i, Njs0+j) on the rank tile",
+ "spread_wet": {
+  "Cd": 2.2652831283967267e-12,
+  "Ch": 1.476649958755005e-12,
+  "Ce": 1.7094438919673279e-12
+ },
+ "n_cells": 131,
+ "n_calm": 67,
+ "n_calm_d2_or_d3": 0
+}

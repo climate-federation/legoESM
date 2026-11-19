@@ -6,13 +6,19 @@ conserves a tracer's mass ``sum A sum_k dp_k q_k``; the lane has no water
 fixer.  Fix: a per-stage transport mass fixer in ``spectral_pe_tendencies``
 plus a global mass restore after the tracer filter.
 
-Measured on this exact setup (T21 L10, 10-20 steps of 600 s, rotational +
+Measured when the fix landed (T21 L10, 10-20 steps of 600 s, rotational +
 divergent flow over a 1.5 km mountain, hyperdiffusion on, mass anchor on,
 x64), relative tracer-mass drift after 20 steps:
   before the fix: sigma 1.0e-5, hybrid 2.3e-3;
-  after:          sigma 2.1e-10, hybrid 7.9e-10 (ssp_rk54; the residual is
-                  the integrator's error on the bilinear invariant).
+  after:          sigma 2.1e-10, hybrid 7.9e-10 (ssp_rk54).
 The 1e-8 bound below therefore fails on the old code by >= 3 orders.
+
+The initial state is projected onto the model's de-aliased band before any
+mass is measured.  The model zeroes out-of-band lnps on its first step
+without re-weighting the tracers, which alone moves tracer mass by -6.3e-8
+(sigma) / -1.0e-7 (hybrid) here; measuring from an unprojected start
+charges that one-time projection to the transport.  Projected start over
+6000 s: drift <= 3.1e-10 at dt 600 s, 1.7e-12 at dt 150 s.
 """
 
 from __future__ import annotations
@@ -68,7 +74,8 @@ def _setup(grid, coord):
         hyperdiff_coeff=1.0 / (4 * 3600 * eig ** 2),
         time_integrator="ssp_rk54", fix_mass=True,
         anchor_mass_to_initial=True)
-    return SpectralPrimitiveEquationModel(grid, coord, cfg), st
+    model = SpectralPrimitiveEquationModel(grid, coord, cfg)
+    return model, model._apply_state_truncation(st)
 
 
 def _tracer_mass(grid, coord, s):

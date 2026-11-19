@@ -24,12 +24,24 @@ positivity limiters are subgradient points, not discontinuities):
 Faithfulness status vs the WRF KF-Eta oracle (``module_cu_kfeta.F``) —
 updated 2026-07-17 after the column-water-leak fix (PR #988) and this audit:
 
+KNOWN DIFFERENCE (RULE 5): the default ``variant="smooth"`` is a surrogate,
+not a smoothed WRF KF-Eta, so no width or sharpness recovers the oracle; the
+reference is ``variant="wrf_kfeta"`` (oracle match 1e-10).  "FAITHFUL" below
+means the ingredient follows the oracle's equations, not that the scheme
+matches it.  Measured on the WRF fixture (tests/atmosphere/
+test_kain_fritsch_smooth_gap.py, per column): heating and moistening miss by
+70-128 % of each firing column's peak, and the surrogate rains nothing on
+those columns (WRF: 4e-5 to 8e-3 kg/m^2/s).  Open defects, recorded, not
+fixed: DTLCL's ``- g(0)^p`` base subtraction leaves an asymptotic bias of
+about -0.2 K for resolved ascent (not the 3e-3 K residual quoted below), and
+the buoyancy-sort denominator ``max(tv10 - tv_u, 1e-6)`` drops its sign.
+
 FAITHFUL (defaults ON, oracle-derived, pinned)
 * Trigger: Kain (2004) Eqs. 1-2 grid-ascent perturbation
   ``DTLCL = dtlcl_coeff * WKL^dtlcl_exponent`` (``faithful_trigger=True``
-  default; smooth softplus surrogate, C^1 with a NEGLIGIBLE ~3e-3 K
-  residual at the WKL=0 cutoff — an exact-zero C^1 smooth positive part
-  does not exist; see ``_faithful_dtlcl``) + the RH trigger perturbation.
+  default; smooth softplus surrogate, C^1 with a ~3e-3 K residual at the
+  WKL=0 cutoff because softplus is never exactly 0; see ``_faithful_dtlcl``)
+  + the RH trigger perturbation.
 * Entrainment: radius-based Kain (2004) Eq. 5-6 rates
   (``faithful_entrainment=True`` default) with the PROF5 buoyancy-sorted
   per-level UER/UDR detrainment (incl. the VMFLCL/UPOLD active-plume-mass
@@ -350,8 +362,8 @@ def _faithful_dtlcl(
 
     The hard ``WKL > 1e-4`` branch and the ``WKL^0.33`` (infinite slope
     at 0) are replaced by a smooth, C^1 surrogate that is NEGLIGIBLY small
-    (~3e-3 K, the outer-softplus ln(2)/k residual — an exact-zero C^1
-    smooth positive part does not exist) at the KF cutoff ``WKL = 0`` and
+    (~3e-3 K, the outer-softplus ln(2)/k residual; softplus is never
+    exactly 0) at the KF cutoff ``WKL = 0`` and
     recovers ``dtlcl_coeff*WKL^p`` for ``WKL >> 0``:
 
         g(x)  = softplus(s*x)/s          (smooth positive part, g(0)=ln2/s)
@@ -384,8 +396,7 @@ def _faithful_dtlcl(
     # value ``sp`` is exactly 0 at base=0.  The OUTER ``softplus(k*sp)/k`` then
     # leaves its OWN tiny ``ln(2)/k`` residual, so DTLCL at the WKL=0 cutoff is
     # NOT exactly 0 but is negligible: ``dtlcl_coeff*ln(2)/dtlcl_pos_sharpness``
-    # ~ 3e-3 K with defaults (codex review-3 #2 — an exact-zero C^1 smooth
-    # positive part does not exist; softplus(0)=ln2>0).  3e-3 K is ~3 orders
+    # ~ 3e-3 K with defaults (codex review-3 #2; softplus(0)=ln2>0).  3e-3 K is ~3 orders
     # below the env-T variation across the LCL, so it does not move the
     # firing point.
     k = config.dtlcl_pos_sharpness
@@ -894,8 +905,17 @@ def kain_fritsch_convection(
     conv_prog_profile: jax.Array,
     dt: float,
     config: KainFritschConfig = KainFritschConfig(),
+    *,
+    u: jax.Array | None = None,
+    v: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array]:
     """Kain-Fritsch convection (AD-safe; smooth trigger/blend/gates).
+
+    ``config.variant`` selects the implementation: ``"smooth"`` (default) runs
+    the surrogate below and ignores ``u``/``v``; ``"wrf_kfeta"`` runs the
+    faithful, NOT RULE 5 compliant WRF KF-Eta port
+    (:func:`~legoesm.atmosphere.physics.convection.kain_fritsch_wrf.kain_fritsch_wrf_convection`),
+    which needs ``u`` and ``v``.  Any other value raises ``ValueError``.
 
     Parameters
     ----------
@@ -933,6 +953,23 @@ def kain_fritsch_convection(
     conv_prog_profile_new : jax.Array, shape (ncol, nlev)
         Updated carry with diagnosed ``M_b`` packed at ``[:, -1]``.
     """
+    if config.variant == "wrf_kfeta":
+        from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import (
+            kain_fritsch_wrf_convection,
+        )
+        return kain_fritsch_wrf_convection(
+            T, q_v, p_full, p_half, w_grid, conv_prog_profile, dt, config,
+            u=u, v=v)
+    if config.variant != "smooth":
+        raise ValueError(
+            f"KainFritschConfig.variant must be one of ('smooth', 'wrf_kfeta'), "
+            f"got {config.variant!r}")
+    for name in (n for n in KainFritschConfig._fields if n.startswith("wrf_")):
+        if getattr(config, name) != KainFritschConfig._field_defaults[name]:
+            raise ValueError(
+                f"KainFritschConfig.{name} is read only by variant='wrf_kfeta'; "
+                f"the smooth surrogate would ignore {getattr(config, name)!r}")
+    del u, v  # the smooth surrogate has no wind dependence
     ncol, nlev = T.shape
     del conv_prog_profile  # KF is diagnostic; we only emit a fresh profile.
 

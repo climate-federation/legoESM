@@ -34,6 +34,9 @@ rrtmgp_gpoint_checkpoint: false # plain scan over g-points (smaller compiled cod
 # --- physics scheme selection (the realistic coupled stack) ---
 convection: sbm                 # Betts-Miller adjustment (detrains-to-precip)
 microphysics: morrison          # 2-moment (ice) — needed with rrtmgp + sbm
+morrison_warm_rain_scheme: kk2000   # explicit: the unset default resolves to
+                                    # kk2000_cam6 under morrison_flavor mg,
+                                    # which needs CLUBB relvar (not wired here)
 clouds: sundqvist
 convective_cloud: true          # convective (thin-cirrus) cloud-fraction source;
                                 # converged: removes the ~4.5 K tropical cold bias.

@@ -15,7 +15,6 @@ level with a constructed marine-Sc column and ZERO surface flux (closed column,
 entrainment isolated):
 
 * the term DRIES the cloud top and MOISTENS the free troposphere just above it;
-* the SURFACE layer is untouched (no evaporation trade);
 * the column water AND potential temperature are CONSERVED (rho*dz weighted);
 * efficiency=0 / default-off is byte-identical to no entrainment;
 * the standalone helper is >=0 and needs ALL THREE gates (drying, inversion,
@@ -111,7 +110,14 @@ def test_helper_needs_all_three_gates():
 
 
 def test_entrainment_dries_cloud_top_not_surface_and_conserves():
-    """OFF->ON: cloud top dries, FT moistens, surface untouched, column conserved."""
+    """OFF->ON: cloud top dries, FT moistens, column conserved.
+
+    (A former check that the LOWEST level's moisture tendency moved by < 1e-3 of
+    the cloud-top drying was a property of the old, too-weak unstable Louis
+    enhancement: with the oracle (ECHAM/ICON) unstable geometry the saturated,
+    slightly unstable BL of this column mixes strongly enough that one implicit
+    step carries ~2% of the cloud-top drying to the lowest level.  K_ent itself is
+    still ~0 below the cloud top, and the surface flux is the caller's.)"""
     col = _marine_sc_column()
     off = louis_turbulence(**col, config=LouisConfig(
         cloudtop_entrainment_efficiency=0.0))
@@ -128,10 +134,7 @@ def test_entrainment_dries_cloud_top_not_surface_and_conserves():
     assert float(dq[i_ct + 1]) < -1e-9
     # (2) The moisture is exported ALOFT: net moistening above the cloud top.
     assert float(jnp.sum(dq[: i_ct + 1])) > 0.0
-    # (3) Surface layer untouched (no evaporation trade).
-    assert abs(float(dq[-1])) < 1e-3 * abs(float(dq[i_ct + 1]))
-
-    # (4) Conservation (closed column): rho*dz-weighted integral of the
+    # (3) Conservation (closed column): rho*dz-weighted integral of the
     #     entrainment moisture AND potential-temperature contribution ~ 0.
     z_half = col["z_half"][0]
     dz_layer = jnp.abs(z_half[:-1] - z_half[1:])          # (nlev,)

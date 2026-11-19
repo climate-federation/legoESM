@@ -26,6 +26,11 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_gas_optics
 Array: TypeAlias = jax.Array
 
 
+# NRLSSI2 mean-index offsets (mo_gas_optics_rrtmgp.F90 set_solar_variability).
+_SOLAR_MG_OFFSET = 0.1495954
+_SOLAR_SB_OFFSET = 0.00066696
+
+
 @dataclasses.dataclass(frozen=True)
 class LookupGasOpticsShortwave(lookup_gas_optics_base.AbstractLookupGasOptics):
   """Lookup table of gases' optical properties in the shortwave bands."""
@@ -59,7 +64,13 @@ def _load_data(
     data as ``Array``s.
   """
   data = lookup_gas_optics_base.load_data(tables, dims, strings)
-  solar_src = tables['solar_source_quiet']
+  # RTE default spectrum: quiet sun plus facular and sunspot terms at the file's
+  # default indices (mo_gas_optics_rrtmgp.F90 set_solar_variability).
+  solar_src = (
+      tables['solar_source_quiet']
+      + (tables['mg_default'] - _SOLAR_MG_OFFSET) * tables['solar_source_facular']
+      + (tables['sb_default'] - _SOLAR_SB_OFFSET) * tables['solar_source_sunspot']
+  )
   data['solar_src_tot'] = jnp.sum(solar_src)
   data['solar_src_scaled'] = solar_src / data['solar_src_tot']
   data['rayl_lower'] = tables['rayl_lower']

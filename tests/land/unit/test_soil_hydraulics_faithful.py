@@ -130,16 +130,16 @@ def test_van_genuchten_matches_paper_oracle():
     form to round-off for moderately negative psi (guards/clips inactive)."""
     psi = np.linspace(-5.0, -0.1, 12)
     Se_o, theta_o, K_o, C_o = _vg_oracle(psi, _CFG)
-    assert np.allclose(np.asarray(van_genuchten_Se(jnp.asarray(psi), _CFG)),
+    assert np.allclose(np.asarray(van_genuchten_Se(jnp.asarray(psi), _CFG, 0.0)),
                        Se_o, rtol=1e-9, atol=0.0)
-    assert np.allclose(np.asarray(van_genuchten_theta(jnp.asarray(psi), _CFG)),
+    assert np.allclose(np.asarray(van_genuchten_theta(jnp.asarray(psi), _CFG, 0.0)),
                        theta_o, rtol=1e-9, atol=0.0)
-    assert np.allclose(np.asarray(van_genuchten_K(jnp.asarray(psi), _CFG)),
+    assert np.allclose(np.asarray(van_genuchten_K(jnp.asarray(psi), _CFG, 0.0)),
                        K_o, rtol=1e-9, atol=0.0)
-    assert np.allclose(np.asarray(van_genuchten_C(jnp.asarray(psi), _CFG)),
+    assert np.allclose(np.asarray(van_genuchten_C(jnp.asarray(psi), _CFG, 0.0)),
                        C_o, rtol=1e-9, atol=0.0)
     # psi(theta) inverts theta(psi).
-    psi_back = np.asarray(van_genuchten_psi(jnp.asarray(theta_o), _CFG))
+    psi_back = np.asarray(van_genuchten_psi(jnp.asarray(theta_o), _CFG, 0.0))
     assert np.allclose(psi_back, psi, rtol=1e-9, atol=0.0)
 
 
@@ -147,7 +147,7 @@ def test_van_genuchten_K_at_saturation_is_ksat_exact():
     """The where-before-pow AD guard keeps the forward EXACT at saturation:
     psi=0 -> Se=1 -> Mualem inner=1 -> K=K_sat (canaries the guard's forward
     value, distinct from a naive pow that would give 0*inf)."""
-    K = float(van_genuchten_K(jnp.array(0.0), _CFG))
+    K = float(van_genuchten_K(jnp.array(0.0), _CFG, 0.0))
     assert K == pytest.approx(_CFG.K_sat, rel=1e-12, abs=0.0)
 
 
@@ -223,9 +223,9 @@ def test_soil_hydraulics_grad_finite_x64():
         assert bool(jnp.isfinite(g)), ("CH", th, g)
     # The deep-dry vG case must actually reach the 1e-12 sqrt floor (Se decays
     # only as |psi|^-(n-1)=|psi|^-0.56, so |psi| ~ 1e22 is needed, not 1e6).
-    assert float(van_genuchten_Se(jnp.array(-1.0e22), _CFG)) < 1e-12
+    assert float(van_genuchten_Se(jnp.array(-1.0e22), _CFG, 0.0)) < 1e-12
     for ps in (0.0, -0.5, -100.0, -1.0e22):
-        gv = jax.grad(lambda p: van_genuchten_K(p, _CFG))(jnp.array(ps))
+        gv = jax.grad(lambda p: van_genuchten_K(p, _CFG, 0.0))(jnp.array(ps))
         assert bool(jnp.isfinite(gv)), ("vG", ps, gv)
     for ps in (0.0, -0.5, -100.0):
         gb = jax.grad(lambda p: brooks_corey_K(p, _CFG))(jnp.array(ps))
@@ -238,7 +238,7 @@ def test_van_genuchten_K_grad_finite_float32_at_saturation():
     _was = getattr(jax.config, "jax_enable_x64", False)
     jax.config.update("jax_enable_x64", False)
     try:
-        g = jax.grad(lambda p: van_genuchten_K(p, _CFG))(jnp.float32(0.0))
+        g = jax.grad(lambda p: van_genuchten_K(p, _CFG, 0.0))(jnp.float32(0.0))
         assert g.dtype == jnp.float32
         assert bool(jnp.isfinite(g))
     finally:

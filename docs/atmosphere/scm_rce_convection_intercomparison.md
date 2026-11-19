@@ -15,9 +15,13 @@
 >    235 K may hold ice supersaturation up to `rh_homo = 2.583 - T/207.8`,
 >    withdrawn where cloud ice already exists (`thermo.
 >    homogeneous_freezing_rh_factor`, on the deposition target of
->    morrison/thompson/p3, ON by default). Liquid: the in-scheme iterated
->    saturation adjustment, opt-in, now carried by every factory-reachable
->    scheme. `scripts/validate/check_ifs_supersaturation_cap.py` verifies both
+>    morrison/thompson, ON by default; the WRF P3 port has none). Liquid: the in-scheme iterated
+>    saturation adjustment, an opt-in guard on the schemes in
+>    `HARD_SAT_GUARD_SCHEMES` (the faithful kessler / seifert_beheng ports
+>    refuse it); the sam-flavour Morrison this campaign runs applies gSAM's
+>    `satadj_liquid` (smooth switches by default, exact at the hard limit) on
+>    every call instead and refuses the opt-in guard.
+>    `scripts/validate/check_ifs_supersaturation_cap.py` verifies both
 >    in all three lanes (plane CRM, SCM campaign, global model).
 > 3. **Microphysics is `morrison` (SAM M2005 flavour), not `kessler`.**
 >    Kessler is warm-rain only, so the ice allowance is inert under it and the
@@ -559,6 +563,10 @@ the `#params` / `#evals` columns are in the table so that is visible in the
 same row as the number.
 
 ### 8.2c Where the cap is applied — MEASURED per scheme
+
+> The p3 rows below were measured on the gSAM P3 port that preceded the WRF
+> P3 port (#2077); the WRF port has no `rh_homo` allowance, so they no longer
+> describe the current p3.
 
 Reaching the scheme and being correctly gated does not prove the allowance is
 applied to the *deposition target*, which is what gSAM does. Section 2b of the

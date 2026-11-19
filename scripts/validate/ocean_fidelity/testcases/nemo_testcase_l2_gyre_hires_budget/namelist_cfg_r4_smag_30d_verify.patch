@@ -1,0 +1,13 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -19 +19 @@
+-   cn_exp      =  "GYRE_OMIP_L2_P3_R4_SMAG" ! quarter-degree Smag ten-step oracle
++   cn_exp      =  "GYRE_R4_SMAG_R15_VERIFY" ! round-15 day-30 closure verification
+@@ -21 +21 @@
+-   nn_itend    =      10   !  last  time step
++   nn_itend    =     720   !  30 days at 24 one-hour steps per day
+@@ -23,2 +23,2 @@
+-   nn_stock    =      10   !  frequency of creation of a restart file (modulo referenced to 1)
+-   nn_write    =      10   !  frequency of write in the output file   (modulo referenced to nn_it000)
++   nn_stock    =     720   !  terminal restart for passive-identity comparison
++   nn_write    =      24   !  daily IOIPSL state output

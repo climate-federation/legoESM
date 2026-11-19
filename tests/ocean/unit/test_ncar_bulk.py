@@ -16,6 +16,9 @@ Strategy
 
 from __future__ import annotations
 
+import inspect
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -24,13 +27,18 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
+from jax.test_util import check_grads  # noqa: E402
+
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
     air_sea_fluxes,
+    blk_oce_2,
     exner_potential_temperature,
     latent_heat_vaporization_sst as latent_heat_vaporization,
     moist_air_cp,
+    nemo_blk_oce_ncar,
     ncar_transfer_coefficients,
     potential_air_temperature_10m,
     pressure_at_height,
@@ -38,6 +46,228 @@ from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
     seawater_q_sat,
 )
 from legoesm.thermo import saturation_vapor_pressure_goff  # noqa: E402
+
+
+def test_standalone_k0_config_requires_every_explicit_selector():
+    """All six record-free K0 fields participate in fail-closed validation."""
+    from legoesm.ocean.bulk_flux_omip import (
+        NemoStandaloneK0Config,
+        validate_nemo_standalone_k0,
+    )
+
+    cfg = NemoStandaloneK0Config(
+        nn_ice=1, ln_drgice_imp=False, ln_mxl0=True, nn_mxlice=0,
+        ln_icebergs=False, initial_state="nemo_k0_istate")
+    validate_nemo_standalone_k0(cfg)
+    plants = {
+        "nn_ice": 0,
+        "ln_drgice_imp": True,
+        "ln_mxl0": False,
+        "nn_mxlice": 2,
+        "ln_icebergs": True,
+        "initial_state": "si3_iceistate",
+    }
+    for field, value in plants.items():
+        with pytest.raises(ValueError, match="Decision-175 K0 selectors"):
+            validate_nemo_standalone_k0(cfg._replace(**{field: value}))
+
+    from types import SimpleNamespace
+    import legoesm.ocean.bulk_flux_omip as bfo
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as ntr
+
+    seen_init = []
+
+    def _fake_orca2_card(deck_root, *, initial_state="file_ts"):
+        seen_init.append(initial_state)
+        return SimpleNamespace(
+            recipe=SimpleNamespace(
+                model_config=SimpleNamespace(
+                    implicit_ice_ocean_top_drag=False,
+                    physics=SimpleNamespace(
+                        vertical_mixing=SimpleNamespace(
+                            tke=SimpleNamespace(
+                                tke_mxl_choice=3,
+                                nemo_mxl0_surface_tmask=True,
+                                nemo_mxl0_rmxl_min_overwrite=True,
+                                nemo_mxlice=0,
+                            )
+                        )
+                    ),
+                ),
+                initial_state=None,
+            ),
+            icebergs_enabled=False,
+        )
+
+    real_builder = ntr.build_orca2_zps_card
+    ntr.build_orca2_zps_card = _fake_orca2_card
+    try:
+        k0_card = bfo.build_nemo_orca2_k0_ocean_card("/unused")
+    finally:
+        ntr.build_orca2_zps_card = real_builder
+    assert seen_init == ["nemo_k0_istate"]
+
+    for bad_k0 in (
+        cfg._replace(ln_drgice_imp=True),
+        cfg._replace(ln_mxl0=False),
+        cfg._replace(nn_mxlice=2),
+        cfg._replace(ln_icebergs=True),
+    ):
+        with pytest.raises(ValueError, match="Decision-175 K0 selectors"):
+            bfo._validate_k0_ocean_card(k0_card._replace(k0=bad_k0))
+
+    bad_drg = _fake_orca2_card("/unused")
+    bad_drg.recipe.model_config.implicit_ice_ocean_top_drag = True
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_drg))
+
+    bad_mxl_tmask = _fake_orca2_card("/unused")
+    bad_mxl_tmask.recipe.model_config.physics.vertical_mixing.tke.nemo_mxl0_surface_tmask = False
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_mxl_tmask))
+
+    bad_mxl_rmxl = _fake_orca2_card("/unused")
+    bad_mxl_rmxl.recipe.model_config.physics.vertical_mixing.tke.nemo_mxl0_rmxl_min_overwrite = False
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_mxl_rmxl))
+
+    bad_mxlice = _fake_orca2_card("/unused")
+    bad_mxlice.recipe.model_config.physics.vertical_mixing.tke.nemo_mxlice = 2
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_mxlice))
+
+    bad_icb = _fake_orca2_card("/unused")
+    bad_icb.icebergs_enabled = True
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_icb))
+
+    seen_nn_ice = []
+    real_blk = bfo.nemo_blk_oce_ncar
+    bfo.nemo_blk_oce_ncar = lambda *a, **kw: seen_nn_ice.append(kw.get("nn_ice"))
+    try:
+        bfo.nemo_orca2_k0_surface_card(
+            *(0.0,) * 10, 0.066, 1.0, 1.0, 5,
+            k0_config=cfg, ice_if=None, s0=None, s2=None)
+    finally:
+        bfo.nemo_blk_oce_ncar = real_blk
+    assert seen_nn_ice == [1]
+
+
+def test_k0_compiled_programs_trace_once_per_branch(monkeypatch):
+    """The K0 surface program traces once per nn_fsbc branch and the fraqsr
+    program once, however the per-step values change.  The physics they call
+    is stubbed with trace-time counters; dropping either ``eqx.filter_jit``
+    (running the uncompiled glue) calls the stub on every step and fails."""
+    from typing import NamedTuple
+
+    import legoesm.ocean.bulk_flux_omip as bfo
+    import legoesm.ocean.eos as eos
+    import legoesm.ocean.physics.shortwave_penetration as swp
+    from legoesm.core.precision import get_policy
+
+    traces = {"surface": 0, "fraqsr": 0}
+
+    class K0(NamedTuple):
+        nn_ice: int
+
+    class Card(NamedTuple):
+        albedo: float
+        precip_factor: float
+        evap_factor: float
+        nb_iter: int
+        k0: K0
+        numerics: object = None
+
+    class Z(NamedTuple):
+        nemo_e3t_0: jax.Array
+        z_half_ref: jax.Array
+        is_active: jax.Array
+
+    class S0(NamedTuple):
+        kt: jax.Array
+        u_before: jax.Array
+        v_before: jax.Array
+        temperature_now: jax.Array
+        salinity_now: jax.Array
+        ssh_now: jax.Array
+        e3t_reference: jax.Array
+        r3t_now: jax.Array
+        surface_mask: jax.Array
+
+    class IceIf(NamedTuple):
+        ts_surface: jax.Array
+        clock: jax.Array
+
+    class S2(NamedTuple):
+        runoff_now: jax.Array
+        sss_target: jax.Array
+        surface_mask: jax.Array
+
+    class Clock(NamedTuple):
+        seconds: jax.Array
+
+    class Surface(NamedTuple):
+        ice_if: IceIf
+
+    def s0f_stub(s0f):
+        traces["surface"] += 1
+        field = s0f.seconds * jnp.ones((3, 4))
+        return (field,) * 9, field, field
+
+    def fraqsr_stub(qsr, *_args):
+        traces["fraqsr"] += 1
+        return qsr
+
+    monkeypatch.setattr(bfo, "nemo_orca2_k0_s0f", s0f_stub)
+    monkeypatch.setattr(
+        bfo, "_nemo_blk_oce_ncar", lambda *a, **kw: Surface(kw["ice_if"]))
+    monkeypatch.setattr(eos, "nemo_r3t_stretch", lambda z, ssh, hb, **kw: 1.0 + ssh)
+    monkeypatch.setattr(
+        eos, "nemo_r3t_rk3_stage1_stretch", lambda z, a, b, hb, **kw: 1.0 + a + b)
+    monkeypatch.setattr(swp, "nemo_fraqsr_1lev", fraqsr_stub)
+
+    ny, nx, nz = 3, 4, 2
+    z = Z(jnp.ones((ny, nx, nz)), jnp.asarray([0.0, -1.0, -2.0]),
+          jnp.ones((ny, nx, nz)))
+    card = Card(0.066, 1.0, 1.0, 5, K0(1))
+    T = jnp.ones((ny, nx, nz))
+    zeros2 = jnp.zeros((ny, nx))
+    s0 = S0(*(jnp.zeros((ny, nx)) for _ in range(9)))
+    s2 = S2(zeros2, zeros2, zeros2)
+    prior = None
+    for kt in range(1, 5):
+        forcing_update = (kt - 1) % 2 == 0
+        _, prior, _, _ = bfo._nemo_orca2_k0_surface_compiled(
+            card, z, get_policy(), T + kt, T, jnp.ones((ny, nx + 1, nz)),
+            jnp.ones((ny + 1, nx, nz)), zeros2 + kt, zeros2, zeros2 + 1.0,
+            s0f=Clock(jnp.asarray(kt * 5400, dtype=jnp.int64)),
+            ice_if=IceIf(zeros2, jnp.asarray(kt, dtype=jnp.int64)),
+            s0=s0._replace(kt=jnp.asarray(kt, dtype=jnp.int64)), s2=s2,
+            chl=zeros2, geothermal_heat_flux_mwm2=zeros2,
+            prior_surface=None if forcing_update else prior,
+            forcing_update=forcing_update,
+        )
+        bfo._nemo_orca2_k0_next_fraqsr_compiled(
+            z, get_policy(), card.numerics, "stub", zeros2 + kt, zeros2 - kt,
+            zeros2, zeros2 + 1.0, zeros2 + kt, zeros2)
+    assert traces == {"surface": 2, "fraqsr": 1}
+
+    # The card's ``numerics`` alone keys both programs: with no scope open and
+    # the trace-time assertion stubbed out, each new value traces each once.
+    monkeypatch.setattr(bfo, "require_numerics", lambda expected: None)
+    for numerics in ("nemo_exact", "nemo_fast", "nemo_exact"):
+        bfo._nemo_orca2_k0_surface_compiled(
+            card._replace(numerics=numerics), z, get_policy(), T, T,
+            jnp.ones((ny, nx + 1, nz)), jnp.ones((ny + 1, nx, nz)), zeros2,
+            zeros2, zeros2 + 1.0, s0f=Clock(jnp.asarray(5400, dtype=jnp.int64)),
+            ice_if=IceIf(zeros2, jnp.asarray(1, dtype=jnp.int64)),
+            s0=s0._replace(kt=jnp.asarray(1, dtype=jnp.int64)), s2=s2,
+            chl=zeros2, geothermal_heat_flux_mwm2=zeros2, prior_surface=None,
+            forcing_update=True)
+        bfo._nemo_orca2_k0_next_fraqsr_compiled(
+            z, get_policy(), numerics, "stub", zeros2, zeros2, zeros2,
+            zeros2 + 1.0, zeros2, zeros2)
+    assert traces == {"surface": 4, "fraqsr": 3}
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +286,68 @@ _MDRY = 28.9647e-3                    # NEMO rmm_dryair
 _MWAT = 18.0153e-3                    # NEMO rmm_water
 _GAMMA_DRY = _RGAS / (_MDRY * 1005.0)  # NEMO rgamma_dry
 _RT0 = 273.15                         # const-ok: NEMO rt0 in the test mirror
+
+
+@pytest.mark.parametrize("backend", ["host", "scan"])
+def test_legacy_blk_oce_2_preserves_parent_reduction_order(backend):
+    """Host and scan backends keep the pre-refactor q_net word order.
+
+    The deliberately flattened plant is algebraically identical but differs
+    by ulps, so this is a live bitwise compatibility check rather than an
+    allclose physics test.
+    """
+    rng = np.random.default_rng(335)
+    shape = (37, 43)
+    theta = rng.uniform(245.0, 310.0, shape)
+    tsk_c = rng.uniform(-2.0, 32.0, shape)
+    lw = rng.uniform(180.0, 480.0, shape)
+    precip = rng.uniform(0.0, 2.0e-4, shape)
+    snow = precip * rng.uniform(0.0, 1.0, shape)
+    evap = rng.uniform(-2.0e-4, 2.0e-4, shape)
+    sensible = rng.uniform(-400.0, 400.0, shape)
+    latent = rng.uniform(-800.0, 800.0, shape)
+
+    xp = np if backend == "host" else jnp
+    theta = xp.asarray(theta)
+    tsk_c = xp.asarray(tsk_c)
+    lw = xp.asarray(lw)
+    precip = xp.asarray(precip)
+    snow = xp.asarray(snow)
+    evap = xp.asarray(evap)
+    sensible = xp.asarray(sensible)
+    latent = xp.asarray(latent)
+    theta_c = theta - constants.T_freeze
+    tsk_K = tsk_c + constants.T_freeze
+    qlwn = constants.emissivity_seawater_lw * (
+        lw - constants.sigma_sb * tsk_K ** 4
+    )
+    liquid = xp.maximum(precip - snow, 0.0)
+    q_precip_evap = (
+        -snow * constants.L_fus_nemo
+        - evap * constants.c_p_seawater * tsk_c
+        + liquid * constants.c_p_seawater * theta_c
+        + snow * constants.c_p_ice_nemo * xp.minimum(theta_c, 0.0)
+    )
+    parent_qns = sensible + latent + qlwn + q_precip_evap
+
+    got = blk_oce_2(
+        theta, tsk_c, lw, precip, snow, evap, sensible, latent,
+        array_namespace=xp,
+    )
+    np.testing.assert_array_equal(np.asarray(got.qns), parent_qns)
+
+    flattened_plant = (
+        qlwn + sensible + latent
+        - snow * constants.L_fus_nemo
+        - evap * constants.c_p_seawater * tsk_c
+        + liquid * constants.c_p_seawater * theta_c
+        + snow * constants.c_p_ice_nemo * xp.minimum(theta_c, 0.0)
+    )
+    flattened_plant = np.asarray(flattened_plant)
+    parent_qns = np.asarray(parent_qns)
+    assert np.count_nonzero(
+        flattened_plant.view(np.uint64) != parent_qns.view(np.uint64)
+    ) > 0
 
 
 def _np_e_sat_goff(T):
@@ -97,7 +389,9 @@ def _np_rho_air(T_abs, q, p):
 
 
 def _np_cd_n10(w):
-    w = np.maximum(w, 0.5)
+    # NEMO cd_n10_ncar (sbcblk_algo_ncar.F90:242-255) has no wind floor: the
+    # caller floors (0.5 first guess, 0.25 iterated UN10).  A 0.5 floor here
+    # mirrored legoESM's tier-3 BLK D1 defect instead of NEMO.
     cd = (2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w ** 6) * 1e-3
     cd = np.where(w >= 33.0, 2.34e-3, cd)
     return np.maximum(cd, 0.1e-3)
@@ -211,9 +505,14 @@ def _random_marine_inputs(n=4096, seed=7):
 def test_ncar_coefficients_match_independent_numpy_mirror():
     theta, q, sst, ssq, wind, _slp = _random_marine_inputs()
     Cd_np, Ch_np, Ce_np, Ub_np = _np_turb_ncar(theta, q, sst, ssq, wind)
+    # The NumPy mirror is NEMO's hard 33 m/s plateau and hard stable/unstable
+    # Stanton step: compare at the hard limit (all smoothing widths 0); the
+    # default's gaps are pinned in the #2241 tests.
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
         jnp.asarray(theta), jnp.asarray(q), jnp.asarray(sst),
-        jnp.asarray(ssq), jnp.asarray(wind))
+        jnp.asarray(ssq), jnp.asarray(wind), cd_cutoff_width=0.0,
+        zeta_cap_width=0.0, dthv_width=0.0, neutral_width=0.0,
+        zu_floor_rel_width=0.0)  # NEMO's hard switches
     assert np.allclose(np.asarray(Ub), Ub_np, rtol=0, atol=0)
     assert np.allclose(np.asarray(Cd), Cd_np, rtol=1e-12, atol=1e-15)
     assert np.allclose(np.asarray(Ch), Ch_np, rtol=1e-12, atol=1e-15)
@@ -233,10 +532,8 @@ def test_full_flux_path_matches_independent_numpy_mirror():
     q = rng.uniform(2e-4, 0.020, n)
     slp = rng.uniform(96000.0, 104000.0, n)
     # Keep q within w = q/q_sat <= 1.5 (up to 150% RH): the random draw can
-    # otherwise pair cold air with tropical humidity (w ~ 9, unphysical),
-    # where the implementation's w<=2 garbage guard INTENTIONALLY departs
-    # from the unclipped Fortran mirror.  Supersaturation parity has its own
-    # dedicated test (q = 1.3 q_sat).
+    # otherwise pair cold air with tropical humidity (w ~ 9, unphysical).
+    # Supersaturation parity has its own dedicated test (q = 1.3 and 7 q_sat).
     q = np.minimum(q, 1.5 * _np_q_sat(T_air, slp))
     u = rng.uniform(-20.0, 20.0, n)
     v = rng.uniform(-20.0, 20.0, n)
@@ -244,7 +541,9 @@ def test_full_flux_path_matches_independent_numpy_mirror():
     out = air_sea_fluxes(
         u10=jnp.asarray(u), v10=jnp.asarray(v), T_air_K=jnp.asarray(T_air),
         q_air=jnp.asarray(q), T_sfc_K=jnp.asarray(sst),
-        slp_Pa=jnp.asarray(slp))
+        slp_Pa=jnp.asarray(slp), zeta_cap_width=0.0, dthv_width=0.0,
+        neutral_width=0.0, cd_cutoff_width=0.0,
+        zu_floor_rel_width=0.0)  # NEMO's hard switches
     names = ("tau_x", "tau_y", "sh", "lh", "evap")
     theta_sst = _np_theta_exner(sst, slp)
     l_ratio = np.asarray(latent_heat_vaporization(jnp.asarray(theta_sst))) / _np_nemo_l_vap(theta_sst)
@@ -285,7 +584,9 @@ def test_near_neutral_reduces_to_neutral_coefficients():
     ssq = seawater_q_sat(sst)
     # tiny UNSTABLE offset (exact zero sits on the Fortran SIGN() knife edge)
     theta = sst - 1e-7
-    Cd, Ch, Ce, Ub = ncar_transfer_coefficients(theta, ssq, sst, ssq, wind)
+    # NEMO's hard stable/unstable step (#2241 widths 0): the limit is one-sided.
+    Cd, Ch, Ce, Ub = ncar_transfer_coefficients(theta, ssq, sst, ssq, wind,
+                                                dthv_width=0.0, neutral_width=0.0)
     CdN = large_yeager_neutral_cd(Ub, nemo_parity=True)
     assert np.allclose(np.asarray(Cd), np.asarray(CdN), rtol=1e-5)
     assert np.allclose(np.asarray(Ce),
@@ -378,11 +679,148 @@ def test_l_vap_deviation_from_nemo_is_bounded():
     assert np.all(ours[1:] < nemo[1:])   # Kirchhoff is the slightly steeper slope, so smaller L when warm
 
 
+_NO_ICE = {"nn_ice": 0, "ice_if": None}
+
+
+def _literal_scalar_inputs():
+    return (
+        jnp.asarray(6.25), jnp.asarray(-2.5), jnp.asarray(286.4),
+        jnp.asarray(0.0065), jnp.asarray(100800.0), jnp.asarray(14.2),
+        jnp.asarray(0.1), jnp.asarray(-0.2), jnp.asarray(125.0),
+        jnp.asarray(310.0), jnp.asarray(2.3e-5), jnp.asarray(3.0e-6),
+        jnp.asarray(1.0), 0.066, 1.0, 1.0, 5,
+    )
+
+
+def test_literal_blk_oce_inexact_binary64_pins_and_eager_jit():
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prior = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        eager = nemo_blk_oce_ncar(
+            *_literal_scalar_inputs(), **_NO_ICE, s0=None, s2=None)
+        inputs = _literal_scalar_inputs()
+        compiled = jax.jit(
+            lambda *values: nemo_blk_oce_ncar(
+                *values, 5, **_NO_ICE, s0=None, s2=None)
+        )(*inputs[:-1])
+        assert all(np.array_equal(np.asarray(a).view(np.uint64),
+                                  np.asarray(b).view(np.uint64))
+                   for a, b in zip(eager, compiled) if a is not None)
+        pins = {
+            "theta_air": 4643735832083737147,
+            "ssq": 4576833549615626132,
+            "qns": 13863530862587990243,
+            "utau": 4588492273966355432,
+            "taum": 4589134070458585377,
+        }
+        for name, word in pins.items():
+            assert int(np.asarray(getattr(eager, name)).view(np.uint64)) == word
+    finally:
+        set_policy(prior)
+
+
+def test_literal_blk_oce_path_plants_and_physical_inputs_have_no_defaults():
+    signature = inspect.signature(nemo_blk_oce_ncar)
+    optional_composition = {
+        "prior_surface", "chl", "geothermal_heat_flux_mwm2"}
+    assert all(parameter.default is inspect.Parameter.empty
+               for name, parameter in signature.parameters.items()
+               if name not in optional_composition)
+    base_args = list(_literal_scalar_inputs())
+    base = nemo_blk_oce_ncar(*base_args, **_NO_ICE, s0=None, s2=None)
+    longwave_args = list(base_args)
+    longwave_args[9] = longwave_args[9] + 1.0
+    longwave = nemo_blk_oce_ncar(
+        *longwave_args, **_NO_ICE, s0=None, s2=None)
+    assert float(longwave.qlwn - base.qlwn) == pytest.approx(
+        constants.emissivity_seawater_lw, rel=0.0, abs=1e-14)
+    assert np.asarray(longwave.qns).view(np.uint64) != np.asarray(base.qns).view(np.uint64)
+    snow_args = list(base_args)
+    snow_args[11] = snow_args[11] + 1.0e-6
+    snow = nemo_blk_oce_ncar(*snow_args, **_NO_ICE, s0=None, s2=None)
+    assert np.asarray(snow.qns).view(np.uint64) != np.asarray(base.qns).view(np.uint64)
+    assert np.asarray(snow.emp).view(np.uint64) == np.asarray(base.emp).view(np.uint64)
+
+
+def test_literal_blk_oce_finite_difference_gradient():
+    args = _literal_scalar_inputs()
+    objective = lambda sst: nemo_blk_oce_ncar(
+        *args[:5], sst, *args[6:], **_NO_ICE, s0=None, s2=None
+    ).qns
+    value = args[5]
+    tangent = float(jax.grad(objective)(value))
+    step = 1.0e-4
+    finite_difference = float(
+        (objective(value + step) - objective(value - step)) / (2.0 * step)
+    )
+    assert np.isfinite(tangent)
+    assert tangent == pytest.approx(finite_difference, rel=2e-5, abs=2e-5)
+
+
+def test_literal_blk_oce_zero_wind_and_masked_fill_gradients_are_finite():
+    """Inactive fills and exactly calm wind are safe for reverse-mode AD."""
+    args = list(_literal_scalar_inputs())
+    args[0] = jnp.asarray(0.0)
+    args[1] = jnp.asarray(0.0)
+
+    def wind_objective(u_wind):
+        values = list(args)
+        values[0] = u_wind
+        result = nemo_blk_oce_ncar(
+            *values, **_NO_ICE, s0=None, s2=None)
+        return result.qns + result.utau + result.vtau + result.taum
+
+    assert np.isfinite(float(jax.grad(wind_objective)(jnp.asarray(0.0))))
+
+    def masked_temperature_objective(temperature):
+        values = list(args)
+        values[2] = temperature
+        values[12] = jnp.asarray(0.0)
+        result = nemo_blk_oce_ncar(
+            *values, **_NO_ICE, s0=None, s2=None)
+        return result.theta_air + result.qns
+
+    def masked_qns_objective(temperature):
+        values = list(args)
+        values[2] = temperature
+        values[12] = jnp.asarray(0.0)
+        result = nemo_blk_oce_ncar(
+            *values, **_NO_ICE, s0=None, s2=None)
+        return result.qns
+
+    value = masked_temperature_objective(jnp.asarray(250.0))
+    tangent = jax.grad(masked_temperature_objective)(jnp.asarray(250.0))
+    qns_tangent = jax.grad(masked_qns_objective)(jnp.asarray(250.0))
+    assert np.isfinite(float(value))
+    assert np.isfinite(float(tangent)) and float(tangent) != 0.0
+    assert float(qns_tangent) == 0.0
+
+
+def test_record_object_minmax_second_operand_wins_signed_zero_ties():
+    from legoesm.ocean.bulk_flux_omip import _fmax, _fmin
+
+    positive = jnp.asarray(0.0)
+    negative = jnp.asarray(-0.0)
+    for operation in (_fmax, _fmin):
+        assert np.signbit(float(operation(positive, negative)))
+        assert not np.signbit(float(operation(negative, positive)))
+
+
+def test_record_object_sign_treats_negative_zero_as_positive():
+    from legoesm.core.source_rounding import nemo_fortran_sign
+
+    magnitude = jnp.asarray(2.0)
+    assert float(nemo_fortran_sign(magnitude, jnp.asarray(-0.0))) == 2.0
+    assert float(nemo_fortran_sign(magnitude, jnp.asarray(-1.0))) == -2.0
+
+
 def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
-    """SUPERSATURATED air (q = 1.3 q_sat, RH 130%): the implementation must
-    still match the UNCLIPPED NEMO formula bit-for-bit — the garbage guard
-    clips only at w > 2, beyond any physical supersaturation (codex
-    round-2 MED: a clip at 1.0 would silently diverge from NEMO here)."""
+    """SUPERSATURATED air: the implementation matches NEMO's UNCLIPPED
+    pres_temp (sbc_phy.F90:275).  q = 1.3 q_sat (RH 130%) and q = 7 q_sat
+    (the largest q/q_sat on the tier-3 ORCA1 record, wet or land; the old
+    w <= 2 clip departed from NEMO there, BLK D3)."""
     T, slp = 275.0, 101000.0
     q_sat0 = float(_np_q_sat(np.float64(T), np.float64(slp)))
     q_super = 1.3 * q_sat0
@@ -391,10 +829,12 @@ def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
     p_ref = float(_np_pres_temp(np.float64(q_super), np.float64(slp), 10.0,
                                 np.float64(T)))
     assert p_impl == pytest.approx(p_ref, rel=1e-13)
-    # and the guard still protects true garbage (land cell at the T floor)
-    p_junk = float(pressure_at_height(
-        jnp.asarray(0.01), jnp.asarray(slp), 10.0, jnp.asarray(150.0)))
-    assert np.isfinite(p_junk) and 0.0 < p_junk <= slp
+    q_record_max = 7.0 * q_sat0
+    p_impl = float(pressure_at_height(
+        jnp.asarray(q_record_max), jnp.asarray(slp), 10.0, jnp.asarray(T)))
+    p_ref = float(_np_pres_temp(np.float64(q_record_max), np.float64(slp),
+                                10.0, np.float64(T)))
+    assert p_impl == pytest.approx(p_ref, rel=1e-13)
 
 
 def test_pressure_at_height_and_exner_theta():
@@ -515,3 +955,229 @@ def test_legacy_requires_q_sfc():
             u10=jnp.asarray(1.0), v10=jnp.asarray(0.0),
             T_air_K=jnp.asarray(280.0), q_air=jnp.asarray(0.005),
             T_sfc_K=jnp.asarray(281.0), algo="ly09_2coeff")
+
+
+# --- smooth |z/L| cap (RULE 5): NEMO's +-10 clip is psi's cap here -----------
+_CAP_GAP_FILE = Path(__file__).parent / "fixtures" / "omip_ncar_zeta_cap_gap.npz"
+# Air 290 K over a warmer sea, q = qs = 5 g/kg, 0.56 m/s: unstable, |z/L| from
+# below to past the cap's ramp (largest change at 293.92 K, 0.58 % in Ch;
+# scripts/tmp/probe_cap_states4.py).  Stable states never settled inside the
+# ramp over a (wind, SST) scan (probe_cap_states3.py).
+_CAP_SST = np.array([290.5, 292.0, 293.0, 293.92, 295.0, 300.0])
+
+
+def _cap_case(width):
+    n = _CAP_SST.size
+    return ncar_transfer_coefficients(
+        jnp.full(n, 290.0), jnp.full(n, 0.005), jnp.asarray(_CAP_SST),
+        jnp.full(n, 0.005), jnp.full(n, 0.56), zeta_cap_width=width)[:3]
+
+
+def _cap_gaps():
+    return {k: np.asarray(d) - np.asarray(h) for k, d, h in
+            zip(("Cd", "Ch", "Ce"), _cap_case(MOST_ZETA_CAP_WIDTH), _cap_case(0.0))}
+
+
+def test_zeta_cap_gap_per_case():
+    """KNOWN DIFFERENCE of the smooth cap vs NEMO's clip, pinned per case."""
+    stored = np.load(_CAP_GAP_FILE)
+    gaps = _cap_gaps()
+    assert sorted(gaps) == sorted(stored.files)
+    for k, g in gaps.items():
+        np.testing.assert_allclose(g, stored[k], rtol=1e-6, atol=1e-12, err_msg=k)
+    assert max(np.abs(g).max() for g in gaps.values()) > 1e-8
+
+
+def test_check_grads_zeta_cap_at_default():
+    def f(sst):
+        cd, ch, ce, _ = ncar_transfer_coefficients(
+            jnp.asarray(290.0), jnp.asarray(0.005), sst, jnp.asarray(0.005),
+            jnp.asarray(0.56))
+        return cd + ch + ce
+    s0 = jnp.asarray(_CAP_SST[np.argmax(np.abs(_cap_gaps()["Ch"]))])  # inside the ramp
+    check_grads(f, (s0,), order=2, modes=("fwd", "rev"), eps=1e-6)
+    assert float(jax.grad(f)(s0)) != 0.0
+
+
+
+# --- #2241 RULE 5: the NEMO-parity 33 m/s neutral-drag plateau -------------
+# The production OMIP path (air_sea_fluxes -> ncar_transfer_coefficients ->
+# large_yeager_neutral_cd(nemo_parity=True)) blends the LY09 polynomial into
+# the 2.34e-3 plateau over [33 - w, 33] m/s, w = cd_cutoff_width (default
+# NCAR_CD_CUTOFF_WIDTH = 0.5); 0.0 is NEMO's hard switch.
+
+def test_nemo_parity_cd_hard_limit_matches_nemo_source_exact():
+    """Width 0 reproduces NEMO's cd_n10_ncar (the rounding-exact branch,
+    itself pinned to NEMO) to round-off, eager and under jit, on both sides
+    of U = 33 (the bit-exact claim belongs to nemo_source_exact only)."""
+    from legoesm.core.bulk_flux import large_yeager_neutral_cd as cd
+    U = jnp.asarray([0.25, 5.0, 30.0, 32.5, 32.75, 33.0 - 1e-12, 33.0, 35.0])
+    ref = np.asarray(cd(U, nemo_parity=True, nemo_source_exact=True))
+    hard = lambda u: cd(u, nemo_parity=True, cd_cutoff_width=0.0)  # noqa: E731
+    for got in (hard(U), jax.jit(hard)(U)):
+        np.testing.assert_allclose(np.asarray(got), ref, rtol=1e-15, atol=0.0)
+
+
+# Relative gap of the default vs the hard plateau, (Cd(0.5) - Cd(0)) / Cd(0),
+# per neutral wind [m/s].  Measured 2026-11-07 (#2241); 0 outside the band.
+_CD_GAP = {32.5: 0.0, 32.6: 6.452073249229509e-05, 32.75: 0.0004441758241635477,
+           32.9: 0.0007216142895876101, 33.0: 0.0}
+
+
+@pytest.mark.parametrize("U", sorted(_CD_GAP))
+def test_nemo_parity_cd_default_gap_per_wind(U):
+    from legoesm.core.bulk_flux import large_yeager_neutral_cd as cd
+    u = jnp.asarray(U)
+    hard = cd(u, nemo_parity=True, cd_cutoff_width=0.0)
+    gap = float((cd(u, nemo_parity=True) - hard) / hard)
+    np.testing.assert_allclose(gap, _CD_GAP[U], rtol=1e-6, atol=1e-12)
+
+
+def test_check_grads_omip_drag_through_the_plateau_at_default():
+    """Scheme level: Cd of ncar_transfer_coefficients vs wind in a neutral
+    column (air = sea theta and q, so zeta = 0 and UN10 = wind in every
+    iteration): the hard switch jumps at 33 m/s; the default is C2 there
+    (order 1 at the join, as for the core helper), smooth mid-band."""
+    def cd(u, width=None):
+        return ncar_transfer_coefficients(
+            jnp.asarray([290.0]), jnp.asarray([0.010]), jnp.asarray([290.0]),
+            jnp.asarray([0.010]), jnp.atleast_1d(u), cd_cutoff_width=width)[0][0]
+    check_grads(cd, (jnp.asarray(33.0),), order=1, modes=("fwd", "rev"), eps=1e-4)
+    check_grads(cd, (jnp.asarray(32.75),), order=2, modes=("fwd", "rev"), eps=1e-4)
+    assert float(jax.grad(cd)(jnp.asarray(32.75))) != 0.0
+    with pytest.raises(AssertionError):          # the hard limit is not smooth
+        check_grads(lambda u: cd(u, 0.0), (jnp.asarray(33.0),), order=1,
+                    modes=("rev",), eps=1e-4)
+
+
+def test_omip_cd_cutoff_width_reaches_the_drag():
+    """The keyword is not inert: inside the band the two widths differ."""
+    args = (jnp.asarray([32.75]), jnp.zeros(1), jnp.asarray([290.0]),
+            jnp.asarray([0.010]), jnp.asarray([291.0]))
+    assert float(air_sea_fluxes(*args)[0][0]) != float(
+        air_sea_fluxes(*args, cd_cutoff_width=0.0)[0][0])
+
+
+def test_every_large_yeager_drag_branch_shares_one_polynomial(monkeypatch):
+    """#2242: the legacy (clipped) and NEMO-parity drag branches evaluate the
+    same LY09 polynomial, so a change to it reaches both."""
+    from legoesm.core import bulk_flux as bf
+    U = jnp.array([5.0, 20.0])
+    base_legacy = bf.large_yeager_neutral_cd(U)
+    base_parity = bf.large_yeager_neutral_cd(U, nemo_parity=True)
+    monkeypatch.setattr(bf, "_ly09_cdn_poly", lambda w: jnp.full_like(w, 1.5))
+    np.testing.assert_allclose(bf.large_yeager_neutral_cd(U), 1.5e-3, rtol=1e-15)
+    np.testing.assert_allclose(
+        bf.large_yeager_neutral_cd(U, nemo_parity=True), 1.5e-3, rtol=1e-15)
+    assert not np.allclose(base_legacy, 1.5e-3) and not np.allclose(base_parity, 1.5e-3)
+
+
+# --- #2241 RULE 5: the stable/unstable neutral Stanton select ---------------
+# ncar_transfer_coefficients blends the stable (18) and unstable (32.7)
+# neutral Stanton numbers with core's ncar_stable_weight: half-width
+# dthv_width [K] on the first-guess dTv, neutral_width on zeta in the
+# iteration; 0.0 is NEMO's hard ``> 0`` step.  States: theta_air - SST in K
+# below, q_air = q_sfc (so dTv ~ that difference), SST 290 K.
+_STANTON_DTH = (-0.03, -0.008, -0.002, 0.0, 0.002, 0.008, 0.03)
+
+
+def _stanton_args(U, dth=_STANTON_DTH):
+    th = jnp.asarray([290.0 + d for d in dth])
+    n = th.shape
+    return (th, jnp.full(n, 0.010), jnp.full(n, 290.0), jnp.full(n, 0.010),
+            jnp.full(n, U))
+
+
+@pytest.mark.parametrize("U", (3.0, 8.0, 15.0))
+def test_omip_stanton_hard_limit_matches_numpy_mirror(U):
+    """Widths 0 reproduce the independent NumPy NEMO mirror on near-neutral
+    states on both sides of the switch, eager and under jit."""
+    args = _stanton_args(U)
+    ref = _np_turb_ncar(*(np.asarray(a) for a in args))
+    hard = lambda *a: ncar_transfer_coefficients(  # noqa: E731
+        *a, dthv_width=0.0, neutral_width=0.0, zeta_cap_width=0.0,
+        cd_cutoff_width=0.0, zu_floor_rel_width=0.0)
+    for got in (hard(*args), jax.jit(hard)(*args)):
+        for a, b in zip(got, ref):
+            np.testing.assert_allclose(np.asarray(a), b, rtol=1e-12, atol=1e-15)
+
+
+# Relative gap of the default vs the hard step, (X(default) - X(0)) / X(0),
+# per state of _STANTON_DTH.  Measured 2026-11-12 (#2241); a change to the
+# blend or its widths re-measures these (CLAUDE.md RULE 5).
+_STANTON_GAP = {
+    (3.0, 'Cd'): [0.0, 0.0, -2.3366027648952347e-06, 0.0, -2.770797659503093e-05, 0.0, 0.0],
+    (3.0, 'Ch'): [0.0, 0.0, -0.005800862717823097, -0.2247706422018349, 0.0988916791323193, 0.0, 0.0],
+    (3.0, 'Ce'): [0.0, 0.0, -4.244781781660209e-06, 0.0, -3.2117140483581586e-05, 0.0, 0.0],
+    (8.0, 'Cd'): [0.0, -1.9180640298511565e-05, -1.7064710272036337e-05, 0.0, -2.1862356180547596e-05, -4.52598206322089e-05, 0.0],
+    (8.0, 'Ch'): [0.0, -0.05118353832474979, -0.18138513554341992, -0.22477064220183487, 0.3372789370783426, 0.17467753279580744, 0.0],
+    (8.0, 'Ce'): [0.0, -2.7433526968469796e-05, -2.4418183235609444e-05, 0.0, -2.1109609184077847e-05, -4.3702571816134735e-05, 0.0],
+    (15.0, 'Cd'): [-3.35668016405842e-05, -2.0440278195622704e-05, -5.865839852003554e-06, 0.0, -7.340718352222034e-06, -2.599836026475332e-05, -5.950613098510515e-05],
+    (15.0, 'Ch'): [-0.08271099527959236, -0.1882409494939306, -0.21590828040781762, -0.22477064220183499, 0.39257013656989764, 0.34756020090464396, 0.2121875520336049],
+    (15.0, 'Ce'): [-3.971561625183429e-05, -2.4192601948759753e-05, -6.943256850536766e-06, 0.0, -6.179842313426353e-06, -2.1887155530135814e-05, -5.0097896816933336e-05],
+}
+
+
+@pytest.mark.parametrize("U,name", sorted(_STANTON_GAP))
+def test_omip_stanton_default_gap_per_state(U, name):
+    args = _stanton_args(U)
+    i = ("Cd", "Ch", "Ce").index(name)
+    d = np.asarray(ncar_transfer_coefficients(*args)[i])
+    h = np.asarray(ncar_transfer_coefficients(
+        *args, dthv_width=0.0, neutral_width=0.0)[i])
+    np.testing.assert_allclose((d - h) / h, _STANTON_GAP[(U, name)],
+                               rtol=1e-6, atol=1e-12)
+
+
+def test_check_grads_omip_stanton_at_default():
+    """Ch vs theta_air: the hard step jumps at the neutral point; the default
+    is smooth (order 2, non-zero derivative) inside both blends.  The point
+    is 3 mK on the stable side, off the psi_m / psi_h zeta = 0 kink that
+    stays hard (as in the core TURB_NCAR port)."""
+    def ch(th, dthv_width=None, neutral_width=None):
+        a = _stanton_args(8.0, (0.0,))
+        return ncar_transfer_coefficients(
+            jnp.atleast_1d(th), *a[1:], dthv_width=dthv_width,
+            neutral_width=neutral_width)[1][0]
+    th0 = jnp.asarray(290.003)
+    # both blends are live at th0 (each width alone moves Ch there)
+    assert float(ch(th0)) != float(ch(th0, dthv_width=0.0))
+    assert float(ch(th0)) != float(ch(th0, neutral_width=0.0))
+    check_grads(ch, (th0,), order=2, modes=("fwd", "rev"), eps=1e-5)
+    assert float(jax.grad(ch)(th0)) != 0.0
+    with pytest.raises(AssertionError):          # the hard limit is not smooth
+        check_grads(lambda t: ch(t, 0.0, 0.0), (jnp.asarray(290.0),), order=1,
+                    modes=("rev",), eps=1e-4)
+
+
+@pytest.mark.parametrize("U", (3.0, 8.0, 15.0))
+def test_omip_stanton_default_is_continuous_at_neutral(U):
+    """The hard step jumps Ch by ~1.8x across theta_air = SST; the default
+    blend is continuous there (fails if the blend is reverted)."""
+    def ch(dth, **w):
+        return float(ncar_transfer_coefficients(*_stanton_args(U, (dth,)), **w)[1][0])
+    hard = ch(1e-9, dthv_width=0.0, neutral_width=0.0) / ch(-1e-9, dthv_width=0.0, neutral_width=0.0)
+    assert abs(hard - 18.0 / 32.7) < 1e-3
+    np.testing.assert_allclose(ch(1e-9), ch(-1e-9), rtol=1e-5)
+
+
+def test_omip_stanton_widths_reach_the_fluxes(monkeypatch):
+    """air_sea_fluxes forwards both widths to the coefficient solve."""
+    import legoesm.ocean.bulk_flux_omip as bfo
+    seen = {}
+    real = bfo.ncar_transfer_coefficients
+
+    def spy(*a, **k):
+        seen.update(k)
+        return real(*a, **k)
+
+    monkeypatch.setattr(bfo, "ncar_transfer_coefficients", spy)
+    bfo.air_sea_fluxes(jnp.asarray([8.0]), jnp.zeros(1), jnp.asarray([290.0]),
+                       jnp.asarray([0.008]), jnp.asarray([290.0]),
+                       dthv_width=0.03, neutral_width=0.004)
+    assert (seen["dthv_width"], seen["neutral_width"]) == (0.03, 0.004)
+
+
+if __name__ == "__main__":
+    np.savez_compressed(_CAP_GAP_FILE, **_cap_gaps())
+    print("wrote", _CAP_GAP_FILE)

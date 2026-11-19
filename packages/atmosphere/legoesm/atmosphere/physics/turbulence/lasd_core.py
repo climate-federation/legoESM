@@ -23,12 +23,22 @@ Every closed form here is a faithful port of the jax-alfa oracle
 numpy reimplementation in ``tests/unit/test_lasd_faithful.py``: the sharp spectral test
 filter (cutoff ``round(N/(2·FGR·TFR))``), the 3×3 periodic box average /9, the
 max-real-root-in-(0,5) β rule (default 1.0, cross-checked against ``numpy.roots`` — a
-different algorithm), and the full a1..e2 / aa..ff / M_ij / LM / MM / ``C_s²``-clip
+different algorithm), and the full a1..e2 / aa..ff / M_ij / LM / MM / ``C_s²``-mask
 assembly (with the Lilly-1992 error-functional coefficient ``_LASD_LILLY_COEFF=8`` and
-``_TFR=2``).  Documented departures from the oracle:
-- ``cs_max`` is a CONFIGURABLE clip extension: the oracle hardcodes 1.0, and the default
-  ``cs_max=1`` reproduces the oracle mask exactly, but ``cs_max != 1`` DOES change the
-  modeled closure (a different ceiling on ``C_s²``) — it is an extension, not a pure
+``_TFR=2``).  The tier-2 oracle audit (les_sgs_closures, 2026-10-19) also RAN jax-alfa
+v0.0.1 (93fe4658) ``LASDD`` on the oracle's own 32³ CBL/NBL/SBL LES fields: ``C_s²`` max
+abs difference 3.8e-15 / 1.1e-10 / 2.9e-10 and β ≤ 6.9e-8, the same size as the oracle's
+own difference from itself on the x↔y-swapped flow (round-off of a different FFT /
+summation axis order, amplified where ``LM``/``MM`` cancel); oracle ``ComputeBeta1`` on
+this module's quintic coefficients returned this module's β bitwise.  (That audit ran
+with the oracle-style Laguerre β-solver then in place; the root isolation described below
+has since replaced it, so the β agreement is a statement about the earlier solver.)
+Only the oracle's ``FGR=1`` (``TFR=2``) setting is supported.  Documented departures from
+the oracle:
+- ``cs_max`` is a CONFIGURABLE mask bound: the oracle hardcodes 1.0 (it sets ``C_s²`` to
+  ZERO where ``C_s² > 1``; it does not clip to 1), and the default ``cs_max=1``
+  reproduces the oracle mask exactly, but ``cs_max != 1`` DOES change the modeled
+  closure (``C_s² > cs_max²`` is zeroed) — it is an extension, not a pure
   reformatting.
 - ``C_s²`` uses a RAW divide after FLOORING the denominator
   (``LMx / where(|MMx|<1e-10, 1e-10, MMx)``), not the project ``safe_divide`` helper;
@@ -66,14 +76,15 @@ __physics_contract__ = {
         "S12": "1/s", "S13": "1/s", "S23": "1/s",
         "Smag": "1/s (resolved strain-rate magnitude |S|)",
         "delta": "m (grid filter width per level)",
-        "cs_max": "1 (upper clip on C_s)",
+        "cs_max": "1 (C_s^2 > cs_max^2 is masked to 0)",
     },
     "outputs": {
         "cs2": "1 (dimensionless Smagorinsky coefficient C_s^2 field)",
     },
     "sign_convention": (
         "C_s^2 >= 0: masked to 0 where the Germano denominator MM ~ 0, where "
-        "C_s^2 < 0, or where C_s^2 > cs_max^2 (backscatter/invalid clipped). "
+        "C_s^2 < 0, or where C_s^2 > cs_max^2 (backscatter/invalid zeroed, "
+        "not clipped). "
         "The caller forms the down-gradient eddy viscosity nu_t = "
         "C_s^2 * delta^2 * |S| >= 0. Returns a coefficient, not a tendency."
     ),
@@ -116,49 +127,73 @@ def spectral_test_filter(field_yxz: jax.Array, cut_y: int, cut_x: int,
         fh = jnp.where(mask_y & mask_x, fh, 0.0)
         return jnp.fft.irfft2(fh, axes=(0, 1), s=(ny, nx))
     from legoesm.parallel.distributed_fft import (
-        distributed_rfft2, distributed_irfft2, local_kx_slice)
+        layout_irfft2, layout_rfft2, local_kx_slice)
     ny, nx = layout.ny_global, layout.nx
-    fh = distributed_rfft2(field_yxz, ny_global=ny, nx=nx,
-                           n_ranks=layout.n_ranks, comm=layout.comm)
+    fh = layout_rfft2(field_yxz, layout)
     iy = jnp.arange(ny)
     fold_y = jnp.minimum(iy, ny - iy)
     mask_y = (fold_y < cut_y)[:, None, None]
-    lo, hi = local_kx_slice(nx, layout.n_ranks, layout.rank)
+    # kx chunk owned per column index ry of Py (== rank of n_ranks for a slab).
+    lo, hi = local_kx_slice(nx, layout.n_ranks_y, layout.ry)
     mask_x = (jnp.arange(lo, hi) < cut_x)[None, :, None]   # GLOBAL kx index
     fh = jnp.where(mask_y & mask_x, fh, 0.0)
-    return distributed_irfft2(fh, ny_global=ny, nx=nx,
-                              n_ranks=layout.n_ranks, comm=layout.comm)
+    return layout_irfft2(fh, layout, field_yxz.shape[-1])
 
 
-def _y_ring_rows(fx, layout):
-    """Return ``(last_row_of_prev_rank, first_row_of_next_rank)`` for the periodic
-    y-ring of the slab decomposition — the two neighbour rows ``imfilter_box3``
-    needs for its ∂y 3-point average. Two directional sendrecv shifts with
-    distinct tags (unambiguous even at n_ranks=2, where prev==next)."""
+def _ring_halo(f, axis, n, r, comm, tag):
+    """Return ``(last_slice_of_prev_rank, first_slice_of_next_rank)`` along
+    ``axis`` for a periodic ring of ``n`` ranks (``r`` = rank in ``comm``) — the
+    two neighbour slices ``imfilter_box3`` needs for its 3-point average. Two
+    directional sendrecv shifts with distinct tags ``tag``, ``tag+1``
+    (unambiguous even at n=2, where prev==next)."""
     import mpi4jax  # noqa: F401
     from legoesm.parallel.halo_exchange import get_sendrecv_vjp
     sr = get_sendrecv_vjp(mpi4jax)
-    n, r, comm = layout.n_ranks, layout.rank, layout.comm
     prev, nxt = (r - 1) % n, (r + 1) % n
-    top, bot = fx[0:1], fx[-1:]
-    tmpl = jnp.zeros_like(bot)
-    # send my last row to next, receive prev's last row from prev
-    last_of_prev = sr(bot, tmpl, prev, nxt, 700, 700, comm)  # coeff-ok: MPI halo message tags
-    # send my first row to prev, receive next's first row from next
-    first_of_next = sr(top, jnp.zeros_like(top), nxt, prev, 701, 701, comm)  # coeff-ok: MPI halo message tags
+    m = f.shape[axis]
+    top = jax.lax.slice_in_dim(f, 0, 1, axis=axis)
+    bot = jax.lax.slice_in_dim(f, m - 1, m, axis=axis)
+    # send my last slice to next, receive prev's last slice from prev
+    last_of_prev = sr(bot, jnp.zeros_like(bot), prev, nxt, tag, tag, comm)
+    # send my first slice to prev, receive next's first slice from next
+    first_of_next = sr(top, jnp.zeros_like(top), nxt, prev, tag + 1, tag + 1, comm)
     return last_of_prev, first_of_next
+
+
+def _ring_avg3(f, axis, n, r, comm, tag):
+    """Periodic 3-point average ``(roll(+1) + f + roll(-1)) / 3`` along a
+    decomposed ``axis`` (local roll when that axis has a single rank)."""
+    if n == 1:
+        return (jnp.roll(f, 1, axis=axis) + f + jnp.roll(f, -1, axis=axis)) / 3.0
+    last_of_prev, first_of_next = _ring_halo(f, axis, n, r, comm, tag)
+    m = f.shape[axis]
+    up = jnp.concatenate([last_of_prev, jax.lax.slice_in_dim(f, 0, m - 1, axis=axis)],
+                         axis=axis)                               # roll(+1)
+    dn = jnp.concatenate([jax.lax.slice_in_dim(f, 1, m, axis=axis), first_of_next],
+                         axis=axis)                               # roll(-1)
+    return (up + f + dn) / 3.0
 
 
 def imfilter_box3(field_yxz: jax.Array, layout=None) -> jax.Array:
     """Periodic 3×3 horizontal box average (oracle ``Utilities.Imfilter``) — the
     LASD LOCAL averaging of the Germano ratio before forming ``C_s²``. Under the
     y-slab ``layout`` the ∂y rolls cross ranks, so the two boundary rows are
-    exchanged with the y-neighbours (∂x is local — x is undecomposed)."""
+    exchanged with the y-neighbours (∂x is local — x is undecomposed). Under the
+    x-y pencil the ∂x average first exchanges one column on ``comm_row``, then
+    the ∂y average one row of the x-averaged field on ``comm_col`` (separable ⇒
+    no corner exchange)."""
+    from legoesm.parallel.distributed_fft import layout_is_pencil
+    if layout is not None and layout_is_pencil(layout):
+        fx = _ring_avg3(field_yxz, 1, layout.n_ranks_x, layout.rx,
+                        layout.comm_row, 702)  # coeff-ok: MPI halo message tags
+        return _ring_avg3(fx, 0, layout.n_ranks_y, layout.ry,
+                          layout.comm_col, 700)  # coeff-ok: MPI halo message tags
     fx = (jnp.roll(field_yxz, 1, axis=1) + field_yxz
           + jnp.roll(field_yxz, -1, axis=1)) / 3.0
     if layout is None:
         return (jnp.roll(fx, 1, axis=0) + fx + jnp.roll(fx, -1, axis=0)) / 3.0
-    last_of_prev, first_of_next = _y_ring_rows(fx, layout)
+    last_of_prev, first_of_next = _ring_halo(
+        fx, 0, layout.n_ranks, layout.rank, layout.comm, 700)  # coeff-ok: MPI halo message tags
     fy_up = jnp.concatenate([last_of_prev, fx[:-1]], axis=0)   # roll(+1, axis=0)
     fy_dn = jnp.concatenate([fx[1:], first_of_next], axis=0)   # roll(-1, axis=0)
     return (fy_up + fx + fy_dn) / 3.0
@@ -372,7 +407,7 @@ def lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag,
     uc, vc, wc : ``(ny, nx, nz)`` cell-centre velocities.
     S11..S23, Smag : ``(ny, nx, nz)`` resolved strain components + ``|S|``.
     delta : ``(nz,)`` grid filter width ``Δ`` per level.
-    cs_max : upper clip on ``C_s²`` (oracle mask uses 1.0).
+    cs_max : ``C_s² > cs_max²`` is masked to ZERO (oracle mask uses 1.0).
 
     Returns ``C_s²`` field ``(ny, nx, nz)`` (locally averaged, masked to a valid
     LES range). The caller forms ``ν_t = C_s² · Δ² · |S|``.

@@ -16,6 +16,7 @@ from legoesm.ocean.fidelity.nemo_recipe import (
     NEMO_CONSTANTS_CONFIG,
     NEMO_DEFERRED_BLOCKS,
     NEMOModelRecipeConfig,
+    NEMORecipe,
     _nemo_gyre_vertical_ladder,
     apply_nemo_gyre_surface_forcing,
     build_nemo_eady_recipe,
@@ -122,6 +123,18 @@ def test_nemo_card_builds_valid_latlon_model_and_is_setup_agnostic():
     assert rest.initial_state.vv_b is not None
     assert eady.initial_state.uu_b is not None
     assert eady.initial_state.vv_b is not None
+
+
+def test_nemo_recipe_carries_tracer_damping_without_changing_legacy_default():
+    """The recipe field survives reconstruction and remains opt-in."""
+    base = build_nemo_rest_recipe(n_lat=6, n_lon=8, nlev=3)
+    assert isinstance(base, NEMORecipe)
+    assert base.tracer_damping is None
+    marker = object()
+    selected = base._replace(tracer_damping=marker)
+    assert selected.tracer_damping is marker
+    assert selected.model_config is base.model_config
+    assert selected.initial_state is base.initial_state
 
 
 def test_nemo_card_one_step_rest_sanity_is_finite():
@@ -487,6 +500,8 @@ def test_nemo_gyre_recipe_selects_gyre_schemes():
     assert mc.pgf_scheme == "adcroft"
     assert mc.gm_redi.slope_scheme == "nemo_iso_lap"
     assert mc.gm_redi.kappa_GM == 0.0        # ln_ldfeiv=F (no GM bolus)
+    assert mc.gm_redi.redi_divisor_thickness_evaluation == \
+        "reference_jacobian"
     assert mc.barotropic.n_barotropic_substeps == 50  # NEMO auto nn_e=50
 
 

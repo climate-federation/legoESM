@@ -14,7 +14,11 @@ sys.path.insert(0, str(PROBE.parent))
 SPEC = importlib.util.spec_from_file_location("channel_seasonal", PROBE)
 S = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
-SPEC.loader.exec_module(S)
+try:
+    SPEC.loader.exec_module(S)
+except FileNotFoundError as exc:  # the probe reads the DINO oracle run at import
+    pytest.skip(f"DINO oracle run not present ({exc.filename}); set DINO_DIR",
+                allow_module_level=True)
 
 
 def _patterns(seed=1455):

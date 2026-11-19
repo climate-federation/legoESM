@@ -19,13 +19,25 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from legoesm import constants
+from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
+                                      NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+                                      NCAR_NEUTRAL_WIDTH, VALID_UNSTABLE_SCHEMES)
+from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    C_E_BULK_DEFAULT, C_H_BULK_DEFAULT)
 from legoesm.land import snow_column as _snow_column
+from legoesm.ice import shortwave as _ice_sw
 
 # Snow emissivity: ONE default and ONE legal range, both owned by the snow
 # column's parameter spec.
 _SNOW_EMISSIVITY_DEFAULT = _snow_column.SnowColumnConfig._field_defaults["emissivity_snow"]
 _SNOW_EMISSIVITY_BOUNDS = (
     _snow_column.__param_spec__["SnowColumnConfig"]["params"]["emissivity_snow"]["bounds"])
+
+# Prescribed-ice melt-albedo width and skin melt-cap width: defaults and the
+# melt-width range owned by the ice shortwave parameter spec.
+_ICE_SFC_DEFAULTS = _ice_sw.PrescribedIceSurfaceConfig._field_defaults
+_ICE_MELT_WIDTH_BOUNDS = (_ice_sw.__param_spec__["PrescribedIceSurfaceConfig"]
+                          ["params"]["sea_ice_melt_ramp_width_K"]["bounds"])
 
 # Canonical AIMIP variant set.  Single source of truth — imported by
 # ``scripts/run/run_aimip.py`` and the ``validate_strict`` rule below.
@@ -146,7 +158,7 @@ def normalize_grid_type(name: str) -> str:
 class DycoreConfig(NamedTuple):
     """Dynamical core configuration."""
     model_type: str = "hydrostatic"       # shallow_water, hydrostatic, nonhydrostatic
-    discretization: str = "cdgrid"        # cdgrid, spectral, sfno, u_cast, mpas
+    discretization: str = "fv3_duo"        # fv3_duo, spectral, sfno, u_cast, mpas, latlon_cgrid
     dt: float = 600.0
     hyperdiff_scale: float = 1.0
     div_damp_scale: float = 1.0
@@ -398,10 +410,29 @@ class DycoreConfig(NamedTuple):
     # The projected form subtracts the column-mean tendency as a uniform
     # mixing-ratio offset, which drains stratospheric water vapour (measured
     # -0.4 ppmv/day at 45-70N, -3 ppmv/day in the tropics on e12_year).
-    # Default ("q_v",) since 2026-10 (owner decision after the 60-day A/B:
-    # 45-70N 70-150 hPa vapour 0.64 -> 4.05 ppmv, 100-200 hPa T -2.3 K).
-    # Empty = every tracer projected (the pre-2026-10 form, for bit-comparison).
-    mpas_vert4_flux_form_tracers: tuple = ("q_v",)
+    # Was ("q_v",) from 2026-10 (60-day A/B vs projected: 45-70N 70-150 hPa
+    # vapour 0.64 -> 4.05 ppmv); empty since 2026-10-15, when q_v moved to the
+    # log form below (a tracer may not be in both lists).  Empty with an empty
+    # log list = every tracer projected (the pre-2026-10 form).
+    mpas_vert4_flux_form_tracers: tuple = ()
+    # Tracer names whose vertical del4 filter acts on ln(q + 1e-7) with a
+    # water-weighted, mass-conserving flux (``vertical_del4_tracer_tendency_log``):
+    # the flux form's fourth difference of q removes 4.5-8.8 %/day of
+    # upper-tropospheric water from ERA5 profiles; the log form does not drift
+    # an exponential-in-level profile.  Must not overlap the flux-form list.
+    # Default ("q_v",) since 2026-10-15 (user decision after the 30/60-day pair
+    # against the flux form); amip_production.yaml also pins it explicitly.
+    mpas_vert4_log_form_tracers: tuple = ("q_v",)
+    # Vertical form of the shared hydrostatic PE core on the lat-lon C-grid and
+    # MPAS lanes (``primitive_eq_generic.VERTICAL_FORMS``).  "legacy" (default)
+    # is each lane's pre-core tendency, unchanged: TEMPORARY, retired after the
+    # A/B; it carries #930 (lat-lon), #1029 (MPAS) and the lat-lon 50 K floor.
+    # validate_strict refuses any other form off those two lanes.
+    vertical_form: str = "legacy"
+    # Spectral lane, CAM-SE top Laplacian sponge (dyn_comp.F90 nu_top): del2
+    # viscosity [m2/s] x (4, 2, 1) on vor, div and T of the top three levels.
+    # 0.0 = off (bit-identical).  (appended after vertical_form: positional ABI)
+    spectral_sponge_nu_top_m2s: float = 0.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -436,9 +467,12 @@ class EvaluationConfig(NamedTuple):
     """
     enabled: bool = False
     suites: tuple[str, ...] = ()  # empty = ALL bundled suites (every tier)
-    model_id: str = "legoESM-1-0"
+    # Empty = the CMOR writer's OutputConfig.cmip_source_id /
+    # cmip_variant_label (one source of truth: the ids ClimateEval looks
+    # up are the ones stamped on the files; owner decision 2026-10-28).
+    model_id: str = ""
     experiment_id: str = "amip"
-    variant_id: str = "r1i1p1f1"
+    variant_id: str = ""
     data_root_dir: str = ""
     fail_on_missing_data: bool = False
     download_missing_data: bool = False
@@ -473,6 +507,15 @@ class OutputConfig(NamedTuple):
     checkpoint_format: str = "npz"  # npz, zarr
     diagnostics_perf_mode: str = "auto"  # auto, always, never
     cmip_resolution_deg: float = 5.0  # lat-lon grid spacing for CMIP output [degrees]
+    # CMOR writer identity / layout (CFWriter's own defaults).  The
+    # institution_id / source_id defaults are NOT registered in the CMIP6
+    # CV (docs/validation/cmip6_publication_blockers.md); registration and
+    # the values are the owner's call.  cmip_drs_tree=True writes the ESGF
+    # DRS directory tree instead of cmor/<table>/.
+    cmip_drs_tree: bool = False
+    cmip_institution_id: str = "CU"
+    cmip_source_id: str = "legoESM-1-0"
+    cmip_variant_label: str = "r1i1p1f1"
     # Wallclock-aware mid-job checkpointing for long (century-scale) HPC chains.
     # ``max_wallclock_seconds=0`` disables it (default); set it to the SLURM
     # ``--time`` budget so the run checkpoints and exits cleanly with
@@ -498,14 +541,17 @@ class OutputConfig(NamedTuple):
 VALID_MICROPHYSICS = (
     "none", "kessler", "sundqvist", "seifert_beheng",
     "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
+    "ifs_cloudsc",
 )
+
+_CLUBB_LITE_WARNED = False  # one stand-in warning per process
 
 VALID_TURBULENCE = (
     "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
-    "holtslag_boville", "ysu", "edmf", "none",
+    "holtslag_boville", "ysu", "edmf", "ifs_vdf", "none",
 )
 
-VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg")
+VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg", "ecrad_ifs")
 
 VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved", "cam6_clubb")
 
@@ -513,7 +559,7 @@ VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved", "cam6_club
 # (e.g. "hines+mcfarlane"); validate_strict splits on "+" before membership.
 VALID_GWD = (
     "rayleigh", "lindzen", "mcfarlane", "hines",
-    "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
+    "prognostic_spectral", "e3sm_cam", "ml_emulator", "ifs_wms", "none",
 )
 
 def parse_gwd_spec(value: str) -> str:
@@ -608,6 +654,23 @@ ZM_SCALAR_FIELDS = {
     "zm_tau": "tau",
     "zm_capelmt": "capelmt",
 }
+# Flat ExperimentConfig scalar -> ZhangMcFarlaneConfig smoothing width of the
+# CAM6 detrainment booking (zhang_mcfarlane.cam6_detrain_condensate, RULE 5).
+# Excluded from __param_spec__ (tier 0, no --params route); the one legal range
+# is zhang_mcfarlane.validate_detrain_widths.  Read only by the MPAS macmic
+# loop with ZM + CLUBB (combined.py ``_defer_dlf``), so validate_strict refuses
+# them elsewhere.  None = keep the scheme's own default.
+ZM_WIDTH_FIELDS = {
+    "zm_detrain_phase_width_K": "detrain_phase_width_K",
+    "zm_detrain_number_width_kgkg_s": "detrain_number_width_kgkg_s",
+}
+# Flat ExperimentConfig scalar -> ZhangMcFarlaneConfig RULE 5 width of the
+# cape > capelmt trigger, read wherever convection == zhang_mcfarlane.  Excluded
+# from __param_spec__; the one legal range is
+# zhang_mcfarlane.validate_trigger_width.  None = the scheme default.
+ZM_TRIGGER_FIELDS = {
+    "zm_trigger_width_J_kg": "trigger_width_J_kg",
+}
 CLUBB_SCALAR_FIELDS = {
     "clubb_c14": "C14",
     "clubb_c8": "C8",
@@ -624,6 +687,55 @@ CLUBB_SCALAR_FIELDS = {
 CLUBB_PROGNOSTIC_ONLY = frozenset({
     "clubb_c14", "clubb_c8", "clubb_c11", "clubb_c11b", "clubb_gamma_coefb",
     "clubb_c_k10"})
+
+
+def resolve_sea_ice_albedo_scheme(cfg) -> str:
+    """The sea-ice albedo scheme a run actually uses.
+
+    ``"auto"`` resolves to ``"maykut_untersteiner"`` when the run carries the
+    prognostic ice skin (an ice surface temperature exists) and to
+    ``"constant"`` otherwise; an explicit value is returned unchanged.
+    """
+    scheme = getattr(cfg, "sea_ice_albedo_scheme", "auto")
+    if scheme != "auto":
+        return scheme
+    return ("maykut_untersteiner" if getattr(cfg, "ice_skin_prognostic", False)
+            else "constant")
+
+
+def resolve_ice_skin_prognostic(cfg, *, latlon_mpi: bool = False,
+                                coupled: bool = False) -> tuple[bool, str]:
+    """``(on, reason)`` for the prognostic ice skin of this run.
+
+    ``ice_skin_prognostic=None`` ("auto") turns the skin on wherever the lane
+    carries it and off, with the reason, where it does not; an explicit
+    ``True``/``False`` is returned unchanged ("explicit").  An explicit
+    ``True`` on a coupled driver raises (the coupled sea-ice model owns the
+    ice surface); the static lanes refuse it in ``validate_strict`` and the
+    checkpoint writers at run start.
+    """
+    value = getattr(cfg, "ice_skin_prognostic", None)
+    if value is not None:
+        if value and coupled:
+            raise ValueError(
+                "ice_skin_prognostic=True on a coupled driver: the coupled "
+                "sea-ice model owns the ice surface temperature (#2106). "
+                "Leave it unset (auto) or false.")
+        return bool(value), "explicit"
+    d, out = cfg.dycore, cfg.output
+    if d.discretization == "spectral":
+        return False, "the spectral lane does not carry the skin yet"
+    if d.discretization == "fv3_duo" and not d.column_lane:
+        return False, "the closed fv3_duo lane has no radiation or surface fluxes"
+    if cfg.radiation == "none":
+        return False, "radiation='none' exports no surface fluxes"
+    if coupled:
+        return False, "coupled drivers: the sea-ice model owns the ice surface"
+    if out.checkpoint_days > 0 and out.checkpoint_format == "zarr":
+        return False, "zarr checkpoints cannot store the skin"
+    if out.checkpoint_days > 0 and latlon_mpi:
+        return False, "lat-lon MPI checkpoints cannot store the skin"
+    return True, "the lane carries the skin"
 
 
 class ExperimentConfig(NamedTuple):
@@ -723,6 +835,10 @@ class ExperimentConfig(NamedTuple):
     # CAM RRTMG-style transported layer above the model top (see
     # ``RRTMGPConfig.overhead_layer``).  False = off (byte-identical).
     rrtmgp_overhead_layer: bool = False
+    # RRTMGP gas-optics table set: "reduced" (LW g128 / SW g112, the module
+    # default) or "full" (LW g256 / SW g224, the reference tables; RFMIP
+    # forcing error <=0.04 W/m2 vs up to 0.24).  Production AMIP selects "full".
+    rrtmgp_gas_tables: str = "reduced"
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
@@ -732,6 +848,10 @@ class ExperimentConfig(NamedTuple):
     ozone_file: str = ""
     ghg_forcing: str = "constant"       # constant, external
     ghg_file: str = ""
+    # radiation='ecrad_ifs' aerosols: the IFS CAMS 2D column-mass
+    # climatology (48r1 aerosol_cams_climatology_43R3a.nc, declared departure
+    # A2a; user 2026-11-04 item 3).  Required for ecrad_ifs (vote C2a).
+    ecrad_ifs_aerosol_file: str = ""
 
     # Solar
     solar_source: str = "constant"      # constant, file, spectral_file
@@ -794,7 +914,7 @@ class ExperimentConfig(NamedTuple):
     clubb_liquid_partition: bool = False
     # CLUBB's upper domain limit [Pa] (CAM ``trop_cloud_top_press``): the
     # scheme's mixing is tapered to zero above this pressure.  None (default)
-    # keeps the scheme's own 0.0 = no limit, byte-identical.
+    # keeps the scheme's own default (CLUBBConfig: CAM6's 100 Pa).
     clubb_trop_cloud_top_press: float | None = None
     # Moisture-only multiplier on CLUBB's q_v eddy diffusivity at the faces
     # whose sigma lies in ``clubb_q_flux_scale_sigma_band`` (cloud-base mixing
@@ -833,8 +953,8 @@ class ExperimentConfig(NamedTuple):
     # albedo. None => CloudConfig default 1.0 (homogeneous, no change).
     cloud_inhomogeneity_factor: float | None = None
     # Sub-grid cloud-optics inhomogeneity scheme: "constant" (Cahalan scalar,
-    # legacy/byte-identical) or "two_region" (tau-dependent Shonk-Hogan optic
-    # that breaks the plane-parallel tau-saturation). cloud_fsd = fractional
+    # legacy/byte-identical) or "two_region" (ecRad McICA gamma scaling per
+    # max_random subcolumn cell). cloud_fsd = fractional
     # std-dev of in-cloud water for two_region (Shonk-Hogan ~0.75).
     cloud_optics_inhomogeneity: str = "constant"
     cloud_fsd: float | None = None
@@ -1042,15 +1162,6 @@ class ExperimentConfig(NamedTuple):
     autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
     autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
 
-    # Tiedtke plume buoyancy-death memory: when True the entraining plume,
-    # once it exhausts its cumulative buoyancy budget, stays dead instead of
-    # reviving above an inversion (the default False lets a plume killed by
-    # negative buoyancy resume nonzero M_u aloft — physically questionable,
-    # and the cause of convective detrainment heating reaching the ~100 hPa
-    # tropical cold point).  Tiedtke-only: validate_strict refuses it with any
-    # other convection scheme.
-    convective_buoyancy_death_memory: bool = False
-
     # Convection / Turbulence / GWD
     convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, zhang_mcfarlane, none
     turbulence: str = "none"           # smagorinsky, louis, tke, none
@@ -1204,7 +1315,7 @@ class ExperimentConfig(NamedTuple):
     # snow-albedo feedback SOTA AMIP land has.  Requires an active land tile.
     # Off (default) ⇒ static vegetation albedo (byte-identical legacy path).
     snow_albedo_feedback: bool = False
-    gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
+    gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, ifs_wms, none
 
     # Conservation
     fix_moisture: bool = False
@@ -1247,6 +1358,14 @@ class ExperimentConfig(NamedTuple):
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
     land_mask_path: str = ""
+    # Where the column land fraction comes from, for the land model AND the
+    # physics alike (one coastline; user 2026-10-28, R3/R5/R6):
+    #   "topography" -- the terrain / land_mask_path above (every lane so far);
+    #   "era5"       -- the ERA5 land-sea mask from land_fraction_era5_zarr
+    #                   (required, no default); lat-lon grids only;
+    #   "zero"       -- an all-ocean column set, chosen explicitly; lat-lon only.
+    land_fraction_source: str = "topography"
+    land_fraction_era5_zarr: str = ""
     # Optional land-surface-albedo NetCDF (e.g. ICON-extpar ALB on a
     # regular lat-lon grid).  When set AND ``land_mask_path`` is set, the
     # static land albedo field replaces the latitude-band fallback used
@@ -1275,6 +1394,10 @@ class ExperimentConfig(NamedTuple):
     # slab knobs (C_land, emissivity_land) become unused and
     # the multilayer config below takes over.
     use_multilayer_land: bool = False
+    # ML/AIMIP training entry points only: lets full physics (multilayer land)
+    # run on the compiled pipeline, which production refuses.  Not a run_amip
+    # argument, so no deck can set it.
+    ml_pipeline: bool = False
     # Land-tile call interval [s]; 0.0 (default) advances the land every
     # host step (legacy).  A positive value calls the tile every
     # round(land_update_seconds/dt) steps with the atmosphere forcing
@@ -1304,6 +1427,11 @@ class ExperimentConfig(NamedTuple):
     # multiplied by 10**(-e * ice fraction).  Active only with
     # land_soil_freeze_thaw; 6 = CLM5 (user 2026-09-28), 0 = no impedance.
     land_soil_ice_impedance_exponent: float = 6.0
+    # Soil-water numerics of the multilayer land (user 2026-10-14), stated here so
+    # the run records it: the air-entry head [m] of the modified van Genuchten
+    # retention curve (Vogel et al. 2001; <= 0, 0 = the classic curve).  Default is
+    # the land library's.
+    land_soil_vg_air_entry_m: float = -0.02
     # Two-leaf canopy (land_surface_scheme="two_leaf"): whether soil-moisture
     # stress also down-regulates the Ball-Berry intercept b0
     # (TwoLeafCanopyConfig.stress_b0). Library default True (both stressed);
@@ -1320,6 +1448,12 @@ class ExperimentConfig(NamedTuple):
     # bare-branch bound). Two-leaf canopy on the multilayer land only. Off by
     # default pending the A/B (user 2026-10-03).
     land_canopy_snow_masking: bool = False
+    # One-layer snow thermal node (SoilThermalConfig.snow_insulation): the
+    # snowpack gets a temperature, ice heat capacity and Jordan (1991)
+    # insulation between its surface and the soil, solved with the soil as in
+    # CLM5.  Off (default) = the heat-free snow bucket.  Opt-in A/B switch
+    # (northern-winter cold bias, 2026-10-03); decks set it explicitly.
+    land_snow_insulation: bool = False
     # Run the multilayer land tile in EXACTLY the configuration its baked
     # per-PFT tables were calibrated under (the single definition lives in
     # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
@@ -1417,8 +1551,8 @@ class ExperimentConfig(NamedTuple):
     start_year: int = 1979
 
     # Surface parameters
-    C_H: float = 0.0044
-    C_E: float = 0.0044
+    C_H: float = C_H_BULK_DEFAULT
+    C_E: float = C_E_BULK_DEFAULT
     # T_ice is the seawater freezing point used as the SST floor /
     # SIC ramp threshold — NOT the ice surface temperature.  Legacy
     # name kept for AMIP config compatibility.
@@ -1435,8 +1569,11 @@ class ExperimentConfig(NamedTuple):
     tau_pole: float = 1.8
     tau_moist_coeff: float = 0.0115        # gray-rad moisture LW optical depth [m²/kg]
     # Additional gray-radiation knobs (GrayRadiationConfig fields), exposed on
-    # ExperimentConfig so the calibration can tune them.  They are threaded to
-    # the gray radiation kernel as a `gray_cfg_overrides` dict.  NOTE:
+    # ExperimentConfig so the calibration can tune them.  NOT YET WIRED: no
+    # consumer threads them to the gray kernel (the pipeline gray builder passes
+    # only tau_equator, tau_pole, S_0 and albedo_ocean), so linear_frac,
+    # lw_diff_factor, sw_tau_0, sw_exponent and tau_moist_coeff currently have
+    # no effect on gray radiation (tier-2 oracle audit probe).  NOTE:
     # sfc_emissivity (above) is NOT honoured by gray radiation — gray keeps its
     # idealized black-surface convention (eps=1.0, Held-Suarez/Frierson); the
     # sfc_emissivity value feeds RRTMGP and the dynamic surface-emissivity blend
@@ -1448,7 +1585,7 @@ class ExperimentConfig(NamedTuple):
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
-    sundqvist_auto_rate: float = 1e-3      # Sundqvist autoconversion rate [1/s]
+    sundqvist_auto_rate: float = 1.5e-4    # Sundqvist autoconversion rate [1/s] (GFS prautco)
     # Convection / microphysics / turbulence / GWD scheme knobs exposed for
     # calibration (AIMIP commit 0c747d4).  These mirror the scheme-config
     # defaults; the calibration threads them to the schemes as a
@@ -1468,7 +1605,7 @@ class ExperimentConfig(NamedTuple):
     # truncated literal would silently perturb the default kernel.
     mcfarlane_k_wave: float = 2.0 * math.pi / 100e3  # McFarlaneConfig.k_wave [1/m]
     mcfarlane_directional_spread: float = 1.0   # McFarlaneConfig.directional_spread
-    mcfarlane_tau_max: float = 10.0             # McFarlaneConfig.tau_max [Pa]
+    mcfarlane_effgw_oro: float = 0.125          # McFarlaneConfig.effgw_oro [1] (#1712)
     # Morrison ice-microphysics tunables (active when microphysics='morrison'
     # — silently filtered out by hasattr when Sundqvist/Kessler is active).
     morrison_bergeron_rate: float = 1e-3        # MorrisonConfig.bergeron_rate [1/s]
@@ -1487,7 +1624,11 @@ class ExperimentConfig(NamedTuple):
     # obs because small-crystal cirrus defeats both ice sinks while hom
     # nucleation keeps seeding number — these three knobs bracket the loop).
     morrison_fall_a_i: float = 700.0            # MorrisonConfig.fall_a_i [m^(1-b)/s]
-    morrison_ice_snow_d_auto: float = 250.0e-6  # MorrisonConfig.ice_snow_d_auto [m]
+    morrison_ice_snow_d_auto: float | None = None  # MorrisonConfig.ice_snow_d_auto [m];
+                                                # None = the flavor's DCS, resolved
+                                                # in the scheme (SAM 250 um, mg =
+                                                # CAM6 MG2 micro_mg_dcs 500 um);
+                                                # an explicit value always wins
     morrison_hom_ice_nuc_N: float = 1.0e6       # MorrisonConfig.hom_ice_nuc_N [1/m^3]
                                                 # (consumed only inside the
                                                 # homogeneous_ice_nucleation
@@ -1520,6 +1661,13 @@ class ExperimentConfig(NamedTuple):
     # land_fraction): "required" (default; a run without a land fraction
     # raises) or "none" (explicit aquaplanet, ocean coefficients everywhere).
     zm_land_fraction: str = "required"
+    # Zhang-McFarlane convective transport of the carried cloud/precipitation
+    # tracers (ZhangMcFarlaneConfig.transport_cloud_tracers; CAM6 convtran).
+    zm_transport_cloud_tracers: bool = True
+    # Kain-Fritsch implementation (KainFritschConfig.variant; user 2026-10-30,
+    # PR #2249): "smooth" (default surrogate) or "wrf_kfeta" (faithful WRF
+    # v4.8.0 KF-Eta port, OPT-IN, NOT RULE 5 compliant, #2280).
+    kain_fritsch_variant: str = "smooth"
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -1552,6 +1700,17 @@ class ExperimentConfig(NamedTuple):
     # neutral); --no-bechtold-use-ifs-cape-closure restores the legacy
     # surrogate byte-identically.  Mirrors BechtoldConfig.use_ifs_cape_closure.
     bechtold_use_ifs_cape_closure: bool = True
+    # Run the IFS convection as CUMASTRN does (faithful OpenIFS port; the six
+    # run-set fields bechtold_epsilon_deep/delta_deep/rprcon/dnoprc,
+    # epsilon_shallow, cape_qadv_weight reach it, every other Bechtold field
+    # must stay at its default).  Mirrors BechtoldConfig.use_ifs_ascent.
+    bechtold_use_ifs_ascent: bool = False
+    # OpenIFS 49r1 METHOX stratospheric water source (methane oxidation +
+    # photolysis, methane_oxidation.py); limit from the run's CH4 (vote M2a).
+    ifs_methox: bool = False
+    # OpenIFS 49r1 Cariolle ozone chemistry on an advected o3_ifs tracer
+    # (tracer only: radiation keeps its own ozone; user 2026-11-10).
+    ifs_ozone_chem: bool = False
     # IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475).  Default
     # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
     # mirrors BechtoldConfig.use_ifs_subcloud_evap (fallbacks match).
@@ -1577,6 +1736,10 @@ class ExperimentConfig(NamedTuple):
     # scheme's own default (BechtoldConfig.enable_cmt, ON) on every lane
     # (review 2026-10-10 F22, majority vote; it used to be OFF on MPAS only).
     bechtold_enable_cmt: bool | None = None
+    # Emanuel CONVECT FU/FV convective momentum transport (#2266).  None = the
+    # scheme's own default (EmanuelConfig.enable_cmt, OFF pending the user's
+    # default decision) on every lane.
+    emanuel_enable_cmt: bool | None = None
     bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
     # Deep-plume entrainment / detrainment base rates (IFS cuascn), exposed
     # 2026-08-14. These set the ITCZ WIDTH and tropical rain concentration:
@@ -1601,6 +1764,12 @@ class ExperimentConfig(NamedTuple):
     bechtold_use_ifs_capdcycl: bool = True
     bechtold_use_ifs_land_rhebc: bool = True
     bechtold_use_ifs_snow_melt: bool = True
+    # The faithful chain's no-supply shallow mode
+    # (BechtoldConfig.ifs_shallow_nosupply; bechtold_use_ifs_ascent above).
+    bechtold_ifs_shallow_nosupply: str = "zero"
+    # The faithful chain's elementwise switches: False = RULE 5 smooth forms,
+    # True = OpenIFS exact (BechtoldConfig.ifs_hard_switches, #2281).
+    bechtold_ifs_hard_switches: bool = False
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1657,7 +1826,11 @@ class ExperimentConfig(NamedTuple):
     # surface -- the SST/SIC blend, without the land skin and without the land
     # lapse correction -- instead of on the land-blended surface temperature
     # and humidity.  The land fraction keeps the land model's own fluxes.
-    ocean_flux_on_ocean_surface: bool = False
+    # Tri-state (user decision 2026-10-26): None = AUTO, on exactly where an
+    # explicit True is accepted (see ``ocean_flux_surface_eligibility``),
+    # resolved at ModelDriver setup so the manifest / saved config / replay
+    # record the boolean; True = required (refused where inert); False = off.
+    ocean_flux_on_ocean_surface: bool | None = None
     # MPAS lane, interactive multilayer land: rebuild the two-leaf canopy's
     # surface parameters (LAI, canopy height, soil-colour albedo from the top
     # soil layer's wetness) from the surfdata climatology at every land step,
@@ -1685,6 +1858,17 @@ class ExperimentConfig(NamedTuple):
 
     # Performance
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
+    # "fp64": the MPAS-lane multilayer land step runs in float64 inside a
+    # lower-precision run (inputs up-cast, outputs back to the carry/storage
+    # dtype; x64 enabled).  The two-leaf canopy solver's convergence test sits
+    # at the fp32 rounding floor: in fp32, 43% of land columns never converge.
+    # "policy": land follows ``precision``.
+    land_compute_precision: str = "policy"
+    # "fp64": every microphysics kernel runs in float64 inside a
+    # lower-precision run (inputs up-cast, tendencies back to the storage
+    # dtype; x64 enabled).  User ruling 2026-08: microphysics stays fp64.
+    # "policy": microphysics follows ``precision``.
+    microphysics_compute_precision: str = "policy"
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
 
     # Reproducibility (Stage A1).  Master RNG seed for the run: every random key
@@ -1833,11 +2017,10 @@ class ExperimentConfig(NamedTuple):
     # helper).  The prescribed-SST anchor otherwise pins ice-covered cells
     # at the CONSTANT T_ice (271.35 K) year-round — the +8.6 K polar tas
     # warm bias of the first ClimateEval scorecard (real central-Arctic
-    # winter skin ~245-250 K).  Default OFF = byte-identical.  Needs
-    # radiation != "none" (the skin integrates the exported surface
-    # fluxes); refused on non-MPAS lanes (their land/ice tiles own the
-    # surface temperature).
-    ice_skin_prognostic: bool = False
+    # winter skin ~245-250 K).  None = auto: on wherever the lane carries the
+    # skin, off (with the reason logged) elsewhere — see
+    # resolve_ice_skin_prognostic, applied at ModelDriver.setup.
+    ice_skin_prognostic: bool | None = None
     ice_thickness_m: float = 2.0      # climatological ice slab thickness [m]
     # Hines (1997) non-orographic GWD launch amplitude + saturation flux cap.
     # Reached through gwd_config_for on EVERY lane (like the mcfarlane_*
@@ -1845,8 +2028,7 @@ class ExperimentConfig(NamedTuple):
     # that resolver existed).  The low-level extratropical westerlies are the
     # observable lever: hines deposits momentum that decelerates them.
     # Appended at the tuple END to preserve the positional ABI.
-    hines_total_rms_wind: float = 2.0           # HinesConfig.total_rms_wind [m/s]
-    hines_Fmax: float = 0.1                     # HinesConfig.Fmax [Pa]
+    hines_total_rms_wind: float = 1.0           # HinesConfig.total_rms_wind [m/s] (LMDZ rmscon)
     # HinesConfig.launch_p [Pa], legal range HINES_LAUNCH_P_RANGE_PA.  No
     # surface launch: a non-orographic wave launched there is born
     # supersaturated in the weakly stratified BL and breaks at its own
@@ -1964,7 +2146,9 @@ class ExperimentConfig(NamedTuple):
     # graupel riming sink.  Default equals the leaf (True).
     morrison_do_graupel: bool = True
     # Morrison warm rain (appended at the END: positional ABI).
-    morrison_warm_rain_scheme: str = "kk2000"   # MorrisonConfig.warm_rain_scheme
+    # MorrisonConfig.warm_rain_scheme; None = unset, resolved by
+    # morrison_flavor (mg -> kk2000_cam6, sam -> kk2000).
+    morrison_warm_rain_scheme: str | None = None
     morrison_autocon_fact: float = 1.0          # MorrisonConfig.autocon_fact (kk2000 only)
     morrison_accre_enhan_fact: float = 1.0      # MorrisonConfig.accre_enhan_fact (kk2000 only)
     # MorrisonConfig.warm_rain_incloud: CAM6 MG2 in-cloud warm rain on the
@@ -1999,6 +2183,76 @@ class ExperimentConfig(NamedTuple):
     # CanopyConfig.most_n_iters: fixed-point iterations of the above-canopy
     # Monin-Obukhov solve (same placement and None semantics as the widths).
     land_canopy_most_n_iters: int | None = None
+    # MorrisonConfig.prognostic_droplet_number: CAM6 MG2 prognostic droplet
+    # number with prescribed-aerosol activation (microp_aero_run); MPAS lane.
+    morrison_prognostic_droplet_number: bool = False
+    # Directory of the sha256-pinned CAM6 PPE member-000 aerosol climatology +
+    # MAM4 property files read by that activation; None = unset.
+    cam6_aerosol_dir: str | None = None
+    # Sea-ice shortwave albedo (#2106).
+    #   "auto" (default)      -> resolved per run by resolve_sea_ice_albedo_scheme:
+    #     "maykut_untersteiner" when the lane carries the prognostic ice skin,
+    #     else "constant"; the RESOLVED value replaces "auto" in the driver's
+    #     config (log, experiment_config.json, run manifest).
+    #   "constant"            -> albedo_ice everywhere, every season.
+    #   "maykut_untersteiner" -> ice.shortwave.maykut_untersteiner_albedo on the
+    #     prognostic ice skin, recomputed every step: albedo_ice when the skin
+    #     is <= T_freeze - width, the scheme's melting bare-ice value at
+    #     T_freeze, linear between.  Needs ice_skin_prognostic=True.
+    sea_ice_albedo_scheme: str = "auto"
+    sea_ice_melt_ramp_width_K: float = _ICE_SFC_DEFAULTS[
+        "sea_ice_melt_ramp_width_K"]   # melt-ramp width below T_freeze [K]
+    # Smooth 0 C cap on the prognostic ice skin (RULE 5): smooth_min(T, T_freeze,
+    # sharpness=1/width).  0 = the hard clip (pre-#2106 behaviour).
+    ice_skin_melt_cap_width_K: float = _ICE_SFC_DEFAULTS[
+        "ice_skin_melt_cap_width_K"]
+    # ZM detrainment smoothing widths (ZM_WIDTH_FIELDS).  None = the scheme
+    # default; the production deck names both.
+    zm_detrain_phase_width_K: float | None = None
+    zm_detrain_number_width_kgkg_s: float | None = None
+    # APPENDED LAST (positional order of the fields above unchanged).
+    # Large-Yeager (surface_bulk_scheme="large_yeager", AeroBulk TURB_NCAR)
+    # RULE 5 smooth-switch widths (#2241), threaded into the atmosphere
+    # SurfaceLayerConfig by apply_surface_flux_config; 0.0 = AeroBulk's hard
+    # switch.  large_yeager_cesm and the other schemes never read them.
+    surface_large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
+    surface_large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
+    surface_large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # MorrisonConfig.mg2_drop_readjust_log_width: RULE 5 width of MG2's final
+    # droplet mean-size readjust (prognostic droplet number only); 0 = MG2's
+    # hard clip.  Range [0, 1], checked in validate_strict.
+    morrison_mg2_drop_readjust_log_width: float = 0.01
+    # MorrisonConfig.mg2_drop_early_reset_log_width: RULE 5 width of MG2's
+    # early droplet size reset (before autoconversion; both droplet-number
+    # paths: read by the kk2000_cam6 autoconversion and the MG2 snow riming);
+    # 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
+    morrison_mg2_drop_early_reset_log_width: float = 0.01
+    # MorrisonConfig.mg2_drop_sed_reset_log_width: RULE 5 width of MG2's
+    # droplet size reset in the sedimentation fall speeds (prognostic droplet
+    # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
+    morrison_mg2_drop_sed_reset_log_width: float = 0.01
+    # CanopyConfig.solve_group: columns per batch of the two-leaf canopy Newton
+    # solve, 0 = one batch per GPU (same placement and None semantics as
+    # land_canopy_most_n_iters; the production deck names it).
+    land_canopy_solve_group: int | None = None
+    # ZhangMcFarlaneConfig.trigger_width_J_kg (ZM_TRIGGER_FIELDS): RULE 5 width
+    # of the deep-convection trigger [J/kg]; 0 = CAM's hard switch.  None = the
+    # scheme default; the production deck names it.
+    zm_trigger_width_J_kg: float | None = None
+    # BechtoldConfig.snow_refill_width_kg_m2_s: RULE 5 width of the legacy
+    # Bechtold sub-cloud snow refill [kg/m^2/s]; 0 = the oracle's hard switch.
+    # None = the scheme default; decks running legacy Bechtold name it.
+    bechtold_snow_refill_width_kg_m2_s: float | None = None
+    # APPENDED LAST (positional order).  Unstable-regime (zeta < 0) MOST form, chosen independently of
+    # surface_stability_scheme and threaded to the same consumers: "native"
+    # (default, byte-identical: each bulk path's own form) | "businger_dyer" |
+    # "coare3".  See bulk_flux.compute_most_fluxes.
+    surface_unstable_scheme: str = "native"
+    # APPENDED LAST.  RULE 5 widths threaded into every MOST surface config
+    # (bulk_flux.surface_flux_widths): smooth |zeta| cap half-width (0 = hard
+    # clip at +-10) and the GFS unstable join width (0 = exact GFS step).
+    surface_most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
+    surface_gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2055,12 +2309,104 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        if (normalize_grid_type(g.grid_type) == "cubed_sphere"
+                and d.discretization != "fv3_duo"):
+            errors.append(
+                "Cubed-sphere atmosphere requires dycore.discretization='fv3_duo'; "
+                f"retired or unsupported selection {d.discretization!r}.")
+        # The faithful IFS convection hands its detrained rain and snow
+        # (PSNDE) to the host's rain and snow species (user 2026-10-28, R12):
+        # only schemes that carry and process both may run it.  p3's snow
+        # slot holds rime, fast_sbm's ice slots stay zero, seifert_beheng is
+        # liquid only, the ML emulator's layout is generic.
+        # ifs_cloudsc takes the detrained precipitation itself, through the
+        # CUMASTRN hand-off (vote VC2/A7').
+        if (self.convection == "bechtold" and self.bechtold_use_ifs_ascent
+                and self.microphysics not in ("morrison", "thompson",
+                                              "ifs_cloudsc")):
+            errors.append(
+                f"bechtold_use_ifs_ascent needs a microphysics that carries "
+                f"rain and snow (morrison, thompson, ifs_cloudsc) for the "
+                f"detrained precipitation, not {self.microphysics!r}")
+        # IFS CLOUDSC reads CUMASTRN's raw detrainment and mass fluxes (vote
+        # VC19a: refuse any other convection), and only the MPAS column lane
+        # carries its advected cloud fraction (vote VC16b: the compiled
+        # cube/lat-lon and spectral lanes refuse it; follow-up).
+        if self.microphysics == "ifs_cloudsc":
+            if not (self.convection == "bechtold"
+                    and self.bechtold_use_ifs_ascent):
+                errors.append(
+                    "microphysics='ifs_cloudsc' needs the faithful IFS "
+                    "convection (convection='bechtold' with "
+                    "bechtold_use_ifs_ascent=True), whose raw PLUDE/PLUDELI/"
+                    "PSNDE/PMFU/PMFD/PLU/LDCUM/KTYPE it reads; got "
+                    f"convection={self.convection!r}, bechtold_use_ifs_ascent="
+                    f"{self.bechtold_use_ifs_ascent!r}")
+            if self.cld_macmic_num_steps != 1:
+                errors.append(
+                    "microphysics='ifs_cloudsc' runs CLOUDSC once per physics "
+                    "step after the convection (the IFS order, vote VC23): "
+                    "needs cld_macmic_num_steps=1, got "
+                    f"{self.cld_macmic_num_steps!r}")
+            if not self.column_loop_lane:
+                errors.append(
+                    "microphysics='ifs_cloudsc' runs only on the MPAS column "
+                    "lane (MPAS dycore or the FV3-duo column lane), which "
+                    "advects its cloud_fraction_ifs tracer; the compiled "
+                    "cube/lat-lon and spectral lanes do not carry it "
+                    "(follow-up)")
+        if not self.column_loop_lane:
+            if "ifs_wms" in self.gravity_wave_drag.split("+"):
+                # Worded without the field name: the lane depends on other
+                # flags, so parse_gwd_spec's single-flag probe must not fire.
+                errors.append(
+                    "ifs_wms drag runs only on the MPAS column lane, which "
+                    "carries its retained wind tendencies")
+            if self.ifs_methox:
+                errors.append(
+                    "ifs_methox runs only on the MPAS column lane")
+        if self.ifs_ozone_chem and (not self.column_loop_lane
+                                    or bool(self.dycore.column_lane)):
+            errors.append(
+                "ifs_ozone_chem runs only on the MPAS dycore lane, which "
+                "carries the o3_ifs tracer (not the FV3-duo column lane)")
+        if self.land_fraction_source not in ("topography", "era5", "zero"):
+            errors.append(
+                f"land_fraction_source must be topography, era5 or zero, got "
+                f"{self.land_fraction_source!r}")
+        elif self.land_fraction_source != "topography":
+            if self.grid.grid_type != "latlon":
+                errors.append(
+                    f"land_fraction_source={self.land_fraction_source!r} is only "
+                    f"supported on the lat-lon grid, not {self.grid.grid_type!r}")
+            if (self.land_fraction_source == "era5"
+                    and not self.land_fraction_era5_zarr):
+                errors.append("land_fraction_source='era5' needs "
+                              "land_fraction_era5_zarr (no default store)")
+            if self.land_mask_path:
+                errors.append(
+                    f"land_mask_path={self.land_mask_path!r} and "
+                    f"land_fraction_source={self.land_fraction_source!r} name "
+                    "two coastlines; drop one")
+            if (self.land_fraction_source == "zero"
+                    and (self.use_multilayer_land or self.slab_land_active)):
+                errors.append(
+                    "land_fraction_source='zero' with a land tile "
+                    "(use_multilayer_land / slab_land_active): land physics "
+                    "on no land")
         # Owner decision 2026-08-16: conserving form always, and any
         # NON-conserving form must ANNOUNCE itself when invoked. These are
         # warnings, not errors — the legacy/exception paths stay selectable
         # for bit-comparison and for the documented MSE-vs-water trade-off.
         import logging as _logging
         _wlog = _logging.getLogger(__name__)
+        global _CLUBB_LITE_WARNED
+        if self.turbulence == "clubb_lite" and not _CLUBB_LITE_WARNED:
+            from legoesm.atmosphere.physics.turbulence.config import (
+                CLUBB_LITE_STANDIN_NOTE,
+            )
+            _wlog.warning(CLUBB_LITE_STANDIN_NOTE)
+            _CLUBB_LITE_WARNED = True
         if not d.mpas_conservative_tracer_clamp:
             _wlog.warning(
                 "NON-CONSERVING form selected: "
@@ -2197,35 +2543,42 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.corner_fill must be one of {CORNER_FILL_MODES}, "
                           f"got {d.corner_fill!r}")
         if d.column_lane:
-            if d.discretization not in ("fv3_duo", "latlon_cgrid"):
+            _native_grid = {"latlon_cgrid": "latlon", "spectral": "gaussian"}
+            if d.discretization not in ("fv3_duo", *_native_grid):
                 errors.append(
                     "dycore.column_lane: no column adapter for "
                     f"dycore.discretization={d.discretization!r} "
-                    "(fv3_duo, latlon_cgrid)")
-            if d.discretization == "latlon_cgrid":
-                if (g.grid_type != "latlon" or d.model_type != "hydrostatic"):
+                    "(fv3_duo, latlon_cgrid, spectral)")
+            if d.discretization in _native_grid:
+                _ng = _native_grid[d.discretization]
+                if (g.grid_type != _ng or d.model_type != "hydrostatic"):
                     errors.append(
-                        "dycore.column_lane with latlon_cgrid needs "
-                        "grid_type='latlon' and model_type='hydrostatic' "
+                        f"dycore.column_lane with {d.discretization} needs "
+                        f"grid_type={_ng!r} and model_type='hydrostatic' "
                         f"(got {g.grid_type!r}, {d.model_type!r})")
                 if self.distributed or self.ensemble_size != 1:
                     errors.append(
-                        "dycore.column_lane on latlon_cgrid is single device: "
-                        "no MPI band (distributed) and no ensemble axis")
+                        f"dycore.column_lane on {d.discretization} is single "
+                        "device: no MPI (distributed) and no ensemble axis")
                 # the column loop's MPAS q_v smoother is a Voronoi
-                # operator; this lane's is latlon_qv_smooth_del4_m4s
+                # operator; the lat-lon lane's is latlon_qv_smooth_del4_m4s
                 if self.output.budget_ledger:
                     errors.append(
-                        "output.budget_ledger on the lat-lon column lane: its "
-                        "dycore publishes no per-step ledger, so no ledger "
-                        "would be written")
+                        f"output.budget_ledger on the {d.discretization} "
+                        "column lane: its dycore publishes no per-step ledger, "
+                        "so no ledger would be written")
                 for _k in ("mpas_qv_smooth_del2_m2s", "mpas_qv_smooth_del4_m4s"):
                     if float(getattr(self, _k, 0.0) or 0.0) != 0.0:
                         errors.append(
-                            f"{_k}={getattr(self, _k)!r} on the lat-lon column "
-                            "lane: the column loop's q_v smoother needs the "
-                            "Voronoi mesh; set it to 0 (this lane's is "
-                            "latlon_qv_smooth_del4_m4s)")
+                            f"{_k}={getattr(self, _k)!r} on the "
+                            f"{d.discretization} column lane: the column "
+                            "loop's q_v smoother needs the Voronoi mesh; set "
+                            "it to 0")
+            if (d.discretization == "spectral"
+                    and str(d.time_integrator).lower() in ("leapfrog", "leapfrog_si")):
+                errors.append(
+                    "dycore.column_lane on spectral runs the explicit ssp_rk54 "
+                    f"only (D5); got time_integrator={d.time_integrator!r}")
             # every column lane: the columns are a VIEW of the native
             # state and only the dycore's step may move the winds
             if self.sponge_enabled:
@@ -2337,6 +2690,34 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"precision must be one of {_valid_precisions}, got {self.precision!r}"
             )
+        if self.land_compute_precision not in ("policy", "fp64"):
+            errors.append(
+                "land_compute_precision must be one of ('policy', 'fp64'), "
+                f"got {self.land_compute_precision!r}")
+        elif (self.land_compute_precision == "fp64"
+              and not (self.column_loop_lane and self.use_multilayer_land)):
+            errors.append(
+                "land_compute_precision='fp64' acts only on the MPAS-lane "
+                "multilayer land step (column_loop_lane and "
+                "use_multilayer_land); this run has neither, so it would be "
+                "ignored")
+        if (self.use_multilayer_land and not self.column_loop_lane
+                and not self.ml_pipeline):
+            errors.append(
+                "use_multilayer_land runs in production only on the column "
+                "loop (MPAS, or dycore.column_lane); the compiled pipeline "
+                f"(discretization={d.discretization!r}) keeps multilayer land "
+                "only for ML training entry points, which set "
+                "ml_pipeline=True.")
+        if self.microphysics_compute_precision not in ("policy", "fp64"):
+            errors.append(
+                "microphysics_compute_precision must be one of "
+                f"('policy', 'fp64'), got {self.microphysics_compute_precision!r}")
+        elif (self.microphysics_compute_precision == "fp64"
+              and self.microphysics == "none"):
+            errors.append(
+                "microphysics_compute_precision='fp64' with microphysics="
+                "'none' would be ignored")
         _valid_distributed_modes = ("mpi", "spmd")
         if self.distributed_mode not in _valid_distributed_modes:
             errors.append(
@@ -2432,11 +2813,22 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_snow_emissivity must be in [{_eps_lo}, {_eps_hi}] (the "
                 f"snow_column parameter spec), got {self.land_snow_emissivity!r}")
-        if self.convective_buoyancy_death_memory and self.convection != "tiedtke":
+        if self.convection == "tiedtke" and self.turbulence == "none":
             errors.append(
-                "convective_buoyancy_death_memory=True requires "
-                f"convection='tiedtke' (got {self.convection!r}): only the "
-                "Tiedtke scheme reads it — the knob would be silently inert.")
+                "convection='tiedtke' (WRF port) reads the previous step's "
+                "boundary-layer q_v tendency and surface water flux (WRF "
+                "qvpblten / qfx) from the turbulence scheme; with "
+                "turbulence='none' they would stay zero")
+        if self.convection == "tiedtke" and (
+                self.convective_precip_split != "constant"
+                or (self.convective_precip_efficiency or 0.0) > 0.0):
+            errors.append(
+                "convection='tiedtke' (WRF port) closes its own "
+                "precipitation: convective_precip_split="
+                f"{self.convective_precip_split!r} / "
+                f"convective_precip_efficiency="
+                f"{self.convective_precip_efficiency!r} would be silently "
+                "inert; leave them at 'constant' / None")
         if self.land_soil_freeze_thaw and not self.use_multilayer_land:
             errors.append(
                 "land_soil_freeze_thaw requires use_multilayer_land: only the "
@@ -2453,6 +2845,18 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "land_soil_ice_impedance_exponent must be finite in [0, 10] "
                 f"(its declared range), got {self.land_soil_ice_impedance_exponent}")
+        _f = "land_soil_vg_air_entry_m"
+        if getattr(self, _f) != type(self)._field_defaults[_f] and not self.use_multilayer_land:
+            errors.append(f"{_f} requires use_multilayer_land: only the multilayer "
+                          "soil solves Richards — the knob would be silently inert.")
+        # One legal range per parameter: the land library's own check.
+        from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, saturation_head
+        try:
+            saturation_head(SoilHydraulicsConfig(
+                retention_curve="van_genuchten",
+                vg_air_entry_m=self.land_soil_vg_air_entry_m))
+        except ValueError as exc:
+            errors.append(f"land_soil_vg_air_entry_m: {exc}")
         if ((self.land_canopy_interception or not self.land_canopy_stress_b0)
                 and not (self.use_multilayer_land
                          and self.land_surface_scheme == "two_leaf")):
@@ -2472,6 +2876,23 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "land_canopy_snow_masking is not supported with land_snow_scheme="
                 "'layered' yet (the masking would not read the pack's snow).")
+        if self.land_snow_insulation and not self.use_multilayer_land:
+            errors.append(
+                "land_snow_insulation requires use_multilayer_land: only the "
+                "multilayer soil has a snow thermal node — the knob would be "
+                "silently inert.")
+        if (self.land_snow_insulation
+                and self.land_surface_scheme not in ("two_leaf", "simple_seb")):
+            errors.append(
+                "land_snow_insulation is not supported with land_surface_scheme="
+                f"{self.land_surface_scheme!r}: only the two-leaf canopy and "
+                "SimpleSEB are supported; the land step would refuse at its "
+                "first call.")
+        if self.land_snow_insulation and self.land_snow_scheme != "bulk":
+            errors.append(
+                "land_snow_insulation is the one-layer thermal node of the bulk "
+                f"snowpack; land_snow_scheme={self.land_snow_scheme!r} carries "
+                "its own snow heat (the two would double-count it).")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "
@@ -2507,6 +2928,28 @@ class ExperimentConfig(NamedTuple):
                 f"zm_land_fraction must be one of ('required', 'none'), got "
                 f"{self.zm_land_fraction!r}"
             )
+        if self.kain_fritsch_variant not in ("smooth", "wrf_kfeta"):
+            errors.append(
+                f"kain_fritsch_variant must be one of ('smooth', 'wrf_kfeta'), "
+                f"got {self.kain_fritsch_variant!r}"
+            )
+        elif (self.convection == "kain_fritsch"
+              and self.kain_fritsch_variant == "wrf_kfeta"):
+            # Fail at load, not at the first physics call: the faithful port
+            # refuses every surrogate-only field away from its default.
+            from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import (
+                check_wrf_kfeta_config,
+            )
+            from legoesm.driver.physics_pipeline import convection_config_for
+            try:
+                check_wrf_kfeta_config(convection_config_for(self).kain_fritsch)
+            except ValueError as exc:
+                errors.append(f"kain_fritsch_variant='wrf_kfeta': {exc}")
+        if not isinstance(self.zm_transport_cloud_tracers, bool):
+            errors.append(
+                f"zm_transport_cloud_tracers must be a bool, got "
+                f"{self.zm_transport_cloud_tracers!r}"
+            )
         if self.bechtold_rain_vapor_sink not in ("formation", "vapour_mass"):
             errors.append(
                 f"bechtold_rain_vapor_sink must be one of "
@@ -2518,6 +2961,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"convective_precip_efficiency must be in [0, 1] or None, got "
                 f"{self.convective_precip_efficiency}"
+            )
+        if self.bechtold_ifs_shallow_nosupply not in ("zero", "first_guess"):
+            errors.append(
+                "bechtold_ifs_shallow_nosupply must be 'zero' or 'first_guess', "
+                f"got {self.bechtold_ifs_shallow_nosupply!r}"
             )
         if self.convective_precip_split not in ("constant", "autoconversion"):
             errors.append(
@@ -2585,6 +3033,48 @@ class ExperimentConfig(NamedTuple):
                 f"radiation must be one of {_valid_radiation}, "
                 f"got {self.radiation!r}"
             )
+        # ecRad 49r1 (votes L2a, L20a, M7a): the MPAS column lane only; the
+        # lane's aerosol forcing does not reach it; TSI, ozone and GHG come
+        # from the input4MIPs files (user 2026-11-04), so any other source
+        # would feed it silently.
+        if self.radiation == "ecrad_ifs":
+            if not self.column_loop_lane:
+                errors.append(
+                    "radiation='ecrad_ifs' runs only on the MPAS column lane "
+                    "(its between-call carry lives in that lane's physics "
+                    "state); the compiled cube/lat-lon and spectral lanes "
+                    "refuse it")
+            if self.aerosol_forcing != "off":
+                errors.append(
+                    "radiation='ecrad_ifs' does not read the lane's aerosol "
+                    "forcing: its aerosols are the IFS CAMS climatology in "
+                    "ecrad_ifs_aerosol_file; aerosol_forcing="
+                    f"{self.aerosol_forcing!r} would be silently ignored, "
+                    "set it to 'off'")
+            if not self.ecrad_ifs_aerosol_file:
+                errors.append(
+                    "radiation='ecrad_ifs' needs ecrad_ifs_aerosol_file (the "
+                    "IFS CAMS 2D aerosol climatology, "
+                    "aerosol_cams_climatology_43R3a.nc); ecRad runs with "
+                    "aerosols on")
+            for _f, _v in (("ozone_forcing", self.ozone_forcing),
+                           ("ghg_forcing", self.ghg_forcing)):
+                if _v != "external":
+                    errors.append(
+                        f"radiation='ecrad_ifs' reads the input4MIPs {_f} "
+                        f"file; {_f}={_v!r} would feed it another source, "
+                        "set it to 'external'")
+            if self.solar_source not in ("file", "spectral_file"):
+                errors.append(
+                    "radiation='ecrad_ifs' reads the input4MIPs TSI; "
+                    f"solar_source={self.solar_source!r} would feed it the "
+                    "static configured constant, set 'file' or "
+                    "'spectral_file'")
+            if self.experiment:
+                errors.append(
+                    "radiation='ecrad_ifs' does not take the CMIP-experiment "
+                    f"GHG trajectory (experiment={self.experiment!r}); it "
+                    "reads the ghg_file")
         _valid_cloud_schemes = VALID_CLOUD_SCHEMES
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(
@@ -2645,6 +3135,19 @@ class ExperimentConfig(NamedTuple):
         # channel (an AMIP run with ``ozone_forcing="externl"`` runs the static
         # fallback profile).  Membership-check them here so the failure is
         # fail-early and loud (dispatch-hardening).
+        _valid_gas_tables = ("reduced", "full")
+        if self.rrtmgp_gas_tables not in _valid_gas_tables:
+            errors.append(
+                f"rrtmgp_gas_tables must be one of {_valid_gas_tables}, "
+                f"got {self.rrtmgp_gas_tables!r}"
+            )
+        elif (self.rrtmgp_gas_tables != "reduced"
+              and self.radiation not in ("rrtmg", "rrtmgp")):
+            errors.append(
+                f"rrtmgp_gas_tables={self.rrtmgp_gas_tables!r} is read only by "
+                f"the rrtmg/rrtmgp radiation; radiation={self.radiation!r} "
+                "would ignore it."
+            )
         _valid_ozone_forcing = ("inline", "external", "off")
         if self.ozone_forcing not in _valid_ozone_forcing:
             errors.append(
@@ -2741,7 +3244,8 @@ class ExperimentConfig(NamedTuple):
         # opt-in would silently no-op there.  Reject it loudly on that backend
         # (dispatch-hardening, mirrors the condensate-scheme guard above).
         if (self.use_clubb_cloud_fraction
-                and self.dycore.discretization == "spectral"):
+                and self.dycore.discretization == "spectral"
+                and not self.dycore.column_lane):
             errors.append(
                 "use_clubb_cloud_fraction=True is not wired into the "
                 f"{self.dycore.discretization!r} radiation path (that backend "
@@ -2880,6 +3384,58 @@ class ExperimentConfig(NamedTuple):
                 if not _ok:
                     errors.append(f"{_f} must be a number in [{_lo}, {_hi}] "
                                   f"(the scheme's __param_spec__), got {_v!r}")
+        if self.bechtold_snow_refill_width_kg_m2_s is not None:
+            if self.convection != "bechtold":
+                errors.append("bechtold_snow_refill_width_kg_m2_s is a Bechtold "
+                              f"field; got convection={self.convection!r}")
+            from legoesm.core.smooth import validate_smoothing_width
+            try:
+                validate_smoothing_width("bechtold_snow_refill_width_kg_m2_s",
+                                         self.bechtold_snow_refill_width_kg_m2_s)
+            except ValueError as exc:
+                errors.append(str(exc))
+        for _f in ZM_TRIGGER_FIELDS:
+            _v = getattr(self, _f)
+            if _v is None:
+                continue
+            if self.convection != "zhang_mcfarlane":
+                errors.append(f"{_f} is a Zhang-McFarlane field; got "
+                              f"convection={self.convection!r}")
+            from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+                validate_trigger_width,
+            )
+            try:
+                validate_trigger_width(_v)
+            except ValueError as exc:
+                errors.append(f"{_f}: {exc}")
+        _zw = {f: getattr(self, f) for f in ZM_WIDTH_FIELDS
+               if getattr(self, f) is not None}
+        if _zw:
+            _nmm_w = self.cld_macmic_num_steps
+            if not (self.convection == "zhang_mcfarlane"
+                    and self.turbulence == "clubb"
+                    and isinstance(_nmm_w, int) and _nmm_w >= 2):
+                errors.append(
+                    f"{sorted(_zw)} are read only by the ZM detrainment booking "
+                    "of the MPAS macro/micro sub-cycle (convection="
+                    "'zhang_mcfarlane', turbulence='clubb', "
+                    "cld_macmic_num_steps>=2); got convection="
+                    f"{self.convection!r}, turbulence={self.turbulence!r}, "
+                    f"cld_macmic_num_steps={_nmm_w!r}, where they would be "
+                    "silently inert")
+            from legoesm.atmosphere.physics.convection.config import (
+                ZhangMcFarlaneConfig as _ZMC,
+            )
+            from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+                validate_detrain_widths,
+            )
+            _zmd = _ZMC()
+            try:
+                validate_detrain_widths(*(
+                    _zw.get(f, getattr(_zmd, leaf))
+                    for f, leaf in ZM_WIDTH_FIELDS.items()))
+            except (TypeError, ValueError) as exc:
+                errors.append(f"{sorted(_zw)}: {exc}")
         if (self.clubb_trop_cloud_top_press is not None
                 and self.turbulence != "clubb"):
             errors.append(
@@ -2928,7 +3484,8 @@ class ExperimentConfig(NamedTuple):
                 f"got {self.surface_thermo_convention!r}"
             )
         _valid_stability = ("dyer1974", "beljaars_holtslag1991",
-                            "grachev2007_sheba", "gryanik2020")
+                            "grachev2007_sheba", "gryanik2020", "gfs",
+                            "wrf_revmm5", "mynn_sfc", "most_revisit_j3")
         # A tiled surface WITH REAL LAND is exempt from the second check
         # below: its land tile is ocean_cfg._replace(bulk_scheme="most", ...)
         # (physics_pipeline ~:701), so it INHERITS the injected
@@ -2950,6 +3507,22 @@ class ExperimentConfig(NamedTuple):
             self.land_mask_path
             or ((self.slab_land_active or self.use_multilayer_land)
                 and not _idealized_topography))
+        if self.surface_unstable_scheme not in VALID_UNSTABLE_SCHEMES:
+            errors.append(
+                f"surface_unstable_scheme must be one of {VALID_UNSTABLE_SCHEMES}, "
+                f"got {self.surface_unstable_scheme!r}"
+            )
+        elif (self.surface_unstable_scheme != "native"
+                and self.surface_bulk_scheme not in ("coare3", "large_yeager")
+                and not _tiled_with_real_land):
+            # constant/none have no stability; large_yeager_cesm runs the CESM
+            # solver, which has its own fixed unstable form and ignores it.
+            errors.append(
+                f"surface_unstable_scheme={self.surface_unstable_scheme!r} "
+                f"needs surface_bulk_scheme 'coare3' or 'large_yeager' (the "
+                f"iterative MOST solver) or surface_tiled=True whose land tile "
+                f"runs MOST; otherwise it would be ignored."
+            )
         if self.surface_stability_scheme not in _valid_stability:
             errors.append(
                 f"surface_stability_scheme must be one of {_valid_stability}, "
@@ -3054,6 +3627,7 @@ class ExperimentConfig(NamedTuple):
         # campaign three tuning waves. Refused, not warned.
         if ((self.use_multilayer_land or self.slab_land_active)
                 and not self.land_mask_path
+                and self.land_fraction_source != "era5"
                 and _idealized_topography):
             errors.append(
                 f"a land tile was requested (use_multilayer_land="
@@ -3061,8 +3635,8 @@ class ExperimentConfig(NamedTuple):
                 f"{self.slab_land_active}) with an idealized "
                 f"topography={self.topography!r} and no land-mask file, which "
                 "has NO land anywhere (f_land is 0 in every cell), so the tile "
-                "would silently no-op — pass a real elevation file to --topography, or a "
-                "--land-mask-file."
+                "would silently no-op — pass a real elevation file to --topography, a "
+                "--land-mask-file, or --land-fraction-source era5."
             )
         # The same "no land anywhere" trap, on the MESH lane, which does not use
         # surface_tiled and so never reached the check above: the flux handoff
@@ -3245,6 +3819,14 @@ class ExperimentConfig(NamedTuple):
                     f"physics_update_steps={_pus} (>= it) so radiation is "
                     "recomputed on physics steps; a held-physics step cannot "
                     "solve radiation")
+            if self.convection == "tiedtke":
+                errors.append(
+                    f"physics_update_steps={_pus} with convection='tiedtke': "
+                    "Tiedtke's moisture-convergence trigger reads the "
+                    "dynamics water-vapour tendency of the step physics "
+                    "runs on, and held-physics steps would drop the "
+                    "intervening dynamics tendencies; use "
+                    "physics_update_steps=1")
         # R-ex (D-REX-1) checkpoint/radiation alignment is NOT checked here:
         # it depends on the EFFECTIVE timestep, which the driver may clamp
         # (CFL) after this validation -- see
@@ -3483,11 +4065,16 @@ class ExperimentConfig(NamedTuple):
                     "in its step factories (qv_smooth_coeff) and would "
                     "silently ignore it."
                 )
-            if self.ice_skin_prognostic:
+            # The prognostic ice skin is carried by the column loop, the
+            # compiled / per-step / operator-split (tiled, lat-band SPMD)
+            # lanes (#2106).  The spectral lane and the closed fv3_duo lane
+            # (its own HS/Kessler loop) do not carry it.
+            if self.ice_skin_prognostic is True and d.discretization in (
+                    "spectral", "fv3_duo"):
                 errors.append(
-                    "ice_skin_prognostic is an MPAS-lane knob; "
-                    f"discretization={d.discretization!r} has its own "
-                    "surface/ice tiles and would silently ignore it."
+                    "ice_skin_prognostic is not wired on the "
+                    f"discretization={d.discretization!r} lane; it would "
+                    "silently keep the constant T_ice anchor."
                 )
         # What the compiled PhysicsPipeline lanes (lat-lon, cube; neither the
         # column loop nor spectral) and the spectral lane would silently drop
@@ -3506,7 +4093,9 @@ class ExperimentConfig(NamedTuple):
                     "(its du/dv sum never reads du_dt_conv). Use the MPAS / "
                     "FV3-duo column lane or spectral"
                     + (", or bechtold_enable_cmt=false."
-                       if self.convection == "bechtold" else "."))
+                       if self.convection == "bechtold"
+                       else ", or emanuel_enable_cmt=false."
+                       if self.convection == "emanuel" else "."))
             _drops = []
             if self.cloud_vertical_overlap_optics != "none":
                 errors.append(
@@ -3517,11 +4106,12 @@ class ExperimentConfig(NamedTuple):
                     "FV3-duo column lane or spectral, or 'none'.")
             if (self.convection == "zhang_mcfarlane"
                     or (self.convection == "bechtold"
-                        and self.bechtold_enable_cmt)):
+                        and self.bechtold_enable_cmt)
+                    or (self.convection == "emanuel"
+                        and self.emanuel_enable_cmt)):
                 errors.append(_cmt)
-            elif (self.convection == "tiedtke"
-                    or (self.convection == "bechtold"
-                        and self.bechtold_enable_cmt is None)):
+            elif (self.convection == "bechtold"
+                    and self.bechtold_enable_cmt is None):
                 _drops.append(_cmt)
             if self.land_params_refresh and self.use_multilayer_land:
                 _drops.append(
@@ -3602,19 +4192,52 @@ class ExperimentConfig(NamedTuple):
                 "cloud_cap_floor_on requires an active cloud scheme and rrtmgp/rrtmg "
                 f"radiation (cloud_scheme={self.cloud_scheme!r}, radiation={self.radiation!r}); "
                 "otherwise the polar-cap radiative floor would be a silent no-op.")
-        if self.ice_skin_prognostic and self.radiation == "none":
+        if self.ice_skin_prognostic is True and self.radiation == "none":
             errors.append(
                 "ice_skin_prognostic integrates the surface energy "
                 "fluxes exported by the physics; radiation='none' computes "
                 "none — the skin would stay at its seed forever."
             )
         if (self.ice_thickness_m != 2.0
-                and not self.ice_skin_prognostic):
+                and self.ice_skin_prognostic is False):
             errors.append(
                 f"ice_thickness_m={self.ice_thickness_m!r} requires "
                 "ice_skin_prognostic=True (the override would be "
                 "silently inert)."
             )
+        _sia = ("auto", "constant", "maykut_untersteiner")
+        if self.sea_ice_albedo_scheme not in _sia:
+            errors.append(
+                f"sea_ice_albedo_scheme={self.sea_ice_albedo_scheme!r} "
+                f"unknown; choose one of {_sia}.")
+        if (self.sea_ice_albedo_scheme == "maykut_untersteiner"
+                and self.ice_skin_prognostic is False):
+            errors.append(
+                "sea_ice_albedo_scheme='maykut_untersteiner' reads the "
+                "prognostic ice skin; it requires ice_skin_prognostic=True.")
+        if not (math.isfinite(self.ice_skin_melt_cap_width_K)
+                and self.ice_skin_melt_cap_width_K >= 0.0):
+            errors.append(
+                "ice_skin_melt_cap_width_K must be finite and >= 0 (0 = hard "
+                f"cap); got {self.ice_skin_melt_cap_width_K!r}.")
+        if (self.sea_ice_melt_ramp_width_K
+                != ExperimentConfig._field_defaults[
+                    "sea_ice_melt_ramp_width_K"]
+                and self.ice_skin_prognostic is not None
+                and resolve_sea_ice_albedo_scheme(self)
+                != "maykut_untersteiner"):
+            errors.append(
+                f"sea_ice_melt_ramp_width_K="
+                f"{self.sea_ice_melt_ramp_width_K!r} requires "
+                "sea_ice_albedo_scheme='maykut_untersteiner' (the override "
+                "would be silently inert).")
+        _lo, _hi = _ICE_MELT_WIDTH_BOUNDS
+        if not (math.isfinite(self.sea_ice_melt_ramp_width_K)
+                and _lo <= self.sea_ice_melt_ramp_width_K <= _hi):
+            errors.append(
+                f"sea_ice_melt_ramp_width_K must be in [{_lo}, {_hi}] K "
+                f"(its parameter spec); got "
+                f"{self.sea_ice_melt_ramp_width_K!r}.")
         if not (math.isfinite(self.ice_thickness_m)
                 and 0.1 <= self.ice_thickness_m <= 10.0):
             errors.append(
@@ -3750,6 +4373,20 @@ class ExperimentConfig(NamedTuple):
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
         _vert_adv_options = ("upwind", "van_leer", "sb")
+        _snu = d.spectral_sponge_nu_top_m2s
+        if not (isinstance(_snu, (int, float)) and not isinstance(_snu, bool)
+                and math.isfinite(_snu) and _snu >= 0.0):
+            errors.append(
+                f"dycore.spectral_sponge_nu_top_m2s must be a finite number >= 0 (got {_snu!r})")
+        elif _snu > 0 and (d.discretization != "spectral" or d.model_type != "hydrostatic"):
+            errors.append(
+                "dycore.spectral_sponge_nu_top_m2s is wired into the hydrostatic spectral "
+                "dycore only; it would be silently inert here.")
+        elif _snu > 0 and not (d.column_lane and d.energy_fixer):
+            errors.append(
+                "dycore.spectral_sponge_nu_top_m2s needs dycore.column_lane and "
+                "dycore.energy_fixer: only the column-lane ssp_rk54 step returns the "
+                "sponge's energy loss (global energy fixer); legacy/leapfrog steps do not.")
         _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
         if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
             errors.append(
@@ -3771,13 +4408,24 @@ class ExperimentConfig(NamedTuple):
                 f"a_h_scale={d.a_h_scale!r} turns the del2 viscosity off; use a_h_scale > 0 "
                 "or set mpas_sponge_del2_top_layers=0")
         _dd4s = getattr(d, "mpas_div_damp4_scale", 0.0)
+        # Consumers: the hydrostatic MPAS dycore and the lat-lon C-grid PE
+        # (which builds its own per-row CAM coefficient from the scale).  The
+        # lat-lon lane is keyed on the factory's own dispatch matrix, so every
+        # (model_type, discretization) alias that reaches that solver counts.
+        from legoesm.driver.component_factory import supported_matrix
+        _latlon_pe = any(
+            r["solver"] == "latlon_cgrid_primitive_equations"
+            and (r["model_type"], r["discretization"], r["grid_type"])
+            == (d.model_type, d.discretization, normalize_grid_type(g.grid_type))
+            for r in supported_matrix())
         if (isinstance(_dd4s, (int, float)) and not isinstance(_dd4s, bool)
-                and _dd4s > 0
+                and _dd4s > 0 and not _latlon_pe
                 and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
             errors.append(
                 "dycore.mpas_div_damp4_scale is wired into the hydrostatic MPAS dycore "
-                f"only; on discretization={d.discretization!r}/model_type={d.model_type!r} "
-                "it would be silently inert")
+                "and the lat-lon C-grid PE only; on "
+                f"discretization={d.discretization!r}/model_type={d.model_type!r}/"
+                f"grid_type={g.grid_type!r} it would be silently inert")
         # Names must be known per-mass water/number tracers (typo guard; the
         # dycore skips a valid name its state does not carry).  No inertness
         # error: the default is non-empty and, like mpas_nu_vert4_T, simply
@@ -3792,6 +4440,55 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"dycore.mpas_vert4_flux_form_tracers: unknown tracer names {_bad} "
                 "(expected per-mass water/number tracers such as q_v)")
+        _v4l = getattr(d, "mpas_vert4_log_form_tracers", ())
+        if isinstance(_v4l, str):
+            errors.append(
+                "dycore.mpas_vert4_log_form_tracers must be a list of tracer "
+                f"names, got the string {_v4l!r}")
+        elif _bad := [n for n in (_v4l or ()) if n not in BORROW_ELIGIBLE_TRACERS]:
+            errors.append(
+                f"dycore.mpas_vert4_log_form_tracers: unknown tracer names {_bad} "
+                "(expected per-mass water/number tracers such as q_v)")
+        elif not isinstance(_v4f, str) and (
+                _both := sorted(set(_v4f or ()) & set(_v4l or ()))):
+            errors.append(
+                f"dycore: tracers {_both} are in both mpas_vert4_flux_form_tracers "
+                "and mpas_vert4_log_form_tracers; each tracer takes one filter form. "
+                f"The log-form list defaults to {DycoreConfig._field_defaults['mpas_vert4_log_form_tracers']}: "
+                f"to give {_both} the flux form, also set the log-form list without "
+                "them (CLI: --mpas-vert4-log-form-tracers with no names; YAML: "
+                "mpas_vert4_log_form_tracers: [])")
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import VERTICAL_FORMS
+        if d.vertical_form not in VERTICAL_FORMS:
+            errors.append(f"dycore.vertical_form must be one of {VERTICAL_FORMS}, "
+                          f"got {d.vertical_form!r}")
+        elif d.vertical_form != "legacy":
+            from legoesm.driver.component_factory import driver_solver_name
+            _solver = driver_solver_name(self)
+            if _solver not in ("latlon_cgrid_primitive_equations",
+                               "mpas_primitive_equations"):
+                errors.append(
+                    f"dycore.vertical_form={d.vertical_form!r} is only wired into "
+                    "the lat-lon C-grid and MPAS hydrostatic dycores; on solver "
+                    f"{_solver!r} it would be silently inert.  Leave it at 'legacy'.")
+            if d.vertical_form.startswith("as83"):
+                if g.vertical_coord == "sigma":
+                    errors.append(
+                        f"dycore.vertical_form={d.vertical_form!r} needs a hybrid "
+                        "vertical coordinate (the sigma lid moves); use 'sb81_theta' "
+                        "or 'legacy' on vertical_coord='sigma'.")
+                if (_solver == "latlon_cgrid_primitive_equations"
+                        and self.enable_latlon_spmd):
+                    errors.append(
+                        f"dycore.vertical_form={d.vertical_form!r} is not band-aware "
+                        "on lat-lon: the lat-band SPMD lane takes 'legacy' or "
+                        "'sb81_theta'.")
+            # no serial-parity test of a shared-core form on these two lanes yet
+            if (_solver == "latlon_cgrid_primitive_equations"
+                    and (self.distributed or self.enable_tiled_dycore)):
+                errors.append(
+                    f"dycore.vertical_form={d.vertical_form!r} is untested on the "
+                    "lat-lon MPI and 2-D tiled lanes; they take 'legacy'.")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
@@ -3992,6 +4689,8 @@ class ExperimentConfig(NamedTuple):
             ("morrison_accre_enhan_fact", 0.1, 10.0),
         ):
             _v = getattr(self, _f)
+            if _v is None and _f == "morrison_ice_snow_d_auto":
+                continue    # unset = the flavor's DCS
             if not math.isfinite(_v) or not (_lo <= _v <= _hi):
                 raise ValueError(
                     f"{_f}={_v} outside MorrisonConfig spec bounds "
@@ -4000,8 +4699,9 @@ class ExperimentConfig(NamedTuple):
             # a float32-noise value must be "default" in BOTH places, never
             # rejected here while the resolver would apply nothing (codex
             # 2026-07-26 round 3, item 4).
-            if not math.isclose(_v, ExperimentConfig._field_defaults[_f],
-                                rel_tol=1e-6, abs_tol=0.0):
+            _d = ExperimentConfig._field_defaults[_f]
+            if _d is None or not math.isclose(_v, _d, rel_tol=1e-6,
+                                              abs_tol=0.0):
                 _morrison_touched.append(_f)
         # A touched morrison_* scalar on any OTHER scheme must be refused at
         # CONFIG time: microphysics='none' early-returns before either lane's
@@ -4025,11 +4725,11 @@ class ExperimentConfig(NamedTuple):
                 "by the hom-nucleation branch and would be silently inert.")
         _wrs = ("kk2000", "kk2000_cam6", "seifert_beheng",
                 "seifert_beheng_sb2001")
-        if self.morrison_warm_rain_scheme not in _wrs:
+        if self.morrison_warm_rain_scheme not in (None, *_wrs):
             raise ValueError(
                 f"morrison_warm_rain_scheme={self.morrison_warm_rain_scheme!r} "
-                f"unknown; choose one of {_wrs}.")
-        if (self.morrison_warm_rain_scheme != "kk2000"
+                f"unknown; choose one of {_wrs} or leave it unset (None).")
+        if (self.morrison_warm_rain_scheme is not None
                 and self.microphysics != "morrison"):
             raise ValueError(
                 f"morrison_warm_rain_scheme={self.morrison_warm_rain_scheme!r} "
@@ -4038,7 +4738,11 @@ class ExperimentConfig(NamedTuple):
         _kk_only = [f for f in ("morrison_autocon_fact",
                                 "morrison_accre_enhan_fact")
                     if f in _morrison_touched]
-        if _kk_only and self.morrison_warm_rain_scheme not in (
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig, resolve_warm_rain_scheme as _resolve_wrs)
+        if _kk_only and _resolve_wrs(MorrisonConfig(
+                morrison_flavor=self.morrison_flavor,
+                warm_rain_scheme=self.morrison_warm_rain_scheme)) not in (
                 "kk2000", "kk2000_cam6"):
             raise ValueError(
                 f"{_kk_only} require morrison_warm_rain_scheme='kk2000' or "
@@ -4064,10 +4768,12 @@ class ExperimentConfig(NamedTuple):
         _rhw = self.land_canopy_rh_cap_smoothing_width
         _zw = self.land_canopy_zeta_cap_smoothing_width
         _mi = self.land_canopy_most_n_iters
-        if _rhw is not None or _zw is not None or _mi is not None:
+        _sg = self.land_canopy_solve_group
+        if (_rhw is not None or _zw is not None or _mi is not None
+                or _sg is not None):
             if self.land_surface_scheme != "two_leaf" or not self.use_multilayer_land:
                 errors.append(
-                    "land_canopy_* (smoothing widths / most_n_iters) set but "
+                    "land_canopy_* (smoothing widths / most_n_iters / solve_group) set but "
                     f"land_surface_scheme={self.land_surface_scheme!r}, use_multilayer_land="
                     f"{self.use_multilayer_land!r}: only the two-leaf canopy of the "
                     "multilayer land reads them, so the value would be inert")
@@ -4079,12 +4785,14 @@ class ExperimentConfig(NamedTuple):
                                     {"rh_cap_smoothing_width": float(_rhw)}),
                                  **({} if _zw is None else
                                     {"zeta_cap_smoothing_width": float(_zw)}),
-                                 **({} if _mi is None else {"most_n_iters": _mi})
+                                 **({} if _mi is None else {"most_n_iters": _mi}),
+                                 **({} if _sg is None else {"solve_group": _sg})
                                  ).validate()
                 except ValueError as exc:
                     errors.append(f"land_canopy_*: {exc}")
         for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
-                    "morrison_do_graupel", "morrison_warm_rain_incloud"):
+                    "morrison_do_graupel", "morrison_warm_rain_incloud",
+                    "morrison_prognostic_droplet_number"):
             _v = getattr(self, _nm)
             if not isinstance(_v, bool):
                 errors.append(f"{_nm} must be a bool, got {_v!r}")
@@ -4114,6 +4822,60 @@ class ExperimentConfig(NamedTuple):
                 f"cld_macmic_num_steps={self.cld_macmic_num_steps}, "
                 f"subgrid_autoconversion={self.subgrid_autoconversion}, "
                 f"cloud_scheme={self.cloud_scheme!r}")
+        if (self.morrison_warm_rain_incloud is True
+                and self.microphysics == "morrison"
+                and not (d.column_lane
+                         or (d.discretization != "fv3_duo"
+                             and normalize_grid_type(g.grid_type) == "mpas"))):
+            # CAM6 MG2 two-moment snow carries the snow number N_s only
+            # through the MPAS column loop and the FV3-duo column lane; the
+            # compiled / SPMD / per-step lanes pack the nine original tracers
+            # and would silently run single-moment snow (user decision
+            # 2026-10-20: refuse, do not carry N_s through them).
+            errors.append(
+                "morrison_warm_rain_incloud=True (CAM6 MG2 two-moment snow) "
+                "runs only on the MPAS lane (grid_type='mpas') or the FV3-duo "
+                "column lane: no other lane carries the snow number N_s; got "
+                f"grid_type={g.grid_type!r}, discretization={d.discretization!r}, "
+                f"column_lane={d.column_lane}")
+        # Where each width is read: the readjust and the sedimentation reset on
+        # the prognostic droplet number only; the early reset by the
+        # kk2000_cam6 autoconversion (both droplet-number paths) and the MG2
+        # snow riming (warm_rain_incloud, which needs the MPAS / FV3-duo
+        # column lane that carries N_s).
+        _morr = self.microphysics == "morrison"
+        _reads = {   # (is it read, where), evaluated only for a non-default value
+            "morrison_mg2_drop_readjust_log_width": (
+                lambda: _morr and self.morrison_prognostic_droplet_number is True,
+                "microphysics='morrison' and morrison_prognostic_droplet_number=True"),
+            "morrison_mg2_drop_early_reset_log_width": (
+                lambda: _morr and (self.morrison_warm_rain_incloud is True
+                           or _resolve_wrs(MorrisonConfig(
+                               morrison_flavor=self.morrison_flavor,
+                               warm_rain_scheme=self.morrison_warm_rain_scheme))
+                           == "kk2000_cam6"),
+                "microphysics='morrison' and the kk2000_cam6 warm-rain scheme or "
+                "morrison_warm_rain_incloud=True"),
+            "morrison_mg2_drop_sed_reset_log_width": (
+                lambda: _morr and self.morrison_prognostic_droplet_number is True,
+                "microphysics='morrison' and morrison_prognostic_droplet_number=True"),
+        }
+        for _rn, (_read, _where) in _reads.items():
+            _rw = getattr(self, _rn)
+            if (isinstance(_rw, bool) or not isinstance(_rw, (int, float))
+                    or not math.isfinite(_rw) or not 0.0 <= _rw <= 1.0):
+                errors.append(
+                    f"{_rn} must be a finite float in "
+                    f"[0, 1] (0 = MG2's hard clip), got {_rw!r}")
+            elif _rw != ExperimentConfig._field_defaults[_rn] and not _read():
+                errors.append(
+                    f"{_rn}={_rw} is read only with {_where} "
+                    "(it would be silently inert)")
+        if self.morrison_prognostic_droplet_number is True and not self.cam6_aerosol_dir:
+            # user decision 2026-10-24, 3
+            errors.append(
+                "morrison_prognostic_droplet_number=True needs cam6_aerosol_dir "
+                "(the CAM6 prescribed-aerosol climatology its activation reads).")
         if (self.morrison_sed_cfl_substeps_strict is True
                 and self.morrison_sed_cfl_substeps is False):
             errors.append(
@@ -4155,7 +4917,7 @@ class ExperimentConfig(NamedTuple):
             # sigmoid re-parameterisation (param_collector._seed_raw), where a
             # widening is NOT inert.  Sub-5e-5 therefore reaches the model via
             # ``--q-c-diagnostic`` or a ``--config`` YAML, but NOT via ``--params``.
-            ("cloud_q_c_diagnostic", 1.0e-6, 1.0e-3),
+            ("cloud_q_c_diagnostic", 1.0e-6, 1.5e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
             ("cloud_inhomogeneity_factor", 0.3, 1.0),
@@ -4259,14 +5021,12 @@ class ExperimentConfig(NamedTuple):
         # spreading factor, a stress/flux cap, an rms launch wind), and none is
         # bounds-checked anywhere else on the CLI/--config route (the
         # ``__param_spec__`` bounds only gate the ``--params`` loader).  Silent
-        # failure modes without this guard: ``hines_Fmax < 0`` makes
-        # ``jnp.clip(drag, 0.0, Fmax)`` return the NEGATIVE cap at every level
-        # (constant spurious drag, no error), and ``hines_total_rms_wind <= 0``
-        # zeroes the amplitude growth so the scheme silently does nothing.
+        # failure modes without this guard: ``hines_total_rms_wind <= 0``
+        # launches no wave spectrum, so the scheme silently does nothing.
         # Positivity + finiteness only — the calibratable RANGE stays in
         # ``__param_spec__`` so it is not maintained twice.
         for _f in ("mcfarlane_k_wave", "mcfarlane_directional_spread",
-                   "mcfarlane_tau_max", "hines_total_rms_wind", "hines_Fmax",
+                   "hines_total_rms_wind",
                    "e3sm_cam_taubgnd", "e3sm_cam_c0", "e3sm_cam_launch_p",
                    "e3sm_cam_effgw"):
             _v = getattr(self, _f)
@@ -4334,6 +5094,27 @@ class ExperimentConfig(NamedTuple):
                     f"does not exist (the Beres table would silently fall "
                     f"back to nothing at build time)"
                 )
+        # Beres on the stand-in table: refused early here (the kernel also
+        # raises, E3SMBeresConfig.use_stand_in_table defaults False).  The
+        # effective GWD config is the override when one is set.
+        _ov = self.gravity_wave_drag_override
+        if _ov is not None and isinstance(_ov, GravityWaveDragConfig):
+            _b_scheme, _b_src = str(_ov.scheme), str(_ov.e3sm_cam.source)
+            _b_path = _ov.e3sm_cam.beres.mfcc_table_path
+            _b_standin = bool(_ov.e3sm_cam.beres.use_stand_in_table)
+        else:
+            _b_scheme, _b_src = str(self.gravity_wave_drag), str(self.e3sm_cam_source)
+            _b_path, _b_standin = self.e3sm_cam_mfcc_table_path, False
+        if ("e3sm_cam" in _b_scheme.split("+") and "convective" in _b_src.split("+")
+                and not _b_path and not _b_standin):
+            errors.append(
+                "e3sm_cam source includes 'convective' (Beres) but no table "
+                "path is set: the kernel would have only the analytic stand-in "
+                "spectrum, which launches almost nothing. Set "
+                "e3sm_cam_mfcc_table_path (or the override's "
+                "beres.mfcc_table_path) to the CESM/E3SM inputdata table "
+                "atm/waccm/gw/newmfspectra40_dc25.nc (sha256 8f1528d85b36...)"
+            )
         if isinstance(self.e3sm_cam_pgwv, bool) or \
                 not isinstance(self.e3sm_cam_pgwv, int) or \
                 self.e3sm_cam_pgwv < 0:
@@ -4353,6 +5134,13 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"e3sm_cam_effgw must be a finite efficiency <= 1.0, "
                 f"got {self.e3sm_cam_effgw!r}"
+            )
+        # Same [0, 1] as McFarlaneConfig.__param_spec__ (one range, #1712).
+        if not (math.isfinite(self.mcfarlane_effgw_oro)
+                and 0.0 <= self.mcfarlane_effgw_oro <= 1.0):
+            errors.append(
+                f"mcfarlane_effgw_oro must be a finite efficiency in "
+                f"[0, 1], got {self.mcfarlane_effgw_oro!r}"
             )
         if not math.isfinite(self.e3sm_cam_taubgnd) or \
                 self.e3sm_cam_taubgnd > 1.0e-2:
@@ -4378,7 +5166,7 @@ class ExperimentConfig(NamedTuple):
         # module the composite path does not carry and are NOT composable.
         _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines",
                                  "e3sm_cam")
-        _composable_stateful = ("prognostic_spectral",)
+        _composable_stateful = ("prognostic_spectral", "ifs_wms")
         _composable = _composable_stateless + _composable_stateful
         _gwd_parts = self.gravity_wave_drag.split("+")
         if len(_gwd_parts) > 1:
@@ -4536,25 +5324,14 @@ class ExperimentConfig(NamedTuple):
                     "See docs/user-guide/climateeval_evaluation.md."
                 )
 
+        # Truthy, not ``is True``: a loader-kept string "true" is checked too.
         if self.ocean_flux_on_ocean_surface:
-            _ok, _why = land_flux_handoff_eligibility(self)
-            if _ok and self.radiation == "none":
-                _ok, _why = False, ("radiation='none' builds no SST anchor "
-                                    "(the ocean surface it needs)")
+            _ok, _why = ocean_flux_surface_eligibility(self)
             if not _ok:
                 errors.append(
                     "ocean_flux_on_ocean_surface=True separates the "
                     "non-land fraction's surface fluxes from the land's, but "
-                    f"{_why}; it would be silently inert.")
-            elif not resolve_land_stress_from_land(self):
-                # The bulk stress covers the whole cell unless the land's own
-                # stress replaces it over land; evaluated on the OCEAN surface
-                # it would then misstate the land share's stability.
-                errors.append(
-                    "ocean_flux_on_ocean_surface=True needs the land "
-                    "model's stress over the land fraction "
-                    "(land_stress_from_land unset or true, eligible); "
-                    "otherwise the ocean-surface stress covers the land too.")
+                    f"{_why}. Leave it unset (auto) or false.")
 
         if self.land_stress_from_land is True:
             _ok, _why = land_stress_eligibility(self)
@@ -4733,6 +5510,7 @@ class ExperimentConfig(NamedTuple):
             volcanic_aerosol_lw=getattr(amip_cfg, 'volcanic_aerosol_lw', False),
             rrtmgp_overhead_layer=getattr(
                 amip_cfg, "rrtmgp_overhead_layer", False),
+            rrtmgp_gas_tables=getattr(amip_cfg, "rrtmgp_gas_tables", "reduced"),
             cloud_scheme=amip_cfg.cloud_scheme,
             microphysics=amip_cfg.microphysics,
             convection=getattr(amip_cfg, 'convection', 'sbm'),
@@ -4776,7 +5554,7 @@ class ExperimentConfig(NamedTuple):
             lw_diff_factor=getattr(amip_cfg, 'lw_diff_factor', 1.66),
             sw_tau_0=getattr(amip_cfg, 'sw_tau_0', 0.22),
             sw_exponent=getattr(amip_cfg, 'sw_exponent', 2.0),
-            sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1.5e-4),
             cloud_rh_crit=getattr(amip_cfg, 'cloud_rh_crit', 0.7),
             louis_l_mix_max=getattr(amip_cfg, 'louis_l_mix_max', 100.0),
             louis_Ri_crit=getattr(amip_cfg, 'louis_Ri_crit', 0.25),
@@ -4792,7 +5570,6 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'mcfarlane_k_wave',
                 ExperimentConfig._field_defaults['mcfarlane_k_wave']),
             mcfarlane_directional_spread=getattr(amip_cfg, 'mcfarlane_directional_spread', 1.0),
-            mcfarlane_tau_max=getattr(amip_cfg, 'mcfarlane_tau_max', 10.0),
             sbm_tau_c=amip_cfg.sbm_tau_c,
             sbm_RH_ref=amip_cfg.sbm_RH_ref,
             sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
@@ -4817,6 +5594,10 @@ class ExperimentConfig(NamedTuple):
             # fresh default run gets, not silently pin the old one.
             bechtold_use_ifs_cape_closure=getattr(
                 amip_cfg, 'bechtold_use_ifs_cape_closure', True),
+            bechtold_use_ifs_ascent=getattr(
+                amip_cfg, 'bechtold_use_ifs_ascent', False),
+            ifs_methox=getattr(amip_cfg, 'ifs_methox', False),
+            ifs_ozone_chem=getattr(amip_cfg, 'ifs_ozone_chem', False),
             bechtold_use_ifs_subcloud_evap=getattr(
                 amip_cfg, 'bechtold_use_ifs_subcloud_evap', True),
             bechtold_use_ifs_inplume_precip=getattr(
@@ -4832,11 +5613,13 @@ class ExperimentConfig(NamedTuple):
             bechtold_rprcon=getattr(amip_cfg, 'bechtold_rprcon', 1.4e-3),
             bechtold_M_b_max=getattr(amip_cfg, 'bechtold_M_b_max', 0.05),
             bechtold_enable_cmt=getattr(amip_cfg, 'bechtold_enable_cmt', None),
+            emanuel_enable_cmt=getattr(amip_cfg, 'emanuel_enable_cmt', None),
             bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
             bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
             bechtold_rain_vapor_sink=getattr(amip_cfg, 'bechtold_rain_vapor_sink', "formation"),
             zm_land_fraction=getattr(amip_cfg, 'zm_land_fraction', "required"),
-            convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
+            zm_transport_cloud_tracers=getattr(amip_cfg, 'zm_transport_cloud_tracers', True),
+            kain_fritsch_variant=getattr(amip_cfg, 'kain_fritsch_variant', "smooth"),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
                 amip_cfg, 'bechtold_use_ifs_downdraft', True),
@@ -4844,6 +5627,8 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_use_ifs_shallow_closure', False),
             bechtold_use_ifs_capdcycl=getattr(
                 amip_cfg, 'bechtold_use_ifs_capdcycl', True),
+            bechtold_ifs_shallow_nosupply=amip_cfg.bechtold_ifs_shallow_nosupply,
+            bechtold_ifs_hard_switches=amip_cfg.bechtold_ifs_hard_switches,
             bechtold_use_ifs_land_rhebc=getattr(
                 amip_cfg, 'bechtold_use_ifs_land_rhebc', True),
             bechtold_use_ifs_snow_melt=getattr(
@@ -4971,7 +5756,7 @@ class ExperimentConfig(NamedTuple):
             lw_diff_factor=getattr(self, 'lw_diff_factor', 1.66),
             sw_tau_0=getattr(self, 'sw_tau_0', 0.22),
             sw_exponent=getattr(self, 'sw_exponent', 2.0),
-            sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1.5e-4),
             cloud_rh_crit=getattr(self, 'cloud_rh_crit', 0.7),
             louis_l_mix_max=getattr(self, 'louis_l_mix_max', 100.0),
             louis_Ri_crit=getattr(self, 'louis_Ri_crit', 0.25),
@@ -4982,7 +5767,6 @@ class ExperimentConfig(NamedTuple):
                 self, 'mcfarlane_k_wave',
                 ExperimentConfig._field_defaults['mcfarlane_k_wave']),
             mcfarlane_directional_spread=getattr(self, 'mcfarlane_directional_spread', 1.0),
-            mcfarlane_tau_max=getattr(self, 'mcfarlane_tau_max', 10.0),
             sbm_tau_c=self.sbm_tau_c,
             sbm_RH_ref=self.sbm_RH_ref,
             sbm_cape_threshold=self.sbm_cape_threshold,
@@ -4996,6 +5780,9 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_alpha=self.bechtold_downdraft_alpha,
             bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
             bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
+            bechtold_use_ifs_ascent=self.bechtold_use_ifs_ascent,
+            ifs_methox=self.ifs_methox,
+            ifs_ozone_chem=self.ifs_ozone_chem,
             bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
             bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
             bechtold_dx_m=self.bechtold_dx_m,
@@ -5008,6 +5795,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rprcon=self.bechtold_rprcon,
             bechtold_M_b_max=self.bechtold_M_b_max,
             bechtold_enable_cmt=self.bechtold_enable_cmt,
+            emanuel_enable_cmt=self.emanuel_enable_cmt,
             bechtold_dnoprc=self.bechtold_dnoprc,
             bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
@@ -5015,11 +5803,14 @@ class ExperimentConfig(NamedTuple):
             bechtold_subsidence_solve=self.bechtold_subsidence_solve,
             bechtold_rain_vapor_sink=self.bechtold_rain_vapor_sink,
             zm_land_fraction=self.zm_land_fraction,
-            convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
+            zm_transport_cloud_tracers=self.zm_transport_cloud_tracers,
+            kain_fritsch_variant=self.kain_fritsch_variant,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
             bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,
+            bechtold_ifs_shallow_nosupply=self.bechtold_ifs_shallow_nosupply,
+            bechtold_ifs_hard_switches=self.bechtold_ifs_hard_switches,
             bechtold_use_ifs_land_rhebc=self.bechtold_use_ifs_land_rhebc,
             bechtold_use_ifs_snow_melt=self.bechtold_use_ifs_snow_melt,
             sigma_b=self.sigma_b,
@@ -5089,6 +5880,13 @@ def experiment_config_to_dict(config: ExperimentConfig) -> dict:
     return d
 
 
+def _lists_to_tuples(cls, kwargs: dict) -> dict:
+    """JSON stores tuple fields as lists; restore tuples so a round-trip is ==."""
+    return {k: tuple(v) if isinstance(v, list)
+            and "tuple" in str(cls.__annotations__.get(k, "")) else v
+            for k, v in kwargs.items()}
+
+
 def experiment_config_from_dict(d: dict, *, strict: bool = False) -> ExperimentConfig:
     """Reconstruct ExperimentConfig from a dict (e.g. loaded from JSON).
 
@@ -5131,18 +5929,16 @@ def experiment_config_from_dict(d: dict, *, strict: bool = False) -> ExperimentC
                 filtered_eval = {
                     k: v for k, v in sub_d['evaluation'].items() if k in known_eval
                 }
-                # ``suites`` is a tuple field; JSON round-trips it as a list, so
-                # coerce back so the reconstructed config == the original.
-                if isinstance(filtered_eval.get('suites'), list):
-                    filtered_eval['suites'] = tuple(filtered_eval['suites'])
-                sub_d['evaluation'] = EvaluationConfig(**filtered_eval)
+                sub_d['evaluation'] = EvaluationConfig(
+                    **_lists_to_tuples(EvaluationConfig, filtered_eval))
             known_sub = set(cls._fields)
             filtered = {k: v for k, v in sub_d.items() if k in known_sub}
-            sub_values[key] = cls(**filtered)
+            sub_values[key] = cls(**_lists_to_tuples(cls, filtered))
 
     # Filter top-level fields
     known = set(ExperimentConfig._fields)
-    filtered = {k: v for k, v in d.items() if k in known}
+    filtered = _lists_to_tuples(
+        ExperimentConfig, {k: v for k, v in d.items() if k in known})
     filtered.update(sub_values)
 
     # Legacy migration: ``morrison_dep_coeff`` was declared 1e-8 (1e5 OFF the
@@ -5183,13 +5979,16 @@ def config_to_dict(config) -> dict:
     ``driver`` uses, so that layer no longer reaches up into
     ``forcing.amip_config`` for serialization (federation carve, Step 3).
     """
-    d = config._asdict()
-    # Runtime-only injection — never serialized (see experiment_config_to_dict).
-    if "turbulence_override" in d:
-        d["turbulence_override"] = None
-    for key, val in d.items():
-        if hasattr(val, "_asdict"):
-            d[key] = val._asdict()
+    if isinstance(config, ExperimentConfig):
+        d = experiment_config_to_dict(config)
+    else:
+        d = config._asdict()
+        # Runtime-only injection — never serialized (see experiment_config_to_dict).
+        if "turbulence_override" in d:
+            d["turbulence_override"] = None
+        for key, val in d.items():
+            if hasattr(val, "_asdict"):
+                d[key] = val._asdict()
     # Schema marker: dicts written by the current codec are exempt from
     # legacy migrations on load (see experiment_config_from_dict — v2 gates
     # the morrison_dep_coeff 1e-8 rewrite to UNMARKED legacy dicts, so a
@@ -5317,6 +6116,35 @@ def checkpoint_radiation_cadence_error(cfg) -> str | None:
             f"rad_update_steps={rus}: the held radiation fluxes "
             "are not checkpointed, so every checkpoint must sit on a "
             "radiation boundary")
+
+
+def ocean_flux_surface_eligibility(cfg) -> tuple[bool, str]:
+    """Is ``ocean_flux_on_ocean_surface=True`` live in ``cfg``?
+    ``(eligible, reason_if_not)``: the land-flux handoff, an SST anchor
+    (radiation != 'none') and the land model's stress over land."""
+    _ok, _why = land_flux_handoff_eligibility(cfg)
+    if not _ok:
+        return False, f"{_why}; it would be silently inert"
+    if cfg.radiation == "none":
+        return False, ("radiation='none' builds no SST anchor (the ocean "
+                       "surface it needs); it would be silently inert")
+    if not resolve_land_stress_from_land(cfg):
+        # The bulk stress covers the whole cell unless the land's own stress
+        # replaces it over land; evaluated on the OCEAN surface it would then
+        # misstate the land share's stability.
+        return False, ("it needs the land model's stress over the land "
+                       "fraction (land_stress_from_land unset or true, "
+                       "eligible); otherwise the ocean-surface stress covers "
+                       "the land too")
+    return True, ""
+
+
+def resolve_ocean_flux_on_ocean_surface(cfg) -> bool:
+    """The resolved tri-state ``ocean_flux_on_ocean_surface``:
+    None (auto) -> on exactly where eligible; True/False as given."""
+    if cfg.ocean_flux_on_ocean_surface is None:
+        return ocean_flux_surface_eligibility(cfg)[0]
+    return bool(cfg.ocean_flux_on_ocean_surface)
 
 
 def resolve_land_stress_from_land(cfg) -> bool:

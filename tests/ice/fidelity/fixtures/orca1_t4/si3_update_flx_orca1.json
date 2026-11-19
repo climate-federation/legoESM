@@ -1,0 +1,24 @@
+{
+ "source": "/burg/glab/users/pg2328/oracle_audit/tier4/update/ctl_on/t4_updflx_record_0004.bin",
+ "recorder": "nemo_5.0.1/cfgs/ORCA1_T4UPD MY_SRC t4_upd.F90 + iceupdate.F90 hooks",
+ "oracle": "NEMO 5.0.1 SI3 ORCA1 ice_update_flx, kt 17281 (ice step), nn_fsbc 96, ln_cndflx F, ln_icethd T, jpl 1",
+ "rank": "0004",
+ "window_i0": 53,
+ "window_j0": 14,
+ "n": 8,
+ "fhld_pos_cells": 32,
+ "ice_cells": 62,
+ "spread_field_max": {
+  "qt_oce_ai": 5.9e-12,
+  "qns": 4.7e-12,
+  "qsr": "1.0 (night-cell cancellation residue, per-cell rule)",
+  "emp": 2.1e-14,
+  "sfx": 8.9e-11,
+  "fwfice": 1.5e-14,
+  "snwice_mass": 6.4e-16,
+  "snwice_fmass": 1.1e-09
+ },
+ "legoesm_main": "efa650f75e466a91a7d7c08308d7f3820948b814",
+ "npz_sha256": "a890b943329781f745afc777100a2acf14cf69155ed0886d0e97550fb5c83499",
+ "extractor": "/burg/glab/users/pg2328/oracle_audit/si3wire/pr2/make_fixture.py"
+}

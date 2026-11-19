@@ -312,9 +312,9 @@ def test_kessler_conserves_water_with_precipitation_as_the_only_sink():
                            N_c=zero, N_r=zero, N_i=zero)
     # With the Klemp-Wilhelmson rain evaporation the sub-saturated shaft still
     # reaches the surface (the old surrogate evaporated it all within one step,
-    # precip == 0); with evaporation off it precipitates too. Water closes in both.
-    for cfg, rains_out in ((KesslerConfig(), True),
-                           (KesslerConfig(evaporation_coeff=0.0), True)):
+    # precip == 0). The faithful port refuses a non-default evaporation
+    # coefficient, so the evaporation-off arm is gone.
+    for cfg, rains_out in ((KesslerConfig(), True),):
         out = kessler_microphysics(T, q_v, hyd, p, p_half, rho, dz, dt, cfg)
         w0 = jnp.sum(rho * (q_v + q_c + q_r) * dz)
         w1 = jnp.sum(rho * (q_v + dt * out.dq_v_dt + q_c + dt * out.dq_c_dt

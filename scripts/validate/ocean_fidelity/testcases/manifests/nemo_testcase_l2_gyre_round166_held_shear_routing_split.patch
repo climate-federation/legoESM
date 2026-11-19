@@ -1,4 +1,18 @@
-ROUND 166 DEVELOPED GYRE SHEAR FREE-SURFACE ROUTING SPLIT (2026-09-25): HELD.
+ROUND 166 DEVELOPED GYRE SHEAR FREE-SURFACE ROUTING SPLIT (2026-09-25):
+HOLD RETRACTED BY GYRE HIGH-RESOLUTION ROUND 9 (2026-10-15).
+
+ROUND 9 DISPOSITION.  The old landing veto below is retained as historical
+evidence, but no longer governs this patch.  Round 9 explicitly requires a
+measured shared-path transcription defect to be fixed and measures this exact
+time-level split at the first quarter-degree failure: substituting NEMO's
+executed ``avt`` reduces the step-2 solved-temperature maximum 1542-fold, and
+routing Nbb SSH to the closure implements the executed
+``CALL zdf_phy(kstp,Nbb,Nbb,Nrhs)``.  The new production-path regression
+observes the face metrics actually consumed and fails on the Kmm routing.
+The one-degree and both quarter-degree GYRE ladders are rescored in the round-9
+receipt.  ORCA2's same Nbb/Nbb source identity remains true; its absent native
+trajectory is recorded as an inherited measurement gap, not a reason to keep
+known shared arithmetic wrong after the user's newer explicit instruction.
 
 Candidate commit: 81a743bb95034f3255eaec506b64e27d2f61a735
 Candidate parent: 7998836a8

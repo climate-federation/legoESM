@@ -68,8 +68,10 @@ def make_moisture_registry() -> TracerRegistry:
     ))
 
 
-def make_full_moisture_registry() -> TracerRegistry:
-    """Full microphysics tracer set (6 species + 3 number concentrations)."""
+def make_full_moisture_registry(snow_number: bool = False) -> TracerRegistry:
+    """Full microphysics tracer set (6 species + 3 number concentrations),
+    plus the snow number ``N_s`` [#/kg] as slot [9] when ``snow_number``
+    (two-moment snow: Morrison's CAM6 MG2 mode)."""
     return TracerRegistry(tracers=(
         TracerInfo("q_v", "kg/kg", True, True, "specific humidity"),
         TracerInfo("q_c", "kg/kg", True, True, "cloud liquid water"),
@@ -93,7 +95,8 @@ def make_full_moisture_registry() -> TracerRegistry:
         TracerInfo("N_c", "1/kg", True, True, "cloud droplet number"),
         TracerInfo("N_r", "1/kg", True, True, "rain droplet number"),
         TracerInfo("N_i", "1/kg", True, True, "ice crystal number"),
-    ))
+    ) + ((TracerInfo("N_s", "1/kg", True, True, "snow number"),)
+         if snow_number else ()))
 
 
 def init_tracers(

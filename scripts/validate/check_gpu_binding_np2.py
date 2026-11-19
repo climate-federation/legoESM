@@ -114,10 +114,11 @@ def burn(out_dir: str, arm: str) -> None:
     pre_env = {k: os.environ.get(k, "UNSET") for k in env_keys}
     rank = pre_env["SLURM_PROCID"]
 
-    # The REAL path under test, exactly as run_amip.py invokes it (before
-    # any jax.numpy / legoesm import that would init the XLA backend).
+    # The REAL path under test, exactly as run_amip.py invokes it for the
+    # mpi4jax lane (before any jax.numpy / legoesm import that would init
+    # the XLA backend).
     from legoesm.parallel.early_init import maybe_init_jax_distributed
-    maybe_init_jax_distributed()
+    maybe_init_jax_distributed(federate=False)
 
     post_cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "UNSET")
 

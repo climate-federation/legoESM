@@ -38,8 +38,12 @@ def test_p3_checkpoint_is_rekeyed_without_changing_values(tmp_path):
     np.savez(src, T=T, p_s=p_s, phis=phis, trc_q_v=q_v, trc_q_c=q_c,
              tracer_names=np.asarray(["q_v", "q_c"]), llc_u_face=u_f,
              llc_v_face=v_f)
-    out = np.load(_load()._convert_p3_latlon(str(src), str(tmp_path)))
+    cfg = tmp_path / "experiment_config.json"
+    cfg.write_text('{"dycore": {"mpas_div_damp4_scale": 1.0}}')
+    out = np.load(_load()._convert_p3_latlon(str(src), str(tmp_path), str(cfg)))
     assert str(out["latloncol_schema"]) == "latloncol_ckpt_v1"
+    # the div-4 stamp is the writing run's own scale (driver restore checks it)
+    assert float(out["latloncol_div4_scale"]) == 1.0
     np.testing.assert_array_equal(out["latloncol_u"], u_f)
     np.testing.assert_array_equal(out["latloncol_v"], v_f)
     np.testing.assert_array_equal(out["latloncol_T"], T.reshape(nlat, nlon, nlev))
@@ -74,3 +78,30 @@ def test_summarize_rates_tags_and_raw_net():
     assert ll["massfix_raw_Wm2"] == pytest.approx(-0.2)
     with pytest.raises(RuntimeError, match="efix_mf: 1 rows"):
         summarize(rows[:-2] + rows[-1:], A, dt, "mpas", steps)
+
+
+def test_p3_conversion_stamps_the_run_scale_and_refuses_a_missing_one(tmp_path):
+    """The stamp follows the writing run's config (0.0 stays 0.0, not a
+    default); a config without dycore.mpas_div_damp4_scale is refused."""
+    import json
+    import pytest
+    nlat, nlon, nlev = 2, 3, 1
+    src = tmp_path / "ck.npz"
+    np.savez(src, T=np.zeros((nlat * nlon, nlev)), p_s=np.zeros(nlat * nlon),
+             phis=np.zeros(nlat * nlon), trc_q_v=np.zeros((nlat * nlon, nlev)),
+             tracer_names=np.asarray(["q_v"]),
+             llc_u_face=np.zeros((nlat, nlon + 1, nlev)),
+             llc_v_face=np.zeros((nlat + 1, nlon, nlev)))
+    probe = _load()
+    for scale in (0.0, 0.5):
+        d = tmp_path / f"s{scale}"
+        d.mkdir()
+        cfg = d / "experiment_config.json"
+        cfg.write_text(json.dumps({"dycore": {"mpas_div_damp4_scale": scale}}))
+        out = np.load(probe._convert_p3_latlon(str(src), str(d), str(cfg)))
+        assert float(out["latloncol_div4_scale"]) == scale
+    for body in ({"dycore": {"dt": 450.0}}, {"grid": {}}):
+        cfg = tmp_path / "missing.json"
+        cfg.write_text(json.dumps(body))
+        with pytest.raises(SystemExit, match="mpas_div_damp4_scale"):
+            probe._convert_p3_latlon(str(src), str(tmp_path), str(cfg))

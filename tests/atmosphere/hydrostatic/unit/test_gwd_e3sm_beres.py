@@ -42,6 +42,19 @@ from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import (
     _cshift_rows,
 )
 
+
+_e3sm_cam_gwd_kernel = e3sm_cam_gwd
+
+
+def e3sm_cam_gwd(*args, **kw):
+    """The kernel with ``p_ref_half`` (E3SM pref_edge) = the test column's own
+    interfaces: these columns are built at surface pressure p_ref = 1e5 Pa, so
+    their interfaces ARE the reference interfaces a lane would pass."""
+    if "p_ref_half" not in kw:
+        ph = kw["p_half"] if "p_half" in kw else args[4]
+        kw["p_ref_half"] = jnp.asarray(ph)[0]
+    return _e3sm_cam_gwd_kernel(*args, **kw)
+
 ORACLE_RAIR = 287.04
 ORACLE_G = 9.80616
 DC = 2.5
@@ -109,13 +122,15 @@ def test_beres_matches_oracle():
         z_heat_max=20000.0, storm_speed_min=10.0, maxh=MAXH, maxuh=MAXUH,
         use_stand_in_table=True, mfcc_peak=1.0e-2, mfcc_c0=30.0,
         mfcc_hdepth_growth=0.05,
+        # the oracle's netdt > 0, q0 max and depth gate (RULE 5 hard limits, #2569)
+        heating_ramp_width=0.0, q0_max_sharpness=float("inf"), hdepth_gate_width=0.0,
     )
     mfcc = build_stand_in_mfcc(NGWV, DC, beres, jnp.float64)
     out = gw_beres_src(
         to(u), to(v), to(netdt), to(zm), jnp.zeros(1), k700, mfcc,
         NGWV, DC, beres,
     )
-    tau0_full, src, tend, xv, yv, c, ubm, ubi, hdepth, maxq0 = out
+    tau0_full, src, tend, xv, yv, c, ubm, ubi, hdepth, maxq0, _t = out
     assert int(src[0]) == _ORACLE_SRC_LEVEL
     assert int(tend[0]) == _ORACLE_SRC_LEVEL
     np.testing.assert_allclose(float(hdepth[0]), _ORACLE_HDEPTH, rtol=1e-12)
@@ -142,8 +157,11 @@ def test_beres_uh_column_lookup():
     pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
     to = lambda a: jnp.asarray(a[None, :])
     slope = 0.02
-    beres0 = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=0.0)
-    beresS = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=slope)
+    # E3SM's integer NINT(uh) column mapping: the RULE 5 hard limit (#2545).
+    beres0 = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=0.0, index_round_width=0.0,
+                             crit_minmax_sharpness=float("inf"))
+    beresS = E3SMBeresConfig(use_stand_in_table=True, mfcc_uh_slope=slope, index_round_width=0.0,
+                             crit_minmax_sharpness=float("inf"))
     mfcc0 = build_stand_in_mfcc(NGWV, DC, beres0, jnp.float64)
     mfccS = build_stand_in_mfcc(NGWV, DC, beresS, jnp.float64)
     out0 = gw_beres_src(to(u), to(v), to(netdt), to(zm), jnp.zeros(1),
@@ -261,7 +279,13 @@ def test_beres_driver_dissipative():
     u_c = rep(u)
     v_c = jnp.zeros((ncol, pver))
     lat = jnp.zeros(ncol)
-    cfg = E3SMCAMConfig(source="convective", pgwv=NGWV, dc=DC, effgw=0.4)
+    args = (u_c, v_c, T_c, pmid_c, pint_c, zf_c, zh_c, rho_c, lat, 1800.0)
+    # RULE 3: the DEFAULT config has no table and must refuse, not run the stand-in.
+    with pytest.raises(ValueError, match="use_stand_in_table is False"):
+        e3sm_cam_gwd(*args, E3SMCAMConfig(source="convective", pgwv=NGWV, dc=DC,
+                                          effgw=0.4), netdt_col=rep(netdt))
+    cfg = E3SMCAMConfig(source="convective", pgwv=NGWV, dc=DC, effgw=0.4,
+                        beres=E3SMBeresConfig(use_stand_in_table=True))   # explicit stand-in
     out = e3sm_cam_gwd(
         u_c, v_c, T_c, pmid_c, pint_c, zf_c, zh_c, rho_c, lat, 1800.0, cfg,
         netdt_col=rep(netdt),
@@ -271,3 +295,105 @@ def test_beres_driver_dissipative():
     assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0
     # eps_gwd is column KE dissipation, must be >= 0 (drag removes KE).
     assert jnp.all(out.eps_gwd >= -1e-9)
+
+
+def test_level_swap_of_the_crit_bound_is_smooth_at_default():
+    """RULE 5 (#2545, codex review): two heating-range levels swap as the
+    minimum projected wind (3.74 + s, 3.74 - s/2 m/s) while Umin/dc = 1.496 sits inside
+    the smooth NINT window; the hard min kinks there, the default soft min
+    (crit_minmax_sharpness) does not."""
+    from jax.test_util import check_grads
+    p = 8
+    z = jnp.array([[6000.0, 4500.0, 3000.0, 1500.0, 0.0]])
+    h = jnp.array([[0.0, 1e-4, 1e-4, 1e-4, 1e-4]])
+    t = jnp.ones((20, 81, 2 * p + 1)).at[:, :, p].set(0.0)
+
+    def make(beres):
+        def f(s):
+            u = jnp.array([[8.0, 0.0, 0.0, 5.0, 10.0]]).at[0, 1].set(3.74 + s).at[0, 2].set(3.74 - 0.5 * s)
+            return 1e10 * gw_beres_src(u, jnp.zeros_like(u), h, z, jnp.zeros(1), 4, t, p, 2.5,
+                                       beres)[0].sum()
+        return jax.jit(f)
+
+    s0 = jnp.asarray(0.0)
+    f = make(E3SMBeresConfig())
+    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-5)
+    assert float(jax.grad(f)(s0)) != 0.0
+    with pytest.raises(AssertionError):
+        check_grads(make(E3SMBeresConfig(crit_minmax_sharpness=float("inf"))), (s0,),
+                    order=2, modes=("rev",), eps=1e-5)
+
+
+@pytest.mark.parametrize("field,bad", [("index_round_width", -0.1), ("index_round_width", 1.5),
+                                       ("index_round_width", 1e-50),
+                                       ("crit_minmax_sharpness", 0.0), ("crit_minmax_sharpness", 1e-50),
+                                       ("crit_minmax_sharpness", float("-inf")),
+                                       ("crit_minmax_sharpness", True),
+                                       ("crit_minmax_sharpness", 1e40),
+                                       ("heating_ramp_width", -1e-7), ("heating_ramp_width", 1e-50),
+                                       ("q0_max_sharpness", 0.0), ("q0_max_sharpness", True),
+                                       ("q0_max_sharpness", 1e40),
+                                       ("hdepth_gate_width", -0.1), ("hdepth_gate_width", 1e-50)])
+def test_beres_smoothing_fields_validated(field, bad):
+    """#2545/#2569: 0/inf (E3SM) or an fp32-safe width/sharpness; anything else raises."""
+    pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
+    to = lambda a: jnp.asarray(a[None, :])
+    beres = E3SMBeresConfig(use_stand_in_table=True, **{field: bad})
+    mfcc = build_stand_in_mfcc(NGWV, DC, beres, jnp.float64)
+    with pytest.raises(ValueError, match=field):
+        gw_beres_src(to(u), to(v), to(netdt), to(zm), jnp.zeros(1), k700, mfcc, NGWV, DC, beres)
+
+
+def test_q0_max_tie_is_smooth_at_default():
+    """#2569 (RULE 5): q0 = max of netdt over the heating range kinks where two
+    levels tie; the default log-sum-exp (q0_max_sharpness) does not, the hard
+    value (inf) alone does.  One level of the deep column is set to the range
+    maximum + s/q0_max_sharpness; f = q0 in units of 1/q0_max_sharpness."""
+    from jax.test_util import check_grads
+    pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
+    to = lambda a: jnp.asarray(a[None, :])
+    i = int(np.argmax(netdt))
+    j = i + 1                                     # in the range, below the max
+    assert netdt[j] > 0.0
+    qs = E3SMBeresConfig().q0_max_sharpness
+
+    def make(beres):
+        mfcc = build_stand_in_mfcc(NGWV, DC, beres, jnp.float64)
+
+        def f(s):
+            nd = to(netdt).at[0, j].set(netdt[i] + s / qs)
+            out = gw_beres_src(to(u), to(v), nd, to(zm), jnp.zeros(1), k700, mfcc,
+                               NGWV, DC, beres)
+            return out[9][0] / 86400.0 * qs       # maxq0 [K/day] -> q0 * qs
+        return jax.jit(f)
+
+    s0 = jnp.asarray(0.0)
+    f = make(E3SMBeresConfig(use_stand_in_table=True))
+    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-3)
+    assert float(jax.grad(f)(s0)) > 0.0
+    with pytest.raises(AssertionError):
+        check_grads(make(E3SMBeresConfig(use_stand_in_table=True,
+                                         q0_max_sharpness=float("inf"))),
+                    (s0,), order=2, modes=("rev",), eps=1e-3)
+
+
+def test_launch_expectation_gradient_finite_in_fp32():
+    """#2569 (codex review 3): a range found with a vanishing probability
+    (heating 1e-15 K/s at one level, cooling elsewhere, no 20 km window) gave a
+    NaN fp32 gradient through the expected launch interface's 1/found."""
+    pver, ncol = 40, 1
+    pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
+    f32 = lambda a: jnp.asarray(a, jnp.float32)[None, :]
+    nd = np.full(pver, -1.0e-4)
+    nd[-4] = 1.0e-15
+    cfg = E3SMCAMConfig(source="convective", pgwv=NGWV, dc=DC, effgw=0.4,
+                        beres=E3SMBeresConfig(use_stand_in_table=True, z_heat_max=1.0e7))
+    rho = pmid / (ORACLE_RAIR * T)
+
+    def loss(netdt_c):
+        out = e3sm_cam_gwd(f32(u), f32(v), f32(T), f32(pmid), f32(pint), f32(zm), f32(z_half),
+                           f32(rho), jnp.zeros(ncol, jnp.float32), 1800.0, cfg, netdt_col=netdt_c)
+        return jnp.sum(out.du_dt) + jnp.sum(out.dT_dt)
+
+    g = jax.grad(loss)(f32(nd))
+    assert g.dtype == jnp.float32 and bool(jnp.all(jnp.isfinite(g)))

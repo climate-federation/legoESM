@@ -14,6 +14,8 @@ helpers that implement that — directly, without standing up a full driver:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import jax.numpy as jnp
 import numpy as np
 
@@ -31,6 +33,9 @@ class _Stub:
     def __init__(self, tracers, carry_aux):
         self.tracers = tracers
         self._carry_aux = carry_aux
+        # Cell-centre state: no staggered-wind fields for the carry to stage.
+        self.state = SimpleNamespace()
+        self._land_ml_state = None  # slab land: no multilayer columns
 
 
 _DM = ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")

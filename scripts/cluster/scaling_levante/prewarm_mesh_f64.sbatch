@@ -20,4 +20,4 @@ for L in 9 10; do
   "$PY" scripts/data/prewarm_voronoi_mesh.py --level "$L" --lloyd 0 || echo "prewarm L$L FAILED"
 done
 echo "=== DONE $(date) ==="
-ls -la "$LEGOESM_MESH_CACHE_DIR"/scvt_v1_lvl{9,10}_*lloyd0_x641.npz 2>/dev/null
+ls -la "$LEGOESM_MESH_CACHE_DIR"/scvt_v2_lvl{9,10}_*lloyd0_x641.npz 2>/dev/null

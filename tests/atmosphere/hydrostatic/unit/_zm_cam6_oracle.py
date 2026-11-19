@@ -7,9 +7,9 @@ column, with ``zmconv_microp = .false.`` and ``zm_org = .false.``.  Arrays are
 allocated with a dummy index 0 so the Fortran indices can be used verbatim.
 
 Independent of the JAX port except for the two shared physical inputs it
-must agree on to be comparable at 1e-10: the saturation curve
-(``legoesm.thermo.saturation_mixing_ratio``, CLAUDE.md, converted to CAM's
-specific humidity in ``qsat_pa``) and the constants
+must agree on to be comparable at 1e-10: the saturation curve (CAM's
+Goff-Gratch over water, ``legoesm.thermo.saturation_vapor_pressure_goff_gratch``,
+with CAM's hard ``wv_sat_svp_to_qsat`` in ``qsat_pa``) and the constants
 (``legoesm.constants``).  The entropy inversion here is scipy ``brentq``
 (the oracle's Brent, run to 1e-13) so it is an independent root finder from
 the port's Newton iteration.
@@ -19,26 +19,48 @@ from __future__ import annotations
 
 import math
 
-import jax
 import numpy as np
 from scipy.optimize import brentq
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_vapor_pressure
-
-_w_sat_jit = jax.jit(saturation_mixing_ratio)
+from legoesm.thermo import (
+    saturation_vapor_pressure_goff_gratch,
+    saturation_vapor_pressure_ice_goff_gratch,
+)
 
 
 def qsat_pa(t, p_pa):
-    """CAM ``qsat_water``/``qsat`` -> saturation SPECIFIC humidity (kg/kg).
+    """CAM ``qsat_water`` (``wv_sat_qsat_water``, wv_sat_methods.F90:195-218)
+    -> saturation SPECIFIC humidity (kg/kg): Goff-Gratch over water, then
+    ``wv_sat_svp_to_qsat`` ``qs = ε·es/(p − (1−ε)·es)``, 1 where
+    ``p − es <= 0``."""
+    es = float(saturation_vapor_pressure_goff_gratch(np.float64(t)))
+    p = float(p_pa)
+    return 1.0 if p - es <= 0.0 else eps1 * es / (p - (1.0 - eps1) * es)
 
-    ``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``: ``qs = ε·es/(p − (1−ε)·es)``.
-    Written here from the shared mixing ratio ``w = ε·es/(p − es)`` as
-    ``w/(1 + w)`` (the same expression), so the shared smooth cap cancels and
-    the pins stay at 1e-10 while a port that feeds ``w`` itself is caught.
-    """
-    w = float(_w_sat_jit(np.float64(t), np.float64(p_pa)))
-    return w / (1.0 + w)
+
+def qsat_trans_pa(t, p_pa):
+    """CAM ``qsat`` (wv_saturation.F90:458-503), the call in ``zm_conv_evap``,
+    written out line for line: ``estblf`` (:306-321) on the 1-K table
+    ``estbl(i) = svp_trans(tmin + i - 1)`` (:216-226) of ``wv_sat_svp_trans``
+    (wv_sat_methods.F90:326-361, ttrice = 20 K) over CAM's Goff-Gratch water /
+    ice curves, then ``wv_sat_svp_to_qsat`` (:180-193)."""
+    ttrice, tmin, tmax = 20.0, 127.16, 375.16   # wv_saturation.F90:79-82
+
+    def svp_trans(tt):
+        es = float(saturation_vapor_pressure_goff_gratch(np.float64(tt))) \
+            if tt >= tfreez - ttrice else 0.0
+        if tt < tfreez:
+            esice = float(saturation_vapor_pressure_ice_goff_gratch(np.float64(tt)))
+            weight = 1.0 if (tfreez - tt) > ttrice else (tfreez - tt) / ttrice
+            es = weight * esice + (1.0 - weight) * es
+        return es
+    t_tmp = max(min(float(t), tmax) - tmin, 0.0)
+    i = int(t_tmp)
+    weight = t_tmp - math.trunc(t_tmp)
+    es = (1.0 - weight) * svp_trans(tmin + i) + weight * svp_trans(tmin + i + 1)
+    p = float(p_pa)
+    return 1.0 if p - es <= 0.0 else eps1 * es / (p - (1.0 - eps1) * es)
 
 
 def qsat_hpa(t, p_hpa):
@@ -235,7 +257,7 @@ def cldprp(q, t, p, z, s, zf, shat, qhat, jb, lel, jt_in, mx, pver, msg, limcnv,
         qu[k] = q[k]
         su[k] = s[k]
         qst[k] = qsat_hpa(t[k], p[k])
-        if p[k] * 100.0 - float(saturation_vapor_pressure(t[k])) <= 0.0:
+        if p[k] * 100.0 - float(saturation_vapor_pressure_goff_gratch(np.float64(t[k]))) <= 0.0:
             qst[k] = 1.0
         gamma[k] = qst[k] * (1.0 + qst[k] / eps1) * eps1 * rl / (rgas * t[k] ** 2) * rl / cpres
         hmn[k] = cpres * t[k] + grav * z[k] + rl * q[k]
@@ -561,12 +583,11 @@ def limcnv_from_pref_edge(pref_edge, pver):
 
 def zm_convr(t0, qh0, pap0, paph0, zm0, zi0, landfrac, delt, pblh, tpert, *,
              capelmt=capelmt_default, tau=tau_default, num_cin=1, dmpdz=-1.0e-3,
-             c0_lnd=0.0075, c0_ocn=0.03, alfa=0.1, pbl_top_pa=None, pref_edge=None):
+             c0_lnd=0.0075, c0_ocn=0.03, alfa=0.1, pref_edge=None):
     """zm_conv.F90:142 ``zm_convr`` for ONE column (0-based surface-last inputs).
 
-    ``delt`` is the oracle's half step (``0.5*ztodt``).  ``pblh`` None ->
-    the port's departure (launch bounded by ``pbl_top_pa``).  Returns a dict
-    of 0-based arrays.
+    ``delt`` is the oracle's half step (``0.5*ztodt``).  Returns a dict of
+    0-based arrays.
     """
     pver = len(t0)
     to1 = lambda a: np.concatenate([[0.0], np.asarray(a, dtype=np.float64)])
@@ -588,16 +609,10 @@ def zm_convr(t0, qh0, pap0, paph0, zm0, zi0, landfrac, delt, pblh, tpert, *,
         pf[k] = paph[k] * 0.01
         z[k] = zm[k] + zs
         zf[k] = zi[k] + zs
-    if pblh is None:
-        pblt = pver
-        for k in range(pver, msg, -1):
-            if pap[k] >= pbl_top_pa:
-                pblt = k
-    else:
-        pblt = pver
-        for k in range(pver - 1, msg, -1):
-            if abs(z[k] - zs - pblh) < (zf[k] - zf[k + 1]) * 0.5:
-                pblt = k
+    pblt = pver
+    for k in range(pver - 1, msg, -1):
+        if abs(z[k] - zs - pblh) < (zf[k] - zf[k + 1]) * 0.5:
+            pblt = k
     q = qh.copy()
     shat, qhat = _arr(pver), _arr(pver)
     for k in range(1, pver + 1):
@@ -726,7 +741,7 @@ def zm_conv_evap(t0, pmid0, pdel0, q0, prdprec0, cldfrc0, deltat, prec_in, ke):
     ntprprd, ntsnprd, tend_s, tend_q = _arr(pver), _arr(pver), _arr(pver), _arr(pver)
     evpvint = 0.0
     for k in range(1, pver + 1):
-        qs = qsat_pa(t[k], pmid[k])
+        qs = qsat_trans_pa(t[k], pmid[k])
         fice, fsnow_conv = cldfrc_fice(t[k])
         if t[k] > tfreez:
             flxsntm = 0.0

@@ -316,8 +316,9 @@ The proposal, change by change:
    - Copy each YAML the driver read into `config_input/`.
    - Fold `run.yaml` (template, overrides, machine) into the manifest's `run`
      block.
-   - Let the runners pass `runner_tag` and `patches` (name plus sha256);
-     the manifest fields already exist.
+   - Let the runners pass `orchestrator_tag` (env `LEGOESM_RUNNER_TAG`) and
+     `patches` (name plus sha256). `runner_tag` stays the entry script's tag:
+     replay and the one-run-per-directory check key on it.
 8. **A default-snapshot gate** (prevents G1 from recurring).
    - A committed golden file lists the default of every field of every
      `*Config` NamedTuple, and a test fails when any default changes.
@@ -407,8 +408,8 @@ stays outside the scientific configuration, as in ESM-Tools and CIME.
 
 Rule of thumb: legoESM records **what actually ran**. Experiment repositories
 record **what was intended, where, and how to rebuild the environment**. The
-link between the two is a pair of fields (`runner_tag`, `patches`) that the
-manifest already has.
+link between the two is a pair of fields (`orchestrator_tag`, `patches`) in
+the manifest.
 
 ## 5. Implementation plan
 
@@ -459,10 +460,84 @@ emits v2. Old manifests keep loading.
    `run_amip.py` may replace them there (`--params` routing, AIMIP trained
    configs, Sundqvist command-line overrides). This is the one place replay
    injects; the closure check still compares the whole record afterwards.
-   Out of scope here, planned as a separate change: the ocean, land (LMIP),
-   DINO and coupled drivers record their
-   runtime configs in `resolved_config`, but `reproduce` does not rerun them,
-   so they have no strict replay or closure check yet.
+   **Component runners** (implemented for land `run_lmip.py`, ocean
+   `run_omip.py`, DINO `run_dino.py` and coupled `run_coupled.py`; CORE2 is
+   validated only). Replay of `run_omip.py` always sets `--grid` to the manifest's grid
+   (`--grid all` writes one manifest per grid); `run_dino.py --timing-jsonl`
+   is pointed at the same file name in the rerun's output (replay refuses when
+   the command line sets it but the manifest does not record it); a
+   multi-controller DINO run records no final digest and is not replayable. `--diag-every`
+   is not an OMIP continuation control (it also sets the JRA55 forcing block
+   size), nor is `--quick` (it changes other defaults). The `run_omip.py` digest covers the
+   final sea ice when the run carries it. A coupled run's record
+   (`coupled/run_manifest.json`, written after setup with the component
+   configs the driver resolved) is replayed with its atmosphere record as a
+   companion: the rerun's atmosphere must resolve to it, and `--check`
+   compares both final digests (the coupled one covers every non-atmosphere
+   array a coupled checkpoint saves, recorded only for a completed run,
+   together with the digest this run's atmosphere recorded, so the pair
+   survives either record being archived or updated later; `--check`
+   compares the pairs both runs recorded). A
+   coupled run that was itself resumed (`--resume`, from the command line or
+   a deck) is not replayable, nor is its atmosphere record alone. The
+   coupling interval `--diag-days` is not a continuation control. Its
+   atmosphere record (tagged `run_coupled`) follows the same continuation
+   controls: a change of run length, checkpoint frequency or wallclock budget
+   archives the old atmosphere record by a hard link and writes the new one;
+   any other change is refused, as for every atmosphere record. A coupled
+   run does not take over a standalone atmosphere record of equal
+   configuration, nor the reverse (an untagged record beside a
+   `coupled/run_manifest.json`, written before the tag, still counts as the
+   coupled run's; one moved away from its coupled record carries no
+   ownership and reads as a standalone record). The
+   atmosphere record is written during setup, before the coupled record is
+   checked, so a continuation the coupled record then refuses leaves the
+   atmosphere record replaced (its predecessor archived beside it, where
+   replay of the older coupled record finds it). A coupled
+   `--resume` checks the checkpoint's code before setup, and refuses (after
+   setup, before stepping) without the matching coupled checkpoint. A runner builds its configuration through script code,
+   so `reproduce` reruns the recording script: the manifest records the exact
+   command line (`run.argv`), the launch directory (`run.cwd`) and the process
+   count (`reproducibility.n_processes`, taken when the manifest is written,
+   so a runner writes it after its process setup). `reproduce` refuses on version drift
+   (unless allowed), on a missing command line or launch directory, on a
+   multi-process run (it prints the command, to be launched on the recorded
+   process count with the original launcher, which is not recorded), on a
+   manifest without a process count, on a run launched through anything but
+   the runner script itself or whose recorded script content
+   (`run.script_sha256`) is missing or matches neither the recorded script
+   nor this checkout's copy (it reruns the recorded script when it is still
+   there unchanged), when this checkout has no `scripts/run/` runner, on
+   `--check` when the reference recorded no final digest, and on an
+   output directory overlapping the reference run's or already holding a
+   manifest.
+   Runner manifests without replay support are validated only, as before. It reruns
+   with only the output flag rewritten (plus the runner's own rewrites:
+   `run_omip.py`'s `--grid`, `run_dino.py`'s `--timing-jsonl`, below) and with `LEGOESM_REPRODUCE_REFERENCE`
+   / `LEGOESM_REPRODUCE_OUTPUT` set; the rerun's manifest writer then refuses
+   before stepping unless the rerun resolves to the reference record
+   (resolved configuration minus the rewritten keys, applied `--params`, resolved
+   physics, and each input's path and size). `--check` compares final digests;
+   without it, a rerun that records no final digest did not complete and
+   fails. Without `--output` the rerun goes to a new temporary directory,
+   which is kept (also after a MATCH) and named in the log. The interpreter, its flags and the environment (`JAX_*`,
+   `XLA_FLAGS`, ...) are not recorded or compared yet (P1 environment block),
+   so a MATCH is not evidence of environment independence. A run started
+   through a wrapper that keeps `argv[0]`, or as `python -m`, is rerun as the
+   plain script.
+   A run into a directory that already holds a run's manifest is a
+   continuation: besides the version-drift rule it may change only its
+   continuation controls (resume/restart flags, run length, output and
+   checkpoint frequency, wallclock budget, output path); any other difference
+   is refused. Manifests written before `run.argv` existed get only the
+   version-drift rule, and so do directories where neither run's continuation
+   controls are classified (runners without replay support); a classified run
+   on either side refuses a change of runner. An existing manifest that
+   can be read but not parsed or validated counts as unknown code: it is
+   refused, and
+   with the drift override it is archived and replaced unchecked. Restart files carry no code
+   identity of their own: the drift gate trusts the manifest found beside the
+   restart (or one level above it, for `run_omip.py` and `run_dino.py`).
 2. Commit check plus a drift diff table in `reproduce` and restart-chain
    continuation, and reporting from `config_hash_matches` (item 2). Until the
    code delta is captured (P1 step 6), a recorded or current `git_dirty` (a
@@ -471,9 +546,13 @@ emits v2. Old manifests keep loading.
    `load_checkpoint`, and reruns through `write_run_manifest_on_root`. To
    proceed anyway, pass `legoesm reproduce --allow-version-drift` or set
    `LEGOESM_ALLOW_VERSION_DRIFT=1` (any driver). A checkpoint needs the
-   writing run's `run_manifest.json` beside it. Not yet gated: the
-   `--restart-from` loaders in `run_omip.py`, `run_dino.py`, `run_lmip.py`
-   and `run_omip_core2.py`, which read restart files directly.
+   writing run's `run_manifest.json` beside it. `run_lmip.py --restart-from`
+   is gated the same way, before the run writes its own manifest;
+   `run_omip.py --restart` and `run_dino.py --restart-from` look for the
+   manifest beside the file or one level above (`restarts/`, `snapshots/`),
+   before loading it. `run_omip_core2.py --restart-from` refuses a restart
+   archive whose recorded source revision is unknown, different, dirty or
+   mixed-tree (it was a warning before).
 3. The manifest is written by `run_omip.py`, `run_lmip.py`, `run_coupled.py`
    and `run_dino.py` (item 3).
 4. Docs: correct the README claim that every run is reproducible
@@ -486,7 +565,7 @@ emits v2. Old manifests keep loading.
    two catalog schemas *first*, so the column is added once (G9).
 8. Default-snapshot golden test plus the CHANGELOG convention (item 8).
 9. `config_input/` copy, and `run.yaml` folded into the manifest (item 7).
-10. Runners write `runner_tag` and patch sha256 into the upstream manifest,
+10. Runners write `orchestrator_tag` and patch sha256 into the upstream manifest,
     and reference the manifest from `experiment.tag`. This is a two-field
     change on each side.
 11. Provenance attributes in CMOR outputs (item 9).

@@ -1,0 +1,42 @@
+--- stp2d.F90
++++ stp2d.F90
+@@ -90,0 +91,2 @@
++      INTEGER  ::   r20_unit, r20_ios, r20_env_status
++      LOGICAL  ::   r20_write
+@@ -91,0 +94,3 @@
++      CHARACTER(LEN=16)  :: r20_magic
++      CHARACTER(LEN=96)  :: r20_filename
++      CHARACTER(LEN=8)   :: r20_env
+@@ -100,0 +106,2 @@
++      CALL get_environment_variable('GYRE_R20_WRITE', r20_env, status=r20_env_status)
++      r20_write = r20_env_status == 0 .AND. TRIM(r20_env) == '1'
+@@ -126,0 +134,15 @@
++         IF( r20_write .AND. lwp .AND. .NOT.ln_tile .AND. kt == nit000 ) THEN
++            IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'round-20 stage-1 RHS writer requires 64-bit wp' )
++            IF( n_dynadv /= np_VEC_c2 )   CALL ctl_stop( 'round-20 stage-1 RHS writer requires np_VEC_c2' )
++            WRITE(r20_filename,'("oracle_r20_stage1_rhs_kt",I8.8,".bin")') kt
++            OPEN( NEWUNIT=r20_unit, FILE=TRIM(r20_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++               &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r20_ios )
++            IF( r20_ios /= 0 )   CALL ctl_stop( 'cannot open round-20 stage-1 RHS dump' )
++            r20_magic = 'NEMO_L2_R20RHS_1'
++            WRITE(r20_unit) r20_magic, 1, kt, Kbb, Krhs, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++            WRITE(r20_unit) SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), &
++               &           SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), &
++               &           SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), &
++               &           SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), &
++               &           SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs))
++         ENDIF
+@@ -128,0 +151 @@
++         IF( r20_write .AND. lwp .AND. .NOT.ln_tile .AND. kt == nit000 )   WRITE(r20_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+@@ -131,0 +155 @@
++         IF( r20_write .AND. lwp .AND. .NOT.ln_tile .AND. kt == nit000 )   WRITE(r20_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+@@ -146,0 +171 @@
++         IF( r20_write .AND. lwp .AND. .NOT.ln_tile .AND. kt == nit000 )   WRITE(r20_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+@@ -163,0 +189 @@
++            IF( r20_write .AND. lwp .AND. .NOT.ln_tile .AND. kt == nit000 )   WRITE(r20_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+@@ -165,0 +192,5 @@
++            IF( r20_write .AND. lwp .AND. .NOT.ln_tile .AND. kt == nit000 ) THEN
++               WRITE(r20_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
++               CLOSE(r20_unit)
++               WRITE(numout,*) 'GYRE_R20_STAGE1_RHS_DUMP ', kt, TRIM(r20_filename)
++            ENDIF

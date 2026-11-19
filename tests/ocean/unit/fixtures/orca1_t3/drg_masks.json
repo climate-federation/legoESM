@@ -1,0 +1,43 @@
+{
+ "record": "/burg/glab/users/pg2328/oracle_audit/tier3/drg/ctl_on/t3_drg_record_<rank>.bin",
+ "recorder_cfg": "NEMO 5.0.1 cfgs/ORCA1_T3DRG (MY_SRC t3 recorder at zdf_drg), kt 17281 from the day-30 restart, 32 MPI tiles",
+ "oracle": "NEMO 5.0.1 zdfdrg.F90 zdf_drg_nonlin (np_non_lin), rCdU_bot = -rCd0_bot*SQRT(0.25*(zut^2+zvt^2)+rn_ke0), rCd0_bot = rn_Cd0*ssmask",
+ "nemo_spread_20_seed": 8.8e-16,
+ "legoesm_base_sha": "ee8534602be3ffdff9b3f66dde1ee6397d3ab877",
+ "extractor": "/burg/glab/users/pg2328/oracle_audit/ocean_fix/drg-masks/extract.py",
+ "window": 16,
+ "seed": 20261103,
+ "layout": "port: u[lat, lon+1] (u[:, i] = west face of cell i), v[lat+1, lon] (v[j] = south face of cell j); levels 0-based",
+ "windows": [
+  {
+   "rank": "0000",
+   "lat0": 32,
+   "lon0": 20,
+   "n_levels": 45,
+   "land_frac": 0.6875,
+   "cells_with_dry_bottom_face": 50,
+   "scalars": {
+    "cd0": 0.001,
+    "ke0": 0.0025,
+    "cdmax": 0.1,
+    "z0": 0.003
+   },
+   "nemo_land_r_all_zero": true
+  },
+  {
+   "rank": "0001",
+   "lat0": 32,
+   "lon0": 24,
+   "n_levels": 47,
+   "land_frac": 0.734375,
+   "cells_with_dry_bottom_face": 49,
+   "scalars": {
+    "cd0": 0.001,
+    "ke0": 0.0025,
+    "cdmax": 0.1,
+    "z0": 0.003
+   },
+   "nemo_land_r_all_zero": true
+  }
+ ]
+}

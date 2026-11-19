@@ -276,7 +276,8 @@ def test_build_artifact_from_a_store(tmp_path):
     assert back.les_setup["surface_gustiness_m_s"] == 1.0
     from legoesm.atmosphere.les_suite.scm_runner import moist_scm_microphysics
     micro = moist_scm_microphysics(back)
-    assert micro.scheme == "kessler" and micro.kessler.parameter_set == "cloudbench"
+    assert micro.scheme == "cloudbench_warm_rain"
+    assert micro == cb.MICROPHYSICS
 
 
 def test_build_artifact_reads_an_untagged_integer_time_as_nanoseconds(tmp_path):

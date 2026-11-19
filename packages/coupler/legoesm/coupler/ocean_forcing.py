@@ -134,6 +134,7 @@ def blend_ice_ocean_forcing(
     alpha_ocean: float | None = None,
     sw_transmittance_ice: float = _SW_TRANSMITTANCE_ICE,
     ice_owns_snow_reservoir: bool = False,
+    ice_precip=None,
 ):
     """Partition a full-cell open-ocean forcing between the open-water fraction
     ``f_open = 1 - A`` and the sea-ice tile, and add the ice->ocean exchange —
@@ -166,6 +167,13 @@ def blend_ice_ocean_forcing(
       This matches the coupled-ESM gate (``coupled_esm_driver`` uses_new_physics
       -> ``f_ocean*P``).  ``runoff`` is always full-cell; only ``evap`` (and now,
       when gated, ``precip``) is rescaled in ``open_fw``.
+
+    ``ice_precip`` (default ``None`` = ``A*P``) is the per-cell precip rate
+    the ice tile accounts for (forwarded to the ocean or stored in its snow
+    pack); the direct channel then carries ``P - ice_precip``.  A caller whose
+    ice tile takes precip at a different cover than ``ice_concentration`` (rain
+    at the post-step cover, tracked snow at the thermodynamics-time cover)
+    passes it so open + ice share sum to exactly ``P``.
 
     ``ocean_mask`` (1 = ocean, 0 = land; ``None`` = all ocean) zeroes the ice
     concentration AND every ice->ocean channel on land cells, so a spurious
@@ -281,10 +289,12 @@ def blend_ice_ocean_forcing(
         # ocean; f_open in [0,1] is a pure fraction -> positive scaling, no sign
         # flip) or the A*P ice-fraction precip is counted twice.  Mirrors
         # coupled_esm_driver's f_ocean*P gate.
-        precip = (
-            open_fw.precip * f_open
-            if ice_owns_snow_reservoir else open_fw.precip
-        )
+        if not ice_owns_snow_reservoir:
+            precip = open_fw.precip
+        elif ice_precip is None:
+            precip = open_fw.precip * f_open
+        else:
+            precip = open_fw.precip - jnp.where(wet, ice_precip, 0.0)
         fw = FreshwaterForcing(
             precip=precip,
             evap=(open_fw.evap * f_open if open_fw.evap is not None else z),

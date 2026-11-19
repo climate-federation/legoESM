@@ -11,6 +11,8 @@ from typing import Final
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+
 # Import dependencies
 
 # Mathematical constants used in CLM
@@ -28,7 +30,7 @@ class PhysicalConstants:
     # Fundamental physical constants
     sb: Final[float] = 5.67e-08  # Stefan-Boltzmann constant (W/m2/K4)
     grav: Final[float] = 9.80665  # Gravitational acceleration (m/s2)
-    vkc: Final[float] = 0.4  # von Karman constant
+    vkc: Final[float] = constants.kappa_von_karman  # von Karman constant
 
     # Density constants
     denh2o: Final[float] = 1000.0  # Density of liquid water (kg/m3)

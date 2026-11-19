@@ -82,8 +82,10 @@ P_SFC = 101_480.0
 
 SCHEMES = (
     "sbm", "dca", "kuo", "mass_flux", "edmf",
-    "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
+    "zhang_mcfarlane", "kain_fritsch", "emanuel", "bechtold",
 )
+# tiedtke (WRF port) needs the dynamics q_v tendency, omega and lagged
+# turbulence inputs this offline column lacks (vote V16a).
 
 
 def build_state(nlev: int, ncol: int):
@@ -135,16 +137,30 @@ def _physics(scheme: str, dt: float, sub_overrides: dict | None = None):
     if sub_overrides:
         base = getattr(ConvectionConfig(**conv_kwargs), scheme)
         conv_kwargs[scheme] = base._replace(**sub_overrides)
-    return make_physics(
-        PhysicsConfig(
-            radiation=RadiationConfig(scheme="none"),
-            convection=ConvectionConfig(**conv_kwargs),
-            turbulence=TurbulenceConfig(scheme="none"),
-            microphysics=MicrophysicsConfig(scheme="none"),
-            gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
-        ),
-        model_type="hydrostatic", dt=dt,
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(**conv_kwargs),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
+    fn = make_physics(
+        cfg, model_type="hydrostatic", dt=dt,
+        surface_bulk_coeffs=None,   # convection-only cost bench
+    )
+    if scheme != "zhang_mcfarlane":
+        return fn
+
+    def zm_fn(state, grid, sigma):
+        # ZM reads the carried PBL height and refuses a call without one.  No
+        # PBL scheme runs here, so it is CAM's initial value, 0
+        # (physpkg.F90:419-424), carried in a fresh PhysicsState.
+        from legoesm.atmosphere.physics.physics_state import init_physics_state
+        T = state.T.data
+        ps = init_physics_state(int(np.prod(T.shape[:-1])), T.shape[-1], cfg,
+                                dtype=T.dtype)
+        return fn(state, grid, sigma, phys_state=ps)
+    return zm_fn
 
 
 def _activity(fn, state, sigma) -> dict:

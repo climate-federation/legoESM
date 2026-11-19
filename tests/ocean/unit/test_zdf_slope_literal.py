@@ -58,15 +58,11 @@ def test_literal_prd_is_jittable_and_differentiable():
     assert np.isfinite(np.asarray(jax.grad(fn)(x)))
 
 
-def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient(
-        monkeypatch):
-    """The unused restored surface W slot must not inject 0*inf into AD."""
+def _literal_slope_case():
+    """Small NEMO partial-cell slope case: z_coord, grid, T, S, masks, eos, and
+    the carried (N2, e3w) W bundle."""
     from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
     from legoesm.ocean.eos import make_eos_fn
-    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
-        compute_nemo_native_slopes,
-    )
-    from legoesm.ocean.physics.lateral_mixing import gm_redi_latlon_cgrid as gm
     from legoesm.ocean.vertical import (
         create_partial_cell_coordinate,
         create_z_star_from_thicknesses,
@@ -97,13 +93,56 @@ def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient(
     mask = jnp.ones((nlat, nlon), dtype=jnp.float64)
     umask = jnp.ones((nlat, nlon + 1), dtype=jnp.float64)
     vmask = jnp.ones((nlat + 1, nlon), dtype=jnp.float64)
-    cfg = GMRediConfig(
-        slope_prd_evaluation="nemo_literal",
-        slope_metric_evaluation="nemo_reciprocal")
     eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
     carried_n2 = jnp.full((nlat, nlon, nlev - 1), 1.0e-5)
     carried_e3w = jnp.broadcast_to(
         jnp.asarray([1.5, 2.5, 3.5]), carried_n2.shape)
+    return (z_coord, grid, T, S, mask, umask, vmask, eos_fn, carried_n2,
+            carried_e3w)
+
+
+def test_eos80_literal_slope_density_is_stored():
+    """The isoneutral-slope density of the nemo_eos80_literal arm goes through
+    nemo_source_store (one conditional in the compiled slopes); supplying the
+    density instead skips it, so a plain-call revert makes the counts equal."""
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_nemo_native_slopes,
+    )
+
+    (z_coord, grid, T, S, mask, umask, vmask, eos_fn, carried_n2,
+     carried_e3w) = _literal_slope_case()
+    z_coord = z_coord._replace(t_depth_ref=jnp.asarray([0.5, 2.0, 4.5, 8.0]))
+    cfg = GMRediConfig(
+        slope_prd_evaluation="nemo_eos80_literal",
+        slope_metric_evaluation="nemo_reciprocal")
+
+    def conditionals(prd_override):
+        def slopes(temperature):
+            rho = 1026.0 + 0.2 * (10.0 - temperature)
+            return compute_nemo_native_slopes(
+                rho, temperature, S, mask, umask, vmask, z_coord, grid, cfg,
+                eos_fn, active_3d=z_coord.is_active,
+                pn2_override=carried_n2, e3w_override=carried_e3w,
+                prd_override=prd_override)
+        return jax.jit(slopes).lower(T).compile().as_text().count(
+            " conditional(")
+
+    assert conditionals(None) - conditionals(jnp.zeros_like(T)) == 1
+
+
+def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient(
+        monkeypatch):
+    """The unused restored surface W slot must not inject 0*inf into AD."""
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_nemo_native_slopes,
+    )
+    from legoesm.ocean.physics.lateral_mixing import gm_redi_latlon_cgrid as gm
+
+    (z_coord, grid, T, S, mask, umask, vmask, eos_fn, carried_n2,
+     carried_e3w) = _literal_slope_case()
+    cfg = GMRediConfig(
+        slope_prd_evaluation="nemo_literal",
+        slope_metric_evaluation="nemo_reciprocal")
 
     def objective(temperature):
         rho = 1026.0 + 0.2 * (10.0 - temperature)
@@ -176,6 +215,7 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
             assert cfg.gm_redi_slope_metric_evaluation == "nemo_reciprocal"
             assert cfg.gm_redi_slope_face_thickness_evaluation == "nemo_qco_live"
             assert cfg.gm_redi_flux_face_thickness_evaluation == "nemo_qco_live"
+            assert cfg.gm_redi_divisor_thickness_evaluation == "nemo_qco_live"
             assert cfg.gm_redi_slope_depth_evaluation == "nemo_qco_live_literal"
             assert cfg.gm_treguier_vertical_reduction_evaluation == "nemo_left"
             assert cfg.gm_treguier_sqrt_evaluation == "nemo_forward_exact"
@@ -187,6 +227,8 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
             assert cfg.gm_redi_slope_face_thickness_evaluation == "static_face", name
             assert cfg.gm_redi_flux_face_thickness_evaluation == \
                 "tpoint_jacobian", name
+            assert cfg.gm_redi_divisor_thickness_evaluation == \
+                "reference_jacobian", name
             assert cfg.gm_redi_slope_depth_evaluation == \
                 "legacy_jacobian_t_surface", name
             assert cfg.gm_treguier_vertical_reduction_evaluation == "tree", name
@@ -199,6 +241,8 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
     assert GMRediConfig().slope_face_thickness_evaluation == "static_face"
     assert GMRediConfig().redi_flux_face_thickness_evaluation == \
         "tpoint_jacobian"
+    assert GMRediConfig().redi_divisor_thickness_evaluation == \
+        "reference_jacobian"
     assert GMRediConfig().slope_depth_evaluation == \
         "legacy_jacobian_t_surface"
     assert GMRediConfig().treguier_vertical_reduction_evaluation == "tree"
@@ -210,6 +254,7 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
         gm_redi_slope_metric_evaluation="division",
         gm_redi_slope_face_thickness_evaluation="static_face",
         gm_redi_flux_face_thickness_evaluation="tpoint_jacobian",
+        gm_redi_divisor_thickness_evaluation="reference_jacobian",
         gm_redi_slope_depth_evaluation="legacy_jacobian_t_surface",
         gm_treguier_vertical_reduction_evaluation="tree",
         gm_treguier_sqrt_evaluation="guarded_floor")
@@ -232,6 +277,11 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
     with pytest.raises(ValueError, match="gm_redi_flux_face_thickness"):
         dino_lat_lon_model_config(
             dino_lat_lon_grid(bad_flux_face, n_lon=8), bad_flux_face)
+    bad_divisor = dataclasses.replace(
+        DINOConfig(), gm_redi_divisor_thickness_evaluation="silent_typo")
+    with pytest.raises(ValueError, match="gm_redi_divisor_thickness"):
+        dino_lat_lon_model_config(
+            dino_lat_lon_grid(bad_divisor, n_lon=8), bad_divisor)
     bad_reduction = dataclasses.replace(
         DINOConfig(), gm_treguier_vertical_reduction_evaluation="silent_typo")
     with pytest.raises(ValueError, match="gm_treguier_vertical_reduction"):

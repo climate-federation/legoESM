@@ -303,10 +303,10 @@ def test_orca2_card_selects_resolved_rk3_sh2():
     )
     assert tke.bottom_tke_bc is True
     assert tke.eice == 1
-    assert tke.tke_langmuir_evaluation == "vectorized"
+    assert tke.tke_langmuir_evaluation == "nemo_literal"  # D135, round 312
     assert (card.recipe.model_config.nemo_first_wzv_after_ssh
-            == "rk3_extrapolated"), (
-        "Decision 78 keeps ORCA2 on the uncarried form until its own ladder")
+            == "rk3_extrapolated_carried"), (
+        "Decision 132: G6 certified the carried slot; round 308 imported it")
     validate_nemo_testcase_card(card)
 
     # Binding selector plant: the former tuple must be rejected by the real
@@ -351,7 +351,8 @@ def test_orca2_card_selects_resolved_rk3_sh2():
     with pytest.raises(ValueError, match="nn_eice=1"):
         validate_nemo_testcase_card(planted)
 
-    langmuir_literal = tke._replace(tke_langmuir_evaluation="nemo_literal")
+    # D135 / round 312: the card runs the literal form; plant the old one.
+    langmuir_literal = tke._replace(tke_langmuir_evaluation="vectorized")
     planted_cfg = card.recipe.model_config._replace(
         physics=card.recipe.model_config.physics._replace(
             vertical_mixing=(
@@ -454,7 +455,8 @@ def test_rk3_ws_admits_pure_redi_but_still_refuses_a_staged_gm_bolus():
     kappa_GM (gm_redi.py:11-13, psi = kappa_GM * S), so kappa_GM=0 removes it
     exactly and leaves pure Redi -- which is what the oracle runs.  Refusing
     every gm_redi would refuse NEMO's own GYRE.  The narrowed guard still
-    raises on a non-zero bolus; the second half of this test proves that.
+    raises on a non-zero bolus outside the complete staged Treguier
+    composition; the second half of this test proves that.
 
     The oracle run selects LN_TRALDF_ISO=T with LN_LDFEIV=F.
     """
@@ -466,7 +468,7 @@ def test_rk3_ws_admits_pure_redi_but_still_refuses_a_staged_gm_bolus():
     assert model.config.gm_redi.kappa_GM == 0.0
     assert model.config.gm_redi.kappa_Redi > 0.0
     cfg = card.recipe.model_config
-    with pytest.raises(ValueError, match="staged GM bolus"):
+    with pytest.raises(ValueError, match="complete staged Treguier"):
         LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord,
             cfg._replace(gm_redi=cfg.gm_redi._replace(kappa_GM=1.0)))

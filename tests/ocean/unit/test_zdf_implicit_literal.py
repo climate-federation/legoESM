@@ -307,3 +307,111 @@ def test_the_ordered_sweep_rounds_its_multiply_separately():
         jnp.asarray(lower), jnp.asarray(diagonal),
         jnp.asarray(upper), jnp.asarray(rhs)))
     assert (solved != separate).sum() == 0
+
+
+def test_the_ordered_sweep_trace_is_the_live_recurrence():
+    """The diagnostic publishes the arrays made by the production sweep."""
+    import numpy as np
+
+    from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+        _nemo_ordered_solve,
+    )
+
+    lower = jnp.asarray([[0.0, -0.2, -0.3]])
+    diagonal = jnp.asarray([[1.2, 1.4, 1.6]])
+    upper = jnp.asarray([[-0.1, -0.2, 0.0]])
+    rhs = jnp.asarray([[0.5, -0.25, 0.75]])
+    ordinary = _nemo_ordered_solve(lower, diagonal, upper, rhs)
+    observed, (eliminated, forward) = _nemo_ordered_solve(
+        lower, diagonal, upper, rhs, return_trace=True)
+
+    np.testing.assert_array_equal(np.asarray(observed), np.asarray(ordinary))
+    assert eliminated.shape == rhs.shape
+    assert forward.shape == rhs.shape
+    np.testing.assert_array_equal(np.asarray(eliminated[..., :1]),
+                                  np.asarray(diagonal[..., :1]))
+    np.testing.assert_array_equal(np.asarray(forward[..., :1]),
+                                  np.asarray(rhs[..., :1]))
+
+
+def test_the_tracer_diagonal_rounds_its_thickness_product_separately():
+    """The rounded arm transcribes trazdf.f90:233 and the control can fail."""
+    from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+        nemo_tracer_tridiagonal,
+    )
+
+    rng = np.random.default_rng(3)
+    shape = (64, 64, 6)
+    e3t_0 = rng.uniform(5.0, 400.0, shape)
+    stretch = 1.0 + rng.uniform(-2e-5, 2e-5, shape[:2])[..., None]
+    K = np.full(shape[:2] + (shape[2] - 1,), 1.2e-5)
+    e3w = rng.uniform(5.0, 400.0, K.shape)
+    wet = np.ones(shape, bool)
+
+    def diagonal(rounded):
+        @jax.jit
+        def evaluate(e3t, ratio):
+            return nemo_tracer_tridiagonal(
+                jnp.asarray(K), e3t * ratio, jnp.asarray(e3w), 10800.0,
+                jnp.asarray(wet), rounded_thickness=rounded)
+
+        return [
+            np.asarray(value)
+            for value in evaluate(jnp.asarray(e3t_0), jnp.asarray(stretch))
+        ]
+
+    lower, diagonal_rounded, upper = diagonal(True)
+    written = (e3t_0 * stretch) - (lower + upper)
+    np.testing.assert_array_equal(diagonal_rounded, written)
+    fused = diagonal(False)[1]
+    assert np.count_nonzero(fused != written) > 100
+    assert np.max(np.abs(fused - written) / written) < 4e-16
+
+
+def test_rounded_thickness_is_refused_without_the_literal_solver():
+    x = jnp.ones((1, 1, 3))
+    with pytest.raises(ValueError, match="rounded_thickness requires"):
+        implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
+            x, x, x, x, jnp.ones((1, 1, 2)), x,
+            jnp.ones((1, 1, 2)), 1.0, jnp.ones((1, 1, 3), bool),
+            rounded_thickness=True)
+
+
+def test_nemo_ordered_solve_reverse_gradient_is_finite_with_a_zero_pivot():
+    """A dry column has a zero pivot; the forward inf/NaN is masked by the
+    caller, and the jitted reverse pass must stay finite (round 316)."""
+    from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+        _nemo_ordered_solve,
+    )
+
+    rng = np.random.default_rng(316)
+    wet = jnp.asarray([1.0, 0.0])[:, None]
+    lower = jnp.asarray(rng.uniform(-0.4, -0.1, (2, 4))) * wet
+    upper = jnp.asarray(rng.uniform(-0.4, -0.1, (2, 4))) * wet
+    diagonal = (1.0 - lower - upper) * wet
+    rhs = jnp.asarray(rng.uniform(-1.0, 1.0, (2, 4))) * wet
+
+    def loss(d, b):
+        x = _nemo_ordered_solve(lower, d, upper, b)
+        return jnp.sum(jnp.where(wet > 0.5, x, 0.0) ** 2)
+
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1)))(diagonal, rhs)
+    for g in grads:
+        assert np.all(np.isfinite(np.asarray(g)))
+
+    # Wet column: VJP/JVP equal the unguarded dense solve's to rounding (1e-12).
+    def dense(d, b):
+        a = jnp.diag(d[0]) + jnp.diag(lower[0, 1:], -1) + jnp.diag(upper[0, :-1], 1)
+        return jnp.sum(jnp.linalg.solve(a, b[0]) ** 2)
+
+    ref = jax.jit(jax.grad(dense, argnums=(0, 1)))(diagonal, rhs)
+    for g, r in zip(grads, ref):
+        assert np.all(np.asarray(r)[0] != 0.0)
+        np.testing.assert_allclose(np.asarray(g)[0], np.asarray(r)[0], rtol=1.0e-12, atol=0.0)
+    dirs = tuple(jnp.asarray(rng.standard_normal((2, 4))) * wet for _ in range(2))
+    tan = jax.jit(lambda *a: jax.jvp(loss, a[:2], a[2:])[1])(diagonal, rhs, *dirs)
+    tan_ref = jax.jit(lambda *a: jax.jvp(dense, a[:2], a[2:])[1])(diagonal, rhs, *dirs)
+    np.testing.assert_allclose(float(tan), float(tan_ref), rtol=1.0e-12, atol=0.0)
+    np.testing.assert_array_equal(
+        np.asarray(_nemo_ordered_solve(lower, diagonal, upper, rhs))[0],
+        np.asarray(_nemo_ordered_solve(lower[:1], diagonal[:1], upper[:1], rhs[:1]))[0])

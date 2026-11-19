@@ -71,7 +71,7 @@ def assess_o1(rows):
 # ---------------------------------------------------------------------------
 # Synthetic coupled-driver setup (benchmark only) + measurement
 # ---------------------------------------------------------------------------
-def _fake_surface_map(path, lat_deg, lon_deg):
+def _fake_surface_map(path, lat_deg, lon_deg, *, vg_air_entry_m):
     """Uniform-loam, all-bare-soil CLM map sized to the requested columns."""
     n = int(np.asarray(lat_deg).size)
     pft = np.zeros((n, 17))
@@ -107,6 +107,7 @@ def _build_cfg(resolution):
         days=1, dataset="analytical", radiation="gray",
         land_mask_path="synthetic.nc",
         use_multilayer_land=True,
+        ml_pipeline=True,
         multilayer_n_layers=6, multilayer_soil_depth=2.5,
         land_surface_scheme="clm_ml",
     )

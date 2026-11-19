@@ -5,7 +5,7 @@ experiment:
   tier: tier1
   complexity: primitive_equation
   extent: idealized
-  maturity: structurally_validated
+  maturity: run_tested
   description: >
     Geostrophic adjustment: an initially-unbalanced meridional temperature
     front (thermal-wind imbalance, started from rest) radiates inertia-gravity

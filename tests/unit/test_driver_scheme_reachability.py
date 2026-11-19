@@ -157,7 +157,9 @@ def test_amip_still_excludes_the_untrained_ml_emulator(amip):
     assert "ml_emulator" not in amip["microphysics"].choices
 
 
-def test_amip_still_excludes_the_crm_only_cloud_scheme(amip):
-    """'resolved' is SAM's CRM convention and raises without explicit
-    q_cloud/q_ice; it is not a C48 GCM scheme."""
-    assert "resolved" not in amip["clouds"].choices
+def test_amip_offers_resolved_clouds_only_for_ifs_cloudsc(amip):
+    """'resolved' (SAM's CRM convention: condensate > 0 is cloud) is offered
+    on AMIP only for IFS CLOUDSC, whose advected cloud fraction it reads (vote
+    VC31); every other microphysics is refused in run_amip's argument check,
+    tested in test_amip_ifs49r1_deck.py."""
+    assert "resolved" in amip["clouds"].choices

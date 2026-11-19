@@ -38,6 +38,7 @@ from __future__ import annotations
 import functools
 import types
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -640,3 +641,82 @@ def test_gather_promotes_to_the_widest_contributed_dtype(layout):
         got = out["x"][peer_probe[0]]
         assert got == pytest.approx(float(peer_probe[0]) + 0.1, abs=0.0,
                                     rel=1e-15)
+
+
+def test_feed_drains_device_work_before_its_first_host_collective(
+        layout, mesh, monkeypatch):
+    """The compiled step's mpi4jax collectives can still be running on an XLA
+    thread when Python reaches the feed; a host collective on the same
+    communicator then cross-matches them (4 nodes: "collective tags 2 and 14
+    do not match", or a hang).  The feed must wait for all queued device work
+    before its first host collective."""
+    events = []
+
+    class _SpyComm(MPI.Intracomm):
+        def allgather(self, obj):
+            events.append("allgather")
+            return super().allgather(obj)
+
+    real_barrier, real_block = jax.effects_barrier, jax.block_until_ready
+
+    def _barrier():
+        events.append("effects_barrier")
+        real_barrier()
+
+    def _block(x):
+        events.append("block_until_ready")
+        return real_block(x)
+
+    monkeypatch.setattr(jax, "effects_barrier", _barrier)
+    monkeypatch.setattr(jax, "block_until_ready", _block)
+    monkeypatch.setattr(MPI, "COMM_WORLD", _SpyComm(MPI.COMM_WORLD))
+
+    dc = _collector()
+    dc.set_cmip_grid_info(grid_type="mpas", grid=mesh, start_year=1979)
+    drv = _fake_driver(dc, layout, _local_with_poisoned_halo(
+        _global_fields(mesh), layout.partition))
+    drv._feed_mpas_cmip_multirank(DAY, dc, layout)
+
+    assert "allgather" in events, "spy never saw the feed's host collective"
+    first = events.index("allgather")
+    assert "effects_barrier" in events[:first], events
+    assert "block_until_ready" in events[:first], events
+
+
+def test_feed_waits_for_its_edge_exchange_before_the_next_host_collective(
+        layout, mesh, monkeypatch):
+    """The feed's own edge exchange is an mpi4jax op dispatched
+    asynchronously; the status allgather after it must not start until the
+    exchange has run, or it can cross-match it on COMM_WORLD."""
+    events = []
+
+    class _SpyComm(MPI.Intracomm):
+        def allgather(self, obj):
+            events.append("allgather")
+            return super().allgather(obj)
+
+    real_barrier = jax.effects_barrier
+    real_exchange = layout.halo_exchange.exchange_edge_field
+
+    def _barrier():
+        events.append("effects_barrier")
+        real_barrier()
+
+    def _exchange(field):
+        events.append("exchange")
+        return real_exchange(field)
+
+    monkeypatch.setattr(jax, "effects_barrier", _barrier)
+    monkeypatch.setattr(MPI, "COMM_WORLD", _SpyComm(MPI.COMM_WORLD))
+    monkeypatch.setattr(layout.halo_exchange, "exchange_edge_field", _exchange)
+
+    dc = _collector()
+    dc.set_cmip_grid_info(grid_type="mpas", grid=mesh, start_year=1979)
+    drv = _fake_driver(dc, layout, _local_with_poisoned_halo(
+        _global_fields(mesh), layout.partition))
+    drv._feed_mpas_cmip_multirank(DAY, dc, layout)
+
+    assert events.count("exchange") == 1, events
+    after = events[events.index("exchange") + 1:]
+    assert "allgather" in after, "spy never saw the post-exchange collective"
+    assert "effects_barrier" in after[:after.index("allgather")], events

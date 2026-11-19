@@ -163,7 +163,8 @@ def test_omip_ncar_matches_aerobulk(oracle):
     out = air_sea_fluxes(
         u10=jnp.asarray(inp["u"]), v10=jnp.asarray(inp["v"]),
         T_air_K=jnp.asarray(inp["t_air"]), q_air=jnp.asarray(inp["q_air"]),
-        T_sfc_K=jnp.asarray(inp["sst"]), slp_Pa=jnp.asarray(inp["slp"]))
+        T_sfc_K=jnp.asarray(inp["sst"]), slp_Pa=jnp.asarray(inp["slp"]),
+        dthv_width=0.0, neutral_width=0.0)   # NEMO's hard Stanton step (#2241)
     allpts = np.ones_like(oracle["W"], dtype=bool)
     # OMIP port keeps NEMO conventions: heat positive-down (= aerobulk),
     # stress = ocean reaction (-aerobulk), evap positive when evaporating
@@ -197,7 +198,12 @@ def test_core_large_yeager_matches_aerobulk_ncar(oracle, heights):
         jnp.asarray(inp["q_air"]), jnp.asarray(oracle["theta_s"]),
         jnp.asarray(oracle["ssq"]), jnp.asarray(rho), z_ref=10.0,
         scheme="large_yeager", n_iter=5,
-        L_latent=jnp.asarray(oracle["L_sst"]), **kw)
+        L_latent=jnp.asarray(oracle["L_sst"]), **kw,
+        # RULE 5 (#2241): oracle comparison at the hard switches (width 0);
+        # the default-width gap is pinned per state in
+        # tests/core/test_aerobulk_ncar_oracle.py.
+        large_yeager_neutral_width=0.0, large_yeager_dthv_width=0.0,
+        large_yeager_cd_cutoff_width=0.0)
     tag = f"ncar_{heights}"
     m = oracle["ly_mask"]
     # legoESM core convention: heat positive-up => compare to -aerobulk.

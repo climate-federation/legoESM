@@ -1,93 +1,62 @@
-"""CLUBB rad-heating ROUTING (MPAS turbulence wrapper path).
+"""No radiative thlp2 source reaches prognostic CLUBB on the MPAS lane.
 
-Covers the routing contract that hands the cached ``PhysicsState.rad_heating``
-to the prognostic-CLUBB turbulence kernel as ``rad_dT_dt``:
-
-  * ``_prognostic_clubb_rad_kwargs`` returns ``{"rad_dT_dt": ...}`` ONLY for
-    prognostic CLUBB (``carry_field == "clubb_moments"``) with a populated
-    cache — reshaped to top-down ``(ncol, nlev)``, cast to the state dtype;
-  * diagnostic CLUBB (carry ``"tke"``) and every non-clubb scheme get ``{}``
-    (no kwarg at all — their kernels do not accept it, byte-identical path);
-  * prognostic CLUBB with an absent/None ``rad_heating`` (or no phys_state)
-    also gets ``{}``.
-
-The PHYSICAL effect of the radiative thlp2 source is covered by the CLUBB
-budget tests; here we pin the plumbing/dispatch, which is factory/trace-time
-(no JAX trace of a column) so it stays cheap, in the style of
-test_clubb_cf_routing.py.
+CAM6 adds CLUBB's radiative thlp2 source only under
+``clubb_cloudtop_cooling`` (``do_cldcool``), default ``.false.``
+(namelist_defaults_cam.xml cesm2_1_rel :1200; clubb_intr.F90 :1935; user
+decision 2026-10-19).  The MPAS turbulence physics_fn must therefore not hand
+the cached ``PhysicsState.rad_heating`` to the kernel, even when it is set.
 """
 
 from __future__ import annotations
 
 import types
 
+import jax
 import jax.numpy as jnp
+import pytest
 
-from legoesm.atmosphere.physics.turbulence.integration import (
-    _prognostic_clubb_rad_kwargs,
-)
+jax.config.update("jax_enable_x64", True)
+
+from legoesm.atmosphere.physics.turbulence import clubb as clubb_mod  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
+    CLUBBConfig, init_clubb_moments, pack_clubb_moments)
+from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.integration import (  # noqa: E402
+    _make_mpas_turbulence)
 
 
-class _FakePhysState:
-    """Minimal PhysicsState-like namespace: only ``rad_heating`` matters."""
+@pytest.fixture(scope="module")
+def mpas_setup():
+    from legoesm.atmosphere.forcing.idealized.held_suarez import (
+        held_suarez_init_mpas)
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    mesh = create_voronoi_mesh(subdivision_level=1, lloyd_iterations=2)
+    sigma = create_sigma_coordinate(8, sigma_top=0.05)
+    state = held_suarez_init_mpas(mesh, sigma, T_init=290.0,
+                                  perturbation_amplitude=0.0)
+    ncell, nlev = state.T.data.shape
+    q_v = jnp.full((ncell, nlev), 0.008, dtype=state.T.data.dtype)
+    return mesh, sigma, state._replace(tracers={"q_v": q_v})
 
-    def __init__(self, rad_heating):
-        self.rad_heating = rad_heating
 
+def test_mpas_lane_does_not_route_rad_heating(mpas_setup, monkeypatch):
+    mesh, sigma, state = mpas_setup
+    ncell, nlev = state.T.data.shape
+    cfg = CLUBBConfig(prognostic=True)
+    seen = []
+    real = clubb_mod.clubb_turbulence_prognostic
 
-class TestRadHeatingRouting:
-    def test_prognostic_clubb_with_rad_heating(self):
-        """(a) prognostic CLUBB + finite cached rad_heating => kwarg passed,
-        reshaped to (ncol, nlev) equal to rad_heating."""
-        nCells, nlev = 4, 7
-        rad = jnp.arange(nCells * nlev, dtype=jnp.float32).reshape(nCells, nlev)
-        kw = _prognostic_clubb_rad_kwargs(
-            "clubb_moments", _FakePhysState(rad), nCells, nlev, jnp.float32)
-        assert set(kw) == {"rad_dT_dt"}
-        got = kw["rad_dT_dt"]
-        assert got.shape == (nCells, nlev)
-        assert got.dtype == jnp.float32
-        assert bool(jnp.array_equal(got, rad))
+    def spy(*a, **k):
+        seen.append(set(k))
+        return real(*a, **k)
 
-    def test_prognostic_clubb_reshapes_flat_cache(self):
-        """The cache may arrive flattened; the kwarg is reshaped top-down."""
-        nCells, nlev = 3, 5
-        flat = jnp.arange(nCells * nlev, dtype=jnp.float32)
-        kw = _prognostic_clubb_rad_kwargs(
-            "clubb_moments", _FakePhysState(flat), nCells, nlev, jnp.float32)
-        assert set(kw) == {"rad_dT_dt"}
-        assert kw["rad_dT_dt"].shape == (nCells, nlev)
-        assert bool(jnp.array_equal(kw["rad_dT_dt"], flat.reshape(nCells, nlev)))
-
-    def test_diagnostic_clubb_no_kwarg(self):
-        """(b) diagnostic CLUBB (carry ``"tke"``) => NO kwarg at all."""
-        rad = jnp.ones((4, 7), dtype=jnp.float32)
-        kw = _prognostic_clubb_rad_kwargs(
-            "tke", _FakePhysState(rad), 4, 7, jnp.float32)
-        assert kw == {}
-
-    def test_prognostic_clubb_rad_heating_none_no_kwarg(self):
-        """(c) prognostic CLUBB but rad_heating None => NO kwarg."""
-        kw = _prognostic_clubb_rad_kwargs(
-            "clubb_moments", _FakePhysState(None), 4, 7, jnp.float32)
-        assert kw == {}
-
-    def test_prognostic_clubb_missing_attr_no_kwarg(self):
-        """A phys_state without the attribute (getattr default None) => {}."""
-        bare = types.SimpleNamespace()  # no rad_heating
-        kw = _prognostic_clubb_rad_kwargs(
-            "clubb_moments", bare, 4, 7, jnp.float32)
-        assert kw == {}
-
-    def test_no_phys_state_no_kwarg(self):
-        """No phys_state at all (one-off physics_fn call) => {}."""
-        kw = _prognostic_clubb_rad_kwargs("clubb_moments", None, 4, 7, jnp.float32)
-        assert kw == {}
-
-    def test_other_schemes_no_kwarg(self):
-        """Every non-clubb carry field stays byte-identical: no kwarg."""
-        rad = jnp.ones((4, 7), dtype=jnp.float32)
-        for carry in ("tke", "qke"):
-            kw = _prognostic_clubb_rad_kwargs(
-                carry, _FakePhysState(rad), 4, 7, jnp.float32)
-            assert kw == {}
+    monkeypatch.setattr(clubb_mod, "clubb_turbulence_prognostic", spy)
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="clubb", clubb=cfg), 300.0)
+    phys_state = types.SimpleNamespace(
+        clubb_moments=pack_clubb_moments(init_clubb_moments(ncell, nlev, cfg)),
+        rad_heating=jnp.full((ncell, nlev), 1.0e-4))
+    fn(state, mesh, sigma, phys_state=phys_state,
+       forcing={"T_sfc": jnp.full((ncell,), 295.0)})
+    assert seen, "the prognostic CLUBB kernel was not called"
+    assert all("rad_dT_dt" not in k for k in seen), seen

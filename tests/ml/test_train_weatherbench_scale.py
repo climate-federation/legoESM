@@ -314,3 +314,21 @@ def test_the_scheme_parameter_mode_is_frozen_on_a_zero_gradient():
     schemes never read the knob — a configuration property, not a transient
     state of the weights."""
     assert _uses_reachability_freeze("physics") is True
+
+
+def test_build_latlon_config_resolves_the_ice_skin_auto():
+    """The WB lat-lon trainer resolves the ice-skin 'auto' once (#2106): on
+    for a radiating lat-lon run, an explicit false wins, junk is refused."""
+    try:
+        from legoesm.training.scale_build import build_latlon_config
+    except ImportError as exc:  # pragma: no cover - env-gated
+        pytest.skip(f"scale_build import needs the full stack ({exc})")
+    cfg = build_scale_config_from_args(["--mode", "physics", "--smoke"])
+    base = {"n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0, "radiation": "gray"}
+    auto = build_latlon_config(cfg, dict(base))
+    assert auto.ice_skin_prognostic is True
+    assert auto.sea_ice_albedo_scheme == "maykut_untersteiner"
+    assert build_latlon_config(
+        cfg, dict(base, ice_skin_prognostic=False)).ice_skin_prognostic is False
+    with pytest.raises(ValueError, match="ice_skin_prognostic"):
+        build_latlon_config(cfg, dict(base, ice_skin_prognostic="yes"))

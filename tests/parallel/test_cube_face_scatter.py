@@ -80,37 +80,3 @@ def test_owned_face_index_validation(grid):
         slice_cubed_sphere_grid(grid, ())  # empty
     with pytest.raises(ValueError):
         slice_cubed_sphere_grid(grid, (5, 6))  # out of range
-
-
-def test_make_rank_local_model_rejects_zero_mean_ps_tendency(grid):
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationConfig,
-        CDGridPrimitiveEquationModel,
-    )
-    from legoesm.grids.vertical import create_sigma_coordinate
-
-    sigma = create_sigma_coordinate(4)
-    cfg = CDGridPrimitiveEquationConfig(zero_mean_ps_tendency=True)
-    model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
-    with pytest.raises(NotImplementedError, match="zero_mean_ps_tendency"):
-        make_rank_local_cube_model(model, _OWNED)
-
-
-def test_make_rank_local_model_slices_and_clears_target(grid):
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationConfig,
-        CDGridPrimitiveEquationModel,
-    )
-    from legoesm.grids.vertical import create_sigma_coordinate
-
-    sigma = create_sigma_coordinate(4)
-    cfg = CDGridPrimitiveEquationConfig(
-        fix_mass=True, anchor_mass_to_initial=True, zero_mean_ps_tendency=False
-    )
-    model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
-    model._target_mass = 12345.0  # pretend a stale full-grid target was cached
-    make_rank_local_cube_model(model, _OWNED)
-    assert model.grid.area.shape[0] == len(_OWNED)
-    assert model.cdgrid.cosa_u.shape[0] == len(_OWNED)
-    assert model.grid.halo_interp_offsets.shape[0] == 6  # kept full
-    assert model._target_mass is None  # recomputed from scattered IC

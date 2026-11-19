@@ -1,0 +1,30 @@
+# name	restart_day	target_day	repo	commit	extra
+# Snow thermal node A/B on the land-stress baseline (user 2026-10-06). Restart:
+# COPY of mv3y_vl checkpoint_day_<restart> only (day 275 = 2001-10-03 00Z,
+# 280 = 2001-10-08 00Z). ON and OFF arms run the SAME frozen tree
+# (wt_snowheat_ab_main = main, re-pinned 2026-10-16) and differ only in the switch.
+# Each ON arm is scored ONLY against the OFF arm with the same restart day.
+sh2_on_a	275	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --land-snow-insulation
+sh2_off_a	275	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --no-land-snow-insulation
+sh2_on_b	280	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --land-snow-insulation
+sh2_off_b	280	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --no-land-snow-insulation
+# 1-day bit-identity gate: explicit switch OFF vs the plain production default
+# on the same tree and restart, and the plain default twice (reproducibility).
+sh2_gate_off	275	276	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --no-land-snow-insulation
+# switch ON for one day: its state must differ from gate_off in a shared entry
+sh2_gate_on	275	276	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --land-snow-insulation
+# switch ON twice: the ON code path must be reproducible too
+sh2_gate_on2	275	276	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --land-snow-insulation
+# ON restart round-trip: continuous 2 days vs 1 day + restart (set up
+# sh2_gate_on_rs with SRC=<ROOT>/sh2_gate_on after sh2_gate_on finished; see bundle.sbatch)
+sh2_gate_on_2d	275	277	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --land-snow-insulation
+sh2_gate_on_rs	276	277	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --land-snow-insulation
+# OFF restart round-trip: tells a snow-layer restart defect from a model one
+sh2_gate_off_2d	275	277	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --no-land-snow-insulation
+sh2_gate_off_rs	276	277	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --no-land-snow-insulation
+# ON restart from sh2_gate_on's day 276 with T_snow -2 K on snow columns
+# (perturb_snow.py): must differ from sh2_gate_on_rs, so the saved layer is read
+sh2_gate_on_pert	276	277	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD	 --land-snow-insulation
+sh2_gate_base	275	276	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD
+# base twice: proves the gate can say IDENTICAL at all (run-to-run determinism)
+sh2_gate_base2	275	276	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_ab_main	HEAD

@@ -1,0 +1,14 @@
+{
+ "record": "/burg/glab/users/pg2328/oracle_audit/tier4/dyn/ctl_on/t4_adv_record_<rank>.bin (32 ranks, assembled by tier4/dyn/t4lib.assemble)",
+ "recorder": "nemo_5.0.1/cfgs/ORCA1_T4DYN MY_SRC hooks in icedyn_adv_pra",
+ "oracle": "NEMO 5.0.1 SI3 ORCA1 ice_dyn_adv_pra, kt 17281, icycle 1, nn_hls 2, F-pivot",
+ "band_rows": "global extended j 321..334 of 335 (last 2 = north fold halo)",
+ "interior_rows": 10,
+ "tracers": [
+  "v_i",
+  "a_i"
+ ],
+ "legoesm_main": "efa650f75e466a91a7d7c08308d7f3820948b814",
+ "extractor": "/burg/glab/users/pg2328/oracle_audit/si3wire/w1a/make_fixture.py",
+ "npz_sha256": "344abf0e3ec2202dcaa542f2a0731fdfe2208e867c21dfcb6f65999f1471100f"
+}

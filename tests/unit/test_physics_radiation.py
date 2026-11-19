@@ -521,7 +521,7 @@ class TestSfcEmissivityOverrideThreading:
             z3 = jnp.zeros((ncol, nlev + 1))
             return SimpleNamespace(
                 heating_rate=z2, sw_flux_down=z3, sw_flux_up=z3,
-                lw_flux_down=z3, lw_flux_up=z3,
+                lw_flux_down=z3, lw_flux_up=z3, toa_insolation=None,
             )
 
         T, p_s, q_v, sst, sic, lat, lon = args

@@ -20,6 +20,7 @@ aimip_turbulence: "louis"
 aimip_gwd: "mcfarlane"
 aimip_cloud: "xu_randall"
 aimip_microphysics: "sundqvist"  # all 5 categories ON (no "none"): micro=off
+aimip_sundqvist_auto_rate: 1.5e-4   # GFS prautco (declared); a trained run starts at 5.95e-4 (5% edge pull-in)
                                  # wrecks radiation (OLR rmse 34->80). Matches
                                  # the stage1/ace2 sweep baseline.
 # The classical variant runs the FULL physics suite with RRTMGP

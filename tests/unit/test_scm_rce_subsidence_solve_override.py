@@ -19,7 +19,7 @@ import scripts.run.run_scm_rce_campaign as campaign
 # accept the override.
 MASS_FLUX_FAMILY = (
     "mass_flux", "edmf", "zhang_mcfarlane", "kain_fritsch",
-    "tiedtke", "bechtold",
+    "bechtold",
 )
 # Schemes the override CANNOT reach, for two different structural reasons --
 # both must be REPORTED, never silently skipped:
@@ -27,7 +27,9 @@ MASS_FLUX_FAMILY = (
 #     compensating-subsidence mass-flux kernel at all;
 #   * emanuel -- its SHIPPED path (use_genuine_mixing=True) is a
 #     buoyancy-sorting mixing matrix that never calls the shared kernel.
-NON_MASS_FLUX = ("sbm", "dca", "kuo", "emanuel")
+#   * tiedtke -- the WRF port carries its own flux-form transport
+#     (cuflx/cudtdq), no shared-kernel selector.
+NON_MASS_FLUX = ("sbm", "dca", "kuo", "emanuel", "tiedtke")
 
 ALL_SCHEMES = MASS_FLUX_FAMILY + NON_MASS_FLUX
 
@@ -89,14 +91,14 @@ def test_unknown_mode_raises():
     """Dispatch-hardening: a typo must not silently produce the as-shipped arm
     and get reported as the matched-kernel one."""
     with pytest.raises(ValueError, match="unknown mode"):
-        campaign.apply_subsidence_solve_override(_cfg("tiedtke"), "implicitflux")
+        campaign.apply_subsidence_solve_override(_cfg("bechtold"), "implicitflux")
 
 
 def test_override_is_non_vacuous_for_the_shipped_advective_schemes():
     """The four schemes threaded in this campaign genuinely START advective, so
     forcing implicit_flux is a real change (not a no-op that would make the
     primary/secondary tables identical)."""
-    for scheme in ("tiedtke", "zhang_mcfarlane", "mass_flux"):
+    for scheme in ("zhang_mcfarlane", "mass_flux"):
         cfg = _cfg(scheme)
         _c, _s, before = campaign._active_subconfig(cfg, "convection")
         assert before.subsidence_solve == "advective", (

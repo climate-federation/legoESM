@@ -67,7 +67,8 @@ def _write_spatially_varying_surfdata(path, nlat=8, nlon=16, nlev=7):
 
 def _fake_driver(grid, f_land, start_day=196.0, start_year=2015.0):
     """Minimal duck-typed ModelDriver for calling _surfdata_land_albedo unbound."""
-    return SimpleNamespace(grid=grid, _f_land=f_land,
+    return SimpleNamespace(grid=grid, _surface_data_grid=lambda: grid,
+                           _f_land=f_land,
                            config=SimpleNamespace(start_day=start_day,
                                                   start_year=start_year))
 
@@ -129,7 +130,8 @@ def test_surfdata_albedo_column_grid_mismatch_raises(tmp_path):
         lat2d=grid.lat2d, lon2d=grid.lon2d, grid_area=grid.grid_area,
         grid_lat=jnp.zeros((4, 4)),
     )
-    bad = SimpleNamespace(grid=bad_grid, _f_land=jnp.ones((8, 16)),
+    bad = SimpleNamespace(grid=bad_grid, _surface_data_grid=lambda: bad_grid,
+                          _f_land=jnp.ones((8, 16)),
                           config=SimpleNamespace(start_day=196.0))
     with pytest.raises(ValueError, match="column/grid layout mismatch"):
         ModelDriver._surfdata_land_albedo(bad, p, lat_albedo)

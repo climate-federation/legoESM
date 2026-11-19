@@ -111,3 +111,28 @@ def test_larger_conductance_damps_top_response() -> None:
     # and every result finite (bounded).
     assert all(np.isfinite(j) for j in jumps)
     assert jumps[0] > jumps[1] > jumps[2] > jumps[3]
+
+
+def test_returned_robin_flux_closes_the_column_energy() -> None:
+    """``return_robin_flux`` (#2542): the column's heat gain equals
+    dt*(G - robin_flux + Q_geo), for one solve and for sub-steps (step mean);
+    the temperatures are those of the plain call; zeros without a conductance."""
+    grid, hcfg, tcfg, T_old, theta = _setup()
+    G = jnp.array([220.0])
+    lam = jnp.array([40.0])
+    dt = 1800.0
+    C = compute_heat_capacity(theta, hcfg, tcfg) * grid.dz
+    for n_sub in (1, 3):
+        T_new, robin = solve_soil_thermal(
+            T_old, theta, grid, hcfg, tcfg, G, dt, surface_conductance=lam,
+            n_substeps=n_sub, return_robin_flux=True)
+        np.testing.assert_array_equal(np.asarray(T_new), np.asarray(solve_soil_thermal(
+            T_old, theta, grid, hcfg, tcfg, G, dt, surface_conductance=lam,
+            n_substeps=n_sub)))
+        assert float(robin[0]) > 1.0                       # the skin warmed
+        gain = np.asarray(jnp.sum(C * (T_new - T_old), axis=-1)) / dt
+        np.testing.assert_allclose(
+            gain, np.asarray(G - robin) + tcfg.Q_geothermal, rtol=0, atol=1e-8)
+    _, zero = solve_soil_thermal(T_old, theta, grid, hcfg, tcfg, G, dt,
+                                 return_robin_flux=True)
+    np.testing.assert_array_equal(np.asarray(zero), np.zeros(1))

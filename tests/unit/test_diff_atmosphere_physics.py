@@ -22,6 +22,26 @@ from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 
 
+def _micro_call(micro_fn, s, grid, sigma):
+    """Call a hydrostatic microphysics adapter; a carry-writing scheme
+    (Sundqvist's gscond) gets a fresh zero carry and its tendencies are
+    returned."""
+    if not getattr(micro_fn, "_writes_phys_state", False):
+        return micro_fn(s, grid, sigma)
+    from types import SimpleNamespace
+    shape = s.T.data.shape
+    ncol = 1
+    for n in shape[:-1]:
+        ncol *= int(n)
+    # previous-step state 1 % drier: a moistening other-process forcing, so
+    # gscond condenses and its tendencies depend on q_v
+    q = jax.lax.stop_gradient(s.tracers["q_v"].data).reshape(ncol, shape[-1])
+    ps = SimpleNamespace(zc_T_prev=s.T.data.reshape(ncol, shape[-1]),
+                         zc_q_v_prev=0.99 * q,
+                         zc_p_s_prev=s.p_s.data.reshape(ncol))
+    return micro_fn(s, grid, sigma, phys_state=ps)[0]
+
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -243,7 +263,9 @@ class TestConvectionGrad:
             "zhang_mcfarlane",
             "kain_fritsch",
             "emanuel",
-            "tiedtke",
+            # tiedtke: the WRF port's gradients are certified in
+            # tests/atmosphere/test_tiedtke_wrf_oracle.py (its bridge needs
+            # the dynamics / lagged turbulence carries this harness lacks)
             "bechtold",
         ],
     )
@@ -280,9 +302,22 @@ class TestConvectionGrad:
                 v=state.v.replace(data=v_data),
             )
 
+        # GFDL moist_conv (dca) adjusts only supersaturated levels, so the
+        # shared 80 % RH state leaves it correctly OFF; scale the humidity to
+        # 1.05x the fixture's saturation mixing ratio so moist_conv acts.
+        if scheme == "dca":
+            q_v = state.tracers["q_v"]
+            state = state._replace(tracers={
+                **state.tracers, "q_v": q_v.replace(data=q_v.data * (1.05 / 0.8))})
+
+        ps = None
+        if scheme == "zhang_mcfarlane":  # ZM needs the carried pblh: CAM cold start
+            from tests._zm_cold_start import cold_phys_state
+            ps = cold_phys_state(state.T.data)
+
         def loss(T_data):
             s = state._replace(T=state.T.replace(data=T_data))
-            tend, _ = conv_fn(s, self.grid, self.sigma)
+            tend, _ = conv_fn(s, self.grid, self.sigma, phys_state=ps)
             return jnp.sum(tend.dT_dt.data ** 2)
 
         grad = jax.grad(loss)(state.T.data)
@@ -320,8 +355,17 @@ class TestTurbulenceGrad:
         from legoesm.atmosphere.physics.turbulence.integration import make_turbulence_physics
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
-        config = TurbulenceConfig(scheme=scheme)
+        from legoesm.atmosphere.physics.combined import PhysicsConfig
+        from legoesm.atmosphere.physics.physics_state import init_physics_state
+        from legoesm.atmosphere.physics.turbulence.config import YSUConfig
+        # ysu carries the WRF surface-layer state and needs the land/water flag
+        # on a grid without a land fraction
+        config = (TurbulenceConfig(scheme=scheme, ysu=YSUConfig(surface_type="land"))
+                  if scheme == "ysu" else TurbulenceConfig(scheme=scheme))
         turb_fn = make_turbulence_physics(config, model_type="hydrostatic", dt=300.0)
+        ps = (init_physics_state(self.state.T.data.size // self.sigma.n_levels,
+                                 self.sigma.n_levels, PhysicsConfig(turbulence=config))
+              if scheme == "ysu" else None)
         # Use a super-adiabatic (convectively unstable) temperature profile
         # so every turbulence scheme is genuinely active.  The default
         # near-isothermal state is stable in θ almost everywhere, where the
@@ -336,7 +380,7 @@ class TestTurbulenceGrad:
 
         def loss(T_data):
             s = state._replace(T=state.T.replace(data=T_data))
-            tend, _ = turb_fn(s, self.grid, self.sigma)
+            tend, _ = turb_fn(s, self.grid, self.sigma, phys_state=ps)
             return jnp.sum(tend.dT_dt.data ** 2)
 
         grad = jax.grad(loss)(state.T.data)
@@ -346,6 +390,19 @@ class TestTurbulenceGrad:
 # ============================================================================
 # 2e  Microphysics
 # ============================================================================
+
+def _full_registry_for(scheme, state):
+    """The WRF Thompson port needs the full moisture registry (votes W1a/Y3a):
+    zeros for the absent species, the values the bridge used to zero-fill."""
+    if scheme != "thompson":
+        return state
+    from legoesm.core.tracers import make_full_moisture_registry
+    qv0 = state.tracers["q_v"]
+    return state._replace(tracers={
+        **{n: qv0.replace(data=jnp.zeros_like(qv0.data), name=n)
+           for n in make_full_moisture_registry().names},
+        **state.tracers})
+
 
 class TestMicrophysicsGrad:
 
@@ -364,16 +421,17 @@ class TestMicrophysicsGrad:
     )
     def test_grad_wrt_qv(self, scheme):
         from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig, MorrisonConfig)
 
-        config = MicrophysicsConfig(scheme=scheme)
+        config = MicrophysicsConfig(scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
         micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
-        state = self.state
+        state = _full_registry_for(scheme, self.state)
 
         def loss(qv_data):
             tracers_new = {**state.tracers, "q_v": state.tracers["q_v"].replace(data=qv_data)}
             s = state._replace(tracers=tracers_new)
-            tend = micro_fn(s, self.grid, self.sigma)
+            tend = _micro_call(micro_fn, s, self.grid, self.sigma)
             return jnp.sum(tend.dT_dt.data ** 2)
 
         grad = jax.grad(loss)(state.tracers["q_v"].data)
@@ -393,11 +451,12 @@ class TestMicrophysicsGrad:
         loss must include tracer tendencies, not just ``dT_dt``.
         """
         from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig, MorrisonConfig)
 
-        config = MicrophysicsConfig(scheme=scheme)
+        config = MicrophysicsConfig(scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
         micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
-        state = self.state
+        state = _full_registry_for(scheme, self.state)
         qr_zero = jnp.zeros_like(state.tracers["q_r"].data)
 
         def loss(qr_data):
@@ -406,7 +465,7 @@ class TestMicrophysicsGrad:
                 "q_r": state.tracers["q_r"].replace(data=qr_data),
             }
             s = state._replace(tracers=tracers_new)
-            tend = micro_fn(s, self.grid, self.sigma)
+            tend = _micro_call(micro_fn, s, self.grid, self.sigma)
             # Sum across ALL output channels so fall-speed bugs in
             # dq_r/dq_i/dq_s/dq_g are not silently masked by a
             # dT_dt-only loss.
@@ -451,11 +510,12 @@ class TestMicrophysicsGrad:
             actually wired through and the test isn't ineffective.
         """
         from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig, MorrisonConfig)
 
-        config = MicrophysicsConfig(scheme=scheme)
+        config = MicrophysicsConfig(scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
         micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
-        state = self.state
+        state = _full_registry_for(scheme, self.state)
         zero_field = jnp.zeros_like(state.tracers["q_v"].data)
 
         # Explicitly add ice-phase tracers to the state so the override
@@ -480,7 +540,7 @@ class TestMicrophysicsGrad:
                 "q_i": state_with_ice.tracers["q_i"].replace(data=qi_data),
             }
             s = state_with_ice._replace(tracers=tracers_new)
-            tend = micro_fn(s, self.grid, self.sigma)
+            tend = _micro_call(micro_fn, s, self.grid, self.sigma)
             total = jnp.sum(tend.dT_dt.data ** 2)
             if tend.tracer_tendencies is not None:
                 for fld in tend.tracer_tendencies.values():
@@ -528,7 +588,8 @@ class TestCombinedPhysicsGrad:
         from legoesm.atmosphere.physics.radiation.config import RadiationConfig
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig, MorrisonConfig)
 
         n, nlev = 4, 5
         self.grid = create_cubed_sphere(n)

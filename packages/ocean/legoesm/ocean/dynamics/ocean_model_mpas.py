@@ -50,6 +50,9 @@ from legoesm.ocean.conservation_mpas import mpas_ocean_conservation_fixer
 from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_eta_tendency
 from legoesm.core.operators_voronoi import tangential_velocity_3d
 from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+from legoesm.ocean.physics.convection.enhanced_diffusion import (
+    apply_nemo_evd, resolve_evd_composition,
+)
 from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
     gm_redi_tracer_tendency_mpas,
@@ -324,6 +327,14 @@ class MPASOceanModel(IntegrationMixin):
                     "(build it with nemo_runoff_depth_map, which floors at 1 m) "
                     "— zero/negative cells would silently drop the runoff "
                     "dilution.")
+        _rdsl = getattr(self.config, "runoff_depth_spread_levels", None)
+        if _rdsl is not None:
+            import numpy as _np
+            _rdsl_np = _np.asarray(_rdsl)
+            if (not _np.issubdtype(_rdsl_np.dtype, _np.integer)) or (_rdsl_np < 1).any():
+                raise ValueError(
+                    "runoff_depth_spread_levels must be an integer map >= 1 "
+                    "(build it with nemo_runoff_level_count).")
         # Reserved distributed-PCG knobs (single-rank stock CG today; see
         # barotropic_implicit_mpas.py Step-4 TODO).  Validate so the
         # schema stays consistent with the lat-lon path.
@@ -695,8 +706,34 @@ class MPASOceanModel(IntegrationMixin):
                     _tke_new = None
                 K_v_cell = K_v_cell + K_v_tke_cells
 
+            # --- NEMO zdfevd (evd_composition="nemo_replace"): replaces the
+            # closure K where bn2 <= threshold, before IWM is added below
+            # (zdfphy.F90:323 then :336). Shared kernel, no lane numerics.
+            if (self._conv_config is not None
+                    and resolve_evd_composition(self._conv_config)
+                    == "nemo_replace"):
+                from legoesm.ocean.vertical import compute_ocean_jacobian
+                from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
+                    bn2_ladder_kwargs,
+                )
+                # NEMO wmask: wet interfaces of wet cells (full-depth
+                # coordinates carry no bottom_level: every interface is wet).
+                _wet_c = mask[:, None] > 0.5
+                _active_evd = (_wet_c if _active_half_c is None
+                               else _active_half_c & _wet_c)
+                _J_evd = compute_ocean_jacobian(
+                    state.eta.data, state.H_bathy.data, z_coord)
+                _J_evd = jnp.where(mask > 0.5, _J_evd, 1.0)
+                K_v_cell = apply_nemo_evd(
+                    K_v_cell, self._conv_config,
+                    T=state.T.data, S=state.S.data, dz_ref=z_coord.dz_ref,
+                    jacobian=_J_evd,
+                    active=jnp.broadcast_to(_active_evd, K_v_cell.shape),
+                    g=self._constants_config.g,
+                    rho_ref=self._constants_config.rho_0,
+                    **bn2_ladder_kwargs(self._conv_config, z_coord, state))
             # --- Convective-adjustment K profile (where N²<0) ---
-            if self._conv_config is not None:
+            elif self._conv_config is not None:
                 from legoesm.ocean.eos import compute_ocean_rho
                 from legoesm.ocean.vertical import compute_ocean_jacobian
                 _J_conv = compute_ocean_jacobian(
@@ -858,9 +895,11 @@ class MPASOceanModel(IntegrationMixin):
         c1_m = mesh.cellsOnEdge[0]
         c2_m = mesh.cellsOnEdge[1]
         T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m,
-                                     mesh.edgesOnCell, mesh.nEdgesOnCell)
+                                     mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                     band_capacity=config.land_fill_band_capacity)
         S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m,
-                                     mesh.edgesOnCell, mesh.nEdgesOnCell)
+                                     mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                     band_capacity=config.land_fill_band_capacity)
 
         # 2a (solve). Implicit vertical tracer diffusion (backward-Euler),
         # BEFORE GM/Redi and advection, on per-cell layer thickness (partial
@@ -1229,7 +1268,8 @@ class MPASOceanModel(IntegrationMixin):
             )
             _F_entry, _entry_heat = real_freshwater_entry(
                 freshwater, F_slow_eta, h_k_new, mask, config.rho_0,
-                T_corrected, runoff_spread_m=resolve_runoff_spread_arg(config))
+                T_corrected, runoff_spread_m=resolve_runoff_spread_arg(config),
+                runoff_t_floor_sharpness=config.runoff_temperature_floor_sharpness)
             _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
                 F_slow_eta, S_corrected, T_corrected, h_k_new, mask,
                 F_entry=_F_entry, entry_heat=_entry_heat)

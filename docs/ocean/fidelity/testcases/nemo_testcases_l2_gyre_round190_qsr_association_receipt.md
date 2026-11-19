@@ -1,5 +1,15 @@
 # Round 190 receipt — production QSR observer association
 
+> **RETRACTED in part (2026-10-15, high-resolution round 9).**  The
+> `10,200/18,000`-word Kbb QSR split below was not merely an observer
+> classification artifact.  It exposed the production false solar source
+> removed in high-resolution round 8: the shared physics call deposited a
+> Kbb field with the wrong stretch and WS-RK3 later subtracted a different,
+> live-stretch field.  The old claim that no executable model statement was
+> implicated is withdrawn.  The measured NEMO comparison and the exact
+> statement that killed the discrepancy are recorded in
+> `nemo_testcases_l2_gyre_hires_round9_receipt.md`.
+
 **Status: HELD.**  Round 189's `9,679/18,000`-cell,
 `2.467770444880557e-06 K` actual-row/direct-rebuild split reproduces exactly,
 but it is an **observer classification artifact**, not a model shortwave

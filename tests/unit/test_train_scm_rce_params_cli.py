@@ -216,11 +216,11 @@ def test_subsidence_override_is_applied_to_the_built_config():
     cfg, _winners, _note, status = trainer._build_recommended_base_config(
         _recommended(),
         bechtold_policy="auto",
-        convection="tiedtke",
+        convection="mass_flux",
         subsidence_solve="implicit_flux",
     )
-    assert status == "forced:tiedtke=implicit_flux"
-    assert cfg.convection.tiedtke.subsidence_solve == "implicit_flux"
+    assert status == "forced:mass_flux=implicit_flux"
+    assert cfg.convection.mass_flux.subsidence_solve == "implicit_flux"
 
 
 def test_subsidence_override_reports_not_applicable_instead_of_silently_skipping():
@@ -253,7 +253,6 @@ def test_unknown_subsidence_mode_raises_from_the_shared_selector():
     "scheme,expected_key",
     [
         ("sbm", "atm.conv.SBMConfig"),
-        ("tiedtke", "atm.conv.TiedtkeConfig"),
         ("bechtold", "atm.conv.BechtoldConfig"),
         ("emanuel", "atm.conv.EmanuelConfig"),
     ],

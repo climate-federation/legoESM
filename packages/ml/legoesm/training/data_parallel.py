@@ -396,7 +396,9 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
 def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                                     local_samples, n_epochs, num_processes, *,
                                     comm=None, on_epoch=None, start_epoch=0,
-                                    place=None):
+                                    place=None, on_step=None,
+                                    start_step=0, start_losses=(),
+                                    start_skipped=0):
     """Per-rank loop over this rank's ERA5 shard, gradients averaged across ranks
     each step. All ranks run lockstep (balanced shards from ``shard_samples`` with
     ``drop_remainder``), so the per-step ``allreduce`` never deadlocks. Rank-0
@@ -415,10 +417,23 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
 
     ``place(sample)`` stages one host sample on the device(s); default
     ``jax.device_put``.  A column-sharded run passes its mesh placement here.
+
+    Mid-epoch resume: ``start_step`` skips that many samples of epoch
+    ``start_epoch`` (the sample order is fixed), seeding its running mean with
+    ``start_losses`` and its skip count with ``start_skipped``.
+    ``on_step(epoch, n_done, losses, n_skipped, params, opt_state)`` runs after
+    every step on every rank and holds what such a resume needs.
     """
     if not 0 <= start_epoch <= n_epochs:
         raise ValueError(
             f"start_epoch={start_epoch} outside [0, n_epochs={n_epochs}]")
+    if not 0 <= start_step < max(1, len(local_samples)):
+        raise ValueError(
+            f"start_step={start_step} outside [0, {len(local_samples)})")
+    if start_step and len(start_losses) + start_skipped != start_step:
+        raise ValueError(
+            f"start_step={start_step} but {len(start_losses)} losses + "
+            f"{start_skipped} skipped were carried")
     import jax
 
     # #1364: ONE trace/compile for the whole run. Hoisted above BOTH loops --
@@ -431,9 +446,12 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
 
     history = []
     for epoch in range(start_epoch, n_epochs):
-        losses = []
-        n_skipped = 0
+        first = epoch == start_epoch and start_step > 0
+        losses = list(start_losses) if first else []
+        n_skipped = start_skipped if first else 0
         for i_step, sample in enumerate(local_samples):
+            if first and i_step < start_step:
+                continue
             import time as _time
             _t0 = _time.perf_counter()
             # #1286 fix A: samples are kept HOST-resident (numpy leaves) so the
@@ -458,6 +476,8 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                 "epoch %d step %d/%d loss=%.6g %.1f s", epoch, i_step + 1,
                 len(local_samples), float(loss), _time.perf_counter() - _t0)
             n_steps_done += 1
+            if on_step is not None:
+                on_step(epoch, i_step + 1, losses, n_skipped, params, opt_state)
             # #1364 retrace guard: with fixed-shape samples the rollout must be
             # traced exactly once for the whole run. More than that means a
             # per-sample leaf is going STATIC under filter_jit (a bare Python

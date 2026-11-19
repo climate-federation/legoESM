@@ -142,6 +142,7 @@ def main():
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams,
+        aimip_declared_knobs,
         make_aimip_classical_spectral_physics,
     )
     from legoesm.training.neural_gcm_spectral import (
@@ -167,12 +168,15 @@ def main():
         "allow_unfilled_families": True,
     }
     logger.info(f"[{args.label}] schemes = {schemes}")
+    from legoesm.training.aimip_spatial import grid_with_land_fraction
+    grid = grid_with_land_fraction(grid)
 
     payload = {"label": args.label, "schemes": dict(schemes)}
     t0 = time.time()
     try:
         # ---- Train ----
-        params = AIMIPClassicalParams.from_defaults()
+        params = AIMIPClassicalParams.from_defaults(
+            declared=aimip_declared_knobs(base))
         train_ic, train_targ, _ic_times = load_training_data(
             spec_cfg, grid, sigma, cache_dir, windows=spec_cfg.windows,
             host_resident=True,   # non-chunked full-dataset load (#1155)

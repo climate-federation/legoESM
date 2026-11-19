@@ -167,7 +167,13 @@ def _build_surface_scheme(args: argparse.Namespace):
     if name == "simple_seb":
         return SimpleSEBConfig()
     if name == "two_leaf":
-        return TwoLeafCanopyConfig()
+        # A namespace saved before the flag existed carries no value: use the
+        # scheme's own default (codex + GLM vote, author dissenting).
+        return TwoLeafCanopyConfig(solve_group=getattr(
+            args, "land_canopy_solve_group",
+            TwoLeafCanopyConfig._field_defaults["solve_group"]),
+            sw_scheme=getattr(args, "land_canopy_sw_scheme",
+                              TwoLeafCanopyConfig._field_defaults["sw_scheme"])).validate()
     if name == "clm_ml":
         from legoesm.land.canopy.config import CLMMLCanopyConfig
         cfg = CLMMLCanopyConfig()
@@ -730,6 +736,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "upstream design value). num_ml_steps is derived from it, "
                         "so the canopy air budget stays at its design sub-step "
                         "whatever host --dt is used.")
+    p.add_argument("--land-canopy-solve-group", type=int, default=0,
+                   dest="land_canopy_solve_group",
+                   help="Two-leaf canopy: columns per batch of the Newton solve, "
+                        "0 = one batch per GPU (the AMIP production value). "
+                        "Read only with --land-surface-scheme two_leaf.")
+    p.add_argument("--land-canopy-sw-scheme", choices=("ryu", "two_stream"), default="ryu",
+                   dest="land_canopy_sw_scheme",
+                   help="Two-leaf canopy shortwave partition: ryu (default, Ryu 2011 "
+                        "closed forms) or two_stream (Sellers two-stream, CLM5 per-PFT "
+                        "leaf optics; needs per-column leaf optics, which only the "
+                        "EC-site driver builds today). Read only with "
+                        "--land-surface-scheme two_leaf.")
     p.add_argument("--output", default="lmip_output",
                    help="Output directory")
     p.add_argument("--checkpoint-days", type=int, default=100,
@@ -903,10 +921,20 @@ def main() -> None:
     # Run manifest (failed write aborts the run).  Forcing is synthetic, so the
     # resolved land config + every CLI control define the experiment.
     from legoesm.driver.restart import (
+        collective_version_drift_gate,
         dataset_provenance_entry,
         record_final_state_digest,
+        restart_version_drift,
         write_run_manifest_on_root,
     )
+    # Continuing from a restart needs the code that wrote it (its manifest
+    # sits beside it).  Checked BEFORE this run writes its own manifest, which
+    # would otherwise sit beside a restart copied into a fresh directory.
+    if args.restart_from is not None:
+        _restart = Path(args.restart_from)
+        collective_version_drift_gate(
+            lambda: restart_version_drift(_restart, [_restart.parent]),
+            f"restart {_restart}")
     manifest_path = write_run_manifest_on_root(
         out_dir,
         {"runner": "run_lmip", "run_config": run_config._asdict(),

@@ -14,9 +14,12 @@ Distribution convention (oracle ``FAST_SBM`` QC/QNC diagnostics):
 
     f_k    = size-distribution value at bin k, number per (volume x mass),
              SI ``[m^-3 kg^-1]`` (oracle CGS: ``cm^-3 g^-1``)
-    dm_k   = 3 COL m_k = ln(2) m_k   exact mass width of a doubling grid,
-             where COL = ln(2)/3 = 0.23105... is the oracle's log-radius
-             increment (``DOUBLE PRECISION, PARAMETER :: COL = 0.23105``)
+    dm_k   = 3 COL m_k               mass width of a doubling grid, with
+             the oracle's literal COL = 0.23105 (``DOUBLE PRECISION,
+             PARAMETER :: COL = 0.23105``, l. 108; ln(2)/3 = 0.2310490...)
+             — the value every oracle moment/quadrature uses. The kernel
+             and Courant tables use the exact ``DLNR = ln(2)/3``
+             (``Kernals_KS``/``courant_bott_KS``: ``dlog(2.d0)/3``).
     number density ``[m^-3]``    = sum_k f_k dm_k
     mass density   ``[kg m^-3]`` = sum_k f_k m_k dm_k
 
@@ -34,12 +37,14 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.sdm.init import lognormal_cdf
 
-# Oracle log-radius increment d(ln r) = ln(2)/3 (mass doubles every bin,
-# radius doubles every 3 bins). Exact value, not the oracle's 0.23105 rounding.
-COL = math.log(2.0) / 3.0
+# Oracle log-radius increment used in every moment/quadrature
+# (module_mp_fast_sbm.F l. 108 ``COL = 0.23105``, passed to ONECOND1, FREEZ,
+# J_W_MELT, JERTIMESC_KS ...): the oracle's literal, so the port reproduces it.
+COL = 0.23105
 
-# ln(2) = 3*COL — the exact mass-bin quadrature width factor (dm_k = ln2 * m_k).
-_LN2 = math.log(2.0)
+# Exact d(ln r) = ln(2)/3 (mass doubles every bin, radius every 3 bins): the
+# oracle's ``dlnr = dlog(2.0d0)/(3.0d0*scal)`` in Kernals_KS / courant_bott_KS.
+DLNR = math.log(2.0) / 3.0
 
 # (4/3)π — sphere volume prefactor (pure geometry).
 _FOUR_THIRDS_PI = 4.0 / 3.0 * math.pi
@@ -97,12 +102,12 @@ def radius_from_mass(mass: jax.Array, rho: float = constants.rho_water) -> jax.A
 
 
 def bin_mass_widths(masses: jax.Array) -> jax.Array:
-    """Quadrature mass width ``dm_k = 3 COL m_k = ln(2) m_k`` [kg].
+    """Quadrature mass width ``dm_k = 3 COL m_k`` [kg] (oracle COL = 0.23105).
 
     This is the oracle's ``dm = 3*col*xl(kr)`` — the midpoint rule in ln(m)
-    (d ln m = ln 2 per bin), used for every spectral moment.
+    (d ln m ≈ ln 2 per bin), used for every spectral moment.
     """
-    return _LN2 * masses
+    return 3.0 * COL * masses
 
 
 def number_density(f: jax.Array, masses: jax.Array) -> jax.Array:

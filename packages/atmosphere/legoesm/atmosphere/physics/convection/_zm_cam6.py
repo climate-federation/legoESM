@@ -21,24 +21,42 @@ Departures from the oracle (all documented, measured where numeric):
 * ``ientropy`` Brent inversion (data-dependent iteration count) is replaced
   by the fixed-iteration Newton solve of ``_zm_dilute.invert_entropy``
   (converges to the same root; AD-safe).
-* Saturation: CAM ``qsat_water`` (Goff-Gratch) / ``qsat`` (mixed phase)
-  return the saturation SPECIFIC humidity ``ε·e/(p − (1−ε)·e)``
-  (``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``); the port uses the shared
-  ``legoesm.thermo.saturation_specific_humidity`` (same expression over the
-  shared Tetens curve, smooth cap) per CLAUDE.md.  The curve difference is
-  measured in ``tests/atmosphere/hydrostatic/unit/test_zm_cam6_oracle.py``.
+* Saturation: the plume (``qsat_hPa`` -> CAM ``qsat_water``, zm_conv.F90:
+  4702-4716) is Goff-Gratch over water with CAM's ``wv_sat_svp_to_qsat``
+  (``legoesm.thermo.saturation_specific_humidity_goff_gratch``; its q = 1
+  cap is smooth by default, RULE 5).
+  ``zm_conv_evap`` uses CAM's own ``qsat``
+  (``legoesm.thermo.saturation_specific_humidity_cam_table``): the 1-K table
+  of the Goff-Gratch ``svp_trans`` water->ice blend (0 to -20 degC), linearly
+  interpolated, with CAM's e->q conversion (its clamp and q = 1 cap smooth
+  by default, RULE 5).
 * Constants come from ``legoesm.constants`` (CAM's liquid/vapour heat
   capacities, dry gas constant, epsilon and vapour gas constant differ in
   the third or fourth significant figure).
 * Divisions the Fortran performs only on gathered deep columns are guarded
   (``_safe_div``) so non-deep columns stay finite under reverse-mode AD;
   the guarded branch is never selected on a deep column.
-* The Fortran ``pblt`` needs ``pblh``; when the host cannot supply it the
-  launch-level search is bounded by ``pbl_top_pa`` instead (see
-  ``zm_convr``).
+* The Fortran ``pblt`` needs ``pblh``; every ZM bridge passes the
+  turbulence scheme's lagged ``PhysicsState.pblh`` as CAM does.  A caller
+  without it (``pblh=None``) is refused (see ``zm_convr``).
 * ``limcnv``: CAM fixes the 40 hPa cap from the REFERENCE interface
   pressures once at init; hosts without a reference vertical coordinate
   (``pref_edge=None``) get it from each column's own interfaces instead.
+* Trigger (KNOWN DIFFERENCE, RULE 5): CAM convects where ``cape > capelmt``
+  at full closure mass flux.  ``zm_convr`` scales the closure ``mb`` (so every
+  mb-scaled output) by ``smoothstep_cubic((cape - capelmt)/trigger_width)``:
+  exactly 0 at and below ``capelmt`` (no convection is created there), exactly
+  CAM above ``capelmt + trigger_width``, C1 in ``cape`` at the threshold.
+  ``trigger_width = 0`` is CAM's hard switch.  Inside the band the mass flux
+  is the weight times CAM's.  The path selection on ``ideep`` (log-mean
+  interfaces, closure NaN guard) stays hard; the weight is 0 wherever it is
+  false.  Still hard on traced state: the integer level picks (``mx``,
+  ``lcl``, ``lel``, ``jt``, ``j0``, ``jd``; jumps), ``min(mb, cap)``, and
+  ``max(., 0)`` when ``dadt`` changes sign (a jump from the cap to 0).
+  Measured at the 10 J/kg default: 0 on all 15 compiled-CAM fixture columns
+  (every deep one has CAPE >= 90 J/kg); with capelmt 85, two columns inside
+  the ramp lose 30 % and 47 % of their mass flux (per-case table:
+  tests/atmosphere/test_zm_pblh_oracle.py, ``_GAP_IN_RAMP``).
 * ``closure``: a launch-level vapour pressure ``eb <= 0`` is ``log(0)`` in
   the Fortran; it stays NaN in a deep column and is 0 in a non-deep one
   (masked anyway; keeps the reverse-mode pass finite).
@@ -58,7 +76,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_specific_humidity, saturation_vapor_pressure
+from legoesm.core.smooth import smoothstep_cubic
+from legoesm.thermo import (
+    saturation_specific_humidity_cam_table,
+    saturation_specific_humidity_goff_gratch,
+    saturation_vapor_pressure_goff_gratch,
+)
 from legoesm.atmosphere.physics.convection._zm_dilute import (
     invert_entropy,
     moist_entropy,
@@ -75,6 +98,7 @@ __all__ = (
     "convtran",
     "momtran",
     "q1q2_pjr",
+    "trigger_weight",
     "zm_conv_evap",
     "zm_convr",
 )
@@ -211,14 +235,15 @@ def _scan_levels(body, init, xs, *, descending):
 
 def _qsat_hpa(t, p_hpa):
     """Oracle ``qsat_hPa``: saturation specific humidity at ``p`` in hPa."""
-    return saturation_specific_humidity(t, p_hpa * 100.0)
+    return saturation_specific_humidity_goff_gratch(t, p_hpa * 100.0)
 
 
 def _qst_cldprp(t, p_hpa):
     """``cldprp``'s environment saturation: ``qst = 1`` where ``p - es <= 0``
     (zm_conv.F90:2937-2941; the only qsat call in the oracle with this guard)."""
     p_pa = p_hpa * 100.0
-    return jnp.where(p_pa - saturation_vapor_pressure(t) <= 0.0, 1.0, _qsat_hpa(t, p_hpa))
+    return jnp.where(p_pa - saturation_vapor_pressure_goff_gratch(t) <= 0.0, 1.0,
+                     _qsat_hpa(t, p_hpa))
 
 
 def _div_md_floor(num, md):
@@ -870,6 +895,14 @@ def q1q2_pjr(q, qs, qu, su, du, qhat, shat, dp, mu, md, sd, qd, ql, dsubcld,
 # ---------------------------------------------------------------------------
 # zm_convr (zm_conv.F90:142-1393)
 # ---------------------------------------------------------------------------
+def trigger_weight(cape, capelmt, ideep, width):
+    """RULE 5 trigger weight: ``smoothstep_cubic((cape - capelmt)/width)`` on
+    deep columns, 0 elsewhere.  The ramp's input is masked first so a NaN
+    CAPE in a non-deep column cannot reach the reverse pass."""
+    x = jnp.where(ideep, (cape - capelmt) / width, 0.0)
+    return jnp.where(ideep, smoothstep_cubic(x), 0.0)
+
+
 class ZMConvr(NamedTuple):
     dqdt: jax.Array      # kg/kg/s
     heat: jax.Array      # J/kg/s
@@ -879,6 +912,7 @@ class ZMConvr(NamedTuple):
     cape: jax.Array      # J/kg
     mb: jax.Array        # hPa/s
     ideep: jax.Array     # bool
+    deep_weight: jax.Array  # trigger weight in [0, 1]; == ideep at width 0
     mu: jax.Array        # hPa/s (scaled by mb)
     md: jax.Array
     du: jax.Array        # 1/s (scaled by mb)
@@ -898,12 +932,13 @@ class ZMConvr(NamedTuple):
 
 def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
              capelmt, tau, num_cin, dmpdz, tiedke_add, lwmax, c0_lnd, c0_ocn,
-             alfa, limcnv_p_pa, pbl_top_pa, pref_edge=None):
+             alfa, limcnv_p_pa, trigger_width, pref_edge=None):
     """Port of ``zm_convr`` (``delt = 0.5*dt`` as in ``zm_conv_tend``).
 
-    ``pblh`` is the PBL height [m] (``None`` -> the launch-level search is
-    bounded by ``pbl_top_pa`` [Pa] instead of the Fortran ``pblt``, a
-    documented departure because the host does not carry ``pblh``).
+    ``trigger_width`` [J/kg] (static float) is the RULE 5 width of the CAPE
+    trigger (module docstring); 0 is CAM's hard switch.
+
+    ``pblh`` is the PBL height [m] (``None`` raises: CAM always has one).
 
     ``pref_edge`` are the REFERENCE interface pressures [Pa] (``nlev+1``, top
     first): CAM caps deep convection at the interface where they cross
@@ -938,13 +973,16 @@ def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
     dz = zf[:, :-1] - zf[:, 1:]
 
     if pblh is None:
-        in_pbl = (p_full >= pbl_top_pa) & (K >= msg1)
-        pblt = jnp.where(in_pbl.any(axis=1),
-                         jnp.min(jnp.where(in_pbl, K, nlev), axis=1), nlev)
-    else:
-        match = (jnp.abs(z - pblh[:, None]) < 0.5 * dz) & (K <= nlev - 1) & (K >= msg1)
-        pblt = jnp.where(match.any(axis=1),
-                         jnp.min(jnp.where(match, K, nlev), axis=1), nlev)
+        # CAM always hands ZM the pbuf PBL height (convect_deep.F90:266);
+        # there is no oracle launch bound without it (oracle row 50).
+        raise ValueError(
+            "zm_convr: no PBL height (pblh). CAM's zm_conv bounds the "
+            "launch-level search with the carried pbuf pblh "
+            "(zm_conv.F90:738-741); pass PhysicsState.pblh (the turbulence "
+            "scheme publishes it).")
+    match = (jnp.abs(z - pblh[:, None]) < 0.5 * dz) & (K <= nlev - 1) & (K >= msg1)
+    pblt = jnp.where(match.any(axis=1),
+                     jnp.min(jnp.where(match, K, nlev), axis=1), nlev)
     pblt = pblt.astype(jnp.int32)
 
     q = qh
@@ -992,6 +1030,11 @@ def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
     mb = jnp.where(mumax > 0.0,
                    jnp.minimum(mb, _safe_div(0.5, delt * mumax, mumax > 0.0)), 0.0)
     mb = jnp.where(ideep, mb, 0.0)
+    if trigger_width == 0:
+        deep_weight = ideep.astype(dtype)
+    else:
+        deep_weight = trigger_weight(cape, capelmt, ideep, trigger_width)
+        mb = mb * deep_weight
 
     scale = jnp.where(K >= msg1, mb[:, None], 0.0)
     mu, md, mc = cpz.mu * scale, cpz.md * scale, cpz.mc * scale
@@ -1009,7 +1052,7 @@ def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
     prec = jnp.maximum(-jnp.sum(jnp.where(K >= msg1, dpp * (dqdt + dlg), 0.0), axis=1),
                        0.0) / g
     return ZMConvr(dqdt=dqdt, heat=heat, dlf=dlg, rprd=rprdg, prec=prec, cape=cape,
-                   mb=mb, ideep=ideep, mu=mu, md=md, du=du, eu=eu, ed=ed, mc=mc,
+                   mb=mb, ideep=ideep, deep_weight=deep_weight, mu=mu, md=md, du=du, eu=eu, ed=ed, mc=mc,
                    cmeg=cmeg, pflx=pflx, dp=dp, dsubcld=dsubcld, jt=jt, maxg=maxg,
                    ql=cpz.ql, limcnv=limcnv, msg=msg)
 
@@ -1046,7 +1089,10 @@ def zm_conv_evap(t, pmid, pdel, q, prdprec, cldfrc, deltat, prec, *, ke):
     ncol, nlev = t.shape
     dtype = t.dtype
     g, latvap, latice, tmelt = constants.g, constants.L_v, constants.L_f, constants.T_freeze
-    qs = saturation_specific_humidity(t, pmid)
+    # CAM ``call qsat(t, pmid, es, qs)`` (zm_conv.F90:1484): the svp_trans
+    # liquid->ice blended Goff-Gratch table, not the water-only qsat_water of
+    # the plume.
+    qs = saturation_specific_humidity_cam_table(t, pmid)
     _, fsnow_conv = cldfrc_fice(t)
 
     def body(carry, xk):
@@ -1205,12 +1251,24 @@ def convtran(const, mu, md, du, eu, ed, dp, jt, mx, msg):
     maxc = jnp.maximum(const_km1, const)
     cdifr = jnp.where(minc < 0.0, 0.0,
                       jnp.abs(const - const_km1) / jnp.maximum(maxc, _CONVTRAN_SMALL))
+    # Interface log-mean chat = log(cabv/cbel)/(cabv-cbel)*cabv*cbel, cabv/cbel
+    # floored at maxc*1e-12.  chat is homogeneous of degree 1 in the two
+    # tracer values, so it is evaluated on values scaled by maxc and scaled
+    # back: in float32 the unscaled floor flushes to zero below maxc ~1e-26
+    # (log(0)*0 = NaN) and cabv*cbel and the gradient's (cabv-cbel)**-2
+    # under/overflow for amounts ~1e-30.  The scale is stop-gradient'd and
+    # maxc/scale keeps its derivative, so the gradient is the unscaled one
+    # (degree-0 homogeneity, exact in exact arithmetic; fp64 moves by ~1e-14
+    # relative).  Where maxc <= 0, cdifr == 0 (minc < 0 or both zero), the arithmetic
+    # mean is taken and the scale 1 only keeps the unused branch finite.
+    scale = jax.lax.stop_gradient(jnp.where(maxc > 0.0, maxc, 1.0))
+    floor = (maxc / scale) * _CHAT_FLOOR_FRAC
+    cabv = jnp.maximum(const_km1 / scale, floor)
+    cbel = jnp.maximum(const / scale, floor)
     geo = cdifr > _LOGMEAN_TOL
-    cabv = jnp.maximum(const_km1, maxc * _CHAT_FLOOR_FRAC)
-    cbel = jnp.maximum(const, maxc * _CHAT_FLOOR_FRAC)
     cabv_s = jnp.where(geo, cabv, 1.0)
     cbel_s = jnp.where(geo, cbel, 2.0)
-    chat = jnp.where(geo, jnp.log(cabv_s / cbel_s) / (cabv_s - cbel_s) * cabv_s * cbel_s,
+    chat = jnp.where(geo, scale * (jnp.log(cabv_s / cbel_s) / (cabv_s - cbel_s) * cabv_s * cbel_s),
                      0.5 * (const + const_km1))
 
     def up(carry, xk):

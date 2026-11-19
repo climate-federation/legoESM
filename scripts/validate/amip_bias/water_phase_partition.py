@@ -74,7 +74,7 @@ def _report(run):
 
     print(f"\n=== {run}: global store by phase [kg/m2, native mesh area] ===")
     print(f"{'day':>6}{'vapour':>10}{'condensate':>12}{'total':>10}{'d(tot)/dt':>11}")
-    prev = None
+    prev = pd_ = None
     for d, pp in series:
         v = float((pp["trc_q_v"] * area).sum() / area.sum())
         c = sum(float((pp[s] * area).sum() / area.sum()) for s in SPECIES)

@@ -239,10 +239,9 @@ def test_rank_local_artifact_is_refused(tmp_path):
     """Under cell partitioning the rows are ONE rank's columns; no weighting
     makes that a global budget.
 
-    No such artifact exists TODAY -- driver setup already refuses the ledger
-    whenever the world size exceeds one or a Voronoi layout is present. This
-    pins the reader against the day that refusal is lifted, which its own
-    message calls "serial-only for now".
+    The driver gathers the rows to the global mesh before writing (#2171),
+    so it always stamps False; this pins the reader against any writer that
+    does not.
     """
     import pytest
     art = _artifact(tmp_path, np.zeros((2, 7, 2)), np.array([3.0, 1.0]),

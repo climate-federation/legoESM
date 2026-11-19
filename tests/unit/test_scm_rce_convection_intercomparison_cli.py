@@ -260,7 +260,7 @@ def test_summary_flags_a_mixed_arm_table_as_confounded(tmp_path):
 #
 # The column's saturation treatment is an EXPERIMENT variable, not a cosmetic
 # one: the IFS/SAM homogeneous-freezing ice allowance exists only inside the
-# ice-carrying schemes (morrison/thompson/p3), and the in-scheme liquid guard
+# morrison/thompson ice schemes (not the WRF P3 port), and the in-scheme liquid guard
 # changes the condensation rate on every step.  These gates assert (a) both
 # reach the config the SCM actually runs, and (b) both invalidate a checkpoint,
 # so a kessler run can never be merged into a morrison table.

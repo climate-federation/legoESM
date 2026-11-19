@@ -969,6 +969,18 @@ def main():
 
         # --- Restart from a previous snapshot (lat-lon only) ---
         if args.restart_from is not None:
+            # Continuing from a snapshot needs the code that wrote it: its
+            # run's manifest sits in <output-dir>/, one level above
+            # snapshots/ (or beside a copied snapshot).  Before the load.
+            from legoesm.driver.restart import (
+                collective_version_drift_gate,
+                restart_version_drift,
+            )
+            _rs = Path(args.restart_from)
+            collective_version_drift_gate(
+                lambda: restart_version_drift(
+                    _rs, [_rs.parent, _rs.parent.parent]),
+                f"restart {_rs}")
             restart = _load_restart(args.restart_from)
             state = _apply_restart_arrays(state, restart, grid_kind)
             print(f"[restart] Applied restart at "
@@ -982,8 +994,9 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     snapshot_dir = args.output_dir / "snapshots"
     snapshot_dir.mkdir(exist_ok=True)
-    _save_run_metadata(args, cfg, grid, z, args.output_dir, grid_kind)
-    # Run manifest (every process calls it; a failed write aborts the run).
+    # Run manifest (every process calls it; a failed write aborts the run),
+    # before the run metadata, so a refused continuation leaves both as
+    # they were.
     from legoesm.driver.restart import (
         dataset_provenance_entry,
         record_final_state_digest,
@@ -1003,6 +1016,7 @@ def main():
                                       dataset_id="restart_from")]
             if args.restart_from is not None else []),
     )
+    _save_run_metadata(args, cfg, grid, z, args.output_dir, grid_kind)
 
     # Time loop
     n_steps_total = int(round(args.days * 86400.0 / dt))

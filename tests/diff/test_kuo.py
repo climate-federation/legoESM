@@ -39,7 +39,8 @@ def _column():
 
 def _scalar_loss(T, qv, pf, ph, pq):
     out = kuo_convection(T, qv, pf, ph, dt=900.0, config=KuoConfig(),
-                         moisture_convergence=pq)
+                         moisture_convergence=pq,
+                         w_grid=jnp.full_like(pq, 0.01))
     return jnp.sum(out.dT_dt ** 2) + jnp.sum(out.dq_v_dt ** 2)
 
 
@@ -134,9 +135,11 @@ def test_kuo_jit_matches_eager():
     T, qv, pf, ph, pq = _column()
     cfg = KuoConfig()
     eager = kuo_convection(T, qv, pf, ph, dt=900.0, config=cfg,
-                           moisture_convergence=pq)
+                           moisture_convergence=pq,
+                           w_grid=jnp.full_like(pq, 0.01))
     jit_fn = jax.jit(lambda *a: kuo_convection(
-        *a, pf, ph, dt=900.0, config=cfg, moisture_convergence=pq))
+        *a, pf, ph, dt=900.0, config=cfg, moisture_convergence=pq,
+        w_grid=jnp.full_like(pq, 0.01)))
     jitted = jit_fn(T, qv)
     np.testing.assert_allclose(np.asarray(eager.dT_dt),
                                np.asarray(jitted.dT_dt), rtol=1e-9, atol=1e-14)
@@ -156,7 +159,8 @@ def test_kuo_vmap_matches_eager():
     def one(T_, q_, pf_, ph_, pq_):
         return kuo_convection(T_[None], q_[None], pf_[None], ph_[None],
                               dt=900.0, config=cfg,
-                              moisture_convergence=pq_[None]).dT_dt[0]
+                              moisture_convergence=pq_[None],
+                              w_grid=jnp.full_like(pq_[None], 0.01)).dT_dt[0]
 
     vm = jax.vmap(one)(Ts, qs, pfs, phs, pqs)
     loop = jnp.stack([one(Ts[i], qs[i], pfs[i], phs[i], pqs[i])

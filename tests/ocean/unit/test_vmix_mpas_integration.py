@@ -234,3 +234,30 @@ class TestMPASSurfaceBuoyancyFlux:
         # real-salt contribution (no-double-count contract).
         assert Q_sfc_S is not None
         assert jnp.allclose(Q_sfc_S, 0.0)
+
+
+@pytest.mark.parametrize("builder", ["physics", "profiles"])
+def test_kpp_sqrt_s_eos_gradient_finite_at_zero_salinity_land(
+        builder, mesh, z_coord, state, kpp_cfg):
+    """A sqrt(S) EOS (veros_gsw) has an infinite dRho/dS at S = 0; the MPAS
+    KPP bridge builds its density on floored salinity (as the lat-lon KPP
+    paths do), so d(sum out)/dS stays finite with zero-salinity land cells
+    (#2243)."""
+    from legoesm.ocean.eos import make_eos_fn
+
+    land = state.land_mask.data < 0.5
+    assert bool(jnp.any(land))
+    eos = make_eos_fn(eos="veros_gsw")
+    make = (make_kpp_physics_mpas if builder == "physics"
+            else make_kpp_profiles_mpas)
+    fn = make(kpp_cfg, eos_fn=eos)
+
+    def loss(s):
+        out = fn(state._replace(S=state.S.replace(data=s)), mesh, z_coord,
+                 None)
+        return sum(jnp.sum(x) for x in out)
+
+    S0 = jnp.where(land[:, None], 0.0, state.S.data)
+    grad = jax.grad(loss)(S0)
+    assert bool(jnp.isfinite(loss(S0)))
+    assert bool(jnp.all(jnp.isfinite(grad)))

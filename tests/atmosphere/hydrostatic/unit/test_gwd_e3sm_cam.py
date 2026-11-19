@@ -38,6 +38,19 @@ from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import (
     e3sm_cam_gwd,
 )
 
+
+_e3sm_cam_gwd_kernel = e3sm_cam_gwd
+
+
+def e3sm_cam_gwd(*args, **kw):
+    """The kernel with ``p_ref_half`` (E3SM pref_edge) = the test column's own
+    interfaces: these columns are built at surface pressure p_ref = 1e5 Pa, so
+    their interfaces ARE the reference interfaces a lane would pass."""
+    if "p_ref_half" not in kw:
+        ph = kw["p_half"] if "p_half" in kw else args[4]
+        kw["p_ref_half"] = jnp.asarray(ph)[0]
+    return _e3sm_cam_gwd_kernel(*args, **kw)
+
 # E3SM oracle constants (gw_common uses rair=287.04, cpair=1004.64).
 ORACLE_RAIR = 287.04
 ORACLE_CPAIR = 1004.64
@@ -177,6 +190,38 @@ def test_oro_momentum_conservation(_oracle_constants):
     mom_sink = float(np.sum((np.array(dpm[0]) / ORACLE_G) * (-np.array(utgw[0]))))
     net_absorbed = tau_total[pver] - tau_total[0]
     np.testing.assert_allclose(mom_sink, net_absorbed, rtol=1e-10)
+
+
+def _neg_div_probe():
+    import importlib.util
+    from pathlib import Path
+    path = (Path(__file__).resolve().parents[4] / "scripts/validate/oracle/gw_spec_e3sm"
+            / "neg_div_probe.py")
+    spec = importlib.util.spec_from_file_location("neg_div_probe", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("smooth", [False, True], ids=["hard", "default"])
+@pytest.mark.parametrize("case", ["neg", "neg_umcfac", "control"])
+def test_negative_divergence_column_conserves_momentum(case, smooth):
+    """#2567 KNOWN DIFFERENCE, RULE 0: where a layer's raw stress divergence
+    is negative the port applies ``sgn(c-u)*ubtl`` (E3SM: ``|ubtl|*sgn(c-u)``,
+    which deposits momentum the stress profile does not supply), so the column
+    deposit equals the stress divergence to round-off.  Columns from the
+    committed oracle probe (launched stress growing upward below the source)."""
+    probe = _neg_div_probe()
+    col = probe.column(case)
+    cfg = E3SMCAMConfig()
+    a = lambda x: jnp.asarray(x)[None]
+    rhoi, ti, nm, ni = gw_prof(a(col["t"]), a(col["pmid"]), a(col["pint"]), C.c_pd, C.R_d,
+                               C.g, cfg.n2min)
+    utgw, tau = probe.port(col, dict(ti=ti, rhoi=rhoi, nm=nm, ni=ni), cfg, smooth)
+    raw = np.diff(col["tau"])[:col["tend"]]
+    assert (raw.min() < 0.0) == (case != "control")      # the case reaches ubtl < 0
+    dep, div = probe.budget(col, utgw, tau)
+    np.testing.assert_allclose(dep, div, rtol=1e-12, atol=0.0)
 
 
 def test_gwd_damping_factor_never_amplifies_stress():

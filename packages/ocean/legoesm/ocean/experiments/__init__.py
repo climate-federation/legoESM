@@ -28,6 +28,7 @@ Available Experiments:
 - baroclinic_gyre: Regional wind-driven baroclinic gyre with surface restoring
 - phillips_two_layer: Two-layer baroclinic instability with relaxation
 - inertia_gravity_wave: Inertia-gravity wave propagation with analytical validation
+- inertia_gravity_wave_channel: the same wave in an f-plane channel (exact eigenmode)
 - lock_exchange: Density-driven gravity current with RPE mixing diagnostics
 - overflow: Dense water overflow over bathymetric slope
 - stommel_gyre_tracer: Passive tracer transport in wind-driven gyre
@@ -91,6 +92,7 @@ AVAILABLE_EXPERIMENTS = {
     "baroclinic_gyre": baroclinic_gyre.EXPERIMENT_CONFIG,
     "phillips_two_layer": phillips_two_layer.EXPERIMENT_CONFIG,
     "inertia_gravity_wave": inertia_gravity_wave.EXPERIMENT_CONFIG,
+    "inertia_gravity_wave_channel": inertia_gravity_wave.CHANNEL_EXPERIMENT_CONFIG,
     "lock_exchange": lock_exchange.EXPERIMENT_CONFIG,
     "overflow": overflow.EXPERIMENT_CONFIG,
     "stommel_gyre_tracer": stommel_gyre_tracer.EXPERIMENT_CONFIG,

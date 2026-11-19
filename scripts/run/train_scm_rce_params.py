@@ -616,6 +616,7 @@ def _make_step_once(
             campaign._radiation_only_config(cfg),
             model_type="hydrostatic",
             dt=dt,
+            surface_bulk_coeffs=None,   # split sub-physics: no surface exchange
         )
     effective_convection_substeps = campaign._effective_scm_convection_substeps(
         cfg.convection.scheme,
@@ -630,6 +631,7 @@ def _make_step_once(
             campaign._convection_only_config(cfg),
             model_type="hydrostatic",
             dt=dt / effective_convection_substeps,
+            surface_bulk_coeffs=None,   # split sub-physics: no surface exchange
         )
     z_profile = jnp.asarray(ref.z_m, dtype=jnp.float64)
     z_above_lowest = jnp.maximum(z_profile - z_profile[-1], 0.0)

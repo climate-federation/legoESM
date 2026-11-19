@@ -1,0 +1,26 @@
+{
+ "record": "/burg/glab/users/pg2328/oracle_audit/tier3/drg/ctl_on/t3_drg_record_0028.bin",
+ "recorder_cfg": "NEMO 5.0.1 cfgs/ORCA1_T3DRG (MY_SRC t3 recorder at zdf_drg), kt 17281 from the day-30 restart, 32 MPI tiles",
+ "oracle": "NEMO 5.0.1 zdfdrg.F90 (ln_non_lin, ln_drgimp, ln_drgice_imp; rCdU_top = rCdU_ice without cavities) + dynspg_ts.F90:1607-1608 combined coefficient",
+ "nemo_spread_20_seed": {
+  "rCdU_bot": 8.8e-16,
+  "rCdU_top": 2.2e-16
+ },
+ "legoesm_main_sha": "efa650f75e466a91a7d7c08308d7f3820948b814",
+ "extractor": "/burg/glab/users/pg2328/oracle_audit/si3wire/pr1b/extract.py",
+ "window": 16,
+ "rank": "0028",
+ "lat0": 16,
+ "lon0": 0,
+ "n_levels": 67,
+ "ice_cells": 251,
+ "land_cells": 5,
+ "land_cells_scored": 1,
+ "scalars": {
+  "cd0": 0.001,
+  "ke0": 0.0025,
+  "cdmax": 0.1,
+  "z0": 0.003
+ },
+ "layout": "port: u[lat, lon+1] (u[:, i] = west face of cell i), v[lat+1, lon] (v[j] = south face of cell j); levels 0-based"
+}

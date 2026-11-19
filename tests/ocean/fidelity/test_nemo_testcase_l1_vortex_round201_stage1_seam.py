@@ -77,12 +77,11 @@ def steps(fp64):
     _, stage_model = _card_and_model(_NEMOWSRK3TestHooks(
         expose_momentum_stage=1))
     out["stage1_out"] = stage_model.step(initial, dt=card.dt_s)
-    own = (out["rhs"].u.data, out["rhs"].v.data)
     _, fed_back = _card_and_model(_NEMOWSRK3TestHooks(
-        stage1_momentum_rhs_override=own))
+        stage1_momentum_rhs_transform=lambda u, v: (u, v)))
     out["fed_back"] = fed_back.step(initial, dt=card.dt_s)
     _, bent_model = _card_and_model(_NEMOWSRK3TestHooks(
-        stage1_momentum_rhs_override=(own[0] * 1.0000001, own[1])))
+        stage1_momentum_rhs_transform=lambda u, v: (u * 1.0000001, v)))
     out["bent"] = bent_model.step(initial, dt=card.dt_s)
     return out
 
@@ -135,8 +134,9 @@ def test_the_two_stage1_boundaries_are_different_frames(steps):
 
 
 def test_feeding_the_model_its_own_stage1_rhs_reproduces_the_step(steps):
-    # The known-answer control: the override binds at the boundary it claims
-    # and substitutes the SAME quantity the exposure published.
+    # The known-answer control: an identity transform binds at the override
+    # boundary inside the SAME traced program.  This avoids cross-program
+    # fusion differences while retaining an exact predicate.
     _assert_identical(steps["fed_back"], steps["plain"])
 
 
@@ -169,6 +169,9 @@ def test_the_known_answer_control_is_not_vacuous(steps):
       "stage1_momentum_rhs_override": (1.0, 2.0)},
      "stage1_momentum_rhs_override"),
     ({"expose_stage1_momentum_rhs": 1}, "must be a bool"),
+    ({"stage1_momentum_rhs_transform": 1}, "must be callable"),
+    ({"stage1_momentum_rhs_transform": lambda u, v: (u, v),
+      "stage1_momentum_rhs_override": (1.0, 2.0)}, "mutually exclusive"),
 ])
 def test_the_construction_guard_refuses_an_ambiguous_exposure(
         fp64, hooks_kwargs, match):

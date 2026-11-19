@@ -49,7 +49,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
-from legoesm.atmosphere.physics.radiation.ozone_mls import mls_ozone_vmr
+from legoesm.atmosphere.physics.radiation.ozone_mls import mls_ozone_layer_vmr
 from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
     preload_rrtmgp_optics,
     rrtmgp_radiation,
@@ -173,7 +173,7 @@ def liquid_fraction(T, width_k: float = CB_ICE_RAMP_WIDTH_K):
 
 
 def column_fluxes(case: CaseRadiation, T, q_v, q_c, p_full, p_half, rho,
-                  *, ozone=mls_ozone_vmr, clouds: bool = True, cloud_fraction=None):
+                  *, ozone=None, clouds: bool = True, cloud_fraction=None):
     """RRTMGP fluxes of the column with its extension above (``out``, top-first on all
     ``n_ext + nlev + 1`` interfaces) and ``n_ext``; inputs as :func:`column_radiation`."""
     dtype = jnp.asarray(T).dtype
@@ -209,7 +209,8 @@ def column_fluxes(case: CaseRadiation, T, q_v, q_c, p_full, p_half, rho,
         T_all[None], pf_all[None], ph_all[None], jnp.asarray([case.sst], dtype),
         q_all[None], jnp.asarray([case.cos_zenith], dtype), rrtmgp_config(case.irrad),
         sfc_albedo_override=CB_SFC_ALBEDO, sfc_emissivity_override=CB_SFC_EMISSIVITY,
-        o3_vmr=ozone(pf_all)[None],
+        o3_vmr=(mls_ozone_layer_vmr(ph_all[None])[0] if ozone is None
+                else ozone(pf_all)[None]),
         cloud_path_liq=(path[None] if clouds else None),
         cloud_r_eff_liq=(r_eff[None] if clouds else None),
         cloud_path_ice=(path_ice[None] if clouds else None),
@@ -220,7 +221,7 @@ def column_fluxes(case: CaseRadiation, T, q_v, q_c, p_full, p_half, rho,
 
 
 def column_radiation(case: CaseRadiation, T, q_v, q_c, p_full, p_half, rho,
-                     *, ozone=mls_ozone_vmr, clouds: bool = True,
+                     *, ozone=None, clouds: bool = True,
                      cloud_fraction=None) -> RadiationRecord:
     """Radiation of the column (top-first ``T``, ``q_v``, ``q_c``, ``p_full``, ``rho``
     on its ``nlev`` layers, ``p_half`` its ``nlev + 1`` interfaces) under ``case``.

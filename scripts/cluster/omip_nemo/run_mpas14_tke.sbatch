@@ -34,7 +34,7 @@ SSSCLIM=$INP/sss_climatology_for_restoring.nc
 ICEIC=$ROOT2/cfgs/ORCA1/INPUTS/Ice_initialization.nc
 echo "=== HOST ==="; hostname; nvidia-smi -L 2>/dev/null | head -1; date
 echo "=== repo ==="; git -C $ROOT log --oneline -1
-GA="--grid mpas --mpas-level 7 --mpas-lloyd 20 --dt 150"
+GA="--grid mpas --mpas-level 7 --mpas-lloyd 50 --dt 150"
 COMMON="--nemo-vertical --partial-cell --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift --years 0.085 --snapshot-every-days 30 --diag-every-days 5"
 LEVERS="--tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate"
 PARITY="--bottom-drag-scheme nemo_quadratic"

@@ -19,6 +19,34 @@
   "Conventions": "CF-1.7 CMIP-6.2"
  },
  "variable_entry": {
+  "ps": {
+   "frequency": "day",
+   "modeling_realm": "atmos",
+   "standard_name": "surface_air_pressure",
+   "units": "Pa",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Surface Air Pressure",
+   "comment": "surface pressure (not mean sea-level pressure), 2-D field to calculate the 3-D pressure field from hybrid coordinates",
+   "dimensions": "longitude latitude time",
+   "out_name": "ps",
+   "type": "real",
+   "positive": ""
+  },
+  "rsdt": {
+   "frequency": "day",
+   "modeling_realm": "atmos",
+   "standard_name": "toa_incoming_shortwave_flux",
+   "units": "W m-2",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "TOA Incident Shortwave Radiation",
+   "comment": "Shortwave radiation incident at the top of the atmosphere",
+   "dimensions": "longitude latitude time",
+   "out_name": "rsdt",
+   "type": "real",
+   "positive": "down"
+  },
   "rsut": {
    "frequency": "day",
    "modeling_realm": "atmos",

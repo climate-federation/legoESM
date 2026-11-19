@@ -8,6 +8,8 @@ arm; it does not introduce another sea-ice model or another transport kernel.
 
 from __future__ import annotations
 
+import math
+
 import hashlib
 import json
 from collections.abc import Mapping
@@ -217,6 +219,7 @@ def build_ice_adv2d_rhg_card(
         t_surface=t_surface,
     )
     config = SI3CGridAEVPConfig(
+        north_fold="none",
         scheme=_RHG_SCHEME,
         staggering=_RHG_STAGGERING,
         dt_s=base.dt_s,
@@ -330,6 +333,7 @@ def step_ice_adv2d_rhg_card(
         card.dynamics_config,
         differentiable=differentiable,
         stress_divergence_outer_weight=stress_divergence_outer_weight,
+        limit_sharpness_scale=math.inf,
     )
     area = card.base.dx_m * card.base.dy_m
     cell_area = jnp.full(dynamics.u_ice_u.shape, area, dtype=jnp.float64)
@@ -351,6 +355,7 @@ def step_ice_adv2d_rhg_card(
         ice_volume_index=ICE_ADV2D_TRACERS.index("v_i"),
         concentration_index=ICE_ADV2D_TRACERS.index("a_i"),
         subcycles=card.base.subcycles,
+        limit_sharpness_scale=math.inf,
     )
     del ignored
     intensives = si3_prather_unpack_intensives(contents, cell_area, wet)

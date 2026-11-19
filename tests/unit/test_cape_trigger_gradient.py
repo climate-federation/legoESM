@@ -117,7 +117,10 @@ def test_gradient_is_nonzero_through_a_real_scheme():
     p_full = 0.5 * (p_half[:-1] + p_half[1:])
     sigma = p_full / p_full[-1]
     T = 200.0 + 100.0 * sigma ** 0.5
-    q_v = 0.018 * sigma ** 3
+    # supersaturated: GFDL moist_conv (run on it, 2026-10-19) adjusts this
+    # column and leaves the 0.018 * sigma**3 one untouched (zero gradient)
+    from legoesm.thermo import saturation_specific_humidity
+    q_v = 1.05 * np.asarray(saturation_specific_humidity(jnp.asarray(T), jnp.asarray(p_full)))
 
     cfg = camp.make_physics_config(convection="dca")
     _name, conv_fn, scheme_cfg = _get_convection_fn(cfg.convection)

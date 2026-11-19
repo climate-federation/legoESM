@@ -18,6 +18,7 @@ from legoesm.ocean.eos import (
     thermal_expansion_coeff,
     haline_contraction_coeff,
     eos_density_derivatives,
+    wright_eos,
 )
 
 # EOS salinity floor [PSU] for the generic-EOS surface α/β autodiff path.
@@ -26,6 +27,15 @@ from legoesm.ocean.eos import (
 # before differentiating.  Matches tke.compute_surface_buoyancy_P_diss_v.  Ocean
 # S ≫ floor, so this is a no-op on wet cells.
 _EOS_SALINITY_FLOOR = 1.0e-3
+
+
+def eos_salinity(S, eos_fn):
+    """Salinity to hand an EOS autodiff: floored at ``_EOS_SALINITY_FLOOR``
+    unless the EOS is Wright (``None`` or ``wright_eos``), which has no
+    sqrt(S) term and stays bit-identical."""
+    if eos_fn is None or eos_fn is wright_eos:
+        return S
+    return jnp.maximum(S, _EOS_SALINITY_FLOOR)
 
 # Shared float32-eps floor for the vertical-mixing kernels.
 _EPS = float(jnp.finfo(jnp.float32).eps)
@@ -317,6 +327,7 @@ def avm_weighted_shear_production(
     *,
     face_metrics: tuple[jnp.ndarray, jnp.ndarray,
                         jnp.ndarray, jnp.ndarray] | None = None,
+    kappa_north_v: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""NEMO ``zdf_sh2`` shear-PRODUCTION term ``p_sh2`` with the viscosity
     face-averaged INSIDE the face sum, exactly as ``zdfsh2.F90:80-94``
@@ -364,6 +375,8 @@ def avm_weighted_shear_production(
     ----------
     u_face_now, v_face_now, u_face_before, v_face_before, dz_half, u_mask,
     v_mask : as :func:`vertical_shear_face_native`.
+    kappa_north_v : optional ``(n_lon, nlev-1)`` viscosity north of the top
+        V face (a T-pivot fold image); None keeps the edge-repeat.
     kappaM_T : ``(n_lat, n_lon, nlev-1)`` — T-point (single per-interface)
         viscosity — face-summed here via array rolls, matching NEMO's
         ``avm(ji+1,jj,jk)+avm(ji,jj,jk)`` exactly; NOT new staggered state.
@@ -431,6 +444,9 @@ def avm_weighted_shear_production(
     kM_face_u = kM_left_u + kM_right_u          # (n_lat, n_lon+1, nlev-1)
     kM_left_v = jnp.concatenate([kappaM_T[:1, :, :], kappaM_T], axis=0)
     kM_right_v = jnp.concatenate([kappaM_T, kappaM_T[-1:, :, :]], axis=0)
+    if kappa_north_v is not None:
+        # north-fold top face: NEMO's avm_k(ji,jj+1) is the fold image row
+        kM_right_v = kM_right_v.at[-1].set(kappa_north_v)
     kM_face_v = kM_left_v + kM_right_v          # (n_lat+1, n_lon, nlev-1)
 
     if face_metrics is None:
@@ -455,6 +471,82 @@ def avm_weighted_shear_production(
     )
     return p_sh2
 
+
+def edge_avm_weighted_shear_production(
+    u_edge: jnp.ndarray,
+    dz_half: jnp.ndarray,
+    kappaM: jnp.ndarray,
+    active: jnp.ndarray,
+    cells_on_edge: jnp.ndarray,
+    edges_on_cell: jnp.ndarray,
+    dc_edge: jnp.ndarray,
+    dv_edge: jnp.ndarray,
+    area_cell: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""NEMO ``zdf_sh2`` (``zdfsh2.F90:78-94``) on a Voronoi C-grid (MPAS).
+
+    NEMO forms, per C-grid face and w-level, ``zsh2 = (avm(i+1)+avm(i)) *
+    du_Kmm * du_Kbb / (e3uw_Kmm e3uw_Kbb) * wumask`` and then
+    ``p_sh2 = 0.25 * [(zsh2u(i-1)+zsh2u(i)) * (2-umask(i-1)umask(i)) +
+    (zsh2v(j-1)+zsh2v(j)) * (2-vmask(j-1)vmask(j))]``.  On the Voronoi grid
+    the faces are the edges of the cell and ``u_edge`` is the edge-normal
+    velocity, so per edge ``e`` = (c1, c2) and interface ``k``::
+
+        zsh2_e = (avm[c1] + avm[c2]) * (u_e[k] - u_e[k+1])**2 / dz_e**2 * wet_e
+        p_sh2[c] = sum_e w_e * zsh2_e * coast_e,   w_e = dc_e dv_e / (4 A_c)
+
+    Weights.  ``w_e`` is the MPAS energy-conserving kinetic-energy weight
+    (KE_c = sum_e w_e u_e**2).  On a rectangle every edge has dc_e dv_e = A_c,
+    so w_e = 1/4: NEMO's 0.25 term for term.  For uniform ``avm`` the sum is
+    ``avm * sum_e (dc_e dv_e / (2 A_c)) S_e``, which equals ``avm |du/dz|**2``
+    for a horizontally uniform shear because ``sum_e (dc_e dv_e/(2A_c)) n_e
+    n_e^T = I`` (the identity that makes the Perot reconstruction exact).
+
+    Coast rule.  NEMO's ``2 - umask(i-1)*umask(i)`` doubles the wet face of an
+    opposite-face pair when its partner is dry (umask at the lower T-level jk),
+    so each direction is averaged over its wet faces and a uniform shear is not
+    halved at the coast.  On a cell with an even number of edges (quads,
+    hexagons) the pair is edge slot k and slot k + nE/2 of ``edges_on_cell``
+    (edges ordered around the cell), and ``coast_e = 2 - wet_e * wet_opp(e)``
+    exactly as NEMO.  A cell with an odd number of edges (the pentagons of an
+    icosahedral mesh) has no opposite edge; there the wet-weight
+    renormalisation ``coast = W_all / W_wet`` is used.  ``wet_e`` at interface
+    k (between layers k and k+1) is both cells active at layer k+1, the lower
+    level as NEMO's umask(jk); it implies the upper one.  Cells with no wet
+    edge get 0.
+
+    Time levels: the MPAS lane is RK3-like, so both velocity factors are the
+    same level (NEMO key_RK3 passes Kbb = Kmm = Nbb).  ``dz_e`` is the mean
+    of the two cells' interface spacings (NEMO e3uw).
+
+    Shapes: u_edge (nEdges, nlev); dz_half, kappaM (nCells, nlev-1); active
+    (nCells, nlev) bool; cells_on_edge (2, nEdges); edges_on_cell (maxEdges,
+    nCells), -1 padded, edges in order around the cell; dc_edge, dv_edge
+    (nEdges,); area_cell (nCells,).  Returns p_sh2 (nCells, nlev-1) [m^2/s^3].
+    """
+    c1, c2 = cells_on_edge[0], cells_on_edge[1]
+    pair = (c1 >= 0) & (c2 >= 0)
+    c1s, c2s = jnp.maximum(c1, 0), jnp.maximum(c2, 0)
+    du = u_edge[:, :-1] - u_edge[:, 1:]
+    dz_e = jnp.maximum(0.5 * (dz_half[c1s] + dz_half[c2s]), _EPS)
+    wet_e = (active[c1s, 1:] & active[c2s, 1:] & pair[:, None]).astype(du.dtype)
+    zsh2 = (kappaM[c1s] + kappaM[c2s]) * du * du / (dz_e * dz_e) * wet_e
+
+    eoc_ok = edges_on_cell >= 0
+    eoc = jnp.maximum(edges_on_cell, 0)
+    w = jnp.where(eoc_ok, dc_edge[eoc] * dv_edge[eoc], 0.0) / (
+        4.0 * area_cell[None, :])                          # (maxEdges, nCells)
+    wet_s = wet_e[eoc] * eoc_ok[..., None]                 # (maxEdges, nCells, L)
+    n_e = jnp.sum(eoc_ok, axis=0)                          # (nCells,)
+    slot = jnp.arange(edges_on_cell.shape[0])[:, None]
+    opp = (slot + n_e[None, :] // 2) % jnp.maximum(n_e[None, :], 1)
+    wet_opp = jnp.take_along_axis(wet_s, opp[..., None], axis=0)
+    w_wet = jnp.sum(w[..., None] * wet_s, axis=0)
+    w_all = jnp.sum(w, axis=0)[:, None]
+    iso = jnp.where(w_wet > 0.0, w_all / jnp.where(w_wet > 0.0, w_wet, 1.0), 0.0)
+    coast = jnp.where((n_e % 2 == 0)[None, :, None], 2.0 - wet_s * wet_opp,
+                      iso[None])
+    return jnp.sum(w[..., None] * zsh2[eoc] * coast, axis=0)
 
 def richardson_number(
     N2: jnp.ndarray,
@@ -715,6 +807,7 @@ def surface_buoyancy_flux(
     c_sw: float,
     real_salt_in_qs: bool,
     eos_fn=None,
+    rho_0_norm: bool = False,
 ):
     """Surface buoyancy flux ``B_f`` [m^2/s^3] (>0 destabilising) + the kinematic
     surface heat / salt fluxes for the KPP / CATKE boundary-layer closures.
@@ -758,6 +851,10 @@ def surface_buoyancy_flux(
         constant source (``constants_config`` for lat-lon, module constants for
         MPAS; both equal the canonical values by default).
     real_salt_in_qs : see above.
+    rho_0_norm : ``False`` (KPP / CATKE): ``alpha``/``beta`` divide the EOS
+        derivatives by the surface density ``rho(T, S, 0)``.  ``True`` (ePBL):
+        divide by ``rho_0`` instead, MOM6's ``calculateBuoyancyFlux1d`` form
+        (``GoRho = g / Rho0``).
 
     Returns
     -------
@@ -773,7 +870,20 @@ def surface_buoyancy_flux(
     # different surface α/β, so the KPP/CATKE surface buoyancy forcing must use
     # it (else the boundary layer mixes against Wright while the interior
     # ρ/N²/Ri use S-EOS — a half-applied closure).
-    if eos_fn is None:
+    if rho_0_norm:
+        fn = wright_eos if eos_fn is None else eos_fn
+        # Same salinity floor as the generic-EOS path below; none for Wright
+        # (given or defaulted), so a run passing wright_eos stays bit-identical.
+        S_eval = eos_salinity(S_sfc, fn)
+
+        def _alpha_sfc():
+            drho_dT, _ = eos_density_derivatives(fn, T_sfc, S_eval, p_sfc)
+            return -drho_dT / rho_0
+
+        def _beta_sfc():
+            _, drho_dS = eos_density_derivatives(fn, T_sfc, S_eval, p_sfc)
+            return drho_dS / rho_0
+    elif eos_fn is None:
         def _alpha_sfc():
             return thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
 
@@ -782,7 +892,9 @@ def surface_buoyancy_flux(
     else:
         # Floor salinity before the EOS-generic autodiff (sqrt(S) EOSes diverge
         # at S=0 land cells; later masking is a multiply ⇒ 0·NaN unsafe).
-        S_eval = jnp.maximum(S_sfc, _EOS_SALINITY_FLOOR)
+        # Wright passed explicitly is not floored, so it matches None bit for
+        # bit, also below the floor (#2243).
+        S_eval = eos_salinity(S_sfc, eos_fn)
 
         def _alpha_sfc():
             drho_dT, _ = eos_density_derivatives(eos_fn, T_sfc, S_eval, p_sfc)

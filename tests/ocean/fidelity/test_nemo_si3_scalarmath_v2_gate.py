@@ -41,10 +41,10 @@ def test_column_card_defaults_to_scalar_math_v2() -> None:
     from legoesm.ice.c1d_omip_l3 import (
         ORACLE_V2_ROOT,
         ORACLE_VERSION,
-        build_c1d_omip_l3_card,
+        build_c1d_omip_l3_si3_lane_card,
     )
 
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_si3_lane_card()
     assert ORACLE_VERSION == "V2_SCALAR_MATH"
     assert card.oracle_root == ORACLE_V2_ROOT == gate.V2_A_ROOT
 

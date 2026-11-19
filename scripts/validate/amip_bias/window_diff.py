@@ -125,7 +125,7 @@ def publishes(run, var):
     genuinely OPTIONAL output: a run without them has no Amon file for them and
     must still be scorable on the fields it does write."""
     return bool(glob.glob(str(ROOT / run / "cmor" / "Amon"
-                              / f"{var}_Amon_*_gn_*.nc")))
+                              / f"{var}_Amon_*_g[nr]_*.nc")))
 
 
 def partial_month(run, var, year, month):
@@ -133,7 +133,7 @@ def partial_month(run, var, year, month):
     newest file ending in ``month``), as (nlat, nlon), plus lat.  ``year`` is
     the sidecar's relative year index and is not used for matching."""
     import xarray as xr
-    pat = str(ROOT / run / "cmor" / "Amon" / f"{var}_Amon_*_gn_*.nc")
+    pat = str(ROOT / run / "cmor" / "Amon" / f"{var}_Amon_*_g[nr]_*.nc")
     files = sorted(glob.glob(pat))
     if not files:
         raise SystemExit(f"{run}: no Amon file for {var} ({pat})")

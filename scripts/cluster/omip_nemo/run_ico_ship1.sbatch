@@ -38,7 +38,7 @@ ICEIC=$ROOT2/cfgs/ORCA1/INPUTS/Ice_initialization.nc
 echo HOST $(hostname); date; git -C $WT log --oneline -1
 # GA/COMMON/LEVERS/IC identical to the ll_ship2 / trp2_ship1 protocol EXCEPT the
 # grid and the unavoidable MPAS gaps (no iwm/bbl/isf/dm2dc/drag-scheme/rgb-chl).
-GA="--grid mpas --mpas-level 7 --mpas-lloyd 20 --dt 150"
+GA="--grid mpas --mpas-level 7 --mpas-lloyd 50 --dt 150"
 COMMON="--nemo-vertical --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift --years 0.25 --snapshot-every-days 30 --diag-every-days 5"
 LEVERS="--tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate"
 IC="--woa-init --woa-t $WTIC --woa-s $WSIC --ice-init $ICEIC"

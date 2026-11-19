@@ -1,0 +1,12 @@
+# name	restart_day	target_day	repo	commit	extra
+# Layered 5-layer snowpack + soil freeze/thaw (CLM5 compaction, physical cover)
+# vs the bulk snowpack (user 2026-10-06). Restart: COPY of mv3y_vl
+# checkpoint_day_<restart> only (day 275 = 2001-10-03 00Z, 280 = 2001-10-08 00Z);
+# the bulk checkpoint seeds the pack from its snow water. Controls: snow-heat's
+# switch-off arms sh2_off_a / sh2_off_b (same restarts), valid only if their 1-day
+# gate shows them byte-identical to 468cef302; otherwise lf_ctl_* below run.
+lf_on_a	275	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_layeredft_run	HEAD	 --land-snow-scheme layered
+lf_on_b	280	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_layeredft_run	HEAD	 --land-snow-scheme layered
+# own controls (only if the shared ones are not valid): plain 468cef302, bulk
+lf_ctl_a	275	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_layeredft_base	468cef3020035652b7e170a83963c25ba110a1d3	 --land-snow-scheme bulk
+lf_ctl_b	280	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_layeredft_base	468cef3020035652b7e170a83963c25ba110a1d3	 --land-snow-scheme bulk

@@ -71,6 +71,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.smooth import positive_part_c1, validate_smoothing_width
 from legoesm.thermo import saturation_mixing_ratio, saturation_specific_humidity
 from legoesm.atmosphere.physics._shared import (
     compute_rho,
@@ -1193,7 +1194,7 @@ def _ifs_inplume_precip_conversion(
     return L_new, precip_frac
 
 
-def _ifs_subcloud_rain_evaporation(
+def ifs_subcloud_rain_evaporation(
     q_v: jax.Array,
     q_sat_env: jax.Array,
     p_half: jax.Array,
@@ -1211,7 +1212,10 @@ def _ifs_subcloud_rain_evaporation(
     evap_scale: float = 1.0,
     rhebc_land_val: float = _IFS_RHEBC_LAND,
     rhebc_land_deep_val: float = _IFS_RHEBC_LAND_DEEP,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+    rmfcfl: float = 1.0,
+    *,
+    snow_refill_width: float,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     r"""IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475).
 
     Oracle recurrence, marched DOWNWARD (both the IFS ``JK`` and our level
@@ -1243,6 +1247,9 @@ def _ifs_subcloud_rain_evaporation(
       applies the evap tendency EXPLICITLY (``subsidence_solve`` affects
       only the mass-flux kernel, not this coupling), so ``RMFCFL = 1`` is
       the value that cannot overshoot the break within a step (codex R1 #3).
+      ``rmfcfl`` sets this factor; the default 1 is the Bechtold path, the
+      faithful IFS chain passes the source's 3 (its tendencies are the
+      implicit cudtdqn port).
     * The rain SOURCE profile feeding the flux is the scheme's post-split
       ``dq_r_conv_dt`` (rain forms in the cloud layer and accumulates
       downward; a layer's own source joins the flux BELOW it —
@@ -1297,9 +1304,29 @@ def _ifs_subcloud_rain_evaporation(
 
     Returns
     -------
-    (evap_rate, rain_scale, melt_rate) : per-level vapor source [kg/kg/s],
-        the column-uniform rain-source debit factor in [0, 1], and the
-        per-level melt rate [kg/kg/s] (zeros when ``snow_melt=False``).
+    (evap_rate, rain_scale, melt_rate, evap_snow_rate) : per-level vapor
+        source [kg/kg/s], the column-uniform rain-source debit factor in
+        [0, 1], the per-level melt rate [kg/kg/s] (zeros when
+        ``snow_melt=False``), and the part of ``evap_rate`` that came from the
+        snow flux [kg/kg/s] (the caller books its extra fusion heat).
+
+    Evaporation acts on rain + snow (``ZRFL = PMFLXR + PMFLXS``,
+    cuflxn.F90:464) and is split between them in proportion to the entering
+    fluxes (``ZDENOM``, :484-488).  A snow flux overdrawn by melt plus its
+    share is refilled from the rain (:493-495); the oracle keeps ``PDPMEL``
+    and moves the water, the port books the same fluxes as a reduced
+    effective melt, so its fusion-heat bookkeeping stays exact.
+
+    KNOWN DIFFERENCE (RULE 5): the refill ``max(-snow_left, 0)`` is the C1
+    one-sided ``positive_part_c1`` of width ``snow_refill_width`` [kg/m^2/s]
+    (static float; 0 = the oracle's hard switch,
+    ``BechtoldConfig.snow_refill_width_kg_m2_s``, default 1e-8).  It is
+    exactly the oracle for ``snow_left >= 0`` (no overdraft: snow-free
+    columns, fully melted layers) and for overdrafts deeper than the width;
+    inside ``0 < -snow_left < width`` it refills up to ``4/27 width`` too
+    little, so the snow flux passed down can dip below 0 by that much
+    (1.5e-9 kg/m^2/s at the default; water is conserved).  Measured per case
+    in tests/unit/test_bechtold.py (``_REFILL_GAP``).
     """
     _dtype = jnp.result_type(q_v, q_sat_env, dq_r_conv_dt, below_lcl)
     g = constants.g
@@ -1329,7 +1356,7 @@ def _ifs_subcloud_rain_evaporation(
                  + (1.0 - land_frac) * rhebc_ocean).astype(_dtype)
     else:
         rhebc = rhebc_ocean.astype(_dtype)                     # (ncol,)
-    zcons2 = 1.0 / (g * dt)                                    # RMFCFL=1 branch
+    zcons2 = rmfcfl / (g * dt)                                 # ZCONS2, cuflxn.F90:209
 
     src_flux = jnp.maximum(dq_r_conv_dt, 0.0) * dp_full / g    # (ncol, nlev)
     sqrt_p = jnp.sqrt(p_half[:, :-1] / p_half[:, -1:])         # layer-top / sfc
@@ -1364,13 +1391,13 @@ def _ifs_subcloud_rain_evaporation(
         # Snow melt acts on the flux entering the layer TOP (same ordering
         # doctrine as the evaporation below); melted snow joins the RAIN.
         melt_k = jnp.minimum(snow_top, mcap_k)
-        snow_top = snow_top - melt_k
         # Oracle ordering (codex R1 #1 + snow R1): evaporation acts on the
-        # flux entering the layer TOP (``ZRFL = PMFLXR(JK)``, cuflxn:449);
+        # rain + snow entering the layer TOP (``ZRFL = PMFLXR(JK) +
+        # PMFLXS(JK)``, cuflxn:464, before this layer's melt);
         # the layer's OWN source — and its OWN melt, which the oracle adds to
         # PMFLXR(JK+1) AFTER the evap of PMFLXR(JK) — join only downstream.
         # Same-layer melt must not evaporate in its production layer.
-        zrfl = flux_top
+        zrfl = flux_top + snow_top
         zrfl_safe = jnp.where(zrfl > _IFS_EVAP_FLUX_TINY, zrfl, 1.0)
         zdrfl1 = (
             _IFS_RCPECONS * evap_scale
@@ -1393,16 +1420,24 @@ def _ifs_subcloud_rain_evaporation(
         evap_k = jnp.where(
             zrfl > _IFS_EVAP_FLUX_TINY, (zrfl - zrfln) * gate_k, 0.0,
         )
-        rain_out = (zrfl - evap_k + melt_k + alpha_k * src_k).astype(_dtype)
-        snow_out = (snow_top + (1.0 - alpha_k) * src_k).astype(_dtype)
-        return (rain_out, snow_out), (evap_k, melt_k)
+        evap_s = jnp.where(zrfl > _IFS_EVAP_FLUX_TINY,
+                           evap_k * snow_top / zrfl_safe, 0.0)
+        snow_left = snow_top - melt_k - evap_s + (1.0 - alpha_k) * src_k
+        over = positive_part_c1(
+            -snow_left, math.inf if snow_refill_width == 0 else 1.0 / snow_refill_width)
+        melt_k = melt_k - over
+        rain_out = (flux_top - (evap_k - evap_s) + melt_k
+                    + alpha_k * src_k).astype(_dtype)
+        snow_out = (snow_left + over).astype(_dtype)
+        return (rain_out, snow_out), (evap_k, melt_k, evap_s)
 
     ncol = q_v.shape[0]
     zero_c = jnp.zeros((ncol,), dtype=_dtype)
-    (rain_sfc, snow_sfc), (evap_sf, melt_sf) = jax.lax.scan(
+    (rain_sfc, snow_sfc), (evap_sf, melt_sf, evap_s_sf) = jax.lax.scan(
         _step, (zero_c, zero_c), inputs)                       # (nlev, ncol)
     evap = jnp.moveaxis(evap_sf, 0, 1)                         # (ncol, nlev)
     melt = jnp.moveaxis(melt_sf, 0, 1)
+    evap_snow = jnp.moveaxis(evap_s_sf, 0, 1)
     if snow_melt:
         # FOLD: snow reaching the surface melts forcibly INTO the surface
         # layer (the melt that would occur on the ground); its cooling books
@@ -1417,7 +1452,7 @@ def _ifs_subcloud_rain_evaporation(
     rain_scale = jnp.clip(
         1.0 - evap_total / jnp.maximum(rain_total, 1e-30), 0.0, 1.0,
     )
-    return evap_rate, rain_scale[:, None], melt_rate
+    return evap_rate, rain_scale[:, None], melt_rate, evap_snow * g / dp_full
 
 
 class _QadvTerms(NamedTuple):
@@ -2139,6 +2174,11 @@ def bechtold_convection(
         Pressure vertical velocity [Pa/s] (``PVERVEL``) for the RCAPQADV
         resolved-ascent gate at ~500 hPa.  ``None`` disables only that
         OR-branch (faithful where ``|omega| << 100 Pa/s``).
+    shf_w_m2, lhf_w_m2 : jax.Array or None, shape (ncol,)
+        Surface sensible / latent heat flux [W/m2], POSITIVE UPWARD (into
+        the atmosphere), the convention of the surface layer that produces
+        them.  The faithful IFS chain negates them at its entry into the
+        IFS PAHFS/PQHFL convention (positive downward).
 
     Returns
     -------
@@ -2148,17 +2188,20 @@ def bechtold_convection(
     conv_stoch_state_new : jax.Array, shape (ncol,)
         Updated AR1 noise state.
     """
-    # Faithful IFS chain, selected as a whole (user decision 2026-09-17):
-    # trigger -> first-guess cloud-base mass flux -> ascent launched at that
-    # flux -> cumastrn rescale -> cudtdqn tendencies.  Static python bool, so
-    # the legacy path below is not traced when this is on (and vice versa).
+    # Faithful IFS chain (user decision 2026-09-17): CUMASTRN as OpenIFS
+    # 8f6f722 runs it, oracle-matched (tests/atmosphere/
+    # test_bechtold_ifs_oracle.py).  Static python bool, so the legacy path
+    # below is not traced when this is on (and vice versa).
     if config.use_ifs_ascent:
         from legoesm.atmosphere.physics.convection._ifs_faithful import (
             ifs_faithful_convection,
         )
+        if shf_w_m2 is None or lhf_w_m2 is None:
+            raise ValueError(
+                "use_ifs_ascent needs the surface heat fluxes shf_w_m2 and "
+                "lhf_w_m2 (the IFS trigger reads PAHFS/PQHFL).")
         out, M_u_new = ifs_faithful_convection(
-            T, q_v, p_full, p_half, u, v, conv_prog_profile,
-            conv_stoch_state, prng_key, dt, config,
+            T, q_v, p_full, p_half, u, v, dt, config,
             shf_w_m2=shf_w_m2, lhf_w_m2=lhf_w_m2, land_frac=land_frac,
             dT_dt_adv=dT_dt_dyn, dq_dt_adv=dq_dt_dyn,
             # PTENT/PTENQ: cumastrn's TOTAL model tendency, which in IFS holds
@@ -2173,6 +2216,7 @@ def bechtold_convection(
                          (dT_dt_rad if dT_dt_dyn is None
                           else dT_dt_dyn + dT_dt_rad)),
             dq_dt_other=dq_dt_dyn,
+            omega=omega,
             out_ctor=ConvectionOutput,
         )
         return out, M_u_new, conv_stoch_state
@@ -2188,6 +2232,8 @@ def bechtold_convection(
             "(the shallow target is applied through the IFS closure's "
             "class blend); enable both or neither."
         )
+    validate_smoothing_width("BechtoldConfig snow_refill_width_kg_m2_s",
+                             config.snow_refill_width_kg_m2_s)
     if config.use_ifs_snow_melt and not config.use_ifs_subcloud_evap:
         raise ValueError(
             "use_ifs_snow_melt requires use_ifs_subcloud_evap=True (the "
@@ -2644,17 +2690,6 @@ def bechtold_convection(
         tau_conv = jnp.clip(
             _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
         )
-        # The diurnal-cycle land branch wants ZTAU/ZTAURES, and ZTAU is the
-        # CLAMPED turnover time -- the oracle divides the resolution factor
-        # back out of the clamped value, it does not step around the clamp.
-        # Handing it the raw ratio skipped the 720 s floor: measured 197 s on a
-        # heated tropical land column, so the subtraction came out 3.7x too
-        # small before the departure gate shrank it further.  With the floor
-        # the land timescale is at least 720 s, which is what makes the term
-        # able to hold CAPE back through the morning.
-        _tau_capdcycl = jnp.clip(
-            _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
-        ) / _ztaures
     if config.use_ifs_cape_closure:
         # -- Full IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
         # (cumastrn.F90:704-833; see _ifs_cape_closure_target).  Supersedes the
@@ -2762,7 +2797,7 @@ def bechtold_convection(
                  - (p_half[:, -1] - p_parcel_source))
                 / _CAPDCYCL_GATE_W_PA)
             _zdcy = _ifs_capdcycl(
-                _supply_virt, _tau_capdcycl, _z_base, u, v, _base_w2, p_full,
+                _supply_virt, _tau_pure, _z_base, u, v, _base_w2, p_full,
                 land_frac, _gate_w, config.capdcycl_land_tau_scale,
             )
         _qadv = None
@@ -3142,8 +3177,8 @@ def bechtold_convection(
         # the helper is q_sat-named but is a generic level-index gather).
         _rh_base = _ifs_cloud_base_qsat(_rh_evap, k_lcl_smooth, levels_arr)[:, 0]
         _rh_top = _ifs_cloud_base_qsat(_rh_evap, k_lnb_smooth, levels_arr)[:, 0]
-        evap_rate_ifs, rain_scale_ifs, melt_rate_ifs = (
-            _ifs_subcloud_rain_evaporation(
+        evap_rate_ifs, rain_scale_ifs, melt_rate_ifs, evap_snow_rate_ifs = (
+            ifs_subcloud_rain_evaporation(
                 q_v, _q_sat_evap, p_half, dp_full, dq_r_conv_dt,
                 _below_lcl_evap, _rh_base, _rh_top, deep_weight, dt,
                 land_frac=(land_frac if config.use_ifs_land_rhebc else None),
@@ -3152,10 +3187,16 @@ def bechtold_convection(
                 evap_scale=config.subcloud_evap_scale,
                 rhebc_land_val=config.rhebc_land,
                 rhebc_land_deep_val=config.rhebc_land_deep,
+                snow_refill_width=config.snow_refill_width_kg_m2_s,
             ))
         dT_dt = dT_dt - (constants.L_v / constants.c_pd) * evap_rate_ifs
         dq_v_dt = dq_v_dt + evap_rate_ifs
         if config.use_ifs_snow_melt:
+            # Sublimating snow costs L_s = L_v + L_f: its formation was booked
+            # +L_f below, so the column enthalpy closes.  OpenIFS heats all of
+            # PDMFUP with the temperature blend FOELHMCU (cudtdqn.F90:281), a
+            # recorded departure.
+            dT_dt = dT_dt - (constants.L_f / constants.c_pd) * evap_snow_rate_ifs  # latent-ok: Bechtold oracle constant
             # Formation-side FREEZING heat (+L_f on the snow-source share:
             # our plume condensed with L_v only) paired with the march's
             # melt COOLING (-L_f, incl. the forced surface fold) — the

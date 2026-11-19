@@ -66,7 +66,6 @@ import numpy as np
 from legoesm.atmosphere.forcing.idealized.large_scale_forcing import upwind_dphi_dz_top2bottom
 from legoesm.atmosphere.physics import MicrophysicsConfig
 from legoesm.atmosphere.physics._shared import exner_function
-from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.thermo import saturation_mixing_ratio
 
 from .bridge import LESReferenceArtifact
@@ -104,11 +103,11 @@ NUDGE_RECIPE = {"source": NUDGE_RECIPE_SOURCE, "nudge_z_i_m": _CB_NUDGE_Z_I_M,
                 "nudge_z_r_m": _CB_NUDGE_Z_R_M, "tau_scalar_s": _CB_TAU_SCALAR_S}
 
 CASE_NAME = "cloudbench_s{site:03d}_m{month:02d}_{exp}"
-#: The column-model microphysics recorded for CloudBench (PI 2026-11-01): our
-#: Kessler with the CloudBench one-moment warm-rain set. KNOWN DIFFERENCE: the
-#: LES's one-moment scheme also carried ice and snow.
-MICROPHYSICS = MicrophysicsConfig(scheme="kessler",
-                                  kessler=KesslerConfig(parameter_set="cloudbench"))
+#: The column-model microphysics recorded for CloudBench (PI 2026-11-01): the
+#: CloudBench one-moment warm-rain scheme, a path of its own beside the Kessler
+#: port (user 2026-11-19). KNOWN DIFFERENCE: the LES's one-moment scheme also
+#: carried ice and snow.
+MICROPHYSICS = MicrophysicsConfig(scheme="cloudbench_warm_rain")
 HELD_OUT_FRACTION = 0.2
 HELD_OUT_SEED = 20261031
 HELD_OUT_FILE = "held_out_sites.json"

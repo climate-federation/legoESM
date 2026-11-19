@@ -1,0 +1,23 @@
+{
+ "record": "/burg/glab/users/pg2328/oracle_audit/tier4/thddo/ctl_on (t4_thddo_record_*.bin, kt=17281)",
+ "cfg": "NEMO 5.0.1 SI3 ORCA1_T4THDDO",
+ "main_literal": "/burg/glab/users/pg2328/oracle_audit/tier4/thddo/lit_ctl_on.npz (main @3148c95a76)",
+ "spread": "/burg/glab/users/pg2328/oracle_audit/tier4/thddo/seeds/out_*.npz (20-seed 1-ulp)",
+ "harness_sha256": "adbe5197ec08e057cc90b1f25bbe92986725e368827c61c52688be41f0913d84",
+ "carrier": "h=v/a, e=e_i/v*nlay, S=sv_i/v, S_layers=szv_i/v*nlay (port_literal.py)",
+ "cells": [
+  4463,
+  4509,
+  4510,
+  4511,
+  4701,
+  5083,
+  5087,
+  5131,
+  11983,
+  12031,
+  12079,
+  88463
+ ],
+ "groups": "4 new-ice snowy uncapped, 3 new-ice snowy at rn_amax cap, 1 open water, 4 non-new ice controls"
+}

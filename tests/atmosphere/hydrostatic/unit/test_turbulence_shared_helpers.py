@@ -19,11 +19,16 @@ shift XLA fusion by ~1e-12, so tolerances are rtol 1e-10 under x64):
 
 from __future__ import annotations
 
+from legoesm import constants
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.atmosphere.physics._shared import louis_stability_functions
+from legoesm.atmosphere.physics._shared import (
+    louis_stability_functions,
+    surface_buoyancy_flux,
+)
 from legoesm.atmosphere.physics.turbulence.pbl_height import (
     first_crossing_height,
 )
@@ -37,18 +42,22 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 # ---------------------------------------------------------------------------
 
 def _louis_reference(Ri, l_mix, dz, b, c, d, blend_sharpness, b_heat):
-    """Inline copy of the OLD louis.py stability-function block (pre-dedup)."""
+    """Inline copy of the OLD louis.py stability-function block (pre-dedup),
+    with the stable HEAT function moved to the OpenIFS vdfexcu.F90:395 form
+    (sqrt multiplies) by the oracle port and the ``sqrt(|Ri| + 1e-10)`` floor
+    replaced by the exact ``sqrt(|Ri|)`` (ICON SQRT(ABS(zri)), F4 spread fix);
+    legacy (no-heights) unstable geometry."""
     Ri_neg = jnp.minimum(Ri, 0.0)
     denom_unstable = (
         1.0 + 3.0 * b * c * l_mix ** 2
-        * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz ** 2 + 1e-10)
+        * jnp.sqrt(jnp.abs(Ri_neg)) / (dz ** 2 + 1e-10)
     )
     f_unstable_m = 1.0 - 2.0 * b * Ri_neg / denom_unstable
     f_unstable_h = 1.0 - 2.0 * b_heat * Ri_neg / denom_unstable
     Ri_pos = jnp.maximum(Ri, 0.0)
     sqrt_stable = jnp.sqrt(1.0 + d * Ri_pos)
     f_stable_m = 1.0 / (1.0 + 2.0 * b * Ri_pos / sqrt_stable)
-    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos / sqrt_stable)
+    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos * sqrt_stable)
     blend = jax.nn.sigmoid(blend_sharpness * Ri)
     f_m = (1.0 - blend) * f_unstable_m + blend * f_stable_m
     f_h = (1.0 - blend) * f_unstable_h + blend * f_stable_h
@@ -97,8 +106,10 @@ def test_louis_stability_matches_old_ysu_inline():
     blend_ri = jax.nn.sigmoid(sharp * Ri)
     f_m_ref = (1.0 - blend_ri) * f_unstable + blend_ri * f_stable
     np.testing.assert_allclose(np.asarray(f_m), np.asarray(f_m_ref), rtol=1e-10)
-    # b_heat defaulted to b: heat function must equal momentum function.
-    np.testing.assert_allclose(np.asarray(f_h), np.asarray(f_m), rtol=1e-12)
+    # b_heat defaulted to b: the unstable heat function equals the momentum
+    # one (the stable heat form differs: sqrt multiplies, OpenIFS vdfexcu:395).
+    neg = np.asarray(Ri) <= 0.0
+    np.testing.assert_allclose(np.asarray(f_h)[neg], np.asarray(f_m)[neg], rtol=1e-12)
 
 
 def test_louis_stability_neutral_limit_and_grad():
@@ -315,3 +326,14 @@ def test_implicit_diffusion_grad_finite():
     g = jax.grad(loss)(K_half)
     assert bool(jnp.all(jnp.isfinite(g)))
     assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_surface_buoyancy_flux_adds_the_virtual_moisture_term():
+    """(w'theta_v')_s = (w'theta')_s + (R_v/R_d - 1) theta (w'q')_s."""
+    wth = jnp.array([0.1, 0.0, -0.02])
+    wq = jnp.array([0.0, 4e-5, 4e-5])
+    th = jnp.array([300.0, 300.0, 290.0])
+    got = np.asarray(surface_buoyancy_flux(wth, wq, th))
+    exp = np.asarray(wth) + (constants.R_v / constants.R_d - 1.0) * np.asarray(th) * np.asarray(wq)
+    np.testing.assert_allclose(got, exp, rtol=1e-6)
+    assert got[1] > 0.0                                    # moisture alone is buoyant

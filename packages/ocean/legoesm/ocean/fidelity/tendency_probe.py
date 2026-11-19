@@ -327,6 +327,15 @@ def probe_latlon_cgrid(
             implicit_vertical_diffusion_ocean,
         )
         _dt_tr = dt_tracer if dt_tracer is not None else dt
+        if (getattr(_vm_cfg, "scheme", "none") == "epbl"
+                and float(_dt_tr) != float(dt)):
+            # ePBL takes the momentum dt (as CATKE does, below) and feeds the
+            # tracer implicit solve, which runs over the tracer dt; the model
+            # refuses dt_mom_ratio != 1 for ePBL, and so does the probe.
+            raise ValueError(
+                f"ePBL needs the tracer timestep ({float(_dt_tr)} s) to equal "
+                f"the momentum timestep ({float(dt)} s), as the model's "
+                "dt_mom_ratio == 1 requirement for ePBL")
         _nemo_literal_tke = (
             getattr(_vm_cfg, "scheme", "none") == "tke"
             and getattr(
@@ -347,8 +356,12 @@ def probe_latlon_cgrid(
         _dt_tke = tke_rn_dt if _nemo_literal_tke else dt
         # K_v = the closure's TRACER diffusivity at this state (the same call
         # the production implicit solve makes).
+        # Production passes degrees(grid.lat_T) (its grid is always a
+        # LatLonCGridGeometry); a plain LatLonGrid carries lat2d instead.
+        _lat_T = getattr(grid, "lat_T", None)
         _K_v, _A_v = compute_vertical_K_profiles(
             state, z_coord, surface_forcing, config.physics, dt_tke=_dt_tke,
+            lat_deg=jnp.degrees(grid.lat2d if _lat_T is None else _lat_T),
         )
         _dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
         _dz_half = build_dz_half(_dz_cell)

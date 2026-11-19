@@ -283,6 +283,9 @@ classical:
     atm.turb.CLUBBConfig:
       prognostic: true
     atm.micro.MorrisonConfig:
+      # Explicit kk2000 (SAM/E3SM KK2000): the unset default resolves to the
+      # CAM6 kk2000_cam6 law under mg, which needs CLUBB relvar this lane lacks.
+      warm_rain_scheme: kk2000
       # CAM6 clubb_do_liqsupersat = .false.: no condensation step after the
       # physics, and no ice-curve blend of it. Matches the MPAS production
       # deck (config/amip/amip_production.yaml, both rows false).

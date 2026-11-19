@@ -32,8 +32,8 @@ set -euo pipefail
 
 ROOT=${ROOT:-${SLURM_SUBMIT_DIR:-$PWD}}
 SRC=${SRC:-/work/bd1083/b309178/diffESM/legoesm_ggn/ETOPO_2022_60s.nc}
-SRC1DEG=${SRC1DEG:-/work/bd1083/b309178/diffESM/legoesm_ap/data/bathymetry/etopo_1deg_clean.nc}
-PROD=${PROD:-/work/bd1083/b309178/diffESM/legoesm_ap/data/orography/sso_stdh_2deg_from1deg.nc}
+SRC1DEG=${SRC1DEG:-/work/bb1596/b309178/diffESM/legoesm_ap/data/bathymetry/etopo_1deg_clean.nc}
+PROD=${PROD:-/work/bb1596/b309178/diffESM/legoesm_ap/data/orography/sso_stdh_2deg_from1deg.nc}
 OUT=${OUT:-/work/bd1083/b309178/diffESM/legoesm_pg/sso_regen_1712}
 : "${PY:?set PY to a Python with the legoesm dependencies}"
 for f in "$SRC" "$SRC1DEG" "$PROD" "$PY"; do

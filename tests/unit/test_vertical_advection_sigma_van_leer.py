@@ -52,6 +52,7 @@ jax.config.update("jax_enable_x64", True)
 # Tropical UTLS configuration of the measured bias (cldF_fsd, 2.5 deg MPAS):
 # 30 sigma levels, sigma_top = 0.01, dt = 75 s.
 NLEV = 30
+SIGMA_SCHEMES = ("upwind", "van_leer")  # what the sigma-coordinate operator takes
 SIGMA_TOP = 0.01
 
 
@@ -150,13 +151,19 @@ def test_van_leer_raises_below_the_stencil_width(nlev):
 
 
 def test_scheme_tuple_is_the_dispatch_domain():
-    assert VERTICAL_ADVECTION_SCHEMES == ("upwind", "van_leer")
+    # The shared tuple also carries the HYBRID-only "sb"; the sigma operator
+    # takes exactly the two schemes below and refuses "sb" loudly (#2055).
+    assert VERTICAL_ADVECTION_SCHEMES == SIGMA_SCHEMES + ("sb",)
+    coord = _coord()
+    with pytest.raises(ValueError, match="hybrid-coordinate flux form"):
+        vertical_advection(jnp.zeros((1, NLEV)), jnp.zeros((1, NLEV + 1)),
+                           coord, scheme="sb")
 
 
 # ------------------------------------------------------------------ consistency
 
 
-@pytest.mark.parametrize("scheme", VERTICAL_ADVECTION_SCHEMES)
+@pytest.mark.parametrize("scheme", SIGMA_SCHEMES)
 def test_constant_field_zero_tendency(scheme):
     coord = _coord()
     sd = _sigma_dot(coord.sigma_half)[None, :] * jnp.ones((3, NLEV + 1))
@@ -301,7 +308,7 @@ def test_tropopause_slope_break_is_advected_without_overshoot():
     lo0, hi0 = float(f0.min()), float(f0.max())
 
     out = {}
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in SIGMA_SCHEMES:
         f = f0
         over = under = 0.0
         for _ in range(nstep):
@@ -525,7 +532,7 @@ def test_boundary_levels_are_the_first_order_tendency_under_both_schemes():
     sd = jnp.asarray(rng.normal(size=(4, NLEV + 1)) * 1e-5)
     sd0 = sd.at[..., 0].set(0.0).at[..., -1].set(0.0)
     sd1 = sd.at[..., 0].set(9.9e-4).at[..., -1].set(-9.9e-4)
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in SIGMA_SCHEMES:
         a = vertical_advection(f, sd0, coord, scheme=scheme)
         b = vertical_advection(f, sd1, coord, scheme=scheme)
         # Both schemes give the SAME boundary tendency (van_leer defers to the
@@ -549,7 +556,7 @@ def test_jit_parity_matches_eager():
     coord = _coord()
     f = _theta_smooth(coord.sigma_full)[None, :]
     sd = _sigma_dot(coord.sigma_half)[None, :]
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in SIGMA_SCHEMES:
         eager = vertical_advection(f, sd, coord, scheme=scheme)
         jitted = jax.jit(vertical_advection, static_argnums=(3,))(
             f, sd, coord, scheme)
@@ -634,8 +641,9 @@ def test_mpas_config_default_and_dispatch():
 def test_mpas_tendencies_reject_unknown_and_hybrid():
     """Fail-early on the STATIC config value, before any tracing."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies,
-    )
+        MPASPrimitiveEquationConfig,
+        )
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     from legoesm.grids.vertical import standard_hybrid_levels
 
     coord = _coord()
@@ -643,9 +651,9 @@ def test_mpas_tendencies_reject_unknown_and_hybrid():
     cfg_bad = MPASPrimitiveEquationConfig(vert_advection_scheme="nope")
     cfg_vl = MPASPrimitiveEquationConfig(vert_advection_scheme="van_leer")
     with pytest.raises(ValueError, match="unknown vert_advection_scheme"):
-        mpas_hydrostatic_tendencies(None, None, coord, cfg_bad)
+        mpas_pe_tendencies(None, None, coord, cfg_bad, vertical_form="legacy")
     with pytest.raises(ValueError, match="sigma vertical coordinate only"):
-        mpas_hydrostatic_tendencies(None, None, hyb, cfg_vl)
+        mpas_pe_tendencies(None, None, hyb, cfg_vl, vertical_form="legacy")
 
 
 def test_driver_config_and_validate_strict():
@@ -710,7 +718,7 @@ def test_tracer_blob_stays_positive_and_bounded_under_varying_sigma_dot():
     assert 2.0 <= cour / 0.0322 <= 2.5, (
         f"Courant {cour:.4f} is {cour/0.0322:.2f}x the production raw-face "
         f"maximum; the docstring claims ~2.1x")
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in SIGMA_SCHEMES:
         q = q0
         lo = hi = None
         for _ in range(400):
@@ -729,7 +737,7 @@ def test_float32_and_float64_finite_including_uniform_columns(dtype):
     coord = create_sigma_coordinate(NLEV, sigma_top=SIGMA_TOP, dtype=dtype)
     f = jnp.asarray(_theta_smooth(coord.sigma_full)[None, :], dtype)
     sd = jnp.asarray(_sigma_dot(coord.sigma_half)[None, :], dtype)
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in SIGMA_SCHEMES:
         out = vertical_advection(f, sd, coord, scheme=scheme)
         assert out.dtype == dtype and bool(jnp.all(jnp.isfinite(out)))
 
@@ -800,17 +808,18 @@ def test_mpas_tendencies_default_unchanged_and_van_leer_moves_all_three_paths():
     cover — theta (dT_dt), the tracers, and the edge winds (du_dt).
     """
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies,
-    )
+        MPASPrimitiveEquationConfig,
+        )
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     mesh, state = _mpas_state_and_mesh()
     coord = _coord()
     base = MPASPrimitiveEquationConfig()
     assert base.vert_advection_scheme == "upwind"
-    t_def = mpas_hydrostatic_tendencies(state, mesh, coord, base)
-    t_up = mpas_hydrostatic_tendencies(
-        state, mesh, coord, base._replace(vert_advection_scheme="upwind"))
-    t_vl = mpas_hydrostatic_tendencies(
-        state, mesh, coord, base._replace(vert_advection_scheme="van_leer"))
+    t_def = mpas_pe_tendencies(state, mesh, coord, base, vertical_form="legacy")
+    t_up = mpas_pe_tendencies(
+        state, mesh, coord, base._replace(vert_advection_scheme="upwind"), vertical_form="legacy")
+    t_vl = mpas_pe_tendencies(
+        state, mesh, coord, base._replace(vert_advection_scheme="van_leer"), vertical_form="legacy")
 
     assert jnp.array_equal(t_def.dT_dt.data, t_up.dT_dt.data)
     assert jnp.array_equal(t_def.du_dt.data, t_up.du_dt.data)
@@ -880,7 +889,7 @@ def test_factory_forwards_the_scheme_to_the_built_mpas_model():
     mesh = create_voronoi_mesh(1)
     coord = _coord(6)
     base = dict(discretization="mpas", model_type="hydrostatic", dt=300.0)
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in SIGMA_SCHEMES:
         cfg = ExperimentConfig(
             dycore=DycoreConfig(mpas_vert_advection_scheme=scheme, **base),
             grid=ExperimentConfig().grid._replace(grid_type="voronoi",

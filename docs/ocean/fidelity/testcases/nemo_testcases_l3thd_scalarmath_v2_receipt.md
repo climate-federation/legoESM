@@ -53,7 +53,7 @@ The search reused rather than duplicated:
 
 - `nemo_si3_exchange_drift_gate.py` for the source-defined 36-field exchange
   layout and byte mapping;
-- `nemo_si3_bulk_flux_gate.py` for all three bulk frame schemas and the existing
+- `nemo_si3_o7_lane_bulk_flux_gate.py` for all three bulk frame schemas and the existing
   legoESM implementation;
 - `nemo_si3thd_phase2_gate.py` and
   `nemo_si3thd_phase2b_year_gate.py` for thermodynamics/ZDF parsing and the

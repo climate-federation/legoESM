@@ -21,7 +21,7 @@ RESTART=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/mpas_orca1fait
 [ -f "$RESTART" ] || { echo "FATAL: no restart at $RESTART"; exit 1; }
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 $PY -u \
   scripts/validate/ocean_fidelity/mpas_treguier_kappa_operators.py \
-  --restart "$RESTART" --level 7 --lloyd 20 \
+  --restart "$RESTART" --level 7 --lloyd 50 \
   --map $ROOT/omip_nemo/kappa_jensen_gap.png
 rc=$?
 echo "DONE rc=$rc"

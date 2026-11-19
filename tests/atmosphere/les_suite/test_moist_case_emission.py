@@ -149,37 +149,37 @@ def test_rico_records_interactive_surface_fluxes(tmp_path, monkeypatch, capsys):
     assert art.les_setup["surface"].startswith("interactive bulk")
 
 
-def test_rico_selects_the_cloudbench_kessler_set_and_the_scm_inherits_it(
+def test_rico_selects_the_cloudbench_warm_rain_and_the_scm_inherits_it(
         tmp_path, monkeypatch, capsys):
-    """--kessler-parameter-set cloudbench reaches the scheme, is recorded in the
-    artifact, the SCM arm rebuilds the same set from that record, and every
+    """--cloudbench-warm-rain reaches the scheme, is recorded in the
+    artifact, the SCM arm rebuilds the same scheme from that record, and every
     budget still closes to round-off."""
     from legoesm.atmosphere.les_suite.bridge import load_artifact
     from legoesm.atmosphere.les_suite.scm_runner import moist_scm_microphysics
     mod = _load("run_rico_les")
     art_path = tmp_path / "rico_cb.npz"
     monkeypatch.setattr(sys, "argv", ["run_rico_les"] + _TINY + [
-        "--kessler-parameter-set", "cloudbench",
+        "--cloudbench-warm-rain",
         "--hours", "0.004", "--dt", "1.0", "--output", str(tmp_path / "rec"),
         "--emit-suite-artifact", str(art_path)])
     assert mod.main() == 0
     rows = _budget_lines(capsys.readouterr().out)
     art = load_artifact(art_path)
-    assert art.les_setup["microphysics"]["kessler"]["parameter_set"] == "cloudbench"
-    assert moist_scm_microphysics(art).kessler.parameter_set == "cloudbench"
+    assert art.les_setup["microphysics"]["scheme"] == "cloudbench_warm_rain"
+    assert moist_scm_microphysics(art).scheme == "cloudbench_warm_rain"
     assert set(rows) == {"theta", "u", "v", "water", "micro_water", "micro_enthalpy",
                          "positivity_water", "positivity_enthalpy"}
     for lab, r in rows.items():
         assert abs(r["residual"]) <= 1e-13 * abs(r["column"]) + 1e-15, (lab, r)
 
 
-def test_rico_kessler_parameter_set_needs_kessler(tmp_path, monkeypatch):
+def test_rico_cloudbench_warm_rain_needs_kessler(tmp_path, monkeypatch):
     mod = _load("run_rico_les")
     monkeypatch.setattr(sys, "argv", ["run_rico_les", "--microphysics", "morrison",
-                                      "--kessler-parameter-set", "cloudbench",
+                                      "--cloudbench-warm-rain",
                                       "--output", str(tmp_path / "rec")])
     # RICO's catalog scheme is Kessler, so a non-Kessler request is refused there,
-    # before the parameter-set check is reached
+    # before the warm-rain check is reached
     with pytest.raises(ValueError, match="disagrees with the"):
         mod.main()
 

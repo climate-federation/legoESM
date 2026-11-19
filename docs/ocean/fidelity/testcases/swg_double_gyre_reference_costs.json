@@ -1,0 +1,48 @@
+{
+  "schema": "swg-double-gyre-reference-costs-v1",
+  "measured_on": "2026-10-12/13",
+  "nemo_three_year": {
+    "wall_seconds": 22918,
+    "model_days": 1095,
+    "mpi_ranks": 32,
+    "cpu": "Intel Xeon Gold 6242R",
+    "source_artifact": "md_dg_dx6p25_dt50_3yr/run.log",
+    "source_artifact_sha256": "7f39aa1c350af20307b4b48b7d5a7d8ee3402ac1efc0486a7fc60e4282fd83ed"
+  },
+  "nemo_three_year_fresh_rebuild": {
+    "wall_seconds": 17404,
+    "model_days": 1095,
+    "mpi_ranks": 32,
+    "cpu": "Intel Xeon Gold 6242R",
+    "source_artifact": "swgdgsa_rounds/round2/operator_acquisition/nemo/dg_3yr/run.log",
+    "source_artifact_sha256": "145cabbb53e3223bd31599e728a1491add7a2f7e6a65a404cc027560c0f821fa",
+    "note": "Same host and deck as nemo_three_year, fresh NEMO build; all 96 restart tiles byte-identical to the reference. The two times bound the measured spread on this host; wall time depends on machine load."
+  },
+  "legoesm_gpu_three_year_daily_mean": {
+    "wall_seconds": 8117,
+    "model_days": 1095,
+    "gpu": "Tesla V100S-PCIE-32GB",
+    "source_artifact": "swgdg_lego_3yr_dailymean.log",
+    "source_artifact_sha256": "0082e3c6d33e8b0afa4138df1584cbd45d108c23ae34988aa763a9a50ac8cb19",
+    "note": "This older driver log records wall time but not allocator high-water memory. A fresh Round-C manifest must supply peak_bytes_in_use."
+  },
+  "legoesm_cpu_one_day": {
+    "wall_seconds": 233.93357684463263,
+    "model_days": 1,
+    "cpu": "Intel Xeon Gold 6242R",
+    "source_artifact": "cpu_fallback_1d/manifest.json",
+    "source_artifact_sha256": "60d38083ff1134ff514562d18643aa8bce5267b3b5eafd8ac5ed7cd60bbf452c"
+  },
+  "movie_year1": {
+    "wall_seconds": 1794,
+    "frames": 365,
+    "cpu": "Intel Xeon Gold 6242R",
+    "source_artifact": "swgdgsa_rounds/round3/movie_year1.log",
+    "source_artifact_sha256": "7c154a1b6d9aac0653da2f52ccb9b78580cbc72e7c3a47664231cca1260d1351"
+  },
+  "planning_reservations": {
+    "nemo_32_core_hours": 7,
+    "legoesm_one_gpu_hours": 2.5,
+    "basis": "Measured 6.366 h NEMO and 2.255 h GPU runs rounded upward for scheduling; build, checks, climate, and movie need additional wall time."
+  }
+}

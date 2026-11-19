@@ -61,11 +61,13 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "microphysics",
         # Morrison warm-rain law (kk2000 | seifert_beheng | seifert_beheng_sb2001).
         "morrison_warm_rain_scheme",
+        "sea_ice_albedo_scheme",
         "convection",
         "turbulence",
         "surface_bulk_scheme",
         "surface_thermo_convention",
         "surface_stability_scheme",  # already guarded (config.py); ratchet entry
+        "surface_unstable_scheme",  # membership check in validate_strict
         "land_surface_scheme",
         "land_snow_scheme",
         "gravity_wave_drag",
@@ -87,6 +89,7 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "ghg_forcing",
         "ozone_forcing",
         "ozone_source",
+        "land_fraction_source",
         "solar_source",
         "solar_spectral_band_order",
         "dataset",

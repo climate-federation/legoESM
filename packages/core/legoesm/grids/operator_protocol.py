@@ -160,3 +160,41 @@ _REQUIRED_EDGE_OPERATORS: tuple[tuple[str, int], ...] = (
 def validate_edge_operators(grid: Any) -> None:
     """Raise ``TypeError`` unless *grid* implements every edge-normal operator."""
     _validate_operators(grid, _REQUIRED_EDGE_OPERATORS)
+
+
+# --- Collocated Cartesian 3-vector interface (RBF-FD) ------------------------
+#
+# Meshless collocated grids carry the velocity as its three Cartesian
+# components at every node, tangent to the sphere.  ``CollocatedOperators`` is
+# the sibling contract: surface ``divergence(ux, uy, uz)`` -> node scalar,
+# surface ``gradient(phi)`` -> ``(gx, gy, gz)`` (tangent), and ``vorticity``
+# = radial component of the surface curl.  No stagger, so no remap or halo.
+
+
+@runtime_checkable
+class CollocatedOperators(Protocol):
+    """Grid-dispatched operators for a collocated Cartesian 3-vector velocity."""
+
+    def divergence(self, ux: Any, uy: Any, uz: Any) -> Any:
+        """Surface divergence of a tangent field -> node scalar."""
+        ...
+
+    def gradient(self, phi: Any) -> Any:
+        """Surface gradient of a node scalar -> ``(gx, gy, gz)``."""
+        ...
+
+    def vorticity(self, ux: Any, uy: Any, uz: Any) -> Any:
+        """Radial component of the surface curl -> node scalar."""
+        ...
+
+
+_REQUIRED_COLLOCATED_OPERATORS: tuple[tuple[str, int], ...] = (
+    ("divergence", 3),
+    ("gradient", 1),
+    ("vorticity", 3),
+)
+
+
+def validate_collocated_operators(grid: Any) -> None:
+    """Raise ``TypeError`` unless *grid* implements every collocated operator."""
+    _validate_operators(grid, _REQUIRED_COLLOCATED_OPERATORS)

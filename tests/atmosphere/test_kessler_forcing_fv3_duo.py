@@ -245,16 +245,29 @@ def test_bridge_refuses_fewer_than_three_tracers(duo_bundle):
     assert KESSLER_TRACER_SLOTS == ("q_v", "q_c", "q_r")
 
 
-def test_dry_columns_are_a_no_op(duo_bundle):
+# RULE 5 record (x64 SLURM 2026-11-11): max |q| per species (q_v, q_c, q_r)
+# after one default step on all-zero water; the bounded smooth switch's
+# round-off residual.  Exactly zero at the hard limit.
+DEFAULT_GAP_DRY_Q = (3.4496277765e-20, 3.707203646e-20, 0.0)
+
+
+@pytest.mark.parametrize("hard", [True, False], ids=["hard_limit", "default"])
+def test_dry_columns_are_a_no_op(duo_bundle, hard):
     """No vapour, no cloud, no rain -> zero tendency everywhere (a sign or
     layout slip would show up as spurious heating on a dry column)."""
+    from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
+    cfg = KesslerConfig(saturation_sharpness=1.0e30) if hard else None
     state, press, _ = duo_bundle
     zeros = [jnp.zeros((6, M, M, KM)) for _ in range(3)]
     out_state, out_press, out_q = apply_kessler_step_sixface_jax(
-        state, press, zeros, dt=DT, **KW)
+        state, press, zeros, dt=DT, config=cfg, **KW)
     assert np.array_equal(np.asarray(out_state["pt"]), state["pt"])
     assert np.array_equal(np.asarray(out_state["delp"]), state["delp"])
     for nm in press:
         assert np.array_equal(np.asarray(out_press[nm]), np.asarray(press[nm])), nm
-    for x in out_q:
-        assert not np.asarray(x).any()
+    if hard:
+        for x in out_q:
+            assert not np.asarray(x).any()
+    else:
+        np.testing.assert_allclose([float(np.abs(np.asarray(x)).max()) for x in out_q],
+                                   DEFAULT_GAP_DRY_Q, rtol=1e-6, atol=1e-12)

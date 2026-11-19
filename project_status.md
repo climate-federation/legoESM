@@ -12,7 +12,8 @@ Maturity: **run_tested** (integration completed clean) · **init_only** (constru
 | `templates/ocean/barotropic_wave.yaml` | tier1 | primitive_equation | idealized | structurally_validated | ✅ | Barotropic wave propagation: a single-layer wave tests the C-grid dispersion rel |
 | `templates/ocean/bench.yaml` | tier1 | primitive_equation | global | structurally_validated | ✅ | NEMO-BENCH-inspired performance benchmark: flat-bottom all-ocean box, zero analy |
 | `templates/ocean/geostrophic_adjustment.yaml` | tier1 | primitive_equation | idealized | structurally_validated | ✅ | Geostrophic adjustment: an initially-unbalanced meridional temperature front (th |
-| `templates/ocean/inertia_gravity_wave.yaml` | tier1 | primitive_equation | idealized | structurally_validated | ✅ | Inertia-gravity (Poincaré) wave propagation: a barotropic-equivalent shallow-wat |
+| `templates/ocean/inertia_gravity_wave.yaml` | tier1 | primitive_equation | idealized | run_tested | ✅ | Inertia-gravity (Poincaré) wave in an f-plane channel (Bishnu et al. 2024): x-pe |
+| `templates/ocean/inertia_gravity_wave_global.yaml` | tier1 | primitive_equation | idealized | init_only | ✅ | Inertia-gravity (Poincaré) wave propagation: a barotropic-equivalent shallow-wat |
 | `templates/sea_ice/itd_roundtrip.yaml` | tier1 | itd | column | structurally_validated | ✅ | Ice-thickness-distribution (ITD) linear-remap round-trip: advecting the ITD forw |
 | `templates/sea_ice/stefan_growth.yaml` | tier1 | thermodynamic | column | structurally_validated | ✅ | Stefan problem: analytic ice-growth rate under a fixed cold surface — the canoni |
 | `templates/3d_idealized/held_suarez.yaml` | tier2 | hydrostatic | global | run_tested | ✅ | Held-Suarez (1994) — Newtonian relaxation to a zonally-symmetric radiative equil |
@@ -36,4 +37,4 @@ Maturity: **run_tested** (integration completed clean) · **init_only** (constru
 | `templates/global_ocean/omip_latlon.yaml` | tier3 | primitive_equation | global | init_only | ✅ | OMIP-style forced global ocean: lat-lon C-grid finite-volume hydrostatic primiti |
 | `templates/global_ocean/omip_latlon_kpp.yaml` | tier3 | primitive_equation | global | structurally_validated | ✅ | OMIP-style forced global ocean (lat-lon C-grid) with the physics pipeline config |
 
-**29/29 templates valid.**
+**30/30 templates valid.**

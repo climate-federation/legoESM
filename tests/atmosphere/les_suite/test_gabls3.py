@@ -20,6 +20,7 @@ import jax.numpy as jnp  # noqa: E402
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
 from legoesm.atmosphere.forcing import gabls3_les as gb  # noqa: E402
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH  # noqa: E402
 
 _RUN = Path(__file__).resolve().parents[3] / "scripts" / "run"
 _TINY = ["--smoke", "--hours", "0.003", "--nx", "8", "--ny", "8", "--nz", "16",
@@ -69,7 +70,8 @@ def test_geostrophic_and_advection_profiles_follow_the_spec():
 
 # --- MOST from a reference height ----------------------------------------------
 def test_most_reference_height_uses_the_integral_scalar_relation():
-    kw = dict(spd_mean=jnp.asarray(5.0), z1=3.125, z0=0.15, theta_ref=290.0)
+    kw = dict(spd_mean=jnp.asarray(5.0), z1=3.125, z0=0.15, theta_ref=290.0,
+              zeta_cap_width=MOST_ZETA_CAP_WIDTH)
     # near-neutral: θ* = κ Δθ / ln(z1/z_ref), independent of z0
     us, ths, *_ = sl.most_surface_flux(th_air_mean=290.0 + 1e-6, t_sfc=290.0,
                                        z_ref=0.25, **kw)
@@ -200,10 +202,10 @@ def test_gabls3_smoke_closes_budgets_and_records_the_applied_forcing(
     # the SCM builds from the artifact with the recorded (no) microphysics
     from legoesm.atmosphere.physics import TurbulenceConfig
     from legoesm.atmosphere.physics.turbulence.config import (
-        MYNN25Config,
         SurfaceLayerConfig,
+        TKEConfig,
     )
-    turb = TurbulenceConfig(scheme="mynn25", mynn25=MYNN25Config(
+    turb = TurbulenceConfig(scheme="tke", tke=TKEConfig(
         surface=SurfaceLayerConfig(z0=gb.Z0_M, Cd_neutral=1.5e-3, Ch_neutral=0.0)))
     scm, grid = build_cbl_scm_from_artifact(art, turb, nlev=16, dt=dt)
     # the SCM's own forcing callbacks deliver exactly the recorded integrals (on its

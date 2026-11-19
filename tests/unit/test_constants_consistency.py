@@ -45,7 +45,7 @@ def test_all_constants_finite_and_positive():
         "rho_freshwater_curvature",
         "sigma_sb", "S_0",
         "emissivity_ocean", "emissivity_ice", "emissivity_land",
-        "kappa_vk", "nu_air",
+        "kappa_von_karman", "nu_air",
         "M_air", "M_CO2", "M_H2O",
         "M_dry", "M_o3", "M_h2o",
         "N_A",

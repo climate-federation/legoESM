@@ -32,8 +32,8 @@ STRUCTURAL departures below — no ``sw_diff``/``diabatic_acce`` knob, the 1-Pa
 
 FAITHFUL (forms reproduce the oracle to round-off on the matched subset:
 ``lw_diff_factor=1``, Isca tau constants, dry LW, ``sfc_emissivity=1``,
-``sw_exponent=4``, Isca ``sw_diff=0``, ``diabatic_acce=1``, ``p_s=p_ref``,
-ordinary layer thickness):
+``sw_exponent=4``, Isca ``sw_diff=0``, ``diabatic_acce=1``, the oracle's
+``pstd_mks`` set to the column ``p_s``, ordinary layer thickness):
   - LW optical-depth latitude profile ``tau_ref = tau_e + (tau_p-tau_e)*sin^2(lat)``
     == Isca ``lw_tau_0 = ir_tau_eq + (ir_tau_pole-ir_tau_eq)*sin(lat)^2``.
   - LW vertical profile ``[f_l*sigma + (1-f_l)*sigma^4]`` == Isca
@@ -72,7 +72,13 @@ DEPARTURES (documented; NOT the Frierson/Isca defaults — see ``GrayRadiationCo
     the heating divide floors ``dp`` at 1 Pa (a safety floor that differs from
     Isca only for pathologically thin layers).
   - Vertical coordinate ``sigma = p/p_s`` (the FHZ06 *paper* form) vs Isca code's
-    ``p/p_std`` (fixed 1000 hPa reference); identical when ``p_s = p_ref``.
+    ``p/pstd_mks`` with ``pstd_mks = PSTD_MKS_EARTH = 101325 Pa`` (Isca v1.0
+    ``two_stream_gray_rad.F90`` l.579-580, ``constants.F90`` l.248). The two
+    agree only when ``p_s = 101325 Pa`` -- NOT at ``constants.p_ref = 1e5 Pa``.
+    Tier-2 oracle audit (running Isca v1.0, SHA 5868cfd8): 0.8-5.8 W/m^2 flux
+    difference on sea-level columns, 110 W/m^2 at ``p_s = 600 hPa`` (production
+    constants); with the oracle's ``pstd_mks`` set to ``p_s`` the forms agree to
+    round-off.
 
 References
 ----------

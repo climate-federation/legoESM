@@ -72,7 +72,8 @@ def test_config_constructs_with_defaults():
 #: fails readably ("unexpected field: ..."), forces a one-line diff per
 #: addition, and keeps the human review the count was there for.
 _CLUBB_CONFIG_SCALAR_FIELDS = frozenset({
-    "clubb_dt", "w_tol", "rt_tol", "thl_tol", "wp2_max", "tke_min", "T0",
+    "clubb_dt", "w_tol", "rt_tol", "thl_tol", "wp2_max", "up2_vp2_cap_width_m2s2",
+    "tke_min", "T0",
     "prognostic", "cloud_buoyancy", "cloud_source",
     "trop_cloud_top_press", "trop_cloud_taper_lnp_width",
     "pdf_variance_scale", "q_flux_scale",

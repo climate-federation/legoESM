@@ -1,5 +1,24 @@
 # legoESM Claude Memory
 
+## RULE 0 — CONSERVATION OF MASS, ENERGY AND MOMENTUM. THE STRICTEST RULE.
+User directive 2026-10-11: *"Mass, energy and momentum conservations should be
+the strictest rules."* Outranks every other rule in this file, including speed,
+brevity and convergence.
+
+- **No change may create or destroy mass, energy or momentum** — no cap, clip,
+  floor, limiter, fallback or "hold" that removes or adds a quantity without
+  routing it to an explicit sink/source in the same budget. A capped water
+  amount goes somewhere (dew, runoff, store); its latent heat goes somewhere.
+- **Every physics/numerics change states its budget and proves it closes**:
+  name the conserved quantities it touches, and add a test asserting
+  `in - out - d(storage) = 0` to round-off (`JAX_ENABLE_X64=1`), shown to FAIL
+  when the fix is reverted.
+- **Exchanged fluxes carry the same value and sign at both ends of a coupling.**
+- **A known non-conserving path (fallback, held column, clamp) is a defect**:
+  report it with its measured size the moment it is found, never absorb it.
+- Speed or convergence fixes that touch a solver must show the conserved
+  totals are unchanged (to round-off) before and after.
+
 ## RULE 1 — CONCISE AND CLEAR. THE DEFAULT, EVERY REPLY.
 User directive 2026-08-21: *"Be concise and clear — make this a default."*
 Eleventh ask. Default, not mode.
@@ -109,6 +128,44 @@ module (`coupler/grid_remap.py`) and core had another (`grids/regridding.py`):
 - **Ponytail FULL is the default, every session** (user 2026-08-20 and again
   2026-08-23): laziest working solution, reuse over rebuild, delete before
   add, shortest diff that is actually correct. Not a mode to be asked for.
+
+## RULE 5 — DIFFERENTIABILITY IS NEVER TRADED FOR ORACLE FIDELITY.
+User directive 2026-10-20, STRICT, on the Kessler port (the smooth saturation
+ramp misses the reference by up to 100 % and lets cloud water go slightly
+negative; the reference's exact step would match it): *"keep the current
+smoothing - differentiability cannot be traded off!"*
+
+- **The default is always the differentiable form.** A switch in the
+  reference whose branch depends on TRACED model state (a saturation step,
+  a threshold `max`/`where` on a prognostic, a clip, a cutoff on the
+  column's traced pressure) is ported as a smooth
+  function whose sharpness/width is a config field; the hard limit is
+  reachable only by setting that field, never as the default.
+- **Out of scope (state-independent):** selections that do not depend on
+  traced state and keep JAX gradients intact — fixed land/sea masks, domain boundaries, index
+  picks, static scheme dispatch. Smoothing those changes the domain or
+  breaks conservation; port them exactly.
+- **Never propose moving a default to the hard limit to close an oracle gap.**
+  Not as an ASK, not as a "pick". The gap is recorded instead.
+- **Record the gap as a KNOWN DIFFERENCE** where the code lives (docstring)
+  and in the PR body: what the reference does, what the port does, the
+  measured size at the production setting, which field recovers the
+  reference, and any invariant the smoothing breaks (e.g. how negative
+  cloud water goes). Never loosen the tolerance.
+- **Every such switch gets three tests:** one AT the hard limit,
+  matching the reference to the oracle tolerance; one AT the smooth default
+  asserting the recorded gap PER CASE (each fixture column's measured
+  mismatch, stored with the test, to 1e-6 relative with a 1e-12 absolute
+  floor); and a gradient test at the default (finite, non-zero derivative
+  through the switch, `jax.test_util.check_grads`). Never a blanket xfail,
+  never one worst-case bound. A change to the smooth form OR its default
+  width re-measures and updates the stored gaps in the same PR, with the
+  reason.
+- RULE 3 is waived only when all four hold: the smooth default is kept for
+  differentiability, the hard limit is reachable via its field and matches
+  the reference, the gap is recorded as above, and all three tests exist and pass.
+  Missing any one, RULE 3 applies.
+- Applies to every oracle translation (CAM, IFS, WRF, ESCOMP, NEMO, FV3, ...).
 
 ## RULE 3 — A FIX WHOSE DEFAULT KEEPS THE BUG IS NOT A FIX. IT IS A BUG WITH A KNOB.
 User directive 2026-08-22, on finding non-orographic gravity waves still being
@@ -230,8 +287,49 @@ leave choice pending.
 NOT COVERED, proceed normally: what user asked in that message; pure additions
 changing no existing behaviour; tests; comments; docs; error text.
 
+**2026-10-16 EXTENSION — NO SIDE IMPLEMENTATION DECISIONS (STRICT).** User:
+*"No side implementation decisions as strict Claude.md rule."* Approving a
+change does NOT approve the decisions made while implementing it.
+
+A SIDE DECISION = any value, behaviour, or method that changes what the code
+computes, accepts, rejects, or reads, and is NOT dictated by the user's answer,
+the oracle being ported, or existing repo code reused unchanged. Each one gets
+ASKED (one line, current -> proposed, batched) before the code embodying it;
+one found mid-implementation → stop and ask then. Classes, not exhaustive:
+- tolerances and acceptance thresholds (incl. checks on input files, and the
+  tolerance an oracle-match test certifies)
+- guards, floors, caps, clamp vs extrapolate, and their fp32-vs-fp64 behaviour
+- edge cases: zero/empty/missing input, absent file, old checkpoint
+- mappings between representations (bands, grids, levels, units)
+- algorithm and order: interpolation, aggregation, update/operation order
+- where data or files live; names and defaults of user-facing switches
+- which lanes/grids get it; error vs warning vs fallback there
+
+PRECEDENCE: this OVERRIDES the "NOT COVERED" line above for pure additions and
+tests whenever they carry a side decision. Still exempt: error MESSAGE wording,
+comments, docs. Ponytail/minimal-diff governs how much code, never licenses
+picking a value. "Formatting only", "minor", "internal", "implementation
+detail", "numerically negligible" are NOT exemptions. Subagent briefs must
+state this rule. Any item on an end-of-task UNASKED list is a violation of this
+rule (target: empty), not a disclosure that discharges it. FAILURE 2026-10-16:
+radiation stage 1 shipped a band-list check tolerance and an fp32 tiny-path
+guard behaviour, both labelled "formatting only", neither asked.
+
+**2026-11-03 — WHO ANSWERS: DETAIL CHOICES GO TO A VOTE, NOT THE USER.** User:
+*"For such detailed question do not ask me but check with [GLM] and codex and
+use the majority of votes. Just ask me big picture / important questions such
+as on design or main directions."* Every side decision above is still never
+made silently, but a DETAIL choice (tolerance, guard, edge case, test value,
+cache key, refusal scope, error-vs-fallback) is put to GLM
+(`mcp__zai__ask_glm`) and codex, batched in one prompt each, plus the author's
+own vote; majority of the three decides. Record each choice with its three
+votes in the commit/PR body. The USER is asked only about design, main
+direction, scope, and anything they named as their call. Precedence: this
+replaces "ask the user" for detail choices everywhere in this section and in
+the STOP-AND-ASK list; for design/direction the user rule stands unchanged.
+
 MECHANICAL CHECK, end of every task: print list of choices made, each one line,
-marked ASKED or UNASKED. Empty UNASKED list = target. Anything on UNASKED list
+marked ASKED (user), VOTED (GLM/codex/author majority, votes shown) or UNASKED. Empty UNASKED list = target. Anything on UNASKED list
 offered for revert in same message. Worked example, five from 2026-08-21 that
 prompted this rule: routing each case's droplet number into single-column arm;
 allocating zero graupel field in every column running microphysics; which
@@ -239,6 +337,21 @@ campaign cases got registered and using ARM cumulus case as stand-in for another
 campaign's regime; pinning forcing downloads to fixed versions and checksums;
 turning missing variable name into hard error. Every one defensible. None asked.
 That the error.
+
+**2026-11-03 REFINEMENT — DETAIL DECISIONS GO TO A VOTE, NOT THE USER.** User,
+repeated three times in one day: *"For detailed questions do not ask me but
+check with him [GLM] and codex and use the majority of votes. Just ask me big
+picture / important questions such as on design or main directions."*
+- **Detail side decision** (names, tolerances, guards, edge cases, file
+  locations, minor scope trims, which diagnostic next): author's pick + GLM vote
+  + codex vote, majority of three wins. Never silent: record each voter's pick
+  in the commit, and mark the item VOTED on the end-of-task list (VOTED counts
+  as discharged, like ASKED).
+- **Still ASK the user:** model design, main direction, production defaults and
+  config changes (RULE 3), which experiments/compute to launch, data source,
+  what is trained or scored, anything changing comparability of results.
+- Unsure which class → big picture → ask.
+- Subagent briefs must state this rule.
 
 ## Operating Mode
 - **TERSE BY DEFAULT.** Drop articles/filler/pleasantries/hedging; fragments fine. Report `[thing] [state] [next]`, not prose. No restating what was just done, no feature tours, no explaining a simplification at more length than the code. Numbers/tables over narration. Full prose ONLY when asked for it (report/walkthrough), or for security warnings, irreversible-action confirmations, and multi-step sequences where fragments risk misread. Code/commits/PRs/docstrings: written normally.
@@ -853,7 +966,7 @@ See `docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md`. Doct
 - **Debug / throwaway / one-off → `scripts/tmp/` ONLY** (eventually deleted): `_*`-prefixed probes, `diag_*`/`diagnose_*`, per-iteration scratch. Never at `scripts/` root. `_probe_*.py` gitignored.
 - **No new files dumped at repo root.** Root keeps ONLY: `README.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `FEDERATION.md`, `project_status.md` (generated), `pyproject.toml`/lockfile/dotfiles. Everything else has a home.
 - **No `.md` notes accumulating at repo root → `docs/`.** Dev-notes, change logs, faithfulness/audit trackers (`*_faithful.md`, `*_checks.md`, review logs) live under `docs/`. Reference by BASENAME so code comments survive the move.
-- **No runtime outputs in git.** `diagnostics/`, `logs/`, `**/logs/`, `results/`, `checkpoints/`, `output/`, `*.zarr`/`*.nc`, root `*.png`/`*.pdf`/`*.svg` gitignored. Visual-regression baselines stay in LOCAL working copies, regenerated on demand — not tracked. Never `git add -f` a runtime artifact.
+- **No runtime outputs in git.** `diagnostics/`, `logs/`, `**/logs/`, `results/`, `checkpoints/`, `output/`, `*.zarr`/`*.nc`, root `*.png`/`*.pdf`/`*.svg` gitignored. Visual-regression baselines stay in LOCAL working copies, regenerated on demand — not tracked. Never `git add -f` a runtime artifact. EXCEPTION: `.physics-validator/` is tracked on purpose — review logs, probes and banked oracle results cited as evidence by docs, tests and validation scripts (user 2026-10-24); only its error captures are ignored.
 - **Source stays under `packages/<pkg>/legoesm/`** (federation namespace). New subpackage → update `tests/test_federation_plan.py` same PR.
 - **Do NOT "flatten" `packages/<pkg>/legoesm/<subpkg>/` → `packages/<pkg>/` — double name is LOAD-BEARING, not redundant.** Editable installs (dev/test workflow) require on-disk path == import path, and hatchling REFUSES prefix-*adding* `sources` remap in dev mode (`ValueError: Dev mode installations are unsupported when any path rewrite in the sources option changes a prefix rather than removes it`; editables#20). So `packages/atmosphere/legoesm/atmosphere/` is only layout where `import legoesm.atmosphere` resolve under `pip install -e`. Flattening to keep `legoesm.*` build wheel but break editable dev; flattening to bare `import atmosphere` mean rewriting ~23k import sites + dropping namespace. Verified 2026-07-13 — don't re-attempt. `src/legoesm/` is SANCTIONED root meta-package (the `legoesm.*` TOP-LEVEL modules: `constants`, `config`, `cli`, `registry`, `dycore_factory`, …), same load-bearing reason — NOT stray `src/` to remove. "Never add source at `src/`" mean don't create NEW `src/` trees for component code; existing `src/legoesm/` stays.
 - **Tests mirror package tree under `tests/`** (`tests/<component>/<tier>/...`). Curated dycore regressions in `tests/atmosphere/dycore/regression/`. No new `test_*.py` at repo root.

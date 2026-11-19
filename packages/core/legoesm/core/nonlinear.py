@@ -114,9 +114,18 @@ def make_implicit_newton_solver(
                 [jacobian_z, jnp.sqrt(damping) * jnp.eye(n, dtype=residual.dtype)]
             )
             rhs = jnp.concatenate([-residual, jnp.zeros(n, residual.dtype)])
-            q, r = jnp.linalg.qr(augmented)
+            # Q^T rhs from the packed reflectors, never forming Q: on GPU the
+            # explicit-Q (orgqr) step runs one small kernel chain PER MATRIX,
+            # which was ~90% of the land canopy solve's wall time.
+            packed, taus = jnp.linalg.qr(augmented, mode="raw")
+            h = packed.T
+            qt_rhs = rhs
+            for k in range(n):
+                v = jnp.concatenate([jnp.zeros(k, h.dtype),
+                                     jnp.ones(1, h.dtype), h[k + 1:, k]])
+                qt_rhs = qt_rhs - taus[k] * jnp.dot(v, qt_rhs) * v
             delta_z = jax.scipy.linalg.solve_triangular(
-                r, q.T @ rhs, lower=False
+                jnp.triu(h[:n, :]), qt_rhs[:n], lower=False
             )
             predicted = residual + jacobian_z @ delta_z
             return delta_z, jnp.sum(predicted * predicted)
@@ -176,7 +185,7 @@ def make_implicit_newton_solver(
             )
 
         initial_converged = (n_sq_0 <= atol) & accepted(x0, n_sq_0)
-        x_final, _, _, _, damping, n_iters, _ = jax.lax.while_loop(
+        x_final, _, _, n_sq_final, damping, n_iters, _ = jax.lax.while_loop(
             cond,
             body,
             (
@@ -189,8 +198,10 @@ def make_implicit_newton_solver(
                 initial_converged,
             ),
         )
-        residual_final = fun(x_final)
-        n_sq_final = jnp.sum(residual_final * residual_final)
+        # The verdict reuses the loop's own residual.  Re-evaluating it here
+        # compiles differently from the residual inside the Jacobian sweep, and
+        # at the tolerance edge that rounding flipped a column the loop had
+        # accepted onto its fallback.
         converged = ((n_sq_final <= atol + rtol * n_sq_0)
                      & accepted(x_final, n_sq_final))
         tiny = jnp.finfo(n_sq_final.dtype).tiny

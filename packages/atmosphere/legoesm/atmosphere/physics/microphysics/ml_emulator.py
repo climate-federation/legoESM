@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import equinox as eqx
 
 from legoesm import constants
-from legoesm.thermo import saturation_specific_humidity
+from legoesm.thermo import latent_heat_vaporization, saturation_specific_humidity
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     hard_saturation_blend,
 )
@@ -222,15 +222,19 @@ def ml_microphysics(
                 p_full.astype(jnp.float64)).astype(q_v_post.dtype)
         else:
             q_sat_post = saturation_specific_humidity(T_post, p_full)
+        # Kirchhoff L_v frozen at the post-step T: the solve, the K cap and the
+        # heating all use it, so c_pd*T + L_v(T_post)*q_v is conserved per cell.
+        l_cp = latent_heat_vaporization(T_post) / constants.c_pd
         rate = hard_saturation_blend(
             jnp.zeros_like(q_v_post), T_post, q_v_post, p_full, dt,
             q_sat_post,
             config.hard_sat_adjust_threshold,
             config.hard_sat_max_heating_K,
+            l_over_cp=l_cp,
         )
         dq_v_dt = dq_v_dt - rate
         dq_c_dt = dq_c_dt + rate
-        dT_dt = dT_dt + (constants.L_v / constants.c_pd) * rate
+        dT_dt = dT_dt + l_cp * rate
 
     # Pin dtype to the input precision so we never silently promote
     # the unused-species placeholders to f64 under x64 mode.

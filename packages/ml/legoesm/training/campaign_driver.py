@@ -122,7 +122,10 @@ def latest_checkpoint(out_dir, *, prefer_ema: bool = False):
     if not d.is_dir():
         return None
     ckpts = sorted(
-        (p for p in d.glob("epoch_*.eqx") if not p.stem.endswith("_ema")),
+        (
+            p for p in d.glob("epoch_*.eqx")
+            if not p.stem.endswith("_ema") and not p.name.endswith(".opt.eqx")
+        ),
         key=lambda p: int(p.stem.split("_")[1]),
     )
     if not ckpts:

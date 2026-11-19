@@ -24,7 +24,7 @@ from legoesm.atmosphere.les_suite.scm_runner import (
 from legoesm.atmosphere.physics import TurbulenceConfig
 from legoesm.atmosphere.physics._shared import exner_function
 from legoesm.atmosphere.physics.turbulence.config import (
-    MYNN25Config,
+    TKEConfig,
     SurfaceLayerConfig,
 )
 
@@ -63,10 +63,12 @@ def _cbl_artifact(**over) -> LESReferenceArtifact:
     return LESReferenceArtifact(**base)
 
 
-def _mynn_config():
+def _closure_config():
+    # the runner's representative 1.5-order closure (vote Q1: was mynn25, now
+    # the WRF port, which this cell-area-free scan SCM cannot run)
     return TurbulenceConfig(
-        scheme="mynn25",
-        mynn25=MYNN25Config(
+        scheme="tke",
+        tke=TKEConfig(
             surface=SurfaceLayerConfig(z0=0.1, Cd_neutral=1.5e-3, Ch_neutral=0.0)
         ),
     )
@@ -132,7 +134,7 @@ def test_saturated_start_artifact_seeds_qc_and_matches_ic():
     # seeded and the SCM's initial θ_l / q_t reproduce the artifact exactly
     # (saturation_adjust is the exact inverse of liquid_water_theta).
     art = _saturated_moist_artifact()
-    scm, grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    scm, grid = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=5.0)
 
     q_c0 = np.asarray(scm.state.tracers["q_c"].data[0, 0, 0])
     q_v0 = np.asarray(scm.state.tracers["q_v"].data[0, 0, 0])
@@ -156,7 +158,7 @@ def test_clear_moist_start_seeds_no_qc():
     # The clear BOMEX-like artifact (q_t < q_sat) forms no cloud at t=0, so q_c
     # is all-zero — the saturation adjustment leaves a cloud-free start unchanged.
     art = _moist_artifact()
-    scm, _ = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    scm, _ = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=5.0)
     q_c0 = np.asarray(scm.state.tracers["q_c"].data[0, 0, 0])
     assert np.allclose(q_c0, 0.0, atol=1e-12)
 
@@ -164,7 +166,7 @@ def test_clear_moist_start_seeds_no_qc():
 def test_build_scm_from_artifact():
     art = _cbl_artifact()
     scm, grid = build_cbl_scm_from_artifact(
-        art, _mynn_config(), nlev=NZ, dt=5.0)
+        art, _closure_config(), nlev=NZ, dt=5.0)
     assert grid.nlev == NZ
     # SCM heights are top-to-bottom (decreasing with index)
     assert float(grid.z_scm_m[0]) > float(grid.z_scm_m[-1])
@@ -181,7 +183,7 @@ def test_scm_surface_flux_follows_the_realised_series():
     cum = np.array([0.0, -0.9, -2.7])                    # means -1e-3, -2e-3
     art = _cbl_artifact(w_theta_s=np.array([0.0, -1.5e-3, -2.5e-3]),
                         w_theta_s_cum=cum, times_s=t)
-    scm, _grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=60.0)
+    scm, _grid = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=60.0)
     fn = scm.forcing.w_th_s
     assert float(fn(10.0)) == pytest.approx(-1e-3)
     assert float(fn(1000.0)) == pytest.approx(-2e-3)
@@ -227,14 +229,14 @@ def test_diagnostic_scheme_flux_nonlocal_beats_local():
     art = _windy_cbl_artifact()
     truth = diagnostic_truth(art)
     rmse = {}
-    for sch in ("smagorinsky", "louis", "holtslag_boville", "ysu"):
+    for sch in ("smagorinsky", "louis", "holtslag_boville"):
         flux = diagnostic_scheme_flux(art, TurbulenceConfig(scheme=sch), nlev=32)
         assert flux.shape == truth.heights_m.shape
         assert bool(jnp.all(jnp.isfinite(flux)))
         rmse[sch] = float(diagnostic_flux_score(truth, flux).wtheta_rmse)
 
     local_worst = max(rmse["smagorinsky"], rmse["louis"])
-    nonlocal_best = min(rmse["holtslag_boville"], rmse["ysu"])
+    nonlocal_best = rmse["holtslag_boville"]
     # Local closures carry ≈0 flux through the mixed layer (structural ceiling) ⇒ their
     # RMSE ≈ the LES flux magnitude; nonlocal beats them by a clear margin.
     assert nonlocal_best < local_worst - 0.1
@@ -248,13 +250,16 @@ def test_diagnostic_scheme_flux_rejects_moist_and_tke():
         diagnostic_scheme_flux(_moist_artifact(), TurbulenceConfig(scheme="smagorinsky"))
     # TKE-carrying scheme → rejected (no wtheta_flux exposure).
     with pytest.raises(ValueError, match="TKE-carrying"):
-        diagnostic_scheme_flux(_windy_cbl_artifact(), _mynn_config())
+        diagnostic_scheme_flux(_windy_cbl_artifact(), _closure_config())
+    # ysu carries the WRF surface-layer state -> rejected by the same guard.
+    with pytest.raises(ValueError, match="not wired for the Q1 diagnostic"):
+        diagnostic_scheme_flux(_windy_cbl_artifact(), TurbulenceConfig(scheme="ysu"))
 
 
 def test_scm_final_profile_finite_on_eval_grid():
     art = _cbl_artifact()
     scm, grid = build_cbl_scm_from_artifact(
-        art, _mynn_config(), nlev=NZ, dt=5.0)
+        art, _closure_config(), nlev=NZ, dt=5.0)
     z_eval = jnp.asarray(art.heights_m)
     theta, u, v = scm_final_theta_on(scm, grid, nsteps=20, z_eval=z_eval)
     assert theta.shape == (NZ,)
@@ -265,7 +270,7 @@ def test_scm_final_profile_finite_on_eval_grid():
 
 def test_scm_les_final_loss_is_finite_nonnegative():
     art = _cbl_artifact()
-    loss = scm_les_final_loss(art, _mynn_config(), nlev=NZ, dt=10.0)
+    loss = scm_les_final_loss(art, _closure_config(), nlev=NZ, dt=10.0)
     assert np.isfinite(loss)
     assert loss >= 0.0
 
@@ -274,7 +279,7 @@ def test_loss_responds_to_surface_flux_mismatch():
     # Scoring the SCM against a truth whose surface flux is very different should
     # not crash and returns a finite loss (sanity that the objective is wired).
     art = _cbl_artifact()
-    loss = scm_les_final_loss(art, _mynn_config(), nlev=NZ, dt=10.0)
+    loss = scm_les_final_loss(art, _closure_config(), nlev=NZ, dt=10.0)
     assert np.isfinite(loss)
 
 
@@ -282,7 +287,7 @@ def test_non_cbl_artifact_rejected():
     # an artifact without a prescribed surface heat flux is not a wired CBL
     art = _cbl_artifact(prescribe="T_s", w_theta_s=None, T_s=np.full(NT, 300.0))
     with pytest.raises(ValueError):
-        build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ)
+        build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ)
 
 
 def test_final_score_components_finite_and_combined_matches_loss():
@@ -291,12 +296,12 @@ def test_final_score_components_finite_and_combined_matches_loss():
     # is the self-check the θ-consistent D7 significance analysis relies on to confirm
     # a re-score reproduces the harness before ranking closures on θ_rmse.
     art = _cbl_artifact()
-    score = scm_les_final_score(art, _mynn_config(), nlev=NZ, dt=10.0)
+    score = scm_les_final_score(art, _closure_config(), nlev=NZ, dt=10.0)
     assert score is not None
     for comp in (score.theta_rmse, score.u_rmse, score.v_rmse, score.combined):
         assert np.isfinite(float(comp)) and float(comp) >= 0.0
     assert score.qt_rmse is None  # dry CBL
-    loss = scm_les_final_loss(art, _mynn_config(), nlev=NZ, dt=10.0)
+    loss = scm_les_final_loss(art, _closure_config(), nlev=NZ, dt=10.0)
     assert float(score.combined) == pytest.approx(loss, rel=0, abs=1e-12)
 
 
@@ -309,7 +314,7 @@ def test_final_score_none_on_divergence(monkeypatch):
     monkeypatch.setattr(scm_runner, "scm_final_theta_on",
                         lambda *a, **k: (nan, nan, nan))
     art = _cbl_artifact()
-    assert scm_les_final_score(art, _mynn_config(), nlev=NZ, dt=20.0) is None
+    assert scm_les_final_score(art, _closure_config(), nlev=NZ, dt=20.0) is None
 
 
 def test_geostrophic_forcing_wired_for_sheared_not_free_cbl():
@@ -317,14 +322,14 @@ def test_geostrophic_forcing_wired_for_sheared_not_free_cbl():
     # f_c!=0 (sheared CBL / SBL) so the Ekman/jet dynamics exist, but leave the free CBL
     # (f_c=0) untouched (SCMForcing disables Coriolis+geostrophic when f_c=0).
     free = _cbl_artifact()  # f_c=0.0
-    scm_free, _ = build_cbl_scm_from_artifact(free, _mynn_config(), nlev=NZ, dt=5.0)
+    scm_free, _ = build_cbl_scm_from_artifact(free, _closure_config(), nlev=NZ, dt=5.0)
     assert scm_free.forcing.u_geo is None and scm_free.forcing.v_geo is None
 
     Ug = 8.0
     sheared = _cbl_artifact(
         f_c=1.0e-4, u_geo=np.full(NZ, Ug), v_geo=np.zeros(NZ),
         u=np.full((NT, NZ), Ug), v=np.zeros((NT, NZ)))
-    scm_sh, _ = build_cbl_scm_from_artifact(sheared, _mynn_config(), nlev=NZ, dt=5.0)
+    scm_sh, _ = build_cbl_scm_from_artifact(sheared, _closure_config(), nlev=NZ, dt=5.0)
     assert scm_sh.forcing.u_geo is not None
     ug = np.asarray(scm_sh.forcing.u_geo(0.0))
     assert np.allclose(ug, Ug, atol=1e-6)  # constant geostrophic wind on the SCM grid
@@ -341,7 +346,7 @@ def test_geostrophic_forcing_wired_for_sheared_not_free_cbl():
     # toward zero (SCMForcing would treat u_g=v_g=0).
     bad = _cbl_artifact(f_c=1.0e-4, u_geo=None)
     with pytest.raises(ValueError, match="geostrophic"):
-        build_cbl_scm_from_artifact(bad, _mynn_config(), nlev=NZ, dt=5.0)
+        build_cbl_scm_from_artifact(bad, _closure_config(), nlev=NZ, dt=5.0)
 
 
 def test_scan_final_state_matches_run():
@@ -354,9 +359,9 @@ def test_scan_final_state_matches_run():
     # deterministic post-processing, so their state-level match carries through).
     art = _cbl_artifact()
     N = 40
-    scm_a, _ = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    scm_a, _ = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=5.0)
     final_run, _hist = scm_a.run(N)
-    scm_b, grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    scm_b, grid = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=5.0)
     final_scan = scm_scan_final_state(scm_b, N)
     for name in ("T", "u", "v"):
         a = np.asarray(getattr(final_run, name).data[0, 0, 0])
@@ -378,7 +383,7 @@ def test_scan_final_state_matches_run():
 
 def test_pure_step_matches_step_and_rejects_ab2():
     art = _cbl_artifact()
-    scm_a, _ = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    scm_a, _ = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=5.0)
     # pure_step(state, phys, t) equals what step() applies for the same stage time
     s0, p0, t0 = scm_a.state, scm_a.phys_state, scm_a.t_seconds
     new_state, _new_phys = scm_a.pure_step(s0, p0, t0)
@@ -386,7 +391,7 @@ def test_pure_step_matches_step_and_rejects_ab2():
     assert np.allclose(np.asarray(new_state.T.data[0, 0, 0]),
                        np.asarray(scm_a.state.T.data[0, 0, 0]), atol=0, rtol=0)
     # AB2 is stateful → pure_step must reject it (no silent wrong rollout)
-    scm_ab2, _ = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    scm_ab2, _ = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=5.0)
     scm_ab2.time_integrator = "ab2"
     with pytest.raises(ValueError):
         scm_ab2.pure_step(scm_ab2.state, scm_ab2.phys_state, scm_ab2.t_seconds)
@@ -403,7 +408,7 @@ def test_diverged_scm_scores_infinite_not_zero(monkeypatch):
     monkeypatch.setattr(scm_runner, "scm_final_theta_on",
                         lambda *a, **k: (nan, nan, nan))
     art = _cbl_artifact()
-    loss = scm_les_final_loss(art, _mynn_config(), nlev=NZ, dt=20.0)
+    loss = scm_les_final_loss(art, _closure_config(), nlev=NZ, dt=20.0)
     assert not np.isfinite(loss)  # +inf, NOT 0.0
 
 
@@ -412,7 +417,7 @@ def test_moist_scm_builds_scan_safe_with_condensate_tracers():
     # condensate/precip set (incl. q_g), so the lax.scan free-run's carry pytree is FIXED —
     # otherwise microphysics auto-materialises a key mid-scan and the scan raises.
     art = _moist_artifact()
-    scm, grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=10.0)
+    scm, grid = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=10.0)
     keys = set(scm.state.tracers)
     assert {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g"} <= keys
     # q_v IC = q_t (q_c≈0 at t0), interpolated onto the SCM grid → physical range
@@ -426,7 +431,7 @@ def test_moist_scm_builds_scan_safe_with_condensate_tracers():
 def test_moist_final_moist_on_returns_thetal_uv_qt():
     # scm_final_moist_on returns (θ_l, u, v, q_t) — four finite profiles on the LES grid.
     art = _moist_artifact()
-    scm, grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=10.0)
+    scm, grid = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=10.0)
     z_eval = jnp.asarray(art.heights_m)
     thl, u, v, qt = scm_final_moist_on(scm, grid, nsteps=30, z_eval=z_eval)
     for arr in (thl, u, v, qt):
@@ -439,12 +444,12 @@ def test_moist_score_includes_qt_dry_does_not():
     # A moist artifact is scored in θ_l + q_t (qt_rmse populated + folded into combined); a
     # dry artifact leaves qt_rmse=None. This is the contrast that proves the moist channel
     # is actually wired into the objective, not silently dropped.
-    moist = scm_les_final_score(_moist_artifact(), _mynn_config(), nlev=NZ, dt=10.0)
+    moist = scm_les_final_score(_moist_artifact(), _closure_config(), nlev=NZ, dt=10.0)
     assert moist is not None and moist.qt_rmse is not None
     assert bool(jnp.isfinite(moist.qt_rmse)) and float(moist.qt_rmse) >= 0.0
     assert bool(jnp.isfinite(moist.combined))
 
-    dry = scm_les_final_score(_cbl_artifact(), _mynn_config(), nlev=NZ, dt=20.0)
+    dry = scm_les_final_score(_cbl_artifact(), _closure_config(), nlev=NZ, dt=20.0)
     assert dry is not None and dry.qt_rmse is None
 
 
@@ -499,7 +504,7 @@ def test_moist_scm_les_loss_jax_differentiable():
 
     def loss(cd):
         surf = SurfaceLayerConfig(z0=0.1, Cd_neutral=cd, Ch_neutral=0.0)
-        turb = TurbulenceConfig(scheme="mynn25", mynn25=MYNN25Config(surface=surf))
+        turb = TurbulenceConfig(scheme="tke", tke=TKEConfig(surface=surf))
         return scmr.scm_les_loss_jax(art, turb, nlev=NZ, dt=20.0)
 
     val = float(loss(jnp.asarray(1.5e-3)))
@@ -544,11 +549,11 @@ def test_partly_cloudy_reference_is_initialised_from_its_recorded_cloud_water():
         )
 
     # Without the channel the mean-saturation fallback sees nothing → clear start.
-    scm_no, _ = build_cbl_scm_from_artifact(_artifact(with_qc=False), _mynn_config())
+    scm_no, _ = build_cbl_scm_from_artifact(_artifact(with_qc=False), _closure_config())
     assert np.allclose(np.asarray(scm_no.state.tracers["q_c"].data[0, 0, 0]), 0.0)
 
     # With the channel the recorded cloud water is SEEDED (not missed, not refused).
-    scm_yes, _ = build_cbl_scm_from_artifact(_artifact(with_qc=True), _mynn_config())
+    scm_yes, _ = build_cbl_scm_from_artifact(_artifact(with_qc=True), _closure_config())
     q_c0 = np.asarray(scm_yes.state.tracers["q_c"].data[0, 0, 0])
     assert q_c0.max() > 1.0e-5              # the partly-cloud q_c is present at init
 
@@ -609,7 +614,7 @@ def test_a_saturation_adjustment_that_did_not_settle_is_refused():
         les_setup={"microphysics": _record()},
     )
     with pytest.raises(ValueError, match="did not settle"):
-        build_cbl_scm_from_artifact(art, _mynn_config(), nlev=16, dt=10.0)
+        build_cbl_scm_from_artifact(art, _closure_config(), nlev=16, dt=10.0)
 
 
 # --- moist SCM microphysics + realised moisture flux --------------------------
@@ -639,7 +644,7 @@ def test_moist_scm_microphysics_precedence_and_no_fallback():
     with pytest.raises(ValueError, match="records no LES microphysics"):
         moist_scm_microphysics(bare, explicit)
     with pytest.raises(ValueError, match="records no LES microphysics"):
-        build_cbl_scm_from_artifact(bare, _mynn_config(), nlev=NZ, dt=60.0)
+        build_cbl_scm_from_artifact(bare, _closure_config(), nlev=NZ, dt=60.0)
     with pytest.raises(ValueError):
         microphysics_from_record({"scheme": "kessler", "kessler": {"nope": 1.0}})
     with pytest.raises(ValueError):                              # no silent defaults
@@ -670,7 +675,7 @@ def test_moist_scm_takes_the_realised_moisture_flux_not_its_first_sample():
         les_setup={"microphysics": microphysics_record(
             MicrophysicsConfig(scheme="kessler")), "subsidence_species": ["q_v"]})
     dt = 60.0
-    scm, _grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=dt)
+    scm, _grid = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=dt)
     applied = sum(float(scm.forcing.w_qv_s(k * dt)) * dt for k in range(int(t[-1] / dt)))
     np.testing.assert_allclose(applied, cum[-1], rtol=1e-12)
     assert float(scm.forcing.w_qv_s(1500.0)) > 1.5 * w_qv[0]  # not the frozen t=0 value
@@ -697,7 +702,7 @@ def test_moist_scm_takes_the_les_time_varying_theta_forcing_and_subsided_species
     art = _moist_artifact(theta_adv=None, theta_adv_cum=cum, qc=qc,
                           les_setup={"subsidence_species": ["q_v", "q_c"]})
     dt = 60.0
-    scm, _grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=dt)
+    scm, _grid = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=dt)
     assert scm.forcing.subsidence_tracers == ("q_v", "q_c")
     # step means of the recorded integral, interpolated to the SCM levels: the
     # first step carries the first interval's rate, a late step the last one's
@@ -710,7 +715,7 @@ def test_moist_scm_takes_the_les_time_varying_theta_forcing_and_subsided_species
         scm_c, _ = build_cbl_scm_from_artifact(
             _moist_artifact(theta_adv=prof, qc=qc,
                             les_setup={"subsidence_species": ["q_v", "q_c"]}),
-            _mynn_config(), nlev=NZ, dt=dt)
+            _closure_config(), nlev=NZ, dt=dt)
         f = scm_c.forcing.theta_adv
         return np.asarray(f(0.0) if callable(f) else f)
     np.testing.assert_allclose(early, _const_channel(means[0]), rtol=1e-12)
@@ -718,7 +723,7 @@ def test_moist_scm_takes_the_les_time_varying_theta_forcing_and_subsided_species
     assert np.ptp(early) > 0.1 * np.max(np.abs(early))        # profile not uniform
     assert np.min(late) < 1.2 * np.min(early)                  # it varies in time
     with pytest.raises(BridgeError):
-        build_cbl_scm_from_artifact(_moist_artifact(les_setup={}), _mynn_config(),
+        build_cbl_scm_from_artifact(_moist_artifact(les_setup={}), _closure_config(),
                                     nlev=NZ, dt=dt)
 
 
@@ -727,7 +732,7 @@ def test_dry_artifact_with_time_varying_theta_forcing_is_refused():
     must not be dropped silently."""
     art = _cbl_artifact(theta_adv_cum=np.zeros((NT, NZ)))
     with pytest.raises(ValueError, match="theta_adv_cum"):
-        build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+        build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=5.0)
 
 
 def test_rain_is_seeded_under_kessler_and_a_two_moment_reference_is_refused():
@@ -749,7 +754,7 @@ def test_rain_is_seeded_under_kessler_and_a_two_moment_reference_is_refused():
     qr = np.zeros((NT, NZ)); qr[:, NZ // 3:NZ // 2] = 5.0e-5
     art = _moist_artifact(qc=qc, qr=qr,
                           les_setup=setup(MicrophysicsConfig(scheme="kessler")))
-    scm, grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=60.0)
+    scm, grid = build_cbl_scm_from_artifact(art, _closure_config(), nlev=NZ, dt=60.0)
     tr = {k: np.asarray(f.data)[0, 0, 0] for k, f in scm.state.tracers.items()}
     want_qr = np.asarray(interp_profile(jnp.asarray(qr[0]), z, grid.z_scm_m))
     assert want_qr.max() > 0.0
@@ -761,19 +766,19 @@ def test_rain_is_seeded_under_kessler_and_a_two_moment_reference_is_refused():
     kes = setup(MicrophysicsConfig(scheme="kessler"))
     with pytest.raises(ValueError, match="exceeds qt"):
         build_cbl_scm_from_artifact(_moist_artifact(qc=qc, qr=qr + art.qt, les_setup=kes),
-                                    _mynn_config(), nlev=NZ, dt=60.0)
+                                    _closure_config(), nlev=NZ, dt=60.0)
     bad = qr.copy(); bad[0, 1] = np.nan
     with pytest.raises(ValueError, match="finite"):
         build_cbl_scm_from_artifact(_moist_artifact(qc=qc, qr=bad, les_setup=kes),
-                                    _mynn_config(), nlev=NZ, dt=60.0)
+                                    _closure_config(), nlev=NZ, dt=60.0)
 
     mor = MicrophysicsConfig(scheme="morrison",
                              morrison=MorrisonConfig(morrison_flavor="sam"))
-    with pytest.raises(ValueError, match="Kessler only"):
+    with pytest.raises(ValueError, match=r"cloudbench_warm_rain'\) only"):
         build_cbl_scm_from_artifact(_moist_artifact(les_setup=setup(mor)),
-                                    _mynn_config(), nlev=NZ, dt=60.0)
-    with pytest.raises(ValueError, match="Kessler only"):
+                                    _closure_config(), nlev=NZ, dt=60.0)
+    with pytest.raises(ValueError, match=r"cloudbench_warm_rain'\) only"):
         build_cbl_scm_from_artifact(
             _moist_artifact(qc=qc, qr=qr,
                             les_setup=setup(MicrophysicsConfig(scheme="sundqvist"))),
-            _mynn_config(), nlev=NZ, dt=60.0)
+            _closure_config(), nlev=NZ, dt=60.0)

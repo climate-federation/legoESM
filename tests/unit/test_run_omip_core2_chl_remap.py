@@ -61,8 +61,14 @@ def test_the_fold_row_is_filled_from_the_row_below():
 
 # --- the selector -----------------------------------------------------------
 
+def _skip_without_oracle_tree(path):
+    if not pathlib.Path(path).parent.exists():
+        pytest.skip("oracle tree not present")
+
+
 def test_unknown_remap_raises():
     m = _mod()
+    _skip_without_oracle_tree(m._CHL_NC)  # the loader opens it before the check
     with pytest.raises(SystemExit, match="unknown chl_remap"):
         m.load_nemo_chl_monthly(None, "tripole", np.zeros((332, 362)),
                                 np.zeros((332, 362)), chl_remap="nearest")
@@ -73,6 +79,7 @@ def test_scrip_refuses_a_grid_it_was_not_built_for():
     through them would produce a plausible, wrong field rather than an error,
     so the shape check must refuse."""
     m = _mod()
+    _skip_without_oracle_tree(m._CHL_NC)
     with pytest.raises(SystemExit, match="eORCA1 tripole"):
         m.load_nemo_chl_monthly(None, "fesom", np.zeros((100, 200)),
                                 np.zeros((100, 200)), chl_remap="nemo_scrip")

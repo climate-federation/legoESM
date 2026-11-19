@@ -1,7 +1,7 @@
 """Fast-SBM bin grid: oracle landmarks, moment quadrature, differentiability.
 
 Oracle: WRF ``phys/module_mp_fast_sbm.F`` (FSBM-2). Checks reproduce the
-oracle's documented grid landmarks (33 mass-doubling bins, COL = ln2/3,
+oracle's documented grid landmarks (33 mass-doubling bins, COL = 0.23105,
 bin 15 ~ 50 um cloud/rain boundary, ~3.25 mm spectrum top) and the spectral
 moment convention (QC/QNC diagnostics with dm = 3*COL*m).
 """
@@ -23,14 +23,16 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm import (
     number_density,
     radius_from_mass,
 )
+from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import DLNR
 
 jax.config.update("jax_enable_x64", True)
 
 
 def test_col_matches_oracle_constant():
-    # Oracle: DOUBLE PRECISION, PARAMETER :: COL = 0.23105 (= ln2/3 rounded).
-    assert abs(COL - 0.23105) < 5.0e-6
-    assert np.isclose(COL, np.log(2.0) / 3.0, rtol=0, atol=0)
+    # Oracle: DOUBLE PRECISION, PARAMETER :: COL = 0.23105 (l. 108) — the
+    # literal every oracle moment uses; kernels/Courant use exact ln2/3.
+    assert COL == 0.23105
+    assert DLNR == np.log(2.0) / 3.0
 
 
 def test_mass_doubling_exact():
@@ -72,9 +74,9 @@ def test_moment_quadrature_matches_oracle_formula():
     q_oracle = float(jnp.sum(3.0 * COL * f * m * m))
     assert np.isclose(n, n_oracle, rtol=1e-14)
     assert np.isclose(q, q_oracle, rtol=1e-14)
-    # dm_k = ln2 * m_k exactly.
+    # dm_k = 3*COL*m_k exactly (oracle DELM = X*3*COL).
     np.testing.assert_allclose(np.asarray(bin_mass_widths(m)),
-                               np.log(2.0) * np.asarray(m), rtol=0, atol=0)
+                               3.0 * COL * np.asarray(m), rtol=0, atol=0)
 
 
 def test_moments_batched_axes():

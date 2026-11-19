@@ -34,6 +34,7 @@ buoyancy-independent.
 """
 from __future__ import annotations
 
+import functools
 import math
 from typing import Any, NamedTuple
 
@@ -41,13 +42,15 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.bulk_flux import psi_h, psi_m   # canonical MOST stability functions
+from legoesm.core.bulk_flux import (  # canonical MOST stability functions
+    MOST_ZETA_CAP_WIDTH, psi_h, psi_m)
 from legoesm.atmosphere.physics._shared import (
     brunt_vaisala_n_squared_from_gradient,
     lilly_buoyancy_factor,
 )
 from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2
-from legoesm.atmosphere.physics.turbulence.vreman import vreman_nu_t as _vreman_core
+from legoesm.atmosphere.physics.turbulence.vreman import (
+    VREMAN_BBETA_GUARD_WIDTH, vreman_nu_t as _vreman_core)
 from legoesm.timestepping.split_explicit import (
     SplitExplicitConfig, split_explicit_step)
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -118,6 +121,9 @@ class SpectralLESConfig(NamedTuple):
     #                                 ANISOTROPIC dx≠dz grids where Smagorinsky/LASD
     #                                 over- or under-dissipate.
     c_vreman: float = 0.07          # Vreman model constant (≈ 2.5·C_s²; Vreman 2004)
+    vreman_bbeta_guard_width: float = VREMAN_BBETA_GUARD_WIDTH  # Vreman zero-guard
+    #                                 smoothstep half-width [m^4/s^4] (RULE 5 smooth
+    #                                 default 1e-13; 0.0 = the author's hard switch)
     time_scheme: str = "rk3"        # "rk3" (SSP-RK3, Shu-Osher; projection each
     #                                 stage) or "ab2" (Adams–Bashforth-2). RK3 is
     #                                 self-starting, 3rd-order, and stable to a ~2-3×
@@ -217,21 +223,70 @@ class SpectralLESConfig(NamedTuple):
     #                                 flux (GABLS3 "inversion strength"): the lid face
     #                                 carries J = K_h·Γ (heat entering from above);
     #                                 0 = no-flux lid.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH  # RULE 5 half-width of the
+    #                                 smooth |zeta| cap at 10 in the MOST surface
+    #                                 layer (most_surface_flux); 0 = hard clip.
 
 
 class SpectralLESLayout(NamedTuple):
-    """y-slab MPI decomposition for the distributed horizontal FFT.
+    """MPI decomposition for the distributed horizontal FFT.
 
-    Rank owns ``(ny_local, nx, nz)`` physically; in spectral space it owns the
-    full ``ny`` (ky) and a kx-column slab of width ``nkx_local`` (see
-    ``parallel/distributed_fft.py``). ``n_ranks_x`` is implicitly 1 (slab).
-    ``comm`` is the MPI communicator (non-array; kept out of any AD path).
+    y-slab (``n_ranks_x == 1``, the default): rank owns ``(ny_local, nx, nz)``
+    physically; in spectral space the full ``ny`` (ky) and a kx-column slab of
+    width ``nkx_local`` (see ``parallel/distributed_fft.py``).
+
+    x-y pencil (``n_ranks_x > 1``, build with
+    :func:`make_spectral_les_pencil_layout`): rank ``(ry, rx) =
+    divmod(rank, n_ranks_x)`` owns ``(ny/Py, nx/Px, nz)``; ``comm_row`` (size
+    ``Px``) and ``comm_col`` (size ``Py``) are its row / column
+    sub-communicators. ``rank``/``n_ranks``/``comm`` always refer to the full
+    communicator (planar means reduce over it). ``nx`` is the GLOBAL nx.
+    Communicators are non-array and kept out of any AD path.
     """
     rank: int
     n_ranks: int
     ny_global: int
     nx: int
     comm: Any = None
+    n_ranks_x: int = 1
+    comm_row: Any = None
+    comm_col: Any = None
+
+    @property
+    def n_ranks_y(self) -> int:
+        return self.n_ranks // self.n_ranks_x
+
+    @property
+    def ry(self) -> int:
+        return self.rank // self.n_ranks_x
+
+    @property
+    def rx(self) -> int:
+        return self.rank % self.n_ranks_x
+
+
+def make_spectral_les_pencil_layout(comm, n_ranks_y: int, n_ranks_x: int,
+                                    ny_global: int, nx: int) -> SpectralLESLayout:
+    """Collective: build a ``n_ranks_y x n_ranks_x`` pencil layout on ``comm``.
+
+    ``n_ranks_x == 1`` returns the plain y-slab layout (no sub-communicators),
+    so slab runs keep the pre-pencil code path exactly."""
+    size, rank = comm.Get_size(), comm.Get_rank()
+    if n_ranks_y < 1 or n_ranks_x < 1 or n_ranks_y * n_ranks_x != size:
+        raise ValueError(
+            f"mesh {n_ranks_y}x{n_ranks_x} != communicator size {size}")
+    if ny_global % n_ranks_y or nx % n_ranks_x:
+        raise ValueError(
+            f"global {ny_global}x{nx} not divisible by mesh {n_ranks_y}x{n_ranks_x}")
+    if n_ranks_x == 1:
+        return SpectralLESLayout(rank=rank, n_ranks=size, ny_global=ny_global,
+                                 nx=nx, comm=comm)
+    ry, rx = divmod(rank, n_ranks_x)
+    comm_row = comm.Split(color=ry, key=rx)
+    comm_col = comm.Split(color=rx, key=ry)
+    return SpectralLESLayout(rank=rank, n_ranks=size, ny_global=ny_global,
+                             nx=nx, comm=comm, n_ranks_x=n_ranks_x,
+                             comm_row=comm_row, comm_col=comm_col)
 
 
 class SpectralLESGrid(NamedTuple):
@@ -360,11 +415,13 @@ def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64,
         # pointwise spectral multiply (kx, ky, k2, masks) lines up with the
         # (ny, nkx_local, nz) output of distributed_rfft2. Padding columns carry
         # no energy (zeros), so the sliced wavenumbers there are harmless.
+        # Pencil: the kx chunk is owned per COLUMN index ry of Py (the slab
+        # transform runs on comm_col); for the slab n_ranks_y/ry == n_ranks/rank.
         from legoesm.parallel.distributed_fft import (
             kx_local_size, local_kx_slice)
         nkx = nx // 2 + 1
-        nkx_pad = layout.n_ranks * kx_local_size(nx, layout.n_ranks)
-        lo, hi = local_kx_slice(nx, layout.n_ranks, layout.rank)
+        nkx_pad = layout.n_ranks_y * kx_local_size(nx, layout.n_ranks_y)
+        lo, hi = local_kx_slice(nx, layout.n_ranks_y, layout.ry)
 
         def _slice(arr):
             return jnp.pad(arr, ((0, 0), (0, nkx_pad - nkx)))[:, lo:hi]
@@ -385,21 +442,19 @@ def _fft(f, g: SpectralLESGrid):
     ``(ny_global, nkx_local, nz)``)."""
     if g.layout is None:
         return jnp.fft.rfft2(f, axes=(0, 1))
-    from legoesm.parallel.distributed_fft import distributed_rfft2
-    L = g.layout
-    return distributed_rfft2(f, ny_global=L.ny_global, nx=L.nx,
-                             n_ranks=L.n_ranks, comm=L.comm)
+    from legoesm.parallel.distributed_fft import layout_rfft2
+    return layout_rfft2(f, g.layout)
 
 
-def _ifft(fh, g: SpectralLESGrid):
+def _ifft(fh, g: SpectralLESGrid, nz=None):
     """Inverse of :func:`_fft` (returns the physical y-slab ``(ny_local,nx,nz)``
-    under MPI, the global ``(ny,nx,nz)`` serially)."""
+    under MPI, the global ``(ny,nx,nz)`` serially). ``nz`` = vertical extent of
+    the field that was transformed; required under the pencil layout (its
+    spectral z axis is zero-padded, so the length is ambiguous)."""
     if g.layout is None:
         return jnp.fft.irfft2(fh, axes=(0, 1), s=(g.cfg.ny, g.cfg.nx))
-    from legoesm.parallel.distributed_fft import distributed_irfft2
-    L = g.layout
-    return distributed_irfft2(fh, ny_global=L.ny_global, nx=L.nx,
-                              n_ranks=L.n_ranks, comm=L.comm)
+    from legoesm.parallel.distributed_fft import layout_irfft2
+    return layout_irfft2(fh, g.layout, nz)
 
 
 def planar_mean(f, g: SpectralLESGrid, keepdims=False):
@@ -420,25 +475,25 @@ def planar_mean(f, g: SpectralLESGrid, keepdims=False):
 def ddx(f, g: SpectralLESGrid):
     """∂/∂x via spectral (exact); Nyquist x-mode killed for a real derivative."""
     fh = _fft(f, g) * (1j * g.kx[..., None])
-    return _ifft(fh, g)
+    return _ifft(fh, g, f.shape[-1])
 
 
 def ddy(f, g: SpectralLESGrid):
     fh = _fft(f, g) * (1j * g.ky[..., None])
-    return _ifft(fh, g)
+    return _ifft(fh, g, f.shape[-1])
 
 
 def _apply_filter(f, g: SpectralLESGrid):
     """Smooth horizontal high-wavenumber low-pass (per z-level). Multiplies the
     rfft2 spectrum by the precomputed σ(k) mask; uniform in z ⇒ divergence-free
     preserving when applied equally to u, v, w."""
-    return _ifft(_fft(f, g) * g.filter_mask[..., None], g)
+    return _ifft(_fft(f, g) * g.filter_mask[..., None], g, f.shape[-1])
 
 
 def _dealias(f, g: SpectralLESGrid):
     if not g.cfg.dealias:
         return f
-    return _ifft(_fft(f, g) * g.dealias_mask[..., None], g)
+    return _ifft(_fft(f, g) * g.dealias_mask[..., None], g, f.shape[-1])
 
 
 # --------------------------------------------------------------------------- #
@@ -456,8 +511,13 @@ def _pad_to_fine(f_yxz, g: SpectralLESGrid | None = None):
     undecomposed) and y via one all-to-all transpose — see
     ``parallel/distributed_fft.distributed_pad_to_fine``."""
     if g is not None and g.layout is not None:
-        from legoesm.parallel.distributed_fft import distributed_pad_to_fine
+        from legoesm.parallel.distributed_fft import (
+            distributed_pad_to_fine, layout_is_pencil, pencil_pad_to_fine)
         L = g.layout
+        if layout_is_pencil(L):
+            return pencil_pad_to_fine(
+                f_yxz, ny_global=L.ny_global, nx=L.nx, n_ranks_y=L.n_ranks_y,
+                n_ranks_x=L.n_ranks_x, comm_row=L.comm_row, comm_col=L.comm_col)
         return distributed_pad_to_fine(f_yxz, ny_global=L.ny_global, nx=L.nx,
                                        n_ranks=L.n_ranks, comm=L.comm)
     ny, nx, nz = f_yxz.shape
@@ -473,8 +533,14 @@ def _pad_to_fine(f_yxz, g: SpectralLESGrid | None = None):
 def _truncate_from_fine(f_fine, ny, nx, g: SpectralLESGrid | None = None):
     """Fine ``(3ny/2,3nx/2,nz)`` → coarse ``(ny,nx,nz)`` physical (+9/4 scaling)."""
     if g is not None and g.layout is not None:
-        from legoesm.parallel.distributed_fft import distributed_truncate_from_fine
+        from legoesm.parallel.distributed_fft import (
+            distributed_truncate_from_fine, layout_is_pencil,
+            pencil_truncate_from_fine)
         L = g.layout
+        if layout_is_pencil(L):
+            return pencil_truncate_from_fine(
+                f_fine, ny_global=L.ny_global, nx=L.nx, n_ranks_y=L.n_ranks_y,
+                n_ranks_x=L.n_ranks_x, comm_row=L.comm_row, comm_col=L.comm_col)
         return distributed_truncate_from_fine(f_fine, ny_global=L.ny_global,
                                               nx=L.nx, n_ranks=L.n_ranks,
                                               comm=L.comm)
@@ -556,14 +622,18 @@ def _vreman_nu_t(u, v, w, g: SpectralLESGrid):
     return _vreman_core(
         a["a11"], a["a12"], a["a13"], a["a21"], a["a22"], a["a23"],
         a["a31"], a["a32"], a["a33"],
-        g.dx, g.dy, g.dz, g.cfg.c_vreman, nu_floor=g.cfg.nu_floor)
+        g.dx, g.dy, g.dz, g.cfg.c_vreman, nu_floor=g.cfg.nu_floor,
+        bbeta_guard_width=g.cfg.vreman_bbeta_guard_width)
 
 
 def eddy_viscosity(u, v, w, g: SpectralLESGrid):
     """Wall-damped constant-coefficient Smagorinsky ``ν_t=(C_s l)²|S|`` at centres.
 
-    ``l = min(C_s Δ, κ z)`` (Mason 1989) with ``Δ=(Δx Δy Δz)^⅓``. This is the
-    oracle's static-SGS option; the Bou-Zeid scale-dependent dynamic coefficient
+    ``l = min(C_s Δ, κ z)`` (Mason 1989) with ``Δ=(Δx Δy Δz)^⅓``. This is a
+    legoESM option, NOT the jax-alfa oracle's static SGS: jax-alfa's static
+    stress (``SGSStresses_SM.py``, ``-2 L² C_s² |S| S_ij`` with a constant
+    ``C_s²`` from ``DerivedVars.py``) has no ``κ z`` cap, which here is on by
+    default (``wall_damping=True``). The Bou-Zeid scale-dependent dynamic coefficient
     (``smagorinsky_dynamic``) replaces the constant ``C_s`` + κz cap with the
     per-(x,y,z) ``C_s²`` from :func:`lasd_core.lasd_cs2` (β IS the near-wall
     scale correction, so no Mason cap)."""
@@ -695,9 +765,10 @@ def advection(u, v, w, g: SpectralLESGrid):
 # --------------------------------------------------------------------------- #
 # Coupled stable Monin–Obukhov surface layer (GABLS1 prescribed-cooling BC)     #
 # --------------------------------------------------------------------------- #
-# Unstable prescribed-flux MOST root bracket in s = ln(−ζ): ζ ∈ [−ZETA_CLIP, −1e−20].
-# The shared ψ clamps ζ at −ZETA_CLIP, so a root beyond it is closed-form; 64
-# halvings of the ~48-wide bracket leave < 1e−17.
+# Unstable prescribed-flux MOST root bracket in s = ln(−ζ): ζ ∈ [−ζ_sat, −1e−20],
+# ζ_sat = ZETA_CLIP + zeta_cap_width. The shared ψ is constant beyond −ζ_sat (the
+# smooth cap has saturated; width 0 = hard clip at ZETA_CLIP), so a root beyond it
+# is closed-form; 64 halvings of the ~48-wide bracket leave < 1e−17.
 _MOST_ZETA_CLIP = 10.0
 _MOST_BISECT_S_LO = -46.0
 _MOST_BISECT_N = 64
@@ -708,45 +779,53 @@ _MOST_FP_N = 50          # stable prescribed-flux fixed-point iterations
 _MOST_U_MIN = 5e-7
 
 
-def _flux_most_resid(s, spd, a, lnz):
+def _flux_most_resid(s, spd, a, lnz, zeta_cap_width):
     """``F(s) = κ⟨U⟩/u_*(s) − (ln(z₁/z0) − ψ_m(−e^s))`` with ``u_*³ = a e^{−s}``:
     the unstable prescribed-flux MOST relation in ``s = ln(−ζ)``, strictly
     increasing in ``s``."""
     kappa = constants.kappa_von_karman
-    return kappa * spd / jnp.cbrt(a * jnp.exp(-s)) - (lnz - psi_m(-jnp.exp(s)))
+    return kappa * spd / jnp.cbrt(a * jnp.exp(-s)) - (
+        lnz - psi_m(-jnp.exp(s), zeta_cap_width=zeta_cap_width))
 
 
-@jax.custom_jvp
-def _flux_most_root(spd, a, lnz):
-    """Root of :func:`_flux_most_resid` in ``[S_LO, ln ZETA_CLIP]`` by bisection (the
-    bracket edge when the root lies outside; callers select those cases away).
-    Derivatives of every order follow the implicit-function rule (custom JVP)."""
-    def bisect(_, lohi):
-        lo, hi = lohi
-        mid = 0.5 * (lo + hi)
-        up = _flux_most_resid(mid, spd, a, lnz) > 0
-        return jnp.where(up, lo, mid), jnp.where(up, mid, hi)
+@functools.lru_cache(maxsize=None)
+def _flux_most_root(zeta_cap_width):
+    """Root finder of :func:`_flux_most_resid` in ``[S_LO, ln(ZETA_CLIP + width)]`` by
+    bisection (the bracket edge when the root lies outside; callers select those
+    cases away), for the static cap width. Derivatives of every order follow the
+    implicit-function rule (custom JVP)."""
+    s_hi = math.log(_MOST_ZETA_CLIP + zeta_cap_width)
 
-    lo, hi = jax.lax.fori_loop(
-        0, _MOST_BISECT_N, bisect,
-        (jnp.full_like(a, _MOST_BISECT_S_LO), jnp.full_like(a, math.log(_MOST_ZETA_CLIP))))
-    return 0.5 * (lo + hi)
+    @jax.custom_jvp
+    def root(spd, a, lnz):
+        def bisect(_, lohi):
+            lo, hi = lohi
+            mid = 0.5 * (lo + hi)
+            up = _flux_most_resid(mid, spd, a, lnz, zeta_cap_width) > 0
+            return jnp.where(up, lo, mid), jnp.where(up, mid, hi)
 
+        lo, hi = jax.lax.fori_loop(
+            0, _MOST_BISECT_N, bisect,
+            (jnp.full_like(a, _MOST_BISECT_S_LO), jnp.full_like(a, s_hi)))
+        return 0.5 * (lo + hi)
 
-@_flux_most_root.defjvp
-def _flux_most_root_jvp(primals, tangents):
-    # F(s(p), p) = 0  ⇒  ṡ = −(∂F/∂p · ṗ) / (∂F/∂s); F_s > 0 for ⟨U⟩ > 0.
-    spd, a, lnz = primals
-    s = _flux_most_root(spd, a, lnz)
-    f_s = jax.jvp(lambda s_: _flux_most_resid(s_, spd, a, lnz), (s,),
-                  (jnp.ones_like(s),))[1]
-    f_p = jax.jvp(lambda *p: _flux_most_resid(s, *p), primals, tangents)[1]
-    return s, -f_p / f_s
+    @root.defjvp
+    def root_jvp(primals, tangents):
+        # F(s(p), p) = 0  ⇒  ṡ = −(∂F/∂p · ṗ) / (∂F/∂s); F_s > 0 for ⟨U⟩ > 0.
+        spd, a, lnz = primals
+        s = root(spd, a, lnz)
+        f_s = jax.jvp(lambda s_: _flux_most_resid(s_, spd, a, lnz, zeta_cap_width),
+                      (s,), (jnp.ones_like(s),))[1]
+        f_p = jax.jvp(lambda *p: _flux_most_resid(s, *p, zeta_cap_width),
+                      primals, tangents)[1]
+        return s, -f_p / f_s
+
+    return root
 
 
 def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10,
                       z0h=None, return_residual=False, z_ref=None, dq=None,
-                      virtual=False):
+                      virtual=False, *, zeta_cap_width):
     """Coupled Monin–Obukhov surface layer (planar-mean, GABLS1-faithful).
 
     Given the planar-mean first-level wind speed ``spd_mean=⟨|u₁|⟩`` and potential
@@ -760,8 +839,19 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
 
     The stability functions ``ψ_m, ψ_h`` are the SHARED canonical Businger–Dyer
     implementation (:func:`legoesm.core.bulk_flux.psi_m`/``psi_h``; stable branch
-    Dyer 1974 ``−5ζ``, unstable Businger–Dyer, both internally clipped to
-    ``ζ∈[−10,10]`` with safe-branch gradients) rather than a re-derived form.
+    Dyer 1974 ``−5ζ``, unstable Businger–Dyer, |ζ| capped at 10 with safe-branch
+    gradients) rather than a re-derived form.  ``zeta_cap_width`` (keyword,
+    required; the config's ``most_zeta_cap_width``) is the RULE 5 half-width of
+    the smooth cap; 0 is the former hard clip.
+
+    KNOWN DIFFERENCE vs the hard clip, at the default width 2 (cap ramp
+    |ζ| in (8, 12)), measured over 9600 states (wind 0.5-10 m/s, θ₁−T_s
+    0.05-10 K, z₁ 3.125 / 6.25 m, z0 0.1 m, θ_ref 263.5 K): 109 converge with
+    |ζ| inside the ramp, where the surface heat flux differs by up to 5.8 %
+    (ζ = 11.1); outside it the result is unchanged, incl. GABLS1-like states
+    (ζ ~ 0.003-0.01).  Per-state gaps pinned in
+    ``tests/unit/fixtures/les_most_zeta_cap_gap.npz``; ``zeta_cap_width=0``
+    reproduces the hard clip exactly.
     Thermal roughness ``z0h`` enters the θ relation as ``ln(z₁/z0h) − ψ_h``;
     ``None`` means ``z0h = z0`` (Beare et al. 2006 specify z0m=z0h=0.1 m), which
     reproduces the single-roughness form exactly.
@@ -800,8 +890,9 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
 
     def _den_h(inv_L, zeta):
         if z_ref is None:
-            return lnzh - psi_h(zeta)
-        return lnzh - psi_h(zeta) + psi_h(z_ref * inv_L)
+            return lnzh - psi_h(zeta, zeta_cap_width=zeta_cap_width)
+        return (lnzh - psi_h(zeta, zeta_cap_width=zeta_cap_width)
+                + psi_h(z_ref * inv_L, zeta_cap_width=zeta_cap_width))
 
     def _inv_L(u_star, th_star, q_star):
         thv_star = th_star if not virtual else th_star + eps_v * theta_ref * q_star
@@ -814,7 +905,7 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     for _ in range(n_iter):
         inv_L = _inv_L(u_star, th_star, q_star)
         zeta = z1 * inv_L                         # +ve stable, −ve unstable
-        u_star = kappa * spd_mean / (lnz - psi_m(zeta))
+        u_star = kappa * spd_mean / (lnz - psi_m(zeta, zeta_cap_width=zeta_cap_width))
         den_h = _den_h(inv_L, zeta)
         th_star = kappa * dth / den_h
         if dq is not None:
@@ -830,7 +921,8 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     zeta = z1 * inv_L
     tiny = jnp.finfo(jnp.result_type(u_star)).tiny
     resid = jnp.maximum(
-        jnp.abs(kappa * spd_mean / (lnz - psi_m(zeta)) - u_star)
+        jnp.abs(kappa * spd_mean / (lnz - psi_m(zeta, zeta_cap_width=zeta_cap_width))
+                - u_star)
         / jnp.maximum(jnp.abs(u_star), tiny),
         jnp.abs(kappa * dth / _den_h(inv_L, zeta) - th_star)
         / jnp.maximum(jnp.abs(th_star), tiny))
@@ -840,7 +932,7 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     return out + (resid,)
 
 
-def most_drag_prescribed_flux(spd_mean, q0, z1, z0, theta_ref):
+def most_drag_prescribed_flux(spd_mean, q0, z1, z0, theta_ref, *, zeta_cap_width):
     """Stability-corrected wall drag when the surface heat flux is PRESCRIBED.
 
     The flux fixes the Obukhov length directly, ``1/L = −κ g q0 / (u_*³ θ_ref)``
@@ -857,15 +949,18 @@ def most_drag_prescribed_flux(spd_mean, q0, z1, z0, theta_ref):
     Defined for ``⟨U⟩ ≥ 5e−7`` m/s (NaN below; :func:`surface_boundary`'s speed,
     ≥ 1e−6, always is). ``q0 ≤ 0``: fixed-point iteration in ``u_*``; if its
     relative residual exceeds ``sqrt(eps)`` (slow or no convergence near the
-    critical cooling) the result is NaN — loud, never a wrong stress. Past ζ = +10 the shared ψ is clamped, so
-    strong cooling gets ``u_* = κ⟨U⟩/(ln(z₁/z0) − ψ_m(10))``, the root of the
-    relation as implemented (mirror of the unstable ζ ≤ −10 limit below).
+    critical cooling) the result is NaN — loud, never a wrong stress. The shared ψ
+    caps |ζ| at 10 (``zeta_cap_width``, keyword, required: the config's
+    ``most_zeta_cap_width``, RULE 5 half-width of the smooth cap; 0 = hard clip)
+    and is constant beyond ``ζ_sat = 10 + zeta_cap_width``, so strong cooling gets
+    ``u_* = κ⟨U⟩/(ln(z₁/z0) − ψ_m(10))``, the root of the relation as implemented
+    (mirror of the unstable ζ ≤ −ζ_sat limit below).
     ``q0 > 0``:
     the fixed point oscillates near free convection, so the root is found in
     ``s = ln(−ζ)``, where ``F(s) = κ⟨U⟩/u_*(s) − (ln(z₁/z0) − ψ_m(−e^s))`` with
     ``u_*³ = κ g q0 z₁/(θ_ref e^s)`` is strictly increasing (unique root), by
     bisection with implicit-function derivatives of every order
-    (:func:`_flux_most_root`). The shared ψ is constant for ζ ≤ −10, so when the
+    (:func:`_flux_most_root`). The shared ψ is constant for ζ ≤ −ζ_sat, so when the
     root lies there (calm wind / free convection) ``u_* = κ⟨U⟩/(ln(z₁/z0) −
     ψ_m(−10))`` exactly; that needs ``ln(z₁/z0) > ψ_m(−10)`` (checked in
     :func:`surface_boundary`). JIT- and AD-safe."""
@@ -886,22 +981,27 @@ def most_drag_prescribed_flux(spd_mean, q0, z1, z0, theta_ref):
         theta_ref * kappa ** 2 * jnp.where(stable, spd_mean, 1.0) ** 3)
 
     def zeta_step(_, zeta):
-        return c * (lnz - psi_m(zeta)) ** 3
+        return c * (lnz - psi_m(zeta, zeta_cap_width=zeta_cap_width)) ** 3
 
     zeta = jax.lax.fori_loop(0, _MOST_FP_N, zeta_step, c * lnz ** 3)  # neutral guess
-    u_star = kappa * spd_mean / (lnz - psi_m(zeta))
-    u_next = kappa * spd_mean / (lnz - psi_m(zeta_step(0, zeta)))
+    u_star = kappa * spd_mean / (lnz - psi_m(zeta, zeta_cap_width=zeta_cap_width))
+    u_next = kappa * spd_mean / (
+        lnz - psi_m(zeta_step(0, zeta), zeta_cap_width=zeta_cap_width))
     tol = jnp.sqrt(jnp.finfo(dt).eps)
     u_star = jnp.where(jnp.abs(u_next - u_star) <= tol * u_star, u_star, jnp.nan)
 
     unstable = q0 > 0
     a = kappa * gacc * jnp.where(unstable, q0, 1.0) * z1 / theta_ref   # u_*³ (−ζ)
     spd_arr, lnz_arr = spd_mean, lnz
-    s = _flux_most_root(spd_arr, a, lnz_arr)
-    u_free = kappa * spd_mean / (lnz - psi_m(-_MOST_ZETA_CLIP))   # ψ clamped
-    f_hi = _flux_most_resid(jnp.full_like(a, math.log(_MOST_ZETA_CLIP)), spd_arr, a, lnz_arr)
-    f_lo = _flux_most_resid(jnp.full_like(a, _MOST_BISECT_S_LO), spd_arr, a, lnz_arr)
-    # Root past ζ = −10: closed form. Root below ζ = −1e−20 (q0 ≈ 0): neutral to
+    zeta_sat = _MOST_ZETA_CLIP + zeta_cap_width      # ψ constant beyond −ζ_sat
+    s = _flux_most_root(zeta_cap_width)(spd_arr, a, lnz_arr)
+    u_free = kappa * spd_mean / (
+        lnz - psi_m(-zeta_sat, zeta_cap_width=zeta_cap_width))
+    f_hi = _flux_most_resid(jnp.full_like(a, math.log(zeta_sat)), spd_arr, a, lnz_arr,
+                            zeta_cap_width)
+    f_lo = _flux_most_resid(jnp.full_like(a, _MOST_BISECT_S_LO), spd_arr, a, lnz_arr,
+                            zeta_cap_width)
+    # Root past ζ = −ζ_sat: closed form. Root below ζ = −1e−20 (q0 ≈ 0): neutral to
     # round-off, which the fixed point already has. Otherwise the bisected root.
     u_unst = jnp.where(f_hi <= 0, u_free,
                        jnp.where(f_lo >= 0, u_star, jnp.cbrt(a * jnp.exp(-s))))
@@ -955,7 +1055,9 @@ def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc,
                     else (None, sfc_theta_flux))
         z1 = 0.5 * g.cfg.Lz / g.cfg.nz          # static: cfg holds strings, never traced
         with jax.ensure_compile_time_eval():    # a constant, also under jit
-            psi_clip = float(psi_m(-_MOST_ZETA_CLIP))
+            # ψ at saturation of the cap (= the hard-clip value ψ_m(−10))
+            psi_clip = float(psi_m(-(_MOST_ZETA_CLIP + g.cfg.most_zeta_cap_width),
+                                   zeta_cap_width=g.cfg.most_zeta_cap_width))
         if math.log(z1 / g.cfg.z0) <= psi_clip:
             raise ValueError(
                 f"sfc_flux_drag='most' needs ln(z1/z0) > psi_m(-{_MOST_ZETA_CLIP}) = "
@@ -963,7 +1065,8 @@ def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc,
                 f"z1={z1} m, z0={g.cfg.z0} m")
         spd_mean = planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
         _us, cd_surf = most_drag_prescribed_flux(
-            spd_mean, sfc_theta_flux, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
+            spd_mean, sfc_theta_flux, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0,
+            zeta_cap_width=g.cfg.most_zeta_cap_width)
         return ((cd_surf, sfc_theta_flux, jnp.nan) if return_residual
                 else (cd_surf, sfc_theta_flux))
     spd_mean = planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
@@ -972,7 +1075,8 @@ def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc,
     out = most_surface_flux(
         spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0,
         z0h=g.cfg.z0h, return_residual=return_residual, z_ref=g.cfg.sfc_ref_height,
-        dq=dq, virtual=g.cfg.most_virtual)
+        dq=dq, virtual=g.cfg.most_virtual,
+        zeta_cap_width=g.cfg.most_zeta_cap_width)
     return (out[3], out[2]) + tuple(out[4:])
 
 
@@ -1312,8 +1416,23 @@ def pressure_potential(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     wzh = _fft(ddz_f2c(w_s, dz), g)
     div_h = uh + vh + wzh                                   # (nyk, nxr, nz) complex
     rhs = div_h / dt
+    k2_2d = g.k2
+    pencil = g.layout is not None and getattr(g.layout, "n_ranks_x", 1) > 1
+    if pencil:
+        # Pencil spectral data are z-split: gather whole z for the vertical solve
+        # (ky chunk rx of Px, zero-padded rows -> k2=0 -> gauge-pinned, rhs 0 ->
+        # phi 0), trimmed to nz BEFORE building the matrix, re-padded after.
+        from legoesm.parallel.distributed_fft import (
+            chunk_slice, pencil_spec_to_zwhole)
+        L = g.layout
+        rhs = pencil_spec_to_zwhole(rhs, nz_out=nz, n_ranks_x=L.n_ranks_x,
+                                    comm_row=L.comm_row)
+        lo, hi = chunk_slice(L.ny_global, L.n_ranks_x, L.rx)
+        k2_2d = jnp.pad(g.k2, ((0, L.n_ranks_x * (hi - lo) - L.ny_global),
+                               (0, 0)))[lo:hi]
+        nyk = hi - lo
     # Tridiagonal in z (centres), Neumann walls: φ[-1]=φ[0], φ[nz]=φ[nz-1].
-    k2 = g.k2[..., None]                                    # (nyk, nxr, 1)
+    k2 = k2_2d[..., None]                                   # (nyk, nxr, 1)
     inv_dz2 = 1.0 / dz ** 2
     a = jnp.full((nyk, nxr, nz), inv_dz2, dtype=rhs.dtype)   # sub
     c = jnp.full((nyk, nxr, nz), inv_dz2, dtype=rhs.dtype)   # super
@@ -1328,14 +1447,18 @@ def pressure_potential(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     # is singular by one constant, so pin only the GAUGE — φ[0]=0 — and keep the
     # interior vertical Laplacian. (Pinning the whole mode to 0 would leave the
     # vertical divergence of these columns uncorrected — an O(5%) leak.)
-    sing = (g.k2 == 0.0)                                   # (ny, nxr)
+    sing = (k2_2d == 0.0)                                  # (nyk, nxr)
     s0 = sing[..., None]
     b = b.at[..., 0].set(jnp.where(sing, 1.0, b[..., 0]))
     c = c.at[..., 0].set(jnp.where(sing, 0.0, c[..., 0]))
     rhs = rhs.at[..., 0].set(jnp.where(sing, 0.0 + 0.0j, rhs[..., 0]))
     del s0
     phi_h = thomas_solve(a, b, c, rhs)
-    return _ifft(phi_h, g)
+    if pencil:
+        from legoesm.parallel.distributed_fft import pencil_zwhole_to_spec
+        phi_h = pencil_zwhole_to_spec(phi_h, ny_global=L.ny_global,
+                                      n_ranks_x=L.n_ranks_x, comm_row=L.comm_row)
+    return _ifft(phi_h, g, nz)
 
 
 def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
@@ -1363,7 +1486,7 @@ def _horizontal_hyperdiff(f, nu4, g: SpectralLESGrid):
     NOT act as broad diffusion (the WENO5 sharpness in the energy-containing
     scales is preserved)."""
     k4 = (g.k2 ** 2)[..., None]                            # (nyk, nxr, 1)
-    return _ifft(-nu4 * k4 * _fft(f, g), g)
+    return _ifft(-nu4 * k4 * _fft(f, g), g, f.shape[-1])
 
 
 def _w_hyperdiffusion(w, g: SpectralLESGrid):

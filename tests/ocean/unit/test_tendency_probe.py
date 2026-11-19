@@ -217,6 +217,72 @@ def test_nemo_literal_tke_probe_forwards_base_rn_dt(
     assert seen["dt_tke"] == 300.0
 
 
+def _epbl_probe_config(dt_s=900.0):
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        EPBLConfig, VerticalMixingConfig,
+    )
+
+    vm = VerticalMixingConfig(scheme="epbl", epbl=EPBLConfig(dt_s=dt_s))
+    return LatLonCGridOceanConfig.from_flat(
+        A_h=1.0e4, A_v=1.0e-3, bottom_drag_r=0.0,
+        implicit_vertical_mixing=False,
+        physics=OceanPhysicsConfig(vertical_mixing=vm),
+    )
+
+
+def test_epbl_probe_passes_momentum_dt_and_refuses_unequal_tracer_dt(
+    state, grid, z_coord, monkeypatch,
+):
+    """ePBL gets the probe's momentum dt as dt_tke (as CATKE does), whatever
+    EPBLConfig.dt_s says, and a tracer dt that differs from it raises."""
+    import legoesm.ocean.physics.vertical_mixing as vertical_mixing
+
+    cfg = _epbl_probe_config(dt_s=900.0)
+    seen = {}
+
+    def _capture_dt(*args, **kwargs):
+        seen["dt_tke"] = kwargs["dt_tke"]
+        shape = state.T.data.shape[:-1] + (state.T.data.shape[-1] - 1,)
+        zeros = jnp.zeros(shape, dtype=state.T.data.dtype)
+        return zeros, zeros
+
+    monkeypatch.setattr(
+        vertical_mixing, "compute_vertical_K_profiles", _capture_dt)
+    probe_latlon_cgrid(state, grid, z_coord, cfg, dt=600.0)
+    assert seen["dt_tke"] == 600.0
+    with pytest.raises(ValueError, match=r"tracer timestep \(900.0 s\) to "
+                                         r"equal the momentum timestep "
+                                         r"\(600.0 s\)"):
+        probe_latlon_cgrid(state, grid, z_coord, cfg, dt=600.0,
+                           dt_tracer=900.0)
+
+
+def test_epbl_probe_passes_latitude_to_the_closure(state, grid, z_coord):
+    """Unpatched K-profile call: ePBL refuses a missing latitude, so the
+    probe must thread the grid latitude exactly as production does."""
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        EPBLConfig, VerticalMixingConfig,
+    )
+
+    vm = VerticalMixingConfig(scheme="epbl", epbl=EPBLConfig(dt_s=600.0))
+    cfg = LatLonCGridOceanConfig.from_flat(
+        A_h=1.0e4, A_v=1.0e-3, bottom_drag_r=0.0,
+        implicit_vertical_mixing=False,
+        physics=OceanPhysicsConfig(vertical_mixing=vm),
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+    zero = jnp.zeros_like(state.T.data[..., 0])
+    # ePBL refuses missing forcing (#2179): pass an explicitly unforced column.
+    sfc = OceanSurfaceForcing(tau_x=zero, tau_y=zero, q_net=zero,
+                              freshwater=zero)
+    result = probe_latlon_cgrid(state, grid, z_coord, cfg, dt=600.0,
+                                surface_forcing=sfc)
+    assert result.dT_zdf is not None
+    assert bool(jnp.isfinite(result.dT_zdf).all())
+
+
 # ---------------------------------------------------------------------------
 # 1. End-to-end probe runs and returns finite arrays
 # ---------------------------------------------------------------------------
