@@ -125,3 +125,30 @@ def test_layered_snow_column_energy_closes_against_atmosphere_fluxes(swe):
     resid = _residual(f"layered swe={swe} f_snow={f_snow:.3f}", r, so,
                       so.snow_ground_heat_applied, robin, new)
     np.testing.assert_allclose(resid, 0.0, rtol=0, atol=_ATOL)
+
+
+@pytest.mark.parametrize("swe", [15.0, 200.0])
+@pytest.mark.parametrize("sw", [400.0, 0.0])
+def test_snow_node_column_energy_closes_against_atmosphere_fluxes(swe, sw):
+    """One-layer snow thermal node (#1882), partial and full cover, day and
+    night.  Storage = node + soil sensible heat, at the end-of-step snow mass
+    and soil water the final solve used (freeze/thaw off; the node stays below
+    freezing, asserted, so no melt is booked)."""
+    cfg = _cfg()
+    cfg = cfg._replace(thermal=cfg.thermal._replace(snow_insulation=True))
+    st = ml.init_multilayer_land_state(2, cfg, T_init=270.0)
+    st = st._replace(snow_depth=jnp.full(2, swe), T_snow=jnp.full(2, 262.0))
+    st, new, r, so, robin = _run(cfg, _forcing(2, T=265.0, q=0.0015, sw=sw), st)
+    tf = constants.T_freeze
+    assert float(jnp.max(new.T_snow)) < tf and float(jnp.min(new.snow_depth)) > 0.0
+    grid = make_soil_grid(cfg.soil_grid)
+    C = compute_heat_capacity(new.theta_soil, cfg.hydraulics, cfg.thermal)
+
+    def E(s):
+        return (jnp.sum(C * grid.dz * (s.T_soil - tf), axis=-1)
+                + constants.c_pi * new.snow_depth * (s.T_snow - tf))
+
+    dS = np.asarray(E(new) - E(st)) / _DT
+    resid = _residual(f"node swe={swe} sw={sw}", r, so,
+                      dS - cfg.thermal.Q_geothermal, robin, new)
+    np.testing.assert_allclose(resid, 0.0, rtol=0, atol=_ATOL)
