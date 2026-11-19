@@ -193,7 +193,12 @@ _UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_wid
                 # nodd, the DDINC cap and the RH branch could compare a wrong
                 # internal quantity without any test noticing.
                 "dd_ok_depth_width_pa", "nodd_tder_width_kgs", "ddinc_cap_width",
-                "dd_rh_low_width_kgkg"}
+                "dd_rh_low_width_kgkg",
+                # PR 7a: no fixture column's closure iteration sits in the
+                # saturation (AINC/AINCMX > 0.999), same-AINC or dfda > 0 bands
+                # (gaps at the hard gap to 2e-15); covered by the branch-weight
+                # unit tests and the width -> 0 convergence of the soft closure
+                "closure_ainc_rel_width", "closure_ainc_tol_width", "closure_dfda_width"}
 
 
 def _moved(stored, case):

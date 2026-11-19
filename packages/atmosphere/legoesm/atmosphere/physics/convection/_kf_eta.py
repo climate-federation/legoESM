@@ -419,7 +419,14 @@ class KFSmoothing(NamedTuple):
       0.1 for deep), the inflow mask UER - DER > 1e-3 (masked and unmasked
       values agree there, AINCM1 >> 1000), and the integer KLCL re-search,
       NSTEP and its DTT limit (E16, C-KLCL2, C-NSTEP: next PR); the integer
-      and flag state is updated wherever A > 0.
+      and flag state is updated wherever A > 0; the adjusted sounding is
+      recomputed from the mixture F, so sounding, condensate and rain derive
+      from one F and the column water closes (oracle water test, tested).
+      KNOWN DIFFERENCE (fixture, max over columns and levels, vs the hard
+      limit's gap): the FABE width moves the sweep's precipitation rate by up
+      to 6.9e-5 kg/m2/s (column 68), the DABE width the heating by up to
+      1.1e-6 K/s (arm L_u20_w05), the AINC width by 7.0e-8 K/s; the
+      saturation, same-AINC and dfda widths move no fixture case.
     """
 
     lut_knot_width: float
