@@ -1336,12 +1336,12 @@ def test_closure_weights_gradient_finite_for_tiny_ainc_steps(dtype, dA):
     """dfda = dFABE/dAINC divides by AINC - AINCOLD: its gradient stays finite
     (the dfda step is saturated wherever the quotient is huge)."""
     def f(x):
-        p = kfe._soft_closure_weights(x[0], jnp.asarray(0.5, dtype), x[1], x[1] - dA,
+        p = kfe._soft_closure_weights(x[0], jnp.asarray(0.5, dtype), x[1], jnp.asarray(0.0, dtype),
                                       jnp.asarray(2.0, dtype), jnp.asarray(0.3, dtype),
                                       jnp.asarray(0.0, dtype), jnp.asarray(False), jnp.asarray(True),
                                       jnp.asarray(True), jnp.asarray(False), jnp.asarray(False), _DEFAULT)
         return sum(p[b] for b in _BRANCHES) + p["cyc1"]
-    g = jax.grad(f)(jnp.asarray([0.6, 0.4], dtype))
+    g = jax.grad(f)(jnp.asarray([0.6, dA], dtype))  # AINC = dA, AINCOLD = 0: no fp32 rounding to 0
     assert bool(jnp.all(jnp.isfinite(g)))
 
 
