@@ -65,6 +65,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.smooth import smooth_max_c1, smooth_min_c1
 
 # Module-local conversion factor (not a physical constant per se).
 _APAR_CONVERSION = 4.56           # [W m-2] → [μmol m-2 s-1] for PAR
@@ -270,6 +271,28 @@ def split_sw_components(
 # Shortwave radiative transfer
 # ---------------------------------------------------------------------------
 
+def _vcmax_sun_shade(LAI, CI, kn, kb, Vcmax25_C3_leaf, Vcmax25_C4_leaf):
+    """Canopy Vcmax25 sunlit/shaded split on the exponential nitrogen profile
+    (Sellers 1985 / DifferBESS): (C3 sun, C3 shade, C4 sun, C4 shade), unmasked."""
+    kn_kb_Lc = kn + kb * LAI
+    LAI_Vc3  = LAI * Vcmax25_C3_leaf
+    # Guard against kn*CI → 0
+    kn_CI_safe = jnp.maximum(kn * CI, 1e-6)
+    Vcmax25_C3Tot = LAI_Vc3 * (1.0 - jnp.exp(-kn * CI)) / kn_CI_safe
+    Vcmax25_C3Sun = LAI_Vc3 * (1.0 - jnp.exp(-CI * kn_kb_Lc)) / jnp.maximum(kn_kb_Lc, 1e-6)
+    LAI_Vc4  = LAI * Vcmax25_C4_leaf
+    Vcmax25_C4Tot = LAI_Vc4 * (1.0 - jnp.exp(-kn * CI)) / kn_CI_safe
+    Vcmax25_C4Sun = LAI_Vc4 * (1.0 - jnp.exp(-CI * kn_kb_Lc)) / jnp.maximum(kn_kb_Lc, 1e-6)
+    return (Vcmax25_C3Sun, Vcmax25_C3Tot - Vcmax25_C3Sun,
+            Vcmax25_C4Sun, Vcmax25_C4Tot - Vcmax25_C4Sun)
+
+
+def _day_weight(PAR_dir, NIR_dir):
+    """tanh dusk ramp on the direct-beam SW that fades fSun toward 0 at night."""
+    return 0.5 * (1.0 + jnp.tanh(
+        (PAR_dir + NIR_dir - _NIGHT_RAMP_CENTER_WM2) / _NIGHT_RAMP_HALFWIDTH_WM2))
+
+
 @jax.jit
 def canopy_shortwave_rt(
     PAR_dir: jax.Array,
@@ -418,18 +441,8 @@ def canopy_shortwave_rt(
 
     # ---- Vcmax25 canopy integration via nitrogen extinction profile ----
     # (Sellers 1985 / DifferBESS: exponential N profile with extinction kn)
-    kn_kb_Lc = kn + kb * LAI
-    LAI_Vc3  = LAI * Vcmax25_C3_leaf
-    # Guard against kn*CI → 0
-    kn_CI_safe = jnp.maximum(kn * CI, 1e-6)
-    Vcmax25_C3Tot = LAI_Vc3 * (1.0 - jnp.exp(-kn * CI)) / kn_CI_safe
-    Vcmax25_C3Sun = LAI_Vc3 * (1.0 - jnp.exp(-CI * kn_kb_Lc)) / jnp.maximum(kn_kb_Lc, 1e-6)
-    Vcmax25_C3Sh  = Vcmax25_C3Tot - Vcmax25_C3Sun
-
-    LAI_Vc4  = LAI * Vcmax25_C4_leaf
-    Vcmax25_C4Tot = LAI_Vc4 * (1.0 - jnp.exp(-kn * CI)) / kn_CI_safe
-    Vcmax25_C4Sun = LAI_Vc4 * (1.0 - jnp.exp(-CI * kn_kb_Lc)) / jnp.maximum(kn_kb_Lc, 1e-6)
-    Vcmax25_C4Sh  = Vcmax25_C4Tot - Vcmax25_C4Sun
+    Vcmax25_C3Sun, Vcmax25_C3Sh, Vcmax25_C4Sun, Vcmax25_C4Sh = _vcmax_sun_shade(
+        LAI, CI, kn, kb, Vcmax25_C3_leaf, Vcmax25_C4_leaf)
 
     # ---- Night / bare soil guard ----
     zero = jnp.zeros_like(LAI)
@@ -454,10 +467,7 @@ def canopy_shortwave_rt(
     # step, so a narrow transition would still produce a kink at the
     # first night step.  By the time sw_dir > 60 the day_weight is ~1
     # and the sunlit fraction is fully active.
-    sw_dir_total = PAR_dir + NIR_dir
-    day_weight = 0.5 * (1.0 + jnp.tanh(
-        (sw_dir_total - _NIGHT_RAMP_CENTER_WM2) / _NIGHT_RAMP_HALFWIDTH_WM2))
-    fSun = fSun * day_weight
+    fSun = fSun * _day_weight(PAR_dir, NIR_dir)
 
     return CanopySWOutput(
         fSun=fSun,
@@ -470,6 +480,247 @@ def canopy_shortwave_rt(
         Vcmax25_C3Sh=Vcmax25_C3Sh,
         Vcmax25_C4Sun=Vcmax25_C4Sun,
         Vcmax25_C4Sh=Vcmax25_C4Sh,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sellers (1985) analytic two-stream with CLM5 leaf optics (sw_scheme="two_stream")
+# ---------------------------------------------------------------------------
+# Transcribed from DifferBESS ``process/CanopyShortwaveRadiationTwoStream.py`` and
+# ``process/canopy_geometry.py`` (v10 ``two_stream_shared``; checkout bd38955c7b
+# working tree, file md5 89755866fd49ead196440691f2818cac), the form of the CLM5
+# Tech Note eqs 2.3.3-2.3.14.  Per band and incidence (beam, diffuse) the diffuse
+# up/down fluxes are solved analytically with the soil as the lower boundary; the
+# sunlit leaves take the unscattered beam plus a CI-weighted share of the diffuse
+# absorption; the three absorbed parts are then rescaled to the MODIS-anchored
+# total (1 - ALB) I, as upstream does.  Numeric guards kept exactly as upstream
+# (documented departures from the closed form): K nudged by _TS_K_NUDGE off the
+# K = h removable singularity, the h -> K series of the cross integral, the
+# omega*beta and leaf-area floors, the SZA > 89 deg night extinction, the
+# rescale skipped below _TS_FLUX_EPS, LAI <= 0 zeroing.  Departure: at LAI <= 0
+# the soil takes the whole absorbed total (upstream discards the leaf share of
+# the floored solve, ~1e-4 of (1 - ALB) I).  RULE 5 KNOWN DIFFERENCE: upstream's
+# hard clip of the sunlit fraction to [0, canopy absorbed] is smoothed in ratio
+# space (sunlit / canopy absorbed clipped to [0, 1] by smooth_max_c1 /
+# smooth_min_c1, exact outside a band of ``clip_width``); ``clip_width = 0``
+# recovers the reference.  At the default 0.01 the sunlit absorbed SW differs
+# from the reference only where that ratio is within 0.005 of 1 (sparse canopies:
+# per-case gaps in tests/land/unit/test_canopy_two_stream_sw.py); invariants
+# kept: 0 <= sunlit <= canopy absorbed, sunlit + shaded = canopy absorbed.
+# KNOWN DIFFERENCE (UV): upstream rescales the UV band to (1 - ALB_VIS) UV; here
+# to (1 - _RHO_UV) UV, the UV reflectance broadband_albedo reports to the
+# atmosphere, so absorbed SW = (1 - broadband_albedo) SW holds for this scheme
+# too.  Size 0.02 (ALB_VIS - 0.05) SW (~0-1 W m-2).
+# Not ported (separate upstream differences): its PFT-geometry Vcmax split (ours
+# kept), its longwave k_d, its per-site soil-albedo inversion.
+_TS_NIGHT_SZA = 89.0          # deg; beyond it the beam extinction is _TS_NIGHT_K
+_TS_NIGHT_K = 50.0
+_TS_SIGMA_GUARD = 1e-4        # |sigma| below which K is nudged off K = h
+_TS_K_NUDGE = 1e-3            # relative nudge of K at that singularity
+_TS_HK_GUARD = 1e-3           # |h - K| below which the cross integral uses its series
+_TS_FLUX_EPS = 1e-9           # absorbed band total below which no rescale is applied
+_TS_OMEGA_BETA_MIN = 1e-6     # floor on the diffuse upscatter omega*beta
+_TS_L_MIN = 1e-4              # leaf-area floor inside the solver
+_TS_UV_LEAF_SCATTERING = 0.05  # UV leaf scattering (absorptance 0.95), split rho = tau
+# Ross-Goudriaan projection G(mu) = phi1 + phi2 mu (CLM eqs 2.3.3-2.3.4).
+_TS_PHI1_A = 0.633
+_TS_PHI1_B = 0.33
+_TS_PHI2_A = 0.877
+# Diffuse extinction k_d(chi_L): exp fit to the uniform-sky transmission through
+# black leaves over LAI 0-5 (DifferBESS canopy_geometry._KD_CHI / _KD_VAL).
+_TS_KD_CHI = (-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+_TS_KD_VAL = (0.6500, 0.6640, 0.6815, 0.7020, 0.7240, 0.7485, 0.7735, 0.7990,
+              0.8245, 0.8475, 0.8675, 0.8805, 0.8775)
+_TS_CHI_L_RANGE = (-0.34, 0.6)
+
+
+class TwoStreamLeafOptics(NamedTuple):
+    """Per-column leaf optics and leaf-angle geometry of the two-stream scheme."""
+    rho_vis: jax.Array
+    tau_vis: jax.Array
+    rho_nir: jax.Array
+    tau_nir: jax.Array
+    phi1: jax.Array
+    phi2: jax.Array
+    k_d: jax.Array
+    cos2_theta: jax.Array
+
+
+def _ts_geometry(chi_l: float) -> tuple[float, float, float, float]:
+    """(phi1, phi2, k_d, cos^2 theta_bar) of a leaf-angle index chi_L (host floats)."""
+    if not _TS_CHI_L_RANGE[0] <= chi_l <= _TS_CHI_L_RANGE[1]:
+        raise ValueError(f"chi_L = {chi_l} outside {_TS_CHI_L_RANGE}")
+    phi1 = 0.5 - _TS_PHI1_A * chi_l - _TS_PHI1_B * chi_l ** 2
+    phi2 = _TS_PHI2_A * (1.0 - 2.0 * phi1)
+    k_d = float(np.interp(chi_l, _TS_KD_CHI, _TS_KD_VAL))
+    return phi1, phi2, k_d, ((1.0 + chi_l) / 2.0) ** 2
+
+
+def two_stream_leaf_optics(pft: str) -> dict[str, float]:
+    """``leaf_*`` CanopyLandParams values of a PFT (CLM5 optics, PFT_LEAF_OPTICS);
+    a mixture class mixes optics and geometry by leaf-area share (upstream
+    ``leaf_optics_for_pft``).  Raises on a PFT with no row."""
+    from legoesm.land.canopy.config import PFT_LEAF_OPTICS, PFT_LEAF_OPTICS_MIXTURE
+    if pft in PFT_LEAF_OPTICS_MIXTURE:
+        tree, grass, w = PFT_LEAF_OPTICS_MIXTURE[pft]
+        parts = [(w, PFT_LEAF_OPTICS[tree]), (1.0 - w, PFT_LEAF_OPTICS[grass])]
+    elif pft in PFT_LEAF_OPTICS:
+        parts = [(1.0, PFT_LEAF_OPTICS[pft])]
+    else:
+        raise ValueError(f"no two-stream leaf optics for PFT {pft!r}; "
+                         f"PFT_LEAF_OPTICS has {sorted(PFT_LEAF_OPTICS)}")
+    vals = [sum(wi * (row[:4] + _ts_geometry(row[4]))[k] for wi, row in parts) for k in range(8)]
+    return dict(zip(("leaf_rho_vis", "leaf_tau_vis", "leaf_rho_nir", "leaf_tau_nir",
+                     "leaf_phi1", "leaf_phi2", "leaf_kd", "leaf_cos2_theta"), vals))
+
+
+def _ts_beam_extinction(SZA, phi1, phi2):
+    """K = G(mu)/mu, mu = cos(min(SZA, 89 deg)); _TS_NIGHT_K beyond 89 deg."""
+    mu = jnp.cos(jnp.radians(jnp.minimum(SZA, _TS_NIGHT_SZA)))
+    return jnp.where(SZA > _TS_NIGHT_SZA, _TS_NIGHT_K, (phi1 + phi2 * mu) / mu)
+
+
+def _ts_single_scattering_albedo(mu, phi1, phi2):
+    """a_s(mu)/omega of CLM eq. 2.3.14 for the Ross-Goudriaan G (unit omega)."""
+    G = phi1 + phi2 * mu
+    return (0.5 * G / (mu * phi2 + G)
+            * (1.0 - (mu * phi1 / (mu * phi2 + G)) * jnp.log((mu * phi1 + mu * phi2 + G) / (mu * phi1))))
+
+
+def _ts_fractions(SZA, L, rho, tau, alb_soil, optics, w_sun, clip_width):
+    """Fractions of a unit incident flux absorbed by sunlit leaves, shaded leaves
+    and the soil, for beam ('b') and diffuse ('d') incidence."""
+    phi1, phi2 = optics.phi1, optics.phi2
+    mu = jnp.cos(jnp.radians(jnp.minimum(SZA, _TS_NIGHT_SZA)))
+    omega = rho + tau
+    mubar = 1.0 / optics.k_d
+    omega_beta = 0.5 * (rho + tau + (rho - tau) * optics.cos2_theta)   # CLM eq. 2.3.11
+    b = 1.0 - omega + omega_beta
+    c = jnp.maximum(omega_beta, _TS_OMEGA_BETA_MIN)
+    h = jnp.sqrt(b * b - c * c) / mubar
+    K = _ts_beam_extinction(SZA, phi1, phi2)
+    sigma = (mubar * K) ** 2 + c * c - b * b
+    K = jnp.where(jnp.abs(sigma) < _TS_SIGMA_GUARD, K * (1.0 + _TS_K_NUDGE), K)
+    sigma = (mubar * K) ** 2 + c * c - b * b
+    beta0 = (1.0 + mubar * K) / (mubar * K) * _ts_single_scattering_albedo(mu, phi1, phi2)
+    d = omega * mubar * K * beta0
+    f = omega * mubar * K * (1.0 - beta0)
+    vm = (b + mubar * h) / c
+    vp = (b - mubar * h) / c
+    eL = jnp.exp(-h * L)
+    eK = jnp.exp(-K * L)
+    hk = h - K
+    near = jnp.abs(hk) < _TS_HK_GUARD
+    cross = jnp.where(near, L * eK * (1.0 - 0.5 * hk * L), (eK - eL) / jnp.where(near, 1.0, hk))
+    out = {}
+    for kind in ("b", "d"):
+        if kind == "b":
+            p1 = (d * (mubar * K - b) - c * f) / sigma
+            p2 = (-f * (b + mubar * K) - c * d) / sigma
+            I0, Tb, c0 = 0.0, eK, K * (p2 - p1) + omega * K
+        else:
+            p1 = p2 = jnp.zeros_like(K)
+            I0, Tb, c0 = 1.0, jnp.zeros_like(K), jnp.zeros_like(K)
+        a11, a12, r1 = vm, vp * eL, I0 - p2
+        a21, a22 = eL * (1.0 - alb_soil * vm), 1.0 - alb_soil * vp
+        r2 = alb_soil * (p2 * eK + Tb) - p1 * eK
+        det = a11 * a22 - a12 * a21
+        A = (r1 * a22 - a12 * r2) / det
+        B = (a11 * r2 - a21 * r1) / det
+        albedo = p1 + A + B * eL
+        I_dn_L = p2 * eK + A * vm * eL + B * vp
+        abs_soil = (1.0 - alb_soil) * (I_dn_L + Tb)
+        abs_veg = 1.0 - albedo - abs_soil
+        sun_diffuse = (c0 * (1.0 - eK * eK) / (2.0 * K)
+                       + h * A * (vm - 1.0) * (1.0 - eK * eL) / (K + h)
+                       - h * B * (vp - 1.0) * cross)
+        beam_sun = (1.0 - omega) * (1.0 - eK) if kind == "b" else 0.0
+        # Upstream: clip(raw, 0, abs_veg).  Smoothed in RATIO space so the result
+        # stays in [0, abs_veg] exactly (the bands at 0 and 1 cannot overlap) and
+        # the gap scales with abs_veg; clip_width = 0 is the hard clip.
+        pos = abs_veg > 0.0
+        ratio = jnp.where(pos, (beam_sun + w_sun * sun_diffuse) / jnp.where(pos, abs_veg, 1.0), 0.0)
+        ratio = smooth_min_c1(smooth_max_c1(ratio, 0.0, clip_width), 1.0, clip_width)
+        abs_sun = abs_veg * ratio
+        out[kind] = (abs_sun, abs_veg - abs_sun, abs_soil, albedo)
+    return out
+
+
+def _ts_band(I_dir, I_dif, SZA, L, rho, tau, alb_soil, alb_modis, optics, w_sun, clip_width):
+    """Absorbed sunlit / shaded / soil flux of one band, rescaled to (1 - alb_modis) I."""
+    I_dir = jnp.maximum(I_dir, 0.0)
+    I_dif = jnp.maximum(I_dif, 0.0)
+    fr = _ts_fractions(SZA, L, rho, tau, alb_soil, optics, w_sun, clip_width)
+    sun, sh, soil = (I_dir * fr["b"][i] + I_dif * fr["d"][i] for i in range(3))
+    total = sun + sh + soil
+    target = (1.0 - alb_modis) * (I_dir + I_dif)
+    nz = total > _TS_FLUX_EPS
+    scale = jnp.where(nz, target / jnp.where(nz, total, 1.0), 1.0)
+    return sun * scale, sh * scale, soil * scale
+
+
+@functools.partial(jax.jit, static_argnames=("clip_width",))
+def canopy_shortwave_two_stream(
+    PAR_dir: jax.Array,
+    PAR_diff: jax.Array,
+    NIR_dir: jax.Array,
+    NIR_diff: jax.Array,
+    UV: jax.Array,
+    SZA: jax.Array,
+    LAI: jax.Array,
+    CI: jax.Array,
+    ALB_VIS: jax.Array,
+    ALB_NIR: jax.Array,
+    Vcmax25_C3_leaf: jax.Array,
+    Vcmax25_C4_leaf: jax.Array,
+    kn: jax.Array,
+    optics: TwoStreamLeafOptics,
+    clip_width: float,
+) -> CanopySWOutput:
+    """Two-leaf shortwave partition by the Sellers two-stream (see block comment).
+
+    Same inputs and outputs as :func:`canopy_shortwave_rt` plus the per-column
+    leaf ``optics``.  Soil lower boundary 0.15 vis / 0.30 nir (upstream
+    DEFAULT_SOIL_ALBEDO; the values the Ryu scheme also uses).  fSun is the
+    clumped sunlit fraction with the PFT beam extinction, times the same dusk
+    ramp as the Ryu scheme; the Vcmax25 split is the Ryu one (spherical kb).
+    """
+    L = jnp.maximum(LAI * CI, _TS_L_MIN)
+    w_sun = CI
+    P = _ts_band(PAR_dir, PAR_diff, SZA, L, optics.rho_vis, optics.tau_vis, _RHO_PAR_SOIL,
+                 ALB_VIS, optics, w_sun, clip_width)
+    N = _ts_band(NIR_dir, NIR_diff, SZA, L, optics.rho_nir, optics.tau_nir, _RHO_NIR_SOIL,
+                 ALB_NIR, optics, w_sun, clip_width)
+    UV_dir = UV * PAR_dir / (PAR_dir + PAR_diff + 1e-5)   # coeff-ok: /0 guard, as the Ryu scheme
+    uv_half = _TS_UV_LEAF_SCATTERING / 2.0
+    # UV total = (1 - _RHO_UV) UV, the reflectance broadband_albedo exports for
+    # both schemes (upstream rescales UV with ALB_VIS; known difference).
+    U = _ts_band(UV_dir, UV - UV_dir, SZA, L, uv_half, uv_half, _RHO_PAR_SOIL,
+                 jnp.full_like(ALB_VIS, _RHO_UV), optics, w_sun, clip_width)
+    zero = jnp.zeros_like(LAI)
+    leafy = LAI > 0
+    ASW_Sun = jnp.where(leafy, P[0] + N[0] + U[0], zero)
+    ASW_Sh = jnp.where(leafy, P[1] + N[1] + U[1], zero)
+    # LAI <= 0: the solver ran on the L floor; the soil takes the whole absorbed
+    # total so absorbed SW = (1 - ALB) I (upstream discards the leaf share there).
+    ASW_Soil = jnp.where(leafy, P[2] + N[2] + U[2], sum(P) + sum(N) + sum(U))
+    APAR_Sun = jnp.where(leafy, P[0] * _APAR_CONVERSION, zero)
+    APAR_Sh = jnp.where(leafy, P[1] * _APAR_CONVERSION, zero)
+
+    K = _ts_beam_extinction(SZA, optics.phi1, optics.phi2)
+    fSun = jnp.where(leafy, jnp.clip((1.0 / K) * (1.0 - jnp.exp(-K * LAI * CI))
+                                     / jnp.where(leafy, LAI, 1.0), 0.0, 1.0), zero)
+    fSun = fSun * _day_weight(PAR_dir, NIR_dir)
+
+    cos_sza = jnp.cos(jnp.radians(SZA))
+    night = SZA > 89.0   # coeff-ok: night mask, as the Ryu scheme
+    kb = jnp.where(night, 50.0, _KB_BEAM / jnp.where(night, 0.01, cos_sza))   # coeff-ok: Ryu night sentinel
+    v3s, v3h, v4s, v4h = _vcmax_sun_shade(LAI, CI, kn, kb, Vcmax25_C3_leaf, Vcmax25_C4_leaf)
+    return CanopySWOutput(
+        fSun=fSun, APAR_Sun=APAR_Sun, APAR_Sh=APAR_Sh,
+        ASW_Sun=ASW_Sun, ASW_Sh=ASW_Sh, ASW_Soil=ASW_Soil,
+        Vcmax25_C3Sun=jnp.where(leafy, v3s, zero), Vcmax25_C3Sh=jnp.where(leafy, v3h, zero),
+        Vcmax25_C4Sun=jnp.where(leafy, v4s, zero), Vcmax25_C4Sh=jnp.where(leafy, v4h, zero),
     )
 
 
