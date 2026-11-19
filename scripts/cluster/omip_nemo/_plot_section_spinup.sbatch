@@ -13,6 +13,8 @@
 # SUSPECTS, not as an answer. Marking a candidate on a figure is only honest
 # if the caption says what it is, which the plotter's own subtitle does.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge
 R=/burg-archive/glab/users/pg2328/legoESM
 cd $ROOT || exit 1
@@ -28,3 +30,4 @@ $PY -u scripts/plot/plot_section_transport_spinup.py \
   --mark-label "viscosity-schedule segment boundaries (a suspect, untested)" \
   --out "$R/results/omip_nemo/section_transport/spinup${TAG}.png"
 echo "=== rc=$? ==="
+exit ${RC:-0}

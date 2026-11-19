@@ -356,3 +356,13 @@ def test_lmip_runs_the_drainage_limiter_at_the_calibrated_value():
     at 0.5; LMIP must not inherit the RichardsConfig library default (0.0)."""
     land = build_config_from_args(_parse_args(["--lat", "45.0"])).land
     assert land.richards.fc_drain_saturation == 0.5
+
+
+def test_land_canopy_sw_scheme_round_trip():
+    """--land-canopy-sw-scheme reaches the two-leaf config; default ryu."""
+    from legoesm.land.canopy.config import CanopyConfig
+    default = build_config_from_args(_parse_args(["--lat", "45.0"])).land.surface_scheme
+    assert default.sw_scheme == "ryu" == CanopyConfig().sw_scheme
+    cfg = build_config_from_args(_parse_args([
+        "--lat", "45.0", "--land-canopy-sw-scheme", "two_stream"])).land.surface_scheme
+    assert cfg.sw_scheme == "two_stream"

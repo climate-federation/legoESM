@@ -1186,6 +1186,24 @@ def gw_drag_prof(
 
     Index: k=0 top (= ktop), k=nlev-1 surface; interfaces 0..nlev.
 
+    KNOWN DIFFERENCE (#2567, RULE 0; vote 3-0): where a layer's raw stress
+    divergence ``ubtl`` is negative, E3SM v3.0.1 applies ``sign(ubtl, c-u)``
+    = ``|ubtl|*sgn(c-u)`` (gw_common.F90:649) while carrying the signed
+    ``ubtl`` to the interface below (:671), so its column deposits momentum
+    the stress profile does not supply.  The port applies ``sgn(c-u)*ubtl``
+    (smooth sign: ``tanh*ubtl``), whose column deposit equals the stress
+    divergence to round-off.  The carry is E3SM's at width 0 (CAM's
+    ``abs(gwut)`` carry is a different code base).  Measured with
+    ``scripts/validate/oracle/gw_spec_e3sm/neg_div_probe.py`` on a constructed
+    column whose launched stress grows upward below the source: du/dt differs
+    from E3SM by 3.9 % of the column maximum (13 % with c near u), and E3SM's
+    column deposit is +0.0155 against a stress divergence of -0.0045 Pa.  No
+    E3SM source reaches it: the stress is non-increasing above the source,
+    and each source sets tend_level = src_level (frontal, Beres) or launches
+    uniform stress between them (orographic); the oracle fixture's
+    arms meet no negative divergence (hard limit and default).  Not in
+    production (mcfarlane.py has its own tendency loop).
+
     Parameters
     ----------
     tau_launch : (ncol, nwav, nlev+1) launched stress (source level set).

@@ -712,10 +712,13 @@ class TestMultilayerLandStep(unittest.TestCase):
         state = init_multilayer_land_state(ncol, config, T_init=280.0)
         forcing = self._make_forcing(ncol)
 
+        # One jitted step reused across the loop: ten eager steps compile one
+        # executable per op and exhaust LLVM's JIT memory on Levante (#2585).
+        step = jax.jit(lambda s, f: step_multilayer_land(
+            s, f, config, U_min=1.0, dt=600.0,
+        ))
         for _ in range(10):
-            state, response, _ = step_multilayer_land(
-                state, forcing, config, U_min=1.0, dt=600.0,
-            )
+            state, response, _ = step(state, forcing)
 
         # Temperature should be finite and reasonable
         self.assertTrue(jnp.all(jnp.isfinite(state.T_soil)))
