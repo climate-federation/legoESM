@@ -14998,6 +14998,10 @@ class ModelDriver:
                     return None
                 sw_down = jnp.asarray(_sd[8].data).reshape(-1)
                 lw_down = jnp.asarray(_sd[9].data).reshape(-1)
+                if _hb_lw_corr is not None:
+                    # the land absorbs, and the handback books, the solve's
+                    # land emission (band Planck), not sigma*T^4
+                    lw_down = lw_down + _hb_lw_corr
                 precip = (jnp.asarray(_sd[2].data).reshape(-1)
                           if _sd[2] is not None else jnp.zeros_like(sw_down))
                 # the atmosphere's own rain/snow partition (F29)
@@ -15712,6 +15716,10 @@ class ModelDriver:
         # held-radiation steps like the solve's net fluxes; the boundary
         # inputs it is split with; this step's land runoff impulse.
         _hb_rad_in = _hb_rad_held = _hb_runoff_now = None
+        # The land's share of the solve's emission minus the boundary's
+        # broadband one, as a downward-LW correction the land call adds
+        # (held between solves like the split it comes from).
+        _hb_lw_corr = None
         # Not persisted: a resumed link's first step re-samples SST/SIC from
         # the restored ocean anyway (_last_force_day starts None).
         _cpl_sst_due = False
@@ -16342,7 +16350,8 @@ class ModelDriver:
                     _forcing["sfc_emissivity"] = _bnd["sfc_emissivity"]
                     _forcing["T_sfc_rad"] = _bnd["T_sfc_rad"]
                     _hb_rad_in = (_fow, _fl_hb, _alb_l_hb, _T_l_hb, _hb_eps,
-                                  _H, _eps_l_hb)
+                                  _H, _eps_l_hb, _bnd["sfc_emissivity"],
+                                  _bnd["T_sfc_rad"])
                     if "open_ocean_frac" in _forcing:
                         _forcing["open_ocean_frac"] = _fow
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
@@ -16502,6 +16511,31 @@ class ModelDriver:
                     _forcing_daily["sfc_albedo"] = blended_surface_albedo(
                         _ice_sic_cur, _alb_f_land, _alb_ice_day,
                         _alb_ocean_cur, _albedo_land_static)
+            # Coupler handback (P5c K3): split this step's radiation solve
+            # with the boundary it was fed, BEFORE the land call, so the land
+            # takes its longwave correction from the same solve the window
+            # books; held across held-radiation steps like the solve (K3-V2).
+            if (_hb_fn is not None and _use_rad and _CPL_K is not None
+                    and getattr(self.model, "_sfc_diag", None) is not None):
+                from legoesm.forcing.surface_utils import (
+                    handback_tile_radiation,
+                )
+                _sd_r = self.model._sfc_diag
+                _sdr = lambda k: jnp.asarray(  # noqa: E731
+                    _sd_r[_sfc_diag_slot(k)].data).reshape(-1)
+                (_fo, _flr, _alr, _Tlr, _eo, _Hr, _elr, _epr,
+                 _Trr) = _hb_rad_in
+                _hc = lambda a: jnp.asarray(  # noqa: E731
+                    a, dtype=_fo.dtype).reshape(-1)
+                _tr = handback_tile_radiation(
+                    _sdr("sw_down_sfc"), _sdr("lw_down_sfc"),
+                    _sdr("sw_net_sfc"), _sdr("lw_net_sfc"), _flr,
+                    _hc(_Hr.f_ice), _hc(_Hr.f_lake), _alr, _Tlr, _eo,
+                    _elr, _hc(_Hr.lw_emit), _hc(_Hr.albedo_ice),
+                    _hc(_Hr.albedo_lake), _hc(_Hr.emissivity_ice),
+                    _hc(_Hr.emissivity_lake), _epr, _Trr)
+                _hb_rad_held = [_tr[f] for f in _CPL_HB_RAD_FIELDS]
+                _hb_lw_corr = _tr["land_lw_down_corr"]
             # Interactive multilayer land step (MPAS port): advance the soil/
             # snow columns with the surface fluxes this step just exported
             # (sw/lw down refresh on radiation steps; precip every step) and
@@ -17228,21 +17262,7 @@ class ModelDriver:
                     # step without a land call).
                     _sdv = lambda k: jnp.asarray(  # noqa: E731
                         _sd[_sfc_diag_slot(k)].data).reshape(-1)
-                    if _use_rad:
-                        from legoesm.forcing.surface_utils import (
-                            handback_tile_radiation,
-                        )
-                        _fo, _flr, _alr, _Tlr, _eo, _Hr, _elr = _hb_rad_in
-                        _hc = lambda a: jnp.asarray(  # noqa: E731
-                            a, dtype=_fo.dtype).reshape(-1)
-                        _tr = handback_tile_radiation(
-                            _sdv("sw_down_sfc"), _sdv("lw_down_sfc"),
-                            _sdv("sw_net_sfc"), _sdv("lw_net_sfc"), _flr,
-                            _hc(_Hr.f_ice), _hc(_Hr.f_lake), _alr, _Tlr, _eo,
-                            _elr, _hc(_Hr.lw_emit), _hc(_Hr.albedo_ice),
-                            _hc(_Hr.albedo_lake), _hc(_Hr.emissivity_ice),
-                            _hc(_Hr.emissivity_lake))
-                        _hb_rad_held = [_tr[f] for f in _CPL_HB_RAD_FIELDS]
+                    # the radiation split was taken before the land call
                     _nb = len(_CPL_WIN_FIELDS)
                     _cpl_now[_nb:] = (
                         _hb_rad_held + [_sdv(f) for f in _CPL_HB_OW_FIELDS]

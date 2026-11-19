@@ -242,6 +242,8 @@ def handback_tile_radiation(
     albedo_lake: jnp.ndarray,
     emissivity_ice: jnp.ndarray,
     emissivity_lake: jnp.ndarray,
+    sfc_emissivity: jnp.ndarray,
+    T_sfc_rad: jnp.ndarray,
 ) -> dict:
     """Per-tile split of one radiation solve's surface fluxes [W/m2, + into
     the surface] for the boundary ``handback_surface_boundary`` built (same
@@ -255,16 +257,35 @@ def handback_tile_radiation(
     emission the coupler debits), so the tiles sum to the net the atmosphere
     applied exactly -- also when the open-water direct beam sees a
     zenith-dependent albedo the diffuse blend does not carry (vote K3-V10).
+
+    The solver emits ``sfc_emissivity * L_down - lw_net`` (its band Planck
+    source at ``T_sfc_rad``), not the boundary's broadband
+    ``sfc_emissivity * sigma * T_sfc_rad**4``.  The land's share of that
+    difference, by broadband emission, is booked on the land: its LW share
+    carries it, and ``land_lw_down_corr`` [W/m2] is what the land call adds
+    to its downward LW so it absorbs exactly that share (``eps_land *
+    land_lw_down_corr`` per land area).  Without it a cell with no water left
+    the difference to nobody (-0.02 W/m2 mean, -0.09 max, MPAS level 3).
+    Votes 2026-11-19 (author/codex/GLM): land side, as a downward-LW
+    adjustment, split before the land call, mixed cells too.
     """
     sb = constants.sigma_sb
     sw_ice, sw_lake = sw_down * (1.0 - albedo_ice), sw_down * (1.0 - albedo_lake)
     lw_ice, lw_lake = emissivity_ice * lw_down, emissivity_lake * lw_down
+    emit_bb = sfc_emissivity * sb * T_sfc_rad ** 4
+    pos = emit_bb > 0.0
+    # land emission per unit land area over the cell's broadband emission
+    w_land = jnp.where(pos, sb * T_land ** 4 / jnp.where(pos, emit_bb, 1.0),
+                       0.0)
+    land_lw_down_corr = -w_land * (sfc_emissivity * lw_down - lw_net - emit_bb)
     return dict(
         ow_sw_net=(sw_net - f_land * sw_down * (1.0 - albedo_land)
                    - f_ice * sw_ice - f_lake * sw_lake),
         ow_lw_net=(lw_net
-                   - f_land * emissivity_land * (lw_down - sb * T_land ** 4)
+                   - f_land * emissivity_land * (lw_down + land_lw_down_corr
+                                                 - sb * T_land ** 4)
                    - f_ice * lw_ice - f_lake * lw_lake + lw_emit_ice_lake),
+        land_lw_down_corr=land_lw_down_corr,
         booked_sw_net_ice=sw_ice,
         booked_lw_abs_ice=lw_ice,
         booked_sw_net_lake=sw_lake,
