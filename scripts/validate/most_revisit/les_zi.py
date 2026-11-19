@@ -45,23 +45,33 @@ def load(path):
     assert zf[0] == 0.0 and np.all(np.diff(zm) > 0) and np.all((zf[1:] > zm[:-1]) & (zf[1:] < zm[1:]))
     ustar = float((uw[0] ** 2 + vw[0] ** 2) ** 0.25)  # vote V3: surface fluxes, as on towers
     q0 = float(wt[0])
-    theta_star = -q0 / ustar
-    length = float(-ustar**3 * th[0] / (KAPPA * constants.g * q0))
     zi = float(zf[np.argmin(wt)])
-    k = np.arange(1, zm.size)
-    z = zf[1:]
     dz = np.diff(zm)
     shear = np.hypot(np.diff(U), np.diff(V)) / dz  # vote V4: vector shear magnitude
-    dth = np.diff(th) / dz
-    sl = share[1:]
+    out = profile_case(zf[1:], shear, np.diff(th) / dz, share[1:], ustar, q0, float(th[0]), zi)
+    out.update(dz=float(dz[0]), n_levels=int(zm.size))
+    return out
+
+
+def profile_case(z, shear, dth, sgs_share, ustar, q0, theta0, zi, eta_max=ETA_MAX, local=None):
+    """phi_m, phi_h at gradient heights z from surface scales; near-wall SGS block and z/zi > eta_max dropped.
+    local: optional (uw, vw, wt) total fluxes at z for the local-scaling arm (Nieuwstadt)."""
+    theta_star = -q0 / ustar
+    length = float(-ustar**3 * theta0 / (KAPPA * constants.g * q0))
     first = 0
-    while first < sl.size and sl[first] > SGS_SHARE_MAX:  # contiguous near-wall block only
+    while first < sgs_share.size and sgs_share[first] > SGS_SHARE_MAX:  # contiguous near-wall block only
         first += 1
-    keep = (np.arange(z.size) >= first) & (z / zi <= ETA_MAX)
+    keep = (np.arange(z.size) >= first) & (z / zi <= eta_max)
     zeta = z / length
-    out = {"first_kept_z": float(z[first]) if first < z.size else np.nan, "levels_dropped": first, "ustar": ustar, "Q": q0, "L": length, "zi": zi, "minus_zi_over_L": -zi / length, "dz": float(dz[0]),
-           "n_levels": int(zm.size), "z": z[keep], "zeta": zeta[keep], "eta": (z / zi)[keep],
+    out = {"first_kept_z": float(z[first]) if first < z.size else np.nan, "levels_dropped": first, "ustar": ustar,
+           "Q": q0, "L": length, "zi": zi, "minus_zi_over_L": -zi / length,
+           "z": z[keep], "zeta": zeta[keep], "eta": (z / zi)[keep],
            "phi_m": (KAPPA * z * shear / ustar)[keep], "phi_h": (KAPPA * z * dth / theta_star)[keep]}
+    if local is not None:
+        us = (local[0] ** 2 + local[1] ** 2) ** 0.25
+        lo = -us**3 * theta0 / (KAPPA * constants.g * local[2])
+        out.update(zeta_loc=(z / lo)[keep], phi_m_loc=(KAPPA * z * shear / us)[keep],
+                   phi_h_loc=(KAPPA * z * dth * us / -local[2])[keep])
     with np.errstate(all="ignore"):
         for kind in "mh":
             out["r_" + kind] = np.log(out["phi_" + kind] / sf.phi(BASE, kind, out["zeta"]))
