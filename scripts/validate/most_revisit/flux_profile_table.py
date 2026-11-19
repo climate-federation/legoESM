@@ -47,6 +47,8 @@ def write_table(path, time_end, z_u, wind, z_t, temp, z_f, ustar, h, le, pressur
     if np.any(np.diff(time_end) <= 0):
         raise ValueError("time must increase strictly")
     for name, x in (("wind", wind), ("temp", temp), ("pressure", pressure), ("ustar", ustar), ("t_flux", t_flux)):
+        if name == "wind" and np.shape(x)[1] == 0:  # heat-only site: no wind levels at all
+            continue
         _check_units(name, x)
     # Profile pairs are (i, i+1) kept only where z[i+1] > z[i]: a top-down table silently scores nothing.
     # Equal heights (two masts at one level) only drop that pair; flux levels are picked by height, not order.
