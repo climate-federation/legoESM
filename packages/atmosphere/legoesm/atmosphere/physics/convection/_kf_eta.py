@@ -1287,7 +1287,8 @@ def _soft_closure_weights(FABE, FABEOLD, AINC, AINCOLD, AINCMX, ainc_new, noitr,
     dA = AINC - AINCOLD
     s_same = _gt_c2(_AINC_TOL - jnp.abs(dA), sm.closure_ainc_tol_width)  # kfsw: B4s
     # divided only where |dA| > tol/2: below it the same-AINC weight is 1 and
-    # dfda does not matter (fp32 reverse-mode NaN for tiny dA otherwise)
+    # dfda does not matter (fp32 reverse-mode NaN for tiny dA otherwise);
+    # relies on closure_ainc_tol_width <= _AINC_TOL (validate_kf_smoothing)
     dfda = (FABE - FABEOLD) / _sd(dA, jnp.abs(dA) > 0.5 * _AINC_TOL)  # kfsw: B4s
     s_dfda = _gt_c2(dfda, sm.closure_dfda_width)
     s_cyc1 = later * (one - (one - s_same) * (one - s_dfda))

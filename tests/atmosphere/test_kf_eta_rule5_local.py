@@ -1298,6 +1298,8 @@ def test_closure_weights_are_the_oracle_branch_at_zero_width():
         x = list(x)
         if x[3] == 0.0:
             x[3] = x[2]  # AINCOLD == AINC (first pass)
+        elif rng.random() < 0.3:  # AINC steps across the dfda guard and the same-AINC tolerance
+            x[3] = x[2] + rng.choice([-1.0, 1.0]) * rng.choice([1e-6, 0.3, 0.5, 0.7, 2.0]) * kfe._AINC_TOL
         want = _hard_branch(*x)
         seen.add(want)
         p = _weights(hard, *x)
