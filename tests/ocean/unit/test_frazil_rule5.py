@@ -24,11 +24,22 @@ def _tf():
 def cases():
     """(theta, S, dz, p, mode): points inside, at the edges of and outside each band."""
     tf, s, dz = _tf(), jnp.full(3, 35.), jnp.array([5., 10., 20.])
+    cfg = FrazilConfig(enabled=True, freezing_scheme="linear_S", rising_frazil="direct",
+                       supercooling_switch_width_K=0.0)
+    deep = tf + jnp.array([0.0, -0.1, -0.2])
+    rising = apply_frazil(deep, s, dz, True, _P, cfg).ice_mass_per_area_kg_m2
+    cap = rising / (cfg.rho_sw_kg_m3 * dz[0])  # surface melt fraction that melts all rising ice
+    s_melt = (s[0] + cap * cfg.ice_salinity_psu) / (1 + cap)
+    tf_melt = freezing_point(s_melt, _P[0], scheme="linear_S") - constants.T_freeze
+    t_melt_all = tf_melt + cap * (cfg.L_f_j_kg / cfg.c_p_sw_j_kg_k + tf_melt)  # fixed point at y = cap
     return {
+        "form_warm_edge": (tf + jnp.array([0.003, 0.5, 0.5]), s, dz, _P, "direct"),
+        "melt_edge": (deep.at[0].set(t_melt_all + 0.002), s, dz, _P, "remelt"),
         "form_band": (tf + jnp.array([-0.004, 0.0, 0.003]), s, dz, _P, "direct"),
         "form_deep": (tf + jnp.array([-1.0, -0.5, -0.2]), s, dz, _P, "direct"),
         "melt_band": (tf + jnp.array([0.002, -0.3, -0.3]), s, dz, _P, "remelt"),
         "melt_cap": (tf + jnp.array([0.31, -0.1, -0.2]), s, dz, _P, "remelt"),
+        "melt_tiny_cap": (tf + jnp.array([0.3, -0.0005, 0.0]), s, dz, _P, "remelt"),
         "melt_full": (tf + jnp.array([3.0, -0.1, -0.2]), s, dz, _P, "remelt"),
         "warm_nocarry": (tf + jnp.array([0.001, 2.0, 5.0]), s, dz, _P, "remelt"),
     }
@@ -82,14 +93,19 @@ def test_no_rising_ice_means_no_melt_and_no_formation_while_rising():
     np.testing.assert_array_equal(np.asarray(out.S_psu[1:]), np.asarray(s[1:]))
 
 
-@pytest.mark.parametrize("case", ["form_band", "melt_band", "melt_cap"])
+@pytest.mark.parametrize("case", ["form_warm_edge", "melt_edge"])
 def test_gradient_through_the_switches(case):
+    """Points where the hard clip has zero derivative (no ice formed / all
+    rising ice melted) and the smooth switch supplies one."""
     t, s, dz, p, mode = cases()[case]
-    cfg = FrazilConfig(enabled=True, freezing_scheme="linear_S", rising_frazil=mode)
 
-    def f(t0):
+    def f(t0, width=None):
+        cfg = FrazilConfig(enabled=True, freezing_scheme="linear_S", rising_frazil=mode)
+        if width is not None:
+            cfg = cfg._replace(supercooling_switch_width_K=width)
         return apply_frazil(t.at[0].set(t0), s, dz, True, p, cfg).ice_mass_per_area_kg_m2
 
+    assert float(jax.grad(f)(t[0], 0.0)) == 0.0
     g = float(jax.grad(f)(t[0]))
     assert np.isfinite(g) and g != 0.0
     check_grads(f, (t[0],), order=1, modes=("rev",), eps=1e-6)

@@ -25,7 +25,8 @@ The nonlinear liquidus is solved with 16 fixed-point iterations (also on
 remelting). Supported seawater regime: initial Si <= S <= 50 PSU, 0 <= Si <= 4,
 sea pressure 0..1e8 Pa, supercooling <= 1.34 K, cp/Lf <= 0.02 K^-1.
 Within this regime the iteration is contractive; tests require equilibrium
-within 1e-10 K in float64 and 1e-4 K in float32. Warm layers with insufficient
+within 1e-10 K in float64 and 1e-4 K in float32 outside the RULE 5 switch
+band (below). Warm layers with insufficient
 incoming ice remain above freezing. A half-mass numerical freeze cap prevents
 division by zero outside this regime; equilibrium is not promised there.
 
@@ -55,8 +56,11 @@ ice are smooth by default (``supercooling_switch_width_K`` = 0.01 K, applied
 as w*cp/Lf in ice-fraction units); 0 restores the hard clip bitwise. The 0.5
 half-mass cap and the rise-carry roundoff guard stay hard. KNOWN DIFFERENCE
 (fixture frazil_rule5_main_*.npz, vs the hard clip): water within about 5 mK
-of freezing forms up to 0.2 kg m-2 of ice per column and shifts T by up to
-2.4 mK; mass and salt budgets stay exact and no ice melts beyond what rises.
+of freezing forms (above it) or keeps rising (below it) up to 0.2 kg m-2 of
+ice per column and shifts T by up to 4.5 mK, so "ice present => T <= Tf" holds
+only to about 5 mK and a remelted cell can keep up to about 5 mK of
+supercooling (the formation check covers formation only); mass and salt budgets stay exact and no ice melts beyond
+what rises.
 """
 
 import math
