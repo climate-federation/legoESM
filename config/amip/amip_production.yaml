@@ -382,7 +382,11 @@ gravity_wave_drag: mcfarlane            # orographic member = CAM6 gw_oro port
                                         # the McFarlaneConfig code defaults (no
                                         # deck rows exist for them, except
                                         # effgw_oro below); the fv3duo deck
-                                        # inherits this row.
+                                        # inherits this row.  Since #2546
+                                        # (2026-11-16) the code defaults also
+                                        # smooth the umcfac |u|, its sign and
+                                        # the taumin zeroing (widths 0.01 m/s,
+                                        # 1e-3 m/s, 1e-10 Pa; RULE 5).
 mcfarlane_effgw_oro: 0.125              # CAM6 effgw_oro (namelist_defaults_cam
                                         # non-WACCM L32); explicit so the run
                                         # records it (#1712).

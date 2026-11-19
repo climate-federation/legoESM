@@ -255,6 +255,13 @@ __param_spec__ = {
             "wrf_chmin_clip_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_top_stop_wtw_width_m2s2": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_top_stop_umf_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_lfs_depth_width_pa": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_melt_t_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_dd_ok_depth_width_pa": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_ldb_tv_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_nodd_tder_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_ddinc_cap_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_dd_rh_low_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_omg_upwind_width_pas": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_timec_clip_width_s": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_pef_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
@@ -1040,6 +1047,13 @@ class KainFritschConfig(NamedTuple):
     wrf_chmin_clip_width_k: float = 1.0
     wrf_top_stop_wtw_width_m2s2: float = 2.0e-4
     wrf_top_stop_umf_width_kgs: float = 2.0
+    wrf_lfs_depth_width_pa: float = 500.0
+    wrf_melt_t_width_k: float = 0.1
+    wrf_dd_ok_depth_width_pa: float = 500.0
+    wrf_ldb_tv_width_k: float = 0.1
+    wrf_nodd_tder_width_kgs: float = 1.0
+    wrf_ddinc_cap_width: float = 0.02
+    wrf_dd_rh_low_width_kgkg: float = 1.0e-6
     wrf_omg_upwind_width_pas: float = 1.0e-3
     wrf_timec_clip_width_s: float = 60.0
     wrf_pef_clip_width: float = 0.02

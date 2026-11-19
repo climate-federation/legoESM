@@ -20,7 +20,7 @@ the geostrophic wind spinning down to < 1 m/s.
    2Δz mode. Resolved eddies + the 3-D SGS set the mixed-layer structure.
 2. **Deep surface coupling spun the wind down.** `h_sl = 100 m` spread the
    surface drag through a deep layer (8 → < 1 m/s). Fixed: `h_sl = 40 m` (thin).
-3. **Explicit vertical-SGS CFL blow-up with LASD.** `_vertical_K_diffusion_full`
+3. **Explicit vertical-SGS CFL blow-up with LASD.** `vertical_K_diffusion_full`
    is explicit forward-Euler (`K < 0.5 dz²/dt ≈ 45 m²/s` near the surface).
    With `--scale-dependent` the Mason κz wall cap was off ⇒ uncapped near-wall
    `K = Cs·Δ` overshot the limit and blew up at ~0.08 h. Fixed: keep
