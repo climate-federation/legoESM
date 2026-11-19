@@ -46,7 +46,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-from legoesm.core.smooth import smooth_max_c1, smooth_min_c1, validate_smoothing_width
+from legoesm.core.smooth import (positive_part_c1, smooth_max_c1, smooth_min_c1,
+                                 validate_smoothing_width)
 
 
 __physics_contract__ = {
@@ -120,6 +121,7 @@ __param_spec__ = {
             "e_pos_width": "numerics: RULE 5 smoothing width",
             "length_switch_width": "numerics: RULE 5 smoothing width",
             "kappa_cap_width": "numerics: RULE 5 smoothing width",
+            "source_split_width": "numerics: RULE 5 smoothing width",
         },
         "params": {
             "alpha_eke": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
@@ -385,6 +387,10 @@ class EKEConfig(NamedTuple):
     e_pos_width: float = 1.0e-8           # max(E, 0) [m^2/s^2]
     length_switch_width: float = 1.0      # min/max between lengths (L_rossby, eke_len, l_min) [m]
     kappa_cap_width: float = 100.0        # min(kappa_GM, kappa_gm_max) [m^2/s]
+    # Source step: the clamp max(P, 0) of a supplied production and the
+    # positive/negative split of a signed source [m^2/s^3] (1 % of a ~1e-8 GM
+    # conversion; vote 1 E3).  The 3-D e_min floor reuses ``e_pos_width``.
+    source_split_width: float = 1.0e-10
 
 
 def eke_mixing_length(L_rossby: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
@@ -418,6 +424,13 @@ def eke_positive_part(E: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
     is positivity-preserving.
     """
     return smooth_max_c1(E, 0.0, cfg.e_pos_width)
+
+
+def eke_floor(E: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
+    """``max(E, e_min)`` (the 3-D step's storage floor), C1 over ``cfg.e_pos_width``
+    (RULE 5; 0 = hard): never below ``max(E, e_min)``, at most ``e_pos_width/8``
+    above it, exact once ``|E - e_min| >= e_pos_width/2``."""
+    return smooth_max_c1(E, cfg.e_min, cfg.e_pos_width)
 
 
 def eke_rhines_length(
@@ -608,6 +621,25 @@ def eke_apply_local_source(
       they hand to the conversion builders).  ``None`` (default) ⇒
       bit-identical.
 
+    RULE 5 (smooth defaults; every width 0 = the hard form): ``E_n`` enters as
+    :func:`eke_positive_part` (``e_pos_width``), ``L`` is floored by
+    ``smooth_max_c1(L, l_min, length_switch_width)``, the clamp of a supplied
+    production uses the one-sided ``positive_part_c1`` (exactly 0 for ``P <= 0``)
+    and the positive/negative split of a signed source uses
+    ``smooth_max_c1(x, 0, source_split_width)`` with ``neg = pos - x`` (the split
+    still sums to ``x`` exactly and both parts stay >= 0, so ``E_{n+1} >= 0``
+    holds at the defaults; at ``x = 0`` the explicit ``w/8`` and the implicit
+    ``w/8`` sink cancel exactly when dissipation is off).  The square root is Veros's ``sqrt(max(0, E))``
+    (no ``+1e-30`` offset).  Kept hard: the ``>= 0`` guards on
+    ``production_scale`` and ``extra_source`` (inputs >= 0 by construction) and
+    the ``1e-30`` divisor guard of the negative-part rate, which binds only where
+    the smoothed ``E_pos`` is exactly 0 (``E <= -e_pos_width/2``).
+    KNOWN DIFFERENCE vs Veros ``integrate_eke``: Veros adds the signed forcing
+    explicitly to ``E`` (not ``max(E, 0)``) and relies on later re-flooring;
+    this step folds the negative part implicitly.  The two agree (width 0) on
+    cells with ``E >= 0`` and forcing ``>= 0``; at the defaults the per-cell
+    gaps are pinned in ``tests/ocean/unit/test_eke_veros_oracle.py``.
+
     When ``return_dissipation`` is True, returns ``(E_new, eke_diss_iw)`` where
     ``eke_diss_iw = c_eps·√E_n·E_{n+1}/L = diss_rate·E_new`` [m²/s³] ≥ 0 is the
     Eden-Greatbatch dissipation rate (Veros ``eke_diss_iw = c_int·eke``, ``c_int =
@@ -617,7 +649,15 @@ def eke_apply_local_source(
     not the IW-breaking dissipation Veros routes to TKE).  Default ⇒ returns
     ``E_new`` only ⇒ bit-identical.
     """
-    E_pos = jnp.maximum(E, 0.0)
+    E_pos = eke_positive_part(E, cfg)
+    w_s = cfg.source_split_width
+
+    def split(x):
+        # (pos, neg) with pos - neg == x exactly and both >= 0 (vote 1 E2);
+        # width 0 = (max(x, 0), max(-x, 0)).
+        pos = smooth_max_c1(x, 0.0, w_s)
+        return pos, pos - x
+
     # Accumulate the EXPLICIT positive production and the IMPLICIT extra sink rate
     # (from sign-indefinite sources' negative part) so the result stays ≥ 0.
     # ``None`` sentinel (not a 0.0 scalar): the default-off path traces the exact
@@ -633,23 +673,28 @@ def eke_apply_local_source(
             # hardening as ``extra_source``) so the headline positivity-by-
             # construction guarantee holds UNCONDITIONALLY even for a rogue
             # negative scale (codex MED-3 r2 NIT); f_res ∈ (0, 1] is
-            # untouched by the clamp.
+            # untouched by the clamp.  Input guard, kept hard (vote 1 E1).
             production = production * jnp.maximum(production_scale, 0.0)
     elif clamp_production:
-        production = jnp.maximum(production_override, 0.0)
+        # one-sided C1 clamp: exactly 0 for P <= 0 (no source from a zero or
+        # negative conversion), exactly P above w_s, never above max(P, 0)
+        production = (positive_part_c1(production_override, 1.0 / w_s) if w_s
+                      else jnp.maximum(production_override, 0.0))
     else:
         # Signed override: positive part explicit, negative part implicit.
-        production = jnp.maximum(production_override, 0.0)
-        neg = jnp.maximum(-production_override, 0.0)        # ≥ 0 sink magnitude
+        production, neg = split(production_override)
+        # divisor guard: binds only where E_pos == 0 exactly (vote 1 E4)
         extra_sink_rate = neg / jnp.maximum(E_pos, 1.0e-30)
     if extra_source is not None:
+        # input guard on a source >= 0 by construction, kept hard (vote 1 E1)
         production = production + jnp.maximum(extra_source, 0.0)
     if signed_source is not None:
-        production = production + jnp.maximum(signed_source, 0.0)
-        neg = jnp.maximum(-signed_source, 0.0)
+        pos, neg = split(signed_source)
+        production = production + pos
         sink = neg / jnp.maximum(E_pos, 1.0e-30)
         extra_sink_rate = sink if extra_sink_rate is None else extra_sink_rate + sink
-    diss_rate = cfg.c_eps * jnp.sqrt(E_pos + 1.0e-30) / jnp.maximum(L, cfg.l_min)
+    L_d = smooth_max_c1(L, cfg.l_min, cfg.length_switch_width)
+    diss_rate = cfg.c_eps * _sqrt0(E_pos) / L_d
     # Both rates are ≥ 0; the implicit denominator ≥ 1 ⇒ E_new ≥ 0 by construction.
     # ``diss_rate`` itself stays the pure Eden-Greatbatch rate — the
     # ``return_dissipation`` product below must exclude the extra sink folding.
@@ -833,7 +878,8 @@ def validate_eke_config(cfg: EKEConfig) -> None:
         raise ValueError(
             f"EKEConfig.kappa_gm_max must be > 0, got {cfg.kappa_gm_max!r}"
         )
-    for name in ("e_pos_width", "length_switch_width", "kappa_cap_width"):
+    for name in ("e_pos_width", "length_switch_width", "kappa_cap_width",
+                 "source_split_width"):
         validate_smoothing_width(f"EKEConfig.{name}", getattr(cfg, name))
     if cfg.mixing_length_scheme not in ("rossby", "rhines"):
         raise ValueError(
@@ -936,5 +982,6 @@ __all__ = [
     "eke_positive_part",
     "eke_3d_local_tendency",
     "eke_apply_local_source",
+    "eke_floor",
     "validate_eke_config",
 ]
