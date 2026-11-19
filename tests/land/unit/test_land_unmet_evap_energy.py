@@ -83,14 +83,25 @@ def _step(monkeypatch, scheme, top, T_init=305.0, snow=None, forcing=None):
     return st, new, r, so, G
 
 
+def _robin(st, new, so):
+    """SimpleSEB's semi-implicit ground-heat correction [W m-2, positive up]:
+    lambda * (top-soil warming) for the single final solve of these snow-free /
+    bulk-snow columns; it also leaves as sensible heat (#2542).  Zero for the
+    two-leaf canopy (no surface conductance)."""
+    if so.surface_conductance is None:
+        return 0.0
+    return np.asarray(so.surface_conductance * (new.T_soil[:, 0] - st.T_soil[:, 0]))
+
+
 def _check(st, new, r, so, G):
     X = np.asarray(so.lhflx - r.lhflx)              # unmet latent energy [W m-2]
     assert np.all(X > _X_MIN), X                     # non-vacuity
     assert int(so.n_held) == 0
     # The soil receives the scheme's own ground flux -- no X in it.
     np.testing.assert_allclose(np.asarray(G), np.asarray(so.G_soil), rtol=0, atol=1e-9)
-    # X leaves as sensible heat to the air.
-    np.testing.assert_allclose(np.asarray(r.shflx - so.shflx), X, rtol=0, atol=1e-9)
+    # X leaves as sensible heat to the air (with SimpleSEB's Robin correction).
+    np.testing.assert_allclose(np.asarray(r.shflx - so.shflx), X + _robin(st, new, so),
+                               rtol=0, atol=1e-9)
     assert np.all(np.isfinite(np.asarray(new.T_soil)))
 
 
@@ -149,6 +160,8 @@ def test_layered_snow_keeps_the_unmet_energy_in_the_column_not_in_sh():
         s, _forcing(2), cfg, 1.0, 1800.0, lat=jnp.full(2, 0.3)))(st)
     X = np.asarray(so.lhflx - r.lhflx)
     assert np.all(X > _X_MIN), X                     # non-vacuity
-    np.testing.assert_allclose(np.asarray(r.shflx), np.asarray(so.shflx),
+    # ... so SH carries only the Robin correction of the solve, not X.
+    assert np.all(np.abs(_robin(st, new, so)) > _X_MIN)
+    np.testing.assert_allclose(np.asarray(r.shflx - so.shflx), _robin(st, new, so),
                                rtol=0, atol=1e-9)
     assert np.all(np.isfinite(np.asarray(new.T_soil)))
