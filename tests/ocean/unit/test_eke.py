@@ -853,12 +853,18 @@ def test_stage2_local_tendency_shape_and_signs():
     # Delegates to the validated 2-D closure ⇒ bit-identical.
     np.testing.assert_array_equal(
         np.asarray(tend), np.asarray(eke_local_tendency(E3, sigma3, L3, cfg)))
-    # At E=0: eps=0 (E^{3/2}=0) and kappa=c_k·L·√(0+1e-30) ≈ c_k·L·1e-15, so the
-    # production P=kappa·sigma^2 is bounded by the documented sqrt-regulariser in
-    # eke_kappa_gm, NOT bit-zero. With L~3e4, sigma~5e-5 this is O(1e-22): assert it
-    # is negligibly small (well below e_min·any-rate), not exactly zero.
-    t0 = eke_3d_local_tendency(jnp.zeros_like(E3), sigma3, L3, cfg)
-    assert float(jnp.max(jnp.abs(t0))) < 1e-18, "E=0 tendency should be negligible"
+    # At E=0 with the hard (Veros) positive part the tendency is exactly zero;
+    # the smooth default lifts E to e_pos_width/8 there, so P = c_k·L·√(w/8)·sigma^2
+    # (bounded below, the closed form).
+    t0 = eke_3d_local_tendency(jnp.zeros_like(E3), sigma3, L3, cfg._replace(e_pos_width=0.0))
+    assert float(jnp.max(jnp.abs(t0))) == 0.0, "E=0 tendency must vanish at the hard limit"
+    ts = eke_3d_local_tendency(jnp.zeros_like(E3), sigma3, L3, cfg)
+    e_w = cfg.e_pos_width / 8.0
+    np.testing.assert_allclose(
+        np.asarray(ts),
+        np.asarray(eke_kappa_gm(jnp.full_like(E3, e_w), L3, cfg._replace(e_pos_width=0.0)) * sigma3 ** 2
+                   - cfg.c_eps * e_w ** 1.5 / jnp.maximum(L3, cfg.l_min)),
+        rtol=1e-10)
     # P >= 0 always: with sigma>0 and E>0, the production term kappa·sigma^2 >= 0.
     P = eke_kappa_gm(E3, L3, cfg) * sigma3 ** 2
     eps = cfg.c_eps * jnp.maximum(E3, 0.0) ** 1.5 / jnp.maximum(L3, cfg.l_min)
