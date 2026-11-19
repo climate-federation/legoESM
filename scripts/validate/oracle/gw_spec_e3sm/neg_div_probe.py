@@ -23,6 +23,7 @@ Usage (x64, repo root on PYTHONPATH):
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import subprocess
 import sys
@@ -80,9 +81,13 @@ def _fortran(exe, col, tag, wd, cfg):
     return {p[0]: np.array([float(x) for x in p[1:]]) for p in map(str.split, open(fout))}
 
 
-def _port(col, fo, cfg, smooth):
+def port(col, prof, cfg, smooth):
+    """The port's ``gw_drag_prof`` on :func:`column` ``col``; ``prof`` holds
+    the (nlev+1)/(nlev) profiles ``ti, rhoi, nm, ni`` of one column (the
+    oracle's, or the port's ``gw_prof``).  Returns (du/dt, final stress)."""
     import jax.numpy as jnp
     from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import gw_drag_prof
+    fo = {k: np.asarray(prof[k]).reshape(-1) for k in ("ti", "rhoi", "nm", "ni")}
     a = lambda x: jnp.asarray(x)[None]
     dpm = np.diff(col["pint"])
     kw = {} if not smooth else dict(
@@ -117,9 +122,12 @@ def _reach(repo: Path) -> dict:
         raise RuntimeError("regenerated Beres harness table does not match the fixture")
     rec, orig = [], E.gw_drag_prof
 
-    def wrapped(tau_launch, *args, **kw):
-        out = orig(tau_launch, *args, **kw)
-        tau_f, tau0, tend_level, rdpm = out[0], out[4], args[2], args[14]
+    sig = inspect.signature(orig)
+
+    def wrapped(*args, **kw):
+        out = orig(*args, **kw)
+        bound = sig.bind(*args, **kw).arguments
+        tau_f, tau0, tend_level, rdpm = out[0], out[4], bound["tend_level"], bound["rdpm"]
         raw = constants.g * (tau0[:, :, 1:] - tau_f[:, :, :-1]) * rdpm[:, None, :]
         within = jnp.arange(rdpm.shape[1])[None, None, :] < tend_level[:, None, None]
         jax.debug.callback(lambda n, p: rec.append((float(n), float(p))),
@@ -162,7 +170,7 @@ def main(exe: str, out_dir: str) -> dict:
             constants.g * np.diff(col["tau"])[:col["tend"]] / np.diff(col["pint"])[:col["tend"]])),
             budget_e3sm=budget(col, uf, tf))
         for name, smooth in (("hard", False), ("default", True)):
-            up, tp = _port(col, fo, cfg, smooth)
+            up, tp = port(col, fo, cfg, smooth)
             r[f"gap_rel_{name}"] = float(np.abs(up - uf).max() / np.abs(uf).max())
             r[f"budget_port_{name}"] = budget(col, up, tp)
         res[case] = r

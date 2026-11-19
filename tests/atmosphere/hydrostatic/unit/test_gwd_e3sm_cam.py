@@ -215,24 +215,12 @@ def test_negative_divergence_column_conserves_momentum(case, smooth):
     col = probe.column(case)
     cfg = E3SMCAMConfig()
     a = lambda x: jnp.asarray(x)[None]
-    pint = col["pint"]
-    dpm = np.diff(pint)
-    rhoi, ti, nm, ni = gw_prof(a(col["t"]), a(col["pmid"]), a(pint), C.c_pd, C.R_d,
+    rhoi, ti, nm, ni = gw_prof(a(col["t"]), a(col["pmid"]), a(col["pint"]), C.c_pd, C.R_d,
                                C.g, cfg.n2min)
-    kw = {} if not smooth else dict(
-        softmin_sharpness=cfg.softmin_sharpness, crit_level_sharpness=cfg.crit_level_sharpness,
-        crit_level_floor=cfg.crit_level_floor, umcfac_abs_width=cfg.umcfac_abs_width,
-        umcfac_sign_width=cfg.umcfac_sign_width, taumin_ramp_width=cfg.taumin_ramp_width)
-    tau, utgw, *_ = gw_drag_prof(
-        jnp.asarray(col["tau"])[None, None], jnp.array([[col["c"]]]),
-        jnp.array([col["src"]]), jnp.array([col["tend"]]), a(col["t"]), ti,
-        a(np.log(pint)), rhoi, nm, ni, a(col["ubm"]), a(col["ubi"]),
-        jnp.array([1.0]), jnp.array([0.0]), a(dpm), a(1.0 / dpm), jnp.zeros(1),
-        col["effgw"], col["dt"], cfg, orographic_only=False,
-        alpha_iface=a(col["alpha"]), **kw)
+    utgw, tau = probe.port(col, dict(ti=ti, rhoi=rhoi, nm=nm, ni=ni), cfg, smooth)
     raw = np.diff(col["tau"])[:col["tend"]]
     assert (raw.min() < 0.0) == (case != "control")      # the case reaches ubtl < 0
-    dep, div = probe.budget(col, np.asarray(utgw[0]), np.asarray(tau[0, 0]))
+    dep, div = probe.budget(col, utgw, tau)
     np.testing.assert_allclose(dep, div, rtol=1e-12, atol=0.0)
 
 
