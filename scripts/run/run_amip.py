@@ -1893,6 +1893,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "is an error rather than a silent override. "
                              "Omitting it leaves those two flags in charge, so "
                              "existing decks are unaffected.")
+    parser.add_argument("--land-prescribed-channels", type=str,
+                        choices=["off", "ts", "ts_lh", "ts_fluxes"],
+                        default=_EXPERIMENT_DEFAULTS.land_prescribed_channels,
+                        dest="land_prescribed_channels",
+                        help="Atmosphere-only AMIP (MPAS lane): PRESCRIBE the "
+                             "land surface from --land-prescribed-flux-file "
+                             "instead of running a land model (needs "
+                             "--no-use-multilayer-land and a land fraction). "
+                             "'off' (default) = no prescribed land; 'ts' = land "
+                             "skin temperature only; 'ts_lh' = skin "
+                             "temperature + the file's latent heat (sensible "
+                             "heat from the bulk law against that skin); "
+                             "'ts_fluxes' = skin temperature + both fluxes. "
+                             "The file's albedo, when present, replaces the "
+                             "land albedo in every mode.")
+    parser.add_argument("--land-prescribed-flux-file", type=str,
+                        default=_EXPERIMENT_DEFAULTS.land_prescribed_flux_file,
+                        dest="land_prescribed_flux_file",
+                        help="NetCDF monthly climatology for "
+                             "--land-prescribed-channels: ts [K], hfss/hfls "
+                             "[W m-2, positive up], optional albedo [1] "
+                             "(scripts/data/build_era5_prescribed_land.py).")
+    parser.add_argument("--land-prescribed-ice-sheet-bulk-sensible",
+                        action=_BoolOneSpelling, default=None,
+                        dest="land_prescribed_ice_sheet_bulk_sensible",
+                        help="Prescribed land 'ts_fluxes': over glacier-"
+                             "dominant columns of --surfdata (Antarctica, "
+                             "Greenland) take the sensible heat from the "
+                             "land-tile Monin-Obukhov law against the "
+                             "prescribed skin instead of the file's flux. "
+                             "Unset = AUTO (on exactly with 'ts_fluxes'); "
+                             "--no-... = the file's flux everywhere.")
+    parser.add_argument("--land-prescribed-ice-sheet-z0-m", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_prescribed_ice_sheet_z0_m,
+                        dest="land_prescribed_ice_sheet_z0_m",
+                        help="Roughness length [m] of the land-tile law used "
+                             "for the ice-sheet sensible heat (default 0.0024, "
+                             "CLM5 snow roughness).")
     parser.add_argument("--use-multilayer-land", default=False,
                         action=argparse.BooleanOptionalAction,
                         help="Replace the slab land tile with the differentiable "
@@ -2898,6 +2936,7 @@ DRY_RUN_CONFIG_INPUTS = (
     "subgrid_orography_path", "land_ic_path", "clm_surfdata_path",
     "land_cover_surfdata", "surfdata_path", "e3sm_cam_mfcc_table_path",
     "physics_parameterization_checkpoint", "physics_parameterization_stats",
+    "land_prescribed_flux_file",
 )
 DRY_RUN_ARG_INPUTS = ("restart_from", "params", "aimip_classical_checkpoint")
 # Mirrors the driver's terrain dispatch: these names are built-in shapes, not files.
@@ -3200,6 +3239,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cap_floor_q_c=args.cloud_cap_floor_q_c,
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
+        land_prescribed_channels=args.land_prescribed_channels,
+        land_prescribed_flux_file=args.land_prescribed_flux_file,
+        land_prescribed_ice_sheet_bulk_sensible=(
+            args.land_prescribed_ice_sheet_bulk_sensible),
+        land_prescribed_ice_sheet_z0_m=args.land_prescribed_ice_sheet_z0_m,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
         land_snow_scheme=args.land_snow_scheme,
         land_snow_emissivity=args.land_snow_emissivity,
@@ -4209,6 +4253,12 @@ def main(argv: list[str] | None = None):
           f"(slab_land_active={args.slab_land_active}, "
           f"use_multilayer_land={args.use_multilayer_land}, "
           f"land_mask_file={getattr(args, 'land_mask_file', '') or '<none>'})")
+    if args.land_prescribed_channels != "off":
+        print(f"[run_amip] Land surface PRESCRIBED (no land model runs): "
+              f"channels={args.land_prescribed_channels}, "
+              f"file={args.land_prescribed_flux_file or '<none>'}, "
+              f"ice-sheet land-law sensible heat="
+              f"{args.land_prescribed_ice_sheet_bulk_sensible} (None = auto)")
     # Postprocess FIRST: it resolves the grid/discretization sentinels
     # (``--truncation 21`` alone sets discretization="spectral" only there),
     # and the spectral fallback keys off ``args.discretization == "spectral"``

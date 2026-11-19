@@ -1,0 +1,52 @@
+# =============================================================================
+# legoESM AMIP — ATMOSPHERE-ONLY with a PRESCRIBED LAND SURFACE (MPAS lane)
+# =============================================================================
+#   source config/amip/amip_production.sh
+#   run_amip.py --config config/amip/amip_prescribed_land.yaml \
+#       "${AMIP_PATH_FLAGS[@]}" --days N --output DIR
+#
+# The production deck's atmosphere with NO land model: the land skin
+# temperature, sensible and latent heat and albedo are prescribed from an
+# ERA5 monthly climatology (1979-1998), handed to the atmosphere over the land
+# fraction through the multilayer land's own hand-off channels.  Purpose:
+# controlled atmosphere experiments with the land model's errors removed.
+#
+# Data file (data/ is gitignored; stage it in the launch directory): built by
+#   scripts/data/build_era5_prescribed_land.py --years 1979-1998 \
+#       --out data/prescribed_land/era5_land_ts_hfss_hfls_alb_clim_1979-1998_1deg.nc
+# from the DKRZ ERA5 monthly means (skt, fal, sshf, slhf; fluxes converted to
+# W m-2 positive UPWARD).
+#
+# Every prescribed-land choice is named below even where it equals a code
+# default (a default is not a record).  The land-model rows of the production
+# deck that validate_strict ties to the interactive land are switched off or
+# unset here; they describe a land model this deck does not run.
+include: amip_production.yaml
+
+# ---- prescribed land ----------------------------------------------------------
+# skin temperature + the file's sensible AND latent heat (the configuration
+# the AGU 2026 campaign ran; 'ts' and 'ts_lh' are the alternatives).
+land_prescribed_channels: ts_fluxes
+land_prescribed_flux_file: data/prescribed_land/era5_land_ts_hfss_hfls_alb_clim_1979-1998_1deg.nc
+# Over glacier-dominant columns (Antarctica, Greenland; glacier map of the
+# --surfdata file) the sensible heat comes from the land-tile Monin-Obukhov
+# law at the CLM5 snow roughness against the prescribed skin, not from the
+# file (auto resolves to this under ts_fluxes; named here).
+land_prescribed_ice_sheet_bulk_sensible: true
+land_prescribed_ice_sheet_z0_m: 0.0024
+
+# ---- no land model ------------------------------------------------------------
+use_multilayer_land: false
+slab_land_active: false
+land_update_seconds: 0.0
+mpas_land_beta_soil: false
+mpas_land_stress_from_land: false
+ocean_flux_on_ocean_surface: false
+mpas_land_params_refresh: false
+land_calibrated_physics: false
+land_soil_freeze_thaw: false
+land_surface_scheme: simple_seb
+land_canopy_rh_cap_smoothing_width: null
+land_canopy_zeta_cap_smoothing_width: null
+land_canopy_most_n_iters: null
+land_canopy_solve_group: null
