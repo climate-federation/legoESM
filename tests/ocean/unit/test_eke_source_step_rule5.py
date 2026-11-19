@@ -45,12 +45,14 @@ def _step(cfg, eke=None, forc=None):
         eke, jnp.zeros_like(eke), jnp.asarray(FIX["eke_len"]), cfg, DT, signed_source=forc))
 
 
-def _fold(eke, L, dt, prod, signed):
-    """The hard form: Veros's implicit dissipation, legoESM's implicit negative part."""
+def _fold(eke, L, dt, *sources, clamp=()):
+    """The hard form: Veros's implicit dissipation; signed sources split, their
+    negative parts folded implicitly; ``clamp`` sources enter as max(., 0)."""
     e = np.maximum(eke, 0.0)
-    pos, neg = np.maximum(signed, 0.0), np.maximum(-signed, 0.0)
+    pos = sum(np.maximum(x, 0.0) for x in sources + clamp)
+    neg = sum(np.maximum(-x, 0.0) for x in sources)
     rate = C_EPS * np.sqrt(e) / np.maximum(L, L_MIN) + neg / np.maximum(e, 1e-30)
-    return (e + dt * (prod + pos)) / (1.0 + dt * rate)
+    return (e + dt * pos) / (1.0 + dt * rate)
 
 
 def test_hard_limit_matches_veros_where_forcing_nonnegative():
@@ -66,11 +68,11 @@ def test_hard_limit_is_the_implicit_fold_elsewhere():
     L = rng.uniform(10.0, 2e4, 400)
     x = rng.choice([-1, 0, 1], 400) * 10.0 ** rng.uniform(-14, -6, 400)
     p = rng.choice([-1, 1], 400) * 10.0 ** rng.uniform(-14, -6, 400)
-    ref = _fold(e, L, DT, np.maximum(p, 0.0), x)
+    ref = _fold(e, L, DT, x, clamp=(p,))
     got = np.asarray(E.eke_apply_local_source(jnp.asarray(e), jnp.zeros(400), jnp.asarray(L), HARD, DT,
                                               production_override=jnp.asarray(p), signed_source=jnp.asarray(x)))
     np.testing.assert_allclose(got, ref, rtol=1e-12, atol=0.0)
-    ref = _fold(e, L, DT, 0.0, p + x)
+    ref = _fold(e, L, DT, p, x)
     got = np.asarray(E.eke_apply_local_source(jnp.asarray(e), jnp.zeros(400), jnp.asarray(L), HARD, DT,
                                               production_override=jnp.asarray(p), clamp_production=False,
                                               signed_source=jnp.asarray(x)))
@@ -104,7 +106,7 @@ _SWITCHES = {
     "dissipation_lmin": (lambda x: _src(SMOOTH, L=x), L_MIN, W_L / 64),
     "signed_split": (lambda x: _src(SMOOTH, signed_source=x), 0.0, W_S / 64),
     "signed_override_split": (lambda x: _src(SMOOTH, production_override=x, clamp_production=False), 0.0, W_S / 64),
-    "production_clamp": (lambda x: _src(SMOOTH, production_override=x), W_S / 2, W_S / 64),
+    "production_clamp": (lambda x: _src(SMOOTH, production_override=x), W_S / 2, W_S / 2000),
     "floor_e_min": (lambda x: E.eke_floor(x, SMOOTH), SMOOTH.e_min, W_E / 64),
 }
 

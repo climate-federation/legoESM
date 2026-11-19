@@ -215,7 +215,10 @@ def test_dissipation_fold_reproduces_eq4_rate():
     r_d = jnp.array([3.0e4, 2.0e3, 4.0e4])
     P = jnp.array([1.0e-2, 0.0, 5.0e-1])            # B_C + B_T [m³/s³]
     L_eff = geometric_dissipation_length(r_d, H)
-    shim = EKEConfig()._replace(c_eps=geom.c_eps_geometric)
+    # the algebra of the fold at the hard switches (RULE 5 widths 0); the smooth
+    # defaults' gap is pinned in test_eke_source_step_rule5.py
+    shim = EKEConfig()._replace(c_eps=geom.c_eps_geometric, e_pos_width=0.0,
+                                length_switch_width=0.0, source_split_width=0.0)
     E_new = eke_apply_local_source(
         E, jnp.zeros_like(E), L_eff, shim, dt, production_override=P)
     rate = geom.c_eps_geometric * np.sqrt(
