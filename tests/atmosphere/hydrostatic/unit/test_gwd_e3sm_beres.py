@@ -375,3 +375,25 @@ def test_q0_max_tie_is_smooth_at_default():
         check_grads(make(E3SMBeresConfig(use_stand_in_table=True,
                                          q0_max_sharpness=float("inf"))),
                     (s0,), order=2, modes=("rev",), eps=1e-3)
+
+
+def test_launch_expectation_gradient_finite_in_fp32():
+    """#2569 (codex review 3): a range found with a vanishing probability
+    (heating 1e-15 K/s at one level, cooling elsewhere, no 20 km window) gave a
+    NaN fp32 gradient through the expected launch interface's 1/found."""
+    pver, ncol = 40, 1
+    pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
+    f32 = lambda a: jnp.asarray(a, jnp.float32)[None, :]
+    nd = np.full(pver, -1.0e-4)
+    nd[-4] = 1.0e-15
+    cfg = E3SMCAMConfig(source="convective", pgwv=NGWV, dc=DC, effgw=0.4,
+                        beres=E3SMBeresConfig(use_stand_in_table=True, z_heat_max=1.0e7))
+    rho = pmid / (ORACLE_RAIR * T)
+
+    def loss(netdt_c):
+        out = e3sm_cam_gwd(f32(u), f32(v), f32(T), f32(pmid), f32(pint), f32(zm), f32(z_half),
+                           f32(rho), jnp.zeros(ncol, jnp.float32), 1800.0, cfg, netdt_col=netdt_c)
+        return jnp.sum(out.du_dt) + jnp.sum(out.dT_dt)
+
+    g = jax.grad(loss)(f32(nd))
+    assert g.dtype == jnp.float32 and bool(jnp.all(jnp.isfinite(g)))

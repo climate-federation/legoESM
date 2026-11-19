@@ -1010,7 +1010,10 @@ def gw_beres_src(
     # keeps x <= nlev - 1, so a launching blend never reaches the surface
     # interface, where the fixer has no region below the source (codex
     # review 2).  With 0/1 indicators x is an integer and launch_t = 0.
-    has = found > 0.0
+    # found below sqrt(tiny) counts as none, so d x/d found ~ 1/found^2 stays
+    # finite in fp32 (codex review 3: NaN gradient at found ~ 1e-24); there
+    # q0 <= found*max(netdt), so tau ~ found^2 and the switch is invisible.
+    has = found > float(jnp.finfo(dtype).tiny) ** 0.5
     x = jnp.where(has, jnp.sum(e * (ks_idx + 1.0), axis=1) / jnp.where(has, found, 1.0),
                   float(nlev))
     x = jnp.clip(smooth_round(x, rw), 0.0, float(nlev))   # rw 0: NINT
