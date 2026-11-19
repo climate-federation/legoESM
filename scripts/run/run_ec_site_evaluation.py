@@ -9,7 +9,8 @@ fluxes that ``scripts/plot/plot_ec_site_combined.py`` reads:
     observed : gpp_obs, le_obs, h_obs, ustar_obs, swc_obs, plus the energy-balance
                closure-corrected le_obs_corr / h_obs_corr (band edge in the figures)
     a ``valid`` mask (all-inputs-observed steps), a ``reverted`` mask (steps the
-    NaN guard rolled back, so a model blow-up is distinguishable from missing
+    NaN guard rolled back, or the land step HELD because its unsolved canopy's
+    fallback was rejected, so a model failure is distinguishable from missing
     observations), and the site attrs.
 
 Per-site physics (tower height, rooting/column depth) come from the consolidated
@@ -134,6 +135,10 @@ def run_evaluation(site: str, out_path: str, driver_dir: str,
             doy=doy, land_params=p)
         rev = _nonfinite(ns)                     # revert to last good state on NaN
         safe = jax.tree_util.tree_map(lambda a, b: jnp.where(rev, b, a), ns, state)
+        # A held column already kept its state, but ``out`` still carries its
+        # rejected fallback fluxes; emit it as reverted, never as model output.
+        held = jnp.any(out.held) if out.held is not None else jnp.array(False)
+        rev = rev | held
         m = lambda v: jnp.where(rev, jnp.array(jnp.nan), v)
         ustar = jnp.sqrt(jnp.sqrt(out.tau_x ** 2 + out.tau_y ** 2)
                          / jnp.maximum(f.rho_lowest, 1e-3))
