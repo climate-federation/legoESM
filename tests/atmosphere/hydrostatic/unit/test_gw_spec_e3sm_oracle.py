@@ -306,6 +306,95 @@ def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps
         check_grads(make(_config(m["ours"])), (s0,), order=order, modes=("rev",), eps=eps)
 
 
+# #2569 (RULE 5): the Beres source's three remaining switches on traced
+# heating.  Each test perturbs ONE input of one L36 column of the
+# convective_frontal arm along a line through the switch, checks the default
+# with check_grads there, and shows the hard value of THAT field alone fails.
+#   heating range: level 20 sits inside column 0's heating run (levels 9..32);
+#     its netdt set to s cuts the run at s <= 0 (the launch interface jumps
+#     from 10 to 21).  At s = w/2 the expected launch interface is 15.5, the
+#     middle of a launch-staircase step.
+#   q0: level 18 of column 0 set to netdt(17) + s ties the range max at s = 0.
+#   depth gate: column 1's run (levels 29..34) is 1.59 km deep; z_full * s
+#     crosses hdepth_min_km = 2.5 km at s = 2.5/hdepth.
+_C0, _CUT, _QI, _QJ, _C1 = 0, 20, 17, 18, 1
+_HD1 = float(np.load(FIXTURE)["l36/z_full"][_C1, 29] - np.load(FIXTURE)["l36/z_full"][_C1, 34]) / 1000.0
+
+
+def _beres_line(fx, col, perturb, beres_kw, source=None):
+    z, meta, table = fx
+    m = meta["arms"]["convective_frontal"]
+    j0 = _inputs(z, "l36")
+    cfg = _config(m["ours"], hard=False)
+    cfg = cfg._replace(beres=cfg.beres._replace(**beres_kw),
+                       **({} if source is None else {"source": source}))
+
+    def f(s):
+        o = _run(perturb(j0, s), cfg, m["dt"], table)
+        return jnp.sum(o.du_dt[col]) + jnp.sum(o.dv_dt[col]) + jnp.sum(o.dT_dt[col])
+    return jax.jit(f)
+
+
+def _set_netdt(k, offset_from=None):
+    def perturb(j, s):
+        base = 0.0 if offset_from is None else j["netdt"][_C0, offset_from]
+        return dict(j, netdt=j["netdt"].at[_C0, k].set(base + s))
+    return perturb
+
+
+def _scale_z(j, s):
+    return dict(j, z_full=j["z_full"].at[_C1].multiply(s),
+                z_half=j["z_half"].at[_C1].multiply(s))
+
+
+_HW = E3SMBeresConfig().heating_ramp_width
+_GATE = E3SMBeresConfig().hdepth_gate_width
+_SWITCHES = {
+    # name: (column, perturbation, point, eps, the field's hard value, interior point)
+    # eps keeps the launch interface (moving 11 levels across the ramp)
+    # inside one step of its staircase (width 0.1 levels).
+    "heating_range": (_C0, _set_netdt(_CUT), 0.0, _HW / 20,
+                      dict(heating_ramp_width=0.0), _HW / 2),
+    "launch_staircase": (_C0, _set_netdt(_CUT), _HW / 2, _HW / 2000,
+                         dict(index_round_width=0.0), None),
+    "q0_max": (_C0, _set_netdt(_QJ, offset_from=_QI), 0.0, 1.0e-10,
+               dict(q0_max_sharpness=float("inf")), None),
+    "depth_gate": (_C1, _scale_z, 2.5 / _HD1, 1.0e-3,
+                   dict(hdepth_gate_width=0.0), (2.5 - _GATE / 2) / _HD1),
+}
+
+
+@pytest.mark.parametrize("name", list(_SWITCHES))
+def test_beres_heating_switches_smooth_at_default(fx, name):
+    col, perturb, s0, eps, hard, interior = _SWITCHES[name]
+    f = _beres_line(fx, col, perturb, {})
+    check_grads(f, (jnp.asarray(s0),), order=2, modes=("rev",), eps=eps)
+    if interior is not None:                     # the ramp moves the drag
+        assert float(jax.grad(f)(jnp.asarray(interior))) != 0.0
+    with pytest.raises(AssertionError):          # this field's hard value alone jumps/kinks
+        check_grads(_beres_line(fx, col, perturb, hard), (jnp.asarray(s0),), order=2,
+                    modes=("rev",), eps=eps)
+
+
+def test_beres_launch_blend_closes_column_energy(fx):
+    """RULE 0 (#2569): at a launch weight of 1/2 the blended convective source
+    still closes the discrete column total energy (the fixer's energy step runs
+    once, on the blend)."""
+    z, meta, table = fx
+    m = meta["arms"]["convective_frontal"]
+    j = _set_netdt(_CUT)(_inputs(z, "l36"), jnp.asarray(_HW / 2))
+    cfg = _config(m["ours"], hard=False)._replace(source="convective")
+    assert cfg.do_energy_conservation
+    o = _run(j, cfg, m["dt"], table)
+    dt, u, v = m["dt"], j["u"], j["v"]
+    dp = jnp.abs(jnp.diff(j["p_half"], axis=1))
+    terms = dp * (constants.c_pd * o.dT_dt + o.du_dt * (u + 0.5 * dt * o.du_dt)
+                  + o.dv_dt * (v + 0.5 * dt * o.dv_dt))
+    col = terms[_C0]
+    assert float(jnp.max(jnp.abs(o.du_dt[_C0]))) > 0.0
+    assert abs(float(jnp.sum(col))) <= 1e-12 * float(jnp.sum(jnp.abs(col)))
+
+
 @pytest.mark.parametrize("field", ["umcfac_abs_width", "umcfac_sign_width", "taumin_ramp_width"])
 @pytest.mark.parametrize("bad", [-1.0, float("nan"), 1.0e-30])
 def test_smoothing_widths_validated(fx, field, bad):
