@@ -393,23 +393,36 @@ def test_beres_heating_switches_smooth_at_default(fx, name):
                     modes=("rev",), eps=eps_sw)
 
 
-def test_beres_launch_blend_closes_column_energy(fx):
+def _surface_half_launch(j, s):
+    """Column 3 (no heating) given heating s*heating_ramp_width at its lowest
+    level only: half the scans find a one-level range (launch interface
+    nlev - 1), half find none (interface nlev), so the blend's second branch
+    launches at the surface interface with no region below it."""
+    nd = j["netdt"].at[3].set(0.0).at[3, -1].set(s * _HW)
+    return dict(j, netdt=nd)
+
+
+@pytest.mark.parametrize("case", ["interior", "surface"])
+def test_beres_launch_blend_closes_column_energy(fx, case):
     """RULE 0 (#2569): at a launch weight of 1/2 the blended convective source
     still closes the discrete column total energy (the fixer's energy step runs
-    once, on the blend)."""
+    once, on the blend), also when one branch launches at the surface."""
     z, meta, table = fx
     m = meta["arms"]["convective_frontal"]
-    j = _set_netdt(_CUT, _HW)(_inputs(z, "l36"), jnp.asarray(0.5))
     cfg = _config(m["ours"], hard=False)._replace(source="convective")
+    if case == "interior":
+        col, j = _C0, _set_netdt(_CUT, _HW)(_inputs(z, "l36"), jnp.asarray(0.5))
+    else:   # gate open at any depth, so the one-level range launches
+        col, j = 3, _surface_half_launch(_inputs(z, "l36"), jnp.asarray(0.5))
+        cfg = cfg._replace(beres=cfg.beres._replace(hdepth_min_km=0.0))
     assert cfg.do_energy_conservation
     o = _run(j, cfg, m["dt"], table)
     dt, u, v = m["dt"], j["u"], j["v"]
     dp = jnp.abs(jnp.diff(j["p_half"], axis=1))
     terms = dp * (constants.c_pd * o.dT_dt + o.du_dt * (u + 0.5 * dt * o.du_dt)
                   + o.dv_dt * (v + 0.5 * dt * o.dv_dt))
-    col = terms[_C0]
-    assert float(jnp.max(jnp.abs(o.du_dt[_C0]))) > 0.0
-    assert abs(float(jnp.sum(col))) <= 1e-12 * float(jnp.sum(jnp.abs(col)))
+    assert float(jnp.max(jnp.abs(o.du_dt[col]))) > 0.0
+    assert abs(float(jnp.sum(terms[col]))) <= 1e-12 * float(jnp.sum(jnp.abs(terms[col])))
 
 
 @pytest.mark.parametrize("field", ["umcfac_abs_width", "umcfac_sign_width", "taumin_ramp_width"])

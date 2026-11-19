@@ -2110,7 +2110,12 @@ def _e3sm_cam_gwd_one_source(
             k_idx = jnp.arange(u.shape[1])[None, :]
             prof = sum(wt * (k_idx >= tl[:, None]) / _below_source_dp(tl, p_half)[:, None]
                        for wt, tl in ((1.0 - w, tend0), (w, tend1)))
-            dsdt = dsdt - dE_int[:, None] * prof
+            # Normalised so the removal integrates to dE_int even when one
+            # branch launches at the surface interface and has no region
+            # below it (codex review 1); no region at all = no correction,
+            # as in the unblended fixer.
+            norm = jnp.sum(dpm * prof, axis=1, keepdims=True)
+            dsdt = dsdt - dE_int[:, None] * prof / jnp.where(norm > 0.0, norm, 1.0)
         dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
         eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
         return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dsdt / constants.c_pd,
