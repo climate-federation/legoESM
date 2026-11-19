@@ -38,7 +38,7 @@ def test_eke_config_defaults_match_veros_acc():
 
 
 def test_mixing_length_floor():
-    cfg = EKEConfig(l_min=100.0)
+    cfg = EKEConfig(l_min=100.0, length_switch_width=0.0)   # hard (Veros) floor
     L_rossby = jnp.array([10.0, 100.0, 5.0e4])
     L = eke_mixing_length(L_rossby, cfg)
     assert float(L[0]) == 100.0      # floored
@@ -69,8 +69,8 @@ def test_kappa_gm_capped():
 
 
 def test_tendency_zero_at_zero_E():
-    """At E=0: production (kappa~0) and dissipation (E^{3/2}=0) both vanish."""
-    cfg = EKEConfig()
+    """At E=0: production (kappa~0) and dissipation (E^{3/2}=0) both vanish (hard positive part)."""
+    cfg = EKEConfig(e_pos_width=0.0)
     E = jnp.zeros((5,)); sigma = jnp.full((5,), 1.0e-5); L = jnp.full((5,), 3.0e4)
     t = eke_local_tendency(E, sigma, L, cfg)
     assert float(jnp.max(jnp.abs(t))) < 1e-15
@@ -181,7 +181,7 @@ def test_compute_eke_kappa_gm_prognostic_and_monotone():
     assert float(jnp.mean(k_hi)) > float(jnp.mean(k_lo))  # kappa grows with E
     # E=0 -> kappa_GM = 0 (no prognostic mixing without eddy energy).
     E0, *rest0 = _eke_coupling_inputs(0.0)
-    k0, _, _ = compute_eke_kappa_gm(E0, *rest0, vcfg, ecfg)
+    k0, _, _ = compute_eke_kappa_gm(E0, *rest0, vcfg, ecfg._replace(e_pos_width=0.0))
     assert float(jnp.max(k0)) < 1e-6
 
 
@@ -538,7 +538,7 @@ def test_rhines_length_beta_floor_finite_at_zero_beta():
 
 
 def test_deformation_radius_matches_formula_both_branches():
-    cfg = EKEConfig()
+    cfg = EKEConfig(length_switch_width=0.0)
     c1 = _ACC_INT_N_DZ / np.pi
     L_mid = c1 / _ACC_FMID
     L_eq = np.sqrt(c1 / (2.0 * _ACC_BETA))
@@ -555,10 +555,15 @@ def test_deformation_radius_matches_formula_both_branches():
 
 
 def test_deformation_radius_zero_at_zero_stratification():
+    hard = EKEConfig(length_switch_width=0.0)
+    L = eke_deformation_radius(
+        jnp.array(0.0), jnp.array(_ACC_FMID), jnp.array(_ACC_BETA), hard)
+    assert float(L) == 0.0   # c1=0 -> midlat branch is 0 and wins the min
+    # Smooth default: both branches are 0, so the C1 min sits width/8 below.
     cfg = EKEConfig()
     L = eke_deformation_radius(
         jnp.array(0.0), jnp.array(_ACC_FMID), jnp.array(_ACC_BETA), cfg)
-    assert float(L) == 0.0   # c1=0 -> midlat branch is 0 and wins the min
+    assert float(L) == -cfg.length_switch_width / 8.0
 
 
 def test_eke_len_composite_picks_min_and_floors():

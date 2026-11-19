@@ -442,7 +442,10 @@ def eke_deformation_radius(
     The midlatitude branch ``c1/|f|`` is the deformation radius; the equatorial
     branch ``sqrt(c1/2β)`` caps it as ``|f|→0``. ``|f|`` and ``β`` denominators are
     floored at ``_DENOM_FLOOR``.  The ``min`` is smoothed over
-    ``cfg.length_switch_width`` (RULE 5; 0 = Veros).
+    ``cfg.length_switch_width`` (RULE 5; 0 = Veros): exact once the branches
+    differ by half the width, never above the hard ``min`` and at most
+    ``width/8`` below it, so with no stratification the radius is
+    ``-width/8`` rather than 0 (``eke_len`` floors it at ``l_min``).
     """
     c1 = jnp.maximum(int_N_dz, 0.0) / jnp.pi
     f_safe = jnp.maximum(jnp.abs(f_coriolis), _DENOM_FLOOR)
