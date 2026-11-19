@@ -24,7 +24,8 @@ from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land import multilayer_land as ml
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
-from legoesm.land.soil_thermal import compute_heat_capacity
+from legoesm.land.soil_thermal import (
+    compute_apparent_heat_capacity, compute_heat_capacity)
 from legoesm.land.surface_scheme import SimpleSEBConfig
 
 pytestmark = pytest.mark.skipif(
@@ -52,37 +53,69 @@ def _cfg(**kw):
                                 surface_scheme=SimpleSEBConfig(), **kw)
 
 
-def _run(cfg, forcing):
-    st = ml.init_multilayer_land_state(2, cfg, T_init=295.0)
+def _run(cfg, forcing, st=None):
+    snow_free = st is None
+    if snow_free:
+        st = ml.init_multilayer_land_state(2, cfg, T_init=295.0)
     new, r, _c, so = jax.jit(lambda s: ml.step_multilayer_land_with_diagnostics(
         s, forcing, cfg, 1.0, _DT, lat=jnp.full(2, 0.3)))(st)
     assert int(so.n_held) == 0
     assert so.surface_conductance is not None
+    # Start-of-step linearisation estimate of the correction (exact only for a
+    # single solve on a snow-free column); printed next to the residual.
     robin = np.asarray(so.surface_conductance
                        * (new.T_soil[:, 0] - st.T_soil[:, 0]))
-    assert np.all(np.abs(robin) > _ROBIN_MIN), robin       # non-vacuity
-    return st, new, r, so
+    if snow_free:
+        assert np.all(np.abs(robin) > _ROBIN_MIN), robin   # non-vacuity
+    return st, new, r, so, robin
+
+
+def _residual(label, r, so, heat_gain, robin):
+    """Rn - SH_atm - LE_atm - (heat the column received from the surface) [W m-2].
+    Sign: Rn, heat_gain positive INTO the land; SH, LE positive UP."""
+    terms = dict(sw_net=so.sw_net, lw_net=so.lw_net, SH_atm=r.shflx, LE_atm=r.lhflx,
+                 G_explicit=so.G_soil, heat_gain=heat_gain, lam_dT=robin)
+    resid = np.asarray(so.sw_net + so.lw_net - r.shflx - r.lhflx) - np.asarray(heat_gain)
+    print(label, {k: float(np.asarray(v)[0]) for k, v in terms.items()},
+          "resid", resid, "resid-lam_dT", resid - robin)
+    for v in terms.values():        # every term is a plausible surface flux
+        assert np.all(np.abs(np.asarray(v)) < 1500.0), terms
+    return resid
 
 
 @pytest.mark.parametrize("freeze_thaw", [False, True])
 @pytest.mark.parametrize("sw", [800.0, 0.0])
 def test_bulk_snow_column_energy_closes_against_atmosphere_fluxes(freeze_thaw, sw):
     """Day (warming skin) and night (cooling skin); freeze/thaw on runs the final
-    solve in sub-steps.  Warm column: the apparent heat capacity is sensible."""
+    solve in sub-steps.  The 295 K column holds no ice (asserted), so its heat
+    storage is the sensible C*dz*dT at the water the final solve used."""
     cfg = _cfg()
     cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=freeze_thaw))
-    st, new, r, so = _run(cfg, _forcing(2, sw=sw))
+    st, new, r, so, robin = _run(cfg, _forcing(2, sw=sw))
+    assert float(jnp.max(st.snow_depth)) == 0.0 and float(jnp.max(new.snow_depth)) == 0.0
     grid = make_soil_grid(cfg.soil_grid)
-    C = compute_heat_capacity(new.theta, cfg.hydraulics, cfg.thermal) * grid.dz
-    dS = np.asarray(jnp.sum(C * (new.T_soil - st.T_soil), axis=-1)) / _DT
-    Rn = np.asarray(so.sw_net + so.lw_net)
-    resid = Rn - np.asarray(r.shflx + r.lhflx) - (dS - cfg.thermal.Q_geothermal)
+    C = compute_heat_capacity(new.theta_soil, cfg.hydraulics, cfg.thermal)
+    for T in (st.T_soil, new.T_soil):   # no latent part in the apparent capacity
+        np.testing.assert_allclose(compute_apparent_heat_capacity(
+            T, new.theta_soil, cfg.hydraulics, cfg.thermal), C, rtol=1e-15)
+    dS = np.asarray(jnp.sum(C * grid.dz * (new.T_soil - st.T_soil), axis=-1)) / _DT
+    resid = _residual(f"bulk sw={sw} ft={freeze_thaw}", r, so,
+                      dS - cfg.thermal.Q_geothermal, robin)
     np.testing.assert_allclose(resid, 0.0, rtol=0, atol=_ATOL)
 
 
-def test_layered_snow_column_energy_closes_against_atmosphere_fluxes():
+@pytest.mark.parametrize("swe", [0.0, 15.0])
+def test_layered_snow_column_energy_closes_against_atmosphere_fluxes(swe):
+    """Snow-free and snow-covered.  ``snow_ground_heat_applied`` is the flux the
+    pack + soil received from the surface; that it equals the column's enthalpy
+    change is asserted by test_layered_snowpack::
+    test_land_step_closes_pack_plus_soil_energy."""
     cfg = _cfg(snow_scheme="layered")
-    st, new, r, so = _run(cfg, _forcing(2))
-    Rn = np.asarray(so.sw_net + so.lw_net)
-    resid = Rn - np.asarray(r.shflx + r.lhflx) - np.asarray(so.snow_ground_heat_applied)
+    if swe > 0.0:
+        st = ml.init_multilayer_land_state(2, cfg, T_init=270.0)
+        st = ml.seed_snow_layers(st._replace(snow_depth=jnp.full(2, swe)), cfg)
+        st, new, r, so, robin = _run(cfg, _forcing(2, T=265.0, q=0.0015, sw=400.0), st)
+    else:
+        st, new, r, so, robin = _run(cfg, _forcing(2))
+    resid = _residual(f"layered swe={swe}", r, so, so.snow_ground_heat_applied, robin)
     np.testing.assert_allclose(resid, 0.0, rtol=0, atol=_ATOL)
