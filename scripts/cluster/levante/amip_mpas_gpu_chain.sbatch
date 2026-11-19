@@ -37,6 +37,27 @@ set -uo pipefail
 : "${TARGET_DAYS:=365}"
 : "${MAX_WALLCLOCK_SECONDS:=39600}"   # 11 h: checkpoint+exit before the 12 h kill
 OUTDIR="${ROOT}/${NAME}"
+# GPU-DIRECT HALO EXCHANGE, opt-in: AMIP_GPU_DIRECT=1 (default 0 = host-staged
+# through the cluster OpenMPI, unchanged).  Halo exchanges and global sums
+# then go GPU-to-GPU through NVIDIA HPC-X (CUDA-aware) instead of through host
+# memory.  Measured 2026-11-17, this deck, MPAS res6, 4xA100, 1 simulated
+# day: 0.083-0.086 -> 0.071-0.077 s/step; one dynamics step's halo time
+# 22 -> 12 ms.  NOT bit-identical to host-staged: HPC-X sums the four ranks'
+# global sums in a different fixed order (deterministic run to run), so the
+# two modes agree to round-off at step 1 and then diverge chaotically.  Keep
+# both arms of a comparison on the same mode.
+# Runs on the production .venv (user decision 2026-11-18): its prebuilt
+# multi-MPI mpi4py loads HPC-X's MPI at run time, and a 1-day 4-GPU state was
+# bit-identical to one from a venv built against HPC-X.  A one-rank preflight
+# checks the loaded MPI and mpi4jax's CUDA extension before the run starts.
+# Single node only: HPC-X
+# cannot start under srun on these nodes, so it runs under its own mpirun,
+# and the multi-node launch is unmeasured.
+: "${AMIP_GPU_DIRECT:=0}"
+if [[ "${AMIP_GPU_DIRECT}" != "0" && "${AMIP_GPU_DIRECT}" != "1" ]]; then
+    echo "[chain] REFUSING: AMIP_GPU_DIRECT=${AMIP_GPU_DIRECT}; use 0 or 1." >&2
+    exit 71
+fi
 # PY overridable so a git-worktree bisect can run an older REPO tree with the
 # main checkout's venv (PATH-style editable .pth entries; PYTHONPATH wins).
 : "${PY:=${REPO}/.venv/bin/python}"
@@ -202,8 +223,8 @@ cd "${REPO}"
 # above and in the self-resubmit below, because a default is not a record.
 # The MPAS lane federates with the mpi4jax halo backend -- distributed_mode
 # 'spmd' is cubed-sphere only (driver/config.py refuses it on a Voronoi mesh)
-# -- so this is ONE RANK PER GPU under srun, with --distributed.
-# CUDA-aware MPI stays OFF: MPI4JAX_USE_CUDA_MPI=1 segfaults on this cluster.
+# -- so this is ONE RANK PER GPU under srun (under HPC-X mpirun with
+# AMIP_GPU_DIRECT=1), with --distributed.
 : "${AMIP_N_GPUS:=4}"
 if (( AMIP_N_GPUS < 4 )); then
     echo "[chain] REFUSING: AMIP_N_GPUS=${AMIP_N_GPUS} is below the floor of 4." >&2
@@ -336,6 +357,8 @@ CMD+=( --distributed )
 # different environment variables".  Measured, job 27647178 died in 12 s on it.
 # Clear the inherited one and state the value on the srun line instead.
 unset SLURM_CPUS_PER_TASK
+_GPU_MAP=$(seq -s, 0 $((AMIP_N_GPUS - 1)))
+if [[ "${AMIP_GPU_DIRECT}" == "0" ]]; then
 # MPI LIBRARY PATHS.  mpi4py needs libmpi and mpi4jax needs a newer libstdc++,
 # and each failure is misleading: without the first, "cannot load MPI library
 # ... libmpi.so.40" (measured, job 27647305 died on it in 16 s); without the
@@ -343,10 +366,10 @@ unset SLURM_CPUS_PER_TASK
 # survive into a batch step here, and the 4.1.6 paths segfault on import (ABI
 # mismatch), so the 4.1.2 path is pinned deliberately.
 export LD_LIBRARY_PATH="/sw/spack-levante/openmpi-4.1.2-mnmady/lib:/sw/spack-levante/gcc-13.4.0-c4mgfk/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-# CUDA-aware MPI stays OFF: MPI4JAX_USE_CUDA_MPI=1 segfaults every data-parallel
-# run on this cluster.
+# CUDA-aware MPI stays OFF on the cluster OpenMPI: MPI4JAX_USE_CUDA_MPI=1
+# segfaults every data-parallel run with it.  AMIP_GPU_DIRECT=1 is the
+# CUDA-aware route.
 export MPI4JAX_USE_CUDA_MPI=0
-_GPU_MAP=$(seq -s, 0 $((AMIP_N_GPUS - 1)))
 LAUNCH=( srun --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}"
          --gpus-per-node="${AMIP_N_GPUS}" --gpu-bind="map_gpu:${_GPU_MAP}"
          --cpus-per-task=8 --kill-on-bad-exit=1 )
@@ -354,6 +377,40 @@ LAUNCH=( srun --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}"
 # step to their own node, so concurrent steps never land on the same GPUs.
 if [[ -n "${AMIP_STEP_NODE:-}" ]]; then
     LAUNCH+=( --nodes=1 --nodelist="${AMIP_STEP_NODE}" --exact )
+fi
+else
+if [[ -n "${AMIP_STEP_NODE:-}" ]] || (( ${SLURM_JOB_NUM_NODES:-1} > 1 )); then
+    echo "[chain] REFUSING: AMIP_GPU_DIRECT=1 runs on one node only; this job" >&2
+    echo "[chain] has ${SLURM_JOB_NUM_NODES:-1} node(s)${AMIP_STEP_NODE:+ and pins step node ${AMIP_STEP_NODE}}." >&2
+    exit 72
+fi
+# shellcheck source=/dev/null
+source "${REPO}/scripts/cluster/levante/hpcx_gdr_env.sh"
+export MPI4JAX_USE_CUDA_MPI=1
+# One GPU per rank: mpirun cannot bind GPUs, so a wrapper hands each local
+# rank its own device.  It also clears SLURM_PROCID, which every mpirun
+# process inherits identically from the batch step and which the driver
+# reads before OMPI_COMM_WORLD_RANK when it picks the profiler-traced rank.
+_WRAP="${OUTDIR}/.gpu_local_rank.sh"
+printf '#!/bin/bash\nunset SLURM_PROCID\nexport CUDA_VISIBLE_DEVICES=${OMPI_COMM_WORLD_LOCAL_RANK}\nexec "$@"\n' > "${_WRAP}"
+chmod +x "${_WRAP}"
+# PREFLIGHT, one rank under the same launcher: the MPI library mpi4py
+# actually loads must be HPC-X's, and mpi4jax must carry its CUDA extension.
+# Asked at run time because a prebuilt multi-MPI mpi4py wheel picks its
+# library when it starts, so no file in the venv says which one it will be.
+_HPCX_VER=$(ompi_info --version 2>/dev/null | head -1)
+_PRE=$(timeout 300 mpirun -np 1 --bind-to none "${_WRAP}" "${PY}" -c "from mpi4py import MPI; from mpi4jax._src.xla_bridge import HAS_CUDA_EXT; print('MPI_LIB', MPI.Get_library_version().splitlines()[0]); print('CUDA_EXT', HAS_CUDA_EXT)" 2>&1)
+echo "[chain] GPU-direct preflight (${PY}):"; echo "${_PRE}" | grep -E '^(MPI_LIB|CUDA_EXT) '
+if [[ -z "${_HPCX_VER}" ]] || ! grep -qF "MPI_LIB ${_HPCX_VER}" <<< "${_PRE}"; then
+    echo "[chain] REFUSING: ${PY} does not load HPC-X's MPI (${_HPCX_VER:-ompi_info missing})." >&2
+    echo "${_PRE}" | tail -5 >&2
+    exit 73
+fi
+if ! grep -qx "CUDA_EXT True" <<< "${_PRE}"; then
+    echo "[chain] REFUSING: ${PY} has an mpi4jax without its CUDA extension." >&2
+    exit 73
+fi
+LAUNCH=( mpirun -np "${AMIP_N_GPUS}" --bind-to none "${_WRAP}" )
 fi
 echo "[chain] launching on ${AMIP_N_GPUS} GPU(s): ${LAUNCH[*]} ${CMD[*]}"
 "${LAUNCH[@]}" "${CMD[@]}"
@@ -376,7 +433,7 @@ if (( RC == 0 )); then
                  --time=12:00:00 --constraint=a100_80 --mem=0 \
                  --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}" \
                  --gpus-per-node="${AMIP_N_GPUS}" \
-                 --export="ALL,NAME=${NAME},ROOT=${ROOT},TARGET_DAYS=${TARGET_DAYS},MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS},EXTRA=${EXTRA:-},AMIP_N_GPUS=${AMIP_N_GPUS},AMIP_PAIR_DIR=${AMIP_PAIR_DIR:-},CONFIG_YAML=${CONFIG_YAML},AMIP_STEP_NODE=" \
+                 --export="ALL,NAME=${NAME},ROOT=${ROOT},TARGET_DAYS=${TARGET_DAYS},MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS},EXTRA=${EXTRA:-},AMIP_N_GPUS=${AMIP_N_GPUS},AMIP_GPU_DIRECT=${AMIP_GPU_DIRECT},AMIP_PAIR_DIR=${AMIP_PAIR_DIR:-},CONFIG_YAML=${CONFIG_YAML},AMIP_STEP_NODE=" \
                  "$0" | awk '{print $NF}')
         echo "[chain] ${NEW_DAY}/${TARGET_DAYS} d done; queued next link: ${NEXT}"
     else

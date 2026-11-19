@@ -1,5 +1,9 @@
-# GPU-direct MPI stack for the legoESM-perf .venv-gdr: NVIDIA HPC-X 2.20
-# (OpenMPI 4.1.7, UCX, CUDA-aware, CUDA 12.x) from nvhpc 25.11 comm_libs/12.9.
+# GPU-direct MPI stack: NVIDIA HPC-X 2.20 (OpenMPI 4.1.7, UCX, CUDA-aware,
+# CUDA 12.x) from nvhpc 25.11 comm_libs/12.9.  Sourced before HPC-X's mpirun
+# (AMIP_GPU_DIRECT=1 in amip_mpas_gpu_chain.sbatch, LAUNCHER=hpcx in the
+# profiler).  The production .venv runs under it unchanged: its prebuilt
+# multi-MPI mpi4py loads this libmpi at run time.  MPICC/OMPI_CC/OMPI_CXX
+# matter only when building mpi4py/mpi4jax from source against HPC-X.
 HPCX_HOME=/sw/spack-levante/nvhpc-25.11-3is7tk/Linux_x86_64/25.11/comm_libs/12.9/hpcx/hpcx-2.20
 export HPCX_HOME
 export PATH="$HPCX_HOME/ompi/bin:$HPCX_HOME/ucx/bin:$PATH"
