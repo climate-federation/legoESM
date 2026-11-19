@@ -106,7 +106,7 @@ def test_bulk_snow_column_energy_closes_against_atmosphere_fluxes(freeze_thaw, s
     np.testing.assert_allclose(resid, 0.0, rtol=0, atol=_ATOL)
 
 
-@pytest.mark.parametrize("swe", [0.0, 1.0, 15.0])
+@pytest.mark.parametrize("swe", [0.0, 15.0, 200.0])
 def test_layered_snow_column_energy_closes_against_atmosphere_fluxes(swe):
     """Snow-free, partial cover and full cover.  ``snow_ground_heat_applied`` is the flux the
     pack + soil received from the surface; that it equals the column's enthalpy
@@ -120,7 +120,7 @@ def test_layered_snow_column_energy_closes_against_atmosphere_fluxes(swe):
     else:
         st, new, r, so, robin = _run(cfg, _forcing(2))
     f_snow = float(ml.snow_cover_fraction(st.snow_depth, cfg.land_albedo)[0])
-    assert (f_snow == 0.0) if swe == 0.0 else (0.0 < f_snow < 1.0) if swe == 1.0 else (
+    assert (f_snow == 0.0) if swe == 0.0 else (0.1 < f_snow < 0.9) if swe == 15.0 else (
         f_snow > 0.9), f_snow
     resid = _residual(f"layered swe={swe} f_snow={f_snow:.3f}", r, so,
                       so.snow_ground_heat_applied, robin, new)
