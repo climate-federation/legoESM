@@ -17,6 +17,8 @@
 # attribute is printed next to every candidate and the magnitude is printed
 # too, because a magnitude discriminates m/s from m3/s instantly.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge
 cd $ROOT || exit 1
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
@@ -58,3 +60,4 @@ for n in ("e1u", "e2u", "e3u_0", "e3t_0", "umask", "e1t", "e2t",
 m.close()
 PY
 echo "=== rc=$? ==="
+exit ${RC:-0}
