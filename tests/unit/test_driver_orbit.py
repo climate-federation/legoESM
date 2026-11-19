@@ -22,7 +22,8 @@ _DRIVER = Path(__file__).resolve().parents[2] / "packages/coupler/legoesm/driver
 
 def _cfg(**kw):
     base = dict(orbital_insolation=True, orbit_year=None, orbit_eccentricity=None,
-                orbit_obliquity_deg=None, orbit_long_perihelion_deg=None)
+                orbit_obliquity_deg=None, orbit_long_perihelion_deg=None,
+                orbit_solver="berger_series")
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -58,7 +59,10 @@ def test_elements_override_one_by_one_and_year_resolves():
 @pytest.mark.parametrize("kw, match", [
     (dict(orbital_insolation=False, orbit_obliquity_deg=10.0), "orbital_insolation"),
     (dict(orbit_year=1850, orbit_eccentricity=0.0), "both set"),
-    (dict(orbit_eccentricity=0.11), "eccentricity"),
+    (dict(orbit_eccentricity=0.11), "kepler"),
+    (dict(orbit_eccentricity=0.91, orbit_solver="kepler"), "eccentricity"),
+    (dict(orbit_solver="exact"), "orbit_solver"),
+    (dict(orbital_insolation=False, orbit_solver="kepler"), "orbital_insolation"),
     (dict(orbit_obliquity_deg=-1.0), "obliquity"),
     (dict(orbit_long_perihelion_deg=360.0), "perihelion"),
     (dict(orbit_year=2_000_000), "validity"),
@@ -132,3 +136,100 @@ def test_driver_reads_only_the_shared_orbit():
         assert not re.search(r"\bearth_orbit\b", f.read_text()), (
             f"{f.name} builds its own orbit instead of experiment_orbit()")
     assert "land.forcing.solar" not in (_DRIVER / "model_driver.py").read_text()
+
+
+def _bisection_true_longitude(day, e, w_deg):
+    # Independent reference: Kepler's equation by bisection, numpy fp64.
+    w = np.deg2rad(w_deg)
+    nu0 = -w
+    e_eq = 2.0 * np.arctan2(np.sqrt(1 - e) * np.sin(nu0 / 2), np.sqrt(1 + e) * np.cos(nu0 / 2))
+    m = np.mod(e_eq - e * np.sin(e_eq) + (day - 80.5) * 2 * np.pi / 365.0, 2 * np.pi)
+    lo, hi = np.zeros_like(m), np.full_like(m, 2 * np.pi)
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        f = mid - e * np.sin(mid) - m
+        lo, hi = np.where(f > 0, lo, mid), np.where(f > 0, mid, hi)
+    ea = 0.5 * (lo + hi)
+    return 2 * np.arctan2(np.sqrt(1 + e) * np.sin(ea / 2), np.sqrt(1 - e) * np.cos(ea / 2)) + w
+
+
+def test_kepler_matches_bisection_at_e_0_9():
+    from legoesm.atmosphere.physics.radiation.solar import solar_declination
+    orbit = OrbitalParameters(0.9, 23.44, 282.9, solver="kepler")
+    days = np.linspace(1.0, 365.0, 2000)
+    lam = _bisection_true_longitude(days, 0.9, 282.9)
+    np.testing.assert_allclose(
+        np.sin(solar_declination(jnp.asarray(days), orbit=orbit)),
+        np.sin(np.deg2rad(23.44)) * np.sin(lam), atol=1e-12)
+
+
+def test_kepler_agrees_with_cesm_series_at_present_day():
+    from legoesm.atmosphere.physics.radiation.solar import solar_declination
+    days = jnp.linspace(1.0, 365.0, 3650)
+    series = solar_declination(days, orbit=earth_orbit())
+    kepler = solar_declination(days, orbit=earth_orbit()._replace(solver="kepler"))
+    assert float(jnp.max(jnp.abs(series - kepler))) < 2e-7
+
+
+def test_distance_factor_mean_exact_at_e_0_9():
+    from legoesm.atmosphere.physics.radiation.solar import earth_sun_distance_factor
+    e = 0.9
+    days = jnp.asarray(1.0 + np.arange(400_000) * 365.0 / 400_000)
+    f = earth_sun_distance_factor(days, OrbitalParameters(e, 23.44, 282.9, solver="kepler"))
+    assert abs(float(jnp.mean(f)) * np.sqrt(1 - e * e) - 1.0) < 1e-4
+    assert abs(float(jnp.max(f)) - ((1 + e) / (1 - e * e)) ** 2) / ((1 + e) / (1 - e * e)) ** 2 < 1e-3
+
+
+def test_kepler_insolation_finite_and_differentiable_at_e_0_9():
+    lat = jnp.deg2rad(jnp.linspace(-80.0, 80.0, 9))
+
+    def q(e):
+        o = OrbitalParameters(e, 23.44, 282.9, solver="kepler")
+        return jnp.sum(daily_mean_insolation(lat, 10.0, orbit=o))
+
+    assert np.isfinite(float(q(0.9)))
+    g = jax.grad(q)(0.9)
+    assert np.isfinite(float(g)) and float(g) != 0.0
+
+
+def test_kepler_solver_reaches_the_orbit_and_allows_e_0_9():
+    o = experiment_orbit(_cfg(orbit_solver="kepler", orbit_eccentricity=0.9))
+    assert o.solver == "kepler" and o.eccentricity == 0.9
+
+
+@pytest.mark.parametrize("solver", ["berger_series", "kepler"])
+def test_orbit_passed_as_jit_argument(solver):
+    from legoesm.atmosphere.physics.radiation.solar import solar_declination
+    o = OrbitalParameters(0.05, 30.0, 100.0, solver=solver)
+    f = jax.jit(lambda d, orb: solar_declination(d, orbit=orb))
+    np.testing.assert_allclose(f(150.0, o), solar_declination(150.0, orbit=o), rtol=1e-14)
+    g = jax.grad(lambda orb: solar_declination(150.0, orbit=orb))(o)
+    assert g.solver == solver and np.isfinite(float(g.obliquity_deg))
+
+
+def test_clm_ml_tile_gets_the_run_orbit_and_s0(monkeypatch):
+    import legoesm.land.canopy.config as canopy_config
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import build_multilayer_land_tile
+
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _record(**kw):
+        seen.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(canopy_config, "CLMMLCanopyConfig", _record)
+    cfg = ExperimentConfig(land_surface_scheme="clm_ml", orbital_insolation=True,
+                           orbit_obliquity_deg=60.0, S_0=1300.0)
+    with pytest.raises(_Stop):
+        build_multilayer_land_tile(cfg, np.zeros(2), np.zeros(2), None)
+    assert seen["orbit_obliquity_deg"] == 60.0 and seen["solar_s0"] == 1300.0
+    assert seen["orbit_eccentricity"] == earth_orbit().eccentricity
+    seen.clear()
+    with pytest.raises(_Stop):
+        build_multilayer_land_tile(ExperimentConfig(land_surface_scheme="clm_ml"),
+                                   np.zeros(2), np.zeros(2), None)
+    assert (seen["orbit_eccentricity"], seen["orbit_obliquity_deg"]) == (0.0, 23.45)

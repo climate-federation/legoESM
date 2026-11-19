@@ -812,6 +812,9 @@ class ExperimentConfig(NamedTuple):
     orbit_eccentricity: float | None = None
     orbit_obliquity_deg: float | None = None
     orbit_long_perihelion_deg: float | None = None
+    # How the solar longitude is computed: CESM's Berger series (exact CESM
+    # match, e <= 0.1) or an exact Kepler solve (e <= 0.9).
+    orbit_solver: str = "berger_series"
     # RRTMGP column recurrence implementation:
     #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
     #   True  = jax.lax.scan (smaller graph, often slower per step on GPU but

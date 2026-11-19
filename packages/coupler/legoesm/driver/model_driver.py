@@ -2001,10 +2001,23 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
         # for MODEST column counts, not full-AMIP resolution (the masked-vmap
         # rewrite, S3, removes the unroll).  MPI/SPMD is refused at the scatter
         # (the 1-based mlcanopy array does not match the per-column remap).
+        from legoesm.atmosphere.physics.radiation.solar import (
+            CIRCULAR_ORBIT_OBLIQUITY_DEG,
+        )
+        from legoesm.driver.orbit import experiment_orbit
         from legoesm.land.canopy.config import CLMMLCanopyConfig
+        # The canopy sees the run's orbit and solar constant; the circular
+        # approximation (orbit None) maps to e=0 at the same obliquity.
+        _orbit = experiment_orbit(config)
         _surface_scheme = CLMMLCanopyConfig(
             use_surfdata_pft=bool(getattr(
-                config, "clm_ml_use_surfdata_pft", False)))
+                config, "clm_ml_use_surfdata_pft", False)),
+            orbit_eccentricity=0.0 if _orbit is None else _orbit.eccentricity,
+            orbit_obliquity_deg=(CIRCULAR_ORBIT_OBLIQUITY_DEG if _orbit is None
+                                 else _orbit.obliquity_deg),
+            orbit_long_perihelion_deg=(0.0 if _orbit is None
+                                       else _orbit.long_perihelion_deg),
+            solar_s0=float(config.S_0))
     else:
         raise ValueError(
             f"Unknown land_surface_scheme {_scheme_name!r}; "

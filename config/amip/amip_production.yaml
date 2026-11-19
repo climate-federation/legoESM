@@ -502,6 +502,7 @@ orbit_year: null
 orbit_eccentricity: null
 orbit_obliquity_deg: null
 orbit_long_perihelion_deg: null
+orbit_solver: berger_series
 ic: era5
 dataset: custom
 sst_var: tosbcs

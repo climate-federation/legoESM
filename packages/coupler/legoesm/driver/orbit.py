@@ -21,10 +21,11 @@ from legoesm.atmosphere.physics.radiation.solar import (
 # shr_orb_params validity: about +-1 Myr around its 1950 AD reference epoch.
 _BERGER_REF_YEAR = 1950
 _BERGER_SPAN_YEARS = 1_000_000
-# radiation.solar's solar longitude is Berger's cubic series in e (no Kepler
-# solve): max true-anomaly error 0.008 deg at e=0.1, 0.13 deg at 0.2, 0.68 deg
-# at 0.3 (vs exact Kepler).  Earth stays below ~0.07; larger e needs a solver.
-_MAX_ECCENTRICITY = 0.1
+# Berger's cubic series (orbit_solver="berger_series", CESM-exact) is accurate
+# only for small e: max true-anomaly error 0.008 deg at e=0.1, 0.13 deg at 0.2,
+# 0.68 deg at 0.3 vs exact Kepler.  orbit_solver="kepler" solves Kepler's
+# equation exactly and is allowed to e=0.9 (user 2026-11-19).
+_MAX_ECCENTRICITY = {"berger_series": 0.1, "kepler": 0.9}
 _ORBIT_ELEMENT_FIELDS = (
     "orbit_eccentricity", "orbit_obliquity_deg", "orbit_long_perihelion_deg")
 
@@ -63,10 +64,14 @@ def validate_orbit_fields(cfg) -> None:
     year = getattr(cfg, "orbit_year", None)
     elements = {f: getattr(cfg, f, None) for f in _ORBIT_ELEMENT_FIELDS}
     set_elements = [f for f, v in elements.items() if v is not None]
-    if (year is not None or set_elements) and not getattr(
+    solver = getattr(cfg, "orbit_solver", "berger_series")
+    if solver not in _MAX_ECCENTRICITY:
+        raise ValueError(
+            f"orbit_solver={solver!r}; expected one of {tuple(_MAX_ECCENTRICITY)}")
+    if (year is not None or set_elements or solver != "berger_series") and not getattr(
             cfg, "orbital_insolation", False):
         raise ValueError(
-            "orbit_year / orbit_* elements need orbital_insolation=True "
+            "orbit_year / orbit_* settings need orbital_insolation=True "
             "(--orbital-insolation); without it the circular approximation "
             "would silently ignore them")
     if year is not None and set_elements:
@@ -75,10 +80,13 @@ def validate_orbit_fields(cfg) -> None:
     if year is not None:
         _check_year(year)
     ecc = elements["orbit_eccentricity"]
-    if ecc is not None and not 0.0 <= ecc <= _MAX_ECCENTRICITY:
+    cap = _MAX_ECCENTRICITY[solver]
+    if ecc is not None and not 0.0 <= ecc <= cap:
         raise ValueError(
-            f"orbit_eccentricity={ecc} must be in [0, {_MAX_ECCENTRICITY}] "
-            "(the solar-longitude series is not accurate beyond)")
+            f"orbit_eccentricity={ecc} must be in [0, {cap}] for "
+            f"orbit_solver={solver!r}"
+            + ("; use orbit_solver='kepler' for larger e"
+               if solver == "berger_series" else ""))
     obl = elements["orbit_obliquity_deg"]
     if obl is not None and not 0.0 <= obl <= 180.0:
         raise ValueError(f"orbit_obliquity_deg={obl} must be in [0, 180]")
@@ -93,9 +101,10 @@ def experiment_orbit(cfg) -> OrbitalParameters | None:
     validate_orbit_fields(cfg)
     if not getattr(cfg, "orbital_insolation", False):
         return None
+    solver = getattr(cfg, "orbit_solver", "berger_series")
     year = getattr(cfg, "orbit_year", None)
     if year is not None:
-        return orbit_from_year(year)
+        return orbit_from_year(year)._replace(solver=solver)
     base = earth_orbit()
     ecc = getattr(cfg, "orbit_eccentricity", None)
     obl = getattr(cfg, "orbit_obliquity_deg", None)
@@ -105,4 +114,5 @@ def experiment_orbit(cfg) -> OrbitalParameters | None:
         obliquity_deg=base.obliquity_deg if obl is None else float(obl),
         long_perihelion_deg=(base.long_perihelion_deg if per is None
                              else float(per)),
+        solver=solver,
     )

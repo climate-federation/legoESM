@@ -819,8 +819,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--orbit-eccentricity", type=float, default=None,
         dest="orbit_eccentricity",
-        help="Orbital eccentricity [0,0.1] (unset = present day). Needs "
+        help="Orbital eccentricity, [0,0.1] with the Berger series, [0,0.9] with "
+             "--orbit-solver kepler (unset = present day). Needs "
              "--orbital-insolation.")
+    parser.add_argument(
+        "--orbit-solver", choices=("berger_series", "kepler"),
+        default="berger_series", dest="orbit_solver",
+        help="Solar longitude: CESM Berger series (default; CESM-exact, "
+             "e<=0.1) or exact Kepler solve (e<=0.9). Needs --orbital-insolation.")
     parser.add_argument(
         "--orbit-obliquity", type=float, default=None,
         dest="orbit_obliquity_deg",
@@ -3133,6 +3139,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         orbit_eccentricity=args.orbit_eccentricity,
         orbit_obliquity_deg=args.orbit_obliquity_deg,
         orbit_long_perihelion_deg=args.orbit_long_perihelion_deg,
+        orbit_solver=args.orbit_solver,
         co2_ppmv=args.co2_ppmv,
         ch4_ppbv=args.ch4_ppbv,
         n2o_ppbv=args.n2o_ppbv,

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
@@ -31,6 +32,8 @@ from legoesm import constants
 
 # Earth orbital / calendar constants (fixed).
 _EARTH_OBLIQUITY_DEG = 23.45
+# Public name: other components that must mirror the circular approximation.
+CIRCULAR_ORBIT_OBLIQUITY_DEG = _EARTH_OBLIQUITY_DEG
 # Day of the vernal equinox in a 365-day no-leap calendar (≈ March 21) for the
 # CIRCULAR-orbit (Cooper) declination, which crosses zero here.
 _SOLSTICE_OFFSET_DAYS = 80.0
@@ -41,6 +44,10 @@ _SOLSTICE_OFFSET_DAYS = 80.0
 # ``day_of_year`` this module receives (forcing.time_utils.day_to_calendar).
 _VERNAL_EQUINOX_CALDAY_SHR_ORB = 80.5
 _DAYS_PER_YEAR = 365.0
+# Newton iterations for Kepler's equation from E0 = pi (converges for every
+# e < 1); <= 8 reach 1e-15 at e = 0.9, checked against bisection.
+_KEPLER_NEWTON_ITERS = 12
+_ORBIT_SOLVERS = ("berger_series", "kepler")
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
 __physics_contract__ = {
@@ -89,11 +96,30 @@ class OrbitalParameters(NamedTuple):
     Defaults are the present-day (≈ year 2000) values from
     ``legoesm.constants``.  ``eccentricity = 0`` recovers a circular orbit
     (the AMIP-II realistic insolation uses the present-day ellipse).
+
+    ``solver`` picks how the true solar longitude is obtained:
+    ``"berger_series"`` (CESM ``shr_orb_decl``'s cubic series in e, matched
+    to the compiled oracle; accurate only for small e: 1.1e-7 rad at present
+    day, 0.008 deg at e=0.1, 0.68 deg at e=0.3) or ``"kepler"`` (exact Newton
+    solve of Kepler's equation, valid to high e).  Daily-mean insolation
+    still holds the declination AND the Earth-Sun distance factor fixed over
+    the day, which degrades at high e near perihelion where both change fast
+    (at e=0.9 (a/r)^2 swings by several per cent within the perihelion day).
     """
 
     eccentricity: float = constants.orbital_eccentricity
     obliquity_deg: float = constants.orbital_obliquity_deg
     long_perihelion_deg: float = constants.orbital_long_perihelion_deg
+    solver: str = "berger_series"
+
+
+# The solver is static pytree metadata: an orbit passed as a jit argument keeps
+# its three elements as traced (differentiable) leaves and retraces per solver.
+jax.tree_util.register_pytree_node(
+    OrbitalParameters,
+    lambda o: ((o.eccentricity, o.obliquity_deg, o.long_perihelion_deg), o.solver),
+    lambda solver, leaves: OrbitalParameters(*leaves, solver=solver),
+)
 
 
 def earth_orbit() -> "OrbitalParameters":
@@ -114,6 +140,11 @@ def _orbital_solar_longitude(
     apparent motion of the Sun caused by the elliptical orbit, which the simple
     ``obliquity·sin`` declination ignores.
     """
+    if orbit.solver == "kepler":
+        return _kepler_solar_longitude(day_of_year, orbit)
+    if orbit.solver != "berger_series":
+        raise ValueError(
+            f"orbit.solver={orbit.solver!r}; expected one of {_ORBIT_SOLVERS}")
     e = orbit.eccentricity
     w = orbit.long_perihelion_deg * constants.DEG_TO_RAD
     delta_lambda = (day_of_year - _VERNAL_EQUINOX_CALDAY_SHR_ORB) * (
@@ -134,6 +165,30 @@ def _orbital_solar_longitude(
         + (13.0 / 12.0) * e ** 3 * jnp.sin(3.0 * (lambda_m - w))  # coeff-ok: Berger 1978 series
     )
     return lam
+
+
+def _kepler_solar_longitude(day_of_year, orbit: OrbitalParameters) -> jnp.ndarray:
+    """Exact true solar longitude [rad]: Kepler's equation by Newton.
+
+    Same calendar anchoring as the series (true longitude 0 at calday 80.5,
+    PMIP4): the mean anomaly at the equinox comes from the true anomaly
+    ``-varpi`` there, then advances uniformly over the 365-day year.
+    """
+    e = orbit.eccentricity
+    w = orbit.long_perihelion_deg * constants.DEG_TO_RAD
+    root_p, root_m = jnp.sqrt(1.0 + e), jnp.sqrt(1.0 - e)
+    e_eq = 2.0 * jnp.arctan2(root_m * jnp.sin(-w / 2.0), root_p * jnp.cos(-w / 2.0))
+    mean_anom = jnp.mod(
+        e_eq - e * jnp.sin(e_eq)
+        + (day_of_year - _VERNAL_EQUINOX_CALDAY_SHR_ORB) * (2.0 * jnp.pi / _DAYS_PER_YEAR),
+        2.0 * jnp.pi)
+    ecc_anom = jnp.full_like(mean_anom, jnp.pi)
+    for _ in range(_KEPLER_NEWTON_ITERS):
+        ecc_anom = ecc_anom - (ecc_anom - e * jnp.sin(ecc_anom) - mean_anom) / (
+            1.0 - e * jnp.cos(ecc_anom))
+    true_anom = 2.0 * jnp.arctan2(root_p * jnp.sin(ecc_anom / 2.0),
+                                  root_m * jnp.cos(ecc_anom / 2.0))
+    return true_anom + w
 
 
 def earth_sun_distance_factor(

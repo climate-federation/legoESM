@@ -22,3 +22,16 @@ def test_model_side_orbits_match_pmip4_table(tmp_path):
         # Half the last digit PMIP4 Table 1 prints (6, 3 and 2 decimals).
         assert abs(me - e) <= 5e-7 and abs(mo - obl) <= 5e-4
         assert abs(((mp - 180.0) % 360.0) - peri_m180) <= 5e-3
+
+
+def test_probe_kepler_reference_agrees_with_model_solver():
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.radiation.solar import (
+        OrbitalParameters, solar_declination,
+    )
+    days = np.linspace(1.0, 365.0, 400)
+    lam = np.deg2rad(mod.kepler_true_longitude_deg(days, 0.9, 282.9))
+    orbit = OrbitalParameters(0.9, 23.44, 282.9, solver="kepler")
+    np.testing.assert_allclose(
+        np.sin(np.asarray(solar_declination(jnp.asarray(days), orbit=orbit))),
+        np.sin(np.deg2rad(23.44)) * np.sin(lam), atol=1e-12)
