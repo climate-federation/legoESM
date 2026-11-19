@@ -464,6 +464,48 @@ def plot_results(output_dir):
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"enhancement_factors.{suffix}", dpi=180)
     plt.close(fig)
+    # This auxiliary descriptor was recorded before looking at the results.
+    # Only the final, formed stratification peak is interpreted: initially
+    # the lower column has constant N² and its argmax is not a unique depth.
+    final_peak = [float(data[stem]["max_n2_depth_m"][-1]) for stem, _, _ in cases]
+    final_mld = [r["final_mld_m"] for r in reports]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    labels = ["A", "B", "C .40", "C .53", "C .80"]
+    axes[0].plot(labels, final_mld, "o-", label="Density-threshold MLD")
+    axes[0].plot(labels, final_peak, "s-", label="Maximum-stratification depth")
+    axes[0].set(ylabel="Final diagnostic depth [m]", title="Two distinct depth definitions at 48 h")
+    axes[0].legend(fontsize=9)
+    axes[1].plot(
+        amplitudes, np.array(final_mld[2:]) - final_mld[1], "o-", label="Density-threshold MLD"
+    )
+    axes[1].plot(
+        amplitudes,
+        np.array(final_peak[2:]) - final_peak[1],
+        "s-",
+        label="Maximum-stratification depth",
+    )
+    axes[1].axhline(
+        cfg["depth_m"] / cfg["nlev"], color="gray", linestyle="--", label="One vertical layer"
+    )
+    axes[1].set(
+        xlabel="Wave amplitude [m]",
+        ylabel="Additional depth relative to B [m]",
+        title="Wave contribution, C minus B",
+    )
+    axes[1].legend(fontsize=9)
+    for ax in axes:
+        ax.grid(alpha=0.25)
+    fig.text(
+        0.08,
+        0.025,
+        "Maximum-N² depth follows the literature descriptor; initial plateau argmax is not interpreted.\n"
+        "All five strict heat-budget gates remain FAIL. These are response diagnostics, not LES skill scores.",
+        fontsize=9,
+    )
+    fig.tight_layout(rect=(0, 0.10, 1, 1))
+    for suffix in ("png", "pdf"):
+        fig.savefig(out / f"depth_definitions.{suffix}", dpi=180)
+    plt.close(fig)
     summary = dict(
         postprocessing_revision=_git("rev-parse", "HEAD"),
         config=cfg,
@@ -477,7 +519,9 @@ def plot_results(output_dir):
             "A_to_B": reports[1]["final_mld_m"] - reports[0]["final_mld_m"],
             "B_to_C": [r["final_mld_m"] - reports[1]["final_mld_m"] for r in reports[2:]],
             "A_to_C": [r["final_mld_m"] - reports[0]["final_mld_m"] for r in reports[2:]],
+            "max_n2_depth_B_to_C": [d - final_peak[1] for d in final_peak[2:]],
         },
+        max_n2_depth_note="Final formed peak only; initial lower-column N2 plateau has no unique maximum depth.",
         descriptive_posthoc_metrics={
             "note": "Final-profile descriptors of preregistered quantities; not new acceptance gates.",
             "peak_Kv_ratio_C_to_B": [
