@@ -507,6 +507,10 @@ def canopy_shortwave_rt(
 # from the reference only where that ratio is within 0.005 of 1 (sparse canopies:
 # per-case gaps in tests/land/unit/test_canopy_two_stream_sw.py); invariants
 # kept: 0 <= sunlit <= canopy absorbed, sunlit + shaded = canopy absorbed.
+# KNOWN DIFFERENCE (UV): upstream rescales the UV band to (1 - ALB_VIS) UV; here
+# to (1 - _RHO_UV) UV, the UV reflectance broadband_albedo reports to the
+# atmosphere, so absorbed SW = (1 - broadband_albedo) SW holds for this scheme
+# too.  Size 0.02 (ALB_VIS - 0.05) SW (~0-1 W m-2).
 # Not ported (separate upstream differences): its PFT-geometry Vcmax split (ours
 # kept), its longwave k_d, its per-site soil-albedo inversion.
 _TS_NIGHT_SZA = 89.0          # deg; beyond it the beam extinction is _TS_NIGHT_K
@@ -689,8 +693,10 @@ def canopy_shortwave_two_stream(
                  ALB_NIR, optics, w_sun, clip_width)
     UV_dir = UV * PAR_dir / (PAR_dir + PAR_diff + 1e-5)   # coeff-ok: /0 guard, as the Ryu scheme
     uv_half = _TS_UV_LEAF_SCATTERING / 2.0
+    # UV total = (1 - _RHO_UV) UV, the reflectance broadband_albedo exports for
+    # both schemes (upstream rescales UV with ALB_VIS; known difference).
     U = _ts_band(UV_dir, UV - UV_dir, SZA, L, uv_half, uv_half, _RHO_PAR_SOIL,
-                 ALB_VIS, optics, w_sun, clip_width)
+                 jnp.full_like(ALB_VIS, _RHO_UV), optics, w_sun, clip_width)
     zero = jnp.zeros_like(LAI)
     leafy = LAI > 0
     ASW_Sun = jnp.where(leafy, P[0] + N[0] + U[0], zero)

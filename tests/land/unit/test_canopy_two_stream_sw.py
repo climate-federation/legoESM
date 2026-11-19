@@ -27,6 +27,7 @@ KD_VAL = np.array([0.6500, 0.6640, 0.6815, 0.7020, 0.7240, 0.7485, 0.7735, 0.799
                    0.8475, 0.8675, 0.8805, 0.8775])
 SOIL = (0.15, 0.30)
 UV_SCAT = 0.05
+UV_RHO = 0.05   # UV reflectance the exported broadband albedo assumes (legoESM, not upstream)
 APAR = 4.56
 
 
@@ -112,7 +113,7 @@ def o_sw(case, pft):
     P = o_band(PARd, PARf, SZA, L, o[0], o[1], SOIL[0], AV, g, CI)
     N = o_band(NIRd, NIRf, SZA, L, o[2], o[3], SOIL[1], AN, g, CI)
     UVd = UV * PARd / (PARd + PARf + 1e-5)
-    U = o_band(UVd, UV - UVd, SZA, L, UV_SCAT / 2, UV_SCAT / 2, SOIL[0], AV, g, CI)
+    U = o_band(UVd, UV - UVd, SZA, L, UV_SCAT / 2, UV_SCAT / 2, SOIL[0], UV_RHO, g, CI)
     return dict(ASW_Sun=P[0] + N[0] + U[0], ASW_Sh=P[1] + N[1] + U[1], ASW_Soil=P[2] + N[2] + U[2],
                 APAR_Sun=P[0] * APAR, APAR_Sh=P[1] * APAR)
 
@@ -143,7 +144,7 @@ def _run(case, pft, width):
 
 def test_constants_canary():
     assert rt._TS_KD_CHI == tuple(KD_CHI) and rt._TS_KD_VAL == tuple(KD_VAL)
-    assert (rt._RHO_PAR_SOIL, rt._RHO_NIR_SOIL, rt._TS_UV_LEAF_SCATTERING, rt._APAR_CONVERSION) == (*SOIL, UV_SCAT, APAR)
+    assert (rt._RHO_PAR_SOIL, rt._RHO_NIR_SOIL, rt._TS_UV_LEAF_SCATTERING, rt._APAR_CONVERSION, rt._RHO_UV) == (*SOIL, UV_SCAT, APAR, UV_RHO)
     for k, row in PFT_LEAF_OPTICS_ROWS.items():
         assert PFT_LEAF_OPTICS[k] == row
 
@@ -269,9 +270,25 @@ def test_energy_closure(width):
     for case in CASES[:4] + [CASES[0][:6] + (0.0,) + CASES[0][7:]]:
         out = _run(case, "DBF", width)
         PARd, PARf, NIRd, NIRf, UV, *_, AV, AN = case
-        incoming_abs = (1 - AV) * (PARd + PARf + UV) + (1 - AN) * (NIRd + NIRf)
+        incoming_abs = (1 - AV) * (PARd + PARf) + (1 - UV_RHO) * UV + (1 - AN) * (NIRd + NIRf)
         tot = float(out.ASW_Sun[0] + out.ASW_Sh[0] + out.ASW_Soil[0])
         assert abs(tot - incoming_abs) < 1e-9 * incoming_abs
+
+
+@pytest.mark.parametrize("av", [0.03, 0.05, 0.12])
+def test_absorbed_matches_exported_albedo(av):
+    """Coupled consistency: absorbed SW = (1 - broadband_albedo) SW, the albedo
+    the land model exports, for an ALB_VIS on both sides of the UV reflectance."""
+    sw, cz = jnp.array([700.0]), jnp.array([0.8])
+    PARd, PARf, NIRd, NIRf, UV = rt.split_sw_components(sw, cz)
+    sza = jnp.degrees(jnp.arccos(cz))
+    out = rt.canopy_shortwave_two_stream(PARd, PARf, NIRd, NIRf, UV, sza, jnp.array([3.0]),
+                                         jnp.array([0.8]), jnp.array([av]), jnp.array([0.3]),
+                                         jnp.array([60.0]), jnp.array([40.0]), jnp.array([0.4]),
+                                         _optics("DBF"), 0.01)
+    tot = float(out.ASW_Sun[0] + out.ASW_Sh[0] + out.ASW_Soil[0])
+    exported = float(rt.broadband_albedo(jnp.array([av]), jnp.array([0.3]))[0])
+    assert abs(tot - (1.0 - exported) * float(sw[0])) < 1e-9 * float(sw[0])
 
 
 def test_mutant_fails_oracle(monkeypatch):
