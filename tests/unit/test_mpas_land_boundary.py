@@ -21,6 +21,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.test_util import check_grads
 
 from legoesm import constants
 import pytest
@@ -1167,3 +1168,369 @@ def test_spectral_multilayer_land_refused():
         dycore=DycoreConfig(dt=600.0, discretization="spectral"))
     with pytest.raises(ValueError, match="never stepped on the spectral lane"):
         cfg.validate_strict()
+
+
+# ---------------------------------------------------------------------------
+# Prescribed land (land_prescribed_channels): the hand-off the driver builds
+# from the climatology file -- T_sfc blended with the file's skin over the
+# land fraction, the file's latent heat + its water hfls / L_v(ts) and, for
+# "ts_fluxes", its sensible heat.  Fluxes positive UPWARD (into the air).
+# ---------------------------------------------------------------------------
+_TS_FILE = 300.0          # prescribed land skin [K] (air at 290 K)
+_SH_FILE = -25.0          # file sensible heat [W/m2], downward (ice-sheet-like)
+_LH_FILE = 60.0           # file latent heat [W/m2], upward
+
+
+def _presc_forcing(ncell, f_land, mode, T_sea=290.0):
+    """What the driver hands the turbulence in ``mode`` (see the run loop)."""
+    from legoesm.thermo import latent_heat_vaporization
+    fl = jnp.asarray(f_land)
+    ts = jnp.full((ncell,), _TS_FILE)
+    f = {"T_sfc": (1.0 - fl) * T_sea + fl * ts}
+    if mode in ("ts_lh", "ts_fluxes"):
+        f["lhflx_land"] = jnp.full((ncell,), _LH_FILE)
+        f["evap_land"] = f["lhflx_land"] / latent_heat_vaporization(ts)
+    if mode == "ts_fluxes":
+        f["shflx_land"] = jnp.full((ncell,), _SH_FILE)
+    return f
+
+
+def _mixed_f_land(ncell):
+    """Cells with f_land exactly 0 (ocean), exactly 1, and in between."""
+    f = np.linspace(0.0, 1.0, ncell)
+    f[::3] = 0.0
+    f[1::3] = 1.0
+    return jnp.asarray(f)
+
+
+@pytest.mark.parametrize("mode", ["ts_lh", "ts_fluxes"])
+def test_prescribed_land_flux_sign_magnitude_and_ocean_scope(
+        mpas_mesh, sigma_coord, state64, mode):
+    """The atmosphere receives the file's flux over the land fraction: the
+    surface flux is (1 - f) * bulk + f * file, with the bulk value of the
+    blended surface; on f = 1 cells it IS the file's (positive up, unscaled);
+    on f = 0 cells nothing changes against a run without the land keys."""
+    from legoesm.thermo import latent_heat_vaporization
+    ncell = state64.T.data.shape[0]
+    f_land = _mixed_f_land(ncell)
+    fl = np.asarray(f_land)
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    forc = _presc_forcing(ncell, f_land, mode)
+    got, _ = _fluxes(fn(state64, mpas_mesh, sigma_coord, forcing=forc))
+    bulk, _ = _fluxes(fn(state64, mpas_mesh, sigma_coord,
+                         forcing={"T_sfc": forc["T_sfc"]}))
+    ev_file = _LH_FILE / float(latent_heat_vaporization(jnp.asarray(_TS_FILE)))
+    np.testing.assert_allclose(got["lhflx_sfc"],
+                               (1 - fl) * bulk["lhflx_sfc"] + fl * _LH_FILE,
+                               rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(got["evap_sfc"],
+                               (1 - fl) * bulk["evap_sfc"] + fl * ev_file,
+                               rtol=1e-10, atol=1e-16)
+    want_sh = (fl * _SH_FILE + (1 - fl) * bulk["shflx_sfc"]
+               if mode == "ts_fluxes" else bulk["shflx_sfc"])
+    np.testing.assert_allclose(got["shflx_sfc"], want_sh, rtol=1e-10, atol=1e-10)
+    land1 = fl == 1.0
+    np.testing.assert_allclose(got["lhflx_sfc"][land1], _LH_FILE, rtol=1e-12)
+    if mode == "ts_fluxes":
+        np.testing.assert_allclose(got["shflx_sfc"][land1], _SH_FILE, rtol=1e-12)
+        # the bulk value there is far from the file's downward flux, so the
+        # check above discriminates (handed value is the file's, not bulk's)
+        assert (bulk["shflx_sfc"][land1] - _SH_FILE > 10.0).all()
+    ocean = fl == 0.0
+    for k in got:
+        np.testing.assert_allclose(got[k][ocean], bulk[k][ocean], rtol=1e-12,
+                                   atol=0, err_msg=k)
+    # non-vacuous: the land cells really differ from the bulk
+    assert np.abs(got["lhflx_sfc"][land1] - bulk["lhflx_sfc"][land1]).min() > 1.0
+
+
+@pytest.mark.parametrize("mode", ["ts_lh", "ts_fluxes"])
+def test_prescribed_land_column_water_closes_on_the_handed_flux(
+        mpas_mesh, sigma_coord, state64, mode):
+    """Water budget at the surface: the column vapour gain is exactly the
+    surface water flux the boundary layer was handed (round-off), and on
+    pure-land cells that flux is the file's hfls / L_v(ts) -- the latent
+    energy the file prescribes enters as that water, no more, no less."""
+    from legoesm.thermo import latent_heat_vaporization
+    ncell = state64.T.data.shape[0]
+    f_land = _mixed_f_land(ncell)
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    out = fn(state64, mpas_mesh, sigma_coord,
+             forcing=_presc_forcing(ncell, f_land, mode))
+    fl_, t = _fluxes(out)
+    p_s = jnp.asarray(state64.p_s.data).reshape(-1)
+    m = np.diff(np.asarray(sigma_coord.pressure_at_half(p_s)), axis=-1) / constants.g
+    dW = np.sum(m * np.asarray(t.tracer_tendencies["q_v"]), axis=1)
+    np.testing.assert_allclose(dW, fl_["evap_sfc"], rtol=1e-9, atol=1e-15)
+    land1 = np.asarray(f_land) == 1.0
+    L = float(latent_heat_vaporization(jnp.asarray(_TS_FILE)))
+    np.testing.assert_allclose(fl_["evap_sfc"][land1] * L, _LH_FILE, rtol=1e-12)
+
+
+@pytest.mark.parametrize("mode", ["ts_lh", "ts_fluxes"])
+def test_prescribed_land_gradient_flows(mpas_mesh, sigma_coord, state64, mode):
+    """With the feature on the boundary-layer heating is differentiable in
+    the prescribed skin temperature and the prescribed latent heat (finite,
+    non-zero), and matches finite differences."""
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.asarray(np.linspace(0.2, 0.9, ncell))
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    base = _presc_forcing(ncell, f_land, mode)
+
+    def loss(ts, lh):
+        f = dict(base, T_sfc=(1.0 - f_land) * 290.0 + f_land * ts,
+                 lhflx_land=lh)
+        out = fn(state64, mpas_mesh, sigma_coord, forcing=f)
+        out = out[0] if isinstance(out, tuple) else out
+        return (jnp.sum(out.dT_dt.data[:, -1] ** 2)
+                + jnp.sum(out.lhflx_sfc.data) * 1e-6)
+
+    args = (jnp.full((ncell,), _TS_FILE), jnp.full((ncell,), _LH_FILE))
+    g = jax.grad(loss, argnums=(0, 1))(*args)
+    for x in g:
+        x = np.asarray(x)
+        assert np.isfinite(x).all() and np.abs(x).max() > 0.0
+    check_grads(loss, args, order=1, modes=["rev"], rtol=1e-5)
+
+
+def test_prescribed_lh_only_refused_with_the_ocean_surface_key(
+        mpas_mesh, sigma_coord, state64):
+    """Latent-only land heat takes the land sensible heat from the bulk call;
+    with T_sfc_ocean that call is on the OCEAN surface -- refused."""
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.full((ncell,), 0.5)
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    f = dict(_presc_forcing(ncell, f_land, "ts_lh"),
+             T_sfc_ocean=jnp.full((ncell,), 290.0))
+    with pytest.raises(ValueError, match="T_sfc_ocean"):
+        fn(state64, mpas_mesh, sigma_coord, forcing=f)
+
+
+# ---------------------------------------------------------------------------
+# land_prescribed_ice_sheet_bulk_sensible: land-tile-law sensible heat on a
+# static share of the land fraction, the handed-over flux on the rest
+# ---------------------------------------------------------------------------
+_Z0_SNOW = 0.0024      # the config default (CLM5 snow roughness) [m]
+
+
+def _strict_errors(cfg):
+    try:
+        cfg.validate_strict()
+    except ValueError as e:
+        return [str(e)]
+    return []
+
+
+def _production_tc():
+    tc = TurbulenceConfig(scheme="louis")
+    return tc._replace(louis=tc.louis._replace(
+        surface=tc.louis.surface._replace(bulk_scheme="large_yeager_cesm")))
+
+
+def _land_law_tc(tc, z0):
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        land_tile_surface_cfg)
+    return tc._replace(louis=tc.louis._replace(
+        surface=land_tile_surface_cfg(tc.louis.surface, z0)))
+
+
+def _sheet_keys(w, z0=_Z0_SNOW):
+    return {"shflx_land_bulk_weight": w, "shflx_land_bulk_z0": jnp.asarray(z0)}
+
+
+def _bulk_weight_runs(mpas_mesh, sigma_coord, state64, w):
+    """presc: the file's flux on all land; ocean / land: the bulk sensible heat
+    of the run's (ocean) law and of the land-tile law at the snow roughness,
+    each from a latent-only ("ts_lh") run whose ONLY law it is; got: the
+    option."""
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.asarray(np.linspace(0.2, 1.0, ncell))
+    tc = _production_tc()
+    fn = _make_mpas_turbulence(tc, 300.0, f_land=f_land)
+    fn_land = _make_mpas_turbulence(_land_law_tc(tc, _Z0_SNOW), 300.0,
+                                    f_land=f_land)
+    f = _land_forcing(ncell, shflx=-25.0, lhflx=2.0)     # ice-sheet-like
+    run = lambda h, g: _fluxes(h(state64, mpas_mesh, sigma_coord, forcing=g))[0]  # noqa: E731
+    lh_only = {k: v for k, v in f.items() if k != "shflx_land"}   # "ts_lh"
+    return (run(fn, f), run(fn, lh_only), run(fn_land, lh_only),
+            run(fn, dict(f, **_sheet_keys(w))), np.asarray(f_land))
+
+
+def test_ice_sheet_bulk_share_is_the_land_tile_law(mpas_mesh, sigma_coord, state64):
+    """On the weighted share of the land fraction the sensible heat is the
+    fixed-roughness LAND-tile law against the skin temperature -- not the
+    run's ocean law -- and the file's flux on the rest; weight 0 is the file's
+    flux everywhere (only ice-sheet cells change).  Latent heat and water are
+    untouched.  Sign: positive upward throughout."""
+    ncell = state64.T.data.shape[0]
+    for w in (jnp.zeros((ncell,)), jnp.ones((ncell,)),
+              jnp.asarray(np.linspace(0.0, 1.0, ncell))):
+        presc, ocean, land, got, fl = _bulk_weight_runs(
+            mpas_mesh, sigma_coord, state64, w)
+        np.testing.assert_allclose(
+            got["shflx_sfc"],
+            presc["shflx_sfc"] + fl * np.asarray(w) * (land["shflx_sfc"] + 25.0),
+            rtol=1e-11, atol=1e-11)
+        for k in ("lhflx_sfc", "evap_sfc"):
+            np.testing.assert_allclose(got[k], presc[k], rtol=1e-12, atol=1e-14)
+    # w = linspace: not the ocean law's value on that share (non-vacuous).
+    wrong = presc["shflx_sfc"] + fl * np.asarray(w) * (ocean["shflx_sfc"] + 25.0)
+    assert np.abs(got["shflx_sfc"] - wrong)[-1] > 1.0      # f_land = w = 1
+    assert not np.allclose(land["shflx_sfc"], ocean["shflx_sfc"], rtol=1e-3)
+    # w = 0 cells (non-ice-sheet) are exactly the file's flux
+    w0 = np.asarray(jnp.asarray(np.linspace(0.0, 1.0, ncell))) == 0.0
+    np.testing.assert_allclose(got["shflx_sfc"][w0], presc["shflx_sfc"][w0],
+                               rtol=1e-12)
+
+
+def test_ice_sheet_land_law_exchanges_more_than_ocean_law_in_stable_air():
+    """A stable ice-sheet column near ERA5's state (air 1.4 K warmer than the
+    surface, 10 m/s, lowest level 52 m up as on the 32-level AMIP grid): the
+    land-tile law at the snow roughness carries at least twice the downward
+    sensible heat of the CESM open-ocean law (campaign branch, 2026-11-15:
+    -13.0 against -5.3 W/m2).  NOT true in stronger stability under the
+    linear Dyer stable function this law inherits (3.5 K, 6 m/s: -1.1 against
+    -1.8; the non-linear stable functions give -3.3 to -5.7 there)."""
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        land_tile_surface_cfg, surface_fluxes_at_lowest_level)
+    ocean_cfg = _production_tc().louis.surface
+    assert ocean_cfg.z_ref_model_level is True
+    z = jnp.asarray([52.0])
+    args = (jnp.asarray([10.0]), jnp.asarray([0.0]),
+            jnp.asarray([241.4]) - constants.g / constants.c_pd * z,
+            jnp.asarray([3.0e-4]), jnp.asarray([240.0]), jnp.asarray([2.5e-4]),
+            jnp.asarray([0.9]))
+    sh_o = float(surface_fluxes_at_lowest_level(*args, ocean_cfg, z)[2][0])
+    sh_l = float(surface_fluxes_at_lowest_level(
+        *args, land_tile_surface_cfg(ocean_cfg, _Z0_SNOW), z)[2][0])
+    assert sh_o < 0.0 and sh_l < 0.0
+    assert abs(sh_l) >= 2.0 * abs(sh_o), (sh_o, sh_l)
+
+
+def test_ice_sheet_bulk_weight_refused_when_inconsistent(
+        mpas_mesh, sigma_coord, state64):
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.full((ncell,), 0.5)
+    fn = _make_mpas_turbulence(_production_tc(), 300.0, f_land=f_land)
+    w = jnp.ones((ncell,))
+    f = _land_forcing(ncell, shflx=-25.0, lhflx=2.0)
+    lh_only = {k: v for k, v in f.items() if k != "shflx_land"}
+    for g in (dict(lh_only, **_sheet_keys(w)),
+              dict({"T_sfc": jnp.full((ncell,), 300.0)}, **_sheet_keys(w))):
+        with pytest.raises(ValueError, match="shflx_land_bulk_weight"):
+            fn(state64, mpas_mesh, sigma_coord, forcing=g)
+    # The weight without its roughness (no fallback to the ocean law), and
+    # the roughness without the weight.
+    for g in (dict(f, shflx_land_bulk_weight=w),
+              dict(f, shflx_land_bulk_z0=jnp.asarray(_Z0_SNOW)),
+              {"T_sfc": jnp.full((ncell,), 300.0),
+               "shflx_land_bulk_z0": jnp.asarray(_Z0_SNOW)}):
+        with pytest.raises(ValueError, match="shflx_land_bulk_z0"):
+            fn(state64, mpas_mesh, sigma_coord, forcing=g)
+
+
+def test_ice_sheet_bulk_weight_gradient(mpas_mesh, sigma_coord, state64):
+    """The surface sensible heat is differentiable in the handed flux and in
+    the skin temperature through the land-tile-law share (finite, non-zero)."""
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.full((ncell,), 1.0)
+    fn = _make_mpas_turbulence(_production_tc(), 300.0, f_land=f_land)
+    f = dict(_land_forcing(ncell, shflx=-25.0, lhflx=2.0),
+             **_sheet_keys(jnp.full((ncell,), 0.5)))
+
+    def loss(T_skin, sh):
+        out = fn(state64, mpas_mesh, sigma_coord,
+                 forcing=dict(f, T_sfc=T_skin, shflx_land=sh))
+        out = out[0] if isinstance(out, tuple) else out
+        return jnp.sum(out.shflx_sfc.data)
+
+    args = (jnp.full((ncell,), 300.0), jnp.full((ncell,), -25.0))
+    g = jax.grad(loss, argnums=(0, 1))(*args)
+    assert all(np.isfinite(np.asarray(x)).all() for x in g)
+    assert (np.asarray(g[0]) > 0.0).all()                 # warmer skin, more upward heat
+    np.testing.assert_allclose(np.asarray(g[1]), 0.5, rtol=1e-10)
+    check_grads(loss, args, order=1, modes=["rev"], rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# validate_strict: the prescribed-land selection
+# ---------------------------------------------------------------------------
+def _presc_cfg(**kw):
+    kw.setdefault("land_prescribed_channels", "ts_fluxes")
+    kw.setdefault("land_prescribed_flux_file", "land_fluxes.nc")
+    kw.setdefault("surfdata_path", "surfdata.nc")
+    return _mpas_cfg(**kw)
+
+
+def _presc_errs(cfg):
+    return "\n".join(e for e in _strict_errors(cfg) if "prescribed" in e)
+
+
+def test_prescribed_land_default_off_and_accepted_where_valid():
+    from legoesm.driver.config import (
+        ExperimentConfig, resolve_land_prescribed_ice_sheet_bulk_sensible)
+    d = ExperimentConfig()
+    assert d.land_prescribed_channels == "off"
+    assert d.land_prescribed_flux_file == ""
+    assert d.land_prescribed_ice_sheet_bulk_sensible is None
+    assert resolve_land_prescribed_ice_sheet_bulk_sensible(d) is False
+    assert d.land_prescribed_ice_sheet_z0_m == _Z0_SNOW
+    assert _presc_errs(_mpas_cfg()) == ""
+    for mode in ("ts", "ts_lh", "ts_fluxes"):
+        assert _presc_errs(_presc_cfg(land_prescribed_channels=mode)) == "", mode
+
+
+@pytest.mark.parametrize("kw, match", [
+    (dict(land_prescribed_channels="fluxes"), "expected one of"),
+    (dict(land_prescribed_flux_file=""), "needs land_prescribed_flux_file"),
+    (dict(land_prescribed_channels="off"), "silently unread"),
+    (dict(use_multilayer_land=True), "replaces the land model"),
+    (dict(slab_land_active=True), "replaces the land model"),
+    (dict(land_beta_soil=True), "no soil"),
+    (dict(topography="flat"), "needs a land fraction"),
+    (dict(turbulence="ysu"), "takes no injected surface flux"),
+    (dict(land_prescribed_ice_sheet_z0_m=0.0), "positive roughness"),
+    (dict(land_prescribed_ice_sheet_z0_m=float("nan")), "positive roughness"),
+    (dict(land_prescribed_channels="ts_lh",
+          land_prescribed_ice_sheet_bulk_sensible=True), "only land_prescribed"),
+    (dict(land_prescribed_channels="off", land_prescribed_flux_file="",
+          land_prescribed_ice_sheet_bulk_sensible=True), "needs prescribed"),
+])
+def test_prescribed_land_refused_where_invalid(kw, match):
+    assert match in _presc_errs(_presc_cfg(**kw))
+
+
+def test_prescribed_land_refused_off_the_mpas_lane():
+    from legoesm.driver.config import (
+        DycoreConfig, ExperimentConfig, GridConfig)
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=4, nlev=8),
+        dycore=DycoreConfig(dt=600.0), topography="elevation.nc",
+        land_prescribed_channels="ts", land_prescribed_flux_file="f.nc")
+    assert "MPAS lane only" in _presc_errs(cfg)
+
+
+def test_prescribed_land_ice_sheet_auto_resolution():
+    """Auto = on exactly with 'ts_fluxes' (the tested campaign setting); the
+    surfdata requirement only binds when it resolves on."""
+    from legoesm.driver.config import (
+        resolve_land_prescribed_ice_sheet_bulk_sensible as res)
+    assert res(_presc_cfg()) is True
+    assert res(_presc_cfg(land_prescribed_channels="ts_lh")) is False
+    assert res(_presc_cfg(land_prescribed_channels="ts")) is False
+    assert res(_presc_cfg(land_prescribed_ice_sheet_bulk_sensible=False)) is False
+    off = _presc_cfg(land_prescribed_ice_sheet_bulk_sensible=False,
+                     surfdata_path="")
+    assert _presc_errs(off) == ""
+
+
+def test_prescribed_land_ice_sheet_needs_the_surfdata_glacier_map():
+    """An empty surfdata_path is refused where the mask is built (setup),
+    before any surface data is touched."""
+    from legoesm.driver.model_driver import ModelDriver
+    with pytest.raises(ValueError, match="glacier map"):
+        ModelDriver._surfdata_glacier_mask(object(), "")

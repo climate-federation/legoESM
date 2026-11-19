@@ -6466,3 +6466,56 @@ def test_no_deck_can_set_ml_pipeline(tmp_path):
     deck.write_text("ml_pipeline: true\n")
     with pytest.raises((SystemExit, ValueError, KeyError)):
         load_yaml_config(str(deck), build_arg_parser())
+
+
+def test_land_prescribed_flags_flow_to_config():
+    """--land-prescribed-{channels,flux-file,ice-sheet-bulk-sensible,
+    ice-sheet-z0-m} round-trip; unset = off / auto / the config default."""
+    parser = build_arg_parser()
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.land_prescribed_channels == "off"
+    assert d.land_prescribed_flux_file == ""
+    assert d.land_prescribed_ice_sheet_bulk_sensible is None
+    assert d.land_prescribed_ice_sheet_z0_m == 0.0024
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-prescribed-channels", "ts_lh",
+        "--land-prescribed-flux-file", "/x/presc.nc",
+        "--no-land-prescribed-ice-sheet-bulk-sensible",
+        "--land-prescribed-ice-sheet-z0-m", "0.001"]), parser))
+    assert cfg.land_prescribed_channels == "ts_lh"
+    assert cfg.land_prescribed_flux_file == "/x/presc.nc"
+    assert cfg.land_prescribed_ice_sheet_bulk_sensible is False
+    assert cfg.land_prescribed_ice_sheet_z0_m == 0.001
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-prescribed-ice-sheet-bulk-sensible"]), parser))
+    assert on.land_prescribed_ice_sheet_bulk_sensible is True
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--land-prescribed-channels", "fluxes"])
+
+
+def test_prescribed_land_deck_selects_the_feature_explicitly():
+    """config/amip/amip_prescribed_land.yaml: the MPAS production atmosphere
+    with no land model and every prescribed-land choice named in the deck."""
+    import yaml
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    path = _repo_root() / "config" / "amip" / "amip_prescribed_land.yaml"
+    deck = yaml.safe_load(path.read_text())
+    for k in ("land_prescribed_channels", "land_prescribed_flux_file",
+              "land_prescribed_ice_sheet_bulk_sensible",
+              "land_prescribed_ice_sheet_z0_m", "use_multilayer_land",
+              "slab_land_active"):
+        assert k in deck, k
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(path), parser)
+    parser.set_defaults(**keys, _config_keys=frozenset(keys))
+    argv = _AMIP_DUMMY_PATHS + ["--land-mask-file", "/dummy/lsm.nc",
+                                "--surfdata", "/dummy/sd.nc"]
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(argv), parser, argv))
+    assert cfg.land_prescribed_channels == "ts_fluxes"
+    assert cfg.land_prescribed_ice_sheet_bulk_sensible is True
+    assert cfg.use_multilayer_land is False and cfg.slab_land_active is False
+    assert cfg.grid.grid_type in ("voronoi", "mpas")
+    cfg.validate_strict()

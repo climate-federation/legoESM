@@ -1253,13 +1253,19 @@ def _make_mpas_turbulence(
         # the land solved; a flux is what crosses the boundary.  Momentum and
         # the ocean/ice fraction keep the scheme's own bulk computation.
         _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
+        # Latent heat WITHOUT a sensible heat (prescribed land, channels
+        # "ts_lh"): the land fraction's sensible heat stays the bulk value
+        # against the blended T_sfc, which over land carries the prescribed
+        # skin temperature.
+        _lhf_only = (forcing is not None and _shf_land is None
+                     and forcing.get("lhflx_land") is not None)
         _surface_flux = None
         _ow_flux = None
-        if _shf_land is not None:
+        if _shf_land is not None or _lhf_only:
             if f_land is None:
                 raise ValueError(
-                    "forcing['shflx_land'] requires f_land in the turbulence "
-                    "factory (make_physics f_land=...).")
+                    "forcing['shflx_land'] / ['lhflx_land'] require f_land in "
+                    "the turbulence factory (make_physics f_land=...).")
             if not _accepts_surface_flux:
                 raise ValueError(
                     f"turbulence scheme {scheme_name!r} cannot be handed the "
@@ -1307,6 +1313,9 @@ def _make_mpas_turbulence(
                 _T_bulk, _q_bulk, rho[:, -1], step_config.surface,
                 z_full[:, -1] - z_half[:, -1],
             )
+            # The surface law as the bulk call saw it (before the blended
+            # water flux is pinned into ``step_config`` below).
+            _surface_cfg_bulk = step_config.surface
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
             if forcing.get("evap_land") is None:
@@ -1346,8 +1355,57 @@ def _make_mpas_turbulence(
                          + _fl * _ev_land + _hb_ev)
             step_config = step_config._replace(surface=step_config.surface._replace(
                 prescribed_evap_kg_m2_s=_ev_blend))
-            _sh_land = jnp.where(
-                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0)
+            if _lhf_only and _T_oc is not None:
+                raise ValueError(
+                    "forcing['lhflx_land'] without ['shflx_land'] takes the "
+                    "land sensible heat from the bulk call, which "
+                    "forcing['T_sfc_ocean'] moves onto the ocean surface; the "
+                    "land share would get the ocean's sensible heat.")
+            _sh_land = (_sh if _lhf_only else jnp.where(
+                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0))
+            # ``forcing["shflx_land_bulk_weight"]`` (static, [0, 1] per cell)
+            # + ``forcing["shflx_land_bulk_z0"]`` (static roughness [m];
+            # prescribed land, land_prescribed_ice_sheet_bulk_sensible): on
+            # that share of the land fraction the sensible heat is the
+            # fixed-roughness LAND-tile Monin-Obukhov law at that roughness
+            # against the land-blended ``T_sfc`` (the prescribed skin over
+            # land) instead of the handed-over flux -- not ``_sh``, which is
+            # the run's non-land (open-ocean) law and gives a stable ice sheet
+            # a small fraction of the exchange (campaign 90-day test: -3 W/m2
+            # with the air 3.5 K warmer than the surface, ERA5 about -16).
+            # Sign: positive UPWARD (out of the surface), both terms.  No
+            # fallback to the ocean law: the weight without its roughness
+            # raises.
+            _w_sheet = forcing.get("shflx_land_bulk_weight")
+            if _w_sheet is not None:
+                if _lhf_only:
+                    raise ValueError(
+                        "forcing['shflx_land_bulk_weight'] replaces a handed-"
+                        "over land sensible heat (forcing['shflx_land']); "
+                        "without one it would be ignored.")
+                _z0_sheet = forcing.get("shflx_land_bulk_z0")
+                if _z0_sheet is None:
+                    raise ValueError(
+                        "forcing['shflx_land_bulk_weight'] needs "
+                        "forcing['shflx_land_bulk_z0'] (roughness length [m] "
+                        "of the land-tile law used on that share).")
+                from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                    land_tile_surface_cfg,
+                )
+                _w_sheet = jnp.asarray(_w_sheet, dtype=q_sfc.dtype).reshape(nCells)
+                _sh_sheet = surface_fluxes_at_lowest_level(
+                    u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
+                    T_sfc, q_sfc, rho[:, -1],
+                    land_tile_surface_cfg(
+                        _surface_cfg_bulk,
+                        jnp.asarray(_z0_sheet, dtype=q_sfc.dtype)),
+                    z_full[:, -1] - z_half[:, -1],
+                )[2]
+                _sh_land = _w_sheet * _sh_sheet + (1.0 - _w_sheet) * _sh_land
+            elif forcing.get("shflx_land_bulk_z0") is not None:
+                raise ValueError(
+                    "forcing['shflx_land_bulk_z0'] is only consumed together "
+                    "with forcing['shflx_land_bulk_weight'].")
             _surface_flux = (
                 _tx, _ty,
                 _w_bulk * _sh + _fl * _sh_land + _hb_sh,
@@ -1404,6 +1462,14 @@ def _make_mpas_turbulence(
                 "forcing['T_sfc_ocean'] (non-land surface anchor) is only "
                 "consumed together with the land's own heat fluxes "
                 "(forcing['shflx_land']); without them it would be ignored.")
+        elif forcing is not None and (
+                forcing.get("shflx_land_bulk_weight") is not None
+                or forcing.get("shflx_land_bulk_z0") is not None):
+            raise ValueError(
+                "forcing['shflx_land_bulk_weight'] / ['shflx_land_bulk_z0'] "
+                "are only consumed together with the land's own sensible "
+                "heat (forcing['shflx_land']); without it they would be "
+                "ignored.")
         elif forcing is not None and forcing.get("taumag_land") is not None:
             raise ValueError(
                 "forcing['taumag_land'] (land-model surface stress) is only "

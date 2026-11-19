@@ -1398,6 +1398,40 @@ class ExperimentConfig(NamedTuple):
     # run on the compiled pipeline, which production refuses.  Not a run_amip
     # argument, so no deck can set it.
     ml_pipeline: bool = False
+    # PRESCRIBED LAND SURFACE (atmosphere-only AMIP, MPAS lane): instead of a
+    # land model, a monthly climatology file (legoesm.forcing.prescribed_land;
+    # built by scripts/data/build_era5_prescribed_land.py) hands the
+    # atmosphere the land surface through the multilayer land's own hand-off
+    # channels, blended over the land fraction.  Explicit selection, OFF by
+    # default; it REPLACES the land tile (use_multilayer_land and
+    # slab_land_active must be off) -- it is not what "no land model" means.
+    #   "off"       (default): no prescribed land; every path unchanged.
+    #   "ts":        land skin temperature only; the atmosphere's bulk law
+    #                computes the land fluxes against it (land humidity from
+    #                the static land_beta).
+    #   "ts_lh":     skin temperature + the file's LATENT heat (and its water,
+    #                hfls / L_v(ts)); sensible heat from the bulk law against
+    #                the prescribed skin.
+    #   "ts_fluxes": skin temperature + the file's sensible AND latent heat
+    #                (the campaign configuration).
+    # The file's albedo, when it carries one, replaces the land albedo in
+    # every mode.  Fluxes positive UPWARD (into the atmosphere).
+    land_prescribed_channels: str = "off"
+    # The climatology file; required (and only read) when the mode is not
+    # "off".  A missing file or variable is an error at setup.
+    land_prescribed_flux_file: str = ""
+    # "ts_fluxes" only: over glacier-dominant columns (glacier_mask of
+    # surfdata_path: Antarctica, Greenland) the land SENSIBLE heat is the
+    # fixed-roughness land-tile Monin-Obukhov law against the prescribed skin
+    # instead of the file's flux (whose downward ~-25 W/m2 over the ice sheets
+    # is taken from the lowest air whatever its temperature).  None (auto) =
+    # on exactly when the mode is "ts_fluxes", the configuration the campaign
+    # tested it in; True outside "ts_fluxes" is refused.  Static mask.
+    land_prescribed_ice_sheet_bulk_sensible: bool | None = None
+    # Roughness length [m] of that land-tile law: 0.0024 m = CLM5 snow/glacier
+    # momentum roughness (zsno; CLM5 Tech Note sect. 2.5.1).  Read only when
+    # the ice-sheet option resolves on.
+    land_prescribed_ice_sheet_z0_m: float = 0.0024
     # Land-tile call interval [s]; 0.0 (default) advances the land every
     # host step (legacy).  A positive value calls the tile every
     # round(land_update_seconds/dt) steps with the atmosphere forcing
@@ -2394,6 +2428,7 @@ class ExperimentConfig(NamedTuple):
                     "land_fraction_source='zero' with a land tile "
                     "(use_multilayer_land / slab_land_active): land physics "
                     "on no land")
+        errors.extend(prescribed_land_errors(self))
         # Owner decision 2026-08-16: conserving form always, and any
         # NON-conserving form must ANNOUNCE itself when invoked. These are
         # warnings, not errors — the legacy/exception paths stay selectable
@@ -6115,6 +6150,86 @@ def checkpoint_radiation_cadence_error(cfg) -> str | None:
             f"rad_update_steps={rus}: the held radiation fluxes "
             "are not checkpointed, so every checkpoint must sit on a "
             "radiation boundary")
+
+
+# land_prescribed_channels: the explicit prescribed-land selection ("off" =
+# none) and which of the file's channels each mode hands to the atmosphere.
+LAND_PRESCRIBED_CHANNELS = ("off", "ts", "ts_lh", "ts_fluxes")
+
+
+def resolve_land_prescribed_ice_sheet_bulk_sensible(cfg) -> bool:
+    """The resolved tri-state ``land_prescribed_ice_sheet_bulk_sensible``:
+    None (auto) -> on exactly when the prescribed land hands over the file's
+    sensible heat (channels 'ts_fluxes'); True/False as given."""
+    if cfg.land_prescribed_ice_sheet_bulk_sensible is None:
+        return cfg.land_prescribed_channels == "ts_fluxes"
+    return bool(cfg.land_prescribed_ice_sheet_bulk_sensible)
+
+
+def prescribed_land_errors(cfg) -> list[str]:
+    """validate_strict errors of the prescribed-land selection ([] = valid).
+    Static, path-free predicates only (as for the other surface-data paths):
+    the climatology file and the ice-sheet option's surfdata_path are checked
+    when the driver reads them."""
+    mode = cfg.land_prescribed_channels
+    errs: list[str] = []
+    if mode not in LAND_PRESCRIBED_CHANNELS:
+        return [f"land_prescribed_channels={mode!r}; expected one of "
+                f"{LAND_PRESCRIBED_CHANNELS}"]
+    sheet = resolve_land_prescribed_ice_sheet_bulk_sensible(cfg)
+    if not (math.isfinite(cfg.land_prescribed_ice_sheet_z0_m)
+            and cfg.land_prescribed_ice_sheet_z0_m > 0.0):
+        errs.append(
+            "land_prescribed_ice_sheet_z0_m must be a positive roughness "
+            f"length [m]; got {cfg.land_prescribed_ice_sheet_z0_m!r}")
+    if mode == "off":
+        if cfg.land_prescribed_flux_file:
+            errs.append(
+                "land_prescribed_flux_file is set but land_prescribed_channels"
+                "='off': the file would be silently unread; select a mode")
+        if sheet:
+            errs.append(
+                "land_prescribed_ice_sheet_bulk_sensible=True needs prescribed "
+                "land (land_prescribed_channels='ts_fluxes')")
+        return errs
+    if not cfg.land_prescribed_flux_file:
+        errs.append(f"land_prescribed_channels={mode!r} needs "
+                    "land_prescribed_flux_file")
+    if (normalize_grid_type(cfg.grid.grid_type) != "mpas"
+            or cfg.dycore.discretization != "mpas"
+            or bool(cfg.dycore.column_lane)):
+        errs.append(
+            "prescribed land runs on the MPAS lane only (grid mpas, "
+            f"discretization mpas); got grid_type={cfg.grid.grid_type!r}, "
+            f"discretization={cfg.dycore.discretization!r}, "
+            f"column_lane={cfg.dycore.column_lane!r}")
+    if cfg.use_multilayer_land or cfg.slab_land_active:
+        errs.append(
+            "prescribed land replaces the land model: set "
+            "use_multilayer_land=False and slab_land_active=False")
+    if cfg.land_beta_soil:
+        errs.append("prescribed land with land_beta_soil=True: there is no "
+                    "soil to derive beta_soil from")
+    if not cfg.land_mask_path and cfg.topography in ("", "flat"):
+        errs.append("prescribed land needs a land fraction to blend over "
+                    "(land_mask_path or a topography file)")
+    if mode in ("ts_lh", "ts_fluxes"):
+        from legoesm.atmosphere.physics.turbulence.integration import (
+            schemes_accepting_surface_flux,
+        )
+        if cfg.turbulence not in schemes_accepting_surface_flux():
+            errs.append(
+                f"land_prescribed_channels={mode!r} hands the boundary layer "
+                f"the file's fluxes, but turbulence={cfg.turbulence!r} takes "
+                f"no injected surface flux ({schemes_accepting_surface_flux()} "
+                "do)")
+    if sheet:
+        if mode != "ts_fluxes":
+            errs.append(
+                "land_prescribed_ice_sheet_bulk_sensible=True replaces the "
+                "FILE's sensible heat, which only land_prescribed_channels="
+                f"'ts_fluxes' hands over (got {mode!r})")
+    return errs
 
 
 def ocean_flux_surface_eligibility(cfg) -> tuple[bool, str]:
