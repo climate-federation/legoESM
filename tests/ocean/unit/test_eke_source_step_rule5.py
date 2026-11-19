@@ -166,3 +166,10 @@ def test_driver_uses_eke_floor():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     src = inspect.getsource(LatLonCGridOceanModel._eke_3d_step)
     assert "eke_floor(E, eke_cfg)" in src and "jnp.maximum(E, eke_cfg.e_min)" not in src
+
+
+def test_zero_energy_dissipates_nothing_at_the_hard_limit():
+    """Veros's c_int = c_eps*sqrt(max(0, E))/eke_len is exactly 0 at E = 0 (no +1e-30 offset)."""
+    _, diss = E.eke_apply_local_source(jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(_L0), HARD, DT,
+                                       signed_source=jnp.asarray(1e-9), return_dissipation=True)
+    assert float(diss) == 0.0
