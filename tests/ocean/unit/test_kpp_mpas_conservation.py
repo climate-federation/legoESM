@@ -273,7 +273,10 @@ class TestConvectiveSurfaceFluxStillRedistributes:
         self, mesh, z_coord, partial_setup, kpp_cfg,
     ):
         state, pc_coord = partial_setup
-        fn = make_kpp_physics_mpas(kpp_cfg)
+        # The cvmix default puts this weakly forced column's BL in the top cell,
+        # where the non-local term is zero; legacy keeps it deeper.
+        fn = make_kpp_physics_mpas(kpp_cfg._replace(
+            kpp=kpp_cfg.kpp._replace(bld_structure="legacy")))
 
         # No-flux baseline.
         _, dT_dt_ref, _ = fn(state, mesh, pc_coord, None)

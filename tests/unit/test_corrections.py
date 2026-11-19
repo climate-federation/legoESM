@@ -513,7 +513,7 @@ class TestKPP:
         u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
         B_f_stable = -1e-7 * jnp.ones((6, 4, 4))
         B_f_unstable = 1e-7 * jnp.ones((6, 4, 4))
-        cfg = KPPConfig()
+        cfg = KPPConfig(bld_structure="legacy")
         out_stable = kpp_vertical_mixing(u, v, T, S, rho, eta, z_coord, J, cfg, B_f=B_f_stable)
         out_unstable = kpp_vertical_mixing(u, v, T, S, rho, eta, z_coord, J, cfg, B_f=B_f_unstable)
         # Tendencies should differ when nonlocal is active
@@ -567,7 +567,7 @@ class TestKPP:
         from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
         from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
         u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
-        cfg = KPPConfig()
+        cfg = KPPConfig(bld_structure="legacy")
 
         # Small negative B_f (barely stable): should NOT be classified as unstable
         B_f_neg = -1e-12 * jnp.ones((6, 4, 4))
@@ -590,7 +590,7 @@ class TestKPP:
         from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
         from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
         u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
-        cfg = KPPConfig()
+        cfg = KPPConfig(bld_structure="legacy")
         B_f = 1e-7 * jnp.ones((6, 4, 4))
 
         # Without Q_sfc_T (diagnosed proxy)
@@ -611,7 +611,7 @@ class TestKPP:
         from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
         from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
         u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
-        cfg = KPPConfig()
+        cfg = KPPConfig(bld_structure="legacy")
         B_f = 1e-7 * jnp.ones((6, 4, 4))
 
         # Without h_bl_prev (uses max_depth estimate)
