@@ -1744,15 +1744,18 @@ def _step_multilayer_land_impl(
                 # Semi-implicit surface (SimpleSEB): the flux that is consistent
                 # with the capped skin of the tentative node + soil solve on the
                 # start-of-step state (as the two-leaf Picard callback), applied
-                # explicitly below like the canopy's.  The Robin correction
-                # G - G_surface reaches the column only, not the atmosphere's
-                # SH/LE -- the same as the snow-free SimpleSEB path's Robin term
-                # in its final solve (unbooked there too).
+                # explicitly below like the canopy's.
                 _G_node, _ = snow_node_robin_ground_flux(
                     G_surface, _lam, T_surface,
                     T_snow0, snow, T_soil, theta, grid, config.hydraulics,
                     config.thermal, dt, snow_cover=f_snow,
                     empty_cover_swe=config.land_albedo.snow_depth_crit)
+                # Semi-implicit correction -> sensible heat to the air (#2542,
+                # same booking and sign as the snow-free arm below): the column
+                # receives _G_node = G_surface - R explicitly, so R is exactly
+                # the flux withheld from it (no sub-step mean needed).  R > 0 =
+                # less INTO the column, more UP; SH positive up.
+                shflx = shflx + (G_surface - _G_node)
             T_snow_new, T_soil_new = solve_snow_node_soil_thermal(
                 _T_start, snow_new, T_soil, richards_out.theta_new, grid,
                 config.hydraulics, config.thermal,
