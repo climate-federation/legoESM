@@ -45,7 +45,9 @@ fraction is zero in the coupled driver, so lake terms are 0.
                  emission minus that broadband emission (band Planck vs
                  sigma T^4): eps_eff L_down - lw_net - eps_eff sigma T_rad^4
   E_land_charged emission the land charges: f_land eps_l sigma T_start^4 x
-                 DT_LAND per land call (T_start = skin at the call's start)
+                 DT_LAND per land call (T_start = the land's own skin before
+                 the call, eps_l = the emissivity the call exports, DT_LAND =
+                 the rounded step count x DT)
   stale = E_land_charged - E_land_atm, band = A_band_land; the atmosphere
   and the land disagree on land emission by stale - band.
 """
@@ -318,23 +320,29 @@ def main(argv=None) -> int:
             return out
         mp.setattr(su, "handback_surface_boundary", _rec_boundary)
 
+    from legoesm.land.multilayer_land import land_skin_temperature
+    dt_land = max(1, int(round(args.land_update_s / lp.DT))) * lp.DT
+
     def land_calls():
-        """Book the emission of every land call since the last look: the
-        call starts from the skin the previous call left."""
+        """Book the emission of a land call made since the last look: from
+        the land's own skin before it (sampled the step before) at the
+        emissivity it exported (the boundary built after it)."""
         cur = getattr(atm, "_land_T_skin_last", None)
+        if "T_pre" not in land_seen:     # the skin set at the run's start
+            land_seen["obj"] = cur
+            return
         if cur is not None and cur is not land_seen.get("obj"):
-            # the first call starts from the skin the step-0 boundary saw
-            T0 = (land_seen["T_ic"] if land_seen.get("obj") is None
-                  else _np(land_seen["obj"]).reshape(-1))
             F["E_land_charged"] += I(
                 f_land * hb_rec["eps_land"] * constants.sigma_sb
-                * T0 ** 4) * args.land_update_s
+                * land_seen["T_pre"] ** 4) * dt_land
             land_seen["n"] = land_seen.get("n", 0) + 1
             land_seen["obj"] = cur
 
     def eterm_step(sd):
-        land_seen.setdefault("T_ic", hb_rec["T_land"])
         land_calls()
+        # the skin the next land call (after this step) starts from
+        land_seen["T_pre"] = _np(land_skin_temperature(
+            atm._land_ml_state, atm.physics.land_ml_cfg)).reshape(-1)
         if n_steps[0] % args.rad_update_steps == 0:
             solve.update(hb_rec, lw_down=_np(sd[SL["lw_down_sfc"]]).reshape(-1),
                          lw_net=_np(sd[SL["lw_net_sfc"]]).reshape(-1))
@@ -412,7 +420,9 @@ def main(argv=None) -> int:
              + I(prev["O"].ice_lake_freshwater_flux) * win)
     status = d.run(segment_callback=sample)
     if args.energy_terms:
-        land_calls()   # the call after the last step
+        land_calls()   # the call after the last step (its exported
+        # emissivity: the last boundary seen; a run of whole windows ends on
+        # a step whose boundary was built after the previous call)
         land_area_t = float(np.sum(f_land * area)) * n_steps[0] * lp.DT
         stale = F["E_land_charged"] - F["E_land_atm"]
         print(f"ETERM land_calls {land_seen.get('n', 0)} steps {n_steps[0]} "

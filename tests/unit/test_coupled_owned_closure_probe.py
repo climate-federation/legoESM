@@ -162,19 +162,28 @@ def test_land_emission_terms_split():
     np.testing.assert_allclose(band, [0.0], atol=1e-9)
 
 
+def _eterms(capsys, land_update_s):
+    assert probe.main(["--days", "0.0625", "--land-update-s",
+                       str(land_update_s), "--energy-terms"]) == 0
+    return {ln.split()[1]: ln.split() for ln in capsys.readouterr().out
+            .splitlines() if ln.startswith("ETERM")}
+
+
+@pytest.mark.parametrize("land_update_s,k", [(300, 1), (900, 3)])
+def test_energy_terms_book_every_land_call(capsys, land_update_s, k):
+    """Every land call is booked once: calls == steps / K (18 steps)."""
+    lines = _eterms(capsys, land_update_s)
+    assert int(lines["land_calls"][2]) == int(lines["land_calls"][4]) // k
+
+
 @pytest.mark.xfail(strict=True, reason=(
-    "instrument noise floor, measured 2026-11-19: stale = 1.5e18 J = 1.09 W/m2 "
-    "land mean at this config (0.0625 d, K=1, radiation every step), 0.017 W/m2 "
-    "over 2 days on the ERA5 real-land case; it should vanish here, cause open"))
+    "measured 2026-11-19 before the land-own-skin booking: stale = 1.09 W/m2 "
+    "land mean here, 0.017 W/m2 over 2 days on the ERA5 real-land case; it "
+    "should vanish here and does not -- cause open, not a noise floor"))
 def test_stale_emission_term_vanishes_when_land_and_radiation_step_together(
         capsys):
     """Land called and radiation solved every step: the land charges the skin
-    the radiation was given, so the stale term is roundoff; every land call
-    is booked."""
-    assert probe.main(["--days", "0.0625", "--land-update-s", "300",
-                       "--energy-terms"]) == 0
-    lines = {ln.split()[1]: ln.split() for ln in capsys.readouterr().out
-             .splitlines() if ln.startswith("ETERM")}
-    assert lines["land_calls"][2] == lines["land_calls"][4]   # calls == steps
+    the radiation was given, so the stale term is roundoff."""
+    lines = _eterms(capsys, 300)
     e_atm = float(lines["E_land_atm"][2])
     assert abs(float(lines["stale"][2])) < 1e-12 * e_atm, lines["stale"]
