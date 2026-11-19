@@ -29,6 +29,54 @@ def test_prescribed_s_l2_spectrum_matches_analytic_stokes():
     np.testing.assert_array_equal(zero, np.zeros((1, 8, 4)))
 
 
+def test_wave_spectrum_to_ocean_kpp_gradient(tiny_config, tiny_state):
+    """Differentiate the real spectral diagnostic -> SCM forcing -> KPP path."""
+    import jax.numpy as jnp
+    from legoesm.ocean.eos import linear_eos
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.physics.vertical_mixing.config import KPPConfig, VerticalMixingConfig
+    from legoesm.ocean.scm import OceanColumnModel
+    from legoesm.ocean.scm_forcing import OceanSCMForcing
+    from legoesm.wave.indices import stokes_drift
+    from legoesm.wave.model import prepare_env
+
+    jax.config.update("jax_enable_x64", True)
+    depth = tiny_state.depth.astype(jnp.float64)
+    env = prepare_env(tiny_config, depth)
+    spectrum = tiny_state.spectra.astype(jnp.float64)
+
+    def objective(scale):
+        magnitude = stokes_drift(spectrum * scale**2, env, depth)["stokes_magnitude"]
+        cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(scheme="kpp", kpp=KPPConfig(enable_langmuir=True)),
+            convection=OceanConvectionConfig(scheme="none"),
+        )
+        column = OceanColumnModel.create(
+            nlev=24,
+            dt=60.0,
+            H_max=120.0,
+            dz_surface=5.0,
+            dz_deep=5.0,
+            T_profile=jnp.concatenate([jnp.full(8, 12.0), jnp.linspace(12.0, 10.0, 16)]),
+            physics_config=cfg,
+            eos_fn=linear_eos,
+            forcing=OceanSCMForcing(
+                tau_x=lambda t: 0.036,
+                tau_y=lambda t: 0.0,
+                q_net=lambda t: -5.0,
+                u_stokes=lambda t: jnp.mean(magnitude),
+            ),
+        )
+        tendency, _ = column._tend_fn(column.state, None, 0.0)
+        return jnp.mean(tendency.K_v)
+
+    derivative = jax.jit(jax.grad(objective))(0.53)
+    fd = (objective(0.530001) - objective(0.529999)) / 0.000002
+    assert jnp.isfinite(derivative) and derivative > 0.0
+    np.testing.assert_allclose(derivative, fd, rtol=1e-4, atol=1e-10)
+
+
 def test_source_manifest_rejects_mixed_or_modified_modules(tmp_path):
     from types import SimpleNamespace
 

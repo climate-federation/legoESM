@@ -465,6 +465,7 @@ def plot_results(output_dir):
         fig.savefig(out / f"enhancement_factors.{suffix}", dpi=180)
     plt.close(fig)
     summary = dict(
+        postprocessing_revision=_git("rev-parse", "HEAD"),
         config=cfg,
         cases=reports,
         interpretation="Prescribed-wave column trends; no numerical LES/global skill claim.",
@@ -476,6 +477,22 @@ def plot_results(output_dir):
             "A_to_B": reports[1]["final_mld_m"] - reports[0]["final_mld_m"],
             "B_to_C": [r["final_mld_m"] - reports[1]["final_mld_m"] for r in reports[2:]],
             "A_to_C": [r["final_mld_m"] - reports[0]["final_mld_m"] for r in reports[2:]],
+        },
+        descriptive_posthoc_metrics={
+            "note": "Final-profile descriptors of preregistered quantities; not new acceptance gates.",
+            "peak_Kv_ratio_C_to_B": [
+                float(data[stem]["K_v"][-1].max() / data["B_0"]["K_v"][-1].max())
+                for stem, _, _ in cases[2:]
+            ],
+            "max_abs_T_difference_C_to_B_K": [
+                float(np.max(np.abs(data[stem]["T"][-1] - data["B_0"]["T"][-1])))
+                for stem, _, _ in cases[2:]
+            ],
+        },
+        input_artifact_sha256={
+            f"{stem}.{suffix}": hashlib.sha256((out / f"{stem}.{suffix}").read_bytes()).hexdigest()
+            for stem, _, _ in cases
+            for suffix in ("json", "npz", "csv")
         },
     )
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -545,11 +562,19 @@ def run_suite(output_dir, upstream_root, *, plot=True):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", action="store_true")
+    parser.add_argument(
+        "--plot-existing",
+        action="store_true",
+        help="regenerate plots/summary from stored, stamped histories",
+    )
     parser.add_argument("--label", choices=["A", "B", "C"])
     parser.add_argument("--amplitude", type=float, default=0.0)
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
+    if args.plot_existing:
+        result = plot_results(args.output_dir)
+        sys.exit(0 if result["budget_pass"] else 1)
     if not args.worker:
         parser.error("use validate_ocean_scm.py --case wave_langmuir")
     try:
