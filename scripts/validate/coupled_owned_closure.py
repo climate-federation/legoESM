@@ -36,6 +36,18 @@ ocean), minus the same at the start (zero by the window-0 rule), + pend_land
 (rain samples the land has not consumed + held land evaporation the land
 debited but the atmosphere has not yet received; zero at the start).  Lake
 fraction is zero in the coupled driver, so lake terms are 0.
+
+``--energy-terms`` adds the land longwave-emission terms [J] (report only):
+  E_land_atm     land emission the atmosphere's radiation assumed:
+                 f_land eps_l sigma T_l^4 at the solve's boundary, held
+                 between solves like the solve
+  A_band_land    the land's share (by broadband emission) of the solve's
+                 emission minus that broadband emission (band Planck vs
+                 sigma T^4): eps_eff L_down - lw_net - eps_eff sigma T_rad^4
+  E_land_charged emission the land charges: f_land eps_l sigma T_start^4 x
+                 DT_LAND per land call (T_start = skin at the call's start)
+  stale = E_land_charged - E_land_atm, band = A_band_land; the atmosphere
+  and the land disagree on land emission by stale - band.
 """
 from __future__ import annotations
 
@@ -70,6 +82,18 @@ def budget_rows(s0: dict, s1: dict, f: dict) -> dict:
         "ocean_water_in": ocean_in,
         "pending": pending,
     }
+
+
+def land_emission_terms(f_land, eps_land, T_land, eps_eff, T_rad, lw_down,
+                        lw_net, sigma):
+    """Per-cell [W/m2] land emission the radiation solve assumed with its
+    boundary (broadband), and the land's share of the solve's emission minus
+    that broadband emission.  Pure."""
+    emit_bb = eps_eff * sigma * T_rad ** 4
+    e_land = f_land * eps_land * sigma * T_land ** 4
+    share = np.where(emit_bb > 0.0, e_land / np.where(emit_bb > 0.0, emit_bb,
+                                                      1.0), 0.0)
+    return e_land, share * (eps_eff * lw_down - lw_net - emit_bb)
 
 
 def land_in_flight(f_land, area, win_sum_precip, held_evap, n, K, dt):
@@ -132,6 +156,10 @@ def main(argv=None) -> int:
     ap.add_argument("--topography", default="")
     ap.add_argument("--trace", action="store_true",
                     help="print the land row per exchange")
+    ap.add_argument("--rad-update-steps", type=int, default=1,
+                    help="radiation solve cadence in steps (1 = the gate)")
+    ap.add_argument("--energy-terms", action="store_true",
+                    help="report the land LW emission terms")
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
     if args.ic == "era5" and not args.ic_path:
@@ -193,7 +221,8 @@ def main(argv=None) -> int:
         use_multilayer_land=True, multilayer_n_layers=4,
         multilayer_soil_depth=2.0, land_beta_soil=True,
         land_surface_scheme="simple_seb", land_params_refresh=False,
-        land_update_seconds=args.land_update_s, **extra)
+        land_update_seconds=args.land_update_s,
+        rad_update_steps=args.rad_update_steps, **extra)
     cc = PRESETS["aquaplanet"]()._replace(
         coupling_dt=win, atm_owns_surface=True, f_land_mode="analytical")
     d = CoupledESMDriver(cfg, cc, output_dir=tempfile.mkdtemp())
@@ -226,6 +255,7 @@ def main(argv=None) -> int:
                                     land_cfg=land_cfg,
                                     land_update_s=args.land_update_s,
                                     extra=extra, ncells=n, window=win,
+                                    rad_update_steps=args.rad_update_steps,
                                     dt=lp.DT, f_lake_max=float(f_lake.max()),
                                     f_land_mean=float(f_land.mean()))))
     print(f"INSTR area_sum/4piR2-1 = "
@@ -273,6 +303,45 @@ def main(argv=None) -> int:
         "q_flux", "q_freeze", "ocean_heat_extr", "pend_H", "pend_fw",
         "R_state", "pend_land", "boot_excess")}
     I = lambda x: float(np.sum(_np(x).reshape(-1) * area))  # noqa: E731
+    F.update(E_land_atm=0.0, A_band_land=0.0, E_land_charged=0.0)
+    hb_rec, solve, land_seen = {}, {}, {}
+    if args.energy_terms:
+        import legoesm.forcing.surface_utils as su
+        _hsb = su.handback_surface_boundary
+
+        def _rec_boundary(f_l, f_i, f_k, T_l, sst, eps, eps_l, *a, **kw):
+            out = _hsb(f_l, f_i, f_k, T_l, sst, eps, eps_l, *a, **kw)
+            hb_rec.update(f_land=_np(f_l).reshape(-1), T_land=_np(T_l)
+                          .reshape(-1), eps_land=_np(eps_l).reshape(-1),
+                          eps_eff=_np(out["sfc_emissivity"]).reshape(-1),
+                          T_rad=_np(out["T_sfc_rad"]).reshape(-1))
+            return out
+        mp.setattr(su, "handback_surface_boundary", _rec_boundary)
+
+    def land_calls():
+        """Book the emission of every land call since the last look: the
+        call starts from the skin the previous call left."""
+        cur = atm._land_T_skin_last
+        prev = land_seen.get("obj")
+        if prev is not None and cur is not prev:
+            F["E_land_charged"] += I(
+                f_land * hb_rec["eps_land"] * constants.sigma_sb
+                * _np(prev).reshape(-1) ** 4) * args.land_update_s
+            land_seen["n"] = land_seen.get("n", 0) + 1
+        land_seen["obj"] = cur
+
+    def eterm_step(sd):
+        land_calls()
+        if n_steps[0] % args.rad_update_steps == 0:
+            solve.update(hb_rec, lw_down=_np(sd[SL["lw_down_sfc"]]).reshape(-1),
+                         lw_net=_np(sd[SL["lw_net_sfc"]]).reshape(-1))
+        e_land, band = land_emission_terms(
+            solve["f_land"], solve["eps_land"], solve["T_land"],
+            solve["eps_eff"], solve["T_rad"], solve["lw_down"],
+            solve["lw_net"], constants.sigma_sb)
+        F["E_land_atm"] += I(e_land) * lp.DT
+        F["A_band_land"] += I(band) * lp.DT
+
     model, orig = atm.model, atm.model.step
     n_steps = [0]
 
@@ -293,6 +362,8 @@ def main(argv=None) -> int:
         L = atm._land_ml_state   # land's own runoff rate x f_land, per step
         F["R_state"] += float(np.sum(f_land * _np(
             L.runoff_surface + L.runoff_subsurface).reshape(-1) * area)) * lp.DT
+        if args.energy_terms:
+            eterm_step(sd)
         n_steps[0] += 1
         return out
 
@@ -337,6 +408,18 @@ def main(argv=None) -> int:
     pend0 = (I(prev["H"].evap) * win
              + I(prev["O"].ice_lake_freshwater_flux) * win)
     status = d.run(segment_callback=sample)
+    if args.energy_terms:
+        land_calls()   # the call after the last step
+        land_area_t = float(np.sum(f_land * area)) * n_steps[0] * lp.DT
+        stale = F["E_land_charged"] - F["E_land_atm"]
+        print(f"ETERM land_calls {land_seen.get('n', 0)} steps {n_steps[0]} "
+              f"K {args.land_update_s / lp.DT:g} rad {args.rad_update_steps}")
+        for kk, v in (("E_land_atm", F["E_land_atm"]),
+                      ("E_land_charged", F["E_land_charged"]),
+                      ("stale", stale), ("band", F["A_band_land"]),
+                      ("stale_minus_band", stale - F["A_band_land"])):
+            print(f"ETERM {kk:16s} {v: .6e} J  {v / land_area_t: .4e} W/m2 "
+                  "(land mean)")
     a1 = arrays()
     s1 = stores(a1, k)
     sp1 = species_totals()
