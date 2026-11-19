@@ -127,3 +127,64 @@ def test_land_bootstrap_call_creates_no_water(tmp_path):
     assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
     # the system row adds the atmosphere's own ~1e-9-relative residual
     assert abs(rows["system_water"] - rows["atm_water"]) < 1.0e3, rows
+
+
+def test_land_emission_terms_split():
+    """Broadband land emission at the solve's boundary, and the land's share
+    of the solve's emission above the broadband one: all of it on a pure-land
+    cell, the emission-weighted share on a mixed cell, none when the solve
+    emits exactly the broadband value."""
+    from legoesm import constants
+    sb = constants.sigma_sb
+    eps, T, Ld = 0.95, 290.0, 330.0
+    e_bb = eps * sb * T ** 4
+    # pure land, solve emits 0.05 W/m2 more than broadband
+    lw_net = eps * Ld - (e_bb + 0.05)
+    e_land, band = probe.land_emission_terms(
+        np.array([1.0]), eps, np.array([T]), np.array([eps]), np.array([T]),
+        np.array([Ld]), np.array([lw_net]), sb)
+    np.testing.assert_allclose(e_land, [e_bb], rtol=1e-14)
+    np.testing.assert_allclose(band, [0.05], rtol=1e-9)
+    # half land (300 K) / half water (280 K, eps 0.97): land's share
+    fl, Tl, ew, Tw = 0.5, 300.0, 0.97, 280.0
+    emit = fl * eps * sb * Tl ** 4 + (1 - fl) * ew * sb * Tw ** 4
+    eps_eff = fl * eps + (1 - fl) * ew
+    T_rad = (emit / (sb * eps_eff)) ** 0.25
+    lw_net = eps_eff * Ld - (emit + 0.1)
+    e_land, band = probe.land_emission_terms(
+        np.array([fl]), eps, np.array([Tl]), np.array([eps_eff]),
+        np.array([T_rad]), np.array([Ld]), np.array([lw_net]), sb)
+    np.testing.assert_allclose(band, [0.1 * fl * eps * sb * Tl ** 4 / emit],
+                               rtol=1e-9)
+    _, band = probe.land_emission_terms(
+        np.array([fl]), eps, np.array([Tl]), np.array([eps_eff]),
+        np.array([T_rad]), np.array([Ld]), np.array([eps_eff * Ld - emit]), sb)
+    np.testing.assert_allclose(band, [0.0], atol=1e-9)
+
+
+def _eterms(capsys, land_update_s):
+    assert probe.main(["--days", "0.0625", "--land-update-s",
+                       str(land_update_s), "--energy-terms"]) == 0
+    return {ln.split()[1]: ln.split() for ln in capsys.readouterr().out
+            .splitlines() if ln.startswith("ETERM")}
+
+
+@pytest.mark.parametrize("land_update_s,k", [(300, 1), (900, 3)])
+def test_energy_terms_book_every_land_call(capsys, land_update_s, k):
+    """Every land call is booked once: calls == steps / K (18 steps)."""
+    lines = _eterms(capsys, land_update_s)
+    assert int(lines["land_calls"][2]) == int(lines["land_calls"][4]) // k
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "measured 2026-11-19 with the land-own-skin booking (7d6549a545): stale "
+    "= +5.17 W/m2 land mean here, -0.052 W/m2 over 2 days on the ERA5 "
+    "real-land case (K=1, rad=1); it should vanish here and does not -- "
+    "cause open, not a noise floor"))
+def test_stale_emission_term_vanishes_when_land_and_radiation_step_together(
+        capsys):
+    """Land called and radiation solved every step: the land charges the skin
+    the radiation was given, so the stale term is roundoff."""
+    lines = _eterms(capsys, 300)
+    e_atm = float(lines["E_land_atm"][2])
+    assert abs(float(lines["stale"][2])) < 1e-12 * e_atm, lines["stale"]
