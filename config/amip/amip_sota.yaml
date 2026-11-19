@@ -112,6 +112,7 @@ land_stomatal_beta: false
 surface_bulk_scheme: coare3   # OCEAN tile (land tile uses MOST via #715)
 surface_gustiness_zi: 300.0
 surface_tiled: true
+surface_stability_scheme: beljaars_holtslag1991   # stable MOST branch; was dyer1974 (#2574)
 surface_z0_land: 0.1
 
 # --- Forcing selectors (observed SST/SIC + full CMIP6 external forcing) --------
