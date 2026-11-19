@@ -444,13 +444,35 @@ def test_land_books_its_share_of_the_solve_emission_excess():
     np.testing.assert_allclose(t["ow_lw_net"][1], 0.0, atol=1e-10)
     np.testing.assert_allclose(land_abs[1], lw_net[1], rtol=1e-12)
     # mixed: the land's share of delta by broadband emission
-    share = (a["f_land"] * el * SB * a["T_land"] ** 4) / (eps * SB * T ** 4)
+    emit = eps * SB * T ** 4
+    # a cell with no broadband emission (all ice, window 0) books no share
+    share = jnp.where(emit > 0, a["f_land"] * el * SB * a["T_land"] ** 4
+                      / jnp.where(emit > 0, emit, 1.0), 0.0)
     land_abs0 = a["f_land"] * el * (L - SB * a["T_land"] ** 4)
     np.testing.assert_allclose(land_abs - land_abs0, -share * delta,
                                rtol=1e-10, atol=1e-13)
     t0 = _split(a, S, L, S * (1.0 - b["sfc_albedo"]),
                 eps * L - eps * SB * T ** 4)
     np.testing.assert_allclose(t0["land_lw_down_corr"], 0.0, atol=1e-10)
+
+
+def test_land_share_of_the_emission_excess_is_differentiable():
+    """Finite, non-zero first derivatives of the land correction through the
+    emission-weight guard (skin T and the solved net LW)."""
+    a = _bnd_inputs()
+    b = handback_surface_boundary(**a)
+    L = jnp.array([300.0, 260.0, 220.0, 350.0])
+    lw_net = b["sfc_emissivity"] * L - b["sfc_emissivity"] * SB * b[
+        "T_sfc_rad"] ** 4 - 0.05
+
+    def corr(T_land, lw_net):
+        S = jnp.zeros(4)
+        return _split(dict(a, T_land=T_land), S, L, S, lw_net)[
+            "land_lw_down_corr"].sum()
+    check_grads(corr, (a["T_land"], lw_net), order=1, modes=["rev"])
+    g = jax.grad(corr, argnums=(0, 1))(a["T_land"], lw_net)
+    assert all(bool(jnp.all(jnp.isfinite(x))) for x in g)
+    assert float(jnp.abs(g[1]).sum()) > 0.0
 
 
 def test_land_call_takes_the_longwave_correction(tmp_path, monkeypatch):
