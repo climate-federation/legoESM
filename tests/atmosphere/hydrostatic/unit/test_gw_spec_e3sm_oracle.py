@@ -394,11 +394,12 @@ def test_beres_heating_switches_smooth_at_default(fx, name):
 
 
 def _surface_half_launch(j, s):
-    """Column 3 (no heating) given heating s*heating_ramp_width at its lowest
-    level only: half the scans find a one-level range (launch interface
-    nlev - 1), half find none (interface nlev), so the blend's second branch
-    launches at the surface interface with no region below it."""
-    nd = j["netdt"].at[3].set(0.0).at[3, -1].set(s * _HW)
+    """Column 3 heated (1e-4 K/s) at every level except the second lowest, at
+    s*heating_ramp_width.  With no z_heat_max window (set by the test), half
+    the scans end the run there (launch interface nlev - 1) and half run to
+    the model top unterminated (no launch, interface nlev): the blend's
+    second branch launches at the surface interface, with no region below."""
+    nd = j["netdt"].at[3].set(1.0e-4).at[3, -2].set(s * _HW)
     return dict(j, netdt=nd)
 
 
@@ -412,9 +413,9 @@ def test_beres_launch_blend_closes_column_energy(fx, case):
     cfg = _config(m["ours"], hard=False)._replace(source="convective")
     if case == "interior":
         col, j = _C0, _set_netdt(_CUT, _HW)(_inputs(z, "l36"), jnp.asarray(0.5))
-    else:   # gate open at any depth, so the one-level range launches
+    else:   # no window and the gate open at any depth, so the shallow range launches
         col, j = 3, _surface_half_launch(_inputs(z, "l36"), jnp.asarray(0.5))
-        cfg = cfg._replace(beres=cfg.beres._replace(hdepth_min_km=0.0))
+        cfg = cfg._replace(beres=cfg.beres._replace(hdepth_min_km=0.0, z_heat_max=1.0e7))
     assert cfg.do_energy_conservation
     o = _run(j, cfg, m["dt"], table)
     dt, u, v = m["dt"], j["u"], j["v"]
