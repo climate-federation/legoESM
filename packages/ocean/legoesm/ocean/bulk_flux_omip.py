@@ -1203,7 +1203,11 @@ def nemo_orca2_si3_coupled_step(
             snow=atmosphere.snow.T,
             qsr=bulk.qsr.T,
             emp=bulk.emp.T,
-            qns_oce=bulk.qns.T,
+            # sbcblk.F90:1003-1007 (nn_ice=2): SI3 receives the open-ocean
+            # non-solar flux before the precipitation/evaporation heat terms
+            # added to qns by blk_oce_2 (:990-999).  Keep the source's
+            # left-associated floating-point evaluation order.
+            qns_oce=R(R(bulk.qlwn + bulk.sensible) + bulk.latent).T,
             qsr_oce=bulk.qsr.T,
             ssu_m=ssu_full,
             ssv_m=ssv_full,

@@ -185,8 +185,10 @@ def _fixture(monkeypatch):
 
     def open_water(*_args, **_kwargs):
         mark("bulk")
+        si3_qns_parts = {"qlwn": 2.0, "sensible": 3.0, "latent": 4.0, "qns": 99.0}
         return bulk.NemoBlkOceResult(*(
-            one_yx if name in ("rhoa", "qsr", "qns", "emp", "utau", "vtau", "taum")
+            jnp.full_like(one_yx, si3_qns_parts[name]) if name in si3_qns_parts
+            else one_yx if name in ("rhoa", "qsr", "emp", "utau", "vtau", "taum")
             else zero_yx
             for name in bulk.NemoBlkOceResult._fields
         ))
@@ -195,6 +197,7 @@ def _fixture(monkeypatch):
 
     def core(entry, live, _card):
         mark("ice")
+        assert np.array_equal(np.asarray(live.surface.qns_oce), np.full(xy, 9.0))
         out = fluxes._replace(qsr=fluxes.qsr + 1.0)
         next_ice = entry._replace(
             ice=entry.ice._replace(
@@ -324,6 +327,7 @@ def real_coupled_fixture():
         aevp=ice_card.aevp._replace(dt_s=ice_dt),
         redistribution=ice_card.redistribution._replace(rdt_ice=ice_dt),
         correction=ice_card.correction._replace(rdt_ice=ice_dt),
+        surface=ice_card.surface._replace(rDt_ice=ice_dt),
         ln_drgice_imp=True,
     )
 
@@ -558,6 +562,14 @@ def test_c2_d225_allows_only_dry_signed_zero_and_reports_kinds_1_2():
     assert report["status"] == "PASS_C2_0_ULP_WET"
     assert report["counts"][3]["dry_zero_sign_different"] == 1
     assert report["report_only_counts"][1]["wet_different"] == 1
+    fields = {
+        (row["kind"], row["kt"], row["field"]): row
+        for row in report["field_counts"]
+    }
+    assert fields[(3, 1, "field")]["dry_zero_sign_different"] == 1
+    assert fields[(3, 1, "field")]["dry_max_abs_difference"] == 0.0
+    assert fields[(1, 1, "field")]["wet_different"] == 1
+    assert fields[(1, 1, "field")]["wet_max_abs_difference"] == np.nextafter(0.0, 1.0)
 
 
 def test_c2_d225_wet_plant_names_first_kind_field_cell_and_step():

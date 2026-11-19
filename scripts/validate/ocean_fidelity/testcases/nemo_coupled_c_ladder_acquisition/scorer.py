@@ -302,6 +302,7 @@ def _d225_field(got, want, wet_mask: np.ndarray) -> dict:
     dry_sign_zero = sign_zero & ~wet
     dry_bad = different & ~wet & ~sign_zero
     bad = wet_bad | dry_bad
+    absolute = np.abs(got - want)
     first = None
     if np.any(bad):
         owned_index = tuple(int(i) for i in np.argwhere(bad)[0])
@@ -322,6 +323,8 @@ def _d225_field(got, want, wet_mask: np.ndarray) -> dict:
         "wet_different": int(np.count_nonzero(wet_bad)),
         "dry_zero_sign_different": int(np.count_nonzero(dry_sign_zero)),
         "dry_other_different": int(np.count_nonzero(dry_bad)),
+        "wet_max_abs_difference": float(np.max(absolute[wet_bad], initial=0.0)),
+        "dry_max_abs_difference": float(np.max(absolute[dry_bad], initial=0.0)),
         "first": first,
     }
 
@@ -332,6 +335,12 @@ def _merge_d225_counts(total: dict, row: dict) -> None:
         "dry_zero_sign_different", "dry_other_different",
     ):
         total[name] = total.get(name, 0) + row[name]
+
+
+def _merge_d225_field_counts(total: dict, row: dict) -> None:
+    _merge_d225_counts(total, row)
+    for name in ("wet_max_abs_difference", "dry_max_abs_difference"):
+        total[name] = max(total.get(name, 0.0), row[name])
 
 
 def score_c2_observations(
@@ -360,6 +369,7 @@ def score_c2_observations(
 
     counts: dict[int, dict] = {}
     report_only: dict[int, dict] = {}
+    field_counts: dict[tuple[int, int, str], dict] = {}
     first_failure = None
     boundary_order = (1, 2, 3, 15, 16, 19, 20, 34, 4, 5, 6)
     order_index = {kind: index for index, kind in enumerate(boundary_order)}
@@ -395,6 +405,9 @@ def score_c2_observations(
             mask_name = f"{staggering}_3d" if got.ndim >= 3 and field in {"ts", "uu", "vv"} else staggering
             row = _d225_field(got, want_fields[field], mask_names[mask_name] > 0.5)
             _merge_d225_counts(kind_total, row)
+            _merge_d225_field_counts(
+                field_counts.setdefault((kind, kt, field), {}), row
+            )
             if (
                 kind in C2_VERDICT_KINDS
                 and first_failure is None
@@ -420,6 +433,15 @@ def score_c2_observations(
         "report_only_kinds": list(C2_REPORT_ONLY_KINDS),
         "counts": counts,
         "report_only_counts": report_only,
+        "field_counts": [
+            {"kind": kind, "kt": kt, "field": field, **row}
+            for (kind, kt, field), row in sorted(
+                field_counts.items(),
+                key=lambda item: (
+                    item[0][1], order_index[item[0][0]], item[0][2]
+                ),
+            )
+        ],
         "first_failure": first_failure,
     }
 
@@ -503,6 +525,7 @@ def _c2_cold_start(run: Path):
     )
     from legoesm.ocean import bulk_flux_omip as bulk
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_orca2_zps_card
     from legoesm.ocean.forcing.nemo_surface import NemoSurfaceMeans
     from legoesm.ocean.freshwater import NemoRunoffSurface
     from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -522,16 +545,18 @@ def _c2_cold_start(run: Path):
     controls = r340.build_real_composed_inputs(
         k0, run, r340_score.DEFAULT_CORE_MANIFEST, r340_score.DEFAULT_ICE_COVER
     )
+    coupled_ocean = build_orca2_zps_card(run, initial_state="si3_iceistate")
     receipt = json.loads((run / "C_DECK_RECEIPT.json").read_text())
     master = Path(receipt["sas_ice_reference"]).parents[1]
     master_run = master / "record_100step"
     ice_card = o17_score.card_for(master_run)._replace(ln_drgice_imp=True)
-    ice_dt = 2.0 * float(k0.ocean.dt_s)
+    ice_dt = 2.0 * float(coupled_ocean.dt_s)
     ice_card = ice_card._replace(
         state=ice_card.state._replace(nn_fsbc=2, rDt_ice=ice_dt),
         aevp=ice_card.aevp._replace(dt_s=ice_dt),
         redistribution=ice_card.redistribution._replace(rdt_ice=ice_dt),
         correction=ice_card.correction._replace(rdt_ice=ice_dt),
+        surface=ice_card.surface._replace(rDt_ice=ice_dt),
     )
     index = o17_score.record_paths(master_run / "o17_master_records")
     records = o17_score.load_step(index[(1, 0)], 1, 0)
@@ -540,7 +565,7 @@ def _c2_cold_start(run: Path):
         stress=o17.stress._replace(tmask_k1=o17.aevp_forcing.tmask_t)
     )
 
-    ocean_state = k0.ocean.recipe.initial_state
+    ocean_state = coupled_ocean.recipe.initial_state
     h = int(ice_card.state.nn_hls)
     bundle = _load_orca2_sas_ice_bundle_inputs()
     if bundle is None:
@@ -599,10 +624,7 @@ def _c2_cold_start(run: Path):
     ice_entry = SI3O17StepState(
         ice, SI3CGridAEVPState(ice.u_ice, ice.v_ice, zero2, zero2, zero2)
     )
-    eta = o2.ssh_kmm[h:-h, h:-h].T
-    ocean_state = ocean_state._replace(eta=ocean_state.eta.replace(data=eta))
-
-    config = k0.ocean.recipe.model_config
+    config = coupled_ocean.recipe.model_config
     vmix = config.physics.vertical_mixing
     physics = config.physics._replace(
         vertical_mixing=vmix._replace(tke=vmix.tke._replace(nemo_mxlice=2))
@@ -610,10 +632,10 @@ def _c2_cold_start(run: Path):
     config = config._replace(
         physics=physics, implicit_ice_ocean_top_drag=True
     )
-    recipe = k0.ocean.recipe._replace(
+    recipe = coupled_ocean.recipe._replace(
         model_config=config, initial_state=ocean_state
     )
-    ocean_card = k0.ocean._replace(recipe=recipe)
+    ocean_card = coupled_ocean._replace(recipe=recipe)
     model = LatLonCGridOceanModel(
         recipe.grid, recipe.z_coord, config, iwm_forcing=recipe.iwm_forcing
     )
@@ -656,10 +678,13 @@ def _c2_cold_start(run: Path):
         jnp.zeros((full[0] - 2 * h, full[1] - 2 * h)), None,
     )
     zero_yx = jnp.zeros(owned, dtype=jnp.float64)
+    prior_sst = ocean_state.T.data[..., 0]
+    prior_sss = ocean_state.S.data[..., 0]
+    prior_e3t = recipe.z_coord.nemo_e3t_0[..., 0]
     carry = bulk.nemo_orca2_si3_cold_start(
         ocean=ocean_state, ice=ice_entry,
         means=NemoSurfaceMeans(
-            zero_yx, zero_yx, zero_yx, zero_yx, zero_yx, zero_yx,
+            zero_yx, zero_yx, prior_sst, prior_sss, zero_yx, prior_e3t,
             jnp.ones_like(zero_yx),
         ),
         stress=stress, fluxes=fluxes,
