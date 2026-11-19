@@ -1655,14 +1655,22 @@ LAND_INTENSIVE_FORCING = ("T_lowest", "q_lowest", "u_lowest", "v_lowest",
                           "z_lowest")
 
 
+# Of those, the ones a bootstrap call scales: water only.  Downward SW/LW stay
+# at the samples' mean rate over the whole first interval (user 2026-11-19):
+# scaling them by n/k ran the land ~DT_LAND nearly dark, up to ~30 K too cold
+# at sunlit cells after 1 h.  The radiation booked is then off by the first
+# sample(s) standing in for the interval's later ones, once per start.
+LAND_BOOT_SCALED_FORCING = ("precip_total", "precip_snow")
+
+
 def land_bootstrap_forcing(a2s, n_samples, k):
     """A bootstrap land call's forcing: it advances DT_LAND = k host steps on
-    ``n_samples`` (< k) samples, so the amounts it books are scaled by
-    n_samples / k and each sample is booked once (the next call books the
-    later ones)."""
+    ``n_samples`` (< k) samples, so the rain and snow it books are scaled by
+    n_samples / k and each sample's water is booked once (the next call books
+    the later ones).  Downward radiation is passed as is."""
     f = n_samples / k
     return a2s._replace(**{name: getattr(a2s, name) * f
-                           for name in LAND_EXTENSIVE_FORCING})
+                           for name in LAND_BOOT_SCALED_FORCING})
 # Per-run scalars among those keys (every other key is a per-cell field).
 _WIN_SCALAR_KEYS = ("land_win_n", "cpl_win_n", "cpl_win_k")
 # Coupling window (P5b): per-step sums of the fluxes the coupler consumes as
@@ -14883,7 +14891,7 @@ class ModelDriver:
             # then holds it.  Its precipitation fell for one step only, so the
             # call site scales that sample's rain and snow by 1/K.  A DT boot
             # step debited one step and was held K: (K-1)*DT*E created.
-            # Its downward radiation is scaled the same way (energy).
+            # Its downward radiation is NOT scaled (land_bootstrap_forcing).
             _land_step_boot_fn = _land_step_fn
             if _land_split is not None:
                 from jax.experimental import multihost_utils as _mhu
@@ -16537,9 +16545,9 @@ class ModelDriver:
                     _a2s_mean = _a2s_mean._replace(
                         cos_zenith=_land_cz_wsum / _land_w_sum)
                     if _land_a2s_n < _LAND_K:
-                        # bootstrap: the samples' rain, snow and downward
-                        # radiation spread over DT_LAND, so each sample is
-                        # booked once (the next call books the later ones)
+                        # bootstrap: the samples' rain and snow spread over
+                        # DT_LAND, so each sample is booked once (the next
+                        # call books the later ones); radiation as is
                         _a2s_mean = land_bootstrap_forcing(
                             _a2s_mean, _land_a2s_n, _LAND_K)
                     _land_fn = (_land_step_fn if _land_a2s_n >= _LAND_K
