@@ -625,12 +625,17 @@ def test_nosupply_gradient_through_the_supply_ramp(fix):
 # against the oracle (arm L0), the no-supply closure held at the source
 # ("first_guess") so only the switches differ: (dT_dt, dq_v_dt, M_u, surface
 # precipitation) per fixture column, measured (x64, CPU) by switch_gaps().
+# Re-measured for #2281 part 3 (downdraught, CUFLXN and post-fixer switches
+# smoothed): L32 column 12 heating gap 0.070 -> 0.97 -- its whole
+# precipitation flux (1.3e-9 kg m-2 s-1) lies inside the flux window
+# (0.01 x 2.27e-7), so the smooth positive part suppresses it; KNOWN
+# DIFFERENCE, kept (vote 2 Q6, 2026-11-19).  Other changes <= 3.5e-6.
 _SWITCH_GAP = {
     "L32": (
-        [1.155408049270849e-13, 3.1927949260996204e-13, 0.0011130719528878582, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.6723091836596204e-16, 4.198668525995863e-05, 0.0, 0.07037075107906984, 4.049624669431736e-12, 1.7179434496712484e-12, 3.1143115208075958e-12],
-        [1.7172552867238978e-14, 1.163127531864268e-13, 0.0010985278742337056, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.3674537767162897e-13, 4.689802829971999e-05, 0.0, 0.013070933253375527, 4.1134943022347197e-13, 5.056799592526267e-14, 1.101205278761102e-13],
-        [1.4365594076618328e-14, 1.340269644731608e-13, 0.0011884180672240485, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.470103297401741e-15, 5.127344626210799e-05, 0.0, 0.0, 4.239592100981241e-13, 4.719359133175054e-14, 6.594308439320736e-14],
-        [3.975688633527109e-15, 1.3571569211051792e-13, 0.0010549443125622503, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.344751639650026e-14, 5.1273446260288524e-05, 0.0, 1.6870632593248073e-25, 4.206675081458067e-13, 3.8886484681088704e-14, 0.0],
+        [1.155408049270849e-13, 3.1927949260996204e-13, 0.0011130719528878582, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.4927806518186066e-06, 4.19866852170346e-05, 0.0, 0.9734300882432095, 4.049624669431736e-12, 7.90455117410403e-08, 3.1143115208075958e-12],
+        [1.7172552867238978e-14, 1.163127531864268e-13, 0.0010985278742337056, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.911942492452407e-06, 4.689802829971999e-05, 0.0, 0.18080538629161375, 4.1134943022347197e-13, 1.080461875279029e-07, 1.101205278761102e-13],
+        [1.4365594076618328e-14, 1.340269644731608e-13, 0.0011884180672240485, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.470103297401741e-15, 5.127344626193498e-05, 0.0, 0.0, 4.239592100981241e-13, 4.719359133175054e-14, 6.594308439320736e-14],
+        [3.975688633527109e-15, 1.3605024188564655e-13, 0.0010549443125622503, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 6.621867336070376e-06, 5.127344625960713e-05, 0.0, 1.6870632593248073e-25, 4.2082974011963847e-13, 3.8886484681088704e-14, 0.0],
     ),
     "L137": (
         [1.661612930475599e-11, 0.0, 0.0, 0.0, 0.0],
@@ -639,10 +644,10 @@ _SWITCH_GAP = {
         [0.0, 0.0, 0.0, 0.0, 0.0],
     ),
     "STRESS": (
-        [1.722849855972394e-13, 0.012694584019058777, 8.875598874530435e-13],
-        [4.41178551951255e-14, 0.014005735274384364, 1.990163333564079e-13],
+        [9.013757623200391e-10, 0.012694584019058777, 8.875598874530435e-13],
+        [2.1411477903198715e-10, 0.014005735274384364, 1.990163333564079e-13],
         [1.2783764286336544e-13, 0.015307609436948059, 2.0573300977747443e-13],
-        [9.120569143950305e-16, 0.015307609436951737, 1.541579152082197e-13],
+        [9.120569143950305e-16, 0.015307609436952462, 1.5953942788457935e-13],
     ),
 }
 
@@ -706,8 +711,9 @@ def _probe(name):
 # window and the test variable is that perturbation.  mode "inject" (sites no
 # input perturbation reached: floors and caps real columns rarely hit; vote
 # 2026-11-14): the column (optionally perturbed by ``direction``/``value``)
-# with only this site's switched operand moved to mid-window at s = 1 (offset
-# under stop_gradient; s spans the window in units of 1) and each ``partners``
+# with only this site's switched operand replaced by mid-window + (s - 1) w
+# (value and derivative a function of s only; vote 3 2026-11-19), s = 1, and
+# each ``partners``
 # site held mid-window, so the switch reaches the output.
 _SITE_POINTS = {
     ('* (1.0 - sm.lt(kget(pvervel, njkt5), ZOMEGA_RES, _W_OMEGA)))', 'lt'):
@@ -816,14 +822,10 @@ _SITE_POINTS = {
         ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
     ('en = -sm.pos(-en, _W_DDEN)     # bounded: en <= 0 (entrainment only)', 'pos'):
         ('L32', 10, 'inject', None, 0.0, 0.01, ()),
-    ('en = sm.max(en, -ZDD_DET_MAX * kget(pmfu, jk) - (mfd1 - zdmfde), _W_DDEN)', 'max'):
-        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
     ('en = sm.max(en, ZDD_MIX_MIN * mfd1, _W_DDEN)', 'max'):
-        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
     ('frz = sm.le(tk, rtt, _W_TFRZ)', 'le'):
         ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
-    ('lude_p = sm.pos(plude, _W_LUDE)', 'pos'):
-        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
     ('melt = sm.on(sk, 0.0, _W_PFLX)', 'on'):
         ('STRESS', 0, 'inject', None, 0.0, 0.0001, ()),
     ('pmfdde_rate + sm.pos(-zer, _W_RATE), pmfdde_rate)', 'pos'):
@@ -1017,6 +1019,12 @@ _SITE_SYNTHETIC = {
     ('zalfaw = sm.sel(sm.lt(kget(pten, jk), rtt, _W_TFRZ), 0.0, foealfcu(th, kget(pten, jk), sm))', 'lt'):
         ('th.RTT', '_W_TFRZ',
          'full-scheme injection point found, but it reaches the scheme output only at round-off level (|d loss/ds| <= 4e-12, finite difference 0; vote 3 2026-11-19)'),
+    ('en = sm.max(en, -ZDD_DET_MAX * kget(pmfu, jk) - (mfd1 - zdmfde), _W_DDEN)', 'max'):
+        ('0.0', '_W_DDEN',
+         'full-scheme injection point found, but its derivative (|d loss/ds| ~ 2e-6..2e-7 on a loss ~ 200) is resolved by finite differences only to >= 9e-4..1.5e-3 at h = 1e-2..3e-2 (round-off, error ~ 1/h), not robustly inside the 1e-3 tolerance (vote 3 2026-11-19) (bound traced: representative value)'),
+    ('lude_p = sm.pos(plude, _W_LUDE)', 'pos'):
+        ('0.0', '_W_LUDE',
+         'full-scheme injection point found, but its derivative (|d loss/ds| ~ 2e-6..2e-7 on a loss ~ 200) is resolved by finite differences only to >= 9e-4..1.5e-3 at h = 1e-2..3e-2 (round-off, error ~ 1/h), not robustly inside the 1e-3 tolerance (vote 3 2026-11-19)'),
 }
 
 
@@ -1228,7 +1236,9 @@ def test_precip_positivity_fixer_conserves_and_has_the_openifs_limit():
         for hard in (True, False):
             r2, s2, deficit, mel = (float(x) for x in M._nonneg_precip(
                 IfsSmooth(hard), jnp.asarray(r1), jnp.asarray(s1), 0.25 * w))
-            assert r2 >= 0.0 and s2 >= 0.0 and deficit >= 0.0
+            # deficit >= 0 at the hard limit; the C1 positive part sits up
+            # to 4w/27 below T inside its window
+            assert r2 >= 0.0 and s2 >= 0.0 and deficit >= (0.0 if hard else -4.0 * w / 27.0)
             assert abs(r2 + s2 - (r1 + s1) - deficit) <= 1e-12 * w
             if hard:
                 np.testing.assert_allclose((r2, s2, deficit, mel), _ref_nonneg(r1, s1, 0.25 * w),
@@ -1364,9 +1374,9 @@ def mse_residuals(fix, g):
 # enthalpy-correction numerator (cudtdqn.F90:290-299).  The exact port
 # reproduces it (first assertion).
 _MSE_SMOOTH_GAP = {
-    "L32": [-5.431957106338814e-10, -9.727429972627988e-10, -0.027704053871804746, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.794919768371983e-11, -0.011967617924881324, 0.0, 2.3062560541853294e-11, -1.8975043758473475e-10, -6.591278634004993e-10, 1.7271485619062517e-10],
+    "L32": [-5.43309397471603e-10, -9.727429972627988e-10, -0.027707962338606507, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0902657382748657e-10, -0.011967617050174795, 0.0, -2.82680577407793e-09, -3.7278269360285776e-10, -3.64957176657299e-06, 1.7271485619062517e-10],
     "L137": [1.2356137814306667e-11, 0.0, 0.0, 0.0, 0.0],
-    "STRESS": [1.0560086138866609e-09, 3.4830013889908003, 1.8132695345229877e-10],
+    "STRESS": [-3.658300329334452e-09, 3.4830013889212523, 3.725020292222325e-10],
 }
 
 

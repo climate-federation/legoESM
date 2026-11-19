@@ -417,8 +417,11 @@ def cuddrafn(th, K, lddraf, ptenh, pqenh, pgeo, pgeoh, paph, prfl, ptd, pqd,
 def _nonneg_precip(sm, r1, s1, dpmel):
     """Smooth, conservative form of CUFLXN's negative-flux fixers (:427-438,
     :489-500).  Total T = r1 + s1 becomes pos(T); the added amount pos(T) - T
-    (>= 0) is returned as ``deficit`` for the caller's sink (PDMFDP above, PDMFUP
-    below cloud base, as OpenIFS).  pos(T) is split in proportion to pos(r1),
+    is returned as ``deficit`` for the caller's sink (PDMFDP above, PDMFUP
+    below cloud base, as OpenIFS).  It is >= 0 at the hard limit; inside the
+    window 0 < T < w the C1 positive part sits below T, so it is down to
+    -4w/27 there (water handed back to the same sink; r2 + s2 - deficit = T
+    still holds exactly).  pos(T) is split in proportion to pos(r1),
     pos(s1), so r2 + s2 = pos(T) exactly; at the hard limit this is the three
     OpenIFS branches.  Melting goes with the surviving flux."""
     t_new = sm.pos(r1 + s1, _W_PFLX)
