@@ -425,7 +425,7 @@ def eke_rhines_length(
     """
     sqrt_E = _sqrt0(eke_positive_part(E, cfg))
     beta_safe = jnp.maximum(beta, _DENOM_FLOOR)
-    return jnp.sqrt(sqrt_E / beta_safe)
+    return _sqrt0(sqrt_E / beta_safe)
 
 
 def eke_deformation_radius(
@@ -449,9 +449,8 @@ def eke_deformation_radius(
     """
     c1 = jnp.maximum(int_N_dz, 0.0) / jnp.pi
     f_safe = jnp.maximum(jnp.abs(f_coriolis), _DENOM_FLOOR)
-    beta_safe = jnp.maximum(beta, _DENOM_FLOOR)
     L_mid = c1 / f_safe
-    L_eq = _sqrt0(c1 / (2.0 * beta_safe))
+    L_eq = _sqrt0(c1 / jnp.maximum(2.0 * beta, _DENOM_FLOOR))
     return smooth_min_c1(L_mid, L_eq, cfg.length_switch_width)
 
 
