@@ -863,6 +863,22 @@ def _target_grid_degrees(grid):
     return target_lat_2d, target_lon_2d, is_gaussian, grid_spacing
 
 
+# A static land fraction within this of 1 is roundoff from area binning
+# (measured 0.99999999999998 on MPAS level 3 from the real-topography product):
+# its 1e-14 water fraction is a slab the coupler divides by.  Votes 2026-11-19
+# (author/codex/GLM): snap at the source, all lanes, tol 1e-12.
+LAND_FRACTION_ROUNDOFF = 1e-12
+
+
+def snap_land_fraction_roundoff(f_land, tol: float = LAND_FRACTION_ROUNDOFF):
+    """``f_land`` with values within ``tol`` of 1 set to exactly 1.  A static
+    field, so the exact snap keeps gradients of every traced quantity; the
+    near-0 side is left alone (land masks and land IC signatures key on
+    ``f_land > 0``)."""
+    f = jnp.asarray(f_land)
+    return jnp.where(jnp.abs(f - 1.0) < tol, jnp.ones_like(f), f)
+
+
 def load_land_fraction(
     grid,
     path: str,

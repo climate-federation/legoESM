@@ -3758,6 +3758,13 @@ class ModelDriver:
                 f"  Land fraction source: {_lf_src} "
                 f"(mean={float(jnp.mean(self._f_land)):.3f})")
 
+        if self._f_land is not None:
+            # every land-fraction source above, once: roundoff below 1 left a
+            # 1e-14 water fraction the slab divided by (SST to 4.7e9 K).  The
+            # sources bin in fp64; an fp32 cast already rounds such values to 1.
+            from legoesm.grids.topography import snap_land_fraction_roundoff
+            self._f_land = snap_land_fraction_roundoff(self._f_land).astype(_sd)
+
         # Attach land_frac for convection and orographic GWD on grids carrying
         # the field (VoronoiMesh and GaussianGrid).  Where it comes from:
         # idealized topography (flat, gaussian) -> zeros, a real elevation file
