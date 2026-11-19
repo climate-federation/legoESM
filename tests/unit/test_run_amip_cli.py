@@ -5380,6 +5380,7 @@ _DUO_DECK_OWN_ROWS = frozenset({
     "grid.grid_type", "grid.resolution",
     "dycore.discretization", "dycore.dt", "dycore.column_lane",
     "dycore.vertical_form",  # as83 adopted for MPAS only (user 2026-11-11)
+    "dycore.tracer_vertical_scheme",  # F2: FV3 uses its own operator
     "dycore.fv3_duo_sponge_layers", "dycore.fv3_duo_sponge_factor",
     "dycore.fv3_duo_sponge_d2_top", "dycore.fv3_duo_nord",
     "dycore.fv3_duo_d4_bg", "dycore.fv3_duo_fill",
@@ -6398,24 +6399,29 @@ def test_fp32_land64_micro64_deck_selects_fp64_land_and_micro():
     assert args.microphysics != "none"
 
 
-@pytest.mark.parametrize("scheme,width", [("sb", 1e-6), ("van_leer", 2e-6), ("van_leer", 0.0)])
-def test_tracer_vertical_flags_round_trip(scheme, width):
+@pytest.mark.parametrize("scheme,width,flux_width", [("sb", 1e-10, 1e-6), ("van_leer", 2e-10, 3e-6), ("van_leer", 0.0, 0.0), (None, 1e-10, 0.0)])
+def test_tracer_vertical_flags_round_trip(scheme, width, flux_width):
     from legoesm.driver.config import experiment_config_to_dict, experiment_config_from_dict
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--tracer-vertical-scheme", scheme,
-        "--tracer-van-leer-width", str(width)]), parser)
+        "--dataset", "analytical", "--grid-type", "latlon", "--discretization", "latlon_cgrid",
+        "--tracer-van-leer-width", str(width), "--tracer-van-leer-flux-width", str(flux_width),
+        *([] if scheme is None else ["--tracer-vertical-scheme", scheme])]), parser)
     cfg = build_config_from_args(args)
     assert cfg.dycore.tracer_vertical_scheme == scheme
+    assert cfg.dycore.tracer_van_leer_flux_width == flux_width
     assert cfg.dycore.tracer_van_leer_width == width
     restored = experiment_config_from_dict(experiment_config_to_dict(cfg))
     assert restored.dycore.tracer_vertical_scheme == scheme
+    assert restored.dycore.tracer_van_leer_flux_width == flux_width
     assert restored.dycore.tracer_van_leer_width == width
     with pytest.raises(ValueError, match="tracer_vertical_scheme"):
         cfg._replace(dycore=cfg.dycore._replace(tracer_vertical_scheme="typo")).validate_strict()
-    for invalid in (-1.0, float("nan"), float("inf")):
-        with pytest.raises(ValueError, match="tracer_van_leer_width"):
-            cfg._replace(dycore=cfg.dycore._replace(tracer_van_leer_width=invalid)).validate_strict()
+    for name in ("tracer_van_leer_width", "tracer_van_leer_flux_width"):
+        for invalid in (-1.0, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match=name):
+                cfg._replace(dycore=cfg.dycore._replace(**{name: invalid})).validate_strict()
+
 
 
 @pytest.mark.parametrize("deck,scheme", [("amip_production.yaml", "van_leer"),
@@ -6425,9 +6431,20 @@ def test_production_decks_explicitly_select_tracer_smoothing(deck, scheme):
     parser = build_arg_parser()
     rows = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser)
     assert rows["tracer_vertical_scheme"] == scheme
-    assert rows["tracer_van_leer_width"] == 1e-6
+    assert rows["tracer_van_leer_width"] == 1e-10
+    assert rows["tracer_van_leer_flux_width"] == 1e-6
     parser.set_defaults(**rows)
     cfg = build_config_from_args(_postprocess_args(
         parser.parse_args(_AMIP_DUMMY_PATHS), parser))
     assert cfg.dycore.tracer_vertical_scheme == scheme
-    assert cfg.dycore.tracer_van_leer_width == 1e-6
+    assert cfg.dycore.tracer_van_leer_width == 1e-10
+    assert cfg.dycore.tracer_van_leer_flux_width == 1e-6
+
+
+@pytest.mark.parametrize("deck", ["amip_production.yaml", "amip_production_latlon48.yaml"])
+def test_production_tracer_borrow_resolved_on(deck):
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser))
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    assert cfg.dycore.mpas_conservative_tracer_clamp is True

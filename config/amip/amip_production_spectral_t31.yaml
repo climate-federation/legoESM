@@ -9,6 +9,7 @@
 # cross-grid configuration table (user rule 2026-10-01/10-09: same
 # configuration on every grid, no improvised deck values).
 include: amip_production.yaml
+tracer_vertical_scheme: null  # F2: this lane retains its own tracer operator
 
 # ---- grid / dycore -------------------------------------------------------------
 grid_type: gaussian

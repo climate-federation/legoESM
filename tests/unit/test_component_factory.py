@@ -972,8 +972,54 @@ def test_hybrid_tracer_smoothing_config_reaches_dycore(grid_type, discretization
                        **({"lloyd_iterations": 2} if grid_type == "mpas" else {}))
     cfg = _make_config(grid_type=grid_type, discretization=discretization, nlev=32)
     cfg = cfg._replace(dycore=cfg.dycore._replace(
-        tracer_vertical_scheme="van_leer", tracer_van_leer_width=2e-6))
+        tracer_vertical_scheme="van_leer", tracer_van_leer_width=2e-10,
+        tracer_van_leer_flux_width=3e-6))
     model = create_atmosphere_dycore(cfg, grid, make_cam6_l32_levels())
-    assert model.config.tracer_van_leer_width == 2e-6
+    assert model.config.tracer_van_leer_width == 2e-10
+    assert model.config.tracer_van_leer_flux_width == 3e-6
     if grid_type == "latlon":
         assert model.config.tracer_vertical_scheme == "van_leer"
+
+
+@pytest.mark.parametrize("grid_type,discretization", [("mpas", "mpas"), ("latlon", "latlon_cgrid"), ("gaussian", "spectral")])
+@pytest.mark.parametrize("vertical_coord", ["sigma", "hybrid", "cam_l32"])
+@pytest.mark.parametrize("scheme", [None, "sb", "van_leer"])
+def test_tracer_vertical_lane_default_and_refusal(grid_type, discretization, vertical_coord, scheme):
+    from legoesm.driver.config import resolve_tracer_vertical_scheme
+    from legoesm.driver.component_factory import driver_solver_name
+
+    cfg = _make_config(grid_type=grid_type, discretization=discretization, nlev=32)
+    cfg = cfg._replace(grid=cfg.grid._replace(vertical_coord=vertical_coord),
+                       dycore=cfg.dycore._replace(tracer_vertical_scheme=scheme))
+    hybrid = vertical_coord != "sigma"
+    allowed = scheme is None or (hybrid and (
+        discretization == "latlon_cgrid" or (discretization == "mpas" and scheme == "van_leer")))
+    if not allowed:
+        with pytest.raises(ValueError, match="tracer_vertical_scheme"):
+            cfg.validate_strict()
+        with pytest.raises(ValueError, match="tracer_vertical_scheme"):
+            resolve_tracer_vertical_scheme(scheme, driver_solver_name(cfg), hybrid=hybrid)
+    else:
+        cfg.validate_strict()
+        expected = (scheme or ("sb" if discretization == "latlon_cgrid" else "van_leer")) if hybrid and discretization != "spectral" else None
+        assert resolve_tracer_vertical_scheme(scheme, driver_solver_name(cfg), hybrid=hybrid) == expected
+
+
+@pytest.mark.parametrize("grid_type,discretization", [("mpas", "mpas"), ("latlon", "latlon_cgrid")])
+def test_factory_resolves_default_from_actual_coordinate(grid_type, discretization):
+    from legoesm.grids.factory import create_grid
+    from legoesm.grids.vertical import make_cam6_l32_levels
+    grid = create_grid(grid_type, 1 if grid_type == "mpas" else 4,
+                       **({"lloyd_iterations": 2} if grid_type == "mpas" else {}))
+    cfg = _make_config(grid_type=grid_type, discretization=discretization, nlev=32)
+    assert cfg.dycore.tracer_vertical_scheme is None
+    model = create_atmosphere_dycore(cfg, grid, make_cam6_l32_levels())
+    assert model.config.tracer_van_leer_width == 1e-10
+    assert model.config.tracer_van_leer_flux_width == 1e-6
+    if grid_type == "latlon":
+        assert model.config.tracer_vertical_scheme == "sb"
+    # Refuse an explicit HYBRID selection even when config metadata claims
+    # hybrid but the actual factory argument is sigma.
+    with pytest.raises(ValueError, match="tracer_vertical_scheme"):
+        create_atmosphere_dycore(cfg._replace(dycore=cfg.dycore._replace(
+            tracer_vertical_scheme="van_leer")), grid, _make_sigma(32))

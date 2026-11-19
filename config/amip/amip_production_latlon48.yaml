@@ -61,7 +61,8 @@ mpas_div_damp4_scale: 1.0
 mpas_sponge_del2_top_layers: 0
 mpas_sponge_del2_top_factor: 1.0
 tracer_vertical_scheme: sb
-tracer_van_leer_width: 1.0e-6  # ASKED(user): smooth width when the van_leer option is selected
+tracer_van_leer_width: 1.0e-10  # VOTED W4: mixing-ratio increments [kg/kg]
+tracer_van_leer_flux_width: 1.0e-6  # VOTED W4: mass flux [Pa/s]
 mpas_vert_advection_scheme: upwind
 mpas_qv_smooth_del2_m2s: 0.0
 mpas_qv_smooth_del4_m4s: 0.0        # refused non-zero on the column lane (edge operator)

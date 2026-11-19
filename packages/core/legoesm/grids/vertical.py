@@ -2628,7 +2628,8 @@ def vertical_advection_hybrid_van_leer(
     mass_flux: jax.Array,
     p_s: jax.Array,
     coord: HybridSigmaPressureCoordinate,
-    smoothing_width: float = 1e-6,
+    smoothing_width: float = 1e-10,
+    flux_smoothing_width: float = 1e-6,
 ) -> jax.Array:
     """Conservative, slope-limited (van Leer) tracer vertical advection, hybrid.
 
@@ -2654,40 +2655,50 @@ def vertical_advection_hybrid_van_leer(
     kernel's docstring for the instability), and a face shared by two cells
     must carry ONE value for the telescoping to hold.
 
-    KNOWN DIFFERENCE: the default ``smoothing_width=1e-6`` uses a regularized
-    harmonic slope (shared ``smooth_abs``), a smooth median face clamp, and a
-    smooth upwind flux split. It is C-infinity in the tracer and mass flux on
-    valid positive-thickness columns, including plateaus and zero flux.
-    Width is an absolute numerical regularizer: its numerical value is used
-    for mixing-ratio increments [kg/kg] and mass flux [Pa/s], respectively.
-    Exact constant fields and paired column conservation are retained; TVD,
-    positivity and bounded reconstruction are not guaranteed at finite width
-    (the smooth median relaxes the hard bound by O(width)). Width is static;
-    unrepresentable positive squares/reciprocals raise rather than becoming a
-    hard switch through underflow or overflow.
-    ``smoothing_width=0`` restores the previous hard reconstruction and flux
-    selection exactly. On the seeded CAM L32 fixtures the per-column maximum
-    absolute tendency gaps [kg/kg/s] range from 5.3967e-12 to 1.8959e-11
-    (seed-0 Gaussian), 6.3212e-12 to 2.0026e-11 (seed-1 Gaussian),
-    6.0970e-12 to 1.4658e-11 (top-hat), and 3.8559e-10 to 1.1437e-9
-    (seed-3 random). An offline standard-atmosphere level-2 MPAS mesh with
-    CAM L32, production humidity initialization and seeded 1 m/s wind
-    perturbations gives a full tracer tendency gap of 1.5031e-12 kg/kg/s
-    maximum absolute, 1.5602e-4 area-weighted relative L2. These are fixture
-    measurements, not production climate statistics. Full per-column gaps are in
-    ``tests/unit/test_vertical_advection_hybrid_van_leer.py`` (T15).
+    KNOWN DIFFERENCE (T18, W4): the default ``smoothing_width=1e-10``
+    regularizes mixing-ratio increments [kg/kg] with a harmonic slope and
+    smooth median face clamp; ``flux_smoothing_width=1e-6`` regularizes the
+    upwind mass-flux split [Pa/s]. The previous single 1e-6 width was too
+    large for condensate increments (T17: 1464 negative faces, -1.64e-7 kg/kg).
+    Separate widths retain C-infinity dependence on tracer and mass flux at
+    their positive defaults, including plateaus and zero flux. Each width is
+    static and may independently be zero; BOTH zero restore the previous hard
+    reconstruction and flux selection bitwise. A positive width whose square
+    or reciprocal is unrepresentable in its input dtype raises.
+    Exact constant fields and paired column conservation are retained. Finite
+    widths do NOT guarantee TVD, positivity or bounded reconstruction; negative
+    water reaches the existing conservative borrow on both production lanes
+    (MPAS van Leer, lat-lon SB). This change does not modify that borrow.
+    With the new defaults the seeded CAM L32 per-column maximum absolute
+    tendency gaps [kg/kg/s] are 2.8815e-13..6.6878e-13 (seed-0 Gaussian),
+    2.2949e-13..6.2433e-13 (seed-1 Gaussian), 9.0352e-14..1.0655e-13
+    (top-hat), and 3.6982e-10..1.1407e-9 (seed-3 random). An offline
+    standard-atmosphere level-2 MPAS mesh with CAM L32, production humidity
+    initialization and seeded 1 m/s wind perturbations gives a full vapour
+    tendency gap of 3.6705e-13 kg/kg/s maximum absolute and 6.7668e-5
+    area-weighted relative L2. These are fixture measurements, not climate
+    statistics. On the same MPAS fixture with the T17 condensate decks and
+    dt=112.5 s, the new defaults give 1296 negative effective faces (minimum
+    -1.8498e-11 kg/kg), 1300 negative forward-Euler updated cells (minimum
+    -1.4606e-13 kg/kg), and max face error / regional hard-face range 0.24280.
+    Whole-species vertical tendency relative L2 gaps for q_v/q_c/q_i/q_r/q_s
+    and q_v*1e-6 are respectively 8.0275e-5, 9.1954e-5, 1.5663e-4,
+    1.8808e-4, 1.2091e-3, 7.6004e-3. Full per-column gaps are stored in
+    ``tests/unit/test_vertical_advection_hybrid_van_leer.py``.
     """
-    if not math.isfinite(smoothing_width) or smoothing_width < 0.0:
-        raise ValueError("smoothing_width must be finite and nonnegative")
-    if smoothing_width > 0.0:
-        # Static numerics setting, excluded from training. Refuse widths whose
-        # square would overflow or enter the subnormal range (XLA may flush
-        # those to zero), or whose reciprocal cannot represent the LSE scale.
-        for dtype in (field.dtype, mass_flux.dtype):
+    # Each static regularizer is checked in the dtype of the quantity it smooths.
+    # Either width may independently recover its hard branch.
+    for name, width, dtype in (
+        ("smoothing_width", smoothing_width, field.dtype),
+        ("flux_smoothing_width", flux_smoothing_width, mass_flux.dtype),
+    ):
+        if not math.isfinite(width) or width < 0.0:
+            raise ValueError(f"{name} must be finite and nonnegative")
+        if width > 0.0:
             limits = np.finfo(np.dtype(dtype))
-            if not (float(limits.tiny) <= smoothing_width * smoothing_width <= float(limits.max)
-                    and 1.0 / smoothing_width <= float(limits.max)):
-                raise ValueError("smoothing_width square and reciprocal must be representable")
+            if not (float(limits.tiny) <= width * width <= float(limits.max)
+                    and 1.0 / width <= float(limits.max)):
+                raise ValueError(f"{name} square and reciprocal must be representable")
     dp = dp_from_hybrid(coord, p_s)                                  # (..., nlev)
     dc = jnp.diff(pressure_from_hybrid(coord, p_s, full=True), axis=-1)
     q_pos, q_neg = _van_leer_face_values(field, dc, dp, smoothing_width)
@@ -2697,12 +2708,12 @@ def vertical_advection_hybrid_van_leer(
     edge = jnp.zeros(nlev + 1, dtype=bool).at[jnp.array([1, nlev - 1])].set(True)
     q_pos = jnp.where(edge, donor_pos, q_pos)
     q_neg = jnp.where(edge, donor_neg, q_neg)
-    if smoothing_width > 0.0:
+    if flux_smoothing_width > 0.0:
         from legoesm.core.smooth import smooth_abs
 
         # Increment form keeps constants exactly zero even under smoothing.
         # One shared face flux still telescopes in the column product rule.
-        flux_abs = smooth_abs(mass_flux, smoothing_width**2) - smoothing_width
+        flux_abs = smooth_abs(mass_flux, flux_smoothing_width**2) - flux_smoothing_width
         pos_top = q_pos[..., :-1] - field
         neg_top = q_neg[..., :-1] - field
         pos_bot = q_pos[..., 1:] - field

@@ -1090,6 +1090,7 @@ class TestTracerMassConservation:
             captured["calls"] += 1
             captured["args"] = args
             captured["width"] = kwargs.get("smoothing_width")
+            captured["flux_width"] = kwargs.get("flux_smoothing_width")
             captured["vertical"] = real_vertical(*args, **kwargs)
             return captured["vertical"]
 
@@ -1106,6 +1107,7 @@ class TestTracerMassConservation:
             vertical_form="legacy")
         if scheme == "van_leer":
             assert captured["width"] == config.tracer_van_leer_width
+            assert captured["flux_width"] == config.tracer_van_leer_flux_width
         dp = dp_from_hybrid(hybrid, state.p_s)
         F = captured["F"]
         assert captured["calls"] == 1
@@ -1142,7 +1144,7 @@ class TestTracerMassConservation:
         real = pe.vertical_advection_hybrid_van_leer
 
         def observe(*args, **kwargs):
-            calls.append(kwargs["smoothing_width"])
+            calls.append((kwargs["smoothing_width"], kwargs["flux_smoothing_width"]))
             return real(*args, **kwargs)
 
         monkeypatch.setattr(pe, "vertical_advection_hybrid_van_leer", observe)
@@ -1153,7 +1155,7 @@ class TestTracerMassConservation:
             state._replace(tracers={"q_v": q}), grid, hybrid, config,
             vertical_form="legacy")
         if scheme == "van_leer":
-            assert calls == [config.tracer_van_leer_width]
+            assert calls == [(config.tracer_van_leer_width, config.tracer_van_leer_flux_width)]
         error = float(jnp.max(jnp.abs(dq["q_v"])))
         print(f"hybrid constant tracer max tendency = {error:.17e}")
         assert error < 1e-18

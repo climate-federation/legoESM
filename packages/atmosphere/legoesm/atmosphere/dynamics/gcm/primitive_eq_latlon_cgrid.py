@@ -265,9 +265,10 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # ``DycoreConfig.vertical_form``.  Appended at the tuple END.
     vertical_form: str = "legacy"
     # ASKED(user), 2026-11-15: smooth hybrid tracer reconstruction.
-    tracer_van_leer_width: float = 1e-6
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
     # Hybrid only; sigma retains its existing upwind tracer operator.
     tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
 
 
 # CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
@@ -530,6 +531,7 @@ def latlon_tracer_tendencies(tracers, u, v, u_c, v_c, dp_u, dp_v, div_dp, dp,
             else:  # Membership checked above, including empty tracer states.
                 vert_q_lead = vertical_advection_hybrid_van_leer(
                     tracers_lead, vert_vel, p_s, sigma_coord,
+                    flux_smoothing_width=config.tracer_van_leer_flux_width,
                     smoothing_width=config.tracer_van_leer_width,
                 )
         else:
@@ -1899,6 +1901,9 @@ __param_spec__ = {
     "CGridLatLonPrimitiveEquationConfig": {
         "scheme_key": "latlon_pe",
         "params": {},
-        "excluded": {"tracer_van_leer_width": "tunable_tier 0: numerics smoothing width"},
+        "excluded": {
+            "tracer_van_leer_width": "tunable_tier 0: numerics smoothing width",
+            "tracer_van_leer_flux_width": "tunable_tier 0: numerics smoothing width",
+        },
     },
 }

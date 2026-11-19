@@ -18,6 +18,7 @@
 # dycore rows off, C one terrain product per grid; plus the land IC on this
 # lane's own columns and the GPU radiation batch.
 include: amip_production.yaml
+tracer_vertical_scheme: null  # F2: this lane retains its own tracer operator
 
 # ---- grid / dycore ----------------------------------------------------------
 grid_type: cubed_sphere

@@ -430,9 +430,11 @@ class DycoreConfig(NamedTuple):
     # validate_strict refuses any other form off those two lanes.
     vertical_form: str = "legacy"
     # ASKED(user), 2026-11-15: lat-lon HYBRID selector; MPAS always van Leer.
-    # Sigma tracer transport is unchanged; width applies to hybrid van Leer.
-    tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
-    tracer_van_leer_width: float = 1e-6
+    # None resolves per lane: hybrid lat-lon SB, hybrid MPAS van Leer;
+    # sigma retains its existing operator and refuses explicit selections.
+    tracer_vertical_scheme: Literal["sb", "van_leer"] | None = None
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
 
 
 class EvaluationConfig(NamedTuple):
@@ -687,6 +689,25 @@ CLUBB_SCALAR_FIELDS = {
 CLUBB_PROGNOSTIC_ONLY = frozenset({
     "clubb_c14", "clubb_c8", "clubb_c11", "clubb_c11b", "clubb_gamma_coefb",
     "clubb_c_k10"})
+
+
+def resolve_tracer_vertical_scheme(value, solver_name, *, hybrid: bool) -> str | None:
+    """Resolve the hybrid tracer operator; None on lanes retaining their operator.
+
+    An explicit selection must be honored by the lane, including direct factory
+    callers. Widths only affect van Leer; each can independently be zero.
+    """
+    if value not in (None, "sb", "van_leer"):
+        raise ValueError("dycore.tracer_vertical_scheme must be None, 'sb' or 'van_leer'")
+    defaults = {"latlon_cgrid_primitive_equations": "sb",
+                "mpas_primitive_equations": "van_leer"}
+    if not hybrid or solver_name not in defaults:
+        if value is not None:
+            raise ValueError("dycore.tracer_vertical_scheme would be silently inert on this lane; use None")
+        return None
+    if solver_name == "mpas_primitive_equations" and value == "sb":
+        raise ValueError("dycore.tracer_vertical_scheme on MPAS hybrid must be None or 'van_leer'")
+    return defaults[solver_name] if value is None else value
 
 
 def resolve_sea_ice_albedo_scheme(cfg) -> str:
@@ -4462,10 +4483,20 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"dycore.vertical_form={d.vertical_form!r} is untested on the "
                     "lat-lon MPI and 2-D tiled lanes; they take 'legacy'.")
-        if d.tracer_vertical_scheme not in ("sb", "van_leer"):
-            errors.append("dycore.tracer_vertical_scheme must be one of ('sb', 'van_leer')")
-        if not math.isfinite(d.tracer_van_leer_width) or d.tracer_van_leer_width < 0.0:
-            errors.append("dycore.tracer_van_leer_width must be finite and nonnegative")
+        from legoesm.driver.component_factory import driver_solver_name
+        if d.tracer_vertical_scheme not in (None, "sb", "van_leer"):
+            errors.append("dycore.tracer_vertical_scheme must be None, 'sb' or 'van_leer'")
+        else:
+            try:
+                resolve_tracer_vertical_scheme(
+                    d.tracer_vertical_scheme, driver_solver_name(self),
+                    hybrid=g.vertical_coord in ("hybrid", "cam_l32"))
+            except ValueError as exc:
+                errors.append(str(exc))
+        for name in ("tracer_van_leer_width", "tracer_van_leer_flux_width"):
+            width = getattr(d, name)
+            if not math.isfinite(width) or width < 0.0:
+                errors.append(f"dycore.{name} must be finite and nonnegative")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "

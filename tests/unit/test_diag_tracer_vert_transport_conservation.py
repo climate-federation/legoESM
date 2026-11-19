@@ -123,7 +123,7 @@ def test_conservative_operator_is_not_positivity_preserving_on_sparse_condensate
         "if this passes, the conservative form has gained a limiter and the "
         "positivity caveat on rerouting tracers can be dropped")
     q_vl = q + dt * vertical_advection_hybrid_van_leer(
-        q, mf, p_s, coord, smoothing_width=0.0)
+        q, mf, p_s, coord, smoothing_width=0.0, flux_smoothing_width=0.0)
     assert float(jnp.min(q_vl)) >= 0.0, (
         "the hard-limit conservative van Leer operator must "
         "stay non-negative on the case that defeats the centered one")

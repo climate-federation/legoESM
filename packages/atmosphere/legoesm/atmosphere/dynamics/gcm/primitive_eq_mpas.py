@@ -240,7 +240,8 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # ``DycoreConfig.vertical_form``.  Appended at the tuple END.
     vertical_form: str = "legacy"
     # ASKED(user), 2026-11-15: smooth hybrid tracer reconstruction.
-    tracer_van_leer_width: float = 1e-6
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
 
 
 # ============================================================================
@@ -565,6 +566,7 @@ def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
             dq = dq + jax.vmap(
                 lambda qk: vertical_advection_hybrid_van_leer(
                     qk, mass_flux, p_s, sigma_coord,
+                    flux_smoothing_width=config.tracer_van_leer_flux_width,
                     smoothing_width=config.tracer_van_leer_width),
                 in_axes=-1, out_axes=-1)(q)
         else:
@@ -1682,6 +1684,9 @@ __param_spec__ = {
     "MPASPrimitiveEquationConfig": {
         "scheme_key": "mpas_pe",
         "params": {},
-        "excluded": {"tracer_van_leer_width": "tunable_tier 0: numerics smoothing width"},
+        "excluded": {
+            "tracer_van_leer_width": "tunable_tier 0: numerics smoothing width",
+            "tracer_van_leer_flux_width": "tunable_tier 0: numerics smoothing width",
+        },
     },
 }
