@@ -409,9 +409,11 @@ def _sqrt0(x: jnp.ndarray) -> jnp.ndarray:
 def eke_positive_part(E: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
     """``max(E, 0)`` (Veros ``max(0, eke)``), smoothed over ``cfg.e_pos_width``.
 
-    C1 in ``E``.  The square roots taken of it (``sqrt(E)``, the Rhines length)
-    keep the reference's zero-energy kink, moved to ``E = -e_pos_width/2``
-    with finite one-sided gradients.  That is negative energy: the 3-D path
+    C1 in ``E``.  The square roots taken of it keep the reference's
+    zero-energy kink, moved to ``E = -e_pos_width/2``: ``sqrt(E)`` gets a finite
+    slope jump there, while the Rhines length (``∝ sqrt(E + w/2)`` just above
+    it) has an unbounded right derivative, as Veros's has at ``E = 0``.  That
+    is negative energy: the 3-D path
     floors ``E`` at ``EKEConfig.e_min`` on wet cells and the 2-D local source
     is positivity-preserving.
     """
