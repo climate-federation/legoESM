@@ -314,11 +314,12 @@ def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps
 #     its netdt set to s*heating_ramp_width cuts the run at s <= 0 (the
 #     launch interface jumps from 10 to 21).  At s = 1/2 the expected launch
 #     interface is 15.5, the middle of a launch-staircase step.
-#   q0: level 18 of column 0 set to netdt(17) + s/q0_max_sharpness ties the
-#     range max at s = 0.
+#   (q0's max over the range: test_gwd_e3sm_beres.py, on gw_beres_src; at a
+#   q0 tie in this column the hard limit's two one-sided slopes of the drag
+#   measured equal, so no kink shows here.)
 #   depth gate: column 1's run (levels 29..34) is 1.59 km deep; z_full * s
 #     crosses hdepth_min_km = 2.5 km at s = 2.5/hdepth.
-_C0, _CUT, _QI, _QJ, _C1 = 0, 20, 17, 18, 1
+_C0, _CUT, _C1 = 0, 20, 1
 _HD1 = float(np.load(FIXTURE)["l36/z_full"][_C1, 29] - np.load(FIXTURE)["l36/z_full"][_C1, 34]) / 1000.0
 
 
@@ -339,12 +340,10 @@ def _beres_line(fx, col, perturb, beres_kw, source=None):
 _BERES = E3SMBeresConfig()
 
 
-def _set_netdt(k, scale, offset_from=None):
-    """netdt of column _C0 at level k set to s*scale (+ netdt at offset_from):
-    s is in units of the switch's own width."""
+def _set_netdt(k, scale):
+    """netdt of column _C0 at level k set to s*scale (s in width units)."""
     def perturb(j, s):
-        base = 0.0 if offset_from is None else j["netdt"][_C0, offset_from]
-        return dict(j, netdt=j["netdt"].at[_C0, k].set(base + s * scale))
+        return dict(j, netdt=j["netdt"].at[_C0, k].set(s * scale))
     return perturb
 
 
@@ -355,31 +354,37 @@ def _scale_z(j, s):
 
 _HW, _GATE = _BERES.heating_ramp_width, _BERES.hdepth_gate_width
 _SWITCHES = {
-    # name: (column, perturbation, point, eps, the field's hard value, interior point)
-    # eps keeps the launch interface (moving 11 levels across the heating
-    # ramp, ~21 levels per unit s at its middle) inside one step of its
-    # staircase (width index_round_width = 0.1 levels).
-    "heating_range": (_C0, _set_netdt(_CUT, _HW), 0.0, 0.05,
-                      dict(heating_ramp_width=0.0), 0.5),
-    "launch_staircase": (_C0, _set_netdt(_CUT, _HW), 0.5, 5.0e-4,
-                         dict(index_round_width=0.0), None),
-    "q0_max": (_C0, _set_netdt(_QJ, 1.0 / _BERES.q0_max_sharpness, offset_from=_QI), 0.0, 0.1,
-               dict(q0_max_sharpness=float("inf")), None),
-    "depth_gate": (_C1, _scale_z, 2.5 / _HD1, 1.0e-3,
-                   dict(hdepth_gate_width=0.0), (2.5 - _GATE / 2) / _HD1),
+    # name: (column, perturbation, s at the switch, s inside the ramp, eps at
+    #        the switch, eps inside, the field's hard value)
+    # Inside the heating ramp the launch interface moves ~19 levels per unit
+    # s; s = 0.3 sits 0.013 in s from its nearest staircase step.
+    "heating_range": (_C0, _set_netdt(_CUT, _HW), 0.0, 0.3, 3.0e-5, 1.0e-4,
+                      dict(heating_ramp_width=0.0)),
+    "launch_staircase": (_C0, _set_netdt(_CUT, _HW), 0.5, 0.5, 1.0e-5, 1.0e-5,
+                         dict(index_round_width=0.0)),
+    "depth_gate": (_C1, _scale_z, 2.5 / _HD1, (2.5 - _GATE / 2) / _HD1, 1.0e-5, 1.0e-5,
+                   dict(hdepth_gate_width=0.0)),
 }
 
 
 @pytest.mark.parametrize("name", list(_SWITCHES))
 def test_beres_heating_switches_smooth_at_default(fx, name):
-    col, perturb, s0, eps, hard, interior = _SWITCHES[name]
+    """Default: second-order check_grads inside the ramp, a nonzero gradient
+    there, and first-order at the switch (the ramp's end is C2).  The field's
+    hard value alone fails first-order at the switch (a jump).  f is scaled
+    by its gradient inside the ramp so check_grads' 1e-5 tolerance is
+    relative."""
+    col, perturb, s_sw, s_in, eps_sw, eps_in, hard = _SWITCHES[name]
     f = _beres_line(fx, col, perturb, {})
-    check_grads(f, (jnp.asarray(s0),), order=2, modes=("rev",), eps=eps)
-    if interior is not None:                     # the ramp moves the drag
-        assert float(jax.grad(f)(jnp.asarray(interior))) != 0.0
-    with pytest.raises(AssertionError):          # this field's hard value alone jumps/kinks
-        check_grads(_beres_line(fx, col, perturb, hard), (jnp.asarray(s0),), order=2,
-                    modes=("rev",), eps=eps)
+    g_in = float(jax.grad(f)(jnp.asarray(s_in)))
+    assert g_in != 0.0                           # the ramp moves the drag
+    fn = jax.jit(lambda s: f(s) / abs(g_in))
+    check_grads(fn, (jnp.asarray(s_in),), order=2, modes=("rev",), eps=eps_in)
+    check_grads(fn, (jnp.asarray(s_sw),), order=1, modes=("rev",), eps=eps_sw)
+    fh = _beres_line(fx, col, perturb, hard)
+    with pytest.raises(AssertionError):          # this field's hard value alone jumps
+        check_grads(jax.jit(lambda s: fh(s) / abs(g_in)), (jnp.asarray(s_sw),), order=1,
+                    modes=("rev",), eps=eps_sw)
 
 
 def test_beres_launch_blend_closes_column_energy(fx):

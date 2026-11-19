@@ -329,12 +329,49 @@ def test_level_swap_of_the_crit_bound_is_smooth_at_default():
                                        ("crit_minmax_sharpness", 0.0), ("crit_minmax_sharpness", 1e-50),
                                        ("crit_minmax_sharpness", float("-inf")),
                                        ("crit_minmax_sharpness", True),
-                                       ("crit_minmax_sharpness", 1e40)])
+                                       ("crit_minmax_sharpness", 1e40),
+                                       ("heating_ramp_width", -1e-7), ("heating_ramp_width", 1e-50),
+                                       ("q0_max_sharpness", 0.0), ("q0_max_sharpness", True),
+                                       ("q0_max_sharpness", 1e40),
+                                       ("hdepth_gate_width", -0.1), ("hdepth_gate_width", 1e-50)])
 def test_beres_smoothing_fields_validated(field, bad):
-    """#2545: 0/inf (E3SM) or an fp32-safe width/sharpness; anything else raises."""
+    """#2545/#2569: 0/inf (E3SM) or an fp32-safe width/sharpness; anything else raises."""
     pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
     to = lambda a: jnp.asarray(a[None, :])
     beres = E3SMBeresConfig(use_stand_in_table=True, **{field: bad})
     mfcc = build_stand_in_mfcc(NGWV, DC, beres, jnp.float64)
     with pytest.raises(ValueError, match=field):
         gw_beres_src(to(u), to(v), to(netdt), to(zm), jnp.zeros(1), k700, mfcc, NGWV, DC, beres)
+
+
+def test_q0_max_tie_is_smooth_at_default():
+    """#2569 (RULE 5): q0 = max of netdt over the heating range kinks where two
+    levels tie; the default log-sum-exp (q0_max_sharpness) does not, the hard
+    value (inf) alone does.  One level of the deep column is set to the range
+    maximum + s/q0_max_sharpness; f = q0 in units of 1/q0_max_sharpness."""
+    from jax.test_util import check_grads
+    pint, pmid, T, zm, z_half, u, v, netdt, k700 = _beres_column(heat="deep")
+    to = lambda a: jnp.asarray(a[None, :])
+    i = int(np.argmax(netdt))
+    j = i + 1                                     # in the range, below the max
+    assert netdt[j] > 0.0
+    qs = E3SMBeresConfig().q0_max_sharpness
+
+    def make(beres):
+        mfcc = build_stand_in_mfcc(NGWV, DC, beres, jnp.float64)
+
+        def f(s):
+            nd = to(netdt).at[0, j].set(netdt[i] + s / qs)
+            out = gw_beres_src(to(u), to(v), nd, to(zm), jnp.zeros(1), k700, mfcc,
+                               NGWV, DC, beres)
+            return out[9][0] / 86400.0 * qs       # maxq0 [K/day] -> q0 * qs
+        return jax.jit(f)
+
+    s0 = jnp.asarray(0.0)
+    f = make(E3SMBeresConfig(use_stand_in_table=True))
+    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-3)
+    assert float(jax.grad(f)(s0)) > 0.0
+    with pytest.raises(AssertionError):
+        check_grads(make(E3SMBeresConfig(use_stand_in_table=True,
+                                         q0_max_sharpness=float("inf"))),
+                    (s0,), order=2, modes=("rev",), eps=1e-3)

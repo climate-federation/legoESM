@@ -149,10 +149,21 @@ deliberate departures / version choices (canaries in
   on the Beres arms the max per-column du/dt gap goes 2.2e-3 -> 9.7e-3 (L36)
   and 3.4e-3 -> 1.5e-2 (L32, convective+frontal), flat-column dT 6.1e-3 ->
   1.6e-2; the oro+frontal+convective L36 maximum (3.6e-2) is unchanged.
-  Width 0.5 gave 0.39 and 1.0 gave 0.46 (not chosen).  STILL HARD on traced
-  state (recorded, follow-up issue): the heating-range level detection
-  (``netdt > 0`` per level), ``q0 = max`` over the range and the
-  ``hdepth >= hdepth_min_km`` launch gate.
+  Width 0.5 gave 0.39 and 1.0 gave 0.46 (not chosen).  Since #2569 the
+  remaining Beres switches on traced heating are smooth too (votes 3-0 /
+  2-1): the per-level ``netdt > 0`` of the heating-range scan is
+  ``smoothstep_quintic(netdt/beres.heating_ramp_width)`` (1e-7 K/s) feeding a
+  survival recurrence whose per-level weights give hdepth, uh, Umin/Umax and
+  the expected launch interface (two neighbouring launches blended, the
+  fixer's energy step applied once to the blend); ``q0 = max`` is a
+  range-weighted log-sum-exp (``beres.q0_max_sharpness`` 1e8 s/K); the
+  ``hdepth >= hdepth_min_km`` gate ramps over the 0.1 km below the threshold
+  (``beres.hdepth_gate_width``).  KNOWN DIFFERENCE (#2569, measured on the
+  oracle fixture, pinned per case): only convective+frontal L36 moves, by
+  <= 5.1e-8 in a column's du/dt gap (q0's soft max); no fixture level has
+  heating in (0, 1e-7) K/s and no column is within 0.5 km of the gate, so the
+  other two cost nothing there (1e-6 K/s would have added 1.5e-2 on L32).
+  The soft max reads at most ln(n + 1)/1e8 K/s above E3SM's q0.
 
 Conservation (see ``__physics_contract__`` energy note): ``conserves=["none"]``
 as the static INTERSECTION over all selectable sources (a contract must hold
@@ -806,20 +817,24 @@ def gw_beres_src(
     hdepth = hdepth * beres.hdepth_scaling_factor
 
     # --- Max heating q0 over the range, from E3SM's q0 = 0 start
-    # (gw_convect.F90:153, :222-227).  RULE 5 (#2569): the r-weighted
-    # log-sum-exp (1/s)*log(1 + sum_k r_k*exp(s*netdt_k)), s =
-    # q0_max_sharpness [s/K]: exactly 0 with no range, above the max by at most
-    # ln(n_range + 1)/s; inf = E3SM's max.
+    # (gw_convect.F90:153, :222-227).  RULE 5 (#2569): each level enters as
+    # the candidate r_k*netdt_k with weight r_k (the start value 0 with weight
+    # 1), so a level leaving the range fades out in value AND weight: a weight
+    # alone would let a tiny r_k carry a large netdt_k into the soft max
+    # (log r_k is a weak penalty).  The soft max is the weighted log-sum-exp
+    # (1/s)*log(1 + sum_k r_k*exp(s*r_k*netdt_k)), s = q0_max_sharpness [s/K]:
+    # exactly 0 with no range, above the max by at most ln(n_range + 1)/s.
+    # inf = the max of the same candidates, E3SM's max when r is 0/1.
     qs = beres.q0_max_sharpness
     if isinstance(qs, bool) or not isinstance(qs, (int, float)) or not qs > 0.0:
         raise ValueError(f"q0_max_sharpness must be > 0 (inf = E3SM); got {qs!r}.")
+    q_cand = jnp.concatenate([jnp.zeros((ncol, 1), dtype), r * netdt], axis=1)
     if math.isinf(qs):
-        q0 = jnp.maximum(jnp.max(jnp.where(r > 0.0, netdt, 0.0), axis=1), 0.0)
+        q0 = jnp.max(q_cand, axis=1)
     else:
         validate_smoothing_width("q0_max_sharpness (as 1/sharpness)", 1.0 / qs)
-        q0 = jax.nn.logsumexp(
-            jnp.concatenate([jnp.zeros((ncol, 1), dtype), qs * netdt], axis=1),
-            axis=1, b=jnp.concatenate([one[:, None], r], axis=1)) / qs
+        q0 = jax.nn.logsumexp(qs * q_cand, axis=1,
+                              b=jnp.concatenate([one[:, None], r], axis=1)) / qs
     maxq0 = q0 * 24.0 * 3600.0  # coeff-ok: hours/day x s/hr -> K/day diagnostic
     q0 = q0 * beres.cf                                     # convert to source amp
 
@@ -839,33 +854,30 @@ def gw_beres_src(
     uh = uh - cs
     uh = jnp.clip(uh, -float(maxuh), float(maxuh))
 
-    # Speeds for critical-level filtering (min/max projected wind in range).
+    # Speeds for critical-level filtering (min/max projected wind in range),
+    # from E3SM's sentinels +-pgwv*dc (the value of an empty range).  RULE 5
+    # (#2569): each level enters as r_k*ubm_k + (1 - r_k)*sentinel with
+    # weight r_k (the q0 form above), E3SM's masked min/max when r is 0/1.
     ks = beres.crit_minmax_sharpness
     if isinstance(ks, bool) or not isinstance(ks, (int, float)) or not ks > 0.0:
         raise ValueError(f"crit_minmax_sharpness must be > 0 (inf = E3SM); got {ks!r}.")
+
+    def cand(sentinel):                                  # (ncol, nlev + 1)
+        return jnp.concatenate([r * ubm + (1.0 - r) * sentinel,
+                                jnp.full((ncol, 1), sentinel, dtype)], axis=1)
+
     if math.isinf(ks):
-        in_range = r > 0.0
-        umin = jnp.min(jnp.where(in_range, ubm, jnp.asarray(pgwv * dc, dtype)), axis=1)
-        umin = jnp.minimum(umin, pgwv * dc)
-        umax = jnp.max(jnp.where(in_range, ubm, jnp.asarray(-pgwv * dc, dtype)), axis=1)
-        umax = jnp.maximum(umax, -pgwv * dc)
+        umin = jnp.min(cand(pgwv * dc), axis=1)
+        umax = jnp.max(cand(-pgwv * dc), axis=1)
     else:
-        # RULE 5 (#2545, vote 3-0): log-sum-exp soft min/max over the
-        # heating-range levels plus E3SM's sentinel +-pgwv*dc (the value of
-        # an empty range), weighted by the range weights r (#2569; a weight,
-        # not a log-mask, so a zero weight has a finite derivative);
-        # overestimates |extremum| by <= ln(n+1)/ks.  inf = E3SM's min/max.
-        # 1/ks is the soft extremum's width [m/s]: the same fp32-safe range
-        # as every RULE 5 width (codex review 2: 1e-50 / 1e40 gave NaN).
+        # RULE 5 (#2545, vote 3-0): log-sum-exp soft min/max; overestimates
+        # |extremum| by <= ln(n+1)/ks.  1/ks is the soft extremum's width
+        # [m/s]: the same fp32-safe range as every RULE 5 width (codex review
+        # 2: 1e-50 / 1e40 gave NaN).
         validate_smoothing_width("crit_minmax_sharpness (as 1/sharpness)", 1.0 / ks)
         wts = jnp.concatenate([r, one[:, None]], axis=1)
-
-        def soft_max(x, sentinel):
-            x = jnp.concatenate([x, jnp.full((ncol, 1), sentinel, dtype)], axis=1)
-            return jax.nn.logsumexp(ks * x, axis=1, b=wts) / ks
-
-        umin = -soft_max(-ubm, -pgwv * dc)
-        umax = soft_max(ubm, -pgwv * dc)
+        umin = -jax.nn.logsumexp(-ks * cand(pgwv * dc), axis=1, b=wts) / ks
+        umax = jax.nn.logsumexp(ks * cand(-pgwv * dc), axis=1, b=wts) / ks
 
     # --- Table lookup.  E3SM: tau0 = mfcc(NINT(hdepth), NINT(uh), :).
     # Round-half-away-from-zero like Fortran NINT.  NOTE (codex beres-1 #2):
