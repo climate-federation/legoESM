@@ -340,6 +340,7 @@ def _worker(args):
         },
         stokes=stokes_info,
         budgets=budgets,
+        budget_pass=max(budgets.values()) <= cfg["budget_rtol"],
         final_mld_m=float(arrays["mld_m"][-1]),
         elapsed_s=time.monotonic() - started,
     )
@@ -357,9 +358,8 @@ def _worker(args):
         )
     if not all(np.isfinite(v).all() for v in arrays.values()):
         raise RuntimeError("nonfinite column output (artifacts retained)")
-    if max(budgets.values()) > cfg["budget_rtol"]:
-        raise RuntimeError(f"budget check failed (artifacts retained): {budgets}")
     print(json.dumps({"case": stem, "final_mld_m": metadata["final_mld_m"], **budgets}), flush=True)
+    return 0 if metadata["budget_pass"] else 1
 
 
 def plot_results(output_dir):
@@ -379,6 +379,8 @@ def plot_results(output_dir):
         ("C_0.8", "C: Wave, A=0.80 m", "#009E73"),
     ]
     data = {stem: np.load(out / f"{stem}.npz") for stem, _, _ in cases}
+    reports = [json.loads((out / f"{stem}.json").read_text()) for stem, _, _ in cases]
+    failed = [f"{r['label']}_{r['amplitude_m']:g}" for r in reports if not r["budget_pass"]]
     fig, axes = plt.subplots(2, 2, figsize=(11, 8))
     z = data["A_0"]["z_centres_m"]
     for stem, label, color in cases:
@@ -413,15 +415,20 @@ def plot_results(output_dir):
         0.08,
         0.018,
         "A→B: weak-buoyancy correction. B→C: Wave / VR12-AL feedback. A→C: total change.\n"
-        "48 h column response; literature trend comparison, not a global-climate or LES skill score.",
+        "48 h prescribed-wave column; no global-climate or LES skill score.\n"
+        + (
+            f"Strict budget gate: FAIL ({', '.join(failed)}). All outcomes retained."
+            if failed
+            else "Strict budget gate: PASS."
+        ),
         fontsize=9,
     )
-    fig.tight_layout(rect=(0, 0.065, 1, 0.96))
+    fig.tight_layout(rect=(0, 0.095, 1, 0.96))
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"coupling_comparison.{suffix}", dpi=180)
     plt.close(fig)
     la = np.geomspace(0.1, 3, 300)
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+    fig, (ax, stokes_ax) = plt.subplots(1, 2, figsize=(11, 4.5))
     ax.loglog(la, np.sqrt(1 + 0.08 / la**2), label="Upstream legacy enhancement")
     ax.loglog(la, np.sqrt(1 + 0.08 / la**4), label="MS00")
     ax.loglog(la, np.sqrt(1 + (3.1 * la) ** -2 + (5.4 * la) ** -4), label="VR12-AL")
@@ -432,15 +439,39 @@ def plot_results(output_dir):
     )
     ax.legend()
     ax.grid(alpha=0.25)
+    amplitudes = [r["amplitude_m"] for r in reports[2:]]
+    stokes_ax.plot(
+        amplitudes,
+        [r["stokes"]["analytic_surface_mps"] for r in reports[2:]],
+        color="#333333",
+        label="Independent analytic Stokes",
+    )
+    stokes_ax.scatter(
+        amplitudes,
+        [r["stokes"]["production_surface_mps"] for r in reports[2:]],
+        color="#0072B2",
+        label="Production Wave diagnostic",
+        zorder=3,
+    )
+    stokes_ax.set(
+        xlabel="Wave amplitude [m]",
+        ylabel="Surface Stokes drift [m/s]",
+        title="Monochromatic diagnostic oracle",
+    )
+    stokes_ax.legend(fontsize=9)
+    stokes_ax.grid(alpha=0.25)
     fig.tight_layout()
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"enhancement_factors.{suffix}", dpi=180)
     plt.close(fig)
-    reports = [json.loads((out / f"{stem}.json").read_text()) for stem, _, _ in cases]
     summary = dict(
         config=cfg,
         cases=reports,
         interpretation="Prescribed-wave column trends; no numerical LES/global skill claim.",
+        budget_pass=all(r["budget_pass"] for r in reports),
+        failed_budget_cases=[
+            f"{r['label']}_{r['amplitude_m']:g}" for r in reports if not r["budget_pass"]
+        ],
         changes_m={
             "A_to_B": reports[1]["final_mld_m"] - reports[0]["final_mld_m"],
             "B_to_C": [r["final_mld_m"] - reports[1]["final_mld_m"] for r in reports[2:]],
@@ -466,8 +497,14 @@ def run_suite(output_dir, upstream_root, *, plot=True):
     )
     cases = [("A", 0.0, Path(upstream_root).resolve()), ("B", 0.0, ROOT)]
     cases += [("C", amp, ROOT) for amp in cfg["wave_amplitudes_m"]]
+    for label, amp, _ in cases:
+        for suffix in ("json", "npz", "csv"):
+            if (out / f"{label}_{amp:g}.{suffix}").exists():
+                raise FileExistsError("use a new output directory; previous evidence is retained")
+    failures = []
+    fatal = []
     for label, amp, source in cases:
-        subprocess.run(
+        completed = subprocess.run(
             [
                 sys.executable,
                 str(Path(__file__).resolve()),
@@ -482,10 +519,27 @@ def run_suite(output_dir, upstream_root, *, plot=True):
                 str(out),
             ],
             env=env,
-            check=True,
+            check=False,
             cwd=out,
         )
-    return plot_results(out) if plot else None
+        if completed.returncode:
+            failures.append(f"{label}_{amp:g}")
+        if completed.returncode not in (0, 1):
+            fatal.append(f"{label}_{amp:g}")
+    if fatal:
+        (out / "fatal_cases.json").write_text(json.dumps(fatal, indent=2) + "\n")
+        raise RuntimeError(f"fatal worker/source failure, no comparison plotted: {fatal}")
+    complete = all(
+        (out / f"{label}_{amp:g}.json").exists() and (out / f"{label}_{amp:g}.npz").exists()
+        for label, amp, _ in cases
+    )
+    summary = plot_results(out) if plot and complete else None
+    if failures:
+        (out / "failed_cases.json").write_text(json.dumps(failures, indent=2) + "\n")
+        raise RuntimeError(
+            f"comparison incomplete or strict budget gate failed: {failures}; artifacts retained"
+        )
+    return summary
 
 
 if __name__ == "__main__":
@@ -498,4 +552,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not args.worker:
         parser.error("use validate_ocean_scm.py --case wave_langmuir")
-    _worker(args)
+    try:
+        status = _worker(args)
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        status = 2
+    sys.exit(status)

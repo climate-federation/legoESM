@@ -77,3 +77,15 @@ Outputs: per-case NPZ histories, JSON configuration/provenance/budget reports,
 CSV time series, and PNG/PDF plots. Relative module paths, source revisions,
 source/input checksums, canonical constants and active KPP fields are stamped.
 Local absolute paths must not appear in committed evidence or PR text.
+
+## Instrument handling amendment after the first A run
+
+The first baseline run used instrument revision d02a38ff99. It completed but
+exceeded the unchanged 1e-10 cooling-normalized heat gate, so the initial
+runner stopped before collecting B/C. The instrument now collects all finite,
+source-verified cases and plots them while preserving each strict budget
+failure and an overall nonzero exit status. Fatal import/provenance/nonfinite
+errors are separate and prevent a complete comparison plot. Existing evidence
+is never overwritten. This changes reporting only: no model, input, statistic,
+tolerance, time window or interpretation threshold is changed. Any diagnosis
+of accumulated roundoff is post-hoc and does not convert a gate failure to PASS.

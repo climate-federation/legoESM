@@ -66,3 +66,32 @@ def test_instrument_gate_rejects_untracked_and_uncommitted_files(monkeypatch):
     monkeypatch.setattr(instrument, "_git", lambda *args: "0" * 40)
     with pytest.raises(RuntimeError, match="not committed at HEAD"):
         instrument._require_committed_instrument()
+
+
+@pytest.mark.parametrize("first_status", [1, 2])
+def test_failed_cases_are_retained_without_hiding_fatal_errors(tmp_path, monkeypatch, first_status):
+    from types import SimpleNamespace
+
+    from scripts.validate import wave_kpp_coupling as instrument
+
+    calls, plots = [], []
+    monkeypatch.setattr(instrument, "_git", lambda *args: "")
+    monkeypatch.setattr(instrument, "_require_committed_instrument", lambda: None)
+
+    def worker(command, **kwargs):
+        out = tmp_path / "results"
+        label = command[command.index("--label") + 1]
+        amplitude = float(command[command.index("--amplitude") + 1])
+        stem = f"{label}_{amplitude:g}"
+        for suffix in ("npz", "json"):
+            (out / f"{stem}.{suffix}").touch()
+        calls.append(stem)
+        return SimpleNamespace(returncode=first_status if label == "A" else 0)
+
+    monkeypatch.setattr(instrument.subprocess, "run", worker)
+    monkeypatch.setattr(instrument, "plot_results", lambda out: plots.append(out))
+    message = "strict budget" if first_status == 1 else "fatal worker/source"
+    with pytest.raises(RuntimeError, match=message):
+        instrument.run_suite(tmp_path / "results", tmp_path / "upstream")
+    assert len(calls) == 5  # collecting all outcomes never changes the gate
+    assert len(plots) == (1 if first_status == 1 else 0)
