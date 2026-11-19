@@ -66,11 +66,11 @@ BASELINE = {
     "A0": ("hard", 44), "A1": ("hard", 7), "A2": ("hard", 2), "A3": ("hard", 2),
     "A4": ("hard", 5), "A5": ("hard", 3), "A6": ("hard", 10), "B1": ("hard", 18),
     "B2": ("hard", 29), "B3": ("hard", 74), "B4": ("hard", 33), "B5": ("hard", 4),
-    "C-KCHECK": ("hard", 41), "C-KLCL": ("hard", 73), "C-KLCLg": ("smooth", 11),
+    "C-KCHECK": ("hard", 40), "C-KLCL": ("hard", 72), "C-KLCLg": ("smooth", 11),
     "C-KLCL2": ("hard", 34),
     "C-KPBL": ("hard", 67), "C-L5": ("hard", 6),
     "C-L5g": ("smooth", 6), "C-LDB": ("hard", 32), "C-LET": ("hard", 35),
-    "C-LFS": ("hard", 37), "C-LTOP": ("hard", 102), "C-LTOPs": ("smooth", 61), "C-LETs": ("smooth", 37), "C-ML": ("hard", 6),
+    "C-LFS": ("hard", 36), "C-LTOP": ("hard", 102), "C-LTOPs": ("smooth", 61), "C-LETs": ("smooth", 35), "C-ML": ("hard", 6),
     "C-MLs": ("smooth", 13), "C-LFSs": ("smooth", 14), "C-LDBs": ("smooth", 34), "B3s": ("smooth", 15), "D7hs": ("smooth", 3), "C-NIC": ("hard", 7),
     "C-NSTEP": ("hard", 4), "D1": ("smooth", 5), "D2": ("hard", 5), "D3": ("smooth", 6),
     "D4": ("smooth", 19), "D5": ("hard", 2), "D6": ("hard", 4), "D7a": ("smooth", 18),
@@ -80,9 +80,9 @@ BASELINE = {
     "E3": ("smooth", 3), "E4": ("smooth", 2), "E5": ("smooth", 8), "E6": ("smooth", 5),
     "E7": ("smooth", 4), "E8": ("smooth", 2), "E9": ("smooth", 8), "E10": ("smooth", 7),
     "E11": ("hard", 12), "E11c": ("smooth", 4), "E12": ("smooth", 10), "E13": ("smooth", 4),
-    "E14": ("smooth", 2), "E15": ("smooth", 13), "E16": ("hard", 5), "E17": ("smooth", 3),
+    "E14": ("smooth", 2), "E15": ("smooth", 17), "E16": ("hard", 5), "E17": ("smooth", 3),
     "E18": ("smooth", 1), "E19": ("smooth", 2), "F1": ("smooth", 19), "F2": ("smooth", 40),
-    "S": ("static", 286), "H": ("static", 17),
+    "S": ("static", 294), "H": ("static", 17),
 }
 
 

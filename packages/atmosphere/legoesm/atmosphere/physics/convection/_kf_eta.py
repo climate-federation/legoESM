@@ -46,6 +46,7 @@ Oracle behaviour that cannot be expressed in JAX and is mapped instead:
 from __future__ import annotations
 
 import functools
+import math
 from typing import NamedTuple
 
 import jax
@@ -397,7 +398,8 @@ class KFSmoothing(NamedTuple):
       the same face weight on both sides), ``timec_clip_width_s`` (E12 TIMEC
       clip), ``pef_clip_width`` (E13), ``pefcbh_cap_width`` (E14, one-sided),
       ``uerder_onset_width_kgs`` (E15 eligibility UER - DER > 1e-3, centred),
-      ``ainc_min_width`` (E15 level minimum of the inflow limits and AINC <= 1),
+      ``ainc_min_width`` (E15 level minimum of the inflow limits and AINC <= 1;
+      a relative width, the minima are taken in log space),
       ``ainc_cap_width`` (E19 AINC <= AINCMX, one-sided), ``qmix_floor_width_kgkg``
       (E17 qmix >= 0, one-sided), ``dabe_floor_width_jkg`` (E18 DABE >= 0.1 ABE),
       ``closure_sup_width_kgkg`` (D7j, blend of the supersaturated and
@@ -1244,13 +1246,19 @@ def _survival_inflow_limit(aincm1, wl, cap):
 
 def _inflow_limit_c1(aincm1, elig, w):
     """AINCMX = min(_AINCMX0, the levels' limits) and AINC = min(AINCMX, 1) as
-    a fold of C1 minima (E15, width ``w``; exact outside the bands); ``elig``
-    in [0, 1] blends each level's limit with ``top`` (no-op in the fold)."""
-    top = _AINCMX0 + w
+    a fold of C1 minima in log space (E15; ``w`` is a relative width, exact
+    where two limits differ by more than a factor exp(w/2)).  Always
+    0 < AINC <= min(AINCMX, 1) and AINCMX <= the hard minimum, at most a
+    factor exp(-w/8) below it per tied level (vote 25).  ``elig`` in [0, 1]
+    blends each level's limit with ``top`` (no-op in the fold)."""
+    top = _AINCMX0 * math.exp(w)
     v = elig * jnp.where(elig > 0.0, jnp.minimum(aincm1, top), top) + (1.0 - elig) * top  # kfsw: E15
-    acc, _ = jax.lax.scan(lambda a, x: (smooth_min_c1(a, x, w), None),  # kfsw: E15
-                          jnp.asarray(_AINCMX0, aincm1.dtype), v)
-    return acc, _cap_c1(acc, 1.0, w)
+    if not w:  # kfsw: S
+        acc = jnp.minimum(_AINCMX0, jnp.min(v))  # kfsw: E15
+        return acc, jnp.minimum(acc, 1.0)  # kfsw: E15
+    lacc, _ = jax.lax.scan(lambda a, x: (smooth_min_c1(a, x, w), None),  # kfsw: E15
+                           jnp.asarray(math.log(_AINCMX0), aincm1.dtype), jnp.log(v))
+    return jnp.exp(lacc), jnp.exp(smooth_min_c1(lacc, 0.0, w))  # kfsw: E15
 
 
 def _floor0_c1(x, w):
@@ -2236,7 +2244,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     AINCM1 = EMS / (_sd(udd, okm) * TIMEC)  # kfsw: E15
     if sv:  # kfsw: S
         wl = jnp.where(kk <= KLCL, 1.0, jnp.cumsum(ql[::-1])[::-1] / PCD)  # kfsw: C-LETs
-        AINCM1 = _survival_inflow_limit(AINCM1, wl, _AINCMX0 + sm.ainc_min_width)
+        AINCM1 = _survival_inflow_limit(AINCM1, wl, _AINCMX0 * math.exp(sm.ainc_min_width))
     if sm.ainc_min_width or sm.uerder_onset_width_kgs:  # kfsw: S
         AINCMX, AINC = _inflow_limit_c1(AINCM1, elig, sm.ainc_min_width)
     else:

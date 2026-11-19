@@ -911,25 +911,46 @@ def test_closure_local_switch_is_oracle_outside_its_band_and_differentiable_insi
 
 
 def test_inflow_limit_fold_is_the_oracle_min_at_zero_width_and_c1_inside():
-    """E15: the fold of C1 minima over the levels is the oracle's min(_AINCMX0,
-    min over eligible levels) and AINC = min(AINCMX, 1) at width 0, exact
-    outside the bands, and differentiable in a level's limit inside one."""
+    """E15: the log-space fold of C1 minima over the levels is the oracle's
+    min(_AINCMX0, min over eligible levels) and AINC = min(AINCMX, 1) at width
+    0, exact (to round-off of exp(log)) outside the relative bands, and
+    differentiable in a level's limit inside one."""
     a = jnp.asarray([5.0, 0.6, 0.05, 0.62, 2000.0])
     ok = jnp.asarray([True, True, False, True, True])
     hard = jnp.minimum(kfe._AINCMX0, jnp.min(jnp.where(ok, a, kfe._AINCMX0)))
     mx, ai = kfe._inflow_limit_c1(a, ok, 0.0)
     assert float(mx) == float(hard) and float(ai) == float(jnp.minimum(hard, 1.0))
     w = _DEFAULT.ainc_min_width
-    far = a.at[3].set(0.7)
-    mxs, ais = kfe._inflow_limit_c1(far, ok, w)
-    assert float(mxs) == 0.6 and float(ais) == 0.6
+    mxs, ais = kfe._inflow_limit_c1(a, ok, w)  # 0.62 is outside 0.6's band
+    np.testing.assert_allclose([float(mxs), float(ais)], [0.6, 0.6], rtol=1e-14)
     f = lambda v: kfe._inflow_limit_c1(a.at[3].set(v), ok, w)[1]  # noqa: E731
-    _grad_nonzero(f, jnp.asarray(0.603), 1e-5)
+    _grad_nonzero(f, jnp.asarray(0.601), 1e-5)
     e = jnp.asarray([1.0, 0.3, 0.0, 1.0, 1.0])
     g = jax.grad(lambda e: kfe._inflow_limit_c1(a, e, w)[0])(e)
     assert bool(jnp.all(jnp.isfinite(g))) and float(g[2]) == 0.0
     mx0, ai0 = kfe._inflow_limit_c1(a, e.at[1].set(0.0).at[3].set(0.0), w)
-    assert float(mx0) == 5.0 and float(ai0) == 1.0  # ineligible levels drop out
+    np.testing.assert_allclose(float(mx0), 5.0, rtol=1e-14)
+    assert float(ai0) == 1.0  # ineligible levels drop out
+
+
+@pytest.mark.parametrize("limits", [
+    [1e-3, 1e-3], [1e-3] * 40, [1.0, 1.0], [0.999, 5.0], [1.002, 1.003, 0.9990],
+    [3000.0, 2500.0], [1000.0, 1000.0, 1004.0], [1e-9, 1e-9, 2e-9]])
+def test_inflow_limit_bounds_hold_at_ties_small_limits_and_the_caps(limits):
+    """Vote 25: 0 < AINC <= min(AINCMX, 1), AINCMX <= the hard minimum (and so
+    <= _AINCMX0) and >= it times exp(-n w / 8); finite gradients at ties.  The
+    additive fold this replaces gave AINCMX = -2.5e-4 on [1e-3, 1e-3] and its
+    one-sided cap AINC = 0.99981 > AINCMX = 0.999."""
+    w = _DEFAULT.ainc_min_width
+    a = jnp.asarray(limits)
+    ok = jnp.ones(a.shape, bool)
+    hard = min(kfe._AINCMX0, min(limits))
+    mx, ai = (float(v) for v in kfe._inflow_limit_c1(a, ok, w))
+    assert 0.0 < ai <= min(mx, 1.0) and mx <= hard * (1 + 4e-16)
+    assert mx >= hard * np.exp(-(len(limits) + 1) * w / 8.0) * (1 - 1e-12)
+    for i in (0, 1):
+        g = jax.grad(lambda v: kfe._inflow_limit_c1(v, ok, w)[i])(a)  # noqa: B023
+        assert bool(jnp.all(jnp.isfinite(g))) and bool(jnp.all(g >= 0.0))
 
 
 def test_feedback_products_are_c1_through_cpr_zero(fix):
