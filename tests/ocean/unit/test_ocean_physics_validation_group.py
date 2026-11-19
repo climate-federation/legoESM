@@ -15,6 +15,8 @@ Run with:  JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m pytest
 
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -560,15 +562,19 @@ def test_jit_parity_kpp():
     from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
     from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
     u, v, T, S, rho, eta, z, J = _kpp_state()
+    from legoesm.ocean.eos import wright_eos
     cfg = KPPConfig()
     tau_x = jnp.full((6, 2, 2), 0.1, dtype=jnp.float64)
     tau_y = jnp.zeros((6, 2, 2), dtype=jnp.float64)
     B_f = jnp.full((6, 2, 2), 1e-7, dtype=jnp.float64)
+    # cvmix differences two EOS calls; the default-policy f32 EOS rounds them
+    # differently eager vs jit (~1 f32 ulp of rho).
+    eos64 = functools.partial(wright_eos, compute_dtype=jnp.float64)
 
     def run(uu):
         return kpp_vertical_mixing(uu, v, T, S, rho, eta, z, J, cfg,
                                    tau_x=tau_x, tau_y=tau_y, B_f=B_f,
-                                   apply_diffusion=False).K_v
+                                   apply_diffusion=False, eos_fn=eos64).K_v
 
     eager = run(u)
     jitted = jax.jit(run)(u)

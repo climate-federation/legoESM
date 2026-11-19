@@ -1819,6 +1819,7 @@ def assert_tke_surface_pair_resolved(vmix_cfg) -> None:
 
 
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
+                              kpp_bld_structure=None,
                               tke_surface_bc=None, tke_surface_bc_level=None,
                               tke_mxl_choice=None,
                               tke_n2_mode=None, tke_n2_eos_form=None,
@@ -1922,7 +1923,10 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
             _tke = _tke._replace(kappaH_min=_checked_kappah_min(tke_kappah_min))
         vm = VerticalMixingConfig(scheme="tke", tke=_tke)
     elif tripole_vmix == "kpp":
-        vm = VerticalMixingConfig(scheme="kpp", kpp=KPPConfig())
+        kpp = KPPConfig()
+        if kpp_bld_structure is not None:
+            kpp = kpp._replace(bld_structure=kpp_bld_structure)
+        vm = VerticalMixingConfig(scheme="kpp", kpp=kpp)
     else:
         raise ValueError(
             f"unknown --tripole-vmix {tripole_vmix!r}; expected 'none', "
@@ -1964,6 +1968,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
+                 kpp_bld_structure=None,
                   tke_surface_bc_level=None,
                   tke_mxl_choice=None, tke_prognostic=None,
                   tke_n2_mode=None, tke_n2_eos_form=None,
@@ -2274,6 +2279,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # the surface TKE input sees the real wind stress.
         _vm_cfg = build_tripole_vmix_config(
             tripole_vmix, iwm=iwm if _use_iwm else None,
+            kpp_bld_structure=kpp_bld_structure,
             tke_eice=tke_eice, tke_surface_bc=tke_surface_bc,
             tke_surface_bc_level=tke_surface_bc_level,
             tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic,
@@ -4304,6 +4310,17 @@ def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
                 f"got {kpp_eice!r}.")
         kpp = kpp._replace(eice=int(kpp_eice))
     return VerticalMixingConfig(scheme="kpp", kpp=kpp)
+
+
+def _validate_kpp_bld_structure(grid, tripole_vmix, kpp_bld_structure):
+    """``--kpp-bld-structure`` reaches only the tripole KPP closure; refuse it
+    anywhere it would be silently discarded."""
+    if kpp_bld_structure is not None and not (
+            grid == "tripole" and tripole_vmix == "kpp"):
+        raise ValueError(
+            "--kpp-bld-structure is wired only into --grid tripole "
+            f"--tripole-vmix kpp; got --grid {grid!r} --tripole-vmix "
+            f"{tripole_vmix!r}.")
 
 
 def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None,
@@ -8363,6 +8380,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "too-deep JANUARY winter ML, 174 m vs NEMO 93 m, that "
                         "cools the 100 m mode water). --grid mpas/latlon_bathy "
                         "only (both run KPP); tripole has no KPP boundary layer.")
+    p.add_argument("--kpp-bld-structure", type=str, default=None,
+                   choices=["legacy", "cvmix"],
+                   help="KPP boundary-layer structure (KPPConfig.bld_structure)"
+                        " for --grid tripole --tripole-vmix kpp. Unset keeps "
+                        "the KPPConfig default.")
     p.add_argument("--kpp-cv", type=float, default=None,
                    help="Override the KPP unresolved-shear coefficient Cv "
                         "(default 1.6). RAISING it increases V_t^2 -> deeper "
@@ -8814,6 +8836,8 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
+    _validate_kpp_bld_structure(args.grid, args.tripole_vmix,
+                                args.kpp_bld_structure)
     if args.tke_shear_avm_weighting is not None and not (
             (args.grid == "tripole" and args.tripole_vmix == "tke")
             or (args.grid == "mpas" and args.mpas_vmix == "tke")
@@ -9557,6 +9581,7 @@ def main() -> int:
             prescribed_flow=args.prescribed_flow,
             no_gm_redi=args.no_gm_redi,
             tripole_vmix=args.tripole_vmix,
+            kpp_bld_structure=args.kpp_bld_structure,
             tke_eice=args.tke_eice,
             tke_surface_bc=args.tke_surface_bc,
             tke_surface_bc_level=args.tke_surface_bc_level,
@@ -9859,6 +9884,7 @@ def main() -> int:
             # build_latlon_bathy already threaded into live KPP (codex). Fail
             # loud on the conflict rather than let YAML win over the explicit CLI.
             if "physics" in _ovr and (args.kpp_ri_crit is not None
+                                      or args.kpp_bld_structure is not None
                                       or args.kpp_cv is not None
                                       or args.kpp_eice is not None
                                       or args.tke_surface_bc is not None
@@ -9867,7 +9893,7 @@ def main() -> int:
                                       or args.tke_step_evaluation is not None
                                       or args.tke_langmuir_rhs_coupling is not None):
                 raise ValueError(
-                    "--kpp-ri-crit/--kpp-cv/--kpp-eice/--tke-buoyancy-sink/--tke-step-evaluation conflict with a --config "
+                    "--kpp-ri-crit/--kpp-bld-structure/--kpp-cv/--kpp-eice/--tke-buoyancy-sink/--tke-step-evaluation conflict with a --config "
                     "ocean.physics block: the YAML physics config would overwrite "
                     "the CLI KPP override. Set Ri_crit/Cv/eice in the YAML "
                     "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "

@@ -481,7 +481,8 @@ class TestIssue7_KPP:
         # Positive B_f = unstable (convective)
         B_f = jnp.full(shape_2d, 1e-7)
 
-        cfg = KPPConfig()
+        # cvmix puts this weakly forced column's BL in the top cell (no non-local).
+        cfg = KPPConfig(bld_structure="legacy")
         out = kpp_vertical_mixing(u, v, T, S, rho, eta, z_coord, jacobian, cfg, B_f=B_f)
 
         # dT_dt should be nonzero (non-local transport active in unstable BL)
