@@ -4531,7 +4531,7 @@ def wp23_rhs(*, nzm, invrs_dt, rhs_pr_turb_wp3, rhs_pr_dfsn_wp3, rhs_pr_dfsn_wp2
     # current value, lower/upper wp3 = 0, upper wp2 = w_tol_sqd
     even = _edge_rows(wp2_int, wp2[:, 0], w_tol_sqd)
     odd = _edge_rows(wp3_int, 0.0, 0.0)
-    return _interleave_zm_zt(even, odd)
+    return _interleave_zm_zt(even, odd).astype(wp2.dtype)
 
 
 def wp23_lhs(*, nzm, ndim, invrs_dt, lhs_ma_zm, lhs_diff_zm, lhs_ta_wp2,
@@ -4581,7 +4581,7 @@ def wp23_lhs(*, nzm, ndim, invrs_dt, lhs_ma_zm, lhs_diff_zm, lhs_ta_wp2,
         corner = 1.0 if b == 2 else 0.0
         bands.append(_interleave_zm_zt(_edge_rows(wp2_rows[b], corner, corner),
                                        _edge_rows(wp3_rows[b], corner, corner)))
-    return jnp.stack(bands, axis=0)
+    return jnp.stack(bands, axis=0).astype(lhs_dp1_wp2.dtype)
 
 
 def wp23_solve(lhs, rhs):
@@ -5317,7 +5317,7 @@ def xm_wpxp_lhs(lhs_diff_zm, lhs_ma_zm, lhs_ma_zt, lhs_ta_wpxp, lhs_ta_xm,
         corner = 1.0 if b == 2 else 0.0
         bands.append(_interleave_zm_zt(_edge_rows(wpxp_rows[b], corner, corner),
                                        xm_rows[b]))
-    return jnp.stack(bands, axis=0)
+    return jnp.stack(bands, axis=0).astype(lhs_diff_zm.dtype)
 
 
 def xm_wpxp_rhs(wpxp, xm, wpxp_forcing, xm_forcing, rhs_bp_pr3, rhs_ta,
@@ -5341,7 +5341,7 @@ def xm_wpxp_rhs(wpxp, xm, wpxp_forcing, xm_forcing, rhs_bp_pr3, rhs_ta,
         + wpxp[:, 1:-1] * invrs_dt)
     even = _edge_rows(rhs_int, wpxp[:, k_lb_zm], 0.0)
     odd = xm * invrs_dt + xm_forcing
-    return _interleave_zm_zt(even, odd)
+    return _interleave_zm_zt(even, odd).astype(wpxp.dtype)
 
 
 def xm_wpxp_solve(lhs, rhs):
@@ -5369,9 +5369,11 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
     thlm/wpthlp. CAM ``l_predict_upwp_vpwp = .false.`` so the wind fluxes
     upwp/vpwp are NOT advanced here (they are diagnosed; um/vm go through
     ``advance_windm_edsclrm``). Builds the shared ADG1 TA + LHS operators once
-    (:func:`calc_xm_wpxp_ta_terms` / :func:`calc_xm_wpxp_lhs_terms`), then for
-    each scalar: solve (:func:`solve_xm_wpxp_with_single_lhs`) → per-field
-    clipping (:func:`xm_wpxp_clipping_and_stats`: MFL → fill_holes → clip_covar).
+    (:func:`calc_xm_wpxp_ta_terms` / :func:`calc_xm_wpxp_lhs_terms`), assembles
+    each scalar's system (:func:`assemble_xm_wpxp_system`), solves rt and thl in
+    one batched penta solve (:func:`_batched_penta_solve`; the per-scalar path
+    is :func:`solve_xm_wpxp_with_single_lhs`), then per-field clipping
+    (:func:`xm_wpxp_clipping_and_stats`: MFL → fill_holes → clip_covar).
 
     The skewness-dependent coefficients ``C6rt_Skw_fnc``/``C6thl_Skw_fnc``/
     ``C7_Skw_fnc`` and ``invrs_tau_C6_zm`` come from the orchestration (CAM
