@@ -549,7 +549,12 @@ def _c2_cold_start(run: Path):
     receipt = json.loads((run / "C_DECK_RECEIPT.json").read_text())
     master = Path(receipt["sas_ice_reference"]).parents[1]
     master_run = master / "record_100step"
-    ice_card = o17_score.card_for(master_run)._replace(ln_drgice_imp=True)
+    ice_card = o17_score.card_for(master_run)._replace(
+        ln_drgice_imp=True,
+        ln_teos10=o17_score.si3_teos10_from_resolved_namelist(
+            run / "output.namelist.dyn"
+        ),
+    )
     ice_dt = 2.0 * float(coupled_ocean.dt_s)
     ice_card = ice_card._replace(
         state=ice_card.state._replace(nn_fsbc=2, rDt_ice=ice_dt),
@@ -763,11 +768,14 @@ def _c2_trace_fields(trace, card, kind: int) -> dict[str, object]:
         core = trace.ice_core
         h = int(card.ice.state.nn_hls)
         out = dict(_state_score_fields(core.final.state, interior_halo=h))
-        out.update({name: getattr(core.final.fluxes, name) for name in core.final.fluxes._fields})
+        out.update({
+            name: getattr(core.correction.fluxes, name)
+            for name in core.correction.fluxes._fields
+        })
         out.update({name: getattr(core.update_forcing, name) for name in core.update_forcing._fields})
         out["tmask_k1"] = core.update_forcing.tmask
-        out["snwice_mass"] = core.final.state.snwice_mass
-        out["snwice_mass_b"] = core.final.state.snwice_mass_b
+        out["snwice_mass"] = core.correction.state.snwice_mass
+        out["snwice_mass_b"] = core.correction.state.snwice_mass_b
         return out
     if kind == 16:
         return {
@@ -810,6 +818,12 @@ def _c2_shard(value, shape: tuple[int, ...], rank: int) -> np.ndarray:
     if value.shape == shape:
         return value
     tail = shape[2:]
+    if value.shape[:2] == (184, 152) and shape[:2] == (94, 152):
+        start = rank * (shape[0] - 4)
+        result = value[start:start + shape[0]]
+        if result.shape != shape:
+            raise ValueError(f"C2 full-halo shard shape mismatch: {result.shape} != {shape}")
+        return result
     if value.shape[:2] == (184, 152):
         owned = value[2:-2, 2:-2]
     elif value.shape[:2] == (180, 148):
@@ -826,8 +840,8 @@ def _c2_shard(value, shape: tuple[int, ...], rank: int) -> np.ndarray:
     return result
 
 
-def run_c2_compiled(evidence: Path) -> dict:
-    """Run the two-step cold C2 trajectory once under ``jax.jit`` and score it."""
+def run_c2_compiled_observations(evidence: Path):
+    """Run the two-step cold C2 trajectory and return scorer-ready observations."""
     from legoesm.ocean import bulk_flux_omip as bulk
 
     expected, masks = load_c2_expected(evidence)
@@ -862,6 +876,12 @@ def run_c2_compiled(evidence: Path) -> dict:
                             global_fields[name], np.asarray(reference).shape, rank
                         )
                 candidate[(kind, kt, rank)] = fields
+    return candidate, expected, masks
+
+
+def run_c2_compiled(evidence: Path) -> dict:
+    """Run the two-step cold C2 trajectory once under ``jax.jit`` and score it."""
+    candidate, expected, masks = run_c2_compiled_observations(evidence)
     return score_c2_observations(candidate, expected, masks)
 
 

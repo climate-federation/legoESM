@@ -76,6 +76,7 @@ from legoesm.ice.si3_surface import (
 from legoesm.ice.si3_thd_pnd import SI3O12Stages, si3_ice_thd_o12_stages
 
 from legoesm import constants
+from legoesm.core.nemo_namelist import parse_namelist
 
 
 class SI3O17Card(NamedTuple):
@@ -89,6 +90,7 @@ class SI3O17Card(NamedTuple):
     correction: SI3IceCorConfig
     surface: SI3SurfaceConfig
     thermo_namelist: dict
+    ln_teos10: bool
     constants: IceConstantsConfig
     rn_himin: float
     rn_hinew: float
@@ -185,13 +187,42 @@ class SI3O17ThroughUpdateFlux(NamedTuple):
     stress_inputs: SI3StressInputs
 
 
-def build_orca2_sas_ice_o17_card(*, surface: SI3SurfaceConfig, thermo_namelist: dict) -> SI3O17Card:
+def si3_teos10_from_resolved_namelist(path) -> bool:
+    """Resolve NEMO's executed EOS arm for the SI3 freezing-point call."""
+
+    values = parse_namelist(path, "dyn")
+    selected = {}
+    for name in ("ln_teos10", "ln_eos80", "ln_seos"):
+        matches = [
+            tokens
+            for (_, group, key), tokens in values.items()
+            if group == "nameos" and key == name
+        ]
+        if (
+            len(matches) != 1
+            or len(matches[0]) != 1
+            or not isinstance(matches[0][0], bool)
+        ):
+            raise ValueError(f"resolved nameos must contain one logical {name}")
+        selected[name] = matches[0][0]
+    if sum(selected.values()) != 1:
+        raise ValueError(f"resolved nameos must select exactly one EOS: {selected}")
+    if selected["ln_seos"]:
+        raise ValueError("SI3 freezing point does not support NEMO's simplified EOS")
+    return selected["ln_teos10"]
+
+
+def build_orca2_sas_ice_o17_card(
+    *, surface: SI3SurfaceConfig, thermo_namelist: dict, ln_teos10: bool
+) -> SI3O17Card:
     """Write every frozen ORCA2_SAS_ICE selector into one O17 card."""
 
     if not isinstance(surface, SI3SurfaceConfig):
         raise TypeError("O17 requires an explicit resolved SI3SurfaceConfig")
     if not isinstance(thermo_namelist, dict):
         raise TypeError("O17 requires the explicit resolved thermodynamic namelist")
+    if not isinstance(ln_teos10, bool):
+        raise TypeError("O17 requires the explicit resolved EOS selector")
     cfg = SI3ORCA2StateConfig(
         jpl=5,
         nlay_i=10,
@@ -304,6 +335,7 @@ def build_orca2_sas_ice_o17_card(*, surface: SI3SurfaceConfig, thermo_namelist: 
         correction=correction,
         surface=surface,
         thermo_namelist=dict(thermo_namelist),
+        ln_teos10=ln_teos10,
         constants=NEMO_SI3_CONSTANTS_CONFIG,
         rn_himin=0.1,  # coeff-ok: frozen ORCA2_SAS_ICE deck selector
         rn_hinew=0.1,  # coeff-ok: frozen ORCA2_SAS_ICE deck selector
@@ -618,7 +650,7 @@ def _si3_o17_through_update_flx(
     u_ice_b = state.u_ice  # icestp.F90:151; store_fields :421-423
     v_ice_b = state.v_ice  # icestp.F90:151; store_fields :421-423
     t_bo_celsius = si3_eos_fzp(  # icestp.F90:136
-        forcing.sss_m, kbnd=0, nn_hls=h  # icestp.F90:136
+        forcing.sss_m, kbnd=0, nn_hls=h, ln_teos10=card.ln_teos10  # icestp.F90:136
     )
     t_bo = (t_bo_celsius[owned] + card.constants.T0) * sf.smask0 + card.constants.T0 * (1.0 - sf.smask0)  # icestp.F90:138
     t_si_step = state.t_si  # icestp.F90:164; diag_set0 :485-488 touches A2D(0) only
@@ -1150,7 +1182,11 @@ def _si3_o17_through_update_flx(
         qns_oce=sf.qns_oce,
         qemp_oce=b2.qemp_oce,
         qemp_ice=b2.qemp_ice,
-        qns_ice=b2.qns_ice,
+        qns_ice=jnp.where(  # icethd.F90:509-510; only active categories scatter back
+            thermo_active_owned,
+            jnp.stack([c.o10.o9.zdf.qns_ice for c in stages.categories], axis=-1)[owned],
+            b2.qns_ice,
+        ),
         emp_oce=b2.emp_oce,
         emp_ice=b2.emp_ice,
         qns_tot=b2.qns_tot,
@@ -1169,7 +1205,7 @@ def _si3_o17_through_update_flx(
         alb_ice=alb,
         cloud_fra=sf.cloud_fra,
         smask0=sf.smask0,
-        qsr=zero2,
+        qsr=sf.qsr,  # sbcblk.F90:763; unchanged at ice_update_flx entry
         sfx=zero2,
         tmask=forcing.aevp_forcing.tmask_t,
         snwice_mass=state.snwice_mass,

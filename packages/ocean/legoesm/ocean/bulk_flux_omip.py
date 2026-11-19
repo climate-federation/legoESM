@@ -979,7 +979,7 @@ class NemoORCA2SI3Carry:
     __slots__ = (
         "ocean", "ice", "means", "stress", "fluxes", "runoff",
         "restoring_volume_flux", "restoring_heat_flux", "restoring_coefficient",
-        "a_fwb", "a_fwb_b", "emp_corr", "kt",
+        "a_fwb", "a_fwb_b", "emp_corr", "shortwave_fraction_top", "kt",
     )
 
     _dynamic_fields = __slots__[:-1]
@@ -998,6 +998,7 @@ class NemoORCA2SI3Carry:
         a_fwb,
         a_fwb_b,
         emp_corr,
+        shortwave_fraction_top,
         kt,
     ):
         if type(kt) is not int or kt < 1:
@@ -1005,7 +1006,7 @@ class NemoORCA2SI3Carry:
         for name, value in zip(self._dynamic_fields, (
             ocean, ice, means, stress, fluxes, runoff,
             restoring_volume_flux, restoring_heat_flux, restoring_coefficient,
-            a_fwb, a_fwb_b, emp_corr,
+            a_fwb, a_fwb_b, emp_corr, shortwave_fraction_top,
         ), strict=True):
             object.__setattr__(self, name, value)
         object.__setattr__(self, "kt", kt)
@@ -1045,7 +1046,7 @@ def nemo_orca2_si3_cold_start(
     return NemoORCA2SI3Carry(
         ocean, ice, means, stress, fluxes, runoff,
         restoring_volume_flux, restoring_heat_flux, restoring_coefficient,
-        fwb.a_fwb, fwb.a_fwb_b, fwb.emp_corr, kt,
+        fwb.a_fwb, fwb.a_fwb_b, fwb.emp_corr, means.frq, kt,
     )
 
 
@@ -1092,8 +1093,6 @@ def nemo_orca2_si3_coupled_step(
 
     from legoesm.ice.si3_finalize import si3_ice_update_tau
     from legoesm.ice.si3_o17 import SI3O17LiveForcing, si3_o17_through_update_flx
-    from legoesm.ocean.eos import nemo_r3t_stretch
-
     kt = carry.kt
     if card.forcing_stride != card.ice.state.nn_fsbc:
         raise ValueError("coupled ocean/ice forcing strides disagree")
@@ -1104,12 +1103,14 @@ def nemo_orca2_si3_coupled_step(
     v_level = state.v if state.v_before is None else state.v_before
     u_owned = jnp.asarray(u_level.data, dtype=jnp.float64)[:, 1:, 0]
     v_owned = jnp.asarray(v_level.data, dtype=jnp.float64)[1:, :, 0]
-    stretch = nemo_r3t_stretch(
-        card.ocean.recipe.z_coord,
-        state.eta.data,
-        state.H_bathy.data,
-        evaluation="nemo_reciprocal",
-    )
+    if getattr(card.ocean.recipe.z_coord, "linear_free_surface", False):
+        r3t_now = jnp.zeros_like(state.eta.data)
+    else:
+        wet_depth = state.H_bathy.data > 0.0
+        safe_depth = jnp.where(wet_depth, state.H_bathy.data, 1.0)
+        # domain.F90:158 stores r1_ht_0; domqco.F90:160 multiplies by ssh.
+        r1_ht_0 = B(jnp.asarray(1.0, dtype=jnp.float64) / safe_depth)
+        r3t_now = jnp.where(wet_depth, R(state.eta.data * r1_ht_0), 0.0)
     ssm_entry = NemoS0Inputs(
         prior=carry.means,
         kt=kt,
@@ -1125,9 +1126,9 @@ def nemo_orca2_si3_coupled_step(
         ssh_now=state.eta.data,
         ssh_inverse_barometer=jnp.zeros_like(state.eta.data),
         e3t_reference=card.ocean.recipe.z_coord.nemo_e3t_0[..., 0],
-        r3t_now=stretch - jnp.asarray(1.0, dtype=jnp.float64),
+        r3t_now=r3t_now,
         surface_mask=state.land_mask.data,
-        shortwave_fraction_top=carry.means.frq,
+        shortwave_fraction_top=carry.shortwave_fraction_top,
     )
     # sbcmod.F90:403 calls sbc_ssm every kt; sbcssm.F90:100-173 owns its
     # odd-finalize/even-accumulate guard internally.
@@ -1153,34 +1154,46 @@ def nemo_orca2_si3_coupled_step(
     fold = card.ice.fold
     u_full = _orca2_si3_full_field(u_owned, fold, "U", h)
     v_full = _orca2_si3_full_field(v_owned, fold, "V", h)
+    # The ocean arrays handed to icestp retain +0 in their folded zero halo;
+    # SI3's vector LBC multiplication would otherwise manufacture -0 there.
+    u_full = jnp.where(u_full == 0.0, 0.0, u_full)
+    v_full = jnp.where(v_full == 0.0, 0.0, v_full)
     sst_full = _orca2_si3_full_field(means.sst, fold, "T", h)
     sss_full = _orca2_si3_full_field(means.sss, fold, "T", h)
     ssh_full = _orca2_si3_full_field(means.ssh, fold, "T", h)
     ssu_full = _orca2_si3_full_field(means.ssu, fold, "U", h)
     ssv_full = _orca2_si3_full_field(means.ssv, fold, "V", h)
+    ssu_full = jnp.where(ssu_full == 0.0, 0.0, ssu_full)
+    ssv_full = jnp.where(ssv_full == 0.0, 0.0, ssv_full)
     e3t_full = _orca2_si3_full_field(means.e3t, fold, "T", h)
     frq_full = _orca2_si3_full_field(means.frq, fold, "T", h)
     o17 = forcing.o17
     stress_template = o17.stress
     # icestp.F90:126-228: the full SI3 call through ice_update_flx is odd-only.
     if surface_update:
-        open_utau = bulk.utau.T
-        open_vtau = bulk.vtau.T
+        held_utau = _orca2_si3_insert_owned(stress_template.utau, bulk.utau.T, h)
+        held_vtau = _orca2_si3_insert_owned(stress_template.vtau, bulk.vtau.T, h)
         open_taum = bulk.taum.T
+        mean_u_full = ssu_full
+        mean_v_full = ssv_full
     else:
-        open_utau = carry.stress.utau_oce
-        open_vtau = carry.stress.vtau_oce
+        held_utau = carry.stress.utau
+        held_vtau = carry.stress.vtau
         open_taum = carry.stress.taum
+        mean_u_full = _orca2_si3_full_field(carry.means.ssu, fold, "U", h)
+        mean_v_full = _orca2_si3_full_field(carry.means.ssv, fold, "V", h)
+        mean_u_full = jnp.where(mean_u_full == 0.0, 0.0, mean_u_full)
+        mean_v_full = jnp.where(mean_v_full == 0.0, 0.0, mean_v_full)
     stress_inputs = stress_template._replace(
         uu_kbb=u_full,
         vv_kbb=v_full,
         u_ice=carry.ice.ice.u_ice,
         v_ice=carry.ice.ice.v_ice,
-        u_oce=u_full,
-        v_oce=v_full,
+        u_oce=mean_u_full,
+        v_oce=mean_v_full,
         at_i=carry.ice.ice.aggregated.at_i,
-        utau=_orca2_si3_insert_owned(stress_template.utau, open_utau, h),
-        vtau=_orca2_si3_insert_owned(stress_template.vtau, open_vtau, h),
+        utau=held_utau,
+        vtau=held_vtau,
         tmod_io=carry.stress.tmod_io,
         taum=open_taum,
         utau_oce=carry.stress.utau_oce,
@@ -1395,7 +1408,7 @@ def nemo_orca2_si3_coupled_step(
     next_carry = carry._replace(
         ocean=ocean_exit,
         ice=ice,
-        means=means._replace(frq=next_shortwave_fraction),
+        means=means,
         stress=stress,
         fluxes=next_fluxes,
         runoff=pre_fwb.runoff,
@@ -1405,6 +1418,7 @@ def nemo_orca2_si3_coupled_step(
         a_fwb=fwb.carry.a_fwb,
         a_fwb_b=fwb.carry.a_fwb_b,
         emp_corr=fwb.carry.emp_corr,
+        shortwave_fraction_top=next_shortwave_fraction,
         kt=kt + 1,
     )
     trace = NemoORCA2SI3Trace(

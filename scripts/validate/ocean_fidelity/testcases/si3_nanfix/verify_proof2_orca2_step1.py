@@ -21,6 +21,7 @@ from legoesm.ice.si3_o17 import (
     SI3O17StepState,
     SI3O17SurfaceForcing,
     build_orca2_sas_ice_o17_card,
+    si3_teos10_from_resolved_namelist,
     si3_o17_step,
 )
 from legoesm.ice.si3_orca2_state import (
@@ -225,7 +226,11 @@ def main() -> None:
     surface_cfg = SI3SurfaceConfig.from_resolved_namelists(
         run / "output.namelist.dyn", run / "output.namelist.ice"
     )._replace(switches=SI3_HARD_SWITCHES)
-    card = build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)
+    card = build_orca2_sas_ice_o17_card(
+        surface=surface_cfg,
+        thermo_namelist=nml,
+        ln_teos10=si3_teos10_from_resolved_namelist(run / "output.namelist.dyn"),
+    )
     h = int(card.state.nn_hls)
     owned = (slice(h, -h), slice(h, -h))
 

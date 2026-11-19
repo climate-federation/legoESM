@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
 
@@ -438,29 +439,24 @@ def _real_pair(fixture):
     )[0]
 
 
-@pytest.mark.parametrize(
-    "plant",
-    ("skip-even-tau", "run-si3-even", "drop-hm-i", "drop-rcdu-ice", "fwb-even", "double-lbc"),
+_C2_PLANTS = (
+    "skip-even-tau", "run-si3-even", "drop-hm-i", "drop-rcdu-ice",
+    "skip-fwb-application", "wrong-sign-center-lbc",
 )
-def test_each_c2_route_plant_changes_real_pair(real_coupled_fixture, monkeypatch, plant):
+
+
+def _install_c2_route_plant(monkeypatch, plant):
     from legoesm.ice import si3_finalize, si3_o17
     from legoesm.ocean.forcing import nemo_surface
 
-    baseline = real_coupled_fixture[4]
     if plant == "skip-even-tau":
         original = si3_finalize.si3_ice_update_tau
 
         def planted(inputs, **kwargs):
-            if kwargs["kt"] % kwargs["nn_fsbc"]:
-                real = original(inputs, **kwargs)
-                return real._replace(
-                    utau=inputs.utau,
-                    vtau=inputs.vtau,
-                    taum=inputs.taum,
-                    tmod_io=inputs.tmod_io,
-                    utau_oce=inputs.utau_oce,
-                    vtau_oce=inputs.vtau_oce,
-                )
+            if kwargs["kt"] % kwargs["nn_fsbc"] == 0:
+                # Skip only the even-step private-field hold by executing the
+                # refresh arm; the real odd step remains completely unchanged.
+                kwargs["kt"] -= 1
             return original(inputs, **kwargs)
 
         monkeypatch.setattr(si3_finalize, "si3_ice_update_tau", planted)
@@ -468,39 +464,101 @@ def test_each_c2_route_plant_changes_real_pair(real_coupled_fixture, monkeypatch
         original = bulk.nemo_orca2_ocean_consumption_step
 
         def planted(card, state, *, surface_forcing, **kwargs):
-            update = {"ice_mean_thickness_hm_i": jnp.zeros_like(surface_forcing.ice_mean_thickness_hm_i)} if plant == "drop-hm-i" else {"ice_ocean_top_drag_rCdu": jnp.zeros_like(surface_forcing.ice_ocean_top_drag_rCdu)}
-            return original(card, state, surface_forcing=surface_forcing._replace(**update), **kwargs)
+            name = (
+                "ice_mean_thickness_hm_i"
+                if plant == "drop-hm-i"
+                else "ice_ocean_top_drag_rCdu"
+            )
+            changed = surface_forcing._replace(
+                **{name: jnp.zeros_like(getattr(surface_forcing, name))}
+            )
+            return original(card, state, surface_forcing=changed, **kwargs)
 
         monkeypatch.setattr(bulk, "nemo_orca2_ocean_consumption_step", planted)
-    elif plant == "fwb-even":
+    elif plant == "skip-fwb-application":
         original = nemo_surface.nemo_fwb_case2_step
 
         def planted(carry, **kwargs):
-            if kwargs["kt"] % kwargs["forcing_stride"] == 0:
-                kwargs["kt"] -= 1
-            return original(carry, **kwargs)
+            result = original(carry, **kwargs)
+            if (kwargs["kt"] - 1) % kwargs["forcing_stride"] == 0:
+                # Omit only sbcfwb.F90:388-390.  The independent annual state
+                # sample above it executes with the real kt and annual_steps.
+                return result._replace(emp=kwargs["emp"], qns=kwargs["qns"])
+            return result
 
         monkeypatch.setattr(bulk, "nemo_fwb_case2_step", planted)
-    elif plant == "double-lbc":
+    elif plant == "wrong-sign-center-lbc":
         original = bulk.nemo_t_stress_lbc_neighbors
 
         def planted(u, v, plan):
-            first = original(u, v, plan)
-            return original(first[0], first[1], plan)
+            center_u, center_v, east, north = original(u, v, plan)
+            return -center_u, -center_v, east, north
 
         monkeypatch.setattr(bulk, "nemo_t_stress_lbc_neighbors", planted)
     elif plant == "run-si3-even":
-        carry, forcing, card, model = real_coupled_fixture[:4]
-        odd, _ = bulk.nemo_orca2_si3_coupled_step(carry, forcing, card, model=model)
-        extra = si3_o17.si3_o17_through_update_flx(
-            odd.ice, forcing.o17._replace(kt=2), card.ice
-        )
-        odd = odd._replace(ice=extra.state, fluxes=extra.final.outputs)
-        planted, _ = bulk.nemo_orca2_si3_coupled_step(odd, forcing, card, model=model)
-        assert _bits(planted) != _bits(baseline)
-        return
+        original = bulk.nemo_orca2_si3_coupled_step
+
+        def planted(carry, forcing, card, **kwargs):
+            if carry.kt % card.forcing_stride == 0:
+                extra = si3_o17.si3_o17_through_update_flx(
+                    carry.ice, forcing.o17._replace(kt=carry.kt), card.ice
+                )
+                carry = carry._replace(
+                    ice=extra.state, fluxes=extra.final.outputs
+                )
+            return original(carry, forcing, card, **kwargs)
+
+        monkeypatch.setattr(bulk, "nemo_orca2_si3_coupled_step", planted)
+    else:
+        raise AssertionError(f"unknown C2 route plant {plant}")
+
+
+@pytest.mark.parametrize("plant", _C2_PLANTS)
+def test_each_c2_route_plant_changes_real_pair(real_coupled_fixture, monkeypatch, plant):
+    baseline = real_coupled_fixture[4]
+    _install_c2_route_plant(monkeypatch, plant)
     planted = _real_pair(real_coupled_fixture)
     assert _bits(planted) != _bits(baseline)
+
+
+@pytest.mark.parametrize("plant", _C2_PLANTS)
+def test_each_c2_route_plant_fails_real_rec_c2_scorer(monkeypatch, plant):
+    from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
+        scorer,
+    )
+
+    evidence = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/"
+        "oracle_coupled_c_ladder"
+    )
+    if not (evidence / "REC_C2").is_dir():
+        pytest.skip("read-only REC_C2 evidence is unavailable")
+    if plant == "skip-fwb-application":
+        original_cold_start = scorer._c2_cold_start
+
+        def controlled_cold_start(run):
+            carry, forcing, sponge, card, model = original_cold_start(run)
+            # REC_C2 has rn_fwb0=0, so the correction application is
+            # structurally unobservable without a nonzero control carry.
+            carry = carry._replace(emp_corr=jnp.asarray(0.1, dtype=jnp.float64))
+            return carry, forcing, sponge, card, model
+
+        monkeypatch.setattr(scorer, "_c2_cold_start", controlled_cold_start)
+        control, _, masks = scorer.run_c2_compiled_observations(evidence)
+        _install_c2_route_plant(monkeypatch, plant)
+        candidate, _, _ = scorer.run_c2_compiled_observations(evidence)
+        report = scorer.score_c2_observations(candidate, control, masks)
+    else:
+        _install_c2_route_plant(monkeypatch, plant)
+        report = scorer.run_c2_compiled(evidence)
+    changed_wet = sum(row["wet_different"] for row in report["field_counts"])
+    changed_dry = sum(row["dry_other_different"] for row in report["field_counts"])
+    print(
+        f"C2_PLANT {plant} status={report['status']} "
+        f"wet_different={changed_wet} dry_other_different={changed_dry}"
+    )
+    assert report["status"].startswith("FAIL_C2"), report["status"]
+    assert changed_wet or changed_dry
 
 
 def test_compiled_real_pair_has_finite_reverse_mode_gradient(real_coupled_fixture):
@@ -583,3 +641,14 @@ def test_c2_d225_wet_plant_names_first_kind_field_cell_and_step():
     assert report["status"].startswith(
         "FAIL_C2 kind=4 field=field cell=(2, 3) kt=2 rank=1"
     )
+
+
+def test_c2_full_halo_shard_preserves_internal_rank_halos():
+    from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
+        scorer,
+    )
+
+    global_field = np.arange(184 * 152, dtype=np.float64).reshape(184, 152)
+    for rank, start in ((0, 0), (1, 90)):
+        got = scorer._c2_shard(global_field, (94, 152), rank)
+        np.testing.assert_array_equal(got, global_field[start:start + 94])
