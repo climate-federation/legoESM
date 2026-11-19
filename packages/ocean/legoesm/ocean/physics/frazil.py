@@ -58,7 +58,8 @@ half-mass cap and the rise-carry roundoff guard stay hard. KNOWN DIFFERENCE
 (fixture frazil_rule5_main_*.npz, vs the hard clip): water within about 5 mK
 of freezing forms (above it) or keeps rising (below it) up to 0.2 kg m-2 of
 ice per column and shifts T by up to 4.5 mK, so "ice present => T <= Tf" holds
-only to about 5 mK and a remelted cell can keep up to about 5 mK of
+only to about 5 mK (where the hard clip's derivative is 0 the smooth one is
+not, by design) and a remelted cell can keep up to about 5 mK of
 supercooling (the formation check covers formation only); mass and salt budgets stay exact and no ice melts beyond
 what rises.
 """
