@@ -172,9 +172,8 @@ SLOPES_AT_ZERO = {
     ("zeng1998_clm", "m"): (4.0, 5.0), ("zeng1998_clm", "h"): (8.0, 5.0),
 }
 # Measured outcome of the user's rule (phi continuous everywhere, C1 except at zeta = 0), recorded, not fixed.
-C1_FAILURES = {
-    "dyer1974": [-10.0, 10.0], "beljaars_holtslag1991": [-10.0, 10.0], "grachev2007_sheba": [-10.0, 10.0],
-    "gryanik2020": [-10.0, 10.0], "holtslag_debruin1988": [-10.0], "gfs": [-0.5],
+C1_FAILURES = {  # the model's hard |zeta| = 10 clip became a smooth cap in #2511, removing those kinks
+    "gfs": [-0.5],
     "zeng1998_clm_m": [-1.574, 1.0], "zeng1998_clm_h": [-0.465, 1.0],
 }
 
