@@ -2621,8 +2621,9 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         # column as fired while any share survives (votes K10)
         fired = fired0 & (C["R"] < 1.0)  # kfsw: A5s
         keep = 1.0 - C["R"]
-        DTDT, DQDT, DQCDT, DQRDT, DQIDT, DQSDT, PRATEC, TDER, PPTFLX = (
-            x * keep for x in (DTDT, DQDT, DQCDT, DQRDT, DQIDT, DQSDT, PRATEC, TDER, PPTFLX))
+        # FRC2 carries PPTFLX into the wrapper's rain split: scaled with it
+        DTDT, DQDT, DQCDT, DQRDT, DQIDT, DQSDT, PRATEC, TDER, PPTFLX, FRC2 = (
+            x * keep for x in (DTDT, DQDT, DQCDT, DQRDT, DQIDT, DQSDT, PRATEC, TDER, PPTFLX, FRC2))
         F = {k: (v * keep if k in ("UMF", "UER", "UDR", "DMF", "DER", "DDR", "DETLQ", "DETIC")
                  else v) for k, v in F.items()}  # kfsw: S
     else:

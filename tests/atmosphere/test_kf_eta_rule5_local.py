@@ -1346,7 +1346,7 @@ def test_closure_weights_gradient_finite_for_tiny_ainc_steps(dtype, dA):
 def test_dfda_step_acts_in_its_band():
     """dfda in (-w/2, w/2): the cyc1 weight moves with FABE (C2, check_grads)."""
     w = _DEFAULT.closure_dfda_width
-    dA, dfda = 2.0e-4, 0.1 * w
+    dA, dfda = 1.0e-2, 0.1 * w
 
     def f(fabe):
         p = kfe._soft_closure_weights(fabe, jnp.asarray(0.05) - dfda * dA, jnp.asarray(0.4),
