@@ -52,7 +52,7 @@ from legoesm.atmosphere.physics.convection import _kf_eta as kfe  # noqa: E402
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig  # noqa: E402
 from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection  # noqa: E402
 from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import _lego_constants  # noqa: E402
-from legoesm.core.smooth import smooth_max_c1  # noqa: E402
+from legoesm.core.smooth import positive_part_c1, smooth_max_c1  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from tests.atmosphere.test_kain_fritsch_oracle import (  # noqa: E402
@@ -180,7 +180,7 @@ _UNEXERCISED = {"condload_sqrt_width_m2s2", "wtw_floor_width_m2s2", "q0_clip_wid
                 # PR 7a: no fixture column reaches these bands
                 "timec_clip_width_s", "pef_clip_width", "pefcbh_cap_width",
                 "uerder_onset_width_kgs", "ainc_cap_width", "qmix_floor_width_kgkg",
-                "closure_sup_width_kgkg", "cpr_onset_width_kgs"}
+                "closure_sup_width_kgkg"}
 
 
 def _moved(stored, case):
@@ -871,8 +871,6 @@ def _switch_cases():
         ("closure_sup_width_kgkg", lambda x, w: kfe._sup_select(x, 0.0, (1.0,), (0.0,), w)[0],
          0.2 * d.closure_sup_width_kgkg, 1e-4,
          _NO_COLUMN.format("the closure mixed layer within 1e-6 kg/kg of saturation (D7j)")),
-        ("cpr_onset_width_kgs", lambda x, w: kfe._frc2(x, x, 1.0, w)[1],
-         0.4 * d.cpr_onset_width_kgs, 1e3, _NO_COLUMN.format("CPR (D7k)")),
     ]
 
 
@@ -914,17 +912,40 @@ def test_inflow_limit_fold_is_the_oracle_min_at_zero_width_and_c1_inside():
     assert float(mx0) == 5.0 and float(ai0) == 1.0  # ineligible levels drop out
 
 
-def test_frc2_keeps_the_feedback_ratio_and_ramps_only_the_diagnostic():
-    """D7k: the ratio that scales the fed-back rain and snow is the oracle's at
-    every width (the water is never altered); only the exported FRC2 ramps in
-    from CPR = 0, and it is the oracle's above the width."""
-    w = _DEFAULT.cpr_onset_width_kgs
-    cpr = jnp.asarray([0.0, 0.3 * w, 2.0 * w, 1e5])
-    r0, d0 = kfe._frc2(0.8 * cpr, cpr, 0.5, 0.0)
-    r, d = kfe._frc2(0.8 * cpr, cpr, 0.5, w)
-    np.testing.assert_array_equal(np.asarray(r), np.asarray(r0))
-    np.testing.assert_array_equal(np.asarray(d[2:]), np.asarray(d0[2:]))
-    assert float(d[0]) == 0.0 and 0.0 < float(d[1]) < float(d0[1])
+def test_feedback_products_are_c1_through_cpr_zero(fix):
+    """D7k stays hard (vote 21): the products p * FRC2 that consume it (p =
+    PPTLIQ or PPTICE <= CPR) are C1 through CPR = 0.  The bounds the proof
+    needs hold on the oracle arms that export CPR; with a C1 precipitation onset (the port's
+    positive parts), both one-sided derivatives at the switch are 0, the
+    first derivative converges to 0 from above, and order-2 check_grads passes
+    on both sides; P / CPR stays smooth, so P's only second-derivative jump is
+    the onset's own (none added by the guard)."""
+    for arm in ("L_nat_w05", "L_u20_w05"):  # the oracle arms that export CPR
+        cpr, pf, ai = fix[f"{arm}_cpr"], fix[f"{arm}_pptflx"], fix[f"{arm}_ainc"]
+        ok = np.isfinite(cpr)  # non-firing columns are NaN-filled
+        assert np.array_equal(ok, np.isfinite(pf)) and ok.any()
+        cpr, pf, ai = cpr[ok], pf[ok], ai[ok]
+        # PPTFLX is the closure-scaled flux: the bound is 0 <= FRC2 <= 1
+        assert np.all(cpr >= 0.0) and np.all(pf >= 0.0) and np.all(pf <= cpr * ai * (1 + 1e-12))
+        assert np.all(fix[f"{arm}_pptliq"][ok].sum(-1) + fix[f"{arm}_pptice"][ok].sum(-1)
+                      <= cpr * (1 + 1e-9))
+    w = 1.0e-3
+    ainc = 0.7
+
+    def P(x):
+        cpr = 1.0e3 * positive_part_c1(x, 1.0 / w)
+        pl = 0.6 * cpr * (1.0 + 0.3 * x)
+        pf = 0.8 * ainc * cpr * (1.0 - 0.2 * x)  # FRC2 = 0.8 (1 - 0.2 x) <= 1
+        return pl * kfe._feedback_ratio(pf, cpr, ainc)
+
+    g = jax.grad(P)
+    assert float(g(0.0)) == 0.0 and float(g(-0.5 * w)) == 0.0
+    for d in (1e-4, 1e-6, 1e-8):
+        assert abs(float(g(d * w))) <= 1e4 * d  # first derivative -> 0 from above
+    for x0 in (-0.5 * w, 0.3 * w, 2.0 * w):
+        check_grads(P, (x0,), order=2, modes=("fwd", "rev"), eps=1e-3 * w)
+    q = lambda x: P(x) / (1.0e3 * positive_part_c1(x, 1.0 / w))  # noqa: E731
+    np.testing.assert_allclose(float(q(1e-9 * w)), 0.6 * 0.8, rtol=1e-6)
 
 
 def test_upstream_face_weight_conserves_and_matches_the_oracle_off_band():

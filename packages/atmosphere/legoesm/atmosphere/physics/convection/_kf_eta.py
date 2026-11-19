@@ -143,7 +143,7 @@ KF_SWITCHES = {
     "D7h": ("D", "hard", "downdraft RH adjustment: low (qsrh < qd) and adj (rhh < 1)"),
     "D7i": ("D", "hard", "subsidence moisture borrow where QG < 0"),
     "D7j": ("D", "smooth", "closure mixed-layer supersaturation adjustment (sup)"),
-    "D7k": ("D", "smooth", "CPR > 0 guard of the precipitation feedback ratio FRC2 (smooth: exported FRC2 ramps in; water unchanged)"),
+    "D7k": ("D", "hard", "CPR > 0 guard of the precipitation feedback ratio FRC2 (kept: products with PPTLIQ/PPTICE <= CPR are continuous)"),
     "E1": ("E", "smooth", "Q0 clipped to [1e-6, QES]"),
     "E2": ("E", "smooth", "TLCL <= TMIX (first pass and closure)"),
     "E3": ("E", "smooth", "WKLCL linear ramp capped at wklcl_ref"),
@@ -361,9 +361,9 @@ class KFSmoothing(NamedTuple):
       ``ainc_cap_width`` (E19 AINC <= AINCMX, one-sided), ``qmix_floor_width_kgkg``
       (E17 qmix >= 0, one-sided), ``dabe_floor_width_jkg`` (E18 DABE >= 0.1 ABE),
       ``closure_sup_width_kgkg`` (D7j, blend of the supersaturated and
-      unsaturated closure mixed layer, centred on qmix = qss) and
-      ``cpr_onset_width_kgs`` (D7k, the exported FRC2 ramps in from CPR = 0;
-      the feedback water keeps the oracle's ratio).
+      unsaturated closure mixed layer, centred on qmix = qss).  D7k (CPR > 0
+      guard of FRC2) stays hard: every consumer multiplies FRC2 by PPTLIQ or
+      PPTICE <= CPR, so the products are continuous (vote 21).
     """
 
     lut_knot_width: float
@@ -401,7 +401,6 @@ class KFSmoothing(NamedTuple):
     qmix_floor_width_kgkg: float
     dabe_floor_width_jkg: float
     closure_sup_width_kgkg: float
-    cpr_onset_width_kgs: float
 
 
 KF_HARD = KFSmoothing(*(0.0 for _ in KFSmoothing._fields))
@@ -1167,17 +1166,19 @@ def _sup_select(qmix, qss, sat, unsat, w):
     return tuple(jnp.where(sup, a, b) for a, b in zip(sat, unsat))  # kfsw: D7j
 
 
-def _frc2(pptflx, cpr, ainc, w):
-    """(feedback ratio, exported FRC2) of the precipitation feedback (D7k).
-    The ratio PPTFLX / (CPR AINC) (0 at CPR = 0) scales RAINFB/SNOWFB, which
-    carry PPTLIQ/PPTICE <= CPR and so vanish with CPR either way: it stays the
-    oracle's so the fed-back water is never altered.  The exported diagnostic
-    jumps to 0 at CPR = 0; w > 0 ramps it in over 0 < CPR < w."""
+def _feedback_ratio(pptflx, cpr, ainc):
+    """FRC2 = PPTFLX / (CPR AINC), 0 at CPR = 0 (D7k, kept hard: vote 21).
+
+    Every consumer multiplies it by PPTLIQ or PPTICE (summing to CPR = TRPPT),
+    so it enters only through P = p FRC2 with 0 <= p <= CPR and
+    0 <= PPTFLX <= CPR AINC, i.e. 0 <= FRC2 <= 1 (fixture-checked; PPTFLX is
+    the closure-scaled flux).  Hence 0 <= P <= CPR: P is squeezed to 0 with
+    CPR, and where a C1 non-negative CPR reaches 0 its derivative is 0, so P
+    is differentiable there with derivative 0 from both sides.  The products
+    are as smooth as the precipitation onset itself; the guard adds no kink.
+    A ramp on the ratio would remove fed-back water."""
     cpos = cpr > 0.0  # kfsw: D7k
-    r = jnp.where(cpos, pptflx / _sd(cpr * ainc, cpos), 0.0)  # kfsw: D7k
-    if w:  # kfsw: S
-        return r, r * smoothstep_quintic(cpr / w)  # kfsw: D7k
-    return r, r
+    return jnp.where(cpos, pptflx / _sd(cpr * ainc, cpos), 0.0)  # kfsw: D7k
 
 
 def _sd(x, ok):
@@ -2276,7 +2277,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
 
     # --- hydrometeors (l.2318-2382) ---
     FBFRC = sc["FBFRC"]
-    FRC2, FRC2_out = _frc2(PPTFLX, CPR, AINC, sm.cpr_onset_width_kgs)
+    FRC2 = _feedback_ratio(PPTFLX, CPR, AINC)
     RAINFB = PPTLIQ * AINC * FBFRC * FRC2
     SNOWFB = PPTICE * AINC * FBFRC * FRC2
     QLG = advect(zf, lambda fin, fout: fin + F["DETLQ"] - fout, OMG, FXM, NSTEP, DTIME)
@@ -2348,7 +2349,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         ltop=jnp.where(fired, LTOP, 0), let=jnp.where(fired, LET, 0),
         abe=fin(sc["ABE"]), vmflcl=fin(VMFLCL), ainc=fin(AINC), timec=fin(TIMECf),
         ncount=jnp.where(fired, C["NCOUNT"], 0), fabe=fin(C["FABE"]), tder=fin(TDER),
-        trppt=fin(TRPPT), pptflx=fin(PPTFLX), cpr=fin(CPR), frc2=fin(FRC2_out), fbfrc=fin(FBFRC),
+        trppt=fin(TRPPT), pptflx=fin(PPTFLX), cpr=fin(CPR), frc2=fin(FRC2), fbfrc=fin(FBFRC),
         lfs=jnp.where(fired, LFS, 0), ldb=jnp.where(fired, LDB, 0), wlcl=fin(sc["WLCL"]),
         rad=fin(sc["RAD"]), chmin=fin(sc["CHMIN"]), cldhgt=fin(S["CLDHGT"][LC]),
         lcl=jnp.where(fired, LCL, 0), au0=fin(AU0), nstep=jnp.where(fired, NSTEP, 0),

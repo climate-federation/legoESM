@@ -265,7 +265,6 @@ __param_spec__ = {
             "wrf_qmix_floor_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_dabe_floor_width_jkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_closure_sup_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
-            "wrf_cpr_onset_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "cloud_depth_min": "trigger: fixed shallow/deep cloud-depth split (not sigmoid-tunable, fix via config)",
             "cloud_depth_sharpness": "numerics: sigmoid sharpness on the deep/shallow blend",
             "cloud_top_detrainment_fraction": "fixed KF-Eta cloud-top detrainment-level fraction (structural detrainment profile, not a tunable closure rate)",
@@ -1051,7 +1050,6 @@ class KainFritschConfig(NamedTuple):
     wrf_qmix_floor_width_kgkg: float = 1.0e-7
     wrf_dabe_floor_width_jkg: float = 1.0
     wrf_closure_sup_width_kgkg: float = 1.0e-6
-    wrf_cpr_onset_width_kgs: float = 1.0
 
 
 class EmanuelConfig(NamedTuple):
