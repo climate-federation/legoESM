@@ -228,6 +228,12 @@ density-threshold MLD, temperatures and diffusivities. The source hypothesis
 and limitations are preregistered; this lane reports column responses and
 literature trends, without asserting exact LES agreement or global skill.
 
+The completed five-case results and figures are in
+[the Wave/KPP validation report](kpp_wave_coupling_validation.md). All five
+strict heat gates remain failed at approximately 4e-10 relative to cooling
+versus the preregistered 1e-10 threshold; the figure generator and suite retain
+nonzero exit status. Physical trends and numerical gates are reported separately.
+
 The weak-buoyancy correction also changes the no-wave KPP at small imposed
 fluxes. Results from the old and revised schemes must retain their respective
 source/configuration identities when comparing or continuing experiments.
