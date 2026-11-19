@@ -321,16 +321,19 @@ def main(argv=None) -> int:
     def land_calls():
         """Book the emission of every land call since the last look: the
         call starts from the skin the previous call left."""
-        cur = atm._land_T_skin_last
-        prev = land_seen.get("obj")
-        if prev is not None and cur is not prev:
+        cur = getattr(atm, "_land_T_skin_last", None)
+        if cur is not None and cur is not land_seen.get("obj"):
+            # the first call starts from the skin the step-0 boundary saw
+            T0 = (land_seen["T_ic"] if land_seen.get("obj") is None
+                  else _np(land_seen["obj"]).reshape(-1))
             F["E_land_charged"] += I(
                 f_land * hb_rec["eps_land"] * constants.sigma_sb
-                * _np(prev).reshape(-1) ** 4) * args.land_update_s
+                * T0 ** 4) * args.land_update_s
             land_seen["n"] = land_seen.get("n", 0) + 1
-        land_seen["obj"] = cur
+            land_seen["obj"] = cur
 
     def eterm_step(sd):
+        land_seen.setdefault("T_ic", hb_rec["T_land"])
         land_calls()
         if n_steps[0] % args.rad_update_steps == 0:
             solve.update(hb_rec, lw_down=_np(sd[SL["lw_down_sfc"]]).reshape(-1),
