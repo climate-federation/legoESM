@@ -60,6 +60,9 @@ class _DS:
         self.variables = v
 
 
+_SEC = "seconds since 1900-01-01 00:00:00"
+
+
 def test_hourly_records_are_restricted_to_the_daily_window():
     m = _load("tracer_variance_budget_nemo")
     day = 86400.0
@@ -67,7 +70,7 @@ def test_hourly_records_are_restricted_to_the_daily_window():
              tb=_Var([[0.0, day], [day, 2 * day]]))
     assert m.daily_record_bounds(ds, 0) == (0.0, day)
     hourly = np.arange(1, 49) * 3600.0 - 1800.0       # 48 hourly means
-    assert m.records_in_window(hourly, (0.0, day)) == list(range(24))
+    assert m.records_in_window(hourly, (0.0, day), _SEC) == list(range(24))
 
 
 def test_missing_bounds_or_empty_window_is_fatal():
@@ -75,18 +78,43 @@ def test_missing_bounds_or_empty_window_is_fatal():
     with pytest.raises(SystemExit, match="no bounds"):
         m.daily_record_bounds(_DS(time_counter=_Var([0.0])), 0)
     with pytest.raises(SystemExit, match="no hourly record"):
-        m.records_in_window(np.array([5.0e5]), (0.0, 86400.0))
+        m.records_in_window(np.array([5.0e5]), (0.0, 86400.0), _SEC)
 
 
 def test_truncated_hourly_window_is_fatal():
     m = _load("tracer_variance_budget_nemo")
     hourly = np.arange(1, 13) * 3600.0 - 1800.0       # only 12 of 24 hours
     with pytest.raises(SystemExit, match="needed to cover"):
-        m.records_in_window(hourly, (0.0, 86400.0))
+        m.records_in_window(hourly, (0.0, 86400.0), _SEC)
 
 
 def test_single_hourly_record_is_fatal():
     """codex review round 2: a file holding only the first hour passed."""
     m = _load("tracer_variance_budget_nemo")
-    with pytest.raises(SystemExit, match="single hourly record"):
-        m.records_in_window(np.array([1800.0]), (0.0, 86400.0))
+    with pytest.raises(SystemExit, match="needed to cover"):
+        m.records_in_window(np.array([1800.0]), (0.0, 86400.0), _SEC)
+
+
+@pytest.mark.parametrize("hours", [[0.5, 12.5], list(np.arange(0.5, 24, 2.0))])
+def test_regularly_thinned_hourly_file_is_fatal(hours):
+    """codex review round 3: a cadence inferred from the surviving records
+    let a file keeping every 12th (or 2nd) hour pass."""
+    m = _load("tracer_variance_budget_nemo")
+    with pytest.raises(SystemExit, match="needed to cover"):
+        m.records_in_window(np.array(hours) * 3600.0, (0.0, 86400.0), _SEC)
+
+
+def test_clustered_hourly_records_are_fatal():
+    """24 records in the window that are not one hour apart."""
+    m = _load("tracer_variance_budget_nemo")
+    t = np.arange(1, 25) * 3600.0 - 1800.0
+    t[5] = t[4] + 60.0
+    with pytest.raises(SystemExit, match="not one hour apart"):
+        m.records_in_window(t, (0.0, 86400.0), _SEC)
+
+
+def test_non_second_time_units_are_fatal():
+    m = _load("tracer_variance_budget_nemo")
+    with pytest.raises(SystemExit, match="seconds since"):
+        m.records_in_window(np.arange(1, 25) - 0.5, (0.0, 24.0),
+                            "hours since 1900-01-01")

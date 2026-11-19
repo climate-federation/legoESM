@@ -77,23 +77,35 @@ def daily_record_bounds(ds, rec):
     return lo, hi
 
 
-def records_in_window(times, bounds):
+# --- the cadence contract of --hourly-trd (#2525 review round 3) ---
+# The expected cadence cannot be inferred from the record times: a regularly
+# thinned hourly file looks exactly like a genuine 12-hourly one.
+_HOURLY_DT_S = 3600.0
+_HOURLY_DT_TOL_S = 1.0     # timestamp decode rounding
+
+
+def records_in_window(times, bounds, units):
     """Indices of ``times`` inside the half-open window (lo, hi] (#2525: the
-    hourly state average must span the same hours as the daily record)."""
+    hourly state average must span the same hours as the daily record).
+
+    The window must be COVERED, not merely touched: exactly one record per
+    hour of the window, consecutive records one hour apart. ``units`` is
+    time_counter's CF units and must be in seconds."""
+    if not str(units).startswith("seconds since"):
+        raise SystemExit(f"FATAL: time_counter units {units!r} are not "
+                         "'seconds since ...'; cannot check hourly coverage")
     lo, hi = bounds
     t = np.asarray(times, dtype=np.float64)
     idx = np.where((t > lo) & (t <= hi))[0]
     if idx.size == 0:
         raise SystemExit(f"FATAL: no hourly record in daily window ({lo}, {hi}]")
-    # The window must be COVERED, not merely touched: a truncated hourly file
-    # would otherwise average fewer hours than the daily record (codex).
-    if t.size < 2:   # one record: no spacing to prove it covers the day
-        raise SystemExit("FATAL: a single hourly record cannot cover a daily window")
-    dt = float(np.median(np.diff(t)))
-    need = int(round((hi - lo) / dt))
+    need = int(round((hi - lo) / _HOURLY_DT_S))
     if idx.size != need:
         raise SystemExit(f"FATAL: {idx.size} hourly records in daily window "
                          f"({lo}, {hi}], {need} needed to cover it")
+    if np.any(np.abs(np.diff(t[idx]) - _HOURLY_DT_S) > _HOURLY_DT_TOL_S):
+        raise SystemExit(f"FATAL: hourly records in daily window ({lo}, {hi}] "
+                         "are not one hour apart")
     return [int(i) for i in idx]
 
 
@@ -132,7 +144,7 @@ def main() -> int:
     if _u[0] != _u[1]:
         raise SystemExit(f"FATAL: daily/hourly time_counter units differ: {_u}")
     recs = records_in_window(dh.variables["time_counter"][:],
-                             daily_record_bounds(dd, 0))
+                             daily_record_bounds(dd, 0), _u[1])
     print(f"[hourly] {nt} records, {len(recs)} inside daily record 0 "
           f"({recs[0]}..{recs[-1]})")
 
@@ -158,10 +170,8 @@ def main() -> int:
                & np.isfinite(stz) & np.isfinite(dV) & (tmask > 0.5))
         nw = int(wet.sum())
         if nw == 0:
-            # Name WHICH input ran out rather than reporting a bare NaN. The
-            # daily budget still produced finite numbers while these records
-            # were empty, which already says the STATE persists and only the
-            # TRENDS stop -- a partial diagnostic window, not a corrupt file.
+            # Name WHICH input ran out rather than reporting a bare NaN; the
+            # run is refused below (every in-window record must carry data).
             print(f"  [rec {r:2d}] EMPTY: votemper={int(np.isfinite(T).sum())} "
                   f"ttrd_zdf={int(np.isfinite(ttz).sum())} "
                   f"strd_zdf={int(np.isfinite(stz).sum())} "
