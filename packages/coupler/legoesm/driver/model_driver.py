@@ -1659,7 +1659,8 @@ LAND_INTENSIVE_FORCING = ("T_lowest", "q_lowest", "u_lowest", "v_lowest",
 # at the samples' mean rate over the whole first interval (user 2026-11-19):
 # scaling them by n/k ran the land ~DT_LAND nearly dark, up to ~30 K too cold
 # at sunlit cells after 1 h.  The radiation booked is then off by the first
-# sample(s) standing in for the interval's later ones, once per start.
+# sample(s) standing in for the interval's later ones, once per start (zero
+# when the radiation is held across the whole first interval).
 LAND_BOOT_SCALED_FORCING = ("precip_total", "precip_snow")
 
 
@@ -16507,7 +16508,9 @@ class ModelDriver:
                     # Cadence accumulator: sum the forcing on-device; the
                     # tile consumes the interval MEAN, so the interval's
                     # precip mass and radiant energy are conserved exactly
-                    # (mean rate x DT_LAND = sum of per-step rate x DT).
+                    # (mean rate x DT_LAND = sum of per-step rate x DT) on
+                    # every full interval; the bootstrap call after a start
+                    # books its radiation unscaled (land_bootstrap_forcing).
                     # With _LAND_K == 1 the mean is the identity and the
                     # trajectory is unchanged.  cos_zenith is accumulated
                     # SW-WEIGHTED separately (weight sw_down + 1 W/m2, so it

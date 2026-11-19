@@ -1505,7 +1505,7 @@ def test_land_ic_file_below_the_dry_floor_is_refused(monkeypatch, tmp_path):
 
 def test_every_land_forcing_field_is_classed_extensive_or_intensive():
     """A new AtmToSurface field must be classed: an amount the land books
-    over its step (scaled at the bootstrap) or a state it reads as is."""
+    over its step or a state it reads as is."""
     from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.driver.model_driver import (
         LAND_EXTENSIVE_FORCING, LAND_INTENSIVE_FORCING)
@@ -1549,3 +1549,9 @@ def test_bootstrap_then_regular_call_books_each_sample_once():
             rtol=1e-12, err_msg=f)
     np.testing.assert_array_equal(np.asarray(boot.T_lowest),
                                   np.asarray(s[0].T_lowest))
+    # n > 1 samples (a start mid-interval): water x n/K, radiation as is
+    boot2 = land_bootstrap_forcing(s[1], 2, 4)
+    np.testing.assert_allclose(np.asarray(boot2.precip_total),
+                               np.asarray(s[1].precip_total) * 0.5, rtol=1e-15)
+    np.testing.assert_array_equal(np.asarray(boot2.sw_down),
+                                  np.asarray(s[1].sw_down))
