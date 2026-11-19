@@ -491,7 +491,8 @@ def solve_soil_thermal(
     surface_conductance: jnp.ndarray | None = None,
     layer_source: jnp.ndarray | None = None,
     n_substeps: int = 1,
-) -> jnp.ndarray:
+    return_robin_flux: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     """Solve soil heat diffusion for one time step (backward Euler).
 
     Parameters
@@ -530,11 +531,21 @@ def solve_soil_thermal(
         = one step, bit-identical).  The apparent heat capacity is re-evaluated
         at each sub-step's start temperature, which keeps a thin layer from
         overshooting the freezing curtain at a long step.
+    return_robin_flux : bool
+        Static flag.  When True, also return the semi-implicit correction the
+        solve applied at the surface, as a step-mean flux (see Returns).
 
     Returns
     -------
     T_new : jnp.ndarray
         Updated soil temperature [K], shape (ncol, n_layers).
+    robin_flux : jnp.ndarray
+        Only with ``return_robin_flux``.  Step-mean of
+        ``surface_conductance * (T_top_k - T_top0)`` over the sub-steps
+        [W/m2, shape (ncol,)]: the column received ``G_surface - robin_flux``.
+        Positive = the surface LOST that much more than the explicit balance
+        behind ``G_surface`` (upward, away from the soil); the caller owes it
+        to the atmosphere (#2542).  Zeros when ``surface_conductance`` is None.
     """
     # Backward Euler over ``n_substeps`` equal sub-steps; G_surface, Q_geo and
     # layer_source are rates held over the whole step.  The semi-implicit
@@ -542,6 +553,7 @@ def solve_soil_thermal(
     dt_sub = dt / n_substeps
     T_top0 = T_soil[:, 0]
     T = T_soil
+    robin_flux = jnp.zeros_like(T_top0)
     for _ in range(n_substeps):
         # ``_soil_heat_system`` re-evaluates the apparent heat capacity at the
         # sub-step's start temperature (sensible-only when freeze/thaw is off).
@@ -571,6 +583,10 @@ def solve_soil_thermal(
         a = jnp.pad(-coeff, ((0, 0), (1, 0)))
         c = jnp.pad(-coeff, ((0, 0), (0, 1)))
         T = thomas_solve(a, diag, c, rhs)
+        if surface_conductance is not None:
+            robin_flux = robin_flux + surface_conductance * (T[:, 0] - T_top0) / n_substeps
+    if return_robin_flux:
+        return T, robin_flux
     return T
 
 

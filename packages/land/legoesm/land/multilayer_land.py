@@ -1544,10 +1544,16 @@ def _step_multilayer_land_impl(
         # evaluated at the solved temperatures (zero for the two-leaf canopy).
         snow_ground_heat_applied = G_surface + evap_excess_energy_pre
         if surface_out.surface_conductance is not None:
-            snow_ground_heat_applied = snow_ground_heat_applied - (
+            _robin_flux = (
                 surface_out.surface_conductance
                 * (f_snow * (T_pack_solved[:, 0] - T_pack_top_ref)
                    + (1.0 - f_snow) * (T_soil_new[:, 0] - T_soil[:, 0])))
+            snow_ground_heat_applied = snow_ground_heat_applied - _robin_flux
+            # The same flux leaves to the atmosphere as sensible heat (#2542; see
+            # the bulk branch's final solve).  Sign: _robin_flux > 0 = the
+            # surface lost more than the explicit balance (less INTO the column,
+            # more UP); SH positive up.
+            shflx = shflx + _robin_flux
         pack, snow_drainage, snow_drainage_heat = snow_phase_and_percolate(
             pack._replace(T=T_pack_solved), scc)
         snow_drain_sensible = None   # handed to the soil only with freeze/thaw (below)
@@ -1737,11 +1743,29 @@ def _step_multilayer_land_impl(
                 # layered pack's final solve); the exported skin re-evaluates it.
                 snow_cover=f_snow,
                 empty_cover_swe=config.land_albedo.snow_depth_crit, **_thermal_kw)
-        else:
+        elif surface_out.surface_conductance is None:
             T_soil_new = solve_soil_thermal(
                 T_soil, richards_out.theta_new, grid,
                 config.hydraulics, config.thermal,
                 G_surface, dt, **_thermal_kw)
+        else:
+            T_soil_new, _robin_flux = solve_soil_thermal(
+                T_soil, richards_out.theta_new, grid,
+                config.hydraulics, config.thermal,
+                G_surface, dt, return_robin_flux=True, **_thermal_kw)
+            # Semi-implicit correction -> sensible heat to the air (#2542).
+            # The column received G_surface - _robin_flux, while SH/LE/LW
+            # were charged at the start-of-step skin temperature, so the
+            # difference must leave the land or the exchange does not close:
+            #   Rn = (SH + X_unmet + R) + LE_actual + (G + X_sublim - R).
+            # All of it goes to SH, the CLM "conserve total energy flux"
+            # rule used for X_unmet above: this step's radiation is already
+            # computed, and a latent share would need a vapour mass the
+            # hydrology (already run) did not draw.  Sign: _robin_flux > 0 =
+            # the skin warmed, the surface lost more (less INTO the soil,
+            # more UP); SH positive up.  Linear in the solved temperatures
+            # (no switch).  Step-mean over the solve's sub-steps.
+            shflx = shflx + _robin_flux
     if not _snow_node:
         T_snow_new = None
 
