@@ -194,11 +194,11 @@ _S_DDBUO = 3.44e-3         # [1] downdraught buoyancy / T
 _S_SQ = 4.94e-10            # [kg m-2 s-1] -PMFD(IDBAS) - 0.5 PMFU(IDBAS)
 _S_QDEF = 1.63e-6          # [kg/kg] saturation deficit
 _S_TFRZ = 1.87          # [K] temperature - RTT
-_S_PFLX = 6.5e-8          # [kg m-2 s-1] precipitation fluxes and their caps
+_S_PFLX = 2.27e-7         # [kg m-2 s-1] precipitation fluxes and their caps
 _S_RHM = 1.53e-2           # [1] cloud-layer RH - ZRHM_MIN
 _S_RATE = 5.77e-8          # [kg m-2 s-1] detrainment-rate consistency
 _S_DDQF = 2.65e-7          # [kg m-2 s-1] downdraught-top moisture flux test
-_S_LUDE = 1.0          # [kg m-2 s-1] cloud-top detrained-liquid fixer
+_S_LUDE = 5.89e-9       # [kg m-2 s-1] cloud-top detrained-liquid fixer
 _W_DDEN, _W_DDBUO, _W_SQ, _W_QDEF, _W_TFRZ, _W_PFLX, _W_RHM, _W_RATE, _W_DDQF, _W_LUDE = (
     _W_REL * x for x in (_S_DDEN, _S_DDBUO, _S_SQ, _S_QDEF, _S_TFRZ, _S_PFLX, _S_RHM,
                          _S_RATE, _S_DDQF, _S_LUDE))
@@ -411,7 +411,8 @@ def _nonneg_precip(sm, r1, s1, dpmel):
     pos(s1), so r2 + s2 = pos(T) exactly; at the hard limit this is the three
     OpenIFS branches.  Melting goes with the surviving flux."""
     t_new = sm.pos(r1 + s1, _W_PFLX)
-    pr, ps = sm.pos(r1, _W_PFLX), sm.pos(s1, _W_PFLX)
+    pr = sm.pos(r1, _W_PFLX)
+    ps = sm.pos(s1, _W_PFLX)
     ok = pr + ps > 0.0
     r2 = t_new * sdiv(pr, pr + ps, ok) * ok
     s2 = t_new - r2
@@ -542,9 +543,13 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
             qsn = foeewmcu(th, zten - zsnmlt / jnp.where(melt, zfac, 1.0)) / pk
         else:
             # bounded: 0 <= melt <= snow flux (zero without snow or below RTT)
-            dpmel = sk - sm.pos(sk - sm.pos(zfac * (zten - rtt), _W_PFLX), _W_PFLX)
-            melt = sm.on(sk, 0.0, _W_PFLX) * sm.on(zten, rtt, _W_TFRZ)
-            qsn = foeewmcu(th, zten - dpmel / zfac, sm) / pk
+            # melt only above RTT (zfac < 0 for T < RTT - 1/ZMELT_DT would otherwise "melt")
+            zsnmlt = zfac * sm.pos(zten - rtt, _W_TFRZ)
+            dpmel = sk - sm.pos(sk - zsnmlt, _W_PFLX)
+            melt = sm.on(sk, 0.0, _W_PFLX)
+            melt = melt * sm.on(zten, rtt, _W_TFRZ)
+            # dpmel > 0 only where zfac > 0 (hard division guard, as OpenIFS's gate)
+            qsn = foeewmcu(th, zten - dpmel / jnp.where(zfac > 0.0, zfac, 1.0), sm) / pk
         s["pqsen"] = kset(s["pqsen"], jk, sm.sel(melt, qsn, kget(s["pqsen"], jk)), on)
         zalfaw = foealfcu(th, zten, sm)
         dmfdp = kget(s["pdmfdp"], jk)
@@ -1035,7 +1040,8 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
         zfacl = sm.min(-(pqen + zmfa) / zdzt, plude, _W_LUDE)
     else:   # bounded: 0 <= ZFAC <= PLUDE, zero unless q + ZMFA < 0 and PLUDE > 0
         lude_p = sm.pos(plude, _W_LUDE)
-        zfacl = lude_p - sm.pos(lude_p - sm.pos(-(pqen + zmfa) / zdzt, _W_LUDE), _W_LUDE)
+        zneed = sm.pos(-(pqen + zmfa) / zdzt, _W_LUDE)
+        zfacl = lude_p - sm.pos(lude_p - zneed, _W_LUDE)
         lim2 = near
     plude_n = jnp.where(lim2, plude + zfacl, plude)
     pdiv = lim2 & (plude_n != 0.0)

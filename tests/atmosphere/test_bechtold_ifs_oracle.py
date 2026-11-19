@@ -459,7 +459,8 @@ def test_wrapper_publishes_the_surface_snow_flux(fix):
     total = np.sum(np.asarray(out.dq_r_conv_dt) * dp, axis=1) / _thermo(fix, "L").RG
     assert snow.shape == total.shape and np.all(snow >= 0.0)
     assert np.any(snow > 0.0)
-    assert np.all(snow <= total)
+    # ``total`` is a column sum: equal to the flux only to round-off
+    assert np.all(snow <= total + _TOL * np.max(total))
 
 
 def test_clamped_square_roots_pass_nan_through(fix, monkeypatch):
@@ -1092,6 +1093,17 @@ def test_smooth_mixing_fraction_keeps_the_parcel_blend_convex():
     ("zlnew = Z_CLDMAX - sm.pos(Z_CLDMAX - zlnew, _W_COND)", "pos"),
     ("zrnew = lr - sm.pos(lr - zrnew, _W_COND)   # <= lr", "pos"),
     ("return jnp.minimum(1.0, x) if sm.hard else 1.0 - sm.pos(1.0 - x, _W_ONE)", "pos"),
+    # part 3: melt cap, detrained-precipitation caps, flux positivity fixer,
+    # evaporation bound, downdraught entrainment bound, cloud-top fixer
+    ("dpmel = sk - sm.pos(sk - zsnmlt, _W_PFLX)", "pos"),
+    ("sn1 = av1 - sm.pos(av1 - sn1, _W_PFLX)", "pos"),
+    ("sn2 = av2 - sm.pos(av2 - sn2, _W_PFLX)", "pos"),
+    ("t_new = sm.pos(r1 + s1, _W_PFLX)", "pos"),
+    ("pr = sm.pos(r1, _W_PFLX)", "pos"),
+    ("zrfln = sm.pos(zrnew, _W_PFLX)", "pos"),
+    ("zdrfl = -sm.pos(zrfl - zrfln, _W_PFLX)    # bounded: <= 0 (evaporation only)", "pos"),
+    ("en = -sm.pos(-en, _W_DDEN)     # bounded: en <= 0 (entrainment only)", "pos"),
+    ("zfacl = lude_p - sm.pos(lude_p - zneed, _W_LUDE)", "pos"),
 ])
 def test_host_water_closes_with_a_bounded_cap_active(fix, site):
     """RULE 0 with the smooth caps inside their windows: every level's capped
@@ -1109,6 +1121,80 @@ def test_host_water_closes_with_a_bounded_cap_active(fix, site):
            + col(out.dq_r_detr_dt) + col(out.dq_s_detr_dt))
     assert np.max(np.abs(dry)) > 0.0
     assert np.max(np.abs(res)) / np.max(np.abs(dry)) <= _TOL
+
+
+def _ref_nonneg(r1, s1, dpmel):
+    """cuflxn.F90:427-438 / :489-500, the three branches: (rain, snow, amount
+    added to the total, melt)."""
+    if r1 + s1 < 0.0:
+        return 0.0, 0.0, -(r1 + s1), 0.0
+    if r1 < 0.0:
+        return 0.0, s1 + r1, 0.0, dpmel
+    if s1 < 0.0:
+        return r1 + s1, 0.0, 0.0, dpmel
+    return r1, s1, 0.0, dpmel
+
+
+def test_precip_positivity_fixer_conserves_and_has_the_openifs_limit():
+    """RULE 0 x RULE 5 for CUFLXN's negative-flux fixer: the smooth form's
+    rain + snow is the input total plus the returned deficit (which the caller
+    adds to the level's precipitation source, as OpenIFS) to round-off, both
+    are >= 0, and with the exact switches it is OpenIFS's three branches."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+
+    w = M._W_PFLX
+    pts = [(a * w, b * w) for a in (-3.0, -1.0, -0.4, 0.0, 0.3, 0.7, 2.0, 50.0)
+           for b in (-3.0, -0.6, 0.0, 0.2, 0.9, 5.0)]
+    for r1, s1 in pts:
+        for hard in (True, False):
+            r2, s2, deficit, mel = (float(x) for x in M._nonneg_precip(
+                IfsSmooth(hard), jnp.asarray(r1), jnp.asarray(s1), 0.25 * w))
+            assert r2 >= 0.0 and s2 >= 0.0 and deficit >= 0.0
+            assert abs(r2 + s2 - (r1 + s1) - deficit) <= 1e-12 * w
+            if hard:
+                np.testing.assert_allclose((r2, s2, deficit, mel), _ref_nonneg(r1, s1, 0.25 * w),
+                                           rtol=1e-12, atol=1e-12 * w)
+    # outside every window the smooth form is the exact one
+    np.testing.assert_allclose(
+        [float(x) for x in M._nonneg_precip(IfsSmooth(False), jnp.asarray(50.0 * w),
+                                            jnp.asarray(5.0 * w), 0.25 * w)],
+        _ref_nonneg(50.0 * w, 5.0 * w, 0.25 * w), rtol=1e-12)
+
+
+def test_precip_positivity_fixer_gradient_at_default():
+    """check_grads through the fixer inside its windows; the derivative
+    differs from the exact switch's."""
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+
+    w = M._W_PFLX
+
+    def f(r1, s1, hard=False):   # in units of w
+        r2, s2, d, mel = M._nonneg_precip(IfsSmooth(hard), r1 * w, s1 * w, 0.25 * w)
+        return (r2 + 2.0 * s2 + 3.0 * d + 5.0 * mel) / w
+
+    for r1, s1 in ((0.4, 0.2), (0.5, -0.2), (-0.1, 0.6)):
+        x = (jnp.asarray(r1), jnp.asarray(s1))
+        check_grads(f, x, order=1, modes=("rev",), eps=1e-5, atol=1e-6, rtol=1e-6)
+        g = np.asarray(jax.grad(f, argnums=(0, 1))(*x))
+        gh = np.asarray(jax.grad(lambda a, b: f(a, b, True), argnums=(0, 1))(*x))
+        assert np.all(np.isfinite(g)) and np.max(np.abs(g - gh)) > 1e-3 * np.max(np.abs(gh))
+
+
+def test_smooth_melt_is_zero_below_freezing(fix):
+    """The smooth melt cap must not melt snow at T < RTT, where OpenIFS's
+    melting factor ZFAC changes sign (T < RTT - 1/ZMELT_DT): surface snow of
+    the fixture's frozen-precipitation columns is the oracle's."""
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    th, x = _thermo(fix, "L"), _inputs(fix, "L32", jnp.float64)
+    out = cumastrn(th, float(fix["dt"]), qsat=satur_qsat(th, x["T"], x["p_full"]),
+                   tun=IfsTunables(hard_switches=False), **x)
+    ref = np.asarray(fix["L_L32_PMFLXS"])[:, -1]
+    assert np.any(ref > 0.0)
+    np.testing.assert_allclose(np.asarray(out.pmflxs)[:, -1], ref, rtol=1e-3, atol=1e-12)
 
 
 def test_ascent_cap_helpers_gradient_at_default():

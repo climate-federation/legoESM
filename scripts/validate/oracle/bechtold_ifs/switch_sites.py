@@ -63,7 +63,15 @@ def sites():
     for mod in MODULES:
         src = inspect.getsource(mod)
         lines = src.splitlines()
-        for node in ast.walk(ast.parse(src)):
+        tree = ast.parse(src)
+        # calls in the body of ``if sm.hard:`` run only with the exact switches
+        # (kept as IfsSmooth calls so switch_scales.py samples them): not sites
+        exact = {id(n) for i in ast.walk(tree)
+                 if isinstance(i, ast.If) and ast.unparse(i.test) == "sm.hard"
+                 for b in i.body for n in ast.walk(b)}
+        for node in ast.walk(tree):
+            if id(node) in exact:
+                continue
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and isinstance(node.func.value, ast.Name) and node.func.value.id == "sm"
                     and node.func.attr in _SITE_METHODS):
@@ -171,11 +179,17 @@ class _Line:
         _, f, self.range = next(d for d in DIRECTIONS if d[0] == direction)
         x0 = column(fix, g, c)
         self.rec = {}
-        with instrument(lambda s, d: self.rec.setdefault(s, []).append(d.ravel())):
-            self._f = jax.jit(lambda s: output(fix, f(x0, s)))
-            self._f(jnp.asarray(float(0.5 * sum(self.range)))).block_until_ready()
+        # held open until close(): instrument() drops every trace on exit, so
+        # a later call would retrace without the recorder
+        self._cm = instrument(lambda s, d: self.rec.setdefault(s, []).append(d.ravel()))
+        self._cm.__enter__()
+        self._f = jax.jit(lambda s: output(fix, f(x0, s)))
+        self._f(jnp.asarray(float(0.5 * sum(self.range)))).block_until_ready()
         self.rec.clear()
         self.fix, self.x = fix, lambda s: f(x0, jnp.asarray(float(s)))
+
+    def close(self):
+        self._cm.__exit__(None, None, None)
 
     def positions(self, s):
         self.rec.clear()
@@ -255,8 +269,8 @@ def search(fix, todo, cols, n_grid=24):
                             break
                     if done:
                         break
+            line.close()
             del line
-            jax.clear_caches()
     return found
 
 
