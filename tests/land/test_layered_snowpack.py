@@ -283,6 +283,13 @@ def test_land_step_closes_pack_plus_soil_energy(scheme, ft):
                 s, s_new, grid, hc, tc)
             src = dt * (sfc.snow_ground_heat_applied + tc.Q_geothermal) + sfc.snow_advected_heat
             np.testing.assert_allclose(dE, src, rtol=1e-9, atol=1e-3)
+            if not two:
+                # ... and that applied ground flux is what the atmosphere was
+                # NOT handed: Rn - SH_atm - LE_atm (#2542; SimpleSEB's Robin
+                # correction leaves as sensible heat).  W/m2, into the land.
+                np.testing.assert_allclose(
+                    sfc.sw_net + sfc.lw_net - resp.shflx - resp.lhflx,
+                    sfc.snow_ground_heat_applied, rtol=0, atol=1e-8)
             assert int(sfc.n_held) == 0
             moved |= bool(jnp.any(jnp.abs(s_new.theta_soil - s.theta_soil) > 1e-4))
             saw["drain"] |= bool(jnp.any(s_new.snow_depth < s.snow_depth - 1e-3))

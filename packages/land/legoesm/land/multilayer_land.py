@@ -1765,6 +1765,14 @@ def _step_multilayer_land_impl(
             # the skin warmed, the surface lost more (less INTO the soil,
             # more UP); SH positive up.  Linear in the solved temperatures
             # (no switch).  Step-mean over the solve's sub-steps.
+            # Rn here is the scheme's, with longwave emitted at the
+            # START-of-step skin temperature.  The exported post-step lw_up /
+            # skin temperature are the boundary of the atmosphere's NEXT
+            # radiation call, where the next land step charges the same
+            # emission; they carry none of this step's correction.
+            # KNOWN LIMITATION: the latent share (lambda_lh * dT) is exported
+            # as sensible, not latent, heat (energy and water both close; the
+            # Bowen ratio of the correction is not preserved).
             shflx = shflx + _robin_flux
     if not _snow_node:
         T_snow_new = None
