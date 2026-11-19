@@ -158,39 +158,40 @@ def test_hard_limit_matches_oracle(pft, ci):
 
 
 # Measured per-case (default - oracle) of ASW_Sun at clip_width=0.01 [W m-2], job
-# 11246591 at the ratio-space smooth clip.  Rounding level (<4e-13) wherever the
+# 11302156 (re-measured when the UV band moved to the exported UV reflectance;
+# first measured in job 11246591).  Rounding level (<4e-13) wherever the
 # sunlit share of canopy absorption is outside the band (cases 0-5: share <= 0.988);
 # case 6 (LAI 0.01, CI 1, share 0.997-0.9995) -0.0019..-0.0026 W m-2.
 # Re-measure and update with the reason if the smooth form or its width changes.
 DEFAULT_GAP = {
     ('ENF', 0): 1.1368683772161603e-13,
-    ('ENF', 1): 0.0,
+    ('ENF', 1): 2.842170943040401e-14,
     ('ENF', 2): 0.0,
     ('ENF', 3): 9.947598300641403e-14,
     ('ENF', 4): 0.0,
     ('ENF', 5): 1.4210854715202004e-14,
-    ('ENF', 6): -0.0025609565686188773,
+    ('ENF', 6): -0.002563064999177911,
     ('DBF', 0): 0.0,
     ('DBF', 1): 0.0,
     ('DBF', 2): -7.105427357601002e-15,
     ('DBF', 3): 0.0,
     ('DBF', 4): 0.0,
     ('DBF', 5): 1.021405182655144e-14,
-    ('DBF', 6): -0.002297587390699185,
+    ('DBF', 6): -0.0022999329351480746,
     ('SAV', 0): 0.0,
     ('SAV', 1): -2.842170943040401e-14,
     ('SAV', 2): 7.105427357601002e-15,
     ('SAV', 3): 1.4210854715202004e-14,
     ('SAV', 4): 0.0,
     ('SAV', 5): 2.6201263381153694e-14,
-    ('SAV', 6): -0.0020631818985004102,
+    ('SAV', 6): -0.0020652698907004385,
     ('GRA', 0): 3.410605131648481e-13,
     ('GRA', 1): -2.842170943040401e-14,
     ('GRA', 2): 7.105427357601002e-15,
     ('GRA', 3): 1.4210854715202004e-14,
     ('GRA', 4): -2.7755575615628914e-17,
-    ('GRA', 5): -1.9984014443252818e-14,
-    ('GRA', 6): -0.001861332159471818,
+    ('GRA', 5): -2.042810365310288e-14,
+    ('GRA', 6): -0.0018632008265915267,
 }
 
 
