@@ -102,6 +102,23 @@ def test_distance_factor_applied_exactly_once():
     assert abs(mean / (constants.S_0 / 4.0 / np.sqrt(1.0 - e * e)) - 1.0) < 2e-4
 
 
+def test_polar_day_shortfall_is_the_documented_sunset_angle_cap():
+    # Known difference vs climlab (max 0.20 W/m2 at obliquity 90): the AD-safe
+    # arccos clip (1 - 1e-7) shrinks polar-day insolation by
+    # (S0/pi) sqrt(2e-7) (a/r)^2 sin(lat) sin(decl).
+    from legoesm.atmosphere.physics.radiation.solar import (
+        earth_sun_distance_factor, solar_declination,
+    )
+    orbit = OrbitalParameters(0.0167, 90.0, 282.9)
+    day, lat = 357.0, jnp.deg2rad(-90.0)
+    sd = jnp.sin(solar_declination(day, orbit=orbit))
+    f = earth_sun_distance_factor(day, orbit)
+    exact = constants.S_0 * f * jnp.sin(lat) * sd
+    cap = constants.S_0 / np.pi * np.sqrt(2e-7) * f * jnp.sin(lat) * sd
+    shortfall = exact - daily_mean_insolation(lat, day, orbit=orbit)
+    np.testing.assert_allclose(shortfall, cap, rtol=1e-2)
+
+
 def test_validate_strict_refuses_bad_year_before_the_run():
     from legoesm.driver.config import ExperimentConfig
     with pytest.raises(ValueError, match="validity"):
