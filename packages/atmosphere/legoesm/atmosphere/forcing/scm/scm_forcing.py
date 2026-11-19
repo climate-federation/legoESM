@@ -127,6 +127,12 @@ class SCMForcing(NamedTuple):
         ``wind_relax_rate`` [1/s]; ``0.0`` disables it. Targets [m/s].
     rad_T_tendency
         Prescribed radiative temperature tendency [K/s], added to dT/dt.
+    rad_column_fn
+        Interactive radiation on the column each stage instead of a prescribed
+        profile: ``rad_column_fn(state, sigma_coord, t)`` returns an object whose
+        ``dT_dt`` [K/s] (top-first, ``nlev``) is added to dT/dt (the radiation's
+        own record, e.g. its boundary fluxes, stays with the caller). Exclusive
+        with ``rad_T_tendency``.
     surface_flux_fn
         A surface law evaluated on the column each stage instead of a time
         series: ``surface_flux_fn(state, sigma_coord, t) -> SurfaceFluxRecord``
@@ -158,6 +164,7 @@ class SCMForcing(NamedTuple):
     v_target: Optional[ProfileFn] = None
     rad_T_tendency: Optional[ProfileFn] = None
     surface_flux_fn: Optional[Callable] = None
+    rad_column_fn: Optional[Callable] = None
 
 
 class SurfaceFluxRecord(NamedTuple):
@@ -237,6 +244,10 @@ def validate_forcing(forcing: SCMForcing) -> None:
             "relaxation would be silently off.")
     if forcing.prescribe == "T_s" and forcing.T_s is None:
         raise ValueError("prescribe='T_s' requires SCMForcing.T_s callable.")
+    if forcing.rad_T_tendency is not None and forcing.rad_column_fn is not None:
+        raise ValueError(
+            "SCMForcing.rad_T_tendency and rad_column_fn are exclusive; the column "
+            "would be heated by two radiations.")
     if forcing.surface_flux_fn is not None:
         if not (forcing.prescribe == "fluxes" and forcing.flux_to_closure):
             raise ValueError(
@@ -553,6 +564,11 @@ def compute_forcing_tendencies(
     if forcing.rad_T_tendency is not None:
         dT_dt = dT_dt + _eval_profile(
             forcing.rad_T_tendency, t_seconds, nlev, sd).reshape(1, 1, 1, nlev)
+    # --- Interactive radiation on this stage's column -------------------
+    if forcing.rad_column_fn is not None:
+        dT_dt = dT_dt + jnp.asarray(
+            forcing.rad_column_fn(state, sigma_coord, t_seconds).dT_dt,
+            dtype=sd).reshape(1, 1, 1, nlev)
 
     tracer_tend = dict(other_tend) or None
     if dqv_dt is not None and q_v_fld is not None:

@@ -111,6 +111,7 @@ def rrtmgp_radiation(
     aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
     ghg_vmr_override: dict | None = None,
+    mcica_cloud_fraction: jnp.ndarray | None = None,
 ) -> RadiationOutput:
     """Compute radiation using jax-rrtmgp (compatibility shim).
 
@@ -138,6 +139,7 @@ def rrtmgp_radiation(
         aerosol_absorption_optical_depth_lw=aerosol_absorption_optical_depth_lw,
         solar_spectral_fraction=solar_spectral_fraction,
         ghg_vmr_override=ghg_vmr_override,
+        mcica_cloud_fraction=mcica_cloud_fraction,
     )
     # Honour RRTMGPConfig.column_chunk_size so this public entry point caps
     # the rrtmgp XLA compile time identically to the integration path (the
