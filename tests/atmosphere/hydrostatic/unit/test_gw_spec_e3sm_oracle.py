@@ -311,10 +311,11 @@ def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps
 # convective_frontal arm along a line through the switch, checks the default
 # with check_grads there, and shows the hard value of THAT field alone fails.
 #   heating range: level 20 sits inside column 0's heating run (levels 9..32);
-#     its netdt set to s cuts the run at s <= 0 (the launch interface jumps
-#     from 10 to 21).  At s = w/2 the expected launch interface is 15.5, the
-#     middle of a launch-staircase step.
-#   q0: level 18 of column 0 set to netdt(17) + s ties the range max at s = 0.
+#     its netdt set to s*heating_ramp_width cuts the run at s <= 0 (the
+#     launch interface jumps from 10 to 21).  At s = 1/2 the expected launch
+#     interface is 15.5, the middle of a launch-staircase step.
+#   q0: level 18 of column 0 set to netdt(17) + s/q0_max_sharpness ties the
+#     range max at s = 0.
 #   depth gate: column 1's run (levels 29..34) is 1.59 km deep; z_full * s
 #     crosses hdepth_min_km = 2.5 km at s = 2.5/hdepth.
 _C0, _CUT, _QI, _QJ, _C1 = 0, 20, 17, 18, 1
@@ -335,10 +336,15 @@ def _beres_line(fx, col, perturb, beres_kw, source=None):
     return jax.jit(f)
 
 
-def _set_netdt(k, offset_from=None):
+_BERES = E3SMBeresConfig()
+
+
+def _set_netdt(k, scale, offset_from=None):
+    """netdt of column _C0 at level k set to s*scale (+ netdt at offset_from):
+    s is in units of the switch's own width."""
     def perturb(j, s):
         base = 0.0 if offset_from is None else j["netdt"][_C0, offset_from]
-        return dict(j, netdt=j["netdt"].at[_C0, k].set(base + s))
+        return dict(j, netdt=j["netdt"].at[_C0, k].set(base + s * scale))
     return perturb
 
 
@@ -347,17 +353,17 @@ def _scale_z(j, s):
                 z_half=j["z_half"].at[_C1].multiply(s))
 
 
-_HW = E3SMBeresConfig().heating_ramp_width
-_GATE = E3SMBeresConfig().hdepth_gate_width
+_HW, _GATE = _BERES.heating_ramp_width, _BERES.hdepth_gate_width
 _SWITCHES = {
     # name: (column, perturbation, point, eps, the field's hard value, interior point)
-    # eps keeps the launch interface (moving 11 levels across the ramp)
-    # inside one step of its staircase (width 0.1 levels).
-    "heating_range": (_C0, _set_netdt(_CUT), 0.0, _HW / 20,
-                      dict(heating_ramp_width=0.0), _HW / 2),
-    "launch_staircase": (_C0, _set_netdt(_CUT), _HW / 2, _HW / 2000,
+    # eps keeps the launch interface (moving 11 levels across the heating
+    # ramp, ~21 levels per unit s at its middle) inside one step of its
+    # staircase (width index_round_width = 0.1 levels).
+    "heating_range": (_C0, _set_netdt(_CUT, _HW), 0.0, 0.05,
+                      dict(heating_ramp_width=0.0), 0.5),
+    "launch_staircase": (_C0, _set_netdt(_CUT, _HW), 0.5, 5.0e-4,
                          dict(index_round_width=0.0), None),
-    "q0_max": (_C0, _set_netdt(_QJ, offset_from=_QI), 0.0, 1.0e-10,
+    "q0_max": (_C0, _set_netdt(_QJ, 1.0 / _BERES.q0_max_sharpness, offset_from=_QI), 0.0, 0.1,
                dict(q0_max_sharpness=float("inf")), None),
     "depth_gate": (_C1, _scale_z, 2.5 / _HD1, 1.0e-3,
                    dict(hdepth_gate_width=0.0), (2.5 - _GATE / 2) / _HD1),
@@ -382,7 +388,7 @@ def test_beres_launch_blend_closes_column_energy(fx):
     once, on the blend)."""
     z, meta, table = fx
     m = meta["arms"]["convective_frontal"]
-    j = _set_netdt(_CUT)(_inputs(z, "l36"), jnp.asarray(_HW / 2))
+    j = _set_netdt(_CUT, _HW)(_inputs(z, "l36"), jnp.asarray(0.5))
     cfg = _config(m["ours"], hard=False)._replace(source="convective")
     assert cfg.do_energy_conservation
     o = _run(j, cfg, m["dt"], table)

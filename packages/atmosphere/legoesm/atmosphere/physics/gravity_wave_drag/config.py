@@ -832,7 +832,7 @@ class E3SMBeresConfig(NamedTuple):
     hd_index_rule: str = "nint"
     index_round_width: float = 0.1
     crit_minmax_sharpness: float = 100.0
-    heating_ramp_width: float = 1.0e-6
+    heating_ramp_width: float = 1.0e-7
     q0_max_sharpness: float = 1.0e8
     hdepth_gate_width: float = 0.1
 

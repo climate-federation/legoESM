@@ -122,6 +122,8 @@ def test_beres_matches_oracle():
         z_heat_max=20000.0, storm_speed_min=10.0, maxh=MAXH, maxuh=MAXUH,
         use_stand_in_table=True, mfcc_peak=1.0e-2, mfcc_c0=30.0,
         mfcc_hdepth_growth=0.05,
+        # the oracle's netdt > 0, q0 max and depth gate (RULE 5 hard limits, #2569)
+        heating_ramp_width=0.0, q0_max_sharpness=float("inf"), hdepth_gate_width=0.0,
     )
     mfcc = build_stand_in_mfcc(NGWV, DC, beres, jnp.float64)
     out = gw_beres_src(
