@@ -14,6 +14,8 @@
 # differs in sign says the forcing is wrong and the cause is upstream; a head
 # that agrees says the response is wrong and the cause is local to the channel.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge; cd $ROOT || exit 1
 echo "HEAD: $(git log --oneline -1)"
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
@@ -49,3 +51,4 @@ $PY -u scripts/validate/ocean_fidelity/bering_ssh_head.py \
   --out "$ROOT/omip_nemo/bering_ssh_head_d${DAY}.json" \
   --map-png "$ROOT/omip_nemo/bering_ssh_diff_d${DAY}.png" 2>&1 | tail -40
 echo "rc=${PIPESTATUS[0]}"
+exit ${RC:-0}

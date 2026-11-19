@@ -176,14 +176,33 @@ def _ocean_to_ice_heat_flux(
     _fpos = zfric > 0.0
     ustar = jnp.where(_fpos, jnp.sqrt(jnp.where(_fpos, zfric, 1.0)), 0.0)
     dT = ocean_sst - config.T_freeze_ocean
-    qsb = rho_cp * config.ocean_heat_ch_nemo * ustar * dT
     zqfr = rho_cp * jnp.asarray(ocean_dz_top_m) * (-dT)
     cap = -jnp.minimum(zqfr, 0.0) / dt / jnp.maximum(ice_area_total,
                                                      _NEMO_EPSI10)
     zswitch = ice_area_total >= _NEMO_EPSI10
-    qsb = jnp.where(zswitch, jnp.minimum(qsb, cap), 0.0)
-    return jnp.where(
-        (dT < 0.0) & (ice_volume_total >= _NEMO_SUPERCOOL_VT_MAX_M), 0.0, qsb)
+    stop = si3_gt(-dT, 0.0, 0.0) * si3_ge(
+        ice_volume_total, _NEMO_SUPERCOOL_VT_MAX_M, 0.0)
+    # The outer where keeps an ice-free cell an exact +0.0 even when its
+    # SST/cap is non-finite, as before the helper was shared (GLM review).
+    return jnp.where(zswitch, _nemo_si3_qsb(
+        1.0, constants.rho_ocean, constants.c_p_seawater,
+        config.ocean_heat_ch_nemo, ustar, dT, cap, stop, 0.0, 0.0), 0.0)
+
+
+def _nemo_si3_qsb(switch, rho, c, ch, ustar, dT, cap, stop_supercool, r, flux_w):
+    """SI3 basal sensible heat ``qsb_ice_bot`` (``icesbc.F90:371-381``, 5.0.1).
+
+    ``qsb = zswitch*rho0*rcp*zch*ustar*(SST - Tf)`` (:371), capped by the heat
+    the top cell can give up before freezing, ``cap = -MIN(zqfr,0)/Dt/
+    MAX(at_i,epsi10)`` (:377), and zeroed where the cell is supercooled under
+    >= 20 m of ice (:381, ``stop_supercool``).  One implementation for the
+    production ``nemo_ustar`` flux (hard, ``r = 0``) and the oracle
+    transcription :func:`_nemo_si3_ice_flx_other` (C1 ramps of width ``r``,
+    flux width ``flux_w``) -- #2525.
+    """
+    qsb = switch * rho * c * ch * ustar * dT
+    qsb = switch * min_c1(qsb, cap, si3_sharp(flux_w))
+    return si3_mix(stop_supercool, 0.0, qsb, r)
 
 
 def grid_supports_ice_dynamics(grid) -> bool:
@@ -1304,19 +1323,16 @@ def _nemo_si3_ice_flx_other(
     friction_velocity = jnp.where(
         friction_positive, jnp.sqrt(jnp.where(friction_positive, friction, 1.0)), 0.0
     )
-    qsb = (
-        switch * rho_ocean * c_ocean
-        * constants.ice_ocean_heat_transfer_nemo * friction_velocity
-        * ((sst_celsius + T0) - T_bottom)
-    )
-    qsb = switch * min_c1(qsb, -freeze_negative / dt / ice_floor, si3_sharp(flux_w))
     supercool = si3_gt(T_bottom - (sst_celsius + T0), 0.0, r * switches.temperature_scale_K)
     stop_volume = constants.ice_supercool_volume_stop_nemo
     thick = si3_ge(ice_volume, stop_volume, r * stop_volume)
     stop_supercool = supercool * thick
+    qsb = _nemo_si3_qsb(
+        switch, rho_ocean, c_ocean, constants.ice_ocean_heat_transfer_nemo,
+        friction_velocity, (sst_celsius + T0) - T_bottom,
+        -freeze_negative / dt / ice_floor, stop_supercool, r, flux_w)
     freeze_energy = si3_mix(stop_supercool, 0.0, freeze_energy, r)
     freeze_positive = si3_mix(stop_supercool, 0.0, freeze_positive, r)
-    qsb = si3_mix(stop_supercool, 0.0, qsb, r)
     if hard:   # NEMO's branch, kept verbatim so hard mode is bitwise (+0.0; codex review)
         cooling = lead_energy - freeze_energy < 0.0
         fhld = jnp.where(

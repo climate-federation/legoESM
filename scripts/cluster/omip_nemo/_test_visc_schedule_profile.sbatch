@@ -17,6 +17,8 @@
 # rescale-then-multiply round trip would leave a 1e-7 residue and the test
 # would be measuring rounding rather than the fix.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge
 cd $ROOT || exit 1
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
@@ -29,3 +31,4 @@ $PY -m pytest -q \
     tests/unit/test_run_omip_core2_visc_schedule_profile.py \
     tests/unit/test_run_omip_core2_eq_visc_shaping.py
 echo "=== pytest rc=$? ==="
+exit ${RC:-0}

@@ -7,6 +7,8 @@
 #SBATCH --time=01:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/_omip_merge/omip_nemo/prmap_%j.out
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge; cd $ROOT || exit 1
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
@@ -23,3 +25,4 @@ $PY -u scripts/validate/ocean_fidelity/compare_tendencies_nemo.py \
   --output-dir "$OUT/maps_iwmbg" 2>&1 | tail -12
 echo "rc=${PIPESTATUS[0]}"
 ls -la "$OUT/maps_iwmbg"/*.png 2>/dev/null | head -20
+exit ${RC:-0}

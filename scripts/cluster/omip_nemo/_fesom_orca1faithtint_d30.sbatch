@@ -62,6 +62,7 @@
 #   CONFIRMS harmonization helps if SSS rmse drops below 0.45 (the IC blend is
 #   a salinity lever first) and MLD rmse below 25 m; REFUTES it if both stay
 #   within 0.02 / 1 m of base2.
+# NOT REPRODUCIBLE FROM THE REPO ALONE (#2525): it imports fesom_jax from the local, never-pushed branch legoesm/nemo-vmom (efebc73). Refused up front if absent.
 set -uo pipefail
 PIN=${1:?usage: sbatch _fesom_orca1faithtint_d30.sbatch <pinned-sha>}
 ROOT=${ROOT:-/burg-archive/glab/users/pg2328/_omip_run3}; cd $ROOT || exit 1
@@ -69,6 +70,7 @@ HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
 # fesom_jax = local branch legoesm/nemo-vmom (main + NEMO vertical momentum option, efebc73); never pushed upstream
+git -C /burg-archive/glab/users/pg2328/_wt_fesomjax_vmom cat-file -e efebc73^{commit} 2>/dev/null || { echo "FATAL: fesom_jax worktree with unpushed commit efebc73 (legoesm/nemo-vmom) is absent"; exit 1; }
 echo "fesom_jax: $(git -C /burg-archive/glab/users/pg2328/_wt_fesomjax_vmom log --oneline -1)"
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')/burg-archive/glab/users/pg2328/_wt_fesomjax_vmom:$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
