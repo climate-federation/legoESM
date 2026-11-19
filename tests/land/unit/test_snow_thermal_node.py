@@ -1112,14 +1112,17 @@ def test_simple_seb_melting_pack_skin_never_above_freezing():
 
 
 # Two-leaf node, one 30-min step, |default - hard cap| (max over the column):
-# (T_snow, T_soil, exported skin) [K].  Measured 2026-11-11 (#1882, width 0.1 K).
+# (T_snow, T_soil, exported skin) [K].  Width 0.1 K (#1882).  Re-measured
+# 2026-11-19 on main b8a2cf6693: the two-leaf step under the cap changed on
+# main since the 2026-11-11 measurement (cold case -3.2 %, warm +0.03 %); the
+# cap form and width did not.  Two JAX builds (0.9.2, 0.10.0) agree to 1e-9.
 _TWO_LEAF_CAP_GAPS = {
     "cold_in_band": (273.10, 268.0, dict(T=262.0),
-                     (4.679180996163268e-04, 6.0137744901567203e-04,
-                      5.6251439565357941e-04)),
+                     (4.5283149017905089e-04, 5.8189459196000826e-04,
+                      5.4440675882005962e-04)),
     "warm_sun_in_band": (273.13, 270.0, dict(T=285.0, sw=700.0, lw=340.0),
-                         (5.0233579986525001e-04, 6.4391417288334196e-04,
-                          4.5622096314446026e-04)),
+                         (5.0233954647183054e-04, 6.4412861001983401e-04,
+                          4.5637296688028073e-04)),
     "cold_outside_band": (270.0, 268.0, dict(T=262.0), (0.0, 0.0, 0.0)),
 }
 
