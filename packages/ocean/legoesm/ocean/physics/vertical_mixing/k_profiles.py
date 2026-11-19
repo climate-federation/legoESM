@@ -142,6 +142,7 @@ def compute_vertical_K_profiles(
     tke_rhs_materialization: str = "",
     tke_rhs_intermediate: str = "",
     return_salt_K: bool = False,
+    tke_budget_out: list | None = None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -356,7 +357,8 @@ def compute_vertical_K_profiles(
             tke_n2_bundle=tke_n2_bundle,
             return_tke_statement_trace=return_tke_statement_trace,
             tke_rhs_materialization=tke_rhs_materialization,
-            tke_rhs_intermediate=tke_rhs_intermediate)
+            tke_rhs_intermediate=tke_rhs_intermediate,
+            tke_budget_out=tke_budget_out)
         if _nemo_floor:
             K_v_total = jnp.maximum(K_v_total, K_vmix)
             A_v_total = jnp.maximum(A_v_total, A_vmix)
@@ -704,7 +706,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      tke_n2_bundle=None,
                      return_tke_statement_trace: bool = False,
                      tke_rhs_materialization: str = "",
-                     tke_rhs_intermediate: str = ""):
+                     tke_rhs_intermediate: str = "",
+                     tke_budget_out: list | None = None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -1193,7 +1196,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     K_H=tke_out.K_H, K_M_surface=tke_out.K_M_surface,
                     dissl=tke_out.dissl,
                     statement_trace=tke_out.statement_trace)
+                if tke_budget_out is not None:
+                    tke_budget_out.append(tke_out.budget)
                 return tke_out.K_H, tke_out.K_M, _carry
+            if tke_budget_out is not None:
+                # Read-only diagnostic side channel: the caller consumes these
+                # tracers inside the same trace (the --trd-columns dump).
+                tke_budget_out.append(tke_out.budget)
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
         # background and 3 iterations of the same backward-Euler step bring TKE
@@ -1494,9 +1503,9 @@ def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
     and spacings come from the partial thicknesses (``h_partial·J`` —
     exactly NEMO's partial-aware e3t/gdept construction); on a pure
     z-star coordinate they are the reference geometry stretched by the
-    Jacobian.  ``N²`` uses the shared ``compute_N2`` in-situ mode
-    (clipped >= 0) — the same construction as NEMO's ``MAX(0, rn2)``
-    usage in every zdfiwm structure function.
+    Jacobian.  ``N²`` comes from the shared ``compute_N2``, selected by
+    ``iwm_cfg.n2_mode``: ``nemo_bn2`` (default; NEMO's ``rn2`` = eosbn2
+    ``bn2``) or ``insitu`` (clipped >= 0); unknown modes raise.
     """
     from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
     from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
@@ -1538,10 +1547,26 @@ def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
     depth_cell = depth_cell.astype(dtype)
     dz_w = dz_w.astype(dtype)
 
-    N2 = compute_N2(
-        rho, dz_w, constants_config.rho_0, g=constants_config.g,
-        n2_mode="insitu",
-    )
+    _iwm_n2 = getattr(iwm_cfg, "n2_mode", "insitu")
+    if _iwm_n2 == "insitu":
+        N2 = compute_N2(
+            rho, dz_w, constants_config.rho_0, g=constants_config.g,
+            n2_mode="insitu",
+        )
+    elif _iwm_n2 == "nemo_bn2":
+        from legoesm.ocean.eos import nemo_bn2_live_geometry
+        _t_d, _w_d, _e3w = nemo_bn2_live_geometry(
+            z_coord, state.eta.data, state.H_bathy.data)
+        N2 = compute_N2(
+            rho, dz_w, constants_config.rho_0, g=constants_config.g,
+            T_cell=T, S_cell=state.S.data, n2_mode="nemo_bn2",
+            t_depth=_t_d, w_depth=_w_d, e3w_int=_e3w,
+            n2_eos_form=iwm_cfg.n2_eos_form,
+        ).astype(dtype)
+    else:
+        raise ValueError(
+            f"Unknown IWMConfig.n2_mode={_iwm_n2!r}; expected 'insitu' or "
+            "'nemo_bn2'.")
 
     if iwm_fields is None:
         iwm_fields = uniform_iwm_forcing(iwm_cfg, H_col.shape, dtype=dtype)

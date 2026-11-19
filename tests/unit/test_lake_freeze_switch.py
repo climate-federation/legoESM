@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from jax.test_util import check_grads
 
+from legoesm import constants
 from legoesm.coupler.lake.config import LakeConfig
 from legoesm.coupler.lake.state import LakeState
 from legoesm.coupler.lake.two_layer_lake import step_lake
@@ -63,8 +64,8 @@ _OLD_SCHEME = {
                   0.003830647376929619, 0.004615778949416893],
     "lhflx": [23.054298289570934, 20.357521709834675, 20.374692662046186,
               20.39186634141828, 20.47777565909715, 60.67143140689696],
-    "T_sfc": [273.15, 273.1530002101403, 273.1554995885315, 273.1579989669225,
-              273.1704958588754, 275.750000041485],
+    "T_sfc": [constants.T_freeze, 273.1530002101403, 273.1554995885315,
+              273.1579989669225, 273.1704958588754, 275.750000041485],
 }
 
 

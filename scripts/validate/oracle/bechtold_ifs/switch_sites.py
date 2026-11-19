@@ -29,13 +29,15 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.atmosphere.physics import _ifs_smooth
+from legoesm.atmosphere.physics import _ifs_thermo
 from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+from legoesm.atmosphere.physics.convection import _ifs_cuascent
 
 FIXTURE = (Path(__file__).resolve().parents[4] / "tests" / "atmosphere"
            / "oracle_fixtures" / "bechtold_ifs.npz")
 GROUPS = ("L32", "L137", "STRESS")
 DX = 1.0e5   # m, the grid length make_fixture.py encoded in PGAW
-MODULES = (M,)
+MODULES = (M, _ifs_cuascent, _ifs_thermo)
 # one-sided windows: active for 0 < (a - b)/w < 1 (target 0.5); centred: |d| < 0.5
 _ONE_SIDED = ("pos", "max", "min", "on", "off", "neg1")
 _CENTRED = ("gt", "ge", "lt", "le")
@@ -129,6 +131,10 @@ def instrument(record=None, hard_sites=(), inject=None):
             return f(self, *args, **kw)
         return g
 
+    # JAX caches traces by function identity, blind to the patched methods:
+    # drop them on entry and exit so no instrumented (or uninstrumented)
+    # trace is reused on the other side
+    jax.clear_caches()
     try:
         for n in orig:
             setattr(_ifs_smooth.IfsSmooth, n, wrap(n))
@@ -136,6 +142,7 @@ def instrument(record=None, hard_sites=(), inject=None):
     finally:
         for n, f in orig.items():
             setattr(_ifs_smooth.IfsSmooth, n, f)
+        jax.clear_caches()
 
 
 def column(fix, g, c):

@@ -1,0 +1,2 @@
+Independent reviewer /root/merge_review
+PASS. Four resolved hunks preserve both parents intent; auto-merges show no semantic conflict or new hybrid callers/lanes. Main positional prefix retained; branch tracer slots shift by one. Record voted tradeoff. UNVERIFIED: PBS runtime results. Existing positional ABI audit recommended.

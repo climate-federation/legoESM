@@ -654,8 +654,12 @@ _CERTIFIED_CARD_DIGESTS = {
     # Main's NamedTuple field order: the config re-printed in e3fd562b8's order
     # gives that lane's pins (6e62ad9e2f13da2b, fe969dad638d27b6, 7a4559a730c1079d).
     "GYRE-zco": "2efa6ac0692b7ff4",
-    "LOCK_EXCHANGE-zco": "3f8ec523690fbe51",
-    "OVERFLOW-zps": "a1fd1ae1b93dab73",
+    # LOCK/OVERFLOW re-pinned for the appended lateral_viscosity_file_coastal
+    # field (default "four_cell"); with that field dropped from the repr they
+    # reproduce the previous pins 3f8ec523690fbe51 / a1fd1ae1b93dab73 exactly.
+    # GYRE-zco is red on main too and is left as main has it.
+    "LOCK_EXCHANGE-zco": "8f0f10523a1d4641",
+    "OVERFLOW-zps": "be68a39f58cc44ee",
 }
 
 

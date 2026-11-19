@@ -29,6 +29,13 @@ adapters share ONE validation + command-building implementation instead of
 copy-pasting it.  Component-specific case-name validation (against a registry or
 the live matrix catalog) stays in the adapter via ``known_names``.
 
+A runner may also accept runner-only keys beyond ``SETUP_KEYS``
+(``MatrixRunnerSpec.extra_keys``, e.g. the ocean BENCH harness's ``preset`` /
+``steps``, #2113) and may have no case filter at all (``case_flag=None``); any
+other runner rejects those keys as unknown fields.  A positional case (a
+subcommand, ``case_flag=""``) and a runner with no grid choice
+(``grid_flag=None``) cover the single-column runner (#2103).
+
 Pure / dependency-free (``shlex`` + ``math`` + ``dataclasses``).
 """
 from __future__ import annotations
@@ -56,19 +63,28 @@ class MatrixRunnerSpec:
 
     runner_path: str
     valid_grids: tuple[str, ...]
-    case_flag: str = "--only"        # the exact-case-name filter flag
+    # The exact-case-name filter flag.  ``None`` = the runner has no case
+    # filter (it runs one fixed case), so the name is validated but not emitted.
+    case_flag: str | None = "--only"
     # Prefix the case name with this to request EXACT match.  ocean / atmosphere
     # filters strip a leading ``=`` to switch from substring to exact, so they
     # use ``"="``; a runner whose case flag is ALREADY exact (sea-ice ``--test``,
     # ``tc.case == args.test``) uses ``""``.
     exact_prefix: str = "="
-    grid_flag: str = "--grid"
+    # ``None`` = the runner has no grid choice (e.g. a single-column runner):
+    # ``setup.grid`` is still validated against ``valid_grids`` but not emitted.
+    grid_flag: str | None = "--grid"
     levels_flag: str | None = "--levels"
     dt_flag: str | None = "--dt"
     days_flag: str | None = "--days"
     resolution_flag: str | None = "--resolution"
     output_flag: str | None = "--output"
     quick_flag: str | None = "--quick"
+    # Runner-only setup keys (#2113): ``(setup_key, flag)`` pairs this runner
+    # accepts beyond ``SETUP_KEYS`` (e.g. the BENCH harness's ``preset`` /
+    # ``steps``).  Every other runner rejects them as unknown fields.  The
+    # component adapter validates their values.
+    extra_keys: tuple[tuple[str, str], ...] = ()
 
     def _override_flag(self, setup_key: str) -> str | None:
         return {
@@ -104,10 +120,11 @@ def validate_setup(setup, spec: MatrixRunnerSpec, *, known_names=None) -> None:
             f"`setup:` must be a mapping with `name:` and `grid:` "
             f"(got {type(setup).__name__})"
         )
-    unknown = sorted(k for k in setup if k not in SETUP_KEYS)
+    valid_keys = SETUP_KEYS + tuple(k for k, _ in spec.extra_keys)
+    unknown = sorted(k for k in setup if k not in valid_keys)
     if unknown:
         raise ValueError(
-            f"unknown setup field(s): {unknown}. Valid: {list(SETUP_KEYS)}"
+            f"unknown setup field(s): {unknown}. Valid: {list(valid_keys)}"
         )
     name, grid = setup.get("name"), setup.get("grid")
     if not isinstance(name, str) or not name:
@@ -163,11 +180,13 @@ def build_matrix_command(spec: MatrixRunnerSpec, setup, *, output_path=None) -> 
     explicit per-run overrides the runner supports.  Case defaults apply for
     anything omitted.
     """
-    parts = [
-        f"python {spec.runner_path}",
-        f"{spec.case_flag} {shlex.quote(spec.exact_prefix + str(setup['name']))}",
-        f"{spec.grid_flag} {shlex.quote(str(setup['grid']))}",
-    ]
+    parts = [f"python {spec.runner_path}"]
+    if spec.case_flag is not None:   # "" = positional case (subcommand)
+        parts.append(" ".join(filter(None, [
+            spec.case_flag,
+            shlex.quote(spec.exact_prefix + str(setup['name']))])))
+    if spec.grid_flag is not None:
+        parts.append(f"{spec.grid_flag} {shlex.quote(str(setup['grid']))}")
     if setup.get("levels") is not None and spec.levels_flag:
         parts.append(f"{spec.levels_flag} {int(setup['levels'])}")
     if setup.get("resolution") and spec.resolution_flag:
@@ -180,6 +199,10 @@ def build_matrix_command(spec: MatrixRunnerSpec, setup, *, output_path=None) -> 
         parts.append(f"{spec.output_flag} {shlex.quote(str(output_path))}")
     if setup.get("quick") and spec.quick_flag:
         parts.append(spec.quick_flag)
+    # ``--flag=value`` so a value starting with ``-`` is not read as a flag.
+    for key, flag in spec.extra_keys:
+        if setup.get(key) is not None:
+            parts.append(f"{flag}={shlex.quote(str(setup[key]))}")
     return " ".join(parts)
 
 

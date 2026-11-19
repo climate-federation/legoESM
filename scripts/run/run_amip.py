@@ -576,6 +576,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "derived for a UNIFORM grid -- measured max "
                              "0.0642 on that run, 15.6x inside it; needs "
                              "nlev>=4).  Default = bit-identical.")
+    parser.add_argument("--spectral-sponge-nu-top-m2s", type=float, default=None,
+                        dest="spectral_sponge_nu_top_m2s",
+                        help="spectral lane CAM-SE top sponge: del2 viscosity [m2/s] "
+                             "x (4, 2, 1) on vor/div/T of the top three levels (0 = off)")
     parser.add_argument("--mpas-sponge-del2-top-layers", type=int, default=None,
                         dest="mpas_sponge_del2_top_layers",
                         help="CAM-style top diffusion sponge: number of top layers whose "
@@ -991,7 +995,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="surface_stability_scheme", default="dyer1974",
                         choices=["dyer1974", "beljaars_holtslag1991",
                                  "grachev2007_sheba", "gryanik2020", "gfs",
-                                 "wrf_revmm5", "mynn_sfc"],
+                                 "wrf_revmm5", "mynn_sfc", "most_revisit_j3"],
                         help="Stable-branch (zeta>0) Monin-Obukhov similarity "
                              "functions for the surface layer (bulk_flux psi_m/"
                              "psi_h). dyer1974 (default) is byte-identical: "
@@ -1975,6 +1979,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "per-column launch height comes from this field "
                              "(real mountains, ~0 over ocean) instead of the "
                              "scalar 500 m default.")
+    parser.add_argument("--default-subgrid-orography-file", type=str,
+                        default="",
+                        help="Machine default for --subgrid-orography-file, "
+                             "used only when neither the --config deck nor the "
+                             "command line names one (the launchers pass it, "
+                             "so a deck built for one grid keeps its own file).")
     parser.add_argument("--albedo-land-month", type=int, default=0,
                         help="Month (1-12) to pick from a monthly land-albedo "
                              "climatology; 0 = annual mean (default).")
@@ -3003,6 +3013,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             else tuple(args.mpas_vert4_log_form_tracers or ())),
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
+        spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
+                                    if args.spectral_sponge_nu_top_m2s is not None else 0.0),
         tracer_vertical_scheme=args.tracer_vertical_scheme,
         tracer_van_leer_width=args.tracer_van_leer_width,
         tracer_van_leer_flux_width=args.tracer_van_leer_flux_width,
@@ -3532,6 +3544,8 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
 
 def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
                       argv: list[str] | None = None) -> argparse.Namespace:
+    if not args.subgrid_orography_file:
+        args.subgrid_orography_file = args.default_subgrid_orography_file
     # Auto-detect MPI environment.
     # SLURM_NTASKS=1 is always set in batch jobs even for single-task GPU runs;
     # only treat it as an MPI signal when > 1 actual tasks are allocated.

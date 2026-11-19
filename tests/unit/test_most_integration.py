@@ -20,7 +20,7 @@ from legoesm.core import bulk_flux as bf
 
 REPO = Path(__file__).resolve().parents[2]
 STABLE = ("dyer1974", "beljaars_holtslag1991", "grachev2007_sheba", "gryanik2020",
-          "gfs", "wrf_revmm5", "mynn_sfc")
+          "gfs", "wrf_revmm5", "mynn_sfc", "most_revisit_j3")
 NEW_UNSTABLE = ("gfs", "wrf_revmm5", "mynn_sfc")
 ZNEG = jnp.linspace(-8.0, -0.01, 300)   # below the cap onset, outside the COARE blend
 
@@ -129,6 +129,8 @@ _CAP_GAP = {  # scripts/tmp/probe_cap_change.py, 2026-11-07
     'gfs': ((-0.0186009684699604, 0.0), (-0.0186009684699604, 0.0)),
     'wrf_revmm5': ((-0.010578351367821703, 0.0), (-0.010068863100138215, 0.0)),
     'mynn_sfc': ((-0.010578351367821703, 0.0), (-0.010068863100138215, 0.0)),
+    # j3_port/gap.py, 2026-11-15
+    'most_revisit_j3': ((-0.018817468951347505, 0.0), (-0.018817468951347505, 0.0)),
 }
 
 
@@ -264,9 +266,10 @@ def _choices(parser, dest):
     return tuple(next(a for a in parser._actions if a.dest == dest).choices)
 
 
-def test_every_stable_scheme_is_selectable_from_every_driver():
+@pytest.mark.parametrize("new", ("mynn_sfc", "most_revisit_j3"))
+def test_every_stable_scheme_is_selectable_from_every_driver(new):
     """Each driver's stable-scheme choices are exactly the core dispatch set,
-    and mynn_sfc round-trips into the configs each driver builds."""
+    and the newer schemes round-trip into the configs each driver builds."""
     from legoesm.driver.config import ExperimentConfig
     from scripts.run.run_omip import parse_args as omip_parse
 
@@ -275,16 +278,16 @@ def test_every_stable_scheme_is_selectable_from_every_driver():
     p = amip.build_arg_parser()
     assert _choices(p, "surface_stability_scheme") == core
     cfg = amip.build_config_from_args(p.parse_args(
-        ["--surface-bulk-scheme", "coare3", "--surface-stability-scheme", "mynn_sfc"]))
-    assert cfg.surface_stability_scheme == "mynn_sfc"
+        ["--surface-bulk-scheme", "coare3", "--surface-stability-scheme", new]))
+    assert cfg.surface_stability_scheme == new
     ExperimentConfig(turbulence="louis", surface_bulk_scheme="coare3",
-                     surface_stability_scheme="mynn_sfc").validate_strict()
+                     surface_stability_scheme=new).validate_strict()
     with pytest.raises(ValueError, match="surface_stability_scheme"):
         ExperimentConfig(turbulence="louis", surface_bulk_scheme="coare3",
                          surface_stability_scheme="mynn").validate_strict()
 
-    a = omip_parse(["--grid", "latlon", "--surface-stability-scheme", "mynn_sfc"])
-    assert a.surface_stability_scheme == "mynn_sfc"
+    a = omip_parse(["--grid", "latlon", "--surface-stability-scheme", new])
+    assert a.surface_stability_scheme == new
     with pytest.raises(SystemExit):
         omip_parse(["--grid", "latlon", "--surface-stability-scheme", "mynn"])
 
@@ -293,10 +296,10 @@ def test_every_stable_scheme_is_selectable_from_every_driver():
     assert _choices(cp, "surface_stability_scheme") == core
     assert _choices(cp, "ice_stability_scheme") == core
     args = cp.parse_args(["--surface-bulk-scheme", "coare3",
-                          "--surface-stability-scheme", "mynn_sfc"])
-    assert coupled.build_coupler_config(args).stability_scheme == "mynn_sfc"
-    args = cp.parse_args(["--ice-bulk-scheme", "most", "--ice-stability-scheme", "mynn_sfc"])
-    assert coupled.build_sea_ice_config(args).stability_scheme == "mynn_sfc"
+                          "--surface-stability-scheme", new])
+    assert coupled.build_coupler_config(args).stability_scheme == new
+    args = cp.parse_args(["--ice-bulk-scheme", "most", "--ice-stability-scheme", new])
+    assert coupled.build_sea_ice_config(args).stability_scheme == new
 
 
 def test_omip_core2_cap_flag_reaches_every_ncar_flux_call():

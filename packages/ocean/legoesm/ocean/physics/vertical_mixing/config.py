@@ -82,6 +82,7 @@ __param_spec__ = {
         "scheme_key": "ocean.vm.richardson",
         "excluded": {
             "Pr_t": "dead field: the Pr-Ri scaling is built into the K formula; richardson.py only warns when Pr_t != default and never reads it — phantom trainable",
+            "ri_clip_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
         },
         "params": {
             "A_bg": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
@@ -242,7 +243,7 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     # ----- Static-stability N^2 mode for the gradient Richardson number -----
     # ``"insitu"`` (default, BIT-IDENTICAL legacy) / ``"insitu_signed"``: N^2
     #   from the in-situ density difference (``eos.compute_buoyancy_frequency``,
-    #   already signed/unclipped here — the downstream ``richardson_number``
+    #   already signed/unclipped here — ``_pp81_diffusivities``
     #   clips Ri>=0), which carries the compressibility bias (~too stable).
     # ``"adiabatic"``: PP81's TRUE static stability via adiabatic parcel
     #   displacement to the upper cell's pressure
@@ -251,6 +252,8 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     #   ``richardson_vertical_mixing``. Both integration factory and the
     #   implicit k_profiles path supply it when this is selected.
     n2_mode: str = "insitu"
+    # RULE 5 width [1] of the C1 Ri >= 0 clip (0 = CVMix's hard clip).
+    ri_clip_width: float = 0.01
 
 
 class TKEConfig(NamedTuple):
@@ -710,6 +713,14 @@ class TKEConfig(NamedTuple):
     # order, including the per-column mbkt+1 no-crossing fallback. Only the
     # complete DINO NEMO cards select it; all other cards remain vectorized.
     tke_langmuir_evaluation: str = "vectorized"
+    # Langmuir source vs NEMO's explicit dissipation add-back.  NEMO adds the
+    # Langmuir increment to en BEFORE the matrix (zdftke.F90:367), so the RHS
+    # add-back zfact3*dissl*en (:419) multiplies the post-Langmuir en.
+    # ``separate`` (historical): Langmuir is a plain RHS source and the
+    # add-back uses the pre-Langmuir e_old.  ``nemo_pre_solve``: the add-back
+    # also acts on dt*source, as in NEMO (factored matrix + nemo_1p5_split
+    # only; the literal matrix already assembles it that way).
+    tke_langmuir_rhs_coupling: str = "separate"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
     # NEMO cards instead freeze p_sh2 from selected step-entry face levels and

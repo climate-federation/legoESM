@@ -53,6 +53,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --gateway-transports --mle --mle-ce 0.06 --kprofile-snapshots \
   --convection enhanced_diffusion --convection-K-conv 100 --convection-K-bg 0 \
   --convection-n2-mode nemo_bn2 --convection-n2-eos teos10 \
+  --convection-evd-composition additive `# user 2026-10-06: additive as before` \
   --convection-trigger hard --convection-n2-threshold=-1e-12 \
   --evd-occupancy-every-hours ${OCCH:-1} \
   --output $PRE 2>&1 | tail -25

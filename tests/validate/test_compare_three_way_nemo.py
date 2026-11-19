@@ -19,20 +19,28 @@ the first version:
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-_MOD = (Path(__file__).resolve().parents[2]
-        / "scripts" / "validate" / "ocean_fidelity" / "compare_three_way_nemo.py")
+# Normally the scorer in this repo.  C3W_MODULE points the whole module at a
+# MUTATED COPY instead, which is how the non-vacuity stage of
+# scripts/cluster/omip_nemo/_oracle_record_gate_tests.sbatch proves that
+# test_the_scorer_actually_calls_the_gate really does fail when the call it
+# claims to pin is deleted.
+_VALIDATE = Path(__file__).resolve().parents[2] / "scripts" / "validate"
+_MOD = (Path(os.environ["C3W_MODULE"]) if os.environ.get("C3W_MODULE")
+        else _VALIDATE / "ocean_fidelity" / "compare_three_way_nemo.py")
 
 
 def _load():
     # The module inserts scripts/validate on sys.path at import time so it can
     # reuse the NEMO scorecard's regridder; load it by path for the same reason.
-    sys.path.insert(0, str(_MOD.parents[1]))
+    # That path is always the REPO's, even when the module itself is a copy.
+    sys.path.insert(0, str(_VALIDATE))
     spec = importlib.util.spec_from_file_location("compare_three_way_nemo", _MOD)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -356,7 +364,10 @@ def test_main_intersects_also_mask_sources_into_both_footprints():
     assert "for x, mx in zip(X, mldX_raw):" in src
     assert "mld_ok &= ocXm > 0.5" in src
     # and a mask-only source without MLD geometry is refused, not skipped
-    assert "an --also-mask snapshot lacks z_center_ref" in src
+    # the message names the field the selected mode needs (window means vs snapshot)
+    assert "FATAL: an --also-mask snapshot lacks " in src
+    assert "mld_mean (run it with --mld-accumulate)" in src
+    assert 'else "z_center_ref/H_bathy")\n                         + ", so the MLD footprint cannot be shared"' in src
 
 
 # --------------------------------------------------------------------------
@@ -495,3 +506,110 @@ def test_manifest_summary_says_so_when_no_command_line_is_recorded(tmp_path):
     s = m._manifest_summary(snap)
     assert s["command_line"] is None
     assert "NOT recorded" in s["note"]
+
+
+# --- the oracle record must be the one ending on the day we say we scored ---
+#
+# The snapshot check in ``main`` pins OUR day and has since 2026-09-15.  The
+# ORACLE's day was unpinned: ``--nemo-time-idx`` defaults to -1, the LAST
+# record, so a card that simply forgot the flag scored its day-30 state against
+# NEMO's day 90 and the difference came back labelled a regression.  These pin
+# the gate the user authorised in its place.
+
+
+def test_matching_record_passes_silently():
+    m.check_oracle_record(expect_day=20, nemo_time_idx=3, n_time=18)
+
+
+def test_the_default_last_record_is_refused_on_a_long_oracle_file():
+    # THE DEFECT ITSELF: 18 records is 90 days, -1 is record 17, and the run
+    # being scored is at day 20.  Before this gate the run proceeded.
+    with pytest.raises(SystemExit) as e:
+        m.check_oracle_record(expect_day=20, nemo_time_idx=-1, n_time=18)
+    msg = str(e.value)
+    assert "record 3" in msg and "record 17" in msg
+    assert "--nemo-time-idx 3" in msg          # says what to pass, not just no
+    assert "days 15 to 20" in msg and "days 85 to 90" in msg
+
+
+def test_a_negative_index_that_lands_on_the_right_record_passes():
+    # -1 is not wrong in itself: on a file holding exactly the days scored it
+    # IS the right record, and refusing it would be a false alarm.
+    m.check_oracle_record(expect_day=20, nemo_time_idx=-1, n_time=4)
+
+
+def test_no_expectation_means_no_check():
+    m.check_oracle_record(expect_day=None, nemo_time_idx=-1, n_time=18)
+
+
+def test_the_monthly_path_is_exempt():
+    # --nemo-month selects by month from a monthly file; the 5-day record
+    # arithmetic does not apply to it and must not fire.
+    m.check_oracle_record(expect_day=20, nemo_time_idx=-1, n_time=18,
+                          nemo_month=1)
+
+
+def test_the_scorer_actually_calls_the_gate(tmp_path, monkeypatch):
+    """NON-VACUITY, and the only test here that proves ENFORCEMENT.
+
+    Codex, reviewing the first version: every test above passes with the call
+    in ``main`` deleted, because they exercise the helper and nothing asserts
+    the wiring.  A gate nobody calls is the same defect it was written to stop.
+
+    So drive ``main`` itself.  The three loaders are replaced with stubs -- the
+    real ones read hundreds of megabytes -- and everything between argument
+    parsing and the gate is the module's own code.  Deleting the call makes
+    this test fail on the stub state instead of on the record mismatch.
+    """
+    snaps = []
+    for nm in ("tri", "mpas"):
+        p = tmp_path / f"{nm}_snapshot_day0020.npz"
+        np.savez(p, time_days=np.asarray(20.0))
+        snaps.append(p)
+    gridt = tmp_path / "oracle_grid_T.nc"
+    gridt.write_bytes(b"")
+
+    def _stub_lego(path):
+        raise AssertionError(f"reached the loader for {path}: the gate did "
+                             "not fire, so main no longer calls it")
+
+    monkeypatch.setattr(m, "_load_legoesm", lambda p, use_mean=False: {"sst": np.zeros((2, 2))})
+    monkeypatch.setattr(m, "_load_nemo",
+                        lambda p, idx, month=None: {"n_time": 18,
+                                                    "sst": np.zeros((2, 2))})
+    monkeypatch.setattr(m, "_scored", _stub_lego, raising=False)
+    monkeypatch.setattr(sys, "argv", [
+        "compare_three_way_nemo.py",
+        "--tripole", str(snaps[0]), "--mpas", str(snaps[1]),
+        "--nemo-gridt", str(gridt), "--out-dir", str(tmp_path / "out"),
+        "--expect-day", "20"])          # and NO --nemo-time-idx: the default -1
+
+    with pytest.raises(SystemExit) as e:
+        m.main()
+    assert "record 3" in str(e.value) and "record 17" in str(e.value)
+
+
+def test_a_day_that_is_not_a_record_boundary_is_refused():
+    # GLM, reviewing the gate above: rounding a non-multiple to the nearest
+    # record turns a config typo into a plausible wrong score.  Day 27 rounds
+    # to record 4, whose window ENDS on day 25 -- a number that would have been
+    # reported as if it were day 27.
+    with pytest.raises(SystemExit) as e:
+        m.check_oracle_record(expect_day=27, nemo_time_idx=4, n_time=18)
+    msg = str(e.value)
+    assert "not a multiple" in msg
+    assert "days 25 and 30" in msg
+
+
+def test_the_non_boundary_refusal_fires_before_the_index_check():
+    # Even a caller who passes the index the old rounding would have chosen
+    # is refused: the day itself is unscoreable, so no index can be right.
+    with pytest.raises(SystemExit) as e:
+        m.check_oracle_record(expect_day=27, nemo_time_idx=-1, n_time=5)
+    assert "not a multiple" in str(e.value)
+
+
+def test_a_float_day_that_is_a_boundary_still_passes():
+    # 20.0 is a boundary written as a float; refusing it would be a false alarm
+    # from the tolerance, not from the convention.
+    m.check_oracle_record(expect_day=20.0, nemo_time_idx=3, n_time=18)
