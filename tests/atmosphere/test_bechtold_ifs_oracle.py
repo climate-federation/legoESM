@@ -448,19 +448,25 @@ def test_wrapper_surface_rain_is_cumastrn_surface_flux(fix, g, monkeypatch):
             assert np.max(np.abs(got - want)) / scale <= _TOL
 
 
-def test_wrapper_publishes_the_surface_snow_flux(fix):
+def test_wrapper_publishes_the_surface_snow_flux(fix, monkeypatch):
     """F29: the frozen surface precipitation is CUMASTRN's surface snow flux,
-    within the column's surface precipitation."""
+    within its surface rain + snow flux (exact; the column sum of the rain
+    source equals that flux to round-off, checked by
+    test_wrapper_surface_rain_is_cumastrn_surface_flux)."""
+    from legoesm.atmosphere.physics.convection import _ifs_faithful as F
     from legoesm.atmosphere.physics.convection.config import BechtoldConfig
 
+    cap, orig = {}, F.cumastrn
+    def spy(*a, **k):
+        cap["o"] = orig(*a, **k)
+        return cap["o"]
+    monkeypatch.setattr(F, "cumastrn", spy)
     out, _ = _wrapper_out(fix, BechtoldConfig(use_ifs_ascent=True, dx_m=_DX))
     snow = np.asarray(out.precip_frozen_sfc)
-    dp = np.diff(fix["L32_p_half"], axis=1)
-    total = np.sum(np.asarray(out.dq_r_conv_dt) * dp, axis=1) / _thermo(fix, "L").RG
-    assert snow.shape == total.shape and np.all(snow >= 0.0)
-    assert np.any(snow > 0.0)
-    # ``total`` is a column sum: equal to the flux only to round-off
-    assert np.all(snow <= total + _TOL * np.max(total))
+    rain = np.asarray(cap["o"].pmflxr)[:, -1]
+    np.testing.assert_array_equal(snow, np.asarray(cap["o"].pmflxs)[:, -1])
+    # snow <= rain + snow  <=>  rain >= 0
+    assert np.all(snow >= 0.0) and np.all(rain >= 0.0) and np.any(snow > 0.0)
 
 
 def test_clamped_square_roots_pass_nan_through(fix, monkeypatch):
@@ -802,6 +808,60 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    # part 3 (CUDDRAFN, CUFLXN, post-fixers): injection for every site (vote
+    # 2026-11-19, 3 of 3)
+    ('ddq = sm.lt(kget(zmfdq, idtop), ZDDTOP_Q * kget(zmfdq, ikd), _W_DDQF)', 'lt'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('dpmel = sk - sm.pos(sk - zsnmlt, _W_PFLX)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('en = -sm.pos(-en, _W_DDEN)     # bounded: en <= 0 (entrainment only)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
+    ('en = sm.max(en, -ZDD_DET_MAX * kget(pmfu, jk) - (mfd1 - zdmfde), _W_DDEN)', 'max'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('en = sm.max(en, ZDD_MIX_MIN * mfd1, _W_DDEN)', 'max'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('frz = sm.le(tk, rtt, _W_TFRZ)', 'le'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('lude_p = sm.pos(plude, _W_LUDE)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
+    ('melt = sm.on(sk, 0.0, _W_PFLX)', 'on'):
+        ('STRESS', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('pmfdde_rate + sm.pos(-zer, _W_RATE), pmfdde_rate)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
+    ('pr = sm.pos(r1, _W_PFLX)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('ps = sm.pos(s1, _W_PFLX)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('return r2, s2, t_new - (r1 + s1), dpmel * sm.on(r1 + s1, 0.0, _W_PFLX)', 'on'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('sn1 = jnp.where(dsn, sm.pos(sn1, _W_PFLX), 0.0)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('sn2 = av2 - sm.pos(av2 - sn2, _W_PFLX)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('sn2 = jnp.where(dsn, sm.pos(sn2, _W_PFLX), 0.0)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('t_new = sm.pos(r1 + s1, _W_PFLX)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zbuoyz = -sm.pos(-zbuoyz, _W_DDBUO)   # bounded: <= 0', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zdrfl = -sm.pos(zrfl - zrfln, _W_PFLX)    # bounded: <= 0 (evaporation only)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zdrfl1 = rcpecons * sm.pos(qsk - qk, _W_QDEF) * zrcucov * spow(arg, ZEVAP_EXP) * dp', 'pos'):
+        ('STRESS', 0, 'inject', None, 0.0, 0.01, ()),
+    ('zfacl = lude_p - sm.pos(lude_p - zneed, _W_LUDE)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
+    ('zneed = sm.pos(-(pqen + zmfa) / zdzt, _W_LUDE)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zrfln = sm.pos(zrnew, _W_PFLX)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zrmin = zrfl - zrcucov * sm.pos(zrhebc * qsk - qk, _W_QDEF) * zcons2 * dp', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zrnew = sm.max(zrnew, zrmin, _W_PFLX)', 'max'):
+        ('STRESS', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zsnmlt = zfac * sm.pos(zten - rtt, _W_TFRZ)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('ztwetb = tk - sm.pos(qsk - qk, _W_QDEF) * (ZTW1 + ZTW2 * (pk - ZTW3) - ZTW4 * (tk - ZTW5))', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
 }
 
 
@@ -939,6 +999,24 @@ _SITE_SYNTHETIC = {
     ('zrnew = sm.pos(zrnew, _W_COND)', 'pos'):
         ('0.0', '_W_COND',
          'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('melt = melt * sm.on(zten, rtt, _W_TFRZ)', 'on'):
+        ('th.RTT', '_W_TFRZ',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)'),
+    ('sq = (idbas >= K - 1) * sm.gt(-kget(pmfd, idbas), 0.5 * kget(mu, idbas), _W_SQ)', 'gt'):
+        ('_S_SQ', '_W_SQ',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried) (bound traced: representative value)'),
+    ('RCUCOV * (1.0 + (sm.max(zrhm, ZRHM_MIN, _W_RHM) - ZRHM_MIN) / ZRHM_SCALE),', 'max'):
+        ('ZRHM_MIN', '_W_RHM',
+         'full-scheme injection point found, but it reaches the scheme output only at round-off level (|d loss/ds| <= 4e-12, finite difference 0; vote 3 2026-11-19)'),
+    ('pmfude_rate = jnp.where(cud, pmfude_rate + sm.pos(-zer, _W_RATE), pmfude_rate)', 'pos'):
+        ('0.0', '_W_RATE',
+         'full-scheme injection point found, but its derivative (|d loss/ds| ~ 1e-6..1e-8 on a loss ~ 200) is resolved by finite differences only to 1.1-1.4e-3 at h = 1e-2 (round-off, error ~ 1/h), above the 1e-3 tolerance (vote 3 2026-11-19)'),
+    ('sn1 = av1 - sm.pos(av1 - sn1, _W_PFLX)', 'pos'):
+        ('0.0', '_W_PFLX',
+         'full-scheme injection point found, but its derivative (|d loss/ds| ~ 1e-6..1e-8 on a loss ~ 200) is resolved by finite differences only to 1.1-1.4e-3 at h = 1e-2 (round-off, error ~ 1/h), above the 1e-3 tolerance (vote 3 2026-11-19)'),
+    ('zalfaw = sm.sel(sm.lt(kget(pten, jk), rtt, _W_TFRZ), 0.0, foealfcu(th, kget(pten, jk), sm))', 'lt'):
+        ('th.RTT', '_W_TFRZ',
+         'full-scheme injection point found, but it reaches the scheme output only at round-off level (|d loss/ds| <= 4e-12, finite difference 0; vote 3 2026-11-19)'),
 }
 
 

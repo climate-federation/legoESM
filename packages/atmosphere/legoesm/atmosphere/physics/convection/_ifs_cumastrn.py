@@ -28,12 +28,23 @@ scale of the switched quantity (``_S_*`` below); True gives OpenIFS's exact
 switches (the oracle match).  Division guards and safety floors
 (RMFCMIN, ZEPS_MF, ZMFS_MIN, ZDQMIN_FLOOR) stay hard.  #2281 part 1 smooths
 the closure, part 2 the ascent (:mod:`._ifs_cuascent`, CUADJTQ/FOEALFCU in
-:mod:`.._ifs_thermo`); the fluxes follow.
+:mod:`.._ifs_thermo`); part 3 the downdraught (CUDDRAFN entrainment and
+buoyancy bounds, the DD-top humidity and freezing/melting selects), CUFLXN
+(melt cap, detrained-precipitation caps, sub-cloud evaporation bounds and
+wet-bulb deficit, the negative-flux fixer -- smooth and conservative, the
+added amount to OpenIFS's sink) and the post-CUFLXN fixers (detrainment-rate
+consistency, cloud-top detrained-liquid fixer).
 KNOWN DIFFERENCE, kept hard in both modes: the level/flag structure.  Cloud
 base and top, departure level, downdraught top and base, the cloud type
 KTYPE, LDCUM/LDDRAF and every level mask built from them are chosen from
 traced buoyancy, pressure and humidity and read through integer gathers;
-their gradients are zero or undefined at a level change.  Smoothing them is
+their gradients are zero or undefined at a level change.  Part 3 adds to this
+list: the CUDLFSN departure pick, the CUDDRAFN termination test (zeroes the
+downdraught flux), IDBAS, and the two min-over-levels limiters (downdraught
+rescale ZMFS, momentum limiter); also hard, as division guards / safety
+floors: ZTD_MIN/MAX, ZRFL_MIN and the PLUDE < 0 floor (fires on no fixture
+column; its PLUDE feeds both the humidity tendency and the detrained
+condensate, so it moves no water).  Smoothing them is
 a soft-level rewrite (a new scheme), not done.  Gap of the smooth default
 against the oracle per fixture column: tests/atmosphere/
 test_bechtold_ifs_oracle.py (``_SWITCH_GAP``).

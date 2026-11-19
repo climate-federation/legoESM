@@ -99,10 +99,13 @@ def instrument(record=None, hard_sites=(), inject=None):
     """Patch IfsSmooth: ``record(site, d)`` gets every call's normalised
     window position d (in window: 0 < d < 1 one-sided, |d| < 0.5 centred);
     calls from ``hard_sites`` take the exact form; ``inject = {site: s}``
-    moves each such site's switched operand to ``mid + (s - 1) w`` (the
-    offset under stop_gradient, so the operand keeps its upstream
-    derivative): at s = 1 every evaluation of the site sits mid-window, and
-    s spans the window in units of 1."""
+    replaces each such site's switched operand by ``mid + (s - 1) w``: at
+    s = 1 every evaluation of the site sits mid-window, and s spans the
+    window in units of 1.  The operand is an honest function of s (and of a
+    traced bound through ``mid``), value and derivative alike: keeping the
+    upstream derivative of a pinned value made autodiff disagree with finite
+    differences by 7-100 % at sites inside a level recursion (vote 3,
+    2026-11-19)."""
     inject = dict(inject or {})
     files = {inspect.getsourcefile(m) for m in MODULES}
     hard_sites = set(hard_sites)
@@ -121,7 +124,7 @@ def instrument(record=None, hard_sites=(), inject=None):
                 one = name in ("pos", "neg1")
                 a, w = args[0], args[1] if one else args[2]
                 tgt = _mid(name, None if one else args[1], w)
-                a = a + jax.lax.stop_gradient(tgt - a) + (inject[site] - 1.0) * w
+                a = tgt + (inject[site] - 1.0) * w
                 args = (a,) + tuple(args[1:])
             if site is not None and not self.hard:
                 if name in ("pos", "neg1"):
