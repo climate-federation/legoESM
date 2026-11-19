@@ -29,8 +29,9 @@ from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land import multilayer_land as ml
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.richards import psi_dry_floor
-from legoesm.land.soil_grid import SoilGridConfig
+from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import theta_from_psi
+from legoesm.land.soil_thermal import compute_heat_capacity
 from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
 from legoesm.thermo import latent_heat_sublimation, latent_heat_vaporization
 
@@ -93,6 +94,22 @@ def _robin(st, new, so):
     return np.asarray(so.surface_conductance * (new.T_soil[:, 0] - st.T_soil[:, 0]))
 
 
+def _seb_boundary_residual(st, new, r, so, theta_C):
+    """SimpleSEB land boundary against heat STORAGE [W m-2], independent of the
+    Robin expression: Rn - SH_atm - LE_atm - (dS/dt - Q_geo), Rn and storage
+    positive into the land, SH/LE positive up.  Freeze/thaw off and one solve
+    (asserted), so storage is the sensible C(theta_C)*dz*dT of the soil; the
+    bulk snow store and an empty layered pack hold no heat."""
+    cfg = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0),
+                               surface_scheme=SimpleSEBConfig())
+    assert not cfg.thermal.enable_freeze_thaw and not cfg.thermal.snow_insulation
+    C = compute_heat_capacity(theta_C, cfg.hydraulics, cfg.thermal) * make_soil_grid(
+        cfg.soil_grid).dz
+    dS = np.asarray(jnp.sum(C * (new.T_soil - st.T_soil), axis=-1)) / 1800.0
+    return (np.asarray(so.sw_net + so.lw_net - r.shflx - r.lhflx)
+            - (dS - cfg.thermal.Q_geothermal))
+
+
 def _check(st, new, r, so, G):
     X = np.asarray(so.lhflx - r.lhflx)              # unmet latent energy [W m-2]
     assert np.all(X > _X_MIN), X                     # non-vacuity
@@ -102,6 +119,12 @@ def _check(st, new, r, so, G):
     # X leaves as sensible heat to the air (with SimpleSEB's Robin correction).
     np.testing.assert_allclose(np.asarray(r.shflx - so.shflx), X + _robin(st, new, so),
                                rtol=0, atol=1e-9)
+    if so.surface_conductance is not None:
+        # Budget, not the code's own expression: the final solve used the
+        # post-hydrology water.
+        np.testing.assert_allclose(
+            _seb_boundary_residual(st, new, r, so, new.theta_soil), 0.0,
+            rtol=0, atol=1e-8)
     assert np.all(np.isfinite(np.asarray(new.T_soil)))
 
 
@@ -156,6 +179,7 @@ def test_layered_snow_keeps_the_unmet_energy_in_the_column_not_in_sh():
     tfl = float(jnp.max(theta_from_psi(psi_dry_floor(cfg.hydraulics), cfg.hydraulics)))
     st = ml.init_multilayer_land_state(2, cfg, T_init=305.0, theta_init=tfl + 5.0e-3)
     assert st.snow_T_layers is not None
+    assert float(jnp.max(st.snow_depth)) == 0.0      # f_snow = 0: no pack share
     new, r, _c, so = jax.jit(lambda s: ml.step_multilayer_land_with_diagnostics(
         s, _forcing(2), cfg, 1.0, 1800.0, lat=jnp.full(2, 0.3)))(st)
     X = np.asarray(so.lhflx - r.lhflx)
@@ -164,4 +188,7 @@ def test_layered_snow_keeps_the_unmet_energy_in_the_column_not_in_sh():
     assert np.all(np.abs(_robin(st, new, so)) > _X_MIN)
     np.testing.assert_allclose(np.asarray(r.shflx - so.shflx), _robin(st, new, so),
                                rtol=0, atol=1e-9)
+    # Budget against storage: the combined solve used the start-of-step water.
+    np.testing.assert_allclose(
+        _seb_boundary_residual(st, new, r, so, st.theta_soil), 0.0, rtol=0, atol=1e-8)
     assert np.all(np.isfinite(np.asarray(new.T_soil)))
