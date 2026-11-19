@@ -82,6 +82,7 @@ __param_spec__ = {
         "scheme_key": "ocean.vm.richardson",
         "excluded": {
             "Pr_t": "dead field: the Pr-Ri scaling is built into the K formula; richardson.py only warns when Pr_t != default and never reads it — phantom trainable",
+            "ri_clip_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
         },
         "params": {
             "A_bg": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
@@ -242,7 +243,7 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     # ----- Static-stability N^2 mode for the gradient Richardson number -----
     # ``"insitu"`` (default, BIT-IDENTICAL legacy) / ``"insitu_signed"``: N^2
     #   from the in-situ density difference (``eos.compute_buoyancy_frequency``,
-    #   already signed/unclipped here — the downstream ``richardson_number``
+    #   already signed/unclipped here — ``_pp81_diffusivities``
     #   clips Ri>=0), which carries the compressibility bias (~too stable).
     # ``"adiabatic"``: PP81's TRUE static stability via adiabatic parcel
     #   displacement to the upper cell's pressure
@@ -251,6 +252,8 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     #   ``richardson_vertical_mixing``. Both integration factory and the
     #   implicit k_profiles path supply it when this is selected.
     n2_mode: str = "insitu"
+    # RULE 5 width [1] of the C1 Ri >= 0 clip (0 = CVMix's hard clip).
+    ri_clip_width: float = 0.01
 
 
 class TKEConfig(NamedTuple):

@@ -215,3 +215,35 @@ def test_blowup_check_interval_override_is_parsed_and_validated():
 # ----------------------------------------------------------------------
 # #1675 site 1 -- the CG mixed-precision probe
 # ----------------------------------------------------------------------
+
+
+# ----------------------------------------------------------------------
+# #1029 -- the lat-lon topo case selects sb81_theta
+# ----------------------------------------------------------------------
+
+def test_latlon_topo_case_selects_sb81_theta():
+    """The legacy vertical form runs this case's jet away (~day 108, #2548).
+
+    The lat-lon held_suarez_topo config must pass ``vertical_form`` choosing
+    ``sb81_theta`` for the topo case and ``legacy`` for flat HS. That the case
+    is no longer waived is pinned in test_matrix_jet_and_known_failures.py.
+    """
+    tree = ast.parse(MATRIX.read_text())
+    hits = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "CGridLatLonPrimitiveEquationConfig"):
+            for kw in node.keywords:
+                if kw.arg == "vertical_form":
+                    hits.append(kw.value)
+    sel = [v for v in hits if isinstance(v, ast.IfExp)]
+    assert len(sel) == 1, [ast.dump(v) for v in hits]
+    e = sel[0]
+    assert isinstance(e.test, ast.Name) and e.test.id == "_topo"
+    assert e.body.value == "sb81_theta" and e.orelse.value == "legacy"
+    # ...and ``_topo`` in run_held_suarez must mean exactly "this is the topo case".
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "run_held_suarez")
+    defs = [n.value for n in ast.walk(fn) if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "_topo" for t in n.targets)]
+    assert len(defs) == 1 and ast.unparse(defs[0]) == "tc.case == 'held_suarez_topo'"

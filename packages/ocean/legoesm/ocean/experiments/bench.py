@@ -149,6 +149,11 @@ class BenchConfig:
     K_v: float = 1.0e-4  # Background vertical diffusivity [m2/s]
 
 
+# run_bench.py step budget defaults (NEMO BENCH nn_itend = 1000; JIT warmup
+# plateau ~4-5 steps); shared with the template adapter's warmup<steps check.
+BENCH_DEFAULT_STEPS = 1000
+BENCH_DEFAULT_WARMUP_STEPS = 5
+
 # Resolution presets for the latlon (Mercator-truncated) lane.  NEMO
 # sizes: orca1_like 360x331, orca025_like 1440x1206, orca12_like
 # 4320x3146 (nn_isize x nn_jsize), nn_ksize = 75 (74 wet levels).

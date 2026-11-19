@@ -548,7 +548,7 @@ _CLUBB_LITE_WARNED = False  # one stand-in warning per process
 
 VALID_TURBULENCE = (
     "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
-    "holtslag_boville", "ysu", "edmf", "none",
+    "holtslag_boville", "ysu", "edmf", "ifs_vdf", "none",
 )
 
 VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg", "ecrad_ifs")
@@ -3485,7 +3485,7 @@ class ExperimentConfig(NamedTuple):
             )
         _valid_stability = ("dyer1974", "beljaars_holtslag1991",
                             "grachev2007_sheba", "gryanik2020", "gfs",
-                            "wrf_revmm5", "mynn_sfc")
+                            "wrf_revmm5", "mynn_sfc", "most_revisit_j3")
         # A tiled surface WITH REAL LAND is exempt from the second check
         # below: its land tile is ocean_cfg._replace(bulk_scheme="most", ...)
         # (physics_pipeline ~:701), so it INHERITS the injected

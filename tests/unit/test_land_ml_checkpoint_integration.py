@@ -53,13 +53,14 @@ def _patch_land_loaders(monkeypatch):
     monkeypatch.setattr(clm, "load_clm_surface", _fake_surface_map)
     monkeypatch.setattr(
         topo, "load_land_fraction",
-        lambda grid, path, *a, **k: jnp.full(grid.lat.shape, 0.5))
+        lambda grid, path, *a, **k: jnp.full(grid.lat2d.shape, 0.5))
 
 
 def _small_cfg(**over):
     base = dict(
-        grid=GridConfig(resolution=8, nlev=8),
-        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=8),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0,
+                            discretization="latlon_cgrid"),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical",
         radiation="gray",
@@ -71,6 +72,9 @@ def _small_cfg(**over):
         # when it is missing -- the user's decision for the MPAS land port
         # tests (0e87622ab), applied here.
         surfdata_path=require_surfdata(),
+        # the ML-training lat-lon pipeline lane: on the cube the pipeline is
+        # now the dry FV3 duo (e137cbf996, #2523)
+        ml_pipeline=True,
     )
     base.update(over)
     return ExperimentConfig(**base)

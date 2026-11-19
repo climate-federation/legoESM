@@ -399,7 +399,8 @@ class TestNPZD:
         T = jnp.full(shape, 20.0)
         PAR = jnp.full(shape, 100.0)
 
-        result = npzd_source_sink(NO3, P, Z, D, DIC, ALK, T, PAR, dz, cfg)
+        result = npzd_source_sink(NO3, P, Z, D, DIC, ALK, T, PAR, dz, cfg,
+                                  jnp.ones(shape))
         assert len(result) == 6
         for r in result:
             assert r.shape == shape
@@ -417,7 +418,8 @@ class TestNPZD:
         T = jnp.full(shape, 20.0)
         PAR = jnp.full(shape, 100.0)
 
-        result = npzd_source_sink(NO3, P, Z, D, DIC, ALK, T, PAR, dz, cfg)
+        result = npzd_source_sink(NO3, P, Z, D, DIC, ALK, T, PAR, dz, cfg,
+                                  jnp.ones(shape))
         for r in result:
             assert jnp.all(jnp.isfinite(r))
 
@@ -437,7 +439,7 @@ class TestNPZD:
         zero_PAR = jnp.zeros(shape)
         NO3 = jnp.full(shape, 10e-3)
         _, dP_dark, _, _, _, _ = npzd_source_sink(
-            NO3, P, Z, D, DIC, ALK, T, zero_PAR, dz, cfg,
+            NO3, P, Z, D, DIC, ALK, T, zero_PAR, dz, cfg, jnp.ones(shape),
         )
         # Growth term should be near zero; only losses
         assert float(jnp.mean(dP_dark)) <= 0
@@ -446,7 +448,7 @@ class TestNPZD:
         zero_NO3 = jnp.full(shape, 1e-15)
         PAR = jnp.full(shape, 200.0)
         _, dP_no_N, _, _, _, _ = npzd_source_sink(
-            zero_NO3, P, Z, D, DIC, ALK, T, PAR, dz, cfg,
+            zero_NO3, P, Z, D, DIC, ALK, T, PAR, dz, cfg, jnp.ones(shape),
         )
         assert float(jnp.mean(dP_no_N)) <= 0
 

@@ -94,7 +94,9 @@ def _a(x):
     return jnp.array(float(x))
 
 
-_CFG = RichardsonVerticalMixingConfig()
+# ri_clip_width 0: CVMix's hard clip (RULE 5 smooth default tested in
+# test_cfam_smooth_switches.py).
+_CFG = RichardsonVerticalMixingConfig(ri_clip_width=0.0)
 _RI = [0.0, 0.05, 0.2, 0.5, 1.0, 2.0, 5.0, 20.0]
 
 
@@ -114,7 +116,7 @@ def test_pp81_diffusivities_match_oracle_nondefault_cfg(Ri):
     A_bg, K_bg) config still matches the oracle to round-off (so a regression that
     hard-codes the classic constants is caught)."""
     cfg = RichardsonVerticalMixingConfig(
-        K_0=8.0e-3, alpha=3.0, n=3, A_bg=2.0e-4, K_bg=5.0e-6)
+        K_0=8.0e-3, alpha=3.0, n=3, A_bg=2.0e-4, K_bg=5.0e-6, ri_clip_width=0.0)
     A_v, K_v = _pp81_diffusivities(_a(Ri), cfg)
     A_o, K_o = _av_kv_oracle(Ri, 8.0e-3, 3.0, 3, 2.0e-4, 5.0e-6)
     assert float(A_v) == pytest.approx(A_o, rel=1e-12, abs=0.0)
@@ -163,8 +165,8 @@ def test_public_function_uses_helper_convention():
     Ri_raw = richardson_number(N2, u, v, dz_actual, eps=_EPS, clip_negative=False)
     # self-validate the fixture actually spans the clip: both signs present.
     assert float(jnp.min(Ri_raw)) < 0.0 < float(jnp.max(Ri_raw))
-    Ri = richardson_number(N2, u, v, dz_actual, eps=_EPS, clip_negative=True)
-    A_exp, K_exp = _pp81_diffusivities(Ri, cfg)
+    # the helper owns the (smooth, RULE 5) Ri >= 0 clip: it is fed the signed Ri
+    A_exp, K_exp = _pp81_diffusivities(Ri_raw, cfg)
     assert jnp.allclose(out.A_v, A_exp, rtol=1e-12, atol=0.0)
     assert jnp.allclose(out.K_v, K_exp, rtol=1e-12, atol=0.0)
 

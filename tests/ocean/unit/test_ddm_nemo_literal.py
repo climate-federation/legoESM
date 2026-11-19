@@ -19,7 +19,9 @@ from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
     implicit_vertical_diffusion_ocean_tracer_pair_dispatch,
 )
 
-CFG = DoubleDiffusionConfig(enabled=True, form="nemo_literal", rn_avts=1.0e-4, rn_hsbfr=1.6)
+# Widths 0: the literal NEMO masks (RULE 5 smooth default tested elsewhere).
+CFG = DoubleDiffusionConfig(enabled=True, form="nemo_literal", rn_avts=1.0e-4, rn_hsbfr=1.6, regime_width=0.0, n2_gate_width=0.0, k_max_width=0.0,
+                      avm_max_width=0.0)
 
 
 @pytest.fixture(autouse=True)

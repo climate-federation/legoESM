@@ -677,26 +677,8 @@ def _apply_jet_strength_floor(
 # the entry gets removed. Keep this list SHORT and issue-linked; it is a
 # regression-triage aid, never a place to bury a real break.
 KNOWN_FAILURES: dict[tuple[str, str, str], dict[str, Any]] = {
-    # latlon held_suarez_topo: topographic jet runaway 131 m/s -> NaN ~step
-    # 27700 (~day 96), physics-free reproducer of the AMIP latlon topography
-    # instability. Reproduces only in a full-length run (the 2-day --quick lane
-    # never reaches the blow-up step and legitimately passes).
-    # MITIGATION WIRED (#1029): the topo run now enables the #836 top sponge at
-    # its frozen 2026-06 calibration envelope (_TOPO_MIT_REF_*; historically
-    # derived from the then-current cube rest-sponge default, kept at that
-    # strength after #1028 retuned the live cube default — see the mitigation
-    # block), with a tripwire bounding it to that envelope (avoids an
-    # over-damped false PASS; this XPASS alarm is the second guard). Entry KEPT
-    # until a 200-day A100 run confirms the sponge arrests the
-    # blow-up WITHOUT over-damping the resolved jet (controlled comparison vs the
-    # flat-topo HS climate): if it passes, this reports XPASS (loud) -> remove the
-    # entry; if it only delays the blow-up it stays XFAIL and the GENERATOR fix is
-    # owed -- making the hybrid PGF hybrid_factor correction discretely consistent
-    # with the Simmons-Burridge geopotential Phi(p_s) (implicates A_half; localized
-    # in #1078). NOT a reference-T split: T is uniform at rest, so a ref-T split is
-    # a no-op here (ruled out). Do NOT pre-remove on the local-unit-test pass alone.
-    ("held_suarez_topo", "latlon", "hybrid"): {
-        "issue": "#1029", "min_days": 100.0, "expect_note": "BLOWUP"},
+    # (empty) lat-lon held_suarez_topo (#1029) removed: the case now selects
+    # vertical_form="sb81_theta" and survives 200 d; legacy instability: #2548.
 }
 
 
@@ -3159,43 +3141,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
     # --- Error norms for TC2 ---
     notes = ""
-    if test_num == 2 and tc.grid_type == "cubed_sphere":
-        exact = williamson_test2_exact(grid, days * 86400.0)
-        h_final = state.h if isinstance(state.h, jnp.ndarray) else state.h.data
-        h_exact = exact.h.data
-        # Manual L2 / Linf norms for CDGrid state
-        err = h_final - h_exact
-        area = grid.area
-        l2 = float(jnp.sqrt(jnp.sum(err**2 * area) / jnp.sum(h_exact**2 * area)))
-        linf = float(jnp.max(jnp.abs(err)) / jnp.max(jnp.abs(h_exact)))
-        norms = {"l2": l2, "linf": linf}
-        # Iter-742 (corrects iter-741 per Codex stop-time review):
-        # iter-740 measured v_d-error, iter-741 corrected to pre-
-        # regrid v_north, but the actual plotted field in
-        # snapshots_v.png is the POST-REGRID v_ll =
-        # _regrid_2d(v_north, lon_deg, lat_deg, coord_kind=cube).
-        # The regrid step interpolates cube-face-native to lat-lon
-        # and can shift/smooth the peak; the PNG colourbar reflects
-        # v_ll magnitude, not v_north magnitude.  Iter-742 measures
-        # the same quantity the snapshot plots — matching the
-        # visual artifact exactly.
-        #
-        # The exact W2 geographic v_north is ZERO everywhere at all
-        # times.  Regridding a zero field yields zero, so max|v_ll|
-        # is itself the error (no subtraction).
-        u_cc = 0.5 * (np.asarray(state.u_d, dtype=np.float64)[:, :, :-1]
-                      + np.asarray(state.u_d, dtype=np.float64)[:, :, 1:])
-        v_cc = 0.5 * (np.asarray(state.v_d, dtype=np.float64)[:, :-1, :]
-                      + np.asarray(state.v_d, dtype=np.float64)[:, 1:, :])
-        v_north_face = _sa_4edge_np * u_cc + _ca_4edge_np * v_cc
-        v_ll = _regrid_2d(v_north_face, lon_deg, lat_deg, coord_kind)
-        v_linf = float(np.max(np.abs(v_ll)))
-        v_north_linf_face = float(np.max(np.abs(v_north_face)))
-        norms["v_linf"] = v_linf
-        notes = (f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}, "
-                 f"v_ll_Linf={v_linf:.2e} "
-                 f"(pre-regrid {v_north_linf_face:.2e})")
-    elif test_num == 2 and tc.grid_type == "latlon":
+    if test_num == 2 and tc.grid_type == "latlon":
         exact = williamson_test2_exact_cgrid(grid, days * 86400.0)
         norms = compute_error_norms_cgrid(state, exact, grid)
         notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
@@ -3795,18 +3741,18 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # then-current cube PE rest-sponge default; #1028 (2026-07-19) showed
         # that 1-h cube default was itself a jet-killing mis-calibration and
         # the cube config default is now 5 d — but THIS mitigation's measured
-        # behaviour (holds the topo case to its tracked XFAIL trajectory;
-        # insufficient to prevent the lid-wave blowup, #1029) was established
+        # behaviour (under the legacy vertical form it did NOT prevent the
+        # blowup, #1029/#2548; the case now runs sb81_theta) was established
         # AT the frozen strength, so the strength is kept and the constants
         # below now carry their own provenance instead of referencing the
         # live cube config.  The tripwire below verifies (a) the sponge is
         # ACTIVE (a DEFAULT_NLEV change could silently disable it) and
         # (b) the on-grid profile never EXCEEDS the frozen envelope (an
         # accidentally-strengthened sponge could over-damp the case into a
-        # false 200-day PASS; the KNOWN_FAILURES registry's loud XPASS alarm
-        # is the second line of defence).  Under-damping is the SAFE failure
-        # (stays XFAIL, honest).  Flat-topo HS is untouched (sponge_coeff=0
-        # -> byte-identical).
+        # false 200-day PASS).  Under-damping is the SAFE failure (a blow-up
+        # surfaces as a red FAIL; the case is no longer a registered known
+        # failure).  Flat-topo HS is untouched (sponge_coeff=0 ->
+        # byte-identical).
         _TOPO_MIT_REF_SIGMA, _TOPO_MIT_REF_TAU_S = 0.15, 3600.0  # frozen 2026-06 envelope (#1029/#1086)
         # #836 lat-lon sponge geometry -- set EXPLICITLY (not left to the config
         # defaults) so the tripwire below verifies the SAME profile the model runs.
@@ -3865,6 +3811,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             sponge_width_m=_SPONGE_WIDTH_M,
             sponge_scale_height_m=_SPONGE_SCALE_H_M,
             sponge_shape=_SPONGE_SHAPE,
+            # #1029: the topo case selects the Simmons-Burridge theta vertical
+            # form. The legacy form ran the jet away (2/2 seeds, ~day 108,
+            # #2548); sb81_theta survived 4/4 seeds to 200 d and seed 42 to
+            # 500 d with the same top sponge; time-mean jet 26.4 m/s (legacy
+            # flat HS: 28.3). Chosen by vote (codex
+            # sb81_theta, GLM sb81_theta, author as83). Flat HS keeps legacy.
+            vertical_form="sb81_theta" if _topo else "legacy",
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         print(f"  latlon HS dissipation: A_h={config.A_h:.4e} m^2/s, "
