@@ -192,6 +192,50 @@ def test_oro_momentum_conservation(_oracle_constants):
     np.testing.assert_allclose(mom_sink, net_absorbed, rtol=1e-10)
 
 
+def _neg_div_probe():
+    import importlib.util
+    from pathlib import Path
+    path = (Path(__file__).resolve().parents[4] / "scripts/validate/oracle/gw_spec_e3sm"
+            / "neg_div_probe.py")
+    spec = importlib.util.spec_from_file_location("neg_div_probe", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("smooth", [False, True], ids=["hard", "default"])
+@pytest.mark.parametrize("case", ["neg", "neg_umcfac", "control"])
+def test_negative_divergence_column_conserves_momentum(case, smooth):
+    """#2567 KNOWN DIFFERENCE, RULE 0: where a layer's raw stress divergence
+    is negative the port applies ``sgn(c-u)*ubtl`` (E3SM: ``|ubtl|*sgn(c-u)``,
+    which deposits momentum the stress profile does not supply), so the column
+    deposit equals the stress divergence to round-off.  Columns from the
+    committed oracle probe (launched stress growing upward below the source)."""
+    probe = _neg_div_probe()
+    col = probe.column(case)
+    cfg = E3SMCAMConfig()
+    a = lambda x: jnp.asarray(x)[None]
+    pint = col["pint"]
+    dpm = np.diff(pint)
+    rhoi, ti, nm, ni = gw_prof(a(col["t"]), a(col["pmid"]), a(pint), C.c_pd, C.R_d,
+                               C.g, cfg.n2min)
+    kw = {} if not smooth else dict(
+        softmin_sharpness=cfg.softmin_sharpness, crit_level_sharpness=cfg.crit_level_sharpness,
+        crit_level_floor=cfg.crit_level_floor, umcfac_abs_width=cfg.umcfac_abs_width,
+        umcfac_sign_width=cfg.umcfac_sign_width, taumin_ramp_width=cfg.taumin_ramp_width)
+    tau, utgw, *_ = gw_drag_prof(
+        jnp.asarray(col["tau"])[None, None], jnp.array([[col["c"]]]),
+        jnp.array([col["src"]]), jnp.array([col["tend"]]), a(col["t"]), ti,
+        a(np.log(pint)), rhoi, nm, ni, a(col["ubm"]), a(col["ubi"]),
+        jnp.array([1.0]), jnp.array([0.0]), a(dpm), a(1.0 / dpm), jnp.zeros(1),
+        col["effgw"], col["dt"], cfg, orographic_only=False,
+        alpha_iface=a(col["alpha"]), **kw)
+    raw = np.diff(col["tau"])[:col["tend"]]
+    assert (raw.min() < 0.0) == (case != "control")      # the case reaches ubtl < 0
+    dep, div = probe.budget(col, np.asarray(utgw[0]), np.asarray(tau[0, 0]))
+    np.testing.assert_allclose(dep, div, rtol=1e-12, atol=0.0)
+
+
 def test_gwd_damping_factor_never_amplifies_stress():
     """Regression: the saturation-damping factor exp(-2*mi*rog*t*dpiln)
     must NEVER exceed 1 (stress can only DECREASE upward through it).
