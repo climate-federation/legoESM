@@ -177,9 +177,10 @@ def test_energy_terms_book_every_land_call(capsys, land_update_s, k):
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "measured 2026-11-19 before the land-own-skin booking: stale = 1.09 W/m2 "
-    "land mean here, 0.017 W/m2 over 2 days on the ERA5 real-land case; it "
-    "should vanish here and does not -- cause open, not a noise floor"))
+    "measured 2026-11-19 with the land-own-skin booking (7d6549a545): stale "
+    "= +5.17 W/m2 land mean here, -0.052 W/m2 over 2 days on the ERA5 "
+    "real-land case (K=1, rad=1); it should vanish here and does not -- "
+    "cause open, not a noise floor"))
 def test_stale_emission_term_vanishes_when_land_and_radiation_step_together(
         capsys):
     """Land called and radiation solved every step: the land charges the skin
