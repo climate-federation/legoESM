@@ -1242,6 +1242,137 @@ def test_soft_downdraft_mass_closes_and_its_gradient_is_finite():
     assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
 
 
+# --- PR 7a: the closure's AINC iteration by branch weights ---------------------
+
+_CLOSURE = ("closure_fabe_width", "closure_ainc_width", "closure_ainc_rel_width",
+            "closure_ainc_tol_width", "closure_dfda_width", "closure_dabe_width_jkg")
+
+
+def _hard_branch(FABE, FABEOLD, AINC, AINCOLD, AINCMX, ainc_new, noitr, stop, deep, later, last, cyc2):
+    """The oracle's closure branch (the port's hard decision, written out)."""
+    if stop:
+        return "stop"
+    if noitr:
+        return "noitr"
+    if FABE > 1.0 and deep:
+        return "ret1"
+    dA = AINC - AINCOLD
+    same = abs(dA) < kfe._AINC_TOL
+    if later and (same or (FABE - FABEOLD) / dA > 0.0):
+        return "cyc1"
+    sat = AINC / AINCMX > kfe._AINC_REL_MAX and FABE > kfe._FABE_HI - kfe._STAB
+    conv = (kfe._FABE_LO - kfe._STAB <= FABE <= kfe._FABE_HI - kfe._STAB) or last
+    if sat or conv:
+        return "exit"
+    if cyc2:
+        return "cyc2"
+    return "ret2" if ainc_new < kfe._AINC_MIN else "apply"
+
+
+_BRANCHES = ("stop", "noitr", "ret1", "cyc1", "exit", "cyc2", "ret2", "apply")
+
+
+def _weights(sm, *x):
+    FABE, FABEOLD, AINC, AINCOLD, AINCMX, ainc_new, noitr, stop, deep, later, last, cyc2 = x
+    f = lambda v: jnp.asarray(v, jnp.float64)  # noqa: E731
+    return kfe._soft_closure_weights(f(FABE), f(FABEOLD), f(AINC), f(AINCOLD), f(AINCMX), f(ainc_new),
+                                     f(float(noitr)), jnp.asarray(stop), jnp.asarray(deep),
+                                     jnp.asarray(later), jnp.asarray(last), jnp.asarray(cyc2), sm)
+
+
+def test_closure_weights_are_the_oracle_branch_at_zero_width():
+    rng = np.random.default_rng(11)
+    hard = _DEFAULT._replace(**{f: 0.0 for f in _CLOSURE})
+    seen = set()
+    for _ in range(3000):
+        x = (rng.choice([0.0, 0.05, 0.1, 0.5, 0.99, 1.0, 1.01, 2.0]) * rng.choice([1.0, 1.0 + 1e-3]),
+             rng.uniform(0, 2), rng.uniform(0.05, 1), rng.uniform(0.05, 1) * rng.choice([1.0, 0.0]),
+             rng.choice([1.0, 1.0005, 2.0, 1000.0]), rng.choice([0.01, 0.0499, 0.05, 0.3]),
+             rng.random() < 0.15, rng.random() < 0.1, rng.random() < 0.9, rng.random() < 0.8,
+             rng.random() < 0.1, rng.random() < 0.1)
+        x = list(x)
+        if x[3] == 0.0:
+            x[3] = x[2]  # AINCOLD == AINC (first pass)
+        want = _hard_branch(*x)
+        seen.add(want)
+        p = _weights(hard, *x)
+        got = {b: float(p[b]) for b in _BRANCHES}
+        assert got == {b: float(b == want) for b in _BRANCHES}, (x, want, got)
+    assert seen == set(_BRANCHES)
+
+
+def test_closure_weights_sum_to_one_and_are_c2_in_their_bands():
+    w = _DEFAULT
+    x0 = dict(FABE=1.0 + 0.2 * w.closure_fabe_width, FABEOLD=0.8, AINC=0.4, AINCOLD=0.4 + 1e-4,
+              AINCMX=0.4 / (kfe._AINC_REL_MAX + 0.1 * w.closure_ainc_rel_width),
+              ainc_new=kfe._AINC_MIN + 0.1 * w.closure_ainc_width)
+    flags = (0.3, False, True, True, False, False)  # noitr weight, stop, deep, later, last, cyc2
+    for name in ("FABE", "AINC", "AINCOLD", "ainc_new"):
+        def f(v, name=name):
+            x = dict(x0, **{name: v})
+            p = kfe._soft_closure_weights(*(jnp.asarray(x[k]) for k in x0), jnp.asarray(flags[0]),
+                                          *(jnp.asarray(b) for b in flags[1:]), w)
+            return jnp.stack([p[b] for b in _BRANCHES])
+        v0 = jnp.asarray(x0[name], jnp.float64)
+        np.testing.assert_allclose(float(jnp.sum(f(v0))), 1.0, rtol=1e-14)
+        check_grads(f, (v0,), order=2, modes=("fwd", "rev"), eps=1e-9)
+    g = jax.jacfwd(lambda v: kfe._soft_closure_weights(
+        v, jnp.asarray(0.8), jnp.asarray(0.4), jnp.asarray(0.4 + 1e-4), jnp.asarray(2.0),
+        jnp.asarray(0.3), jnp.asarray(0.0), jnp.asarray(False), jnp.asarray(True), jnp.asarray(True),
+        jnp.asarray(False), jnp.asarray(False), w)["ret1"])(jnp.asarray(1.0))
+    assert float(g) > 0.0
+
+
+def test_soft_min_levels_and_caps_reduce_to_the_oracle():
+    v = jnp.asarray([5.0, 0.3, 0.3002, 7.0, 1000.0])
+    assert float(kfe._soft_min_levels(v, 1000.0, 0.0)) == 0.3
+    s = kfe._soft_min_levels(v, 1000.0, _DEFAULT.closure_ainc_width)
+    assert 0.3 - _DEFAULT.closure_ainc_width / 8 <= float(s) < 0.3
+    far = jnp.asarray([5.0, 0.3, 0.4])
+    assert float(kfe._soft_min_levels(far, 1000.0, _DEFAULT.closure_ainc_width)) == 0.3
+    check_grads(lambda x: kfe._soft_min_levels(x, 1000.0, _DEFAULT.closure_ainc_width), (v,),
+                order=1, modes=("fwd", "rev"), eps=1e-6)
+
+
+def test_soft_closure_converges_to_the_hard_closure_as_the_widths_shrink():
+    """Every other width at its default, the closure widths at 1e-9 of their
+    defaults reproduce the hard closure (widths 0) on fired sweep columns."""
+    fx = dict(np.load(_FIX))
+    hard = _DEFAULT._replace(**{f: 0.0 for f in _CLOSURE})
+    tiny = _DEFAULT._replace(**{f: 1e-9 * getattr(_DEFAULT, f) for f in _CLOSURE})
+    cols = [i for i in range(0, len(fx["sweep_combo"]), 7)][:12]
+    n_fired = 0
+    for oh, ot in zip(_dd_cols(fx, hard, cols), _dd_cols(fx, tiny, cols)):
+        assert bool(oh["fired"][0]) == bool(ot["fired"][0])
+        for k in ("dtdt", "dqdt", "pratec", "umf", "ainc", "ncount"):
+            a, b = np.asarray(ot[k], float), np.asarray(oh[k], float)
+            np.testing.assert_allclose(a, b, rtol=1e-7, atol=1e-12 * (np.abs(b).max() + 1e-30))
+        n_fired += int(oh["fired"][0])
+        jax.clear_caches()
+    assert n_fired > 0
+
+
+def test_soft_closure_gradient_is_finite_and_water_closes():
+    fx = dict(np.load(_FIX))
+    o, T = _sweep_column(fx, 90)
+    assert bool(o["fired"][0])
+    g = jax.grad(lambda T: jnp.sum(_sweep_column(fx, 90, T)[0]["dtdt"]))(T)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_inflow_mask_threshold_is_continuous_on_the_fixture():
+    """K6: at UER - DER = 1e-3 kg/s the inflow ratio EMS/(1e-3 TIMEC) is far above
+    the 1000 cap on every fired sweep column, so the hard mask cannot kink AINCMX."""
+    fx = dict(np.load(_FIX))
+    for i in range(0, len(fx["sweep_combo"]), 7):
+        o, _ = _sweep_column(fx, i)
+        if bool(o["fired"][0]):
+            ems = np.asarray(o["ems"][0])
+            ratio = ems[ems > 0].min() / (kfe._UERDER_MIN * float(o["timec"][0]))
+            assert ratio > 10.0 * kfe._AINCMX0
+    jax.clear_caches()
+
+
 def test_widths_are_validated():
     with pytest.raises(ValueError, match="lut_knot_width"):
         kfe.validate_kf_smoothing(_DEFAULT._replace(lut_knot_width=1.5))

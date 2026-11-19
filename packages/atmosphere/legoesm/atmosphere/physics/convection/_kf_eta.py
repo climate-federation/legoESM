@@ -483,7 +483,7 @@ def _gt_c2(x, w):
     """Weight of x > 0: the oracle's 0/1 at w = 0, else the C2 step (B3s, C-LDBs, D7hs)."""
     if w:  # kfsw: S
         return _step_c2(x, w)
-    return (x > 0.0).astype(jnp.result_type(x))  # kfsw: B3s,C-LDBs,D7hs
+    return (x > 0.0).astype(jnp.result_type(x))  # kfsw: B3s,C-LDBs,D7hs,A5s,B4s
 
 
 def _descent_base_weights(h, lev):
@@ -675,7 +675,7 @@ def _step_c(x, w):
 def _step_c2(x, w):
     """C2 (quintic) step centred on 0, band |x| < w/2 (w > 0): 0 below, 1
     above (D4 weights, cloud-top survival hazards and the soft LET)."""
-    return smoothstep_quintic(0.5 + x / w)  # kfsw: D4,C-LTOPs,C-LETs
+    return smoothstep_quintic(0.5 + x / w)  # kfsw: D4,C-LTOPs,C-LETs,A5s,B4s,D7js
 
 
 # Continuation floor of the updraft's mass fluxes past a likely stop2 exit
@@ -830,8 +830,8 @@ def _cap_c1(x, cap, w):
     ``cap``, exactly ``x`` below ``cap - w`` (E1 Q0 <= QES and, negated, Q0 >=
     1e-6; E2 TLCL <= TMIX; E4 WLCL <= 3 m/s)."""
     if w:  # kfsw: S
-        return cap - positive_part_c1(cap - x, 1.0 / w)  # kfsw: E1,E2,E4
-    return jnp.minimum(x, cap)  # kfsw: E1,E2,E4
+        return cap - positive_part_c1(cap - x, 1.0 / w)  # kfsw: E1,E2,E4,E15s,E17s,E19s
+    return jnp.minimum(x, cap)  # kfsw: E1,E2,E4,E15s,E17s,E19s
 
 
 def _glaciate(ab, p, tu, theteu, qu, qliq, qice, qnl, qni, ttemp_prev, sm):
@@ -1235,6 +1235,11 @@ def _prof5_c1(eq, width):
 # Column driver
 # --------------------------------------------------------------------------
 
+def _scale_in_cloud(base, inc, ainc):
+    """The closure's mass fluxes ``base`` scaled by ``ainc`` inside the cloud."""
+    return {k: jnp.where(inc, base[k] * ainc, base[k]) for k in base}  # kfsw: B4,B4s
+
+
 def _lerp(wt, new, old):
     return old + wt * (new - old)
 
@@ -1249,6 +1254,7 @@ def _closure_soft_on(sm: KFSmoothing) -> bool:
 def _soft_min_levels(v, init, w):
     """min(init, v_1, ..., v_n) as a fold of C1 pairwise minima (E15; exact where
     the running minimum and the next value differ by more than w/2)."""
+    init = jnp.asarray(init, v.dtype)
     out, _ = jax.lax.scan(lambda acc, x: (smooth_min_c1(acc, x, w), None), init, v)  # kfsw: E15s
     return out
 
@@ -1264,18 +1270,18 @@ def _soft_closure_weights(FABE, FABEOLD, AINC, AINCOLD, AINCMX, ainc_new, noitr,
     lower edge FABE >= 0 holds by construction and stays exact; FABE == 0
     (fz) stays hard: the window exits there, so its branch has no weight."""
     one = jnp.ones_like(FABE)
-    p_stop = stop_here.astype(FABE.dtype)
-    s_ret1 = _gt_c2(FABE - 1.0, sm.closure_fabe_width) * deep  # kfsw: A5s
+    p_stop = stop_here.astype(FABE.dtype)  # kfsw: B4s
+    s_ret1 = _gt_c2(FABE - 1.0, sm.closure_fabe_width) * deep
     dA = AINC - AINCOLD
     s_same = _gt_c2(_AINC_TOL - jnp.abs(dA), sm.closure_ainc_tol_width)  # kfsw: B4s
     dfda = (FABE - FABEOLD) / _sd(dA, dA != 0.0)  # kfsw: B4s
-    s_dfda = _gt_c2(dfda, sm.closure_dfda_width)  # kfsw: B4s
+    s_dfda = _gt_c2(dfda, sm.closure_dfda_width)
     s_cyc1 = later * (one - (one - s_same) * (one - s_dfda))
-    hi = _gt_c2(FABE - (_FABE_HI - _STAB), sm.closure_fabe_width)  # kfsw: B4s
-    s_sat = _gt_c2(AINC / AINCMX - _AINC_REL_MAX, sm.closure_ainc_rel_width) * hi  # kfsw: B4s
+    hi = _gt_c2(FABE - (_FABE_HI - _STAB), sm.closure_fabe_width)
+    s_sat = _gt_c2(AINC / AINCMX - _AINC_REL_MAX, sm.closure_ainc_rel_width) * hi
     s_conv = jnp.where(last, one, (one - hi) * (FABE >= _FABE_LO - _STAB))  # kfsw: B4s
     s_ex = one - (one - s_sat) * (one - s_conv)
-    s_ret2 = _gt_c2(_AINC_MIN - ainc_new, sm.closure_ainc_width)  # kfsw: A5s
+    s_ret2 = _gt_c2(_AINC_MIN - ainc_new, sm.closure_ainc_width)
     q = one - p_stop
     p = dict(stop=p_stop, noitr=q * noitr)
     q1 = q * (one - noitr)
@@ -2242,12 +2248,12 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         AINCM1 = EMS / (_sd(udd, okm) * TIMEC)  # kfsw: C-LETs
         wl = jnp.where(kk <= KLCL, 1.0, jnp.cumsum(ql[::-1])[::-1] / PCD)  # kfsw: C-LETs
         AINCM1 = _survival_inflow_limit(AINCM1, wl)
+    aincm1 = jnp.where(okm, AINCM1, _AINCMX0)  # kfsw: E15
     if soft_cl:  # kfsw: S
-        AINCMX = _soft_min_levels(jnp.where(okm, AINCM1, _AINCMX0), _AINCMX0,  # kfsw: E15
-                                  sm.closure_ainc_width)
-        AINC = _cap_c1(AINCMX, 1.0, sm.closure_ainc_width)  # kfsw: E15s
+        AINCMX = _soft_min_levels(aincm1, _AINCMX0, sm.closure_ainc_width)
+        AINC = _cap_c1(AINCMX, 1.0, sm.closure_ainc_width)
     else:
-        AINCMX = jnp.minimum(_AINCMX0, jnp.min(jnp.where(okm, AINCM1, _AINCMX0)))  # kfsw: E15
+        AINCMX = jnp.minimum(_AINCMX0, jnp.min(aincm1))  # kfsw: E15
         AINC = jnp.where(AINCMX < 1.0, AINCMX, 1.0)  # kfsw: E15
     TDER2, PPTFL2 = TDER, PPTFLX
     base = dict(UMF=UMF, DMF=DMF, DETLQ=DETLQ, DETIC=DETIC, UDR=UDR, UER=UER, DER=DER, DDR=DDR)
@@ -2279,7 +2285,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
     if soft_cl:  # kfsw: S
         # live weight A (the hard ~stop & ~ret), cancelled weight R (A5 returns)
         # and the NOITR latch as a weight
-        it0.update(A=jnp.ones((), dtype), R=zero, NOITR=zero)
+        it0.update(A=jnp.ones((), dtype), R=zero, NOITR=zero)  # kfsw: S
 
     def iterate(c, ncount):
         if soft_cl:  # kfsw: S
@@ -2377,7 +2383,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         tmix_s = tmix + rl / CP * dq
         qmix_s = qmix - dq
         if sm.q0_floor_width_kgkg:  # kfsw: S
-            qmix_u = -_cap_c1(-qmix, 0.0, sm.q0_floor_width_kgkg)  # kfsw: E17s
+            qmix_u = -_cap_c1(-qmix, 0.0, sm.q0_floor_width_kgkg)
         else:
             qmix_u = jnp.maximum(qmix, 0.0)  # kfsw: E17
         emix = qmix_u * PMIX / (_EPS_KF + qmix_u)
@@ -2385,7 +2391,7 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         tdpt = (CLIQ - DLIQ * tlog) / (BLIQ - tlog)
         tlcl_u = _cap_c1(_tsat_from_dewpoint(tdpt, tmix), tmix, lut.sm.tlcl_cap_width_k)
         if sm.tpmix_width_kgkg:  # kfsw: S
-            ws = _step_c2(qmix - qss, sm.tpmix_width_kgkg)  # kfsw: D7js
+            ws = _step_c2(qmix - qss, sm.tpmix_width_kgkg)
             tmix = tmix + ws * (tmix_s - tmix)
             qmix = qmix_u + ws * (qmix_s - qmix_u)
             tlcl = tlcl_u + ws * (tmix_s - tlcl_u)
@@ -2449,35 +2455,34 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         fatal_new = _w(a, fatal | istop, c["fatal"])  # kfsw: A6
         if soft_cl:  # kfsw: S
             last = ncount == _N_ITER  # kfsw: S
-            ainc_new = _cap_c1(ainc_new, AINCMX, sm.closure_ainc_width)  # kfsw: E19s
+            ainc_new = _cap_c1(ainc_new, AINCMX, sm.closure_ainc_width)
             p = _soft_closure_weights(
                 FABE, c["FABEOLD"], c["AINC"], c["AINCOLD"], AINCMX, ainc_new, c["NOITR"],
                 stop_here, deep, later, last, cyc2, sm)
             n = dict(c)
-            lerp = _lerp
-            n["OMG"] = lerp(A, OMG, c["OMG"])
-            n["FXM"] = lerp(A, FXM, c["FXM"])
+            n["OMG"] = _lerp(A, OMG, c["OMG"])
+            n["FXM"] = _lerp(A, FXM, c["FXM"])
             n["NSTEP"] = _w(a, NSTEP, c["NSTEP"])  # kfsw: B4s
             n["DTIME"] = _w(a, DTIME, c["DTIME"])  # kfsw: B4s
             n["overflow"] = overflow
-            n["TG"] = lerp(A, TG, c["TG"])
-            n["QG"] = lerp(A, QG, c["QG"])
+            n["TG"] = _lerp(A, TG, c["TG"])
+            n["QG"] = _lerp(A, QG, c["QG"])
             n["fatal"] = fatal_new
             nonstop = a & ~stop_here
             n["KLCL"] = _w(nonstop, klcl, c["KLCL"])  # kfsw: B4s
             n["THETEU"] = _w(nonstop, theteu, c["THETEU"])  # kfsw: B4s
-            n["FABE"] = lerp(A * p["live"], FABE, c["FABE"])
+            n["FABE"] = _lerp(A * p["live"], FABE, c["FABE"])
             n["NOITR"] = c["NOITR"] + A * (p["cyc1"] + p["cyc2"])
             n["AINC"] = c["AINC"] + A * (p["cyc1"] * (c["AINCOLD"] - c["AINC"])
                                          + p["apply"] * (ainc_new - c["AINC"]))
             u_old = A * (p["exit"] + p["cyc2"] + p["rescale"])
-            n["AINCOLD"] = lerp(u_old, c["AINC"], c["AINCOLD"])
-            n["FABEOLD"] = lerp(u_old, FABE, c["FABEOLD"])
+            n["AINCOLD"] = _lerp(u_old, c["AINC"], c["AINCOLD"])
+            n["FABEOLD"] = _lerp(u_old, FABE, c["FABEOLD"])
             u_app = A * p["apply"]
-            n["F"] = jax.tree_util.tree_map(lambda new, old: lerp(u_app, new, old), {
-                k: jnp.where(inc, base[k] * ainc_new, base[k]) for k in base}, F)  # kfsw: C-LTOP
-            n["TDER"] = lerp(u_app, TDER2 * ainc_new, c["TDER"])
-            n["PPTFLX"] = lerp(u_app, PPTFL2 * ainc_new, c["PPTFLX"])
+            n["F"] = jax.tree_util.tree_map(lambda new, old: _lerp(u_app, new, old),
+                                            _scale_in_cloud(base, inc, ainc_new), F)
+            n["TDER"] = _lerp(u_app, TDER2 * ainc_new, c["TDER"])
+            n["PPTFLX"] = _lerp(u_app, PPTFL2 * ainc_new, c["PPTFLX"])
             A_new = A * (p["cyc1"] + p["cyc2"] + p["apply"])
             n["A"] = A_new
             n["R"] = c["R"] + A * (p["ret1"] + p["ret2"])
@@ -2525,8 +2530,8 @@ def _post(S, sc, U0, V0, T0, P0, Q0, QES, RH, TV0, DP, Z0, DZA, L5, kk, valid, *
         upd_old = a & (p_exit | p_cyc2 | p_rescale)
         n["AINCOLD"] = _w(upd_old, AINCOLD, c["AINCOLD"])  # kfsw: B4
         n["FABEOLD"] = _w(upd_old, FABEOLD, c["FABEOLD"])  # kfsw: B4
-        n["F"] = jax.tree_util.tree_map(lambda new, old: _w(a & p_apply, new, old), {
-            k: jnp.where(inc, base[k] * ainc_new, base[k]) for k in base}, F)  # kfsw: B4
+        n["F"] = jax.tree_util.tree_map(lambda new, old: _w(a & p_apply, new, old),
+                                        _scale_in_cloud(base, inc, ainc_new), F)  # kfsw: B4
         n["TDER"] = _w(a & p_apply, TDER2 * ainc_new, c["TDER"])  # kfsw: B4
         n["PPTFLX"] = _w(a & p_apply, PPTFL2 * ainc_new, c["PPTFLX"])  # kfsw: B4
         ends = a & (p_stop | p_noitr | p_exit)
