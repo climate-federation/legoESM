@@ -422,6 +422,10 @@ class KFSmoothing(NamedTuple):
       and flag state is updated wherever A > 0; the adjusted sounding is
       recomputed from the mixture F, so sounding, condensate and rain derive
       from one F and the column water closes (oracle water test, tested).
+      The soft closure is a single (mean-field) trajectory: every share holds
+      the one mixture F, so a cancelled or exited share is valued at the
+      mixture rather than at its own frozen state; the bias vanishes as the
+      widths go to 0 (tested) and is part of the gaps below.
       KNOWN DIFFERENCE (fixture, max over columns and levels, vs the hard
       limit's gap): the FABE width moves the sweep's precipitation rate by up
       to 6.9e-5 kg/m2/s (column 68), the DABE width the heating by up to
@@ -521,7 +525,8 @@ def validate_kf_smoothing(sm: KFSmoothing) -> None:
     for name, hi in (("lut_knot_width", 1.0), ("prof5_width", _PROF5_WIDTH_MAX),
                      ("top_stop_wtw_width_m2s2", 2.0 * _WTW_STOP),
                      ("top_stop_umf_width_kgs", 2.0 * (_UMF_DETR_MIN - _CONT_HI_KGS)),
-                     ("nodd_tder_width_kgs", 2.0 * _TDER_MIN)):
+                     ("nodd_tder_width_kgs", 2.0 * _TDER_MIN),
+                     ("closure_ainc_tol_width", _AINC_TOL)):
         if getattr(sm, name) > hi:  # kfsw: S
             raise ValueError(f"KFSmoothing.{name} must be 0 or in (0, {hi}]; "
                              f"got {getattr(sm, name)!r}")  # kfsw: S
@@ -1281,7 +1286,9 @@ def _soft_closure_weights(FABE, FABEOLD, AINC, AINCOLD, AINCMX, ainc_new, noitr,
     s_ret1 = _gt_c2(FABE - 1.0, sm.closure_fabe_width) * deep
     dA = AINC - AINCOLD
     s_same = _gt_c2(_AINC_TOL - jnp.abs(dA), sm.closure_ainc_tol_width)  # kfsw: B4s
-    dfda = (FABE - FABEOLD) / _sd(dA, dA != 0.0)  # kfsw: B4s
+    # divided only where |dA| > tol/2: below it the same-AINC weight is 1 and
+    # dfda does not matter (fp32 reverse-mode NaN for tiny dA otherwise)
+    dfda = (FABE - FABEOLD) / _sd(dA, jnp.abs(dA) > 0.5 * _AINC_TOL)  # kfsw: B4s
     s_dfda = _gt_c2(dfda, sm.closure_dfda_width)
     s_cyc1 = later * (one - (one - s_same) * (one - s_dfda))
     hi = _gt_c2(FABE - (_FABE_HI - _STAB), sm.closure_fabe_width)

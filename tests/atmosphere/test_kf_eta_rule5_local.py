@@ -1328,6 +1328,66 @@ def test_closure_weights_sum_to_one_and_are_c2_in_their_bands():
     assert float(g) > 0.0
 
 
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+@pytest.mark.parametrize("dA", [0.0, 1e-30, 1e-15, 1e-7])
+def test_closure_weights_gradient_finite_for_tiny_ainc_steps(dtype, dA):
+    """dfda = dFABE/dAINC divides by AINC - AINCOLD: its gradient stays finite
+    (the dfda step is saturated wherever the quotient is huge)."""
+    def f(x):
+        p = kfe._soft_closure_weights(x[0], jnp.asarray(0.5, dtype), x[1], x[1] - dA,
+                                      jnp.asarray(2.0, dtype), jnp.asarray(0.3, dtype),
+                                      jnp.asarray(0.0, dtype), jnp.asarray(False), jnp.asarray(True),
+                                      jnp.asarray(True), jnp.asarray(False), jnp.asarray(False), _DEFAULT)
+        return sum(p[b] for b in _BRANCHES) + p["cyc1"]
+    g = jax.grad(f)(jnp.asarray([0.6, 0.4], dtype))
+    assert bool(jnp.all(jnp.isfinite(g)))
+
+
+def test_dfda_step_acts_in_its_band():
+    """dfda in (-w/2, w/2): the cyc1 weight moves with FABE (C2, check_grads)."""
+    w = _DEFAULT.closure_dfda_width
+    dA, dfda = 2.0e-4, 0.1 * w
+
+    def f(fabe):
+        p = kfe._soft_closure_weights(fabe, jnp.asarray(0.05) - dfda * dA, jnp.asarray(0.4),
+                                      jnp.asarray(0.4 - dA), jnp.asarray(2.0), jnp.asarray(0.3),
+                                      jnp.asarray(0.0), jnp.asarray(False), jnp.asarray(True),
+                                      jnp.asarray(True), jnp.asarray(False), jnp.asarray(False), _DEFAULT)
+        return p["cyc1"]
+    x0 = jnp.asarray(0.05, jnp.float64)
+    assert 0.0 < float(f(x0)) < 1.0
+    assert float(jax.grad(f)(x0)) > 0.0
+    check_grads(f, (x0,), order=2, modes=("fwd", "rev"), eps=1e-9)
+
+
+def test_water_closes_with_a_partially_cancelled_closure(fix, monkeypatch):
+    """A 30 % return share forced on every pass: the column water still closes
+    and the tendencies shrink (the (1 - R) scaling acts)."""
+    from tests.atmosphere.test_kain_fritsch_oracle import _WRF_DEFAULT
+    m, x = _wrapper_inputs(fix, "L_nat_w05")
+    dp = fix["p_half"][:, 1:] - fix["p_half"][:, :-1]
+    f = fix["L_nat_w05_fired"] == 1
+    base, _ = kain_fritsch_convection(**x, config=_WRF_DEFAULT)
+    orig = kfe._soft_closure_weights
+
+    def forced(*a):
+        p = dict(orig(*a))
+        for k in ("ret1", "cyc1", "exit", "cyc2", "rescale", "ret2", "apply"):
+            p[k] = 0.7 * p[k]
+        p["ret1"] = p["ret1"] + 0.3 * p["live"]
+        return p
+
+    monkeypatch.setattr(kfe, "_soft_closure_weights", forced)
+    jax.clear_caches()
+    out, _ = kain_fritsch_convection(**x, config=_WRF_DEFAULT)
+    tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt) + np.asarray(out.dq_r_conv_dt)) * dp / constants.g
+    scale = np.sum(np.abs(np.asarray(out.dq_v_dt)) * dp / constants.g, axis=1)
+    assert np.all(np.abs(tot.sum(axis=1))[f] <= 1.0e-9 * scale[f])
+    a, b = np.abs(np.asarray(out.dT_dt))[f].max(), np.abs(np.asarray(base.dT_dt))[f].max()
+    assert 0.0 < a < 0.75 * b
+    jax.clear_caches()
+
+
 def test_soft_min_levels_and_caps_reduce_to_the_oracle():
     v = jnp.asarray([5.0, 0.3, 0.3002, 7.0, 1000.0])
     assert float(kfe._soft_min_levels(v, 1000.0, 0.0)) == 0.3

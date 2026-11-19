@@ -65,7 +65,7 @@ _TAG = re.compile(r"kfsw:\s*([A-Za-z0-9\-]+(?:\s*,\s*[A-Za-z0-9\-]+)*)")
 BASELINE = {
     "A0": ("hard", 44), "A1": ("hard", 7), "A2": ("hard", 2), "A3": ("hard", 2),
     "A4": ("hard", 5), "A5": ("hard", 3), "A5s": ("smooth", 5), "A6": ("hard", 10), "B1": ("hard", 18),
-    "B2": ("hard", 29), "B3": ("hard", 74), "B4": ("hard", 33), "B4s": ("smooth", 24), "B5": ("hard", 4),
+    "B2": ("hard", 29), "B3": ("hard", 74), "B4": ("hard", 33), "B4s": ("smooth", 25), "B5": ("hard", 4),
     "C-KCHECK": ("hard", 41), "C-KLCL": ("hard", 73), "C-KLCLg": ("smooth", 11),
     "C-KLCL2": ("hard", 34),
     "C-KPBL": ("hard", 67), "C-L5": ("hard", 6),
