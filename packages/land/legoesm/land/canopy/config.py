@@ -315,6 +315,25 @@ class CanopyConfig(NamedTuple):
     # absorption (sunlit / canopy absorbed) to [0, 1] (upstream clips hard).  0 =
     # the reference's hard clip.  Read only by sw_scheme="two_stream".
     two_stream_clip_width: float = 0.01
+    # Hand the soil the ground heat flux together with its derivative with
+    # respect to the ground temperature, so the final soil solve treats the
+    # top boundary semi-implicitly (CLM5 Technical Description, eqs. 2.5.123
+    # and 2.5.124 for the derivative, 2.6.15 for the linearised flux in the
+    # soil solve).  False = the explicit Neumann flux: a converged midday solve
+    # over sparse dry canopy then put 290-390 W/m2 into the 2.9 mm top layer
+    # and raised it 17-43 K in one 1800 s step (I. Di Carlo, legoESM-enso
+    # 16f7ac09a7).  Default False -> True (user 2026-11-20: fixed value is the
+    # default).  Bulk snowpack without the snow thermal node only.  Appended.
+    implicit_ground_flux: bool = True
+    # A column whose canopy solve stops at the iteration cap takes the fluxes
+    # of its LAST iterate (when that iterate is an admissible state), as CLM5
+    # does after its forty iterations (Technical Description 2.5.3.2, step 12;
+    # the energy error goes to sensible heat, eqs. 2.5.135, 2.5.138-2.5.139,
+    # which the multilayer land's fallback closure already does).  False = the
+    # cold state (canopy at air temperature), whose sensible heat reached
+    # 1,100-1,430 W/m2 over hot dry soil and was then rejected and held
+    # (legoESM-enso 9b70a0f84b).  Default True (user 2026-11-20).  Appended.
+    fallback_from_last_iterate: bool = True
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -360,6 +379,9 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 "two_stream_clip_width must be <= 1 (the smoothing bands at 0 and 1 of "
                 f"the sunlit share would overlap), got {self.two_stream_clip_width!r}")
+        for _f in ("implicit_ground_flux", "fallback_from_last_iterate"):
+            if not isinstance(getattr(self, _f), bool):
+                raise ValueError(f"{_f} must be a bool, got {getattr(self, _f)!r}")
         return self
 
 

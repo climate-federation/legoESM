@@ -461,6 +461,14 @@ land_canopy_most_n_iters: 10
 # Canopy Newton solve columns per batch: 64 -> 0 = one batch per GPU (user
 # 2026-11-07; AMIP 4 A100 step 0.242 -> 0.138 s, answers equal to rounding).
 land_canopy_solve_group: 0
+# Two-leaf canopy fixes from I. Di Carlo's legoESM-enso fork (user 2026-11-20:
+# fixed value is the default): semi-implicit ground heat flux (CLM5 eqs.
+# 2.5.123-2.5.124, 2.6.15; explicit flux heated the 2.9 mm top soil layer
+# 17-43 K in one step under sparse dry canopy) and unconverged columns keep
+# their last admissible iterate (CLM5 2.5.3.2; the cold-state fallback gave
+# 1,100-1,430 W/m2 sensible heat and was held).  NEW BASELINE.
+land_canopy_implicit_ground_flux: true
+land_canopy_fallback_from_last_iterate: true
 mpas_land_beta_soil: true
 # Surface drag over land from the land model's own roughness / canopy drag, not
 # the ocean bulk law (user 2026-10-03: "a major default"; Dec 2001 45-70N land:

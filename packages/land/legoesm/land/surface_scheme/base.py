@@ -230,3 +230,11 @@ class SurfaceFluxOutput(NamedTuple):
     # iterate this step (any water left over is in RichardsOutput.water_created).
     # Filled in by the land step (appended last, same positional reason).
     soil_unconverged: jax.Array | None = None
+    # Ground temperature [K] the scheme's ``G_soil`` was evaluated at, when the
+    # scheme hands a ``surface_conductance`` to be linearised about it rather
+    # than about the start-of-step top layer (two-leaf canopy with
+    # ``implicit_ground_flux``).  The land step then applies
+    # G_soil - surface_conductance * (T_top_new - surface_conductance_T_ref)
+    # and returns the difference to sensible heat (appended last, same
+    # positional reason).  None otherwise.
+    surface_conductance_T_ref: jax.Array | None = None

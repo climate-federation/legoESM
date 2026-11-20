@@ -2277,6 +2277,13 @@ class ExperimentConfig(NamedTuple):
     # clip at +-10) and the GFS unstable join width (0 = exact GFS step).
     surface_most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
     surface_gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH
+    # APPENDED LAST.  CanopyConfig.implicit_ground_flux / fallback_from_last_
+    # iterate (two-leaf canopy: semi-implicit ground heat flux, CLM5 eqs.
+    # 2.5.123-2.5.124 and 2.6.15; unconverged columns keep their last admissible
+    # iterate, CLM5 2.5.3.2).  Same placement and None semantics as
+    # land_canopy_most_n_iters; the production deck names both.
+    land_canopy_implicit_ground_flux: bool | None = None
+    land_canopy_fallback_from_last_iterate: bool | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -4798,11 +4805,14 @@ class ExperimentConfig(NamedTuple):
         _zw = self.land_canopy_zeta_cap_smoothing_width
         _mi = self.land_canopy_most_n_iters
         _sg = self.land_canopy_solve_group
+        _igf = self.land_canopy_implicit_ground_flux
+        _fbl = self.land_canopy_fallback_from_last_iterate
         if (_rhw is not None or _zw is not None or _mi is not None
-                or _sg is not None):
+                or _sg is not None or _igf is not None or _fbl is not None):
             if self.land_surface_scheme != "two_leaf" or not self.use_multilayer_land:
                 errors.append(
-                    "land_canopy_* (smoothing widths / most_n_iters / solve_group) set but "
+                    "land_canopy_* (smoothing widths / most_n_iters / solve_group / "
+                    "implicit_ground_flux / fallback_from_last_iterate) set but "
                     f"land_surface_scheme={self.land_surface_scheme!r}, use_multilayer_land="
                     f"{self.use_multilayer_land!r}: only the two-leaf canopy of the "
                     "multilayer land reads them, so the value would be inert")
@@ -4815,7 +4825,11 @@ class ExperimentConfig(NamedTuple):
                                  **({} if _zw is None else
                                     {"zeta_cap_smoothing_width": float(_zw)}),
                                  **({} if _mi is None else {"most_n_iters": _mi}),
-                                 **({} if _sg is None else {"solve_group": _sg})
+                                 **({} if _sg is None else {"solve_group": _sg}),
+                                 **({} if _igf is None
+                                    else {"implicit_ground_flux": _igf}),
+                                 **({} if _fbl is None
+                                    else {"fallback_from_last_iterate": _fbl})
                                  ).validate()
                 except ValueError as exc:
                     errors.append(f"land_canopy_*: {exc}")

@@ -1078,6 +1078,15 @@ def _step_multilayer_land_impl(
     tau_x = surface_out.tau_x
     tau_y = surface_out.tau_y
     G_surface = surface_out.G_soil
+    if surface_out.surface_conductance_T_ref is not None and (layered or _snow_node):
+        # The shifted linearisation is wired only into the plain soil solve; the
+        # snow-node and layered solves would take the conductance about another
+        # temperature and lose the difference.
+        raise ValueError(
+            "implicit_ground_flux (two-leaf canopy) is implemented for the bulk "
+            "snowpack without the snow thermal node only; got snow_scheme="
+            f"{config.snow_scheme!r}, snow_insulation={_snow_node!r}; set "
+            "land_canopy_implicit_ground_flux: false for this configuration")
 
     # --- Unsolved canopy column: close its energy at the land boundary ---
     # A column whose canopy solve did not converge carries the scheme's fallback
@@ -1770,10 +1779,21 @@ def _step_multilayer_land_impl(
                 config.hydraulics, config.thermal,
                 G_surface, dt, **_thermal_kw)
         else:
+            # Two-leaf canopy with implicit_ground_flux: G was evaluated at the
+            # canopy's own ground temperature T_ref (last Picard pass), not at
+            # the start-of-step top layer the solve linearises about, so shift
+            # it there first (CLM5 eq. 2.6.15); the shift, like the Robin
+            # correction, is energy the soil did not take and goes to SH below.
+            # Sign: positive = INTO the soil; SH positive up.
+            _G_in = G_surface
+            if surface_out.surface_conductance_T_ref is not None:
+                _G_in = G_surface + surface_out.surface_conductance * (
+                    surface_out.surface_conductance_T_ref - T_soil[:, 0])
+                shflx = shflx + (G_surface - _G_in)
             T_soil_new, _robin_flux = solve_soil_thermal(
                 T_soil, richards_out.theta_new, grid,
                 config.hydraulics, config.thermal,
-                G_surface, dt, return_robin_flux=True, **_thermal_kw)
+                _G_in, dt, return_robin_flux=True, **_thermal_kw)
             # Semi-implicit correction -> sensible heat to the air (#2542).
             # The column received G_surface - _robin_flux, while SH/LE/LW
             # were charged at the start-of-step skin temperature, so the

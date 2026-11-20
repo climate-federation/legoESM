@@ -2207,6 +2207,21 @@ def reconstruct_cell_velocity_wet(u_edge, mesh, wet_edge):
     return u_east, v_north
 
 
+def _owner_cell_values(mesh, *fields):
+    """Halo rows replaced by their owners' values, under an armed multi-rank
+    Voronoi MPI layout whose local mesh is ``mesh``; ``None`` entries pass
+    through, and without such a layout (serial, one rank, a global mesh) the
+    fields are returned unchanged.  docs/85 13.34: the physics of a halo copy
+    of a column can differ from its owner's in the last bits, and the cut edges
+    then carried that difference into the surface winds."""
+    from legoesm.parallel.voronoi_mpi import get_matching_voronoi_layout
+    lay = get_matching_voronoi_layout(mesh)
+    if lay is None or lay.n_ranks < 2:
+        return fields
+    ex = lay.halo_exchange.exchange_cell_field
+    return tuple(None if f is None else ex(f) for f in fields)
+
+
 def cell_vector_to_edge_normal(du_cell, dv_cell, mesh, dp_cell=None):
     """Project cell-centred vector components onto the MPAS edge normals.
 
@@ -2222,7 +2237,14 @@ def cell_vector_to_edge_normal(du_cell, dv_cell, mesh, dp_cell=None):
     (exact on hybrid levels with differing surface pressures; the plain
     average only conserves on pure sigma).  ``None`` keeps the plain average
     bit for bit.
+
+    Under a multi-rank Voronoi MPI layout whose local mesh is ``mesh``, the
+    halo rows of the inputs are first replaced by the owning rank's values
+    (:func:`_owner_cell_values`), so an edge on the partition cut averages the
+    owners' tendencies (and layer masses) exactly as the serial projection
+    does, whatever the physics computed on the halo copy of a column.
     """
+    du_cell, dv_cell, dp_cell = _owner_cell_values(mesh, du_cell, dv_cell, dp_cell)
     c0 = mesh.cellsOnEdge[0]  # (nEdges,)
     c1 = mesh.cellsOnEdge[1]  # (nEdges,)
     if dp_cell is None:
