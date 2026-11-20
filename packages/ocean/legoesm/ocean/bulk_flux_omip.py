@@ -96,7 +96,7 @@ from legoesm.core.source_rounding import (
 from legoesm.core.source_rounding import (
     nemo_source_round as R,
 )
-from legoesm.ocean.eos import nemo_eos_fzp_eos80
+from legoesm.ocean.eos import nemo_eos_fzp, nemo_eos_fzp_eos80
 from legoesm.ocean.forcing.nemo_fld_read import nemo_fld_time_interp
 from legoesm.ocean.forcing.nemo_surface import (
     NemoFwbCase2Carry,
@@ -816,7 +816,7 @@ class NemoSbcIceIfInputs(NamedTuple):
     ts_surface: object
     ff_f: object
     tmask_surface: object
-    smask0: object
+    smask0: object; use_conservative_temperature: bool
 
 
 class NemoS0Inputs(NamedTuple):
@@ -1213,7 +1213,9 @@ def build_nemo_orca2_si3_static(
         raise ValueError(
             "resolved &namsbc_blk SN_CC%CLNAME must be a character value"
         )
-    if cloud_file.strip().upper() != "NOT USED":
+    # fldread.F90:991 and sbcblk.F90:392 use Fortran TRIM: remove trailing
+    # blanks only, then compare case-sensitively with the literal.
+    if not _nemo_fld_is_not_used(cloud_file):
         raise ValueError(
             "coupled SI3 cloud-file forcing is not implemented: "
             f"SN_CC%CLNAME={cloud_file!r}"
@@ -1536,7 +1538,9 @@ def _orca2_si3_velocity_full_fields(u_owned, v_owned, fold, nn_hls: int, *, step
     """U/V full arrays with NEMO's halos: filled once the ocean has stepped.
 
     stprk3_stg.F90:630-637 fills uu/vv halos (sign -1, ldfull) at the end of
-    every RK3 stage; the cold-start fields (istate.F90:82-134) are never filled.
+    every RK3 stage.  On the admitted ``ln_tsd_init=.TRUE.`` cold start,
+    istate.F90:114-123 leaves U/V unfilled; its user-defined start at :126-134
+    is a different branch.
     """
     from legoesm.ice.si3_orca2_state import si3_lbc_lnk_orca2
 
@@ -1544,7 +1548,7 @@ def _orca2_si3_velocity_full_fields(u_owned, v_owned, fold, nn_hls: int, *, step
     for owned, grid in ((u_owned, "U"), (v_owned, "V")):
         value = _orca2_si3_full_field(owned, fold, grid, nn_hls)
         filled = si3_lbc_lnk_orca2(
-            value, grid, -1.0, nn_hls=nn_hls, ldfull=fold.nfd_full_when_absent,
+            value, grid, -1.0, nn_hls=nn_hls, ldfull=True,
         )
         out.append(jnp.where(stepped, filled, value))
     return tuple(out)
@@ -1575,7 +1579,7 @@ def nemo_orca2_si3_coupled_step(
     *,
     model,
     sponge,
-    _surface_update: bool | None = None,
+    _surface_update: bool,
 ):
     """One coupled ORCA2+SI3 step in ``sbcmod``/``stprk3`` source order.
 
@@ -1585,7 +1589,7 @@ def nemo_orca2_si3_coupled_step(
 
     from legoesm.ice.si3_finalize import si3_ice_update_tau
     from legoesm.ice.si3_o17 import SI3O17LiveForcing, si3_o17_through_update_flx
-    kt = carry.kt
+    kt = _nemo_concrete_kt(carry.kt)
     if card.forcing_stride != card.ice.state.nn_fsbc:
         raise ValueError("coupled ocean/ice forcing strides disagree")
     if card.forcing_stride != 2:
@@ -1640,8 +1644,8 @@ def nemo_orca2_si3_coupled_step(
 
     atmosphere, runoff_now, sss_target = nemo_orca2_k0_s0f(forcing.s0f)
     surface_update = (
-        _nemo_orca2_si3_surface_update_due(kt, card.forcing_stride)
-        if _surface_update is None else _surface_update
+        _surface_update
+        if isinstance(_surface_update, bool) else _surface_update
     )
     if not isinstance(surface_update, bool):
         raise TypeError(
@@ -1892,8 +1896,8 @@ def nemo_orca2_si3_coupled_step(
         ice_mean_thickness_hm_i=hm_i,
         ice_ocean_top_drag_rCdu=rcdu,
     )
-    if isinstance(kt, jax.core.Tracer) and sponge is not None:
-        sponge = sponge._replace(nemo_kt=kt)
+    if sponge is not None:
+        sponge = _nemo_checked_sponge(sponge, kt)
     stepped = nemo_orca2_ocean_consumption_step(
         card.ocean,
         state,
@@ -1966,6 +1970,17 @@ def nemo_orca2_si3_coupled_pair(
         bt_hist = next_carry.ocean.bt_hist
         eta_rk3_after = next_carry.ocean.eta_rk3_after
         cflice_delayed = next_carry.ice.ice.cflice_delayed
+        config = card.ocean.recipe.model_config
+        if (bt_hist is None
+                and config.barotropic.barotropic_time_filter != "nemo_ab3am4"):
+            bt_hist = next_carry.ocean_bt_hist
+        if eta_rk3_after is None:
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                nemo_rk3_after_ssh_is_carried,
+            )
+
+            if not nemo_rk3_after_ssh_is_carried(config):
+                eta_rk3_after = next_carry.ocean_eta_rk3_after
         missing = [
             name for name, value in (
                 ("ocean.bt_hist", bt_hist),
@@ -2690,7 +2705,7 @@ def _nemo_blk_oce_ncar(
         iif = nemo_sbc_ice_if(
             cover, ice_if.sss_m, ice_if.sst_m, ice_if.ts_surface, ice_if.ff_f,
             ice_if.tmask_surface, ice_if.smask0, qsr, qns,
-            nn_hls=min(halo) // 2,
+            nn_hls=min(halo) // 2, use_conservative_temperature=ice_if.use_conservative_temperature,
         )
         qsr, qns, ts_surface, fr_i = iif.qsr, iif.qns, iif.ts_surface, iif.fr_i
     bulk = NemoBlkOceResult(
@@ -2770,7 +2785,8 @@ class NemoSbcIceIfResult(NamedTuple):
 
 
 def nemo_sbc_ice_if(ice_cover, sss_m, sst_m, ts_surface, ff_f,
-                    tmask_surface, smask0, qsr, qns, *, nn_hls):
+                    tmask_surface, smask0, qsr, qns, *, nn_hls,
+                    use_conservative_temperature: bool):
     """Literal record-build ``sbc_ice_if`` update block (nn_ice = 1).
 
     Transcribes sbcice_if.f90:154-196, the body of ``IF( MOD(kt-1, nn_fsbc)
@@ -2791,7 +2807,17 @@ def nemo_sbc_ice_if(ice_cover, sss_m, sst_m, ts_surface, ff_f,
     inner = ((slice(None), slice(None)) if h == 0 else
              (slice(h, ny - h), slice(h, nx - h)))
     # sbcice_if.f90:158-159: eos_fzp on A2D(nn_hls), then masked.
-    fzp = R(nemo_eos_fzp_eos80(sss_m) * jnp.asarray(tmask_surface, dtype=f64))
+    if isinstance(use_conservative_temperature, bool):
+        freezing = nemo_eos_fzp if use_conservative_temperature else nemo_eos_fzp_eos80
+        freezing_value = freezing(sss_m)
+    else:
+        selector = jnp.asarray(use_conservative_temperature)
+        if selector.shape != () or selector.dtype.kind != "b":
+            raise TypeError("sbc_ice_if requires the resolved NEMO EOS selector")
+        freezing_value = jnp.where(
+            selector, nemo_eos_fzp(sss_m), nemo_eos_fzp_eos80(sss_m)
+        )
+    fzp = R(freezing_value * jnp.asarray(tmask_surface, dtype=f64))
     # :164-167: clamp on the full A2D(nn_hls) halo.
     ts_new = _fmax(jnp.asarray(ts_surface, dtype=f64), fzp)
     zt = fzp[inner]
@@ -2998,3 +3024,29 @@ __all__ = [
     "rho_air_moist",
     "seawater_q_sat",
 ]
+
+
+def _nemo_concrete_kt(kt):
+    """Normalize a concrete device integer while leaving traced counters live."""
+    if isinstance(kt, jax.core.Tracer):
+        return kt
+    scalar = np.asarray(kt)
+    return int(scalar) if scalar.shape == () and scalar.dtype.kind in "iu" else kt
+
+
+def _nemo_fld_is_not_used(name: str) -> bool:
+    """Match fldread's case-sensitive Fortran ``TRIM(name) == 'NOT USED'``."""
+    return name.rstrip(" ") == "NOT USED"
+
+
+def _nemo_checked_sponge(sponge, kt):
+    """Validate an eager damping stamp, then satisfy the traced identity guard."""
+    if isinstance(kt, jax.core.Tracer):
+        return sponge._replace(nemo_kt=kt)
+    target = sponge.nemo_kt
+    requested = int(np.asarray(kt))
+    if target is None or int(np.asarray(target)) != requested:
+        raise ValueError(
+            f"L6 damping target is stale: target kt={target!r}, requested kt={requested!r}"
+        )
+    return sponge

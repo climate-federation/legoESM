@@ -471,6 +471,20 @@ def score_c2_observations(
     )
 
 
+def score_c3_pair_observations(
+    candidate: dict[tuple[int, int, int], dict[str, object]],
+    expected: dict[tuple[int, int, int], dict[str, object]],
+    masks: dict[tuple[int, int], dict[str, np.ndarray]],
+    *,
+    steps: tuple[int, int],
+) -> dict:
+    """Public pair scorer shared by the compiled C3 route and its controls."""
+
+    return _score_c_observations(
+        candidate, expected, masks, steps=steps, mode="C3"
+    )
+
+
 def _load_expected_steps(
     run: Path, steps: tuple[int, ...], dimensions: tuple[int, int, int]
 ) -> tuple[dict, dict]:
@@ -547,7 +561,7 @@ def score_c2(evidence: Path, candidate: dict[tuple[int, int, int], dict]) -> dic
     return score_c2_observations(candidate, expected, masks)
 
 
-def _c2_cold_start(run: Path, *, n_steps: int = 2):
+def _c2_cold_start(run: Path, *, n_steps: int):
     """Load records and bind them to the production coupled recipe."""
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     from legoesm.ocean import bulk_flux_omip as bulk
@@ -575,7 +589,7 @@ def _c2_cold_start(run: Path, *, n_steps: int = 2):
     )
     coupled_ocean = build_orca2_zps_card(run, initial_state="si3_iceistate")
     ice_card = o17_score.card_for(master_run)._replace(
-        ln_drgice_imp=True,
+        ln_drgice_imp=bool(_coupled_resolved_namelist(run)["ln_drgice_imp"]),
         ln_teos10=ln_teos10,
     )
     return bulk.build_nemo_orca2_si3_coupled_recipe(
@@ -748,12 +762,28 @@ def _trace_observations(traces, card, expected: dict, steps: tuple[int, ...]) ->
     return candidate
 
 
+def _validate_sponge_steps(sponge, first_kt: int) -> None:
+    """Host-side stale-target guard before a carried counter becomes traced."""
+
+    for offset, target in enumerate(sponge):
+        stamped = None if target is None else target.nemo_kt
+        expected = first_kt + offset
+        if stamped is None or int(np.asarray(stamped)) != expected:
+            raise ValueError(
+                f"L6 damping target is stale: target kt={stamped!r}, "
+                f"requested kt={expected!r}"
+            )
+
+
 def run_c2_compiled_observations(evidence: Path):
     """Run the two-step cold C2 trajectory and return scorer-ready observations."""
     from legoesm.ocean import bulk_flux_omip as bulk
 
     expected, masks = load_c2_expected(evidence)
-    carry, forcing, sponge, card, model = _c2_cold_start(evidence / "REC_C2")
+    carry, forcing, sponge, card, model = _c2_cold_start(
+        evidence / "REC_C2", n_steps=2
+    )
+    _validate_sponge_steps(sponge, 1)
 
     @jax.jit
     def compiled_pair(entry, odd_forcing, even_forcing, odd_sponge, even_sponge):
@@ -779,7 +809,7 @@ def run_c2_compiled(evidence: Path) -> dict:
     return score_c2_observations(candidate, expected, masks)
 
 
-def run_c3_compiled(evidence: Path, *, pair_limit: int = 50) -> dict:
+def run_c3_compiled(evidence: Path, *, pair_limit: int) -> dict:
     """Compile one traced pair once, carry it forward, and score pairwise.
 
     ``pair_limit`` exists only for the required preflight timing measurement.
@@ -800,6 +830,7 @@ def run_c3_compiled(evidence: Path, *, pair_limit: int = 50) -> dict:
             f"C3 deck readers produced {len(forcing)} forcing and {len(sponge)} "
             f"damping records; expected {n_steps} each"
         )
+    _validate_sponge_steps(sponge, 1)
 
     compile_count = 0
 
@@ -821,6 +852,8 @@ def run_c3_compiled(evidence: Path, *, pair_limit: int = 50) -> dict:
     executable = compiled_pair.lower(
         carry, forcing[0], forcing[1], sponge[0], sponge[1]
     ).compile()
+    executable_identity = id(executable)
+    executable_calls = 0
     compile_seconds = time.perf_counter() - compile_start
     if compile_count != 1:
         raise ValueError(f"C3 pair compiled {compile_count} times; expected exactly 1")
@@ -841,12 +874,15 @@ def run_c3_compiled(evidence: Path, *, pair_limit: int = 50) -> dict:
             sponge[odd_kt - 1],
             sponge[odd_kt],
         )
+        executable_calls += 1
+        if id(executable) != executable_identity:
+            raise ValueError("C3 compiled executable identity changed during trajectory")
         jax.block_until_ready(next_carry)
         pair_wall_seconds.append(time.perf_counter() - started)
         expected, masks = _load_expected_steps(run, steps, dimensions)
         candidate = _trace_observations(traces, card, expected, steps)
-        pair_report = _score_c_observations(
-            candidate, expected, masks, steps=steps, mode="C3"
+        pair_report = score_c3_pair_observations(
+            candidate, expected, masks, steps=steps
         )
         for kind, row in pair_report["counts"].items():
             _merge_d225_counts(counts.setdefault(kind, {}), row)
@@ -881,6 +917,8 @@ def run_c3_compiled(evidence: Path, *, pair_limit: int = 50) -> dict:
         "status": status,
         "compiled": True,
         "compile_count": compile_count,
+        "compiled_executable_identity": executable_identity,
+        "compiled_executable_calls": executable_calls,
         "pairs_scored": len(pair_wall_seconds),
         "compile_seconds": compile_seconds,
         "pair_wall_seconds": pair_wall_seconds,
@@ -1250,7 +1288,7 @@ def main() -> int:
         parser.error("--evidence and --ppsrc are required outside --self-test")
     _admitted_resolved_namelist(args.evidence)
     if args.mode == "C3":
-        report = {"C3": run_c3_compiled(args.evidence), **status_report()}
+        report = {"C3": run_c3_compiled(args.evidence, pair_limit=50), **status_report()}
         print(json.dumps(report, indent=2, sort_keys=True))
         return 2 if report["C3"]["status"].startswith("FAIL_C3") else 0
     report = {

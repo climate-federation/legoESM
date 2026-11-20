@@ -375,14 +375,14 @@ def run_standalone_k0_driver(
     mask_jnp = jnp.asarray(mask_np, dtype=jnp.float64)
     cover_jnp = jnp.asarray(cover, dtype=jnp.float64)
 
-    means_init = NemoSurfaceMeans(*(zero for _ in range(7)))
+    eos = recipe.model_config.eos ; require(eos in ("nemo_eos80", "nemo_teos10"), "unsupported ORCA2 EOS: " + eos) ; means_init = NemoSurfaceMeans(*(zero for _ in range(7)))
     s0_base = bulk.NemoS0Inputs(
         prior=means_init,
         kt=1,
         nit000=1,
         forcing_stride=2,
         restart_means_present=False,
-        use_conservative_temperature=False,
+        use_conservative_temperature=eos == "nemo_teos10",
         remove_inverse_barometer=False,
         u_before=zero,
         v_before=zero,
@@ -480,7 +480,7 @@ def run_standalone_k0_driver(
             zero,
             ff_f,
             mask_jnp,
-            mask_jnp,
+            mask_jnp, eos == "nemo_teos10",
         )
         s0 = (
             s0_base

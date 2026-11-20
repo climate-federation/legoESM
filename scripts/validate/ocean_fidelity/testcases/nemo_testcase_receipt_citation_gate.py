@@ -15086,8 +15086,11 @@ CITATION_MAP.update({
 # ``anchors`` dictionaries produced by that composition and pin the resolved
 # tree.  The citation strings remain historical receipt text; only their live
 # source locations change.
-def _merge_resolution_repin(citation: str, lines: str, anchors=None) -> None:
+def _merge_resolution_repin(
+    citation: str, lines: str, anchors=None, *, strict_extent: bool = False,
+) -> None:
     value = CITATION_MAP[citation]
+    explicit_anchors = anchors is not None
     if anchors is None:
         while isinstance(value, dict):
             value = value["anchors"]
@@ -15098,7 +15101,13 @@ def _merge_resolution_repin(citation: str, lines: str, anchors=None) -> None:
     if isinstance(anchors, list):
         anchors = list(anchors)
         if anchors and isinstance(anchors[-1], int):
-            anchors[-1] = extent
+            if strict_extent and anchors[-1] != extent:
+                raise ValueError(
+                    f"explicit extent {anchors[-1]} does not match {lines!r} "
+                    f"({extent} lines)"
+                )
+            if not strict_extent:
+                anchors[-1] = extent
         elif extent > 1:
             anchors.append(extent)
     elif extent > 1:
@@ -18227,13 +18236,6 @@ for _citation, _lines in (
     ('packages/core/legoesm/core/transcendentals.py:477-538', '484-576'),
     ('packages/core/legoesm/core/transcendentals.py:527-538', '558-576'),
     ('packages/core/legoesm/core/transcendentals.py:91-242', '92-243'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1030-1114', '2177-2253'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1132-1153', '2273-2295'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1168-1171', '2309-2312'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1176-1219', '2317-2363'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1320-1581', '2465-2726'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1401-1473', '2546-2618'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1402-1474', '2547-2618'),
     ('packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:5967-5968', '5978-5979'),
     ('packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12740-12769', '12795-12824'),
     ('packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13155-13172', '13210-13227'),
@@ -18340,13 +18342,15 @@ _merge_resolution_repin(
 )
 _merge_resolution_repin(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1034-1035,2188-2190',
-    '2624-2832,4038-4040',
+    '2832-2833,4038-4040',
     anchors=[
-        ('constants: IceConstantsConfig,', 16),
         'rDt_ice: float, rn_snwblow: float, rn_sinew: float, nn_icesal: int,',
+        ('constants: IceConstantsConfig,', 17),
         '"sprecip": jnp.asarray(thermo_forcing.snow_precipitation, dtype=dtype),',
         '"evap_ice": jnp.asarray(thermo_forcing.evaporation, dtype=dtype),',
+        5,
     ],
+    strict_extent=True,
 )
 _merge_resolution_repin(
     'double_diffusion.py:330-357', '410-444',
@@ -18404,8 +18408,15 @@ _merge_resolution_repin(
 )
 _merge_resolution_repin(
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2268-2531',
-    '2255-2256',
-    anchors=[('1,', 51), ('bbl_aht_m2_s=1000.0,', 2)],
+    '2249-2269,2308-2561',
+    anchors=[
+        ('model_config = _model_config(', 4),
+        'f"model_config.eos, got {model_config.eos!r}"',
+        "# Geometry-ladder G1 rounds 2-3: ORCA2's T-pivot fold retains NEMO's",
+        'model_config = model_config._replace(gm_redi=orca2_l2_isoneutral_gm_redi())',
+        275,
+    ],
+    strict_extent=True,
 )
 _merge_resolution_repin(
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2504-2505',
@@ -18418,15 +18429,46 @@ _merge_resolution_repin(
 
 # Final coupled-field adapter shift from review R1.
 for _citation, _lines in (
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1030-1114', '2184-2260'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1132-1153', '2280-2302'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1168-1171', '2316-2319'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1176-1219', '2324-2370'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1320-1581', '2472-2733'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1401-1473', '2553-2625'),
-    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1402-1474', '2554-2625'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1030-1114', '2224-2300'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1132-1153', '2320-2342'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1168-1171', '2356-2359'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1176-1219', '2364-2410'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1320-1581', '2512-2773'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1401-1473', '2593-2665'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1402-1474', '2594-2665'),
 ):
     _merge_resolution_repin(_citation, _lines)
+
+# Review T2: these historical claims span complete live statement blocks.  The
+# former final repins accidentally combined independent endpoint shifts and the
+# helper then replaced their stored extents with those enlarged ranges.
+_merge_resolution_repin(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:214-246', '2031-2063',
+    anchors=[
+        'def _si3_502_ice_enthalpy_from_temperature(',
+        'return sr(constants.rho_ice * sr(sr(sensible + latent) - ocean))',
+        33,
+    ],
+    strict_extent=True,
+)
+_merge_resolution_repin(
+    'ocean_model_latlon_cgrid.py:11723-11861', '11907-12050',
+    anchors=[
+        'T=state_new.T.replace(data=_adv_content_T),',
+        ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 1),
+        144,
+    ],
+    strict_extent=True,
+)
+_merge_resolution_repin(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2212', '3922-4062',
+    anchors=[
+        'def si3_lane_column_step_arrays(state: SI3ColumnArrays,',
+        'e_snow=o10.o9.zdf.e_s,',
+        141,
+    ],
+    strict_extent=True,
+)
 
 def audit_map() -> list[dict]:
     """EVERY entry in the map must resolve cleanly, cited this round or not.

@@ -3162,7 +3162,7 @@ def _si3_pra_subcycle_cond_dispatch(
         jnp.int32(max(0, nn_hls - 1)),
     )
     if any(isinstance(leaf, jax.core.Tracer)
-           for leaf in jax.tree_util.tree_leaves((init_ops, icycle_arr))):
+           for leaf in jax.tree_util.tree_leaves((init_ops, icycle_arr, kt_parity))):
         # DECISION 198: traced callers run `DO jt = 1, icycle` (`:156-498`) as one
         # three-step lax.scan with the same per-jt ihls, sweep parity and
         # `icycle >= jt` selection as the unrolled calls below; the body is

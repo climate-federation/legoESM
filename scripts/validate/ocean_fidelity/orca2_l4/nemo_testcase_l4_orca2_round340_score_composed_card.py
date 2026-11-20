@@ -237,7 +237,7 @@ def run_and_score_real_composed_card(
     )
     bulk._validate_k0_ocean_card(card)
     controls = gate.build_real_composed_inputs(
-        card, Path(deck_root), Path(core_manifest), Path(ice_cover_path)
+        card, Path(deck_root), Path(core_manifest), Path(ice_cover_path), n_steps=10
     )
     replay = gate.run_composed_card(
         card, card.ocean.recipe.initial_state, controls, model=model

@@ -115,7 +115,9 @@ def _unequal(got, want):
 
 
 def _jit():
-    return jax.jit(partial(nemo_sbc_ice_if, nn_hls=HLS))
+    return jax.jit(partial(
+        nemo_sbc_ice_if, nn_hls=HLS, use_conservative_temperature=False
+    ))
 
 
 def test_jit_matches_independent_scalar_transcription_bitwise():
@@ -146,7 +148,9 @@ def test_truly_eager_equals_jit_bitwise(barriers, monkeypatch):
         monkeypatch.setattr(eos, "nemo_source_round", lambda v: v)
     args = _inputs(seed=7)
     with jax.disable_jit():
-        eager = nemo_sbc_ice_if(*args, nn_hls=HLS)
+        eager = nemo_sbc_ice_if(
+            *args, nn_hls=HLS, use_conservative_temperature=False
+        )
     assert (_unequal(eager, _jit()(*args)) == 0) == barriers
 
 
@@ -228,18 +232,24 @@ def test_min_tie_cannot_reach_output_checked_proof(monkeypatch):
 
     monkeypatch.setattr(bfo, "_fmin", recording_fmin)
     with jax.disable_jit():
-        literal = nemo_sbc_ice_if(*args, nn_hls=HLS)
+        literal = nemo_sbc_ice_if(
+            *args, nn_hls=HLS, use_conservative_temperature=False
+        )
     (x,) = seen
     assert not np.any((x == 0.0) & np.signbit(x))           # no -0 operand
     assert np.any((x == 0.0) & ~np.signbit(x))              # +0 ties occur
     assert np.any(np.isnan(x))                              # NaN path covered
     monkeypatch.setattr(bfo, "_fmin", jnp.minimum)
     with jax.disable_jit():
-        planted = nemo_sbc_ice_if(*args, nn_hls=HLS)
+        planted = nemo_sbc_ice_if(
+            *args, nn_hls=HLS, use_conservative_temperature=False
+        )
     assert _unequal(literal, planted) == 0
     normal = _special_grid(subnormals=False)
     with jax.disable_jit():
-        got = nemo_sbc_ice_if(*normal, nn_hls=HLS)
+        got = nemo_sbc_ice_if(
+            *normal, nn_hls=HLS, use_conservative_temperature=False
+        )
     assert _unequal(got, _scalar(*normal)) == 0
 
 
@@ -272,7 +282,9 @@ def test_fd_gradients_open_ice_and_clamp():
     cover[J - 1, I - 1] = 0.6
     fz = _fzp(34.0)
     sst[J, I] = fz + 0.3                    # fr_i = 0 (observed ice, no opa ice)
-    f = jax.jit(partial(nemo_sbc_ice_if, nn_hls=HLS))
+    f = jax.jit(partial(
+        nemo_sbc_ice_if, nn_hls=HLS, use_conservative_temperature=False
+    ))
 
     def qns_of(field, value, index):
         def g(v):
@@ -382,7 +394,7 @@ def _ice_case():
     after = cover.copy()
     before = np.clip(cover + rng.uniform(-0.1, 0.1, cover.shape), 0.0, 1.0)
     ice = NemoSbcIceIfInputs(before, after, 12_345_678, -_YEAR_S // 2,
-                             _YEAR_S // 2, sss, sst, ts, ff, tmask, smask0)
+                             _YEAR_S // 2, sss, sst, ts, ff, tmask, smask0, False)
     blk = _blk_args(smask0.shape) + (jnp.asarray(smask0),)
     return blk, ice
 
@@ -399,8 +411,9 @@ def test_nn_ice_1_production_call_site_runs_fld_read_and_sbc_ice_if():
     got = run(blk, ice)
     base = jax.jit(lambda b: _blk(b, nn_ice=0, ice_if=None))(blk)
     cover = nemo_fld_time_interp(*ice[:5])
-    want = jax.jit(partial(nemo_sbc_ice_if, nn_hls=HLS))(
-        cover, *ice[5:], base.qsr, base.qns)
+    want = jax.jit(partial(
+        nemo_sbc_ice_if, nn_hls=HLS, use_conservative_temperature=False
+    ))(cover, *ice[5:-1], base.qsr, base.qns)
     assert _unequal((got.ts_surface, got.fr_i, got.qsr, got.qns), want) == 0
     assert _unequal((got.qns,), (base.qns,)) > 0
     assert _unequal((got.qsr,), (base.qsr,)) > 0
@@ -409,8 +422,9 @@ def test_nn_ice_1_production_call_site_runs_fld_read_and_sbc_ice_if():
             assert _unequal((getattr(got, name),), (getattr(base, name),)) == 0
     assert base.ts_surface is None and base.fr_i is None
     # the cover is the time blend, not either raw slot
-    stale = jax.jit(partial(nemo_sbc_ice_if, nn_hls=HLS))(
-        ice.fdta_after, *ice[5:], base.qsr, base.qns)
+    stale = jax.jit(partial(
+        nemo_sbc_ice_if, nn_hls=HLS, use_conservative_temperature=False
+    ))(ice.fdta_after, *ice[5:-1], base.qsr, base.qns)
     assert _unequal((got.qns,), (stale.qns,)) > 0
 
 

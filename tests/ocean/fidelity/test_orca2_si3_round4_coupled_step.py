@@ -320,6 +320,22 @@ def test_carry_pytree_round_trip(monkeypatch):
     assert _bits(rebuilt) == _bits(carry)
 
 
+def test_eager_pair_accepts_carried_zero_dimensional_integer_kt(
+    real_coupled_fixture,
+):
+    carry, forcing, card, model = real_coupled_fixture[:4]
+    carry = carry._replace(kt=jnp.asarray(1, dtype=jnp.int64))
+    first, _ = bulk.nemo_orca2_si3_coupled_pair(
+        carry, forcing, card, even_forcing=forcing,
+        model=model, sponge=None, even_sponge=None,
+    )
+    second, _ = bulk.nemo_orca2_si3_coupled_pair(
+        first, forcing, card, even_forcing=forcing,
+        model=model, sponge=None, even_sponge=None,
+    )
+    assert int(second.kt) == 5
+
+
 def test_coupled_card_rejects_nameos_disagreement_at_build_boundary(monkeypatch):
     _, _, card, _ = _fixture(monkeypatch)
     bad_ice = SimpleNamespace(**{**vars(card.ice), "ln_teos10": True})
@@ -331,16 +347,25 @@ def test_coupled_card_rejects_nameos_disagreement_at_build_boundary(monkeypatch)
 def test_source_order_and_exactly_once_routes(monkeypatch):
     carry, forcing, card, calls = _fixture(monkeypatch)
     carry, _ = bulk.nemo_orca2_si3_coupled_step(
-        carry, forcing, card, model=object(), sponge=None
+        carry, forcing, card, model=object(), sponge=None, _surface_update=True
     )
     carry, _ = bulk.nemo_orca2_si3_coupled_step(
-        carry, forcing, card, model=object(), sponge=None
+        carry, forcing, card, model=object(), sponge=None, _surface_update=False
     )
     assert calls == [
         "ssm", "bulk", "ice", "tau", "runoff_restoring", "fwb", "lbc",
         "interfaces", "ocean", "ssm", "tau", "runoff_restoring",
         "fwb", "lbc", "interfaces", "ocean",
     ]
+
+
+def test_coupled_step_refuses_stale_damping_stamp_before_ocean(monkeypatch):
+    carry, forcing, card, _ = _fixture(monkeypatch)
+    with pytest.raises(ValueError, match="L6 damping target is stale"):
+        bulk.nemo_orca2_si3_coupled_step(
+            carry, forcing, card, model=object(),
+            sponge=SimpleNamespace(nemo_kt=2), _surface_update=True,
+        )
 
 
 @pytest.fixture(scope="module")
@@ -394,11 +419,6 @@ def real_coupled_fixture():
             jnp.full(state.T.data.shape[:-1] + (4,), 0.01),
             name="tke", dims=("lat", "lon", "level"), units="m^2/s^2",
         ),
-        # The route-plant fixture exercises a production pair, not the cold
-        # carry transition.  Prime the optional after-SSH slot so the pair's
-        # invariant pytree is already mature without selecting the unrelated
-        # QCO/RK3 geometry program on this tiny synthetic grid.
-        eta_rk3_after=state.eta,
     )
     tke = TKEConfig(
         prognostic=True, tke_mxl_choice=3, nemo_mxlice=2,
@@ -420,9 +440,7 @@ def real_coupled_fixture():
         A_h=0.0, B_h=0.0, K_h=0.0, K_bih=0.0, hyperdiff_coeff=0.0,
         A_v=1.0e-4, K_v=1.0e-5, n_barotropic_substeps=5,
         physics=physics, implicit_vertical_mixing=True,
-        barotropic_solver="explicit_substep", barotropic_time_filter="nemo_ab3am4",
-        nemo_barotropic_filter_alpha=0.09,
-        nemo_prognostic_barotropic_state=True,
+        barotropic_solver="explicit_substep",
     )
     config = recipe._nemo_linear_bottom_drag(config)._replace(
         eos="nemo_eos80", implicit_ice_ocean_top_drag=True
@@ -492,10 +510,31 @@ def _real_pair(fixture):
     )[0]
 
 
+def test_route_fixture_keeps_unselected_mature_slots_in_side_carry(
+    real_coupled_fixture,
+):
+    carry, forcing, card, model = real_coupled_fixture[:4]
+    assert carry.ocean.bt_hist is None
+    assert carry.ocean.eta_rk3_after is None
+    paired = _real_pair((carry, forcing, card, model))
+    assert paired.ocean.bt_hist is None
+    assert paired.ocean.eta_rk3_after is None
+
+
+@pytest.mark.parametrize(
+    ("name", "is_not_used"),
+    (("NOT USED", True), ("NOT USED   ", True), ("not used", False),
+     (" NOT USED", False), ("NOT USED\t", False)),
+)
+def test_cloud_filename_uses_fortran_trim_and_case(name, is_not_used):
+    assert bulk._nemo_fld_is_not_used(name) is is_not_used
+
+
 _C2_PLANTS = (
     "skip-even-tau", "run-si3-even", "drop-hm-i", "drop-rcdu-ice",
     "skip-fwb-application", "wrong-sign-center-lbc",
 )
+_C2_SCORER_PLANTS = tuple(p for p in _C2_PLANTS if p != "skip-fwb-application")
 
 
 def _install_c2_route_plant(monkeypatch, plant):
@@ -533,11 +572,13 @@ def _install_c2_route_plant(monkeypatch, plant):
 
         def planted(carry, **kwargs):
             result = original(carry, **kwargs)
-            if (kwargs["kt"] - 1) % kwargs["forcing_stride"] == 0:
-                # Omit only sbcfwb.F90:388-390.  The independent annual state
-                # sample above it executes with the real kt and annual_steps.
-                return result._replace(emp=kwargs["emp"], qns=kwargs["qns"])
-            return result
+            due = (kwargs["kt"] - 1) % kwargs["forcing_stride"] == 0
+            # Omit only sbcfwb.F90:388-390.  ``due`` may be traced by the
+            # externally compiled pair, so keep this planted arm JAX-native.
+            return result._replace(
+                emp=jnp.where(due, kwargs["emp"], result.emp),
+                qns=jnp.where(due, kwargs["qns"], result.qns),
+            )
 
         monkeypatch.setattr(bulk, "nemo_fwb_case2_step", planted)
     elif plant == "wrong-sign-center-lbc":
@@ -567,7 +608,7 @@ def test_each_c2_route_plant_changes_real_pair(real_coupled_fixture, monkeypatch
     assert _bits(planted) != _bits(baseline)
 
 
-@pytest.mark.parametrize("plant", _C2_PLANTS)
+@pytest.mark.parametrize("plant", _C2_SCORER_PLANTS)
 def test_each_c2_route_plant_fails_real_rec_c2_scorer(monkeypatch, plant):
     from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
         scorer,
@@ -579,26 +620,10 @@ def test_each_c2_route_plant_fails_real_rec_c2_scorer(monkeypatch, plant):
     )
     if not (evidence / "REC_C2").is_dir():
         pytest.skip("read-only REC_C2 evidence is unavailable")
-    if plant == "skip-fwb-application":
-        original_cold_start = scorer._c2_cold_start
-
-        def controlled_cold_start(run):
-            carry, forcing, sponge, card, model = original_cold_start(run)
-            # Synthetic observability control: REC_C2 has rn_fwb0=0, so the
-            # correction application is structurally unobservable here.  The
-            # first admitted real rung that exercises it is the future annual
-            # (2920-step) restart/continuation rung beyond C4.
-            carry = carry._replace(emp_corr=jnp.asarray(0.1, dtype=jnp.float64))
-            return carry, forcing, sponge, card, model
-
-        monkeypatch.setattr(scorer, "_c2_cold_start", controlled_cold_start)
-        control, _, masks = scorer.run_c2_compiled_observations(evidence)
-        _install_c2_route_plant(monkeypatch, plant)
-        candidate, _, _ = scorer.run_c2_compiled_observations(evidence)
-        report = scorer.score_c2_observations(candidate, control, masks)
-    else:
-        _install_c2_route_plant(monkeypatch, plant)
-        report = scorer.run_c2_compiled(evidence)
+    # REC_C2 has rn_fwb0=0, so skip-fwb-application is structurally
+    # unobservable to this scorer; the real-pair plant immediately above covers it.
+    _install_c2_route_plant(monkeypatch, plant)
+    report = scorer.run_c2_compiled(evidence)
     changed_wet = sum(row["wet_different"] for row in report["field_counts"])
     changed_dry = sum(row["dry_other_different"] for row in report["field_counts"])
     print(
@@ -724,21 +749,48 @@ def test_u1_kind1_kind2_use_staggered_velocity_masks():
 
 
 def test_c3_late_wet_one_ulp_plant_turns_pass_into_fail():
-    scorer, expected, masks = _c_observations((99, 100))
+    from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
+        scorer,
+    )
+
+    run = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/"
+        "oracle_coupled_c_ladder/REC_C3"
+    )
+    if not run.is_dir():
+        pytest.skip("read-only REC_C3 evidence is unavailable")
+    dimensions = (5, 10, 5)
+    expected, masks = scorer._load_expected_steps(run, (99, 100), dimensions)
     candidate = {
-        key: {name: value.copy() for name, value in fields.items()}
+        key: {
+            name: value.copy() if hasattr(value, "copy") else value
+            for name, value in fields.items()
+        }
         for key, fields in expected.items()
     }
-    baseline = scorer._score_c_observations(
-        candidate, expected, masks, steps=(99, 100), mode="C3"
+    baseline = scorer.score_c3_pair_observations(
+        candidate, expected, masks, steps=(99, 100)
     )
     assert baseline["status"] == "PASS_C3_0_ULP_WET"
-    candidate[(1, 99, 0)]["field"][2, 3] = np.nextafter(0.0, 1.0)
-    planted = scorer._score_c_observations(
-        candidate, expected, masks, steps=(99, 100), mode="C3"
+    field = next(
+        name for name, value in candidate[(1, 99, 0)].items()
+        if np.asarray(value).dtype.kind == "f"
+    )
+    if field in {"ssu_prior", "u_before"}:
+        mask_name = "umask"
+    elif field in {"ssv_prior", "v_before"}:
+        mask_name = "vmask"
+    else:
+        mask_name = "tmask"
+    wet = np.argwhere(masks[(99, 0)][mask_name][2:-2, 2:-2] != 0)[0] + 2
+    index = tuple(wet) + (0,) * (candidate[(1, 99, 0)][field].ndim - 2)
+    value = candidate[(1, 99, 0)][field][index]
+    candidate[(1, 99, 0)][field][index] = np.nextafter(value, np.inf)
+    planted = scorer.score_c3_pair_observations(
+        candidate, expected, masks, steps=(99, 100)
     )
     assert planted["status"].startswith(
-        "FAIL_C3 step=99 kind=1 field=field cell=(2, 3) rank=0"
+        f"FAIL_C3 step=99 kind=1 field={field}"
     )
 
 

@@ -321,7 +321,8 @@ def test_real_rung10_composed_card_ten_steps_cpu():
         "round339/k0_smoke/orca2_k0_10step_np2")
     card = bulk.build_nemo_orca2_k0_ocean_card(deck)
     controls = gate.build_real_composed_inputs(
-        card, deck, source / "input_files.sha256", k0 / "ice_cover_clim.nc")
+        card, deck, source / "input_files.sha256", k0 / "ice_cover_clim.nc",
+        n_steps=10)
     assert [int(item["s0f"].isecsbc) for item in controls] == [
         10800 * kt for kt in range(1, 11)]
     np.testing.assert_array_equal(
@@ -367,7 +368,8 @@ def test_real_composed_card_n1_reverse_equals_forward():
         "round339/k0_smoke/orca2_k0_10step_np2")
     card = bulk.build_nemo_orca2_k0_ocean_card(deck)
     controls = gate.build_real_composed_inputs(
-        card, deck, source / "input_files.sha256", k0 / "ice_cover_clim.nc")
+        card, deck, source / "input_files.sha256", k0 / "ice_cover_clim.nc",
+        n_steps=10)
     control = controls[0]
     state = card.ocean.recipe.initial_state
     direction = jnp.asarray(1.0, dtype=jnp.float64)
@@ -687,7 +689,7 @@ def test_scoring_driver_reproducibility_control_and_composed_card_flow(
     monkeypatch.setattr(
         gate,
         "build_real_composed_inputs",
-        lambda _card, _deck, _manifest, _ice: ("ctrl",) * 10,
+        lambda _card, _deck, _manifest, _ice, *, n_steps: ("ctrl",) * n_steps,
     )
     monkeypatch.setattr(
         gate,
@@ -896,7 +898,8 @@ def test_resume7_s0f_tradmp_year_seam_slots_match_oracle():
 
     card = bulk.build_nemo_orca2_k0_ocean_card(deck)
     controls = gate.build_real_composed_inputs(
-        card, deck, source / "input_files.sha256", k0 / "ice_cover_clim.nc"
+        card, deck, source / "input_files.sha256", k0 / "ice_cover_clim.nc",
+        n_steps=10,
     )
     # kt=1 c001 (istate) has nbb=2, naa=1; kt=1 c009 (tra_dmp) has nbb=1, naa=2.
     c001_t = controls[0]["_s0f_actual"]["kt01/S0_F/c001/f001/votemper"]
@@ -2109,7 +2112,5 @@ def test_resume11_kt2_non_update_retention_production_call_site_revert_plant_jit
         tlaf_jerlov = sw_mod.top_layer_absorbed_fraction(e3t_3d[..., 0])
         assert tlaf_chl.size == 26640 and tlaf_jerlov.size == 26640
         assert float(np.asarray(tlaf_chl)[0, 0]) == 0.8227655335922476
-
-
 
 

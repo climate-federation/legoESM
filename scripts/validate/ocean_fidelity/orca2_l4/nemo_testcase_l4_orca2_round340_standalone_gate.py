@@ -563,7 +563,7 @@ def _build_stress_lbc_and_masks(
 
 
 def build_real_composed_inputs(
-    card, deck_root: Path, core_manifest: Path, ice_cover_path: Path, *, n_steps: int = 10,
+    card, deck_root: Path, core_manifest: Path, ice_cover_path: Path, *, n_steps: int,
 ) -> tuple[dict[str, object], ...]:
     """Build a K0 control window from the exact files named by its namelists.
 
@@ -634,10 +634,10 @@ def build_real_composed_inputs(
     )
     zero = jnp.zeros((ny, nx), dtype=jnp.float64)
     one = jnp.ones((ny, nx), dtype=jnp.float64)
-    means = NemoSurfaceMeans(*(zero for _ in range(7)))
+    means = NemoSurfaceMeans(*(zero for _ in range(7))) ; eos = card.ocean.recipe.model_config.eos ; require(eos in ("nemo_eos80", "nemo_teos10"), "unsupported ORCA2 EOS: " + eos)
     s0 = bulk.NemoS0Inputs(
         prior=means, kt=1, nit000=1, forcing_stride=2,
-        restart_means_present=False, use_conservative_temperature=False,
+        restart_means_present=False, use_conservative_temperature=eos == "nemo_teos10",
         remove_inverse_barometer=False, u_before=zero, v_before=zero,
         temperature_now=zero, salinity_now=zero, ssh_now=zero,
         ssh_inverse_barometer=zero, e3t_reference=one, r3t_now=zero,
@@ -736,7 +736,7 @@ def build_real_composed_inputs(
         ice_if = bulk.NemoSbcIceIfInputs(
             jnp.asarray(cover), jnp.asarray(cover), isecsbc,
             -15768000, 15768000, zero, zero, zero, jnp.asarray(ff_f),
-            jnp.asarray(mask), jnp.asarray(mask))
+            jnp.asarray(mask), jnp.asarray(mask), eos == "nemo_teos10")
         fld_actual = {}
         midpoint = (2 * kt - 1) * dt_s // 2
         surface_call = 4 if kt == 1 else 1
