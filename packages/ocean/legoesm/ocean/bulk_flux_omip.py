@@ -1833,6 +1833,7 @@ def nemo_orca2_si3_coupled_step(
     next_shortwave_fraction = _nemo_orca2_k0_next_fraqsr_compiled(
         card.ocean.recipe.z_coord,
         get_policy(),
+        None,  # the coupled card is built for no numerics mode
         card.ocean.recipe.model_config.physics.shortwave_penetration,
         state.eta.data,
         ocean_exit.eta.data,
