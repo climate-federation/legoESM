@@ -298,3 +298,74 @@ def test_validate_refuses_geography_clashes(kw, msg):
 def test_validate_refuses_geography_knobs_without_geography():
     with pytest.raises(ValueError, match="need geography"):
         _mpas_cfg("g.nc")._replace(geography="").validate_strict()
+
+
+def test_ocean_depth_is_the_binned_sea_depth_clipped(mesh, tmp_path):
+    p = _gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))
+    d = geo.geography_ocean_depth(mesh, p, H_min=10.0, H_max=5500.0)
+    _, f = _terrain(mesh, p)
+    def near(a, b):   # an area-weighted mean of a constant, to rounding
+        return np.allclose(a, b, rtol=1e-12, atol=0.0)
+    assert near(d[f == 0.0], 5200.0)              # all-sea cells: the file depth
+    assert np.all(d[f == 1.0] == 10.0)            # no sea source point: H_min
+    coast = (f > 0.0) & (f < 1.0)
+    assert coast.any() and near(d[coast], 5200.0)  # mean over sea points only
+    assert np.all(geo.geography_ocean_depth(mesh, p, H_min=10.0, H_max=4000.0)
+                  == np.where(f == 1.0, 10.0, 4000.0))
+
+
+def test_snap_partial_cells_is_the_omip_inline_recipe():
+    """The shared snap is the inline OMIP code it replaced, bitwise."""
+    import jax.numpy as jnp
+    from legoesm.ocean.bathymetry import snap_partial_cells
+    from legoesm.ocean.vertical import create_ocean_z_star
+    z = create_ocean_z_star(20, H_max=5500.0)
+    H = jnp.asarray(np.random.default_rng(0).uniform(-100.0, 5500.0, 4000))
+    abs_z_half = jnp.abs(z.z_half_ref)
+    n_above = jnp.sum(abs_z_half[None, :] < H[:, None], axis=1)
+    bl = jnp.clip(n_above - 1, 0, z.n_levels - 1)
+    frac = (H - abs_z_half[bl]) / jnp.maximum(z.dz_ref[bl], 1e-10)
+    up, lo = abs_z_half[bl], abs_z_half[jnp.minimum(bl + 1, z.n_levels)]
+    want = jnp.where((frac < 0.30) & (frac > 0) & (H > 0),
+                     jnp.where(H - up < lo - H, up, lo), H)
+    want = jnp.where(want <= 0, 0.0, want)
+    got = snap_partial_cells(H, z)
+    assert np.array_equal(np.asarray(got), np.asarray(want))
+    assert int(np.sum(np.asarray(got) != np.asarray(jnp.maximum(H, 0.0)))) > 100
+
+
+def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
+    import jax.numpy as jnp
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    from legoesm.ocean.bathymetry import snap_partial_cells
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+    p = _gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))
+    d = CoupledESMDriver(_mpas_cfg(p), CoupledConfig(
+        f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+        ocean_H_max_m=5500.0), output_dir=str(tmp_path / "run"))
+    d.setup()
+    f = np.asarray(d._atm._f_land).ravel()
+    wet = np.asarray(d._ocean_land_mask)
+    assert np.array_equal(wet, (f < 1.0).astype(wet.dtype)) and 0 < wet.sum() < wet.size
+    H = np.asarray(d._ocean_state.H_bathy.data)
+    want = np.asarray(snap_partial_cells(jnp.full(H.shape, 5200.0, H.dtype),
+                                         d._ocean_z_coord))
+    assert np.array_equal(H, np.where(wet > 0.5, want, 0.0))
+    assert isinstance(d._ocean_z_coord, OceanPartialCellCoordinate)
+
+
+def test_coupled_latlon_dynamic_ocean_refuses_a_geography(tmp_path):
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=16, nlev=8),
+        dycore=DycoreConfig(discretization="latlon_cgrid", dt=300.0),
+        days=1, dataset="analytical", radiation="gray", topography="flat",
+        geography=_gen(tmp_path, "aquaplanet"), geography_regrid="binned")
+    d = CoupledESMDriver(cfg, CoupledConfig(f_land_mode="analytical", land_mode="none",
+                                            ocean_mode="dynamic"),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="lat-lon/tripole dynamic ocean"):
+        d.setup()
