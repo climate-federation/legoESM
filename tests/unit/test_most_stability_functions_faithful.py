@@ -320,3 +320,11 @@ def test_differentiable_both_branches_all_schemes():
             gh = float(jax.grad(lambda z: psi_h(_a([z]), sc)[0])(z0))
             assert np.isfinite(gm) and abs(gm) > 0.0
             assert np.isfinite(gh) and abs(gh) > 0.0
+
+
+def test_bh91_check_grads_order2_stable():
+    from jax.test_util import check_grads
+    z = _a([0.05, 0.5, 2.0, 6.0])
+    for fn in (psi_m, psi_h):
+        check_grads(lambda x: fn(x, "beljaars_holtslag1991"), (z,), order=2,
+                    modes=("fwd", "rev"))
