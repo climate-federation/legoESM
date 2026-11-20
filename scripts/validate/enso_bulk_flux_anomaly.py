@@ -37,7 +37,7 @@ _IN = ["10m_u_component_of_wind", "10m_v_component_of_wind", "2m_temperature",
        "2m_dewpoint_temperature", "sea_surface_temperature", "surface_pressure"]
 _OUT = ["mean_surface_latent_heat_flux"]
 _YEARS = range(1991, 2001)
-_BOX = dict(latitude=slice(-30.0, 30.0), longitude=slice(120.0, 280.0))
+_BOX = dict(latitude=slice(-30.01, 30.01), longitude=slice(119.99, 280.0))  # float32 grid
 _NINO34 = (-5.0, 5.0, 190.0, 240.0)
 _MAX_BYTES = 1_000_000_000  # user cap on the login-node transfer
 
