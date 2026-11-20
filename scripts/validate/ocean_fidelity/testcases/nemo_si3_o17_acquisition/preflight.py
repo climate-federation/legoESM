@@ -138,7 +138,7 @@ def numerical_preflight(master: Path, plant: str | None = None) -> dict:
     def capture_advection(state, *_args, **_kwargs):
         raise Boundary((state.u_ice, state.v_ice))
 
-    def run(boundary="rdgrft", plant=None):
+    def run(*, boundary, plant):
         o17.si3_ice_dyn_rdgrft = capture_rdgrft
         if boundary == "advection":
             if plant == "swap-rheology-advection":
@@ -165,16 +165,18 @@ def numerical_preflight(master: Path, plant: str | None = None) -> dict:
             o17.si3_lane_cgrid_deformation = original_deformation
         raise RuntimeError("O17 numerical boundary was not reached")
 
-    baseline = run()
+    baseline = run(boundary="rdgrft", plant=None)
     if plant == "swap-rheology-advection":
-        baseline_advection = run("advection")
-        candidate = run("advection", plant="swap-rheology-advection")
+        baseline_advection = run(boundary="advection", plant=None)
+        candidate = run(
+            boundary="advection", plant="swap-rheology-advection"
+        )
         fired = any(
             not np.array_equal(a, b)
             for a, b in zip(candidate, baseline_advection, strict=True)
         )
     elif plant == "drop-deformation-fold":
-        candidate = run(plant="drop-deformation-fold")
+        candidate = run(boundary="rdgrft", plant="drop-deformation-fold")
         fired = any(not np.array_equal(a, b) for a, b in zip(candidate[1:], baseline[1:], strict=True))
     elif plant is None:
         fired = True

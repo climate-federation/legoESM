@@ -826,6 +826,8 @@ def run_c3_compiled(evidence: Path, *, pair_limit: int = 50) -> dict:
         raise ValueError(f"C3 pair compiled {compile_count} times; expected exactly 1")
 
     counts: dict[int, dict] = {}
+    step_counts: dict[tuple[int, int], dict] = {}
+    field_counts: list[dict] = []
     first_failure = None
     pair_wall_seconds = []
     for pair_index in range(pair_limit):
@@ -848,6 +850,11 @@ def run_c3_compiled(evidence: Path, *, pair_limit: int = 50) -> dict:
         )
         for kind, row in pair_report["counts"].items():
             _merge_d225_counts(counts.setdefault(kind, {}), row)
+        for row in pair_report["field_counts"]:
+            field_counts.append(row)
+            _merge_d225_field_counts(
+                step_counts.setdefault((row["kind"], row["kt"]), {}), row
+            )
         if first_failure is None and pair_report["first_failure"] is not None:
             first_failure = pair_report["first_failure"]
         carry = next_carry
@@ -879,6 +886,13 @@ def run_c3_compiled(evidence: Path, *, pair_limit: int = 50) -> dict:
         "pair_wall_seconds": pair_wall_seconds,
         "mean_pair_wall_seconds": float(np.mean(pair_wall_seconds)),
         "counts": counts,
+        "step_counts": [
+            {"kind": kind, "kt": kt, **row}
+            for (kind, kt), row in sorted(
+                step_counts.items(), key=lambda item: (item[0][1], item[0][0])
+            )
+        ],
+        "field_counts": field_counts,
         "first_failure": first_failure,
         "input_readers": {
             "atmosphere_CORE": "load_core_normal_year + nemo_fld_interp",

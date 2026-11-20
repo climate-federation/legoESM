@@ -285,6 +285,7 @@ def _real_consumption_output(fixture, hm_i, rcdu_ice):
         surface_forcing=surface,
         freshwater_forcing=freshwater,
         model=model,
+        sponge=None,
         nemo_kt=1,
     )
 

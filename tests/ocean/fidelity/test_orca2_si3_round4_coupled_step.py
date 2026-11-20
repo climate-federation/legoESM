@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -289,6 +290,28 @@ def _bits(tree):
     return b"".join(np.asarray(leaf).tobytes() for leaf in leaves)
 
 
+def test_full_field_adapter_preserves_rest_gradient_without_an_unowned_lbc():
+    owned = jnp.zeros((2, 2), dtype=jnp.float64)
+    fold = SimpleNamespace(nfd_full_when_absent=True)
+
+    def loss(value):
+        return jnp.sum(bulk._orca2_si3_full_field(value, fold, "U", 1))
+
+    full = bulk._orca2_si3_full_field(owned, fold, "U", 1)
+    gradient = jax.grad(loss)(owned)
+    assert not bool(jnp.any(jnp.signbit(full)))
+    assert np.array_equal(np.asarray(gradient), np.ones((2, 2)))
+    assert float(jnp.sum(gradient)) == 4.0
+
+
+def test_ocean_consumption_requires_model_sponge_and_clock():
+    parameters = inspect.signature(
+        bulk.nemo_orca2_ocean_consumption_step
+    ).parameters
+    for name in ("model", "sponge", "nemo_kt"):
+        assert parameters[name].default is inspect.Parameter.empty
+
+
 def test_carry_pytree_round_trip(monkeypatch):
     carry, _, _, _ = _fixture(monkeypatch)
     leaves, definition = jax.tree_util.tree_flatten(carry)
@@ -371,6 +394,11 @@ def real_coupled_fixture():
             jnp.full(state.T.data.shape[:-1] + (4,), 0.01),
             name="tke", dims=("lat", "lon", "level"), units="m^2/s^2",
         ),
+        # The route-plant fixture exercises a production pair, not the cold
+        # carry transition.  Prime the optional after-SSH slot so the pair's
+        # invariant pytree is already mature without selecting the unrelated
+        # QCO/RK3 geometry program on this tiny synthetic grid.
+        eta_rk3_after=state.eta,
     )
     tke = TKEConfig(
         prognostic=True, tke_mxl_choice=3, nemo_mxlice=2,
@@ -392,7 +420,9 @@ def real_coupled_fixture():
         A_h=0.0, B_h=0.0, K_h=0.0, K_bih=0.0, hyperdiff_coeff=0.0,
         A_v=1.0e-4, K_v=1.0e-5, n_barotropic_substeps=5,
         physics=physics, implicit_vertical_mixing=True,
-        barotropic_solver="explicit_substep",
+        barotropic_solver="explicit_substep", barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.09,
+        nemo_prognostic_barotropic_state=True,
     )
     config = recipe._nemo_linear_bottom_drag(config)._replace(
         eos="nemo_eos80", implicit_ice_ocean_top_drag=True

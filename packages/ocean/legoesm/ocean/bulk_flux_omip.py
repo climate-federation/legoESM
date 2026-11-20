@@ -1171,8 +1171,10 @@ def build_nemo_orca2_si3_static(
         SI3ORCA2AdvectionGrid,
         si3_dom_uniq_t_orca2,
     )
+    from legoesm.core.nemo_namelist import parse_namelist
 
-    path = Path(deck_root) / "ORCA_R2_zps_domcfg.nc"
+    deck_root = Path(deck_root)
+    path = deck_root / "ORCA_R2_zps_domcfg.nc"
     if not path.is_file():
         raise FileNotFoundError(f"missing coupled ORCA2 domain file: {path}")
     with netCDF4.Dataset(path, "r") as dataset:
@@ -1195,6 +1197,27 @@ def build_nemo_orca2_si3_static(
     gphit = _orca2_si3_scalar_full_field(gphit_owned, fold, "T", fillcopy=True)
     full_zero = jnp.zeros_like(tmask)
     owned_zero = jnp.zeros_like(jnp.asarray(surface_mask, dtype=jnp.float64).T)
+    resolved = deck_root / "output.namelist.dyn"
+    if not resolved.is_file():
+        raise FileNotFoundError(f"missing coupled resolved namelist: {resolved}")
+    namelist = parse_namelist(resolved, "dyn")
+    cloud_names = [
+        tokens
+        for (_, group, key), tokens in namelist.items()
+        if group == "namsbc_blk" and key == "sn_cc%clname"
+    ]
+    if len(cloud_names) != 1 or len(cloud_names[0]) != 1:
+        raise ValueError("resolved &namsbc_blk must contain one SN_CC%CLNAME")
+    cloud_file = cloud_names[0][0]
+    if not isinstance(cloud_file, str):
+        raise ValueError(
+            "resolved &namsbc_blk SN_CC%CLNAME must be a character value"
+        )
+    if cloud_file.strip().upper() != "NOT USED":
+        raise ValueError(
+            "coupled SI3 cloud-file forcing is not implemented: "
+            f"SN_CC%CLNAME={cloud_file!r}"
+        )
     init = SI3O2InitConfig.for_orca2_omip_l4(
         nn_hls=h, ln_teos10=ice_card.ln_teos10
     )
@@ -1494,18 +1517,19 @@ def _validate_nemo_orca2_si3_eos(card: NemoORCA2SI3Card) -> None:
 
 
 def _orca2_si3_full_field(owned, fold, staggering: str, nn_hls: int):
-    """Transpose a model-owned ORCA2 field and apply the existing SI3 LBC."""
-
-    from legoesm.ice.si3_orca2_state import si3_lbc_lnk_orca2
+    """Transpose one source-assigned ocean field into the SI3 full array."""
 
     value = jnp.asarray(owned, dtype=jnp.float64).T
     if nn_hls:
         value = jnp.pad(value, ((nn_hls, nn_hls), (nn_hls, nn_hls)))
-    sign = -1.0 if staggering in ("U", "V") else 1.0
-    return si3_lbc_lnk_orca2(
-        value, staggering, sign, nn_hls=nn_hls,
-        ldfull=fold.nfd_full_when_absent,
-    )
+    if staggering == "T":
+        from legoesm.ice.si3_orca2_state import si3_lbc_lnk_orca2
+
+        value = si3_lbc_lnk_orca2(
+            value, "T", 1.0, nn_hls=nn_hls,
+            ldfull=fold.nfd_full_when_absent,
+        )
+    return value
 
 
 def _orca2_si3_insert_owned(template, owned, nn_hls: int):
@@ -1554,13 +1578,19 @@ def nemo_orca2_si3_coupled_step(
     u_owned = jnp.asarray(u_level.data, dtype=jnp.float64)[:, 1:, 0]
     v_owned = jnp.asarray(v_level.data, dtype=jnp.float64)[1:, :, 0]
     from legoesm.ocean.eos import nemo_qco_r3t_ratio
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+
+    z_coord = card.ocean.recipe.z_coord
 
     # domain.F90:158 stores r1_ht_0; domqco.F90:160 multiplies by ssh.
     r3t_now = nemo_qco_r3t_ratio(
-        card.ocean.recipe.z_coord,
+        z_coord,
         state.eta.data,
         state.H_bathy.data,
-        linear_free_surface=False,
+        linear_free_surface=(
+            False if isinstance(z_coord, OceanPartialCellCoordinate)
+            else z_coord.linear_free_surface
+        ),
         evaluation="nemo_reciprocal",
     )
     ssm_entry = NemoS0Inputs(
@@ -1615,22 +1645,11 @@ def nemo_orca2_si3_coupled_step(
     fold = card.ice.fold
     u_full = _orca2_si3_full_field(u_owned, fold, "U", h)
     v_full = _orca2_si3_full_field(v_owned, fold, "V", h)
-    # istate.F90:82,121-122 assigns uu/vv(Kaa/Kbb)=0._wp at this cold start.
-    # Preserve that executed +0 assignment across the SI3 vector halo adapter;
-    # otherwise its fold sign creates wet -0 values that NEMO never writes.
-    u_full = jnp.where(u_full == 0.0, 0.0, u_full)
-    v_full = jnp.where(v_full == 0.0, 0.0, v_full)
     sst_full = _orca2_si3_full_field(means.sst, fold, "T", h)
     sss_full = _orca2_si3_full_field(means.sss, fold, "T", h)
     ssh_full = _orca2_si3_full_field(means.ssh, fold, "T", h)
     ssu_full = _orca2_si3_full_field(means.ssu, fold, "U", h)
     ssv_full = _orca2_si3_full_field(means.ssv, fold, "V", h)
-    # sbcssm.F90:105-107 writes ssu_m/ssv_m = REAL(nn_fsbc-1)*uu/vv; at kt=1
-    # the multiplier is +1 and NEMO carries the ocean's +0 into wet fold cells.
-    # The SI3 halo adapter's vector sign is not part of that assignment, so
-    # undo only the zero signs it would manufacture on this live input.
-    ssu_full = jnp.where(ssu_full == 0.0, 0.0, ssu_full)
-    ssv_full = jnp.where(ssv_full == 0.0, 0.0, ssv_full)
     e3t_full = _orca2_si3_full_field(means.e3t, fold, "T", h)
     frq_full = _orca2_si3_full_field(means.frq, fold, "T", h)
     o17 = forcing.o17
@@ -1648,10 +1667,6 @@ def nemo_orca2_si3_coupled_step(
         open_taum = carry.stress.taum
         mean_u_full = _orca2_si3_full_field(carry.means.ssu, fold, "U", h)
         mean_v_full = _orca2_si3_full_field(carry.means.ssv, fold, "V", h)
-        # sbcssm.F90:128-136 explicitly resets ssu_m/ssv_m to +0._wp on the
-        # even new-mean arm.  Preserve those source-assigned wet zero signs.
-        mean_u_full = jnp.where(mean_u_full == 0.0, 0.0, mean_u_full)
-        mean_v_full = jnp.where(mean_v_full == 0.0, 0.0, mean_v_full)
     stress_inputs = stress_template._replace(
         uu_kbb=u_full,
         vv_kbb=v_full,
@@ -2008,9 +2023,9 @@ def nemo_orca2_ocean_consumption_step(
     *,
     surface_forcing,
     freshwater_forcing,
-    model=None,
-    sponge=None,
-    nemo_kt=None,
+    model,
+    sponge,
+    nemo_kt,
 ):
     """Consume an explicit coupled surface boundary in the ORCA2 ocean.
 
@@ -2026,16 +2041,6 @@ def nemo_orca2_ocean_consumption_step(
                  or not isinstance(nemo_kt, (int, np.integer))
                  or nemo_kt < 1)):
         raise ValueError("ORCA2 ocean consumption requires nemo_kt=<positive step>")
-    if model is None:
-        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            LatLonCGridOceanModel,
-        )
-
-        recipe = ocean_card.recipe
-        model = LatLonCGridOceanModel(
-            recipe.grid, recipe.z_coord, recipe.model_config,
-            iwm_forcing=recipe.iwm_forcing,
-        )
     kwargs = {
         "freshwater": freshwater_forcing,
         "surface_forcing": surface_forcing,
