@@ -339,20 +339,23 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
     import jax.numpy as jnp
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
-    from legoesm.ocean.bathymetry import snap_partial_cells
-    from legoesm.ocean.vertical import OceanPartialCellCoordinate
-    p = _gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))
-    d = CoupledESMDriver(_mpas_cfg(p), CoupledConfig(
-        f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
-        ocean_H_max_m=5500.0), output_dir=str(tmp_path / "run"))
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate, create_ocean_z_star
+    cc = CoupledConfig(f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+                       ocean_H_max_m=5500.0)
+    z = create_ocean_z_star(cc.ocean_nlev, H_max=cc.ocean_H_max_m)
+    top = float(np.abs(np.asarray(z.z_half_ref))[-2])        # an interface
+    D = top + 0.1 * float(np.asarray(z.dz_ref)[-1])          # 10% into the last level
+    ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))
+    ds["elevation"] = ds["elevation"].where(ds["elevation"] >= 0.0, -D)
+    d = CoupledESMDriver(_mpas_cfg(_write(ds, tmp_path, "box_snap.nc")), cc,
+                         output_dir=str(tmp_path / "run"))
     d.setup()
     f = np.asarray(d._atm._f_land).ravel()
     wet = np.asarray(d._ocean_land_mask)
     assert np.array_equal(wet, (f < 1.0).astype(wet.dtype)) and 0 < wet.sum() < wet.size
     H = np.asarray(d._ocean_state.H_bathy.data)
-    want = np.asarray(snap_partial_cells(jnp.full(H.shape, 5200.0, H.dtype),
-                                         d._ocean_z_coord))
-    assert np.array_equal(H, np.where(wet > 0.5, want, 0.0))
+    assert np.allclose(H[wet > 0.5], top, rtol=1e-12, atol=0.0)   # snapped up to it
+    assert np.all(H[wet < 0.5] == 0.0)
     assert isinstance(d._ocean_z_coord, OceanPartialCellCoordinate)
     assert d._ocean_model.z_coord is d._ocean_z_coord   # model rebuilt on it
 
