@@ -989,6 +989,11 @@ class CoupledESMDriver:
             from legoesm.grids.geography import geography_ocean_depth
             from legoesm.ocean.bathymetry import BathymetryConfig, snap_partial_cells
             from legoesm.ocean.vertical import create_partial_cell_coordinate
+            if mesh is not self._atm.grid:
+                raise ValueError(
+                    "geography with an MPAS ocean on its own mesh is not supported "
+                    "yet (the wet mask is the atmosphere's land fraction, cell by "
+                    "cell); refusing")
             layout = getattr(self._atm, "_voronoi_layout", None)
             depth = geography_ocean_depth(
                 self._atm._grid_global if layout is not None else mesh, geo,

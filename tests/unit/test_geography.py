@@ -187,6 +187,7 @@ def test_bare_soil_where_the_file_has_no_land_map(tmp_path):
     (lambda d: d.__setitem__("ice_sheet_thickness", d["elevation"] * 0), "not supported"),
     (lambda d: d.__setitem__("land_fraction", d["elevation"] * 0 + 50.0), r"not %"),
     (lambda d: d["elevation"].attrs.update(units="km"), "units"),
+    (lambda d: d["elevation"].values.__setitem__((3, 4), np.nan), "finite"),
 ])
 def test_open_geography_refuses(tmp_path, edit, msg):
     ds = mg.idealized("aquaplanet")
@@ -353,6 +354,7 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
                                          d._ocean_z_coord))
     assert np.array_equal(H, np.where(wet > 0.5, want, 0.0))
     assert isinstance(d._ocean_z_coord, OceanPartialCellCoordinate)
+    assert d._ocean_model.z_coord is d._ocean_z_coord   # model rebuilt on it
 
 
 def test_coupled_latlon_dynamic_ocean_refuses_a_geography(tmp_path):
@@ -368,4 +370,16 @@ def test_coupled_latlon_dynamic_ocean_refuses_a_geography(tmp_path):
                                             ocean_mode="dynamic"),
                          output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match="lat-lon/tripole dynamic ocean"):
+        d.setup()
+
+
+def test_coupled_mpas_ocean_on_its_own_mesh_refuses_a_geography(tmp_path):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    p = _gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))
+    d = CoupledESMDriver(_mpas_cfg(p), CoupledConfig(
+        f_land_mode="analytical", land_mode="none", ocean_mode="dynamic"),
+        output_dir=str(tmp_path / "run"), ocean_grid=create_voronoi_mesh(3))
+    with pytest.raises(ValueError, match="on its own mesh"):
         d.setup()

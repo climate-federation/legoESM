@@ -60,6 +60,8 @@ def open_geography(path: str):
             errs.append(f"elevation dims {el.dims} != ('lat', 'lon')")
         if el.attrs.get("units") != "m":
             errs.append(f"elevation units {el.attrs.get('units')!r} != 'm'")
+        if not np.all(np.isfinite(el.values)):
+            errs.append("elevation must be finite everywhere (no missing values)")
     if "land_fraction" in ds:
         lf = ds["land_fraction"]
         if lf.ndim != 2:
