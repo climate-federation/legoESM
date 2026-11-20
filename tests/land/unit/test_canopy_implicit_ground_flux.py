@@ -52,8 +52,8 @@ def _forcing(n, T=300.0, q=0.008, sw=900.0, u=1.0):
         has_precipitation=o)
 
 
-def _cfg(implicit):
-    sch = TwoLeafCanopyConfig(max_iters=10, implicit_ground_flux=implicit)
+def _cfg(implicit, max_iters=10):
+    sch = TwoLeafCanopyConfig(max_iters=max_iters, implicit_ground_flux=implicit)
     return MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, dz_top=0.025, growth_factor=2.0,
                                  total_depth=3.0),
@@ -86,8 +86,9 @@ def test_soil_solve_applies_the_flux_it_reports(n_sub):
     assert np.all(np.abs(np.asarray(Gap - G)[:2]) > 1.0)
 
 
-def _step(monkeypatch, implicit, T_init=307.0, n=4, u=(0.7, 1.4, 2.8, 3.6)):
-    cfg = _cfg(implicit)
+def _step(monkeypatch, implicit, T_init=307.0, n=4, u=(0.7, 1.4, 2.8, 3.6),
+          max_iters=10):
+    cfg = _cfg(implicit, max_iters)
     st = ml.init_multilayer_land_state(n, cfg, T_init=T_init, theta_init=0.12)
     f = _forcing(n)._replace(u_lowest=jnp.asarray(u))
     seen = {}
@@ -254,3 +255,14 @@ def test_singular_canopy_air_jacobian_gives_finite_gradient(monkeypatch):
     g = jax.grad(lambda ts: S.ground_heat_conductance(
         x, bundle._replace(Ts_bc=ts), cc, jnp.array(True)))(bundle.Ts_bc)
     assert np.isfinite(float(g))
+
+
+def test_unconverged_columns_close_with_the_implicit_flux(monkeypatch):
+    """Cap-stopped columns (last-iterate fallback, partial lambda) close the land
+    boundary with the flux the soil received: Rn_ext = SH + LE + G_applied."""
+    st, new, r, so, G_ap, G_in, seen = _step(monkeypatch, True, max_iters=1)
+    acc = ~np.asarray(so.converged).astype(bool) & ~np.asarray(so.held).astype(bool)
+    assert acc.any()                                        # non-vacuity
+    assert seen["lam"] is not None
+    E = np.asarray(so.Rn_ext - r.shflx - r.lhflx - G_ap)
+    np.testing.assert_allclose(E[acc], 0.0, atol=1e-9)
