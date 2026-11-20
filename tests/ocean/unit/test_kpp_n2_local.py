@@ -227,3 +227,22 @@ def test_c6_linear_eos_modes_identical(float64):
     a = np.asarray(_n2(rho, T, S, "adiabatic", eos_fn=linear))
     b = np.asarray(_n2(rho, T, S, "insitu_signed", eos_fn=linear))
     np.testing.assert_allclose(a, b, rtol=1e-12)
+
+
+def test_partial_cell_n2_uses_live_centre_spacing(float64):
+    """On a partial-cell coordinate the adiabatic N^2 divides by the live centre spacing of h_k."""
+    from types import SimpleNamespace
+    from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic, compute_hydrostatic_pressure
+    T, S = _column()
+    rho = _insitu_rho(T, S)
+    z = _zc()
+    h_k = jnp.asarray(z.dz_ref)[None, :].at[0, -1].set(0.3 * float(z.dz_ref[-1]))  # a shortened bottom cell
+    zpc = SimpleNamespace(dz_ref=z.dz_ref, is_active=jnp.ones_like(h_k))
+    J = jnp.ones((1,))
+    got = kpp_mod._kpp_interface_n2(rho, T, S, jnp.zeros((1,)), zpc, J, KPPConfig(), G, h_k=h_k)
+    p = compute_hydrostatic_pressure(rho, jnp.zeros((1,)), z.dz_ref, J, rho_0, G, h_actual=h_k)
+    want = compute_buoyancy_frequency_adiabatic(T, S, p, z.dz_ref, J, rho_ref=rho_0, g=G,
+                                                dz_half=0.5 * (h_k[..., :-1] + h_k[..., 1:]))
+    ref = compute_buoyancy_frequency_adiabatic(T, S, p, z.dz_ref, J, rho_ref=rho_0, g=G)
+    assert np.allclose(np.asarray(got), np.asarray(want), rtol=1e-12, atol=0.0)
+    assert abs(float(got[0, -1]) - float(ref[0, -1])) > 1e-3 * abs(float(ref[0, -1]))  # the bottom interface differs
