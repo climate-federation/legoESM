@@ -707,7 +707,6 @@ def shr_orb_params(iyear_AD: int) -> tuple:
 
     eccen2 = cossum * cossum + sinsum * sinsum
     eccen = math.sqrt(eccen2)
-    eccen3 = eccen2 * eccen
 
     # ------------------------------------------------------------------
     # 4. Fixed vernal equinox longitude — Fortran lines 170-183
@@ -745,9 +744,22 @@ def shr_orb_params(iyear_AD: int) -> tuple:
     while mvelp >= 360.0:
         mvelp -= 360.0
 
-    # ------------------------------------------------------------------
-    # 6. Derived quantities — Fortran lines 204-214
-    # ------------------------------------------------------------------
+    return (eccen, obliq, mvelp) + shr_orb_derived(eccen, obliq, mvelp, eccen2)
+
+
+def shr_orb_derived(eccen: float, obliq: float, mvelp: float,
+                    eccen2: float | None = None) -> tuple:
+    """Derived orbit quantities ``(obliqr, lambm0, mvelpp)`` from the elements.
+
+    Fortran ``shr_orb_params`` lines 204-214, split out so a caller holding
+    orbital elements (not a year) gets the same ``shr_orb_decl`` inputs.
+    ``eccen2`` is the Fortran's own e^2 (from the series sums) when known, so
+    ``shr_orb_params`` stays bitwise.
+    """
+    degrad = pi / 180.0  # degrees → radians — Fortran line 148
+    if eccen2 is None:
+        eccen2 = eccen * eccen
+    eccen3 = eccen2 * eccen
     obliqr = obliq * degrad
     mvelpp = (mvelp + 180.0) * degrad
 
@@ -758,5 +770,4 @@ def shr_orb_params(iyear_AD: int) -> tuple:
         - 0.25 * eccen2 * (0.5 + beta) * math.sin(2.0 * mvelpp)
         + 0.125 * eccen3 * (1.0 / 3.0 + beta) * math.sin(3.0 * mvelpp)
     )
-
-    return eccen, obliq, mvelp, obliqr, lambm0, mvelpp
+    return obliqr, lambm0, mvelpp

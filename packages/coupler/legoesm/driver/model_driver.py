@@ -2021,10 +2021,23 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
         # for MODEST column counts, not full-AMIP resolution (the masked-vmap
         # rewrite, S3, removes the unroll).  MPI/SPMD is refused at the scatter
         # (the 1-based mlcanopy array does not match the per-column remap).
+        from legoesm.atmosphere.physics.radiation.solar import (
+            CIRCULAR_ORBIT_OBLIQUITY_DEG,
+        )
+        from legoesm.driver.orbit import experiment_orbit
         from legoesm.land.canopy.config import CLMMLCanopyConfig
+        # The canopy sees the run's orbit and solar constant; the circular
+        # approximation (orbit None) maps to e=0 at the same obliquity.
+        _orbit = experiment_orbit(config)
         _surface_scheme = CLMMLCanopyConfig(
             use_surfdata_pft=bool(getattr(
-                config, "clm_ml_use_surfdata_pft", False)))
+                config, "clm_ml_use_surfdata_pft", False)),
+            orbit_eccentricity=0.0 if _orbit is None else _orbit.eccentricity,
+            orbit_obliquity_deg=(CIRCULAR_ORBIT_OBLIQUITY_DEG if _orbit is None
+                                 else _orbit.obliquity_deg),
+            orbit_long_perihelion_deg=(0.0 if _orbit is None
+                                       else _orbit.long_perihelion_deg),
+            solar_s0=float(config.S_0))
     else:
         raise ValueError(
             f"Unknown land_surface_scheme {_scheme_name!r}; "
@@ -13490,8 +13503,8 @@ class ModelDriver:
             if _rho_ci is not None and _r_nuc is not None:
                 _ice_nuc_mass = (4.0 / 3.0) * jnp.pi * float(_rho_ci) \
                     * float(_r_nuc) ** 3
-        from legoesm.atmosphere.physics.radiation.solar import earth_orbit
-        _orbit_params = earth_orbit() if cfg.orbital_insolation else None
+        from legoesm.driver.orbit import experiment_orbit
+        _orbit_params = experiment_orbit(cfg)
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=_rad_scheme if _rad_scheme != "none" else "none",
@@ -15038,12 +15051,17 @@ class ModelDriver:
             self._land_n_held_total = 0
             self._land_n_held_steps = 0
 
-            from legoesm.land.forcing.solar import cos_solar_zenith as _csz
+            from legoesm.atmosphere.physics.radiation.solar import (
+                cos_zenith_angle as _cza,
+            )
             _lml_lon = jnp.asarray(self.grid.lonCell).reshape(-1)
 
+            # The land sees the run's one orbit (the radiation's), not a
+            # land-side copy of the circular approximation.
             @jax.jit
             def _cos_zen_fn(doy, hour_utc):
-                return _csz(_lml_lat, _lml_lon, doy, hour_utc)
+                return jnp.maximum(_cza(_lml_lat, _lml_lon, doy, hour_utc,
+                                        orbit=_orbit_params), 0.0)
 
             def _marshal_land_forcing():
                 """AtmToSurface from the last radiation export + current state.
@@ -17617,14 +17635,13 @@ class ModelDriver:
         from legoesm.atmosphere.physics.radiation.gray import gray_radiation
         from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
         from legoesm.atmosphere.physics.radiation.solar import (
-            daily_mean_insolation, earth_orbit,
+            daily_mean_insolation,
         )
         # Realistic orbit (Berger 1978) for this legacy spectral dry-gray path;
         # None ⇒ circular orbit (idealized runs unchanged).  gray daily-mean
         # folds the (a/r)^2 factor into the returned insolation directly.
-        _orbit_params = (earth_orbit()
-                         if getattr(self.config, "orbital_insolation", False)
-                         else None)
+        from legoesm.driver.orbit import experiment_orbit
+        _orbit_params = experiment_orbit(self.config)
         from legoesm.forcing.surface_utils import (
             blend_surface_temperature, blended_surface_albedo)
 
@@ -17861,8 +17878,8 @@ class ModelDriver:
                 "leapfrog", "leapfrog_si")
             if not _spectral_leapfrog:
                 self._refuse_stateful_physics_unthreaded(cfg)
-            from legoesm.atmosphere.physics.radiation.solar import earth_orbit
-            _orbit_params = earth_orbit() if cfg.orbital_insolation else None
+            from legoesm.driver.orbit import experiment_orbit
+            _orbit_params = experiment_orbit(cfg)
             phys_cfg = PhysicsConfig(
                 radiation=RadiationConfig(
                     scheme=_rad_scheme,

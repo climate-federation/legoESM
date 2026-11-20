@@ -500,6 +500,13 @@ mpas_conservative_tracer_clamp: true
 # ---- forcing / IC / output (unchanged) ------------------------------------------
 diurnal_cycle: true
 orbital_insolation: true
+# Orbit: present day, stated explicitly (null = present-day element; set
+# orbit_year OR the three elements for a paleo/idealized orbit).
+orbit_year: null
+orbit_eccentricity: null
+orbit_obliquity_deg: null
+orbit_long_perihelion_deg: null
+orbit_solver: berger_series
 ic: era5
 dataset: custom
 sst_var: tosbcs

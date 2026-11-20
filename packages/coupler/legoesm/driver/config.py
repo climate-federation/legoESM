@@ -801,6 +801,20 @@ class ExperimentConfig(NamedTuple):
     # perihelion/aphelion asymmetry, ~+/-3.4%).  Default False keeps the
     # circular-orbit approximation for idealized/aquaplanet runs.
     orbital_insolation: bool = False
+    # User-set orbit (requires orbital_insolation=True; resolved by
+    # legoesm.driver.orbit.experiment_orbit, the one orbit every solar
+    # consumer reads).  orbit_year = Berger (1978) orbit of that year AD
+    # (negative = BC); the three elements override present day one by one
+    # (unset = present day).  Year and elements are mutually exclusive.
+    # orbit_long_perihelion_deg is measured from the moving vernal equinox
+    # (Berger convention, = CESM mvelp + 180).
+    orbit_year: int | None = None
+    orbit_eccentricity: float | None = None
+    orbit_obliquity_deg: float | None = None
+    orbit_long_perihelion_deg: float | None = None
+    # How the solar longitude is computed: CESM's Berger series (exact CESM
+    # match, e <= 0.1) or an exact Kepler solve (e <= 0.9).
+    orbit_solver: str = "berger_series"
     # RRTMGP column recurrence implementation:
     #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
     #   True  = jax.lax.scan (smaller graph, often slower per step on GPU but
@@ -2319,6 +2333,11 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        from legoesm.driver.orbit import validate_orbit_fields
+        try:
+            validate_orbit_fields(self)
+        except ValueError as exc:
+            errors.append(str(exc))
         if (normalize_grid_type(g.grid_type) == "cubed_sphere"
                 and d.discretization != "fv3_duo"):
             errors.append(

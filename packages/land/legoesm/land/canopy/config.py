@@ -660,6 +660,11 @@ class CanopyLandParams(NamedTuple):
 # CLMMLCanopyConfig — configuration for the CLM-ML-JAX multilayer canopy
 # ---------------------------------------------------------------------------
 
+# CLM's shr_orb_decl (Berger cubic series): 0.008 deg true-anomaly error at
+# e=0.1, 0.68 deg at e=0.3 vs exact Kepler.
+CLM_ML_MAX_ECCENTRICITY = 0.1
+
+
 class CLMMLCanopyConfig(NamedTuple):
     """Configuration for the CLM-ML-JAX multilayer canopy surface scheme.
 
@@ -957,6 +962,16 @@ class CLMMLCanopyConfig(NamedTuple):
     # into the process-global backend control (one width per process).
     dew_limit_smoothing_mol: float = 1e-6
 
+    # The coupled run's orbit and solar constant (legoesm.driver.orbit, set by
+    # the coupled driver).  None (land-only runs) = CLM's year-2001 Berger
+    # orbit and constants.S_0.  Perihelion longitude is from the moving vernal
+    # equinox (radiation convention, = CESM mvelp + 180).  CLM's shr_orb_decl
+    # is Berger's cubic series, so eccentricity above 0.1 is refused.
+    orbit_eccentricity: float | None = None
+    orbit_obliquity_deg: float | None = None
+    orbit_long_perihelion_deg: float | None = None
+    solar_s0: float | None = None
+
     def validate(self) -> "CLMMLCanopyConfig":
         """Fail-early check of the static string-dispatch fields.
 
@@ -965,6 +980,16 @@ class CLMMLCanopyConfig(NamedTuple):
         setup instead of silently running the default RSL physics.  Returns
         ``self`` for chaining.
         """
+        _orb = (self.orbit_eccentricity, self.orbit_obliquity_deg,
+                self.orbit_long_perihelion_deg)
+        if any(v is None for v in _orb) and any(v is not None for v in _orb):
+            raise ValueError(
+                f"CLM-ML orbit needs all three elements or none; got {_orb}")
+        if (self.orbit_eccentricity is not None
+                and not 0.0 <= self.orbit_eccentricity <= CLM_ML_MAX_ECCENTRICITY):
+            raise ValueError(
+                f"CLM-ML orbit_eccentricity={self.orbit_eccentricity}: CLM's "
+                f"shr_orb_decl series is only accurate to e={CLM_ML_MAX_ECCENTRICITY}")
         if self.turbulence_scheme not in VALID_CLM_ML_TURBULENCE_SCHEMES:
             raise ValueError(
                 f"unknown turbulence_scheme {self.turbulence_scheme!r}; the "
