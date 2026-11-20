@@ -243,12 +243,12 @@ def isf_prescribed_melt_tendencies(
       live thicknesses.  Identical at rest (the oracle columns have no
       free-surface stretch); can differ by one level when the stretch moves
       an interface across ``zmin``.
-    * NEMO masks a column out (no melt at all) when ``zmax`` is not below
-      the snapped ``zmin``; here the forcing loader widens every band to at
-      least 1 m and the melt is applied in the top cell.  On the eORCA1
-      Depoorter file this is 8 columns and 2.6 % of the annual melt that
-      NEMO drops and this port deposits (measured on the native grid with
-      the static ``gdepw_0`` snap).
+    * A column whose ``min(zmax, depth)`` is not below the snapped ``zmin``
+      gets no melt, as NEMO's ``mskisf_par`` (eORCA1 Depoorter: 8 columns,
+      2.6 % of the annual melt).  NEMO decides this once on the static
+      grid; here it follows the live thicknesses, like ``ktop``.  On
+      regridded grids the loader rescales the monthly melt to the full
+      source total before this mask drops any column.
     * The ``fwf > 0`` gate drops refreezing, which NEMO would apply; the
       eORCA1 forcing ``sornfisf`` has no negative values, so it never binds
       there.
@@ -328,7 +328,8 @@ def isf_prescribed_melt_tendencies(
     at_bot = idx == kbot_idx
     w = dz * full + frac[..., jnp.newaxis] * dz * at_bot   # Σw = htbl
 
-    has_melt = (fwf > 0.0) & (col_depth > 0.0)
+    # isf_par_init mskisf_par: no melt where the band below the snapped top is empty.
+    has_melt = (fwf > 0.0) & (col_depth > 0.0) & (zmax_c - zmin_snap > 0.0)
     htbl_safe = jnp.where(htbl > 0.0, htbl, 1.0)
     w_norm = jnp.where(has_melt[..., jnp.newaxis], w / htbl_safe[..., jnp.newaxis], 0.0)
 
