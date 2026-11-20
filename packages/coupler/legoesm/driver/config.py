@@ -1346,6 +1346,10 @@ class ExperimentConfig(NamedTuple):
     # floor ADDS the clipped water (announced at dycore build); with the
     # default borrow it is ignored there.
     energy_consistent_moisture_clip: bool = False
+    # Virtual temperature in the MPAS hydrostatic dynamics (geopotential and
+    # pressure-gradient force; MPASPrimitiveEquationConfig.virtual_temperature).
+    # Single-device MPAS lane only. False = dry T (behaviour before 20 Nov 2026).
+    mpas_virtual_temperature: bool = False
     # Resolved-wind moisture advection (issue #771): attach q_v/q_c/q_r/q_i/
     # q_s/q_g (+ the per-mass ice number N_i) to the dycore state each step so
     # the primitive-equation step advects them.  Without it, cube moisture is
@@ -2333,6 +2337,13 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        _mpas_core = (d.discretization == "mpas"
+                      or normalize_grid_type(g.grid_type) == "mpas")
+        if self.mpas_virtual_temperature and (not _mpas_core or self.distributed):
+            errors.append(
+                "mpas_virtual_temperature is implemented on the single-device MPAS "
+                f"hydrostatic core only; got grid_type={g.grid_type!r}, "
+                f"discretization={d.discretization!r}, distributed={self.distributed!r}.")
         from legoesm.driver.orbit import validate_orbit_fields
         try:
             validate_orbit_fields(self)
@@ -5556,6 +5567,7 @@ class ExperimentConfig(NamedTuple):
             fix_moisture=getattr(amip_cfg, 'fix_moisture', False),
             energy_consistent_moisture_clip=getattr(
                 amip_cfg, 'energy_consistent_moisture_clip', False),
+            mpas_virtual_temperature=getattr(amip_cfg, 'mpas_virtual_temperature', False),
             moisture_advection=getattr(amip_cfg, 'moisture_advection', False),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,

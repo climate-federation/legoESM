@@ -1052,6 +1052,7 @@ def create_atmosphere_dycore(
             # Mass-conserving tracer positivity clamp (see DycoreConfig).
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
+            virtual_temperature=bool(getattr(config, "mpas_virtual_temperature", False)),
             # Sigma-lane vertical advection scheme (see DycoreConfig).
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
             vertical_form=dc.vertical_form,

@@ -121,6 +121,15 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # preserves the q_v integral with T untouched), so this is a no-op there and
     # must NOT be stacked on it (that would inject -L_v*deficit of cooling).
     energy_consistent_moisture_clip: bool = False
+    # Water-vapour buoyancy in the dynamics: True uses the virtual temperature
+    # T_v = T (1 + (R_v/R_d - 1) q_v) (``legoesm.thermo.virtual_temperature``,
+    # q_v = the state's specific-humidity tracer) in the hydrostatic
+    # geopotential and the pressure-gradient correction, as CAM does
+    # (geopotential.F90: tv = t (1 + zvir q)).  The compression term
+    # kappa T omega / p and the temperature advection keep the dry T.  Every
+    # vertical form (legacy here; the shared core in primitive_eq_generic).
+    # False = dry T everywhere (behaviour before 20 Nov 2026).
+    virtual_temperature: bool = False
     anchor_mass_to_initial: bool = False  # iter-11: mirror PE/SW anchor pattern
     # Default integrator is the 5-stage 4th-order SSP scheme — NOT the
     # 3-stage ``ssp_rk3`` — because ``ssp_rk3`` has the smaller absolute-
@@ -707,6 +716,16 @@ def mpas_legacy_pe_tendencies(
     kappa = constants.kappa
     T_3d.shape[-1]
     p_s = jnp.clip(p_s, config.p_floor, config.p_ceil)
+    if config.virtual_temperature:
+        if state.tracers is None or "q_v" not in state.tracers:
+            raise ValueError(
+                "MPASPrimitiveEquationConfig.virtual_temperature=True needs the "
+                "specific-humidity tracer 'q_v' in the dynamical state; got "
+                f"{None if state.tracers is None else sorted(state.tracers)}.")
+        from legoesm.thermo import virtual_temperature as _virtual_temperature
+        T_dyn_3d = _virtual_temperature(T_3d, state.tracers["q_v"].data)
+    else:
+        T_dyn_3d = T_3d
 
     # --- 1. Pressure at full levels ---
     if _hybrid:
@@ -717,9 +736,9 @@ def mpas_legacy_pe_tendencies(
 
     # --- 2. Geopotential ---
     if _hybrid:
-        Phi = compute_geopotential_hybrid(T_3d, p_s, sigma_coord, phis)
+        Phi = compute_geopotential_hybrid(T_dyn_3d, p_s, sigma_coord, phis)
     else:
-        Phi = compute_geopotential(T_3d, p_s, sigma_coord, phis)
+        Phi = compute_geopotential(T_dyn_3d, p_s, sigma_coord, phis)
 
     ln_ps = jnp.log(p_s)
 
@@ -789,7 +808,9 @@ def mpas_legacy_pe_tendencies(
         ln_ps_edge_pre = _Tpd_pl_edge[:, -1]   # (nEdges,) — reused below
         B_full = sigma_coord.B_full  # (nlev,)
         hybrid_factor_edge = B_full * p_s_edge_scalar[:, None] / jnp.maximum(p_full_edge, 1e-10)
-        pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None] * hybrid_factor_edge
+        _T_pg_edge = (T_edge_3d + cell_to_edge_avg_3d(T_dyn_3d - T_3d, mesh)
+                      if config.virtual_temperature else T_edge_3d)
+        pg_corr_3d = R_d * _T_pg_edge * grad_ln_ps[:, None] * hybrid_factor_edge
     else:
         # Batch (T_3d, p_s, ln_ps) into a single cell_to_edge_avg_3d call.
         # ``p_s`` rides as one extra passive slot so the σ-branch flux-form
@@ -809,7 +830,9 @@ def mpas_legacy_pe_tendencies(
             p_s_edge_scalar[:, None]
             * sigma_coord.dsigma.astype(p_s.dtype)[None, :]
         )  # (nEdges, nlev)
-        pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
+        _T_pg_edge = (T_edge_3d + cell_to_edge_avg_3d(T_dyn_3d - T_3d, mesh)
+                      if config.virtual_temperature else T_edge_3d)
+        pg_corr_3d = R_d * _T_pg_edge * grad_ln_ps[:, None]  # (nEdges, nlev)
 
     # PV flux: h_proxy = dp/g (pressure thickness).  For the hybrid
     # branch ``dp_edge_3d`` was produced by the batched cell-to-edge
