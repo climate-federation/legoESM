@@ -2450,3 +2450,69 @@ def simple_bulk_fluxes(
     shflx = rho * constants.c_pd * Ch * wind_speed * (T_sfc - T_lowest)
     lhflx = rho * _L * Ch * wind_speed * (q_sfc - q_lowest)
     return tau_x, tau_y, shflx, lhflx
+
+
+# --- 2 m temperature from a GIVEN sensible heat flux (prescribed-flux land) ---
+# CESM's hol clamp (shr_flux_atmOcn: hol = sign(hol) min(|hol|, 10)) keeps the
+# similarity iteration bounded in very stable air; this is its smooth form.
+_FLUX_PROFILE_ZETA_CAP = 10.0
+
+
+def two_metre_temperature_from_flux(
+    u_atm, v_atm, theta_atm, z_atm, shflx, rho, z0m, *,
+    stability_scheme: str = "dyer1974",
+    z_diag: float = 2.0,
+    z0h_z0_ratio: float = _Z0H_Z0_RATIO_DEFAULT,
+    n_iter: int = 5,
+    minwind: float = _CESM_MINWIND,
+    zeta_cap_sharpness: float = 100.0,
+):
+    """Air temperature at ``z_diag`` from the lowest level and a KNOWN flux.
+
+    For a surface whose turbulent fluxes are prescribed (ERA5 land fluxes on
+    the AMIP prescribed-land lane) there is no bulk law to invert: the
+    sensible heat the air received is ``shflx`` by construction.  The 2 m
+    value consistent with that flux is the similarity profile integrated from
+    the lowest level with ``theta* = -shflx / (rho c_p u*)`` and ``u*`` from
+    the momentum law over the surface's own roughness ``z0m``::
+
+        theta(z_diag) = theta_atm - theta*/kappa [ln(z_atm/z_diag)
+                                                 - psi_h(z_atm/L) + psi_h(z_diag/L)]
+
+    ``L`` is iterated ``n_iter`` times from neutral (CESM's count), with the
+    smooth CESM-style |zeta| <= 10 cap.  Positive-UPWARD ``shflx``: upward
+    heat gives theta* < 0 and a 2 m value WARMER than the lowest level, the
+    daytime-land and winter-inversion-free case.  The skin temperature is
+    deliberately NOT an input: under prescribed fluxes it never heated this
+    air.  Returns TEMPERATURE at ``z_diag`` (theta minus g z_diag / c_p, the
+    same step CESM's tref applies).
+
+    Inputs: ``theta_atm`` potential temperature at ``z_atm`` [K],
+    ``z_atm`` height of the lowest level above the surface [m], ``shflx``
+    [W m-2] positive upward, ``rho`` [kg m-3], ``z0m`` momentum roughness [m]
+    (scalar or per column).  ``stability_scheme`` as :func:`psi_m`/:func:`psi_h`.
+    """
+    from legoesm.core.smooth import smooth_clamp
+    validate_stability_scheme(stability_scheme)
+    wind2 = u_atm ** 2 + v_atm ** 2
+    windy = wind2 > 0.0
+    speed = jnp.sqrt(jnp.where(windy, wind2, 1.0))
+    speed = jnp.maximum(jnp.where(windy, speed, 0.0), minwind)
+    z0m = jnp.asarray(z0m, dtype=theta_atm.dtype)
+    z0h = z0m * z0h_z0_ratio
+    ln_zm = jnp.log(z_atm / z0m)
+    ln_zd = jnp.log(z_atm / z_diag)
+    cap = _FLUX_PROFILE_ZETA_CAP
+    zeta = jnp.zeros_like(theta_atm)
+    u_star = KAPPA * speed / ln_zm
+    theta_star = -shflx / (rho * constants.c_pd * u_star)
+    for _ in range(n_iter):
+        zeta = smooth_clamp(
+            KAPPA * constants.g * z_atm * theta_star / (u_star ** 2 * theta_atm),
+            -cap, cap, zeta_cap_sharpness)
+        u_star = KAPPA * speed / (
+            ln_zm - psi_m(zeta, stability_scheme) + psi_m(zeta * z0m / z_atm, stability_scheme))
+        theta_star = -shflx / (rho * constants.c_pd * u_star)
+    theta_d = theta_atm - (theta_star / KAPPA) * (
+        ln_zd - psi_h(zeta, stability_scheme) + psi_h(zeta * z_diag / z_atm, stability_scheme))
+    return theta_d - (constants.g / constants.c_pd) * z_diag

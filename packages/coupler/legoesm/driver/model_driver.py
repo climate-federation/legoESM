@@ -5721,6 +5721,9 @@ class ModelDriver:
                 self.config, "surface_stability_scheme", "dyer1974"),
             surface_bulk_scheme=getattr(
                 self.config, "surface_bulk_scheme", "constant"),
+            # Land roughness for the prescribed-flux 2 m profile (the lane's
+            # own tiled-land roughness; the flux-driven leg needs it).
+            surface_z0_land=getattr(self.config, "surface_z0_land", None),
         )
         # Register per-cell horizontal areas so every global-mean diagnostic
         # (<R_TOA>, <SST>, <CWV>, ...) is area-weighted.  On a lat-lon grid an
@@ -10812,6 +10815,16 @@ class ModelDriver:
                         q_land=(None if _tas_land_q is None
                                 else jnp.asarray(_tas_land_q).reshape(-1)),
                         land_fraction=jnp.asarray(_tas_f_land).reshape(-1))
+                    # Prescribed-flux land: the published land tas is the
+                    # profile consistent with the prescribed sensible heat
+                    # (set only on that lane; the interactive tile keeps its
+                    # skin-anchored profile).
+                    _tas_sh = getattr(self, "_land_shflx_last", None)
+                    if _tas_sh is not None:
+                        _tas_kw["shflx_land"] = jnp.asarray(_tas_sh).reshape(-1)
+                        _tas_z0 = getattr(self, "_tas_land_z0", None)
+                        if _tas_z0 is not None:
+                            _tas_kw["z0_land"] = jnp.asarray(_tas_z0).reshape(-1)
                 from legoesm.forcing.surface_utils import blend_surface_temperature
                 ts = blend_surface_temperature(_sst, _sic, _tas_ice)
                 if _tas_land_T is not None and _tas_f_land is not None:
@@ -13447,6 +13460,13 @@ class ModelDriver:
             _ice_sheet_bulk_z0 = jnp.asarray(
                 float(cfg.land_prescribed_ice_sheet_z0_m),
                 dtype=self.state.p_s.data.dtype)
+            # Per-cell land roughness for the published 2 m temperature: the
+            # same roughness the ice-sheet bulk law uses on glacier cells, the
+            # lane's land roughness elsewhere.
+            self._tas_land_z0 = jnp.where(
+                _ice_sheet_bulk_w > 0.5, _ice_sheet_bulk_z0,
+                jnp.asarray(float(cfg.surface_z0_land),
+                            dtype=self.state.p_s.data.dtype))
             logger.info(
                 "  Prescribed land: land-tile Monin-Obukhov sensible heat "
                 "(z0 = %g m) on %d glacier-dominant cells of this rank "
@@ -15678,8 +15698,11 @@ class ModelDriver:
              _land_evap_cells, _land_albedo_cells) = _presc_land_arrays(
                 float(_land_presc_day))
             # The published ts/tas read the land skin from here; without it
-            # they fall back to the ocean anchor over land.
+            # they fall back to the ocean anchor over land.  The prescribed
+            # sensible heat is handed over too: the published land tas is the
+            # profile consistent with the flux the air actually received.
             self._land_T_skin_last = _land_T_skin
+            self._land_shflx_last = _land_shflx_cells
 
         for step in range(n_steps_total):
             if step in _trace_edges:
@@ -16215,6 +16238,7 @@ class ModelDriver:
                  _land_evap_cells, _land_albedo_cells) = _presc_land_arrays(
                     float(_land_presc_day))
                 self._land_T_skin_last = _land_T_skin
+                self._land_shflx_last = _land_shflx_cells
             if _land_ml_on:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:

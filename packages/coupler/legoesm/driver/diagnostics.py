@@ -299,6 +299,7 @@ class DiagnosticCollector:
         vcoord=None,
         surface_stability_scheme: str = "dyer1974",
         surface_bulk_scheme: str = "constant",
+        surface_z0_land: float | None = None,
         clubb_config=None,
         cmip_drs_tree: bool = False,
         cmip_institution_id: str = "CU",
@@ -317,6 +318,13 @@ class DiagnosticCollector:
         # similarity profile, so it keeps the historical coare3 profile —
         # which also keeps the default byte-identical.
         self.surface_stability_scheme = surface_stability_scheme
+        # Land roughness [m] for the prescribed-flux 2 m profile over land
+        # (``_tas_2m(shflx_land=...)``); None = the lane has no land roughness
+        # and that leg refuses rather than borrowing the ocean's.
+        self.surface_z0_land = surface_z0_land
+        # Sharpness of the skin/level bracket on the flux-driven land leg
+        # (smooth.smooth_clamp; inf = hard clamp).
+        self.tas_flux_profile_bracket_sharpness = 100.0
         # surface_bulk_scheme="none": no surface layer exists, so the 2 m
         # temperature (and its daily extremes) is not produced at all rather
         # than published from a profile of an exchange that never happens.
@@ -806,7 +814,8 @@ class DiagnosticCollector:
         return f_lo + alpha * (f_hi - f_lo)
 
     def _tas_2m(self, state, q_v, sst, sic, T_ice, u_low=None, v_low=None,
-                *, T_land=None, q_land=None, land_fraction=None):
+                *, T_land=None, q_land=None, land_fraction=None,
+                shflx_land=None, z0_land=None):
         """2 m air temperature for CMIP ``tas`` from the MOST surface-layer
         similarity profile (interpolate the lowest model level down to 2 m).
         Returns the lowest-level T when the surface inputs (SST / sigma) are
@@ -838,6 +847,21 @@ class DiagnosticCollector:
         p_s = state.p_s.data
         p_low = jnp.asarray(self._p_full(p_s))[..., -1]
         rho_low = p_low / (constants.R_d * T_low)
+        # The lowest model level sits at z_low above the surface (about 60 m
+        # on L32), not at 10 m, and the similarity laws integrate POTENTIAL
+        # temperature (CESM camsrfexch hands shr_flux_atmOcn zbot = zm(pver)
+        # and thbot = T exner).  Handing them the level as 10 m and T as theta
+        # published a 2 m value about g z_low / c_p ~ 0.6 K too cold over sea
+        # (measured with this port's own tref at SST 301 K, z_low 60 m).  The
+        # height is the same hypsometric half-thickness the flux path uses
+        # (compute_layer_dz: R T_v dp / (g p_mid), midpoint = half of it) and
+        # the theta pairing is the flux path's surface_reference_state.
+        from legoesm.core.bulk_flux import surface_reference_state
+        from legoesm.thermo import virtual_temperature
+        dp_low = jnp.asarray(self._dp(p_s))[..., -1]
+        z_low = 0.5 * constants.R_d * virtual_temperature(T_low, q_low) * dp_low / (
+            constants.g * p_low)
+        theta_low, _ = surface_reference_state(T_low, 10.0, z_low)
         # Similarity profile matched to the experiment's surface fluxes:
         # SAME bulk scheme (constant -> the historical coare3 stand-in, see
         # __init__) and SAME stable-branch selector (codex 2026-08-02: a
@@ -866,20 +890,23 @@ class DiagnosticCollector:
                 # CESM shr_flux_atmOcn's own ``tref`` diagnostic (2 m).
                 from legoesm.core.bulk_flux import compute_sam_oceflx_fluxes
                 *_, T_2m = compute_sam_oceflx_fluxes(
-                    u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
-                    z_bot=10.0, variant="cesm", return_2m=True,
+                    u_low, v_low, theta_low, q_low, T_sfc, q_sfc, rho_low,
+                    z_bot=z_low, variant="cesm", return_2m=True,
                     t_bot=T_low,
                 )
                 return T_2m
             *_, T_2m = compute_most_fluxes(
-                u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+                u_low, v_low, theta_low, q_low, T_sfc, q_sfc, rho_low,
+                z_ref=z_low,
                 scheme=(self.tas_profile_scheme
                         if self.tas_profile_scheme != "large_yeager_cesm"
                         else "large_yeager"),
                 return_2m=True,
                 stability_scheme=self.surface_stability_scheme,
             )
-            return T_2m
+            # The MOST branch integrates theta down to z_diag; CESM's tref
+            # applies the same potential-to-temperature step (0.01 K/m x 2 m).
+            return T_2m - (constants.g / constants.c_pd) * 2.0
 
         T_sfc_sea = blend_surface_temperature(sst, sic, T_ice)
         q_sfc_sea = saturation_mixing_ratio(T_sfc_sea, p_s)
@@ -900,7 +927,37 @@ class DiagnosticCollector:
         # frozen ground.
         q_sfc_land = (saturation_mixing_ratio(T_land, p_s) if q_land is None
                       else q_land)
-        T_2m_land = _profile_to_2m(T_land, q_sfc_land, ocean=False)
+        if shflx_land is not None:
+            # Prescribed-flux land (option b): the 2 m value is the profile
+            # consistent with the sensible heat the air ACTUALLY received,
+            # integrated from the lowest level with the land roughness and the
+            # lane's stability functions.  The skin is not an anchor here:
+            # under prescribed fluxes it never heated this air, and a bulk law
+            # between a climatological skin and model air published 2 m
+            # values 3 K below the skin where ERA5 sits 1 K above it (January
+            # 30-60N land, measured on the frozen baseline).
+            from legoesm.core.bulk_flux import two_metre_temperature_from_flux
+            z0 = self.surface_z0_land if z0_land is None else z0_land
+            if z0 is None:
+                raise ValueError(
+                    "_tas_2m(shflx_land=...) needs a land roughness: pass "
+                    "z0_land or construct the collector with surface_z0_land.")
+            T_2m_land = two_metre_temperature_from_flux(
+                u_low, v_low, theta_low, z_low, shflx_land, rho_low, z0,
+                stability_scheme=self.surface_stability_scheme)
+            # A prescribed flux can exceed what the lowest layer's turbulence
+            # can carry (calm, strongly stable air: u* -> 0 with a finite
+            # downward flux), where the similarity gradient has no physical
+            # limit.  The 2 m air lies between the surface and the lowest level
+            # in every monotone profile, so the skin bounds the value without
+            # anchoring it.  Smooth clamp (RULE 5); the hard form is sharpness
+            # = inf.  Author's pick: codex/GLM were unavailable for the vote.
+            from legoesm.core.smooth import smooth_clamp
+            T_2m_land = smooth_clamp(
+                T_2m_land, jnp.minimum(T_land, T_low), jnp.maximum(T_land, T_low),
+                self.tas_flux_profile_bracket_sharpness)
+        else:
+            T_2m_land = _profile_to_2m(T_land, q_sfc_land, ocean=False)
         T_2m_sea = _profile_to_2m(T_sfc_sea, q_sfc_sea, ocean=True)
         f_land = jnp.clip(jnp.asarray(land_fraction, dtype=T_2m_land.dtype),
                           0.0, 1.0)

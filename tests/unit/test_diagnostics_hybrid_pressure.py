@@ -296,7 +296,10 @@ def test_tas_2m_follows_surface_stability_scheme():
         tas_default, tas_grachev)
     # Physical bracket: between the surface and the lowest-level temperature.
     for tas in (tas_default, tas_grachev):
-        assert np.all(tas >= 220.0) and np.all(tas <= 300.0)
+        # Bracket in TEMPERATURE: the 2 m value is theta at 2 m minus the
+        # potential-to-temperature step g*2/c_p (CESM tref does the same),
+        # so it may sit that far below a 220 K skin.
+        assert np.all(tas >= 220.0 - 0.02) and np.all(tas <= 300.0)
 
 
 def test_tas_2m_follows_surface_bulk_scheme():
@@ -311,7 +314,7 @@ def test_tas_2m_follows_surface_bulk_scheme():
     np.testing.assert_array_equal(tas_default, tas_constant)
     np.testing.assert_array_equal(tas_default, tas_coare3)
     assert np.all(np.abs(tas_ly - tas_default) > 0.5), (tas_default, tas_ly)
-    assert np.all(tas_ly >= 220.0) and np.all(tas_ly <= 300.0)
+    assert np.all(tas_ly >= 220.0 - 0.02) and np.all(tas_ly <= 300.0)
 
 
 # ---------------------------------------------------------------------------
@@ -371,3 +374,144 @@ def test_tas_2m_zero_land_fraction_collapses_to_the_ocean_branch():
     zero_land = _tas_land_for(T_land=jnp.full((2,), 240.0),
                               land_fraction=jnp.zeros((2,)))
     np.testing.assert_allclose(zero_land, legacy, rtol=0.0, atol=0.0)
+
+
+# ---------------------------------------------------------------------------
+# _tas_2m hands the similarity law the lowest level's TRUE height and its
+# POTENTIAL temperature (CESM camsrfexch: zbot = zm(pver), thbot = T exner).
+# Labelling the ~60-225 m level as 10 m and passing absolute T published a
+# 2 m value ~g z_low / c_p too cold (0.6 K at z_low = 60 m) on both legs.
+# ---------------------------------------------------------------------------
+def _cesm_sea_tas(z_bot, T_atm, T_low, q_low, sst, u, rho):
+    import jax.numpy as jnp
+    from legoesm.core.bulk_flux import compute_sam_oceflx_fluxes
+    from legoesm.thermo import saturation_mixing_ratio
+    q_sfc = saturation_mixing_ratio(sst, jnp.full_like(sst, 1.0e5))
+    *_, t2m = compute_sam_oceflx_fluxes(
+        u, jnp.zeros_like(u), T_atm, q_low, sst, q_sfc, rho,
+        z_bot=z_bot, variant="cesm", return_2m=True, t_bot=T_low)
+    return np.asarray(t2m)
+
+
+def _lowest_level_geometry(coord, state, q_v):
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.core.bulk_flux import surface_reference_state
+    from legoesm.thermo import virtual_temperature
+    T_low = state.T.data[..., -1]
+    q_low = q_v[..., -1]
+    p_s = state.p_s.data
+    p_low = jnp.asarray(coord.pressure_at_full(p_s))[..., -1]
+    dp_low = jnp.asarray(coord.layer_thickness_dp(p_s))[..., -1]
+    rho = p_low / (constants.R_d * T_low)
+    z_low = 0.5 * constants.R_d * virtual_temperature(T_low, q_low) * dp_low / (
+        constants.g * p_low)
+    theta_low, _ = surface_reference_state(T_low, 10.0, z_low)
+    return T_low, q_low, rho, z_low, theta_low
+
+
+def test_tas_2m_sea_leg_uses_level_height_and_potential_temperature():
+    import jax.numpy as jnp
+    from legoesm import constants
+
+    coord = create_sigma_coordinate(NLEV)
+    dc = DiagnosticCollector(nlev=NLEV, sigma_full=coord.sigma_full,
+                             dsigma=coord.dsigma, vcoord=coord,
+                             surface_bulk_scheme="large_yeager_cesm")
+    state = _tas_stub_state(NLEV)
+    q_v = jnp.full((2, NLEV), 1.5e-2)
+    sst = jnp.full((2,), 303.0)            # warm sea under 300 K air: unstable
+    tas = np.asarray(dc._tas_2m(state, q_v, sst, jnp.zeros((2,)), T_ice=271.35))
+    T_low, q_low, rho, z_low, theta_low = _lowest_level_geometry(coord, state, q_v)
+    assert float(z_low[0]) > 50.0            # a real model level, not 10 m
+    u = state.u.data[..., -1]
+    ref = _cesm_sea_tas(z_low, theta_low, T_low, q_low, sst, u, rho)
+    np.testing.assert_allclose(tas, ref, rtol=0.0, atol=1e-9)
+    old = _cesm_sea_tas(10.0, T_low, T_low, q_low, sst, u, rho)
+    gain = tas - old
+    expected = float((constants.g / constants.c_pd) * z_low[0])
+    assert np.all(gain > 0.3), (tas, old)
+    assert np.all(np.abs(gain - expected) < 0.35 * expected), (gain, expected)
+
+
+# ---------------------------------------------------------------------------
+# Prescribed-flux land (option b): the published land tas is the profile
+# consistent with the prescribed sensible heat, not a bulk law between a
+# climatological skin and model air.
+# ---------------------------------------------------------------------------
+def test_flux_driven_2m_profile_signs_and_zero_flux():
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.core.bulk_flux import two_metre_temperature_from_flux
+
+    theta = jnp.full((3,), 280.0)
+    z = jnp.full((3,), 60.0)
+    rho = jnp.full((3,), 1.2)
+    u = jnp.full((3,), 5.0)
+    v = jnp.zeros((3,))
+    H = jnp.array([0.0, 80.0, -40.0])          # none, upward (day), downward (night)
+    t2 = np.asarray(two_metre_temperature_from_flux(
+        u, v, theta, z, H, rho, 0.1, stability_scheme="beljaars_holtslag1991"))
+    # Zero flux: no gradient, only the theta -> T step over 2 m.
+    np.testing.assert_allclose(t2[0], 280.0 - constants.g / constants.c_pd * 2.0, atol=1e-9)
+    # Upward heat: 2 m warmer than the level; downward: colder.
+    assert t2[1] > t2[0] + 0.3, t2
+    assert t2[2] < t2[0] - 0.3, t2
+
+
+def _presc_land_tas(dc, state, q_v, T_land, H, **kw):
+    import jax.numpy as jnp
+    return np.asarray(dc._tas_2m(state, q_v, jnp.full((2,), 220.0), jnp.zeros((2,)),
+                                 T_ice=271.35, T_land=T_land, land_fraction=jnp.ones((2,)),
+                                 shflx_land=H, **kw))
+
+
+def test_tas_2m_prescribed_land_follows_the_flux_within_the_skin_bracket():
+    import jax.numpy as jnp
+    from types import SimpleNamespace
+    from legoesm.core.bulk_flux import two_metre_temperature_from_flux
+
+    coord = create_sigma_coordinate(NLEV)
+    dc = DiagnosticCollector(nlev=NLEV, sigma_full=coord.sigma_full,
+                             dsigma=coord.dsigma, vcoord=coord,
+                             surface_bulk_scheme="large_yeager_cesm",
+                             surface_stability_scheme="beljaars_holtslag1991",
+                             surface_z0_land=0.1)
+    state = _tas_stub_state(NLEV)                 # lowest level 300 K, 10 m/s
+    q_v = jnp.full((2, NLEV), 2e-3)
+    T_low, q_low, rho, z_low, theta_low = _lowest_level_geometry(coord, state, q_v)
+    H = jnp.array([40.0, 40.0])
+    # 1. With the skin far outside the profile's reach the answer IS the
+    #    flux-driven profile (the skin is a bound, not an anchor): the same
+    #    value for a 320 K and a 340 K skin, equal to the helper.
+    a = _presc_land_tas(dc, state, q_v, jnp.full((2,), 320.0), H)
+    b = _presc_land_tas(dc, state, q_v, jnp.full((2,), 340.0), H)
+    ref = np.asarray(two_metre_temperature_from_flux(
+        state.u.data[..., -1], state.v.data[..., -1], theta_low, z_low, H, rho, 0.1,
+        stability_scheme="beljaars_holtslag1991"))
+    np.testing.assert_allclose(a, b, rtol=0.0, atol=1e-9)
+    np.testing.assert_allclose(a, ref, rtol=0.0, atol=1e-3)
+    assert np.all(a > np.asarray(T_low)) and np.all(a < 320.0)
+    # 2. Calm, strongly stable air with a prescribed downward flux: the raw
+    #    profile has no physical limit; the published value stays inside
+    #    [skin, lowest level] and finite.
+    calm = SimpleNamespace(T=state.T, p_s=state.p_s,
+                           u=SimpleNamespace(data=jnp.full((2, NLEV), 0.5)),
+                           v=SimpleNamespace(data=jnp.zeros((2, NLEV))))
+    raw = np.asarray(two_metre_temperature_from_flux(
+        calm.u.data[..., -1], calm.v.data[..., -1], theta_low, z_low,
+        jnp.array([-200.0, -200.0]), rho, 0.1, stability_scheme="beljaars_holtslag1991"))
+    assert np.all(raw < 240.0)                     # the unbounded profile overshoots
+    c = _presc_land_tas(dc, calm, q_v, jnp.full((2,), 260.0), jnp.array([-200.0, -200.0]))
+    assert np.all(np.isfinite(c)) and np.all(c > 259.5) and np.all(c <= np.asarray(T_low) + 1e-6), c
+    # 3. Without the flux the leg is the skin-anchored profile of the
+    #    interactive lane, unchanged: the skin moves the answer.
+    d = np.asarray(dc._tas_2m(state, q_v, jnp.full((2,), 220.0), jnp.zeros((2,)),
+                              T_ice=271.35, T_land=jnp.full((2,), 240.0), land_fraction=jnp.ones((2,))))
+    e = np.asarray(dc._tas_2m(state, q_v, jnp.full((2,), 220.0), jnp.zeros((2,)),
+                              T_ice=271.35, T_land=jnp.full((2,), 300.0), land_fraction=jnp.ones((2,))))
+    assert np.all(np.abs(d - e) > 1.0)
+    # 4. A per-cell roughness is honoured (glacier cells get their own z0).
+    f = _presc_land_tas(dc, state, q_v, jnp.full((2,), 320.0), H,
+                        z0_land=jnp.array([0.1, 0.0024]))
+    assert f[0] == a[0] and f[1] != a[1], (f, a)
