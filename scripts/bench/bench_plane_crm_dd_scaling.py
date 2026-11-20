@@ -56,7 +56,13 @@ RCEMIP1_DECK_ARGV = (
     "--smag-cs", "0.19", "--semi-implicit", "--microphysics", "morrison",
     "--nlev", "64", "--T-sfc", "300.0", "--insolation", "rcemip",
     "--radiation", "rrtmgp", "--clouds", "--radiation-interval", "150",
+    "--radiation-column-chunk", "128",
 )
+
+
+# Ranks per node admitted at a time to the first radiation compile+call
+# (vote 2026-11-16: 8): all 128 at once exceed the node's memory.
+RAD_FIRST_CALL_RANKS_PER_ROUND = 8
 
 
 def bench_parser() -> argparse.ArgumentParser:
@@ -211,6 +217,7 @@ def main(argv=None):
         make_flat_plane_terrain_metric,
     )
     from legoesm.grids.plane import create_plane_grid
+    from legoesm.parallel.staggered_init import staggered_first_call
     from legoesm.parallel.plane_mpi import (
         make_plane_pencil_grid, make_plane_pencil_layout,
     )
@@ -301,7 +308,8 @@ def main(argv=None):
         rad_cfg = rcp._build_radiation_config(
             rargs.radiation, update_interval_steps=rargs.radiation_interval,
             clouds=rargs.clouds, insolation=rargs.insolation,
-            t_sfc=rargs.T_sfc)
+            t_sfc=rargs.T_sfc,
+            column_chunk_size=rargs.radiation_column_chunk)
         mp_cfg = rcp._build_microphysics_config(
             rargs.microphysics, rargs.homogeneous_ice_nucleation,
             hard_saturation_adjustment=rargs.hard_saturation_adjustment,
@@ -319,7 +327,11 @@ def main(argv=None):
                 physics[f"{name}_ms"] = 0.0
                 continue
             jf = jax.jit(lambda s, f=fn: f(s, grid, hc, tm))
-            sync(jf(state))
+            if name == "rad":
+                staggered_first_call(jf, state, comm=comm,
+                                     ranks_per_round=RAD_FIRST_CALL_RANKS_PER_ROUND)
+            else:
+                sync(jf(state))
             comm.Barrier()
             t = _timed(lambda: jf(state), bargs.physics_calls, sync)
             physics[f"{name}_ms"] = 1e3 * comm.allreduce(
