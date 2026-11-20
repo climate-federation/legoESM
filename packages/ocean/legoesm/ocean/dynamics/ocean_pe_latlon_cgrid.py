@@ -6642,11 +6642,12 @@ def _latlon_tendencies_outside_core(
         sponge is not None
         and bool(getattr(
             config, "rk3_stage3_damping_after_geothermal_nemo_order", False)))
+    _sponge_active = (z_coord.is_active.astype(T.dtype)
+                      if isinstance(z_coord, OceanPartialCellCoordinate) else None)
     du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v = _bc_sponge_relaxation(
         du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
         include_tracers=not (_sponge_implicit or _sponge_stage3_damping),
-        active=(z_coord.is_active.astype(T.dtype)
-                if isinstance(z_coord, OceanPartialCellCoordinate) else None),
+        active=_sponge_active,
     )
     tracer_source = None
     if _sponge_implicit:
@@ -6658,6 +6659,9 @@ def _latlon_tendencies_outside_core(
             jnp.zeros_like(dT_dt), jnp.zeros_like(dS_dt), T, S, sponge,
             mask=None, expand_gamma_axis=-1,
         )
+        if _sponge_active is not None:
+            _sp_dT = _sp_dT * _sponge_active
+            _sp_dS = _sp_dS * _sponge_active
         tracer_source = SurfaceTracerForcing(
             dT_dt=Field(data=_sp_dT * mask_3d, name="dT_source_rate",
                         dims=("lat", "lon", "level"), units="degC/s"),

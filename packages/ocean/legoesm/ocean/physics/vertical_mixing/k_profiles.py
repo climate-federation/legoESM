@@ -1393,6 +1393,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=False, eos_fn=eos_fn, ice_frac=_kpp_ice_fr,
             p_cell=_kpp_p_cell,
+            h_k=(maybe_partial_h_actual(state, z_coord)
+                 if _kpp_p_cell is not None else None),
         )
         return out.K_v, out.A_v, None
 

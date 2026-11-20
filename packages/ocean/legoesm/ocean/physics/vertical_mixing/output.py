@@ -19,3 +19,4 @@ class VerticalMixingOutput(NamedTuple):
     dS_dt: jnp.ndarray
     K_v: jnp.ndarray   # Diffusivity diagnostic at interfaces
     A_v: jnp.ndarray   # Viscosity diagnostic at interfaces
+    h_bl: jnp.ndarray | None = None  # KPP boundary-layer depth [m] (KPP only)

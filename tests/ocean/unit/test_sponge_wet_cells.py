@@ -6,6 +6,7 @@ the explicit sponge filled them with target values (S 0.40, 0.81, 1.20 per step 
 which other operators could read as water. Wet cells still relax toward the targets.
 """
 import numpy as np
+import pytest
 
 import jax
 
@@ -29,7 +30,8 @@ DT = 1800.0
 NY, NX = 8, 12
 
 
-def test_sponge_leaves_cells_below_the_seafloor_empty():
+@pytest.mark.parametrize("implicit", [False, True])
+def test_sponge_leaves_cells_below_the_seafloor_empty(implicit):
     grid, wall = create_regional_grid("latlon", n_lat=NY, n_lon=NX, lat_south=-4.0,
                                       lat_north=4.0, lon_west=200.0, lon_east=200.0 + NX)
     ocean = np.asarray(wall) > 0.5
@@ -45,7 +47,7 @@ def test_sponge_leaves_cells_below_the_seafloor_empty():
     gam = jnp.asarray(np.where(np.asarray(lm) > 0.5, 1.0 / 86400.0, 0.0))  # 2-D: every wet column, all levels
     shape = st.T.data.shape
     sponge = SpongeForcing(gamma=gam, T_ref=jnp.full(shape, 10.0), S_ref=jnp.full(shape, 34.0))
-    cfg = LatLonCGridOceanConfig.from_flat(physics=OceanPhysicsConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(sponge_forcing_implicit=implicit, physics=OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="constant"),
         lateral_mixing=LateralMixingConfig(scheme="none"), shortwave_penetration=None))
     model = LatLonCGridOceanModel(grid, zc_pc, cfg)

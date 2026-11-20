@@ -281,9 +281,12 @@ def _kpp_interface_n2(rho, T, S, eta, z_coord, jacobian, cfg, g, eos_fn=None, p_
         raise ValueError(f"KPPConfig.n2_mode must be 'adiabatic' or 'insitu_signed', got {mode!r}")
     if p_cell is None:
         p_cell = compute_hydrostatic_pressure(rho, eta, z_coord.dz_ref, jacobian, rho_0_ref, g, h_actual=h_k)
+    # Partial cells: divide by the live centre spacing, not the reference one.
+    dz_half = (None if (h_k is None or getattr(z_coord, "is_active", None) is None)
+               else 0.5 * (h_k[..., :-1] + h_k[..., 1:]))
     return compute_buoyancy_frequency_adiabatic(
         T, eos_salinity(S, eos_fn), p_cell, z_coord.dz_ref, jacobian,
-        eos_fn=eos_fn, rho_ref=rho_0_ref, g=g,
+        eos_fn=eos_fn, rho_ref=rho_0_ref, g=g, dz_half=dz_half,
     )
 
 
@@ -777,4 +780,5 @@ def kpp_vertical_mixing(
         dS_dt=tr_tend[1] + dS_nonlocal,
         K_v=K_v,
         A_v=A_v,
+        h_bl=h_bl,
     )
