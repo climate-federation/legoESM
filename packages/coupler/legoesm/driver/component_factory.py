@@ -1053,7 +1053,6 @@ def create_atmosphere_dycore(
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
             positivity_condensate_from_vapour=dc.positivity_condensate_from_vapour,
-            positivity_condensate_from_vapour_width=dc.positivity_condensate_from_vapour_width,
             # Sigma-lane vertical advection scheme (see DycoreConfig).
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
             vertical_form=dc.vertical_form,
@@ -1460,7 +1459,6 @@ def create_atmosphere_dycore(
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,  # #1354/#1515 borrow (grid-general knob)
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (hard-floor path only)
             positivity_condensate_from_vapour=dc.positivity_condensate_from_vapour,
-            positivity_condensate_from_vapour_width=dc.positivity_condensate_from_vapour_width,
             # Stage 3-E: pass polar-filter parameters through.  When
             # use_polar_filter is False (default) the model's filter
             # mask is None and no FFT is applied — bit-identical to

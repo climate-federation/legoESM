@@ -102,63 +102,73 @@ def test_pay_function_is_column_local():
     np.testing.assert_array_equal(np.asarray(Ta[:5]), np.asarray(Tb))
 
 
-# --- RULE 5: the payment's switches branch on traced state -----------------
-# GAP: per column of _ramp_state, max over levels of |default - hard| q_c dp
-# / the column's q_c absolute mass (measured 2026-11-20, width 0.01).
-_GAP = [0.0, 0.4721335690625082, 0.2535874344088033, 4.8285008974370146e-06, 0.0,
-        0.4806324782288631]
+# --- the payment is continuous in the state (RULE 5) -----------------------
 
-
-def _paid_mask(tr, dp):
-    w = dp
-    V = jnp.sum(jnp.maximum(tr["q_v"], 0.0) * w, axis=-1)
-    D = {x: jnp.maximum(-jnp.sum(tr[x] * w, axis=-1), 0.0) for x in WATER[1:]}
-    return (sum(D.values()) > 0.0) & (V > sum(D.values())), D
-
-
-def test_hard_limit_is_the_ported_form():
-    """width = 0: every column whose vapour can pay has each net-negative
-    condensate zeroed and nothing else touched (the ENSO-fork form)."""
-    tr, T, dp, _ = _state()
-    out, _ = pay_condensate_deficit_from_vapour(tr, T, dp, width=0.0)
-    paid, D = _paid_mask(tr, dp)
-    assert int(paid.sum()) >= 6
+def _fork_hard_pay(tr, T, dp):
+    """The ENSO fork's form: zero each net-negative condensate column and pay
+    it from vapour, only where the vapour can pay all."""
+    V = jnp.sum(jnp.maximum(tr["q_v"], 0.0) * dp, axis=-1, keepdims=True)
+    D = {x: jnp.maximum(-jnp.sum(tr[x] * dp, axis=-1, keepdims=True), 0.0) for x in WATER[1:]}
+    D_tot = sum(D.values())
+    paid = (D_tot > 0.0) & (V > D_tot)
+    out = dict(tr)
     for x in WATER[1:]:
-        z = np.asarray(paid & (D[x] > 0.0))
-        np.testing.assert_array_equal(np.asarray(out[x])[z], 0.0)
-        np.testing.assert_array_equal(np.asarray(out[x])[~z], np.asarray(tr[x])[~z])
+        out[x] = jnp.where(paid & (D[x] > 0.0), 0.0, tr[x])
+    vpos = jnp.maximum(tr["q_v"], 0.0)
+    out["q_v"] = tr["q_v"] - vpos * jnp.where(paid, D_tot / V, 0.0)
+    # latent heat per unit paid: L_v for liquid, L_v + L_f for frozen
+    heat = sum((constants.L_v + (0.0 if x in ("q_c", "q_r") else constants.L_f)) * D[x]
+               for x in WATER[1:])
+    return out, T + jnp.where(paid, vpos / V * heat / constants.c_pd, 0.0)
 
 
-def _ramp_state():
-    """Columns across both ramps: q_c = (1e-5, -1e-5 (1 + r)), so D/A =
-    r/(2 + r) for r = 0, 0.004, 0.01, 0.02, 0.05; the last column pays
-    D/A ~ 1 from vapour at (V - D)/V = 0.005."""
+def test_full_stage_equals_the_fork_form_where_vapour_pays():
+    """After the column borrow, a paid column ends as the fork left it."""
+    tr, T, dp, area = _state()
+    kw = dict(conservative=True, energy_consistent=False, area=area)
+    a, Ta = apply_water_positivity(tr, T, dp, **kw)
+    hard, Th = _fork_hard_pay(tr, T, dp)
+    b, Tb = apply_water_positivity(hard, Th, dp, condensate_from_vapour=False, **kw)
+    for n in WATER:
+        np.testing.assert_allclose(np.asarray(a[n]), np.asarray(b[n]), rtol=1e-12, atol=1e-20,
+                                   err_msg=n)
+    np.testing.assert_allclose(np.asarray(Ta), np.asarray(Tb), rtol=1e-14, atol=0)
+
+
+def test_payment_is_continuous_at_a_zero_column_total():
+    """The fork zeroed q_c on the sign of its column total (an O(q) jump);
+    here a column total of -1e-14 vs +1e-14 moves q_c by O(1e-17) (the
+    fork's form moves it by 1e-5)."""
+    dp = jnp.full((1, 2), 2000.0)
+    T = jnp.full((1, 2), 280.0)
+    out = []
+    for e in (-1.0e-14, 1.0e-14):
+        tr = {"q_v": jnp.full((1, 2), 1.0e-2), "q_c": jnp.array([[1.0e-5, -1.0e-5 - e / 2000.0]])}
+        out.append(np.asarray(pay_condensate_deficit_from_vapour(tr, T, dp)[0]["q_c"]))
+    assert np.max(np.abs(out[0] - out[1])) < 1.0e-16
+
+
+def test_full_stage_conserves_water_where_vapour_barely_pays():
+    """Columns near both former switches (column total near 0, vapour near
+    the deficit), every column zero or net-negative in q_c: the full stage
+    creates no water."""
     r = np.array([0.0, 0.004, 0.01, 0.02, 0.05])
-    qc = np.stack([np.full(5, 1.0e-5), -1.0e-5 * (1.0 + r)], axis=-1)
-    qc = np.concatenate([qc, [[-2.0e-6, 1.0e-7]]])
+    qc = np.concatenate([np.stack([np.full(5, 1.0e-5), -1.0e-5 * (1.0 + r)], axis=-1),
+                         [[-2.0e-6, 1.0e-7]]])
     qv = np.concatenate([np.full((5, 2), 1.0e-2), [[1.9e-6, 9.5e-9]]])
-    dp = jnp.full((6, 2), 2000.0)
-    return {"q_v": jnp.asarray(qv), "q_c": jnp.asarray(qc)}, jnp.full((6, 2), 280.0), dp
+    tr = {"q_v": jnp.asarray(qv), "q_c": jnp.asarray(qc)}
+    dp, T = jnp.full((6, 2), 2000.0), jnp.full((6, 2), 280.0)
+    out, _ = apply_water_positivity(tr, T, dp, conservative=True, energy_consistent=False,
+                                    area=jnp.ones(6))
+    w0 = float(sum(jnp.sum(dp * tr[n]) for n in tr))
+    w1 = float(sum(jnp.sum(dp * out[n]) for n in out))
+    assert abs(w1 - w0) / w0 < 1e-15
+    assert float(jnp.min(out["q_c"])) >= 0.0
 
 
-def _gap():
-    tr, T, dp = _ramp_state()
-    hard, _ = pay_condensate_deficit_from_vapour(tr, T, dp, width=0.0)
-    soft, _ = pay_condensate_deficit_from_vapour(tr, T, dp)
-    A = np.asarray(jnp.sum(jnp.abs(tr["q_c"]) * dp, axis=-1))
-    return np.asarray(jnp.max(jnp.abs(soft["q_c"] - hard["q_c"]) * dp, axis=-1)) / A
-
-
-def test_default_gap_per_column_is_the_recorded_one():
-    gap = _gap()
-    print("default gap per column", repr(gap.tolist()))
-    np.testing.assert_allclose(gap, _GAP, rtol=1e-6, atol=1e-12)
-    assert np.array_equal(gap > 0.0, np.asarray(_GAP) > 0.0)
-
-
-def test_gradient_through_the_switches_at_default():
-    """A column inside the deficit ramp (D/A = 0.005, half the width) and one
-    inside the vapour-capacity ramp: finite, nonzero, correct derivatives."""
+def test_gradient_through_the_payment():
+    """Away from the max/min kinks: finite, nonzero, correct derivatives,
+    one column fully paid and one where the vapour pays only part."""
     from jax.test_util import check_grads
     dp = jnp.full((2, 2), 2000.0)
     T = jnp.full((2, 2), 280.0)
@@ -168,11 +178,22 @@ def test_gradient_through_the_switches_at_default():
         out, T1 = pay_condensate_deficit_from_vapour({"q_v": qv, "q_c": qc}, T, dp)
         return jnp.sum(out["q_c"] ** 2) + jnp.sum(out["q_v"] * T1)
 
-    # row 0: D/A = 0.005 (deficit ramp); row 1: D/A = 0.9 and
-    # (V - D)/(width V) ~ 0.5 (vapour-capacity ramp)
-    qc = jnp.array([[1.0e-5, -1.01e-5], [-2.0e-6, 1.0e-7]])
-    qv = jnp.array([[1.0e-2, 1.0e-2], [1.9e-6, 9.5e-9]])
+    qc = jnp.array([[1.0e-5, -1.2e-5], [-2.0e-6, 1.0e-7]])
+    qv = jnp.array([[1.0e-2, 1.0e-2], [1.0e-6, 5.0e-7]])     # row 1: V < D
     g = jax.grad(f, argnums=(0, 1))(qc, qv)
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in g)
-    assert float(jnp.abs(g[0][0, 1])) > 0.0
-    check_grads(f, (qc, qv), order=2, modes=("fwd", "rev"), eps=1e-11, atol=1e-6, rtol=1e-4)
+    assert float(jnp.abs(g[0][0, 1])) > 0.0 and float(jnp.abs(g[1][1, 0])) > 0.0
+    check_grads(f, (qc, qv), order=1, modes=("fwd", "rev"), eps=1e-11, atol=1e-6, rtol=1e-4)
+
+
+def test_vapour_short_column_pays_what_it_holds():
+    """V+ < D_tot: the column pays all its vapour (the fork paid nothing and
+    left the whole deficit to the borrow); water is conserved."""
+    dp = jnp.full((1, 2), 2000.0)
+    T = jnp.full((1, 2), 280.0)
+    tr = {"q_v": jnp.array([[1.0e-6, 5.0e-7]]), "q_c": jnp.array([[-2.0e-6, 1.0e-7]])}
+    out, _ = pay_condensate_deficit_from_vapour(tr, T, dp)
+    V = float(jnp.sum(tr["q_v"] * dp))
+    np.testing.assert_allclose(np.asarray(out["q_v"]), 0.0, atol=1e-22)
+    gained = float(jnp.sum((out["q_c"] - tr["q_c"]) * dp))
+    np.testing.assert_allclose(gained, V, rtol=1e-14)

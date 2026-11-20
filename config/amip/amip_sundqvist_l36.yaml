@@ -559,7 +559,6 @@ mpas_qv_smooth_del2_m2s: 0.0
 mpas_qv_smooth_del4_m4s: 3.6421e14
 mpas_conservative_tracer_clamp: true
 positivity_condensate_from_vapour: true  # pay net-negative column condensate from the column's vapour (ENSO-fork port, 2026-11-20)
-positivity_condensate_from_vapour_width: 0.01  # RULE 5 width of that payment's switches (0 = hard)
 mpas_ice_skin_prognostic: true
 
 # --- the interactive land surface -------------------------------------------

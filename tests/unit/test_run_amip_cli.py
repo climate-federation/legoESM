@@ -6528,8 +6528,3 @@ def test_positivity_condensate_from_vapour_flag_flows_to_config():
         "--dataset", "analytical", "--no-positivity-condensate-from-vapour",
     ]), parser))
     assert cfg_no.dycore.positivity_condensate_from_vapour is False
-    assert cfg.dycore.positivity_condensate_from_vapour_width == 0.01
-    cfg_w = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--positivity-condensate-from-vapour-width", "0",
-    ]), parser))
-    assert cfg_w.dycore.positivity_condensate_from_vapour_width == 0.0
