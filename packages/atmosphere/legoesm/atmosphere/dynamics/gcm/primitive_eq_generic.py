@@ -151,10 +151,18 @@ def vertical_momentum_advection(vel: jax.Array, vv_face: jax.Array, ps_face: jax
 
 def primitive_equation_tendencies(
     T: jax.Array, vel: Edge, p_s: jax.Array, phis: jax.Array,
-    sigma_coord: Any, ops: PEOperators,
+    sigma_coord: Any, ops: PEOperators, T_buoy: jax.Array | None = None,
 ) -> tuple[Edge, jax.Array, jax.Array, Any, Ctx]:
     """``(dvel, dT, dp_s, tracer_tends, ctx)`` for any grid; ``vel`` is a tuple of
-    face families with the level axis last."""
+    face families with the level axis last.
+
+    ``T_buoy`` (optional) is the temperature the BUOYANCY terms see, i.e. the
+    hydrostatic geopotential and the pressure-gradient coefficient; the virtual
+    temperature for water-vapour buoyancy.  The temperature equation (transport,
+    compression) keeps ``T``.  ``None`` = ``T`` everywhere (unchanged path).
+    KNOWN DIFFERENCE: with ``T_buoy`` set, the Arakawa-Suarez form's PGF and its
+    theta transport no longer use the same face theta, so its discrete energy
+    conservation holds for the dry part only."""
     R_d, kappa = constants.R_d, constants.kappa
     hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
     _check_vertical_form(ops.vertical_form)
@@ -174,15 +182,21 @@ def primitive_equation_tendencies(
             P_half, pi, dpi_dps = as83_layer_exner(sigma_coord, p_s)
             theta = T / pi
             theta_half = as83_interface_theta(theta, P_half, pi)
-            Phi = as83_geopotential(theta, theta_half, P_half, pi, phis)
+            if T_buoy is None:
+                Phi = as83_geopotential(theta, theta_half, P_half, pi, phis)
+            else:
+                theta_b = T_buoy / pi
+                Phi = as83_geopotential(theta_b, as83_interface_theta(theta_b, P_half, pi),
+                                        P_half, pi, phis)
             L = pi
         else:
-            Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+            Phi = compute_geopotential_hybrid(T if T_buoy is None else T_buoy,
+                                              p_s, sigma_coord, phis)
             L = sb81_full_level_ln_p(sigma_coord, p_s)            # (..., nlev)
     else:
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
         dp = p_s[..., None] * sigma_coord.dsigma.astype(p_s.dtype)
-        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
+        Phi = compute_geopotential(T if T_buoy is None else T_buoy, p_s, sigma_coord, phis)
         L = jnp.log(p_s)[..., None]                           # (..., 1)
     nlev = T.shape[-1]
 
@@ -200,8 +214,20 @@ def primitive_equation_tendencies(
         else:
             theta_f = ops.to_face(theta)
     # PGF coefficient on faces: R_d T_f (ln p form) or c_p theta_f (Exner form)
-    pgf_coef = (tuple(constants.c_pd * f for f in theta_f) if as83
-                else tuple(R_d * f for f in T_face))
+    if T_buoy is None:
+        pgf_coef = (tuple(constants.c_pd * f for f in theta_f) if as83
+                    else tuple(R_d * f for f in T_face))
+    elif as83:
+        theta_b = T_buoy / pi
+        if ops.vertical_form == "as83_logmean":
+            theta_bf = tuple(
+                as83_logmean_face_weight(p1, p2) * (t1 - t2) + t2
+                for (t1, t2), (p1, p2) in zip(ops.face_pairs(theta_b), ops.face_pairs(pi)))
+        else:
+            theta_bf = ops.to_face(theta_b)
+        pgf_coef = tuple(constants.c_pd * f for f in theta_bf)
+    else:
+        pgf_coef = tuple(R_d * f for f in ops.to_face(T_buoy))
     dvel = tuple(-(db + c * dl) for db, c, dl in zip(dB, pgf_coef, dL))
 
     dp_face = ops.to_face(dp)
@@ -572,8 +598,18 @@ def mpas_pe_tendencies(state: Any, mesh: Any, sigma_coord: Any, config: Any = No
                          "diagnostics (legacy only)")
     ops = mpas_pe_operators(mesh, config, state.tracers, dt, vertical_form=vertical_form,
                             fence_pv_flux=fence_pv_flux)
+    T_buoy = None
+    if getattr(config, "virtual_temperature", False):
+        if state.tracers is None or "q_v" not in state.tracers:
+            raise ValueError(
+                "MPASPrimitiveEquationConfig.virtual_temperature=True needs the "
+                "specific-humidity tracer 'q_v' in the dynamical state; got "
+                f"{None if state.tracers is None else sorted(state.tracers)}.")
+        from legoesm.thermo import virtual_temperature
+        T_buoy = virtual_temperature(state.T.data, state.tracers["q_v"].data)
     (du,), dT, dps, tt, _ = primitive_equation_tendencies(
-        state.T.data, (state.u.data,), state.p_s.data, state.phis.data, sigma_coord, ops)
+        state.T.data, (state.u.data,), state.p_s.data, state.phis.data, sigma_coord, ops,
+        T_buoy=T_buoy)
     return MPASHydrostaticTendencies(
         du_dt=Field(data=du, name="du_dt", dims=("nEdges", "nlev"), units="m/s²"),
         dT_dt=Field(data=dT, name="dT_dt", dims=("nCells", "nlev"), units="K/s"),

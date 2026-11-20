@@ -2639,6 +2639,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # convection (the kessler+sbm wind blow-up).  Default off => unchanged.
     parser.add_argument("--energy-consistent-moisture-clip",
                         action="store_true", default=False)
+    parser.add_argument("--mpas-virtual-temperature", dest="mpas_virtual_temperature",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Use the virtual temperature (water-vapour buoyancy) in the "
+                             "MPAS hydrostatic geopotential and pressure-gradient force, "
+                             "as CAM does. Default off (dry T).")
     # Resolved-wind moisture advection through the cdgrid dycore (issue #771).
     # OPT-IN / experimental (advective form, not discretely mass-conserving) —
     # default OFF is bit-identical to the legacy column-locked moisture path.
@@ -3256,6 +3261,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
+        mpas_virtual_temperature=args.mpas_virtual_temperature,
         moisture_advection=args.moisture_advection,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
