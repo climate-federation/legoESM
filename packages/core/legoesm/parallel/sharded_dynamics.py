@@ -4704,7 +4704,9 @@ def make_voronoi_sharded_step(
                         cfg, "conservative_tracer_clamp", False),
                     energy_consistent=getattr(
                         cfg, "energy_consistent_moisture_clip", False),
-                    area=area_arg)
+                    area=area_arg,
+                    condensate_from_vapour=getattr(
+                        cfg, "positivity_condensate_from_vapour", True))
                 state_new = state_new._replace(
                     tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

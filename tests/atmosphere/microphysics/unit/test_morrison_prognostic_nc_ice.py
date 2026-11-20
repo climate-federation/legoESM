@@ -267,21 +267,15 @@ def test_no_ice_number_lost_to_sublimation(monkeypatch):
     fx = A._fx()
     c, T, hyd = _cold(fx, rh_i=0.7)
     s_dep = _spy(monkeypatch, "mg2_ice_deposition_sublimation")
-    calls = []
-    real_sed = M.sedimentation_tendency
-
-    def spy_sed(x, *a, **k):
-        calls.append((np.asarray(x), k.get("extra_sink")))
-        return real_sed(x, *a, **k)
-
-    monkeypatch.setattr(M, "sedimentation_tendency", spy_sed)
+    s_sed = _spy(monkeypatch, "mg2_ice_sedimentation")
     zero_ac = _spy(monkeypatch, "ice_autoconversion_mg2",
                    lambda o: (jnp.zeros_like(o[0]), jnp.zeros_like(o[1])))
     A._run(fx, cfg=_cfg(do_snow_to_graupel=False), T=T, hyd_kw=hyd)
     assert zero_ac and (np.asarray(s_dep["out"][1])[np.asarray(c)] < 0).all()
-    ni = [e for x, e in calls if e is not None
-          and np.array_equal(x, np.clip(np.asarray(hyd["N_i"]), 0.0, None))]
-    assert len(ni) == 1 and not np.asarray(ni[0]).any()
+    # MG2 (nsubi = 0): the ice number MG2 transports, the post-process
+    # number (micro_mg2_0.F90:2207), has lost nothing to the sublimation
+    n_tr = np.asarray(s_sed["in"][1])[np.asarray(c)]
+    assert np.array_equal(n_tr, np.asarray(hyd["N_i"])[np.asarray(c)]), n_tr
 
 
 def test_snow_deposition_off_switch(monkeypatch):
@@ -318,8 +312,13 @@ def test_whole_scheme_gradient_through_0C():
 
 def test_limited_deposition_reaches_the_tendencies(monkeypatch):
     """The deposition limiter's output is the deposition the scheme applies:
-    zeroing it inside the scheme returns exactly that vapour (dq_v) and heat."""
+    zeroing it inside the scheme returns exactly that vapour (dq_v) and heat.
+    Cloud ice does not sediment here: MG2 transports the post-process ice
+    (micro_mg2_0.F90:2206), whose inflow into a smaller cloud fraction
+    sublimates, so the deposition would also change that vapour."""
     fx = A._fx()
+    monkeypatch.setattr(W, "mg2_ice_fall_speeds",
+                        lambda lami, rho, cfg: (jnp.zeros_like(lami), jnp.zeros_like(lami)))
     c, T, hyd = _cold(fx)
     cfg = _cfg(do_snow_to_graupel=False)
     with monkeypatch.context() as mp:
