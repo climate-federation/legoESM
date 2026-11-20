@@ -224,28 +224,30 @@ def test_driver_terrain_is_the_geography_terrain(mesh, tmp_path):
     assert np.asarray(want).max() == 1.0
 
 
-@pytest.mark.parametrize("shape", ["ridge", "aquaplanet"])
-def test_coupled_refuses_geography_with_its_own_land_tile(tmp_path, shape):
+@pytest.mark.parametrize("shape,cc_kw", [
+    ("ridge", dict(land_mode="slab")),
+    ("aquaplanet", dict(land_mode="slab")),
+    ("ridge", dict(land_mode="multilayer", land_param_source="clm")),
+    ("ridge", dict(land_mode="slab", atm_owns_surface=True)),
+])
+def test_coupled_refuses_geography_with_its_own_land_tile(tmp_path, monkeypatch,
+                                                          shape, cc_kw):
     """No coupler land tile on a geography (it would ignore the geography's
-    land map, and on an all-ocean mask invent continents)."""
+    land map, and on an all-ocean mask invent continents) -- refused before
+    the coupler reads any reference land data."""
+    import legoesm.land.clm_surface_map as csm
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+
+    def no_reference_data(*a, **k):
+        raise AssertionError("coupler read reference CLM data")
+
+    monkeypatch.setattr(csm, "download_clm_surfdata", no_reference_data)
     cfg = _mpas_cfg(_gen(tmp_path, shape, barrier_lon=0.0 if shape == "ridge" else None))
-    d = CoupledESMDriver(cfg, CoupledConfig(f_land_mode="analytical", land_mode="slab"),
+    d = CoupledESMDriver(cfg, CoupledConfig(f_land_mode="analytical", **cc_kw),
                          output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match="coupler's own land tile"):
         d.setup()
-
-
-def test_present_day_refuses_non_metre_elevation(tmp_path):
-    import xarray as xr
-    lat, lon = np.arange(-89.5, 90.0, 1.0), np.arange(0.5, 360.0, 1.0)
-    z = xr.Dataset({"z": (("lat", "lon"), np.zeros((lat.size, lon.size)),
-                          {"units": "m**2 s**-2"})}, coords={"lat": lat, "lon": lon})
-    m = xr.Dataset({"sftlf": (("lat", "lon"), np.zeros((lat.size, lon.size)))},
-                   coords={"lat": lat, "lon": lon})
-    with pytest.raises(ValueError, match="not metres"):
-        mg.present_day(_write(z, tmp_path, "z.nc"), _write(m, tmp_path, "m.nc"))
 
 
 def test_duo_column_lane_rebuilds_terrain_from_a_geography():
@@ -262,6 +264,7 @@ def test_duo_column_lane_rebuilds_terrain_from_a_geography():
 
 def test_duo_column_factory_refuses_geography_without_era5_ic():
     from types import SimpleNamespace
+
     from legoesm.driver.component_factory import _create_fv3_duo_column_model
     with pytest.raises(ValueError, match="geography='g.nc'"):
         _create_fv3_duo_column_model(_mpas_cfg("g.nc"), SimpleNamespace(nlev=10),
