@@ -1331,6 +1331,9 @@ def main(argv=None, *, build_only=False):
         overrides["carbon_ic_path"] = args.carbon_ic
     overrides["transient_land_cover"] = args.transient_land_cover
     overrides["land_cover_surfdata"] = args.land_cover_surfdata
+    if getattr(args, "geography", ""):
+        # the geography is the one land mask: the coupler reads the atmosphere's
+        overrides["f_land_mode"] = "analytical"
 
     # Explicit --land-scheme overrides the preset's land model for ANY ocean mode
     # (the woa branch already applied its own default above; re-applying the same

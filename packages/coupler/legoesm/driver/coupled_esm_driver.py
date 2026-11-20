@@ -1046,12 +1046,18 @@ class CoupledESMDriver:
         cfg = self.coupled_cfg
         shape_2d = self._atm.grid.grid_shape_2d
         _sd = get_policy().storage
-        if self._atm.config.geography and cfg.land_mode != "none":
+        if self._atm.config.geography and cfg.land_mode != "none" and (
+                cfg.land_mode != "slab" or cfg.atm_owns_surface
+                or not cfg.use_pft
+                or getattr(cfg, "land_param_source", "analytical") != "clm"
+                or cfg.f_land_mode != "analytical"
+                or getattr(cfg, "transient_land_cover", False)):
             raise ValueError(
-                "geography with the coupler's own land tile: that tile builds its "
-                "land parameters without the geography's land map; use "
-                "land_mode='none' (with atm_owns_surface=True the atmosphere's "
-                "land reads the geography).")
+                "geography with the coupler's own land tile: only the slab tile "
+                "reads the geography's land map (land_mode='slab', use_pft=True, "
+                "land_param_source='clm', f_land_mode='analytical', "
+                "atm_owns_surface=False); or use land_mode='none' (with "
+                "atm_owns_surface=True the atmosphere's land reads the geography).")
 
         coupler_cfg = self._coupler_config or CouplerConfig()
         self._coupler_cfg = coupler_cfg  # reused by the 3D-ocean flux assembly
@@ -1254,8 +1260,11 @@ class CoupledESMDriver:
             f_land = jnp.zeros(shape_2d, dtype=_sd)
         elif cfg.f_land_mode == "analytical":
             # Use driver's land mask if non-trivial; otherwise generate one
-            # based on latitude (simple continents approximation).
-            if (self._atm._f_land is not None
+            # based on latitude (simple continents approximation).  A
+            # geography's mask is taken as-is, even all ocean.
+            if self._atm.config.geography:
+                f_land = self._atm._f_land
+            elif (self._atm._f_land is not None
                     and float(jnp.max(self._atm._f_land)) > 0):
                 f_land = self._atm._f_land
             elif cfg.land_mode != "none":
@@ -1410,8 +1419,12 @@ class CoupledESMDriver:
                     f"{cover.shape[0]} years {int(years[0])}-{int(years[-1])}, "
                     f"{variant} tuning), {lat_deg.size} columns")
                 return provider
-            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant,
-                                            vg_air_entry_m=head)
+            geo = self._atm.config.geography
+            if geo:
+                from legoesm.grids.geography import geography_clm_surface
+            provider = clm_surface_provider(
+                lat_deg, lon_deg, geography_clm_surface(geo) if geo else None,
+                variant=variant, vg_air_entry_m=head)
             logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
                         f"reference soil, {variant} tuning), {lat_deg.size} columns")
             return provider
