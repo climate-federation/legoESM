@@ -368,6 +368,25 @@ def plot_results(output_dir):
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+
+    # Match the WADEN WW3 comparison style: actual Times New Roman, inward
+    # ticks and embedded TrueType PDF fonts. Do not substitute a generic serif.
+    for path in Path("/mnt/c/Windows/Fonts").glob("times*.ttf"):
+        font_manager.fontManager.addfont(str(path))
+    font_manager.findfont("Times New Roman", fallback_to_default=False)
+    plt.rcParams.update({
+        "font.family": "Times New Roman", "font.size": 12,
+        "mathtext.fontset": "stix", "axes.titlesize": 13,
+        "axes.labelsize": 12, "axes.linewidth": 1.2,
+        "xtick.labelsize": 11, "ytick.labelsize": 11,
+        "xtick.direction": "in", "ytick.direction": "in",
+        "xtick.top": True, "ytick.right": True,
+        "xtick.major.width": 1.0, "ytick.major.width": 1.0,
+        "lines.linewidth": 1.9, "lines.markersize": 6,
+        "legend.fontsize": 10.5, "legend.frameon": False,
+        "pdf.fonttype": 42, "ps.fonttype": 42,
+    })
 
     out = Path(output_dir)
     cfg = json.loads((INPUTS / "config.json").read_text())
@@ -378,21 +397,25 @@ def plot_results(output_dir):
         ("C_0.53", "C: Wave, A=0.53 m", "#0072B2"),
         ("C_0.8", "C: Wave, A=0.80 m", "#009E73"),
     ]
+    line_styles = {"A_0": "-", "B_0": "--", "C_0.4": ":",
+                   "C_0.53": "-.", "C_0.8": (0, (5, 1, 1, 1, 1, 1))}
     data = {stem: np.load(out / f"{stem}.npz") for stem, _, _ in cases}
     reports = [json.loads((out / f"{stem}.json").read_text()) for stem, _, _ in cases]
     failed = [f"{r['label']}_{r['amplitude_m']:g}" for r in reports if not r["budget_pass"]]
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
     z = data["A_0"]["z_centres_m"]
     for stem, label, color in cases:
         d = data[stem]
-        axes[0, 0].plot(d["time_s"] / 3600, d["mld_m"], label=label, color=color)
-        axes[0, 1].plot(d["T"][-1], -z, label=label, color=color)
-        axes[1, 0].semilogx(d["K_v"][-1], -0.5 * (z[:-1] + z[1:]), label=label, color=color)
-        axes[1, 1].plot(d["T"][-1] - data["A_0"]["T"][-1], -z, label=label, color=color)
+        style = dict(label=label, color=color, linestyle=line_styles[stem])
+        axes[0, 0].plot(d["time_s"] / 3600, d["mld_m"], **style)
+        axes[0, 1].plot(d["T"][-1], -z, **style)
+        axes[1, 0].semilogx(d["K_v"][-1], -0.5 * (z[:-1] + z[1:]), **style)
+        axes[1, 1].plot(d["T"][-1] - data["A_0"]["T"][-1], -z, **style)
     axes[0, 0].set(
         xlabel="Time [h]", ylabel="Density-threshold MLD [m]", title="Mixed-layer response"
     )
-    axes[0, 0].legend(fontsize=8)
+    fig.legend(*axes[0, 0].get_legend_handles_labels(), loc="upper center",
+               bbox_to_anchor=(0.5, 0.958), ncol=3, handlelength=3.4)
     axes[0, 1].set(
         xlabel="Temperature [°C]", ylabel="Depth [m]", ylim=(-90, 0), title="Final temperature"
     )
@@ -408,9 +431,13 @@ def plot_results(output_dir):
         ylim=(-90, 0),
         title="Total contribution relative to upstream",
     )
-    for ax in axes.flat:
-        ax.grid(alpha=0.25)
-    fig.suptitle("legoESM Wave–KPP: prescribed S-L2 monochromatic-wave conditions")
+    for panel, ax in zip("abcd", axes.flat):
+        title = ax.get_title()
+        ax.set_title("")
+        ax.set_title(f"({panel}) {title}", loc="left", pad=10)
+        ax.grid(linestyle=":", linewidth=0.6, alpha=0.35)
+    fig.suptitle("legoESM Wave–KPP: prescribed S-L2 monochromatic-wave conditions",
+                 fontsize=14, y=0.99)
     fig.text(
         0.08,
         0.018,
@@ -421,24 +448,26 @@ def plot_results(output_dir):
             if failed
             else "Strict budget gate: PASS."
         ),
-        fontsize=9,
+        fontsize=10.5,
     )
-    fig.tight_layout(rect=(0, 0.095, 1, 0.96))
+    fig.tight_layout(rect=(0.01, 0.105, 0.99, 0.89), h_pad=2.0, w_pad=2.0)
     for suffix in ("png", "pdf"):
-        fig.savefig(out / f"coupling_comparison.{suffix}", dpi=180)
+        fig.savefig(out / f"coupling_comparison.{suffix}", dpi=400)
     plt.close(fig)
     la = np.geomspace(0.1, 3, 300)
     fig, (ax, stokes_ax) = plt.subplots(1, 2, figsize=(11, 4.5))
-    ax.loglog(la, np.sqrt(1 + 0.08 / la**2), label="Upstream legacy enhancement")
-    ax.loglog(la, np.sqrt(1 + 0.08 / la**4), label="MS00")
-    ax.loglog(la, np.sqrt(1 + (3.1 * la) ** -2 + (5.4 * la) ** -4), label="VR12-AL")
+    ax.loglog(la, np.sqrt(1 + 0.08 / la**2), color="#333333", linestyle=":",
+              label="Upstream legacy enhancement")
+    ax.loglog(la, np.sqrt(1 + 0.08 / la**4), color="#D55E00", linestyle="--", label="MS00")
+    ax.loglog(la, np.sqrt(1 + (3.1 * la) ** -2 + (5.4 * la) ** -4),
+              color="#0072B2", label="VR12-AL")
     ax.set(
         xlabel="Turbulent Langmuir number",
         ylabel="Velocity multiplier",
         title="Analytic closure comparison",
     )
     ax.legend()
-    ax.grid(alpha=0.25)
+    ax.grid(linestyle=":", linewidth=0.6, alpha=0.35)
     amplitudes = [r["amplitude_m"] for r in reports[2:]]
     stokes_ax.plot(
         amplitudes,
@@ -458,30 +487,35 @@ def plot_results(output_dir):
         ylabel="Surface Stokes drift [m/s]",
         title="Monochromatic diagnostic oracle",
     )
-    stokes_ax.legend(fontsize=9)
-    stokes_ax.grid(alpha=0.25)
-    fig.tight_layout()
+    stokes_ax.legend(fontsize=10.5)
+    stokes_ax.grid(linestyle=":", linewidth=0.6, alpha=0.35)
+    for panel, axis in zip("ab", (ax, stokes_ax)):
+        title = axis.get_title()
+        axis.set_title("")
+        axis.set_title(f"({panel}) {title}", loc="left", pad=10)
+    fig.tight_layout(pad=1.5, w_pad=2.0)
     for suffix in ("png", "pdf"):
-        fig.savefig(out / f"enhancement_factors.{suffix}", dpi=180)
+        fig.savefig(out / f"enhancement_factors.{suffix}", dpi=400)
     plt.close(fig)
     # This auxiliary descriptor was recorded before looking at the results.
     # Only the final, formed stratification peak is interpreted: initially
     # the lower column has constant N² and its argmax is not a unique depth.
     final_peak = [float(data[stem]["max_n2_depth_m"][-1]) for stem, _, _ in cases]
     final_mld = [r["final_mld_m"] for r in reports]
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     labels = ["A", "B", "C .40", "C .53", "C .80"]
-    axes[0].plot(labels, final_mld, "o-", label="Density-threshold MLD")
-    axes[0].plot(labels, final_peak, "s-", label="Maximum-stratification depth")
+    axes[0].plot(labels, final_mld, "o-", color="#0072B2", label="Density-threshold MLD")
+    axes[0].plot(labels, final_peak, "s--", color="#D55E00", label="Maximum-stratification depth")
     axes[0].set(ylabel="Final diagnostic depth [m]", title="Two distinct depth definitions at 48 h")
-    axes[0].legend(fontsize=9)
+    axes[0].legend(fontsize=10.5)
     axes[1].plot(
-        amplitudes, np.array(final_mld[2:]) - final_mld[1], "o-", label="Density-threshold MLD"
+        amplitudes, np.array(final_mld[2:]) - final_mld[1], "o-", color="#0072B2",
+        label="Density-threshold MLD"
     )
     axes[1].plot(
         amplitudes,
         np.array(final_peak[2:]) - final_peak[1],
-        "s-",
+        "s--", color="#D55E00",
         label="Maximum-stratification depth",
     )
     axes[1].axhline(
@@ -492,19 +526,22 @@ def plot_results(output_dir):
         ylabel="Additional depth relative to B [m]",
         title="Wave contribution, C minus B",
     )
-    axes[1].legend(fontsize=9)
-    for ax in axes:
-        ax.grid(alpha=0.25)
+    axes[1].legend(fontsize=10.5)
+    for panel, ax in zip("ab", axes):
+        title = ax.get_title()
+        ax.set_title("")
+        ax.set_title(f"({panel}) {title}", loc="left", pad=10)
+        ax.grid(linestyle=":", linewidth=0.6, alpha=0.35)
     fig.text(
         0.08,
         0.025,
         "Maximum-N² depth follows the literature descriptor; initial plateau argmax is not interpreted.\n"
         "All five strict heat-budget gates remain FAIL. These are response diagnostics, not LES skill scores.",
-        fontsize=9,
+        fontsize=10.5,
     )
-    fig.tight_layout(rect=(0, 0.10, 1, 1))
+    fig.tight_layout(rect=(0.01, 0.14, 0.99, 1), pad=1.5, w_pad=2.0)
     for suffix in ("png", "pdf"):
-        fig.savefig(out / f"depth_definitions.{suffix}", dpi=180)
+        fig.savefig(out / f"depth_definitions.{suffix}", dpi=400)
     plt.close(fig)
     summary = dict(
         postprocessing_revision=_git("rev-parse", "HEAD"),

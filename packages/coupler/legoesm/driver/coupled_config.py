@@ -205,8 +205,10 @@ class CoupledConfig(NamedTuple):
     ocean_restore_sss_tau_days: float = 0.0   # surface S relaxation [days]
 
     # --- Spectral wave component (optional) ---------------------------------
-    # ``wave_mode`` is "off" (default; every existing run is byte-identical) or
-    # "active".  Active requires a dynamic 3-D ocean (the depth/mask come from
+    # ``wave_mode`` is "off" (default; no wave initialization or stepping) or
+    # "active". Existing KPP runs retain the shared weak-buoyancy correction
+    # even with waves off; Langmuir enhancement is controlled separately.
+    # Active requires a dynamic 3-D ocean (the depth/mask come from
     # its H_bathy/land_mask), a WaveConfig, and converted NeuralSWM weights when networks are enabled.
     # The component is stepped once per coupling_dt with the neutral 10 m wind
     # derived from the coupler's stress and roughness; its surface Stokes-drift
