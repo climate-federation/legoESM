@@ -17,3 +17,17 @@ def test_signs_and_wind_dependence():
     lhf, tau = mod.model_fluxes(u, v, t2, td2, sst, ps)
     assert np.all(lhf > 0) and np.all(tau > 0)
     assert lhf[1] > lhf[0] and tau[1] > tau[0]
+
+
+def test_planted_ocean_nan_is_fatal():
+    import pytest
+    lat, lon = np.array([0.0]), np.array([200.0])
+    t = lambda y: (np.arange(124) * 21600 + (np.datetime64(f"{y}-12-01", "s")
+                                            - np.datetime64("1970-01-01", "s")).astype("int64"))
+    d = {y: dict(time=t(y), lat=lat, lon=lon,
+                 **{v: np.ones((124, 1, 1)) for v in mod._IN + mod._OUT}) for y in mod._YEARS}
+    ocean = np.ones((1, 1), bool)
+    mod.check_inputs(d, ocean, lat, lon)
+    d[1993]["10m_u_component_of_wind"][5, 0, 0] = np.nan
+    with pytest.raises(AssertionError, match="non-finite"):
+        mod.check_inputs(d, ocean, lat, lon)

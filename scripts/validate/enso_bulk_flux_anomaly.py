@@ -46,8 +46,14 @@ def fetch(out):
         if os.path.exists(f):
             continue
         t = pd.date_range(f"{y}-12-01", f"{y}-12-31 18:00", freq="6h")
-        sel = sub[_IN + _OUT].sel(time=t).compute(scheduler="threads", num_workers=16)
-        np.savez(f, **{v: sel[v].values for v in _IN + _OUT})
+        # ERA5 mean rates at hour h cover (h-1, h]: take h+1 so the flux window
+        # starts at the instantaneous input time and never reaches November.
+        si = sub[_IN].sel(time=t).compute(scheduler="threads", num_workers=16)
+        so = sub[_OUT].sel(time=t + pd.Timedelta("1h")).compute(
+            scheduler="threads", num_workers=16)
+        np.savez(f, time=t.values.astype("datetime64[s]").astype("int64"),
+                 lat=sub.latitude.values, lon=sub.longitude.values,
+                 **{v: si[v].values for v in _IN}, **{v: so[v].values for v in _OUT})
         print(f"# saved {f}", flush=True)
     st = sub[["land_sea_mask"]].isel(time=0).compute()
     np.savez(os.path.join(out, "static.npz"), lsm=st.land_sea_mask.values,
@@ -69,9 +75,24 @@ def model_fluxes(u, v, t2, td2, sst, ps):
         ocean_surface_q_sat(sst, ps, thermo_convention=cfg.thermo_convention,
                             bulk_scheme=cfg.bulk_scheme))
     rho = moist_air_density(t2, ps, q2)
+    # production hands the law a surface-referenced temperature (T + g z / c_p);
+    # ERA5's air temperature is at 2 m, so the shift is 2 m (~0.02 K)
+    theta = t2 + constants.g * 2.0 / constants.c_pd
     tau_x, _, _, lhf, _ = compute_surface_fluxes(
-        u, v, t2, q2, sst, q_sfc, rho, cfg, z_ref=cfg.z_ref, t_bot=t2)
+        u, v, theta, q2, sst, q_sfc, rho, cfg, z_ref=cfg.z_ref, t_bot=t2)
     return np.asarray(lhf), -np.asarray(tau_x)  # on-atmosphere -> on-surface
+
+
+def check_inputs(d, ocean, lat, lon):
+    """Fatal unless every year has the same 124 Dec samples, grid, and finite ocean data."""
+    t0 = d[1997]["time"] - np.datetime64("1997-12-01", "s").astype("int64")
+    for y, f in d.items():
+        assert f["time"].shape == (124,), (y, f["time"].shape)
+        assert np.array_equal(f["time"] - np.datetime64(f"{y}-12-01", "s").astype("int64"), t0), y
+        assert np.array_equal(f["lat"], lat) and np.array_equal(f["lon"], lon), y
+        for v in _IN + _OUT:
+            bad = ~np.isfinite(f[v][:, ocean])
+            assert not bad.any(), f"{y} {v}: {int(bad.sum())} non-finite ocean values"
 
 
 def _wmean(x, w):
@@ -90,9 +111,8 @@ def score(out):
     st = np.load(os.path.join(out, "static.npz"))
     lat, lon = st["lat"], st["lon"]
     d = {y: np.load(os.path.join(out, f"era5_dec{y}.npz")) for y in _YEARS}
-    for y in _YEARS:  # fatal on missing / non-finite data over ocean
-        assert d[y]["2m_temperature"].shape[0] == 124, (y, d[y]["2m_temperature"].shape)
     ocean = (st["lsm"] < 0.5) & np.all(np.isfinite(d[1997]["sea_surface_temperature"]), 0)
+    check_inputs(d, ocean, lat, lon)
     w = np.where(ocean, np.cos(np.deg2rad(lat))[:, None], 0.0)
     la, lo = np.meshgrid(lat, lon, indexing="ij")
     w34 = np.where((la >= _NINO34[0]) & (la <= _NINO34[1]) & (lo >= _NINO34[2])
