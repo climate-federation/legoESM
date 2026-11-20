@@ -6,7 +6,10 @@ import numpy as np
 import pytest
 
 from legoesm.core.smooth import (
+    abs_tanh,
     max_c1,
+    sign_tanh,
+    zero_at_or_below,
     min_c1,
     pnorm_smooth_min, positive_part_c1, sigmoid_switch, smooth_max, smooth_min, smooth_clamp,
     smooth_relu, smooth_abs, smoothstep_cubic, smoothstep_quintic,
@@ -214,3 +217,23 @@ def test_positive_part_c1_traced_inf_is_hard_and_finite():
     g = jax.jit(jax.grad(lambda x, s: jnp.sum(positive_part_c1(x, s))))(x, jnp.inf)
     assert jnp.all(jnp.isfinite(g))
     assert jnp.array_equal(f(x, 4.0), positive_part_c1(x, 4.0))
+
+
+def test_abs_sign_tanh_and_zero_at_or_below():
+    """RULE 5 helpers (#2546): width 0 is the hard switch bitwise; the smooth
+    forms stay within their stated bounds and are C2 at the switch."""
+    x = jnp.linspace(-0.05, 0.05, 1001)
+    assert jnp.array_equal(abs_tanh(x, 0.0), jnp.abs(x))
+    assert jnp.array_equal(sign_tanh(x, 0.0), jnp.sign(x))
+    w = 0.01
+    a = abs_tanh(x, w)
+    assert jnp.all(a <= jnp.abs(x)) and jnp.all(jnp.abs(x) - a <= 0.28 * w)
+    assert jnp.all(jnp.abs(sign_tanh(x, w)) <= 1.0)
+    tau = jnp.linspace(0.0, 3e-10, 301)
+    assert jnp.array_equal(zero_at_or_below(tau, 1e-10, 0.0), jnp.where(tau <= 1e-10, 0.0, tau))
+    r = zero_at_or_below(tau, 1e-10, 1e-10)
+    assert jnp.all(r[tau <= 1e-10] == 0.0) and jnp.array_equal(r[tau >= 2e-10], tau[tau >= 2e-10])
+    for f, x0 in ((lambda t: abs_tanh(t, w), 0.0), (lambda t: sign_tanh(t, w) * t * t, 0.0),
+                  (lambda t: zero_at_or_below(t, 1.0, 1.0), 1.0)):
+        for g in (jax.grad(f), jax.grad(jax.grad(f))):
+            assert abs(float(g(x0 - 1e-7)) - float(g(x0 + 1e-7))) < 1e-3

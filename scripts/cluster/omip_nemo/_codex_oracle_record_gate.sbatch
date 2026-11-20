@@ -10,6 +10,8 @@
 # Adversarial review of the oracle-record gate (3868d7f3a).  Half of the
 # mandatory dual review; GLM is the other half and runs separately.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 WT=/burg-archive/glab/users/pg2328/_omip_merge
 cd $WT || exit 1
 echo "=== HEAD $(git -C $WT log --oneline -1)"
@@ -59,3 +61,4 @@ codex exec --sandbox read-only -C $WT "$(cat $P)" < /dev/null
 echo "=== codex rc=$? ==="
 rm -f "$P"
 echo DONE
+exit ${RC:-0}

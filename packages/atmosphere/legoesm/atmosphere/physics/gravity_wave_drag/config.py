@@ -39,9 +39,14 @@ __param_spec__ = {
         "excluded": {
             "source_wind_p": "selects a level INDEX (the last reference interface with p below the value, E3SM gw_init), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "z_heat_max": "bounds the integer heating-depth search window (a comparison), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
-            "hdepth_min_km": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "hdepth_min_km": "threshold of the launch gate (E3SM's 2.5 km convention; a smooth ramp since #2569, hard and gradient-free at hdepth_gate_width 0); not a continuum closure (review F4; Hines launch_p precedent)",
             "mfcc_uh_slope": "stand-in-table-only surrogate slope (default 0 = uh-independent); the real source spectrum is the offline mfcc table, not a trained scalar",
             "storm_speed_min": "ground-relative storm-speed floor used only to truncate the integer Doppler cell-speed CS; a discretisation threshold, not a continuum closure",
+            "crit_minmax_sharpness": "numerics: sharpness [s/m] of the soft min/max of the heating-range wind (critical-level bin bounds; RULE 5, #2545; inf = E3SM), value voted by Claude+GLM+codex",
+            "index_round_width": "numerics: width (index units) of the smooth NINT/INT staircases of the table lookup, Doppler shift and critical-level bins (RULE 5, #2545; 0 = E3SM), value voted by Claude+GLM+codex",
+            "heating_ramp_width": "numerics: width [K/s] of the smoothstep that replaces the per-level netdt > 0 test of the heating-range scan (RULE 5, #2569; 0 = E3SM), value voted by Claude+GLM+codex",
+            "q0_max_sharpness": "numerics: sharpness [s/K] of the soft max of netdt over the heating range (RULE 5, #2569; inf = E3SM), value voted by Claude+GLM+codex",
+            "hdepth_gate_width": "numerics: width [km] of the launch-gate ramp below hdepth_min_km (RULE 5, #2569; 0 = E3SM), value voted by Claude+GLM+codex",
         },
         "params": {
             # --- convective source amplitude (Beres et al. 2004) ---
@@ -170,6 +175,9 @@ __param_spec__ = {
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "min_wind_sharpness": "sigmoid sharpness of the smooth min-wind activation; a differentiability/smoothing width, not a closure",
             "softmin_sharpness": "p of the p-norm smooth min of the saturation cap min(taudmp, tausat) and of the umcfac / tndmax tendency limiters; a differentiability/smoothing width, not a closure",
+            "umcfac_abs_width": "numerics: width of the smooth |ubm| in the umcfac tendency limit (RULE 5, #2546; 0 = CAM's |x|), E3SM value voted by Claude+GLM+codex",
+            "umcfac_sign_width": "numerics: width of the smooth sign(-ubm) of the limited tendency (RULE 5, #2546; 0 = CAM's sign), E3SM value voted by Claude+GLM+codex",
+            "taumin_ramp_width": "numerics: width [Pa] of the smooth taumin stress zeroing (RULE 5, #2546; 0 = CAM's hard zeroing), E3SM value voted by Claude+GLM+codex",
         },
         "params": {
             # --- orographic launch amplitude / efficiency ---
@@ -438,6 +446,20 @@ class McFarlaneConfig(NamedTuple):
         stress profile after propagation (``tau *= effgw``); with a land
         fraction the per-column efficiency is ``effgw_oro*landfrac`` (issue
         #1712).
+    umcfac_abs_width : float
+        Width [m/s] of the smooth ``|ubm|`` in the ``umcfac`` tendency limit
+        ``umcfac*|0 - ubm|/dt``: ``x*tanh(x/w)`` (RULE 5, #2546; default 0.01,
+        the E3SM value of #2241).  ``0.0`` is CAM's ``abs``, kinked where
+        the projected wind changes sign.
+    umcfac_sign_width : float
+        Width [m/s] of the smooth sign the limited tendency takes,
+        ``tanh(-ubm/ws)`` (RULE 5, #2546; default 1e-3, the E3SM value).
+        ``0.0`` is CAM's ``sign``.
+    taumin_ramp_width : float
+        Width [Pa] of the smooth ``taumin`` zeroing of ``tausat``/``taudmp``
+        (RULE 5, #2546; default 1e-10 = ``taumin``, the E3SM value):
+        ``tau*smoothstep_quintic((tau - taumin)/w)``.  ``0.0`` is CAM's hard
+        zeroing (a jump of ``taumin``).
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
@@ -456,6 +478,9 @@ class McFarlaneConfig(NamedTuple):
     tndmax_per_day: float = 400.0
     umcfac: float = 0.5
     effgw_oro: float = 0.125
+    umcfac_abs_width: float = 0.01
+    umcfac_sign_width: float = 1.0e-3
+    taumin_ramp_width: float = 1.0e-10
 
 
 class HinesConfig(NamedTuple):
@@ -749,6 +774,41 @@ class E3SMBeresConfig(NamedTuple):
         ``uh`` table-column lookup (used by the oracle harness to validate
         that the ``uh_idx``/``uh_col`` mapping is correct).  Only used when
         ``use_stand_in_table=True``.
+    index_round_width : float
+        RULE 5 (#2545) width, in index units, of the C2 staircases
+        (``core.smooth.smooth_round`` / ``smooth_trunc``) that replace E3SM's
+        ``NINT``/``INT`` of traced state: the table row ``NINT(hdepth)``, the
+        column ``NINT(uh)``, the cell speed ``INT(CS)``, the Doppler shift
+        ``NINT(CS/dc)`` and the critical-level bins ``NINT(Umin/dc)``,
+        ``NINT(Umax/dc)``; lookups and shifts blend the two neighbouring
+        integers linearly.  Each was a jump in the launched spectrum (a wind
+        scan found 10 kinks there, #2545).  In (0, 1]; ``0.0`` = E3SM exactly.
+        At a width > 0 the ``hd_index_rule`` choice is not distinguished (the
+        two rules differ only at exact half-km ties; vote 3-0).
+    crit_minmax_sharpness : float
+        RULE 5 (#2545) sharpness [s/m] of the log-sum-exp soft min/max of the
+        projected wind over the heating range (E3SM ``Umin``/``Umax``, the
+        critical-level bin bounds); default 100 (vote 3-0), overestimating
+        the extremum by at most ``ln(n_levels)/100`` m/s.  ``math.inf`` =
+        E3SM's ``min``/``max`` exactly.
+    heating_ramp_width : float
+        RULE 5 (#2569) width [K/s] of ``smoothstep_quintic(netdt/w)``, the
+        per-level heating indicator that replaces E3SM's ``netdt > 0`` in the
+        heating-range scan (exactly 0 for ``netdt <= 0``, 1 from ``w``).  The
+        scan becomes a survival recurrence whose per-level weights feed
+        hdepth, uh, q0, Umin/Umax and the expected launch interface (blended
+        over two neighbouring interfaces through ``index_round_width``).
+        ``0.0`` = E3SM exactly.
+    q0_max_sharpness : float
+        RULE 5 (#2569) sharpness [s/K] of the range-weighted log-sum-exp
+        that replaces E3SM's ``q0 = max(0, netdt over the range)``; above the
+        max by at most ``ln(n_range + 1)/q0_max_sharpness``.  ``math.inf`` =
+        E3SM.
+    hdepth_gate_width : float
+        RULE 5 (#2569) width [km] of the launch-gate ramp
+        ``smoothstep_quintic((hdepth - hdepth_min_km)/w + 1)``: E3SM's value at
+        and above ``hdepth_min_km``, 0 below ``hdepth_min_km - w``.  ``0.0`` =
+        E3SM's ``hdepth >= hdepth_min_km``.
     """
     cf: float = 20.0
     hdepth_scaling_factor: float = 1.0
@@ -770,6 +830,11 @@ class E3SMBeresConfig(NamedTuple):
     storm_speed_truncate: bool = True
     source_level_rule: str = "interface_below_p"
     hd_index_rule: str = "nint"
+    index_round_width: float = 0.1
+    crit_minmax_sharpness: float = 100.0
+    heating_ramp_width: float = 1.0e-7
+    q0_max_sharpness: float = 1.0e8
+    hdepth_gate_width: float = 0.1
 
 
 class E3SMCAMConfig(NamedTuple):

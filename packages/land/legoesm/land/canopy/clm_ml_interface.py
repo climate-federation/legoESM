@@ -109,6 +109,32 @@ _last_topology_key: tuple | None = None
 # ---------------------------------------------------------------------------
 
 
+def _install_clm_orbit(canopy_config: CLMMLCanopyConfig | None) -> None:
+    """Point CLM's process-global orbit (``clm_varorb``) at the run's orbit.
+
+    Unset (``None`` config or elements) = the year-2001 Berger orbit, the
+    land-only default.  Elements come in the radiation convention (perihelion
+    from the moving vernal equinox, = CESM mvelp + 180).
+    """
+    from legoesm.land.canopy.clm_ml_backend.clm_share.shr_orb_mod import (
+        shr_orb_derived, shr_orb_params,
+    )
+    import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_varorb as _varorb
+
+    if canopy_config is None or canopy_config.orbit_eccentricity is None:
+        # shr_orb_params returns (eccen, obliq_deg, mvelp_deg, obliqr, lambm0, mvelpp)
+        eccen, _obliq, _mvelp, obliqr, lambm0, mvelpp = shr_orb_params(2001)  # coeff-ok: non-leap reference year 2001 for CLM orbital parameters epoch
+    else:
+        eccen = float(canopy_config.orbit_eccentricity)
+        obliqr, lambm0, mvelpp = shr_orb_derived(
+            eccen, float(canopy_config.orbit_obliquity_deg),
+            (float(canopy_config.orbit_long_perihelion_deg) - 180.0) % 360.0)
+    _varorb.eccen = float(eccen)
+    _varorb.obliqr = float(obliqr)
+    _varorb.mvelpp = float(mvelpp)
+    _varorb.lambm0 = float(lambm0)
+
+
 def _ensure_clm_initialized() -> None:
     """Call CLM phase-1 initialization exactly once."""
     global _CLM_INITIALIZED
@@ -134,15 +160,7 @@ def _ensure_clm_initialized() -> None:
     # Must match the start_date_ymd=20010101 epoch used in _setup_clm_time so
     # that CLM's shr_orb_cosz gets consistent orbital geometry (year 2000 is
     # a leap year and shifts caldays after Feb 28 by one day).
-    from legoesm.land.canopy.clm_ml_backend.clm_share.shr_orb_mod import shr_orb_params
-    import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_varorb as _varorb
-
-    # shr_orb_params returns (eccen, obliq_deg, mvelp_deg, obliqr, lambm0, mvelpp)
-    eccen, _obliq, _mvelp, obliqr, lambm0, mvelpp = shr_orb_params(2001)  # coeff-ok: non-leap reference year 2001 for CLM orbital parameters epoch
-    _varorb.eccen = float(eccen)
-    _varorb.obliqr = float(obliqr)
-    _varorb.mvelpp = float(mvelpp)
-    _varorb.lambm0 = float(lambm0)
+    _install_clm_orbit(None)
 
     _CLM_INITIALIZED = True
 
@@ -884,10 +902,11 @@ def _compute_virtual_lon_deg(
 def _estimate_beam_fraction(
     sw_down: jnp.ndarray,
     cos_zen: np.ndarray,
+    s0: float = constants.S_0,
 ) -> jnp.ndarray:
     """Estimate direct-beam fraction from clearness index (Erbs et al. 1982).
 
-    Clearness index  kt = SW_down / (S0 * cos_zen)  where S0 = 1361 W/m².
+    Clearness index  kt = SW_down / (S0 * cos_zen)  with S0 the run solar constant.
     Erbs et al. (1982, Solar Energy 28:293-302) give the *diffuse* fraction Id/I:
 
         kt ≤ 0.22:  Id/I = 1 - 0.09*kt
@@ -903,7 +922,11 @@ def _estimate_beam_fraction(
     ``jax.grad`` tape.  ``cos_zen`` is solar geometry (a non-differentiated
     constant); passing a NumPy array is fine — ``jnp`` ops upcast it.
     """
-    S0 = constants.S_0  # solar constant [W/m²]
+    # Known approximation: the TOA reference has no Earth-Sun distance factor
+    # (+-3.4% at present day; meaningless near perihelion/aphelion of a very
+    # eccentric orbit).  Fixing it needs the factor from the coupler on both
+    # the eager and traced paths (open design question, 2026-11-19).
+    S0 = s0  # the run's solar constant [W/m²]
     sw = jnp.asarray(sw_down, dtype=jnp.float64)
     cos_zen_clamped = jnp.maximum(jnp.asarray(cos_zen, dtype=jnp.float64), 0.01)  # coeff-ok: minimum cos_zen floor to avoid division by zero in clearness index
     sw_toa = S0 * cos_zen_clamped
@@ -928,6 +951,7 @@ def _sw_partition(
     f_dir: float = -1.0,
     cos_zen: np.ndarray | None = None,
     f_dir_fallback: float = 0.30,  # coeff-ok: Erbs et al. (1982) overcast-sky beam fraction fallback; prefer CLMMLCanopyConfig.f_dir_noclearness_fallback
+    s0: float = constants.S_0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Partition total downwelling SW into direct/diffuse × VIS/NIR bands.
 
@@ -971,7 +995,7 @@ def _sw_partition(
             # Fallback: assume overcast (conservative, no zenith info)
             f_dir_arr = jnp.full_like(sw, f_dir_fallback)
         else:
-            f_dir_arr = _estimate_beam_fraction(sw, cos_zen)
+            f_dir_arr = _estimate_beam_fraction(sw, cos_zen, s0)
     else:
         f_dir_arr = jnp.full_like(sw, float(f_dir))
 
@@ -1024,6 +1048,8 @@ def _build_stubs(
         f_dir=float(canopy_config.f_dir),
         cos_zen=cos_zen,
         f_dir_fallback=float(canopy_config.f_dir_noclearness_fallback),
+        s0=(constants.S_0 if canopy_config.solar_s0 is None
+            else float(canopy_config.solar_s0)),
     )
 
     # shape (np_, numrad+1) = (np_, 3); CLM uses ivis=1, inir=2
@@ -1796,6 +1822,7 @@ def compute_clm_ml_canopy_fluxes(
 
     # ---- Phase-1 CLM initialization (once) ----
     _ensure_clm_initialized()
+    _install_clm_orbit(canopy_config)
 
     # Lazy imports of CLM-ML-JAX entry point
     from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyFluxesMod import MLCanopyFluxes

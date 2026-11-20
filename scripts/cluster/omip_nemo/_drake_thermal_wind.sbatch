@@ -23,6 +23,8 @@
 #
 # Record DERIVED from the day, never inherited.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge
 R=/burg-archive/glab/users/pg2328/legoESM
 cd $ROOT || exit 1
@@ -62,3 +64,4 @@ $PY -u scripts/validate/ocean_fidelity/drake_thermal_wind_vs_nemo.py \
   --south-lat=-62,-60 --north-lat=-57,-55.4 \
   --out-json "$R/results/omip_nemo/section_transport/drake_thermal_wind_deep_d${DAY}.json"
 echo "=== rc=$? ==="
+exit ${RC:-0}

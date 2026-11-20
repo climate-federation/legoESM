@@ -945,3 +945,16 @@ class TestUnstructuredTopographySmoothing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_snap_land_fraction_roundoff_only_near_one():
+    """Values within 1e-12 of 1 become exactly 1 (so the water fraction is
+    exactly 0); real fractions and the near-0 side are untouched."""
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.grids.topography import snap_land_fraction_roundoff
+    f = jnp.array([1.0 - 1e-14, 1.0 - 2.0 ** -53, 1.0 + 1e-15, 0.5, 1e-16,
+                   0.0, 1.0, 1.0 - 1e-9])
+    out = np.asarray(snap_land_fraction_roundoff(f))
+    np.testing.assert_array_equal(out[:3], 1.0)
+    np.testing.assert_array_equal(out[3:], np.asarray(f)[3:])

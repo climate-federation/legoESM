@@ -1505,7 +1505,7 @@ def test_land_ic_file_below_the_dry_floor_is_refused(monkeypatch, tmp_path):
 
 def test_every_land_forcing_field_is_classed_extensive_or_intensive():
     """A new AtmToSurface field must be classed: an amount the land books
-    over its step (scaled at the bootstrap) or a state it reads as is."""
+    over its step or a state it reads as is."""
     from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.driver.model_driver import (
         LAND_EXTENSIVE_FORCING, LAND_INTENSIVE_FORCING)
@@ -1515,10 +1515,11 @@ def test_every_land_forcing_field_is_classed_extensive_or_intensive():
 
 
 def test_bootstrap_then_regular_call_books_each_sample_once():
-    """Energy and water booking across a start: the bootstrap call (one
-    sample, advances K*DT) plus the next regular call (samples 2..K+1, K*DT)
-    book exactly the sum of the samples' amounts x DT for rain, snow and
-    downward SW/LW."""
+    """Water booking across a start: the bootstrap call (one sample, advances
+    K*DT) plus the next regular call (samples 2..K+1, K*DT) book exactly the
+    sum of the samples' rain and snow x DT.  Downward SW/LW reach the
+    bootstrap call unscaled (user 2026-11-19), so the radiation booked is the
+    samples' plus (K-1) x the first sample."""
     import jax
     from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.driver.model_driver import land_bootstrap_forcing
@@ -1532,10 +1533,25 @@ def test_bootstrap_then_regular_call_books_each_sample_once():
     boot = land_bootstrap_forcing(s[0], 1, K)
     reg = jax.tree_util.tree_map(lambda *x: sum(x) / K, *s[1:])
     # named here, not read from the module, so dropping one there fails here
-    for f in ("sw_down", "lw_down", "precip_total", "precip_snow"):
+    for f in ("precip_total", "precip_snow"):
         booked = (np.asarray(getattr(boot, f))
                   + np.asarray(getattr(reg, f))) * K * DT
         fell = sum(np.asarray(getattr(x, f)) for x in s) * DT
         np.testing.assert_allclose(booked, fell, rtol=1e-12, err_msg=f)
+    for f in ("sw_down", "lw_down"):
+        np.testing.assert_array_equal(np.asarray(getattr(boot, f)),
+                                      np.asarray(getattr(s[0], f)), err_msg=f)
+        booked = (np.asarray(getattr(boot, f))
+                  + np.asarray(getattr(reg, f))) * K * DT
+        fell = sum(np.asarray(getattr(x, f)) for x in s) * DT
+        np.testing.assert_allclose(
+            booked - fell, (K - 1) * np.asarray(getattr(s[0], f)) * DT,
+            rtol=1e-12, err_msg=f)
     np.testing.assert_array_equal(np.asarray(boot.T_lowest),
                                   np.asarray(s[0].T_lowest))
+    # n > 1 samples (a start mid-interval): water x n/K, radiation as is
+    boot2 = land_bootstrap_forcing(s[1], 2, 4)
+    np.testing.assert_allclose(np.asarray(boot2.precip_total),
+                               np.asarray(s[1].precip_total) * 0.5, rtol=1e-15)
+    np.testing.assert_array_equal(np.asarray(boot2.sw_down),
+                                  np.asarray(s[1].sw_down))

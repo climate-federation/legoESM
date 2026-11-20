@@ -36,7 +36,8 @@ from legoesm.land.canopy.config import (
 )
 from legoesm.land.canopy.photosynthesis import co2_compensation_point
 from legoesm.land.canopy.radiative_transfer import (
-    split_sw_components, canopy_shortwave_rt,
+    split_sw_components, canopy_shortwave_rt, canopy_shortwave_two_stream,
+    TwoStreamLeafOptics,
 )
 from legoesm.land.canopy.sif import two_leaf_canopy_sif
 from legoesm.land.canopy.stability import (
@@ -197,6 +198,10 @@ def static_canopy_roughness(lp, ncol):
         _get(lp, "hc", jnp.full(ncol, _DEFAULT_HC)), LAI,
         _get(lp, "rz0m", jnp.full(ncol, _DEFAULT_RZ0M)),
         _get(lp, "rd", jnp.full(ncol, _DEFAULT_RD)))
+
+
+_TWO_STREAM_OPTICS_FIELDS = ("rho_vis", "tau_vis", "rho_nir", "tau_nir",
+                             "phi1", "phi2", "kd", "cos2_theta")
 
 
 def _get(lp, name: str, fallback):
@@ -424,10 +429,26 @@ def compute_two_leaf_canopy_fluxes(
     PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV = split_sw_components(
         forcing.sw_down, cos_zenith)
 
-    sw_rt = canopy_shortwave_rt(
-        PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
-        SZA, LAI, CI, ALB_VIS, ALB_NIR,
-        Vc3_leaf_stressed, Vc4_leaf_stressed, kn)
+    if cc.sw_scheme == "ryu":
+        sw_rt = canopy_shortwave_rt(
+            PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
+            SZA, LAI, CI, ALB_VIS, ALB_NIR,
+            Vc3_leaf_stressed, Vc4_leaf_stressed, kn)
+    elif cc.sw_scheme == "two_stream":
+        _optics = [_get(lp, f"leaf_{n}", None) for n in _TWO_STREAM_OPTICS_FIELDS]
+        if any(o is None for o in _optics):
+            raise ValueError(
+                "sw_scheme='two_stream' needs per-column leaf optics (CanopyLandParams "
+                f"leaf_{'/'.join(_TWO_STREAM_OPTICS_FIELDS)}); this driver does not build "
+                "them (fill them with radiative_transfer.two_stream_leaf_optics(pft))")
+        sw_rt = canopy_shortwave_two_stream(
+            PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
+            SZA, LAI, CI, ALB_VIS, ALB_NIR,
+            Vc3_leaf_stressed, Vc4_leaf_stressed, kn,
+            TwoStreamLeafOptics(*_optics), cc.two_stream_clip_width)
+    else:
+        raise ValueError(f"unknown sw_scheme {cc.sw_scheme!r}; must be one of "
+                         "('ryu', 'two_stream')")
 
     # ---- Thermodynamic / atmosphere variables ----
     Ps    = forcing.p_surface
