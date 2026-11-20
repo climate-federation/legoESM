@@ -3183,6 +3183,34 @@ class PlaneCompressibleEulerModel:
                 _to_fp64(state) if self.config.mixed_precision else state,
                 self.grid, self.height_coord, self.terrain_metric,
             )
+            self._cache_target_anomaly(
+                _to_fp64(state) if self.config.mixed_precision else state)
+
+    def _cache_target_anomaly(self, state) -> None:
+        """Cache the anchor's rho' integral next to the total it belongs to.
+
+        The fixer works in anomaly form; handing it ``target - B`` instead
+        carries the rounding of the ~1e14 total (float32: 2e-6 kg/m3 off,
+        a one-time ~6e-6 relative dry-mass jump at the first fixer call).
+        """
+        self._target_anomaly = (self._target_mass, _plane_weighted_mass_sum(
+            state.rho_prime.data, self.grid, self.height_coord,
+            self.terrain_metric,
+        ))
+
+    def _fixer_target(self, target, state):
+        """Anomaly-form fixer target: the cached anchor anomaly when it
+        belongs to ``target``; the pre-step anomaly when not anchoring;
+        else (``_target_mass`` set by a caller) ``target - B``."""
+        cached = getattr(self, "_target_anomaly", None)
+        if cached is not None and cached[0] is target:
+            return cached[1]
+        if not self.config.anchor_mass_to_initial:
+            return _plane_weighted_mass_sum(
+                state.rho_prime.data, self.grid, self.height_coord,
+                self.terrain_metric,
+            )
+        return target - self._background_mass
 
     def step(
         self,
@@ -3222,11 +3250,14 @@ class PlaneCompressibleEulerModel:
                 self._target_mass = compute_dry_mass_plane(
                     mass_state, self.grid, self.height_coord, self.terrain_metric,
                 )
+                self._cache_target_anomaly(mass_state)
         target = self._target_mass
         if target is None and self.config.fix_mass:
             target = compute_dry_mass_plane(
                 mass_state, self.grid, self.height_coord, self.terrain_metric,
             )
+        if self.config.fix_mass:
+            target = self._fixer_target(target, mass_state)
         return self._step_jit(state, dt, target, physics_fn)
 
     def step_halo(
@@ -3524,14 +3555,14 @@ class PlaneCompressibleEulerModel:
             )
 
         if self.config.fix_mass and target_mass is not None:
+            # ``target_mass`` is already the anomaly target (see
+            # ``_fixer_target``): delta = (target - sum(rho' w)) / V.
             fixer = (_fix_mass_fp64(fix_mass_nonhydrostatic_plane)
                      if self.config.mixed_precision
                      else fix_mass_nonhydrostatic_plane)
             state_new = fixer(
                 state_new, target_mass, self.grid, self.height_coord,
                 self.terrain_metric,
-                # Concrete eager constant read off the static ``self``
-                # at trace time — bit-preserved as a jaxpr literal.
-                background_mass=self._background_mass,
+                background_mass=jnp.zeros((), target_mass.dtype),
             )
         return state_new
