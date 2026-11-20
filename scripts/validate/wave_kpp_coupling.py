@@ -414,7 +414,7 @@ def plot_results(output_dir):
         xlabel="Time [h]", ylabel="Density-threshold MLD [m]", title="Mixed-layer response"
     )
     fig.legend(*axes[0, 0].get_legend_handles_labels(), loc="upper center",
-               bbox_to_anchor=(0.5, 0.995), ncol=5, fontsize=10,
+               bbox_to_anchor=(0.5, 0.995), ncol=5, fontsize=12.5,
                handlelength=2.5, columnspacing=1.1, handletextpad=0.5)
     axes[0, 1].set(
         xlabel="Temperature [°C]", ylabel="Depth [m]", ylim=(-90, 0), title="Final temperature"
@@ -438,7 +438,7 @@ def plot_results(output_dir):
         ax.grid(linestyle=":", linewidth=0.6, alpha=0.35)
     # Interpretation and gate outcomes remain in summary.json and the
     # validation report; captions belong alongside figures in the PR.
-    fig.tight_layout(rect=(0, 0, 1, 0.935), pad=1.2, h_pad=1.4, w_pad=1.8)
+    fig.tight_layout(rect=(0, 0, 1, 0.96), pad=1.2, h_pad=1.4, w_pad=1.8)
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"coupling_comparison.{suffix}", dpi=400)
     plt.close(fig)
