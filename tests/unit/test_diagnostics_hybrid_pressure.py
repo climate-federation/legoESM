@@ -296,7 +296,10 @@ def test_tas_2m_follows_surface_stability_scheme():
         tas_default, tas_grachev)
     # Physical bracket: between the surface and the lowest-level temperature.
     for tas in (tas_default, tas_grachev):
-        assert np.all(tas >= 220.0) and np.all(tas <= 300.0)
+        # Bracket in TEMPERATURE: the 2 m value is theta at 2 m minus the
+        # potential-to-temperature step g*2/c_p (CESM tref does the same),
+        # so it may sit that far below a 220 K skin.
+        assert np.all(tas >= 220.0 - 0.02) and np.all(tas <= 300.0)
 
 
 def test_tas_2m_follows_surface_bulk_scheme():
@@ -311,7 +314,7 @@ def test_tas_2m_follows_surface_bulk_scheme():
     np.testing.assert_array_equal(tas_default, tas_constant)
     np.testing.assert_array_equal(tas_default, tas_coare3)
     assert np.all(np.abs(tas_ly - tas_default) > 0.5), (tas_default, tas_ly)
-    assert np.all(tas_ly >= 220.0) and np.all(tas_ly <= 300.0)
+    assert np.all(tas_ly >= 220.0 - 0.02) and np.all(tas_ly <= 300.0)
 
 
 # ---------------------------------------------------------------------------
@@ -409,3 +412,60 @@ def test_plev19_shared_bracket_matches_the_single_call_formula(with_vcoord, dtyp
         ref = _plev19_reference(dc, field, p_s)
         np.testing.assert_array_equal(dc._interp_to_plev19(field, p_s, bracket), ref)
         np.testing.assert_array_equal(dc._interp_to_plev19(field, p_s), ref)
+
+
+# ---------------------------------------------------------------------------
+# _tas_2m hands the similarity law the lowest level's TRUE height and its
+# POTENTIAL temperature (CESM camsrfexch: zbot = zm(pver), thbot = T exner).
+# Labelling the ~60-225 m level as 10 m and passing absolute T published a
+# 2 m value ~g z_low / c_p too cold (0.6 K at z_low = 60 m) on both legs.
+# ---------------------------------------------------------------------------
+def _cesm_sea_tas(z_bot, T_atm, T_low, q_low, sst, u, rho):
+    import jax.numpy as jnp
+    from legoesm.core.bulk_flux import compute_sam_oceflx_fluxes
+    from legoesm.thermo import saturation_mixing_ratio
+    q_sfc = saturation_mixing_ratio(sst, jnp.full_like(sst, 1.0e5))
+    *_, t2m = compute_sam_oceflx_fluxes(
+        u, jnp.zeros_like(u), T_atm, q_low, sst, q_sfc, rho,
+        z_bot=z_bot, variant="cesm", return_2m=True, t_bot=T_low)
+    return np.asarray(t2m)
+
+
+def test_tas_2m_sea_leg_uses_level_height_and_potential_temperature():
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.core.bulk_flux import surface_reference_state
+    from legoesm.thermo import virtual_temperature
+
+    coord = create_sigma_coordinate(NLEV)
+    dc = DiagnosticCollector(nlev=NLEV, sigma_full=coord.sigma_full,
+                             dsigma=coord.dsigma, vcoord=coord,
+                             surface_bulk_scheme="large_yeager_cesm")
+    state = _tas_stub_state(NLEV)
+    q_v = jnp.full((2, NLEV), 1.5e-2)
+    sst = jnp.full((2,), 303.0)            # warm sea under 300 K air: unstable
+    tas = np.asarray(dc._tas_2m(state, q_v, sst, jnp.zeros((2,)), T_ice=271.35))
+
+    T_low = state.T.data[..., -1]
+    q_low = q_v[..., -1]
+    p_s = state.p_s.data
+    p_low = jnp.asarray(coord.pressure_at_full(p_s))[..., -1]
+    dp_low = jnp.asarray(coord.layer_thickness_dp(p_s))[..., -1]
+    rho = p_low / (constants.R_d * T_low)
+    z_low = 0.5 * constants.R_d * virtual_temperature(T_low, q_low) * dp_low / (
+        constants.g * p_low)
+    assert float(z_low[0]) > 50.0            # a real model level, not 10 m
+    theta_low, _ = surface_reference_state(T_low, 10.0, z_low)
+    u = state.u.data[..., -1]
+
+    # 1. The diagnostic IS the CESM tref evaluated at (z_low, theta): wiring.
+    ref = _cesm_sea_tas(z_low, theta_low, T_low, q_low, sst, u, rho)
+    np.testing.assert_allclose(tas, ref, rtol=0.0, atol=1e-9)
+    # 2. It is warmer than the old (10 m, absolute T) inputs by about
+    #    g z_low / c_p; this is the assertion that fails when the fix is
+    #    reverted.
+    old = _cesm_sea_tas(10.0, T_low, T_low, q_low, sst, u, rho)
+    gain = tas - old
+    expected = float((constants.g / constants.c_pd) * z_low[0])
+    assert np.all(gain > 0.3), (tas, old)
+    assert np.all(np.abs(gain - expected) < 0.35 * expected), (gain, expected)
