@@ -401,8 +401,7 @@ def plot_results(output_dir):
                    "C_0.53": "-.", "C_0.8": (0, (5, 1, 1, 1, 1, 1))}
     data = {stem: np.load(out / f"{stem}.npz") for stem, _, _ in cases}
     reports = [json.loads((out / f"{stem}.json").read_text()) for stem, _, _ in cases]
-    failed = [f"{r['label']}_{r['amplitude_m']:g}" for r in reports if not r["budget_pass"]]
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7.4))
     z = data["A_0"]["z_centres_m"]
     for stem, label, color in cases:
         d = data[stem]
@@ -415,7 +414,8 @@ def plot_results(output_dir):
         xlabel="Time [h]", ylabel="Density-threshold MLD [m]", title="Mixed-layer response"
     )
     fig.legend(*axes[0, 0].get_legend_handles_labels(), loc="upper center",
-               bbox_to_anchor=(0.5, 0.958), ncol=3, handlelength=3.4)
+               bbox_to_anchor=(0.5, 0.995), ncol=5, fontsize=10,
+               handlelength=2.5, columnspacing=1.1, handletextpad=0.5)
     axes[0, 1].set(
         xlabel="Temperature [°C]", ylabel="Depth [m]", ylim=(-90, 0), title="Final temperature"
     )
@@ -436,21 +436,9 @@ def plot_results(output_dir):
         ax.set_title("")
         ax.set_title(f"({panel}) {title}", loc="left", pad=10)
         ax.grid(linestyle=":", linewidth=0.6, alpha=0.35)
-    fig.suptitle("legoESM Wave–KPP: prescribed S-L2 monochromatic-wave conditions",
-                 fontsize=14, y=0.99)
-    fig.text(
-        0.08,
-        0.018,
-        "A→B: weak-buoyancy correction. B→C: Wave / VR12-AL feedback. A→C: total change.\n"
-        "48 h prescribed-wave column; no global-climate or LES skill score.\n"
-        + (
-            f"Strict budget gate: FAIL ({', '.join(failed)}). All outcomes retained."
-            if failed
-            else "Strict budget gate: PASS."
-        ),
-        fontsize=10.5,
-    )
-    fig.tight_layout(rect=(0.01, 0.105, 0.99, 0.89), h_pad=2.0, w_pad=2.0)
+    # Interpretation and gate outcomes remain in summary.json and the
+    # validation report; captions belong alongside figures in the PR.
+    fig.tight_layout(rect=(0, 0, 1, 0.935), pad=1.2, h_pad=1.4, w_pad=1.8)
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"coupling_comparison.{suffix}", dpi=400)
     plt.close(fig)
@@ -502,7 +490,7 @@ def plot_results(output_dir):
     # the lower column has constant N² and its argmax is not a unique depth.
     final_peak = [float(data[stem]["max_n2_depth_m"][-1]) for stem, _, _ in cases]
     final_mld = [r["final_mld_m"] for r in reports]
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
     labels = ["A", "B", "C .40", "C .53", "C .80"]
     axes[0].plot(labels, final_mld, "o-", color="#0072B2", label="Density-threshold MLD")
     axes[0].plot(labels, final_peak, "s--", color="#D55E00", label="Maximum-stratification depth")
@@ -532,14 +520,7 @@ def plot_results(output_dir):
         ax.set_title("")
         ax.set_title(f"({panel}) {title}", loc="left", pad=10)
         ax.grid(linestyle=":", linewidth=0.6, alpha=0.35)
-    fig.text(
-        0.08,
-        0.025,
-        "Maximum-N² depth follows the literature descriptor; initial plateau argmax is not interpreted.\n"
-        "All five strict heat-budget gates remain FAIL. These are response diagnostics, not LES skill scores.",
-        fontsize=10.5,
-    )
-    fig.tight_layout(rect=(0.01, 0.14, 0.99, 1), pad=1.5, w_pad=2.0)
+    fig.tight_layout(pad=1.5, w_pad=2.0)
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"depth_definitions.{suffix}", dpi=400)
     plt.close(fig)
