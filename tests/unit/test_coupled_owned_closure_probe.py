@@ -134,18 +134,22 @@ def test_land_bootstrap_call_creates_no_water(tmp_path):
 @pytest.mark.slow
 def test_duo_column_lane_runs_and_closes_land(tmp_path, capsys):
     """--grid fv3duo runs the duo cube's column lane (6 N^2 columns) and its
-    land row closes to roundoff over three coupling windows, as on MPAS."""
+    land row closes to roundoff over three coupling windows, as on MPAS; the
+    atmosphere row too, with the store on the duo's own delp.  dt 150 s, not
+    the MPAS test's 300 s, so a flux sum left on the MPAS constant fails."""
     import json
     out = tmp_path / "duo.json"
     assert probe.main(["--grid", "fv3duo", "--resolution", "12", "--dt",
-                       "300", "--vertical-coord", "cam_l32", "--nlev", "32",
+                       "150", "--vertical-coord", "cam_l32", "--nlev", "32",
                        "--days", "0.0625", "--json", str(out)]) == 0
     cfg = json.loads(next(ln[len("CONFIG "):] for ln in capsys.readouterr()
                           .out.splitlines() if ln.startswith("CONFIG ")))
     assert (cfg["grid"], cfg["ncells"], cfg["dt"]) == ("fv3duo", 6 * 12 ** 2,
-                                                       300.0)
-    rows = json.loads(out.read_text())["rows"]
+                                                       150.0)
+    res = json.loads(out.read_text())
+    rows, e_atm = res["rows"], abs(res["fluxes"]["E_atm"])
     assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
+    assert abs(rows["atm_water"]) < 1.0e-6 * e_atm, (rows["atm_water"], e_atm)
 
 
 def test_land_emission_terms_split():

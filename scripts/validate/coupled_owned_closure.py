@@ -298,15 +298,32 @@ def main(argv=None) -> int:
             or land0.canopy_state is not None:
         raise SystemExit("land store not covered by this probe")
 
+    def layer_dp():
+        """The layer mass the lane carries [Pa]: MPAS's hybrid dp(p_s); the
+        duo's own prognostic delp (Lagrangian, moved by the water the
+        physics applies), not the hybrid profile of its p_s."""
+        if args.grid == "mpas":
+            return _np(atm.sigma.layer_thickness_dp(atm.state.p_s.data)
+                       ).reshape(n, -1)
+        m = atm.model
+        ci = slice(m.ng, m.ng + m.n)
+        delp = np.asarray(m._faces6(atm.state.native)["state"]["delp"])
+        return m._columns(delp[:, ci, ci]).reshape(n, -1)
+
+    if args.grid == "fv3duo":
+        hyb = _np(atm.sigma.layer_thickness_dp(atm.state.p_s.data)
+                  ).reshape(n, -1)
+        print(f"INSTR start max|delp - dp_hybrid(p_s)|/dp = "
+              f"{np.max(np.abs(layer_dp() - hyb) / hyb):.3e}")
+
     def species_totals():
-        dp = _np(atm.sigma.layer_thickness_dp(atm.state.p_s.data)).reshape(n, -1)
+        dp = layer_dp()
         return {s: float(np.sum(np.sum(_np(atm.current_tracer(s)).reshape(n, -1)
                                        * dp, axis=-1) / constants.g * area))
                 for s in carried}
 
     def arrays():
-        p_s = atm.state.p_s.data
-        dp = _np(atm.sigma.layer_thickness_dp(p_s)).reshape(n, -1)
+        dp = layer_dp()
         q = sum(_np(atm.current_tracer(s)).reshape(n, -1) for s in carried)
         L = atm._land_ml_state
         z = np.zeros(n)
@@ -380,6 +397,26 @@ def main(argv=None) -> int:
 
     model, orig = atm.model, atm.model.step
     n_steps = [0]
+    dyn_dw = [np.zeros(2)]
+    if args.trace and args.grid == "fv3duo":
+        # attribution: the water the duo DYNAMICS alone changes per step
+        # (bundle before vs after dyn.step, on its own delp)
+        ci = slice(model.ng, model.ng + model.n)
+        iw = [model.tracer_names.index(s) for s in carried]
+
+        def w_bundle(b):
+            f = model._faces6(b)
+            dp = np.asarray(f["state"]["delp"])[:, ci, ci]
+            q = sum(np.asarray(f["q"][i])[:, ci, ci] for i in iw)
+            return np.array([float(np.sum(model._columns(x).sum(-1) * area)
+                                   / constants.g) for x in (q * dp, dp)])
+        dyn, dyn_step = model.dyn, model.dyn.step
+
+        def traced_dyn_step(b, dt_):
+            out_b = dyn_step(b, dt_)
+            dyn_dw[0] += w_bundle(out_b) - w_bundle(b)
+            return out_b
+        dyn.step = traced_dyn_step
 
     def step(*a, **kw):
         out = orig(*a, **kw)
@@ -433,6 +470,14 @@ def main(argv=None) -> int:
             r = (w - trace["W"]) - ((F["P_land"] - trace["P"])
                                     - (e_l - trace["E"])
                                     - (F["R_land"] - trace["R"]))
+            if args.grid == "fv3duo":
+                wa = stores(arrays(), k)["W_atm"]
+                print(f"TRACE_ATM ex {n_ex[0]:3d} dW_atm {wa - trace['WA']: .4e}"
+                      f" E-P {(F['E_atm'] - F['P_atm']) - trace['EP']: .4e}"
+                      f" dyn_dW {(dyn_dw[0] - trace['DY'])[0]: .4e}"
+                      f" dyn_dM {(dyn_dw[0] - trace['DY'])[1]: .4e}")
+                trace.update(WA=wa, EP=F["E_atm"] - F["P_atm"],
+                             DY=dyn_dw[0].copy())
             print(f"TRACE ex {n_ex[0]:3d} day {day:.4f} dW_land {w - trace['W']: .4e}"
                   f" E_land {e_l - trace['E']: .4e} land_resid {r: .4e}")
             trace.update(W=w, E=e_l, P=F["P_land"], R=F["R_land"])
@@ -440,7 +485,8 @@ def main(argv=None) -> int:
     a0 = arrays()
     s0 = stores(a0, k)
     sp0 = species_totals()
-    trace = dict(W=s0["W_land"], E=0.0, P=0.0, R=0.0)
+    trace = dict(W=s0["W_land"], E=0.0, P=0.0, R=0.0, WA=s0["W_atm"], EP=0.0,
+                 DY=np.zeros(2))
     pend0 = (I(prev["H"].evap) * win
              + I(prev["O"].ice_lake_freshwater_flux) * win)
     status = d.run(segment_callback=sample)
@@ -458,6 +504,11 @@ def main(argv=None) -> int:
                       ("stale_minus_band", stale - F["A_band_land"])):
             print(f"ETERM {kk:16s} {v: .6e} J  {v / land_area_t: .4e} W/m2 "
                   "(land mean)")
+    if args.grid == "fv3duo":
+        hyb = _np(atm.sigma.layer_thickness_dp(atm.state.p_s.data)
+                  ).reshape(n, -1)
+        print(f"INSTR end max|delp - dp_hybrid(p_s)|/dp = "
+              f"{np.max(np.abs(layer_dp() - hyb) / hyb):.3e}")
     a1 = arrays()
     s1 = stores(a1, k)
     sp1 = species_totals()
