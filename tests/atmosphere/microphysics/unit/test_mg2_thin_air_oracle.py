@@ -439,7 +439,7 @@ def _melt_column(monkeypatch, zero=()):
     monkeypatch.setattr(M, "mg2_ice_sedimentation", wrap(real_i, "ice"))
     monkeypatch.setattr(M, "mg2_cloud_sedimentation", wrap(real_c, "drop"))
     cfg = _production_morrison()._replace(**HARD_LIMIT, warm_rain_scheme="kk2000_cam6",
-                                          specified_nc_droplet_sedimentation=True)
+                                          prognostic_droplet_number=True)
     M.morrison_microphysics(T, qv, hyd, p, ph, rho, dz, 1800.0, cfg, cloud_fraction=cf)
     assert len(seen["T"]) == 2            # start-of-step melt, post-sedimentation melt
     return seen["T"][1][0], seen["melt"][1][0], seen["ice"][0], seen["drop"][0]

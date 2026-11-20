@@ -1250,7 +1250,12 @@ def mg2_cloud_fallout(c0, n0, f, fn, cldm, p_half, dt, n_substeps_max):
     def body(i, carry):
         c, n, dqc, dn, dqv, sfc = carry
         on = (i < nsub).astype(q_c.dtype)
-        F, Fn = fc * c, fnc * n
+        # Donor bound: a sub-step never exports more than the level holds.
+        # MG2 never needs it (its nstep is uncapped, so fc dt/nstep <= pdel);
+        # it binds only where n_substeps_max clips nstep, and is bitwise
+        # inert otherwise (vote 2026-11-20: author, GLM).
+        F = jnp.minimum(fc * c, jnp.maximum(c, 0.0) * pdel / (dt * inv))
+        Fn = jnp.minimum(fnc * n, jnp.maximum(n, 0.0) * pdel / (dt * inv))
         tend_c = (F - d * _shift(F)) / pdel
         tend_n = (Fn - d * _shift(Fn)) / pdel
         evap = (1.0 - d) * _shift(F) / pdel
