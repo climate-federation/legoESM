@@ -2,10 +2,14 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.core.smooth import (
+    abs_tanh,
     max_c1,
+    sign_tanh,
+    zero_at_or_below,
     min_c1,
     pnorm_smooth_min, positive_part_c1, sigmoid_switch, smooth_max, smooth_min, smooth_clamp,
     smooth_relu, smooth_abs, smoothstep_cubic, smoothstep_quintic,
@@ -126,6 +130,53 @@ def test_pnorm_smooth_min():
     assert bool(jnp.isfinite(g)) and 0.0 < float(g) < 1.0
 
 
+def test_pnorm_smooth_min_tie_curvature_and_zero_inputs():
+    """#2241: exact second derivative at a tie (min/max-based AD zeroed it);
+    exact min and finite gradients at zero inputs with eps = 0, at the
+    default and at the hard limit."""
+    if not jax.config.jax_enable_x64:
+        pytest.skip("curvature checked in fp64 (JAX_ENABLE_X64=1)")
+    from jax.test_util import check_grads
+    p = 50.0
+    f = lambda a, b: pnorm_smooth_min(a, b, p, 0.0)  # noqa: E731
+    two = jnp.array(2.0)
+    check_grads(lambda a: f(a, two), (two,), order=2, modes=("fwd", "rev"), eps=1e-4)
+    check_grads(f, (two, two), order=2, modes=("fwd", "rev"), eps=1e-4)
+    want = -(p + 1.0) * 2.0 ** (-1.0 / p) / (4.0 * 2.0)
+    got = jax.grad(jax.grad(lambda a: f(a, two)))(two)
+    np.testing.assert_allclose(float(got), want, rtol=1e-10)
+    for a, b in ((0.0, 3.0), (3.0, 0.0), (0.0, 0.0)):
+        a, b = jnp.array(a), jnp.array(b)
+        for pp in (p, 1e12):
+            assert float(pnorm_smooth_min(a, b, pp, 0.0)) == 0.0
+            ga, gb = jax.grad(lambda x, y: pnorm_smooth_min(x, y, pp, 0.0), (0, 1))(a, b)
+            assert bool(jnp.isfinite(ga)) and bool(jnp.isfinite(gb))
+    np.testing.assert_allclose(float(pnorm_smooth_min(jnp.array(3.0), jnp.array(5.0), 1e12, 0.0)),
+                               3.0, rtol=1e-12)
+
+
+def test_pnorm_smooth_min_tiny_inputs_have_finite_gradients_in_fp32():
+    """#2241 review: with eps = 0 a tiny hi (1e-20) gave a NaN d/dhi in fp32
+    (lo/hi differentiated through hi^-2); the analytic JVP keeps it finite."""
+    for a, b in ((0.0, 1e-20), (1e-30, 1e-20), (0.0, 1e-30), (1e-25, 1e-20)):
+        a, b = jnp.asarray(a, jnp.float32), jnp.asarray(b, jnp.float32)
+        ga, gb = jax.grad(lambda x, y: pnorm_smooth_min(x, y, 50.0, 0.0), (0, 1))(a, b)
+        assert bool(jnp.isfinite(ga)) and bool(jnp.isfinite(gb)), (a, b, ga, gb)
+        f = lambda x, y: pnorm_smooth_min(x, y, 50.0, 0.0)  # noqa: E731
+        for x, y in ((a, b), (b, a)):
+            hess = jax.hessian(f, (0, 1))(x, y)
+            assert all(bool(jnp.isfinite(h)) for row in hess for h in row), (x, y, hess)
+            fwd = jax.jacfwd(jax.jacfwd(f, (0, 1)), (0, 1))(x, y)
+            assert all(bool(jnp.isfinite(h)) for row in fwd for h in row), (x, y, fwd)
+            rr = jax.jacrev(jax.jacrev(f, (0, 1)), (0, 1))(x, y)
+            assert all(bool(jnp.isfinite(h)) for row in rr for h in row), (x, y, rr)
+        if float(a) == 0.0:          # lo = 0: exactly the min's gradient
+            ga, gb = jax.grad(f, (0, 1))(a, b)
+            assert (float(ga), float(gb)) == (1.0, 0.0)
+            gb2, ga2 = jax.grad(f, (0, 1))(b, a)
+            assert (float(gb2), float(ga2)) == (0.0, 1.0)
+
+
 def test_positive_part_c1_is_zero_below_and_c1():
     """Exactly 0 for x <= 0 (softplus is not), exactly x at and above 1/s,
     never above max(x, 0), and value and slope continuous at both joins."""
@@ -166,3 +217,23 @@ def test_positive_part_c1_traced_inf_is_hard_and_finite():
     g = jax.jit(jax.grad(lambda x, s: jnp.sum(positive_part_c1(x, s))))(x, jnp.inf)
     assert jnp.all(jnp.isfinite(g))
     assert jnp.array_equal(f(x, 4.0), positive_part_c1(x, 4.0))
+
+
+def test_abs_sign_tanh_and_zero_at_or_below():
+    """RULE 5 helpers (#2546): width 0 is the hard switch bitwise; the smooth
+    forms stay within their stated bounds and are C2 at the switch."""
+    x = jnp.linspace(-0.05, 0.05, 1001)
+    assert jnp.array_equal(abs_tanh(x, 0.0), jnp.abs(x))
+    assert jnp.array_equal(sign_tanh(x, 0.0), jnp.sign(x))
+    w = 0.01
+    a = abs_tanh(x, w)
+    assert jnp.all(a <= jnp.abs(x)) and jnp.all(jnp.abs(x) - a <= 0.28 * w)
+    assert jnp.all(jnp.abs(sign_tanh(x, w)) <= 1.0)
+    tau = jnp.linspace(0.0, 3e-10, 301)
+    assert jnp.array_equal(zero_at_or_below(tau, 1e-10, 0.0), jnp.where(tau <= 1e-10, 0.0, tau))
+    r = zero_at_or_below(tau, 1e-10, 1e-10)
+    assert jnp.all(r[tau <= 1e-10] == 0.0) and jnp.array_equal(r[tau >= 2e-10], tau[tau >= 2e-10])
+    for f, x0 in ((lambda t: abs_tanh(t, w), 0.0), (lambda t: sign_tanh(t, w) * t * t, 0.0),
+                  (lambda t: zero_at_or_below(t, 1.0, 1.0), 1.0)):
+        for g in (jax.grad(f), jax.grad(jax.grad(f))):
+            assert abs(float(g(x0 - 1e-7)) - float(g(x0 + 1e-7))) < 1e-3

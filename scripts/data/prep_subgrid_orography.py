@@ -40,6 +40,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prep_etopo_topography import regrid_elevation_to_latlon  # noqa: E402
 
 
+def block_area_mean(x, lat, factor: int):
+    """Area-weighted mean of ``x(lat, lon)`` over non-overlapping factor x factor blocks.
+
+    Regular lat-lon cell area is proportional to cos(lat) (row-wise, constant in
+    lon), so every sample counts by the area it represents inside its block.
+    """
+    import numpy as np
+
+    n_lat, n_lon = x.shape
+    xb = np.asarray(x, dtype=np.float64).reshape(
+        n_lat // factor, factor, n_lon // factor, factor)
+    wb = np.broadcast_to(
+        np.cos(np.deg2rad(lat)).reshape(n_lat // factor, factor, 1, 1), xb.shape)
+    w_sum = np.maximum(wb.sum(axis=(1, 3)), 1e-12)
+    return (wb * xb).sum(axis=(1, 3)) / w_sum
+
+
 def subgrid_orography_stddev(
     ds,
     *,

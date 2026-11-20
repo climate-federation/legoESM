@@ -395,6 +395,26 @@ def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
                                   ic["soil_hydraulics_column_sig"])
 
 
+def test_era5_stage_builds_its_grid_in_float64(tmp_path, monkeypatch):
+    """The ERA5 soil-T stage picks donors and land/glacier columns on the run's
+    float64 centres, not the builder's default fp32 ones."""
+    import jax.numpy as jnp
+    import legoesm.grids.factory as gf
+    from legoesm.core.precision import get_policy, set_policy
+    rg, ic_path, _ = _setup_cli(tmp_path, monkeypatch)
+    stub, seen = gf.create_grid, []
+    monkeypatch.setattr(gf, "create_grid",
+                        lambda *a, **k: (seen.append(get_policy().storage), stub())[1])
+    ambient = get_policy()
+    try:
+        set_policy(ambient._replace(storage=jnp.float32))
+        files, lsm, sd = _era5_inputs(tmp_path)
+        assert _run_cli(rg, ic_path, tmp_path / "out.npz", files, lsm, sd) == 0
+    finally:
+        set_policy(ambient)
+    assert seen == [jnp.float64]
+
+
 @pytest.mark.parametrize("extra", [["--stamp-only"],
                                    ["--source-soil-hydraulics", "a", "b", "c"]])
 def test_cli_refuses_stamping_flags_in_era5_mode(tmp_path, monkeypatch, extra):
@@ -492,7 +512,7 @@ def test_production_deck_resolves_to_the_era5_soil_t_ic():
     parser.set_defaults(**keys)
     parser.set_defaults(_config_keys=frozenset(keys))
     cfg = build_config_from_args(parser.parse_args([]))
-    assert cfg.land_ic_path == "data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101.npz"
+    assert cfg.land_ic_path == "data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101_v3.npz"
 
 
 def test_fv3_duo_target_writes_the_duo_column_mesh_not_the_generic_cube(
@@ -569,6 +589,67 @@ def test_warm_era5_soil_is_ice_consistent_with_freeze_thaw_on():
         assert bool(jnp.all(jnp.isfinite(C))) and bool(jnp.all(C >= sensible_floor))
 
 
+def _floors(hyd, shape):
+    from legoesm.land.richards import dry_floor
+    lo = np.broadcast_to(np.asarray(dry_floor(hyd)[1], np.float64), shape)
+    sat = np.broadcast_to(np.asarray(hyd.theta_sat, np.float64), shape)
+    return lo, sat
+
+
+def test_relative_wetness_lands_between_target_floor_and_saturation():
+    """Donor water copied into a soil with a higher dry floor: the absolute
+    copy is refused by the run's loader, the rebuild is accepted, and every
+    rebuilt layer lies in [target floor, target saturation] even for donor
+    layers below their own floor or above saturation (clipped)."""
+    import jax.numpy as jnp
+    from legoesm.land.restart import conform_soil_water
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg_rw")
+    shape = (3, 3)
+    src = SoilHydraulicsConfig(theta_r=jnp.full(shape, 0.02),
+                               theta_sat=jnp.full(shape, 0.40))
+    tgt = SoilHydraulicsConfig(theta_r=jnp.full(shape, 0.16),
+                               theta_sat=jnp.full(shape, 0.48))
+    dz = np.array([0.1, 0.3, 0.6])
+    lo_s, sat_s = _floors(src, shape)
+    lo_t, sat_t = _floors(tgt, shape)
+    theta = np.array([[lo_s[0, 0] + 1e-3] * 3,                 # dry donor
+                      [lo_s[1, 0] - 1e-6, 0.25, sat_s[1, 2] + 1e-6],  # out of range
+                      [0.20, 0.25, 0.30]])
+    with pytest.raises(ValueError):
+        conform_soil_water(theta, dz, tgt)            # the defect being fixed
+    out, n_clipped = rg.rebuild_relative_wetness(theta, lo_s, sat_s, lo_t, sat_t)
+    assert n_clipped == 2
+    assert np.all(out >= lo_t) and np.all(out <= sat_t)
+    w_in = (theta[2] - lo_s[2]) / (sat_s[2] - lo_s[2])
+    np.testing.assert_allclose((out[2] - lo_t[2]) / (sat_t[2] - lo_t[2]), w_in,
+                               rtol=1e-12)
+    rg.check_above_dry_floor(out, dz, lo_t)
+    conform_soil_water(out, dz, tgt)                  # loadable
+
+
+def test_relative_wetness_same_soil_is_bit_identical():
+    import jax.numpy as jnp
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg_same")
+    shape = (2, 4)
+    hyd = SoilHydraulicsConfig(theta_r=jnp.full(shape, 0.05),
+                               theta_sat=jnp.full(shape, 0.43))
+    lo, sat = _floors(hyd, shape)
+    theta = np.random.default_rng(0).uniform(lo, sat)
+    theta[0, 0] = lo[0, 0] - 1e-6        # kept as is: same soil is a pure copy
+    out, n_clipped = rg.rebuild_relative_wetness(theta, lo, sat, lo, sat)
+    assert n_clipped == 0
+    np.testing.assert_array_equal(out, theta)
+
+
+def test_check_above_dry_floor_refuses_a_column_below_it_in_total():
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg_chk")
+    lo = np.full((2, 3), 0.1)
+    dz = np.array([0.1, 0.3, 0.6])
+    rg.check_above_dry_floor(np.array([[0.05, 0.12, 0.12], [0.1] * 3]), dz, lo)
+    with pytest.raises(SystemExit):
+        rg.check_above_dry_floor(np.array([[0.09] * 3, [0.1] * 3]), dz, lo)
+
+
 def test_lift_to_dry_floor_lifts_only_columns_below_the_floor_in_total():
     """A column whose total water is below the run's dry floor is set to that
     floor (the least water the loader accepts); a column above it in total,
@@ -593,3 +674,230 @@ def test_lift_to_dry_floor_lifts_only_columns_below_the_floor_in_total():
     np.testing.assert_array_equal(out[1:], theta[1:])
     np.testing.assert_allclose(added[0], 0.01 * dz.sum(), rtol=1e-12)
     conform_soil_water(out, dz, hyd)          # now loadable
+
+
+def _lift_only_setup(tmp_path, monkeypatch):
+    """A 3-column stamped IC on a fake grid; the run's soil from a fake surfdata."""
+    import jax.numpy as jnp
+    import legoesm.land.clm_surface_map as csm
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import theta_from_psi
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg_lift_only")
+    monkeypatch.setattr(rg, "_ic_grid", lambda g, r: None)
+    monkeypatch.setattr(rg, "_cols_rad", lambda g: (np.zeros(3), np.zeros(3)))
+    soil = {"theta_r": np.array([0.16, 0.16, 0.05]),
+            "theta_sat": np.array([0.45, 0.45, 0.40]),
+            "alpha_vg": np.full(3, 0.8), "n_vg": np.full(3, 1.09),
+            "K_sat": np.full(3, 5.56e-8)}
+    seen = {}
+
+    def fake_load(path, lat, lon, *, vg_air_entry_m):
+        seen["vg_air_entry_m"] = vg_air_entry_m
+        return soil
+    monkeypatch.setattr(csm, "load_clm_surface", fake_load)
+    hyd = csm.clm_hydraulics_config(soil)._replace(vg_air_entry_m=-0.02)
+    lo = np.asarray(theta_from_psi(psi_dry_floor(hyd), hyd), np.float64)[:, 0]
+    dz = np.array([0.1, 0.3, 0.6])
+    theta = np.array([[lo[0] - 0.01] * 3,                            # below in total
+                      [lo[1] - 0.05, lo[1] + 0.05, lo[1] + 0.05],     # one layer below
+                      [0.20, 0.25, 0.30]])
+    src = tmp_path / "ic.npz"
+    np.savez(src, theta_soil=theta, psi_soil=-np.ones((3, 3)),
+             T_soil=np.full((3, 3), 280.0), soil_dz=dz,
+             snow_depth=np.arange(3.0), soil_hydraulics_json=np.str_("{}"),
+             metadata_json=np.str_('{"grid_type": "x", "resolution": 1}'))
+    sd = tmp_path / "surf.nc"
+    sd.write_bytes(b"surf")
+    return rg, src, sd, lo, dz, seen, jnp
+
+
+def test_lift_only_changes_only_the_lifted_column(tmp_path, monkeypatch):
+    """--lift-only on an IC already on its grid: the column below the run's
+    floor in total is set to the floor, the water added is recorded, and every
+    other array and column is byte-identical."""
+    import json
+    rg, src, sd, lo, dz, seen, _ = _lift_only_setup(tmp_path, monkeypatch)
+    out = tmp_path / "out.npz"
+    assert rg.main(["--lift-only", "--source", str(src), "--out", str(out),
+                    "--target-grid", "x", "--target-resolution", "1",
+                    "--target-clm-surfdata", str(sd),
+                    "--vg-air-entry-m", "-0.02"]) == 0
+    assert seen["vg_air_entry_m"] == -0.02
+    a, b = np.load(src), np.load(out)
+    assert set(a.files) == set(b.files)
+    for k in a.files:
+        if k not in ("theta_soil", "metadata_json"):
+            np.testing.assert_array_equal(a[k], b[k])
+    np.testing.assert_array_equal(b["theta_soil"][1:], a["theta_soil"][1:])
+    np.testing.assert_array_equal(b["theta_soil"][0], lo[0])
+    rep = json.loads(str(b["metadata_json"]))["dry_floor_lift_only"]
+    assert rep["n_lifted"] == 1 and rep["vg_air_entry_m"] == -0.02
+    np.testing.assert_allclose(rep["lifted_columns_water_added_mm"]["0"],
+                               1e3 * 0.01 * dz.sum(), rtol=1e-12)
+    import legoesm.land.clm_surface_map as csm
+    from legoesm.land.restart import conform_soil_water
+    hyd = csm.clm_hydraulics_config(
+        csm.load_clm_surface(sd, 0, 0, vg_air_entry_m=-0.02))._replace(
+            vg_air_entry_m=-0.02)
+    conform_soil_water(b["theta_soil"], dz, hyd)       # now loadable
+
+
+def test_lift_only_floor_moves_with_the_air_entry_head(tmp_path, monkeypatch):
+    """The floor depends on the run's air-entry head, so the flag reaches the
+    hydraulics the floor is computed from (not only the surfdata loader)."""
+    import json
+    rg, src, sd, lo, dz, seen, _ = _lift_only_setup(tmp_path, monkeypatch)
+    import legoesm.land.clm_surface_map as csm
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import theta_from_psi
+    added = {}
+    for h in ("-0.02", "0.0"):
+        out = tmp_path / f"out{h}.npz"
+        rg.main(["--lift-only", "--source", str(src), "--out", str(out),
+                 "--target-grid", "x", "--target-resolution", "1",
+                 "--target-clm-surfdata", str(sd), "--vg-air-entry-m", h])
+        rep = json.loads(str(np.load(out)["metadata_json"]))["dry_floor_lift_only"]
+        added[h] = rep["lifted_columns_water_added_mm"]["0"]
+        hyd = csm.clm_hydraulics_config(csm.load_clm_surface(
+            sd, 0, 0, vg_air_entry_m=float(h)))._replace(vg_air_entry_m=float(h))
+        lo_h = float(np.asarray(theta_from_psi(psi_dry_floor(hyd), hyd))[0, 0])
+        theta0 = np.load(src)["theta_soil"][0]
+        np.testing.assert_allclose(added[h], 1e3 * ((lo_h - theta0) * dz).sum(),
+                                   rtol=1e-12)
+    assert added["-0.02"] != added["0.0"]
+
+
+@pytest.mark.parametrize("bad", ["sig", "f32", "grid", "nostamp"])
+def test_lift_only_refuses_unsafe_sources(tmp_path, monkeypatch, bad):
+    rg, src, sd, *_ = _lift_only_setup(tmp_path, monkeypatch)
+    a = dict(np.load(src))
+    if bad == "sig":
+        a["soil_hydraulics_column_sig"] = np.zeros(3)
+    elif bad == "f32":
+        a["theta_soil"] = a["theta_soil"].astype(np.float32)
+    elif bad == "grid":
+        a["metadata_json"] = np.str_('{"grid_type": "y", "resolution": 1}')
+    else:
+        del a["soil_hydraulics_json"]
+    np.savez(src, **a)
+    with pytest.raises(SystemExit):
+        rg.main(["--lift-only", "--source", str(src), "--out",
+                 str(tmp_path / "o.npz"), "--target-grid", "x",
+                 "--target-resolution", "1", "--target-clm-surfdata", str(sd),
+                 "--vg-air-entry-m", "-0.02"])
+
+
+@pytest.mark.parametrize("drop", ["--target-clm-surfdata", "--vg-air-entry-m"])
+def test_lift_only_refuses_without_the_runs_soil(tmp_path, monkeypatch, drop):
+    rg, src, sd, *_ = _lift_only_setup(tmp_path, monkeypatch)
+    argv = ["--lift-only", "--source", str(src), "--out", str(tmp_path / "o.npz"),
+            "--target-grid", "x", "--target-resolution", "1",
+            "--target-clm-surfdata", str(sd), "--vg-air-entry-m", "-0.02"]
+    i = argv.index(drop)
+    del argv[i:i + 2]
+    with pytest.raises(SystemExit):
+        rg.main(argv)
+
+
+def _rebuild_setup(tmp_path, monkeypatch, curve="clapp_hornberger"):
+    """main() with --target-clm-surfdata on a 32-column source, a REVERSED
+    donor map, heterogeneous donor soil and a uniform target soil."""
+    import jax.numpy as jnp
+    import legoesm.coupler.grid_remap as gr
+    import legoesm.land.boundary_data as bd
+    import legoesm.land.clm_surface_map as cm
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_SURFDATA_COSBY, soil_hydraulics_stamp)
+    sd = tmp_path / "surf.nc"
+    sd.write_bytes(b"cosby")
+    clm = tmp_path / "clm.nc"
+    clm.write_bytes(b"clm")
+    ncol, nlay = 32, 10
+    h_src = SoilHydraulicsConfig(
+        retention_curve="clapp_hornberger", theta_r=0.0,
+        theta_sat=jnp.asarray(np.linspace(0.35, 0.50, ncol)[:, None]
+                              * np.ones((1, nlay))))
+    h_tgt = SoilHydraulicsConfig(theta_r=0.16, theta_sat=0.48)
+
+    class _Cfg:
+        hydraulics = h_src
+
+    mod = _load("scripts/data/regrid_land_ic.py", "_rg_main")
+    monkeypatch.setattr(mod, "_source_land_mask",
+                        lambda surfdata, grid, n: np.ones(n, dtype=bool))
+    monkeypatch.setattr(gr, "nearest_column_map",
+                        lambda *a, **k: np.arange(ncol)[::-1].copy())
+    monkeypatch.setattr(bd, "init_land_surface_data",
+                        lambda *a, **k: (_Cfg, None, None))
+    monkeypatch.setattr(cm, "load_clm_surface", lambda *a, **k: None)
+    monkeypatch.setattr(cm, "clm_hydraulics_config", lambda *a, **k: h_tgt)
+    stamp = soil_hydraulics_stamp(curve, HYDRAULICS_SOURCE_SURFDATA_COSBY, sd)
+    src = _source(tmp_path, stamp=stamp)
+    argv = ["--source", str(src), "--surfdata", str(sd),
+            "--target-grid", "latlon", "--target-resolution", "4",
+            "--out", str(tmp_path / "out.npz"),
+            "--source-soil-column", "10,3.0,2.0",
+            "--target-clm-surfdata", str(clm), "--vg-air-entry-m", "-0.02"]
+    return mod, argv, src, h_src, h_tgt, clm
+
+
+def test_main_rebuilds_donor_wetness_on_the_target_soil(tmp_path, monkeypatch):
+    import json
+    import jax.numpy as jnp
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_CLM_MAP, soil_hydraulics_stamp,
+        soil_hydraulics_stamps_match)
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import psi_from_theta
+    mod, argv, src, h_src, h_tgt, clm = _rebuild_setup(tmp_path, monkeypatch)
+    assert mod.main(argv) == 0
+    out = np.load(tmp_path / "out.npz")
+    theta_src = np.load(src)["theta_soil"]
+    nearest = np.arange(32)[::-1]
+    lo_s, sat_s = _floors(h_src, theta_src.shape)
+    lo_t, sat_t = _floors(h_tgt, theta_src.shape)
+    w = np.clip((theta_src - lo_s) / (sat_s - lo_s), 0.0, 1.0)[nearest]
+    np.testing.assert_allclose(out["theta_soil"], lo_t + w * (sat_t - lo_t),
+                               rtol=1e-12)
+    psi = jnp.maximum(psi_from_theta(jnp.asarray(out["theta_soil"]), h_tgt),
+                      psi_dry_floor(h_tgt))
+    np.testing.assert_allclose(out["psi_soil"], np.asarray(psi), rtol=1e-12)
+    assert soil_hydraulics_stamps_match(
+        json.loads(str(out["soil_hydraulics_json"])),
+        soil_hydraulics_stamp(h_tgt.retention_curve, HYDRAULICS_SOURCE_CLM_MAP,
+                              clm))
+
+
+def test_main_refuses_a_source_stamped_with_another_curve(tmp_path, monkeypatch):
+    mod, argv, *_ = _rebuild_setup(tmp_path, monkeypatch, curve="van_genuchten")
+    with pytest.raises(SystemExit, match="retention curve"):
+        mod.main(argv)
+
+
+@pytest.mark.parametrize("grid_type,res", [("latlon", 48), ("gaussian", 31)])
+def test_target_grid_centres_are_the_runs(grid_type, res):
+    """The builder's target centres equal the run's column mesh at float64
+    storage (production precision: fp64) bit for bit; the float32 default put
+    lat-lon centres off exact values, so ties between CLM cells broke the
+    other way than the run's."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.atmosphere.dynamics.gcm.latlon_cgrid_column import (
+        build_latlon_column_mesh)
+    from legoesm.core.precision import get_policy, set_policy
+    from legoesm.grids.factory import create_grid
+    if not jax.config.jax_enable_x64:
+        pytest.skip("needs JAX_ENABLE_X64=1")
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg_tg")
+    ambient = get_policy()
+    fp32 = ambient._replace(storage=jnp.float32)
+    try:
+        set_policy(fp32._replace(storage=jnp.float64))
+        mesh = build_latlon_column_mesh(create_grid(grid_type, resolution=res))
+        set_policy(fp32)                            # the builder's default
+        lat, lon = rg._cols_rad(rg._target_grid(grid_type, res))
+        assert get_policy() == fp32                 # the swap is undone
+    finally:
+        set_policy(ambient)
+    np.testing.assert_array_equal(lat, np.asarray(mesh.latCell))
+    np.testing.assert_array_equal(lon, np.asarray(mesh.lonCell))

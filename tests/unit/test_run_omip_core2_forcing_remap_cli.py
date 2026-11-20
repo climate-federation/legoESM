@@ -76,22 +76,22 @@ def test_the_sampler_still_refuses_a_non_tripole_grid():
 # --- user decision 2026-10-14 (4a): lanes that cannot apply nemo_scrip refuse it.
 
 
-@pytest.mark.parametrize("remap,refused", [("nemo_scrip", True),
-                                           ("bilinear", False)])
-def test_fesom_lane_refuses_nemo_scrip_at_setup(remap, refused):
-    """The fesom forced loop never passes forcing_remap to the sampler, so it
-    would run bilinear whatever the flag said; the stage gate must refuse it."""
-    from scripts.run.run_omip_core2 import (
-        _build_arg_parser, validate_fesom_stage)
-    p = _build_arg_parser()
-    args = p.parse_args(["--grid", "fesom", "--fesom-mesh-dir", "/m",
-                         "--output", "/o", "--no-emp",
-                         "--forcing-remap", remap])
-    if refused:
-        with pytest.raises(SystemExit, match="--forcing-remap"):
-            validate_fesom_stage(args, p)
-    else:
-        validate_fesom_stage(args, p)  # no raise
+@pytest.mark.parametrize("remap", ["nemo_scrip", "bilinear", "nemo_weights"])
+def test_fesom_lane_forcing_remap_gate(remap, monkeypatch):
+    """The fesom forced loop threads forcing_remap into its samplers, so the
+    stage gate accepts the flag; nemo_scrip (eORCA1 weights) is refused by
+    main()'s preflight before the model build."""
+    import sys
+
+    from scripts.run import run_omip_core2 as c2
+    argv = ["--grid", "fesom", "--fesom-mesh-dir", "/m", "--output", "/o",
+            "--no-emp", "--forcing-remap", remap]
+    p = c2._build_arg_parser()
+    c2.validate_fesom_stage(p.parse_args(argv), p)  # no raise
+    if remap == "nemo_scrip":
+        monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", *argv])
+        with pytest.raises(SystemExit, match="--forcing-remap nemo_scrip is wired"):
+            c2.main()
 
 
 def _scan_remap_guard():
@@ -174,3 +174,15 @@ def test_non_tripole_grids_refuse_nemo_scrip_before_the_model_build(
     else:
         with pytest.raises(_PastSetupGuards):
             c2.main()
+
+
+def test_latlon_bathy_refuses_point_sampler_at_preflight(monkeypatch):
+    """latlon_bathy uses the conservative regrid; nemo_weights would only fail
+    at the first forcing step, after the model build."""
+    import sys
+
+    from scripts.run import run_omip_core2 as c2
+    monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "latlon_bathy",
+                                      "--output", "/o", "--forcing-remap", "nemo_weights"])
+    with pytest.raises(SystemExit, match="--forcing-remap nemo_weights is wired"):
+        c2.main()

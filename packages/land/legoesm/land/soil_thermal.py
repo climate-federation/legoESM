@@ -50,6 +50,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.smooth import min_c1
 from legoesm.land.soil_grid import SoilGrid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.thermo import latent_heat_fusion
@@ -75,6 +76,8 @@ __param_spec__ = {
             "sr_clip_min": "numerics: saturation-ratio floor",
             "C_ice_vol": "material: ice volumetric heat capacity (= rho_ice·c_pi)",
             "freeze_curve_width_K": "numerics: freezing-curve smoothing half-width [K]",
+            "snow_skin_cap_width_K": "numerics: smoothing width of the snow-node "
+                                     "skin cap at T_freeze [K] (RULE 5; 0 = hard)",
             "snow_bulk_density_kg_m3": "material: fixed bulk snow density of the "
                                        "one-layer snow thermal node (no density "
                                        "state; user-fixed 250 kg/m^3, 2026-10-03)",
@@ -169,6 +172,10 @@ class SoilThermalConfig(NamedTuple):
     # capacity and no insulation (the legacy bucket), bit-identical to before.
     snow_insulation: bool = False
     snow_bulk_density_kg_m3: float = 250.0  # [kg/m3] fixed bulk snow density
+    # [K] width of the C1 cap that holds the snow-node skin at or below
+    # T_freeze (``core.smooth.min_c1``: exact at and above freezing and more
+    # than this below it); 0 = the hard ``min(T_snow, T_freeze)``.
+    snow_skin_cap_width_K: float = 0.1
 
 
 def compute_heat_capacity(
@@ -491,7 +498,8 @@ def solve_soil_thermal(
     surface_conductance: jnp.ndarray | None = None,
     layer_source: jnp.ndarray | None = None,
     n_substeps: int = 1,
-) -> jnp.ndarray:
+    return_robin_flux: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     """Solve soil heat diffusion for one time step (backward Euler).
 
     Parameters
@@ -530,11 +538,21 @@ def solve_soil_thermal(
         = one step, bit-identical).  The apparent heat capacity is re-evaluated
         at each sub-step's start temperature, which keeps a thin layer from
         overshooting the freezing curtain at a long step.
+    return_robin_flux : bool
+        Static flag.  When True, also return the semi-implicit correction the
+        solve applied at the surface, as a step-mean flux (see Returns).
 
     Returns
     -------
     T_new : jnp.ndarray
         Updated soil temperature [K], shape (ncol, n_layers).
+    robin_flux : jnp.ndarray
+        Only with ``return_robin_flux``.  Step-mean of
+        ``surface_conductance * (T_top_k - T_top0)`` over the sub-steps
+        [W/m2, shape (ncol,)]: the column received ``G_surface - robin_flux``.
+        Positive = the surface LOST that much more than the explicit balance
+        behind ``G_surface`` (upward, away from the soil); the caller owes it
+        to the atmosphere (#2542).  Zeros when ``surface_conductance`` is None.
     """
     # Backward Euler over ``n_substeps`` equal sub-steps; G_surface, Q_geo and
     # layer_source are rates held over the whole step.  The semi-implicit
@@ -542,6 +560,7 @@ def solve_soil_thermal(
     dt_sub = dt / n_substeps
     T_top0 = T_soil[:, 0]
     T = T_soil
+    robin_flux = jnp.zeros_like(T_top0)
     for _ in range(n_substeps):
         # ``_soil_heat_system`` re-evaluates the apparent heat capacity at the
         # sub-step's start temperature (sensible-only when freeze/thaw is off).
@@ -571,6 +590,10 @@ def solve_soil_thermal(
         a = jnp.pad(-coeff, ((0, 0), (1, 0)))
         c = jnp.pad(-coeff, ((0, 0), (0, 1)))
         T = thomas_solve(a, diag, c, rhs)
+        if surface_conductance is not None:
+            robin_flux = robin_flux + surface_conductance * (T[:, 0] - T_top0) / n_substeps
+    if return_robin_flux:
+        return T, robin_flux
     return T
 
 
@@ -746,13 +769,14 @@ def solve_snow_node_soil_thermal(
     Returns ``(T_snow_new (ncol,), T_soil_new (ncol, n_layers))``.
     """
     if surface_conductance is not None:
-        # A semi-implicit surface (SimpleSEB) linearises the surface loss in
-        # the skin temperature, which a snow surface caps at T_freeze; doing
-        # that consistently needs the cap inside the solve.  Only the explicit
-        # ground flux (the two-leaf canopy's Picard loop) is supported.
+        # A semi-implicit surface linearises its loss in the skin, which the
+        # node caps at T_freeze; its flux must come from
+        # snow_node_robin_ground_flux (cap inside the solve) and enter here
+        # explicitly.
         raise ValueError(
             "solve_snow_node_soil_thermal does not support surface_conductance "
-            "(semi-implicit surface); use the two-leaf canopy surface scheme.")
+            "(semi-implicit surface); pass the explicit ground flux from "
+            "snow_node_robin_ground_flux.")
     T_soil_bare = solve_soil_thermal(
         T_soil, theta, grid, hydro_config, thermal_config, G_surface, dt,
         layer_source=layer_source, n_substeps=n_substeps)
@@ -772,3 +796,80 @@ def solve_snow_node_soil_thermal(
     T_soil_new = jnp.where(covered[:, None], T_soil_cov, T_soil_bare)
     T_snow_new = jnp.where(covered, T_snow_cov[:, 0], T_soil_bare[:, 0])
     return T_snow_new, T_soil_new
+
+
+def snow_skin_cap(T_snow, width_K: float):
+    """The snow-node skin cap ``min(T_snow, T_freeze)`` [K] (a pack's heat above
+    freezing is melt, so its surface is never warmer than ``T_freeze``).
+
+    RULE 5 smooth default: ``core.smooth.min_c1`` with band ``width_K`` [K] --
+    exactly ``T_freeze`` at and above freezing, exactly ``T_snow`` more than
+    ``width_K`` below it, C1 and monotone in between, where it lies between
+    ``T_snow`` and ``T_freeze`` (at most ``4 * width_K / 27`` above ``T_snow``,
+    never above ``T_freeze``).  ``width_K = 0`` is the hard ``jnp.minimum``.
+    """
+    if not width_K >= 0.0:
+        raise ValueError(f"snow_skin_cap_width_K must be >= 0, got {width_K!r}.")
+    if width_K == 0.0:
+        return jnp.minimum(T_snow, constants.T_freeze)
+    return min_c1(T_snow, constants.T_freeze, 1.0 / width_K)
+
+
+def snow_node_robin_ground_flux(
+    G0, surface_conductance, skin_ref, T_snow, snow_swe, T_soil, theta,
+    grid: SoilGrid, hydro_config: SoilHydraulicsConfig,
+    thermal_config: SoilThermalConfig, dt: float, *,
+    snow_cover, empty_cover_swe: float, n_newton: int = 3,
+):
+    """Ground heat flux [W/m2, + into the ground] of a semi-implicit surface
+    (SimpleSEB) over the snow node, with the skin cap INSIDE the solve.
+
+    The surface gives ``G(skin) = G0 - lambda * (skin - skin_ref)``, linearised
+    about the skin it was evaluated at.  The skin is the cover blend of the
+    capped node and the top soil of the tentative node + soil solve
+    (:func:`solve_snow_node_soil_thermal` on the start-of-step state, as the
+    two-leaf canopy's Picard callback).  That solve is affine in its explicit
+    ground flux, ``T_node = a + b G`` and ``T_soil0 = c + d G`` (one backward-
+    Euler step whose coefficients, the apparent heat capacity with freeze/thaw
+    included, are evaluated at the start-of-step temperatures; two solves, at
+    ``G = 0`` and ``G = 1``, give all four), so the consistent flux is the
+    root of the scalar,
+    ``F(G) = G - G0 + lambda * (skin(G) - skin_ref)``.  Start: the
+    exact root of the hard cap (piecewise linear: unclamped, else the node
+    pinned at ``T_freeze``); then ``n_newton`` Newton steps on the smooth cap.
+    ``lambda >= 0`` (SimpleSEB clamps each slope) and ``b, d >= 0`` give
+    ``F' >= 1``: one root, and both hard-cap pieces meet at the node reaching
+    ``T_freeze``.  The caller applies the returned flux EXPLICITLY in its
+    final node solve.
+
+    Returns ``(G, residual)``, ``residual = F(G)`` [W/m2] (diagnostic).
+    """
+    f = snow_cover
+    lam = surface_conductance
+    width = thermal_config.snow_skin_cap_width_K
+
+    def _tent(G):
+        return solve_snow_node_soil_thermal(
+            T_snow, snow_swe, T_soil, theta, grid, hydro_config,
+            thermal_config, G, dt, snow_cover=f,
+            empty_cover_swe=empty_cover_swe)
+
+    # (two solves, not a forward tangent: the tridiagonal solver is custom_vjp)
+    Ts0, Tg0 = _tent(jnp.zeros_like(G0))
+    Ts1, Tg1 = _tent(jnp.ones_like(G0))
+    a, b, c, d = Ts0, Ts1 - Ts0, Tg0[:, 0], Tg1[:, 0] - Tg0[:, 0]
+    tf = constants.T_freeze
+    G_free = (G0 + lam * (skin_ref - f * a - (1.0 - f) * c)) / (
+        1.0 + lam * (f * b + (1.0 - f) * d))
+    G_pin = (G0 + lam * (skin_ref - f * tf - (1.0 - f) * c)) / (
+        1.0 + lam * (1.0 - f) * d)
+    G = jnp.where(a + b * G_free <= tf, G_free, G_pin)
+
+    def _F(G):
+        return G - G0 + lam * (f * snow_skin_cap(a + b * G, width)
+                               + (1.0 - f) * (c + d * G) - skin_ref)
+
+    for _ in range(n_newton):
+        r, dr = jax.jvp(_F, (G,), (jnp.ones_like(G),))
+        G = G - r / dr
+    return G, _F(G)

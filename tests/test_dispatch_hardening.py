@@ -155,7 +155,6 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "create_model"),
         # kt whitelist: an unvalidated 6*kt^2 tile count must raise, not
         # silently replicate the global state per device (#1360).
-        ("packages/core/legoesm/parallel/tiled_production_cdgrid.py", "_validate_tiled_step_factory_args"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "get_solver_class"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "resolve_solver_name"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py", "plane_compressible_euler_slow_tendencies"),
@@ -227,6 +226,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/core/bulk_flux.py", "validate_stability_scheme"),
         ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_m"),
         ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_h"),
+        # Unstable-regime MOST form selector (unstable_scheme): unknown raises.
+        ("packages/core/legoesm/core/bulk_flux.py", "validate_unstable_scheme"),
         ("packages/core/legoesm/core/tracers.py", "index"),
         ("packages/core/legoesm/grids/capability.py", "instantiate"),
         ("packages/core/legoesm/grids/capability.py", "validate_runtime"),
@@ -263,6 +264,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ice/legoesm/ice/sea_ice.py", "_bulk_flux_dispatch"),
         ("packages/ice/legoesm/ice/sea_ice.py", "step_sea_ice"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_closing_rate_from_velocity"),
+        ("packages/ice/legoesm/ice/sea_ice.py", "_ocean_to_ice_heat_flux"),
         ("packages/ice/legoesm/ice/shortwave.py", "compute_ice_sw"),
         ("packages/land/legoesm/land/carbon/carbon_cycle.py", "step_carbon"),
         # The multilayer-land bulk dispatch moved into the pluggable surface
@@ -291,6 +293,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # bare ``else: # PM``, so a typo silently runs Penman-Monteith. Guarded
         # at the config validator AND at the solver entry (direct-call path).
         ("packages/land/legoesm/land/canopy/solver.py", "solve_canopy_closure"),
+        # Two-leaf canopy shortwave dispatch (ryu|two_stream), 2026-11-17:
+        # CanopyConfig.validate (above) at setup and the surface-scheme call site.
+        ("packages/land/legoesm/land/surface_scheme/two_leaf_canopy.py",
+         "compute_two_leaf_canopy_fluxes"),
         # CLM-ML canopy-airspace turbulence dispatch (rsl_bonan|most): selects
         # whether the Harman & Finnigan roughness-sublayer correction is active.
         # An unknown value must raise, not fall through to the RSL default —

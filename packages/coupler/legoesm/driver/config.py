@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from legoesm import constants
-from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
-                                      NCAR_NEUTRAL_WIDTH)
+from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
+                                      NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+                                      NCAR_NEUTRAL_WIDTH, VALID_UNSTABLE_SCHEMES)
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     C_E_BULK_DEFAULT, C_H_BULK_DEFAULT)
 from legoesm.land import snow_column as _snow_column
@@ -157,7 +158,7 @@ def normalize_grid_type(name: str) -> str:
 class DycoreConfig(NamedTuple):
     """Dynamical core configuration."""
     model_type: str = "hydrostatic"       # shallow_water, hydrostatic, nonhydrostatic
-    discretization: str = "cdgrid"        # cdgrid, spectral, sfno, u_cast, mpas
+    discretization: str = "fv3_duo"        # fv3_duo, spectral, sfno, u_cast, mpas, latlon_cgrid
     dt: float = 600.0
     hyperdiff_scale: float = 1.0
     div_damp_scale: float = 1.0
@@ -428,6 +429,10 @@ class DycoreConfig(NamedTuple):
     # A/B; it carries #930 (lat-lon), #1029 (MPAS) and the lat-lon 50 K floor.
     # validate_strict refuses any other form off those two lanes.
     vertical_form: str = "legacy"
+    # Spectral lane, CAM-SE top Laplacian sponge (dyn_comp.F90 nu_top): del2
+    # viscosity [m2/s] x (4, 2, 1) on vor, div and T of the top three levels.
+    # 0.0 = off (bit-identical).  (appended after vertical_form: positional ABI)
+    spectral_sponge_nu_top_m2s: float = 0.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -543,7 +548,7 @@ _CLUBB_LITE_WARNED = False  # one stand-in warning per process
 
 VALID_TURBULENCE = (
     "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
-    "holtslag_boville", "ysu", "edmf", "none",
+    "holtslag_boville", "ysu", "edmf", "ifs_vdf", "none",
 )
 
 VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg", "ecrad_ifs")
@@ -1389,6 +1394,10 @@ class ExperimentConfig(NamedTuple):
     # slab knobs (C_land, emissivity_land) become unused and
     # the multilayer config below takes over.
     use_multilayer_land: bool = False
+    # ML/AIMIP training entry points only: lets full physics (multilayer land)
+    # run on the compiled pipeline, which production refuses.  Not a run_amip
+    # argument, so no deck can set it.
+    ml_pipeline: bool = False
     # Land-tile call interval [s]; 0.0 (default) advances the land every
     # host step (legacy).  A positive value calls the tile every
     # round(land_update_seconds/dt) steps with the atmosphere forcing
@@ -1758,6 +1767,9 @@ class ExperimentConfig(NamedTuple):
     # The faithful chain's no-supply shallow mode
     # (BechtoldConfig.ifs_shallow_nosupply; bechtold_use_ifs_ascent above).
     bechtold_ifs_shallow_nosupply: str = "zero"
+    # The faithful chain's elementwise switches: False = RULE 5 smooth forms,
+    # True = OpenIFS exact (BechtoldConfig.ifs_hard_switches, #2281).
+    bechtold_ifs_hard_switches: bool = False
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1819,6 +1831,16 @@ class ExperimentConfig(NamedTuple):
     # resolved at ModelDriver setup so the manifest / saved config / replay
     # record the boolean; True = required (refused where inert); False = off.
     ocean_flux_on_ocean_surface: bool | None = None
+    # MPAS lane, partly ice-covered sea cells (#2573, user decision
+    # 2026-11-19): the non-land TURBULENT exchange (heat, water, stress) is
+    # evaluated separately on the prognostic ice skin and on the open water
+    # (SST) and cover-weighted for the atmosphere; the ice skin is charged the
+    # ice tile's own sensible and latent heat instead of the cell mean.
+    # Radiation is not split.  Tri-state like ocean_flux_on_ocean_surface:
+    # None = AUTO, on exactly where an explicit True is accepted
+    # (``sea_ice_flux_split_eligibility``), resolved at ModelDriver setup;
+    # True = required (refused where inert); False = one blended surface.
+    sea_ice_flux_split: bool | None = None
     # MPAS lane, interactive multilayer land: rebuild the two-leaf canopy's
     # surface parameters (LAI, canopy height, soil-colour albedo from the top
     # soil layer's wetness) from the surfdata climatology at every land step,
@@ -1846,6 +1868,17 @@ class ExperimentConfig(NamedTuple):
 
     # Performance
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
+    # "fp64": the MPAS-lane multilayer land step runs in float64 inside a
+    # lower-precision run (inputs up-cast, outputs back to the carry/storage
+    # dtype; x64 enabled).  The two-leaf canopy solver's convergence test sits
+    # at the fp32 rounding floor: in fp32, 43% of land columns never converge.
+    # "policy": land follows ``precision``.
+    land_compute_precision: str = "policy"
+    # "fp64": every microphysics kernel runs in float64 inside a
+    # lower-precision run (inputs up-cast, tendencies back to the storage
+    # dtype; x64 enabled).  User ruling 2026-08: microphysics stays fp64.
+    # "policy": microphysics follows ``precision``.
+    microphysics_compute_precision: str = "policy"
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
 
     # Reproducibility (Stage A1).  Master RNG seed for the run: every random key
@@ -2220,6 +2253,16 @@ class ExperimentConfig(NamedTuple):
     # Bechtold sub-cloud snow refill [kg/m^2/s]; 0 = the oracle's hard switch.
     # None = the scheme default; decks running legacy Bechtold name it.
     bechtold_snow_refill_width_kg_m2_s: float | None = None
+    # APPENDED LAST (positional order).  Unstable-regime (zeta < 0) MOST form, chosen independently of
+    # surface_stability_scheme and threaded to the same consumers: "native"
+    # (default, byte-identical: each bulk path's own form) | "businger_dyer" |
+    # "coare3".  See bulk_flux.compute_most_fluxes.
+    surface_unstable_scheme: str = "native"
+    # APPENDED LAST.  RULE 5 widths threaded into every MOST surface config
+    # (bulk_flux.surface_flux_widths): smooth |zeta| cap half-width (0 = hard
+    # clip at +-10) and the GFS unstable join width (0 = exact GFS step).
+    surface_most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
+    surface_gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2276,6 +2319,11 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        if (normalize_grid_type(g.grid_type) == "cubed_sphere"
+                and d.discretization != "fv3_duo"):
+            errors.append(
+                "Cubed-sphere atmosphere requires dycore.discretization='fv3_duo'; "
+                f"retired or unsupported selection {d.discretization!r}.")
         # The faithful IFS convection hands its detrained rain and snow
         # (PSNDE) to the host's rain and snow species (user 2026-10-28, R12):
         # only schemes that carry and process both may run it.  p3's snow
@@ -2652,6 +2700,34 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"precision must be one of {_valid_precisions}, got {self.precision!r}"
             )
+        if self.land_compute_precision not in ("policy", "fp64"):
+            errors.append(
+                "land_compute_precision must be one of ('policy', 'fp64'), "
+                f"got {self.land_compute_precision!r}")
+        elif (self.land_compute_precision == "fp64"
+              and not (self.column_loop_lane and self.use_multilayer_land)):
+            errors.append(
+                "land_compute_precision='fp64' acts only on the MPAS-lane "
+                "multilayer land step (column_loop_lane and "
+                "use_multilayer_land); this run has neither, so it would be "
+                "ignored")
+        if (self.use_multilayer_land and not self.column_loop_lane
+                and not self.ml_pipeline):
+            errors.append(
+                "use_multilayer_land runs in production only on the column "
+                "loop (MPAS, or dycore.column_lane); the compiled pipeline "
+                f"(discretization={d.discretization!r}) keeps multilayer land "
+                "only for ML training entry points, which set "
+                "ml_pipeline=True.")
+        if self.microphysics_compute_precision not in ("policy", "fp64"):
+            errors.append(
+                "microphysics_compute_precision must be one of "
+                f"('policy', 'fp64'), got {self.microphysics_compute_precision!r}")
+        elif (self.microphysics_compute_precision == "fp64"
+              and self.microphysics == "none"):
+            errors.append(
+                "microphysics_compute_precision='fp64' with microphysics="
+                "'none' would be ignored")
         _valid_distributed_modes = ("mpi", "spmd")
         if self.distributed_mode not in _valid_distributed_modes:
             errors.append(
@@ -2815,11 +2891,12 @@ class ExperimentConfig(NamedTuple):
                 "land_snow_insulation requires use_multilayer_land: only the "
                 "multilayer soil has a snow thermal node — the knob would be "
                 "silently inert.")
-        if self.land_snow_insulation and self.land_surface_scheme != "two_leaf":
+        if (self.land_snow_insulation
+                and self.land_surface_scheme not in ("two_leaf", "simple_seb")):
             errors.append(
                 "land_snow_insulation is not supported with land_surface_scheme="
-                f"{self.land_surface_scheme!r}: only the two-leaf canopy (explicit "
-                "ground flux) is supported; the land step would refuse at its "
+                f"{self.land_surface_scheme!r}: only the two-leaf canopy and "
+                "SimpleSEB are supported; the land step would refuse at its "
                 "first call.")
         if self.land_snow_insulation and self.land_snow_scheme != "bulk":
             errors.append(
@@ -3417,7 +3494,8 @@ class ExperimentConfig(NamedTuple):
                 f"got {self.surface_thermo_convention!r}"
             )
         _valid_stability = ("dyer1974", "beljaars_holtslag1991",
-                            "grachev2007_sheba", "gryanik2020")
+                            "grachev2007_sheba", "gryanik2020", "gfs",
+                            "wrf_revmm5", "mynn_sfc", "most_revisit_j3")
         # A tiled surface WITH REAL LAND is exempt from the second check
         # below: its land tile is ocean_cfg._replace(bulk_scheme="most", ...)
         # (physics_pipeline ~:701), so it INHERITS the injected
@@ -3439,6 +3517,22 @@ class ExperimentConfig(NamedTuple):
             self.land_mask_path
             or ((self.slab_land_active or self.use_multilayer_land)
                 and not _idealized_topography))
+        if self.surface_unstable_scheme not in VALID_UNSTABLE_SCHEMES:
+            errors.append(
+                f"surface_unstable_scheme must be one of {VALID_UNSTABLE_SCHEMES}, "
+                f"got {self.surface_unstable_scheme!r}"
+            )
+        elif (self.surface_unstable_scheme != "native"
+                and self.surface_bulk_scheme not in ("coare3", "large_yeager")
+                and not _tiled_with_real_land):
+            # constant/none have no stability; large_yeager_cesm runs the CESM
+            # solver, which has its own fixed unstable form and ignores it.
+            errors.append(
+                f"surface_unstable_scheme={self.surface_unstable_scheme!r} "
+                f"needs surface_bulk_scheme 'coare3' or 'large_yeager' (the "
+                f"iterative MOST solver) or surface_tiled=True whose land tile "
+                f"runs MOST; otherwise it would be ignored."
+            )
         if self.surface_stability_scheme not in _valid_stability:
             errors.append(
                 f"surface_stability_scheme must be one of {_valid_stability}, "
@@ -4289,6 +4383,20 @@ class ExperimentConfig(NamedTuple):
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
         _vert_adv_options = ("upwind", "van_leer", "sb")
+        _snu = d.spectral_sponge_nu_top_m2s
+        if not (isinstance(_snu, (int, float)) and not isinstance(_snu, bool)
+                and math.isfinite(_snu) and _snu >= 0.0):
+            errors.append(
+                f"dycore.spectral_sponge_nu_top_m2s must be a finite number >= 0 (got {_snu!r})")
+        elif _snu > 0 and (d.discretization != "spectral" or d.model_type != "hydrostatic"):
+            errors.append(
+                "dycore.spectral_sponge_nu_top_m2s is wired into the hydrostatic spectral "
+                "dycore only; it would be silently inert here.")
+        elif _snu > 0 and not (d.column_lane and d.energy_fixer):
+            errors.append(
+                "dycore.spectral_sponge_nu_top_m2s needs dycore.column_lane and "
+                "dycore.energy_fixer: only the column-lane ssp_rk54 step returns the "
+                "sponge's energy loss (global energy fixer); legacy/leapfrog steps do not.")
         _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
         if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
             errors.append(
@@ -5235,6 +5343,14 @@ class ExperimentConfig(NamedTuple):
                     "non-land fraction's surface fluxes from the land's, but "
                     f"{_why}. Leave it unset (auto) or false.")
 
+        if self.sea_ice_flux_split:
+            _ok, _why = sea_ice_flux_split_eligibility(self)
+            if not _ok:
+                errors.append(
+                    "sea_ice_flux_split=True separates the ice and open-water "
+                    f"turbulent exchange in sea-ice cells, but {_why}. Leave "
+                    "it unset (auto) or false.")
+
         if self.land_stress_from_land is True:
             _ok, _why = land_stress_eligibility(self)
             if not _ok:
@@ -5530,6 +5646,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_capdcycl=getattr(
                 amip_cfg, 'bechtold_use_ifs_capdcycl', True),
             bechtold_ifs_shallow_nosupply=amip_cfg.bechtold_ifs_shallow_nosupply,
+            bechtold_ifs_hard_switches=amip_cfg.bechtold_ifs_hard_switches,
             bechtold_use_ifs_land_rhebc=getattr(
                 amip_cfg, 'bechtold_use_ifs_land_rhebc', True),
             bechtold_use_ifs_snow_melt=getattr(
@@ -5711,6 +5828,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
             bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,
             bechtold_ifs_shallow_nosupply=self.bechtold_ifs_shallow_nosupply,
+            bechtold_ifs_hard_switches=self.bechtold_ifs_hard_switches,
             bechtold_use_ifs_land_rhebc=self.bechtold_use_ifs_land_rhebc,
             bechtold_use_ifs_snow_melt=self.bechtold_use_ifs_snow_melt,
             sigma_b=self.sigma_b,
@@ -6045,6 +6163,31 @@ def resolve_ocean_flux_on_ocean_surface(cfg) -> bool:
     if cfg.ocean_flux_on_ocean_surface is None:
         return ocean_flux_surface_eligibility(cfg)[0]
     return bool(cfg.ocean_flux_on_ocean_surface)
+
+
+def sea_ice_flux_split_eligibility(cfg) -> tuple[bool, str]:
+    """Is ``sea_ice_flux_split=True`` live in ``cfg``?
+    ``(eligible, reason_if_not)``: the non-land fluxes on the ocean/ice
+    surface (the anchor the split replaces) and the prognostic ice skin it
+    drives (off on a coupled driver, whose sea-ice model owns the ice)."""
+    if not resolve_ocean_flux_on_ocean_surface(cfg):
+        _why = ("ocean_flux_on_ocean_surface is off"
+                if cfg.ocean_flux_on_ocean_surface is False
+                else ocean_flux_surface_eligibility(cfg)[1])
+        return False, ("the non-land fluxes are not on the ocean/ice surface "
+                       f"({_why})")
+    if cfg.ice_skin_prognostic is False:
+        return False, ("ice_skin_prognostic is off (the split charges the "
+                       "prognostic ice skin)")
+    return True, ""
+
+
+def resolve_sea_ice_flux_split(cfg) -> bool:
+    """The resolved tri-state ``sea_ice_flux_split``:
+    None (auto) -> on exactly where eligible; True/False as given."""
+    if cfg.sea_ice_flux_split is None:
+        return sea_ice_flux_split_eligibility(cfg)[0]
+    return bool(cfg.sea_ice_flux_split)
 
 
 def resolve_land_stress_from_land(cfg) -> bool:

@@ -872,6 +872,8 @@ def build_local_mesh(
                              else mesh.subgrid_topo_stddev[lc]),
         land_frac=(None if mesh.land_frac is None
                    else mesh.land_frac[lc]),
+        subgrid_topo_filt_stddev=(None if mesh.subgrid_topo_filt_stddev is None
+                                  else mesh.subgrid_topo_filt_stddev[lc]),
     )
 
 
@@ -1003,6 +1005,9 @@ def _pad_voronoi_for_sharding(mesh: VoronoiMesh, n_devices: int) -> VoronoiMesh:
                                          pad_cells, fill=0.0)),
         land_frac=(None if mesh.land_frac is None
                    else pad_1d(mesh.land_frac, pad_cells, fill=0.0)),
+        subgrid_topo_filt_stddev=(None if mesh.subgrid_topo_filt_stddev is None
+                                  else pad_1d(mesh.subgrid_topo_filt_stddev, pad_cells,
+                                              fill=0.0)),
     )
 
 
@@ -1236,6 +1241,8 @@ def reorder_voronoi_for_sharding(
                                              cell_perm)),
         land_frac=(None if mesh.land_frac is None
                    else reorder_1d(mesh.land_frac, cell_perm)),
+        subgrid_topo_filt_stddev=(None if mesh.subgrid_topo_filt_stddev is None
+                                  else reorder_1d(mesh.subgrid_topo_filt_stddev, cell_perm)),
     )
 
     if edge_order == "block":

@@ -27,7 +27,8 @@ epsilon_shallow), rprcon -> RPRCON, dnoprc -> ZDNOPRC, cape_qadv_weight ->
 RCAPQADV; their defaults are sucumf's.  ifs_shallow_nosupply and
 ifs_shallow_supply_width_w_m2 select main #2253's no-supply shallow closure
 (default "zero", a recorded departure from the source; see the cumastrn
-closure).  No other BechtoldConfig field reaches
+closure).  ifs_hard_switches (default False) selects the smooth (RULE 5) or
+OpenIFS-exact elementwise switches.  No other BechtoldConfig field reaches
 this path: a non-default value of any of them raises (they configure the
 legacy reduction only).
 """
@@ -75,7 +76,8 @@ __physics_contract__ = {
 _TUNABLES = ("epsilon_deep", "delta_deep", "epsilon_shallow", "rprcon", "dnoprc",
              "cape_qadv_weight")
 # Main #2253's no-supply shallow mode and its smoothing width, by name.
-_NOSUPPLY_FIELDS = ("ifs_shallow_nosupply", "ifs_shallow_supply_width_w_m2")
+_NOSUPPLY_FIELDS = ("ifs_shallow_nosupply", "ifs_shallow_supply_width_w_m2",
+                    "ifs_hard_switches")
 _READ_FIELDS = ("use_ifs_ascent", "dx_m") + _TUNABLES + _NOSUPPLY_FIELDS
 
 
@@ -130,7 +132,8 @@ def _tunables(config):
         entshalp=config.epsilon_shallow / config.epsilon_deep, rprcon=config.rprcon,
         zdnoprc=config.dnoprc, rcapqadv=config.cape_qadv_weight,
         shallow_nosupply=config.ifs_shallow_nosupply,
-        shallow_supply_width_w_m2=config.ifs_shallow_supply_width_w_m2)
+        shallow_supply_width_w_m2=config.ifs_shallow_supply_width_w_m2,
+        hard_switches=config.ifs_hard_switches)
 
 
 def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, dt, config, shf_w_m2,

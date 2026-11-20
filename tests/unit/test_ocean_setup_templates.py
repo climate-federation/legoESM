@@ -10,6 +10,7 @@ keeping the *setup* axis distinct from the ``ocean:`` physics *recipe*.
 """
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 
@@ -44,6 +45,19 @@ def _ocean_template_paths() -> list[Path]:
     return sorted(_OCEAN_TEMPLATES.glob("*.yaml"))
 
 
+def _is_harness(cfg) -> bool:
+    """A bench template carrying run_bench.py harness keys (#2113)."""
+    from legoesm.ocean.config import _is_bench_harness  # noqa: PLC0415
+    return _is_bench_harness(cfg.get("setup"))
+
+
+def _run_bench_parse(argv):
+    """Parse *argv* with the REAL run_bench.py CLI (catalog for the harness)."""
+    sys.path.insert(0, str(_REPO_ROOT))
+    from scripts.run import run_bench  # noqa: PLC0415
+    return run_bench._parse_args(argv)
+
+
 def _matrix_case_pairs() -> set[tuple[str, str]]:
     """The live (case, grid_type) catalog from the matrix runner."""
     sys.path.insert(0, str(_REPO_ROOT / "scripts" / "matrix"))
@@ -66,6 +80,10 @@ class TestOceanSetupTemplates:
         assert name in AVAILABLE_EXPERIMENTS, name
         cfg.validate_strict()
         cmd = cfg.run_command(str(path))
+        if _is_harness(cfg):
+            assert cmd.startswith("python scripts/run/run_bench.py ")
+            assert f"--grid {grid}" in cmd
+            return
         assert "run_ocean_test_matrix.py" in cmd
         assert f"--only ={name}" in cmd          # EXACT match, not substring
         assert f"--grid {grid}" in cmd
@@ -193,6 +211,8 @@ class TestSetupTemplateCoverage:
         pairs = _matrix_case_pairs()
         for path in _ocean_template_paths():
             cfg = OceanExperimentConfig.from_yaml(str(path))
+            if _is_harness(cfg):  # covered by the run_bench CLI test below
+                continue
             name, grid = cfg.get("setup.name"), cfg.get("setup.grid")
             assert (name, grid) in pairs, (
                 f"{path.name}: ({name!r}, {grid!r}) is not a matrix case "
@@ -237,3 +257,135 @@ class TestSetupTemplateCoverage:
         # the runner guard (run_ocean_test_matrix.main) raises SystemExit on an
         # empty exact-match selection — verified by inspection of the
         # `if str(args.only).startswith("="): raise SystemExit` guard.
+
+
+# ---------------------------------------------------------- BENCH harness #2113
+class TestBenchHarnessRoute:
+    def _cfg(self, setup):
+        return OceanExperimentConfig.from_dict(
+            {"model": {"type": "ocean_only"}, "setup": setup,
+             "output": {"path": "out/x/"}})
+
+    def test_shipped_harness_templates_parse_with_run_bench(self):
+        """Every harness template's emitted argv is accepted by the real
+        run_bench.py CLI and lands on the declared values."""
+        shipped = [p for p in _ocean_template_paths()
+                   if _is_harness(OceanExperimentConfig.from_yaml(str(p)))]
+        assert shipped, "no BENCH harness template shipped"
+        for path in shipped:
+            cfg = OceanExperimentConfig.from_yaml(str(path))
+            cfg.validate_strict()
+            argv = shlex.split(cfg.run_command())[2:]
+            args = _run_bench_parse(argv)
+            s = cfg.get("setup")
+            assert args.grid == s["grid"]
+            for key in ("preset", "steps", "warmup_steps", "n_lat",
+                        "timing_jsonl"):
+                if key in s:
+                    assert getattr(args, key) == s[key], (path.name, key)
+
+    def test_bench_without_harness_keys_keeps_matrix_route(self):
+        cmd = self._cfg({"name": "bench", "grid": "latlon"}).run_command()
+        assert "run_ocean_test_matrix.py --only =bench" in cmd
+
+    def test_full_mapping(self):
+        cfg = self._cfg({"name": "bench", "grid": "tripole",
+                         "preset": "orca025_like", "steps": 50,
+                         "warmup_steps": 3, "n_lat": 100,
+                         "timing_jsonl": "t.jsonl", "levels": 10,
+                         "dt_seconds": 600.0})
+        cfg.validate_strict()
+        args = _run_bench_parse(shlex.split(cfg.run_command())[2:])
+        assert (args.grid, args.preset, args.steps, args.warmup_steps,
+                args.n_lat, args.timing_jsonl, args.nlev, args.dt) == (
+            "tripole", "orca025_like", 50, 3, 100, "t.jsonl", 10, 600.0)
+        assert "--output" not in cfg.run_command()
+
+    def test_dash_leading_value_parses(self):
+        cfg = self._cfg({"name": "bench", "grid": "latlon",
+                         "timing_jsonl": "-t.jsonl"})
+        cfg.validate_strict()
+        args = _run_bench_parse(shlex.split(cfg.run_command())[2:])
+        assert args.timing_jsonl == "-t.jsonl"
+
+    @pytest.mark.parametrize("bad, match", [
+        ({"preset": "orca2_like"}, "not a BENCH preset"),
+        ({"preset": ["orca1_like"]}, "not a BENCH preset"),
+        ({"steps": 0}, "setup.steps must be"),
+        ({"steps": True}, "setup.steps must be"),
+        ({"warmup_steps": -1}, "setup.warmup_steps must be"),
+        ({"steps": 5, "warmup_steps": 5}, "must be < steps"),
+        ({"steps": 3}, "must be < steps"),  # default warmup 5
+        ({"n_lat": 100}, "grid: tripole only"),
+        ({"timing_jsonl": ""}, "timing_jsonl must be"),
+        ({"preset": "orca1_like", "duration_days": 1.0}, "not supported by"),
+        ({"preset": "orca1_like", "quick": True}, "not supported by"),
+    ])
+    def test_invalid_harness_values_raise(self, bad, match):
+        with pytest.raises(ValueError, match=match):
+            self._cfg({"name": "bench", "grid": "latlon", **bad}).validate_strict()
+
+    def test_harness_keys_rejected_for_other_experiments(self):
+        with pytest.raises(ValueError, match="unknown setup field"):
+            self._cfg({"name": "lock_exchange", "grid": "latlon",
+                       "preset": "orca1_like"}).validate_strict()
+
+    def test_harness_grid_choices(self):
+        with pytest.raises(ValueError, match="not a valid matrix grid"):
+            self._cfg({"name": "bench", "grid": "mpas",
+                       "preset": "orca1_like"}).validate_strict()
+
+
+# ------------------------------------------------------- single column #2103
+_ONE_D_TEMPLATES = _REPO_ROOT / "config" / "templates" / "1d"
+
+
+def _scm_cases() -> dict:
+    """The live case catalog of the single-column matrix runner."""
+    sys.path.insert(0, str(_REPO_ROOT / "scripts" / "matrix"))
+    import run_scm_test_matrix as S  # noqa: PLC0415
+    return S.CASES
+
+
+def _ocean_1d_template_paths() -> list[Path]:
+    return [p for p in sorted(_ONE_D_TEMPLATES.glob("*.yaml"))
+            if OceanExperimentConfig.from_yaml(str(p)).get("model.type")
+            in ("ocean", "ocean_only")]
+
+
+class TestOceanColumnTemplates:
+    def _cfg(self, setup):
+        return OceanExperimentConfig.from_dict(
+            {"model": {"type": "ocean_only"}, "setup": setup})
+
+    def test_ocean_scm_names_are_runner_cases(self):
+        from legoesm.ocean.config import _OCEAN_SCM_CASES  # noqa: PLC0415
+        assert set(_OCEAN_SCM_CASES) <= set(_scm_cases())
+
+    def test_shipped_1d_templates_name_a_real_scm_case(self):
+        paths = _ocean_1d_template_paths()
+        assert paths, f"no ocean templates under {_ONE_D_TEMPLATES}"
+        cases = _scm_cases()
+        for path in paths:
+            cfg = OceanExperimentConfig.from_yaml(str(path))
+            cfg.validate_strict()
+            name = cfg.get("setup.name")
+            assert name in cases, (path.name, name)
+            assert shlex.split(cfg.run_command()) == [
+                "python", "scripts/matrix/run_scm_test_matrix.py", name]
+
+    def test_unknown_column_case_raises(self):
+        with pytest.raises(ValueError, match="not a known experiment"):
+            self._cfg({"name": "lock_exchange", "grid": "column"}).validate_strict()
+
+    def test_column_case_on_3d_grid_raises(self):
+        with pytest.raises(ValueError, match="not a known experiment"):
+            self._cfg({"name": "ocean_convective_deepening",
+                       "grid": "latlon"}).validate_strict()
+
+    @pytest.mark.parametrize("over", [{"levels": 10}, {"dt_seconds": 60.0},
+                                      {"duration_days": 1.0}, {"quick": True}])
+    def test_overrides_rejected(self, over):
+        with pytest.raises(ValueError, match="not supported by"):
+            self._cfg({"name": "ocean_convective_deepening", "grid": "column",
+                       **over}).validate_strict()

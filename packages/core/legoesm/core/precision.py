@@ -372,6 +372,16 @@ def const(value: float, module: str | None, role: str) -> jax.Array:
     return jnp.array(value, dtype=target)
 
 
+def match_leaf_dtypes(pytree, reference):
+    """Cast each array leaf of ``pytree`` to the dtype of the matching leaf of
+    ``reference`` (same tree structure); non-array leaves pass through."""
+    def _cast(x, r):
+        if hasattr(x, "dtype") and hasattr(r, "dtype") and x.dtype != r.dtype:
+            return x.astype(r.dtype)
+        return x
+    return jax.tree.map(_cast, pytree, reference)
+
+
 def cast_pytree(pytree, module: str | None, role: str, *,
                 allow_downcast: bool = False):
     """Cast all float arrays in a pytree to the effective dtype.
@@ -611,6 +621,21 @@ def with_precision(module: str):
 
             return jax.tree.map(_to_storage, result)
 
+        wrapper.__name__ = fn.__name__
+        wrapper.__doc__ = fn.__doc__
+        return wrapper
+    return decorator
+
+
+def with_precision_override(module: str):
+    """:func:`with_precision` applied only while ``module`` has a ``compute``
+    override set (e.g. float64 microphysics inside a float32 run); otherwise
+    ``fn`` runs untouched.  Decided at call (trace) time."""
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            if "compute" in _MODULE_OVERRIDES.get(module, {}):
+                return with_precision(module)(fn)(*args, **kwargs)
+            return fn(*args, **kwargs)
         wrapper.__name__ = fn.__name__
         wrapper.__doc__ = fn.__doc__
         return wrapper

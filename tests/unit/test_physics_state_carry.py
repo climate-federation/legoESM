@@ -204,23 +204,6 @@ def _toy_carry_physics_fn():
     return physics_fn
 
 
-def _cdgrid_setup(n=6, nlev=6):
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationModel,
-        CDGridPrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
-
-    grid = create_cubed_sphere(n)
-    sigma = create_sigma_coordinate(nlev)
-    model = CDGridPrimitiveEquationModel(
-        grid, sigma, CDGridPrimitiveEquationConfig())
-    state = held_suarez_init(grid, sigma)
-    return model, state, sigma
-
-
 def _mpas_setup(n=3, nlev=8):
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
@@ -236,70 +219,6 @@ def _mpas_setup(n=3, nlev=8):
         mesh, sigma, MPASPrimitiveEquationConfig())
     state = held_suarez_init_mpas(mesh, sigma)
     return model, state
-
-
-def test_cdgrid_step_threads_seeded_carry():
-    """CDGrid PE step: output carry depends on the input carry (memory),
-    perturbation survives, chained steps keep it — mirror of the MPAS
-    memory test (issue #413 lift)."""
-    model, state, sigma = _cdgrid_setup()
-    cfg = _tke_physics_config()
-    # Toy +1 carry: MYJ floors q2 in this no-turbulence rest state.
-    physics_fn = _toy_carry_physics_fn()
-
-    shp = state.T.data.shape           # (6, n, n, nlev)
-    ncol = shp[0] * shp[1] * shp[2]
-    nlev = shp[3]
-    seed = init_physics_state(ncol, nlev, cfg)
-    seed_pert = seed._replace(tke=seed.tke.at[0, :].add(1.0))
-
-    _ = model.step(state, 1.0, physics_fn=physics_fn, phys_state=seed)
-    ps_a = model._phys_state
-    _ = model.step(state, 1.0, physics_fn=physics_fn, phys_state=seed_pert)
-    ps_b = model._phys_state
-
-    assert ps_a is not None and ps_b is not None, (
-        "CDGrid step dropped the seeded carry (model._phys_state is None)"
-    )
-    assert not np.array_equal(np.asarray(ps_b.tke), np.asarray(ps_a.tke)), (
-        "Output carry is independent of the input carry — the scheme "
-        "is being reseeded every step (issue #405/#413)"
-    )
-    assert (float(np.max(np.asarray(ps_b.tke)[0]))
-            > float(np.max(np.asarray(ps_a.tke)[0]))), (
-        "Perturbed TKE column lost its memory through the step"
-    )
-    # Chain a second step on the perturbed branch: memory persists.
-    s1 = model.step(state, 1.0, physics_fn=physics_fn, phys_state=seed_pert)
-    _ = model.step(s1, 1.0, physics_fn=physics_fn,
-                   phys_state=model._phys_state)
-    ps2 = model._phys_state
-    assert ps2 is not None
-    assert np.all(np.isfinite(np.asarray(ps2.tke)))
-
-
-def test_cdgrid_carry_advances_exactly_once_per_step():
-    """Toy +1 carry: after one CDGrid step the carry must be seed+1 —
-    stages share the step-input carry; one post-step eval produces the
-    carry-out (the documented #413 semantics)."""
-    model, state, _ = _cdgrid_setup(n=4, nlev=4)
-    cfg = _tke_physics_config()
-    shp = state.T.data.shape
-    seed = init_physics_state(shp[0] * shp[1] * shp[2], shp[3], cfg)
-
-    _ = model.step(state, 600.0, physics_fn=_toy_carry_physics_fn(),
-                   phys_state=seed)
-    ps_out = model._phys_state
-    assert ps_out is not None
-    np.testing.assert_allclose(
-        np.asarray(ps_out.tke), np.asarray(seed.tke) + 1.0,
-        rtol=0, atol=0,
-        err_msg="carry must advance exactly once per step "
-                "(per-RK-stage accumulation or a dropped carry detected)",
-    )
-    # No carry threaded -> stash resets to None (legacy contract).
-    _ = model.step(state, 600.0, physics_fn=_toy_carry_physics_fn())
-    assert model._phys_state is None
 
 
 def test_latlon_step_threads_seeded_carry():
@@ -408,116 +327,10 @@ def test_refusal_guard_covers_sundqvist_microphysics():
         ModelDriver._refuse_stateful_physics_unthreaded(_Cfg())
 
 
-def _stateful_driver_config(**overrides):
-    from legoesm.driver.config import (
-        ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
-    )
-    # dt=1 s: at production dt a rest-state TKE perturbation legitimately
-    # dissipates to the scheme floor within a step (same caveat as the
-    # MPAS memory test), which would mask a dropped carry.
-    kwargs = dict(
-        grid=GridConfig(resolution=8, nlev=5),
-        dycore=DycoreConfig(energy_fixer=False, dt=1.0),
-        output=OutputConfig(diag_days=1),
-        days=6.0 / 86400.0,             # 6 steps at dt=1
-        dataset="analytical",
-        turbulence="tke",
-        gravity_wave_drag="prognostic_spectral",
-    )
-    kwargs.update(overrides)
-    return ExperimentConfig(**kwargs)
 
 
-@pytest.mark.parametrize("compiled", [True, False],
-                         ids=["run_compiled", "run_per_step"])
-def test_driver_loops_thread_and_persist_stateful_carries(
-        tmp_path, compiled):
-    """Issue #413 lift: the compiled and per-step driver loops now RUN
-    stateful schemes (formerly refused), seed the carries via
-    init_physics_state, thread them through the unified physics step,
-    persist them in carry_aux for checkpointing, and RESTORE a
-    carry_aux seed (the checkpoint-restart path).  Memory pin: a
-    perturbed restored carry must produce a different final carry than
-    the default seed under identical dynamics."""
-    from legoesm.driver.model_driver import ModelDriver
-
-    # edmf, not tke: MYJ resets q2 to its floor in this stable rest state
-    # (WRF PRODQ2 no-turbulence branch), erasing any seed whatever the loop does.
-    cfg = _stateful_driver_config(turbulence="edmf")
-    driver = ModelDriver(cfg, output_dir=tmp_path / "a")
-    driver.setup()
-    status = driver.run(compiled=compiled)
-    assert status == "COMPLETED", (
-        "stateful schemes must RUN on this loop now (guard lifted #413)"
-    )
-
-    assert "tke" in driver._carry_aux, (
-        "tke carry not persisted in carry_aux (checkpoint would reseed)"
-    )
-    assert "gwd_spectrum" in driver._carry_aux
-    tke_a = np.asarray(driver._carry_aux["tke"])
-    spec_a = np.asarray(driver._carry_aux["gwd_spectrum"])
-    nlev = cfg.grid.nlev
-    assert tke_a.shape[-1] == nlev and tke_a.ndim == 2
-    assert spec_a.ndim == 3
-    assert np.all(np.isfinite(tke_a)) and np.all(np.isfinite(spec_a))
-
-    # Second run, identical dynamics, PERTURBED restored carry (the
-    # restart path: carry_aux seeds _prepare_run_context).  The final
-    # carry must remember the perturbation — if the loop reseeded every
-    # step (issue #405) both runs would end identical.
-    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
-    driver_b.setup()
-    tke_seed = jnp.asarray(tke_a)
-    driver_b._carry_aux = {
-        "tke": tke_seed.at[0, :].set(tke_seed[0, :] + 1e-2),
-    }
-    status_b = driver_b.run(compiled=compiled)
-    assert status_b == "COMPLETED"
-    tke_b = np.asarray(driver_b._carry_aux["tke"])
-    assert not np.array_equal(tke_b, tke_a), (
-        "final tke is independent of the seeded carry — the loop is "
-        "reseeding the physics state every step (issue #405)"
-    )
-    assert float(np.max(tke_b[0])) > float(np.max(tke_a[0])), (
-        "perturbed TKE column lost its memory through the run"
-    )
 
 
-def test_checkpoint_roundtrip_restores_stateful_carries(tmp_path):
-    """#413 item 3 (cubed-sphere/npz path): tke + gwd_spectrum ride
-    carry_aux into the checkpoint and come back bit-identical through
-    load_checkpoint; the restarted run then CONTINUES from the restored
-    carry (no silent reseed across restart)."""
-    from legoesm.driver.model_driver import ModelDriver
-    from legoesm.driver.config import OutputConfig
-
-    cfg = _stateful_driver_config(
-        output=OutputConfig(diag_days=1, checkpoint_days=3.0 / 86400.0),
-    )
-    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
-    driver_a.setup()
-    assert driver_a.run(compiled=True) == "COMPLETED"
-    tke_saved = np.asarray(driver_a._carry_aux["tke"])
-    spec_saved = np.asarray(driver_a._carry_aux["gwd_spectrum"])
-
-    ckpts = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))
-    assert ckpts, "no checkpoint written"
-
-    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
-    driver_b.setup()
-    driver_b.load_checkpoint(ckpts[-1])
-    assert "tke" in driver_b._carry_aux, (
-        "tke did not survive the checkpoint roundtrip — restart would "
-        "silently reseed the physics memory (issue #405/#413)"
-    )
-    np.testing.assert_array_equal(
-        np.asarray(driver_b._carry_aux["tke"]), tke_saved)
-    np.testing.assert_array_equal(
-        np.asarray(driver_b._carry_aux["gwd_spectrum"]), spec_saved)
-    # Restored carry actually seeds the continued run.
-    assert driver_b.run(compiled=True) == "COMPLETED"
-    assert np.all(np.isfinite(np.asarray(driver_b._carry_aux["tke"])))
 
 
 def test_mpas_checkpoint_roundtrip_restores_physics_state(tmp_path):
@@ -618,57 +431,8 @@ def test_pack_carry_preserves_f64_gwd_spectrum_dtype():
     )
 
 
-def test_conv_prog_scheme_tag_roundtrip_and_rejection(tmp_path):
-    """Codex round 9: the conv_prog scheme tag round-trips the npz
-    checkpoint as a string and a same-shape cross-scheme restore is
-    rejected loudly."""
-    from legoesm.driver.model_driver import ModelDriver
-    from legoesm.driver.config import OutputConfig
-
-    cfg = _stateful_driver_config(
-        convection="mass_flux",
-        output=OutputConfig(diag_days=1, checkpoint_days=3.0 / 86400.0),
-    )
-    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
-    driver_a.setup()
-    assert driver_a.run(compiled=True) == "COMPLETED"
-    ckpts = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))
-    assert ckpts
-    with np.load(ckpts[-1]) as d:
-        assert "carry_conv_prog_scheme" in d.files
-        assert str(d["carry_conv_prog_scheme"]) == "mass_flux"
-
-    # Same shape, different scheme: edmf also carries (ncol,) — the
-    # tag must reject the restore.
-    cfg_b = _stateful_driver_config(
-        convection="edmf",
-        output=OutputConfig(diag_days=1, checkpoint_days=3.0 / 86400.0),
-    )
-    driver_b = ModelDriver(cfg_b, output_dir=tmp_path / "b")
-    driver_b.setup()
-    driver_b.load_checkpoint(ckpts[-1])
-    assert driver_b._carry_aux.get("conv_prog_scheme") == "mass_flux"
-    with pytest.raises(ValueError, match="mass_flux"):
-        driver_b.run(compiled=True)
-
-    # Matching scheme restores cleanly.
-    driver_c = ModelDriver(cfg, output_dir=tmp_path / "c")
-    driver_c.setup()
-    driver_c.load_checkpoint(ckpts[-1])
-    assert driver_c.run(compiled=True) == "COMPLETED"
 
 
-def test_restored_carry_shape_mismatch_fails_fast(tmp_path):
-    """Codex round 1: a PRESENT restored carry with the wrong shape is a
-    checkpoint/config mismatch — must raise, not silently reseed."""
-    from legoesm.driver.model_driver import ModelDriver
-
-    cfg = _stateful_driver_config()
-    driver = ModelDriver(cfg, output_dir=tmp_path)
-    driver.setup()
-    driver._carry_aux = {"tke": jnp.zeros((7, 3))}   # wrong shape
-    with pytest.raises(ValueError, match="405"):
-        driver.run(compiled=True)
 
 
 def test_pipeline_refuses_dropped_active_carry():
@@ -723,38 +487,6 @@ def test_sharded_wrapper_refuses_stateful_physics():
     with pytest.raises(NotImplementedError, match="405"):
         _refuse_stateful_physics_unthreaded_wrapper(
             functools.partial(stateful_fn))
-
-
-def test_integrate_mixin_refuses_and_threads_carry():
-    """Codex round 2: IntegrationMixin.integrate must refuse a stateful
-    physics_fn without a carry, and thread the carry when supplied."""
-    from legoesm.atmosphere.physics.combined import make_physics
-
-    model, state, _ = _cdgrid_setup(n=4, nlev=4)
-    cfg = _tke_physics_config()
-    fn = make_physics(cfg, model_type="hydrostatic", dt=1.0)
-    with pytest.raises(NotImplementedError, match="405"):
-        model.integrate(state, duration=2.0, dt=1.0, physics_fn=fn)
-
-    shp = state.T.data.shape
-    seed = init_physics_state(shp[0] * shp[1] * shp[2], shp[3], cfg)
-    # Threading uses the toy +1 carry: MYJ floors q2 in this
-    # no-turbulence rest state, erasing any real-scheme seed.
-    toy = _toy_carry_physics_fn()
-    _ = model.integrate(
-        state, duration=2.0, dt=1.0, physics_fn=toy, phys_state=seed)
-    ps_a = model._phys_state
-    assert ps_a is not None
-    np.testing.assert_allclose(np.asarray(ps_a.tke), np.asarray(seed.tke) + 2.0,
-                               rtol=0, atol=0)
-    seed_pert = seed._replace(tke=seed.tke.at[0, :].add(1.0))
-    _ = model.integrate(
-        state, duration=2.0, dt=1.0, physics_fn=toy, phys_state=seed_pert)
-    ps_b = model._phys_state
-    assert not np.array_equal(np.asarray(ps_b.tke), np.asarray(ps_a.tke)), (
-        "integrate() final carry is independent of the seeded carry — "
-        "the loop is reseeding the physics state (issue #405)"
-    )
 
 
 def test_make_physics_tags_requires_phys_state():
@@ -815,25 +547,6 @@ def _stateful_make_physics():
     fn = make_physics(_tke_physics_config(), model_type="hydrostatic", dt=1.0)
     assert fn._requires_phys_state is True, "fixture must be a stateful fn"
     return fn
-
-
-def test_cdgrid_step_refuses_stateful_physics_without_carry():
-    """A stateful physics_fn handed to the CDGrid public step APIs with
-    no phys_state must REFUSE loudly — silently reseeding every step is
-    the exact failure class #413 removes (the integrate()/sharded guards
-    did not cover direct step / step_with_physics / step_cell_centre)."""
-    model, state, _ = _cdgrid_setup(n=4, nlev=4)
-    fn = _stateful_make_physics()
-    with pytest.raises(NotImplementedError, match="405"):
-        model.step(state, 1.0, physics_fn=fn)
-    with pytest.raises(NotImplementedError, match="405"):
-        model.step_with_physics(state, 1.0, physics_fn=fn)
-    with pytest.raises(NotImplementedError, match="405"):
-        model.step_cell_centre(state, 1.0, physics_fn=fn)
-    # Untagged (legacy) physics_fn is unaffected: the no-carry call still
-    # runs byte-identically to the 3-arg path.
-    _ = model.step(state, 1.0, physics_fn=_toy_carry_physics_fn())
-    assert model._phys_state is None
 
 
 def test_latlon_step_refuses_stateful_physics_without_carry():
@@ -1212,40 +925,6 @@ def test_spectral_family_step_refuses_stateful_physics():
         sfno.step_with_physics(None, 1.0, fn)
 
 
-def test_carry_guard_sees_through_partial_and_wraps():
-    """Codex adversarial round 9 (#413): a functools.partial / wraps
-    wrapper around a tagged stateful make_physics fn strips the direct
-    _requires_phys_state attribute; the carry guard must follow
-    .func / __wrapped__ so a wrapped stateful physics cannot bypass the
-    contract and silently reseed."""
-    import functools
-    from legoesm.timestepping.integration import physics_requires_phys_state
-
-    fn = _stateful_make_physics()
-    assert physics_requires_phys_state(fn)
-
-    # functools.partial (e.g. binding forcing=) strips the attribute.
-    p = functools.partial(fn, forcing=None)
-    assert not getattr(p, "_requires_phys_state", False)
-    assert physics_requires_phys_state(p)
-
-    # functools.wraps copies __wrapped__ -> must be followed.
-    @functools.wraps(fn)
-    def wrapped(*a, **k):
-        return fn(*a, **k)
-    assert physics_requires_phys_state(wrapped)
-
-    # A diagnostic (untagged) fn stays False through a partial.
-    assert not physics_requires_phys_state(
-        functools.partial(_toy_carry_physics_fn()))
-
-    # End-to-end: a partial-wrapped stateful fn on a direct CDGrid step
-    # (no phys_state) still refuses loudly.
-    model, state, _ = _cdgrid_setup(n=4, nlev=4)
-    with pytest.raises(NotImplementedError, match="405"):
-        model.step(state, 1.0, physics_fn=functools.partial(fn))
-
-
 def test_voronoi_mpi_step_refuses_stateful_physics_without_carry():
     """Codex adversarial round 11 (#413): make_voronoi_mpi_step with the
     default state-only contract (return_phys_state=False) drops the
@@ -1261,39 +940,6 @@ def test_voronoi_mpi_step_refuses_stateful_physics_without_carry():
     with pytest.raises(NotImplementedError, match="405"):
         make_voronoi_mpi_step(
             None, None, None, physics_fn=functools.partial(fn))
-
-
-def test_nonhydrostatic_cdgrid_step_refuses_stateful_physics():
-    """Codex adversarial round 13 (#413): the nonhydrostatic CD-grid
-    dycore does not thread a PhysicsState carry, so a tagged stateful
-    make_physics(model_type="nonhydrostatic") fn on its direct step APIs
-    must be refused, not silently reseeded.  (NH MPAS / NH plane share the
-    same helper-based guard.)  The guard fires before the state is
-    touched, so a placeholder suffices."""
-    from legoesm.atmosphere.physics.combined import make_physics
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.vertical import (
-        create_height_coordinate, compute_terrain_metric,
-    )
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
-        CDGridCompressibleEulerModel,
-        CDGridCompressibleEulerConfig,
-    )
-
-    fn = make_physics(
-        _tke_physics_config(), model_type="nonhydrostatic", dt=1.0)
-    assert fn._requires_phys_state is True
-
-    grid = create_cubed_sphere(4)
-    hc = create_height_coordinate(5, 30000.0)
-    tm = compute_terrain_metric(jnp.zeros((6, grid.n, grid.n)), hc)
-    nh = CDGridCompressibleEulerModel(
-        grid, hc, tm, CDGridCompressibleEulerConfig())
-
-    with pytest.raises(NotImplementedError, match="405"):
-        nh.step(None, 1.0, physics_fn=fn)
-    with pytest.raises(NotImplementedError, match="405"):
-        nh.step_with_physics(None, 1.0, physics_fn=fn)
 
 
 def test_requires_phys_state_gwd_composite():

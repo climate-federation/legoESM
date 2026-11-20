@@ -448,30 +448,26 @@ def probe_npzd():
     cfg = BiogeoConfig()
 
     dN, dP, dZ, dD, dDIC, dALK = npzd_source_sink(
-        NO3, P, Z, Det, DIC, ALK, T, PAR, dz, cfg,
+        NO3, P, Z, Det, DIC, ALK, T, PAR, dz, cfg, jnp.ones_like(NO3),
     )
 
-    # N conservation in nitrogen pools (no sinking exported -> column sum
-    # unaffected).  However: detritus sinking exports nitrogen out of the
-    # bottom of every column.  Compute interior-column N tendency closure.
-    N_pool_tend = (dN + dP + dZ + dD).sum(axis=-1) * 50.0
-    # The export at the bottom is w_sink * D[bottom].
-    w_sink_s = cfg.w_sink / 86400.0
-    expected_export = -w_sink_s * Det[..., -1]
-    rel_err = float(jnp.max(
-        jnp.abs(N_pool_tend - expected_export)
-        / jnp.maximum(jnp.abs(expected_export), 1e-30),
-    ))
+    # N conservation in nitrogen pools: detritus sinking onto the sea floor
+    # is remineralised in the bottom cell (#1816), so the column N tendency
+    # vanishes. Scale by the magnitude of the terms.
+    N_pool_tend = ((dN + dP + dZ + dD) * dz).sum(axis=-1)
+    scale = ((jnp.abs(dN) + jnp.abs(dP) + jnp.abs(dZ) + jnp.abs(dD)) * dz).sum(axis=-1)
+    rel_err = float(jnp.max(jnp.abs(N_pool_tend) / jnp.maximum(scale, 1e-30)))
     ok_cons = rel_err < 1e-6
     report(
-        "NPZD nitrogen pool conservation w/ export",
+        "NPZD nitrogen pool column closure",
         ok_cons,
         f"rel_err={rel_err:.3e}",
     )
 
     # Gradient sanity
     def loss(P_):
-        d = npzd_source_sink(NO3, P_, Z, Det, DIC, ALK, T, PAR, dz, cfg)
+        d = npzd_source_sink(NO3, P_, Z, Det, DIC, ALK, T, PAR, dz, cfg,
+                             jnp.ones_like(NO3))
         return d[1].sum()
 
     g = jax.grad(loss)(P)

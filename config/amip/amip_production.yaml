@@ -382,7 +382,11 @@ gravity_wave_drag: mcfarlane            # orographic member = CAM6 gw_oro port
                                         # the McFarlaneConfig code defaults (no
                                         # deck rows exist for them, except
                                         # effgw_oro below); the fv3duo deck
-                                        # inherits this row.
+                                        # inherits this row.  Since #2546
+                                        # (2026-11-16) the code defaults also
+                                        # smooth the umcfac |u|, its sign and
+                                        # the taumin zeroing (widths 0.01 m/s,
+                                        # 1e-3 m/s, 1e-10 Pa; RULE 5).
 mcfarlane_effgw_oro: 0.125              # CAM6 effgw_oro (namelist_defaults_cam
                                         # non-WACCM L32); explicit so the run
                                         # records it (#1712).
@@ -466,6 +470,10 @@ mpas_land_stress_from_land: true
 # not on the land-blended T_sfc/q_sfc (#1320; CESM computes atm-ocn fluxes on
 # ocean points only).  User 2026-10-19.
 ocean_flux_on_ocean_surface: true
+# Partly ice-covered sea cells: turbulent exchange on the ice skin and on the
+# open water separately, the ice skin charged its own sensible/latent heat
+# (#2573, user 2026-11-19).  Radiation is not split.
+sea_ice_flux_split: true
 mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
                                 # albedo rebuilt every land step, as the
                                 # offline calibration runs the tables (user
@@ -474,9 +482,15 @@ land_soil_init: aridity
 # Land starting state: the res-6 spun-up soil water/snow (soil_ic_mpas6.npz) with
 # soil TEMPERATURE replaced by ERA5 1979-01-01 00 UTC stl1-4 on non-glacier land
 # (glaciers keep the spin-up). Built by scripts/data/regrid_land_ic.py
-# --era5-soil-t; provenance is in the file's metadata. data/ is gitignored:
+# --target-grid mpas --target-resolution 6 --target-clm-surfdata <the run's
+# CLM surfdata> (soil water carried as relative wetness between dry floor and
+# saturation, rebuilt on this run's soil, user 2026-11-12), then
+# --era5-soil-t; file md5 0d3a2af0a438c1653ddc3f5c122966c9; provenance is in
+# the file's metadata. data/ is gitignored:
 # stage the file in the launch directory.
-land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101.npz
+# _v3 (2026-11-15): rebuilt with --vg-air-entry-m -0.02 against main's moved
+# dry floor (re-land of #2497/#2526; supersedes the _v2 lift-only file).
+land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101_v3.npz
 
 # ---- moisture smoothing / clamps (unchanged) -----------------------------------
 mpas_qv_smooth_del2_m2s: 0.0

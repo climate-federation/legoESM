@@ -68,16 +68,21 @@ def _tc(case, grid, vert):
     return mod.TestCase("hydrostatic", case, grid, "72x144", vert, 200, 2)
 
 
-def test_known_failure_registered_latlon_topo():
-    assert ("held_suarez_topo", "latlon", "hybrid") in mod.KNOWN_FAILURES
+def test_latlon_topo_no_longer_waived():
+    """#1029 resolved by selecting sb81_theta; a blow-up must now be a red FAIL."""
+    assert ("held_suarez_topo", "latlon", "hybrid") not in mod.KNOWN_FAILURES
 
 
 _BLOWUP = "mass drift=nan, max|v|=nan; BLOWUP: state non-finite (NaN/Inf)"
+_KEY = ("held_suarez_topo", "latlon", "hybrid")
+_ENTRY = {"issue": "#1029", "min_days": 100.0, "expect_note": "BLOWUP"}
 
 
-def test_known_failure_waives_only_the_reproduced_blowup():
+def test_known_failure_waives_only_the_reproduced_blowup(monkeypatch):
     """Full run: the tagged blow-up FAIL -> XFAIL; every other status/cause is
-    NOT masked (codex rounds 1+2)."""
+    NOT masked (codex rounds 1+2). Synthetic entry: the registry mechanism is
+    kept even while the registry is empty."""
+    monkeypatch.setitem(mod.KNOWN_FAILURES, _KEY, _ENTRY)
     tc = _tc("held_suarez_topo", "latlon", "hybrid")
     assert mod._apply_known_failure(tc, "FAIL", 200.0, _BLOWUP) == "XFAIL"
     # differently-caused full-run FAIL (no BLOWUP tag) stays red -> exit-gated
@@ -87,8 +92,9 @@ def test_known_failure_waives_only_the_reproduced_blowup():
     assert mod._apply_known_failure(tc, "SKIP", 200.0, _BLOWUP) == "SKIP"
 
 
-def test_known_failure_short_run_reports_true_status():
+def test_known_failure_short_run_reports_true_status(monkeypatch):
     """Quick 2-day run never reaches the blow-up step -> no spurious XFAIL/XPASS."""
+    monkeypatch.setitem(mod.KNOWN_FAILURES, _KEY, _ENTRY)
     tc = _tc("held_suarez_topo", "latlon", "hybrid")
     for s in ("PASS", "FAIL", "ERROR", "SKIP"):
         assert mod._apply_known_failure(tc, s, 2.0, _BLOWUP) == s

@@ -72,28 +72,6 @@ def _mpas_setup(mesh_level: int, terrain: dict):
     return mesh, state, hcoord, tmetric, model
 
 
-def _cube_setup(n: int, terrain: dict):
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
-        CDGridCompressibleEulerConfig,
-        CDGridCompressibleEulerModel,
-    )
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-
-    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1 import (
-        dcmip25_tc1_init,
-    )
-
-    grid = create_cubed_sphere(n, use_duogrid=True)
-    state, hcoord, tmetric = dcmip25_tc1_init(
-        grid, n_levels=10, params=terrain,
-    )
-    cfg = CDGridCompressibleEulerConfig(
-        n_acoustic_substeps=10, semi_implicit_acoustic=True, fix_mass=False,
-    )
-    model = CDGridCompressibleEulerModel(grid, hcoord, tmetric, cfg)
-    return grid, state, hcoord, tmetric, model
-
-
 # ---------------------------------------------------------------------------
 # 1. Dry-mass conservation over a mountain, NO mass fixer.
 # ---------------------------------------------------------------------------
@@ -119,27 +97,6 @@ def test_mpas_terrain_dry_mass_drift():
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
 
 
-def test_cube_terrain_dry_mass_drift():
-    """Cube NH (duogrid) over a resolved 2 km Gaussian hill: inherent
-    dry-mass drift at the fp64 floor (measured 3.9e-16).  Without the
-    J-weighted horizontal continuity this drifts at 5.5e-8
-    (dt=30 s, 20 steps, C12)."""
-    from legoesm.core.conservation import compute_nh_dry_mass
-
-    grid, state, hcoord, tmetric, model = _cube_setup(12, HILL)
-
-    def _mass(s):
-        return float(compute_nh_dry_mass(
-            s.rho_prime.data, hcoord, tmetric, grid,
-        ))
-
-    m0 = _mass(state)
-    for _ in range(N_STEPS):
-        state = model.step(state, 30.0)
-    assert jnp.all(jnp.isfinite(state.w.data))
-    assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
-
-
 # ---------------------------------------------------------------------------
 # 2. Rest state (u = 0, rho' = theta' = 0) is a bitwise fixed point —
 #    over terrain AND flat.  Known-value guard: the J = 1 (flat) case
@@ -155,22 +112,6 @@ def test_mpas_rest_state_is_stationary(terrain):
 
     stepped = model.step(state, 60.0)
     assert jnp.array_equal(stepped.u.data, state.u.data)
-    assert jnp.array_equal(stepped.w.data, state.w.data)
-    assert jnp.array_equal(stepped.theta_prime.data, state.theta_prime.data)
-    assert jnp.array_equal(stepped.rho_prime.data, state.rho_prime.data)
-
-
-@pytest.mark.parametrize("terrain", [FLAT, HILL], ids=["flat", "mountain"])
-def test_cube_rest_state_is_stationary(terrain):
-    _, state, _, _, model = _cube_setup(8, terrain)
-    zeros = jnp.zeros_like(state.u.data)
-    state = state._replace(
-        u=state.u.replace(data=zeros), v=state.v.replace(data=zeros),
-    )
-
-    stepped = model.step(state, 30.0)
-    assert jnp.array_equal(stepped.u.data, state.u.data)
-    assert jnp.array_equal(stepped.v.data, state.v.data)
     assert jnp.array_equal(stepped.w.data, state.w.data)
     assert jnp.array_equal(stepped.theta_prime.data, state.theta_prime.data)
     assert jnp.array_equal(stepped.rho_prime.data, state.rho_prime.data)

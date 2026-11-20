@@ -33,6 +33,7 @@ import numpy as np
 import pytest
 from jax.test_util import check_grads
 
+from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
 
@@ -43,7 +44,8 @@ _HARD = 1.0e12   # sharpness at the hard-switch limit
 def _hard_config():
     return McFarlaneConfig()._replace(
         min_wind_sharpness=_HARD, softmin_sharpness=_HARD,
-        crit_level_sharpness=_HARD, crit_level_floor=0.0)
+        crit_level_sharpness=_HARD, crit_level_floor=0.0,
+        umcfac_abs_width=0.0, umcfac_sign_width=0.0, taumin_ramp_width=0.0)
 
 
 def _run(f, cfg):
@@ -181,12 +183,14 @@ def test_effgw_oro_is_read(fx):
 # the same p-norm smooth min (#2241: column 10, the limiter column, du/dt
 # 3.52e-3 -> 3.66e-3, dT/dt 4.23e-3 -> 4.46e-3; column 8 dq/dt in the 7th
 # digit); a change to the smooth form or its default widths re-measures
-# these (CLAUDE.md RULE 5).
+# these (CLAUDE.md RULE 5); re-measured 2026-11-12 when the launch Froude cap
+# became the same p-norm smooth min (#2241: columns 0, 9, 10 move in the
+# 6th-7th digit, e.g. column 0 du/dt 5.859040e-3 -> 5.859046e-3).
 _DEFAULT_GAP = {
-    "du_dt": [0.005859040034893811, 6.472889827836152e-08, 1.6868859976542688e-06, 4.3204513047210216e-17, 8.746006123670688e-08, 0.0, 1.7624749877984122e-12, 0.0, 3.9375029599815744e-05, 9.49897006228089e-09, 0.0036637403699350565, 0.028638863439120362, 9.331091449513355e-06, 0.006028398688773056],
-    "dv_dt": [0.0058590400348939725, 6.472889832271714e-08, 1.6868859976542686e-06, 1.7858574851330124e-16, 8.746006120341078e-08, 0.0, 6.417260889483866e-13, 0.0, 3.937502959984183e-05, 0.0, 0.003663740369934912, 0.028638863439120338, 9.331091449516941e-06, 0.0060283986887730776],
-    "dT_dt": [0.009321124470501766, 1.3583388846033913e-07, 3.2232602012354554e-07, 2.2454514043272096e-09, 1.1613159687254673e-07, 0.0, 4.446515471276407e-15, 0.0, 3.84647821312094e-05, 1.4866842787362648e-08, 0.00445921683282261, 0.026811860105715277, 5.12531637968643e-06, 0.009777855450530558],
-    "dq_v_dt": [0.0008319519855585455, 1.4664196005087715e-07, 1.8998898091578e-08, 5.051315779127953e-11, 5.919641014073965e-09, 0.0, 2.1587669923266932e-19, 0.0, 1.2754852561754775e-06, 1.976997972882354e-08, 1.6988157670128806e-10, 3.228541565997711e-05, 3.7414933751356154e-06, 9.995812882304257e-05],
+    "du_dt": [0.005859045941955335, 6.472889827836152e-08, 1.6868859976542688e-06, 4.3204513047210216e-17, 8.746006123670688e-08, 0.0, 1.7624749877984122e-12, 0.0, 3.9375029599815744e-05, 9.498973769530592e-09, 0.003663740369935438, 0.028638863439120362, 9.331091449513355e-06, 0.006028398688773056],
+    "dv_dt": [0.005859045941955472, 6.472889832271714e-08, 1.6868859976542686e-06, 1.7858574851330124e-16, 8.746006120341078e-08, 0.0, 6.417260889483866e-13, 0.0, 3.937502959984183e-05, 0.0, 0.003663740369935409, 0.028638863439120338, 9.331091449516941e-06, 0.0060283986887730776],
+    "dT_dt": [0.009321071263240707, 1.3583388846033913e-07, 3.2232602012354554e-07, 2.2454514043272096e-09, 1.1613159687254673e-07, 0.0, 4.446515471276407e-15, 0.0, 3.84647821312094e-05, 1.4866400219946277e-08, 0.004459216832505393, 0.026811860105715277, 5.12531637968643e-06, 0.009777855450530558],
+    "dq_v_dt": [0.0008318973701614702, 1.4664196005087715e-07, 1.8998898091578e-08, 5.051315779127953e-11, 5.919641014073965e-09, 0.0, 2.1587669923266932e-19, 0.0, 1.2754852561754775e-06, 1.976997972882354e-08, 1.6988157670128806e-10, 3.228541565997711e-05, 3.7414933751356154e-06, 9.995812882304257e-05],
 }
 # Column 3 (Antarctic): its dT/dq entries are the oracle's eddy-diffusion
 # round-off floor (identical at the hard limit), so they are bounded, not
@@ -231,7 +235,11 @@ _KINKS = ((8, 0.8726731705528938), (13, 0.8381197667884639),
           # smooth stress cap); none remains with the p-norm limiters.
           (10, 0.8995271070366408), (10, 0.9281700052027244),
           (10, 0.9748640376019653), (10, 1.0091078906295348),
-          (10, 1.1961275878169801))
+          (10, 1.1961275878169801),
+          # #2241: the hard launch Froude cap min(hdsp^2, fcrit2 (U/N)^2)
+          # (column 0: both sides 6.4e5 m^2 at this s); found 2026-11-12 by
+          # the same scan, bisected; check_grads fails here at the hard limit.
+          (0, 0.8714971575453994))
 
 
 @pytest.mark.parametrize("col,s_star", _KINKS)
@@ -257,3 +265,110 @@ def test_check_grads_through_the_smoothing_at_default(fx, col, s_star):
     s0 = jnp.asarray(s_star)
     check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-5)
     assert float(jax.grad(f)(s0)) != 0.0
+
+
+# (column, a*): zonal-wind OFFSETS (u + a*) where the umcfac limit's |0 - ubm|
+# kinks (a projected wind crosses 0 in a limited layer; a wind SCALE never
+# moves such a zero).  Found 2026-11-16 by scanning a in [-10, 10] m/s (step
+# 0.01) at widths 0 and bisecting; the jump persists to h = 1e-9 at widths 0
+# and vanishes with umcfac_abs_width alone (#2546).
+_UMCFAC_KINKS = ((1, -0.11720559719624321), (9, -0.19999999999999987))
+_CAM_SWITCHES = dict(umcfac_abs_width=0.0, umcfac_sign_width=0.0, taumin_ramp_width=0.0)
+
+
+def _offset_fn(fx, col, cfg):
+    keys = ("u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho", "lat",
+            "sgh", "lf", "q", "p_ref_half")
+    f1 = {k: jnp.asarray(fx[k][col:col + 1]) if k != "p_ref_half" else jnp.asarray(fx[k])
+          for k in keys}
+
+    def f(a):
+        out = mcfarlane_gwd(
+            f1["u"] + a, f1["v"], f1["T"], f1["p_full"], f1["p_half"], f1["z_full"],
+            f1["z_half"], f1["rho"], f1["lat"], float(fx["dt"]), cfg,
+            h_topo_col=f1["sgh"], p_ref_half=f1["p_ref_half"],
+            land_frac_col=f1["lf"], tracers={"q_v": f1["q"]})
+        return jnp.sum(out.du_dt) + jnp.sum(out.dv_dt) + jnp.sum(out.dT_dt)
+    return jax.jit(f)
+
+
+@pytest.mark.parametrize("col,a_star", _UMCFAC_KINKS)
+def test_check_grads_through_umcfac_abs_and_sign_at_default(fx, col, a_star):
+    """RULE 5 gradient test (#2546): the default's smooth |ubm| / sign pass
+    check_grads where CAM's abs (widths 0) fails.  eps 1e-6: the smooth sign
+    is 1e-3 m/s wide (as in the E3SM test)."""
+    a0 = jnp.asarray(a_star)
+    f = _offset_fn(fx, col, McFarlaneConfig())
+    check_grads(f, (a0,), order=2, modes=("rev",), eps=1e-6)
+    assert float(jax.grad(f)(a0)) != 0.0
+    with pytest.raises(AssertionError):
+        check_grads(_offset_fn(fx, col, McFarlaneConfig()._replace(**_CAM_SWITCHES)),
+                    (a0,), order=2, modes=("rev",), eps=1e-6)
+
+
+@pytest.mark.parametrize("field", sorted(_CAM_SWITCHES))
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), 1.0e-30])
+def test_smoothing_widths_validated(fx, field, bad):
+    """0 (CAM) or a usable width; a negative/NaN/sub-fp32 width raises (#2546)."""
+    with pytest.raises(ValueError, match=field):
+        _run(fx, McFarlaneConfig()._replace(**{field: bad}))
+
+
+@pytest.mark.parametrize("col,a_star", _UMCFAC_KINKS)
+def test_limited_stress_divergence_equals_deposited_momentum(fx, col, a_star):
+    """RULE 0 (#2546 review): every layer's redetermined stress increment is
+    the momentum the layer receives, |ubt| dp / g, to round-off, at the
+    default inside the smooth sign's width (a* + 2e-4 m/s: |tanh| ~ 0.2 there).
+    Carrying ubtl instead (the |tanh| < 1 shortfall) loses up to 24 %."""
+    keys = ("u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho", "lat",
+            "sgh", "lf", "q", "p_ref_half")
+    f1 = {k: jnp.asarray(fx[k][col:col + 1]) if k != "p_ref_half" else jnp.asarray(fx[k])
+          for k in keys}
+    out, tau = mcfarlane_gwd(
+        f1["u"] + (a_star + 2e-4), f1["v"], f1["T"], f1["p_full"], f1["p_half"],
+        f1["z_full"], f1["z_half"], f1["rho"], f1["lat"], float(fx["dt"]),
+        McFarlaneConfig(), h_topo_col=f1["sgh"], p_ref_half=f1["p_ref_half"],
+        land_frac_col=f1["lf"], tracers={"q_v": f1["q"]}, return_stress=True)
+    dp = np.diff(np.asarray(f1["p_half"]), axis=1)
+    ubt = np.hypot(np.asarray(out.du_dt), np.asarray(out.dv_dt))
+    deposit = ubt * dp / constants.g
+    np.testing.assert_allclose(np.diff(np.asarray(tau), axis=1), deposit,
+                               rtol=1e-10, atol=1e-12 * float(deposit.max()))
+    assert float(deposit.max()) > 0.0
+
+
+# (column, s*): wind SCALES at which the launch stress is ~taumin (the smooth
+# U > 2 m/s gate makes it tiny), so CAM's taumin zeroing switches stress
+# levels above the source off: a jump of ~taumin in the profile.  Found
+# 2026-11-17 by bisecting the hard config's count of nonzero stresses (#2546).
+_TAUMIN_POINTS = ((1, 0.2571661190557264), (4, 0.11968111034790291))
+
+
+@pytest.mark.parametrize("col,s_star", _TAUMIN_POINTS)
+def test_check_grads_through_taumin_ramp_at_default(fx, col, s_star):
+    """RULE 5 gradient test (#2546): the default's quintic taumin ramp passes
+    check_grads where CAM's hard zeroing fails.  f is scaled by 1e10/effgw so
+    the ~taumin stresses are O(1) for the tolerance."""
+    keys = ("u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho", "lat",
+            "sgh", "lf", "q", "p_ref_half")
+    f1 = {k: jnp.asarray(fx[k][col:col + 1]) if k != "p_ref_half" else jnp.asarray(fx[k])
+          for k in keys}
+    eff = McFarlaneConfig().effgw_oro * float(fx["lf"][col])
+
+    def make(cfg):
+        def f(s):
+            out = mcfarlane_gwd(
+                f1["u"] * s, f1["v"] * s, f1["T"], f1["p_full"], f1["p_half"],
+                f1["z_full"], f1["z_half"], f1["rho"], f1["lat"], float(fx["dt"]), cfg,
+                h_topo_col=f1["sgh"], p_ref_half=f1["p_ref_half"],
+                land_frac_col=f1["lf"], tracers={"q_v": f1["q"]})
+            return 1e10 / eff * (jnp.sum(out.du_dt) + jnp.sum(out.dv_dt))
+        return jax.jit(f)
+
+    s0 = jnp.asarray(s_star)
+    f = make(McFarlaneConfig())
+    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-5 * s_star)
+    assert float(jax.grad(f)(s0)) != 0.0
+    with pytest.raises(AssertionError):
+        check_grads(make(McFarlaneConfig()._replace(taumin_ramp_width=0.0)), (s0,),
+                    order=2, modes=("rev",), eps=1e-5 * s_star)

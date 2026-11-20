@@ -6983,8 +6983,37 @@ def clubb_turbulence_prognostic(
             "q_flux_scale is a diagnostic-CLUBB mechanism probe; the prognostic "
             "closure transports rtm inside its own solver and does not read it "
             f"(got {config.q_flux_scale}).")
-    moments = unpack_clubb_moments(clubb_moments)
+    # Working dtype = the moment carry's dtype (the lax.scan carry below must
+    # come back in it).  Every float array input is cast to it (downcast
+    # included): under JAX_ENABLE_X64 an fp32 run hands this function some
+    # float64 inputs, which promoted the float32 carry and made the scan raise.
+    # All-float64 inputs: every cast is a no-op, so fp64 runs are bitwise
+    # unchanged.  Same pattern as compute_mixing_length.
+    _wd = clubb_moments.dtype
+    # sub-step count from the caller's dt, before any rounding by the cast
     n_sub = max(1, math.ceil(dt / config.clubb_dt))
+
+    def _to_wd(x):
+        # jax AND numpy float arrays/scalars (numpy ones are strong-typed)
+        if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating):
+            return jnp.asarray(x, dtype=_wd)
+        return x
+
+    def _traced_to_wd(x):
+        # config: only traced (trained) leaves; static Python/numpy fields
+        # stay concrete so the Python branches on them keep working
+        if isinstance(x, jax.core.Tracer) and jnp.issubdtype(x.dtype, jnp.floating):
+            return x.astype(_wd)
+        return x
+
+    config = jax.tree.map(_traced_to_wd, config)
+    (u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho, dt,
+     sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp, surface_flux, rad_dT_dt, q_c,
+     lat, omega) = jax.tree.map(_to_wd, (
+        u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho, dt,
+        sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp, surface_flux, rad_dT_dt,
+        q_c, lat, omega))
+    moments = unpack_clubb_moments(clubb_moments)
     _top_kw = {}
     if config.trop_cloud_top_press > 0.0:
         if lat is None:
