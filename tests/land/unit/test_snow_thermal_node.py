@@ -208,7 +208,7 @@ def test_full_step_conserves_water_with_warm_pack(ft):
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0),
         thermal=_TH._replace(enable_freeze_thaw=ft),
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     ncol = 2
     st = init_multilayer_land_state(ncol, cfg, T_init=279.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([20.0, 2.0]),
@@ -343,7 +343,7 @@ def test_canopy_ground_node_is_the_snow_surface():
     from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=272.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([40.0]), T_snow=jnp.array([255.0]))
     f = _forcing(1, 252.0, 0.0, 0.0)
@@ -367,7 +367,7 @@ def test_flux_heats_the_node_and_melt_follows_from_its_enthalpy():
     from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=262.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([20.0]), T_snow=jnp.array([_TF]))
     o = jnp.ones(1)
@@ -417,7 +417,7 @@ def test_full_step_energy_ledger_under_melting_conditions():
     from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=262.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([20.0]), T_snow=jnp.array([_TF]))
     o = jnp.ones(1)
@@ -477,7 +477,7 @@ def test_canopy_ground_node_never_above_freezing_under_snow(monkeypatch):
     from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=270.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([15.0]), T_snow=jnp.array([_TF]))
     o = jnp.ones(1)
@@ -529,7 +529,7 @@ def test_node_mirrors_top_soil_once_the_pack_is_gone():
     sublimates away; the stored-heat melt is the route to an empty pack.)"""
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=272.0, theta_init=0.25)
     # Stored heat c_ice*S*(T-Tf) above L_f*S melts the whole pack.
     T_hot = _TF + 1.2 * constants.L_f / constants.c_pi
@@ -559,7 +559,7 @@ def test_trace_pack_stays_bounded_and_canopy_converges(swe, monkeypatch):
     from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=268.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([swe]), T_snow=jnp.array([266.0]))
     o = jnp.ones(1)
@@ -601,7 +601,7 @@ def test_held_column_reports_the_capped_skin():
         _hold_unsolved_columns, step_multilayer_land_with_diagnostics)
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=268.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([10.0]), T_snow=jnp.array([276.0]))
     f = _forcing(1, 262.0, 0.0, 0.0)
@@ -645,7 +645,7 @@ def test_snow_falling_on_warm_ground_does_not_arrive_warm():
     from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=285.0, theta_init=0.25)
     f = _forcing(1, 271.0, 2.0e-3, 2.0e-3)._replace(sw_down=jnp.zeros(1))
     dt = 1800.0
@@ -670,7 +670,7 @@ def test_new_pack_after_melt_out_starts_at_cold_soil():
     from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=262.0, theta_init=0.25)
     st = st._replace(T_snow=jnp.array([_TF]))       # stale node, no snow
     f = _forcing(1, 258.0, 2.0e-3, 2.0e-3)._replace(sw_down=jnp.zeros(1))
@@ -742,7 +742,7 @@ def test_freeze_thaw_final_solve_with_snow_node(monkeypatch, case):
     th = _TH._replace(enable_freeze_thaw=True)
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=th,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     calls = []
     real = multilayer_land.solve_snow_node_soil_thermal
 
@@ -793,7 +793,7 @@ def test_snow_node_with_layered_snowpack_is_refused():
     from legoesm.land.multilayer_land import seed_snow_layers
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
-        surface_scheme=TwoLeafCanopyConfig(), snow_scheme="layered")
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False), snow_scheme="layered")
     st = init_multilayer_land_state(1, cfg, T_init=265.0, theta_init=0.25)
     st = seed_snow_layers(st._replace(snow_depth=jnp.array([10.0])), cfg)
     with pytest.raises(ValueError, match="BULK snowpack"):
@@ -813,7 +813,7 @@ def test_freeze_thaw_bulk_path_is_not_better_than_the_node(monkeypatch, case):
     th = SoilThermalConfig(enable_freeze_thaw=True)          # node off
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=th,
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     calls = []
     real = multilayer_land.solve_soil_thermal
 
@@ -1137,7 +1137,7 @@ def test_two_leaf_node_stored_gap_at_the_default_cap(case):
         cfg = MultiLayerLandConfig(
             soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0),
             thermal=_TH._replace(snow_skin_cap_width_K=width),
-            surface_scheme=TwoLeafCanopyConfig())
+            surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
         st = init_multilayer_land_state(1, cfg, T_init=Tg, theta_init=0.25)
         st = st._replace(snow_depth=jnp.array([15.0]), T_snow=jnp.array([Ts]))
         o = jnp.ones(1)

@@ -134,9 +134,13 @@ def test_flag_off_is_the_explicit_path(monkeypatch):
     assert so.surface_conductance is None and so.surface_conductance_T_ref is None
     assert seen["lam"] is None and not seen["ret"]
     np.testing.assert_array_equal(np.asarray(G_ap), np.asarray(G_in))
-    # and the fix changes the answer (non-vacuity of the flag)
-    _st, new1, r1, *_ = _step(monkeypatch, True)
-    assert not np.array_equal(np.asarray(new1.T_soil), np.asarray(new.T_soil))
+    # and the fix changes the answer (non-vacuity of the flag); no spy here
+    cfg_on = _cfg(True)
+    f = _forcing(4)._replace(u_lowest=jnp.asarray((0.7, 1.4, 2.8, 3.6)))
+    st_on = ml.init_multilayer_land_state(4, cfg_on, T_init=307.0, theta_init=0.12)
+    new_on, *_ = jax.jit(lambda s: ml.step_multilayer_land_with_diagnostics(
+        s, f, cfg_on, 1.0, 1800.0, lat=jnp.full(4, -0.55)))(st_on)
+    assert not np.array_equal(np.asarray(new_on.T_soil), np.asarray(new.T_soil))
 
 
 def test_default_is_the_implicit_flux():
