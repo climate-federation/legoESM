@@ -116,6 +116,25 @@ def test_eqpas_gap_is_open(mesh, tmp_path):
     assert lats.min() < -80.0 and lats.max() > 80.0
 
 
+@pytest.mark.parametrize("shape,lines", [
+    ("ridge", [(-90.0, 90.0)]), ("drake", [(-40.0, 90.0)]),
+    ("eqpas", [(-90.0, -20.0), (20.0, 90.0)])])
+def test_every_face_the_barrier_crosses_has_a_closed_cell(mesh, tmp_path, monkeypatch,
+                                                          shape, lines):
+    """Watertightness measured: trace the barrier ~1000x finer than the check
+    does; each change of owner is a face crossing, and one of its two cells
+    must be closed."""
+    _, f = _terrain(mesh, _gen(tmp_path, shape, barrier_lon=0.0))
+    polys = [mg._meridian(0.0, a, b) for a, b in lines]
+    monkeypatch.setattr(geo, "_DENSIFY_MAX_DEG", 1e-4)
+    monkeypatch.setattr(geo, "_DENSIFY_CELL_FRACTION", 1e-4)
+    for o in geo.barrier_owners(mesh, polys):
+        a, b = o[:-1], o[1:]
+        cross = a != b
+        assert np.all((f[a[cross]] == 1.0) | (f[b[cross]] == 1.0))
+        assert geo.barrier_gaps(mesh, [o]) == 0
+
+
 def test_a_barrier_that_jumps_cells_is_refused(mesh, tmp_path, monkeypatch):
     ds = mg.idealized("ridge", barrier_lon=0.0).isel(vertex=[0, 90, 180])  # -90, 0, 90
     p = _write(ds, tmp_path, "ridge3.nc")
@@ -157,8 +176,10 @@ def test_bare_soil_where_the_file_has_no_land_map(tmp_path):
     m = load_clm_surface(src, np.array([0.0, 45.0]), np.array([10.0, 200.0]),
                          vg_air_entry_m=0.0)
     assert np.all(np.asarray(m["pft_fractions"])[:, 0] == 1.0)
-    assert np.all(np.asarray(m["pct_sand"]) == geo._BARE_SAND_PCT)
-    assert np.all(np.asarray(m["pct_clay"]) == geo._BARE_CLAY_PCT)
+    assert np.all(np.asarray(m["pct_sand"]) == 43.0)     # VOTED V6: USDA loam centroid
+    assert np.all(np.asarray(m["pct_clay"]) == 18.0)
+    from legoesm.land.clm_surface_map import soil_color_albedo
+    assert np.all(np.asarray(m["soil_albedo"]) == soil_color_albedo(np.array([15]))[0])
 
 
 @pytest.mark.parametrize("edit,msg", [
@@ -203,22 +224,13 @@ def test_driver_terrain_is_the_geography_terrain(mesh, tmp_path):
     assert np.asarray(want).max() == 1.0
 
 
-def test_coupled_takes_an_all_ocean_geography_as_is(tmp_path):
-    """No invented continents: the all-ocean mask reaches the coupler, whose
-    dead-land-tile guard then refuses a land model on it."""
+@pytest.mark.parametrize("shape", ["ridge", "aquaplanet"])
+def test_coupled_refuses_geography_with_its_own_land_tile(tmp_path, shape):
+    """No coupler land tile on a geography (it would ignore the geography's
+    land map, and on an all-ocean mask invent continents)."""
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
-    cfg = _mpas_cfg(_gen(tmp_path, "aquaplanet"))
-    d = CoupledESMDriver(cfg, CoupledConfig(f_land_mode="analytical", land_mode="slab"),
-                         output_dir=str(tmp_path / "run"))
-    with pytest.raises(ValueError, match="land fraction is zero everywhere"):
-        d.setup()
-
-
-def test_coupled_refuses_geography_with_its_own_land_tile(tmp_path):
-    from legoesm.driver.coupled_config import CoupledConfig
-    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
-    cfg = _mpas_cfg(_gen(tmp_path, "ridge", barrier_lon=0.0))
+    cfg = _mpas_cfg(_gen(tmp_path, shape, barrier_lon=0.0 if shape == "ridge" else None))
     d = CoupledESMDriver(cfg, CoupledConfig(f_land_mode="analytical", land_mode="slab"),
                          output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match="coupler's own land tile"):
@@ -234,6 +246,26 @@ def test_present_day_refuses_non_metre_elevation(tmp_path):
                    coords={"lat": lat, "lon": lon})
     with pytest.raises(ValueError, match="not metres"):
         mg.present_day(_write(z, tmp_path, "z.nc"), _write(m, tmp_path, "m.nc"))
+
+
+def test_duo_column_lane_rebuilds_terrain_from_a_geography():
+    from types import SimpleNamespace
+
+    from legoesm.driver.model_driver import ModelDriver
+    called = []
+    stub = SimpleNamespace(config=_mpas_cfg("g.nc")._replace(ic="era5", ic_path=""),
+                           _fv3_duo_column_terrain=lambda: called.append(1))
+    with pytest.raises(ValueError, match="needs ic_path"):
+        ModelDriver._fv3_duo_column_init_state(stub)
+    assert called == [1]
+
+
+def test_duo_column_factory_refuses_geography_without_era5_ic():
+    from types import SimpleNamespace
+    from legoesm.driver.component_factory import _create_fv3_duo_column_model
+    with pytest.raises(ValueError, match="geography='g.nc'"):
+        _create_fv3_duo_column_model(_mpas_cfg("g.nc"), SimpleNamespace(nlev=10),
+                                     "hydrostatic")
 
 
 @pytest.mark.parametrize("kw,msg", [

@@ -12493,7 +12493,7 @@ class ModelDriver:
         DCMIP16 baroclinic wave through the view.  One tracer slot per
         registered name.  ``_phis_data`` IS the dynamics terrain."""
         cfg = self.config
-        if cfg.topography != "flat":
+        if cfg.topography != "flat" or cfg.geography:
             self._fv3_duo_column_terrain()
         if cfg.ic == "era5":
             from legoesm.training.era5_to_state import (

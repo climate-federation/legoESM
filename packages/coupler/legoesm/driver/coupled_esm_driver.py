@@ -1004,6 +1004,12 @@ class CoupledESMDriver:
         cfg = self.coupled_cfg
         shape_2d = self._atm.grid.grid_shape_2d
         _sd = get_policy().storage
+        if self._atm.config.geography and cfg.land_mode != "none":
+            raise ValueError(
+                "geography with the coupler's own land tile: that tile builds its "
+                "land parameters without the geography's land map; use "
+                "land_mode='none' (with atm_owns_surface=True the atmosphere's "
+                "land reads the geography).")
 
         coupler_cfg = self._coupler_config or CouplerConfig()
         self._coupler_cfg = coupler_cfg  # reused by the 3D-ocean flux assembly
@@ -1206,11 +1212,9 @@ class CoupledESMDriver:
             f_land = jnp.zeros(shape_2d, dtype=_sd)
         elif cfg.f_land_mode == "analytical":
             # Use driver's land mask if non-trivial; otherwise generate one
-            # based on latitude (simple continents approximation).  A geography
-            # file's mask is authoritative even when it has no land at all.
+            # based on latitude (simple continents approximation).
             if (self._atm._f_land is not None
-                    and (self._atm.config.geography
-                         or float(jnp.max(self._atm._f_land)) > 0)):
+                    and float(jnp.max(self._atm._f_land)) > 0):
                 f_land = self._atm._f_land
             elif cfg.land_mode != "none":
                 # Generate analytical land mask: ~30% land by area
@@ -1286,13 +1290,6 @@ class CoupledESMDriver:
         # a silently dead land tile.
         assert_land_tile_reachable(cfg.land_mode, cfg.f_land_mode, f_land)
 
-        if (self._atm.config.geography and not cfg.atm_owns_surface
-                and cfg.land_mode != "none"):
-            raise ValueError(
-                "geography with the coupler's own land tile: that tile builds its "
-                "land parameters without the geography's land map; use "
-                "atm_owns_surface=True (the atmosphere's land reads the geography) "
-                "or land_mode='none'.")
         if cfg.atm_owns_surface:
             self._install_surface_handback(ice_cfg, lake_cfg)
 
