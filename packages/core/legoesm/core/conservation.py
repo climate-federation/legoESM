@@ -29,6 +29,7 @@ from legoesm import constants
 from legoesm.core.operators import global_integral, is_distributed
 from legoesm.core.operators_voronoi import kinetic_energy_cell
 from legoesm.core.precision import resolve_dtype, get_policy
+from legoesm.core.smooth import smoothstep_quintic
 from legoesm.core.state import ShallowWaterState, HydrostaticState
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import compute_geopotential
@@ -162,9 +163,13 @@ def energy_consistent_water_floor(tracers, T):
 
 
 CONDENSATE_TRACERS = ("q_c", "q_r", "q_i", "q_s", "q_g")
+#: RULE 5 width of the payment's two traced-state switches (vote 2026-11-20:
+#: author, GLM, codex); 0 = the hard form.
+POSITIVITY_PAY_WIDTH_DEFAULT = 0.01
 
 
-def pay_condensate_deficit_from_vapour(tracers, T, dp):
+def pay_condensate_deficit_from_vapour(tracers, T, dp,
+                                       width=POSITIVITY_PAY_WIDTH_DEFAULT):
     """Pay a column's net-negative condensate from the same column's vapour.
 
     The column borrow cannot repay a condensate whose column total is
@@ -187,6 +192,18 @@ def pay_condensate_deficit_from_vapour(tracers, T, dp):
     q_frozen)`` are conserved per column.  A column whose vapour cannot pay
     (``V+ <= sum_x D_x``) is left to the borrow.  Column local: identical
     serial and under MPI.
+
+    ``width`` (RULE 5): both switches above branch on traced state, so by
+    default they are smooth.  A condensate is paid by the fraction
+    ``w_x = smoothstep(D_x / (width A_x))`` of its deficit, ``A_x =
+    sum(|q_x| dp)``, and the whole payment by ``g = smoothstep((V+ - D_tot)
+    / (width V+))``; ``q_x <- (1 - w_x g) q_x`` adds ``w_x g D_x`` to the
+    column, which the vapour pays with its latent heat, so water and column
+    frozen MSE stay conserved at any width.  ``width = 0`` is the hard form.
+    KNOWN DIFFERENCE vs the hard form: a column whose deficit is within
+    ``width`` of its condensate's absolute mass, or whose vapour is within
+    ``width`` of paying, is paid only in part and keeps some negative
+    condensate for the borrow.
 
     Ported from I. Di Carlo's ENSO fork (iadicarlo/legoESM-enso e9120c2034,
     0ed16a720d) without its isotope-passenger branch.
@@ -211,21 +228,38 @@ def pay_condensate_deficit_from_vapour(tracers, T, dp):
     D = {x: jnp.maximum(-jnp.sum(raw(tracers[x]) * w, axis=-1, keepdims=True), 0.0)
          for x in cond}
     D_tot = sum(D.values())
-    paid = (D_tot > 0.0) & (V > D_tot)
     out = dict(tracers)
-    for x in cond:
-        out[x] = put(tracers[x], jnp.where(paid & (D[x] > 0.0), 0.0, raw(tracers[x])))
-    frac = jnp.where(paid, D_tot / jnp.where(paid, V, 1.0), 0.0)
-    out["q_v"] = put(tracers["q_v"], qv - vpos * frac)
-    heat = sum((constants.L_v - _FLOOR_LATENT_COEF[x]) * D[x] for x in cond)
     T_data = raw(T)
-    dT = jnp.where(paid, vpos / jnp.where(paid, V, 1.0) * heat / constants.c_pd, 0.0)
+    if width == 0.0:
+        paid = (D_tot > 0.0) & (V > D_tot)
+        for x in cond:
+            out[x] = put(tracers[x], jnp.where(paid & (D[x] > 0.0), 0.0, raw(tracers[x])))
+        frac = jnp.where(paid, D_tot / jnp.where(paid, V, 1.0), 0.0)
+        out["q_v"] = put(tracers["q_v"], qv - vpos * frac)
+        heat = sum((constants.L_v - _FLOOR_LATENT_COEF[x]) * D[x] for x in cond)
+        dT = jnp.where(paid, vpos / jnp.where(paid, V, 1.0) * heat / constants.c_pd, 0.0)
+        return out, put(T, T_data + dT.astype(T_data.dtype))
+    has_v = V > 0.0
+    V_s = jnp.where(has_v, V, 1.0)
+    g = jnp.where(has_v, smoothstep_quintic((V_s - D_tot) / (width * V_s)), 0.0)
+    pay = {}
+    for x in cond:
+        A = jnp.sum(jnp.abs(raw(tracers[x])) * w, axis=-1, keepdims=True)
+        has_a = A > 0.0
+        A_s = jnp.where(has_a, A, 1.0)
+        f = jnp.where(has_a, smoothstep_quintic(D[x] / (width * A_s)), 0.0) * g
+        out[x] = put(tracers[x], (1.0 - f) * raw(tracers[x]))
+        pay[x] = f * D[x]
+    out["q_v"] = put(tracers["q_v"], qv - vpos * (sum(pay.values()) / V_s))
+    heat = sum((constants.L_v - _FLOOR_LATENT_COEF[x]) * pay[x] for x in cond)
+    dT = vpos / V_s * heat / constants.c_pd
     return out, put(T, T_data + dT.astype(T_data.dtype))
 
 
 def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
                            area, area_ref=None, sum_fn=None,
-                           condensate_from_vapour=True):
+                           condensate_from_vapour=True,
+                           condensate_from_vapour_width=POSITIVITY_PAY_WIDTH_DEFAULT):
     """Single positivity stage for every atmospheric dycore (MPAS/cube/spectral/
     lat-lon), so the three grids stay bit-equivalent by construction.
 
@@ -258,7 +292,8 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
     Returns ``(tracers_out, T_out)``.
     """
     if condensate_from_vapour and conservative and T is not None:
-        tracers, T = pay_condensate_deficit_from_vapour(tracers, T, dp)
+        tracers, T = pay_condensate_deficit_from_vapour(
+            tracers, T, dp, width=condensate_from_vapour_width)
     if conservative:
         out = {}
         for name in sorted(tracers):

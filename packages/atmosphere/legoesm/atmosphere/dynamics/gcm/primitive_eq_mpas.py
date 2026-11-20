@@ -112,6 +112,8 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # (``apply_water_positivity(condensate_from_vapour=...)``).  False = the
     # legacy form, which creates water when the globe cannot repay a deficit.
     positivity_condensate_from_vapour: bool = True
+    # RULE 5 width of the payment's switches (0 = hard form).
+    positivity_condensate_from_vapour_width: float = 0.01
     # Optional (nlev,) per-layer weight restricting the budget ledger's
     # SNAPSHOT-derived rows (dynamics, clips) to a vertical band, matching the
     # weight the physics rows use. Both sides must carry the same weight or the
@@ -1537,7 +1539,9 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 conservative=self.config.conservative_tracer_clamp,
                 energy_consistent=self.config.energy_consistent_moisture_clip,
                 area=self.mesh.areaCell,
-                condensate_from_vapour=self.config.positivity_condensate_from_vapour)
+                condensate_from_vapour=self.config.positivity_condensate_from_vapour,
+                condensate_from_vapour_width=(
+                    self.config.positivity_condensate_from_vapour_width))
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

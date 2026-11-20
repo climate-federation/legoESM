@@ -1315,7 +1315,9 @@ def make_voronoi_mpi_step(
                 sum_fn=_mpi_owned_sum,
                 # column local, so identical on every decomposition
                 condensate_from_vapour=getattr(
-                    config, "positivity_condensate_from_vapour", True))
+                    config, "positivity_condensate_from_vapour", True),
+                condensate_from_vapour_width=getattr(
+                    config, "positivity_condensate_from_vapour_width", 0.01))
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

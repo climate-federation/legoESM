@@ -192,6 +192,7 @@ mpas_ice_skin_prognostic: true    # prognostic sea-ice skin temperature
 mpas_conservative_tracer_clamp: true   # positivity fixer that borrows within
                                   # the column instead of creating mass
 positivity_condensate_from_vapour: true  # pay net-negative column condensate from the column's vapour (ENSO-fork port, 2026-11-20)
+positivity_condensate_from_vapour_width: 0.01  # RULE 5 width of that payment's switches (0 = hard)
 mpas_qv_smooth_del2_m2s: 2.0e5    # del2 smoothing on q_v (grid-scale moisture
                                   # noise on the Voronoi mesh)
 

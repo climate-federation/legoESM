@@ -313,6 +313,9 @@ class DycoreConfig(NamedTuple):
     # the globe cannot repay the deficit.  Ported from the ENSO fork
     # (I. Di Carlo), owner decision 2026-11-20: fixed form is the default.
     positivity_condensate_from_vapour: bool = True
+    # RULE 5 width of that payment's two traced-state switches (vote
+    # 2026-11-20: author, GLM, codex); 0 = the hard form.
+    positivity_condensate_from_vapour_width: float = 0.01
     # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
     # lat-lon C-grid lane (discretization-consistent with the geopotential
     # and the momentum/thermo ln p^SB gradients).  Default ON; False keeps
