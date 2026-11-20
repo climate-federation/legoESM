@@ -254,25 +254,27 @@ def search(fix, todo, cols, n_grid=24):
             if not left:
                 return found
             line = _Line(fix, g, c, name)
-            grid = np.linspace(lo, hi, n_grid)
-            pos = [line.positions(s) for s in grid]
-            for site in left:
-                done = False
-                for i in range(n_grid - 1):
-                    d0, d1 = pos[i].get(site), pos[i + 1].get(site)
-                    if d0 is None or d1 is None or d0.shape != d1.shape:
-                        continue
-                    f0, f1 = d0 - _target(site), d1 - _target(site)
-                    for e in np.nonzero(np.sign(f0) != np.sign(f1))[0]:
-                        m = _bisect(line, site, e, grid[i], grid[i + 1], f0[e])
-                        if m is not None and line.changes_when_hard(site, m):
-                            found[site] = (g, int(c), name, float(m),
-                                           _fd_step(line, site, e, m))
-                            done = True
+            try:
+                grid = np.linspace(lo, hi, n_grid)
+                pos = [line.positions(s) for s in grid]
+                for site in left:
+                    done = False
+                    for i in range(n_grid - 1):
+                        d0, d1 = pos[i].get(site), pos[i + 1].get(site)
+                        if d0 is None or d1 is None or d0.shape != d1.shape:
+                            continue
+                        f0, f1 = d0 - _target(site), d1 - _target(site)
+                        for e in np.nonzero(np.sign(f0) != np.sign(f1))[0]:
+                            m = _bisect(line, site, e, grid[i], grid[i + 1], f0[e])
+                            if m is not None and line.changes_when_hard(site, m):
+                                found[site] = (g, int(c), name, float(m),
+                                               _fd_step(line, site, e, m))
+                                done = True
+                                break
+                        if done:
                             break
-                    if done:
-                        break
-            line.close()
+            finally:
+                line.close()
             del line
     return found
 

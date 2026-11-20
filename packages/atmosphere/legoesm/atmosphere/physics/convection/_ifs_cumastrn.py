@@ -414,6 +414,17 @@ def cuddrafn(th, K, lddraf, ptenh, pqenh, pgeo, pgeoh, paph, prfl, ptd, pqd,
     return jax.lax.fori_loop(0, K - 2, body, st)
 
 
+def _cap_min(sm, a, b, w):
+    """Smooth min(a, b) floored at 0, for a >= 0: pos(b) - pos(b - a).
+    Exactly 0 where a = 0 or b <= 0 (b - pos(b - a) is not: the C1 positive
+    part sits below x on 0 < x < w, so it gave up to 4w/27 with nothing to
+    cap -- e.g. snow melted below freezing; codex review, vote 4 2026-11-19);
+    0 <= result <= max(b, 0); result <= a + 4w/27 (pos has slope up to 4/3);
+    max(min(a, b), 0) at the hard limit.  Only the smooth branches call it."""
+    bp = sm.pos(b, w)
+    return bp - sm.pos(b - a, w)
+
+
 def _nonneg_precip(sm, r1, s1, dpmel):
     """Smooth, conservative form of CUFLXN's negative-flux fixers (:427-438,
     :489-500).  Total T = r1 + s1 becomes pos(T); the added amount pos(T) - T
@@ -423,7 +434,12 @@ def _nonneg_precip(sm, r1, s1, dpmel):
     -4w/27 there (water handed back to the same sink; r2 + s2 - deficit = T
     still holds exactly).  pos(T) is split in proportion to pos(r1),
     pos(s1), so r2 + s2 = pos(T) exactly; at the hard limit this is the three
-    OpenIFS branches.  Melting goes with the surviving flux; it is dropped
+    OpenIFS branches, except the all-negative branch of the first (fall)
+    loop with detrained precipitation SN1 + SN2 > 0: OpenIFS resets
+    PDMFDP = -(PMFLXR + PMFLXS + PDMFUP) while SN1 + SN2 stay detrained, so
+    that much water appears from nothing; here the sink takes -(r1 + s1),
+    which closes (fires on no fixture column; the exact branch keeps
+    OpenIFS's form).  Melting goes with the surviving flux; it is dropped
     only for T < 0 (OpenIFS keeps it at T = 0)."""
     t_new = sm.pos(r1 + s1, _W_PFLX)
     pr = sm.pos(r1, _W_PFLX)
@@ -560,7 +576,7 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
             # bounded: 0 <= melt <= snow flux (zero without snow or below RTT)
             # melt only above RTT (zfac < 0 for T < RTT - 1/ZMELT_DT would otherwise "melt")
             zsnmlt = zfac * sm.pos(zten - rtt, _W_TFRZ)
-            dpmel = sk - sm.pos(sk - zsnmlt, _W_PFLX)
+            dpmel = _cap_min(sm, zsnmlt, sk, _W_PFLX)
             melt = sm.on(sk, 0.0, _W_PFLX)
             melt = melt * sm.on(zten, rtt, _W_TFRZ)
             # dpmel > 0 only where zfac > 0 (hard division guard, as OpenIFS's gate)
@@ -583,8 +599,8 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
             sn1 = sm.min(sn1, av1, _W_PFLX)
             sn2 = sm.min(sn2, av2, _W_PFLX)
         else:   # bounded: detrained snow/rain never exceed what is available
-            sn1 = av1 - sm.pos(av1 - sn1, _W_PFLX)
-            sn2 = av2 - sm.pos(av2 - sn2, _W_PFLX)
+            sn1 = _cap_min(sm, sn1, av1, _W_PFLX)
+            sn2 = _cap_min(sm, sn2, av2, _W_PFLX)
         sn1 = jnp.where(dsn, sm.pos(sn1, _W_PFLX), 0.0)
         sn2 = jnp.where(dsn, sm.pos(sn2, _W_PFLX), 0.0)
         r1 = rk + zalfaw * (dmfup + dmfdp) + dpmel - sn1
@@ -1054,9 +1070,8 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
         lim2 = near & (pqen + zmfa < 0.0) & (plude > 0.0)
         zfacl = sm.min(-(pqen + zmfa) / zdzt, plude, _W_LUDE)
     else:   # bounded: 0 <= ZFAC <= PLUDE, zero unless q + ZMFA < 0 and PLUDE > 0
-        lude_p = sm.pos(plude, _W_LUDE)
         zneed = sm.pos(-(pqen + zmfa) / zdzt, _W_LUDE)
-        zfacl = lude_p - sm.pos(lude_p - zneed, _W_LUDE)
+        zfacl = _cap_min(sm, zneed, plude, _W_LUDE)
         lim2 = near
     plude_n = jnp.where(lim2, plude + zfacl, plude)
     pdiv = lim2 & (plude_n != 0.0)
