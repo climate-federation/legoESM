@@ -1264,6 +1264,12 @@ class CoupledESMDriver:
             # geography's mask is taken as-is, even all ocean.
             if self._atm.config.geography:
                 f_land = self._atm._f_land
+                if (cfg.land_mode == "none" and not cfg.atm_owns_surface
+                        and float(jnp.max(f_land)) > 0.0):
+                    raise ValueError(
+                        "geography has land but no land model runs on it: use "
+                        "land_mode='slab' (reads the geography's land map) or "
+                        "atm_owns_surface=True")
             elif (self._atm._f_land is not None
                     and float(jnp.max(self._atm._f_land)) > 0):
                 f_land = self._atm._f_land

@@ -341,8 +341,8 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
     from legoesm.ocean.vertical import OceanPartialCellCoordinate, create_ocean_z_star
-    cc = CoupledConfig(f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
-                       ocean_H_max_m=5500.0)
+    cc = CoupledConfig(f_land_mode="analytical", land_mode="slab", use_pft=True,
+                       land_param_source="clm", ocean_mode="dynamic", ocean_H_max_m=5500.0)
     z = create_ocean_z_star(cc.ocean_nlev, H_max=cc.ocean_H_max_m)
     top = float(np.abs(np.asarray(z.z_half_ref))[-2])        # an interface
     D = top + 0.1 * float(np.asarray(z.dz_ref)[-1])          # 10% into the last level
@@ -419,3 +419,13 @@ def test_coupled_slab_land_reads_the_geography(tmp_path, monkeypatch, shape):
     assert np.array_equal(np.asarray(d._tile_config.f_land).ravel(), f_atm)
     pft = np.asarray(built[0].pft_fractions)
     assert np.all(pft[:, 13] == 1.0) and np.all(np.asarray(built[0].lai) == 2.0)
+
+
+def test_coupled_geography_land_without_a_land_model_is_refused(tmp_path):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))),
+                         CoupledConfig(f_land_mode="analytical", land_mode="none"),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="no land model runs on it"):
+        d.setup()
