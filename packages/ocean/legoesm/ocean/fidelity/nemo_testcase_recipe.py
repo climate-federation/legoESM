@@ -2536,8 +2536,12 @@ def build_orca2_zps_card(
         # Moving this card to "nemo_bn2" is the card owner's decision.
         n2_mode="insitu",
     )
+    # NEMO's zdf_ddm switches are hard: pin the four RULE 5 widths to 0
+    # (#2578 added them with smooth defaults; width 0 = the hard reference).
     ddm_config = model_config.physics.vertical_mixing.ddm._replace(
-        enabled=True, form="nemo_literal", rn_avts=1.0e-4, rn_hsbfr=1.6)
+        enabled=True, form="nemo_literal", rn_avts=1.0e-4, rn_hsbfr=1.6,
+        regime_width=0.0, n2_gate_width=0.0, k_max_width=0.0,
+        avm_max_width=0.0)
     model_config = model_config._replace(
         physics=model_config.physics._replace(
             vertical_mixing=model_config.physics.vertical_mixing._replace(
