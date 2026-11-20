@@ -6515,3 +6515,16 @@ def test_no_deck_can_set_ml_pipeline(tmp_path):
     deck.write_text("ml_pipeline: true\n")
     with pytest.raises((SystemExit, ValueError, KeyError)):
         load_yaml_config(str(deck), build_arg_parser())
+
+
+def test_positivity_condensate_from_vapour_flag_flows_to_config():
+    """--positivity-condensate-from-vapour round-trips to DycoreConfig
+    (default ON, owner decision 2026-11-20; --no- restores the legacy borrow)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg.dycore.positivity_condensate_from_vapour is True
+    cfg_no = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-positivity-condensate-from-vapour",
+    ]), parser))
+    assert cfg_no.dycore.positivity_condensate_from_vapour is False

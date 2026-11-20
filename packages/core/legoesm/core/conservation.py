@@ -161,8 +161,71 @@ def energy_consistent_water_floor(tracers, T):
     return out, T_out
 
 
+CONDENSATE_TRACERS = ("q_c", "q_r", "q_i", "q_s", "q_g")
+
+
+def pay_condensate_deficit_from_vapour(tracers, T, dp):
+    """Pay a column's net-negative condensate from the same column's vapour.
+
+    The column borrow cannot repay a condensate whose column total is
+    negative: :func:`conservative_positive_clip` zeroes the column and the
+    global stage takes the deficit from the positive mass of the whole globe,
+    and when the globe holds less than the debt the floor creates water
+    (measured on the ENSO-fork stage T start: 3.25e-7 of the global water in
+    one step).  Here, before the borrow, every column with
+    ``D_x = -sum(dp q_x) > 0`` for a condensate ``x`` sets ``q_x`` to zero
+    over the column and removes ``sum_x D_x`` from the column's vapour in
+    proportion to ``max(q_v, 0) dp``, the vapour condensing into the missing
+    condensate.  Its latent heat is released where the vapour is removed:
+
+        c_pd dT_k = (q_v+_k / V+) sum_x (L_v - coef_x) D_x
+
+    with ``coef_x`` of :data:`_FLOOR_LATENT_COEF` (L_v for liquid, L_v + L_f
+    for ice, snow and graupel), as PUMAS books its vapour to condensate
+    transfers (``qvlat``, ``tlat`` with ``xxlv``/``xxls``).  Total water and
+    the column frozen moist static energy ``sum dp (c_pd T + L_v q_v - L_f
+    q_frozen)`` are conserved per column.  A column whose vapour cannot pay
+    (``V+ <= sum_x D_x``) is left to the borrow.  Column local: identical
+    serial and under MPI.
+
+    Ported from I. Di Carlo's ENSO fork (iadicarlo/legoESM-enso e9120c2034,
+    0ed16a720d) without its isotope-passenger branch.
+
+    ``dp`` (..., nlev) layer masses.  Returns ``(tracers, T)``.
+    """
+    def raw(f):
+        return f.data if hasattr(f, "data") else f
+
+    def put(f, x):
+        return f.replace(data=x) if hasattr(f, "replace") else x
+
+    if "q_v" not in tracers:
+        return tracers, T
+    w = jnp.asarray(dp)
+    qv = raw(tracers["q_v"])
+    vpos = jnp.maximum(qv, 0.0)
+    V = jnp.sum(vpos * w, axis=-1, keepdims=True)
+    cond = [x for x in CONDENSATE_TRACERS if x in tracers]
+    if not cond:
+        return tracers, T
+    D = {x: jnp.maximum(-jnp.sum(raw(tracers[x]) * w, axis=-1, keepdims=True), 0.0)
+         for x in cond}
+    D_tot = sum(D.values())
+    paid = (D_tot > 0.0) & (V > D_tot)
+    out = dict(tracers)
+    for x in cond:
+        out[x] = put(tracers[x], jnp.where(paid & (D[x] > 0.0), 0.0, raw(tracers[x])))
+    frac = jnp.where(paid, D_tot / jnp.where(paid, V, 1.0), 0.0)
+    out["q_v"] = put(tracers["q_v"], qv - vpos * frac)
+    heat = sum((constants.L_v - _FLOOR_LATENT_COEF[x]) * D[x] for x in cond)
+    T_data = raw(T)
+    dT = jnp.where(paid, vpos / jnp.where(paid, V, 1.0) * heat / constants.c_pd, 0.0)
+    return out, put(T, T_data + dT.astype(T_data.dtype))
+
+
 def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
-                           area, area_ref=None, sum_fn=None):
+                           area, area_ref=None, sum_fn=None,
+                           condensate_from_vapour=True):
     """Single positivity stage for every atmospheric dycore (MPAS/cube/spectral/
     lat-lon), so the three grids stay bit-equivalent by construction.
 
@@ -182,8 +245,20 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
       per-species latent-heat T correction (:func:`energy_consistent_water_floor`).
     * ``conservative=False`` + ``energy_consistent=False``: plain ``max(q,0)``.
 
+    ``condensate_from_vapour`` (``conservative`` only, default True): before
+    the borrow, a column's net-negative condensate is paid from the same
+    column's vapour with its latent heat
+    (:func:`pay_condensate_deficit_from_vapour`), so the borrow never has to
+    take it from other columns or create it.  False selects the legacy form,
+    which creates the deficit when the globe cannot repay it.  The payment
+    books latent heat, so it needs ``T``: lanes that pass ``T=None`` (their
+    temperature is not grid-point, e.g. spectral, the FV3 duo column) keep
+    the legacy borrow.
+
     Returns ``(tracers_out, T_out)``.
     """
+    if condensate_from_vapour and conservative and T is not None:
+        tracers, T = pay_condensate_deficit_from_vapour(tracers, T, dp)
     if conservative:
         out = {}
         for name in sorted(tracers):
