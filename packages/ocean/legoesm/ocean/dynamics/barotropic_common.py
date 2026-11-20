@@ -347,10 +347,7 @@ def compute_filter_weights(
     ``div(Hu_avg) == (eta_old − eta_avg)/dt + Σ_j w_transport_j·S_j``.
     That reduces to ``+ S`` only for a source held constant across the
     substeps, which eta diffusion — being state-dependent, hence different
-    every substep — is NOT (codex 2026-08-12).  The lat-lon substep
-    (barotropic_latlon_cgrid.py) therefore books its eta diffusion as a
-    transport with the substep's own weight, which removes it from ``S_j``;
-    the MPAS substep does not yet.  Matching the two expressions gives the
+    every substep — is NOT (codex 2026-08-12).  Matching the two expressions gives the
     ONLY consistent per-substep transport weight
 
         w_transport[j] = tail_j / (n_substeps · w_total).
