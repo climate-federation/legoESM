@@ -53,3 +53,13 @@ The coupled admission writes `round345_coupled_c4_sst_ulp_metrics.json`.  Its
 `ICE_AREA_NH`, `ICE_AREA_SH`, `ICE_VOLUME_NH`, and `ICE_VOLUME_SH`.  The
 companion admission binds the report to REF_C4's binary, re-hashed namelists
 and inputs, unchanged day-1 SI3 state, and the exact control continuation.
+
+To regenerate only that report after admission, without running NEMO, use:
+
+```bash
+python scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round345_sst_ulp_gate.py \
+  --coupled-c4 \
+  --build-coupled-c4-envelope-report /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/coupled_c4_perturbed_twin
+```
+
+This also refreshes the report SHA-256 stored in the existing passed admission.

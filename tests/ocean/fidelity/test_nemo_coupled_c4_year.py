@@ -232,10 +232,12 @@ def test_scorer_assembles_all_twelve_checkpoint_months(
     assert [month["month"] for month in report["months"]] == list(range(1, 13))
 
 
-def test_c4_control_withholds_ice_bar_and_reports_ocean_separately() -> None:
+def test_c4_control_passes_all_ocean_and_ice_rows() -> None:
     candidate, envelope, admission = _synthetic_reports()
     result = scorer.score_c4(candidate, envelope, admission)
-    assert result["status"] == "PENDING_USER_ICE_BAR"
+    assert result["status"] == "PASS_C4_12_OF_12"
+    assert result["months_passed"] == 12
+    assert result["first_failure"] is None
     assert result["ocean_d188"]["verdict"] == "PASS"
     assert result["ocean_d188"]["months_passed"] == 12
     assert all(
@@ -257,44 +259,89 @@ def test_c4_control_withholds_ice_bar_and_reports_ocean_separately() -> None:
     assert "ICE_SST" not in result["months"][0]["quantities"]
     assert "ICE_SSS" not in result["months"][0]["quantities"]
     ice = result["months"][0]["quantities"]["ICE_AREA_NH"]
-    assert ice["verdict"] == "PENDING_USER_ICE_BAR"
-    assert set(ice["monthly_mean_relative_difference"]["candidate_bars"]) == {
-        "fixed_0p01", "three_times_envelope",
+    assert ice["verdict"] == "PASS"
+    assert ice["monthly_mean_relative_difference"]["verdict_bearing"] is False
+    assert ice["mean_daily_relative_abs_difference"] == {
+        "candidate_error": 0.0,
+        "envelope_error": 0.001,
+        "bar": decision188.KE_FLOOR_FRACTION,
+        "operator": "<=",
+        "pass": True,
+        "verdict_bearing": True,
     }
-    assert set(ice["mean_daily_relative_difference"]["candidate_bars"]) == {
-        "fixed_0p01", "three_times_envelope",
-    }
+    assert result["ice_bar_decision"] == 233
+    assert result["ice_bar"]["floor_fraction"] == decision188.KE_FLOOR_FRACTION
+    assert result["ice_bar"]["envelope_multiplier"] == (
+        decision188.KE_ENVELOPE_MULTIPLIER
+    )
+    assert "KE_FLOOR_FRACTION" in result["ice_bar"]["formula"]
 
 
 def test_one_month_one_ocean_quantity_plant_flips_pass_to_fail() -> None:
     candidate, envelope, admission = _synthetic_reports()
     candidate["months"][2]["metrics"]["SST"]["rms"] = math.nextafter(0.01, math.inf)
     result = scorer.score_c4(candidate, envelope, admission)
-    assert result["status"] == "FAIL"
+    assert result["status"] == "FAIL_C4"
     assert result["ocean_d188"]["verdict"] == "FAIL"
     assert result["ocean_d188"]["months_passed"] == 11
     assert result["ocean_d188"]["first_failure"] == {
         "month": "M03_Mar", "quantity": "SST",
     }
+    assert result["first_failure"] == {
+        "month": "M03_Mar", "quantity": "SST",
+    }
     assert result["months"][2]["quantities"]["SST"]["pass"] is False
 
 
-def test_one_month_ice_area_plant_fires_both_candidate_bars_without_verdict() -> None:
+def test_m08_ice_area_nh_just_above_d233_bar_fails() -> None:
     candidate, envelope, admission = _synthetic_reports()
-    planted = copy.deepcopy(candidate)
-    metric = planted["months"][5]["metrics"]["ICE_AREA_SH"]
-    metric["candidate_monthly_mean"] = 10.2
-    metric["absolute_difference"] = 0.2
-    metric["relative_abs_difference"] = 0.02
-    metric["mean_daily_relative_abs_difference"] = 0.02
+    bar = decision188.KE_FLOOR_FRACTION
+    planted = scorer._add_synthetic_ice(candidate, 0.0)
+    metric = planted["months"][7]["metrics"]["ICE_AREA_NH"]
+    above = math.nextafter(bar, math.inf)
+    metric.update({
+        "candidate_monthly_mean": 10.0 * (1.0 + above),
+        "absolute_difference": 10.0 * above,
+        "relative_abs_difference": above,
+        "mean_daily_relative_abs_difference": above,
+    })
     result = scorer.score_c4(planted, envelope, admission)
-    assert result["status"] == "PENDING_USER_ICE_BAR"
-    row = result["months"][5]["quantities"]["ICE_AREA_SH"]
-    assert row["verdict"] == "PENDING_USER_ICE_BAR"
-    assert row["monthly_mean_relative_difference"]["would_pass_fixed_0p01"] is False
-    assert row["monthly_mean_relative_difference"][
-        "would_pass_three_times_envelope"
-    ] is False
+    assert result["status"] == "FAIL_C4"
+    assert result["first_failure"] == {
+        "month": "M08_Aug", "quantity": "ICE_AREA_NH",
+    }
+    row = result["months"][7]["quantities"]["ICE_AREA_NH"]
+    assert row["verdict"] == "FAIL"
+    assert row["mean_daily_relative_abs_difference"]["pass"] is False
+
+
+def test_m08_ice_area_nh_just_below_d233_bar_passes() -> None:
+    candidate, envelope, admission = _synthetic_reports()
+    metric = candidate["months"][7]["metrics"]["ICE_AREA_NH"]
+    below = math.nextafter(decision188.KE_FLOOR_FRACTION, 0.0)
+    metric.update({
+        "candidate_monthly_mean": 10.0 * (1.0 + below),
+        "absolute_difference": 10.0 * below,
+        "relative_abs_difference": below,
+        "mean_daily_relative_abs_difference": below,
+    })
+    result = scorer.score_c4(candidate, envelope, admission)
+    assert result["status"] == "PASS_C4_12_OF_12"
+
+
+def test_equal_monthly_ice_means_with_above_bar_daily_errors_fail() -> None:
+    candidate, envelope, admission = _synthetic_reports()
+    metric = candidate["months"][7]["metrics"]["ICE_AREA_NH"]
+    metric["mean_daily_relative_abs_difference"] = math.nextafter(
+        decision188.KE_FLOOR_FRACTION, math.inf
+    )
+    result = scorer.score_c4(candidate, envelope, admission)
+    row = result["months"][7]["quantities"]["ICE_AREA_NH"]
+    assert row["monthly_mean_relative_difference"]["candidate_error"] == 0.0
+    assert result["status"] == "FAIL_C4"
+    assert result["first_failure"] == {
+        "month": "M08_Aug", "quantity": "ICE_AREA_NH",
+    }
 
 
 def test_zero_ice_envelope_is_refused_before_verdict() -> None:
@@ -303,19 +350,22 @@ def test_zero_ice_envelope_is_refused_before_verdict() -> None:
     metric["candidate_monthly_mean"] = metric["nemo_monthly_mean"]
     metric["absolute_difference"] = 0.0
     metric["relative_abs_difference"] = 0.0
+    metric["mean_daily_relative_abs_difference"] = 0.0
     admission = decision188.minimal_coupled_c4_envelope_admission(
         envelope_report=envelope
     )
-    with pytest.raises(scorer.C4ScoreError, match="envelope errors must be positive"):
+    with pytest.raises(scorer.C4ScoreError, match="daily envelope error must be positive"):
         scorer.score_c4(candidate, envelope, admission)
 
 
 def test_builtin_plants_name_ocean_and_ice_failures() -> None:
     plants = scorer.run_plants()
-    assert plants["control"] == "PENDING_USER_ICE_BAR"
+    assert plants["control"] == "PASS_C4_12_OF_12"
     assert plants["ocean_control"] == "PASS"
-    assert plants["one_month_ocean_quantity_plant"] == "FAIL_D188_M04_Apr_SST"
-    assert plants["one_month_ice_area_plant"] == "BOTH_CANDIDATE_BARS_FIRE"
+    assert plants["one_month_ocean_quantity_plant"] == "FAIL_C4_M04_Apr_SST"
+    assert plants["ice_above_bar_plant"] == "FAIL_C4_M08_Aug_ICE_AREA_NH"
+    assert plants["ice_below_bar_plant"] == "PASS_C4_12_OF_12"
+    assert plants["daily_cancellation_plant"] == "FAIL_C4_M08_Aug_ICE_AREA_NH"
 
 
 def test_ice_envelope_nemo_mean_must_equal_scored_nemo_mean() -> None:
@@ -577,6 +627,26 @@ def test_cli_exit_one_is_reachable_for_ocean_failure(monkeypatch, tmp_path: Path
         "--envelope-metrics", str(envelope),
         "--envelope-admission", str(admission),
     ]) == 1
+
+
+def test_cli_exit_zero_is_reachable_for_twelve_month_pass(
+    monkeypatch, tmp_path: Path
+) -> None:
+    envelope = tmp_path / "envelope.json"
+    admission = tmp_path / "admission.json"
+    envelope.write_text("{}\n", encoding="utf-8")
+    admission.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(scorer, "load_checkpoint_report", lambda _path: {})
+    monkeypatch.setattr(
+        scorer,
+        "score_c4",
+        lambda *_args, **_kwargs: {"status": "PASS_C4_12_OF_12"},
+    )
+    assert scorer.main([
+        "--checkpoint-dir", str(tmp_path),
+        "--envelope-metrics", str(envelope),
+        "--envelope-admission", str(admission),
+    ]) == 0
 
 
 def test_only_exact_in_flight_44512_identity_is_score_compatible() -> None:

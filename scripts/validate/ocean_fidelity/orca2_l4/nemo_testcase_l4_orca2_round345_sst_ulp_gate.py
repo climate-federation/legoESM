@@ -1318,6 +1318,55 @@ def build_coupled_c4_envelope_report(
     return report
 
 
+def write_coupled_c4_envelope_report(run_root: Path) -> dict[str, Any]:
+    """Rebuild only the coupled envelope report and refresh its digest receipt."""
+    run_root = run_root.resolve()
+    admission_path = run_root / COUPLED_C4_ADMISSION_NAME
+    require(admission_path.is_file(),
+            f"missing passed coupled C4 admission: {admission_path}")
+    admission = json.loads(admission_path.read_text(encoding="utf-8"))
+    require(
+        admission.get("status") == "PASS_R345_COUPLED_C4_YEAR_SST_PLUS_ONE_ULP_ARM"
+        and admission.get("admitted") is True
+        and admission.get("profile") == COUPLED_C4_PROFILE,
+        "coupled C4 report-only rebuild requires a passed full-year admission",
+    )
+    baseline_root = Path(str(admission.get("baseline_arm", ""))).resolve()
+    perturbed_root = Path(str(admission.get("run_dir", ""))).resolve()
+    require(baseline_root == COUPLED_C4_BASELINE_ARM.resolve(),
+            "coupled C4 admission baseline is not REF_C4")
+    require(
+        perturbed_root
+        == (run_root / COUPLED_C4_PERTURBED_ARM_NAME).resolve(),
+        "coupled C4 admission perturbed arm is not under the requested run root",
+    )
+    report = build_coupled_c4_envelope_report(baseline_root, perturbed_root)
+    metrics_path = run_root / COUPLED_C4_METRICS_NAME
+    metrics_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    admission["envelope_metrics"] = {
+        "path": str(metrics_path),
+        "sha256": common.sha256(metrics_path),
+        "format": report["format"],
+        "months": 12,
+        "d188_ocean_quantities": [*decision188_metric_keys()],
+        "ice_quantities": list(COUPLED_ICE_KEYS),
+    }
+    admission_path.write_text(
+        json.dumps(admission, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return {
+        "status": "PASS_R345_COUPLED_C4_ENVELOPE_REPORT_ONLY",
+        "nemo_rerun": False,
+        "metrics_path": str(metrics_path),
+        "metrics_sha256": admission["envelope_metrics"]["sha256"],
+        "admission_path": str(admission_path),
+        "months": 12,
+        "ice_sst_sss_mask_source": "Decision-188 ice_cover_clim.nc",
+    }
+
+
 def admit_coupled_c4_pair(
     run_root: Path,
     *,
@@ -2421,6 +2470,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stage-control-run-dir", type=Path)
     parser.add_argument("--admit-run-dir", type=Path)
     parser.add_argument("--admit-existing", type=Path)
+    parser.add_argument("--build-coupled-c4-envelope-report", type=Path)
     parser.add_argument("--write-run-manifest", type=Path)
     parser.add_argument("--verify-perturbation", type=Path)
     parser.add_argument("--act-as-nemo-binary", action="store_true")
@@ -2437,7 +2487,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     selected = sum(value is not None and value is not False for value in (
         args.stage_run_dir, args.stage_control_run_dir, args.admit_run_dir,
-        args.admit_existing, args.write_run_manifest,
+        args.admit_existing, args.build_coupled_c4_envelope_report,
+        args.write_run_manifest,
         args.verify_perturbation, args.preflight_only, args.act_as_nemo_binary,
     ))
     require(selected == 1, "select exactly one gate action")
@@ -2484,6 +2535,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.admit_existing, build_cfg=args.build_cfg,
                 expected_steps=args.expected_steps, allow_stub_binary=args.allow_stub_binary,
             )
+    elif args.build_coupled_c4_envelope_report is not None:
+        require(args.coupled_c4,
+                "--build-coupled-c4-envelope-report requires --coupled-c4")
+        result = write_coupled_c4_envelope_report(
+            args.build_coupled_c4_envelope_report
+        )
     elif args.write_run_manifest is not None:
         result = write_run_manifest(args.write_run_manifest)
     elif args.verify_perturbation is not None:

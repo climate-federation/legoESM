@@ -366,6 +366,66 @@ def test_coupled_envelope_report_exposes_d188_and_ice_fields(
     assert result["envelope_profile"] == ulp_gate.COUPLED_C4_PROFILE
     assert result["ice_metric_keys"] == list(ulp_gate.COUPLED_ICE_KEYS)
     assert all(required <= set(month["metrics"]) for month in result["months"])
+    assert all(
+        month["ice_sst_sss_mask_source"] == "Decision-188 ice_cover_clim.nc"
+        for month in result["months"]
+    )
+
+
+def test_coupled_envelope_report_only_refreshes_metrics_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "coupled"
+    perturbed = run_root / ulp_gate.COUPLED_C4_PERTURBED_ARM_NAME
+    perturbed.mkdir(parents=True)
+    admission_path = run_root / ulp_gate.COUPLED_C4_ADMISSION_NAME
+    admission_path.write_text(json.dumps({
+        "status": "PASS_R345_COUPLED_C4_YEAR_SST_PLUS_ONE_ULP_ARM",
+        "admitted": True,
+        "profile": ulp_gate.COUPLED_C4_PROFILE,
+        "baseline_arm": str(ulp_gate.COUPLED_C4_BASELINE_ARM),
+        "run_dir": str(perturbed),
+        "envelope_metrics": {"sha256": "stale"},
+    }) + "\n", encoding="utf-8")
+    report = decision188.minimal_coupled_c4_year_report(sst=0.0, ke=0.001)
+    for month in report["months"]:
+        month["ice_sst_sss_mask_source"] = "Decision-188 ice_cover_clim.nc"
+    monkeypatch.setattr(
+        ulp_gate,
+        "build_coupled_c4_envelope_report",
+        lambda baseline, candidate: report,
+    )
+
+    result = ulp_gate.write_coupled_c4_envelope_report(run_root)
+    metrics_path = run_root / ulp_gate.COUPLED_C4_METRICS_NAME
+    refreshed = json.loads(admission_path.read_text(encoding="utf-8"))
+    assert result["status"] == "PASS_R345_COUPLED_C4_ENVELOPE_REPORT_ONLY"
+    assert result["nemo_rerun"] is False
+    assert refreshed["envelope_metrics"]["sha256"] == ulp_gate.common.sha256(
+        metrics_path
+    )
+    assert refreshed["envelope_metrics"]["sha256"] != "stale"
+
+
+def test_coupled_envelope_report_only_cli_dispatches_without_nemo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    called = []
+    monkeypatch.setattr(
+        ulp_gate,
+        "write_coupled_c4_envelope_report",
+        lambda root: called.append(root) or {
+            "status": "PASS_R345_COUPLED_C4_ENVELOPE_REPORT_ONLY",
+            "nemo_rerun": False,
+        },
+    )
+    assert ulp_gate.main([
+        "--coupled-c4",
+        "--build-coupled-c4-envelope-report", str(tmp_path),
+    ]) == 0
+    assert called == [tmp_path]
 
 
 def test_day1_restart_gets_exact_uniform_fp64_one_ulp_pattern(tmp_path: Path) -> None:

@@ -119,7 +119,7 @@ def load_checkpoint_report(
 def _score_ice_month(
     candidate: dict[str, Any], envelope: dict[str, Any]
 ) -> dict[str, dict[str, Any]]:
-    """Report both ice errors and both candidate bars without choosing a verdict."""
+    """Apply D233 to the four daily-based monthly ice errors."""
 
     rows = {}
     expected_units = {
@@ -173,10 +173,15 @@ def _score_ice_month(
             ),
             f"{candidate['label']}: {key} envelope error disagrees with monthly means",
         )
-        require(envelope_value > 0.0 and envelope_daily_value > 0.0,
-                f"{candidate['label']}: {key} envelope errors must be positive")
+        require(envelope_daily_value > 0.0,
+                f"{candidate['label']}: {key} daily envelope error must be positive")
         require(daily_value >= 0.0,
                 f"{candidate['label']}: {key} mean daily relative error is negative")
+        daily_bar = max(
+            ICE_RELATIVE_FLOOR,
+            ICE_ENVELOPE_MULTIPLIER * envelope_daily_value,
+        )
+        passed = daily_value <= daily_bar
         rows[key] = {
             "nemo_monthly_mean": nemo_mean,
             "candidate_monthly_mean": candidate_mean,
@@ -186,30 +191,18 @@ def _score_ice_month(
             "monthly_mean_relative_difference": {
                 "candidate_error": value,
                 "envelope_error": envelope_value,
-                "candidate_bars": {
-                    "fixed_0p01": ICE_RELATIVE_FLOOR,
-                    "three_times_envelope": ICE_ENVELOPE_MULTIPLIER * envelope_value,
-                },
-                "would_pass_fixed_0p01": value <= ICE_RELATIVE_FLOOR,
-                "would_pass_three_times_envelope": (
-                    value <= ICE_ENVELOPE_MULTIPLIER * envelope_value
-                ),
+                "verdict_bearing": False,
             },
-            "mean_daily_relative_difference": {
+            "mean_daily_relative_abs_difference": {
                 "candidate_error": daily_value,
                 "envelope_error": envelope_daily_value,
-                "candidate_bars": {
-                    "fixed_0p01": ICE_RELATIVE_FLOOR,
-                    "three_times_envelope": (
-                        ICE_ENVELOPE_MULTIPLIER * envelope_daily_value
-                    ),
-                },
-                "would_pass_fixed_0p01": daily_value <= ICE_RELATIVE_FLOOR,
-                "would_pass_three_times_envelope": (
-                    daily_value <= ICE_ENVELOPE_MULTIPLIER * envelope_daily_value
-                ),
+                "bar": daily_bar,
+                "operator": "<=",
+                "pass": passed,
+                "verdict_bearing": True,
             },
-            "verdict": "PENDING_USER_ICE_BAR",
+            "pass": passed,
+            "verdict": "PASS" if passed else "FAIL",
         }
     return rows
 
@@ -221,7 +214,7 @@ def score_c4(
     *,
     envelope_metrics_digest: str | None = None,
 ) -> dict[str, Any]:
-    """Apply D188 to ocean and leave the two SI3 bar candidates pending."""
+    """Apply D188 to ocean and D233 to four SI3 quantities in every month."""
 
     if envelope_metrics_digest is None:
         envelope_metrics_digest = decision188.envelope_metrics_sha256(envelope_report)
@@ -248,29 +241,39 @@ def score_c4(
 
     months = []
     first_ocean_failure = None
+    first_failure = None
     for ocean_month, candidate, envelope in zip(
         ocean["months"], candidate_months, envelope_months, strict=True
     ):
         ice = _score_ice_month(candidate, envelope)
         quantities = copy.deepcopy(ocean_month["metrics"])
         quantities.update(ice)
-        failed = next(
+        failed_ocean = next(
             (name for name, row in ocean_month["metrics"].items() if not bool(row["pass"])),
             None,
         )
-        if first_ocean_failure is None and failed is not None:
-            first_ocean_failure = {"month": candidate["label"], "quantity": failed}
-        ocean_month_failed = ocean_month["verdict"] == "FAIL"
+        if first_ocean_failure is None and failed_ocean is not None:
+            first_ocean_failure = {
+                "month": candidate["label"], "quantity": failed_ocean,
+            }
+        failed_ice = next(
+            (name for name in runner.ICE_KEYS if not bool(ice[name]["pass"])),
+            None,
+        )
+        failed = failed_ocean if failed_ocean is not None else failed_ice
+        if first_failure is None and failed is not None:
+            first_failure = {"month": candidate["label"], "quantity": failed}
         months.append({
             "label": candidate["label"],
             "status": candidate["status"],
             "quantities": quantities,
             "ocean_d188_verdict": ocean_month["verdict"],
-            "ice_bar_status": "PENDING_USER_ICE_BAR",
-            "verdict": "FAIL" if ocean_month_failed else "PENDING_USER_ICE_BAR",
+            "ice_d233_verdict": "PASS" if failed_ice is None else "FAIL",
+            "verdict": "PASS" if failed is None else "FAIL",
         })
+    passed = first_failure is None
     return {
-        "format": "nemo-coupled-c4-score-v1",
+        "format": "nemo-coupled-c4-score-v2",
         "decision": 228,
         "ocean_card": "DECISION_188",
         "ocean_reference_only_metrics": {
@@ -288,12 +291,18 @@ def score_c4(
             "envelope_reported_masks": envelope_mask_sources,
             "reason": "Decision 188 excludes both keys from FIXED_RMS_BARS",
         },
-        "ice_bar_decision": "PENDING_USER",
-        "ice_bar_candidates": ["fixed 0.01", "3 * admitted-envelope error"],
-        "ice_error_definitions": [
-            "monthly-mean relative difference",
-            "mean of daily relative differences",
-        ],
+        "ice_bar_decision": 233,
+        "ice_bar": {
+            "formula": (
+                "mean_daily_relative_abs_difference <= "
+                "max(KE_FLOOR_FRACTION, KE_ENVELOPE_MULTIPLIER * "
+                "admitted_coupled_NEMO_twin_mean_daily_relative_abs_difference)"
+            ),
+            "constants_source": "Decision 188",
+            "floor_fraction": ICE_RELATIVE_FLOOR,
+            "envelope_multiplier": ICE_ENVELOPE_MULTIPLIER,
+        },
+        "monthly_mean_relative_difference_verdict_bearing": False,
         "hemispheres": {
             "NH": "gphit > 0 degrees",
             "SH": "gphit <= 0 degrees",
@@ -306,7 +315,9 @@ def score_c4(
             ),
             "first_failure": first_ocean_failure,
         },
-        "status": "FAIL" if ocean["verdict"] == "FAIL" else "PENDING_USER_ICE_BAR",
+        "months_passed": sum(month["verdict"] == "PASS" for month in months),
+        "first_failure": first_failure,
+        "status": "PASS_C4_12_OF_12" if passed else "FAIL_C4",
     }
 
 
@@ -337,40 +348,71 @@ def run_plants() -> dict[str, str]:
         envelope_report=envelope
     )
     control = score_c4(candidate, envelope, admission)
-    require(control["status"] == "PENDING_USER_ICE_BAR",
-            "C4 synthetic control did not withhold the ice verdict")
+    require(control["status"] == "PASS_C4_12_OF_12",
+            "C4 synthetic control did not pass all 12 months")
     require(control["ocean_d188"]["verdict"] == "PASS",
             "C4 synthetic ocean control did not pass D188")
 
     ocean_plant = copy.deepcopy(candidate)
     ocean_plant["months"][3]["metrics"]["SST"]["rms"] = math.nextafter(0.01, math.inf)
     ocean_result = score_c4(ocean_plant, envelope, admission)
-    require(ocean_result["status"] == "FAIL",
+    require(ocean_result["status"] == "FAIL_C4",
             "one-month ocean plant did not return a failing process status")
-    require(ocean_result["ocean_d188"]["first_failure"]
+    require(ocean_result["first_failure"]
             == {"month": "M04_Apr", "quantity": "SST"},
             "one-month ocean plant did not fail C4")
 
+    ice_bar = max(
+        ICE_RELATIVE_FLOOR,
+        ICE_ENVELOPE_MULTIPLIER * 0.001,
+    )
+    above = math.nextafter(ice_bar, math.inf)
+    below = math.nextafter(ice_bar, 0.0)
+
     ice_plant = copy.deepcopy(candidate)
     ice_metric = ice_plant["months"][7]["metrics"]["ICE_AREA_NH"]
-    ice_metric["candidate_monthly_mean"] = 10.2
-    ice_metric["absolute_difference"] = 0.2
-    ice_metric["relative_abs_difference"] = 0.02
-    ice_metric["mean_daily_relative_abs_difference"] = 0.02
+    ice_metric["candidate_monthly_mean"] = 10.0 * (1.0 + above)
+    ice_metric["absolute_difference"] = 10.0 * above
+    ice_metric["relative_abs_difference"] = above
+    ice_metric["mean_daily_relative_abs_difference"] = above
     ice_result = score_c4(ice_plant, envelope, admission)
-    ice_row = ice_result["months"][7]["quantities"]["ICE_AREA_NH"]
+    require(ice_result["status"] == "FAIL_C4", "above-bar ice plant passed")
     require(
-        not ice_row["monthly_mean_relative_difference"]["would_pass_fixed_0p01"]
-        and not ice_row["monthly_mean_relative_difference"][
-            "would_pass_three_times_envelope"
-        ],
-        "one-month ice-area plant did not fire both candidate bars",
+        ice_result["first_failure"]
+        == {"month": "M08_Aug", "quantity": "ICE_AREA_NH"},
+        "above-bar ice plant did not name M08 ICE_AREA_NH",
+    )
+
+    below_plant = copy.deepcopy(candidate)
+    below_metric = below_plant["months"][7]["metrics"]["ICE_AREA_NH"]
+    below_metric["candidate_monthly_mean"] = 10.0 * (1.0 + below)
+    below_metric["absolute_difference"] = 10.0 * below
+    below_metric["relative_abs_difference"] = below
+    below_metric["mean_daily_relative_abs_difference"] = below
+    below_result = score_c4(below_plant, envelope, admission)
+    require(below_result["status"] == "PASS_C4_12_OF_12",
+            "below-bar ice plant failed")
+
+    cancellation_plant = copy.deepcopy(candidate)
+    cancellation_metric = cancellation_plant["months"][7]["metrics"][
+        "ICE_AREA_NH"
+    ]
+    cancellation_metric["mean_daily_relative_abs_difference"] = above
+    cancellation_result = score_c4(cancellation_plant, envelope, admission)
+    require(cancellation_result["status"] == "FAIL_C4",
+            "daily cancellation plant passed")
+    require(
+        cancellation_result["first_failure"]
+        == {"month": "M08_Aug", "quantity": "ICE_AREA_NH"},
+        "daily cancellation plant did not name M08 ICE_AREA_NH",
     )
     return {
-        "control": "PENDING_USER_ICE_BAR",
+        "control": "PASS_C4_12_OF_12",
         "ocean_control": control["ocean_d188"]["verdict"],
-        "one_month_ocean_quantity_plant": "FAIL_D188_M04_Apr_SST",
-        "one_month_ice_area_plant": "BOTH_CANDIDATE_BARS_FIRE",
+        "one_month_ocean_quantity_plant": "FAIL_C4_M04_Apr_SST",
+        "ice_above_bar_plant": "FAIL_C4_M08_Aug_ICE_AREA_NH",
+        "ice_below_bar_plant": "PASS_C4_12_OF_12",
+        "daily_cancellation_plant": "FAIL_C4_M08_Aug_ICE_AREA_NH",
     }
 
 
@@ -403,7 +445,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")
     print(rendered, end="")
-    return 2 if result["status"] == "PENDING_USER_ICE_BAR" else 1
+    return 0 if result["status"] == "PASS_C4_12_OF_12" else 1
 
 
 if __name__ == "__main__":
