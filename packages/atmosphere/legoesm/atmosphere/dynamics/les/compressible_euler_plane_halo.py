@@ -851,35 +851,30 @@ def plane_compressible_euler_slow_tendencies_halo(
         ny_p, nx_p = tracers_flat_pad.shape[:2]
         tracers_pad = tracers_flat_pad.reshape(ny_p, nx_p, nlev, n_tr)
 
+        _tracer_sgs = _use_smag or _use_mol
+
         def _tracer_tend_one(q_pad, q_int):
+            # One fused function per tracer: advection then (as in the serial
+            # grouping) + (horizontal SGS + vertical SGS), reading q_pad once.
             # tadv_* = van_leer under weno5 (positivity guard); == adv_* else.
-            return (
+            tend = (
                 tadv_x(q_pad, u_center_pad, grid.dx, h)
                 + tadv_y(q_pad, v_center_pad, grid.dy, h)
                 + _vertical_tracer_adv(q_int, w, height_coord, J)
             )
+            # SGS-SCALAR (#80): SAM `sgs.f90:664-675` SGS-diffuses EVERY
+            # scalar with K_h, like theta'; mirrors the serial leg so the two
+            # stay bit-identical (test_halo_equiv_with_smagorinsky_and_tracers).
+            if _tracer_sgs:
+                sgs = oh.variable_K_diffusion_vlast_halo(q_pad, K_h_pad, grid, h)
+                if _sgs_vert:
+                    sgs = sgs + vertical_K_diffusion_full(
+                        q_int[..., None], K_h_int, height_coord)[..., 0]
+                tend = tend + sgs
+            return tend
         dtracers_dt = jax.vmap(
             _tracer_tend_one, in_axes=(-1, -1), out_axes=-1,
         )(tracers_pad, tracers)
-        # SGS-SCALAR (#80): SAM `sgs.f90:664-675` SGS-diffuses EVERY scalar
-        # (q_v + all hydrometeors) with K_h, like θ'. The serial dycore does
-        # this; the MPI halo path previously diffused θ'/u/v/w but NOT the
-        # tracers ⇒ silent serial≠MPI divergence (caught by
-        # test_halo_equiv_with_smagorinsky_and_tracers). Mirror the serial
-        # leg here so the two stay bit-identical (K_h_pad is in scope only
-        # inside the closure block above — Smagorinsky OR molecular/DNS).
-        if _use_smag or _use_mol:
-            # Serial grouping: adv + (horizontal SGS + vertical SGS).
-            tracer_sgs = jax.vmap(
-                lambda q_pad: oh.variable_K_diffusion_vlast_halo(
-                    q_pad, K_h_pad, grid, h),
-                in_axes=-1, out_axes=-1,
-            )(tracers_pad)
-            if _sgs_vert:
-                tracer_sgs = tracer_sgs + vertical_K_diffusion_full(
-                    tracers, K_h_int, height_coord,
-                )
-            dtracers_dt = dtracers_dt + tracer_sgs
     else:
         dtracers_dt = jnp.zeros_like(tracers)
     zero_phis = jnp.zeros_like(state.phis.data)
