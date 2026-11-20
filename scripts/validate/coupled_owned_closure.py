@@ -374,9 +374,10 @@ def main(argv=None) -> int:
             land_seen["obj"] = cur
             return
         if cur is not None and cur is not land_seen.get("obj"):
-            F["E_land_charged"] += I(
-                f_land * hb_rec["eps_land"] * constants.sigma_sb
-                * land_seen["T_pre"] ** 4) * dt_land
+            c = (f_land * hb_rec["eps_land"] * constants.sigma_sb
+                 * land_seen["T_pre"] ** 4)
+            F["E_land_charged"] += I(c) * dt_land
+            land_seen["c_pend"] = land_seen["c_last"] = c
             land_seen["n"] = land_seen.get("n", 0) + 1
             land_seen["obj"] = cur
 
@@ -385,13 +386,26 @@ def main(argv=None) -> int:
         # the skin the next land call (after this step) starts from
         land_seen["T_pre"] = _np(land_skin_temperature(
             atm._land_ml_state, atm.physics.land_ml_cfg)).reshape(-1)
-        if n_steps[0] % args.rad_update_steps == 0:
+        new_solve = n_steps[0] % args.rad_update_steps == 0
+        if new_solve:
             solve.update(hb_rec, lw_down=_np(sd[SL["lw_down_sfc"]]).reshape(-1),
                          lw_net=_np(sd[SL["lw_net_sfc"]]).reshape(-1))
         e_land, band = land_emission_terms(
             solve["f_land"], solve["eps_land"], solve["T_land"],
             solve["eps_eff"], solve["T_rad"], solve["lw_down"],
             solve["lw_net"], constants.sigma_sb)
+        if "e_first" not in land_seen:
+            land_seen["e_first"] = I(e_land)
+        if new_solve and land_seen.get("c_pend") is not None:
+            # this solve's land emission vs the emission the land call
+            # before it charged (the land exports its START-of-step skin
+            # as the radiating temperature, so they are the same cells'
+            # same T if the solve consumed that call's export)
+            d = e_land - land_seen.pop("c_pend")
+            land_seen["pair_sum"] = land_seen.get("pair_sum", 0.0) + I(d)
+            land_seen["pair_max"] = max(land_seen.get("pair_max", 0.0),
+                                        float(np.max(np.abs(d))))
+            land_seen["n_pair"] = land_seen.get("n_pair", 0) + 1
         F["E_land_atm"] += I(e_land) * DT
         F["A_band_land"] += I(band) * DT
 
@@ -498,6 +512,18 @@ def main(argv=None) -> int:
         stale = F["E_land_charged"] - F["E_land_atm"]
         print(f"ETERM land_calls {land_seen.get('n', 0)} steps {n_steps[0]} "
               f"K {args.land_update_s / DT:g} rad {args.rad_update_steps}")
+        # lag bookkeeping: stale = (last call's charge - first solve's
+        # emission) x interval - sum over paired (solve - previous call)
+        endpoint = (I(land_seen["c_last"]) * dt_land
+                    - land_seen["e_first"] * DT)
+        pairs = land_seen.get("pair_sum", 0.0) * DT
+        print(f"ETERM paired {land_seen.get('n_pair', 0)} maxdiff "
+              f"{land_seen.get('pair_max', 0.0):.3e} W/m2 (solve vs the "
+              "call before it)")
+        for kk, v in (("endpoint", endpoint), ("pairs", pairs),
+                      ("stale_minus_lag", stale - (endpoint - pairs))):
+            print(f"ETERM {kk:16s} {v: .6e} J  {v / land_area_t: .4e} W/m2 "
+                  "(land mean)")
         for kk, v in (("E_land_atm", F["E_land_atm"]),
                       ("E_land_charged", F["E_land_charged"]),
                       ("stale", stale), ("band", F["A_band_land"]),

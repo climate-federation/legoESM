@@ -199,15 +199,16 @@ def test_energy_terms_book_every_land_call(capsys, land_update_s, k):
     assert int(lines["land_calls"][2]) == int(lines["land_calls"][4]) // k
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "measured 2026-11-19 with the land-own-skin booking (7d6549a545): stale "
-    "= +5.17 W/m2 land mean here, -0.052 W/m2 over 2 days on the ERA5 "
-    "real-land case (K=1, rad=1); it should vanish here and does not -- "
-    "cause open, not a noise floor"))
-def test_stale_emission_term_vanishes_when_land_and_radiation_step_together(
-        capsys):
-    """Land called and radiation solved every step: the land charges the skin
-    the radiation was given, so the stale term is roundoff."""
+def test_stale_emission_term_is_the_one_call_lag(capsys):
+    """Land called and radiation solved every step: each solve emits exactly
+    what the land call before it charged (the land exports its start-of-step
+    skin as the radiating temperature), so the land-charged minus
+    atmosphere-emitted total is only the in-flight endpoint term (last call's
+    charge minus the first solve's emission), not a leak."""
     lines = _eterms(capsys, 300)
     e_atm = float(lines["E_land_atm"][2])
-    assert abs(float(lines["stale"][2])) < 1e-12 * e_atm, lines["stale"]
+    assert int(lines["paired"][2]) == int(lines["land_calls"][2]) - 1
+    assert float(lines["paired"][4]) == 0.0, lines["paired"]
+    assert abs(float(lines["stale"][2])) > 1e-6 * e_atm   # non-vacuous
+    assert abs(float(lines["stale_minus_lag"][2])) < 1e-12 * e_atm, (
+        lines["stale_minus_lag"])
