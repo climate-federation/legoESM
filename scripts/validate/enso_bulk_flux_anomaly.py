@@ -107,6 +107,14 @@ def _wcorr(a, b, w):
     return float((w * a * b).sum() / np.sqrt((w * a * a).sum() * (w * b * b).sum()))
 
 
+def _wslope(y, x, w):
+    """Area-weighted regression slope of y on x (sign-robust amplitude ratio)."""
+    m = np.isfinite(x) & np.isfinite(y) & (w > 0)
+    x, y, w = x[m], y[m], w[m]
+    x, y = x - (x * w).sum() / w.sum(), y - (y * w).sum() / w.sum()
+    return float((w * x * y).sum() / (w * x * x).sum())
+
+
 def score(out):
     st = np.load(os.path.join(out, "static.npz"))
     lat, lon = st["lat"], st["lon"]
@@ -129,8 +137,12 @@ def score(out):
     base = {y: run(y, y) for y in _YEARS}
     clim_l = np.mean([base[y][0] for y in _YEARS], 0)
     clim_t = np.mean([base[y][1] for y in _YEARS], 0)
-    wind_l = np.mean([run(1997, y)[0] for y in _YEARS], 0) - clim_l
-    thermo_l = np.mean([run(y, 1997)[0] for y in _YEARS], 0) - clim_l
+    sw = [run(1997, y) for y in _YEARS]
+    st_ = [run(y, 1997) for y in _YEARS]
+    wind_l = np.mean([r[0] for r in sw], 0) - clim_l
+    thermo_l = np.mean([r[0] for r in st_], 0) - clim_l
+    wind_t = np.mean([r[1] for r in sw], 0) - clim_t
+    thermo_t = np.mean([r[1] for r in st_], 0) - clim_t
     m_l, m_t = base[1997][0] - clim_l, base[1997][1] - clim_t
     e_l = {y: -d[y]["mean_surface_latent_heat_flux"].mean(0) for y in _YEARS}  # ERA5 + down
     e_t = {y: d[y]["mean_eastward_turbulent_surface_stress"].mean(0) for y in _YEARS}
@@ -146,7 +158,10 @@ def score(out):
               f"ratio {_wmean(m_l, ww) / _wmean(a_l, ww):6.3f} | wind {_wmean(wind_l, ww):7.2f} "
               f"thermo {_wmean(thermo_l, ww):7.2f} resid {_wmean(m_l - wind_l - thermo_l, ww):6.2f}")
         print(f"[{name}] taux anom model {_wmean(m_t, ww):8.4f} ERA5 {_wmean(a_t, ww):8.4f} "
-              f"ratio {_wmean(m_t, ww) / _wmean(a_t, ww):6.3f}")
+              f"ratio {_wmean(m_t, ww) / _wmean(a_t, ww):6.3f} | wind {_wmean(wind_t, ww):8.4f} "
+              f"thermo {_wmean(thermo_t, ww):8.4f}")
+        print(f"[{name}] slope model-on-ERA5 anom LHF {_wslope(m_l, a_l, ww):6.3f} "
+              f"taux {_wslope(m_t, a_t, ww):6.3f}")
     print(f"[wide] pattern corr LHF {_wcorr(m_l, a_l, w):.3f}  taux {_wcorr(m_t, a_t, w):.3f}")
     print(f"[wide] clim pattern corr LHF {_wcorr(clim_l, ec_l, w):.3f}  "
           f"taux {_wcorr(clim_t, ec_t, w):.3f}")
