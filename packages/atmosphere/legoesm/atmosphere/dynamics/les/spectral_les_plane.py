@@ -462,6 +462,15 @@ def ddy(f, g: SpectralLESGrid):
     return _ifft(fh, g, f.shape[-1])
 
 
+def div_h(fx, fy, g: SpectralLESGrid):
+    """Horizontal divergence ``∂fx/∂x + ∂fy/∂y`` (spectral, exact) — equal to
+    ``ddx(fx) + ddy(fy)`` up to round-off, summed in spectral space so it costs
+    ONE inverse FFT instead of two."""
+    fh = (_fft(fx, g) * (1j * g.kx[..., None])
+          + _fft(fy, g) * (1j * g.ky[..., None]))
+    return _ifft(fh, g, fx.shape[-1])
+
+
 def _apply_filter(f, g: SpectralLESGrid):
     """Smooth horizontal high-wavenumber low-pass (per z-level). Multiplies the
     rfft2 spectrum by the precomputed σ(k) mask; uniform in z ⇒ divergence-free
@@ -797,8 +806,8 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None):
     tau12 = 2 * nu_t * S12
     _tau13, _tau23 = 2 * nu_t * S13, 2 * nu_t * S23           # centres
     # Horizontal divergence of the stress (spectral, exact).
-    Fu = ddx(tau11, g) + ddy(tau12, g)
-    Fv = ddx(tau12, g) + ddy(tau22, g)
+    Fu = div_h(tau11, tau12, g)
+    Fv = div_h(tau12, tau22, g)
     # Vertical SGS momentum flux on FACES: τ_i3 = 2 ν_t S_i3, interpolated to
     # faces; the SURFACE face value is the MOST wall stress (not the interior
     # closure), the rigid-lid top is no-stress.
@@ -841,7 +850,7 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None):
     Fv = Fv + ddz_f2c(tau23_full, dz)
     # Vertical SGS force on interior FACES: ∂_x τ13 + ∂_y τ23 + ∂_z τ33.
     #   τ13_f, τ23_f live on interior faces (nz-1); τ33 at centres (nz).
-    Fw_int = (ddx(tau13_f, g) + ddy(tau23_f, g)
+    Fw_int = (div_h(tau13_f, tau23_f, g)
               + ddz_c2f(tau33, dz))                        # (ny, nx, nz-1)
     Fw = jnp.pad(Fw_int, ((0, 0), (0, 0), (1, 1)))         # 0 at the walls → nz+1
     return Fu, Fv, Fw, u_star
@@ -872,7 +881,7 @@ def scalar_rhs(theta, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
         adv = u * dthdx + v * dthdy + f2c(w * dthdz_f)
     # Horizontal SGS scalar flux divergence (spectral).
     Kh = nu_t / g.cfg.pr_sgs
-    Hsgs = ddx(Kh * dthdx, g) + ddy(Kh * dthdy, g)
+    Hsgs = div_h(Kh * dthdx, Kh * dthdy, g)
     # Vertical SGS flux on interior faces + surface flux BC + no-flux lid.
     Kh_f = c2f(Kh)
     flux_int = Kh_f * ddz_c2f(theta, dz)                   # (ny,nx,nz-1), J=K∂θ/∂z
@@ -1046,7 +1055,7 @@ def scalar_rhs_monotone(phi, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux,
            - phi * _vanleer_fv_velocity_divergence(u, v, w, g))
     dthdx, dthdy = ddx(phi, g), ddy(phi, g)
     Kh = nu_t / g.cfg.pr_sgs
-    Hsgs = ddx(Kh * dthdx, g) + ddy(Kh * dthdy, g)
+    Hsgs = div_h(Kh * dthdx, Kh * dthdy, g)
     Kh_f = c2f(Kh)
     flux_int = Kh_f * ddz_c2f(phi, dz)
     z = jnp.zeros_like(phi[..., :1])
@@ -1151,9 +1160,11 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
         phi_h = pencil_zwhole_to_spec(phi_h, ny_global=L.ny_global,
                                       n_ranks_x=L.n_ranks_x, comm_row=L.comm_row)
     # u = u* - dt ∇φ.  Horizontal grad spectral; vertical grad to faces.
+    # Horizontal gradient straight from phi_h (not irfft -> rfft of phi): same
+    # values to round-off, one forward FFT fewer.
     phi = _ifft(phi_h, g, nz)
-    u_new = u_s - dt * ddx(phi, g)
-    v_new = v_s - dt * ddy(phi, g)
+    u_new = u_s - dt * _ifft(phi_h * (1j * g.kx[..., None]), g, nz)
+    v_new = v_s - dt * _ifft(phi_h * (1j * g.ky[..., None]), g, nz)
     dphidz_f = jnp.pad(ddz_c2f(phi, dz), ((0, 0), (0, 0), (1, 1)))    # 0 at walls
     w_new = w_s - dt * dphidz_f
     w_new = w_new.at[..., 0].set(0.0).at[..., -1].set(0.0)

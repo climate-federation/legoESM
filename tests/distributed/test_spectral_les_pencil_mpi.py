@@ -6,7 +6,7 @@ a grid chosen so every padding path is live: nkx=13 split over Py∈{2,4} (kx
 padding), ny=16 split over Px=3 in the projection (ky padding) and nz=7 / nz±1
 split over Px∈{2,3,4} (z padding). Tolerances are the slab tests' (same
 operators, same reduction-order class): operators 1e-10, dealiased step 1e-9,
-dynamic-LASD step 1e-4 (``test_lasd_mpi.py``), gradients 1e-5.
+dynamic-LASD step 1e-12 (measured 1.3e-15, ``test_lasd_mpi.py``), gradients 1e-5.
 
 Run (each size exercises different meshes)::
 
@@ -255,8 +255,9 @@ def test_pencil_dealiased_step_matches_serial_and_conserves(time_scheme):
 
 def test_pencil_lasd_step_matches_serial():
     """Full oracle closure (3/2 de-aliasing + dynamic LASD SGS) step()
-    trajectory; LASD tolerance 1e-4 as the slab test (raw C_s² is
-    hypersensitive to FFT round-off, the integrated state is not)."""
+    trajectory == serial to round-off. Measured (x64, 4 ranks, meshes 2x2,
+    4x1, 1x4): state 1.3e-15, nu_t < 8e-14, beta < 7e-14, no C_s² mask flips
+    — the former 1e-4 tolerance was never a measured gap."""
     cfg = SpectralLESConfig(nx=NX, ny=NY, nz=NZ, Lx=300.0, Ly=200.0, Lz=100.0,
                             dealias=True, smagorinsky_dynamic=True,
                             spectral_filter=True, time_scheme="rk3")
@@ -268,7 +269,7 @@ def test_pencil_lasd_step_matches_serial():
             np.testing.assert_allclose(
                 _gather(getattr(dist[-1], name), mesh),
                 np.asarray(getattr(ser[-1], name)),
-                rtol=1e-4, atol=1e-4, err_msg=f"{name} mismatch {mesh}")
+                rtol=1e-12, atol=1e-12, err_msg=f"{name} mismatch {mesh}")
 
 
 # --------------------------------------------------------------------------- #

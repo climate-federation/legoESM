@@ -285,6 +285,22 @@ def test_spectral_filter_folds_full_fft_y_axis():
     assert np.max(np.abs(hi)) < 1e-10                   # high |k_y| (incl. its fold) removed
 
 
+def test_level_major_filter_and_box3_equal_default_layout():
+    """``level_major=True`` (the ``(nz, ny, nx)`` order the ``lasd_cs2`` body runs
+    in for speed) returns the default-layout result, transposed (same values)."""
+    fld = jnp.asarray(_F[0])
+    ny, nx, _ = fld.shape
+    c1y, c1x, c2y, c2x = _cutoffs(ny, nx)
+    lm = jnp.moveaxis(fld, 2, 0)
+    for cy, cx in ((c1y, c1x), (c2y, c2x)):
+        np.testing.assert_allclose(
+            _np(jnp.moveaxis(spectral_test_filter(lm, cy, cx, level_major=True), 0, 2)),
+            _np(spectral_test_filter(fld, cy, cx)), rtol=1e-13, atol=1e-15)
+    np.testing.assert_allclose(
+        _np(jnp.moveaxis(imfilter_box3(lm, level_major=True), 0, 2)),
+        _np(imfilter_box3(fld)), rtol=1e-13, atol=1e-15)
+
+
 # ------------------------------- box3 average -------------------------------- #
 
 def test_box3_matches_independent_roll():

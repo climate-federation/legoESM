@@ -104,23 +104,29 @@ _TFR = 2.0   # test-filter ratio (FGR=1): level-1 = 2Δ, level-2 = 4Δ
 _LASD_LILLY_COEFF = 8.0
 
 def spectral_test_filter(field_yxz: jax.Array, cut_y: int, cut_x: int,
-                         layout=None):
+                         layout=None, level_major: bool = False):
     """Sharp spectral cutoff TEST filter over the periodic ``(y, x)`` plane
     (oracle ``Filtering_Level1/2``): zero every mode with ``|k_y| ≥ cut_y`` or
     ``k_x ≥ cut_x``. Vertical left unfiltered (ABL LES is homogeneous in (x,y)).
 
     ``layout`` (a ``SpectralLESLayout``) selects the y-slab distributed FFT; the
     kx cutoff is applied on this rank's kx-column slab via the columns' GLOBAL
-    indices. ``None`` ⇒ serial ``jnp.fft.rfft2``."""
+    indices. ``None`` ⇒ serial ``jnp.fft.rfft2``. ``level_major=True`` takes and
+    returns ``(nz, ny, nx)`` instead of ``(ny, nx, nz)`` (same values)."""
     if layout is None:
-        ny, nx = field_yxz.shape[0], field_yxz.shape[1]
-        fh = jnp.fft.rfft2(field_yxz, axes=(0, 1))
+        ay, ax = (1, 2) if level_major else (0, 1)
+        ny, nx = field_yxz.shape[ay], field_yxz.shape[ax]
+        fh = jnp.fft.rfft2(field_yxz, axes=(ay, ax))
         iy = jnp.arange(ny)
         fold_y = jnp.minimum(iy, ny - iy)
-        mask_y = (fold_y < cut_y)[:, None, None]
-        mask_x = (jnp.arange(fh.shape[1]) < cut_x)[None, :, None]
-        fh = jnp.where(mask_y & mask_x, fh, 0.0)
-        return jnp.fft.irfft2(fh, axes=(0, 1), s=(ny, nx))
+        mask = ((fold_y < cut_y)[:, None]
+                & (jnp.arange(fh.shape[ax]) < cut_x)[None, :])   # (ny, nkx)
+        mask = mask[None] if level_major else mask[:, :, None]
+        fh = jnp.where(mask, fh, 0.0)
+        return jnp.fft.irfft2(fh, axes=(ay, ax), s=(ny, nx))
+    if level_major:
+        return jnp.moveaxis(spectral_test_filter(
+            jnp.moveaxis(field_yxz, 0, 2), cut_y, cut_x, layout), 2, 0)
     from legoesm.parallel.distributed_fft import (
         layout_irfft2, layout_rfft2, local_kx_slice)
     ny, nx = layout.ny_global, layout.nx
@@ -169,29 +175,28 @@ def _ring_avg3(f, axis, n, r, comm, tag):
     return (up + f + dn) / 3.0
 
 
-def imfilter_box3(field_yxz: jax.Array, layout=None) -> jax.Array:
+def imfilter_box3(field_yxz: jax.Array, layout=None,
+                  level_major: bool = False) -> jax.Array:
     """Periodic 3×3 horizontal box average (oracle ``Utilities.Imfilter``) — the
     LASD LOCAL averaging of the Germano ratio before forming ``C_s²``. Under the
     y-slab ``layout`` the ∂y rolls cross ranks, so the two boundary rows are
     exchanged with the y-neighbours (∂x is local — x is undecomposed). Under the
     x-y pencil the ∂x average first exchanges one column on ``comm_row``, then
     the ∂y average one row of the x-averaged field on ``comm_col`` (separable ⇒
-    no corner exchange)."""
+    no corner exchange). ``level_major=True`` takes and returns ``(nz, ny, nx)``
+    instead of ``(ny, nx, nz)`` (same values)."""
     from legoesm.parallel.distributed_fft import layout_is_pencil
+    ay, ax = (1, 2) if level_major else (0, 1)
     if layout is not None and layout_is_pencil(layout):
-        fx = _ring_avg3(field_yxz, 1, layout.n_ranks_x, layout.rx,
+        fx = _ring_avg3(field_yxz, ax, layout.n_ranks_x, layout.rx,
                         layout.comm_row, 702)  # coeff-ok: MPI halo message tags
-        return _ring_avg3(fx, 0, layout.n_ranks_y, layout.ry,
+        return _ring_avg3(fx, ay, layout.n_ranks_y, layout.ry,
                           layout.comm_col, 700)  # coeff-ok: MPI halo message tags
-    fx = (jnp.roll(field_yxz, 1, axis=1) + field_yxz
-          + jnp.roll(field_yxz, -1, axis=1)) / 3.0
+    fx = _ring_avg3(field_yxz, ax, 1, 0, None, 0)       # x undecomposed: local roll
     if layout is None:
-        return (jnp.roll(fx, 1, axis=0) + fx + jnp.roll(fx, -1, axis=0)) / 3.0
-    last_of_prev, first_of_next = _ring_halo(
-        fx, 0, layout.n_ranks, layout.rank, layout.comm, 700)  # coeff-ok: MPI halo message tags
-    fy_up = jnp.concatenate([last_of_prev, fx[:-1]], axis=0)   # roll(+1, axis=0)
-    fy_dn = jnp.concatenate([fx[1:], first_of_next], axis=0)   # roll(-1, axis=0)
-    return (fy_up + fx + fy_dn) / 3.0
+        return _ring_avg3(fx, ay, 1, 0, None, 0)
+    return _ring_avg3(fx, ay, layout.n_ranks, layout.rank, layout.comm,
+                      700)  # coeff-ok: MPI halo message tags
 
 
 def laguerre_max_real_root_beta(coeffs6: jax.Array) -> jax.Array:
@@ -293,19 +298,29 @@ def lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag,
     # from the layout for clarity. (Bug caught by codex review 2026-06-09.)
     ny_g = layout.ny_global if layout is not None else ny
     nx_g = layout.nx if layout is not None else nx
-    L2 = (jnp.asarray(delta) ** 2).reshape(1, 1, nz)               # Δ² (1,1,nz)
+    # Speed (memory order only; same values to round-off — the plane-mean sums
+    # run in a different order): the body runs on LEVEL-MAJOR
+    # ``(nz, ny, nx)`` arrays, so the test-filter FFTs, the ~40 pointwise
+    # products, the plane means and the box average all work on contiguous
+    # horizontal planes. On ``(ny, nx, nz)`` every consumer of an FFT output
+    # re-transposes it (measured on one CPU core, 64x64x128 fp64).
+    uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag = (
+        jnp.moveaxis(a, 2, 0)
+        for a in (uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag))
+    L2 = (jnp.asarray(delta) ** 2).reshape(nz, 1, 1)               # Δ² (nz,1,1)
     cut1y, cut1x = round(ny_g / (2 * _TFR)), round(nx_g / (2 * _TFR))            # 2Δ
     cut2y, cut2x = round(ny_g / (2 * _TFR * _TFR)), round(nx_g / (2 * _TFR * _TFR))  # 4Δ
-    F1 = lambda f: spectral_test_filter(f, cut1y, cut1x, layout)  # noqa: E731
-    F2 = lambda f: spectral_test_filter(f, cut2y, cut2x, layout)  # noqa: E731
+    F1 = lambda f: spectral_test_filter(f, cut1y, cut1x, layout, True)  # noqa: E731
+    F2 = lambda f: spectral_test_filter(f, cut2y, cut2x, layout, True)  # noqa: E731
+    box3 = lambda f: imfilter_box3(f, layout, True)                     # noqa: E731
     if layout is None:
-        pm = lambda f: jnp.mean(f, axis=(0, 1))                   # noqa: E731
+        pm = lambda f: jnp.mean(f, axis=(1, 2))                   # noqa: E731
     else:
         from legoesm.parallel.reductions import global_sum_mpi
         _pden = layout.ny_global * layout.nx
         # Reduce over the layout's communicator (matches the distributed FFT), not
         # COMM_WORLD — consistent on sub-communicators (codex 2026-06-09).
-        pm = lambda f: (global_sum_mpi(jnp.sum(f, axis=(0, 1)),  # noqa: E731
+        pm = lambda f: (global_sum_mpi(jnp.sum(f, axis=(1, 2)),  # noqa: E731
                                        comm=layout.comm) / _pden)
 
     u_h, v_h, w_h = F1(uc), F1(vc), F1(wc)
@@ -354,7 +369,7 @@ def lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag,
     ee = a1*d2 + b2*d1
     ff = -b1*d2
     beta = laguerre_max_real_root_beta(jnp.stack([ff, ee, dd, cc, bb, aa], -1))
-    beta3d = beta.reshape(1, 1, nz)
+    beta3d = beta.reshape(nz, 1, 1)
 
     T1, T2 = 2.0*L2, 2.0*(_TFR**2)*L2
     M11 = T1*SS11h - T2*beta3d*S_h*S11h
@@ -366,7 +381,7 @@ def lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag,
     LM = (L11*M11+L22*M22+L33*M33+2.0*(L12*M12+L13*M13+L23*M23))
     MM = (M11**2+M22**2+M33**2+2.0*(M12**2+M13**2+M23**2))
 
-    LMx, MMx = imfilter_box3(LM, layout), imfilter_box3(MM, layout)
+    LMx, MMx = box3(LM), box3(MM)
     cs2 = LMx / jnp.where(jnp.abs(MMx) < 1.0e-10, 1.0e-10, MMx)
     invalid = (jnp.abs(MMx) < 1.0e-10) | (cs2 < 0.0) | (cs2 > cs_max ** 2)
-    return jnp.where(invalid, 0.0, cs2)                           # C_s² (ny,nx,nz)
+    return jnp.moveaxis(jnp.where(invalid, 0.0, cs2), 0, 2)      # C_s² (ny,nx,nz)

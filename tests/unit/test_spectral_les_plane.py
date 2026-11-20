@@ -58,6 +58,17 @@ def test_spectral_derivative_exact_single_mode():
     np.testing.assert_allclose(np.asarray(df), np.asarray(ref), atol=1e-9)
 
 
+def test_div_h_equals_ddx_plus_ddy():
+    """``div_h`` (one inverse FFT) == ``ddx(fx) + ddy(fy)`` (two) to round-off."""
+    g = _grid()
+    rng = np.random.default_rng(3)
+    fx, fy = (jnp.asarray(rng.standard_normal((g.cfg.ny, g.cfg.nx, g.cfg.nz)))
+              for _ in range(2))
+    np.testing.assert_allclose(np.asarray(sl.div_h(fx, fy, g)),
+                               np.asarray(sl.ddx(fx, g) + sl.ddy(fy, g)),
+                               rtol=1e-12, atol=1e-12)
+
+
 def test_rotational_advection_conserves_energy():
     """⟨u·C⟩ over the volume ≈ 0 for the rotational form (no spurious KE
     production/destruction) — the non-dissipation that sustains turbulence."""
