@@ -551,8 +551,9 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     # orog only.  Under the analytic baroclinic-wave IC (flat-terrain
     # balanced) a mountain would be placed in the diagnostics and never
     # reach dynamics -- refused rather than silently flat (codex M6 r1).
-    if config.topography != "flat" and config.ic != "era5":
-        refused.append(f"topography={config.topography!r} with ic="
+    if (config.topography != "flat" or config.geography) and config.ic != "era5":
+        refused.append(f"topography={config.topography!r} / geography="
+                       f"{config.geography!r} with ic="
                        f"{config.ic!r} (only ic='era5' carries a dynamics "
                        "terrain on this lane; the file/mountain would be "
                        "diagnostic-only while dynamics stayed flat)")
