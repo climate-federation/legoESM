@@ -47,14 +47,14 @@ from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition
 )
 
 CHECKPOINT_FORMAT = "nemo-coupled-c4-month-checkpoint-v1"
-LEGACY_C4_METRIC_FORMAT = "nemo-coupled-c4-month-metrics-v1"
 C4_METRIC_FORMAT = "nemo-coupled-c4-month-metrics-v2"
-SUPPORTED_C4_METRIC_FORMATS = (LEGACY_C4_METRIC_FORMAT, C4_METRIC_FORMAT)
-LEGACY_RUNNER_SHA256 = "8fc4ab6af90a6d822e2366acb1ebe2d6fa2363eede074b76ab46a8880c23361b"
-LEGACY_DECISION171_ICE_COVER = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
-    "round339/k0_smoke/orca2_k0_10step_np2/ice_cover_clim.nc"
-)
+SUPPORTED_C4_METRIC_FORMATS = (C4_METRIC_FORMAT,)
+IN_FLIGHT_44512_INPUT_IDENTITY = {
+    "deck_receipt_sha256": "8b916b74567cd0495a0dce986f1bd77ef281e7984aa1bbdd26a1537dc9a21254",
+    "runner_sha256": "7d675a75cd32d71f7d1e8d3b9bb236af09a23652229429d274d146ad75e76495",
+    "coupled_source_sha256": "a3f93e902b8decb157937989d581497d8b5207339434ff6849e7ee5dc1eb55a6",
+    "ice_package_source_sha256": "424362b575d38649a29b1e6fa72837387cf9260b980d813bf36346c58406b0c1",
+}
 PAIRS_PER_DAY = year_metrics.STEPS_PER_DAY // 2
 TOTAL_PAIRS = 1460
 ICE_KEYS = (
@@ -185,35 +185,18 @@ def coupled_core_manifest(reference_root: Path) -> Path:
     require(receipt.get("status") == "PASS_EXACT_R339_R5_DECK_ICE5",
             f"{receipt_path}: coupled deck receipt did not pass")
     require(receipt.get("rung") == "C4", f"{receipt_path}: receipt is not C4")
+    try:
+        verified = c_ladder_deck.verify(
+            reference_root, "C4", require_resolved_output=True
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    require(verified.get("resolved_output_checked") is True,
+            f"{reference_root}: executed SI3 controls were not verified")
     source_deck = Path(c_ladder_deck.OVERLAYS["source_deck"])
     manifest = source_deck / "input_files.sha256"
     require(manifest.is_file(), f"missing coupled source-deck manifest {manifest}")
     return manifest
-
-
-def read_coupled_initial_ice_cover(reference_root: Path) -> np.ndarray:
-    """Read the coupled run's own initial ice concentration as a scoring mask."""
-
-    import netCDF4
-
-    ranks = []
-    for rank in (0, 1):
-        path = reference_root / f"output.init_{rank:04d}.nc"
-        require(path.is_file(), f"missing coupled initial output {path}")
-        with netCDF4.Dataset(path) as dataset:
-            require("soicecov" in dataset.variables,
-                    f"{path.name}: missing coupled initial soicecov")
-            raw = np.ma.asarray(dataset.variables["soicecov"][0])
-            require(int(np.ma.count_masked(raw)) == 0,
-                    f"{path.name}: soicecov contains fill/masked values")
-            ranks.append(np.asarray(raw, dtype=np.float64))
-    cover = np.concatenate(ranks, axis=1)
-    require(cover.shape == (148, 180),
-            f"coupled initial ice-cover shape {cover.shape} != (148, 180)")
-    require(bool(np.isfinite(cover).all()), "coupled initial ice cover is non-finite")
-    require(bool(((cover >= 0.0) & (cover <= 1.0)).all()),
-            "coupled initial ice cover is outside [0, 1]")
-    return cover
 
 
 def resolved_c4_controls(reference_root: Path) -> dict[str, Any]:
@@ -240,18 +223,48 @@ def resolved_c4_controls(reference_root: Path) -> dict[str, Any]:
     require(len(set(calendars)) == 1, f"{output_path}: unresolved executed calendar")
     ice = c_ladder_scorer._coupled_resolved_namelist(reference_root)
     controls = {
+        "nn_it000": int(scalar("namrun", "nn_it000")),
         "nn_itend": int(scalar("namrun", "nn_itend")),
+        "nn_stock": int(scalar("namrun", "nn_stock")),
+        "ln_rstart": bool(scalar("namrun", "ln_rstart")),
         "rn_Dt": float(scalar("namdom", "rn_dt")),
+        "nn_fsbc": int(scalar("namsbc", "nn_fsbc")),
+        "nn_ice": int(scalar("namsbc", "nn_ice")),
         "nn_leapy": int(scalar("namrun", "nn_leapy")),
         "calendar": calendars[0],
         "ice_dimensions": tuple(int(ice[name]) for name in ("jpl", "nlay_i", "nlay_s")),
+        "si3_switches": {
+            name: ice[name]
+            for name in (
+                "rn_simin", "rn_sinew", "nn_icesal", "ln_pnd", "ln_pnd_LEV",
+                "ln_pnd_TOPO", "ln_pnd_lids", "ln_pnd_alb", "nn_snwfra",
+                "ln_drgice_imp",
+            )
+        },
     }
     require(controls == {
+        "nn_it000": 1,
         "nn_itend": 2920,
+        "nn_stock": 8,
+        "ln_rstart": False,
         "rn_Dt": 10800.0,
+        "nn_fsbc": 2,
+        "nn_ice": 2,
         "nn_leapy": 0,
         "calendar": "noleap",
         "ice_dimensions": (5, 10, 5),
+        "si3_switches": {
+            "rn_simin": 0.1,
+            "rn_sinew": 0.75,
+            "nn_icesal": 4.0,
+            "ln_pnd": True,
+            "ln_pnd_LEV": True,
+            "ln_pnd_TOPO": False,
+            "ln_pnd_lids": True,
+            "ln_pnd_alb": True,
+            "nn_snwfra": 2.0,
+            "ln_drgice_imp": True,
+        },
     }, f"resolved coupled C4 controls moved: {controls}")
     return controls
 
@@ -292,18 +305,13 @@ def checkpoint_input_identity(reference_root: Path) -> dict[str, str]:
 
 
 def _resume_identity_is_compatible(stored: Any, current: dict[str, str]) -> bool:
-    if stored == current:
-        return True
-    if not isinstance(stored, dict):
-        return False
-    return (
-        set(stored) == {
-            "deck_receipt_sha256", "runner_sha256", "coupled_source_sha256",
-        }
-        and stored.get("runner_sha256") == LEGACY_RUNNER_SHA256
-        and stored.get("deck_receipt_sha256") == current["deck_receipt_sha256"]
-        and stored.get("coupled_source_sha256") == current["coupled_source_sha256"]
-    )
+    return stored == current
+
+
+def checkpoint_identity_is_scorable(stored: Any, current: dict[str, str]) -> bool:
+    """Admit current evidence or the operator-named in-flight 44512 acquisition."""
+
+    return stored == current or stored == IN_FLIGHT_44512_INPUT_IDENTITY
 
 
 def checkpoint_name(month: int, completed_kt: int) -> str:
@@ -382,11 +390,17 @@ def inspect_checkpoint(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         require(isinstance(schema, list) and bool(schema),
                 f"{path.name}: checkpoint has no carry leaf schema")
         names = [str(row.get("name", "")) for row in schema]
-        require(len(names) == len(set(names)) and all(names),
-                f"{path.name}: carry leaf schema names are empty or duplicated")
+        expected_names = [f"carry_{index:05d}" for index in range(179)]
+        require(names == expected_names,
+                f"{path.name}: carry leaf schema is not the 179-leaf coupled carry")
         expected = set(names) | {"__metadata_json__", "__month_report_json__"}
         require(set(archive.files) == expected,
                 f"{path.name}: checkpoint archive leaves differ from its carry schema")
+        for row in schema:
+            value = np.asarray(archive[row["name"]])
+            require(list(value.shape) == row.get("shape")
+                    and value.dtype.str == row.get("dtype"),
+                    f"{path.name}: carry leaf {row['name']} disagrees with its schema")
     require(metadata.get("format") == CHECKPOINT_FORMAT,
             f"{path.name}: unsupported checkpoint format {metadata.get('format')!r}")
     return metadata, report
@@ -427,6 +441,8 @@ def validate_checkpoint_prefix(
     observed = []
     identities = []
     metric_formats = []
+    carry_schemas = []
+    carry_treedefs = []
     for path in paths:
         metadata, report = inspect_checkpoint(path)
         month = validate_month_checkpoint(path, metadata, report)
@@ -435,12 +451,18 @@ def validate_checkpoint_prefix(
         observed.append(month)
         identities.append(metadata.get("input_identity"))
         metric_formats.append(report.get("format"))
+        carry_schemas.append(metadata.get("leaf_schema"))
+        carry_treedefs.append(metadata.get("treedef"))
     require(observed == list(range(1, through_month + 1)),
             f"resume checkpoint months are {observed}, expected 1..{through_month}")
     require(all(identity == identities[0] for identity in identities),
             "resume checkpoint input_identity changed between months")
     require(all(metric_format == metric_formats[0] for metric_format in metric_formats),
             "resume checkpoint metric format changed between months")
+    require(all(schema == carry_schemas[0] for schema in carry_schemas),
+            "resume checkpoint carry schema changed between months")
+    require(all(treedef == carry_treedefs[0] for treedef in carry_treedefs),
+            "resume checkpoint carry treedef changed between months")
     require(metric_formats[0] in SUPPORTED_C4_METRIC_FORMATS,
             f"unsupported resumed metric format {metric_formats[0]!r}")
     return identities[0], metric_formats[0]
@@ -607,7 +629,7 @@ def build_month_report(
     geo: dict[str, np.ndarray],
     *,
     metric_format: str = C4_METRIC_FORMAT,
-    ice_sst_sss_mask_source: str = "coupled output.init soicecov",
+    ice_sst_sss_mask_source: str = "Decision-188 ice_cover_clim.nc",
 ) -> dict[str, Any]:
     window = year_metrics.calendar_month_day_ranges()[month_index - 1]
     require(window["complete_month"], f"{window['label']}: calendar month is not complete")
@@ -878,12 +900,8 @@ def run_c4(
     if not profile_only:
         geo = year_metrics.pilot_metrics.static_geometry(reference_root)
         mld = year_metrics.K0MLDEvaluator(reference_root)
-        if metric_format == LEGACY_C4_METRIC_FORMAT:
-            cover = r340.read_decision171_cover(LEGACY_DECISION171_ICE_COVER)
-            mask_source = "legacy Decision-171 standalone ice_cover_clim.nc"
-        else:
-            cover = read_coupled_initial_ice_cover(reference_root)
-            mask_source = "coupled output.init soicecov"
+        cover = r340.read_decision171_cover(year_driver.DEFAULT_ICE_COVER_PATH)
+        mask_source = "Decision-188 ice_cover_clim.nc"
         metric_context = (geo, mld, cover, mask_source)
 
     month_rows: list[dict[str, Any]] = []

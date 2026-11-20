@@ -40,7 +40,9 @@ def _finite(value: Any, label: str) -> float:
     return output
 
 
-def load_checkpoint_report(checkpoint_dir: Path) -> dict[str, Any]:
+def load_checkpoint_report(
+    checkpoint_dir: Path, *, carry_template: Any | None = None
+) -> dict[str, Any]:
     """Assemble one D188-compatible report from exactly 12 month checkpoints."""
 
     paths = sorted(checkpoint_dir.glob("c4_month??_step*.npz"))
@@ -50,8 +52,10 @@ def load_checkpoint_report(checkpoint_dir: Path) -> dict[str, Any]:
     reference_root = None
     input_identity = None
     metric_format = None
+    checkpoint_metadata = []
     for path in paths:
         metadata, report = runner.inspect_checkpoint(path)
+        checkpoint_metadata.append((path, metadata))
         try:
             month = runner.validate_month_checkpoint(path, metadata, report)
         except RuntimeError as exc:
@@ -79,11 +83,24 @@ def load_checkpoint_report(checkpoint_dir: Path) -> dict[str, Any]:
         months[month] = report
     require(sorted(months) == list(range(1, 13)),
             f"C4 checkpoint months are {sorted(months)}, expected 1..12")
+    if carry_template is None:
+        try:
+            carry_template = runner.c_ladder_scorer._c2_cold_start(
+                Path(reference_root), n_steps=2
+            )[0]
+        except (RuntimeError, ValueError) as exc:
+            raise C4ScoreError(str(exc)) from exc
+    _payload, expected_tree = runner._carry_payload(carry_template)
+    for path, metadata in checkpoint_metadata:
+        require(metadata.get("leaf_schema") == expected_tree["leaf_schema"],
+                f"{path.name}: carry schema differs from the 179-leaf deck template")
+        require(metadata.get("treedef") == expected_tree["treedef"],
+                f"{path.name}: carry treedef differs from the deck template")
     try:
         current_identity = runner.checkpoint_input_identity(Path(reference_root))
     except RuntimeError as exc:
         raise C4ScoreError(str(exc)) from exc
-    require(runner._resume_identity_is_compatible(input_identity, current_identity),
+    require(runner.checkpoint_identity_is_scorable(input_identity, current_identity),
             "C4 deck receipt or coupled program changed since checkpoint acquisition")
     assembled = {
         "format": "orca2-r342-s4-year-metrics-v2",
@@ -96,22 +113,6 @@ def load_checkpoint_report(checkpoint_dir: Path) -> dict[str, Any]:
         "checkpoint_input_identity": input_identity,
         "checkpoint_metric_format": metric_format,
     }
-    if metric_format == runner.LEGACY_C4_METRIC_FORMAT:
-        assembled["legacy_metric_limitations"] = [
-            "ice volume values are normalized from km3 to 1e3 km3 on read",
-            "mean daily relative ice errors were not stored and require scoring replay",
-            "ICE_SST/ICE_SSS used the legacy standalone Decision-171 mask",
-        ]
-        for month in assembled["months"]:
-            for key in ("ICE_VOLUME_NH", "ICE_VOLUME_SH"):
-                row = month["metrics"].get(key)
-                if row is None or row.get("units") != "km3":
-                    continue
-                for field in (
-                    "nemo_monthly_mean", "candidate_monthly_mean", "absolute_difference",
-                ):
-                    row[field] = float(row[field]) / 1000.0
-                row["units"] = "1e3 km3"
     return assembled
 
 
@@ -121,11 +122,21 @@ def _score_ice_month(
     """Report both ice errors and both candidate bars without choosing a verdict."""
 
     rows = {}
+    expected_units = {
+        "ICE_AREA_NH": "1e6 km2",
+        "ICE_AREA_SH": "1e6 km2",
+        "ICE_VOLUME_NH": "1e3 km3",
+        "ICE_VOLUME_SH": "1e3 km3",
+    }
     for key in runner.ICE_KEYS:
         require(key in candidate["metrics"], f"{candidate['label']}: missing candidate {key}")
         require(key in envelope["metrics"], f"{candidate['label']}: missing envelope {key}")
         source = candidate["metrics"][key]
         envelope_source = envelope["metrics"][key]
+        require(source.get("units") == expected_units[key],
+                f"{candidate['label']}: {key} candidate units are not {expected_units[key]}")
+        require(envelope_source.get("units") == expected_units[key],
+                f"{candidate['label']}: {key} envelope units are not {expected_units[key]}")
         nemo_mean = _finite(source["nemo_monthly_mean"], f"{key} NEMO mean")
         candidate_mean = _finite(source["candidate_monthly_mean"], f"{key} candidate mean")
         envelope_nemo_mean = _finite(
@@ -214,6 +225,14 @@ def score_c4(
 
     if envelope_metrics_digest is None:
         envelope_metrics_digest = decision188.envelope_metrics_sha256(envelope_report)
+    candidate_mask_sources = sorted({
+        month.get("ice_sst_sss_mask_source", "UNSTAMPED")
+        for month in candidate_report.get("months", [])
+    })
+    envelope_mask_sources = sorted({
+        month.get("ice_sst_sss_mask_source", "UNSTAMPED")
+        for month in envelope_report.get("months", [])
+    })
     try:
         ocean = decision188.evaluate_decision188(
             candidate_report,
@@ -241,18 +260,34 @@ def score_c4(
         )
         if first_ocean_failure is None and failed is not None:
             first_ocean_failure = {"month": candidate["label"], "quantity": failed}
+        ocean_month_failed = ocean_month["verdict"] == "FAIL"
         months.append({
             "label": candidate["label"],
             "status": candidate["status"],
             "quantities": quantities,
             "ocean_d188_verdict": ocean_month["verdict"],
             "ice_bar_status": "PENDING_USER_ICE_BAR",
-            "verdict": "PENDING_USER_ICE_BAR",
+            "verdict": "FAIL" if ocean_month_failed else "PENDING_USER_ICE_BAR",
         })
     return {
         "format": "nemo-coupled-c4-score-v1",
         "decision": 228,
         "ocean_card": "DECISION_188",
+        "ocean_reference_only_metrics": {
+            "ICE_SST": {
+                "verdict_bearing": False,
+                "reference_bar_rms": 0.01,
+                "required_mask": "Decision-188 ice_cover_clim.nc",
+            },
+            "ICE_SSS": {
+                "verdict_bearing": False,
+                "reference_bar_rms": 0.002,
+                "required_mask": "Decision-188 ice_cover_clim.nc",
+            },
+            "candidate_reported_masks": candidate_mask_sources,
+            "envelope_reported_masks": envelope_mask_sources,
+            "reason": "Decision 188 excludes both keys from FIXED_RMS_BARS",
+        },
         "ice_bar_decision": "PENDING_USER",
         "ice_bar_candidates": ["fixed 0.01", "3 * admitted-envelope error"],
         "ice_error_definitions": [
@@ -271,7 +306,7 @@ def score_c4(
             ),
             "first_failure": first_ocean_failure,
         },
-        "status": "PENDING_USER_ICE_BAR",
+        "status": "FAIL" if ocean["verdict"] == "FAIL" else "PENDING_USER_ICE_BAR",
     }
 
 
@@ -286,7 +321,7 @@ def _add_synthetic_ice(report: dict[str, Any], relative_error: float) -> dict[st
                 "absolute_difference": 10.0 * relative_error,
                 "relative_abs_difference": relative_error,
                 "mean_daily_relative_abs_difference": relative_error,
-                "units": "synthetic",
+                "units": "1e6 km2" if "AREA" in key else "1e3 km3",
             }
     return output
 
@@ -310,6 +345,8 @@ def run_plants() -> dict[str, str]:
     ocean_plant = copy.deepcopy(candidate)
     ocean_plant["months"][3]["metrics"]["SST"]["rms"] = math.nextafter(0.01, math.inf)
     ocean_result = score_c4(ocean_plant, envelope, admission)
+    require(ocean_result["status"] == "FAIL",
+            "one-month ocean plant did not return a failing process status")
     require(ocean_result["ocean_d188"]["first_failure"]
             == {"month": "M04_Apr", "quantity": "SST"},
             "one-month ocean plant did not fail C4")

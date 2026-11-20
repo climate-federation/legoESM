@@ -1305,6 +1305,7 @@ def build_coupled_c4_envelope_report(
     for month in report["months"]:
         require(month["status"] == "EVALUATED_COMPLETE_MONTH",
                 f"{month['label']}: coupled envelope month is not complete")
+        month["ice_sst_sss_mask_source"] = "Decision-188 ice_cover_clim.nc"
         ice_rows = [ice_by_day[day] for day in month["available_days"]]
         month["metrics"].update(c4_year_runner.monthly_ice_metrics(ice_rows))
     report.update({

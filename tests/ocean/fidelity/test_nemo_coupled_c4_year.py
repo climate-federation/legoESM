@@ -111,12 +111,14 @@ def _empty_month(month: int) -> dict:
 
 
 def _synthetic_reports():
-    admission = decision188.minimal_envelope_admission()
     candidate = scorer._add_synthetic_ice(
-        decision188.minimal_year_report(sst=0.0, ke=0.0), 0.0
+        decision188.minimal_coupled_c4_year_report(sst=0.0, ke=0.0), 0.0
     )
     envelope = scorer._add_synthetic_ice(
-        decision188.minimal_year_report(sst=0.0, ke=0.001), 0.001
+        decision188.minimal_coupled_c4_year_report(sst=0.0, ke=0.001), 0.001
+    )
+    admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=envelope
     )
     return candidate, envelope, admission
 
@@ -223,7 +225,9 @@ def test_scorer_assembles_all_twelve_checkpoint_months(
             reference_root=reference,
             month_report=_empty_month(month),
         )
-    report = scorer.load_checkpoint_report(tmp_path)
+    report = scorer.load_checkpoint_report(
+        tmp_path, carry_template=real_carry_template
+    )
     assert report["nemo_root"] == str(reference.resolve())
     assert [month["month"] for month in report["months"]] == list(range(1, 13))
 
@@ -241,6 +245,17 @@ def test_c4_control_withholds_ice_bar_and_reports_ocean_separately() -> None:
         if name not in runner.ICE_KEYS
     )
     assert set(runner.ICE_KEYS) <= set(result["months"][0]["quantities"])
+    assert result["ocean_reference_only_metrics"]["reason"] == (
+        "Decision 188 excludes both keys from FIXED_RMS_BARS"
+    )
+    assert result["ocean_reference_only_metrics"]["ICE_SST"]["required_mask"] == (
+        "Decision-188 ice_cover_clim.nc"
+    )
+    assert result["ocean_reference_only_metrics"]["candidate_reported_masks"] == [
+        "UNSTAMPED"
+    ]
+    assert "ICE_SST" not in result["months"][0]["quantities"]
+    assert "ICE_SSS" not in result["months"][0]["quantities"]
     ice = result["months"][0]["quantities"]["ICE_AREA_NH"]
     assert ice["verdict"] == "PENDING_USER_ICE_BAR"
     assert set(ice["monthly_mean_relative_difference"]["candidate_bars"]) == {
@@ -255,7 +270,7 @@ def test_one_month_one_ocean_quantity_plant_flips_pass_to_fail() -> None:
     candidate, envelope, admission = _synthetic_reports()
     candidate["months"][2]["metrics"]["SST"]["rms"] = math.nextafter(0.01, math.inf)
     result = scorer.score_c4(candidate, envelope, admission)
-    assert result["status"] == "PENDING_USER_ICE_BAR"
+    assert result["status"] == "FAIL"
     assert result["ocean_d188"]["verdict"] == "FAIL"
     assert result["ocean_d188"]["months_passed"] == 11
     assert result["ocean_d188"]["first_failure"] == {
@@ -288,6 +303,9 @@ def test_zero_ice_envelope_is_refused_before_verdict() -> None:
     metric["candidate_monthly_mean"] = metric["nemo_monthly_mean"]
     metric["absolute_difference"] = 0.0
     metric["relative_abs_difference"] = 0.0
+    admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=envelope
+    )
     with pytest.raises(scorer.C4ScoreError, match="envelope errors must be positive"):
         scorer.score_c4(candidate, envelope, admission)
 
@@ -303,6 +321,9 @@ def test_builtin_plants_name_ocean_and_ice_failures() -> None:
 def test_ice_envelope_nemo_mean_must_equal_scored_nemo_mean() -> None:
     candidate, envelope, admission = _synthetic_reports()
     envelope["months"][4]["metrics"]["ICE_AREA_NH"]["nemo_monthly_mean"] = 10.1
+    admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=envelope
+    )
     with pytest.raises(scorer.C4ScoreError, match="envelope and scored NEMO means differ"):
         scorer.score_c4(candidate, envelope, admission)
 
@@ -348,6 +369,56 @@ def test_checkpoint_archive_missing_a_schema_leaf_is_refused(
         runner.inspect_checkpoint(path)
 
 
+def test_checkpoint_archive_leaf_shape_must_match_declared_schema(
+    tmp_path: Path, real_carry_template
+) -> None:
+    reference = _reference(tmp_path / "reference")
+    path = tmp_path / runner.checkpoint_name(1, 2)
+    runner.write_checkpoint(
+        path,
+        _carry(real_carry_template, 3.0, 3),
+        month=1,
+        completed_kt=2,
+        reference_root=reference,
+        month_report=_empty_month(1),
+    )
+    with np.load(path, allow_pickle=False) as archive:
+        payload = {name: np.asarray(archive[name]) for name in archive.files}
+    payload["carry_00001"] = np.asarray([payload["carry_00001"], payload["carry_00001"]])
+    path.unlink()
+    np.savez(path, **payload)
+    with pytest.raises(RuntimeError, match="carry leaf carry_00001 disagrees"):
+        runner.inspect_checkpoint(path)
+
+
+def test_checkpoint_prefix_refuses_mixed_carry_treedefs(
+    tmp_path: Path, real_carry_template
+) -> None:
+    reference = _reference(tmp_path / "reference")
+    paths = []
+    for month in (1, 2):
+        completed = _empty_month(month)["end_day"] * runner.year_metrics.STEPS_PER_DAY
+        path = tmp_path / runner.checkpoint_name(month, completed)
+        runner.write_checkpoint(
+            path,
+            _carry(real_carry_template, float(month), completed + 1),
+            month=month,
+            completed_kt=completed,
+            reference_root=reference,
+            month_report=_empty_month(month),
+        )
+        paths.append(path)
+    with np.load(paths[1], allow_pickle=False) as archive:
+        payload = {name: np.asarray(archive[name]) for name in archive.files}
+    metadata = json.loads(str(payload["__metadata_json__"].item()))
+    metadata["treedef"] += " planted"
+    payload["__metadata_json__"] = np.asarray(json.dumps(metadata, sort_keys=True))
+    paths[1].unlink()
+    np.savez(paths[1], **payload)
+    with pytest.raises(RuntimeError, match="carry treedef changed between months"):
+        runner.validate_checkpoint_prefix(tmp_path, reference, 2)
+
+
 def test_scorer_refuses_input_identity_change_between_months(
     tmp_path: Path, real_carry_template
 ) -> None:
@@ -384,12 +455,41 @@ def test_checkpoint_identity_requires_receipt_and_hashes_ice_package(
 
 def test_resolved_c4_controls_come_from_coupled_deck() -> None:
     assert runner.resolved_c4_controls(REF_C4) == {
+        "nn_it000": 1,
         "nn_itend": 2920,
+        "nn_stock": 8,
+        "ln_rstart": False,
         "rn_Dt": 10800.0,
+        "nn_fsbc": 2,
+        "nn_ice": 2,
         "nn_leapy": 0,
         "calendar": "noleap",
         "ice_dimensions": (5, 10, 5),
+        "si3_switches": {
+            "rn_simin": 0.1,
+            "rn_sinew": 0.75,
+            "nn_icesal": 4.0,
+            "ln_pnd": True,
+            "ln_pnd_LEV": True,
+            "ln_pnd_TOPO": False,
+            "ln_pnd_lids": True,
+            "ln_pnd_alb": True,
+            "nn_snwfra": 2.0,
+            "ln_drgice_imp": True,
+        },
     }
+
+
+def test_coupled_manifest_rechecks_executed_si3_controls(monkeypatch) -> None:
+    calls = []
+
+    def verified(root, rung, *, require_resolved_output=False, **_kwargs):
+        calls.append((root, rung, require_resolved_output))
+        return {"resolved_output_checked": require_resolved_output}
+
+    monkeypatch.setattr(runner.c_ladder_deck, "verify", verified)
+    assert runner.coupled_core_manifest(REF_C4).is_file()
+    assert calls == [(REF_C4, "C4", True)]
 
 
 def test_nemo_ice_reader_rejects_wrong_clock_and_fill_values(tmp_path: Path) -> None:
@@ -439,6 +539,53 @@ def test_ice_volume_units_and_equator_belongs_to_southern_hemisphere() -> None:
     assert rows["ICE_VOLUME_SH"] == {
         "nemo": 1.0, "candidate": 1.0, "units": "1e3 km3",
     }
+
+
+def test_monthly_ice_metrics_preserve_opposite_sign_daily_error() -> None:
+    rows = []
+    for candidate in (9.0, 11.0):
+        rows.append({
+            key: {
+                "nemo": 10.0,
+                "candidate": candidate,
+                "units": "1e6 km2" if "AREA" in key else "1e3 km3",
+            }
+            for key in runner.ICE_KEYS
+        })
+    monthly = runner.monthly_ice_metrics(rows)
+    for metric in monthly.values():
+        assert metric["relative_abs_difference"] == 0.0
+        assert metric["mean_daily_relative_abs_difference"] == 0.1
+
+
+def test_ice_units_must_match_between_candidate_and_envelope() -> None:
+    candidate, envelope, admission = _synthetic_reports()
+    candidate["months"][0]["metrics"]["ICE_VOLUME_NH"]["units"] = "km3"
+    with pytest.raises(scorer.C4ScoreError, match="candidate units are not 1e3 km3"):
+        scorer.score_c4(candidate, envelope, admission)
+
+
+def test_cli_exit_one_is_reachable_for_ocean_failure(monkeypatch, tmp_path: Path) -> None:
+    envelope = tmp_path / "envelope.json"
+    admission = tmp_path / "admission.json"
+    envelope.write_text("{}\n", encoding="utf-8")
+    admission.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(scorer, "load_checkpoint_report", lambda _path: {})
+    monkeypatch.setattr(scorer, "score_c4", lambda *_args, **_kwargs: {"status": "FAIL"})
+    assert scorer.main([
+        "--checkpoint-dir", str(tmp_path),
+        "--envelope-metrics", str(envelope),
+        "--envelope-admission", str(admission),
+    ]) == 1
+
+
+def test_only_exact_in_flight_44512_identity_is_score_compatible() -> None:
+    current = dict(runner.IN_FLIGHT_44512_INPUT_IDENTITY)
+    assert runner.checkpoint_identity_is_scorable(current, {})
+    legacy = {key: current[key] for key in (
+        "deck_receipt_sha256", "runner_sha256", "coupled_source_sha256",
+    )}
+    assert not runner.checkpoint_identity_is_scorable(legacy, {})
 
 
 def test_gpu_is_refused_at_argument_parsing(monkeypatch, tmp_path: Path) -> None:
@@ -533,7 +680,7 @@ def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
     monkeypatch.setattr(runner.year_metrics.pilot_metrics, "static_geometry", lambda _r: {})
     monkeypatch.setattr(runner.year_metrics, "K0MLDEvaluator", lambda _r: object())
     monkeypatch.setattr(
-        runner, "read_coupled_initial_ice_cover", lambda _r: np.zeros((148, 180))
+        runner.r340, "read_decision171_cover", lambda _p: np.zeros((148, 180))
     )
     monkeypatch.setattr(runner.ladder, "_candidate_fields", lambda _o: {})
     monkeypatch.setattr(runner.year_metrics.pilot_metrics, "read_nemo_day", lambda *_a: {})
@@ -558,12 +705,13 @@ def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
     ]) == 0
     capsys.readouterr()
 
-    straight_final, _, _ = runner.restore_checkpoint(
+    straight_final, _, straight_report = runner.restore_checkpoint(
         straight_dir / runner.checkpoint_name(2, 4), cold, reference
     )
     resumed_final, _, _ = runner.restore_checkpoint(
         resumed_dir / runner.checkpoint_name(2, 4), cold, reference
     )
     _assert_tree_bits_equal(resumed_final, straight_final)
+    assert straight_report["ice_sst_sss_mask_source"] == "Decision-188 ice_cover_clim.nc"
     assert len(compile_hlo) == 2
     assert compile_hlo[0] == compile_hlo[1]
