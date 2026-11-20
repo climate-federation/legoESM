@@ -22,7 +22,7 @@ def test_signs_and_wind_dependence():
 def test_planted_ocean_nan_is_fatal():
     import pytest
     lat, lon = np.array([0.0]), np.array([200.0])
-    t = lambda y: (np.arange(124) * 21600 + (np.datetime64(f"{y}-12-01", "s")
+    t = lambda y: ((np.arange(124) + 1) * 21600 + (np.datetime64(f"{y}-12-01", "s")
                                             - np.datetime64("1970-01-01", "s")).astype("int64"))
     d = {y: dict(time=t(y), lat=lat, lon=lon,
                  **{v: np.ones((124, 1, 1)) for v in mod._IN + mod._OUT}) for y in mod._YEARS}

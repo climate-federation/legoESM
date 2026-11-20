@@ -55,12 +55,9 @@ def fetch(out):
     # whole-globe chunks: count the chunks touched and refuse past the cap
     idx = [ds.indexes["time"].get_indexer(stamps(y)) for y in _YEARS]
     assert all((i >= 0).all() for i in idx), "a December stamp is missing from the store"
-    n_chunk = sum(len(set(i // 8)) for i in idx)
-    est = 0
-    for v in _IN + _OUT:
-        z = fs.info(f"{_WB2}/{v}/1000.0.0")["size"]
-        est += n_chunk * z
-    print(f"# estimated transfer {est / 1e6:.0f} MB ({n_chunk} time chunks per variable)")
+    chunks = sorted({int(c) for i in idx for c in i // 8})
+    est = sum(fs.info(f"{_WB2}/{v}/{c}.0.0")["size"] for v in _IN + _OUT for c in chunks)
+    print(f"# transfer {est / 1e6:.0f} MB ({len(chunks)} time chunks per variable)")
     assert est < _MAX_BYTES, est
     for y in _YEARS:
         f = os.path.join(out, f"era5_dec{y}.npz")
@@ -112,7 +109,7 @@ def model_fluxes(u, v, t2, td2, sst, ps):
 
 def check_inputs(d, ocean, lat, lon):
     """Fatal unless every year has the same 124 Dec samples, grid, and finite ocean data."""
-    t0 = d[1997]["time"] - np.datetime64("1997-12-01", "s").astype("int64")
+    t0 = np.arange(6, 745, 6) * 3600  # Dec 1 06 .. Jan 1 00, seconds after Dec 1 00
     for y, f in d.items():
         assert f["time"].shape == (124,), (y, f["time"].shape)
         assert np.array_equal(f["time"] - np.datetime64(f"{y}-12-01", "s").astype("int64"), t0), y
@@ -146,8 +143,8 @@ def score(out):
     st = np.load(os.path.join(out, "static.npz"))
     lat, lon = st["lat"], st["lon"]
     d = {y: np.load(os.path.join(out, f"era5_dec{y}.npz")) for y in _YEARS}
-    ocean = (st["lsm"] < 0.5) & np.all(np.isfinite(d[1997]["sea_surface_temperature"]), 0)
-    check_inputs(d, ocean, lat, lon)
+    ocean = st["lsm"] < 0.5
+    check_inputs(d, ocean, lat, lon)  # any non-finite SST on an ocean cell is fatal
     w = np.where(ocean, np.cos(np.deg2rad(lat))[:, None], 0.0)
     la, lo = np.meshgrid(lat, lon, indexing="ij")
     w34 = np.where((la >= _NINO34[0]) & (la <= _NINO34[1]) & (lo >= _NINO34[2])
