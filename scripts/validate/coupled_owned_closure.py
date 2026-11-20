@@ -512,18 +512,23 @@ def main(argv=None) -> int:
         stale = F["E_land_charged"] - F["E_land_atm"]
         print(f"ETERM land_calls {land_seen.get('n', 0)} steps {n_steps[0]} "
               f"K {args.land_update_s / DT:g} rad {args.rad_update_steps}")
-        # lag bookkeeping: stale = (last call's charge - first solve's
-        # emission) x interval - sum over paired (solve - previous call)
-        endpoint = (I(land_seen["c_last"]) * dt_land
-                    - land_seen["e_first"] * DT)
-        pairs = land_seen.get("pair_sum", 0.0) * DT
-        print(f"ETERM paired {land_seen.get('n_pair', 0)} maxdiff "
-              f"{land_seen.get('pair_max', 0.0):.3e} W/m2 (solve vs the "
-              "call before it)")
-        for kk, v in (("endpoint", endpoint), ("pairs", pairs),
-                      ("stale_minus_lag", stale - (endpoint - pairs))):
-            print(f"ETERM {kk:16s} {v: .6e} J  {v / land_area_t: .4e} W/m2 "
-                  "(land mean)")
+        # lag bookkeeping, K=1 and rad=1 only (one charge per solve; at
+        # other cadences a charge feeds several solves and it does not
+        # telescope): stale = (last call's charge - first solve's emission)
+        # x interval - sum over paired (solve - previous call)
+        if dt_land == DT and args.rad_update_steps == 1:
+            endpoint = (I(land_seen["c_last"]) * dt_land
+                        - land_seen["e_first"] * DT)
+            pairs = land_seen.get("pair_sum", 0.0) * DT
+            print(f"ETERM paired {land_seen.get('n_pair', 0)} maxdiff "
+                  f"{land_seen.get('pair_max', 0.0):.3e} W/m2 (solve vs the "
+                  "call before it)")
+            for kk, v in (("endpoint", endpoint), ("pairs", pairs),
+                          ("stale_minus_lag", stale - (endpoint - pairs))):
+                print(f"ETERM {kk:16s} {v: .6e} J  {v / land_area_t: .4e} "
+                      "W/m2 (land mean)")
+        else:
+            print("ETERM lag identity not evaluated (needs K=1, rad=1)")
         for kk, v in (("E_land_atm", F["E_land_atm"]),
                       ("E_land_charged", F["E_land_charged"]),
                       ("stale", stale), ("band", F["A_band_land"]),
