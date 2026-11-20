@@ -513,6 +513,10 @@ class CoupledESMDriver:
         if isinstance(self._ocean_grid, VoronoiMesh):
             self._init_mpas_dynamic_ocean(T_sfc_mean)
             return
+        if self._atm.config.geography:
+            raise ValueError(
+                "geography with a lat-lon/tripole dynamic ocean is not supported "
+                "yet (only the co-located MPAS ocean reads it); refusing")
         from legoesm.grids.latlon import LatLonGrid
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -974,6 +978,44 @@ class CoupledESMDriver:
             mesh, z_coord, T_water_init_C=T_surf_C, H_max=cfg.ocean_H_max_m,
             land_lat_threshold=90.0,
         )
+        geo = self._atm.config.geography
+        if geo:
+            # depth from the geography, wet = atm f_land < 1 on the shared mesh
+            # (no air-sea flux lands on a dry ocean cell; user 2026-11-20).
+            # Built on the global mesh then sliced to this rank's cells, as the
+            # atm terrain is; then the OMIP realistic recipe: snap thin bottom
+            # cells, partial-cell coordinate, model rebuilt on it.
+            from legoesm.core.field import Field
+            from legoesm.grids.geography import geography_ocean_depth
+            from legoesm.ocean.bathymetry import BathymetryConfig, snap_partial_cells
+            from legoesm.ocean.vertical import create_partial_cell_coordinate
+            if mesh is not self._atm.grid:
+                raise ValueError(
+                    "geography with an MPAS ocean on its own mesh is not supported "
+                    "yet (the wet mask is the atmosphere's land fraction, cell by "
+                    "cell); refusing")
+            layout = getattr(self._atm, "_voronoi_layout", None)
+            depth = geography_ocean_depth(
+                self._atm._grid_global if layout is not None else mesh, geo,
+                H_min=BathymetryConfig().H_min, H_max=cfg.ocean_H_max_m)
+            if layout is not None:
+                depth = depth[np.asarray(layout.partition.local_cells)]
+            wet = np.asarray(self._atm._f_land, dtype=np.float64).ravel() < 1.0
+            _sd = self._ocean_state.H_bathy.data.dtype
+            H = snap_partial_cells(jnp.asarray(np.where(wet, depth, 0.0), dtype=_sd),
+                                   z_coord)
+            n_dried = int(np.sum(wet & (np.asarray(H) <= 0.0)))
+            if n_dried:
+                raise ValueError(
+                    f"geography {geo}: {n_dried} ocean cells snap to zero depth "
+                    "(shallower than 30% of the top ocean level); the ocean wet "
+                    "mask would no longer match the atmosphere's land fraction")
+            z_coord = create_partial_cell_coordinate(z_coord, H)
+            self._ocean_model = MPASOceanModel(mesh, z_coord, config)
+            self._ocean_state = self._ocean_state._replace(
+                H_bathy=Field(data=H, name="H_bathy", dims=("nCells",), units="m"),
+                land_mask=Field(data=jnp.asarray(wet, dtype=_sd), name="land_mask",
+                                dims=("nCells",), units="1"))
         self._ocean_step = self._ocean_model.step
         self._ocean_z_coord = z_coord
         self._ocean_land_mask = self._ocean_state.land_mask.data

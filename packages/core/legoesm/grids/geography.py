@@ -60,6 +60,8 @@ def open_geography(path: str):
             errs.append(f"elevation dims {el.dims} != ('lat', 'lon')")
         if el.attrs.get("units") != "m":
             errs.append(f"elevation units {el.attrs.get('units')!r} != 'm'")
+        if not np.all(np.isfinite(el.values)):
+            errs.append("elevation must be finite everywhere (no missing values)")
     if "land_fraction" in ds:
         lf = ds["land_fraction"]
         if lf.ndim != 2:
@@ -227,6 +229,29 @@ def geography_terrain(grid, path: str, mode: str, *, smoothing_passes: int,
     phis, f_land = load_real_topography(grid, config=cfg, f_land_src=f_src,
                                         closed_cells=closed)
     return phis, f_land
+
+
+def geography_ocean_depth(grid, path: str, *, H_min: float, H_max: float):
+    """Ocean depth [m, positive down] on every ``grid`` cell: the area-binned
+    mean of ``-elevation`` over the cell's ocean source points (VOTED D1
+    a/a/a), clipped to ``[H_min, H_max]`` -- a cell with no ocean source point
+    gets ``H_min`` (D2 a/a/a), deeper than the z-coordinate bottom is clamped
+    (D3 b/a/b); no smoothing (D4 a/a/a).  Which cells are wet is the caller's
+    (the co-located ocean: atmosphere ``f_land < 1``, user 2026-11-20)."""
+    from legoesm.grids.topography import bin_latlon_to_cells, grid_ownership
+    ds = open_geography(path)
+    try:
+        lat = np.asarray(ds["lat"].values, dtype=np.float64)
+        lon = np.asarray(ds["lon"].values, dtype=np.float64)
+        el = np.asarray(ds["elevation"].values, dtype=np.float64)
+    finally:
+        ds.close()
+    sea = (el < 0.0).astype(np.float64)
+    c_lat, c_lon, _, _ = _grid_cells(grid)
+    sea_c, depth_sum = bin_latlon_to_cells(lat, lon, [sea, sea * -el], c_lat, c_lon,
+                                           **grid_ownership(grid))
+    depth = np.divide(depth_sum, sea_c, out=np.zeros_like(sea_c), where=sea_c > 0.0)
+    return np.clip(depth, H_min, H_max)
 
 
 def geography_clm_surface(path: str):
