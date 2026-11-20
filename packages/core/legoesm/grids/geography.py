@@ -12,7 +12,7 @@ A regular lat-lon NetCDF (global attribute ``legoesm_geography_version = 1``):
   smoothing), and a barrier that jumps between non-neighbour cells is
   refused;
 - CLM-surfdata variables (CLM names and dims) -- the land surface; absent ->
-  uniform bare soil.
+  uniform C3 grassland (LAI 2) on loam.
 
 Lakes (``lake_fraction``) and ice sheets (``ice_sheet_thickness``) are
 refused for now.
@@ -35,11 +35,16 @@ _REFUSED_VARS = ("ice_sheet_thickness", "lake_fraction")
 _DENSIFY_MAX_DEG = 0.05
 _DENSIFY_CELL_FRACTION = 0.25
 
-# --- uniform bare soil (VOTED V6: PFT 0, USDA loam centroid, colour 15) ---
-_BARE_SAND_PCT = 43.0
-_BARE_CLAY_PCT = 18.0
-_BARE_SOIL_COLOR = 15
-_BARE_SOIL_LEVELS = 10   # CLM5 nlevsoi; the loader averages the top root-zone layers
+# --- uniform grassland where the file has no land map (user 2026-11-20: slab
+# land + two-leaf canopy, grass; VOTED G1 C3 grass PFT 13 a/a/?, G2 constant
+# MONTHLY_LAI 2.0 b/b/a, G3 soil = V6 loam centroid + colour 15 a/a/a) ---
+_GRASS_PFT = 13               # CLM5 c3_grass (natural-PFT index)
+_GRASS_LAI = 2.0              # [m2 m-2], every month
+_N_NAT_PFT, _N_CFT, _N_MONTHS = 15, 2, 12
+_SOIL_SAND_PCT = 43.0
+_SOIL_CLAY_PCT = 18.0
+_SOIL_COLOR = 15
+_SOIL_LEVELS = 10   # CLM5 nlevsoi; the loader averages the top root-zone layers
 
 
 def open_geography(path: str):
@@ -257,20 +262,26 @@ def geography_ocean_depth(grid, path: str, *, H_min: float, H_max: float):
 def geography_clm_surface(path: str):
     """The land-surface map of a geography file as a CLM-surfdata
     ``xarray.Dataset`` (for :func:`~legoesm.land.clm_surface_map.load_clm_surface`):
-    the file's own CLM variables, else uniform bare soil."""
+    the file's own CLM variables, else uniform C3 grassland."""
     import xarray as xr
     ds = open_geography(path)
     if "PCT_NAT_PFT" in ds:
         return ds
     ds.close()
     one = np.ones((1, 1))
-    lev = np.ones((_BARE_SOIL_LEVELS, 1, 1))
+    lev = np.ones((_SOIL_LEVELS, 1, 1))
+    nat = np.zeros((_N_NAT_PFT, 1, 1))
+    nat[_GRASS_PFT] = 100.0
+    lai = np.zeros((_N_MONTHS, _N_NAT_PFT + _N_CFT, 1, 1))
+    lai[:, _GRASS_PFT] = _GRASS_LAI
     return xr.Dataset(
-        {"PCT_NAT_PFT": (("natpft", "lsmlat", "lsmlon"), 100.0 * one[None]),
+        {"PCT_NAT_PFT": (("natpft", "lsmlat", "lsmlon"), nat),
          "PCT_NATVEG": (("lsmlat", "lsmlon"), 100.0 * one),
          "PCT_CROP": (("lsmlat", "lsmlon"), 0.0 * one),
+         "PCT_CFT": (("cft", "lsmlat", "lsmlon"), np.full((_N_CFT, 1, 1), 50.0)),
          "PCT_GLACIER": (("lsmlat", "lsmlon"), 0.0 * one),
-         "PCT_SAND": (("nlevsoi", "lsmlat", "lsmlon"), _BARE_SAND_PCT * lev),
-         "PCT_CLAY": (("nlevsoi", "lsmlat", "lsmlon"), _BARE_CLAY_PCT * lev),
-         "SOIL_COLOR": (("lsmlat", "lsmlon"), np.full((1, 1), _BARE_SOIL_COLOR))},
+         "MONTHLY_LAI": (("time", "lsmpft", "lsmlat", "lsmlon"), lai),
+         "PCT_SAND": (("nlevsoi", "lsmlat", "lsmlon"), _SOIL_SAND_PCT * lev),
+         "PCT_CLAY": (("nlevsoi", "lsmlat", "lsmlon"), _SOIL_CLAY_PCT * lev),
+         "SOIL_COLOR": (("lsmlat", "lsmlon"), np.full((1, 1), _SOIL_COLOR))},
         coords={"lsmlat": [0.0], "lsmlon": [0.0]})

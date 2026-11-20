@@ -170,15 +170,16 @@ def test_binned_box_land_fraction_is_the_area_binned_source(mesh, tmp_path):
     assert np.array_equal(f, want) and f.max() == 1.0
 
 
-def test_bare_soil_where_the_file_has_no_land_map(tmp_path):
-    from legoesm.land.clm_surface_map import load_clm_surface
+def test_grassland_where_the_file_has_no_land_map(tmp_path):
+    from legoesm.land.clm_surface_map import load_clm_surface, soil_color_albedo
     src = geo.geography_clm_surface(_gen(tmp_path, "aquaplanet"))
     m = load_clm_surface(src, np.array([0.0, 45.0]), np.array([10.0, 200.0]),
                          vg_air_entry_m=0.0)
-    assert np.all(np.asarray(m["pft_fractions"])[:, 0] == 1.0)
-    assert np.all(np.asarray(m["pct_sand"]) == 43.0)     # VOTED V6: USDA loam centroid
+    pft = np.asarray(m["pft_fractions"])
+    assert np.all(pft[:, 13] == 1.0) and pft.sum() == 2.0   # VOTED G1: C3 grass
+    assert np.all(np.asarray(m["lai"]) == 2.0)              # VOTED G2
+    assert np.all(np.asarray(m["pct_sand"]) == 43.0)        # VOTED V6/G3: loam
     assert np.all(np.asarray(m["pct_clay"]) == 18.0)
-    from legoesm.land.clm_surface_map import soil_color_albedo
     assert np.all(np.asarray(m["soil_albedo"]) == soil_color_albedo(np.array([15]))[0])
 
 
@@ -340,8 +341,8 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
     from legoesm.ocean.vertical import OceanPartialCellCoordinate, create_ocean_z_star
-    cc = CoupledConfig(f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
-                       ocean_H_max_m=5500.0)
+    cc = CoupledConfig(f_land_mode="analytical", land_mode="slab", use_pft=True,
+                       land_param_source="clm", ocean_mode="dynamic", ocean_H_max_m=5500.0)
     z = create_ocean_z_star(cc.ocean_nlev, H_max=cc.ocean_H_max_m)
     top = float(np.abs(np.asarray(z.z_half_ref))[-2])        # an interface
     D = top + 0.1 * float(np.asarray(z.dz_ref)[-1])          # 10% into the last level
@@ -385,4 +386,58 @@ def test_coupled_mpas_ocean_on_its_own_mesh_refuses_a_geography(tmp_path):
         f_land_mode="analytical", land_mode="none", ocean_mode="dynamic"),
         output_dir=str(tmp_path / "run"), ocean_grid=create_voronoi_mesh(3))
     with pytest.raises(ValueError, match="on its own mesh"):
+        d.setup()
+
+
+@pytest.mark.parametrize("shape", ["box", "aquaplanet"])
+def test_coupled_slab_land_reads_the_geography(tmp_path, monkeypatch, shape):
+    """Slab land + two-leaf canopy on the geography: grass params, the
+    atmosphere's land fraction as-is (no invented continents), no reference
+    CLM file read."""
+    import legoesm.land.clm_surface_map as csm
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+
+    def no_reference_data(*a, **k):
+        raise AssertionError("coupler read reference CLM data")
+
+    monkeypatch.setattr(csm, "download_clm_surfdata", no_reference_data)
+    built = []
+    orig = CoupledESMDriver._build_pft_provider
+    monkeypatch.setattr(CoupledESMDriver, "_build_pft_provider",
+                        lambda self, sh: built.append(orig(self, sh)) or built[-1])
+    p = _gen(tmp_path, shape, box=(-30.0, 30.0, 60.0, 150.0) if shape == "box" else None)
+    d = CoupledESMDriver(_mpas_cfg(p), CoupledConfig(
+        f_land_mode="analytical", land_mode="slab", use_pft=True,
+        land_param_source="clm"), output_dir=str(tmp_path / "run"))
+    if shape == "aquaplanet":   # all ocean stays all ocean: a dead land tile is refused
+        with pytest.raises(ValueError, match="zero everywhere"):
+            d.setup()
+        return
+    d.setup()
+    f_atm = np.asarray(d._atm._f_land).ravel()
+    assert np.array_equal(np.asarray(d._tile_config.f_land).ravel(), f_atm)
+    pft = np.asarray(built[0].pft_fractions)
+    assert np.all(pft[:, 13] == 1.0) and np.all(np.asarray(built[0].lai) == 2.0)
+
+
+def test_coupled_geography_land_without_a_land_model_is_refused(tmp_path):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))),
+                         CoupledConfig(f_land_mode="analytical", land_mode="none"),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="no land model runs on it"):
+        d.setup()
+
+
+@pytest.mark.parametrize("mode", ["zero", "from_ocean"])
+def test_coupled_geography_needs_the_atmosphere_land_fraction(tmp_path, mode):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))),
+                         CoupledConfig(f_land_mode=mode, land_mode="none",
+                                       ocean_mode="dynamic"),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="needs f_land_mode='analytical'"):
         d.setup()
