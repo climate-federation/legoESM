@@ -10,8 +10,11 @@ functions, and writes one restart-complete checkpoint per no-leap month.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -19,8 +22,8 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from legoesm.core.precision import PrecisionPolicy, set_policy
+
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
 )
@@ -31,21 +34,27 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round340_standalone_gate as r340,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
-    nemo_testcase_l4_orca2_round340_score_composed_card as r340_score,
+    nemo_testcase_l4_orca2_round342_s4_year_driver as year_driver,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round342_s4_year_metrics as year_metrics,
 )
-from scripts.validate.ocean_fidelity.orca2_l4 import (
-    nemo_testcase_l4_orca2_round342_s4_year_driver as year_driver,
+from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
+    deck as c_ladder_deck,
 )
 from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
     scorer as c_ladder_scorer,
 )
 
-
 CHECKPOINT_FORMAT = "nemo-coupled-c4-month-checkpoint-v1"
-C4_METRIC_FORMAT = "nemo-coupled-c4-month-metrics-v1"
+LEGACY_C4_METRIC_FORMAT = "nemo-coupled-c4-month-metrics-v1"
+C4_METRIC_FORMAT = "nemo-coupled-c4-month-metrics-v2"
+SUPPORTED_C4_METRIC_FORMATS = (LEGACY_C4_METRIC_FORMAT, C4_METRIC_FORMAT)
+LEGACY_RUNNER_SHA256 = "8fc4ab6af90a6d822e2366acb1ebe2d6fa2363eede074b76ab46a8880c23361b"
+LEGACY_DECISION171_ICE_COVER = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+    "round339/k0_smoke/orca2_k0_10step_np2/ice_cover_clim.nc"
+)
 PAIRS_PER_DAY = year_metrics.STEPS_PER_DAY // 2
 TOTAL_PAIRS = 1460
 ICE_KEYS = (
@@ -70,7 +79,7 @@ class C4InputReader:
         self.card = card
         self._build_sponge = build_orca2_damping_for_step
         self.mapped_core = year_driver.load_core_window_for_steps(
-            reference_root, r340_score.DEFAULT_CORE_MANIFEST, n_steps
+            reference_root, coupled_core_manifest(reference_root), n_steps
         )
         self.runoff_12 = year_driver._load_monthly_12(
             reference_root / "runoff_core_monthly.nc", "sorunoff"
@@ -148,6 +157,105 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def _source_tree_sha256(root: Path) -> str:
+    """Hash every Python source path and byte in one package tree."""
+
+    files = sorted(path for path in root.rglob("*.py") if path.is_file())
+    require(bool(files), f"no Python sources found under {root}")
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        payload = path.read_bytes()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
+
+
+def coupled_core_manifest(reference_root: Path) -> Path:
+    """Return the manifest belonging to the source deck staged as REF_C4.
+
+    The manifest validates model-input CORE fields.  It is not a scoring mask.
+    """
+
+    receipt_path = reference_root / "C_DECK_RECEIPT.json"
+    require(receipt_path.is_file(), f"missing coupled deck receipt {receipt_path}")
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    require(receipt.get("status") == "PASS_EXACT_R339_R5_DECK_ICE5",
+            f"{receipt_path}: coupled deck receipt did not pass")
+    require(receipt.get("rung") == "C4", f"{receipt_path}: receipt is not C4")
+    source_deck = Path(c_ladder_deck.OVERLAYS["source_deck"])
+    manifest = source_deck / "input_files.sha256"
+    require(manifest.is_file(), f"missing coupled source-deck manifest {manifest}")
+    return manifest
+
+
+def read_coupled_initial_ice_cover(reference_root: Path) -> np.ndarray:
+    """Read the coupled run's own initial ice concentration as a scoring mask."""
+
+    import netCDF4
+
+    ranks = []
+    for rank in (0, 1):
+        path = reference_root / f"output.init_{rank:04d}.nc"
+        require(path.is_file(), f"missing coupled initial output {path}")
+        with netCDF4.Dataset(path) as dataset:
+            require("soicecov" in dataset.variables,
+                    f"{path.name}: missing coupled initial soicecov")
+            raw = np.ma.asarray(dataset.variables["soicecov"][0])
+            require(int(np.ma.count_masked(raw)) == 0,
+                    f"{path.name}: soicecov contains fill/masked values")
+            ranks.append(np.asarray(raw, dtype=np.float64))
+    cover = np.concatenate(ranks, axis=1)
+    require(cover.shape == (148, 180),
+            f"coupled initial ice-cover shape {cover.shape} != (148, 180)")
+    require(bool(np.isfinite(cover).all()), "coupled initial ice cover is non-finite")
+    require(bool(((cover >= 0.0) & (cover <= 1.0)).all()),
+            "coupled initial ice cover is outside [0, 1]")
+    return cover
+
+
+def resolved_c4_controls(reference_root: Path) -> dict[str, Any]:
+    """Read the executed coupled ocean/ice controls before a C4 run."""
+
+    from legoesm.core.nemo_namelist import parse_namelist
+
+    resolved_path = reference_root / "output.namelist.dyn"
+    require(resolved_path.is_file(), f"missing coupled resolved namelist {resolved_path}")
+    parsed = parse_namelist(resolved_path, "ocean")
+
+    def scalar(group: str, name: str) -> Any:
+        values = parsed.get(("ocean", group, name))
+        require(isinstance(values, list) and len(values) == 1,
+                f"{resolved_path}: unresolved scalar {group}.{name}")
+        return values[0]
+
+    output_path = reference_root / "ocean.output"
+    require(output_path.is_file(), f"missing coupled run log {output_path}")
+    calendars = re.findall(
+        r'The IOIPSL calendar is\s+"([^"]+)"',
+        output_path.read_text(encoding="utf-8", errors="replace"),
+    )
+    require(len(set(calendars)) == 1, f"{output_path}: unresolved executed calendar")
+    ice = c_ladder_scorer._coupled_resolved_namelist(reference_root)
+    controls = {
+        "nn_itend": int(scalar("namrun", "nn_itend")),
+        "rn_Dt": float(scalar("namdom", "rn_dt")),
+        "nn_leapy": int(scalar("namrun", "nn_leapy")),
+        "calendar": calendars[0],
+        "ice_dimensions": tuple(int(ice[name]) for name in ("jpl", "nlay_i", "nlay_s")),
+    }
+    require(controls == {
+        "nn_itend": 2920,
+        "rn_Dt": 10800.0,
+        "nn_leapy": 0,
+        "calendar": "noleap",
+        "ice_dimensions": (5, 10, 5),
+    }, f"resolved coupled C4 controls moved: {controls}")
+    return controls
+
+
 def _jsonable_array(value: Any) -> np.ndarray:
     array = np.asarray(value)
     require(array.dtype.kind != "O", "C4 carry contains an object-dtype leaf")
@@ -167,17 +275,35 @@ def _carry_payload(carry: Any) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     )
 
 
-def checkpoint_input_identity(reference_root: Path) -> dict[str, str | None]:
+def checkpoint_input_identity(reference_root: Path) -> dict[str, str]:
     """Bind resumed state to its deck receipt and coupled program sources."""
 
+    from legoesm.ice import si3_o17
     from legoesm.ocean import bulk_flux_omip as bulk
 
     receipt = reference_root / "C_DECK_RECEIPT.json"
+    require(receipt.is_file(), f"missing required coupled deck receipt {receipt}")
     return {
-        "deck_receipt_sha256": common.sha256(receipt) if receipt.is_file() else None,
+        "deck_receipt_sha256": common.sha256(receipt),
         "runner_sha256": common.sha256(Path(__file__)),
         "coupled_source_sha256": common.sha256(Path(bulk.__file__)),
+        "ice_package_source_sha256": _source_tree_sha256(Path(si3_o17.__file__).resolve().parent),
     }
+
+
+def _resume_identity_is_compatible(stored: Any, current: dict[str, str]) -> bool:
+    if stored == current:
+        return True
+    if not isinstance(stored, dict):
+        return False
+    return (
+        set(stored) == {
+            "deck_receipt_sha256", "runner_sha256", "coupled_source_sha256",
+        }
+        and stored.get("runner_sha256") == LEGACY_RUNNER_SHA256
+        and stored.get("deck_receipt_sha256") == current["deck_receipt_sha256"]
+        and stored.get("coupled_source_sha256") == current["coupled_source_sha256"]
+    )
 
 
 def checkpoint_name(month: int, completed_kt: int) -> str:
@@ -194,6 +320,7 @@ def write_checkpoint(
     completed_kt: int,
     reference_root: Path,
     month_report: dict[str, Any],
+    input_identity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Atomically store the complete pytree carry and its scored month."""
 
@@ -207,7 +334,10 @@ def write_checkpoint(
         "completed_kt": completed_kt,
         "next_kt": completed_kt + 1,
         "reference_root": str(reference_root.resolve()),
-        "input_identity": checkpoint_input_identity(reference_root.resolve()),
+        "input_identity": (
+            checkpoint_input_identity(reference_root.resolve())
+            if input_identity is None else input_identity
+        ),
         **tree,
     }
     payload["__metadata_json__"] = np.asarray(json.dumps(metadata, sort_keys=True))
@@ -248,6 +378,15 @@ def inspect_checkpoint(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
                 f"{path.name}: not a C4 checkpoint")
         metadata = json.loads(str(archive["__metadata_json__"].item()))
         report = json.loads(str(archive["__month_report_json__"].item()))
+        schema = metadata.get("leaf_schema", [])
+        require(isinstance(schema, list) and bool(schema),
+                f"{path.name}: checkpoint has no carry leaf schema")
+        names = [str(row.get("name", "")) for row in schema]
+        require(len(names) == len(set(names)) and all(names),
+                f"{path.name}: carry leaf schema names are empty or duplicated")
+        expected = set(names) | {"__metadata_json__", "__month_report_json__"}
+        require(set(archive.files) == expected,
+                f"{path.name}: checkpoint archive leaves differ from its carry schema")
     require(metadata.get("format") == CHECKPOINT_FORMAT,
             f"{path.name}: unsupported checkpoint format {metadata.get('format')!r}")
     return metadata, report
@@ -279,21 +418,32 @@ def validate_month_checkpoint(
 
 def validate_checkpoint_prefix(
     output_dir: Path, reference_root: Path, through_month: int
-) -> None:
+) -> tuple[dict[str, str], str]:
     """Require a contiguous same-deck checkpoint prefix before a resumed write."""
 
     paths = sorted(output_dir.glob("c4_month??_step*.npz"))
     require(len(paths) == through_month,
             f"resume directory has {len(paths)} checkpoints, expected {through_month}")
     observed = []
+    identities = []
+    metric_formats = []
     for path in paths:
         metadata, report = inspect_checkpoint(path)
         month = validate_month_checkpoint(path, metadata, report)
         require(Path(metadata["reference_root"]).resolve() == reference_root.resolve(),
                 f"{path.name}: resumed checkpoint deck differs from this run")
         observed.append(month)
+        identities.append(metadata.get("input_identity"))
+        metric_formats.append(report.get("format"))
     require(observed == list(range(1, through_month + 1)),
             f"resume checkpoint months are {observed}, expected 1..{through_month}")
+    require(all(identity == identities[0] for identity in identities),
+            "resume checkpoint input_identity changed between months")
+    require(all(metric_format == metric_formats[0] for metric_format in metric_formats),
+            "resume checkpoint metric format changed between months")
+    require(metric_formats[0] in SUPPORTED_C4_METRIC_FORMATS,
+            f"unsupported resumed metric format {metric_formats[0]!r}")
+    return identities[0], metric_formats[0]
 
 
 def restore_checkpoint(
@@ -310,7 +460,9 @@ def restore_checkpoint(
         validate_month_checkpoint(path, metadata, report)
     require(Path(metadata["reference_root"]).resolve() == reference_root.resolve(),
             f"{path.name}: checkpoint reference deck differs from this run")
-    require(metadata.get("input_identity") == checkpoint_input_identity(reference_root),
+    require(_resume_identity_is_compatible(
+                metadata.get("input_identity"), checkpoint_input_identity(reference_root)
+            ),
             f"{path.name}: deck receipt or coupled program changed since checkpoint")
     template_leaves, treedef = jax.tree_util.tree_flatten(template)
     schema = metadata.get("leaf_schema", [])
@@ -333,6 +485,7 @@ def restore_checkpoint(
     carry = jax.tree_util.tree_unflatten(treedef, restored)
     require(int(np.asarray(carry.kt)) == int(metadata["next_kt"]),
             f"{path.name}: restored carry kt disagrees with checkpoint metadata")
+    carry = carry._replace(kt=int(np.asarray(carry.kt)))
     return carry, metadata, report
 
 
@@ -347,10 +500,19 @@ def read_nemo_ice_day(reference_root: Path, day: int) -> dict[str, np.ndarray]:
         path = reference_root / f"ORCA2_{kt:08d}_restart_ice_{rank:04d}.nc"
         require(path.is_file(), f"missing NEMO SI3 restart {path}")
         with netCDF4.Dataset(path) as dataset:
+            require("kt_ice" in dataset.variables, f"{path.name}: missing SI3 kt_ice")
+            kt_ice = np.ma.asarray(dataset.variables["kt_ice"][:])
+            require(int(np.ma.count_masked(kt_ice)) == 0 and kt_ice.size == 1,
+                    f"{path.name}: invalid or fill-valued SI3 kt_ice")
+            kt_value = float(np.asarray(kt_ice).item())
+            require(math.isfinite(kt_value) and kt_value == float(kt),
+                    f"{path.name}: SI3 kt_ice {kt_value} != restart kt {kt}")
             fields = {}
             for output, source in (("area", "a_i"), ("volume", "v_i")):
                 require(source in dataset.variables, f"{path.name}: missing SI3 {source}")
-                raw = np.ma.filled(dataset.variables[source][0], 0.0)
+                raw = np.ma.asarray(dataset.variables[source][0])
+                require(int(np.ma.count_masked(raw)) == 0,
+                        f"{path.name}: SI3 {source} contains fill/masked values")
                 fields[output] = np.asarray(raw, dtype=np.float64).sum(axis=0)
             rank_fields.append(fields)
     out = {
@@ -391,10 +553,10 @@ def ice_day_metrics(
     rows = {}
     for field, label, scale, units in (
         ("area", "ICE_AREA", 1.0e12, "1e6 km2"),
-        ("volume", "ICE_VOLUME", 1.0e9, "km3"),
+        ("volume", "ICE_VOLUME", 1.0e12, "1e3 km3"),
     ):
-        # SI3 assigns gphit > 0 to its northern branch and ELSEWHERE to the
-        # southern branch (icestp.F90); keep the diagnostic a true partition.
+        # NEMO icewri.F90:222-241 assigns ff_t > 0 to NH and ELSEWHERE to SH,
+        # and reports both area and volume after multiplying by 1.e-12.
         for hemisphere, mask in (("NH", latitude > 0.0), ("SH", latitude <= 0.0)):
             nemo_total = float(np.sum(nemo[field] * area_weight * mask) / scale)
             candidate_total = float(np.sum(candidate[field] * area_weight * mask) / scale)
@@ -411,15 +573,27 @@ def monthly_ice_metrics(daily_rows: list[dict[str, dict[str, float]]]) -> dict[s
     require(bool(daily_rows), "cannot aggregate an empty C4 SI3 month")
     output = {}
     for key in ICE_KEYS:
-        nemo_mean = float(np.mean([row[key]["nemo"] for row in daily_rows]))
-        candidate_mean = float(np.mean([row[key]["candidate"] for row in daily_rows]))
+        nemo_daily = np.asarray([row[key]["nemo"] for row in daily_rows], dtype=np.float64)
+        candidate_daily = np.asarray(
+            [row[key]["candidate"] for row in daily_rows], dtype=np.float64
+        )
+        require(bool(np.isfinite(nemo_daily).all() and np.isfinite(candidate_daily).all()),
+                f"{key}: non-finite daily ice total")
+        require(bool((nemo_daily > 0.0).all()), f"{key}: NEMO daily total is not positive")
+        require(bool((candidate_daily >= 0.0).all()),
+                f"{key}: candidate daily total is negative")
+        nemo_mean = float(np.mean(nemo_daily))
+        candidate_mean = float(np.mean(candidate_daily))
         absolute = abs(candidate_mean - nemo_mean)
         output[key] = {
-            "metric": "relative_abs_monthly_mean",
+            "metric": "relative_abs_monthly_mean_and_mean_daily_relative_abs",
             "nemo_monthly_mean": nemo_mean,
             "candidate_monthly_mean": candidate_mean,
             "absolute_difference": absolute,
             "relative_abs_difference": absolute / abs(nemo_mean),
+            "mean_daily_relative_abs_difference": float(
+                np.mean(np.abs(candidate_daily - nemo_daily) / np.abs(nemo_daily))
+            ),
             "units": daily_rows[0][key]["units"],
         }
     return output
@@ -431,6 +605,9 @@ def build_month_report(
     daily_maps: list[dict[str, np.ndarray]],
     ice_rows: list[dict[str, dict[str, float]]],
     geo: dict[str, np.ndarray],
+    *,
+    metric_format: str = C4_METRIC_FORMAT,
+    ice_sst_sss_mask_source: str = "coupled output.init soicecov",
 ) -> dict[str, Any]:
     window = year_metrics.calendar_month_day_ranges()[month_index - 1]
     require(window["complete_month"], f"{window['label']}: calendar month is not complete")
@@ -441,10 +618,11 @@ def build_month_report(
     metrics.update(monthly_ice_metrics(ice_rows))
     return {
         **window,
-        "format": C4_METRIC_FORMAT,
+        "format": metric_format,
         "status": "EVALUATED_COMPLETE_MONTH",
         "bar_mode": "DECISION_188_PASS_FAIL",
         "verdict": None,
+        "ice_sst_sss_mask_source": ice_sst_sss_mask_source,
         "metrics": metrics,
     }
 
@@ -486,6 +664,12 @@ def compile_pair(
     compile_seconds = time.perf_counter() - started
     require(compile_count == 1, f"C4 pair compiled {compile_count} times; expected exactly 1")
     return executable, compile_seconds, lambda: compile_count
+
+
+def _normalize_compile_carry(carry: Any) -> Any:
+    """Keep the resumed ``kt`` leaf weakly typed like the cold Python integer."""
+
+    return carry._replace(kt=int(np.asarray(carry.kt)))
 
 
 def _advance_pairs(executable, carry, forcing, sponge, start: int, stop: int):
@@ -531,12 +715,15 @@ def run_restart_identity(reference_root: Path, output_dir: Path) -> dict[str, An
     """Prove four real compiled pairs equal a two-pair checkpoint continuation."""
 
     jax.config.update("jax_enable_x64", True)
+    require(jax.default_backend() == "cpu",
+            "C4 exact CPU libm math refuses non-CPU backends")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     reference_root = reference_root.resolve()
     total_pairs, split_pairs = 4, 2
     carry, forcing, sponge, card, model = c_ladder_scorer._c2_cold_start(
         reference_root, n_steps=2 * total_pairs
     )
+    carry = _normalize_compile_carry(carry)
     executable, compile_seconds, compile_count = compile_pair(
         carry, forcing[0], forcing[1], sponge[0], sponge[1], card, model
     )
@@ -597,11 +784,12 @@ def run_c4(
     """Run the compiled trajectory; full mode writes exactly 12 month checkpoints."""
 
     jax.config.update("jax_enable_x64", True)
+    require(jax.default_backend() == "cpu",
+            "C4 exact CPU libm math refuses non-CPU backends")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    require(jax.default_backend() in ("cpu", "gpu"),
-            f"C4 requires a compiled CPU/GPU backend, got {jax.default_backend()}")
     reference_root = reference_root.resolve()
     require(reference_root.is_dir(), f"missing C4 reference deck {reference_root}")
+    controls = resolved_c4_controls(reference_root)
     if profile_only:
         require(resume is None, "C4 profile mode does not resume checkpoints")
         require(type(pair_limit) is int and 1 <= pair_limit <= 4,
@@ -609,21 +797,36 @@ def run_c4(
         n_steps = 2 * pair_limit
     else:
         require(pair_limit is None, "a verdict-bearing C4 year cannot use --pair-limit")
-        n_steps = 2 * TOTAL_PAIRS
+        n_steps = controls["nn_itend"]
+        require(n_steps == 2 * TOTAL_PAIRS and n_steps % 2 == 0,
+                f"resolved C4 step count {n_steps} is not {2 * TOTAL_PAIRS}")
 
     carry, seed_forcing, _seed_sponge, card, model = c_ladder_scorer._c2_cold_start(
         reference_root, n_steps=2
     )
+    carry = _normalize_compile_carry(carry)
+    require(float(card.ocean.dt_s) == controls["rn_Dt"],
+            f"coupled card dt {card.ocean.dt_s} != resolved rn_Dt {controls['rn_Dt']}")
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     resumed_month = 0
+    run_input_identity = checkpoint_input_identity(reference_root)
+    metric_format = C4_METRIC_FORMAT
     if resume is not None:
         resume = resume.resolve()
         require(resume.parent == output_dir,
                 "C4 resume checkpoint must be in the output checkpoint directory")
-        carry, metadata, _report = restore_checkpoint(resume, carry, reference_root)
+        carry, metadata, resumed_report = restore_checkpoint(resume, carry, reference_root)
         resumed_month = int(metadata["month"])
-        validate_checkpoint_prefix(output_dir, reference_root, resumed_month)
+        prefix_identity, prefix_metric_format = validate_checkpoint_prefix(
+            output_dir, reference_root, resumed_month
+        )
+        require(prefix_identity == metadata.get("input_identity"),
+                "terminal resume checkpoint identity differs from its prefix")
+        require(prefix_metric_format == resumed_report.get("format"),
+                "terminal resume checkpoint metric format differs from its prefix")
+        run_input_identity = prefix_identity
+        metric_format = prefix_metric_format
         require(resume.name == checkpoint_name(
                     resumed_month, int(metadata["completed_kt"])
                 ),
@@ -633,14 +836,15 @@ def run_c4(
                 f"refusing a cold C4 run in nonempty checkpoint directory {output_dir}")
     start_pair = (int(np.asarray(carry.kt)) - 1) // 2
     stop_pair = pair_limit if profile_only else TOTAL_PAIRS
+    expected_months = len(year_metrics.calendar_month_day_ranges())
     require(0 <= start_pair <= stop_pair,
             f"C4 start pair {start_pair} is outside requested stop pair {stop_pair}")
     if start_pair == stop_pair:
-        require(not profile_only and resumed_month == 12,
-                "only a complete month-12 checkpoint may end a resumed C4 run")
+        require(not profile_only and resumed_month == expected_months,
+                "only the final monthly checkpoint may end a resumed C4 run")
         return {
             "format": "nemo-coupled-c4-run-v1",
-            "status": "PASS_C4_RUN_12_CHECKPOINTS",
+            "status": f"PASS_C4_RUN_{expected_months}_CHECKPOINTS",
             "reference_root": str(reference_root),
             "backend": jax.default_backend(),
             "fp64": bool(jax.config.jax_enable_x64),
@@ -650,8 +854,10 @@ def run_c4(
             "pairs_executed": 0,
             "pair_wall_seconds": [],
             "mean_pair_wall_seconds": None,
-            "resumed_month": 12,
+            "resumed_month": expected_months,
             "already_complete": True,
+            "resolved_controls": controls,
+            "metric_format": metric_format,
             "checkpoints": [],
         }
 
@@ -672,8 +878,13 @@ def run_c4(
     if not profile_only:
         geo = year_metrics.pilot_metrics.static_geometry(reference_root)
         mld = year_metrics.K0MLDEvaluator(reference_root)
-        cover = r340.read_decision171_cover(r340_score.DEFAULT_ICE_COVER)
-        metric_context = (geo, mld, cover)
+        if metric_format == LEGACY_C4_METRIC_FORMAT:
+            cover = r340.read_decision171_cover(LEGACY_DECISION171_ICE_COVER)
+            mask_source = "legacy Decision-171 standalone ice_cover_clim.nc"
+        else:
+            cover = read_coupled_initial_ice_cover(reference_root)
+            mask_source = "coupled output.init soicecov"
+        metric_context = (geo, mld, cover, mask_source)
 
     month_rows: list[dict[str, Any]] = []
     month_maps: list[dict[str, np.ndarray]] = []
@@ -703,7 +914,7 @@ def run_c4(
         if profile_only or completed_kt % year_metrics.STEPS_PER_DAY:
             continue
 
-        geo, mld, cover = metric_context
+        geo, mld, cover, mask_source = metric_context
         day = completed_kt // year_metrics.STEPS_PER_DAY
         candidate = ladder._candidate_fields(carry.ocean)
         nemo = year_metrics.pilot_metrics.read_nemo_day(reference_root, day)
@@ -727,7 +938,13 @@ def run_c4(
         require(month_number == resumed_month + len(checkpoints) + 1,
                 f"C4 month cadence skipped or repeated month {month_number}")
         month_report = build_month_report(
-            month_number, month_rows, month_maps, month_ice, geo
+            month_number,
+            month_rows,
+            month_maps,
+            month_ice,
+            geo,
+            metric_format=metric_format,
+            ice_sst_sss_mask_source=mask_source,
         )
         path = output_dir / checkpoint_name(month_number, completed_kt)
         checkpoints.append(write_checkpoint(
@@ -737,24 +954,30 @@ def run_c4(
             completed_kt=completed_kt,
             reference_root=reference_root,
             month_report=month_report,
+            input_identity=run_input_identity,
         ))
         month_rows, month_maps, month_ice = [], [], []
 
     require(compile_count() == 1,
             f"C4 pair retraced {compile_count()} times; expected exactly 1")
     if not profile_only:
-        require(int(np.asarray(carry.kt)) == 2921, f"C4 final next kt is {carry.kt}, expected 2921")
-        require(resumed_month + len(checkpoints) == 12,
-                f"C4 wrote through month {resumed_month + len(checkpoints)}, expected 12")
+        final_next_kt = 2 * stop_pair + 1
+        require(int(np.asarray(carry.kt)) == final_next_kt,
+                f"C4 final next kt is {carry.kt}, expected {final_next_kt}")
+        require(resumed_month + len(checkpoints) == expected_months,
+                f"C4 wrote through month {resumed_month + len(checkpoints)}, "
+                f"expected {expected_months}")
     return {
         "format": "nemo-coupled-c4-run-v1",
         "status": (
             f"PROFILE_C4_{len(pair_seconds)}_PAIRS_NO_VERDICT"
-            if profile_only else "PASS_C4_RUN_12_CHECKPOINTS"
+            if profile_only else f"PASS_C4_RUN_{expected_months}_CHECKPOINTS"
         ),
         "reference_root": str(reference_root),
         "backend": jax.default_backend(),
         "fp64": bool(jax.config.jax_enable_x64),
+        "resolved_controls": controls,
+        "metric_format": metric_format,
         "compiled": True,
         "compile_count": compile_count(),
         "compile_seconds": compile_seconds,
@@ -776,6 +999,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--restart-identity", action="store_true")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
+    if jax.default_backend() != "cpu":
+        parser.error("C4 supports CPU only because exact libm transcendental math is CPU-only")
     if args.restart_identity:
         require(args.resume is None and args.pair_limit is None and not args.profile_only,
                 "--restart-identity cannot be combined with resume/profile options")
