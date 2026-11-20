@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
 import struct
@@ -14,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.core.nemo_namelist import parse_namelist
-from legoesm.core.precision import PrecisionPolicy, set_policy
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ice.config import SI3_HARD_SWITCHES
 from legoesm.ice.si3_finalize import (
     SI3StressInputs,
@@ -47,6 +48,7 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_composition_scorer i
 MAGIC = b"CLAD0001"
 UNSCORABLE = "NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP"
 ADMITTED_ICE_DIMENSIONS = (5, 10, 5)
+COUPLED_MATH_CHOICES = ("libm-cpu", "fast-literal")
 C2_VERDICT_KINDS = (1, 2, 3, 4, 5, 6, 15, 16, 19, 20, 34)
 C2_REPORT_ONLY_KINDS = ()
 _HEADER_BYTES = 8 + 4 + 11 * 4
@@ -101,6 +103,34 @@ _FIXED_SPECS = {
     5: (("ts", "F4"), ("uu", "F3"), ("vv", "F3"), ("ssh", "F2")),
     6: (("ts", "F4"), ("uu", "F3"), ("vv", "F3"), ("ssh", "F2")),
 }
+
+
+def configure_coupled_math(math_mode: str) -> None:
+    """Select exact libm or round-344's fp64/native fast-literal arm."""
+
+    if math_mode == "libm-cpu":
+        if jax.default_backend() != "cpu":
+            raise RuntimeError("libm-cpu math requires the CPU backend")
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        return
+    if math_mode == "fast-literal":
+        set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+        return
+    raise ValueError(
+        f"coupled math must be one of {COUPLED_MATH_CHOICES}, got {math_mode!r}"
+    )
+
+
+@contextlib.contextmanager
+def coupled_math_scope(math_mode: str):
+    """Hold the explicit coupled policy over the outermost JIT boundary."""
+
+    previous = get_policy()
+    configure_coupled_math(math_mode)
+    try:
+        yield
+    finally:
+        set_policy(previous)
 
 
 def _record_specs(kind: int, remove_inverse_barometer: int | None = None):
@@ -561,9 +591,9 @@ def score_c2(evidence: Path, candidate: dict[tuple[int, int, int], dict]) -> dic
     return score_c2_observations(candidate, expected, masks)
 
 
-def _c2_cold_start(run: Path, *, n_steps: int):
+def _c2_cold_start(run: Path, *, n_steps: int, math_mode: str):
     """Load records and bind them to the production coupled recipe."""
-    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    configure_coupled_math(math_mode)
     from legoesm.ocean import bulk_flux_omip as bulk
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_orca2_zps_card
     from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -592,13 +622,23 @@ def _c2_cold_start(run: Path, *, n_steps: int):
         ln_drgice_imp=bool(_coupled_resolved_namelist(run)["ln_drgice_imp"]),
         ln_teos10=ln_teos10,
     )
-    return bulk.build_nemo_orca2_si3_coupled_recipe(
+    result = bulk.build_nemo_orca2_si3_coupled_recipe(
         run,
         coupled_ocean=coupled_ocean,
         k0=k0,
         controls=controls,
         ice_card=ice_card,
     )
+    if math_mode == "fast-literal":
+        carry, forcing, sponge, card, model = result
+        # Round 344's GPU arm changes only this selector.  It deliberately does
+        # not enter ``nemo_fast``, whose source-rounding removal is a different
+        # numerical experiment.
+        card = card._replace(
+            ocean=card.ocean._replace(transcendentals="native")
+        )
+        result = carry, forcing, sponge, card, model
+    return result
 
 
 def _c2_ocean_fields(state) -> dict[str, np.ndarray]:
@@ -775,13 +815,13 @@ def _validate_sponge_steps(sponge, first_kt: int) -> None:
             )
 
 
-def run_c2_compiled_observations(evidence: Path):
+def _run_c2_compiled_observations(evidence: Path, *, math_mode: str):
     """Run the two-step cold C2 trajectory and return scorer-ready observations."""
     from legoesm.ocean import bulk_flux_omip as bulk
 
     expected, masks = load_c2_expected(evidence)
     carry, forcing, sponge, card, model = _c2_cold_start(
-        evidence / "REC_C2", n_steps=2
+        evidence / "REC_C2", n_steps=2, math_mode=math_mode
     )
     _validate_sponge_steps(sponge, 1)
 
@@ -803,13 +843,24 @@ def run_c2_compiled_observations(evidence: Path):
     return candidate, expected, masks
 
 
-def run_c2_compiled(evidence: Path) -> dict:
+def run_c2_compiled_observations(evidence: Path, *, math_mode: str):
+    """Run C2 under explicit exact-CPU or round-344 fast-literal math."""
+
+    with coupled_math_scope(math_mode):
+        return _run_c2_compiled_observations(evidence, math_mode=math_mode)
+
+
+def run_c2_compiled(evidence: Path, *, math_mode: str) -> dict:
     """Run the two-step cold C2 trajectory once under ``jax.jit`` and score it."""
-    candidate, expected, masks = run_c2_compiled_observations(evidence)
-    return score_c2_observations(candidate, expected, masks)
+    candidate, expected, masks = run_c2_compiled_observations(
+        evidence, math_mode=math_mode
+    )
+    report = score_c2_observations(candidate, expected, masks)
+    report["math"] = math_mode
+    return report
 
 
-def run_c3_compiled(evidence: Path, *, pair_limit: int) -> dict:
+def _run_c3_compiled(evidence: Path, *, pair_limit: int, math_mode: str) -> dict:
     """Compile one traced pair once, carry it forward, and score pairwise.
 
     ``pair_limit`` exists only for the required preflight timing measurement.
@@ -824,7 +875,9 @@ def run_c3_compiled(evidence: Path, *, pair_limit: int) -> dict:
     if type(pair_limit) is not int or not 1 <= pair_limit <= 50:
         raise ValueError("C3 pair_limit must be an integer in [1, 50]")
     n_steps = 2 * pair_limit
-    carry, forcing, sponge, card, model = _c2_cold_start(run, n_steps=n_steps)
+    carry, forcing, sponge, card, model = _c2_cold_start(
+        run, n_steps=n_steps, math_mode=math_mode
+    )
     if len(forcing) != n_steps or len(sponge) != n_steps:
         raise ValueError(
             f"C3 deck readers produced {len(forcing)} forcing and {len(sponge)} "
@@ -914,6 +967,7 @@ def run_c3_compiled(evidence: Path, *, pair_limit: int) -> dict:
             f"expected={f['nemo_bits']} domain={f['domain']}"
         )
     return {
+        "math": math_mode,
         "status": status,
         "compiled": True,
         "compile_count": compile_count,
@@ -942,6 +996,17 @@ def run_c3_compiled(evidence: Path, *, pair_limit: int) -> dict:
             "SI3_initial_state_and_static_grid": "build_nemo_orca2_si3_static",
         },
     }
+
+
+def run_c3_compiled(
+    evidence: Path, *, pair_limit: int, math_mode: str
+) -> dict:
+    """Run C3 under explicit exact-CPU or round-344 fast-literal math."""
+
+    with coupled_math_scope(math_mode):
+        return _run_c3_compiled(
+            evidence, pair_limit=pair_limit, math_mode=math_mode
+        )
 
 
 def _coupled_resolved_namelist(run: Path) -> dict:
@@ -1270,6 +1335,7 @@ def main() -> int:
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--ppsrc", type=Path)
     parser.add_argument("--mode", choices=("C0-C2", "C3"))
+    parser.add_argument("--math", choices=COUPLED_MATH_CHOICES)
     parser.add_argument("--plant", choices=("numeric", "wrong-parity"))
     parser.add_argument(
         "--self-test", choices=("baseline", "numeric", "truncation", "wrong-parity")
@@ -1288,18 +1354,27 @@ def main() -> int:
         parser.error("--evidence and --ppsrc are required outside --self-test")
     if args.mode is None:
         parser.error("--mode C0-C2 or --mode C3 is required outside --self-test")
+    if args.math is None:
+        parser.error("--math libm-cpu or --math fast-literal is required outside --self-test")
     _admitted_resolved_namelist(args.evidence)
     if args.mode == "C3":
-        report = {"C3": run_c3_compiled(args.evidence, pair_limit=50), **status_report()}
+        report = {
+            "math": args.math,
+            "C3": run_c3_compiled(
+                args.evidence, pair_limit=50, math_mode=args.math
+            ),
+            **status_report(),
+        }
         print(json.dumps(report, indent=2, sort_keys=True))
         return 2 if report["C3"]["status"].startswith("FAIL_C3") else 0
     report = {
+        "math": args.math,
         "C0": score_c0(
             args.evidence / "REC_C3/c_ladder_records",
             plant=args.plant if args.plant == "numeric" else None,
         ),
         "C1": score_c1(args.evidence, plant=args.plant),
-        "C2": run_c2_compiled(args.evidence),
+        "C2": run_c2_compiled(args.evidence, math_mode=args.math),
         **status_report(),
     }
     print(json.dumps(report, indent=2, sort_keys=True))

@@ -32,6 +32,7 @@ REF_C4 = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/"
     "oracle_coupled_c_ladder/REF_C4"
 )
+MATH = "libm-cpu"
 
 
 @pytest.fixture(scope="module")
@@ -39,7 +40,7 @@ def real_carry_template() -> bulk.NemoORCA2SI3Carry:
     """Use the production 179-leaf carry schema with scalar-sized test leaves."""
 
     carry, _forcing, _sponge, _card, _model = c_ladder_scorer._c2_cold_start(
-        REF_C4, n_steps=2
+        REF_C4, n_steps=2, math_mode=MATH
     )
 
     def scalar_leaf(value):
@@ -120,6 +121,7 @@ def _synthetic_reports():
     admission = decision188.minimal_coupled_c4_envelope_admission(
         envelope_report=envelope
     )
+    candidate["math"] = MATH
     return candidate, envelope, admission
 
 
@@ -147,9 +149,11 @@ def test_restart_identity_compiled_pairs_save_restore_bitwise(
         completed_kt=4,
         reference_root=_reference(tmp_path / "reference"),
         month_report=_empty_month(1),
+        math_mode=MATH,
     )
     restored, metadata, _report = runner.restore_checkpoint(
-        checkpoint, cold, tmp_path / "reference", validate_calendar=False
+        checkpoint, cold, tmp_path / "reference", math_mode=MATH,
+        validate_calendar=False
     )
     assert metadata["next_kt"] == 5
     assert jax.typeof(restored.kt).weak_type
@@ -172,11 +176,13 @@ def test_checkpoint_carries_every_nemo_orca2_si3_leaf(
         completed_kt=2,
         reference_root=_reference(tmp_path / "reference"),
         month_report=_empty_month(1),
+        math_mode=MATH,
     )
     leaves, _ = jax.tree_util.tree_flatten(carry)
     assert written["leaf_count"] == len(leaves) == 179
     restored, _, _ = runner.restore_checkpoint(
         path, _carry(real_carry_template, 2.0, 1), tmp_path / "reference",
+        math_mode=MATH,
         validate_calendar=False,
     )
     _assert_tree_bits_equal(restored, carry)
@@ -195,6 +201,7 @@ def test_scorer_refuses_checkpoint_set_with_missing_month(
             completed_kt=completed,
             reference_root=reference,
             month_report=_empty_month(month),
+            math_mode=MATH,
         )
     june_kt = _empty_month(6)["end_day"] * runner.year_metrics.STEPS_PER_DAY
     (tmp_path / runner.checkpoint_name(6, june_kt)).unlink()
@@ -224,6 +231,7 @@ def test_scorer_assembles_all_twelve_checkpoint_months(
             completed_kt=completed,
             reference_root=reference,
             month_report=_empty_month(month),
+            math_mode=MATH,
         )
     report = scorer.load_checkpoint_report(
         tmp_path, carry_template=real_carry_template
@@ -275,6 +283,15 @@ def test_c4_control_passes_all_ocean_and_ice_rows() -> None:
         decision188.KE_ENVELOPE_MULTIPLIER
     )
     assert "KE_FLOOR_FRACTION" in result["ice_bar"]["formula"]
+
+
+@pytest.mark.parametrize("math_mode", runner.MATH_CHOICES)
+def test_c4_scorer_accepts_and_prints_each_explicit_math(math_mode: str) -> None:
+    candidate, envelope, admission = _synthetic_reports()
+    candidate["math"] = math_mode
+    result = scorer.score_c4(candidate, envelope, admission)
+    assert result["math"] == math_mode
+    assert result["status"] == "PASS_C4_12_OF_12"
 
 
 def test_one_month_one_ocean_quantity_plant_flips_pass_to_fail() -> None:
@@ -409,6 +426,7 @@ def test_checkpoint_archive_missing_a_schema_leaf_is_refused(
         completed_kt=2,
         reference_root=reference,
         month_report=_empty_month(1),
+        math_mode=MATH,
     )
     with np.load(path, allow_pickle=False) as archive:
         payload = {name: np.asarray(archive[name]) for name in archive.files}
@@ -431,6 +449,7 @@ def test_checkpoint_archive_leaf_shape_must_match_declared_schema(
         completed_kt=2,
         reference_root=reference,
         month_report=_empty_month(1),
+        math_mode=MATH,
     )
     with np.load(path, allow_pickle=False) as archive:
         payload = {name: np.asarray(archive[name]) for name in archive.files}
@@ -456,6 +475,7 @@ def test_checkpoint_prefix_refuses_mixed_carry_treedefs(
             completed_kt=completed,
             reference_root=reference,
             month_report=_empty_month(month),
+            math_mode=MATH,
         )
         paths.append(path)
     with np.load(paths[1], allow_pickle=False) as archive:
@@ -466,6 +486,25 @@ def test_checkpoint_prefix_refuses_mixed_carry_treedefs(
     paths[1].unlink()
     np.savez(paths[1], **payload)
     with pytest.raises(RuntimeError, match="carry treedef changed between months"):
+        runner.validate_checkpoint_prefix(tmp_path, reference, 2)
+
+
+def test_checkpoint_prefix_refuses_mixed_math(
+    tmp_path: Path, real_carry_template
+) -> None:
+    reference = _reference(tmp_path / "reference")
+    for month, math_mode in zip((1, 2), runner.MATH_CHOICES, strict=True):
+        completed = _empty_month(month)["end_day"] * runner.year_metrics.STEPS_PER_DAY
+        runner.write_checkpoint(
+            tmp_path / runner.checkpoint_name(month, completed),
+            _carry(real_carry_template, float(month), completed + 1),
+            month=month,
+            completed_kt=completed,
+            reference_root=reference,
+            month_report=_empty_month(month),
+            math_mode=math_mode,
+        )
+    with pytest.raises(RuntimeError, match="math selection changed between months"):
         runner.validate_checkpoint_prefix(tmp_path, reference, 2)
 
 
@@ -486,6 +525,7 @@ def test_scorer_refuses_input_identity_change_between_months(
             completed_kt=completed,
             reference_root=reference,
             month_report=_empty_month(month),
+            math_mode=MATH,
             input_identity=month_identity,
         )
     with pytest.raises(scorer.C4ScoreError, match="input_identity changed"):
@@ -669,8 +709,28 @@ def test_gpu_is_refused_at_argument_parsing(monkeypatch, tmp_path: Path) -> None
         runner.main([
             "--reference", str(tmp_path / "reference"),
             "--output-dir", str(tmp_path / "output"),
+            "--math", MATH,
         ])
     assert raised.value.code == 2
+
+
+def test_gpu_accepts_the_existing_fast_literal_math(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(runner.jax, "default_backend", lambda: "gpu")
+    seen = {}
+
+    def fake_run(*_args, math_mode, **_kwargs):
+        seen["math"] = math_mode
+        return {"status": "PROFILE_C4_2_PAIRS_NO_VERDICT", "math": math_mode}
+
+    monkeypatch.setattr(runner, "run_c4", fake_run)
+    assert runner.main([
+        "--reference", str(tmp_path / "reference"),
+        "--output-dir", str(tmp_path / "output"),
+        "--math", "fast-literal",
+        "--profile-only",
+        "--pair-limit", "2",
+    ]) == 0
+    assert seen == {"math": "fast-literal"}
 
 
 def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
@@ -763,7 +823,7 @@ def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
     monkeypatch.setattr(runner, "ice_day_metrics", lambda *_a: {})
     monkeypatch.setattr(runner, "build_month_report", fake_month_report)
 
-    straight = runner.run_c4(reference, straight_dir)
+    straight = runner.run_c4(reference, straight_dir, math_mode=MATH)
     assert straight["status"] == "PASS_C4_RUN_2_CHECKPOINTS"
     resumed_dir.mkdir()
     first_name = runner.checkpoint_name(1, 2)
@@ -771,15 +831,18 @@ def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
     assert runner.main([
         "--reference", str(reference),
         "--output-dir", str(resumed_dir),
+        "--math", MATH,
         "--resume", str(resumed_dir / first_name),
     ]) == 0
     capsys.readouterr()
 
     straight_final, _, straight_report = runner.restore_checkpoint(
-        straight_dir / runner.checkpoint_name(2, 4), cold, reference
+        straight_dir / runner.checkpoint_name(2, 4), cold, reference,
+        math_mode=MATH,
     )
     resumed_final, _, _ = runner.restore_checkpoint(
-        resumed_dir / runner.checkpoint_name(2, 4), cold, reference
+        resumed_dir / runner.checkpoint_name(2, 4), cold, reference,
+        math_mode=MATH,
     )
     _assert_tree_bits_equal(resumed_final, straight_final)
     assert straight_report["ice_sst_sss_mask_source"] == "Decision-188 ice_cover_clim.nc"

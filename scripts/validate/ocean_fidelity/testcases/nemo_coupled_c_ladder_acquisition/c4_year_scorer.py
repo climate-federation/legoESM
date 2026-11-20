@@ -52,6 +52,7 @@ def load_checkpoint_report(
     reference_root = None
     input_identity = None
     metric_format = None
+    math_mode = None
     checkpoint_metadata = []
     for path in paths:
         metadata, report = runner.inspect_checkpoint(path)
@@ -76,6 +77,11 @@ def load_checkpoint_report(
             input_identity = identity
         require(identity == input_identity,
                 f"{path.name}: C4 input_identity changed between months")
+        checkpoint_math = runner.checkpoint_math(metadata)
+        if math_mode is None:
+            math_mode = checkpoint_math
+        require(checkpoint_math == math_mode,
+                f"{path.name}: C4 math selection changed between months")
         if metric_format is None:
             metric_format = report["format"]
         require(report["format"] == metric_format,
@@ -86,7 +92,7 @@ def load_checkpoint_report(
     if carry_template is None:
         try:
             carry_template = runner.c_ladder_scorer._c2_cold_start(
-                Path(reference_root), n_steps=2
+                Path(reference_root), n_steps=2, math_mode=math_mode
             )[0]
         except (RuntimeError, ValueError) as exc:
             raise C4ScoreError(str(exc)) from exc
@@ -112,6 +118,7 @@ def load_checkpoint_report(
         "months": [months[index] for index in range(1, 13)],
         "checkpoint_input_identity": input_identity,
         "checkpoint_metric_format": metric_format,
+        "math": math_mode,
     }
     return assembled
 
@@ -216,6 +223,10 @@ def score_c4(
 ) -> dict[str, Any]:
     """Apply D188 to ocean and D233 to four SI3 quantities in every month."""
 
+    math_mode = candidate_report.get("math")
+    require(math_mode in runner.MATH_CHOICES,
+            f"candidate math must be one of {runner.MATH_CHOICES}, got {math_mode!r}")
+
     if envelope_metrics_digest is None:
         envelope_metrics_digest = decision188.envelope_metrics_sha256(envelope_report)
     candidate_mask_sources = sorted({
@@ -274,6 +285,7 @@ def score_c4(
     passed = first_failure is None
     return {
         "format": "nemo-coupled-c4-score-v2",
+        "math": math_mode,
         "decision": 228,
         "ocean_card": "DECISION_188",
         "ocean_reference_only_metrics": {
@@ -341,6 +353,7 @@ def run_plants() -> dict[str, str]:
     candidate = _add_synthetic_ice(
         decision188.minimal_year_report(sst=0.0, ke=0.0), 0.0
     )
+    candidate["math"] = "libm-cpu"
     envelope = _add_synthetic_ice(
         decision188.minimal_coupled_c4_year_report(sst=0.0, ke=0.001), 0.001
     )

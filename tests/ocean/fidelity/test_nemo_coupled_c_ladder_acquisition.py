@@ -403,7 +403,7 @@ def test_scorer_main_reads_c0_from_staged_rec_c3(monkeypatch, tmp_path: Path) ->
         sys,
         "argv",
         ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc"),
-         "--mode", "C0-C2"],
+         "--mode", "C0-C2", "--math", "libm-cpu"],
     )
     assert scorer.main() == 0
     assert seen["c0"] == tmp_path / "REC_C3/c_ladder_records"
@@ -426,7 +426,7 @@ def test_scorer_main_returns_nonzero_on_c2_failure(monkeypatch, tmp_path: Path) 
         sys,
         "argv",
         ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc"),
-         "--mode", "C0-C2"],
+         "--mode", "C0-C2", "--math", "libm-cpu"],
     )
     assert scorer.main() == 2
 
@@ -448,6 +448,7 @@ def test_scorer_main_returns_nonzero_on_c3_failure(monkeypatch, tmp_path: Path) 
         [
             "scorer.py", "--evidence", str(tmp_path),
             "--ppsrc", str(tmp_path / "ppsrc"), "--mode", "C3",
+            "--math", "libm-cpu",
         ],
     )
     assert scorer.main() == 2
@@ -571,7 +572,20 @@ def test_scorer_main_requires_mode(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc")],
+        ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc"),
+         "--math", "libm-cpu"],
+    )
+    with pytest.raises(SystemExit) as raised:
+        scorer.main()
+    assert raised.value.code == 2
+
+
+def test_scorer_main_requires_math(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["scorer.py", "--evidence", str(tmp_path),
+         "--ppsrc", str(tmp_path / "ppsrc"), "--mode", "C0-C2"],
     )
     with pytest.raises(SystemExit) as raised:
         scorer.main()

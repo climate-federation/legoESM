@@ -623,7 +623,7 @@ def test_each_c2_route_plant_fails_real_rec_c2_scorer(monkeypatch, plant):
     # REC_C2 has rn_fwb0=0, so skip-fwb-application is structurally
     # unobservable to this scorer; the real-pair plant immediately above covers it.
     _install_c2_route_plant(monkeypatch, plant)
-    report = scorer.run_c2_compiled(evidence)
+    report = scorer.run_c2_compiled(evidence, math_mode="libm-cpu")
     changed_wet = sum(row["wet_different"] for row in report["field_counts"])
     changed_dry = sum(row["dry_other_different"] for row in report["field_counts"])
     print(

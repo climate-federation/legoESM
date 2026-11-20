@@ -22,7 +22,6 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
-from legoesm.core.precision import PrecisionPolicy, set_policy
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
@@ -63,6 +62,7 @@ ICE_KEYS = (
     "ICE_VOLUME_NH",
     "ICE_VOLUME_SH",
 )
+MATH_CHOICES = c_ladder_scorer.COUPLED_MATH_CHOICES
 
 
 class C4InputReader:
@@ -314,6 +314,21 @@ def checkpoint_identity_is_scorable(stored: Any, current: dict[str, str]) -> boo
     return stored == current or stored == IN_FLIGHT_44512_INPUT_IDENTITY
 
 
+def checkpoint_math(metadata: dict[str, Any]) -> str:
+    """Return an explicit math stamp, admitting only the named legacy run."""
+
+    math_mode = metadata.get("math")
+    if math_mode is not None:
+        require(math_mode in MATH_CHOICES,
+                f"C4 checkpoint has invalid math selection {math_mode!r}")
+        return str(math_mode)
+    require(
+        metadata.get("input_identity") == IN_FLIGHT_44512_INPUT_IDENTITY,
+        "C4 checkpoint has no admitted math selection",
+    )
+    return "libm-cpu"
+
+
 def checkpoint_name(month: int, completed_kt: int) -> str:
     require(1 <= month <= 12, f"invalid C4 month {month}")
     require(completed_kt > 0, f"invalid C4 completed step {completed_kt}")
@@ -328,6 +343,7 @@ def write_checkpoint(
     completed_kt: int,
     reference_root: Path,
     month_report: dict[str, Any],
+    math_mode: str,
     input_identity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Atomically store the complete pytree carry and its scored month."""
@@ -335,6 +351,7 @@ def write_checkpoint(
     require(not path.exists(), f"refusing to overwrite C4 checkpoint {path}")
     require(int(np.asarray(carry.kt)) == completed_kt + 1,
             "C4 checkpoint carry kt is not the next step")
+    require(math_mode in MATH_CHOICES, f"invalid C4 math selection {math_mode!r}")
     payload, tree = _carry_payload(carry)
     metadata = {
         "format": CHECKPOINT_FORMAT,
@@ -342,6 +359,7 @@ def write_checkpoint(
         "completed_kt": completed_kt,
         "next_kt": completed_kt + 1,
         "reference_root": str(reference_root.resolve()),
+        "math": math_mode,
         "input_identity": (
             checkpoint_input_identity(reference_root.resolve())
             if input_identity is None else input_identity
@@ -372,6 +390,7 @@ def write_checkpoint(
         "path": path.name,
         "month": month,
         "completed_kt": completed_kt,
+        "math": math_mode,
         "sha256": common.sha256(path),
         "leaf_count": len(tree["leaf_schema"]),
     }
@@ -432,7 +451,7 @@ def validate_month_checkpoint(
 
 def validate_checkpoint_prefix(
     output_dir: Path, reference_root: Path, through_month: int
-) -> tuple[dict[str, str], str]:
+) -> tuple[dict[str, str], str, str]:
     """Require a contiguous same-deck checkpoint prefix before a resumed write."""
 
     paths = sorted(output_dir.glob("c4_month??_step*.npz"))
@@ -443,6 +462,7 @@ def validate_checkpoint_prefix(
     metric_formats = []
     carry_schemas = []
     carry_treedefs = []
+    math_modes = []
     for path in paths:
         metadata, report = inspect_checkpoint(path)
         month = validate_month_checkpoint(path, metadata, report)
@@ -453,6 +473,7 @@ def validate_checkpoint_prefix(
         metric_formats.append(report.get("format"))
         carry_schemas.append(metadata.get("leaf_schema"))
         carry_treedefs.append(metadata.get("treedef"))
+        math_modes.append(checkpoint_math(metadata))
     require(observed == list(range(1, through_month + 1)),
             f"resume checkpoint months are {observed}, expected 1..{through_month}")
     require(all(identity == identities[0] for identity in identities),
@@ -463,9 +484,11 @@ def validate_checkpoint_prefix(
             "resume checkpoint carry schema changed between months")
     require(all(treedef == carry_treedefs[0] for treedef in carry_treedefs),
             "resume checkpoint carry treedef changed between months")
+    require(all(math_mode == math_modes[0] for math_mode in math_modes),
+            "resume checkpoint math selection changed between months")
     require(metric_formats[0] in SUPPORTED_C4_METRIC_FORMATS,
             f"unsupported resumed metric format {metric_formats[0]!r}")
-    return identities[0], metric_formats[0]
+    return identities[0], metric_formats[0], math_modes[0]
 
 
 def restore_checkpoint(
@@ -473,6 +496,7 @@ def restore_checkpoint(
     template: Any,
     reference_root: Path,
     *,
+    math_mode: str,
     validate_calendar: bool = True,
 ) -> tuple[Any, dict, dict]:
     """Restore a carry using the fresh deck-built pytree as its exact schema."""
@@ -482,6 +506,8 @@ def restore_checkpoint(
         validate_month_checkpoint(path, metadata, report)
     require(Path(metadata["reference_root"]).resolve() == reference_root.resolve(),
             f"{path.name}: checkpoint reference deck differs from this run")
+    require(checkpoint_math(metadata) == math_mode,
+            f"{path.name}: checkpoint math differs from this run")
     require(_resume_identity_is_compatible(
                 metadata.get("input_identity"), checkpoint_input_identity(reference_root)
             ),
@@ -733,17 +759,16 @@ def _first_tree_bit_difference(left: Any, right: Any) -> dict[str, Any] | None:
     return None
 
 
-def run_restart_identity(reference_root: Path, output_dir: Path) -> dict[str, Any]:
+def _run_restart_identity(
+    reference_root: Path, output_dir: Path, *, math_mode: str
+) -> dict[str, Any]:
     """Prove four real compiled pairs equal a two-pair checkpoint continuation."""
 
     jax.config.update("jax_enable_x64", True)
-    require(jax.default_backend() == "cpu",
-            "C4 exact CPU libm math refuses non-CPU backends")
-    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     reference_root = reference_root.resolve()
     total_pairs, split_pairs = 4, 2
     carry, forcing, sponge, card, model = c_ladder_scorer._c2_cold_start(
-        reference_root, n_steps=2 * total_pairs
+        reference_root, n_steps=2 * total_pairs, math_mode=math_mode
     )
     carry = _normalize_compile_carry(carry)
     executable, compile_seconds, compile_count = compile_pair(
@@ -763,6 +788,7 @@ def run_restart_identity(reference_root: Path, output_dir: Path) -> dict[str, An
         month=1,
         completed_kt=2 * split_pairs,
         reference_root=reference_root,
+        math_mode=math_mode,
         month_report={
             "format": "nemo-coupled-c4-restart-identity-v1",
             "pairs_completed": split_pairs,
@@ -770,7 +796,11 @@ def run_restart_identity(reference_root: Path, output_dir: Path) -> dict[str, An
         },
     )
     restored, _metadata, _report = restore_checkpoint(
-        checkpoint, carry, reference_root, validate_calendar=False
+        checkpoint,
+        carry,
+        reference_root,
+        math_mode=math_mode,
+        validate_calendar=False,
     )
     continued, second_seconds = _advance_pairs(
         executable, restored, forcing, sponge, split_pairs, total_pairs
@@ -782,6 +812,7 @@ def run_restart_identity(reference_root: Path, output_dir: Path) -> dict[str, An
     return {
         "format": "nemo-coupled-c4-restart-identity-v1",
         "status": "PASS_C4_RESTART_IDENTITY_BITWISE",
+        "math": math_mode,
         "backend": jax.default_backend(),
         "fp64": bool(jax.config.jax_enable_x64),
         "total_pairs": total_pairs,
@@ -795,10 +826,22 @@ def run_restart_identity(reference_root: Path, output_dir: Path) -> dict[str, An
     }
 
 
-def run_c4(
+def run_restart_identity(
+    reference_root: Path, output_dir: Path, *, math_mode: str
+) -> dict[str, Any]:
+    """Run the restart proof under the explicitly selected coupled math."""
+
+    with c_ladder_scorer.coupled_math_scope(math_mode):
+        return _run_restart_identity(
+            reference_root, output_dir, math_mode=math_mode
+        )
+
+
+def _run_c4(
     reference_root: Path,
     output_dir: Path,
     *,
+    math_mode: str,
     resume: Path | None = None,
     pair_limit: int | None = None,
     profile_only: bool = False,
@@ -806,9 +849,6 @@ def run_c4(
     """Run the compiled trajectory; full mode writes exactly 12 month checkpoints."""
 
     jax.config.update("jax_enable_x64", True)
-    require(jax.default_backend() == "cpu",
-            "C4 exact CPU libm math refuses non-CPU backends")
-    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     reference_root = reference_root.resolve()
     require(reference_root.is_dir(), f"missing C4 reference deck {reference_root}")
     controls = resolved_c4_controls(reference_root)
@@ -824,7 +864,7 @@ def run_c4(
                 f"resolved C4 step count {n_steps} is not {2 * TOTAL_PAIRS}")
 
     carry, seed_forcing, _seed_sponge, card, model = c_ladder_scorer._c2_cold_start(
-        reference_root, n_steps=2
+        reference_root, n_steps=2, math_mode=math_mode
     )
     carry = _normalize_compile_carry(carry)
     require(float(card.ocean.dt_s) == controls["rn_Dt"],
@@ -838,15 +878,19 @@ def run_c4(
         resume = resume.resolve()
         require(resume.parent == output_dir,
                 "C4 resume checkpoint must be in the output checkpoint directory")
-        carry, metadata, resumed_report = restore_checkpoint(resume, carry, reference_root)
+        carry, metadata, resumed_report = restore_checkpoint(
+            resume, carry, reference_root, math_mode=math_mode
+        )
         resumed_month = int(metadata["month"])
-        prefix_identity, prefix_metric_format = validate_checkpoint_prefix(
+        prefix_identity, prefix_metric_format, prefix_math = validate_checkpoint_prefix(
             output_dir, reference_root, resumed_month
         )
         require(prefix_identity == metadata.get("input_identity"),
                 "terminal resume checkpoint identity differs from its prefix")
         require(prefix_metric_format == resumed_report.get("format"),
                 "terminal resume checkpoint metric format differs from its prefix")
+        require(prefix_math == math_mode,
+                "terminal resume checkpoint math differs from this run")
         run_input_identity = prefix_identity
         metric_format = prefix_metric_format
         require(resume.name == checkpoint_name(
@@ -867,6 +911,7 @@ def run_c4(
         return {
             "format": "nemo-coupled-c4-run-v1",
             "status": f"PASS_C4_RUN_{expected_months}_CHECKPOINTS",
+            "math": math_mode,
             "reference_root": str(reference_root),
             "backend": jax.default_backend(),
             "fp64": bool(jax.config.jax_enable_x64),
@@ -971,6 +1016,7 @@ def run_c4(
             month=month_number,
             completed_kt=completed_kt,
             reference_root=reference_root,
+            math_mode=math_mode,
             month_report=month_report,
             input_identity=run_input_identity,
         ))
@@ -991,6 +1037,7 @@ def run_c4(
             f"PROFILE_C4_{len(pair_seconds)}_PAIRS_NO_VERDICT"
             if profile_only else f"PASS_C4_RUN_{expected_months}_CHECKPOINTS"
         ),
+        "math": math_mode,
         "reference_root": str(reference_root),
         "backend": jax.default_backend(),
         "fp64": bool(jax.config.jax_enable_x64),
@@ -1007,26 +1054,52 @@ def run_c4(
     }
 
 
+def run_c4(
+    reference_root: Path,
+    output_dir: Path,
+    *,
+    math_mode: str,
+    resume: Path | None = None,
+    pair_limit: int | None = None,
+    profile_only: bool = False,
+) -> dict[str, Any]:
+    """Run C4 under exact CPU or round-344 fast-literal math."""
+
+    with c_ladder_scorer.coupled_math_scope(math_mode):
+        return _run_c4(
+            reference_root,
+            output_dir,
+            math_mode=math_mode,
+            resume=resume,
+            pair_limit=pair_limit,
+            profile_only=profile_only,
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--math", choices=MATH_CHOICES, required=True)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--pair-limit", type=int)
     parser.add_argument("--profile-only", action="store_true")
     parser.add_argument("--restart-identity", action="store_true")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
-    if jax.default_backend() != "cpu":
-        parser.error("C4 supports CPU only because exact libm transcendental math is CPU-only")
+    if args.math == "libm-cpu" and jax.default_backend() != "cpu":
+        parser.error("--math libm-cpu requires the CPU backend")
     if args.restart_identity:
         require(args.resume is None and args.pair_limit is None and not args.profile_only,
                 "--restart-identity cannot be combined with resume/profile options")
-        report = run_restart_identity(args.reference, args.output_dir)
+        report = run_restart_identity(
+            args.reference, args.output_dir, math_mode=args.math
+        )
     else:
         report = run_c4(
             args.reference,
             args.output_dir,
+            math_mode=args.math,
             resume=args.resume,
             pair_limit=args.pair_limit,
             profile_only=args.profile_only,
