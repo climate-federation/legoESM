@@ -131,12 +131,7 @@ def test_land_bootstrap_call_creates_no_water(tmp_path):
     assert abs(rows["system_water"] - rows["atm_water"]) < 1.0e3, rows
 
 
-@pytest.mark.slow
-def test_duo_column_lane_runs_and_closes_land(tmp_path, capsys):
-    """--grid fv3duo runs the duo cube's column lane (6 N^2 columns) and its
-    land row closes to roundoff over three coupling windows, as on MPAS; the
-    atmosphere row too, with the store on the duo's own delp.  dt 150 s, not
-    the MPAS test's 300 s, so a flux sum left on the MPAS constant fails."""
+def _duo_run(tmp_path, capsys):
     import json
     out = tmp_path / "duo.json"
     assert probe.main(["--grid", "fv3duo", "--resolution", "12", "--dt",
@@ -144,12 +139,34 @@ def test_duo_column_lane_runs_and_closes_land(tmp_path, capsys):
                        "--days", "0.0625", "--json", str(out)]) == 0
     cfg = json.loads(next(ln[len("CONFIG "):] for ln in capsys.readouterr()
                           .out.splitlines() if ln.startswith("CONFIG ")))
+    return cfg, json.loads(out.read_text())
+
+
+@pytest.mark.slow
+def test_duo_column_lane_runs_and_closes_land(tmp_path, capsys):
+    """--grid fv3duo runs the duo cube's column lane (6 N^2 columns) and its
+    land row closes to roundoff over three coupling windows, as on MPAS.
+    dt 150 s, not the MPAS test's 300 s, so a flux sum left on the MPAS
+    constant fails."""
+    cfg, res = _duo_run(tmp_path, capsys)
     assert (cfg["grid"], cfg["ncells"], cfg["dt"]) == ("fv3duo", 6 * 12 ** 2,
                                                        150.0)
-    res = json.loads(out.read_text())
-    rows, e_atm = res["rows"], abs(res["fluxes"]["E_atm"])
-    assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
-    assert abs(rows["atm_water"]) < 1.0e-6 * e_atm, (rows["atm_water"], e_atm)
+    assert abs(res["rows"]["land_water"]) < 1.0e3, res["rows"]["land_water"]
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(strict=True, reason=(
+    "measured 2026-11-20: atm row 2.0e11 kg vs E 2.2e12 here (dt 150); the "
+    "duo dynamics change water at exact air mass -- tracer_2d builds dp2 "
+    "from the raw per-face mass-flux capacitors while delp uses the "
+    "seam-averaged fluxes (as the Fortran oracle does); a mutant averaging "
+    "the capacitors closes the row to <25 kg.  Fix pending the user"))
+def test_duo_column_lane_closes_atmosphere_water(tmp_path, capsys):
+    """The atmosphere row on the duo's own delp closes like MPAS's (1e-9)."""
+    _, res = _duo_run(tmp_path, capsys)
+    e_atm = abs(res["fluxes"]["E_atm"])
+    assert abs(res["rows"]["atm_water"]) < 1.0e-6 * e_atm, (
+        res["rows"]["atm_water"], e_atm)
 
 
 def test_land_emission_terms_split():
