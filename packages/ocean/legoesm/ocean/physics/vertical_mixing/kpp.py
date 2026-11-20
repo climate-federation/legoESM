@@ -780,5 +780,4 @@ def kpp_vertical_mixing(
         dS_dt=tr_tend[1] + dS_nonlocal,
         K_v=K_v,
         A_v=A_v,
-        h_bl=h_bl,
     )

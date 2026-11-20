@@ -88,6 +88,21 @@ def _kpp(T, S, mode, eos_fn=None, u=None, v=None, j=1.0, tau=0.03, zc=None):
                                        Q_sfc_S=jnp.zeros((n,)), apply_diffusion=False, eos_fn=eos_fn)
 
 
+def _kpp_h(*a, **k):
+    """``_kpp`` plus the boundary-layer depth, read from the solver's own call."""
+    rec, orig = {}, kpp_mod._boundary_layer_depth
+
+    def spy(*aa, **kk):
+        rec["h"] = orig(*aa, **kk)
+        return rec["h"]
+    kpp_mod._boundary_layer_depth = spy
+    try:
+        out = _kpp(*a, **k)
+    finally:
+        kpp_mod._boundary_layer_depth = orig
+    return out, rec["h"]
+
+
 def test_default_is_local():
     assert KPPConfig().n2_mode == "adiabatic"
 
@@ -153,11 +168,11 @@ def test_c3_insitu_signed_is_earlier_expression(float64):
     orig = kpp_mod._kpp_interface_n2
     try:
         kpp_mod._kpp_interface_n2 = lambda rho_, *a, **k: compute_buoyancy_frequency(rho_, z.dz_ref, jnp.ones((1,)))
-        forced = _kpp(T, S, "adiabatic")
+        forced, h_forced = _kpp_h(T, S, "adiabatic")
     finally:
         kpp_mod._kpp_interface_n2 = orig
-    out = _kpp(T, S, "insitu_signed")
-    for a, b in ((out.K_v, forced.K_v), (out.A_v, forced.A_v), (out.h_bl, forced.h_bl), (out.dT_dt, forced.dT_dt)):
+    out, h_out = _kpp_h(T, S, "insitu_signed")
+    for a, b in ((out.K_v, forced.K_v), (out.A_v, forced.A_v), (h_out, h_forced), (out.dT_dt, forced.dT_dt)):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
 
 
@@ -170,16 +185,16 @@ def test_c4_gradients_finite_eager_and_jit(x64, profile, j):
     zc = _zc()
 
     def loss(T_, S_):
-        out = _kpp(T_, S_, "adiabatic", u=u, j=j, zc=zc)
-        return jnp.sum(out.K_v) + jnp.sum(out.A_v) + jnp.sum(out.h_bl)
+        out, h = _kpp_h(T_, S_, "adiabatic", u=u, j=j, zc=zc)
+        return jnp.sum(out.K_v) + jnp.sum(out.A_v) + jnp.sum(h)
 
     g_eager = jax.grad(loss, argnums=(0, 1))(T, S)
     g_jit = jax.jit(jax.grad(loss, argnums=(0, 1)))(T, S)
     for ge, gj in zip(g_eager, g_jit):
         assert np.all(np.isfinite(np.asarray(ge))), f"{profile}: eager gradient not finite"
         assert np.all(np.isfinite(np.asarray(gj))), f"{profile}: jit gradient not finite"
-    out = _kpp(T, S, "adiabatic", u=u, j=j, zc=zc)
-    assert np.all(np.isfinite(np.asarray(out.K_v))) and np.all(np.isfinite(np.asarray(out.h_bl)))
+    out, h = _kpp_h(T, S, "adiabatic", u=u, j=j, zc=zc)
+    assert np.all(np.isfinite(np.asarray(out.K_v))) and np.all(np.isfinite(np.asarray(h)))
     # Eager and jit agree to float32 precision: the Wright EOS runs in float32 by the default precision policy
     # even with x64 state, and the XLA operation order then differs by rounding (observed 3e-4 relative on this
     # sum of K_v, A_v and h_bl, which is sensitive through the sigmoid crossing of the boundary layer depth).
@@ -197,9 +212,9 @@ def test_c5_weak_instability_below_the_bl_gets_kconv_only_when_local(float64):
     local_n2 = np.asarray(_n2(rho, T, S, "adiabatic"))[0, k]
     insitu_n2 = np.asarray(_n2(rho, T, S, "insitu_signed"))[0, k]
     assert -3e-5 < local_n2 < -2e-6 and insitu_n2 > 0.0, (local_n2, insitu_n2)
-    out_l = _kpp(T, S, "adiabatic", tau=0.005)
-    out_i = _kpp(T, S, "insitu_signed", tau=0.005)
-    assert float(out_l.h_bl[0]) < 100.0 and float(out_i.h_bl[0]) < 100.0
+    out_l, h_l = _kpp_h(T, S, "adiabatic", tau=0.005)
+    out_i, h_i = _kpp_h(T, S, "insitu_signed", tau=0.005)
+    assert float(h_l[0]) < 100.0 and float(h_i[0]) < 100.0
     assert float(out_l.K_v[0, k]) > 0.5
     assert float(out_i.K_v[0, k]) < 0.01
 
@@ -211,10 +226,10 @@ def test_c5_stable_interface_smaller_ri_and_more_shear_mixing(float64):
     T = 25.0 - 3.3e-2 * z
     T, S = jnp.asarray(T[None]), jnp.full((1, NLEV), 35.0)
     u = jnp.asarray(np.clip(1.8e-2 * (z - 140.0), 0.0, 0.36)[None])
-    out_l = _kpp(T, S, "adiabatic", u=u, tau=0.005)
-    out_i = _kpp(T, S, "insitu_signed", u=u, tau=0.005)
+    out_l, h_l = _kpp_h(T, S, "adiabatic", u=u, tau=0.005)
+    out_i, h_i = _kpp_h(T, S, "insitu_signed", u=u, tau=0.005)
     k = int(np.argmin(np.abs(z - 148.0)))
-    assert float(out_l.h_bl[0]) < 100.0 and float(out_i.h_bl[0]) < 100.0
+    assert float(h_l[0]) < 100.0 and float(h_i[0]) < 100.0
     assert float(out_l.K_v[0, k]) > float(out_i.K_v[0, k])
 
 
