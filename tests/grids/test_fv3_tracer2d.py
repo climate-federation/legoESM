@@ -490,3 +490,129 @@ def test_batched_jit_matches_eager(jctx):
     assert_batched_matches_loop(jitted, eager,
                                 "tracer_2d_1l_sixface[jit,batched]",
                                 rtol=5e-12, atol=5e-12)
+
+
+# --------------------------------------------------------------------
+# 9.  Skipping the iterations past the deepest schedule
+#
+# Both paths wrap each scan iteration in a lax.cond on the resolved
+# schedule, so iterations every level has finished are skipped rather
+# than computed and masked away.  The gates: (i) the skip is real -- the
+# seam blend fires exactly once per tracer per executed iteration, read
+# from a debug callback under jit (ungated, every path fires NSPLT_MAX
+# times); (ii) the cube-total tracer mass is invariant to round-off on
+# seam-consistent capacitors, unsplit and sub-cycled, both paths; (iii)
+# the reverse-mode derivative through the gated loop matches a central
+# finite difference.
+# --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_finished_subcycles_are_skipped_not_masked(jctx, monkeypatch,
+                                                   batched):
+    fired = []
+    orig = jtr.average_shared_edge_cgrid
+
+    def counted(fx6, fy6, tab):
+        jax.debug.callback(lambda: fired.append(1))
+        return orig(fx6, fy6, tab)
+
+    monkeypatch.setattr(jtr, "average_shared_edge_cgrid", counted)
+    amp = _AMPS["mixed"]
+    fn = jax.jit(
+        lambda q, dp, cap: jtr.tracer_2d_1l_sixface(
+            jctx, q, dp, cap, km=KM, nq=NQ, hord_tr=HORD_TR, dt=DT,
+            batched=batched))
+    out = fn(_tracers()[1], _dp1()[1], _caps(amp)[1])
+    jax.effects_barrier()
+    sched = _schedule(out)
+    assert max(sched) < jtr.NSPLT_MAX and len(set(sched)) > 1, sched
+    want = NQ * (max(sched) if batched else sum(sched))
+    assert len(fired) == want, (
+        f"seam blend fired {len(fired)} times, schedule {sched} needs "
+        f"{want} (ungated: {NQ * jtr.NSPLT_MAX * (1 if batched else KM)})")
+
+
+def _seam_consistent_caps(ctx, courant, seed):
+    """cx/cy ~ U(-courant, courant); mfx/mfy blended once so the
+    flux_adj seam blend is an identity on them and the cube total of
+    q*dp is exactly invariant (see test_fv3_native_tracer2d)."""
+    from legoesm.grids.fv3_native_gridstruct import (
+        average_shared_edge_cgrid as np_blend,
+    )
+    rng = np.random.default_rng(seed)
+    npx = N + 1
+    area_mean = float(np.mean(ctx["gs6"][0]["area"]))
+    cap = [{"cx": courant * rng.uniform(-1, 1, (npx, MA, KM)),
+            "cy": courant * rng.uniform(-1, 1, (MA, npx, KM)),
+            "mfx": np.zeros((npx, MA, KM)),
+            "mfy": np.zeros((MA, npx, KM))} for _ in range(6)]
+    for t in range(6):
+        cap[t]["mfx"][:, 0:N, :] = area_mean * rng.uniform(
+            -0.5, 0.5, (npx, N, KM))
+        cap[t]["mfy"][0:N, :, :] = area_mean * rng.uniform(
+            -0.5, 0.5, (N, npx, KM))
+    for k in range(KM):
+        mx = [cap[t]["mfx"][:, 0:N, k].copy() for t in range(6)]
+        my = [cap[t]["mfy"][0:N, :, k].copy() for t in range(6)]
+        np_blend(mx, my, N, NG)
+        for t in range(6):
+            cap[t]["mfx"][:, 0:N, k] = mx[t]
+            cap[t]["mfy"][0:N, :, k] = my[t]
+    return {nm: jnp.asarray(np.stack([cap[t][nm] for t in range(6)]))
+            for nm in CAP_KEYS}
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("courant", [0.05, 1.5])
+def test_tracer_mass_is_conserved(ctx, jctx, courant, batched):
+    cap = _seam_consistent_caps(ctx, courant, seed=21)
+    q = _tracers()[1]
+    dp = jnp.full((6, MA, MA, KM), 1.0e4)
+    out = jtr.tracer_2d_1l_sixface(jctx, q, dp, cap, km=KM, nq=NQ,
+                                   hord_tr=HORD_TR, dt=DT, batched=batched)
+    jtr.check_nsplt_schedule(out)
+    sched = _schedule(out)
+    assert (max(sched) == 1) if courant < 1.0 else (min(sched) >= 2), sched
+    w = slice(NG, NG + N)
+    area = np.stack([ctx["gs6"][t]["area"][w, w] for t in range(6)])
+    rarea = np.stack([ctx["gs6"][t]["rarea"][w, w] for t in range(6)])
+    # dp the last pass divides by: returned dp1 plus the divergence of
+    # the frac-rescaled mass fluxes the routine returns.
+    mfx = np.asarray(out["mfx"])[:, :, 0:N, :]
+    mfy = np.asarray(out["mfy"])[:, 0:N, :, :]
+    dp_last = (np.asarray(out["dp1"])[:, w, w, :]
+               + (mfx[:, :-1] - mfx[:, 1:] + mfy[:, :, :-1]
+                  - mfy[:, :, 1:]) * rarea[..., None])
+    for iq in range(NQ):
+        m0 = np.sum(np.asarray(q)[:, iq, w, w, :] * 1.0e4
+                    * area[..., None])
+        m1 = np.sum(np.asarray(out["q"])[:, iq, w, w, :] * dp_last
+                    * area[..., None])
+        rel = abs(m1 - m0) / abs(m0)
+        assert rel < 1e-12, (
+            f"tracer {iq} mass {m0} -> {m1} (rel {rel:.3e}, nsplt={sched})")
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_gradient_through_the_gated_loop_matches_finite_difference(
+        jctx, batched):
+    dp_j, cap_j = _dp1()[1], _caps(_AMPS["mixed"])[1]
+    rng = np.random.default_rng(31)
+    wts = jnp.asarray(rng.standard_normal((6, NQ, N, N, KM)))
+    w = slice(NG, NG + N)
+
+    def loss(q):
+        out = jtr.tracer_2d_1l_sixface(jctx, q, dp_j, cap_j, km=KM, nq=NQ,
+                                       hord_tr=HORD_TR, dt=DT,
+                                       batched=batched)
+        return jnp.sum(out["q"][:, :, w, w, :] * wts)
+
+    q0 = _tracers()[1]
+    v = jnp.asarray(rng.standard_normal(q0.shape))
+    g = jax.grad(loss)(q0)
+    ad = float(jnp.sum(g * v))
+    eps = 1e-6
+    fd = float((loss(q0 + eps * v) - loss(q0 - eps * v)) / (2 * eps))
+    assert np.isfinite(ad) and ad != 0.0, ad
+    assert abs(ad - fd) <= 1e-5 * abs(fd), f"AD {ad} vs FD {fd}"
