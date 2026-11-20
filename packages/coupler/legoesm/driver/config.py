@@ -1831,6 +1831,16 @@ class ExperimentConfig(NamedTuple):
     # resolved at ModelDriver setup so the manifest / saved config / replay
     # record the boolean; True = required (refused where inert); False = off.
     ocean_flux_on_ocean_surface: bool | None = None
+    # MPAS lane, partly ice-covered sea cells (#2573, user decision
+    # 2026-11-19): the non-land TURBULENT exchange (heat, water, stress) is
+    # evaluated separately on the prognostic ice skin and on the open water
+    # (SST) and cover-weighted for the atmosphere; the ice skin is charged the
+    # ice tile's own sensible and latent heat instead of the cell mean.
+    # Radiation is not split.  Tri-state like ocean_flux_on_ocean_surface:
+    # None = AUTO, on exactly where an explicit True is accepted
+    # (``sea_ice_flux_split_eligibility``), resolved at ModelDriver setup;
+    # True = required (refused where inert); False = one blended surface.
+    sea_ice_flux_split: bool | None = None
     # MPAS lane, interactive multilayer land: rebuild the two-leaf canopy's
     # surface parameters (LAI, canopy height, soil-colour albedo from the top
     # soil layer's wetness) from the surfdata climatology at every land step,
@@ -5333,6 +5343,14 @@ class ExperimentConfig(NamedTuple):
                     "non-land fraction's surface fluxes from the land's, but "
                     f"{_why}. Leave it unset (auto) or false.")
 
+        if self.sea_ice_flux_split:
+            _ok, _why = sea_ice_flux_split_eligibility(self)
+            if not _ok:
+                errors.append(
+                    "sea_ice_flux_split=True separates the ice and open-water "
+                    f"turbulent exchange in sea-ice cells, but {_why}. Leave "
+                    "it unset (auto) or false.")
+
         if self.land_stress_from_land is True:
             _ok, _why = land_stress_eligibility(self)
             if not _ok:
@@ -6145,6 +6163,31 @@ def resolve_ocean_flux_on_ocean_surface(cfg) -> bool:
     if cfg.ocean_flux_on_ocean_surface is None:
         return ocean_flux_surface_eligibility(cfg)[0]
     return bool(cfg.ocean_flux_on_ocean_surface)
+
+
+def sea_ice_flux_split_eligibility(cfg) -> tuple[bool, str]:
+    """Is ``sea_ice_flux_split=True`` live in ``cfg``?
+    ``(eligible, reason_if_not)``: the non-land fluxes on the ocean/ice
+    surface (the anchor the split replaces) and the prognostic ice skin it
+    drives (off on a coupled driver, whose sea-ice model owns the ice)."""
+    if not resolve_ocean_flux_on_ocean_surface(cfg):
+        _why = ("ocean_flux_on_ocean_surface is off"
+                if cfg.ocean_flux_on_ocean_surface is False
+                else ocean_flux_surface_eligibility(cfg)[1])
+        return False, ("the non-land fluxes are not on the ocean/ice surface "
+                       f"({_why})")
+    if cfg.ice_skin_prognostic is False:
+        return False, ("ice_skin_prognostic is off (the split charges the "
+                       "prognostic ice skin)")
+    return True, ""
+
+
+def resolve_sea_ice_flux_split(cfg) -> bool:
+    """The resolved tri-state ``sea_ice_flux_split``:
+    None (auto) -> on exactly where eligible; True/False as given."""
+    if cfg.sea_ice_flux_split is None:
+        return sea_ice_flux_split_eligibility(cfg)[0]
+    return bool(cfg.sea_ice_flux_split)
 
 
 def resolve_land_stress_from_land(cfg) -> bool:

@@ -659,14 +659,16 @@ class TestFV3DuoDefaultDenyWall:
         )
         assert set(_FV3_DUO_AUTO_RESOLVED) == {
             "ice_skin_prognostic", "sea_ice_albedo_scheme",
-            "ocean_flux_on_ocean_surface"}
+            "ocean_flux_on_ocean_surface", "sea_ice_flux_split"}
         resolved = _fv3_duo_config(ice_skin_prognostic=False,
                                    sea_ice_albedo_scheme="constant",
-                                   ocean_flux_on_ocean_surface=False)
+                                   ocean_flux_on_ocean_surface=False,
+                                   sea_ice_flux_split=False)
         _refuse_fv3_duo_non_default(resolved)  # must not raise
         for field, value in (("ice_skin_prognostic", True),
                              ("sea_ice_albedo_scheme", "maykut_untersteiner"),
-                             ("ocean_flux_on_ocean_surface", True)):
+                             ("ocean_flux_on_ocean_surface", True),
+                             ("sea_ice_flux_split", True)):
             with pytest.raises(ValueError, match=field):
                 _refuse_fv3_duo_non_default(
                     resolved._replace(**{field: value}))
@@ -1359,7 +1361,15 @@ def test_wall_default_surface_is_frozen():
 # DEFAULTS are inert here by read: every config field the duo run loop
 # reads is allow-listed, and its Kessler leaf gets no
 # morrison scalar while morrison_ice_snow_d_auto is None.
-_WALL_SURFACE_SHA256 = "c4057f6e83bc88dc75965ef2a5e68e257f4f9ef6116740d3757b93659110cff6"
+#
+# 2026-11-20 (#2573): the literal was already stale on main (origin/main
+# acbbad1d97 fails this test with the old value); this branch's surface is
+# main's plus 1 ADDED: sea_ice_flux_split (None, AUTO).  It resolves
+# False on the duo lane (ocean_flux_on_ocean_surface resolves False there)
+# and is in _FV3_DUO_AUTO_RESOLVED, so it passes only at that value and
+# True is refused (test_auto_fields_pass_at_their_resolved_value_only).
+# Nothing MOVED; the allow-list is unchanged.
+_WALL_SURFACE_SHA256 = "1a2e7c317d6785f2d329d165791faf033fd9f70fd5885917530d5ac00c6796dc"
 
 
 def test_wall_leaf_types_are_scalar():

@@ -1167,3 +1167,208 @@ def test_spectral_multilayer_land_refused():
         dycore=DycoreConfig(dt=600.0, discretization="spectral"))
     with pytest.raises(ValueError, match="never stepped on the spectral lane"):
         cfg.validate_strict()
+
+
+# ---------------------------------------------------------------------------
+# Ice / open-water turbulent split (sea_ice_flux_split, #2573)
+# ---------------------------------------------------------------------------
+
+_T_ICE = 255.0       # cold ice skin under 290 K air [K]
+_SH_LAND = 40.0      # land sensible heat in _land_forcing [W/m2]
+
+
+def _split_forcing(ncell, f_land, sic, *, T_ice=_T_ICE, split=True):
+    """Ocean-surface forcing whose non-land anchor is the sic blend of the
+    ice skin and the SST; ``split`` adds the tile keys."""
+    T_ice = jnp.full((ncell,), T_ice)
+    T_w = jnp.full((ncell,), _T_OCEAN)
+    f = _ocean_sfc_forcing(ncell, f_land)
+    f["T_sfc_ocean"] = sic * T_ice + (1.0 - sic) * T_w
+    if split:
+        f.update(sea_ice_frac=sic, T_sfc_ice=T_ice, T_sfc_water=T_w)
+    return f
+
+
+def _split_setup(state64):
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.asarray(np.linspace(0.1, 0.9, ncell))
+    sic = jnp.asarray(np.linspace(0.8, 0.2, ncell))
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    return ncell, f_land, sic, fn
+
+
+def _one_surface(fn, state64, mesh, sigma, ncell, f_land, T):
+    """A run whose whole non-land surface is at ``T`` (no split)."""
+    f = _ocean_sfc_forcing(ncell, f_land)
+    f["T_sfc_ocean"] = jnp.full((ncell,), T)
+    return _fluxes(fn(state64, mesh, sigma, forcing=f))
+
+
+def test_ice_split_closure_and_exchanged_flux(mpas_mesh, sigma_coord, state64):
+    """RULE 0 closure, per grid cell: the heat and water the atmosphere
+    receives = land + ice area x ice tile + open-water area x water tile, with
+    each tile the flux of a run whose only non-land surface IS that tile.  The
+    ice-tile SH/LH exported for the ice skin is that same ice term (same value,
+    same sign at both ends).  Fails without the split: no ice export, and the
+    blended surface gives a different total (nonlinear exchange law)."""
+    ncell, f_land, sic, fn = _split_setup(state64)
+    fl, s = np.asarray(f_land), np.asarray(sic)
+    on, t_on = _fluxes(fn(state64, mpas_mesh, sigma_coord,
+                          forcing=_split_forcing(ncell, f_land, sic)))
+    ice, _ = _one_surface(fn, state64, mpas_mesh, sigma_coord, ncell,
+                          f_land, _T_ICE)
+    wat, _ = _one_surface(fn, state64, mpas_mesh, sigma_coord, ncell,
+                          f_land, _T_OCEAN)
+    for k in on:
+        np.testing.assert_allclose(on[k], s * ice[k] + (1.0 - s) * wat[k],
+                                   rtol=1e-12, atol=0, err_msg=k)
+    land = {"shflx_sfc": _SH_LAND, "lhflx_sfc": 90.0,
+            "evap_sfc": 90.0 / constants.L_v}
+    tile = {k: (v - fl * land[k]) / (1.0 - fl) for k, v in ice.items()}
+    wtile = {k: (v - fl * land[k]) / (1.0 - fl) for k, v in wat.items()}
+    sh_i = np.asarray(t_on.shflx_ice.data)
+    lh_i = np.asarray(t_on.lhflx_ice.data)
+    np.testing.assert_allclose(sh_i, tile["shflx_sfc"], rtol=1e-12, atol=0)
+    np.testing.assert_allclose(lh_i, tile["lhflx_sfc"], rtol=1e-12, atol=0)
+    # in - out - d(storage) = 0 with no storage in the exchange itself.
+    for k, ice_k in (("shflx_sfc", sh_i), ("lhflx_sfc", lh_i)):
+        resid = (on[k] - fl * land[k] - (1.0 - fl) * s * ice_k
+                 - (1.0 - fl) * (1.0 - s) * wtile[k])
+        np.testing.assert_allclose(resid, 0.0, atol=1e-10 * np.abs(on[k]).max())
+    # Sign: the cold ice skin is HEATED by the 290 K air (downward sensible,
+    # negative upward), the warm open water heats the air.
+    assert (sh_i < 0.0).all() and (wtile["shflx_sfc"] > 0.0).all()
+    off, t_off = _fluxes(fn(state64, mpas_mesh, sigma_coord,
+                            forcing=_split_forcing(ncell, f_land, sic,
+                                                   split=False)))
+    assert getattr(t_off, "shflx_ice", None) is None
+    # Latent heat: the humidity law is nonlinear in T, so the blended surface
+    # gives a different total (sensible can coincide under a linear law).
+    assert not np.allclose(off["lhflx_sfc"], on["lhflx_sfc"], rtol=1e-6)
+
+
+@pytest.mark.parametrize("cover,T_ref", [(0.0, _T_OCEAN), (1.0, _T_ICE)])
+def test_ice_split_end_members(mpas_mesh, sigma_coord, state64, cover, T_ref):
+    """No ice: the open-water run; full ice: the ice run (fluxes and the
+    column tendencies)."""
+    ncell, f_land, _, fn = _split_setup(state64)
+    sic = jnp.full((ncell,), cover)
+    on, t_on = _fluxes(fn(state64, mpas_mesh, sigma_coord,
+                          forcing=_split_forcing(ncell, f_land, sic)))
+    ref, t_ref = _one_surface(fn, state64, mpas_mesh, sigma_coord, ncell,
+                              f_land, T_ref)
+    for k in on:
+        np.testing.assert_allclose(on[k], ref[k], rtol=1e-12, atol=0,
+                                   err_msg=k)
+    np.testing.assert_allclose(np.asarray(t_on.dT_dt.data),
+                               np.asarray(t_ref.dT_dt.data), rtol=1e-12,
+                               atol=0)
+    np.testing.assert_allclose(np.asarray(t_on.du_dt.data),
+                               np.asarray(t_ref.du_dt.data), rtol=1e-12,
+                               atol=0)
+
+
+def test_ice_split_gradient(mpas_mesh, sigma_coord, state64):
+    ncell, f_land, sic, fn = _split_setup(state64)
+    base = _split_forcing(ncell, f_land, sic)
+
+    def loss(T_ice):
+        out = fn(state64, mpas_mesh, sigma_coord,
+                 forcing=dict(base, T_sfc_ice=T_ice))
+        out = out[0] if isinstance(out, tuple) else out
+        return (jnp.sum(out.dT_dt.data[:, -1] ** 2)
+                + jnp.sum(out.shflx_ice.data))
+
+    from jax.test_util import check_grads
+    check_grads(loss, (base["T_sfc_ice"],), order=1, modes=["rev"],
+                rtol=1e-5)
+    g = np.asarray(jax.grad(loss)(base["T_sfc_ice"]))
+    assert np.isfinite(g).all() and np.abs(g).max() > 0
+
+
+def test_ice_split_refusals(mpas_mesh, sigma_coord, state64):
+    ncell, f_land, sic, fn = _split_setup(state64)
+    f = _split_forcing(ncell, f_land, sic)
+    with pytest.raises(ValueError, match="missing"):
+        fn(state64, mpas_mesh, sigma_coord,
+           forcing={k: v for k, v in f.items() if k != "T_sfc_water"})
+    with pytest.raises(ValueError, match="T_sfc_ocean"):
+        fn(state64, mpas_mesh, sigma_coord,
+           forcing={k: v for k, v in f.items() if k != "T_sfc_ocean"})
+    with pytest.raises(ValueError, match="handback"):
+        fn(state64, mpas_mesh, sigma_coord,
+           forcing=dict(f, shflx_hb=jnp.zeros((ncell,))))
+    no_land = {k: f[k] for k in ("T_sfc", "sea_ice_frac", "T_sfc_ice",
+                                 "T_sfc_water")}
+    with pytest.raises(ValueError, match="sea_ice_frac"):
+        fn(state64, mpas_mesh, sigma_coord, forcing=no_land)
+
+
+@pytest.mark.parametrize("kw,want", [
+    (dict(), True),
+    (dict(ocean_flux_on_ocean_surface=False), False),
+    (dict(ice_skin_prognostic=False), False),
+    (dict(land_beta_soil=False), False),
+], ids=["eligible", "ocean_surface_off", "skin_off", "no_handoff"])
+def test_ice_split_auto_on_exactly_where_true_is_accepted(kw, want):
+    from legoesm.driver.config import (
+        ExperimentConfig, resolve_sea_ice_flux_split as res)
+    assert ExperimentConfig().sea_ice_flux_split is None
+    cfg = _eligible_cfg(**kw)
+    cfg.validate_strict()
+    assert res(cfg) is want
+    explicit = cfg._replace(sea_ice_flux_split=True)
+    if want:
+        explicit.validate_strict()
+    else:
+        with pytest.raises(ValueError, match="sea_ice_flux_split"):
+            explicit.validate_strict()
+    assert res(cfg._replace(sea_ice_flux_split=False)) is False
+
+
+@pytest.mark.parametrize("kw,want", [
+    (dict(), True), (dict(ocean_flux_on_ocean_surface=False), False),
+    (dict(sea_ice_flux_split=False), False),
+])
+def test_ice_split_auto_resolved_into_driver_config(kw, want):
+    from legoesm.driver.model_driver import ModelDriver
+    d = ModelDriver(_eligible_cfg(**kw))
+    d._resolve_ocean_flux_surface()
+    assert d.config.sea_ice_flux_split is want
+    assert d._input_config.sea_ice_flux_split is want
+
+
+def test_ice_skin_is_charged_the_exported_ice_tile_flux():
+    """Consumer side of the exchange: the skin advance reads the ice-tile
+    SH/LH from the slots the MPAS producers fill (tuple built the producers'
+    way), never the cell mean; a missing ice export raises.  The held-physics
+    cache keeps the ice fields like every other diagnostic rate."""
+    from legoesm.core.state import (
+        HydrostaticTendencies, MPAS_SFC_DIAG_EXTRA_KEYS)
+    from legoesm.driver.model_driver import ice_skin_turbulent_fluxes
+    from legoesm.atmosphere.physics.combined import merge_physics_cache
+    from legoesm.core.field import Field
+
+    def fld(v):
+        return Field(data=jnp.full((3,), v), name="x", units="W/m^2")
+    zero = fld(0.0)
+    tend = HydrostaticTendencies(
+        du_dt=zero, dv_dt=None, dT_dt=zero, dp_s_dt=zero, dphis_dt=zero,
+        shflx_sfc=fld(10.0), lhflx_sfc=fld(20.0),
+        shflx_ice=fld(-30.0), lhflx_ice=fld(4.0))
+    sd = (None, None, None) + tuple(
+        getattr(tend, k, None) for k in MPAS_SFC_DIAG_EXTRA_KEYS)
+    sh, lh = ice_skin_turbulent_fluxes(sd, True)
+    np.testing.assert_array_equal(np.asarray(sh), -30.0)
+    np.testing.assert_array_equal(np.asarray(lh), 4.0)
+    sh, lh = ice_skin_turbulent_fluxes(sd, False)
+    np.testing.assert_array_equal(np.asarray(sh), 10.0)
+    np.testing.assert_array_equal(np.asarray(lh), 20.0)
+    no_ice = tend._replace(shflx_ice=None, lhflx_ice=None)
+    sd0 = (None, None, None) + tuple(
+        getattr(no_ice, k, None) for k in MPAS_SFC_DIAG_EXTRA_KEYS)
+    with pytest.raises(RuntimeError, match="ice tile"):
+        ice_skin_turbulent_fluxes(sd0, True)
+    held = merge_physics_cache(tend, tend._replace(shflx_ice=fld(-7.0)))
+    np.testing.assert_array_equal(np.asarray(held.shflx_ice.data), -7.0)
