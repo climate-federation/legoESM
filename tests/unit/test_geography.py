@@ -250,6 +250,17 @@ def test_coupled_refuses_geography_with_its_own_land_tile(tmp_path, monkeypatch,
         d.setup()
 
 
+def test_present_day_refuses_non_metre_elevation(tmp_path):
+    import xarray as xr
+    lat, lon = np.arange(-89.5, 90.0, 1.0), np.arange(0.5, 360.0, 1.0)
+    z = xr.Dataset({"z": (("lat", "lon"), np.zeros((lat.size, lon.size)),
+                          {"units": "m**2 s**-2"})}, coords={"lat": lat, "lon": lon})
+    m = xr.Dataset({"sftlf": (("lat", "lon"), np.zeros((lat.size, lon.size)))},
+                   coords={"lat": lat, "lon": lon})
+    with pytest.raises(ValueError, match="not metres"):
+        mg.present_day(_write(z, tmp_path, "z.nc"), _write(m, tmp_path, "m.nc"))
+
+
 def test_duo_column_lane_rebuilds_terrain_from_a_geography():
     from types import SimpleNamespace
 
