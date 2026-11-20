@@ -6,6 +6,7 @@ unplanted step passes; none edits an already computed result.
 """
 
 import hashlib
+import inspect
 import struct
 import subprocess
 import sys
@@ -108,6 +109,14 @@ def _load_pre_split_o17() -> types.ModuleType:
     source = sources["si3_o17"].replace(
         "from legoesm.ice.si3_finalize import (",
         f"from {finalize_name} import (",
+        1,
+    )
+    # The historical body imports today's EOS helper.  U2 deliberately removed
+    # that helper's default, so make the archived caller's already-resolved card
+    # value explicit without changing the historical calculation.
+    source = source.replace(
+        "forcing.sss_m, kbnd=0, nn_hls=h  # icestp.F90:136",
+        "forcing.sss_m, kbnd=0, nn_hls=h, ln_teos10=card.ln_teos10  # icestp.F90:136",
         1,
     )
     exec(compile(source, o17.__file__, "exec"), o17.__dict__)
@@ -302,6 +311,8 @@ def _full_checks(entry, card, result, pre_tail, baseline) -> None:
 
 
 def test_o17_typed_pytree_boundary_and_explicit_card() -> None:
+    eos_parameter = inspect.signature(si3_eos_fzp).parameters["ln_teos10"]
+    assert eos_parameter.default is inspect.Parameter.empty
     assert SI3O17LiveForcing._fields[:4] == ("kt", "sss_m", "sst_m", "rn_amax_2d")
     assert not (
         {"redistribution_state", "correction_state", "thermo", "fluxes"}
@@ -812,7 +823,9 @@ def test_o17_newly_guarded_outputs_reverse_mode_matches_central_differences_and_
         v_s=eqv0.v_s, e_s=e_s0, t_su=t_su0, t_si=t_si0, equivalent=eqv0, aggregated=agg0
     )
 
-    t_bo_celsius = o17_mod.si3_eos_fzp(forcing.sss_m, kbnd=0, nn_hls=h)
+    t_bo_celsius = o17_mod.si3_eos_fzp(
+        forcing.sss_m, kbnd=0, nn_hls=h, ln_teos10=card.ln_teos10
+    )
     t_bo = (t_bo_celsius[owned] + card.constants.T0) * sf.smask0 + card.constants.T0 * (
         1.0 - sf.smask0
     )

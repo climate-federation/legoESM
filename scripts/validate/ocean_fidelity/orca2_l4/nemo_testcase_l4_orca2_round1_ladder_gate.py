@@ -379,7 +379,8 @@ def record_initial_ice_state(card):
     ssh = orca2_initial_ice_ssh(
         np.asarray(state.T.data), np.asarray(state.S.data),
         np.asarray(z.is_active), np.asarray(card.recipe.grid.f_T),
-        np.asarray(z.nemo_e1e2t), ice, ln_teos10=False)
+        np.asarray(z.nemo_e1e2t), ice,
+        ln_teos10=card.recipe.model_config.eos == "nemo_teos10")
     return state._replace(eta=state.eta.replace(
         data=jnp.asarray(ssh, dtype=jnp.float64)))
 

@@ -429,6 +429,28 @@ def test_scorer_main_returns_nonzero_on_c2_failure(monkeypatch, tmp_path: Path) 
     assert scorer.main() == 2
 
 
+def test_scorer_main_returns_nonzero_on_c3_failure(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        scorer,
+        "run_c3_compiled",
+        lambda *_a, **_k: {"status": "FAIL_C3 step=99 kind=1 planted"},
+    )
+    monkeypatch.setattr(
+        scorer,
+        "_admitted_resolved_namelist",
+        lambda _evidence: {"jpl": 5, "nlay_i": 10, "nlay_s": 5},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "scorer.py", "--evidence", str(tmp_path),
+            "--ppsrc", str(tmp_path / "ppsrc"), "--mode", "C3",
+        ],
+    )
+    assert scorer.main() == 2
+
+
 @pytest.mark.parametrize("unit", ("stprk3", "sbcssm", "sbcmod", "icestp", "iceupdate"))
 def test_each_observer_patch_applies_to_real_ppsrc(tmp_path: Path, unit: str) -> None:
     target = tmp_path / f"{unit}.f90"

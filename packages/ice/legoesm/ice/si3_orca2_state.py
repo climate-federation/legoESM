@@ -3197,7 +3197,7 @@ def _si3_pra_subcycle_cond_dispatch(
 
 
 def si3_dyn_adv_pra_orca2(
-    kt: int,
+    kt: int | Field,
     u_ice: Field,
     v_ice: Field,
     h_i: Field,
@@ -3283,7 +3283,10 @@ def si3_dyn_adv_pra_orca2(
     if not isinstance(config, SI3ORCA2StateConfig):
         raise ValueError("si3_dyn_adv_pra_orca2 requires an explicit SI3ORCA2StateConfig")
     cfg = config
-    if kt < 1 or cfg.nn_fsbc < 1:
+    traced_kt = isinstance(kt, jax.core.Tracer)
+    if ((not traced_kt
+         and (isinstance(kt, bool) or not isinstance(kt, (int, np.integer)) or kt < 1))
+            or cfg.nn_fsbc < 1):
         raise ValueError("si3_dyn_adv_pra_orca2 requires kt >= 1 and nn_fsbc >= 1")
     sr = nemo_source_round
     consts = cfg.ice_constants
@@ -3311,7 +3314,10 @@ def si3_dyn_adv_pra_orca2(
 
     zudy = sr(u_ice * grid.e2u)
     zvdx = sr(v_ice * grid.e1v)
-    kt_parity = ((int(kt) - 1) // int(cfg.nn_fsbc)) % 2
+    kt_parity = (
+        ((jnp.asarray(kt, dtype=jnp.int32) - 1) // int(cfg.nn_fsbc)) % 2
+        if traced_kt else ((int(kt) - 1) // int(cfg.nn_fsbc)) % 2
+    )
 
     init_carry = (
         ato_i,
@@ -4284,7 +4290,7 @@ def si3_glob_2dsum_ddpdd(
 def si3_eos_fzp(
     sss_m: Field,
     *,
-    ln_teos10: bool = True,
+    ln_teos10: bool,
     kbnd: int = 2,
     nn_hls: int = 2,
     _plant_wrong_eos: bool = False,

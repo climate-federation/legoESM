@@ -1027,18 +1027,19 @@ class NemoORCA2SI3Trace(NamedTuple):
 class NemoORCA2SI3Carry:
     """Restart-complete pure carry for the ORCA2+SI3 source-order recipe.
 
-    ``kt`` is static pytree metadata because the admitted SI3 Prather sweep and
-    aEVP program select a compile-time source program from the integer step.
-    All physical state remains dynamic leaves under :func:`jax.jit`/``grad``.
+    ``kt`` is a dynamic scalar leaf so one compiled odd/even pair can carry a
+    long trajectory.  The pair fixes the odd/even source programs statically;
+    SI3's alternating Prather sweep consumes the carried scalar dynamically.
     """
 
     __slots__ = (
         "ocean", "ice", "means", "stress", "fluxes", "runoff",
         "restoring_volume_flux", "restoring_heat_flux", "restoring_coefficient",
-        "a_fwb", "a_fwb_b", "emp_corr", "shortwave_fraction_top", "kt",
+        "a_fwb", "a_fwb_b", "emp_corr", "shortwave_fraction_top",
+        "ocean_bt_hist", "ocean_eta_rk3_after", "ice_cflice_delayed", "kt",
     )
 
-    _dynamic_fields = __slots__[:-1]
+    _dynamic_fields = __slots__
 
     def __init__(
         self,
@@ -1055,17 +1056,21 @@ class NemoORCA2SI3Carry:
         a_fwb_b,
         emp_corr,
         shortwave_fraction_top,
+        ocean_bt_hist,
+        ocean_eta_rk3_after,
+        ice_cflice_delayed,
         kt,
     ):
-        if type(kt) is not int or kt < 1:
-            raise ValueError("NemoORCA2SI3Carry kt must be a positive Python integer")
+        if isinstance(kt, (int, np.integer)) and (isinstance(kt, bool) or kt < 1):
+            raise ValueError("NemoORCA2SI3Carry kt must be a positive integer scalar")
         for name, value in zip(self._dynamic_fields, (
             ocean, ice, means, stress, fluxes, runoff,
             restoring_volume_flux, restoring_heat_flux, restoring_coefficient,
             a_fwb, a_fwb_b, emp_corr, shortwave_fraction_top,
+            ocean_bt_hist, ocean_eta_rk3_after, ice_cflice_delayed,
+            kt,
         ), strict=True):
             object.__setattr__(self, name, value)
-        object.__setattr__(self, "kt", kt)
 
     def __setattr__(self, name, value):
         raise AttributeError("NemoORCA2SI3Carry is immutable; use _replace")
@@ -1077,17 +1082,17 @@ class NemoORCA2SI3Carry:
         return type(self)(*(updates.get(name, getattr(self, name)) for name in self.__slots__))
 
     def tree_flatten(self):
-        return tuple(getattr(self, name) for name in self._dynamic_fields), self.kt
+        return tuple(getattr(self, name) for name in self._dynamic_fields), None
 
     @classmethod
-    def tree_unflatten(cls, kt, children):
-        return cls(*children, kt)
+    def tree_unflatten(cls, _aux, children):
+        return cls(*children)
 
 
 jax.tree_util.register_pytree_node(
     NemoORCA2SI3Carry,
     lambda carry: carry.tree_flatten(),
-    lambda kt, children: NemoORCA2SI3Carry.tree_unflatten(kt, children),
+    lambda aux, children: NemoORCA2SI3Carry.tree_unflatten(aux, children),
 )
 
 
@@ -1100,10 +1105,24 @@ def nemo_orca2_si3_cold_start(
 
     _validate_nemo_orca2_si3_eos(card)
     fwb = nemo_fwb_case2_cold_start(rn_fwb0)
+    cflice_placeholder = jnp.zeros(
+        (), dtype=jnp.asarray(means.frq).dtype
+    )
+    u_hist_source = getattr(ocean, "uu_b", ocean.u).data
+    v_hist_source = getattr(ocean, "vv_b", ocean.v).data
+    bt_hist_placeholder = (
+        jnp.zeros_like(u_hist_source),
+        jnp.zeros_like(u_hist_source),
+        jnp.zeros_like(v_hist_source),
+        jnp.zeros_like(v_hist_source),
+        jnp.zeros_like(ocean.eta.data),
+        jnp.zeros_like(ocean.eta.data),
+    )
     return NemoORCA2SI3Carry(
         ocean, ice, means, stress, fluxes, runoff,
         restoring_volume_flux, restoring_heat_flux, restoring_coefficient,
-        fwb.a_fwb, fwb.a_fwb_b, fwb.emp_corr, means.frq, kt,
+        fwb.a_fwb, fwb.a_fwb_b, fwb.emp_corr, means.frq,
+        bt_hist_placeholder, ocean.eta, cflice_placeholder, kt,
     )
 
 
@@ -1251,7 +1270,7 @@ def build_nemo_orca2_si3_coupled_recipe(
     controls,
     ice_card,
 ):
-    """Construct the two-step coupled recipe from its own admitted deck.
+    """Construct a coupled trajectory from its own admitted deck.
 
     The scorer supplies only decoded forcing records and the resolved SI3
     configuration.  Initial-state physics, static grid fields, masks, model
@@ -1391,14 +1410,17 @@ def build_nemo_orca2_si3_coupled_recipe(
         NemoORCA2SI3Forcing(
             row["s0f"], static.o17, row["chl"], row["geothermal_heat_flux_mwm2"]
         )
-        for row in controls[:2]
+        for row in controls
     )
     full = static.tmask.shape
     owned = ocean_state.eta.data.shape
     ice_owned = (full[0] - 2 * h, full[1] - 2 * h)
     fluxes = SI3UpdateFluxOutputs(*(
         jnp.zeros(
-            full if name in ("fr_i", "snwice_mass", "snwice_mass_b", "snwice_fmass")
+            full
+            if name in ("fr_i", "snwice_mass", "snwice_mass_b", "snwice_fmass")
+            else ice_owned + (ice_card.state.jpl,)
+            if name in ("tn_ice", "alb_ice")
             else ice_owned,
             dtype=jnp.float64,
         )
@@ -1429,7 +1451,7 @@ def build_nemo_orca2_si3_coupled_recipe(
         kt=1,
         card=card,
     )
-    return carry, forcing, (controls[0]["sponge"], controls[1]["sponge"]), card, model
+    return carry, forcing, tuple(row["sponge"] for row in controls), card, model
 
 
 def _validate_nemo_orca2_si3_eos(card: NemoORCA2SI3Card) -> None:
@@ -1511,6 +1533,7 @@ def nemo_orca2_si3_coupled_step(
     *,
     model,
     sponge,
+    _surface_update: bool | None = None,
 ):
     """One coupled ORCA2+SI3 step in ``sbcmod``/``stprk3`` source order.
 
@@ -1568,7 +1591,15 @@ def nemo_orca2_si3_coupled_step(
     )
 
     atmosphere, runoff_now, sss_target = nemo_orca2_k0_s0f(forcing.s0f)
-    surface_update = _nemo_orca2_si3_surface_update_due(kt, card.forcing_stride)
+    surface_update = (
+        _nemo_orca2_si3_surface_update_due(kt, card.forcing_stride)
+        if _surface_update is None else _surface_update
+    )
+    if not isinstance(surface_update, bool):
+        raise TypeError(
+            "compiled coupled steps require the odd/even surface-update arm "
+            "from nemo_orca2_si3_coupled_pair"
+        )
     bulk = None
     # sbcblk.F90:589: MOD(kt-1,nn_fsbc)==0.  Even steps retain the private
     # open-ocean stress/flux inputs produced on the preceding odd step.
@@ -1701,7 +1732,9 @@ def nemo_orca2_si3_coupled_step(
         config=card.ice.state,
         ln_drgice_imp=card.ice.ln_drgice_imp,
         nn_fsbc=card.forcing_stride,
-        kt=kt,
+        # This routine depends only on the static odd/even refresh arm.  The
+        # absolute carried step remains live in every time-dependent consumer.
+        kt=1 if surface_update else 2,
     )
 
     ice_qsr = jnp.asarray(fluxes.qsr, dtype=jnp.float64).T
@@ -1819,6 +1852,8 @@ def nemo_orca2_si3_coupled_step(
         ice_mean_thickness_hm_i=hm_i,
         ice_ocean_top_drag_rCdu=rcdu,
     )
+    if isinstance(kt, jax.core.Tracer) and sponge is not None:
+        sponge = sponge._replace(nemo_kt=kt)
     stepped = nemo_orca2_ocean_consumption_step(
         card.ocean,
         state,
@@ -1874,25 +1909,97 @@ def nemo_orca2_si3_coupled_pair(
     even_forcing: NemoORCA2SI3Forcing,
     model,
     sponge,
+    even_sponge,
 ):
-    """Run the admitted C2 odd/even pair; callers own the :func:`jax.jit`.
+    """Run one odd/even pair with an invariant externally carried pytree.
 
-    Keeping the compilation boundary outside this pure recipe lets the C-ladder
-    harness judge the compiled model without moving loading, comparison, or
-    reporting into production physics.
+    A true cold ocean has no barotropic history/after-SSH and SI3 has no
+    delayed CFL scalar.  The first pair creates those arrays, which would
+    otherwise change the pytree and force a second compilation.  The external
+    carry keeps those three mature values in explicit cache leaves and stores
+    ``None`` in their source-owned state slots between pairs.  The cold arm
+    uses the untouched from-rest state; the warm arm restores the caches.
+    Both arms return the same tree, so one executable handles all C3 pairs.
     """
 
-    odd_carry, odd = nemo_orca2_si3_coupled_step(
-        carry, forcing, card, model=model, sponge=sponge
-    )
-    even_carry, even = nemo_orca2_si3_coupled_step(
-        odd_carry,
-        even_forcing,
-        card,
-        model=model,
-        sponge=sponge,
-    )
-    return even_carry, (odd, even)
+    def stabilize(next_carry, odd, even):
+        bt_hist = next_carry.ocean.bt_hist
+        eta_rk3_after = next_carry.ocean.eta_rk3_after
+        cflice_delayed = next_carry.ice.ice.cflice_delayed
+        missing = [
+            name for name, value in (
+                ("ocean.bt_hist", bt_hist),
+                ("ocean.eta_rk3_after", eta_rk3_after),
+                ("ice.cflice_delayed", cflice_delayed),
+            ) if value is None
+        ]
+        if missing:
+            raise ValueError(
+                "coupled pair did not create mature carry fields: "
+                + ", ".join(missing)
+            )
+        stable_carry = next_carry._replace(
+            ocean=next_carry.ocean._replace(bt_hist=None, eta_rk3_after=None),
+            ice=next_carry.ice._replace(
+                ice=next_carry.ice.ice._replace(cflice_delayed=None)
+            ),
+            stress=next_carry.stress._replace(rCdU_ice=None),
+            ocean_bt_hist=bt_hist,
+            ocean_eta_rk3_after=eta_rk3_after,
+            ice_cflice_delayed=cflice_delayed,
+        )
+        # Trace data is not carry.  Stabilize only optional metadata on the
+        # unscored state object so lax.cond can return either arm; every scored
+        # field remains the exact cold/warm model observation.
+        odd_entry = odd.ocean_entry
+        if odd_entry.bt_hist is None:
+            odd = odd._replace(ocean_entry=odd_entry._replace(
+                bt_hist=next_carry.ocean_bt_hist,
+                eta_rk3_after=next_carry.ocean_eta_rk3_after,
+            ))
+        return stable_carry, (odd, even)
+
+    def run_pair(entry):
+        odd_carry, odd = nemo_orca2_si3_coupled_step(
+            entry,
+            forcing,
+            card,
+            model=model,
+            sponge=sponge,
+            _surface_update=_nemo_orca2_si3_surface_update_due(
+                1, card.forcing_stride
+            ),
+        )
+        even_carry, even = nemo_orca2_si3_coupled_step(
+            odd_carry,
+            even_forcing,
+            card,
+            model=model,
+            sponge=even_sponge,
+            _surface_update=_nemo_orca2_si3_surface_update_due(
+                2, card.forcing_stride
+            ),
+        )
+        return stabilize(even_carry, odd, even)
+
+    def run_warm(entry):
+        warm_ocean = entry.ocean._replace(
+            bt_hist=entry.ocean_bt_hist,
+            eta_rk3_after=entry.ocean_eta_rk3_after,
+        )
+        warm_ice = entry.ice._replace(ice=entry.ice.ice._replace(
+            cflice_delayed=entry.ice_cflice_delayed
+        ))
+        return run_pair(entry._replace(ocean=warm_ocean, ice=warm_ice))
+
+    if isinstance(carry.kt, jax.core.Tracer):
+        return jax.lax.cond(
+            jnp.asarray(carry.kt) == jnp.asarray(1),
+            run_pair,
+            run_warm,
+            carry,
+        )
+    return run_pair(carry) if int(carry.kt) == 1 else run_warm(carry)
 
 
 def nemo_orca2_ocean_consumption_step(
@@ -1913,8 +2020,11 @@ def nemo_orca2_ocean_consumption_step(
     top-drag consumers; this core only shares its exact ``model.step`` call.
     """
 
-    if (isinstance(nemo_kt, bool) or not isinstance(nemo_kt, (int, np.integer))
-            or nemo_kt < 1):
+    traced_kt = isinstance(nemo_kt, jax.core.Tracer)
+    if (not traced_kt
+            and (isinstance(nemo_kt, bool)
+                 or not isinstance(nemo_kt, (int, np.integer))
+                 or nemo_kt < 1)):
         raise ValueError("ORCA2 ocean consumption requires nemo_kt=<positive step>")
     if model is None:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -1929,7 +2039,7 @@ def nemo_orca2_ocean_consumption_step(
     kwargs = {
         "freshwater": freshwater_forcing,
         "surface_forcing": surface_forcing,
-        "nemo_kt": int(nemo_kt),
+        "nemo_kt": nemo_kt if traced_kt else int(nemo_kt),
     }
     if sponge is not None:
         kwargs["sponge"] = sponge

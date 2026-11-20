@@ -2106,7 +2106,6 @@ def build_orca2_zps_card(
     deck_root: str | Path,
     *,
     initial_state: str = "si3_iceistate",
-    ln_teos10: bool = False,
 ) -> NEMOTestcaseCard:
     """Build the source-file-driven ORCA2+SI3 card through ocean kt=1 entry.
 
@@ -2247,6 +2246,29 @@ def build_orca2_zps_card(
         nemo_e3t_jpk=jnp.asarray(e3t_jpk, dtype=jnp.float64),
     )
 
+    model_config = _model_config(
+        barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.09,
+        n_barotropic_substeps=65,
+        bbl_adv_option=0,
+        bbl_gamma_s=0.0,
+        bbl_diffusive_option=1,
+        bbl_aht_m2_s=1000.0,
+        whole_step_identity="orca2_vector_een_c2",
+        # ln_lc: the literal Langmuir source, imlc = mbkt+1 when no level
+        # crosses (zdftke.f90:311-378, :354; Decision 135, round 312).
+        tke_langmuir_evaluation="nemo_literal",
+    )
+    if model_config.eos == "nemo_teos10":
+        freezing_ln_teos10 = True
+    elif model_config.eos == "nemo_eos80":
+        freezing_ln_teos10 = False
+    else:
+        raise ValueError(
+            "ORCA2 initial freezing point requires a NEMO TEOS-10 or EOS-80 "
+            f"model_config.eos, got {model_config.eos!r}"
+        )
+
     if initial_state == "si3_iceistate":
         temperature, salinity = build_orca2_initial_ts(
             temperature_path, salinity_path, tmask)
@@ -2254,7 +2276,7 @@ def build_orca2_zps_card(
         initial_ssh = orca2_initial_ice_ssh(
             temperature, salinity, tmask, np.asarray(grid.f_T),
             metric["e1t"] * metric["e2t"], ORCA2_DECK_INITIAL_ICE,
-            ln_teos10=ln_teos10)
+            ln_teos10=freezing_ln_teos10)
     else:
         temperature, salinity, initial_ssh = build_orca2_istate_for_mode(
             temperature_path,
@@ -2263,7 +2285,7 @@ def build_orca2_zps_card(
             f_t=np.asarray(grid.f_T),
             e1e2t=metric["e1t"] * metric["e2t"],
             initial_state=initial_state,
-            ln_teos10=ln_teos10,
+            ln_teos10=freezing_ln_teos10,
         )
 
     state = rest_state_latlon_cgrid_ocean(
@@ -2283,25 +2305,6 @@ def build_orca2_zps_card(
         eta=state.eta.replace(data=jnp.asarray(initial_ssh, dtype=jnp.float64)),
     )
 
-    model_config = _model_config(
-        barotropic_time_filter="nemo_ab3am4",
-        nemo_barotropic_filter_alpha=0.09,
-        n_barotropic_substeps=65,
-        bbl_adv_option=0,
-        bbl_gamma_s=0.0,
-        bbl_diffusive_option=1,
-        bbl_aht_m2_s=1000.0,
-        whole_step_identity="orca2_vector_een_c2",
-        # ln_lc: the literal Langmuir source, imlc = mbkt+1 when no level
-        # crosses (zdftke.f90:311-378, :354; Decision 135, round 312).
-        tke_langmuir_evaluation="nemo_literal",
-    )
-    expected_eos = "nemo_teos10" if ln_teos10 else "nemo_eos80"
-    if model_config.eos != expected_eos:
-        raise ValueError(
-            "ORCA2 ocean EOS disagrees with the resolved &nameos source: "
-            f"ln_teos10={ln_teos10!r}, ocean eos={model_config.eos!r}"
-        )
     # Geometry-ladder G1 rounds 2-3: ORCA2's T-pivot fold retains NEMO's
     # fold-image V transport in vor_een and in the split-explicit live face
     # depth. These are deck-invariant geometry statements, so every hierarchy

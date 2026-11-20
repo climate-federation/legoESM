@@ -457,7 +457,8 @@ def real_coupled_fixture():
 def _real_pair(fixture):
     carry, forcing, card, model = fixture[:4]
     return bulk.nemo_orca2_si3_coupled_pair(
-        carry, forcing, card, even_forcing=forcing, model=model, sponge=None
+        carry, forcing, card, even_forcing=forcing, model=model,
+        sponge=None, even_sponge=None,
     )[0]
 
 
@@ -588,7 +589,8 @@ def test_compiled_real_pair_has_finite_reverse_mode_gradient(real_coupled_fixtur
             )
         )
         even, _ = bulk.nemo_orca2_si3_coupled_pair(
-            seeded, forcing, card, even_forcing=forcing, model=model, sponge=None
+            seeded, forcing, card, even_forcing=forcing, model=model,
+            sponge=None, even_sponge=None,
         )
         return jnp.sum(even.ocean.eta.data * even.ocean.eta.data)
 
@@ -598,15 +600,15 @@ def test_compiled_real_pair_has_finite_reverse_mode_gradient(real_coupled_fixtur
     assert float(gradient) != 0.0
 
 
-def _c2_observations():
+def _c_observations(steps=(1, 2)):
     from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
         scorer,
     )
 
     values = {}
     for kind in (*scorer.C2_REPORT_ONLY_KINDS, *scorer.C2_VERDICT_KINDS):
-        for kt in (1, 2):
-            if kind in (15, 16) and kt == 2:
+        for kt in steps:
+            if kind in (15, 16) and kt % 2 == 0:
                 continue
             for rank in (0, 1):
                 values[(kind, kt, rank)] = {
@@ -618,14 +620,14 @@ def _c2_observations():
             "umask": np.pad(np.ones((2, 3)), 2),
             "vmask": np.pad(np.ones((2, 3)), 2),
         }
-        for kt in (1, 2)
+        for kt in steps
         for rank in (0, 1)
     }
     return scorer, values, masks
 
 
-def test_c2_d225_allows_only_dry_signed_zero_and_reports_kinds_1_2():
-    scorer, expected, masks = _c2_observations()
+def test_c2_d225_allows_only_dry_signed_zero_and_scores_kinds_1_2():
+    scorer, expected, masks = _c_observations()
     candidate = {
         key: {name: value.copy() for name, value in fields.items()}
         for key, fields in expected.items()
@@ -634,9 +636,10 @@ def test_c2_d225_allows_only_dry_signed_zero_and_reports_kinds_1_2():
     candidate[(3, 1, 0)]["field"][2, 2] = -0.0
     candidate[(1, 1, 0)]["field"][2, 3] = np.nextafter(0.0, 1.0)
     report = scorer.score_c2_observations(candidate, expected, masks)
-    assert report["status"] == "PASS_C2_0_ULP_WET"
+    assert report["status"].startswith("FAIL_C2 step=1 kind=1")
     assert report["counts"][3]["dry_zero_sign_different"] == 1
-    assert report["report_only_counts"][1]["wet_different"] == 1
+    assert report["counts"][1]["wet_different"] == 1
+    assert report["report_only_counts"] == {}
     fields = {
         (row["kind"], row["kt"], row["field"]): row
         for row in report["field_counts"]
@@ -648,7 +651,7 @@ def test_c2_d225_allows_only_dry_signed_zero_and_reports_kinds_1_2():
 
 
 def test_c2_d225_wet_plant_names_first_kind_field_cell_and_step():
-    scorer, expected, masks = _c2_observations()
+    scorer, expected, masks = _c_observations()
     candidate = {
         key: {name: value.copy() for name, value in fields.items()}
         for key, fields in expected.items()
@@ -656,7 +659,56 @@ def test_c2_d225_wet_plant_names_first_kind_field_cell_and_step():
     candidate[(4, 2, 1)]["field"][2, 3] = np.nextafter(0.0, 1.0)
     report = scorer.score_c2_observations(candidate, expected, masks)
     assert report["status"].startswith(
-        "FAIL_C2 kind=4 field=field cell=(2, 3) kt=2 rank=1"
+        "FAIL_C2 step=2 kind=4 field=field cell=(2, 3) rank=1"
+    )
+
+
+def test_u1_kind1_kind2_use_staggered_velocity_masks():
+    scorer, expected, masks = _c_observations()
+    for (kind, _kt, _rank), fields in expected.items():
+        template = fields["field"]
+        if kind == 1:
+            fields.clear()
+            fields.update(
+                ssu_prior=template.copy(), ssv_prior=template.copy(),
+                u_before=template.copy(), v_before=template.copy(),
+            )
+        elif kind == 2:
+            fields.clear()
+            fields.update(ssu=template.copy(), ssv=template.copy())
+    candidate = {
+        key: {name: value.copy() for name, value in fields.items()}
+        for key, fields in expected.items()
+    }
+    for mask in masks.values():
+        mask["umask"][2, 3] = 0.0
+        mask["vmask"][2, 3] = 0.0
+    for field in ("ssu_prior", "ssv_prior", "u_before", "v_before"):
+        candidate[(1, 1, 0)][field][2, 3] = -0.0
+    for field in ("ssu", "ssv"):
+        candidate[(2, 1, 0)][field][2, 3] = -0.0
+    report = scorer.score_c2_observations(candidate, expected, masks)
+    assert report["status"] == "PASS_C2_0_ULP_WET"
+    assert report["counts"][1]["dry_zero_sign_different"] == 4
+    assert report["counts"][2]["dry_zero_sign_different"] == 2
+
+
+def test_c3_late_wet_one_ulp_plant_turns_pass_into_fail():
+    scorer, expected, masks = _c_observations((99, 100))
+    candidate = {
+        key: {name: value.copy() for name, value in fields.items()}
+        for key, fields in expected.items()
+    }
+    baseline = scorer._score_c_observations(
+        candidate, expected, masks, steps=(99, 100), mode="C3"
+    )
+    assert baseline["status"] == "PASS_C3_0_ULP_WET"
+    candidate[(1, 99, 0)]["field"][2, 3] = np.nextafter(0.0, 1.0)
+    planted = scorer._score_c_observations(
+        candidate, expected, masks, steps=(99, 100), mode="C3"
+    )
+    assert planted["status"].startswith(
+        "FAIL_C3 step=99 kind=1 field=field cell=(2, 3) rank=0"
     )
 
 

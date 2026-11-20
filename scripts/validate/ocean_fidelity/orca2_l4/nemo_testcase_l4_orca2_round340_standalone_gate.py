@@ -429,14 +429,16 @@ def read_core_field(path: Path, variable: str) -> np.ndarray:
     return value
 
 
-def load_core_normal_year(root: Path, manifest: Path) -> dict[str, np.ndarray]:
-    """Map every CORE record reachable during the ten-step K0 replay.
+def load_core_normal_year(
+    root: Path, manifest: Path, *, n_steps: int, dt_s: int
+) -> dict[str, np.ndarray]:
+    """Map every CORE record reachable during the requested K0 window.
 
     The files have independent 6-hourly, daily, and monthly cadences.  NEMO
     uses the containing record when ``ln_tint=.false.``; consequently the
-    first ten steps need records 1--5, 1--2, and 1 respectively.  Keeping the
-    leading record axis here prevents the caller from silently freezing
-    record 0 across the replay.
+    The final even step retains the preceding odd step's forcing.  Keeping only
+    the reachable leading records prevents both a silently frozen record 0 and
+    loading the rest of the normal year for a short exactness window.
     """
 
     declared = {}
@@ -454,15 +456,24 @@ def load_core_normal_year(root: Path, manifest: Path) -> dict[str, np.ndarray]:
         require(sha256(root / name) == declared[name],
                 f"round-5 CORE input digest moved: {name}")
 
+    if type(n_steps) is not int or n_steps < 1 or type(dt_s) is not int or dt_s < 1:
+        raise GateError("CORE input window requires positive integer n_steps and dt_s")
+    retained_kt = n_steps if n_steps % 2 else n_steps - 1
+    retained_clock = retained_kt * dt_s
     mapped: dict[str, np.ndarray] = {}
     weights = {bicubic: o1.load_weights(root, bicubic)
                for bicubic in (False, True)}
     for field, filename, variable, bicubic in o1.FIELD_SPECS:
         with netCDF4.Dataset(root / filename) as dataset:
             source_variable = dataset[variable]
-            count = {1460: 5, 365: 2, 12: 1}.get(source_variable.shape[0])
-            require(count is not None,
+            cadence = {1460: 21600, 365: 86400, 12: 2678400}.get(
+                source_variable.shape[0]
+            )
+            require(cadence is not None,
                     f"CORE cadence moved for {variable}: {source_variable.shape}")
+            count = retained_clock // cadence + 1
+            require(count <= source_variable.shape[0],
+                    f"CORE input window exceeds normal year for {variable}: {count}")
             sources = [np.asarray(source_variable[index].data, dtype=np.float64)
                        for index in range(count)]
         indices, coefficients = weights[bicubic]
@@ -552,9 +563,9 @@ def _build_stress_lbc_and_masks(
 
 
 def build_real_composed_inputs(
-    card, deck_root: Path, core_manifest: Path, ice_cover_path: Path,
+    card, deck_root: Path, core_manifest: Path, ice_cover_path: Path, *, n_steps: int = 10,
 ) -> tuple[dict[str, object], ...]:
-    """Build ten K0 controls from the exact files named by its namelists.
+    """Build a K0 control window from the exact files named by its namelists.
 
     This is the standalone smoke/input boundary, not an oracle-record bridge:
     CORE is mapped through the deck weights, while ice cover, runoff, restoring
@@ -570,7 +581,9 @@ def build_real_composed_inputs(
     )
 
     root = Path(deck_root)
-    mapped = load_core_normal_year(root, Path(core_manifest))
+    mapped = load_core_normal_year(
+        root, Path(core_manifest), n_steps=n_steps, dt_s=int(card.ocean.dt_s)
+    )
     cover = read_decision171_cover(Path(ice_cover_path))
     runoff_before, runoff_after = _monthly_slots(
         root / "runoff_core_monthly.nc", "sorunoff")
@@ -690,7 +703,7 @@ def build_real_composed_inputs(
         return result
 
     controls = []
-    for kt in range(1, 11):
+    for kt in range(1, n_steps + 1):
         dt_s = int(card.ocean.dt_s)
         # fldread.F90:195-206 adds half of nn_fsbc-1 to NEMO's step-entry
         # clock: (2*kt-1)*dt/2 + dt/2 == kt*dt for nn_fsbc=2.

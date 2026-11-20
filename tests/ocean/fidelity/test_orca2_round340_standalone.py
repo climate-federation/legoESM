@@ -750,6 +750,7 @@ def test_resume7_k0_istate_ssh_and_dry_cell_signed_zero_keep_si3_bit_identical()
     """Fixes 1 & 2: K0 istate starts from ssh=0 and preserves dry-cell -0.0 on T; SI3 stays bit-identical."""
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 
+    assert "ln_teos10" not in inspect.signature(recipe.build_orca2_zps_card).parameters
     sig = inspect.signature(recipe.build_orca2_istate_for_mode)
     assert sig.parameters["initial_state"].default is inspect.Parameter.empty
     with pytest.raises(ValueError, match="unknown ORCA2 initial_state"):
@@ -2108,8 +2109,6 @@ def test_resume11_kt2_non_update_retention_production_call_site_revert_plant_jit
         tlaf_jerlov = sw_mod.top_layer_absorbed_fraction(e3t_3d[..., 0])
         assert tlaf_chl.size == 26640 and tlaf_jerlov.size == 26640
         assert float(np.asarray(tlaf_chl)[0, 0]) == 0.8227655335922476
-
-
 
 
 

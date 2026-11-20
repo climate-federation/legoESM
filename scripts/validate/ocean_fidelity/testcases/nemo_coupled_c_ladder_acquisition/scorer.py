@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed C0/C1 scorer and D225/D226 compiled-C2 comparison."""
+"""Fail-closed C0/C1 scorer and D225/D226 compiled C2/C3 comparisons."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import struct
+import time
 from pathlib import Path
 
 import jax
@@ -46,8 +47,8 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_composition_scorer i
 MAGIC = b"CLAD0001"
 UNSCORABLE = "NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP"
 ADMITTED_ICE_DIMENSIONS = (5, 10, 5)
-C2_VERDICT_KINDS = (3, 4, 5, 6, 15, 16, 19, 20, 34)
-C2_REPORT_ONLY_KINDS = (1, 2)
+C2_VERDICT_KINDS = (1, 2, 3, 4, 5, 6, 15, 16, 19, 20, 34)
+C2_REPORT_ONLY_KINDS = ()
 _HEADER_BYTES = 8 + 4 + 11 * 4
 _KIND1_FLAGS = (
     ("restart_means_present", "i4"),
@@ -317,9 +318,11 @@ def _d225_field(got, want, wet_mask: np.ndarray) -> dict:
             "nemo_bits": f"0x{int(want_bits[owned_index]):016x}",
             "domain": "wet" if bool(wet[owned_index]) else "dry",
         }
+    wet_values = int(np.count_nonzero(wet))
     return {
         "values": int(got.size),
-        "wet_values": int(np.count_nonzero(wet)),
+        "wet_values": wet_values,
+        "dry_values": int(got.size) - wet_values,
         "wet_different": int(np.count_nonzero(wet_bad)),
         "dry_zero_sign_different": int(np.count_nonzero(dry_sign_zero)),
         "dry_other_different": int(np.count_nonzero(dry_bad)),
@@ -331,7 +334,7 @@ def _d225_field(got, want, wet_mask: np.ndarray) -> dict:
 
 def _merge_d225_counts(total: dict, row: dict) -> None:
     for name in (
-        "values", "wet_values", "wet_different",
+        "values", "wet_values", "dry_values", "wet_different",
         "dry_zero_sign_different", "dry_other_different",
     ):
         total[name] = total.get(name, 0) + row[name]
@@ -343,10 +346,13 @@ def _merge_d225_field_counts(total: dict, row: dict) -> None:
         total[name] = max(total.get(name, 0.0), row[name])
 
 
-def score_c2_observations(
+def _score_c_observations(
     candidate: dict[tuple[int, int, int], dict[str, object]],
     expected: dict[tuple[int, int, int], dict[str, object]],
     masks: dict[tuple[int, int], dict[str, np.ndarray]],
+    *,
+    steps: tuple[int, ...],
+    mode: str,
 ) -> dict:
     """Compare compiled recipe observations; perform no physical arithmetic.
 
@@ -356,16 +362,16 @@ def score_c2_observations(
     required = {
         (kind, kt, rank)
         for kind in (*C2_REPORT_ONLY_KINDS, *C2_VERDICT_KINDS)
-        for kt in (1, 2)
+        for kt in steps
         for rank in (0, 1)
         if not (kind in (15, 16) and kt % 2 == 0)
     }
     missing = sorted(required - set(candidate))
     if missing:
-        raise ValueError(f"C2 candidate observations incomplete; missing={missing[:8]}")
+        raise ValueError(f"{mode} candidate observations incomplete; missing={missing[:8]}")
     missing_expected = sorted(required - set(expected))
     if missing_expected:
-        raise ValueError(f"C2 NEMO observations incomplete; missing={missing_expected[:8]}")
+        raise ValueError(f"{mode} NEMO observations incomplete; missing={missing_expected[:8]}")
 
     counts: dict[int, dict] = {}
     report_only: dict[int, dict] = {}
@@ -380,7 +386,7 @@ def score_c2_observations(
         want_fields = expected[(kind, kt, rank)]
         if set(got_fields) != set(want_fields):
             raise ValueError(
-                f"C2 kind={kind} kt={kt} rank={rank} field set mismatch: "
+                f"{mode} kind={kind} kt={kt} rank={rank} field set mismatch: "
                 f"candidate_only={sorted(set(got_fields) - set(want_fields))}, "
                 f"NEMO_only={sorted(set(want_fields) - set(got_fields))}"
             )
@@ -393,15 +399,17 @@ def score_c2_observations(
             if got.dtype.kind != "f":
                 if not np.array_equal(got, np.asarray(want_fields[field])):
                     raise ValueError(
-                        f"C2 integer metadata differs kind={kind} field={field} kt={kt} rank={rank}"
+                        f"{mode} integer metadata differs kind={kind} field={field} kt={kt} rank={rank}"
                     )
                 continue
             if field in {
-                "uu", "ssu", "utauU", "uu_kbb", "u_before", "u_ice", "u_oce"
+                "uu", "ssu", "ssu_prior", "utauU", "uu_kbb", "u_before",
+                "u_ice", "u_oce",
             }:
                 staggering = "umask"
             elif field in {
-                "vv", "ssv", "vtauV", "vv_kbb", "v_before", "v_ice", "v_oce"
+                "vv", "ssv", "ssv_prior", "vtauV", "vv_kbb", "v_before",
+                "v_ice", "v_oce",
             }:
                 staggering = "vmask"
             else:
@@ -422,13 +430,14 @@ def score_c2_observations(
                     **row["first"],
                 }
     if first_failure is None:
-        status = "PASS_C2_0_ULP_WET"
+        status = f"PASS_{mode}_0_ULP_WET"
     else:
         f = first_failure
         status = (
-            f"FAIL_C2 kind={f['kind']} field={f['field']} cell={f['cell']} "
-            f"kt={f['kt']} rank={f['rank']} got={f['got_bits']} "
-            f"nemo={f['nemo_bits']} domain={f['domain']}"
+            f"FAIL_{mode} step={f['kt']} kind={f['kind']} field={f['field']} "
+            f"cell={f['cell']} "
+            f"rank={f['rank']} got={f['got_bits']} "
+            f"expected={f['nemo_bits']} domain={f['domain']}"
         )
     return {
         "status": status,
@@ -450,41 +459,52 @@ def score_c2_observations(
     }
 
 
-def load_c2_expected(evidence: Path) -> tuple[dict, dict]:
-    """Load only the admitted NEMO observations and D225 physical masks."""
-    run = evidence / "REC_C2"
-    namelist = _coupled_resolved_namelist(run)
-    dimensions = tuple(int(namelist[name]) for name in ("jpl", "nlay_i", "nlay_s"))
-    if dimensions != ADMITTED_ICE_DIMENSIONS:
-        raise ValueError(
-            "STATUS PLANT-FIRED: resolved ice dimensions "
-            f"{dimensions} are inadmissible; expected ICE5 {ADMITTED_ICE_DIMENSIONS}"
-        )
+def score_c2_observations(
+    candidate: dict[tuple[int, int, int], dict[str, object]],
+    expected: dict[tuple[int, int, int], dict[str, object]],
+    masks: dict[tuple[int, int], dict[str, np.ndarray]],
+) -> dict:
+    """Compare the compiled two-step recipe under D225/D226/D230."""
+
+    return _score_c_observations(
+        candidate, expected, masks, steps=(1, 2), mode="C2"
+    )
+
+
+def _load_expected_steps(
+    run: Path, steps: tuple[int, ...], dimensions: tuple[int, int, int]
+) -> tuple[dict, dict]:
+    """Load selected NEMO boundaries and masks without model arithmetic."""
+
     c_root = run / "c_ladder_records"
     master_root = run / "o8_o16_master_records"
     o17_root = run / "o17_master_records"
     expected: dict[tuple[int, int, int], dict[str, object]] = {}
     masks: dict[tuple[int, int], dict[str, np.ndarray]] = {}
-    for kt in (1, 2):
+    import netCDF4
+
+    mask_3d_by_rank = {}
+    for rank in (0, 1):
+        with netCDF4.Dataset(run / f"mesh_mask_{rank:04d}.nc") as dataset:
+            mask_3d_by_rank[rank] = {
+                f"{name}_3d": np.asarray(
+                    dataset.variables[name][0], dtype=np.float64
+                ).transpose(2, 1, 0)
+                for name in ("tmask", "umask", "vmask")
+            }
+    for kt in steps:
         for rank in (0, 1):
-            for kind in (*C2_REPORT_ONLY_KINDS, 3, 4, 5, 6):
+            for kind in (1, 2, 3, 4, 5, 6):
                 record = read_c_record(
                     c_root / f"c_kind{kind}_step{kt:04d}_rank{rank:04d}.bin"
                 )
                 expected[(kind, kt, rank)] = record["fields"]
                 if kind == 4:
-                    import netCDF4
-
-                    with netCDF4.Dataset(run / f"mesh_mask_{rank:04d}.nc") as dataset:
-                        mask_3d = {
-                            f"{name}_3d": np.asarray(dataset.variables[name][0], dtype=np.float64).transpose(2, 1, 0)
-                            for name in ("tmask", "umask", "vmask")
-                        }
                     masks[(kt, rank)] = {
                         name: record["fields"][name]
                         for name in ("tmask", "umask", "vmask")
                     }
-                    masks[(kt, rank)].update(mask_3d)
+                    masks[(kt, rank)].update(mask_3d_by_rank[rank])
             for kind in (15, 16, 19, 20):
                 if kind in (15, 16) and kt % 2 == 0:
                     continue
@@ -507,13 +527,27 @@ def load_c2_expected(evidence: Path) -> tuple[dict, dict]:
     return expected, masks
 
 
+def load_c2_expected(evidence: Path) -> tuple[dict, dict]:
+    """Load only the admitted NEMO observations and D225 physical masks."""
+
+    run = evidence / "REC_C2"
+    namelist = _coupled_resolved_namelist(run)
+    dimensions = tuple(int(namelist[name]) for name in ("jpl", "nlay_i", "nlay_s"))
+    if dimensions != ADMITTED_ICE_DIMENSIONS:
+        raise ValueError(
+            "STATUS PLANT-FIRED: resolved ice dimensions "
+            f"{dimensions} are inadmissible; expected ICE5 {ADMITTED_ICE_DIMENSIONS}"
+        )
+    return _load_expected_steps(run, (1, 2), dimensions)
+
+
 def score_c2(evidence: Path, candidate: dict[tuple[int, int, int], dict]) -> dict:
     """Score observations emitted by one externally jitted coupled-pair run."""
     expected, masks = load_c2_expected(evidence)
     return score_c2_observations(candidate, expected, masks)
 
 
-def _c2_cold_start(run: Path):
+def _c2_cold_start(run: Path, *, n_steps: int = 2):
     """Load records and bind them to the production coupled recipe."""
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     from legoesm.ocean import bulk_flux_omip as bulk
@@ -530,7 +564,8 @@ def _c2_cold_start(run: Path):
 
     k0 = bulk.build_nemo_orca2_k0_ocean_card(run)
     controls = r340.build_real_composed_inputs(
-        k0, run, r340_score.DEFAULT_CORE_MANIFEST, r340_score.DEFAULT_ICE_COVER
+        k0, run, r340_score.DEFAULT_CORE_MANIFEST, r340_score.DEFAULT_ICE_COVER,
+        n_steps=n_steps,
     )
     receipt = json.loads((run / "C_DECK_RECEIPT.json").read_text())
     master = Path(receipt["sas_ice_reference"]).parents[1]
@@ -538,9 +573,7 @@ def _c2_cold_start(run: Path):
     ln_teos10 = o17_score.si3_teos10_from_resolved_namelist(
         run / "output.namelist.dyn"
     )
-    coupled_ocean = build_orca2_zps_card(
-        run, initial_state="si3_iceistate", ln_teos10=ln_teos10
-    )
+    coupled_ocean = build_orca2_zps_card(run, initial_state="si3_iceistate")
     ice_card = o17_score.card_for(master_run)._replace(
         ln_drgice_imp=True,
         ln_teos10=ln_teos10,
@@ -692,27 +725,11 @@ def _c2_shard(value, shape: tuple[int, ...], rank: int) -> np.ndarray:
     return result
 
 
-def run_c2_compiled_observations(evidence: Path):
-    """Run the two-step cold C2 trajectory and return scorer-ready observations."""
-    from legoesm.ocean import bulk_flux_omip as bulk
+def _trace_observations(traces, card, expected: dict, steps: tuple[int, ...]) -> dict:
+    """Adapt one compiled pair trace to record names/indexing, then discard it."""
 
-    expected, masks = load_c2_expected(evidence)
-    carry, forcing, sponge, card, model = _c2_cold_start(evidence / "REC_C2")
-
-    @jax.jit
-    def compiled_pair(entry):
-        odd, odd_trace = bulk.nemo_orca2_si3_coupled_step(
-            entry, forcing[0], card, model=model, sponge=sponge[0]
-        )
-        even, even_trace = bulk.nemo_orca2_si3_coupled_step(
-            odd, forcing[1], card, model=model, sponge=sponge[1]
-        )
-        return even, (odd_trace, even_trace)
-
-    final, traces = compiled_pair(carry)
-    jax.block_until_ready(final)
     candidate: dict[tuple[int, int, int], dict[str, object]] = {}
-    for kt, trace in enumerate(traces, start=1):
+    for kt, trace in zip(steps, traces, strict=True):
         for kind in (*C2_REPORT_ONLY_KINDS, *C2_VERDICT_KINDS):
             if kind in (15, 16) and kt % 2 == 0:
                 continue
@@ -728,6 +745,31 @@ def run_c2_compiled_observations(evidence: Path):
                             global_fields[name], np.asarray(reference).shape, rank
                         )
                 candidate[(kind, kt, rank)] = fields
+    return candidate
+
+
+def run_c2_compiled_observations(evidence: Path):
+    """Run the two-step cold C2 trajectory and return scorer-ready observations."""
+    from legoesm.ocean import bulk_flux_omip as bulk
+
+    expected, masks = load_c2_expected(evidence)
+    carry, forcing, sponge, card, model = _c2_cold_start(evidence / "REC_C2")
+
+    @jax.jit
+    def compiled_pair(entry, odd_forcing, even_forcing, odd_sponge, even_sponge):
+        return bulk.nemo_orca2_si3_coupled_pair(
+            entry,
+            odd_forcing,
+            card,
+            even_forcing=even_forcing,
+            model=model,
+            sponge=odd_sponge,
+            even_sponge=even_sponge,
+        )
+
+    final, traces = compiled_pair(carry, forcing[0], forcing[1], sponge[0], sponge[1])
+    jax.block_until_ready(final)
+    candidate = _trace_observations(traces, card, expected, (1, 2))
     return candidate, expected, masks
 
 
@@ -735,6 +777,119 @@ def run_c2_compiled(evidence: Path) -> dict:
     """Run the two-step cold C2 trajectory once under ``jax.jit`` and score it."""
     candidate, expected, masks = run_c2_compiled_observations(evidence)
     return score_c2_observations(candidate, expected, masks)
+
+
+def run_c3_compiled(evidence: Path, *, pair_limit: int = 50) -> dict:
+    """Compile one traced pair once, carry it forward, and score pairwise.
+
+    ``pair_limit`` exists only for the required preflight timing measurement.
+    Anything shorter than 50 pairs is explicitly non-verdict-bearing.
+    """
+
+    from legoesm.ocean import bulk_flux_omip as bulk
+
+    run = evidence / "REC_C3"
+    namelist = _admitted_resolved_namelist(evidence)
+    dimensions = tuple(int(namelist[name]) for name in ("jpl", "nlay_i", "nlay_s"))
+    if type(pair_limit) is not int or not 1 <= pair_limit <= 50:
+        raise ValueError("C3 pair_limit must be an integer in [1, 50]")
+    n_steps = 2 * pair_limit
+    carry, forcing, sponge, card, model = _c2_cold_start(run, n_steps=n_steps)
+    if len(forcing) != n_steps or len(sponge) != n_steps:
+        raise ValueError(
+            f"C3 deck readers produced {len(forcing)} forcing and {len(sponge)} "
+            f"damping records; expected {n_steps} each"
+        )
+
+    compile_count = 0
+
+    def pair_program(entry, odd_forcing, even_forcing, odd_sponge, even_sponge):
+        nonlocal compile_count
+        compile_count += 1
+        return bulk.nemo_orca2_si3_coupled_pair(
+            entry,
+            odd_forcing,
+            card,
+            even_forcing=even_forcing,
+            model=model,
+            sponge=odd_sponge,
+            even_sponge=even_sponge,
+        )
+
+    compiled_pair = jax.jit(pair_program)
+    compile_start = time.perf_counter()
+    executable = compiled_pair.lower(
+        carry, forcing[0], forcing[1], sponge[0], sponge[1]
+    ).compile()
+    compile_seconds = time.perf_counter() - compile_start
+    if compile_count != 1:
+        raise ValueError(f"C3 pair compiled {compile_count} times; expected exactly 1")
+
+    counts: dict[int, dict] = {}
+    first_failure = None
+    pair_wall_seconds = []
+    for pair_index in range(pair_limit):
+        odd_kt = 2 * pair_index + 1
+        steps = (odd_kt, odd_kt + 1)
+        started = time.perf_counter()
+        next_carry, traces = executable(
+            carry,
+            forcing[odd_kt - 1],
+            forcing[odd_kt],
+            sponge[odd_kt - 1],
+            sponge[odd_kt],
+        )
+        jax.block_until_ready(next_carry)
+        pair_wall_seconds.append(time.perf_counter() - started)
+        expected, masks = _load_expected_steps(run, steps, dimensions)
+        candidate = _trace_observations(traces, card, expected, steps)
+        pair_report = _score_c_observations(
+            candidate, expected, masks, steps=steps, mode="C3"
+        )
+        for kind, row in pair_report["counts"].items():
+            _merge_d225_counts(counts.setdefault(kind, {}), row)
+        if first_failure is None and pair_report["first_failure"] is not None:
+            first_failure = pair_report["first_failure"]
+        carry = next_carry
+        if first_failure is not None:
+            # The first bad pair is already fully scored and reported.  Stop
+            # before executing later physics so localization remains anchored
+            # to the earliest NEMO-order boundary.
+            break
+
+    if compile_count != 1:
+        raise ValueError(f"C3 pair retraced {compile_count} times; expected exactly 1")
+    if first_failure is None and pair_limit == 50:
+        status = "PASS_C3_0_ULP_WET"
+    elif first_failure is None:
+        status = f"PROFILE_C3_{pair_limit}_PAIRS_NO_VERDICT"
+    else:
+        f = first_failure
+        status = (
+            f"FAIL_C3 step={f['kt']} kind={f['kind']} field={f['field']} "
+            f"cell={f['cell']} rank={f['rank']} got={f['got_bits']} "
+            f"expected={f['nemo_bits']} domain={f['domain']}"
+        )
+    return {
+        "status": status,
+        "compiled": True,
+        "compile_count": compile_count,
+        "pairs_scored": len(pair_wall_seconds),
+        "compile_seconds": compile_seconds,
+        "pair_wall_seconds": pair_wall_seconds,
+        "mean_pair_wall_seconds": float(np.mean(pair_wall_seconds)),
+        "counts": counts,
+        "first_failure": first_failure,
+        "input_readers": {
+            "atmosphere_CORE": "load_core_normal_year + nemo_fld_interp",
+            "runoff_and_sss_target": "_monthly_slots + nemo_fld_time_interp",
+            "chlorophyll": "chlorophyll_at_step",
+            "geothermal_heat_flux": "read_geothermal_heatflow",
+            "tracer_damping_target": "build_orca2_damping_for_step",
+            "ocean_initial_state_and_static_grid": "build_orca2_zps_card",
+            "SI3_initial_state_and_static_grid": "build_nemo_orca2_si3_static",
+        },
+    }
 
 
 def _coupled_resolved_namelist(run: Path) -> dict:
@@ -1014,7 +1169,7 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
 
 
 def status_report() -> dict:
-    return {"C3": UNSCORABLE, "C4": UNSCORABLE}
+    return {"C4": UNSCORABLE}
 
 
 def self_test(plant: str | None, scratch: Path) -> dict:
@@ -1062,6 +1217,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--ppsrc", type=Path)
+    parser.add_argument("--mode", choices=("C0-C2", "C3"), default="C0-C2")
     parser.add_argument("--plant", choices=("numeric", "wrong-parity"))
     parser.add_argument(
         "--self-test", choices=("baseline", "numeric", "truncation", "wrong-parity")
@@ -1079,6 +1235,10 @@ def main() -> int:
     if args.evidence is None or args.ppsrc is None:
         parser.error("--evidence and --ppsrc are required outside --self-test")
     _admitted_resolved_namelist(args.evidence)
+    if args.mode == "C3":
+        report = {"C3": run_c3_compiled(args.evidence), **status_report()}
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 2 if report["C3"]["status"].startswith("FAIL_C3") else 0
     report = {
         "C0": score_c0(
             args.evidence / "REC_C3/c_ladder_records",
