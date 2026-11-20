@@ -814,6 +814,26 @@ def _sfc_diag_slot(key: str) -> int:
             + MPAS_SFC_DIAG_EXTRA_KEYS.index(key))
 
 
+def ice_skin_turbulent_fluxes(sfc_diag, split_on: bool):
+    """``(SH, LH)`` [W/m2, +upward] the prognostic ice skin is charged from
+    the MPAS ``_sfc_diag`` tuple: the ice tile's own fluxes under
+    ``sea_ice_flux_split`` (#2573; missing ones raise, never the cell mean),
+    else the cell-mean turbulent fluxes (an absent one is None)."""
+    keys = (("shflx_ice", "lhflx_ice") if split_on
+            else ("shflx_sfc", "lhflx_sfc"))
+    out = []
+    for k in keys:
+        i = _sfc_diag_slot(k)
+        out.append(sfc_diag[i].data
+                   if len(sfc_diag) > i and sfc_diag[i] is not None else None)
+    if split_on and None in out:
+        raise RuntimeError(
+            "sea_ice_flux_split is on but the physics did not export the ice "
+            "tile's sensible/latent heat; the ice skin would be charged the "
+            "cell mean.")
+    return tuple(out)
+
+
 def _evap_sfc_slot() -> int:
     """Index of ``evap_sfc`` (the column's surface water flux) in the MPAS
     ``_sfc_diag`` tuple."""
@@ -3305,6 +3325,18 @@ class ModelDriver:
                         upd["ocean_flux_on_ocean_surface"],
                         "" if upd["ocean_flux_on_ocean_surface"] else
                         f" ({ocean_flux_surface_eligibility(self.config)[1]})")
+        # The ice/open-water split (#2573) depends on the two above.
+        from legoesm.driver.config import (
+            resolve_sea_ice_flux_split, sea_ice_flux_split_eligibility)
+        auto = self.config.sea_ice_flux_split is None
+        upd = {"sea_ice_flux_split": resolve_sea_ice_flux_split(self.config)}
+        self.config = self.config._replace(**upd)
+        self._input_config = self._input_config._replace(**upd)
+        if auto:
+            logger.info("  sea_ice_flux_split: auto -> %s%s",
+                        upd["sea_ice_flux_split"],
+                        "" if upd["sea_ice_flux_split"] else
+                        f" ({sea_ice_flux_split_eligibility(self.config)[1]})")
         self.config.validate_strict()
 
     def setup(self) -> None:
@@ -14226,6 +14258,12 @@ class ModelDriver:
                 _dst["T_sfc"] = _blend_T_sfc(_sst, _sic)
                 if _ocean_sfc_on:
                     _dst["T_sfc_ocean"] = _ocean_ice_T_sfc(_sst, _sic)
+                if _ice_split_on:
+                    # The two tiles of that same blend (#2573): the cover,
+                    # the prognostic skin READ AT CALL TIME, and the SST.
+                    _dst["sea_ice_frac"] = jnp.asarray(_sic).reshape(-1)
+                    _dst["T_sfc_ice"] = self._ice_T_skin.reshape(-1)
+                    _dst["T_sfc_water"] = jnp.asarray(_sst).reshape(-1)
 
             # (The former ``_compute_T_sfc(day)`` wrapper — a one-line
             # ``_blend_T_sfc(*get_sst_sic(day))`` — was inlined at its single
@@ -14477,6 +14515,18 @@ class ModelDriver:
         # Validated (validate_strict) to imply the land-flux handoff, so the
         # turbulence always receives T_sfc_ocean together with shflx_land.
         _ocean_sfc_on = resolve_ocean_flux_on_ocean_surface(cfg)
+        # Ice / open-water turbulent split (#2573); validate_strict ties it
+        # to the ocean-surface anchor and the prognostic ice skin.
+        from legoesm.driver.config import resolve_sea_ice_flux_split
+        _ice_split_on = resolve_sea_ice_flux_split(cfg)
+        if _ice_split_on and not (_ice_skin_on and _ocean_sfc_on):
+            raise ValueError(
+                "sea_ice_flux_split needs the prognostic ice skin and "
+                "ocean_flux_on_ocean_surface on.")
+        if _ice_split_on and self.get_surface_handback is not None:
+            raise ValueError(
+                "sea_ice_flux_split and the coupler ice/lake handback both "
+                "claim the ice tile's fluxes; select one.")
         # Coupler ice/lake handback (P5c K2): the atmosphere owns land and
         # open water; the bulk law covers the open-water fraction only and
         # the coupler's ice+lake fluxes, emission, albedo and emissivity fill
@@ -14507,6 +14557,9 @@ class ModelDriver:
         print(f"  Non-land surface fluxes evaluated on: "
               f"{'OCEAN/ICE surface' if _ocean_sfc_on else 'land-blended surface'}"
               f" (ocean_flux_on_ocean_surface={_ocean_sfc_on})")
+        print(f"  Sea-ice cells, ice and open-water turbulent exchange: "
+              f"{'SEPARATE (ice skin charged its own SH/LH)' if _ice_split_on else 'one blended surface'}"
+              f" (sea_ice_flux_split={_ice_split_on})")
         print(f"  Land surface stress to the boundary layer: "
               f"{'LAND MODEL' if _land_stress_on else 'atmosphere bulk law'} "
               f"(land_stress_from_land="
@@ -16497,12 +16550,12 @@ class ModelDriver:
                 _lwn = (_sd[1].data if (_sd is not None and len(_sd) > 1
                                         and _sd[1] is not None) else None)
                 if _swn is not None and _lwn is not None:
+                    _sh_sk, _lh_sk = ice_skin_turbulent_fluxes(
+                        _sd, _ice_split_on)
+                    # Radiation stays the cell mean (only the turbulent
+                    # exchange is split, #2573); turbulent terms +upward.
                     self._ice_T_skin = advance_ice_skin(
-                        self._ice_T_skin, _swn, _lwn,
-                        (_sd[6].data if len(_sd) > 6 and _sd[6] is not None
-                         else None),
-                        (_sd[7].data if len(_sd) > 7 and _sd[7] is not None
-                         else None),
+                        self._ice_T_skin, _swn, _lwn, _sh_sk, _lh_sk,
                         _ice_sic_cur, dt_s=DT, h_ice_m=_h_ice,
                         melt_cap_width_K=float(
                             cfg.ice_skin_melt_cap_width_K))
