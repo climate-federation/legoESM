@@ -1,8 +1,8 @@
-"""core-0030: KPP's N^2 is the local buoyancy gradient, not the difference of in-situ densities (docs/88 6.13).
+"""core-0030: KPP's N^2 is the local buoyancy gradient, not the difference of in-situ densities (ENSO-project notes (iadicarlo/legoESM-enso) 88 6.13).
 
 The in-situ difference carries the compressibility of seawater, about +4e-5 s^-2, in V_t^2, the interior Richardson
 number and the convective trigger. LMD94 (Eqs. 23, 27), MOM6, MITgcm and POP all difference two parcels at one
-pressure. Pass criteria C1 to C6 of docs/88 6.13:
+pressure. Pass criteria C1 to C6 of ENSO-project notes (iadicarlo/legoESM-enso) 88 6.13:
 1. C1, uniform column: local N^2 exactly zero, in-situ 4.0e-5 to 4.2e-5 s^-2 (float32 and float64 for the first);
 2. C2, local form equals g (alpha dT/dz - beta dS/dz) from autodiff of the EOS, and prints the size of the choice of
    reference pressure and of the p = 0 bulk Richardson numerator against level pressure;
@@ -122,7 +122,7 @@ def test_c2_local_form_equals_autodiff_and_pressure_choice(float64):
     ana = -(G / rho_0) * (drho_dt * (Ti[:-1] - Ti[1:]) + drho_ds * (Si[:-1] - Si[1:])) / DZ
     assert np.max(np.abs(local - ana)) <= 1.0e-6
 
-    # sizes reported in docs/88 6.13 (read with pytest -s)
+    # sizes reported in ENSO-project notes (iadicarlo/legoESM-enso) 88 6.13 (read with pytest -s)
     def n2_at(p):
         ru = np.asarray(wright_eos(jnp.asarray(Ti[:-1]), jnp.asarray(Si[:-1]), jnp.asarray(p)))
         rl = np.asarray(wright_eos(jnp.asarray(Ti[1:]), jnp.asarray(Si[1:]), jnp.asarray(p)))

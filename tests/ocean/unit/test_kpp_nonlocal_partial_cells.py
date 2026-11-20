@@ -5,7 +5,7 @@ The explicit non-local term (LMD94 eq. 19) is a flux divergence.  With live laye
 two wet cells, so sum_k h_k dT/dt = 0: the term moves heat and salt within the boundary layer and
 creates none.  The former divisor dz_ref * jacobian is thicker than a partial bottom cell, and the
 flux at the seafloor interface was kept, so a column whose boundary layer reaches a partial bottom
-cell gained heat (the nest worker's residual, docs/89 5.10a of the ENSO project).
+cell gained heat (the nest worker's residual, ENSO-project notes (iadicarlo/legoESM-enso) 89 5.10a of the ENSO project).
 """
 import numpy as np
 

@@ -1,4 +1,4 @@
-"""core-0026: CATKE bottom-distance coefficient as in Oceananigans (docs/92).
+"""core-0026: CATKE bottom-distance coefficient as in Oceananigans (ENSO-project notes (iadicarlo/legoESM-enso) 92).
 
 1. The default CATKEConfig.c_bottom_shear is 0.967, Oceananigans CATKEMixingLength.Cᵇ (main, 8e4f98d).
 2. It gives the near-bottom similarity constant C_b (c_lo_u^3 / c_lo_diss)^(1/4) = 0.40 to 3 decimals, the value

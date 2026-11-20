@@ -2,7 +2,7 @@
 
 A closed box over a sloping bottom (partial cells, several bottom levels) with a 2-D sponge rate toward fixed
 targets for T and S. Cells below the seafloor must stay at zero: with the 2-D land mask alone
-the explicit sponge filled them with target values (S 0.40, 0.81, 1.20 per step on grid E's band, docs/86),
+the explicit sponge filled them with target values (S 0.40, 0.81, 1.20 per step on grid E's band, ENSO-project notes (iadicarlo/legoESM-enso) 86),
 which other operators could read as water. Wet cells still relax toward the targets.
 """
 import numpy as np
