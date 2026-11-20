@@ -186,8 +186,12 @@ class _Line:
         # a later call would retrace without the recorder
         self._cm = instrument(lambda s, d: self.rec.setdefault(s, []).append(d.ravel()))
         self._cm.__enter__()
-        self._f = jax.jit(lambda s: output(fix, f(x0, s)))
-        self._f(jnp.asarray(float(0.5 * sum(self.range)))).block_until_ready()
+        try:
+            self._f = jax.jit(lambda s: output(fix, f(x0, s)))
+            self._f(jnp.asarray(float(0.5 * sum(self.range)))).block_until_ready()
+        except BaseException:
+            self.close()
+            raise
         self.rec.clear()
         self.fix, self.x = fix, lambda s: f(x0, jnp.asarray(float(s)))
 

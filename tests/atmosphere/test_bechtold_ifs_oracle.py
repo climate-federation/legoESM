@@ -1279,8 +1279,10 @@ def test_cap_min_is_zero_with_nothing_to_cap():
     np.testing.assert_array_equal(f[:, np.asarray(b[0]) <= 0.0], 0.0)
     assert np.all(f >= 0.0) and np.all(f <= np.maximum(np.asarray(b), 0.0))
     assert np.all(f <= np.asarray(a) + 4.0 * w / 27.0 * (1.0 + 1e-12))
-    np.testing.assert_array_equal(np.asarray(M._cap_min(IfsSmooth(True), a, b, w)),
-                                  np.maximum(np.minimum(np.asarray(a), np.asarray(b)), 0.0))
+    # hard limit: pos(b) - pos(b - a) = b - (b - a) rounds (codex round 2)
+    np.testing.assert_allclose(np.asarray(M._cap_min(IfsSmooth(True), a, b, w)),
+                               np.maximum(np.minimum(np.asarray(a), np.asarray(b)), 0.0),
+                               rtol=1e-12, atol=1e-12 * w)
 
 
 def test_cap_min_gradient_at_default():
