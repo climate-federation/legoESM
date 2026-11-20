@@ -2498,6 +2498,9 @@ def main():
             return st
         return jax.tree.map(lambda a, d: a.astype(d), st, _state_dtypes)
 
+    def _step_once(st):
+        return model.step(_hold_dtypes(st), dt=args.dt, physics_fn=physics_fn)
+
     for i in range(_start_step, args.steps):
         state = _hold_dtypes(state)
         if args.land:
@@ -2530,7 +2533,10 @@ def main():
                 args.land_albedo,
                 land_emissivity,
             )
-            state = model.step(_hold_dtypes(state), dt=args.dt, physics_fn=physics_fn)
+            # First step compiles the step: block, then return the freed compile
+            # heap to the OS (the only trim when radiation runs inside the step).
+            state = (staggered_first_call(_step_once, state) if i == _start_step
+                     else _step_once(state))
         else:
             if rad_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
@@ -2543,7 +2549,10 @@ def main():
                 state = apply_radiation_forward_euler(
                     state, cached_rad_tend, args.dt,
                 )
-            state = model.step(_hold_dtypes(state), dt=args.dt, physics_fn=physics_fn)
+            # First step compiles the step: block, then return the freed compile
+            # heap to the OS (the only trim when radiation runs inside the step).
+            state = (staggered_first_call(_step_once, state) if i == _start_step
+                     else _step_once(state))
         # POSITIVITY GUARD (CRM-dycore campaign, codex-reviewed): keep the water
         # tracers >=0 in the STATE after each step, matching run_rce_mpi_long.
         # The advective-form tracer advection under strong div(u) — e.g. a

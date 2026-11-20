@@ -133,3 +133,20 @@ def test_chunked_gradient_matches_single_shot(cloudy_plane):
     scale = float(jnp.max(jnp.abs(g_ref)))
     assert np.isfinite(np.asarray(g_got)).all() and scale > 0.0
     assert float(jnp.max(jnp.abs(g_got - g_ref))) <= 1e-9 * scale
+
+
+def test_first_step_returns_freed_heap_when_radiation_runs_every_step(
+        monkeypatch, tmp_path):
+    """--radiation-interval 1 folds radiation into the step, so no gated
+    refresh trims the compile heap; the first step must do it (once)."""
+    rcp = _load()
+    import legoesm.parallel.staggered_init as si
+    calls = []
+    monkeypatch.setattr(si, "release_freed_heap", lambda: calls.append(1) or True)
+    monkeypatch.setattr(sys, "argv", [
+        "run_rcemip_plane.py", "--nx", "4", "--ny", "4", "--nlev", "8",
+        "--steps", "2", "--semi-implicit", "--radiation", "gray",
+        "--radiation-interval", "1", "--print-every", "1",
+        "--output", str(tmp_path)])
+    rcp.main()
+    assert len(calls) == 1
