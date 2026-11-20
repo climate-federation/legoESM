@@ -23,8 +23,10 @@ at the end of this module lift that cap at two all-to-alls per transform (one
 on a row sub-communicator, one on a column sub-communicator).
 
 AD. ``mpi4jax.alltoall`` is a permutation (orthogonal data movement); its adjoint
-is the same all-to-all applied to the cotangent. We wrap it in a ``custom_vjp``
-so the spectral LES stays end-to-end differentiable — the project mandates that
+is the same all-to-all applied to the cotangent, and its tangent map is that
+all-to-all too. We bind it as a linear primitive with exactly those JVP and
+transpose rules so the spectral LES stays end-to-end differentiable at every
+order, forward and reverse — the project mandates that
 only AD-safe collectives appear in differentiable paths, and a raw ``alltoall``
 is not one. Complex arrays are carried as ONE packed real ``alltoall`` (real and
 imaginary parts stacked inside each per-rank block) so the wrapper never relies
@@ -32,6 +34,8 @@ on complex collective support and pays a single collective latency per transpose
 """
 
 from __future__ import annotations
+
+import functools
 
 import jax
 import jax.numpy as jnp
@@ -55,34 +59,66 @@ def _raw_alltoall(x, comm):
     return mpi4jax.alltoall(x, comm=comm)
 
 
+@functools.cache
+def _alltoall_p():
+    """Linear primitive ``y = alltoall(x)`` whose JVP and transpose are both
+    the same all-to-all (a permutation that is its own transpose), and which
+    re-binds itself in both rules, so every AD order works (the pattern of
+    the replicated allreduce in :mod:`legoesm.parallel.reductions`).
+    mpi4jax's ``alltoall`` has no JVP/transpose rule, so the earlier
+    ``custom_vjp`` (whose backward called it raw) broke second-order AD and
+    could not do forward mode at all."""
+    from jax.extend.core import Primitive
+    from jax.interpreters import ad, batching, mlir
+
+    from legoesm.parallel.reductions import CommParam, require_mpi_stack
+
+    _, MPI = require_mpi_stack()
+
+    def raw(x, *, comm):
+        return _raw_alltoall(x, comm.comm)
+
+    # mpi4jax's ordered effect, read off its own jaxpr (trace only).
+    world = MPI.COMM_WORLD
+    effects = jax.make_jaxpr(lambda v: raw(v, comm=CommParam(world)))(
+        jnp.zeros((world.Get_size(),))).effects
+
+    prim = Primitive("legoesm_alltoall")
+    prim.def_impl(raw)
+    prim.def_effectful_abstract_eval(
+        lambda x, *, comm: (jax.core.ShapedArray(x.shape, x.dtype), effects))
+    mlir.register_lowering(prim, mlir.lower_fun(raw, multiple_results=False))
+    # A symbolic-zero tangent/cotangent reaching a rule is instantiated so
+    # this rank still enters the collective. Every rank must differentiate
+    # through the same all-to-alls: one whose input carries no tangent at
+    # all skips the tangent collective and the others deadlock.
+    ad.primitive_jvps[prim] = lambda primals, tangents, *, comm: (
+        prim.bind(primals[0], comm=comm),
+        prim.bind(ad.instantiate_zeros(tangents[0]), comm=comm))
+    ad.primitive_transposes[prim] = (
+        lambda ct, _x, *, comm: [prim.bind(ad.instantiate_zeros(ct), comm=comm)])
+    # Axis 0 is the rank-block axis, so a vmapped batch rides on axis 1.
+    batching.primitive_batchers[prim] = lambda args, dims, *, comm: (
+        prim.bind(jnp.moveaxis(args[0], dims[0], 1), comm=comm), 1)
+    return prim
+
+
 def ad_alltoall(x, comm):
     """All-to-all on a real array ``(P, *rest)`` (``P == n_ranks``), AD-safe.
 
     The all-to-all is an orthogonal permutation of data across ranks, so its
     vector-Jacobian product is the *same* all-to-all applied to the incoming
-    cotangent. That makes it usable inside ``jax.grad`` / ``eqx.filter_*``,
-    unlike a bare ``mpi4jax.alltoall`` (allgather/alltoall are otherwise
-    diagnostic-only in this codebase). ``comm`` is a non-differentiable static
-    argument (``nondiff_argnums``); it is not a JAX type.
+    cotangent, and (being linear) its JVP is the all-to-all of the tangent.
+    That makes it usable inside ``jax.grad`` / ``jax.jvp`` / ``eqx.filter_*``
+    at any order, unlike a bare ``mpi4jax.alltoall`` (allgather/alltoall are
+    otherwise diagnostic-only in this codebase). ``comm`` is static.
     """
-    return _raw_alltoall(x, comm)
+    from legoesm.parallel.reductions import CommParam, require_mpi_stack
 
-
-def _ad_alltoall_fwd(x, comm):
-    # custom_vjp passes args in original order to fwd; no residuals needed (the
-    # adjoint of a permutation does not depend on the primal value).
-    return _raw_alltoall(x, comm), None
-
-
-def _ad_alltoall_bwd(comm, _res, g):
-    # nondiff args first, then residuals, then cotangent. Adjoint of an
-    # all-to-all is the all-to-all of the cotangent (P×P equal blocks ⇒ the
-    # operator is its own transpose). Return grad for the single diff arg x.
-    return (_raw_alltoall(g, comm),)
-
-
-ad_alltoall = jax.custom_vjp(ad_alltoall, nondiff_argnums=(1,))
-ad_alltoall.defvjp(_ad_alltoall_fwd, _ad_alltoall_bwd)
+    if comm is None:
+        _, MPI = require_mpi_stack()
+        comm = MPI.COMM_WORLD
+    return _alltoall_p().bind(jnp.asarray(x), comm=CommParam(comm))
 
 
 def _alltoall_complex(z, comm):
