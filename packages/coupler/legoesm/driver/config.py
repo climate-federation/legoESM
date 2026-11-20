@@ -4833,6 +4833,15 @@ class ExperimentConfig(NamedTuple):
                                  ).validate()
                 except ValueError as exc:
                     errors.append(f"land_canopy_*: {exc}")
+        if (self.use_multilayer_land and self.land_surface_scheme == "two_leaf"
+                and (self.land_snow_scheme == "layered" or self.land_snow_insulation)
+                and self.land_canopy_implicit_ground_flux is not False):
+            errors.append(
+                "land_canopy_implicit_ground_flux (on by default) is implemented for "
+                "the bulk snowpack without the snow thermal node only; with "
+                f"land_snow_scheme={self.land_snow_scheme!r}, land_snow_insulation="
+                f"{self.land_snow_insulation!r} set land_canopy_implicit_ground_flux: "
+                "false")
         for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
                     "morrison_do_graupel", "morrison_warm_rain_incloud",
                     "morrison_prognostic_droplet_number"):

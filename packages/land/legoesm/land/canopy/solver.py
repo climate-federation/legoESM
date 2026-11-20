@@ -603,10 +603,13 @@ def ground_heat_conductance(
     J_a = jax.jacfwd(_residual, 0)(xa, ts)
     F_t = jax.jacfwd(_residual, 1)(xa, ts)
     g_a, g_t = jax.grad(_ground_flux, (0, 1))(xa, ts)
-    dxa = -jnp.linalg.solve(J_a, F_t)
+    # Double where: a singular J_a would put inf/NaN in the unselected branch,
+    # which reaches the reverse-mode cotangent through the select.
+    ok = converged & jnp.all(jnp.isfinite(J_a)) & (jnp.linalg.det(J_a) != 0.0)
+    dxa = -jnp.linalg.solve(jnp.where(ok, J_a, jnp.eye(2, dtype=J_a.dtype)), F_t)
     lam_full = -(g_t + g_a @ dxa)
     lam_part = -g_t
-    lam = jnp.where(converged & jnp.isfinite(lam_full), lam_full, lam_part)
+    lam = jnp.where(ok & jnp.isfinite(lam_full), lam_full, lam_part)
     return jnp.where(jnp.isfinite(lam), lam, 0.0)
 
 

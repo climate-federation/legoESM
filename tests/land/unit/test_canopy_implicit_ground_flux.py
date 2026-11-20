@@ -236,3 +236,21 @@ def _converged_column(cc):
 def test_config_rejects_a_non_bool_flag():
     with pytest.raises(ValueError, match="implicit_ground_flux"):
         TwoLeafCanopyConfig(implicit_ground_flux=1).validate()
+
+
+def test_singular_canopy_air_jacobian_gives_finite_gradient(monkeypatch):
+    """A singular J_a must fall back to the partial derivative with no NaN in
+    the reverse-mode gradient (the unselected solve branch is sanitised)."""
+    from legoesm.land.canopy import solver as S
+    cc = TwoLeafCanopyConfig(max_iters=60, implicit_ground_flux=True)
+    x, bundle = _converged_column(cc)
+    real = S._canopy_residual
+    # canopy-air rows independent of (Tc, q_c): J_a == 0, singular
+    monkeypatch.setattr(S, "_canopy_residual", lambda xx, b, **k: real(
+        xx.at[4:6].set(x[4:6]), b, **k))
+    lam_part = S.ground_heat_conductance(x, bundle, cc, jnp.array(False))
+    lam = S.ground_heat_conductance(x, bundle, cc, jnp.array(True))
+    assert float(lam) == float(lam_part)
+    g = jax.grad(lambda ts: S.ground_heat_conductance(
+        x, bundle._replace(Ts_bc=ts), cc, jnp.array(True)))(bundle.Ts_bc)
+    assert np.isfinite(float(g))

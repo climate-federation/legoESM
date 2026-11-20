@@ -6534,3 +6534,20 @@ def test_no_deck_can_set_ml_pipeline(tmp_path):
     deck.write_text("ml_pipeline: true\n")
     with pytest.raises((SystemExit, ValueError, KeyError)):
         load_yaml_config(str(deck), build_arg_parser())
+
+
+def test_two_leaf_implicit_ground_flux_with_snow_node_is_refused_strict():
+    """The implicit ground flux (default on) is bulk-snow-without-node only:
+    validate_strict names it unless the deck switches it off."""
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land",
+            "--land-surface-scheme", "two_leaf", "--land-snow-insulation"]
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    with pytest.raises(ValueError, match="implicit_ground_flux \\(on by default\\)"):
+        cfg.validate_strict()
+    off = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--no-land-canopy-implicit-ground-flux"]), parser))
+    try:          # this bare analytical deck fails other checks (no land mask)
+        off.validate_strict()
+    except ValueError as err:
+        assert "implicit_ground_flux (on by default)" not in str(err)
