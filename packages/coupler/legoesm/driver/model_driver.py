@@ -8504,6 +8504,9 @@ class ModelDriver:
                 # different one; user decision 2026-10-26)
                 _save["latloncol_div4_scale"] = np.asarray(
                     float(_llc.dyn.config.nu_div4_scale))
+                # the vertical form likewise (#2548)
+                _save["latloncol_vertical_form"] = np.asarray(
+                    str(_llc.dyn.config.vertical_form))
                 for _k in ("u", "v", "T", "p_s", "phis"):
                     _save[f"latloncol_{_k}"] = np.asarray(getattr(_nat, _k))
                 _names = sorted(_nat.tracers)
@@ -9303,6 +9306,19 @@ class ModelDriver:
                         f"{_run_dd4}: the trajectory would change at the "
                         "restart.  Resume with the checkpoint's scale, or "
                         "start a new run.")
+                # vertical-form stamp (#2548): an unstamped file predates it,
+                # when every lat-lon column run was legacy
+                _ck_vf = (str(d["latloncol_vertical_form"])
+                          if "latloncol_vertical_form" in d.files else "legacy")
+                _run_vf = str(_llc.dyn.config.vertical_form)
+                if _ck_vf != _run_vf:
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} was written with "
+                        f"vertical_form={_ck_vf!r} ('legacy' when the file "
+                        f"carries no latloncol_vertical_form) but this run "
+                        f"steps with {_run_vf!r}: the trajectory would change "
+                        "at the restart.  Resume with the checkpoint's form, "
+                        "or start a new run.")
                 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
                     CGridLatLonHydrostaticState,
                 )

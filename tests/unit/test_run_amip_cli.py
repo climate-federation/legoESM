@@ -3282,12 +3282,12 @@ def test_factory_threads_vertical_form_into_the_dycore(grid_type, discretization
 
 @pytest.mark.parametrize("deck,expected_form", [
     ("amip_production.yaml", "as83"),
-    ("amip_production_latlon48.yaml", "legacy"),
+    ("amip_production_latlon48.yaml", "as83"),
     ("amip_production_spectral_t31.yaml", "legacy"),
     ("amip_production_fv3duo_c24.yaml", "legacy"),
 ])
 def test_production_decks_select_vertical_form(deck, expected_form):
-    """Production selects as83 on MPAS and preserves legacy on other grids."""
+    """Production selects as83 on MPAS and lat-lon; legacy on spectral and FV3 duo."""
     from pathlib import Path
 
     from legoesm.driver.run_config_yaml import load_yaml_config
@@ -5398,7 +5398,7 @@ _DUO_DECK_OWN_ROWS = frozenset({
     # switched off because the duo's own sponge / damping replace them
     "grid.grid_type", "grid.resolution",
     "dycore.discretization", "dycore.dt", "dycore.column_lane",
-    "dycore.vertical_form",  # as83 adopted for MPAS only (user 2026-11-11)
+    "dycore.vertical_form",  # as83 on MPAS and lat-lon; the duo keeps legacy
     "dycore.fv3_duo_sponge_layers", "dycore.fv3_duo_sponge_factor",
     "dycore.fv3_duo_sponge_d2_top", "dycore.fv3_duo_nord",
     "dycore.fv3_duo_d4_bg", "dycore.fv3_duo_fill",
@@ -6098,6 +6098,7 @@ def test_latlon48_deck_resolves_div4_and_cam_polar_cutoff_into_the_dycore():
                                    latlon_native_grid=grid).dyn
     assert dyn.config.nu_div4_scale == 1.0
     assert dyn.config.use_polar_filter is True
+    assert dyn.config.vertical_form == "as83"
     assert dyn.config.polar_filter_cutoff_deg == 35.9041
     assert dyn.dt == cfg.dycore.dt == 450.0
 def test_mcfarlane_effgw_oro_flag_flows_to_config():
