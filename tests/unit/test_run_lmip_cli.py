@@ -85,14 +85,13 @@ def test_land_canopy_solve_group_round_trip():
     assert build_config_from_args(old).land.surface_scheme.solve_group == 0
 
 
-def test_land_canopy_implicit_flux_and_fallback_round_trip():
-    """Both two-leaf fixes default ON (CanopyConfig) and can be switched off."""
+def test_land_canopy_implicit_ground_flux_round_trip():
+    """The two-leaf implicit ground flux defaults ON and can be switched off."""
     d = build_config_from_args(_parse_args(["--lat", "45.0"])).land.surface_scheme
-    assert d.implicit_ground_flux is True and d.fallback_from_last_iterate is True
+    assert d.implicit_ground_flux is True
     off = build_config_from_args(_parse_args([
-        "--lat", "45.0", "--no-land-canopy-implicit-ground-flux",
-        "--no-land-canopy-fallback-from-last-iterate"])).land.surface_scheme
-    assert off.implicit_ground_flux is False and off.fallback_from_last_iterate is False
+        "--lat", "45.0", "--no-land-canopy-implicit-ground-flux"])).land.surface_scheme
+    assert off.implicit_ground_flux is False
 
 
 def test_committed_lmip_decks_select_solve_group():
