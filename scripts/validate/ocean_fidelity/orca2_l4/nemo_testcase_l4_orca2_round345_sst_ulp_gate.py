@@ -31,6 +31,12 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round342_s4_year_gate as r342,
 )
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_round342_s4_year_metrics as year_metrics,
+)
+from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (  # noqa: E402
+    deck as coupled_deck,
+)
 
 GateError = common.GateError
 require = common.require
@@ -45,6 +51,9 @@ INPUT_AUDIT = "round342_arm_a_input_identity.json"
 PERTURBED_ARM_NAME = "orca2_k0_year1_sst_plus_1ulp_np2"
 CONTROL_ARM_NAME = "orca2_k0_year1_restart_control_np2"
 DELAY_RESTART_VARIABLES = frozenset({"DELAY_re8_fwb2", "DELAY_im8_fwb2"})
+COUPLED_ICE_KEYS = (
+    "ICE_AREA_NH", "ICE_AREA_SH", "ICE_VOLUME_NH", "ICE_VOLUME_SH",
+)
 BASELINE_ARM = (
     Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds")
     / "round342/s4_year/orca2_k0_year1_a_np2"
@@ -59,6 +68,21 @@ DEFAULT_RUN_ROOT = Path(
 DEFAULT_EVIDENCE_DIR = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r345"
 )
+COUPLED_C4_BASELINE_ARM = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/"
+    "oracle_coupled_c_ladder/REF_C4"
+)
+COUPLED_C4_MANIFEST = COUPLED_C4_BASELINE_ARM.parent / "manifest/run_manifest.json"
+COUPLED_C4_CONTROL_ARM_NAME = "coupled_c4_year1_restart_control_np2"
+COUPLED_C4_PERTURBED_ARM_NAME = "coupled_c4_year1_sst_plus_1ulp_np2"
+COUPLED_C4_RUN_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/"
+    "coupled_c4_perturbed_twin"
+)
+COUPLED_C4_EVIDENCE_DIR = COUPLED_C4_RUN_ROOT / "evidence"
+COUPLED_C4_ADMISSION_NAME = "round345_coupled_c4_sst_ulp_admission.json"
+COUPLED_C4_METRICS_NAME = "round345_coupled_c4_sst_ulp_metrics.json"
+COUPLED_C4_PROFILE = "COUPLED_C_LADDER_REF_C4"
 
 
 def _wet_surface_mask(domain_file: Path) -> np.ndarray:
@@ -237,7 +261,12 @@ def verify_control_input_manifest(run_dir: Path) -> dict[str, Any]:
     manifest_path = run_dir / CONTROL_INPUT_MANIFEST
     require(manifest_path.is_file(), f"missing control-input manifest: {manifest_path}")
     recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
-    measured = verify_unperturbed_restart_pair(Path(recorded["source_arm"]), run_dir)
+    source_arm = Path(recorded["source_arm"])
+    measured = verify_unperturbed_restart_pair(source_arm, run_dir)
+    if "ice_restart_pair_unchanged" in recorded:
+        measured["ice_restart_pair_unchanged"] = verify_unchanged_ice_restart_pair(
+            source_arm, run_dir
+        )
     require(recorded == measured, "recorded control-input manifest does not match re-audit")
     return measured
 
@@ -274,9 +303,72 @@ def verify_perturbation_manifest(run_dir: Path) -> dict[str, Any]:
     manifest_path = run_dir / PERTURBATION_MANIFEST
     require(manifest_path.is_file(), f"missing perturbation manifest: {manifest_path}")
     recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
-    measured = verify_restart_pair_perturbation(Path(recorded["source_arm"]), run_dir)
+    source_arm = Path(recorded["source_arm"])
+    measured = verify_restart_pair_perturbation(source_arm, run_dir)
+    if "ice_restart_pair_unchanged" in recorded:
+        measured["ice_restart_pair_unchanged"] = verify_unchanged_ice_restart_pair(
+            source_arm, run_dir
+        )
     require(recorded == measured, "recorded perturbation manifest does not match re-audit")
     return measured
+
+
+def verify_unchanged_ice_restart_pair(
+    source_arm: Path,
+    candidate_arm: Path,
+) -> dict[str, Any]:
+    """Prove both rank-local SI3 day-1 restart files are byte-identical."""
+    rows = []
+    for rank in (0, 1):
+        name = f"ORCA2_{RESTART_KT:08d}_restart_ice_{rank:04d}.nc"
+        source = source_arm / name
+        candidate = candidate_arm / name
+        require(source.is_file(), f"missing coupled day-1 ice restart: {source}")
+        require(candidate.is_file() and not candidate.is_symlink(),
+                f"coupled day-1 ice restart must be a regular file: {candidate}")
+        source_sha = common.sha256(source)
+        candidate_sha = common.sha256(candidate)
+        require(candidate_sha == source_sha,
+                f"{name}: coupled day-1 ice restart differs from REF_C4")
+        rows.append({
+            "rank": rank,
+            "source_path": str(source.resolve()),
+            "source_sha256": source_sha,
+            "candidate_file": name,
+            "candidate_sha256": candidate_sha,
+        })
+    return {
+        "status": "PASS_R345_COUPLED_DAY1_ICE_RESTART_UNCHANGED",
+        "restart_kt": RESTART_KT,
+        "restart_pair_byte_identical": True,
+        "rank_files": rows,
+    }
+
+
+def _copy_coupled_day1_restarts(
+    run_dir: Path,
+    *,
+    perturb: bool,
+    source_arm: Path = COUPLED_C4_BASELINE_ARM,
+) -> dict[str, Any]:
+    ocean = (
+        perturb_day1_restart_pair(run_dir, source_arm)
+        if perturb
+        else copy_unperturbed_day1_restart_pair(run_dir, source_arm)
+    )
+    for rank in (0, 1):
+        name = f"ORCA2_{RESTART_KT:08d}_restart_ice_{rank:04d}.nc"
+        shutil.copy2(source_arm / name, run_dir / name)
+    ocean["ice_restart_pair_unchanged"] = verify_unchanged_ice_restart_pair(
+        source_arm, run_dir
+    )
+    manifest = run_dir / (
+        PERTURBATION_MANIFEST if perturb else CONTROL_INPUT_MANIFEST
+    )
+    manifest.write_text(
+        json.dumps(ocean, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return ocean
 
 
 def _patch_restart_namelist(source: Path, destination: Path, expected_steps: int) -> dict[str, Any]:
@@ -467,6 +559,182 @@ def stage_control_arm(
         run_dir, perturb=False, ice_cover_path=ice_cover_path,
         build_cfg=build_cfg, expected_steps=expected_steps,
     )
+
+
+def _patch_ice_restart_namelist(source: Path, destination: Path) -> dict[str, Any]:
+    text = source.read_text(encoding="utf-8")
+    group = re.search(r"(?ims)^\s*&nampar\b.*?^\s*/\s*$", text)
+    require(group is not None, f"missing &nampar block in {source}")
+    block = group.group(0)
+    value = f"ORCA2_{RESTART_KT:08d}_restart_ice"
+    block, count = re.subn(
+        r"(?im)(^\s*cn_icerst_in\s*=\s*)[^!\n]+",
+        rf'\g<1>"{value}"   ',
+        block,
+        count=1,
+    )
+    require(count == 1, f"failed to patch cn_icerst_in in {source}")
+    text = text[:group.start()] + block + text[group.end():]
+    destination.write_text(text, encoding="utf-8")
+    common.validate_group_membership(destination, {"cn_icerst_in": "nampar"})
+    return {
+        "source": str(source.resolve()),
+        "source_sha256": common.sha256(source),
+        "sha256": common.sha256(destination),
+        "cn_icerst_in": value,
+        "ice_restart_pair_unchanged": True,
+    }
+
+
+def _coupled_deck_names() -> tuple[list[str], list[str]]:
+    source = Path(coupled_deck.OVERLAYS["source_deck"])
+    inputs = _manifest_names(source / "input_files.sha256")
+    deck = _manifest_names(source / "deck_files.sha256")
+    return inputs, deck
+
+
+def verify_coupled_deck_identity(
+    run_dir: Path,
+    *,
+    baseline_arm: Path = COUPLED_C4_BASELINE_ARM,
+    allow_restart_namelists: bool,
+) -> dict[str, Any]:
+    """Re-hash the exact C4 inputs/deck; only the two restart namelists may differ."""
+    input_names, deck_names = _coupled_deck_names()
+    allowed = {"namelist_cfg", "namelist_ice_cfg"} if allow_restart_namelists else set()
+    rows = {}
+    changed = []
+    for name in sorted(input_names + deck_names):
+        baseline = baseline_arm / name
+        candidate = run_dir / name
+        require(baseline.exists() and candidate.exists(), f"missing coupled C4 deck file {name}")
+        baseline_sha = common.sha256(baseline)
+        candidate_sha = common.sha256(candidate)
+        equal = baseline_sha == candidate_sha
+        require(equal or name in allowed,
+                f"coupled C4 deck/input {name} differs outside restart namelists")
+        if not equal:
+            changed.append(name)
+        rows[name] = {
+            "baseline_sha256": baseline_sha,
+            "staged_sha256": candidate_sha,
+            "byte_identical": equal,
+        }
+    require(set(changed) == allowed,
+            f"coupled C4 restart-namelist changes are {changed}, expected {sorted(allowed)}")
+    return {
+        "status": "PASS_R345_COUPLED_C4_DECK_INPUT_IDENTITY",
+        "baseline_arm": str(baseline_arm.resolve()),
+        "input_file_count": len(input_names),
+        "deck_file_count": len(deck_names),
+        "restart_namelists_rehashed": sorted(allowed),
+        "all_other_deck_and_input_files_byte_identical": True,
+        "files": rows,
+    }
+
+
+def verify_coupled_c4_baseline(
+    baseline_arm: Path = COUPLED_C4_BASELINE_ARM,
+) -> dict[str, Any]:
+    receipt = json.loads((baseline_arm / "C_DECK_RECEIPT.json").read_text())
+    manifest = json.loads(COUPLED_C4_MANIFEST.read_text())
+    require(receipt.get("status") == "PASS_EXACT_R339_R5_DECK_ICE5"
+            and receipt.get("rung") == "C4"
+            and receipt.get("ice_dimensions") == [5, 10, 5],
+            "REF_C4 is not the admitted coupled C4 ICE5 deck")
+    require(receipt.get("resolved") == {
+        "nn_fsbc": 2, "nn_ice": 2, "nn_it000": 1,
+        "nn_itend": 2920, "nn_stock": 8,
+    }, "REF_C4 receipt has unexpected resolved controls")
+    require((baseline_arm / "NEMO_RUN_COMPLETE").is_file(),
+            "REF_C4 lacks NEMO_RUN_COMPLETE")
+    require((baseline_arm / "time.step").read_text().strip() == "2920",
+            "REF_C4 time.step is not 2920")
+    producer = str(manifest.get("producer_commit", ""))
+    require(bool(re.fullmatch(r"[0-9a-f]{40}", producer)),
+            "REF_C4 manifest has invalid producer commit")
+    head = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    ancestor = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor", producer, head],
+        check=False,
+    )
+    require(ancestor.returncode == 0,
+            f"REF_C4 producer commit {producer} is not an ancestor of {head}")
+    binary_sha = common.sha256(baseline_arm / "nemo")
+    require(binary_sha == manifest["binary_sha256"]["observer_free_REF"],
+            "REF_C4 binary digest moved")
+    return {
+        "status": "PASS_R345_COUPLED_C4_BASELINE",
+        "baseline_arm": str(baseline_arm.resolve()),
+        "producer_commit": producer,
+        "binary_sha256": binary_sha,
+        "deck_receipt_sha256": common.sha256(baseline_arm / "C_DECK_RECEIPT.json"),
+        "ice_dimensions": [5, 10, 5],
+        "expected_steps": 2920,
+        "daily_restart_shards": 1460,
+    }
+
+
+def stage_coupled_c4_arm(
+    run_dir: Path,
+    *,
+    perturb: bool,
+    expected_steps: int = r342.YEAR_STEPS,
+) -> dict[str, Any]:
+    require(expected_steps == r342.YEAR_STEPS,
+            "coupled C4 acquisition is admitted only at kt=2920")
+    marker = run_dir / ".round345_attempt"
+    marker_text = marker.read_text(encoding="utf-8") if marker.is_file() else None
+    if marker_text is not None:
+        marker.unlink()
+    require(run_dir.is_dir() and not any(run_dir.iterdir()),
+            f"coupled arm staging requires an otherwise-empty claimed directory: {run_dir}")
+    run_dir.rmdir()
+    coupled_deck.stage(
+        Path(coupled_deck.OVERLAYS["source_deck"]), run_dir, "C4"
+    )
+    if marker_text is not None:
+        marker.write_text(marker_text, encoding="utf-8")
+    pristine_identity = verify_coupled_deck_identity(
+        run_dir, allow_restart_namelists=False
+    )
+    baseline = verify_coupled_c4_baseline()
+    ocean_namelist = _patch_restart_namelist(
+        COUPLED_C4_BASELINE_ARM / "namelist_cfg",
+        run_dir / "namelist_cfg",
+        expected_steps,
+    )
+    ice_namelist = _patch_ice_restart_namelist(
+        COUPLED_C4_BASELINE_ARM / "namelist_ice_cfg",
+        run_dir / "namelist_ice_cfg",
+    )
+    shutil.copy2(run_dir / "namelist_cfg", run_dir / "staged.namelist_cfg")
+    identity = verify_coupled_deck_identity(
+        run_dir, allow_restart_namelists=True
+    )
+    restart = _copy_coupled_day1_restarts(run_dir, perturb=perturb)
+    build_sources = run_dir / "build_sources"
+    build_sources.mkdir()
+    shutil.copy2(COUPLED_C4_MANIFEST, build_sources / "run_manifest.json")
+    shutil.copy2(
+        COUPLED_C4_BASELINE_ARM / "C_DECK_RECEIPT.json",
+        build_sources / "C_DECK_RECEIPT.json",
+    )
+    return {
+        "profile": COUPLED_C4_PROFILE,
+        "baseline_admission": baseline,
+        "pristine_deck_identity": pristine_identity,
+        "restart_deck_identity": identity,
+        "restart_namelist": ocean_namelist,
+        "ice_restart_namelist": ice_namelist,
+        (
+            "restart_sst_perturbation" if perturb
+            else "unperturbed_restart_control_input"
+        ): restart,
+    }
 
 
 def write_run_manifest(run_dir: Path) -> dict[str, Any]:
@@ -671,6 +939,122 @@ def verify_perturbed_restart_outputs(
     }
 
 
+def _verify_coupled_continuation_file(
+    candidate: Path,
+    baseline: Path,
+    *,
+    expected_kt: int,
+    ice: bool,
+    require_data_equal: bool,
+) -> dict[str, Any]:
+    require(baseline.is_file(), f"missing REF_C4 continuation restart: {baseline}")
+    require(candidate.is_file() and not candidate.is_symlink(),
+            f"missing regular coupled continuation restart: {candidate}")
+    with netCDF4.Dataset(baseline) as baseline_ds, netCDF4.Dataset(candidate) as candidate_ds:
+        baseline_names = set(baseline_ds.variables)
+        candidate_names = set(candidate_ds.variables)
+        allowed_baseline_only = set() if ice else set(DELAY_RESTART_VARIABLES)
+        require(
+            baseline_names - candidate_names == allowed_baseline_only
+            and not candidate_names - baseline_names,
+            f"{candidate.name}: coupled restart inventory differs: "
+            f"REF_C4_only={sorted(baseline_names - candidate_names)}, "
+            f"candidate_only={sorted(candidate_names - baseline_names)}",
+        )
+        required = {"a_i", "v_i"} if ice else {"kt", "tn", "sn", "un", "vn", "sshn"}
+        require(required <= candidate_names,
+                f"{candidate.name}: missing coupled restart variables "
+                f"{sorted(required - candidate_names)}")
+        if not ice:
+            require(int(np.asarray(candidate_ds.variables["kt"][...])) == expected_kt,
+                    f"{candidate.name}: ocean restart kt is not {expected_kt}")
+        common_names = sorted(baseline_names & candidate_names)
+        for name in common_names:
+            baseline_var = baseline_ds.variables[name]
+            candidate_var = candidate_ds.variables[name]
+            baseline_var.set_auto_maskandscale(False)
+            candidate_var.set_auto_maskandscale(False)
+            baseline_values = np.asarray(baseline_var[:])
+            candidate_values = np.asarray(candidate_var[:])
+            require(baseline_values.dtype == candidate_values.dtype,
+                    f"{candidate.name}:{name} dtype differs from REF_C4")
+            require(baseline_values.shape == candidate_values.shape,
+                    f"{candidate.name}:{name} shape differs from REF_C4")
+            if np.issubdtype(candidate_values.dtype, np.number):
+                require(bool(np.isfinite(candidate_values).all()),
+                        f"{candidate.name}:{name} contains non-finite values")
+            if require_data_equal:
+                require(
+                    baseline_values.tobytes(order="C")
+                    == candidate_values.tobytes(order="C"),
+                    f"{candidate.name}:{name} data differs from REF_C4",
+                )
+    return {
+        "kt": expected_kt,
+        "rank": int(candidate.stem.rsplit("_", 1)[1]),
+        "component": "ice" if ice else "ocean",
+        "file": candidate.name,
+        "baseline_sha256": common.sha256(baseline),
+        "candidate_sha256": common.sha256(candidate),
+        "common_variable_count": len(common_names),
+        "ref_c4_only_variables": sorted(allowed_baseline_only),
+        "candidate_only_variables": [],
+    }
+
+
+def verify_coupled_c4_continuation(
+    candidate_arm: Path,
+    *,
+    baseline_arm: Path = COUPLED_C4_BASELINE_ARM,
+    expected_steps: int = r342.YEAR_STEPS,
+    require_data_equal: bool,
+) -> dict[str, Any]:
+    first_output_kt = RESTART_KT + r342.DAILY_STOCK_STRIDE
+    require(expected_steps >= first_output_kt
+            and (expected_steps - RESTART_KT) % r342.DAILY_STOCK_STRIDE == 0,
+            f"coupled continuation endpoint is off cadence: {expected_steps}")
+    rows = []
+    for kt in range(first_output_kt, expected_steps + 1, r342.DAILY_STOCK_STRIDE):
+        for ice, infix in ((False, "restart"), (True, "restart_ice")):
+            for rank in (0, 1):
+                name = f"ORCA2_{kt:08d}_{infix}_{rank:04d}.nc"
+                rows.append(_verify_coupled_continuation_file(
+                    candidate_arm / name,
+                    baseline_arm / name,
+                    expected_kt=kt,
+                    ice=ice,
+                    require_data_equal=require_data_equal,
+                ))
+    days = (expected_steps - RESTART_KT) // r342.DAILY_STOCK_STRIDE
+    require(len(rows) == days * 4,
+            f"coupled continuation checked {len(rows)} files, expected {days * 4}")
+    return {
+        "status": (
+            "PASS_R345_COUPLED_C4_UNPERTURBED_RESTART_CONTROL"
+            if require_data_equal
+            else "PASS_R345_COUPLED_C4_PERTURBED_RESTART_OUTPUTS"
+        ),
+        "baseline_arm": str(baseline_arm.resolve()),
+        "candidate_arm": str(candidate_arm.resolve()),
+        "restart_kt_first": first_output_kt,
+        "restart_kt_last": expected_steps,
+        "daily_restart_quartets_checked": days,
+        "restart_files_checked": len(rows),
+        "ocean_restart_files_checked": days * 2,
+        "ice_restart_files_checked": days * 2,
+        "all_common_variable_data_bitwise_identical": require_data_equal,
+        "unequal_common_variable_data_count": 0 if require_data_equal else None,
+        "required_ref_c4_ocean_only_variables": sorted(DELAY_RESTART_VARIABLES),
+        "candidate_only_variables": [],
+        "comparison": (
+            "variable dtype + shape + raw C-order data bytes for ocean and SI3"
+            if require_data_equal
+            else "variable set + dtype + shape + finite numeric data for ocean and SI3"
+        ),
+        "restart_files": rows,
+    }
+
+
 def _copy_netcdf_excluding_variables(
     source: Path,
     destination: Path,
@@ -700,6 +1084,228 @@ def _copy_netcdf_excluding_variables(
             dst_var.set_auto_maskandscale(False)
             dst_var[...] = src_var[...]
     os.replace(temporary, destination)
+
+
+def verify_coupled_c4_inventory(
+    run_dir: Path,
+    *,
+    expected_steps: int = r342.YEAR_STEPS,
+) -> dict[str, Any]:
+    expected = {
+        f"ORCA2_{kt:08d}_{infix}_{rank:04d}.nc"
+        for kt in range(RESTART_KT, expected_steps + 1, r342.DAILY_STOCK_STRIDE)
+        for infix in ("restart", "restart_ice")
+        for rank in (0, 1)
+    }
+    present = {
+        path.name for path in run_dir.iterdir()
+        if path.is_file() and re.fullmatch(
+            r"ORCA2_\d{8}_restart(?:_ice)?_\d{4}\.nc", path.name
+        )
+    }
+    missing = sorted(expected - present)
+    extra = sorted(present - expected)
+    require(not missing and not extra,
+            f"coupled restart inventory mismatch: missing={missing[:2]}, extra={extra[:2]}")
+    observer = sorted(
+        path.name for path in run_dir.iterdir()
+        if path.is_file() and (path.suffix == ".bin" or path.name.startswith("oracle_"))
+    )
+    require(not observer, f"coupled arm contains observer outputs: {observer}")
+    return {
+        "expected_restart_file_count": len(expected),
+        "ocean_restart_file_count": len(expected) // 2,
+        "ice_restart_file_count": len(expected) // 2,
+        "observer_outputs": observer,
+    }
+
+
+def _verify_coupled_resolved_outputs(run_dir: Path, expected_steps: int) -> dict[str, Any]:
+    expected_ocean = {
+        "nn_it000": str(FIRST_RUN_STEP),
+        "nn_itend": str(expected_steps),
+        "nn_stock": str(r342.DAILY_STOCK_STRIDE),
+        "ln_rstart": "T",
+        "nn_rstctl": "2",
+        "cn_ocerst_in": f"ORCA2_{RESTART_KT:08d}_restart",
+    }
+    common.validate_ocean_output(run_dir / "ocean.output", expected_ocean)
+    ice_output = run_dir / "output.namelist.ice"
+    require(ice_output.is_file(), f"missing resolved SI3 namelist: {ice_output}")
+    ice_text = ice_output.read_text(encoding="utf-8", errors="replace")
+    ice_restart = f"ORCA2_{RESTART_KT:08d}_restart_ice"
+    require(common.output_has(ice_text, "cn_icerst_in", f"'{ice_restart}'")
+            or common.output_has(ice_text, "cn_icerst_in", f'"{ice_restart}"')
+            or re.search(
+                rf"(?im)^\s*cn_icerst_in\s*=\s*['\"]{ice_restart}['\"]", ice_text
+            ) is not None,
+            "resolved SI3 cn_icerst_in is not the REF_C4 day-1 restart pair")
+    return {
+        "ocean": expected_ocean,
+        "ice": {"cn_icerst_in": ice_restart},
+    }
+
+
+def admit_coupled_c4_arm(
+    run_dir: Path,
+    *,
+    perturb: bool,
+    expected_steps: int = r342.YEAR_STEPS,
+    allow_stub_binary: bool = False,
+) -> dict[str, Any]:
+    require(expected_steps == r342.YEAR_STEPS,
+            "coupled C4 admission is only defined for kt=2920")
+    restart_input = (
+        verify_perturbation_manifest(run_dir)
+        if perturb else verify_control_input_manifest(run_dir)
+    )
+    manifest = r342._verify_existing_run_manifest(run_dir)
+    baseline = verify_coupled_c4_baseline()
+    actual_binary = common.sha256(run_dir / "nemo")
+    if not allow_stub_binary:
+        require(actual_binary == baseline["binary_sha256"],
+                "coupled C4 arm binary differs from REF_C4")
+    identity = verify_coupled_deck_identity(
+        run_dir, allow_restart_namelists=True
+    )
+    completion = r342.verify_nemo_completion_signal(
+        run_dir, expected_steps=expected_steps
+    )
+    inventory = verify_coupled_c4_inventory(run_dir, expected_steps=expected_steps)
+    resolved = _verify_coupled_resolved_outputs(run_dir, expected_steps)
+    continuation = verify_coupled_c4_continuation(
+        run_dir,
+        expected_steps=expected_steps,
+        require_data_equal=not perturb,
+    )
+    return {
+        "status": (
+            "PASS_R345_COUPLED_C4_YEAR_SST_PLUS_ONE_ULP_ARM"
+            if perturb else "PASS_R345_COUPLED_C4_UNPERTURBED_CONTROL_ARM"
+        ),
+        "admitted": True,
+        "profile": COUPLED_C4_PROFILE,
+        "run_dir": str(run_dir.resolve()),
+        "baseline_arm": str(COUPLED_C4_BASELINE_ARM.resolve()),
+        "restart_kt": RESTART_KT,
+        "first_run_step": FIRST_RUN_STEP,
+        "expected_steps": expected_steps,
+        "ice_dimensions": [5, 10, 5],
+        "binary_sha256": actual_binary,
+        "binary_equal_ref_c4": actual_binary == baseline["binary_sha256"],
+        "baseline_admission": baseline,
+        "ref_c4_input_identity": identity,
+        "resolved_restart_namelists": resolved,
+        "inventory": inventory,
+        "completion_signal": completion,
+        (
+            "restart_sst_perturbation" if perturb
+            else "unperturbed_restart_control_input"
+        ): restart_input,
+        (
+            "continuation_restart_outputs" if perturb
+            else "restart_continuation_control"
+        ): continuation,
+        "producer_manifest": manifest,
+    }
+
+
+def build_coupled_c4_envelope_report(
+    baseline_root: Path,
+    perturbed_root: Path,
+) -> dict[str, Any]:
+    """Build the D188 ocean metrics plus four monthly hemispheric SI3 totals."""
+    # Keep the coupled runner import local: its JAX model dependencies are not
+    # needed by the standalone acquisition, staging, or admission checks.
+    from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
+        c4_year_runner,
+    )
+
+    report = year_metrics.evaluate_month_by_month(
+        nemo_root=baseline_root,
+        candidate_root=perturbed_root,
+        days=365,
+        candidate_is_nemo_restart=True,
+    )
+    geo = year_metrics.pilot_metrics.static_geometry(baseline_root)
+    ice_by_day = {
+        day: c4_year_runner.ice_day_metrics(
+            c4_year_runner.read_nemo_ice_day(perturbed_root, day),
+            c4_year_runner.read_nemo_ice_day(baseline_root, day),
+            geo,
+        )
+        for day in range(1, 366)
+    }
+    for month in report["months"]:
+        require(month["status"] == "EVALUATED_COMPLETE_MONTH",
+                f"{month['label']}: coupled envelope month is not complete")
+        ice_rows = [ice_by_day[day] for day in month["available_days"]]
+        month["metrics"].update(c4_year_runner.monthly_ice_metrics(ice_rows))
+    report.update({
+        "round": "orca2_r345_coupled_c4",
+        "envelope_profile": COUPLED_C4_PROFILE,
+        "required_admission_status": "PASS_R345_COUPLED_C4_YEAR_SST_PLUS_ONE_ULP_ARM",
+        "ice_metric_keys": list(COUPLED_ICE_KEYS),
+        "ice_hemispheres": {"NH": "gphit > 0", "SH": "gphit <= 0"},
+    })
+    return report
+
+
+def admit_coupled_c4_pair(
+    run_root: Path,
+    *,
+    expected_steps: int = r342.YEAR_STEPS,
+    allow_stub_binary: bool = False,
+) -> dict[str, Any]:
+    control_arm = run_root / COUPLED_C4_CONTROL_ARM_NAME
+    perturbed_arm = run_root / COUPLED_C4_PERTURBED_ARM_NAME
+    control = admit_coupled_c4_arm(
+        control_arm, perturb=False, expected_steps=expected_steps,
+        allow_stub_binary=allow_stub_binary,
+    )
+    perturbed = admit_coupled_c4_arm(
+        perturbed_arm, perturb=True, expected_steps=expected_steps,
+        allow_stub_binary=allow_stub_binary,
+    )
+    require(control["binary_sha256"] == perturbed["binary_sha256"],
+            "coupled control and envelope binaries differ")
+    require(
+        control["producer_manifest"]["producer_commit"]
+        == perturbed["producer_manifest"]["producer_commit"],
+        "coupled control and envelope producer commits differ",
+    )
+    report = build_coupled_c4_envelope_report(
+        COUPLED_C4_BASELINE_ARM, perturbed_arm
+    )
+    metrics_path = run_root / COUPLED_C4_METRICS_NAME
+    metrics_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    perturbed["unperturbed_restart_control"] = control
+    perturbed["restart_continuation_control"] = control["restart_continuation_control"]
+    perturbed["envelope_metrics"] = {
+        "path": str(metrics_path.resolve()),
+        "sha256": common.sha256(metrics_path),
+        "format": report["format"],
+        "months": 12,
+        "d188_ocean_quantities": [
+            *decision188_metric_keys(),
+        ],
+        "ice_quantities": list(COUPLED_ICE_KEYS),
+    }
+    output = run_root / COUPLED_C4_ADMISSION_NAME
+    output.write_text(
+        json.dumps(perturbed, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return perturbed
+
+
+def decision188_metric_keys() -> tuple[str, ...]:
+    return (
+        "SST", "T_0-100m", "T_100-1000m", "T_>1000m",
+        "SSS", "S_0-100m", "S_100-1000m", "S_>1000m",
+        "SSH", "MLD", "PSI", "DRAKE", "KE",
+    )
 
 
 def admit_control_arm(
@@ -1074,6 +1680,89 @@ def write_stub_outputs(
     return result
 
 
+def write_coupled_c4_stub_outputs(
+    run_dir: Path,
+    *,
+    rank: int | None = None,
+    plant_missing_stop: bool = False,
+    plant_short_timestep: int | None = None,
+) -> dict[str, Any]:
+    """Synthetic coupled continuation using REF_C4's retained ocean+ice outputs."""
+    ranks = (0, 1) if rank is None else (rank,)
+    require(all(local_rank in (0, 1) for local_rank in ranks),
+            f"stub rank must be 0 or 1, got {rank}")
+    control = (run_dir / CONTROL_INPUT_MANIFEST).is_file()
+    require(control != (run_dir / PERTURBATION_MANIFEST).is_file(),
+            "coupled stub must identify exactly one restart arm")
+    if control:
+        verify_control_input_manifest(run_dir)
+    else:
+        verify_perturbation_manifest(run_dir)
+    input_paths = [
+        run_dir / f"ORCA2_{RESTART_KT:08d}_{infix}_{local_rank:04d}.nc"
+        for infix in ("restart", "restart_ice") for local_rank in ranks
+    ]
+    before = {path.name: common.sha256(path) for path in input_paths}
+    expected_steps, stock = r342.parse_namelist_itend_stock(run_dir / "namelist_cfg")
+    require(stock == r342.DAILY_STOCK_STRIDE,
+            f"coupled stub restart stride is {stock}, expected 8")
+    for kt in range(RESTART_KT + stock, expected_steps + 1, stock):
+        for local_rank in ranks:
+            ocean_name = f"ORCA2_{kt:08d}_restart_{local_rank:04d}.nc"
+            _copy_netcdf_excluding_variables(
+                COUPLED_C4_BASELINE_ARM / ocean_name,
+                run_dir / ocean_name,
+                DELAY_RESTART_VARIABLES,
+            )
+            ice_name = f"ORCA2_{kt:08d}_restart_ice_{local_rank:04d}.nc"
+            shutil.copy2(COUPLED_C4_BASELINE_ARM / ice_name, run_dir / ice_name)
+    writes_shared = rank in (None, 0)
+    step_value = (
+        int(plant_short_timestep)
+        if plant_short_timestep is not None else expected_steps
+    )
+    if writes_shared:
+        ocean_text = (COUPLED_C4_BASELINE_ARM / "ocean.output").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        replacements = {
+            "nn_it000": str(FIRST_RUN_STEP),
+            "nn_itend": str(expected_steps),
+            "nn_stock": str(stock),
+            "ln_rstart": "T",
+            "nn_rstctl": "2",
+            "cn_ocerst_in": f"ORCA2_{RESTART_KT:08d}_restart",
+        }
+        for name, value in replacements.items():
+            ocean_text, count = re.subn(
+                rf"(?im)(^\s*[^\n]*\b{name}\s*=\s*)\S+",
+                rf"\g<1>{value}", ocean_text, count=1,
+            )
+            require(count == 1, f"coupled stub ocean.output lacks {name}")
+        (run_dir / "ocean.output").write_text(ocean_text, encoding="utf-8")
+        shutil.copy2(
+            COUPLED_C4_BASELINE_ARM / "output.namelist.dyn",
+            run_dir / "output.namelist.dyn",
+        )
+        _patch_ice_restart_namelist(
+            COUPLED_C4_BASELINE_ARM / "output.namelist.ice",
+            run_dir / "output.namelist.ice",
+        )
+        (run_dir / "time.step").write_text(f" {step_value:8d}\n", encoding="utf-8")
+    after = {path.name: common.sha256(path) for path in input_paths}
+    require(after == before, "coupled stub changed a staged day-1 ocean/ice restart")
+    if writes_shared and not plant_missing_stop:
+        print("STOP 0", file=sys.stderr, flush=True)
+    return {
+        "rank": rank,
+        "nn_itend": expected_steps,
+        "nn_stock": stock,
+        "time_step": step_value,
+        "day1_restart_sha256_before": before,
+        "day1_restart_sha256_after": after,
+    }
+
+
 def verify_run_sh(run_sh: Path) -> dict[str, Any]:
     require(run_sh.is_file(), f"missing acquisition script: {run_sh}")
     text = run_sh.read_text(encoding="utf-8")
@@ -1381,6 +2070,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--build-cfg", type=Path, default=r342.DEFAULT_BUILD_CFG)
     parser.add_argument("--ice-cover", type=Path, default=r342.DEFAULT_ICE_COVER_PATH)
     parser.add_argument("--expected-steps", type=int, default=r342.YEAR_STEPS)
+    parser.add_argument("--coupled-c4", action="store_true")
     args = parser.parse_args(argv)
     selected = sum(value is not None and value is not False for value in (
         args.stage_run_dir, args.stage_control_run_dir, args.admit_run_dir,
@@ -1389,42 +2079,83 @@ def main(argv: list[str] | None = None) -> int:
     ))
     require(selected == 1, "select exactly one gate action")
     if args.stage_run_dir is not None:
-        result = stage_perturbed_arm(
-            args.stage_run_dir, ice_cover_path=args.ice_cover,
-            build_cfg=args.build_cfg, expected_steps=args.expected_steps,
-        )
+        if args.coupled_c4:
+            result = stage_coupled_c4_arm(
+                args.stage_run_dir, perturb=True, expected_steps=args.expected_steps,
+            )
+        else:
+            result = stage_perturbed_arm(
+                args.stage_run_dir, ice_cover_path=args.ice_cover,
+                build_cfg=args.build_cfg, expected_steps=args.expected_steps,
+            )
     elif args.stage_control_run_dir is not None:
-        result = stage_control_arm(
-            args.stage_control_run_dir, ice_cover_path=args.ice_cover,
-            build_cfg=args.build_cfg, expected_steps=args.expected_steps,
-        )
+        if args.coupled_c4:
+            result = stage_coupled_c4_arm(
+                args.stage_control_run_dir, perturb=False,
+                expected_steps=args.expected_steps,
+            )
+        else:
+            result = stage_control_arm(
+                args.stage_control_run_dir, ice_cover_path=args.ice_cover,
+                build_cfg=args.build_cfg, expected_steps=args.expected_steps,
+            )
     elif args.admit_run_dir is not None:
-        result = admit_perturbed_arm(
-            args.admit_run_dir, build_cfg=args.build_cfg,
-            expected_steps=args.expected_steps, allow_stub_binary=args.allow_stub_binary,
-        )
+        if args.coupled_c4:
+            result = admit_coupled_c4_arm(
+                args.admit_run_dir, perturb=True, expected_steps=args.expected_steps,
+                allow_stub_binary=args.allow_stub_binary,
+            )
+        else:
+            result = admit_perturbed_arm(
+                args.admit_run_dir, build_cfg=args.build_cfg,
+                expected_steps=args.expected_steps, allow_stub_binary=args.allow_stub_binary,
+            )
     elif args.admit_existing is not None:
-        result = admit_existing_with_quarantine(
-            args.admit_existing, build_cfg=args.build_cfg,
-            expected_steps=args.expected_steps, allow_stub_binary=args.allow_stub_binary,
-        )
+        if args.coupled_c4:
+            result = admit_coupled_c4_pair(
+                args.admit_existing, expected_steps=args.expected_steps,
+                allow_stub_binary=args.allow_stub_binary,
+            )
+        else:
+            result = admit_existing_with_quarantine(
+                args.admit_existing, build_cfg=args.build_cfg,
+                expected_steps=args.expected_steps, allow_stub_binary=args.allow_stub_binary,
+            )
     elif args.write_run_manifest is not None:
         result = write_run_manifest(args.write_run_manifest)
     elif args.verify_perturbation is not None:
         result = verify_perturbation_manifest(args.verify_perturbation)
     elif args.act_as_nemo_binary:
-        result = write_stub_outputs(
-            Path.cwd(),
-            rank=r342.stub_mpi_rank_from_env(),
-            plant_unproduced_file=args.plant_stub_unproduced_file,
-            plant_missing_stop=args.plant_stub_missing_stop,
-            plant_short_timestep=args.plant_stub_short_timestep,
-        )
+        if args.coupled_c4:
+            result = write_coupled_c4_stub_outputs(
+                Path.cwd(),
+                rank=r342.stub_mpi_rank_from_env(),
+                plant_missing_stop=args.plant_stub_missing_stop,
+                plant_short_timestep=args.plant_stub_short_timestep,
+            )
+        else:
+            result = write_stub_outputs(
+                Path.cwd(),
+                rank=r342.stub_mpi_rank_from_env(),
+                plant_unproduced_file=args.plant_stub_unproduced_file,
+                plant_missing_stop=args.plant_stub_missing_stop,
+                plant_short_timestep=args.plant_stub_short_timestep,
+            )
     else:
-        result = run_preflight(
-            evidence_dir=args.evidence_dir, build_cfg=args.build_cfg,
-            ice_cover_path=args.ice_cover,
-        )
+        if args.coupled_c4:
+            result = {
+                "status": "PASS_R345_COUPLED_C4_PREFLIGHT",
+                "baseline": verify_coupled_c4_baseline(),
+                "run_sh": verify_run_sh(
+                    Path(__file__).resolve().parent
+                    / "nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh"
+                ),
+            }
+        else:
+            result = run_preflight(
+                evidence_dir=args.evidence_dir, build_cfg=args.build_cfg,
+                ice_cover_path=args.ice_cover,
+            )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

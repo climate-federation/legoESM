@@ -24,3 +24,18 @@ digests, logs the attempt in `admit_existing.log`, keeps failures in
 ```bash
 run.sh --admit-existing /absolute/path/to/refused/<retained-arm>
 ```
+
+`run.sh --coupled-c4 --run` applies the same acquisition to the admitted
+coupled C-ladder `REF_C4` deck.  It stages REF_C4's exact 59 deck/input files,
+then changes only the ocean and SI3 restart names and run start to continue the
+ocean+ice restart quartet at `kt = 8`.  The control must reproduce all common
+ocean and SI3 continuation-variable bytes at every daily output through
+`kt = 2920`; only the two known delayed ocean buffers may be absent.  The
+perturbed arm changes the same finite wet surface `tn` values by one float64
+ULP and leaves both SI3 restart shards byte-identical.
+
+The coupled admission writes `round345_coupled_c4_sst_ulp_metrics.json`.  Its
+12 complete months contain all Decision-188 ocean metrics plus
+`ICE_AREA_NH`, `ICE_AREA_SH`, `ICE_VOLUME_NH`, and `ICE_VOLUME_SH`.  The
+companion admission binds the report to REF_C4's binary, re-hashed namelists
+and inputs, unchanged day-1 SI3 state, and the exact control continuation.

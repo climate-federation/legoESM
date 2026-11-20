@@ -11,7 +11,7 @@ PYTHON_BIN="/home/dbalwada/legoESM/.venv/bin/python"
 if [[ ! -x "${PYTHON_BIN}" ]]; then PYTHON_BIN="python3"; fi
 
 export PATH="/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}"
-export PYTHONPATH="${REPO_ROOT}/packages/ocean:${REPO_ROOT}/packages/core:${REPO_ROOT}:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_ROOT}/packages/atmosphere:${REPO_ROOT}/packages/core:${REPO_ROOT}/packages/coupler:${REPO_ROOT}/packages/ice:${REPO_ROOT}/packages/land:${REPO_ROOT}/packages/ml:${REPO_ROOT}/packages/ocean:${REPO_ROOT}/packages/tools:${REPO_ROOT}:${PYTHONPATH:-}"
 export JAX_PLATFORMS="cpu"
 export CUDA_VISIBLE_DEVICES=""
 export JAX_ENABLE_X64=1
@@ -29,6 +29,7 @@ REQUIRED_RAM_GIB="${R345_REQUIRED_RAM_GIB:-150}"
 REQUIRED_DISK_GIB="${R345_REQUIRED_DISK_GIB:-25}"
 
 MODE="preflight"
+PROFILE="standalone"
 STUB_ROOT=""
 ADMIT_ROOT=""
 PLANT_STUB_UNPRODUCED=0
@@ -38,6 +39,7 @@ PLANT_STUB_SHORT_TIMESTEP=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --preflight-only) MODE="preflight"; shift ;;
+    --coupled-c4) PROFILE="coupled-c4"; shift ;;
     --run) MODE="run"; shift ;;
     --stub-run-dir) MODE="stub"; STUB_ROOT="${2:-}"; shift 2 ;;
     --admit-existing) MODE="admit"; ADMIT_ROOT="${2:-}"; shift 2 ;;
@@ -50,6 +52,17 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ "${PROFILE}" == "coupled-c4" ]]; then
+  BASELINE_ARM="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/oracle_coupled_c_ladder/REF_C4"
+  RUN_ROOT="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/coupled_c4_perturbed_twin"
+  EVIDENCE_DIR="${RUN_ROOT}/evidence"
+  CONTROL_ARM_NAME="coupled_c4_year1_restart_control_np2"
+  PERTURBED_ARM_NAME="coupled_c4_year1_sst_plus_1ulp_np2"
+  REQUIRED_DISK_GIB="${R345_REQUIRED_DISK_GIB:-200}"
+fi
+PROFILE_FLAGS=()
+if [[ "${PROFILE}" == "coupled-c4" ]]; then PROFILE_FLAGS+=("--coupled-c4"); fi
 
 check_clean_worktree() {
   local check_repo="${R345_CHECK_REPO_ROOT:-${REPO_ROOT}}"
@@ -120,8 +133,11 @@ stage_arm() {
   printf '%s\n' "${owner_token}" >"${arm_dir}/.round345_attempt"
   local stage_flag="--stage-run-dir"
   if [[ "${arm_kind}" == "control" ]]; then stage_flag="--stage-control-run-dir"; fi
+  local profile_flags=()
+  if [[ "${PROFILE}" == "coupled-c4" ]]; then profile_flags+=("--coupled-c4"); fi
   "${PYTHON_BIN}" "${GATE_PY}" \
     "${stage_flag}" "${arm_dir}" \
+    "${profile_flags[@]}" \
     --build-cfg "${BUILD_CFG}" \
     --ice-cover "${ICE_COVER_PATH}" \
     --expected-steps "${EXPECTED_STEPS}" >/dev/null || return 1
@@ -136,6 +152,9 @@ stage_arm() {
 #!/usr/bin/env bash
 exec "${PYTHON_BIN}" "${GATE_PY}" --act-as-nemo-binary ${extra_flags[*]:-}
 EOF
+    if [[ "${PROFILE}" == "coupled-c4" ]]; then
+      sed -i 's/--act-as-nemo-binary/--act-as-nemo-binary --coupled-c4/' "${arm_dir}/nemo"
+    fi
     chmod +x "${arm_dir}/nemo"
   else
     cp -a "${nemo_bin}" "${arm_dir}/nemo"
@@ -146,6 +165,7 @@ EOF
 run_arm() {
   local arm_dir="$1"
   local rc=0
+  check_no_active_nemo
   (
     cd "${arm_dir}"
     timeout --foreground --signal=TERM --kill-after=30s "${PER_ARM_TIMEOUT}s" \
@@ -191,13 +211,16 @@ run_pipeline() {
   export R345_ATTEMPT_TOKEN="${owner_token}"
   local admission_flags=()
   if [[ "${binary}" == "__STUB__" ]]; then admission_flags+=("--allow-stub-binary"); fi
+  local profile_flags=()
+  if [[ "${PROFILE}" == "coupled-c4" ]]; then profile_flags+=("--coupled-c4"); fi
   if ! stage_arm "${control_arm}" "${binary}" "control" \
      || ! run_arm "${control_arm}" \
      || ! stage_arm "${perturbed_arm}" "${binary}" "perturbed" \
      || ! run_arm "${perturbed_arm}" \
      || ! "${PYTHON_BIN}" "${GATE_PY}" \
           --admit-existing "${root}" --build-cfg "${BUILD_CFG}" \
-          --expected-steps "${EXPECTED_STEPS}" "${admission_flags[@]}"; then
+          --expected-steps "${EXPECTED_STEPS}" "${admission_flags[@]}" \
+          "${profile_flags[@]}"; then
     quarantine_arm "${control_arm}" "${owner_token}"
     quarantine_arm "${perturbed_arm}" "${owner_token}"
     return 1
@@ -211,8 +234,8 @@ case "${MODE}" in
     check_memory_and_disk "${EVIDENCE_DIR}"
     "${PYTHON_BIN}" "${GATE_PY}" --preflight-only \
       --evidence-dir "${EVIDENCE_DIR}" --build-cfg "${BUILD_CFG}" \
-      --ice-cover "${ICE_COVER_PATH}"
-    echo "ORCA2_ROUND345_SST_ULP_PREFLIGHT_READY"
+      --ice-cover "${ICE_COVER_PATH}" "${PROFILE_FLAGS[@]}"
+    echo "ORCA2_ROUND345_SST_ULP_PREFLIGHT_READY profile=${PROFILE}"
     ;;
   stub)
     [[ -n "${STUB_ROOT}" ]] || { echo "REFUSE: --stub-run-dir needs a path" >&2; exit 2; }
@@ -229,7 +252,8 @@ case "${MODE}" in
       admit_flags+=("--allow-stub-binary")
     fi
     "${PYTHON_BIN}" "${GATE_PY}" --admit-existing "${ADMIT_ROOT}" \
-      --build-cfg "${BUILD_CFG}" --expected-steps "${EXPECTED_STEPS}" "${admit_flags[@]}"
+      --build-cfg "${BUILD_CFG}" --expected-steps "${EXPECTED_STEPS}" \
+      "${admit_flags[@]}" "${PROFILE_FLAGS[@]}"
     ;;
   run)
     check_clean_worktree
@@ -238,8 +262,8 @@ case "${MODE}" in
     [[ -x "${BASELINE_ARM}/nemo" ]] || { echo "REFUSE: missing admitted round-342 binary" >&2; exit 1; }
     "${PYTHON_BIN}" "${GATE_PY}" --preflight-only \
       --evidence-dir "${EVIDENCE_DIR}" --build-cfg "${BUILD_CFG}" \
-      --ice-cover "${ICE_COVER_PATH}"
+      --ice-cover "${ICE_COVER_PATH}" "${PROFILE_FLAGS[@]}"
     run_pipeline "${RUN_ROOT}" "${BASELINE_ARM}/nemo"
-    echo "ORCA2_ROUND345_SST_ULP_ACQUISITION_COMPLETE: ${RUN_ROOT}/${CONTROL_ARM_NAME} + ${RUN_ROOT}/${PERTURBED_ARM_NAME}"
+    echo "ORCA2_ROUND345_SST_ULP_ACQUISITION_COMPLETE profile=${PROFILE}: ${RUN_ROOT}/${CONTROL_ARM_NAME} + ${RUN_ROOT}/${PERTURBED_ARM_NAME}"
     ;;
 esac

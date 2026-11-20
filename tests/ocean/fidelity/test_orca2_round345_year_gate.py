@@ -63,7 +63,7 @@ def test_decision188_runs_on_orca2x_30_day_pilot_schema() -> None:
     result = decision188.evaluate_decision188(
         _pilot_report(ke_rms=0.002),
         _pilot_report(ke_rms=0.0007),
-        decision188.minimal_envelope_admission(),
+        decision188.minimal_standalone_envelope_admission(),
     )
     assert result["verdict"] == "PASS"
     assert result["months_evaluated"] == 1
@@ -79,7 +79,8 @@ def test_decision188_refuses_different_month_windows() -> None:
     envelope["months"][0]["saved_kts"] = [16]
     with pytest.raises(decision188.GateError, match="saved steps differ"):
         decision188.evaluate_decision188(
-            candidate, envelope, decision188.minimal_envelope_admission())
+            candidate, envelope,
+            decision188.minimal_standalone_envelope_admission())
 
 
 def test_decision188_refuses_zero_envelope_in_any_month() -> None:
@@ -88,11 +89,12 @@ def test_decision188_refuses_zero_envelope_in_any_month() -> None:
     envelope["months"][7]["metrics"]["KE"]["relative_rms_fraction"] = 0.0
     with pytest.raises(decision188.GateError, match="must be > 0"):
         decision188.evaluate_decision188(
-            candidate, envelope, decision188.minimal_envelope_admission())
+            candidate, envelope,
+            decision188.minimal_standalone_envelope_admission())
 
 
 def test_decision188_refuses_missing_restart_control() -> None:
-    admission = decision188.minimal_envelope_admission()
+    admission = decision188.minimal_standalone_envelope_admission()
     admission.pop("unperturbed_restart_control")
     with pytest.raises(decision188.GateError, match="restart-continuation control"):
         decision188.evaluate_decision188(
@@ -148,6 +150,157 @@ def _write_domain(path: Path) -> np.ndarray:
         variable = dataset.createVariable("top_level", "i4", ("y", "x"))
         variable[:] = top
     return top > 0
+
+
+def _write_ice_restart(path: Path, rank: int) -> None:
+    values = np.arange(6, dtype=np.float64).reshape(1, 2, 3) + rank + 1
+    with netCDF4.Dataset(path, "w") as dataset:
+        dataset.createDimension("time", 1)
+        dataset.createDimension("y", 2)
+        dataset.createDimension("x", 3)
+        for name, offset in (("a_i", 0.0), ("v_i", 10.0), ("t_su", 20.0)):
+            variable = dataset.createVariable(name, "f8", ("time", "y", "x"))
+            variable[:] = values + offset
+
+
+def _coupled_envelope_report(*, ke: float = 0.001) -> dict:
+    report = decision188.minimal_year_report(sst=0.0, ke=ke)
+    for month in report["months"]:
+        month["metrics"].update({
+            key: {"bias": 0.0, "rms": 0.0}
+            for key in decision188.COUPLED_ICE_KEYS
+        })
+    return report
+
+
+def test_decision188_requires_and_accepts_coupled_admission_for_si3_envelope() -> None:
+    candidate = decision188.minimal_year_report(sst=0.0, ke=0.0)
+    envelope = _coupled_envelope_report()
+    with pytest.raises(decision188.GateError, match="admitted coupled REF_C4"):
+        decision188.evaluate_decision188(
+            candidate,
+            envelope,
+            decision188.minimal_standalone_envelope_admission(),
+        )
+    result = decision188.evaluate_decision188(
+        candidate, envelope, decision188.minimal_coupled_c4_envelope_admission()
+    )
+    assert result["verdict"] == "PASS"
+    assert result["months_evaluated"] == 12
+
+
+def test_coupled_control_continuation_refuses_nonidentical_ice_data(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "ref_c4"
+    control = tmp_path / "control"
+    baseline.mkdir()
+    control.mkdir()
+    for rank in (0, 1):
+        ocean_name = f"ORCA2_00000016_restart_{rank:04d}.nc"
+        _write_restart(
+            baseline / ocean_name, rank, kt_value=16, include_delay_buffers=True
+        )
+        _write_restart(control / ocean_name, rank, kt_value=16)
+        ice_name = f"ORCA2_00000016_restart_ice_{rank:04d}.nc"
+        _write_ice_restart(baseline / ice_name, rank)
+        shutil.copy2(baseline / ice_name, control / ice_name)
+
+    admitted = ulp_gate.verify_coupled_c4_continuation(
+        control,
+        baseline_arm=baseline,
+        expected_steps=16,
+        require_data_equal=True,
+    )
+    assert admitted["all_common_variable_data_bitwise_identical"] is True
+    assert admitted["restart_files_checked"] == 4
+
+    planted = control / "ORCA2_00000016_restart_ice_0001.nc"
+    with netCDF4.Dataset(planted, "r+") as dataset:
+        variable = dataset.variables["a_i"]
+        values = np.asarray(variable[:])
+        values.reshape(-1)[0] = np.nextafter(values.reshape(-1)[0], np.inf)
+        variable[:] = values
+    with pytest.raises(ulp_gate.GateError, match="a_i data differs from REF_C4"):
+        ulp_gate.verify_coupled_c4_continuation(
+            control,
+            baseline_arm=baseline,
+            expected_steps=16,
+            require_data_equal=True,
+        )
+
+
+def test_coupled_restart_namelist_and_single_tool_profile(tmp_path: Path) -> None:
+    source = tmp_path / "namelist_ice_cfg"
+    destination = tmp_path / "patched.namelist_ice_cfg"
+    source.write_text(
+        "&nampar\n"
+        '  cn_icerst_in = "restart_ice_r4.2" ! retained cold-start name\n'
+        '  cn_icerst_out = "restart_ice"\n'
+        "/\n"
+        "&namother\n  cn_icerst_in = \"must_not_change\"\n/\n",
+        encoding="utf-8",
+    )
+    audit = ulp_gate._patch_ice_restart_namelist(source, destination)
+    assert audit["cn_icerst_in"] == "ORCA2_00000008_restart_ice"
+    patched = destination.read_text(encoding="utf-8")
+    assert patched.count("ORCA2_00000008_restart_ice") == 1
+    assert 'cn_icerst_in = "must_not_change"' in patched
+
+    run_sh = Path(ulp_gate.__file__).resolve().parent / (
+        "nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh"
+    )
+    syntax = subprocess.run(
+        ["bash", "-n", str(run_sh)], capture_output=True, text=True, check=False
+    )
+    assert syntax.returncode == 0, syntax.stderr
+    script = run_sh.read_text(encoding="utf-8")
+    assert "--coupled-c4" in script
+    assert "coupled_c4_year1_restart_control_np2" in script
+    assert "coupled_c4_year1_sst_plus_1ulp_np2" in script
+
+
+def test_coupled_envelope_report_exposes_d188_and_ice_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
+        c4_year_runner,
+    )
+
+    report = decision188.minimal_year_report(sst=0.0, ke=0.001)
+    monkeypatch.setattr(
+        ulp_gate.year_metrics,
+        "evaluate_month_by_month",
+        lambda **_kwargs: report,
+    )
+    monkeypatch.setattr(
+        ulp_gate.year_metrics.pilot_metrics,
+        "static_geometry",
+        lambda _root: {},
+    )
+    monkeypatch.setattr(
+        c4_year_runner,
+        "read_nemo_ice_day",
+        lambda _root, _day: {},
+    )
+    daily_ice = {
+        key: {"nemo": 1.0, "candidate": 1.0001, "units": "synthetic"}
+        for key in ulp_gate.COUPLED_ICE_KEYS
+    }
+    monkeypatch.setattr(
+        c4_year_runner,
+        "ice_day_metrics",
+        lambda _candidate, _nemo, _geo: daily_ice,
+    )
+
+    result = ulp_gate.build_coupled_c4_envelope_report(
+        tmp_path / "REF_C4", tmp_path / "perturbed"
+    )
+    required = set(ulp_gate.decision188_metric_keys()) | set(ulp_gate.COUPLED_ICE_KEYS)
+    assert result["envelope_profile"] == ulp_gate.COUPLED_C4_PROFILE
+    assert result["ice_metric_keys"] == list(ulp_gate.COUPLED_ICE_KEYS)
+    assert all(required <= set(month["metrics"]) for month in result["months"])
 
 
 def test_day1_restart_gets_exact_uniform_fp64_one_ulp_pattern(tmp_path: Path) -> None:

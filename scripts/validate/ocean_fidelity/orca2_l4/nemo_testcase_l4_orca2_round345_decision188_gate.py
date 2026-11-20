@@ -47,6 +47,10 @@ PSI_PATTERN_CORR_MIN = 0.999
 DRAKE_BAR_SV = 0.5
 KE_ENVELOPE_MULTIPLIER = 3.0
 KE_FLOOR_FRACTION = 0.01
+COUPLED_C4_PROFILE = "COUPLED_C_LADDER_REF_C4"
+COUPLED_ICE_KEYS = (
+    "ICE_AREA_NH", "ICE_AREA_SH", "ICE_VOLUME_NH", "ICE_VOLUME_SH",
+)
 
 
 def _finite(value: Any, label: str) -> float:
@@ -217,6 +221,9 @@ def _verify_envelope_admission(
     envelope_admission: dict[str, Any],
 ) -> None:
     """Bind the metric envelope to the admitted nonzero fp64 restart perturbation."""
+    if envelope_admission.get("profile") == COUPLED_C4_PROFILE:
+        _verify_coupled_c4_envelope_admission(envelope_report, envelope_admission)
+        return
     require(envelope_admission.get("status") == "PASS_R345_S4_YEAR_SST_PLUS_ONE_ULP_ARM"
             and envelope_admission.get("admitted") is True,
             "envelope lacks a passed round-345 perturbed-restart admission")
@@ -281,6 +288,86 @@ def _verify_envelope_admission(
                 "envelope compares the baseline arm with itself")
 
 
+def _verify_coupled_c4_envelope_admission(
+    envelope_report: dict[str, Any],
+    admission: dict[str, Any],
+) -> None:
+    require(
+        admission.get("status")
+        == "PASS_R345_COUPLED_C4_YEAR_SST_PLUS_ONE_ULP_ARM"
+        and admission.get("admitted") is True,
+        "coupled envelope lacks a passed REF_C4 perturbed-twin admission",
+    )
+    perturbation = admission.get("restart_sst_perturbation", {})
+    ice_input = perturbation.get("ice_restart_pair_unchanged", {})
+    require(
+        perturbation.get("status") == "PASS_R345_DAY1_RESTART_SST_PLUS_ONE_FP64_ULP"
+        and perturbation.get("variable") == "tn"
+        and perturbation.get("dtype") == "float64"
+        and perturbation.get("restart_kt") == 8
+        and perturbation.get("first_run_step") == 9
+        and perturbation.get("exact_ulp_distance") == 1
+        and int(perturbation.get("changed_values", 0)) > 0
+        and perturbation.get("changed_values") == perturbation.get("selected_values")
+        and perturbation.get("unselected_restart_values_and_metadata_bit_identical") is True,
+        "coupled envelope does not carry the exact nonzero +1-fp64-ULP surface-tn pattern",
+    )
+    require(
+        ice_input.get("status") == "PASS_R345_COUPLED_DAY1_ICE_RESTART_UNCHANGED"
+        and ice_input.get("restart_pair_byte_identical") is True,
+        "coupled envelope changed the day-1 SI3 restart pair",
+    )
+    require(admission.get("binary_equal_ref_c4") is True,
+            "coupled envelope binary differs from REF_C4")
+    identity = admission.get("ref_c4_input_identity", {})
+    require(
+        identity.get("status") == "PASS_R345_COUPLED_C4_DECK_INPUT_IDENTITY"
+        and identity.get("all_other_deck_and_input_files_byte_identical") is True
+        and identity.get("restart_namelists_rehashed")
+        == ["namelist_cfg", "namelist_ice_cfg"],
+        "coupled envelope deck/input identity is not bound to REF_C4",
+    )
+    control = admission.get("unperturbed_restart_control", {})
+    continuation = admission.get("restart_continuation_control", {})
+    control_input = control.get("unperturbed_restart_control_input", {})
+    control_ice = control_input.get("ice_restart_pair_unchanged", {})
+    require(
+        control.get("status") == "PASS_R345_COUPLED_C4_UNPERTURBED_CONTROL_ARM"
+        and control.get("admitted") is True
+        and control.get("binary_equal_ref_c4") is True
+        and control_input.get("status") == "PASS_R345_DAY1_RESTART_UNPERTURBED_CONTROL"
+        and control_input.get("restart_pair_byte_identical") is True
+        and control_ice.get("restart_pair_byte_identical") is True
+        and continuation.get("status")
+        == "PASS_R345_COUPLED_C4_UNPERTURBED_RESTART_CONTROL"
+        and continuation.get("all_common_variable_data_bitwise_identical") is True
+        and continuation.get("unequal_common_variable_data_count") == 0
+        and continuation.get("restart_kt_first") == 16
+        and continuation.get("restart_kt_last") == 2920
+        and continuation.get("daily_restart_quartets_checked") == 364
+        and continuation.get("restart_files_checked") == 1456
+        and continuation.get("ocean_restart_files_checked") == 728
+        and continuation.get("ice_restart_files_checked") == 728,
+        "coupled envelope lacks the exact 364-day ocean+SI3 control continuation",
+    )
+    require(envelope_report.get("envelope_profile") == COUPLED_C4_PROFILE,
+            "coupled envelope report lacks its REF_C4 profile stamp")
+    require(envelope_report.get("candidate_is_nemo_restart") is True,
+            "coupled envelope candidate must be a NEMO restart arm")
+    candidate_root = Path(str(envelope_report.get("candidate_root", ""))).resolve()
+    nemo_root = Path(str(envelope_report.get("nemo_root", ""))).resolve()
+    require(candidate_root == Path(str(admission.get("run_dir", ""))).resolve(),
+            "coupled envelope report candidate root differs from admission")
+    require(nemo_root == Path(str(admission.get("baseline_arm", ""))).resolve(),
+            "coupled envelope report baseline root is not REF_C4")
+    require(candidate_root != nemo_root,
+            "coupled envelope compares REF_C4 with itself")
+    for month in envelope_report.get("months", []):
+        metrics = month.get("metrics", {})
+        require(all(key in metrics for key in COUPLED_ICE_KEYS),
+                f"{month.get('label', '<month>')}: coupled envelope lacks SI3 totals")
+
+
 def evaluate_decision188(
     candidate_report: dict[str, Any],
     envelope_report: dict[str, Any],
@@ -288,6 +375,15 @@ def evaluate_decision188(
 ) -> dict[str, Any]:
     """Apply the Decision-188 bars to matching candidate/envelope months."""
     _verify_bars_match_decision160_reporter()
+    carries_coupled_ice = bool(envelope_report.get("months")) and all(
+        all(key in month.get("metrics", {}) for key in COUPLED_ICE_KEYS)
+        for month in envelope_report["months"]
+    )
+    require(
+        not carries_coupled_ice
+        or envelope_admission.get("profile") == COUPLED_C4_PROFILE,
+        "an ocean+SI3 envelope requires an admitted coupled REF_C4 perturbed twin",
+    )
     _verify_envelope_admission(envelope_report, envelope_admission)
     if candidate_report.get("format") == "orca2-r342-s4-year-metrics-v2":
         candidate_nemo_root = candidate_report.get("nemo_root")
@@ -343,6 +439,7 @@ def minimal_year_report(
     })
     return {
         "format": "orca2-r342-s4-year-metrics-v2",
+        "envelope_profile": COUPLED_C4_PROFILE,
         "bias_convention": "candidate - NEMO",
         "nemo_root": nemo_root,
         "candidate_root": candidate_root,
@@ -361,7 +458,7 @@ def minimal_year_report(
     }
 
 
-def minimal_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
+def minimal_standalone_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
     return {
         "status": "PASS_R345_S4_YEAR_SST_PLUS_ONE_ULP_ARM",
         "admitted": True,
@@ -410,9 +507,74 @@ def minimal_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
     }
 
 
+def minimal_coupled_c4_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
+    baseline = "/synthetic/nemo-baseline"
+    perturbed = "/synthetic/perturbed-nemo"
+    ice_input = {
+        "status": "PASS_R345_COUPLED_DAY1_ICE_RESTART_UNCHANGED",
+        "restart_pair_byte_identical": True,
+    }
+    control_input = {
+        "status": "PASS_R345_DAY1_RESTART_UNPERTURBED_CONTROL",
+        "restart_pair_byte_identical": True,
+        "ice_restart_pair_unchanged": copy.deepcopy(ice_input),
+    }
+    continuation = {
+        "status": "PASS_R345_COUPLED_C4_UNPERTURBED_RESTART_CONTROL",
+        "baseline_arm": baseline,
+        "restart_kt_first": 16,
+        "restart_kt_last": 2920,
+        "daily_restart_quartets_checked": 364,
+        "restart_files_checked": 1456,
+        "ocean_restart_files_checked": 728,
+        "ice_restart_files_checked": 728,
+        "unequal_common_variable_data_count": 0,
+        "all_common_variable_data_bitwise_identical": True,
+    }
+    control = {
+        "status": "PASS_R345_COUPLED_C4_UNPERTURBED_CONTROL_ARM",
+        "admitted": True,
+        "binary_equal_ref_c4": True,
+        "unperturbed_restart_control_input": control_input,
+        "restart_continuation_control": continuation,
+    }
+    return {
+        "status": "PASS_R345_COUPLED_C4_YEAR_SST_PLUS_ONE_ULP_ARM",
+        "admitted": True,
+        "profile": COUPLED_C4_PROFILE,
+        "run_dir": perturbed,
+        "baseline_arm": baseline,
+        "binary_equal_ref_c4": True,
+        "ref_c4_input_identity": {
+            "status": "PASS_R345_COUPLED_C4_DECK_INPUT_IDENTITY",
+            "all_other_deck_and_input_files_byte_identical": True,
+            "restart_namelists_rehashed": ["namelist_cfg", "namelist_ice_cfg"],
+        },
+        "restart_sst_perturbation": {
+            "status": "PASS_R345_DAY1_RESTART_SST_PLUS_ONE_FP64_ULP",
+            "variable": "tn",
+            "dtype": "float64",
+            "restart_kt": 8,
+            "first_run_step": 9,
+            "exact_ulp_distance": 1,
+            "selected_values": changed_values,
+            "changed_values": changed_values,
+            "unselected_restart_values_and_metadata_bit_identical": True,
+            "ice_restart_pair_unchanged": ice_input,
+        },
+        "unperturbed_restart_control": control,
+        "restart_continuation_control": continuation,
+    }
+
+
+def minimal_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
+    """C4 scorer fixture: an admitted coupled envelope is the safe default."""
+    return minimal_coupled_c4_envelope_admission(changed_values=changed_values)
+
+
 def run_plants() -> dict[str, Any]:
     """Run the three Decision-188 non-vacuity plants."""
-    admission = minimal_envelope_admission()
+    admission = minimal_standalone_envelope_admission()
     envelope_floor = minimal_year_report(sst=0.0, ke=0.001)
     at_bar = evaluate_decision188(
         minimal_year_report(sst=0.01, ke=0.01), envelope_floor, admission)
@@ -445,12 +607,12 @@ def run_plants() -> dict[str, Any]:
     try:
         evaluate_decision188(
             minimal_year_report(sst=0.0, ke=0.0), envelope_floor,
-            minimal_envelope_admission(changed_values=0))
+            minimal_standalone_envelope_admission(changed_values=0))
     except GateError:
         nonperturbed_caught = True
     control_caught = False
     try:
-        no_control = minimal_envelope_admission()
+        no_control = minimal_standalone_envelope_admission()
         no_control.pop("unperturbed_restart_control")
         evaluate_decision188(
             minimal_year_report(sst=0.0, ke=0.0), envelope_floor, no_control)
