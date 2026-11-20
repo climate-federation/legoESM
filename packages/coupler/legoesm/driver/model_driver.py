@@ -814,6 +814,26 @@ def _sfc_diag_slot(key: str) -> int:
             + MPAS_SFC_DIAG_EXTRA_KEYS.index(key))
 
 
+def ice_skin_turbulent_fluxes(sfc_diag, split_on: bool):
+    """``(SH, LH)`` [W/m2, +upward] the prognostic ice skin is charged from
+    the MPAS ``_sfc_diag`` tuple: the ice tile's own fluxes under
+    ``sea_ice_flux_split`` (#2573; missing ones raise, never the cell mean),
+    else the cell-mean turbulent fluxes (an absent one is None)."""
+    keys = (("shflx_ice", "lhflx_ice") if split_on
+            else ("shflx_sfc", "lhflx_sfc"))
+    out = []
+    for k in keys:
+        i = _sfc_diag_slot(k)
+        out.append(sfc_diag[i].data
+                   if len(sfc_diag) > i and sfc_diag[i] is not None else None)
+    if split_on and None in out:
+        raise RuntimeError(
+            "sea_ice_flux_split is on but the physics did not export the ice "
+            "tile's sensible/latent heat; the ice skin would be charged the "
+            "cell mean.")
+    return tuple(out)
+
+
 def _evap_sfc_slot() -> int:
     """Index of ``evap_sfc`` (the column's surface water flux) in the MPAS
     ``_sfc_diag`` tuple."""
@@ -3305,6 +3325,18 @@ class ModelDriver:
                         upd["ocean_flux_on_ocean_surface"],
                         "" if upd["ocean_flux_on_ocean_surface"] else
                         f" ({ocean_flux_surface_eligibility(self.config)[1]})")
+        # The ice/open-water split (#2573) depends on the two above.
+        from legoesm.driver.config import (
+            resolve_sea_ice_flux_split, sea_ice_flux_split_eligibility)
+        auto = self.config.sea_ice_flux_split is None
+        upd = {"sea_ice_flux_split": resolve_sea_ice_flux_split(self.config)}
+        self.config = self.config._replace(**upd)
+        self._input_config = self._input_config._replace(**upd)
+        if auto:
+            logger.info("  sea_ice_flux_split: auto -> %s%s",
+                        upd["sea_ice_flux_split"],
+                        "" if upd["sea_ice_flux_split"] else
+                        f" ({sea_ice_flux_split_eligibility(self.config)[1]})")
         self.config.validate_strict()
 
     def setup(self) -> None:
@@ -3757,6 +3789,13 @@ class ModelDriver:
             logger.info(
                 f"  Land fraction source: {_lf_src} "
                 f"(mean={float(jnp.mean(self._f_land)):.3f})")
+
+        if self._f_land is not None:
+            # every land-fraction source above, once: roundoff below 1 left a
+            # 1e-14 water fraction the slab divided by (SST to 4.7e9 K).  The
+            # sources bin in fp64; an fp32 cast already rounds such values to 1.
+            from legoesm.grids.topography import snap_land_fraction_roundoff
+            self._f_land = snap_land_fraction_roundoff(self._f_land).astype(_sd)
 
         # Attach land_frac for convection and orographic GWD on grids carrying
         # the field (VoronoiMesh and GaussianGrid).  Where it comes from:
@@ -8497,6 +8536,9 @@ class ModelDriver:
                 # different one; user decision 2026-10-26)
                 _save["latloncol_div4_scale"] = np.asarray(
                     float(_llc.dyn.config.nu_div4_scale))
+                # the vertical form likewise (#2548)
+                _save["latloncol_vertical_form"] = np.asarray(
+                    str(_llc.dyn.config.vertical_form))
                 for _k in ("u", "v", "T", "p_s", "phis"):
                     _save[f"latloncol_{_k}"] = np.asarray(getattr(_nat, _k))
                 _names = sorted(_nat.tracers)
@@ -9296,6 +9338,19 @@ class ModelDriver:
                         f"{_run_dd4}: the trajectory would change at the "
                         "restart.  Resume with the checkpoint's scale, or "
                         "start a new run.")
+                # vertical-form stamp (#2548): an unstamped file predates it,
+                # when every lat-lon column run was legacy
+                _ck_vf = (str(d["latloncol_vertical_form"])
+                          if "latloncol_vertical_form" in d.files else "legacy")
+                _run_vf = str(_llc.dyn.config.vertical_form)
+                if _ck_vf != _run_vf:
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} was written with "
+                        f"vertical_form={_ck_vf!r} ('legacy' when the file "
+                        f"carries no latloncol_vertical_form) but this run "
+                        f"steps with {_run_vf!r}: the trajectory would change "
+                        "at the restart.  Resume with the checkpoint's form, "
+                        "or start a new run.")
                 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
                     CGridLatLonHydrostaticState,
                 )
@@ -14203,6 +14258,12 @@ class ModelDriver:
                 _dst["T_sfc"] = _blend_T_sfc(_sst, _sic)
                 if _ocean_sfc_on:
                     _dst["T_sfc_ocean"] = _ocean_ice_T_sfc(_sst, _sic)
+                if _ice_split_on:
+                    # The two tiles of that same blend (#2573): the cover,
+                    # the prognostic skin READ AT CALL TIME, and the SST.
+                    _dst["sea_ice_frac"] = jnp.asarray(_sic).reshape(-1)
+                    _dst["T_sfc_ice"] = self._ice_T_skin.reshape(-1)
+                    _dst["T_sfc_water"] = jnp.asarray(_sst).reshape(-1)
 
             # (The former ``_compute_T_sfc(day)`` wrapper — a one-line
             # ``_blend_T_sfc(*get_sst_sic(day))`` — was inlined at its single
@@ -14454,6 +14515,18 @@ class ModelDriver:
         # Validated (validate_strict) to imply the land-flux handoff, so the
         # turbulence always receives T_sfc_ocean together with shflx_land.
         _ocean_sfc_on = resolve_ocean_flux_on_ocean_surface(cfg)
+        # Ice / open-water turbulent split (#2573); validate_strict ties it
+        # to the ocean-surface anchor and the prognostic ice skin.
+        from legoesm.driver.config import resolve_sea_ice_flux_split
+        _ice_split_on = resolve_sea_ice_flux_split(cfg)
+        if _ice_split_on and not (_ice_skin_on and _ocean_sfc_on):
+            raise ValueError(
+                "sea_ice_flux_split needs the prognostic ice skin and "
+                "ocean_flux_on_ocean_surface on.")
+        if _ice_split_on and self.get_surface_handback is not None:
+            raise ValueError(
+                "sea_ice_flux_split and the coupler ice/lake handback both "
+                "claim the ice tile's fluxes; select one.")
         # Coupler ice/lake handback (P5c K2): the atmosphere owns land and
         # open water; the bulk law covers the open-water fraction only and
         # the coupler's ice+lake fluxes, emission, albedo and emissivity fill
@@ -14484,6 +14557,9 @@ class ModelDriver:
         print(f"  Non-land surface fluxes evaluated on: "
               f"{'OCEAN/ICE surface' if _ocean_sfc_on else 'land-blended surface'}"
               f" (ocean_flux_on_ocean_surface={_ocean_sfc_on})")
+        print(f"  Sea-ice cells, ice and open-water turbulent exchange: "
+              f"{'SEPARATE (ice skin charged its own SH/LH)' if _ice_split_on else 'one blended surface'}"
+              f" (sea_ice_flux_split={_ice_split_on})")
         print(f"  Land surface stress to the boundary layer: "
               f"{'LAND MODEL' if _land_stress_on else 'atmosphere bulk law'} "
               f"(land_stress_from_land="
@@ -14991,6 +15067,10 @@ class ModelDriver:
                     return None
                 sw_down = jnp.asarray(_sd[8].data).reshape(-1)
                 lw_down = jnp.asarray(_sd[9].data).reshape(-1)
+                if _hb_lw_corr is not None:
+                    # the land absorbs, and the handback books, the solve's
+                    # land emission (band Planck), not sigma*T^4
+                    lw_down = lw_down + _hb_lw_corr
                 precip = (jnp.asarray(_sd[2].data).reshape(-1)
                           if _sd[2] is not None else jnp.zeros_like(sw_down))
                 # the atmosphere's own rain/snow partition (F29)
@@ -15705,6 +15785,10 @@ class ModelDriver:
         # held-radiation steps like the solve's net fluxes; the boundary
         # inputs it is split with; this step's land runoff impulse.
         _hb_rad_in = _hb_rad_held = _hb_runoff_now = None
+        # The land's share of the solve's emission minus the boundary's
+        # broadband one, as a downward-LW correction the land call adds
+        # (held between solves like the split it comes from).
+        _hb_lw_corr = None
         # Not persisted: a resumed link's first step re-samples SST/SIC from
         # the restored ocean anyway (_last_force_day starts None).
         _cpl_sst_due = False
@@ -16335,7 +16419,8 @@ class ModelDriver:
                     _forcing["sfc_emissivity"] = _bnd["sfc_emissivity"]
                     _forcing["T_sfc_rad"] = _bnd["T_sfc_rad"]
                     _hb_rad_in = (_fow, _fl_hb, _alb_l_hb, _T_l_hb, _hb_eps,
-                                  _H, _eps_l_hb)
+                                  _H, _eps_l_hb, _bnd["sfc_emissivity"],
+                                  _bnd["T_sfc_rad"])
                     if "open_ocean_frac" in _forcing:
                         _forcing["open_ocean_frac"] = _fow
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
@@ -16465,12 +16550,12 @@ class ModelDriver:
                 _lwn = (_sd[1].data if (_sd is not None and len(_sd) > 1
                                         and _sd[1] is not None) else None)
                 if _swn is not None and _lwn is not None:
+                    _sh_sk, _lh_sk = ice_skin_turbulent_fluxes(
+                        _sd, _ice_split_on)
+                    # Radiation stays the cell mean (only the turbulent
+                    # exchange is split, #2573); turbulent terms +upward.
                     self._ice_T_skin = advance_ice_skin(
-                        self._ice_T_skin, _swn, _lwn,
-                        (_sd[6].data if len(_sd) > 6 and _sd[6] is not None
-                         else None),
-                        (_sd[7].data if len(_sd) > 7 and _sd[7] is not None
-                         else None),
+                        self._ice_T_skin, _swn, _lwn, _sh_sk, _lh_sk,
                         _ice_sic_cur, dt_s=DT, h_ice_m=_h_ice,
                         melt_cap_width_K=float(
                             cfg.ice_skin_melt_cap_width_K))
@@ -16495,6 +16580,31 @@ class ModelDriver:
                     _forcing_daily["sfc_albedo"] = blended_surface_albedo(
                         _ice_sic_cur, _alb_f_land, _alb_ice_day,
                         _alb_ocean_cur, _albedo_land_static)
+            # Coupler handback (P5c K3): split this step's radiation solve
+            # with the boundary it was fed, BEFORE the land call, so the land
+            # takes its longwave correction from the same solve the window
+            # books; held across held-radiation steps like the solve (K3-V2).
+            if (_hb_fn is not None and _use_rad and _CPL_K is not None
+                    and getattr(self.model, "_sfc_diag", None) is not None):
+                from legoesm.forcing.surface_utils import (
+                    handback_tile_radiation,
+                )
+                _sd_r = self.model._sfc_diag
+                _sdr = lambda k: jnp.asarray(  # noqa: E731
+                    _sd_r[_sfc_diag_slot(k)].data).reshape(-1)
+                (_fo, _flr, _alr, _Tlr, _eo, _Hr, _elr, _epr,
+                 _Trr) = _hb_rad_in
+                _hc = lambda a: jnp.asarray(  # noqa: E731
+                    a, dtype=_fo.dtype).reshape(-1)
+                _tr = handback_tile_radiation(
+                    _sdr("sw_down_sfc"), _sdr("lw_down_sfc"),
+                    _sdr("sw_net_sfc"), _sdr("lw_net_sfc"), _flr,
+                    _hc(_Hr.f_ice), _hc(_Hr.f_lake), _alr, _Tlr, _eo,
+                    _elr, _hc(_Hr.lw_emit), _hc(_Hr.albedo_ice),
+                    _hc(_Hr.albedo_lake), _hc(_Hr.emissivity_ice),
+                    _hc(_Hr.emissivity_lake), _epr, _Trr)
+                _hb_rad_held = [_tr[f] for f in _CPL_HB_RAD_FIELDS]
+                _hb_lw_corr = _tr["land_lw_down_corr"]
             # Interactive multilayer land step (MPAS port): advance the soil/
             # snow columns with the surface fluxes this step just exported
             # (sw/lw down refresh on radiation steps; precip every step) and
@@ -17221,21 +17331,7 @@ class ModelDriver:
                     # step without a land call).
                     _sdv = lambda k: jnp.asarray(  # noqa: E731
                         _sd[_sfc_diag_slot(k)].data).reshape(-1)
-                    if _use_rad:
-                        from legoesm.forcing.surface_utils import (
-                            handback_tile_radiation,
-                        )
-                        _fo, _flr, _alr, _Tlr, _eo, _Hr, _elr = _hb_rad_in
-                        _hc = lambda a: jnp.asarray(  # noqa: E731
-                            a, dtype=_fo.dtype).reshape(-1)
-                        _tr = handback_tile_radiation(
-                            _sdv("sw_down_sfc"), _sdv("lw_down_sfc"),
-                            _sdv("sw_net_sfc"), _sdv("lw_net_sfc"), _flr,
-                            _hc(_Hr.f_ice), _hc(_Hr.f_lake), _alr, _Tlr, _eo,
-                            _elr, _hc(_Hr.lw_emit), _hc(_Hr.albedo_ice),
-                            _hc(_Hr.albedo_lake), _hc(_Hr.emissivity_ice),
-                            _hc(_Hr.emissivity_lake))
-                        _hb_rad_held = [_tr[f] for f in _CPL_HB_RAD_FIELDS]
+                    # the radiation split was taken before the land call
                     _nb = len(_CPL_WIN_FIELDS)
                     _cpl_now[_nb:] = (
                         _hb_rad_held + [_sdv(f) for f in _CPL_HB_OW_FIELDS]

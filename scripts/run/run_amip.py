@@ -2222,6 +2222,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "over land (--mpas-land-stress-from-land, "
                              "default auto) and radiation != none); --no-... "
                              "= off.")
+    parser.add_argument("--sea-ice-flux-split",
+                        action=_BoolOneSpelling, default=None,
+                        dest="sea_ice_flux_split",
+                        help="MPAS lane: in partly ice-covered sea cells "
+                             "evaluate the turbulent exchange separately on "
+                             "the ice skin and the open water and charge the "
+                             "ice skin its own sensible/latent heat (#2573; "
+                             "radiation not split). Unset = AUTO (on wherever "
+                             "--ocean-flux-on-ocean-surface and the prognostic "
+                             "ice skin are on); --no-... = one blended "
+                             "surface.")
     parser.add_argument("--land-params-refresh", "--mpas-land-params-refresh",
                         action=_BoolOneSpelling, default=True,
                         dest="land_params_refresh",
@@ -3268,6 +3279,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_beta_soil=args.land_beta_soil,
         land_stress_from_land=args.land_stress_from_land,
         ocean_flux_on_ocean_surface=args.ocean_flux_on_ocean_surface,
+        sea_ice_flux_split=args.sea_ice_flux_split,
         land_params_refresh=args.land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s

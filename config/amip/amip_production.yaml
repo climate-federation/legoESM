@@ -470,6 +470,10 @@ mpas_land_stress_from_land: true
 # not on the land-blended T_sfc/q_sfc (#1320; CESM computes atm-ocn fluxes on
 # ocean points only).  User 2026-10-19.
 ocean_flux_on_ocean_surface: true
+# Partly ice-covered sea cells: turbulent exchange on the ice skin and on the
+# open water separately, the ice skin charged its own sensible/latent heat
+# (#2573, user 2026-11-19).  Radiation is not split.
+sea_ice_flux_split: true
 mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
                                 # albedo rebuilt every land step, as the
                                 # offline calibration runs the tables (user
