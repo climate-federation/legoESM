@@ -756,7 +756,7 @@ def test_resume7_k0_istate_ssh_and_dry_cell_signed_zero_keep_si3_bit_identical()
         recipe.build_orca2_istate_for_mode(
             "unused", "unused", np.ones((1, 1, 1), dtype=bool),
             f_t=np.ones((1, 1)), e1e2t=np.ones((1, 1)),
-            initial_state="unknown_mode",
+            initial_state="unknown_mode", ln_teos10=False,
         )
 
     deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
@@ -2108,7 +2108,6 @@ def test_resume11_kt2_non_update_retention_production_call_site_revert_plant_jit
         tlaf_jerlov = sw_mod.top_layer_absorbed_fraction(e3t_3d[..., 0])
         assert tlaf_chl.size == 26640 and tlaf_jerlov.size == 26640
         assert float(np.asarray(tlaf_chl)[0, 0]) == 0.8227655335922476
-
 
 
 

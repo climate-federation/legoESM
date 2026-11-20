@@ -20,7 +20,13 @@ from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ice import sea_ice
 from legoesm.ice import si3_o17 as o17_mod
 from legoesm.ice.config import SeaIceConfig, build_si3_orca2_o17_config
-from legoesm.ice.si3_o17 import SI3O17Card, SI3O17LiveForcing, SI3O17StepState, si3_o17_step
+from legoesm.ice.si3_o17 import (
+    SI3O17Card,
+    SI3O17LiveForcing,
+    SI3O17StepState,
+    si3_o17_step,
+    si3_o17_through_update_flx,
+)
 from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig, si3_eos_fzp, si3_lbc_lnk_orca2
 
 from scripts.validate.ocean_fidelity.testcases import (
@@ -40,7 +46,7 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_ad_probe import (
 REPO = Path(__file__).resolve().parents[3]
 # Eager binary64 digests of the 7x7 mixed-regime card (one aEVP subcycle) after
 # Resume 5.  Any code revert of a composed statement changes them.
-PROBE_SHA256 = "7e6ff54def6cdd1b6ba878431687a00c7627e50d37af7824ee8d32481ff6ebbe"
+PROBE_SHA256 = "470b15d4c55e430eaa0fc0f5855a9598b996d4cfd118766f155179a17b147cb9"
 FULL_SHA256 = "46317520de43e28ead25d27239c5d0dc05fe7dde92087f6594f59c317a74c16d"
 
 
@@ -146,10 +152,42 @@ def _run(entry, forcing, card, **kwargs):
         return si3_o17_step(entry, SI3O17LiveForcing(1, *forcing[1:]), card, **kwargs)
 
 
+def _probe_projection(core, entry, forcing, card):
+    """Test-owned projection of the real through-update-flux production call."""
+
+    h = card.state.nn_hls
+    owned = (slice(h, -h), slice(h, -h))
+    t0 = card.constants.T0
+    t_bo = (
+        (si3_eos_fzp(
+            forcing.sss_m, kbnd=0, nn_hls=h, ln_teos10=card.ln_teos10
+        )[owned] + t0) * forcing.surface.smask0
+        + t0 * (1.0 - forcing.surface.smask0)
+    )
+    return (
+        core.aevp.u_ice_u,
+        core.aevp.v_ice_v,
+        core.advection_state.a_i,
+        core.redistribution.state.a_i,
+        core.deformation[0],
+        core.deformation[1],
+        core.surface_stress.flx_other.qlead,
+        core.surface_stress.flx_other.fhld,
+        t_bo,
+        entry.ice.u_ice,
+        entry.ice.v_ice,
+        core.correction.state.a_i,
+        core.correction.state.aggregated.at_i,
+        core.surface_stress,
+        core.aevp,
+    )
+
+
 def _probe(entry, forcing, card):
-    # O6 has its own admitted eager/JIT suite; omitting it keeps this boundary small.
-    return _run(entry, forcing, card, _test_return_surface_probe=True,
-                _plant_drop_redistribution=True)
+    live = SI3O17LiveForcing(1, *forcing[1:])
+    with jax.disable_jit():
+        core = si3_o17_through_update_flx(entry, live, card)
+    return _probe_projection(core, entry, live, card)
 
 
 def _scorer_projection(result):
@@ -200,7 +238,9 @@ def _probe_checks(entry, forcing, card, probe, baseline) -> None:
     smask0 = forcing.surface.smask0
     t0 = card.constants.T0
     reference_t_bo = (  # icestp.F90:136-138 evaluated from the admitted freezing point
-        (si3_eos_fzp(forcing.sss_m, kbnd=0, nn_hls=h)[owned] + t0) * smask0 + t0 * (1.0 - smask0)
+        (si3_eos_fzp(
+            forcing.sss_m, kbnd=0, nn_hls=h, ln_teos10=card.ln_teos10
+        )[owned] + t0) * smask0 + t0 * (1.0 - smask0)
     )
     np.testing.assert_array_equal(
         np.asarray(probe[8]).view(np.uint64), np.asarray(reference_t_bo).view(np.uint64),
@@ -458,7 +498,9 @@ def test_o17_kt_enters_prather_parity_and_explicit_stress_cadence() -> None:
     calls = [node for node in ast.walk(core_tree) if isinstance(node, ast.Call)
              and getattr(node.func, "id", "") == "si3_dyn_orca2"]
     passed = [kw.value for call in calls for kw in call.keywords if kw.arg == "kt"]
-    assert len(core_uses) == len(passed) == 2 and all(u in passed for u in core_uses)
+    # There is one production advection call.  The old second call existed
+    # only in a production-parameter plant arm and was removed with that arm.
+    assert len(core_uses) == len(passed) == 1 and core_uses[0] in passed
 
     wrapper_tree = ast.parse(inspect.getsource(o17_mod.si3_o17_step))
     tau = next(node for node in ast.walk(wrapper_tree) if isinstance(node, ast.Call)
@@ -473,8 +515,12 @@ def test_o17_surface_boundary_eager_jit_and_code_revert_plants(mixed, probe_base
     entry, forcing, card = mixed
     _probe_checks(entry, forcing, card, probe_baseline, probe_baseline)
     compiled = jax.jit(
-        lambda e, d: si3_o17_step(e, SI3O17LiveForcing(1, *d), card,
-                                  _test_return_surface_probe=True, _plant_drop_redistribution=True)
+        lambda e, d: _probe_projection(
+            si3_o17_through_update_flx(e, SI3O17LiveForcing(1, *d), card),
+            e,
+            SI3O17LiveForcing(1, *d),
+            card,
+        )
     )(entry, tuple(forcing[1:]))
     # XLA turns x*convert(mask) into a select: +0 where eager/NEMO keep -0.
     assert "[14].stress2_t" in _assert_only_signed_zeros_differ(compiled, probe_baseline)
@@ -592,9 +638,7 @@ def test_o17_inactive_category_open_water_snowfall_nan_fix_and_plant(monkeypatch
         ),
     )
 
-    step_fixed, trace_fixed = si3_o17_step(
-        entry_still, forcing_still, card_fast, _plant_drop_redistribution=True
-    )
+    step_fixed, trace_fixed = si3_o17_step(entry_still, forcing_still, card_fast)
     state_fixed = step_fixed.ice
     fluxes_fixed = trace_fixed.finalize.final.fluxes
     out_fixed = trace_fixed.finalize.final.outputs
@@ -684,9 +728,7 @@ def test_o17_inactive_category_open_water_snowfall_nan_fix_and_plant(monkeypatch
         )
 
     monkeypatch.setattr(o17_mod, "_thermo_entries", planted_unguarded_thermo_entries)
-    step_plant, trace_plant = si3_o17_step(
-        entry_still, forcing_still, card_fast, _plant_drop_redistribution=True
-    )
+    step_plant, trace_plant = si3_o17_step(entry_still, forcing_still, card_fast)
     state_plant = step_plant.ice
     fluxes_plant = trace_plant.finalize.final.fluxes
     out_plant = trace_plant.finalize.final.outputs
@@ -1519,19 +1561,13 @@ def test_o17_scorer_free_run_and_carried_state_plants(
             # Prove the real si3_o17_step resets t_si[owned], overwrites aevp.(u_ice_u, v_ice_v),
             # recomputes equivalent.* and the 15 non-carried aggregated.* fields before ice_thd,
             # and ignores cnd_ice and t1_ice.
-            p_bad = si3_o17_step(
-                entry_st,
-                forcing_st,
-                card,
-                _test_return_surface_probe=True,
-                _plant_drop_redistribution=True,
+            p_bad = _probe_projection(
+                si3_o17_through_update_flx(entry_st, forcing_st, card),
+                entry_st, forcing_st, card,
             )
-            p_clean = si3_o17_step(
-                step2_clean_entry,
-                forcing_st,
-                card,
-                _test_return_surface_probe=True,
-                _plant_drop_redistribution=True,
+            p_clean = _probe_projection(
+                si3_o17_through_update_flx(step2_clean_entry, forcing_st, card),
+                step2_clean_entry, forcing_st, card,
             )
             assert _bit_mismatches(p_bad, p_clean) == []
             probe_checked["ran"] = True
@@ -1633,6 +1669,7 @@ def test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir(
         "correction",
         "surface",
         "thermo_namelist",
+        "ln_teos10",
         "constants",
         "rn_himin",
         "rn_hinew",

@@ -629,11 +629,6 @@ def _si3_o17_through_update_flx(
     entry: SI3O17StepState,
     forcing: SI3O17LiveForcing,
     card: SI3O17Card,
-    *,
-    _plant_swap_rheology_advection: bool = False,
-    _plant_drop_redistribution: bool = False,
-    _plant_drop_deformation_fold: bool = False,
-    _test_return_surface_probe: bool = False,
 ) -> SI3O17ThroughUpdateFlux:
     """Run the exact NEMO ``ice_stp`` graph through ``ice_update_flx``."""
 
@@ -709,7 +704,7 @@ def _si3_o17_through_update_flx(
         aevp_forcing,
         forcing.aevp_metrics,
         card.aevp,
-        fold=None if _plant_drop_deformation_fold else card.fold,  # icedyn_rhg_evp.F90:791-838
+        fold=card.fold,  # icedyn_rhg_evp.F90:791-838
     )
     # pdivu_i is the arithmetic product at icedyn_rhg_evp.F90:822-824 (a
     # negative bracket times zmsk=0 stores -0); pdelta_i's +0 is the ELSE of
@@ -718,67 +713,35 @@ def _si3_o17_through_update_flx(
     # icestp.diag_set0 assigns +0 to every SI3 flux accumulator at step
     # entry.  They are not live forcing and cannot be injected mid-step.
     step_fluxes = SI3Fluxes(*(jnp.zeros_like(forcing.sss_m) for _ in SI3Fluxes._fields))
-    if _plant_swap_rheology_advection:
-        adv_input_u, adv_input_v = entry.ice.u_ice, entry.ice.v_ice  # icedyn.F90:132-133
-        adv_state, adv = si3_dyn_orca2(
-            entry.ice,
-            forcing.advection_grid,
-            kt=forcing.kt,
-            sss_m=forcing.sss_m,
-            sst_m=forcing.sst_m,
-            rn_uice=None,
-            rn_vice=None,
-            config=card.state,
-            wfx_res=zeros,
-            hfx_res=zeros,
-            sfx_res=zeros,
-            diag_adv_mass=zeros,
-            diag_adv_salt=zeros,
-            diag_adv_heat=zeros,
-            dynamics_path="np_dynALL",  # namelist_ice_ref:51; icedyn.F90:130-135
-        )
-        state = adv_state._replace(u_ice=aevp.u_ice_u, v_ice=aevp.v_ice_v)
-    else:
-        adv_input_u, adv_input_v = state.u_ice, state.v_ice  # icedyn.F90:132-133
-        state, adv = si3_dyn_orca2(
-            state,
-            forcing.advection_grid,
-            kt=forcing.kt,
-            sss_m=forcing.sss_m,
-            sst_m=forcing.sst_m,
-            rn_uice=None,
-            rn_vice=None,
-            config=card.state,
-            wfx_res=zeros,
-            hfx_res=zeros,
-            sfx_res=zeros,
-            diag_adv_mass=zeros,
-            diag_adv_salt=zeros,
-            diag_adv_heat=zeros,
-            dynamics_path="np_dynALL",  # namelist_ice_ref:51; icedyn.F90:130-135
-        )
+    state, adv = si3_dyn_orca2(
+        state,
+        forcing.advection_grid,
+        kt=forcing.kt,
+        sss_m=forcing.sss_m,
+        sst_m=forcing.sst_m,
+        rn_uice=None,
+        rn_vice=None,
+        config=card.state,
+        wfx_res=zeros,
+        hfx_res=zeros,
+        sfx_res=zeros,
+        diag_adv_mass=zeros,
+        diag_adv_salt=zeros,
+        diag_adv_heat=zeros,
+        dynamics_path="np_dynALL",  # namelist_ice_ref:51; icedyn.F90:130-135
+    )
     advection_state = state  # icedyn.F90:133-134; named O17 localisation boundary
     rdg_entry = _rdgrft_state(state, step_fluxes)
-    if _plant_drop_redistribution:
-        rdg = SI3RdgrftResult(
-            rdg_entry,
-            jnp.zeros_like(zeros, bool),
-            jnp.asarray(0),
-            jnp.zeros_like(zeros, jnp.int32),
-            jnp.zeros_like(zeros, bool),
-            jnp.zeros_like(zeros, bool),
-        )
-    else:
-        rdg = si3_ice_dyn_rdgrft(
-            rdg_entry,
-            divu_i=divu,
-            delta_i=delta,
-            sst_m=forcing.sst_m,
-            sss_m=forcing.sss_m,
-            hi_max=state.bounds.hi_max,
-            nn_hls=card.state.nn_hls,
-            config=card.redistribution,
-        )
+    rdg = si3_ice_dyn_rdgrft(
+        rdg_entry,
+        divu_i=divu,
+        delta_i=delta,
+        sst_m=forcing.sst_m,
+        sss_m=forcing.sss_m,
+        hi_max=state.bounds.hi_max,
+        nn_hls=card.state.nn_hls,
+        config=card.redistribution,
+    )
     state = _state_from_rdgrft(state, rdg.state)
     fluxes = step_fluxes._replace(
         wfx_dyn=rdg.state.wfx_dyn,
@@ -922,19 +885,6 @@ def _si3_o17_through_update_flx(
         config=card.surface,
     )
     surface = SI3SurfaceOutputs(b1, utau_ice, vtau_ice, alb, b2, other)
-    if _test_return_surface_probe:
-        # Test-only projection immediately before ice_thd (icestp.F90:191-192).
-        # It keeps the real entry, rheology, deformation, Prather, O6 and O7
-        # arithmetic JIT-executable while Decision 194 leaves the 342k-equation
-        # category-loop compilation to the next round (icethd.F90:117-177).
-        return (  # icestp.F90:126-191
-            adv_input_u, adv_input_v, advection_state.a_i,  # icedyn.F90:132-133
-            state.a_i, divu, delta,  # icedyn.F90:133-134
-            other.qlead, other.fhld, t_bo,  # icesbc.F90:450-464; icestp.F90:136
-            u_ice_b, v_ice_b, a_i_b, at_i_b,  # icestp.F90:151,184
-            surface, aevp,  # icestp.F90:159,168,201 (O7 products and aEVP exit)
-        )
-
     frazil = si3_ice_thd_frazil(other.qlead, rn_hinew=card.rn_hinew, ln_frazil=card.ln_frazil)
     dh_fluxes = SI3DHFluxes(**{name: getattr(fluxes, name) for name in SI3DHFluxes._fields})
     thermo_entries = _thermo_entries(  # icethd.F90:117-140
@@ -1256,48 +1206,20 @@ def si3_o17_through_update_flx(
     entry: SI3O17StepState,
     forcing: SI3O17LiveForcing,
     card: SI3O17Card,
-    *,
-    _plant_swap_rheology_advection: bool = False,
-    _plant_drop_redistribution: bool = False,
-    _plant_drop_deformation_fold: bool = False,
-    _test_return_surface_probe: bool = False,
 ) -> SI3O17ThroughUpdateFlux:
     """Public coupled-recipe boundary through NEMO ``ice_update_flx``."""
 
-    return _si3_o17_through_update_flx(
-        entry,
-        forcing,
-        card,
-        _plant_swap_rheology_advection=_plant_swap_rheology_advection,
-        _plant_drop_redistribution=_plant_drop_redistribution,
-        _plant_drop_deformation_fold=_plant_drop_deformation_fold,
-        _test_return_surface_probe=_test_return_surface_probe,
-    )
+    return _si3_o17_through_update_flx(entry, forcing, card)
 
 
 def si3_o17_step(
     entry: SI3O17StepState,
     forcing: SI3O17LiveForcing,
     card: SI3O17Card,
-    *,
-    _plant_swap_rheology_advection: bool = False,
-    _plant_drop_redistribution: bool = False,
-    _plant_drop_deformation_fold: bool = False,
-    _test_return_surface_probe: bool = False,
 ) -> tuple[SI3O17StepState, SI3O17Trace]:
     """One exact production call graph in NEMO ``ice_stp`` order."""
 
-    core = _si3_o17_through_update_flx(
-        entry,
-        forcing,
-        card,
-        _plant_swap_rheology_advection=_plant_swap_rheology_advection,
-        _plant_drop_redistribution=_plant_drop_redistribution,
-        _plant_drop_deformation_fold=_plant_drop_deformation_fold,
-        _test_return_surface_probe=_test_return_surface_probe,
-    )
-    if _test_return_surface_probe:
-        return core
+    core = _si3_o17_through_update_flx(entry, forcing, card)
     stress = si3_ice_update_tau(
         core.stress_inputs,
         config=card.state,

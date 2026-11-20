@@ -392,6 +392,9 @@ def test_scorer_main_reads_c0_from_staged_rec_c3(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(scorer, "score_c0", fake_c0)
     monkeypatch.setattr(scorer, "score_c1", lambda *_args, **_kwargs: {"status": "PASS"})
     monkeypatch.setattr(
+        scorer, "run_c2_compiled", lambda *_args, **_kwargs: {"status": "PASS_C2_0_ULP_WET"}
+    )
+    monkeypatch.setattr(
         scorer,
         "_admitted_resolved_namelist",
         lambda _evidence: {"jpl": 5, "nlay_i": 10, "nlay_s": 5},
@@ -403,6 +406,27 @@ def test_scorer_main_reads_c0_from_staged_rec_c3(monkeypatch, tmp_path: Path) ->
     )
     assert scorer.main() == 0
     assert seen["c0"] == tmp_path / "REC_C3/c_ladder_records"
+
+
+def test_scorer_main_returns_nonzero_on_c2_failure(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(scorer, "score_c0", lambda *_a, **_k: {"status": "PASS"})
+    monkeypatch.setattr(scorer, "score_c1", lambda *_a, **_k: {"status": "PASS"})
+    monkeypatch.setattr(
+        scorer,
+        "run_c2_compiled",
+        lambda *_a, **_k: {"status": "FAIL_C2 kind=3 planted"},
+    )
+    monkeypatch.setattr(
+        scorer,
+        "_admitted_resolved_namelist",
+        lambda _evidence: {"jpl": 5, "nlay_i": 10, "nlay_s": 5},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc")],
+    )
+    assert scorer.main() == 2
 
 
 @pytest.mark.parametrize("unit", ("stprk3", "sbcssm", "sbcmod", "icestp", "iceupdate"))

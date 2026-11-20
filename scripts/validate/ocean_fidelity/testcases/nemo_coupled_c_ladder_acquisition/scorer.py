@@ -396,9 +396,13 @@ def score_c2_observations(
                         f"C2 integer metadata differs kind={kind} field={field} kt={kt} rank={rank}"
                     )
                 continue
-            if field in {"uu", "ssu", "utauU", "uu_kbb", "u_ice", "u_oce"}:
+            if field in {
+                "uu", "ssu", "utauU", "uu_kbb", "u_before", "u_ice", "u_oce"
+            }:
                 staggering = "umask"
-            elif field in {"vv", "ssv", "vtauV", "vv_kbb", "v_ice", "v_oce"}:
+            elif field in {
+                "vv", "ssv", "vtauV", "vv_kbb", "v_before", "v_ice", "v_oce"
+            }:
                 staggering = "vmask"
             else:
                 staggering = "tmask"
@@ -510,24 +514,10 @@ def score_c2(evidence: Path, candidate: dict[tuple[int, int, int], dict]) -> dic
 
 
 def _c2_cold_start(run: Path):
-    """Build REC_C2 from the deck's K0 ocean and production ice_istate."""
+    """Load records and bind them to the production coupled recipe."""
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    from legoesm.ice.dynamics import SI3CGridAEVPState
-    from legoesm.ice.si3_finalize import SI3UpdateFluxOutputs
-    from legoesm.ice.si3_o17 import SI3O17StepState
-    from legoesm.ice.si3_orca2_state import (
-        SI3O2InitConfig,
-        si3_dom_uniq_t_orca2,
-        si3_o2_scalar_initial_state,
-        si3_update_snwice_mass,
-        si3_var_agg,
-        si3_var_glo2eqv,
-    )
     from legoesm.ocean import bulk_flux_omip as bulk
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_orca2_zps_card
-    from legoesm.ocean.forcing.nemo_surface import NemoSurfaceMeans
-    from legoesm.ocean.freshwater import NemoRunoffSurface
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round340_score_composed_card as r340_score,
     )
@@ -537,169 +527,31 @@ def _c2_cold_start(run: Path):
     from scripts.validate.ocean_fidelity.testcases import (
         nemo_si3_o17_composition_scorer as o17_score,
     )
-    from scripts.validate.ocean_fidelity.testcases.nemo_si3_o2_orca2_sas_gate import (
-        _load_orca2_sas_ice_bundle_inputs,
-    )
 
     k0 = bulk.build_nemo_orca2_k0_ocean_card(run)
     controls = r340.build_real_composed_inputs(
         k0, run, r340_score.DEFAULT_CORE_MANIFEST, r340_score.DEFAULT_ICE_COVER
     )
-    coupled_ocean = build_orca2_zps_card(run, initial_state="si3_iceistate")
     receipt = json.loads((run / "C_DECK_RECEIPT.json").read_text())
     master = Path(receipt["sas_ice_reference"]).parents[1]
     master_run = master / "record_100step"
+    ln_teos10 = o17_score.si3_teos10_from_resolved_namelist(
+        run / "output.namelist.dyn"
+    )
+    coupled_ocean = build_orca2_zps_card(
+        run, initial_state="si3_iceistate", ln_teos10=ln_teos10
+    )
     ice_card = o17_score.card_for(master_run)._replace(
         ln_drgice_imp=True,
-        ln_teos10=o17_score.si3_teos10_from_resolved_namelist(
-            run / "output.namelist.dyn"
-        ),
+        ln_teos10=ln_teos10,
     )
-    ice_dt = 2.0 * float(coupled_ocean.dt_s)
-    ice_card = ice_card._replace(
-        state=ice_card.state._replace(nn_fsbc=2, rDt_ice=ice_dt),
-        aevp=ice_card.aevp._replace(dt_s=ice_dt),
-        redistribution=ice_card.redistribution._replace(rdt_ice=ice_dt),
-        correction=ice_card.correction._replace(rdt_ice=ice_dt),
-        surface=ice_card.surface._replace(rDt_ice=ice_dt),
+    return bulk.build_nemo_orca2_si3_coupled_recipe(
+        run,
+        coupled_ocean=coupled_ocean,
+        k0=k0,
+        controls=controls,
+        ice_card=ice_card,
     )
-    index = o17_score.record_paths(master_run / "o17_master_records")
-    records = o17_score.load_step(index[(1, 0)], 1, 0)
-    o17 = o17_score.live_forcing(records, ice_card)
-    o17 = o17._replace(
-        stress=o17.stress._replace(tmask_k1=o17.aevp_forcing.tmask_t)
-    )
-
-    ocean_state = coupled_ocean.recipe.initial_state
-    h = int(ice_card.state.nn_hls)
-    bundle = _load_orca2_sas_ice_bundle_inputs()
-    if bundle is None:
-        raise ValueError("C2 cold start requires the admitted ORCA2 input bundle")
-    sst = bulk._orca2_si3_full_field(
-        ocean_state.T.data[..., 0], ice_card.fold, "T", h
-    )
-    sss = bulk._orca2_si3_full_field(
-        ocean_state.S.data[..., 0], ice_card.fold, "T", h
-    )
-    tmask = jnp.asarray(bundle["tmask"])
-    smask0_i = si3_dom_uniq_t_orca2(nn_hls=h)
-    ssh0 = jnp.zeros_like(tmask)
-    o2 = si3_o2_scalar_initial_state(
-        sst_m=sst,
-        sss_m=sss,
-        tmask=tmask,
-        ff_t=jnp.asarray(bundle["ff_t"]),
-        gphit=jnp.asarray(bundle["gphit"]),
-        e1e2t=jnp.asarray(bundle["e1e2t"]),
-        ssmask=tmask,
-        smask0_i=smask0_i,
-        ssh_before_kbb=ssh0,
-        ssh_before_kmm=ssh0,
-        config=SI3O2InitConfig.for_orca2_omip_l4(nn_hls=h),
-        state_config=ice_card.state,
-    )
-    o3 = o2.o3
-    zero3 = jnp.zeros_like(o3.a_i)
-    eqv = si3_var_glo2eqv(
-        v_i=o3.v_i, v_s=o3.v_s, sv_i=o3.sv_i, a_i=o3.a_i,
-        oa_i=zero3, a_ip=o3.a_ip, v_ip=o3.v_ip, v_il=o3.v_il,
-        e_s=o3.e_s, e_i=o3.e_i, szv_i=o3.szv_i, kn=1,
-        hi_max_top=ice_card.state.rn_himax, sss_m=sss, config=ice_card.state,
-    )
-    agg = si3_var_agg(
-        v_i=o3.v_i, v_s=eqv.v_s, sv_i=o3.sv_i, a_i=eqv.a_i,
-        oa_i=zero3, a_ip=o3.a_ip, v_ip=o3.v_ip, v_il=o3.v_il,
-        t_su=o3.t_su, t_si=zero3, e_s=o3.e_s, e_i=o3.e_i,
-        szv_i=o3.szv_i, a_ip_eff=eqv.a_ip_eff, t_i=eqv.t_i,
-        t_s=eqv.t_s, kn=1, config=ice_card.state,
-    )
-    mass, mass_b, _ = si3_update_snwice_mass(
-        vt_i=agg.vt_i, vt_s=agg.vt_s, vt_ip=agg.vt_ip, vt_il=agg.vt_il,
-        snwice_mass_prev=jnp.zeros_like(agg.vt_i), tmask=tmask,
-        config=ice_card.state, is_init=True,
-    )
-    ice = SI3State.zeros(*tmask.shape, config=ice_card.state)._replace(
-        a_i=eqv.a_i, v_i=o3.v_i, v_s=eqv.v_s, sv_i=o3.sv_i,
-        t_su=o3.t_su, oa_i=zero3, a_ip=o3.a_ip, v_ip=o3.v_ip,
-        v_il=o3.v_il, e_s=o3.e_s, e_i=o3.e_i, szv_i=o3.szv_i,
-        t1_ice=o3.t1_ice, t_si=zero3, equivalent=eqv, aggregated=agg,
-        snwice_mass=mass, snwice_mass_b=mass_b,
-    )
-    zero2 = jnp.zeros_like(tmask)
-    ice_entry = SI3O17StepState(
-        ice, SI3CGridAEVPState(ice.u_ice, ice.v_ice, zero2, zero2, zero2)
-    )
-    config = coupled_ocean.recipe.model_config
-    vmix = config.physics.vertical_mixing
-    physics = config.physics._replace(
-        vertical_mixing=vmix._replace(tke=vmix.tke._replace(nemo_mxlice=2))
-    )
-    config = config._replace(
-        physics=physics, implicit_ice_ocean_top_drag=True
-    )
-    recipe = coupled_ocean.recipe._replace(
-        model_config=config, initial_state=ocean_state
-    )
-    ocean_card = coupled_ocean._replace(recipe=recipe)
-    model = LatLonCGridOceanModel(
-        recipe.grid, recipe.z_coord, config, iwm_forcing=recipe.iwm_forcing
-    )
-    s2 = controls[0]["s2"]
-    mask = ocean_state.land_mask.data
-    unique = smask0_i[h:-h, h:-h].T
-    card = bulk.NemoORCA2SI3Card(
-        ocean_card, ice_card, s2.stress_lbc,
-        recipe.z_coord.nemo_e1e2t, unique, s2.runoff_mouth_mask, mask,
-        s2.tmask_east, s2.tmask_north, s2.umask, s2.vmask,
-        s2.runoff_factor, s2.reference_density, s2.restoring_mm_per_day,
-        s2.restoring_bound_mm_per_day, s2.seconds_per_day, jnp.asarray(365.0),
-        s2.salinity_floor, s2.heat_capacity, 2920, 2,
-        jnp.asarray(k0.albedo), jnp.asarray(k0.precip_factor),
-        jnp.asarray(k0.evap_factor), k0.nb_iter,
-    )
-    forcing = tuple(
-        bulk.NemoORCA2SI3Forcing(
-            row["s0f"], o17, row["chl"], row["geothermal_heat_flux_mwm2"]
-        )
-        for row in controls[:2]
-    )
-    owned = ocean_state.eta.data.shape
-    full = tmask.shape
-    ice_owned = (full[0] - 2 * h, full[1] - 2 * h)
-    fluxes = SI3UpdateFluxOutputs(*(
-        jnp.zeros(
-            full if name in ("fr_i", "snwice_mass", "snwice_mass_b", "snwice_fmass")
-            else ice_owned,
-            dtype=jnp.float64,
-        )
-        for name in SI3UpdateFluxOutputs._fields
-    ))
-    stress_inputs = o17.stress
-    stress = SI3StressOutputs(
-        jnp.zeros_like(stress_inputs.utau), jnp.zeros_like(stress_inputs.vtau),
-        jnp.zeros((full[0] - 2 * h, full[1] - 2 * h)),
-        jnp.zeros_like(stress_inputs.tmod_io),
-        jnp.zeros((full[0] - 2 * h, full[1] - 2 * h)),
-        jnp.zeros((full[0] - 2 * h, full[1] - 2 * h)), None,
-    )
-    zero_yx = jnp.zeros(owned, dtype=jnp.float64)
-    prior_sst = ocean_state.T.data[..., 0]
-    prior_sss = ocean_state.S.data[..., 0]
-    prior_e3t = recipe.z_coord.nemo_e3t_0[..., 0]
-    carry = bulk.nemo_orca2_si3_cold_start(
-        ocean=ocean_state, ice=ice_entry,
-        means=NemoSurfaceMeans(
-            zero_yx, zero_yx, prior_sst, prior_sss, zero_yx, prior_e3t,
-            jnp.ones_like(zero_yx),
-        ),
-        stress=stress, fluxes=fluxes,
-        runoff=NemoRunoffSurface(zero_yx, zero_yx, zero_yx),
-        restoring_volume_flux=zero_yx, restoring_heat_flux=zero_yx,
-        restoring_coefficient=jnp.ones_like(zero_yx),
-        rn_fwb0=jnp.asarray(0.0), kt=1,
-    )
-    sponge = (controls[0]["sponge"], controls[1]["sponge"])
-    return carry, forcing, sponge, card, model
 
 
 def _c2_ocean_fields(state) -> dict[str, np.ndarray]:
@@ -1237,7 +1089,7 @@ def main() -> int:
         **status_report(),
     }
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0
+    return 2 if report["C2"]["status"].startswith("FAIL_C2") else 0
 
 
 if __name__ == "__main__":

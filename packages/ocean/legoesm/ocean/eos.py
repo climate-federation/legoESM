@@ -3636,6 +3636,7 @@ def slab_freeze_point_K(T_freeze_const, scheme: str = "constant"):
 
 def nemo_qco_r3t_ratio(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray, *,
+    linear_free_surface: bool,
     evaluation: str = "quotient",
 ) -> jnp.ndarray:
     """NEMO ``dom_qco_r3c`` T-point ratio without a thickness floor."""
@@ -3643,7 +3644,7 @@ def nemo_qco_r3t_ratio(
         raise ValueError(
             f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
             "or 'nemo_reciprocal'")
-    if getattr(z_coord, "linear_free_surface", False):
+    if linear_free_surface:
         return jnp.zeros_like(jnp.asarray(eta))
     H = jnp.asarray(H_bathy)
     wet_H = H > 0.0

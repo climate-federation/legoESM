@@ -109,19 +109,6 @@ def _fixture(monkeypatch):
     ))
     runoff = NemoRunoffSurface(zero_yx, zero_yx, zero_yx)
     ice_state = _IceState(zero_xy, zero_xy, _Aggregated(one_xy, one_xy), one_xy)
-    carry = bulk.nemo_orca2_si3_cold_start(
-        ocean=state,
-        ice=_IceStep(ice_state, zero_xy),
-        means=means,
-        stress=stress,
-        fluxes=fluxes,
-        runoff=runoff,
-        restoring_volume_flux=zero_yx,
-        restoring_heat_flux=zero_yx,
-        restoring_coefficient=one_yx,
-        rn_fwb0=jnp.asarray(0.0),
-        kt=1,
-    )
     surface = SI3O17SurfaceForcing(*(
         zero_yx if name not in ("ssu_m", "ssv_m") else zero_xy
         for name in SI3O17SurfaceForcing._fields
@@ -146,14 +133,21 @@ def _fixture(monkeypatch):
         state=ice_cfg,
         fold=SimpleNamespace(nfd_full_when_absent=True),
         ln_drgice_imp=True,
+        ln_teos10=False,
     )
-    zcoord = SimpleNamespace(nemo_e3t_0=jnp.ones(yx + (1,)))
+    zcoord = SimpleNamespace(
+        nemo_e3t_0=jnp.ones(yx + (1,)), linear_free_surface=False
+    )
+    physics = SimpleNamespace(
+        vertical_mixing=SimpleNamespace(tke=SimpleNamespace(n2_eos_form="eos80")),
+        convection=SimpleNamespace(scheme="none"),
+        lateral_mixing=SimpleNamespace(scheme="none"),
+        shortwave_penetration=SimpleNamespace(),
+    )
     ocean_card = SimpleNamespace(
         recipe=SimpleNamespace(
             z_coord=zcoord,
-            model_config=SimpleNamespace(
-                physics=SimpleNamespace(shortwave_penetration=SimpleNamespace())
-            ),
+            model_config=SimpleNamespace(eos="nemo_eos80", physics=physics),
         )
     )
     index = jnp.arange(6, dtype=jnp.int64).reshape(yx)
@@ -166,6 +160,20 @@ def _fixture(monkeypatch):
         jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(1.0),
         jnp.asarray(0.0), jnp.asarray(1.0), 4, 2, jnp.asarray(0.0),
         jnp.asarray(1.0), jnp.asarray(1.0), 1,
+    )
+    carry = bulk.nemo_orca2_si3_cold_start(
+        ocean=state,
+        ice=_IceStep(ice_state, zero_xy),
+        means=means,
+        stress=stress,
+        fluxes=fluxes,
+        runoff=runoff,
+        restoring_volume_flux=zero_yx,
+        restoring_heat_flux=zero_yx,
+        restoring_coefficient=one_yx,
+        rn_fwb0=jnp.asarray(0.0),
+        kt=1,
+        card=card,
     )
 
     calls = []
@@ -289,10 +297,22 @@ def test_carry_pytree_round_trip(monkeypatch):
     assert _bits(rebuilt) == _bits(carry)
 
 
+def test_coupled_card_rejects_nameos_disagreement_at_build_boundary(monkeypatch):
+    _, _, card, _ = _fixture(monkeypatch)
+    bad_ice = SimpleNamespace(**{**vars(card.ice), "ln_teos10": True})
+    mismatched = card._replace(ice=bad_ice)
+    with pytest.raises(ValueError, match="ocean/ice EOS settings disagree"):
+        bulk._validate_nemo_orca2_si3_eos(mismatched)
+
+
 def test_source_order_and_exactly_once_routes(monkeypatch):
     carry, forcing, card, calls = _fixture(monkeypatch)
-    carry, _ = bulk.nemo_orca2_si3_coupled_step(carry, forcing, card)
-    carry, _ = bulk.nemo_orca2_si3_coupled_step(carry, forcing, card)
+    carry, _ = bulk.nemo_orca2_si3_coupled_step(
+        carry, forcing, card, model=object(), sponge=None
+    )
+    carry, _ = bulk.nemo_orca2_si3_coupled_step(
+        carry, forcing, card, model=object(), sponge=None
+    )
     assert calls == [
         "ssm", "bulk", "ice", "tau", "runoff_restoring", "fwb", "lbc",
         "interfaces", "ocean", "ssm", "tau", "runoff_restoring",
@@ -330,6 +350,7 @@ def real_coupled_fixture():
         correction=ice_card.correction._replace(rdt_ice=ice_dt),
         surface=ice_card.surface._replace(rDt_ice=ice_dt),
         ln_drgice_imp=True,
+        ln_teos10=False,
     )
 
     grid = create_latlon_grid(n_lat=6, n_lon=8)
@@ -355,6 +376,7 @@ def real_coupled_fixture():
         prognostic=True, tke_mxl_choice=3, nemo_mxlice=2,
         nemo_mxl0_surface_tmask=True,
         tke_preclosure_coeff_source="carried_previous_step",
+        n2_eos_form="eos80",
     )
     base = OceanPhysicsConfig()
     physics = OceanPhysicsConfig(
@@ -373,7 +395,7 @@ def real_coupled_fixture():
         barotropic_solver="explicit_substep",
     )
     config = recipe._nemo_linear_bottom_drag(config)._replace(
-        implicit_ice_ocean_top_drag=True
+        eos="nemo_eos80", implicit_ice_ocean_top_drag=True
     )
     model = LatLonCGridOceanModel(grid, z_coord, config)
     ocean_card = SimpleNamespace(
@@ -422,7 +444,7 @@ def real_coupled_fixture():
         ocean=state, ice=entry, means=means, stress=stress,
         fluxes=initial_fluxes, runoff=runoff,
         restoring_volume_flux=zero, restoring_heat_flux=zero,
-        restoring_coefficient=one, rn_fwb0=jnp.asarray(0.0), kt=1,
+        restoring_coefficient=one, rn_fwb0=jnp.asarray(0.0), kt=1, card=card,
     )
     carry = carry._replace(
         a_fwb=jnp.asarray(0.0), a_fwb_b=jnp.asarray(1.0),
@@ -435,7 +457,7 @@ def real_coupled_fixture():
 def _real_pair(fixture):
     carry, forcing, card, model = fixture[:4]
     return bulk.nemo_orca2_si3_coupled_pair(
-        carry, forcing, card, even_forcing=forcing, model=model
+        carry, forcing, card, even_forcing=forcing, model=model, sponge=None
     )[0]
 
 
@@ -446,7 +468,7 @@ _C2_PLANTS = (
 
 
 def _install_c2_route_plant(monkeypatch, plant):
-    from legoesm.ice import si3_finalize, si3_o17
+    from legoesm.ice import si3_finalize
     from legoesm.ocean.forcing import nemo_surface
 
     if plant == "skip-even-tau":
@@ -488,27 +510,20 @@ def _install_c2_route_plant(monkeypatch, plant):
 
         monkeypatch.setattr(bulk, "nemo_fwb_case2_step", planted)
     elif plant == "wrong-sign-center-lbc":
-        original = bulk.nemo_t_stress_lbc_neighbors
-
-        def planted(u, v, plan):
-            center_u, center_v, east, north = original(u, v, plan)
-            return -center_u, -center_v, east, north
+        def planted(u, v, _plan):
+            # Omit sbcmod.F90:534's lbc_lnk call: interpolation below sees
+            # untreated T stresses and their untreated east/north neighbors.
+            east = jnp.concatenate((u[:, 1:], u[:, -1:]), axis=1)
+            north = jnp.concatenate((v[1:, :], v[-1:, :]), axis=0)
+            return u, v, east, north
 
         monkeypatch.setattr(bulk, "nemo_t_stress_lbc_neighbors", planted)
     elif plant == "run-si3-even":
-        original = bulk.nemo_orca2_si3_coupled_step
-
-        def planted(carry, forcing, card, **kwargs):
-            if carry.kt % card.forcing_stride == 0:
-                extra = si3_o17.si3_o17_through_update_flx(
-                    carry.ice, forcing.o17._replace(kt=carry.kt), card.ice
-                )
-                carry = carry._replace(
-                    ice=extra.state, fluxes=extra.final.outputs
-                )
-            return original(carry, forcing, card, **kwargs)
-
-        monkeypatch.setattr(bulk, "nemo_orca2_si3_coupled_step", planted)
+        # Omit the production cadence guard.  The real coupled step now takes
+        # its own SI3 path on even kt; no external SI3 call is injected.
+        monkeypatch.setattr(
+            bulk, "_nemo_orca2_si3_surface_update_due", lambda _kt, _stride: True
+        )
     else:
         raise AssertionError(f"unknown C2 route plant {plant}")
 
@@ -538,8 +553,10 @@ def test_each_c2_route_plant_fails_real_rec_c2_scorer(monkeypatch, plant):
 
         def controlled_cold_start(run):
             carry, forcing, sponge, card, model = original_cold_start(run)
-            # REC_C2 has rn_fwb0=0, so the correction application is
-            # structurally unobservable without a nonzero control carry.
+            # Synthetic observability control: REC_C2 has rn_fwb0=0, so the
+            # correction application is structurally unobservable here.  The
+            # first admitted real rung that exercises it is the future annual
+            # (2920-step) restart/continuation rung beyond C4.
             carry = carry._replace(emp_corr=jnp.asarray(0.1, dtype=jnp.float64))
             return carry, forcing, sponge, card, model
 
@@ -571,7 +588,7 @@ def test_compiled_real_pair_has_finite_reverse_mode_gradient(real_coupled_fixtur
             )
         )
         even, _ = bulk.nemo_orca2_si3_coupled_pair(
-            seeded, forcing, card, even_forcing=forcing, model=model
+            seeded, forcing, card, even_forcing=forcing, model=model, sponge=None
         )
         return jnp.sum(even.ocean.eta.data * even.ocean.eta.data)
 

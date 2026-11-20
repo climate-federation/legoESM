@@ -95,7 +95,7 @@ def test_shipped_card_keeps_deck_ice_and_comparison_matches_nemo_entry(orca2):
     rebuilt = recipe.orca2_initial_ice_ssh(
         np.asarray(state.T.data), np.asarray(state.S.data), np.asarray(z.is_active),
         np.asarray(orca2.recipe.grid.f_T), np.asarray(z.nemo_e1e2t),
-        recipe.ORCA2_DECK_INITIAL_ICE)
+        recipe.ORCA2_DECK_INITIAL_ICE, ln_teos10=False)
     assert np.array_equal(rebuilt.view(np.uint64), shipped.view(np.uint64))
 
     ladder.record_initial_ice.cache_clear()

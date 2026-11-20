@@ -243,6 +243,7 @@ precip_factor_orca1 = 1.0       # [-] namsbc_blk rn_pfac
 evap_factor_orca1 = 1.0         # [-] namsbc_blk rn_efac
 ice_sw_clear_nemo = 0.18
 ice_sw_cloudy_nemo = 0.35
+ice_cloud_fraction_default_nemo = 0.81  # [-] sbc_phy.F90 pp_cldf
 ice_sw_thin_threshold_nemo = 0.1  # [m]
 ice_sw_thin_inverse_nemo = 10.0   # [m-1]
 ice_ocean_heat_transfer_nemo = 0.0057
