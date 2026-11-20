@@ -1,63 +1,90 @@
-"""Does the production ocean bulk-flux law reproduce ERA5's El Nino flux anomaly?
+"""Does the production ocean bulk-flux law reproduce ERA5's El Nino latent heat anomaly?
 
 Offline: ERA5 surface inputs (10 m wind, 2 m T/dewpoint, SST, p_s) for Dec 1997
 and Dec 1991-2000 go through the MPAS production deck's ocean flux law
 (``large_yeager_cesm`` via ``compute_surface_fluxes``, sea-water surface
 humidity as the CLUBB integration builds it).  The Dec-1997 minus climatology
-anomaly of latent heat flux and zonal stress is scored against ERA5's own
-fluxes, and the latent-heat anomaly is split into a wind-speed term and a
-thermodynamic (humidity-difference) term by swapping inputs through the same
-function (paired by day/hour; residual = interaction).
+anomaly of latent heat flux is scored against ERA5's own flux, and split into a
+wind-speed term and a thermodynamic (humidity-difference) term by swapping
+inputs through the same function (paired by day/hour; residual = interaction).
+The source store carries no surface stress, so the zonal stress anomaly is the
+bulk formula on ERA5 winds only (no ERA5 stress to score against).
 
-  fetch: python scripts/validate/enso_bulk_flux_anomaly.py fetch --out DIR
+Source: WeatherBench2 ERA5, 1.5 deg conservative, 6-hourly (``_WB2``).  Its
+``mean_surface_latent_heat_flux`` at stamp t is the mean over the hour BEFORE t,
+so each December uses stamps Dec 1 06 UTC .. Jan 1 00 UTC (124 samples, every
+flux window inside December) for inputs and fluxes alike; the inputs are
+instantaneous at t, half an hour after the flux window's centre.
+
+  fetch (login node, single process): python scripts/validate/enso_bulk_flux_anomaly.py fetch --out DIR
   score: JAX_ENABLE_X64=1 python scripts/validate/enso_bulk_flux_anomaly.py score --out DIR
 
 Detail choices (votes author/GLM/codex): z_bot=10 m with 2 m T,q (a/a/a);
-climatology includes 1997 (a/b/a); 1 deg (a/a/a); 6-hourly (a/a/a, after
-transfer cost); per-sample fluxes (a/a/a); swap split (a/a/a); ratio + pattern
-correlation (a/a/a); ERA5 mean-rate fluxes (a/a/a).
+climatology includes 1997 (a/b/a); 6-hourly (a/a/a, after transfer cost);
+per-sample fluxes (a/a/a); swap split (a/a/a); ratio + pattern correlation
+(a/a/a); ERA5 mean-rate fluxes (a/a/a).  1.5 deg WB2 store: user choice.
 """
 import argparse
+import hashlib
 import os
 import subprocess
 
 import numpy as np
 
-_ARCO = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+_WB2 = ("gs://weatherbench2/datasets/era5/"
+        "1959-2023_01_10-6h-240x121_equiangular_with_poles_conservative.zarr")
 _IN = ["10m_u_component_of_wind", "10m_v_component_of_wind", "2m_temperature",
        "2m_dewpoint_temperature", "sea_surface_temperature", "surface_pressure"]
-_OUT = ["mean_surface_latent_heat_flux", "mean_eastward_turbulent_surface_stress",
-        "mean_surface_sensible_heat_flux"]
+_OUT = ["mean_surface_latent_heat_flux"]
 _YEARS = range(1991, 2001)
-# 30N..30S, 120E..280E on the 0.25-deg ARCO grid (lat descending), 1-deg stride
-_LAT, _LON = slice(240, 481, 4), slice(480, 1121, 4)
+_BOX = dict(latitude=slice(-30.0, 30.0), longitude=slice(120.0, 280.0))
 _NINO34 = (-5.0, 5.0, 190.0, 240.0)
+_MAX_BYTES = 1_000_000_000  # user cap on the login-node transfer
+
+
+def stamps(y):
+    import pandas as pd
+    return pd.date_range(f"{y}-12-01 06:00", f"{y + 1}-01-01 00:00", freq="6h")
 
 
 def fetch(out):
     import gcsfs
-    import pandas as pd
     import xarray as xr
     fs = gcsfs.GCSFileSystem(token="anon")
-    ds = xr.open_zarr(fs.get_mapper(_ARCO), chunks={})
-    sub = ds.isel(latitude=_LAT, longitude=_LON)
+    ds = xr.open_zarr(fs.get_mapper(_WB2), chunks=None)
+    # whole-globe chunks: count the chunks touched and refuse past the cap
+    idx = [ds.indexes["time"].get_indexer(stamps(y)) for y in _YEARS]
+    assert all((i >= 0).all() for i in idx), "a December stamp is missing from the store"
+    n_chunk = sum(len(set(i // 8)) for i in idx)
+    est = 0
+    for v in _IN + _OUT:
+        z = fs.info(f"{_WB2}/{v}/1000.0.0")["size"]
+        est += n_chunk * z
+    print(f"# estimated transfer {est / 1e6:.0f} MB ({n_chunk} time chunks per variable)")
+    assert est < _MAX_BYTES, est
     for y in _YEARS:
         f = os.path.join(out, f"era5_dec{y}.npz")
         if os.path.exists(f):
             continue
-        t = pd.date_range(f"{y}-12-01", f"{y}-12-31 18:00", freq="6h")
-        # ERA5 mean rates at hour h cover (h-1, h]: take h+1 so the flux window
-        # starts at the instantaneous input time and never reaches November.
-        si = sub[_IN].sel(time=t).compute(scheduler="threads", num_workers=16)
-        so = sub[_OUT].sel(time=t + pd.Timedelta("1h")).compute(
-            scheduler="threads", num_workers=16)
-        np.savez(f, time=t.values.astype("datetime64[s]").astype("int64"),
-                 lat=sub.latitude.values, lon=sub.longitude.values,
-                 **{v: si[v].values for v in _IN}, **{v: so[v].values for v in _OUT})
+        sel = ds[_IN + _OUT].sel(time=stamps(y)).sel(**_BOX).load()
+        sel = sel.transpose("time", "latitude", "longitude")
+        assert sel.sizes["time"] == 124 and sel.sizes["latitude"] == 41 \
+            and sel.sizes["longitude"] == 107, sel.sizes  # 1.5 deg, 30S-30N, 120E-279E
+        np.savez(f, time=stamps(y).values.astype("datetime64[s]").astype("int64"),
+                 lat=sel.latitude.values, lon=sel.longitude.values,
+                 **{v: sel[v].values for v in _IN + _OUT})
         print(f"# saved {f}", flush=True)
-    st = sub[["land_sea_mask"]].isel(time=0).compute()
-    np.savez(os.path.join(out, "static.npz"), lsm=st.land_sea_mask.values,
-             lat=sub.latitude.values, lon=sub.longitude.values)
+    st = ds["land_sea_mask"].sel(**_BOX).transpose("latitude", "longitude").load()
+    np.savez(os.path.join(out, "static.npz"), lsm=st.values,
+             lat=st.latitude.values, lon=st.longitude.values)
+
+
+def _provenance(out):
+    h = hashlib.sha256()
+    for name in ["static.npz"] + [f"era5_dec{y}.npz" for y in _YEARS]:
+        with open(os.path.join(out, name), "rb") as fh:
+            h.update(fh.read())
+    return f"# source {_WB2}; sha256(static+10 Decembers) {h.hexdigest()[:16]}"
 
 
 def model_fluxes(u, v, t2, td2, sst, ps):
@@ -145,26 +172,24 @@ def score(out):
     thermo_t = np.mean([r[1] for r in st_], 0) - clim_t
     m_l, m_t = base[1997][0] - clim_l, base[1997][1] - clim_t
     e_l = {y: -d[y]["mean_surface_latent_heat_flux"].mean(0) for y in _YEARS}  # ERA5 + down
-    e_t = {y: d[y]["mean_eastward_turbulent_surface_stress"].mean(0) for y in _YEARS}
-    ec_l, ec_t = np.mean(list(e_l.values()), 0), np.mean(list(e_t.values()), 0)
-    a_l, a_t = e_l[1997] - ec_l, e_t[1997] - ec_t
+    ec_l = np.mean(list(e_l.values()), 0)
+    a_l = e_l[1997] - ec_l
+    assert 50.0 < _wmean(ec_l, w) < 250.0, "ERA5 LHF sign/units: ocean clim must be ~100 W/m2 up"
 
-    print(f"# window: Dec 1-31 6-hourly; clim Dec {_YEARS[0]}-{_YEARS[-1]} incl 1997; "
-          f"ocean cells {int(ocean.sum())}; 1 deg")
+    print(f"# window: Dec 1 06 - Jan 1 00 UTC 6-hourly (flux = hour before stamp); clim Dec "
+          f"{_YEARS[0]}-{_YEARS[-1]} incl 1997; ocean cells {int(ocean.sum())}; 1.5 deg")
+    print(_provenance(out))
     print(f"clim LHF  model {_wmean(clim_l, w):7.2f}  ERA5 {_wmean(ec_l, w):7.2f} W/m2 (wide)")
-    print(f"clim taux model {_wmean(clim_t, w):7.4f}  ERA5 {_wmean(ec_t, w):7.4f} Pa (wide)")
+    print(f"clim taux model {_wmean(clim_t, w):7.4f} Pa (wide; no ERA5 stress in source)")
     for name, ww in (("nino34", w34), ("wide", w)):
         print(f"[{name}] LHF anom model {_wmean(m_l, ww):7.2f} ERA5 {_wmean(a_l, ww):7.2f} "
               f"ratio {_wmean(m_l, ww) / _wmean(a_l, ww):6.3f} | wind {_wmean(wind_l, ww):7.2f} "
               f"thermo {_wmean(thermo_l, ww):7.2f} resid {_wmean(m_l - wind_l - thermo_l, ww):6.2f}")
-        print(f"[{name}] taux anom model {_wmean(m_t, ww):8.4f} ERA5 {_wmean(a_t, ww):8.4f} "
-              f"ratio {_wmean(m_t, ww) / _wmean(a_t, ww):6.3f} | wind {_wmean(wind_t, ww):8.4f} "
-              f"thermo {_wmean(thermo_t, ww):8.4f}")
-        print(f"[{name}] slope model-on-ERA5 anom LHF {_wslope(m_l, a_l, ww):6.3f} "
-              f"taux {_wslope(m_t, a_t, ww):6.3f}")
-    print(f"[wide] pattern corr LHF {_wcorr(m_l, a_l, w):.3f}  taux {_wcorr(m_t, a_t, w):.3f}")
-    print(f"[wide] clim pattern corr LHF {_wcorr(clim_l, ec_l, w):.3f}  "
-          f"taux {_wcorr(clim_t, ec_t, w):.3f}")
+        print(f"[{name}] taux anom model only {_wmean(m_t, ww):8.4f} Pa | wind "
+              f"{_wmean(wind_t, ww):8.4f} thermo {_wmean(thermo_t, ww):8.4f}")
+        print(f"[{name}] slope model-on-ERA5 anom LHF {_wslope(m_l, a_l, ww):6.3f}")
+    print(f"[wide] pattern corr anom LHF {_wcorr(m_l, a_l, w):.3f}; "
+          f"clim LHF {_wcorr(clim_l, ec_l, w):.3f}")
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
                          text=True).stdout.strip()
     print(f"# git {sha}")
