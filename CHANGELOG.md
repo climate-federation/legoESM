@@ -48,10 +48,12 @@ All notable changes to legoESM. Format roughly follows
 
 ### Fixed
 
-- **Coupled surface solar geometry with a daily cycle.** Surface
-  `cos_zenith` now uses the host solar formula at the coupling-segment midpoint
-  in both surface-ownership routes, floored at zero at night. The daily-mean
-  branch when `diurnal_cycle=False` and the segment-mean radiation fluxes are
+- **Coupled surface solar geometry with a daily cycle.** Surface `cos_zenith`
+  is now the insolation-weighted mean of the host solar cosine over the
+  coupling segment, in both surface-ownership routes. A segment that straddles
+  sunrise or sunset therefore hands the surface a daytime cosine together with
+  its positive shortwave; fully dark segments give zero. The daily-mean branch
+  when `diurnal_cycle=False` and the segment-mean radiation fluxes are
   unchanged.
 
 - **Hines gravity-wave drag no longer launches at the surface.** The launch
