@@ -1532,6 +1532,24 @@ def _orca2_si3_full_field(owned, fold, staggering: str, nn_hls: int):
     return value
 
 
+def _orca2_si3_velocity_full_fields(u_owned, v_owned, fold, nn_hls: int, *, stepped):
+    """U/V full arrays with NEMO's halos: filled once the ocean has stepped.
+
+    stprk3_stg.F90:630-637 fills uu/vv halos (sign -1, ldfull) at the end of
+    every RK3 stage; the cold-start fields (istate.F90:82-134) are never filled.
+    """
+    from legoesm.ice.si3_orca2_state import si3_lbc_lnk_orca2
+
+    out = []
+    for owned, grid in ((u_owned, "U"), (v_owned, "V")):
+        value = _orca2_si3_full_field(owned, fold, grid, nn_hls)
+        filled = si3_lbc_lnk_orca2(
+            value, grid, -1.0, nn_hls=nn_hls, ldfull=fold.nfd_full_when_absent,
+        )
+        out.append(jnp.where(stepped, filled, value))
+    return tuple(out)
+
+
 def _orca2_si3_insert_owned(template, owned, nn_hls: int):
     value = jnp.asarray(template, dtype=jnp.float64)
     owned = jnp.asarray(owned, dtype=jnp.float64)
@@ -1643,13 +1661,16 @@ def nemo_orca2_si3_coupled_step(
 
     h = int(card.ice.state.nn_hls)
     fold = card.ice.fold
-    u_full = _orca2_si3_full_field(u_owned, fold, "U", h)
-    v_full = _orca2_si3_full_field(v_owned, fold, "V", h)
+    # uu(Kbb) and the means it feeds carry filled halos from kt=2 on.
+    u_full, v_full = _orca2_si3_velocity_full_fields(
+        u_owned, v_owned, fold, h, stepped=kt > 1
+    )
     sst_full = _orca2_si3_full_field(means.sst, fold, "T", h)
     sss_full = _orca2_si3_full_field(means.sss, fold, "T", h)
     ssh_full = _orca2_si3_full_field(means.ssh, fold, "T", h)
-    ssu_full = _orca2_si3_full_field(means.ssu, fold, "U", h)
-    ssv_full = _orca2_si3_full_field(means.ssv, fold, "V", h)
+    ssu_full, ssv_full = _orca2_si3_velocity_full_fields(
+        means.ssu, means.ssv, fold, h, stepped=kt > 1
+    )
     e3t_full = _orca2_si3_full_field(means.e3t, fold, "T", h)
     frq_full = _orca2_si3_full_field(means.frq, fold, "T", h)
     o17 = forcing.o17
@@ -1665,8 +1686,11 @@ def nemo_orca2_si3_coupled_step(
         held_utau = carry.stress.utau
         held_vtau = carry.stress.vtau
         open_taum = carry.stress.taum
-        mean_u_full = _orca2_si3_full_field(carry.means.ssu, fold, "U", h)
-        mean_v_full = _orca2_si3_full_field(carry.means.ssv, fold, "V", h)
+        # icestp.F90:126-134 leaves u_oce/v_oce at the previous odd step's
+        # ssu_m/ssv_m, which were filled only if that step was after kt=1.
+        mean_u_full, mean_v_full = _orca2_si3_velocity_full_fields(
+            carry.means.ssu, carry.means.ssv, fold, h, stepped=kt > 2
+        )
     stress_inputs = stress_template._replace(
         uu_kbb=u_full,
         vv_kbb=v_full,
@@ -1712,9 +1736,10 @@ def nemo_orca2_si3_coupled_step(
             frq_m=_crop_to_surface_interior(frq_full, bulk.qsr.T.shape),
             e3t_m=_crop_to_surface_interior(e3t_full, bulk.qsr.T.shape),
         )
+        # icestp.F90:130-134: the rheology's u_oce/v_oce are the ssu_m/ssv_m means.
         aevp_forcing = o17.aevp_forcing._replace(
-            ocean_u_u=u_full,
-            ocean_v_v=v_full,
+            ocean_u_u=ssu_full,
+            ocean_v_v=ssv_full,
         )
         live = SI3O17LiveForcing(
             kt,
