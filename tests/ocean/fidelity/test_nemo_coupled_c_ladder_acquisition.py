@@ -402,7 +402,8 @@ def test_scorer_main_reads_c0_from_staged_rec_c3(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(
         sys,
         "argv",
-        ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc")],
+        ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc"),
+         "--mode", "C0-C2"],
     )
     assert scorer.main() == 0
     assert seen["c0"] == tmp_path / "REC_C3/c_ladder_records"
@@ -424,7 +425,8 @@ def test_scorer_main_returns_nonzero_on_c2_failure(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(
         sys,
         "argv",
-        ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc")],
+        ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc"),
+         "--mode", "C0-C2"],
     )
     assert scorer.main() == 2
 
@@ -563,3 +565,14 @@ def test_bounded_master_preflight_exercises_exact_run_stub(tmp_path: Path) -> No
         "PASS_C_MASTER_PLANTS_SOURCE_NUMERIC_PASSIVITY_TRUNCATION_PARITY_DISK_RAM_RETENTION"
         in proc.stdout
     )
+
+
+def test_scorer_main_requires_mode(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc")],
+    )
+    with pytest.raises(SystemExit) as raised:
+        scorer.main()
+    assert raised.value.code == 2

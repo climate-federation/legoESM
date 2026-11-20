@@ -1269,7 +1269,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--ppsrc", type=Path)
-    parser.add_argument("--mode", choices=("C0-C2", "C3"), default="C0-C2")
+    parser.add_argument("--mode", choices=("C0-C2", "C3"))
     parser.add_argument("--plant", choices=("numeric", "wrong-parity"))
     parser.add_argument(
         "--self-test", choices=("baseline", "numeric", "truncation", "wrong-parity")
@@ -1286,6 +1286,8 @@ def main() -> int:
         return 0
     if args.evidence is None or args.ppsrc is None:
         parser.error("--evidence and --ppsrc are required outside --self-test")
+    if args.mode is None:
+        parser.error("--mode C0-C2 or --mode C3 is required outside --self-test")
     _admitted_resolved_namelist(args.evidence)
     if args.mode == "C3":
         report = {"C3": run_c3_compiled(args.evidence, pair_limit=50), **status_report()}
