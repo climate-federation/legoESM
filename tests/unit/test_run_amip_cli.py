@@ -1172,6 +1172,20 @@ def test_orbit_flags_round_trip_and_validate():
         ]), parser)).validate_strict()
 
 
+def test_geography_flags_round_trip():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--geography", "ridge.nc",
+        "--geography-regrid", "binned", "--geography-barrier-width-cells", "3",
+    ]), parser))
+    assert (cfg.geography, cfg.geography_regrid,
+            cfg.geography_barrier_width_cells) == ("ridge.nc", "binned", 3)
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical"]), parser))
+    assert (off.geography, off.geography_regrid,
+            off.geography_barrier_width_cells) == ("", "", 1)
+
+
 def test_convective_cloud_boolean_optional_action_can_disable_config_default():
     """--no-convective-cloud must override a config-file-enabled default.
 
