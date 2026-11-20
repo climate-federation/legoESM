@@ -145,6 +145,9 @@ def score(out):
     d = {y: np.load(os.path.join(out, f"era5_dec{y}.npz")) for y in _YEARS}
     ocean = st["lsm"] < 0.5
     check_inputs(d, ocean, lat, lon)  # any non-finite SST on an ocean cell is fatal
+    from legoesm import constants
+    sst_min = min(float(d[y]["sea_surface_temperature"][:, ocean].min()) for y in _YEARS)
+    assert sst_min > constants.T_freeze, f"ocean SST {sst_min} K: sea ice in the box"
     w = np.where(ocean, np.cos(np.deg2rad(lat))[:, None], 0.0)
     la, lo = np.meshgrid(lat, lon, indexing="ij")
     w34 = np.where((la >= _NINO34[0]) & (la <= _NINO34[1]) & (lo >= _NINO34[2])
