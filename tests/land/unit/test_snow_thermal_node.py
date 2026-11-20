@@ -248,7 +248,8 @@ def test_full_step_conserves_water_with_warm_pack(ft):
 def test_full_step_jit_parity(ft):
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0),
-        thermal=_TH._replace(enable_freeze_thaw=ft))
+        thermal=_TH._replace(enable_freeze_thaw=ft),
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(2, cfg, T_init=270.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([0.0, 30.0]),
                      T_snow=jnp.array([270.0, 262.0]))
@@ -287,7 +288,8 @@ def test_snow_fallen_this_step_gets_its_own_node():
     """Snow falling on bare ground forms a pack in the step's FINAL solve (end-
     of-step mass): the node then decouples from the top soil."""
     cfg = MultiLayerLandConfig(
-        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH)
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=271.0, theta_init=0.25)
     f = _forcing(1, 255.0, 2.0e-3, 2.0e-3)      # 3.6 kg/m2 of snow in 30 min
     s2 = jax.jit(lambda s: step_multilayer_land(s, f, cfg, 1.0, 1800.0,
@@ -317,7 +319,8 @@ def test_stored_heat_melt_conserves_enthalpy_and_leaves_pack_at_freezing():
 
 def test_full_step_gradient_wrt_snow_mass_is_finite_and_matches_fd():
     cfg = MultiLayerLandConfig(
-        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH)
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(1, cfg, T_init=270.0, theta_init=0.25)
     f = _forcing(1, 258.0, 0.0, 0.0)
 
