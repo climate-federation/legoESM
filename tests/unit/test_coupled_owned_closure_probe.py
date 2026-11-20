@@ -107,6 +107,8 @@ def test_injected_atmosphere_source_fails_the_bar():
     (["--ic", "era5"], "--ic-path"),
     (["--land", "real", "--land-mask-file", "m.nc"], "--clm-surfdata-path"),
     (["--surfdata", "s.nc"], "--land real"),
+    (["--grid", "fv3duo", "--dt", "300"], "--resolution and --dt"),
+    (["--grid", "fv3duo", "--resolution", "12"], "--resolution and --dt"),
 ])
 def test_real_case_options_refuse_missing_or_stray_paths(argv, msg, capsys):
     with pytest.raises(SystemExit):
@@ -127,3 +129,103 @@ def test_land_bootstrap_call_creates_no_water(tmp_path):
     assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
     # the system row adds the atmosphere's own ~1e-9-relative residual
     assert abs(rows["system_water"] - rows["atm_water"]) < 1.0e3, rows
+
+
+def _duo_run(tmp_path, capsys):
+    import json
+    out = tmp_path / "duo.json"
+    assert probe.main(["--grid", "fv3duo", "--resolution", "12", "--dt",
+                       "150", "--vertical-coord", "cam_l32", "--nlev", "32",
+                       "--days", "0.0625", "--json", str(out)]) == 0
+    cfg = json.loads(next(ln[len("CONFIG "):] for ln in capsys.readouterr()
+                          .out.splitlines() if ln.startswith("CONFIG ")))
+    return cfg, json.loads(out.read_text())
+
+
+@pytest.mark.slow
+def test_duo_column_lane_runs_and_closes_land(tmp_path, capsys):
+    """--grid fv3duo runs the duo cube's column lane (6 N^2 columns) and its
+    land row closes to roundoff over three coupling windows, as on MPAS.
+    dt 150 s, not the MPAS test's 300 s, so a flux sum left on the MPAS
+    constant fails."""
+    cfg, res = _duo_run(tmp_path, capsys)
+    assert (cfg["grid"], cfg["ncells"], cfg["dt"]) == ("fv3duo", 6 * 12 ** 2,
+                                                       150.0)
+    assert abs(res["rows"]["land_water"]) < 1.0e3, res["rows"]["land_water"]
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(strict=True, reason=(
+    "measured 2026-11-20: atm row 2.0e11 kg vs E 2.2e12 here (dt 150); the "
+    "duo dynamics change water at exact air mass -- tracer_2d builds dp2 "
+    "from the raw per-face mass-flux capacitors while delp uses the "
+    "seam-averaged fluxes (as the Fortran oracle does); a mutant averaging "
+    "the capacitors closes the row to <25 kg.  Fix pending the user"))
+def test_duo_column_lane_closes_atmosphere_water(tmp_path, capsys):
+    """The atmosphere row on the duo's own delp closes like MPAS's (1e-9)."""
+    _, res = _duo_run(tmp_path, capsys)
+    e_atm = abs(res["fluxes"]["E_atm"])
+    assert abs(res["rows"]["atm_water"]) < 1.0e-6 * e_atm, (
+        res["rows"]["atm_water"], e_atm)
+
+
+def test_land_emission_terms_split():
+    """Broadband land emission at the solve's boundary, and the land's share
+    of the solve's emission above the broadband one: all of it on a pure-land
+    cell, the emission-weighted share on a mixed cell, none when the solve
+    emits exactly the broadband value."""
+    from legoesm import constants
+    sb = constants.sigma_sb
+    eps, T, Ld = 0.95, 290.0, 330.0
+    e_bb = eps * sb * T ** 4
+    # pure land, solve emits 0.05 W/m2 more than broadband
+    lw_net = eps * Ld - (e_bb + 0.05)
+    e_land, band = probe.land_emission_terms(
+        np.array([1.0]), eps, np.array([T]), np.array([eps]), np.array([T]),
+        np.array([Ld]), np.array([lw_net]), sb)
+    np.testing.assert_allclose(e_land, [e_bb], rtol=1e-14)
+    np.testing.assert_allclose(band, [0.05], rtol=1e-9)
+    # half land (300 K) / half water (280 K, eps 0.97): land's share
+    fl, Tl, ew, Tw = 0.5, 300.0, 0.97, 280.0
+    emit = fl * eps * sb * Tl ** 4 + (1 - fl) * ew * sb * Tw ** 4
+    eps_eff = fl * eps + (1 - fl) * ew
+    T_rad = (emit / (sb * eps_eff)) ** 0.25
+    lw_net = eps_eff * Ld - (emit + 0.1)
+    e_land, band = probe.land_emission_terms(
+        np.array([fl]), eps, np.array([Tl]), np.array([eps_eff]),
+        np.array([T_rad]), np.array([Ld]), np.array([lw_net]), sb)
+    np.testing.assert_allclose(band, [0.1 * fl * eps * sb * Tl ** 4 / emit],
+                               rtol=1e-9)
+    _, band = probe.land_emission_terms(
+        np.array([fl]), eps, np.array([Tl]), np.array([eps_eff]),
+        np.array([T_rad]), np.array([Ld]), np.array([eps_eff * Ld - emit]), sb)
+    np.testing.assert_allclose(band, [0.0], atol=1e-9)
+
+
+def _eterms(capsys, land_update_s):
+    assert probe.main(["--days", "0.0625", "--land-update-s",
+                       str(land_update_s), "--energy-terms"]) == 0
+    return {ln.split()[1]: ln.split() for ln in capsys.readouterr().out
+            .splitlines() if ln.startswith("ETERM")}
+
+
+@pytest.mark.parametrize("land_update_s,k", [(300, 1), (900, 3)])
+def test_energy_terms_book_every_land_call(capsys, land_update_s, k):
+    """Every land call is booked once: calls == steps / K (18 steps)."""
+    lines = _eterms(capsys, land_update_s)
+    assert int(lines["land_calls"][2]) == int(lines["land_calls"][4]) // k
+
+
+def test_stale_emission_term_is_the_one_call_lag(capsys):
+    """Land called and radiation solved every step: each solve emits exactly
+    what the land call before it charged (the land exports its start-of-step
+    skin as the radiating temperature), so the land-charged minus
+    atmosphere-emitted total is only the in-flight endpoint term (last call's
+    charge minus the first solve's emission), not a leak."""
+    lines = _eterms(capsys, 300)
+    e_atm = float(lines["E_land_atm"][2])
+    assert int(lines["paired"][2]) == int(lines["land_calls"][2]) - 1
+    assert float(lines["paired"][4]) == 0.0, lines["paired"]
+    assert abs(float(lines["stale"][2])) > 1e-6 * e_atm   # non-vacuous
+    assert abs(float(lines["stale_minus_lag"][2])) < 1e-12 * e_atm, (
+        lines["stale_minus_lag"])

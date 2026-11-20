@@ -52,6 +52,7 @@ surface_gustiness_zi: 300.0     # [m] BL depth z_i driving w*; 0 = off.
                                 # __param_spec__: turbulence/config.py EXCLUDED
                                 # (a BL-depth convention / scheme-enable, not a
                                 # trainable closure).
+surface_stability_scheme: beljaars_holtslag1991   # stable MOST branch; was dyer1974 (#2574)
 
 # --- TUNED cloud optics: thinner diagnostic condensate -> Earth-like albedo ---
 # Converged with coare3: the extra moisture over-brightened low cloud (albedo

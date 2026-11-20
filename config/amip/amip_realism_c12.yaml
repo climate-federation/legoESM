@@ -60,6 +60,7 @@ convective_cloud: false
 # --- Surface: COARE3 bulk fluxes + convective gustiness ----------------------
 surface_bulk_scheme: coare3
 surface_gustiness_zi: 300.0
+surface_stability_scheme: beljaars_holtslag1991   # stable MOST branch; was dyer1974 (#2574)
 
 # --- Initial condition: realistic (dry) moisture -----------------------------
 # rh_init default 0.7 gives IC CWV ~85 (3.4x Earth ~25) which triggers the

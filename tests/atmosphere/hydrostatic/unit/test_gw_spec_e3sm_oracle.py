@@ -94,7 +94,10 @@ def _config(ours, hard=True):
     if not hard:
         return cfg
     return cfg._replace(beres=br._replace(index_round_width=0.0,
-                                          crit_minmax_sharpness=float("inf")), **_HARD)
+                                          crit_minmax_sharpness=float("inf"),
+                                          heating_ramp_width=0.0,
+                                          q0_max_sharpness=float("inf"),
+                                          hdepth_gate_width=0.0), **_HARD)
 
 
 def _inputs(z, ds, dtype=jnp.float64):
@@ -160,6 +163,9 @@ def test_matches_e3sm_oracle(fx, arm, ds):
 # Re-measured 2026-11-16 when the Beres NINT/INT staircases landed (#2545,
 # index_round_width 0.1, crit_minmax_sharpness 100): only the four Beres
 # (convective) entries moved.
+# Re-measured 2026-11-19 (#2569: heating_ramp_width 1e-7 K/s, q0_max_sharpness
+# 1e8 s/K, hdepth_gate_width 0.1 km): only convective_frontal/l36 moved
+# (column 6, by 5.1e-8 in du, from q0's soft max).
 _DEFAULT_GAP = {
     'background/l36': {
         'du': [0.002108721345086995, 0.0010616902333161087, 0.002646053370863181, 0.002210858303638305, 0.0, 0.001440805231582475, 0.0012456071295903564, 0.0004652215882224963],
@@ -192,10 +198,10 @@ _DEFAULT_GAP = {
         'dT_cols_flat': [0.006114392768353289, 0.0, 0.004650292706994736],
     },
     'convective_frontal/l36': {
-        'du': [0.00968506344532093, 0.0, 0.005858737822303813, 0.0020440834854522794, 0.0, 2.3725363871957644e-05, 0.0021661630212110347, 0.0014267022035004402],
-        'dv': [0.009685063445320928, 0.0, 0.008934473740157923, 0.0020440834854522556, 0.0, 0.0, 0.0021698027258529816, 0.0],
+        'du': [0.00968506344532093, 0.0, 0.005858737822303776, 0.0020440834854522794, 0.0, 2.3725363871957644e-05, 0.002166112198723856, 0.0014267022035004402],
+        'dv': [0.009685063445320928, 0.0, 0.008934473740157852, 0.0020440834854522556, 0.0, 0.0, 0.0021697552227249515, 0.0],
         'dT_field': 0.0012500463992782592,
-        'dT_cols_flat': [0.004947481047096745, 0.0, 0.0018477619841124214, 0.0, 8.291689284458155e-06, 0.0046367786014093375, 0.0012500463992782592],
+        'dT_cols_flat': [0.004947481047096745, 0.0, 0.0018477619841124214, 0.0, 8.291689284458155e-06, 0.00463677150701196, 0.0012500463992782592],
     },
     'convective_frontal/l32': {
         'du': [0.003075873588991349, 0.014712869840803975, 0.0034188551369078723],
@@ -301,6 +307,129 @@ def test_check_grads_through_the_smoothing_at_default(fx, case, col, s_star, eps
     assert float(jax.grad(f)(s0)) != 0.0
     with pytest.raises(AssertionError):          # the hard limit has the kink
         check_grads(make(_config(m["ours"])), (s0,), order=order, modes=("rev",), eps=eps)
+
+
+# #2569 (RULE 5): the Beres source's three remaining switches on traced
+# heating.  Each test perturbs ONE input of one L36 column of the
+# convective_frontal arm along a line through the switch, checks the default
+# with check_grads there, and shows the hard value of THAT field alone fails.
+#   heating range: level 20 sits inside column 0's heating run (levels 9..32);
+#     its netdt set to s*heating_ramp_width cuts the run at s <= 0 (the
+#     launch interface jumps from 10 to 21).  At s = 1/2 the expected launch
+#     interface is 15.5, the middle of a launch-staircase step.
+#   (q0's max over the range: test_gwd_e3sm_beres.py, on gw_beres_src; at a
+#   q0 tie in this column the hard limit's two one-sided slopes of the drag
+#   measured equal, so no kink shows here.)
+#   depth gate: column 1's run (levels 29..34) is 1.59 km deep; z_full * s
+#     crosses hdepth_min_km = 2.5 km at s = 2.5/hdepth.
+_C0, _CUT, _C1 = 0, 20, 1
+_HD1 = float(np.load(FIXTURE)["l36/z_full"][_C1, 29] - np.load(FIXTURE)["l36/z_full"][_C1, 34]) / 1000.0
+
+
+def _beres_line(fx, col, perturb, beres_kw, source=None):
+    z, meta, table = fx
+    m = meta["arms"]["convective_frontal"]
+    j0 = _inputs(z, "l36")
+    cfg = _config(m["ours"], hard=False)
+    cfg = cfg._replace(beres=cfg.beres._replace(**beres_kw),
+                       **({} if source is None else {"source": source}))
+
+    def f(s):
+        o = _run(perturb(j0, s), cfg, m["dt"], table)
+        return jnp.sum(o.du_dt[col]) + jnp.sum(o.dv_dt[col]) + jnp.sum(o.dT_dt[col])
+    return jax.jit(f)
+
+
+_BERES = E3SMBeresConfig()
+
+
+def _set_netdt(k, scale):
+    """netdt of column _C0 at level k set to s*scale (s in width units)."""
+    def perturb(j, s):
+        return dict(j, netdt=j["netdt"].at[_C0, k].set(s * scale))
+    return perturb
+
+
+def _scale_z(j, s):
+    return dict(j, z_full=j["z_full"].at[_C1].multiply(s),
+                z_half=j["z_half"].at[_C1].multiply(s))
+
+
+_HW, _GATE = _BERES.heating_ramp_width, _BERES.hdepth_gate_width
+_SWITCHES = {
+    # name: (column, perturbation, s at the switch, s inside the ramp, eps at
+    #        the switch, eps inside, the field's hard value)
+    # The drag sees the heating ramp through staircased indices, so it moves
+    # only where one of them steps: inside the ramp the point is s = 1/2,
+    # where the launch interface (moving ~21 levels per unit s) sits on the
+    # middle of a step 0.1 levels wide, hence eps 1e-7 there.  The depth-gate
+    # point (hdepth 2.42 km) is clear of the table row's NINT(hdepth) steps.
+    "heating_range": (_C0, _set_netdt(_CUT, _HW), 0.0, 0.5, 3.0e-5, 1.0e-7,
+                      dict(heating_ramp_width=0.0)),
+    "launch_staircase": (_C0, _set_netdt(_CUT, _HW), 0.5, 0.5, 1.0e-7, 1.0e-7,
+                         dict(index_round_width=0.0)),
+    "depth_gate": (_C1, _scale_z, 2.5 / _HD1, 2.42 / _HD1, 1.0e-5, 1.0e-5,
+                   dict(hdepth_gate_width=0.0)),
+}
+
+
+@pytest.mark.parametrize("name", list(_SWITCHES))
+def test_beres_heating_switches_smooth_at_default(fx, name):
+    """Default: second-order check_grads inside the ramp, a nonzero gradient
+    there, and first-order at the switch (the ramp's end is C2).  The field's
+    hard value alone fails first-order at the switch (a jump).  f is scaled
+    by its gradient inside the ramp so check_grads' 1e-5 tolerance is
+    relative."""
+    col, perturb, s_sw, s_in, eps_sw, eps_in, hard = _SWITCHES[name]
+    f = _beres_line(fx, col, perturb, {})
+    g_in = float(jax.grad(f)(jnp.asarray(s_in)))
+    assert g_in != 0.0                           # the ramp moves the drag
+    fn = jax.jit(lambda s: f(s) / abs(g_in))
+    check_grads(fn, (jnp.asarray(s_in),), order=2, modes=("rev",), eps=eps_in)
+    check_grads(fn, (jnp.asarray(s_sw),), order=1, modes=("rev",), eps=eps_sw)
+    fh = _beres_line(fx, col, perturb, hard)
+    with pytest.raises(AssertionError):          # this field's hard value alone jumps
+        check_grads(jax.jit(lambda s: fh(s) / abs(g_in)), (jnp.asarray(s_sw),), order=1,
+                    modes=("rev",), eps=eps_sw)
+
+
+def _surface_half_launch(j, s):
+    """Column 3 heated (1e-4 K/s) at every level except the second lowest, at
+    s*heating_ramp_width.  With no z_heat_max window (set by the test), a
+    fraction of the scans ends the run there (launch interface nlev - 1) and
+    the rest run to the model top unterminated (no range, no launch)."""
+    nd = j["netdt"].at[3].set(1.0e-4).at[3, -2].set(s * _HW)
+    return dict(j, netdt=nd)
+
+
+# interior: column 0 at launch weight 1/2.  surface: at s = 0.5267 the
+# expected launch over ALL scans (counting the unterminated ones at the
+# surface interface) reached the surface interface while the drag was nonzero
+# and the fixer's energy step had no region below the source: residual 1
+# (codex review 2); the launch is now the expectation over the scans that
+# find a range.
+@pytest.mark.parametrize("case,s", [("interior", 0.5), ("surface", 0.5),
+                                    ("surface", 0.526717480630108)])
+def test_beres_launch_blend_closes_column_energy(fx, case, s):
+    """RULE 0 (#2569): the blended convective source closes the discrete column
+    total energy (the fixer's energy step runs once, on the blend), also when
+    most scans find no range."""
+    z, meta, table = fx
+    m = meta["arms"]["convective_frontal"]
+    cfg = _config(m["ours"], hard=False)._replace(source="convective")
+    if case == "interior":
+        col, j = _C0, _set_netdt(_CUT, _HW)(_inputs(z, "l36"), jnp.asarray(s))
+    else:   # no window and the gate open at any depth, so the shallow range launches
+        col, j = 3, _surface_half_launch(_inputs(z, "l36"), jnp.asarray(s))
+        cfg = cfg._replace(beres=cfg.beres._replace(hdepth_min_km=0.0, z_heat_max=1.0e7))
+    assert cfg.do_energy_conservation
+    o = _run(j, cfg, m["dt"], table)
+    dt, u, v = m["dt"], j["u"], j["v"]
+    dp = jnp.abs(jnp.diff(j["p_half"], axis=1))
+    terms = dp * (constants.c_pd * o.dT_dt + o.du_dt * (u + 0.5 * dt * o.du_dt)
+                  + o.dv_dt * (v + 0.5 * dt * o.dv_dt))
+    assert float(jnp.max(jnp.abs(o.du_dt[col]))) > 0.0
+    assert abs(float(jnp.sum(terms[col]))) <= 1e-12 * float(jnp.sum(jnp.abs(terms[col])))
 
 
 @pytest.mark.parametrize("field", ["umcfac_abs_width", "umcfac_sign_width", "taumin_ramp_width"])

@@ -410,12 +410,94 @@ def test_driver_refuses_the_handback_off_the_column_loop(tmp_path):
 
 def _split(a, S, L, sw_net, lw_net):
     from legoesm.forcing.surface_utils import handback_tile_radiation
+    b = handback_surface_boundary(**a)
     return handback_tile_radiation(
         S, L, sw_net, lw_net, a["f_land"], a["f_ice"], a["f_lake"],
         a["albedo_land"], a["T_land"], a["emissivity"], a["emissivity_land"],
         a["lw_emit_ice_lake"],
         a["albedo_ice"], a["albedo_lake"], a["emissivity_ice"],
-        a["emissivity_lake"])
+        a["emissivity_lake"], b["sfc_emissivity"], b["T_sfc_rad"])
+
+
+def test_land_books_its_share_of_the_solve_emission_excess():
+    """The solver emits delta more than the boundary's broadband emission.
+    A pure-land cell leaves the open water exactly nothing and the land
+    absorbs exactly the solved net; a mixed cell gives the land its
+    emission-weighted share of delta and the open water the rest; with
+    delta = 0 the correction vanishes."""
+    a = _bnd_inputs()
+    a["f_land"] = a["f_land"].at[1].set(1.0)
+    a["f_ice"] = a["f_ice"].at[1].set(0.0)
+    a["f_lake"] = a["f_lake"].at[1].set(0.0)
+    a["lw_emit_ice_lake"] = a["lw_emit_ice_lake"].at[1].set(0.0)
+    b = handback_surface_boundary(**a)
+    S = jnp.array([400.0, 250.0, 120.0, 600.0])
+    L = jnp.array([300.0, 260.0, 220.0, 350.0])
+    eps, T = b["sfc_emissivity"], b["T_sfc_rad"]
+    delta = jnp.array([0.05, 0.07, 0.03, 0.09])
+    lw_net = eps * L - (eps * SB * T ** 4 + delta)
+    t = _split(a, S, L, S * (1.0 - b["sfc_albedo"]), lw_net)
+    el = a["emissivity_land"]
+    land_abs = a["f_land"] * el * (L + t["land_lw_down_corr"]
+                                   - SB * a["T_land"] ** 4)
+    # pure land: nothing left to the open water, the land takes the net
+    np.testing.assert_allclose(t["ow_lw_net"][1], 0.0, atol=1e-10)
+    np.testing.assert_allclose(land_abs[1], lw_net[1], rtol=1e-12)
+    # mixed: the land's share of delta by broadband emission
+    emit = eps * SB * T ** 4
+    # a cell with no broadband emission (all ice, window 0) books no share
+    share = jnp.where(emit > 0, a["f_land"] * el * SB * a["T_land"] ** 4
+                      / jnp.where(emit > 0, emit, 1.0), 0.0)
+    land_abs0 = a["f_land"] * el * (L - SB * a["T_land"] ** 4)
+    np.testing.assert_allclose(land_abs - land_abs0, -share * delta,
+                               rtol=1e-10, atol=1e-13)
+    t0 = _split(a, S, L, S * (1.0 - b["sfc_albedo"]),
+                eps * L - eps * SB * T ** 4)
+    np.testing.assert_allclose(t0["land_lw_down_corr"], 0.0, atol=1e-10)
+
+
+def test_land_share_of_the_emission_excess_is_differentiable():
+    """Finite, non-zero first derivatives of the land correction through the
+    emission-weight guard (skin T and the solved net LW)."""
+    a = _bnd_inputs()
+    b = handback_surface_boundary(**a)
+    L = jnp.array([300.0, 260.0, 220.0, 350.0])
+    lw_net = b["sfc_emissivity"] * L - b["sfc_emissivity"] * SB * b[
+        "T_sfc_rad"] ** 4 - 0.05
+
+    def corr(T_land, lw_net):
+        S = jnp.zeros(4)
+        return _split(dict(a, T_land=T_land), S, L, S, lw_net)[
+            "land_lw_down_corr"].sum()
+    check_grads(corr, (a["T_land"], lw_net), order=1, modes=["rev"])
+    g = jax.grad(corr, argnums=(0, 1))(a["T_land"], lw_net)
+    assert all(bool(jnp.all(jnp.isfinite(x))) for x in g)
+    assert float(jnp.abs(g[1]).sum()) > 0.0
+
+
+def test_land_call_takes_the_longwave_correction(tmp_path, monkeypatch):
+    """The land call adds the split's correction to its downward LW: a large
+    correction (x1e4) moves the land skin, the unscaled one barely."""
+    import legoesm.forcing.surface_utils as su
+    probe = _driver(tmp_path / "p", monkeypatch)
+    ncol = int(np.asarray(probe.state.p_s.data).size)
+    skins = {}
+    for tag, scale in (("one", 1.0), ("big", 1.0e4)):
+        orig = su.handback_tile_radiation
+
+        def scaled(*a, _o=orig, _s=scale, **k):
+            out = dict(_o(*a, **k))
+            out["land_lw_down_corr"] = _s * out["land_lw_down_corr"] + (
+                0.0 if _s == 1.0 else 50.0)
+            return out
+        monkeypatch.setattr(su, "handback_tile_radiation", scaled)
+        d, cb = _k3_run(tmp_path / tag, monkeypatch, 6,
+                        _H(ncol, f_ice=0.2, f_lake=0.1))
+        assert d.run(segment_callback=cb) == "COMPLETED"
+        skins[tag] = np.asarray(d._land_T_skin_last)
+        monkeypatch.setattr(su, "handback_tile_radiation", orig)
+    land = np.asarray(d._f_land).reshape(-1) > 0
+    assert np.max(np.abs(skins["big"] - skins["one"])[land]) > 0.1
 
 
 def test_tile_radiation_split_is_the_open_water_share_of_the_net():
