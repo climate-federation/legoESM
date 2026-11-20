@@ -162,8 +162,18 @@ def main(argv=None) -> int:
                     help="radiation solve cadence in steps (1 = the gate)")
     ap.add_argument("--energy-terms", action="store_true",
                     help="report the land LW emission terms")
+    ap.add_argument("--grid", choices=("mpas", "fv3duo"), default="mpas",
+                    help="mpas: the restart test's level-3 mesh; fv3duo: the "
+                         "FV3 duo cube on the column lane (dycore knobs of "
+                         "the production duo deck)")
+    ap.add_argument("--resolution", type=int, default=None,
+                    help="mesh level (mpas, default 3) or cube N (fv3duo)")
+    ap.add_argument("--dt", type=float, default=None,
+                    help="dynamics step [s] (mpas default 300)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
+    if args.grid == "fv3duo" and (args.resolution is None or args.dt is None):
+        ap.error("--grid fv3duo needs --resolution and --dt")
     if args.ic == "era5" and not args.ic_path:
         ap.error("--ic era5 needs --ic-path")
     real_paths = ("land_mask_file", "clm_surfdata_path", "surfdata",
@@ -212,10 +222,23 @@ def main(argv=None) -> int:
     extra = ({"morrison_warm_rain_scheme": args.warm_rain}
              if args.micro == "morrison" else {})
     win = 1800.0
+    DT = lp.DT if args.dt is None else args.dt
+    if args.grid == "mpas":
+        grid = GridConfig(grid_type="mpas", nlev=nlev,
+                          resolution=args.resolution or lp.MPAS_RES,
+                          vertical_coord=args.vertical_coord)
+        dycore = DycoreConfig(discretization="mpas", dt=DT)
+    else:
+        # the column lane of the duo production deck
+        # (config/amip/amip_production_fv3duo_c24.yaml): every other duo
+        # dycore field already sits at the deck's value by default
+        grid = GridConfig(grid_type="cubed_sphere", nlev=nlev,
+                          resolution=args.resolution,
+                          vertical_coord=args.vertical_coord)
+        dycore = DycoreConfig(discretization="fv3_duo", dt=DT,
+                              column_lane=True, fv3_duo_fill=True)
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="mpas", resolution=lp.MPAS_RES,
-                        nlev=nlev, vertical_coord=args.vertical_coord),
-        dycore=DycoreConfig(discretization="mpas", dt=lp.DT),
+        grid=grid, dycore=dycore,
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=0),
         days=args.days, dataset="analytical", radiation="rrtmgp",
         convection=args.convection, turbulence="louis", microphysics=args.micro,
@@ -249,7 +272,9 @@ def main(argv=None) -> int:
              C_mix=ocfg.rho_ocean * ocfg.c_ocean * ocfg.h_mix,
              g=constants.g, rho_water=constants.rho_water,
              rho_ice=constants.rho_ice)
-    print("CONFIG", json.dumps(dict(days=args.days, micro=args.micro,
+    print("CONFIG", json.dumps(dict(grid=args.grid,
+                                    resolution=cfg.grid.resolution,
+                                    days=args.days, micro=args.micro,
                                     convection=args.convection,
                                     ic=args.ic, ic_path=args.ic_path,
                                     vertical_coord=args.vertical_coord,
@@ -258,7 +283,7 @@ def main(argv=None) -> int:
                                     land_update_s=args.land_update_s,
                                     extra=extra, ncells=n, window=win,
                                     rad_update_steps=args.rad_update_steps,
-                                    dt=lp.DT, f_lake_max=float(f_lake.max()),
+                                    dt=DT, f_lake_max=float(f_lake.max()),
                                     f_land_mean=float(f_land.mean()))))
     print(f"INSTR area_sum/4piR2-1 = "
           f"{area.sum() / (4 * np.pi * constants.R_earth ** 2) - 1:.3e}")
@@ -321,7 +346,7 @@ def main(argv=None) -> int:
         mp.setattr(su, "handback_surface_boundary", _rec_boundary)
 
     from legoesm.land.multilayer_land import land_skin_temperature
-    dt_land = max(1, int(round(args.land_update_s / lp.DT))) * lp.DT
+    dt_land = max(1, int(round(args.land_update_s / DT))) * DT
 
     def land_calls():
         """Book the emission of a land call made since the last look: from
@@ -350,8 +375,8 @@ def main(argv=None) -> int:
             solve["f_land"], solve["eps_land"], solve["T_land"],
             solve["eps_eff"], solve["T_rad"], solve["lw_down"],
             solve["lw_net"], constants.sigma_sb)
-        F["E_land_atm"] += I(e_land) * lp.DT
-        F["A_band_land"] += I(band) * lp.DT
+        F["E_land_atm"] += I(e_land) * DT
+        F["A_band_land"] += I(band) * DT
 
     model, orig = atm.model, atm.model.step
     n_steps = [0]
@@ -359,8 +384,8 @@ def main(argv=None) -> int:
     def step(*a, **kw):
         out = orig(*a, **kw)
         sd = model._sfc_diag
-        F["P_atm"] += I(sd[SL["precip"]]) * lp.DT
-        F["E_atm"] += I(sd[SL["evap_sfc"]]) * lp.DT
+        F["P_atm"] += I(sd[SL["precip"]]) * DT
+        F["E_atm"] += I(sd[SL["evap_sfc"]]) * DT
         if n_steps[0] == 1:
             # the boot land call (end of step 1, published before step 2)
             # debits one DT of evaporation; the atmosphere applies that held
@@ -368,11 +393,11 @@ def main(argv=None) -> int:
             hb = (atm._land_window or {}).get("land_held_evap")
             if hb is not None:
                 F["boot_excess"] = I(f_land * _np(hb).reshape(-1)) * (
-                    max(1, int(round(cfg.land_update_seconds / lp.DT))) - 1
-                ) * lp.DT
+                    max(1, int(round(cfg.land_update_seconds / DT))) - 1
+                ) * DT
         L = atm._land_ml_state   # land's own runoff rate x f_land, per step
         F["R_state"] += float(np.sum(f_land * _np(
-            L.runoff_surface + L.runoff_subsurface).reshape(-1) * area)) * lp.DT
+            L.runoff_surface + L.runoff_subsurface).reshape(-1) * area)) * DT
         if args.energy_terms:
             eterm_step(sd)
         n_steps[0] += 1
@@ -423,10 +448,10 @@ def main(argv=None) -> int:
         land_calls()   # the call after the last step (its exported
         # emissivity: the last boundary seen; a run of whole windows ends on
         # a step whose boundary was built after the previous call)
-        land_area_t = float(np.sum(f_land * area)) * n_steps[0] * lp.DT
+        land_area_t = float(np.sum(f_land * area)) * n_steps[0] * DT
         stale = F["E_land_charged"] - F["E_land_atm"]
         print(f"ETERM land_calls {land_seen.get('n', 0)} steps {n_steps[0]} "
-              f"K {args.land_update_s / lp.DT:g} rad {args.rad_update_steps}")
+              f"K {args.land_update_s / DT:g} rad {args.rad_update_steps}")
         for kk, v in (("E_land_atm", F["E_land_atm"]),
                       ("E_land_charged", F["E_land_charged"]),
                       ("stale", stale), ("band", F["A_band_land"]),
@@ -445,13 +470,13 @@ def main(argv=None) -> int:
     # land has not yet consumed, and the held land evaporation the land
     # already debited for the rest of its interval but the atmosphere has not
     # yet received.  None before the first land call (the run start).
-    K = max(1, int(round(cfg.land_update_seconds / lp.DT)))
+    K = max(1, int(round(cfg.land_update_seconds / DT)))
     lw = atm._land_window or {}
     n_w = int(lw.get("land_win_n", 0))
     F["pend_land"] = land_in_flight(
         f_land, area,
         _np(lw["land_win_sum_precip_total"]).reshape(-1) if n_w > 0 else 0.0,
-        _np(lw["land_held_evap"]).reshape(-1), n_w, K, lp.DT)
+        _np(lw["land_held_evap"]).reshape(-1), n_w, K, DT)
     print(f"PENDING land samples n={n_w} K={K} pend_land={F['pend_land']:.6e} kg")
     cw = getattr(atm, "_cpl_window", None) or {}
     if int(cw.get("cpl_win_n", 0)) != 0:

@@ -107,6 +107,8 @@ def test_injected_atmosphere_source_fails_the_bar():
     (["--ic", "era5"], "--ic-path"),
     (["--land", "real", "--land-mask-file", "m.nc"], "--clm-surfdata-path"),
     (["--surfdata", "s.nc"], "--land real"),
+    (["--grid", "fv3duo", "--dt", "300"], "--resolution and --dt"),
+    (["--grid", "fv3duo", "--resolution", "12"], "--resolution and --dt"),
 ])
 def test_real_case_options_refuse_missing_or_stray_paths(argv, msg, capsys):
     with pytest.raises(SystemExit):
@@ -127,6 +129,23 @@ def test_land_bootstrap_call_creates_no_water(tmp_path):
     assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
     # the system row adds the atmosphere's own ~1e-9-relative residual
     assert abs(rows["system_water"] - rows["atm_water"]) < 1.0e3, rows
+
+
+@pytest.mark.slow
+def test_duo_column_lane_runs_and_closes_land(tmp_path, capsys):
+    """--grid fv3duo runs the duo cube's column lane (6 N^2 columns) and its
+    land row closes to roundoff over three coupling windows, as on MPAS."""
+    import json
+    out = tmp_path / "duo.json"
+    assert probe.main(["--grid", "fv3duo", "--resolution", "12", "--dt",
+                       "300", "--vertical-coord", "cam_l32", "--nlev", "32",
+                       "--days", "0.0625", "--json", str(out)]) == 0
+    cfg = json.loads(next(ln[len("CONFIG "):] for ln in capsys.readouterr()
+                          .out.splitlines() if ln.startswith("CONFIG ")))
+    assert (cfg["grid"], cfg["ncells"], cfg["dt"]) == ("fv3duo", 6 * 12 ** 2,
+                                                       300.0)
+    rows = json.loads(out.read_text())["rows"]
+    assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
 
 
 def test_land_emission_terms_split():
