@@ -132,8 +132,6 @@ __param_spec__ = {
             "maximum_viscosity": "numerics: cap",
             "maximum_tracer_diffusivity": "numerics: cap",
             "maximum_tke_diffusivity": "numerics: cap",
-            "surface_buoyancy_flux_shortwave": "switch (string): whether the penetrating shortwave enters the surface buoyancy flux; not a number to fit",
-            "n2_mode": "switch (string): how N^2 is formed (local buoyancy gradient or in-situ difference); not a number to fit",
         },
         "params": {
             "c_surface_shear": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) mixing length", "shape": None},
