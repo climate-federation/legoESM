@@ -429,3 +429,15 @@ def test_coupled_geography_land_without_a_land_model_is_refused(tmp_path):
                          output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match="no land model runs on it"):
         d.setup()
+
+
+@pytest.mark.parametrize("mode", ["zero", "from_ocean"])
+def test_coupled_geography_needs_the_atmosphere_land_fraction(tmp_path, mode):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))),
+                         CoupledConfig(f_land_mode=mode, land_mode="none",
+                                       ocean_mode="dynamic"),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="needs f_land_mode='analytical'"):
+        d.setup()

@@ -1046,17 +1046,20 @@ class CoupledESMDriver:
         cfg = self.coupled_cfg
         shape_2d = self._atm.grid.grid_shape_2d
         _sd = get_policy().storage
+        if self._atm.config.geography and cfg.f_land_mode != "analytical":
+            raise ValueError(
+                f"geography needs f_land_mode='analytical' (the coupler's land "
+                f"fraction is the geography's, read from the atmosphere); got "
+                f"{cfg.f_land_mode!r}")
         if self._atm.config.geography and cfg.land_mode != "none" and (
                 cfg.land_mode != "slab" or cfg.atm_owns_surface
                 or not cfg.use_pft
                 or getattr(cfg, "land_param_source", "analytical") != "clm"
-                or cfg.f_land_mode != "analytical"
                 or getattr(cfg, "transient_land_cover", False)):
             raise ValueError(
                 "geography with the coupler's own land tile: only the slab tile "
                 "reads the geography's land map (land_mode='slab', use_pft=True, "
-                "land_param_source='clm', f_land_mode='analytical', "
-                "atm_owns_surface=False); or use land_mode='none' (with "
+                "land_param_source='clm', atm_owns_surface=False); or use land_mode='none' (with "
                 "atm_owns_surface=True the atmosphere's land reads the geography).")
 
         coupler_cfg = self._coupler_config or CouplerConfig()
@@ -1431,8 +1434,9 @@ class CoupledESMDriver:
             provider = clm_surface_provider(
                 lat_deg, lon_deg, geography_clm_surface(geo) if geo else None,
                 variant=variant, vg_air_entry_m=head)
-            logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
-                        f"reference soil, {variant} tuning), {lat_deg.size} columns")
+            _src = (f"geography {geo} land map" if geo else
+                    "CLM reference surfdata (real PFT map + reference soil)")
+            logger.info(f"  Land params: {_src} ({variant} tuning), {lat_deg.size} columns")
             return provider
         if source != "analytical":
             raise ValueError(
