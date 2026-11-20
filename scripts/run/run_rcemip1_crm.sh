@@ -94,7 +94,7 @@ day_steps() { $PY -c "print(int(round(86400.0/$DT)))"; }
 common_flags() {
     echo "--nx $NX --ny $NY --nlev $NLEV --dx $DX --dt $DT \
           --T-sfc 300.0 --insolation rcemip \
-          --precision float32 --semi-implicit \
+          --precision mixed --semi-implicit \
           --radiation-interval $RAD_INTERVAL --hyperdiff $HYPERDIFF"
 }
 
@@ -114,7 +114,7 @@ spinup)
 
     # --restart latest makes this idempotent: re-running resumes rather than
     # restarting from the IC, so a 60-day run can be done in sittings.
-    LEGOESM_RCEMIP_PLANE_FP32=1 JAX_PLATFORMS=$PLATFORM $PY \
+    JAX_PLATFORMS=$PLATFORM $PY \
         scripts/run/run_rcemip_plane.py $(common_flags) \
         --radiation "$SPINUP_RAD" $SPINUP_RAD_EXTRA \
         --microphysics "$SPINUP_MICRO" \
@@ -169,7 +169,7 @@ print(int(re.search(r'ckpt_0*(\d+)\.npz','$CKPT').group(1)))
     echo "RCEMIP1 production: micro=${MICRO}, RRTMGP + clouds, ${DAYS} d from ${CKPT}"
     echo "  output: ${OUT}"
 
-    LEGOESM_RCEMIP_PLANE_FP32=1 JAX_PLATFORMS=$PLATFORM $PY \
+    JAX_PLATFORMS=$PLATFORM $PY \
         scripts/run/run_rcemip_plane.py $(common_flags) \
         --radiation rrtmgp --clouds --microphysics "$MICRO" \
         --steps "$STEPS" --print-every 2400 --snapshot-every "$SNAP_EVERY" \

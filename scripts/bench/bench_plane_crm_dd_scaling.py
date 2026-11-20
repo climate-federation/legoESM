@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import resource
 import os
 import socket
 import statistics
@@ -61,7 +62,7 @@ RCEMIP1_DECK_ARGV = (
 def bench_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--mode", choices=["strong", "weak"], default="strong")
-    p.add_argument("--precision", choices=["float32", "float64"],
+    p.add_argument("--precision", choices=["float32", "float64", "mixed"],
                    default="float64")
     p.add_argument("--warmup-steps", type=int, default=3)
     p.add_argument("--time-steps", type=int, default=10,
@@ -214,8 +215,8 @@ def main(argv=None):
         make_plane_pencil_grid, make_plane_pencil_layout,
     )
 
-    jax.config.update("jax_enable_x64", bargs.precision == "float64")
-    dtype = jnp.float32 if bargs.precision == "float32" else jnp.float64
+    jax.config.update("jax_enable_x64", bargs.precision != "float32")
+    dtype = jnp.float64 if bargs.precision == "float64" else jnp.float32
     rargs = rcp.parse_args([*RCEMIP1_DECK_ARGV, *runner_argv,
                             "--precision", bargs.precision])
     if rargs.hyperdiff is None:  # same resolution as the driver's main()
@@ -310,7 +311,8 @@ def main(argv=None):
         non_rad_fn, rad_fn = rcp.split_rad_from_other_physics(
             grid, hc, tm, radiation_config=rad_cfg,
             microphysics_config=mp_cfg, dt=rargs.dt, T_sfc=rargs.T_sfc,
-            p_sfc=rcp.P_SFC_RCEMIP, surface_flux=not rargs.no_surface_flux)
+            p_sfc=rcp.P_SFC_RCEMIP, surface_flux=not rargs.no_surface_flux,
+            mixed_precision=(bargs.precision == "mixed"))
         physics = {}
         for name, fn in (("non_rad", non_rad_fn), ("rad", rad_fn)):
             if fn is None:
@@ -341,6 +343,9 @@ def main(argv=None):
             physics["amortised_ms_per_step"] = calls[0] * (
                 physics["non_rad_ms"] + physics["rad_ms"])
 
+    # Peak resident memory per rank (Linux ru_maxrss is KiB), max over ranks.
+    peak_rss_mib = comm.allreduce(
+        resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, op=MPI.MAX)
     if rank == 0:
         per_step = [w / bargs.time_steps for w in window_s]
         rec = {
@@ -361,7 +366,7 @@ def main(argv=None):
             "ms_per_step_min": 1e3 * min(per_step),
             "ms_per_step_median": 1e3 * statistics.median(per_step),
             "finite": finite_all, "max_abs_dtheta_prime": max_dtheta,
-            "physics": physics,
+            "physics": physics, "peak_rss_mib_max_rank": peak_rss_mib,
             "dycore_config": {k: (v if isinstance(v, (int, float, str, bool,
                                                       type(None))) else str(v))
                               for k, v in cfg._asdict().items()},

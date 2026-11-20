@@ -728,11 +728,15 @@ def saturation_adjustment_gsam(T, q_v, q_c, p_full, *, excess_sharpness,
     ok = sat & (niter <= _GSAM_SATADJ_MAXITER - 1)
     if hard_excess and math.isinf(qc_floor_sharpness):
         q_c_new = jnp.where(ok, p_weight * jnp.maximum(0.0, tabs1 - tabs) / fac, 0.0)
-        T_adj = tabs1 if p_min_width_pa == 0.0 else tabs + p_weight * (tabs1 - tabs)
-        return jnp.where(ok, T_adj, tabs), q_t - q_c_new, q_c_new
-    dT = jnp.where(ok, p_weight, 0.0) * smooth_relu(tabs1 - tabs, qc_floor_sharpness)
-    q_c_new = dT / fac
-    return tabs + dT, q_t - q_c_new, q_c_new
+    else:
+        dT = jnp.where(ok, p_weight, 0.0) * smooth_relu(tabs1 - tabs, qc_floor_sharpness)
+        q_c_new = dT / fac
+    # Water and heat move as ONE amount (condensation > 0), applied with
+    # opposite signs to q_v and q_c and as L_v/c_pd * amount to T. Forming
+    # q_v = (q_v + q_c) - q_c_new instead rounds at the vapour scale and, in
+    # fp32, creates water (measured +2.0e-8 summed per call on RCEMIP1 64^3).
+    condensation = q_c_new - q_c
+    return T + fac * condensation, q_v - condensation, q_c + condensation
 
 
 def effective_Nc(N_c, Nc_0, *, predict_Nc=True, nc_specified_field=False):
