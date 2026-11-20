@@ -63,6 +63,8 @@ import jax
 import jax.numpy as jnp
 from legoesm.ocean.eos import (
     compute_buoyancy_frequency,
+    compute_buoyancy_frequency_adiabatic,
+    compute_hydrostatic_pressure,
 )
 from legoesm.ocean.eos import (
     rho_0 as rho_0_ref,
@@ -257,6 +259,34 @@ def _kpp_shape_function(sigma):
     return sigma_clip * (1.0 - sigma_clip) ** 2
 
 
+def _kpp_interface_n2(rho, T, S, eta, z_coord, jacobian, cfg, g, eos_fn=None, p_cell=None, h_k=None):
+    """N^2 at interior interfaces [s^-2], signed, for V_t^2, the interior Ri and the convective trigger (core-0030).
+
+    ``cfg.n2_mode``:
+
+    - ``"adiabatic"``: the local buoyancy gradient, g (alpha dT/dz - beta dS/dz): both cells of an interface at
+      one pressure (the upper cell's, ``eos.compute_buoyancy_frequency_adiabatic``, the function CATKE uses).
+      LMD94 Eqs. 23 and 27 and every reference code difference two parcels at one pressure (MOM6 and MITgcm at
+      the interface or lower cell, POP at the lower cell), so none carries g^2 / c_s^2.
+    - ``"insitu_signed"``: the earlier difference of in-situ densities at each cell's own pressure, biased too
+      stable by g^2 / c_s^2 (about +4e-5 s^-2 near the surface), unchanged bit for bit (same call as before).
+
+    ``p_cell`` (Pa, cell centres) is used when given; otherwise it is the hydrostatic pressure from ``rho`` and
+    ``eta`` (``h_k`` the partial-cell thicknesses, if any).  Raises ``ValueError`` on an unknown mode.
+    """
+    mode = getattr(cfg, "n2_mode", "adiabatic")
+    if mode == "insitu_signed":
+        return compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
+    if mode != "adiabatic":
+        raise ValueError(f"KPPConfig.n2_mode must be 'adiabatic' or 'insitu_signed', got {mode!r}")
+    if p_cell is None:
+        p_cell = compute_hydrostatic_pressure(rho, eta, z_coord.dz_ref, jacobian, rho_0_ref, g, h_actual=h_k)
+    return compute_buoyancy_frequency_adiabatic(
+        T, eos_salinity(S, eos_fn), p_cell, z_coord.dz_ref, jacobian,
+        eos_fn=eos_fn, rho_ref=rho_0_ref, g=g,
+    )
+
+
 def _kpp_unresolved_shear_variance(N, d, w_s, cfg, eps):
     """LMD94 Eq. 23 unresolved-shear velocity variance V_t^2 [m^2/s^2].
 
@@ -289,11 +319,15 @@ def _boundary_layer_depth(
     h_bl_prev: jnp.ndarray | None = None,
     eos_fn=None,
     ice_frac: jnp.ndarray | None = None,
+    N2: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Estimate boundary layer depth h via bulk Richardson number.
 
     Uses linear interpolation to find the depth where Ri_b crosses
     Ri_crit, rather than snapping to the nearest model level.
+
+    ``N2`` is the interface N^2 from ``_kpp_interface_n2``; if None (direct
+    callers) it is computed here with ``cfg.n2_mode`` and eta = 0.
 
     Returns shape (...) boundary layer depth [m, positive downward].
     """
@@ -314,9 +348,8 @@ def _boundary_layer_depth(
     # potential density) before differencing, removing the spurious pressure
     # term (CVMix / MOM6 KPP convention).  ``eos_fn`` defaults to
     # ``wright_eos`` so the reference density matches how the in-situ ``rho``
-    # was built when the caller does not thread an explicit EOS.  (N^2 / V_t^2
-    # below still use the in-situ ``rho`` gradient — a smaller secondary
-    # effect, left unchanged so this fix stays surgical.)
+    # was built when the caller does not thread an explicit EOS.  (The N^2 of
+    # V_t^2 below comes from ``_kpp_interface_n2``, core-0030.)
     if eos_fn is None:
         from legoesm.ocean.eos import wright_eos
         eos_fn = wright_eos
@@ -344,7 +377,8 @@ def _boundary_layer_depth(
     # is evaluated with the previous-step boundary-layer depth (h_bl_prev) so
     # V_t^2 does not depend on the very h it helps to compute.  N is floored
     # at sqrt(1e-30) for an AD-safe gradient (no max()-induced 0*inf).
-    N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
+    if N2 is None:
+        N2 = _kpp_interface_n2(rho, T, S, jnp.zeros_like(rho[..., 0]), z_coord, jacobian, cfg, g, eos_fn=eos_fn)
     N2_full = jnp.concatenate([N2[..., :1], N2], axis=-1)
     # N = sqrt(max(N^2, 0)): only STABLE stratification (N^2 > 0) contributes to
     # the unresolved-shear variance (LMD94 / CVMix); convective layers (N^2 < 0)
@@ -435,6 +469,7 @@ def kpp_vertical_mixing(
     u_stokes: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
     h_k: jnp.ndarray | None = None,
+    p_cell: jnp.ndarray | None = None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
 
@@ -443,6 +478,10 @@ def kpp_vertical_mixing(
     and the flux is kept only at interfaces between two wet cells, so the
     column content change h_k * dT/dt sums to zero.  Without it the divisor is
     dz_ref * jacobian, which is thicker than a partial bottom cell.
+
+    ``p_cell`` (optional, (..., nlev), Pa): cell-centre pressure for
+    ``KPPConfig.n2_mode = "adiabatic"``.  If None it is integrated here from
+    ``rho`` and ``eta`` (with ``h_k`` when given).
 
     Parameters
     ----------
@@ -500,10 +539,13 @@ def kpp_vertical_mixing(
         # caller to provide B_f explicitly when convective KPP matters.
         B_f = jnp.zeros_like(rho[..., 0])
 
+    # --- N^2 at interfaces (V_t^2, interior Ri and convective trigger, core-0030) ---
+    N2 = _kpp_interface_n2(rho, T, S, eta, z_coord, jacobian, cfg, g, eos_fn=eos_fn, p_cell=p_cell, h_k=h_k)
+
     # --- Boundary layer depth ---
     h_bl = _boundary_layer_depth(
         rho, T, S, u, v, z_coord, jacobian, u_star, B_f, cfg, g,
-        h_bl_prev=h_bl_prev, eos_fn=eos_fn, ice_frac=ice_frac,
+        h_bl_prev=h_bl_prev, eos_fn=eos_fn, ice_frac=ice_frac, N2=N2,
     )
 
     # --- Depth coordinate ---
@@ -563,8 +605,7 @@ def kpp_vertical_mixing(
     K_bl_m_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_m * G, cfg.K_max)
     K_bl_s_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_s * G, cfg.K_max)
 
-    # --- Interior mixing: Richardson-number dependent ---
-    N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
+    # --- Interior mixing: Richardson-number dependent (N2 from above) ---
     # Interface spacing — also reused by the surface T/S gradient terms below.
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
     # Interior Ri = N^2 / S^2 (#518: shared helper; no clip here — KPP clamps

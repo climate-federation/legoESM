@@ -1031,6 +1031,11 @@ class KPPConfig(NamedTuple):
     #   Siberian salty — that TKEConfig.eice fixed on the TKE grid but never
     #   reached the KPP grids).
     eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
+    # N^2 for V_t^2, the interior Richardson number and the convective trigger (core-0030).
+    # "adiabatic": the local buoyancy gradient (both cells of an interface at one pressure), as LMD94,
+    # CVMix/MOM6, MITgcm and POP.  "insitu_signed": the earlier difference of in-situ densities at each
+    # cell's own pressure (biased by g^2/c_s^2, about +4e-5 s^-2), kept bit for bit.  User-approved default 2026-11-20 (published form).
+    n2_mode: str = "adiabatic"
 
 
 class CATKEConfig(NamedTuple):

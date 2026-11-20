@@ -1376,12 +1376,23 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                        if (_kpp_eice != 0 and surface_forcing is not None)
                        else None)
 
+        # core-0030: pressure for KPP's local N^2 (KPPConfig.n2_mode = "adiabatic"), as the CATKE branch above.
+        _kpp_p_cell = None
+        if getattr(vmix_cfg.kpp, "n2_mode", "adiabatic") == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            _kpp_p_cell = compute_hydrostatic_pressure(
+                rho, state.eta.data, z_coord.dz_ref, J,
+                constants_config.rho_0, constants_config.g,
+                h_actual=maybe_partial_h_actual(state, z_coord))
         out = kpp_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, vmix_cfg.kpp,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=False, eos_fn=eos_fn, ice_frac=_kpp_ice_fr,
+            p_cell=_kpp_p_cell,
         )
         return out.K_v, out.A_v, None
 
