@@ -155,14 +155,11 @@ def test_duo_column_lane_runs_and_closes_land(tmp_path, capsys):
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason=(
-    "measured 2026-11-20: atm row 2.0e11 kg vs E 2.2e12 here (dt 150); the "
-    "duo dynamics change water at exact air mass -- tracer_2d builds dp2 "
-    "from the raw per-face mass-flux capacitors while delp uses the "
-    "seam-averaged fluxes (as the Fortran oracle does); a mutant averaging "
-    "the capacitors closes the row to <25 kg.  Fix pending the user"))
 def test_duo_column_lane_closes_atmosphere_water(tmp_path, capsys):
-    """The atmosphere row on the duo's own delp closes like MPAS's (1e-9)."""
+    """The atmosphere row on the duo's own delp closes like MPAS's (1e-9).
+    Was a strict xfail (2.0e11 kg vs E 2.2e12) until the duo tracer's dp2
+    was built from the seam-blended capacitors (fv3_tracer2d KNOWN
+    DIFFERENCE)."""
     _, res = _duo_run(tmp_path, capsys)
     e_atm = abs(res["fluxes"]["E_atm"])
     assert abs(res["rows"]["atm_water"]) < 1.0e-6 * e_atm, (

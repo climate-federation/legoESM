@@ -1210,6 +1210,10 @@ def _make_jax_step(ctx, jit=False, batched=False):
         jq = [_jnp.asarray(_np.stack([_np.asarray(q_in[t][iq])
                                       for t in range(6)]))
               for iq in range(_nq)]
+        # Fortran's tracer dp2 arithmetic: the lane's default seam-blended
+        # dp2 is a recorded KNOWN DIFFERENCE (fv3_tracer2d), not a port
+        # defect this score should report.
+        kw.setdefault("dp2_seam_blend", False)
         if jit:
             # THE PATH THE MODEL ACTUALLY RUNS. `FV3DuoDynamicsModel` steps
             # through the COMPILED builder, and compilation is not neutral
