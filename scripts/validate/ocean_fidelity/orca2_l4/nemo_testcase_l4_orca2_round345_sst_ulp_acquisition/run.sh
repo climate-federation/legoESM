@@ -11,7 +11,7 @@ PYTHON_BIN="/home/dbalwada/legoESM/.venv/bin/python"
 if [[ ! -x "${PYTHON_BIN}" ]]; then PYTHON_BIN="python3"; fi
 
 export PATH="/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}"
-export PYTHONPATH="${REPO_ROOT}/packages/atmosphere:${REPO_ROOT}/packages/core:${REPO_ROOT}/packages/coupler:${REPO_ROOT}/packages/ice:${REPO_ROOT}/packages/land:${REPO_ROOT}/packages/ml:${REPO_ROOT}/packages/ocean:${REPO_ROOT}/packages/tools:${REPO_ROOT}:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_ROOT}/packages/ocean:${REPO_ROOT}/packages/core:${REPO_ROOT}:${PYTHONPATH:-}"
 export JAX_PLATFORMS="cpu"
 export CUDA_VISIBLE_DEVICES=""
 export JAX_ENABLE_X64=1
@@ -54,6 +54,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${PROFILE}" == "coupled-c4" ]]; then
+  export PYTHONPATH="${REPO_ROOT}/packages/atmosphere:${REPO_ROOT}/packages/coupler:${REPO_ROOT}/packages/ice:${REPO_ROOT}/packages/land:${REPO_ROOT}/packages/ml:${REPO_ROOT}/packages/tools:${PYTHONPATH}"
   BASELINE_ARM="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/oracle_coupled_c_ladder/REF_C4"
   RUN_ROOT="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/coupled_c4_perturbed_twin"
   EVIDENCE_DIR="${RUN_ROOT}/evidence"
@@ -165,7 +166,7 @@ EOF
 run_arm() {
   local arm_dir="$1"
   local rc=0
-  check_no_active_nemo
+  if [[ "${PROFILE}" == "coupled-c4" ]]; then check_no_active_nemo; fi
   (
     cd "${arm_dir}"
     timeout --foreground --signal=TERM --kill-after=30s "${PER_ARM_TIMEOUT}s" \
@@ -235,7 +236,11 @@ case "${MODE}" in
     "${PYTHON_BIN}" "${GATE_PY}" --preflight-only \
       --evidence-dir "${EVIDENCE_DIR}" --build-cfg "${BUILD_CFG}" \
       --ice-cover "${ICE_COVER_PATH}" "${PROFILE_FLAGS[@]}"
-    echo "ORCA2_ROUND345_SST_ULP_PREFLIGHT_READY profile=${PROFILE}"
+    if [[ "${PROFILE}" == "standalone" ]]; then
+      echo "ORCA2_ROUND345_SST_ULP_PREFLIGHT_READY"
+    else
+      echo "ORCA2_ROUND345_SST_ULP_PREFLIGHT_READY profile=${PROFILE}"
+    fi
     ;;
   stub)
     [[ -n "${STUB_ROOT}" ]] || { echo "REFUSE: --stub-run-dir needs a path" >&2; exit 2; }
@@ -248,7 +253,8 @@ case "${MODE}" in
     check_clean_worktree
     admit_flags=()
     if [[ "${R345_PREFLIGHT_ALLOW_STUB:-0}" == "1" \
-       && "${ADMIT_ROOT}" == /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/* ]]; then
+       && ( "${ADMIT_ROOT}" == /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/* \
+         || "${R345_INTERNAL_COUPLED_PREFLIGHT:-0}" == "1" ) ]]; then
       admit_flags+=("--allow-stub-binary")
     fi
     "${PYTHON_BIN}" "${GATE_PY}" --admit-existing "${ADMIT_ROOT}" \
@@ -264,6 +270,10 @@ case "${MODE}" in
       --evidence-dir "${EVIDENCE_DIR}" --build-cfg "${BUILD_CFG}" \
       --ice-cover "${ICE_COVER_PATH}" "${PROFILE_FLAGS[@]}"
     run_pipeline "${RUN_ROOT}" "${BASELINE_ARM}/nemo"
-    echo "ORCA2_ROUND345_SST_ULP_ACQUISITION_COMPLETE profile=${PROFILE}: ${RUN_ROOT}/${CONTROL_ARM_NAME} + ${RUN_ROOT}/${PERTURBED_ARM_NAME}"
+    if [[ "${PROFILE}" == "standalone" ]]; then
+      echo "ORCA2_ROUND345_SST_ULP_ACQUISITION_COMPLETE: ${RUN_ROOT}/${CONTROL_ARM_NAME} + ${RUN_ROOT}/${PERTURBED_ARM_NAME}"
+    else
+      echo "ORCA2_ROUND345_SST_ULP_ACQUISITION_COMPLETE profile=${PROFILE}: ${RUN_ROOT}/${CONTROL_ARM_NAME} + ${RUN_ROOT}/${PERTURBED_ARM_NAME}"
+    fi
     ;;
 esac

@@ -30,9 +30,23 @@ coupled C-ladder `REF_C4` deck.  It stages REF_C4's exact 59 deck/input files,
 then changes only the ocean and SI3 restart names and run start to continue the
 ocean+ice restart quartet at `kt = 8`.  The control must reproduce all common
 ocean and SI3 continuation-variable bytes at every daily output through
-`kt = 2920`; only the two known delayed ocean buffers may be absent.  The
+`kt = 2920`.  For both ocean and SI3, only `DELAY_im8_fwb2` and
+`DELAY_re8_fwb2` may be absent.  NEMO writes the SI3 delayed state at
+`src/ICE/icerst.F90:140`; continuation-read buffers are skipped by
+`src/OCE/IOM/iom.F90:1953-1981`, so those two fields are not re-emitted.  The
 perturbed arm changes the same finite wet surface `tn` values by one float64
 ULP and leaves both SI3 restart shards byte-identical.
+
+Coupled admission has the same quarantine and promotion contract as the
+standalone profile.  After both NEMO arms finish, admit the canonical pair with:
+
+```bash
+run.sh --coupled-c4 --admit-existing /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/coupled_c4_perturbed_twin
+```
+
+If the original admission already moved the pair into `refused/`, pass either
+retained coupled arm path instead; the gate validates both retained arms before
+promoting them together and records the attempt in `admit_existing.log`.
 
 The coupled admission writes `round345_coupled_c4_sst_ulp_metrics.json`.  Its
 12 complete months contain all Decision-188 ocean metrics plus

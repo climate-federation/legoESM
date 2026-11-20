@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -63,7 +64,7 @@ def test_decision188_runs_on_orca2x_30_day_pilot_schema() -> None:
     result = decision188.evaluate_decision188(
         _pilot_report(ke_rms=0.002),
         _pilot_report(ke_rms=0.0007),
-        decision188.minimal_standalone_envelope_admission(),
+        decision188.minimal_envelope_admission(),
     )
     assert result["verdict"] == "PASS"
     assert result["months_evaluated"] == 1
@@ -80,7 +81,7 @@ def test_decision188_refuses_different_month_windows() -> None:
     with pytest.raises(decision188.GateError, match="saved steps differ"):
         decision188.evaluate_decision188(
             candidate, envelope,
-            decision188.minimal_standalone_envelope_admission())
+            decision188.minimal_envelope_admission())
 
 
 def test_decision188_refuses_zero_envelope_in_any_month() -> None:
@@ -90,11 +91,11 @@ def test_decision188_refuses_zero_envelope_in_any_month() -> None:
     with pytest.raises(decision188.GateError, match="must be > 0"):
         decision188.evaluate_decision188(
             candidate, envelope,
-            decision188.minimal_standalone_envelope_admission())
+            decision188.minimal_envelope_admission())
 
 
 def test_decision188_refuses_missing_restart_control() -> None:
-    admission = decision188.minimal_standalone_envelope_admission()
+    admission = decision188.minimal_envelope_admission()
     admission.pop("unperturbed_restart_control")
     with pytest.raises(decision188.GateError, match="restart-continuation control"):
         decision188.evaluate_decision188(
@@ -152,25 +153,27 @@ def _write_domain(path: Path) -> np.ndarray:
     return top > 0
 
 
-def _write_ice_restart(path: Path, rank: int) -> None:
+def _write_ice_restart(
+    path: Path, rank: int, *, include_delay_buffers: bool = False,
+) -> None:
     values = np.arange(6, dtype=np.float64).reshape(1, 2, 3) + rank + 1
     with netCDF4.Dataset(path, "w") as dataset:
         dataset.createDimension("time", 1)
         dataset.createDimension("y", 2)
         dataset.createDimension("x", 3)
+        kt_ice = dataset.createVariable("kt_ice", "f8")
+        kt_ice[...] = 16.0
         for name, offset in (("a_i", 0.0), ("v_i", 10.0), ("t_su", 20.0)):
             variable = dataset.createVariable(name, "f8", ("time", "y", "x"))
             variable[:] = values + offset
+        if include_delay_buffers:
+            dataset.createDimension("delay", 2)
+            dataset.createVariable("DELAY_re8_fwb2", "f8", ("delay",))[:] = [1.0, 2.0]
+            dataset.createVariable("DELAY_im8_fwb2", "f8", ("delay",))[:] = [3.0, 4.0]
 
 
 def _coupled_envelope_report(*, ke: float = 0.001) -> dict:
-    report = decision188.minimal_year_report(sst=0.0, ke=ke)
-    for month in report["months"]:
-        month["metrics"].update({
-            key: {"bias": 0.0, "rms": 0.0}
-            for key in decision188.COUPLED_ICE_KEYS
-        })
-    return report
+    return decision188.minimal_coupled_c4_year_report(sst=0.0, ke=ke)
 
 
 def test_decision188_requires_and_accepts_coupled_admission_for_si3_envelope() -> None:
@@ -180,13 +183,50 @@ def test_decision188_requires_and_accepts_coupled_admission_for_si3_envelope() -
         decision188.evaluate_decision188(
             candidate,
             envelope,
-            decision188.minimal_standalone_envelope_admission(),
+            decision188.minimal_envelope_admission(),
         )
+    admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=envelope
+    )
+    digest = decision188.envelope_metrics_sha256(envelope)
     result = decision188.evaluate_decision188(
-        candidate, envelope, decision188.minimal_coupled_c4_envelope_admission()
+        candidate, envelope, admission, envelope_metrics_digest=digest
     )
     assert result["verdict"] == "PASS"
     assert result["months_evaluated"] == 12
+
+
+def test_decision188_coupled_receipt_binds_baselines_inventory_and_metrics_hash() -> None:
+    candidate = decision188.minimal_year_report(sst=0.0, ke=0.0)
+    envelope = _coupled_envelope_report()
+    digest = decision188.envelope_metrics_sha256(envelope)
+    original = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=envelope
+    )
+    plants = []
+    planted = copy.deepcopy(original)
+    planted["ref_c4_input_identity"]["baseline_arm"] = "/synthetic/other"
+    plants.append(planted)
+    planted = copy.deepcopy(original)
+    planted["restart_continuation_control"]["baseline_arm"] = "/synthetic/other"
+    plants.append(planted)
+    planted = copy.deepcopy(original)
+    planted["restart_continuation_control"]["candidate_only_variables"] = ["plant"]
+    plants.append(planted)
+    planted = copy.deepcopy(original)
+    planted["continuation_restart_outputs"]["candidate_only_variables"] = ["plant"]
+    plants.append(planted)
+    planted = copy.deepcopy(original)
+    planted["envelope_metrics"]["sha256"] = "0" * 64
+    plants.append(planted)
+    for admission in plants:
+        with pytest.raises(decision188.GateError):
+            decision188.evaluate_decision188(
+                candidate,
+                envelope,
+                admission,
+                envelope_metrics_digest=digest,
+            )
 
 
 def test_coupled_control_continuation_refuses_nonidentical_ice_data(
@@ -203,8 +243,12 @@ def test_coupled_control_continuation_refuses_nonidentical_ice_data(
         )
         _write_restart(control / ocean_name, rank, kt_value=16)
         ice_name = f"ORCA2_00000016_restart_ice_{rank:04d}.nc"
-        _write_ice_restart(baseline / ice_name, rank)
-        shutil.copy2(baseline / ice_name, control / ice_name)
+        _write_ice_restart(baseline / ice_name, rank, include_delay_buffers=True)
+        ulp_gate._copy_netcdf_excluding_variables(
+            baseline / ice_name,
+            control / ice_name,
+            ulp_gate.ICE_CONTINUATION_BASELINE_ONLY_VARIABLES,
+        )
 
     admitted = ulp_gate.verify_coupled_c4_continuation(
         control,
@@ -258,6 +302,27 @@ def test_coupled_restart_namelist_and_single_tool_profile(tmp_path: Path) -> Non
     assert "--coupled-c4" in script
     assert "coupled_c4_year1_restart_control_np2" in script
     assert "coupled_c4_year1_sst_plus_1ulp_np2" in script
+
+
+def test_live_coupled_output_namelist_uses_fortran_trim() -> None:
+    canonical = (
+        ulp_gate.COUPLED_C4_RUN_ROOT
+        / ulp_gate.COUPLED_C4_CONTROL_ARM_NAME
+        / "output.namelist.ice"
+    )
+    retained = sorted(
+        (ulp_gate.COUPLED_C4_RUN_ROOT / "refused").glob(
+            f"*{ulp_gate.COUPLED_C4_CONTROL_ARM_NAME}*/output.namelist.ice"
+        )
+    )
+    output = canonical if canonical.is_file() else retained[-1]
+    assert output.is_file()
+    text = output.read_text(encoding="utf-8")
+    raw = next(line for line in text.splitlines() if "CN_ICERST_IN=" in line)
+    assert len(raw.split('"', 2)[1]) == 256
+    assert ulp_gate._fortran_trimmed_namelist_character(
+        text, "cn_icerst_in"
+    ) == "ORCA2_00000008_restart_ice"
 
 
 def test_coupled_envelope_report_exposes_d188_and_ice_fields(

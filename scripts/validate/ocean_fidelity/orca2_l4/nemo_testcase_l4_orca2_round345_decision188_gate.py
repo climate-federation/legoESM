@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import sys
@@ -32,6 +33,11 @@ class GateError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise GateError(message)
+
+
+def envelope_metrics_sha256(report: dict[str, Any]) -> str:
+    rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
 TEMPERATURE_KEYS = ("SST", "T_0-100m", "T_100-1000m", "T_>1000m")
@@ -219,10 +225,13 @@ def _score_month(
 def _verify_envelope_admission(
     envelope_report: dict[str, Any],
     envelope_admission: dict[str, Any],
+    envelope_sha256: str | None,
 ) -> None:
     """Bind the metric envelope to the admitted nonzero fp64 restart perturbation."""
     if envelope_admission.get("profile") == COUPLED_C4_PROFILE:
-        _verify_coupled_c4_envelope_admission(envelope_report, envelope_admission)
+        _verify_coupled_c4_envelope_admission(
+            envelope_report, envelope_admission, envelope_sha256
+        )
         return
     require(envelope_admission.get("status") == "PASS_R345_S4_YEAR_SST_PLUS_ONE_ULP_ARM"
             and envelope_admission.get("admitted") is True,
@@ -291,6 +300,7 @@ def _verify_envelope_admission(
 def _verify_coupled_c4_envelope_admission(
     envelope_report: dict[str, Any],
     admission: dict[str, Any],
+    envelope_sha256: str | None,
 ) -> None:
     require(
         admission.get("status")
@@ -320,6 +330,7 @@ def _verify_coupled_c4_envelope_admission(
     require(admission.get("binary_equal_ref_c4") is True,
             "coupled envelope binary differs from REF_C4")
     identity = admission.get("ref_c4_input_identity", {})
+    baseline_arm = Path(str(admission.get("baseline_arm", ""))).resolve()
     require(
         identity.get("status") == "PASS_R345_COUPLED_C4_DECK_INPUT_IDENTITY"
         and identity.get("all_other_deck_and_input_files_byte_identical") is True
@@ -327,10 +338,14 @@ def _verify_coupled_c4_envelope_admission(
         == ["namelist_cfg", "namelist_ice_cfg"],
         "coupled envelope deck/input identity is not bound to REF_C4",
     )
+    require(Path(str(identity.get("baseline_arm", ""))).resolve() == baseline_arm,
+            "coupled envelope identity names a different REF_C4 baseline")
     control = admission.get("unperturbed_restart_control", {})
     continuation = admission.get("restart_continuation_control", {})
+    perturbed_continuation = admission.get("continuation_restart_outputs", {})
     control_input = control.get("unperturbed_restart_control_input", {})
     control_ice = control_input.get("ice_restart_pair_unchanged", {})
+    control_identity = control.get("ref_c4_input_identity", {})
     require(
         control.get("status") == "PASS_R345_COUPLED_C4_UNPERTURBED_CONTROL_ARM"
         and control.get("admitted") is True
@@ -349,6 +364,26 @@ def _verify_coupled_c4_envelope_admission(
         and continuation.get("ocean_restart_files_checked") == 728
         and continuation.get("ice_restart_files_checked") == 728,
         "coupled envelope lacks the exact 364-day ocean+SI3 control continuation",
+    )
+    require(
+        Path(str(control.get("baseline_arm", ""))).resolve() == baseline_arm
+        and Path(str(control_identity.get("baseline_arm", ""))).resolve() == baseline_arm
+        and Path(str(continuation.get("baseline_arm", ""))).resolve() == baseline_arm,
+        "coupled control continuation or identity names a different REF_C4 baseline",
+    )
+    require(
+        continuation.get("candidate_only_variables") == []
+        and perturbed_continuation.get("candidate_only_variables") == []
+        and perturbed_continuation.get("baseline_arm") == str(baseline_arm)
+        and perturbed_continuation.get("status")
+        == "PASS_R345_COUPLED_C4_PERTURBED_RESTART_OUTPUTS",
+        "coupled continuation admits candidate-only variables or a different baseline",
+    )
+    metrics_receipt = admission.get("envelope_metrics", {})
+    require(
+        envelope_sha256 is not None
+        and metrics_receipt.get("sha256") == envelope_sha256,
+        "coupled envelope metrics SHA-256 differs from its admission receipt",
     )
     require(envelope_report.get("envelope_profile") == COUPLED_C4_PROFILE,
             "coupled envelope report lacks its REF_C4 profile stamp")
@@ -372,6 +407,8 @@ def evaluate_decision188(
     candidate_report: dict[str, Any],
     envelope_report: dict[str, Any],
     envelope_admission: dict[str, Any],
+    *,
+    envelope_metrics_digest: str | None = None,
 ) -> dict[str, Any]:
     """Apply the Decision-188 bars to matching candidate/envelope months."""
     _verify_bars_match_decision160_reporter()
@@ -384,7 +421,9 @@ def evaluate_decision188(
         or envelope_admission.get("profile") == COUPLED_C4_PROFILE,
         "an ocean+SI3 envelope requires an admitted coupled REF_C4 perturbed twin",
     )
-    _verify_envelope_admission(envelope_report, envelope_admission)
+    _verify_envelope_admission(
+        envelope_report, envelope_admission, envelope_metrics_digest
+    )
     if candidate_report.get("format") == "orca2-r342-s4-year-metrics-v2":
         candidate_nemo_root = candidate_report.get("nemo_root")
         envelope_nemo_root = envelope_report.get("nemo_root")
@@ -439,7 +478,6 @@ def minimal_year_report(
     })
     return {
         "format": "orca2-r342-s4-year-metrics-v2",
-        "envelope_profile": COUPLED_C4_PROFILE,
         "bias_convention": "candidate - NEMO",
         "nemo_root": nemo_root,
         "candidate_root": candidate_root,
@@ -458,7 +496,7 @@ def minimal_year_report(
     }
 
 
-def minimal_standalone_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
+def minimal_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
     return {
         "status": "PASS_R345_S4_YEAR_SST_PLUS_ONE_ULP_ARM",
         "admitted": True,
@@ -507,9 +545,32 @@ def minimal_standalone_envelope_admission(*, changed_values: int = 4) -> dict[st
     }
 
 
-def minimal_coupled_c4_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
+def minimal_coupled_c4_year_report(
+    *, sst: float, ke: float,
+    nemo_root: str = "/synthetic/nemo-baseline",
+    candidate_root: str = "/synthetic/perturbed-nemo",
+) -> dict[str, Any]:
+    report = minimal_year_report(
+        sst=sst, ke=ke, nemo_root=nemo_root, candidate_root=candidate_root
+    )
+    report["envelope_profile"] = COUPLED_C4_PROFILE
+    for month in report["months"]:
+        month["metrics"].update({
+            key: {"bias": 0.0, "rms": 0.0}
+            for key in COUPLED_ICE_KEYS
+        })
+    return report
+
+
+def minimal_coupled_c4_envelope_admission(
+    *,
+    changed_values: int = 4,
+    envelope_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     baseline = "/synthetic/nemo-baseline"
     perturbed = "/synthetic/perturbed-nemo"
+    if envelope_report is None:
+        envelope_report = minimal_coupled_c4_year_report(sst=0.0, ke=0.001)
     ice_input = {
         "status": "PASS_R345_COUPLED_DAY1_ICE_RESTART_UNCHANGED",
         "restart_pair_byte_identical": True,
@@ -530,11 +591,23 @@ def minimal_coupled_c4_envelope_admission(*, changed_values: int = 4) -> dict[st
         "ice_restart_files_checked": 728,
         "unequal_common_variable_data_count": 0,
         "all_common_variable_data_bitwise_identical": True,
+        "candidate_only_variables": [],
+    }
+    perturbed_continuation = {
+        "status": "PASS_R345_COUPLED_C4_PERTURBED_RESTART_OUTPUTS",
+        "baseline_arm": baseline,
+        "restart_kt_first": 16,
+        "restart_kt_last": 2920,
+        "candidate_only_variables": [],
     }
     control = {
         "status": "PASS_R345_COUPLED_C4_UNPERTURBED_CONTROL_ARM",
         "admitted": True,
         "binary_equal_ref_c4": True,
+        "baseline_arm": baseline,
+        "ref_c4_input_identity": {
+            "baseline_arm": baseline,
+        },
         "unperturbed_restart_control_input": control_input,
         "restart_continuation_control": continuation,
     }
@@ -547,6 +620,7 @@ def minimal_coupled_c4_envelope_admission(*, changed_values: int = 4) -> dict[st
         "binary_equal_ref_c4": True,
         "ref_c4_input_identity": {
             "status": "PASS_R345_COUPLED_C4_DECK_INPUT_IDENTITY",
+            "baseline_arm": baseline,
             "all_other_deck_and_input_files_byte_identical": True,
             "restart_namelists_rehashed": ["namelist_cfg", "namelist_ice_cfg"],
         },
@@ -564,17 +638,16 @@ def minimal_coupled_c4_envelope_admission(*, changed_values: int = 4) -> dict[st
         },
         "unperturbed_restart_control": control,
         "restart_continuation_control": continuation,
+        "continuation_restart_outputs": perturbed_continuation,
+        "envelope_metrics": {
+            "sha256": envelope_metrics_sha256(envelope_report),
+        },
     }
-
-
-def minimal_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
-    """C4 scorer fixture: an admitted coupled envelope is the safe default."""
-    return minimal_coupled_c4_envelope_admission(changed_values=changed_values)
 
 
 def run_plants() -> dict[str, Any]:
     """Run the three Decision-188 non-vacuity plants."""
-    admission = minimal_standalone_envelope_admission()
+    admission = minimal_envelope_admission()
     envelope_floor = minimal_year_report(sst=0.0, ke=0.001)
     at_bar = evaluate_decision188(
         minimal_year_report(sst=0.01, ke=0.01), envelope_floor, admission)
@@ -607,12 +680,12 @@ def run_plants() -> dict[str, Any]:
     try:
         evaluate_decision188(
             minimal_year_report(sst=0.0, ke=0.0), envelope_floor,
-            minimal_standalone_envelope_admission(changed_values=0))
+            minimal_envelope_admission(changed_values=0))
     except GateError:
         nonperturbed_caught = True
     control_caught = False
     try:
-        no_control = minimal_standalone_envelope_admission()
+        no_control = minimal_envelope_admission()
         no_control.pop("unperturbed_restart_control")
         evaluate_decision188(
             minimal_year_report(sst=0.0, ke=0.0), envelope_floor, no_control)
@@ -652,9 +725,15 @@ def main(argv: list[str] | None = None) -> int:
             and args.envelope_admission is not None,
             "--candidate-metrics, --envelope-metrics, and --envelope-admission are required")
     candidate = json.loads(args.candidate_metrics.read_text(encoding="utf-8"))
-    envelope = json.loads(args.envelope_metrics.read_text(encoding="utf-8"))
+    envelope_bytes = args.envelope_metrics.read_bytes()
+    envelope = json.loads(envelope_bytes)
     admission = json.loads(args.envelope_admission.read_text(encoding="utf-8"))
-    result = evaluate_decision188(candidate, envelope, admission)
+    result = evaluate_decision188(
+        candidate,
+        envelope,
+        admission,
+        envelope_metrics_digest=hashlib.sha256(envelope_bytes).hexdigest(),
+    )
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

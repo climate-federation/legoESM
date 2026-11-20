@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -206,12 +207,19 @@ def score_c4(
     candidate_report: dict[str, Any],
     envelope_report: dict[str, Any],
     envelope_admission: dict[str, Any],
+    *,
+    envelope_metrics_digest: str | None = None,
 ) -> dict[str, Any]:
     """Apply D188 to ocean and leave the two SI3 bar candidates pending."""
 
+    if envelope_metrics_digest is None:
+        envelope_metrics_digest = decision188.envelope_metrics_sha256(envelope_report)
     try:
         ocean = decision188.evaluate_decision188(
-            candidate_report, envelope_report, envelope_admission
+            candidate_report,
+            envelope_report,
+            envelope_admission,
+            envelope_metrics_digest=envelope_metrics_digest,
         )
         candidate_months = decision188.normalize_months(candidate_report)
         envelope_months = decision188.normalize_months(envelope_report)
@@ -284,12 +292,14 @@ def _add_synthetic_ice(report: dict[str, Any], relative_error: float) -> dict[st
 
 
 def run_plants() -> dict[str, str]:
-    admission = decision188.minimal_envelope_admission()
     candidate = _add_synthetic_ice(
         decision188.minimal_year_report(sst=0.0, ke=0.0), 0.0
     )
     envelope = _add_synthetic_ice(
-        decision188.minimal_year_report(sst=0.0, ke=0.001), 0.001
+        decision188.minimal_coupled_c4_year_report(sst=0.0, ke=0.001), 0.001
+    )
+    admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=envelope
     )
     control = score_c4(candidate, envelope, admission)
     require(control["status"] == "PENDING_USER_ICE_BAR",
@@ -342,9 +352,15 @@ def main(argv: list[str] | None = None) -> int:
     require(args.envelope_metrics is not None, "--envelope-metrics is required")
     require(args.envelope_admission is not None, "--envelope-admission is required")
     candidate = load_checkpoint_report(args.checkpoint_dir)
-    envelope = json.loads(args.envelope_metrics.read_text(encoding="utf-8"))
+    envelope_bytes = args.envelope_metrics.read_bytes()
+    envelope = json.loads(envelope_bytes)
     admission = json.loads(args.envelope_admission.read_text(encoding="utf-8"))
-    result = score_c4(candidate, envelope, admission)
+    result = score_c4(
+        candidate,
+        envelope,
+        admission,
+        envelope_metrics_digest=hashlib.sha256(envelope_bytes).hexdigest(),
+    )
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

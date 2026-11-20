@@ -51,6 +51,7 @@ INPUT_AUDIT = "round342_arm_a_input_identity.json"
 PERTURBED_ARM_NAME = "orca2_k0_year1_sst_plus_1ulp_np2"
 CONTROL_ARM_NAME = "orca2_k0_year1_restart_control_np2"
 DELAY_RESTART_VARIABLES = frozenset({"DELAY_re8_fwb2", "DELAY_im8_fwb2"})
+ICE_CONTINUATION_BASELINE_ONLY_VARIABLES = DELAY_RESTART_VARIABLES
 COUPLED_ICE_KEYS = (
     "ICE_AREA_NH", "ICE_AREA_SH", "ICE_VOLUME_NH", "ICE_VOLUME_SH",
 )
@@ -586,6 +587,28 @@ def _patch_ice_restart_namelist(source: Path, destination: Path) -> dict[str, An
     }
 
 
+def _expected_coupled_restart_namelist_hashes(
+    expected_steps: int | None,
+) -> dict[str, str]:
+    """Rebuild the two authorized C4 restart namelists and return exact hashes."""
+    require(expected_steps is not None and expected_steps >= FIRST_RUN_STEP,
+            "coupled restart-namelist hashing requires resolved nn_itend")
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        ocean = root / "namelist_cfg"
+        ice = root / "namelist_ice_cfg"
+        _patch_restart_namelist(
+            COUPLED_C4_BASELINE_ARM / "namelist_cfg", ocean, expected_steps
+        )
+        _patch_ice_restart_namelist(
+            COUPLED_C4_BASELINE_ARM / "namelist_ice_cfg", ice
+        )
+        return {
+            "namelist_cfg": common.sha256(ocean),
+            "namelist_ice_cfg": common.sha256(ice),
+        }
+
+
 def _coupled_deck_names() -> tuple[list[str], list[str]]:
     source = Path(coupled_deck.OVERLAYS["source_deck"])
     inputs = _manifest_names(source / "input_files.sha256")
@@ -598,10 +621,15 @@ def verify_coupled_deck_identity(
     *,
     baseline_arm: Path = COUPLED_C4_BASELINE_ARM,
     allow_restart_namelists: bool,
+    expected_steps: int | None = None,
 ) -> dict[str, Any]:
     """Re-hash the exact C4 inputs/deck; only the two restart namelists may differ."""
     input_names, deck_names = _coupled_deck_names()
     allowed = {"namelist_cfg", "namelist_ice_cfg"} if allow_restart_namelists else set()
+    expected_hashes = (
+        _expected_coupled_restart_namelist_hashes(expected_steps)
+        if allow_restart_namelists else {}
+    )
     rows = {}
     changed = []
     for name in sorted(input_names + deck_names):
@@ -613,6 +641,11 @@ def verify_coupled_deck_identity(
         equal = baseline_sha == candidate_sha
         require(equal or name in allowed,
                 f"coupled C4 deck/input {name} differs outside restart namelists")
+        if name in allowed:
+            require(
+                candidate_sha == expected_hashes[name],
+                f"coupled C4 {name} is not the exact patched restart namelist",
+            )
         if not equal:
             changed.append(name)
         rows[name] = {
@@ -628,6 +661,7 @@ def verify_coupled_deck_identity(
         "input_file_count": len(input_names),
         "deck_file_count": len(deck_names),
         "restart_namelists_rehashed": sorted(allowed),
+        "restart_namelist_sha256": expected_hashes,
         "all_other_deck_and_input_files_byte_identical": True,
         "files": rows,
     }
@@ -684,8 +718,6 @@ def stage_coupled_c4_arm(
     perturb: bool,
     expected_steps: int = r342.YEAR_STEPS,
 ) -> dict[str, Any]:
-    require(expected_steps == r342.YEAR_STEPS,
-            "coupled C4 acquisition is admitted only at kt=2920")
     marker = run_dir / ".round345_attempt"
     marker_text = marker.read_text(encoding="utf-8") if marker.is_file() else None
     if marker_text is not None:
@@ -713,7 +745,7 @@ def stage_coupled_c4_arm(
     )
     shutil.copy2(run_dir / "namelist_cfg", run_dir / "staged.namelist_cfg")
     identity = verify_coupled_deck_identity(
-        run_dir, allow_restart_namelists=True
+        run_dir, allow_restart_namelists=True, expected_steps=expected_steps
     )
     restart = _copy_coupled_day1_restarts(run_dir, perturb=perturb)
     build_sources = run_dir / "build_sources"
@@ -953,7 +985,14 @@ def _verify_coupled_continuation_file(
     with netCDF4.Dataset(baseline) as baseline_ds, netCDF4.Dataset(candidate) as candidate_ds:
         baseline_names = set(baseline_ds.variables)
         candidate_names = set(candidate_ds.variables)
-        allowed_baseline_only = set() if ice else set(DELAY_RESTART_VARIABLES)
+        # NEMO continuation SI3 restarts legitimately omit the two delayed
+        # fwb2 buffers present in REF_C4's cold-start files.  The write/read
+        # asymmetry is in NEMO 5.0.2 src/ICE/icerst.F90:140 and
+        # src/OCE/IOM/iom.F90:1953-1981.
+        allowed_baseline_only = set(
+            ICE_CONTINUATION_BASELINE_ONLY_VARIABLES if ice
+            else DELAY_RESTART_VARIABLES
+        )
         require(
             baseline_names - candidate_names == allowed_baseline_only
             and not candidate_names - baseline_names,
@@ -961,13 +1000,17 @@ def _verify_coupled_continuation_file(
             f"REF_C4_only={sorted(baseline_names - candidate_names)}, "
             f"candidate_only={sorted(candidate_names - baseline_names)}",
         )
-        required = {"a_i", "v_i"} if ice else {"kt", "tn", "sn", "un", "vn", "sshn"}
+        required = (
+            {"kt_ice", "a_i", "v_i"}
+            if ice else {"kt", "tn", "sn", "un", "vn", "sshn"}
+        )
         require(required <= candidate_names,
                 f"{candidate.name}: missing coupled restart variables "
                 f"{sorted(required - candidate_names)}")
-        if not ice:
-            require(int(np.asarray(candidate_ds.variables["kt"][...])) == expected_kt,
-                    f"{candidate.name}: ocean restart kt is not {expected_kt}")
+        step_name = "kt_ice" if ice else "kt"
+        require(int(np.asarray(candidate_ds.variables[step_name][...])) == expected_kt,
+                f"{candidate.name}: {step_name} is not {expected_kt}")
+        nonzero_names = {"a_i", "v_i"} if ice else set(r342.NONZERO_RESTART_VARS)
         common_names = sorted(baseline_names & candidate_names)
         for name in common_names:
             baseline_var = baseline_ds.variables[name]
@@ -983,6 +1026,9 @@ def _verify_coupled_continuation_file(
             if np.issubdtype(candidate_values.dtype, np.number):
                 require(bool(np.isfinite(candidate_values).all()),
                         f"{candidate.name}:{name} contains non-finite values")
+                if name in nonzero_names:
+                    require(float(np.max(np.abs(candidate_values))) > 0.0,
+                            f"{candidate.name}:{name} is identically zero")
             if require_data_equal:
                 require(
                     baseline_values.tobytes(order="C")
@@ -1045,6 +1091,9 @@ def verify_coupled_c4_continuation(
         "all_common_variable_data_bitwise_identical": require_data_equal,
         "unequal_common_variable_data_count": 0 if require_data_equal else None,
         "required_ref_c4_ocean_only_variables": sorted(DELAY_RESTART_VARIABLES),
+        "required_ref_c4_ice_only_variables": sorted(
+            ICE_CONTINUATION_BASELINE_ONLY_VARIABLES
+        ),
         "candidate_only_variables": [],
         "comparison": (
             "variable dtype + shape + raw C-order data bytes for ocean and SI3"
@@ -1120,6 +1169,16 @@ def verify_coupled_c4_inventory(
     }
 
 
+def _fortran_trimmed_namelist_character(text: str, name: str) -> str:
+    """Parse a quoted namelist character value with Fortran TRIM semantics."""
+    match = re.search(
+        rf"(?im)^\s*{re.escape(name)}\s*=\s*(['\"])(.*?)\1\s*,?\s*$",
+        text,
+    )
+    require(match is not None, f"resolved namelist lacks quoted {name}")
+    return match.group(2).rstrip()
+
+
 def _verify_coupled_resolved_outputs(run_dir: Path, expected_steps: int) -> dict[str, Any]:
     expected_ocean = {
         "nn_it000": str(FIRST_RUN_STEP),
@@ -1134,11 +1193,7 @@ def _verify_coupled_resolved_outputs(run_dir: Path, expected_steps: int) -> dict
     require(ice_output.is_file(), f"missing resolved SI3 namelist: {ice_output}")
     ice_text = ice_output.read_text(encoding="utf-8", errors="replace")
     ice_restart = f"ORCA2_{RESTART_KT:08d}_restart_ice"
-    require(common.output_has(ice_text, "cn_icerst_in", f"'{ice_restart}'")
-            or common.output_has(ice_text, "cn_icerst_in", f'"{ice_restart}"')
-            or re.search(
-                rf"(?im)^\s*cn_icerst_in\s*=\s*['\"]{ice_restart}['\"]", ice_text
-            ) is not None,
+    require(_fortran_trimmed_namelist_character(ice_text, "cn_icerst_in") == ice_restart,
             "resolved SI3 cn_icerst_in is not the REF_C4 day-1 restart pair")
     return {
         "ocean": expected_ocean,
@@ -1146,15 +1201,26 @@ def _verify_coupled_resolved_outputs(run_dir: Path, expected_steps: int) -> dict
     }
 
 
+def _coupled_resolved_expected_steps(
+    run_dir: Path, requested_steps: int | None,
+) -> int:
+    expected_steps, stock = r342.parse_namelist_itend_stock(run_dir / "namelist_cfg")
+    require(stock == r342.DAILY_STOCK_STRIDE,
+            f"coupled C4 nn_stock is {stock}, expected {r342.DAILY_STOCK_STRIDE}")
+    if requested_steps is not None:
+        require(expected_steps == requested_steps,
+                f"coupled C4 resolved nn_itend {expected_steps} != requested {requested_steps}")
+    return expected_steps
+
+
 def admit_coupled_c4_arm(
     run_dir: Path,
     *,
     perturb: bool,
-    expected_steps: int = r342.YEAR_STEPS,
+    expected_steps: int | None = None,
     allow_stub_binary: bool = False,
 ) -> dict[str, Any]:
-    require(expected_steps == r342.YEAR_STEPS,
-            "coupled C4 admission is only defined for kt=2920")
+    expected_steps = _coupled_resolved_expected_steps(run_dir, expected_steps)
     restart_input = (
         verify_perturbation_manifest(run_dir)
         if perturb else verify_control_input_manifest(run_dir)
@@ -1166,7 +1232,7 @@ def admit_coupled_c4_arm(
         require(actual_binary == baseline["binary_sha256"],
                 "coupled C4 arm binary differs from REF_C4")
     identity = verify_coupled_deck_identity(
-        run_dir, allow_restart_namelists=True
+        run_dir, allow_restart_namelists=True, expected_steps=expected_steps
     )
     completion = r342.verify_nemo_completion_signal(
         run_dir, expected_steps=expected_steps
@@ -1254,11 +1320,16 @@ def build_coupled_c4_envelope_report(
 def admit_coupled_c4_pair(
     run_root: Path,
     *,
-    expected_steps: int = r342.YEAR_STEPS,
+    expected_steps: int | None = None,
     allow_stub_binary: bool = False,
 ) -> dict[str, Any]:
     control_arm = run_root / COUPLED_C4_CONTROL_ARM_NAME
     perturbed_arm = run_root / COUPLED_C4_PERTURBED_ARM_NAME
+    control_steps = _coupled_resolved_expected_steps(control_arm, expected_steps)
+    perturbed_steps = _coupled_resolved_expected_steps(perturbed_arm, expected_steps)
+    require(control_steps == perturbed_steps,
+            "coupled control and envelope resolved nn_itend differ")
+    expected_steps = control_steps
     control = admit_coupled_c4_arm(
         control_arm, perturb=False, expected_steps=expected_steps,
         allow_stub_binary=allow_stub_binary,
@@ -1274,6 +1345,19 @@ def admit_coupled_c4_pair(
         == perturbed["producer_manifest"]["producer_commit"],
         "coupled control and envelope producer commits differ",
     )
+    control_hashes = control["ref_c4_input_identity"]["restart_namelist_sha256"]
+    perturbed_hashes = perturbed["ref_c4_input_identity"]["restart_namelist_sha256"]
+    require(control_hashes == perturbed_hashes,
+            "coupled control and envelope patched namelist hashes differ")
+    if expected_steps != r342.YEAR_STEPS:
+        perturbed["unperturbed_restart_control"] = control
+        perturbed["restart_continuation_control"] = control["restart_continuation_control"]
+        perturbed["preflight_short_run"] = True
+        output = run_root / COUPLED_C4_ADMISSION_NAME
+        output.write_text(
+            json.dumps(perturbed, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return perturbed
     report = build_coupled_c4_envelope_report(
         COUPLED_C4_BASELINE_ARM, perturbed_arm
     )
@@ -1599,6 +1683,128 @@ def admit_existing_with_quarantine(
         ) from exc
 
 
+def admit_coupled_c4_existing_with_quarantine(
+    run_root_or_retained: Path,
+    *,
+    expected_steps: int | None = None,
+    allow_stub_binary: bool = False,
+) -> dict[str, Any]:
+    """Coupled C4 admission with the standalone quarantine/promotion contract."""
+    explicit = None
+    if run_root_or_retained.parent.name == "refused":
+        explicit = run_root_or_retained
+        run_root = run_root_or_retained.parent.parent
+    else:
+        run_root = run_root_or_retained
+    control = run_root / COUPLED_C4_CONTROL_ARM_NAME
+    perturbed = run_root / COUPLED_C4_PERTURBED_ARM_NAME
+    refused = run_root / "refused"
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+    if explicit is None and control.is_dir() and perturbed.is_dir():
+        try:
+            result = admit_coupled_c4_pair(
+                run_root, expected_steps=expected_steps,
+                allow_stub_binary=allow_stub_binary,
+            )
+            _append_admit_log(run_root, {
+                "timestamp_utc": timestamp,
+                "route": "in_place",
+                "status": "PASS",
+                "producer_commit": result["producer_manifest"]["producer_commit"],
+                "binary_sha256": result["binary_sha256"],
+                "control_arm": str(control),
+                "perturbed_arm": str(perturbed),
+            })
+            return result
+        except Exception as exc:
+            refused.mkdir(parents=True, exist_ok=True)
+            moved = []
+            for arm in (control, perturbed):
+                if arm.exists():
+                    destination = refused / f"{timestamp}_{arm.name}"
+                    shutil.move(str(arm), str(destination))
+                    moved.append(str(destination))
+            _append_admit_log(run_root, {
+                "timestamp_utc": timestamp,
+                "route": "in_place",
+                "status": "REFUSED_AND_QUARANTINED",
+                "error": str(exc),
+                "quarantined": moved,
+            })
+            (run_root / COUPLED_C4_ADMISSION_NAME).write_text(
+                json.dumps({
+                    "status": "REFUSED_R345_COUPLED_C4_ADMIT_EXISTING",
+                    "admitted": False,
+                    "timestamp_utc": timestamp,
+                    "error": str(exc),
+                    "quarantined": moved,
+                }, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            raise GateError(
+                f"--admit-existing refused in-place coupled C4 arms ({exc}); "
+                f"quarantined to {moved}"
+            ) from exc
+
+    require(not control.exists() and not perturbed.exists(),
+            f"incomplete canonical coupled C4 arm pair under {run_root}")
+    require(refused.is_dir(), f"missing refused directory: {refused}")
+    retained_control = _retained_arm(refused, COUPLED_C4_CONTROL_ARM_NAME, explicit)
+    retained_perturbed = _retained_arm(refused, COUPLED_C4_PERTURBED_ARM_NAME, explicit)
+    try:
+        require(retained_control.resolve().is_relative_to(refused.resolve())
+                and retained_perturbed.resolve().is_relative_to(refused.resolve()),
+                "retained coupled C4 arms are not inside refused/")
+        r342._verify_existing_run_manifest(retained_control)
+        r342._verify_existing_run_manifest(retained_perturbed)
+        admit_coupled_c4_arm(
+            retained_control, perturb=False, expected_steps=expected_steps,
+            allow_stub_binary=allow_stub_binary,
+        )
+        admit_coupled_c4_arm(
+            retained_perturbed, perturb=True, expected_steps=expected_steps,
+            allow_stub_binary=allow_stub_binary,
+        )
+        shutil.move(str(retained_control), str(control))
+        shutil.move(str(retained_perturbed), str(perturbed))
+        result = admit_coupled_c4_pair(
+            run_root, expected_steps=expected_steps,
+            allow_stub_binary=allow_stub_binary,
+        )
+        result["admit_existing_route"] = "refused"
+        result["promoted_from_refused"] = [
+            str(retained_control), str(retained_perturbed),
+        ]
+        _append_admit_log(run_root, {
+            "timestamp_utc": timestamp,
+            "route": "refused",
+            "status": "PASS_PROMOTED",
+            "producer_commit": result["producer_manifest"]["producer_commit"],
+            "binary_sha256": result["binary_sha256"],
+            "promoted_from": [str(retained_control), str(retained_perturbed)],
+            "control_arm": str(control),
+            "perturbed_arm": str(perturbed),
+        })
+        return result
+    except Exception as exc:
+        if control.exists() and not retained_control.exists():
+            shutil.move(str(control), str(retained_control))
+        if perturbed.exists() and not retained_perturbed.exists():
+            shutil.move(str(perturbed), str(retained_perturbed))
+        _append_admit_log(run_root, {
+            "timestamp_utc": timestamp,
+            "route": "refused",
+            "status": "REFUSED_RETAINED_IN_PLACE",
+            "error": str(exc),
+            "retained_control": str(retained_control),
+            "retained_perturbed": str(retained_perturbed),
+        })
+        raise GateError(
+            f"--admit-existing refused retained coupled C4 arms ({exc}); kept in refused/"
+        ) from exc
+
+
 def write_stub_outputs(
     run_dir: Path,
     *,
@@ -1715,7 +1921,11 @@ def write_coupled_c4_stub_outputs(
                 DELAY_RESTART_VARIABLES,
             )
             ice_name = f"ORCA2_{kt:08d}_restart_ice_{local_rank:04d}.nc"
-            shutil.copy2(COUPLED_C4_BASELINE_ARM / ice_name, run_dir / ice_name)
+            _copy_netcdf_excluding_variables(
+                COUPLED_C4_BASELINE_ARM / ice_name,
+                run_dir / ice_name,
+                ICE_CONTINUATION_BASELINE_ONLY_VARIABLES,
+            )
     writes_shared = rank in (None, 0)
     step_value = (
         int(plant_short_timestep)
@@ -1748,6 +1958,17 @@ def write_coupled_c4_stub_outputs(
             COUPLED_C4_BASELINE_ARM / "output.namelist.ice",
             run_dir / "output.namelist.ice",
         )
+        ice_output = run_dir / "output.namelist.ice"
+        ice_text = ice_output.read_text(encoding="utf-8")
+        ice_restart = f"ORCA2_{RESTART_KT:08d}_restart_ice"
+        ice_text, count = re.subn(
+            r'(?im)(^\s*cn_icerst_in\s*=\s*)[^!\n]+',
+            rf'\g<1>"{ice_restart:<256}",',
+            ice_text,
+            count=1,
+        )
+        require(count == 1, "coupled stub failed to pad resolved cn_icerst_in")
+        ice_output.write_text(ice_text, encoding="utf-8")
         (run_dir / "time.step").write_text(f" {step_value:8d}\n", encoding="utf-8")
     after = {path.name: common.sha256(path) for path in input_paths}
     require(after == before, "coupled stub changed a staged day-1 ocean/ice restart")
@@ -1763,15 +1984,19 @@ def write_coupled_c4_stub_outputs(
     }
 
 
-def verify_run_sh(run_sh: Path) -> dict[str, Any]:
+def verify_run_sh(
+    run_sh: Path,
+    *,
+    scratch_root: Path = PREFLIGHT_SCRATCH_ROOT,
+) -> dict[str, Any]:
     require(run_sh.is_file(), f"missing acquisition script: {run_sh}")
     text = run_sh.read_text(encoding="utf-8")
     require("rm -rf" not in text and "pkill" not in text and "killall" not in text,
             "acquisition script contains a destructive or pattern-kill command")
     syntax = subprocess.run(["bash", "-n", str(run_sh)], capture_output=True, text=True)
     require(syntax.returncode == 0, f"bash -n failed: {syntax.stderr}")
-    PREFLIGHT_SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=PREFLIGHT_SCRATCH_ROOT) as tmp:
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=scratch_root) as tmp:
         planted = Path(tmp) / "run.sh"
         planted.write_text(text + "\nif then\n", encoding="utf-8")
         bad = subprocess.run(["bash", "-n", str(planted)], capture_output=True, text=True)
@@ -2052,6 +2277,143 @@ def run_preflight(
     return report
 
 
+def run_coupled_c4_preflight() -> dict[str, Any]:
+    """Exercise the coupled stub, admission, plants, and refused/ recovery."""
+    run_sh = Path(__file__).resolve().parent / (
+        "nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh"
+    )
+    scratch_root = Path(tempfile.gettempdir())
+    shell = verify_run_sh(run_sh, scratch_root=scratch_root)
+    baseline = verify_coupled_c4_baseline()
+    with tempfile.TemporaryDirectory(dir=scratch_root) as temporary:
+        root = Path(temporary) / "coupled_c4_stub"
+        fake_bin = Path(temporary) / "bin"
+        fake_bin.mkdir()
+        fake_timeout = fake_bin / "timeout"
+        fake_timeout.write_text(
+            "#!/usr/bin/env bash\n"
+            "OMPI_COMM_WORLD_RANK=0 ./nemo && OMPI_COMM_WORLD_RANK=1 ./nemo\n",
+            encoding="utf-8",
+        )
+        fake_timeout.chmod(0o755)
+        env = dict(
+            os.environ,
+            PATH=f"{fake_bin}:{os.environ['PATH']}",
+            R345_PREFLIGHT_ALLOW_STUB="1",
+            R345_INTERNAL_COUPLED_PREFLIGHT="1",
+            R345_REQUIRED_RAM_GIB="0",
+            R345_REQUIRED_DISK_GIB="0",
+        )
+        stub = subprocess.run(
+            ["bash", str(run_sh), "--coupled-c4", "--stub-run-dir", str(root),
+             "--stub-steps", "16"],
+            capture_output=True, text=True, check=False, env=env,
+        )
+        require(stub.returncode == 0,
+                f"coupled C4 stub pipeline failed:\n{stub.stdout}\n{stub.stderr}")
+        control = root / COUPLED_C4_CONTROL_ARM_NAME
+        perturbed = root / COUPLED_C4_PERTURBED_ARM_NAME
+        for arm in (control, perturbed):
+            assert_steps = _coupled_resolved_expected_steps(arm, 16)
+            require(assert_steps == 16, "coupled stub ignored resolved nn_itend")
+            for rank in (0, 1):
+                ice = arm / f"ORCA2_00000016_restart_ice_{rank:04d}.nc"
+                with netCDF4.Dataset(ice) as dataset:
+                    require(
+                        set(dataset.variables).isdisjoint(
+                            ICE_CONTINUATION_BASELINE_ONLY_VARIABLES
+                        ),
+                        "coupled stub did not reproduce NEMO's delayed-ice omission",
+                    )
+            _verify_coupled_resolved_outputs(arm, 16)
+
+        ice_restart = perturbed / "ORCA2_00000016_restart_ice_0000.nc"
+        pristine_ice = Path(temporary) / "ice.pristine.nc"
+        shutil.copy2(ice_restart, pristine_ice)
+        with netCDF4.Dataset(ice_restart, "r+") as dataset:
+            dataset.variables["kt_ice"][...] = 15.0
+        kt_ice_caught = False
+        try:
+            verify_coupled_c4_continuation(
+                perturbed, expected_steps=16, require_data_equal=False
+            )
+        except GateError:
+            kt_ice_caught = True
+        require(kt_ice_caught, "coupled kt_ice plant did not fail")
+        shutil.copy2(pristine_ice, ice_restart)
+        with netCDF4.Dataset(ice_restart, "r+") as dataset:
+            dataset.variables["a_i"][:] = 0.0
+        zero_prognostic_caught = False
+        try:
+            verify_coupled_c4_continuation(
+                perturbed, expected_steps=16, require_data_equal=False
+            )
+        except GateError:
+            zero_prognostic_caught = True
+        require(zero_prognostic_caught,
+                "coupled zero-prognostic restart plant did not fail")
+        shutil.copy2(pristine_ice, ice_restart)
+
+        ice_namelist = perturbed / "namelist_ice_cfg"
+        pristine_namelist = Path(temporary) / "namelist_ice_cfg.pristine"
+        shutil.copy2(ice_namelist, pristine_namelist)
+        with ice_namelist.open("a", encoding="utf-8") as handle:
+            handle.write("! exact-hash plant\n")
+        namelist_hash_caught = False
+        try:
+            verify_coupled_deck_identity(
+                perturbed, allow_restart_namelists=True, expected_steps=16
+            )
+        except GateError:
+            namelist_hash_caught = True
+        require(namelist_hash_caught, "coupled patched-namelist hash plant did not fail")
+        shutil.copy2(pristine_namelist, ice_namelist)
+
+        input_restart = perturbed / f"ORCA2_{RESTART_KT:08d}_restart_0000.nc"
+        pristine_input = Path(temporary) / "input.pristine.nc"
+        shutil.copy2(input_restart, pristine_input)
+        with input_restart.open("ab") as handle:
+            handle.write(b"coupled quarantine plant")
+        refused_run = subprocess.run(
+            ["bash", str(run_sh), "--coupled-c4", "--admit-existing", str(root),
+             "--stub-steps", "16"],
+            capture_output=True, text=True, check=False, env=env,
+        )
+        refused = root / "refused"
+        retained_control = _retained_arm(
+            refused, COUPLED_C4_CONTROL_ARM_NAME, None
+        )
+        retained_perturbed = _retained_arm(
+            refused, COUPLED_C4_PERTURBED_ARM_NAME, None
+        )
+        require(refused_run.returncode != 0,
+                "coupled failing admission did not refuse")
+        shutil.copy2(pristine_input, retained_perturbed / input_restart.name)
+        promoted = subprocess.run(
+            ["bash", str(run_sh), "--coupled-c4", "--admit-existing",
+             str(retained_perturbed), "--stub-steps", "16"],
+            capture_output=True, text=True, check=False, env=env,
+        )
+        require(promoted.returncode == 0 and control.is_dir() and perturbed.is_dir(),
+                f"coupled refused/ promotion failed:\n{promoted.stdout}\n{promoted.stderr}")
+        admit_log = (root / "admit_existing.log").read_text(encoding="utf-8")
+        require('"status": "REFUSED_AND_QUARANTINED"' in admit_log
+                and '"status": "PASS_PROMOTED"' in admit_log,
+                "coupled admit_existing.log lacks quarantine/promotion records")
+    return {
+        "status": "PASS_R345_COUPLED_C4_PREFLIGHT",
+        "baseline": baseline,
+        "run_sh": shell,
+        "stub_end_to_end": True,
+        "resolved_nn_itend": 16,
+        "ice_delay_omission_stub": True,
+        "kt_ice_plant": True,
+        "zero_prognostic_plant": True,
+        "exact_namelist_hash_plant": True,
+        "quarantine_promotion_plant": True,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage-run-dir", type=Path)
@@ -2112,7 +2474,7 @@ def main(argv: list[str] | None = None) -> int:
             )
     elif args.admit_existing is not None:
         if args.coupled_c4:
-            result = admit_coupled_c4_pair(
+            result = admit_coupled_c4_existing_with_quarantine(
                 args.admit_existing, expected_steps=args.expected_steps,
                 allow_stub_binary=args.allow_stub_binary,
             )
@@ -2143,14 +2505,7 @@ def main(argv: list[str] | None = None) -> int:
             )
     else:
         if args.coupled_c4:
-            result = {
-                "status": "PASS_R345_COUPLED_C4_PREFLIGHT",
-                "baseline": verify_coupled_c4_baseline(),
-                "run_sh": verify_run_sh(
-                    Path(__file__).resolve().parent
-                    / "nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh"
-                ),
-            }
+            result = run_coupled_c4_preflight()
         else:
             result = run_preflight(
                 evidence_dir=args.evidence_dir, build_cfg=args.build_cfg,
