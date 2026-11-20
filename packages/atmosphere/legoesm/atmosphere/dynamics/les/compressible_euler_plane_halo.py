@@ -872,9 +872,12 @@ def plane_compressible_euler_slow_tendencies_halo(
                         q_int[..., None], K_h_int, height_coord)[..., 0]
                 tend = tend + sgs
             return tend
-        dtracers_dt = jax.vmap(
-            _tracer_tend_one, in_axes=(-1, -1), out_axes=-1,
-        )(tracers_pad, tracers)
+        # Cache-blocked: one tracer at a time (its ~1 MB working set stays in
+        # cache) instead of a vmap that streams all tracers through each op.
+        dtracers_dt = jnp.moveaxis(jax.lax.map(
+            lambda qq: _tracer_tend_one(*qq),
+            (jnp.moveaxis(tracers_pad, -1, 0), jnp.moveaxis(tracers, -1, 0)),
+        ), 0, -1)
     else:
         dtracers_dt = jnp.zeros_like(tracers)
     zero_phis = jnp.zeros_like(state.phis.data)
