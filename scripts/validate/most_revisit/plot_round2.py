@@ -47,13 +47,7 @@ def main():
     a = ap.parse_args()
     np.seterr(all="ignore")
     data = r2.load(a.samples)
-    j3 = json.load(open(a.bench))["global_fit"]["J3"]
-    ref = {"m": [("Dyer 1974 (legoESM default)", r2.DYER["m"], []),
-                 ("J3 round 1 (3 params)", {"stable": "1 + a_inf*z + (a0 - a_inf)*z/(1 + z/zc)", "unstable": "(1 + 16*x)**-0.25",
-                                            "params": {"a0": 0, "a_inf": 0, "zc": 0}}, [j3["a0"], j3["a_inf"], j3["zc"]])],
-           "h": [("Dyer 1974 (legoESM default)", r2.DYER["h"], []),
-                 ("J3 round 1", {"stable": "pr0 + a_inf*z + (a0 - a_inf)*z/(1 + z/zc)", "unstable": "pr0*(1 + 16*x)**-0.5",
-                                 "params": {"a0": 0, "a_inf": 0, "zc": 0, "pr0": 0}}, [j3["a0"], j3["a_inf"], j3["zc"], j3["pr0"]])]}
+    ref = reference_curves(a.bench)
     winners = json.load(open(a.winners))
     zeta = np.concatenate([-np.logspace(1, -2, 200), np.logspace(-2, 1, 200)])
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
@@ -78,6 +72,17 @@ def main():
     fig.tight_layout()
     fig.savefig(a.out, dpi=130)
     print("WROTE", a.out)
+
+
+def reference_curves(bench):
+    """Dyer and the round-1 J3 global fit, as (label, spec, params) per kind."""
+    j3 = json.load(open(bench))["global_fit"]["J3"]
+    return {"m": [("Dyer 1974 (legoESM default)", r2.DYER["m"], []),
+                 ("J3 round 1 (3 params)", {"stable": "1 + a_inf*z + (a0 - a_inf)*z/(1 + z/zc)", "unstable": "(1 + 16*x)**-0.25",
+                                            "params": {"a0": 0, "a_inf": 0, "zc": 0}}, [j3["a0"], j3["a_inf"], j3["zc"]])],
+           "h": [("Dyer 1974 (legoESM default)", r2.DYER["h"], []),
+                 ("J3 round 1", {"stable": "pr0 + a_inf*z + (a0 - a_inf)*z/(1 + z/zc)", "unstable": "pr0*(1 + 16*x)**-0.5",
+                                 "params": {"a0": 0, "a_inf": 0, "zc": 0, "pr0": 0}}, [j3["a0"], j3["a_inf"], j3["zc"], j3["pr0"]])]}
 
 
 if __name__ == "__main__":
