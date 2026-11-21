@@ -21,7 +21,9 @@ present.  This module never re-derives an extent.
 SUBCYCLING (the node that does not port mechanically): nsplt is
 data-derived, so the level loop runs a fixed ``NSPLT_MAX``-long
 ``lax.scan`` whose inactive iterations are a PROVEN no-op (jnp.where
-returns the old state bit-exactly); the schedule carries
+returns the old state bit-exactly) and are skipped by a ``lax.cond``
+(loop path: past that level's nsplt; batched path: past the deepest
+level's nsplt); the schedule carries
 stop_gradient, so the derivative is piecewise with no term through
 the trip-count decision -- the true derivative almost everywhere.  A
 resolved nsplt above NSPLT_MAX is never truncated: the schedule and a
@@ -157,9 +159,9 @@ def _window_seam_refresh(tab, exch, nq: int):
     is the acoustic-substep entry pattern and makes the phase pad-depth
     safe for any nsplt.  One tracer per key: ``exch[:, iq]`` is
     ``(nb, W, W)`` per level or ``(nb, W, W, km)`` batched, the layouts
-    the entry refresh and pt already rely on.  ponytail: fires on every
-    masked scan slot (NSPLT_MAX); gate on the active mask if the ladder
-    shows it."""
+    the entry refresh and pt already rely on.  It fires only on executed
+    scan slots: per level up to that level's nsplt on the loop path, up
+    to the deepest level's nsplt on the batched path."""
     wc = getattr(tab, "window_comm", None)
     if wc is None:
         return exch
@@ -417,7 +419,7 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
         qn20 = q[:, :, :, :, k]          # halos already exchanged (:276-281)
         dp10 = dp1[:, ng:ng + n, ng:ng + n, k]
 
-        def body(carry, it):
+        def work(carry, it):
             qn2, dp1i, qfin = carry
             # D2 masks: scan index it is Fortran it+1.  `run` = active,
             # non-final iteration (writes qn2 and dp1); `last` writes q.
@@ -481,7 +483,12 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
             # bit-exactly; both arms are total and finite (rule 2).
             return (jnp.where(run, exch, qn2),
                     jnp.where(run, dp2, dp1i),
-                    jnp.where(last, base, qfin)), None
+                    jnp.where(last, base, qfin))
+
+        # Skip the iterations past this level's nsplt (the masked no-op).
+        def body(carry, it, work=work, nsp=nsp):
+            return jax.lax.cond(it < nsp, lambda c: work(c, it),
+                                lambda c: c, carry), None
 
         (_, dp1k_f, qk_f), _ = jax.lax.scan(
             body, (qn20, dp10, qn20), jnp.arange(NSPLT_MAX))
@@ -647,7 +654,7 @@ def _tracer_2d_1l_sixface_batched(ctx, q6, dp1_6, mfx6, mfy6, cx6, cy6, *,
     run_q = lambda m: m[None, None, None, None, :]
     run_d = lambda m: m[None, None, None, :]
 
-    def body(carry, it):
+    def work(carry, it):
         qn2, dp1i, qfin = carry
         run = (it + 1) < nsplt_f                        # (km,)
         last = (it + 1) == nsplt_f
@@ -680,7 +687,19 @@ def _tracer_2d_1l_sixface_batched(ctx, q6, dp1_6, mfx6, mfy6, cx6, cy6, *,
         exch = _window_seam_refresh(tab, exch, nq)
         return (jnp.where(run_q(run), exch, qn2),
                 jnp.where(run_d(run), dp2, dp1i),
-                jnp.where(run_q(last), base, qfin)), None
+                jnp.where(run_q(last), base, qfin))
+
+    # Iterations past the deepest level's nsplt are the no-op the masks
+    # above make them; skip their transport and collectives instead of
+    # computing and discarding them.  This runs in the GSPMD region, not
+    # inside a shard_map body (those wrap only the exchanges), and the
+    # level axis is never sharded, so the max is a replicated scalar and
+    # every device takes the same branch around the collectives.
+    nsplt_top = nsplt_f.max()
+
+    def body(carry, it):
+        return jax.lax.cond(it < nsplt_top, lambda c: work(c, it),
+                            lambda c: c, carry), None
 
     (_, dp1k_f, qk_f), _ = jax.lax.scan(
         body, (qn20, dp10, qn20), jnp.arange(NSPLT_MAX))

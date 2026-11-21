@@ -130,7 +130,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
 from legoesm.ocean.physics.lateral_mixing.mle_latlon_cgrid import (
     mle_tracer_tendency_latlon_cgrid,
 )
-from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
+from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source, eke_floor
 # Public symbol from the blessed shared "_gm_redi_common" module pattern (see
 # tests/test_no_private_cross_imports.py): the SAME Hallberg f_res definition
 # the GM/Redi tracer tendencies apply to kappa_GM, reused for the EKE-budget
@@ -13811,7 +13811,8 @@ class LatLonCGridOceanModel:
             production_scale=_scale_w,
         )
 
-        # Floor at e_min on wet columns, zero on land (kappa_gm_override is
+        # Floor at e_min on wet columns (C1 over e_pos_width, RULE 5; 0 = hard
+        # max), zero on land (kappa_gm_override is
         # already wet-masked by compute_eke_kappa_gm).  Cast back to the field
         # dtype: the source/sink promotes through the f64 sigma(z)/L(z), but the
         # stored eke must keep the storage-policy dtype so the scan-carry pytree
@@ -13823,7 +13824,7 @@ class LatLonCGridOceanModel:
         # not .astype) so the scan-carry pytree stays dtype-stable WITHOUT JAX's
         # implicit-downcast FutureWarning (which a future JAX makes an error).
         E_new = jax.lax.convert_element_type(
-            jnp.where(lm3 > 0.5, jnp.maximum(E, eke_cfg.e_min), 0.0), dtype,
+            jnp.where(lm3 > 0.5, eke_floor(E, eke_cfg), 0.0), dtype,
         )
         if _wet_if_eke is not None:
             # Keep the eddy energy off dry interfaces (Veros maskW) on

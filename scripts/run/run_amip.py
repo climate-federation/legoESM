@@ -812,6 +812,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "(a/r)^2 eccentricity asymmetry (~+/-3.4%%). Default off = "
              "circular orbit (idealized).",
     )
+    parser.add_argument(
+        "--orbit-year", type=int, default=None, dest="orbit_year",
+        help="Berger (1978) orbit of this year AD (negative = BC, e.g. -4050 "
+             "for 6 ka). Needs --orbital-insolation; excludes --orbit-*.")
+    parser.add_argument(
+        "--orbit-eccentricity", type=float, default=None,
+        dest="orbit_eccentricity",
+        help="Orbital eccentricity, [0,0.1] with the Berger series, [0,0.9] with "
+             "--orbit-solver kepler (unset = present day). Needs "
+             "--orbital-insolation.")
+    parser.add_argument(
+        "--orbit-solver", choices=("berger_series", "kepler"),
+        default="berger_series", dest="orbit_solver",
+        help="Solar longitude: CESM Berger series (default; CESM-exact, "
+             "e<=0.1) or exact Kepler solve (e<=0.9). Needs --orbital-insolation.")
+    parser.add_argument(
+        "--orbit-obliquity", type=float, default=None,
+        dest="orbit_obliquity_deg",
+        help="Obliquity [deg, 0-180] (unset = present day). Needs "
+             "--orbital-insolation.")
+    parser.add_argument(
+        "--orbit-perihelion", type=float, default=None,
+        dest="orbit_long_perihelion_deg",
+        help="Longitude of perihelion from the moving vernal equinox "
+             "[deg, 0-360) (= CESM mvelp + 180; unset = present day). Needs "
+             "--orbital-insolation.")
     parser.add_argument("--dynamic-albedo", action=argparse.BooleanOptionalAction, default=False,
                         help="Zenith-angle-dependent ocean albedo "
                              "(Briegleb 1992) instead of the constant "
@@ -3120,6 +3146,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_gas_tables=args.rrtmgp_gas_tables,
         diurnal_cycle=args.diurnal_cycle,
         orbital_insolation=args.orbital_insolation,
+        orbit_year=args.orbit_year,
+        orbit_eccentricity=args.orbit_eccentricity,
+        orbit_obliquity_deg=args.orbit_obliquity_deg,
+        orbit_long_perihelion_deg=args.orbit_long_perihelion_deg,
+        orbit_solver=args.orbit_solver,
         co2_ppmv=args.co2_ppmv,
         ch4_ppbv=args.ch4_ppbv,
         n2o_ppbv=args.n2o_ppbv,

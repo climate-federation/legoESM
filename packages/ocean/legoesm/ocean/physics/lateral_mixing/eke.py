@@ -46,6 +46,9 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.smooth import (positive_part_c1, smooth_max_c1, smooth_min_c1,
+                                 validate_smoothing_width)
+
 
 __physics_contract__ = {
     "summary": (
@@ -115,6 +118,10 @@ __param_spec__ = {
         "excluded": {
             "e_min": "numerics: floor/cap",
             "l_min": "numerics: floor/cap",
+            "e_pos_width": "numerics: RULE 5 smoothing width",
+            "length_switch_width": "numerics: RULE 5 smoothing width",
+            "kappa_cap_width": "numerics: RULE 5 smoothing width",
+            "source_split_width": "numerics: RULE 5 smoothing width",
         },
         "params": {
             "alpha_eke": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
@@ -374,19 +381,56 @@ class EKEConfig(NamedTuple):
     # On a Veros u_centered coordinate the two alternate by up to ±50% per
     # level. Default False ⇒ BIT-IDENTICAL.
     n2_over_dzw: bool = False
+    # RULE 5 smoothing widths of the closure's switches on traced state
+    # (smooth_min_c1/smooth_max_c1: exact once the two sides differ by more
+    # than width/2).  0 = Veros's hard max/min (oracle mode).
+    e_pos_width: float = 1.0e-8           # max(E, 0) [m^2/s^2]
+    length_switch_width: float = 1.0      # min/max between lengths (L_rossby, eke_len, l_min) [m]
+    kappa_cap_width: float = 100.0        # min(kappa_GM, kappa_gm_max) [m^2/s]
+    # Source step: the clamp max(P, 0) of a supplied production and the
+    # positive/negative split of a signed source [m^2/s^3] (1 % of a ~1e-8 GM
+    # conversion; vote 1 E3).  The 3-D e_min floor reuses ``e_pos_width``.
+    source_split_width: float = 1.0e-10
 
 
 def eke_mixing_length(L_rossby: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
     """Mixing length L = max(L_rossby, l_min) — the Rossby-radius length from the
     Visbeck machinery, floored so kappa_GM/dissipation stay well-defined. This is
     the ``mixing_length_scheme="rossby"`` length (legoESM's pre-eke_len default)."""
-    return jnp.maximum(L_rossby, cfg.l_min)
+    return smooth_max_c1(L_rossby, cfg.l_min, cfg.length_switch_width)
 
 
 # Denominator safety floor for the |f| and β reciprocals in the Rhines-limited
 # mixing length — a pure numerical floor (matches Veros eke_len's ``max(·, 1e-16)``),
 # exempt from the named-constant rule like the other eps floors in this module.
 _DENOM_FLOOR = 1.0e-16
+
+
+def _sqrt0(x: jnp.ndarray) -> jnp.ndarray:
+    """``sqrt(x)`` for ``x >= 0`` with a finite gradient at 0 (forward exact)."""
+    pos = x > 0.0
+    return jnp.where(pos, jnp.sqrt(jnp.where(pos, x, 1.0)), 0.0)
+
+
+def eke_positive_part(E: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
+    """``max(E, 0)`` (Veros ``max(0, eke)``), smoothed over ``cfg.e_pos_width``.
+
+    C1 in ``E``.  The square roots taken of it keep the reference's
+    zero-energy kink, moved to ``E = -e_pos_width/2``: ``sqrt(E)`` gets a finite
+    slope jump there, while the Rhines length (``∝ sqrt(E + w/2)`` just above
+    it) has an unbounded right derivative, as Veros's has at ``E = 0``.  That
+    is negative energy: the 3-D path
+    floors ``E`` at ``EKEConfig.e_min`` on wet cells and the 2-D local source
+    is positivity-preserving.
+    """
+    return smooth_max_c1(E, 0.0, cfg.e_pos_width)
+
+
+def eke_floor(E: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
+    """``max(E, e_min)`` (the 3-D step's storage floor), C1 over ``cfg.e_pos_width``
+    (RULE 5; 0 = hard): never below ``max(E, e_min)``, at most ``e_pos_width/8``
+    above it, exact once ``|E - e_min| >= e_pos_width/2``."""
+    return smooth_max_c1(E, cfg.e_min, cfg.e_pos_width)
 
 
 def eke_rhines_length(
@@ -397,14 +441,13 @@ def eke_rhines_length(
 
     ``sqrt(E)`` is the eddy velocity scale [m/s] (``E`` is the specific eddy energy
     [m^2/s^2]); ``beta = df/dy`` [1/(m·s)]; ``sqrt(E)/beta`` has units m^2, so the
-    result is a length. ``E`` is floored at 0 and regularised by ``+1e-30`` before
-    the sqrt (finite gradient at ``E=0``); ``beta`` is floored at ``_DENOM_FLOOR``
-    (matching Veros, which assumes ``beta > 0`` — true on the sphere where
-    ``f = 2Ω sinφ`` ⇒ ``β = 2Ω cosφ/R ≥ 0``).
+    result is a length. ``E`` goes through :func:`eke_positive_part`; ``beta`` is
+    floored at ``_DENOM_FLOOR`` (matching Veros, which assumes ``beta > 0`` — true
+    on the sphere where ``f = 2Ω sinφ`` ⇒ ``β = 2Ω cosφ/R ≥ 0``).
     """
-    sqrt_E = jnp.sqrt(jnp.maximum(E, 0.0) + 1.0e-30)
+    sqrt_E = _sqrt0(eke_positive_part(E, cfg))
     beta_safe = jnp.maximum(beta, _DENOM_FLOOR)
-    return jnp.sqrt(sqrt_E / beta_safe)
+    return _sqrt0(sqrt_E / beta_safe)
 
 
 def eke_deformation_radius(
@@ -420,16 +463,17 @@ def eke_deformation_radius(
     ``Σ √(max(0,N²))·dzw·maskW``); the ``1/pi`` is the WKB first-baroclinic factor.
     The midlatitude branch ``c1/|f|`` is the deformation radius; the equatorial
     branch ``sqrt(c1/2β)`` caps it as ``|f|→0``. ``|f|`` and ``β`` denominators are
-    floored at ``_DENOM_FLOOR``; the equatorial sqrt is regularised by ``+1e-30`` for
-    a finite gradient at ``c1=0`` (where the midlatitude branch is exactly 0 and wins
-    the min, so the forward value is unaffected).
+    floored at ``_DENOM_FLOOR``.  The ``min`` is smoothed over
+    ``cfg.length_switch_width`` (RULE 5; 0 = Veros): exact once the branches
+    differ by half the width, never above the hard ``min`` and at most
+    ``width/8`` below it, so with no stratification the radius is
+    ``-width/8`` rather than 0 (``eke_len`` floors it at ``l_min``).
     """
     c1 = jnp.maximum(int_N_dz, 0.0) / jnp.pi
     f_safe = jnp.maximum(jnp.abs(f_coriolis), _DENOM_FLOOR)
-    beta_safe = jnp.maximum(beta, _DENOM_FLOOR)
     L_mid = c1 / f_safe
-    L_eq = jnp.sqrt(c1 / (2.0 * beta_safe) + 1.0e-30)
-    return jnp.minimum(L_mid, L_eq)
+    L_eq = _sqrt0(c1 / jnp.maximum(2.0 * beta, _DENOM_FLOOR))
+    return smooth_min_c1(L_mid, L_eq, cfg.length_switch_width)
 
 
 def eke_len_composite(
@@ -443,17 +487,18 @@ def eke_len_composite(
     deformation radius ``L_def`` where eddies are weak/small; ``l_min`` floors the
     result. All inputs are lengths [m] ≥ 0.
     """
-    inner = jnp.minimum(cfg.eke_cross * L_def, cfg.eke_crhin * L_rhines)
-    return jnp.maximum(cfg.l_min, inner)
+    w = cfg.length_switch_width
+    inner = smooth_min_c1(cfg.eke_cross * L_def, cfg.eke_crhin * L_rhines, w)
+    return smooth_max_c1(inner, cfg.l_min, w)
 
 
 def eke_kappa_gm(E: jnp.ndarray, L: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
-    """Prognostic GM coefficient ``kappa_GM = c_k * L * sqrt(E)`` (clamped >= 0 and
-    <= kappa_gm_max). E is floored at 0 before the sqrt (sqrt of a tiny positive is
-    used at E=0 so the gradient stays finite)."""
-    E_pos = jnp.maximum(E, 0.0)
-    kappa = cfg.c_k * L * jnp.sqrt(E_pos + 1.0e-30)
-    return jnp.clip(kappa, 0.0, cfg.kappa_gm_max)
+    """Prognostic GM coefficient ``kappa_GM = min(kappa_gm_max, c_k * L * sqrt(max(E, 0)))``
+    (Veros ``K_gm``); the positive part and the cap are smoothed over
+    ``cfg.e_pos_width`` / ``cfg.kappa_cap_width`` (RULE 5; 0 = Veros). ``L >= 0``
+    so the result is >= 0."""
+    kappa = cfg.c_k * L * _sqrt0(eke_positive_part(E, cfg))
+    return smooth_min_c1(kappa, cfg.kappa_gm_max, cfg.kappa_cap_width)
 
 
 def eke_local_tendency(
@@ -474,10 +519,11 @@ def eke_local_tendency(
     L : array — mixing length [m] (already floored, see ``eke_mixing_length``).
     cfg : EKEConfig.
     """
-    E_pos = jnp.maximum(E, 0.0)
-    kappa = eke_kappa_gm(E_pos, L, cfg)
+    E_pos = eke_positive_part(E, cfg)
+    kappa = eke_kappa_gm(E, L, cfg)
     production = kappa * sigma ** 2
-    dissipation = cfg.c_eps * E_pos ** 1.5 / jnp.maximum(L, cfg.l_min)
+    L_d = smooth_max_c1(L, cfg.l_min, cfg.length_switch_width)
+    dissipation = cfg.c_eps * E_pos * _sqrt0(E_pos) / L_d
     return production - dissipation
 
 
@@ -575,6 +621,25 @@ def eke_apply_local_source(
       they hand to the conversion builders).  ``None`` (default) ⇒
       bit-identical.
 
+    RULE 5 (smooth defaults; every width 0 = the hard form): ``E_n`` enters as
+    :func:`eke_positive_part` (``e_pos_width``), ``L`` is floored by
+    ``smooth_max_c1(L, l_min, length_switch_width)``, the clamp of a supplied
+    production uses the one-sided ``positive_part_c1`` (exactly 0 for ``P <= 0``)
+    and the positive/negative split of a signed source uses
+    ``smooth_max_c1(x, 0, source_split_width)`` with ``neg = pos - x`` (the split
+    sums to ``x`` up to one rounding and both parts stay >= 0, so ``E_{n+1} >= 0``
+    holds at the defaults; at ``x = 0`` the explicit ``w/8`` and the implicit
+    ``w/8`` sink cancel up to rounding when dissipation is off).  The square root is Veros's ``sqrt(max(0, E))``
+    (no ``+1e-30`` offset).  Kept hard: the ``>= 0`` guards on
+    ``production_scale`` and ``extra_source`` (inputs >= 0 by construction) and
+    the ``1e-30`` divisor guard of the negative-part rate, which binds only where
+    the smoothed ``E_pos`` is exactly 0 (``E <= -e_pos_width/2``).
+    KNOWN DIFFERENCE vs Veros ``integrate_eke``: Veros adds the signed forcing
+    explicitly to ``E`` (not ``max(E, 0)``) and relies on later re-flooring;
+    this step folds the negative part implicitly.  The two agree (width 0) on
+    cells with ``E >= 0`` and forcing ``>= 0``; at the defaults the per-cell
+    gaps are pinned in ``tests/ocean/unit/test_eke_source_step_rule5.py``.
+
     When ``return_dissipation`` is True, returns ``(E_new, eke_diss_iw)`` where
     ``eke_diss_iw = c_eps·√E_n·E_{n+1}/L = diss_rate·E_new`` [m²/s³] ≥ 0 is the
     Eden-Greatbatch dissipation rate (Veros ``eke_diss_iw = c_int·eke``, ``c_int =
@@ -584,7 +649,15 @@ def eke_apply_local_source(
     not the IW-breaking dissipation Veros routes to TKE).  Default ⇒ returns
     ``E_new`` only ⇒ bit-identical.
     """
-    E_pos = jnp.maximum(E, 0.0)
+    E_pos = eke_positive_part(E, cfg)
+    w_s = cfg.source_split_width
+
+    def split(x):
+        # (pos, neg) with pos - neg == x exactly and both >= 0 (vote 1 E2);
+        # width 0 = (max(x, 0), max(-x, 0)).
+        pos = smooth_max_c1(x, 0.0, w_s)
+        return pos, pos - x
+
     # Accumulate the EXPLICIT positive production and the IMPLICIT extra sink rate
     # (from sign-indefinite sources' negative part) so the result stays ≥ 0.
     # ``None`` sentinel (not a 0.0 scalar): the default-off path traces the exact
@@ -592,7 +665,8 @@ def eke_apply_local_source(
     # scalar-dtype interaction — bit-identical by construction.
     extra_sink_rate = None
     if production_override is None:
-        production = eke_kappa_gm(E_pos, L, cfg) * sigma ** 2
+        # eke_kappa_gm takes its own positive part of E (codex r1: not E_pos twice)
+        production = eke_kappa_gm(E, L, cfg) * sigma ** 2
         if production_scale is not None:
             # Resolution-function budget coupling: the SAME f_res ∈ (0, 1]
             # the GM/Redi tracer flux applies to kappa_GM scales the
@@ -600,23 +674,28 @@ def eke_apply_local_source(
             # hardening as ``extra_source``) so the headline positivity-by-
             # construction guarantee holds UNCONDITIONALLY even for a rogue
             # negative scale (codex MED-3 r2 NIT); f_res ∈ (0, 1] is
-            # untouched by the clamp.
+            # untouched by the clamp.  Input guard, kept hard (vote 1 E1).
             production = production * jnp.maximum(production_scale, 0.0)
     elif clamp_production:
-        production = jnp.maximum(production_override, 0.0)
+        # one-sided C1 clamp: exactly 0 for P <= 0 (no source from a zero or
+        # negative conversion), exactly P above w_s, never above max(P, 0)
+        production = (positive_part_c1(production_override, 1.0 / w_s) if w_s
+                      else jnp.maximum(production_override, 0.0))
     else:
         # Signed override: positive part explicit, negative part implicit.
-        production = jnp.maximum(production_override, 0.0)
-        neg = jnp.maximum(-production_override, 0.0)        # ≥ 0 sink magnitude
+        production, neg = split(production_override)
+        # divisor guard: binds only where E_pos == 0 exactly (vote 1 E4)
         extra_sink_rate = neg / jnp.maximum(E_pos, 1.0e-30)
     if extra_source is not None:
+        # input guard on a source >= 0 by construction, kept hard (vote 1 E1)
         production = production + jnp.maximum(extra_source, 0.0)
     if signed_source is not None:
-        production = production + jnp.maximum(signed_source, 0.0)
-        neg = jnp.maximum(-signed_source, 0.0)
+        pos, neg = split(signed_source)
+        production = production + pos
         sink = neg / jnp.maximum(E_pos, 1.0e-30)
         extra_sink_rate = sink if extra_sink_rate is None else extra_sink_rate + sink
-    diss_rate = cfg.c_eps * jnp.sqrt(E_pos + 1.0e-30) / jnp.maximum(L, cfg.l_min)
+    L_d = smooth_max_c1(L, cfg.l_min, cfg.length_switch_width)
+    diss_rate = cfg.c_eps * _sqrt0(E_pos) / L_d
     # Both rates are ≥ 0; the implicit denominator ≥ 1 ⇒ E_new ≥ 0 by construction.
     # ``diss_rate`` itself stays the pure Eden-Greatbatch rate — the
     # ``return_dissipation`` product below must exclude the extra sink folding.
@@ -800,6 +879,9 @@ def validate_eke_config(cfg: EKEConfig) -> None:
         raise ValueError(
             f"EKEConfig.kappa_gm_max must be > 0, got {cfg.kappa_gm_max!r}"
         )
+    for name in ("e_pos_width", "length_switch_width", "kappa_cap_width",
+                 "source_split_width"):
+        validate_smoothing_width(f"EKEConfig.{name}", getattr(cfg, name))
     if cfg.mixing_length_scheme not in ("rossby", "rhines"):
         raise ValueError(
             "EKEConfig.mixing_length_scheme must be 'rossby' or 'rhines', got "
@@ -898,7 +980,9 @@ __all__ = [
     "eke_len_composite",
     "eke_kappa_gm",
     "eke_local_tendency",
+    "eke_positive_part",
     "eke_3d_local_tendency",
     "eke_apply_local_source",
+    "eke_floor",
     "validate_eke_config",
 ]
