@@ -307,7 +307,8 @@ def main(argv=None):
         rank_window_s.append(comm.allgather(dt_local))
     comm.Barrier()
     if bargs.profile_dir and rank in (0, n_ranks // 2):
-        jax.profiler.start_trace(f"{bargs.profile_dir}/rank{rank:04d}")
+        jax.profiler.start_trace(f"{bargs.profile_dir}/rank{rank:04d}",
+                                 create_perfetto_trace=True)
         _timed(one_step, 2, sync)
         jax.profiler.stop_trace()
     elif bargs.profile_dir:
