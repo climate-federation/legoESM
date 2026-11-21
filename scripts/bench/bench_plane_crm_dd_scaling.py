@@ -89,7 +89,20 @@ def bench_parser() -> argparse.ArgumentParser:
                         "process).")
     p.add_argument("--output", type=str, default=None,
                    help="Append one JSON line (rank 0).")
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="After the timed windows, ranks 0 and n/2 record a "
+                        "jax.profiler trace of 2 steps under this directory.")
+    p.add_argument("--ablate-fix-mass", action="store_true",
+                   help="Attribution only: run with the dry-mass fixer off.")
     return p
+
+
+def _rank_stats(rank_window_s, time_steps):
+    """Per-rank ms/step (median over windows): min/median/max and slowest rank."""
+    per_rank = [1e3 * statistics.median(w[r] for w in rank_window_s) / time_steps
+                for r in range(len(rank_window_s[0]))]
+    return {"min": min(per_rank), "median": statistics.median(per_rank),
+            "max": max(per_rank), "slowest_rank": per_rank.index(max(per_rank))}
 
 
 def most_square_factors(n: int) -> tuple[int, int]:
@@ -243,6 +256,8 @@ def main(argv=None):
     ny_g, nx_g = global_grid_shape(bargs.mode, rargs.ny, rargs.nx,
                                    n_ranks_y, n_ranks_x)
     cfg = rcp.build_dycore_config(rargs)
+    if bargs.ablate_fix_mass:
+        cfg = cfg._replace(fix_mass=False)
     halo = horizontal_advection_halo_width(cfg)
     layout = make_plane_pencil_layout(
         rank=rank, n_ranks=n_ranks, n_ranks_y=n_ranks_y, n_ranks_x=n_ranks_x,
@@ -284,11 +299,19 @@ def main(argv=None):
     finite_ok = all(bool(jnp.all(jnp.isfinite(f.data))) for f in
                     (state.u, state.v, state.w, state.theta_prime,
                      state.rho_prime, state.tracers))
-    window_s = []
+    window_s, rank_window_s = [], []
     for _ in range(bargs.windows):
         comm.Barrier()
         dt_local = _timed(one_step, bargs.time_steps, sync)
         window_s.append(comm.allreduce(dt_local, op=MPI.MAX))
+        rank_window_s.append(comm.allgather(dt_local))
+    comm.Barrier()
+    if bargs.profile_dir and rank in (0, n_ranks // 2):
+        jax.profiler.start_trace(f"{bargs.profile_dir}/rank{rank:04d}")
+        _timed(one_step, 2, sync)
+        jax.profiler.stop_trace()
+    elif bargs.profile_dir:
+        _timed(one_step, 2, sync)
     comm.Barrier()
     finite_ok = finite_ok and all(
         bool(jnp.all(jnp.isfinite(f.data))) for f in
@@ -379,6 +402,7 @@ def main(argv=None):
             "ms_per_step_median": 1e3 * statistics.median(per_step),
             "finite": finite_all, "max_abs_dtheta_prime": max_dtheta,
             "physics": physics, "peak_rss_mib_max_rank": peak_rss_mib,
+            "rank_ms_per_step": _rank_stats(rank_window_s, bargs.time_steps),
             "dycore_config": {k: (v if isinstance(v, (int, float, str, bool,
                                                       type(None))) else str(v))
                               for k, v in cfg._asdict().items()},
