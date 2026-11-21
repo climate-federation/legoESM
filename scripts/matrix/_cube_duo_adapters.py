@@ -313,13 +313,83 @@ DUO_HYDRO_KM = 32
 DUO_HYDRO_ETA = "cam6_l32"
 
 
+def rotated_jw_bundle(model, *, perturbed: bool, alpha: float) -> dict:
+    """DCMIP 2008 4-1/4-2 rotated baroclinic-wave bundle on the duo grid.
+
+    The analytic state is the SAME builder every other matrix grid uses
+    (``jablonowski_rotated._build_rotated_state_dense_grid``) on the run's
+    own CAM6 L32 coordinate (``make_cam6_l32_levels``; its
+    ``sigma_full * P0`` is the duo's full-level pressure at ``ps = P0``).
+    T fills ``pt`` at A-grid centres; geographic winds at D-edge midpoints
+    are projected onto the edge tangents by the certified
+    ``analytic_swcore_state`` covariant projection.  Starting from the
+    model's own DCMIP16 bundle keeps delp/ps/press (``ps = P0`` in both
+    ICs, so the layer masses are identical) and the passive sphum
+    passenger; only the compute windows of ``pt``/``u``/``v`` are
+    overwritten (halos stay as the DCMIP16 builder leaves them; the step's
+    entry exchanges fill them).
+    """
+    import jax.numpy as jnp
+    from legoesm.grids.fv3_native_gridstruct import analytic_swcore_state
+    from legoesm.grids.vertical import CAM6_L32_P0, make_cam6_l32_levels
+    from tests.test_cases.dcmip2008.jablonowski_rotated import (
+        _build_rotated_state_dense_grid)
+
+    coord = make_cam6_l32_levels()
+    km = model.config.km
+    if coord.n_levels != km or not (
+            # the two tables round differently at ~1e-8 relative
+            # (measured max 6.7e-4 Pa in ak); a different table is O(1)
+            np.allclose(np.asarray(coord.A_half) * CAM6_L32_P0, model.ak,
+                        rtol=1e-6, atol=1e-2)
+            and np.allclose(np.asarray(coord.B_half), model.bk,
+                            rtol=1e-6, atol=1e-12)):
+        raise ValueError("rotated JW duo IC: the model's eta table is not "
+                         "the CAM6 L32 coordinate the IC is built on")
+    ctx = model.grid.ctx_np
+    n, ng = ctx["n"], ctx["ng"]
+    sl = _compute_window(ctx)
+    bundle = model.dcmip16_initial_state(do_pert=False)
+    st = dict(bundle["state"])
+    pt = np.array(st["pt"])
+    u = np.array(st["u"])
+    v = np.array(st["v"])
+    for t, gs in enumerate(ctx["gs6"]):
+        lon = np.asarray(gs["agrid_lon"])[sl, sl]
+        lat = np.asarray(gs["agrid_lat"])[sl, sl]
+        _, _, T, _ = _build_rotated_state_dense_grid(
+            lon, lat, coord, perturbed, float(alpha))
+        pt[t, sl, sl, :] = np.asarray(T)
+        cache = {}
+
+        def winds3d(ll):
+            key = ll.tobytes()
+            if key not in cache:
+                ue, vn, _, _ = _build_rotated_state_dense_grid(
+                    ll[..., 0], ll[..., 1], coord, perturbed, float(alpha))
+                cache[key] = (np.asarray(ue), np.asarray(vn))
+            return cache[key]
+        for k in range(km):
+            d = analytic_swcore_state(
+                gs, wind_fn=lambda ll, k=k: tuple(a[..., k]
+                                                  for a in winds3d(ll)))
+            u[t, sl, ng:ng + n + 1, k] = d["u"][sl, ng:ng + n + 1]
+            v[t, ng:ng + n + 1, sl, k] = d["v"][ng:ng + n + 1, sl]
+    st.update(pt=jnp.asarray(pt), u=jnp.asarray(u), v=jnp.asarray(v))
+    return {**bundle, "state": st}
+
+
 def build_duo_hydro(n: int, *, perturbed: bool = True,
                     held_suarez: bool = False, km: int = DUO_HYDRO_KM,
-                    eta: str = DUO_HYDRO_ETA):
+                    eta: str = DUO_HYDRO_ETA,
+                    rotated_alpha: float | None = None):
     """FV3DuoDynamicsModel (production deck defaults) on C``n``.
 
     ``dt`` follows the driver lane: the deck dt 1920 s clamped by the
     driver's generic ``cfl_check_and_adjust`` (``ModelDriver``).
+    ``rotated_alpha`` (not None): DCMIP 2008 rotated JW -- the planet's
+    rotation axis tilted by alpha (``create_fv3_duo_grid(rotation_alpha)``)
+    and :func:`rotated_jw_bundle` as the IC.
     """
     import jax
     jax.config.update("jax_enable_x64", True)
@@ -328,10 +398,15 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     from legoesm.core.cfl import cfl_check_and_adjust
     from legoesm.grids.factory import create_fv3_duo_grid
 
-    grid = create_fv3_duo_grid(n)
+    grid = create_fv3_duo_grid(
+        n, rotation_alpha=0.0 if rotated_alpha is None else rotated_alpha)
     cfg = FV3DuoConfig(km=km, eta=eta, hydrostatic=True)
     model = FV3DuoDynamicsModel(grid, cfg)
-    bundle = model.dcmip16_initial_state(do_pert=perturbed)
+    if rotated_alpha is None:
+        bundle = model.dcmip16_initial_state(do_pert=perturbed)
+    else:
+        bundle = rotated_jw_bundle(model, perturbed=perturbed,
+                                   alpha=rotated_alpha)
     dt = float(cfl_check_and_adjust(1920.0, n, model_type="primitive_eq",
                                     grid_type="cubed_sphere"))
 
@@ -386,7 +461,12 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     note = (f"fv3_duo FV3DuoDynamicsModel km={km} eta={eta} hydrostatic, "
             f"nord={cfg.nord} d4_bg={cfg.d4_bg} sponge={cfg.sponge_del2_top_layers}"
             f"L, n_split={cfg.n_split}, dt={dt:g}s (deck 1920 s + driver "
-            f"CFL clamp); DCMIP16 baroclinic-wave IC (do_pert={perturbed})")
+            f"CFL clamp); " + (
+                f"DCMIP16 baroclinic-wave IC (do_pert={perturbed})"
+                if rotated_alpha is None else
+                f"rotated JW IC (jablonowski_rotated builder on CAM6 L32, "
+                f"alpha={rotated_alpha:.4f}, perturbed={perturbed}), "
+                f"rotated-planet Coriolis"))
     if held_suarez:
         note += " + certified FV3 HS (strat=T) after each step"
     return SimpleNamespace(

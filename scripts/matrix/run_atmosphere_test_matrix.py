@@ -4375,15 +4375,17 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     )
 
     if tc.grid_type == "cubed_sphere":
-        if tc.case not in ("baroclinic", "baroclinic_steady"):
+        if tc.case not in ("baroclinic", "baroclinic_steady",
+                           "rotated_baroclinic", "rotated_steady"):
             raise NotImplementedError(
-                f"{tc.case} on cube: no fv3_duo matrix adapter (duo has only "
-                "the DCMIP16 baroclinic-wave IC on this lane)")
+                f"{tc.case} on cube: no fv3_duo matrix adapter for this IC")
         # FV3 duo (sole cube core): FV3DuoDynamicsModel, DCMIP16 IC; see
         # scripts/matrix/_cube_duo_adapters.py.
         from scripts.matrix._cube_duo_adapters import build_duo_hydro
         n = int(tc.resolution[1:])
-        duo = build_duo_hydro(n, perturbed=_perturbed, held_suarez=False)
+        duo = (build_duo_hydro(n, perturbed=_rot_perturbed,
+                               rotated_alpha=_rot_alpha) if _rotated
+               else build_duo_hydro(n, perturbed=_perturbed))
         state = duo.state
         dt = duo.dt
         nlev = duo.km

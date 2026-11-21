@@ -67,8 +67,11 @@ def _rotate_to_rotated_frame(
     """Rotate geographic (lon, lat) into the rotated test-frame.
 
     Rotation is about the y-axis (i.e. the axis through (lon=π/2, lat=0)
-    and (lon=3π/2, lat=0)). The rotation matrix maps the original North
-    Pole (0,0,1) to (sin(α), 0, cos(α)).
+    and (lon=3π/2, lat=0)). The rotated frame's North Pole sits at
+    (-sin(α), 0, cos(α)), i.e. (lon=π, lat=π/2-α): the DCMIP 2008 / JW06 /
+    Williamson-1992 convention, so ``sin(lat_r)`` equals
+    ``legoesm.core.williamson_sw_analytic.rotated_sin_lat`` and the
+    rotated-planet Coriolis ``rotated_coriolis`` balances this state.
 
     Returns
     -------
@@ -83,7 +86,7 @@ def _rotate_to_rotated_frame(
     # Rotation about y-axis by -alpha (we rotate the FRAME by +alpha,
     # which is equivalent to rotating points by -alpha)
     cos_a = math.cos(alpha)
-    sin_a = math.sin(alpha)
+    sin_a = -math.sin(alpha)  # DCMIP pole at (lon=π, lat=π/2-α)
     xr = cos_a * x - sin_a * z
     yr = y
     zr = sin_a * x + cos_a * z
@@ -106,10 +109,10 @@ def _wind_rotation_factors(
 
     Given a vector u_r * e_hat_rotated_east at the rotated-frame point
     (lon_r, lat_r), return scalar projection coefficients (cos_gamma,
-    -sin_gamma) such that:
+    sin_gamma) such that:
 
         u_east_geo  = u_r * cos_gamma
-        v_north_geo =-u_r * sin_gamma
+        v_north_geo = u_r * sin_gamma
 
     The local angle ``gamma`` satisfies::
 
@@ -120,7 +123,7 @@ def _wind_rotation_factors(
     via the inverse rotation matrix (a rotation by +α about y-axis).
     """
     cos_a = math.cos(alpha)
-    sin_a = math.sin(alpha)
+    sin_a = -math.sin(alpha)  # DCMIP pole at (lon=π, lat=π/2-α)
 
     # Rotated-frame east unit vector at (lon_r, lat_r), expressed in the
     # rotated coordinate basis: (-sin(lon_r), cos(lon_r), 0).
@@ -144,7 +147,10 @@ def _wind_rotation_factors(
     geo_n_z = jnp.cos(lat)
 
     cos_gamma = e_x * geo_e_x + e_y * geo_e_y + e_z * geo_e_z
-    sin_gamma_neg_v = -(e_x * geo_n_x + e_y * geo_n_y + e_z * geo_n_z)
+    # The north component of u_r * e_rot is u_r * (e_rot . n_geo); the
+    # previous leading minus flipped v, so the rotated jet blew across its own
+    # pressure gradient (v . grad sin(lat_r) != 0) and was never steady.
+    sin_gamma_neg_v = e_x * geo_n_x + e_y * geo_n_y + e_z * geo_n_z
     return cos_gamma, sin_gamma_neg_v
 
 
