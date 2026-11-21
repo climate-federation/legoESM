@@ -227,13 +227,16 @@ def _v_face_length(grid, row):
     return float(grid.radius) * jnp.cos(jnp.asarray(grid.lat_v)[row]) * float(grid.dlon)
 
 
-def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=None):
+def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=None, m2=None):
     """CROCO t3dbc.F / u3dbc.F adaptive oblique radiation with nudging, on
     arrays (..., along) ordered boundary, first, second interior; r_in,
-    r_out = dt / tau (dimensionless).  mb, m1 (..., along): wet masks of the
-    boundary row and the first interior row; the tangential gradients are
-    zero across a dry neighbour (CROCO multiplies them by the land mask), and
-    the result is zero on dry points.  None: no masking."""
+    r_out = dt / tau (dimensionless).  mb, m1, m2 (..., along): wet masks of
+    the boundary row and the first and second interior rows.  As CROCO
+    multiplies its gradients by the land mask: the tangential gradients are
+    zero across a dry neighbour, the normal gradients are zero where the first
+    or second interior cell is dry (no radiation: the boundary value is kept
+    and nudged with the outflow time scale), and the result is zero on dry
+    points.  None: no masking."""
     def tgrad(f, m):
         gb = f - jnp.concatenate([f[..., :1], f[..., :-1]], axis=-1)
         if m is not None:
@@ -242,6 +245,9 @@ def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=Non
     gb, g1 = tgrad(fb_old, mb), tgrad(f1_old, m1)
     dft = f1_old - f1_new
     dfx = f1_new - f2_new
+    if m1 is not None:          # no radiation from dry interior cells (their values are not water)
+        radiate = m1 if m2 is None else m1 * m2
+        dft, dfx = dft * radiate, dfx * radiate
     inflow = dfx * dft < 0.0
     dft = jnp.where(inflow, 0.0, dft)
     tau = jnp.where(inflow, r_in, r_out)
@@ -335,10 +341,11 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
         face = 1 if side in ('west', 'south') else -2
         mb = (_side(h, side, ring, 0) > 0).astype(h.dtype)          # wet ring cells per level
         m1 = (_side(h, side, ring, 1) > 0).astype(h.dtype)          # wet first interior cells per level
+        m2 = (_side(h, side, ring, 2) > 0).astype(h.dtype)          # wet second interior cells per level
         for name, data in (('T', dT), ('S', getattr(ob, f'{side}_S'))):
             new, old = (T, To) if name == 'T' else (S, So)
             row = _orlanski(_side(old, side, ring, 0), _side(old, side, ring, 1), _side(new, side, ring, 1),
-                            _side(new, side, ring, 2), data, r_in, r_out, mb, m1)
+                            _side(new, side, ring, 2), data, r_in, r_out, mb, m1, m2)
             if name == 'T':
                 T = _set_side(T, side, ring, row)
             else:

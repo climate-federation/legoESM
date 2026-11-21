@@ -82,3 +82,53 @@ def test_ring_radiation_ignores_dry_neighbours():
     assert ring_change > 1e-4, ring_change          # the boundary data reach the ring: the test is not vacuous
     assert uniform_T < 1e-12, uniform_T             # land corners no longer feed zeros into the ring
     assert dry == 0.0, dry                          # nothing is written into dry ring cells or corners
+
+
+def test_ring_cells_deeper_than_the_interior_stay_physical():
+    """A south ring deeper than the first interior row (1200 m against 300 m): below 300 m the ring cells have
+    no wet interior neighbour, and the cells under the shallow row are dry. A 2-D band rate fills those dry
+    cells with target values from zero, as the model's explicit sponge does. The ring cells must not radiate
+    from them: S in the deep ring cells stays between the data (34.5) and the start (35.0). Before the radiation
+    was masked by the interior wet masks, they were pulled toward the dry cells' values (stream C, 1b setup:
+    about 1 percent of S per step)."""
+    grid, wall = create_regional_grid("latlon", n_lat=NY, n_lon=NX, lat_south=-5.0,
+                                      lat_north=5.0, lon_west=200.0, lon_east=200.0 + NX)
+    ocean = np.asarray(wall) > 0.5
+    ocean[1:-1, 0] = True
+    ocean[0, 1:-1] = True
+    ocean[-1, 1:-1] = True
+    H = np.where(ocean, 1200.0, 0.0)
+    H[1, 1:-1] = np.where(ocean[1, 1:-1], 300.0, 0.0)             # a shallow first interior row on the south side
+    zc = create_z_star_from_thicknesses(np.array([20.0, 40.0, 80.0, 160.0, 300.0, 600.0]))
+    zc_pc, H2, lm = make_partial_cell_latlon(zc, H, ocean.astype(float), smoothing_passes=0)
+    st = rest_state_latlon_cgrid_ocean(grid, zc_pc, land_mask_override=jnp.asarray(lm),
+                                       H_bathy_override=jnp.asarray(H2), H_max=float(zc.H_max))
+    wet0 = np.asarray(compute_layer_thickness(st.eta.data, st.H_bathy.data, zc_pc)) > 0
+    st = st._replace(T=st.T.replace(data=jnp.asarray(15.0 * wet0)), S=st.S.replace(data=jnp.asarray(35.0 * wet0)))
+    nl = st.T.data.shape[-1]
+    kw = {}
+    for side, n in (("west", NY + 2), ("south", NX + 2), ("north", NX + 2)):
+        bar = "ubar" if side == "west" else "vbar"
+        kw.update({f"{side}_{bar}": jnp.zeros(n), f"{side}_zeta": jnp.zeros(n),
+                   f"{side}_T": jnp.full((nl, n), 15.0), f"{side}_S": jnp.full((nl, n), 34.5),
+                   f"{side}_u3": jnp.zeros((nl, n)), f"{side}_t3": jnp.zeros((nl, n + 1))})
+    ob = OpenBoundaryData(tau_in=jnp.asarray(86400.0), tau_out=jnp.asarray(360 * 86400.0), **kw)
+    jj, ii = np.meshgrid(np.arange(NY + 2), np.arange(NX + 2), indexing="ij")
+    d = np.minimum(np.minimum(ii, jj), NY + 1 - jj).astype(float)
+    gam = jnp.asarray(np.where(d < 3, (1 - d / 3) ** 2, 0.0) / 86400.0 * lm)     # 2-D: fills the dry cells
+    sponge = SpongeForcing(gamma=gam, T_ref=jnp.full(st.T.data.shape, 15.0), S_ref=jnp.full(st.S.data.shape, 34.5),
+                           open_boundary=ob)
+    cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, physics=OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(scheme="constant"),
+        lateral_mixing=LateralMixingConfig(scheme="none"), shortwave_penetration=None))
+    model = LatLonCGridOceanModel(grid, zc_pc, cfg)
+    z = jnp.zeros_like(st.eta.data)
+    sf = OceanSurfaceForcing(tau_x=z, tau_y=z, q_net=z, sw_down=None)
+    deep_ring = wet0[0] & ~wet0[1]                                      # ring cells with a dry cell inward
+    assert deep_ring.sum() > 0
+    lo, hi = np.inf, -np.inf
+    for _ in range(N_STEPS):
+        st = model.step(st, DT, surface_forcing=sf, sponge=sponge)
+        Sr = np.asarray(st.S.data)[0][deep_ring]
+        lo, hi = min(lo, float(Sr.min())), max(hi, float(Sr.max()))
+    assert 34.5 - 1e-9 <= lo and hi <= 35.0 + 1e-9, (lo, hi)
