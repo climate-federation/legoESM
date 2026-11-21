@@ -1429,7 +1429,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             _turb_extra["conv_dlf"] = dlf
         if (_host_omega_once and state.v is None
                 and HOST_OMEGA_FORCING_KEY not in (forcing or {})):
-            # a column model (cell winds) supplies its own omega
+            # edge winds (state.v is None) = the MPAS GCM: diagnose the
+            # pre-physics omega once and hold it through the sub-cycle; a
+            # column model (cell winds) must pass its own in the forcing
             _turb_extra[HOST_OMEGA_FORCING_KEY] = mpas_host_omega(
                 state, grid, sigma_coord)
         # Each sub-cycled module is applied (state AND carry) before the next
