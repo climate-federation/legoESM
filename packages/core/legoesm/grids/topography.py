@@ -742,13 +742,15 @@ def subgrid_orography_per_cell(cell_lat_rad, cell_lon_rad, lat_src_deg, lon_src_
     return np.sqrt(var), mean, cnt
 
 
-def load_subgrid_orography_cells(path, n_cells: int, mesh_sha256: str) -> np.ndarray:
+def load_subgrid_orography_cells(path, n_cells: int, mesh_sha256: str,
+                                 cells=None) -> np.ndarray:
     """Per-cell ``sgh`` [m] from a file written for one saved MPAS mesh.
 
     The file (``scripts/data/build_subgrid_orography_cells.py``) holds
     ``sgh`` ``(nCells,)`` in the mesh's cell order and the SHA-256 of that
     mesh; it is refused unless the hash equals ``mesh_sha256`` (the run's
-    pinned mesh) and the length equals ``n_cells``.
+    pinned mesh) and the length equals ``n_cells``.  ``cells`` (global cell
+    indices, e.g. an MPI rank's owned-then-halo cells) selects those entries.
     """
     with np.load(os.fspath(path), allow_pickle=False) as d:
         if "sgh" not in d.files or "mesh_sha256" not in d.files:
@@ -765,7 +767,7 @@ def load_subgrid_orography_cells(path, n_cells: int, mesh_sha256: str) -> np.nda
         raise ValueError(f"{path}: sgh has shape {sgh.shape}, the mesh has {n_cells} cells")
     if not np.all(np.isfinite(sgh)) or np.any(sgh < 0.0):
         raise ValueError(f"{path}: sgh must be finite and >= 0")
-    return sgh
+    return sgh if cells is None else sgh[np.asarray(cells)]
 
 
 def neighbour_table(grid):

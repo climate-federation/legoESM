@@ -3913,9 +3913,17 @@ class ModelDriver:
                         raise ValueError(
                             "a per-cell subgrid orography file (.npz) needs a "
                             "saved, pinned MPAS mesh (mpas_mesh_file)")
+                    # Under the cell-partition MPI lane the file is in the
+                    # GLOBAL cell order; take this rank's local cells.
+                    _vl = getattr(self, "_voronoi_layout", None)
+                    _part = None if _vl is None else _vl.partition
                     sso = jnp.asarray(load_subgrid_orography_cells(
-                        sso_path, int(np.asarray(self.grid.grid_lat).size),
-                        getattr(_gcfg, "mpas_mesh_sha256", ""))).astype(_sd)
+                        sso_path,
+                        (int(np.asarray(self.grid.grid_lat).size) if _part is None
+                         else int(_part.nCells_global)),
+                        getattr(_gcfg, "mpas_mesh_sha256", ""),
+                        cells=None if _part is None else _part.local_cells,
+                    )).astype(_sd)
                     logger.info("  subgrid orography per cell footprint from %s",
                                 sso_path)
                 # lat-lon column lane: the native grid (its own spacing for
