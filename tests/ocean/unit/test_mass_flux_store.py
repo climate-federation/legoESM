@@ -1437,6 +1437,8 @@ def test_store_mass_flux_is_the_last_config_field():
             "runoff_temperature_floor_sharpness",
             # NEMO eddy_viscosity_3D coastal closure (OMIP card port, #2472)
             "lateral_viscosity_file_coastal",
+            # ENSO-fork port: per-step temperature budget record (diagnostic, default off)
+            "store_tracer_budget",
             )
     assert fields[-len(tail):] == tail, (
         f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "
