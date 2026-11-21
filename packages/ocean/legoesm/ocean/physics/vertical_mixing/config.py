@@ -182,8 +182,6 @@ __param_spec__ = {
             "gamma_T": "Large 1994 fixed nondim constant",
             "zeta_m_abs": "Large 1994 fixed nondim constant",
             "zeta_s_abs": "Large 1994 fixed nondim constant",
-            "surrogate_width_sigma": "numerics: surrogate-gradient width",
-            "surrogate_width_n2": "numerics: surrogate-gradient width",
         },
         "params": {
             "A_bg": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},

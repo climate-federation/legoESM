@@ -67,4 +67,4 @@ forcing:
   path: ""
 output:
   format: zarr
-  path: output/omip_latlon_kpp/
+  path: output/omip_latlon_kpp_cvmix/
