@@ -332,7 +332,7 @@ def _orlanski_1d(fb_new, f1_old, f1_new, f2_new, data, r_in, r_out, rx_max, *, w
     w_out = step_rel(p, dhdt * dhdt + dhdx * dhdx + _EPS, width)
     if width == 0:
         out = p > 0.0
-        rx = jnp.where(out, jnp.minimum(dhdt / jnp.where(out, dhdx, 1.0), rx_max), 0.0)
+        rx = jnp.where(out, jnp.minimum(stable_div(dhdt, jnp.where(out, dhdx, 1.0)), rx_max), 0.0)
     else:
         # one-sided (0 for inflow, never negative), so 1 + rx stays positive
         pp = positive_part_rel(p, dhdt * dhdt + dhdx * dhdx, width)
