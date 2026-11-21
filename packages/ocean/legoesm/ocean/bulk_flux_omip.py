@@ -3079,27 +3079,13 @@ def _nemo_fld_is_not_used(name: str) -> bool:
 
 
 def _nemo_checked_sponge(sponge, kt):
-    """Validate a damping stamp, then satisfy the traced identity guard."""
+    """Validate an eager damping stamp, then satisfy the traced identity guard.
+
+    Compiled coupled runners validate each concrete pair before invoking their
+    executable.  The traced arm must stay callback-free: CUDA cannot execute a
+    host callback when no local CPU device is registered.
+    """
     if isinstance(kt, jax.core.Tracer):
-        target = sponge.nemo_kt
-        if target is None:
-            raise ValueError("L6 damping target is stale: target kt=None")
-
-        def fail_if_stale(target_value, requested_value):
-            target_scalar = np.asarray(target_value)
-            requested_scalar = np.asarray(requested_value)
-            if (target_scalar.shape != () or target_scalar.dtype.kind not in "iu"
-                    or requested_scalar.shape != ()
-                    or requested_scalar.dtype.kind not in "iu"
-                    or int(target_scalar) < 1
-                    or int(requested_scalar) < 1
-                    or int(target_scalar) != int(requested_scalar)):
-                raise ValueError(
-                    "L6 damping target is stale: "
-                    f"target kt={target_scalar!r}, requested kt={requested_scalar!r}"
-                )
-
-        jax.debug.callback(fail_if_stale, target, kt, ordered=True)
         return sponge._replace(nemo_kt=kt)
     target = sponge.nemo_kt
     requested = int(np.asarray(kt))

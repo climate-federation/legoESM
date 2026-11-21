@@ -377,24 +377,25 @@ def test_coupled_step_refuses_stale_damping_stamp_before_ocean(monkeypatch):
 
 
 @pytest.mark.parametrize("target", (0, 999))
-def test_compiled_sponge_stamp_refuses_stale_or_nonpositive_target(target):
+def test_host_sponge_stamp_refuses_stale_or_nonpositive_target(target):
+    with pytest.raises(ValueError, match="L6 damping target is stale"):
+        bulk._nemo_checked_sponge(_StampedSponge(target), 1)
+
+
+def test_lowered_sponge_stamp_guard_has_no_host_callback():
     @jax.jit
     def checked(target_kt, requested_kt):
         return bulk._nemo_checked_sponge(
             _StampedSponge(target_kt), requested_kt
         ).nemo_kt
 
-    with pytest.raises(Exception, match="L6 damping target is stale"):
-        jax.block_until_ready(checked(jnp.asarray(target), jnp.asarray(1)))
+    lowered = checked.lower(jnp.asarray(1), jnp.asarray(1)).as_text()
+    assert "xla_ffi_python_cpu_callback" not in lowered
 
 
 def test_compiled_sponge_stamp_refuses_none_before_execution():
     with pytest.raises(ValueError, match="target kt=None"):
-        jax.jit(
-            lambda requested: bulk._nemo_checked_sponge(
-                _StampedSponge(None), requested
-            ).nemo_kt
-        )(jnp.asarray(1))
+        bulk._nemo_checked_sponge(_StampedSponge(None), 1)
 
 
 @pytest.fixture(scope="module")
@@ -552,12 +553,30 @@ def test_route_fixture_keeps_mature_slots_in_source_owned_carry(
 
 
 def test_second_pair_matches_live_sequential_mature_history(real_coupled_fixture):
-    carry, forcing, card, model, first_pair = real_coupled_fixture
-    paired = _real_pair((first_pair, forcing, card, model))
+    carry, forcing, card, model = real_coupled_fixture[:4]
+    base_config = card.ocean.recipe.model_config
+    active_config = base_config._replace(barotropic=base_config.barotropic._replace(
+        barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.07,
+        nemo_prognostic_barotropic_state=True,
+    ))
+    active_model = type(model)(model.grid, model.z_coord, active_config)
+    active_card = card._replace(ocean=SimpleNamespace(
+        dt_s=card.ocean.dt_s,
+        recipe=SimpleNamespace(
+            z_coord=model.z_coord,
+            model_config=active_config,
+        ),
+    ))
+    active_fixture = (carry, forcing, active_card, active_model)
+    first_pair = _real_pair(active_fixture)
+    assert first_pair.ocean.bt_hist is not None
+    assert first_pair.ice.ice.cflice_delayed is not None
+    paired = _real_pair((first_pair, forcing, active_card, active_model))
     sequential = first_pair
     for surface_update in (True, False):
         sequential, _ = bulk.nemo_orca2_si3_coupled_step(
-            sequential, forcing, card, model=model, sponge=None,
+            sequential, forcing, active_card, model=active_model, sponge=None,
             _surface_update=surface_update,
         )
     for name in ("T", "S", "eta"):

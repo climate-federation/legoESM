@@ -18441,6 +18441,13 @@ for _citation, _lines in (
 ):
     _merge_resolution_repin(_citation, _lines)
 
+for _citation, _lines in (
+    ('tests/ocean/fidelity/test_orca2_round342_s4_year.py:180-448', '196-464'),
+    ('tests/ocean/fidelity/test_orca2_round342_s4_year.py:265-360', '281-376'),
+    ('tests/ocean/fidelity/test_orca2_round342_s4_year.py:710-727', '726-743'),
+):
+    _merge_resolution_repin(_citation, _lines)
+
 # Carbon review follow-up: validation and carry hardening moved these live
 # statements.  Keep the historical receipt citations bound to their exact
 # post-review source locations.

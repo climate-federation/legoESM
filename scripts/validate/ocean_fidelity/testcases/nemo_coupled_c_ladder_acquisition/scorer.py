@@ -1361,6 +1361,11 @@ def main() -> int:
         parser.error("--mode C0-C2 or --mode C3 is required outside --self-test")
     if args.math is None:
         parser.error("--math libm-cpu or --math fast-literal is required outside --self-test")
+    if args.mode == "C0-C2" and args.math == "fast-literal":
+        parser.error(
+            "--mode C0-C2 --math fast-literal is refused: C1 alb_ice is not "
+            "0 ULP; the exactness bar is unchanged"
+        )
     _admitted_resolved_namelist(args.evidence)
     if args.mode == "C3":
         report = {

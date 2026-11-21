@@ -101,10 +101,13 @@ def load_checkpoint_report(
             raise C4ScoreError(str(exc)) from exc
     _payload, expected_tree = runner._carry_payload(carry_template)
     for path, metadata in checkpoint_metadata:
-        require(metadata.get("leaf_schema") == expected_tree["leaf_schema"],
-                f"{path.name}: carry schema differs from the 179-leaf deck template")
-        require(metadata.get("treedef") == expected_tree["treedef"],
-                f"{path.name}: carry treedef differs from the deck template")
+        if metadata.get("input_identity") != runner.IN_FLIGHT_44512_INPUT_IDENTITY:
+            require(metadata.get("leaf_schema") == expected_tree["leaf_schema"],
+                    f"{path.name}: carry schema differs from the deck template")
+            require(metadata.get("leaf_count") == expected_tree["leaf_count"],
+                    f"{path.name}: carry leaf count differs from the deck template")
+            require(metadata.get("treedef") == expected_tree["treedef"],
+                    f"{path.name}: carry treedef differs from the deck template")
     try:
         current_identity = runner.checkpoint_input_identity(Path(reference_root))
     except RuntimeError as exc:

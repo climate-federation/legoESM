@@ -615,3 +615,19 @@ def test_scorer_main_requires_math(monkeypatch, tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as raised:
         scorer.main()
     assert raised.value.code == 2
+
+
+def test_scorer_main_refuses_fast_literal_under_c0_c2_exactness_bar(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["scorer.py", "--evidence", str(tmp_path),
+         "--ppsrc", str(tmp_path / "ppsrc"), "--mode", "C0-C2",
+         "--math", "fast-literal"],
+    )
+    with pytest.raises(SystemExit) as raised:
+        scorer.main()
+    assert raised.value.code == 2
+    assert "C1 alb_ice is not 0 ULP; the exactness bar is unchanged" in capsys.readouterr().err

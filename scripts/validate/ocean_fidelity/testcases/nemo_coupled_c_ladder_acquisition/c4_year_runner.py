@@ -285,7 +285,11 @@ def _carry_payload(carry: Any) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     ]
     return (
         {row["name"]: array for row, array in zip(schema, arrays, strict=True)},
-        {"leaf_schema": schema, "treedef": str(treedef)},
+        {
+            "leaf_schema": schema,
+            "leaf_count": treedef.num_leaves,
+            "treedef": str(treedef),
+        },
     )
 
 
@@ -409,10 +413,30 @@ def inspect_checkpoint(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         schema = metadata.get("leaf_schema", [])
         require(isinstance(schema, list) and bool(schema),
                 f"{path.name}: checkpoint has no carry leaf schema")
+        treedef_text = metadata.get("treedef")
+        require(isinstance(treedef_text, str) and bool(treedef_text),
+                f"{path.name}: checkpoint has no carry treedef")
+        treedef_leaf_count = treedef_text.count("*")
+        require(treedef_leaf_count > 0,
+                f"{path.name}: checkpoint carry treedef has no leaves")
+        leaf_count = metadata.get("leaf_count")
+        if (leaf_count is None
+                and metadata.get("input_identity") == IN_FLIGHT_44512_INPUT_IDENTITY):
+            # The already-running checkpoint format predates the explicit
+            # treedef count.  Its exact admitted identity and schema retain the
+            # count needed for scoring only; restore still requires the live
+            # deck-built treedef below.
+            leaf_count = treedef_leaf_count
+        require(type(leaf_count) is int and leaf_count > 0,
+                f"{path.name}: checkpoint has no valid carry treedef leaf count")
+        require(leaf_count == treedef_leaf_count,
+                f"{path.name}: carry leaf count differs from its treedef")
+        require(len(schema) == leaf_count,
+                f"{path.name}: carry schema differs from its treedef leaf count")
         names = [str(row.get("name", "")) for row in schema]
-        expected_names = [f"carry_{index:05d}" for index in range(179)]
+        expected_names = [f"carry_{index:05d}" for index in range(leaf_count)]
         require(names == expected_names,
-                f"{path.name}: carry leaf schema is not the 179-leaf coupled carry")
+                f"{path.name}: carry leaf schema order differs from its treedef")
         expected = set(names) | {"__metadata_json__", "__month_report_json__"}
         require(set(archive.files) == expected,
                 f"{path.name}: checkpoint archive leaves differ from its carry schema")
@@ -689,6 +713,9 @@ def compile_pair(
 
     from legoesm.ocean import bulk_flux_omip as bulk
 
+    c_ladder_scorer._validate_sponge_steps(
+        (odd_sponge, even_sponge), int(np.asarray(carry.kt))
+    )
     compile_count = 0
 
     def pair_program(entry, odd_forcing, even_forcing, odd_sponge, even_sponge):
@@ -725,6 +752,9 @@ def _advance_pairs(executable, carry, forcing, sponge, start: int, stop: int):
     timings = []
     for pair_index in range(start, stop):
         odd_index = 2 * pair_index
+        c_ladder_scorer._validate_sponge_steps(
+            (sponge[odd_index], sponge[odd_index + 1]), int(np.asarray(carry.kt))
+        )
         started = time.perf_counter()
         carry = executable(
             carry,
@@ -966,6 +996,9 @@ def _run_c4(
         else:
             odd_forcing, odd_sponge = inputs.record(odd_index + 1)
             even_forcing, even_sponge = inputs.record(odd_index + 2)
+        c_ladder_scorer._validate_sponge_steps(
+            (odd_sponge, even_sponge), int(np.asarray(carry.kt))
+        )
         started = time.perf_counter()
         carry = executable(
             carry,
