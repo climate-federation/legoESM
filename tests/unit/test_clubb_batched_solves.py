@@ -13,12 +13,13 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.turbulence import clubb as C  # noqa: E402, N812
 
 
-def _systems(rng, n_sys, ncol, n, nb):
+def _systems(rng, n_sys, ncol, n, nb, dominant=True):
     out = []
     for _ in range(n_sys):
         lhs = jnp.asarray(rng.standard_normal((nb, ncol, n)))
-        # diagonally dominant main band so every system is well posed
-        lhs = lhs.at[nb // 2].add(10.0)
+        if dominant:
+            # diagonally dominant main band so every system is well posed
+            lhs = lhs.at[nb // 2].add(10.0)
         rhs = jnp.asarray(rng.standard_normal((ncol, n)))
         out.append((lhs, rhs))
     return out
@@ -55,3 +56,13 @@ def test_batched_solve_refuses_mismatched_columns():
     (lhs, rhs), = _systems(rng, 1, ncol=5, n=9, nb=3)
     with pytest.raises(ValueError):
         C._batched_tridiag_solve([(lhs, rhs), (lhs[:, :3], rhs[:3])])
+
+
+@pytest.mark.parametrize("n_sys", [2, 3])
+def test_batched_penta_equals_sequential_when_rows_pivot(n_sys):
+    """Not diagonally dominant: the partial pivoting picks rows per column, and
+    the batched solve must still equal each per-system solve bit for bit."""
+    rng = np.random.default_rng(4)
+    systems = _systems(rng, n_sys, ncol=9, n=21, nb=5, dominant=False)
+    for (lhs, rhs), x in zip(systems, C._batched_penta_solve(systems)):
+        np.testing.assert_array_equal(np.asarray(x), np.asarray(C.penta_solve(lhs, rhs)))
