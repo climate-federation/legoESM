@@ -114,7 +114,10 @@ def _characteristic(ub_old, u1_old, zb_old, z1_old, z1_new, hb, h1, dn, dt_s, g,
     """CROCO u2dbc.F, OBC_M2CHARACT with M2_FRC_BRY and Z_FRC_BRY; sign +1 for
     west and south, -1 for north (the outgoing characteristic changes sign)."""
     D = 0.5 * (hb + zb_old + h1 + z1_old)
-    hx = jnp.sqrt(g / max_rel(D, _EPS, _FLOOR_WIDTH))
+    # sqrt(g / max(D, _EPS)), with the floored (dry) points as a constant so no
+    # derivative of g / _EPS reaches the gradient (float32 overflows it)
+    wet = D > _EPS
+    hx = jnp.where(wet, jnp.sqrt(g / jnp.where(wet, D, 1.0)), jnp.sqrt(g / _EPS))
     cx = dt_s * D * hx / dn
     zx = (0.5 + cx) * z1_old + (0.5 - cx) * zb_old
     active = cx > _CX_CRIT
