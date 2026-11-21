@@ -6612,26 +6612,3 @@ def test_positivity_condensate_from_vapour_flag_flows_to_config():
         "--dataset", "analytical", "--no-positivity-condensate-from-vapour",
     ]), parser))
     assert cfg_no.dycore.positivity_condensate_from_vapour is False
-
-
-def test_five_mode_flag_round_trips_and_refuses_checkpoints():
-    parser = build_arg_parser()
-    off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
-    assert off.five_mode == "off"
-    on = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--five-mode", "forced"]), parser))
-    assert on.five_mode == "forced"
-    with pytest.raises(ValueError, match="five_mode"):
-        on._replace(five_mode="route_b").validate_strict()
-    with pytest.raises(ValueError, match="cannot be checkpointed"):
-        on._replace(output=on.output._replace(checkpoint_days=30)).validate_strict()
-
-
-def test_five_deck_selects_five_and_disables_checkpoints():
-    from pathlib import Path
-    import yaml
-    deck = yaml.safe_load((Path(__file__).resolve().parents[2]
-                           / "config/amip/amip_production_five.yaml").read_text())
-    assert deck["include"] == "amip_production.yaml"
-    assert deck["five_mode"] == "always" and deck["checkpoint_days"] == 0

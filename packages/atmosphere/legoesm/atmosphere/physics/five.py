@@ -32,6 +32,10 @@ selection (running-mean EIS/omega regime machine with hysteresis, hold and a
 capacity whose overflow stops the run) -- its switches on traced state have no
 smooth form that keeps their meaning.
 
+Column use only: reached through ``make_physics(five=FiveConfig(...))``; no
+driver switch or deck selects it.  The build refuses every lane it cannot run
+on, including the production MPAS deck (its physics cadence cache).
+
 Not built here (docs/85 13.24): the fine-grid vertical advection, a gather of
 active columns (host and fine physics both run in every column and the result
 is selected), ZM's gross sink and source (the net increment is split by
