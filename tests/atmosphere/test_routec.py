@@ -340,7 +340,13 @@ _CASES = {
 # Re-measured 2026-11-21 after switching the logistics to compact C1 ramps
 # (vote A/A/A: the logistic midpoints sat on admissible boundary states, e.g.
 # a well-mixed layer, and gave a rejected candidate half weight).
-_GAP = {}
+_GAP = {
+    "d0": [0.0, 0.0, 0.0, 0.0],
+    "known": [0.0, 0.0, 0.0, 0.0],
+    "lock_edge": [0.0, 0.0, -0.23076923076924002, -0.02912621359221919],  # m = 0.1 on Lock's ramp
+    "small_m": [0.0, 0.0, 0.0, 0.0],
+    "thin": [0.0, 0.0, 0.0, 0.0],
+}
 
 
 @pytest.mark.parametrize("name", sorted(_CASES))
@@ -428,7 +434,8 @@ def _E_case(name):
 
 # per case: E at the default widths minus the hard form (absolute; E is in
 # [0, 1]); measured 2026-11-21
-_E_GAP = {}
+_E_GAP = {"cloudy": 0.0001132809321338843, "just_saturated": 2.3604247784370417e-05,
+          "unsaturated": 0.0}
 
 
 @pytest.mark.parametrize("name", ["cloudy", "just_saturated", "unsaturated"])
@@ -443,7 +450,7 @@ def test_r5_enhancement_gap_per_case(name):
 
 def test_r5_gradients_through_the_cloudy_and_pressure_switches():
     c = _known_column()
-    ql = c["ql"].at[0, c["kb"] - 1].set(rc.QL_MIN + 5e-8)    # inside the ql band
+    ql = c["ql"].at[0, c["kb"] - 1].set(rc.QL_MIN - 5e-8)    # inside the ql ramp
     ph = c["p_half"]
 
     def f(ql, p_half):
