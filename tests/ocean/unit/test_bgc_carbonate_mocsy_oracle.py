@@ -10,6 +10,11 @@ silicate = phosphate = 0 (provenance string stored in the fixture).
   fugacity correction (module docstring).  With phosphate = silicate = 0 here, its pCO2 departure
   from mocsy (-0.9 % to -4.8 %) comes from the water alkalinity and fugacity terms only.  That open
   deficit is pinned per case as a change detector (rel 1e-6, abs floor 1e-12), not accepted as correct.
+
+Revert gates: the B_T parity and the pCO2/fCO2 pins fail if the boron fix is reverted.  K0, K1, K2
+and K_B are oracle-parity checks of unchanged code, not revert gates.
+The Fortran driver that built the fixture is NOT committed (open follow-up); the reference
+coefficients were checked against mocsy v2.4.1 constants.f90 in review.
 """
 from pathlib import Path
 

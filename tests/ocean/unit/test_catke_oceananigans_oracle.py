@@ -21,6 +21,11 @@ KNOWN DIFFERENCES, pinned per case (rel 1e-6, abs 1e-12), from the different sta
   to exactly 0 (Julia: NaN * false == 0), so its dissipation length is inf, capped at the column depth.
   The port's Ri from centre-averaged N² is finite and positive (sigma = 0.579, length 1.1 m).  Measured
   offline (gap 116x, pinned; the other 31 centres match to 7e-16); an oracle artifact, not a port defect.
+
+Revert gates: the default tripwire and the diffusivity/dissipation cases F1, F4, F6 and F7 fail if
+c_bottom_shear is reverted to 0.28 (measured).  The surface TKE flux (which never reads it) and the
+cases F2, F3, F5 (unchanged by the revert) are oracle-parity checks, not revert gates.
+The Julia script that built the fixture is NOT committed (open follow-up).
 """
 from pathlib import Path
 
