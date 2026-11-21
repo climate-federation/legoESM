@@ -182,7 +182,8 @@ class RRTMOptics(optics_base.OpticsScheme):
     return ps_fn
 
   def _cloud_props(
-      self, ibnd, is_lw, r_eff_liq, cloud_path_liq, r_eff_ice, cloud_path_ice
+      self, ibnd, is_lw, r_eff_liq, cloud_path_liq, r_eff_ice, cloud_path_ice,
+      cloud_snow=None,
   ) -> dict[str, Array]:
     """The actual cloud optical properties calculation."""
     logging.info('Calling cloud optical properties graph.')
@@ -205,6 +206,7 @@ class RRTMOptics(optics_base.OpticsScheme):
         ibnd=ibnd,
         # LW clouds are absorption-only (RTE-RRTMGP 1scl / CAM6 RRTMG LW).
         absorption_only=is_lw,
+        cloud_snow=cloud_snow,
     )
 
   def cloud_properties_fn(
@@ -225,7 +227,8 @@ class RRTMOptics(optics_base.OpticsScheme):
       single-scattering albedo, and asymmetry factor.
     """
 
-    def cloud_props_fn(r_eff_liq, cloud_path_liq, r_eff_ice, cloud_path_ice):
+    def cloud_props_fn(r_eff_liq, cloud_path_liq, r_eff_ice, cloud_path_ice,
+                       cloud_snow=None):
       return self._cloud_props(
           ibnd,
           is_lw,
@@ -233,6 +236,7 @@ class RRTMOptics(optics_base.OpticsScheme):
           cloud_path_liq,
           r_eff_ice,
           cloud_path_ice,
+          cloud_snow=cloud_snow,
       )
 
     return cloud_props_fn
@@ -274,6 +278,7 @@ class RRTMOptics(optics_base.OpticsScheme):
       cloud_r_eff_ice: Array | None = None,
       cloud_path_ice: Array | None = None,
       cloud_fraction: Array | None = None,
+      cloud_snow=None,
   ) -> Mapping[str, Array]:
     """Add cloud optics to already-computed gas optics for g-point ``igpt``.
 
@@ -292,6 +297,7 @@ class RRTMOptics(optics_base.OpticsScheme):
         radius_eff_ice=cloud_r_eff_ice,
         cloud_path_ice=cloud_path_ice,
         cloud_fraction=cloud_fraction,
+        cloud_snow=cloud_snow,
     )
 
   def _combine_gas_and_cloud_properties(
@@ -304,6 +310,7 @@ class RRTMOptics(optics_base.OpticsScheme):
       radius_eff_ice: Array | None = None,
       cloud_path_ice: Array | None = None,
       cloud_fraction: Array | None = None,
+      cloud_snow=None,
   ) -> dict[str, Array]:
     """Combine the gas optical properties with the cloud optical properties.
 
@@ -344,7 +351,8 @@ class RRTMOptics(optics_base.OpticsScheme):
 
     compute_cloud_properties_fn = self.cloud_properties_fn(ibnd, is_lw)
     cloud_optical_props = compute_cloud_properties_fn(
-        radius_eff_liq, cloud_path_liq, radius_eff_ice, cloud_path_ice
+        radius_eff_liq, cloud_path_liq, radius_eff_ice, cloud_path_ice,
+        cloud_snow=cloud_snow,
     )
 
     # Scale cloud optical depth by cloud fraction for partial coverage
@@ -374,6 +382,7 @@ class RRTMOptics(optics_base.OpticsScheme):
       cloud_r_eff_ice: Array | None = None,
       cloud_path_ice: Array | None = None,
       cloud_fraction: Array | None = None,
+      cloud_snow=None,
   ) -> dict[str, Array]:
     """Compute the monochromatic longwave optical properties.
 
@@ -413,7 +422,8 @@ class RRTMOptics(optics_base.OpticsScheme):
     }
     return self.add_cloud_optical_properties(
         igpt, optical_props, True, cloud_r_eff_liq, cloud_path_liq,
-        cloud_r_eff_ice, cloud_path_ice, cloud_fraction=cloud_fraction)
+        cloud_r_eff_ice, cloud_path_ice, cloud_fraction=cloud_fraction,
+        cloud_snow=cloud_snow)
 
   @override
   def compute_sw_optical_properties(
@@ -428,6 +438,7 @@ class RRTMOptics(optics_base.OpticsScheme):
       cloud_r_eff_ice: Array | None = None,
       cloud_path_ice: Array | None = None,
       cloud_fraction: Array | None = None,
+      cloud_snow=None,
   ) -> dict[str, Array]:
     """Compute the monochromatic shortwave optical properties.
 
@@ -477,7 +488,8 @@ class RRTMOptics(optics_base.OpticsScheme):
     }
     return self.add_cloud_optical_properties(
         igpt, gas_optical_props, False, cloud_r_eff_liq, cloud_path_liq,
-        cloud_r_eff_ice, cloud_path_ice, cloud_fraction=cloud_fraction)
+        cloud_r_eff_ice, cloud_path_ice, cloud_fraction=cloud_fraction,
+        cloud_snow=cloud_snow)
 
   @override
   def compute_planck_sources(

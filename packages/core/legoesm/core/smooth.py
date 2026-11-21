@@ -264,6 +264,43 @@ def zero_at_or_below(x: jax.Array, floor: float, width: float) -> jax.Array:
     return x * smoothstep_quintic((x - floor) / width)
 
 
+def ramp_above_ln(x: jax.Array, floor: float, log_width: float) -> jax.Array:
+    """Weight of the test ``x > floor`` for a positive ``floor`` (RULE 5), as a
+    C2 ramp in ``ln x``: exactly 0 at and below ``floor``, exactly 1 from
+    ``floor * exp(log_width)``.  ``log_width = 0`` is the hard ``x > floor``."""
+    if log_width == 0:
+        return (jnp.asarray(x) > floor).astype(jnp.result_type(x, float))
+    lx = jnp.log(jnp.maximum(x, floor))
+    return smoothstep_quintic((lx - math.log(floor)) / log_width)
+
+
+def floor_ln(x: jax.Array, floor: float, log_width: float) -> jax.Array:
+    """``max(floor, x)`` for a positive ``floor`` (RULE 5): C1 smooth max in
+    ``ln`` space, exact outside ``|ln(x/floor)| >= log_width/2``.
+    ``log_width = 0`` is ``jnp.maximum``; C1 needs ``log_width <= 2 ln 2``
+    (the clamp at ``floor/2`` must sit outside the smoothing band)."""
+    if log_width == 0:
+        return jnp.maximum(floor, x)
+    if log_width > 2.0 * math.log(2.0):
+        raise ValueError(f"floor_ln needs log_width <= 2 ln 2, got {log_width}")
+    return jnp.exp(smooth_max_c1(math.log(floor),
+                                 jnp.log(jnp.maximum(x, 0.5 * floor)), log_width))
+
+
+def cap_ln(x: jax.Array, cap: float, log_width: float) -> jax.Array:
+    """``min(x, cap)`` for a positive ``cap`` and ``x >= 0`` (RULE 5): C1 smooth
+    min in ``ln`` space, exact outside ``|ln(x/cap)| >= log_width/2``.
+    ``log_width = 0`` is ``jnp.minimum``; C1 needs ``log_width <= 2 ln 2``
+    (the switch at ``cap/2`` must sit outside the smoothing band)."""
+    if log_width == 0:
+        return jnp.minimum(x, cap)
+    if log_width > 2.0 * math.log(2.0):
+        raise ValueError(f"cap_ln needs log_width <= 2 ln 2, got {log_width}")
+    lo = 0.5 * cap
+    soft = jnp.exp(smooth_min_c1(jnp.log(jnp.maximum(x, lo)), math.log(cap), log_width))
+    return jnp.where(x > lo, soft, x)
+
+
 def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
     if width == 0:

@@ -49,6 +49,8 @@ __param_spec__ = {
             "cam6_rhmaxis": "CAM6 cldfrc2m rhmaxis default 1.0 (stratospheric step at rhi=1) = physical ceiling",
             "cam6_deepcu_frac_limit": "numerics: threshold below which the deep-convective fraction is zeroed (clubb_intr frac_limit)",
             "cam6_deepcu_ic_limit": "numerics: in-cloud water floor below which the deep-convective fraction is zeroed (clubb_intr ic_limit)",
+            "cam6_conv_water_frac_limit": "numerics: conv_water_frac_limit, the fraction below which conv_water_4rad drops a cloud part (CAM6 namelist 0.01)",
+            "cam6_rad_gate_log_width": "numerics: RULE 5 smoothing width (ln space) of the CAM6 convective-water and snow-in-radiation thresholds; 0 = CAM6's hard switches",
             "cloud_inhomogeneity_factor": "Cahalan plane-parallel-bias reduction, default 1.0 (homogeneous, no reduction) = the physical ceiling; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
@@ -413,6 +415,44 @@ class CloudConfig(NamedTuple):
     # smoothstep_quintic((CDF - (1 - cf))/width + 1/2), exactly CAM's 0/1
     # outside a band of that width.  Used by "max_random" and "mcica".
     cloud_subcolumn_mask_width: float = 1.0e-3
+    # CAM6 convective water in the radiation (conv_water.F90 conv_water_4rad,
+    # used by cloud_diagnostics.F90:364-404; cam6 namelist conv_water_in_rad
+    # = 1 and conv_water_frac_limit = 0.01, namelist_defaults_cam.xml:1183,
+    # 1186).  Scheme "cam6_clubb" only.  0 (default) = the stratiform water
+    # alone reaches the cloud optics, as before.  1 = the deep convective
+    # in-cloud water (ZM ql, ``conv_icwmr``) over deepcu is area-averaged with
+    # the stratiform in-cloud water over ast, split by the stratiform ice
+    # ratio, and the result is taken in cloud over the radiative cover with
+    # CAM's 1e-4 floor and 5 g/kg cap.  Mode 2 (emissivity average) is not
+    # ported.
+    cam6_conv_water_in_rad: int = 0
+    cam6_conv_water_frac_limit: float = 0.01
+    # CAM6 snow in the radiation (micro_mg_cam.F90:2306-2321 cldfsnow and
+    # icswp, :2576-2583 and :2639 the snow diameter des; radiation.F90:928-1067
+    # cldfprime = max(CLD, cldfsnow), fraction-weighted cloud + snow optics;
+    # cloud_rad_props.F90:424-443, 594-608 snow through the Mitchell ice
+    # optics).  Scheme "cam6_clubb" with McICA only.  False (default) = no
+    # snow in the radiation, as before.  The Mitchell table file is
+    # CESM inputdata atm/cam/physprops/iceoptics_c080917.nc (sha256 pinned in
+    # mitchell_ice_optics.ICEOPTICS_SHA256), given by path.
+    cam6_snow_in_rad: bool = False
+    cam6_snow_optics_file: str = ""
+    # Radiation droplet number under SPECIFIED droplets (MG2 nccons, legoESM
+    # prognostic_droplet_number False).  False (default) = the radiation
+    # reads the N_c tracer, as before; that tracer still receives ZM
+    # detrainment while nothing removes it.  True = the radiation uses MG2's
+    # own specified number, as CAM6 does with micro_mg_nccons: MG2 resets the
+    # grid number to ncnst/rho * lcldm (micro_mg2_0.F90:2818-2824) and the
+    # radiation takes it in cloud over ast (micro_mg_cam.F90:2539-2554), so
+    # REL sees ncnst/rho * max(alst, mincld)/max(ast, mincld) per kg.
+    # Scheme "cam6_clubb" only; ncnst is the microphysics Nc_0.
+    cam6_rad_specified_nc: bool = False
+    # RULE 5 width, in ln space, of every threshold in the CAM6 convective
+    # water (conv_water_4rad) and snow-in-radiation (cldfsnow, icswp, des)
+    # ports: a quantity within a factor exp(width) above its CAM6 threshold
+    # is only partly switched.  0 = CAM6's hard switches (oracle tests).
+    # User-approved default 0.01 (2026-10-27).
+    cam6_rad_gate_log_width: float = 0.01
 
 
 def build_cloud_config(
@@ -448,6 +488,12 @@ def build_cloud_config(
     cam6_rhmaxi: float | None = None,
     cam6_rhminis: float | None = None,
     cam6_rhmaxis: float | None = None,
+    cam6_conv_water_in_rad: int | None = None,
+    cam6_conv_water_frac_limit: float | None = None,
+    cam6_snow_in_rad: bool | None = None,
+    cam6_snow_optics_file: str | None = None,
+    cam6_rad_specified_nc: bool | None = None,
+    cam6_rad_gate_log_width: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -501,7 +547,13 @@ def build_cloud_config(
     if cover_condensate_q_ref is not None:
         overrides["cover_condensate_q_ref"] = cover_condensate_q_ref
     for _name, _val in (("cam6_rhmini", cam6_rhmini), ("cam6_rhmaxi", cam6_rhmaxi),
-                        ("cam6_rhminis", cam6_rhminis), ("cam6_rhmaxis", cam6_rhmaxis)):
+                        ("cam6_rhminis", cam6_rhminis), ("cam6_rhmaxis", cam6_rhmaxis),
+                        ("cam6_conv_water_in_rad", cam6_conv_water_in_rad),
+                        ("cam6_conv_water_frac_limit", cam6_conv_water_frac_limit),
+                        ("cam6_snow_in_rad", cam6_snow_in_rad),
+                        ("cam6_snow_optics_file", cam6_snow_optics_file),
+                        ("cam6_rad_specified_nc", cam6_rad_specified_nc),
+                        ("cam6_rad_gate_log_width", cam6_rad_gate_log_width)):
         if _val is not None:
             overrides[_name] = _val
     for _name, _val in (("cap_floor_on", cap_floor_on), ("cap_floor_lat_deg", cap_floor_lat_deg),
