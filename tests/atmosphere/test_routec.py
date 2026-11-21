@@ -331,8 +331,17 @@ _CASES = {
     "thin": dict(m_true=0.995),
 }
 # per case: (sum of weights, blended m, D_i theta_vl, D_i q_t) at the default
-# widths minus the hard form, relative where the hard value is non-zero
-_GAP = {}
+# widths minus the hard form, relative where the hard value is non-zero.
+# Measured 2026-11-21 at the voted default widths.  The ~25 % m gap: in an
+# exactly well-mixed layer c = 0 sits ON the strict-inequality switch, so the
+# soft form gives half weight to the failing candidate kb = T (m = 0).
+_GAP = {
+    "d0": (-0.18594182027046025, -0.4353260557276408, -0.4089637947819323, -0.4088889513498771),  # hard (1.0, 0.170769, 0.1, -0.01342)
+    "known": (-5.958380089954307e-05, -0.25005674315838866, -0.149014259096798, -0.1567138356163305),  # hard (1.0, 0.37, 8.0, -0.004)
+    "lock_edge": (-9.36285958752503e-05, -0.2500907674016885, -0.31690992298686327, -0.2366825887419481),  # hard (1.0, 0.1, 10.4, -0.00412)
+    "small_m": (-0.005078690292762755, -0.255072936817805, -0.24515806410728333, -0.24289777099082832),  # hard (1.0, 0.05, 10.2, -0.00411)
+    "thin": (-0.317015142793617, -0.5661937117616986, -0.25806670621456196, -0.31338391442017105),  # hard (1.0, 0.995, 8.0, -0.004)
+}
 
 
 @pytest.mark.parametrize("name", sorted(_CASES))
