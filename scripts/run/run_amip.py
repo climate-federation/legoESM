@@ -1261,6 +1261,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         metavar=("LO", "HI"),
                         help="Sigma band (lo hi) of faces --clubb-q-flux-scale "
                              "acts on; required with it.")
+    parser.add_argument("--five-mode", dest="five_mode", default="off",
+                        choices=("off", "always", "forced"),
+                        help="FIVE fine vertical layers below 742 hPa around the "
+                             "column physics (Yamaguchi et al. 2017): off "
+                             "(default), always, or forced (on/off by a fixed "
+                             "period). MPAS lane, CLUBB, macmic >= 2, no "
+                             "checkpoints yet.")
     parser.add_argument("--clubb-prognostic", dest="clubb_prognostic",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Run CLUBB as a PROGNOSTIC higher-order closure: "
@@ -3212,6 +3219,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_scheme=args.clouds,
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
+        five_mode=args.five_mode,
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)

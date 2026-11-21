@@ -1,0 +1,10 @@
+# Production deck + FIVE fine vertical layers below 742 hPa, non-default arm.
+#
+# Host layers below 742 hPa split into ~20 m sublayers; radiation, CLUBB and
+# MG2 run on the fine column, ZM on the host and replayed (Yamaguchi et al.
+# 2017).  Ported from Isma Di Carlo's ENSO fork (opt-in).  The FIVE carry is
+# not checkpointed yet, so this arm runs without restart files.  Everything
+# else is amip_production.yaml.
+include: amip_production.yaml
+five_mode: always
+checkpoint_days: 0

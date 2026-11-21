@@ -2315,6 +2315,11 @@ class ExperimentConfig(NamedTuple):
     # Same placement and None semantics as land_canopy_most_n_iters; the
     # production deck names it.
     land_canopy_implicit_ground_flux: bool | None = None
+    # APPENDED LAST.  FIVE fine vertical layers below 742 hPa around the
+    # column physics (physics/five.py, Yamaguchi et al. 2017): "off"
+    # (default, no FIVE), "always" (every column) or "forced" (on and off by
+    # FiveConfig.forced_period_s).  MPAS column lane, CLUBB, macmic >= 2.
+    five_mode: str = "off"
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2437,6 +2442,13 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "ifs_ozone_chem runs only on the MPAS dycore lane, which "
                 "carries the o3_ifs tracer (not the FV3-duo column lane)")
+        if self.five_mode not in ("off", "always", "forced"):
+            errors.append(f"five_mode must be off, always or forced, got {self.five_mode!r}")
+        elif self.five_mode != "off" and (self.output.checkpoint_days > 0
+                                          or self.output.max_wallclock_seconds > 0):
+            errors.append("five_mode != 'off' cannot be checkpointed yet (the FIVE "
+                          "carry is not persisted): set checkpoint_days=0 and "
+                          "max_wallclock_seconds=0")
         if self.land_fraction_source not in ("topography", "era5", "zero"):
             errors.append(
                 f"land_fraction_source must be topography, era5 or zero, got "

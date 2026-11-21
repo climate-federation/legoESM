@@ -472,9 +472,12 @@ def make_five_physics(host_fn, fine_fn, zm_fn, G: FiveGrid, cfg: FiveConfig, con
     has_moments = config.turbulence.scheme == "clubb"
 
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
-        if phys_state is None or phys_state.five_carry is None:
-            raise ValueError("FIVE needs PhysicsState.five_carry: seed it with "
-                             "five_carry_seed(physics_fn, state, sigma_coord, phys_state)")
+        if phys_state is None:
+            raise ValueError("FIVE needs a PhysicsState")
+        if phys_state.five_carry is None:
+            # first call: seed here, where the column state is at hand (one
+            # retrace of the caller at the None -> dict transition)
+            phys_state = _seed(state, sigma_coord, phys_state, G, cfg, config)
         forcing = dict(forcing or {})
         carry = phys_state.five_carry
         ps_H_in = phys_state._replace(five_carry=None)
@@ -561,9 +564,12 @@ def _tend_dict(t):
 def five_carry_seed(physics_fn, state, sigma_coord, phys_state):
     """Initial FIVE carry: the fine state constant per layer from the host,
     the fine physics carry from a fresh one with the host carries mapped."""
-    from legoesm.atmosphere.physics.physics_state import init_physics_state
     G, cfg = physics_fn._five
-    config = physics_fn._five_physics_config
+    return _seed(state, sigma_coord, phys_state, G, cfg, physics_fn._five_physics_config)
+
+
+def _seed(state, sigma_coord, phys_state, G, cfg, config):
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
     ncol = state.T.data.shape[0]
     nH = G.n_sub.size
     nf = G.owner.size

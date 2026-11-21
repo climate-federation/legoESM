@@ -13947,6 +13947,14 @@ class ModelDriver:
                 f"mixing substeps <= {_cam6_act.n_max}")
 
         _mynn_col = getattr(cfg, "turbulence", "none") == "mynn25"
+        _five_cfg = None
+        if cfg.five_mode != "off":
+            from legoesm.atmosphere.physics.five import FiveConfig
+            if not hasattr(self.sigma, "A_half"):
+                raise ValueError("five_mode needs a hybrid sigma-pressure vertical "
+                                 f"coordinate; this run uses {cfg.grid.vertical_coord!r}")
+            _five_cfg = FiveConfig(enabled=True, mode=cfg.five_mode)
+            logger.info(f"  FIVE fine layers below 742 hPa, mode={cfg.five_mode}")
 
         def _build_physics(_cfg, need_rad=True,
                            mynn_initflag=(False if _mynn_col else None)):
@@ -13969,7 +13977,8 @@ class ModelDriver:
                                 physics_cadence=_phys_cadence_write,
                                 physics_cadence_steps=PHYS_UPDATE_STEPS,
                                 cld_macmic_num_steps=cfg.cld_macmic_num_steps,
-                                surface_bulk_coeffs=_sfc_bulk_coeffs)
+                                surface_bulk_coeffs=_sfc_bulk_coeffs,
+                                five=_five_cfg, five_host_coord=self.sigma)
 
         physics_fn = _build_physics(phys_cfg)
         if _hold_phys:
