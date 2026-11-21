@@ -188,7 +188,8 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
                          nord_tr: int = 0, trdm: float = 0.0,
                          lim_fac: float = 1.0, z_tracer: bool = True,
                          inline_q: bool = False,
-                         batched: bool = False) -> dict:
+                         batched: bool = False,
+                         dp2_seam_blend: bool = True) -> dict:
     """``tracer_2d_1L`` (fv_tracer2d.F90:114-389), all six faces,
     FUNCTIONAL.
 
@@ -198,8 +199,23 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
     (nb, nq, m_a, m_a, km) [spec: [face][iq] of (m_a, m_a, km)];
     ``dp1_6`` (nb, m_a, m_a, km) = delp BEFORE dyn_core
     (fv_dynamics.F90:472-478); ``flux_cap`` = alloc_flux_capacitors'
-    dict, the UN-averaged d_sw1 fluxes -- dp2 uses them as-is and the
-    tracer fluxes get their own seam blend; do not "fix" this.
+    dict, the UN-averaged d_sw1 fluxes.  fv_tp_2d reads them raw; dp2
+    reads them seam-blended (``dp2_seam_blend``, below).
+
+    KNOWN DIFFERENCE FROM FORTRAN (``dp2_seam_blend``, STATIC, default
+    True).  Fortran (fv_tracer2d.F90:302-306/:341-345) builds dp2 from
+    the RAW capacitors while the tracer fluxes are seam-blended by
+    flux_adj and the dycore's delp is updated with fluxes blended at
+    barrier 1.  At the cube-face seams the tracer therefore divides a
+    blended flux by an unblended mass: uniform q is not preserved and
+    q*delp is not conserved -- measured on the C48 coupled closure as
+    atmosphere water created at 1.6e-3 of the rain over three coupling
+    windows.  The default builds dp2's divergence from the capacitors
+    blended by the SAME ``average_shared_edge_cgrid`` call and table as
+    flux_adj, so dp2 equals the delp the dycore carries and the closure
+    holds (< 25 kg of 1.6e16 kg).  ``dp2_seam_blend=False`` recovers the
+    Fortran arithmetic exactly (the spec-parity tests run there).  The
+    returned ``mfx``/``mfy`` stay the raw frac-rescaled capacitors.
 
     Returned (C4 -- everything the spec mutates): ``q`` (interiors from
     the update nests of :284-388; halos/corners exactly as the Fortran
@@ -231,6 +247,7 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
                               nord_tr=nord_tr, trdm=trdm,
                               inline_q=inline_q)
     require_bool("tracer_2d_1l_sixface", "batched", batched)
+    require_bool("tracer_2d_1l_sixface", "dp2_seam_blend", dp2_seam_blend)
     del dt  # D7: parity only; see docstring -- it looks like a bug otherwise.
     # The JAX context is ATTRIBUTE-access; only the NumPy lane
     # uses a dict.  Same slip as module 4's first draft.
@@ -280,7 +297,7 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
         # default.
         return _tracer_2d_1l_sixface_batched(
             ctx, q6, dp1_6, mfx6, mfy6, cx6, cy6, km=km, nq=nq,
-            hord_tr=hord_tr, lim_fac=lim_fac)
+            hord_tr=hord_tr, lim_fac=lim_fac, dp2_seam_blend=dp2_seam_blend)
     # The FLAGS live on ctx.flags6, never on ctx.gs6: the JAX context
     # builder keeps only the np.ndarray members of each gridstruct
     # (fv3_duo_stepper.py:484) and puts every scalar/bool into a
@@ -403,6 +420,13 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
         mxk = [mfx6[t, :, 0:n, k] for t in range(nb)]  # (n+1, n) dummy
         myk = [mfy6[t, 0:n, :, k] for t in range(nb)]  # (n, n+1) dummy
         ra_x, ra_y, div6 = [], [], []
+        # dp2's capacitors: seam-blended like the tracer fluxes (default)
+        # or raw as in Fortran -- see the docstring's KNOWN DIFFERENCE.
+        if dp2_seam_blend:
+            mxd, myd = average_shared_edge_cgrid(
+                jnp.stack(mxk), jnp.stack(myk), tab)
+        else:
+            mxd, myd = mxk, myk
         for t in range(nb):
             area_g = gmet["area"][t]
             # Vectorised (:286-296): each ra cell reads only xfx/yfx.
@@ -411,8 +435,8 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
             ra_y.append(area_g[:, ng:ng + n]
                         + yf[t][:, 0:n] - yf[t][:, 1:n + 1])
             # Vectorised (:302-306/:341-345): dp2 reads only mfx/mfy/dp1.
-            div6.append((mxk[t][0:n, :] - mxk[t][1:n + 1, :]
-                         + myk[t][:, 0:n] - myk[t][:, 1:n + 1])
+            div6.append((mxd[t][0:n, :] - mxd[t][1:n + 1, :]
+                         + myd[t][:, 0:n] - myd[t][:, 1:n + 1])
                         * gmet["rarea"][t][ng:ng + n, ng:ng + n])
         div6 = jnp.stack(div6)
         nsp = nsplt_f[k]
@@ -503,7 +527,8 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
 
 def _tracer_2d_1l_sixface_batched(ctx, q6, dp1_6, mfx6, mfy6, cx6, cy6, *,
                                   km: int, nq: int, hord_tr: int,
-                                  lim_fac: float) -> dict:
+                                  lim_fac: float,
+                                  dp2_seam_blend: bool = True) -> dict:
     """The vmap-over-faces arm of :func:`tracer_2d_1l_sixface` (C2a --
     face-batching ladder step 6).
 
@@ -642,8 +667,11 @@ def _tracer_2d_1l_sixface_batched(ctx, q6, dp1_6, mfx6, mfy6, cx6, cy6, *,
              + xf6[:, 0:n, :, :] - xf6[:, 1:n + 1, :, :])
     ra_y6 = (gs["area"][:, :, ng:ng + n, None]
              + yf6[:, :, 0:n, :] - yf6[:, :, 1:n + 1, :])
-    div6 = ((mxk6[:, 0:n, :, :] - mxk6[:, 1:n + 1, :, :]
-             + myk6[:, :, 0:n, :] - myk6[:, :, 1:n + 1, :])
+    # dp2's capacitors: see tracer_2d_1l_sixface's KNOWN DIFFERENCE.
+    mxd6, myd6 = (average_shared_edge_cgrid(mxk6, myk6, tab)
+                  if dp2_seam_blend else (mxk6, myk6))
+    div6 = ((mxd6[:, 0:n, :, :] - mxd6[:, 1:n + 1, :, :]
+             + myd6[:, :, 0:n, :] - myd6[:, :, 1:n + 1, :])
             * rarea_win[..., None])
     qn20 = q                                            # (6, nq, m, m, km)
     dp10 = dp1[:, ng:ng + n, ng:ng + n, :]              # (6, n, n, km)
@@ -718,7 +746,8 @@ def make_tracer_2d_1l_sixface_jit(ctx: dict, *, km: int, nq: int,
                                   z_tracer: bool = True,
                                   inline_q: bool = False,
                                   batched: bool = False,
-                                  check_nsplt: bool = True):
+                                  check_nsplt: bool = True,
+                                  dp2_seam_blend: bool = True):
     """jit the phase with every static bound closed over (C3: dt, and
     only dt, stays dynamic -- a new time step never retraces).
 
@@ -731,7 +760,8 @@ def make_tracer_2d_1l_sixface_jit(ctx: dict, *, km: int, nq: int,
     core = jax.jit(functools.partial(
         tracer_2d_1l_sixface, ctx, km=km, nq=nq, hord_tr=hord_tr,
         q_split=q_split, nord_tr=nord_tr, trdm=trdm, lim_fac=lim_fac,
-        z_tracer=z_tracer, inline_q=inline_q, batched=batched))
+        z_tracer=z_tracer, inline_q=inline_q, batched=batched,
+        dp2_seam_blend=dp2_seam_blend))
     if not check_nsplt:
         return core
 
