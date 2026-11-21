@@ -544,3 +544,27 @@ def test_r5_gradient_through_locks_switch():
     check_grads(f, (c["thvl"],), order=1, modes=("rev",), eps=1e-6, rtol=1e-4)
     g = np.asarray(jax.grad(f)(c["thvl"]))
     assert np.all(np.isfinite(g)) and np.any(g != 0.0)
+
+
+def test_rejected_candidate_with_wild_m_leaves_no_nan():
+    """Equal 2000 Pa layers, theta_vl [300, 297, 300, 300]: the only candidate
+    is rejected (c < 0) with m far outside [0, 1], whose inversion pressure
+    would be negative; forward terms and their gradient stay finite."""
+    nz, dpi = 4, 2000.0
+    dz = dpi / constants.g                                  # rho = 1
+    zm = jnp.asarray(np.arange(nz + 1)[None] * dz)
+    gr = make_clubb_grid(zm, 0.5 * (zm[:, 1:] + zm[:, :-1]))
+    rho_zt, rho_zm = jnp.ones((1, nz)), jnp.ones((1, nz + 1))
+    thl0 = jnp.asarray([[300.0, 297.0, 300.0, 300.0]])
+    z = jnp.zeros((1, nz))
+
+    def terms(thl):
+        return rc.clubb_routec_terms(thl, z, z.at[0, 0].set(2e-4), jnp.full((1, nz + 1), 0.5),
+                                     jnp.full((1, nz + 1), 300.0), rho_zm, rho_zt,
+                                     jnp.asarray([1.0e5]), gr, WD)
+    out = terms(thl0)
+    assert float(out["cand"].weight[0, 0]) == 0.0 and abs(float(out["cand"].m[0, 0])) > 1.0
+    for k in ("F_rt", "F_thl", "c_low", "c_F", "w_e", "E"):
+        assert np.all(np.isfinite(np.asarray(out[k]))), k
+    g = jax.grad(lambda t: jnp.sum(terms(t)["F_thl"]) + jnp.sum(terms(t)["c_F"]))(thl0)
+    assert np.all(np.isfinite(np.asarray(g)))
