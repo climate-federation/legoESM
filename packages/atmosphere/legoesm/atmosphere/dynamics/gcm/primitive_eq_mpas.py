@@ -22,6 +22,7 @@ References
 
 from __future__ import annotations
 
+import math
 from functools import partial
 from typing import NamedTuple
 
@@ -725,6 +726,15 @@ def mpas_legacy_pe_tendencies(
             "lane only; on the sigma lane it would be silently inert. Use "
             "vertical_coord='cam_l32'/'hybrid', or 'upwind'/'van_leer' on sigma."
         )
+
+    if _vert_scheme == "ppm" and isinstance(dt, (int, float)) and not dt > 0:
+        raise ValueError(
+            "vert_advection_scheme='ppm' needs the step dt > 0 (its faces "
+            f"integrate over the mass swept in dt); got dt={dt!r}")
+    _nu4_tr = config.nu_vert4_tracer
+    if _nu4_tr is not None and not (math.isfinite(_nu4_tr) and _nu4_tr >= 0.0):
+        raise ValueError(
+            f"nu_vert4_tracer must be None or finite and >= 0; got {_nu4_tr!r}")
 
     u_3d = state.u.data        # (nEdges, nlev)
     T_3d = state.T.data        # (nCells, nlev)

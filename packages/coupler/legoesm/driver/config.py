@@ -4615,6 +4615,13 @@ class ExperimentConfig(NamedTuple):
                     f"{d.mpas_vert_advection_scheme!r} needs at least 4 "
                     f"vertical levels for its 4-cell stencil; grid.nlev="
                     f"{g.nlev}.")
+        _nu4t = d.mpas_nu_vert4_tracer
+        if _nu4t is not None and (
+                isinstance(_nu4t, bool) or not isinstance(_nu4t, (int, float))
+                or not (math.isfinite(_nu4t) and _nu4t >= 0.0)):
+            errors.append(
+                "dycore.mpas_nu_vert4_tracer must be None or a finite number "
+                f">= 0 [1/s]; got {_nu4t!r}.")
         _ppms = d.mpas_vert_ppm_limiter_sharpness
         if (isinstance(_ppms, bool) or not isinstance(_ppms, (int, float))
                 or not (_ppms > 0)):

@@ -6667,3 +6667,13 @@ def test_mpas_vert_ppm_flags_flow_to_config():
          "--mpas-vert-advection-scheme", "ppm"]), parser))
     with pytest.raises(ValueError, match="HYBRID vertical transport"):
         cfg_sig.validate_strict()
+
+
+@pytest.mark.parametrize("bad", ["-1", "nan", "inf"])
+def test_mpas_nu_vert4_tracer_rejects_invalid(bad):
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--grid-type", "voronoi",
+         "--discretization", "mpas", "--mpas-nu-vert4-tracer", bad]), parser))
+    with pytest.raises(ValueError, match="mpas_nu_vert4_tracer"):
+        cfg.validate_strict()

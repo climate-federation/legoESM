@@ -3089,6 +3089,13 @@ def vertical_advection_hybrid_ppm(
     constraint would have clipped exactly.  The upwind choice of donor by
     the sign of the mass flux stays a hard switch, as in the van Leer
     operator: the flux ``F (q_face - q)`` is continuous across it.
+    The limiter's comparisons against ZERO (``abs``, ``sign``, the flat-cell
+    ``dm == 0`` test) see a relative difference of exactly +-1 and so stay
+    hard at any finite sharpness; ``abs`` is continuous and ``sign`` multiplies
+    a magnitude that vanishes with ``dm``, so AD is exact almost everywhere,
+    but these are not smoothed (follow-up: an absolute-width form).  Valid for
+    a vertical Courant number ``c <= 1`` (measured about 0.01 at L32, dt
+    300 s); larger ``c`` is not guarded.
     """
     return ppm_flux_tendency(field, mass_flux, dp_from_hybrid(coord, p_s), dt,
                              kord=kord, iv=iv, sharpness=sharpness)
@@ -3179,8 +3186,11 @@ def vertical_advection_tv_hybrid_ppm(T, q_v, dq_v, mass_flux, p_s, coord, dt, *,
     the vertical advection plus the adiabatic term), in CAM-FV's discrete
     form.  Needs a model top above zero pressure, as CAM-FV's ln p map does.
     """
-    a0 = np.asarray(coord.A_half)[0] * float(coord.p_ref)
-    b0 = np.asarray(coord.B_half)[0]
+    # Host check on a concrete coordinate; skipped when it is traced.
+    concrete = not any(isinstance(x, jax.core.Tracer)
+                       for x in (coord.A_half, coord.B_half, coord.p_ref))
+    a0 = np.asarray(coord.A_half)[0] * float(coord.p_ref) if concrete else 1.0
+    b0 = np.asarray(coord.B_half)[0] if concrete else 0.0
     if not (a0 > 0.0 and b0 == 0.0):
         raise ValueError(
             "the ppm temperature path maps T_v over ln p (CAM-FV te_map) and "

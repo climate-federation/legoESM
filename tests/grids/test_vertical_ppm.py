@@ -541,3 +541,25 @@ def test_unported_options_raise(bad):
     kw = dict(kord=7, iv=0, sharpness=HARD) | bad
     with pytest.raises(ValueError):
         ppm2m_profile(jnp.ones((1, 1, 8)), jnp.ones((1, 8)), **kw)
+
+
+def test_ppm_refuses_a_python_zero_step():
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_mpas as pe
+    mesh, coord, state = _mpas_state()
+    with pytest.raises(ValueError, match="dt > 0"):
+        pe.mpas_legacy_pe_tendencies(
+            state, mesh, coord,
+            pe.MPASPrimitiveEquationConfig(vert_advection_scheme="ppm"), dt=0.0)
+
+
+def test_tv_path_runs_with_a_traced_coordinate():
+    import jax
+    coord = make_cam6_l32_levels()
+    km = coord.A_full.shape[0]
+    T = jnp.full((2, km), 250.0)
+    q = jnp.zeros((2, km))
+    F = jnp.zeros((2, km + 1))
+    p_s = jnp.full((2,), 1.0e5)
+    f = jax.jit(lambda c: vertical_advection_tv_hybrid_ppm(
+        T, q, q, F, p_s, c, 300.0, sharpness=DEFAULT_SHARPNESS))
+    assert np.all(np.isfinite(np.asarray(f(coord))))

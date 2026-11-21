@@ -94,3 +94,36 @@ def test_hybrid_ledger_closes_with_true_layer_masses():
     np.testing.assert_allclose(rows, actual_true, rtol=1e-8, atol=1e-16)
     # the old p_s*dsigma weighting measures a different store change here
     assert np.abs(actual_old - actual_true).max() > 1e3 * np.abs(rows - actual_true).max()
+
+
+def test_physics_module_rows_use_true_layer_masses(monkeypatch):
+    """Every per-module physics row is booked with the column's true layer
+    masses: each ledger_entry_column call from the physics carries
+    dp == layer_thickness_dp(p_s), and its row equals an independent
+    true-dp integral of the same tendency (the step-total test above cannot
+    see module attribution, because the closure residual goes to other)."""
+    import legoesm.diagnostics.process_ledger as pl
+    model, state, coord = _hybrid_model_and_state()
+    real = pl.ledger_entry_column
+    calls = []
+
+    def spy(dq, dT, p_s, dsigma, dp=None, level_weight=None):
+        out = real(dq, dT, p_s, dsigma, dp=dp, level_weight=level_weight)
+        calls.append((dq, dT, p_s, dp, out))
+        return out
+
+    monkeypatch.setattr(pl, "ledger_entry_column", spy)
+    physics = make_physics(
+        PhysicsConfig(radiation=RadiationConfig(scheme="gray"),
+                      turbulence=TurbulenceConfig(scheme="louis"),
+                      convection=ConvectionConfig(scheme="kuo")),
+        model_type="mpas", dt=DT, budget_ledger=True)
+    model.step(state, DT, physics_fn=physics, phys_state=None)
+    assert len(calls) >= 3                      # radiation, turbulence, convection
+    for dq, dT, p_s, dp, out in calls:
+        assert dp is not None
+        want_dp = coord.layer_thickness_dp(
+            jnp.asarray(p_s).astype(conservation_accumulator()))
+        np.testing.assert_allclose(np.asarray(dp), np.asarray(want_dp), rtol=0, atol=0)
+        indep = real(dq, dT, p_s, coord.dsigma, dp=want_dp)
+        np.testing.assert_allclose(np.asarray(out), np.asarray(indep), rtol=1e-12, atol=0)
