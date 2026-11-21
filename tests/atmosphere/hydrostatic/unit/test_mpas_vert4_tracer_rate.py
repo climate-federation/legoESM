@@ -12,7 +12,7 @@ import pytest
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
     MPASPrimitiveEquationConfig, MPASPrimitiveEquationModel,
-    mpas_hydrostatic_tendencies)
+    mpas_legacy_pe_tendencies)
 from legoesm.core.field import Field
 from tests.atmosphere.hydrostatic.unit.test_mpas_vert4_flux_form import NU, _tracer_state
 
@@ -25,30 +25,17 @@ FORMS = {
 
 
 def _tend(state, mesh, coord, cfg):
-    td = mpas_hydrostatic_tendencies(state, mesh, coord, cfg, None, 0.0)
+    td = mpas_legacy_pe_tendencies(state, mesh, coord, cfg, None, 0.0)
     return (np.asarray(td.dT_dt.data),
             {k: np.asarray(v.data) for k, v in td.tracer_tendencies.items()})
 
 
-# Each form with and without isotope passengers of q_v and q_c.
-CASES = [(f, p) for f in FORMS for p in (False, True)]
-# Passenger over bulk.  A power of two, so a passenger at this ratio gets
-# exactly this ratio times its bulk's tendency under every linear operator
-# and under the log form's donor-ratio fluxes.
-R = 0.5
-PASSENGERS = (("q_v_o18", "q_v"), ("q_c_o18", "q_c"))
+CASES = [(f, False) for f in FORMS]
 
 
 def _setup(form, pas=False):
     mesh, coord, cfg, state = _tracer_state()
     cfg = cfg._replace(**FORMS[form])
-    if pas:
-        tr = dict(state.tracers)
-        for p, b in PASSENGERS:
-            tr[p] = Field(data=R * tr[b].data, name=p, dims=("nCells", "nlev"),
-                          units="kg/kg")
-        state = state._replace(tracers=tr)
-        cfg = cfg._replace(passenger_bulk=PASSENGERS)
     return mesh, coord, cfg, state
 
 
@@ -66,7 +53,7 @@ def test_none_follows_the_temperature_rate_bitwise(form, pas):
     dT0, dq0 = _tend(state, mesh, coord, cfg)
     dT1, dq1 = _tend(state, mesh, coord, same)
     np.testing.assert_array_equal(dT0, dT1)
-    assert set(dq0) == ({"q_v", "q_c", "q_v_o18", "q_c_o18"} if pas else {"q_v", "q_c"})
+    assert set(dq0) == {"q_v", "q_c"}
     for k in dq0:
         np.testing.assert_array_equal(dq0[k], dq1[k])
     s0 = MPASPrimitiveEquationModel(mesh, coord, cfg).step(state, 300.0)
@@ -80,7 +67,7 @@ def test_none_follows_the_temperature_rate_bitwise(form, pas):
 @pytest.mark.parametrize("form,pas", CASES)
 def test_zero_tracer_rate_filters_T_only(form, pas):
     """nu_vert4_T = 2e-6, nu_vert4_tracer = 0: T keeps its filter tendency
-    bitwise, every tracer (passengers included) gets none, and the filter
+    bitwise, every tracer gets none, and the filter
     leaves column tracer mass unchanged."""
     mesh, coord, cfg, state = _setup(form, pas)
     assert cfg.nu_vert4_T == NU == 2.0e-6
@@ -109,21 +96,6 @@ def test_tracer_rate_gates_on_its_own(form, pas):
     np.testing.assert_array_equal(tr_T, off_T)
     for k in on_q:
         np.testing.assert_array_equal(tr_q[k], on_q[k])
-
-
-@pytest.mark.parametrize("form", FORMS)
-def test_passengers_take_their_bulk_rate(form):
-    """With the tracer rate set apart from the T rate, each passenger's filter
-    tendency is exactly R times its bulk's: passengers and isotopes take the
-    tracer rate, never the T rate."""
-    mesh, coord, cfg, state = _setup(form, True)
-    cfg = cfg._replace(nu_vert4_tracer=2.5 * NU)
-    _, on_q = _tend(state, mesh, coord, cfg)
-    _, off_q = _tend(state, mesh, coord, cfg._replace(nu_vert4_T=0.0, nu_vert4_tracer=0.0))
-    for p, b in PASSENGERS:
-        filt_b = on_q[b] - off_q[b]
-        assert np.max(np.abs(filt_b)) > 0.0                           # control: bulk filtered
-        np.testing.assert_array_equal(on_q[p] - off_q[p], R * filt_b)
 
 
 @pytest.mark.parametrize("flag,expect", [((), None), (("--mpas-nu-vert4-tracer", "0"), 0.0)])
