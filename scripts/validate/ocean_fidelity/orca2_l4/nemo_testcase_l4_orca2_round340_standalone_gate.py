@@ -764,10 +764,15 @@ def build_real_composed_inputs(
                 fld_actual["kt01/S0_F/c003/f001/heatflow"] = fld_fields(
                     geothermal_raw, clock=midpoint, nrec=annual_nrec,
                     nbb=1, naa=2)
+            cadences = {
+                "wndi": 21600, "wndj": 21600, "tair": 21600,
+                "humi": 21600, "slp": 21600, "qsr_down": 86400,
+                "qlw_down": 86400, "precip_raw": 2678400,
+                "snow_raw": 2678400,
+            }
             for field_index, (field, _filename, clvar, _bicubic) in enumerate(
                     o1.FIELD_SPECS, start=1):
-                cadence = (21600 if mapped[field].shape[0] == 5 else
-                           86400 if mapped[field].shape[0] == 2 else 2678400)
+                cadence = cadences[field]
                 record = retained_clock // cadence
                 key = (f"kt{kt:02d}/S0_F/c{surface_call:03d}/"
                        f"f{field_index:03d}/{clvar}")

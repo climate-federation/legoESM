@@ -33,6 +33,12 @@ SI3_RECEIPTS = tuple(sorted(
 ))
 
 
+def test_strict_extent_refuses_implicit_anchors():
+    citation = next(iter(gate.CITATION_MAP))
+    with pytest.raises(ValueError, match="requires explicit anchors"):
+        gate._merge_resolution_repin(citation, "1-2", strict_extent=True)
+
+
 def test_bare_line_spans_bind_to_the_last_named_file():
     text = ("`stprk3_stg.F90:324` then, in `stp2d.F90` order, `:128` and "
             "`:131`; back to `dynhpg.F90:359` and `:383`.")

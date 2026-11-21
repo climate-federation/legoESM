@@ -910,7 +910,6 @@ def _run_c3_compiled(evidence: Path, *, pair_limit: int, math_mode: str) -> dict
     executable = compiled_pair.lower(
         carry, forcing[0], forcing[1], sponge[0], sponge[1]
     ).compile()
-    executable_identity = id(executable)
     executable_calls = 0
     compile_seconds = time.perf_counter() - compile_start
     if compile_count != 1:
@@ -933,8 +932,6 @@ def _run_c3_compiled(evidence: Path, *, pair_limit: int, math_mode: str) -> dict
             sponge[odd_kt],
         )
         executable_calls += 1
-        if id(executable) != executable_identity:
-            raise ValueError("C3 compiled executable identity changed during trajectory")
         jax.block_until_ready(next_carry)
         pair_wall_seconds.append(time.perf_counter() - started)
         expected, masks = _load_expected_steps(run, steps, dimensions)
@@ -976,7 +973,6 @@ def _run_c3_compiled(evidence: Path, *, pair_limit: int, math_mode: str) -> dict
         "status": status,
         "compiled": True,
         "compile_count": compile_count,
-        "compiled_executable_identity": executable_identity,
         "compiled_executable_calls": executable_calls,
         "pairs_scored": len(pair_wall_seconds),
         "compile_seconds": compile_seconds,

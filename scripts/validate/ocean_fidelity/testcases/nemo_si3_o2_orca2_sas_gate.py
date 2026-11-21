@@ -317,6 +317,10 @@ def o2_istate_snapshot_to_config(
     ln_eos80: bool = False,
 ) -> SI3O2InitConfig:
     """Build `SI3O2InitConfig` from a stitched `O2SI3I01` snapshot's header metadata."""
+    if type(ln_teos10) is not bool or type(ln_eos80) is not bool:
+        raise TypeError("resolved EOS selectors must be booleans")
+    if ln_teos10 == ln_eos80:
+        raise ValueError("exactly one of ln_teos10 and ln_eos80 must be true")
     m = snap["meta"]
     return SI3O2InitConfig(
         ln_iceini=bool(m["ln_iceini"]),
@@ -346,7 +350,7 @@ def o2_istate_snapshot_to_config(
         rn_amax_s=float(m["rn_amax_s"]),
         ln_ice_embd=bool(m["ln_ice_embd"]),
         ln_rstart=False,
-        ln_teos10=bool(ln_teos10 and not ln_eos80),
+        ln_teos10=ln_teos10,
     )
 
 

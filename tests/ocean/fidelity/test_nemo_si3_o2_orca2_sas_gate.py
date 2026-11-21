@@ -97,6 +97,14 @@ gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
 
+@pytest.mark.parametrize("selectors", ((True, True), (False, False)))
+def test_o2_snapshot_config_refuses_ambiguous_eos_selectors(selectors):
+    with pytest.raises(ValueError, match="exactly one"):
+        gate.o2_istate_snapshot_to_config(
+            {"meta": {}}, ln_teos10=selectors[0], ln_eos80=selectors[1]
+        )
+
+
 @pytest.fixture(autouse=True)
 def _force_fp64():
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))

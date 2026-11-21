@@ -15091,6 +15091,8 @@ def _merge_resolution_repin(
 ) -> None:
     value = CITATION_MAP[citation]
     explicit_anchors = anchors is not None
+    if strict_extent and not explicit_anchors:
+        raise ValueError("strict_extent requires explicit anchors")
     if anchors is None:
         while isinstance(value, dict):
             value = value["anchors"]
@@ -18438,6 +18440,101 @@ for _citation, _lines in (
     ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1402-1474', '2594-2665'),
 ):
     _merge_resolution_repin(_citation, _lines)
+
+# Carbon review follow-up: validation and carry hardening moved these live
+# statements.  Keep the historical receipt citations bound to their exact
+# post-review source locations.
+for _citation, _lines in (
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1386', '1390'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1-1681', '1-1685'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:839-1135', '843-1139'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:353-385', '357-389'),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1139-1599', '1143-1603'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:152-307', '160-315'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:113-149', '121-157'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:309-348', '317-356'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:1-1202', '1-1210'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:380-417', '388-425'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:420-464', '428-472'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:467-515', '475-523'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:518-536', '526-544'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:539-648', '547-656'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:651-745', '659-753'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:748-814', '756-822'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:817-1176', '825-1184'),
+    ('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:1179-1202', '1187-1210'),
+    ('tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py:189-240', '195-246'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3244-3251', '3310-3317'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3374-3823', '3443-3892'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3826-3979', '3895-4048'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4046-4831', '4115-4900'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4046-4153', '4115-4222'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4046-4099', '4115-4168'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4102-4136', '4171-4205'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4140-4153', '4209-4222'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4157-4260', '4226-4329'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4225-4260', '4294-4329'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4172-4200', '4241-4269'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4203-4221', '4272-4290'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4547-4831', '4616-4900'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4547-4732', '4616-4801'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4773-4787', '4842-4856'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4561-4742', '4630-4811'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4313-4422', '4382-4491'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4340', '4409'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4429-4543', '4498-4612'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4711-4718', '4780-4787'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4823-4830', '4892-4900'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3456-3506', '3525-3575'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3826-3929', '3895-3998'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3380-3427,3583-3663', '3449-3496,3652-3732'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3374-3804', '3443-3892'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3450-3500', '3525-3575'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3807-3910', '3895-3998'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3807-3960', '3895-4048'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4027-4080', '4115-4168'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4027-4134', '4115-4222'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4027-4812', '4115-4900'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4083-4117', '4171-4205'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4121-4134', '4209-4222'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4138-4241', '4226-4329'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4153-4181', '4241-4269'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4184-4202', '4272-4290'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4206-4241', '4294-4329'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4294-4403', '4382-4491'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4321', '4409'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4410-4524', '4498-4612'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4528-4713', '4616-4801'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4528-4812', '4616-4900'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4542-4723', '4630-4811'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4692-4699', '4780-4787'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4754-4768', '4842-4856'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4804-4811', '4892-4900'),
+    ('nemo_testcase_l4_orca2_round340_standalone_gate.py:1176-1185', '1194-1203'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1030-1114', '2263-2339'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1132-1153', '2359-2381'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1168-1171', '2395-2398'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1176-1219', '2403-2449'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1320-1581', '2551-2812'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1401-1473', '2632-2704'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1402-1474', '2633-2704'),
+):
+    _merge_resolution_repin(_citation, _lines)
+
+_merge_resolution_repin(
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3140-3317', '3199-3382',
+    anchors=['def si3_dyn_adv_pra_orca2(', '        ln_pnd_TOPO=bool(cfg.ln_pnd_TOPO),'],
+)
+_merge_resolution_repin(
+    'nemo_testcase_l4_orca2_round340_standalone_gate.py:935-940,1009-1011',
+    '944-953,1027-1029',
+    anchors=[
+        'return {name: np.asarray(values[name]) for name in names}',
+        'means = surface.means',
+        ('for kid, boundary in OUTER_BOUNDARIES.items():', 2),
+        'OUTER_FIELDS_BY_KID[kid], outer_values[kid])',
+    ],
+)
 
 # Review T2: these historical claims span complete live statement blocks.  The
 # former final repins accidentally combined independent endpoint shifts and the

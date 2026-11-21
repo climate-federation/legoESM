@@ -3284,8 +3284,12 @@ def si3_dyn_adv_pra_orca2(
         raise ValueError("si3_dyn_adv_pra_orca2 requires an explicit SI3ORCA2StateConfig")
     cfg = config
     traced_kt = isinstance(kt, jax.core.Tracer)
+    concrete_kt = kt if traced_kt else np.asarray(kt)
     if ((not traced_kt
-         and (isinstance(kt, bool) or not isinstance(kt, (int, np.integer)) or kt < 1))
+         and (isinstance(kt, bool)
+              or concrete_kt.shape != ()
+              or concrete_kt.dtype.kind not in "iu"
+              or int(concrete_kt) < 1))
             or cfg.nn_fsbc < 1):
         raise ValueError("si3_dyn_adv_pra_orca2 requires kt >= 1 and nn_fsbc >= 1")
     sr = nemo_source_round

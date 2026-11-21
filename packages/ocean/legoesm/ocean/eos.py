@@ -3601,13 +3601,22 @@ def nemo_eos_fzp_eos80(S_psu):
     its true derivative there is infinite and land cells carry ``S = 0``.
     """
     S = jnp.asarray(S_psu, dtype=jnp.float64)
-    positive = S > 0.0
-    root = jnp.where(positive, jnp.sqrt(jnp.where(positive, S, 1.0)),
-                     lax.stop_gradient(jnp.sqrt(S)))
+    nonnegative = S >= 0.0
+    valid_S = jnp.where(nonnegative, S, 0.0)
+    positive = valid_S > 0.0
+    root = jnp.where(
+        positive, jnp.sqrt(jnp.where(positive, valid_S, 1.0)),
+        lax.stop_gradient(jnp.sqrt(valid_S)),
+    )
     rd = nemo_source_round
     poly = rd(rd(_TFRZ_S_LINEAR + rd(_TFRZ_S_ONEHALF * rd(root)))
-              + rd(_TFRZ_S_SQUARE * S))
-    return rd(poly * S)
+              + rd(_TFRZ_S_SQUARE * valid_S))
+    valid = rd(poly * valid_S)
+    raw_root = jnp.sqrt(S)
+    raw_poly = rd(rd(_TFRZ_S_LINEAR + rd(_TFRZ_S_ONEHALF * rd(raw_root)))
+                  + rd(_TFRZ_S_SQUARE * S))
+    raw = rd(raw_poly * S)
+    return jnp.where(nonnegative, valid, lax.stop_gradient(raw))
 
 
 def slab_freeze_point_K(T_freeze_const, scheme: str = "constant"):

@@ -373,14 +373,17 @@ def record_initial_ice_state(card):
 
     from legoesm.ocean.fidelity.nemo_testcase_recipe import orca2_initial_ice_ssh
 
-    ice, _ = record_initial_ice(RUNG10_RECORD_RUN)
     state = card.recipe.initial_state
     z = card.recipe.z_coord
+    eos = card.recipe.model_config.eos
+    if eos not in {"nemo_teos10", "nemo_eos80"}:
+        raise ValueError(f"initial ice requires an explicit resolved NEMO EOS, got {eos!r}")
+    ice, _ = record_initial_ice(RUNG10_RECORD_RUN)
     ssh = orca2_initial_ice_ssh(
         np.asarray(state.T.data), np.asarray(state.S.data),
         np.asarray(z.is_active), np.asarray(card.recipe.grid.f_T),
         np.asarray(z.nemo_e1e2t), ice,
-        ln_teos10=card.recipe.model_config.eos == "nemo_teos10")
+        ln_teos10=eos == "nemo_teos10")
     return state._replace(eta=state.eta.replace(
         data=jnp.asarray(ssh, dtype=jnp.float64)))
 

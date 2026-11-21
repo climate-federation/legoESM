@@ -1176,7 +1176,7 @@ def _fortran_trimmed_namelist_character(text: str, name: str) -> str:
         text,
     )
     require(match is not None, f"resolved namelist lacks quoted {name}")
-    return match.group(2).rstrip()
+    return match.group(2).rstrip(" ")
 
 
 def _verify_coupled_resolved_outputs(run_dir: Path, expected_steps: int) -> dict[str, Any]:
@@ -2332,7 +2332,7 @@ def run_coupled_c4_preflight() -> dict[str, Any]:
     run_sh = Path(__file__).resolve().parent / (
         "nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh"
     )
-    scratch_root = Path(tempfile.gettempdir())
+    scratch_root = PREFLIGHT_SCRATCH_ROOT
     shell = verify_run_sh(run_sh, scratch_root=scratch_root)
     baseline = verify_coupled_c4_baseline()
     with tempfile.TemporaryDirectory(dir=scratch_root) as temporary:

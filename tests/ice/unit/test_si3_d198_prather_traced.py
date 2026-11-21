@@ -92,6 +92,15 @@ def test_traced_prather_keeps_parent_forward_bits():
     assert (_digest(eager), _digest(compiled)) == (PARENT_DIGEST, PARENT_DIGEST)
 
 
+def test_prather_accepts_zero_dimensional_integer_kt_and_rejects_zero():
+    arrays, static = _fixture("icycle3_kt1")
+    expected = _run(arrays, static)
+    got = _run(arrays, {**static, "kt": jnp.asarray(1, dtype=jnp.int64)})
+    assert _digest((("expected", expected),)) == _digest((("expected", got),))
+    with pytest.raises(ValueError, match="kt >= 1"):
+        _run(arrays, {**static, "kt": jnp.asarray(0, dtype=jnp.int64)})
+
+
 # (input, index, relative step): thickness, area, snow, enthalpy, pond and both
 # velocity components at interior cells.  Each case is judged by its own
 # relative error; with |f| ~ 3.9e3 the quotient's rounding noise,

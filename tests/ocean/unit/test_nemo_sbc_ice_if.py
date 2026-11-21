@@ -428,6 +428,26 @@ def test_nn_ice_1_production_call_site_runs_fld_read_and_sbc_ice_if():
     assert _unequal((got.qns,), (stale.qns,)) > 0
 
 
+def test_teos10_select_cuts_inactive_negative_eos80_nan_gradient():
+    from legoesm.ocean.eos import nemo_eos_fzp, nemo_eos_fzp_eos80
+
+    salinity = jnp.asarray(-0.5, dtype=jnp.float64)
+    assert bool(jnp.isnan(nemo_eos_fzp_eos80(salinity)))
+
+    def selected(value):
+        return jnp.where(
+            jnp.asarray(True), nemo_eos_fzp(value),
+            nemo_eos_fzp_eos80(value),
+        )
+
+    value = selected(salinity)
+    expected = nemo_eos_fzp(salinity)
+    np.testing.assert_array_equal(
+        np.asarray(value).view(np.uint64), np.asarray(expected).view(np.uint64)
+    )
+    assert bool(jnp.isfinite(jax.grad(selected)(salinity)))
+
+
 def test_nn_ice_dispatch_refuses():
     blk, ice = _ice_case()
     with pytest.raises(ValueError, match="nn_ice"):

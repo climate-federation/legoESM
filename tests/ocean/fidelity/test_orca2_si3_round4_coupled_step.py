@@ -63,6 +63,14 @@ class _OceanStep(NamedTuple):
     state_after: object
 
 
+class _StampedSponge(NamedTuple):
+    nemo_kt: object
+
+
+class _FakeCarry(NamedTuple):
+    kt: int
+
+
 def _field(data, name):
     return Field(jnp.asarray(data, dtype=jnp.float64), name=name)
 
@@ -368,6 +376,27 @@ def test_coupled_step_refuses_stale_damping_stamp_before_ocean(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("target", (0, 999))
+def test_compiled_sponge_stamp_refuses_stale_or_nonpositive_target(target):
+    @jax.jit
+    def checked(target_kt, requested_kt):
+        return bulk._nemo_checked_sponge(
+            _StampedSponge(target_kt), requested_kt
+        ).nemo_kt
+
+    with pytest.raises(Exception, match="L6 damping target is stale"):
+        jax.block_until_ready(checked(jnp.asarray(target), jnp.asarray(1)))
+
+
+def test_compiled_sponge_stamp_refuses_none_before_execution():
+    with pytest.raises(ValueError, match="target kt=None"):
+        jax.jit(
+            lambda requested: bulk._nemo_checked_sponge(
+                _StampedSponge(None), requested
+            ).nemo_kt
+        )(jnp.asarray(1))
+
+
 @pytest.fixture(scope="module")
 def real_coupled_fixture():
     """The production O17 12x10 physics coupled to a real 6x8 ocean."""
@@ -510,15 +539,33 @@ def _real_pair(fixture):
     )[0]
 
 
-def test_route_fixture_keeps_unselected_mature_slots_in_side_carry(
+def test_route_fixture_keeps_mature_slots_in_source_owned_carry(
     real_coupled_fixture,
 ):
     carry, forcing, card, model = real_coupled_fixture[:4]
-    assert carry.ocean.bt_hist is None
-    assert carry.ocean.eta_rk3_after is None
     paired = _real_pair((carry, forcing, card, model))
-    assert paired.ocean.bt_hist is None
-    assert paired.ocean.eta_rk3_after is None
+    # This fixture's schemes do not carry bt_hist/eta_rk3_after.  Their stable
+    # shape caches remain available while active delayed CFL stays source-owned.
+    assert paired.ocean_bt_hist is not None
+    assert paired.ocean_eta_rk3_after is not None
+    assert paired.ice.ice.cflice_delayed is not None
+
+
+def test_second_pair_matches_live_sequential_mature_history(real_coupled_fixture):
+    carry, forcing, card, model, first_pair = real_coupled_fixture
+    paired = _real_pair((first_pair, forcing, card, model))
+    sequential = first_pair
+    for surface_update in (True, False):
+        sequential, _ = bulk.nemo_orca2_si3_coupled_step(
+            sequential, forcing, card, model=model, sponge=None,
+            _surface_update=surface_update,
+        )
+    for name in ("T", "S", "eta"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(paired.ocean, name).data).view(np.uint64),
+            np.asarray(getattr(sequential.ocean, name).data).view(np.uint64),
+            err_msg=name,
+        )
 
 
 @pytest.mark.parametrize(
@@ -605,6 +652,30 @@ def test_each_c2_route_plant_changes_real_pair(real_coupled_fixture, monkeypatch
     baseline = real_coupled_fixture[4]
     _install_c2_route_plant(monkeypatch, plant)
     planted = _real_pair(real_coupled_fixture)
+    assert _bits(planted) != _bits(baseline)
+
+
+def test_skip_fwb_application_plant_changes_compiled_real_pair(
+    real_coupled_fixture, monkeypatch,
+):
+    carry, forcing, card, model = real_coupled_fixture[:4]
+
+    def compiled(entry):
+        return bulk.nemo_orca2_si3_coupled_pair(
+            entry, forcing, card, even_forcing=forcing, model=model,
+            sponge=None, even_sponge=None,
+        )[0]
+
+    baseline = jax.jit(compiled)(carry)
+    _install_c2_route_plant(monkeypatch, "skip-fwb-application")
+
+    def compiled_with_plant(entry):
+        return bulk.nemo_orca2_si3_coupled_pair(
+            entry, forcing, card, even_forcing=forcing, model=model,
+            sponge=None, even_sponge=None,
+        )[0]
+
+    planted = jax.jit(compiled_with_plant)(carry)
     assert _bits(planted) != _bits(baseline)
 
 
@@ -748,50 +819,73 @@ def test_u1_kind1_kind2_use_staggered_velocity_masks():
     assert report["counts"][2]["dry_zero_sign_different"] == 2
 
 
-def test_c3_late_wet_one_ulp_plant_turns_pass_into_fail():
+def test_c3_late_wet_one_ulp_plant_turns_compiled_live_path_into_fail(
+    monkeypatch,
+):
     from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
         scorer,
     )
 
-    run = Path(
-        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/"
-        "oracle_coupled_c_ladder/REC_C3"
+    forcing = tuple(jnp.asarray(i) for i in range(4))
+    sponge = tuple(_StampedSponge(i) for i in range(1, 5))
+    monkeypatch.setattr(
+        scorer, "_c2_cold_start",
+        lambda *_a, **_k: (_FakeCarry(1), forcing, sponge, object(), object()),
     )
-    if not run.is_dir():
-        pytest.skip("read-only REC_C3 evidence is unavailable")
-    dimensions = (5, 10, 5)
-    expected, masks = scorer._load_expected_steps(run, (99, 100), dimensions)
-    candidate = {
-        key: {
-            name: value.copy() if hasattr(value, "copy") else value
-            for name, value in fields.items()
+    monkeypatch.setattr(
+        scorer, "_admitted_resolved_namelist",
+        lambda _evidence: {"jpl": 5, "nlay_i": 10, "nlay_s": 5},
+    )
+
+    def fake_pair(entry, *_a, **_k):
+        return _FakeCarry(entry.kt + 2), (object(), object())
+
+    monkeypatch.setattr(bulk, "nemo_orca2_si3_coupled_pair", fake_pair)
+
+    class FakeLower:
+        def __init__(self, function, args):
+            function(*args)
+
+        def compile(self):
+            return fake_pair
+
+    class FakeJit:
+        def __init__(self, function):
+            self.function = function
+
+        def lower(self, *args):
+            return FakeLower(self.function, args)
+
+        def __call__(self, *_args):
+            raise AssertionError("trajectory bypassed the one lowered executable")
+
+    monkeypatch.setattr(scorer.jax, "jit", FakeJit)
+
+    def expected_steps(_run, steps, _dimensions):
+        _, expected, masks = _c_observations(steps)
+        return expected, masks
+
+    monkeypatch.setattr(scorer, "_load_expected_steps", expected_steps)
+    traced_steps = []
+
+    def traced(_traces, _card, expected, steps):
+        traced_steps.append(steps)
+        candidate = {
+            key: {name: value.copy() for name, value in fields.items()}
+            for key, fields in expected.items()
         }
-        for key, fields in expected.items()
-    }
-    baseline = scorer.score_c3_pair_observations(
-        candidate, expected, masks, steps=(99, 100)
+        if steps == (3, 4):
+            candidate[(1, 3, 0)]["field"][2, 2] = np.nextafter(0.0, 1.0)
+        return candidate
+
+    monkeypatch.setattr(scorer, "_trace_observations", traced)
+    report = scorer._run_c3_compiled(
+        Path("unused"), pair_limit=2, math_mode="libm-cpu"
     )
-    assert baseline["status"] == "PASS_C3_0_ULP_WET"
-    field = next(
-        name for name, value in candidate[(1, 99, 0)].items()
-        if np.asarray(value).dtype.kind == "f"
-    )
-    if field in {"ssu_prior", "u_before"}:
-        mask_name = "umask"
-    elif field in {"ssv_prior", "v_before"}:
-        mask_name = "vmask"
-    else:
-        mask_name = "tmask"
-    wet = np.argwhere(masks[(99, 0)][mask_name][2:-2, 2:-2] != 0)[0] + 2
-    index = tuple(wet) + (0,) * (candidate[(1, 99, 0)][field].ndim - 2)
-    value = candidate[(1, 99, 0)][field][index]
-    candidate[(1, 99, 0)][field][index] = np.nextafter(value, np.inf)
-    planted = scorer.score_c3_pair_observations(
-        candidate, expected, masks, steps=(99, 100)
-    )
-    assert planted["status"].startswith(
-        f"FAIL_C3 step=99 kind=1 field={field}"
-    )
+    assert traced_steps == [(1, 2), (3, 4)]
+    assert report["compile_count"] == 1
+    assert report["compiled_executable_calls"] == 2
+    assert report["status"].startswith("FAIL_C3 step=3 kind=1 field=field")
 
 
 def test_c2_full_halo_shard_preserves_internal_rank_halos():
@@ -803,3 +897,16 @@ def test_c2_full_halo_shard_preserves_internal_rank_halos():
     for rank, start in ((0, 0), (1, 90)):
         got = scorer._c2_shard(global_field, (94, 152), rank)
         np.testing.assert_array_equal(got, global_field[start:start + 94])
+
+
+def test_record_initial_ice_refuses_unresolved_eos_before_record_io():
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
+    )
+
+    card = SimpleNamespace(recipe=SimpleNamespace(
+        initial_state=object(), z_coord=object(),
+        model_config=SimpleNamespace(eos="unknown"),
+    ))
+    with pytest.raises(ValueError, match="explicit resolved NEMO EOS"):
+        ladder.record_initial_ice_state(card)

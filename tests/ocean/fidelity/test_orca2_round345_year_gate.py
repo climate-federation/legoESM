@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -58,6 +59,18 @@ def test_decision188_plants_fire() -> None:
         "nonperturbed_envelope_refusal_plant": "PASS",
         "missing_unperturbed_control_refusal_plant": "PASS",
     }
+
+
+def test_coupled_preflight_uses_explicit_scratch_and_fortran_trim_only_spaces():
+    source = inspect.getsource(ulp_gate.run_coupled_c4_preflight)
+    assert "PREFLIGHT_SCRATCH_ROOT" in source
+    assert "gettempdir" not in source
+    assert ulp_gate._fortran_trimmed_namelist_character(
+        'cn_icerst_in="restart   "\n', "cn_icerst_in"
+    ) == "restart"
+    assert ulp_gate._fortran_trimmed_namelist_character(
+        'cn_icerst_in="restart\t"\n', "cn_icerst_in"
+    ) == "restart\t"
 
 
 def test_decision188_runs_on_orca2x_30_day_pilot_schema() -> None:

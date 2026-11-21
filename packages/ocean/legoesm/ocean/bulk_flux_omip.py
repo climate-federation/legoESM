@@ -1061,8 +1061,24 @@ class NemoORCA2SI3Carry:
         ice_cflice_delayed,
         kt,
     ):
-        if isinstance(kt, (int, np.integer)) and (isinstance(kt, bool) or kt < 1):
-            raise ValueError("NemoORCA2SI3Carry kt must be a positive integer scalar")
+        concrete_kt = _nemo_concrete_kt(kt)
+        # JAX calls pytree unflatten with bare ``object()`` sentinels while
+        # constructing an abstract tree and with ArgInfo while lowering; no
+        # model value exists at either point.
+        abstract_kt = (
+            isinstance(concrete_kt, jax.core.Tracer)
+            or (type(kt).__module__.startswith("jax._src.")
+                and type(kt).__name__ in {"ArgInfo", "Leaf"})
+        )
+        if (type(kt) is not object
+                and not abstract_kt
+                and (isinstance(concrete_kt, bool)
+                     or not isinstance(concrete_kt, (int, np.integer))
+                     or concrete_kt < 1)):
+            raise ValueError(
+                "NemoORCA2SI3Carry kt must be a positive integer scalar; "
+                f"got {type(kt)!r} {kt!r}"
+            )
         for name, value in zip(self._dynamic_fields, (
             ocean, ice, means, stress, fluxes, runoff,
             restoring_volume_flux, restoring_heat_flux, restoring_coefficient,
@@ -1118,8 +1134,36 @@ def nemo_orca2_si3_cold_start(
         jnp.zeros_like(ocean.eta.data),
         jnp.zeros_like(ocean.eta.data),
     )
+    stable_ocean = ocean
+    if hasattr(ocean, "bt_hist") and hasattr(ocean, "eta_rk3_after"):
+        config = card.ocean.recipe.model_config
+        ocean_updates = {}
+        if config.barotropic.barotropic_time_filter == "nemo_ab3am4":
+            ocean_updates["bt_hist"] = bt_hist_placeholder
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            nemo_rk3_after_ssh_is_carried,
+        )
+        if nemo_rk3_after_ssh_is_carried(config):
+            ocean_updates["eta_rk3_after"] = ocean.eta
+        if ocean_updates:
+            stable_ocean = ocean._replace(**ocean_updates)
+    stable_ice = ice
+    if hasattr(ice.ice, "cflice_delayed"):
+        stable_ice = ice._replace(ice=ice.ice._replace(
+            cflice_delayed=cflice_placeholder
+        ))
+    stable_stress = stress
+    if stress.rCdU_ice is None:
+        h = int(card.ice.state.nn_hls)
+        rcdu_shape = (
+            stress.tmod_io.shape[0] - 2 * h + 2,
+            stress.tmod_io.shape[1] - 2 * h + 2,
+        )
+        stable_stress = stress._replace(rCdU_ice=jnp.zeros(
+            rcdu_shape, dtype=jnp.asarray(stress.tmod_io).dtype
+        ))
     return NemoORCA2SI3Carry(
-        ocean, ice, means, stress, fluxes, runoff,
+        stable_ocean, stable_ice, means, stable_stress, fluxes, runoff,
         restoring_volume_flux, restoring_heat_flux, restoring_coefficient,
         fwb.a_fwb, fwb.a_fwb_b, fwb.emp_corr, means.frq,
         bt_hist_placeholder, ocean.eta, cflice_placeholder, kt,
@@ -1958,12 +2002,10 @@ def nemo_orca2_si3_coupled_pair(
     """Run one odd/even pair with an invariant externally carried pytree.
 
     A true cold ocean has no barotropic history/after-SSH and SI3 has no
-    delayed CFL scalar.  The first pair creates those arrays, which would
-    otherwise change the pytree and force a second compilation.  The external
-    carry keeps those three mature values in explicit cache leaves and stores
-    ``None`` in their source-owned state slots between pairs.  The cold arm
-    uses the untouched from-rest state; the warm arm restores the caches.
-    Both arms return the same tree, so one executable handles all C3 pairs.
+    delayed CFL scalar.  Cold-start construction puts shape-only placeholders
+    in those slots so the first and later pair calls share one pytree.  The
+    cold arm removes the placeholders before physics; every returned carry
+    keeps the mature arrays in their source-owned slots.
     """
 
     def stabilize(next_carry, odd, even):
@@ -1994,11 +2036,6 @@ def nemo_orca2_si3_coupled_pair(
                 + ", ".join(missing)
             )
         stable_carry = next_carry._replace(
-            ocean=next_carry.ocean._replace(bt_hist=None, eta_rk3_after=None),
-            ice=next_carry.ice._replace(
-                ice=next_carry.ice.ice._replace(cflice_delayed=None)
-            ),
-            stress=next_carry.stress._replace(rCdU_ice=None),
             ocean_bt_hist=bt_hist,
             ocean_eta_rk3_after=eta_rk3_after,
             ice_cflice_delayed=cflice_delayed,
@@ -2037,24 +2074,25 @@ def nemo_orca2_si3_coupled_pair(
         )
         return stabilize(even_carry, odd, even)
 
-    def run_warm(entry):
-        warm_ocean = entry.ocean._replace(
-            bt_hist=entry.ocean_bt_hist,
-            eta_rk3_after=entry.ocean_eta_rk3_after,
-        )
-        warm_ice = entry.ice._replace(ice=entry.ice.ice._replace(
-            cflice_delayed=entry.ice_cflice_delayed
-        ))
-        return run_pair(entry._replace(ocean=warm_ocean, ice=warm_ice))
+    def run_cold(entry):
+        cold_ocean = entry.ocean
+        if hasattr(cold_ocean, "bt_hist") and hasattr(cold_ocean, "eta_rk3_after"):
+            cold_ocean = cold_ocean._replace(bt_hist=None, eta_rk3_after=None)
+        cold_ice = entry.ice
+        if hasattr(cold_ice.ice, "cflice_delayed"):
+            cold_ice = cold_ice._replace(ice=cold_ice.ice._replace(
+                cflice_delayed=None
+            ))
+        return run_pair(entry._replace(ocean=cold_ocean, ice=cold_ice))
 
     if isinstance(carry.kt, jax.core.Tracer):
         return jax.lax.cond(
             jnp.asarray(carry.kt) == jnp.asarray(1),
+            run_cold,
             run_pair,
-            run_warm,
             carry,
         )
-    return run_pair(carry) if int(carry.kt) == 1 else run_warm(carry)
+    return run_cold(carry) if int(carry.kt) == 1 else run_pair(carry)
 
 
 def nemo_orca2_ocean_consumption_step(
@@ -2075,16 +2113,17 @@ def nemo_orca2_ocean_consumption_step(
     top-drag consumers; this core only shares its exact ``model.step`` call.
     """
 
-    traced_kt = isinstance(nemo_kt, jax.core.Tracer)
+    concrete_kt = _nemo_concrete_kt(nemo_kt)
+    traced_kt = isinstance(concrete_kt, jax.core.Tracer)
     if (not traced_kt
-            and (isinstance(nemo_kt, bool)
-                 or not isinstance(nemo_kt, (int, np.integer))
-                 or nemo_kt < 1)):
+            and (isinstance(concrete_kt, bool)
+                 or not isinstance(concrete_kt, (int, np.integer))
+                 or concrete_kt < 1)):
         raise ValueError("ORCA2 ocean consumption requires nemo_kt=<positive step>")
     kwargs = {
         "freshwater": freshwater_forcing,
         "surface_forcing": surface_forcing,
-        "nemo_kt": nemo_kt if traced_kt else int(nemo_kt),
+        "nemo_kt": nemo_kt if traced_kt else int(concrete_kt),
     }
     if sponge is not None:
         kwargs["sponge"] = sponge
@@ -3040,8 +3079,27 @@ def _nemo_fld_is_not_used(name: str) -> bool:
 
 
 def _nemo_checked_sponge(sponge, kt):
-    """Validate an eager damping stamp, then satisfy the traced identity guard."""
+    """Validate a damping stamp, then satisfy the traced identity guard."""
     if isinstance(kt, jax.core.Tracer):
+        target = sponge.nemo_kt
+        if target is None:
+            raise ValueError("L6 damping target is stale: target kt=None")
+
+        def fail_if_stale(target_value, requested_value):
+            target_scalar = np.asarray(target_value)
+            requested_scalar = np.asarray(requested_value)
+            if (target_scalar.shape != () or target_scalar.dtype.kind not in "iu"
+                    or requested_scalar.shape != ()
+                    or requested_scalar.dtype.kind not in "iu"
+                    or int(target_scalar) < 1
+                    or int(requested_scalar) < 1
+                    or int(target_scalar) != int(requested_scalar)):
+                raise ValueError(
+                    "L6 damping target is stale: "
+                    f"target kt={target_scalar!r}, requested kt={requested_scalar!r}"
+                )
+
+        jax.debug.callback(fail_if_stale, target, kt, ordered=True)
         return sponge._replace(nemo_kt=kt)
     target = sponge.nemo_kt
     requested = int(np.asarray(kt))
