@@ -184,6 +184,14 @@ def test_snow_and_specified_number_refused_off_the_hydrostatic_lane():
             refuse(cc.radiation_config(cc.cloud_config(**kw)), "spectral")
 
 
+def test_floor_and_cap_refuse_a_width_past_their_clamp():
+    x = jnp.array([1e-3])
+    for fn in (floor_ln, cap_ln):
+        fn(x, 1e-4, 1.38)
+        with pytest.raises(ValueError, match="2 ln 2"):
+            fn(x, 1e-4, 1.39)
+
+
 if __name__ == "__main__":
     np.savez(GAPS, **_gaps())
     print({k: float(np.max(v)) for k, v in _gaps().items()})
