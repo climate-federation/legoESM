@@ -441,3 +441,29 @@ def test_coupled_geography_needs_the_atmosphere_land_fraction(tmp_path, mode):
                          output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match="needs f_land_mode='analytical'"):
         d.setup()
+
+
+def test_land_surfdata_is_uniform_grass_or_none(mesh, tmp_path):
+    from legoesm.land.global_surface_data import (
+        get_surfdata_preset, load_global_surface_data)
+    sd = geo.geography_land_surfdata(_gen(tmp_path, "aquaplanet"))
+    g = load_global_surface_data(get_surfdata_preset("legoesm_surfdata"), mesh,
+                                 surf_ds=sd, landuse_ds=sd, veg_ds=sd)
+    pft = np.asarray(g.pft_frac)
+    assert np.allclose(pft[..., 13], 1.0) and np.allclose(pft.sum(-1), 1.0)
+    assert np.allclose(np.asarray(g.lai_monthly)[..., 13], 2.0)
+    assert np.allclose(np.asarray(g.htop_monthly)[..., 13], 0.5)
+    own = _write(mg.idealized("aquaplanet").assign(
+        PCT_NAT_PFT=(("natpft", "lsmlat", "lsmlon"), np.zeros((15, 1, 1)))),
+        tmp_path, "own.nc")
+    assert geo.geography_land_surfdata(own) is None
+
+
+def test_atmosphere_canopy_land_tile_on_a_geography(mesh, tmp_path):
+    from legoesm.driver.model_driver import build_multilayer_land_tile
+    cfg = _mpas_cfg(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0)),
+                    use_multilayer_land=True, land_surface_scheme="two_leaf")
+    lat = np.asarray(mesh.latCell); lon = np.asarray(mesh.lonCell)
+    tile = build_multilayer_land_tile(cfg, lat, lon, mesh)
+    assert np.allclose(np.asarray(tile["params"].hc), 0.5)
+    assert tile["params_update_factory"] is not None

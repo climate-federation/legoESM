@@ -1,0 +1,5 @@
+# E&M2009 drake case.  Geography file built by
+#   python scripts/data/make_geography.py drake --barrier-lon 0 -o <path>
+include: em2009_base.yaml
+geography: /burg/glab/users/pg2328/esoteric_logs/geography/drake.nc
+zm_land_fraction: required             # ZM refuses 'required' on an all-ocean mask and 'none' with land

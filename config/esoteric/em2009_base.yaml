@@ -1,0 +1,55 @@
+# Enderton & Marshall (2009)-style coupled idealized-geography deck (user
+# approved 2026-11-20/21): the MPAS production atmosphere, changed ONLY where
+# MPAS level 5, the geography, the coupled lane or perpetual present day force
+# it.  Row-by-row ledger with evidence and review record:
+# /burg/glab/users/pg2328/esoteric_logs/em2009_deck_ledger.md.
+# Driver: scripts/run/run_coupled.py --config config/esoteric/<case>.yaml
+include: ../amip/amip_production.yaml
+
+# ---- (a) MPAS level 5 instead of 6 ------------------------------------------
+resolution: 5                     # 10242 cells (~2.2 deg), ~E&M2009's C32
+dt: 225.0                         # production 112.5 s at L6 x 2 (CFL ~ dx); PLAUSIBLE, check the printed L5 clamp
+physics_update_steps: 8           # keeps physics every 1800 s
+rad_update_steps: 16              # keeps radiation hourly
+mpas_qv_smooth_del4_m4s: 5.82736e15   # absolute m4/s: x16 keeps the 2-cell damping time (VOTED V1 a/a/a)
+# a_h_scale, hyperdiffusion, divergence damping, sponge: nondimensional, auto-scale with dx (unchanged)
+
+# ---- (b) idealized geography (per-case decks set the file) -----------------
+geography_regrid: binned
+geography_barrier_width_cells: 1
+ic: default                       # ERA5 is Earth's atmosphere over Earth terrain: uniform rest start
+land_ic: null                     # res-6 real-land soil file does not apply; aridity seed from the start RH
+gravity_wave_drag: none           # production GWD is orographic only (mcfarlane); a geography has no
+                                  # subgrid orography, so zero mountain drag = no GWD (user 2026-11-21)
+
+# ---- (c) coupled lane --------------------------------------------------------
+preset: aquaplanet                # coupler land tile off: the ATMOSPHERE owns land (user U1 2026-11-21)
+atm_owns_surface: true            # atmosphere multilayer land + two-leaf canopy on the geography grass
+couple_surface_fluxes: false      # the coupler's fluxes never replace the atmosphere's (U1)
+# couple_surface_radiation resolves false (forwarded only for ocean_ic woa)
+# coupling_dt: CoupledConfig default 3600 s (no run_coupled key)
+ocean: dynamic                    # co-located MPAS ocean, wet where land fraction < 1
+ocean_nlev: 20
+ocean_dt: 300.0                   # code default; CFL at L5 not yet shown
+ocean_H_max: 5200.0               # = the geography's flat ocean depth (VOTED V6 b/b/b)
+ocean_ic: rest                    # stratified rest, surface at the atmosphere's mean T_sfc
+mpas_ice_skin_prognostic: false   # coupled: the sea-ice model owns the ice surface
+sea_ice_albedo_scheme: constant   # what 'auto' resolves to without the skin (VOTED W6 a/a/a)
+dataset: analytical               # SST from the dynamic ocean, ice from the coupler
+sst_var: null
+sic_var: null
+
+# ---- (d) perpetual present day ----------------------------------------------
+ghg_forcing: constant             # VOTED V2 a/a/a
+co2_ppmv: 415.0
+ch4_ppbv: 1900.0
+n2o_ppbv: 332.0
+solar_source: constant            # S_0, default spectrum (VOTED V3 a/a/a)
+ozone_forcing: external           # 2005-2014 monthly climatology (user U2 2026-11-21)
+ozone_file: /burg-archive/glab/users/pg2328/legoESM/data/cmip6_forcing/clim/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_zonalmean_185001-201412_clim2005-2014.nc
+aerosol_forcing: external         # 2005-2014 monthly climatology, optics-weighted (U2; VOTED W1 a/a/a)
+aerosol_file: /burg-archive/glab/users/pg2328/legoESM/data/cmip6_forcing/clim/aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg_clim2005-2014.nc
+aerosol_ccn_file: /burg-archive/glab/users/pg2328/legoESM/data/cmip6_forcing/clim/aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg_clim2005-2014.nc
+# volcanic aerosol: OFF (no file) -- PENDING USER (off vs 2005-2014 climatology)
+start_year: 1979                  # calendar only: every forcing above is constant or cyclic (VOTED V4)
+cmip_output: false                # process study (VOTED V5)

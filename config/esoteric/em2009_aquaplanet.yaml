@@ -1,0 +1,5 @@
+# E&M2009 aquaplanet case.  Geography file built by
+#   python scripts/data/make_geography.py aquaplanet -o <path>
+include: em2009_base.yaml
+geography: /burg/glab/users/pg2328/esoteric_logs/geography/aquaplanet.nc
+zm_land_fraction: none             # ZM refuses 'required' on an all-ocean mask and 'none' with land

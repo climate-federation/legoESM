@@ -439,7 +439,10 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *,
     from legoesm.land.config import MultiLayerLandConfig
     from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
 
-    cfg_sd = get_surfdata_preset("legoesm_surfdata")._replace(surf_path=surfdata_path)
+    # ``surfdata_path`` may be an in-memory harmonized dataset (a geography's).
+    _ds = None if isinstance(surfdata_path, str) else surfdata_path
+    cfg_sd = get_surfdata_preset("legoesm_surfdata")._replace(
+        surf_path=surfdata_path if _ds is None else "")
     # Remap the surfdata soil profile onto the CONFIG's soil grid, not the loader
     # default.  build_soil_hydraulics below derives per-(col, layer) hydraulics
     # from gsd.sand_frac/clay_frac, so the remap target MUST match
@@ -449,7 +452,8 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *,
     if isinstance(land_config, MultiLayerLandConfig):
         from legoesm.land.soil_grid import make_soil_grid
         _soil_grid = make_soil_grid(land_config.soil_grid)
-    gsd = load_global_surface_data(cfg_sd, grid, soil_grid=_soil_grid)
+    gsd = load_global_surface_data(cfg_sd, grid, soil_grid=_soil_grid, surf_ds=_ds,
+                                   landuse_ds=_ds, veg_ds=_ds)
     ncol = int(np.asarray(gsd.soil_color).shape[0])
     if theta_top is None:
         theta_top = jnp.full(ncol, THETA_TOP_DEFAULT)
