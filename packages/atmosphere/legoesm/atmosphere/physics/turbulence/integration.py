@@ -200,6 +200,9 @@ def get_turbulence_fn(config: TurbulenceConfig):
                 clubb_turbulence_prognostic,
             )
             return "clubb", clubb_turbulence_prognostic, clubb_cfg
+        if getattr(clubb_cfg, "routec_inversion", False):
+            raise ValueError("CLUBBConfig.routec_inversion needs prognostic=True: "
+                             "the diagnostic path has no xm/w'x' solve to constrain")
         return "clubb", clubb_turbulence, clubb_cfg
     elif config.scheme == "holtslag_boville":
         return "holtslag_boville", holtslag_boville_turbulence, config.holtslag_boville

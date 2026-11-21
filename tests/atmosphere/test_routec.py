@@ -180,7 +180,7 @@ def _rows_case():
 def _rows_rc(weight, xi, kbs):
     z = jnp.zeros_like(weight)
     cand = rc.Candidates(jnp.asarray(kbs), weight, *([z] * 10))
-    return {"cand": cand, "xi": xi}
+    return {"cand": cand, "c_low": 1.0 - xi, "c_F": xi}
 
 
 def test_v4_constrained_rows_hold_after_the_solve():
@@ -298,8 +298,13 @@ def test_v4_rows_hold_at_the_diagnosed_levels_inside_the_core(monkeypatch):
         for c in range(w.shape[0]):
             k = int(round(float(r["kb_eff"][c])))
             assert abs(w[c, k + 1]) < 1e-14
-            np.testing.assert_allclose(w[c, k] - (1 - r["xi_eff"][c]) * w[c, k - 1],
-                                       r["xi_eff"][c] * F[c], rtol=1e-10, atol=1e-16)
+            np.testing.assert_allclose(w[c, k] - r["c_low_eff"][c] * w[c, k - 1],
+                                       r["c_F_eff"][c] * F[c], rtol=1e-10, atol=1e-16)
+            # GB01 C12 on the mass flux: the kinematic row carries rho ratios
+            rho = np.asarray(env["rho_ds_zm"])[c]
+            np.testing.assert_allclose(r["c_low_eff"][c],
+                                       (1 - r["xi_eff"][c]) * rho[k - 1] / rho[k], rtol=1e-12)
+            assert abs(r["c_low_eff"][c] - (1 - r["xi_eff"][c])) > 1e-4
 
 
 def test_route_c_changes_the_cloud_top_fluxes():
@@ -403,3 +408,51 @@ def test_no_eddy_diffusion_across_the_constrained_flux_levels(monkeypatch):
         assert Kh[c, k] == 0.0 and Kh[c, k + 1] == 0.0
         rest = np.delete(np.arange(Kh.shape[1]), [k, k + 1])
         np.testing.assert_array_equal(Kh[c, rest], Kh0[c, rest])
+
+
+def test_routec_refused_on_the_diagnostic_clubb_path():
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
+    cfg = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(routec_inversion=True))
+    with pytest.raises(ValueError, match="routec_inversion needs prognostic"):
+        get_turbulence_fn(cfg)
+    ok = TurbulenceConfig(scheme="clubb",
+                          clubb=CLUBBConfig(routec_inversion=True, prognostic=True))
+    assert get_turbulence_fn(ok)[0] == "clubb"
+
+
+def _E_case(name):
+    p, ex = 90000.0, (90000.0 / constants.p_ref) ** constants.kappa
+    rs = float(sat_mixrat_liq(jnp.asarray(p), jnp.asarray(288.3 * ex)))
+    rt = {"cloudy": 1.05 * rs, "just_saturated": 1.0000005 * rs,
+          "unsaturated": 0.8 * rs}[name]
+    a = lambda x: jnp.asarray([x])  # noqa: E731
+    return a(288.3), a(rt), a(8.0), a(-4e-3), a(p), a(ex)
+
+
+# per case: E at the default widths minus the hard form (absolute; E is in
+# [0, 1]); measured 2026-11-21
+_E_GAP = {}
+
+
+@pytest.mark.parametrize("name", ["cloudy", "just_saturated", "unsaturated"])
+def test_r5_enhancement_gap_per_case(name):
+    args = _E_case(name)
+    gap = float(rc.evaporative_enhancement(*args, WD)[0][0]
+                - rc.evaporative_enhancement(*args, W0)[0][0])
+    if _E_GAP.get(name) is None:
+        pytest.fail(f"MEASURED {name!r}: {gap!r}")
+    np.testing.assert_allclose(gap, _E_GAP[name], rtol=1e-6, atol=1e-12)
+
+
+def test_r5_gradients_through_the_cloudy_and_pressure_switches():
+    c = _known_column()
+    ql = c["ql"].at[0, c["kb"] - 1].set(rc.QL_MIN + 5e-8)    # inside the ql band
+    ph = c["p_half"]
+
+    def f(ql, p_half):
+        cand = rc.diagnose_candidates(c["thvl"], ql, p_half, WD)
+        return jnp.sum(cand.weight * cand.m)
+    check_grads(f, (ql, ph), order=1, modes=("rev",), eps=1e-9, rtol=1e-3, atol=1e-6)
+    gq = np.asarray(jax.grad(f, argnums=0)(ql, ph))
+    assert np.all(np.isfinite(gq)) and gq[0, c["kb"] - 1] != 0.0

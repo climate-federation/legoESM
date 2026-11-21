@@ -6087,8 +6087,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         from legoesm.atmosphere.physics.turbulence.routec import (
             clubb_routec_terms, widths_from_config)
         rc = clubb_routec_terms(
-            state.thlm, state.rtm, pdf["rcm"], diag["em"], thv_ds_zm, rho_ds_zt,
-            p_sfc, p_in_Pa_zt, exner_zt, gr, widths_from_config(config))
+            state.thlm, state.rtm, pdf["rcm"], diag["em"], thv_ds_zm, rho_ds_zm,
+            rho_ds_zt, p_sfc, gr, widths_from_config(config))
 
     # ---- (3) advance_xm_wpxp: rtm/wprtp + thlm/wpthlp ----
     wprtp, rtm, wpthlp, thlm = advance_xm_wpxp(

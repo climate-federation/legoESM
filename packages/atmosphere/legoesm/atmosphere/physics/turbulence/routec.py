@@ -45,7 +45,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.smooth import positive_part_c1, sigmoid_switch, smooth_clamp
+from legoesm.core.smooth import max_c1, positive_part_c1, sigmoid_switch, smooth_clamp, sqrt_c1
 
 __physics_contract__ = {
     "summary": (
@@ -170,14 +170,16 @@ def _reconstruct(thvl, pi_half, kb, w: RouteCWidths):
     dpiA = dpi[:, kb]
     s_lo = _safe_div(t2 - tA, pc2 - pcA)       # sigma^{M+3/2}
     s_hi = _safe_div(t3 - t2, pc3 - pc2)       # sigma^{M+5/2}
-    # GB01 s_1 = the more negative slope: upper pair where s_hi <= s_lo
-    u = _step(_safe_div(s_lo - s_hi, jnp.abs(s_lo) + jnp.abs(s_hi)), w.m)
+    # GB01 s_1 = the more negative slope: upper pair where s_hi <= s_lo.  The
+    # normaliser carries a floor of the jump width per layer mass, so the
+    # smooth choice is continuous where both slopes vanish (0 at width 0).
+    u = _step(_safe_div(s_lo - s_hi, jnp.abs(s_lo) + jnp.abs(s_hi) + w.jump / dpiA), w.m)
     s1 = u * s_hi + (1.0 - u) * s_lo
     th_top = t2 - s1 * (pc2 - pi_top)          # (C1)
     a = th_top - tM
     c = tA - tM
     disc = a * a - 2.0 * s1 * dpiA * c
-    den_q = a + _sqrt0(disc)
+    den_q = a + sqrt_c1(disc, w.jump ** 2)
     m_q = _safe_div(2.0 * c, den_q)            # smaller root of (C4)
     jump_q = a - s1 * m_q * dpiA               # (C5)
     q = _step(disc, w.jump ** 2) * _step(jump_q - D0, w.jump) * _gt(den_q, w.jump)
@@ -234,7 +236,7 @@ def inversion_jump(x, cand: Candidates, w: RouteCWidths):
     where 1/m exceeds 10 (Lock 2001 after eq. A2) by a logistic in m about 0.1
     of width ``w.lock`` (0 = the hard switch).  Linear in X."""
     xM, xA, x2 = (_cand_take(x, cand.kb, o) for o in (-1, 0, 1))
-    m = jnp.maximum(cand.m, 1e-6)              # guard: GB form is weighted ~0 there
+    m = max_c1(cand.m, 1e-6, _sharp(w.m))      # guard: GB form is weighted ~0 there
     gb = 2.0 * (xA - (1.0 - m) * xM) / m - xM - extrapolated_top(x, cand)
     lam = _gt(1.0 / LOCK_FRAC_MAX - cand.m, w.lock)
     return lam * (x2 - xM) + (1.0 - lam) * gb
@@ -334,8 +336,8 @@ def entrainment_velocity(e_i, z_i, jump_thvl, theta_v0, E):
     return _safe_div(A * e * _sqrt0(e), l_i * db)
 
 
-def clubb_routec_terms(thlm, rtm, rcm, em, thv_ds_zm, rho_ds_zt, p_sfc, p_in_Pa_zt,
-                       exner_zt, gr, w: RouteCWidths):
+def clubb_routec_terms(thlm, rtm, rcm, em, thv_ds_zm, rho_ds_zm, rho_ds_zt, p_sfc,
+                       gr, w: RouteCWidths):
     """Everything CLUBB's xm/w'x' solve needs for route C, from the
     start-of-step state on CLUBB's ascending grid (zt: nz layers, zm: nz + 1).
 
@@ -357,40 +359,51 @@ def clubb_routec_terms(thlm, rtm, rcm, em, thv_ds_zm, rho_ds_zt, p_sfc, p_in_Pa_
     th0 = thv_ds_zm[:, kb]
     dthl = inversion_jump(thlm, cand, w)
     drt = inversion_jump(rtm, cand, w)
-    E, _ = evaporative_enhancement(thlm[:, kb - 1], rtm[:, kb - 1], dthl, drt,
-                                   p_in_Pa_zt[:, kb - 1], exner_zt[:, kb - 1], w)
-    w_e = entrainment_velocity(e_i, z_i, cand.jump_thvl, th0, E)
     pi_i = cand.pi_top - cand.m * cand.dpi_a
+    p_i = p_sfc[:, None] - pi_i                # mixing evaluated at the inversion
+    E, _ = evaporative_enhancement(thlm[:, kb - 1], rtm[:, kb - 1], dthl, drt, p_i,
+                                   (p_i / constants.p_ref) ** constants.kappa, w)
+    w_e = entrainment_velocity(e_i, z_i, cand.jump_thvl, th0, E)
     xi = _safe_div(cand.pi_bot - cand.pi_low, pi_i - cand.pi_low)
+    # GB01 C12-C14 interpolate the mass flux rho w'x' in pi; CLUBB solves the
+    # kinematic w'x', so the row carries the density ratios to level kb.
+    r_kb = rho_ds_zm[:, kb]
+    rho_i = rho_ds_zm[:, kb + 1] - cand.m * (rho_ds_zm[:, kb + 1] - r_kb)
+    c_low = (1.0 - xi) * rho_ds_zm[:, kb - 1] / r_kb
+    c_F = xi * rho_i / r_kb
     nzm = pi_half.shape[1]
     onehot = (jnp.arange(nzm)[None, :] == kb[:, None]).astype(dpi.dtype)  # (ncand, nzm)
     W_zm = cand.weight @ onehot + cand.weight @ jnp.roll(onehot, 1, axis=1)
     wsum = jnp.sum(cand.weight, axis=1)
     blend = lambda x: jnp.sum(cand.weight * x, axis=1)  # noqa: E731
-    return dict(cand=cand, xi=xi, F_rt=-w_e * drt, F_thl=-w_e * dthl, W_zm=W_zm,
+    return dict(cand=cand, xi=xi, c_low=c_low, c_F=c_F, F_rt=-w_e * drt,
+                F_thl=-w_e * dthl, W_zm=W_zm,
                 w_e=blend(w_e), E=blend(E), m=blend(cand.m), z_i=blend(z_i),
                 jump_thvl=blend(cand.jump_thvl), jump_thl=blend(dthl),
                 jump_rt=blend(drt), e_i=blend(e_i), active=wsum,
                 kb_eff=blend(jnp.broadcast_to(kb, cand.weight.shape).astype(dpi.dtype)),
-                xi_eff=blend(xi), F_rt_eff=blend(-w_e * drt), F_thl_eff=blend(-w_e * dthl))
+                xi_eff=blend(xi), c_low_eff=blend(c_low), c_F_eff=blend(c_F),
+                F_rt_eff=blend(-w_e * drt), F_thl_eff=blend(-w_e * dthl))
 
 
 def routec_constrain_rows(lhs, rhs, rc, F):
     """Route C: blend two w'x' rows of the coupled xm/w'x' penta system toward
     GB01's constraints (eqs. 22, C12 to C14), per candidate base interface kb
     with weight w: the row of w'x'[kb + 1] toward w'x' = 0 and the row of
-    w'x'[kb] toward w'x'[kb] - (1 - xi) w'x'[kb - 1] = xi F.  A row r becomes
+    w'x'[kb] toward w'x'[kb] - c_low w'x'[kb - 1] = c_F F, with
+    c_low = (1 - xi) rho[kb - 1] / rho[kb] and c_F = xi rho_i / rho[kb] (the
+    mass-flux interpolation in pi written for the kinematic flux).  A row r becomes
     (1 - W_r) row_r + (constraint rows weighted by their candidates), exact at
     one-hot weights (the hard form).  Interleaving as :func:`xm_wpxp_lhs`
     (w'x'[k] at 2k); band 4 couples row r to unknown r - 2.  xm rows untouched."""
-    cand, xi = rc["cand"], rc["xi"]
+    cand = rc["cand"]
     ncol, ndim = rhs.shape
     nzm = (ndim + 1) // 2
     onehot = (jnp.arange(nzm)[None, :] == cand.kb[:, None]).astype(rhs.dtype)
     wb = cand.weight @ onehot                                   # bottom-row weight at kb
     wt = cand.weight @ jnp.roll(onehot, 1, axis=1)              # top-row weight at kb + 1
-    b4 = (cand.weight * (1.0 - xi)) @ onehot
-    rb = (cand.weight * xi * F) @ onehot
+    b4 = (cand.weight * rc["c_low"]) @ onehot
+    rb = (cand.weight * rc["c_F"] * F) @ onehot
 
     def to_rows(z):
         return jnp.zeros((ncol, ndim), rhs.dtype).at[:, 0::2].set(z)
