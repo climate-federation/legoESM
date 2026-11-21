@@ -105,12 +105,15 @@ def test_physics_module_rows_use_true_layer_masses(monkeypatch):
     import legoesm.diagnostics.process_ledger as pl
     model, state, coord = _hybrid_model_and_state()
     real = pl.ledger_entry_column
-    calls = []
+    has_dp, diffs = [], []
 
     def spy(dq, dT, p_s, dsigma, dp=None, level_weight=None):
-        out = real(dq, dT, p_s, dsigma, dp=dp, level_weight=level_weight)
-        calls.append((p_s, dp))
-        return out
+        has_dp.append(dp is not None)          # static under jit
+        if dp is not None:
+            want = coord.layer_thickness_dp(p_s.astype(conservation_accumulator()))
+            jax.debug.callback(lambda d: diffs.append(float(d)),
+                               jnp.max(jnp.abs(dp - want)))
+        return real(dq, dT, p_s, dsigma, dp=dp, level_weight=level_weight)
 
     monkeypatch.setattr(pl, "ledger_entry_column", spy)
     physics = make_physics(
@@ -119,9 +122,6 @@ def test_physics_module_rows_use_true_layer_masses(monkeypatch):
                       convection=ConvectionConfig(scheme="kuo")),
         model_type="mpas", dt=DT, budget_ledger=True)
     model.step(state, DT, physics_fn=physics, phys_state=None)
-    assert len(calls) >= 3                      # radiation, turbulence, convection
-    for p_s, dp in calls:
-        assert dp is not None
-        want_dp = coord.layer_thickness_dp(
-            jnp.asarray(p_s).astype(conservation_accumulator()))
-        np.testing.assert_array_equal(np.asarray(dp), np.asarray(want_dp))
+    jax.effects_barrier()
+    assert len(has_dp) >= 3 and all(has_dp)   # radiation, turbulence, convection
+    assert diffs and max(diffs) == 0.0
