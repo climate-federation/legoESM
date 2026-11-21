@@ -73,7 +73,8 @@ def test_cloud_call_uses_cam6_in_cloud_water_over_cld():
     off = _props(cc.cloud_config(), c)
     on = _props(cc.cloud_config(cam6_conv_water_in_rad=1), c)
     liq, ice = cam6_conv_water_4rad(c["q_c"], c["q_i"], off.ast, off.deepcu,
-                                   c["conv_icwmr"], 0.01)
+                                   c["conv_icwmr"], 0.01,
+                                   log_width=cc.cloud_config().cam6_rad_gate_log_width)
     dpg = (c["p_half"][:, 1:] - c["p_half"][:, :-1]) / constants.g
     cld = on.cloud_fraction
     want_l = jnp.minimum(liq / jnp.maximum(cld, 1e-4), 5e-3) * dpg * cld

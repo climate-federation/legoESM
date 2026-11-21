@@ -56,6 +56,7 @@ References
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import NamedTuple
 
@@ -63,7 +64,8 @@ import jax.numpy as jnp
 from jax import lax, nn
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
-from legoesm.core.smooth import smooth_min
+from legoesm.core.smooth import (ramp_above_ln, smooth_max_c1, smooth_min,
+                                 validate_smoothing_width)
 from legoesm.thermo import (
     mixing_ratio_to_specific_humidity,
     saturation_mixing_ratio,
@@ -217,6 +219,13 @@ class CloudProperties(NamedTuple):
     # by ~10 W/m2 globally against the subcolumn ICA treatment (#1521).
     lwp_lw: jnp.ndarray | None = None
     iwp_lw: jnp.ndarray | None = None
+    # CAM6 fractions behind ``cloud_fraction`` (scheme "cam6_clubb" only,
+    # ``None`` otherwise): the CLUBB liquid fraction alst, the stratiform
+    # fraction ast = max(alst, aist) and the deep convective fraction deepcu.
+    # Diagnostics; the radiation does not read them.
+    alst: jnp.ndarray | None = None
+    ast: jnp.ndarray | None = None
+    deepcu: jnp.ndarray | None = None
     # CAM6 snow for the radiation (``CloudConfig.cam6_snow_in_rad``, else
     # ``None``): snow cloud fraction cldfsnow, in-cloud snow path icswp
     # [kg/m2] and snow effective diameter des [micron].
@@ -1014,7 +1023,8 @@ _MG2_RHOSN = 250.0           # micro_mg_utils rhosn, bulk snow density [kg/m3]
 _MG2_RHOWS = 917.0           # micro_mg_utils rhows, solid ice density [kg/m3]
 
 
-def cam6_snow_for_radiation(cld, deepcu, q_liq, q_snow, n_snow, T, p_full, dp):
+def cam6_snow_for_radiation(cld, deepcu, q_liq, q_snow, n_snow, T, p_full, dp,
+                            log_width=0.0):
     """CAM6 snow fields the radiation reads: ``(cldfsnow, icswp, des)``.
 
     micro_mg_cam.F90 (cam_cesm2_1_rel_60): cldfsnow at :2309-2319 (starts
@@ -1031,23 +1041,47 @@ def cam6_snow_for_radiation(cld, deepcu, q_liq, q_snow, n_snow, T, p_full, dp):
     keeps the number bounded away from zero, legoESM's tracer need not)
     gets des = 0, i.e. no snow optics, instead of an infinite diameter.
     """
-    concld = jnp.minimum(deepcu, _SN_CONCLD_MAX)
-    cldfsnow = jnp.where((cld > _SN_MINCLD) & (concld < _SN_MINCLD)
-                         & (q_liq < _SN_QLIQ_MIN), 0.0, cld)
-    cldfsnow = jnp.where((cldfsnow <= _SN_MINCLD) & (q_snow > _SN_QS_FRAC),
-                         _SN_FRAC_NOCLD, cldfsnow)
-    icswp = q_snow / jnp.maximum(_SN_MINCLD, cldfsnow) * dp / constants.g
     rho = p_full / (constants.R_d * T)
-    on = (q_snow >= _SN_QS_DES) & (n_snow > 0.0)
-    qs_on = jnp.where(on, q_snow, 1.0)
+    if log_width == 0:
+        concld = jnp.minimum(deepcu, _SN_CONCLD_MAX)
+        cldfsnow = jnp.where((cld > _SN_MINCLD) & (concld < _SN_MINCLD)
+                             & (q_liq < _SN_QLIQ_MIN), 0.0, cld)
+        cldfsnow = jnp.where((cldfsnow <= _SN_MINCLD) & (q_snow > _SN_QS_FRAC),
+                             _SN_FRAC_NOCLD, cldfsnow)
+        icswp = q_snow / jnp.maximum(_SN_MINCLD, cldfsnow) * dp / constants.g
+        on = (q_snow >= _SN_QS_DES) & (n_snow > 0.0)
+        qs_on = jnp.where(on, q_snow, 1.0)
+        n_on = jnp.where(on, n_snow, 1.0)
+        dsout = (jnp.pi * _MG2_RHOSN * (n_on * rho) / (qs_on * rho)) ** (-1.0 / 3.0)
+        des = jnp.where(on, dsout * 3.0 * _MG2_RHOSN / _MG2_RHOWS * 1.0e6, 0.0)
+        return cldfsnow, icswp, des
+    # RULE 5 smooth default (CloudConfig.cam6_rad_gate_log_width): every
+    # threshold above is an ln-space C2 ramp (ramp_above_ln) and the icswp
+    # floor an ln-space smooth max.  concld = min(deepcu, 0.8) is only
+    # compared against 1e-4, so deepcu is tested directly.  The n_snow > 0
+    # guard stays hard (beyond CAM; voted).  KNOWN DIFFERENCE vs CAM6:
+    # quantities within a factor exp(log_width) above a threshold are only
+    # partly switched (test_cam6_rad_smooth_gates.py records the gap).
+    w = log_width
+    r = functools.partial(ramp_above_ln, log_width=w)
+    zero_w = r(cld, _SN_MINCLD) * (1.0 - r(deepcu, _SN_MINCLD)) * (1.0 - r(q_liq, _SN_QLIQ_MIN))
+    cldfsnow = cld * (1.0 - zero_w)
+    nocld_w = (1.0 - r(cldfsnow, _SN_MINCLD)) * r(q_snow, _SN_QS_FRAC)
+    cldfsnow = cldfsnow + nocld_w * (_SN_FRAC_NOCLD - cldfsnow)
+    denom = jnp.exp(smooth_max_c1(
+        math.log(_SN_MINCLD), jnp.log(jnp.maximum(cldfsnow, 0.5 * _SN_MINCLD)), w))
+    icswp = q_snow / denom * dp / constants.g
+    on = n_snow > 0.0
+    qs_on = jnp.where(on, jnp.maximum(q_snow, _SN_QS_DES), 1.0)
     n_on = jnp.where(on, n_snow, 1.0)
     dsout = (jnp.pi * _MG2_RHOSN * (n_on * rho) / (qs_on * rho)) ** (-1.0 / 3.0)
-    des = jnp.where(on, dsout * 3.0 * _MG2_RHOSN / _MG2_RHOWS * 1.0e6, 0.0)
+    des = jnp.where(on, dsout * 3.0 * _MG2_RHOSN / _MG2_RHOWS * 1.0e6
+                    * r(q_snow, _SN_QS_DES), 0.0)
     return cldfsnow, icswp, des
 
 
 def cam6_conv_water_4rad(ls_liq, ls_ice, ast, dp_frac, dp_icwmr, frac_limit,
-                         sh_frac=None, sh_icwmr=None):
+                         sh_frac=None, sh_icwmr=None, log_width=0.0):
     """Grid-mean liquid and ice for the radiation, stratus plus cumulus.
 
     Port of CAM6 ``conv_water_4rad`` (conv_water.F90, cam_cesm2_1_rel_60,
@@ -1071,25 +1105,44 @@ def cam6_conv_water_4rad(ls_liq, ls_ice, ast, dp_frac, dp_icwmr, frac_limit,
     sh_frac = zero if sh_frac is None else sh_frac
     sh_icwmr = zero if sh_icwmr is None else sh_icwmr
     fl = frac_limit
-    sh0 = jnp.where((sh_frac <= fl) | (sh_icwmr <= _CW_IC_LIMIT), 0.0, sh_frac)
-    dp0 = jnp.where((dp_frac <= fl) | (dp_icwmr <= _CW_IC_LIMIT), 0.0, dp_frac)
-    cu0 = sh0 + dp0
     wrk1 = jnp.minimum(1.0, jnp.maximum(
         0.0, ls_ice / (ls_ice + ls_liq + _CW_ICE_RATIO_EPS)))
-    no_cu = (cu0 < fl) | ((sh_icwmr + dp_icwmr) < _CW_IC_LIMIT)
     ls_sum = ls_liq + ls_ice
     ls_icwmr = ls_sum / jnp.maximum(fl, ast)
-    # stratus only (:330-341): a fraction under frac_limit is dropped
-    tot0_a = jnp.where(ast < fl, 0.0, ast)
-    tot_ic_a = jnp.where(ast < fl, 0.0, ls_icwmr)
+    if log_width == 0:
+        sh0 = jnp.where((sh_frac <= fl) | (sh_icwmr <= _CW_IC_LIMIT), 0.0, sh_frac)
+        dp0 = jnp.where((dp_frac <= fl) | (dp_icwmr <= _CW_IC_LIMIT), 0.0, dp_frac)
+        cu0 = sh0 + dp0
+        no_cu = (cu0 < fl) | ((sh_icwmr + dp_icwmr) < _CW_IC_LIMIT)
+        # stratus only (:330-341): a fraction under frac_limit is dropped
+        tot0_a = jnp.where(ast < fl, 0.0, ast)
+        tot_ic_a = jnp.where(ast < fl, 0.0, ls_icwmr)
+    else:
+        # RULE 5 smooth default (CloudConfig.cam6_rad_gate_log_width): each
+        # threshold is an ln-space C2 ramp (ramp_above_ln), the branch select
+        # a blend by the cumulus weight.  The max(frac_limit, .) floors stay:
+        # every one sits where a ramp from the same floor is already 0 with
+        # zero slope.  KNOWN DIFFERENCE vs CAM6: fractions and water within a
+        # factor exp(log_width) above a threshold are only partly switched
+        # (test_cam6_rad_smooth_gates.py records the gap).
+        r = functools.partial(ramp_above_ln, log_width=log_width)
+        sh0 = sh_frac * r(sh_frac, fl) * r(sh_icwmr, _CW_IC_LIMIT)
+        dp0 = dp_frac * r(dp_frac, fl) * r(dp_icwmr, _CW_IC_LIMIT)
+        cu0 = sh0 + dp0
+        cu_w = r(cu0, fl) * r(sh_icwmr + dp_icwmr, _CW_IC_LIMIT)
+        _ast_w = r(ast, fl)
+        tot0_a = ast * _ast_w
+        tot_ic_a = ls_icwmr * _ast_w
     # stratus and cumulus (:345-385), mode 1
     cu_icwmr = (sh0 * sh_icwmr + dp0 * dp_icwmr) / jnp.maximum(fl, cu0)
     tot0_b = ast + cu0
     tot_ic_b = (ast * ls_icwmr + cu0 * cu_icwmr) / jnp.maximum(fl, tot0_b)
-    tot0 = jnp.where(no_cu, tot0_a, tot0_b)
-    tot_ic = jnp.where(no_cu, tot_ic_a, tot_ic_b)
-    totg_ice = tot0 * tot_ic * wrk1
-    totg_liq = tot0 * tot_ic * (1.0 - wrk1)
+    if log_width == 0:
+        tot = jnp.where(no_cu, tot0_a, tot0_b) * jnp.where(no_cu, tot_ic_a, tot_ic_b)
+    else:
+        tot = tot0_a * tot_ic_a + cu_w * (tot0_b * tot_ic_b - tot0_a * tot_ic_a)
+    totg_ice = tot * wrk1
+    totg_liq = tot * (1.0 - wrk1)
     return totg_liq, totg_ice
 
 
@@ -1207,6 +1260,9 @@ def compute_cloud_properties(
             "radiation would run an unreferenced pairing. Use one of "
             f"{_IN_CLOUD_NUMBER_SCHEMES} or drop the aerosol CCN coupling "
             "(--aerosol-ccn).")
+    if config.cam6_conv_water_in_rad != 0 or config.cam6_snow_in_rad:
+        validate_smoothing_width("CloudConfig.cam6_rad_gate_log_width",
+                                 config.cam6_rad_gate_log_width)
     if config.cam6_rad_specified_nc and n_cloud_specified is None:
         raise ValueError(
             "CloudConfig.cam6_rad_specified_nc needs the microphysics' "
@@ -1536,7 +1592,8 @@ def compute_cloud_properties(
         _dp_icwmr = jnp.zeros_like(T) if conv_icwmr is None else conv_icwmr
         _totg_liq, _totg_ice = cam6_conv_water_4rad(
             q_c, q_i, _ast_cam6, _deepcu_cam6, _dp_icwmr,
-            config.cam6_conv_water_frac_limit)
+            config.cam6_conv_water_frac_limit,
+            log_width=config.cam6_rad_gate_log_width)
         _cld = jnp.maximum(_CD_MIN_CLD, cf)
         lwp = jnp.minimum(_totg_liq / _cld, _CD_IC_MAX) * dp / constants.g * cf
         iwp = jnp.minimum(_totg_ice / _cld, _CD_IC_MAX) * dp / constants.g * cf
@@ -1553,7 +1610,8 @@ def compute_cloud_properties(
                 "snow, or the caller did not pass it.")
         _cldfsnow, _icswp, _des = cam6_snow_for_radiation(
             cf, _deepcu_cam6, q_c, jnp.maximum(q_snow, 0.0),
-            jnp.maximum(n_snow, 0.0), T, p_full, dp)
+            jnp.maximum(n_snow, 0.0), T, p_full, dp,
+            log_width=config.cam6_rad_gate_log_width)
 
     # Effective radii (constant for now): ``broadcast_to`` produces a
     # zero-copy logical view, whereas ``jnp.full_like(T, scalar)``
@@ -1879,6 +1937,9 @@ def compute_cloud_properties(
         r_eff_ice=r_eff_ice,
         lwp_lw=lwp_lw,
         iwp_lw=iwp_lw,
+        alst=_alst_cam6,
+        ast=_ast_cam6,
+        deepcu=_deepcu_cam6,
         cldfsnow=_cldfsnow,
         icswp=_icswp,
         des=_des,

@@ -264,6 +264,16 @@ def zero_at_or_below(x: jax.Array, floor: float, width: float) -> jax.Array:
     return x * smoothstep_quintic((x - floor) / width)
 
 
+def ramp_above_ln(x: jax.Array, floor: float, log_width: float) -> jax.Array:
+    """Weight of the test ``x > floor`` for a positive ``floor`` (RULE 5), as a
+    C2 ramp in ``ln x``: exactly 0 at and below ``floor``, exactly 1 from
+    ``floor * exp(log_width)``.  ``log_width = 0`` is the hard ``x > floor``."""
+    if log_width == 0:
+        return (jnp.asarray(x) > floor).astype(jnp.result_type(x, float))
+    lx = jnp.log(jnp.maximum(x, floor))
+    return smoothstep_quintic((lx - math.log(floor)) / log_width)
+
+
 def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
     if width == 0:

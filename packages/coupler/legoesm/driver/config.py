@@ -1073,6 +1073,10 @@ class ExperimentConfig(NamedTuple):
     # feeds and nothing removes.  Needs cloud_scheme='cam6_clubb', Morrison
     # with morrison_prognostic_droplet_number=False and aerosol_ccn off.
     cloud_cam6_rad_specified_nc: bool = False
+    # RULE 5 width (ln space) of the CAM6 convective-water and snow-in-radiation
+    # thresholds (CloudConfig.cam6_rad_gate_log_width); None => 0.01, 0 = CAM6's
+    # hard switches.
+    cloud_cam6_rad_gate_log_width: float | None = None
     # Polar-cap radiative cloud floor (CloudConfig.cap_floor_*): an attribution
     # lever for the 2026-09 Arctic self-isolation A/B, radiation-only, MPAS /
     # spectral standalone radiation path only (the FV pipeline refuses it).

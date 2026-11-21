@@ -50,6 +50,7 @@ __param_spec__ = {
             "cam6_deepcu_frac_limit": "numerics: threshold below which the deep-convective fraction is zeroed (clubb_intr frac_limit)",
             "cam6_deepcu_ic_limit": "numerics: in-cloud water floor below which the deep-convective fraction is zeroed (clubb_intr ic_limit)",
             "cam6_conv_water_frac_limit": "numerics: conv_water_frac_limit, the fraction below which conv_water_4rad drops a cloud part (CAM6 namelist 0.01)",
+            "cam6_rad_gate_log_width": "numerics: RULE 5 smoothing width (ln space) of the CAM6 convective-water and snow-in-radiation thresholds; 0 = CAM6's hard switches",
             "cloud_inhomogeneity_factor": "Cahalan plane-parallel-bias reduction, default 1.0 (homogeneous, no reduction) = the physical ceiling; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
@@ -446,6 +447,12 @@ class CloudConfig(NamedTuple):
     # REL sees ncnst/rho * max(alst, mincld)/max(ast, mincld) per kg.
     # Scheme "cam6_clubb" only; ncnst is the microphysics Nc_0.
     cam6_rad_specified_nc: bool = False
+    # RULE 5 width, in ln space, of every threshold in the CAM6 convective
+    # water (conv_water_4rad) and snow-in-radiation (cldfsnow, icswp, des)
+    # ports: a quantity within a factor exp(width) above its CAM6 threshold
+    # is only partly switched.  0 = CAM6's hard switches (oracle tests).
+    # User-approved default 0.01 (2026-10-27).
+    cam6_rad_gate_log_width: float = 0.01
 
 
 def build_cloud_config(
@@ -486,6 +493,7 @@ def build_cloud_config(
     cam6_snow_in_rad: bool | None = None,
     cam6_snow_optics_file: str | None = None,
     cam6_rad_specified_nc: bool | None = None,
+    cam6_rad_gate_log_width: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -544,7 +552,8 @@ def build_cloud_config(
                         ("cam6_conv_water_frac_limit", cam6_conv_water_frac_limit),
                         ("cam6_snow_in_rad", cam6_snow_in_rad),
                         ("cam6_snow_optics_file", cam6_snow_optics_file),
-                        ("cam6_rad_specified_nc", cam6_rad_specified_nc)):
+                        ("cam6_rad_specified_nc", cam6_rad_specified_nc),
+                        ("cam6_rad_gate_log_width", cam6_rad_gate_log_width)):
         if _val is not None:
             overrides[_name] = _val
     for _name, _val in (("cap_floor_on", cap_floor_on), ("cap_floor_lat_deg", cap_floor_lat_deg),
