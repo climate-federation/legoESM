@@ -347,11 +347,9 @@ def exchange_halo_plane_yxz(
         )
         south_halo = from_south.reshape((h, layout.nx_local, *trailing))
         north_halo = from_north.reshape((h, layout.nx_local, *trailing))
-        # Assemble in one buffer (in-place slab writes), not a concatenate.
-        ns_padded = (jnp.empty((field_yxz.shape[0] + 2 * h, *field_yxz.shape[1:]),
-                               field_yxz.dtype)
-                     .at[:h].set(south_halo).at[h:-h].set(field_yxz)
-                     .at[-h:].set(north_halo))
+        ns_padded = jnp.concatenate(
+            [south_halo, field_yxz, north_halo], axis=0,
+        )
 
     # ----- Stage 2: E/W of the NS-padded array -----
     # ns_padded already carries the NS halo rows, so E/W slabs of
@@ -385,10 +383,9 @@ def exchange_halo_plane_yxz(
         )
         west_halo = from_west.reshape((ny_padded, h, *trailing))
         east_halo = from_east.reshape((ny_padded, h, *trailing))
-        padded = (jnp.empty((ny_padded, ns_padded.shape[1] + 2 * h, *trailing),
-                            ns_padded.dtype)
-                  .at[:, :h].set(west_halo).at[:, h:-h].set(ns_padded)
-                  .at[:, -h:].set(east_halo))
+        padded = jnp.concatenate(
+            [west_halo, ns_padded, east_halo], axis=1,
+        )
 
     return padded
 
