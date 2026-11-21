@@ -469,13 +469,33 @@ def plane_compressible_euler_slow_tendencies_halo(
 
     # ONE packed halo exchange for every horizontally-coupled field
     # used in slow-tendency computations.
+    # Turbulence-closure mode (DNS-LES, iter-177) — mirrors the serial path so
+    # closure="molecular" (DNS) and "smagorinsky" (CRM/LES) stay bit-identical
+    # serial vs MPI at n_ranks==1. vreman/amd already rejected at entry
+    # (_require_single_rank_closure); only smagorinsky / molecular remain.
+    _closure = getattr(config, "turbulence_closure", "smagorinsky")
+    _use_smag = _closure == "smagorinsky" and config.smagorinsky_cs > 0.0
+    _use_mol = (_closure == "molecular"
+                and getattr(config, "molecular_viscosity", 0.0) > 0.0)
+    _need_w_pad = _use_smag or _use_mol or config.hyperdiff_w_coeff > 0.0
+    tracers = state.tracers.data
+    _n_tr = tracers.shape[-1]
+    w_full = 0.5 * (w[..., :-1] + w[..., 1:])
+    # Exchanges are grouped by data dependency into three packed rounds
+    # (state; fields derived from it; K at faces): same values, fewer
+    # blocking MPI rounds than one exchange per field.
     fields_to_exchange = [u, v, theta_p, rho_p, theta_total]
     if not substep_horiz:
         fields_to_exchange += [pi_p, rho_total]
+    extra = [w_full] + ([w] if _need_w_pad else []) + ([tracers] if _n_tr else [])
     padded = packed_exchange_halo_plane_yxz(
-        *fields_to_exchange, layout=layout,
+        *fields_to_exchange, *extra, layout=layout,
     )
     u_pad, v_pad, theta_p_pad, rho_p_pad, theta_total_pad = padded[:5]
+    extra_pad = padded[len(fields_to_exchange):]
+    w_full_pad = extra_pad[0]
+    w_pad = extra_pad[1] if _need_w_pad else None
+    tracers_pad = extra_pad[-1] if _n_tr else None
 
     # 2. C-grid pressure gradient (skipped under the full split — the
     #    acoustic substep integrates it at dt/n_substeps).
@@ -555,10 +575,53 @@ def plane_compressible_euler_slow_tendencies_halo(
     # 5. Theta advection.
     u_center = oh.interp_xface_to_cell_vlast_halo(u_pad, grid, h)
     v_center = oh.interp_yface_to_cell_vlast_halo(v_pad, grid, h)
-    # Need u_center, v_center to be padded for use with the halo-aware
-    # upwind. Re-pad the interior result.
-    u_center_pad = _re_pad_halo(u_center, layout, h)
-    v_center_pad = _re_pad_halo(v_center, layout, h)
+    v_at_xface = oh.interp_yface_to_xface_vlast_halo(v_pad, grid, h)
+    u_at_yface = oh.interp_xface_to_yface_vlast_halo(u_pad, grid, h)
+    # Round 2: every halo field derived from the round-1 state.
+    round2 = {"u_center": u_center, "v_center": v_center,
+              "v_at_xface": v_at_xface, "u_at_yface": u_at_yface}
+    if config.hyperdiff_coeff > 0.0:
+        round2["lap_u"] = oh.laplacian_vlast_halo(u_pad, grid, h)
+        round2["lap_v"] = oh.laplacian_vlast_halo(v_pad, grid, h)
+        round2["lap_theta"] = oh.laplacian_vlast_halo(theta_p_pad, grid, h)
+    if config.hyperdiff_rho_coeff > 0.0:
+        round2["lap_rho"] = oh.laplacian_vlast_halo(rho_p_pad, grid, h)
+    if config.hyperdiff_w_coeff > 0.0:
+        round2["lap_w"] = oh.laplacian_vlast_halo(w_pad, grid, h)
+    if _use_smag or _use_mol:
+        # 11a. Smagorinsky-Lilly / molecular eddy viscosity on the interior
+        #      (R4 halo port); used in section 11.
+        if _use_mol:
+            # DNS: CONSTANT molecular ν on the interior; the SAME halo exchange
+            # + operators below then apply (a constant field is trivially
+            # halo-consistent, so no strain stencil / N² is needed).
+            K_m_int = jnp.full(
+                theta_total.shape, config.molecular_viscosity,
+                dtype=theta_total.dtype,
+            )
+            sgs_prandtl = config.molecular_prandtl
+        else:
+            # Interior N² for the stratification term (column-local), from the
+            # SAME shared helper the serial call site uses, so the clear↔moist
+            # switch and serial/MPI parity hold bit-for-bit at n_ranks==1.
+            n2_sgs_h = sgs_brunt_vaisala_sq(
+                theta_total, state.tracers.data, height_coord,
+            )
+            K_m_int = _compute_smagorinsky_K_m_plane_halo(
+                u_pad, v_pad, w_pad, grid, height_coord,
+                config.smagorinsky_cs, halo=h,
+                n2_sgs=n2_sgs_h, prandtl=config.smagorinsky_prandtl,
+                wall_damping=getattr(config, "smagorinsky_wall_damping", True),
+                delta_max=config.smagorinsky_delta_max,
+                stability_length=getattr(
+                    config, "smagorinsky_stability_length", False),
+            )
+            sgs_prandtl = config.smagorinsky_prandtl
+        round2["K_m"] = K_m_int
+    padded2 = dict(zip(round2, packed_exchange_halo_plane_yxz(
+        *round2.values(), layout=layout)))
+    u_center_pad = padded2["u_center"]
+    v_center_pad = padded2["v_center"]
     # Choose horizontal advection scheme. iter-187 consults the
     # public HORIZONTAL_ADVECTION_HALO_REQUIREMENT map from
     # compressible_euler_plane so the halo-width contract lives in
@@ -629,10 +692,8 @@ def plane_compressible_euler_slow_tendencies_halo(
 
     # 6. Horizontal momentum advection — u advected by (u, v_at_xface),
     #    v advected by (u_at_yface, v). MOMENTUM scheme (madv; ADV-SPLIT #86).
-    v_at_xface = oh.interp_yface_to_xface_vlast_halo(v_pad, grid, h)
-    u_at_yface = oh.interp_xface_to_yface_vlast_halo(u_pad, grid, h)
-    v_at_xface_pad = _re_pad_halo(v_at_xface, layout, h)
-    u_at_yface_pad = _re_pad_halo(u_at_yface, layout, h)
+    v_at_xface_pad = padded2["v_at_xface"]
+    u_at_yface_pad = padded2["u_at_yface"]
     du_adv = (
         madv_x(u_pad, u_pad, grid.dx, h)
         + madv_y(u_pad, v_at_xface_pad, grid.dy, h)
@@ -650,8 +711,6 @@ def plane_compressible_euler_slow_tendencies_halo(
     dv_dt = dv_adv + dv_vert + dv_pg + dv_cor
 
     # 8. w slow part — MOMENTUM scheme, like the serial path.
-    w_full = 0.5 * (w[..., :-1] + w[..., 1:])
-    w_full_pad = _re_pad_halo(w_full, layout, h)
     dw_full = (
         madv_x(w_full_pad, u_center_pad, grid.dx, h)
         + madv_y(w_full_pad, v_center_pad, grid.dy, h)
@@ -704,12 +763,8 @@ def plane_compressible_euler_slow_tendencies_halo(
     #     need re-exchange between passes since the first lap output
     #     loses halo freshness.
     if config.hyperdiff_coeff > 0.0:
-        lap_u_int = oh.laplacian_vlast_halo(u_pad, grid, h)
-        lap_v_int = oh.laplacian_vlast_halo(v_pad, grid, h)
-        lap_theta_int = oh.laplacian_vlast_halo(theta_p_pad, grid, h)
-        lap_u_pad, lap_v_pad, lap_theta_pad = packed_exchange_halo_plane_yxz(
-            lap_u_int, lap_v_int, lap_theta_int, layout=layout,
-        )
+        lap_u_pad, lap_v_pad, lap_theta_pad = (
+            padded2["lap_u"], padded2["lap_v"], padded2["lap_theta"])
         du_dt = du_dt - config.hyperdiff_coeff * oh.laplacian_vlast_halo(
             lap_u_pad, grid, h,
         )
@@ -720,19 +775,12 @@ def plane_compressible_euler_slow_tendencies_halo(
             oh.laplacian_vlast_halo(lap_theta_pad, grid, h)
         )
     if config.hyperdiff_rho_coeff > 0.0:
-        lap_rho_int = oh.laplacian_vlast_halo(rho_p_pad, grid, h)
-        lap_rho_pad, = packed_exchange_halo_plane_yxz(
-            lap_rho_int, layout=layout,
-        )
+        lap_rho_pad = padded2["lap_rho"]
         drho_p_dt = drho_p_dt - config.hyperdiff_rho_coeff * (
             oh.laplacian_vlast_halo(lap_rho_pad, grid, h)
         )
     if config.hyperdiff_w_coeff > 0.0:
-        w_pad = _re_pad_halo(w, layout, h)
-        lap_w_int = oh.laplacian_vlast_halo(w_pad, grid, h)
-        lap_w_pad, = packed_exchange_halo_plane_yxz(
-            lap_w_int, layout=layout,
-        )
+        lap_w_pad = padded2["lap_w"]
         dw_dt = dw_dt - config.hyperdiff_w_coeff * (
             oh.laplacian_vlast_halo(lap_w_pad, grid, h)
         )
@@ -757,45 +805,9 @@ def plane_compressible_euler_slow_tendencies_halo(
     #     once, then drives the existing
     #     :func:`oh.variable_K_diffusion_vlast_halo` on each prognostic
     #     at its native Arakawa-C staggering.
-    # Turbulence-closure mode (DNS-LES, iter-177) — mirrors the serial path so
-    # closure="molecular" (DNS) and "smagorinsky" (CRM/LES) stay bit-identical
-    # serial vs MPI at n_ranks==1.
-    # vreman/amd already rejected at entry (_require_single_rank_closure);
-    # here only the halo-supported closures (smagorinsky / molecular) remain.
-    _closure = getattr(config, "turbulence_closure", "smagorinsky")
-    _use_smag = _closure == "smagorinsky" and config.smagorinsky_cs > 0.0
-    _use_mol = (_closure == "molecular"
-                and getattr(config, "molecular_viscosity", 0.0) > 0.0)
     if _use_smag or _use_mol:
-        w_pad_half, = packed_exchange_halo_plane_yxz(w, layout=layout)
-        if _use_mol:
-            # DNS: CONSTANT molecular ν on the interior; the SAME halo exchange
-            # + operators below then apply (a constant field is trivially
-            # halo-consistent, so no strain stencil / N² is needed).
-            K_m_int = jnp.full(
-                theta_total.shape, config.molecular_viscosity,
-                dtype=theta_total.dtype,
-            )
-            sgs_prandtl = config.molecular_prandtl
-        else:
-            # Interior N² for the stratification term (column-local — no halo
-            # exchange needed). Built by the SAME shared helper the serial call
-            # site uses, on the rank-local interior θ/tracers, so the clear↔
-            # moist switch and serial/MPI parity hold bit-for-bit at n_ranks==1.
-            n2_sgs_h = sgs_brunt_vaisala_sq(
-                theta_total, state.tracers.data, height_coord,
-            )
-            K_m_int = _compute_smagorinsky_K_m_plane_halo(
-                u_pad, v_pad, w_pad_half, grid, height_coord,
-                config.smagorinsky_cs, halo=h,
-                n2_sgs=n2_sgs_h, prandtl=config.smagorinsky_prandtl,
-                wall_damping=getattr(config, "smagorinsky_wall_damping", True),
-                delta_max=config.smagorinsky_delta_max,
-                stability_length=getattr(
-                    config, "smagorinsky_stability_length", False),
-            )
-            sgs_prandtl = config.smagorinsky_prandtl
-        K_m_pad, = packed_exchange_halo_plane_yxz(K_m_int, layout=layout)
+        w_pad_half = w_pad
+        K_m_pad = padded2["K_m"]
         K_xface_int = oh.interp_cell_to_xface_vlast_halo(K_m_pad, grid, h)
         K_yface_int = oh.interp_cell_to_yface_vlast_halo(K_m_pad, grid, h)
         K_xface_pad, K_yface_pad = packed_exchange_halo_plane_yxz(
@@ -834,23 +846,8 @@ def plane_compressible_euler_slow_tendencies_halo(
         if _sgs_vert:
             dw_dt = dw_dt + vertical_K_diffusion_w(w, K_m_int, height_coord)
 
-    # 12. Tracer advection.
-    tracers = state.tracers.data
-    if tracers.shape[-1] > 0:
-        # Pad each tracer slot via packed exchange (one MPI round).
-        # tracers.shape = (ny_local, nx_local, nlev, n_tracers)
-        n_tr = tracers.shape[-1]
-        # Treat trailing tracer axis as additional channels by
-        # stacking into the trailing dim of packed exchange.
-        # tracers already (ny, nx, nlev, n_tr); pack into single
-        # exchange directly by reshape into (ny, nx, nlev*n_tr).
-        ny_l, nx_l, nlev, _ = tracers.shape
-        tracers_flat = tracers.reshape(ny_l, nx_l, nlev * n_tr)
-        tracers_flat_pad, = packed_exchange_halo_plane_yxz(
-            tracers_flat, layout=layout,
-        )
-        ny_p, nx_p = tracers_flat_pad.shape[:2]
-        tracers_pad = tracers_flat_pad.reshape(ny_p, nx_p, nlev, n_tr)
+    # 12. Tracer advection (tracers padded in round 1).
+    if _n_tr > 0:
 
         _tracer_sgs = _use_smag or _use_mol
 
