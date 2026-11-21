@@ -191,6 +191,7 @@ __param_spec__ = {
     "MorrisonConfig": {
         "scheme_key": "atm.micro.MorrisonConfig",
         "excluded": {
+            "boutle_overcast_ramp_width": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM+Claude vote 2026-11-21",
             "boutle_fsd_factor": "bounds pending: the observed FSD scatter of Boutle et al. (2014, doi:10.1002/qj.2140) is to bound it and is not yet read; tiered once sourced",
             "gsam_satadj_excess_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
@@ -1192,6 +1193,10 @@ class MorrisonConfig(NamedTuple):
     # Needs warm_rain_scheme="kk2000_cam6" and warm_rain_incloud=True.
     relvar_scheme: str = "cam6_clubb"
     boutle_fsd_factor: float = 1.0
+    # RULE 5 smoothing of Boutle et al.'s coefficient jump at C = 1 (0.20 ->
+    # 0.11): smoothstep width in cloud fraction; 0 = the published hard jump
+    # (KNOWN DIFFERENCE in _warm_rain.boutle2014_fsd).
+    boutle_overcast_ramp_width: float = 0.01
 
 
 RELVAR_SCHEMES = ("cam6_clubb", "boutle2014")
@@ -1370,6 +1375,7 @@ def apply_microphysics_experiment_flags(
     morrison_warm_rain_scheme: str | None = None,
     morrison_warm_rain_incloud: bool | None = None,
     morrison_prognostic_droplet_number: bool | None = None,
+    morrison_relvar_scheme: str | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1562,6 +1568,16 @@ def apply_microphysics_experiment_flags(
                 f"scheme (got {scheme!r}).")
         scheme_config = scheme_config._replace(
             prognostic_droplet_number=morrison_prognostic_droplet_number)
+    if morrison_relvar_scheme is not None:
+        if scheme != "morrison":
+            raise ValueError(
+                f"morrison_relvar_scheme={morrison_relvar_scheme!r} is only read "
+                f"by the morrison scheme (got {scheme!r}).")
+        if morrison_relvar_scheme not in RELVAR_SCHEMES:
+            raise ValueError(
+                f"Unknown morrison_relvar_scheme {morrison_relvar_scheme!r}; "
+                f"choose one of {RELVAR_SCHEMES}.")
+        scheme_config = scheme_config._replace(relvar_scheme=morrison_relvar_scheme)
     if morrison_warm_rain_scheme is not None:
         if scheme != "morrison":
             raise ValueError(

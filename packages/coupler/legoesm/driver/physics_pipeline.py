@@ -4759,6 +4759,10 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_mg2_drop_early_reset_log_width", None)),
         ("morrison_mg2_drop_sed_reset_log_width", "mg2_drop_sed_reset_log_width",
          getattr(config, "morrison_mg2_drop_sed_reset_log_width", None)),
+        ("morrison_boutle_fsd_factor", "boutle_fsd_factor",
+         getattr(config, "morrison_boutle_fsd_factor", None)),
+        ("morrison_boutle_overcast_ramp_width", "boutle_overcast_ramp_width",
+         getattr(config, "morrison_boutle_overcast_ramp_width", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),
@@ -4819,9 +4823,14 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _prog_nc = (None if _prog_nc
                 is _ExpCfg._field_defaults["morrison_prognostic_droplet_number"]
                 else _prog_nc)
+    _relvar = getattr(config, "morrison_relvar_scheme",
+                      _ExpCfg._field_defaults["morrison_relvar_scheme"])
+    _relvar = (None if _relvar == _ExpCfg._field_defaults["morrison_relvar_scheme"]
+               else _relvar)
     if (not _touched and _flavor is None and _sed_sub is None
             and _sed_strict is None and _sed_max is None and _graupel is None
-            and _wrs is None and _incloud is None and _prog_nc is None):
+            and _wrs is None and _incloud is None and _prog_nc is None
+            and _relvar is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4833,7 +4842,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_sed_cfl_substeps_strict=_sed_strict,
         morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs,
         morrison_warm_rain_incloud=_incloud,
-        morrison_prognostic_droplet_number=_prog_nc)
+        morrison_prognostic_droplet_number=_prog_nc,
+        morrison_relvar_scheme=_relvar)
 
 
 def _resolve_microphysics(config):

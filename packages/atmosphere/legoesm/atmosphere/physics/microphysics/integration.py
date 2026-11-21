@@ -372,6 +372,9 @@ def require_relvar_scheme_lane(microphysics_config, model_type: str):
     f = m.boutle_fsd_factor
     if scheme == "boutle2014" and isinstance(f, (int, float)) and not (math.isfinite(f) and f > 0.0):
         raise ValueError(f"boutle_fsd_factor must be positive and finite, got {f!r}.")
+    w = m.boutle_overcast_ramp_width
+    if scheme == "boutle2014" and isinstance(w, (int, float)) and not (0.0 <= w < 1.0):
+        raise ValueError(f"boutle_overcast_ramp_width must lie in [0, 1), got {w!r}.")
 
 
 # ===========================================================================
@@ -796,7 +799,8 @@ def _make_hydrostatic_microphysics(
                     _kw["relvar"] = boutle2014_relvar(
                         jnp.clip(phys_state.cloud_fraction.reshape(ncol, nlev), 0.0, 1.0),
                         jnp.asarray(_area).reshape(ncol, 1),
-                        scheme_config.boutle_fsd_factor)
+                        scheme_config.boutle_fsd_factor,
+                        scheme_config.boutle_overcast_ramp_width)
             if _prog_nc:
                 # CAM6 microp_aero_run immediately before micro_mg (user
                 # decision 2026-10-24, 2), on this sub-step's post-CLUBB state.
