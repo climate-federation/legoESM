@@ -77,6 +77,47 @@ def test_unconverged_column_uses_its_last_iterate_and_closes():
     np.testing.assert_allclose(np.asarray(so0.Tf_Sun)[unsolved], 300.0, atol=1e-9)
 
 
+def test_last_iterate_gradient_matches_finite_differences_near_root(monkeypatch):
+    """A column stopped at the cap near its root gets the root's gradient.
+
+    The convergence gate is disabled (rtol = atol = 0) so every column stops
+    at the cap three iterations in, close to its root (residual ~1e-14 of the
+    seed's), as the held columns of a real run do.  d(SH+LE)/d(T_air) by
+    reverse mode matches central differences; with the old zero cotangent for
+    unconverged columns it was ~0.11 of them
+    (scripts/validate/canopy_fallback_gradient_fd.py).
+    """
+    from legoesm.land.canopy import solver as canopy_solver
+    monkeypatch.setattr(canopy_solver, "_LM_RTOL", 0.0)
+    monkeypatch.setattr(canopy_solver, "_LM_ATOL", 0.0)
+    sch = TwoLeafCanopyConfig(max_iters=3, implicit_ground_flux=False)
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, dz_top=0.025, growth_factor=2.0,
+                                 total_depth=3.0),
+        surface_scheme=sch)
+    st = ml.init_multilayer_land_state(_N, cfg, T_init=307.0, theta_init=0.12)
+
+    def run(dT):
+        f = _forcing(300.0 + dT)
+        return ml.step_multilayer_land_with_diagnostics(
+            st, f, cfg, 1.0, 1800.0, lat=jnp.full(_N, -0.55))
+
+    _, _, _, so = jax.jit(run)(0.0)
+    acc = ~np.asarray(so.converged).astype(bool) & ~np.asarray(so.held).astype(bool)
+    assert acc.all()                                        # non-vacuity
+    m = jnp.asarray(acc, dtype=jnp.float64)
+
+    def loss(dT):
+        _, r, _, _ = run(dT)
+        return jnp.sum(m * (r.shflx + r.lhflx))
+
+    ad = float(jax.jit(jax.grad(loss))(0.0))
+    lf = jax.jit(loss)
+    h = 1e-4
+    fd = float((lf(h) - lf(-h)) / (2 * h))
+    np.testing.assert_allclose(ad, fd, rtol=1e-3)
+
+
 def test_flag_on_by_default():
     assert TwoLeafCanopyConfig().fallback_from_last_iterate is True
     with pytest.raises(ValueError, match="fallback_from_last_iterate"):

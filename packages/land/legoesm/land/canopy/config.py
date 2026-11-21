@@ -333,6 +333,13 @@ class CanopyConfig(NamedTuple):
     # cold state (canopy at air temperature), whose sensible heat reached
     # 1,100-1,430 W/m2 over hot dry soil and was then rejected and held
     # (legoESM-enso 9b70a0f84b).  Default True (user 2026-11-20).  Appended.
+    # Gradient: such a column carries the implicit-function adjoint at its last
+    # iterate (core.nonlinear adjoint_unconverged), the root's gradient as the
+    # residual left there goes to zero.  KNOWN DIFFERENCE from d(last
+    # iterate)/d(input), measured d(SH+LE)/d(T_air) AD/FD: 1.000 at residual
+    # 7e-15 of the seed's, 0.988 at 1e-7, 0.655 one step from the cold seed
+    # (4.8e-4); scripts/validate/canopy_fallback_gradient_fd.py.  False =
+    # cold state, whose gradient is exact.
     fallback_from_last_iterate: bool = True
 
     def validate(self) -> "CanopyConfig":

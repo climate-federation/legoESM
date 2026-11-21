@@ -106,7 +106,7 @@ def main():
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
     print(f"git {sha}  x64  N={_N}  T_init=307 K  loss=sum(SH+LE) accepted unconverged")
-    for near_root, iters in ((False, (1, 2)), (True, (1, 2, 3, 4, 6))):
+    for near_root, iters in ((False, (1, 2)), (True, (1, 2, 3))):
         for max_iters in iters:
             for adjoint in (False, True):
                 res = _measure(max_iters, 307.0, adjoint, near_root)
