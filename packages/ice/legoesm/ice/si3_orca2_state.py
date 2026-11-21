@@ -3285,12 +3285,12 @@ def si3_dyn_adv_pra_orca2(
     cfg = config
     traced_kt = isinstance(kt, jax.core.Tracer)
     concrete_kt = kt if traced_kt else np.asarray(kt)
-    if ((not traced_kt
-         and (isinstance(kt, bool)
-              or concrete_kt.shape != ()
-              or concrete_kt.dtype.kind not in "iu"
-              or int(concrete_kt) < 1))
-            or cfg.nn_fsbc < 1):
+    if (
+        concrete_kt.shape != ()
+        or concrete_kt.dtype.kind not in "iu"
+        or (not traced_kt and int(concrete_kt) < 1)
+        or cfg.nn_fsbc < 1
+    ):
         raise ValueError("si3_dyn_adv_pra_orca2 requires kt >= 1 and nn_fsbc >= 1")
     sr = nemo_source_round
     consts = cfg.ice_constants
@@ -4306,6 +4306,8 @@ def si3_eos_fzp(
     - `ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:1787-1848`
     - `src/ICE/iceistate.F90:125`, `:263`
     """
+    if type(ln_teos10) is not bool:
+        raise TypeError("si3_eos_fzp ln_teos10 selector must be a static bool")
     sr = nemo_source_round
     sss = jnp.asarray(sss_m, dtype=jnp.float64)
     dtype = sss.dtype

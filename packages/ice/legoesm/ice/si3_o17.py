@@ -685,6 +685,8 @@ def _si3_o17_through_update_flx(
 
     if card.core2_precipitation_closure is not False:
         raise ValueError("O17 freezes core2_precipitation_closure=False")
+    if card.state.nn_fsbc != 1:
+        raise ValueError("O17 freezes the ORCA2_SAS_ICE nn_fsbc=1 cadence")
     if not (card.state.ln_icedyn and card.state.ln_icethd and card.state.ln_dynadv_pra):
         raise ValueError(
             "O17 requires explicit live dynamics, Prather advection, and thermodynamics"
@@ -1281,7 +1283,10 @@ def si3_o17_step(
         config=card.state,
         ln_drgice_imp=card.ln_drgice_imp,
         nn_fsbc=card.state.nn_fsbc,
-        kt=forcing.kt,
+        # The O17 card freezes nn_fsbc=1, so every ocean step is an ice step.
+        # Keeping that resolved cadence static leaves forcing.kt traceable for
+        # Prather's alternating sweep under jax.jit.
+        kt=1,
     )
     finalize = SI3FinalizeResponse(core.correction, core.final, stress)
     return core.state, SI3O17Trace(
@@ -1311,6 +1316,7 @@ __all__ = (
     "SI3O17Trace",
     "si3_icethd_age_and_lbc",
     "si3_icethd_tail",
+    "si3_teos10_from_resolved_namelist",
     "si3_o17_through_update_flx",
     "si3_o17_step",
 )

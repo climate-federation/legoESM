@@ -1,17 +1,16 @@
 """Self-contained contract and dispatch tests for the O17 full SI3 step (``si3_o17``).
 
-The O17 numerical tests (full step against NEMO records, compiled and eager) live on
-the SI3 fidelity lane with the records they need.  These tests need only model code
-and the NEMO reference namelists shipped under ``tests/ice/unit/data``: they pin the
-frozen ORCA2_SAS_ICE card, the explicit O17 config, and how ``step_sea_ice`` reaches
-the step.
+The full numerical-body regression lives in ``test_si3_orca2_regression_pin``.
+These tests need only model code and the NEMO reference namelists shipped under
+``tests/ice/unit/data``: they pin the frozen ORCA2_SAS_ICE card, the explicit O17
+config, and how ``step_sea_ice`` reaches the step.
 """
 
 from pathlib import Path
 
 import jax.numpy as jnp
 import pytest
-from legoesm.ice import sea_ice
+from legoesm.ice import sea_ice, si3_o17 as si3_o17_module
 from legoesm.ice.config import (
     SI3_HARD_SWITCHES,
     SeaIceConfig,
@@ -27,7 +26,12 @@ from legoesm.ice.si3_o17 import (
     si3_teos10_from_resolved_namelist,
     si3_o17_step,
 )
-from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig, SI3State
+from legoesm.ice.si3_orca2_state import (
+    SI3O2InitConfig,
+    SI3ORCA2StateConfig,
+    SI3State,
+    si3_eos_fzp,
+)
 from legoesm.ice.si3_surface import SI3SurfaceConfig
 
 EXPREF = Path(__file__).parent / "data" / "orca2_sas_ice_expref"
@@ -106,6 +110,22 @@ def test_card_eos_selector_comes_from_resolved_nameos(
     assert si3_teos10_from_resolved_namelist(path) is expected
 
 
+@pytest.mark.parametrize("selector", (None, "false", 0, 1, jnp.bool_(True)))
+def test_eos_fzp_refuses_every_non_python_bool(selector) -> None:
+    with pytest.raises(TypeError, match="static bool"):
+        si3_eos_fzp(jnp.full((2, 2), 35.0), ln_teos10=selector)
+
+
+def test_o2_eos_default_and_its_factory_callers_remain_explicitly_pinned() -> None:
+    assert SI3O2InitConfig._field_defaults["ln_teos10"] is True
+    assert SI3O2InitConfig.for_orca2_sas_ice().ln_teos10 is True
+    assert SI3O2InitConfig.for_orca2_omip_l4().ln_teos10 is False
+
+
+def test_resolved_eos_helper_is_publicly_exported() -> None:
+    assert "si3_teos10_from_resolved_namelist" in si3_o17_module.__all__
+
+
 def test_o17_config_is_explicit_and_reports_the_cards_switches() -> None:
     card = _card()
     cfg = build_si3_orca2_o17_config(card)
@@ -133,6 +153,8 @@ def test_o17_step_refuses_a_card_outside_its_contract_before_computing() -> None
         off = card._replace(state=card.state._replace(**{field: False}))
         with pytest.raises(ValueError, match="explicit live dynamics"):
             si3_o17_step(entry, forcing, off)
+    with pytest.raises(ValueError, match="nn_fsbc=1"):
+        si3_o17_step(entry, forcing, card._replace(state=card.state._replace(nn_fsbc=2)))
 
 
 def test_step_sea_ice_dispatches_live_forcing_to_the_o17_step(monkeypatch) -> None:

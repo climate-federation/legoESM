@@ -15,7 +15,8 @@ Pinned: ``si3_lbc_lnk_orca2`` (T/U/V/F, both signs, both ``ldfull``, 2-D and
 delayed-CFL icycle-3 case), ``si3_orca2_ice_strength`` and
 ``si3_orca2_aevp_solver``/``_trace`` (both fold programs, both
 ``differentiable`` arms), ``si3_dom_uniq_t_orca2``, ``si3_o15_step``,
-``si3_o16_step`` and ``sea_ice._si3_orca2_o2_step_with_trace``.
+``si3_o16_step``, ``sea_ice._si3_orca2_o2_step_with_trace``, and the full O17
+body's live qns/qsr wiring and JIT-traced Prather path.
 """
 
 from __future__ import annotations
@@ -24,10 +25,16 @@ import importlib.util
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 jax.config.update("jax_enable_x64", True)
+
+from legoesm.ice.si3_o17 import (  # noqa: E402
+    si3_o17_step,
+    si3_o17_through_update_flx,
+)
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "si3_orca2_regression"
 
@@ -92,3 +99,45 @@ def test_one_ulp_change_in_a_stored_output_trips_the_pin(rung: str) -> None:
     planted[key] = arr
     with pytest.raises(AssertionError):
         _assert_bitwise(expected, planted)
+
+
+def test_o17_numerical_body_pins_live_qns_ice_and_qsr(pin_policy) -> None:
+    entry, forcing, card = GEN.build_o17_case()
+    core = si3_o17_through_update_flx(entry, forcing, card)
+
+    np.testing.assert_array_equal(
+        _bits(core.update_forcing.qsr), _bits(forcing.surface.qsr)
+    )
+    raw_qns = np.asarray(core.surface_stress.blk_ice_2.qns_ice)
+    thd_qns = np.asarray(jnp.stack(
+        [category.o10.o9.zdf.qns_ice for category in core.thermodynamics.categories],
+        axis=-1,
+    ))[GEN.NN_HLS:-GEN.NN_HLS, GEN.NN_HLS:-GEN.NN_HLS]
+    actual_qns = np.asarray(core.update_forcing.qns_ice)
+    from_raw = _bits(actual_qns) == _bits(raw_qns)
+    from_thermodynamics = _bits(actual_qns) == _bits(thd_qns)
+    assert np.all(from_raw | from_thermodynamics)
+    assert np.any(from_thermodynamics & ~from_raw)
+
+
+def test_o17_step_lowers_under_jit_with_live_forcing_pytree(pin_policy) -> None:
+    entry, forcing, card = GEN.build_o17_case()
+    lowered = jax.jit(lambda e, f: si3_o17_step(e, f, card)).lower(entry, forcing)
+    assert lowered is not None
+
+
+@pytest.mark.parametrize("kt", (jnp.asarray(True), jnp.asarray(1.5)))
+def test_o17_prather_trace_refuses_non_integer_kt(kt, pin_policy) -> None:
+    entry, forcing, card = GEN.build_o17_case()
+    with pytest.raises(ValueError, match="kt >= 1"):
+        jax.eval_shape(
+            lambda e, f: si3_o17_step(e, f, card),
+            entry,
+            forcing._replace(kt=kt),
+        )
+
+
+def test_o17_prather_refuses_concrete_zero_kt(pin_policy) -> None:
+    entry, forcing, card = GEN.build_o17_case(kt=0)
+    with pytest.raises(ValueError, match="kt >= 1"):
+        si3_o17_step(entry, forcing, card)
