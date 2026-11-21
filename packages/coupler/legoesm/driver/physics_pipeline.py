@@ -4762,6 +4762,10 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_mg2_drop_sed_reset_log_width", None)),
         ("morrison_qsfm_freeze_ramp_K", "qsfm_freeze_ramp_K",
          getattr(config, "morrison_qsfm_freeze_ramp_K", None)),
+        ("morrison_cirrus_T_width_K", "cirrus_T_width_K",
+         getattr(config, "morrison_cirrus_T_width_K", None)),
+        ("morrison_cirrus_rel_width", "cirrus_rel_width",
+         getattr(config, "morrison_cirrus_rel_width", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),

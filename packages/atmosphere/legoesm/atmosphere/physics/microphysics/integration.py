@@ -795,7 +795,8 @@ def _make_hydrostatic_microphysics(
                     T_col, q_v_col, p_full_col, p_half_col, hydrometeors.q_c,
                     hydrometeors.q_i, _get_tracer("N_i"), _kw["cloud_fraction"],
                     phys_state, forcing, cirrus_aerosol,
-                    jnp.asarray(grid.latCell).reshape(ncol))
+                    jnp.asarray(grid.latCell).reshape(ncol),
+                    scheme_config.cirrus_T_width_K, scheme_config.cirrus_rel_width)
             _kw.update(sundqvist_lane_kwargs(
                 scheme_name, grid, ncol,
                 state.tracers is not None and "q_i" in state.tracers,
@@ -967,7 +968,7 @@ def cam6_activation_npccn(T_col, q_v_col, p_full_col, p_half_col, N_c_per_kg, q_
 
 
 def cam6_cirrus_naai(T_col, q_v_col, p_full_col, p_half_col, q_c, q_i, N_i, ast,
-                     phys_state, forcing, setup, lat_rad):
+                     phys_state, forcing, setup, lat_rad, T_width_K, rel_width):
     """CAM6 activated ice number naai [1/kg] (microp_aero_run's wsubi and
     nucleate_ice_cam_calc) from ``forcing["cirrus_aerosol"]``, CLUBB's wp2 carry,
     the CAM chem tropopause and ``ast``."""
@@ -990,7 +991,7 @@ def cam6_cirrus_naai(T_col, q_v_col, p_full_col, p_half_col, q_c, q_i, N_i, ast,
     wsubi = wsubi_from_wp2(wp2.reshape(ncol, nlev + 1), setup.top_lev)
     return cam6_naai(T_col, q_v_col, p_full_col, q_c, q_i, N_i, ast, wsubi,
                      a["num_a1"], a["num_a2"], a["num_a3"], a["dst_a3"], a["ncl_a3"],
-                     a["so4_a3"], troplev, setup.top_lev)
+                     a["so4_a3"], troplev, setup.top_lev, T_width_K, rel_width)
 
 
 # ===========================================================================

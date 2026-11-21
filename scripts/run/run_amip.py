@@ -2539,6 +2539,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="RULE 5 width [K] of CAM6 MG2's qsfm switch at "
                              "freezing (cloud_cam6_do_subgrid_growth only); 0 = "
                              "MG2's hard switch.")
+    parser.add_argument("--morrison-cirrus-T-width-K", type=float,
+                        default=ExperimentConfig._field_defaults["morrison_cirrus_T_width_K"],
+                        dest="morrison_cirrus_T_width_K",
+                        help="RULE 5 width [K] of the CAM6 cirrus nucleation "
+                             "temperature switches (cam6_liu_penner only); 0 = "
+                             "CAM6's hard switches.")
+    parser.add_argument("--morrison-cirrus-rel-width", type=float,
+                        default=ExperimentConfig._field_defaults["morrison_cirrus_rel_width"],
+                        dest="morrison_cirrus_rel_width",
+                        help="RULE 5 relative width of the CAM6 cirrus nucleation "
+                             "humidity/updraft/ice/number switches (cam6_liu_penner "
+                             "only); 0 = CAM6's hard switches.")
     parser.add_argument("--morrison-warm-rain-incloud",
                         action=argparse.BooleanOptionalAction,
                         default=ExperimentConfig._field_defaults[
@@ -3455,6 +3467,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_mg2_drop_early_reset_log_width=args.morrison_mg2_drop_early_reset_log_width,
         morrison_mg2_drop_sed_reset_log_width=args.morrison_mg2_drop_sed_reset_log_width,
         morrison_qsfm_freeze_ramp_K=args.morrison_qsfm_freeze_ramp_K,
+        morrison_cirrus_T_width_K=args.morrison_cirrus_T_width_K,
+        morrison_cirrus_rel_width=args.morrison_cirrus_rel_width,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,

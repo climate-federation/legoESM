@@ -70,6 +70,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from legoesm.core.smooth import smoothstep_cubic
+from legoesm.atmosphere.physics.microphysics.cam6_nucleate_ice import ge_ramp, le_ramp
 
 from legoesm import constants
 from legoesm.thermo import latent_heat_fusion, latent_heat_vaporization
@@ -982,7 +983,7 @@ def morrison_microphysics(
         # Cooper stands in for CAM6's mixed-phase hetfrz_classnuc, which acts only
         # for 235.15 K < T < 269.15 K (hetfrz_classnuc_cam.F90:779); below, CAM6's
         # cirrus ice comes from naai alone (block 1b).
-        dN_i_nuc = jnp.where(T > _CAM6_HETFRZ_T_MIN_K, dN_i_nuc, 0.0)
+        dN_i_nuc = dN_i_nuc * ge_ramp(T, _CAM6_HETFRZ_T_MIN_K, config.cirrus_T_width_K)
     # Mass source: each new crystal starts at MI0 = 4/3·π·ρ_ci·r³ (SAM
     # MNUCCD = NNUCCD·MI0), so freshly-nucleated ice carries mass rather
     # than relying solely on subsequent deposition.
@@ -1021,18 +1022,19 @@ def morrison_microphysics(
         if _cirrus_lp:
             # CAM6 MG2 (micro_mg2_0.F90:1117-1129): where naai > 0, T < tmelt - 5
             # and relhum*esl/esi > 1.05, the grid-mean target is naai*icldm with
-            # icldm = max(ast, mincld) (:869).  Hard switches as in MG2; naai
-            # itself is a hard-threshold scheme (cam6_nucleate_ice, not
-            # differentiable).  KNOWN DIFFERENCES: Cooper's crystals of this step
+            # icldm = max(ast, mincld) (:869).  RULE 5: the T and humidity
+            # switches are one-sided ramps (MorrisonConfig.cirrus_T_width_K /
+            # cirrus_rel_width, 0 = MG2's hard switches); naai > 0 is dropped,
+            # the target naai*icldm is 0 there.  KNOWN DIFFERENCES: Cooper's crystals of this step
             # are counted as already present (legoESM keeps Cooper as the stand-in
             # for CAM6's hetfrz_classnuc), and MG2's nimax cap is not applied.
             _esl = saturation_vapor_pressure_goff_gratch(T)
             _esi = saturation_vapor_pressure_ice_goff_gratch(T)
-            hom_gate = jnp.where(
-                (naai > 0.0) & (T < T_freeze - _MG2_ICENUCT_OFFSET_K)
-                # relhum = q/qvl on the qsfm-scaled qvl (:933, :1109-1112)
-                & (q_v / jnp.clip(q_sat_mg2, 1.0e-12) * _esl / _esi
-                   > _MG2_ICENUC_RHI), 1.0, 0.0)
+            # relhum = q/qvl on the qsfm-scaled qvl (:933, :1109-1112)
+            hom_gate = (
+                le_ramp(T, T_freeze - _MG2_ICENUCT_OFFSET_K, config.cirrus_T_width_K)
+                * ge_ramp(q_v / jnp.clip(q_sat_mg2, 1.0e-12) * _esl / _esi,
+                          _MG2_ICENUC_RHI, config.cirrus_rel_width, _MG2_ICENUC_RHI))
             n_hom_target = naai * jnp.maximum(cloud_fraction, _MG2_MINCLD)
         # Top up to n_hom_target counting the COOPER crystals nucleated in this
         # SAME step (dN_i_nuc*dt), not just the pre-existing N_i.  Cooper's

@@ -231,6 +231,8 @@ __param_spec__ = {
             "mg2_drop_early_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_drop_sed_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "qsfm_freeze_ramp_K": "numerics: smoothing width of the qsfm freezing switch (RULE 5), not a closure",
+            "cirrus_T_width_K": "numerics: smoothing width of the cirrus nucleation temperature switches (RULE 5), not a closure",
+            "cirrus_rel_width": "numerics: relative smoothing width of the cirrus nucleation switches (RULE 5), not a closure",
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -1205,6 +1207,13 @@ class MorrisonConfig(NamedTuple):
     # the caller, applied as MG2 does (micro_mg2_0.F90:1117-1129).  Needs
     # homogeneous_ice_nucleation=True and warm_rain_incloud=True.
     cirrus_nucleation: str = "fixed"
+    # RULE 5 widths of the cam6_liu_penner switches on model state (one-sided
+    # C1 ramps, exact on the side the condition holds; KNOWN DIFFERENCE in
+    # cam6_nucleate_ice and the MG2 gate): temperature thresholds [K], and
+    # relative-humidity/updraft/ice/number thresholds as a fraction of the
+    # threshold.  0 = CAM6's hard switches.
+    cirrus_T_width_K: float = 0.1
+    cirrus_rel_width: float = 0.01
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,

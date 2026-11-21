@@ -1,5 +1,5 @@
 """config/amip/amip_production_{cam6_subgrid_growth,mg2_specified_nc_sed,
-positivity_after_zm}.yaml: the production deck with one ported ENSO-fork option
+positivity_after_zm,cam6_cirrus}.yaml: the production deck with one ported ENSO-fork option
 each.  Each RESOLVED ExperimentConfig differs from production in exactly its own
 row, and production keeps every option off.
 """
@@ -20,6 +20,9 @@ _ARMS = {
         "morrison_specified_nc_droplet_sedimentation": (False, True)},
     "amip_production_positivity_after_zm.yaml": {
         "positivity_after_zm": (False, True)},
+    "amip_production_cam6_cirrus.yaml": {
+        "morrison_cirrus_nucleation": ("fixed", "cam6_liu_penner"),
+        "cirrus_aerosol_file": (None, "inputs/cesm_prescribed_aero/mam3_2000clim_mpas.npz")},
 }
 
 

@@ -12,9 +12,15 @@ off; mixed-phase heterogeneous freezing is a separate scheme), ``nucleate_ice_in
 Output ``naai`` [1/kg] is MG2's activated ice number: MG2 nucleates ``(naai - ni/icldm) icldm`` per step
 where ``naai > 0``, ``T < tmelt - 5`` and ``relhum esl/esi > 1.05`` (micro_mg2_0.F90:1117-1129).
 
-Every branch of the Fortran is a ``jnp.where`` on the same conditions, evaluated in the same order;
-IEEE semantics are kept (``log(0)`` gives ``-inf`` and the NaN regime threshold compares false exactly as in
-the Fortran when no dust is present).  Not differentiable through the branch thresholds.
+Every branch of the Fortran is kept, in the same order.  KNOWN DIFFERENCE (RULE 5): each switch on model
+state is a one-sided C1 ramp (:func:`ge_ramp` / :func:`le_ramp`) that equals the Fortran exactly on the side the
+condition holds and blends over one width on the other side: temperature thresholds over ``wT`` [K]
+(``MorrisonConfig.cirrus_T_width_K``, default 0.1 K), relative-humidity, updraft, ice and number thresholds
+over ``wr`` times the threshold (``MorrisonConfig.cirrus_rel_width``, default 0.01).  ``wT = wr = 0`` is the
+Fortran's hard switches (the oracle test).  Switches on the prescribed aerosol (not model state), static
+level indices (incl. the CAM chem tropopause level, stop-gradient'd as on main's CLUBB lane) and division
+guards stay hard.  ``oso4 > 0`` (a non-negative number) ramps on the side it holds (:func:`_pos`).  Where no dust is present the Fortran's regime threshold is
+NaN and compares false; here it is replaced by a large value that does the same, so gradients stay finite.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ import math
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.smooth import smoothstep_cubic
 from legoesm.thermo import (
     saturation_vapor_pressure_goff_gratch,
     saturation_vapor_pressure_ice_goff_gratch,
@@ -36,7 +43,7 @@ __physics_contract__ = {
     "outputs": {"naai": "1/kg"},
     "sign_convention": "none (a number of activated ice nuclei)",
     "conserves": ["none"],
-    "differentiable": False,
+    "differentiable": True,
     "reference": "CAM cam_cesm2_1_rel_60 nucleate_ice.F90, nucleate_ice_cam.F90; Liu and Penner (2005, "
                  "doi:10.1127/0941-2948/2005/0059); Shi et al. (2015, doi:10.5194/acp-15-1503-2015)",
     "idealized_test": "gfortran build of unmodified nucleate_ice.F90 with a driver transcribing "
@@ -92,11 +99,40 @@ WSUB_CAP = 10.0                # microp_aero.F90:533
 TKE_PER_WP2 = 1.5              # clubb tke = 3/2 wp2 (microp_aero.F90:517)
 
 
+_REGM_NO_DUST = 1.0e3            # stands in for the Fortran's NaN regime threshold (compares false)
+
+
+def ge_ramp(x, thr, width, scale=1.0):
+    """1 where ``x >= thr`` (exactly, as the Fortran), a C1 ramp from 0 at ``thr - width*scale`` below;
+    ``width <= 0`` (a Python float) is the hard switch."""
+    if width <= 0.0:
+        return (x >= thr).astype(jnp.result_type(x, float))
+    return smoothstep_cubic((x - thr) / (width * scale) + 1.0)
+
+
+def le_ramp(x, thr, width, scale=1.0):
+    """1 where ``x <= thr``, a C1 ramp to 0 at ``thr + width*scale`` above; ``width <= 0`` is hard."""
+    return ge_ramp(-x, -thr, width, scale)
+
+
+def _pos(x, width, scale):
+    """``x > 0`` for ``x >= 0``: there is no off side to ramp on, so a C1 ramp from 0 at 0 to 1 at
+    ``width*scale`` (the one switch here whose gap is on the side the condition holds)."""
+    if width <= 0.0:
+        return (x > 0.0).astype(jnp.result_type(x, float))
+    return smoothstep_cubic(x / (width * scale))
+
+
+def _pick(s, a, b):
+    """``a`` where the switch weight ``s`` is 1, ``b`` where 0, blended between."""
+    return b + s * (a - b)
+
+
 def _svp(T):
     return saturation_vapor_pressure_goff_gratch(T), saturation_vapor_pressure_ice_goff_gratch(T)
 
 
-def _hf(T, ww, RH, Na):
+def _hf(T, ww, RH, Na, wT, wr):
     """``hf``: homogeneous freezing number [#/cm3]; T in deg C."""
     lw = jnp.log(ww)
     A = HF["RHwA"][0] * lw + HF["RHwA"][1]
@@ -104,17 +140,17 @@ def _hf(T, ww, RH, Na):
     C = HF["RHwC"][0] * lw + HF["RHwC"][1]
     RHw = (A * T * T + B * T + C) * PERCENT
     regm = HF["regm"][0] * lw + HF["regm"][1]
-    warm64 = T > HF["T64"]
-    A2f = jnp.where(warm64, HF["A21f"], HF["A22f"])
-    B2f = jnp.where(warm64, HF["B21f"], HF["B22f"])
+    warm64 = ge_ramp(T, HF["T64"], wT)
+    A2f = _pick(warm64, HF["A21f"], HF["A22f"])
+    B2f = _pick(warm64, HF["B21f"], HF["B22f"])
     k1f = jnp.exp(A2f + B2f * T + HF["C2f"] * lw)
     k2f = HF["A1f"] + HF["B1f"] * T + HF["C1f"] * lw
     k1s = jnp.exp(HF["A2s"] + (HF["B2s"] + HF["B3s"] * lw) * T + HF["C2s"] * lw)
     k2s = HF["A1s"] + HF["B1s"] * T + HF["C1s"] * lw
     Nf = jnp.minimum(k1f * Na ** k2f, Na)
     Ns = jnp.minimum(k1s * Na ** k2s, Na)
-    on = (T <= TC_HOM) & (RH >= RHw)
-    return jnp.where(on, jnp.where(T >= regm, Nf, Ns), 0.0)
+    on = le_ramp(T, TC_HOM, wT) * ge_ramp(RH, RHw, wr, jnp.abs(RHw))
+    return on * _pick(ge_ramp(T, regm, wT), Nf, Ns)
 
 
 def _hetero(T, ww, Ns):
@@ -149,7 +185,7 @@ def _vpreice(P_in, T, R_in, C_in, S_in):
     return VICE * 1e-2  # coeff-ok: cm/s -> m/s (nucleate_ice.F90 Vpreice)
 
 
-def _frachom(Tmean, RHimean, detaT):
+def _frachom(Tmean, RHimean, detaT, wr):
     """``frachom``: fraction of the cloud reaching the homogeneous threshold.  The Fortran sums bins from
     the top down and exits at the first bin below threshold; Sbin rises with the bin index (detaT > 0),
     so that equals the sum over every bin at or above threshold, taken here in the same top-down order."""
@@ -158,72 +194,93 @@ def _frachom(Tmean, RHimean, detaT):
     deta = (i - 0.5 - NBIN / 2) * 6.0 / NBIN
     Sbin = RHimean[..., None] * jnp.exp(deta * detaT[..., None] * SETA / Tmean[..., None] ** 2.0)
     pdf = jnp.exp(-deta ** 2.0 / 2.0) * 6.0 / (jnp.sqrt(2.0 * math.pi) * NBIN)
-    live = jnp.cumprod(Sbin >= Sihom[..., None], axis=-1).astype(bool)   # stops at the first failure
+    live = jnp.cumprod(ge_ramp(Sbin, Sihom[..., None], wr, jnp.abs(Sihom[..., None])),
+                       axis=-1)                               # stops at the first failure
     fhom = jnp.zeros_like(Tmean)
     for k in range(NBIN):                                     # sequential, as the Fortran accumulates
-        fhom = fhom + jnp.where(live[..., k], pdf[k], 0.0)
+        fhom = fhom + live[..., k] * pdf[k]
     return jnp.minimum(1.0, fhom / FHOM_NORM)
 
 
-def nucleati(wbar, tair, pmid, relhum, cldn, qc, qi, ni_in, rhoair, so4_num, dst_num, soot_num, subgrid):
+def nucleati(wbar, tair, pmid, relhum, cldn, qc, qi, ni_in, rhoair, so4_num, dst_num, soot_num, subgrid,
+             wT=0.0, wr=0.0):
     """``nucleati`` for CAM6 settings.  Returns ``(nuci [1/kg], nihf, niimm, oso4_num)`` with nihf and niimm in
     #/cm3 (CAM's per-volume outputs before the final unit change) and oso4_num in #/cm3."""
     esl, esi = _svp(tair)
     RHimean = relhum * esl / esi * subgrid
     # pre-existing ice (:149-185)
     Ni_preice = ni_in * rhoair / jnp.maximum(MINCLD, cldn)
-    pre = (Ni_preice > NI_PRE_MIN) & (qi > QI_PRE_MIN)
-    lami = (GAMMA4 * CI * ni_in / jnp.where(pre, qi, 1.0)) ** (1.0 / 3.0)
-    Ri = jnp.maximum(0.5 / jnp.where(pre, lami, 1.0), RI_PRE_MIN)
-    wpice = jnp.where(pre, _vpreice(pmid, tair, Ri, Ni_preice, SHOM_PRE), 0.0)
-    wpicehet = jnp.where(pre, _vpreice(pmid, tair, Ri, Ni_preice, SHET), 0.0)
+    # the Fortran's strict > is the >= ramp here: identical except exactly at the threshold
+    pre = ge_ramp(Ni_preice, NI_PRE_MIN, wr, NI_PRE_MIN) * ge_ramp(qi, QI_PRE_MIN, wr, QI_PRE_MIN)
+    live = pre > 0.0
+    qi_s = jnp.where(live, qi, 1.0)
+    ni_s = jnp.where(live, ni_in, 1.0)
+    lami = (GAMMA4 * CI * ni_s / qi_s) ** (1.0 / 3.0)
+    Ri = jnp.maximum(0.5 / lami, RI_PRE_MIN)
+    Ni_s = jnp.where(live, Ni_preice, 1.0)
+    wpice = jnp.where(live, pre * _vpreice(pmid, tair, Ri, Ni_s, SHOM_PRE), 0.0)
+    wpicehet = jnp.where(live, pre * _vpreice(pmid, tair, Ri, Ni_s, SHET), 0.0)
     weff = jnp.maximum(wbar - wpice, MINWEFF)
     weffhet = jnp.maximum(wbar - wpicehet, MINWEFF)
     wbar1, wbar2 = weff, weffhet
-    fhom = _frachom(tair, RHimean, wbar / DETA_T_W)
+    fhom = _frachom(tair, RHimean, wbar / DETA_T_W, wr)
     tc = tair - constants.T_freeze
     dsum = soot_num + dst_num
+    # aerosol (prescribed, not model state): hard, as the Fortran
     so4_ok = so4_num >= N_SMALL
-    active = ((so4_ok | (dsum >= N_SMALL)) & (cldn > 0.0) & (RHimean >= RHI_ACT)
-              & (((tc <= TC_MIXED_MAX) & (tc >= TC_HOM) & (qc < QC_SMALL)) | (tc <= TC_HOM)))
-    A = REGM_A[0] * jnp.log(dsum) + REGM_A[1]
-    B = REGM_B[0] * jnp.log(dsum) + REGM_B[1]
-    regm = A * jnp.log(wbar1) + B
+    dust_ok = dsum >= N_SMALL
+    aer_ok = (so4_ok | dust_ok).astype(tair.dtype)
+    # safe aerosol numbers where a mode is absent: the branches that read them are not selected there
+    so4_s = jnp.where(so4_ok, so4_num, 1.0)
+    dsum_s = jnp.where(dust_ok, dsum, 1.0)
+    # cldn = max(ast, mincld) > 0 always: the Fortran's cldn > 0 test cannot fail and is dropped
+    mixed = le_ramp(tc, TC_MIXED_MAX, wT) * ge_ramp(tc, TC_HOM, wT) * le_ramp(qc, QC_SMALL, wr, QC_SMALL)
+    cold = le_ramp(tc, TC_HOM, wT)
+    active = aer_ok * ge_ramp(RHimean, RHI_ACT, wr, RHI_ACT) * (mixed + cold - mixed * cold)
+    A = REGM_A[0] * jnp.log(dsum_s) + REGM_A[1]
+    B = REGM_B[0] * jnp.log(dsum_s) + REGM_B[1]
+    regm = jnp.where(dust_ok, A * jnp.log(wbar1) + B, _REGM_NO_DUST)
     rhs = relhum * subgrid
     # the homogeneous block repeated three times in the Fortran (:207-221, :232-243, :247-258)
-    nihf_raw = _hf(tc, wbar1, rhs, so4_num)
-    hom_occ = nihf_raw > NIHF_OCCUR
-    hom_niimm = jnp.where(hom_occ, dsum, 0.0)
+    nihf_raw = jnp.where(so4_ok, _hf(tc, wbar1, rhs, so4_s, wT, wr), 0.0)
+    hom_occ = ge_ramp(nihf_raw, NIHF_OCCUR, wr, NIHF_OCCUR)
+    hom_niimm = hom_occ * dsum
     hom_nihf = nihf_raw * fhom
-    hom_oso4 = jnp.where(hom_occ, nihf_raw, 0.0) * fhom
+    hom_oso4 = hom_occ * nihf_raw * fhom
     hom_n1 = hom_nihf + hom_niimm
     # heterogeneous at the actual temperature (:222-228)
-    het_niimm = _hetero(tc, wbar2, dsum)
+    het_niimm = jnp.where(dust_ok, _hetero(tc, wbar2, dsum_s), 0.0)
     # mixed regime (:259-271)
-    mix_nihf_raw = _hf(regm - REGM_RAMP, wbar1, rhs, so4_num)
-    mix_niimm = _hetero(regm, wbar2, dsum)
-    mix_oso4 = jnp.where(mix_nihf_raw > NIHF_OCCUR, mix_nihf_raw, 0.0)
+    mix_nihf_raw = jnp.where(so4_ok, _hf(regm - REGM_RAMP, wbar1, rhs, so4_s, wT, wr), 0.0)
+    mix_niimm = jnp.where(dust_ok, _hetero(regm, wbar2, dsum_s), 0.0)
+    mix_oso4 = ge_ramp(mix_nihf_raw, NIHF_OCCUR, wr, NIHF_OCCUR) * mix_nihf_raw
     ramp = ((regm - tc) / REGM_RAMP) ** 2
     mix_nihf = mix_nihf_raw * fhom * ramp
     mix_oso4 = mix_oso4 * fhom * ramp
     mix_n1 = mix_niimm + mix_nihf
-    hom_only = (tc < TC_HOM_ONLY) & (wbar1 > W_HOM_ONLY)
-    b1 = (tc > regm) | (so4_num < N_SMALL)
-    b2 = (tc < regm - REGM_RAMP) | (dsum < N_SMALL)
-    b1_hom = hom_only & so4_ok
-    n1 = jnp.where(b1, jnp.where(b1_hom, hom_n1, het_niimm),
-                   jnp.where(b2, hom_n1, jnp.where(hom_only, hom_n1, mix_n1)))
-    nihf = jnp.where(b1, jnp.where(b1_hom, hom_nihf, 0.0),
-                     jnp.where(b2, hom_nihf, jnp.where(hom_only, hom_nihf, mix_nihf)))
-    niimm = jnp.where(b1, jnp.where(b1_hom, hom_niimm, het_niimm),
-                      jnp.where(b2, hom_niimm, jnp.where(hom_only, hom_niimm, mix_niimm)))
-    oso4 = jnp.where(b1, jnp.where(b1_hom, hom_oso4, 0.0),
-                     jnp.where(b2, hom_oso4, jnp.where(hom_only, hom_oso4, mix_oso4)))
-    ni = jnp.where(active, n1 + Ni_preice * 1e-6, 0.0)
-    nihf = jnp.where(active, nihf, 0.0)
-    niimm = jnp.where(active, niimm, 0.0)
-    oso4 = jnp.where(active, oso4, 0.0)
-    nuci = jnp.where((ni > NUCI_MAX) | (ni < 0.0), 0.0, ni)  # nimey = 0 under use_hetfrz_classnuc
+    hom_only = le_ramp(tc, TC_HOM_ONLY, wT) * ge_ramp(wbar1, W_HOM_ONLY, wr, W_HOM_ONLY)
+    so4_small = 1.0 - so4_ok.astype(tair.dtype)
+    dust_small = 1.0 - dust_ok.astype(tair.dtype)
+    b1t = ge_ramp(tc, regm, wT)
+    b1 = b1t + so4_small - b1t * so4_small
+    b2t = le_ramp(tc, regm - REGM_RAMP, wT)
+    b2 = b2t + dust_small - b2t * dust_small
+    b1_hom = hom_only * so4_ok.astype(tair.dtype)
+
+    def tree(v_hom, v_het, v_mix):
+        return _pick(b1, _pick(b1_hom, v_hom, v_het),
+                     _pick(b2, v_hom, _pick(hom_only, v_hom, v_mix)))
+
+    n1 = tree(hom_n1, het_niimm, mix_n1)
+    nihf = tree(hom_nihf, 0.0, mix_nihf)
+    niimm = tree(hom_niimm, het_niimm, mix_niimm)
+    oso4 = tree(hom_oso4, 0.0, mix_oso4)
+    ni = active * (n1 + Ni_preice * 1e-6)
+    nihf = active * nihf
+    niimm = active * niimm
+    oso4 = active * oso4
+    # ni >= 0 always; the cap at 9999/cm3 zeroes (nimey = 0 under use_hetfrz_classnuc)
+    nuci = ni * (1.0 - ge_ramp(ni, NUCI_MAX, wr, NUCI_MAX))
     return nuci * PER_CM3 / rhoair, nihf, niimm, oso4
 
 
@@ -237,7 +294,7 @@ def wsubi_from_wp2(wp2_iface, top_lev):
 
 
 def cam6_naai(T, q_v, pmid, q_c, q_i, N_i, ast, wsubi, num_accum, num_aitken, num_coarse,
-              coarse_dust, coarse_nacl, coarse_so4, troplev, top_lev):
+              coarse_dust, coarse_nacl, coarse_so4, troplev, top_lev, wT=0.0, wr=0.0):
     """``nucleate_ice_cam_calc`` per level for the modal aerosol (separate_dust false: the coarse mode holds
     dust, sea salt and sulfate).  All fields (ncol, nlev), top first; aerosol numbers [1/kg], masses [kg/kg];
     ``troplev`` (ncol,) 0-based CAM tropopause layer; ``top_lev`` 0-based.  Returns naai [1/kg]."""
@@ -254,11 +311,14 @@ def cam6_naai(T, q_v, pmid, q_c, q_i, N_i, ast, wsubi, num_accum, num_aitken, nu
     so4_num_cr = jnp.where(so4mc > 0.0, so4mc / jnp.where(so4mc > 0.0, tot, 1.0) * num_coarse * to_cm3, 0.0)
     so4_num = num_aitken * to_cm3
     naai, _, _, oso4 = nucleati(wsubi, T, pmid, relhum, icldm, q_c, q_i, N_i, rho,
-                                so4_num, dst_num, jnp.zeros_like(T), SUBGRID)
+                                so4_num, dst_num, jnp.zeros_like(T), SUBGRID, wT, wr)
     k = jnp.arange(T.shape[1])
-    strat = (k[None, :] < troplev[:, None]) & (oso4 > 0.0)
     so4_num_ac = num_accum * to_cm3
-    dso4 = jnp.maximum(0.0, STRAT * (so4_num_cr + so4_num_ac) - oso4) * PER_CM3 / rho
-    naai = jnp.where(strat, naai + dso4, naai)
-    on = (k[None, :] >= top_lev) & (T < constants.T_freeze - T_NUC_MAX_OFFSET)
-    return jnp.where(on, naai, 0.0)
+    so4_strat = STRAT * (so4_num_cr + so4_num_ac)
+    # oso4 > 0 ramped over wr times the stratospheric sulfate number it is compared with
+    strat = (k[None, :] < troplev[:, None]) * _pos(
+        oso4, wr, jnp.where(so4_strat > 0.0, so4_strat, 1.0))
+    dso4 = jnp.maximum(0.0, so4_strat - oso4) * PER_CM3 / rho
+    naai = naai + strat * dso4
+    on = (k[None, :] >= top_lev) * le_ramp(T, constants.T_freeze - T_NUC_MAX_OFFSET, wT)
+    return on * naai
