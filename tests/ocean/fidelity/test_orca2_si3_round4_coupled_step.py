@@ -376,7 +376,7 @@ def test_coupled_step_refuses_stale_damping_stamp_before_ocean(monkeypatch):
         )
 
 
-@pytest.mark.parametrize("target", (0, 999))
+@pytest.mark.parametrize("target", (0, 999, True, 1.0))
 def test_host_sponge_stamp_refuses_stale_or_nonpositive_target(target):
     with pytest.raises(ValueError, match="L6 damping target is stale"):
         bulk._nemo_checked_sponge(_StampedSponge(target), 1)
@@ -396,6 +396,16 @@ def test_lowered_sponge_stamp_guard_has_no_host_callback():
 def test_compiled_sponge_stamp_refuses_none_before_execution():
     with pytest.raises(ValueError, match="target kt=None"):
         bulk._nemo_checked_sponge(_StampedSponge(None), 1)
+
+
+def test_eager_pair_refuses_even_entry_clock_before_physics(monkeypatch):
+    carry, forcing, card, calls = _fixture(monkeypatch)
+    with pytest.raises(ValueError, match="odd positive integer entry kt"):
+        bulk.nemo_orca2_si3_coupled_pair(
+            carry._replace(kt=2), forcing, card, even_forcing=forcing,
+            model=object(), sponge=None, even_sponge=None,
+        )
+    assert calls == []
 
 
 @pytest.fixture(scope="module")
@@ -857,7 +867,9 @@ def test_c3_late_wet_one_ulp_plant_turns_compiled_live_path_into_fail(
     )
 
     def fake_pair(entry, *_a, **_k):
-        return _FakeCarry(entry.kt + 2), (object(), object())
+        first = int(entry.kt)
+        traces = (SimpleNamespace(kt=first), SimpleNamespace(kt=first + 1))
+        return _FakeCarry(entry.kt + 2), traces
 
     monkeypatch.setattr(bulk, "nemo_orca2_si3_coupled_pair", fake_pair)
 
@@ -885,26 +897,46 @@ def test_c3_late_wet_one_ulp_plant_turns_compiled_live_path_into_fail(
         return expected, masks
 
     monkeypatch.setattr(scorer, "_load_expected_steps", expected_steps)
-    traced_steps = []
 
-    def traced(_traces, _card, expected, steps):
-        traced_steps.append(steps)
-        candidate = {
-            key: {name: value.copy() for name, value in fields.items()}
-            for key, fields in expected.items()
-        }
-        if steps == (3, 4):
-            candidate[(1, 3, 0)]["field"][2, 2] = np.nextafter(0.0, 1.0)
-        return candidate
+    observed = []
 
-    monkeypatch.setattr(scorer, "_trace_observations", traced)
+    def trace_fields(trace, _card, kind):
+        observed.append((trace.kt, kind))
+        field = np.zeros((6, 7), dtype=np.float64)
+        if trace.kt == 3 and kind == 1:
+            field[2, 2] = np.nextafter(0.0, 1.0)
+        return {"field": field}
+
+    monkeypatch.setattr(scorer, "_c2_trace_fields", trace_fields)
     report = scorer._run_c3_compiled(
         Path("unused"), pair_limit=2, math_mode="libm-cpu"
     )
-    assert traced_steps == [(1, 2), (3, 4)]
+    assert (1, 1) in observed
+    assert (3, 1) in observed
     assert report["compile_count"] == 1
     assert report["compiled_executable_calls"] == 2
     assert report["status"].startswith("FAIL_C3 step=3 kind=1 field=field")
+
+
+@pytest.mark.parametrize("target", (True, 1.0))
+def test_c3_preflight_refuses_noninteger_sponge_target(target):
+    from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
+        scorer,
+    )
+
+    with pytest.raises(ValueError, match="L6 damping target is stale"):
+        scorer._validate_sponge_steps((_StampedSponge(target),), 1)
+
+
+def test_c3_preflight_refuses_even_pair_entry_clock():
+    from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
+        scorer,
+    )
+
+    with pytest.raises(ValueError, match="odd positive integer entry kt"):
+        scorer._validate_sponge_steps(
+            (_StampedSponge(2), _StampedSponge(3)), 2
+        )
 
 
 def test_c2_full_halo_shard_preserves_internal_rank_halos():

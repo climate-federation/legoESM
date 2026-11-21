@@ -2008,6 +2008,17 @@ def nemo_orca2_si3_coupled_pair(
     keeps the mature arrays in their source-owned slots.
     """
 
+    concrete_kt = _nemo_concrete_kt(carry.kt)
+    if not isinstance(concrete_kt, jax.core.Tracer):
+        kt_scalar = np.asarray(concrete_kt)
+        if (kt_scalar.shape != ()
+                or kt_scalar.dtype.kind not in "iu"
+                or int(kt_scalar) < 1
+                or int(kt_scalar) % 2 != 1):
+            raise ValueError(
+                "coupled pair requires an odd positive integer entry kt"
+            )
+
     def stabilize(next_carry, odd, even):
         bt_hist = next_carry.ocean.bt_hist
         eta_rk3_after = next_carry.ocean.eta_rk3_after
@@ -3088,9 +3099,20 @@ def _nemo_checked_sponge(sponge, kt):
     if isinstance(kt, jax.core.Tracer):
         return sponge._replace(nemo_kt=kt)
     target = sponge.nemo_kt
-    requested = int(np.asarray(kt))
-    if target is None or int(np.asarray(target)) != requested:
+    target_scalar = None if target is None else np.asarray(target)
+    requested_scalar = np.asarray(kt)
+    valid = (
+        target_scalar is not None
+        and target_scalar.shape == ()
+        and target_scalar.dtype.kind in "iu"
+        and requested_scalar.shape == ()
+        and requested_scalar.dtype.kind in "iu"
+        and int(target_scalar) >= 1
+        and int(requested_scalar) >= 1
+        and int(target_scalar) == int(requested_scalar)
+    )
+    if not valid:
         raise ValueError(
-            f"L6 damping target is stale: target kt={target!r}, requested kt={requested!r}"
+            f"L6 damping target is stale: target kt={target!r}, requested kt={kt!r}"
         )
     return sponge

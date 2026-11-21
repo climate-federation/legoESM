@@ -810,10 +810,24 @@ def _trace_observations(traces, card, expected: dict, steps: tuple[int, ...]) ->
 def _validate_sponge_steps(sponge, first_kt: int) -> None:
     """Host-side stale-target guard before a carried counter becomes traced."""
 
+    first_scalar = np.asarray(first_kt)
+    if (first_scalar.shape != ()
+            or first_scalar.dtype.kind not in "iu"
+            or int(first_scalar) < 1
+            or int(first_scalar) % 2 != 1):
+        raise ValueError(
+            "coupled pair requires an odd positive integer entry kt"
+        )
+    first = int(first_scalar)
     for offset, target in enumerate(sponge):
         stamped = None if target is None else target.nemo_kt
-        expected = first_kt + offset
-        if stamped is None or int(np.asarray(stamped)) != expected:
+        stamped_scalar = None if stamped is None else np.asarray(stamped)
+        expected = first + offset
+        if (stamped_scalar is None
+                or stamped_scalar.shape != ()
+                or stamped_scalar.dtype.kind not in "iu"
+                or int(stamped_scalar) < 1
+                or int(stamped_scalar) != expected):
             raise ValueError(
                 f"L6 damping target is stale: target kt={stamped!r}, "
                 f"requested kt={expected!r}"

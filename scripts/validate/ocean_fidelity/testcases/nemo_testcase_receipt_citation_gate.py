@@ -18528,6 +18528,20 @@ for _citation, _lines in (
 ):
     _merge_resolution_repin(_citation, _lines)
 
+# Coupled review c20 inserts the eager pair-clock guard before the historical
+# K0 and bulk-flux blocks.  Preserve the existing citations at their exact
+# post-guard source locations.
+for _citation, _lines in (
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1030-1114', '2274-2350'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1132-1153', '2370-2392'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1168-1171', '2406-2409'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1176-1219', '2414-2460'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1320-1581', '2562-2823'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1401-1473', '2643-2715'),
+    ('packages/ocean/legoesm/ocean/bulk_flux_omip.py:1402-1474', '2644-2715'),
+):
+    _merge_resolution_repin(_citation, _lines)
+
 _merge_resolution_repin(
     'packages/ice/legoesm/ice/si3_orca2_state.py:3140-3317', '3199-3382',
     anchors=['def si3_dyn_adv_pra_orca2(', '        ln_pnd_TOPO=bool(cfg.ln_pnd_TOPO),'],
