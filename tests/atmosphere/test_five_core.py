@@ -297,7 +297,7 @@ def test_r5_hard_widths_are_the_reference_bitwise(setup):
 
 # per case: max |default - reference| of the fine water increment over
 # max |reference|, measured 2026-11-21 at the voted default widths
-_GAP = {"cap_binds": 0.0, "cap_edge": 0.0012562814070352863, "empty_layer": None,
+_GAP = {"cap_binds": 0.0, "cap_edge": 0.0012562814070352863, "empty_layer": 0.0,
         "mixed_sign": 0.0, "source_only": 0.0, "tiny_increment": 0.05623059957619883}
 
 
