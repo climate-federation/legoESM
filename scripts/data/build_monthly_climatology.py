@@ -47,7 +47,7 @@ def climatology(ds, first: int, last: int, optics: bool = False):
     first_idx = [int(np.flatnonzero(sel & (months == m))[0]) for m in range(1, 13)]
     out = ds.drop_vars([v for v in ds.data_vars if "time" in ds[v].dims] + ["time"])
     bounds = tv.attrs.get("bounds")
-    timed = [v for v in ds.data_vars if "time" in ds[v].dims and v != bounds]
+    timed = [v for v in ds.data_vars if "time" in ds[v].dims]
     means = {v: [] for v in timed}
     for m in range(1, 13):
         idx = np.flatnonzero(sel & (months == m))

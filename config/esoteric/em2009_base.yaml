@@ -23,6 +23,7 @@ gravity_wave_drag: none           # production GWD is orographic only (mcfarlane
                                   # subgrid orography, so zero mountain drag = no GWD (user 2026-11-21)
 
 # ---- (c) coupled lane --------------------------------------------------------
+unfused_radiation: false          # production value; run_coupled's own default is true (inert on MPAS)
 preset: aquaplanet                # coupler land tile off: the ATMOSPHERE owns land (user U1 2026-11-21)
 atm_owns_surface: true            # atmosphere multilayer land + two-leaf canopy on the geography grass
 couple_surface_fluxes: false      # the coupler's fluxes never replace the atmosphere's (U1)
