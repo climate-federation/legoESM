@@ -183,11 +183,12 @@ def _latlon_run(tmp_path, capsys):
 def test_latlon_column_lane_closes_land_and_atmosphere(tmp_path, capsys):
     """--grid latlon runs the lat-lon C-grid's column lane (n_lat x 2 n_lat
     columns) and its land and atmosphere rows close over three coupling
-    windows, as on MPAS and the duo.  dt 600 s, neither the MPAS 300 s nor
-    the duo 150 s, so a flux sum left on another lane's constant fails."""
+    windows, as on MPAS and the duo.  The driver's CFL clamp cuts the
+    requested 600 s to 300 s, so a flux sum taken on the requested step
+    (not the one the model took) fails by 2x."""
     cfg, res = _latlon_run(tmp_path, capsys)
-    assert (cfg["grid"], cfg["ncells"], cfg["dt"]) == ("latlon", 12 * 24,
-                                                       600.0)
+    assert (cfg["grid"], cfg["ncells"], cfg["dt_requested"], cfg["dt"]) == (
+        "latlon", 12 * 24, 600.0, 300.0)
     rows, e_atm = res["rows"], abs(res["fluxes"]["E_atm"])
     assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
     assert abs(rows["atm_water"]) < 1.0e-6 * e_atm, (rows["atm_water"], e_atm)

@@ -274,6 +274,9 @@ def main(argv=None) -> int:
         d._sfc_state, d._tile_config, d._ice_config or SeaIceConfig(),
         d._lake_config or LakeConfig())
     atm = d._atm
+    # the driver's CFL clamps can shorten the step (the lat-lon pole cell):
+    # every per-step sum below is over the step the model actually took
+    DT_req, DT = DT, float(atm.config.dycore.dt)
     tc = d._tile_config
     ocfg = cc.ocean_config
     area = _np(atm.grid.grid_area).reshape(-1)
@@ -296,7 +299,8 @@ def main(argv=None) -> int:
                                     land_update_s=args.land_update_s,
                                     extra=extra, ncells=n, window=win,
                                     rad_update_steps=args.rad_update_steps,
-                                    dt=DT, f_lake_max=float(f_lake.max()),
+                                    dt=DT, dt_requested=DT_req,
+                                    f_lake_max=float(f_lake.max()),
                                     f_land_mean=float(f_land.mean()))))
     print(f"INSTR area_sum/4piR2-1 = "
           f"{area.sum() / (4 * np.pi * constants.R_earth ** 2) - 1:.3e}")
