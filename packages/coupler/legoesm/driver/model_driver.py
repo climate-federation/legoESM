@@ -3659,9 +3659,41 @@ class ModelDriver:
         self.static_topography_phis()
         return self._f_land
 
+    @staticmethod
+    def _load_mpas_mesh_file(gc, *, lloyd_iterations: int):
+        """The global MPAS mesh from ``gc.mpas_mesh_file``, pinned by hash.
+
+        Refuses without ``mpas_mesh_sha256``, on a hash mismatch (stored or
+        expected), when the file's resolution differs from ``gc.resolution``
+        or its Lloyd iterations from the driver's, and when its radius is not
+        the driver's sphere.
+        """
+        from legoesm import constants
+        from legoesm.grids.voronoi_mesh_file import load_voronoi_mesh_for_run
+        mesh = load_voronoi_mesh_for_run(
+            gc.mpas_mesh_file, resolution=gc.resolution,
+            expected_sha256=getattr(gc, "mpas_mesh_sha256", ""),
+            lloyd_iterations=lloyd_iterations, radius=constants.R_earth,
+            variable=bool(getattr(gc, "mpas_mesh_variable", False)))
+        logger.info(
+            "  MPAS mesh loaded from %s (sha256 %s, %d cells); not "
+            "regenerated", gc.mpas_mesh_file, gc.mpas_mesh_sha256,
+            mesh.nCells)
+        return mesh
+
     def _create_grid(self) -> None:
         """Create horizontal grid and vertical coordinate."""
         gc = self.config.grid
+        if (getattr(gc, "mpas_mesh_file", "")
+                or getattr(gc, "mpas_mesh_sha256", "")):
+            from legoesm.driver.config import normalize_grid_type
+            if normalize_grid_type(gc.grid_type) != "mpas":
+                raise ValueError(
+                    f"mpas_mesh_file/mpas_mesh_sha256 set with grid_type "
+                    f"{gc.grid_type!r}; a saved mesh is only used on 'mpas'")
+            if not getattr(gc, "mpas_mesh_file", ""):
+                raise ValueError(
+                    "mpas_mesh_sha256 set without mpas_mesh_file")
 
         # All global grids go through the one component-agnostic factory
         # (legoesm.grids.factory.create_grid) — the driver owns no grid
@@ -3750,7 +3782,16 @@ class ModelDriver:
             # mpas aliases (voronoi, icosahedral, mpas_voronoi) are normalised
             # to "mpas" at the config boundary (driver.config.normalize_grid_type).
             kwargs = {"lloyd_iterations": 50} if gc.grid_type == "mpas" else {}
-            global_grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
+            if getattr(gc, "mpas_mesh_file", ""):
+                # grid_type is mpas or an alias (refused above otherwise)
+                # Saved mesh: the same cells in the same order on every
+                # machine (a regenerated mesh is not bitwise portable).
+                # This is the ONLY place the driver builds the global MPAS
+                # mesh; topography, diagnostics, CMOR and the cell partition
+                # all take self.grid / self._grid_global from here.
+                global_grid = self._load_mpas_mesh_file(gc, lloyd_iterations=50)
+            else:
+                global_grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
             # MPAS / Voronoi cell-partition MPI: partition the global mesh
             # and slice this rank's (owned + halo) local mesh.  Deferred to
             # here — not the runtime bootstrap — because the partition needs
@@ -4014,12 +4055,37 @@ class ModelDriver:
             else:
                 from legoesm.grids.topography import load_subgrid_orography
                 _nat_g = getattr(self, "_latlon_native_grid", None)
+                if str(sso_path).endswith(".npz"):
+                    # per-cell sgh over each cell's footprint, built for the
+                    # run's saved mesh (build_subgrid_orography_cells.py);
+                    # refused on any other mesh
+                    from legoesm.grids.topography import (
+                        load_subgrid_orography_cells)
+                    _gcfg = self.config.grid
+                    if not getattr(_gcfg, "mpas_mesh_file", ""):
+                        raise ValueError(
+                            "a per-cell subgrid orography file (.npz) needs a "
+                            "saved, pinned MPAS mesh (mpas_mesh_file)")
+                    # Under the cell-partition MPI lane the file is in the
+                    # GLOBAL cell order; take this rank's local cells.
+                    _vl = getattr(self, "_voronoi_layout", None)
+                    _part = None if _vl is None else _vl.partition
+                    sso = jnp.asarray(load_subgrid_orography_cells(
+                        sso_path,
+                        (int(np.asarray(self.grid.grid_lat).size) if _part is None
+                         else int(_part.nCells_global)),
+                        getattr(_gcfg, "mpas_mesh_sha256", ""),
+                        cells=None if _part is None else _part.local_cells,
+                    )).astype(_sd)
+                    logger.info("  subgrid orography per cell footprint from %s",
+                                sso_path)
                 # lat-lon column lane: the native grid (its own spacing for
                 # the file's scale check), flattened to the mesh's columns
-                sso = (load_subgrid_orography(self.grid, sso_path)
-                       if _nat_g is None else jnp.reshape(
-                           load_subgrid_orography(_nat_g, sso_path), (-1,))
-                       ).astype(_sd)
+                else:
+                    sso = (load_subgrid_orography(self.grid, sso_path)
+                           if _nat_g is None else jnp.reshape(
+                               load_subgrid_orography(_nat_g, sso_path), (-1,))
+                           ).astype(_sd)
                 try:
                     self.grid = self.grid._replace(subgrid_topo_stddev=sso)
                 # NamedTuple._replace raises TypeError ("Got unexpected field
