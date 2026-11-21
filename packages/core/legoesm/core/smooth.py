@@ -348,8 +348,10 @@ def max_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     if width == 0:
         return jnp.maximum(a, b)
     a, b = jnp.broadcast_arrays(jnp.asarray(a), jnp.asarray(b))
-    s = jnp.abs(a) + jnp.abs(b) + jnp.finfo(jnp.result_type(a, float)).tiny
-    return smooth_max_c1(a / s, b / s, width) * s
+    s = jnp.abs(a) + jnp.abs(b)
+    ok = s > 0
+    s1 = jnp.where(ok, s, 1.0)           # double where: no 0/0 in the value or its gradient
+    return jnp.where(ok, smooth_max_c1(a / s1, b / s1, width) * s1, jnp.maximum(a, b))
 
 
 def min_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:

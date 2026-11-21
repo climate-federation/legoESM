@@ -129,3 +129,28 @@ def test_ring_cells_deeper_than_the_interior_stay_physical():
         Sr = np.asarray(st.S.data)[0][deep_ring]
         lo, hi = min(lo, float(Sr.min())), max(hi, float(Sr.max()))
     assert 34.5 - 1e-9 <= lo and hi <= 35.0 + 1e-9, (lo, hi)
+
+
+def _orl(fb, f1o, f1n, f2n, mb, m1, m2):
+    from legoesm.ocean.dynamics.open_boundary_latlon import _orlanski
+    a = lambda x: jnp.asarray(np.asarray(x, float)[None])                     # noqa: E731
+    return np.asarray(_orlanski(a(fb), a(f1o), a(f1n), a(f2n), a(np.full(len(fb), 15.0)), 0.05, 0.001,
+                                a(mb), a(m1), a(m2), width=0.0))[0]
+
+
+def test_tangential_radiation_does_not_read_a_dry_corner():
+    """Ring row with a dry corner at index 0; wet values uniform along the row, so the radiated
+    boundary value must be the same in every wet cell (the corner's zero must not enter cy)."""
+    wet = np.array([0.0, 1, 1, 1, 1, 1])
+    out = _orl(15.0 * wet, 15.0 * wet, 14.0 * wet, 13.0 * wet, wet, wet, wet)
+    assert out[0] == 0.0
+    assert np.ptp(out[1:]) == 0.0, out
+
+
+def test_no_radiation_from_a_dry_interior_cell():
+    """Where the first interior cell is dry the boundary value is kept and nudged with the outflow
+    rate, whatever the dry cell holds."""
+    wet_b, wet_1 = np.ones(6), np.array([1.0, 1, 0, 1, 1, 1])
+    f1 = np.where(wet_1 > 0, 14.0, 100.0)
+    out = _orl(np.full(6, 15.0), np.full(6, 15.0), f1, np.full(6, 13.0), wet_b, wet_1, wet_1)
+    assert out[2] == (1.0 - 0.001) * 15.0 + 0.001 * 15.0

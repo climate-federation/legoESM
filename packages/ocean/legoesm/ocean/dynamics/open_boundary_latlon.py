@@ -269,7 +269,7 @@ def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=Non
     p = dfx * dft
     scale = dfx * dfx + dft * dft + _EPS
     w_in = step_rel(-p, scale, width)
-    tau = r_out + (r_in - r_out) * w_in
+    tau = w_in * r_in + (1.0 - w_in) * r_out          # exact r_in / r_out at w_in = 1 / 0
     if width == 0:
         dft = jnp.where(w_in > 0, 0.0, dft)
     else:
@@ -319,7 +319,7 @@ def _orlanski_1d(fb_new, f1_old, f1_new, f2_new, data, r_in, r_out, rx_max, *, w
         pp = sc * positive_part_c1(p / sc, 1.0 / width)
         rx = pp / (max_rel(dhdx * dhdx, pp / rx_max, width) + _EPS)
     fb = (fb_new + rx * f1_new) / (1.0 + rx)
-    r = r_in + (r_out - r_in) * w_out
+    r = w_out * r_out + (1.0 - w_out) * r_in          # exact r_out / r_in at w_out = 1 / 0
     g = r / (1.0 + r)
     return (1.0 - g) * fb + g * data
 

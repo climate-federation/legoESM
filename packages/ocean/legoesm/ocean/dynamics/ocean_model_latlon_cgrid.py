@@ -8300,6 +8300,12 @@ class LatLonCGridOceanModel:
                 tend.dv_diss.data * h_v_pre, axis=-1) / H_v_pre
                 ) * state.v_mask.data
 
+        if (getattr(sponge, "open_boundary", None) is not None
+                and _cfg_b.barotropic.barotropic_solver in ("rigid_lid", "implicit_cn")):
+            raise ValueError(
+                "open lateral boundaries are implemented in the standard-halo "
+                "explicit substep solver only, not barotropic_solver="
+                f"{_cfg_b.barotropic.barotropic_solver!r}")
         if _cfg_b.barotropic.barotropic_solver == "rigid_lid":
             # Rigid lid: no free surface — solve the barotropic streamfunction
             # from the (Coriolis-augmented) slow forcing.  eta is left unchanged.
