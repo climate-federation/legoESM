@@ -95,3 +95,34 @@ def test_cache_check_fails_closed():
     ph = np.where(z > 0, 1 + 5 * z, (1 - 16 * np.minimum(z, 0)) ** -0.25) * 1.1
     data = {"s0": {"m": {0: (z, ph), 1: (z, ph)}, "h": {0: (np.empty(0),) * 2, 1: (np.empty(0),) * 2}}}
     assert r2.check(data, bench, 30) == np.inf  # scored here, absent from the reference
+
+
+def test_restrict_unstable_ignores_stable_samples():
+    x = np.linspace(0.1, 8, 200)
+    z = np.r_[-x, np.linspace(0.1, 5, 200)]
+    ph = np.where(z < 0, (1 + 14 * np.abs(np.minimum(z, 0))) ** -0.4, 50.0)  # exact g 14, p 0.4
+    spec = {"stable": "1 + g*z", "unstable": "(1 + g*x)**(-p)", "params": {"g": [16, 1, 60], "p": [0.45, 0.2, 0.7]}}  # g shared, so stable samples would pull it
+    data = {"s": {"h": {0: (z, ph), 1: (z, ph)}, "m": {0: (np.empty(0),) * 2, 1: (np.empty(0),) * 2}}}
+    p, diag = r2.fit(spec, "h", data, 30, restrict="unstable")
+    assert diag["success"] and np.allclose(p, [14, 0.4], rtol=1e-5), p
+    p_all, _ = r2.fit(spec, "h", data, 30)
+    assert not np.allclose(p_all, [14, 0.4], rtol=1e-3)
+
+
+def test_main_passes_candidate_restrict_to_fit(tmp_path, monkeypatch):
+    import json
+    seen = []
+
+    def fake_fit(spec, kind, data, min_count, restrict=None):
+        seen.append(restrict)
+        raise RuntimeError("stop")
+    monkeypatch.setattr(r2, "fit", fake_fit)
+    np.savez(tmp_path / "s.npz", **{"a|h|0|zeta": np.ones(1), "a|h|0|phi": np.ones(1)})
+    (tmp_path / "b.json").write_text("{}")
+    cands = [{"name": "u", "kind": "h", "restrict": "unstable", "stable": "1", "unstable": "1", "params": {}},
+             {"name": "n", "kind": "h", "stable": "1", "unstable": "1", "params": {}}]
+    (tmp_path / "c.json").write_text(json.dumps(cands))
+    monkeypatch.setattr(sys, "argv", ["round2", "--samples", str(tmp_path / "s.npz"), "--bench", str(tmp_path / "b.json"),
+                                      "--candidates", str(tmp_path / "c.json"), "--out", str(tmp_path / "o.json")])
+    r2.main()
+    assert seen == ["unstable", None]

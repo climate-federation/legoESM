@@ -179,6 +179,7 @@ def rank(scores, bench):
             ci = lambda v: np.percentile([np.median(rng.choice(v, len(v))) for _ in range(N_BOOT)], [2.5, 97.5]).tolist()  # noqa: E731
             out[panel] = {"median_rank": float(np.median(ranks)), "mean_rank": float(np.mean(ranks)), "wins": wins, "n": len(ranks),
                           "med_vs_dyer": float(np.median(vd)), "med_vs_J3g": float(np.median(vj)),
+                          "frac_sites_better_than_dyer": float(np.mean(np.array(vd) < 0)),
                           "ci95_vs_dyer": ci(np.array(vd)), "ci95_vs_J3g": ci(np.array(vj))}
     return out
 
@@ -228,7 +229,7 @@ def main():
         name, kind = c["name"], c["kind"]
         entry = {"kind": kind, "spec": c, "author": c.get("author", "")}
         try:
-            p, diag = fit(c, kind, data, a.min_count)
+            p, diag = fit(c, kind, data, a.min_count, restrict=c.get("restrict"))
             entry.update(params=dict(zip(c["params"], map(float, p))), fit=diag)
             if not diag["success"]:
                 raise RuntimeError(f"fit failed: {diag}")

@@ -37,3 +37,17 @@ def test_paired_keeps_only_cells_finite_in_both_arms():
     (mx, rx, _), (my, ry, _) = uh.paired(x, y)
     assert np.allclose(mx[0], 2.0) and np.isnan(mx[1]) and np.allclose(my[0], 6.0) and np.isnan(my[1])
     assert np.isfinite(rx).sum() == 2 and np.isfinite(ry).sum() == 2
+
+
+def test_oracle_scale_gain_uses_odd_days_to_fit_and_even_days_to_score():
+    z = -np.linspace(0.15, 3.0, 40)
+    d = (1 - 16 * z) ** -0.5
+    wiggle = np.exp(0.1 * np.sin(np.arange(40)))
+    data = {"a": {"h": {1: (z, 1.5 * d * wiggle), 0: (z, 1.5 * d * wiggle)}},
+            "b": {"h": {1: (z, 1.0 * d * wiggle), 0: (z, 2.0 * d * wiggle)}}}
+    g = uh.oracle_scale_gain(data)
+    rmse = lambda r: np.sqrt(np.mean(np.log(r) ** 2))  # noqa: E731
+    c_a = 1.5 * np.exp(np.mean(np.log(wiggle)))
+    assert abs(g["a"] - (rmse(1.5 * wiggle / c_a) - rmse(1.5 * wiggle))) < 1e-12 and g["a"] < -0.3
+    c_b = np.exp(np.mean(np.log(wiggle)))
+    assert abs(g["b"] - (rmse(2.0 * wiggle / c_b) - rmse(2.0 * wiggle))) < 1e-12

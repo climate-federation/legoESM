@@ -37,6 +37,20 @@ def ratio(data):
     return np.nanmedian(rows, 0), rows, np.nanmedian(zr, 0)
 
 
+def oracle_scale_gain(data, min_count=30):
+    """Per site: Dyer times the site's own best constant (geometric-mean ratio on odd days), scored on even days.
+    Returns {site: even-day log-RMSE(scaled) - log-RMSE(Dyer)}: what a per-site constant could gain over Dyer."""
+    out = {}
+    for s, v in data.items():
+        (zo, po), (ze, pe) = v["h"][1], v["h"][0]
+        so, se = (zo < 0) & (po > 0), (ze < 0) & (pe > 0)
+        if so.sum() < min_count or se.sum() < min_count:
+            continue
+        c = np.exp(np.mean(np.log(po[so] / dyer(zo[so]))))
+        out[s] = r2.log_rmse(pe[se], c * dyer(ze[se])) - r2.log_rmse(pe[se], dyer(ze[se]))
+    return out
+
+
 def paired(x, y):
     """Both ratio() results restricted to (site, bin) cells finite in both, so the arms compare like with like."""
     ok = np.isfinite(x[1]) & np.isfinite(y[1])
@@ -79,6 +93,8 @@ def main():
     res["per_site_uncorrected"] = dict(zip(sites, arms["uncorrected"][1].tolist()))
     res["perm_h"] = {"median_of_seeds": np.nanmedian(perm, 0).tolist(), "q05": np.nanpercentile(perm, 5, 0).tolist(),
                      "q95": np.nanpercentile(perm, 95, 0).tolist()}
+    res["oracle_scale_gain"] = oracle_scale_gain(corr)
+    res["oracle_scale_gain_median"] = float(np.median(list(res["oracle_scale_gain"].values())))
     json.dump(res, open(a.out, "w"), indent=1)
 
     fig, (ax, axs) = plt.subplots(1, 2, figsize=(15, 6))
@@ -117,6 +133,7 @@ def main():
     print("WROTE", a.out)
     for k in arms:
         print(k, np.round(res[k]["median"], 2).tolist(), res[k]["n_sites"])
+    print("oracle per-site scale gain vs Dyer, median", round(res["oracle_scale_gain_median"], 4), len(res["oracle_scale_gain"]))
     print("perm_h", np.round(res["perm_h"]["median_of_seeds"], 2).tolist())
     for s, row in res["per_site"].items():
         print(f"{s:20s}", np.round(row, 2).tolist())
