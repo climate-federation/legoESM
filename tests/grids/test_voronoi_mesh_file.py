@@ -151,7 +151,7 @@ def test_tampered_scalar_or_dtype_is_refused(tmp_path):
     save_voronoi_mesh(create_voronoi_mesh(LEVEL, lloyd_iterations=LLOYD),
                       path, resolution=LEVEL, lloyd_iterations=LLOYD)
     for i, mutate in enumerate((
-            lambda e: e.__setitem__("radius", np.asarray(6.371e6)),
+            lambda e: e.__setitem__("radius", e["radius"] * 1.001),
             lambda e: e.__setitem__(
                 "cellsOnEdge", e["cellsOnEdge"].astype(np.int64)))):
         bad = tmp_path / f"bad{i}.npz"

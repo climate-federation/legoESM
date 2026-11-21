@@ -99,7 +99,7 @@ def test_builder_and_loader(tmp_path):
     np.testing.assert_array_equal(got, sgh)
     # an MPI rank's owned-then-halo cells, in the partition's order
     from legoesm.parallel.voronoi_partition import partition_voronoi_mesh
-    part = partition_voronoi_mesh(mesh, 2, 1, halo_depth=3)
+    part = partition_voronoi_mesh(mesh, 4, 1, halo_depth=1)
     got_r = load_subgrid_orography_cells(out, mesh.nCells, sha,
                                          cells=part.local_cells)
     np.testing.assert_array_equal(got_r, sgh[np.asarray(part.local_cells)])
@@ -108,3 +108,15 @@ def test_builder_and_loader(tmp_path):
         load_subgrid_orography_cells(out, mesh.nCells, "f" * 64)
     with pytest.raises(ValueError, match="shape"):
         load_subgrid_orography_cells(out, mesh.nCells + 1, sha)
+
+
+def test_per_cell_file_refused_with_ifs_vdf():
+    """ifs_vdf reads SSO_STDH_FILT from a netCDF file; a per-cell .npz has only sgh."""
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=1, nlev=3, vertical_coord="sigma"),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic", discretization="mpas"),
+        topography="flat", radiation="gray", days=1,
+        turbulence="ifs_vdf", subgrid_orography_path="sgh.npz")
+    with pytest.raises(ValueError, match="per-cell .npz"):
+        cfg.validate_strict()

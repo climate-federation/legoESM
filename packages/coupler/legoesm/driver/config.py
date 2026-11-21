@@ -2467,6 +2467,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "mpas_mesh_sha256 is set but mpas_mesh_file is empty; the "
                 "pin would be ignored")
+        if (str(self.subgrid_orography_path).endswith(".npz")
+                and self.turbulence == "ifs_vdf"):
+            errors.append(
+                "turbulence='ifs_vdf' reads SSO_STDH_FILT from a netCDF "
+                "subgrid_orography_path; a per-cell .npz file carries only sgh")
         if getattr(g, "mpas_mesh_variable", False) and not _mesh_file:
             errors.append(
                 "mpas_mesh_variable is set but mpas_mesh_file is empty; a "
