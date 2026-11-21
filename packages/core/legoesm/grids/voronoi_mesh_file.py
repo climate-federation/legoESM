@@ -318,7 +318,6 @@ def load_voronoi_mesh(path, expected_sha256: str | None = None) -> VoronoiMesh:
                 f"{path}: mesh hash {stored} differs from the expected "
                 f"{want}. Refusing to use a different mesh.")
 
-    scalar_types = meta.get("scalar_types", {})
     fdtype = jnp.dtype(_storage_float_dtype())
     fields: dict[str, Any] = {}
     for name in VoronoiMesh._fields:
@@ -326,9 +325,9 @@ def load_voronoi_mesh(path, expected_sha256: str | None = None) -> VoronoiMesh:
             continue                      # optional field, stays None
         a = entries[name]
         if name in _SCALAR_FIELDS:
-            kind = scalar_types.get(
-                name, "float" if a.dtype.kind == "f" else "int")
-            fields[name] = int(a[()]) if kind == "int" else float(a[()])
+            # type from the hashed dtype (int64 / float64), never from the
+            # unhashed metadata
+            fields[name] = int(a[()]) if a.dtype.kind in "iu" else float(a[()])
         elif a.dtype.kind == "f":
             if a.dtype.itemsize < fdtype.itemsize:
                 raise MeshFileError(
@@ -338,6 +337,10 @@ def load_voronoi_mesh(path, expected_sha256: str | None = None) -> VoronoiMesh:
                     "scripts/grids/save_mpas_mesh.py (float64).")
             fields[name] = jnp.array(a, dtype=fdtype)
         elif a.dtype.kind in "iu":
+            i32 = np.iinfo(np.int32)
+            if a.size and (a.min() < i32.min or a.max() > i32.max):
+                raise MeshFileError(
+                    f"{path}: field {name} holds values outside int32")
             fields[name] = jnp.array(a, dtype=jnp.int32)
         else:
             raise MeshFileError(

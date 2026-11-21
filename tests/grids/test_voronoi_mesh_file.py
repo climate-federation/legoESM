@@ -353,3 +353,30 @@ def test_config_json_round_trip_keeps_the_pin():
         json.loads(json.dumps(experiment_config_to_dict(cfg))))
     assert back.grid.mpas_mesh_file == "m.npz"
     assert back.grid.mpas_mesh_sha256 == "ef" * 32
+
+
+def test_unhashed_metadata_cannot_change_scalars_and_int32_overflow_is_refused(tmp_path):
+    from legoesm.grids.voronoi_mesh_file import mesh_arrays_sha256
+    mesh = create_voronoi_mesh(LEVEL, lloyd_iterations=LLOYD)
+    path = tmp_path / "m.npz"
+    digest = save_voronoi_mesh(mesh, path, resolution=LEVEL, lloyd_iterations=LLOYD)
+
+    def retype(e):
+        meta = json.loads(str(e["_metadata"][()]))
+        meta["scalar_types"] = {k: "float" for k in meta.get("scalar_types", {})}
+        e["_metadata"] = np.asarray(json.dumps(meta))
+    meta_bad = tmp_path / "meta.npz"
+    _rewrite(path, meta_bad, retype)
+    back = load_voronoi_mesh(meta_bad, expected_sha256=digest)
+    assert isinstance(back.nCells, int) and back.nCells == mesh.nCells
+
+    def overflow(e):
+        c = e["cellsOnEdge"].astype(np.int64)
+        c[0, 0] = 2 ** 32 + int(c[0, 0])          # wraps to the same int32
+        e["cellsOnEdge"] = c
+        e["_sha256"] = np.asarray(mesh_arrays_sha256(
+            {k: v for k, v in e.items() if not k.startswith("_")}))
+    big = tmp_path / "big.npz"
+    _rewrite(path, big, overflow)
+    with pytest.raises(MeshFileError, match="outside int32"):
+        load_voronoi_mesh(big)
