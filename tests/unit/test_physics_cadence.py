@@ -227,12 +227,10 @@ def test_model_step_held_publishes_cached_diagnostics_and_compiles_once():
             assert np.array_equal(_arr(model._sfc_diag[6]), _arr(cache.shflx_sfc))
         else:
             assert not _leaves_equal(cache, p_prev.held_physics)
-    # Compiles per step, pinned: write on the seeded carry (0), held (1),
-    # write again on the post-step carry (2: ``init_physics_state`` seeds
-    # ``tke`` weak-typed, the first step returns it strong-typed -- a
-    # pre-existing one-off retrace, identical on the held-rate design), then
-    # NO further compile: both variants are reused, never a per-step retrace.
-    assert sizes == [1, 2, 3, 3, 3, 3]
+    # Compiles per step, pinned: write on the seeded carry (0) and held (1),
+    # then NO further compile: both variants are reused, never a per-step
+    # retrace (the seed carries strong types, so step 2 does not recompile).
+    assert sizes == [1, 2, 2, 2, 2, 2]
 
 
 def _mpas_cfg(**kw):

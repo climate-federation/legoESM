@@ -1423,7 +1423,9 @@ class _MPASSfcFluxAccum:
     # ``is_complete``, not on per-slot counts), while pr covers the whole
     # window -- the same behaviour slots 8/9/13 shipped with.  Later
     # windows are complete.
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14)
+    # 22-24 = taux_sfc / tauy_sfc / precip_conv_sfc (CMOR tauu, tauv, prc),
+    # with the same mid-window-restart behaviour as slot 14 above.
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 22, 23, 24)
     #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
     #: sw_dn, hfss, hfls).  After the first radiation call every one of them
     #: is non-None on EVERY step (the MPAS model holds the last radiation
@@ -11473,6 +11475,11 @@ class ModelDriver:
         # ice+snow+graupel + convective snow, the slot the land's snowfall
         # reads), published raw like pr; None when not exported.
         prsn = _sfc_slot(_sfc_diag_slot("precip_frozen"))
+        # Surface stress on the surface and convective precip (CMOR tauu,
+        # tauv, prc): window means like pr; None when not exported.
+        tauu = _sfc_slot(_sfc_diag_slot("taux_sfc"))
+        tauv = _sfc_slot(_sfc_diag_slot("tauy_sfc"))
+        prc = _sfc_slot(_sfc_diag_slot("precip_conv_sfc"))
         # Clear-sky TOA pair (#843): slots populated only when
         # --clear-sky-diag is on, so these are None (fields absent from the
         # CMOR output, byte-identical) in the default configuration.
@@ -11560,6 +11567,9 @@ class ModelDriver:
             v_north=v_north,
             precip=precip,
             prsn=prsn,
+            tauu=tauu,
+            tauv=tauv,
+            prc=prc,
             phis=state.phis.data,
             tas=tas,
             ts=ts,
