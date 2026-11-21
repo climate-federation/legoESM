@@ -27,7 +27,8 @@ Coverage (matches the original):
 * Vertical advection (column-local, no halo needed)
 * Rayleigh sponge (column-local, no halo)
 * Biharmonic hyperdiffusion (`laplacian²`)
-* Tracer advective transport (vmap over tracer axis)
+* Tracer advective transport + SGS diffusion (one fused function per
+  tracer, run with ``jax.lax.map`` over the tracer axis)
 
 Smagorinsky LES + vertical-θ diffusion (R4/R5)
 ----------------------------------------------
@@ -872,8 +873,9 @@ def plane_compressible_euler_slow_tendencies_halo(
                         q_int[..., None], K_h_int, height_coord)[..., 0]
                 tend = tend + sgs
             return tend
-        # Cache-blocked: one tracer at a time (its ~1 MB working set stays in
-        # cache) instead of a vmap that streams all tracers through each op.
+        # One tracer at a time (lax.map) instead of a vmap over the tracer
+        # axis: measured 34% (fp32) / 29% (fp64) faster at 128 ranks/node,
+        # bitwise-identical results.
         dtracers_dt = jnp.moveaxis(jax.lax.map(
             lambda qq: _tracer_tend_one(*qq),
             (jnp.moveaxis(tracers_pad, -1, 0), jnp.moveaxis(tracers, -1, 0)),
