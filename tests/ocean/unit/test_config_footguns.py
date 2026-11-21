@@ -129,7 +129,7 @@ def test_shipped_global_ocean_templates_load_with_their_eos():
 
     from legoesm.ocean.config import OceanExperimentConfig
 
-    for name in ("omip_latlon.yaml", "omip_latlon_kpp.yaml"):
+    for name in ("omip_latlon.yaml", "omip_latlon_kpp.yaml", "omip_latlon_kpp_cvmix.yaml"):
         p = Path("config/templates/global_ocean") / name
         if not p.exists():
             pytest.skip(f"{p} not present")
@@ -137,6 +137,17 @@ def test_shipped_global_ocean_templates_load_with_their_eos():
         assert rt.eos in VALID_EOS_SCHEMES, (
             f"{name} resolved eos={rt.eos!r} not in VALID_EOS_SCHEMES"
         )
+
+
+def test_kpp_cvmix_template_selects_the_opt_in_kpp_options():
+    from pathlib import Path
+
+    from legoesm.ocean.config import OceanExperimentConfig
+
+    p = Path("config/templates/global_ocean/omip_latlon_kpp_cvmix.yaml")
+    kpp = OceanExperimentConfig.from_yaml(str(p)).to_ocean_config().physics.vertical_mixing.kpp
+    assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates) == (
+        "candidate", True, True)
 
 
 def test_vertical_mixing_reachable_via_the_yaml_ocean_key():

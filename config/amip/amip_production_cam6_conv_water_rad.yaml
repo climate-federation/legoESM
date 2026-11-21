@@ -1,0 +1,12 @@
+# Production deck + CAM6 convective water in the radiation, non-default arm.
+#
+# CAM6 conv_water_in_rad = 1 (conv_water.F90 conv_water_4rad, area-weighted
+# average; namelist_defaults_cam.xml): the ZM deep in-cloud water over deepcu
+# joins the stratiform water the cloud optics read.  Ported from the ENSO
+# fork (Isma Di Carlo).  Everything else is amip_production.yaml.
+include: amip_production.yaml
+cloud_cam6_conv_water_in_rad: 1
+cloud_cam6_conv_water_frac_limit: 0.01  # NAMED, equals the code default (CAM6 namelist)
+cloud_cam6_rad_gate_log_width: 0.01     # NAMED, equals the code default: RULE 5
+                                        # width of the CAM6 thresholds (0 = CAM6's
+                                        # hard switches)

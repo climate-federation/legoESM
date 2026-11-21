@@ -378,6 +378,10 @@ def test_cesm_lane_width_reaches_surface_layer_coupler_and_tas(monkeypatch):
            and getattr(c.func, "id", None) in ("compute_sam_oceflx_fluxes", "_most_2m_jit")
            for k in c.keywords if k.arg in ("zeta_cap_width", "most_zeta_cap_width")]
     assert kws == ["self.surface_most_zeta_cap_width"] * 2, kws
+    # The 2 m call runs through the cached jit, which must forward every option.
+    impl = next(f for f in diag.body
+                if isinstance(f, ast.FunctionDef) and f.name == "_most_2m_impl")
+    assert "return compute_most_fluxes(*args, return_2m=True, **kwargs)" in ast.unparse(impl)
     drv = (REPO / "packages/coupler/legoesm/driver/model_driver.py").read_text()
     assert '"surface_most_zeta_cap_width", MOST_ZETA_CAP_WIDTH)' in drv
     gfs = [ast.unparse(k.value) for c in ast.walk(diag) if isinstance(c, ast.Call)

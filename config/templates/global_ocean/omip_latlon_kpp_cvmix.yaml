@@ -1,0 +1,70 @@
+# legoESM experiment template -- OMIP global lat-lon ocean, KPP in its CVMix / MOM6 options.
+#
+# Same as omip_latlon_kpp.yaml except three opt-in KPP options (Isma Di Carlo's ENSO
+# fork): the unresolved-shear velocity scale of the CVMix/MOM6 form, velocity scales
+# from the actual surface buoyancy flux (no float32-epsilon floor), and surrogate
+# gradients through the boundary-layer-base and convective switches (forward
+# unchanged).  Defaults elsewhere stay as in omip_latlon_kpp.yaml.
+experiment:
+  tier: tier3
+  complexity: primitive_equation
+  extent: global
+  maturity: structurally_validated   # config passes validate_strict; not run end-to-end
+  description: >
+    OMIP-style forced global ocean (lat-lon C-grid) with the physics pipeline
+    configured via nested YAML: KPP vertical mixing (Ri_crit=0.3, CVMix/MOM6 options),
+    enhanced-diffusion convection, Jerlov-II shortwave penetration, and triad
+    GM/Redi (kappa_GM=kappa_Redi=1000). Requires CORE-II forcing + WOA18 IC.
+  data: [core2_nyf, woa18]
+  conservation_gates: [volume, heat, salt]
+model:
+  name: "OMIP-latlon-kpp-cvmix"
+  type: ocean_only
+grid:
+  type: latlon_cgrid
+  n_lat: 180
+  n_lon: 360
+  nlev: 30
+ocean:
+  A_h: 30000.0                # lateral viscosity [m^2/s] (flat field; see header)
+  A_h_lat_scaling: true       # cos(lat) scaling for uniform grid Reynolds number
+  bottom_drag_r: 0.0025       # linear bottom drag
+  eos: wright
+  pgf_scheme: smc03           # density-Jacobian PGF over partial cells
+  barotropic_solver: implicit_cn
+  implicit_vertical_mixing: true
+  tracer_advection: tvd
+  momentum_advection: vector_invariant
+  # --- nested physics pipeline (#382) ---
+  physics:
+    vertical_mixing:
+      scheme: kpp
+      kpp:
+        Ri_crit: 0.3          # critical bulk Richardson number (Large et al. 1994)
+        vt2_velocity_scale: candidate   # CVMix / MOM6 w_s at sigma = epsilon of each candidate depth
+        actual_buoyancy_flux: true      # zeta from the actual B_f (CVMix 1d_OBL)
+        gradient_surrogates: true       # logistic-blend backward pass through the two switches
+    lateral_mixing:
+      scheme: none            # lat-lon: lateral mixing via A_h / gm_redi (see header)
+    convection:
+      scheme: enhanced_diffusion
+    shortwave_penetration:
+      water_type: "II"        # Jerlov water type
+  # --- GM/Redi lateral mixing (top-level on the lat-lon C-grid) ---
+  gm_redi:
+    kappa_GM: 1000.0
+    kappa_Redi: 1000.0
+    S_max: 0.01
+    slope_scheme: triads
+time:
+  dt_seconds: 1800            # 30 min
+  duration_days: 365          # 1 year
+  output_interval_days: 30
+init:
+  woa_init: true              # WOA18 cold-start IC (see experiment.data: woa18)
+forcing:
+  dataset: core2_nyf
+  path: ""
+output:
+  format: zarr
+  path: output/omip_latlon_kpp_cvmix/
