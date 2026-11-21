@@ -2188,9 +2188,10 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     _sg = getattr(config, "land_canopy_solve_group", None)
     if _sg is not None:
         _w_over["solve_group"] = int(_sg)
-    _igf = getattr(config, "land_canopy_implicit_ground_flux", None)
-    if _igf is not None:
-        _w_over["implicit_ground_flux"] = _igf
+    for _k in ("implicit_ground_flux", "fallback_from_last_iterate"):
+        _v = getattr(config, f"land_canopy_{_k}", None)
+        if _v is not None:
+            _w_over[_k] = _v
     if _w_over:
         from legoesm.land.canopy.config import CanopyConfig as _CanopyCfg
         if not isinstance(cfg.surface_scheme, _CanopyCfg):
@@ -2202,12 +2203,14 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     if isinstance(cfg.surface_scheme, TwoLeafCanopyConfig):
         logger.info("  land canopy smoothing widths: RH cap %.3g, zeta cap %.3g; "
                     "MOST iterations %d; solve group %d (0 = one batch); "
-                    "implicit ground flux %s",
+                    "implicit ground flux %s; unconverged fallback %s",
                     cfg.surface_scheme.rh_cap_smoothing_width,
                     cfg.surface_scheme.zeta_cap_smoothing_width,
                     cfg.surface_scheme.most_n_iters,
                     cfg.surface_scheme.solve_group,
-                    "ON" if cfg.surface_scheme.implicit_ground_flux else "off")
+                    "ON" if cfg.surface_scheme.implicit_ground_flux else "off",
+                    "last iterate" if cfg.surface_scheme.fallback_from_last_iterate
+                    else "cold state")
     # One-layer snow thermal node, same placement and reason.
     _sn = bool(config.land_snow_insulation)
     cfg = cfg._replace(thermal=cfg.thermal._replace(snow_insulation=_sn))

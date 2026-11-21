@@ -258,7 +258,7 @@ def test_singular_canopy_air_jacobian_gives_finite_gradient(monkeypatch):
 
 
 def test_unconverged_columns_close_with_the_implicit_flux(monkeypatch):
-    """Cap-stopped columns (cold-state fallback, partial lambda) close the land
+    """Cap-stopped columns (last-iterate fallback, partial lambda) close the land
     boundary with the flux the soil received: Rn_ext = SH + LE + G_applied."""
     st, new, r, so, G_ap, G_in, seen = _step(monkeypatch, True, max_iters=1)
     acc = ~np.asarray(so.converged).astype(bool) & ~np.asarray(so.held).astype(bool)

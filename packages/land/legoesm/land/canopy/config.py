@@ -325,6 +325,15 @@ class CanopyConfig(NamedTuple):
     # 16f7ac09a7).  Default False -> True (user 2026-11-20: fixed value is the
     # default).  Bulk snowpack without the snow thermal node only.  Appended.
     implicit_ground_flux: bool = True
+    # A column whose canopy solve stops at the iteration cap takes the fluxes
+    # of its LAST iterate (when that iterate is an admissible state), as CLM5
+    # does after its forty iterations (Technical Description 2.5.3.2, step 12;
+    # the energy error goes to sensible heat, eqs. 2.5.135, 2.5.138-2.5.139,
+    # which the multilayer land's fallback closure already does).  False = the
+    # cold state (canopy at air temperature), whose sensible heat reached
+    # 1,100-1,430 W/m2 over hot dry soil and was then rejected and held
+    # (legoESM-enso 9b70a0f84b).  Default True (user 2026-11-20).  Appended.
+    fallback_from_last_iterate: bool = True
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -370,9 +379,9 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 "two_stream_clip_width must be <= 1 (the smoothing bands at 0 and 1 of "
                 f"the sunlit share would overlap), got {self.two_stream_clip_width!r}")
-        if not isinstance(self.implicit_ground_flux, bool):
-            raise ValueError("implicit_ground_flux must be a bool, got "
-                             f"{self.implicit_ground_flux!r}")
+        for _f in ("implicit_ground_flux", "fallback_from_last_iterate"):
+            if not isinstance(getattr(self, _f), bool):
+                raise ValueError(f"{_f} must be a bool, got {getattr(self, _f)!r}")
         return self
 
 
