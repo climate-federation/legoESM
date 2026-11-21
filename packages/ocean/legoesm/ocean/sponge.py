@@ -58,6 +58,13 @@ class SpongeForcing(NamedTuple):
     u_ref: jnp.ndarray | None = None
     v_ref: jnp.ndarray | None = None
     nemo_kt: int | None = None
+    # Open lateral boundaries of a regional lat-lon run (OpenBoundaryData of
+    # dynamics/open_boundary_latlon.py); None keeps every side a wall.
+    open_boundary: object | None = None
+    # Laplacian sponge viscosity [m2/s] at cell centres, (n_lat, n_lon), added to
+    # the OM4p25 lateral friction next to open sides (CROCO SPONGE_VIS2,
+    # set_nudgcof.F); None adds nothing.
+    visc2: jnp.ndarray | None = None
 
 
 def compute_sponge_gamma(

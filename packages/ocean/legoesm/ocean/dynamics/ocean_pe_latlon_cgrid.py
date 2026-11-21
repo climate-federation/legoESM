@@ -125,6 +125,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     apply_north_fold,
     smagorinsky_biharmonic_tendency_cgrid,
     om4p25_lateral_friction_tendency_cgrid,
+    om4_resolution_function,
+    wkb_first_baroclinic_wave_speed,
     qg_leith_viscosity_tendency_cgrid,
     smagorinsky_viscosity_cgrid,
     smagorinsky_viscosity_q_cgrid,
@@ -3492,6 +3494,9 @@ def _bc_horizontal_viscosity(
     ldf_metric_reciprocal_operands=None,
     nemo_smagorinsky_coefficient_override=None,
     vertex_mask=None,
+    T=None,
+    S=None,
+    sponge_visc2=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
     Smagorinsky + Leith, with cos(lat) / equatorial / polar-cap scaling and the
@@ -3499,6 +3504,9 @@ def _bc_horizontal_viscosity(
     together because the meridional block reuses the slope-foot helper/fields
     defined in stage 10. Pure verbatim extraction (Q8). Returns the momentum
     accumulators plus the per-term viscosity diagnostics."""
+    if sponge_visc2 is not None and config.lateral_friction_scheme != "om4p25":
+        raise ValueError("SpongeForcing.visc2 (sponge viscosity) is applied by the om4p25 lateral "
+                         f"friction only, got lateral_friction_scheme={config.lateral_friction_scheme!r}")
     diag_Ah_lap_u = jnp.zeros_like(du_dt)
     diag_Ah_lap_v = jnp.zeros_like(dv_dt)
     # Cell-centre A_h coefficient field [m²/s] used to build the FAITHFUL
@@ -4331,10 +4339,30 @@ def _bc_horizontal_viscosity(
     # (−biharmonic)); accumulated into the Smagorinsky diagnostic bucket.
     if config.lateral_friction_scheme == "om4p25":
         _om = config.omp25 if config.omp25 is not None else OMp25Config()
+        _res_fn = None
+        if getattr(_om, "resolution_function", "taper") == "mom6_step_wkb":
+            if T is None or S is None or h_k is None:
+                raise ValueError('resolution_function="mom6_step_wkb" needs T, S and h_k')
+            _eos = make_eos_fn(config.eos, getattr(config, "eos_linear", None),
+                               eos_nemo_seos=getattr(config, "eos_nemo_seos", None))
+            _wet = h_k > 0.0 if mask is None else (h_k > 0.0) & (mask[..., jnp.newaxis] > 0.5)
+            _c1 = wkb_first_baroclinic_wave_speed(T, S, h_k, _wet, _eos,
+                                                  config.rho_0, config.g,
+                                                  width=_om.smooth_width)
+            _res_fn = om4_resolution_function(_c1, grid, mask=mask, coef=_om.res_coef,
+                                              gill_equatorial=_om.gill_equatorial_ld,
+                                              width=_om.smooth_width)
+        elif getattr(_om, "resolution_function", "taper") != "taper":
+            raise ValueError(f"omp25.resolution_function must be 'taper' or 'mom6_step_wkb', "
+                             f"got {_om.resolution_function!r}")
         om_u, om_v = om4p25_lateral_friction_tendency_cgrid(
             u, v, grid, C2=_om.C2, Cu2=_om.Cu2, C4=_om.C4, Cu4=_om.Cu4,
             deformation_radius=_om.deformation_radius_m,
-            mask=mask, u_mask=u_mask, v_mask=v_mask)
+            mask=mask, u_mask=u_mask, v_mask=v_mask,
+            Kh_sin_lat=getattr(_om, "Kh_sin_lat", 0.0), Kh_sin_power=getattr(_om, "Kh_sin_power", 4.0),
+            bound_coriolis_vel=getattr(_om, "bound_coriolis_vel", 0.0), resolution_fn=_res_fn,
+            bound_coef=getattr(_om, "bound_coef", 0.0), dt=dt, nu2_sponge_h=sponge_visc2,
+            smooth_width=_om.smooth_width)
         om_u, om_v = _apply_slope_foot(om_u, om_v)
         du_dt = du_dt + om_u
         dv_dt = dv_dt + om_v
@@ -4911,6 +4939,23 @@ def surface_stress_faces(
     _native_j = getattr(surface_forcing, "tau_j_native", None)
     if (_native_i is None) != (_native_j is None):
         raise ValueError("tau_i_native and tau_j_native must be supplied together")
+    _face_u = getattr(surface_forcing, "tau_u_face", None)
+    _face_v = getattr(surface_forcing, "tau_v_face", None)
+    if (_face_u is None) != (_face_v is None):
+        raise ValueError("tau_u_face and tau_v_face must be supplied together")
+    if _face_u is not None:
+        if (_native_i is not None or _native_u is not None or cell_mask is not None
+                or nemo_fold_vector_sign):
+            raise ValueError("tau_u_face/tau_v_face cannot be combined with "
+                             "the native T-point stress or the NEMO identities")
+        dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J
+        dz_0_u = interp_cell_to_uface(dz_0_T)
+        (dz_0_v,) = interp_to_v_points_multi((dz_0_T,), grid=grid, source_round=True)
+        if (jnp.shape(_face_u) != jnp.shape(dz_0_u)
+                or jnp.shape(_face_v) != jnp.shape(dz_0_v)):
+            raise ValueError("tau_u_face/tau_v_face must match the u/v face shapes")
+        return (jnp.asarray(_face_u, dtype=u_dtype),
+                jnp.asarray(_face_v, dtype=u_dtype), dz_0_u, dz_0_v)
     if _native_u is not None and _native_i is not None:
         raise ValueError(
             "utau_u_native/vtau_v_native and tau_i_native/tau_j_native "
@@ -6414,6 +6459,8 @@ def _latlon_tendencies_outside_core(
             nemo_smagorinsky_coefficient_override=(
                 nemo_smagorinsky_coefficient_override),
             vertex_mask=vertex_mask,
+            T=T, S=S,
+            sponge_visc2=getattr(sponge, "visc2", None),
         )
     _nemo_after_ldf_u = du_dt
     _nemo_after_ldf_v = dv_dt
