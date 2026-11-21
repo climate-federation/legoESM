@@ -149,3 +149,10 @@ def test_floored_divisions_have_finite_gradients_on_dry_faces():
         z = jnp.zeros((3, 4), dt)
         g = jax.grad(lambda h: ob._over_floor(h, h.sum(axis=0, keepdims=True)).sum())(z)
         assert np.all(np.isfinite(np.asarray(g)))
+
+
+def test_hard_width_gradient_is_finite_on_a_flat_interior():
+    z = jnp.zeros((2, 8), jnp.float32)
+    for argnum in range(5):
+        g = jax.grad(lambda *x: ob._orlanski(*x, 0.05, 0.001, width=0.0).sum(), argnums=argnum)(z, z, z, z, z)
+        assert np.all(np.isfinite(np.asarray(g))), argnum
