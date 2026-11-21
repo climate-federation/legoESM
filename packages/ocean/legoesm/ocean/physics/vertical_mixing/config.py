@@ -1029,6 +1029,11 @@ class KPPConfig(NamedTuple):
     #   Siberian salty — that TKEConfig.eice fixed on the TKE grid but never
     #   reached the KPP grids).
     eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
+    # N^2 for V_t^2, the interior Richardson number and the convective trigger (ENSO core-0030).
+    # "adiabatic": the local buoyancy gradient (both cells of an interface at one pressure), as LMD94,
+    # CVMix/MOM6, MITgcm and POP.  "insitu_signed": the earlier difference of in-situ densities at each
+    # cell's own pressure (biased by g^2/c_s^2, about +4e-5 s^-2), kept bit for bit.  User-approved default 2026-11-20 (published form).
+    n2_mode: str = "adiabatic"
 
 
 class CATKEConfig(NamedTuple):
@@ -1060,7 +1065,10 @@ class CATKEConfig(NamedTuple):
     """
     # --- stable (shear) mixing length: surface/bottom + stratification ---
     c_surface_shear: float = 1.131       # Cˢ  surface-distance coefficient
-    c_bottom_shear: float = 0.28         # Cᵇ  bottom-distance coefficient
+    # Cᵇ bottom-distance coefficient. Oceananigans CATKEMixingLength (main, 8e4f98d, 5 November 2026): Cᵇ = 0.967,
+    # chosen so that the near-bottom similarity constant Cᵇ (Cˡᵒu^3 / CˡᵒD)^(1/4) is 0.4, because Cᵇ is not
+    # constrained by the surface-forced calibration LES (Wagner et al. 2025, section 3.1.3). Was 0.28 (ENSO core-0026).
+    c_bottom_shear: float = 0.967
     c_ri_lower: float = 0.254            # CRi⁰ stability-function lower Ri
     c_ri_width: float = 1.02             # CRiᵟ stability-function width
     c_sheared_plume: float = 0.505       # Cˢᵖ sheared-convective-plume coefficient
@@ -1100,6 +1108,23 @@ class CATKEConfig(NamedTuple):
     maximum_viscosity: float = float("inf")           # K_u cap [m^2/s]
     maximum_tracer_diffusivity: float = float("inf")  # K_c cap [m^2/s]
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
+    # Shortwave in CATKE's surface buoyancy flux Jb (ENSO core-0027). Oceananigans' CATKE takes Jb from the top boundary
+    # fluxes of T and S only (catke_vertical_diffusivity.jl, top_buoyancy_flux of the top tracer BCs); with
+    # penetrating radiation (NumericalEarth/ClimaOcean TwoColorRadiation) the whole shortwave is a body forcing and
+    # shortwave_radiative_forcing returns zero for the top flux (radiative_forcing.jl, apply_air_sea_radiative_fluxes.jl),
+    # so Jb is formed from the non-solar flux. "exclude" (default) does the same here when the surface forcing
+    # carries sw_down: Jb uses q_net - sw_down. "include" keeps the earlier behaviour (Jb from the full q_net).
+    # With a skin fraction above 0 (the "auto" or default jerlov_2band path, or sweeney_2band) part of sw_down is
+    # absorbed at the top and still sits in the tracer surface flux; it is left out of Jb all the same, as
+    # NumericalEarth leaves all shortwave out even where most is absorbed in the top cell. The regional driver uses
+    # skin fraction 0, where the split is exact.
+    surface_buoyancy_flux_shortwave: str = "exclude"
+    # N^2 for CATKE (ENSO core-0029). Oceananigans' CATKE uses the local buoyancy gradient ∂z_b = g (alpha ∂zT - beta ∂zS)
+    # (SeawaterBuoyancy), with no compressibility term. "adiabatic" (default) evaluates both cells of an interface
+    # at the upper cell's pressure (eos.compute_buoyancy_frequency_adiabatic), which is that local gradient for any
+    # EOS. "insitu_signed" keeps the earlier behaviour: the difference of in-situ densities, biased stable by the
+    # compressibility of seawater (about +4e-5 s^-2 near the surface with Wright).
+    n2_mode: str = "adiabatic"
 
 
 class EPBLConfig(NamedTuple):
