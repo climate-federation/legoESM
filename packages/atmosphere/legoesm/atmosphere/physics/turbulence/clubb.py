@@ -6786,8 +6786,10 @@ def clubb_step(
             # momentum level half the lowest wm_zt.
             dz_layer = z_half[:, :-1] - z_half[:, 1:]
             pdel = p_half[:, 1:] - p_half[:, :-1]
-            rho_in = flip_vertical(pdel / (constants.g * dz_layer))
-            wm_zt = -flip_vertical(omega) / (rho_in * constants.g)
+            # operation order as CAM's (bit-for-bit against the compiled
+            # oracle, tests/atmosphere/test_clubb_host_omega_oracle.py)
+            rho_in = flip_vertical((1.0 / constants.g) * (pdel / dz_layer))
+            wm_zt = -1.0 * flip_vertical(omega) / (rho_in * constants.g)
             wm_zm = zt2zm(wm_zt, gr).at[:, 0].set(0.5 * wm_zt[:, 0])
         else:
             # clubb_intr.F90:1677-1679, 1778 (cam_cesm2_1_rel_60)

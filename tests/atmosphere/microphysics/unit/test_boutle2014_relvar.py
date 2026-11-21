@@ -203,7 +203,10 @@ def test_mg2_receives_the_selected_relvar(monkeypatch, scheme):
             want = jax.jit(lambda c_, a_: boutle2014_relvar(c_, a_, 1.7, width))(
                 jnp.clip(cf.reshape(r.shape), 0.0, 1.0),
                 jnp.asarray(mesh.areaCell).reshape(-1, 1))
-            np.testing.assert_array_equal(np.asarray(want), r)
+            # the model fuses this inside the scanned sub-cycle; XLA's fusion
+            # moves the last bit (measured 7.4e-16 relative), so compare to a
+            # few ulp rather than bitwise
+            np.testing.assert_allclose(np.asarray(want), r, rtol=1e-14, atol=0.0)
         else:
             np.testing.assert_array_equal(rv.reshape(r.shape), r)
     # discriminating: the two sources differ on this state

@@ -157,8 +157,8 @@ def test_cam_layer_density_flag_gives_cams_wm(monkeypatch):
     _run(col, omega, monkeypatch, got, cam_density=True)
     dz = col["z_half"][:, :-1] - col["z_half"][:, 1:]
     pdel = col["p_half"][:, 1:] - col["p_half"][:, :-1]
-    rho_in = jnp.flip(pdel / (constants.g * dz), axis=1)
-    wm_zt = -jnp.flip(omega, axis=1) / (rho_in * constants.g)
+    rho_in = jnp.flip((1.0 / constants.g) * (pdel / dz), axis=1)
+    wm_zt = -1.0 * jnp.flip(omega, axis=1) / (rho_in * constants.g)
     np.testing.assert_array_equal(np.asarray(got["wm_zt"]), np.asarray(wm_zt))
     wm_zm = zt2zm(wm_zt, got["gr"])
     np.testing.assert_array_equal(np.asarray(got["wm_zm"][:, 1:]),
