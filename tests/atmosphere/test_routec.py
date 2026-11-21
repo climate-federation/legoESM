@@ -340,12 +340,14 @@ _CASES = {
 # Measured 2026-11-21 at the voted default widths.  The ~25 % m gap: in an
 # exactly well-mixed layer c = 0 sits ON the strict-inequality switch, so the
 # soft form gives half weight to the failing candidate kb = T (m = 0).
+# Re-measured 2026-11-21 after the review-round-1 slope normaliser floor
+# and C1 square root (only "thin" moved, by 5e-5 relative).
 _GAP = {
     "d0": (-0.18594182027046025, -0.4353260557276408, -0.4089637947819323, -0.4088889513498771),  # hard (1.0, 0.170769, 0.1, -0.01342)
     "known": (-5.958380089954307e-05, -0.25005674315838866, -0.149014259096798, -0.1567138356163305),  # hard (1.0, 0.37, 8.0, -0.004)
     "lock_edge": (-9.36285958752503e-05, -0.2500907674016885, -0.31690992298686327, -0.2366825887419481),  # hard (1.0, 0.1, 10.4, -0.00412)
     "small_m": (-0.005078690292762755, -0.255072936817805, -0.24515806410728333, -0.24289777099082832),  # hard (1.0, 0.05, 10.2, -0.00411)
-    "thin": (-0.317015142793617, -0.5661937117616986, -0.25806670621456196, -0.31338391442017105),  # hard (1.0, 0.995, 8.0, -0.004)
+    "thin": (-0.31702839773499925, -0.5662066765727483, -0.25808053877125403, -0.31339761751049583),  # hard (1.0, 0.995, 8.0, -0.004)
 }
 
 
@@ -432,7 +434,8 @@ def _E_case(name):
 
 # per case: E at the default widths minus the hard form (absolute; E is in
 # [0, 1]); measured 2026-11-21
-_E_GAP = {}
+_E_GAP = {"cloudy": 0.0001132809321338843, "just_saturated": 0.0035248022082624408,
+          "unsaturated": 0.0}
 
 
 @pytest.mark.parametrize("name", ["cloudy", "just_saturated", "unsaturated"])
