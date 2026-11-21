@@ -49,3 +49,5 @@ implicit_vertical_mixing: true
 no_conservation_fixer: true
 K_v: 0.0                      # constant K_v is ADDED to KPP; main default 1e-4 eroded the thermocline (old run: LEGOESM_KV=0)
 # run with: export LEGOESM_KPP_VT_N2=potential   (KPP V_t^2 from potential-density N; kpp.py)
+runoff_routing: spread_all     # from day 3330: also spread wet river-mouth runoff (Irrawaddy cells reached S = -8)
+runoff_radius_km: 150.0

@@ -1045,7 +1045,7 @@ def parse_args(argv: list[str] | None = None):
     # the JRA55-do global total at 0.5625 deg.  FESOM2's counterpart is
     # use_runoff_mapper / runoff_radius (500 km).
     p.add_argument("--runoff-routing", type=str, default="none",
-                   choices=["none", "nearest", "spread"],
+                   choices=["none", "nearest", "spread", "spread_all"],
                    help=(
                        "Route river runoff off dry cells onto wet ones, "
                        "conserving total discharge. 'none' (default) = "
@@ -1054,7 +1054,10 @@ def parse_args(argv: list[str] | None = None):
                        "closest wet cell within --runoff-radius-km. "
                        "'spread' = divided over every wet cell in range "
                        "(area-weighted), closer to FESOM's mapper and avoids "
-                       "a salinity crater under a big river."
+                       "a salinity crater under a big river. "
+                       "'spread_all' = as 'spread', and ALSO spreads the "
+                       "discharge that lands on wet river-mouth cells (needed "
+                       "at 1/4 deg, where big rivers otherwise drive S < 0)."
                    ))
     p.add_argument("--runoff-source", type=str, default="jra55_friver",
                    choices=["jra55_friver", "core2_climatology"],

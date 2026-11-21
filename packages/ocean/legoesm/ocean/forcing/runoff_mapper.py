@@ -53,7 +53,7 @@ from legoesm import constants
 
 #: Routing schemes :func:`build_runoff_map` accepts.  A typo must raise, not
 #: silently select a different physical treatment (CLAUDE.md dispatch rule).
-VALID_RUNOFF_SCHEMES: tuple[str, ...] = ("nearest", "spread")
+VALID_RUNOFF_SCHEMES: tuple[str, ...] = ("nearest", "spread", "spread_all")
 
 
 class RunoffMap(NamedTuple):
@@ -165,6 +165,10 @@ def build_runoff_map(
             "discharge to its single closest wet cell; 'spread' divides it "
             "over every wet cell within radius_m."
         )
+    if scheme == "spread_all" and reference_runoff is None:
+        raise ValueError(
+            "scheme='spread_all' needs reference_runoff: wet river-mouth "
+            "donors are the wet cells where it is > 0.")
     if not np.isfinite(radius_m) or radius_m <= 0.0:
         raise ValueError(
             f"radius_m must be finite and > 0; got {radius_m}.")
@@ -186,7 +190,21 @@ def build_runoff_map(
             "nowhere to route runoff to."
         )
 
-    dry_idx = np.flatnonzero(~wet_flat)
+    keep_flat = wet_flat.copy()
+    if scheme == "spread_all":
+        # Also spread the discharge that already lands on WET cells.  At
+        # 1/4 deg a big river (Irrawaddy, Mississippi) arrives on one or two
+        # shallow wet coastal cells; the virtual salt flux there outruns the
+        # exchange with the open sea and drives S negative.  Wet donors give
+        # up their own runoff (keep_flat False) and receive their area share
+        # back as recipients, like every other wet cell in range.
+        ref_flat = np.broadcast_to(np.asarray(reference_runoff,
+                                              dtype=np.float64), shape).ravel()
+        wet_donor = wet_flat & (ref_flat > 0.0)
+        keep_flat = wet_flat & ~wet_donor
+        dry_idx = np.flatnonzero(~wet_flat | wet_donor)
+    else:
+        dry_idx = np.flatnonzero(~wet_flat)
     wet_idx = np.flatnonzero(wet_flat)
     xyz_wet = _unit_sphere_xyz(latf[wet_idx], lonf[wet_idx])
     xyz_dry = _unit_sphere_xyz(latf[dry_idx], lonf[dry_idx])
@@ -209,7 +227,7 @@ def build_runoff_map(
         src_list.append(src)
         dst_list.append(dst)
         w_list.append(area[src] / area[dst])
-    else:  # "spread"
+    else:  # "spread" / "spread_all"
         neighbours = tree.query_ball_point(xyz_dry, r=cutoff)
         for i, nb in enumerate(neighbours):
             if not nb:
@@ -245,7 +263,7 @@ def build_runoff_map(
         src_idx=jnp.asarray(src_idx, dtype=jnp.int32),
         dst_idx=jnp.asarray(dst_idx, dtype=jnp.int32),
         weight=jnp.asarray(weight),
-        wet_mask_flat=jnp.asarray(wet_flat),
+        wet_mask_flat=jnp.asarray(keep_flat),
         shape=tuple(shape),
         unrouted_fraction=unrouted_fraction,
     )
