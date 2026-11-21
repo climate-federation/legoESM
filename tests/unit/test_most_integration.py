@@ -375,13 +375,13 @@ def test_cesm_lane_width_reaches_surface_layer_coupler_and_tas(monkeypatch):
     assert seen and all(w == 1.234 for w in seen), seen
     diag = ast.parse((REPO / "packages/coupler/legoesm/driver/diagnostics.py").read_text())
     kws = [ast.unparse(k.value) for c in ast.walk(diag) if isinstance(c, ast.Call)
-           and getattr(c.func, "id", None) in ("compute_sam_oceflx_fluxes", "compute_most_fluxes")
+           and getattr(c.func, "id", None) in ("compute_sam_oceflx_fluxes", "_most_2m_jit")
            for k in c.keywords if k.arg in ("zeta_cap_width", "most_zeta_cap_width")]
     assert kws == ["self.surface_most_zeta_cap_width"] * 2, kws
     drv = (REPO / "packages/coupler/legoesm/driver/model_driver.py").read_text()
     assert '"surface_most_zeta_cap_width", MOST_ZETA_CAP_WIDTH)' in drv
     gfs = [ast.unparse(k.value) for c in ast.walk(diag) if isinstance(c, ast.Call)
-           and getattr(c.func, "id", None) == "compute_most_fluxes"
+           and getattr(c.func, "id", None) == "_most_2m_jit"
            for k in c.keywords if k.arg == "gfs_unstable_join_width"]
     assert gfs == ["self.surface_gfs_unstable_join_width"], gfs
     assert '"surface_gfs_unstable_join_width", GFS_UNSTABLE_JOIN_WIDTH)' in drv
