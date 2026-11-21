@@ -453,7 +453,8 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
             f"Unknown turbulence scheme {scheme!r}; choose from "
             f"{list(TURBULENCE_SCHEMES)}."
         )
-    turb = TurbulenceConfig(scheme=scheme)
+    turb = TurbulenceConfig(scheme=scheme,
+                            clubb_routec_inversion=bool(clubb_routec_inversion))
     if scheme == "clubb":
         # The DIAGNOSTIC path (prognostic=False, the library default) reads only
         # six CLUBBParams fields and just four of them have a live gradient
@@ -464,8 +465,7 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
         # PhysicsState.clubb_moments, so nothing else has to change.
         clubb_cfg = getattr(turb, "clubb", None) or CLUBBConfig()
         turb = turb._replace(
-            clubb=clubb_cfg._replace(prognostic=bool(clubb_prognostic),
-                                     routec_inversion=bool(clubb_routec_inversion))
+            clubb=clubb_cfg._replace(prognostic=bool(clubb_prognostic))
         )
     if clubb_routec_inversion and not (scheme == "clubb" and clubb_prognostic):
         raise ValueError("--clubb-routec-inversion needs --schemes clubb on the "

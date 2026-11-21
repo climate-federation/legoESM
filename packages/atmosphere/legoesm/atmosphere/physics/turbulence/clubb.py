@@ -749,11 +749,6 @@ class CLUBBConfig(NamedTuple):
     q_flux_scale: float = 1.0
     q_flux_scale_sigma_lo: float = 0.0
     q_flux_scale_sigma_hi: float = 1.0
-    # Route C (routec.py): Grenier and Bretherton (2001) subgrid inversion with
-    # its explicit entrainment flux imposed inside the xm/w'x' solve (Lock 2001
-    # diagnosis).  Static switch; False (default) leaves every path unchanged.
-    # Single-column use: the GCM's host advection lacks GB01's corrected faces.
-    routec_inversion: bool = False
     # RULE 5 widths of route C's switches on traced state (0 = the published
     # hard form; KNOWN DIFFERENCE in routec.py): cloudy test in liquid and in
     # pressure, theta_vl inequalities, m and slope-pair choice, Lock's double
@@ -5967,7 +5962,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                        p_sfc, thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
                        invrs_rho_ds_zm, invrs_rho_ds_zt, wm_zt, wm_zm,
                        sfc_elevation, fcor, ug, vg, dt, gr: CLUBBGrid, config,
-                       l_implemented, radht_zt=None, vector_sfc_stress=False):
+                       l_implemented, radht_zt=None, vector_sfc_stress=False,
+                       routec_inversion=False):
     """One prognostic CLUBB step (the CAM-default ``advance_clubb_core`` core).
 
     Runs, in the CAM order, ``compute_clubb_diagnostics`` -> the pre-advance ADG1
@@ -6083,7 +6079,7 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     # ---- (2d) route C: the subgrid inversion and its entrainment fluxes on
     # the start-of-step state (routec.py; static switch, off by default) ----
     rc = None
-    if config.routec_inversion:
+    if routec_inversion:
         from legoesm.atmosphere.physics.turbulence.routec import (
             clubb_routec_terms, widths_from_config)
         rc = clubb_routec_terms(
@@ -6684,6 +6680,7 @@ def clubb_step(
     q_c: jax.Array | None = None,
     troplev: jax.Array | None = None,
     omega: jax.Array | None = None,
+    routec_inversion: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6915,6 +6912,7 @@ def clubb_step(
         wm_zt=wm_zt, wm_zm=wm_zm, sfc_elevation=sfc_elevation,
         fcor=jnp.zeros((ncol,), dtype=T.dtype), ug=um, vg=vm, dt=dt, gr=gr,
         config=config, l_implemented=True, radht_zt=radht_zt,
+        routec_inversion=routec_inversion,
         # A PRESCRIBED surface stress is a vector boundary condition, so it is
         # applied as one. A stress the scheme computed itself from this wind is
         # already antiparallel to it, and takes the reference path unchanged.
@@ -7042,6 +7040,7 @@ def clubb_turbulence_prognostic(
     q_c: jax.Array | None = None,
     lat: jax.Array | None = None,
     omega: jax.Array | None = None,
+    routec_inversion: bool = False,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -7214,7 +7213,8 @@ def clubb_turbulence_prognostic(
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
-            radht_zt=radht_zt, omega=omega, **_liq_kw, **_top_kw)
+            radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
+            **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         sfc_energy_in = diags["sfc_energy_in"]
         clubbtop = diags.get("clubbtop")
@@ -7247,8 +7247,8 @@ def clubb_turbulence_prognostic(
             du, dv, dT, dq, m_new, diag = clubb_step(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
-                radht_zt=radht_zt, omega=omega, **_top_kw,
-                **({"q_c": ql_c} if _liq_on else {}))
+                radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
+                **_top_kw, **({"q_c": ql_c} if _liq_on else {}))
             ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c
             carry = (u_c + dt_sub * du, v_c + dt_sub * dv, T_c + dt_sub * dT,
                      q_c_col + dt_sub * dq, ql_new, m_new)

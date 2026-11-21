@@ -1592,9 +1592,9 @@ def test_clubb_routec_inversion_flag_reaches_clubb_config_and_refuses_inert():
     assert drv.parse_args([]).clubb_routec_inversion is False
     cfg = drv.build_physics_config("clubb", prescribed_fluxes=False,
                                    clubb_routec_inversion=True)
-    assert cfg.turbulence.clubb.routec_inversion is True
+    assert cfg.turbulence.clubb_routec_inversion is True
     assert drv.build_physics_config("clubb", prescribed_fluxes=False
-                                    ).turbulence.clubb.routec_inversion is False
+                                    ).turbulence.clubb_routec_inversion is False
     with pytest.raises(ValueError, match="silently inert"):
         drv.build_physics_config("clubb", prescribed_fluxes=False,
                                  clubb_prognostic=False, clubb_routec_inversion=True)

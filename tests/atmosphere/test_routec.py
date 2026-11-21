@@ -253,7 +253,7 @@ def _sc_env(ng=2, nzt=12, dz=125.0):
         rho_ds_zm=f(rho_m), rho_ds_zt=f(rho_t[0]), invrs_rho_ds_zm=f(1 / rho_m),
         invrs_rho_ds_zt=f(1 / rho_t[0]), wm_zt=zt0, wm_zm=zm0, sfc_elevation=jnp.zeros((ng,)),
         fcor=jnp.full((ng,), 7.6e-5), ug=f(np.full(nzt, 5.0)), vg=f(np.full(nzt, -5.0)),
-        dt=300.0, gr=gr, config=CLUBBConfig(routec_inversion=True), l_implemented=True)
+        dt=300.0, gr=gr, config=CLUBBConfig(), l_implemented=True, routec_inversion=True)
     return state, forcing, env, gr
 
 
@@ -288,7 +288,7 @@ def test_v4_rows_hold_at_the_diagnosed_levels_inside_the_core(monkeypatch):
         return orig(solve_type, xm, wpxp_pre, *a, **k)
     monkeypatch.setattr(C, "xm_wpxp_clipping_and_stats", spy)
     state, forcing, env, gr = _sc_env()
-    hard = CLUBBConfig(routec_inversion=True, **{f: 0.0 for f in _WIDTH_FIELDS})
+    hard = CLUBBConfig(**{f: 0.0 for f in _WIDTH_FIELDS})
     _, d = advance_clubb_core(state, forcing, **{**env, "config": hard})
     r = {k: np.asarray(v) for k, v in d["routec"].items()}
     assert np.all(r["active"] == 1.0) and np.all(r["w_e"] > 0.0)
@@ -310,7 +310,7 @@ def test_v4_rows_hold_at_the_diagnosed_levels_inside_the_core(monkeypatch):
 def test_route_c_changes_the_cloud_top_fluxes():
     state, forcing, env, gr = _sc_env()
     s_on, d_on = advance_clubb_core(state, forcing, **env)
-    s_off, d_off = advance_clubb_core(state, forcing, **{**env, "config": CLUBBConfig()})
+    s_off, d_off = advance_clubb_core(state, forcing, **{**env, "routec_inversion": False})
     assert "routec" not in d_off
     assert np.all(np.asarray(d_on["routec"]["active"]) > 0.5)
     assert np.max(np.abs(np.asarray(s_on.thlm) - np.asarray(s_off.thlm))) > 1e-6
@@ -362,7 +362,9 @@ def test_r5_default_gap_per_case(name):
 def test_r5_default_widths_are_the_config_defaults():
     d = CLUBBConfig()._asdict()
     assert tuple(d[f] for f in _WIDTH_FIELDS) == tuple(WD)
-    assert CLUBBConfig().routec_inversion is False
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    assert TurbulenceConfig().clubb_routec_inversion is False
+    assert "routec_inversion" not in CLUBBConfig._fields
 
 
 def test_r5_gradients_through_the_switches():
@@ -401,7 +403,7 @@ def test_no_eddy_diffusion_across_the_constrained_flux_levels(monkeypatch):
         return orig(rtm, thlm, Kh_zm, *a, **k)
     monkeypatch.setattr(C, "expldiff_rtm_thlm", spy)
     state, forcing, env, gr = _sc_env()
-    hard = CLUBBConfig(routec_inversion=True, **{f: 0.0 for f in _WIDTH_FIELDS})
+    hard = CLUBBConfig(**{f: 0.0 for f in _WIDTH_FIELDS})
     _, d = advance_clubb_core(state, forcing, **{**env, "config": hard})
     Kh, Kh0 = got[-1], np.asarray(d["Kh_zm"])
     for c in range(Kh.shape[0]):
@@ -415,12 +417,15 @@ def test_no_eddy_diffusion_across_the_constrained_flux_levels(monkeypatch):
 def test_routec_refused_on_the_diagnostic_clubb_path():
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
-    cfg = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(routec_inversion=True))
+    cfg = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(), clubb_routec_inversion=True)
     with pytest.raises(ValueError, match="routec_inversion needs prognostic"):
         get_turbulence_fn(cfg)
-    ok = TurbulenceConfig(scheme="clubb",
-                          clubb=CLUBBConfig(routec_inversion=True, prognostic=True))
-    assert get_turbulence_fn(ok)[0] == "clubb"
+    ok = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True),
+                          clubb_routec_inversion=True)
+    name, fn, _ = get_turbulence_fn(ok)
+    assert name == "clubb" and fn.keywords == {"routec_inversion": True}
+    off = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True))
+    assert not hasattr(get_turbulence_fn(off)[1], "keywords")
 
 
 def _E_case(name):
@@ -478,7 +483,7 @@ def test_off_path_never_enters_route_c(monkeypatch):
         return orig(rtm, thlm, Kh_zm, *a, **k)
     monkeypatch.setattr(C, "expldiff_rtm_thlm", spy)
     state, forcing, env, gr = _sc_env()
-    _, d = advance_clubb_core(state, forcing, **{**env, "config": CLUBBConfig()})
+    _, d = advance_clubb_core(state, forcing, **{**env, "routec_inversion": False})
     assert "routec" not in d
     np.testing.assert_array_equal(got[-1], np.asarray(d["Kh_zm"]))
 
