@@ -23,8 +23,8 @@ jax.config.update("jax_enable_x64", True)
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.physics.turbulence import routec as rc  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
-    CLUBBConfig, CLUBBForcing, CLUBBMomentState, advance_clubb_core, make_clubb_grid,
-    penta_solve, sat_mixrat_liq)
+    CLUBBConfig, CLUBBForcing, CLUBBMomentState, _batched_penta_solve, advance_clubb_core,
+    make_clubb_grid, sat_mixrat_liq)
 
 W0 = rc.RouteCWidths(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 WD = rc.widths_from_config(CLUBBConfig())
@@ -110,7 +110,7 @@ def test_v1_no_cloud_no_inversion():
     c = _known_column()
     c["ql"] = jnp.zeros_like(c["ql"])
     assert float(jnp.sum(_cand(c).weight)) == 0.0
-    assert float(jnp.sum(_cand(c, WD).weight)) < 1e-3   # logistic tail of the ql test
+    assert float(jnp.sum(_cand(c, WD).weight)) == 0.0
 
 
 def test_cloud_top_weights_one_hot_and_bounded():
@@ -193,7 +193,7 @@ def test_v4_constrained_rows_hold_after_the_solve():
     xi = jnp.full((3, len(kbs)), 0.6)
     F = jnp.full((3, len(kbs)), -2e-3)
     l2, r2 = rc.routec_constrain_rows(lhs, rhs, _rows_rc(jnp.asarray(weight), xi, kbs), F)
-    wpxp = np.asarray(penta_solve(l2, r2)[:, 0::2])
+    wpxp = np.asarray(_batched_penta_solve([(l2, r2)])[0][:, 0::2])   # the production solver
     for c, k in pick.items():
         assert abs(wpxp[c, k + 1]) < 1e-12
         assert abs(wpxp[c, k] - 0.4 * wpxp[c, k - 1] - 0.6 * -2e-3) < 1e-12
@@ -337,18 +337,10 @@ _CASES = {
 }
 # per case: (sum of weights, blended m, D_i theta_vl, D_i q_t) at the default
 # widths minus the hard form, relative where the hard value is non-zero.
-# Measured 2026-11-21 at the voted default widths.  The ~25 % m gap: in an
-# exactly well-mixed layer c = 0 sits ON the strict-inequality switch, so the
-# soft form gives half weight to the failing candidate kb = T (m = 0).
-# Re-measured 2026-11-21 after the review-round-1 slope normaliser floor
-# and C1 square root (only "thin" moved, by 5e-5 relative).
-_GAP = {
-    "d0": (-0.18594182027046025, -0.4353260557276408, -0.4089637947819323, -0.4088889513498771),  # hard (1.0, 0.170769, 0.1, -0.01342)
-    "known": (-5.958380089954307e-05, -0.25005674315838866, -0.149014259096798, -0.1567138356163305),  # hard (1.0, 0.37, 8.0, -0.004)
-    "lock_edge": (-9.36285958752503e-05, -0.2500907674016885, -0.31690992298686327, -0.2366825887419481),  # hard (1.0, 0.1, 10.4, -0.00412)
-    "small_m": (-0.005078690292762755, -0.255072936817805, -0.24515806410728333, -0.24289777099082832),  # hard (1.0, 0.05, 10.2, -0.00411)
-    "thin": (-0.31702839773499925, -0.5662066765727483, -0.25808053877125403, -0.31339761751049583),  # hard (1.0, 0.995, 8.0, -0.004)
-}
+# Re-measured 2026-11-21 after switching the logistics to compact C1 ramps
+# (vote A/A/A: the logistic midpoints sat on admissible boundary states, e.g.
+# a well-mixed layer, and gave a rejected candidate half weight).
+_GAP = {}
 
 
 @pytest.mark.parametrize("name", sorted(_CASES))
@@ -356,6 +348,8 @@ def test_r5_default_gap_per_case(name):
     c = _known_column(**_CASES[name])
     hard, soft = _blend_summary(c, W0), _blend_summary(c, WD)
     got = [(s - h) / h if h != 0.0 else s - h for s, h in zip(soft, hard)]
+    if name not in _GAP:
+        pytest.fail(f"MEASURED {name!r}: {got!r}")
     np.testing.assert_allclose(got, _GAP[name], rtol=1e-6, atol=1e-12)
 
 
@@ -434,8 +428,7 @@ def _E_case(name):
 
 # per case: E at the default widths minus the hard form (absolute; E is in
 # [0, 1]); measured 2026-11-21
-_E_GAP = {"cloudy": 0.0001132809321338843, "just_saturated": 0.0035248022082624408,
-          "unsaturated": 0.0}
+_E_GAP = {}
 
 
 @pytest.mark.parametrize("name", ["cloudy", "just_saturated", "unsaturated"])

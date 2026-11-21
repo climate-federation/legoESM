@@ -25,7 +25,8 @@ CLUBB's orientation), shape ``(ncol, nz)`` for layer values and
 KNOWN DIFFERENCE (RULE 5): every switch the published method takes on traced
 state (cloudy-layer test, cloud-top layer choice, T versus T + 1, the D0
 branch, the slope pair, Lock's double jump, the saturation adjustment, the
-enhancement gate and clip) is a logistic / C1 form whose width is a
+enhancement gate and clip) is a compact C1 form (smoothstep ramps placed on
+the side the hard test rejects, so accepted states keep weight 1) whose width is a
 CLUBBConfig field; the integer ambiguous layer becomes a weighted blend over
 candidate base interfaces.  All widths 0 is the published hard form (tests
 V1, V4).  The defaults' per-case gaps are stored in tests/atmosphere/test_routec.py.
@@ -45,7 +46,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.smooth import max_c1, positive_part_c1, sigmoid_switch, smooth_clamp, sqrt_c1
+from legoesm.core.smooth import max_c1, positive_part_c1, smooth_clamp, smoothstep_cubic, sqrt_c1
 
 __physics_contract__ = {
     "summary": (
@@ -117,13 +118,18 @@ def _sharp(width):
 
 
 def _step(x, width):
-    """Heaviside x >= 0, smoothed by a logistic of the given width (0 = hard)."""
-    return sigmoid_switch(x, _sharp(width))
+    """x >= 0 as a compact C1 ramp: 0 for x <= -width, 1 for x >= 0 (0 = hard),
+    so every state the hard test accepts keeps weight exactly 1."""
+    if width == 0:
+        return (x >= 0.0).astype(jnp.result_type(x, float))
+    return smoothstep_cubic(x / width + 1.0)
 
 
 def _gt(x, width):
-    """Strict x > 0, smoothed by the same logistic (0 = hard)."""
-    return 1.0 - _step(-x, width)
+    """Strict x > 0 as a compact C1 ramp: 0 for x <= 0, 1 for x >= width."""
+    if width == 0:
+        return (x > 0.0).astype(jnp.result_type(x, float))
+    return smoothstep_cubic(x / width)
 
 
 def cloud_top_weights(cloudy):
@@ -188,9 +194,7 @@ def _reconstruct(thvl, pi_half, kb, w: RouteCWidths):
     jump = q * jump_q + (1.0 - q) * D0
     act = (_gt(c, w.jump) * _gt(a + D0, w.jump) * _gt(m, w.m)
            * _step(1.0 - m, w.m))
-    finite = jnp.isfinite(m) & jnp.isfinite(jump)
-    return (jnp.where(finite, act, 0.0), jnp.where(finite, m, 1.0), u, pcA, pc2, pc3,
-            pi_top, pi_bot, pi_low, dpiA, jnp.where(finite, jump, D0))
+    return act, m, u, pcA, pc2, pc3, pi_top, pi_bot, pi_low, dpiA, jump
 
 
 def diagnose_candidates(thvl, ql, p_half, w: RouteCWidths) -> Candidates:
@@ -202,6 +206,8 @@ def diagnose_candidates(thvl, ql, p_half, w: RouteCWidths) -> Candidates:
     ``P_T`` from :func:`cloud_top_weights` and ``a`` the soft 'active' of the
     reconstruction at kb; at zero widths this is exactly the hard choice."""
     ncol, nz = thvl.shape
+    if nz < 4:
+        raise ValueError(f"route C needs at least 4 layers (layers M to M+3), got {nz}")
     pi_half = p_half[:, :1] - p_half
     cloudy = (_step(ql - QL_MIN, w.ql) * _gt(p_half[:, 1:] - P_TOP_PA, w.p))
     P_T = cloud_top_weights(cloudy)
@@ -233,17 +239,13 @@ def extrapolated_top(x, cand: Candidates):
 def inversion_jump(x, cand: Candidates, w: RouteCWidths):
     """D_i X = 2 X_1 - X_M - X^{M+3/2}, X_1 = (X_{M+1} - (1 - m) X_M) / m (GB01
     C8), per candidate; blended with Lock's double grid-level jump X_{M+2} - X_M
-    where 1/m exceeds 10 (Lock 2001 after eq. A2) by a logistic in m about 0.1
+    where 1/m exceeds 10 (Lock 2001 after eq. A2) by a C1 ramp in m below 0.1
     of width ``w.lock`` (0 = the hard switch).  Linear in X."""
     xM, xA, x2 = (_cand_take(x, cand.kb, o) for o in (-1, 0, 1))
     m = max_c1(cand.m, 1e-6, _sharp(w.m))      # guard: GB form is weighted ~0 there
     gb = 2.0 * (xA - (1.0 - m) * xM) / m - xM - extrapolated_top(x, cand)
     lam = _gt(1.0 / LOCK_FRAC_MAX - cand.m, w.lock)
     return lam * (x2 - xM) + (1.0 - lam) * gb
-
-
-def _take(x, k):
-    return jnp.take_along_axis(x, k[:, None], axis=1)[:, 0]
 
 
 def _sqrt0(x):
@@ -290,12 +292,13 @@ def theta_v_of(thl, rt, p, exner, w: RouteCWidths):
 
 
 def evaporative_enhancement(thl_c, rt_c, dthl, drt, p, exner, w: RouteCWidths):
-    """E = chi_s (1 - D_i b_s / D_i b) (GB01 eqs. 18, B1) for mixtures of the
+    """E = chi_s - D_i b_s / D_i b (GB01 eqs. 18, B1; equal to 1 - 2 <b> / D_i b
+    over the piecewise-linear mixing line, test V2) for mixtures of the
     cloudy boundary layer air with the above-inversion air at pressure p.
     chi_s solves r_t(chi) = r_s(theta_l(chi) exner, p) (bisection, then one
     Newton step off its stopped gradient so chi_s carries the implicit-function
     derivative).  The gate 'boundary layer air saturated, above-inversion air
-    not, D_i b > 0' is a product of logistics (widths ``w.ql``, ``w.jump``) and
+    not, D_i b > 0' is a product of C1 ramps (widths ``w.ql``, ``w.jump``) and
     the [0, 1] clip a smooth clamp (``w.e``); zero widths give the hard form.
     Returns (E, chi_s)."""
     from legoesm.atmosphere.physics.turbulence.clubb import sat_mixrat_liq
@@ -373,7 +376,8 @@ def clubb_routec_terms(thlm, rtm, rcm, em, thv_ds_zm, rho_ds_zm, rho_ds_zt, p_sf
     c_F = xi * rho_i / r_kb
     nzm = pi_half.shape[1]
     onehot = (jnp.arange(nzm)[None, :] == kb[:, None]).astype(dpi.dtype)  # (ncand, nzm)
-    W_zm = cand.weight @ onehot + cand.weight @ jnp.roll(onehot, 1, axis=1)
+    up = (jnp.arange(nzm)[None, :] == kb[:, None] + 1).astype(dpi.dtype)    # level kb + 1
+    W_zm = cand.weight @ onehot + cand.weight @ up
     wsum = jnp.sum(cand.weight, axis=1)
     blend = lambda x: jnp.sum(cand.weight * x, axis=1)  # noqa: E731
     return dict(cand=cand, xi=xi, c_low=c_low, c_F=c_F, F_rt=-w_e * drt,
@@ -401,7 +405,8 @@ def routec_constrain_rows(lhs, rhs, rc, F):
     nzm = (ndim + 1) // 2
     onehot = (jnp.arange(nzm)[None, :] == cand.kb[:, None]).astype(rhs.dtype)
     wb = cand.weight @ onehot                                   # bottom-row weight at kb
-    wt = cand.weight @ jnp.roll(onehot, 1, axis=1)              # top-row weight at kb + 1
+    up = (jnp.arange(nzm)[None, :] == cand.kb[:, None] + 1).astype(rhs.dtype)
+    wt = cand.weight @ up                                       # top-row weight at kb + 1
     b4 = (cand.weight * rc["c_low"]) @ onehot
     rb = (cand.weight * rc["c_F"] * F) @ onehot
 
