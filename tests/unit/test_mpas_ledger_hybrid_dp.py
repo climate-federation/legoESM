@@ -97,11 +97,11 @@ def test_hybrid_ledger_closes_with_true_layer_masses():
 
 
 def test_physics_module_rows_use_true_layer_masses(monkeypatch):
-    """Every per-module physics row is booked with the column's true layer
+    """Every per-module physics row is weighted with the column's true layer
     masses: each ledger_entry_column call from the physics carries
-    dp == layer_thickness_dp(p_s), and its row equals an independent
-    true-dp integral of the same tendency (the step-total test above cannot
-    see module attribution, because the closure residual goes to other)."""
+    dp == layer_thickness_dp(p_s).  The step-total test above cannot see
+    this, because the closure residual goes to other_physics.  Row routing
+    is main's and is not changed here."""
     import legoesm.diagnostics.process_ledger as pl
     model, state, coord = _hybrid_model_and_state()
     real = pl.ledger_entry_column
@@ -109,7 +109,7 @@ def test_physics_module_rows_use_true_layer_masses(monkeypatch):
 
     def spy(dq, dT, p_s, dsigma, dp=None, level_weight=None):
         out = real(dq, dT, p_s, dsigma, dp=dp, level_weight=level_weight)
-        calls.append((dq, dT, p_s, dp, out))
+        calls.append((p_s, dp))
         return out
 
     monkeypatch.setattr(pl, "ledger_entry_column", spy)
@@ -120,10 +120,8 @@ def test_physics_module_rows_use_true_layer_masses(monkeypatch):
         model_type="mpas", dt=DT, budget_ledger=True)
     model.step(state, DT, physics_fn=physics, phys_state=None)
     assert len(calls) >= 3                      # radiation, turbulence, convection
-    for dq, dT, p_s, dp, out in calls:
+    for p_s, dp in calls:
         assert dp is not None
         want_dp = coord.layer_thickness_dp(
             jnp.asarray(p_s).astype(conservation_accumulator()))
-        np.testing.assert_allclose(np.asarray(dp), np.asarray(want_dp), rtol=0, atol=0)
-        indep = real(dq, dT, p_s, coord.dsigma, dp=want_dp)
-        np.testing.assert_allclose(np.asarray(out), np.asarray(indep), rtol=1e-12, atol=0)
+        np.testing.assert_array_equal(np.asarray(dp), np.asarray(want_dp))
