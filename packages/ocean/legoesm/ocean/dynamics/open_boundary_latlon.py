@@ -25,16 +25,21 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 from legoesm.core.smooth import max_rel, min_rel, positive_part_rel, stable_div, step_rel
 
 _CX_CRIT = 0.292893218813452          # 1 - 1/sqrt(2), u2dbc.F threshold of the zx extrapolation
 _EPS = 1.0e-20
-# RULE 5 width of the positive floors max(x, _EPS) in the barotropic part, which
-# runs inside the substep loop without the model config: the floors never bind
-# on a wet face (depths of metres, sections of km^2), so the band is never entered.
-_FLOOR_WIDTH = 0.01
+
+
+def _over_floor(x, s):
+    """``x / max(s, _EPS)`` with the floored points' value held constant (no
+    derivative of a division by ``_EPS``: float32 overflows it).  The floor binds
+    only on all-dry faces or sections, where ``x`` is 0."""
+    ok = s > _EPS
+    return jnp.where(ok, x / jnp.where(ok, s, 1.0), jax.lax.stop_gradient(x) / _EPS)
 
 
 class OpenBoundaryData(NamedTuple):
@@ -190,7 +195,7 @@ def apply_barotropic_open_boundary(eta_c, U_c, V_c, eta_new, U_new, V_new,
             flux = flux + s * jnp.sum(vel * d * length)
             section = section + jnp.sum(d * length)
         target = 0.0 if ob.target_net_flux is None else ob.target_net_flux
-        corr = (target - flux) / max_rel(section, _EPS, _FLOOR_WIDTH)
+        corr = _over_floor(target - flux, section)
         for _, k, s, d, length, is_u in faces:
             if is_u:
                 U_new = U_new.at[:, k].add(s * corr * (d > 0))
@@ -229,7 +234,7 @@ def constrain_open_face_fluxes(flux_u, flux_v, H_u_flux, H_v_flux, grid, ob: Ope
         net = net + sgn * jnp.sum(f * length)
         section = section + jnp.sum(d * length)
     target = 0.0 if ob.target_net_flux is None else ob.target_net_flux
-    corr = (target - net) / max_rel(section, _EPS, _FLOOR_WIDTH)
+    corr = _over_floor(target - net, section)
     for is_u, k, sgn, d, length in faces:
         if is_u:
             flux_u = flux_u.at[:, k].add(sgn * corr * d)
@@ -423,7 +428,7 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
             b0 = face if is_normal else ring
             hf = _face_thickness_rows(h, side, is_normal)                             # (nlev, along)
             wet = (hf > 0).astype(hf.dtype)
-            w = hf / max_rel(jnp.sum(hf, axis=0, keepdims=True), _EPS, width)
+            w = _over_floor(hf, jnp.sum(hf, axis=0, keepdims=True))
             mean_cur = jnp.sum(w * _side(new, side, b0, 0), axis=0, keepdims=True)    # barotropic part kept
             vmask = state_new.u_mask.data if use_u else state_new.v_mask.data
             vmask = vmask[..., None] if vmask.ndim == 2 else vmask

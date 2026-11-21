@@ -142,3 +142,10 @@ def test_default_width_makes_no_new_extremes():
         pad = np.concatenate([fb[:, :1], fb, fb[:, -1:]], axis=1)
         nb = np.stack([pad[:, :-2], pad[:, 1:-1], pad[:, 2:], f1n, d])
         assert np.all(out >= nb.min(0) - 1e-12) and np.all(out <= nb.max(0) + 1e-12), seed
+
+
+def test_floored_divisions_have_finite_gradients_on_dry_faces():
+    for dt in (jnp.float32, jnp.float64):
+        z = jnp.zeros((3, 4), dt)
+        g = jax.grad(lambda h: ob._over_floor(h, h.sum(axis=0, keepdims=True)).sum())(z)
+        assert np.all(np.isfinite(np.asarray(g)))
