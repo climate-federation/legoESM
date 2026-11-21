@@ -313,3 +313,53 @@ def test_qsfm_freeze_switch_gradient_at_default():
     check_grads(f, (T,), order=2, modes=["fwd", "rev"])
     g = jax.grad(lambda t: jnp.sum(f(t)))(T)
     assert bool(jnp.all(jnp.isfinite(g))) and bool(jnp.all(g != 0.0))
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_mpas_lane_hands_the_ramp_to_mg2_only_when_on(on, monkeypatch):
+    """Through the MPAS macmic lane: with cam6_do_subgrid_growth the ramp of
+    the aist call reaches morrison_microphysics as qsatfac_ramp; without it
+    nothing is passed (qsfm = 1)."""
+    import sys
+    sys.path.insert(0, "tests/unit")
+    from legoesm.atmosphere.physics.microphysics import integration as mi
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from test_morrison_warm_rain_incloud import _mpas_physics
+    from test_physics_macmic import _moist_setup
+    real_micro, real_aist = mi.morrison_microphysics, mi.cam6_ice_stratus_fraction
+    seen, ramps = [], []
+
+    def aist(*a, **k):
+        out = real_aist(*a, **k)
+        if k.get("return_qsatfac"):
+            ramps.append(np.asarray(out[1]))
+        return out
+
+    def micro(*a, qsatfac_ramp=None, **k):
+        seen.append(None if qsatfac_ramp is None else np.asarray(qsatfac_ramp))
+        return real_micro(*a, qsatfac_ramp=qsatfac_ramp, **k)
+    monkeypatch.setattr(mi, "morrison_microphysics", micro)
+    monkeypatch.setattr(mi, "cam6_ice_stratus_fraction", aist)
+    mesh, sigma, state = _moist_setup()
+    tr = dict(state.tracers)
+    tr["q_i"] = state.T.replace(data=jnp.full_like(state.T.data, 1.0e-6), name="q_i",
+                                units="kg/kg")
+    tr["N_s"] = state.T.replace(data=jnp.zeros_like(state.T.data), name="N_s",
+                                units="1/kg")
+    state = state._replace(tracers=tr)
+    _, cfg = _mpas_physics(True, n=2)
+    rc = cfg.radiation._replace(cloud_config=cfg.radiation.cloud_config._replace(
+        cam6_do_subgrid_growth=on))
+    cfg = cfg._replace(radiation=rc)
+    from legoesm.atmosphere.physics.combined import make_physics
+    fn = make_physics(cfg, model_type="mpas", dt=600.0, cld_macmic_num_steps=2)
+    ps = init_physics_state(*state.T.data.shape, cfg)
+    ps = ps._replace(cloud_fraction=jnp.full(state.T.data.shape, 0.123))
+    fn(state, mesh, sigma, phys_state=ps)
+    assert len(seen) == 2
+    if on:
+        assert len(ramps) == 2
+        for s, r in zip(seen, ramps):
+            np.testing.assert_array_equal(s, r.reshape(s.shape))
+    else:
+        assert seen == [None, None] and not ramps

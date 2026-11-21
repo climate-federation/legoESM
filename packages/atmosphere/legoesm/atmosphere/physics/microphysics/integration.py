@@ -231,17 +231,17 @@ def _incloud_liquid_cloud_fraction(phys_state, q_v_col, T_col, p_full_col,
         raise ValueError(
             "warm_rain_incloud=True but no cloud_fraction carry "
             "reached the microphysics (needs CLUBB turbulence).")
+    # cldfrc2m_do_subgrid_growth: aist's call also returns qsatfac's ramp
+    # term (clubb_intr.F90:2556-2558); MG2 completes it into qsfm (:880).
+    _sub_growth = bool(getattr(cloud_config, "cam6_do_subgrid_growth", False))
     _aist = cam6_ice_stratus_fraction(
         q_v_col, T_col, p_full_col, q_i_col, lat_col, cloud_config,
         p_half_col[:, :-1],
         trop_cloud_top_press=clubb_config.trop_cloud_top_press,
         trop_cloud_taper_lnp_width=clubb_config.trop_cloud_taper_lnp_width,
-        return_qsatfac=bool(getattr(cloud_config, "cam6_do_subgrid_growth",
-                                    False)))
-    # cldfrc2m_do_subgrid_growth: aist's call also returns qsatfac's ramp
-    # term (clubb_intr.F90:2556-2558); MG2 completes it into qsfm (:880).
+        **({"return_qsatfac": True} if _sub_growth else {}))
     _ramp = None
-    if isinstance(_aist, tuple):
+    if _sub_growth:
         _aist, _ramp = _aist
     return (jnp.maximum(jnp.clip(_cf.reshape(T_col.shape), 0.0, 1.0), _aist),
             _ramp)

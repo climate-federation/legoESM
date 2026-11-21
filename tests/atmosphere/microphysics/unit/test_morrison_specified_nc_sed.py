@@ -199,3 +199,19 @@ def test_deck_key_and_cli_flag_reach_the_scheme(tmp_path):
     c = build_config_from_args(_postprocess_args(parser.parse_args(
         ["--config", str(deck), "--dataset", "analytical"]), parser))
     assert getattr(c, key) is True
+
+
+def test_sed_reset_width_is_accepted_with_specified_sedimentation():
+    """The specified-number sedimentation reads mg2_drop_sed_reset_log_width,
+    so a non-default width is not refused as inert there."""
+    from tests.unit.test_cam6_cloud_fraction import _exp_cfg
+    cfg = _exp_cfg(microphysics="morrison", morrison_warm_rain_incloud=True,
+                   morrison_specified_nc_droplet_sedimentation=True,
+                   morrison_mg2_drop_sed_reset_log_width=0.0)
+    try:
+        cfg.validate_strict()
+    except ValueError as e:
+        assert "mg2_drop_sed_reset_log_width" not in str(e), str(e)
+    off = _exp_cfg(microphysics="morrison", morrison_mg2_drop_sed_reset_log_width=0.0)
+    with pytest.raises(ValueError, match="mg2_drop_sed_reset_log_width"):
+        off.validate_strict()

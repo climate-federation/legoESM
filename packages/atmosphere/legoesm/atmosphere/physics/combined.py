@@ -893,9 +893,15 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 f"cld_macmic_num_steps=1, got {_n_macmic}.")
     # Water positivity right after ZM's update (ZhangMcFarlaneConfig.
     # positivity_after_zm), where CAM6 runs qneg3.
-    _zm_positivity = (model_type == "mpas" and _n_macmic >= 2
-                      and config.convection.scheme == "zhang_mcfarlane"
-                      and bool(config.convection.zhang_mcfarlane.positivity_after_zm))
+    _zm_positivity = bool(config.convection.zhang_mcfarlane.positivity_after_zm)
+    if _zm_positivity and not (model_type == "mpas" and _n_macmic >= 2
+                               and config.convection.scheme == "zhang_mcfarlane"):
+        raise ValueError(
+            "positivity_after_zm=True runs only inside the MPAS macmic loop "
+            "(model_type='mpas', cld_macmic_num_steps >= 2, convection="
+            f"'zhang_mcfarlane'); got model_type={model_type!r}, "
+            f"cld_macmic_num_steps={_n_macmic}, convection="
+            f"{config.convection.scheme!r}.")
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(
             config.convection, model_type, dt,
@@ -1421,11 +1427,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 # The correction joins ZM's tendency, so the window total and
                 # the ledger see it.
                 from legoesm.core.conservation import after_convection_positivity
-                _q0 = state.tracers["q_v"].data
-                _dqv = r_pre[5].get("q_v")
                 _tr_in = {k: f.data for k, f in state_m.tracers.items()}
                 _dp = sigma_coord.layer_thickness_dp(state_m.p_s.data)
-                _tr_out, _T_out, _zdiag = after_convection_positivity(
+                _tr_out, _T_out, _ = after_convection_positivity(
                     _tr_in, state_m.T.data, _dp)
                 _tr_t = dict(r_pre[5])
                 for _k, _v in _tr_out.items():
@@ -1435,12 +1439,6 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                         _tr_t[_k] = (_v - _tr_in[_k]) / dt
                 r_pre = (r_pre[:2] + (r_pre[2] + (_T_out - state_m.T.data) / dt,)
                          + r_pre[3:5] + (_tr_t,) + r_pre[6:])
-                if _dqv is not None:
-                    # largest net ZM vapour outflow over the content in one dt
-                    _zdiag["max_outflow_over_content"] = jnp.max(
-                        jnp.where(_q0 > 0.0, -dt * _dqv / jnp.where(_q0 > 0.0, _q0, 1.0),
-                                  0.0), axis=-1)
-                r_pre = r_pre[:6] + ({**r_pre[6], "zm_borrow_diag": _zdiag},) + r_pre[7:]
                 state_m = state_m._replace(
                     T=state_m.T.replace(data=_T_out),
                     tracers={k: f.replace(data=_tr_out[k])

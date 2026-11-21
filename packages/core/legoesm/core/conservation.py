@@ -317,10 +317,16 @@ def after_convection_positivity(tracers, T, dp):
     A column with nothing negative is returned unchanged.  All arrays
     (ncol, nlev), top-down; ``dp`` [Pa].
 
+    KNOWN DIFFERENCE from a fully conservative stage: a column whose vapour
+    total is net-negative, or whose condensate deficit exceeds its vapour,
+    is zeroed by the column borrow, which creates that water (as CAM6's
+    qneg3 does for every hole).  The created mass is reported per column as
+    ``water_created_kg_m2``.
+
     Returns ``(tracers, T, diag)``; ``diag`` holds per-column counts and
     deficits of the input, the water mass species (``water_cells``,
     ``water_deficit_kg_m2``) and the number species (``number_cells``,
-    ``number_deficit_per_m2`` [#/m2]) apart.
+    ``number_deficit_per_m2`` [#/m2]) apart, and ``water_created_kg_m2``.
 
     Ported from I. Di Carlo's ENSO fork (iadicarlo/legoESM-enso 3e01d6be43,
     360591d5b3) without its isotope-passenger branch.
@@ -349,6 +355,13 @@ def after_convection_positivity(tracers, T, dp):
         x = (conservative_positive_clip(x, dp, axis=-1)[0]
              if is_borrow_eligible_tracer(name) else jnp.maximum(x, 0.0))
         out[name] = f.replace(data=x) if hasattr(f, "replace") else x
+
+    def _col_water(tr):
+        return sum(jnp.sum((tr[k].data if hasattr(tr[k], "data") else tr[k]) * dp,
+                           axis=-1) for k in water) / constants.g if water \
+            else jnp.zeros(ncol, dp.dtype)
+
+    diag["water_created_kg_m2"] = _col_water(out) - _col_water(data)
     return out, T, diag
 
 

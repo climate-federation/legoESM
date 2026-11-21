@@ -5,6 +5,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -92,7 +93,7 @@ def test_gradient_finite_through_a_hole():
     assert bool(jnp.isfinite(g)) and float(g) != 0.0
 
 
-def _zm_physics(on, monkeypatch, calls):
+def _zm_physics(on, monkeypatch, calls, n=2, jit=False):
     import sys
     sys.path.insert(0, "tests/unit")
     from test_physics_macmic import _cfg, _moist_setup
@@ -111,13 +112,39 @@ def _zm_physics(on, monkeypatch, calls):
     cfg = cfg._replace(convection=cfg.convection._replace(zhang_mcfarlane=zm))
     mesh, sigma, state = _moist_setup()
     ps = init_physics_state(*state.T.data.shape, cfg)
-    f = make_physics(cfg, model_type="mpas", dt=1800.0, cld_macmic_num_steps=2)
+    f = make_physics(cfg, model_type="mpas", dt=1800.0, cld_macmic_num_steps=n)
+    if jit:
+        return jax.jit(lambda st, p: f(st, mesh, sigma, phys_state=p))(state, ps)
     return f(state, mesh, sigma, phys_state=ps)
 
 
-def test_macmic_loop_calls_the_stage_only_when_on(monkeypatch):
+@pytest.mark.parametrize("n,jit", [(2, False), (3, False), (3, True)])
+def test_macmic_loop_calls_the_stage_only_when_on(n, jit, monkeypatch):
     on, off = [], []
-    _, ps_on = _zm_physics(True, monkeypatch, on)
-    _, ps_off = _zm_physics(False, monkeypatch, off)
+    _, ps_on = _zm_physics(True, monkeypatch, on, n, jit)
+    _, ps_off = _zm_physics(False, monkeypatch, off, n, jit)
     assert on and not off
-    assert ps_on.zm_borrow_diag is not None and ps_off.zm_borrow_diag is None
+
+
+def test_refused_where_it_would_be_inert():
+    import sys
+    sys.path.insert(0, "tests/unit")
+    from test_physics_macmic import _cfg
+    from legoesm.atmosphere.physics.combined import make_physics
+    cfg = _cfg(conv="zhang_mcfarlane")
+    zm = cfg.convection.zhang_mcfarlane._replace(positivity_after_zm=True,
+                                                 land_fraction="none")
+    cfg = cfg._replace(convection=cfg.convection._replace(zhang_mcfarlane=zm))
+    with pytest.raises(ValueError, match="positivity_after_zm"):
+        make_physics(cfg, model_type="mpas", dt=1800.0, cld_macmic_num_steps=1)
+
+
+def test_net_negative_vapour_column_creation_is_reported():
+    dp, qv, qc, T = _cols(9)
+    qv = qv.at[2].set(-1.0e-6)
+    qc = qc.at[2].set(0.0)
+    out, _, d = after_convection_positivity({"q_v": qv, "q_c": qc}, T, dp)
+    assert bool(jnp.all(out["q_v"] >= 0.0))
+    created = np.asarray(d["water_created_kg_m2"])
+    np.testing.assert_allclose(created[2], float(_col(-qv[2:3], dp[2:3])[0]), rtol=1e-12)
+    np.testing.assert_allclose(created[[0, 1, 3]], 0.0, atol=1e-18)

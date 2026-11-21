@@ -5034,8 +5034,10 @@ class ExperimentConfig(NamedTuple):
                 "microphysics='morrison' and the kk2000_cam6 warm-rain scheme or "
                 "morrison_warm_rain_incloud=True"),
             "morrison_mg2_drop_sed_reset_log_width": (
-                lambda: _morr and self.morrison_prognostic_droplet_number is True,
-                "microphysics='morrison' and morrison_prognostic_droplet_number=True"),
+                lambda: _morr and (self.morrison_prognostic_droplet_number is True
+                                   or self.morrison_specified_nc_droplet_sedimentation is True),
+                "microphysics='morrison' and morrison_prognostic_droplet_number=True "
+                "or morrison_specified_nc_droplet_sedimentation=True"),
             "morrison_qsfm_freeze_ramp_K": (
                 lambda: _morr and self.cloud_cam6_do_subgrid_growth is True,
                 "microphysics='morrison' and cloud_cam6_do_subgrid_growth=True"),
