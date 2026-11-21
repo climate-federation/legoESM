@@ -1433,6 +1433,42 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             help=f"CAM6 ice-stratus ramp cldfrc2m {_nm} "
                                  f"(cloud scheme cam6_clubb; bounds {_lo}..{_hi}); "
                                  f"None = {_dv} (CAM6 CLUBB default)")
+    parser.add_argument("--cloud-cam6-conv-water-in-rad",
+                        dest="cloud_cam6_conv_water_in_rad", type=int,
+                        choices=(0, 1), default=0,
+                        help="CAM6 conv_water_in_rad (cloud scheme cam6_clubb): "
+                             "1 adds the deep convective in-cloud water over "
+                             "deepcu to the radiation's cloud water "
+                             "(conv_water.F90); 0 (default) = stratiform only.")
+    parser.add_argument("--cloud-cam6-conv-water-frac-limit",
+                        dest="cloud_cam6_conv_water_frac_limit", type=float,
+                        default=None,
+                        help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
+                             "None = 0.01 (CAM6 namelist)")
+    parser.add_argument("--cloud-cam6-snow-in-rad", dest="cloud_cam6_snow_in_rad",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM6 snow in the radiation (cloud scheme "
+                             "cam6_clubb, McICA): snow fraction, in-cloud snow "
+                             "path and MG2 snow diameter through the Mitchell "
+                             "ice optics. Default off.")
+    parser.add_argument("--cloud-cam6-snow-optics-file",
+                        dest="cloud_cam6_snow_optics_file", type=str, default="",
+                        help="path of CESM inputdata "
+                             "atm/cam/physprops/iceoptics_c080917.nc (Mitchell "
+                             "table, sha256 checked) for --cloud-cam6-snow-in-rad")
+    parser.add_argument("--cloud-cam6-rad-specified-nc",
+                        dest="cloud_cam6_rad_specified_nc",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="With specified droplets (Morrison/MG2, no "
+                             "prognostic number) the radiation uses MG2's "
+                             "Nc_0 in cloud, as CAM6 micro_mg_nccons, not the "
+                             "N_c tracer. Default off.")
+    parser.add_argument("--cloud-cam6-rad-gate-log-width",
+                        dest="cloud_cam6_rad_gate_log_width", type=float,
+                        default=None,
+                        help="RULE 5 width (ln space) of the CAM6 convective-"
+                             "water and snow-in-radiation thresholds; 0 = "
+                             "CAM6's hard switches; None = 0.01")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -3268,6 +3304,12 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_rhmaxi=args.cloud_cam6_rhmaxi,
         cloud_cam6_rhminis=args.cloud_cam6_rhminis,
         cloud_cam6_rhmaxis=args.cloud_cam6_rhmaxis,
+        cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
+        cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
+        cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,
+        cloud_cam6_snow_optics_file=args.cloud_cam6_snow_optics_file,
+        cloud_cam6_rad_specified_nc=args.cloud_cam6_rad_specified_nc,
+        cloud_cam6_rad_gate_log_width=args.cloud_cam6_rad_gate_log_width,
         cloud_cap_floor_on=args.cloud_cap_floor_on,
         cloud_cap_floor_lat_deg=args.cloud_cap_floor_lat_deg,
         cloud_cap_floor_p_max_pa=args.cloud_cap_floor_p_max_pa,

@@ -1054,6 +1054,29 @@ class ExperimentConfig(NamedTuple):
     cloud_cam6_rhmaxi: float | None = None
     cloud_cam6_rhminis: float | None = None
     cloud_cam6_rhmaxis: float | None = None
+    # CAM6 convective water in the radiation (CloudConfig.cam6_conv_water_in_rad;
+    # conv_water.F90 conv_water_4rad, cam6 namelist conv_water_in_rad = 1 and
+    # conv_water_frac_limit = 0.01).  0 (default) = off, the stratiform water
+    # alone.  cloud_scheme='cam6_clubb' only.  None frac_limit => 0.01.
+    cloud_cam6_conv_water_in_rad: int = 0
+    cloud_cam6_conv_water_frac_limit: float | None = None
+    # CAM6 snow in the radiation (CloudConfig.cam6_snow_in_rad): the snow
+    # fraction cldfsnow, in-cloud snow path and MG2 snow diameter, through the
+    # Mitchell ice optics, combined with the cloud by fraction under McICA.
+    # Needs cloud_scheme='cam6_clubb', cloud_vertical_overlap_optics='mcica'
+    # and the path of CESM inputdata atm/cam/physprops/iceoptics_c080917.nc.
+    cloud_cam6_snow_in_rad: bool = False
+    cloud_cam6_snow_optics_file: str = ""
+    # Radiation droplet number under specified droplets
+    # (CloudConfig.cam6_rad_specified_nc): MG2's Nc_0 in cloud, as CAM6 does
+    # with micro_mg_nccons, instead of the N_c tracer that ZM detrainment
+    # feeds and nothing removes.  Needs cloud_scheme='cam6_clubb', Morrison
+    # with morrison_prognostic_droplet_number=False and aerosol_ccn off.
+    cloud_cam6_rad_specified_nc: bool = False
+    # RULE 5 width (ln space) of the CAM6 convective-water and snow-in-radiation
+    # thresholds (CloudConfig.cam6_rad_gate_log_width); None => 0.01, 0 = CAM6's
+    # hard switches.
+    cloud_cam6_rad_gate_log_width: float | None = None
     # Polar-cap radiative cloud floor (CloudConfig.cap_floor_*): an attribution
     # lever for the 2026-09 Arctic self-isolation A/B, radiation-only, MPAS /
     # spectral standalone radiation path only (the FV pipeline refuses it).
@@ -4903,6 +4926,38 @@ class ExperimentConfig(NamedTuple):
                 f"{', '.join(_cam6_rh_set)} set but cloud_scheme="
                 f"{self.cloud_scheme!r}: the CAM6 aist ramp is read only by "
                 "cloud_scheme='cam6_clubb' (otherwise silently inert).")
+        if self.cloud_cam6_snow_in_rad and (
+                self.cloud_scheme != "cam6_clubb"
+                or self.cloud_vertical_overlap_optics != "mcica"
+                or not self.cloud_cam6_snow_optics_file):
+            errors.append(
+                "cloud_cam6_snow_in_rad=True needs cloud_scheme='cam6_clubb', "
+                "cloud_vertical_overlap_optics='mcica' and "
+                "cloud_cam6_snow_optics_file (iceoptics_c080917.nc); got "
+                f"{self.cloud_scheme!r}, {self.cloud_vertical_overlap_optics!r}, "
+                f"{self.cloud_cam6_snow_optics_file!r}.")
+        if self.cloud_cam6_rad_specified_nc and (
+                self.cloud_scheme != "cam6_clubb"
+                or self.microphysics != "morrison"
+                or self.morrison_prognostic_droplet_number
+                or self.nc_from_aerosol):
+            errors.append(
+                "cloud_cam6_rad_specified_nc=True is for specified droplets: it "
+                "needs cloud_scheme='cam6_clubb', microphysics='morrison', "
+                "morrison_prognostic_droplet_number=False and aerosol_ccn "
+                "(nc_from_aerosol) off.")
+        if self.cloud_cam6_conv_water_in_rad not in (0, 1):
+            errors.append(
+                "cloud_cam6_conv_water_in_rad must be 0 (off) or 1 (CAM6 "
+                "area-weighted convective water; mode 2 is not ported), got "
+                f"{self.cloud_cam6_conv_water_in_rad!r}")
+        if ((self.cloud_cam6_conv_water_in_rad != 0
+                or self.cloud_cam6_conv_water_frac_limit is not None)
+                and self.cloud_scheme != "cam6_clubb"):
+            errors.append(
+                "cloud_cam6_conv_water_in_rad / _frac_limit need "
+                f"cloud_scheme='cam6_clubb' (got {self.cloud_scheme!r}): the "
+                "CAM6 convective water reads ast and deepcu.")
         if self.morrison_warm_rain_incloud is True and (
                 self.turbulence != "clubb" or self.cld_macmic_num_steps < 2
                 or self.subgrid_autoconversion
@@ -5027,6 +5082,9 @@ class ExperimentConfig(NamedTuple):
             ("cloud_cam6_rhmaxi", 1.0, 1.1),
             ("cloud_cam6_rhminis", 0.85, 1.0),
             ("cloud_cam6_rhmaxis", 1.0, 1.1),
+            # CAM6 namelist conv_water_frac_limit 0.01; it must stay positive
+            # (every conv_water_4rad division is floored by it).
+            ("cloud_cam6_conv_water_frac_limit", 1.0e-4, 0.1),
             ("cloud_cap_floor_lat_deg", 40.0, 89.0),
             ("cloud_cap_floor_p_max_pa", 20000.0, 100000.0),
             ("cloud_cap_floor_cf", 0.1, 1.0),
