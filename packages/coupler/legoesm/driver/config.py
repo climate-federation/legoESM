@@ -6099,7 +6099,7 @@ def land_flux_handoff_eligibility(cfg) -> tuple[bool, str]:
     # another grid never reaches the loop.
     if not (cfg.dycore.column_lane
             or (cfg.dycore.discretization != "fv3_duo"
-                and cfg.grid.grid_type == "mpas")):
+                and normalize_grid_type(cfg.grid.grid_type) == "mpas")):
         return False, "this is not the MPAS lane or a column lane"
     if not cfg.use_multilayer_land:
         return False, "use_multilayer_land is off (no land model)"

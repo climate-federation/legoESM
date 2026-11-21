@@ -46,7 +46,8 @@ def climatology(ds, first: int, last: int, optics: bool = False):
                              f"{first}-{last}, expected {n_years}")
     first_idx = [int(np.flatnonzero(sel & (months == m))[0]) for m in range(1, 13)]
     out = ds.drop_vars([v for v in ds.data_vars if "time" in ds[v].dims] + ["time"])
-    timed = [v for v in ds.data_vars if "time" in ds[v].dims]
+    bounds = tv.attrs.get("bounds")
+    timed = [v for v in ds.data_vars if "time" in ds[v].dims and v != bounds]
     means = {v: [] for v in timed}
     for m in range(1, 13):
         idx = np.flatnonzero(sel & (months == m))
@@ -65,6 +66,8 @@ def climatology(ds, first: int, last: int, optics: bool = False):
         da.attrs = ds[v].attrs
         out[v] = da.assign_coords(time=time)
     out = out.assign_coords(time=time)
+    if bounds in ds.variables:     # the stamps' own first-year bounds
+        out[bounds] = ds[bounds].isel(time=first_idx).assign_coords(time=time)
     out.attrs = dict(ds.attrs)
     out.attrs["history"] = (f"monthly climatology {first}-{last}"
                             f"{' (optics-weighted ssa/asy)' if optics else ''} by "

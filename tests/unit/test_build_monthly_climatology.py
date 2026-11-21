@@ -51,3 +51,12 @@ def test_optics_weighting():
 def test_refuses_a_span_off_the_file():
     with pytest.raises(ValueError, match="expected 2"):
         bmc.climatology(_ds("days since 2004-01-01"), 2006, 2007)
+
+
+def test_time_bounds_follow_the_first_year_stamps():
+    ds = _ds("days since 2004-01-01")
+    ds["time"].attrs["bounds"] = "time_bnds"
+    t = ds["time"].values
+    ds["time_bnds"] = (("time", "nb"), np.stack([t - 15.0, t + 15.0], -1))
+    out = bmc.climatology(ds, 2005, 2006)
+    np.testing.assert_array_equal(out["time_bnds"].values, ds["time_bnds"].values[12:24])

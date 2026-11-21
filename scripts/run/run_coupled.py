@@ -536,13 +536,14 @@ def _amip_main_only_dests(parser):
     import inspect
     import re
     from legoesm.driver.config import (
-        CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS,
+        CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS, ZM_WIDTH_FIELDS,
     )
     pat = r"(?:args|pre)\.(\w+)|getattr\((?:args|pre),\s*\"(\w+)\""
     read = {m[0] or m[1] for m in re.findall(
         pat, inspect.getsource(_run_amip().build_config_from_args)
         + Path(__file__).read_text())}
-    read |= set(ZM_SCALAR_FIELDS) | set(ZM_TRIGGER_FIELDS) | set(CLUBB_SCALAR_FIELDS)
+    read |= (set(ZM_SCALAR_FIELDS) | set(ZM_TRIGGER_FIELDS) | set(ZM_WIDTH_FIELDS)
+             | set(CLUBB_SCALAR_FIELDS))
     amip = {a.dest for a in _run_amip().build_arg_parser()._actions}
     return sorted((amip - read) - {"help"})
 
@@ -588,8 +589,10 @@ def _coupled_atm_config(args):
         raise SystemExit("--max-wallclock-hours and --max-wallclock-seconds both "
                          "set; pass one.")
     from legoesm.driver.config import ExperimentConfig
+    # With atm_owns_surface the atmosphere's land runs, so it keeps them.
+    land_tile_only = () if args.atm_owns_surface else _LAND_TILE_ONLY
     return cfg._replace(
-        **{f: getattr(ExperimentConfig(), f) for f in _LAND_TILE_ONLY},
+        **{f: getattr(ExperimentConfig(), f) for f in land_tile_only},
         # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
         morrison_warm_rain_scheme=(
             args.morrison_warm_rain_scheme
