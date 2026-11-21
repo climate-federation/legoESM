@@ -205,5 +205,5 @@ def test_mcica_masks_the_snow_cap_weight_with_the_path():
     ib = 3
     got = mio.mitchell_band_lw_abs_od(t, ib, kw["cloud_snow"][0], d, kw["cloud_snow"][3])
     want = m * w * mio.mitchell_band_lw_abs_od(t, ib, p, d)
-    assert float(want) == pytest.approx(m * w * 50.0)
+    assert float(want.ravel()[0]) == pytest.approx(float(m * w[0, 0] * 50.0))
     np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-12)
