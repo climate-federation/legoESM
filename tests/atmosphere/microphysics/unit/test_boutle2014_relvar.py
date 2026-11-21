@@ -124,6 +124,10 @@ def test_build_guards():
         with pytest.raises(ValueError, match="silently inert"):
             require_relvar_scheme_lane(MicrophysicsConfig(
                 scheme="morrison", morrison=MorrisonConfig(**kw)), "mpas")
+    with pytest.raises(TypeError, match="must be scalars"):
+        require_relvar_scheme_lane(MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(
+            warm_rain_scheme="kk2000", relvar_scheme="boutle2014",
+            boutle_fsd_factor=jnp.asarray([-1.0, 1.0]))), "mpas")
     for bad in (True, None, "1"):
         with pytest.raises(TypeError, match="must be a real number"):
             require_relvar_scheme_lane(MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(

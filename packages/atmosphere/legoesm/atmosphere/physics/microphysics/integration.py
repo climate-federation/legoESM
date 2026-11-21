@@ -371,8 +371,11 @@ def require_relvar_scheme_lane(microphysics_config, model_type: str):
             f"relvar_scheme={scheme!r} is wired on the MPAS lane only; got "
             f"model_type={model_type!r}.")
     def _concrete(v):
-        # a concrete one-element array is checked as its value; tracers pass
-        if isinstance(v, jax.Array) and not isinstance(v, jax.core.Tracer) and v.size == 1:
+        # a concrete array must be a scalar and is checked as its value;
+        # tracers pass
+        if isinstance(v, jax.Array) and not isinstance(v, jax.core.Tracer):
+            if v.size != 1:
+                raise TypeError(f"Boutle knobs must be scalars, got shape {v.shape}.")
             return float(v)
         return v
     f, w = _concrete(m.boutle_fsd_factor), _concrete(m.boutle_overcast_ramp_width)
