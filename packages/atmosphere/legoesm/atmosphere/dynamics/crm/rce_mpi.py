@@ -329,6 +329,22 @@ def compute_dry_mass_plane_mpi(
     return global_sum_mpi(local_mass)
 
 
+def compute_rho_prime_mass_plane_mpi(
+    state, grid, height_coord, terrain_metric, layout, owned_mask,
+) -> jax.Array:
+    """Global ``sum_owned(rho' * J * area_T * dz)`` — the anomaly part of
+    :func:`compute_dry_mass_plane_mpi`, without the ~1e14 ``rho_ref``
+    background whose rounding swamps it in float32."""
+    _validate_layout(layout)
+    from legoesm.parallel.reductions import global_sum_mpi
+
+    weight_horizontal = (
+        terrain_metric.jacobian * grid.area_T * owned_mask
+    )[:, :, None]
+    local = jnp.sum(state.rho_prime.data * weight_horizontal * height_coord.dz)
+    return local if layout.n_ranks == 1 else global_sum_mpi(local)
+
+
 def _plane_volume_weight_mpi(
     grid, height_coord, terrain_metric, layout, owned_mask,
 ) -> jax.Array:
@@ -355,7 +371,7 @@ def _plane_volume_weight_mpi(
 
 def fix_mass_nonhydrostatic_plane_mpi(
     state, target_mass, grid, height_coord, terrain_metric,
-    layout, owned_mask,
+    layout, owned_mask, target_is_anomaly: bool = False,
 ):
     """MPI-aware dry-mass fixer (R7).
 
@@ -378,7 +394,21 @@ def fix_mass_nonhydrostatic_plane_mpi(
     if layout.n_ranks == 1:
         return fix_mass_nonhydrostatic_plane(
             state, target_mass, grid, height_coord, terrain_metric,
+            background_mass=(jnp.zeros((), state.rho_prime.data.dtype)
+                             if target_is_anomaly else None),
         )
+    if target_is_anomaly:
+        # Anomaly form (``target_mass`` = anchored global sum(rho' w)):
+        # never differences two ~1e14 totals, so float32 holds the anchor
+        # to round-off instead of a ~2e-7 relative per-step mass jitter.
+        current = compute_rho_prime_mass_plane_mpi(
+            state, grid, height_coord, terrain_metric, layout, owned_mask,
+        )
+        volume = _plane_volume_weight_mpi(
+            grid, height_coord, terrain_metric, layout, owned_mask,
+        )
+        return state._replace(rho_prime=state.rho_prime.replace(
+            data=state.rho_prime.data + (target_mass - current) / volume))
     current_mass = compute_dry_mass_plane_mpi(
         state, grid, height_coord, terrain_metric, layout, owned_mask,
     )

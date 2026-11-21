@@ -3432,28 +3432,42 @@ class PlaneCompressibleEulerModel:
         if self.config.fix_mass and owned_mask is not None:
             from legoesm.atmosphere.dynamics.crm.rce_mpi import (
                 compute_dry_mass_plane_mpi,
+                compute_rho_prime_mass_plane_mpi,
                 fix_mass_nonhydrostatic_plane_mpi,
             )
+            mass_state = (_to_fp64(state_local) if self.config.mixed_precision
+                          else state_local)
+            mass_args = (self.grid, self.height_coord, self.terrain_metric,
+                         layout, owned_mask)
             if self.config.anchor_mass_to_initial:
                 if self._target_mass is None:
                     # Initial reduction across all ranks so every rank
-                    # captures the same anchor.
+                    # captures the same anchor (total + its rho' anomaly).
                     self._target_mass = compute_dry_mass_plane_mpi(
-                        _to_fp64(state_local) if self.config.mixed_precision else state_local, self.grid, self.height_coord,
-                        self.terrain_metric, layout, owned_mask,
-                    )
+                        mass_state, *mass_args)
+                    self._target_anomaly = (
+                        self._target_mass,
+                        compute_rho_prime_mass_plane_mpi(mass_state, *mass_args))
                 target = self._target_mass
             else:
-                target = compute_dry_mass_plane_mpi(
-                    _to_fp64(state_local) if self.config.mixed_precision else state_local, self.grid, self.height_coord,
-                    self.terrain_metric, layout, owned_mask,
-                )
+                target = None
+            # Anomaly-form target, as in ``_fixer_target`` (serial); a
+            # caller-replaced ``_target_mass`` keeps the total form.
+            cached = getattr(self, "_target_anomaly", None)
+            if target is None:
+                target, anomaly = compute_rho_prime_mass_plane_mpi(
+                    mass_state, *mass_args), True
+            elif cached is not None and cached[0] is target:
+                target, anomaly = cached[1], True
+            else:
+                anomaly = False
             mpi_fixer = (_fix_mass_fp64(fix_mass_nonhydrostatic_plane_mpi)
                          if self.config.mixed_precision
                          else fix_mass_nonhydrostatic_plane_mpi)
             stepped = mpi_fixer(
                 stepped, target, self.grid, self.height_coord,
                 self.terrain_metric, layout, owned_mask,
+                target_is_anomaly=anomaly,
             )
         return stepped
 
