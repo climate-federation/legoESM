@@ -63,6 +63,22 @@ __physics_contract__ = {
     "idealized_test": "tests/atmosphere/test_five_core.py",
 }
 
+__param_spec__ = {
+    "FiveConfig": {
+        "scheme_key": "atm.five.FiveConfig",
+        "excluded": {
+            "dz_target_m": "numerics: target sublayer depth of the static fine grid",
+            "p_fine_top_pa": "domain definition [Pa]: top of the refined part (CAM L32 742 hPa interface)",
+            "forced_period_s": "experiment protocol: on/off period of the forced selection",
+            "spread_width": "numerics: RULE 5 smooth-switch width, value voted 2026-11-21",
+            "split_width_kg_kg": "numerics: RULE 5 smooth-switch width, value voted 2026-11-21",
+            "cap_width": "numerics: RULE 5 smooth-switch width, value voted 2026-11-21",
+            "empty_width_kg_kg": "numerics: RULE 5 smooth-switch width, value voted 2026-11-21",
+        },
+        "params": {},
+    },
+}
+
 # --- standard atmosphere for the static sublayer count (ICAO 1993) ---
 _STD_T0_K = 288.15
 _STD_LAPSE_K_PER_M = 6.5e-3
