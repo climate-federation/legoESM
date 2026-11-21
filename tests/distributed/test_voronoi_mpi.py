@@ -476,14 +476,15 @@ class TestPPMStepMPI:
         layout = make_voronoi_partition_layout(
             mesh, rank, n_ranks, cell_owner=partition_cells_geometric(mesh, n_ranks))
         local = scatter_state_voronoi(state, layout.partition)
-        mpi = gather_state_voronoi(
-            make_voronoi_mpi_step(model, layout, coord, config)(local, DT),
-            layout.partition)
+        from legoesm.parallel.voronoi_mpi import gather_voronoi_field
+        out = make_voronoi_mpi_step(model, layout, coord, config)(local, DT)
+        mpi = gather_state_voronoi(out, layout.partition)
+        mpi_qv = gather_voronoi_field(out.tracers["q_v"].data, layout.partition, "cell")
         if rank == 0:
             for name in ("T", "p_s"):
                 np.testing.assert_allclose(
                     getattr(mpi, name).data, getattr(serial, name).data,
                     rtol=1e-8, atol=1e-8, err_msg=f"MPI {name} vs serial (ppm)")
             np.testing.assert_allclose(
-                mpi.tracers["q_v"].data, serial.tracers["q_v"].data,
+                mpi_qv, serial.tracers["q_v"].data,
                 rtol=1e-8, atol=1e-12, err_msg="MPI q_v vs serial (ppm)")
