@@ -35,7 +35,7 @@ def _top_soil_after(on, swe, n_steps):
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0),
         thermal=SoilThermalConfig(snow_insulation=on),
-        surface_scheme=TwoLeafCanopyConfig())
+        surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st = init_multilayer_land_state(ncol, cfg, T_init=280.0, theta_init=0.25)
     st = st._replace(snow_depth=swe)
     if on:

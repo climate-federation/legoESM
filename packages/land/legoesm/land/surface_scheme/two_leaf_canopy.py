@@ -45,7 +45,7 @@ from legoesm.land.canopy.stability import (
 )
 from legoesm.land.canopy.solver import (
     CanopyForcingBundle, solve_canopy_closure_diag, canopy_forward,
-    canopy_state_admissible,
+    canopy_state_admissible, ground_heat_conductance,
 )
 from legoesm.land.canopy.energy_balance import soil_surface_evap_resistance
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
@@ -717,6 +717,21 @@ def compute_two_leaf_canopy_fluxes(
     # Safety clamp on G: extreme non-converged values corrupt T_soil.
     G_clamped = jnp.clip(G, -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
 
+    # Semi-implicit ground flux (CanopyConfig.implicit_ground_flux; CLM5 eqs.
+    # 2.5.123-2.5.124 into 2.6.15).  G above was evaluated at the last Picard
+    # pass's ground temperature ``bundles_k.Ts_bc``; the soil solve linearises
+    # about it.  Where the clamp binds G no longer depends on the ground
+    # temperature, so lambda is 0 there (the explicit clamped flux, as before).
+    if cc.implicit_ground_flux:
+        lam_g = jax.vmap(
+            lambda x_, b_, c_: ground_heat_conductance(x_, b_, cc, c_))(
+                x_final, bundles_k, converged)
+        surface_conductance = jnp.where(G == G_clamped, jnp.maximum(lam_g, 0.0), 0.0)
+        surface_conductance_T_ref = bundles_k.Ts_bc
+    else:
+        surface_conductance = None
+        surface_conductance_T_ref = None
+
     # ---- Wind stress from MOST ustar ----
     # Sign: stress ON THE AIR (opposes the wind), the convention of the ocean
     # bulk and SimpleSEB stresses this vector is tile-blended with (#2031).
@@ -784,4 +799,6 @@ def compute_two_leaf_canopy_fluxes(
         tau_mag=tau_mag,
         L_soil=L_cond,
         condensation=condensation,
+        surface_conductance=surface_conductance,
+        surface_conductance_T_ref=surface_conductance_T_ref,
     )

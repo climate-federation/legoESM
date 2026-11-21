@@ -315,6 +315,16 @@ class CanopyConfig(NamedTuple):
     # absorption (sunlit / canopy absorbed) to [0, 1] (upstream clips hard).  0 =
     # the reference's hard clip.  Read only by sw_scheme="two_stream".
     two_stream_clip_width: float = 0.01
+    # Hand the soil the ground heat flux together with its derivative with
+    # respect to the ground temperature, so the final soil solve treats the
+    # top boundary semi-implicitly (CLM5 Technical Description, eqs. 2.5.123
+    # and 2.5.124 for the derivative, 2.6.15 for the linearised flux in the
+    # soil solve).  False = the explicit Neumann flux: a converged midday solve
+    # over sparse dry canopy then put 290-390 W/m2 into the 2.9 mm top layer
+    # and raised it 17-43 K in one 1800 s step (I. Di Carlo, legoESM-enso
+    # 16f7ac09a7).  Default False -> True (user 2026-11-20: fixed value is the
+    # default).  Bulk snowpack without the snow thermal node only.  Appended.
+    implicit_ground_flux: bool = True
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -360,6 +370,9 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 "two_stream_clip_width must be <= 1 (the smoothing bands at 0 and 1 of "
                 f"the sunlit share would overlap), got {self.two_stream_clip_width!r}")
+        if not isinstance(self.implicit_ground_flux, bool):
+            raise ValueError("implicit_ground_flux must be a bool, got "
+                             f"{self.implicit_ground_flux!r}")
         return self
 
 

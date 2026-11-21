@@ -131,7 +131,8 @@ def _check(st, new, r, so, G):
 def test_dry_soil_refill_energy_goes_to_sensible_heat(monkeypatch):
     """Two-leaf canopy on a column 1e-3 above its dry floor: the Richards floor
     refills part of the draw (measured X = 19 W/m2 in this step)."""
-    st, new, r, so, G = _step(monkeypatch, TwoLeafCanopyConfig(), top=1.0e-3)
+    st, new, r, so, G = _step(monkeypatch, TwoLeafCanopyConfig(implicit_ground_flux=False),
+                              top=1.0e-3)   # explicit-flux budget under test
     assert bool(jnp.all(so.converged))
     _check(st, new, r, so, G)
     # land boundary, two-leaf: Rn_ext = SH + LE + G to the scheme's own residual

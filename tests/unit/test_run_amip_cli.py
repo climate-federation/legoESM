@@ -5909,6 +5909,7 @@ def test_production_deck_names_both_canopy_smoothing_widths():
     assert cfg.land_canopy_zeta_cap_smoothing_width == d.zeta_cap_smoothing_width
     assert cfg.land_canopy_most_n_iters == d.most_n_iters == 10
     assert cfg.land_canopy_solve_group == d.solve_group == 0
+    assert cfg.land_canopy_implicit_ground_flux is d.implicit_ground_flux is True
 
 
 def test_land_canopy_solve_group_round_trip_and_validate():
@@ -5919,6 +5920,20 @@ def test_land_canopy_solve_group_round_trip_and_validate():
     assert cfg.land_canopy_solve_group == 64
     for bad, match in ((cfg._replace(land_canopy_solve_group=-1), "solve_group"),
                        (cfg._replace(land_surface_scheme="simple_seb"), "inert")):
+        with pytest.raises(ValueError, match=match):
+            bad.validate_strict()
+
+
+def test_land_canopy_implicit_ground_flux_round_trip_and_validate():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--use-multilayer-land",
+        "--land-surface-scheme", "two_leaf",
+        "--no-land-canopy-implicit-ground-flux"]), parser))
+    assert cfg.land_canopy_implicit_ground_flux is False
+    for bad, match in (
+            (cfg._replace(land_canopy_implicit_ground_flux=1), "implicit_ground_flux"),
+            (cfg._replace(land_surface_scheme="simple_seb"), "inert")):
         with pytest.raises(ValueError, match=match):
             bad.validate_strict()
 
@@ -6567,6 +6582,23 @@ def test_no_deck_can_set_ml_pipeline(tmp_path):
     deck.write_text("ml_pipeline: true\n")
     with pytest.raises((SystemExit, ValueError, KeyError)):
         load_yaml_config(str(deck), build_arg_parser())
+
+
+def test_two_leaf_implicit_ground_flux_with_snow_node_is_refused_strict():
+    """The implicit ground flux (default on) is bulk-snow-without-node only:
+    validate_strict names it unless the deck switches it off."""
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land",
+            "--land-surface-scheme", "two_leaf", "--land-snow-insulation"]
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    with pytest.raises(ValueError, match="implicit_ground_flux \\(on by default\\)"):
+        cfg.validate_strict()
+    off = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--no-land-canopy-implicit-ground-flux"]), parser))
+    try:          # this bare analytical deck fails other checks (no land mask)
+        off.validate_strict()
+    except ValueError as err:
+        assert "implicit_ground_flux (on by default)" not in str(err)
 
 
 def test_positivity_condensate_from_vapour_flag_flows_to_config():

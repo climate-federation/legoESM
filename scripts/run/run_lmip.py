@@ -169,11 +169,13 @@ def _build_surface_scheme(args: argparse.Namespace):
     if name == "two_leaf":
         # A namespace saved before the flag existed carries no value: use the
         # scheme's own default (codex + GLM vote, author dissenting).
+        _igf = getattr(args, "land_canopy_implicit_ground_flux", None)
         return TwoLeafCanopyConfig(solve_group=getattr(
             args, "land_canopy_solve_group",
             TwoLeafCanopyConfig._field_defaults["solve_group"]),
             sw_scheme=getattr(args, "land_canopy_sw_scheme",
-                              TwoLeafCanopyConfig._field_defaults["sw_scheme"])).validate()
+                              TwoLeafCanopyConfig._field_defaults["sw_scheme"]),
+            **({} if _igf is None else {"implicit_ground_flux": _igf})).validate()
     if name == "clm_ml":
         from legoesm.land.canopy.config import CLMMLCanopyConfig
         cfg = CLMMLCanopyConfig()
@@ -741,6 +743,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Two-leaf canopy: columns per batch of the Newton solve, "
                         "0 = one batch per GPU (the AMIP production value). "
                         "Read only with --land-surface-scheme two_leaf.")
+    p.add_argument("--land-canopy-implicit-ground-flux",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   dest="land_canopy_implicit_ground_flux",
+                   help="Two-leaf canopy: semi-implicit ground heat flux (CLM5 "
+                        "eqs. 2.5.123-2.5.124, 2.6.15). Default: the CanopyConfig "
+                        "value (on). Read only with --land-surface-scheme two_leaf.")
     p.add_argument("--land-canopy-sw-scheme", choices=("ryu", "two_stream"), default="ryu",
                    dest="land_canopy_sw_scheme",
                    help="Two-leaf canopy shortwave partition: ryu (default, Ryu 2011 "
