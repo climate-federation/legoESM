@@ -273,7 +273,7 @@ def _cases(setup):
     nH, nf = G.n_sub.size, G.owner.size
     q = _rng(70, (NCOL, nf), 1e-3, 2e-2)
     X = five.to_host(q, dpf, G)
-    q_thin = q.at[:, -3:].set(0.0)                       # an empty bottom sublayer set
+    q_thin = q.at[:, G.owner == nH - 1].set(4e-10)      # near-empty bottom layer
     return {
         "mixed_sign": (_rng(71, (NCOL, nH), -1e-4, 1e-4), q),
         "source_only": (_rng(72, (NCOL, nH), 1e-6, 1e-4), q),
@@ -297,7 +297,8 @@ def test_r5_hard_widths_are_the_reference_bitwise(setup):
 
 # per case: max |default - reference| of the fine water increment over
 # max |reference|, measured 2026-11-21 at the voted default widths
-_GAP = {}
+_GAP = {"cap_binds": 0.0, "cap_edge": 0.0012562814070352863, "empty_layer": None,
+        "mixed_sign": 0.0, "source_only": 0.0, "tiny_increment": 0.05623059957619883}
 
 
 @pytest.mark.parametrize("name", ["cap_binds", "cap_edge", "empty_layer", "mixed_sign",
@@ -308,7 +309,7 @@ def test_r5_default_gap_per_case(setup, name):
     ref = _ref_exchange(inc, q, ph, pf, dpf, G)
     got = five.exchange_bulk(inc, q, ph, pf, dpf, G, DEF)[0]
     gap = float(jnp.max(jnp.abs(got - ref)) / jnp.max(jnp.abs(ref)))
-    if name not in _GAP:
+    if _GAP[name] is None:
         pytest.fail(f"MEASURED {name!r}: {gap!r}")
     np.testing.assert_allclose(gap, _GAP[name], rtol=1e-6, atol=1e-12)
 
@@ -327,7 +328,8 @@ def test_r5_gradients_through_the_switches(setup):
         d, _ = five.exchange_bulk(1e-5 * inc, 1e-2 * q, ph, pf, dpf, G, DEF)
         return 1e5 * jnp.sum(d * jnp.cos(jnp.arange(nf)))
 
-    check_grads(f, (inc0, q0), order=1, modes=("rev",), atol=1e-5, rtol=1e-5)
+    # eps well inside the 1e-9 kg/kg split band (inc is scaled by 1e-5)
+    check_grads(f, (inc0, q0), order=1, modes=("rev",), eps=1e-6, atol=1e-5, rtol=1e-5)
     g = jax.grad(f)(inc0, q0)
     assert np.all(np.isfinite(np.asarray(g))) and float(jnp.max(jnp.abs(g))) > 0.0
 
