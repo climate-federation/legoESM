@@ -162,18 +162,22 @@ def main(argv=None) -> int:
                     help="radiation solve cadence in steps (1 = the gate)")
     ap.add_argument("--energy-terms", action="store_true",
                     help="report the land LW emission terms")
-    ap.add_argument("--grid", choices=("mpas", "fv3duo"), default="mpas",
+    ap.add_argument("--grid", choices=("mpas", "fv3duo", "latlon"),
+                    default="mpas",
                     help="mpas: the restart test's level-3 mesh; fv3duo: the "
                          "FV3 duo cube on the column lane (dycore knobs of "
-                         "the production duo deck)")
+                         "the production duo deck); latlon: the lat-lon "
+                         "C-grid on the column lane (grid/dycore knobs of "
+                         "the CMIP coupled decks, config/cmip)")
     ap.add_argument("--resolution", type=int, default=None,
-                    help="mesh level (mpas, default 3) or cube N (fv3duo)")
+                    help="mesh level (mpas, default 3), cube N (fv3duo) "
+                         "or n_lat (latlon)")
     ap.add_argument("--dt", type=float, default=None,
                     help="dynamics step [s] (mpas default 300)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
-    if args.grid == "fv3duo" and (args.resolution is None or args.dt is None):
-        ap.error("--grid fv3duo needs --resolution and --dt")
+    if args.grid != "mpas" and (args.resolution is None or args.dt is None):
+        ap.error(f"--grid {args.grid} needs --resolution and --dt")
     if args.ic == "era5" and not args.ic_path:
         ap.error("--ic era5 needs --ic-path")
     real_paths = ("land_mask_file", "clm_surfdata_path", "surfdata",
@@ -228,6 +232,15 @@ def main(argv=None) -> int:
                           resolution=args.resolution or lp.MPAS_RES,
                           vertical_coord=args.vertical_coord)
         dycore = DycoreConfig(discretization="mpas", dt=DT)
+    elif args.grid == "latlon":
+        # the CMIP coupled decks' lat-lon atmosphere (latlon_cgrid, no polar
+        # filter, energy fixer on = the default); owned mode reads the
+        # handback only on the column loop, hence column_lane
+        grid = GridConfig(grid_type="latlon", nlev=nlev,
+                          resolution=args.resolution,
+                          vertical_coord=args.vertical_coord)
+        dycore = DycoreConfig(discretization="latlon_cgrid", dt=DT,
+                              column_lane=True)
     else:
         # the column lane of the duo production deck
         # (config/amip/amip_production_fv3duo_c24.yaml): every other duo
@@ -261,6 +274,9 @@ def main(argv=None) -> int:
         d._sfc_state, d._tile_config, d._ice_config or SeaIceConfig(),
         d._lake_config or LakeConfig())
     atm = d._atm
+    # the driver's CFL clamps can shorten the step (the lat-lon pole cell):
+    # every per-step sum below is over the step the model actually took
+    DT_req, DT = DT, float(atm.config.dycore.dt)
     tc = d._tile_config
     ocfg = cc.ocean_config
     area = _np(atm.grid.grid_area).reshape(-1)
@@ -283,7 +299,8 @@ def main(argv=None) -> int:
                                     land_update_s=args.land_update_s,
                                     extra=extra, ncells=n, window=win,
                                     rad_update_steps=args.rad_update_steps,
-                                    dt=DT, f_lake_max=float(f_lake.max()),
+                                    dt=DT, dt_requested=DT_req,
+                                    f_lake_max=float(f_lake.max()),
                                     f_land_mean=float(f_land.mean()))))
     print(f"INSTR area_sum/4piR2-1 = "
           f"{area.sum() / (4 * np.pi * constants.R_earth ** 2) - 1:.3e}")
@@ -299,10 +316,11 @@ def main(argv=None) -> int:
         raise SystemExit("land store not covered by this probe")
 
     def layer_dp():
-        """The layer mass the lane carries [Pa]: MPAS's hybrid dp(p_s); the
-        duo's own prognostic delp (Lagrangian, moved by the water the
-        physics applies), not the hybrid profile of its p_s."""
-        if args.grid == "mpas":
+        """The layer mass the lane carries [Pa]: the hybrid dp(p_s) of
+        MPAS and the lat-lon C-grid (prognostic p_s); the duo's own
+        prognostic delp (Lagrangian, moved by the water the physics
+        applies), not the hybrid profile of its p_s."""
+        if args.grid != "fv3duo":
             return _np(atm.sigma.layer_thickness_dp(atm.state.p_s.data)
                        ).reshape(n, -1)
         m = atm.model
@@ -504,6 +522,10 @@ def main(argv=None) -> int:
     pend0 = (I(prev["H"].evap) * win
              + I(prev["O"].ice_lake_freshwater_flux) * win)
     status = d.run(segment_callback=sample)
+    if abs(n_steps[0] * DT - args.days * 86400.0) > 1e-6 * DT:
+        raise SystemExit(
+            f"steps x dt = {n_steps[0]} x {DT:g} s != {args.days} d: the "
+            "lane changed its step after setup; per-step sums are invalid")
     if args.energy_terms:
         land_calls()   # the call after the last step (its exported
         # emissivity: the last boundary seen; a run of whole windows ends on
