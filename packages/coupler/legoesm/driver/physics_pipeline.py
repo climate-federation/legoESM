@@ -3861,7 +3861,7 @@ def _build_gray_radiation_fn(config):
     from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation,
-        earth_orbit, earth_sun_distance_factor,
+        earth_sun_distance_factor,
     )
     from legoesm.driver.kernel_registry import (
         RADIATION_REGISTRY, resolve_kernel,
@@ -3872,7 +3872,8 @@ def _build_gray_radiation_fn(config):
     S_0 = config.S_0
     # Realistic (Berger 1978) orbit for AMIP-II/CMIP; None ⇒ circular orbit,
     # so idealized runs are bit-for-bit unchanged.
-    orbit = earth_orbit() if getattr(config, "orbital_insolation", False) else None
+    from legoesm.driver.orbit import experiment_orbit
+    orbit = experiment_orbit(config)
 
     gray_config = GrayRadiationConfig(
         tau_equator=config.tau_equator,
@@ -3992,7 +3993,7 @@ def _build_rrtmgp_radiation_fn(config):
     from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation, daylight_fraction,
-        earth_orbit, earth_sun_distance_factor,
+        earth_sun_distance_factor,
     )
     from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 
@@ -4000,7 +4001,8 @@ def _build_rrtmgp_radiation_fn(config):
     S_0 = config.S_0
     # Realistic (Berger 1978) orbit for AMIP-II/CMIP; None ⇒ circular orbit,
     # so idealized runs are bit-for-bit unchanged.
-    orbit = earth_orbit() if getattr(config, "orbital_insolation", False) else None
+    from legoesm.driver.orbit import experiment_orbit
+    orbit = experiment_orbit(config)
 
     rrtmg_config = rrtmgp_config_from_experiment(
         config,
@@ -5791,9 +5793,8 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
     pipeline.rrtmgp_radiation = rad_scheme in ("rrtmgp", "rrtmg")
     pipeline.cesm_ocean_albedo = (bool(config.dynamic_albedo)
                                   and pipeline.rrtmgp_radiation)
-    from legoesm.atmosphere.physics.radiation.solar import earth_orbit
-    pipeline.orbit = (earth_orbit()
-                      if getattr(config, 'orbital_insolation', False) else None)
+    from legoesm.driver.orbit import experiment_orbit
+    pipeline.orbit = experiment_orbit(config)
     # Slab-land interface flux law (see _step_slab_land).  Checked here so a
     # config that dodged validate_strict (direct pipeline builders) still
     # fails at BUILD time — not at trace time inside the compiled step — when

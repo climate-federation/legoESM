@@ -56,6 +56,8 @@ from legoesm.land.soil_thermal import (
     liquid_water_content,
     melt_snow_node_excess,
     moisture_fusion_heat_source,
+    snow_node_robin_ground_flux,
+    snow_skin_cap,
     soil_layer_enthalpy,
     solve_snow_node_soil_thermal,
     solve_snow_soil_thermal,
@@ -590,12 +592,13 @@ def _step_multilayer_land_impl(
                 "initialise the state with init_multilayer_land_state(config=...) "
                 "or init_snow_temperature(state) on a restart without it.")
         if (config.elev_bands is not None
-                or not isinstance(config.surface_scheme, TwoLeafCanopyConfig)
+                or not isinstance(config.surface_scheme,
+                                  (TwoLeafCanopyConfig, SimpleSEBConfig))
                 or isinstance(config.surface_scheme, CLMMLCanopyConfig)):
             raise ValueError(
                 "config.thermal.snow_insulation (one-layer snow thermal node) is "
-                "supported only with the two-leaf canopy surface scheme and no "
-                "elevation-band snow.")
+                "supported only with the two-leaf canopy or SimpleSEB surface "
+                "scheme and no elevation-band snow.")
         if config.snow_scheme != "bulk":
             raise ValueError(
                 "config.thermal.snow_insulation is the one-layer thermal node of "
@@ -618,7 +621,7 @@ def _step_multilayer_land_impl(
         # this branch, so the snowfall is the forcing's).
         f_snow = snow_cover_fraction(
             jnp.maximum(snow, 0.0) + forcing.precip_snow * dt, config.land_albedo)
-        T_surface = _node_skin(T_snow0, T_soil[:, 0], f_snow)
+        T_surface = _node_skin(T_snow0, T_soil[:, 0], f_snow, config.thermal)
     else:
         T_surface = T_soil[:, 0]
     ncol = T_surface.shape[0]
@@ -842,7 +845,7 @@ def _step_multilayer_land_impl(
                     T_snow0, snow, T_soil, theta, grid,
                     config.hydraulics, config.thermal, G, dt_, snow_cover=f_snow,
                     empty_cover_swe=config.land_albedo.snow_depth_crit)
-                return _node_skin(_Ts, _Tg[:, 0], f_snow)
+                return _node_skin(_Ts, _Tg[:, 0], f_snow, config.thermal)
             T_tent = solve_soil_thermal(
                 T_soil, theta, grid,
                 config.hydraulics, config.thermal,
@@ -1054,7 +1057,7 @@ def _step_multilayer_land_impl(
             albedo_land=albedo_land,
             emissivity=emissivity,
             z0=z0,
-            snow_cover=f_snow if layered else None,
+            snow_cover=f_snow if _partial_cover else None,
         )
     else:
         raise ValueError(
@@ -1275,22 +1278,21 @@ def _step_multilayer_land_impl(
     # ground charge ``surface_out.L_soil`` = (1-w) L_leaf + w L_s(T_surface).
     _T_charge = forcing.T_lowest if _lsch == "clm_ml" else T_surface
     _L_v_T = charged_latent_heat(_lsch, _T_charge)
-    if layered:
-        # Partial cover: only the snow-covered fraction f of the ground (and of
-        # canopy dew) is the pack; the snow-free (1-f) evaporates from the soil.
-        # A binary split here routed ALL ground latent to a trace pack, whose
-        # top-layer clamp then returned it to G (measured: ~0 latent flux over
-        # 290 K soil for ~20 h while a 3 kg/m2 pack melted out).
-        # SimpleSEB already computes the snow and soil exchange separately and
-        # returns the pack's share (``LE_snow``, f-weighted); taking f of its
-        # f-blended total again put only ~f^2 of the snow's potential on the pack.
-        if scheme_is_seb and surface_out.LE_snow is None:
-            raise ValueError(
-                "layered snow with SimpleSEB needs the scheme's pack share "
-                "(SurfaceFluxOutput.LE_snow): call compute_simple_seb_fluxes with "
-                "snow_cover=f.")
+    # Partial cover (layered pack or snow node): only the snow-covered fraction
+    # f of the ground (and of canopy dew) is the pack; the snow-free (1-f) evaporates from the soil.
+    # A binary split here routed ALL ground latent to a trace pack, whose
+    # top-layer clamp then returned it to G (measured: ~0 latent flux over
+    # 290 K soil for ~20 h while a 3 kg/m2 pack melted out).
+    # SimpleSEB already computes the snow and soil exchange separately and
+    # returns the pack's share (``LE_snow``, f-weighted); taking f of its
+    # f-blended total again put only ~f^2 of the snow's potential on the pack.
+    if _partial_cover and scheme_is_seb and surface_out.LE_snow is None:
+        raise ValueError(
+            "partial snow cover with SimpleSEB needs the scheme's pack share "
+            "(SurfaceFluxOutput.LE_snow): call compute_simple_seb_fluxes with "
+            "snow_cover=f.")
     if scheme_is_seb:
-        snow_latent = (surface_out.LE_snow if layered else
+        snow_latent = (surface_out.LE_snow if _partial_cover else
                        jnp.where(has_snow, lhflx_ground, 0.0)
                        + jnp.where(transp_to_snow, lhflx_transp, 0.0))
         sublim_demand = snow_latent / charged_latent_heat(_lsch, _T_charge, ice=True)
@@ -1544,10 +1546,17 @@ def _step_multilayer_land_impl(
         # evaluated at the solved temperatures (zero for the two-leaf canopy).
         snow_ground_heat_applied = G_surface + evap_excess_energy_pre
         if surface_out.surface_conductance is not None:
-            snow_ground_heat_applied = snow_ground_heat_applied - (
+            _robin_flux = (
                 surface_out.surface_conductance
                 * (f_snow * (T_pack_solved[:, 0] - T_pack_top_ref)
                    + (1.0 - f_snow) * (T_soil_new[:, 0] - T_soil[:, 0])))
+            snow_ground_heat_applied = snow_ground_heat_applied - _robin_flux
+            # The same flux leaves to the atmosphere as sensible heat (#2542; see
+            # the bulk branch's final solve).  Sign: _robin_flux > 0 = the
+            # surface lost more than the explicit balance (less INTO the column,
+            # more UP); SH positive up.  Exact for the single combined solve
+            # above; a sub-stepped one would need the solver's step mean.
+            shflx = shflx + _robin_flux
         pack, snow_drainage, snow_drainage_heat = snow_phase_and_percolate(
             pack._replace(T=T_pack_solved), scc)
         snow_drain_sensible = None   # handed to the soil only with freeze/thaw (below)
@@ -1729,19 +1738,63 @@ def _step_multilayer_land_impl(
             # restart without a node: snow cannot arrive warmer than T_freeze.
             _T_start = jnp.where(snow > 0.0, T_snow0,
                                  jnp.minimum(T_soil[:, 0], constants.T_freeze))
+            _G_node = G_surface
+            _lam = _thermal_kw.pop("surface_conductance")
+            if _lam is not None:
+                # Semi-implicit surface (SimpleSEB): the flux that is consistent
+                # with the capped skin of the tentative node + soil solve on the
+                # start-of-step state (as the two-leaf Picard callback), applied
+                # explicitly below like the canopy's.
+                _G_node, _ = snow_node_robin_ground_flux(
+                    G_surface, _lam, T_surface,
+                    T_snow0, snow, T_soil, theta, grid, config.hydraulics,
+                    config.thermal, dt, snow_cover=f_snow,
+                    empty_cover_swe=config.land_albedo.snow_depth_crit)
+                # Semi-implicit correction -> sensible heat to the air (#2542,
+                # same booking and sign as the snow-free arm below): the column
+                # receives _G_node = G_surface - R explicitly, so R is exactly
+                # the flux withheld from it (no sub-step mean needed).  R > 0 =
+                # less INTO the column, more UP; SH positive up.
+                shflx = shflx + (G_surface - _G_node)
             T_snow_new, T_soil_new = solve_snow_node_soil_thermal(
                 _T_start, snow_new, T_soil, richards_out.theta_new, grid,
                 config.hydraulics, config.thermal,
-                G_surface + _store_heat / dt, dt,
+                _G_node + _store_heat / dt, dt,
                 # Same cover as the canopy closure that produced G (as the
                 # layered pack's final solve); the exported skin re-evaluates it.
                 snow_cover=f_snow,
                 empty_cover_swe=config.land_albedo.snow_depth_crit, **_thermal_kw)
-        else:
+        elif surface_out.surface_conductance is None:
             T_soil_new = solve_soil_thermal(
                 T_soil, richards_out.theta_new, grid,
                 config.hydraulics, config.thermal,
                 G_surface, dt, **_thermal_kw)
+        else:
+            T_soil_new, _robin_flux = solve_soil_thermal(
+                T_soil, richards_out.theta_new, grid,
+                config.hydraulics, config.thermal,
+                G_surface, dt, return_robin_flux=True, **_thermal_kw)
+            # Semi-implicit correction -> sensible heat to the air (#2542).
+            # The column received G_surface - _robin_flux, while SH/LE/LW
+            # were charged at the start-of-step skin temperature, so the
+            # difference must leave the land or the exchange does not close:
+            #   Rn = (SH + X_unmet + R) + LE_actual + (G + X_sublim - R).
+            # All of it goes to SH, the CLM "conserve total energy flux"
+            # rule used for X_unmet above: this step's radiation is already
+            # computed, and a latent share would need a vapour mass the
+            # hydrology (already run) did not draw.  Sign: _robin_flux > 0 =
+            # the skin warmed, the surface lost more (less INTO the soil,
+            # more UP); SH positive up.  Linear in the solved temperatures
+            # (no switch).  Step-mean over the solve's sub-steps.
+            # Rn here is the scheme's, with longwave emitted at the
+            # START-of-step skin temperature.  The exported post-step lw_up /
+            # skin temperature are the boundary of the atmosphere's NEXT
+            # radiation call, where the next land step charges the same
+            # emission; they carry none of this step's correction.
+            # KNOWN LIMITATION: the latent share (lambda_lh * dT) is exported
+            # as sensible, not latent, heat (energy and water both close; the
+            # Bowen ratio of the correction is not preserved).
+            shflx = shflx + _robin_flux
     if not _snow_node:
         T_snow_new = None
 
@@ -1826,7 +1879,8 @@ def _step_multilayer_land_impl(
     elif _snow_node:
         T_skin_new = _node_skin(
             T_snow_new, T_surface_new,
-            snow_cover_fraction(jnp.maximum(snow_new, 0.0), config.land_albedo))
+            snow_cover_fraction(jnp.maximum(snow_new, 0.0), config.land_albedo),
+            config.thermal)
     else:
         T_skin_new = T_surface_new
     # Re-brighten the snow-free base with the END-of-step top-layer moisture so the albedo
@@ -2083,10 +2137,11 @@ def drainage_heat_to_soil(drain_sensible, runoff_surface, water_in):
     return accepted * drain_sensible
 
 
-def _node_skin(T_snow, T_soil_top, f_snow):
-    """Snow-node skin ``f*min(T_snow, T_freeze) + (1-f)*T_soil_top`` (a pack's
-    heat above freezing is melt); ``f = 0`` (no snow) gives the top soil."""
-    return (f_snow * jnp.minimum(T_snow, constants.T_freeze)
+def _node_skin(T_snow, T_soil_top, f_snow, thermal_config):
+    """Snow-node skin ``f*cap(T_snow) + (1-f)*T_soil_top`` (a pack's heat above
+    freezing is melt; ``cap`` = :func:`snow_skin_cap`, the smooth
+    ``min(T_snow, T_freeze)``); ``f = 0`` (no snow) gives the top soil."""
+    return (f_snow * snow_skin_cap(T_snow, thermal_config.snow_skin_cap_width_K)
             + (1.0 - f_snow) * T_soil_top)
 
 
@@ -2463,7 +2518,7 @@ def land_skin_temperature(state: MultiLayerLandState,
         return state.T_soil[:, 0]
     return _node_skin(state.T_snow, state.T_soil[:, 0],
                       snow_cover_fraction(jnp.maximum(state.snow_depth, 0.0),
-                                          config.land_albedo))
+                                          config.land_albedo), config.thermal)
 
 
 def init_snow_temperature(state: MultiLayerLandState) -> MultiLayerLandState:

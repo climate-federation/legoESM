@@ -923,3 +923,21 @@ def test_compute_precision_fp64_refused_on_backend_without_fp64(monkeypatch,
         _build_driver(str(tmp_path), TWO_STEPS_DAYS, use_multilayer=False,
                       precision="fp32", microphysics="kessler",
                       microphysics_compute_precision="fp64")
+
+
+def test_setup_snaps_roundoff_land_fraction_to_one(monkeypatch, tmp_path):
+    """A column carrying a 1e-14 (or 1e-16) water fraction from area-binning
+    roundoff leaves setup with an exactly-zero water fraction; real fractions
+    and tiny land fractions are kept."""
+    import legoesm.grids.topography as topo
+    _patch_land_loaders(monkeypatch)
+    pattern = jnp.array([1.0 - 1e-14, 1.0 - 2.0 ** -53, 0.5, 1e-16, 1.0])
+    monkeypatch.setattr(
+        topo, "load_land_fraction",
+        lambda grid, path, *a, **k: jnp.resize(
+            pattern, jnp.asarray(grid.grid_lat).shape))
+    d = _build_driver(str(tmp_path), FOUR_STEPS_DAYS)
+    f = np.asarray(d._f_land)
+    want = np.resize(np.array([1.0, 1.0, 0.5, 1e-16, 1.0]), f.shape)
+    np.testing.assert_array_equal(f, want)
+    assert np.all(1.0 - f[f > 0.9] == 0.0)

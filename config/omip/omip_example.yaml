@@ -13,6 +13,7 @@ dt: 3600.0
 days: 365.0
 checkpoint_days: 30.0
 precision: fp64
+surface_stability_scheme: beljaars_holtslag1991   # stable MOST branch (#2574)
 # vertical mixing (KPP) closure knobs
 vertical_mixing_scheme: kpp
 kpp_ri_crit: 0.3

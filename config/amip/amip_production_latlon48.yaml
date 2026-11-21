@@ -22,7 +22,9 @@ include: amip_production.yaml
 grid_type: latlon
 resolution: 48              # n_lat 48 (n_lon 96): 3.75 deg, ~417 km at the equator (C24 class, design row P3)
 discretization: latlon_cgrid
-vertical_form: legacy       # lat-lon production stays legacy (user 2026-11-11)
+vertical_form: as83         # Arakawa-Suarez, as MPAS (user 2026-11-19, overturns the
+                            # 2026-11-11 keep-legacy ruling): legacy runs a jet away over
+                            # terrain near day 108 (#2548)
 column_lane: true           # the lat-lon dycore is the dynamics operator of the CAM6 column loop
 use_polar_filter: true      # Fourier polar filter: the dt below is set by the EQUATORIAL CFL (as
                             # amip_sundqvist_latlon24.yaml); filter off, the pole-cell clamp is 36 s.

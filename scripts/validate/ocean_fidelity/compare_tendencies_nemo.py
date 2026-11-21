@@ -133,6 +133,9 @@ def load_pair(tfile: str, ufile: str, vfile: str, rec: int):
         "avm": _fill(dsT.variables["avm"][r1]),
         "avs": _fill(dsT.variables["avs"][r1]),
         "ttrd_zdf": _fill(dsT.variables["ttrd_zdf"][r1]),
+        # The first post-restart step's trend: the one time level that pairs
+        # with the Mode-A K (restart state) in the variance budget (#2525).
+        "ttrd_zdf_rec0": _fill(dsT.variables["ttrd_zdf"][0]),
         "strd_zdf": _fill(dsT.variables["strd_zdf"][r1]),
         # POST-operator state for the trend at r1 (see the pairing note in
         # run_stage_b): record r1+1, clamped to the last record.
@@ -517,12 +520,14 @@ def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
               "and K_M, as zdf_iwm does to avt and avm")
         K_H = K_H + K_wave
         K_M = K_M + K_wave
+    else:
+        K_wave = None
     # K = c_k * l * sqrt(e), and we SEED NEMO's own en but then step it, so a
     # diffusivity excess is either the LENGTH or the stepped ENERGY. Returning
     # both decomposes it instead of leaving it to argument.
     _leps = np.asarray(out.l_eps).reshape(ncol, z - 1)
     _enew = np.asarray(out.tke_new).reshape(ncol, z - 1)
-    return K_H, K_M, n2, dz_half, _leps, _enew, en_i
+    return K_H, K_M, n2, dz_half, _leps, _enew, en_i, K_wave
 
 
 def run_stage_b(d):
@@ -692,9 +697,43 @@ def box_report(name, ours, theirs, wet, lat_col, lon_col, evd_cols=None):
     return rows
 
 
+def closure_prandtl(K_M, K_H, avm, avt, k_wave):
+    """(Pr_ours, Pr_nemo) of the CLOSURE alone, or None (#2525).
+
+    ORCA1's avt/avm carry zdf_iwm's K_wave on top of the TKE closure (added to
+    both, ln_tsdiff=.false.), so avm/avt is not the closure's nn_pdl Prandtl
+    and cannot be inverted for Ri.  With the probe's own K_wave (same NEMO
+    state, same forcing maps) subtracted from both sides it is; without it
+    there is no closure Prandtl to report.  Interfaces where a subtraction
+    leaves a non-positive diffusivity are NaN.  APPROXIMATE: NEMO's avt/avm
+    are hourly means and K_wave is this probe's instantaneous estimate, so
+    the NEMO side is only as closure-pure as that estimate matches zdf_iwm.
+    """
+    if k_wave is None:
+        return None
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kh, km = K_H - k_wave, K_M - k_wave
+        at, am = avt - k_wave, avm - k_wave
+        ok = (kh > 0) & (km > 0) & (at > 0) & (am > 0) \
+            & np.isfinite(at) & np.isfinite(am)
+        if ok.any():
+            # NEMO's floors on the CLOSURE fields: a floor plus a spatially
+            # varying K_wave is off the total's floor but still floored.
+            ok &= (at > at[ok].min() * 1.01) & (am > am[ok].min() * 1.01)
+        return (np.where(ok, km / kh, np.nan), np.where(ok, am / at, np.nan))
+
+
+_PR_KEYS = ("n_ours_at_ceiling", "Pr_nemo_median_where_ours_ceil",
+            "Pr_nemo_frac_ceil_where_ours_ceil", "Pr_nemo_median",
+            "Pr_ours_median", "Pr_ours_p10", "Pr_ours_p90",
+            "Pr_ours_frac_at_ceiling", "Pr_ours_frac_at_floor",
+            "Pr_nemo_frac_at_ceiling", "Pr_nemo_frac_at_floor",
+            "n_both_unclamped", "Ri_ratio_median", "n_pr_closure")
+
+
 def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
                          evd_cols=None, z_iface=None, z_cuts_m=(300.0, 100.0),
-                         stage="Stage A"):
+                         stage="Stage A", k_wave=None):
     """Split the Stage-A K_H excess into a MOMENTUM part and a PRANDTL part.
 
     Stage A scores K_H against ``avt``, which carries BOTH the closure
@@ -752,6 +791,11 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
     """
     fin = wet & np.isfinite(avt_i) & np.isfinite(avm_i) \
         & np.isfinite(K_H) & np.isfinite(K_M)
+    _pr = closure_prandtl(K_M, K_H, avm_i, avt_i, k_wave)
+    if _pr is None:
+        print("  [Prandtl] NO closure Prandtl: avt/avm include IWM and no "
+              "--iwm-forcing K_wave is available to remove it, so every Pr/Ri "
+              "column below is NaN (#2525).")
     avtb = float(np.min(avt_i[fin & (avt_i > 0)])) if (fin & (avt_i > 0)).any() else 0.0
     avmb = float(np.min(avm_i[fin & (avm_i > 0)])) if (fin & (avm_i > 0)).any() else 0.0
     free = fin & (avt_i > avtb * 1.01) & (avm_i > avmb * 1.01) & (K_H > 0)
@@ -849,6 +893,31 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
                                                     / pr_n[free_both]))
                                     if n >= 10 else float("nan"))}
 
+    def _pr_stats(pr_o, pr_n):
+        if pr_o.size < 10:
+            return dict.fromkeys(_PR_KEYS, float("nan"))
+        return {
+            **_pr_at_our_ceiling(pr_o, pr_n),
+            "Pr_nemo_median": float(np.median(pr_n)),
+            "Pr_ours_median": float(np.median(pr_o)),
+            "Pr_ours_p10": float(np.percentile(pr_o, 10)),
+            "Pr_ours_p90": float(np.percentile(pr_o, 90)),
+            # A median that equals a clamp is not a Prandtl number.
+            "Pr_ours_frac_at_ceiling": float(np.mean(pr_o > 9.99)),
+            "Pr_ours_frac_at_floor": float(np.mean(pr_o < 1.001)),
+            "Pr_nemo_frac_at_ceiling": float(np.mean(pr_n > 9.99)),
+            "Pr_nemo_frac_at_floor": float(np.mean(pr_n < 1.001)),
+            # Both closures use Pr = clamp(4.5*Ri, 1, 10) -- the card
+            # sets prandtl_ri_coeff = 1/ri_cri = 4.5 to match nn_pdl=1
+            # -- so ON THE INTERFACES WHERE NEITHER IS CLAMPED the Pr
+            # ratio IS the Richardson-number ratio, with the shared
+            # coefficient cancelling. That subset is the only place the
+            # comparison means anything, and its size is reported so a
+            # ratio taken on a handful of points is visible as such.
+            **_ri_ratio(pr_o, pr_n),
+            "n_pr_closure": int(pr_o.size),
+        }
+
     for tag0, incol in regions:
         for suff, colsel in subsets:
             for dsuff, dsel in depths:
@@ -859,8 +928,14 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
                     m = m & dsel
                 if m.sum() < 10:
                     continue
-                pr_n = avm_i[m] / avt_i[m]
-                pr_o = K_M[m] / K_H[m]
+                # EVD replaces avt only (rn_evd), so in EVD columns avm/avt
+                # is not the closure Prandtl either (#2525).
+                if _pr is None or suff == "/evd":
+                    pr_stats = dict.fromkeys(_PR_KEYS, float("nan"))
+                else:
+                    _po, _pn = _pr[0][m], _pr[1][m]
+                    _ok = np.isfinite(_po) & np.isfinite(_pn)
+                    pr_stats = _pr_stats(_po[_ok], _pn[_ok])
                 rows.append({
                     "region": tag0 + suff + dsuff, "n": int(m.sum()),
                     # MATCHED to box_report's reduction; the mean sits beside it
@@ -869,30 +944,13 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
                     "K_M_over_avm_rms": _rms(K_M[m]) / _rms(avm_i[m]),
                     "K_H_over_avt_mean": float(K_H[m].mean() / avt_i[m].mean()),
                     "K_M_over_avm_mean": float(K_M[m].mean() / avm_i[m].mean()),
-                    **_pr_at_our_ceiling(pr_o, pr_n),
-                    "Pr_nemo_median": float(np.median(pr_n)),
-                    "Pr_ours_median": float(np.median(pr_o)),
-                    "Pr_ours_p10": float(np.percentile(pr_o, 10)),
-                    "Pr_ours_p90": float(np.percentile(pr_o, 90)),
-                    # A median that equals a clamp is not a Prandtl number.
-                    "Pr_ours_frac_at_ceiling": float(np.mean(pr_o > 9.99)),
-                    "Pr_ours_frac_at_floor": float(np.mean(pr_o < 1.001)),
-                    "Pr_nemo_frac_at_ceiling": float(np.mean(pr_n > 9.99)),
-                    "Pr_nemo_frac_at_floor": float(np.mean(pr_n < 1.001)),
-                    # Both closures use Pr = clamp(4.5*Ri, 1, 10) -- the card
-                    # sets prandtl_ri_coeff = 1/ri_cri = 4.5 to match nn_pdl=1
-                    # -- so ON THE INTERFACES WHERE NEITHER IS CLAMPED the Pr
-                    # ratio IS the Richardson-number ratio, with the shared
-                    # coefficient cancelling. That subset is the only place the
-                    # comparison means anything, and its size is reported so a
-                    # ratio taken on a handful of points is visible as such.
-                    **_ri_ratio(pr_o, pr_n),
+                    **pr_stats,
                 })
     print("  %-22s %8s %9s %9s %8s %8s %8s %8s %8s" % (
         "region", "n", "KH/avt_r", "KM/avm_r",
         "Pr_nemo", "Pr_ours", "at_ceil", "Ri_o/Ri_n", "n_free"))
     for r in rows:
-        print("  %-22s %8d %9.3f %9.3f %8.2f %8.2f %8.3f %8.2f %8d" % (
+        print("  %-22s %8d %9.3f %9.3f %8.2f %8.2f %8.3f %8.2f %8s" % (
             r["region"], r["n"], r["K_H_over_avt_rms"], r["K_M_over_avm_rms"],
             r["Pr_nemo_median"], r["Pr_ours_median"],
             r["Pr_ours_frac_at_ceiling"], r["Ri_ratio_median"],
@@ -1175,7 +1233,7 @@ def main():
             print(f"[ice] a_i: mean {_ice.mean():.4f}, "
                   f"frac>0.15 {(_ice > 0.15).mean():.4f}")
         (K_H2, K_M2, n2_ours, e3w_a2, leps2, enew2,
-         eseed2) = run_stage_a2_mode_a(
+         eseed2, K_wave2) = run_stage_a2_mode_a(
             d2_for_a2(d), rst, cfg_a2, iwm_maps=_iwm, ice_frac=_ice,
             use_bathy=args.use_bathy)
         result["stage_a2_mode_a"] = region_report(
@@ -1204,7 +1262,8 @@ def main():
         result["stage_a2_prandtl"] = prandtl_split_report(
             K_H2, K_M2, avt_a2(d), avm_i, wet_pair, lat_col,
             d["lon"].reshape(-1), evd_cols=evd_cols, z_iface=_z_iface,
-            z_cuts_m=(300.0, 100.0), stage="Stage A2 (Mode-A, NEMO's own en)")
+            z_cuts_m=(300.0, 100.0), stage="Stage A2 (Mode-A, NEMO's own en)",
+            k_wave=K_wave2)
         # WHY OUR RICHARDSON NUMBER IS LARGER THAN NEMO'S, measured rather
         # than argued. The Prandtl split above shows our Pr pinned at its
         # ceiling of 10 across ~95% of the Antarctic while NEMO sits near 1.7
@@ -1331,9 +1390,16 @@ def main():
         _e3w2 = np.maximum(e3w_a2, 1e-12) ** 2
         _sh2_n_real = sh2_n / _e3w2          # NEMO's order, real units s^-2
         _sh2_o_real = sh2_o / _e3w2          # centred order, what we feed
-        _avt2, _avm2 = avt_a2(d), avm_i
+        # Closure-only Prandtl on both sides (#2525): IWM removed, or no
+        # inversion at all (all-NaN -> every region row below is skipped).
+        _cp = closure_prandtl(K_M2, K_H2, avm_i, avt_a2(d), K_wave2)
+        if _cp is None:
+            print("\n[n2_split] SKIPPED: NEMO's avm/avt include IWM and no "
+                  "--iwm-forcing K_wave is available to remove it, so Pr_nemo "
+                  "cannot be inverted for Ri (#2525).")
+            _cp = (np.full_like(K_H2, np.nan), np.full_like(K_H2, np.nan))
         with np.errstate(divide="ignore", invalid="ignore"):
-            _pr_n = _avm2 / _avt2
+            _pr_n = _cp[1]
             _ri_n = _pr_n / _coeff
             _n2_nemo = _ri_n * _sh2_n_real
             _ri_o = n2_ours / np.maximum(_sh2_o_real, 1e-20)
@@ -1343,7 +1409,7 @@ def main():
         # nothing, so it is reported next to them rather than assumed.
         _pr_pred = np.clip(_coeff * _ri_o, 1.0, 10.0)
         with np.errstate(divide="ignore", invalid="ignore"):
-            _pr_act = K_M2 / K_H2
+            _pr_act = _cp[0]
         _rows = []
         for _nm, _lo, _hi in REGIONS:
             _band = (lat_col >= _lo) & (lat_col <= _hi)
@@ -1403,6 +1469,9 @@ def main():
     # VOLUME-WEIGHTED mean. Ratio near 1 means our closure removes tracer
     # variance at NEMO's rate; below 1 means we under-mix, above 1 over-mix.
     if args.variance_budget:
+        if not args.restart_npz:
+            raise SystemExit("--variance-budget needs --restart-npz: our K is "
+                             "the Mode-A closure on NEMO's restart state")
         import jax.numpy as jnp
         from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
             implicit_vertical_diffusion_ocean,
@@ -1417,11 +1486,16 @@ def main():
 
         dz_c = np.where(np.isfinite(_cols(d["e3t"])), _cols(d["e3t"]), 1.0)
         dz_h = 0.5 * (dz_c[:, :-1] + dz_c[:, 1:])
-        T_c = np.nan_to_num(_cols(d["T"]), nan=0.0)
+        # ONE time level (#2525): K_H2 is the Mode-A closure on the RESTART
+        # state, so the state is the restart's and NEMO's trend is record 0,
+        # the first (dt = 3600 s = one record) step taken from it.  It used to
+        # pair the restart K with record rec-1's state and record rec's trend.
+        T_rst = rst["tn"]
+        _nm = _cols(d["ttrd_zdf_rec0"])
+        T_c = np.nan_to_num(_cols(T_rst), nan=0.0)
         area = (e1t * e2t).reshape(ncolc)[:, None]
         dVc = area * dz_c
-        wetv = (_cols(np.isfinite(d["T"]).astype(float)) > 0.5) & np.isfinite(
-            _cols(d["ttrd_zdf"]))
+        wetv = (_cols(np.isfinite(T_rst).astype(float)) > 0.5) & np.isfinite(_nm)
 
         # DRY CELLS MUST NOT DIFFUSE. `T_c` carries 0.0 below the sea floor
         # (nan_to_num), so an unmasked solve sees a ~20 K jump at the last wet
@@ -1430,7 +1504,7 @@ def main():
         # closure whose diffusivity is 0.89-1.49x NEMO's could produce -- an
         # instrument defect, not a result. K is therefore zeroed at every
         # interface whose two adjacent cells are not both wet.
-        wet_cell = _cols(np.isfinite(d["T"]).astype(float)) > 0.5
+        wet_cell = _cols(np.isfinite(T_rst).astype(float)) > 0.5
         iface_wet = wet_cell[:, :-1] & wet_cell[:, 1:]
         K_use = np.where(iface_wet, np.nan_to_num(K_H2, nan=0.0), 0.0)
         print(f"[variance] K interfaces kept {int(iface_wet.sum())} of "
@@ -1440,7 +1514,6 @@ def main():
             jnp.asarray(T_c), jnp.asarray(K_use), jnp.asarray(dz_c),
             jnp.asarray(dz_h), 3600.0))
         dT_ours = (T_ours - T_c) / 3600.0
-        _nm = _cols(d["ttrd_zdf"])
         print(f"[variance] |dT| ours max {np.abs(np.where(wetv, dT_ours, 0)).max():.4e}"
               f"  NEMO max {np.abs(np.where(wetv, np.nan_to_num(_nm), 0)).max():.4e} K/s")
 
@@ -1452,7 +1525,7 @@ def main():
                                 * np.where(wetv, tend, 0.0) * w).sum())
 
         chi_ours = _chi(dT_ours)
-        chi_nemo = _chi(_cols(d["ttrd_zdf"]))
+        chi_nemo = _chi(_nm)
         ratio = chi_ours / chi_nemo if chi_nemo else float("nan")
         print(f"\n[variance] chi_zdf(theta) ours {chi_ours:+.6e}  "
               f"NEMO {chi_nemo:+.6e}  ratio {ratio:.4f}")
@@ -1461,7 +1534,8 @@ def main():
         result["variance_budget_zdf_theta"] = {
             "chi_ours": chi_ours, "chi_nemo": chi_nemo, "ratio": ratio,
             "n_cells": int(wetv.sum()),
-            "note": "our K from the Mode-A closure, NEMO's from ttrd_zdf, "
+            "note": "our K from the Mode-A closure on the restart state, "
+                    "NEMO's ttrd_zdf record 0 (first step from that state), "
                     "same state, same volumes, same BE solver",
         }
 

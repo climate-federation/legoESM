@@ -1937,15 +1937,14 @@ class CoupledESMDriver:
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import (
-                daily_mean_insolation, earth_orbit,
-                earth_sun_distance_factor,
+                daily_mean_insolation, earth_sun_distance_factor,
             )
             # Solar constant from legoesm.constants per CLAUDE.md.
             # ``acfg.S_0`` allows override for sensitivity studies.
             S_0 = acfg.S_0
             # Realistic orbit (Berger 1978) when enabled; None ⇒ circular.
-            _orbit = (earth_orbit()
-                      if getattr(acfg, "orbital_insolation", False) else None)
+            from legoesm.driver.orbit import experiment_orbit
+            _orbit = experiment_orbit(acfg)
             if acfg.diurnal_cycle:
                 # Five-minute spacing limits linear interpolation error in the
                 # diurnal cosine to (2*pi*5/1440)^2 / 8, below 6e-5.

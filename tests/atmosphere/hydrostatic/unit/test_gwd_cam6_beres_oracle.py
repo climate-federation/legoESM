@@ -189,7 +189,11 @@ def _synthetic(pver=30, seed=3):
 
 def _beres(**kw):
     base = dict(cf=CF, al=AL, z_heat_max=Z_HEAT_MAX, storm_speed_min=STORM_MIN,
-                maxh=MAXH, maxuh=MAXUH, use_stand_in_table=False)
+                maxh=MAXH, maxuh=MAXUH, use_stand_in_table=False,
+                index_round_width=0.0,       # the oracle's NINT/INT and min/max
+                crit_minmax_sharpness=float("inf"),   # (RULE 5 hard limits, #2545)
+                heating_ramp_width=0.0, q0_max_sharpness=float("inf"),
+                hdepth_gate_width=0.0)                # (#2569)
     base.update(kw)
     return E3SMBeresConfig(**base)
 
@@ -211,7 +215,7 @@ def test_cam6_flags_pin_gw_convect_transcription():
     hd_m = 1000.0 * np.arange(1, MAXH + 1)
     ref = _cam6_gw_beres_src_ref(u, v, netdt, zm, k, mfcc, hd_m, 1000.0, PGWV, DC)
     out = _run_kernel(_beres(**CAM6), u, v, netdt, zm, mfcc, k)
-    tau, src_level, tend_level, xv, yv, c, ubm, ubi, hdepth, maxq0 = out
+    tau, src_level, tend_level, xv, yv, c, ubm, ubi, hdepth, maxq0, _t = out
     assert ref["tau"].any(), "synthetic case launches nothing; oracle vacuous"
     np.testing.assert_allclose(np.asarray(tau), ref["tau"], rtol=1e-10, atol=0.0)
     np.testing.assert_array_equal(np.asarray(src_level), ref["src_level"])

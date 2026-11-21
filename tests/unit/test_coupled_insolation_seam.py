@@ -18,7 +18,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 
-def _coupled_driver(insolation_start_doy, *, diurnal=False, orbital=False,
+def _coupled_driver(insolation_start_doy, *, diurnal=False, orbit_options=None,
                     surface_radiation=False, precision=None, output_dir=None):
     from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
     from legoesm.driver.coupled_config import CoupledConfig
@@ -30,7 +30,7 @@ def _coupled_driver(insolation_start_doy, *, diurnal=False, orbital=False,
                             discretization="latlon_cgrid"),
         radiation="gray", convection="none", turbulence="none", days=1,
         insolation_start_doy=insolation_start_doy,
-        diurnal_cycle=diurnal, orbital_insolation=orbital,
+        diurnal_cycle=diurnal, **(orbit_options or {}),
         **({} if precision is None else {"precision": precision}))
     drv = CoupledESMDriver(atm, CoupledConfig(couple_surface_radiation=surface_radiation),
                            output_dir=output_dir)
@@ -82,10 +82,17 @@ def test_coupler_insolation_default_is_january_byte_identical():
 
 
 @pytest.mark.parametrize("owned", [False, True])
-@pytest.mark.parametrize("orbital", [False, True])
+@pytest.mark.parametrize("orbit_options", [
+    pytest.param({}, id="circular"),
+    pytest.param({"orbital_insolation": True}, id="present_day"),
+    pytest.param(
+        {"orbital_insolation": True, "orbit_eccentricity": 0.2, "orbit_solver": "kepler"},
+        id="configured_kepler",
+    ),
+])
 @pytest.mark.parametrize("diurnal", [False, True])
 def test_segment_hands_surface_weighted_sun_or_legacy_daily_mean(
-        monkeypatch, tmp_path, owned, orbital, diurnal):
+        monkeypatch, tmp_path, owned, orbit_options, diurnal):
     """Exercise both real segment callers up to their first surface handoff.
 
     Reference the diurnal integral with one-second midpoint samples;
@@ -99,9 +106,11 @@ def test_segment_hands_surface_weighted_sun_or_legacy_daily_mean(
     )
     from legoesm.coupler import grid_remap
 
-    drv = _coupled_driver(244, diurnal=diurnal, orbital=orbital,
+    drv = _coupled_driver(244, diurnal=diurnal, orbit_options=orbit_options,
                           output_dir=tmp_path)
-    orbit = earth_orbit() if orbital else None
+    orbit = earth_orbit() if orbit_options else None
+    if "orbit_solver" in orbit_options:
+        orbit = orbit._replace(eccentricity=0.2, solver="kepler")
     handed = []
 
     class SurfaceHandoffReachedError(Exception):
@@ -139,7 +148,7 @@ def test_segment_hands_surface_weighted_sun_or_legacy_daily_mean(
             np.testing.assert_allclose(actual, expected, rtol=0.0, atol=6e-5)
         else:
             doy, _ = drv._atm._calendar_for_radiation(end_day)
-            eccf = earth_sun_distance_factor(float(doy), orbit) if orbital else 1.0
+            eccf = earth_sun_distance_factor(float(doy), orbit) if orbit is not None else 1.0
             s0 = drv.atm_config.S_0
             expected = jnp.clip(daily_mean_insolation(
                 lat, float(doy), S_0=s0, orbit=orbit) / (eccf * s0), 0.0, 1.0)

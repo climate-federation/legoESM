@@ -299,3 +299,49 @@ def test_curvilinear_cell_area_mid_row_seam():
     assert row.max() / row.min() < 1.0 + 1e-9
     sphere = 4.0 * np.pi * constants.R_earth ** 2
     np.testing.assert_allclose(area.sum(), sphere, rtol=1e-3)
+
+
+def test_loader_keeps_empty_band_and_step_drops_its_melt(tmp_path):
+    """A source band with zmax above zmin reaches the step unwidened and melts nothing (NEMO mskisf_par)."""
+    netCDF4 = pytest.importorskip("netCDF4")
+    from legoesm.ocean.forcing.isf_spe import load_isf_spe_forcing
+
+    lat2d, lon2d = np.meshgrid(np.array([-75.0, -70.0]), np.array([-10.0, 10.0]), indexing="ij")
+    fwf = np.full((12, 2, 2), 1.0e-4)
+    zmin = np.full((12, 2, 2), 45.0)
+    zmax = np.full((12, 2, 2), 300.0)
+    zmax[:, 0, 0] = 38.0
+    p = tmp_path / "isf.nc"
+    with netCDF4.Dataset(p, "w") as ds:
+        ds.createDimension("time", 12)
+        ds.createDimension("y", 2)
+        ds.createDimension("x", 2)
+        for n, a in (("nav_lon", lon2d), ("nav_lat", lat2d)):
+            v = ds.createVariable(n, "f8", ("y", "x")); v[:] = a
+        for n, a in (("sornfisf", fwf), ("sodepmin_isf", zmin), ("sodepmax_isf", zmax)):
+            v = ds.createVariable(n, "f8", ("time", "y", "x")); v[:] = a
+    f = load_isf_spe_forcing(str(p), lat2d, lon2d)
+    assert f.zmax[0, 0, 0] == 38.0
+    dz = jnp.broadcast_to(jnp.array([10.0, 10.0, 20.0, 40.0, 80.0, 160.0]), (2, 2, 6))
+    S = jnp.full((2, 2, 6), 34.5)
+    dT, dS, eta = isf_prescribed_melt_tendencies(
+        S, dz, jnp.ones_like(dz), jnp.asarray(f.fwf[0]), jnp.asarray(f.zmin[0]), jnp.asarray(f.zmax[0]),
+        rho_0=RHO0, c_sw=CP, L_fus=LF)
+    assert not np.any(np.asarray(dT[0, 0])) and not np.any(np.asarray(dS[0, 0])) and float(eta[0, 0]) == 0.0
+    assert np.all(np.asarray(eta)[[0, 1, 1], [1, 0, 1]] > 0.0)
+
+
+@pytest.mark.parametrize("zmax", [38.0, 40.0])
+def test_empty_band_gradient_finite(zmax):
+    """Gradients through a masked column (below and on the band top) stay finite."""
+    dz0 = jnp.array([10.0, 10.0, 20.0, 40.0, 80.0, 160.0])
+    S0 = jnp.full(6, 34.5)
+
+    def total(S, dz, fwf):
+        dT, dS, eta = isf_prescribed_melt_tendencies(
+            S, dz, jnp.ones_like(dz), fwf, jnp.asarray(45.0), jnp.asarray(zmax),
+            rho_0=RHO0, c_sw=CP, L_fus=LF)
+        return jnp.sum(dT * dz) + jnp.sum(dS * dz) + eta
+
+    g = jax.grad(total, argnums=(0, 1, 2))(S0, dz0, jnp.asarray(1.0e-4))
+    assert all(np.all(np.isfinite(np.asarray(x))) for x in g)

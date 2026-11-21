@@ -119,6 +119,16 @@ def implicit_caco3_dissolution(
     dz : array (nlev,)  Layer thickness [m].
     wet_mask : array (..., nlev)  1 = ocean cell, 0 = below sea floor/land.
     remin_depth : float  e-folding depth [m] (oracle ``zca``).
+
+    Oracle (``tests/ocean/unit/test_npzd_caco3_mitgcm_oracle.py``): matches
+    compiled MITgcm ``CAR_FLUX`` (c3f71ac8) to 1e-12, and
+    ``_production_levels`` matches its ``nlev``.  KNOWN DIFFERENCE: ``dz`` is
+    one profile for every column, with no partial cells.  In MITgcm only the
+    bottom wet cell is partial (z-level partial steps).  The flux arriving
+    from above dissolves there over ``drF*hFacC`` in MITgcm and over the full
+    thickness here, so that part of the rate is ``hFacC`` times MITgcm's;
+    CaCO3 formed in that cell dissolves in place in both (pinned at
+    ``hFacC = 0.5``, with and without production in the partial cell).
     """
     z_i = _interface_depths(dz)
     z_bot = z_i[1:]

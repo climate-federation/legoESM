@@ -855,6 +855,21 @@ class DiagnosticCollector:
         p_s = state.p_s.data
         p_low = jnp.asarray(self._p_full(p_s))[..., -1]
         rho_low = p_low / (constants.R_d * T_low)
+        # The lowest model level sits at z_low above the surface (about 60 m
+        # on L32), not at 10 m, and the similarity laws integrate POTENTIAL
+        # temperature (CESM camsrfexch hands shr_flux_atmOcn zbot = zm(pver)
+        # and thbot = T exner).  Handing them the level as 10 m and T as theta
+        # published a 2 m value about g z_low / c_p ~ 0.6 K too cold over sea
+        # (measured with this port's own tref at SST 301 K, z_low 60 m).  The
+        # height is the same hypsometric half-thickness the flux path uses
+        # (compute_layer_dz: R T_v dp / (g p_mid), midpoint = half of it) and
+        # the theta pairing is the flux path's surface_reference_state.
+        from legoesm.core.bulk_flux import surface_reference_state
+        from legoesm.thermo import virtual_temperature
+        dp_low = jnp.asarray(self._dp(p_s))[..., -1]
+        z_low = 0.5 * constants.R_d * virtual_temperature(T_low, q_low) * dp_low / (
+            constants.g * p_low)
+        theta_low, _ = surface_reference_state(T_low, 10.0, z_low)
         # Similarity profile matched to the experiment's surface fluxes:
         # SAME bulk scheme (constant -> the historical coare3 stand-in, see
         # __init__) and SAME stable-branch selector (codex 2026-08-02: a
@@ -883,13 +898,14 @@ class DiagnosticCollector:
                 # CESM shr_flux_atmOcn's own ``tref`` diagnostic (2 m).
                 from legoesm.core.bulk_flux import compute_sam_oceflx_fluxes
                 *_, T_2m = compute_sam_oceflx_fluxes(
-                    u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
-                    z_bot=10.0, variant="cesm", return_2m=True,
+                    u_low, v_low, theta_low, q_low, T_sfc, q_sfc, rho_low,
+                    z_bot=z_low, variant="cesm", return_2m=True,
                     t_bot=T_low, zeta_cap_width=self.surface_most_zeta_cap_width,
                 )
                 return T_2m
             *_, T_2m = compute_most_fluxes(
-                u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+                u_low, v_low, theta_low, q_low, T_sfc, q_sfc, rho_low,
+                z_ref=z_low,
                 scheme=(self.tas_profile_scheme
                         if self.tas_profile_scheme != "large_yeager_cesm"
                         else "large_yeager"),
@@ -899,7 +915,9 @@ class DiagnosticCollector:
                 most_zeta_cap_width=self.surface_most_zeta_cap_width,
                 gfs_unstable_join_width=self.surface_gfs_unstable_join_width,
             )
-            return T_2m
+            # The MOST branch integrates theta down to z_diag; CESM's tref
+            # applies the same potential-to-temperature step (0.01 K/m x 2 m).
+            return T_2m - (constants.g / constants.c_pd) * 2.0
 
         T_sfc_sea = blend_surface_temperature(sst, sic, T_ice)
         q_sfc_sea = saturation_mixing_ratio(T_sfc_sea, p_s)

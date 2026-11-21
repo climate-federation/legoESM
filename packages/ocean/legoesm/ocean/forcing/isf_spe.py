@@ -28,9 +28,6 @@ from legoesm.ocean.forcing.curvilinear_regrid import (
 _FWF_VAR = "sornfisf"
 _ZMIN_VAR = "sodepmin_isf"
 _ZMAX_VAR = "sodepmax_isf"
-# Minimum injection-band thickness [m] so the overlap weights stay
-# well-conditioned when zmax ≈ zmin in the source file.
-_MIN_BAND_M = 1.0
 
 
 class ISFSpeForcing(NamedTuple):
@@ -55,7 +52,8 @@ def load_isf_spe_forcing(
     grids get nearest-WET-neighbour + per-month global melt-total
     renormalisation (cos-lat weights, or ``target_area`` when given).
     ``zmin`` is clamped >= 0 (the source stores small negative band tops
-    near the surface) and the band is kept at least ``1 m`` thick.
+    near the surface).  Bands with ``zmax`` at or above the band top are
+    passed through; the tendency step gives them no melt, as NEMO does.
 
     ``paired_cells=True`` marks 1-D ``lat_T``/``lon_T`` as PAIRED unstructured
     cell centres (MPAS Voronoi ``(nCells,)``) rather than regular grid axes —
@@ -130,5 +128,4 @@ def load_isf_spe_forcing(
     if land_mask is not None:
         out_fwf = out_fwf * np.asarray(land_mask, dtype=np.float64)[None]
     out_zmin = np.maximum(out_zmin, 0.0)
-    out_zmax = np.maximum(out_zmax, out_zmin + _MIN_BAND_M)
     return ISFSpeForcing(fwf=out_fwf, zmin=out_zmin, zmax=out_zmax)

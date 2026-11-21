@@ -244,6 +244,26 @@ def validate_smoothing_width(name: str, w) -> None:
             f"[{lo:.3e}, {1.0 / lo:.3e}]; got {w!r}.")
 
 
+def abs_tanh(x: jax.Array, width: float) -> jax.Array:
+    """``|x|`` as ``x*tanh(x/width)`` (RULE 5): C-infinity, 0 at 0, never above
+    ``|x|``, within ``0.28*width`` of it.  ``width = 0`` is ``jnp.abs``."""
+    return jnp.abs(x) if width == 0 else x * jnp.tanh(x / width)
+
+
+def sign_tanh(x: jax.Array, width: float) -> jax.Array:
+    """``sign(x)`` as ``tanh(x/width)`` (RULE 5).  ``width = 0`` is ``jnp.sign``."""
+    return jnp.sign(x) if width == 0 else jnp.tanh(x / width)
+
+
+def zero_at_or_below(x: jax.Array, floor: float, width: float) -> jax.Array:
+    """``x`` zeroed where ``x <= floor`` (RULE 5): ``x*smoothstep_quintic((x -
+    floor)/width)``, exactly 0 at and below ``floor`` and exactly ``x`` from
+    ``floor + width``, C2.  ``width = 0`` is the hard ``where(x <= floor, 0, x)``."""
+    if width == 0:
+        return jnp.where(x <= floor, 0.0, x)
+    return x * smoothstep_quintic((x - floor) / width)
+
+
 def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
     if width == 0:
@@ -314,3 +334,42 @@ def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
     Uses sqrt(x^2 + epsilon) which is differentiable everywhere.
     """
     return jnp.sqrt(x * x + epsilon)
+
+
+def smooth_round(x: jax.Array, width: float) -> jax.Array:
+    """Nearest-integer rounding as a C2 staircase (RULE 5): equal to ``n``
+    except where ``frac(x)`` is within ``width/2`` of 1/2, where it rises to
+    ``n + 1`` by ``smoothstep_quintic``.  ``width`` in (0, 1].  ``width = 0`` is
+    Fortran ``NINT`` (half away from zero), exactly; as ``width -> 0`` the
+    staircase tends to ``floor(x + 1/2)``, which differs from ``NINT`` only at
+    exact negative half-integers."""
+    if width == 0:
+        return jnp.sign(x) * jnp.floor(jnp.abs(x) + 0.5)
+    n = jnp.floor(x)
+    return n + smoothstep_quintic((x - n - 0.5) / width + 0.5)
+
+
+def smooth_trunc(x: jax.Array, width: float) -> jax.Array:
+    """Truncation toward zero as a C2 staircase (RULE 5): ``sign(x)*m`` with
+    ``m = floor(|x|)`` except over the last ``width`` of each unit, where it
+    rises to ``m + 1`` by ``smoothstep_quintic`` (so exactly 0, with zero
+    derivatives, for ``|x| < 1 - width``).  ``width`` in (0, 1].  ``width = 0`` is ``jnp.trunc``, exactly."""
+    if width == 0:
+        return jnp.trunc(x)
+    a = jnp.abs(x)
+    m = jnp.floor(a)
+    return jnp.sign(x) * (m + smoothstep_quintic((a - m - 1.0) / width + 1.0))
+
+
+def blend_integer_index(r: jax.Array, take):
+    """``take(n)`` at an integer-valued ``r``; between integers the linear
+    blend ``(1-t)*take(floor(r)) + t*take(floor(r)+1)``, ``t = r - floor(r)``,
+    so a smooth staircase ``r`` (:func:`smooth_round`) gives a smooth lookup.
+    ``take`` receives an int32 index array of ``r``'s shape and returns an
+    array whose leading dims are ``r``'s."""
+    lo = jnp.floor(r)
+    t = r - lo
+    lo = lo.astype(jnp.int32)
+    a, b = take(lo), take(lo + 1)
+    t = t.reshape(t.shape + (1,) * (a.ndim - t.ndim))
+    return (1.0 - t) * a + t * b
