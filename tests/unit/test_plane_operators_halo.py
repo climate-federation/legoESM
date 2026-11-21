@@ -158,28 +158,6 @@ def test_packed_exchange_halo_plane_yxz_matches_unpacked():
         np.testing.assert_array_equal(np.asarray(p), np.asarray(i))
 
 
-def test_packed_exchange_mixed_trailing_shapes_matches_unpacked():
-    """Fields of different trailing shapes (full levels, nlev+1, tracer stack)
-    exchanged together equal per-field exchanges, shape and dtype kept."""
-    from legoesm.parallel.plane_mpi import (
-        exchange_halo_plane_yxz, make_plane_pencil_layout,
-        packed_exchange_halo_plane_yxz,
-    )
-    layout = make_plane_pencil_layout(
-        rank=0, n_ranks=1, n_ranks_y=1, n_ranks_x=1,
-        ny_global=8, nx_global=6, halo=3,
-    )
-    rng = np.random.default_rng(7)
-    fields = [jnp.asarray(rng.standard_normal(s))
-              for s in ((8, 6, 4), (8, 6, 5), (8, 6, 4, 3))]
-    packed = packed_exchange_halo_plane_yxz(*fields, layout=layout)
-    for f, p in zip(fields, packed):
-        i = exchange_halo_plane_yxz(f, layout)
-        assert p.shape == i.shape == (14, 12) + f.shape[2:]
-        assert p.dtype == f.dtype
-        np.testing.assert_array_equal(np.asarray(p), np.asarray(i))
-
-
 def _pad_yxz(arr_yxz, halo=1):
     """Wrap-pad the FIRST two axes for (ny, nx, *) layout."""
     pad_widths = [(halo, halo)] * 2 + [(0, 0)] * (arr_yxz.ndim - 2)

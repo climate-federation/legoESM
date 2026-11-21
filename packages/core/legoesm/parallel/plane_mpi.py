@@ -409,15 +409,16 @@ def packed_exchange_halo_plane_yxz(
     per-call mpi4jax dispatch overhead dominates many-small-message
     workloads (~2-5 ms per sendrecv vs ~50 μs on cluster IB).
 
-    All fields must share the ``(ny_local, nx_local)`` prefix; trailing
-    shapes may differ (e.g. full-level fields, ``nlev+1`` w and the tracer
-    stack together): each is flattened to ``(ny, nx, k)``, the stack is
-    concatenated on the last axis, exchanged once and split back.
+    All fields must share the same ``(ny_local, nx_local)`` prefix +
+    same trailing-axis dimensions (typically same ``nlev``). If
+    trailing-axis shapes differ per field, use the unpacked
+    :func:`exchange_halo_plane_yxz` instead.
 
     Parameters
     ----------
     *fields : jax.Array
-        Local interior arrays, each ``(ny_local, nx_local, ...)``.
+        Local interior arrays, each ``(ny_local, nx_local, ...)``
+        with the same trailing axes.
     layout : PlanePencilLayout
 
     Returns
@@ -428,25 +429,18 @@ def packed_exchange_halo_plane_yxz(
     """
     if not fields:
         return []
-    ny, nx = fields[0].shape[:2]
+    ref = fields[0]
     for f in fields[1:]:
-        if f.shape[:2] != (ny, nx):
+        if f.shape != ref.shape:
             raise ValueError(
-                f"packed_exchange_halo_plane_yxz requires a common (ny, nx) "
-                f"prefix; got {fields[0].shape} vs {f.shape}."
+                f"packed_exchange_halo_plane_yxz requires all fields "
+                f"share the same shape; got {ref.shape} vs {f.shape}."
             )
-    dtype = jnp.result_type(*fields)  # promotes like the former jnp.stack
-    sizes = [math.prod(f.shape[2:]) for f in fields]
-    stacked = jnp.concatenate(
-        [f.astype(dtype).reshape(ny, nx, k) for f, k in zip(fields, sizes)],
-        axis=-1)
+    # Stack along NEW trailing axis → single (ny, nx, ..., n_fields).
+    stacked = jnp.stack(fields, axis=-1)
     padded = exchange_halo_plane_yxz(stacked, layout)
-    out, start = [], 0
-    for f, k in zip(fields, sizes):
-        out.append(padded[..., start:start + k].reshape(
-            padded.shape[:2] + f.shape[2:]))
-        start += k
-    return out
+    # Split back along the trailing axis.
+    return [padded[..., i] for i in range(len(fields))]
 
 
 def scatter_plane_field(
