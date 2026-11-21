@@ -800,9 +800,9 @@ def parse_args(argv: list[str] | None = None):
                          "post-albedo shortwave, as FESOM2 does; sweeney_2band "
                          "also deposits the surface part on the live top thickness; "
                          "'ohlmann_2003' = Ohlmann (2003) chlorophyll double "
-                         "exponential (needs --chl-clim)."))
+                         "exponential (tripole lane; needs --chl-clim)."))
     p.add_argument("--sw-skin-fraction", type=float, default=None,
-                   help=("Fraction of the net shortwave 'jerlov_2band' keeps in the "
+                   help=("Tripole lane: fraction of the net shortwave 'jerlov_2band' keeps in the "
                          "surface cell (default: the kernel's 0.06; 0 = all through "
                          "the two-band profile, as ROMS/CROCO)."))
     p.add_argument("--chl-clim", type=str, default=None,
@@ -2801,9 +2801,12 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
     )
     _chl_sw = getattr(args, "sw_penetration", "auto")
     if getattr(args, "sw_skin_fraction", None) is not None and (
-            _chl_sw != "jerlov_2band" or grid_type == "mpas"):
+            _chl_sw != "jerlov_2band" or grid_type != "tripole"):
         raise ValueError("--sw-skin-fraction is read only by --sw-penetration "
-                         "jerlov_2band on the lat-lon / tripole lanes")
+                         "jerlov_2band on the tripole lane")
+    if _chl_sw == "ohlmann_2003" and grid_type != "tripole":
+        raise ValueError("--sw-penetration ohlmann_2003 is implemented on the "
+                         "tripole (lat-lon C-grid) lane only")
     if _chl_sw in ("sweeney_2band", "ohlmann_2003"):
         if not getattr(args, "chl_clim", None):
             raise ValueError(f"--sw-penetration {_chl_sw} needs --chl-clim <Sweeney_2005.nc>")

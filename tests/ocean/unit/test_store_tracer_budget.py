@@ -45,6 +45,21 @@ def test_record_stages_sum_to_total_and_final_T_matches():
     np.testing.assert_array_equal(np.asarray(new.T.data), np.asarray(ref.T.data))
 
 
+def test_record_closes_the_explicit_and_advective_heat_content_change():
+    # Wind-driven flow over a stratified box: nonzero transports, so the recorded divergences carry the
+    # advective change h1*T_adv - h0*T_mid exactly, and the explicit stages carry T_mid - T0.
+    st, new = _step(store_tracer_budget=True)
+    tb = {k: (np.asarray(v) if not isinstance(v, dict) else v) for k, v in new.tbudget.items()}
+    act = tb["active"] > 0.5
+    div = tb["div_h"] + tb["div_z"]
+    assert np.abs(tb["div_z"][act]).max() > 0.0 and np.abs(tb["div_h"][act]).max() > 0.0
+    np.testing.assert_allclose(tb["div_x"] + tb["div_y"], tb["div_h"], rtol=1e-10, atol=1e-18)
+    lhs = tb["h1"] * tb["T_adv"]
+    rhs = tb["h0"] * tb["T_mid"] - box.DT * div
+    np.testing.assert_allclose(lhs[act], rhs[act], rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose((tb["T_mid"] - tb["T0"])[act], box.DT * tb["R_total"][act], rtol=1e-10, atol=1e-12)
+
+
 @pytest.mark.parametrize("kw", [dict(tracer_time_integrator="ab2"), dict(tracer_advection="fct2")])
 def test_refused_where_the_applied_flux_is_not_one_stage(kw):
     with pytest.raises(ValueError, match="store_tracer_budget"):
