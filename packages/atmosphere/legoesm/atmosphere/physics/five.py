@@ -451,6 +451,12 @@ def _map_carry(x, nH, nf, G, ph_H, pf_f):
     return x
 
 
+def _run_inputs():
+    from legoesm.atmosphere.physics.physics_state import PHYSSTATE_INPUT_FIELDS
+    return (PHYSSTATE_INPUT_FIELDS - {"held_physics"}) | {"surface_T_sfc_override"}
+
+
+_RUN_INPUTS = _run_inputs()
 _NO_MAP = ("five_carry", "clubb_moments", "held_physics", "prng_key", "col_index")
 
 
@@ -495,8 +501,7 @@ def make_five_physics(host_fn, fine_fn, zm_fn, G: FiveGrid, cfg: FiveConfig, con
     ``fine_fn`` is the same physics built with ``convection_override`` set to
     the replay returned by :func:`make_conv_replay`; ``zm_fn`` the host
     convection module (None without convection)."""
-    from legoesm.atmosphere.physics.physics_state import (
-        PHYSSTATE_INPUT_FIELDS, update_physics_state)
+    from legoesm.atmosphere.physics.physics_state import update_physics_state
     nH = G.n_sub.size
     nf = G.owner.size
     has_moments = config.turbulence.scheme == "clubb"
@@ -526,12 +531,12 @@ def make_five_physics(host_fn, fine_fn, zm_fn, G: FiveGrid, cfg: FiveConfig, con
 
         # fine physics carry: entering columns take the host carries
         ps_f = _host_carries_to_fine(carry["ps"], ps_H_in, entered, G, ph_H, pf_f)
-        # run-level inputs (prescribed surface fluxes, dynamics tendencies) are
+        # run-level inputs (prescribed surface T and fluxes, dynamics tendencies) are
         # boundary conditions, not memory: the fine column reads the host's at
         # every call, whatever their rank
         ps_f = ps_f._replace(**{
             k: _map_carry(getattr(ps_H_in, k), nH, nf, G, ph_H, pf_f)
-            for k in PHYSSTATE_INPUT_FIELDS - {"held_physics"}})
+            for k in _RUN_INPUTS})
         if has_moments and ps_H_in.clubb_moments.shape[1:] == (15, nH + 1):
             mH = ps_H_in.clubb_moments
             ps_f = ps_f._replace(clubb_moments=jnp.where(

@@ -357,7 +357,7 @@ def test_wrapper_hands_the_fine_column_the_current_run_inputs(setup):
         return _Tend(_F(z), _F(z), None, {"q_v": _F(z)}), ps
 
     def fine_fn(state, grid, coord, ps, forcing):
-        seen.append(ps.surface_shflx_override_w_m2)
+        seen.append((ps.surface_shflx_override_w_m2, ps.surface_T_sfc_override))
         z = jnp.zeros((NCOL, nf))
         return _Tend(_F(z), _F(z), None, {"q_v": _F(z)}), ps
 
@@ -367,9 +367,11 @@ def test_wrapper_hands_the_fine_column_the_current_run_inputs(setup):
     ps = init_physics_state(ncol=NCOL, nlev=nH, physics_config=config, dtype=jnp.float64)
     ps = five.five_carry_seed(fn, state, hc, ps)
     for val in (40.0, 75.0):
-        ps = ps._replace(surface_shflx_override_w_m2=jnp.full((NCOL,), val))
+        ps = ps._replace(surface_shflx_override_w_m2=jnp.full((NCOL,), val),
+                         surface_T_sfc_override=jnp.full((NCOL,), 250.0 + val))
         _, ps = fn(state, None, hc, ps)
-        np.testing.assert_array_equal(np.asarray(seen[-1]), val)
+        np.testing.assert_array_equal(np.asarray(seen[-1][0]), val)
+        np.testing.assert_array_equal(np.asarray(seen[-1][1]), 250.0 + val)
 
 
 def test_wrapper_refuses_edge_winds(setup):
@@ -403,6 +405,8 @@ def test_make_physics_builds_five_only_where_it_can_run(setup):
     fn = make_physics(cfg, model_type="mpas", dt=600.0, cld_macmic_num_steps=2,
                       five=on, five_host_coord=hc)
     assert fn._five[1] is on
+    for hook in ("reset_state", "set_time", "set_T_sfc_override"):
+        assert callable(getattr(fn, hook))
     for off in (None, five.FiveConfig(enabled=False)):
         assert not hasattr(make_physics(cfg, model_type="mpas", dt=600.0,
                                         cld_macmic_num_steps=2, five=off), "_five")

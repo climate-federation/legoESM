@@ -450,7 +450,9 @@ def _wrap_five(host_fn, config, five, model_type, dt, column_mesh, need_rad,
         defer = (config.convection.scheme == "zhang_mcfarlane")
         zm_fn = make_convection_physics(config.convection, "mpas", dt,
                                         defer_detrainment=defer)
-    return five_mod.make_five_physics(host_fn, fine_fn, zm_fn, G, five, config, dt)
+    fn = five_mod.make_five_physics(host_fn, fine_fn, zm_fn, G, five, config, dt)
+    return _attach_lifecycle_hooks(
+        fn, [(f, None, None) for f in (host_fn, fine_fn, zm_fn) if f is not None])
 
 
 def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
