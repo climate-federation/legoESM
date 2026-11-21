@@ -331,7 +331,10 @@ def test_host_omega_is_the_dycores_flux_form_continuity(hybrid):
     from legoesm.grids.vertical import create_hybrid_coordinate
     mesh, sigma, state, _, _ = _mpas_setup(True)
     if hybrid:
-        sigma = create_hybrid_coordinate(state.T.data.shape[1])
+        nlev = state.T.data.shape[1]
+        s_h = np.linspace(0.05, 1.0, nlev + 1)
+        a = 0.4 * s_h * (1.0 - s_h)
+        sigma = create_hybrid_coordinate(nlev, jnp.asarray(a), jnp.asarray(s_h - a))
     ncell = state.T.data.shape[0]
     ps = 1.0e5 - 8.0e3 * jnp.asarray(np.random.default_rng(5).random(ncell))
     state = state._replace(p_s=state.p_s.replace(data=ps))
@@ -340,5 +343,5 @@ def test_host_omega_is_the_dycores_flux_form_continuity(hybrid):
     assert cfg.nu_del4_ps == 0.0
     tend = mpas_model_tendencies(state, mesh, sigma, cfg)
     np.testing.assert_allclose(np.asarray(dps), np.asarray(tend.dp_s_dt.data),
-                               rtol=1e-10, atol=1e-12)
+                               rtol=1e-12, atol=0.0)
     assert np.all(np.isfinite(np.asarray(omega)))

@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Callable
 
 import math
+import numbers
 
 import jax
 import jax.numpy as jnp
@@ -369,11 +370,19 @@ def require_relvar_scheme_lane(microphysics_config, model_type: str):
         raise ValueError(
             f"relvar_scheme={scheme!r} is wired on the MPAS lane only; got "
             f"model_type={model_type!r}.")
-    f = m.boutle_fsd_factor
-    if scheme == "boutle2014" and isinstance(f, (int, float)) and not (math.isfinite(f) and f > 0.0):
+    f, w = m.boutle_fsd_factor, m.boutle_overcast_ramp_width
+    if scheme == "cam6_clubb":
+        # the Boutle knobs are read by nothing on this path: refuse a set one
+        d = type(m)._field_defaults
+        for name, v in (("boutle_fsd_factor", f), ("boutle_overcast_ramp_width", w)):
+            if isinstance(v, numbers.Real) and v != d[name]:
+                raise ValueError(
+                    f"{name}={v!r} is read only by relvar_scheme='boutle2014'; "
+                    "with 'cam6_clubb' it would be silently inert.")
+        return
+    if isinstance(f, numbers.Real) and not (math.isfinite(f) and f > 0.0):
         raise ValueError(f"boutle_fsd_factor must be positive and finite, got {f!r}.")
-    w = m.boutle_overcast_ramp_width
-    if scheme == "boutle2014" and isinstance(w, (int, float)) and not (0.0 <= w < 1.0):
+    if isinstance(w, numbers.Real) and not (0.0 <= w < 1.0):
         raise ValueError(f"boutle_overcast_ramp_width must lie in [0, 1), got {w!r}.")
 
 

@@ -131,11 +131,18 @@ def mpas_flux_form_continuity(state, mesh, sigma_coord):
         compute_omega_hybrid, compute_pressure_velocity, compute_sigma_dot_from_cumsum)
     p_s = state.p_s.data
     nlev = state.T.data.shape[-1]
-    p_half = sigma_coord.pressure_at_half(p_s).reshape(p_s.shape[0], nlev + 1)
-    dp_edge = cell_to_edge_avg_3d(p_half[:, 1:] - p_half[:, :-1], mesh)
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+    if _hybrid:
+        # the edge average of the cell layer thickness, as the dycore's hybrid branch
+        p_half = sigma_coord.pressure_at_half(p_s).reshape(p_s.shape[0], nlev + 1)
+        dp_edge = cell_to_edge_avg_3d(p_half[:, 1:] - p_half[:, :-1], mesh)
+    else:
+        # p_s_edge * dsigma, as the dycore's sigma branch
+        dp_edge = (cell_to_edge_avg_3d(p_s[:, None], mesh)[:, :1]
+                   * sigma_coord.dsigma.astype(p_s.dtype)[None, :])
     cum = jnp.cumsum(divergence_cell_3d(state.u.data * dp_edge, mesh), axis=-1)
     D = cum[..., -1:]
-    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+    if _hybrid:
         dps = -D[..., 0] / sigma_coord.B_range
         return compute_omega_hybrid(compute_mass_flux_from_cumsum(cum, D, sigma_coord),
                                     p_s, dps, sigma_coord), dps
