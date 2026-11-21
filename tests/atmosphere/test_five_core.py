@@ -339,3 +339,76 @@ def test_r5_default_widths_are_the_config_defaults():
     assert (d.spread_width, d.split_width_kg_kg, d.cap_width, d.empty_width_kg_kg) == (
         0.01, 1.0e-9, 0.01, 1.0e-9)
     assert d.enabled is False
+
+
+# ------------------------------------------------- inputs, lanes, public entry
+def test_wrapper_hands_the_fine_column_the_current_run_inputs(setup):
+    """Prescribed surface fluxes (rank 1) reach the fine physics at every call,
+    not only when a column enters FIVE."""
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    G, hc = setup["G"], setup["hc"]
+    nH, nf = G.n_sub.size, G.owner.size
+    config = PhysicsConfig()
+    seen = []
+
+    def host_fn(state, grid, coord, ps, forcing):
+        z = jnp.zeros((NCOL, nH))
+        return _Tend(_F(z), _F(z), None, {"q_v": _F(z)}), ps
+
+    def fine_fn(state, grid, coord, ps, forcing):
+        seen.append(ps.surface_shflx_override_w_m2)
+        z = jnp.zeros((NCOL, nf))
+        return _Tend(_F(z), _F(z), None, {"q_v": _F(z)}), ps
+
+    fn = five.make_five_physics(host_fn, fine_fn, None, G, DEF, config, 300.0)
+    state = _State(_F(_rng(61, (NCOL, nH), 270, 300)), _F(jnp.zeros((NCOL, nH))), None,
+                   {"q_v": _F(_rng(62, (NCOL, nH), 1e-3, 1e-2))}, _F(setup["p_s"]))
+    ps = init_physics_state(ncol=NCOL, nlev=nH, physics_config=config, dtype=jnp.float64)
+    ps = five.five_carry_seed(fn, state, hc, ps)
+    for val in (40.0, 75.0):
+        ps = ps._replace(surface_shflx_override_w_m2=jnp.full((NCOL,), val))
+        _, ps = fn(state, None, hc, ps)
+        np.testing.assert_array_equal(np.asarray(seen[-1]), val)
+
+
+def test_wrapper_refuses_edge_winds(setup):
+    fn, state, ps, _ = _wrapper_case(setup, "always")
+    nH = setup["G"].n_sub.size
+    state = state._replace(u=_F(jnp.zeros((NCOL + 3, nH))))
+    with pytest.raises(ValueError, match="cell-centred winds"):
+        fn(state, None, setup["hc"], ps)
+
+
+def _clubb_cfg():
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.convection import ConvectionConfig
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.radiation import RadiationConfig
+    from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+    from legoesm.atmosphere.physics.turbulence import clubb as C  # noqa: N812
+    return PhysicsConfig(
+        radiation=RadiationConfig(scheme="none", cloud_config=CloudConfig(scheme="cam6_clubb")),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=C.CLUBBConfig(prognostic=True)),
+        microphysics=MicrophysicsConfig(scheme="morrison"))
+
+
+def test_make_physics_builds_five_only_where_it_can_run(setup):
+    from legoesm.atmosphere.physics.combined import make_physics
+    cfg, hc = _clubb_cfg(), setup["hc"]
+    on = five.FiveConfig(enabled=True)
+    fn = make_physics(cfg, model_type="mpas", dt=600.0, cld_macmic_num_steps=2,
+                      five=on, five_host_coord=hc)
+    assert fn._five[1] is on
+    for off in (None, five.FiveConfig(enabled=False)):
+        assert not hasattr(make_physics(cfg, model_type="mpas", dt=600.0,
+                                        cld_macmic_num_steps=2, five=off), "_five")
+    refused = (dict(model_type="hydrostatic", cld_macmic_num_steps=2),
+               dict(model_type="mpas", cld_macmic_num_steps=1),
+               dict(model_type="mpas", cld_macmic_num_steps=2, physics_cadence="write"),
+               dict(model_type="mpas", cld_macmic_num_steps=2, budget_ledger=True))
+    for kw in refused:
+        with pytest.raises(ValueError, match="FIVE"):
+            make_physics(cfg, dt=600.0, five=on, five_host_coord=hc, **kw)

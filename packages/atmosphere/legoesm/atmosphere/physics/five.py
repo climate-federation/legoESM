@@ -280,8 +280,17 @@ def exchange_bulk(inc_H, x_f, ph_H, pf_f, dp_f, G: FiveGrid, cfg=None, gross=Non
 
     A sink removes the fraction f = S/X of every sublayer's content (X the
     layer mean); the light water decides every switch (docs/90 7.11): an
-    empty layer (X <= 0) gives nothing, and f is capped at -1.  What a switch
-    withholds stays in host minus A(fine) and the next sync exchanges it.
+    empty layer (X <= 0) gives nothing, and f is capped at -1.  Where the host
+    applies its own increment (inactive columns, or a caller holding the host
+    state), what a switch withholds stays in host minus A(fine) and the next
+    sync exchanges it.  In an ACTIVE column of :func:`make_five_physics` the
+    host takes A(fine), so the removed water is f_eff X, not S: KNOWN
+    DIFFERENCE, not balanced by the replayed heating and precipitation.  It
+    arises where S < -X (the hard cap, as in the reference fork) and, at the
+    smooth default, also for -X < S < -(1 - cap_width) X, where at most
+    4/27 * cap_width * X extra is removed (1.5e-3 X at cap_width 0.01; the
+    ``cap_edge`` gap stored in tests/atmosphere/test_five_core.py).  cap_width
+    = 0 confines it to S < -X.
     ``gross``: optional ``(sink, source)`` of the host process; without it the
     net is split by sign.  ``cfg`` (FiveConfig) gives the RULE 5 widths of the
     sign split, the empty-layer test and the cap; None = the hard switches."""
@@ -486,7 +495,8 @@ def make_five_physics(host_fn, fine_fn, zm_fn, G: FiveGrid, cfg: FiveConfig, con
     ``fine_fn`` is the same physics built with ``convection_override`` set to
     the replay returned by :func:`make_conv_replay`; ``zm_fn`` the host
     convection module (None without convection)."""
-    from legoesm.atmosphere.physics.physics_state import update_physics_state
+    from legoesm.atmosphere.physics.physics_state import (
+        PHYSSTATE_INPUT_FIELDS, update_physics_state)
     nH = G.n_sub.size
     nf = G.owner.size
     has_moments = config.turbulence.scheme == "clubb"
@@ -494,6 +504,9 @@ def make_five_physics(host_fn, fine_fn, zm_fn, G: FiveGrid, cfg: FiveConfig, con
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
         if phys_state is None:
             raise ValueError("FIVE needs a PhysicsState")
+        if state.u.data.shape != state.T.data.shape:
+            raise ValueError("FIVE needs cell-centred winds (u on the T columns); "
+                             f"got u {state.u.data.shape} vs T {state.T.data.shape}")
         if phys_state.five_carry is None:
             # first call: seed here, where the column state is at hand (one
             # retrace of the caller at the None -> dict transition)
@@ -513,6 +526,12 @@ def make_five_physics(host_fn, fine_fn, zm_fn, G: FiveGrid, cfg: FiveConfig, con
 
         # fine physics carry: entering columns take the host carries
         ps_f = _host_carries_to_fine(carry["ps"], ps_H_in, entered, G, ph_H, pf_f)
+        # run-level inputs (prescribed surface fluxes, dynamics tendencies) are
+        # boundary conditions, not memory: the fine column reads the host's at
+        # every call, whatever their rank
+        ps_f = ps_f._replace(**{
+            k: _map_carry(getattr(ps_H_in, k), nH, nf, G, ph_H, pf_f)
+            for k in PHYSSTATE_INPUT_FIELDS - {"held_physics"}})
         if has_moments and ps_H_in.clubb_moments.shape[1:] == (15, nH + 1):
             mH = ps_H_in.clubb_moments
             ps_f = ps_f._replace(clubb_moments=jnp.where(
