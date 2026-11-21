@@ -3536,8 +3536,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # face fluxes the update used), and T just before and after the implicit
     # vertical solve (h1 weighted).  Supported for the forward Euler outer
     # integrator with the euler tracer integrator and an exposed-flux tracer
-    # scheme (as store_salt_flux); prognostic state is unchanged.  Appended
-    # to preserve positional callers.
+    # scheme (as store_salt_flux); prognostic state is unchanged.  The record
+    # turns ``state.tbudget`` from None into a dict, so with the flag on the
+    # step runs in a Python loop only (a lax.scan / jitted multi-step carry
+    # fails loudly on the changed treedef; no zero seed as for store_salt_flux).
+    # Appended to preserve positional callers.
     store_tracer_budget: bool = False
 
 
