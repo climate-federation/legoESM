@@ -11,6 +11,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
+from legoesm import constants  # noqa: E402
 from legoesm.ocean.dynamics import open_boundary_latlon as ob  # noqa: E402
 
 _EPS = ob._EPS
@@ -107,6 +108,26 @@ def test_default_width_gradient_is_finite_on_a_flat_interior():
                       lambda *x: ob._orlanski_1d(*x, 0.05, 0.001, jnp.asarray(1.0, dt), width=0.01).sum()):
                 g = jax.grad(f, argnums=argnum)(*args)
                 assert np.all(np.isfinite(np.asarray(g))), (dt, argnum)
+
+
+def test_default_width_gradient_is_finite_in_band_near_rest():
+    """Constant rows of size 1e-9 (fluid near rest) sit inside the inflow/outflow band; float32
+    gradients through every operand stay finite (no y**-2 in the division derivatives)."""
+    for dt in (jnp.float32, jnp.float64):
+        x = 1e-9
+        args = tuple(jnp.full((2, 8), v, dt) for v in (x, 1.005 * x, x, 0.0, 0.0))
+        for argnum in range(5):
+            for f in (lambda *a: ob._orlanski(*a, 0.05, 0.001, width=0.01).sum(),
+                      lambda *a: ob._orlanski_1d(*a, 0.05, 0.001, jnp.asarray(1.0, dt), width=0.01).sum()):
+                g = jax.grad(f, argnums=argnum)(*args)
+                assert np.all(np.isfinite(np.asarray(g))), (dt, argnum)
+
+
+def test_flather_gradient_is_finite_at_dry_points():
+    z = jnp.zeros(6, jnp.float32)
+    g = jax.grad(lambda e: ob._characteristic(z, z, e, e, e, z, z, jnp.ones(6, jnp.float32) * 5e4, 900.0,
+                                              constants.g, z, z, 1.0).sum())(z)
+    assert np.all(np.isfinite(np.asarray(g)))
 
 
 def test_default_width_makes_no_new_extremes():

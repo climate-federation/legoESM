@@ -279,3 +279,14 @@ def test_relative_helpers_float32_gradient_at_tiny_operands():
               lambda t: step_rel(t, jnp.float32(0.0), 0.01), lambda t: positive_part_rel(t, t, 0.01)):
         for x0 in (x, jnp.float32(0.0)):
             assert np.isfinite(float(jax.grad(f)(x0)))
+
+
+def test_step_rel_tie_at_zero_band_matches_the_hard_form():
+    assert float(step_rel(jnp.float64(0.0), 0.0, 0.01)) == 0.0
+    assert float(step_rel(jnp.float64(1.0), 0.0, 0.01)) == 1.0
+
+
+def test_relative_helpers_float32_gradient_inside_a_tiny_band():
+    a = jnp.float32(1e-18)
+    for f in (lambda t: max_rel(t, a, 0.01), lambda t: step_rel(t - a, a, 0.01)):
+        assert np.isfinite(float(jax.grad(f)(a * jnp.float32(1.002))))

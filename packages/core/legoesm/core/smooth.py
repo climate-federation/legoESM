@@ -123,25 +123,26 @@ def pnorm_smooth_min(a: jax.Array, b: jax.Array, p: float, eps: float) -> jax.Ar
 
 
 @jax.custom_jvp
-def _div(x, y):
+def stable_div(x, y):
+    """``x / y`` whose derivative is formed as ``(dx - (x/y) dy) / y``, never ``y**-2``."""
     return x / y
 
 
-@_div.defjvp
-def _div_jvp(primals, tangents):
-    # d(x/y) = (dx - (x/y) dy) / y through _div again, so forward-mode AD never
+@stable_div.defjvp
+def _stable_div_jvp(primals, tangents):
+    # d(x/y) = (dx - (x/y) dy) / y through stable_div again, so forward-mode AD never
     # forms y^-2 (it underflows to 0 for tiny y in fp32: 0*inf = NaN).  Measured
     # in fp32 at y ~ 1e-20: first and second derivatives (fwd-fwd, fwd-rev,
     # rev-rev) finite; third-order reverse is NaN (transposition divides plainly).
     x, y = primals
     dx, dy = tangents
-    out = _div(x, y)
-    return out, _div(dx - out * dy, y)
+    out = stable_div(x, y)
+    return out, stable_div(dx - out * dy, y)
 
 
 def _pnorm_ratio(lo, hi, eps):
     ok = hi > eps
-    return ok, jnp.where(ok, _div(lo, jnp.where(ok, hi, jnp.ones_like(hi))), jnp.zeros_like(lo))
+    return ok, jnp.where(ok, stable_div(lo, jnp.where(ok, hi, jnp.ones_like(hi))), jnp.zeros_like(lo))
 
 
 @functools.partial(jax.custom_jvp, nondiff_argnums=(2, 3))
@@ -329,12 +330,12 @@ def sqrt_c1(x: jax.Array, width: float) -> jax.Array:
 
 
 def _unit_ramp(x: jax.Array, wabs: jax.Array) -> jax.Array:
-    """``clip(x / wabs, 0, 1)`` with the division taken only inside ``0 < x < wabs``
-    (double where), so no ``1/wabs**2`` term reaches the gradient outside the band
-    and a vanishing ``wabs`` never makes 0/0."""
+    """``clip(x / wabs, 0, 1)`` for ``x > 0`` and 0 for ``x <= 0`` (also when
+    ``wabs = 0``), with the division taken only inside ``0 < x < wabs`` (double
+    where) and through :func:`stable_div`, so no ``1/wabs**2`` reaches the gradient."""
     inside = (x > 0) & (x < wabs)
-    t = x / jnp.where(inside, wabs, 1.0)
-    return jnp.where(inside, t, jnp.where(x >= wabs, 1.0, 0.0))
+    t = stable_div(x, jnp.where(inside, wabs, 1.0))      # derivative (dx - t dw)/w: no w**-2 in float32
+    return jnp.where(inside, t, jnp.where((x > 0) & (x >= wabs), 1.0, 0.0))
 
 
 def step_rel(x: jax.Array, scale: jax.Array, width: float) -> jax.Array:

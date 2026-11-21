@@ -27,7 +27,7 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-from legoesm.core.smooth import max_rel, min_rel, positive_part_rel, step_rel
+from legoesm.core.smooth import max_rel, min_rel, positive_part_rel, stable_div, step_rel
 
 _CX_CRIT = 0.292893218813452          # 1 - 1/sqrt(2), u2dbc.F threshold of the zx extrapolation
 _EPS = 1.0e-20
@@ -117,11 +117,12 @@ def _characteristic(ub_old, u1_old, zb_old, z1_old, z1_new, hb, h1, dn, dt_s, g,
     hx = jnp.sqrt(g / max_rel(D, _EPS, _FLOOR_WIDTH))
     cx = dt_s * D * hx / dn
     zx = (0.5 + cx) * z1_old + (0.5 - cx) * zb_old
-    corr = (z1_new + cx * zb_old - (1.0 + cx) * z1_old) * (
-        1.0 - _CX_CRIT / max_rel(cx, _EPS, _FLOOR_WIDTH)) ** 2
+    active = cx > _CX_CRIT
+    cx_a = jnp.where(active, cx, 1.0)            # inactive (dry) points: no overflow in the unused branch
+    corr = (z1_new + cx_a * zb_old - (1.0 + cx_a) * z1_old) * (1.0 - _CX_CRIT / cx_a) ** 2
     # C1 as it stands (RULE 5): corr and its derivative in cx both vanish at
     # cx = _CX_CRIT, so the switch has no jump in value or slope.
-    zx = jnp.where(cx > _CX_CRIT, zx + corr, zx)
+    zx = jnp.where(active, zx + corr, zx)
     return 0.5 * ((1.0 - cx) * ub_old + cx * u1_old + u_ext - sign * hx * (zx - z_ext))
 
 
@@ -300,7 +301,7 @@ def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=Non
         # a flat column (no gradient at all) has cff at the floor; keep fb_old there without
         # differentiating a division by the floor (float32 overflows 1/floor**2)
         live = (dfx * dfx + dfy * dfy > 0) | (cx > 0)
-        fb = jnp.where(live, num / jnp.where(live, cff + cx, 1.0), fb_old)
+        fb = jnp.where(live, stable_div(num, jnp.where(live, cff + cx, 1.0)), fb_old)
     out = (1.0 - tau) * fb + tau * data
     return out if mb is None else out * mb
 
@@ -328,7 +329,7 @@ def _orlanski_1d(fb_new, f1_old, f1_new, f2_new, data, r_in, r_out, rx_max, *, w
         # one-sided (0 for inflow, never negative), so 1 + rx stays positive
         pp = positive_part_rel(p, dhdt * dhdt + dhdx * dhdx, width)
         live = pp > 0
-        rx = jnp.where(live, pp / jnp.where(live, max_rel(dhdx * dhdx, pp / rx_max, width), 1.0), 0.0)
+        rx = jnp.where(live, stable_div(pp, jnp.where(live, max_rel(dhdx * dhdx, pp / rx_max, width), 1.0)), 0.0)
     fb = (fb_new + rx * f1_new) / (1.0 + rx)
     r = w_out * r_out + (1.0 - w_out) * r_in          # exact r_out / r_in at w_out = 1 / 0
     g = r / (1.0 + r)
