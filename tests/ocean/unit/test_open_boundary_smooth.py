@@ -113,6 +113,20 @@ def test_default_widths_are_the_approved_value():
     assert OMp25Config().smooth_width == W
 
 
+def test_om4p5_width_is_validated():
+    from legoesm.grids.factory import create_regional_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.vertical import create_z_star_from_thicknesses
+    grid, _ = create_regional_grid("latlon", n_lat=4, n_lon=4, lat_south=-2.0, lat_north=2.0,
+                                   lon_west=200.0, lon_east=204.0)
+    zc = create_z_star_from_thicknesses(np.array([20.0, 40.0]))
+    for bad in (-0.01, float("nan")):
+        cfg = LatLonCGridOceanConfig()._replace(lateral_friction_scheme="om4p25",
+                                                omp25=OMp25Config(smooth_width=bad))
+        with pytest.raises(ValueError, match="omp25.smooth_width"):
+            LatLonCGridOceanModel(grid, zc, cfg)
+
+
 def test_stored_gaps_at_the_default_width():
     measured = _cases()
     for name, gaps in GAPS.items():

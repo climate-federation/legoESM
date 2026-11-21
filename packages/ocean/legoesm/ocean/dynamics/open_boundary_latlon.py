@@ -39,7 +39,7 @@ def _over_floor(x, s):
     derivative of a division by ``_EPS``: float32 overflows it).  The floor binds
     only on all-dry faces or sections, where ``x`` is 0."""
     ok = s > _EPS
-    return jnp.where(ok, x / jnp.where(ok, s, 1.0), jax.lax.stop_gradient(x) / _EPS)
+    return jnp.where(ok, stable_div(x, jnp.where(ok, s, 1.0)), jax.lax.stop_gradient(x) / _EPS)
 
 
 class OpenBoundaryData(NamedTuple):
@@ -122,7 +122,7 @@ def _characteristic(ub_old, u1_old, zb_old, z1_old, z1_new, hb, h1, dn, dt_s, g,
     # sqrt(g / max(D, _EPS)), with the floored (dry) points as a constant so no
     # derivative of g / _EPS reaches the gradient (float32 overflows it)
     wet = D > _EPS
-    hx = jnp.where(wet, jnp.sqrt(g / jnp.where(wet, D, 1.0)), jnp.sqrt(g / _EPS))
+    hx = jnp.where(wet, jnp.sqrt(g) * jax.lax.rsqrt(jnp.where(wet, D, 1.0)), jnp.sqrt(g / _EPS))
     cx = dt_s * D * hx / dn
     zx = (0.5 + cx) * z1_old + (0.5 - cx) * zb_old
     active = cx > _CX_CRIT
@@ -332,7 +332,9 @@ def _orlanski_1d(fb_new, f1_old, f1_new, f2_new, data, r_in, r_out, rx_max, *, w
     w_out = step_rel(p, dhdt * dhdt + dhdx * dhdx + _EPS, width)
     if width == 0:
         out = p > 0.0
-        rx = jnp.where(out, jnp.minimum(stable_div(dhdt, jnp.where(out, dhdx, 1.0)), rx_max), 0.0)
+        capped = jnp.abs(dhdt) >= rx_max * jnp.abs(dhdx)       # decided before dividing (no overflow)
+        free = out & ~capped
+        rx = jnp.where(out, jnp.where(capped, rx_max, stable_div(dhdt, jnp.where(free, dhdx, 1.0))), 0.0)
     else:
         # one-sided (0 for inflow, never negative), so 1 + rx stays positive
         pp = positive_part_rel(p, dhdt * dhdt + dhdx * dhdx, width)

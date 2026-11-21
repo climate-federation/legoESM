@@ -170,3 +170,14 @@ def test_hard_1d_capped_quotient_gradient_is_finite():
         g = jax.grad(lambda *x: ob._orlanski_1d(*x, 0.1, 0.01, jnp.asarray(1.0, jnp.float32),
                                                 width=0.0).sum(), argnums=argnum)(*a)
         assert np.all(np.isfinite(np.asarray(g))), argnum
+
+
+def test_near_floor_and_huge_quotient_gradients_are_finite():
+    t = jnp.full((1, 4), 2e-20, jnp.float32)
+    g = jax.grad(lambda h: ob._over_floor(h, h.sum(axis=0, keepdims=True)).sum())(t)
+    assert np.all(np.isfinite(np.asarray(g)))
+    a = [jnp.full((1, 4), v, jnp.float32) for v in (1.0, 100.0, 0.0, -1e-37, 0.0)]
+    for argnum in range(5):
+        g = jax.grad(lambda *x: ob._orlanski_1d(*x, 0.1, 0.01, jnp.asarray(1.0, jnp.float32),
+                                                width=0.0).sum(), argnums=argnum)(*a)
+        assert np.all(np.isfinite(np.asarray(g))), argnum

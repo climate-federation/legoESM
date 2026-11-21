@@ -4334,6 +4334,8 @@ class LatLonCGridOceanModel:
         """Resolve conditional defaults, then validate configuration ranges."""
         validate_smoothing_width("open_boundary_smooth_width",
                                  config.open_boundary_smooth_width)
+        if config.omp25 is not None:
+            validate_smoothing_width("omp25.smooth_width", config.omp25.smooth_width)
         if getattr(config, "momentum_face_mask", "2d") not in ("2d", "3d"):
             raise ValueError(
                 "momentum_face_mask must be '2d' or '3d', got "

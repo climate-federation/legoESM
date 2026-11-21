@@ -30,7 +30,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.core.profile_metrics import safe_sqrt
-from legoesm.core.smooth import max_rel, min_rel, sqrt_c1, step_rel
+from legoesm.core.smooth import max_rel, min_rel, sqrt_c1, stable_div, step_rel
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
 from legoesm.grids.halo_latlon import (
@@ -3606,7 +3606,7 @@ def wkb_first_baroclinic_wave_speed(T, S, h_k, active, eos_fn, rho0, g, *, width
                / (jnp.sum(both, axis=-1, keepdims=True) + 1.0))
         ok = ref > 0                      # an unstratified column has N = 0, as the hard form
         ref1 = jnp.where(ok, ref, 1.0)
-        N = jnp.where(ok, jnp.sqrt(ref1) * sqrt_c1(N2 / ref1, width), 0.0)
+        N = jnp.where(ok, jnp.sqrt(ref1) * sqrt_c1(stable_div(N2, ref1), width), 0.0)
     return jnp.sum(N * both * dz, axis=-1) / jnp.pi
 
 
