@@ -305,6 +305,14 @@ class DycoreConfig(NamedTuple):
     # NO floor at all), so every grid's tracer positivity is equivalent.  The
     # ``mpas_`` prefix is legacy; a rename is deferred to avoid a schema churn.
     mpas_conservative_tracer_clamp: bool = True
+    # Grid-general (MPAS, lat-lon, MPAS-MPI lanes; lanes whose positivity
+    # stage has no grid-point T -- spectral, FV3 duo -- keep the legacy
+    # borrow): before the borrow, pay a column's net-negative condensate from
+    # the same column's vapour with its latent heat, conserving water and
+    # column frozen MSE.  False = the legacy form, which creates water when
+    # the globe cannot repay the deficit.  Ported from the ENSO fork
+    # (I. Di Carlo), owner decision 2026-11-20: fixed form is the default.
+    positivity_condensate_from_vapour: bool = True
     # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
     # lat-lon C-grid lane (discretization-consistent with the geopotential
     # and the momentum/thermo ln p^SB gradients).  Default ON; False keeps

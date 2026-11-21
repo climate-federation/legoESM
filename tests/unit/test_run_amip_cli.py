@@ -6547,3 +6547,16 @@ def test_two_leaf_implicit_ground_flux_with_snow_node_is_refused_strict():
         off.validate_strict()
     except ValueError as err:
         assert "implicit_ground_flux (on by default)" not in str(err)
+
+
+def test_positivity_condensate_from_vapour_flag_flows_to_config():
+    """--positivity-condensate-from-vapour round-trips to DycoreConfig
+    (default ON, owner decision 2026-11-20; --no- restores the legacy borrow)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg.dycore.positivity_condensate_from_vapour is True
+    cfg_no = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-positivity-condensate-from-vapour",
+    ]), parser))
+    assert cfg_no.dycore.positivity_condensate_from_vapour is False
