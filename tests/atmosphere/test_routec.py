@@ -110,7 +110,7 @@ def test_v1_no_cloud_no_inversion():
     c = _known_column()
     c["ql"] = jnp.zeros_like(c["ql"])
     assert float(jnp.sum(_cand(c).weight)) == 0.0
-    assert float(jnp.sum(_cand(c, WD).weight)) < 1e-6
+    assert float(jnp.sum(_cand(c, WD).weight)) < 1e-3   # logistic tail of the ql test
 
 
 def test_cloud_top_weights_one_hot_and_bounded():

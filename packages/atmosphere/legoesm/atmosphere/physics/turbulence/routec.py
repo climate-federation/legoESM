@@ -121,6 +121,11 @@ def _step(x, width):
     return sigmoid_switch(x, _sharp(width))
 
 
+def _gt(x, width):
+    """Strict x > 0, smoothed by the same logistic (0 = hard)."""
+    return 1.0 - _step(-x, width)
+
+
 def cloud_top_weights(cloudy):
     """P(layer k is the top of the lowest contiguous cloudy deck), (ncol, nz),
     from per-layer cloudy probabilities (ascending).  One-hot at the deck top
@@ -175,11 +180,11 @@ def _reconstruct(thvl, pi_half, kb, w: RouteCWidths):
     den_q = a + _sqrt0(disc)
     m_q = _safe_div(2.0 * c, den_q)            # smaller root of (C4)
     jump_q = a - s1 * m_q * dpiA               # (C5)
-    q = _step(disc, w.jump ** 2) * _step(jump_q - D0, w.jump) * _step(den_q, w.jump)
+    q = _step(disc, w.jump ** 2) * _step(jump_q - D0, w.jump) * _gt(den_q, w.jump)
     m_d0 = _safe_div(2.0 * c, a + D0)          # (C7)
     m = q * m_q + (1.0 - q) * m_d0
     jump = q * jump_q + (1.0 - q) * D0
-    act = (_step(c, w.jump) * _step(a + D0, w.jump) * _step(m, w.m)
+    act = (_gt(c, w.jump) * _gt(a + D0, w.jump) * _gt(m, w.m)
            * _step(1.0 - m, w.m))
     finite = jnp.isfinite(m) & jnp.isfinite(jump)
     return (jnp.where(finite, act, 0.0), jnp.where(finite, m, 1.0), u, pcA, pc2, pc3,
@@ -196,7 +201,7 @@ def diagnose_candidates(thvl, ql, p_half, w: RouteCWidths) -> Candidates:
     reconstruction at kb; at zero widths this is exactly the hard choice."""
     ncol, nz = thvl.shape
     pi_half = p_half[:, :1] - p_half
-    cloudy = (_step(ql - QL_MIN, w.ql) * _step(p_half[:, 1:] - P_TOP_PA, w.p))
+    cloudy = (_step(ql - QL_MIN, w.ql) * _gt(p_half[:, 1:] - P_TOP_PA, w.p))
     P_T = cloud_top_weights(cloudy)
     kbs = list(range(1, max(nz - 2, 1)))
     rec = [_reconstruct(thvl, pi_half, k, w) for k in kbs]
@@ -231,7 +236,7 @@ def inversion_jump(x, cand: Candidates, w: RouteCWidths):
     xM, xA, x2 = (_cand_take(x, cand.kb, o) for o in (-1, 0, 1))
     m = jnp.maximum(cand.m, 1e-6)              # guard: GB form is weighted ~0 there
     gb = 2.0 * (xA - (1.0 - m) * xM) / m - xM - extrapolated_top(x, cand)
-    lam = _step(1.0 / LOCK_FRAC_MAX - cand.m, w.lock)
+    lam = _gt(1.0 / LOCK_FRAC_MAX - cand.m, w.lock)
     return lam * (x2 - xM) + (1.0 - lam) * gb
 
 
@@ -307,12 +312,12 @@ def evaporative_enhancement(thl_c, rt_c, dthl, drt, p, exner, w: RouteCWidths):
     chi_b = jax.lax.stop_gradient(0.5 * (lo + hi))
     f_b, df_b = jax.jvp(f, (chi_b,), (jnp.ones_like(chi_b),))
     chi_s = chi_b - _safe_div(f_b, df_b)
-    gate = _step(f0, w.ql) * _step(-f1, w.ql)
+    gate = _gt(f0, w.ql) * _gt(-f1, w.ql)
     thv_c = theta_v_of(thl_c, rt_c, p, exner, w)
     b1 = theta_v_of(thl_c + dthl, rt_c + drt, p, exner, w) - thv_c
     thl_s, rt_s = thl_c + chi_s * dthl, rt_c + chi_s * drt
     bs = thl_s * (1.0 + _EPS_V * rt_s) - thv_c          # just saturated: r_c = 0, r_v = r_t
-    E = gate * _step(b1, w.jump) * smooth_clamp(chi_s - _safe_div(bs, b1), 0.0, 1.0,
+    E = gate * _gt(b1, w.jump) * smooth_clamp(chi_s - _safe_div(bs, b1), 0.0, 1.0,
                                                  _sharp(w.e))
     return E, gate * chi_s
 
