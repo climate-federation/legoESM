@@ -33,6 +33,7 @@ References
 from __future__ import annotations
 
 import logging
+import math
 from typing import Callable, NamedTuple
 
 import jax
@@ -739,6 +740,7 @@ def _van_leer_face_values(
     field: jax.Array,
     dc_full: jax.Array,
     d_layer: jax.Array,
+    smoothing_width: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Metric-aware van-Leer face values on any monotone vertical coordinate.
 
@@ -783,6 +785,32 @@ def _van_leer_face_values(
     dsp = _pad_last(d_layer, 1, 1)  # (..., nlev+2)
     d_above, d_below = dsp[..., :-1], dsp[..., 1:]          # (..., nlev+1)
     d_sum = d_above + d_below
+
+    if smoothing_width > 0.0:
+        from legoesm.core.smooth import smooth_abs, smooth_max, smooth_min
+
+        # Work in mixing-ratio increments, avoiding singular slope ratios at
+        # plateaus. The harmonic mean tends to the hard van Leer slope as
+        # width tends to zero; equal slopes and constant fields remain exact.
+        delta = f_j - f_jm1
+        above = (f_jm1 - f_jm2) * (dc_loc / dc_up)
+        below = (f_jp1 - f_j) * (dc_loc / dc_dn)
+        abs_delta = smooth_abs(delta, smoothing_width**2)
+        abs_above = smooth_abs(above, smoothing_width**2)
+        abs_below = smooth_abs(below, smoothing_width**2)
+        slope_pos = (above * abs_delta + delta * abs_above) / (abs_above + abs_delta)
+        slope_neg = (below * abs_delta + delta * abs_below) / (abs_below + abs_delta)
+        corrections = jnp.stack(((d_above / d_sum) * slope_pos,
+                                 (d_below / d_sum) * slope_neg))
+        # median(c, 0, delta) is clip(c, min(0,delta), max(0,delta)).
+        # Smooth max/min of the SAME three values are opposite at c=delta=0:
+        # their sum cancels exactly, preserving a constant field. This also
+        # approaches the hard stretched-grid clip as width tends to zero.
+        sharpness = 1.0 / smoothing_width
+        upper = smooth_max(smooth_max(corrections, 0.0, sharpness), delta, sharpness)
+        lower = smooth_min(smooth_min(corrections, 0.0, sharpness), delta, sharpness)
+        bounded = corrections + delta - (upper + lower)
+        return f_jm1 + bounded[0], f_j - bounded[1]
 
     eps = 1e-30
     t_grad = ratio_grad_floor(jnp.result_type(field))
@@ -2601,6 +2629,8 @@ def vertical_advection_hybrid_van_leer(
     mass_flux: jax.Array,
     p_s: jax.Array,
     coord: HybridSigmaPressureCoordinate,
+    smoothing_width: float = 1e-10,
+    flux_smoothing_width: float = 1e-6,
 ) -> jax.Array:
     """Conservative, slope-limited (van Leer) tracer vertical advection, hybrid.
 
@@ -2618,22 +2648,82 @@ def vertical_advection_hybrid_van_leer(
     this closes the VERTICAL term only; the MPAS horizontal tracer operator is
     advective and not paired with the layer-thickness continuity.
 
-    Face values: the metric-aware van-Leer reconstruction in pressure,
-    clipped to the two adjacent cells.  The faces next to the top and bottom
-    layers use the donor cell instead: a reconstructed value there is downwind
+    At zero width, face values use metric-aware van Leer reconstruction in
+    pressure, clipped to the two adjacent cells. At positive width, they use
+    the smooth reconstruction described below. The faces next to the top and
+    bottom layers use the donor cell instead: a reconstructed value there is downwind
     of the boundary layer for inflow into the domain interior (see the sigma
     kernel's docstring for the instability), and a face shared by two cells
     must carry ONE value for the telescoping to hold.
+
+    KNOWN DIFFERENCE (T18, W4): the default ``smoothing_width=1e-10``
+    regularizes mixing-ratio increments [kg/kg] with a harmonic slope and
+    smooth median face clamp; ``flux_smoothing_width=1e-6`` regularizes the
+    upwind mass-flux split [Pa/s]. The previous single 1e-6 width was too
+    large for condensate increments (T17: 1464 negative faces, -1.64e-7 kg/kg).
+    Separate widths retain C-infinity dependence on tracer and mass flux at
+    their positive defaults, including plateaus and zero flux. Each width is
+    static and may independently be zero; BOTH zero restore the previous hard
+    reconstruction and flux selection bitwise. A positive width whose square
+    or reciprocal is unrepresentable in its input dtype raises.
+    Exact constant fields and paired column conservation are retained. Finite
+    widths do NOT guarantee TVD, positivity or bounded reconstruction; negative
+    water reaches the existing conservative borrow on both production lanes
+    (MPAS van Leer, lat-lon SB). This change does not modify that borrow.
+    With the new defaults the seeded CAM L32 per-column maximum absolute
+    tendency gaps [kg/kg/s] are 2.8815e-13..6.6878e-13 (seed-0 Gaussian),
+    2.2949e-13..6.2433e-13 (seed-1 Gaussian), 9.0352e-14..1.0655e-13
+    (top-hat), and 3.6982e-10..1.1407e-9 (seed-3 random). An offline
+    standard-atmosphere level-2 MPAS mesh with CAM L32, production humidity
+    initialization and seeded 1 m/s wind perturbations gives a full vapour
+    tendency gap of 3.6705e-13 kg/kg/s maximum absolute and 6.7668e-5
+    area-weighted relative L2. These are fixture measurements, not climate
+    statistics. On the same MPAS fixture with the T17 condensate decks and
+    dt=112.5 s, the new defaults give 1296 negative effective faces (minimum
+    -1.8498e-11 kg/kg), 1300 negative forward-Euler updated cells (minimum
+    -1.4606e-13 kg/kg), and max face error / regional hard-face range 0.24280.
+    Whole-species vertical tendency relative L2 gaps for q_v/q_c/q_i/q_r/q_s
+    and q_v*1e-6 are respectively 8.0275e-5, 9.1954e-5, 1.5663e-4,
+    1.8808e-4, 1.2091e-3, 7.6004e-3. Full per-column gaps are stored in
+    ``tests/unit/test_vertical_advection_hybrid_van_leer.py``.
     """
+    # Each static regularizer is checked in the dtype of the quantity it smooths.
+    # Either width may independently recover its hard branch.
+    for name, width, dtype in (
+        ("smoothing_width", smoothing_width, field.dtype),
+        ("flux_smoothing_width", flux_smoothing_width, mass_flux.dtype),
+    ):
+        if not math.isfinite(width) or width < 0.0:
+            raise ValueError(f"{name} must be finite and nonnegative")
+        if width > 0.0:
+            limits = np.finfo(np.dtype(dtype))
+            if not (float(limits.tiny) <= width * width <= float(limits.max)
+                    and 1.0 / width <= float(limits.max)):
+                raise ValueError(f"{name} square and reciprocal must be representable")
     dp = dp_from_hybrid(coord, p_s)                                  # (..., nlev)
     dc = jnp.diff(pressure_from_hybrid(coord, p_s, full=True), axis=-1)
-    q_pos, q_neg = _van_leer_face_values(field, dc, dp)              # (..., nlev+1)
+    q_pos, q_neg = _van_leer_face_values(field, dc, dp, smoothing_width)
     donor_pos = jnp.concatenate([field[..., :1], field], axis=-1)    # cell above
     donor_neg = jnp.concatenate([field, field[..., -1:]], axis=-1)   # cell below
     nlev = field.shape[-1]
     edge = jnp.zeros(nlev + 1, dtype=bool).at[jnp.array([1, nlev - 1])].set(True)
     q_pos = jnp.where(edge, donor_pos, q_pos)
     q_neg = jnp.where(edge, donor_neg, q_neg)
+    if flux_smoothing_width > 0.0:
+        from legoesm.core.smooth import smooth_abs
+
+        # Increment form keeps constants exactly zero even under smoothing.
+        # One shared face flux still telescopes in the column product rule.
+        flux_abs = smooth_abs(mass_flux, flux_smoothing_width**2) - flux_smoothing_width
+        pos_top = q_pos[..., :-1] - field
+        neg_top = q_neg[..., :-1] - field
+        pos_bot = q_pos[..., 1:] - field
+        neg_bot = q_neg[..., 1:] - field
+        inc_top = (0.5 * mass_flux[..., :-1] * (pos_top + neg_top)
+                   + 0.5 * flux_abs[..., :-1] * (pos_top - neg_top))
+        inc_bot = (0.5 * mass_flux[..., 1:] * (pos_bot + neg_bot)
+                   + 0.5 * flux_abs[..., 1:] * (pos_bot - neg_bot))
+        return -(inc_bot - inc_top) / jnp.clip(dp, 1e-10, None)
     q_face = jnp.where(mass_flux > 0, q_pos, q_neg)
     inc_top = mass_flux[..., :-1] * (q_face[..., :-1] - field)
     inc_bot = mass_flux[..., 1:] * (q_face[..., 1:] - field)

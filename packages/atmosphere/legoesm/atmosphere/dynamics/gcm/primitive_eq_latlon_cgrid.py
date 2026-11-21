@@ -36,7 +36,7 @@ References
 from __future__ import annotations
 
 from functools import partial
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -81,6 +81,8 @@ from legoesm.grids.vertical import (
     compute_geopotential_hybrid,
     vertical_advection,
     vertical_advection_hybrid,
+    vertical_advection_hybrid_sb,
+    vertical_advection_hybrid_van_leer,
     compute_pressure_velocity,
     compute_mass_flux_from_cumsum,
     compute_sigma_dot_from_cumsum,
@@ -267,6 +269,11 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # pre-core body, unchanged; the driver fills it from
     # ``DycoreConfig.vertical_form``.  Appended at the tuple END.
     vertical_form: str = "legacy"
+    # ASKED(user), 2026-11-15: smooth hybrid tracer reconstruction.
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    # Hybrid only; sigma retains its existing upwind tracer operator.
+    tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
 
 
 # CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
@@ -450,14 +457,21 @@ def cgrid_to_hydrostatic(
 
 def latlon_tracer_tendencies(tracers, u, v, u_c, v_c, dp_u, dp_v, div_dp, dp,
                               vert_vel, p_s, grid, sigma_coord, config, _hybrid):
-    """Tracer tendencies (mass-weighted flux form); ``vert_vel`` is the hybrid
-    mass flux or the sigma-dot."""
+    """Tracer tendencies with selectable conservative hybrid transport.
+
+    ``vert_vel`` is the hybrid interface mass flux (positive downward) or
+    the sigma-dot.
+    """
+
+    if config.tracer_vertical_scheme not in ("sb", "van_leer"):
+        raise ValueError(f"unknown tracer vertical scheme {config.tracer_vertical_scheme!r}")
 
     # --- 12. Tracer transport (mass-weighted flux form) ---
     # Uses the same mass fluxes (dp_u*u, dp_v*v) as the continuity
     # equation for discrete consistency.  The mixing-ratio tendency is:
-    #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp - vert_advection
-    # This conserves ∫ q·dp·dA (tracer mass) to machine precision.
+    #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp + vertical_tendency
+    # With PPM horizontal transport, the hybrid flux form closes the
+    # instantaneous product rule for ∫ q·dp·dA (tracer mass) to round-off.
     #
     # All tracers share the same u, v, dp, div_dp.  Stack along a trailing
     # tracer axis and fold it into the level axis so the operator's
@@ -509,23 +523,22 @@ def latlon_tracer_tendencies(tracers, u, v, u_c, v_c, dp_u, dp_v, div_dp, dp,
                 u_c[..., None] * dq_dx_stack + v_c[..., None] * dq_dy_stack
             )
 
-        # Vertical advection batched across all tracers — both
-        # ``vertical_advection_hybrid`` and ``vertical_advection``
-        # operate on ``axis=-1`` for the vertical, so move the tracer
-        # axis to leading where the velocity-independent shared work
-        # (``F_full`` / ``p_full`` for hybrid, ``F`` for sigma) is
-        # computed *once* and the upwind ``jnp.diff(field, axis=-1)``
-        # broadcasts across the (n_tracers,) axis.  Replaces a Python
-        # for-loop that called the operator ``n_tracers`` times.
-        # Same leading-axis batching as the (u, v) vertical advection
-        # in CD-grid CE/PE (Loop 142).
+        # Both vertical operators use axis=-1 and broadcast their shared
+        # mass fluxes across the leading tracer axis.
         tracers_lead = jnp.moveaxis(
             tracer_stack, -1, 0,
         )  # (n_tracers, n_lat, n_lon, nlev)
         if _hybrid:
-            vert_q_lead = vertical_advection_hybrid(
-                tracers_lead, vert_vel, p_s, sigma_coord,
-            )
+            if config.tracer_vertical_scheme == "sb":
+                vert_q_lead = vertical_advection_hybrid_sb(
+                    tracers_lead, vert_vel, p_s, sigma_coord,
+                )
+            else:  # Membership checked above, including empty tracer states.
+                vert_q_lead = vertical_advection_hybrid_van_leer(
+                    tracers_lead, vert_vel, p_s, sigma_coord,
+                    flux_smoothing_width=config.tracer_van_leer_flux_width,
+                    smoothing_width=config.tracer_van_leer_width,
+                )
         else:
             vert_q_lead = vertical_advection(
                 tracers_lead, vert_vel, sigma_coord,
@@ -1888,3 +1901,15 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         """
         return self.step(state, dt, physics_fn=physics_fn,
                          phys_state=phys_state)
+
+
+__param_spec__ = {
+    "CGridLatLonPrimitiveEquationConfig": {
+        "scheme_key": "latlon_pe",
+        "params": {},
+        "excluded": {
+            "tracer_van_leer_width": "tunable_tier 0: numerics smoothing width",
+            "tracer_van_leer_flux_width": "tunable_tier 0: numerics smoothing width",
+        },
+    },
+}
