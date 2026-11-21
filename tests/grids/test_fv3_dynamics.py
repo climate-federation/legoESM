@@ -241,11 +241,13 @@ def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
          for iq in range(NQ)]
     press = _press_jax(jst, ptop)
     _extra = {"consv_te": consv_te} if consv_te else {}
+    # dp2_seam_blend=False: the spec's tracer arithmetic (the default's
+    # seam-blended dp2 is a recorded KNOWN DIFFERENCE, fv3_tracer2d).
     return jdyn.fv_dynamics_step(jctx, jst, press, q=q, batched=batched,
                                  **_common(ptop, ak, bk, hydrostatic,
                                            k_split, n_split),
                                  **_moist(zvir, sphum_index), **_extra,
-                                 cfg=cfg)
+                                 cfg=cfg, dp2_seam_blend=False)
 
 
 def _out_state(got):
@@ -349,7 +351,7 @@ def _run_jax_press(jctx, eta, press, *, hydrostatic, zvir, sphum_index,
     return _out_state(jdyn.fv_dynamics_step(
         jctx, jst, press, q=q,
         **_common(ptop, ak, bk, hydrostatic, k_split, 2),
-        **_moist(zvir, sphum_index)))
+        **_moist(zvir, sphum_index), dp2_seam_blend=False))
 
 
 @pytest.mark.parametrize("k_split", [1, 2])
@@ -1012,3 +1014,27 @@ def test_top_sponge_off_deck_is_bitwise_the_default(jctx, eta):
                 lb = jax.tree_util.tree_leaves(ref[nm])
                 assert all(np.asarray(a).tobytes() == np.asarray(b).tobytes()
                            for a, b in zip(la, lb)), (batched, over, nm)
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_uniform_tracer_survives_a_whole_step(jctx, eta, batched):
+    """KNOWN DIFFERENCE (fv3_tracer2d): with the default seam-blended
+    tracer dp2, a uniform tracer stays uniform through the acoustic
+    loop, the tracer sub-cycles AND the remap -- dp2 is the delp the
+    dycore carries.  The Fortran arithmetic (False) breaks it at the
+    cube seams, so the gate cannot pass vacuously."""
+    ak, bk, ptop = eta
+    w = slice(NG, NG + N)
+    c = 0.01
+    dev = {}
+    for blend in (True, False):
+        jst = state_3d_to_jax(_state(True))
+        q = [jnp.full((6, MA, MA, KM), c) for _ in range(NQ)]
+        out = jdyn.fv_dynamics_step(
+            jctx, jst, _press_jax(jst, ptop), q=q, batched=batched,
+            **_common(ptop, ak, bk, True, 1, 2), dp2_seam_blend=blend)
+        qi = np.stack([np.asarray(x)[:, w, w, :] for x in out["q"]])
+        assert_real(qi, f"q (blend={blend})")
+        dev[blend] = float(np.abs(qi / c - 1.0).max())
+    assert dev[True] < 1e-12, dev
+    assert dev[False] > 1e-9, dev

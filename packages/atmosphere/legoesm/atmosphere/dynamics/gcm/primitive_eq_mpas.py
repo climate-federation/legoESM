@@ -107,6 +107,11 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # decision: "conserving form always"); False restores the legacy clamp
     # for bit-comparison against older runs.
     conservative_tracer_clamp: bool = True
+    # Positivity: pay a column's net-negative condensate from the same
+    # column's vapour with its latent heat before the borrow
+    # (``apply_water_positivity(condensate_from_vapour=...)``).  False = the
+    # legacy form, which creates water when the globe cannot repay a deficit.
+    positivity_condensate_from_vapour: bool = True
     # Optional (nlev,) per-layer weight restricting the budget ledger's
     # SNAPSHOT-derived rows (dynamics, clips) to a vertical band, matching the
     # weight the physics rows use. Both sides must carry the same weight or the
@@ -1531,7 +1536,8 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 state_new.tracers, state_new.T.data, _dp,
                 conservative=self.config.conservative_tracer_clamp,
                 energy_consistent=self.config.energy_consistent_moisture_clip,
-                area=self.mesh.areaCell)
+                area=self.mesh.areaCell,
+                condensate_from_vapour=self.config.positivity_condensate_from_vapour)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

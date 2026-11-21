@@ -155,12 +155,14 @@ def _run_np(ctx, level_amp):
     return q_np, dp_np, cap_np
 
 
-def _run_jax(jctx, level_amp, *, check=True, batched=False):
+def _run_jax(jctx, level_amp, *, check=True, batched=False,
+             dp2_seam_blend=True):
     q_j = _tracers()[1]
     dp_j = _dp1()[1]
     cap_j = _caps(level_amp)[1]
     out = jtr.tracer_2d_1l_sixface(jctx, q_j, dp_j, cap_j, km=KM, nq=NQ,
-                                   hord_tr=HORD_TR, dt=DT, batched=batched)
+                                   hord_tr=HORD_TR, dt=DT, batched=batched,
+                                   dp2_seam_blend=dp2_seam_blend)
     if check:
         jtr.check_nsplt_schedule(out)
     return out
@@ -190,7 +192,8 @@ _AMPS = {"all_single": (0.30, 0.40, 0.50),
 def test_parity_against_the_spec(ctx, jctx, label):
     amp = _AMPS[label]
     q_ref, dp_ref, cap_ref = _run_np(ctx, amp)
-    got = _run_jax(jctx, amp)
+    # The spec's own dp2 arithmetic (see the KNOWN DIFFERENCE section).
+    got = _run_jax(jctx, amp, dp2_seam_blend=False)
 
     sched = _schedule(got)
     assert len(sched) == KM, sched
@@ -315,7 +318,7 @@ def test_both_sides_of_a_schedule_transition(ctx, jctx):
     hi = min(a for a in seen if seen[a] > min(seen.values()))
     for amp in (lo, hi):
         q_ref, _, _ = _run_np(ctx, (amp, amp, amp))
-        got = _run_jax(jctx, (amp, amp, amp))
+        got = _run_jax(jctx, (amp, amp, amp), dp2_seam_blend=False)
         want = np.stack([np.stack(q_ref[t]) for t in range(6)])
         assert_real(want, f"numpy q (amp={amp})")
         # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): worst side of the crossing
@@ -527,13 +530,16 @@ def test_finished_subcycles_are_skipped_not_masked(jctx, monkeypatch,
     jax.effects_barrier()
     sched = _schedule(out)
     assert max(sched) < jtr.NSPLT_MAX and len(set(sched)) > 1, sched
-    want = NQ * (max(sched) if batched else sum(sched))
+    # Plus the dp2 capacitor blend outside the scan: once per level on
+    # the loop path, once for all levels on the batched path.
+    want = (NQ * (max(sched) if batched else sum(sched))
+            + (1 if batched else KM))
     assert len(fired) == want, (
         f"seam blend fired {len(fired)} times, schedule {sched} needs "
         f"{want} (ungated: {NQ * jtr.NSPLT_MAX * (1 if batched else KM)})")
 
 
-def _seam_consistent_caps(ctx, courant, seed):
+def _seam_consistent_caps(ctx, courant, seed, *, blend=True):
     """cx/cy ~ U(-courant, courant); mfx/mfy blended once so the
     flux_adj seam blend is an identity on them and the cube total of
     q*dp is exactly invariant (see test_fv3_native_tracer2d)."""
@@ -552,7 +558,7 @@ def _seam_consistent_caps(ctx, courant, seed):
             -0.5, 0.5, (npx, N, KM))
         cap[t]["mfy"][0:N, :, :] = area_mean * rng.uniform(
             -0.5, 0.5, (N, npx, KM))
-    for k in range(KM):
+    for k in range(KM if blend else 0):
         mx = [cap[t]["mfx"][:, 0:N, k].copy() for t in range(6)]
         my = [cap[t]["mfy"][0:N, :, k].copy() for t in range(6)]
         np_blend(mx, my, N, NG)
@@ -616,3 +622,184 @@ def test_gradient_through_the_gated_loop_matches_finite_difference(
     fd = float((loss(q0 + eps * v) - loss(q0 - eps * v)) / (2 * eps))
     assert np.isfinite(ad) and ad != 0.0, ad
     assert abs(ad - fd) <= 1e-5 * abs(fd), f"AD {ad} vs FD {fd}"
+
+
+# --------------------------------------------------------------------
+# 10.  KNOWN DIFFERENCE: dp2 from the seam-blended capacitors
+#
+# Fortran builds dp2 from the RAW capacitors while the tracer fluxes and
+# the dycore's delp use seam-blended ones; the default blends dp2's
+# capacitors too (fv3_tracer2d docstring).  The fixtures here use RAW
+# area-scale capacitors -- the seam-consistent fixture above blends them
+# first, which is exactly why the conservation gate never saw this.
+# Each gate checks the default AND that the Fortran arithmetic
+# (dp2_seam_blend=False) violates it, so none can pass vacuously.
+# The Fortran-side lower bounds are tripwires on the FIXTURE: they hold
+# only while the capacitors disagree across seams.  If one fails, the
+# fixture went seam-consistent -- fix the fixture, never the bound.
+# --------------------------------------------------------------------
+
+def _blend_np(mfx, mfy):
+    from legoesm.grids.fv3_native_gridstruct import (
+        average_shared_edge_cgrid as np_blend,
+    )
+    mfx, mfy = np.array(mfx), np.array(mfy)
+    for k in range(KM):
+        mx = [mfx[t, :, 0:N, k].copy() for t in range(6)]
+        my = [mfy[t, 0:N, :, k].copy() for t in range(6)]
+        np_blend(mx, my, N, NG)
+        for t in range(6):
+            mfx[t, :, 0:N, k] = mx[t]
+            mfy[t, 0:N, :, k] = my[t]
+    return mfx, mfy
+
+
+def _dycore_dp_last(ctx, out):
+    """The delp the dycore carries: returned dp1 plus the divergence of
+    the SEAM-BLENDED frac-rescaled capacitors (barrier 1's fluxes)."""
+    w = slice(NG, NG + N)
+    rarea = np.stack([ctx["gs6"][t]["rarea"][w, w] for t in range(6)])
+    mfx, mfy = _blend_np(out["mfx"], out["mfy"])
+    mfx, mfy = mfx[:, :, 0:N, :], mfy[:, 0:N, :, :]
+    return (np.asarray(out["dp1"])[:, w, w, :]
+            + (mfx[:, :-1] - mfx[:, 1:] + mfy[:, :, :-1] - mfy[:, :, 1:])
+            * rarea[..., None])
+
+
+def _run_raw(jctx, q, courant, batched, dp2_seam_blend):
+    out = jtr.tracer_2d_1l_sixface(
+        jctx, q, jnp.full((6, MA, MA, KM), 1.0e4),
+        _RAW_CAPS[courant], km=KM, nq=NQ, hord_tr=HORD_TR, dt=DT,
+        batched=batched, dp2_seam_blend=dp2_seam_blend)
+    jtr.check_nsplt_schedule(out)
+    sched = _schedule(out)
+    assert (max(sched) == 1) if courant < 1.0 else (min(sched) >= 2), sched
+    return out
+
+
+_RAW_CAPS = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _raw_caps(ctx):
+    for c in (0.05, 1.5):
+        _RAW_CAPS[c] = _seam_consistent_caps(ctx, c, seed=23, blend=False)
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("courant", [0.05, 1.5])
+def test_uniform_tracer_stays_uniform_on_raw_capacitors(jctx, courant,
+                                                        batched):
+    c = 2.5
+    q = jnp.full((6, NQ, MA, MA, KM), c)
+    w = slice(NG, NG + N)
+    dev = {}
+    for blend in (True, False):
+        out = _run_raw(jctx, q, courant, batched, blend)
+        qi = np.asarray(out["q"])[:, :, w, w, :]
+        assert_real(qi, f"q (blend={blend})")
+        dev[blend] = float(np.abs(qi / c - 1.0).max())
+    # Round-off only on the default; the Fortran arithmetic breaks
+    # uniformity at the seams by far more.
+    assert dev[True] < 1e-13, dev
+    assert dev[False] > 1e-7, dev
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("courant", [0.05, 1.5])
+def test_tracer_mass_on_the_dycores_delp_is_conserved(ctx, jctx, courant,
+                                                      batched):
+    q = _tracers()[1]
+    w = slice(NG, NG + N)
+    area = np.stack([ctx["gs6"][t]["area"][w, w] for t in range(6)])
+    rel = {}
+    for blend in (True, False):
+        out = _run_raw(jctx, q, courant, batched, blend)
+        dp_last = _dycore_dp_last(ctx, out)
+        worst = 0.0
+        for iq in range(NQ):
+            m0 = np.sum(np.asarray(q)[:, iq, w, w, :] * 1.0e4
+                        * area[..., None])
+            m1 = np.sum(np.asarray(out["q"])[:, iq, w, w, :] * dp_last
+                        * area[..., None])
+            assert np.isfinite(m1), (blend, iq, m1)
+            worst = max(worst, abs(m1 - m0) / abs(m0))
+        rel[blend] = worst
+    assert rel[True] < 1e-13, rel
+    assert rel[False] > 1e-9, rel
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_seam_blended_dp2_gradient(jctx, batched):
+    """Reverse-mode derivative through the blended-capacitor dp2,
+    sub-cycled, against a central finite difference, with respect to a
+    dimensionless multiplier on the mass capacitors (the raw area-scale
+    entries make per-entry derivatives too small to gate).  Jitted:
+    check_grads' many eager calls aborted XLA's compile of the scan in
+    the full-file run (jobs 11317784, 11317949).  The derivative must be
+    finite, non-zero, and differ from the Fortran arithmetic's, so the
+    blended path really carries it."""
+    cap = dict(_RAW_CAPS[1.5])
+    q = _tracers()[1]
+    w = slice(NG, NG + N)
+    wts = jnp.asarray(np.random.default_rng(41).standard_normal(
+        (6, NQ, N, N, KM)))
+
+    def make(blend):
+        def f(s):
+            out = jtr.tracer_2d_1l_sixface(
+                jctx, q, jnp.full((6, MA, MA, KM), 1.0e4),
+                dict(cap, mfx=cap["mfx"] * s, mfy=cap["mfy"] * s), km=KM,
+                nq=NQ, hord_tr=HORD_TR, dt=DT, batched=batched,
+                dp2_seam_blend=blend)
+            return jnp.sum(out["q"][:, :, w, w, :] * wts)
+        return jax.jit(f), jax.jit(jax.grad(f))
+
+    f, df = make(True)
+    # eps 1e-3: dL/ds is ~1e-5, and at eps 1e-6 the FD was round-off
+    # (the two arms' FDs differed by 4e-3 relative while their ADs
+    # agreed to 1e-13; job 11318101).
+    s0, eps = 1.0, 1e-3
+    ad = float(df(s0))
+    fd = float((f(s0 + eps) - f(s0 - eps)) / (2 * eps))
+    assert np.isfinite(ad) and abs(ad) > 1e-6, ad
+    assert abs(ad - fd) <= 1e-4 * abs(fd), f"AD {ad} vs FD {fd}"
+    ad_fortran = float(make(False)[1](s0))
+    assert abs(ad - ad_fortran) > 1e-9 * abs(ad), (ad, ad_fortran)
+
+
+def test_dp2_seam_blend_defaults_on_and_bool(jctx):
+    """RULE 3: the conserving arithmetic is the default on every entry
+    point; a truthy non-bool is refused."""
+    import inspect
+
+    from legoesm.core import fv3_dynamics as jdyn
+
+    for fn in (jtr.tracer_2d_1l_sixface, jtr.make_tracer_2d_1l_sixface_jit,
+               jdyn.fv_dynamics_step, jdyn.make_fv_dynamics_step_jit):
+        assert inspect.signature(fn).parameters[
+            "dp2_seam_blend"].default is True, fn.__name__
+    with pytest.raises(TypeError, match="dp2_seam_blend"):
+        _run_jax(jctx, _AMPS["mixed"], dp2_seam_blend=1)
+
+
+# MEASURED (job 11317222, raw area-scale capacitors seed 23, _tracers
+# seed 11): max relative q difference, default vs the Fortran
+# arithmetic (which the spec-parity gates above certify), per case.
+# Identical on both arms.  A change to the blend or to dp2 re-measures.
+_DP2_GAP = {0.05: 7.344748299e-05, 1.5: 7.344731507e-05}
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("courant", sorted(_DP2_GAP))
+def test_default_departs_from_fortran_by_the_recorded_gap(jctx, courant,
+                                                          batched):
+    q = _tracers()[1]
+    w = slice(NG, NG + N)
+    d = np.asarray(_run_raw(jctx, q, courant, batched, True)["q"])[
+        :, :, w, w, :]
+    o = np.asarray(_run_raw(jctx, q, courant, batched, False)["q"])[
+        :, :, w, w, :]
+    gap = float(np.abs(d / o - 1.0).max())
+    want = _DP2_GAP[courant]
+    assert abs(gap - want) <= max(1e-6 * want, 1e-12), (gap, want)
