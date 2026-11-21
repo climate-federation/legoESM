@@ -1247,6 +1247,114 @@ def _land_window_add(a2s_sum, cz_wsum, w_sum, a2s):
             cz_wsum + a2s.cos_zenith * w, w_sum + w)
 
 
+def mpas_surface_anchors(sst, sic, skin, *, f_land, lapse_z, lapse_K_m):
+    """(T_sfc, ocean/ice T_sfc) of one SST/SIC/ice-skin triple on the MPAS
+    eager loop: the SST/ice blend, then (``lapse_z`` not None) the land-lapse
+    correction of T_sfc.  Pure; the loop jits it with the run's static
+    land fraction and lapse height bound by ``functools.partial``."""
+    from legoesm.forcing.surface_utils import (
+        blend_surface_temperature, land_lapse_adjusted_surface_temperature)
+    ts_o = blend_surface_temperature(
+        jnp.asarray(sst).reshape(-1), jnp.asarray(sic).reshape(-1),
+        skin).reshape(-1)
+    ts = ts_o
+    if lapse_z is not None:
+        # Cast the storage-dtype (possibly f32) statics to the anchor dtype so
+        # the correction is formed at anchor precision (mirrors the
+        # turbulence-path cast).  Where f_land and sic overlap (elevated icy
+        # coasts) the lapse cools the blended anchor's land fraction too --
+        # directionally harmless (see codex F5).
+        ts = land_lapse_adjusted_surface_temperature(
+            ts, f_land.astype(ts.dtype), lapse_z.astype(ts.dtype), lapse_K_m)
+    return ts, ts_o
+
+
+def mpas_sea_ice_albedo_refresh(skin, sic, alb_ocean, f_land_alb, alb_land, *,
+                                scheme, albedo_ice, h_ice_m, melt_width_K):
+    """(ice albedo, ice/ocean blend, full surface albedo) of the current ice
+    skin.  Pure; the loop jits it with the run's static scheme settings bound
+    by ``functools.partial``."""
+    from legoesm.forcing.surface_utils import (
+        blend_surface_property, blended_surface_albedo)
+    from legoesm.ice.shortwave import sea_ice_albedo
+    alb_ice = sea_ice_albedo(scheme, albedo_ice, T_skin=skin, h_ice_m=h_ice_m,
+                             melt_width_K=melt_width_K)
+    sea = blend_surface_property(sic, alb_ice, alb_ocean)
+    return alb_ice, sea, blended_surface_albedo(
+        sic, f_land_alb, alb_ice, alb_ocean, alb_land)
+
+
+def mpas_land_forcing(sw_down, lw_down, precip, frozen, t_air, q_air, p_s,
+                      u_edge_last, u_c, v_c, doy, sod, co2, lw_corr, *,
+                      precip_published, sigma, cos_zen_fn, recon_fn):
+    """The AtmToSurface of one MPAS step from bare arrays.  Every value that
+    changes during the run is an argument; ``sigma``, ``cos_zen_fn`` and
+    ``recon_fn`` are the run's static coordinate, sun and edge-to-cell wind
+    reconstruction, bound by ``functools.partial`` when the loop jits it."""
+    from legoesm.core.coupling_fields import (
+        AtmToSurface, lowest_level_height)
+    from legoesm.thermo import moist_air_density
+    T_air = t_air
+    sw_down = jnp.asarray(sw_down).reshape(-1)
+    lw_down = jnp.asarray(lw_down).reshape(-1)
+    if lw_corr is not None:
+        # the land absorbs, and the handback books, the solve's land emission
+        # (band Planck), not sigma*T^4
+        lw_down = lw_down + lw_corr
+    precip = (jnp.asarray(precip).reshape(-1)
+              if precip is not None else jnp.zeros_like(sw_down))
+    # the atmosphere's own rain/snow partition (F29)
+    precip_snow = land_snowfall_from_frozen(frozen, precip_published, precip)
+    if q_air is None:
+        q_air = jnp.zeros_like(T_air)
+    p_s = jnp.asarray(p_s).reshape(-1)
+    if u_edge_last is not None:
+        u_c, v_c = recon_fn(u_edge_last)
+    # Same conventions as the canonical extractor (coupler surface_exchange)
+    # and the coupled tile: the coordinate's lowest full-level pressure and
+    # the MOIST density there, rho = p_lowest / (R_d T_v) (F28).  The zenith
+    # is the REAL per-cell sun (same doy/seconds the radiation uses this
+    # step): the two-leaf canopy's radiation partitioning is zenith-driven.
+    p_full = sigma.pressure_at_full(p_s)
+    p_lowest = p_full[..., -1]
+    z_lowest = lowest_level_height(T_air, sigma.pressure_at_half(p_s), p_full)
+    return AtmToSurface(
+        z_lowest=z_lowest,
+        sw_down=sw_down, lw_down=lw_down,
+        precip_total=precip,
+        precip_snow=precip_snow,
+        T_lowest=T_air, q_lowest=q_air,
+        u_lowest=u_c, v_lowest=v_c,
+        p_lowest=p_lowest, p_surface=p_s,
+        rho_lowest=moist_air_density(T_air, p_lowest, q_air),
+        cos_zenith=cos_zen_fn(doy, sod / 3600.0),
+        # Radiation's CO2 (daily GHG file, else cfg.co2_ppmv).
+        co2_ppmv=jnp.full_like(T_air, co2),
+        has_radiation=jnp.ones_like(T_air),
+        has_precipitation=jnp.ones_like(T_air),
+    )
+
+
+def mpas_poststep(state, *, sponge_decay, qv_smooth_fn):
+    """Post-step dycore edits on the end-of-step state, shared by the eager
+    loop and the differentiable segment (mpas_diff_step).  Top sponge (#836):
+    Rayleigh decay of the edge winds toward rest above sigma_top (pure
+    elementwise multiply; ``sponge_decay`` None = off).  q_v smoothing
+    (``qv_smooth_fn`` None = off): UNWEIGHTED SCVT del2/del4, then a floor
+    that restores each level's dp-weighted WATER MASS to its pre-smoothing
+    value, so this filter (after the step's fixers) neither creates nor
+    destroys water (F12)."""
+    if sponge_decay is not None:
+        state = state._replace(
+            u=state.u.replace(data=state.u.data * sponge_decay))
+    if qv_smooth_fn is not None:
+        trc = dict(state.tracers)
+        trc["q_v"] = state.tracers["q_v"].replace(
+            data=qv_smooth_fn(state.tracers["q_v"].data, state.p_s.data))
+        state = state._replace(tracers=trc)
+    return state
+
+
 class _MPASSfcFluxAccum:
     """Per-step accumulator for the MPAS eager loop's ``_sfc_diag`` flux
     slots so the CMOR feed hands INTERVAL MEANS to the accumulators instead
@@ -14272,26 +14380,12 @@ class ModelDriver:
                 # skin READ AT CALL TIME.
                 return _anchors_core(_sst, _sic, _current_skin())[1]
 
-            @jax.jit
-            def _anchors_core(_sst, _sic, _skin):
-                """(T_sfc, ocean/ice T_sfc) of one SST/SIC/skin triple: the
-                blend, then the land-lapse correction, in one compiled call
-                (the per-step re-anchor was ~10 eager dispatches)."""
-                _ts_o = blend_surface_temperature(
-                    jnp.asarray(_sst).reshape(-1), jnp.asarray(_sic).reshape(-1),
-                    _skin).reshape(-1)
-                _ts = _ts_o
-                if _lapse_z is not None:
-                    # Cast the storage-dtype (possibly f32) statics to the
-                    # anchor dtype so the correction is formed at anchor
-                    # precision (mirrors the turbulence-path cast).  Where
-                    # f_land and sic overlap (elevated icy coasts) the lapse
-                    # cools the blended anchor's land fraction too --
-                    # directionally harmless (see codex F5).
-                    _ts = land_lapse_adjusted_surface_temperature(
-                        _ts, _f_land_cells.astype(_ts.dtype),
-                        _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
-                return _ts, _ts_o
+            from functools import partial as _partial
+            # One compiled call per re-anchor (eagerly ~10 dispatches); the
+            # SST/SIC and the skin READ AT CALL TIME are arguments.
+            _anchors_core = jax.jit(_partial(
+                mpas_surface_anchors, f_land=_f_land_cells, lapse_z=_lapse_z,
+                lapse_K_m=_land_lapse_K_m))
 
             def _current_skin():
                 return self._ice_T_skin if _ice_skin_on else _T_ice
@@ -14434,18 +14528,12 @@ class ModelDriver:
                 h_ice_m=float(cfg.ice_thickness_m),
                 melt_width_K=float(cfg.sea_ice_melt_ramp_width_K))
 
-        @jax.jit
-        def _sea_albedo_core(_skin, _sic, _alb_ocean, _f_land_alb, _alb_land):
-            """(ice albedo, ice/ocean blend, full surface albedo) of the
-            current skin in one compiled call (the per-step refresh was
-            ~10 eager dispatches)."""
-            _alb_ice = sea_ice_albedo(
-                _sia_scheme, _albedo_ice, T_skin=_skin,
-                h_ice_m=float(cfg.ice_thickness_m),
-                melt_width_K=float(cfg.sea_ice_melt_ramp_width_K))
-            _sea = blend_surface_property(_sic, _alb_ice, _alb_ocean)
-            return _alb_ice, _sea, blended_surface_albedo(
-                _sic, _f_land_alb, _alb_ice, _alb_ocean, _alb_land)
+        from functools import partial as _partial
+        # One compiled call per per-step refresh (eagerly ~10 dispatches).
+        _sea_albedo_core = jax.jit(_partial(
+            mpas_sea_ice_albedo_refresh, scheme=_sia_scheme,
+            albedo_ice=_albedo_ice, h_ice_m=float(cfg.ice_thickness_m),
+            melt_width_K=float(cfg.sea_ice_melt_ramp_width_K)))
 
         _alb_ocean_cur = None    # open-ocean albedo of the current forcing day
         _albedo_land_static = None
@@ -15176,56 +15264,15 @@ class ModelDriver:
 
             from functools import partial as _partial
 
-            from legoesm.core.coupling_fields import land_co2_ppmv, lowest_level_height
-            from legoesm.thermo import moist_air_density
+            from legoesm.core.coupling_fields import land_co2_ppmv
 
-            @_partial(jax.jit, static_argnames=("precip_published",))
-            def _marshal_core(sw_down, lw_down, precip, frozen, t_air, q_air,
-                              p_s, u_edge_last, u_c, v_c, doy, sod, co2,
-                              lw_corr, *, precip_published):
-                """The AtmToSurface of one step from bare arrays, one compiled
-                call (eagerly this was ~30 device dispatches per step)."""
-                T_air = t_air
-                sw_down = jnp.asarray(sw_down).reshape(-1)
-                lw_down = jnp.asarray(lw_down).reshape(-1)
-                if lw_corr is not None:
-                    # the land absorbs, and the handback books, the solve's
-                    # land emission (band Planck), not sigma*T^4
-                    lw_down = lw_down + lw_corr
-                precip = (jnp.asarray(precip).reshape(-1)
-                          if precip is not None else jnp.zeros_like(sw_down))
-                precip_snow = land_snowfall_from_frozen(
-                    frozen, precip_published, precip)
-                if q_air is None:
-                    q_air = jnp.zeros_like(T_air)
-                p_s = jnp.asarray(p_s).reshape(-1)
-                if u_edge_last is not None:
-                    u_c, v_c = _recon_cell_velocity_jit(u_edge_last)
-                # The zenith is the REAL per-cell sun (same doy/seconds the
-                # radiation uses this step): it was a fixed 0.5 when only the
-                # bulk scheme ran here (which never reads it), but the two-leaf
-                # canopy now runs on this lane and its radiation partitioning
-                # is zenith-driven -- a fixed sun would give the canopy neither
-                # a diurnal cycle nor night.
-                _p_full = self.sigma.pressure_at_full(p_s)
-                p_lowest = _p_full[..., -1]
-                z_lowest = lowest_level_height(
-                    T_air, self.sigma.pressure_at_half(p_s), _p_full)
-                return AtmToSurface(
-                    z_lowest=z_lowest,
-                    sw_down=sw_down, lw_down=lw_down,
-                    precip_total=precip,
-                    precip_snow=precip_snow,
-                    T_lowest=T_air, q_lowest=q_air,
-                    u_lowest=u_c, v_lowest=v_c,
-                    p_lowest=p_lowest, p_surface=p_s,
-                    rho_lowest=moist_air_density(T_air, p_lowest, q_air),
-                    cos_zenith=_cos_zen_fn(doy, sod / 3600.0),
-                    # Radiation's CO2 (daily GHG file, else cfg.co2_ppmv).
-                    co2_ppmv=jnp.full_like(T_air, co2),
-                    has_radiation=jnp.ones_like(T_air),
-                    has_precipitation=jnp.ones_like(T_air),
-                )
+            # One compiled call per step (eagerly ~30 dispatches); every
+            # per-step value is an argument, the bound ones are run-static.
+            _marshal_core = jax.jit(
+                _partial(mpas_land_forcing, sigma=self.sigma,
+                         cos_zen_fn=_cos_zen_fn,
+                         recon_fn=_recon_cell_velocity_jit),
+                static_argnames=("precip_published",))
             logger.info(
                 "  Interactive multilayer land (MPAS): %d columns, "
                 "f_land mean=%.3f — skin T -> forcing['T_sfc'] blend, "
@@ -16047,29 +16094,14 @@ class ModelDriver:
                         "(nu4*dt*g_max^2=%.4f of 0.5 stability bound)",
                         _qv_ll_nu4, _cfl4_ll)
 
-        def _poststep_state(state):
-            """Post-step dycore edits on the end-of-step state, shared by the
-            eager loop and the differentiable segment (mpas_diff_step).
-            Top sponge (#836): Rayleigh decay of the edge winds toward rest
-            above sigma_top (pure elementwise multiply).  q_v smoothing:
-            _mpas_qv_smooth_step, UNWEIGHTED SCVT del2/del4, then a floor that
-            restores each level's dp-weighted WATER MASS to its pre-smoothing
-            value, so this filter (after the step's fixers) neither creates
-            nor destroys water (F12)."""
-            if _sponge_decay is not None:
-                state = state._replace(
-                    u=state.u.replace(data=state.u.data * _sponge_decay))
-            if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0 or _qv_ll_nu4 > 0.0:
-                _trc_sm = state.tracers
-                _new_trc_sm = dict(_trc_sm)
-                _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(
-                    data=_qv_smooth_jit(_trc_sm["q_v"].data, state.p_s.data))
-                state = state._replace(tracers=_new_trc_sm)
-            return state
-
         # One compiled call per step (sponge multiply + q_v smoothing) instead
         # of one eager dispatch per operation.
-        _poststep_state = jax.jit(_poststep_state)
+        from functools import partial as _partial_poststep
+        _poststep_state = jax.jit(_partial_poststep(
+            mpas_poststep, sponge_decay=_sponge_decay,
+            qv_smooth_fn=(_qv_smooth_jit if (_qv_smooth_nu > 0.0
+                                             or _qv_smooth_nu4 > 0.0
+                                             or _qv_ll_nu4 > 0.0) else None)))
 
         # Profiling windows, off unless LEGOESM_TRACE_STEPS="first:count:dir"
         # (loop-step indices; see ``trace_windows`` for LEGOESM_TRACE_WINDOWS /
