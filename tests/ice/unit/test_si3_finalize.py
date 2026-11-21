@@ -346,7 +346,9 @@ def test_o16_tau_gradient_matches_central_difference() -> None:
             taum=jnp.ones((2, 2)), utau_oce=z[1:-1, 1:-1], vtau_oce=z[1:-1, 1:-1],
             tmask_k1=jnp.ones(shape),
         )
-        return jnp.sum(si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=True).utau)
+        return jnp.sum(si3_ice_update_tau(
+            inputs, config=cfg, ln_drgice_imp=True, nn_fsbc=cfg.nn_fsbc, kt=1
+        ).utau)
 
     x = jnp.asarray(1.0, dtype=jnp.float64)
     grad = float(jax.grad(objective)(x))
@@ -369,7 +371,9 @@ def test_o16_tau_gradient_is_finite_at_zero_relative_velocity() -> None:
             taum=jnp.ones((2, 2)), utau_oce=z[1:-1, 1:-1], vtau_oce=z[1:-1, 1:-1],
             tmask_k1=jnp.ones(shape),
         )
-        return jnp.sum(si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=True).utau)
+        return jnp.sum(si3_ice_update_tau(
+            inputs, config=cfg, ln_drgice_imp=True, nn_fsbc=cfg.nn_fsbc, kt=1
+        ).utau)
 
     zero = jnp.asarray(0.0, dtype=jnp.float64)
     assert float(objective(zero)) == 0.0
@@ -611,7 +615,10 @@ def test_o16_tau_gradient_is_finite_at_zero_relative_velocity_both_arms(field, l
             utau_oce=z[1:-1, 1:-1], vtau_oce=z[1:-1, 1:-1],
             tmask_k1=jnp.ones(shape),  # main requires the level-1 mask on the implicit arm
         )
-        out = si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=ln_drgice_imp)
+        out = si3_ice_update_tau(
+            inputs, config=cfg, ln_drgice_imp=ln_drgice_imp,
+            nn_fsbc=cfg.nn_fsbc, kt=1,
+        )
         return jnp.sum(getattr(out, field))
 
     x = jnp.asarray(0.0, dtype=jnp.float64)

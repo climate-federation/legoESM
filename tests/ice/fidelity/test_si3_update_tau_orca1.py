@@ -66,7 +66,9 @@ def _inputs(d, **over):
 
 def test_ice_step_matches_nemo_orca1_including_rcdu_ice():
     d = _load()
-    out = si3_ice_update_tau(_inputs(d), config=_config(d, 96), ln_drgice_imp=True, ice_step=True)
+    out = si3_ice_update_tau(
+        _inputs(d), config=_config(d, 96), ln_drgice_imp=True, nn_fsbc=96, kt=17281
+    )
     inner = (slice(1, -1), slice(1, -1))
     got = dict(tmod_io=out.tmod_io[inner], utau_oce=out.utau_oce, vtau_oce=out.vtau_oce, taum=out.taum,
                utau=out.utau[inner], vtau=out.vtau[inner], rCdU_ice=out.rCdU_ice[inner])
@@ -81,13 +83,18 @@ def test_ice_step_matches_nemo_orca1_including_rcdu_ice():
 
 def test_rcdu_ice_covers_halo_one_and_is_masked():
     d = _load()
-    out = si3_ice_update_tau(_inputs(d), config=_config(d, 96), ln_drgice_imp=True)
+    out = si3_ice_update_tau(
+        _inputs(d), config=_config(d, 96), ln_drgice_imp=True, nn_fsbc=96, kt=17281
+    )
     assert out.rCdU_ice.shape == d["u_ice"].shape      # DO_2D(1,1,1,1) at nn_hls=1 = the whole array
     i, j = np.unravel_index(np.argmin(np.asarray(out.rCdU_ice)), out.rCdU_ice.shape)
     assert float(out.rCdU_ice[i, j]) < 0.0             # perturb a cell that carries drag
     tm = d["tmask_k1"].copy()
     tm[i, j] = 0.0
-    masked = si3_ice_update_tau(_inputs(d, tmask_k1=tm), config=_config(d, 96), ln_drgice_imp=True)
+    masked = si3_ice_update_tau(
+        _inputs(d, tmask_k1=tm), config=_config(d, 96), ln_drgice_imp=True,
+        nn_fsbc=96, kt=17281,
+    )
     assert float(masked.rCdU_ice[i, j]) == 0.0
     keep = np.ones(tm.shape, bool)
     keep[i, j] = False
@@ -96,7 +103,9 @@ def test_rcdu_ice_covers_halo_one_and_is_masked():
 
 def test_explicit_arm_returns_no_rcdu_ice():
     d = _load()
-    out = si3_ice_update_tau(_inputs(d), config=_config(d, 96), ln_drgice_imp=False)
+    out = si3_ice_update_tau(
+        _inputs(d), config=_config(d, 96), ln_drgice_imp=False, nn_fsbc=96, kt=17281
+    )
     assert out.rCdU_ice is None
 
 
@@ -104,15 +113,23 @@ def test_implicit_arm_refuses_missing_tmask():
     """Implicit arm without a mask would drop both the explicit current term and rCdU_ice (vote D7 b)."""
     d = _load()
     with pytest.raises(ValueError, match="tmask_k1"):
-        si3_ice_update_tau(_inputs(d, tmask_k1=None), config=_config(d, 96), ln_drgice_imp=True)
-    assert si3_ice_update_tau(_inputs(d, tmask_k1=None), config=_config(d, 96),
-                              ln_drgice_imp=False).rCdU_ice is None
+        si3_ice_update_tau(
+            _inputs(d, tmask_k1=None), config=_config(d, 96), ln_drgice_imp=True,
+            nn_fsbc=96, kt=17281,
+        )
+    assert si3_ice_update_tau(
+        _inputs(d, tmask_k1=None), config=_config(d, 96), ln_drgice_imp=False,
+        nn_fsbc=96, kt=17281,
+    ).rCdU_ice is None
 
 
 def test_wrong_tmask_shape_is_refused():
     d = _load()
     with pytest.raises(ValueError, match="tmask_k1"):
-        si3_ice_update_tau(_inputs(d, tmask_k1=d["tmask_k1"][1:, :]), config=_config(d, 96), ln_drgice_imp=True)
+        si3_ice_update_tau(
+            _inputs(d, tmask_k1=d["tmask_k1"][1:, :]), config=_config(d, 96),
+            ln_drgice_imp=True, nn_fsbc=96, kt=17281,
+        )
 
 
 def test_ocean_step_between_ice_steps_holds_ice_step_quantities():
@@ -120,7 +137,9 @@ def test_ocean_step_between_ice_steps_holds_ice_step_quantities():
     Known answer = iceupdate.F90:388-404 written out in numpy (no NEMO record exists at a non-ice step)."""
     d = _load()
     cfg = _config(d, 96)
-    held = si3_ice_update_tau(_inputs(d), config=cfg, ln_drgice_imp=True, ice_step=True)
+    held = si3_ice_update_tau(
+        _inputs(d), config=cfg, ln_drgice_imp=True, nn_fsbc=96, kt=17281
+    )
     u_new = d["u_ice"] * 1.3 + 0.01
     v_new = d["v_ice"] * 0.6 - 0.02
     pu_new = d["pu_oce"] * 0.7
@@ -129,7 +148,9 @@ def test_ocean_step_between_ice_steps_holds_ice_step_quantities():
                   utau=d["utau"] * 3.0, vtau=d["vtau"] * 3.0, taum=held.taum,
                   tmod_io=held.tmod_io, utau_oce=held.utau_oce, vtau_oce=held.vtau_oce)
     for imp in (True, False):
-        out = si3_ice_update_tau(nxt, config=cfg, ln_drgice_imp=imp, ice_step=False)
+        out = si3_ice_update_tau(
+            nxt, config=cfg, ln_drgice_imp=imp, nn_fsbc=96, kt=17282
+        )
         np.testing.assert_array_equal(out.tmod_io, held.tmod_io)
         np.testing.assert_array_equal(out.taum, held.taum)
         np.testing.assert_array_equal(out.utau_oce, held.utau_oce)
@@ -148,6 +169,122 @@ def test_ocean_step_between_ice_steps_holds_ice_step_quantities():
             assert _rel(out.rCdU_ice, ref_r) <= 1e-15
 
 
+def test_even_step_hold_blend_and_rcdu_contract_plants_fire():
+    """Both cadence parities match an independent NumPy transcription on every output."""
+    d = _load()
+    cfg = _config(d, 2)
+    inner = (slice(1, -1), slice(1, -1))
+
+    def expected(inputs, *, refresh):
+        x = {name: np.asarray(value) for name, value in inputs._asdict().items()}
+        rho0 = np.float64(cfg.ice_constants.rho_ocean)
+        if refresh:
+            zu = (x["u_ice"][1:-1, 1:-1] + x["u_ice"][:-2, 1:-1]) - (
+                x["u_oce"][1:-1, 1:-1] + x["u_oce"][:-2, 1:-1]
+            )
+            zv = (x["v_ice"][1:-1, 1:-1] + x["v_ice"][1:-1, :-2]) - (
+                x["v_oce"][1:-1, 1:-1] + x["v_oce"][1:-1, :-2]
+            )
+            zmod = np.float64(0.25) * (zu * zu + zv * zv)
+            tmod_io = x["tmod_io"].copy()
+            tmod_io[inner] = (rho0 * x["drag_io"][inner]) * np.sqrt(zmod)
+            taum_ice = (
+                (x["at_i"][inner] * rho0)
+                * x["drag_io"][inner]
+            ) * zmod
+            taum = ((np.float64(1.0) - x["at_i"][inner]) * x["taum"]) + taum_ice
+            utau_oce = x["utau"][inner].copy()
+            vtau_oce = x["vtau"][inner].copy()
+        else:
+            tmod_io = x["tmod_io"].copy()
+            taum = x["taum"].copy()
+            utau_oce = x["utau_oce"].copy()
+            vtau_oce = x["vtau_oce"].copy()
+
+        urel = x["u_ice"][inner] + x["u_ice"][:-2, 1:-1]
+        vrel = x["v_ice"][inner] + x["v_ice"][1:-1, :-2]
+        zutau = (np.float64(0.5) * tmod_io[inner]) * urel
+        zvtau = (np.float64(0.5) * tmod_io[inner]) * vrel
+        utau = x["utau"].copy()
+        vtau = x["vtau"].copy()
+        utau[inner] = ((np.float64(1.0) - x["at_i"][inner]) * utau_oce) + (
+            x["at_i"][inner] * zutau
+        )
+        vtau[inner] = ((np.float64(1.0) - x["at_i"][inner]) * vtau_oce) + (
+            x["at_i"][inner] * zvtau
+        )
+        r1_rho0 = np.float64(1.0) / rho0
+        rcdu = ((-r1_rho0 * tmod_io) * x["at_i"]) * x["tmask_k1"]
+        return dict(
+            utau=utau,
+            vtau=vtau,
+            taum=taum,
+            tmod_io=tmod_io,
+            utau_oce=utau_oce,
+            vtau_oce=vtau_oce,
+            rCdU_ice=rcdu,
+        )
+
+    def assert_expected(candidate, reference):
+        for name in candidate._fields:
+            np.testing.assert_array_equal(
+                np.asarray(getattr(candidate, name)), reference[name], err_msg=name
+            )
+
+    odd_inputs = _inputs(d)
+    odd = si3_ice_update_tau(
+        odd_inputs, config=cfg, ln_drgice_imp=True, nn_fsbc=2, kt=1
+    )
+    assert_expected(odd, expected(odd_inputs, refresh=True))
+    nxt = _inputs(
+        d,
+        u_ice=d["u_ice"] * 1.3 + 0.01,
+        v_ice=d["v_ice"] * 0.6 - 0.02,
+        u_oce=d["u_oce"] * 5.0,
+        utau=d["utau"] * 3.0,
+        vtau=d["vtau"] * 3.0,
+        taum=odd.taum,
+        tmod_io=odd.tmod_io,
+        utau_oce=odd.utau_oce,
+        vtau_oce=odd.vtau_oce,
+    )
+    even = si3_ice_update_tau(
+        nxt, config=cfg, ln_drgice_imp=True, nn_fsbc=2, kt=2
+    )
+    even_expected = expected(nxt, refresh=False)
+    assert_expected(even, even_expected)
+
+    with pytest.raises(AssertionError, match="vtau"):
+        assert_expected(even._replace(vtau=nxt.vtau), even_expected)
+
+    with pytest.raises(AssertionError, match="rCdU_ice"):
+        assert_expected(even._replace(rCdU_ice=2.0 * even.rCdU_ice), even_expected)
+
+    refreshed_on_even = si3_ice_update_tau(
+        nxt, config=cfg, ln_drgice_imp=True, nn_fsbc=2, kt=1
+    )
+    with pytest.raises(AssertionError, match="utau"):
+        assert_expected(refreshed_on_even, even_expected)
+
+
+def test_nn_fsbc_argument_must_match_config_and_rejects_bool():
+    d = _load()
+    cfg = _config(d, 2)
+    with pytest.raises(ValueError, match=r"nn_fsbc must equal config.nn_fsbc: 1 != 2"):
+        si3_ice_update_tau(
+            _inputs(d), config=cfg, ln_drgice_imp=True, nn_fsbc=1, kt=1
+        )
+    with pytest.raises(TypeError, match="static Python integers"):
+        si3_ice_update_tau(
+            _inputs(d), config=cfg, ln_drgice_imp=True, nn_fsbc=True, kt=1
+        )
+    for kt in (True, 1.5):
+        with pytest.raises(TypeError, match="kt must be a static Python integer"):
+            si3_ice_update_tau(
+                _inputs(d), config=cfg, ln_drgice_imp=True, nn_fsbc=2, kt=kt
+            )
+
+
 def test_loop_extents_at_nn_hls_2():
     """nn_hls=2: tmod_io on DO_2D(1) (untouched outer ring), blend on DO_2D(0), rCdU_ice on DO_2D(1) (array shrunk by 1)."""
     cfg = SI3ORCA2StateConfig()._replace(nn_hls=2, nn_fsbc=96)
@@ -160,7 +297,9 @@ def test_loop_extents_at_nn_hls_2():
         u_oce=f(), v_oce=f(), drag_io=f() * 0.01, at_i=f(), utau=jnp.full((n, n), sentinel),
         vtau=jnp.full((n, n), sentinel), tmod_io=jnp.full((n, n), sentinel), taum=jnp.ones((n - 4, n - 4)),
         utau_oce=jnp.zeros((n - 4, n - 4)), vtau_oce=jnp.zeros((n - 4, n - 4)), tmask_k1=jnp.ones((n, n)))
-    out = si3_ice_update_tau(inp, config=cfg, ln_drgice_imp=True)
+    out = si3_ice_update_tau(
+        inp, config=cfg, ln_drgice_imp=True, nn_fsbc=96, kt=17281
+    )
     tm = np.asarray(out.tmod_io)
     assert np.all(tm[0, :] == sentinel) and np.all(tm[:, -1] == sentinel)
     assert np.all(tm[1:-1, 1:-1] != sentinel)
@@ -174,8 +313,12 @@ def test_loop_extents_at_nn_hls_2():
 def test_jit_matches_eager():
     d = _load()
     cfg = _config(d, 96)
-    eager = si3_ice_update_tau(_inputs(d), config=cfg, ln_drgice_imp=True)
-    jitted = jax.jit(lambda x: si3_ice_update_tau(x, config=cfg, ln_drgice_imp=True))(_inputs(d))
+    eager = si3_ice_update_tau(
+        _inputs(d), config=cfg, ln_drgice_imp=True, nn_fsbc=96, kt=17281
+    )
+    jitted = jax.jit(lambda x: si3_ice_update_tau(
+        x, config=cfg, ln_drgice_imp=True, nn_fsbc=96, kt=17281
+    ))(_inputs(d))
     for a, b in zip(eager, jitted):
         np.testing.assert_array_equal(a, b)
 
@@ -183,8 +326,12 @@ def test_jit_matches_eager():
 def test_ice_step_true_equals_previous_single_call_form():
     """nn_fsbc=1: the ice step is every step; the composed call is unchanged from the O16 form (no rCdU_ice change)."""
     d = _load()
-    a = si3_ice_update_tau(_inputs(d), config=_config(d, 1), ln_drgice_imp=False)
-    b = si3_ice_update_tau(_inputs(d), config=_config(d, 96), ln_drgice_imp=False, ice_step=True)
+    a = si3_ice_update_tau(
+        _inputs(d), config=_config(d, 1), ln_drgice_imp=False, nn_fsbc=1, kt=1
+    )
+    b = si3_ice_update_tau(
+        _inputs(d), config=_config(d, 96), ln_drgice_imp=False, nn_fsbc=96, kt=17281
+    )
     for x, y in zip(a, b):
         if x is not None:
             np.testing.assert_array_equal(x, y)
@@ -195,8 +342,10 @@ def test_rcdu_ice_gradient_matches_central_difference():
     cfg = _config(d, 96)
 
     def f(s):
-        return jnp.sum(si3_ice_update_tau(_inputs(d, u_ice=jnp.asarray(d["u_ice"]) * s), config=cfg,
-                                          ln_drgice_imp=True).rCdU_ice)
+        return jnp.sum(si3_ice_update_tau(
+            _inputs(d, u_ice=jnp.asarray(d["u_ice"]) * s), config=cfg,
+            ln_drgice_imp=True, nn_fsbc=96, kt=17281,
+        ).rCdU_ice)
 
     x = jnp.asarray(1.0)
     g = float(jax.grad(f)(x))

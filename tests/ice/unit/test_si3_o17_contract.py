@@ -24,6 +24,7 @@ from legoesm.ice.si3_o17 import (
     SI3O17LiveForcing,
     SI3O17StepState,
     build_orca2_sas_ice_o17_card,
+    si3_teos10_from_resolved_namelist,
     si3_o17_step,
 )
 from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig, SI3State
@@ -44,6 +45,7 @@ def _card(surface=None) -> SI3O17Card:
     return build_orca2_sas_ice_o17_card(
         surface=_surface(SI3_HARD_SWITCHES) if surface is None else surface,
         thermo_namelist={"ln_icedA": True},
+        ln_teos10=True,
     )
 
 
@@ -76,9 +78,32 @@ def test_card_freezes_the_orca2_sas_ice_deck_and_keeps_the_callers_surface() -> 
 
 def test_card_builder_refuses_untyped_inputs() -> None:
     with pytest.raises(TypeError, match="resolved SI3SurfaceConfig"):
-        build_orca2_sas_ice_o17_card(surface=object(), thermo_namelist={})
+        build_orca2_sas_ice_o17_card(
+            surface=object(), thermo_namelist={}, ln_teos10=True
+        )
     with pytest.raises(TypeError, match="thermodynamic namelist"):
-        build_orca2_sas_ice_o17_card(surface=_surface(), thermo_namelist=None)
+        build_orca2_sas_ice_o17_card(
+            surface=_surface(), thermo_namelist=None, ln_teos10=True
+        )
+    with pytest.raises(TypeError, match="resolved EOS selector"):
+        build_orca2_sas_ice_o17_card(
+            surface=_surface(), thermo_namelist={}, ln_teos10=None
+        )
+
+
+@pytest.mark.parametrize(
+    ("teos10", "eos80", "expected"),
+    ((True, False, True), (False, True, False)),
+)
+def test_card_eos_selector_comes_from_resolved_nameos(
+    tmp_path, teos10, eos80, expected
+) -> None:
+    path = tmp_path / "output.namelist.dyn"
+    path.write_text(
+        f"&nameos\n ln_teos10={'.true.' if teos10 else '.false.'},\n"
+        f" ln_eos80={'.true.' if eos80 else '.false.'},\n ln_seos=.false.\n/\n"
+    )
+    assert si3_teos10_from_resolved_namelist(path) is expected
 
 
 def test_o17_config_is_explicit_and_reports_the_cards_switches() -> None:
