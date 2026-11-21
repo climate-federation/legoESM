@@ -124,7 +124,14 @@ def test_conv_water_gradient_through_every_switch():
     def f(*a):
         liq, ice = cam6_conv_water_4rad(*a, 0.01, log_width=W)
         return liq + ice
-    check_grads(f, args, order=1, modes=("fwd", "rev"), atol=1e-6, rtol=1e-4)
+    # inputs span 1e-12..0.3: check in ln space so one finite-difference step
+    # (eps in ln x, well inside the ramp width W) fits every input
+    pos = tuple(jnp.where(a > 0, a, 1e-30) for a in args)
+
+    def f_ln(*la):
+        return f(*(jnp.exp(x) for x in la)) / 1e-5
+    check_grads(f_ln, tuple(jnp.log(a) for a in pos), order=1, modes=("fwd", "rev"),
+                eps=1e-4, atol=1e-6, rtol=1e-3)
     # non-zero derivative through the switched input of each column
     for col, arg in ((0, 2), (1, 3), (2, 4)):
         g = jax.grad(lambda x: f(*[x if i == arg else a for i, a in enumerate(args)])[col])(
@@ -144,8 +151,10 @@ def test_snow_gradient_through_every_switch():
     def f(*a):
         cf, sp, de = cam6_snow_for_radiation(*a, log_width=W)
         return cf + sp + 1e-3 * de
-    check_grads(lambda *a: f(*a, *args[4:]), args[:4], order=1,
-                modes=("fwd", "rev"), atol=1e-6, rtol=1e-4)
+    pos = tuple(jnp.where(a > 0, a, 1e-30) for a in args[:4])
+    check_grads(lambda *la: f(*(jnp.exp(x) for x in la), *args[4:]),
+                tuple(jnp.log(a) for a in pos), order=1, modes=("fwd", "rev"),
+                eps=1e-4, atol=1e-6, rtol=1e-3)
     for col, arg in ((0, 0), (1, 1), (2, 3), (3, 2)):
         g = jax.grad(lambda x: f(*[x if i == arg else a for i, a in enumerate(args)])[col])(
             args[arg])
