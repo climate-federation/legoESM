@@ -329,13 +329,14 @@ def sqrt_c1(x: jax.Array, width: float) -> jax.Array:
 
 
 def step_rel(x: jax.Array, scale: jax.Array, width: float) -> jax.Array:
-    """C1 step ``x > 0`` (RULE 5) with its ramp over ``|x| < width*scale/2``:
-    exactly 0 below and 1 above the band.  ``scale > 0`` is the magnitude ``x``
-    is measured against (traced is fine); ``width`` is dimensionless and static,
-    ``width = 0`` is the hard ``x > 0``."""
+    """C1 step ``x > 0`` (RULE 5), one-sided: exactly 0 for ``x <= 0`` (ties go
+    to the hard form's side), a ramp over ``0 < x < width*scale``, exactly 1
+    above.  ``scale > 0`` is the magnitude ``x`` is measured against (traced is
+    fine); ``width`` is dimensionless and static, ``width = 0`` is the hard
+    ``x > 0``."""
     if width == 0:
         return (x > 0).astype(jnp.result_type(x, float))
-    return smoothstep_cubic(x / (width * scale) + 0.5)
+    return smoothstep_cubic(x / (width * scale))
 
 
 def max_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
