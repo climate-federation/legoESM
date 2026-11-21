@@ -389,7 +389,8 @@ if ! source "${REPO}/scripts/cluster/levante/hpcx_gdr_env.sh"; then
     echo "[chain] REFUSING: could not set up the HPC-X environment." >&2
     exit 73
 fi
-_HPCX="${HPCX_HOME:-}"; _HPCX="${_HPCX%/}"
+_HPCX="${HPCX_HOME:-}"
+while [[ "${_HPCX}" == */ ]]; do _HPCX="${_HPCX%/}"; done   # "/" or "//" -> empty: refused
 export MPI4JAX_USE_CUDA_MPI=1
 # One GPU per rank: mpirun cannot bind GPUs, so a wrapper hands each local
 # rank its own device.  It also clears SLURM_PROCID, which every mpirun

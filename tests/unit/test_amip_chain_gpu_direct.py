@@ -97,7 +97,8 @@ def _preflight_block() -> str:
 
 def _run_preflight(tmp_path, *, markers=None, rc: int = 0, env_ok: bool = True,
                    ompi_info: bool = True, mpirun_elsewhere: bool = False,
-                   lib_elsewhere: bool = False) -> subprocess.CompletedProcess:
+                   ompi_info_elsewhere: bool = False, lib_elsewhere: bool = False,
+                   hpcx_home: str | None = None) -> subprocess.CompletedProcess:
     """The script's GPU-direct preflight with a stub HPC-X tree under
     ``tmp/hpcx`` (env script, ompi_info, mpirun).  The stub mpirun prints the
     preflight markers (default: all good) and exits ``rc``."""
@@ -106,21 +107,24 @@ def _run_preflight(tmp_path, *, markers=None, rc: int = 0, env_ok: bool = True,
     bin_.mkdir(parents=True, exist_ok=True)
     env = tmp_path / "scripts" / "cluster" / "levante"
     env.mkdir(parents=True, exist_ok=True)
+    home = f"{hpcx}/" if hpcx_home is None else hpcx_home
     (env / "hpcx_gdr_env.sh").write_text(
-        f"export HPCX_HOME={hpcx}/\nexport PATH={bin_}:$PATH\n" if env_ok else "return 1\n")
+        (f"export HPCX_HOME={home}\n" if home else "unset HPCX_HOME\n")
+        + f"export PATH={bin_}:$PATH\n" if env_ok else "return 1\n")
+    other = tmp_path / "other"
+    other.mkdir(exist_ok=True)
     if ompi_info:
-        (bin_ / "ompi_info").write_text("#!/bin/bash\necho 'Open MPI v4.1.7'\n")
+        ((other if ompi_info_elsewhere else bin_) / "ompi_info").write_text(
+            "#!/bin/bash\necho 'Open MPI v4.1.7'\n")
     lib = "/usr/lib/libmpi.so.40" if lib_elsewhere else f"{hpcx}/ompi/lib/libmpi.so.40"
     if markers is None:
         markers = f"'MPI_LIB Open MPI v4.1.7, package: HPC-X' 'MPI_PATH {lib}' 'CUDA_EXT True'"
     stub = f"#!/bin/bash\nprintf '%s\\n' {markers}\nexit {rc}\n"
-    mbin = tmp_path / "other" if mpirun_elsewhere else bin_
-    mbin.mkdir(exist_ok=True)
-    (mbin / "mpirun").write_text(stub)
-    for d in (bin_, mbin):
+    ((other if mpirun_elsewhere else bin_) / "mpirun").write_text(stub)
+    for d in (bin_, other):
         for f in d.iterdir():
             f.chmod(0o755)
-    path = f"{tmp_path / 'other'}:/usr/bin:/bin" if mpirun_elsewhere else "/usr/bin:/bin"
+    path = f"{other}:/usr/bin:/bin"
     body = _preflight_block() + '\necho PREFLIGHT_PASSED'
     return _run(tmp_path, body, PATH=path, PY="/r/python", REPO=str(tmp_path),
                 OUTDIR=str(tmp_path))
@@ -144,7 +148,9 @@ def test_preflight_that_fails_after_printing_its_markers_is_refused(tmp_path, rc
     dict(ompi_info=False),                    # no ompi_info at all
     dict(mpirun_elsewhere=True),              # a non-HPC-X mpirun shadows HPC-X's
     dict(lib_elsewhere=True),                 # mpi4py loads a libmpi outside HPC-X
-    dict(markers="'MPI_LIB Open MPI v4.1.2' 'MPI_PATH /x' 'CUDA_EXT True'"),
+    dict(ompi_info_elsewhere=True),           # a non-HPC-X ompi_info, same version
+    dict(hpcx_home=""),                       # env script succeeds, HPCX_HOME unset
+    dict(hpcx_home="//"),                     # degenerate HPCX_HOME = filesystem root
     dict(markers="'MPI_LIB Open MPI v4.1.7' 'CUDA_EXT True'"),          # no path
 ])
 def test_preflight_refuses_anything_that_is_not_hpcx(tmp_path, case):
@@ -156,4 +162,11 @@ def test_preflight_refuses_anything_that_is_not_hpcx(tmp_path, case):
 def test_preflight_without_the_cuda_extension_is_refused(tmp_path):
     lib = tmp_path / "hpcx" / "ompi" / "lib" / "libmpi.so.40"
     r = _run_preflight(tmp_path, markers=f"'MPI_LIB Open MPI v4.1.7' 'MPI_PATH {lib}' 'CUDA_EXT False'")
+    assert r.returncode == 73
+
+
+def test_preflight_with_the_wrong_mpi_version_is_refused(tmp_path):
+    # library path under HPC-X, so only the version check can refuse
+    lib = tmp_path / "hpcx" / "ompi" / "lib" / "libmpi.so.40"
+    r = _run_preflight(tmp_path, markers=f"'MPI_LIB Open MPI v4.1.2' 'MPI_PATH {lib}' 'CUDA_EXT True'")
     assert r.returncode == 73
