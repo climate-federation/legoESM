@@ -342,6 +342,8 @@ def test_host_omega_is_the_dycores_flux_form_continuity(hybrid):
     cfg = MPASPrimitiveEquationConfig()
     assert cfg.nu_del4_ps == 0.0
     tend = mpas_model_tendencies(state, mesh, sigma, cfg)
-    np.testing.assert_allclose(np.asarray(dps), np.asarray(tend.dp_s_dt.data),
-                               rtol=1e-12, atol=0.0)
+    # relative to the field's maximum: measured 0 (sigma) and 2.0e-8 (hybrid,
+    # float32 mesh metrics); the advective div(u) dp form is off by 2.1e-2
+    ref = np.asarray(tend.dp_s_dt.data)
+    assert np.max(np.abs(np.asarray(dps) - ref)) <= 1e-6 * np.max(np.abs(ref))
     assert np.all(np.isfinite(np.asarray(omega)))
