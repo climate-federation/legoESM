@@ -1220,6 +1220,7 @@ def compute_cloud_properties(
 
     # --- Cloud fraction ---
     _ast_cam6 = None  # CAM6 stratiform fraction max(alst, aist); cam6_clubb only
+    _alst_cam6 = None
     _deepcu_cam6 = None
     if config.scheme == "xu_randall":
         q_c = jnp.zeros_like(T) if q_cloud is None else q_cloud
@@ -1295,6 +1296,7 @@ def compute_cloud_properties(
             deepcu = cam6_deep_convective_fraction(
                 conv_mass_flux_up, conv_icwmr, config)
         _ast_cam6 = jnp.maximum(alst, aist)
+        _alst_cam6 = alst
         _deepcu_cam6 = deepcu
         cf = jnp.minimum(_ast_cam6 + deepcu, 1.0)
     else:
