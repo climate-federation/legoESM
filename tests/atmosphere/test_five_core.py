@@ -391,7 +391,8 @@ def _clubb_cfg():
     return PhysicsConfig(
         radiation=RadiationConfig(scheme="none", cloud_config=CloudConfig(scheme="cam6_clubb")),
         convection=ConvectionConfig(scheme="none"),
-        turbulence=TurbulenceConfig(scheme="clubb", clubb=C.CLUBBConfig(prognostic=True)),
+        turbulence=TurbulenceConfig(scheme="clubb", liquid_partition=True,
+                                    clubb=C.CLUBBConfig(prognostic=True)),
         microphysics=MicrophysicsConfig(scheme="morrison"))
 
 
@@ -405,9 +406,11 @@ def test_make_physics_builds_five_only_where_it_can_run(setup):
     for off in (None, five.FiveConfig(enabled=False)):
         assert not hasattr(make_physics(cfg, model_type="mpas", dt=600.0,
                                         cld_macmic_num_steps=2, five=off), "_five")
-    refused = (dict(model_type="hydrostatic", cld_macmic_num_steps=2),
-               dict(model_type="mpas", cld_macmic_num_steps=1),
-               dict(model_type="mpas", cld_macmic_num_steps=2, physics_cadence="write"),
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    with pytest.raises(ValueError, match="FIVE runs on the MPAS lane"):
+        make_physics(PhysicsConfig(), model_type="hydrostatic", dt=600.0,
+                     cld_macmic_num_steps=2, five=on, five_host_coord=hc)
+    refused = (dict(model_type="mpas", cld_macmic_num_steps=2, physics_cadence="write"),
                dict(model_type="mpas", cld_macmic_num_steps=2, budget_ledger=True))
     for kw in refused:
         with pytest.raises(ValueError, match="FIVE"):
