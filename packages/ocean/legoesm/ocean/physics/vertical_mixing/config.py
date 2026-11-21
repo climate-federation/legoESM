@@ -175,6 +175,8 @@ __param_spec__ = {
             "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "crossing_sharpness": "numerics: solver/CFL/smoothing parameter",
             "crossing_threshold": "numerics: solver/CFL/smoothing parameter",
+            "surrogate_width_sigma": "numerics: backward-pass surrogate width (gradients only, never fitted)",
+            "surrogate_width_n2": "numerics: backward-pass surrogate width (gradients only, never fitted)",
             "epsilon_lmd": "numerics: floor/cap",
             "gamma_S": "Large 1994 fixed nondim constant",
             "gamma_T": "Large 1994 fixed nondim constant",
@@ -1034,6 +1036,31 @@ class KPPConfig(NamedTuple):
     # CVMix/MOM6, MITgcm and POP.  "insitu_signed": the earlier difference of in-situ densities at each
     # cell's own pressure (biased by g^2/c_s^2, about +4e-5 s^-2), kept bit for bit.  User-approved default 2026-11-20 (published form).
     n2_mode: str = "adiabatic"
+    # Velocity scale w_s inside the unresolved shear V_t^2 of the bulk Richardson
+    # number.  "column" (default, unchanged behaviour): w_s at each depth d for a
+    # boundary layer of depth h_bl_prev, or of the full column when the caller
+    # passes no h_bl_prev (the lat-lon K-profile path), so the surface-layer cap
+    # d_eff = min(d, epsilon*h) does not act.  "candidate": the CVMix / MOM6 form,
+    # each candidate depth d is its own boundary-layer depth and w_s is taken at
+    # sigma = epsilon of it, d_eff = epsilon*d, in stable and unstable forcing
+    # (CVMix cvmix_kpp_compute_turbulent_scales_1d_OBL with l_LMD_ws = .false.,
+    # its default; MOM6 MOM_CVMix_KPP.F90 KPP_compute_BLD, Vt_layer = 1.0 and
+    # OBL_depth = cell-centre depth).
+    vt2_velocity_scale: str = "column"
+    # Surface buoyancy flux in the KPP velocity scales.  False (default, unchanged
+    # behaviour): |B_f| below float32 machine epsilon (1.19e-7 m^2/s^3) is replaced by
+    # that floor with the same sign, which covers most tropical fluxes.  True: the actual
+    # flux, with zeta = d_eff kappa B_f / u*^3 written without a division by B_f, as
+    # LMD94 and CVMix (cvmix_kpp_compute_turbulent_scales_1d_OBL) use it.
+    actual_buoyancy_flux: bool = False
+    # Gradient surrogates (docs/88 6.12 (a2)): the boundary-layer base switch (K_bl inside, interior K below
+    # sigma = 1) and the convective switch (K_conv where N2 < Ri_conv) keep their exact forward values but
+    # take the derivative of a logistic blend in the backward pass, with these widths (numerical, stated
+    # before use, never fitted).  False (default): exact gradients of the step functions.
+    gradient_surrogates: bool = False
+    surrogate_switches: str = "bl_base,convective"   # which switches get a surrogate (comma list)
+    surrogate_width_sigma: float = 0.1     # in sigma = depth / h_bl
+    surrogate_width_n2: float = 1.0e-6     # in N2 [s^-2]
 
 
 class CATKEConfig(NamedTuple):
