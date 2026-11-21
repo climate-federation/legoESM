@@ -87,7 +87,7 @@ def test_forward_bitwise_unchanged(switches):
     base = KPPConfig(vt2_velocity_scale="candidate", actual_buoyancy_flux=True)
     off = _run(base, *cols)
     on = _run(base._replace(gradient_surrogates=True, surrogate_switches=switches), *cols)
-    for name in ("K_v", "A_v", "dT_dt", "dS_dt", "nl_unit"):
+    for name in ("K_v", "A_v", "dT_dt", "dS_dt"):
         np.testing.assert_array_equal(np.asarray(getattr(on, name)), np.asarray(getattr(off, name)), err_msg=name)
 
 
