@@ -75,9 +75,11 @@ from legoesm.grids.vertical import (
     VERTICAL_ADVECTION_SCHEMES,
     vertical_advection,
     vertical_advection_hybrid,
+    vertical_advection_hybrid_ppm,
     vertical_advection_hybrid_van_leer,
     vertical_advection_theta,
     vertical_advection_theta_hybrid,
+    vertical_advection_tv_hybrid_ppm,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import (
@@ -250,6 +252,10 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # Rate [1/s] of the vertical del4 filter on TRACERS.  None = follow
     # ``nu_vert4_T`` (bit-identical); 0.0 leaves tracers unfiltered.
     nu_vert4_tracer: float | None = None
+    # Sharpness of the PPM limiter's branch decisions under
+    # vert_advection_scheme='ppm' (RULE 5): inf = CAM-FV's ppm2m exactly, a
+    # finite value blends branches within about 4/sharpness relative.
+    vert_ppm_limiter_sharpness: float = 1.0e4
 
 
 # ============================================================================
@@ -551,7 +557,7 @@ def mpas_momentum_dissipation(du_dt_3d, u_3d, mesh, config):
 
 def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
                             mass_flux, sigma_dot, p_s, _dps_del4,
-                            _filter_weight, physics_tendency=None):
+                            _filter_weight, physics_tendency=None, dt=0.0):
     """Tracer tendency dict (``None`` for a dry state)."""
     _vert_scheme = config.vert_advection_scheme
     # --- 7. Tracer transport (moisture etc.) ---
@@ -570,7 +576,14 @@ def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
         _tnames = list(tracers.keys())
         q = jnp.stack([tracers[k].data for k in _tnames], axis=-1)
         dq = tracer_horizontal_advection(q, u_3d, mesh)
-        if _hybrid:
+        if _hybrid and _vert_scheme == "ppm":
+            # CAM-FV kord 7, positive definite (te_map's constituents).
+            dq = dq + jax.vmap(
+                lambda qk: vertical_advection_hybrid_ppm(
+                    qk, mass_flux, p_s, sigma_coord, dt, kord=7, iv=0,
+                    sharpness=config.vert_ppm_limiter_sharpness),
+                in_axes=-1, out_axes=-1)(q)
+        elif _hybrid:
             dq = dq + jax.vmap(
                 lambda qk: vertical_advection_hybrid_van_leer(
                     qk, mass_flux, p_s, sigma_coord,
@@ -698,7 +711,7 @@ def mpas_legacy_pe_tendencies(
             f"unknown vert_advection_scheme {_vert_scheme!r}; expected one of "
             f"{VERTICAL_ADVECTION_SCHEMES}"
         )
-    if _hybrid and _vert_scheme not in ("upwind", "sb"):
+    if _hybrid and _vert_scheme not in ("upwind", "sb", "ppm"):
         raise ValueError(
             f"vert_advection_scheme={_vert_scheme!r} is implemented for the "
             "sigma vertical coordinate only; the hybrid lane's temperature "
@@ -706,12 +719,11 @@ def mpas_legacy_pe_tendencies(
             "limited operator), so it would be silently inert. "
             "Use vertical_coord='sigma', or 'upwind'/'sb' on the hybrid lane."
         )
-    if not _hybrid and _vert_scheme == "sb":
+    if not _hybrid and _vert_scheme in ("sb", "ppm"):
         raise ValueError(
-            "vert_advection_scheme='sb' (conservative Simmons-Burridge flux "
-            "form) is wired into the HYBRID lane only; on the sigma lane it "
-            "would be silently inert. Use vertical_coord='cam_l32'/'hybrid', "
-            "or 'upwind'/'van_leer' on sigma."
+            f"vert_advection_scheme={_vert_scheme!r} is wired into the HYBRID "
+            "lane only; on the sigma lane it would be silently inert. Use "
+            "vertical_coord='cam_l32'/'hybrid', or 'upwind'/'van_leer' on sigma."
         )
 
     u_3d = state.u.data        # (nEdges, nlev)
@@ -951,9 +963,26 @@ def mpas_legacy_pe_tendencies(
         # scheme='sb' swaps the upwind advective operator inside the θ
         # round-trip for the conservative Simmons-Burridge flux form, which
         # satisfies the discrete product rule the advective one violates.
-        vert_thermo_T = vertical_advection_theta_hybrid(
-            T_3d, mass_flux, p_s, sigma_coord,
-            conservative=(_vert_scheme == "sb"))
+        if _vert_scheme == "ppm":
+            # CAM-FV te_map's temperature step: T_v mapped over ln p with
+            # kord 4, divided by 1 + zvir q_v of the vapour after its own
+            # kord 7 step.  Same quantity as the theta form below.
+            _sharp = config.vert_ppm_limiter_sharpness
+            if state.tracers is not None and "q_v" in state.tracers:
+                _qv = state.tracers["q_v"].data
+                _dqv = vertical_advection_hybrid_ppm(
+                    _qv, mass_flux, p_s, sigma_coord, dt, kord=7, iv=0,
+                    sharpness=_sharp)
+            else:
+                _qv = jnp.zeros_like(T_3d)
+                _dqv = jnp.zeros_like(T_3d)
+            vert_thermo_T = vertical_advection_tv_hybrid_ppm(
+                T_3d, _qv, _dqv, mass_flux, p_s, sigma_coord, dt,
+                sharpness=_sharp)
+        else:
+            vert_thermo_T = vertical_advection_theta_hybrid(
+                T_3d, mass_flux, p_s, sigma_coord,
+                conservative=(_vert_scheme == "sb"))
         # Hybrid carries a mass flux, not a coordinate velocity; the
         # diagnostic reports the equivalent dsigma/dt so the two branches are
         # comparable (dp/dt per unit layer mass).
@@ -1069,7 +1098,7 @@ def mpas_legacy_pe_tendencies(
     tracer_tends_out = mpas_tracer_tendencies(
         state.tracers, u_3d, mesh, sigma_coord, config, _hybrid,
         mass_flux if _hybrid else None, None if _hybrid else sigma_dot,
-        p_s, _dps_del4, _filter_weight, physics_tendency)
+        p_s, _dps_del4, _filter_weight, physics_tendency, dt=dt)
 
     _out = MPASHydrostaticTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",

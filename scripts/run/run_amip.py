@@ -578,8 +578,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "ON by default; --no-positivity-condensate-from-"
                              "vapour restores the legacy borrow, which creates "
                              "water when the globe cannot repay the deficit.")
+    parser.add_argument("--mpas-vert-ppm-limiter-sharpness", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_vert_ppm_limiter_sharpness,
+                        dest="mpas_vert_ppm_limiter_sharpness",
+                        help="sharpness of the PPM limiter's branch decisions "
+                             "under --mpas-vert-advection-scheme ppm; inf = "
+                             "CAM-FV's hard limiter exactly")
     parser.add_argument("--mpas-vert-advection-scheme",
-                        choices=("upwind", "van_leer", "sb"),
+                        choices=("upwind", "van_leer", "sb", "ppm"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
                         help="Vertical advection scheme on the MPAS sigma lane "
                              "(theta, tracers, edge winds).  'upwind' (default) "
@@ -3077,6 +3083,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         positivity_condensate_from_vapour=args.positivity_condensate_from_vapour,
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
+        mpas_vert_ppm_limiter_sharpness=args.mpas_vert_ppm_limiter_sharpness,
         spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
                                     if args.spectral_sponge_nu_top_m2s is not None else 0.0),
         tracer_vertical_scheme=args.tracer_vertical_scheme,

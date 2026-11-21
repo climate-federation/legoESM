@@ -153,7 +153,7 @@ def test_van_leer_raises_below_the_stencil_width(nlev):
 def test_scheme_tuple_is_the_dispatch_domain():
     # The shared tuple also carries the HYBRID-only "sb"; the sigma operator
     # takes exactly the two schemes below and refuses "sb" loudly (#2055).
-    assert VERTICAL_ADVECTION_SCHEMES == SIGMA_SCHEMES + ("sb",)
+    assert VERTICAL_ADVECTION_SCHEMES == SIGMA_SCHEMES + ("sb", "ppm")
     coord = _coord()
     with pytest.raises(ValueError, match="hybrid-coordinate flux form"):
         vertical_advection(jnp.zeros((1, NLEV)), jnp.zeros((1, NLEV + 1)),
