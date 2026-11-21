@@ -10,6 +10,8 @@ from __future__ import annotations
 import pathlib
 import subprocess
 
+import pytest
+
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 _LEVANTE = _REPO / "scripts" / "cluster" / "levante" / "amip_mpas_gpu_chain.sbatch"
 
@@ -87,3 +89,42 @@ def test_the_mode_is_carried_into_the_next_link():
     text = _LEVANTE.read_text()
     resubmit = text[text.index("NEXT=$(sbatch"):]
     assert "AMIP_GPU_DIRECT=${AMIP_GPU_DIRECT}" in resubmit
+
+
+def _preflight_block() -> str:
+    return _between("_HPCX_VER=$(ompi_info", 'LAUNCH=( mpirun -np "${AMIP_N_GPUS}"')
+
+
+def _run_preflight(tmp_path, *, markers: str, rc: int) -> subprocess.CompletedProcess:
+    """The script's preflight block with stub ``ompi_info``/``mpirun`` on PATH:
+    the stub mpirun prints ``markers`` and exits ``rc``."""
+    bin_ = tmp_path / "bin"
+    bin_.mkdir(exist_ok=True)
+    (bin_ / "ompi_info").write_text("#!/bin/bash\necho 'Open MPI v4.1.7'\n")
+    (bin_ / "mpirun").write_text(f"#!/bin/bash\nprintf '%s\\n' {markers}\nexit {rc}\n")
+    for f in bin_.iterdir():
+        f.chmod(0o755)
+    body = _preflight_block() + '\necho PREFLIGHT_PASSED'
+    return _run(tmp_path, body, PATH=f"{bin_}:$PATH", PY="/r/python", _WRAP="/r/wrap")
+
+
+_GOOD = "'MPI_LIB Open MPI v4.1.7, package: HPC-X' 'CUDA_EXT True'"
+
+
+def test_preflight_passes_when_it_succeeds_with_both_markers(tmp_path):
+    r = _run_preflight(tmp_path, markers=_GOOD, rc=0)
+    assert r.returncode == 0, r.stderr
+    assert "PREFLIGHT_PASSED" in r.stdout
+
+
+@pytest.mark.parametrize("rc", [1, 124])
+def test_preflight_that_fails_after_printing_both_markers_is_refused(tmp_path, rc):
+    r = _run_preflight(tmp_path, markers=_GOOD, rc=rc)
+    assert r.returncode == 73, (r.returncode, r.stdout, r.stderr)
+    assert "PREFLIGHT_PASSED" not in r.stdout
+
+
+@pytest.mark.parametrize("markers", ["'MPI_LIB Open MPI v4.1.2' 'CUDA_EXT True'",
+                                     "'MPI_LIB Open MPI v4.1.7' 'CUDA_EXT False'"])
+def test_preflight_with_wrong_mpi_or_no_cuda_extension_is_refused(tmp_path, markers):
+    assert _run_preflight(tmp_path, markers=markers, rc=0).returncode == 73

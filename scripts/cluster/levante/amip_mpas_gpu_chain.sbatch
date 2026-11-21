@@ -400,7 +400,13 @@ chmod +x "${_WRAP}"
 # library when it starts, so no file in the venv says which one it will be.
 _HPCX_VER=$(ompi_info --version 2>/dev/null | head -1)
 _PRE=$(timeout 300 mpirun -np 1 --bind-to none "${_WRAP}" "${PY}" -c "from mpi4py import MPI; from mpi4jax._src.xla_bridge import HAS_CUDA_EXT; print('MPI_LIB', MPI.Get_library_version().splitlines()[0]); print('CUDA_EXT', HAS_CUDA_EXT)" 2>&1)
+_PRE_RC=$?
 echo "[chain] GPU-direct preflight (${PY}):"; echo "${_PRE}" | grep -E '^(MPI_LIB|CUDA_EXT) '
+if (( _PRE_RC != 0 )); then
+    echo "[chain] REFUSING: the GPU-direct preflight exited ${_PRE_RC} (124 = timed out)." >&2
+    echo "${_PRE}" | tail -5 >&2
+    exit 73
+fi
 if [[ -z "${_HPCX_VER}" ]] || ! grep -qF "MPI_LIB ${_HPCX_VER}" <<< "${_PRE}"; then
     echo "[chain] REFUSING: ${PY} does not load HPC-X's MPI (${_HPCX_VER:-ompi_info missing})." >&2
     echo "${_PRE}" | tail -5 >&2
