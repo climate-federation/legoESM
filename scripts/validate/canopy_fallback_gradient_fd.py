@@ -6,7 +6,10 @@ by reverse mode and by central differences, where eps scales the shortwave
 (or shifts the air temperature) and loss = sum of SH + LE over the accepted
 unconverged columns, with the solver's adjoint on unconverged columns ON
 (``adjoint_unconverged``) and OFF (zero cotangent, the old behaviour).
-float64.  Prints one line per (max_iters, knob, adjoint): AD, FD, AD/FD.
+Second sweep ("near root"): the convergence gate is disabled (rtol = atol =
+0), so every column stops at the cap close to its root, as the held columns
+of a real run do; the residual left (squared, relative to the seed) is
+printed.  float64.  Prints one line per (max_iters, knob, adjoint): AD, FD, AD/FD.
 
 Run: JAX_ENABLE_X64=1 python scripts/validate/canopy_fallback_gradient_fd.py
 """
@@ -59,7 +62,11 @@ def _setup(max_iters, T_init):
     return run
 
 
-def _measure(max_iters, T_init, adjoint):
+def _measure(max_iters, T_init, adjoint, near_root=False):
+    tol0 = (canopy_solver._LM_RTOL, canopy_solver._LM_ATOL)
+    if near_root:
+        canopy_solver._LM_RTOL, canopy_solver._LM_ATOL = 0.0, 0.0
+
     def patched(*a, **k):
         k["adjoint_unconverged"] = adjoint
         return _ORIG(*a, **k)
@@ -71,6 +78,8 @@ def _measure(max_iters, T_init, adjoint):
                 & ~np.asarray(so.held).astype(bool))
         if not mask.any():
             return None
+        rel = getattr(so, "canopy_resid_rel", None)
+        rel = float(np.max(np.asarray(rel)[mask])) if rel is not None else float("nan")
         m = jnp.asarray(mask, dtype=jnp.float64)
 
         def loss(eps_sw, eps_t):
@@ -86,26 +95,31 @@ def _measure(max_iters, T_init, adjoint):
             e[i] = -h
             fm = lf(*e)
             fd = float((fp - fm) / (2 * h))
-            out.append((("sw_scale", "T_air")[i], float(g[i]), fd, int(mask.sum())))
+            out.append((("sw_scale", "T_air")[i], float(g[i]), fd, int(mask.sum()), rel))
         return out
     finally:
         canopy_solver._make_implicit_newton_solver = _ORIG
+        canopy_solver._LM_RTOL, canopy_solver._LM_ATOL = tol0
 
 
 def main():
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
     print(f"git {sha}  x64  N={_N}  T_init=307 K  loss=sum(SH+LE) accepted unconverged")
-    for max_iters in (1, 2, 3, 5, 8):
-        for adjoint in (False, True):
-            res = _measure(max_iters, 307.0, adjoint)
-            if res is None:
-                print(f"max_iters={max_iters}: no accepted unconverged column")
-                break
-            for knob, ad, fd, n in res:
-                ratio = ad / fd if fd != 0.0 else float("nan")
-                print(f"max_iters={max_iters} n_cols={n} adjoint={'on ' if adjoint else 'off'} "
-                      f"{knob:8s} AD={ad: .6e} FD={fd: .6e} AD/FD={ratio: .4f}")
+    for near_root, iters in ((False, (1, 2)), (True, (1, 2, 3, 4, 6))):
+        for max_iters in iters:
+            for adjoint in (False, True):
+                res = _measure(max_iters, 307.0, adjoint, near_root)
+                if res is None:
+                    print(f"near_root={near_root} max_iters={max_iters}: "
+                          "no accepted unconverged column")
+                    break
+                for knob, ad, fd, n, rel in res:
+                    ratio = ad / fd if fd != 0.0 else float("nan")
+                    print(f"near_root={near_root} max_iters={max_iters} n_cols={n} "
+                          f"max_resid_rel={rel:.2e} adjoint={'on ' if adjoint else 'off'} "
+                          f"{knob:8s} AD={ad: .6e} FD={fd: .6e} AD/FD={ratio: .4f}",
+                          flush=True)
 
 
 if __name__ == "__main__":
