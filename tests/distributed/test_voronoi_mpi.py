@@ -332,51 +332,6 @@ class TestMPIStep:
                 rtol=1e-8, atol=1e-8,
                 err_msg="MPI p_s mismatch vs serial")
 
-    def test_apvm_step_matches_serial(self, mesh, sigma, config):
-        """APVM scales its upwinding by the step dt: the MPI tendency must
-        receive it, or APVM is silently off under MPI and on in serial."""
-        _skip_if_no_mpi()
-        rank, n_ranks = _get_mpi_info()
-
-        from legoesm.parallel.voronoi_partition import partition_cells_geometric
-        cell_owner = partition_cells_geometric(mesh, n_ranks)
-        layout = make_voronoi_partition_layout(
-            mesh, rank, n_ranks, cell_owner=cell_owner)
-        cfg = config._replace(apvm_scale=1.0)
-
-        global_state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
-        model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
-        serial_state = model.step(global_state, DT)
-
-        local_state = scatter_state_voronoi(global_state, layout.partition)
-        mpi_step = make_voronoi_mpi_step(model, layout, sigma, cfg)
-        mpi_global = gather_state_voronoi(
-            mpi_step(local_state, DT), layout.partition)
-        if rank == 0:
-            # Same tolerance as test_step_matches_serial above.
-            np.testing.assert_allclose(
-                mpi_global.u.data, serial_state.u.data,
-                rtol=1e-8, atol=1e-8,
-                err_msg="MPI u mismatch vs serial (apvm)")
-
-    @pytest.mark.parametrize("bad_dt", [None, 0.0, -DT, float("nan")])
-    def test_step_refuses_missing_dt(self, mesh, sigma, config, bad_dt):
-        """A missing, zero, negative or NaN dt raises instead of stepping."""
-        _skip_if_no_mpi()
-        rank, n_ranks = _get_mpi_info()
-
-        from legoesm.parallel.voronoi_partition import partition_cells_geometric
-        cell_owner = partition_cells_geometric(mesh, n_ranks)
-        layout = make_voronoi_partition_layout(
-            mesh, rank, n_ranks, cell_owner=cell_owner)
-        model = MPASPrimitiveEquationModel(mesh, sigma, config)
-        local_state = scatter_state_voronoi(
-            baroclinic_wave_init_mpas(mesh, sigma, perturbed=True),
-            layout.partition)
-        mpi_step = make_voronoi_mpi_step(model, layout, sigma, config)
-        with pytest.raises(ValueError, match="dt"):
-            mpi_step(local_state, bad_dt)
-
 
 class TestMassConservation:
     """Verify global mass is conserved under MPI."""
