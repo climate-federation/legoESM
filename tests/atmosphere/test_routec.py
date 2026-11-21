@@ -380,3 +380,26 @@ def test_r5_enhancement_gradient_via_chi_s():
     x = a(1.05 * rs)
     check_grads(f, (x,), order=1, modes=("rev",), eps=1e-7, rtol=1e-3)
     assert float(jax.grad(f)(x)[0]) != 0.0
+
+
+def test_no_eddy_diffusion_across_the_constrained_flux_levels(monkeypatch):
+    """Hard widths: the explicit rtm/thlm diffusion gets Kh = 0 at the two flux
+    levels where the entrainment flux is imposed, Kh unchanged elsewhere."""
+    from legoesm.atmosphere.physics.turbulence import clubb as C
+    got = []
+    orig = C.expldiff_rtm_thlm
+
+    def spy(rtm, thlm, Kh_zm, *a, **k):
+        got.append(np.asarray(Kh_zm))
+        return orig(rtm, thlm, Kh_zm, *a, **k)
+    monkeypatch.setattr(C, "expldiff_rtm_thlm", spy)
+    state, forcing, env, gr = _sc_env()
+    hard = CLUBBConfig(routec_inversion=True, **{f: 0.0 for f in _WIDTH_FIELDS})
+    _, d = advance_clubb_core(state, forcing, **{**env, "config": hard})
+    Kh, Kh0 = got[-1], np.asarray(d["Kh_zm"])
+    for c in range(Kh.shape[0]):
+        k = int(round(float(d["routec"]["kb_eff"][c])))
+        assert Kh0[c, k] > 0.0 and Kh0[c, k + 1] > 0.0
+        assert Kh[c, k] == 0.0 and Kh[c, k + 1] == 0.0
+        rest = np.delete(np.arange(Kh.shape[1]), [k, k + 1])
+        np.testing.assert_array_equal(Kh[c, rest], Kh0[c, rest])
