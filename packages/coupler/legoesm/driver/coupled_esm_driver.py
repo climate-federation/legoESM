@@ -35,6 +35,29 @@ _HANDBACK_KEYS = ("shflx", "lhflx", "surface_mass_flux", "tau_x", "tau_y")
 _SECONDS_PER_DAY = 86400.0
 
 
+@jax.jit
+def _insolation_weighted_cosine(lat, lon, doy, hour, orbit):
+    """Integral of daylight cosine squared divided by integral of daylight cosine.
+
+    Interpolate the signed host cosine between equally spaced time nodes.
+    On each interval integrate only its sunlit fraction, including partial
+    intervals at sunrise and sunset. Equal endpoints also cover a zero-duration
+    diagnostic call (instantaneous geometry).
+    """
+    from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
+
+    mu = jax.vmap(lambda d, h: cos_zenith_angle(lat, lon, d, h, orbit=orbit))(doy, hour)
+    low = jnp.minimum(mu[:-1], mu[1:])
+    high = jnp.maximum(mu[:-1], mu[1:])
+    # For a crossing, the daylight duration fraction is high / (high - low).
+    crosses = (low < 0.0) & (high > 0.0)
+    fraction = jnp.where(crosses, high / jnp.where(crosses, high - low, 1.0), 1.0)
+    a, b = jnp.maximum(low, 0.0), jnp.maximum(high, 0.0)
+    first = jnp.sum(fraction * (a + b) / 2.0, axis=0)
+    second = jnp.sum(fraction * (a * a + a * b + b * b) / 3.0, axis=0)
+    return second / jnp.where(first > 0.0, first, 1.0)
+
+
 def _total_ice_sic(ice_state):
     """Total sea-ice concentration [0-1] on the grid, from either a scalar
     :class:`SeaIceState` (``concentration`` is grid-shaped) or a multi-category
@@ -1708,8 +1731,14 @@ class CoupledESMDriver:
     # Coupling step
     # ==================================================================
 
-    def _build_atm_forcing(self, day: float):
-        """Build AtmToSurface from atmosphere state and physics."""
+    def _build_atm_forcing(self, day: float, *, segment_seconds: float = 0.0):
+        """Build surface forcing at the segment ending on ``day``.
+
+        With a daily cycle, ``cos_zenith`` is the insolation-weighted mean of
+        the host solar cosine over the segment; the downward radiation remains
+        the atmosphere's segment mean. Direct callers without a segment
+        duration get the cosine at the supplied instant.
+        """
         from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.forcing.surface_utils import (
             blend_surface_temperature,
@@ -1916,14 +1945,23 @@ class CoupledESMDriver:
             # Realistic orbit (Berger 1978) when enabled; None ⇒ circular.
             from legoesm.driver.orbit import experiment_orbit
             _orbit = experiment_orbit(acfg)
-            _eccf = (earth_sun_distance_factor(float(doy), _orbit)
-                     if _orbit is not None else 1.0)
-            Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0,
-                                            orbit=_orbit)
-            # cos_zen is a geometric optical-path cosine: use the orbital
-            # declination but divide out the (a/r)^2 flux factor so it stays
-            # <= 1.  _eccf == 1.0 on the circular orbit ⇒ bit-identical.
-            cos_zen = jnp.clip(Q_daily / (_eccf * S_0), 0.0, 1.0)
+            if acfg.diurnal_cycle:
+                # Five-minute spacing limits linear interpolation error in the
+                # diurnal cosine to (2*pi*5/1440)^2 / 8, below 6e-5.
+                intervals = max(1, int(np.ceil(segment_seconds / 300.0)))
+                days = np.linspace(day - segment_seconds / _SECONDS_PER_DAY,
+                                   day, intervals + 1)
+                sun_doy, sun_seconds = self._atm._calendar_for_radiation(days)
+                cos_zen = _insolation_weighted_cosine(
+                    lat, self._atm._grid_lon, sun_doy, sun_seconds / 3600.0, _orbit)
+            else:
+                _eccf = (earth_sun_distance_factor(float(doy), _orbit)
+                         if _orbit is not None else 1.0)
+                Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0,
+                                                orbit=_orbit)
+                # Geometric optical-path cosine: divide out the orbital
+                # (a/r)^2 flux factor. Preserve the daily-mean path exactly.
+                cos_zen = jnp.clip(Q_daily / (_eccf * S_0), 0.0, 1.0)
         else:
             cos_zen = jnp.full_like(p_s, 0.5)
 
@@ -2677,7 +2715,7 @@ class CoupledESMDriver:
                 f"atm_owns_surface: segment {dt_segment} s != coupling_dt "
                 f"{win} s; the atmosphere's exports are the means of ONE "
                 "coupling window.")
-        atm_forcing = self._build_atm_forcing(day)
+        atm_forcing = self._build_atm_forcing(day, segment_seconds=dt_segment)
         self._last_atm_precip = atm_forcing.precip_total
         q_flux_now = None
         if getattr(self, "_qflux_forcing", None) is not None:
@@ -2718,7 +2756,7 @@ class CoupledESMDriver:
 
         from legoesm.coupler.grid_remap import remap_field, remap_surface_fields
 
-        atm_forcing = self._build_atm_forcing(day)
+        atm_forcing = self._build_atm_forcing(day, segment_seconds=dt_segment)
         # F2 (C1) tripwire: stash the precip RATE the coupler is about to
         # deliver so the segment-boundary moisture-budget residual can compare
         # it against the atmosphere's OWN column-water-vapour drain (an
