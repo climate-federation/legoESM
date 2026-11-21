@@ -332,9 +332,9 @@ class TestMPIStep:
                 rtol=1e-8, atol=1e-8,
                 err_msg="MPI p_s mismatch vs serial")
 
-    def test_flux_fct_moist_step_matches_serial(self, mesh, sigma, config):
-        """The flux-FCT limiter divides by the step dt: the MPI tendency must
-        receive it, or every limited tracer goes non-finite in one step."""
+    def test_apvm_step_matches_serial(self, mesh, sigma, config):
+        """APVM scales its upwinding by the step dt: the MPI tendency must
+        receive it, or APVM is silently off under MPI and on in serial."""
         _skip_if_no_mpi()
         rank, n_ranks = _get_mpi_info()
 
@@ -342,27 +342,22 @@ class TestMPIStep:
         cell_owner = partition_cells_geometric(mesh, n_ranks)
         layout = make_voronoi_partition_layout(
             mesh, rank, n_ranks, cell_owner=cell_owner)
-        cfg = config._replace(tracer_horizontal_scheme="flux_fct")
+        cfg = config._replace(apvm_scale=1.0)
 
-        global_state = baroclinic_wave_init_mpas(
-            mesh, sigma, perturbed=True, moist=True)
+        global_state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
         serial_state = model.step(global_state, DT)
 
         local_state = scatter_state_voronoi(global_state, layout.partition)
         mpi_step = make_voronoi_mpi_step(model, layout, sigma, cfg)
-        local_result = mpi_step(local_state, DT)
-
-        # gather_state_voronoi does not carry tracers: compare each rank's
-        # owned cells (they come first in the local ordering) with serial.
-        part = layout.partition
-        owned = np.asarray(part.local_cells[:part.n_owned_cells])
-        q_mpi = np.asarray(local_result.tracers["q_v"].data)[:part.n_owned_cells]
-        assert np.all(np.isfinite(q_mpi)), "MPI q_v non-finite"
-        np.testing.assert_allclose(
-            q_mpi, np.asarray(serial_state.tracers["q_v"].data)[owned],
-            rtol=1e-8, atol=1e-8,
-            err_msg="MPI q_v mismatch vs serial (flux_fct)")
+        mpi_global = gather_state_voronoi(
+            mpi_step(local_state, DT), layout.partition)
+        if rank == 0:
+            # Same tolerance as test_step_matches_serial above.
+            np.testing.assert_allclose(
+                mpi_global.u.data, serial_state.u.data,
+                rtol=1e-8, atol=1e-8,
+                err_msg="MPI u mismatch vs serial (apvm)")
 
     @pytest.mark.parametrize("bad_dt", [None, 0.0, -DT, float("nan")])
     def test_step_refuses_missing_dt(self, mesh, sigma, config, bad_dt):
