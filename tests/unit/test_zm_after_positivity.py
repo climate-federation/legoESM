@@ -148,3 +148,34 @@ def test_net_negative_vapour_column_creation_is_reported():
     created = np.asarray(d["water_created_kg_m2"])
     np.testing.assert_allclose(created[2], float(_col(-qv[2:3], dp[2:3])[0]), rtol=1e-12)
     np.testing.assert_allclose(created[[0, 1, 3]], 0.0, atol=1e-18)
+
+
+def test_ledger_rows_still_sum_to_the_applied_total():
+    """The correction (incl. a column zeroed, i.e. created water) is booked in
+    the convection's ledger row: the rows sum to the applied totals."""
+    import sys
+    sys.path.insert(0, "tests/unit")
+    from test_physics_macmic import _cfg, _moist_setup
+    from legoesm.atmosphere.physics.combined import make_physics
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.diagnostics.process_ledger import ledger_entry_column
+    mesh, sigma, state = _moist_setup()
+    tr = dict(state.tracers)
+    qc = tr["q_c"].data.at[3].set(-1.0e-6).at[5, 2].set(-5.0e-5)
+    tr["q_c"] = tr["q_c"].replace(data=qc)
+    state = state._replace(tracers=tr)
+    tots = {}
+    for on in (False, True):
+        cfg = _cfg(conv="zhang_mcfarlane")
+        zm = cfg.convection.zhang_mcfarlane._replace(positivity_after_zm=on,
+                                                     land_fraction="none")
+        cfg = cfg._replace(convection=cfg.convection._replace(zhang_mcfarlane=zm))
+        ps = init_physics_state(*state.T.data.shape, cfg)
+        t, _ = make_physics(cfg, model_type="mpas", dt=1800.0, cld_macmic_num_steps=2,
+                            budget_ledger=True)(state, mesh, sigma, phys_state=ps)
+        dq = sum(t.tracer_tendencies[k].data for k in ("q_v", "q_c", "q_r"))
+        tot = ledger_entry_column(dq, t.dT_dt.data, state.p_s.data, sigma.dsigma)
+        np.testing.assert_allclose(np.asarray(t.ledger_rows.sum(axis=1)), np.asarray(tot),
+                                   rtol=1e-8, atol=1e-8 * float(jnp.abs(tot).max()))
+        tots[on] = np.asarray(tot)
+    assert not np.allclose(tots[True], tots[False])

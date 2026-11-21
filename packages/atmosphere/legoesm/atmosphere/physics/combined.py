@@ -327,6 +327,15 @@ def make_physics(
             "tendency (qvften); physics_cadence_steps="
             f"{physics_cadence_steps} would drop the intervening dynamics "
             "steps. Run tiedtke with physics_cadence_steps=1")
+    if (config.convection.zhang_mcfarlane.positivity_after_zm
+            and not (model_type == "mpas" and cld_macmic_num_steps >= 2
+                     and config.convection.scheme == "zhang_mcfarlane")):
+        raise ValueError(
+            "positivity_after_zm=True runs only inside the MPAS macmic loop "
+            "(model_type='mpas', cld_macmic_num_steps >= 2, convection="
+            f"'zhang_mcfarlane'); got model_type={model_type!r}, "
+            f"cld_macmic_num_steps={cld_macmic_num_steps}, convection="
+            f"{config.convection.scheme!r}.")
     if config.convection.scheme == "tiedtke" and cld_macmic_num_steps > 1:
         raise ValueError(
             "convection='tiedtke' (WRF port) reads the previous step's "
@@ -893,15 +902,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 f"cld_macmic_num_steps=1, got {_n_macmic}.")
     # Water positivity right after ZM's update (ZhangMcFarlaneConfig.
     # positivity_after_zm), where CAM6 runs qneg3.
+    # (refused by make_physics wherever it would be inert)
     _zm_positivity = bool(config.convection.zhang_mcfarlane.positivity_after_zm)
-    if _zm_positivity and not (model_type == "mpas" and _n_macmic >= 2
-                               and config.convection.scheme == "zhang_mcfarlane"):
-        raise ValueError(
-            "positivity_after_zm=True runs only inside the MPAS macmic loop "
-            "(model_type='mpas', cld_macmic_num_steps >= 2, convection="
-            f"'zhang_mcfarlane'); got model_type={model_type!r}, "
-            f"cld_macmic_num_steps={_n_macmic}, convection="
-            f"{config.convection.scheme!r}.")
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(
             config.convection, model_type, dt,
@@ -1437,8 +1439,20 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                         _tr_t[_k] = _tr_t[_k] + (_v - _tr_in[_k]) / dt
                     elif _k in _tr_in:
                         _tr_t[_k] = (_v - _tr_in[_k]) / dt
-                r_pre = (r_pre[:2] + (r_pre[2] + (_T_out - state_m.T.data) / dt,)
-                         + r_pre[3:5] + (_tr_t,) + r_pre[6:])
+                _dT_fix = (_T_out - state_m.T.data) / dt
+                _led = r_pre[10]
+                if _led is not None:
+                    # book the correction (incl. any created water) in the
+                    # convection's ledger row, so the rows still sum to the
+                    # applied total
+                    from legoesm.diagnostics.process_ledger import ledger_entry_column
+                    _dq_fix = sum((_tr_out[k] - _tr_in[k]) / dt
+                                  for k in _LEDGER_WATER if k in _tr_out)
+                    _led = _led.at[:, sel["pre"][0][1], :].add(ledger_entry_column(
+                        _dq_fix, _dT_fix, state.p_s.data, sigma_coord.dsigma,
+                        level_weight=_ledger_level_weight).astype(_led.dtype))
+                r_pre = (r_pre[:2] + (r_pre[2] + _dT_fix,)
+                         + r_pre[3:5] + (_tr_t,) + r_pre[6:10] + (_led,) + r_pre[11:])
                 state_m = state_m._replace(
                     T=state_m.T.replace(data=_T_out),
                     tracers={k: f.replace(data=_tr_out[k])
