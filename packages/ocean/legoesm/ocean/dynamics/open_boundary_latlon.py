@@ -69,7 +69,7 @@ class OpenBoundaryData(NamedTuple):
     # velocity in the ring row.  With tau_in (s) set, the ring cells get
     # adaptive Orlanski radiation nudged toward these data after every outer
     # step: strong nudging (tau_in) where the phase speed points inward, weak
-    # (tau_out) where it points out.  Passive tracers get zero gradient.
+    # (tau_out) where it points out.
     west_T: jnp.ndarray | None = None
     west_S: jnp.ndarray | None = None
     west_u3: jnp.ndarray | None = None
@@ -227,14 +227,19 @@ def _v_face_length(grid, row):
     return float(grid.radius) * jnp.cos(jnp.asarray(grid.lat_v)[row]) * float(grid.dlon)
 
 
-def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out):
+def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=None):
     """CROCO t3dbc.F / u3dbc.F adaptive oblique radiation with nudging, on
     arrays (..., along) ordered boundary, first, second interior; r_in,
-    r_out = dt / tau (dimensionless)."""
-    def tgrad(f):
+    r_out = dt / tau (dimensionless).  mb, m1 (..., along): wet masks of the
+    boundary row and the first interior row; the tangential gradients are
+    zero across a dry neighbour (CROCO multiplies them by the land mask), and
+    the result is zero on dry points.  None: no masking."""
+    def tgrad(f, m):
         gb = f - jnp.concatenate([f[..., :1], f[..., :-1]], axis=-1)
+        if m is not None:
+            gb = gb * m * jnp.concatenate([m[..., :1], m[..., :-1]], axis=-1)
         return jnp.concatenate([gb, gb[..., -1:]], axis=-1)
-    gb, g1 = tgrad(fb_old), tgrad(f1_old)
+    gb, g1 = tgrad(fb_old, mb), tgrad(f1_old, m1)
     dft = f1_old - f1_new
     dfx = f1_new - f2_new
     inflow = dfx * dft < 0.0
@@ -247,7 +252,8 @@ def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out):
     cy = jnp.clip(dft * dfy, -cff, cff)
     fb = (cff * fb_old + cx * f1_new - jnp.maximum(cy, 0.0) * gb[..., :-1]
           - jnp.minimum(cy, 0.0) * gb[..., 1:]) / (cff + cx)
-    return (1.0 - tau) * fb + tau * data
+    out = (1.0 - tau) * fb + tau * data
+    return out if mb is None else out * mb
 
 
 def _orlanski_1d(fb_new, f1_old, f1_new, f2_new, data, r_in, r_out, rx_max):
@@ -307,7 +313,7 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
     """Ring cells and open faces after an outer step: T, S radiated and nudged
     toward the data; the open-face normal velocity and the ring tangential
     velocity likewise for their baroclinic part, with the depth mean kept from
-    the barotropic boundary condition; passive tracers zero gradient.
+    the barotropic boundary condition.
 
     ``h`` (n_lat, n_lon, nlev): the layer thickness of ``state_new``.  The
     depth mean is the thickness-weighted mean over the wet part of each face
@@ -321,17 +327,18 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
     r_in, r_out = dt / ob.tau_in, dt / ob.tau_out
     T, S, u, v = state_new.T.data, state_new.S.data, state_new.u.data, state_new.v.data
     To, So, uo, vo = state_old.T.data, state_old.S.data, state_old.u.data, state_old.v.data
-    P = getattr(state_new, 'passive', None)
     for side in ('west', 'south', 'north'):
         dT = getattr(ob, f'{side}_T')
         if dT is None:
             continue
         ring = 0 if side in ('west', 'south') else -1
         face = 1 if side in ('west', 'south') else -2
+        mb = (_side(h, side, ring, 0) > 0).astype(h.dtype)          # wet ring cells per level
+        m1 = (_side(h, side, ring, 1) > 0).astype(h.dtype)          # wet first interior cells per level
         for name, data in (('T', dT), ('S', getattr(ob, f'{side}_S'))):
             new, old = (T, To) if name == 'T' else (S, So)
             row = _orlanski(_side(old, side, ring, 0), _side(old, side, ring, 1), _side(new, side, ring, 1),
-                            _side(new, side, ring, 2), data, r_in, r_out)
+                            _side(new, side, ring, 2), data, r_in, r_out, mb, m1)
             if name == 'T':
                 T = _set_side(T, side, ring, row)
             else:
@@ -348,12 +355,15 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
             wet = (hf > 0).astype(hf.dtype)
             w = hf / jnp.maximum(jnp.sum(hf, axis=0, keepdims=True), _EPS)
             mean_cur = jnp.sum(w * _side(new, side, b0, 0), axis=0, keepdims=True)    # barotropic part kept
+            vmask = state_new.u_mask.data if use_u else state_new.v_mask.data
+            vmask = vmask[..., None] if vmask.ndim == 2 else vmask
+            m1v = (_side(jnp.broadcast_to(vmask, new.shape), side, b0, 1) > 0).astype(hf.dtype)
             if not is_normal and ob.tangential_nudge_only is not None:
                 g_in = r_in / (1.0 + r_in)
                 rad = (1.0 - g_in) * _side(old, side, b0, 0) + g_in * data
             elif ob.velocity_rx_max is None:
                 rad = _orlanski(_side(old, side, b0, 0), _side(old, side, b0, 1), _side(new, side, b0, 1),
-                                _side(new, side, b0, 2), data, r_in, r_out)
+                                _side(new, side, b0, 2), data, r_in, r_out, wet, m1v)
             else:
                 rad = _orlanski_1d(_side(new, side, b0, 0), _side(old, side, b0, 1), _side(new, side, b0, 1),
                                    _side(new, side, b0, 2), data, r_in, r_out, ob.velocity_rx_max)
@@ -362,17 +372,6 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
                 u = _set_side(u, side, b0, row)
             else:
                 v = _set_side(v, side, b0, row)
-        if P is not None:
-            Pn = P
-            if side == 'west':
-                Pn = Pn.at[:, 0].set(Pn[:, 1])
-            elif side == 'south':
-                Pn = Pn.at[0].set(Pn[1])
-            else:
-                Pn = Pn.at[-1].set(Pn[-2])
-            P = Pn
     out = state_new._replace(T=state_new.T.replace(data=T), S=state_new.S.replace(data=S),
                              u=state_new.u.replace(data=u), v=state_new.v.replace(data=v))
-    if P is not None:
-        out = out._replace(passive=P)
     return out
