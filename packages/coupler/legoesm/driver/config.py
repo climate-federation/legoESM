@@ -118,6 +118,21 @@ class GridConfig(NamedTuple):
     # stratospheric layers up to sigma_top (the raised-lid experiment).
     sigma_layout: str = "standard"
     use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
+    # Saved global MPAS mesh (grid_type "mpas" only).  A regenerated SCVT mesh
+    # is not bitwise portable: the cells agree across machines to ~4e-5 chord
+    # but their ORDER can differ (1,973 of 2,562 level 4 cells moved between a
+    # Mac and Snellius), so per-cell inputs built on one machine land on the
+    # wrong cells on the other.  When set, the driver loads this file
+    # (scripts/grids/save_mpas_mesh.py) instead of calling create_grid, and
+    # refuses to run unless mpas_mesh_sha256 matches the file's content hash
+    # and the file's resolution matches ``resolution``.  "" = regenerate as
+    # before (unchanged).
+    mpas_mesh_file: str = ""
+    mpas_mesh_sha256: str = ""
+    # The saved mesh is variable resolution (not 10 x 4**r + 2 cells): the
+    # loader checks the file's own cell count and its variable_mesh mark
+    # instead of the subdivision level (load_voronoi_mesh_for_run).
+    mpas_mesh_variable: bool = False
 
 
 # Canonical name for the SCVT Voronoi mesh + TRiSK discretization.
@@ -1054,6 +1069,34 @@ class ExperimentConfig(NamedTuple):
     cloud_cam6_rhmaxi: float | None = None
     cloud_cam6_rhminis: float | None = None
     cloud_cam6_rhmaxis: float | None = None
+    # CAM6 cldfrc2m_do_subgrid_growth (CloudConfig.cam6_do_subgrid_growth):
+    # MG2's sub-grid saturation factor qsatfac (cldfrc2m.F90:1116-1117,
+    # micro_mg2_0.F90:880, 922-927); .true. in the cam6 namelist defaults.
+    # False = qsfm = 1 (upstream legoESM choice bc696df77e).
+    cloud_cam6_do_subgrid_growth: bool = False
+    # CAM6 convective water in the radiation (CloudConfig.cam6_conv_water_in_rad;
+    # conv_water.F90 conv_water_4rad, cam6 namelist conv_water_in_rad = 1 and
+    # conv_water_frac_limit = 0.01).  0 (default) = off, the stratiform water
+    # alone.  cloud_scheme='cam6_clubb' only.  None frac_limit => 0.01.
+    cloud_cam6_conv_water_in_rad: int = 0
+    cloud_cam6_conv_water_frac_limit: float | None = None
+    # CAM6 snow in the radiation (CloudConfig.cam6_snow_in_rad): the snow
+    # fraction cldfsnow, in-cloud snow path and MG2 snow diameter, through the
+    # Mitchell ice optics, combined with the cloud by fraction under McICA.
+    # Needs cloud_scheme='cam6_clubb', cloud_vertical_overlap_optics='mcica'
+    # and the path of CESM inputdata atm/cam/physprops/iceoptics_c080917.nc.
+    cloud_cam6_snow_in_rad: bool = False
+    cloud_cam6_snow_optics_file: str = ""
+    # Radiation droplet number under specified droplets
+    # (CloudConfig.cam6_rad_specified_nc): MG2's Nc_0 in cloud, as CAM6 does
+    # with micro_mg_nccons, instead of the N_c tracer that ZM detrainment
+    # feeds and nothing removes.  Needs cloud_scheme='cam6_clubb', Morrison
+    # with morrison_prognostic_droplet_number=False and aerosol_ccn off.
+    cloud_cam6_rad_specified_nc: bool = False
+    # RULE 5 width (ln space) of the CAM6 convective-water and snow-in-radiation
+    # thresholds (CloudConfig.cam6_rad_gate_log_width); None => 0.01, 0 = CAM6's
+    # hard switches.
+    cloud_cam6_rad_gate_log_width: float | None = None
     # Polar-cap radiative cloud floor (CloudConfig.cap_floor_*): an attribution
     # lever for the 2026-09 Arctic self-isolation A/B, radiation-only, MPAS /
     # spectral standalone radiation path only (the FV pipeline refuses it).
@@ -1715,6 +1758,10 @@ class ExperimentConfig(NamedTuple):
     # PR #2249): "smooth" (default surrogate) or "wrf_kfeta" (faithful WRF
     # v4.8.0 KF-Eta port, OPT-IN, NOT RULE 5 compliant, #2280).
     kain_fritsch_variant: str = "smooth"
+    # Water positivity right after ZM's update in the macmic loop
+    # (ZhangMcFarlaneConfig.positivity_after_zm; where CAM6 runs qneg3, here
+    # the column-conserving borrow; MPAS lane, cld_macmic_num_steps >= 2).
+    positivity_after_zm: bool = False
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -2243,9 +2290,20 @@ class ExperimentConfig(NamedTuple):
     # MorrisonConfig.prognostic_droplet_number: CAM6 MG2 prognostic droplet
     # number with prescribed-aerosol activation (microp_aero_run); MPAS lane.
     morrison_prognostic_droplet_number: bool = False
+    # MorrisonConfig.specified_nc_droplet_sedimentation: CAM6 MG2 cloud-droplet
+    # sedimentation with the specified droplet number (MG2 nccons=.true.).
+    # Needs morrison_warm_rain_incloud and the specified-droplet mode.
+    morrison_specified_nc_droplet_sedimentation: bool = False
     # Directory of the sha256-pinned CAM6 PPE member-000 aerosol climatology +
     # MAM4 property files read by that activation; None = unset.
     cam6_aerosol_dir: str | None = None
+    # MorrisonConfig.cirrus_nucleation: "fixed" (Koop threshold, fixed number)
+    # or "cam6_liu_penner" (CAM6 nucleate_ice with pre-existing ice; MPAS lane;
+    # needs cirrus_aerosol_file).
+    morrison_cirrus_nucleation: str = "fixed"
+    # npz of a CAM prescribed MAM3 aerosol climatology mapped onto the run's
+    # cells (cam6_cirrus_aerosol.map_to_cells); None = unset.
+    cirrus_aerosol_file: str | None = None
     # Sea-ice shortwave albedo (#2106).
     #   "auto" (default)      -> resolved per run by resolve_sea_ice_albedo_scheme:
     #     "maykut_untersteiner" when the lane carries the prognostic ice skin,
@@ -2288,6 +2346,16 @@ class ExperimentConfig(NamedTuple):
     # droplet size reset in the sedimentation fall speeds (prognostic droplet
     # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_sed_reset_log_width: float = 0.01
+    # MorrisonConfig.qsfm_freeze_ramp_K: RULE 5 width [K] of MG2's qsfm switch
+    # at T_freeze (read only with cloud_cam6_do_subgrid_growth); 0 = MG2's
+    # hard switch.  Range [0, 1], checked in validate_strict.
+    morrison_qsfm_freeze_ramp_K: float = 0.1
+    # MorrisonConfig.cirrus_T_width_K / cirrus_rel_width: RULE 5 widths of the
+    # cam6_liu_penner cirrus switches (temperature [K]; relative for humidity,
+    # updraft, ice and number thresholds); 0 = CAM6's hard switches.  Range
+    # [0, 1], checked in validate_strict.
+    morrison_cirrus_T_width_K: float = 0.1
+    morrison_cirrus_rel_width: float = 0.01
     # CanopyConfig.solve_group: columns per batch of the two-leaf canopy Newton
     # solve, 0 = one batch per GPU (same placement and None semantics as
     # land_canopy_most_n_iters; the production deck names it).
@@ -2437,6 +2505,30 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "ifs_ozone_chem runs only on the MPAS dycore lane, which "
                 "carries the o3_ifs tracer (not the FV3-duo column lane)")
+        _mesh_file = getattr(g, "mpas_mesh_file", "")
+        _mesh_sha = getattr(g, "mpas_mesh_sha256", "")
+        if _mesh_file and normalize_grid_type(g.grid_type) != "mpas":
+            errors.append(
+                f"mpas_mesh_file={_mesh_file!r} is only valid with grid_type "
+                f"'mpas', not {g.grid_type!r}")
+        if _mesh_file and not _mesh_sha:
+            errors.append(
+                f"mpas_mesh_file={_mesh_file!r} needs mpas_mesh_sha256 (the "
+                "hash printed by scripts/grids/save_mpas_mesh.py); a run "
+                "never loads an unpinned mesh")
+        if _mesh_sha and not _mesh_file:
+            errors.append(
+                "mpas_mesh_sha256 is set but mpas_mesh_file is empty; the "
+                "pin would be ignored")
+        if (str(self.subgrid_orography_path).endswith(".npz")
+                and self.turbulence == "ifs_vdf"):
+            errors.append(
+                "turbulence='ifs_vdf' reads SSO_STDH_FILT from a netCDF "
+                "subgrid_orography_path; a per-cell .npz file carries only sgh")
+        if getattr(g, "mpas_mesh_variable", False) and not _mesh_file:
+            errors.append(
+                "mpas_mesh_variable is set but mpas_mesh_file is empty; a "
+                "variable mesh is only loaded from a saved file")
         if self.land_fraction_source not in ("topography", "era5", "zero"):
             errors.append(
                 f"land_fraction_source must be topography, era5 or zero, got "
@@ -3016,6 +3108,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"zm_transport_cloud_tracers must be a bool, got "
                 f"{self.zm_transport_cloud_tracers!r}"
+            )
+        if not isinstance(self.positivity_after_zm, bool):
+            errors.append(
+                f"positivity_after_zm must be a bool, got "
+                f"{self.positivity_after_zm!r}"
             )
         if self.bechtold_rain_vapor_sink not in ("formation", "vapour_mass"):
             errors.append(
@@ -4903,6 +5000,44 @@ class ExperimentConfig(NamedTuple):
                 f"{', '.join(_cam6_rh_set)} set but cloud_scheme="
                 f"{self.cloud_scheme!r}: the CAM6 aist ramp is read only by "
                 "cloud_scheme='cam6_clubb' (otherwise silently inert).")
+        if self.cloud_cam6_do_subgrid_growth and (
+                self.cloud_scheme != "cam6_clubb" or self.microphysics != "morrison"):
+            errors.append(
+                "cloud_cam6_do_subgrid_growth=True needs cloud_scheme='cam6_clubb' "
+                "and microphysics='morrison' (MG2 mode); got "
+                f"{self.cloud_scheme!r}, {self.microphysics!r}.")
+        if self.cloud_cam6_snow_in_rad and (
+                self.cloud_scheme != "cam6_clubb"
+                or self.cloud_vertical_overlap_optics != "mcica"
+                or not self.cloud_cam6_snow_optics_file):
+            errors.append(
+                "cloud_cam6_snow_in_rad=True needs cloud_scheme='cam6_clubb', "
+                "cloud_vertical_overlap_optics='mcica' and "
+                "cloud_cam6_snow_optics_file (iceoptics_c080917.nc); got "
+                f"{self.cloud_scheme!r}, {self.cloud_vertical_overlap_optics!r}, "
+                f"{self.cloud_cam6_snow_optics_file!r}.")
+        if self.cloud_cam6_rad_specified_nc and (
+                self.cloud_scheme != "cam6_clubb"
+                or self.microphysics != "morrison"
+                or self.morrison_prognostic_droplet_number
+                or self.nc_from_aerosol):
+            errors.append(
+                "cloud_cam6_rad_specified_nc=True is for specified droplets: it "
+                "needs cloud_scheme='cam6_clubb', microphysics='morrison', "
+                "morrison_prognostic_droplet_number=False and aerosol_ccn "
+                "(nc_from_aerosol) off.")
+        if self.cloud_cam6_conv_water_in_rad not in (0, 1):
+            errors.append(
+                "cloud_cam6_conv_water_in_rad must be 0 (off) or 1 (CAM6 "
+                "area-weighted convective water; mode 2 is not ported), got "
+                f"{self.cloud_cam6_conv_water_in_rad!r}")
+        if ((self.cloud_cam6_conv_water_in_rad != 0
+                or self.cloud_cam6_conv_water_frac_limit is not None)
+                and self.cloud_scheme != "cam6_clubb"):
+            errors.append(
+                "cloud_cam6_conv_water_in_rad / _frac_limit need "
+                f"cloud_scheme='cam6_clubb' (got {self.cloud_scheme!r}): the "
+                "CAM6 convective water reads ast and deepcu.")
         if self.morrison_warm_rain_incloud is True and (
                 self.turbulence != "clubb" or self.cld_macmic_num_steps < 2
                 or self.subgrid_autoconversion
@@ -4951,8 +5086,19 @@ class ExperimentConfig(NamedTuple):
                 "microphysics='morrison' and the kk2000_cam6 warm-rain scheme or "
                 "morrison_warm_rain_incloud=True"),
             "morrison_mg2_drop_sed_reset_log_width": (
-                lambda: _morr and self.morrison_prognostic_droplet_number is True,
-                "microphysics='morrison' and morrison_prognostic_droplet_number=True"),
+                lambda: _morr and (self.morrison_prognostic_droplet_number is True
+                                   or self.morrison_specified_nc_droplet_sedimentation is True),
+                "microphysics='morrison' and morrison_prognostic_droplet_number=True "
+                "or morrison_specified_nc_droplet_sedimentation=True"),
+            "morrison_qsfm_freeze_ramp_K": (
+                lambda: _morr and self.cloud_cam6_do_subgrid_growth is True,
+                "microphysics='morrison' and cloud_cam6_do_subgrid_growth=True"),
+            "morrison_cirrus_T_width_K": (
+                lambda: _morr and self.morrison_cirrus_nucleation == "cam6_liu_penner",
+                "microphysics='morrison' and morrison_cirrus_nucleation='cam6_liu_penner'"),
+            "morrison_cirrus_rel_width": (
+                lambda: _morr and self.morrison_cirrus_nucleation == "cam6_liu_penner",
+                "microphysics='morrison' and morrison_cirrus_nucleation='cam6_liu_penner'"),
         }
         for _rn, (_read, _where) in _reads.items():
             _rw = getattr(self, _rn)
@@ -4970,6 +5116,18 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "morrison_prognostic_droplet_number=True needs cam6_aerosol_dir "
                 "(the CAM6 prescribed-aerosol climatology its activation reads).")
+        if self.morrison_cirrus_nucleation not in ("fixed", "cam6_liu_penner"):
+            errors.append(f"morrison_cirrus_nucleation={self.morrison_cirrus_nucleation!r}; "
+                          "choose 'fixed' or 'cam6_liu_penner'.")
+        if self.morrison_cirrus_nucleation == "cam6_liu_penner" and not (
+                self.cirrus_aerosol_file and self.homogeneous_ice_nucleation
+                and self.morrison_warm_rain_incloud):
+            errors.append(
+                "morrison_cirrus_nucleation='cam6_liu_penner' needs cirrus_aerosol_file, "
+                "homogeneous_ice_nucleation=True and morrison_warm_rain_incloud=True.")
+        if self.cirrus_aerosol_file and self.morrison_cirrus_nucleation != "cam6_liu_penner":
+            errors.append("cirrus_aerosol_file is read only under "
+                          "morrison_cirrus_nucleation='cam6_liu_penner'.")
         if (self.morrison_sed_cfl_substeps_strict is True
                 and self.morrison_sed_cfl_substeps is False):
             errors.append(
@@ -5027,6 +5185,9 @@ class ExperimentConfig(NamedTuple):
             ("cloud_cam6_rhmaxi", 1.0, 1.1),
             ("cloud_cam6_rhminis", 0.85, 1.0),
             ("cloud_cam6_rhmaxis", 1.0, 1.1),
+            # CAM6 namelist conv_water_frac_limit 0.01; it must stay positive
+            # (every conv_water_4rad division is floored by it).
+            ("cloud_cam6_conv_water_frac_limit", 1.0e-4, 0.1),
             ("cloud_cap_floor_lat_deg", 40.0, 89.0),
             ("cloud_cap_floor_p_max_pa", 20000.0, 100000.0),
             ("cloud_cap_floor_cf", 0.1, 1.0),
@@ -5722,6 +5883,7 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=getattr(amip_cfg, 'zm_land_fraction', "required"),
             zm_transport_cloud_tracers=getattr(amip_cfg, 'zm_transport_cloud_tracers', True),
             kain_fritsch_variant=getattr(amip_cfg, 'kain_fritsch_variant', "smooth"),
+            positivity_after_zm=getattr(amip_cfg, 'positivity_after_zm', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
                 amip_cfg, 'bechtold_use_ifs_downdraft', True),
@@ -5907,6 +6069,7 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=self.zm_land_fraction,
             zm_transport_cloud_tracers=self.zm_transport_cloud_tracers,
             kain_fritsch_variant=self.kain_fritsch_variant,
+            positivity_after_zm=self.positivity_after_zm,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,

@@ -239,6 +239,7 @@ class AMIPExperimentConfig(NamedTuple):
     zm_land_fraction: str = "required"  # ZM land mask policy: "required" | "none" (aquaplanet)
     zm_transport_cloud_tracers: bool = True  # ZM convtran of carried cloud/precip tracers (CAM6)
     kain_fritsch_variant: str = "smooth"  # KF: "smooth" (default) | "wrf_kfeta" (opt-in WRF port, #2280)
+    positivity_after_zm: bool = False  # column-conserving water borrow right after ZM (where CAM6 runs qneg3)
 
 
 def config_to_dict(config) -> dict:
