@@ -125,8 +125,8 @@ def _pos(x, width, scale):
 
 
 def _pick(s, a, b):
-    """``a`` where the switch weight ``s`` is 1, ``b`` where 0, blended between."""
-    return b + s * (a - b)
+    """``a`` where the switch weight ``s`` is 1, ``b`` where 0 (both exactly), blended between."""
+    return a * s + b * (1.0 - s)
 
 
 def _svp(T):
@@ -144,12 +144,13 @@ def _hf(T, ww, RH, Na, wT, wr):
     warm64 = ge_ramp(T, HF["T64"], wT, strict=True)
     A2f = _pick(warm64, HF["A21f"], HF["A22f"])
     B2f = _pick(warm64, HF["B21f"], HF["B22f"])
-    k1f = jnp.exp(A2f + B2f * T + HF["C2f"] * lw)
     k2f = HF["A1f"] + HF["B1f"] * T + HF["C1f"] * lw
-    k1s = jnp.exp(HF["A2s"] + (HF["B2s"] + HF["B3s"] * lw) * T + HF["C2s"] * lw)
     k2s = HF["A1s"] + HF["B1s"] * T + HF["C1s"] * lw
-    Nf = jnp.minimum(k1f * Na ** k2f, Na)
-    Ns = jnp.minimum(k1s * Na ** k2s, Na)
+    # min(k1 Na**k2, Na) in log space: no overflow of the capped product (fp32), finite reverse mode
+    lNa = jnp.log(Na)
+    Nf = jnp.exp(jnp.minimum(A2f + B2f * T + HF["C2f"] * lw + k2f * lNa, lNa))
+    Ns = jnp.exp(jnp.minimum(HF["A2s"] + (HF["B2s"] + HF["B3s"] * lw) * T + HF["C2s"] * lw
+                             + k2s * lNa, lNa))
     on = le_ramp(T, TC_HOM, wT) * ge_ramp(RH, RHw, wr, jnp.abs(RHw))
     return on * _pick(ge_ramp(T, regm, wT), Nf, Ns)
 
@@ -160,8 +161,8 @@ def _hetero(T, ww, Ns):
     lN = jnp.log(Ns)
     B = (h["A11"] + h["B11"] * lN) * jnp.log(ww) + (h["A12"] + h["B12"] * lN)
     C = h["A21"] + h["B21"] * lN
-    Nis = math.exp(h["A22"]) * Ns ** h["B22"] * jnp.exp(B * T) * ww ** C
-    return jnp.minimum(Nis, Ns)
+    # min(Nis, Ns) in log space: no overflow of the capped product (fp32), finite reverse mode
+    return jnp.exp(jnp.minimum(h["A22"] + h["B22"] * lN + B * T + C * jnp.log(ww), lN))
 
 
 def _vpreice(P_in, T, R_in, C_in, S_in):

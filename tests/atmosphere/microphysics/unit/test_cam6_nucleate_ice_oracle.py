@@ -153,3 +153,20 @@ def test_no_dust_gradient_finite():
 
     v, g = jax.value_and_grad(f)(215.0 * one)
     assert bool(jnp.isfinite(v)) and bool(jnp.all(jnp.isfinite(g)))
+
+
+def test_fp32_gradient_finite_with_trace_dust_and_weak_updraft():
+    """Trace dust and a 1 mm/s updraft put the mixed regime near -155 C, where the
+    capped heterogeneous and homogeneous products overflow fp32 if formed before
+    their caps; reverse mode must stay finite."""
+    one = jnp.ones((1, 1), jnp.float32)
+
+    def f(T):
+        nuci, _, _, _ = nucleati(1.0e-3 * one, T, 2.0e4 * one, 1.5 * one, 0.5 * one, 0.0 * one,
+                                 0.0 * one, 0.0 * one, 0.3 * one, 1.0e-4 * one, 1.0e-9 * one,
+                                 0.0 * one, 1.2, 0.1, 0.01)
+        return jnp.sum(nuci)
+
+    v, g = jax.value_and_grad(f)(jnp.float32(215.0) * one)
+    assert v.dtype == jnp.float32
+    assert bool(jnp.isfinite(v)) and bool(jnp.all(jnp.isfinite(g)))
