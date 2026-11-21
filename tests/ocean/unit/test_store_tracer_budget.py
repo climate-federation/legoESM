@@ -60,6 +60,23 @@ def test_record_closes_the_explicit_and_advective_heat_content_change():
     np.testing.assert_allclose((tb["T_mid"] - tb["T0"])[act], box.DT * tb["R_total"][act], rtol=1e-10, atol=1e-12)
 
 
+def test_record_books_the_gm_redi_rate():
+    # Sloping isotherms so GM/Redi acts; its rate joins R and R_total, keeping T_mid - T0 = dt*R_total.
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    grid, zc_pc, st, lm = box._box()
+    tilt = np.linspace(-2.0, 2.0, st.T.data.shape[0])[:, None, None] * lm[..., None]
+    st = st._replace(T=st.T.replace(data=st.T.data + jnp.asarray(tilt)))
+    cfg = box._cfg(True)._replace(store_tracer_budget=True,
+                                  gm_redi=GMRediConfig(kappa_GM=1.0e3, kappa_Redi=1.0e3))
+    sf = OceanSurfaceForcing(tau_x=jnp.zeros_like(st.eta.data), tau_y=jnp.zeros_like(st.eta.data),
+                             q_net=jnp.asarray(box.Q * lm))
+    tb = LatLonCGridOceanModel(grid, zc_pc, cfg).step(st, box.DT, surface_forcing=sf).tbudget
+    act = np.asarray(tb["active"]) > 0.5
+    assert np.abs(np.asarray(tb["R"]["gm"])[act]).max() > 0.0
+    np.testing.assert_allclose((np.asarray(tb["T_mid"]) - np.asarray(tb["T0"]))[act],
+                               box.DT * np.asarray(tb["R_total"])[act], rtol=1e-10, atol=1e-12)
+
+
 @pytest.mark.parametrize("kw", [dict(tracer_time_integrator="ab2"), dict(tracer_advection="fct2")])
 def test_refused_where_the_applied_flux_is_not_one_stage(kw):
     with pytest.raises(ValueError, match="store_tracer_budget"):

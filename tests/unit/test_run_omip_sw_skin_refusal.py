@@ -21,7 +21,7 @@ run_omip = _scan.run_omip
 @pytest.mark.parametrize("sw,skin,match", [
     ("auto", 0.0, "--sw-skin-fraction"),
     ("jerlov_2band", 0.0, "--sw-skin-fraction"),      # the plain lat-lon lane never reads the scheme
-    ("ohlmann_2003", None, "ohlmann_2003"),
+    ("ohlmann_2003", None, "implemented on the tripole"),
 ])
 def test_unread_shortwave_options_are_refused_off_tripole(tmp_path, sw, skin, match):
     cache = _scan._make_synthetic_cache(tmp_path, n_lat=8, n_lon=16, n_records=8)
