@@ -130,7 +130,8 @@ def test_build_guards():
                 boutle_fsd_factor=bad)), "mpas")
     # numpy scalars are checked too
     for kw, msg in ((dict(boutle_fsd_factor=np.float32(-1.0)), "must be positive"),
-                    (dict(boutle_overcast_ramp_width=np.float64(1.0)), r"lie in \[0, 1\)")):
+                    (dict(boutle_overcast_ramp_width=np.float64(1.0)), r"lie in \[0, 1\)"),
+                    (dict(boutle_fsd_factor=jnp.asarray(float("nan"))), "must be positive")):
         with pytest.raises(ValueError, match=msg):
             require_relvar_scheme_lane(MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(
                 warm_rain_scheme="kk2000", relvar_scheme="boutle2014", **kw)), "mpas")

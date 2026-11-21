@@ -370,7 +370,12 @@ def require_relvar_scheme_lane(microphysics_config, model_type: str):
         raise ValueError(
             f"relvar_scheme={scheme!r} is wired on the MPAS lane only; got "
             f"model_type={model_type!r}.")
-    f, w = m.boutle_fsd_factor, m.boutle_overcast_ramp_width
+    def _concrete(v):
+        # a concrete one-element array is checked as its value; tracers pass
+        if isinstance(v, jax.Array) and not isinstance(v, jax.core.Tracer) and v.size == 1:
+            return float(v)
+        return v
+    f, w = _concrete(m.boutle_fsd_factor), _concrete(m.boutle_overcast_ramp_width)
     for name, v in (("boutle_fsd_factor", f), ("boutle_overcast_ramp_width", w)):
         if isinstance(v, bool) or not isinstance(v, (numbers.Real, jax.Array)):
             raise TypeError(f"{name} must be a real number, got {v!r}.")
