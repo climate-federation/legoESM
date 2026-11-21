@@ -98,8 +98,10 @@ def compute_optical_properties(
       table coordinate is CAM6's solid-ice diameter ``2 r 500/917``.
     ibnd: The spectral band index.
     cloud_snow: ``None`` or ``(path [kg/m2], effective diameter [micron],
-      MitchellIceOptics)``: CAM6 snow, added as a third phase with the
-      Mitchell table (its bands are in RRTMGP order, so ``ibnd`` indexes it).
+      MitchellIceOptics, fraction weight)``: CAM6 snow, added as a third phase
+      with the Mitchell table (its bands are in RRTMGP order, so ``ibnd``
+      indexes it).  ``path`` already carries the weight; the LW cap is taken
+      before it, as in CAM.
     absorption_only: If True, return the absorption-only (no-scattering)
       properties RTE-RRTMGP computes for a ``ty_optical_props_1scl`` target
       (mo_cloud_optics_rrtmgp.F90:527-541): optical depth
@@ -188,13 +190,14 @@ def compute_optical_properties(
     # snow diameter, summed with the cloud's tau, tau*w and tau*w*g.  CAM
     # weights each part by its fraction over cldfprime; the caller has put
     # those weights into the paths, so the sum here is the same thing.  LW:
-    # Mitchell's absorption optical depth (capped at 50 per band, :654).
+    # Mitchell's absorption optical depth, capped at 50 per band IN CLOUD
+    # (:654) before the weight.
     from legoesm.atmosphere.physics.radiation.rrtmgp.optics import (
         mitchell_ice_optics as mio)
-    snow_path, snow_d_eff, snow_table = cloud_snow
+    snow_path, snow_d_eff, snow_table, snow_weight = cloud_snow
     if absorption_only:
       snow_abs = mio.mitchell_band_lw_abs_od(
-          snow_table, ibnd, snow_path, snow_d_eff)
+          snow_table, ibnd, snow_path, snow_d_eff, snow_weight)
     else:
       s_tau, s_tau_w, s_tau_w_g = mio.mitchell_band_sw(
           snow_table, ibnd, snow_path, snow_d_eff)

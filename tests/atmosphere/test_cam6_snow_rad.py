@@ -102,6 +102,8 @@ def test_band_optics_follow_cams_fraction_weighting(solver):
     cfs = np.where(r.random(sh) < 0.5, cld, 0.25)
     cfp = np.maximum(cld, cfs)
     liq, ice, swp = (r.uniform(0, 0.1, sh) for _ in range(3))
+    # half the snow layers deep enough that CAM's in-cloud LW cap of 50 binds
+    swp = np.where(r.random(sh) < 0.5, swp, swp * 1.0e5)
     rl, ri = r.uniform(5e-6, 15e-6, sh), r.uniform(20e-6, 60e-6, sh)
     des = r.uniform(100, 400, sh)
     lib = solver.optics_lib
@@ -110,7 +112,8 @@ def test_band_optics_follow_cams_fraction_weighting(solver):
         comb = cloud_optics.compute_optical_properties(
             look, jnp.asarray(liq * cld / cfp), jnp.asarray(ice * cld / cfp),
             jnp.asarray(rl), jnp.asarray(ri), ib, absorption_only=is_lw,
-            cloud_snow=(jnp.asarray(swp * cfs / cfp), jnp.asarray(des), t))
+            cloud_snow=(jnp.asarray(swp * cfs / cfp), jnp.asarray(des), t,
+                        jnp.asarray(cfs / cfp)))
         cl = cloud_optics.compute_optical_properties(
             look, jnp.asarray(liq), jnp.asarray(ice), jnp.asarray(rl), jnp.asarray(ri),
             ib, absorption_only=is_lw)

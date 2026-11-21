@@ -182,15 +182,20 @@ def mitchell_band_sw(table: MitchellIceOptics, ibnd, path, d_eff):
     return tuple(jnp.where(on, x, 0.0) for x in (tau, tau_w, tau_w_g))
 
 
-def mitchell_band_lw_abs_od(table: MitchellIceOptics, ibnd, path, d_eff):
-    """``mitchell_lw_abs_od`` for ONE LW band ``ibnd`` (may be traced)."""
+def mitchell_band_lw_abs_od(table: MitchellIceOptics, ibnd, path, d_eff, weight=1.0):
+    """``mitchell_lw_abs_od`` for ONE LW band ``ibnd`` (may be traced).
+
+    ``weight``: the fraction weight already in ``path`` (CAM6 cldfsnow /
+    cldfprime).  CAM caps the IN-CLOUD optical depth at 50 and then weights
+    it (cloud_rad_props.F90:654-658, radiation.F90:1065); ``w min(p a, 50) =
+    min(w p a, 50 w)``, so the cap is scaled by the weight."""
     path = jnp.asarray(path)
     d_eff = jnp.asarray(d_eff)
     on = _on(path, d_eff)
     d_eff = jnp.where(on, d_eff, table.d_eff[0])
     path = jnp.where(on, path, 0.0)
     absor = cam_lininterp.interp1(table.d_eff, table.lw_abs[ibnd], d_eff)
-    return jnp.where(on, jnp.minimum(path * absor, _LW_ABS_OD_MAX), 0.0)
+    return jnp.where(on, jnp.minimum(path * absor, _LW_ABS_OD_MAX * weight), 0.0)
 
 
 def cast_table(table: MitchellIceOptics, dtype) -> MitchellIceOptics:

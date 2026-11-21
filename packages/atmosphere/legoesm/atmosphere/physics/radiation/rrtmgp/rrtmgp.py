@@ -616,6 +616,7 @@ class RRTMGP:
       cloud_path_snow: jnp.ndarray | None = None,
       cloud_d_eff_snow: jnp.ndarray | None = None,
       snow_optics=None,
+      cloud_snow_weight: jnp.ndarray | None = None,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -706,6 +707,10 @@ class RRTMGP:
           Mitchell table (``mitchell_ice_optics.MitchellIceOptics``).  All
           three or none; they need cloud paths, and are refused with
           ``cloud_fraction`` scaling or separate LW paths.
+      cloud_snow_weight :
+          (ncol, nlev) fraction weight already in ``cloud_path_snow`` (CAM6
+          cldfsnow/cldfprime), so the LW absorption cap is taken in cloud
+          before it, as CAM does.  ``None`` => 1.
 
       Returns
       -------
@@ -798,6 +803,8 @@ class RRTMGP:
           cloud_path_snow = jnp.asarray(cloud_path_snow).astype(_table_dtype)
           cloud_d_eff_snow = jnp.asarray(cloud_d_eff_snow).astype(_table_dtype)
           snow_optics = _mio.cast_table(snow_optics, _table_dtype)
+          cloud_snow_weight = (jnp.ones_like(cloud_path_snow) if cloud_snow_weight is None
+                               else jnp.asarray(cloud_snow_weight).astype(_table_dtype))
       if ghg_vmr_override is not None:
           # Cast every numeric override (array, Python float/int, list)
           # to the working dtype; only floating leaves are retyped so
@@ -854,6 +861,7 @@ class RRTMGP:
           cloud_path_snow = _zero(cloud_path_snow)
           if cloud_d_eff_snow is not None:
               cloud_d_eff_snow = _top(cloud_d_eff_snow, cloud_d_eff_snow[:, :1])
+              cloud_snow_weight = _top(cloud_snow_weight, cloud_snow_weight[:, :1])
           cloud_path_liq_lw = _zero(cloud_path_liq_lw)
           cloud_path_ice_lw = _zero(cloud_path_ice_lw)
           cloud_fraction = _zero(cloud_fraction)
@@ -1038,7 +1046,8 @@ class RRTMGP:
           cloud_snow = (
               jnp.clip(_add_halos(cloud_path_snow[:, None, ::-1]), 0.0, None),
               jnp.clip(_add_halos(cloud_d_eff_snow[:, None, ::-1]), 0.0, None),
-              snow_optics)
+              snow_optics,
+              jnp.clip(_add_halos(cloud_snow_weight[:, None, ::-1]), 0.0, 1.0))
 
       # McICA (CAM6 mcica_subcol_gen): each g-point sees its own
       # maximum-random cloud subcolumn.  The paths passed in are IN-CLOUD;

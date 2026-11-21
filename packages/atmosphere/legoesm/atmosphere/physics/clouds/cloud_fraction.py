@@ -64,7 +64,7 @@ import jax.numpy as jnp
 from jax import lax, nn
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
-from legoesm.core.smooth import (ramp_above_ln, smooth_max_c1, smooth_min,
+from legoesm.core.smooth import (cap_ln, floor_ln, ramp_above_ln, smooth_min,
                                  validate_smoothing_width)
 from legoesm.thermo import (
     mixing_ratio_to_specific_humidity,
@@ -1068,9 +1068,7 @@ def cam6_snow_for_radiation(cld, deepcu, q_liq, q_snow, n_snow, T, p_full, dp,
     cldfsnow = cld * (1.0 - zero_w)
     nocld_w = (1.0 - r(cldfsnow, _SN_MINCLD)) * r(q_snow, _SN_QS_FRAC)
     cldfsnow = cldfsnow + nocld_w * (_SN_FRAC_NOCLD - cldfsnow)
-    denom = jnp.exp(smooth_max_c1(
-        math.log(_SN_MINCLD), jnp.log(jnp.maximum(cldfsnow, 0.5 * _SN_MINCLD)), w))
-    icswp = q_snow / denom * dp / constants.g
+    icswp = q_snow / floor_ln(cldfsnow, _SN_MINCLD, w) * dp / constants.g
     on = n_snow > 0.0
     qs_on = jnp.where(on, jnp.maximum(q_snow, _SN_QS_DES), 1.0)
     n_on = jnp.where(on, n_snow, 1.0)
@@ -1108,7 +1106,7 @@ def cam6_conv_water_4rad(ls_liq, ls_ice, ast, dp_frac, dp_icwmr, frac_limit,
     wrk1 = jnp.minimum(1.0, jnp.maximum(
         0.0, ls_ice / (ls_ice + ls_liq + _CW_ICE_RATIO_EPS)))
     ls_sum = ls_liq + ls_ice
-    ls_icwmr = ls_sum / jnp.maximum(fl, ast)
+    ls_icwmr = ls_sum / floor_ln(ast, fl, log_width)
     if log_width == 0:
         sh0 = jnp.where((sh_frac <= fl) | (sh_icwmr <= _CW_IC_LIMIT), 0.0, sh_frac)
         dp0 = jnp.where((dp_frac <= fl) | (dp_icwmr <= _CW_IC_LIMIT), 0.0, dp_frac)
@@ -1120,11 +1118,13 @@ def cam6_conv_water_4rad(ls_liq, ls_ice, ast, dp_frac, dp_icwmr, frac_limit,
     else:
         # RULE 5 smooth default (CloudConfig.cam6_rad_gate_log_width): each
         # threshold is an ln-space C2 ramp (ramp_above_ln), the branch select
-        # a blend by the cumulus weight.  The max(frac_limit, .) floors stay:
-        # every one sits where a ramp from the same floor is already 0 with
-        # zero slope.  KNOWN DIFFERENCE vs CAM6: fractions and water within a
-        # factor exp(log_width) above a threshold are only partly switched
-        # (test_cam6_rad_smooth_gates.py records the gap).
+        # a blend by the cumulus weight, the stratiform floor max(frac_limit,
+        # ast) an ln-space smooth max (floor_ln).  The two cumulus-branch
+        # floors stay hard: each sits where the cumulus weight from the same
+        # floor is already 0 with zero slope.  KNOWN DIFFERENCE vs CAM6:
+        # fractions and water within a factor exp(log_width) of a threshold
+        # are only partly switched (test_cam6_rad_smooth_gates.py records
+        # the gap).
         r = functools.partial(ramp_above_ln, log_width=log_width)
         sh0 = sh_frac * r(sh_frac, fl) * r(sh_icwmr, _CW_IC_LIMIT)
         dp0 = dp_frac * r(dp_frac, fl) * r(dp_icwmr, _CW_IC_LIMIT)
@@ -1132,7 +1132,7 @@ def cam6_conv_water_4rad(ls_liq, ls_ice, ast, dp_frac, dp_icwmr, frac_limit,
         cu_w = r(cu0, fl) * r(sh_icwmr + dp_icwmr, _CW_IC_LIMIT)
         _ast_w = r(ast, fl)
         tot0_a = ast * _ast_w
-        tot_ic_a = ls_icwmr * _ast_w
+        tot_ic_a = ls_icwmr
     # stratus and cumulus (:345-385), mode 1
     cu_icwmr = (sh0 * sh_icwmr + dp0 * dp_icwmr) / jnp.maximum(fl, cu0)
     tot0_b = ast + cu0
@@ -1594,9 +1594,10 @@ def compute_cloud_properties(
             q_c, q_i, _ast_cam6, _deepcu_cam6, _dp_icwmr,
             config.cam6_conv_water_frac_limit,
             log_width=config.cam6_rad_gate_log_width)
-        _cld = jnp.maximum(_CD_MIN_CLD, cf)
-        lwp = jnp.minimum(_totg_liq / _cld, _CD_IC_MAX) * dp / constants.g * cf
-        iwp = jnp.minimum(_totg_ice / _cld, _CD_IC_MAX) * dp / constants.g * cf
+        _w = config.cam6_rad_gate_log_width
+        _cld = floor_ln(cf, _CD_MIN_CLD, _w)
+        lwp = cap_ln(_totg_liq / _cld, _CD_IC_MAX, _w) * dp / constants.g * cf
+        iwp = cap_ln(_totg_ice / _cld, _CD_IC_MAX, _w) * dp / constants.g * cf
     _cldfsnow = _icswp = _des = None
     if config.cam6_snow_in_rad:
         if config.scheme != "cam6_clubb":

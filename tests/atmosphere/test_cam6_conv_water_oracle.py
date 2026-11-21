@@ -18,6 +18,7 @@ import pytest
 from legoesm import constants
 from legoesm.atmosphere.physics.clouds.cloud_fraction import (
     cam6_conv_water_4rad, compute_cloud_properties)
+from legoesm.core.smooth import cap_ln, floor_ln
 from tests.unit import _cam6_rad_columns as cc
 
 jax.config.update("jax_enable_x64", True)
@@ -77,8 +78,9 @@ def test_cloud_call_uses_cam6_in_cloud_water_over_cld():
                                    log_width=cc.cloud_config().cam6_rad_gate_log_width)
     dpg = (c["p_half"][:, 1:] - c["p_half"][:, :-1]) / constants.g
     cld = on.cloud_fraction
-    want_l = jnp.minimum(liq / jnp.maximum(cld, 1e-4), 5e-3) * dpg * cld
-    want_i = jnp.minimum(ice / jnp.maximum(cld, 1e-4), 5e-3) * dpg * cld
+    _w = cc.cloud_config().cam6_rad_gate_log_width
+    want_l = cap_ln(liq / floor_ln(cld, 1e-4, _w), 5e-3, _w) * dpg * cld
+    want_i = cap_ln(ice / floor_ln(cld, 1e-4, _w), 5e-3, _w) * dpg * cld
     np.testing.assert_allclose(np.asarray(on.lwp), np.asarray(want_l), rtol=1e-12, atol=0)
     np.testing.assert_allclose(np.asarray(on.iwp), np.asarray(want_i), rtol=1e-12, atol=0)
     np.testing.assert_array_equal(np.asarray(on.cloud_fraction), np.asarray(off.cloud_fraction))

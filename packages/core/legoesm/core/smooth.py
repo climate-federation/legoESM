@@ -274,6 +274,27 @@ def ramp_above_ln(x: jax.Array, floor: float, log_width: float) -> jax.Array:
     return smoothstep_quintic((lx - math.log(floor)) / log_width)
 
 
+def floor_ln(x: jax.Array, floor: float, log_width: float) -> jax.Array:
+    """``max(floor, x)`` for a positive ``floor`` (RULE 5): C1 smooth max in
+    ``ln`` space, exact outside ``|ln(x/floor)| >= log_width/2``.
+    ``log_width = 0`` is ``jnp.maximum``."""
+    if log_width == 0:
+        return jnp.maximum(floor, x)
+    return jnp.exp(smooth_max_c1(math.log(floor),
+                                 jnp.log(jnp.maximum(x, 0.5 * floor)), log_width))
+
+
+def cap_ln(x: jax.Array, cap: float, log_width: float) -> jax.Array:
+    """``min(x, cap)`` for a positive ``cap`` and ``x >= 0`` (RULE 5): C1 smooth
+    min in ``ln`` space, exact outside ``|ln(x/cap)| >= log_width/2``.
+    ``log_width = 0`` is ``jnp.minimum``."""
+    if log_width == 0:
+        return jnp.minimum(x, cap)
+    lo = 0.5 * cap
+    soft = jnp.exp(smooth_min_c1(jnp.log(jnp.maximum(x, lo)), math.log(cap), log_width))
+    return jnp.where(x > lo, soft, x)
+
+
 def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
     if width == 0:

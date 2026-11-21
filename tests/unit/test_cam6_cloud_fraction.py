@@ -330,10 +330,10 @@ def test_cam6_cloud_fraction_is_differentiable():
 # Wiring: driver config, MPAS combined physics, radiation reads the carry
 # ---------------------------------------------------------------------------
 def _exp_cfg(**over):
-    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
     base = dict(cloud_scheme="cam6_clubb", turbulence="clubb",
                 use_clubb_cloud_fraction=True, microphysics="sundqvist",
-                radiation="rrtmgp",
+                radiation="rrtmgp", grid=GridConfig(grid_type="voronoi"),
                 dycore=DycoreConfig(discretization="mpas"))
     base.update(over)
     return ExperimentConfig(**base)

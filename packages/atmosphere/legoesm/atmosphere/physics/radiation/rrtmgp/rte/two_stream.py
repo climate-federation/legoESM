@@ -245,7 +245,7 @@ def _gpoint_cloud_paths(igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn):
 
 
 def _gpoint_snow(igpt, cloud_snow, cloud_path_fn):
-  """``{'cloud_snow': (path, d_eff, table)}`` for g-point ``igpt`` (the McICA
+  """``{'cloud_snow': (path, d_eff, table, weight)}`` for g-point ``igpt`` (the McICA
   path when ``cloud_path_fn`` samples snow too), or ``{}`` without snow."""
   if cloud_snow is None:
     return {}

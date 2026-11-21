@@ -673,6 +673,19 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None,
     return q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col
 
 
+def _refuse_hydrostatic_only_cloud_options(radiation_config, lane):
+    """CAM6 snow in the radiation and the specified droplet number are wired
+    on the hydrostatic radiation builder only; refuse them elsewhere at
+    construction instead of on the first radiation call."""
+    cc = radiation_config.cloud_config
+    if radiation_config.cloud_scheme != "none" and (
+            getattr(cc, "cam6_snow_in_rad", False)
+            or getattr(cc, "cam6_rad_specified_nc", False)):
+        raise ValueError(
+            "CloudConfig.cam6_snow_in_rad / cam6_rad_specified_nc are wired on "
+            f"the hydrostatic radiation lane only, not the {lane} lane.")
+
+
 def _specified_droplet_number(radiation_config, micro_leaf, nc_from_aerosol):
     """MG2's specified droplet number Nc_0 [1/m3] for the radiation when
     ``CloudConfig.cam6_rad_specified_nc`` is on, else ``None``.  Refused
@@ -1289,6 +1302,7 @@ def _call_radiation_backend(
             _rad_kwargs["cloud_path_liq"] = _rad_kwargs["cloud_path_liq"] * _w_cld
             _rad_kwargs["cloud_path_ice"] = _rad_kwargs["cloud_path_ice"] * _w_cld
             _rad_kwargs["cloud_path_snow"] = cloud_props.icswp * _w_snow
+            _rad_kwargs["cloud_snow_weight"] = _w_snow
             _rad_kwargs["cloud_d_eff_snow"] = cloud_props.des
             _rad_kwargs["snow_optics"] = _snow_optics_table(
                 cloud_config.cam6_snow_optics_file)
@@ -2408,6 +2422,7 @@ def _make_nonhydrostatic_radiation(
 
     Signature: (state, grid, height_coord, terrain_metric) -> NonHydrostaticTendencies
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "nonhydrostatic")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
@@ -2794,6 +2809,7 @@ def _make_plane_radiation(
     Signature: ``(state, grid, height_coord, terrain_metric) ->
     PlaneNonHydrostaticTendencies``.
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "plane")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
@@ -2980,6 +2996,7 @@ def _make_mpas_nh_radiation(
     Signature: ``(state, mesh, height_coord, terrain_metric) ->
     MPASNonHydrostaticTendencies``.
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "MPAS non-hydrostatic")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
@@ -3183,6 +3200,7 @@ def _make_spectral_pe_radiation(
     the activation-storage relief that lets the production AIMIP
     run finish on a single GPU.
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "spectral")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
     # CAM6 ``cam6_clubb`` cloud fraction takes its liquid fraction from the

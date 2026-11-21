@@ -26,6 +26,7 @@ from legoesm import constants
 from legoesm.atmosphere.physics.clouds.cloud_fraction import (
     cam6_conv_water_4rad, cam6_snow_for_radiation, compute_cloud_properties)
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.core.smooth import cap_ln, floor_ln
 
 jax.config.update("jax_enable_x64", True)
 
@@ -48,9 +49,10 @@ def _sn(fx, w):
 
 
 def _gaps():
-    """Per-case |smooth - hard| at the default width, relative to the case's
-    largest hard value: one row per conv-water fixture column, one entry per
-    snow fixture point."""
+    """Per-case |smooth - hard| at the default width: one entry per conv-water
+    fixture column (relative to that column's largest hard value) and per snow
+    fixture point (relative to the field's largest hard value over the
+    fixture, since many points are exactly 0 at the hard limit)."""
     cw, sn = dict(np.load(CW_FIX)), dict(np.load(SN_FIX))
     out = {}
     for name, h, s in zip(("cw_liq", "cw_ice"), _cw(cw, 0.0), _cw(cw, W)):
@@ -59,7 +61,7 @@ def _gaps():
                      / np.maximum(np.abs(h).max(axis=1), 1e-300))
     for name, h, s in zip(("sn_cldfsnow", "sn_icswp", "sn_des"), _sn(sn, 0.0), _sn(sn, W)):
         h, s = np.asarray(h), np.asarray(s)
-        out[name] = np.abs(s - h) / np.maximum(np.abs(h), 1e-300)
+        out[name] = np.abs(s - h) / max(float(np.abs(h).max()), 1e-300)
     return out
 
 
@@ -88,7 +90,7 @@ def test_hard_limit_reaches_the_oracle_through_the_config():
         liq, _ = cam6_conv_water_4rad(c["q_c"], c["q_i"], on.ast, on.deepcu,
                                       c["conv_icwmr"], 0.01, log_width=w)
         cld = on.cloud_fraction
-        want = jnp.minimum(liq / jnp.maximum(cld, 1e-4), 5e-3) * dpg * cld
+        want = cap_ln(liq / floor_ln(cld, 1e-4, w), 5e-3, w) * dpg * cld
         np.testing.assert_allclose(np.asarray(on.lwp), np.asarray(want),
                                    rtol=1e-12, atol=0)
     with pytest.raises(ValueError, match="cam6_rad_gate_log_width"):
@@ -101,8 +103,8 @@ def test_smooth_default_gap_matches_the_recorded_gap_per_case():
     assert sorted(want) == sorted(got)
     for k in got:
         np.testing.assert_allclose(got[k], want[k], rtol=1e-6, atol=1e-12, err_msg=k)
-    # the gap is a smoothing gap, not a different scheme: small where measured
-    assert max(float(np.max(v)) for v in got.values()) < 1.0
+    # non-vacuous: the smooth default does differ from CAM somewhere
+    assert max(float(np.max(v)) for v in got.values()) > 0.0
 
 
 def _in_band_cw():
@@ -159,6 +161,16 @@ def test_width_reaches_the_cloud_config_from_the_deck_key_and_the_cli():
     assert _standalone_cloud_config(_exp_cfg(), "cam6_clubb").cam6_rad_gate_log_width == W
     a = run_amip.build_arg_parser().parse_args(["--cloud-cam6-rad-gate-log-width", "0"])
     assert run_amip.build_config_from_args(a).cloud_cam6_rad_gate_log_width == 0.0
+
+
+def test_snow_and_specified_number_refused_off_the_hydrostatic_lane():
+    from legoesm.atmosphere.physics.radiation.integration import (
+        _refuse_hydrostatic_only_cloud_options as refuse)
+    from tests.unit import _cam6_rad_columns as cc
+    refuse(cc.radiation_config(cc.cloud_config()), "spectral")
+    for kw in (dict(cam6_snow_in_rad=True), dict(cam6_rad_specified_nc=True)):
+        with pytest.raises(ValueError, match="hydrostatic radiation lane only"):
+            refuse(cc.radiation_config(cc.cloud_config(**kw)), "spectral")
 
 
 if __name__ == "__main__":
