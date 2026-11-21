@@ -389,6 +389,7 @@ if ! source "${REPO}/scripts/cluster/levante/hpcx_gdr_env.sh"; then
     echo "[chain] REFUSING: could not set up the HPC-X environment." >&2
     exit 73
 fi
+_HPCX="${HPCX_HOME:-}"; _HPCX="${_HPCX%/}"
 export MPI4JAX_USE_CUDA_MPI=1
 # One GPU per rank: mpirun cannot bind GPUs, so a wrapper hands each local
 # rank its own device.  It also clears SLURM_PROCID, which every mpirun
@@ -397,22 +398,30 @@ export MPI4JAX_USE_CUDA_MPI=1
 _WRAP="${OUTDIR}/.gpu_local_rank.sh"
 printf '#!/bin/bash\nunset SLURM_PROCID\nexport CUDA_VISIBLE_DEVICES=${OMPI_COMM_WORLD_LOCAL_RANK}\nexec "$@"\n' > "${_WRAP}"
 chmod +x "${_WRAP}"
-# PREFLIGHT, one rank under the same launcher: the MPI library mpi4py
-# actually loads must be HPC-X's, and mpi4jax must carry its CUDA extension.
-# Asked at run time because a prebuilt multi-MPI mpi4py wheel picks its
-# library when it starts, so no file in the venv says which one it will be.
+# PREFLIGHT, one rank under the same launcher: the mpirun, ompi_info and the
+# libmpi that mpi4py actually loads (read from the process's own memory map)
+# must all live under HPCX_HOME, the loaded library must report HPC-X's
+# version, and mpi4jax must carry its CUDA extension.  Asked at run time
+# because a prebuilt multi-MPI mpi4py wheel picks its library when it starts,
+# so no file in the venv says which one it will be.  One rank cannot exercise
+# cross-rank GPU-direct transport: the run's first halo exchange is that test.
+if [[ -z "${_HPCX}" || "$(command -v mpirun || true)" != "${_HPCX}"/* \
+        || "$(command -v ompi_info || true)" != "${_HPCX}"/* ]]; then
+    echo "[chain] REFUSING: mpirun/ompi_info do not resolve under HPCX_HOME='${_HPCX}'." >&2
+    exit 73
+fi
 _HPCX_VER=$(ompi_info --version 2>/dev/null | head -1)
-_PRE=$(timeout 300 mpirun -np 1 --bind-to none "${_WRAP}" "${PY}" -c "from mpi4py import MPI; from mpi4jax._src.xla_bridge import HAS_CUDA_EXT; print('MPI_LIB', MPI.Get_library_version().splitlines()[0]); print('CUDA_EXT', HAS_CUDA_EXT)" 2>&1)
+_PRE=$(timeout 300 mpirun -np 1 --bind-to none "${_WRAP}" "${PY}" -c "from mpi4py import MPI; from mpi4jax._src.xla_bridge import HAS_CUDA_EXT; print('MPI_LIB', MPI.Get_library_version().splitlines()[0]); print('MPI_PATH', next(l.split()[-1] for l in open('/proc/self/maps') if 'libmpi.so' in l)); print('CUDA_EXT', HAS_CUDA_EXT)" 2>&1)
 _PRE_RC=$?
-echo "[chain] GPU-direct preflight (${PY}):"; echo "${_PRE}" | grep -E '^(MPI_LIB|CUDA_EXT) '
+echo "[chain] GPU-direct preflight (${PY}):"; echo "${_PRE}" | grep -E '^(MPI_LIB|MPI_PATH|CUDA_EXT) '
 if (( _PRE_RC != 0 )); then
     echo "[chain] REFUSING: the GPU-direct preflight exited ${_PRE_RC} (124 = timed out)." >&2
     echo "${_PRE}" | tail -5 >&2
     exit 73
 fi
-if [[ -z "${_HPCX_VER}" || "$(command -v ompi_info)" != "${HPCX_HOME}/"* ]] \
-        || ! grep -qF "MPI_LIB ${_HPCX_VER}" <<< "${_PRE}"; then
-    echo "[chain] REFUSING: ${PY} does not load HPC-X's MPI (${_HPCX_VER:-ompi_info missing})." >&2
+if [[ -z "${_HPCX_VER}" ]] || ! grep -qF "MPI_LIB ${_HPCX_VER}" <<< "${_PRE}" \
+        || [[ "$(grep '^MPI_PATH ' <<< "${_PRE}" | head -1 | cut -d' ' -f2-)" != "${_HPCX}"/* ]]; then
+    echo "[chain] REFUSING: ${PY} does not load HPC-X's MPI (${_HPCX_VER:-ompi_info gave no version})." >&2
     echo "${_PRE}" | tail -5 >&2
     exit 73
 fi
