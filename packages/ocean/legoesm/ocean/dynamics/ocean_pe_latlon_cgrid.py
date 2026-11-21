@@ -4343,12 +4343,11 @@ def _bc_horizontal_viscosity(
         if getattr(_om, "resolution_function", "taper") == "mom6_step_wkb":
             if T is None or S is None or h_k is None:
                 raise ValueError('resolution_function="mom6_step_wkb" needs T, S and h_k')
-            from legoesm import constants as _const
             _eos = make_eos_fn(config.eos, getattr(config, "eos_linear", None),
                                eos_nemo_seos=getattr(config, "eos_nemo_seos", None))
             _wet = h_k > 0.0 if mask is None else (h_k > 0.0) & (mask[..., jnp.newaxis] > 0.5)
             _c1 = wkb_first_baroclinic_wave_speed(T, S, h_k, _wet, _eos,
-                                                  config.rho_0, _const.g,
+                                                  config.rho_0, config.g,
                                                   width=_om.smooth_width)
             _res_fn = om4_resolution_function(_c1, grid, mask=mask, coef=_om.res_coef,
                                               gill_equatorial=_om.gill_equatorial_ld,

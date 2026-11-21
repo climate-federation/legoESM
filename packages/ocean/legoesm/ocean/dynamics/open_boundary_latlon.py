@@ -27,7 +27,7 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-from legoesm.core.smooth import max_rel, min_rel, positive_part_c1, step_rel
+from legoesm.core.smooth import max_rel, min_rel, positive_part_rel, step_rel
 
 _CX_CRIT = 0.292893218813452          # 1 - 1/sqrt(2), u2dbc.F threshold of the zx extrapolation
 _EPS = 1.0e-20
@@ -284,16 +284,23 @@ def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=Non
     cff = max_rel(dfx * dfx + dfy * dfy, _EPS, width)
     # cx = max(p, 0) as the hard form has it; the smooth form is one-sided (0 for
     # inflow, never negative) so cff + cx stays positive
-    cx = dft * dfx if width == 0 else scale * positive_part_c1(p / scale, 1.0 / width)
+    cx = dft * dfx if width == 0 else positive_part_rel(p, scale, width)
     if width == 0:
         cy = jnp.clip(dft * dfy, -cff, cff)
         cy_pos, cy_neg = jnp.maximum(cy, 0.0), jnp.minimum(cy, 0.0)
     else:
-        cy = cff * min_rel(max_rel(dft * dfy / cff, -1.0, width), 1.0, width)
-        cy_pos = cff * positive_part_c1(cy / cff, 1.0 / width)     # cy / cff in [-1, 1]
-        cy_neg = cy - cy_pos
-    fb = (cff * fb_old + cx * f1_new - cy_pos * gb[..., :-1]
-          - cy_neg * gb[..., 1:]) / (cff + cx)
+        cy = min_rel(max_rel(dft * dfy, -cff, width), cff, width)
+        # sign-preserving split: cy_pos >= 0 >= cy_neg, each exact away from 0
+        cy_pos = positive_part_rel(cy, cff, width)
+        cy_neg = -positive_part_rel(-cy, cff, width)
+    num = cff * fb_old + cx * f1_new - cy_pos * gb[..., :-1] - cy_neg * gb[..., 1:]
+    if width == 0:
+        fb = num / (cff + cx)
+    else:
+        # a flat column (no gradient at all) has cff at the floor; keep fb_old there without
+        # differentiating a division by the floor (float32 overflows 1/floor**2)
+        live = (dfx * dfx + dfy * dfy > 0) | (cx > 0)
+        fb = jnp.where(live, num / jnp.where(live, cff + cx, 1.0), fb_old)
     out = (1.0 - tau) * fb + tau * data
     return out if mb is None else out * mb
 
@@ -319,9 +326,9 @@ def _orlanski_1d(fb_new, f1_old, f1_new, f2_new, data, r_in, r_out, rx_max, *, w
         rx = jnp.where(out, jnp.minimum(dhdt / jnp.where(out, dhdx, 1.0), rx_max), 0.0)
     else:
         # one-sided (0 for inflow, never negative), so 1 + rx stays positive
-        sc = dhdt * dhdt + dhdx * dhdx + _EPS
-        pp = sc * positive_part_c1(p / sc, 1.0 / width)
-        rx = pp / (max_rel(dhdx * dhdx, pp / rx_max, width) + _EPS)
+        pp = positive_part_rel(p, dhdt * dhdt + dhdx * dhdx, width)
+        live = pp > 0
+        rx = jnp.where(live, pp / jnp.where(live, max_rel(dhdx * dhdx, pp / rx_max, width), 1.0), 0.0)
     fb = (fb_new + rx * f1_new) / (1.0 + rx)
     r = w_out * r_out + (1.0 - w_out) * r_in          # exact r_out / r_in at w_out = 1 / 0
     g = r / (1.0 + r)

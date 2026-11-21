@@ -328,30 +328,51 @@ def sqrt_c1(x: jax.Array, width: float) -> jax.Array:
     return jnp.where(above, jnp.sqrt(jnp.where(above, x, width)), bridge)
 
 
+def _unit_ramp(x: jax.Array, wabs: jax.Array) -> jax.Array:
+    """``clip(x / wabs, 0, 1)`` with the division taken only inside ``0 < x < wabs``
+    (double where), so no ``1/wabs**2`` term reaches the gradient outside the band
+    and a vanishing ``wabs`` never makes 0/0."""
+    inside = (x > 0) & (x < wabs)
+    t = x / jnp.where(inside, wabs, 1.0)
+    return jnp.where(inside, t, jnp.where(x >= wabs, 1.0, 0.0))
+
+
 def step_rel(x: jax.Array, scale: jax.Array, width: float) -> jax.Array:
     """C1 step ``x > 0`` (RULE 5), one-sided: exactly 0 for ``x <= 0`` (ties go
     to the hard form's side), a ramp over ``0 < x < width*scale``, exactly 1
-    above.  ``scale > 0`` is the magnitude ``x`` is measured against (traced is
+    above.  ``scale >= 0`` is the magnitude ``x`` is measured against (traced is
     fine); ``width`` is dimensionless and static, ``width = 0`` is the hard
     ``x > 0``."""
     if width == 0:
         return (x > 0).astype(jnp.result_type(x, float))
-    return smoothstep_cubic(x / (width * scale))
+    return smoothstep_cubic(_unit_ramp(x, width * scale))
+
+
+def positive_part_rel(x: jax.Array, scale: jax.Array, width: float) -> jax.Array:
+    """C1 ``max(x, 0)`` (RULE 5): exactly 0 for ``x <= 0``, exactly ``x`` from
+    ``width*scale`` on, ``x t (2 - t)`` with ``t = x/(width*scale)`` between
+    (:func:`positive_part_c1` with its band set relative to ``scale``); never
+    above ``max(x, 0)``.  ``width = 0`` is ``jnp.maximum(x, 0)``."""
+    if width == 0:
+        return jnp.maximum(x, 0.0)
+    t = _unit_ramp(x, width * scale)
+    return jnp.where(t >= 1.0, x, x * t * (2.0 - t))
 
 
 def max_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
-    """C1 ``max(a, b)`` with the band ``|a - b| < width*(|a| + |b|)/2`` measured
+    """C1 ``max(a, b)`` (RULE 5) with the band ``|a - b| < width*(|a| + |b|)/2``
     relative to the operands (dimensionless static ``width``): exact outside it,
-    :func:`smooth_max_c1` on the normalised operands inside.  ``width = 0`` is
-    ``jnp.maximum``.  Against an operand of 0 the band is empty (the kink stays):
-    use :func:`positive_part_c1` on a scaled argument there."""
+    ``b + u**2 / (2 w)`` inside (``u = a - b + w/2``, ``w = width*(|a| + |b|)``;
+    value and slope match at both joins).  No division outside the band, so the
+    gradient is finite at zero operands.  ``width = 0`` is ``jnp.maximum``."""
     if width == 0:
         return jnp.maximum(a, b)
     a, b = jnp.broadcast_arrays(jnp.asarray(a), jnp.asarray(b))
-    s = jnp.abs(a) + jnp.abs(b)
-    ok = s > 0
-    s1 = jnp.where(ok, s, 1.0)           # double where: no 0/0 in the value or its gradient
-    return jnp.where(ok, smooth_max_c1(a / s1, b / s1, width) * s1, jnp.maximum(a, b))
+    d = a - b
+    wabs = width * (jnp.abs(a) + jnp.abs(b))
+    u = d + 0.5 * wabs
+    t = _unit_ramp(u, wabs)
+    return b + jnp.where(t >= 1.0, d, 0.5 * u * t)
 
 
 def min_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:

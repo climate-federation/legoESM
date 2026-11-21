@@ -98,8 +98,26 @@ def test_orlanski_1d_width_zero_is_the_reference_bitwise():
 
 
 def test_default_width_gradient_is_finite_on_a_flat_interior():
-    z = jnp.zeros((2, 8))
-    for f in (lambda x: ob._orlanski(x, z, z, z, z, 0.05, 0.001, width=0.01).sum(),
-              lambda x: ob._orlanski_1d(x, z, z, z, z, 0.05, 0.001, jnp.asarray(1.0), width=0.01).sum()):
-        g = jax.grad(f)(z)
-        assert np.all(np.isfinite(np.asarray(g)))
+    """Every operand, float64 and float32: a flat column must not turn the gradient NaN."""
+    for dt in (jnp.float64, jnp.float32):
+        z = jnp.zeros((2, 8), dt)
+        args = (z, z, z, z, z)
+        for argnum in range(5):
+            for f in (lambda *x: ob._orlanski(*x, 0.05, 0.001, width=0.01).sum(),
+                      lambda *x: ob._orlanski_1d(*x, 0.05, 0.001, jnp.asarray(1.0, dt), width=0.01).sum()):
+                g = jax.grad(f, argnums=argnum)(*args)
+                assert np.all(np.isfinite(np.asarray(g))), (dt, argnum)
+
+
+def test_default_width_makes_no_new_extremes():
+    """The CROCO update is a convex combination of the old boundary row (cell and its two
+    tangential neighbours), the new first interior value and the data; the smoothed
+    coefficients keep it so (a sign-flipped split overshoots a boundary plateau)."""
+    for seed in range(6):
+        fb, f1o, f1n, f2n, d = (np.asarray(x) for x in _rows(seed))
+        fb[:, 10:20] = 1.0                                  # a plateau on the boundary row
+        out = np.asarray(ob._orlanski(*(jnp.asarray(x) for x in (fb, f1o, f1n, f2n, d)),
+                                      0.05, 0.001, width=0.01))
+        pad = np.concatenate([fb[:, :1], fb, fb[:, -1:]], axis=1)
+        nb = np.stack([pad[:, :-2], pad[:, 1:-1], pad[:, 2:], f1n, d])
+        assert np.all(out >= nb.min(0) - 1e-12) and np.all(out <= nb.max(0) + 1e-12), seed

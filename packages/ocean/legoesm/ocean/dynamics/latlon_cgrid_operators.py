@@ -3603,8 +3603,10 @@ def wkb_first_baroclinic_wave_speed(T, S, h_k, active, eos_fn, rho0, g, *, width
         N = jnp.sqrt(jnp.maximum(N2, 1.0e-30)) * (N2 > 0.0).astype(h_k.dtype)
     else:
         ref = (jnp.sum(jnp.abs(N2) * both, axis=-1, keepdims=True)
-               / (jnp.sum(both, axis=-1, keepdims=True) + 1.0) + 1.0e-30)
-        N = jnp.sqrt(ref) * sqrt_c1(N2 / ref, width)
+               / (jnp.sum(both, axis=-1, keepdims=True) + 1.0))
+        ok = ref > 0                      # an unstratified column has N = 0, as the hard form
+        ref1 = jnp.where(ok, ref, 1.0)
+        N = jnp.where(ok, jnp.sqrt(ref1) * sqrt_c1(N2 / ref1, width), 0.0)
     return jnp.sum(N * both * dz, axis=-1) / jnp.pi
 
 
@@ -3628,7 +3630,7 @@ def om4_resolution_function(c1, grid, mask=None, coef=1.0, gill_equatorial=True,
     m = jnp.ones_like(c1) if mask is None else mask.astype(c1.dtype)
     def step(c, dx, dy, f, b):
         A, B = (coef * c) ** 2, (dx ** 2 + dy ** 2) * (f ** 2 + c * b)
-        return 1.0 - step_rel(A - B, A + B + 1.0e-30, width)
+        return 1.0 - step_rel(A - B, A + B, width)
     R_h = step(c1, dx_h, dy_h, f_h, b_h) * m
     cp = jnp.pad(c1 * m, 1, mode="edge")
     mp = jnp.pad(m, 1, mode="edge")

@@ -270,3 +270,12 @@ def test_max_rel_gradient_is_finite_at_zero_operands():
         assert np.isfinite(float(g))
         g2 = jax.grad(lambda x: min_rel(x * x, x, w))(0.0)
         assert np.isfinite(float(g2))
+
+
+def test_relative_helpers_float32_gradient_at_tiny_operands():
+    from legoesm.core.smooth import positive_part_rel
+    x = jnp.float32(1e-20)
+    for f in (lambda t: max_rel(t, jnp.float32(0.0), 0.01), lambda t: min_rel(t, t * t, 0.01),
+              lambda t: step_rel(t, jnp.float32(0.0), 0.01), lambda t: positive_part_rel(t, t, 0.01)):
+        for x0 in (x, jnp.float32(0.0)):
+            assert np.isfinite(float(jax.grad(f)(x0)))
