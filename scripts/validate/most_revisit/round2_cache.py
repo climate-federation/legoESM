@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--min-ustar", type=float, required=True)
     ap.add_argument("--max-zg", type=float, required=True)
+    ap.add_argument("--no-offset-correct", action="store_true", help="heat differences without the neutral offset")
     a = ap.parse_args()
     np.seterr(all="ignore")
     arrays = {}
@@ -47,7 +48,7 @@ def main():
         ds = fs.open_site(path)
         inv_l2 = second_level_inv_l(ds, a.min_ustar)
         for parity in (0, 1):
-            pairs_, flux = sf.site_pairs(ds, a.min_ustar, True, a.max_zg, day_parity=parity)
+            pairs_, flux = sf.site_pairs(ds, a.min_ustar, offset_correct=not a.no_offset_correct, max_zg=a.max_zg, day_parity=parity)
             for kind, plist in pairs_.items():
                 if not plist:
                     continue
