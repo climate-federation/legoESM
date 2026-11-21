@@ -1,0 +1,73 @@
+## Verdict: Confirm A
+
+**A is correct, and the strongest argument is behavioral, not just cosmetic.** Neither ordering can preserve both parents' indices (both appended at the same slot after `vertical_form`), but the failure modes differ:
+
+- **A** keeps `spectral_sponge_nu_top_m2s` at main's index (k+1). Any main-side *positional* construction `DycoreConfig(..., nu_top)` still binds correctly; trailing defaults absorb the branch's three appended fields.
+- **B** moves main's field to k+4. That same main-side positional call would **silently misbind** — the float `0.0` lands in `tracer_vertical_scheme: Literal["sb","van_leer"] | None`, only exploding later in `validate_strict` (or not at all if validation is skipped on some path). A's worst case for a branch positional caller is an immediate `TypeError`; B's worst case is silent misbinding.
+
+Secondary confirmations of A:
+- Main's inline comment *"appended after vertical_form: positional ABI"* stays literally true under A; under B it becomes false and must be edited.
+- Branch's three fields remain a **contiguous tail** under A, so the "new fields appended last" docstring intent survives for the branch feature too.
+- A equals the rebase-onto-main result; every other topic branch merging main sees a stable slot for the sponge field.
+- Runtime audit: all construction in `run_amip.py` is keyword-based; defaults, `validate_strict`, `_replace`, and `to_dict`/`from_dict` round-trips are name-keyed and order-independent. **No behavior change beyond the intended union of the two features.**
+
+## Resolved code (choice A)
+
+**`config.py`** — both comment blocks retained; note the `ASKED(user)` provenance must stay attached to `tracer_vertical_scheme`, and main's bit-identical-off comment stays with the sponge field:
+
+```python
+    vertical_form: str = "legacy"
+    # Spectral lane, CAM-SE top Laplacian sponge (dyn_comp.F90 nu_top): del2
+    # viscosity [m2/s] x (4, 2, 1) on vor, div and T of the top three levels.
+    # 0.0 = off (bit-identical).  (appended after vertical_form: positional ABI)
+    spectral_sponge_nu_top_m2s: float = 0.0
+    # ASKED(user), 2026-11-15: lat-lon HYBRID selector; MPAS always van Leer.
+    # None resolves per lane: hybrid lat-lon SB, hybrid MPAS van Leer;
+    # sigma retains its existing operator and refuses explicit selections.
+    tracer_vertical_scheme: Literal["sb", "van_leer"] | None = None
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
+```
+
+**`run_amip.py`** — kwargs, so order is cosmetic; keep in tuple order. Do **not** "simplify" main's `is not None` coalescing — the CLI default is `None` and the config field is typed `float`:
+
+```python
+        mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
+        spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
+                                    if args.spectral_sponge_nu_top_m2s is not None else 0.0),
+        tracer_vertical_scheme=args.tracer_vertical_scheme,
+        tracer_van_leer_width=args.tracer_van_leer_width,
+        tracer_van_leer_flux_width=args.tracer_van_leer_flux_width,
+        mpas_sponge_del2_top_layers=(args.mpas_sponge_del2_top_layers
+                                     if args.mpas_sponge_del2_top_layers is not None else 0),
+```
+
+**`test_mpas_vert4_flux_form.py`** — this is the one hunk where *both* parents' DycoreConfig assertions are wrong post-merge; a new combined assertion must be written. Main's MPAS `_fields[-3:]` assertion must be **dropped** (it fails — branch appended two widths to that tuple); branch's `_fields[-5:]` is the surviving truth:
+
+```python
+def test_new_fields_are_appended_last():
+    """Positional ABI: the new fields sit at the end of both NamedTuples,
+    after the later-appended ``vertical_form`` -- on DycoreConfig main's
+    ``spectral_sponge_nu_top_m2s`` first, then this branch's tracer scheme
+    and van Leer widths; on the MPAS tuple the branch widths only."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
+    from legoesm.driver.config import DycoreConfig
+    assert MPASPrimitiveEquationConfig._fields[-5:] == (
+        "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form",
+        "tracer_van_leer_width", "tracer_van_leer_flux_width")
+    assert DycoreConfig._fields[-7:] == (
+        "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers", "vertical_form",
+        "spectral_sponge_nu_top_m2s",
+        "tracer_vertical_scheme", "tracer_van_leer_width", "tracer_van_leer_flux_width")
+```
+
+**`test_run_amip_cli.py`** — concatenate both blocks verbatim (HEAD's three tracer tests, then main's four SSO/pipeline tests), normalizing the stray extra blank line in the HEAD block. Nothing overlaps; nothing may be dropped. The `_postprocess_args(..., argv)` third-arg form and `set_defaults(**keys, _config_keys=frozenset(keys))` in main's tests depend on main-side parser/loader changes that merged in clean hunks — keep them exactly as written.
+
+## Lost-intent / hazard checklist
+
+1. **Don't keep either parent's DycoreConfig ABI assertion** — both fail post-merge; writing the 7-tail is mandatory, not optional polish.
+2. **`Literal` import**: HEAD is the only user of `Literal` in `config.py`; verify `from typing import Literal` survived the clean hunks.
+3. **Serialized-order golden tests**: `_asdict()`/JSON key order changes vs. both parents (merge-inherent). Grep for snapshot/golden tests over serialized `DycoreConfig`.
+4. **Pickles/checkpoints**: namedtuple pickles carry positional values; pre-merge `DycoreConfig` pickles break under either A or B. Flag if any cache stores them.
+5. **Cross-lane `validate_strict`**: branch's semantics define behavior for lat-lon and MPAS lanes but say nothing about explicit `tracer_vertical_scheme` on the *spectral* lane. Both parents' validators merged independently — check the union doesn't accidentally permit or crash on that combination.
+6. **`_config_keys` provenance**: branch's deck tests call `set_defaults(**rows)` without `_config_keys`, while main's SSO test relies on it. Tracer keys aren't touched by the machine-default override logic, so these should pass — but run both test files post-merge to confirm.

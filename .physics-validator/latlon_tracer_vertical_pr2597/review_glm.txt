@@ -1,0 +1,22 @@
+## PASS
+
+All four hunks are the exact union of both parents (hunk 3 is the one deliberate rewrite, and it matches vote A). Per-hunk verification:
+
+**Hunk 1 — `config.py` DycoreConfig fields**
+Resolved order is `vertical_form → spectral_sponge_nu_top_m2s → tracer_vertical_scheme → tracer_van_leer_width → tracer_van_leer_flux_width`. Main's field + 3-line comment preserved verbatim; branch's comment + 3 fields preserved verbatim and shifted one slot later — the accepted inherent positional shift. Both defaults unchanged (spectral `0.0` = off/bit-identical; tracer `None / 1e-10 / 1e-6`). The `Literal` import main→branch needs is retained via the branch-side diff.
+
+**Hunk 2 — `run_amip.py` `build_config_from_args`**
+Main's `spectral_sponge_nu_top_m2s` kwarg (with `None → 0.0` mapping) inserted before branch's three tracer kwargs; all keyword-passed, so field-order shift is inert here. Both CLI flags exist in the merged parser with parent-side defaults; branch's tests use `_postprocess_args(args, parser)` without `--default-subgrid-orography-file`, and main's fallback is a no-op when that flag is empty (`""`), so main's SSO default logic cannot perturb branch's round-trip/deck tests.
+
+**Hunk 3 — `test_mpas_vert4_flux_form.py`**
+The rewritten assertions are the correct merged-state union: `DycoreConfig._fields[-7:]` = 7 names exactly matching the resolved field order in hunk 1; `MPASPrimitiveEquationConfig._fields[-5:]` keeps branch's form, which is also consistent with main's intent — main never added the sponge to the MPAS tuple, and the merged assert correctly excludes it. The docstring's "(DycoreConfig)" qualifier reflects exactly that asymmetry.
+
+**Hunk 4 — `test_run_amip_cli.py`**
+Branch's 3 tests (`test_tracer_vertical_flags_round_trip`, `test_production_decks_explicitly_select_tracer_smoothing`, `test_production_tracer_borrow_resolved_on`) appear as context in the vs-HEAD diff — retained intact. Main's 4 items (`test_launcher_sso_default_never_replaces_a_decks_own_file` incl. the `_config_keys=frozenset(keys)` kwarg, `_two_cell_cutoff_report`, `test_duo_sso_product_cutoff_is_two_cells` incl. the planted-violation assert, `test_no_deck_can_set_ml_pipeline`) are added byte-identical to main's conflict side. No duplicate test names, no dropped parametrize cases.
+
+**Cross-checks**
+- Validator retention confirmed in the resolved `config.py`: main's `_snu` gates (finite ≥ 0, spectral + hydrostatic, `column_lane and energy_fixer`) and branch's `resolve_tracer_vertical_scheme` + width checks are separate blocks, both present, no overlap conflict.
+- Nothing in any resolved hunk is absent from both parents (the only authored text is hunk 3's docstring/assertions, which is the sanctioned vote-A consequence).
+- No default or behavior change attributable to the merge itself: each side's defaults/validators enter only from its own parent; combined defaults preserve main's "off" and branch's "None resolves per lane".
+
+Residual risk accepted per the stated audit: the positional shift is only safe because the factory passes the sponge argument by keyword and no caller constructs `DycoreConfig` positionally across the inserted slot — as audited ("factory adds spectral sponge argument; no new hybrid callers"), and any hypothetical positional misbind would fail loudly in `validate_strict` (str→float check / scheme membership) rather than silently.

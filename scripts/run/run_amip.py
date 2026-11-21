@@ -551,6 +551,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "decision 2026-08-16: conserving form always); "
                              "--no-mpas-conservative-tracer-clamp restores the "
                              "legacy clamp for bit-comparison runs.")
+    parser.add_argument("--tracer-vertical-scheme", choices=("sb", "van_leer"),
+                        default=_DYCORE_DEFAULTS.tracer_vertical_scheme,
+                        help="Hybrid tracer scheme; omitted = lane default (lat-lon SB, MPAS van Leer). "
+                             "Sigma lanes require omission; MPAS hybrid refuses SB.")
+    parser.add_argument("--tracer-van-leer-width", type=float,
+                        default=_DYCORE_DEFAULTS.tracer_van_leer_width,
+                        help="Hybrid van Leer mixing-ratio increment width [kg/kg]; zero = hard faces.")
+    parser.add_argument("--tracer-van-leer-flux-width", type=float,
+                        default=_DYCORE_DEFAULTS.tracer_van_leer_flux_width,
+                        help="Hybrid van Leer mass-flux width [Pa/s]; zero = hard flux split. "
+                             "Both widths zero recover the old hard operator.")
     parser.add_argument("--positivity-condensate-from-vapour",
                         action=argparse.BooleanOptionalAction,
                         default=_DYCORE_DEFAULTS.positivity_condensate_from_vapour,
@@ -3051,6 +3062,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
         spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
                                     if args.spectral_sponge_nu_top_m2s is not None else 0.0),
+        tracer_vertical_scheme=args.tracer_vertical_scheme,
+        tracer_van_leer_width=args.tracer_van_leer_width,
+        tracer_van_leer_flux_width=args.tracer_van_leer_flux_width,
         mpas_sponge_del2_top_layers=(args.mpas_sponge_del2_top_layers
                                      if args.mpas_sponge_del2_top_layers is not None else 0),
         mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor
