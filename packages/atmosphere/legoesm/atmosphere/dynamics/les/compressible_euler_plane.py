@@ -2786,13 +2786,17 @@ def plane_acoustic_substeps_si_horizontal_halo(
     Multi-rank counterpart of
     :func:`plane_acoustic_substeps_si_horizontal`: same forward-backward
     scheme, but every horizontal stencil reads a halo-padded slab
-    instead of a ``jnp.roll`` over the (absent) global array.
-    Communication-avoiding: the state is exchanged ONCE per call with a
-    halo ``2 * n_substeps`` wide; each substep then consumes two rings
-    (the reach-1 pressure gradient / face interpolation that updates
-    ``u``/``v``, and the reach-1 divergence of the mass fluxes), so the
-    ring values are recomputed locally with the same arithmetic the
-    neighbouring rank applies to its interior.
+    instead of a ``jnp.roll`` over the (absent) global array. Per
+    substep it issues exactly TWO packed halo rounds:
+
+    1. ``(theta', rho')`` before the update — the Exner perturbation
+       and the sanitized ``theta_total``/``rho_total`` are pointwise,
+       so they are computed ON the padded slabs; the C-grid pressure
+       gradient and face interpolations then produce interior-shape
+       ``u``/``v`` updates.
+    2. the horizontal mass fluxes ``(rho_xface*u_new, rho_yface*v_new)``
+       — re-padded so the backward C-grid divergence closes on the
+       interior.
 
     The vertical implicit solve, vertical continuity and vertical theta
     advection reuse the shared column kernel (column-local, no MPI).
@@ -2801,7 +2805,8 @@ def plane_acoustic_substeps_si_horizontal_halo(
     substep (same stencil arithmetic on wrapped halos).
 
     ``layout`` and ``n_substeps`` are static, so the Python substep
-    loop unrolls at trace time.
+    loop unrolls at trace time with one sendrecv token chain per
+    exchange.
     """
     del slow_tend
     from legoesm.atmosphere.dynamics.les import plane_operators_halo as oh
@@ -2817,6 +2822,7 @@ def plane_acoustic_substeps_si_horizontal_halo(
     si_w_filter_nu = float(getattr(
         euler_config, "si_w_vertical_filter_nu", 0.0,
     ))
+    h = layout.halo
 
     u = state.u.data
     v = state.v.data
@@ -2824,104 +2830,87 @@ def plane_acoustic_substeps_si_horizontal_halo(
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
 
+    tri_bands = precompute_si_tridiag_bands(
+        height_coord, J, dt_s, g, implicit_buoyancy,
+        nlev=theta_p.shape[-1],
+    )
+
     from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         compute_exner_perturbation,
     )
 
     b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
-
-    # Communication-avoiding: the state is exchanged once per CHUNK of m
-    # substeps with a halo H = 2*m cells wide (m = all substeps unless the
-    # rank tile is narrower than 2*n_substeps); each substep consumes two
-    # rings (reach-1 pressure gradient / face interpolation, then reach-1
-    # divergence) and recomputes the ring with the same arithmetic as the
-    # neighbour's interior.
-    n_sub = int(n_substeps)
-    m = max(1, min(n_sub, min(u.shape[0], u.shape[1]) // 2))
-
-    def crop(a, r):
-        return a[r:-r, r:-r] if r else a
-
     u_c, v_c, w_c, theta_p_c, rho_p_c = u, v, w, theta_p, rho_p
-    for k0 in range(0, n_sub, m):
-        n_chunk = min(m, n_sub - k0)
-        H = 2 * n_chunk
-        wide = layout._replace(halo=H)
-        u_c, v_c, theta_p_c, rho_p_c = packed_exchange_halo_plane_yxz(
-            u_c, v_c, theta_p_c, rho_p_c, layout=wide)
-        w_parts = packed_exchange_halo_plane_yxz(
-            w_c, *([b_moist] if b_moist is not None else []), layout=wide)
-        w_c = w_parts[0]
-        b_moist_pad = w_parts[1] if b_moist is not None else None
-        # The plane dycore runs on flat terrain only (asserted at model
-        # construction), so J == 1 on the halo ring too.
-        J_pad = jnp.pad(J, ((H, H), (H, H)), mode="edge")
-        tri_bands_pad = precompute_si_tridiag_bands(
-            height_coord, J_pad, dt_s, g, implicit_buoyancy,
-            nlev=theta_p.shape[-1],
+    for _ in range(int(n_substeps)):
+        # Exchange 1: θ', ρ'. sanitize + Exner are pointwise, so the
+        # padded totals/π' are exact on the halo ring; the reach-1
+        # C-grid stencils below then close on the interior.
+        theta_p_pad, rho_p_pad = packed_exchange_halo_plane_yxz(
+            theta_p_c, rho_p_c, layout=layout,
         )
-        for k in range(n_chunk):
-            r0 = 2 * k  # every field carries halo H - r0 at substep start
-            # sanitize + Exner are pointwise, so totals/π' are exact on the ring.
-            theta_total_pad, rho_total_pad = sanitize_theta_rho(
-                theta_0 + theta_p_c, rho_0 + rho_p_c,
-            )
-            # 1+2. Horizontal pressure gradient -> forward u, v update (ring -1).
-            pi_p_pad = compute_exner_perturbation(
-                rho_p_c, theta_p_c, height_coord,
-            )
-            grad_pi_x = oh.grad_x_vlast_halo(pi_p_pad, grid, 1)
-            grad_pi_y = oh.grad_y_vlast_halo(pi_p_pad, grid, 1)
-            theta_xface = oh.interp_cell_to_xface_vlast_halo(
-                theta_total_pad, grid, 1,
-            )
-            theta_yface = oh.interp_cell_to_yface_vlast_halo(
-                theta_total_pad, grid, 1,
-            )
-            u_new = crop(u_c, 1) + dt_s * (-c_p * theta_xface * grad_pi_x)
-            v_new = crop(v_c, 1) + dt_s * (-c_p * theta_yface * grad_pi_y)
+        theta_total_pad, rho_total_pad = sanitize_theta_rho(
+            theta_0 + theta_p_pad, rho_0 + rho_p_pad,
+        )
+        # 1+2. Horizontal pressure gradient -> forward u, v update
+        #      (interior-shape results from the padded slabs).
+        pi_p_pad = compute_exner_perturbation(
+            rho_p_pad, theta_p_pad, height_coord,
+        )
+        grad_pi_x = oh.grad_x_vlast_halo(pi_p_pad, grid, h)
+        grad_pi_y = oh.grad_y_vlast_halo(pi_p_pad, grid, h)
+        theta_xface = oh.interp_cell_to_xface_vlast_halo(
+            theta_total_pad, grid, h,
+        )
+        theta_yface = oh.interp_cell_to_yface_vlast_halo(
+            theta_total_pad, grid, h,
+        )
+        u_new = u_c + dt_s * (-c_p * theta_xface * grad_pi_x)
+        v_new = v_c + dt_s * (-c_p * theta_yface * grad_pi_y)
 
-            # 3. Vertical acoustic implicit (w) + vertical continuity +
-            #    vertical theta advection (shared column kernel; column-local,
-            #    on the padded slab). beta=0.0 here — the Skamarock-Klemp
-            #    off-centering is applied ONCE on the combined vertical +
-            #    horizontal divergence below, exactly like the serial substep.
-            w_new, theta_p_new, rho_p_vert = semi_implicit_acoustic_column_kernel(
-                w_c, theta_p_c, rho_p_c,
-                height_coord, crop(J_pad, r0), dt_s, 0.0, g,
-                implicit_buoyancy=implicit_buoyancy,
-                precomputed_tridiag=tuple(crop(b, r0) for b in tri_bands_pad),
-                si_w_vertical_filter_nu=si_w_filter_nu,
-                theta_vert_van_leer=(
-                    getattr(euler_config, "acoustic_theta_advection", "centered")
-                    == "van_leer"),
-            )
-            # 3b. Frozen SAM moist buoyancy on w, each substep (layout-aware
-            #     global mean inside the helper when configured).
-            if b_moist_pad is not None:
-                w_new = (w_new + dt_s * crop(b_moist_pad, r0)
-                         ).at[..., 0].set(0.0).at[..., -1].set(0.0)
+        # 3. Vertical acoustic implicit (w) + vertical continuity +
+        #    vertical theta advection (shared column kernel; column-
+        #    local, interior arrays). beta=0.0 here — the Skamarock-
+        #    Klemp off-centering is applied ONCE on the combined
+        #    vertical+horizontal divergence below, exactly like the
+        #    serial si_horizontal substep.
+        w_new, theta_p_new, rho_p_vert = semi_implicit_acoustic_column_kernel(
+            w_c, theta_p_c, rho_p_c,
+            height_coord, J, dt_s, 0.0, g,
+            implicit_buoyancy=implicit_buoyancy,
+            precomputed_tridiag=tri_bands,
+            si_w_vertical_filter_nu=si_w_filter_nu,
+            theta_vert_van_leer=(
+                getattr(euler_config, "acoustic_theta_advection", "centered")
+                == "van_leer"),
+        )
+        # 3b. Frozen SAM moist buoyancy on w, each substep (layout-aware
+        #     global mean inside the helper when configured).
+        if b_moist is not None:
+            w_new = (w_new + dt_s * b_moist).at[..., 0].set(0.0).at[..., -1].set(0.0)
 
-            # 4. Horizontal mass-flux divergence (backward: uses new u, v; mass
-            #    flux uses the start-of-substep rho_total) -> ring -2.
-            rho_xface = oh.interp_cell_to_xface_vlast_halo(
-                rho_total_pad, grid, 1,
-            )
-            rho_yface = oh.interp_cell_to_yface_vlast_halo(
-                rho_total_pad, grid, 1,
-            )
-            horiz_div = oh.divergence_vlast_halo(
-                rho_xface * u_new, rho_yface * v_new, grid, 1)
-            rho_p_new = crop(rho_p_vert, 2) - dt_s * horiz_div
-            # Off-center the FULL divergence update (Skamarock-Klemp 2008),
-            # once, on the combined vertical+horizontal result.
-            if beta != 0.0:
-                rho_p_new = (1.0 + beta) * rho_p_new - beta * crop(rho_p_c, 2)
+        # 4. Horizontal mass-flux divergence (backward: uses new u, v;
+        #    mass flux uses the start-of-substep rho_total).
+        rho_xface = oh.interp_cell_to_xface_vlast_halo(
+            rho_total_pad, grid, h,
+        )
+        rho_yface = oh.interp_cell_to_yface_vlast_halo(
+            rho_total_pad, grid, h,
+        )
+        # Exchange 2: re-pad the interior fluxes so the C-grid
+        # divergence closes on the interior.
+        flux_u_pad, flux_v_pad = packed_exchange_halo_plane_yxz(
+            rho_xface * u_new, rho_yface * v_new, layout=layout,
+        )
+        horiz_div = oh.divergence_vlast_halo(flux_u_pad, flux_v_pad, grid, h)
+        rho_p_new = rho_p_vert - dt_s * horiz_div
+        # Off-center the FULL divergence update (Skamarock-Klemp 2008),
+        # once, on the combined vertical+horizontal result.
+        if beta != 0.0:
+            rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
-            u_c, v_c, w_c, theta_p_c, rho_p_c = (
-                crop(u_new, 1), crop(v_new, 1), crop(w_new, 2),
-                crop(theta_p_new, 2), rho_p_new,
-            )
+        u_c, v_c, w_c, theta_p_c, rho_p_c = (
+            u_new, v_new, w_new, theta_p_new, rho_p_new,
+        )
 
     return PlaneNonHydrostaticState(
         u=state.u.replace(data=u_c),
