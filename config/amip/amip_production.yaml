@@ -73,6 +73,9 @@ mpas_sponge_del2_top_layers: 2       # index-based sponge: 2 layers on L32 span
                                      # branches) -- 2 layers is the closest
                                      # offered setting (user 2026-09-21)
 mpas_sponge_del2_top_factor: 8.0
+tracer_vertical_scheme: van_leer
+tracer_van_leer_width: 1.0e-10  # VOTED W4: mixing-ratio increments [kg/kg]
+tracer_van_leer_flux_width: 1.0e-6  # VOTED W4: mass flux [Pa/s]
 mpas_vert_advection_scheme: sb       # conservative Simmons-Burridge flux form
                                      # of the hybrid theta transport (van Leer
                                      # is sigma-only on this lane).  The
@@ -476,6 +479,10 @@ mpas_land_stress_from_land: true
 # not on the land-blended T_sfc/q_sfc (#1320; CESM computes atm-ocn fluxes on
 # ocean points only).  User 2026-10-19.
 ocean_flux_on_ocean_surface: true
+# Partly ice-covered sea cells: turbulent exchange on the ice skin and on the
+# open water separately, the ice skin charged its own sensible/latent heat
+# (#2573, user 2026-11-19).  Radiation is not split.
+sea_ice_flux_split: true
 mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
                                 # albedo rebuilt every land step, as the
                                 # offline calibration runs the tables (user
@@ -498,10 +505,18 @@ land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101_v3.npz
 mpas_qv_smooth_del2_m2s: 0.0
 mpas_qv_smooth_del4_m4s: 3.6421e14
 mpas_conservative_tracer_clamp: true
+positivity_condensate_from_vapour: true  # pay net-negative column condensate from the column's vapour (ENSO-fork port, 2026-11-20)
 
 # ---- forcing / IC / output (unchanged) ------------------------------------------
 diurnal_cycle: true
 orbital_insolation: true
+# Orbit: present day, stated explicitly (null = present-day element; set
+# orbit_year OR the three elements for a paleo/idealized orbit).
+orbit_year: null
+orbit_eccentricity: null
+orbit_obliquity_deg: null
+orbit_long_perihelion_deg: null
+orbit_solver: berger_series
 ic: era5
 dataset: custom
 sst_var: tosbcs

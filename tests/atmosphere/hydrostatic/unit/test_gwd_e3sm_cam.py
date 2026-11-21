@@ -192,6 +192,38 @@ def test_oro_momentum_conservation(_oracle_constants):
     np.testing.assert_allclose(mom_sink, net_absorbed, rtol=1e-10)
 
 
+def _neg_div_probe():
+    import importlib.util
+    from pathlib import Path
+    path = (Path(__file__).resolve().parents[4] / "scripts/validate/oracle/gw_spec_e3sm"
+            / "neg_div_probe.py")
+    spec = importlib.util.spec_from_file_location("neg_div_probe", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("smooth", [False, True], ids=["hard", "default"])
+@pytest.mark.parametrize("case", ["neg", "neg_umcfac", "control"])
+def test_negative_divergence_column_conserves_momentum(case, smooth):
+    """#2567 KNOWN DIFFERENCE, RULE 0: where a layer's raw stress divergence
+    is negative the port applies ``sgn(c-u)*ubtl`` (E3SM: ``|ubtl|*sgn(c-u)``,
+    which deposits momentum the stress profile does not supply), so the column
+    deposit equals the stress divergence to round-off.  Columns from the
+    committed oracle probe (launched stress growing upward below the source)."""
+    probe = _neg_div_probe()
+    col = probe.column(case)
+    cfg = E3SMCAMConfig()
+    a = lambda x: jnp.asarray(x)[None]
+    rhoi, ti, nm, ni = gw_prof(a(col["t"]), a(col["pmid"]), a(col["pint"]), C.c_pd, C.R_d,
+                               C.g, cfg.n2min)
+    utgw, tau = probe.port(col, dict(ti=ti, rhoi=rhoi, nm=nm, ni=ni), cfg, smooth)
+    raw = np.diff(col["tau"])[:col["tend"]]
+    assert (raw.min() < 0.0) == (case != "control")      # the case reaches ubtl < 0
+    dep, div = probe.budget(col, utgw, tau)
+    np.testing.assert_allclose(dep, div, rtol=1e-12, atol=0.0)
+
+
 def test_gwd_damping_factor_never_amplifies_stress():
     """Regression: the saturation-damping factor exp(-2*mi*rog*t*dpiln)
     must NEVER exceed 1 (stress can only DECREASE upward through it).

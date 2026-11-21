@@ -577,4 +577,17 @@ def make_partial_cell_latlon(z_coord, H_bathy, land_mask, thin_threshold=0.3,
 
     zc = create_partial_cell_coordinate(
         z_coord, jnp.asarray(H_snapped, dtype=jnp.float64))
-    return zc, H_snapped.astype(np.float64), lm_out.astype(np.float64)
+    # The column depth the barotropic step uses must equal the sum of the layer thicknesses the tracers and the
+    # baroclinic step use.  The coordinate caps a column deeper than the reference grid at its bottom and
+    # snaps a bottom cell within 1e-5 of full to full; set the depth from the cells, as MITgcm recomputes
+    # R_low from the lopped cells (ini_masks_etc.F) and MOM6 clips the depth to MAXIMUM_DEPTH.  Columns
+    # with neither keep their depth to the bit.
+    h_sum = np.asarray(zc.h_partial, dtype=np.float64).sum(axis=-1)
+    H_out = np.where(H_snapped > 0.0, h_sum, H_snapped)
+    H_out = np.where(np.abs(H_out - H_snapped) <= 1e-12 * np.maximum(H_snapped, 1.0), H_snapped, H_out)
+    n_cut = int(((H_out != H_snapped) & (H_snapped > 0.0)).sum())
+    if n_cut:
+        logging.getLogger("legoesm.ocean").info(
+            "  partial-cell column depth set to the layer sum in %d columns (max change %.3g m)",
+            n_cut, float(np.abs(H_out - H_snapped).max()))
+    return zc, H_out.astype(np.float64), lm_out.astype(np.float64)

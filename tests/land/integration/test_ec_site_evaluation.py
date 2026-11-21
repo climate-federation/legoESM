@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 
+import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 import pytest
@@ -79,6 +80,50 @@ def test_run_ec_site_evaluation_smoke(tmp_path):
     assert np.all(np.isfinite(ds.le_soil.values[v]))
     part = ds.le_canopy.values[v] + ds.le_soil.values[v]
     assert np.nanmax(np.abs(part - le[v])) < 1.0   # W/m2 rounding slack
+
+
+def test_run_ec_site_evaluation_two_stream(tmp_path):
+    """--canopy-sw-scheme two_stream runs end to end, is recorded, and changes the fluxes."""
+    _make_driver(str(tmp_path / "SYN-Test_driver_v2.nc"))
+    run = _load("run_ec_site_evaluation", _RUNNER_PY)
+    a = xr.open_dataset(run.run_evaluation("SYN-Test", str(tmp_path / "r.nc"), str(tmp_path)))
+    b = xr.open_dataset(run.run_evaluation("SYN-Test", str(tmp_path / "t.nc"), str(tmp_path),
+                                           sw_scheme="two_stream"))
+    assert a.attrs["canopy_sw_scheme"] == "ryu" and b.attrs["canopy_sw_scheme"] == "two_stream"
+    v = b.valid.values.astype(bool)
+    for k in ("gpp_mod", "le_mod", "h_mod"):
+        assert np.all(np.isfinite(b[k].values[v]))
+    assert not b.reverted.values.astype(bool).any()
+    assert np.nanmax(np.abs(a.h_mod.values[v] - b.h_mod.values[v])) > 0.1
+
+
+def test_held_step_is_emitted_as_reverted(tmp_path, monkeypatch):
+    """A step the land model HOLDS (unsolved canopy, fallback rejected) carries its
+    rejected fluxes in the diagnostics; the runner must emit it as reverted, never
+    as model output (US-Ton 2017-02-11 07:15 under two_stream: -2486 / +2558 W m-2)."""
+    _make_driver(str(tmp_path / "SYN-Test_driver_v2.nc"))
+    run = _load("run_ec_site_evaluation", _RUNNER_PY)
+    real = run.step_multilayer_land_with_diagnostics
+    sw = xr.open_dataset(tmp_path / "SYN-Test_driver_v2.nc")["SW_IN"].values.ravel()
+    sw_peak = float(np.nanmax(sw))
+    want = np.isclose(sw, sw_peak, rtol=0.0, atol=1e-6)
+
+    def fake(state, f, *a, **kw):
+        ns, r, c, out = real(state, f, *a, **kw)
+        held = jnp.abs(jnp.asarray(f.sw_down).reshape(-1) - sw_peak) <= 1e-6
+        return ns, r, c, out._replace(
+            held=held, lhflx=jnp.where(held, -2486.0, out.lhflx),
+            shflx=jnp.where(held, 2558.0, out.shflx))
+
+    ds0 = xr.open_dataset(run.run_evaluation("SYN-Test", str(tmp_path / "a.nc"), str(tmp_path)))
+    monkeypatch.setattr(run, "step_multilayer_land_with_diagnostics", fake)
+    ds = xr.open_dataset(run.run_evaluation("SYN-Test", str(tmp_path / "b.nc"), str(tmp_path)))
+    rev = ds.reverted.values.astype(bool)
+    assert want.any() and not ds0.reverted.values.astype(bool).any()
+    np.testing.assert_array_equal(rev, want)
+    assert np.all(np.isnan(ds.le_mod.values[want])) and np.all(np.isnan(ds.h_mod.values[want]))
+    assert np.nanmax(np.abs(ds.le_mod.values)) < 1000.0
+    assert np.nanmax(np.abs(ds.h_mod.values)) < 1000.0
 
 
 def test_run_ec_site_evaluation_rejects_empty_window(tmp_path):

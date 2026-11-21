@@ -16,7 +16,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from legoesm import constants
 from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
@@ -305,6 +305,14 @@ class DycoreConfig(NamedTuple):
     # NO floor at all), so every grid's tracer positivity is equivalent.  The
     # ``mpas_`` prefix is legacy; a rename is deferred to avoid a schema churn.
     mpas_conservative_tracer_clamp: bool = True
+    # Grid-general (MPAS, lat-lon, MPAS-MPI lanes; lanes whose positivity
+    # stage has no grid-point T -- spectral, FV3 duo -- keep the legacy
+    # borrow): before the borrow, pay a column's net-negative condensate from
+    # the same column's vapour with its latent heat, conserving water and
+    # column frozen MSE.  False = the legacy form, which creates water when
+    # the globe cannot repay the deficit.  Ported from the ENSO fork
+    # (I. Di Carlo), owner decision 2026-11-20: fixed form is the default.
+    positivity_condensate_from_vapour: bool = True
     # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
     # lat-lon C-grid lane (discretization-consistent with the geopotential
     # and the momentum/thermo ln p^SB gradients).  Default ON; False keeps
@@ -433,6 +441,12 @@ class DycoreConfig(NamedTuple):
     # viscosity [m2/s] x (4, 2, 1) on vor, div and T of the top three levels.
     # 0.0 = off (bit-identical).  (appended after vertical_form: positional ABI)
     spectral_sponge_nu_top_m2s: float = 0.0
+    # ASKED(user), 2026-11-15: lat-lon HYBRID selector; MPAS always van Leer.
+    # None resolves per lane: hybrid lat-lon SB, hybrid MPAS van Leer;
+    # sigma retains its existing operator and refuses explicit selections.
+    tracer_vertical_scheme: Literal["sb", "van_leer"] | None = None
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
 
 
 class EvaluationConfig(NamedTuple):
@@ -689,6 +703,25 @@ CLUBB_PROGNOSTIC_ONLY = frozenset({
     "clubb_c_k10"})
 
 
+def resolve_tracer_vertical_scheme(value, solver_name, *, hybrid: bool) -> str | None:
+    """Resolve the hybrid tracer operator; None on lanes retaining their operator.
+
+    An explicit selection must be honored by the lane, including direct factory
+    callers. Widths only affect van Leer; each can independently be zero.
+    """
+    if value not in (None, "sb", "van_leer"):
+        raise ValueError("dycore.tracer_vertical_scheme must be None, 'sb' or 'van_leer'")
+    defaults = {"latlon_cgrid_primitive_equations": "sb",
+                "mpas_primitive_equations": "van_leer"}
+    if not hybrid or solver_name not in defaults:
+        if value is not None:
+            raise ValueError("dycore.tracer_vertical_scheme would be silently inert on this lane; use None")
+        return None
+    if solver_name == "mpas_primitive_equations" and value == "sb":
+        raise ValueError("dycore.tracer_vertical_scheme on MPAS hybrid must be None or 'van_leer'")
+    return defaults[solver_name] if value is None else value
+
+
 def resolve_sea_ice_albedo_scheme(cfg) -> str:
     """The sea-ice albedo scheme a run actually uses.
 
@@ -801,6 +834,20 @@ class ExperimentConfig(NamedTuple):
     # perihelion/aphelion asymmetry, ~+/-3.4%).  Default False keeps the
     # circular-orbit approximation for idealized/aquaplanet runs.
     orbital_insolation: bool = False
+    # User-set orbit (requires orbital_insolation=True; resolved by
+    # legoesm.driver.orbit.experiment_orbit, the one orbit every solar
+    # consumer reads).  orbit_year = Berger (1978) orbit of that year AD
+    # (negative = BC); the three elements override present day one by one
+    # (unset = present day).  Year and elements are mutually exclusive.
+    # orbit_long_perihelion_deg is measured from the moving vernal equinox
+    # (Berger convention, = CESM mvelp + 180).
+    orbit_year: int | None = None
+    orbit_eccentricity: float | None = None
+    orbit_obliquity_deg: float | None = None
+    orbit_long_perihelion_deg: float | None = None
+    # How the solar longitude is computed: CESM's Berger series (exact CESM
+    # match, e <= 0.1) or an exact Kepler solve (e <= 0.9).
+    orbit_solver: str = "berger_series"
     # RRTMGP column recurrence implementation:
     #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
     #   True  = jax.lax.scan (smaller graph, often slower per step on GPU but
@@ -1831,6 +1878,16 @@ class ExperimentConfig(NamedTuple):
     # resolved at ModelDriver setup so the manifest / saved config / replay
     # record the boolean; True = required (refused where inert); False = off.
     ocean_flux_on_ocean_surface: bool | None = None
+    # MPAS lane, partly ice-covered sea cells (#2573, user decision
+    # 2026-11-19): the non-land TURBULENT exchange (heat, water, stress) is
+    # evaluated separately on the prognostic ice skin and on the open water
+    # (SST) and cover-weighted for the atmosphere; the ice skin is charged the
+    # ice tile's own sensible and latent heat instead of the cell mean.
+    # Radiation is not split.  Tri-state like ocean_flux_on_ocean_surface:
+    # None = AUTO, on exactly where an explicit True is accepted
+    # (``sea_ice_flux_split_eligibility``), resolved at ModelDriver setup;
+    # True = required (refused where inert); False = one blended surface.
+    sea_ice_flux_split: bool | None = None
     # MPAS lane, interactive multilayer land: rebuild the two-leaf canopy's
     # surface parameters (LAI, canopy height, soil-colour albedo from the top
     # soil layer's wetness) from the surfdata climatology at every land step,
@@ -2309,6 +2366,11 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        from legoesm.driver.orbit import validate_orbit_fields
+        try:
+            validate_orbit_fields(self)
+        except ValueError as exc:
+            errors.append(str(exc))
         if (normalize_grid_type(g.grid_type) == "cubed_sphere"
                 and d.discretization != "fv3_duo"):
             errors.append(
@@ -2881,11 +2943,12 @@ class ExperimentConfig(NamedTuple):
                 "land_snow_insulation requires use_multilayer_land: only the "
                 "multilayer soil has a snow thermal node — the knob would be "
                 "silently inert.")
-        if self.land_snow_insulation and self.land_surface_scheme != "two_leaf":
+        if (self.land_snow_insulation
+                and self.land_surface_scheme not in ("two_leaf", "simple_seb")):
             errors.append(
                 "land_snow_insulation is not supported with land_surface_scheme="
-                f"{self.land_surface_scheme!r}: only the two-leaf canopy (explicit "
-                "ground flux) is supported; the land step would refuse at its "
+                f"{self.land_surface_scheme!r}: only the two-leaf canopy and "
+                "SimpleSEB are supported; the land step would refuse at its "
                 "first call.")
         if self.land_snow_insulation and self.land_snow_scheme != "bulk":
             errors.append(
@@ -4488,6 +4551,20 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"dycore.vertical_form={d.vertical_form!r} is untested on the "
                     "lat-lon MPI and 2-D tiled lanes; they take 'legacy'.")
+        from legoesm.driver.component_factory import driver_solver_name
+        if d.tracer_vertical_scheme not in (None, "sb", "van_leer"):
+            errors.append("dycore.tracer_vertical_scheme must be None, 'sb' or 'van_leer'")
+        else:
+            try:
+                resolve_tracer_vertical_scheme(
+                    d.tracer_vertical_scheme, driver_solver_name(self),
+                    hybrid=g.vertical_coord in ("hybrid", "cam_l32"))
+            except ValueError as exc:
+                errors.append(str(exc))
+        for name in ("tracer_van_leer_width", "tracer_van_leer_flux_width"):
+            width = getattr(d, name)
+            if not math.isfinite(width) or width < 0.0:
+                errors.append(f"dycore.{name} must be finite and nonnegative")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
@@ -5332,6 +5409,14 @@ class ExperimentConfig(NamedTuple):
                     "non-land fraction's surface fluxes from the land's, but "
                     f"{_why}. Leave it unset (auto) or false.")
 
+        if self.sea_ice_flux_split:
+            _ok, _why = sea_ice_flux_split_eligibility(self)
+            if not _ok:
+                errors.append(
+                    "sea_ice_flux_split=True separates the ice and open-water "
+                    f"turbulent exchange in sea-ice cells, but {_why}. Leave "
+                    "it unset (auto) or false.")
+
         if self.land_stress_from_land is True:
             _ok, _why = land_stress_eligibility(self)
             if not _ok:
@@ -6144,6 +6229,31 @@ def resolve_ocean_flux_on_ocean_surface(cfg) -> bool:
     if cfg.ocean_flux_on_ocean_surface is None:
         return ocean_flux_surface_eligibility(cfg)[0]
     return bool(cfg.ocean_flux_on_ocean_surface)
+
+
+def sea_ice_flux_split_eligibility(cfg) -> tuple[bool, str]:
+    """Is ``sea_ice_flux_split=True`` live in ``cfg``?
+    ``(eligible, reason_if_not)``: the non-land fluxes on the ocean/ice
+    surface (the anchor the split replaces) and the prognostic ice skin it
+    drives (off on a coupled driver, whose sea-ice model owns the ice)."""
+    if not resolve_ocean_flux_on_ocean_surface(cfg):
+        _why = ("ocean_flux_on_ocean_surface is off"
+                if cfg.ocean_flux_on_ocean_surface is False
+                else ocean_flux_surface_eligibility(cfg)[1])
+        return False, ("the non-land fluxes are not on the ocean/ice surface "
+                       f"({_why})")
+    if cfg.ice_skin_prognostic is False:
+        return False, ("ice_skin_prognostic is off (the split charges the "
+                       "prognostic ice skin)")
+    return True, ""
+
+
+def resolve_sea_ice_flux_split(cfg) -> bool:
+    """The resolved tri-state ``sea_ice_flux_split``:
+    None (auto) -> on exactly where eligible; True/False as given."""
+    if cfg.sea_ice_flux_split is None:
+        return sea_ice_flux_split_eligibility(cfg)[0]
+    return bool(cfg.sea_ice_flux_split)
 
 
 def resolve_land_stress_from_land(cfg) -> bool:

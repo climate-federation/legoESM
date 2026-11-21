@@ -551,6 +551,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "decision 2026-08-16: conserving form always); "
                              "--no-mpas-conservative-tracer-clamp restores the "
                              "legacy clamp for bit-comparison runs.")
+    parser.add_argument("--tracer-vertical-scheme", choices=("sb", "van_leer"),
+                        default=_DYCORE_DEFAULTS.tracer_vertical_scheme,
+                        help="Hybrid tracer scheme; omitted = lane default (lat-lon SB, MPAS van Leer). "
+                             "Sigma lanes require omission; MPAS hybrid refuses SB.")
+    parser.add_argument("--tracer-van-leer-width", type=float,
+                        default=_DYCORE_DEFAULTS.tracer_van_leer_width,
+                        help="Hybrid van Leer mixing-ratio increment width [kg/kg]; zero = hard faces.")
+    parser.add_argument("--tracer-van-leer-flux-width", type=float,
+                        default=_DYCORE_DEFAULTS.tracer_van_leer_flux_width,
+                        help="Hybrid van Leer mass-flux width [Pa/s]; zero = hard flux split. "
+                             "Both widths zero recover the old hard operator.")
+    parser.add_argument("--positivity-condensate-from-vapour",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.positivity_condensate_from_vapour,
+                        help="Positivity stage (MPAS, lat-lon): pay a column's "
+                             "net-negative condensate from the same column's "
+                             "vapour with its latent heat before the borrow. "
+                             "ON by default; --no-positivity-condensate-from-"
+                             "vapour restores the legacy borrow, which creates "
+                             "water when the globe cannot repay the deficit.")
     parser.add_argument("--mpas-vert-advection-scheme",
                         choices=("upwind", "van_leer", "sb"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
@@ -812,6 +832,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "(a/r)^2 eccentricity asymmetry (~+/-3.4%%). Default off = "
              "circular orbit (idealized).",
     )
+    parser.add_argument(
+        "--orbit-year", type=int, default=None, dest="orbit_year",
+        help="Berger (1978) orbit of this year AD (negative = BC, e.g. -4050 "
+             "for 6 ka). Needs --orbital-insolation; excludes --orbit-*.")
+    parser.add_argument(
+        "--orbit-eccentricity", type=float, default=None,
+        dest="orbit_eccentricity",
+        help="Orbital eccentricity, [0,0.1] with the Berger series, [0,0.9] with "
+             "--orbit-solver kepler (unset = present day). Needs "
+             "--orbital-insolation.")
+    parser.add_argument(
+        "--orbit-solver", choices=("berger_series", "kepler"),
+        default="berger_series", dest="orbit_solver",
+        help="Solar longitude: CESM Berger series (default; CESM-exact, "
+             "e<=0.1) or exact Kepler solve (e<=0.9). Needs --orbital-insolation.")
+    parser.add_argument(
+        "--orbit-obliquity", type=float, default=None,
+        dest="orbit_obliquity_deg",
+        help="Obliquity [deg, 0-180] (unset = present day). Needs "
+             "--orbital-insolation.")
+    parser.add_argument(
+        "--orbit-perihelion", type=float, default=None,
+        dest="orbit_long_perihelion_deg",
+        help="Longitude of perihelion from the moving vernal equinox "
+             "[deg, 0-360) (= CESM mvelp + 180; unset = present day). Needs "
+             "--orbital-insolation.")
     parser.add_argument("--dynamic-albedo", action=argparse.BooleanOptionalAction, default=False,
                         help="Zenith-angle-dependent ocean albedo "
                              "(Briegleb 1992) instead of the constant "
@@ -2222,6 +2268,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "over land (--mpas-land-stress-from-land, "
                              "default auto) and radiation != none); --no-... "
                              "= off.")
+    parser.add_argument("--sea-ice-flux-split",
+                        action=_BoolOneSpelling, default=None,
+                        dest="sea_ice_flux_split",
+                        help="MPAS lane: in partly ice-covered sea cells "
+                             "evaluate the turbulent exchange separately on "
+                             "the ice skin and the open water and charge the "
+                             "ice skin its own sensible/latent heat (#2573; "
+                             "radiation not split). Unset = AUTO (on wherever "
+                             "--ocean-flux-on-ocean-surface and the prognostic "
+                             "ice skin are on); --no-... = one blended "
+                             "surface.")
     parser.add_argument("--land-params-refresh", "--mpas-land-params-refresh",
                         action=_BoolOneSpelling, default=True,
                         dest="land_params_refresh",
@@ -3001,9 +3058,13 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             if isinstance(args.mpas_vert4_log_form_tracers, str)    # YAML scalar
             else tuple(args.mpas_vert4_log_form_tracers or ())),
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
+        positivity_condensate_from_vapour=args.positivity_condensate_from_vapour,
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
         spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
                                     if args.spectral_sponge_nu_top_m2s is not None else 0.0),
+        tracer_vertical_scheme=args.tracer_vertical_scheme,
+        tracer_van_leer_width=args.tracer_van_leer_width,
+        tracer_van_leer_flux_width=args.tracer_van_leer_flux_width,
         mpas_sponge_del2_top_layers=(args.mpas_sponge_del2_top_layers
                                      if args.mpas_sponge_del2_top_layers is not None else 0),
         mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor
@@ -3109,6 +3170,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_gas_tables=args.rrtmgp_gas_tables,
         diurnal_cycle=args.diurnal_cycle,
         orbital_insolation=args.orbital_insolation,
+        orbit_year=args.orbit_year,
+        orbit_eccentricity=args.orbit_eccentricity,
+        orbit_obliquity_deg=args.orbit_obliquity_deg,
+        orbit_long_perihelion_deg=args.orbit_long_perihelion_deg,
+        orbit_solver=args.orbit_solver,
         co2_ppmv=args.co2_ppmv,
         ch4_ppbv=args.ch4_ppbv,
         n2o_ppbv=args.n2o_ppbv,
@@ -3268,6 +3334,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_beta_soil=args.land_beta_soil,
         land_stress_from_land=args.land_stress_from_land,
         ocean_flux_on_ocean_surface=args.ocean_flux_on_ocean_surface,
+        sea_ice_flux_split=args.sea_ice_flux_split,
         land_params_refresh=args.land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s

@@ -449,6 +449,11 @@ def _auto_ocean_flux_surface(cfg):
         cfg._replace(ocean_flux_on_ocean_surface=None))
 
 
+def _auto_sea_ice_flux_split(cfg):
+    from legoesm.driver.config import resolve_sea_ice_flux_split
+    return resolve_sea_ice_flux_split(cfg._replace(sea_ice_flux_split=None))
+
+
 # AUTO-default fields (user decision 2026-10-26): ModelDriver.setup
 # replaces the AUTO default by its resolved value before this wall runs,
 # so each is accepted at its default OR at exactly what AUTO resolves to
@@ -458,6 +463,7 @@ _FV3_DUO_AUTO_RESOLVED = {
     "ice_skin_prognostic": _auto_ice_skin,
     "sea_ice_albedo_scheme": _auto_sea_ice_albedo,
     "ocean_flux_on_ocean_surface": _auto_ocean_flux_surface,
+    "sea_ice_flux_split": _auto_sea_ice_flux_split,
 }
 
 
@@ -866,6 +872,12 @@ def create_atmosphere_dycore(
     solver_name = driver_solver_name(config)
     if solver_name is None:
         _fail_unsupported(model_type, discretization, grid_type)
+    from legoesm.driver.config import resolve_tracer_vertical_scheme
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+    tracer_scheme = resolve_tracer_vertical_scheme(
+        dc.tracer_vertical_scheme, solver_name,
+        hybrid=isinstance(sigma, HybridSigmaPressureCoordinate))
+    logger.info("Tracer vertical scheme: %s", tracer_scheme or "lane existing operator")
     refuse_unwired_energy_fixer(config, solver_name)
     warn_if_vapour_floor_creates_water(config, solver_name)
     if coeff_grid is None:
@@ -1046,8 +1058,11 @@ def create_atmosphere_dycore(
             # Mass-conserving tracer positivity clamp (see DycoreConfig).
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
+            positivity_condensate_from_vapour=dc.positivity_condensate_from_vapour,
             # Sigma-lane vertical advection scheme (see DycoreConfig).
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
+            tracer_van_leer_width=dc.tracer_van_leer_width,
+            tracer_van_leer_flux_width=dc.tracer_van_leer_flux_width,
             vertical_form=dc.vertical_form,
             sponge_del2_top_layers=int(dc.mpas_sponge_del2_top_layers),
             sponge_del2_top_factor=float(dc.mpas_sponge_del2_top_factor),
@@ -1447,10 +1462,15 @@ def create_atmosphere_dycore(
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
         )
         cfg = CGridLatLonPrimitiveEquationConfig(
+            tracer_vertical_scheme=(tracer_scheme if tracer_scheme is not None
+                                    else CGridLatLonPrimitiveEquationConfig().tracer_vertical_scheme),
+            tracer_van_leer_width=dc.tracer_van_leer_width,
+            tracer_van_leer_flux_width=dc.tracer_van_leer_flux_width,
             A_h=_A_h,
             fix_mass=_fix_mass,
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,  # #1354/#1515 borrow (grid-general knob)
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (hard-floor path only)
+            positivity_condensate_from_vapour=dc.positivity_condensate_from_vapour,
             # Stage 3-E: pass polar-filter parameters through.  When
             # use_polar_filter is False (default) the model's filter
             # mask is None and no FFT is applied — bit-identical to

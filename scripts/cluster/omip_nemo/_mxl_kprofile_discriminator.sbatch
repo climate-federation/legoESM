@@ -30,6 +30,8 @@
 # The warm-pool box is the within-oracle control: if the profiles agree there
 # too, a cold-tongue-only comparison would be reading a constant.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 R=/burg-archive/glab/users/pg2328/legoESM; cd $R || exit 1
 M=/burg-archive/glab/users/pg2328/_omip_merge
 echo "MAIN HEAD: $(git log --oneline -1)"
@@ -60,3 +62,4 @@ $PY -u $M/scripts/validate/ocean_fidelity/equatorial_diffusivity_oracle.py \
   --legoesm-snapshot "$CTL" "$ARM"
 echo "### rc=$?"
 echo DONE
+exit ${RC:-0}

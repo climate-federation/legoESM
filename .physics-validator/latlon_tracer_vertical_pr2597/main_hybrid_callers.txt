@@ -1,0 +1,25 @@
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_generic.py:85:    vertical_advection_hybrid,
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_generic.py:86:    vertical_advection_hybrid_sb,
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_generic.py:147:            return vertical_advection_hybrid_sb(vel, vv_face, ps_face, sigma_coord)
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_generic.py:148:        return vertical_advection_hybrid(vel, vv_face, ps_face, sigma_coord)
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py:83:    vertical_advection_hybrid,
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py:508:        # ``vertical_advection_hybrid`` and ``vertical_advection``
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py:521:            vert_q_lead = vertical_advection_hybrid(
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py:969:        du_dt = du_dt + vertical_advection_hybrid(u, mf_u, ps_u, sigma_coord)
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py:970:        dv_dt = dv_dt + vertical_advection_hybrid(v, mf_v, ps_v, sigma_coord)
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py:971:        vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py:77:    vertical_advection_hybrid,
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py:78:    vertical_advection_hybrid_van_leer,
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py:198:    # limited ``vertical_advection_hybrid_van_leer``, independent of this field.
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py:564:                lambda qk: vertical_advection_hybrid_van_leer(
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py:1093:        return vertical_advection_hybrid(u_3d, mass_flux_edge, p_s_edge, sigma_coord)
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_pe.py:73:    vertical_advection_hybrid,
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_pe.py:358:    # vertical_advection_hybrid_sb) or "upwind" (legacy, NOT recommended:
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_pe.py:545:        ``vertical_advection_hybrid``.
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_pe.py:625:        _vadv_hybrid = vertical_advection_hybrid
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_pe.py:631:        from legoesm.grids.vertical import vertical_advection_hybrid_sb
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_pe.py:632:        _vadv_hybrid = vertical_advection_hybrid_sb
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_pe.py:1201:            # the same ``vertical_advection_hybrid`` helper used for
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_pe.py:1210:                vert_adv_q = vertical_advection_hybrid(
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/tracer_transport_mpas.py:66:    sigma, ``vertical_advection_hybrid_van_leer`` for the hybrid dycore).  Keeping the
+origin/main:packages/atmosphere/legoesm/atmosphere/dynamics/gcm/tracer_transport_mpas.py:114:    (horizontal + ``vertical_advection_hybrid_van_leer``)."""
