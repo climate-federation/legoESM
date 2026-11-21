@@ -60,6 +60,7 @@ def make_implicit_newton_solver(
     lambda_max: float = 1.0e10,
     n_sq_max: float | None = None,
     admissible: Callable | None = None,
+    adjoint_unconverged: bool = False,
 ):
     """Build a scaled Levenberg--Marquardt root solver with an IFT VJP.
 
@@ -77,7 +78,11 @@ def make_implicit_newton_solver(
     ``converged`` and the adjoint mask alike.  The forward
     linear least-squares step uses augmented QR and Nielsen gain-ratio damping
     with rejected steps.  The backward pass uses an exact, column-equilibrated
-    solve and returns zero cotangents for every non-converged root.
+    solve and returns zero cotangents for every non-converged root, unless
+    ``adjoint_unconverged``: then a non-converged ``x`` (a caller keeping the
+    last iterate) gets the implicit-function adjoint at that iterate,
+    ``-(df/dx)^-1 df/dp``, which approaches the root's as the residual left
+    there shrinks.
     """
     x_scale = jnp.asarray(x_scale)
     f_scale = jnp.asarray(f_scale)
@@ -241,9 +246,9 @@ def make_implicit_newton_solver(
 
         _, vjp = jax.vjp(lambda p: scaled_residual(x_safe, p), parameters)
         grad_parameters = vjp(-adjoint)[0]
-        solve_failed = (
-            input_invalid | ~converged | jnp.any(~jnp.isfinite(adjoint))
-        )
+        solve_failed = input_invalid | jnp.any(~jnp.isfinite(adjoint))
+        if not adjoint_unconverged:
+            solve_failed = solve_failed | ~converged
 
         def mask(value):
             return jnp.where(

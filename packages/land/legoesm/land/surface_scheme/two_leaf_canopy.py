@@ -593,7 +593,14 @@ def compute_two_leaf_canopy_fluxes(
         # root: it reports converged=False, and the multilayer land step closes
         # their energy into sensible heat and accepts the column (or reverts it
         # if non-finite or beyond the fallback guards).
-        x_final = jnp.where(converged[:, None], x_final, cold_state)
+        if cc.fallback_from_last_iterate:
+            # CLM5 2.5.3.2: an unconverged column keeps its last iterate when
+            # that is an admissible canopy state; otherwise the cold state.
+            _fb_state = jnp.where(
+                canopy_state_admissible(x_final)[:, None], x_final, cold_state)
+        else:
+            _fb_state = cold_state
+        x_final = jnp.where(converged[:, None], x_final, _fb_state)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
