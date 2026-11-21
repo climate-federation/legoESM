@@ -236,6 +236,12 @@ def _bench_voronoi_state(level: int, nlev: int, n_tracers: int,
     exchange = jax.jit(lambda u_, c_: batched_halo_exchange((u_,), c_, sched, rank))
 
     out = jax.block_until_ready(exchange(u, cells))
+    # The exchange must overwrite each rank's halo with its neighbours'
+    # (different) random values; an identity exchange leaves every leaf equal.
+    _in = jax.tree_util.tree_leaves(((u,), cells))
+    _out = jax.tree_util.tree_leaves(out)
+    halo_changed = (len(_in) == len(_out) and any(
+        not np.array_equal(np.asarray(o), np.asarray(i)) for o, i in zip(_out, _in)))
     digest = hashlib.sha256()
     for a in jax.tree_util.tree_leaves(out):
         digest.update(np.ascontiguousarray(np.asarray(a)).tobytes())
@@ -250,6 +256,7 @@ def _bench_voronoi_state(level: int, nlev: int, n_tracers: int,
     comm.Barrier()
     per_rank_ms = comm.allgather(1e3 * float(np.median(times)))
     digests = comm.allgather(digest.hexdigest())
+    halo_changed_all = comm.allgather(bool(halo_changed))
     n_bytes = 8 * (part.n_local_edges * nlev
                    + part.n_local_cells * (nlev * (1 + n_tracers) + 1))
     try:
@@ -273,6 +280,7 @@ def _bench_voronoi_state(level: int, nlev: int, n_tracers: int,
         "mpi_library": MPI.Get_library_version().splitlines()[0],
         "local_state_bytes_rank0": n_bytes,
         "per_rank_digest": digests,
+        "per_rank_halo_changed": halo_changed_all,
         "exchanges": {
             "state": {
                 "time_per_exchange_ms": max(per_rank_ms),

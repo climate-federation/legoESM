@@ -385,7 +385,10 @@ if [[ -n "${AMIP_STEP_NODE:-}" ]] || (( ${SLURM_JOB_NUM_NODES:-1} > 1 )); then
     exit 72
 fi
 # shellcheck source=/dev/null
-source "${REPO}/scripts/cluster/levante/hpcx_gdr_env.sh"
+if ! source "${REPO}/scripts/cluster/levante/hpcx_gdr_env.sh"; then
+    echo "[chain] REFUSING: could not set up the HPC-X environment." >&2
+    exit 73
+fi
 export MPI4JAX_USE_CUDA_MPI=1
 # One GPU per rank: mpirun cannot bind GPUs, so a wrapper hands each local
 # rank its own device.  It also clears SLURM_PROCID, which every mpirun
@@ -407,7 +410,8 @@ if (( _PRE_RC != 0 )); then
     echo "${_PRE}" | tail -5 >&2
     exit 73
 fi
-if [[ -z "${_HPCX_VER}" ]] || ! grep -qF "MPI_LIB ${_HPCX_VER}" <<< "${_PRE}"; then
+if [[ -z "${_HPCX_VER}" || "$(command -v ompi_info)" != "${HPCX_HOME}/"* ]] \
+        || ! grep -qF "MPI_LIB ${_HPCX_VER}" <<< "${_PRE}"; then
     echo "[chain] REFUSING: ${PY} does not load HPC-X's MPI (${_HPCX_VER:-ompi_info missing})." >&2
     echo "${_PRE}" | tail -5 >&2
     exit 73

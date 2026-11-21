@@ -95,17 +95,21 @@ def _preflight_block() -> str:
     return _between("_HPCX_VER=$(ompi_info", 'LAUNCH=( mpirun -np "${AMIP_N_GPUS}"')
 
 
-def _run_preflight(tmp_path, *, markers: str, rc: int) -> subprocess.CompletedProcess:
-    """The script's preflight block with stub ``ompi_info``/``mpirun`` on PATH:
-    the stub mpirun prints ``markers`` and exits ``rc``."""
+def _run_preflight(tmp_path, *, markers: str, rc: int, ompi_info: bool = True,
+                   hpcx_home: str | None = None) -> subprocess.CompletedProcess:
+    """The script's preflight block with stub ``ompi_info``/``mpirun`` on PATH
+    (``HPCX_HOME`` = the stub directory's parent unless ``hpcx_home``): the
+    stub mpirun prints ``markers`` and exits ``rc``."""
     bin_ = tmp_path / "bin"
     bin_.mkdir(exist_ok=True)
-    (bin_ / "ompi_info").write_text("#!/bin/bash\necho 'Open MPI v4.1.7'\n")
+    if ompi_info:
+        (bin_ / "ompi_info").write_text("#!/bin/bash\necho 'Open MPI v4.1.7'\n")
     (bin_ / "mpirun").write_text(f"#!/bin/bash\nprintf '%s\\n' {markers}\nexit {rc}\n")
     for f in bin_.iterdir():
         f.chmod(0o755)
     body = _preflight_block() + '\necho PREFLIGHT_PASSED'
-    return _run(tmp_path, body, PATH=f"{bin_}:$PATH", PY="/r/python", _WRAP="/r/wrap")
+    return _run(tmp_path, body, PATH=f"{bin_}:/usr/bin:/bin", PY="/r/python", _WRAP="/r/wrap",
+                HPCX_HOME=hpcx_home or str(tmp_path))
 
 
 _GOOD = "'MPI_LIB Open MPI v4.1.7, package: HPC-X' 'CUDA_EXT True'"
@@ -128,3 +132,15 @@ def test_preflight_that_fails_after_printing_both_markers_is_refused(tmp_path, r
                                      "'MPI_LIB Open MPI v4.1.7' 'CUDA_EXT False'"])
 def test_preflight_with_wrong_mpi_or_no_cuda_extension_is_refused(tmp_path, markers):
     assert _run_preflight(tmp_path, markers=markers, rc=0).returncode == 73
+
+
+def test_preflight_without_hpcx_ompi_info_is_refused(tmp_path):
+    # no ompi_info at all
+    assert _run_preflight(tmp_path, markers=_GOOD, rc=0, ompi_info=False).returncode == 73
+
+
+def test_preflight_with_a_non_hpcx_ompi_info_is_refused(tmp_path):
+    # an ompi_info outside HPCX_HOME (a cluster OpenMPI left on PATH) agrees
+    # with itself but is not HPC-X
+    r = _run_preflight(tmp_path, markers=_GOOD, rc=0, hpcx_home="/sw/hpcx-elsewhere")
+    assert r.returncode == 73, (r.stdout, r.stderr)

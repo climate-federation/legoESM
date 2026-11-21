@@ -47,6 +47,9 @@ def test_state_payload_schema_and_reproducible_digest():
     assert a["payload"] == "state" and a["n_ranks"] == n
     assert len(a["per_rank_digest"]) == n
     assert a["per_rank_digest"] == b["per_rank_digest"]
+    # every rank's halo was overwritten by its neighbours (an identity
+    # exchange keeps the digests reproducible but fails this)
+    assert a["per_rank_halo_changed"] == [True] * n
     t = a["exchanges"]["state"]["time_per_exchange_ms"]
     assert t > 0.0 and t == max(a["exchanges"]["state"]["per_rank_median_ms"])
 

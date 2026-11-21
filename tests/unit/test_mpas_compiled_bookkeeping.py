@@ -63,7 +63,7 @@ def test_surface_anchors_compiled_equal_eager(lapse, array_skin):
                                      lapse_z=lapse_z, lapse_K_m=-0.0065))
     got = core(sst, sic, skin)
     ref = _anchors_eager_847d(sst, sic, skin, f_land, lapse_z, -0.0065)
-    for g, e in zip(got, ref):
+    for g, e in zip(got, ref, strict=True):
         _close(g, e)
     # the skin is an argument: a changed skin moves the anchors (no stale capture)
     if array_skin:
@@ -89,7 +89,7 @@ def test_sea_ice_albedo_refresh_compiled_equal_eager(scheme):
     a_ice = sea_ice_albedo(scheme, 0.6, T_skin=skin, h_ice_m=2.0, melt_width_K=1.0)
     ref = (a_ice, blend_surface_property(sic, a_ice, alb_o),
            blended_surface_albedo(sic, f_land, a_ice, alb_o, alb_l))
-    for g, e in zip(got, ref):
+    for g, e in zip(got, ref, strict=True):
         _close(g, e)
 
 
@@ -138,7 +138,8 @@ def _marshal_eager_847d(sd, t_air, q_air, p_s, u_c, v_c, doy, sod, co2, lw_corr,
 @pytest.mark.parametrize("edge_winds", [False, True])
 @pytest.mark.parametrize("with_corr", [False, True])
 @pytest.mark.parametrize("precip_kind", ["frozen", "none"])
-def test_land_forcing_marshal_compiled_equal_eager(edge_winds, with_corr, precip_kind):
+@pytest.mark.parametrize("dry", [False, True])
+def test_land_forcing_marshal_compiled_equal_eager(edge_winds, with_corr, precip_kind, dry):
     from legoesm.grids.vertical import make_cam6_l32_levels
     r = _rng(3)
     sigma = make_cam6_l32_levels()
@@ -149,6 +150,8 @@ def test_land_forcing_marshal_compiled_equal_eager(edge_winds, with_corr, precip
     precip = 1e-4 * r.random(_N) if precip_kind == "frozen" else None
     frozen = 0.5 * precip if precip_kind == "frozen" else None
     t_air, q_air = 260.0 + 40.0 * r.random(_N), 0.02 * r.random(_N)
+    if dry:
+        q_air = None
     p_s = 9e4 + 1.2e4 * r.random(_N)
     u_edge = 10.0 * r.standard_normal(_N)
     u_c, v_c = (None, None) if edge_winds else (u_edge, 0.3 * u_edge)
@@ -250,7 +253,7 @@ def test_poststep_compiled_equal_eager(sponge, smooth_on):
     core = jax.jit(functools.partial(md.mpas_poststep, sponge_decay=decay,
                                      qv_smooth_fn=smooth))
     got, ref = core(state), _poststep_eager_847d(state, decay, smooth)
-    for g, e in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(ref)):
+    for g, e in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(ref), strict=True):
         _close(g, e)
 
 
@@ -327,7 +330,7 @@ def test_land_window_compiled_equal_eager_and_closes_its_budget():
             cz_e, w_e = a.cos_zenith * cw, cw
         else:
             cz_e, w_e = cz_e + a.cos_zenith * cw, w_e + cw
-    for g, e in zip(jax.tree_util.tree_leaves(s), jax.tree_util.tree_leaves(s_e)):
+    for g, e in zip(jax.tree_util.tree_leaves(s), jax.tree_util.tree_leaves(s_e), strict=True):
         _close(g, e)
     _close(cz, cz_e)
     _close(w, w_e)
