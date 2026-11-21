@@ -327,6 +327,15 @@ def make_physics(
             "tendency (qvften); physics_cadence_steps="
             f"{physics_cadence_steps} would drop the intervening dynamics "
             "steps. Run tiedtke with physics_cadence_steps=1")
+    if (config.convection.zhang_mcfarlane.positivity_after_zm
+            and not (model_type == "mpas" and cld_macmic_num_steps >= 2
+                     and config.convection.scheme == "zhang_mcfarlane")):
+        raise ValueError(
+            "positivity_after_zm=True runs only inside the MPAS macmic loop "
+            "(model_type='mpas', cld_macmic_num_steps >= 2, convection="
+            f"'zhang_mcfarlane'); got model_type={model_type!r}, "
+            f"cld_macmic_num_steps={cld_macmic_num_steps}, convection="
+            f"{config.convection.scheme!r}.")
     if config.convection.scheme == "tiedtke" and cld_macmic_num_steps > 1:
         raise ValueError(
             "convection='tiedtke' (WRF port) reads the previous step's "
@@ -891,6 +900,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 "microphysics='ifs_cloudsc' runs CLOUDSC once per physics "
                 "step (the IFS order, no macro/micro sub-cycle): needs "
                 f"cld_macmic_num_steps=1, got {_n_macmic}.")
+    # Water positivity right after ZM's update (ZhangMcFarlaneConfig.
+    # positivity_after_zm), where CAM6 runs qneg3.
+    # (refused by make_physics wherever it would be inert)
+    _zm_positivity = bool(config.convection.zhang_mcfarlane.positivity_after_zm)
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(
             config.convection, model_type, dt,
@@ -1410,9 +1423,43 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 if dlf is not None:
                     dlf = dlf.reshape(state.T.data.shape)
                 r_pre = r_pre[:6] + (_upd,) + r_pre[7:]
-            parts.append((r_pre, 1.0))
             state_m = _advance_state(state_m, r_pre[0], r_pre[1], r_pre[2],
                                      r_pre[3], r_pre[5], dt)
+            if _zm_positivity:
+                # CAM6 runs qneg3 here (physics_update after convect_deep_tend,
+                # physpkg.F90:1925); legoESM uses its column-conserving borrow.
+                # The correction joins ZM's tendency, so the window total and
+                # the ledger see it.
+                from legoesm.core.conservation import after_convection_positivity
+                _tr_in = {k: f.data for k, f in state_m.tracers.items()}
+                _dp = sigma_coord.layer_thickness_dp(state_m.p_s.data)
+                _tr_out, _T_out, _ = after_convection_positivity(
+                    _tr_in, state_m.T.data, _dp)
+                _tr_t = dict(r_pre[5])
+                for _k, _v in _tr_out.items():
+                    if _k in _tr_t:
+                        _tr_t[_k] = _tr_t[_k] + (_v - _tr_in[_k]) / dt
+                    elif _k in _tr_in:
+                        _tr_t[_k] = (_v - _tr_in[_k]) / dt
+                _dT_fix = (_T_out - state_m.T.data) / dt
+                _led = r_pre[10]
+                if _led is not None:
+                    # book the correction (incl. any created water) in the
+                    # convection's ledger row, so the rows still sum to the
+                    # applied total
+                    from legoesm.diagnostics.process_ledger import ledger_entry_column
+                    _dq_fix = sum((_tr_out[k] - _tr_in[k]) / dt
+                                  for k in _LEDGER_WATER if k in _tr_out)
+                    _led = _led.at[:, sel["pre"][0][1], :].add(ledger_entry_column(
+                        _dq_fix, _dT_fix, state.p_s.data, sigma_coord.dsigma,
+                        level_weight=_ledger_level_weight).astype(_led.dtype))
+                r_pre = (r_pre[:2] + (r_pre[2] + _dT_fix,)
+                         + r_pre[3:5] + (_tr_t,) + r_pre[6:10] + (_led,) + r_pre[11:])
+                state_m = state_m._replace(
+                    T=state_m.T.replace(data=_T_out),
+                    tracers={k: f.replace(data=_tr_out[k])
+                             for k, f in state_m.tracers.items()})
+            parts.append((r_pre, 1.0))
             # CAM order: clubb_tend_cam reads THIS step's convect_deep_tend
             # output (cmfmc, dlf), so the convective carries are visible to
             # the sub-cycle (the N=1 split hands them over one step late).

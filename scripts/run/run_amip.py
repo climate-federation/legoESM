@@ -1464,6 +1464,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=None,
                         help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
                              "None = 0.01 (CAM6 namelist)")
+    parser.add_argument("--cloud-cam6-do-subgrid-growth",
+                        dest="cloud_cam6_do_subgrid_growth",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM6 cldfrc2m_do_subgrid_growth: MG2 scales its "
+                             "saturation below freezing by qsatfac from the "
+                             "aist ramp (cam6 namelist .true.). Default off "
+                             "(qsfm = 1).")
     parser.add_argument("--cloud-cam6-snow-in-rad", dest="cloud_cam6_snow_in_rad",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="CAM6 snow in the radiation (cloud scheme "
@@ -1637,6 +1644,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "of the carried cloud water, ice, rain, snow and "
                              "number tracers. "
                              f"Default {_EXPERIMENT_DEFAULTS.zm_transport_cloud_tracers}.")
+    parser.add_argument("--positivity-after-zm",
+                        dest="positivity_after_zm",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.positivity_after_zm,
+                        help="Water positivity right after Zhang-McFarlane's "
+                             "update in the macmic loop (where CAM6 runs qneg3): "
+                             "the column-conserving borrow, MPAS lane with "
+                             "cld_macmic_num_steps >= 2. "
+                             f"Default {_EXPERIMENT_DEFAULTS.positivity_after_zm}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -2535,6 +2551,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "size reset in the sedimentation fall speeds, "
                              "prognostic droplet number only; 0 = MG2's hard "
                              "clip.")
+    parser.add_argument("--morrison-qsfm-freeze-ramp-K", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_qsfm_freeze_ramp_K"],
+                        dest="morrison_qsfm_freeze_ramp_K",
+                        help="RULE 5 width [K] of CAM6 MG2's qsfm switch at "
+                             "freezing (cloud_cam6_do_subgrid_growth only); 0 = "
+                             "MG2's hard switch.")
     parser.add_argument("--morrison-warm-rain-incloud",
                         action=argparse.BooleanOptionalAction,
                         default=ExperimentConfig._field_defaults[
@@ -2555,6 +2578,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="CAM6 MG2 prognostic droplet number with CAM6 "
                              "prescribed-aerosol activation (MPAS lane). "
                              "Needs --cam6-aerosol-dir.")
+    parser.add_argument("--morrison-specified-nc-droplet-sedimentation",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_specified_nc_droplet_sedimentation"],
+                        dest="morrison_specified_nc_droplet_sedimentation",
+                        help="CAM6 MG2 cloud-droplet sedimentation with the "
+                             "specified droplet number (MG2 nccons). Needs "
+                             "--morrison-warm-rain-incloud and specified "
+                             "droplets. Default off = no cloud-water "
+                             "sedimentation under specified droplets.")
     parser.add_argument("--cam6-aerosol-dir", type=str,
                         default=ExperimentConfig._field_defaults["cam6_aerosol_dir"],
                         dest="cam6_aerosol_dir",
@@ -3328,6 +3361,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_rhmaxi=args.cloud_cam6_rhmaxi,
         cloud_cam6_rhminis=args.cloud_cam6_rhminis,
         cloud_cam6_rhmaxis=args.cloud_cam6_rhmaxis,
+        cloud_cam6_do_subgrid_growth=args.cloud_cam6_do_subgrid_growth,
         cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
         cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
         cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,
@@ -3433,12 +3467,15 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_mg2_drop_readjust_log_width=args.morrison_mg2_drop_readjust_log_width,
         morrison_mg2_drop_early_reset_log_width=args.morrison_mg2_drop_early_reset_log_width,
         morrison_mg2_drop_sed_reset_log_width=args.morrison_mg2_drop_sed_reset_log_width,
+        morrison_qsfm_freeze_ramp_K=args.morrison_qsfm_freeze_ramp_K,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         morrison_do_graupel=args.morrison_do_graupel,
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
         morrison_prognostic_droplet_number=args.morrison_prognostic_droplet_number,
+        morrison_specified_nc_droplet_sedimentation=(
+            args.morrison_specified_nc_droplet_sedimentation),
         cam6_aerosol_dir=args.cam6_aerosol_dir,
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
         land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
@@ -3544,6 +3581,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         zm_land_fraction=args.zm_land_fraction,
         kain_fritsch_variant=args.kain_fritsch_variant,
         zm_transport_cloud_tracers=args.zm_transport_cloud_tracers,
+        positivity_after_zm=args.positivity_after_zm,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,

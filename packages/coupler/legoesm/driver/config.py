@@ -1069,6 +1069,11 @@ class ExperimentConfig(NamedTuple):
     cloud_cam6_rhmaxi: float | None = None
     cloud_cam6_rhminis: float | None = None
     cloud_cam6_rhmaxis: float | None = None
+    # CAM6 cldfrc2m_do_subgrid_growth (CloudConfig.cam6_do_subgrid_growth):
+    # MG2's sub-grid saturation factor qsatfac (cldfrc2m.F90:1116-1117,
+    # micro_mg2_0.F90:880, 922-927); .true. in the cam6 namelist defaults.
+    # False = qsfm = 1 (upstream legoESM choice bc696df77e).
+    cloud_cam6_do_subgrid_growth: bool = False
     # CAM6 convective water in the radiation (CloudConfig.cam6_conv_water_in_rad;
     # conv_water.F90 conv_water_4rad, cam6 namelist conv_water_in_rad = 1 and
     # conv_water_frac_limit = 0.01).  0 (default) = off, the stratiform water
@@ -1753,6 +1758,10 @@ class ExperimentConfig(NamedTuple):
     # PR #2249): "smooth" (default surrogate) or "wrf_kfeta" (faithful WRF
     # v4.8.0 KF-Eta port, OPT-IN, NOT RULE 5 compliant, #2280).
     kain_fritsch_variant: str = "smooth"
+    # Water positivity right after ZM's update in the macmic loop
+    # (ZhangMcFarlaneConfig.positivity_after_zm; where CAM6 runs qneg3, here
+    # the column-conserving borrow; MPAS lane, cld_macmic_num_steps >= 2).
+    positivity_after_zm: bool = False
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -2281,6 +2290,10 @@ class ExperimentConfig(NamedTuple):
     # MorrisonConfig.prognostic_droplet_number: CAM6 MG2 prognostic droplet
     # number with prescribed-aerosol activation (microp_aero_run); MPAS lane.
     morrison_prognostic_droplet_number: bool = False
+    # MorrisonConfig.specified_nc_droplet_sedimentation: CAM6 MG2 cloud-droplet
+    # sedimentation with the specified droplet number (MG2 nccons=.true.).
+    # Needs morrison_warm_rain_incloud and the specified-droplet mode.
+    morrison_specified_nc_droplet_sedimentation: bool = False
     # Directory of the sha256-pinned CAM6 PPE member-000 aerosol climatology +
     # MAM4 property files read by that activation; None = unset.
     cam6_aerosol_dir: str | None = None
@@ -2326,6 +2339,10 @@ class ExperimentConfig(NamedTuple):
     # droplet size reset in the sedimentation fall speeds (prognostic droplet
     # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_sed_reset_log_width: float = 0.01
+    # MorrisonConfig.qsfm_freeze_ramp_K: RULE 5 width [K] of MG2's qsfm switch
+    # at T_freeze (read only with cloud_cam6_do_subgrid_growth); 0 = MG2's
+    # hard switch.  Range [0, 1], checked in validate_strict.
+    morrison_qsfm_freeze_ramp_K: float = 0.1
     # CanopyConfig.solve_group: columns per batch of the two-leaf canopy Newton
     # solve, 0 = one batch per GPU (same placement and None semantics as
     # land_canopy_most_n_iters; the production deck names it).
@@ -3078,6 +3095,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"zm_transport_cloud_tracers must be a bool, got "
                 f"{self.zm_transport_cloud_tracers!r}"
+            )
+        if not isinstance(self.positivity_after_zm, bool):
+            errors.append(
+                f"positivity_after_zm must be a bool, got "
+                f"{self.positivity_after_zm!r}"
             )
         if self.bechtold_rain_vapor_sink not in ("formation", "vapour_mass"):
             errors.append(
@@ -4965,6 +4987,12 @@ class ExperimentConfig(NamedTuple):
                 f"{', '.join(_cam6_rh_set)} set but cloud_scheme="
                 f"{self.cloud_scheme!r}: the CAM6 aist ramp is read only by "
                 "cloud_scheme='cam6_clubb' (otherwise silently inert).")
+        if self.cloud_cam6_do_subgrid_growth and (
+                self.cloud_scheme != "cam6_clubb" or self.microphysics != "morrison"):
+            errors.append(
+                "cloud_cam6_do_subgrid_growth=True needs cloud_scheme='cam6_clubb' "
+                "and microphysics='morrison' (MG2 mode); got "
+                f"{self.cloud_scheme!r}, {self.microphysics!r}.")
         if self.cloud_cam6_snow_in_rad and (
                 self.cloud_scheme != "cam6_clubb"
                 or self.cloud_vertical_overlap_optics != "mcica"
@@ -5045,8 +5073,13 @@ class ExperimentConfig(NamedTuple):
                 "microphysics='morrison' and the kk2000_cam6 warm-rain scheme or "
                 "morrison_warm_rain_incloud=True"),
             "morrison_mg2_drop_sed_reset_log_width": (
-                lambda: _morr and self.morrison_prognostic_droplet_number is True,
-                "microphysics='morrison' and morrison_prognostic_droplet_number=True"),
+                lambda: _morr and (self.morrison_prognostic_droplet_number is True
+                                   or self.morrison_specified_nc_droplet_sedimentation is True),
+                "microphysics='morrison' and morrison_prognostic_droplet_number=True "
+                "or morrison_specified_nc_droplet_sedimentation=True"),
+            "morrison_qsfm_freeze_ramp_K": (
+                lambda: _morr and self.cloud_cam6_do_subgrid_growth is True,
+                "microphysics='morrison' and cloud_cam6_do_subgrid_growth=True"),
         }
         for _rn, (_read, _where) in _reads.items():
             _rw = getattr(self, _rn)
@@ -5819,6 +5852,7 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=getattr(amip_cfg, 'zm_land_fraction', "required"),
             zm_transport_cloud_tracers=getattr(amip_cfg, 'zm_transport_cloud_tracers', True),
             kain_fritsch_variant=getattr(amip_cfg, 'kain_fritsch_variant', "smooth"),
+            positivity_after_zm=getattr(amip_cfg, 'positivity_after_zm', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
                 amip_cfg, 'bechtold_use_ifs_downdraft', True),
@@ -6004,6 +6038,7 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=self.zm_land_fraction,
             zm_transport_cloud_tracers=self.zm_transport_cloud_tracers,
             kain_fritsch_variant=self.kain_fritsch_variant,
+            positivity_after_zm=self.positivity_after_zm,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
