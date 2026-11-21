@@ -172,7 +172,9 @@ def test_preflight_with_the_wrong_mpi_version_is_refused(tmp_path):
     assert r.returncode == 73
 
 
-def test_preflight_accepts_an_hpcx_home_with_several_trailing_slashes(tmp_path):
-    r = _run_preflight(tmp_path, hpcx_home=f"{tmp_path / 'hpcx'}//")
+@pytest.mark.parametrize("slashes", ["//", "///", "////"])
+def test_preflight_accepts_an_hpcx_home_with_several_trailing_slashes(tmp_path, slashes):
+    # (an interior "//" in HPCX_HOME is not normalised: it fails closed, refused)
+    r = _run_preflight(tmp_path, hpcx_home=f"{tmp_path / 'hpcx'}{slashes}")
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert "PREFLIGHT_PASSED" in r.stdout
