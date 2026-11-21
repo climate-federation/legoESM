@@ -593,7 +593,12 @@ def score_c2(evidence: Path, candidate: dict[tuple[int, int, int], dict]) -> dic
 
 def _c2_cold_start(run: Path, *, n_steps: int, math_mode: str):
     """Load records and bind them to the production coupled recipe."""
-    configure_coupled_math(math_mode)
+    with coupled_math_scope(math_mode):
+        return _c2_cold_start_selected_math(run, n_steps=n_steps, math_mode=math_mode)
+
+
+def _c2_cold_start_selected_math(run: Path, *, n_steps: int, math_mode: str):
+    """Build the coupled recipe while the caller-selected policy is active."""
     from legoesm.ocean import bulk_flux_omip as bulk
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_orca2_zps_card
     from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -1100,8 +1105,10 @@ def _nemo_cadenced_tau_step(
     )
 
 
-def score_c0(records: Path, *, plant: str | None = None) -> dict:
-    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+def score_c0(
+    records: Path, *, math_mode: str, plant: str | None = None
+) -> dict:
+    configure_coupled_math(math_mode)
     entries = sorted(records.glob("c_kind1_*.bin"))
     if not entries:
         raise ValueError("STATUS PLANT-FIRED: no C0 entry records")
@@ -1147,8 +1154,10 @@ def score_c0(records: Path, *, plant: str | None = None) -> dict:
     return {"status": "PASS_C0_0_ULP", "records": len(entries)}
 
 
-def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
-    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+def score_c1(
+    evidence: Path, *, math_mode: str, plant: str | None = None
+) -> dict:
+    configure_coupled_math(math_mode)
     run = evidence / "REC_C3"
     records = run / "o8_o16_master_records"
     namelist = _admitted_resolved_namelist(evidence)
@@ -1371,9 +1380,10 @@ def main() -> int:
         "math": args.math,
         "C0": score_c0(
             args.evidence / "REC_C3/c_ladder_records",
+            math_mode=args.math,
             plant=args.plant if args.plant == "numeric" else None,
         ),
-        "C1": score_c1(args.evidence, plant=args.plant),
+        "C1": score_c1(args.evidence, math_mode=args.math, plant=args.plant),
         "C2": run_c2_compiled(args.evidence, math_mode=args.math),
         **status_report(),
     }

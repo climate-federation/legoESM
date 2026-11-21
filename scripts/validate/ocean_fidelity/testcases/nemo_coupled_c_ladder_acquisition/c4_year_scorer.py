@@ -77,7 +77,10 @@ def load_checkpoint_report(
             input_identity = identity
         require(identity == input_identity,
                 f"{path.name}: C4 input_identity changed between months")
-        checkpoint_math = runner.checkpoint_math(metadata)
+        try:
+            checkpoint_math = runner.checkpoint_math(metadata)
+        except RuntimeError as exc:
+            raise C4ScoreError(str(exc)) from exc
         if math_mode is None:
             math_mode = checkpoint_math
         require(checkpoint_math == math_mode,

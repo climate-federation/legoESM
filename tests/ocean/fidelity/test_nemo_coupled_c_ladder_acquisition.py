@@ -14,6 +14,7 @@ from pathlib import Path
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ice.si3_finalize import SI3StressInputs, si3_ice_update_tau
 from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig
 from legoesm.ocean.forcing.nemo_surface import NemoSurfaceMeans, nemo_sbc_ssm_step
@@ -231,22 +232,46 @@ def test_scorer_refuses_non_ice5_evidence_before_scoring(tmp_path: Path) -> None
         scorer._admitted_resolved_namelist(tmp_path)
 
 
-def test_c_scorers_select_fp64_libm_before_scoring(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("math_mode", "transcendentals"),
+    (("libm-cpu", "libm"), ("fast-literal", "native")),
+)
+def test_c_scorers_select_requested_math_before_scoring(
+    monkeypatch, tmp_path: Path, math_mode: str, transcendentals: str
+) -> None:
     selected = []
     monkeypatch.setattr(scorer, "set_policy", selected.append)
     with pytest.raises(ValueError, match="no C0 entry records"):
-        scorer.score_c0(tmp_path)
+        scorer.score_c0(tmp_path, math_mode=math_mode)
     assert selected[-1].compute == jnp.float64
-    assert selected[-1].transcendentals == "libm"
+    assert selected[-1].transcendentals == transcendentals
 
     def stop_after_policy(_run):
         raise RuntimeError("stop after precision policy")
 
     monkeypatch.setattr(scorer, "_coupled_resolved_namelist", stop_after_policy)
     with pytest.raises(RuntimeError, match="stop after precision policy"):
-        scorer.score_c1(tmp_path)
+        scorer.score_c1(tmp_path, math_mode=math_mode)
     assert selected[-1].compute == jnp.float64
-    assert selected[-1].transcendentals == "libm"
+    assert selected[-1].transcendentals == transcendentals
+
+
+def test_c2_cold_start_restores_global_policy() -> None:
+    previous = get_policy()
+    selected = PrecisionPolicy.fp64(transcendentals="native")
+    set_policy(selected)
+    try:
+        scorer._c2_cold_start(
+            Path(
+                "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/"
+                "round31/oracle_coupled_c_ladder/REC_C2"
+            ),
+            n_steps=2,
+            math_mode="libm-cpu",
+        )
+        assert get_policy() == selected
+    finally:
+        set_policy(previous)
 
 
 def test_c1_uses_versioned_reader_and_scores_only_mpi_shard_interior() -> None:

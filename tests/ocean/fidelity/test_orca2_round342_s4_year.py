@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from legoesm.core.precision import get_policy, set_policy
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean import bulk_flux_omip as bulk
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -65,6 +65,22 @@ def test_calendar_month_day_ranges_partial_window() -> None:
         assert w["complete_month"] is False
         assert w["available_days"] == []
         assert w["saved_kts"] == []
+
+
+def test_standalone_mld_metric_is_bit_identical_with_explicit_libm_policy() -> None:
+    record = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/"
+        "oracle_coupled_c_ladder/REF_C4"
+    )
+    policy = PrecisionPolicy.fp64(transcendentals="libm")
+    set_policy(policy)
+    standalone = r342_metrics.K0MLDEvaluator(record)
+    expected = np.asarray(standalone._bundle(standalone.state))
+    explicit = r342_metrics.K0MLDEvaluator(record, precision_policy=policy)
+    recomputed = np.asarray(explicit._bundle(explicit.state))
+    assert recomputed.dtype == expected.dtype
+    assert recomputed.shape == expected.shape
+    assert recomputed.tobytes() == expected.tobytes()
 
 
 def test_decision185_reference_bars_and_no_state_averaging_for_nonlinear_metrics() -> None:

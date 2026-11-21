@@ -22,6 +22,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.core.precision import get_policy
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
@@ -944,7 +945,9 @@ def _run_c4(
     metric_context = None
     if not profile_only:
         geo = year_metrics.pilot_metrics.static_geometry(reference_root)
-        mld = year_metrics.K0MLDEvaluator(reference_root)
+        mld = year_metrics.K0MLDEvaluator(
+            reference_root, precision_policy=get_policy()
+        )
         cover = r340.read_decision171_cover(year_driver.DEFAULT_ICE_COVER_PATH)
         mask_source = "Decision-188 ice_cover_clim.nc"
         metric_context = (geo, mld, cover, mask_source)

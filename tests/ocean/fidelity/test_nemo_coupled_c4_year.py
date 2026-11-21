@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean import bulk_flux_omip as bulk
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -508,6 +509,72 @@ def test_checkpoint_prefix_refuses_mixed_math(
         runner.validate_checkpoint_prefix(tmp_path, reference, 2)
 
 
+def test_scorer_refuses_mixed_math_between_months(
+    tmp_path: Path, real_carry_template
+) -> None:
+    reference = _reference(tmp_path / "reference")
+    for month in range(1, 13):
+        math_mode = "fast-literal" if month == 12 else "libm-cpu"
+        completed = _empty_month(month)["end_day"] * runner.year_metrics.STEPS_PER_DAY
+        runner.write_checkpoint(
+            tmp_path / runner.checkpoint_name(month, completed),
+            _carry(real_carry_template, float(month), completed + 1),
+            month=month,
+            completed_kt=completed,
+            reference_root=reference,
+            month_report=_empty_month(month),
+            math_mode=math_mode,
+        )
+    with pytest.raises(
+        scorer.C4ScoreError, match="math selection changed between months"
+    ):
+        scorer.load_checkpoint_report(tmp_path, carry_template=real_carry_template)
+
+
+def test_scorer_wraps_checkpoint_math_errors(
+    monkeypatch, tmp_path: Path
+) -> None:
+    for month in range(1, 13):
+        (tmp_path / f"c4_month{month:02d}_step{month:08d}.npz").touch()
+
+    def invalid_checkpoint(path):
+        month = int(path.name[8:10])
+        return (
+            {
+                "month": month,
+                "completed_kt": month,
+                "next_kt": month + 1,
+                "reference_root": str(tmp_path),
+                "input_identity": {},
+            },
+            {
+                "format": runner.C4_METRIC_FORMAT,
+                "month": month,
+                "status": "EVALUATED_COMPLETE_MONTH",
+            },
+        )
+
+    monkeypatch.setattr(runner, "inspect_checkpoint", invalid_checkpoint)
+    monkeypatch.setattr(
+        runner,
+        "validate_month_checkpoint",
+        lambda _path, metadata, _report: metadata["month"],
+    )
+    with pytest.raises(scorer.C4ScoreError, match="no admitted math selection"):
+        scorer.load_checkpoint_report(tmp_path, carry_template=object())
+
+
+def test_real_c4_metrics_evaluator_does_not_clobber_fast_literal_policy() -> None:
+    selected = PrecisionPolicy.fp64(transcendentals="native")
+    previous = get_policy()
+    set_policy(selected)
+    try:
+        runner.year_metrics.K0MLDEvaluator(REF_C4, precision_policy=selected)
+        assert get_policy() == selected
+    finally:
+        set_policy(previous)
+
+
 def test_scorer_refuses_input_identity_change_between_months(
     tmp_path: Path, real_carry_template
 ) -> None:
@@ -808,7 +875,9 @@ def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
     monkeypatch.setattr(runner, "C4InputReader", FakeInputs)
     monkeypatch.setattr(runner, "compile_pair", fake_compile)
     monkeypatch.setattr(runner.year_metrics.pilot_metrics, "static_geometry", lambda _r: {})
-    monkeypatch.setattr(runner.year_metrics, "K0MLDEvaluator", lambda _r: object())
+    monkeypatch.setattr(
+        runner.year_metrics, "K0MLDEvaluator", lambda _r, **_kwargs: object()
+    )
     monkeypatch.setattr(
         runner.r340, "read_decision171_cover", lambda _p: np.zeros((148, 180))
     )

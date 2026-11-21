@@ -49,7 +49,7 @@ for _pkg in reversed((REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packa
         sys.path.insert(0, str(_pkg))
 
 import jax  # noqa: E402
-from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy  # noqa: E402
 from legoesm.ocean import bulk_flux_omip as bulk  # noqa: E402
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel  # noqa: E402
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
@@ -65,9 +65,20 @@ require = common.require
 class K0MLDEvaluator(pilot_metrics.MLDEvaluator):
     """Subclass of `pilot_metrics.MLDEvaluator` initialized from the standalone K0 card."""
 
-    def __init__(self, record: Path):
+    def __init__(
+        self,
+        record: Path,
+        *,
+        precision_policy: PrecisionPolicy | None = None,
+    ):
         jax.config.update("jax_enable_x64", True)
-        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        if precision_policy is None:
+            # Preserve the standalone round-342 path exactly.
+            set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        elif get_policy() != precision_policy:
+            raise ValueError(
+                "K0 MLD evaluator policy differs from the active run policy"
+            )
         k0_card = bulk.build_nemo_orca2_k0_ocean_card(record)
         recipe = k0_card.ocean.recipe
         model = LatLonCGridOceanModel(
