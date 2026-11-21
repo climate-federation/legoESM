@@ -124,6 +124,10 @@ def test_build_guards():
         with pytest.raises(ValueError, match="silently inert"):
             require_relvar_scheme_lane(MicrophysicsConfig(
                 scheme="morrison", morrison=MorrisonConfig(**kw)), "mpas")
+    for bad in (True, None, "1"):
+        with pytest.raises(TypeError, match="must be a real number"):
+            require_relvar_scheme_lane(MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(
+                boutle_fsd_factor=bad)), "mpas")
     # numpy scalars are checked too
     for kw, msg in ((dict(boutle_fsd_factor=np.float32(-1.0)), "must be positive"),
                     (dict(boutle_overcast_ramp_width=np.float64(1.0)), r"lie in \[0, 1\)")):
@@ -201,7 +205,8 @@ def test_mg2_receives_the_selected_relvar(monkeypatch, scheme):
     tr = dict(state.tracers)
     tr["N_s"] = state.T.replace(data=jnp.zeros_like(state.T.data), name="N_s", units="1/kg")
     state = state._replace(tracers=tr)
-    fn, cfg = _physics(warm_rain_incloud=True, relvar_scheme=scheme, boutle_fsd_factor=1.7)
+    fn, cfg = _physics(warm_rain_incloud=True, relvar_scheme=scheme,
+                       **({"boutle_fsd_factor": 1.7} if scheme == "boutle2014" else {}))
     ps = init_physics_state(*state.T.data.shape, cfg)
     fn(state, mesh, sigma, phys_state=ps)
     assert len(read) == len(written_cf) == 2

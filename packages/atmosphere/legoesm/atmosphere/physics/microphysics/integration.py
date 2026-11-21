@@ -371,6 +371,9 @@ def require_relvar_scheme_lane(microphysics_config, model_type: str):
             f"relvar_scheme={scheme!r} is wired on the MPAS lane only; got "
             f"model_type={model_type!r}.")
     f, w = m.boutle_fsd_factor, m.boutle_overcast_ramp_width
+    for name, v in (("boutle_fsd_factor", f), ("boutle_overcast_ramp_width", w)):
+        if isinstance(v, bool) or not isinstance(v, (numbers.Real, jax.Array)):
+            raise TypeError(f"{name} must be a real number, got {v!r}.")
     if scheme == "cam6_clubb":
         # the Boutle knobs are read by nothing on this path: refuse a set one
         d = type(m)._field_defaults
