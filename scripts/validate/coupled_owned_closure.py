@@ -522,6 +522,10 @@ def main(argv=None) -> int:
     pend0 = (I(prev["H"].evap) * win
              + I(prev["O"].ice_lake_freshwater_flux) * win)
     status = d.run(segment_callback=sample)
+    if abs(n_steps[0] * DT - args.days * 86400.0) > 1e-6 * DT:
+        raise SystemExit(
+            f"steps x dt = {n_steps[0]} x {DT:g} s != {args.days} d: the "
+            "lane changed its step after setup; per-step sums are invalid")
     if args.energy_terms:
         land_calls()   # the call after the last step (its exported
         # emissivity: the last boundary seen; a run of whole windows ends on
