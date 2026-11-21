@@ -114,7 +114,7 @@ def test_default_width_makes_no_new_extremes():
     tangential neighbours), the new first interior value and the data; the smoothed
     coefficients keep it so (a sign-flipped split overshoots a boundary plateau)."""
     for seed in range(6):
-        fb, f1o, f1n, f2n, d = (np.asarray(x) for x in _rows(seed))
+        fb, f1o, f1n, f2n, d = (np.array(x) for x in _rows(seed))
         fb[:, 10:20] = 1.0                                  # a plateau on the boundary row
         out = np.asarray(ob._orlanski(*(jnp.asarray(x) for x in (fb, f1o, f1n, f2n, d)),
                                       0.05, 0.001, width=0.01))

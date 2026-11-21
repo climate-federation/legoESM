@@ -372,7 +372,7 @@ def max_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     wabs = width * (jnp.abs(a) + jnp.abs(b))
     u = d + 0.5 * wabs
     t = _unit_ramp(u, wabs)
-    return b + jnp.where(t >= 1.0, d, 0.5 * u * t)
+    return jnp.where(t >= 1.0, a, b + 0.5 * u * t)          # exact a above, exact b below the band
 
 
 def min_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
