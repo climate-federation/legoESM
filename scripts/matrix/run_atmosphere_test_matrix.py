@@ -38,6 +38,7 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -1829,6 +1830,25 @@ def _regrid_latlon_to_181x360(arr: np.ndarray, lon_deg: np.ndarray,
     return out.reshape((tgt_lat.size, tgt_lon.size) + a.shape[2:])
 
 
+_CUBE_DUO_WEIGHTS: dict = {}
+
+
+def _cube_duo_latlon_weights(lon_deg: np.ndarray, lat_deg: np.ndarray):
+    """IDW (k=4) weights from the FV3 duo six-face A-grid centres to the
+    (181, 360) canvas.  The legacy face-aware bilinear cube weights
+    (``_get_cs_weights``) assume the retired equiangular cube's face order
+    and cell centres; the duo cube has a different face numbering and
+    gnomonic family (centres up to a quarter cell apart), so the shared
+    unstructured KD-tree helper is used on the duo's own coordinates.
+    Cached per coordinate set."""
+    lon_a = np.ascontiguousarray(lon_deg, dtype=np.float64)
+    lat_a = np.ascontiguousarray(lat_deg, dtype=np.float64)
+    key = (lon_a.shape, lon_a.tobytes(), lat_a.tobytes())
+    if key not in _CUBE_DUO_WEIGHTS:
+        _CUBE_DUO_WEIGHTS[key] = _build_latlon_weights(lon_deg, lat_deg, k=4)
+    return _CUBE_DUO_WEIGHTS[key]
+
+
 def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
                coord_kind: str) -> np.ndarray:
     """Regrid a 2D field to (181, 360) lat-lon."""
@@ -1851,6 +1871,11 @@ def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
         if arr.shape == (181, 360):
             return arr
         idxs, w = _build_latlon_weights(lon_deg, lat_deg, k=20)
+        return _apply_weights(arr.ravel(), idxs, w, 181, 360)
+    if coord_kind == "cube_duo":
+        if arr.shape == (181, 360):
+            return arr
+        idxs, w = _cube_duo_latlon_weights(lon_deg, lat_deg)
         return _apply_weights(arr.ravel(), idxs, w, 181, 360)
     # Cubed-sphere: use face-aware bilinear interpolation.
     # If a field was already regridded (e.g. wind from corner-based remap),
@@ -1880,13 +1905,15 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
         # (181,360) [-180,180) canvas in both axes (see _regrid_2d).
         lat_gauss = np.asarray(lat_deg, dtype=np.float64).ravel()
         return _regrid_latlon_to_181x360(arr, lon_deg, lat_gauss)
-    if coord_kind == "icosa":
+    if coord_kind in ("icosa", "cube_duo"):
         if arr.ndim == 1:
             arr = arr[:, None]
         if arr.ndim >= 3 and arr.shape[:2] == (181, 360):
             return arr
         nlev = arr.shape[-1]
-        idxs, w = _build_latlon_weights(lon_deg, lat_deg, k=20)
+        idxs, w = (_cube_duo_latlon_weights(lon_deg, lat_deg)
+                   if coord_kind == "cube_duo"
+                   else _build_latlon_weights(lon_deg, lat_deg, k=20))
         flat = arr.reshape(-1, nlev)
         out = np.full((181, 360, nlev), np.nan, dtype=np.float64)
         for k in range(nlev):
@@ -2755,7 +2782,46 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
     test_num = tc.run_kwargs["test_num"]
 
     if tc.grid_type == "cubed_sphere":
-        raise ValueError("fv3_duo is the only cube atmosphere core; this matrix case has no duo adapter.")
+        # FV3 duo (the sole cube atmosphere core): JAX km=1 duo stepper on
+        # the Zenodo deck cadence; see scripts/matrix/_cube_duo_adapters.py.
+        from scripts.matrix._cube_duo_adapters import build_duo_sw
+        n = int(tc.resolution[1:])
+        duo = build_duo_sw(test_num, n)
+        grid = SimpleNamespace(area=duo.area, radius=duo.radius)
+        state = duo.state
+        dt = duo.dt
+        _duo_h0 = duo.h(duo.state)
+        _duo_note = duo.note
+
+        def step_fn(s, dt_):
+            return duo.step(s, dt_)
+
+        def check_fn(s):
+            h = duo.h(s)
+            u, v = duo.winds(s)
+            return (bool(np.all(np.isfinite(h)) and np.all(np.isfinite(u))
+                         and np.all(np.isfinite(v))),
+                    float(np.max(np.hypot(u, v))))
+
+        def scalar_fn(s):
+            u, v = duo.winds(s)
+            return {"mean_height": _area_weighted_mean(duo.h(s), duo.area),
+                    "max_wind": float(np.max(np.hypot(u, v)))}
+
+        def extract_fn(s):
+            u_e, v_n = duo.winds(s)
+            u_ll = _regrid_2d(u_e, lon_deg, lat_deg, coord_kind)
+            v_ll = _regrid_2d(v_n, lon_deg, lat_deg, coord_kind)
+            return {"u": u_ll, "v": v_ll,
+                    "wind_speed": np.sqrt(u_ll ** 2 + v_ll ** 2),
+                    "height": duo.h(s),
+                    "vorticity": _latlon_curl(u_ll, v_ll, float(duo.radius)),
+                    "u_cc_east": u_e, "v_cc_north": v_n}
+
+        key_array_fn = lambda s: s["delp"]
+        coord_kind = "cube_duo"
+        lon_deg = duo.lon_deg
+        lat_deg = duo.lat_deg
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
@@ -3125,6 +3191,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.gaussian import sh_synthesis as _sh
         h_init = _sh(grid, state.phi_hat.data) / constants.g
         mass_init = _area_weighted_mean(h_init, grid.grid_area)
+    elif tc.grid_type == "cubed_sphere":
+        mass_init = _area_weighted_mean(_duo_h0, grid.area)
     else:
         h_data = state.h if isinstance(state.h, jnp.ndarray) else state.h.data
         if tc.grid_type == "icosahedral":
@@ -3179,6 +3247,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         _linf = float(
             np.max(np.abs(_err)) / np.max(np.abs(_init_h)))
         notes = f"L2={_l2:.2e}, Linf={_linf:.2e}"
+    elif test_num == 2 and tc.grid_type == "cubed_sphere":
+        # W2 steady state: the analytic solution IS the IC (same norm as the
+        # spectral branch: area-weighted relative L2, max-normalised Linf).
+        _err = duo.h(state) - _duo_h0
+        _l2 = float(np.sqrt(np.sum(_err ** 2 * duo.area)
+                            / np.sum(_duo_h0 ** 2 * duo.area)))
+        _linf = float(np.max(np.abs(_err)) / np.max(np.abs(_duo_h0)))
+        _w_mass_drift = _compute_drift(diag.get("mean_height", []))
+        notes = (f"L2={_l2:.2e}, Linf={_linf:.2e}, mass drift="
+                 f"{_w_mass_drift:.2e}")
+        ok, notes = _apply_mass_drift_tolerance(
+            ok, notes, _w_mass_drift, _DYCORE_MASS_DRIFT_TOL,
+            n_samples=len(diag.get("mean_height", [])))
     elif diag.get("mean_height"):
         _w_mass_drift = _compute_drift(diag['mean_height'])
         notes = f"mass drift={_w_mass_drift:.2e}"
@@ -3192,6 +3273,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             n_samples=len(diag['mean_height']),
         )
 
+    if tc.grid_type == "cubed_sphere":
+        notes = f"{notes}; {_duo_note}"
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "status": "PASS" if ok else "FAIL",
@@ -3270,7 +3353,38 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     _CB_BLOWUP = 5000.0
 
     if tc.grid_type == "cubed_sphere":
-        raise ValueError("fv3_duo is the only cube atmosphere core; this matrix case has no duo adapter.")
+        # FV3 duo test_case-1 analogue: frozen solid-body winds, the duo
+        # delp transport (d_sw1 -> barrier 1 -> d_sw2); see
+        # scripts/matrix/_cube_duo_adapters.py.
+        from scripts.matrix._cube_duo_adapters import build_duo_cosine_bell
+        n = int(tc.resolution[1:])
+        duo = build_duo_cosine_bell(n, beta)
+        state = duo.state
+        dt = duo.dt
+        _cb_note = duo.note
+
+        def step_fn(s, dt_):
+            return duo.step(s, dt_)
+
+        def check_fn(s):
+            h = duo.h(s)
+            return (bool(np.all(np.isfinite(h))), float(np.max(np.abs(h))))
+
+        def scalar_fn(s):
+            h = duo.h(s)
+            return {"mean_height": _area_weighted_mean(h, duo.area),
+                    "max_height": float(np.max(h))}
+
+        def extract_fn(s):
+            return {"height": duo.h(s)}
+
+        key_array_fn = lambda s: s
+        coord_kind = "cube_duo"
+        lon_deg = duo.lon_deg
+        lat_deg = duo.lat_deg
+
+        def error_fn(s, t):
+            return cosine_bell_error_norms(duo.h(s), duo.exact(t), duo.area)
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
@@ -3594,6 +3708,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL_CB,
         n_samples=n_mass_samples)
 
+    if tc.grid_type == "cubed_sphere":
+        notes = f"{notes}; {_cb_note}"
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "status": "PASS" if ok else "FAIL",
@@ -3700,7 +3816,54 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         return kw
 
     if tc.grid_type == "cubed_sphere":
-        raise ValueError("fv3_duo is the only cube atmosphere core; this matrix case has no duo adapter.")
+        if _topo:
+            raise NotImplementedError(
+                "held_suarez_topo on cube: fv3_duo matrix adapter covers flat "
+                "Held-Suarez only (no duo terrain IC for this case)")
+        if radiation != "gray":
+            raise NotImplementedError(
+                f"held_suarez radiation={radiation!r} on cube: the fv3_duo lane "
+                "runs the certified Held-Suarez forcing only")
+        # FV3 duo (sole cube core): FV3DuoDynamicsModel, DCMIP16 IC; see
+        # scripts/matrix/_cube_duo_adapters.py.
+        from scripts.matrix._cube_duo_adapters import build_duo_hydro
+        n = int(tc.resolution[1:])
+        duo = build_duo_hydro(n, perturbed=True, held_suarez=True)
+        state = duo.state
+        dt = duo.dt
+        nlev = duo.km
+        sigma = SimpleNamespace(sigma_full=duo.level_values)
+        _ps0 = duo.ps(state)
+        _duo_note = (f"{duo.note}; matrix vertical label "
+                     f"'{tc.vertical_coord}' NOT honoured (duo runs its "
+                     f"hybrid table)")
+
+        def step_fn(s, dt_):
+            return duo.step(s, dt_)
+
+        def check_fn(s):
+            u, v = duo.winds(s)
+            return (bool(np.all(np.isfinite(u)) and np.all(np.isfinite(v))
+                         and np.all(np.isfinite(duo.temperature(s)))),
+                    float(np.max(np.hypot(u, v))))
+
+        def scalar_fn(s):
+            u, v = duo.winds(s)
+            return {
+                "mass": _area_weighted_sum(duo.ps(s), duo.area),
+                "max_wind": float(np.max(np.hypot(u, v))),
+                "mean_T": _area_weighted_mean(duo.temperature(s), duo.area),
+            }
+
+        def extract_fn(s):
+            u, v = duo.winds(s, level=-1)
+            return {"u": u, "v": v, "wind_speed": np.sqrt(u ** 2 + v ** 2),
+                    "p_s": duo.ps(s), "T_3d": duo.temperature(s)}
+
+        key_array_fn = lambda s: s["state"]["pt"]
+        coord_kind = "cube_duo"
+        lon_deg = duo.lon_deg
+        lat_deg = duo.lat_deg
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
@@ -4089,6 +4252,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
+    if tc.grid_type == "cubed_sphere":
+        notes = f"{notes}; {_duo_note}"
 
     _write_results_txt(output_dir, _augment_with_rrtmgp_overrides({
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -4210,7 +4375,50 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     )
 
     if tc.grid_type == "cubed_sphere":
-        raise ValueError("fv3_duo is the only cube atmosphere core; this matrix case has no duo adapter.")
+        if tc.case not in ("baroclinic", "baroclinic_steady"):
+            raise NotImplementedError(
+                f"{tc.case} on cube: no fv3_duo matrix adapter (duo has only "
+                "the DCMIP16 baroclinic-wave IC on this lane)")
+        # FV3 duo (sole cube core): FV3DuoDynamicsModel, DCMIP16 IC; see
+        # scripts/matrix/_cube_duo_adapters.py.
+        from scripts.matrix._cube_duo_adapters import build_duo_hydro
+        n = int(tc.resolution[1:])
+        duo = build_duo_hydro(n, perturbed=_perturbed, held_suarez=False)
+        state = duo.state
+        dt = duo.dt
+        nlev = duo.km
+        sigma = SimpleNamespace(sigma_full=duo.level_values)
+        _ps0 = duo.ps(state)
+        _duo_note = (f"{duo.note}; matrix vertical label "
+                     f"'{tc.vertical_coord}' NOT honoured (duo runs its "
+                     f"hybrid table)")
+
+        def step_fn(s, dt_):
+            return duo.step(s, dt_)
+
+        def check_fn(s):
+            u, v = duo.winds(s)
+            return (bool(np.all(np.isfinite(u)) and np.all(np.isfinite(v))
+                         and np.all(np.isfinite(duo.temperature(s)))),
+                    float(np.max(np.hypot(u, v))))
+
+        def scalar_fn(s):
+            u, v = duo.winds(s)
+            return {
+                "mass": _area_weighted_sum(duo.ps(s), duo.area),
+                "max_wind": float(np.max(np.hypot(u, v))),
+                "ps_perturbation": float(np.max(np.abs(duo.ps(s) - _ps0))),
+            }
+
+        def extract_fn(s):
+            u, v = duo.winds(s, level=-1)
+            return {"u": u, "v": v, "wind_speed": np.sqrt(u ** 2 + v ** 2),
+                    "p_s": duo.ps(s), "T_3d": duo.temperature(s)}
+
+        key_array_fn = lambda s: s["state"]["pt"]
+        coord_kind = "cube_duo"
+        lon_deg = duo.lon_deg
+        lat_deg = duo.lat_deg
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
@@ -4486,6 +4694,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
+    if tc.grid_type == "cubed_sphere":
+        notes = f"{notes}; {_duo_note}"
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -4747,7 +4957,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     nlev = DEFAULT_NLEV
 
     if tc.grid_type == "cubed_sphere":
-        raise ValueError("fv3_duo is the only cube atmosphere core; this matrix case has no duo adapter.")
+        raise NotImplementedError(
+            "amip on cube: no fv3_duo matrix adapter (the closed duo lane has "
+            "no radiation/surface physics; see cube_duo_only_retirement.md)")
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
@@ -5143,7 +5355,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
     nlev = DEFAULT_NLEV
 
     if tc.grid_type == "cubed_sphere":
-        raise ValueError("fv3_duo is the only cube atmosphere core; this matrix case has no duo adapter.")
+        raise NotImplementedError(
+            f"{tc.case} on cube: no fv3_duo matrix adapter for the "
+            "nonhydrostatic DCMIP cases (see cube_duo_only_retirement.md)")
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
