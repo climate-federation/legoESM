@@ -4622,6 +4622,12 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "dycore.mpas_nu_vert4_tracer must be None or a finite number "
                 f">= 0 [1/s]; got {_nu4t!r}.")
+        if d.mpas_vert_advection_scheme == "ppm" and d.vertical_form != "legacy":
+            errors.append(
+                "dycore.mpas_vert_advection_scheme='ppm' is wired into the MPAS "
+                "legacy vertical form only; with dycore.vertical_form="
+                f"{d.vertical_form!r} the shared PE core refuses it. Set "
+                "vertical_form: legacy.")
         _ppms = d.mpas_vert_ppm_limiter_sharpness
         if (isinstance(_ppms, bool) or not isinstance(_ppms, (int, float))
                 or not (_ppms > 0)):
