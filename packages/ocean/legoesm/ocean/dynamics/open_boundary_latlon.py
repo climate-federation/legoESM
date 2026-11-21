@@ -27,8 +27,14 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.smooth import max_rel, min_rel, step_rel
+
 _CX_CRIT = 0.292893218813452          # 1 - 1/sqrt(2), u2dbc.F threshold of the zx extrapolation
 _EPS = 1.0e-20
+# RULE 5 width of the positive floors max(x, _EPS) in the barotropic part, which
+# runs inside the substep loop without the model config: the floors never bind
+# on a wet face (depths of metres, sections of km^2), so the band is never entered.
+_FLOOR_WIDTH = 0.01
 
 
 class OpenBoundaryData(NamedTuple):
@@ -108,11 +114,13 @@ def _characteristic(ub_old, u1_old, zb_old, z1_old, z1_new, hb, h1, dn, dt_s, g,
     """CROCO u2dbc.F, OBC_M2CHARACT with M2_FRC_BRY and Z_FRC_BRY; sign +1 for
     west and south, -1 for north (the outgoing characteristic changes sign)."""
     D = 0.5 * (hb + zb_old + h1 + z1_old)
-    hx = jnp.sqrt(g / jnp.maximum(D, _EPS))
+    hx = jnp.sqrt(g / max_rel(D, _EPS, _FLOOR_WIDTH))
     cx = dt_s * D * hx / dn
     zx = (0.5 + cx) * z1_old + (0.5 - cx) * zb_old
     corr = (z1_new + cx * zb_old - (1.0 + cx) * z1_old) * (
-        1.0 - _CX_CRIT / jnp.maximum(cx, _EPS)) ** 2
+        1.0 - _CX_CRIT / max_rel(cx, _EPS, _FLOOR_WIDTH)) ** 2
+    # C1 as it stands (RULE 5): corr and its derivative in cx both vanish at
+    # cx = _CX_CRIT, so the switch has no jump in value or slope.
     zx = jnp.where(cx > _CX_CRIT, zx + corr, zx)
     return 0.5 * ((1.0 - cx) * ub_old + cx * u1_old + u_ext - sign * hx * (zx - z_ext))
 
@@ -174,7 +182,7 @@ def apply_barotropic_open_boundary(eta_c, U_c, V_c, eta_new, U_new, V_new,
             flux = flux + s * jnp.sum(vel * d * length)
             section = section + jnp.sum(d * length)
         target = 0.0 if ob.target_net_flux is None else ob.target_net_flux
-        corr = (target - flux) / jnp.maximum(section, _EPS)
+        corr = (target - flux) / max_rel(section, _EPS, _FLOOR_WIDTH)
         for _, k, s, d, length, is_u in faces:
             if is_u:
                 U_new = U_new.at[:, k].add(s * corr * (d > 0))
@@ -213,7 +221,7 @@ def constrain_open_face_fluxes(flux_u, flux_v, H_u_flux, H_v_flux, grid, ob: Ope
         net = net + sgn * jnp.sum(f * length)
         section = section + jnp.sum(d * length)
     target = 0.0 if ob.target_net_flux is None else ob.target_net_flux
-    corr = (target - net) / jnp.maximum(section, _EPS)
+    corr = (target - net) / max_rel(section, _EPS, _FLOOR_WIDTH)
     for is_u, k, sgn, d, length in faces:
         if is_u:
             flux_u = flux_u.at[:, k].add(sgn * corr * d)
@@ -227,7 +235,7 @@ def _v_face_length(grid, row):
     return float(grid.radius) * jnp.cos(jnp.asarray(grid.lat_v)[row]) * float(grid.dlon)
 
 
-def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=None, m2=None):
+def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=None, m2=None, *, width):
     """CROCO t3dbc.F / u3dbc.F adaptive oblique radiation with nudging, on
     arrays (..., along) ordered boundary, first, second interior; r_in,
     r_out = dt / tau (dimensionless).  mb, m1, m2 (..., along): wet masks of
@@ -236,7 +244,16 @@ def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=Non
     zero across a dry neighbour, the normal gradients are zero where the first
     or second interior cell is dry (no radiation: the boundary value is kept
     and nudged with the outflow time scale), and the result is zero on dry
-    points.  None: no masking."""
+    points.  None: no masking.
+
+    ``width`` (dimensionless, static): the inflow/outflow switch, the upstream
+    pick of the tangential gradient, the clip of cy to [-cff, cff], its split
+    into positive and negative parts and the cff floor are C1 ramps over a band
+    of ``width`` relative to each switch's own magnitude (RULE 5); ``width = 0``
+    is CROCO's hard form exactly.
+    KNOWN DIFFERENCE at the default 0.01: values inside a band differ from
+    CROCO's hard switches by at most O(width) of the switched quantity; the
+    measured per-case gaps are stored in test_open_boundary_smooth.py."""
     def tgrad(f, m):
         gb = f - jnp.concatenate([f[..., :1], f[..., :-1]], axis=-1)
         if m is not None:
@@ -248,33 +265,52 @@ def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=Non
     if m1 is not None:          # no radiation from dry interior cells (their values are not water)
         radiate = m1 if m2 is None else m1 * m2
         dft, dfx = dft * radiate, dfx * radiate
-    inflow = dfx * dft < 0.0
-    dft = jnp.where(inflow, 0.0, dft)
-    tau = jnp.where(inflow, r_in, r_out)
-    up = dft * (g1[..., :-1] + g1[..., 1:]) > 0.0
-    dfy = jnp.where(up, g1[..., :-1], g1[..., 1:])
-    cff = jnp.maximum(dfx * dfx + dfy * dfy, _EPS)
+    # inflow where dfx*dft < 0; the product is measured against dfx^2 + dft^2
+    w_in = step_rel(-dfx * dft, dfx * dfx + dft * dft + _EPS, width)
+    dft = dft * (1.0 - w_in)
+    tau = r_out + (r_in - r_out) * w_in
+    gsum = g1[..., :-1] + g1[..., 1:]
+    w_up = step_rel(dft * gsum, dft * dft + gsum * gsum + _EPS, width)
+    dfy = w_up * g1[..., :-1] + (1.0 - w_up) * g1[..., 1:]
+    cff = max_rel(dfx * dfx + dfy * dfy, _EPS, width)
     cx = dft * dfx
-    cy = jnp.clip(dft * dfy, -cff, cff)
-    fb = (cff * fb_old + cx * f1_new - jnp.maximum(cy, 0.0) * gb[..., :-1]
-          - jnp.minimum(cy, 0.0) * gb[..., 1:]) / (cff + cx)
+    if width == 0:
+        cy = jnp.clip(dft * dfy, -cff, cff)
+        cy_pos, cy_neg = jnp.maximum(cy, 0.0), jnp.minimum(cy, 0.0)
+    else:
+        cy = cff * min_rel(max_rel(dft * dfy / cff, -1.0, width), 1.0, width)
+        cy_pos = cff * max_rel(cy / cff, 0.0, width)
+        cy_neg = cy - cy_pos
+    fb = (cff * fb_old + cx * f1_new - cy_pos * gb[..., :-1]
+          - cy_neg * gb[..., 1:]) / (cff + cx)
     out = (1.0 - tau) * fb + tau * data
     return out if mb is None else out * mb
 
 
-def _orlanski_1d(fb_new, f1_old, f1_new, f2_new, data, r_in, r_out, rx_max):
+def _orlanski_1d(fb_new, f1_old, f1_new, f2_new, data, r_in, r_out, rx_max, *, width):
     """MOM6 1-D Orlanski radiation with nudging (radiation_open_bdry_conds,
     OBC_RAD_VEL_WT = 1), on arrays (..., along): the boundary value after the
     model step, the first interior old and new, the second interior new.  The
     phase speed rx = min((f1_old - f1_new) / (f1_new - f2_new), rx_max) when
     outward, 0 otherwise; boundary = (fb_new + rx f1_new) / (1 + rx), then
-    nudged with weight dt / (tau + dt) (MOM6 gamma_2), tau_in on inflow."""
+    nudged with weight dt / (tau + dt) (MOM6 gamma_2), tau_in on inflow.
+
+    ``width`` as in :func:`_orlanski` (RULE 5): the outward switch and the cap
+    at rx_max are C1 ramps; rx is formed as p / max(dhdx^2, p / rx_max) with
+    p = dhdt*dhdx, equal to min(dhdt/dhdx, rx_max) for p > 0 and free of the
+    division by a vanishing dhdx.  ``width = 0`` is MOM6's hard form."""
     dhdt = f1_old - f1_new
     dhdx = f1_new - f2_new
-    out = dhdt * dhdx > 0.0
-    rx = jnp.where(out, jnp.minimum(dhdt / jnp.where(out, dhdx, 1.0), rx_max), 0.0)
+    p = dhdt * dhdx
+    w_out = step_rel(p, dhdt * dhdt + dhdx * dhdx + _EPS, width)
+    if width == 0:
+        out = p > 0.0
+        rx = jnp.where(out, jnp.minimum(dhdt / jnp.where(out, dhdx, 1.0), rx_max), 0.0)
+    else:
+        pp = p * w_out
+        rx = w_out * pp / (max_rel(dhdx * dhdx, pp / rx_max, width) + _EPS)
     fb = (fb_new + rx * f1_new) / (1.0 + rx)
-    r = jnp.where(out, r_out, r_in)
+    r = r_in + (r_out - r_in) * w_out
     g = r / (1.0 + r)
     return (1.0 - g) * fb + g * data
 
@@ -315,11 +351,14 @@ def _face_thickness_rows(h, side, is_normal):
     return jnp.concatenate([z, inner, z], axis=0).T
 
 
-def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, dt, h):
+def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, dt, h, *, width):
     """Ring cells and open faces after an outer step: T, S radiated and nudged
     toward the data; the open-face normal velocity and the ring tangential
     velocity likewise for their baroclinic part, with the depth mean kept from
     the barotropic boundary condition.
+
+    ``width``: the RULE 5 smoothing width of the radiation switches (see
+    :func:`_orlanski`); 0 is the hard reference form.
 
     ``h`` (n_lat, n_lon, nlev): the layer thickness of ``state_new``.  The
     depth mean is the thickness-weighted mean over the wet part of each face
@@ -345,7 +384,7 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
         for name, data in (('T', dT), ('S', getattr(ob, f'{side}_S'))):
             new, old = (T, To) if name == 'T' else (S, So)
             row = _orlanski(_side(old, side, ring, 0), _side(old, side, ring, 1), _side(new, side, ring, 1),
-                            _side(new, side, ring, 2), data, r_in, r_out, mb, m1, m2)
+                            _side(new, side, ring, 2), data, r_in, r_out, mb, m1, m2, width=width)
             if name == 'T':
                 T = _set_side(T, side, ring, row)
             else:
@@ -360,7 +399,7 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
             b0 = face if is_normal else ring
             hf = _face_thickness_rows(h, side, is_normal)                             # (nlev, along)
             wet = (hf > 0).astype(hf.dtype)
-            w = hf / jnp.maximum(jnp.sum(hf, axis=0, keepdims=True), _EPS)
+            w = hf / max_rel(jnp.sum(hf, axis=0, keepdims=True), _EPS, width)
             mean_cur = jnp.sum(w * _side(new, side, b0, 0), axis=0, keepdims=True)    # barotropic part kept
             vmask = state_new.u_mask.data if use_u else state_new.v_mask.data
             vmask = vmask[..., None] if vmask.ndim == 2 else vmask
@@ -370,10 +409,10 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
                 rad = (1.0 - g_in) * _side(old, side, b0, 0) + g_in * data
             elif ob.velocity_rx_max is None:
                 rad = _orlanski(_side(old, side, b0, 0), _side(old, side, b0, 1), _side(new, side, b0, 1),
-                                _side(new, side, b0, 2), data, r_in, r_out, wet, m1v)
+                                _side(new, side, b0, 2), data, r_in, r_out, wet, m1v, width=width)
             else:
                 rad = _orlanski_1d(_side(new, side, b0, 0), _side(old, side, b0, 1), _side(new, side, b0, 1),
-                                   _side(new, side, b0, 2), data, r_in, r_out, ob.velocity_rx_max)
+                                   _side(new, side, b0, 2), data, r_in, r_out, ob.velocity_rx_max, width=width)
             row = (rad - jnp.sum(w * rad, axis=0, keepdims=True) + mean_cur) * wet
             if use_u:
                 u = _set_side(u, side, b0, row)

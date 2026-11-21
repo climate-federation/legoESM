@@ -1141,6 +1141,10 @@ class OMp25Config(NamedTuple):
     res_coef: float = 1.0            # VISC_RES_SCALE_COEF (1)
     gill_equatorial_ld: bool = True  # GILL_EQUATORIAL_LD (True): beta* = 2 |grad f|
     bound_coef: float = 0.0          # HORVISC_BOUND_COEF for the BOUND_KH, BOUND_AH caps (0.8); 0 off
+    # RULE 5 smoothing width (dimensionless) of the OM4p5 form's switches: the
+    # resolution-function step, the stable-interface mask and sqrt of the WKB N2,
+    # the maxima of the viscosity terms and the BOUND caps.  0 = MOM6's hard form.
+    smooth_width: float = 0.01
 
 
 class DynBottomDragConfig(NamedTuple):
@@ -3589,6 +3593,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   u face / v face pair, energy neutral to round-off for any flow; with
     #   coriolis_time_scheme="trapezoidal" the whole rotation is.
     coriolis_baroclinic_operator: str = "four_point"
+    # RULE 5 smoothing width (dimensionless) of the open-boundary radiation
+    # switches (inflow/outflow, upstream pick, cy clip, rx cap; see
+    # open_boundary_latlon._orlanski).  0 = CROCO/MOM6's hard switches.
+    # Read only when SpongeForcing.open_boundary is given.
+    open_boundary_smooth_width: float = 0.01
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

@@ -97,7 +97,7 @@ def test_interior_volume_follows_the_target():
     """Every step, the first included, adds the target times dt to the
     interior, at the default sea level damping."""
     grid, zc_pc, st0 = _box()
-    cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, physics=OceanPhysicsConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, open_boundary_smooth_width=0.0, physics=OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="constant"),
         lateral_mixing=LateralMixingConfig(scheme="none"), shortwave_penetration=None))
     assert cfg.barotropic.barotropic_diffusion_alpha > 0.0     # the damping must not leak through open faces
@@ -156,7 +156,7 @@ def test_baroclinic_part_keeps_the_depth_mean_over_a_shelf():
         kw.update({f"{side}_T": jnp.full((nl, n), 10.0), f"{side}_S": jnp.full((nl, n), 35.0),
                    f"{side}_u3": u3, f"{side}_t3": jnp.zeros((nl, n + 1))})
     ob = _data(Q)._replace(tau_in=jnp.asarray(86400.0), tau_out=jnp.asarray(360 * 86400.0), **kw)
-    cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, physics=OceanPhysicsConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, open_boundary_smooth_width=0.0, physics=OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="constant"),
         lateral_mixing=LateralMixingConfig(scheme="none"), shortwave_penetration=None))
     model = LatLonCGridOceanModel(grid, zc_pc, cfg)

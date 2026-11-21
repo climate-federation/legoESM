@@ -56,7 +56,7 @@ def _run():
                    f"{side}_T": jnp.full((nl, n), 15.0), f"{side}_S": Sd,
                    f"{side}_u3": jnp.zeros((nl, n)), f"{side}_t3": jnp.zeros((nl, n + 1))})
     ob = OpenBoundaryData(tau_in=jnp.asarray(86400.0), tau_out=jnp.asarray(360 * 86400.0), **kw)
-    cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, physics=OceanPhysicsConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, open_boundary_smooth_width=0.0, physics=OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="constant"),
         lateral_mixing=LateralMixingConfig(scheme="none"), shortwave_penetration=None))
     model = LatLonCGridOceanModel(grid, zc_pc, cfg)
@@ -118,7 +118,7 @@ def test_ring_cells_deeper_than_the_interior_stay_physical():
     gam = jnp.asarray(np.where(d < 3, (1 - d / 3) ** 2, 0.0) / 86400.0 * lm)     # 2-D: fills the dry cells
     sponge = SpongeForcing(gamma=gam, T_ref=jnp.full(st.T.data.shape, 15.0), S_ref=jnp.full(st.S.data.shape, 34.5),
                            open_boundary=ob)
-    cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, physics=OceanPhysicsConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, open_boundary_smooth_width=0.0, physics=OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="constant"),
         lateral_mixing=LateralMixingConfig(scheme="none"), shortwave_penetration=None))
     model = LatLonCGridOceanModel(grid, zc_pc, cfg)

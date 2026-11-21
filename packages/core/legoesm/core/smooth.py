@@ -328,6 +328,35 @@ def sqrt_c1(x: jax.Array, width: float) -> jax.Array:
     return jnp.where(above, jnp.sqrt(jnp.where(above, x, width)), bridge)
 
 
+def step_rel(x: jax.Array, scale: jax.Array, width: float) -> jax.Array:
+    """C1 step ``x > 0`` (RULE 5) with its ramp over ``|x| < width*scale/2``:
+    exactly 0 below and 1 above the band.  ``scale > 0`` is the magnitude ``x``
+    is measured against (traced is fine); ``width`` is dimensionless and static,
+    ``width = 0`` is the hard ``x > 0``."""
+    if width == 0:
+        return (x > 0).astype(jnp.result_type(x, float))
+    return smoothstep_cubic(x / (width * scale) + 0.5)
+
+
+def max_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
+    """C1 ``max(a, b)`` with the band ``|a - b| < width*(|a| + |b|)/2`` measured
+    relative to the operands (dimensionless static ``width``): exact outside it,
+    :func:`smooth_max_c1` on the normalised operands inside.  ``width = 0`` is
+    ``jnp.maximum``."""
+    if width == 0:
+        return jnp.maximum(a, b)
+    a, b = jnp.broadcast_arrays(jnp.asarray(a), jnp.asarray(b))
+    s = jnp.abs(a) + jnp.abs(b) + jnp.finfo(jnp.result_type(a, float)).tiny
+    return smooth_max_c1(a / s, b / s, width) * s
+
+
+def min_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
+    """C1 ``min(a, b)``, relative band as :func:`max_rel`; ``width = 0`` is ``jnp.minimum``."""
+    if width == 0:
+        return jnp.minimum(a, b)
+    return -max_rel(-a, -b, width)
+
+
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
     """Smooth approximation to |x|.
 

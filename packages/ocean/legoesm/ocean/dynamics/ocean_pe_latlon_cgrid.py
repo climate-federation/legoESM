@@ -4348,9 +4348,11 @@ def _bc_horizontal_viscosity(
                                eos_nemo_seos=getattr(config, "eos_nemo_seos", None))
             _wet = h_k > 0.0 if mask is None else (h_k > 0.0) & (mask[..., jnp.newaxis] > 0.5)
             _c1 = wkb_first_baroclinic_wave_speed(T, S, h_k, _wet, _eos,
-                                                  config.rho_0, _const.g)
+                                                  config.rho_0, _const.g,
+                                                  width=_om.smooth_width)
             _res_fn = om4_resolution_function(_c1, grid, mask=mask, coef=_om.res_coef,
-                                              gill_equatorial=_om.gill_equatorial_ld)
+                                              gill_equatorial=_om.gill_equatorial_ld,
+                                              width=_om.smooth_width)
         elif getattr(_om, "resolution_function", "taper") != "taper":
             raise ValueError(f"omp25.resolution_function must be 'taper' or 'mom6_step_wkb', "
                              f"got {_om.resolution_function!r}")
@@ -4360,7 +4362,8 @@ def _bc_horizontal_viscosity(
             mask=mask, u_mask=u_mask, v_mask=v_mask,
             Kh_sin_lat=getattr(_om, "Kh_sin_lat", 0.0), Kh_sin_power=getattr(_om, "Kh_sin_power", 4.0),
             bound_coriolis_vel=getattr(_om, "bound_coriolis_vel", 0.0), resolution_fn=_res_fn,
-            bound_coef=getattr(_om, "bound_coef", 0.0), dt=dt, nu2_sponge_h=sponge_visc2)
+            bound_coef=getattr(_om, "bound_coef", 0.0), dt=dt, nu2_sponge_h=sponge_visc2,
+            smooth_width=_om.smooth_width)
         om_u, om_v = _apply_slope_foot(om_u, om_v)
         du_dt = du_dt + om_u
         dv_dt = dv_dt + om_v
@@ -4948,7 +4951,7 @@ def surface_stress_faces(
                              "the native T-point stress or the NEMO identities")
         dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J
         dz_0_u = interp_cell_to_uface(dz_0_T)
-        (dz_0_v,) = interp_to_v_points_multi((dz_0_T,), grid=grid)
+        (dz_0_v,) = interp_to_v_points_multi((dz_0_T,), grid=grid, source_round=True)
         if (jnp.shape(_face_u) != jnp.shape(dz_0_u)
                 or jnp.shape(_face_v) != jnp.shape(dz_0_v)):
             raise ValueError("tau_u_face/tau_v_face must match the u/v face shapes")

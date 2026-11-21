@@ -39,7 +39,7 @@ def _setup(seed=0, nlev=3):
     u = jnp.asarray(0.2 * rng.standard_normal((grid.n_lat, grid.n_lon + 1, nlev)))
     v = jnp.asarray(0.2 * rng.standard_normal((grid.n_lat + 1, grid.n_lon, nlev)))
     v = v.at[0].set(0.0).at[-1].set(0.0)
-    R = om4_resolution_function(jnp.full((grid.n_lat, grid.n_lon), 2.5), grid)
+    R = om4_resolution_function(jnp.full((grid.n_lat, grid.n_lon), 2.5), grid, width=0.0)
     n = np.arange(grid.n_lat)                         # a southern sponge, 10 cells, CROCO's cosine
     w = np.where(n < 10, 0.5 * (np.cos(np.pi * n / 10) + 1.0), 0.0)
     zon = 1.0 + 0.5 * np.cos(2 * np.pi * np.arange(grid.n_lon) / grid.n_lon)   # varies zonally: tests the wrap

@@ -62,7 +62,7 @@ def test_wkb_wave_speed_of_uniform_stratification():
     h = jnp.asarray(np.broadcast_to(dz, (3, 2, 40)))
     act = jnp.ones((3, 2, 40), bool)
     c1 = wkb_first_baroclinic_wave_speed(jnp.asarray(np.broadcast_to(T, (3, 2, 40))), jnp.zeros((3, 2, 40)),
-                                         h, act, eos, rho0, g)
+                                         h, act, eos, rho0, g, width=0.0)
     H_int = z[-1] - z[0]                                         # the interfaces span centre to centre
     assert np.allclose(np.asarray(c1), N * H_int / np.pi, rtol=1e-12), (np.asarray(c1)[0, 0], N * H_int / np.pi)
 
@@ -73,7 +73,7 @@ def test_wkb_ignores_unstable_and_inactive_interfaces():
     T = jnp.asarray([[[10.0, 12.0, 8.0, 0.0]]])                # unstable top pair, stable second, last cell dry
     act = jnp.asarray([[[True, True, True, False]]])
     h = jnp.full((1, 1, 4), 50.0)
-    c1 = float(wkb_first_baroclinic_wave_speed(T, jnp.zeros_like(T), h, act, eos, rho0, g)[0, 0])
+    c1 = float(wkb_first_baroclinic_wave_speed(T, jnp.zeros_like(T), h, act, eos, rho0, g, width=0.0)[0, 0])
     expect = np.sqrt(g / rho0 * 4.0 / 50.0) * 50.0 / np.pi       # only the stable 12 -> 8 interface
     assert abs(c1 - expect) < 1e-12 * expect
 
@@ -82,7 +82,7 @@ def test_resolution_function_is_the_mom6_step():
     """R = 0 where c1^2 > (dx^2 + dy^2)(f^2 + 2 c1 |grad f|), else 1, cell by cell."""
     grid = _half_degree_grid()
     c1 = jnp.full((grid.n_lat, grid.n_lon), 2.5)
-    R_h, R_q = om4_resolution_function(c1, grid)
+    R_h, R_q = om4_resolution_function(c1, grid, width=0.0)
     lat = np.asarray(grid.lat)
     om = grid.omega
     dx = constants.R_earth * np.cos(lat) * grid.dlon
@@ -97,7 +97,7 @@ def test_resolution_function_is_the_mom6_step():
 def test_om4p5_dissipates_energy_and_is_zero_at_rest():
     grid = _grid()
     u, v = _fields(grid, seed=3)
-    R = om4_resolution_function(jnp.full((grid.n_lat, grid.n_lon), 2.5), grid)
+    R = om4_resolution_function(jnp.full((grid.n_lat, grid.n_lon), 2.5), grid, width=0.0)
     tu, tv = om4p25_lateral_friction_tendency_cgrid(u, v, grid, resolution_fn=R, **OM4P5)
     area = np.asarray(grid.area)[..., None]
     a_uc = 0.5 * (area + np.roll(area, 1, axis=1))
@@ -126,11 +126,11 @@ def test_each_om4p5_term_changes_the_tendency():
     high, _ = create_regional_grid("latlon", n_lat=40, n_lon=8, lat_south=40.0, lat_north=60.0,
                                    lon_west=140.0, lon_east=144.0)
     u, v = _fields(high, seed=5)
-    R = om4_resolution_function(jnp.full((high.n_lat, high.n_lon), 2.5), high)
+    R = om4_resolution_function(jnp.full((high.n_lat, high.n_lon), 2.5), high, width=0.0)
     assert diff(high, 1e-4 * u, 1e-4 * v, R, dict(Kh_sin_lat=0.0)) > 1e-3
     grid = _half_degree_grid()
     u, v = _fields(grid, seed=5)
-    R = om4_resolution_function(jnp.full((grid.n_lat, grid.n_lon), 2.5), grid)
+    R = om4_resolution_function(jnp.full((grid.n_lat, grid.n_lon), 2.5), grid, width=0.0)
     assert diff(grid, 15.0 * u, 15.0 * v, R, dict(bound_coriolis_vel=0.0)) > 1e-3
     a = om4p25_lateral_friction_tendency_cgrid(u, v, grid, resolution_fn=R, **OM4P5)
     b = om4p25_lateral_friction_tendency_cgrid(u, v, grid, resolution_fn=tuple(jnp.ones_like(r) for r in R),
@@ -142,7 +142,7 @@ def test_caps_bound_the_tendency():
     """With a tiny dt the caps bind: the tendency equals the capped one, smaller than uncapped."""
     grid = _grid()
     u, v = _fields(grid, seed=7)
-    R = om4_resolution_function(jnp.full((grid.n_lat, grid.n_lon), 2.5), grid)
+    R = om4_resolution_function(jnp.full((grid.n_lat, grid.n_lon), 2.5), grid, width=0.0)
     capped = om4p25_lateral_friction_tendency_cgrid(u, v, grid, resolution_fn=R, **{**OM4P5, 'dt': 1e9})
     free = om4p25_lateral_friction_tendency_cgrid(u, v, grid, resolution_fn=R, **{**OM4P5, 'bound_coef': 0.0})
     assert float(jnp.abs(capped[0]).max()) < float(jnp.abs(free[0]).max())

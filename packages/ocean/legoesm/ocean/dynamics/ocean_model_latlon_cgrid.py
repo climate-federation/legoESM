@@ -28,6 +28,7 @@ import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
+from legoesm.core.smooth import validate_smoothing_width
 from legoesm.grids.latlon import (
     LatLonGrid,
     compute_v_face_coords,
@@ -4331,6 +4332,8 @@ class LatLonCGridOceanModel:
         config: LatLonCGridOceanConfig,
     ) -> LatLonCGridOceanConfig:
         """Resolve conditional defaults, then validate configuration ranges."""
+        validate_smoothing_width("open_boundary_smooth_width",
+                                 config.open_boundary_smooth_width)
         if getattr(config, "momentum_face_mask", "2d") not in ("2d", "3d"):
             raise ValueError(
                 "momentum_face_mask must be '2d' or '3d', got "
@@ -15866,7 +15869,8 @@ class LatLonCGridOceanModel:
                 self._open_boundary_post = False
             return apply_baroclinic_open_boundary(
                 state, _new, _ob, dt,
-                compute_layer_thickness(_new.eta.data, _new.H_bathy.data, self.z_coord))
+                compute_layer_thickness(_new.eta.data, _new.H_bathy.data, self.z_coord),
+                width=self.config.open_boundary_smooth_width)
         # A direct eager step is also a valid cold-start driver.  Seed the
         # NEMO pre-tke_avn coefficient memory here as well as in
         # seed_scan_carry(); otherwise only scan/restart drivers get the

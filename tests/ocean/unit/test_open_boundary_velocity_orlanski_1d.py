@@ -27,24 +27,24 @@ def test_hand_values():
     a = lambda x: jnp.asarray([x], dtype=float)  # noqa: E731
     # inflow (f1 rising toward f2, phase speed inward): rx = 0, the model's own boundary value, nudged with tau_in
     g = RI / (1 + RI)
-    out = _orlanski_1d(a(0.3), a(1.0), a(1.2), a(0.5), a(0.0), RI, RO, 1.0)
+    out = _orlanski_1d(a(0.3), a(1.0), a(1.2), a(0.5), a(0.0), RI, RO, 1.0, width=0.0)
     assert np.isclose(float(out[0]), (1 - g) * 0.3)
     # outward, rx = (1.0 - 0.8) / (0.8 - 0.4) = 0.5
     g = RO / (1 + RO)
-    out = _orlanski_1d(a(0.3), a(1.0), a(0.8), a(0.4), a(0.0), RI, RO, 1.0)
+    out = _orlanski_1d(a(0.3), a(1.0), a(0.8), a(0.4), a(0.0), RI, RO, 1.0, width=0.0)
     assert np.isclose(float(out[0]), (1 - g) * (0.3 + 0.5 * 0.8) / 1.5)
     # outward, rx = 0.6 / 0.1 = 6 capped at 1
-    out = _orlanski_1d(a(0.3), a(1.0), a(0.4), a(0.3), a(0.0), RI, RO, 1.0)
+    out = _orlanski_1d(a(0.3), a(1.0), a(0.4), a(0.3), a(0.0), RI, RO, 1.0, width=0.0)
     assert np.isclose(float(out[0]), (1 - g) * (0.3 + 0.4) / 2.0)
     # flat interior (f1 = f2): no division by zero, treated as inflow
-    out = _orlanski_1d(a(0.3), a(1.0), a(0.4), a(0.4), a(0.2), RI, RO, 1.0)
+    out = _orlanski_1d(a(0.3), a(1.0), a(0.4), a(0.4), a(0.2), RI, RO, 1.0, width=0.0)
     assert np.isfinite(float(out[0]))
 
 
 def test_no_new_extremes():
     rng = np.random.default_rng(0)
     fb, f1o, f1n, f2n, d = (jnp.asarray(rng.standard_normal((6, 40))) for _ in range(5))
-    out = np.asarray(_orlanski_1d(fb, f1o, f1n, f2n, d, RI, RO, 1.0))
+    out = np.asarray(_orlanski_1d(fb, f1o, f1n, f2n, d, RI, RO, 1.0, width=0.0))
     lo = np.minimum.reduce([np.asarray(fb), np.asarray(f1n), np.asarray(d)])
     hi = np.maximum.reduce([np.asarray(fb), np.asarray(f1n), np.asarray(d)])
     assert np.all(out >= lo - 1e-14) and np.all(out <= hi + 1e-14)
@@ -53,7 +53,7 @@ def test_no_new_extremes():
 def test_gradient_is_finite():
     rng = np.random.default_rng(1)
     args = [jnp.asarray(rng.standard_normal((3, 8))) for _ in range(5)]
-    g = jax.grad(lambda x: jnp.sum(_orlanski_1d(x, *args[1:], RI, RO, 1.0) ** 2))(args[0])
+    g = jax.grad(lambda x: jnp.sum(_orlanski_1d(x, *args[1:], RI, RO, 1.0, width=0.0) ** 2))(args[0])
     assert np.all(np.isfinite(np.asarray(g))) and np.abs(np.asarray(g)).max() > 0
 
 
@@ -85,8 +85,8 @@ def _states():
 
 def test_full_step_changes_only_the_velocity_rows():
     old, new, ob, h = _states()
-    a = apply_baroclinic_open_boundary(old, new, ob, 1800.0, h)
-    b = apply_baroclinic_open_boundary(old, new, ob._replace(velocity_rx_max=1.0), 1800.0, h)
+    a = apply_baroclinic_open_boundary(old, new, ob, 1800.0, h, width=0.0)
+    b = apply_baroclinic_open_boundary(old, new, ob._replace(velocity_rx_max=1.0), 1800.0, h, width=0.0)
     assert np.array_equal(np.asarray(a.T.data), np.asarray(b.T.data))
     assert np.array_equal(np.asarray(a.S.data), np.asarray(b.S.data))
     du = np.abs(np.asarray(a.u.data) - np.asarray(b.u.data))
@@ -104,7 +104,7 @@ def test_tangential_nudge_only():
     """The ring-row tangential velocity is the previous value nudged toward the data with tau_in (before the
     depth mean correction, which keeps the model's depth mean); the normal velocity and T, S are unchanged."""
     old, new, ob, h = _states()
-    b = apply_baroclinic_open_boundary(old, new, ob._replace(velocity_rx_max=1.0), 1800.0, h)
+    b = apply_baroclinic_open_boundary(old, new, ob._replace(velocity_rx_max=1.0), 1800.0, h, width=0.0)
     c = apply_baroclinic_open_boundary(old, new, ob._replace(velocity_rx_max=1.0, tangential_nudge_only=True), 1800.0, h)
     assert np.array_equal(np.asarray(b.v.data), np.asarray(c.v.data))
     assert np.array_equal(np.asarray(b.T.data), np.asarray(c.T.data))
