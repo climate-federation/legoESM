@@ -531,12 +531,16 @@ def test_slope_choice_is_continuous_through_a_single_zero_slope():
 
 
 def test_r5_gradient_through_locks_switch():
-    c = _known_column(m_true=0.0975)                    # inside Lock's ramp in m
+    """Differentiate theta_vl, which moves m inside Lock's ramp (m just below
+    0.1), so the derivative runs through the blend weight itself."""
+    c = _known_column(m_true=0.0975)
+    cand0 = rc.diagnose_candidates(c["thvl"], c["ql"], c["p_half"], WD)
+    m0 = float(jnp.sum(cand0.weight * cand0.m))
+    assert 1.0 / rc.LOCK_FRAC_MAX - WD.lock < m0 < 1.0 / rc.LOCK_FRAC_MAX
 
-    def f(qt):
-        cand = rc.diagnose_candidates(c["thvl"], c["ql"], c["p_half"], WD)
-        return jnp.sum(cand.weight * rc.inversion_jump(qt, cand, WD))
-    check_grads(f, (c["qt"],), order=1, modes=("rev",), eps=1e-6, rtol=1e-5)
-    cand = rc.diagnose_candidates(c["thvl"], c["ql"], c["p_half"], WD)
-    lam = rc._gt(1.0 / rc.LOCK_FRAC_MAX - cand.m, WD.lock)
-    assert np.any((np.asarray(lam) > 0.0) & (np.asarray(lam) < 1.0) & (np.asarray(cand.weight) > 0))
+    def f(thvl):
+        cand = rc.diagnose_candidates(thvl, c["ql"], c["p_half"], WD)
+        return jnp.sum(cand.weight * rc.inversion_jump(c["qt"], cand, WD))
+    check_grads(f, (c["thvl"],), order=1, modes=("rev",), eps=1e-6, rtol=1e-4)
+    g = np.asarray(jax.grad(f)(c["thvl"]))
+    assert np.all(np.isfinite(g)) and np.any(g != 0.0)
