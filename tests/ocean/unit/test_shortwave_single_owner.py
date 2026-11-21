@@ -93,3 +93,17 @@ def test_pipeline_alone_owns_sw_down_without_q_net():
                              sw_down=jnp.asarray(Q * lm))
     new = model.step(st, DT, surface_forcing=sf)
     assert np.all(np.isfinite(np.asarray(new.T.data)))
+
+
+def test_skin_fraction_zero_sends_all_shortwave_down_the_profile():
+    # jerlov_2band keeps 6% in the surface cell by default; skin fraction 0 sends it all down the profile,
+    # so the surface cell warms less while the column total stays q_net.
+    grid, zc_pc, st, lm = _box()
+    sf = OceanSurfaceForcing(tau_x=jnp.zeros_like(st.eta.data), tau_y=jnp.zeros_like(st.eta.data),
+                             q_net=jnp.asarray(Q * lm), sw_down=jnp.asarray(Q * lm))
+    top = []
+    for skin in (None, 0.0):
+        cfg = _cfg(True, shortwave_scheme="jerlov_2band", shortwave_skin_fraction=skin)
+        new = LatLonCGridOceanModel(grid, zc_pc, cfg).step(st, DT, surface_forcing=sf)
+        top.append(float(np.max(np.asarray(new.T.data)[..., 0] - np.asarray(st.T.data)[..., 0])))
+    assert top[1] < top[0]

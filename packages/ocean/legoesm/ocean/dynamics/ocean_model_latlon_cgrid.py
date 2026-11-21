@@ -5044,6 +5044,9 @@ class LatLonCGridOceanModel:
                     "store_mass_flux (the tracer-advecting flux is formed "
                     "inside the advective-form tendency, not in a shared "
                     "mass-flux block the step can capture)")
+            if getattr(config, "store_tracer_budget", False):
+                _unsupported.append(
+                    "store_tracer_budget (the record is collected in _step_impl)")
             if getattr(config, "store_salt_flux", False):
                 # codex round-1 RED 3: same bypass -- _unsplit_ab2_step never
                 # runs _step_impl's capture, so the seeded 2-D slots would sit
@@ -6019,7 +6022,9 @@ class LatLonCGridOceanModel:
                 "the model via legoesm.ocean.physics.bbl_adv."
                 "apply_bbl_adv_step (the driver-side path run_omip_core2.py "
                 "uses via --bbl-adv).")
-        if getattr(config, "store_salt_flux", False):
+        _flux_caps = [n for n in ("store_salt_flux", "store_tracer_budget")
+                      if getattr(config, n, False)]
+        for _cap_name in _flux_caps:
             # Refuse-not-ignore: the capture stores "the flux the model
             # applied", which is only well-defined per step on the euler
             # path with a scheme that exposes its horizontal fluxes.  AB2
@@ -6029,7 +6034,7 @@ class LatLonCGridOceanModel:
             # with the right shape.
             if config.tracer_time_integrator != "euler":
                 raise ValueError(
-                    "store_salt_flux requires tracer_time_integrator="
+                    f"{_cap_name} requires tracer_time_integrator="
                     f"'euler' (got {config.tracer_time_integrator!r}): under "
                     "AB2/RK3 the applied salt flux is a multi-level/staged "
                     "combination the capture would misrepresent.")
@@ -6043,7 +6048,7 @@ class LatLonCGridOceanModel:
                 # the applied flux.  Leapfrog applies 2*dt*F^n to the BEFORE
                 # state (a different base and weight).  Refuse both.
                 raise ValueError(
-                    "store_salt_flux requires outer_integrator="
+                    f"{_cap_name} requires outer_integrator="
                     f"'forward_euler' (got {_outer_for_salt!r}): the outer "
                     "AB2/leapfrog combine explicit tracer increments across "
                     "time levels, so a single-step captured flux would not "
@@ -6051,7 +6056,7 @@ class LatLonCGridOceanModel:
             if config.tracer_advection in ("ppm_fct", "fct2",
                                            "dst3_multidim", "som", "none"):
                 raise ValueError(
-                    "store_salt_flux is not supported with tracer_advection="
+                    f"{_cap_name} is not supported with tracer_advection="
                     f"{config.tracer_advection!r}: the scheme does not expose "
                     "its horizontal face fluxes (FCT/multidim form them "
                     "in-kernel; SOM advects moments).  Use upwind/tvd/"
