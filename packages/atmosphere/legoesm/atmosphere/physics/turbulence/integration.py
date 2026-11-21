@@ -1659,7 +1659,9 @@ def _make_mpas_turbulence(
         _lhf = getattr(turb_out, "lhflx", None)
         _evp = getattr(turb_out, "evap_sfc", None)
         # Surface stress on the surface [Pa, +east/north]: minus the column
-        # integral of the momentum tendency (flux form, no flux at the top).
+        # integral of the momentum tendency (flux form, no flux at the top),
+        # i.e. all the stress this scheme applied, form drag included (as
+        # CAM's TAUX includes its turbulent mountain stress).
         _dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]          # top-first, Pa
         _taux = -jnp.sum(du_cell * _dp_col, axis=-1) / constants.g
         _tauy = -jnp.sum(dv_cell * _dp_col, axis=-1) / constants.g

@@ -2,8 +2,7 @@
 
 ``jnp.full(shape, <python float>, dtype=None)`` is weak-typed; the physics hands the same field
 back strongly typed, so a weak seed changes the jitted step's argument signature after the first
-step and forces a second full compile (``relvar``: 296 s and 17 GB at MPAS level 1 with isotope
-passengers, enso_attribution docs/85 13.36).
+step and forces a second full compile.
 """
 from __future__ import annotations
 
