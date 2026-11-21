@@ -3641,7 +3641,7 @@ def om4_resolution_function(c1, grid, mask=None, coef=1.0, gill_equatorial=True,
 
 def _om4_mom6_tendency(u, v, grid, *, C2, Cu2, C4, Cu4, Kh_sin_lat, Kh_sin_power, bound_coriolis_vel,
                        resolution_fn, bound_coef, dt, mask=None, u_mask=None, v_mask=None,
-                       nu2_sponge_h=None, *, width):
+                       nu2_sponge_h=None, width):
     """OM4p5 lateral friction with MOM6's definitions (see om4p25_lateral_friction_tendency_cgrid)."""
     S_h = smagorinsky_viscosity_cgrid(u, v, grid, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask)  # area_h |D|
     D_T, D_S = strain_rate_cgrid(u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
