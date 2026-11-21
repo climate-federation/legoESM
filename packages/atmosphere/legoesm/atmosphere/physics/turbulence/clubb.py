@@ -327,6 +327,12 @@ __param_spec__ = {
             "rt_tol": "numerics: total-water mixing-ratio tolerance [kg/kg]",
             "thl_tol": "numerics: liquid-water potential-temperature tolerance [K]",
             "tke_min": "numerics: carried-TKE/wp2 state floor [m^2/s^2]",
+            "routec_ql_width_kg_kg": "numerics: route C smooth-switch width (RULE 5), value decided by codex+GLM+Claude vote 2026-11-21",
+            "routec_p_top_width_pa": "numerics: route C smooth-switch width (RULE 5), value decided by codex+GLM+Claude vote 2026-11-21",
+            "routec_jump_width_k": "numerics: route C smooth-switch width (RULE 5), value decided by codex+GLM+Claude vote 2026-11-21",
+            "routec_m_width": "numerics: route C smooth-switch width (RULE 5), value decided by codex+GLM+Claude vote 2026-11-21",
+            "routec_lock_m_width": "numerics: route C smooth-switch width (RULE 5), value decided by codex+GLM+Claude vote 2026-11-21",
+            "routec_E_width": "numerics: route C smooth-switch width (RULE 5), value decided by codex+GLM+Claude vote 2026-11-21",
             "trop_cloud_top_press": "domain definition [Pa]: CAM ref_pres trop_cloud_top_press — where the scheme runs, not a closure coefficient",
             "trop_cloud_taper_lnp_width": "numerics: smooth log-pressure taper width replacing CAM's hard top_lev slice",
             "w_tol": "numerics: w-moment tolerance/floor [m/s]",
@@ -743,6 +749,21 @@ class CLUBBConfig(NamedTuple):
     q_flux_scale: float = 1.0
     q_flux_scale_sigma_lo: float = 0.0
     q_flux_scale_sigma_hi: float = 1.0
+    # Route C (routec.py): Grenier and Bretherton (2001) subgrid inversion with
+    # its explicit entrainment flux imposed inside the xm/w'x' solve (Lock 2001
+    # diagnosis).  Static switch; False (default) leaves every path unchanged.
+    # Single-column use: the GCM's host advection lacks GB01's corrected faces.
+    routec_inversion: bool = False
+    # RULE 5 widths of route C's switches on traced state (0 = the published
+    # hard form; KNOWN DIFFERENCE in routec.py): cloudy test in liquid and in
+    # pressure, theta_vl inequalities, m and slope-pair choice, Lock's double
+    # jump in m, and the [0, 1] clip of E.
+    routec_ql_width_kg_kg: float = 1.0e-7
+    routec_p_top_width_pa: float = 500.0
+    routec_jump_width_k: float = 0.01
+    routec_m_width: float = 0.01
+    routec_lock_m_width: float = 0.005
+    routec_E_width: float = 0.01
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -5361,8 +5382,14 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
                     wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm,
                     invrs_rho_ds_zt, w_1_zm, w_2_zm, varnce_w_1_zm,
                     varnce_w_2_zm, mixt_frac_zm, dt, gr: CLUBBGrid, config,
-                    l_implemented=False):
+                    l_implemented=False, routec=None):
     """Advance the coupled xm/w'x' scalar pairs one step (``advance_xm_wpxp``).
+
+    ``routec`` (optional): the dict of
+    :func:`legoesm.atmosphere.physics.turbulence.routec.clubb_routec_terms`;
+    each solve's two flux rows at the subgrid inversion are blended toward
+    GB01's constraints (:func:`~legoesm.atmosphere.physics.turbulence.routec.routec_constrain_rows`).
+    None (default) is the unchanged path.
 
     Faithful port of the core (CAM-default) path of
     ``advance_xm_wpxp_module.F90:advance_xm_wpxp``: advances rtm/wprtp and
@@ -5402,18 +5429,24 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
     lo, hi = calc_turb_adv_range(w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm,
                                  mixt_frac_zm, gr, dt)
 
-    def _system(wpxp, xm, wpxp_forcing, xm_forcing, C6, xpthvp):
-        return assemble_xm_wpxp_system(
+    def _system(wpxp, xm, wpxp_forcing, xm_forcing, C6, xpthvp, F_rc=None):
+        lhs, rhs = assemble_xm_wpxp_system(
             wpxp, xm, wpxp_forcing, xm_forcing, C6, C7_Skw_fnc, invrs_tau_C6_zm,
             lhs_ta, sh["lhs_diff_zm"], sh["lhs_ma_zm"], sh["lhs_ma_zt"],
             sh["lhs_ta_xm"], sh["lhs_tp"], sh["lhs_ac_pr2"], thv_ds_zm, xpthvp, dt)
+        if routec is not None:
+            from legoesm.atmosphere.physics.turbulence.routec import routec_constrain_rows
+            lhs, rhs = routec_constrain_rows(lhs, rhs, routec, F_rc)
+        return lhs, rhs
 
     # The rt and thl systems are independent: one batched penta solve
     # (:func:`_batched_penta_solve`, per-column arithmetic unchanged), then
     # the per-field clipping in the Fortran's order.
     soln_rt, soln_thl = _batched_penta_solve([
-        _system(wprtp, rtm, wprtp_forcing, rtm_forcing, C6rt_Skw_fnc, rtpthvp),
-        _system(wpthlp, thlm, wpthlp_forcing, thlm_forcing, C6thl_Skw_fnc, thlpthvp)])
+        _system(wprtp, rtm, wprtp_forcing, rtm_forcing, C6rt_Skw_fnc, rtpthvp,
+                None if routec is None else routec["F_rt"]),
+        _system(wpthlp, thlm, wpthlp_forcing, thlm_forcing, C6thl_Skw_fnc, thlpthvp,
+                None if routec is None else routec["F_thl"])])
 
     def _clip(soln, xm, xm_forcing, xp2, xp2_clip, mfl_id, xm_tol, tol_mfl,
               field_tol, l_mfl):
@@ -6047,6 +6080,16 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                                coef_rad)
         forcing = forcing._replace(thlp2=forcing.thlp2 + src)
 
+    # ---- (2d) route C: the subgrid inversion and its entrainment fluxes on
+    # the start-of-step state (routec.py; static switch, off by default) ----
+    rc = None
+    if config.routec_inversion:
+        from legoesm.atmosphere.physics.turbulence.routec import (
+            clubb_routec_terms, widths_from_config)
+        rc = clubb_routec_terms(
+            state.thlm, state.rtm, pdf["rcm"], diag["em"], thv_ds_zm, rho_ds_zt,
+            p_sfc, p_in_Pa_zt, exner_zt, gr, widths_from_config(config))
+
     # ---- (3) advance_xm_wpxp: rtm/wprtp + thlm/wpthlp ----
     wprtp, rtm, wpthlp, thlm = advance_xm_wpxp(
         state.rtm, state.thlm, state.wprtp, state.wpthlp, forcing.rtm,
@@ -6056,7 +6099,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         state.rtp2, state.thlp2, pdf["rtpthvp"], pdf["thlpthvp"], thv_ds_zm,
         wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
         pdf["w_1_zm"], pdf["w_2_zm"], pdf["varnce_w_1_zm"], pdf["varnce_w_2_zm"],
-        pdf["mixt_frac_zm"], dt, gr, config, l_implemented=l_implemented)
+        pdf["mixt_frac_zm"], dt, gr, config, l_implemented=l_implemented,
+        routec=rc)
     # CAM's rcm_out: the pre-advance in-layer rcm clipped against the advanced
     # rtm (advance_clubb_core_module.F90 clip_rcm after advance_xm_wpxp);
     # clubb_intr pairs it with qclvar in relvar (:2424).
@@ -6105,7 +6149,10 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         vector_sfc_stress=vector_sfc_stress, l_implemented=l_implemented)
     # CAM l_do_expldiff_rtm_thlm = True (fixed): at the end of
     # advance_windm_edsclrm, with the same start-of-step Kh_zm.
-    rtm, thlm = expldiff_rtm_thlm(rtm, thlm, diag["Kh_zm"], p.c_K10h, wm_zt,
+    # Route C: no eddy diffusivity at the two flux levels where the entrainment
+    # flux is specified (Lock 2001 section 4), by the constraint weight.
+    Kh_ed = diag["Kh_zm"] if rc is None else diag["Kh_zm"] * (1.0 - rc["W_zm"])
+    rtm, thlm = expldiff_rtm_thlm(rtm, thlm, Kh_ed, p.c_K10h, wm_zt,
                                   rho_ds_zm, invrs_rho_ds_zt, p_in_Pa_zt, dt, gr,
                                   l_implemented=l_implemented)
 
@@ -6137,6 +6184,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         rcp2_zt=pdf["rcp2_zt"],
         rcm_out=rcm_out,
         wpthvp=pdf_post["wpthvp"], Kh_zt=diag["Kh_zt"], Kh_zm=diag["Kh_zm"])
+    if rc is not None:
+        diagnostics["routec"] = {k: v for k, v in rc.items() if k != "cand"}
     return new_state, diagnostics
 
 
