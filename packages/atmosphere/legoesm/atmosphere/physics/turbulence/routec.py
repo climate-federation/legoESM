@@ -177,9 +177,9 @@ def _reconstruct(thvl, pi_half, kb, w: RouteCWidths):
     s_lo = _safe_div(t2 - tA, pc2 - pcA)       # sigma^{M+3/2}
     s_hi = _safe_div(t3 - t2, pc3 - pc2)       # sigma^{M+5/2}
     # GB01 s_1 = the more negative slope: upper pair where s_hi <= s_lo.  The
-    # normaliser carries a floor of the jump width per layer mass, so the
-    # smooth choice is continuous where both slopes vanish (0 at width 0).
-    u = _step(_safe_div(s_lo - s_hi, jnp.abs(s_lo) + jnp.abs(s_hi) + w.jump / dpiA), w.m)
+    # smooth normaliser (a floor of the jump width per layer mass, 0 at width
+    # 0) keeps the choice C1 where either or both slopes vanish.
+    u = _step(_safe_div(s_lo - s_hi, jnp.sqrt(s_lo ** 2 + s_hi ** 2 + (w.jump / dpiA) ** 2)), w.m)
     s1 = u * s_hi + (1.0 - u) * s_lo
     th_top = t2 - s1 * (pc2 - pi_top)          # (C1)
     a = th_top - tM
@@ -211,9 +211,12 @@ def diagnose_candidates(thvl, ql, p_half, w: RouteCWidths) -> Candidates:
     pi_half = p_half[:, :1] - p_half
     cloudy = (_step(ql - QL_MIN, w.ql) * _gt(p_half[:, 1:] - P_TOP_PA, w.p))
     P_T = cloud_top_weights(cloudy)
-    kbs = list(range(1, max(nz - 2, 1)))
+    kbs = list(range(1, nz - 2))
     rec = [_reconstruct(thvl, pi_half, k, w) for k in kbs]
-    act = jnp.stack([r[0] for r in rec], axis=1)
+    # GB01 appendix C: the inversion itself (top of the ambiguous layer) lies
+    # below 700 hPa, also for the T + 1 fallback
+    act = jnp.stack([r[0] * _gt(p_half[:, k + 1] - P_TOP_PA, w.p)
+                     for r, k in zip(rec, kbs)], axis=1)
     weight = []
     for i, k in enumerate(kbs):
         prev = P_T[:, k - 1] * (1.0 - act[:, i - 1]) if i > 0 else P_T[:, k - 1]
@@ -356,13 +359,17 @@ def clubb_routec_terms(thlm, rtm, rcm, em, thv_ds_zm, rho_ds_zm, rho_ds_zt, p_sf
     p_half = p_sfc[:, None] - pi_half
     cand = diagnose_candidates(theta_vl(thlm, rtm), rcm, p_half, w)
     kb = cand.kb
+    # zero-weight candidates may carry any m (e.g. -60): evaluate them at a
+    # harmless m so no NaN reaches the blended rows (0 * NaN)
+    live = cand.weight > 0.0
+    m_ev = jnp.where(live, cand.m, 0.5)
     zt, zb = gr.zm[:, kb + 1], gr.zm[:, kb]
-    z_i = zt - cand.m * (zt - zb)
+    z_i = zt - m_ev * (zt - zb)
     e_i = em[:, kb]
     th0 = thv_ds_zm[:, kb]
     dthl = inversion_jump(thlm, cand, w)
     drt = inversion_jump(rtm, cand, w)
-    pi_i = cand.pi_top - cand.m * cand.dpi_a
+    pi_i = cand.pi_top - m_ev * cand.dpi_a
     p_i = p_sfc[:, None] - pi_i                # mixing evaluated at the inversion
     E, _ = evaporative_enhancement(thlm[:, kb - 1], rtm[:, kb - 1], dthl, drt, p_i,
                                    (p_i / constants.p_ref) ** constants.kappa, w)
@@ -371,23 +378,24 @@ def clubb_routec_terms(thlm, rtm, rcm, em, thv_ds_zm, rho_ds_zm, rho_ds_zt, p_sf
     # GB01 C12-C14 interpolate the mass flux rho w'x' in pi; CLUBB solves the
     # kinematic w'x', so the row carries the density ratios to level kb.
     r_kb = rho_ds_zm[:, kb]
-    rho_i = rho_ds_zm[:, kb + 1] - cand.m * (rho_ds_zm[:, kb + 1] - r_kb)
-    c_low = (1.0 - xi) * rho_ds_zm[:, kb - 1] / r_kb
-    c_F = xi * rho_i / r_kb
+    rho_i = rho_ds_zm[:, kb + 1] - m_ev * (rho_ds_zm[:, kb + 1] - r_kb)
+    c_low = jnp.where(live, (1.0 - xi) * rho_ds_zm[:, kb - 1] / r_kb, 0.0)
+    c_F = jnp.where(live, xi * rho_i / r_kb, 0.0)
+    F_rt = jnp.where(live, -w_e * drt, 0.0)
+    F_thl = jnp.where(live, -w_e * dthl, 0.0)
     nzm = pi_half.shape[1]
     onehot = (jnp.arange(nzm)[None, :] == kb[:, None]).astype(dpi.dtype)  # (ncand, nzm)
     up = (jnp.arange(nzm)[None, :] == kb[:, None] + 1).astype(dpi.dtype)    # level kb + 1
     W_zm = cand.weight @ onehot + cand.weight @ up
     wsum = jnp.sum(cand.weight, axis=1)
-    blend = lambda x: jnp.sum(cand.weight * x, axis=1)  # noqa: E731
-    return dict(cand=cand, xi=xi, c_low=c_low, c_F=c_F, F_rt=-w_e * drt,
-                F_thl=-w_e * dthl, W_zm=W_zm,
+    blend = lambda x: jnp.sum(jnp.where(live, cand.weight * x, 0.0), axis=1)  # noqa: E731
+    return dict(cand=cand, xi=xi, c_low=c_low, c_F=c_F, F_rt=F_rt, F_thl=F_thl, W_zm=W_zm,
                 w_e=blend(w_e), E=blend(E), m=blend(cand.m), z_i=blend(z_i),
                 jump_thvl=blend(cand.jump_thvl), jump_thl=blend(dthl),
                 jump_rt=blend(drt), e_i=blend(e_i), active=wsum,
                 kb_eff=blend(jnp.broadcast_to(kb, cand.weight.shape).astype(dpi.dtype)),
                 xi_eff=blend(xi), c_low_eff=blend(c_low), c_F_eff=blend(c_F),
-                F_rt_eff=blend(-w_e * drt), F_thl_eff=blend(-w_e * dthl))
+                F_rt_eff=blend(F_rt), F_thl_eff=blend(F_thl))
 
 
 def routec_constrain_rows(lhs, rhs, rc, F):

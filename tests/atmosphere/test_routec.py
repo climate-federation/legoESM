@@ -459,3 +459,72 @@ def test_r5_gradients_through_the_cloudy_and_pressure_switches():
     check_grads(f, (ql, ph), order=1, modes=("rev",), eps=1e-9, rtol=1e-3, atol=1e-6)
     gq = np.asarray(jax.grad(f, argnums=0)(ql, ph))
     assert np.all(np.isfinite(gq)) and gq[0, c["kb"] - 1] != 0.0
+
+
+def test_off_path_never_enters_route_c(monkeypatch):
+    """routec_inversion=False: no route C code runs and the scalar diffusion
+    gets the unmodified Kh (the default path is the base path)."""
+    from legoesm.atmosphere.physics.turbulence import clubb as C
+
+    def boom(*a, **k):
+        raise AssertionError("route C entered on the off path")
+    monkeypatch.setattr(rc, "routec_constrain_rows", boom)
+    monkeypatch.setattr(rc, "clubb_routec_terms", boom)
+    got = []
+    orig = C.expldiff_rtm_thlm
+
+    def spy(rtm, thlm, Kh_zm, *a, **k):
+        got.append(np.asarray(Kh_zm))
+        return orig(rtm, thlm, Kh_zm, *a, **k)
+    monkeypatch.setattr(C, "expldiff_rtm_thlm", spy)
+    state, forcing, env, gr = _sc_env()
+    _, d = advance_clubb_core(state, forcing, **{**env, "config": CLUBBConfig()})
+    assert "routec" not in d
+    np.testing.assert_array_equal(got[-1], np.asarray(d["Kh_zm"]))
+
+
+def test_gradient_finite_with_rejected_candidates():
+    """Zero-weight candidates (any m, e.g. far below the inversion) leave no
+    NaN in the forward step or its gradient."""
+    state, forcing, env, gr = _sc_env()
+
+    def f(thlm):
+        s, _ = advance_clubb_core(state._replace(thlm=thlm), forcing, **env)
+        return jnp.sum(s.thlm * s.rtm)
+    g = np.asarray(jax.grad(f)(state.thlm))
+    assert np.all(np.isfinite(g)) and np.any(g != 0.0)
+
+
+def _p_shift_column(p_inv):
+    """The known column with the inversion top (top of the ambiguous layer)
+    moved to pressure p_inv."""
+    c = _known_column()
+    shift = p_inv - float(c["p_half"][0, c["kb"] + 1])
+    return {**c, "p_half": c["p_half"] + shift}
+
+
+def test_r5_inversion_pressure_gate_gap_and_gradient():
+    c = _p_shift_column(rc.P_TOP_PA + 250.0)                # inside the 500 Pa ramp
+    hard = float(jnp.sum(_cand(c, W0).weight))
+    soft = float(jnp.sum(_cand(c, WD).weight))
+    assert hard == 1.0
+    np.testing.assert_allclose(soft - hard, -0.5, rtol=1e-12)   # smoothstep(1/2) = 1/2
+
+    def f(p_half):
+        return jnp.sum(rc.diagnose_candidates(c["thvl"], c["ql"], p_half, WD).weight)
+    check_grads(f, (c["p_half"],), order=1, modes=("rev",), eps=1e-3, rtol=1e-4, atol=1e-9)
+    assert float(jnp.max(jnp.abs(jax.grad(f)(c["p_half"])))) > 0.0
+    above = _p_shift_column(rc.P_TOP_PA - 1.0)              # inversion above 700 hPa
+    assert float(jnp.sum(_cand(above, W0).weight)) == 0.0
+
+
+def test_slope_choice_is_continuous_through_a_single_zero_slope():
+    """One slope crossing zero while the other is small: the smooth choice of
+    the slope pair moves continuously (no jump in m)."""
+    c = _known_column(gam=0.0)                              # linear part flat above
+    ms = []
+    for eps in (-1e-9, 0.0, 1e-9):
+        th = c["thvl"].at[0, c["kb"] + 2].add(eps * 2000.0)
+        cand = rc.diagnose_candidates(th, c["ql"], c["p_half"], WD)
+        ms.append(float(jnp.sum(cand.weight * cand.m)))
+    assert abs(ms[0] - ms[1]) < 1e-6 and abs(ms[2] - ms[1]) < 1e-6
