@@ -2800,13 +2800,6 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         and z_coord is not None
     )
     _chl_sw = getattr(args, "sw_penetration", "auto")
-    if getattr(args, "sw_skin_fraction", None) is not None and (
-            _chl_sw != "jerlov_2band" or grid_type != "tripole"):
-        raise ValueError("--sw-skin-fraction is read only by --sw-penetration "
-                         "jerlov_2band on the tripole lane")
-    if _chl_sw == "ohlmann_2003" and grid_type != "tripole":
-        raise ValueError("--sw-penetration ohlmann_2003 is implemented on the "
-                         "tripole (lat-lon C-grid) lane only")
     if _chl_sw in ("sweeney_2band", "ohlmann_2003"):
         if not getattr(args, "chl_clim", None):
             raise ValueError(f"--sw-penetration {_chl_sw} needs --chl-clim <Sweeney_2005.nc>")
@@ -6137,6 +6130,20 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
 # Single-grid runner
 # ===========================================================================
 
+def check_shortwave_options(args, grid_type: str) -> None:
+    """Refuse shortwave options the selected lane would never read."""
+    tripole_jra55 = (grid_type == "tripole"
+                     and getattr(args, "forcing_mode", "restoring") == "jra55_do_tropical")
+    sw = getattr(args, "sw_penetration", "auto")
+    if getattr(args, "sw_skin_fraction", None) is not None and (
+            sw != "jerlov_2band" or not tripole_jra55):
+        raise ValueError("--sw-skin-fraction is read only by --sw-penetration "
+                         "jerlov_2band on the tripole lane with jra55_do_tropical forcing")
+    if sw == "ohlmann_2003" and not tripole_jra55:
+        raise ValueError("--sw-penetration ohlmann_2003 is implemented on the "
+                         "tripole lane with jra55_do_tropical forcing only")
+
+
 def run_omip_single(grid_type: str, args) -> dict:
     """Run OMIP simulation on a single grid type."""
     # Apply precision BEFORE any model state is built. Idempotent + safe for
@@ -6257,6 +6264,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     # Restart provenance for THIS run (0 = serial cell order): set for every
     # run so an earlier SPMD run in the same interpreter cannot leak its count.
     _MPAS_SPMD_N_DEVICES[0] = int(_mpas_spmd_nd) if _mpas_spmd_nd > 1 else 0
+    check_shortwave_options(args, grid_type)
     if getattr(args, "B_h_gamma0", None) is not None and grid_type != "tripole":
         raise SystemExit(
             f"--B-h-gamma0 is wired for --grid tripole only (2-D face metrics); "

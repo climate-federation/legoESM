@@ -1,34 +1,32 @@
-"""``--sw-skin-fraction`` (jerlov_2band) and ``ohlmann_2003`` are read only on the tripole lane; elsewhere refused."""
+"""``--sw-skin-fraction`` (jerlov_2band) and ``ohlmann_2003`` are read only on the tripole lane with
+jra55_do_tropical forcing; every other combination is refused before the model is built."""
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("xarray")
-pytest.importorskip("zarr")
-
-_HERE = Path(__file__).resolve().parent
-_spec = importlib.util.spec_from_file_location("_sea_ice_scan_skin", _HERE / "test_run_omip_sea_ice_scan.py")
-_scan = importlib.util.module_from_spec(_spec)
-sys.modules["_sea_ice_scan_skin"] = _scan
-_spec.loader.exec_module(_scan)
-run_omip = _scan.run_omip
+from scripts.run.run_omip import check_shortwave_options
 
 
-@pytest.mark.parametrize("sw,skin,match", [
-    ("auto", 0.0, "--sw-skin-fraction"),
-    ("jerlov_2band", 0.0, "--sw-skin-fraction"),      # the plain lat-lon lane never reads the scheme
-    ("ohlmann_2003", None, "implemented on the tripole"),
+def _args(sw, skin, forcing="jra55_do_tropical"):
+    return SimpleNamespace(sw_penetration=sw, sw_skin_fraction=skin, forcing_mode=forcing)
+
+
+@pytest.mark.parametrize("sw,skin,grid,forcing,match", [
+    ("auto", 0.0, "tripole", "jra55_do_tropical", "--sw-skin-fraction"),
+    ("jerlov_2band", 0.0, "latlon", "jra55_do_tropical", "--sw-skin-fraction"),
+    ("jerlov_2band", 0.0, "mpas", "jra55_do_tropical", "--sw-skin-fraction"),
+    ("jerlov_2band", 0.0, "tripole", "restoring", "--sw-skin-fraction"),
+    ("ohlmann_2003", None, "mpas", "jra55_do_tropical", "ohlmann_2003"),
+    ("ohlmann_2003", None, "latlon", "jra55_do_tropical", "ohlmann_2003"),
+    ("ohlmann_2003", None, "tripole", "restoring", "ohlmann_2003"),
 ])
-def test_unread_shortwave_options_are_refused_off_tripole(tmp_path, sw, skin, match):
-    cache = _scan._make_synthetic_cache(tmp_path, n_lat=8, n_lon=16, n_records=8)
-    grid, z_coord, _, _, _ = _scan._make_tiny_latlon_setup(n_lat=8, n_lon=16)
-    T_woa, S_woa = _scan._make_woa_like_targets(grid, nlev=4)
-    args = _scan._argparse_namespace(jra55_cache=str(cache))
-    args.sw_penetration = sw
-    args.sw_skin_fraction = skin
+def test_unread_shortwave_options_are_refused(sw, skin, grid, forcing, match):
     with pytest.raises(ValueError, match=match):
-        run_omip._setup_jra55_forcing_state(args, grid, "latlon", z_coord=z_coord, T_woa=T_woa, S_woa=S_woa)
+        check_shortwave_options(_args(sw, skin, forcing), grid)
+
+
+@pytest.mark.parametrize("sw,skin", [("jerlov_2band", 0.0), ("ohlmann_2003", None), ("auto", None)])
+def test_read_shortwave_options_pass_on_tripole_jra55(sw, skin):
+    check_shortwave_options(_args(sw, skin), "tripole")
