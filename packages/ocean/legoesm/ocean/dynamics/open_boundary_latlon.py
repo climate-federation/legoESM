@@ -28,7 +28,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.smooth import max_rel, min_rel, positive_part_rel, stable_div, step_rel
+from legoesm.core.smooth import max_rel, min_rel, positive_part_rel, stable_div, step_rel, straight_through
 
 _CX_CRIT = 0.292893218813452          # 1 - 1/sqrt(2), u2dbc.F threshold of the zx extrapolation
 _EPS = 1.0e-20
@@ -304,11 +304,12 @@ def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=Non
         cy_neg = -positive_part_rel(-cy, cff, width)
     num = cff * fb_old + cx * f1_new - cy_pos * gb[..., :-1] - cy_neg * gb[..., 1:]
     # a flat column (no gradient at all) has cff at the floor: there the value is
-    # num / (cff + cx) as the reference, held constant so no derivative of a
-    # division by the floor is formed (float32 overflows it)
+    # num / (cff + cx) as the reference (= fb_old up to rounding), differentiated
+    # as fb_old so no derivative of a division by the floor is formed (float32
+    # overflows it)
     live = (dfx * dfx + dfy * dfy > 0) | (cx > 0)
     den = cff + cx
-    fb = jnp.where(live, stable_div(num, jnp.where(live, den, 1.0)), jax.lax.stop_gradient(num / den))
+    fb = jnp.where(live, stable_div(num, jnp.where(live, den, 1.0)), straight_through(num / den, fb_old))
     out = (1.0 - tau) * fb + tau * data
     return out if mb is None else out * mb
 

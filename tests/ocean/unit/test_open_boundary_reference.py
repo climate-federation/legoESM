@@ -156,3 +156,9 @@ def test_hard_width_gradient_is_finite_on_a_flat_interior():
     for argnum in range(5):
         g = jax.grad(lambda *x: ob._orlanski(*x, 0.05, 0.001, width=0.0).sum(), argnums=argnum)(z, z, z, z, z)
         assert np.all(np.isfinite(np.asarray(g))), argnum
+
+
+def test_flat_point_keeps_the_boundary_value_derivative():
+    z = jnp.zeros((2, 8), jnp.float32)
+    g = jax.grad(lambda fb: ob._orlanski(fb, z, z, z, z, 0.05, 0.001, width=0.0).sum())(z)
+    np.testing.assert_allclose(np.asarray(g), 1.0 - 0.001, rtol=1e-6)      # (1 - r_out) d fb_old
