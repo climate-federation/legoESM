@@ -1,0 +1,11 @@
+# Production deck with CAM-FV PPM vertical transport on the MPAS hybrid lane.
+#
+# Everything is amip_production.yaml except the vertical advection scheme:
+# 'ppm' replaces 'sb' for temperature (CAM-FV te_map: T_v over ln p, kord 4)
+# and for every tracer (kord 7, positive definite).  The limiter's branch
+# decisions are smooth at the default sharpness (RULE 5); inf is CAM-FV's
+# hard limiter.  Ported from the ENSO fork (Isma Di Carlo).  Not a
+# production candidate: an A/B arm against amip_production.yaml.
+include: amip_production.yaml
+mpas_vert_advection_scheme: ppm
+mpas_vert_ppm_limiter_sharpness: 1.0e4   # = DycoreConfig default; written so the arm records it
