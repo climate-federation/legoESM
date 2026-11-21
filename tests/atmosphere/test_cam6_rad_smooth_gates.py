@@ -113,7 +113,9 @@ def _in_band_cw():
     ls_liq = jnp.array([2e-5, 2e-5, 2e-5])
     ls_ice = jnp.array([1e-5, 1e-5, 1e-5])
     ast = jnp.array([fl * b, 0.3, 0.3])
-    dp_frac = jnp.array([0.0, fl * b, 0.2])
+    # dp0 = dp_frac * ramp(dp_frac) must itself pass frac_limit for the
+    # cumulus weight to move (CAM's two-stage test), so the upper band
+    dp_frac = jnp.array([0.0, fl * np.exp(0.95 * W), 0.2])
     dp_icwmr = jnp.array([0.0, 1e-3, 1e-12 * b])
     return ls_liq, ls_ice, ast, dp_frac, dp_icwmr
 
