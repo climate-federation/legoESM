@@ -109,6 +109,8 @@ def test_injected_atmosphere_source_fails_the_bar():
     (["--surfdata", "s.nc"], "--land real"),
     (["--grid", "fv3duo", "--dt", "300"], "--resolution and --dt"),
     (["--grid", "fv3duo", "--resolution", "12"], "--resolution and --dt"),
+    (["--grid", "latlon", "--dt", "300"], "--resolution and --dt"),
+    (["--grid", "latlon", "--resolution", "12"], "--resolution and --dt"),
 ])
 def test_real_case_options_refuse_missing_or_stray_paths(argv, msg, capsys):
     with pytest.raises(SystemExit):
@@ -164,6 +166,31 @@ def test_duo_column_lane_closes_atmosphere_water(tmp_path, capsys):
     e_atm = abs(res["fluxes"]["E_atm"])
     assert abs(res["rows"]["atm_water"]) < 1.0e-6 * e_atm, (
         res["rows"]["atm_water"], e_atm)
+
+
+def _latlon_run(tmp_path, capsys):
+    import json
+    out = tmp_path / "latlon.json"
+    assert probe.main(["--grid", "latlon", "--resolution", "12", "--dt",
+                       "600", "--vertical-coord", "cam_l32", "--nlev", "32",
+                       "--days", "0.0625", "--json", str(out)]) == 0
+    cfg = json.loads(next(ln[len("CONFIG "):] for ln in capsys.readouterr()
+                          .out.splitlines() if ln.startswith("CONFIG ")))
+    return cfg, json.loads(out.read_text())
+
+
+@pytest.mark.slow
+def test_latlon_column_lane_closes_land_and_atmosphere(tmp_path, capsys):
+    """--grid latlon runs the lat-lon C-grid's column lane (n_lat x 2 n_lat
+    columns) and its land and atmosphere rows close over three coupling
+    windows, as on MPAS and the duo.  dt 600 s, neither the MPAS 300 s nor
+    the duo 150 s, so a flux sum left on another lane's constant fails."""
+    cfg, res = _latlon_run(tmp_path, capsys)
+    assert (cfg["grid"], cfg["ncells"], cfg["dt"]) == ("latlon", 12 * 24,
+                                                       600.0)
+    rows, e_atm = res["rows"], abs(res["fluxes"]["E_atm"])
+    assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
+    assert abs(rows["atm_water"]) < 1.0e-6 * e_atm, (rows["atm_water"], e_atm)
 
 
 def test_land_emission_terms_split():
