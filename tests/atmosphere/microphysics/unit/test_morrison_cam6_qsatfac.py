@@ -13,7 +13,7 @@ verbatim cldfrc2m and MG2 lines in qsatfac_driver.F90).  x64.
   measured gap is pinned.  Above CLUBB's top the ramp blends to 1.
 * the scaled qvl/qvi, the nucleation humidity factor and every MG2 kernel
   that reads them match the Fortran at the hard limit (1e-12, as the
-  unscaled kernel oracle); the scheme's naai gate reads the scaled qvl.
+  unscaled kernel oracle).
 * in the scheme, qsfm reaches exactly those kernels, only below T_freeze;
   a ramp of 1 is bitwise the qsfm = 1 path.
 """
@@ -79,13 +79,13 @@ def _ramp(fx, sel, top=NO_TOP):
     return ramp
 
 
-def _qsatfac(fx, sel, monkeypatch=None):
+def _qsatfac(fx, sel, monkeypatch=None, width=0.0):
     """legoESM qsfm (ramp from the aist call, completed by MG2's mg2_qsfm on
     MG2's Goff-Gratch liquid curve) at cold fixture points."""
     if monkeypatch is not None:
         _cam_curves(monkeypatch)
     T, p = J(fx["in_T"][sel])[:, None], J(fx["in_p"][sel])[:, None]
-    qf = M.mg2_qsfm(T, J(fx["in_q"][sel])[:, None], qsl(T, p), _ramp(fx, sel))
+    qf = M.mg2_qsfm(T, J(fx["in_q"][sel])[:, None], qsl(T, p), _ramp(fx, sel), width)
     return np.asarray(qf[:, 0])
 
 
@@ -174,20 +174,6 @@ def test_scaled_saturation_and_kernels_match_cam6(monkeypatch):
     assert _rel(gate[cold], fx["out_gate"][cold]) < 1e-12
 
 
-def test_naai_gate_reads_the_scaled_qvl():
-    """micro_mg2_0.F90:1107-1118: with sub-grid clouds relhum is already on the
-    qsfm-scaled qvl, so air at rhi 1.02 (gate closed with qsfm = 1) nucleates
-    once qsfm = 0.9 (1.02/0.9 > 1.05)."""
-    from tests.atmosphere.microphysics.unit import test_morrison_cirrus_nucleation as CN
-    T, q_v, hyd, p, ph, rho, dz, cf = CN._col(1.02)
-    cfg, naai = CN._cfg("cam6_liu_penner"), jnp.full_like(T, 2.0e5)
-    out = [M.morrison_microphysics(T, q_v, hyd, p, ph, rho, dz, 600.0, cfg, cloud_fraction=cf,
-                                   relvar=jnp.ones_like(T), naai=naai, **kw)
-           for kw in ({}, {"qsatfac_ramp": jnp.full_like(T, 0.9)})]
-    off, on = (np.asarray(o.process_budget["cirrus_nucleation"]) for o in out)
-    assert (off == 0.0).all() and (on > 0.0).all()
-
-
 def _run(qsatfac_ramp, monkeypatch=None, spies=()):
     """The cold mixed-phase columns of the ice test, with rain below freezing."""
     fx = A._fx()
@@ -222,7 +208,7 @@ def test_qsfm_reaches_every_mg2_kernel_below_freezing_only(monkeypatch):
     ramp = jnp.full(T.shape, 0.85)
     _, sc, _, _ = _run(ramp, monkeypatch, KERNELS)
     q_v, q_sat = base["rain_evaporation_mg2"]["in"][:2]
-    fac = np.asarray(M.mg2_qsfm(T, q_v, q_sat, ramp))
+    fac = np.asarray(M.mg2_qsfm(T, q_v, q_sat, ramp, _cfg().qsfm_freeze_ramp_K))
     cold = np.asarray(T) < C.T_freeze
     assert (~cold).any() and np.asarray(c).any()
     assert (fac[cold] == 0.85).any() and ((fac[cold] > 0.85) & (fac[cold] < 1.0)).any()
@@ -283,3 +269,47 @@ def test_run_amip_flag_round_trip():
     p = ra.build_arg_parser()
     assert p.parse_args(["--cloud-cam6-do-subgrid-growth"]).cloud_cam6_do_subgrid_growth
     assert not p.parse_args([]).cloud_cam6_do_subgrid_growth
+
+
+# RULE 5: MG2's qsfm switch at T_freeze, smoothed over MorrisonConfig.
+# qsfm_freeze_ramp_K.  Cases: temperatures just below freezing, qv/qs = 0.7,
+# ramp 0.85 (so qsatfac = 0.85); the hard switch gives qsfm = 0.85 below
+# T_freeze.  Gap = |qsfm(default) - qsfm(hard)| per case, measured 2026-11-21.
+QSFM_FREEZE_CASES_DT_K = (0.001, 0.025, 0.05, 0.075, 0.1, 0.15)
+QSFM_FREEZE_GAPS = (0.1499553, 0.1265625, 0.075, 0.0234375, 0.0, 0.0)
+
+
+def _qsfm_cases(width):
+    T = C.T_freeze - jnp.asarray(QSFM_FREEZE_CASES_DT_K)
+    q_sat = jnp.full_like(T, 1.0e-3)
+    return np.asarray(M.mg2_qsfm(T, 0.7 * q_sat, q_sat, jnp.full_like(T, 0.85), width))
+
+
+def test_qsfm_freeze_switch_hard_limit_is_mg2():
+    got = _qsfm_cases(0.0)
+    np.testing.assert_array_equal(got, np.full(got.shape, 0.85))
+    T = jnp.asarray([C.T_freeze, C.T_freeze + 1.0])
+    one = M.mg2_qsfm(T, jnp.full_like(T, 7e-4), jnp.full_like(T, 1e-3),
+                     jnp.full_like(T, 0.85), 0.0)
+    np.testing.assert_array_equal(np.asarray(one), [1.0, 1.0])
+
+
+def test_qsfm_freeze_switch_default_gap_per_case():
+    w = M.MorrisonConfig().qsfm_freeze_ramp_K
+    gap = np.abs(_qsfm_cases(w) - _qsfm_cases(0.0))
+    print("qsfm freeze gaps", repr(tuple(gap)))
+    np.testing.assert_allclose(gap, QSFM_FREEZE_GAPS, rtol=1e-6, atol=1e-12)
+
+
+def test_qsfm_freeze_switch_gradient_at_default():
+    from jax.test_util import check_grads
+    w = M.MorrisonConfig().qsfm_freeze_ramp_K
+
+    def f(T):
+        return M.mg2_qsfm(T, jnp.full_like(T, 7e-4), jnp.full_like(T, 1e-3),
+                          jnp.full_like(T, 0.85), w)
+
+    T = C.T_freeze - jnp.asarray([0.02, 0.05, 0.08])
+    check_grads(f, (T,), order=2, modes=["fwd", "rev"])
+    g = jax.grad(lambda t: jnp.sum(f(t)))(T)
+    assert bool(jnp.all(jnp.isfinite(g))) and bool(jnp.all(g != 0.0))

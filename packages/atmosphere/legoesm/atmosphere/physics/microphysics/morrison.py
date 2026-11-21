@@ -69,6 +69,7 @@ import math
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from legoesm.core.smooth import smoothstep_cubic
 
 from legoesm import constants
 from legoesm.thermo import latent_heat_fusion, latent_heat_vaporization
@@ -384,17 +385,25 @@ __physics_contract__ = {
 }
 
 
-def mg2_qsfm(T, q_v, q_sat, qsatfac_ramp):
+def mg2_qsfm(T, q_v, q_sat, qsatfac_ramp, freeze_ramp_K):
     """CAM6 MG2 ``qsfm`` from the ramp term of qsatfac.
 
     cldfrc2m.F90:1116-1117 ``qsatfac = max(min(qv/qs, 1), ramp)`` with ``qs``
     CAM's ``qsat_water``, the same curve as MG2's ``qvl`` (here ``q_sat``);
     micro_mg2_0.F90:880 ``qsfm = qsatfac``, applied only below tmelt
-    (:911-928), so 1 at and above T_freeze (the same hard switch at 0 C as
-    MG2's qvi = qvl above freezing).
+    (:911-928), so 1 at and above T_freeze.
+
+    KNOWN DIFFERENCE (RULE 5): MG2's switch at T_freeze is a jump in qsfm
+    wherever qsatfac < 1; here ``qsfm = 1 + s (qsatfac - 1)`` with ``s`` a C1
+    smoothstep from 0 at T_freeze to 1 at ``T_freeze - freeze_ramp_K``
+    (``MorrisonConfig.qsfm_freeze_ramp_K``, default 0.1 K); 0 = MG2's hard
+    switch.  Only the 0.1 K just below freezing differs from MG2.
     """
     qsatfac = jnp.maximum(jnp.minimum(q_v / q_sat, 1.0), qsatfac_ramp)
-    return jnp.where(T >= constants.T_freeze, 1.0, qsatfac)
+    if freeze_ramp_K <= 0.0:
+        return jnp.where(T >= constants.T_freeze, 1.0, qsatfac)
+    s = smoothstep_cubic((constants.T_freeze - T) / freeze_ramp_K)
+    return 1.0 + s * (qsatfac - 1.0)
 
 
 def morrison_microphysics(
@@ -840,7 +849,7 @@ def morrison_microphysics(
     # tmelt qsfm is not applied.  q_sat_mg2 is the liquid saturation every
     # MG2 kernel reads; without qsatfac_ramp it is q_sat itself (qsfm = 1).
     if qsatfac_ramp is not None:
-        _qsfm = mg2_qsfm(T, q_v, q_sat, qsatfac_ramp)
+        _qsfm = mg2_qsfm(T, q_v, q_sat, qsatfac_ramp, config.qsfm_freeze_ramp_K)
         q_sat_mg2 = q_sat * _qsfm
     else:
         _qsfm = None

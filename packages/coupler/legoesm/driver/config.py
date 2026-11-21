@@ -2324,6 +2324,10 @@ class ExperimentConfig(NamedTuple):
     # droplet size reset in the sedimentation fall speeds (prognostic droplet
     # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_sed_reset_log_width: float = 0.01
+    # MorrisonConfig.qsfm_freeze_ramp_K: RULE 5 width [K] of MG2's qsfm switch
+    # at T_freeze (read only with cloud_cam6_do_subgrid_growth); 0 = MG2's
+    # hard switch.  Range [0, 1], checked in validate_strict.
+    morrison_qsfm_freeze_ramp_K: float = 0.1
     # CanopyConfig.solve_group: columns per batch of the two-leaf canopy Newton
     # solve, 0 = one batch per GPU (same placement and None semantics as
     # land_canopy_most_n_iters; the production deck names it).
@@ -5032,6 +5036,9 @@ class ExperimentConfig(NamedTuple):
             "morrison_mg2_drop_sed_reset_log_width": (
                 lambda: _morr and self.morrison_prognostic_droplet_number is True,
                 "microphysics='morrison' and morrison_prognostic_droplet_number=True"),
+            "morrison_qsfm_freeze_ramp_K": (
+                lambda: _morr and self.cloud_cam6_do_subgrid_growth is True,
+                "microphysics='morrison' and cloud_cam6_do_subgrid_growth=True"),
         }
         for _rn, (_read, _where) in _reads.items():
             _rw = getattr(self, _rn)

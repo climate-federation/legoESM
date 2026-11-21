@@ -2532,6 +2532,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "size reset in the sedimentation fall speeds, "
                              "prognostic droplet number only; 0 = MG2's hard "
                              "clip.")
+    parser.add_argument("--morrison-qsfm-freeze-ramp-K", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_qsfm_freeze_ramp_K"],
+                        dest="morrison_qsfm_freeze_ramp_K",
+                        help="RULE 5 width [K] of CAM6 MG2's qsfm switch at "
+                             "freezing (cloud_cam6_do_subgrid_growth only); 0 = "
+                             "MG2's hard switch.")
     parser.add_argument("--morrison-warm-rain-incloud",
                         action=argparse.BooleanOptionalAction,
                         default=ExperimentConfig._field_defaults[
@@ -3436,6 +3443,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_mg2_drop_readjust_log_width=args.morrison_mg2_drop_readjust_log_width,
         morrison_mg2_drop_early_reset_log_width=args.morrison_mg2_drop_early_reset_log_width,
         morrison_mg2_drop_sed_reset_log_width=args.morrison_mg2_drop_sed_reset_log_width,
+        morrison_qsfm_freeze_ramp_K=args.morrison_qsfm_freeze_ramp_K,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,

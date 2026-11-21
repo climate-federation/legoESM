@@ -230,6 +230,7 @@ __param_spec__ = {
             "mg2_drop_readjust_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_drop_early_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_drop_sed_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "qsfm_freeze_ramp_K": "numerics: smoothing width of the qsfm freezing switch (RULE 5), not a closure",
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -1190,6 +1191,12 @@ class MorrisonConfig(NamedTuple):
     # flux carry the sedimentation.  False (default) = no cloud-water
     # sedimentation under specified droplets (byte-identical).
     specified_nc_droplet_sedimentation: bool = False
+    # RULE 5 width [K] of MG2's qsfm switch at T_freeze (qsfm applied only
+    # below tmelt, micro_mg2_0.F90:911-928; read only with a qsatfac ramp,
+    # CloudConfig.cam6_do_subgrid_growth): qsfm = 1 + s (qsatfac - 1) with s a
+    # C1 smoothstep from 0 at T_freeze to 1 at T_freeze - width.  0 = MG2's
+    # hard switch.  KNOWN DIFFERENCE in morrison.mg2_qsfm.
+    qsfm_freeze_ramp_K: float = 0.1
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,

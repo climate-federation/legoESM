@@ -90,3 +90,34 @@ def test_gradient_finite_through_a_hole():
 
     g = jax.grad(f)(-1.0e-6)
     assert bool(jnp.isfinite(g)) and float(g) != 0.0
+
+
+def _zm_physics(on, monkeypatch, calls):
+    import sys
+    sys.path.insert(0, "tests/unit")
+    from test_physics_macmic import _cfg, _moist_setup
+    from legoesm.atmosphere.physics.combined import make_physics
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.core import conservation
+    real = conservation.after_convection_positivity
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(conservation, "after_convection_positivity", spy)
+    cfg = _cfg(conv="zhang_mcfarlane")
+    zm = cfg.convection.zhang_mcfarlane._replace(positivity_after_zm=on, land_fraction="none")
+    cfg = cfg._replace(convection=cfg.convection._replace(zhang_mcfarlane=zm))
+    mesh, sigma, state = _moist_setup()
+    ps = init_physics_state(*state.T.data.shape, cfg)
+    f = make_physics(cfg, model_type="mpas", dt=1800.0, cld_macmic_num_steps=2)
+    return f(state, mesh, sigma, phys_state=ps)
+
+
+def test_macmic_loop_calls_the_stage_only_when_on(monkeypatch):
+    on, off = [], []
+    _, ps_on = _zm_physics(True, monkeypatch, on)
+    _, ps_off = _zm_physics(False, monkeypatch, off)
+    assert on and not off
+    assert ps_on.zm_borrow_diag is not None and ps_off.zm_borrow_diag is None
