@@ -95,6 +95,9 @@ def area_weighted_profile(field: jax.Array, area: jax.Array | None) -> jax.Array
 # Column Energy
 # ======================================================================
 
+# Jitted so the hydrostatic scan inside compiles once per shape: called
+# eagerly from the host-side budget ledger it recompiled at every call.
+@jax.jit
 def column_moist_static_energy(
     T: jax.Array,
     q_v: jax.Array,
@@ -255,6 +258,9 @@ def column_moist_static_energy(
     return E
 
 
+# Jitted so the hydrostatic scan inside compiles once per shape: called
+# eagerly from the host-side budget ledger it recompiled at every call.
+@jax.jit
 def column_dry_static_energy(
     T: jax.Array,
     phis: jax.Array,

@@ -211,7 +211,10 @@ _EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "shflx_ow", "lhflx_ow", "evap_ow", "taux_ow", "tauy_ow",
                 # slots 20-21 (#2573): the ice tile's turbulent heat fluxes
                 # under sea_ice_flux_split.
-                "shflx_ice", "lhflx_ice")
+                "shflx_ice", "lhflx_ice",
+                # slots 22-24: surface stress (CMOR tauu/tauv) and the
+                # convective precip (CMOR prc).
+                "taux_sfc", "tauy_sfc", "precip_conv_sfc")
 
 
 class TestSfcDiagContract:
