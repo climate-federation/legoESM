@@ -757,9 +757,7 @@ def _make_hydrostatic_microphysics(
                     phys_state, q_v_col, T_col, p_full_col, p_half_col,
                     hydrometeors.q_i, jnp.asarray(grid.latCell).reshape(ncol),
                     cloud_config, clubb_config)
-
                 if _ramp is not None:
-
                     _kw["qsatfac_ramp"] = _ramp
             if relvar_from_clubb:
                 # CAM6 MG2 reads pbuf RELVAR, set by clubb_tend_cam in the same
@@ -1707,9 +1705,7 @@ def _make_spectral_pe_microphysics(
                 _kw["cloud_fraction"], _ramp = _incloud_liquid_cloud_fraction(
                     phys_state, q_v_col, T_col, p_full_col, p_half_col,
                     hydrometeors.q_i, _lat_col, cloud_config, clubb_config)
-
                 if _ramp is not None:
-
                     _kw["qsatfac_ramp"] = _ramp
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
