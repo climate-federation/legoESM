@@ -430,6 +430,7 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
                          bulk_ce: float | None = None,
                          surface=None,
                          clubb_prognostic: bool = True,
+                         clubb_routec_inversion: bool = False,
                          smag_stability_form: str = "lilly",
                          simple_lw: bool = False) -> PhysicsConfig:
     """PhysicsConfig with ONLY the turbulence scheme varying.
@@ -463,8 +464,12 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
         # PhysicsState.clubb_moments, so nothing else has to change.
         clubb_cfg = getattr(turb, "clubb", None) or CLUBBConfig()
         turb = turb._replace(
-            clubb=clubb_cfg._replace(prognostic=bool(clubb_prognostic))
+            clubb=clubb_cfg._replace(prognostic=bool(clubb_prognostic),
+                                     routec_inversion=bool(clubb_routec_inversion))
         )
+    if clubb_routec_inversion and not (scheme == "clubb" and clubb_prognostic):
+        raise ValueError("--clubb-routec-inversion needs --schemes clubb on the "
+                         "prognostic path; elsewhere it would be silently inert.")
     sub = getattr(turb, scheme)
     if scheme == "smagorinsky":
         # The Deardorff stable-length option (PR #1647): stratification shrinks
@@ -932,6 +937,7 @@ def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
         simple_lw=arm.name in _SIMPLE_LW_CASES,
         bulk_ch=arm.case.spec.bulk_ch, bulk_ce=arm.case.spec.bulk_ce,
         surface=arm.surface, clubb_prognostic=args.clubb_prognostic,
+        clubb_routec_inversion=getattr(args, "clubb_routec_inversion", False),
         smag_stability_form=getattr(args, "smag_stability_form", "lilly"),
     )
 
@@ -1421,6 +1427,12 @@ def parse_args(argv=None):
                    help="run full CLUBB on its prognostic path. The diagnostic "
                         "default leaves 44 of 48 tunable params with a zero "
                         "gradient; prognostic makes 35 of 48 live.")
+    p.add_argument("--clubb-routec-inversion", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="Route C: Grenier-Bretherton (2001) subgrid inversion with "
+                        "explicit cloud-top entrainment inside CLUBB (prognostic "
+                        "path only). Widths of its smooth switches are CLUBBConfig "
+                        "fields.")
     p.add_argument("--surface-bulk-scheme", default="constant",
                    choices=("constant", "most"),
                    help="surface flux law, IDENTICAL on every arm. 'constant' "

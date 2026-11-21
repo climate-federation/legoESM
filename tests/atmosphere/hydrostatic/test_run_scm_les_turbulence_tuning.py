@@ -1585,3 +1585,19 @@ def test_every_shipped_scheme_can_be_built_in_the_column(scheme):
         T_profile=jnp.linspace(230.0, 290.0, 8),
         q_v_profile=jnp.full((8,), 1.0e-3))
     assert "q_g" in scm.state.tracers, scheme
+
+
+def test_clubb_routec_inversion_flag_reaches_clubb_config_and_refuses_inert():
+    assert drv.parse_args(["--clubb-routec-inversion"]).clubb_routec_inversion is True
+    assert drv.parse_args([]).clubb_routec_inversion is False
+    cfg = drv.build_physics_config("clubb", prescribed_fluxes=False,
+                                   clubb_routec_inversion=True)
+    assert cfg.turbulence.clubb.routec_inversion is True
+    assert drv.build_physics_config("clubb", prescribed_fluxes=False
+                                    ).turbulence.clubb.routec_inversion is False
+    with pytest.raises(ValueError, match="silently inert"):
+        drv.build_physics_config("clubb", prescribed_fluxes=False,
+                                 clubb_prognostic=False, clubb_routec_inversion=True)
+    with pytest.raises(ValueError, match="silently inert"):
+        drv.build_physics_config("smagorinsky", prescribed_fluxes=False,
+                                 clubb_routec_inversion=True)
