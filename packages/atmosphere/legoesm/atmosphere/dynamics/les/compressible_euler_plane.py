@@ -3451,23 +3451,29 @@ class PlaneCompressibleEulerModel:
                 target = self._target_mass
             else:
                 target = None
-            # Anomaly-form target, as in ``_fixer_target`` (serial); a
-            # caller-replaced ``_target_mass`` keeps the total form.
+            # Anomaly-form target, as in ``_fixer_target`` (serial). A
+            # caller-replaced ``_target_mass`` total is converted once by
+            # subtracting the global background (carries that total's
+            # rounding, as the serial fallback does).
             cached = getattr(self, "_target_anomaly", None)
             if target is None:
-                target, anomaly = compute_rho_prime_mass_plane_mpi(
-                    mass_state, *mass_args), True
+                target = compute_rho_prime_mass_plane_mpi(
+                    mass_state, *mass_args)
             elif cached is not None and cached[0] is target:
-                target, anomaly = cached[1], True
+                target = cached[1]
             else:
-                anomaly = False
+                rest = mass_state._replace(rho_prime=mass_state.rho_prime.replace(
+                    data=jnp.zeros_like(mass_state.rho_prime.data)))
+                total = target
+                target = total - compute_dry_mass_plane_mpi(rest, *mass_args)
+                if not isinstance(target, jax.core.Tracer):
+                    self._target_anomaly = (total, target)  # convert once
             mpi_fixer = (_fix_mass_fp64(fix_mass_nonhydrostatic_plane_mpi)
                          if self.config.mixed_precision
                          else fix_mass_nonhydrostatic_plane_mpi)
             stepped = mpi_fixer(
                 stepped, target, self.grid, self.height_coord,
                 self.terrain_metric, layout, owned_mask,
-                target_is_anomaly=anomaly,
             )
         return stepped
 

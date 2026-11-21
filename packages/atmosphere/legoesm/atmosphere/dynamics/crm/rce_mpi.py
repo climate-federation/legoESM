@@ -370,53 +370,37 @@ def _plane_volume_weight_mpi(
 
 
 def fix_mass_nonhydrostatic_plane_mpi(
-    state, target_mass, grid, height_coord, terrain_metric,
-    layout, owned_mask, target_is_anomaly: bool = False,
+    state, target_anomaly, grid, height_coord, terrain_metric,
+    layout, owned_mask,
 ):
-    """MPI-aware dry-mass fixer (R7).
+    """MPI-aware dry-mass fixer (R7), anomaly form.
 
     Uniform additive correction to ``rho_prime``:
 
-        delta = (target_mass - current_global) / global_volume_weight
-        rho_prime' = rho_prime + delta
+        delta = (target_anomaly - A) / V,   rho_prime' = rho_prime + delta
 
-    where ``current_global`` and ``global_volume_weight`` are both
-    ``global_sum_mpi`` reductions. Every rank applies the same
-    ``delta`` so the resulting global mass exactly matches
-    ``target_mass`` to round-off.
+    with ``A`` = :func:`compute_rho_prime_mass_plane_mpi` (global
+    ``sum_owned(rho' J area_T dz)``) and ``V`` the global owned volume, both
+    ``global_sum_mpi`` reductions, so every rank applies the same ``delta``.
+    ``target_anomaly`` is the anchor's rho' integral, NOT the total dry mass:
+    differencing two ~1e14 totals (the former form) left a float32 dry-mass
+    jitter of up to ~6e-7 relative per step; this form closes to round-off.
 
-    Mirrors the serial :func:`fix_mass_nonhydrostatic_plane` — AD-safe
-    (pure additive correction, no clip, no branch on traced values).
-
-    Single-rank short-circuits to the serial fixer.
+    AD-safe (pure additive correction, no clip, no branch on traced values).
+    Single-rank short-circuits to the serial fixer in the same anomaly form.
     """
     _validate_layout(layout)
     if layout.n_ranks == 1:
         return fix_mass_nonhydrostatic_plane(
-            state, target_mass, grid, height_coord, terrain_metric,
-            background_mass=(jnp.zeros((), state.rho_prime.data.dtype)
-                             if target_is_anomaly else None),
+            state, target_anomaly, grid, height_coord, terrain_metric,
+            background_mass=jnp.zeros((), state.rho_prime.data.dtype),
         )
-    if target_is_anomaly:
-        # Anomaly form (``target_mass`` = anchored global sum(rho' w)):
-        # never differences two ~1e14 totals, so float32 holds the anchor
-        # to round-off instead of a ~2e-7 relative per-step mass jitter.
-        current = compute_rho_prime_mass_plane_mpi(
-            state, grid, height_coord, terrain_metric, layout, owned_mask,
-        )
-        volume = _plane_volume_weight_mpi(
-            grid, height_coord, terrain_metric, layout, owned_mask,
-        )
-        return state._replace(rho_prime=state.rho_prime.replace(
-            data=state.rho_prime.data + (target_mass - current) / volume))
-    current_mass = compute_dry_mass_plane_mpi(
+    current = compute_rho_prime_mass_plane_mpi(
         state, grid, height_coord, terrain_metric, layout, owned_mask,
     )
     volume = _plane_volume_weight_mpi(
         grid, height_coord, terrain_metric, layout, owned_mask,
     )
-    delta = (target_mass - current_mass) / volume
-    new_rho_p = state.rho_prime.data + delta
-    return state._replace(
-        rho_prime=state.rho_prime.replace(data=new_rho_p),
-    )
+    return state._replace(rho_prime=state.rho_prime.replace(
+        data=state.rho_prime.data + (target_anomaly - current) / volume))
+
