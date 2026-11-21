@@ -528,3 +528,15 @@ def test_slope_choice_is_continuous_through_a_single_zero_slope():
         cand = rc.diagnose_candidates(th, c["ql"], c["p_half"], WD)
         ms.append(float(jnp.sum(cand.weight * cand.m)))
     assert abs(ms[0] - ms[1]) < 1e-6 and abs(ms[2] - ms[1]) < 1e-6
+
+
+def test_r5_gradient_through_locks_switch():
+    c = _known_column(m_true=0.0975)                    # inside Lock's ramp in m
+
+    def f(qt):
+        cand = rc.diagnose_candidates(c["thvl"], c["ql"], c["p_half"], WD)
+        return jnp.sum(cand.weight * rc.inversion_jump(qt, cand, WD))
+    check_grads(f, (c["qt"],), order=1, modes=("rev",), eps=1e-6, rtol=1e-5)
+    cand = rc.diagnose_candidates(c["thvl"], c["ql"], c["p_half"], WD)
+    lam = rc._gt(1.0 / rc.LOCK_FRAC_MAX - cand.m, WD.lock)
+    assert np.any((np.asarray(lam) > 0.0) & (np.asarray(lam) < 1.0) & (np.asarray(cand.weight) > 0))

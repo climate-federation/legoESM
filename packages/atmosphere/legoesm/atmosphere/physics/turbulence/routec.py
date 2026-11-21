@@ -25,13 +25,20 @@ CLUBB's orientation), shape ``(ncol, nz)`` for layer values and
 KNOWN DIFFERENCE (RULE 5): every switch the published method takes on traced
 state (cloudy-layer test, cloud-top layer choice, T versus T + 1, the D0
 branch, the slope pair, Lock's double jump, the saturation adjustment, the
-enhancement gate and clip) is a compact C1 form (smoothstep ramps placed on
-the side the hard test rejects, so accepted states keep weight 1) whose width is a
+enhancement gate and clip) is a compact C1 form (smoothstep ramps; for the
+closed tests x >= 0 the ramp lies on the rejected side, so accepted states keep
+weight 1; for the open tests x > 0 it lies within one width above the
+threshold) whose width is a
 CLUBBConfig field; the integer ambiguous layer becomes a weighted blend over
 candidate base interfaces.  All widths 0 is the published hard form (tests
 V1, V4).  The defaults' per-case gaps are stored in tests/atmosphere/test_routec.py.
 GB01's corrected advective faces for the host dycore (section 5) are not
-ported: route C runs in single-column CLUBB.
+ported: route C runs in single-column CLUBB, and the SCM's prescribed
+subsidence advection still uses its ordinary faces (some numerical
+entrainment remains in subsiding cases).  CLUBB's post-solve flux limiter and
+w'x' clipping may modify the imposed rows where they fire (conservation is
+unaffected).  The mixing-length height z_i interpolates z linearly in m
+(pi_i and rho_i are interpolated in mass).
 
 Layer indices for a candidate base interface ``kb``: layer M = kb - 1,
 ambiguous layer M+1 = kb, M+2 = kb + 1, M+3 = kb + 2; flux levels M-1/2 = kb
