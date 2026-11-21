@@ -205,6 +205,16 @@ def build_runoff_map(
         dry_idx = np.flatnonzero(~wet_flat | wet_donor)
     else:
         dry_idx = np.flatnonzero(~wet_flat)
+    if reference_runoff is not None:
+        # Only cells that ever carry runoff need a routing entry.  Without
+        # this, every dry cell within radius_m of the sea becomes a donor
+        # (7.1 million pairs at 1/4 deg, 150 km), and applying the map to a
+        # forcing block gathers an (n_pairs, n_records) array that exhausts
+        # GPU memory.  Runoff is >= 0, so a zero time-mean means always zero:
+        # dropping those donors changes nothing in the routed field.
+        ref_all = np.broadcast_to(np.asarray(reference_runoff,
+                                             dtype=np.float64), shape).ravel()
+        dry_idx = dry_idx[ref_all[dry_idx] != 0.0]
     wet_idx = np.flatnonzero(wet_flat)
     xyz_wet = _unit_sphere_xyz(latf[wet_idx], lonf[wet_idx])
     xyz_dry = _unit_sphere_xyz(latf[dry_idx], lonf[dry_idx])
