@@ -338,7 +338,10 @@ class CanopyConfig(NamedTuple):
     # residual left there goes to zero.  KNOWN DIFFERENCE from d(last
     # iterate)/d(input), measured d(SH+LE)/d(T_air) AD/FD: 1.000 at residual
     # 7e-15 of the seed's, 0.988 at 1e-7, 0.655 one step from the cold seed
-    # (4.8e-4); scripts/validate/canopy_fallback_gradient_fd.py.  Like a
+    # (4.8e-4); over 64 random columns one step from the cold seed, median
+    # 0.968, range -0.13 to 14.7, max |AD| 18 W/m2/K against max |FD| 1.3e3:
+    # it does not blow up where it is least exact
+    # (scripts/validate/canopy_fallback_gradient_fd.py [--sweep]).  Like a
     # converged root, the last iterate carries no gradient to its seed, so the
     # dependence on the previous pass's state is dropped.  The forward output
     # jumps between last iterate and cold state at the admissibility boundary.
