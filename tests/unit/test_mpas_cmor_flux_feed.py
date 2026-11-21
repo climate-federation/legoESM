@@ -505,6 +505,52 @@ class TestFeedUsesIntervalMeans:
         # Interval accumulator restarted for the next interval.
         assert acc.mean(2) is None
 
+    def test_feed_hands_stress_and_prc_interval_means(self, mesh):
+        """tauu/tauv/prc (slots 22-24) reach the collector as the window
+        mean of their per-step samples, not the end-of-window snapshot."""
+        import types
+        from legoesm.driver.model_driver import (
+            ModelDriver, _MPASSfcFluxAccum, _sfc_diag_slot)
+
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+
+        def _field(a):
+            return types.SimpleNamespace(data=np.asarray(a))
+
+        slots = {k: _sfc_diag_slot(k)
+                 for k in ("taux_sfc", "tauy_sfc", "precip_conv_sfc")}
+        width = max(slots.values()) + 1
+
+        def _sample(vals):
+            t = [None] * width
+            t[2] = _field(np.full(n, 5.0e-5))
+            for k, v in vals.items():
+                t[slots[k]] = _field(np.full(n, v))
+            return tuple(t)
+
+        acc = _MPASSfcFluxAccum()
+        acc.add(_sample({"taux_sfc": 0.1, "tauy_sfc": -0.02, "precip_conv_sfc": 1.0e-5}))
+        acc.add(_sample({"taux_sfc": 0.3, "tauy_sfc": -0.04, "precip_conv_sfc": 3.0e-5}))
+        u_edge = np.zeros((int(mesh.nEdges), NLEV))
+        fake = types.SimpleNamespace(
+            diagnostics=dc, grid=mesh, _mpas_sfc_accum=acc,
+            config=types.SimpleNamespace(
+                output=types.SimpleNamespace(diag_days=1.0)),
+            state=types.SimpleNamespace(
+                u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
+                phis=_field(f["phis"]), tracers=None, v=None),
+            model=types.SimpleNamespace(_sfc_diag=_sample(
+                {"taux_sfc": 9.0, "tauy_sfc": 9.0, "precip_conv_sfc": 9.0})),
+        )
+        _as_driver(fake)
+        ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tauu"], 0.2, rtol=1e-6)
+        np.testing.assert_allclose(out["field_2d_tauv"], -0.03, rtol=1e-6)
+        np.testing.assert_allclose(out["field_2d_prc"], 2.0e-5, rtol=1e-6)
+
     def test_feed_falls_back_to_snapshot_without_accum(self, mesh):
         """No accumulator (pre-#1353 paths, non-MPAS drivers): the feed
         reads the instantaneous slots exactly as before."""
