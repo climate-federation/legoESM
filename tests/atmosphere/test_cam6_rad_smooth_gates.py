@@ -131,7 +131,7 @@ def test_conv_water_gradient_through_every_switch():
     def f_ln(*la):
         return f(*(jnp.exp(x) for x in la)) / 1e-5
     check_grads(f_ln, tuple(jnp.log(a) for a in pos), order=1, modes=("fwd", "rev"),
-                eps=1e-4, atol=1e-6, rtol=1e-3)
+                eps=1e-6, atol=1e-6, rtol=1e-3)
     # non-zero derivative through the switched input of each column
     for col, arg in ((0, 2), (1, 3), (2, 4)):
         g = jax.grad(lambda x: f(*[x if i == arg else a for i, a in enumerate(args)])[col])(
@@ -154,7 +154,7 @@ def test_snow_gradient_through_every_switch():
     pos = tuple(jnp.where(a > 0, a, 1e-30) for a in args[:4])
     check_grads(lambda *la: f(*(jnp.exp(x) for x in la), *args[4:]),
                 tuple(jnp.log(a) for a in pos), order=1, modes=("fwd", "rev"),
-                eps=1e-4, atol=1e-6, rtol=1e-3)
+                eps=1e-6, atol=1e-6, rtol=1e-3)
     for col, arg in ((0, 0), (1, 1), (2, 3), (3, 2)):
         g = jax.grad(lambda x: f(*[x if i == arg else a for i, a in enumerate(args)])[col])(
             args[arg])
