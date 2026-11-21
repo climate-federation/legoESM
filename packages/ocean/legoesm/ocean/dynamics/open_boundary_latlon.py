@@ -167,6 +167,10 @@ def apply_barotropic_open_boundary(eta_c, U_c, V_c, eta_new, U_new, V_new,
         V_new = (V_new + dt_s * ob.band_gamma_v * rv) / (1.0 + dt_s * ob.band_gamma_v) * v_mask
 
     if (faces_u or faces_v) and ob.volume_correction_off is None:
+        # The face depth below is the hard min rule of the model's own barotropic
+        # continuity (KNOWN DIFFERENCE from RULE 5, inherited, not smoothed here):
+        # the correction must match the realised flux, so its gradient has the
+        # same subgradient at D_a = D_b as that operator.
         # obc_volcons.F: remove the net inflow with one uniform inward velocity
         # (or bring it to target_net_flux).  The face depth is the total depth
         # H + eta by the min rule of the substep's continuity flux, as CROCO's

@@ -260,6 +260,8 @@ def test_relative_switches_hard_limit_band_and_c1():
         g = jax.grad(f)
         assert abs(float(g(x0 - 1e-7)) - float(g(x0 + 1e-7))) < 1e-4
         assert float(g(x0)) > 0.0          # a derivative through the switch, unlike the hard form
+    g = jax.grad(lambda t: step_rel(t, 2.0, w))
+    assert float(g(0.0)) == 0.0 and abs(float(g(1e-7))) < 1e-4        # C1 at the one-sided join
 
 
 def test_max_rel_gradient_is_finite_at_zero_operands():

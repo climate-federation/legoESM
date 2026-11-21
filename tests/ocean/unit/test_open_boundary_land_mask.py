@@ -154,3 +154,26 @@ def test_no_radiation_from_a_dry_interior_cell():
     f1 = np.where(wet_1 > 0, 14.0, 100.0)
     out = _orl(np.full(6, 15.0), np.full(6, 15.0), f1, np.full(6, 13.0), wet_b, wet_1, wet_1, data=14.0)
     assert abs(out[2] - ((1.0 - 0.001) * 15.0 + 0.001 * 14.0)) < 1e-12, out[2]   # inflow rate would give 14.95
+
+
+def test_open_boundaries_are_refused_by_the_implicit_and_rigid_lid_solvers():
+    import pytest
+    grid, wall = create_regional_grid("latlon", n_lat=NY, n_lon=NX, lat_south=-5.0,
+                                      lat_north=5.0, lon_west=200.0, lon_east=200.0 + NX)
+    zc = create_z_star_from_thicknesses(np.array([20.0, 40.0, 80.0]))
+    st = rest_state_latlon_cgrid_ocean(grid, zc, land_mask_override=jnp.asarray(wall))
+    nl = st.T.data.shape[-1]
+    ob = OpenBoundaryData(tau_in=jnp.asarray(86400.0), tau_out=jnp.asarray(360 * 86400.0),
+                          west_ubar=jnp.zeros(NY + 2), west_zeta=jnp.zeros(NY + 2),
+                          west_T=jnp.full((nl, NY + 2), 15.0), west_S=jnp.full((nl, NY + 2), 35.0))
+    z = jnp.zeros_like(st.eta.data)
+    sf = OceanSurfaceForcing(tau_x=z, tau_y=z, q_net=z, sw_down=None)
+    sponge = SpongeForcing(gamma=z, T_ref=st.T.data, S_ref=st.S.data, open_boundary=ob)
+    for solver in ("implicit_cn", "rigid_lid"):
+        cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, barotropic_solver=solver,
+                                               physics=OceanPhysicsConfig(
+                                                   vertical_mixing=VerticalMixingConfig(scheme="constant"),
+                                                   lateral_mixing=LateralMixingConfig(scheme="none"),
+                                                   shortwave_penetration=None))
+        with pytest.raises(ValueError, match="open lateral boundaries"):
+            LatLonCGridOceanModel(grid, zc, cfg).step(st, DT, surface_forcing=sf, sponge=sponge)
