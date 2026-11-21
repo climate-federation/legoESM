@@ -317,3 +317,28 @@ def test_host_omega_refused_where_it_would_be_inert():
         make_turbulence_physics(
             TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True),
                              host_omega=True), "hydrostatic", 300.0)
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_host_omega_is_the_dycores_flux_form_continuity(hybrid):
+    """Over a non-uniform surface pressure the advective div(u) dp and the
+    dycore's flux-form div(u dp_edge) differ; the host omega's implied surface
+    pressure tendency equals the MPAS dycore's own."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        MPASPrimitiveEquationConfig, mpas_model_tendencies)
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        mpas_flux_form_continuity)
+    from legoesm.grids.vertical import create_hybrid_coordinate
+    mesh, sigma, state, _, _ = _mpas_setup(True)
+    if hybrid:
+        sigma = create_hybrid_coordinate(state.T.data.shape[1])
+    ncell = state.T.data.shape[0]
+    ps = 1.0e5 - 8.0e3 * jnp.asarray(np.random.default_rng(5).random(ncell))
+    state = state._replace(p_s=state.p_s.replace(data=ps))
+    omega, dps = mpas_flux_form_continuity(state, mesh, sigma)
+    cfg = MPASPrimitiveEquationConfig()
+    assert cfg.nu_del4_ps == 0.0
+    tend = mpas_model_tendencies(state, mesh, sigma, cfg)
+    np.testing.assert_allclose(np.asarray(dps), np.asarray(tend.dp_s_dt.data),
+                               rtol=1e-10, atol=1e-12)
+    assert np.all(np.isfinite(np.asarray(omega)))

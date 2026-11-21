@@ -119,21 +119,41 @@ _ENERGY_FIELD_BY_SCHEME = {
 HOST_OMEGA_FORCING_KEY = "clubb_host_omega"
 
 
-def mpas_host_omega(state, mesh, sigma_coord):
-    """Large-scale pressure velocity [Pa/s, (nCells, nlev)] of an MPAS state.
+def mpas_flux_form_continuity(state, mesh, sigma_coord):
+    """``(omega, dp_s_dt)`` of an MPAS state from the dycore's FLUX-FORM
+    continuity, ``div(u dp_edge)`` with ``dp_edge`` the edge average of the
+    cell layer thickness (primitive_eq_mpas step 4; the advective
+    ``div(u) dp`` differs wherever grad p_s != 0), closed by the shared
+    blocks of ``legoesm.grids.vertical``.  omega [Pa/s, (nCells, nlev)]."""
+    from legoesm.core.operators_voronoi import cell_to_edge_avg_3d, divergence_cell_3d
+    from legoesm.grids.vertical import (
+        HybridSigmaPressureCoordinate, SigmaCoordinate, compute_mass_flux_from_cumsum,
+        compute_omega_hybrid, compute_pressure_velocity, compute_sigma_dot_from_cumsum)
+    p_s = state.p_s.data
+    nlev = state.T.data.shape[-1]
+    p_half = sigma_coord.pressure_at_half(p_s).reshape(p_s.shape[0], nlev + 1)
+    dp_edge = cell_to_edge_avg_3d(p_half[:, 1:] - p_half[:, :-1], mesh)
+    cum = jnp.cumsum(divergence_cell_3d(state.u.data * dp_edge, mesh), axis=-1)
+    D = cum[..., -1:]
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        dps = -D[..., 0] / sigma_coord.B_range
+        return compute_omega_hybrid(compute_mass_flux_from_cumsum(cum, D, sigma_coord),
+                                    p_s, dps, sigma_coord), dps
+    if isinstance(sigma_coord, SigmaCoordinate):
+        dps = -D[..., 0] / (1.0 - sigma_coord.sigma_half[0])
+        sd = compute_sigma_dot_from_cumsum(cum, D, p_s, sigma_coord)
+        return compute_pressure_velocity(sd, p_s, dps, sigma_coord), dps
+    raise ValueError(f"no hydrostatic continuity for {type(sigma_coord).__name__}")
 
-    The closed hydrostatic continuity diagnostic of the edge winds
-    (:func:`omega_from_divergence` of the cell divergence), the same field the
-    driver publishes as ``wap``.  The MPAS hydrostatic dycore carries a mass
-    flux, not a full omega, so this is the host omega handed to CLUBB
-    (TurbulenceConfig.host_omega).  Needs an edge mesh: a column model with
-    cell winds must supply ``forcing[HOST_OMEGA_FORCING_KEY]`` instead.
+
+def mpas_host_omega(state, mesh, sigma_coord):
+    """Large-scale pressure velocity [Pa/s, (nCells, nlev)] of an MPAS state,
+    the dycore's own flux-form continuity omega (:func:`mpas_flux_form_continuity`):
+    the host omega handed to CLUBB (TurbulenceConfig.host_omega).  Needs an
+    edge mesh: a column model with cell winds must supply
+    ``forcing[HOST_OMEGA_FORCING_KEY]`` instead.
     """
-    from legoesm.atmosphere.forcing.column_large_scale_extract import (
-        omega_from_divergence)
-    from legoesm.core.operators_voronoi import divergence_cell_3d
-    return omega_from_divergence(
-        divergence_cell_3d(state.u.data, mesh), state.p_s.data, sigma_coord)
+    return mpas_flux_form_continuity(state, mesh, sigma_coord)[0]
 
 
 def turbulence_scheme_traits(scheme_name: str) -> TurbulenceSchemeTraits:
