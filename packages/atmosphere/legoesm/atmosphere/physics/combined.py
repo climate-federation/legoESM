@@ -65,8 +65,10 @@ from legoesm.atmosphere.physics.convection.integration import (
     make_convection_physics,
 )
 from legoesm.atmosphere.physics.turbulence.integration import (
+    HOST_OMEGA_FORCING_KEY,
     get_turbulence_fn,
     make_turbulence_physics,
+    mpas_host_omega,
     resolved_clubb_config,
     turbulence_carry_field,
 )
@@ -891,6 +893,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 "microphysics='ifs_cloudsc' runs CLOUDSC once per physics "
                 "step (the IFS order, no macro/micro sub-cycle): needs "
                 f"cld_macmic_num_steps=1, got {_n_macmic}.")
+    # CAM6 hands CLUBB state%omega, the dycore's omega, unchanged by the
+    # physics before it (ZM moves the winds, omega is not updated), so the
+    # macmic sub-cycle gets omega from the PRE-physics state, once.
+    _host_omega_once = (model_type == "mpas" and _n_macmic >= 2
+                        and config.turbulence.scheme == "clubb"
+                        and bool(getattr(config.turbulence, "host_omega", False)))
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(
             config.convection, model_type, dt,
@@ -1415,15 +1423,25 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             # output (cmfmc, dlf), so the convective carries are visible to
             # the sub-cycle (the N=1 split hands them over one step late).
             ps_m = _carry_within_call(ps_m, r_pre[6])
+        _turb_extra = {}
+        if dlf is not None:
+            # clubb_tend_cam books dlf on its post-CLUBB state1.
+            _turb_extra["conv_dlf"] = dlf
+        if (_host_omega_once and state.v is None
+                and HOST_OMEGA_FORCING_KEY not in (forcing or {})):
+            # edge winds (state.v is None) = the MPAS GCM: diagnose the
+            # pre-physics omega once and hold it through the sub-cycle; a
+            # column model (cell winds) must pass its own in the forcing
+            _turb_extra[HOST_OMEGA_FORCING_KEY] = mpas_host_omega(
+                state, grid, sigma_coord)
         # Each sub-cycled module is applied (state AND carry) before the next
         # one runs: CAM physics_update after clubb_tend_cam, then
         # microp_driver_tend on the updated state (physpkg.F90:2097-2101).
         for _i in range(_n_macmic):
             for _fr in sel["sub"]:
-                if dlf is not None and _fr[0] is _turb_entry:
-                    # clubb_tend_cam books dlf on its post-CLUBB state1.
+                if _turb_extra and _fr[0] is _turb_entry:
                     r_sub = _run([_fr], state_m, ps_m,
-                                 {**(forcing or {}), "conv_dlf": dlf})
+                                 {**(forcing or {}), **_turb_extra})
                 elif cloudsc_conv is not None and _fr[0] is _micro_entry:
                     # CLOUDSC reads the detrainment RATES every sub-step
                     # (as the CLUBB host books dlf above).

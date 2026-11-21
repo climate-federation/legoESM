@@ -1284,6 +1284,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "and the two disagree. Requires --turbulence clubb "
                              "and --clubb-prognostic. Default off = the "
                              "historical bridge (byte-identical).")
+    parser.add_argument("--clubb-host-omega", dest="clubb_host_omega",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Hand prognostic CLUBB the host's large-scale "
+                             "pressure velocity, as CAM6 does (wm_zt = "
+                             "-omega/(rho g)), so its fluxes and variances feel "
+                             "the subsidence. MPAS lane. Requires --turbulence "
+                             "clubb and --clubb-prognostic. Default off = wm 0, "
+                             "the historical bridge (byte-identical).")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -2500,6 +2508,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="CAM6 MG2 prognostic droplet number with CAM6 "
                              "prescribed-aerosol activation (MPAS lane). "
                              "Needs --cam6-aerosol-dir.")
+    parser.add_argument("--morrison-relvar-scheme", type=str,
+                        choices=["cam6_clubb", "boutle2014"],
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_relvar_scheme"],
+                        dest="morrison_relvar_scheme",
+                        help="Source of MG2's subgrid cloud-water variance "
+                             "(relvar) on the CLUBB liquid-partition lane: "
+                             "cam6_clubb (CLUBB's own, default) or boutle2014 "
+                             "(Boutle et al. 2014 liquid FSD from cloud "
+                             "fraction and cell size). MPAS lane; needs "
+                             "--morrison-warm-rain-incloud.")
+    parser.add_argument("--morrison-boutle-fsd-factor", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_boutle_fsd_factor"],
+                        dest="morrison_boutle_fsd_factor",
+                        help="Multiplier on the Boutle et al. (2014) FSD "
+                             "(relvar = 1/(factor*FSD)^2); boutle2014 only.")
+    parser.add_argument("--morrison-boutle-overcast-ramp-width", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_boutle_overcast_ramp_width"],
+                        dest="morrison_boutle_overcast_ramp_width",
+                        help="Cloud-fraction width of the smooth blend of "
+                             "Boutle's FSD coefficient jump at full cover; "
+                             "0 = the published hard jump.")
     parser.add_argument("--cam6-aerosol-dir", type=str,
                         default=ExperimentConfig._field_defaults["cam6_aerosol_dir"],
                         dest="cam6_aerosol_dir",
@@ -3213,6 +3245,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
         clubb_liquid_partition=args.clubb_liquid_partition,
+        clubb_host_omega=args.clubb_host_omega,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
            for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS,
@@ -3373,6 +3406,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_do_graupel=args.morrison_do_graupel,
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
         morrison_prognostic_droplet_number=args.morrison_prognostic_droplet_number,
+        morrison_relvar_scheme=args.morrison_relvar_scheme,
+        morrison_boutle_fsd_factor=args.morrison_boutle_fsd_factor,
+        morrison_boutle_overcast_ramp_width=args.morrison_boutle_overcast_ramp_width,
         cam6_aerosol_dir=args.cam6_aerosol_dir,
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
         land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,

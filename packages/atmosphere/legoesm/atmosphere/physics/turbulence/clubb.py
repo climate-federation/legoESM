@@ -6635,6 +6635,7 @@ def clubb_step(
     q_c: jax.Array | None = None,
     troplev: jax.Array | None = None,
     omega: jax.Array | None = None,
+    omega_cam_layer_density: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6651,9 +6652,12 @@ def clubb_step(
         the PDF closure inside ``advance_clubb_core``).
       * Mean vertical velocity: with the host pressure velocity ``omega``
         [Pa/s, top-down ``(ncol, nlev)``] given, ``wm_zt = -omega / (rho_ds_zt
-        g)`` (CESM2.1 form, no ``omega_bot``: clubb_intr.F90:1676-1679
-        cam_cesm2_1_rel_60) and ``wm_zm = zt2zm(wm_zt)`` (:1778); without it
-        ``wm = 0``. CLUBB runs with ``l_implemented = .true.`` as in CAM
+        g)`` (CESM2.1 form, no ``omega_bot``: clubb_intr.F90:1676-1679,
+        cam_cesm2_1_rel_60) and ``wm_zm = zt2zm(wm_zt)`` (:1778); with
+        ``omega_cam_layer_density`` (static, the GCM host-omega lane) the
+        density is CAM's ``rho_in = pdel / (g dz)`` (:1654-1656) and the
+        surface momentum level takes half the lowest ``wm_zt`` (CAM's ghost
+        level holds 0); without ``omega`` ``wm = 0``. CLUBB runs with ``l_implemented = .true.`` as in CAM
         (clubb_intr.F90:113), so ``wm`` reaches the flux, variance and
         wp2/wp3 equations and the PDF closure, while the mean advection of the
         means stays with the host dycore.
@@ -6854,9 +6858,23 @@ def clubb_step(
     if omega is None:
         wm_zt, wm_zm = zeros_zt, zeros_zm
     else:
-        # clubb_intr.F90:1677-1679, 1778 (cam_cesm2_1_rel_60)
-        wm_zt = -flip_vertical(omega) / (rho_ds_zt * constants.g)
-        wm_zm = zt2zm(wm_zt, gr)
+        if omega_cam_layer_density:
+            # clubb_intr.F90:1654-1656 (cam_cesm2_1_rel_60): CAM's rho_in =
+            # pdel/(g dz), the layer mass over the layer depth.  CAM's CLUBB
+            # grid (grid_type 3) has a ghost thermodynamic level below the
+            # surface holding wm_zt = 0, so its zt2zm gives the surface
+            # momentum level half the lowest wm_zt.
+            dz_layer = z_half[:, :-1] - z_half[:, 1:]
+            pdel = p_half[:, 1:] - p_half[:, :-1]
+            # operation order as CAM's (bit-for-bit against the compiled
+            # oracle, tests/atmosphere/test_clubb_host_omega_oracle.py)
+            rho_in = flip_vertical((1.0 / constants.g) * (pdel / dz_layer))
+            wm_zt = -1.0 * flip_vertical(omega) / (rho_in * constants.g)
+            wm_zm = zt2zm(wm_zt, gr).at[:, 0].set(0.5 * wm_zt[:, 0])
+        else:
+            # clubb_intr.F90:1677-1679, 1778 (cam_cesm2_1_rel_60)
+            wm_zt = -flip_vertical(omega) / (rho_ds_zt * constants.g)
+            wm_zm = zt2zm(wm_zt, gr)
     new_state, diags = advance_clubb_core(
         state, forcing, Lscale=Lscale, brunt_vaisala_freq_sqd=brunt,
         exner_zt=exner_zt, p_in_Pa_zt=p_zt, p_sfc=flip_vertical(p_half)[:, 0],
@@ -6993,6 +7011,7 @@ def clubb_turbulence_prognostic(
     q_c: jax.Array | None = None,
     lat: jax.Array | None = None,
     omega: jax.Array | None = None,
+    omega_cam_layer_density: bool = False,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -7052,8 +7071,8 @@ def clubb_turbulence_prognostic(
 
     **Pressure velocity** (``omega``, ``(ncol, nlev)`` top-down [Pa/s]):
     forwarded to :func:`clubb_step`, which sets CLUBB's ``wm`` from it on every
-    sub-step at the held host density (CAM computes ``wm_zt`` once, before its
-    ``nadv`` loop, clubb_intr.F90:1677 cam_cesm2_1_rel_60). ``None``: ``wm = 0``.
+    sub-step at the held host layer density (CAM computes ``wm_zt`` once, before
+    its ``nadv`` loop, clubb_intr.F90:1677 cam_cesm2_1_rel_60). ``None``: ``wm = 0``.
 
     Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
     back into ``PhysicsState.clubb_moments`` via the carry machinery.
@@ -7165,7 +7184,8 @@ def clubb_turbulence_prognostic(
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
-            radht_zt=radht_zt, omega=omega, **_liq_kw, **_top_kw)
+            radht_zt=radht_zt, omega=omega,
+            omega_cam_layer_density=omega_cam_layer_density, **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         sfc_energy_in = diags["sfc_energy_in"]
         clubbtop = diags.get("clubbtop")
@@ -7198,7 +7218,8 @@ def clubb_turbulence_prognostic(
             du, dv, dT, dq, m_new, diag = clubb_step(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
-                radht_zt=radht_zt, omega=omega, **_top_kw,
+                radht_zt=radht_zt, omega=omega,
+                omega_cam_layer_density=omega_cam_layer_density, **_top_kw,
                 **({"q_c": ql_c} if _liq_on else {}))
             ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c
             carry = (u_c + dt_sub * du, v_c + dt_sub * dv, T_c + dt_sub * dT,

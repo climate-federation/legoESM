@@ -65,8 +65,11 @@ def test_switch_defaults_off():
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     assert MorrisonConfig._field_defaults["prognostic_droplet_number"] is False
     # appended (positional ABI), then the two RULE 5 widths of 2026-10-22 and
-    # the readjust, early-reset and sedimentation-reset widths of 2026-11-01 (#2216)
-    assert MorrisonConfig._fields[-6:] == (
+    # the readjust, early-reset and sedimentation-reset widths of 2026-11-01 (#2216),
+    # then the opt-in Boutle (2014) relvar fields
+    assert MorrisonConfig._fields[-9:] == (
         "prognostic_droplet_number", "mg2_presence_ramp_top", "mg2_frozen_rain_ice_ramp_frac",
         "mg2_drop_readjust_log_width", "mg2_drop_early_reset_log_width",
-        "mg2_drop_sed_reset_log_width")
+        "mg2_drop_sed_reset_log_width",
+        "relvar_scheme", "boutle_fsd_factor", "boutle_overcast_ramp_width")
+    assert MorrisonConfig._field_defaults["relvar_scheme"] == "cam6_clubb"

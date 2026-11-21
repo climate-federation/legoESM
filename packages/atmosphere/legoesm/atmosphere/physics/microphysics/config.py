@@ -191,6 +191,8 @@ __param_spec__ = {
     "MorrisonConfig": {
         "scheme_key": "atm.micro.MorrisonConfig",
         "excluded": {
+            "boutle_overcast_ramp_width": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM+Claude vote 2026-11-21",
+            "boutle_fsd_factor": "bounds pending: the observed FSD scatter of Boutle et al. (2014, doi:10.1002/qj.2140) is to bound it and is not yet read; tiered once sourced",
             "gsam_satadj_excess_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
@@ -1181,6 +1183,23 @@ class MorrisonConfig(NamedTuple):
     # (#2216, user 2026-11-01; KNOWN DIFFERENCE in
     # _warm_rain.mg2_droplet_fall_coefficients).
     mg2_drop_sed_reset_log_width: float = 0.01
+    # Source of the MG2 relvar on the CLUBB liquid-partition lane (APPENDED AT
+    # THE TUPLE END, positional ABI).  "cam6_clubb" (default, byte-identical):
+    # CLUBB's grid-box rcm**2/qclvar (clubb_intr.F90:2416-2425).
+    # "boutle2014": relvar = 1/(boutle_fsd_factor * FSD)**2, FSD the observed
+    # fractional standard deviation of liquid water of Boutle et al. (2014,
+    # QJRMS 140, 583-594) in CLUBB's PDF cloud fraction and the cell size
+    # sqrt(areaCell); MG2's [0.001, relvarmax] clip is kept (mg2_var_coef).
+    # Needs warm_rain_scheme="kk2000_cam6" and warm_rain_incloud=True.
+    relvar_scheme: str = "cam6_clubb"
+    boutle_fsd_factor: float = 1.0
+    # RULE 5 smoothing of Boutle et al.'s coefficient jump at C = 1 (0.20 ->
+    # 0.11): smoothstep width in cloud fraction; 0 = the published hard jump
+    # (KNOWN DIFFERENCE in _warm_rain.boutle2014_fsd).
+    boutle_overcast_ramp_width: float = 0.01
+
+
+RELVAR_SCHEMES = ("cam6_clubb", "boutle2014")
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
@@ -1356,6 +1375,7 @@ def apply_microphysics_experiment_flags(
     morrison_warm_rain_scheme: str | None = None,
     morrison_warm_rain_incloud: bool | None = None,
     morrison_prognostic_droplet_number: bool | None = None,
+    morrison_relvar_scheme: str | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1548,6 +1568,16 @@ def apply_microphysics_experiment_flags(
                 f"scheme (got {scheme!r}).")
         scheme_config = scheme_config._replace(
             prognostic_droplet_number=morrison_prognostic_droplet_number)
+    if morrison_relvar_scheme is not None:
+        if scheme != "morrison":
+            raise ValueError(
+                f"morrison_relvar_scheme={morrison_relvar_scheme!r} is only read "
+                f"by the morrison scheme (got {scheme!r}).")
+        if morrison_relvar_scheme not in RELVAR_SCHEMES:
+            raise ValueError(
+                f"Unknown morrison_relvar_scheme {morrison_relvar_scheme!r}; "
+                f"choose one of {RELVAR_SCHEMES}.")
+        scheme_config = scheme_config._replace(relvar_scheme=morrison_relvar_scheme)
     if morrison_warm_rain_scheme is not None:
         if scheme != "morrison":
             raise ValueError(
