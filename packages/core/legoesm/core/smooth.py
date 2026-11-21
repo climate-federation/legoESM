@@ -342,7 +342,8 @@ def max_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     """C1 ``max(a, b)`` with the band ``|a - b| < width*(|a| + |b|)/2`` measured
     relative to the operands (dimensionless static ``width``): exact outside it,
     :func:`smooth_max_c1` on the normalised operands inside.  ``width = 0`` is
-    ``jnp.maximum``."""
+    ``jnp.maximum``.  Against an operand of 0 the band is empty (the kink stays):
+    use :func:`positive_part_c1` on a scaled argument there."""
     if width == 0:
         return jnp.maximum(a, b)
     a, b = jnp.broadcast_arrays(jnp.asarray(a), jnp.asarray(b))

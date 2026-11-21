@@ -27,7 +27,7 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-from legoesm.core.smooth import max_rel, min_rel, step_rel
+from legoesm.core.smooth import max_rel, min_rel, positive_part_c1, step_rel
 
 _CX_CRIT = 0.292893218813452          # 1 - 1/sqrt(2), u2dbc.F threshold of the zx extrapolation
 _EPS = 1.0e-20
@@ -266,20 +266,27 @@ def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out, mb=None, m1=Non
         radiate = m1 if m2 is None else m1 * m2
         dft, dfx = dft * radiate, dfx * radiate
     # inflow where dfx*dft < 0; the product is measured against dfx^2 + dft^2
-    w_in = step_rel(-dfx * dft, dfx * dfx + dft * dft + _EPS, width)
-    dft = dft * (1.0 - w_in)
+    p = dfx * dft
+    scale = dfx * dfx + dft * dft + _EPS
+    w_in = step_rel(-p, scale, width)
     tau = r_out + (r_in - r_out) * w_in
+    if width == 0:
+        dft = jnp.where(w_in > 0, 0.0, dft)
+    else:
+        dft = dft * (1.0 - w_in)
     gsum = g1[..., :-1] + g1[..., 1:]
     w_up = step_rel(dft * gsum, dft * dft + gsum * gsum + _EPS, width)
     dfy = w_up * g1[..., :-1] + (1.0 - w_up) * g1[..., 1:]
     cff = max_rel(dfx * dfx + dfy * dfy, _EPS, width)
-    cx = dft * dfx
+    # cx = max(p, 0) as the hard form has it; the smooth form is one-sided (0 for
+    # inflow, never negative) so cff + cx stays positive
+    cx = dft * dfx if width == 0 else scale * positive_part_c1(p / scale, 1.0 / width)
     if width == 0:
         cy = jnp.clip(dft * dfy, -cff, cff)
         cy_pos, cy_neg = jnp.maximum(cy, 0.0), jnp.minimum(cy, 0.0)
     else:
         cy = cff * min_rel(max_rel(dft * dfy / cff, -1.0, width), 1.0, width)
-        cy_pos = cff * max_rel(cy / cff, 0.0, width)
+        cy_pos = cff * positive_part_c1(cy / cff, 1.0 / width)     # cy / cff in [-1, 1]
         cy_neg = cy - cy_pos
     fb = (cff * fb_old + cx * f1_new - cy_pos * gb[..., :-1]
           - cy_neg * gb[..., 1:]) / (cff + cx)
@@ -307,8 +314,10 @@ def _orlanski_1d(fb_new, f1_old, f1_new, f2_new, data, r_in, r_out, rx_max, *, w
         out = p > 0.0
         rx = jnp.where(out, jnp.minimum(dhdt / jnp.where(out, dhdx, 1.0), rx_max), 0.0)
     else:
-        pp = p * w_out
-        rx = w_out * pp / (max_rel(dhdx * dhdx, pp / rx_max, width) + _EPS)
+        # one-sided (0 for inflow, never negative), so 1 + rx stays positive
+        sc = dhdt * dhdt + dhdx * dhdx + _EPS
+        pp = sc * positive_part_c1(p / sc, 1.0 / width)
+        rx = pp / (max_rel(dhdx * dhdx, pp / rx_max, width) + _EPS)
     fb = (fb_new + rx * f1_new) / (1.0 + rx)
     r = r_in + (r_out - r_in) * w_out
     g = r / (1.0 + r)

@@ -105,7 +105,7 @@ def test_tangential_nudge_only():
     depth mean correction, which keeps the model's depth mean); the normal velocity and T, S are unchanged."""
     old, new, ob, h = _states()
     b = apply_baroclinic_open_boundary(old, new, ob._replace(velocity_rx_max=1.0), 1800.0, h, width=0.0)
-    c = apply_baroclinic_open_boundary(old, new, ob._replace(velocity_rx_max=1.0, tangential_nudge_only=True), 1800.0, h)
+    c = apply_baroclinic_open_boundary(old, new, ob._replace(velocity_rx_max=1.0, tangential_nudge_only=True), 1800.0, h, width=0.0)
     assert np.array_equal(np.asarray(b.v.data), np.asarray(c.v.data))
     assert np.array_equal(np.asarray(b.T.data), np.asarray(c.T.data))
     g = RI / (1 + RI)
