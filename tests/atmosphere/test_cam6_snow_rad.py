@@ -192,3 +192,18 @@ def test_deck_keys_reach_the_cloud_config():
 def test_real_table_loads_through_the_backend_loader():
     t = radint._snow_optics_table(REAL)
     assert t.sw_ext.shape[0] == 14 and t.lw_abs.shape[0] == 16
+
+
+def test_mcica_masks_the_snow_cap_weight_with_the_path():
+    """A smooth McICA mask m scales the snow path AND its LW cap weight, so a
+    saturated layer gives m w min(p a, 50), not min(m w p a, 50 w)."""
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rte.two_stream import _gpoint_snow
+    t = _synthetic_table()
+    p, w, m = jnp.array([[1.0e6]]), jnp.array([[0.5]]), 0.5
+    d = jnp.array([[200.0]])
+    kw = _gpoint_snow(0, (w * p, d, t, w), lambda igpt: (None, None, m * w * p, m * w))
+    ib = 3
+    got = mio.mitchell_band_lw_abs_od(t, ib, kw["cloud_snow"][0], d, kw["cloud_snow"][3])
+    want = m * w * mio.mitchell_band_lw_abs_od(t, ib, p, d)
+    assert float(want) == pytest.approx(m * w * 50.0)
+    np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-12)

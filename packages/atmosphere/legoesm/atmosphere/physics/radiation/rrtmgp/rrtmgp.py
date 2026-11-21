@@ -1084,8 +1084,10 @@ class RRTMGP:
                   mask = jnp.concatenate(
                       [jnp.zeros_like(mask[:, :, :1]), mask], axis=2)
 
+              # snow: its cap weight is sampled with the path (a smooth
+              # mask m gives m w min(p a, 50) = min(m w p a, 50 m w))
               _sampled = ((_cpl, _cpi) if cloud_snow is None
-                          else (_cpl, _cpi, cloud_path_snow))
+                          else (_cpl, _cpi, cloud_path_snow, cloud_snow_weight))
 
               def paths(igpt):
                   m = mask[igpt]

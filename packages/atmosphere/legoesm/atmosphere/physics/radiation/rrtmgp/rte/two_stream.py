@@ -234,7 +234,7 @@ def _compute_optimal_lw_secant(
 def _gpoint_cloud_paths(igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn):
   """Cloud water paths seen by g-point ``igpt``.
 
-  ``cloud_path_fn(igpt) -> (liq, ice[, snow])`` supplies McICA paths (each
+  ``cloud_path_fn(igpt) -> (liq, ice[, snow, snow weight])`` supplies McICA paths (each
   g-point its own cloud subcolumn); without it every g-point sees the same
   paths.
   """
@@ -251,7 +251,8 @@ def _gpoint_snow(igpt, cloud_snow, cloud_path_fn):
     return {}
   if cloud_path_fn is None:
     return {'cloud_snow': cloud_snow}
-  return {'cloud_snow': (cloud_path_fn(igpt)[2],) + tuple(cloud_snow[1:])}
+  sampled = cloud_path_fn(igpt)
+  return {'cloud_snow': (sampled[2],) + tuple(cloud_snow[1:3]) + (sampled[3],)}
 
 
 def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
