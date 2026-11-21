@@ -102,6 +102,58 @@ def _measure(max_iters, T_init, adjoint, near_root=False):
         canopy_solver._LM_RTOL, canopy_solver._LM_ATOL = tol0
 
 
+def sweep(n=64, max_iters=1):
+    """Far from root: many columns stopped one LM step from the cold seed.
+
+    Per-column d(SH+LE)/d(T_air) by reverse mode (the columns are independent,
+    so a jacobian of the per-column loss is diagonal) against central
+    differences; prints the largest |AD|, |FD| and the AD/FD spread, to see
+    whether the last-iterate adjoint ever blows up where it is least exact.
+    """
+    rng = np.random.default_rng(0)
+    u = jnp.asarray(rng.uniform(0.3, 6.0, n))
+    ta = jnp.asarray(rng.uniform(285.0, 315.0, n))
+    sw = jnp.asarray(rng.uniform(100.0, 1000.0, n))
+    sch = TwoLeafCanopyConfig(max_iters=max_iters, fallback_from_last_iterate=True,
+                              implicit_ground_flux=False)
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, dz_top=0.025, growth_factor=2.0,
+                                 total_depth=3.0),
+        surface_scheme=sch)
+    st = ml.init_multilayer_land_state(n, cfg, T_init=307.0, theta_init=0.12)
+    o = jnp.ones(n)
+    ps = 1e5 * o
+
+    def run(dT):
+        Ta = ta + dT
+        f = AtmToSurface(
+            sw_down=sw, lw_down=400.0 * o, precip_total=0 * o, precip_snow=0 * o,
+            T_lowest=Ta, q_lowest=0.008 * o, u_lowest=u, v_lowest=0 * o,
+            p_lowest=0.99 * ps, p_surface=ps, rho_lowest=ps / (constants.R_d * Ta),
+            cos_zenith=0.85 * o, co2_ppmv=340 * o, has_radiation=o,
+            has_precipitation=o)
+        return ml.step_multilayer_land_with_diagnostics(
+            st, f, cfg, 1.0, 1800.0, lat=jnp.full(n, -0.55))
+
+    _, _, _, so = jax.jit(run)(jnp.zeros(n))
+    acc = (~np.asarray(so.converged).astype(bool)
+           & ~np.asarray(so.held).astype(bool))
+
+    def per_col(dT):
+        _, r, _, _ = run(dT)
+        return r.shflx + r.lhflx
+    ad = np.diag(np.asarray(jax.jit(jax.jacrev(per_col))(jnp.zeros(n))))
+    f = jax.jit(per_col)
+    h = 1e-4
+    fd = np.asarray((f(jnp.full(n, h)) - f(jnp.full(n, -h))) / (2 * h))
+    a, d = ad[acc], fd[acc]
+    r = a / np.where(d == 0.0, np.nan, d)
+    print(f"sweep n={n} max_iters={max_iters} accepted_unconverged={acc.sum()} "
+          f"max|AD|={np.max(np.abs(a)):.3e} max|FD|={np.max(np.abs(d)):.3e} "
+          f"AD/FD min={np.nanmin(r):.3f} median={np.nanmedian(r):.3f} "
+          f"max={np.nanmax(r):.3f}", flush=True)
+
+
 def main():
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
@@ -123,4 +175,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sweep() if "--sweep" in sys.argv else main()
