@@ -182,8 +182,14 @@ def make_physics(
     surface_bulk_coeffs="default",
     cam6_activation=None,
     mynn_initflag=None,
+    five=None,
+    five_host_coord=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
+
+    ``five``: a :class:`~legoesm.atmosphere.physics.five.FiveConfig`; None or
+    ``enabled=False`` (default) returns exactly the function built without it.
+    ``five_host_coord``: the host hybrid coordinate FIVE nests its fine grid in.
 
     The returned function calls each enabled physics module and sums
     their tendencies.
@@ -400,7 +406,51 @@ def make_physics(
     fn._mynn_initflag = mynn_initflag
     fn._requires_phys_state = (physics_config_requires_phys_state(config)
                                or physics_cadence != "off")
+    if five is not None and five.enabled:
+        fn = _wrap_five(fn, config, five, model_type, dt, column_mesh, need_rad,
+                        f_land, land_beta, budget_ledger, physics_cadence,
+                        cld_macmic_num_steps, surface_bulk_coeffs,
+                        cam6_activation, mynn_initflag, five_host_coord)
     return fn
+
+
+def _wrap_five(host_fn, config, five, model_type, dt, column_mesh, need_rad,
+               f_land, land_beta, budget_ledger, physics_cadence,
+               cld_macmic_num_steps, surface_bulk_coeffs, cam6_activation,
+               mynn_initflag, host_coord):
+    """Build the FIVE fine physics beside ``host_fn`` (docs/85 13.24)."""
+    from legoesm.atmosphere.physics.convection.integration import make_convection_physics
+    from legoesm.atmosphere.physics import five as five_mod
+    five_mod.validate_five_config(five)
+    if model_type != "mpas" or int(cld_macmic_num_steps) < 2:
+        raise ValueError("FIVE runs on the MPAS lane with cld_macmic_num_steps >= 2")
+    if budget_ledger or physics_cadence != "off":
+        raise ValueError("FIVE is not built with the budget ledger or the physics cadence cache")
+    if config.turbulence.scheme != "clubb":
+        raise ValueError("FIVE needs CLUBB turbulence (the fine moments are CLUBB's)")
+    if getattr(config.turbulence, "host_omega", False):
+        raise ValueError("FIVE does not pass the host omega to the fine CLUBB yet")
+    if config.microphysics.scheme == "ifs_cloudsc":
+        raise ValueError("FIVE is not built with ifs_cloudsc (no convection replay hand-off)")
+    if host_coord is None:
+        raise ValueError("FIVE needs the host vertical coordinate (five_host_coord), "
+                         "a hybrid sigma-pressure coordinate")
+    G = five_mod.build_five_grid(host_coord, five)
+    replay = (five_mod.make_conv_replay(G, config, dt, five)
+              if config.convection.scheme != "none" else None)
+    fine_fn = _make_hydrostatic_combined(
+        config, dt, model_type="mpas", column_mesh=column_mesh,
+        need_rad=need_rad, f_land=f_land, land_beta=land_beta,
+        cld_macmic_num_steps=cld_macmic_num_steps,
+        surface_bulk_coeffs=surface_bulk_coeffs,
+        cam6_activation=cam6_activation, mynn_initflag=mynn_initflag,
+        convection_override=replay)
+    zm_fn = None
+    if replay is not None:
+        defer = (config.convection.scheme == "zhang_mcfarlane")
+        zm_fn = make_convection_physics(config.convection, "mpas", dt,
+                                        defer_detrainment=defer)
+    return five_mod.make_five_physics(host_fn, fine_fn, zm_fn, G, five, config, dt)
 
 
 def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
@@ -737,8 +787,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                cld_macmic_num_steps: int = 1,
                                surface_bulk_coeffs=None,
                                cam6_activation=None,
-                               mynn_initflag=None) -> Callable:
+                               mynn_initflag=None,
+                               convection_override=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
+
+    ``convection_override``: a module used in place of the configured
+    convection (FIVE's replay of the host ZM on the fine grid); None (default)
+    builds the configured one.
 
     ``surface_bulk_coeffs`` ``(C_H, C_E, latent)``: the constant-coefficient surface
     exchange (:func:`~legoesm.atmosphere.physics.turbulence.integration.make_surface_bulk_physics`)
@@ -894,7 +949,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(
             config.convection, model_type, dt,
-            defer_detrainment=_defer_dlf, defer_to_cloudsc=_cloudsc),
+            defer_detrainment=_defer_dlf, defer_to_cloudsc=_cloudsc)
+            if convection_override is None else convection_override,
             True, "conv_prog_profile"))
     _turb_entry = None
     _micro_entry = None
