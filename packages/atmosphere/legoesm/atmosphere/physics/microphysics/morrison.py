@@ -983,7 +983,8 @@ def morrison_microphysics(
         # Cooper stands in for CAM6's mixed-phase hetfrz_classnuc, which acts only
         # for 235.15 K < T < 269.15 K (hetfrz_classnuc_cam.F90:779); below, CAM6's
         # cirrus ice comes from naai alone (block 1b).
-        dN_i_nuc = dN_i_nuc * ge_ramp(T, _CAM6_HETFRZ_T_MIN_K, config.cirrus_T_width_K)
+        dN_i_nuc = dN_i_nuc * ge_ramp(T, _CAM6_HETFRZ_T_MIN_K, config.cirrus_T_width_K,
+                                      strict=True)
     # Mass source: each new crystal starts at MI0 = 4/3·π·ρ_ci·r³ (SAM
     # MNUCCD = NNUCCD·MI0), so freshly-nucleated ice carries mass rather
     # than relying solely on subsequent deposition.
@@ -1032,9 +1033,11 @@ def morrison_microphysics(
             _esi = saturation_vapor_pressure_ice_goff_gratch(T)
             # relhum = q/qvl on the qsfm-scaled qvl (:933, :1109-1112)
             hom_gate = (
-                le_ramp(T, T_freeze - _MG2_ICENUCT_OFFSET_K, config.cirrus_T_width_K)
+                le_ramp(T, T_freeze - _MG2_ICENUCT_OFFSET_K, config.cirrus_T_width_K,
+                        strict=True)
                 * ge_ramp(q_v / jnp.clip(q_sat_mg2, 1.0e-12) * _esl / _esi,
-                          _MG2_ICENUC_RHI, config.cirrus_rel_width, _MG2_ICENUC_RHI))
+                          _MG2_ICENUC_RHI, config.cirrus_rel_width, _MG2_ICENUC_RHI,
+                          strict=True))
             n_hom_target = naai * jnp.maximum(cloud_fraction, _MG2_MINCLD)
         # Top up to n_hom_target counting the COOPER crystals nucleated in this
         # SAME step (dN_i_nuc*dt), not just the pre-existing N_i.  Cooper's

@@ -102,17 +102,18 @@ TKE_PER_WP2 = 1.5              # clubb tke = 3/2 wp2 (microp_aero.F90:517)
 _REGM_NO_DUST = 1.0e3            # stands in for the Fortran's NaN regime threshold (compares false)
 
 
-def ge_ramp(x, thr, width, scale=1.0):
-    """1 where ``x >= thr`` (exactly, as the Fortran), a C1 ramp from 0 at ``thr - width*scale`` below;
-    ``width <= 0`` (a Python float) is the hard switch."""
+def ge_ramp(x, thr, width, scale=1.0, strict=False):
+    """1 where ``x >= thr`` (``x > thr`` if ``strict``; exactly, as the Fortran), a C1 ramp from 0 at
+    ``thr - width*scale`` below; ``width <= 0`` (a Python float) is the Fortran's hard comparison."""
     if width <= 0.0:
-        return (x >= thr).astype(jnp.result_type(x, float))
+        return ((x > thr) if strict else (x >= thr)).astype(jnp.result_type(x, float))
     return smoothstep_cubic((x - thr) / (width * scale) + 1.0)
 
 
-def le_ramp(x, thr, width, scale=1.0):
-    """1 where ``x <= thr``, a C1 ramp to 0 at ``thr + width*scale`` above; ``width <= 0`` is hard."""
-    return ge_ramp(-x, -thr, width, scale)
+def le_ramp(x, thr, width, scale=1.0, strict=False):
+    """1 where ``x <= thr`` (``x < thr`` if ``strict``), a C1 ramp to 0 at ``thr + width*scale`` above;
+    ``width <= 0`` is the hard comparison."""
+    return ge_ramp(-x, -thr, width, scale, strict)
 
 
 def _pos(x, width, scale):
@@ -140,7 +141,7 @@ def _hf(T, ww, RH, Na, wT, wr):
     C = HF["RHwC"][0] * lw + HF["RHwC"][1]
     RHw = (A * T * T + B * T + C) * PERCENT
     regm = HF["regm"][0] * lw + HF["regm"][1]
-    warm64 = ge_ramp(T, HF["T64"], wT)
+    warm64 = ge_ramp(T, HF["T64"], wT, strict=True)
     A2f = _pick(warm64, HF["A21f"], HF["A22f"])
     B2f = _pick(warm64, HF["B21f"], HF["B22f"])
     k1f = jnp.exp(A2f + B2f * T + HF["C2f"] * lw)
@@ -211,7 +212,8 @@ def nucleati(wbar, tair, pmid, relhum, cldn, qc, qi, ni_in, rhoair, so4_num, dst
     # pre-existing ice (:149-185)
     Ni_preice = ni_in * rhoair / jnp.maximum(MINCLD, cldn)
     # the Fortran's strict > is the >= ramp here: identical except exactly at the threshold
-    pre = ge_ramp(Ni_preice, NI_PRE_MIN, wr, NI_PRE_MIN) * ge_ramp(qi, QI_PRE_MIN, wr, QI_PRE_MIN)
+    pre = (ge_ramp(Ni_preice, NI_PRE_MIN, wr, NI_PRE_MIN, strict=True)
+           * ge_ramp(qi, QI_PRE_MIN, wr, QI_PRE_MIN, strict=True))
     live = pre > 0.0
     qi_s = jnp.where(live, qi, 1.0)
     ni_s = jnp.where(live, ni_in, 1.0)
@@ -234,7 +236,7 @@ def nucleati(wbar, tair, pmid, relhum, cldn, qc, qi, ni_in, rhoair, so4_num, dst
     so4_s = jnp.where(so4_ok, so4_num, 1.0)
     dsum_s = jnp.where(dust_ok, dsum, 1.0)
     # cldn = max(ast, mincld) > 0 always: the Fortran's cldn > 0 test cannot fail and is dropped
-    mixed = le_ramp(tc, TC_MIXED_MAX, wT) * ge_ramp(tc, TC_HOM, wT) * le_ramp(qc, QC_SMALL, wr, QC_SMALL)
+    mixed = le_ramp(tc, TC_MIXED_MAX, wT) * ge_ramp(tc, TC_HOM, wT) * le_ramp(qc, QC_SMALL, wr, QC_SMALL, strict=True)
     cold = le_ramp(tc, TC_HOM, wT)
     active = aer_ok * ge_ramp(RHimean, RHI_ACT, wr, RHI_ACT) * (mixed + cold - mixed * cold)
     A = REGM_A[0] * jnp.log(dsum_s) + REGM_A[1]
@@ -243,7 +245,7 @@ def nucleati(wbar, tair, pmid, relhum, cldn, qc, qi, ni_in, rhoair, so4_num, dst
     rhs = relhum * subgrid
     # the homogeneous block repeated three times in the Fortran (:207-221, :232-243, :247-258)
     nihf_raw = jnp.where(so4_ok, _hf(tc, wbar1, rhs, so4_s, wT, wr), 0.0)
-    hom_occ = ge_ramp(nihf_raw, NIHF_OCCUR, wr, NIHF_OCCUR)
+    hom_occ = ge_ramp(nihf_raw, NIHF_OCCUR, wr, NIHF_OCCUR, strict=True)
     hom_niimm = hom_occ * dsum
     hom_nihf = nihf_raw * fhom
     hom_oso4 = hom_occ * nihf_raw * fhom
@@ -251,19 +253,23 @@ def nucleati(wbar, tair, pmid, relhum, cldn, qc, qi, ni_in, rhoair, so4_num, dst
     # heterogeneous at the actual temperature (:222-228)
     het_niimm = jnp.where(dust_ok, _hetero(tc, wbar2, dsum_s), 0.0)
     # mixed regime (:259-271)
-    mix_nihf_raw = jnp.where(so4_ok, _hf(regm - REGM_RAMP, wbar1, rhs, so4_s, wT, wr), 0.0)
-    mix_niimm = jnp.where(dust_ok, _hetero(regm, wbar2, dsum_s), 0.0)
-    mix_oso4 = ge_ramp(mix_nihf_raw, NIHF_OCCUR, wr, NIHF_OCCUR) * mix_nihf_raw
-    ramp = ((regm - tc) / REGM_RAMP) ** 2
+    # the mixed regime is read only with dust; without it the placeholder regm would put the
+    # inactive branch at ~1000 C (exp overflow, 0*inf in reverse mode): evaluate it at tc there
+    regm_x = jnp.where(dust_ok, regm, tc)
+    mix_nihf_raw = jnp.where(so4_ok, _hf(regm_x - REGM_RAMP, wbar1, rhs, so4_s, wT, wr), 0.0)
+    mix_niimm = jnp.where(dust_ok, _hetero(regm_x, wbar2, dsum_s), 0.0)
+    mix_oso4 = ge_ramp(mix_nihf_raw, NIHF_OCCUR, wr, NIHF_OCCUR, strict=True) * mix_nihf_raw
+    ramp = ((regm_x - tc) / REGM_RAMP) ** 2
     mix_nihf = mix_nihf_raw * fhom * ramp
     mix_oso4 = mix_oso4 * fhom * ramp
     mix_n1 = mix_niimm + mix_nihf
-    hom_only = le_ramp(tc, TC_HOM_ONLY, wT) * ge_ramp(wbar1, W_HOM_ONLY, wr, W_HOM_ONLY)
+    hom_only = (le_ramp(tc, TC_HOM_ONLY, wT, strict=True)
+                * ge_ramp(wbar1, W_HOM_ONLY, wr, W_HOM_ONLY, strict=True))
     so4_small = 1.0 - so4_ok.astype(tair.dtype)
     dust_small = 1.0 - dust_ok.astype(tair.dtype)
-    b1t = ge_ramp(tc, regm, wT)
+    b1t = ge_ramp(tc, regm, wT, strict=True)
     b1 = b1t + so4_small - b1t * so4_small
-    b2t = le_ramp(tc, regm - REGM_RAMP, wT)
+    b2t = le_ramp(tc, regm - REGM_RAMP, wT, strict=True)
     b2 = b2t + dust_small - b2t * dust_small
     b1_hom = hom_only * so4_ok.astype(tair.dtype)
 
@@ -280,7 +286,7 @@ def nucleati(wbar, tair, pmid, relhum, cldn, qc, qi, ni_in, rhoair, so4_num, dst
     niimm = active * niimm
     oso4 = active * oso4
     # ni >= 0 always; the cap at 9999/cm3 zeroes (nimey = 0 under use_hetfrz_classnuc)
-    nuci = ni * (1.0 - ge_ramp(ni, NUCI_MAX, wr, NUCI_MAX))
+    nuci = ni * (1.0 - ge_ramp(ni, NUCI_MAX, wr, NUCI_MAX, strict=True))
     return nuci * PER_CM3 / rhoair, nihf, niimm, oso4
 
 
@@ -288,9 +294,11 @@ def wsubi_from_wp2(wp2_iface, top_lev):
     """``microp_aero.F90`` wsubi on layers from CLUBB wp2 on interfaces (use_preexisting_ice: no 0.2 cap)."""
     tke = TKE_PER_WP2 * wp2_iface
     arg = 0.5 * (tke[:, :-1] + tke[:, 1:]) * (2.0 / 3.0)
-    wsub = jnp.minimum(jnp.sqrt(jnp.maximum(arg, 0.0)), WSUB_CAP)
+    # max(WSUBI_MIN, sqrt(max(arg, 0))) taken as sqrt(max(arg, WSUBI_MIN**2)): the same value, and no
+    # infinite sqrt derivative at arg = 0 behind the floor
+    wsub = jnp.minimum(jnp.sqrt(jnp.maximum(arg, WSUBI_MIN ** 2)), WSUB_CAP)
     above = jnp.arange(arg.shape[1]) < top_lev
-    return jnp.where(above, WSUBI_MIN, jnp.maximum(WSUBI_MIN, wsub))
+    return jnp.where(above, WSUBI_MIN, wsub)
 
 
 def cam6_naai(T, q_v, pmid, q_c, q_i, N_i, ast, wsubi, num_accum, num_aitken, num_coarse,
@@ -320,5 +328,5 @@ def cam6_naai(T, q_v, pmid, q_c, q_i, N_i, ast, wsubi, num_accum, num_aitken, nu
         oso4, wr, jnp.where(so4_strat > 0.0, so4_strat, 1.0))
     dso4 = jnp.maximum(0.0, so4_strat - oso4) * PER_CM3 / rho
     naai = naai + strat * dso4
-    on = (k[None, :] >= top_lev) * le_ramp(T, constants.T_freeze - T_NUC_MAX_OFFSET, wT)
+    on = (k[None, :] >= top_lev) * le_ramp(T, constants.T_freeze - T_NUC_MAX_OFFSET, wT, strict=True)
     return on * naai

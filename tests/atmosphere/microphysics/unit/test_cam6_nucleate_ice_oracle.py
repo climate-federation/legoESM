@@ -120,3 +120,36 @@ def test_naai_gradient_at_default(fx):
     print("naai grad", g, fd)
     assert np.isfinite(g) and g != 0.0
     assert abs(g - fd) <= 1e-3 * abs(fd)
+
+
+def test_hard_limit_keeps_the_fortran_comparators():
+    from legoesm.atmosphere.physics.microphysics.cam6_nucleate_ice import ge_ramp, le_ramp
+    x = jnp.asarray([1.05])
+    assert float(ge_ramp(x, 1.05, 0.0, strict=True)[0]) == 0.0      # Fortran x > thr
+    assert float(ge_ramp(x, 1.05, 0.0)[0]) == 1.0                   # Fortran x >= thr
+    assert float(le_ramp(x, 1.05, 0.0, strict=True)[0]) == 0.0
+    assert float(le_ramp(x, 1.05, 0.0)[0]) == 1.0
+    # the smooth form is exact on the side the condition holds
+    assert float(ge_ramp(jnp.asarray([1.06]), 1.05, 0.01, 1.05, strict=True)[0]) == 1.0
+    assert float(ge_ramp(jnp.asarray([1.05 * 0.99 - 1e-9]), 1.05, 0.01, 1.05)[0]) == 0.0
+
+
+def test_wsubi_gradient_finite_at_zero_turbulence():
+    wp2 = jnp.zeros((1, 6))
+    g = jax.grad(lambda w: jnp.sum(wsubi_from_wp2(w, top_lev=1)))(wp2)
+    assert bool(jnp.all(jnp.isfinite(g)))
+
+
+def test_no_dust_gradient_finite():
+    """No dust: the Fortran's regime threshold is NaN; the inactive mixed branch
+    must not overflow or poison reverse mode."""
+    one = jnp.ones((1, 1))
+
+    def f(T):
+        nuci, _, _, _ = nucleati(1.0 * one, T, 2.0e4 * one, 1.5 * one, 0.5 * one, 0.0 * one,
+                                 0.0 * one, 0.0 * one, 0.3 * one, 1.0e-4 * one, 0.0 * one,
+                                 0.0 * one, 1.2, 0.1, 0.01)
+        return jnp.sum(nuci)
+
+    v, g = jax.value_and_grad(f)(215.0 * one)
+    assert bool(jnp.isfinite(v)) and bool(jnp.all(jnp.isfinite(g)))
