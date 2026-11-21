@@ -499,6 +499,7 @@ land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101_v3.npz
 mpas_qv_smooth_del2_m2s: 0.0
 mpas_qv_smooth_del4_m4s: 3.6421e14
 mpas_conservative_tracer_clamp: true
+positivity_condensate_from_vapour: true  # pay net-negative column condensate from the column's vapour (ENSO-fork port, 2026-11-20)
 
 # ---- forcing / IC / output (unchanged) ------------------------------------------
 diurnal_cycle: true

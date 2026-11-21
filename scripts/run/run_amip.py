@@ -562,6 +562,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=_DYCORE_DEFAULTS.tracer_van_leer_flux_width,
                         help="Hybrid van Leer mass-flux width [Pa/s]; zero = hard flux split. "
                              "Both widths zero recover the old hard operator.")
+    parser.add_argument("--positivity-condensate-from-vapour",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.positivity_condensate_from_vapour,
+                        help="Positivity stage (MPAS, lat-lon): pay a column's "
+                             "net-negative condensate from the same column's "
+                             "vapour with its latent heat before the borrow. "
+                             "ON by default; --no-positivity-condensate-from-"
+                             "vapour restores the legacy borrow, which creates "
+                             "water when the globe cannot repay the deficit.")
     parser.add_argument("--mpas-vert-advection-scheme",
                         choices=("upwind", "van_leer", "sb"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
@@ -3049,6 +3058,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             if isinstance(args.mpas_vert4_log_form_tracers, str)    # YAML scalar
             else tuple(args.mpas_vert4_log_form_tracers or ())),
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
+        positivity_condensate_from_vapour=args.positivity_condensate_from_vapour,
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
         spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
                                     if args.spectral_sponge_nu_top_m2s is not None else 0.0),
