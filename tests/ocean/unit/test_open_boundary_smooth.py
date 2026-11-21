@@ -29,11 +29,11 @@ OM4P5 = dict(C2=0.15, Cu2=0.01, C4=0.06, Cu4=0.01, Kh_sin_lat=2000.0, Kh_sin_pow
 
 # Max |smooth - hard| per case at W, measured on this fixture (KNOWN DIFFERENCE, RULE 5).
 GAPS = {
-    "orlanski": None,
-    "orlanski_1d": None,
-    "resolution_fn": None,
-    "wkb": None,
-    "om4p5_tendency": None,
+    "orlanski": [4.440892098500626e-16, 4.440892098500626e-16, 0.0001758401576701374],
+    "orlanski_1d": [2.220446049250313e-16, 1.1102230246251565e-16, 0.00020560608281416926],
+    "resolution_fn": [0.0, 0.36573386396251784, 0.17397055672223738],
+    "wkb": [0.0012680457993169414, 2.2288693464989073e-05, 2.2288693829031203e-05],
+    "om4p5_tendency": [4.290172723640188e-10, 4.731819003420793e-10, 3.590434841460404e-10],
 }
 
 
@@ -131,8 +131,8 @@ def test_gradients_through_the_switches():
     g = jax.grad(lambda x: _orlanski(one[0], one[1], x, one[3], one[4], RI, RO, width=W).sum())(one[2])
     assert np.isfinite(float(g[0, 0])) and float(g[0, 0]) != 0.0
     grid = _grid()
-    gR = jax.grad(lambda c: om4_resolution_function(jnp.full((grid.n_lat, grid.n_lon), c), grid,
-                                                    width=W)[0].sum())(2.5)
+    gR = jax.grad(lambda c: sum(r.sum() for r in om4_resolution_function(
+        jnp.full((grid.n_lat, grid.n_lon), c), grid, width=W)))(2.5)
     assert np.isfinite(float(gR)) and float(gR) != 0.0      # the hard step has zero derivative
     T, S, h, act = _column(0)
     gN = jax.grad(lambda t: wkb_first_baroclinic_wave_speed(t, S, h, act, _eos(), constants.rho_ocean, constants.g,
