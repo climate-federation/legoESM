@@ -170,3 +170,9 @@ def test_preflight_with_the_wrong_mpi_version_is_refused(tmp_path):
     lib = tmp_path / "hpcx" / "ompi" / "lib" / "libmpi.so.40"
     r = _run_preflight(tmp_path, markers=f"'MPI_LIB Open MPI v4.1.2' 'MPI_PATH {lib}' 'CUDA_EXT True'")
     assert r.returncode == 73
+
+
+def test_preflight_accepts_an_hpcx_home_with_several_trailing_slashes(tmp_path):
+    r = _run_preflight(tmp_path, hpcx_home=f"{tmp_path / 'hpcx'}//")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "PREFLIGHT_PASSED" in r.stdout
