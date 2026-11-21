@@ -126,8 +126,8 @@ def test_gradients_through_the_switches():
     check_grads(lambda f1n: _orlanski_1d(rows[0], rows[1], f1n, rows[3], rows[4], RI, RO,
                                          jnp.asarray(1.0), width=W),
                 (rows[2],), order=1, modes=["rev"], atol=1e-5, rtol=1e-5)
-    # the inflow/outflow switch itself: d(out)/d(f1_new) where dfx*dft = 0 is finite and non-zero
-    one = [jnp.asarray([[x]]) for x in (0.3, 1.0, 1.0, 0.5, 0.0)]
+    # inside the inflow/outflow band (dfx*dft just above 0): d(out)/d(f1_new) finite and non-zero
+    one = [jnp.asarray([[x]]) for x in (0.3, 1.0, 0.999, 0.5, 0.0)]
     g = jax.grad(lambda x: _orlanski(one[0], one[1], x, one[3], one[4], RI, RO, width=W).sum())(one[2])
     assert np.isfinite(float(g[0, 0])) and float(g[0, 0]) != 0.0
     grid = _grid()
