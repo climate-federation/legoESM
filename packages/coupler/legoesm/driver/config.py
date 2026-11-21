@@ -2297,6 +2297,13 @@ class ExperimentConfig(NamedTuple):
     # Directory of the sha256-pinned CAM6 PPE member-000 aerosol climatology +
     # MAM4 property files read by that activation; None = unset.
     cam6_aerosol_dir: str | None = None
+    # MorrisonConfig.cirrus_nucleation: "fixed" (Koop threshold, fixed number)
+    # or "cam6_liu_penner" (CAM6 nucleate_ice with pre-existing ice; MPAS lane;
+    # needs cirrus_aerosol_file).
+    morrison_cirrus_nucleation: str = "fixed"
+    # npz of a CAM prescribed MAM3 aerosol climatology mapped onto the run's
+    # cells (cam6_cirrus_aerosol.map_to_cells); None = unset.
+    cirrus_aerosol_file: str | None = None
     # Sea-ice shortwave albedo (#2106).
     #   "auto" (default)      -> resolved per run by resolve_sea_ice_albedo_scheme:
     #     "maykut_untersteiner" when the lane carries the prognostic ice skin,
@@ -2343,6 +2350,12 @@ class ExperimentConfig(NamedTuple):
     # at T_freeze (read only with cloud_cam6_do_subgrid_growth); 0 = MG2's
     # hard switch.  Range [0, 1], checked in validate_strict.
     morrison_qsfm_freeze_ramp_K: float = 0.1
+    # MorrisonConfig.cirrus_T_width_K / cirrus_rel_width: RULE 5 widths of the
+    # cam6_liu_penner cirrus switches (temperature [K]; relative for humidity,
+    # updraft, ice and number thresholds); 0 = CAM6's hard switches.  Range
+    # [0, 1], checked in validate_strict.
+    morrison_cirrus_T_width_K: float = 0.1
+    morrison_cirrus_rel_width: float = 0.01
     # CanopyConfig.solve_group: columns per batch of the two-leaf canopy Newton
     # solve, 0 = one batch per GPU (same placement and None semantics as
     # land_canopy_most_n_iters; the production deck names it).
@@ -5080,6 +5093,12 @@ class ExperimentConfig(NamedTuple):
             "morrison_qsfm_freeze_ramp_K": (
                 lambda: _morr and self.cloud_cam6_do_subgrid_growth is True,
                 "microphysics='morrison' and cloud_cam6_do_subgrid_growth=True"),
+            "morrison_cirrus_T_width_K": (
+                lambda: _morr and self.morrison_cirrus_nucleation == "cam6_liu_penner",
+                "microphysics='morrison' and morrison_cirrus_nucleation='cam6_liu_penner'"),
+            "morrison_cirrus_rel_width": (
+                lambda: _morr and self.morrison_cirrus_nucleation == "cam6_liu_penner",
+                "microphysics='morrison' and morrison_cirrus_nucleation='cam6_liu_penner'"),
         }
         for _rn, (_read, _where) in _reads.items():
             _rw = getattr(self, _rn)
@@ -5097,6 +5116,18 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "morrison_prognostic_droplet_number=True needs cam6_aerosol_dir "
                 "(the CAM6 prescribed-aerosol climatology its activation reads).")
+        if self.morrison_cirrus_nucleation not in ("fixed", "cam6_liu_penner"):
+            errors.append(f"morrison_cirrus_nucleation={self.morrison_cirrus_nucleation!r}; "
+                          "choose 'fixed' or 'cam6_liu_penner'.")
+        if self.morrison_cirrus_nucleation == "cam6_liu_penner" and not (
+                self.cirrus_aerosol_file and self.homogeneous_ice_nucleation
+                and self.morrison_warm_rain_incloud):
+            errors.append(
+                "morrison_cirrus_nucleation='cam6_liu_penner' needs cirrus_aerosol_file, "
+                "homogeneous_ice_nucleation=True and morrison_warm_rain_incloud=True.")
+        if self.cirrus_aerosol_file and self.morrison_cirrus_nucleation != "cam6_liu_penner":
+            errors.append("cirrus_aerosol_file is read only under "
+                          "morrison_cirrus_nucleation='cam6_liu_penner'.")
         if (self.morrison_sed_cfl_substeps_strict is True
                 and self.morrison_sed_cfl_substeps is False):
             errors.append(

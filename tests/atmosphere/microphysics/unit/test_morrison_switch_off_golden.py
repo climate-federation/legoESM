@@ -68,8 +68,8 @@ def test_switch_defaults_off():
     # appended (positional ABI), then the two RULE 5 widths of 2026-10-22, the
     # readjust, early-reset and sedimentation-reset widths of 2026-11-01 (#2216),
     # then the specified-number droplet sedimentation switch
-    assert MorrisonConfig._fields[-8:] == (
+    assert MorrisonConfig._fields[-11:] == (
         "prognostic_droplet_number", "mg2_presence_ramp_top", "mg2_frozen_rain_ice_ramp_frac",
         "mg2_drop_readjust_log_width", "mg2_drop_early_reset_log_width",
         "mg2_drop_sed_reset_log_width", "specified_nc_droplet_sedimentation",
-        "qsfm_freeze_ramp_K")
+        "qsfm_freeze_ramp_K", "cirrus_nucleation", "cirrus_T_width_K", "cirrus_rel_width")

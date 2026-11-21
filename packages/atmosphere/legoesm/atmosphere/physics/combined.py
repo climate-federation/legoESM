@@ -182,6 +182,7 @@ def make_physics(
     surface_bulk_coeffs="default",
     cam6_activation=None,
     mynn_initflag=None,
+    cirrus_aerosol=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -398,7 +399,8 @@ def make_physics(
             budget_ledger_level_weight=budget_ledger_level_weight,
             surface_bulk_coeffs=surface_bulk_coeffs,
             cam6_activation=cam6_activation,
-            mynn_initflag=mynn_initflag)
+            mynn_initflag=mynn_initflag,
+            cirrus_aerosol=cirrus_aerosol)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -746,7 +748,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                cld_macmic_num_steps: int = 1,
                                surface_bulk_coeffs=None,
                                cam6_activation=None,
-                               mynn_initflag=None) -> Callable:
+                               mynn_initflag=None,
+                               cirrus_aerosol=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
     ``surface_bulk_coeffs`` ``(C_H, C_E, latent)``: the constant-coefficient surface
@@ -957,7 +960,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 and config.microphysics.scheme == "morrison"
                 and resolve_warm_rain_scheme(
                     config.microphysics.morrison) == "kk2000_cam6"),
-            cam6_activation=cam6_activation)
+            cam6_activation=cam6_activation,
+            cirrus_aerosol=cirrus_aerosol)
         # CAM6 droplet activation writes the CLDO carry (cloud_fraction_old),
         # Sundqvist its gscond previous-step carry (zc_*), both as a dict.
         _micro_carry = getattr(_micro_fn, "_writes_phys_state", False)

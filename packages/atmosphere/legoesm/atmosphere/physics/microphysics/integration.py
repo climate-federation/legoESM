@@ -277,6 +277,7 @@ def make_microphysics_physics(
     clubb_config=None,
     relvar_from_clubb: bool = False,
     cam6_activation=None,
+    cirrus_aerosol=None,
 ) -> Callable:
     """Create a physics function for microphysics matching a model's signature.
 
@@ -325,7 +326,11 @@ def make_microphysics_physics(
                                             model_type=model_type,
                                             clubb_config=clubb_config,
                                             relvar_from_clubb=relvar_from_clubb,
-                                            cam6_activation=cam6_activation)
+                                            cam6_activation=cam6_activation,
+                                            cirrus_aerosol=cirrus_aerosol)
+    elif cirrus_aerosol is not None:
+        raise ValueError(f"cirrus_aerosol is wired on the hydrostatic/mpas lanes only "
+                         f"(got model_type={model_type!r}).")
     elif model_type == "nonhydrostatic":
         fn = _make_nonhydrostatic_microphysics(microphysics_config, dt)
     elif model_type == "plane":
@@ -518,6 +523,7 @@ def _make_hydrostatic_microphysics(
     clubb_config=None,
     relvar_from_clubb: bool = False,
     cam6_activation=None,
+    cirrus_aerosol=None,
 ) -> Callable:
     """Create microphysics physics_fn for PrimitiveEquationModel.
 
@@ -563,6 +569,12 @@ def _make_hydrostatic_microphysics(
     if cam6_activation is not None and not _prog_nc:
         raise ValueError("cam6_activation is read only under "
                          "prognostic_droplet_number=True.")
+    _cirrus_lp = getattr(scheme_config, "cirrus_nucleation", "fixed") == "cam6_liu_penner"
+    if _cirrus_lp and (cirrus_aerosol is None or not _incloud):
+        raise ValueError('cirrus_nucleation="cam6_liu_penner" needs the prescribed '
+                         "aerosol setup (cirrus_aerosol) and warm_rain_incloud=True.")
+    if cirrus_aerosol is not None and not _cirrus_lp:
+        raise ValueError('cirrus_aerosol is read only under cirrus_nucleation="cam6_liu_penner".')
 
     def physics_fn(
         state: HydrostaticState,
@@ -776,6 +788,15 @@ def _make_hydrostatic_microphysics(
                 _below = jnp.arange(nlev) >= cam6_activation.top_lev
                 _cldo_new = jnp.where(
                     _below, _ast, phys_state.cloud_fraction_old.reshape(ncol, nlev))
+            if _cirrus_lp:
+                # CAM6 microp_aero_run -> nucleate_ice_cam_calc on this sub-step's
+                # post-CLUBB state, before the microphysics (as npccn above).
+                _kw["naai"] = cam6_cirrus_naai(
+                    T_col, q_v_col, p_full_col, p_half_col, hydrometeors.q_c,
+                    hydrometeors.q_i, _get_tracer("N_i"), _kw["cloud_fraction"],
+                    phys_state, forcing, cirrus_aerosol,
+                    jnp.asarray(grid.latCell).reshape(ncol),
+                    scheme_config.cirrus_T_width_K, scheme_config.cirrus_rel_width)
             _kw.update(sundqvist_lane_kwargs(
                 scheme_name, grid, ncol,
                 state.tracers is not None and "q_i" in state.tracers,
@@ -907,6 +928,9 @@ def _make_hydrostatic_microphysics(
     elif _incloud or relvar_from_clubb or scheme_name == "thompson":
         # thompson: the SCM's prescribed large-scale w (PhysicsState.dyn_w_ls)
         physics_fn._wants_phys_state_ro = True
+    if _cirrus_lp:
+        # reads forcing["cirrus_aerosol"] and the CLUBB wp2 carry
+        physics_fn._wants_forcing = True
     return physics_fn
 
 
@@ -941,6 +965,33 @@ def cam6_activation_npccn(T_col, q_v_col, p_full_col, p_half_col, N_c_per_kg, q_
         phys_state.clubb_kh_iface.reshape(ncol, nlev + 1),
         ast, phys_state.cloud_fraction_old.reshape(ncol, nlev), dtmicro,
         aer_num, aer_mass, setup.props, setup.top_lev, setup.n_max)
+
+
+def cam6_cirrus_naai(T_col, q_v_col, p_full_col, p_half_col, q_c, q_i, N_i, ast,
+                     phys_state, forcing, setup, lat_rad, T_width_K, rel_width):
+    """CAM6 activated ice number naai [1/kg] (microp_aero_run's wsubi and
+    nucleate_ice_cam_calc) from ``forcing["cirrus_aerosol"]``, CLUBB's wp2 carry,
+    the CAM chem tropopause and ``ast``."""
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import cam_chem_tropopause_level
+    from legoesm.atmosphere.physics.microphysics.cam6_cirrus_aerosol import (
+        cirrus_aerosol_at_model_levels)
+    from legoesm.atmosphere.physics.microphysics.cam6_nucleate_ice import (
+        cam6_naai, wsubi_from_wp2)
+    aer = None if forcing is None else forcing.get("cirrus_aerosol")
+    if aer is None:
+        raise ValueError('cirrus_nucleation="cam6_liu_penner" but no '
+                         "forcing['cirrus_aerosol'] reached the microphysics.")
+    wp2 = getattr(phys_state, "clubb_wp2_iface", None) if phys_state is not None else None
+    if wp2 is None:
+        raise ValueError('cirrus_nucleation="cam6_liu_penner" needs the prognostic '
+                         "CLUBB wp2 carry (clubb_wp2_iface).")
+    ncol, nlev = T_col.shape
+    a = cirrus_aerosol_at_model_levels(aer, setup, p_full_col)
+    troplev = cam_chem_tropopause_level(T_col, p_full_col, p_half_col, lat_rad)
+    wsubi = wsubi_from_wp2(wp2.reshape(ncol, nlev + 1), setup.top_lev)
+    return cam6_naai(T_col, q_v_col, p_full_col, q_c, q_i, N_i, ast, wsubi,
+                     a["num_a1"], a["num_a2"], a["num_a3"], a["dst_a3"], a["ncl_a3"],
+                     a["so4_a3"], troplev, setup.top_lev, T_width_K, rel_width)
 
 
 # ===========================================================================
