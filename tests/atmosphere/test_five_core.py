@@ -321,7 +321,7 @@ def test_r5_gradients_through_the_switches(setup):
     X0 = five.to_host(1e-2 * q0, dpf, G)
     # increments on every switch: mixed signs, one layer inside the cap band
     inc0 = (jnp.sin(jnp.arange(nH, dtype=jnp.float64)) * 1e-3
-            + jnp.where(jnp.arange(nH) == nH - 2, -0.995, 0.0) * X0[0] / 1e-5)
+            + jnp.where(jnp.arange(nH) == nH - 2, -0.995, 0.0) * X0[0] / 1e-5)[None, :]
 
     def f(inc, q):
         d, _ = five.exchange_bulk(1e-5 * inc, 1e-2 * q, ph, pf, dpf, G, DEF)
