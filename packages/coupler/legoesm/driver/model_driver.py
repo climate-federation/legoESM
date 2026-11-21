@@ -659,6 +659,13 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         cam6_rhmaxi=getattr(cfg, "cloud_cam6_rhmaxi", None),
         cam6_rhminis=getattr(cfg, "cloud_cam6_rhminis", None),
         cam6_rhmaxis=getattr(cfg, "cloud_cam6_rhmaxis", None),
+        cam6_conv_water_in_rad=getattr(cfg, "cloud_cam6_conv_water_in_rad", None),
+        cam6_conv_water_frac_limit=getattr(
+            cfg, "cloud_cam6_conv_water_frac_limit", None),
+        cam6_snow_in_rad=getattr(cfg, "cloud_cam6_snow_in_rad", None),
+        cam6_snow_optics_file=getattr(cfg, "cloud_cam6_snow_optics_file", None),
+        cam6_rad_specified_nc=getattr(cfg, "cloud_cam6_rad_specified_nc", None),
+        cam6_rad_gate_log_width=getattr(cfg, "cloud_cam6_rad_gate_log_width", None),
         cap_floor_on=getattr(cfg, "cloud_cap_floor_on", None),
         cap_floor_lat_deg=getattr(cfg, "cloud_cap_floor_lat_deg", None),
         cap_floor_p_max_pa=getattr(cfg, "cloud_cap_floor_p_max_pa", None),
@@ -1416,7 +1423,9 @@ class _MPASSfcFluxAccum:
     # ``is_complete``, not on per-slot counts), while pr covers the whole
     # window -- the same behaviour slots 8/9/13 shipped with.  Later
     # windows are complete.
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14)
+    # 22-24 = taux_sfc / tauy_sfc / precip_conv_sfc (CMOR tauu, tauv, prc),
+    # with the same mid-window-restart behaviour as slot 14 above.
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 22, 23, 24)
     #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
     #: sw_dn, hfss, hfls).  After the first radiation call every one of them
     #: is non-None on EVERY step (the MPAS model holds the last radiation
@@ -3652,9 +3661,41 @@ class ModelDriver:
         self.static_topography_phis()
         return self._f_land
 
+    @staticmethod
+    def _load_mpas_mesh_file(gc, *, lloyd_iterations: int):
+        """The global MPAS mesh from ``gc.mpas_mesh_file``, pinned by hash.
+
+        Refuses without ``mpas_mesh_sha256``, on a hash mismatch (stored or
+        expected), when the file's resolution differs from ``gc.resolution``
+        or its Lloyd iterations from the driver's, and when its radius is not
+        the driver's sphere.
+        """
+        from legoesm import constants
+        from legoesm.grids.voronoi_mesh_file import load_voronoi_mesh_for_run
+        mesh = load_voronoi_mesh_for_run(
+            gc.mpas_mesh_file, resolution=gc.resolution,
+            expected_sha256=getattr(gc, "mpas_mesh_sha256", ""),
+            lloyd_iterations=lloyd_iterations, radius=constants.R_earth,
+            variable=bool(getattr(gc, "mpas_mesh_variable", False)))
+        logger.info(
+            "  MPAS mesh loaded from %s (sha256 %s, %d cells); not "
+            "regenerated", gc.mpas_mesh_file, gc.mpas_mesh_sha256,
+            mesh.nCells)
+        return mesh
+
     def _create_grid(self) -> None:
         """Create horizontal grid and vertical coordinate."""
         gc = self.config.grid
+        if (getattr(gc, "mpas_mesh_file", "")
+                or getattr(gc, "mpas_mesh_sha256", "")):
+            from legoesm.driver.config import normalize_grid_type
+            if normalize_grid_type(gc.grid_type) != "mpas":
+                raise ValueError(
+                    f"mpas_mesh_file/mpas_mesh_sha256 set with grid_type "
+                    f"{gc.grid_type!r}; a saved mesh is only used on 'mpas'")
+            if not getattr(gc, "mpas_mesh_file", ""):
+                raise ValueError(
+                    "mpas_mesh_sha256 set without mpas_mesh_file")
 
         # All global grids go through the one component-agnostic factory
         # (legoesm.grids.factory.create_grid) — the driver owns no grid
@@ -3743,7 +3784,16 @@ class ModelDriver:
             # mpas aliases (voronoi, icosahedral, mpas_voronoi) are normalised
             # to "mpas" at the config boundary (driver.config.normalize_grid_type).
             kwargs = {"lloyd_iterations": 50} if gc.grid_type == "mpas" else {}
-            global_grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
+            if getattr(gc, "mpas_mesh_file", ""):
+                # grid_type is mpas or an alias (refused above otherwise)
+                # Saved mesh: the same cells in the same order on every
+                # machine (a regenerated mesh is not bitwise portable).
+                # This is the ONLY place the driver builds the global MPAS
+                # mesh; topography, diagnostics, CMOR and the cell partition
+                # all take self.grid / self._grid_global from here.
+                global_grid = self._load_mpas_mesh_file(gc, lloyd_iterations=50)
+            else:
+                global_grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
             # MPAS / Voronoi cell-partition MPI: partition the global mesh
             # and slice this rank's (owned + halo) local mesh.  Deferred to
             # here — not the runtime bootstrap — because the partition needs
@@ -4007,12 +4057,37 @@ class ModelDriver:
             else:
                 from legoesm.grids.topography import load_subgrid_orography
                 _nat_g = getattr(self, "_latlon_native_grid", None)
+                if str(sso_path).endswith(".npz"):
+                    # per-cell sgh over each cell's footprint, built for the
+                    # run's saved mesh (build_subgrid_orography_cells.py);
+                    # refused on any other mesh
+                    from legoesm.grids.topography import (
+                        load_subgrid_orography_cells)
+                    _gcfg = self.config.grid
+                    if not getattr(_gcfg, "mpas_mesh_file", ""):
+                        raise ValueError(
+                            "a per-cell subgrid orography file (.npz) needs a "
+                            "saved, pinned MPAS mesh (mpas_mesh_file)")
+                    # Under the cell-partition MPI lane the file is in the
+                    # GLOBAL cell order; take this rank's local cells.
+                    _vl = getattr(self, "_voronoi_layout", None)
+                    _part = None if _vl is None else _vl.partition
+                    sso = jnp.asarray(load_subgrid_orography_cells(
+                        sso_path,
+                        (int(np.asarray(self.grid.grid_lat).size) if _part is None
+                         else int(_part.nCells_global)),
+                        getattr(_gcfg, "mpas_mesh_sha256", ""),
+                        cells=None if _part is None else _part.local_cells,
+                    )).astype(_sd)
+                    logger.info("  subgrid orography per cell footprint from %s",
+                                sso_path)
                 # lat-lon column lane: the native grid (its own spacing for
                 # the file's scale check), flattened to the mesh's columns
-                sso = (load_subgrid_orography(self.grid, sso_path)
-                       if _nat_g is None else jnp.reshape(
-                           load_subgrid_orography(_nat_g, sso_path), (-1,))
-                       ).astype(_sd)
+                else:
+                    sso = (load_subgrid_orography(self.grid, sso_path)
+                           if _nat_g is None else jnp.reshape(
+                               load_subgrid_orography(_nat_g, sso_path), (-1,))
+                           ).astype(_sd)
                 try:
                     self.grid = self.grid._replace(subgrid_topo_stddev=sso)
                 # NamedTuple._replace raises TypeError ("Got unexpected field
@@ -11400,6 +11475,11 @@ class ModelDriver:
         # ice+snow+graupel + convective snow, the slot the land's snowfall
         # reads), published raw like pr; None when not exported.
         prsn = _sfc_slot(_sfc_diag_slot("precip_frozen"))
+        # Surface stress on the surface and convective precip (CMOR tauu,
+        # tauv, prc): window means like pr; None when not exported.
+        tauu = _sfc_slot(_sfc_diag_slot("taux_sfc"))
+        tauv = _sfc_slot(_sfc_diag_slot("tauy_sfc"))
+        prc = _sfc_slot(_sfc_diag_slot("precip_conv_sfc"))
         # Clear-sky TOA pair (#843): slots populated only when
         # --clear-sky-diag is on, so these are None (fields absent from the
         # CMOR output, byte-identical) in the default configuration.
@@ -11487,6 +11567,9 @@ class ModelDriver:
             v_north=v_north,
             precip=precip,
             prsn=prsn,
+            tauu=tauu,
+            tauv=tauv,
+            prc=prc,
             phis=state.phis.data,
             tas=tas,
             ts=ts,

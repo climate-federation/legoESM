@@ -12,6 +12,7 @@ Supported model types:
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import Callable
 
@@ -672,6 +673,60 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None,
     return q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col
 
 
+def _refuse_hydrostatic_only_cloud_options(radiation_config, lane):
+    """CAM6 snow in the radiation and the specified droplet number are wired
+    on the hydrostatic radiation builder only; refuse them elsewhere at
+    construction instead of on the first radiation call."""
+    cc = radiation_config.cloud_config
+    if radiation_config.cloud_scheme != "none" and (
+            getattr(cc, "cam6_snow_in_rad", False)
+            or getattr(cc, "cam6_rad_specified_nc", False)):
+        raise ValueError(
+            "CloudConfig.cam6_snow_in_rad / cam6_rad_specified_nc are wired on "
+            f"the hydrostatic radiation lane only, not the {lane} lane.")
+
+
+def _specified_droplet_number(radiation_config, micro_leaf, nc_from_aerosol):
+    """MG2's specified droplet number Nc_0 [1/m3] for the radiation when
+    ``CloudConfig.cam6_rad_specified_nc`` is on, else ``None``.  Refused
+    when the droplets are not specified (prognostic number, gSAM predict_Nc
+    or the aerosol-CCN field), where the radiation has its own number."""
+    cc = radiation_config.cloud_config
+    if radiation_config.cloud_scheme == "none" or not getattr(
+            cc, "cam6_rad_specified_nc", False):
+        return None
+    if micro_leaf is None or not hasattr(micro_leaf, "Nc_0"):
+        raise ValueError(
+            "CloudConfig.cam6_rad_specified_nc reads Nc_0 from the run's "
+            "Morrison/MG2 microphysics config; none was passed to the "
+            "radiation factory.")
+    if (getattr(micro_leaf, "prognostic_droplet_number", False)
+            or getattr(micro_leaf, "predict_Nc", False)
+            or getattr(micro_leaf, "nc_from_aerosol", False) or nc_from_aerosol):
+        raise ValueError(
+            "CloudConfig.cam6_rad_specified_nc is for SPECIFIED droplets; "
+            "this run predicts them or takes them from the aerosol field.")
+    return float(micro_leaf.Nc_0)
+
+
+def _extract_snow_columns(state, ncol, nlev):
+    """Snow mass q_s [kg/kg] and number N_s [1/kg] columns for CAM6 snow in
+    the radiation; raises when the state carries no two-moment snow."""
+    tracers = getattr(state, "tracers", None) or {}
+    if "q_s" not in tracers or "N_s" not in tracers:
+        raise ValueError(
+            "CloudConfig.cam6_snow_in_rad reads the snow mass q_s and number "
+            "N_s tracers; this run carries "
+            f"{sorted(k for k in ('q_s', 'N_s') if k in tracers)} (run MG2 "
+            "two-moment snow).")
+    out = []
+    for name in ("q_s", "N_s"):
+        raw = tracers[name]
+        data = raw.data if hasattr(raw, "data") else raw
+        out.append(jnp.maximum(data.reshape(ncol, nlev), 0.0))
+    return tuple(out)
+
+
 def _get_grid_lat_lon(grid_or_mesh, shape_2d):
     """Get latitude/longitude arrays from any grid type.
 
@@ -882,6 +937,19 @@ def _column_constraint(column_mesh, ncol: int):
     return cons
 
 
+@functools.lru_cache(maxsize=4)
+def _snow_optics_table(path: str):
+    """The CAM6 Mitchell table for snow, loaded once per path (checksum
+    pinned in ``mitchell_ice_optics``)."""
+    if not path:
+        raise ValueError(
+            "CloudConfig.cam6_snow_in_rad needs cam6_snow_optics_file: the "
+            "path of CESM inputdata atm/cam/physprops/iceoptics_c080917.nc")
+    from legoesm.atmosphere.physics.radiation.rrtmgp.optics.mitchell_ice_optics import (
+        load_mitchell_ice_optics)
+    return load_mitchell_ice_optics(path)
+
+
 def _call_radiation_backend(
     radiation_config: RadiationConfig,
     T: jnp.ndarray,
@@ -921,6 +989,9 @@ def _call_radiation_backend(
     clubb_config=None,
     mg2_ice_dcs_m: float | None = None,
     mg2_ice_slope_log_width: float | None = None,
+    q_snow: jnp.ndarray | None = None,
+    n_snow: jnp.ndarray | None = None,
+    n_cloud_specified: float | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -1116,6 +1187,9 @@ def _call_radiation_backend(
                                              "none") == "max_random"),
             mg2_ice_dcs_m=mg2_ice_dcs_m,
             mg2_ice_slope_log_width=mg2_ice_slope_log_width,
+            q_snow=q_snow,
+            n_snow=n_snow,
+            n_cloud_specified=n_cloud_specified,
         )
         if cloud_config.cap_floor_on:
             from legoesm.atmosphere.physics.clouds.cloud_fraction import apply_cap_cloud_floor
@@ -1213,6 +1287,26 @@ def _call_radiation_backend(
             cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
         _rad_kwargs["mcica_cloud_fraction"] = cloud_props.cloud_fraction
         _rad_kwargs["mcica_mask_width"] = float(cloud_config.cloud_subcolumn_mask_width)
+        if cloud_props.cldfsnow is not None:
+            # CAM6 snow (radiation.F90:928-993, 1057-1067): McICA samples
+            # cldfprime = max(CLD, cldfsnow), and a cloudy subcolumn sees
+            # (cldfsnow snow + CLD cloud)/cldfprime of each optical property.
+            # Every optical property is linear in its path, so the weights go
+            # on the in-cloud paths.
+            _cld = cloud_props.cloud_fraction
+            _cfp = jnp.maximum(_cld, cloud_props.cldfsnow)
+            _pos = _cfp > 0.0
+            _den = jnp.where(_pos, _cfp, 1.0)
+            _w_cld = jnp.where(_pos, _cld / _den, 0.0)
+            _w_snow = jnp.where(_pos, cloud_props.cldfsnow / _den, 0.0)
+            _rad_kwargs["cloud_path_liq"] = _rad_kwargs["cloud_path_liq"] * _w_cld
+            _rad_kwargs["cloud_path_ice"] = _rad_kwargs["cloud_path_ice"] * _w_cld
+            _rad_kwargs["cloud_path_snow"] = cloud_props.icswp * _w_snow
+            _rad_kwargs["cloud_snow_weight"] = _w_snow
+            _rad_kwargs["cloud_d_eff_snow"] = cloud_props.des
+            _rad_kwargs["snow_optics"] = _snow_optics_table(
+                cloud_config.cam6_snow_optics_file)
+            _rad_kwargs["mcica_cloud_fraction"] = _cfp
     elif _ov != "none":
         # Dispatch hardening: a typo must never silently run the legacy
         # single-column path (validated on the static config value).
@@ -1220,6 +1314,11 @@ def _call_radiation_backend(
             f"unknown cloud_vertical_overlap_optics {_ov!r}; "
             "expected 'none', 'max_random' or 'mcica'"
         )
+    if (cloud_props is not None and cloud_props.cldfsnow is not None
+            and _ov != "mcica"):
+        raise ValueError(
+            "CloudConfig.cam6_snow_in_rad is wired for the CAM6 McICA "
+            f"overlap only (cloud_vertical_overlap_optics='mcica'); got {_ov!r}.")
 
     # Column-chunk the rrtmgp solve when configured: the per-block body
     # compiles ONCE at ``column_chunk_size`` columns, capping the highly
@@ -1636,6 +1735,13 @@ def _make_hydrostatic_radiation(
             "(use_clubb_cloud_fraction=True); select one.")
     if cloud_fraction_tracer is not None:
         radiation_config = full_column_cloud_fraction_override(radiation_config)
+    # CAM6 snow in the radiation reads the snow tracers (static gate).
+    _cam6_snow_active = _cam6_cf_active and bool(getattr(
+        radiation_config.cloud_config, "cam6_snow_in_rad", False))
+    # Specified droplets (MG2 nccons): the radiation takes the microphysics'
+    # own Nc_0 instead of the N_c tracer (CloudConfig.cam6_rad_specified_nc).
+    _nc_specified = _specified_droplet_number(
+        radiation_config, micro_leaf_config, nc_from_aerosol)
     # Clear-sky TOA diagnostic (#843 lean-lane port): a STATIC clouds-off
     # config variant for the second radiation pass.  ``cloud_scheme="none"``
     # skips the cloud diagnosis entirely (no cloud kwargs -> the solver's
@@ -1827,6 +1933,9 @@ def _make_hydrostatic_radiation(
                 rho_col=_rho_for_number_conversion(
                     state, ncol, nlev, T_col, p_full_col))
         )
+        q_snow_col = n_snow_col = None
+        if _cam6_snow_active:
+            q_snow_col, n_snow_col = _extract_snow_columns(state, ncol, nlev)
 
         # Aerosol-CCN droplet number for the cloud-optics PSD (Twomey first
         # indirect effect): override the (dead-zeros / constant-r_eff) N_c
@@ -1981,6 +2090,9 @@ def _make_hydrostatic_radiation(
                 _aer_lw_ext = shard_columns(_aer_lw_ext, column_mesh)
             if _cf_ovr is not None:
                 _cf_ovr = shard_columns(_cf_ovr, column_mesh)
+            if q_snow_col is not None:
+                q_snow_col = shard_columns(q_snow_col, column_mesh)
+                n_snow_col = shard_columns(n_snow_col, column_mesh)
             if _conv_precip_col is not None:
                 _conv_precip_col = shard_columns(_conv_precip_col, column_mesh)
 
@@ -2032,6 +2144,9 @@ def _make_hydrostatic_radiation(
             clubb_config=clubb_config,
             mg2_ice_dcs_m=_mg2_ice_dcs_m,
             mg2_ice_slope_log_width=_mg2_ice_slope_w,
+            q_snow=q_snow_col,
+            n_snow=n_snow_col,
+            n_cloud_specified=_nc_specified,
         )
 
         # #843 lean-lane clear-sky second pass: SAME column state and
@@ -2307,6 +2422,7 @@ def _make_nonhydrostatic_radiation(
 
     Signature: (state, grid, height_coord, terrain_metric) -> NonHydrostaticTendencies
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "nonhydrostatic")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
@@ -2693,6 +2809,7 @@ def _make_plane_radiation(
     Signature: ``(state, grid, height_coord, terrain_metric) ->
     PlaneNonHydrostaticTendencies``.
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "plane")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
@@ -2879,6 +2996,7 @@ def _make_mpas_nh_radiation(
     Signature: ``(state, mesh, height_coord, terrain_metric) ->
     MPASNonHydrostaticTendencies``.
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "MPAS non-hydrostatic")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
@@ -3082,6 +3200,7 @@ def _make_spectral_pe_radiation(
     the activation-storage relief that lets the production AIMIP
     run finish on a single GPU.
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "spectral")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
     # CAM6 ``cam6_clubb`` cloud fraction takes its liquid fraction from the

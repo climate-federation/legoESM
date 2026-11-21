@@ -118,6 +118,21 @@ class GridConfig(NamedTuple):
     # stratospheric layers up to sigma_top (the raised-lid experiment).
     sigma_layout: str = "standard"
     use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
+    # Saved global MPAS mesh (grid_type "mpas" only).  A regenerated SCVT mesh
+    # is not bitwise portable: the cells agree across machines to ~4e-5 chord
+    # but their ORDER can differ (1,973 of 2,562 level 4 cells moved between a
+    # Mac and Snellius), so per-cell inputs built on one machine land on the
+    # wrong cells on the other.  When set, the driver loads this file
+    # (scripts/grids/save_mpas_mesh.py) instead of calling create_grid, and
+    # refuses to run unless mpas_mesh_sha256 matches the file's content hash
+    # and the file's resolution matches ``resolution``.  "" = regenerate as
+    # before (unchanged).
+    mpas_mesh_file: str = ""
+    mpas_mesh_sha256: str = ""
+    # The saved mesh is variable resolution (not 10 x 4**r + 2 cells): the
+    # loader checks the file's own cell count and its variable_mesh mark
+    # instead of the subdivision level (load_voronoi_mesh_for_run).
+    mpas_mesh_variable: bool = False
 
 
 # Canonical name for the SCVT Voronoi mesh + TRiSK discretization.
@@ -1054,6 +1069,29 @@ class ExperimentConfig(NamedTuple):
     cloud_cam6_rhmaxi: float | None = None
     cloud_cam6_rhminis: float | None = None
     cloud_cam6_rhmaxis: float | None = None
+    # CAM6 convective water in the radiation (CloudConfig.cam6_conv_water_in_rad;
+    # conv_water.F90 conv_water_4rad, cam6 namelist conv_water_in_rad = 1 and
+    # conv_water_frac_limit = 0.01).  0 (default) = off, the stratiform water
+    # alone.  cloud_scheme='cam6_clubb' only.  None frac_limit => 0.01.
+    cloud_cam6_conv_water_in_rad: int = 0
+    cloud_cam6_conv_water_frac_limit: float | None = None
+    # CAM6 snow in the radiation (CloudConfig.cam6_snow_in_rad): the snow
+    # fraction cldfsnow, in-cloud snow path and MG2 snow diameter, through the
+    # Mitchell ice optics, combined with the cloud by fraction under McICA.
+    # Needs cloud_scheme='cam6_clubb', cloud_vertical_overlap_optics='mcica'
+    # and the path of CESM inputdata atm/cam/physprops/iceoptics_c080917.nc.
+    cloud_cam6_snow_in_rad: bool = False
+    cloud_cam6_snow_optics_file: str = ""
+    # Radiation droplet number under specified droplets
+    # (CloudConfig.cam6_rad_specified_nc): MG2's Nc_0 in cloud, as CAM6 does
+    # with micro_mg_nccons, instead of the N_c tracer that ZM detrainment
+    # feeds and nothing removes.  Needs cloud_scheme='cam6_clubb', Morrison
+    # with morrison_prognostic_droplet_number=False and aerosol_ccn off.
+    cloud_cam6_rad_specified_nc: bool = False
+    # RULE 5 width (ln space) of the CAM6 convective-water and snow-in-radiation
+    # thresholds (CloudConfig.cam6_rad_gate_log_width); None => 0.01, 0 = CAM6's
+    # hard switches.
+    cloud_cam6_rad_gate_log_width: float | None = None
     # Polar-cap radiative cloud floor (CloudConfig.cap_floor_*): an attribution
     # lever for the 2026-09 Arctic self-isolation A/B, radiation-only, MPAS /
     # spectral standalone radiation path only (the FV pipeline refuses it).
@@ -2315,11 +2353,6 @@ class ExperimentConfig(NamedTuple):
     # Same placement and None semantics as land_canopy_most_n_iters; the
     # production deck names it.
     land_canopy_implicit_ground_flux: bool | None = None
-    # APPENDED LAST.  FIVE fine vertical layers below 742 hPa around the
-    # column physics (physics/five.py, Yamaguchi et al. 2017): "off"
-    # (default, no FIVE), "always" (every column) or "forced" (on and off by
-    # FiveConfig.forced_period_s).  MPAS column lane, CLUBB, macmic >= 2.
-    five_mode: str = "off"
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2442,13 +2475,30 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "ifs_ozone_chem runs only on the MPAS dycore lane, which "
                 "carries the o3_ifs tracer (not the FV3-duo column lane)")
-        if self.five_mode not in ("off", "always", "forced"):
-            errors.append(f"five_mode must be off, always or forced, got {self.five_mode!r}")
-        elif self.five_mode != "off" and (self.output.checkpoint_days > 0
-                                          or self.output.max_wallclock_seconds > 0):
-            errors.append("five_mode != 'off' cannot be checkpointed yet (the FIVE "
-                          "carry is not persisted): set checkpoint_days=0 and "
-                          "max_wallclock_seconds=0")
+        _mesh_file = getattr(g, "mpas_mesh_file", "")
+        _mesh_sha = getattr(g, "mpas_mesh_sha256", "")
+        if _mesh_file and normalize_grid_type(g.grid_type) != "mpas":
+            errors.append(
+                f"mpas_mesh_file={_mesh_file!r} is only valid with grid_type "
+                f"'mpas', not {g.grid_type!r}")
+        if _mesh_file and not _mesh_sha:
+            errors.append(
+                f"mpas_mesh_file={_mesh_file!r} needs mpas_mesh_sha256 (the "
+                "hash printed by scripts/grids/save_mpas_mesh.py); a run "
+                "never loads an unpinned mesh")
+        if _mesh_sha and not _mesh_file:
+            errors.append(
+                "mpas_mesh_sha256 is set but mpas_mesh_file is empty; the "
+                "pin would be ignored")
+        if (str(self.subgrid_orography_path).endswith(".npz")
+                and self.turbulence == "ifs_vdf"):
+            errors.append(
+                "turbulence='ifs_vdf' reads SSO_STDH_FILT from a netCDF "
+                "subgrid_orography_path; a per-cell .npz file carries only sgh")
+        if getattr(g, "mpas_mesh_variable", False) and not _mesh_file:
+            errors.append(
+                "mpas_mesh_variable is set but mpas_mesh_file is empty; a "
+                "variable mesh is only loaded from a saved file")
         if self.land_fraction_source not in ("topography", "era5", "zero"):
             errors.append(
                 f"land_fraction_source must be topography, era5 or zero, got "
@@ -4915,6 +4965,38 @@ class ExperimentConfig(NamedTuple):
                 f"{', '.join(_cam6_rh_set)} set but cloud_scheme="
                 f"{self.cloud_scheme!r}: the CAM6 aist ramp is read only by "
                 "cloud_scheme='cam6_clubb' (otherwise silently inert).")
+        if self.cloud_cam6_snow_in_rad and (
+                self.cloud_scheme != "cam6_clubb"
+                or self.cloud_vertical_overlap_optics != "mcica"
+                or not self.cloud_cam6_snow_optics_file):
+            errors.append(
+                "cloud_cam6_snow_in_rad=True needs cloud_scheme='cam6_clubb', "
+                "cloud_vertical_overlap_optics='mcica' and "
+                "cloud_cam6_snow_optics_file (iceoptics_c080917.nc); got "
+                f"{self.cloud_scheme!r}, {self.cloud_vertical_overlap_optics!r}, "
+                f"{self.cloud_cam6_snow_optics_file!r}.")
+        if self.cloud_cam6_rad_specified_nc and (
+                self.cloud_scheme != "cam6_clubb"
+                or self.microphysics != "morrison"
+                or self.morrison_prognostic_droplet_number
+                or self.nc_from_aerosol):
+            errors.append(
+                "cloud_cam6_rad_specified_nc=True is for specified droplets: it "
+                "needs cloud_scheme='cam6_clubb', microphysics='morrison', "
+                "morrison_prognostic_droplet_number=False and aerosol_ccn "
+                "(nc_from_aerosol) off.")
+        if self.cloud_cam6_conv_water_in_rad not in (0, 1):
+            errors.append(
+                "cloud_cam6_conv_water_in_rad must be 0 (off) or 1 (CAM6 "
+                "area-weighted convective water; mode 2 is not ported), got "
+                f"{self.cloud_cam6_conv_water_in_rad!r}")
+        if ((self.cloud_cam6_conv_water_in_rad != 0
+                or self.cloud_cam6_conv_water_frac_limit is not None)
+                and self.cloud_scheme != "cam6_clubb"):
+            errors.append(
+                "cloud_cam6_conv_water_in_rad / _frac_limit need "
+                f"cloud_scheme='cam6_clubb' (got {self.cloud_scheme!r}): the "
+                "CAM6 convective water reads ast and deepcu.")
         if self.morrison_warm_rain_incloud is True and (
                 self.turbulence != "clubb" or self.cld_macmic_num_steps < 2
                 or self.subgrid_autoconversion
@@ -5039,6 +5121,9 @@ class ExperimentConfig(NamedTuple):
             ("cloud_cam6_rhmaxi", 1.0, 1.1),
             ("cloud_cam6_rhminis", 0.85, 1.0),
             ("cloud_cam6_rhmaxis", 1.0, 1.1),
+            # CAM6 namelist conv_water_frac_limit 0.01; it must stay positive
+            # (every conv_water_4rad division is floored by it).
+            ("cloud_cam6_conv_water_frac_limit", 1.0e-4, 0.1),
             ("cloud_cap_floor_lat_deg", 40.0, 89.0),
             ("cloud_cap_floor_p_max_pa", 20000.0, 100000.0),
             ("cloud_cap_floor_cf", 0.1, 1.0),

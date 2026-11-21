@@ -1204,7 +1204,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                         "sw_up_toa_clr", "lw_up_toa_clr",
                         "sed_substeps_required", "evap_sfc",
                         "shflx_ow", "lhflx_ow", "evap_ow", "taux_ow",
-                        "tauy_ow", "shflx_ice", "lhflx_ice")
+                        "tauy_ow", "shflx_ice", "lhflx_ice",
+                        "taux_sfc", "tauy_sfc", "precip_conv_sfc")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Per-process ledger: capture each module's row from its OWN complete
@@ -1346,7 +1347,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                   "lw_up_toa_clr", "sed_substeps_required",
                                   "evap_sfc", "shflx_ow", "lhflx_ow",
                                   "evap_ow", "taux_ow", "tauy_ow",
-                                  "shflx_ice", "lhflx_ice"}
+                                  "shflx_ice", "lhflx_ice", "taux_sfc",
+                                  "tauy_sfc", "precip_conv_sfc"}
 
     def _advance_state(state, du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends, dt_x):
         """``state + dt_x * tendency`` (CAM ``physics_update``); ``phis`` fixed."""
