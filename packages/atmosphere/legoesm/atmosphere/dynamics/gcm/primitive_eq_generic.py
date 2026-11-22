@@ -476,6 +476,10 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
     if scheme not in VERTICAL_ADVECTION_SCHEMES:
         raise ValueError(f"unknown vert_advection_scheme {scheme!r}; "
                          f"expected one of {VERTICAL_ADVECTION_SCHEMES}")
+    if scheme == "ppm":
+        raise ValueError("vert_advection_scheme='ppm' is wired into the MPAS "
+                         "legacy vertical form only; the shared PE core would "
+                         "run it silently inert")
     if config.pv_scheme == "energy":
         pv_flux = pv_flux_energy_conserving_3d
     elif config.pv_scheme == "enstrophy":

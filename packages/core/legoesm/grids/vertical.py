@@ -708,7 +708,7 @@ def _vertical_advection_upwind_sigma(
 # "sb" is the conservative Simmons-Burridge flux form, HYBRID-lane only
 # (:func:`vertical_advection_hybrid_sb`); "van_leer" is SIGMA-lane only.
 # Each lane refuses the other's scheme rather than run it silently inert.
-VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer", "sb")
+VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer", "sb", "ppm")
 
 
 def van_leer_face_values_sigma(
@@ -2728,6 +2728,478 @@ def vertical_advection_hybrid_van_leer(
     inc_top = mass_flux[..., :-1] * (q_face[..., :-1] - field)
     inc_bot = mass_flux[..., 1:] * (q_face[..., 1:] - field)
     return -(inc_bot - inc_top) / jnp.clip(dp, 1e-10, None)
+
+
+def _face_minus_cell_tendency(field, mass_flux, q_face, dp):
+    """``-[F_{k+1/2}(q_{k+1/2} - f_k) - F_{k-1/2}(q_{k-1/2} - f_k)] / dp_k``.
+
+    The update shared by the van Leer and PPM tracer operators: paired with
+    the continuity that built ``F`` (zero at the top and the surface), the
+    column sum of ``dp * f`` telescopes, and a constant field has zero
+    tendency whatever the face values."""
+    inc_top = mass_flux[..., :-1] * (q_face[..., :-1] - field)
+    inc_bot = mass_flux[..., 1:] * (q_face[..., 1:] - field)
+    return -(inc_bot - inc_top) / jnp.clip(dp, 1e-10, None)
+
+
+
+PPM_KORDS = (4, 7)
+
+
+def _ppm_shift(x, n):
+    """``x(k+n)`` at every level k (last axis), edge-replicated beyond the
+    column so every arm stays finite; callers mask the levels where the
+    Fortran loop does not run."""
+    if n == 0:
+        return x
+    pad = ((0, 0),) * (x.ndim - 1)
+    if n > 0:
+        return jnp.pad(x[..., n:], (*pad, (0, n)), mode="edge")
+    return jnp.pad(x[..., :n], (*pad, (-n, 0)), mode="edge")
+
+
+def _ppm_levels(km, lo, hi):
+    """Static mask of Fortran levels lo..hi (1-based, inclusive)."""
+    k = np.arange(1, km + 1)
+    return jnp.asarray((k >= lo) & (k <= hi))
+
+
+class _PPMSwitch:
+    """The limiter's branch decisions, hard (CAM exactly) or smooth.
+
+    Every decision is taken on the BULK field (index 0 of the stacked
+    arrays) and applied to the whole stack, so a twin (index 1) follows the
+    bulk's branches and its transport is linear in the twin (proposal
+    section 3).  ``sharpness = inf`` gives Fortran's comparisons exactly,
+    strict or not as in the source.  A finite sharpness replaces each
+    comparison ``lhs < rhs`` by the weight ``sigmoid(sharpness * z)`` with
+    ``z = (rhs - lhs) / (|lhs| + |rhs|)``, a relative difference in
+    [-1, 1] (``legoesm.core.smooth.sigmoid_switch``), and an equality test
+    ``x == 0`` by ``exp(-(sharpness * x / |x|)^2)``; the branches are then
+    blended with that weight.  The relative form keeps the limiter
+    positively homogeneous (scaling the field scales its transport), so a
+    tracer with a uniform ratio to its bulk keeps that ratio under its own
+    limiter too.  A comparison against zero gives z = +-1 and stays sharp
+    at any sharpness above about 40 in float64.
+    """
+
+    def __init__(self, sharpness):
+        self.hard = sharpness == math.inf
+        self.sharpness = sharpness
+
+    def lt(self, lhs, rhs, strict=True):
+        if self.hard:
+            return lhs < rhs if strict else lhs <= rhs
+        from legoesm.core.smooth import sigmoid_switch
+        lhs = jnp.broadcast_to(lhs, jnp.shape(rhs)) if jnp.ndim(lhs) == 0 else lhs
+        d = rhs - lhs
+        den = jnp.abs(lhs) + jnp.abs(rhs)
+        z = jnp.where(den > 0, d / jnp.where(den > 0, den, 1.0), 0.0)
+        return sigmoid_switch(z, self.sharpness)
+
+    def eq0(self, x):
+        if self.hard:
+            return x == 0
+        den = jnp.abs(x)
+        z = jnp.where(den > 0, x / jnp.where(den > 0, den, 1.0), 0.0)
+        return jnp.exp(-(self.sharpness * z) ** 2)
+
+    @staticmethod
+    def both(w1, w2):
+        return (w1 & w2) if w1.dtype == jnp.bool_ else w1 * w2
+
+    @staticmethod
+    def pick(w, a, b):
+        """``a`` where the decision ``w`` holds, else ``b`` (stack-aware)."""
+        if w.dtype == jnp.bool_:
+            return jnp.where(w, a, b)
+        return b + w * (a - b)
+
+    # value operations on stacked arrays (bulk at index 0)
+    def max2(self, x, y):
+        return self.pick(self.lt(y[0], x[0], strict=False), x, y)
+
+    def min2(self, x, y):
+        return self.pick(self.lt(x[0], y[0], strict=False), x, y)
+
+    def abs(self, x):
+        return self.pick(self.lt(jnp.zeros_like(x[0]), x[0], strict=False), x, -x)
+
+    def sign(self, a, b):
+        """Fortran ``sign(a, b)``: ``|a|`` where ``b >= 0``, else ``-|a|``."""
+        aa = self.abs(a)
+        return self.pick(self.lt(jnp.zeros_like(b[0]), b[0], strict=False), aa, -aa)
+
+
+def _kmppm(sw, dm, a, al, ar, a6, lmt):
+    """mapz_module.F90 kmppm (:1092-1198) on stacked cells; returns
+    ``(al, ar, a6)``.  ``lmt`` 0: standard PPM constraint; 1: Lin's full
+    monotonicity constraint; 2: positive definite constraint."""
+    if lmt == 0:
+        da1 = ar - al
+        da2 = da1 * da1
+        a6da = a6 * da1
+        lo = sw.lt(a6da[0], -da2[0])            # a6da < -da2
+        hi = sw.lt(da2[0], a6da[0])             # a6da >  da2
+        a6_lo = 3.0 * (al - a)
+        a6_hi = 3.0 * (ar - a)
+        al_n = sw.pick(lo, al, sw.pick(hi, ar - a6_hi, al))
+        ar_n = sw.pick(lo, al - a6_lo, ar)
+        a6_n = sw.pick(lo, a6_lo, sw.pick(hi, a6_hi, a6))
+        z = sw.eq0(dm[0])                       # dm == 0: flat cell
+        return (sw.pick(z, a, al_n), sw.pick(z, a, ar_n),
+                sw.pick(z, jnp.zeros_like(a6), a6_n))
+    if lmt == 1:
+        qmp = 2.0 * dm
+        al = a - sw.sign(sw.min2(sw.abs(qmp), sw.abs(al - a)), qmp)
+        ar = a + sw.sign(sw.min2(sw.abs(qmp), sw.abs(ar - a)), qmp)
+        return al, ar, 3.0 * (2.0 * a - (al + ar))
+    if lmt == 2:
+        dlr = ar - al
+        out = sw.lt(sw.abs(dlr)[0], -a6[0])     # |ar - al| < -a6
+        # a6 < 0 wherever ``out`` holds; elsewhere fmin's value is discarded,
+        # so the divisor there only has to be finite and non-zero.
+        a6s = jnp.where(a6[0] < 0, a6[0], -1.0)
+        fmin = a[0] + 0.25 * dlr[0] ** 2 / a6s + a6[0] / 12.0
+        act = sw.both(out, sw.lt(fmin, jnp.zeros_like(fmin)))
+        flat = sw.both(sw.lt(a[0], ar[0]), sw.lt(a[0], al[0]))
+        rgt = sw.lt(al[0], ar[0])                # ar > al
+        a6_l = 3.0 * (al - a)
+        a6_r = 3.0 * (ar - a)
+        al_n = sw.pick(flat, a, sw.pick(rgt, al, ar - a6_r))
+        ar_n = sw.pick(flat, a, sw.pick(rgt, al - a6_l, ar))
+        a6_n = sw.pick(flat, jnp.zeros_like(a6), sw.pick(rgt, a6_l, a6_r))
+        return sw.pick(act, al_n, al), sw.pick(act, ar_n, ar), sw.pick(act, a6_n, a6)
+    raise ValueError(f"kmppm: lmt={lmt!r} is not ported (0, 1 or 2)")
+
+
+def ppm2m_profile(a, dp, *, iv, kord, sharpness=math.inf):
+    """CAM-FV ``ppm2m`` parabolas, ``(AL, AR, A6)`` per cell.
+
+    Port of mapz_module.F90 ppm2m (:672-950, cam_cesm2_1_rel_60) with kmppm
+    and steepz.  The parabola in cell k is
+    ``f(s) = AL + s [(AR - AL) + A6 (1 - s)]``, ``s`` from 0 at the top edge
+    to 1 at the bottom edge, with mean ``a``.
+
+    Parameters
+    ----------
+    a : (S, ..., km) cell means, levels top first.  ``S`` stacks a bulk
+        field (index 0) and, in twin mode, a twin (index 1) that takes every
+        branch decision from the bulk.
+    dp : (..., km) layer thickness [Pa], the ``delp`` of ppm2m.
+    iv : 0 (positive definite scalar) or 1 (other fields).  Winds (iv = -1)
+        are not ported.
+    kord : 4 (Lin's full monotonicity constraint, CAM-FV's T_v) or 7
+        (Huynh's constraint, quasi monotone, plus the positive definite
+        constraint for iv = 0: CAM-FV's constituents).
+    sharpness : ``inf`` = the Fortran branches exactly; finite = the smooth
+        decisions of :class:`_PPMSwitch` (RULE 5).
+
+    Notes
+    -----
+    Every Fortran k loop here reads only arrays written by earlier loops, so
+    each is vectorised over k with static level masks.  The tie-breaking of
+    Fortran ``max``/``min`` never changes a value.  The two divisions whose
+    value can be discarded (by ``df2`` in steepz and by ``a6`` in kmppm
+    lmt 2) get a finite stand-in divisor where the quotient is not used.
+    """
+    if iv not in (0, 1):
+        raise ValueError(f"ppm2m_profile: iv={iv!r} not ported (0 or 1)")
+    if kord not in PPM_KORDS:
+        raise ValueError(f"ppm2m_profile: kord={kord!r} not ported; one of {PPM_KORDS}")
+    if not (sharpness > 0):
+        raise ValueError(f"ppm2m_profile: sharpness must be > 0 (inf = hard), got {sharpness!r}")
+    km = a.shape[-1]
+    if km < 4:
+        raise ValueError(f"ppm2m_profile needs at least 4 levels; got {km}")
+    sw = _PPMSwitch(sharpness)
+    S = _ppm_shift
+    lev = lambda lo, hi: _ppm_levels(km, lo, hi)  # noqa: E731
+    zero = jnp.zeros_like(a)
+    am1, ap1 = S(a, -1), S(a, 1)
+    dpm1, dpp1 = S(dp, -1), S(dp, 1)
+    delq = ap1 - a                     # Fortran delq(k) = a(k+1) - a(k)
+    delqm1 = S(delq, -1)               # delq(k-1)
+    d4 = dpm1 + dp                     # d4(k) = delp(k-1) + delp(k)
+    d4p1, d4m1 = S(d4, 1), S(d4, -1)
+
+    # k = 2..km-1: limited slope dc and first-guess mismatch df2
+    c1 = (dpm1 + 0.5 * dp) / d4p1
+    c2 = (dpp1 + 0.5 * dp) / d4
+    tmp = dp * (c1 * delq + c2 * delqm1) / (d4 + dpp1)
+    qmax = sw.max2(sw.max2(am1, a), ap1) - a
+    qmin = a - sw.min2(sw.min2(am1, a), ap1)
+    dc = sw.sign(sw.min2(sw.min2(sw.abs(tmp), qmax), qmin), tmp)
+    m_int = lev(2, km - 1)
+    dc = jnp.where(m_int, dc, zero)
+    df2 = jnp.where(m_int, tmp, zero)
+
+    # k = 3..km-1: fourth-order edge value below cell k-1
+    cc1 = delqm1 * dpm1 / d4
+    a1 = d4m1 / (d4 + dpm1)
+    a2 = d4p1 / (d4 + dp)
+    dcm1 = S(dc, -1)
+    al = am1 + cc1 + 2.0 / (d4m1 + d4p1) * (
+        dp * (cc1 * (a1 - a2) + a2 * dcm1) - dpm1 * a1 * dc)
+    al = jnp.where(lev(3, km - 1), al, zero)
+
+    # steepz: decisions and the steepening weight alfa from the bulk
+    rat = delqm1[0] / d4                                   # k = 2..km
+    f = (S(rat, 1) - rat) / (dpm1 + dp + dpp1)             # k = 2..km-1
+    fp, fm = S(f, 1), S(f, -1)
+    dg2 = (fp - fm) * ((dpp1 - dpm1) ** 2 + d4 * d4p1)
+    df2b = df2[0]
+    ratio = (-0.1875 * dg2 / jnp.where(df2b != 0, df2b, 1.0))[None]
+    alfa_v = sw.max2(jnp.zeros_like(ratio), sw.min2(ratio, jnp.full_like(ratio, 0.5)))[0]
+    nonzero = (df2b != 0) if sw.hard else 1.0 - sw.eq0(df2b)
+    cond = sw.both(sw.lt(fp * fm, jnp.zeros_like(fm)), nonzero)
+    alfa = jnp.where(lev(3, km - 2), sw.pick(cond, alfa_v, jnp.zeros_like(alfa_v)), 0.0)
+    alm1 = S(alfa, -1)
+    al_st = (1.0 - alm1 - alfa) * al + alm1 * (a - dc) + alfa * (am1 + dcm1)
+    al = jnp.where(lev(4, km - 2), al_st, al)
+
+    # top: area-preserving cubic with zero second derivative at the top
+    d1, d2 = dp[..., 0], dp[..., 1]
+    a_1, a_2 = a[..., 0], a[..., 1]
+    qm = (d2 * a_1 + d1 * a_2) / (d1 + d2)
+    dq = 2.0 * (a_2 - a_1) / (d1 + d2)
+    ct1 = 4.0 * (al[..., 2] - qm - d2 * dq) / (d2 * (2.0 * d2 * d2 + d1 * (d2 + 3.0 * d1)))
+    ct3 = dq - 0.5 * ct1 * (d2 * (5.0 * d1 + d2) - 3.0 * d1 ** 2)
+    al2 = qm - 0.25 * ct1 * d1 * d2 * (d2 + 3.0 * d1)
+    al1 = d1 * (2.0 * ct1 * d1 ** 2 - ct3) + al2
+    dc1 = 0.5 * (a_1 - al1)
+    al2 = sw.max2(sw.min2(a_1, a_2), al2)
+    al2 = sw.min2(sw.max2(a_1, a_2), al2)
+    if iv == 0:
+        al1 = sw.max2(jnp.zeros_like(al1), al1)
+        al2 = sw.max2(jnp.zeros_like(al2), al2)
+
+    # bottom: area-preserving cubic with zero second derivative at the surface
+    d1, d2 = dp[..., -1], dp[..., -2]
+    a_k, a_km1 = a[..., -1], a[..., -2]
+    qm = (d2 * a_k + d1 * a_km1) / (d1 + d2)
+    dq = 2.0 * (a_km1 - a_k) / (d1 + d2)
+    cb1 = (al[..., -2] - qm - d2 * dq) / (d2 * (2.0 * d2 * d2 + d1 * (d2 + 3.0 * d1)))
+    cb3 = dq - 2.0 * cb1 * (d2 * (5.0 * d1 + d2) - 3.0 * d1 ** 2)
+    alk = qm - cb1 * d1 * d2 * (d2 + 3.0 * d1)
+    ark = d1 * (8.0 * cb1 * d1 ** 2 - cb3) + alk
+    dck = 0.5 * (ark - a_k)
+    alk = sw.max2(sw.min2(a_k, a_km1), alk)
+    alk = sw.min2(sw.max2(a_k, a_km1), alk)
+    if iv == 0:
+        ark = sw.max2(jnp.zeros_like(ark), ark)
+
+    al = al.at[..., 0].set(al1).at[..., 1].set(al2).at[..., -1].set(alk)
+    dc = dc.at[..., 0].set(dc1).at[..., -1].set(dck)
+    ar = jnp.concatenate([al[..., 1:], ark[..., None]], axis=-1)   # ar(k) = al(k+1)
+    a6 = 3.0 * (2.0 * a - (al + ar))
+
+    def _apply(mask, new):
+        return tuple(jnp.where(mask, n, o) for n, o in zip(new, (al, ar, a6)))
+
+    # top two layers: standard PPM constraint
+    al, ar, a6 = _apply(lev(1, 2), _kmppm(sw, dc, a, al, ar, a6, 0))
+    m_mid = lev(3, km - 2)
+    if kord >= 7:
+        h2 = S(dc, 1) - S(dc, -1)                 # k = 2..km-1
+        fac = 1.5 if kord == 7 else 0.125
+        pmp = 2.0 * dc
+        lac = a + fac * S(h2, -1) + dc
+        qmp = a + pmp
+        lo = sw.min2(sw.min2(a, qmp), lac)
+        hi = sw.max2(sw.max2(a, qmp), lac)
+        ar_n = sw.min2(sw.max2(ar, lo), hi)
+        qmp = a - pmp
+        lac = a + fac * S(h2, 1) - dc
+        lo = sw.min2(sw.min2(a, qmp), lac)
+        hi = sw.max2(sw.max2(a, qmp), lac)
+        al_n = sw.min2(sw.max2(al, lo), hi)
+        a6_n = 3.0 * (2.0 * a - (al_n + ar_n))
+        new = (al_n, ar_n, a6_n)
+        if iv == 0 and kord == 7:
+            new = _kmppm(sw, dc, a, *new, 2)
+        al, ar, a6 = _apply(m_mid, new)
+    else:                                         # kord 4: lmt = 1
+        al, ar, a6 = _apply(m_mid, _kmppm(sw, dc, a, al, ar, a6, 1))
+    # bottom two layers: A6 recomputed, standard PPM constraint
+    a6_b = 3.0 * (2.0 * a - (al + ar))
+    al, ar, a6 = _apply(lev(km - 1, km), _kmppm(sw, dc, a, al, ar, a6_b, 0))
+    return al, ar, a6
+
+
+def ppm_swept_face_values(al, ar, a6, mass_flux, dp, dt, *, upwind=None):
+    """Mean of the donor cell's parabola over the mass each interface sweeps
+    in ``dt``, at every interface (..., km+1); the two boundary faces carry
+    zero flux and return 0.
+
+    ``F > 0`` (downward): donor = the cell above, swept ``s`` in
+    ``[1 - c, 1]`` with ``c = F dt / dp_above``; ``F < 0``: donor = the cell
+    below, ``s`` in ``[0, c]`` with ``c = -F dt / dp_below``.  The mean of
+    ``f`` over ``[s0, s1]`` is map1_ppm's
+    ``AL + (AR - AL + A6)(s0 + s1)/2 - A6 (s1^2 + s1 s0 + s0^2)/3``
+    (mapz_module.F90:325-327), which has no division by ``c``: at ``c = 0``
+    it is the donor's edge value (the method-of-lines limit).  Valid for
+    ``c <= 1``; a larger ``c`` would integrate the parabola beyond its cell
+    (the proposal measured about 0.01 at L32, dt 300 s).  ``upwind``
+    (..., km+1), when given, decides the donor by its sign instead of
+    ``mass_flux`` (same sign, but defined where ``mass_flux * dt`` is 0)."""
+    Fi = mass_flux[..., 1:-1]
+    r3 = 1.0 / 3.0
+    s0 = 1.0 - Fi * dt / dp[..., :-1]
+    al_u, ar_u, a6_u = al[..., :-1], ar[..., :-1], a6[..., :-1]
+    down = al_u + 0.5 * (ar_u - al_u + a6_u) * (s0 + 1.0) - a6_u * r3 * (1.0 + s0 + s0 * s0)
+    c = -Fi * dt / dp[..., 1:]
+    al_d, ar_d, a6_d = al[..., 1:], ar[..., 1:], a6[..., 1:]
+    up = al_d + 0.5 * (ar_d - al_d + a6_d) * c - a6_d * r3 * c * c
+    sel = Fi if upwind is None else upwind[..., 1:-1]
+    face = jnp.where(sel > 0, down, up)
+    pad = ((0, 0),) * (face.ndim - 1)
+    return jnp.pad(face, (*pad, (1, 1)))
+
+
+def vertical_advection_hybrid_ppm(
+    field: jax.Array,
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+    dt: float,
+    *,
+    kord: int,
+    iv: int,
+    sharpness: float,
+) -> jax.Array:
+    """Eulerian flux-form PPM vertical transport on the hybrid lane.
+
+    The face value of :func:`vertical_advection_hybrid_van_leer`'s
+    face-minus-cell form is replaced by the donor cell's limited CAM-FV
+    parabola (:func:`ppm2m_profile`) integrated over the mass the face sweeps
+    in ``dt`` (:func:`ppm_swept_face_values`).  Continuity, the mass flux and
+    the update are unchanged, so the column sum of ``dp * field`` telescopes
+    and a constant field keeps zero tendency.  Proposal option (b1):
+    results/legoesm/scm/ppm_remap_proposal.md.
+
+
+    KNOWN DIFFERENCES (RULE 5): at ``sharpness = inf`` the parabolas are
+    CAM-FV's (tests: tests/grids/test_vertical_ppm.py, fixture
+    tests/grids/oracle_fixtures/cam_fv_ppm2m.npz).  At a finite sharpness the
+    limiter and the twin fallback blend their branches where the compared
+    quantities differ by less than about 4/sharpness relative; the gaps
+    measured on the fixture columns are stored in that test.  The smoothing
+    can leave small negative face values where kord 7's positive definite
+    constraint would have clipped exactly.  The upwind choice of donor by
+    the sign of the mass flux stays a hard switch, as in the van Leer
+    operator: the flux ``F (q_face - q)`` is continuous across it.
+    The limiter's comparisons against ZERO (``abs``, ``sign``, the flat-cell
+    ``dm == 0`` test) see a relative difference of exactly +-1 and so stay
+    hard at any finite sharpness; ``abs`` is continuous and ``sign`` multiplies
+    a magnitude that vanishes with ``dm``, so AD is exact almost everywhere,
+    but these are not smoothed (follow-up: an absolute-width form).  Valid for
+    a vertical Courant number ``c <= 1`` (measured about 0.01 at L32, dt
+    300 s); larger ``c`` is not guarded.
+    """
+    return ppm_flux_tendency(field, mass_flux, dp_from_hybrid(coord, p_s), dt,
+                             kord=kord, iv=iv, sharpness=sharpness)
+
+
+
+
+def ppm_flux_tendency(field, mass_flux, dp, dt, *, kord, iv, sharpness):
+    """:func:`vertical_advection_hybrid_ppm` on given layer thicknesses ``dp``
+    (..., km) [Pa]; see there."""
+    al, ar, a6 = ppm2m_profile(field[None], dp, iv=iv, kord=kord, sharpness=sharpness)
+    face = ppm_swept_face_values(al, ar, a6, mass_flux, dp, dt)
+    return _face_minus_cell_tendency(field, mass_flux, face[0], dp)
+
+
+def cam_fv_pkz(p_half):
+    """CAM-FV's layer mean of ``p^kappa``,
+    ``(pe_{k+1}^kappa - pe_k^kappa) / (kappa (ln pe_{k+1} - ln pe_k))``
+    (the pkz that te_map multiplies pt by), on edges (..., km+1) [Pa]."""
+    kappa = constants.kappa
+    pk = p_half ** kappa
+    return (pk[..., 1:] - pk[..., :-1]) / (
+        kappa * (jnp.log(p_half[..., 1:]) - jnp.log(p_half[..., :-1])))
+
+
+def ppm_tv_lnp_start(T, q_v, p_half, mass_flux, step):
+    """CAM-FV te_map's state before its temperature remap, for a step of
+    ``step`` seconds: ``(tv_star, x, w)``.
+
+    * ``tv_star``: the virtual temperature after the Lagrangian step, pt
+      times pkz of the Lagrangian edges ``pe + F step`` (pt conserved,
+      te_map.F90 "Converting pt to t"), i.e.
+      ``T (1 + zvir q_v) pkz(pe + F step) / pkz(pe)``;
+    * ``x = ln pe``, the coordinate CAM-FV maps temperature over;
+    * ``w = ln pe - ln(pe - F step)`` at each interface, the ln p interval
+      the face sweeps (F > 0 downward; 0 at the top and the surface).
+    """
+    from legoesm.thermo import virtual_temperature
+    tv = virtual_temperature(T, q_v)
+    tv_star = tv * cam_fv_pkz(p_half + mass_flux * step) / cam_fv_pkz(p_half)
+    x = jnp.log(p_half)
+    w = x - jnp.log(p_half - mass_flux * step)
+    return tv_star, x, w
+
+
+def ppm_tv_lnp_tendency(T, q_v, dq_v, mass_flux, p_half, dt, *, sharpness):
+    """Temperature tendency of CAM-FV's vertical step on the Eulerian grid:
+    the F part of the adiabatic term plus the vertical transport, as te_map
+    does it (te_map.F90:476-569, cam_cesm2_1_rel_60).
+
+    ``tv_star`` (:func:`ppm_tv_lnp_start`) is reconstructed with kord 4,
+    iv 1 (``ppm2m``) over ``ln pe``, and each face carries the mean of its
+    donor's parabola over the ln p interval it sweeps in ``dt``, in the
+    face-minus-cell form with ln p thicknesses as the weights (the quantity
+    map1_ppm on log pe conserves is ``sum T_v d ln p``).  The new
+    temperature divides the new virtual temperature by ``1 + zvir q_v``
+    with the vapour after its own vertical step, ``q_v + dt dq_v``, as
+    te_map divides by the remapped vapour.  The tendency is
+    ``(T_new - T) / dt``; for a Python ``dt == 0`` it is the limit, the
+    derivative in the step length at zero.
+
+    ``dq_v`` is the vapour's vertical (PPM) tendency; pass zeros for a dry
+    state (``q_v`` zero too).  ``p_half`` (..., km+1) must be positive
+    (CAM-FV's ptop > 0).
+    """
+    def new_T(step):
+        tv_star, x, w = ppm_tv_lnp_start(T, q_v, p_half, mass_flux, step)
+        dx = jnp.diff(x, axis=-1)
+        al, ar, a6 = ppm2m_profile(tv_star[None], dx, iv=1, kord=4, sharpness=sharpness)
+        # donor by the sign of F: at step 0 the swept interval w is exactly
+        # zero and would not say which side the donor is on
+        face = ppm_swept_face_values(al, ar, a6, w, dx, 1.0, upwind=mass_flux)[0]
+        incr = _face_minus_cell_tendency(tv_star, w, face, dx)
+        from legoesm.thermo import virtual_temperature
+        return (tv_star + incr) / virtual_temperature(jnp.ones_like(q_v), q_v + step * dq_v)
+
+    if isinstance(dt, (int, float)) and dt == 0:
+        zero = jnp.zeros((), dtype=jnp.result_type(T))
+        return jax.jvp(new_T, (zero,), (jnp.ones_like(zero),))[1]
+    return (new_T(dt) - T) / dt
+
+
+def vertical_advection_tv_hybrid_ppm(T, q_v, dq_v, mass_flux, p_s, coord, dt, *, sharpness):
+    """:func:`ppm_tv_lnp_tendency` on the hybrid lane's interface pressures.
+
+    Replaces :func:`vertical_advection_theta_hybrid` under the ``ppm`` scheme:
+    it returns the same quantity, ``-F dT/dp + kappa T F / p`` (the F part of
+    the vertical advection plus the adiabatic term), in CAM-FV's discrete
+    form.  Needs a model top above zero pressure, as CAM-FV's ln p map does.
+    """
+    # Host check on a concrete coordinate; skipped when it is traced.
+    concrete = not any(isinstance(x, jax.core.Tracer)
+                       for x in (coord.A_half, coord.B_half, coord.p_ref))
+    a0 = np.asarray(coord.A_half)[0] * float(coord.p_ref) if concrete else 1.0
+    b0 = np.asarray(coord.B_half)[0] if concrete else 0.0
+    if not (a0 > 0.0 and b0 == 0.0):
+        raise ValueError(
+            "the ppm temperature path maps T_v over ln p (CAM-FV te_map) and "
+            "needs a model top above zero pressure (pure-pressure top "
+            f"A_half[0] * p_ref > 0, B_half[0] = 0); got {a0!r} Pa, B {b0!r}")
+    p_half = pressure_from_hybrid(coord, p_s, full=False)
+    return ppm_tv_lnp_tendency(T, q_v, dq_v, mass_flux, p_half, dt, sharpness=sharpness)
+
+
 
 
 def vertical_advection_theta_hybrid(

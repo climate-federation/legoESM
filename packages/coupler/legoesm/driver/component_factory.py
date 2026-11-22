@@ -1053,6 +1053,9 @@ def create_atmosphere_dycore(
             time_integrator=_ti,
             # #930 cure: vertical biharmonic damping of the 2Δσ T checkerboard.
             nu_vert4_T=dc.mpas_nu_vert4_T,
+            # Tracer rate of the same filter (None = follow nu_vert4_T).
+            nu_vert4_tracer=dc.mpas_nu_vert4_tracer,
+            vert_ppm_limiter_sharpness=float(dc.mpas_vert_ppm_limiter_sharpness),
             vert4_flux_form_tracers=tuple(dc.mpas_vert4_flux_form_tracers),
             vert4_log_form_tracers=tuple(dc.mpas_vert4_log_form_tracers),
             # Mass-conserving tracer positivity clamp (see DycoreConfig).
