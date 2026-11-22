@@ -508,7 +508,12 @@ def test_coupled_mpas_ocean_starts_from_qobs(tmp_path):
     d.setup()
     lat = np.degrees(np.asarray(d._ocean_grid.latCell))
     z0 = float(d._ocean_z_coord.z_full_ref[0])
-    want = 2.0 + (qobs_sst_C(lat) - 2.0) * np.exp(z0 / _SCALE_DEPTH)
+    sst = qobs_sst_C(lat)
+    t_deep = np.minimum(2.0, sst)                 # polar columns start neutral
+    want = t_deep + (sst - t_deep) * np.exp(z0 / _SCALE_DEPTH)
+    T = np.asarray(d._ocean_state.T.data)
+    polar = np.abs(lat) > 55.0
+    assert polar.any() and np.all(np.diff(T[polar], axis=1) <= 1e-6)  # no warm water under cold
     assert np.allclose(np.asarray(d._ocean_state.T.data)[:, 0], want, rtol=1e-6, atol=1e-5)  # float32
     from legoesm import constants
     sst_atm = np.asarray(d._atm.get_sst_sic(0.0)[0]).ravel()     # what the atmosphere reads
