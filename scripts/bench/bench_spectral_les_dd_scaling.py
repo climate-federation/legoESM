@@ -51,9 +51,11 @@ def bench_parser() -> argparse.ArgumentParser:
     p.add_argument("--precision", choices=["float32", "float64"],
                    default="float64")
     p.add_argument("--case", default="cbl_nieuwstadt")
-    p.add_argument("--decomp", choices=["slab", "pencil"], default="slab",
+    p.add_argument("--decomp", choices=["slab", "pencil", "planes"],
+                   default="slab",
                    help="slab = y-slabs over all ranks; pencil = most-square "
-                        "y x x rank mesh")
+                        "y x x rank mesh; planes = the pencil mesh with the "
+                        "planes FFT mode (one all-to-all per transform)")
     p.add_argument("--nx", type=int, required=True)
     p.add_argument("--ny", type=int, required=True)
     p.add_argument("--nz", type=int, required=True)
@@ -149,13 +151,14 @@ def main(argv=None):
     rank, n = comm.Get_rank(), comm.Get_size()
     n_y, n_x = most_square_factors(n)
     ny_g, nx_g = global_grid_shape(bargs.mode, bargs.ny, bargs.nx, n_y, n_x)
-    p_y, p_x = (n_y, n_x) if bargs.decomp == "pencil" else (n, 1)
+    p_y, p_x = (n_y, n_x) if bargs.decomp in ("pencil", "planes") else (n, 1)
     if ny_g % p_y or nx_g % p_x:
         raise SystemExit(f"global {ny_g}x{nx_g} not divisible by mesh {p_y}x{p_x}")
     ny_l, nx_l = ny_g // p_y, nx_g // p_x
     grid = scaled_grid(case.grid, nx_g, ny_g, bargs.nz)
     cfg = les.cbl_les_config(grid, args, sgs)
-    layout = (sl.make_spectral_les_pencil_layout(comm, p_y, p_x, ny_g, nx_g)
+    layout = (sl.make_spectral_les_pencil_layout(
+        comm, p_y, p_x, ny_g, nx_g, planes=bargs.decomp == "planes")
               if n > 1 else None)
     g = sl.make_grid(cfg, dtype=dtype, layout=layout)
     ry, rx = divmod(rank, p_x)

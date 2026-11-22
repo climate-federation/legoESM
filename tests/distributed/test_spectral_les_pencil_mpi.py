@@ -47,8 +47,22 @@ MESHES = _MESHES.get(NPROC, [])
 pytestmark = pytest.mark.skipif(not MESHES, reason=f"no mesh for {NPROC} ranks")
 
 
+PLANES = False   # set per test by the autouse fixture below
+
+
+@pytest.fixture(autouse=True, params=[False, True], ids=["pencil", "planes"])
+def _fft_mode(request):
+    """Every test runs with the pencil FFT and with the planes FFT mode (same
+    physical blocks; one all-to-all to whole horizontal planes per transform)."""
+    global PLANES
+    PLANES = request.param
+    yield
+    PLANES = False
+
+
 def _layout(mesh):
-    return make_spectral_les_pencil_layout(COMM, mesh[0], mesh[1], NY, NX)
+    return make_spectral_les_pencil_layout(COMM, mesh[0], mesh[1], NY, NX,
+                                           planes=PLANES)
 
 
 def _block(f, mesh):
@@ -84,6 +98,15 @@ def _spec_ref(fh_serial, mesh, nzf):
     return pad[:, klo:khi, zlo:zhi]
 
 
+def _planes_spec_ref(fh_serial, nzf):
+    """Serial rfft2 spectrum cut to this rank's planes-mode block: full ky and
+    kx, z chunk RANK of NPROC (zero-padded)."""
+    zlo, zhi = chunk_slice(nzf, NPROC, RANK)
+    pad = np.zeros((NY, NX // 2 + 1, NPROC * (zhi - zlo)), complex)
+    pad[..., :nzf] = np.asarray(fh_serial)
+    return pad[..., zlo:zhi]
+
+
 # --------------------------------------------------------------------------- #
 # Transforms                                                                   #
 # --------------------------------------------------------------------------- #
@@ -94,7 +117,8 @@ def test_pencil_rfft2_matches_serial_and_roundtrips(dz):
     for mesh in MESHES:
         L = _layout(mesh)
         fh = layout_rfft2(_block(f, mesh), L)
-        ref = _spec_ref(jnp.fft.rfft2(f, axes=(0, 1)), mesh, nzf)
+        ref = (_planes_spec_ref(jnp.fft.rfft2(f, axes=(0, 1)), nzf) if PLANES
+               else _spec_ref(jnp.fft.rfft2(f, axes=(0, 1)), mesh, nzf))
         np.testing.assert_allclose(np.asarray(fh), ref, rtol=1e-10, atol=1e-10)
         back = layout_irfft2(fh, L, nzf)
         np.testing.assert_allclose(_gather(back, mesh), np.asarray(f),
@@ -102,6 +126,8 @@ def test_pencil_rfft2_matches_serial_and_roundtrips(dz):
 
 
 def test_pencil_zwhole_roundtrip_and_content():
+    if PLANES:
+        pytest.skip("pencil spectral layout only (planes covered by the step tests)")
     f = _rand(2, (NY, NX, NZ))
     fh_ser = np.asarray(jnp.fft.rfft2(f, axes=(0, 1)))
     for mesh in MESHES:
@@ -321,7 +347,8 @@ def test_pencil_transpose_and_fft_gradients():
                 return global_sum_mpi(jnp.sum(wt * jnp.sin(y) * y), final_loss=True)
 
             _fd_checks(loss_t, _block(xg, mesh), _block(vg, mesh))
-        wl = jnp.asarray(np.abs(_spec_ref(wg, mesh, NZ)))
+        wl = jnp.asarray(np.abs(_planes_spec_ref(wg, NZ) if PLANES
+                                else _spec_ref(wg, mesh, NZ)))
 
         def loss_fft(x, L=L, wl=wl):
             back = layout_irfft2(layout_rfft2(x, L) * (1.0 + wl), L, NZ)

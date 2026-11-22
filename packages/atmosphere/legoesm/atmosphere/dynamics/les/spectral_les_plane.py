@@ -230,6 +230,9 @@ class SpectralLESLayout(NamedTuple):
     n_ranks_x: int = 1
     comm_row: Any = None
     comm_col: Any = None
+    planes: bool = False  # FFT mode: one all-to-all to whole horizontal planes
+    #                      of a z-chunk per transform (spectra (ny, nkx,
+    #                      ceil(nz/P)), z zero-padded)
 
     @property
     def n_ranks_y(self) -> int:
@@ -245,11 +248,13 @@ class SpectralLESLayout(NamedTuple):
 
 
 def make_spectral_les_pencil_layout(comm, n_ranks_y: int, n_ranks_x: int,
-                                    ny_global: int, nx: int) -> SpectralLESLayout:
+                                    ny_global: int, nx: int,
+                                    planes: bool = False) -> SpectralLESLayout:
     """Collective: build a ``n_ranks_y x n_ranks_x`` pencil layout on ``comm``.
 
     ``n_ranks_x == 1`` returns the plain y-slab layout (no sub-communicators),
-    so slab runs keep the pre-pencil code path exactly."""
+    so slab runs keep the pre-pencil code path exactly. ``planes=True``
+    keeps the physical slab/pencil blocks but selects the planes FFT mode."""
     size, rank = comm.Get_size(), comm.Get_rank()
     if n_ranks_y < 1 or n_ranks_x < 1 or n_ranks_y * n_ranks_x != size:
         raise ValueError(
@@ -259,13 +264,13 @@ def make_spectral_les_pencil_layout(comm, n_ranks_y: int, n_ranks_x: int,
             f"global {ny_global}x{nx} not divisible by mesh {n_ranks_y}x{n_ranks_x}")
     if n_ranks_x == 1:
         return SpectralLESLayout(rank=rank, n_ranks=size, ny_global=ny_global,
-                                 nx=nx, comm=comm)
+                                 nx=nx, comm=comm, planes=planes)
     ry, rx = divmod(rank, n_ranks_x)
     comm_row = comm.Split(color=ry, key=rx)
     comm_col = comm.Split(color=rx, key=ry)
     return SpectralLESLayout(rank=rank, n_ranks=size, ny_global=ny_global,
                              nx=nx, comm=comm, n_ranks_x=n_ranks_x,
-                             comm_row=comm_row, comm_col=comm_col)
+                             comm_row=comm_row, comm_col=comm_col, planes=planes)
 
 
 class SpectralLESGrid(NamedTuple):
@@ -396,11 +401,13 @@ def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64,
         # no energy (zeros), so the sliced wavenumbers there are harmless.
         # Pencil: the kx chunk is owned per COLUMN index ry of Py (the slab
         # transform runs on comm_col); for the slab n_ranks_y/ry == n_ranks/rank.
+        # Planes mode: every rank holds the full spectrum (lo, hi = 0, nkx).
         from legoesm.parallel.distributed_fft import (
-            kx_local_size, local_kx_slice)
+            kx_local_size, layout_is_planes, layout_kx_slice)
         nkx = nx // 2 + 1
-        nkx_pad = layout.n_ranks_y * kx_local_size(nx, layout.n_ranks_y)
-        lo, hi = local_kx_slice(nx, layout.n_ranks_y, layout.ry)
+        nkx_pad = (nkx if layout_is_planes(layout)
+                   else layout.n_ranks_y * kx_local_size(nx, layout.n_ranks_y))
+        lo, hi = layout_kx_slice(layout, nx)
 
         def _slice(arr):
             return jnp.pad(arr, ((0, 0), (0, nkx_pad - nkx)))[:, lo:hi]
@@ -492,6 +499,24 @@ def _dealias(f, g: SpectralLESGrid):
 # the rfft2 FULL axis is y (axis 0), the REDUCED axis is x (axis 1). Both       #
 # Nyquist modes are dropped (unrepresentable derivative; the oracle does too).  #
 # --------------------------------------------------------------------------- #
+def _via_planes(op, f, L):
+    """Planes FFT mode: one all-to-all to whole horizontal planes of this
+    rank's z-chunk, the SERIAL horizontal operator ``op`` on them, one
+    all-to-all back (the plane size may change, e.g. the 3/2 pad)."""
+    from legoesm.parallel.distributed_fft import (
+        blocks_from_planes, planes_from_blocks)
+    gy, gx = f.shape[0] * L.n_ranks_y, f.shape[1] * L.n_ranks_x
+    if (gy, gx) not in ((L.ny_global, L.nx),
+                        (3 * L.ny_global // 2, 3 * L.nx // 2)):
+        raise ValueError(f"block {f.shape[:2]} x mesh is neither the coarse nor "
+                         f"the 3/2 fine global grid")
+    p = planes_from_blocks(f, n_ranks_y=L.n_ranks_y, n_ranks_x=L.n_ranks_x,
+                           comm=L.comm)
+    return blocks_from_planes(op(p), n_ranks_y=L.n_ranks_y,
+                              n_ranks_x=L.n_ranks_x, comm=L.comm,
+                              nz_out=f.shape[-1])
+
+
 def _pad_to_fine(f_yxz, g: SpectralLESGrid | None = None):
     """Coarse ``(ny,nx,nz)`` → fine ``(3ny/2, 3nx/2, nz)`` physical (zero-pad).
 
@@ -500,8 +525,11 @@ def _pad_to_fine(f_yxz, g: SpectralLESGrid | None = None):
     ``parallel/distributed_fft.distributed_pad_to_fine``."""
     if g is not None and g.layout is not None:
         from legoesm.parallel.distributed_fft import (
-            distributed_pad_to_fine, layout_is_pencil, pencil_pad_to_fine)
+            distributed_pad_to_fine, layout_is_pencil, layout_is_planes,
+            pencil_pad_to_fine)
         L = g.layout
+        if layout_is_planes(L):
+            return _via_planes(lambda p: _pad_to_fine(p), f_yxz, L)
         if layout_is_pencil(L):
             return pencil_pad_to_fine(
                 f_yxz, ny_global=L.ny_global, nx=L.nx, n_ranks_y=L.n_ranks_y,
@@ -522,9 +550,13 @@ def _truncate_from_fine(f_fine, ny, nx, g: SpectralLESGrid | None = None):
     """Fine ``(3ny/2,3nx/2,nz)`` → coarse ``(ny,nx,nz)`` physical (+9/4 scaling)."""
     if g is not None and g.layout is not None:
         from legoesm.parallel.distributed_fft import (
-            distributed_truncate_from_fine, layout_is_pencil,
+            distributed_truncate_from_fine, layout_is_pencil, layout_is_planes,
             pencil_truncate_from_fine)
         L = g.layout
+        if layout_is_planes(L):
+            # GLOBAL coarse size: callers may pass this rank's block shape.
+            return _via_planes(
+                lambda p: _truncate_from_fine(p, L.ny_global, L.nx), f_fine, L)
         if layout_is_pencil(L):
             return pencil_truncate_from_fine(
                 f_fine, ny_global=L.ny_global, nx=L.nx, n_ranks_y=L.n_ranks_y,
@@ -1118,18 +1150,22 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     div_h = uh + vh + wzh                                   # (nyk, nxr, nz) complex
     rhs = div_h / dt
     k2_2d = g.k2
-    pencil = g.layout is not None and getattr(g.layout, "n_ranks_x", 1) > 1
-    if pencil:
-        # Pencil spectral data are z-split: gather whole z for the vertical solve
-        # (ky chunk rx of Px, zero-padded rows -> k2=0 -> gauge-pinned, rhs 0 ->
-        # phi 0), trimmed to nz BEFORE building the matrix, re-padded after.
+    from legoesm.parallel.distributed_fft import (
+        layout_is_pencil, layout_is_planes, layout_zsplit)
+    zsplit = g.layout is not None and (layout_is_pencil(g.layout)
+                                       or layout_is_planes(g.layout))
+    if zsplit:
+        # Pencil / planes spectral data are z-split (over the row communicator /
+        # all ranks): gather whole z for the vertical solve (ky chunk r of n,
+        # zero-padded rows -> k2=0 -> gauge-pinned, rhs 0 -> phi 0), trimmed to
+        # nz BEFORE building the matrix, re-padded after.
         from legoesm.parallel.distributed_fft import (
             chunk_slice, pencil_spec_to_zwhole)
         L = g.layout
-        rhs = pencil_spec_to_zwhole(rhs, nz_out=nz, n_ranks_x=L.n_ranks_x,
-                                    comm_row=L.comm_row)
-        lo, hi = chunk_slice(L.ny_global, L.n_ranks_x, L.rx)
-        k2_2d = jnp.pad(g.k2, ((0, L.n_ranks_x * (hi - lo) - L.ny_global),
+        zn, zr, zcomm = layout_zsplit(L)
+        rhs = pencil_spec_to_zwhole(rhs, nz_out=nz, n_ranks_x=zn, comm_row=zcomm)
+        lo, hi = chunk_slice(L.ny_global, zn, zr)
+        k2_2d = jnp.pad(g.k2, ((0, zn * (hi - lo) - L.ny_global),
                                (0, 0)))[lo:hi]
         nyk = hi - lo
     # Tridiagonal in z (centres), Neumann walls: φ[-1]=φ[0], φ[nz]=φ[nz-1].
@@ -1155,10 +1191,10 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     rhs = rhs.at[..., 0].set(jnp.where(sing, 0.0 + 0.0j, rhs[..., 0]))
     del s0
     phi_h = thomas_solve(a, b, c, rhs)
-    if pencil:
+    if zsplit:
         from legoesm.parallel.distributed_fft import pencil_zwhole_to_spec
         phi_h = pencil_zwhole_to_spec(phi_h, ny_global=L.ny_global,
-                                      n_ranks_x=L.n_ranks_x, comm_row=L.comm_row)
+                                      n_ranks_x=zn, comm_row=zcomm)
     # u = u* - dt ∇φ.  Horizontal grad spectral; vertical grad to faces.
     # Horizontal gradient straight from phi_h (not irfft -> rfft of phi): same
     # values to round-off, one forward FFT fewer.

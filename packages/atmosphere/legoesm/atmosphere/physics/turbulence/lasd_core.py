@@ -128,14 +128,14 @@ def spectral_test_filter(field_yxz: jax.Array, cut_y: int, cut_x: int,
         return jnp.moveaxis(spectral_test_filter(
             jnp.moveaxis(field_yxz, 0, 2), cut_y, cut_x, layout), 2, 0)
     from legoesm.parallel.distributed_fft import (
-        layout_irfft2, layout_rfft2, local_kx_slice)
+        layout_irfft2, layout_kx_slice, layout_rfft2)
     ny, nx = layout.ny_global, layout.nx
     fh = layout_rfft2(field_yxz, layout)
     iy = jnp.arange(ny)
     fold_y = jnp.minimum(iy, ny - iy)
     mask_y = (fold_y < cut_y)[:, None, None]
-    # kx chunk owned per column index ry of Py (== rank of n_ranks for a slab).
-    lo, hi = local_kx_slice(nx, layout.n_ranks_y, layout.ry)
+    # kx columns this rank holds (slab/pencil chunk; all of them in planes mode).
+    lo, hi = layout_kx_slice(layout, nx)
     mask_x = (jnp.arange(lo, hi) < cut_x)[None, :, None]   # GLOBAL kx index
     fh = jnp.where(mask_y & mask_x, fh, 0.0)
     return layout_irfft2(fh, layout, field_yxz.shape[-1])
