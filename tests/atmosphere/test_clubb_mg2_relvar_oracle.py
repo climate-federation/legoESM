@@ -360,6 +360,8 @@ def test_microphysics_reads_clubbs_relvar_from_the_same_substep(monkeypatch, inc
             "q_s": state.T.replace(data=z, name="q_s", units="kg/kg"),
             "N_s": state.T.replace(data=z, name="N_s", units="1/kg")})
     cfg = PhysicsConfig(
+        # the spies read concrete values: no module remat (it traces its body)
+        module_checkpoint=False,
         radiation=RadiationConfig(scheme="none",
                                   cloud_config=CloudConfig(scheme="cam6_clubb")),
         convection=ConvectionConfig(scheme="none"),

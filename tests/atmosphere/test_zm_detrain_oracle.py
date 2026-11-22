@@ -316,6 +316,8 @@ def test_macmic_hands_dlf_to_every_clubb_substep(monkeypatch):
     monkeypatch.setattr(cmb, "make_turbulence_physics", f_turb)
     monkeypatch.setattr(cmb, "make_microphysics_physics", f_micro)
     cfg = cmb.PhysicsConfig(
+        # the spies read concrete values: no module remat (it traces its body)
+        module_checkpoint=False,
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme="zhang_mcfarlane"),
         turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True)),

@@ -350,7 +350,8 @@ def test_mpas_lane_hands_the_ramp_to_mg2_only_when_on(on, monkeypatch):
     _, cfg = _mpas_physics(True, n=2)
     rc = cfg.radiation._replace(cloud_config=cfg.radiation.cloud_config._replace(
         cam6_do_subgrid_growth=on))
-    cfg = cfg._replace(radiation=rc)
+    # the spies read concrete values: no module remat (it traces its body)
+    cfg = cfg._replace(radiation=rc, module_checkpoint=False)
     from legoesm.atmosphere.physics.combined import make_physics
     fn = make_physics(cfg, model_type="mpas", dt=600.0, cld_macmic_num_steps=2)
     ps = init_physics_state(*state.T.data.shape, cfg)
