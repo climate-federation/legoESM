@@ -47,7 +47,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 import jax
-jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", os.environ.get("JAX_ENABLE_X64", "1") not in ("0", "false", "False"))  # JAX_ENABLE_X64=0 -> fp32 matrix
 
 import jax.numpy as jnp
 import numpy as np
@@ -770,9 +770,10 @@ def _area_weighted_sum(field, area) -> float:
     which already casts; Voronoi ``areaCell`` is fp64 so the mixed-
     dtype product promotes implicitly).
     """
-    f = jnp.asarray(field, dtype=jnp.float64)
-    a = jnp.asarray(area, dtype=jnp.float64)
-    return float(jnp.sum(f * a))
+    # numpy, not jnp: jnp.float64 silently downcasts to fp32 when x64 is off.
+    f = np.asarray(field, dtype=np.float64)
+    a = np.asarray(area, dtype=np.float64)
+    return float(np.sum(f * a))
 
 
 # ---------------------------------------------------------------------------
@@ -4245,7 +4246,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
                 rotated_baroclinic_init_latlon)
             state_cc = rotated_baroclinic_init_latlon(
-                grid, sigma_for_init,
+                grid, sigma,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
             from tests.test_cases.dcmip2012.rest_state_topography import (
@@ -4257,7 +4258,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 tc.case, "latlon", grid, sigma)
         else:
             state_cc = baroclinic_wave_init_latlon(
-                grid, sigma_for_init, perturbed=_perturbed)
+                grid, sigma, perturbed=_perturbed)
         state = hydrostatic_to_cgrid(state_cc, grid)
 
         def step_fn(s, dt_):
@@ -4321,7 +4322,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
                 rotated_baroclinic_init_mpas)
             state = rotated_baroclinic_init_mpas(
-                mesh, sigma_for_init,
+                mesh, sigma,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
             from tests.test_cases.dcmip2012.rest_state_topography import (
@@ -4332,7 +4333,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             state = _build_dcmip2008_state(tc.case, "mpas", mesh, sigma)
         else:
             state = baroclinic_wave_init_mpas(
-                mesh, sigma_for_init, perturbed=_perturbed)
+                mesh, sigma, perturbed=_perturbed)
         grid = mesh
 
         def step_fn(s, dt_):
@@ -4400,7 +4401,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
                 rotated_baroclinic_init_spectral)
             state = rotated_baroclinic_init_spectral(
-                grid, sigma_for_init,
+                grid, sigma,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
             from tests.test_cases.dcmip2012.rest_state_topography import (
@@ -4412,7 +4413,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 tc.case, "spectral", grid, sigma)
         else:
             state = baroclinic_wave_init_spectral(
-                grid, sigma_for_init, perturbed=_perturbed)
+                grid, sigma, perturbed=_perturbed)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
