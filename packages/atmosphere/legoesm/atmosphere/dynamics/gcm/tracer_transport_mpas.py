@@ -240,3 +240,78 @@ class TracerTransportMPASModel(IntegrationMixin):
         )
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
+
+
+def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, sharpness):
+    """Flux-form, mass-consistent horizontal tracer tendency with Zalesak FCT.
+
+    The layer tracer mass ``q dp`` obeys ``d(q dp)/dt = -div(u dp_e q_e)``,
+    paired with the SAME layer mass flux ``u dp_e`` whose divergence drives
+    the continuity; the state carries ``q``, so this returns
+    ``(-div(u dp_e q_e) + q div(u dp_e)) / dp``.  ``q_e``: first-order upwind
+    plus the antidiffusive part toward the centred value ``(q_1 + q_2)/2``,
+    limited (Zalesak 1979, doi:10.1016/0021-9991(79)90051-2; the limiter MPAS-A
+    applies, Skamarock and Gassmann 2011, doi:10.1175/MWR-D-10-05056.1) so the
+    forward-Euler update over ``dt`` stays inside the range of ``q`` and of the
+    low-order update over the cell and its neighbours.  Port of the ENSO fork
+    (Di Carlo, e0226a4a8b) onto the shared PE core.
+
+    KNOWN DIFFERENCE (RULE 5): the two dimensionless clips of the limiter,
+    ``min(1, room/inflow)`` and the edge's ``min`` of its two cell ratios, are
+    C1 (``core.smooth.min_c1``) at finite ``sharpness``; ``inf`` is the hard
+    Zalesak limiter.  Inside the band (ratio within ``1/sharpness`` of the
+    clip) the smooth value is above the hard one, so the update can leave the
+    bounds by at most that fraction of the antidiffusive flux.  The upwind
+    selection, the sign split of the antidiffusive fluxes, the neighbour
+    minimum/maximum bounds and the zero-inflow test stay hard: each is
+    continuous in the state, so the gradient is exact almost everywhere.
+
+    ``q`` (nCells, nlev, ntr); ``u_edge`` (nEdges, nlev); ``dp`` (nCells,
+    nlev) and ``dp_edge`` (nEdges, nlev) [Pa]; ``dt`` [s] the step the limiter
+    guards (> 0).  Returns (nCells, nlev, ntr).
+    """
+    from legoesm.core.smooth import min_c1
+
+    if not dt > 0:
+        raise ValueError(f"tracer_horizontal_flux_fct needs dt > 0 (got {dt!r})")
+    nC, nlev, ntr = q.shape
+    nE = u_edge.shape[0]
+
+    def div(f):   # (nEdges, nlev, ntr) per unit length -> (nCells, nlev, ntr) per area
+        return divergence_cell_3d(f.reshape(nE, -1), mesh).reshape(nC, nlev, -1)
+
+    c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
+    dp_c = jnp.where(dp != 0, dp, 1.0)[..., None]        # halo padding (p_s = 0)
+    fm = (u_edge * dp_edge)[..., None]                   # (nE, nlev, 1)
+    q1, q2 = q[c1], q[c2]
+    f_low = fm * jnp.where(fm >= 0, q1, q2)
+    anti = fm * (0.5 * (q1 + q2)) - f_low
+    div_fm = div(fm)
+    q_td = q + dt * (q * div_fm - div(f_low)) / dp_c
+    # bounds: q and the low-order update over the cell and its neighbours
+    coc = mesh.cellsOnCell
+    ok = (coc >= 0)[..., None, None]
+    coc_s = jnp.maximum(coc, 0)
+    lo, hi = jnp.minimum(q, q_td), jnp.maximum(q, q_td)
+    q_min = jnp.minimum(jnp.min(jnp.where(ok, lo[coc_s], jnp.inf), axis=0), lo)
+    q_max = jnp.maximum(jnp.max(jnp.where(ok, hi[coc_s], -jnp.inf), axis=0), hi)
+    # antidiffusive in/out per cell area (> 0 leaves the cell)
+    eoc = mesh.edgesOnCell
+    # in the state's precision: a mesh may store its geometry in float32
+    w = (jnp.where(eoc >= 0, mesh.edgeSignOnCell, 0).astype(q.dtype)
+         * mesh.dvEdge[jnp.maximum(eoc, 0)].astype(q.dtype)
+         / mesh.areaCell[None, :].astype(q.dtype))[..., None, None]
+    out = w * anti[jnp.maximum(eoc, 0)]
+    p_in = jnp.sum(jnp.maximum(-out, 0.0), axis=0)
+    p_out = jnp.sum(jnp.maximum(out, 0.0), axis=0)
+    # q_max >= q_td >= q_min by construction, so the rooms are >= 0
+    room_in = (q_max - q_td) * dp_c / dt
+    room_out = (q_td - q_min) * dp_c / dt
+
+    def ratio(room, p):
+        return jnp.where(p > 0, min_c1(1.0, room / jnp.where(p > 0, p, 1.0), sharpness), 0.0)
+
+    r_plus, r_minus = ratio(room_in, p_in), ratio(room_out, p_out)
+    lim = jnp.where(anti >= 0, min_c1(r_minus[c1], r_plus[c2], sharpness),
+                    min_c1(r_plus[c1], r_minus[c2], sharpness))
+    return (q * div_fm - div(f_low + lim * anti)) / dp_c

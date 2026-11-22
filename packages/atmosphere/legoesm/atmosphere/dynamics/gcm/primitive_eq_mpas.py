@@ -257,6 +257,30 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # vert_advection_scheme='ppm' (RULE 5): inf = CAM-FV's ppm2m exactly, a
     # finite value blends branches within about 4/sharpness relative.
     vert_ppm_limiter_sharpness: float = 1.0e4
+    # Terrain and variable-mesh options (ENSO fork port; shared PE core only,
+    # the legacy vertical form refuses them).  Horizontal tracer transport:
+    # "advective" (centred, neither conservative nor positive) or "flux_fct"
+    # (flux form on the continuity's layer mass flux, upwind + Zalesak FCT,
+    # ``tracer_transport_mpas.tracer_horizontal_flux_fct``).
+    tracer_horizontal_scheme: str = "advective"
+    # C1 width of the FCT limiter clips (RULE 5): inf = hard Zalesak.
+    fct_limiter_sharpness: float = 1.0e4
+    # K_h temperature diffusion on pressure surfaces, leading term (CAM3,
+    # Collins et al. 2004, eq. 3.84): lap_p T = lap T - (dT/dp) B lap(p_s).
+    K_h_pressure_surfaces: bool = False
+    # Per-edge damping on a variable-resolution mesh: every horizontal damping
+    # coefficient is the finest cells' value times f_p = rho_e**(-p/4) on each
+    # edge (rho_e the mean meshDensity of its cells, 1 at the finest), capped
+    # at (damping_ref_stiffness / G_e)**(p/2) with G_e the edge's
+    # vector-Laplacian Gershgorin row sum; p = damping_exp_del2 for nu_del2
+    # and K_h, damping_exp_del4 for nu_del4, nu_del4_ps and nu_div4 (MPAS-A
+    # mesh scaling, Martini et al. 2015, doi:10.1002/2015MS000470).  The
+    # factory sets damping_ref_stiffness from the GLOBAL mesh.  Uniform mesh:
+    # every factor is exactly 1.0.
+    edge_scaled_damping: bool = False
+    damping_exp_del2: float = 2.0
+    damping_exp_del4: float = 4.0
+    damping_ref_stiffness: float = 0.0
 
 
 # ============================================================================
@@ -526,8 +550,61 @@ def sponge_del2_profile(nlev: int, n_layers: int, factor) -> jnp.ndarray:
     return fac ** exponent
 
 
-def mpas_momentum_dissipation(du_dt_3d, u_3d, mesh, config):
-    """Add the optional del-2 / del-4 viscosity and div-4 damping."""
+def edge_damping_scales(mesh, config):
+    """Per-edge multipliers ``(f2, f4)`` of the del2 and del4 damping
+    coefficients (``MPASPrimitiveEquationConfig.edge_scaled_damping``), or
+    ``None`` when off.  Padded edges (density 0) and edges with an incomplete
+    stencil (``G_e = 0``) keep the density factor (1.0 for padding)."""
+    if not config.edge_scaled_damping:
+        return None
+    from legoesm.core.operators_voronoi import vector_laplacian_row_sum
+    if not config.damping_ref_stiffness > 0.0:
+        raise ValueError("edge_scaled_damping needs damping_ref_stiffness > 0 (the "
+                         "finest band's vector-Laplacian row sum, "
+                         "damping_reference_stiffness)")
+    rho = jnp.asarray(mesh.meshDensity)
+    rho_e = 0.5 * (rho[mesh.cellsOnEdge[0]] + rho[mesh.cellsOnEdge[1]])
+    rho_e = jnp.where(rho_e > 0.0, rho_e, 1.0)
+    g = vector_laplacian_row_sum(mesh)
+    ref = float(config.damping_ref_stiffness)
+    ratio = ref / jnp.where(g > 0.0, g, ref)
+
+    def f(p):
+        return jnp.minimum(rho_e ** (-0.25 * float(p)), ratio ** (0.5 * float(p)))
+    return f(config.damping_exp_del2), f(config.damping_exp_del4)
+
+
+def damping_reference_stiffness(mesh) -> float:
+    """``damping_ref_stiffness`` of a mesh: the largest vector-Laplacian row
+    sum over its finest edges (both cells at meshDensity 1).  Computed on the
+    GLOBAL mesh so every rank of a cell partition caps alike."""
+    import numpy as np
+    from legoesm.core.operators_voronoi import vector_laplacian_row_sum
+    rho = np.asarray(mesh.meshDensity)
+    c0, c1 = np.asarray(mesh.cellsOnEdge[0]), np.asarray(mesh.cellsOnEdge[1])
+    finest = (c0 >= 0) & (c1 >= 0)
+    finest &= ((rho[np.maximum(c0, 0)] >= 1.0 - 1e-12)
+               & (rho[np.maximum(c1, 0)] >= 1.0 - 1e-12))
+    g = np.asarray(vector_laplacian_row_sum(mesh))
+    if not np.any(finest & (g > 0)):
+        raise ValueError("damping_reference_stiffness: the mesh has no complete "
+                         "edge at meshDensity 1")
+    return float(np.max(g[finest & (g > 0)]))
+
+
+def mpas_momentum_dissipation(du_dt_3d, u_3d, mesh, config, scales=None):
+    """Add the optional del-2 / del-4 viscosity and div-4 damping; ``scales``
+    = :func:`edge_damping_scales` (None = the scalar coefficients)."""
+    if scales is None:
+        def _s2(x):
+            return x
+        _s4 = _s2
+    else:
+        def _s2(x):
+            return scales[0][:, None].astype(x.dtype) * x
+
+        def _s4(x):
+            return scales[1][:, None].astype(x.dtype) * x
     # Viscosity — when both del2 and del4 are active, the biharmonic
     # ``vector_laplacian_del4_3d`` is defined as
     # ``-vector_laplacian_del2_3d(vector_laplacian_del2_3d(u))``, so
@@ -541,25 +618,28 @@ def mpas_momentum_dissipation(du_dt_3d, u_3d, mesh, config):
         config.sponge_del2_top_factor).astype(u_3d.dtype)
     if config.nu_del2 > 0 and config.nu_del4 > 0:
         _del2_u = vector_laplacian_del2_3d(u_3d, mesh)
-        du_dt_3d = du_dt_3d + _nu2[None, :] * _del2_u
-        du_dt_3d = du_dt_3d - config.nu_del4 * vector_laplacian_del2_3d(_del2_u, mesh)
+        du_dt_3d = du_dt_3d + _nu2[None, :] * _s2(_del2_u)
+        du_dt_3d = du_dt_3d - config.nu_del4 * _s4(vector_laplacian_del2_3d(_del2_u, mesh))
     elif config.nu_del2 > 0:
-        du_dt_3d = du_dt_3d + _nu2[None, :] * vector_laplacian_del2_3d(u_3d, mesh)
+        du_dt_3d = du_dt_3d + _nu2[None, :] * _s2(vector_laplacian_del2_3d(u_3d, mesh))
     elif config.nu_del4 > 0:
-        du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
+        du_dt_3d = du_dt_3d + config.nu_del4 * _s4(vector_laplacian_del4_3d(u_3d, mesh))
 
     # Divergence-selective biharmonic damping (CAM-FV ldiv4).  Same sign
     # convention as the vector biharmonic above: the del4 term enters with a
     # minus sign, del2 with a plus.
     if config.nu_div4 > 0:
-        du_dt_3d = du_dt_3d - config.nu_div4 * div_damp_del4_3d(u_3d, mesh)
+        du_dt_3d = du_dt_3d - config.nu_div4 * _s4(div_damp_del4_3d(u_3d, mesh))
     return du_dt_3d
 
 
 def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
                             mass_flux, sigma_dot, p_s, _dps_del4,
-                            _filter_weight, physics_tendency=None, dt=0.0):
-    """Tracer tendency dict (``None`` for a dry state)."""
+                            _filter_weight, physics_tendency=None, dt=0.0,
+                            dp=None, dp_edge=None):
+    """Tracer tendency dict (``None`` for a dry state).  ``dp``/``dp_edge``:
+    the continuity's layer thicknesses, read by ``tracer_horizontal_scheme
+    = "flux_fct"``."""
     _vert_scheme = config.vert_advection_scheme
     # --- 7. Tracer transport (moisture etc.) ---
     # Advect prognostic tracers with the dycore's OWN edge wind (u_3d) and
@@ -573,10 +653,19 @@ def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
     if tracers is not None and len(tracers) > 0:
         from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
             tracer_horizontal_advection,
+            tracer_horizontal_flux_fct,
         )
         _tnames = list(tracers.keys())
         q = jnp.stack([tracers[k].data for k in _tnames], axis=-1)
-        dq = tracer_horizontal_advection(q, u_3d, mesh)
+        if config.tracer_horizontal_scheme == "flux_fct":
+            dq = tracer_horizontal_flux_fct(q, u_3d, dp, dp_edge, mesh, dt,
+                                            config.fct_limiter_sharpness)
+        elif config.tracer_horizontal_scheme == "advective":
+            dq = tracer_horizontal_advection(q, u_3d, mesh)
+        else:
+            raise ValueError(f"unknown tracer_horizontal_scheme "
+                             f"{config.tracer_horizontal_scheme!r}; expected "
+                             "'advective' or 'flux_fct'")
         if _hybrid and _vert_scheme == "ppm":
             # CAM-FV kord 7, positive definite (te_map's constituents).
             dq = dq + jax.vmap(
@@ -694,6 +783,12 @@ def mpas_legacy_pe_tendencies(
     MPASHydrostaticTendencies
     """
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+    if (config.tracer_horizontal_scheme != "advective" or config.K_h_pressure_surfaces
+            or config.edge_scaled_damping):
+        raise ValueError(
+            "tracer_horizontal_scheme / K_h_pressure_surfaces / edge_scaled_damping "
+            "are wired into the shared PE core only; the legacy vertical form "
+            "would run them silently inert")
     # Typo guard on the static tracer-form selection, whether or not the
     # filter runs (nu_vert4_T = 0 or <= 2 levels) and whether or not the state
     # carries tracers: a misspelled name is an error, never silently unused.

@@ -216,6 +216,21 @@ def reduce_partition_metrics(local: dict) -> dict:
     return out
 
 
+# Complete halo rings the MPAS flux-FCT tracer transport needs on the MPI lane:
+# the limiter factor on an owned edge reads the antidiffusive fluxes on every
+# edge of the neighbouring halo cell, whose low-order bounds take the cells
+# beyond.  MEASURED in the ENSO fork (Di Carlo, d7d10936ef; level 4, ERA5
+# start): one complete ring (halo depth 2) gave q_v off by 2.6e-8 relative
+# after one dynamics step, two (depth 3) matched serial to 5e-16.
+_FLUX_FCT_COMPLETE_RINGS = 2
+
+
+def required_halo_depth(tracer_horizontal_scheme: str) -> int:
+    """Halo depth (cell rings) the MPAS step needs: 3 for ``flux_fct`` (two
+    complete rings), else the default 2."""
+    return _FLUX_FCT_COMPLETE_RINGS + 1 if tracer_horizontal_scheme == "flux_fct" else 2
+
+
 def make_voronoi_partition_layout(
     global_mesh: VoronoiMesh,
     rank: int,
@@ -919,6 +934,14 @@ def make_voronoi_mpi_step(
     )
     if config is None:
         config = model.config
+    if (getattr(config, "tracer_horizontal_scheme", "advective") == "flux_fct"
+            and layout.complete_cell_rings < _FLUX_FCT_COMPLETE_RINGS):
+        raise ValueError(
+            f"flux_fct tracer transport needs {_FLUX_FCT_COMPLETE_RINGS} complete "
+            f"halo rings, this layout certifies {layout.complete_cell_rings} "
+            "(0 = not certified); build it with initialize_voronoi_mpi("
+            "halo_depth=required_halo_depth('flux_fct')), or owned-cell q "
+            "differs from serial along the partition cut")
 
     local_mesh = layout.local_mesh
     owned_mask = layout.owned_mask_cells

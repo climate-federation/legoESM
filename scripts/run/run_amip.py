@@ -603,6 +603,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="sharpness of the PPM limiter's branch decisions "
                              "under --mpas-vert-advection-scheme ppm; inf = "
                              "CAM-FV's hard limiter exactly")
+    parser.add_argument("--mpas-tracer-horizontal-scheme",
+                        choices=("advective", "flux_fct"),
+                        default=_DYCORE_DEFAULTS.mpas_tracer_horizontal_scheme,
+                        dest="mpas_tracer_horizontal_scheme",
+                        help="MPAS horizontal tracer transport (shared PE core): "
+                             "'advective' (centred) or 'flux_fct' (flux form + "
+                             "Zalesak FCT)")
+    parser.add_argument("--mpas-fct-limiter-sharpness", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_fct_limiter_sharpness,
+                        dest="mpas_fct_limiter_sharpness",
+                        help="C1 sharpness of the flux_fct limiter clips; inf = "
+                             "the hard Zalesak limiter")
+    parser.add_argument("--mpas-kh-pressure-surfaces",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.mpas_kh_pressure_surfaces,
+                        dest="mpas_kh_pressure_surfaces",
+                        help="MPAS K_h temperature diffusion on pressure surfaces "
+                             "(CAM3 leading-term terrain correction)")
+    parser.add_argument("--mpas-edge-scaled-damping",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.mpas_edge_scaled_damping,
+                        dest="mpas_edge_scaled_damping",
+                        help="scale MPAS horizontal damping per edge with the "
+                             "mesh density (variable-resolution meshes)")
+    parser.add_argument("--mpas-damping-exp-del2", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_damping_exp_del2,
+                        dest="mpas_damping_exp_del2",
+                        help="spacing exponent of the per-edge del2 / K_h damping")
+    parser.add_argument("--mpas-damping-exp-del4", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_damping_exp_del4,
+                        dest="mpas_damping_exp_del4",
+                        help="spacing exponent of the per-edge del4 / ps del4 / "
+                             "ldiv4 damping")
     parser.add_argument("--mpas-vert-advection-scheme",
                         choices=("upwind", "van_leer", "sb", "ppm"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
@@ -3240,6 +3273,12 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         positivity_condensate_from_vapour=args.positivity_condensate_from_vapour,
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
         mpas_vert_ppm_limiter_sharpness=args.mpas_vert_ppm_limiter_sharpness,
+        mpas_tracer_horizontal_scheme=args.mpas_tracer_horizontal_scheme,
+        mpas_fct_limiter_sharpness=args.mpas_fct_limiter_sharpness,
+        mpas_kh_pressure_surfaces=args.mpas_kh_pressure_surfaces,
+        mpas_edge_scaled_damping=args.mpas_edge_scaled_damping,
+        mpas_damping_exp_del2=args.mpas_damping_exp_del2,
+        mpas_damping_exp_del4=args.mpas_damping_exp_del4,
         spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
                                     if args.spectral_sponge_nu_top_m2s is not None else 0.0),
         tracer_vertical_scheme=args.tracer_vertical_scheme,
