@@ -230,7 +230,9 @@ def main(argv=None):
         make_flat_plane_terrain_metric,
     )
     from legoesm.grids.plane import create_plane_grid
-    from legoesm.parallel.staggered_init import staggered_first_call
+    from legoesm.parallel.staggered_init import (
+        release_freed_heap, staggered_first_call,
+    )
     from legoesm.parallel.plane_mpi import (
         make_plane_pencil_grid, make_plane_pencil_layout,
     )
@@ -295,6 +297,9 @@ def main(argv=None):
         return state
 
     t_compile = _timed(one_step, 1, sync)
+    # Return the dycore compile heap so the later radiation compile fits
+    # (128 ranks/node otherwise sit at ~230 GB of freed-but-held heap).
+    heap_trimmed = release_freed_heap()
     _timed(one_step, max(bargs.warmup_steps - 1, 0), sync)
     finite_ok = all(bool(jnp.all(jnp.isfinite(f.data))) for f in
                     (state.u, state.v, state.w, state.theta_prime,
@@ -403,6 +408,7 @@ def main(argv=None):
             "ms_per_step_median": 1e3 * statistics.median(per_step),
             "finite": finite_all, "max_abs_dtheta_prime": max_dtheta,
             "physics": physics, "peak_rss_mib_max_rank": peak_rss_mib,
+            "heap_trimmed_after_first_step": heap_trimmed,
             "rank_ms_per_step": _rank_stats(rank_window_s, bargs.time_steps),
             "dycore_config": {k: (v if isinstance(v, (int, float, str, bool,
                                                       type(None))) else str(v))

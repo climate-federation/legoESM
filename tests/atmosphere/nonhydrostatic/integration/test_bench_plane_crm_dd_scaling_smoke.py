@@ -54,6 +54,8 @@ def test_crm_bench_single_rank(tmp_path, mode):
     assert rec["dycore_config"]["sgs_vertical_diffusion"] is True
     phys = rec["physics"]
     assert rec["max_abs_dtheta_prime"] > 0.0  # the dynamics actually ran
+    # the dycore compile heap is returned before the radiation compile
+    assert rec["heap_trimmed_after_first_step"] is True
     assert phys["non_rad_calls_per_step"] == 3  # SSP-RK3 slow-tendency calls
     assert phys["non_rad_ms"] > 0.0 and phys["rad_ms"] > 0.0
     assert phys["radiation_interval"] > 1  # driver default gates radiation
