@@ -890,9 +890,10 @@ def build_parser():
     parser.add_argument("--ocean-H-max", type=float, default=5500.0,
                         help="Max ocean depth [m] (--ocean dynamic)")
     parser.add_argument("--ocean-ic", default="rest",
-                        choices=["rest", "woa"],
+                        choices=["rest", "woa", "qobs"],
                         help="3D ocean initial condition (--ocean dynamic): "
-                             "'rest' = idealized aquaplanet rest state; 'woa' = "
+                             "'rest' = idealized aquaplanet rest state; 'qobs' = "
+                             "rest with the APE Qobs SST profile (MPAS ocean); 'woa' = "
                              "WOA18 reanalysis T/S + WOA-derived continents "
                              "(realistic cold start; f_land co-derived from the "
                              "same ocean mask, land tile enabled)")
@@ -1240,11 +1241,14 @@ def main(argv=None, *, build_only=False):
             # cold start is wired (a WOA cold start on the unstructured mesh —
             # woa_ocean_mask/partial cells — is a follow-up).  ocean_config and
             # ocean_ic='woa' are lat-lon-only.
-            if args.ocean_ic != "rest":
+            if args.ocean_ic not in ("rest", "qobs"):
                 raise SystemExit(
                     "--ocean dynamic --grid voronoi is wired for the stratified "
-                    "rest cold start only (--ocean-ic rest); the WOA cold start "
-                    "on the MPAS Voronoi mesh is a follow-up.")
+                    "rest cold starts only (--ocean-ic rest|qobs); the WOA cold "
+                    "start on the MPAS Voronoi mesh is a follow-up.")
+        elif args.ocean_ic == "qobs":
+            raise SystemExit("--ocean-ic qobs is wired for the MPAS ocean "
+                             "(--grid voronoi) only.")
         else:
             from legoesm.ocean.state import LatLonCGridOceanConfig
             overrides["ocean_config"] = LatLonCGridOceanConfig()

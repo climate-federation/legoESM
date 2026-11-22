@@ -163,7 +163,7 @@ def rest_state_mpas_ocean(
     ----------
     mesh : VoronoiMesh
     z_coord : OceanZStarCoordinate
-    T_water_init_C : float
+    T_water_init_C : float or (nCells,) array
         Surface temperature [degC].
     T_deep : float
         Deep temperature [degC].
@@ -207,8 +207,10 @@ def rest_state_mpas_ocean(
 
     # Temperature: exponential profile
     z_full = z_coord.z_full_ref  # (nlev,), negative values
-    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)
-    T_data = jnp.broadcast_to(T_profile[jnp.newaxis, :], (nCells, nlev)).astype(dtype)
+    # scalar or per-cell (nCells,) surface temperature
+    T_s = jnp.reshape(jnp.asarray(T_water_init_C), (-1, 1))
+    T_profile = T_deep + (T_s - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)[jnp.newaxis, :]
+    T_data = jnp.broadcast_to(T_profile, (nCells, nlev)).astype(dtype)
 
     # Salinity: uniform
     S_data = jnp.full((nCells, nlev), S_uniform, dtype=dtype)

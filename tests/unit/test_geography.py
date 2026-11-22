@@ -467,3 +467,56 @@ def test_atmosphere_canopy_land_tile_on_a_geography(mesh, tmp_path):
     tile = build_multilayer_land_tile(cfg, lat, lon, mesh)
     assert np.allclose(np.asarray(tile["params"].hc), 0.5)
     assert tile["params_update_factory"] is not None
+
+
+def test_qobs_profile_is_the_ape_formula():
+    from legoesm.forcing.analytical import qobs_sst_C
+    lat = np.array([-90.0, -60.0, -59.0, -30.0, 0.0, 30.0, 59.0, 60.0, 90.0])
+    t = qobs_sst_C(lat)
+    assert t[4] == 27.0 and np.all(t[[0, 1, 7, 8]] == 0.0)
+    assert np.allclose(t, t[::-1], rtol=0, atol=1e-12)       # symmetric
+    s2 = np.sin(np.radians(45.0)) ** 2                          # 3*30/2 = 45 deg
+    assert np.isclose(t[3], 27.0 * (1.0 - 0.5 * (s2 + s2 * s2)), rtol=1e-14)
+    assert 0.0 < t[2] < 0.05                                     # continuous at 60 (0.028 at 59)
+
+
+def test_mpas_rest_state_takes_a_per_cell_surface_temperature(mesh):
+    import jax.numpy as jnp
+    from legoesm.ocean.init_mpas import _SCALE_DEPTH, rest_state_mpas_ocean
+    from legoesm.ocean.vertical import create_ocean_z_star
+    z = create_ocean_z_star(10, H_max=5500.0)
+    scalar = rest_state_mpas_ocean(mesh, z, T_water_init_C=20.0)
+    want = 2.0 + (20.0 - 2.0) * jnp.exp(z.z_full_ref / _SCALE_DEPTH)  # the old formula
+    assert np.array_equal(np.asarray(scalar.T.data),
+                          np.broadcast_to(np.asarray(want), scalar.T.data.shape))
+    ts = np.linspace(0.0, 27.0, mesh.nCells)
+    col = rest_state_mpas_ocean(mesh, z, T_water_init_C=ts)
+    T = np.asarray(col.T.data)
+    assert np.allclose(T[:, 0], 2.0 + (ts - 2.0) * np.exp(float(z.z_full_ref[0]) / _SCALE_DEPTH),
+                       rtol=1e-6, atol=0.0)   # float32 ocean storage
+    assert T.shape == (mesh.nCells, 10)
+
+
+def test_coupled_mpas_ocean_starts_from_qobs(tmp_path):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    from legoesm.forcing.analytical import qobs_sst_C
+    from legoesm.ocean.init_mpas import _SCALE_DEPTH
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet")), CoupledConfig(
+        f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+        ocean_ic="qobs"), output_dir=str(tmp_path / "run"))
+    d.setup()
+    lat = np.degrees(np.asarray(d._ocean_grid.latCell))
+    z0 = float(d._ocean_z_coord.z_full_ref[0])
+    want = 2.0 + (qobs_sst_C(lat) - 2.0) * np.exp(z0 / _SCALE_DEPTH)
+    assert np.allclose(np.asarray(d._ocean_state.T.data)[:, 0], want, rtol=1e-6, atol=1e-5)  # float32
+
+
+def test_coupled_mpas_ocean_refuses_an_unwired_start(tmp_path):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet")), CoupledConfig(
+        f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+        ocean_ic="woa"), output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="must be 'rest' or 'qobs'"):
+        d.setup()

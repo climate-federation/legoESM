@@ -973,7 +973,14 @@ class CoupledESMDriver:
         # rationale as the lat-lon ocean_ic='rest' branch.  The surface layer
         # starts near the atmosphere's mean SST (T_sfc_mean [K] -> degC) so the
         # cold start is not shocked by a large air-sea temperature jump.
-        T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+        if cfg.ocean_ic == "qobs":
+            from legoesm.forcing.analytical import qobs_sst_C
+            T_surf_C = qobs_sst_C(np.degrees(np.asarray(mesh.latCell)))
+        elif cfg.ocean_ic == "rest":
+            T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+        else:
+            raise ValueError(
+                f"MPAS ocean: ocean_ic must be 'rest' or 'qobs', got {cfg.ocean_ic!r}.")
         self._ocean_state = rest_state_mpas_ocean(
             mesh, z_coord, T_water_init_C=T_surf_C, H_max=cfg.ocean_H_max_m,
             land_lat_threshold=90.0,

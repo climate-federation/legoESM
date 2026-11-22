@@ -33,7 +33,7 @@ ocean: dynamic                    # co-located MPAS ocean, wet where land fracti
 ocean_nlev: 20
 ocean_dt: 300.0                   # code default; CFL at L5 not yet shown
 ocean_H_max: 5200.0               # = the geography's flat ocean depth (VOTED V6 b/b/b)
-ocean_ic: rest                    # stratified rest, surface at the atmosphere's mean T_sfc
+ocean_ic: qobs                    # stratified rest, surface = APE Qobs SST profile (user 2026-11-22: a uniform start leaves no meridional SST contrast)
 mpas_ice_skin_prognostic: false   # coupled: the sea-ice model owns the ice surface
 sea_ice_albedo_scheme: constant   # what 'auto' resolves to without the skin (VOTED W6 a/a/a)
 dataset: analytical               # SST from the dynamic ocean, ice from the coupler
