@@ -303,6 +303,68 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
     return out, T
 
 
+def after_convection_positivity(tracers, T, dp):
+    """Water positivity right after deep convection, inside one physics call.
+
+    CAM6 runs ``qneg3`` there (physics_update after convect_deep_tend,
+    physpkg.F90:1925), flooring Q at 1e-12 and so creating water.  This stage
+    conserves it instead, column by column: a column's net-negative
+    condensate is paid from its own vapour with its latent heat
+    (:func:`pay_condensate_deficit_from_vapour`), then every borrow-eligible
+    species is borrowed back within its column
+    (:func:`conservative_positive_clip`); other species are floored.  Column
+    local, so identical serial and under MPI, and continuous in the state.
+    A column with nothing negative is returned unchanged.  All arrays
+    (ncol, nlev), top-down; ``dp`` [Pa].
+
+    KNOWN DIFFERENCE from a fully conservative stage: a column whose vapour
+    total is net-negative, or whose condensate deficit exceeds its vapour,
+    is zeroed by the column borrow, which creates that water (as CAM6's
+    qneg3 does for every hole).  The created mass is reported per column as
+    ``water_created_kg_m2``.
+
+    Returns ``(tracers, T, diag)``; ``diag`` holds per-column counts and
+    deficits of the input, the water mass species (``water_cells``,
+    ``water_deficit_kg_m2``) and the number species (``number_cells``,
+    ``number_deficit_per_m2`` [#/m2]) apart, and ``water_created_kg_m2``.
+
+    Ported from I. Di Carlo's ENSO fork (iadicarlo/legoESM-enso 3e01d6be43,
+    360591d5b3) without its isotope-passenger branch.
+    """
+    from legoesm import constants
+    data = {k: (f.data if hasattr(f, "data") else f) for k, f in tracers.items()}
+    eligible = [k for k in data if is_borrow_eligible_tracer(k)]
+    water = [k for k in eligible if str(k).removeprefix("trc_") in WATER_MASS_SPECIES]
+    number = [k for k in eligible if k not in water]
+    ncol = dp.shape[0]
+
+    def _cells(keys):
+        return (sum(jnp.sum(data[k] < 0.0, axis=-1) for k in keys)
+                if keys else jnp.zeros(ncol)).astype(jnp.int32)
+
+    def _deficit(keys):
+        return (sum(jnp.sum(jnp.maximum(-data[k], 0.0) * dp, axis=-1) for k in keys)
+                / constants.g if keys else jnp.zeros(ncol, dp.dtype))
+
+    diag = {"water_cells": _cells(water), "water_deficit_kg_m2": _deficit(water),
+            "number_cells": _cells(number), "number_deficit_per_m2": _deficit(number)}
+    tracers, T = pay_condensate_deficit_from_vapour(tracers, T, dp)
+    out = {}
+    for name, f in tracers.items():
+        x = f.data if hasattr(f, "data") else f
+        x = (conservative_positive_clip(x, dp, axis=-1)[0]
+             if is_borrow_eligible_tracer(name) else jnp.maximum(x, 0.0))
+        out[name] = f.replace(data=x) if hasattr(f, "replace") else x
+
+    def _col_water(tr):
+        return sum(jnp.sum((tr[k].data if hasattr(tr[k], "data") else tr[k]) * dp,
+                           axis=-1) for k in water) / constants.g if water \
+            else jnp.zeros(ncol, dp.dtype)
+
+    diag["water_created_kg_m2"] = _col_water(out) - _col_water(data)
+    return out, T, diag
+
+
 def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
     """Clip ``q`` to zero WITHOUT creating mass: borrow the deficit back.
 

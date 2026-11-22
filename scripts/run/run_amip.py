@@ -1410,6 +1410,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "ground temperature (semi-implicit top boundary, "
                              "CLM5 eqs. 2.5.123-2.5.124 and 2.6.15). Default: "
                              "the land CanopyConfig value (on).")
+    parser.add_argument("--land-canopy-fallback-from-last-iterate",
+                        dest="land_canopy_fallback_from_last_iterate",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_fallback_from_last_iterate,
+                        help="Two-leaf canopy: a column stopped at the iteration "
+                             "cap takes its last admissible iterate's fluxes "
+                             "(CLM5 2.5.3.2) instead of the cold state. Default: "
+                             "the land CanopyConfig value (on).")
     parser.add_argument("--land-snow-insulation", dest="land_snow_insulation",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_snow_insulation,
@@ -1464,6 +1472,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=None,
                         help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
                              "None = 0.01 (CAM6 namelist)")
+    parser.add_argument("--cloud-cam6-do-subgrid-growth",
+                        dest="cloud_cam6_do_subgrid_growth",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM6 cldfrc2m_do_subgrid_growth: MG2 scales its "
+                             "saturation below freezing by qsatfac from the "
+                             "aist ramp (cam6 namelist .true.). Default off "
+                             "(qsfm = 1).")
     parser.add_argument("--cloud-cam6-snow-in-rad", dest="cloud_cam6_snow_in_rad",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="CAM6 snow in the radiation (cloud scheme "
@@ -1637,6 +1652,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "of the carried cloud water, ice, rain, snow and "
                              "number tracers. "
                              f"Default {_EXPERIMENT_DEFAULTS.zm_transport_cloud_tracers}.")
+    parser.add_argument("--positivity-after-zm",
+                        dest="positivity_after_zm",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.positivity_after_zm,
+                        help="Water positivity right after Zhang-McFarlane's "
+                             "update in the macmic loop (where CAM6 runs qneg3): "
+                             "the column-conserving borrow, MPAS lane with "
+                             "cld_macmic_num_steps >= 2. "
+                             f"Default {_EXPERIMENT_DEFAULTS.positivity_after_zm}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -2535,6 +2559,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "size reset in the sedimentation fall speeds, "
                              "prognostic droplet number only; 0 = MG2's hard "
                              "clip.")
+    parser.add_argument("--morrison-qsfm-freeze-ramp-K", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_qsfm_freeze_ramp_K"],
+                        dest="morrison_qsfm_freeze_ramp_K",
+                        help="RULE 5 width [K] of CAM6 MG2's qsfm switch at "
+                             "freezing (cloud_cam6_do_subgrid_growth only); 0 = "
+                             "MG2's hard switch.")
+    parser.add_argument("--morrison-cirrus-T-width-K", type=float,
+                        default=ExperimentConfig._field_defaults["morrison_cirrus_T_width_K"],
+                        dest="morrison_cirrus_T_width_K",
+                        help="RULE 5 width [K] of the CAM6 cirrus nucleation "
+                             "temperature switches (cam6_liu_penner only); 0 = "
+                             "CAM6's hard switches.")
+    parser.add_argument("--morrison-cirrus-rel-width", type=float,
+                        default=ExperimentConfig._field_defaults["morrison_cirrus_rel_width"],
+                        dest="morrison_cirrus_rel_width",
+                        help="RULE 5 relative width of the CAM6 cirrus nucleation "
+                             "humidity/updraft/ice/number switches (cam6_liu_penner "
+                             "only); 0 = CAM6's hard switches.")
     parser.add_argument("--morrison-warm-rain-incloud",
                         action=argparse.BooleanOptionalAction,
                         default=ExperimentConfig._field_defaults[
@@ -2555,12 +2598,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="CAM6 MG2 prognostic droplet number with CAM6 "
                              "prescribed-aerosol activation (MPAS lane). "
                              "Needs --cam6-aerosol-dir.")
+    parser.add_argument("--morrison-specified-nc-droplet-sedimentation",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_specified_nc_droplet_sedimentation"],
+                        dest="morrison_specified_nc_droplet_sedimentation",
+                        help="CAM6 MG2 cloud-droplet sedimentation with the "
+                             "specified droplet number (MG2 nccons). Needs "
+                             "--morrison-warm-rain-incloud and specified "
+                             "droplets. Default off = no cloud-water "
+                             "sedimentation under specified droplets.")
     parser.add_argument("--cam6-aerosol-dir", type=str,
                         default=ExperimentConfig._field_defaults["cam6_aerosol_dir"],
                         dest="cam6_aerosol_dir",
                         help="Directory of the CAM6 PPE member-000 aerosol "
                              "climatology and MAM4 property files (sha256-pinned) "
                              "read by --morrison-prognostic-droplet-number.")
+    parser.add_argument("--morrison-cirrus-nucleation", choices=["fixed", "cam6_liu_penner"],
+                        default=ExperimentConfig._field_defaults["morrison_cirrus_nucleation"],
+                        dest="morrison_cirrus_nucleation",
+                        help="Cirrus ice nucleation: 'fixed' (Koop threshold, fixed "
+                             "number) or 'cam6_liu_penner' (CAM6 nucleate_ice with "
+                             "pre-existing ice; needs --cirrus-aerosol-file).")
+    parser.add_argument("--cirrus-aerosol-file", type=str,
+                        default=ExperimentConfig._field_defaults["cirrus_aerosol_file"],
+                        dest="cirrus_aerosol_file",
+                        help="npz of a CAM prescribed MAM3 aerosol climatology mapped "
+                             "onto the run's cells, read by cam6_liu_penner.")
     parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
                         default="mg", dest="morrison_flavor",
                         help="Morrison parameter flavor: 'mg' (E3SM/CESM "
@@ -3328,6 +3392,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_rhmaxi=args.cloud_cam6_rhmaxi,
         cloud_cam6_rhminis=args.cloud_cam6_rhminis,
         cloud_cam6_rhmaxis=args.cloud_cam6_rhmaxis,
+        cloud_cam6_do_subgrid_growth=args.cloud_cam6_do_subgrid_growth,
         cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
         cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
         cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,
@@ -3433,18 +3498,26 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_mg2_drop_readjust_log_width=args.morrison_mg2_drop_readjust_log_width,
         morrison_mg2_drop_early_reset_log_width=args.morrison_mg2_drop_early_reset_log_width,
         morrison_mg2_drop_sed_reset_log_width=args.morrison_mg2_drop_sed_reset_log_width,
+        morrison_qsfm_freeze_ramp_K=args.morrison_qsfm_freeze_ramp_K,
+        morrison_cirrus_T_width_K=args.morrison_cirrus_T_width_K,
+        morrison_cirrus_rel_width=args.morrison_cirrus_rel_width,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         morrison_do_graupel=args.morrison_do_graupel,
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
         morrison_prognostic_droplet_number=args.morrison_prognostic_droplet_number,
+        morrison_specified_nc_droplet_sedimentation=(
+            args.morrison_specified_nc_droplet_sedimentation),
         cam6_aerosol_dir=args.cam6_aerosol_dir,
+        morrison_cirrus_nucleation=args.morrison_cirrus_nucleation,
+        cirrus_aerosol_file=args.cirrus_aerosol_file,
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
         land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
         land_canopy_most_n_iters=args.land_canopy_most_n_iters,
         land_canopy_solve_group=args.land_canopy_solve_group,
         land_canopy_implicit_ground_flux=args.land_canopy_implicit_ground_flux,
+        land_canopy_fallback_from_last_iterate=args.land_canopy_fallback_from_last_iterate,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None
@@ -3544,6 +3617,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         zm_land_fraction=args.zm_land_fraction,
         kain_fritsch_variant=args.kain_fritsch_variant,
         zm_transport_cloud_tracers=args.zm_transport_cloud_tracers,
+        positivity_after_zm=args.positivity_after_zm,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,

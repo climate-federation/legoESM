@@ -69,6 +69,8 @@ import math
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from legoesm.core.smooth import smoothstep_cubic
+from legoesm.atmosphere.physics.microphysics.cam6_nucleate_ice import ge_ramp, le_ramp
 
 from legoesm import constants
 from legoesm.thermo import latent_heat_fusion, latent_heat_vaporization
@@ -78,6 +80,10 @@ from legoesm.core.smooth import smooth_min
 from legoesm.thermo import saturation_specific_humidity_ice as _saturation_specific_humidity_ice
 from legoesm.thermo import saturation_specific_humidity_ice_goff_gratch as _qsat_ice_goff_gratch
 from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
+from legoesm.thermo import (
+    saturation_vapor_pressure_goff_gratch,
+    saturation_vapor_pressure_ice_goff_gratch,
+)
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     saturation_adjustment_gsam,
@@ -152,6 +158,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
 )
 from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.microphysics.config import (
+    CIRRUS_NUCLEATION_SCHEMES,
     SED_CFL_SUBSTEPS_MAX_LIMIT,
     MorrisonConfig,
     resolve_unset_ice_snow_d_auto,
@@ -213,6 +220,11 @@ _NUC_RH_ICE_THRESHOLD = 1.08     # ice-nucleation RH_ice gate
 _NUC_RH_LIQ_THRESHOLD = 0.999    # liquid-nucleation RH_liq gate
 _MG2_OMSM = 1.0 - 1.0e-5           # MG2 limiter round-off margin omsm, micro_mg_utils.F90:117
 _MG2_ACCRETION_VARCOEF_EXP = 1.15  # MG2 accrete_cloud_water_rain var_coef(relvar, 1.15), micro_mg_utils.F90:1317
+# MG2 ice nucleation from naai (micro_mg2_0.F90:334, :1117-1118; microp_aero.F90:73)
+_MG2_ICENUCT_OFFSET_K = 5.0        # icenuct = tmelt - 5
+_MG2_ICENUC_RHI = 1.05             # relhum*esl/esi > 1.05
+_MG2_MINCLD = 1.0e-4               # mincld
+_CAM6_HETFRZ_T_MIN_K = 235.15      # hetfrz_classnuc_cam.F90:779 lower bound [K]
 
 # MorrisonConfig fields with no counterpart in gSAM's satadj_liquid: under the
 # sam flavour they must stay at their defaults (setting one raises).
@@ -384,6 +396,27 @@ __physics_contract__ = {
 }
 
 
+def mg2_qsfm(T, q_v, q_sat, qsatfac_ramp, freeze_ramp_K):
+    """CAM6 MG2 ``qsfm`` from the ramp term of qsatfac.
+
+    cldfrc2m.F90:1116-1117 ``qsatfac = max(min(qv/qs, 1), ramp)`` with ``qs``
+    CAM's ``qsat_water``, the same curve as MG2's ``qvl`` (here ``q_sat``);
+    micro_mg2_0.F90:880 ``qsfm = qsatfac``, applied only below tmelt
+    (:911-928), so 1 at and above T_freeze.
+
+    KNOWN DIFFERENCE (RULE 5): MG2's switch at T_freeze is a jump in qsfm
+    wherever qsatfac < 1; here ``qsfm = 1 + s (qsatfac - 1)`` with ``s`` a C1
+    smoothstep from 0 at T_freeze to 1 at ``T_freeze - freeze_ramp_K``
+    (``MorrisonConfig.qsfm_freeze_ramp_K``, default 0.1 K); 0 = MG2's hard
+    switch.  Only the 0.1 K just below freezing differs from MG2.
+    """
+    qsatfac = jnp.maximum(jnp.minimum(q_v / q_sat, 1.0), qsatfac_ramp)
+    if freeze_ramp_K <= 0.0:
+        return jnp.where(T >= constants.T_freeze, 1.0, qsatfac)
+    s = smoothstep_cubic((constants.T_freeze - T) / freeze_ramp_K)
+    return 1.0 + s * (qsatfac - 1.0)
+
+
 def morrison_microphysics(
     T: jax.Array,
     q_v: jax.Array,
@@ -397,6 +430,8 @@ def morrison_microphysics(
     cloud_fraction: jax.Array | None = None,
     relvar: jax.Array | None = None,
     npccn: jax.Array | None = None,
+    qsatfac_ramp: jax.Array | None = None,
+    naai: jax.Array | None = None,
 ) -> MicrophysicsOutput:
     """Compute Morrison double-moment microphysics tendencies.
 
@@ -417,6 +452,20 @@ def morrison_microphysics(
         [1/(m^3 s)] (the caller converts CAM6 microp_aero's per-kg npccn with
         this call's ``rho``); required by, and accepted only under,
         ``config.prognostic_droplet_number``.
+    qsatfac_ramp
+        The ramp term ``(1 - aist)*rhmini + aist*rhmaxi`` of CAM6's sub-grid
+        saturation factor ``(ncol, nlev)`` [1] (cldfrc2m.F90:1116-1117,
+        ``CloudConfig.cam6_do_subgrid_growth``).  MG2 mode only.  The scheme
+        completes it into qsfm with :func:`mg2_qsfm` on its own liquid curve;
+        below T_freeze qsfm scales the liquid and ice saturation humidity
+        every MG2 kernel reads, exactly as micro_mg2_0.F90:922-927 scales
+        qvl/qvi (rain evaporation, snow sublimation, Bergeron, ice
+        deposition/sublimation and its limiter).  None = qsfm = 1.
+    naai
+        CAM6 activated ice number ``(ncol, nlev)`` [1/kg] (nucleate_ice_cam_calc,
+        :func:`legoesm.atmosphere.physics.microphysics.cam6_nucleate_ice.cam6_naai`);
+        required by, and accepted only under, ``config.cirrus_nucleation ==
+        "cam6_liu_penner"``.
 
     Returns
     -------
@@ -434,6 +483,19 @@ def morrison_microphysics(
     # Droplet-number budget publication (``MicrophysicsOutput.nc_budget``):
     # the same static switch as ``qc_budget``, MG2 prognostic number only.
     _nc_pub = _prog_nc and bool(getattr(config, "publish_qc_budget", False))
+    # CAM6 MG2 with a SPECIFIED droplet number (nccons=.true.) still sediments
+    # cloud water (micro_mg2_0.F90:2056-2377), its fall speeds taken from the
+    # constant number (:2074-2076).  Static config; checked at start-up.
+    _sed_spec = bool(getattr(config, "specified_nc_droplet_sedimentation", False))
+    if _sed_spec:
+        _bad = [msg for ok, msg in (
+            (config.warm_rain_incloud, "warm_rain_incloud=True"),
+            (not _prog_nc, "prognostic_droplet_number=False"),
+            (not getattr(config, "predict_Nc", False), "predict_Nc=False"),
+        ) if not ok]
+        if _bad:
+            raise ValueError("MorrisonConfig.specified_nc_droplet_sedimentation=True "
+                             "needs " + ", ".join(_bad) + ".")
     if _prog_nc:
         # Start-up guards (static config; user decisions 2026-10-19 2a, Q-I/10a,
         # Q-B 3a, 18a; 2026-10-20 Q4): CAM6 MG2 droplet number lives only on the MG2 warm-rain
@@ -458,6 +520,25 @@ def morrison_microphysics(
         # user decision 2026-10-20: inputs the switch-off path never reads are refused
         raise ValueError("npccn= is read only under "
                          "MorrisonConfig.prognostic_droplet_number=True.")
+    _cirrus = getattr(config, "cirrus_nucleation", "fixed")
+    if _cirrus not in CIRRUS_NUCLEATION_SCHEMES:
+        raise ValueError(f"MorrisonConfig.cirrus_nucleation={_cirrus!r}; choose one of "
+                         f"{CIRRUS_NUCLEATION_SCHEMES}.")
+    _cirrus_lp = _cirrus == "cam6_liu_penner"
+    if _cirrus_lp:
+        _bad = [msg for ok, msg in (
+            (config.homogeneous_ice_nucleation, "homogeneous_ice_nucleation=True"),
+            (config.warm_rain_incloud, "warm_rain_incloud=True (MG2's ice cloud fraction)"),
+            (cloud_fraction is not None, "the cloud fraction passed as cloud_fraction="),
+            (naai is not None and jnp.shape(naai) == T.shape,
+             f"the activated ice number passed as naai= with shape {T.shape}"),
+        ) if not ok]
+        if _bad:
+            raise ValueError('MorrisonConfig.cirrus_nucleation="cam6_liu_penner" needs '
+                             + ", ".join(_bad) + ".")
+    elif naai is not None:
+        raise ValueError('naai= is read only under MorrisonConfig.cirrus_nucleation='
+                         '"cam6_liu_penner".')
     # sam flavour: gSAM's micro_proc puts the state on the liquid saturation
     # curve (satadj_liquid, condensing OR evaporating cloud) BEFORE the M2005
     # process rates (microphysics.f90:743), so every rate below sees the
@@ -507,6 +588,13 @@ def morrison_microphysics(
     # PSMLT/NSUBS/PGSACW and its Cooper-like nucleation does not count snow, so
     # those SAM double-moment pieces stay off in this mode.
     mg2_snow = bool(config.warm_rain_incloud) and snow_double_moment
+    if qsatfac_ramp is not None and not (
+            mg2_snow and jnp.shape(qsatfac_ramp) == T.shape):
+        raise ValueError(
+            "qsatfac_ramp= (CAM6 do_subgrid_growth) is read only in MG2 mode "
+            "(warm_rain_incloud=True with a prognostic snow number) and needs "
+            f"shape {T.shape}; got mg2_snow={mg2_snow}, shape "
+            f"{jnp.shape(qsatfac_ramp)}.")
     # MG2 has no graupel; in MG2 mode do_graupel still selects it (user decision
     # 2026-10-21 item 14a): with do_graupel=False frozen rain follows MG2
     # (snow, or cloud ice), with do_graupel=True the graupel paths stay on.
@@ -792,13 +880,23 @@ def morrison_microphysics(
             f"Expected 'mg2' (CAM6 MG2 Beheng, the mg-flavour default), "
             f"'sb2001' (SAM NRAGG) or 'legacy'."
         )
+    # CAM6 MG2 sub-grid saturation (micro_mg2_0.F90:880, 922-927): below
+    # tmelt qvl (and qvi, below) are scaled by qsfm = qsatfac; at and above
+    # tmelt qsfm is not applied.  q_sat_mg2 is the liquid saturation every
+    # MG2 kernel reads; without qsatfac_ramp it is q_sat itself (qsfm = 1).
+    if qsatfac_ramp is not None:
+        _qsfm = mg2_qsfm(T, q_v, q_sat, qsatfac_ramp, config.qsfm_freeze_ramp_K)
+        q_sat_mg2 = q_sat * _qsfm
+    else:
+        _qsfm = None
+        q_sat_mg2 = q_sat
     if config.rain_evap_scheme == "m2005" and config.warm_rain_incloud:
         # CAM6 MG2: the same diffusion+ventilation core, but rain evaporates
         # only in the precipitating CLEAR air (precip_frac - lcldm) against
         # the clear-air humidity, on the in-precip PSD
         # (evaporate_sublimate_precip, micro_mg_utils.F90:1422-1536).
         evaporation = rain_evaporation_mg2(
-            q_v, q_sat, T, p_full, rho, q_ric, lamr_ic, n0r_ic, cf_eff,
+            q_v, q_sat_mg2, T, p_full, rho, q_ric, lamr_ic, n0r_ic, cf_eff,
             precip_frac, q_c_ic, q_iic, config)
     elif config.rain_evap_scheme == "m2005":
         evaporation = rain_evaporation_m2005(
@@ -828,9 +926,12 @@ def morrison_microphysics(
     q_sat_i = qsat_ice_fn(T, p_full)
     if mg2_snow:
         # MG2 ice saturation: equal to liquid saturation at and above
-        # T_freeze (micro_mg2_0.F90:911-914), for the snow and ice kernels; no
-        # sub-grid factor (qsfm = 1, user decision 2026-10-21 S10.6 8a).
+        # T_freeze (micro_mg2_0.F90:911-914), for the snow and ice kernels;
+        # below T_freeze scaled by qsfm (:922-923) when qsatfac_ramp is given, else
+        # qsfm = 1 (upstream legoESM choice bc696df77e).
         q_sat_i_mg2 = jnp.where(T >= T_freeze, q_sat, q_sat_i)
+        if _qsfm is not None:
+            q_sat_i_mg2 = q_sat_i_mg2 * _qsfm
     # DEPOSITION target only. IFS/SAM homogeneous-freezing allowance: pristine
     # air below 235 K may hold ice supersaturation up to rh_homo (gSAM
     # cloud.f90), withdrawn where cloud ice is already present at scheme entry (the cloud.f90 qci gate; see thermo.homogeneous_freezing_rh_factor). The NUCLEATION gates below
@@ -878,6 +979,12 @@ def morrison_microphysics(
     dN_i_nuc = (
         jnp.clip(N_i_target - N_frozen, 0.0) / jnp.clip(dt, 1.0) * nuc_gate
     )
+    if _cirrus_lp:
+        # Cooper stands in for CAM6's mixed-phase hetfrz_classnuc, which acts only
+        # for 235.15 K < T < 269.15 K (hetfrz_classnuc_cam.F90:779); below, CAM6's
+        # cirrus ice comes from naai alone (block 1b).
+        dN_i_nuc = dN_i_nuc * ge_ramp(T, _CAM6_HETFRZ_T_MIN_K, config.cirrus_T_width_K,
+                                      strict=True)
     # Mass source: each new crystal starts at MI0 = 4/3·π·ρ_ci·r³ (SAM
     # MNUCCD = NNUCCD·MI0), so freshly-nucleated ice carries mass rather
     # than relying solely on subsequent deposition.
@@ -913,6 +1020,25 @@ def morrison_microphysics(
                 config.hom_freeze_T_sharpness * (config.hom_freeze_T_max - T))
         )
         n_hom_target = config.hom_ice_nuc_N / jnp.clip(rho, _RHO_FLOOR)  # per-mass
+        if _cirrus_lp:
+            # CAM6 MG2 (micro_mg2_0.F90:1117-1129): where naai > 0, T < tmelt - 5
+            # and relhum*esl/esi > 1.05, the grid-mean target is naai*icldm with
+            # icldm = max(ast, mincld) (:869).  RULE 5: the T and humidity
+            # switches are one-sided ramps (MorrisonConfig.cirrus_T_width_K /
+            # cirrus_rel_width, 0 = MG2's hard switches); naai > 0 is dropped,
+            # the target naai*icldm is 0 there.  KNOWN DIFFERENCES: Cooper's crystals of this step
+            # are counted as already present (legoESM keeps Cooper as the stand-in
+            # for CAM6's hetfrz_classnuc), and MG2's nimax cap is not applied.
+            _esl = saturation_vapor_pressure_goff_gratch(T)
+            _esi = saturation_vapor_pressure_ice_goff_gratch(T)
+            # relhum = q/qvl on the qsfm-scaled qvl (:933, :1109-1112)
+            hom_gate = (
+                le_ramp(T, T_freeze - _MG2_ICENUCT_OFFSET_K, config.cirrus_T_width_K,
+                        strict=True)
+                * ge_ramp(q_v / jnp.clip(q_sat_mg2, 1.0e-12) * _esl / _esi,
+                          _MG2_ICENUC_RHI, config.cirrus_rel_width, _MG2_ICENUC_RHI,
+                          strict=True))
+            n_hom_target = naai * jnp.maximum(cloud_fraction, _MG2_MINCLD)
         # Top up to n_hom_target counting the COOPER crystals nucleated in this
         # SAME step (dN_i_nuc*dt), not just the pre-existing N_i.  Cooper's
         # ``gate_ice`` opens at RH_ice >= 1.08, which is ALWAYS satisfied when the
@@ -990,7 +1116,7 @@ def morrison_microphysics(
         # pristine-air allowance); its berg replaces the emergent Bergeron
         # below; limited in MG2's order after the q_c limiter.
         _vap_dep, _ice_sublim, _berg = mg2_ice_deposition_sublimation(
-            q_v, q_i, N_i, cf_eff, T, p_full, rho, q_sat, q_sat_i_mg2,
+            q_v, q_i, N_i, cf_eff, T, p_full, rho, q_sat_mg2, q_sat_i_mg2,
             config.rho_cloud_ice, dcs, config.mg2_ice_slope_log_width,
             RAMP_WIDTH_PER_SHARPNESS / config.melt_sharpness,
             presence_top=config.mg2_presence_ramp_top)
@@ -1214,7 +1340,7 @@ def morrison_microphysics(
     # 4a. MG2 Bergeron onto snow (bergeron_process_snow, micro_mg2_0.F90:
     #     1527-1531): cloud liquid -> snow, grid = bergs*lcldm (:1894).
     if mg2_snow and config.do_snow_deposition:
-        bergs = mg2_bergeron_snow(T, q_c_ic, q_sic, q_sat, q_sat_i_mg2, eps_s,
+        bergs = mg2_bergeron_snow(T, q_c_ic, q_sic, q_sat_mg2, q_sat_i_mg2, eps_s,
                                   RAMP_WIDTH_PER_SHARPNESS / config.melt_sharpness) * cf_eff
     else:
         bergs = jnp.zeros_like(q_c)
@@ -1445,7 +1571,7 @@ def morrison_microphysics(
         # deposition onto snow (its snow growth from vapour is the Bergeron
         # term above, which draws on cloud liquid).
         prds = (mg2_snow_sublimation(
-                    q_v, q_sat, q_sat_i_mg2, T, eps_s, q_sic, cf_eff,
+                    q_v, q_sat_mg2, q_sat_i_mg2, T, eps_s, q_sic, cf_eff,
                     precip_frac,
                     q_c_ic, q_iic) * precip_frac
                 if config.do_snow_deposition else jnp.zeros_like(q_s))
@@ -2461,14 +2587,24 @@ def morrison_microphysics(
         # during the MG2 ice sedimentation above (qvlat, tlat, :2290-2296)
         dq_v_dt = dq_v_dt + sed_qv_i
         dT_dt = dT_dt + sed_T_i
-    if _prog_nc:
+    if _prog_nc or _sed_spec:
         # MG2 cloud-droplet sedimentation on the post-process state
         # (micro_mg2_0.F90:2056-2377; user decision 9a), sharing the
         # sedimentation sub-step cap, its required-count report and strict
         # error (user decision 2026-10-20).  N_c is per volume here.
+        if _prog_nc:
+            _nc_sed_kg = (N_c + dN_c_dt * dt) / rho
+        else:
+            # MG2 nccons: the fall speeds see the in-cloud number ncnst/rho
+            # (:2074-2076), here N_c_eff (the specified number every other
+            # warm-rain rate reads, per volume, in cloud), handed over as the
+            # grid mean because the routine divides by lcldm.  The number
+            # sediments too in MG2, but the specified number is not evolved
+            # here, so only the mass, vapour, heat and surface terms are kept.
+            _nc_sed_kg = N_c_eff / rho * cf_eff
         (sed_c, sed_nc_kg, sed_qv, sed_T, precip_c,
          _req_c) = mg2_cloud_sedimentation(
-            q_c + dq_c_dt * dt, (N_c + dN_c_dt * dt) / rho, cf_eff, T, rho,
+            q_c + dq_c_dt * dt, _nc_sed_kg, cf_eff, T, rho,
             p_half, dt, _nsub, presence_top=config.mg2_presence_ramp_top,
             # RULE 5: the fall-speed size reset rounded by its width (0 = MG2's
             # hard clip; KNOWN DIFFERENCE in mg2_droplet_fall_coefficients)
@@ -2485,9 +2621,10 @@ def morrison_microphysics(
                     f"{_nsub_max}; shorten the physics sub-step or raise the cap")
                 _sed_poison = jnp.where(_overflow_c, jnp.nan, _sed_poison)
         dq_c_dt = dq_c_dt + sed_c
-        dN_c_dt = dN_c_dt + sed_nc_kg * rho
-        if _nc_pub:
-            _nc_terms["sedimentation"] = sed_nc_kg * rho
+        if _prog_nc:
+            dN_c_dt = dN_c_dt + sed_nc_kg * rho
+            if _nc_pub:
+                _nc_terms["sedimentation"] = sed_nc_kg * rho
         dq_v_dt = dq_v_dt + sed_qv
         dT_dt = dT_dt + sed_T
     if mg2_snow:
@@ -2849,7 +2986,7 @@ def morrison_microphysics(
     # surface flux from ``sedimentation_tendency`` so column water
     # conservation holds exactly when the CFL limiter fires.
     precipitation = precip_r + precip_i + precip_s + precip_g
-    if _prog_nc:
+    if _prog_nc or _sed_spec:
         # droplets reaching the surface count as precipitation (CAM6 prect;
         # user decision 2026-10-20)
         precipitation = precipitation + precip_c
@@ -2929,7 +3066,8 @@ def morrison_microphysics(
         # the residual, so a term added to ``dq_c_dt`` without being listed
         # here is caught rather than hidden.  Cloud droplets sediment only
         # under prognostic_droplet_number (MG2), where "sedimentation" is
-        # listed; otherwise cloud water does not sediment.
+        # listed, and under specified_nc_droplet_sedimentation; otherwise
+        # cloud water does not sediment.
         out = out._replace(qc_budget={
             "condensation": condensation,
             "autoconversion": -dq_c_au,
@@ -2945,7 +3083,7 @@ def morrison_microphysics(
             # post-step M2005 small-condensate removal (the preamble one is
             # inside "condensation", relative to the input q_c)
             out.qc_budget["small_removal"] = small_removal_c
-        if _prog_nc:
+        if _prog_nc or _sed_spec:
             out.qc_budget["sedimentation"] = sed_c
         if mg2_snow:
             out.qc_budget["ice_melt"] = _qc_ice_melt

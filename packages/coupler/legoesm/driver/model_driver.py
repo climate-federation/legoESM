@@ -659,6 +659,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         cam6_rhmaxi=getattr(cfg, "cloud_cam6_rhmaxi", None),
         cam6_rhminis=getattr(cfg, "cloud_cam6_rhminis", None),
         cam6_rhmaxis=getattr(cfg, "cloud_cam6_rhmaxis", None),
+        cam6_do_subgrid_growth=getattr(cfg, "cloud_cam6_do_subgrid_growth", None),
         cam6_conv_water_in_rad=getattr(cfg, "cloud_cam6_conv_water_in_rad", None),
         cam6_conv_water_frac_limit=getattr(
             cfg, "cloud_cam6_conv_water_frac_limit", None),
@@ -2343,9 +2344,10 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     _sg = getattr(config, "land_canopy_solve_group", None)
     if _sg is not None:
         _w_over["solve_group"] = int(_sg)
-    _igf = getattr(config, "land_canopy_implicit_ground_flux", None)
-    if _igf is not None:
-        _w_over["implicit_ground_flux"] = _igf
+    for _k in ("implicit_ground_flux", "fallback_from_last_iterate"):
+        _v = getattr(config, f"land_canopy_{_k}", None)
+        if _v is not None:
+            _w_over[_k] = _v
     if _w_over:
         from legoesm.land.canopy.config import CanopyConfig as _CanopyCfg
         if not isinstance(cfg.surface_scheme, _CanopyCfg):
@@ -2357,12 +2359,14 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     if isinstance(cfg.surface_scheme, TwoLeafCanopyConfig):
         logger.info("  land canopy smoothing widths: RH cap %.3g, zeta cap %.3g; "
                     "MOST iterations %d; solve group %d (0 = one batch); "
-                    "implicit ground flux %s",
+                    "implicit ground flux %s; unconverged fallback %s",
                     cfg.surface_scheme.rh_cap_smoothing_width,
                     cfg.surface_scheme.zeta_cap_smoothing_width,
                     cfg.surface_scheme.most_n_iters,
                     cfg.surface_scheme.solve_group,
-                    "ON" if cfg.surface_scheme.implicit_ground_flux else "off")
+                    "ON" if cfg.surface_scheme.implicit_ground_flux else "off",
+                    "last iterate" if cfg.surface_scheme.fallback_from_last_iterate
+                    else "cold state")
     # One-layer snow thermal node, same placement and reason.
     _sn = bool(config.land_snow_insulation)
     cfg = cfg._replace(thermal=cfg.thermal._replace(snow_insulation=_sn))
@@ -14028,6 +14032,33 @@ class ModelDriver:
                 f"  CAM6 droplet activation: prescribed aerosol from "
                 f"{cfg.cam6_aerosol_dir}, top_lev={_cam6_act.top_lev}, "
                 f"mixing substeps <= {_cam6_act.n_max}")
+        _cirrus_setup = None
+        if cfg.morrison_cirrus_nucleation == "cam6_liu_penner":
+            from legoesm.atmosphere.physics.microphysics.cam6_aerosol_climatology import (
+                trop_cloud_top_lev)
+            from legoesm.atmosphere.physics.microphysics.cam6_cirrus_aerosol import load_setup
+            from legoesm.atmosphere.physics.turbulence.integration import resolved_clubb_config
+            _pref_mid = np.asarray(self.sigma.pressure_at_full(jnp.asarray(constants.p_ref)))
+            _cirrus_setup = load_setup(cfg.cirrus_aerosol_file, trop_cloud_top_lev(
+                _pref_mid, resolved_clubb_config(phys_cfg.turbulence).trop_cloud_top_press))
+            _ps_chk, _ = self._owned_p_s_and_lat()
+            _nc_file = int(np.load(cfg.cirrus_aerosol_file)["PS"].shape[-1])
+            # Voronoi cell-partition MPI: the file holds the GLOBAL mesh; each rank
+            # reads its own cells (owned then halo) by global index.
+            _vl_cir = getattr(self, "_voronoi_layout", None)
+            _cirrus_cells = (None if _vl_cir is None
+                             else np.asarray(_vl_cir.partition.local_cells))
+            if _cirrus_cells is not None:
+                if _nc_file != int(_vl_cir.partition.nCells_global):
+                    raise ValueError(f"cirrus_aerosol_file has {_nc_file} cells, the "
+                                     f"global mesh {int(_vl_cir.partition.nCells_global)}")
+                _nc_file = int(_cirrus_cells.size)
+            if _nc_file != int(np.prod(np.shape(_ps_chk))):
+                raise ValueError(f"cirrus_aerosol_file has {_nc_file} cells, the run "
+                                 f"{int(np.prod(np.shape(_ps_chk)))}")
+            logger.info(
+                f"  CAM6 cirrus nucleation (Liu-Penner, pre-existing ice): prescribed "
+                f"aerosol from {cfg.cirrus_aerosol_file}, top_lev={_cirrus_setup.top_lev}")
 
         _mynn_col = getattr(cfg, "turbulence", "none") == "mynn25"
 
@@ -14041,6 +14072,7 @@ class ModelDriver:
             return make_physics(_cfg, model_type="mpas", dt=DT_PHYS,
                                 mynn_initflag=mynn_initflag,
                                 cam6_activation=_cam6_act,
+                                cirrus_aerosol=_cirrus_setup,
                                 budget_ledger_level_weight=_ledger_weight,
                                 column_mesh=_column_mesh, need_rad=need_rad,
                                 f_land=(_f_land_cells
@@ -15501,6 +15533,7 @@ class ModelDriver:
                                     False))
         _last_force_day = None
         _cam6_held = None
+        _cirrus_held = None
         # External CMIP6 forcing (ozone file / aerosol / transient GHG) on
         # the MPAS path: threaded through the same per-step TRACED
         # ``forcing`` dict as T_sfc, refreshed at daily cadence.  The
@@ -16258,7 +16291,8 @@ class ModelDriver:
             if (_sst_forcing or _ext_forcing or _solar_ext
                     or self._segment_callback is not None
                     or _cam6_act is not None
-                    or _cariolle_monthly is not None):
+                    or _cariolle_monthly is not None
+                    or _cirrus_setup is not None):
                 # Anchored on the ABSOLUTE step from the run's day-0 origin:
                 # ``START_DAY + step*DT`` rounds differently from the unbroken
                 # run's ``0 + (start_step+step)*DT`` (1 ulp at step 219 of a
@@ -16496,6 +16530,16 @@ class ModelDriver:
                     _cam6_held, _forcing["cam6_aerosol"] = cam6_aerosol_forcing(
                         cfg.cam6_aerosol_dir, _force_day % NOLEAP_ONE_YR,
                         *_cam6_hw, held=_cam6_held)
+                if _cirrus_setup is not None:
+                    # CAM prescribed_aero for the cirrus nucleation aerosol (MAM3
+                    # file mapped to the cells): same record handling and clock.
+                    from legoesm.atmosphere.physics.microphysics.cam6_aerosol_climatology import (  # noqa: E501
+                        NOLEAP_ONE_YR)
+                    from legoesm.atmosphere.physics.microphysics.cam6_cirrus_aerosol import (  # noqa: E501
+                        cirrus_aerosol_forcing)
+                    _cirrus_held, _forcing["cirrus_aerosol"] = cirrus_aerosol_forcing(
+                        cfg.cirrus_aerosol_file, _cirrus_setup, _force_day % NOLEAP_ONE_YR,
+                        held=_cirrus_held, cells=_cirrus_cells)
                 # Surface heat fluxes for the convective diurnal-cycle CAPE
                 # subtraction, which is what delays land storms from noon to
                 # late afternoon.  They are the PREVIOUS step's: turbulence

@@ -393,6 +393,12 @@ class CloudConfig(NamedTuple):
     cam6_rhmaxi: float = 1.0
     cam6_rhminis: float = 1.0
     cam6_rhmaxis: float = 1.0
+    # cldfrc2m.F90:1116-1117 (namelist cldfrc2m_do_subgrid_growth; .true. in
+    # the cam6 physics defaults, namelist_defaults_cam.xml): the sub-grid
+    # saturation factor qsatfac from the aist ramp, read by MG2
+    # (micro_mg2_0.F90:880, 922-927) to scale qvl/qvi/esl/esi below
+    # freezing.  False = qsfm = 1 (the upstream legoESM choice, bc696df77e).
+    cam6_do_subgrid_growth: bool = False
     # clubb_intr.F90:2501 deepcu = max(0, min(dp1*log(1 + dp2*M_up), max));
     # :2504 zeroed when deepcu <= frac_limit or in-cloud water < ic_limit
     # (:1356-1357).
@@ -488,6 +494,7 @@ def build_cloud_config(
     cam6_rhmaxi: float | None = None,
     cam6_rhminis: float | None = None,
     cam6_rhmaxis: float | None = None,
+    cam6_do_subgrid_growth: bool | None = None,
     cam6_conv_water_in_rad: int | None = None,
     cam6_conv_water_frac_limit: float | None = None,
     cam6_snow_in_rad: bool | None = None,
@@ -548,6 +555,7 @@ def build_cloud_config(
         overrides["cover_condensate_q_ref"] = cover_condensate_q_ref
     for _name, _val in (("cam6_rhmini", cam6_rhmini), ("cam6_rhmaxi", cam6_rhmaxi),
                         ("cam6_rhminis", cam6_rhminis), ("cam6_rhmaxis", cam6_rhmaxis),
+                        ("cam6_do_subgrid_growth", cam6_do_subgrid_growth),
                         ("cam6_conv_water_in_rad", cam6_conv_water_in_rad),
                         ("cam6_conv_water_frac_limit", cam6_conv_water_frac_limit),
                         ("cam6_snow_in_rad", cam6_snow_in_rad),
