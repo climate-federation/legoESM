@@ -453,12 +453,9 @@ def all_vertical_paths(out):
     np.testing.assert_allclose(zc.dz_ref, m[0], rtol=1e-12, atol=0.0)
     m = zc.dz_ref[None, :]
     J = jnp.ones(1)
-    # D3: measure the public tracer binding used by each backend.  The private
-    # spectral helper exists only on the pre-fix baseline, never as a shim.
-    spectral_op = getattr(so, "vertical_advection_ocean", None)
-    if spectral_op is None:
-        spectral_op = getattr(so, "_vertical_advection_spectral")
-    operators = (("CD-grid", cd._vertical_advection_ocean), ("spectral", spectral_op))
+    # These are the actual tracer bindings used by the two tendency functions.
+    operators = (("CD-grid", cd._vertical_advection_ocean),
+                 ("spectral", so.vertical_advection_ocean))
     provenance["operators"] = {path: op.__module__ + "." + op.__qualname__ for path, op in operators}
     for path, op in operators:
         record(path + " original", op.__name__, m, qo, op(qo, wo, zc, J), jnp.diff(wo))
@@ -478,8 +475,8 @@ def all_vertical_paths(out):
     control = record("planted leak", "surface source 1e-3 K/s", h, T, dq+leak, jnp.diff(w))
     assert control["verdict"] == "LEAKS"
     # Golden primitive momentum arrays; production wiring is checked separately.
-    momentum_op = getattr(cd, "advective_vertical_momentum_ocean", cd._vertical_advection_ocean)
-    spectral_momentum = getattr(so, "advective_vertical_momentum_ocean", spectral_op)
+    momentum_op = cd.advective_vertical_momentum_ocean
+    spectral_momentum = so.advective_vertical_momentum_ocean
     provenance["momentum_operators"] = {"CD-grid": momentum_op.__module__ + "." + momentum_op.__qualname__,
                                         "spectral": spectral_momentum.__module__ + "." + spectral_momentum.__qualname__}
     np.savez(out / "momentum.npz", cd=momentum_op(T,w,zc,J), spectral=spectral_momentum(T,w,zc,J))

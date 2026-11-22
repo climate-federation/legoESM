@@ -48,6 +48,7 @@ from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
 from legoesm.ocean.physics.mixing import vertical_diffusion
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 from legoesm.ocean.dynamics.ocean_model import OceanModel
+from legoesm.ocean.vertical import advective_vertical_momentum_ocean
 from legoesm.ocean.conservation import (
     ocean_conservation_fixer,
 )
@@ -586,8 +587,8 @@ class TestOceanTendencies:
         assert float(jnp.max(jnp.abs(tend.du_dt.data[active]))) > 0.0
 
 
-class TestVerticalAdvection:
-    """Tests for vertical upwind advection."""
+class TestAdvectiveVerticalMomentum:
+    """Regression tests for the unchanged advective momentum operator."""
 
     def test_upward_flow_uses_deeper_donor(self, ocean_z_coord):
         """Upward flow should use deeper donor and zero-gradient at bottom."""
@@ -595,7 +596,7 @@ class TestVerticalAdvection:
         jac = jnp.ones((1, 1, 1))
         w_half = jnp.ones((1, 1, 1, ocean_z_coord.n_levels + 1))
 
-        adv = _vertical_advection_ocean(field, w_half, ocean_z_coord, jac)
+        adv = advective_vertical_momentum_ocean(field, w_half, ocean_z_coord, jac)
 
         assert jnp.allclose(adv[..., :-1], -1.0, atol=1e-6)
         assert float(adv[0, 0, 0, -1]) == pytest.approx(0.0, abs=1e-8)
@@ -606,7 +607,7 @@ class TestVerticalAdvection:
         jac = jnp.ones((1, 1, 1))
         w_half = -jnp.ones((1, 1, 1, ocean_z_coord.n_levels + 1))
 
-        adv = _vertical_advection_ocean(field, w_half, ocean_z_coord, jac)
+        adv = advective_vertical_momentum_ocean(field, w_half, ocean_z_coord, jac)
 
         assert float(adv[0, 0, 0, 0]) == pytest.approx(0.0, abs=1e-8)
         assert jnp.allclose(adv[..., 1:], 1.0, atol=1e-6)
@@ -619,7 +620,7 @@ class TestVerticalAdvection:
         field = (J * ocean_z_coord.z_full_ref)[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
         w_half = jnp.ones((1, 1, 1, ocean_z_coord.n_levels + 1))
 
-        adv = _vertical_advection_ocean(field, w_half, ocean_z_coord, jac)
+        adv = advective_vertical_momentum_ocean(field, w_half, ocean_z_coord, jac)
         assert jnp.allclose(adv[..., :-1], -1.0, atol=1e-6)
         assert float(adv[0, 0, 0, -1]) == pytest.approx(0.0, abs=1e-8)
 
