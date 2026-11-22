@@ -10603,7 +10603,7 @@ class ModelDriver:
     # ==================================================================
 
     _ENERGY_SERIES_KEYS = ("energy_toa_net", "energy_dE_dt",
-                           "energy_residual", "sw_net_sfc", "lw_net_sfc",
+                           "energy_toa_minus_dE_dt", "sw_net_sfc", "lw_net_sfc",
                            "hfss", "hfls", "evspsbl")
 
     def _mpas_energy_sample(self, p_s_data, elapsed_day: float) -> dict:
@@ -10711,7 +10711,7 @@ class ModelDriver:
         return {
             "energy_toa_net": float(_eb.toa_net),
             "energy_dE_dt": float(_eb.dE_dt),
-            "energy_residual": float(_eb.residual),
+            "energy_toa_minus_dE_dt": float(_eb.toa_minus_dE_dt),
             "sw_net_sfc": float(_eb.sfc_sw_net),
             "lw_net_sfc": float(_eb.sfc_lw_net),
             # Which flux timing produced this sample.  The closure
@@ -10842,7 +10842,7 @@ class ModelDriver:
         out = {
             "energy_toa_net": float(eb.toa_net),
             "energy_dE_dt": float(eb.dE_dt),
-            "energy_residual": float(eb.residual),
+            "energy_toa_minus_dE_dt": float(eb.toa_minus_dE_dt),
             "sw_net_sfc": float(eb.sfc_sw_net),
             "lw_net_sfc": float(eb.sfc_lw_net),
             "energy_flux_interval_mean": float(fmin[1]),
@@ -15499,7 +15499,7 @@ class ModelDriver:
             "moisture_residual": [],
             # Energy-budget series (#1354/#1515): the MPAS lane runs the
             # EnergyBudgetTracker per diag step from self.model._sfc_diag.
-            "energy_toa_net": [], "energy_dE_dt": [], "energy_residual": [],
+            "energy_toa_net": [], "energy_dE_dt": [], "energy_toa_minus_dE_dt": [],
             "sw_net_sfc": [], "lw_net_sfc": [], "hfss": [], "hfls": [],
             "evspsbl": [],
             # 1.0 = the seven energy channels above (and evspsbl) are diagnostic-INTERVAL
@@ -18768,7 +18768,7 @@ class ModelDriver:
             lw_up_toa=_arr("lw_up_toa") if "lw_up_toa" in ts else nan,
             sw_net_sfc=_arr("sw_net_sfc") if "sw_net_sfc" in ts else nan,
             lw_net_sfc=_arr("lw_net_sfc") if "lw_net_sfc" in ts else nan,
-            energy_residual=_arr("energy_residual") if "energy_residual" in ts else nan,
+            energy_toa_minus_dE_dt=_arr("energy_toa_minus_dE_dt") if "energy_toa_minus_dE_dt" in ts else nan,
             moisture_residual=_arr("moisture_residual") if "moisture_residual" in ts else nan,
             # #1354/#1515 energy-budget closure inputs (MPAS lane).
             energy_toa_net=_arr("energy_toa_net") if "energy_toa_net" in ts else nan,

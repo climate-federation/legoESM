@@ -299,6 +299,8 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
     )
     from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         absolute_vorticity_coriolis,
+        latlon_coriolis_is_rotated,
+        latlon_vertex_coriolis,
     )
     from legoesm.core.conservation import zero_mean_tendency
     from legoesm.core.operators_fv_latlon_3d import cgrid_fv_scalar_advection_latlon_3d
@@ -335,6 +337,9 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
     two_omega = 2.0 * grid.omega
     f_vert = jnp.pad(two_omega * jnp.sin(0.5 * (lat[:-1] + lat[1:])), (1, 1),
                      constant_values=(-two_omega, two_omega))     # (n_lat+1,)
+    f_vert = f_vert[:, None]                                        # (n_lat+1, 1)
+    if latlon_coriolis_is_rotated(grid):
+        f_vert = latlon_vertex_coriolis(grid)                       # (n_lat+1, n_lon+1)
 
     def kinetic_energy_dual(vel):
         """K_c = sum_f A_f u_f^2 / (4 A_c) (the TRiSK form)."""
@@ -355,7 +360,7 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
         zeta = gops_ll.vorticity(u, v)                            # (n_lat+1, n_lon+1, nlev)
         dpx = 0.5 * (dp[:, west] + dp[:, east])                   # (n_lat, n_lon+1, nlev)
         dpv = jnp.concatenate([dpx[:1], 0.5 * (dpx[:-1] + dpx[1:]), dpx[-1:]], axis=0)
-        Q = (zeta + f_vert[:, None, None]) / dpv
+        Q = (zeta + f_vert[..., None]) / dpv
         sV = V[:, west] + V[:, east]                              # (n_lat+1, n_lon+1, nlev)
         cor_u = (Q[:-1] * sV[:-1] + Q[1:] * sV[1:]) / (4.0 * d_u[:, None, None])
         Up = jnp.pad(U, ((1, 1), (0, 0), (0, 0)))
