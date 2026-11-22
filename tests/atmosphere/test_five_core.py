@@ -419,3 +419,13 @@ def test_make_physics_builds_five_only_where_it_can_run(setup):
     for kw in refused:
         with pytest.raises(ValueError, match="FIVE"):
             make_physics(cfg, dt=600.0, five=on, five_host_coord=hc, **kw)
+    zm = cfg.convection._replace(
+        scheme="zhang_mcfarlane",
+        zhang_mcfarlane=cfg.convection.zhang_mcfarlane._replace(positivity_after_zm=True))
+    mg = cfg.microphysics._replace(
+        morrison=cfg.microphysics.morrison._replace(cirrus_nucleation="cam6_liu_penner"))
+    for bad, what in ((cfg._replace(convection=zm), "positivity_after_zm"),
+                      (cfg._replace(microphysics=mg), "cirrus_nucleation")):
+        with pytest.raises(ValueError, match=f"FIVE is not built with {what}"):
+            make_physics(bad, model_type="mpas", dt=600.0, cld_macmic_num_steps=2,
+                         five=on, five_host_coord=hc)
