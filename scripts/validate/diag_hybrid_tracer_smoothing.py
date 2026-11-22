@@ -385,7 +385,7 @@ def paired_column_budget(m, q, dq, dm):
             "verdict": "CONSERVES" if np.all(relative <= 1e-12) else "LEAKS"}
 
 
-def all_vertical_paths(out):
+def all_vertical_paths(out, *, pressure_only=False):
     """T24 preregistered vertical-subsystem census; PBS CPU only.
 
     Closed lids throughout. Pressure F is positive down; height w positive up.
@@ -425,8 +425,10 @@ def all_vertical_paths(out):
                   "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   "PBS_JOBID": os.environ["PBS_JOBID"], "precision": "fp64", "device": "cpu",
                   "tolerance": 1e-12, "complete": False, "module_sources": sources,
+                  "source_sha256": {name: hashlib.sha256(Path(path).read_bytes()).hexdigest() for name, path in sources.items()},
                   "finite_scale_note": "sum absolute per-layer finite mass increments; exact product difference"}
     (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+    (out / "measured_source.patch").write_text(subprocess.check_output(["git", "diff", "HEAD"], cwd=root, text=True))
 
     def record(path, scheme, m, q, dq, dm, statistic="instantaneous"):
         r = paired_column_budget(m, q, dq, dm)
@@ -452,9 +454,14 @@ def all_vertical_paths(out):
             a = list(bound.arguments.values())
             q = a[0]
             if kind == "hybrid":
-                F, ps, coord = a[1:4]
+                if name == "vertical_advection_tracer":
+                    F, coord, ps = a[1:4]
+                else:
+                    F, ps, coord = a[1:4]
                 m, dm = v.dp_from_hybrid(coord, ps), -jnp.diff(F, axis=-1)
             elif kind == "sigma":
+                # Dividing the entire per-column paired budget by ps leaves
+                # this relative residual invariant; retain normalized sigma units.
                 F, coord = a[1:3]
                 m, dm = coord.dsigma, -jnp.diff(F, axis=-1)
             else:
@@ -506,17 +513,19 @@ def all_vertical_paths(out):
         from legoesm.driver.config import ExperimentConfig
         qv = ExperimentConfig().rh_init * saturation_mixing_ratio(T, state.p_s.data[:, None] * c.sigma_full) * c.sigma_full**2
         state = state._replace(T=state.T.replace(data=T), tracers={"q_v": Field(qv)})
-        name = "vertical_advection_hybrid_van_leer" if hybrid else "vertical_advection"
-        # Observe tracer-only entry: momentum and T use the same sigma binding.
-        real_tracer = mp.mpas_tracer_tendencies
-        def tracer_spy(*a, **kw):
-            with observe(mp, name, "MPAS/" + label, label):
-                return real_tracer(*a, **kw)
-        mp.mpas_tracer_tendencies = tracer_spy
-        try:
-            mp.mpas_model_tendencies(state, mesh, c, mp.MPASPrimitiveEquationConfig())
-        finally:
-            mp.mpas_tracer_tendencies = real_tracer
+        for scheme in ("sb", "van_leer"):
+            name = "vertical_advection_hybrid_" + scheme if hybrid else "vertical_advection_tracer"
+            # Scope observation to the native tracer callback only.
+            real_tracer = mp.mpas_tracer_tendencies
+            def tracer_spy(*a, **kw):
+                with observe(mp, name, "MPAS/" + label + "/" + scheme, label):
+                    return real_tracer(*a, **kw)
+            mp.mpas_tracer_tendencies = tracer_spy
+            try:
+                mp.mpas_model_tendencies(state, mesh, c,
+                    mp.MPASPrimitiveEquationConfig(tracer_vertical_scheme=scheme))
+            finally:
+                mp.mpas_tracer_tendencies = real_tracer
 
         grid = create_latlon_grid(8)
         shape = (grid.n_lat, grid.n_lon, 32)
@@ -527,7 +536,7 @@ def all_vertical_paths(out):
         pl = jnp.full(shape[:-1], ps[0])
         ml = c.layer_thickness_dp(pl)
         for scheme in ("sb", "van_leer"):
-            name = "vertical_advection_hybrid_" + scheme if hybrid else "vertical_advection"
+            name = "vertical_advection_hybrid_" + scheme if hybrid else "vertical_advection_tracer"
             with observe(ll, name, "latlon/" + label + "/" + scheme, label):
                 ll.latlon_tracer_tendencies({"q_v": ql},
                     jnp.zeros((8, grid.n_lon + 1, 32)), jnp.zeros((9, grid.n_lon, 32)),
@@ -539,41 +548,51 @@ def all_vertical_paths(out):
         qg = jnp.broadcast_to(q[0], sg)
         fs = jnp.broadcast_to(F[0] / ps[0], sg[:-1] + (33,))
         if not hybrid:
-            with observe(mp, "vertical_advection", "MPAS/sigma/van_leer", "sigma"):
-                mp.mpas_tracer_tendencies(state.tracers, state.u.data, mesh, c,
-                    mp.MPASPrimitiveEquationConfig(vert_advection_scheme="van_leer"),
-                    False, None, jnp.broadcast_to(F[0] / ps[0], (mesh.nCells, 33)),
-                    state.p_s.data, None, None)
+            for scheme in ("sb", "van_leer"):
+                with observe(mp, "vertical_advection_tracer", "MPAS/sigma/thermal_van_leer/" + scheme, "sigma"):
+                    mp.mpas_tracer_tendencies(state.tracers, state.u.data, mesh, c,
+                        mp.MPASPrimitiveEquationConfig(vert_advection_scheme="van_leer", tracer_vertical_scheme=scheme),
+                        False, None, jnp.broadcast_to(F[0] / ps[0], (mesh.nCells, 33)),
+                        state.p_s.data, None, None)
         state_s = sp.isothermal_rest_state_spectral(gg, c, tracers={"q_v": Field(qg)})
         # Nonzero, vertically varying resolved divergence builds live F.
         divg = jnp.cos(gg.lat)[:, None, None] * jnp.cos(gg.lon)[None, :, None] * jnp.arange(1, 33)[None, None, :] * 1e-6
         state_s = state_s._replace(div_hat=state_s.div_hat.replace(data=sh_analysis_3d(gg, divg)))
-        with observe(sp, "vertical_advection_hybrid" if hybrid else "vertical_advection",
-                     "spectral PE/" + label, label):
-            sp.spectral_pe_tendencies(state_s, gg, c, sp.SpectralPEConfig())
+        for scheme in ("sb", "van_leer"):
+            with observe(sp, "vertical_advection_tracer",
+                         "spectral PE/" + label + "/" + scheme, label):
+                sp.spectral_pe_tendencies(state_s, gg, c,
+                    sp.SpectralPEConfig(tracer_vertical_scheme=scheme))
 
     c = v.create_sigma_coordinate(32)
     def state_q(data):
         return TracerState(tracers=Field(data[..., None]), time=Field(jnp.array(0.0)))
     qm = jnp.broadcast_to(q[0], (mesh.nCells, 32))
     fm = jnp.broadcast_to(F[0] / ps[0], (mesh.nCells, 33))
-    with observe(tm, "vertical_advection", "standalone MPAS/sigma", "sigma"):
-        tm.tracer_advection_tendency(qm[..., None], jnp.zeros((mesh.nEdges, 32)), fm, mesh, c)
-    with observe(tl, "vertical_advection", "standalone latlon/sigma", "sigma"):
-        def wind(t, lon, lat, c):
-            return jnp.zeros(lon.shape + (32,)), jnp.zeros(lon.shape + (32,)), jnp.broadcast_to(F[0] / ps[0], lon.shape + (33,))
-        tl.tracer_tendencies_latlon(state_q(ql), grid, c, wind)
-    with observe(ts, "vertical_advection", "standalone spectral/sigma", "sigma"):
-        def swind(t, g, c):
-            return jnp.zeros(sg), jnp.zeros(sg), fs
-        ts.tracer_tendencies_spectral(state_q(sh_analysis_3d(gg, qg)), gg, c, swind)
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    cg = create_cubed_sphere(4)
-    qc = jnp.broadcast_to(q[0], (6, 4, 4, 32))
-    with observe(tc, "vertical_advection", "standalone cube/sigma", "sigma"):
-        def cwind(t, g, c):
-            return jnp.zeros_like(qc), jnp.zeros_like(qc), jnp.broadcast_to(F[0] / ps[0], (6, 4, 4, 33))
-        tc.tracer_tendencies(state_q(qc), cg, c, cwind)
+    for scheme in ("sb", "van_leer"):
+        with observe(tm, "vertical_advection_tracer", "standalone MPAS/sigma/" + scheme, "sigma"):
+            tm.tracer_advection_tendency(qm[..., None], jnp.zeros((mesh.nEdges, 32)), fm, mesh, c, tm.TracerTransportMPASConfig(tracer_vertical_scheme=scheme))
+        with observe(tl, "vertical_advection_tracer", "standalone latlon/sigma/" + scheme, "sigma"):
+            def wind(t, lon, lat, c):
+                return jnp.zeros(lon.shape + (32,)), jnp.zeros(lon.shape + (32,)), jnp.broadcast_to(F[0] / ps[0], lon.shape + (33,))
+            tl.tracer_tendencies_latlon(state_q(ql), grid, c, wind, tl.TracerTransportLatLonConfig(tracer_vertical_scheme=scheme))
+        with observe(ts, "vertical_advection_tracer", "standalone spectral/sigma/" + scheme, "sigma"):
+            def swind(t, g, c):
+                return jnp.zeros(sg), jnp.zeros(sg), fs
+            ts.tracer_tendencies_spectral(state_q(sh_analysis_3d(gg, qg)), gg, c, swind, ts.TracerTransportSpectralConfig(tracer_vertical_scheme=scheme))
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        cg = create_cubed_sphere(4)
+        qc = jnp.broadcast_to(q[0], (6, 4, 4, 32))
+        with observe(tc, "vertical_advection_tracer", "standalone cube/sigma/" + scheme, "sigma"):
+            def cwind(t, g, c):
+                return jnp.zeros_like(qc), jnp.zeros_like(qc), jnp.broadcast_to(F[0] / ps[0], (6, 4, 4, 33))
+            tc.tracer_tendencies(state_q(qc), cg, c, cwind, tc.TracerTransportConfig(tracer_vertical_scheme=scheme))
+
+    if pressure_only:
+        provenance["pressure_complete"] = True
+        provenance["scope"] = "pressure-coordinate atmosphere only"
+        (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+        return rows
 
     # Height native slow caller and full model step (finite product increment).
     from legoesm.atmosphere.dynamics.gcm import compressible_euler_mpas as nh
@@ -699,14 +718,87 @@ def all_vertical_paths(out):
     (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
 
 
+def production_step_snapshot(out):
+    """Resolved production-config fixture steps for bitwise baseline comparison.
+
+    T24_FIXTURE_ROOT selects the isolated baseline's fixtures and decks; module
+    source paths and Git revision are stamped. This is a one-step regression
+    fixture, not a production-resolution climate calculation.
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.core.field import Field
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.grids.factory import create_grid
+    from legoesm.grids.vertical import make_cam6_l32_levels
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_mpas as mp
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as ll
+    from scripts.run.run_amip import build_arg_parser, build_config_from_args, _postprocess_args
+
+    assert os.environ.get("PBS_JOBID") and jax.config.x64_enabled
+    assert all(d.platform == "cpu" for d in jax.devices())
+    set_policy(PrecisionPolicy.fp64())
+    root = Path(os.environ.get("T24_FIXTURE_ROOT", Path(__file__).resolve().parents[2])).resolve()
+    assert all(Path(m.__file__).resolve().is_relative_to(root) for m in (mp, ll))
+    out.mkdir(parents=True, exist_ok=True)
+    helpers = runpy.run_path(str(root / "tests/unit/test_run_amip_cli.py"))
+    mh = runpy.run_path(str(root / "tests/unit/test_mpas_atmosphere.py"))
+    lh = runpy.run_path(str(root / "tests/atmosphere/hydrostatic/unit/test_primitive_eq_latlon_cgrid.py"))
+    columns = runpy.run_path(str(root / "tests/unit/test_vertical_advection_hybrid_van_leer.py"))
+    coord, _, _, q = columns["_column"]()
+    results, configs = {}, {}
+    for kind, deck in (("mpas", "amip_production.yaml"), ("latlon", "amip_production_latlon48.yaml")):
+        parser = build_arg_parser()
+        parser.set_defaults(**load_yaml_config(str(root / "config/amip" / deck), parser))
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args(helpers["_AMIP_DUMMY_PATHS"]), parser))
+        grid = create_grid(kind, 2 if kind == "mpas" else 8,
+                           **({"lloyd_iterations": 5} if kind == "mpas" else {}))
+        model = create_atmosphere_dycore(cfg, grid, coord, latlon_native_grid=grid)
+        configs[kind] = model.config._asdict()
+        if kind == "mpas":
+            state = mh["_add_perturbation_hydro"](mh["_make_hydrostatic_state"](grid, 32), grid, 32)
+            state = state._replace(tracers={"q_v": Field(jnp.broadcast_to(q[0], state.T.data.shape))})
+        else:
+            state = ll.hydrostatic_to_cgrid(lh["baroclinic_wave_init_latlon"](grid, coord), grid)
+            state = state._replace(tracers={"q_v": jnp.broadcast_to(q[0], state.T.shape)})
+        before_q = state.tracers["q_v"]
+        before_q = before_q.data if hasattr(before_q, "data") and not isinstance(before_q, jax.Array) else before_q
+        after = model.step(state, 30.0)
+        after_q = after.tracers["q_v"]
+        after_q = after_q.data if hasattr(after_q, "data") and not isinstance(after_q, jax.Array) else after_q
+        results[kind + "_initial_q_v"] = np.asarray(before_q)
+        results[kind + "_final_q_v"] = np.asarray(after_q)
+        assert np.any(np.asarray(after_q) != np.asarray(before_q)), "vacuous tracer step"
+        for index, leaf in enumerate(jax.tree.leaves(after)):
+            array = np.asarray(leaf)
+            assert np.isfinite(array).all()
+            results[f"{kind}_{index}"] = array
+    np.savez_compressed(out / "step.npz", **results)
+    provenance = dict(commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+                      root=str(root), PBS_JOBID=os.environ["PBS_JOBID"], precision="fp64",
+                      script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                      module_sources={m.__name__: str(Path(m.__file__).resolve()) for m in (mp, ll)},
+                      resolved_configs=configs, dt=30.0, complete=True)
+    (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+    (out / "measured_source.patch").write_text(subprocess.check_output(["git", "diff", "HEAD"], cwd=root, text=True))
+    print("PRODUCTION_FIXTURE_STEP_COMPLETE", sorted(results), flush=True)
+
+
 def main():
     import sys
-    if "--all-vertical-paths" in sys.argv:
+    if "--all-vertical-paths" in sys.argv or "--production-step-snapshot" in sys.argv:
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--all-vertical-paths", action="store_true")
+        parser.add_argument("--production-step-snapshot", action="store_true")
         parser.add_argument("--out", type=Path, required=True)
         args = parser.parse_args()
-        all_vertical_paths(args.out)
+        if args.production_step_snapshot:
+            production_step_snapshot(args.out)
+        else:
+            all_vertical_paths(args.out)
     else:
         smoothing_main()
 

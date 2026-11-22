@@ -24,3 +24,9 @@ roundoff gate, fixtures, guards, selector placement and SB standalone default.
 Full-diff independent Codex and GLM review required before implementation commit.
 User-selected production default: spectral SB; FV3 conserves so retains null.
 No new time-coupling algorithm or prognostic field selected.
+
+Before mutation run: the operator-level revert restores original advective sigma
+and spectral-hybrid operations while retaining compatibility signatures. Predict
+18 repaired native-route budget tests FAIL and 4 already-conservative hybrid
+controls PASS (22 native routes, both selectors plus old MPAS thermal=van_leer).
+This is a deliberate disposable-worktree revert, not a candidate model.
