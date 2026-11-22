@@ -361,7 +361,7 @@ class TestEnergyBudgetTracker:
                      a.toa_lw_up[i], a.sfc_sw_net[i], a.sfc_lw_net[i],
                      elapsed_seconds=a.times[i])
         assert b.dE_dt[-1] > 0.0
-        for name in ("toa_net", "sfc_net", "dE_dt", "residual", "column_energy"):
+        for name in ("toa_net", "sfc_net", "dE_dt", "toa_minus_dE_dt", "column_energy"):
             assert getattr(b, name) == getattr(a, name), name
 
     def test_steady_state_small_residual(self):
@@ -414,7 +414,7 @@ class TestEnergyBudgetTracker:
 
         s = tracker.summary()
         assert "Energy Budget Summary" in s
-        assert "Residual" in s
+        assert "TOA - dE/dt" in s
 
     def test_lists_accumulate(self):
         """Tracker lists should grow with each update."""

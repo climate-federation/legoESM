@@ -131,7 +131,7 @@ def load(path: pathlib.Path) -> dict[str, np.ndarray]:
     missing = [k for k in _NEEDED if k not in d]
     if missing:
         raise SystemExit(
-            f"{path} lacks {missing}; present: {sorted(d.files)[:20]}. The "
+            f"{path} lacks {missing}; present: {sorted(d)[:20]}. The "
             "energy channels are only written by the MPAS/spectral lightweight "
             "series -- check the run actually reached its first diagnostic.")
     out = {k: np.asarray(d[k], dtype=float) for k in _NEEDED}
