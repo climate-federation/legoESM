@@ -48,12 +48,12 @@ atm_owns_surface: true
 # ---- physics schedule: the lat-lon AMIP production schedule (user
 # 2026-11-22): physics every 1800 s, CLUBB + microphysics sub-cycled 3 x 600 s
 # (CAM6 namelist_defaults_cam.xml:1254; required by clubb_liquid_partition),
-# radiation hourly.  The knobs count STEPS of the step the model actually takes:
-# the driver clamps this deck's dt 300 s to 60 s (pole CFL + generic check, an
-# open item), so 30 x 60 s = 1800 s and 60 x 60 s = 3600 s.  Re-derive both if
-# that clamp changes (vote author/GLM/codex b/b/b, 2026-11-22). ----
-physics_update_steps: 30
-rad_update_steps: 60
+# radiation hourly.  The knobs count STEPS of the step the model takes: dt
+# 300 s (run_coupled turns the lat-lon polar filter on, and the driver's CFL
+# check keeps 300 s), so 6 x 300 s = 1800 s and 12 x 300 s = 3600 s; one day =
+# 288 steps, a multiple of both. ----
+physics_update_steps: 6
+rad_update_steps: 12
 cld_macmic_num_steps: 3
 
 # ---- turbulence: verbatim from config/amip/amip_production.yaml (its

@@ -302,7 +302,7 @@ def test_slab_deck_runs_the_atmosphere_owned_column_lane():
     assert slab["turbulence"] == "clubb" and slab["clubb_prognostic"] is True
     assert slab["clubb_liquid_partition"] is True
     assert (slab["physics_update_steps"], slab["rad_update_steps"],
-            slab["cld_macmic_num_steps"]) == (30, 60, 3)
+            slab["cld_macmic_num_steps"]) == (6, 12, 3)
     d3 = load_yaml_config(str(CMIP_CONFIGS[1]), parser)
     assert not d3.get("column_lane") and not d3.get("atm_owns_surface")
     assert not d3.get("use_multilayer_land")
