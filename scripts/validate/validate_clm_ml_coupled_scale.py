@@ -107,6 +107,7 @@ def _build_cfg(resolution):
         days=1, dataset="analytical", radiation="gray",
         land_mask_path="synthetic.nc",
         use_multilayer_land=True,
+        ml_pipeline=True,
         multilayer_n_layers=6, multilayer_soil_depth=2.5,
         land_surface_scheme="clm_ml",
     )

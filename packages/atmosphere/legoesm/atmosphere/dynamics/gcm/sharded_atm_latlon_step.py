@@ -393,6 +393,11 @@ def build_band_grids_atm(grid, n_devices: int):
             f"atm lat-band SPMD requires n_lat ({n_lat}) divisible by "
             f"n_devices ({n_devices}) so every band is uniform (one shard_map "
             f"program). Pick n_devices among the divisors of {n_lat}.")
+    if n_devices > 1 and n_lat // n_devices < 3:
+        raise ValueError(
+            f"atm lat-band SPMD needs >= 3 lat rows per band (PPM halo=3 "
+            f"single-hop exchange); got {n_lat // n_devices} from "
+            f"n_lat={n_lat} on {n_devices} devices.")
     fold = getattr(grid, "fold", None)
     return [
         slice_latlon_grid_to_band(
@@ -1624,8 +1629,8 @@ def build_tile_grids_atm_2d(grid, p_lat: int, p_lon: int):
     sector).  ``skip_total_area_reduce=True`` keeps ``total_area`` the GLOBAL
     full-sphere sum on EVERY tile (the mass-fixer denominator stays global).
     Requires ``n_lat % p_lat == 0`` and ``n_lon % p_lon == 0`` (uniform tiles
-    -> one shard_map program) and at least 2 cells per SPLIT dimension per
-    tile (the widest production halo — the PPM ``halo=2`` exchange — moves
+    -> one shard_map program) and at least 3 cells per SPLIT dimension per
+    tile (the widest production halo — the PPM ``halo=3`` exchange — moves
     edge blocks of that depth in one ppermute hop).
     """
     from legoesm.parallel.latlon_mpi import (
@@ -1640,10 +1645,10 @@ def build_tile_grids_atm_2d(grid, p_lat: int, p_lon: int):
             f"({p_lat}) == 0 and n_lon ({n_lon}) % p_lon ({p_lon}) == 0 so "
             f"every tile is uniform (one shard_map program).")
     nl, w = n_lat // p_lat, n_lon // p_lon
-    if (p_lat > 1 and nl < 2) or (p_lon > 1 and w < 2):
+    if (p_lat > 1 and nl < 3) or (p_lon > 1 and w < 3):
         raise ValueError(
-            f"atm 2-D SPMD tiling: tiles must keep >= 2 cells per split "
-            f"dimension (PPM halo=2 single-hop exchange); got "
+            f"atm 2-D SPMD tiling: tiles must keep >= 3 cells per split "
+            f"dimension (PPM halo=3 single-hop exchange); got "
             f"{nl}x{w} tiles from ({p_lat}, {p_lon}) on {n_lat}x{n_lon}.")
     fold = getattr(grid, "fold", None)
     return [

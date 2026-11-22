@@ -106,6 +106,8 @@ arm() {  # arm <nd> <variant> <precond> <degree> <iters> <x64> <pass>
     a+=(--record-true-residual --steps "${ACC_STEPS:-10}" --warmup 2)
   else
     a+=(--steps "$STEPS" --warmup "$WARMUP")
+    # PROFILE=1: trace both timed blocks (analyze with --steps 2*STEPS); timing is then not a ladder row.
+    [[ "${PROFILE:-}" == 1 ]] && a+=(--profile-dir "$OUTDIR/trace_${tag}")
   fi
   launch=(srun --export=ALL --nodes="$nn" --ntasks="$nd" --ntasks-per-node="$PPN"
           --gpus-per-node=4 --gpu-bind=none --cpu-bind=cores

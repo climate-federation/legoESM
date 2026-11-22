@@ -25,6 +25,7 @@ from legoesm.land import multilayer_land
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.multilayer_land import init_multilayer_land_state, step_multilayer_land
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import (
     SoilThermalConfig,
@@ -177,7 +178,8 @@ def _exact_residual(T0, T1, th0, th1, dz, G, dt, cfg, n=4000):
 def test_full_step_closes_soil_energy(monkeypatch, arm):
     a = _ARMS[arm]
     cfg = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0),
-                               thermal=ON)
+                               thermal=ON,   # explicit-flux budget under test
+                               surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     st, new, (args, kwargs, T1) = _captured_step(
         monkeypatch, cfg, _forcing(1, **a["forcing"]), a["T_init"], a["theta_init"])
     T0, th1, grid, _, _, G, dt = args

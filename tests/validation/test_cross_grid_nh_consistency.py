@@ -158,80 +158,6 @@ def _build_plane():
     }
 
 
-def _build_cubed_sphere():
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
-        CDGridCompressibleEulerConfig,
-        CDGridCompressibleEulerModel,
-    )
-    from legoesm.core.field import Field
-    from legoesm.core.state import NonHydrostaticState
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.vertical import (
-        compute_terrain_metric,
-        create_height_coordinate,
-    )
-
-    n = 4
-    grid = create_cubed_sphere(n, use_duogrid=True)
-    hc = create_height_coordinate(NLEV, H_TOP)
-    tm = compute_terrain_metric(jnp.zeros((6, n, n)), hc)
-    # Cubed-sphere-specific config (separate from the shared
-    # CompressibleEulerConfig used by plane / MPAS code paths;
-    # cubed-sphere carries C-D-grid-specific damping knobs).
-    cfg = CDGridCompressibleEulerConfig(
-        n_acoustic_substeps=4, fix_mass=False,
-    )
-    model = CDGridCompressibleEulerModel(grid, hc, tm, cfg)
-    dims_3d = ("face", "x", "y", "level")
-    dims_w = ("face", "x", "y", "level_half")
-    dims_2d = ("face", "x", "y")
-    state = NonHydrostaticState(
-        u=Field(jnp.zeros((6, n, n, NLEV), jnp.float64), name="u",
-                dims=dims_3d, units="m/s"),
-        v=Field(jnp.zeros((6, n, n, NLEV), jnp.float64), name="v",
-                dims=dims_3d, units="m/s"),
-        w=Field(jnp.zeros((6, n, n, NLEV + 1), jnp.float64), name="w",
-                dims=dims_w, units="m/s"),
-        theta_prime=Field(jnp.zeros((6, n, n, NLEV), jnp.float64),
-                          name="theta_prime", dims=dims_3d, units="K"),
-        rho_prime=Field(jnp.zeros((6, n, n, NLEV), jnp.float64),
-                        name="rho_prime", dims=dims_3d, units="kg/m^3"),
-        phis=Field(jnp.zeros((6, n, n), jnp.float64), name="phis",
-                   dims=dims_2d, units="m^2/s^2"),
-        tracers=Field(jnp.zeros((6, n, n, NLEV, 0), jnp.float64),
-                      name="tracers",
-                      dims=("face", "x", "y", "level", "tracer"),
-                      units="kg/kg"),
-    )
-
-    def _perturb(s, amp):
-        # Add amp at the single mid-level cell (face 0, i=0, j=0).
-        return s._replace(
-            theta_prime=s.theta_prime.replace(
-                data=s.theta_prime.data.at[0, 0, 0, NLEV // 2].add(amp),
-            ),
-        )
-
-    return {
-        "name": "cubed_sphere",
-        "model": model,
-        "state": state,
-        "mass_fn": model.compute_dry_mass,
-        "max_abs_w": lambda s: float(jnp.max(jnp.abs(s.w.data))),
-        "max_abs_u": lambda s: float(jnp.max(jnp.abs(s.u.data))),
-        "max_abs_theta_p": lambda s: float(
-            jnp.max(jnp.abs(s.theta_prime.data))
-        ),
-        "max_abs_rho_p": lambda s: float(
-            jnp.max(jnp.abs(s.rho_prime.data))
-        ),
-        "max_w_signed": lambda s: float(jnp.max(s.w.data)),
-        "min_w_signed": lambda s: float(jnp.min(s.w.data)),
-        "perturb_theta": _perturb,
-        "tol": _TOL["cubed_sphere"],
-    }
-
-
 def _build_mpas():
     from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
         MPASCompressibleEulerConfig,
@@ -306,7 +232,6 @@ def _build_mpas():
 
 _GRID_BUILDERS = {
     "plane": _build_plane,
-    "cubed_sphere": _build_cubed_sphere,
     "mpas": _build_mpas,
 }
 

@@ -436,7 +436,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                      hord_tr: int = 6, tracer_q_split: int = 0,
                      nord_tr: int = 0, trdm2=0.0, lim_fac=1.0,
                      z_tracer: bool = True, inline_q: bool = False,
-                     fill: bool = False) -> dict:
+                     fill: bool = False,
+                     dp2_seam_blend: bool = True) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (:451-674), functional.
 
     C4/D4 returns ``{"state", "press", "q", "omga", "nh", "stages",
@@ -452,6 +453,10 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     (6,m_a,m_a,km+1), zs/ws3 padded (6,m_a,m_a), ws compute (6,n,n),
     pe/peln (6,)+field_shape, pk compute (6,n,n,km+1).  This module
     re-derives none of them (R9).
+
+    ``dp2_seam_blend`` (static, default True) is the tracer step's
+    seam-consistent dp2, a KNOWN DIFFERENCE from Fortran documented on
+    ``fv3_tracer2d.tracer_2d_1l_sixface``; False is the oracle arithmetic.
 
     ``stages`` is the LAST n_map iteration's acoustic payload, by return
     not callback (C6/R8; the spec's stage_hook is not ported): S10 the
@@ -785,7 +790,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                                        dt=mdt, q_split=tracer_q_split,
                                        nord_tr=nord_tr, trdm=trdm2,
                                        lim_fac=lim_fac, z_tracer=z_tracer,
-                                       inline_q=inline_q, batched=batched)
+                                       inline_q=inline_q, batched=batched,
+                                       dp2_seam_blend=dp2_seam_blend)
             # The routine returns a DICT (C4: everything the spec
             # mutates). Binding the whole dict to qq made the remap's
             # `qq[i]` a KeyError on any run with tracers.
@@ -1057,7 +1063,8 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
                               trdm2=0.0, lim_fac=1.0, z_tracer: bool = True,
                               inline_q: bool = False, zvir: float = 0.0,
                               consv_te: float = 0.0, out_shardings=None,
-                              batched: bool = False):
+                              batched: bool = False,
+                              dp2_seam_blend: bool = True):
     """Static (C3/D5): ctx, km and every DECK constant.  Dynamic: only
     state, press, q, bdt, omga and nh.
 
@@ -1080,7 +1087,8 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
             hord_tr=hord_tr, tracer_q_split=tracer_q_split,
             nord_tr=nord_tr, trdm2=trdm2, lim_fac=lim_fac,
             fill=fill,
-            z_tracer=z_tracer, inline_q=inline_q, batched=batched)
+            z_tracer=z_tracer, inline_q=inline_q, batched=batched,
+            dp2_seam_blend=dp2_seam_blend)
 
     # THE RETURN CARRIES TWO NON-ARRAY LEAVES -- `pt_units` (a str) and
     # `omga_is_meaningless` (a bool) -- and jit refuses to return either

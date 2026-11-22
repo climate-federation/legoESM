@@ -656,11 +656,11 @@ def main(argv=None):
     # Split the dynamics row into the three terms the dycore itself assembles
     # (horizontal advection, the theta-form vertical term, the surface-pressure
     # adiabatic term).  These are the dycore's own arrays, not a re-derivation:
-    # mpas_hydrostatic_tendencies returns them on request, which no production
+    # the legacy form (mpas_model_tendencies) returns them on request, which no production
     # path does.  Called WITHOUT physics so the terms are the dry dynamics only.
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        mpas_hydrostatic_tendencies)
-    _tend_full, _terms = mpas_hydrostatic_tendencies(
+        mpas_model_tendencies)
+    _tend_full, _terms = mpas_model_tendencies(
         state, mesh, sig, model.config, None, DT, return_thermo_terms=True)
     dyn_terms = {
         "dyn_horiz_adv": np.asarray(_terms.horiz_adv, dtype=np.float64),
@@ -719,7 +719,7 @@ def main(argv=None):
     # not the anomaly.  Winds, pressure and the mesh are the model's throughout.
     _state_era5 = state._replace(
         T=state.T.replace(data=jnp.asarray(Te, dtype=state.T.data.dtype)))
-    _, _terms_e = mpas_hydrostatic_tendencies(
+    _, _terms_e = mpas_model_tendencies(
         _state_era5, mesh, sig, model.config, None, DT, return_thermo_terms=True)
     dyn_terms.update({
         "era5T_horiz_adv": np.asarray(_terms_e.horiz_adv, dtype=np.float64),

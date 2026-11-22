@@ -174,7 +174,8 @@ class FV3DuoGridBundle(NamedTuple):
 
 def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
                         phis_filter_iter: int = 0,
-                        phis6=None) -> FV3DuoGridBundle:
+                        phis6=None,
+                        rotation_alpha: float = 0.0) -> FV3DuoGridBundle:
     """Build the certified six-face duo-cube context pair for C``resolution``.
 
     Wraps ``build_six_face_duo_context`` (ext-bundle + oracle
@@ -189,6 +190,13 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
     the restart path (M5): the checkpoint persists the terrain the run
     stepped on, so a resume rebuilds the grid from the file, not from
     the ERA5 source.  Exclusive with ``phis_fn``.
+
+    ``rotation_alpha`` [rad]: tilt of the planet's rotation axis for the
+    Coriolis terms (gridstruct ``f0``/``fC`` = ``2 Omega S`` with ``S`` =
+    ``legoesm.core.williamson_sw_analytic.rotated_sin_lat``), passed
+    straight to ``build_six_face_duo_context``; 0.0 (default) is the
+    standard planet, byte-identical to omitting it.  Used by the DCMIP
+    2008 rotated Jablonowski-Williamson tests.
     """
     if phis6 is not None and phis_fn is not None:
         raise ValueError("create_fv3_duo_grid: phis6 (a ready terrain "
@@ -209,7 +217,8 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
     ctx_np = build_six_face_duo_context(resolution, ng,
                                         use_ext_bundle=True,
                                         oracle_conventions=True,
-                                        topo_fn=phis_fn)
+                                        topo_fn=phis_fn,
+                                        rotation_alpha=float(rotation_alpha))
     ctx_jax = build_jax_duo_stepper_context(ctx_np)
     if phis_fn is not None and phis_filter_iter > 0:
         # orography (route A, M4): phis_fn(lon, lat) evaluated on the

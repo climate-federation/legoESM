@@ -23,7 +23,7 @@ from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.core.bulk_flux import (
     surface_reference_state,
     compute_most_fluxes,
-    large_yeager_widths,
+    surface_flux_widths,
     compute_sam_oceflx_fluxes,
     simple_bulk_fluxes,
     validate_bulk_scheme,
@@ -211,6 +211,7 @@ def compute_surface_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
             variant="cesm", t_bot=t_bot, **_ws,
+            zeta_cap_width=config.most_zeta_cap_width,
         )
         return _apply_prescribed_scalar_fluxes(
             config, tau_x, tau_y, shflx, lhflx, ustar, rho) + tuple(_w)
@@ -224,10 +225,11 @@ def compute_surface_fluxes(
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
+            unstable_scheme=config.unstable_scheme,
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
-            **large_yeager_widths(config),
+            **surface_flux_widths(config),
         )
         # The prescribed-flux override applies on THIS branch too. Returning
         # early without it would let a config that sets both a MOST scheme and
@@ -450,6 +452,25 @@ def land_stress_into_surface_flux(surface_flux, tau_land_mag, land_valid,
     return rebuilt[:4] + (jnp.where(has_land, rebuilt[4], surface_flux[4]),)
 
 
+def handback_into_surface_flux(surface_flux, bulk_tau_x, bulk_tau_y,
+                               f_handback, tau_x_hb, tau_y_hb, rho_sfc):
+    """``(tau_x, tau_y, shflx, lhflx, ustar)`` with the coupler's ice+lake
+    stress handback in place of the bulk stress over that fraction.
+
+    ``surface_flux`` carries the bulk stress over every non-land fraction
+    (with the land stress already blended in, or the bulk over land too);
+    ``f_handback`` x the bulk stress is removed and the handback stress
+    (per grid cell, already weighted by the ice/lake area) added.  ``ustar``
+    is rebuilt from the blended stress in EVERY column, so it moves
+    continuously as the prognostic ice fraction goes to zero (vote V14).
+    Heat fluxes pass through unchanged.
+    """
+    tx = surface_flux[0] - f_handback * bulk_tau_x + tau_x_hb
+    ty = surface_flux[1] - f_handback * bulk_tau_y + tau_y_hb
+    return prescribed_into_surface_flux(surface_flux, rho_sfc,
+                                        tau_x=tx, tau_y=ty)
+
+
 def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar, rho):
     """Override the turbulent surface fluxes with prescribed values.
 
@@ -628,6 +649,7 @@ def _single_tile_flux(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
             variant="cesm", t_bot=t_bot,
+            zeta_cap_width=config.most_zeta_cap_width,
         )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(
@@ -639,10 +661,11 @@ def _single_tile_flux(
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
+            unstable_scheme=config.unstable_scheme,
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
-            **large_yeager_widths(config),
+            **surface_flux_widths(config),
         )
 
     # Constant neutral coefficients.

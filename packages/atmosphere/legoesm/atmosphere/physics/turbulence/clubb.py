@@ -327,6 +327,12 @@ __param_spec__ = {
             "rt_tol": "numerics: total-water mixing-ratio tolerance [kg/kg]",
             "thl_tol": "numerics: liquid-water potential-temperature tolerance [K]",
             "tke_min": "numerics: carried-TKE/wp2 state floor [m^2/s^2]",
+            "routec_ql_width_kg_kg": "numerics: route C (RULE 5) ramp width [kg/kg] of the cloudy-layer liquid test and the saturation positive part (value voted 2026-11-21)",
+            "routec_p_top_width_pa": "numerics: route C (RULE 5) ramp width [Pa] of the below-700-hPa tests (value voted 2026-11-21)",
+            "routec_jump_width_k": "numerics: route C (RULE 5) ramp width [K] of the theta_vl inequalities, D0 branch and buoyancy gate (value voted 2026-11-21)",
+            "routec_m_width": "numerics: route C (RULE 5) ramp width [1] of the mass-fraction bounds and slope-pair choice (value voted 2026-11-21)",
+            "routec_lock_m_width": "numerics: route C (RULE 5) ramp width [1] in m of Lock's double-jump switch at m = 0.1 (value voted 2026-11-21)",
+            "routec_E_width": "numerics: route C (RULE 5) width [1] of the smooth [0, 1] clip of the evaporative enhancement (value voted 2026-11-21)",
             "trop_cloud_top_press": "domain definition [Pa]: CAM ref_pres trop_cloud_top_press — where the scheme runs, not a closure coefficient",
             "trop_cloud_taper_lnp_width": "numerics: smooth log-pressure taper width replacing CAM's hard top_lev slice",
             "w_tol": "numerics: w-moment tolerance/floor [m/s]",
@@ -743,6 +749,16 @@ class CLUBBConfig(NamedTuple):
     q_flux_scale: float = 1.0
     q_flux_scale_sigma_lo: float = 0.0
     q_flux_scale_sigma_hi: float = 1.0
+    # RULE 5 widths of route C's switches on traced state (0 = the published
+    # hard form; KNOWN DIFFERENCE in routec.py): cloudy test in liquid and in
+    # pressure, theta_vl inequalities, m and slope-pair choice, Lock's double
+    # jump in m, and the [0, 1] clip of E.
+    routec_ql_width_kg_kg: float = 1.0e-7
+    routec_p_top_width_pa: float = 500.0
+    routec_jump_width_k: float = 0.01
+    routec_m_width: float = 0.01
+    routec_lock_m_width: float = 0.005
+    routec_E_width: float = 0.01
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -1842,6 +1858,64 @@ def penta_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
         Solution, shape ``(ngrdcol, ndim)``.
     """
     return lapack_band_solve(lhs, rhs, kl=2, ku=2)
+
+
+def _interleave_zm_zt(even, odd):
+    """Interleave zm-slot and zt-slot columns into one ``(ncol, 2*n-1)`` vector.
+
+    ``even`` is ``(ncol, n)`` and lands on global indices ``0, 2, ..., 2n-2``;
+    ``odd`` is ``(ncol, n-1)`` and lands on ``1, 3, ..., 2n-3``.  Pure data
+    movement (stack + reshape), so the result is bitwise the strided
+    ``.at[:, 0::2].set(even).at[:, 1::2].set(odd)`` it replaces; XLA compiles
+    each strided update to a scatter that copies the whole array, and the
+    banded assemblies issue dozens of them per CLUBB sub-step.
+    """
+    ncol, n = even.shape
+    odd_padded = jnp.concatenate([odd, jnp.zeros_like(odd[:, :1])], axis=1)
+    return jnp.stack([even, odd_padded], axis=2).reshape(ncol, 2 * n)[:, :2 * n - 1]
+
+
+def _edge_rows(interior, lower, upper):
+    """``(ncol, m)`` interior values framed by one lower and one upper row value
+    (scalar or ``(ncol,)``) -> ``(ncol, m + 2)``; a concatenate, not a scatter."""
+    ncol = interior.shape[0]
+    lo = jnp.broadcast_to(jnp.asarray(lower, interior.dtype), (ncol,))[:, None]
+    hi = jnp.broadcast_to(jnp.asarray(upper, interior.dtype), (ncol,))[:, None]
+    return jnp.concatenate([lo, interior, hi], axis=1)
+
+
+def _batched_band_solve(systems, solve):
+    """Solve several same-shaped banded systems in ONE call of ``solve``.
+
+    ``systems`` is a list of ``(lhs, rhs)`` with ``lhs`` ``(nb, ncol, n)`` and
+    ``rhs`` ``(ncol, n)``; the systems are concatenated along the column axis,
+    solved once and split again.  Both band solvers are elementwise across
+    the column axis, so each column's arithmetic (pivot choices included) is
+    exactly the per-system solve's; what changes is the launch count: one
+    sequential sweep over ``n`` rows instead of one per system.
+    """
+    ncol = systems[0][1].shape[0]
+    for lhs, rhs in systems:
+        if lhs.shape[1:] != systems[0][0].shape[1:] or rhs.shape != systems[0][1].shape:
+            raise ValueError(
+                f"batched band solve: system shapes differ ({lhs.shape}, {rhs.shape} "
+                f"vs {systems[0][0].shape}, {systems[0][1].shape})")
+    if len(systems) == 1:
+        return [solve(*systems[0])]
+    lhs_b = jnp.concatenate([lhs for lhs, _ in systems], axis=1)
+    rhs_b = jnp.concatenate([rhs for _, rhs in systems], axis=0)
+    x = solve(lhs_b, rhs_b)
+    return [x[i * ncol:(i + 1) * ncol] for i in range(len(systems))]
+
+
+def _batched_tridiag_solve(systems):
+    """:func:`_batched_band_solve` with :func:`tridiag_solve`."""
+    return _batched_band_solve(systems, tridiag_solve)
+
+
+def _batched_penta_solve(systems):
+    """:func:`_batched_band_solve` with :func:`penta_solve`."""
+    return _batched_band_solve(systems, penta_solve)
 
 
 # ===========================================================================
@@ -3407,8 +3481,7 @@ def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
                             u_star_sqd, wind_speed, gr)
     rhs_um = windm_edsclrm_rhs(lhs_diff, um, um_tndcy, dt)
     rhs_vm = windm_edsclrm_rhs(lhs_diff, vm, vm_tndcy, dt)
-    um_new = tridiag_solve(lhs, rhs_um)
-    vm_new = tridiag_solve(lhs, rhs_vm)
+    um_new, vm_new = _batched_tridiag_solve([(lhs, rhs_um), (lhs, rhs_vm)])
 
     # Second Crank-Nicholson half (implicit component) for upwp/vpwp.
     xpwp_u_new = calc_xpwp(Km_zm_p_nu10, um_new, gr.invrs_dzm)[:, 1:-1]
@@ -3839,16 +3912,20 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
             Cn_x, invrs_tau_xp2_zm, gamma, dt, gr)
         return lhs_x2
 
-    soln_rtp2 = solve_xp2_xpyp(_scalar_lhs(Cn_rt), lhs_ta, rhs_ta_rtp2, Cn_rt,
-                               invrs_tau_xp2_zm, rt_thr, rtp2, rtm, rtm, wprtp,
-                               wprtp, invrs_dzm, rtp2_forcing, dt)
-    soln_thlp2 = solve_xp2_xpyp(_scalar_lhs(Cn_thl), lhs_ta, rhs_ta_thlp2, Cn_thl,
-                                invrs_tau_xp2_zm, thl_thr, thlp2, thlm, thlm,
-                                wpthlp, wpthlp, invrs_dzm, thlp2_forcing, dt)
-    soln_rtpthlp = solve_xp2_xpyp(_scalar_lhs(Cn_rtthl), lhs_ta, rhs_ta_rtpthlp,
-                                  Cn_rtthl, invrs_tau_xp2_zm, _ZERO_THRESHOLD,
-                                  rtpthlp, rtm, thlm, wprtp, wpthlp, invrs_dzm,
-                                  rtpthlp_forcing, dt)
+    # The three scalar-moment systems are independent: one batched solve
+    # (:func:`_batched_tridiag_solve`, per-column arithmetic unchanged).
+    soln_rtp2, soln_thlp2, soln_rtpthlp = _batched_tridiag_solve([
+        (_scalar_lhs(Cn_rt),
+         xp2_xpyp_rhs(lhs_ta, rhs_ta_rtp2, Cn_rt, invrs_tau_xp2_zm, rt_thr, rtp2,
+                      rtm, rtm, wprtp, wprtp, invrs_dzm, rtp2_forcing, dt, gamma)),
+        (_scalar_lhs(Cn_thl),
+         xp2_xpyp_rhs(lhs_ta, rhs_ta_thlp2, Cn_thl, invrs_tau_xp2_zm, thl_thr, thlp2,
+                      thlm, thlm, wpthlp, wpthlp, invrs_dzm, thlp2_forcing, dt, gamma)),
+        (_scalar_lhs(Cn_rtthl),
+         xp2_xpyp_rhs(lhs_ta, rhs_ta_rtpthlp, Cn_rtthl, invrs_tau_xp2_zm,
+                      _ZERO_THRESHOLD, rtpthlp, rtm, thlm, wprtp, wpthlp, invrs_dzm,
+                      rtpthlp_forcing, dt, gamma)),
+    ])
 
     rtp2_fh = pos_definite_variances(soln_rtp2, rho_ds_zm, gr.dzm, rt_thr,
                                      hf_lower, hf_upper, _CAM_FILL_HOLES_TYPE)
@@ -3923,8 +4000,7 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
                               lhs_ta, params.C_uu_shr, params.C4, params.C14,
                               invrs_tau_C4_zm, invrs_tau_C14_zm, lhs_dp1_C4,
                               lhs_dp1_C14, pr2, omg, dt, w_tol_sqd, False, None)
-    soln_up2 = tridiag_solve(lhs_uv, rhs_up2)
-    soln_vp2 = tridiag_solve(lhs_uv, rhs_vp2)
+    soln_up2, soln_vp2 = _batched_tridiag_solve([(lhs_uv, rhs_up2), (lhs_uv, rhs_vp2)])
 
     up2_fh = pos_definite_variances(soln_up2, rho_ds_zm, gr.dzm, w_tol_sqd,
                                     hf_lower, hf_upper, _CAM_FILL_HOLES_TYPE)
@@ -4423,38 +4499,37 @@ def wp23_rhs(*, nzm, invrs_dt, rhs_pr_turb_wp3, rhs_pr_dfsn_wp3, rhs_pr_dfsn_wp2
     BCs (lower wp2 = current value, lower/upper wp3 = 0, upper wp2 = ``w_tol_sqd``).
     ``l_ho_nontrad_coriolis`` (CAM ``.false.``) is a static feature gate. Returns
     ``(ncol, 2*nzm-1)``.
+
+    The wp2 (even) and wp3 (odd) slots are accumulated on their own
+    ``(ncol, nzm-2)`` / ``(ncol, nzm-3)`` interiors in the Fortran's term order
+    and interleaved once (:func:`_interleave_zm_zt`); the values are those of
+    the strided-scatter assembly this replaces, without its per-term full-array
+    copies.
     """
-    ngrdcol = wp2.shape[0]
-    ndim = 2 * nzm - 1
-    rhs = jnp.zeros((ngrdcol, ndim), dtype=wp2.dtype)
-
-    # wp3 interior (global 3,5,..): pressure-turb + pressure-dfsn
-    rhs = rhs.at[:, 3:-2:2].set(rhs_pr_turb_wp3[:, 1:-1] + rhs_pr_dfsn_wp3[:, 1:-1])
-    # wp2 interior (global 2,4,..): pressure-dfsn
-    rhs = rhs.at[:, 2:-1:2].set(rhs_pr_dfsn_wp2[:, 1:-1])
-
-    # l_tke_aniso=True: wp2 pr1 + over-implicit pr1
-    rhs = rhs.at[:, 2:-1:2].add(rhs_pr1_wp2[:, 1:-1])
-    rhs = rhs.at[:, 2:-1:2].add((1.0 - _GAMMA) * (-lhs_pr1_wp2[:, 1:-1] * wp2[:, 1:-1]))
-
-    # wp3 time tendency + turbulent production (over-implicit) + buoyancy/pr2/pr1
-    rhs = rhs.at[:, 3:-2:2].add(invrs_dt * wp3[:, 1:-1])
-    rhs = rhs.at[:, 3:-2:2].add(
+    # wp2 interior (global 2,4,..): pressure-dfsn, then l_tke_aniso=True pr1 +
+    # over-implicit pr1, time tendency, buoyancy/pr2, pr3, dp1 (over-implicit)
+    wp2_int = rhs_pr_dfsn_wp2[:, 1:-1]
+    wp2_int = wp2_int + rhs_pr1_wp2[:, 1:-1]
+    wp2_int = wp2_int + (1.0 - _GAMMA) * (-lhs_pr1_wp2[:, 1:-1] * wp2[:, 1:-1])
+    # wp3 interior (global 3,5,..): pressure-turb + pressure-dfsn, time tendency,
+    # turbulent production (over-implicit), buoyancy/pr2, pr1
+    wp3_int = rhs_pr_turb_wp3[:, 1:-1] + rhs_pr_dfsn_wp3[:, 1:-1]
+    wp3_int = wp3_int + invrs_dt * wp3[:, 1:-1]
+    wp3_int = wp3_int + (
         (1.0 - _GAMMA) * (-lhs_tp_wp3[0, :, 1:-1] * wp2[:, 2:-1]
                           - lhs_tp_wp3[1, :, 1:-1] * wp2[:, 1:-2]))
-    rhs = rhs.at[:, 3:-2:2].add(rhs_bp1_pr2_wp3[:, 1:-1])
-    rhs = rhs.at[:, 3:-2:2].add(rhs_pr1_wp3[:, 1:-1])
-    rhs = rhs.at[:, 3:-2:2].add((1.0 - _GAMMA) * (-lhs_pr1_wp3[:, 1:-1] * wp3[:, 1:-1]))
+    wp3_int = wp3_int + rhs_bp1_pr2_wp3[:, 1:-1]
+    wp3_int = wp3_int + rhs_pr1_wp3[:, 1:-1]
+    wp3_int = wp3_int + (1.0 - _GAMMA) * (-lhs_pr1_wp3[:, 1:-1] * wp3[:, 1:-1])
 
-    # wp2 time tendency + buoyancy/pr2 + pr3 + dp1 (over-implicit)
-    rhs = rhs.at[:, 2:-1:2].add(invrs_dt * wp2[:, 1:-1])
-    rhs = rhs.at[:, 2:-1:2].add(rhs_bp_pr2_wp2[:, 1:-1])
-    rhs = rhs.at[:, 2:-1:2].add(rhs_pr3_wp2[:, 1:-1])
-    rhs = rhs.at[:, 2:-1:2].add(rhs_dp1_wp2[:, 1:-1])
-    rhs = rhs.at[:, 2:-1:2].add((1.0 - _GAMMA) * (-lhs_dp1_wp2[:, 1:-1] * wp2[:, 1:-1]))
+    wp2_int = wp2_int + invrs_dt * wp2[:, 1:-1]
+    wp2_int = wp2_int + rhs_bp_pr2_wp2[:, 1:-1]
+    wp2_int = wp2_int + rhs_pr3_wp2[:, 1:-1]
+    wp2_int = wp2_int + rhs_dp1_wp2[:, 1:-1]
+    wp2_int = wp2_int + (1.0 - _GAMMA) * (-lhs_dp1_wp2[:, 1:-1] * wp2[:, 1:-1])
 
     # ADG1 TA for wp3 (over-implicit, 5 bands)
-    rhs = rhs.at[:, 3:-2:2].add(
+    wp3_int = wp3_int + (
         (1.0 - _GAMMA) * (
             -lhs_ta_wp3[0, :, 1:-1] * wp3[:, 2:]
             - lhs_ta_wp3[1, :, 1:-1] * wp2[:, 2:-1]
@@ -4465,15 +4540,14 @@ def wp23_rhs(*, nzm, invrs_dt, rhs_pr_turb_wp3, rhs_pr_dfsn_wp3, rhs_pr_dfsn_wp2
     if l_ho_nontrad_coriolis:   # CAM default False (static gate)
         fy = jnp.asarray(fcor_y)
         fy = fy[:, None] if fy.ndim == 1 else fy
-        rhs = rhs.at[:, 2:-1:2].add(2.0 * fy * upwp[:, 1:-1])
-        rhs = rhs.at[:, 3:-2:2].add(3.0 * fy * jnp.asarray(wp2up)[:, 1:-1])
+        wp2_int = wp2_int + 2.0 * fy * upwp[:, 1:-1]
+        wp3_int = wp3_int + 3.0 * fy * jnp.asarray(wp2up)[:, 1:-1]
 
-    # Boundary conditions (k_lb_zm = 0 on the ascending grid)
-    rhs = rhs.at[:, 0].set(wp2[:, 0])
-    rhs = rhs.at[:, 1].set(0.0)
-    rhs = rhs.at[:, 2 * nzm - 3].set(0.0)
-    rhs = rhs.at[:, 2 * nzm - 2].set(w_tol_sqd)
-    return rhs
+    # Boundary conditions (k_lb_zm = 0 on the ascending grid): lower wp2 =
+    # current value, lower/upper wp3 = 0, upper wp2 = w_tol_sqd
+    even = _edge_rows(wp2_int, wp2[:, 0], w_tol_sqd)
+    odd = _edge_rows(wp3_int, 0.0, 0.0)
+    return _interleave_zm_zt(even, odd).astype(wp2.dtype)
 
 
 def wp23_lhs(*, nzm, ndim, invrs_dt, lhs_ma_zm, lhs_diff_zm, lhs_ta_wp2,
@@ -4487,42 +4561,43 @@ def wp23_lhs(*, nzm, ndim, invrs_dt, lhs_ma_zm, lhs_diff_zm, lhs_ta_wp2,
     Over-implicit implicit terms are scaled by gamma; identity rows pin the four
     BC corners. ``l_tke_aniso=True`` (wp2 pr1 on the main diagonal) and the splat
     terms (CAM ``C_wp2_splat=0`` → zero) are included. Returns ``(5, ncol, 2*nzm-1)``.
+
+    Each band is accumulated on the wp2 (even) and wp3 (odd) interiors in the
+    Fortran's term order and interleaved once (:func:`_interleave_zm_zt`).
     """
-    ngrdcol = lhs_dp1_wp2.shape[0]
-    lhs = jnp.zeros((5, ngrdcol, ndim), dtype=lhs_dp1_wp2.dtype)
-
-    # Lower BC identity (wp2 global 0, wp3 global 1)
-    lhs = lhs.at[2, :, 0].set(1.0)
-    lhs = lhs.at[2, :, 1].set(1.0)
-
-    # wp2 interior rows
-    lhs = lhs.at[0, :, 2:-1:2].set(lhs_ma_zm[0, :, 1:-1] + lhs_diff_zm[0, :, 1:-1])
-    lhs = lhs.at[1, :, 2:-1:2].set(lhs_ta_wp2[0, :, 1:-1])
-    lhs = lhs.at[2, :, 2:-1:2].set(
-        lhs_ma_zm[1, :, 1:-1] + lhs_diff_zm[1, :, 1:-1] + lhs_ac_pr2_wp2[:, 1:-1]
-        + _GAMMA * lhs_dp1_wp2[:, 1:-1] + invrs_dt)
-    lhs = lhs.at[3, :, 2:-1:2].set(lhs_ta_wp2[1, :, 1:-1])
-    lhs = lhs.at[4, :, 2:-1:2].set(lhs_ma_zm[2, :, 1:-1] + lhs_diff_zm[2, :, 1:-1])
-    lhs = lhs.at[2, :, 2:-1:2].add(_GAMMA * lhs_pr1_wp2[:, 1:-1])   # l_tke_aniso=True
-    lhs = lhs.at[2, :, 2:-1:2].add(lhs_splat_wp2[:, 1:-1])
-
-    # wp3 interior rows
-    lhs = lhs.at[0, :, 3:-2:2].set(lhs_ma_zt[0, :, 1:-1] + lhs_diff_zt[0, :, 1:-1])
-    lhs = lhs.at[1, :, 3:-2:2].set(_GAMMA * lhs_tp_wp3[0, :, 1:-1])
-    lhs = lhs.at[2, :, 3:-2:2].set(
-        lhs_ma_zt[1, :, 1:-1] + lhs_diff_zt[1, :, 1:-1] + lhs_ac_pr2_wp3[:, 1:-1]
-        + _GAMMA * lhs_pr1_wp3[:, 1:-1] + lhs_splat_wp3[:, 1:-1] + invrs_dt)
-    lhs = lhs.at[3, :, 3:-2:2].set(_GAMMA * lhs_tp_wp3[1, :, 1:-1])
-    lhs = lhs.at[4, :, 3:-2:2].set(lhs_ma_zt[2, :, 1:-1] + lhs_diff_zt[2, :, 1:-1])
-
+    del ndim  # 2*nzm-1 by construction of the interleaved vector
+    g = _GAMMA
+    # wp2 interior rows (global 2,4,..), bands super2..sub2
+    wp2_rows = [
+        lhs_ma_zm[0, :, 1:-1] + lhs_diff_zm[0, :, 1:-1],
+        lhs_ta_wp2[0, :, 1:-1],
+        (lhs_ma_zm[1, :, 1:-1] + lhs_diff_zm[1, :, 1:-1] + lhs_ac_pr2_wp2[:, 1:-1]
+         + g * lhs_dp1_wp2[:, 1:-1] + invrs_dt),
+        lhs_ta_wp2[1, :, 1:-1],
+        lhs_ma_zm[2, :, 1:-1] + lhs_diff_zm[2, :, 1:-1],
+    ]
+    wp2_rows[2] = wp2_rows[2] + g * lhs_pr1_wp2[:, 1:-1]   # l_tke_aniso=True
+    wp2_rows[2] = wp2_rows[2] + lhs_splat_wp2[:, 1:-1]
+    # wp3 interior rows (global 3,5,..)
+    wp3_rows = [
+        lhs_ma_zt[0, :, 1:-1] + lhs_diff_zt[0, :, 1:-1],
+        g * lhs_tp_wp3[0, :, 1:-1],
+        (lhs_ma_zt[1, :, 1:-1] + lhs_diff_zt[1, :, 1:-1] + lhs_ac_pr2_wp3[:, 1:-1]
+         + g * lhs_pr1_wp3[:, 1:-1] + lhs_splat_wp3[:, 1:-1] + invrs_dt),
+        g * lhs_tp_wp3[1, :, 1:-1],
+        lhs_ma_zt[2, :, 1:-1] + lhs_diff_zt[2, :, 1:-1],
+    ]
     # ADG1 TA for wp3: add gamma*lhs_ta_wp3 to all 5 bands of the wp3 rows
-    for b in range(5):
-        lhs = lhs.at[b, :, 3:-2:2].add(_GAMMA * lhs_ta_wp3[b, :, 1:-1])
+    wp3_rows = [r + g * lhs_ta_wp3[b, :, 1:-1] for b, r in enumerate(wp3_rows)]
 
-    # Upper BC identity (wp3 global 2*nzm-3, wp2 global 2*nzm-2)
-    lhs = lhs.at[2, :, 2 * nzm - 3].set(1.0)
-    lhs = lhs.at[2, :, 2 * nzm - 2].set(1.0)
-    return lhs
+    # Identity rows at the four BC corners (wp2 global 0 and 2*nzm-2, wp3
+    # global 1 and 2*nzm-3) on the main band; zero on the others.
+    bands = []
+    for b in range(5):
+        corner = 1.0 if b == 2 else 0.0
+        bands.append(_interleave_zm_zt(_edge_rows(wp2_rows[b], corner, corner),
+                                       _edge_rows(wp3_rows[b], corner, corner)))
+    return jnp.stack(bands, axis=0).astype(lhs_dp1_wp2.dtype)
 
 
 def wp23_solve(lhs, rhs):
@@ -5070,6 +5145,24 @@ def solve_xm_wpxp_with_single_lhs(wpxp, xm, wpxp_forcing, xm_forcing, C6_Skw_fnc
     (if ``wp2``/``xp2_relaxed`` given) applies the Cauchy-Schwarz flux clip.
     ``rhs_ta = 0`` for ADG1. Returns ``(wpxp_new, xm_new)``.
     """
+    lhs, rhs = assemble_xm_wpxp_system(
+        wpxp, xm, wpxp_forcing, xm_forcing, C6_Skw_fnc, C7_Skw_fnc,
+        invrs_tau_C6_zm, lhs_ta_wpxp, lhs_diff_zm, lhs_ma_zm, lhs_ma_zt,
+        lhs_ta_xm, lhs_tp, lhs_ac_pr2, thv_ds_zm, xpthvp, dt)
+    wpxp_new, xm_new = xm_wpxp_solve(lhs, rhs)
+    if wp2 is not None and xp2_relaxed is not None:
+        wpxp_new = clip_covar(wpxp_new, wp2, xp2_relaxed)
+    return wpxp_new, xm_new
+
+
+def assemble_xm_wpxp_system(wpxp, xm, wpxp_forcing, xm_forcing, C6_Skw_fnc,
+                            C7_Skw_fnc, invrs_tau_C6_zm, lhs_ta_wpxp,
+                            lhs_diff_zm, lhs_ma_zm, lhs_ma_zt, lhs_ta_xm,
+                            lhs_tp, lhs_ac_pr2, thv_ds_zm, xpthvp, dt):
+    """The ``(lhs, rhs)`` of one xm/w'x' pair's coupled penta system (the
+    assembly half of :func:`solve_xm_wpxp_with_single_lhs`): field-specific
+    pressure-1 LHS and buoyancy/pr3 RHS on the shared operators, ``rhs_ta = 0``
+    for ADG1."""
     lhs_pr1 = wpxp_term_pr1_lhs(C6_Skw_fnc, invrs_tau_C6_zm)
     rhs_bp_pr3 = wpxp_terms_bp_pr3_rhs(C7_Skw_fnc, thv_ds_zm, xpthvp)
     rhs_ta = jnp.zeros_like(wpxp)
@@ -5077,10 +5170,7 @@ def solve_xm_wpxp_with_single_lhs(wpxp, xm, wpxp_forcing, xm_forcing, C6_Skw_fnc
                       lhs_tp, lhs_ac_pr2, lhs_pr1, dt)
     rhs = xm_wpxp_rhs(wpxp, xm, wpxp_forcing, xm_forcing, rhs_bp_pr3, rhs_ta,
                       lhs_ta_wpxp, lhs_pr1, dt, k_lb_zm=0)
-    wpxp_new, xm_new = xm_wpxp_solve(lhs, rhs)
-    if wp2 is not None and xp2_relaxed is not None:
-        wpxp_new = clip_covar(wpxp_new, wp2, xp2_relaxed)
-    return wpxp_new, xm_new
+    return lhs, rhs
 
 
 def xm_wpxp_clipping_and_stats(solve_type, xm, wpxp_preclip, xm_old, xp2, xp2_clip,
@@ -5212,37 +5302,38 @@ def xm_wpxp_lhs(lhs_diff_zm, lhs_ma_zm, lhs_ma_zt, lhs_ta_wpxp, lhs_ta_xm,
     global index 2k, xm[k] at 2k+1. Bands ``[super2, super1, main, sub1, sub2]``;
     the wpxp turbulent advection and pressure-1 are over-implicit (scaled by
     gamma). wpxp lower/upper rows are identity BCs. Returns ``(5, ncol, 2*nzm-1)``.
+
+    Bands are built on the wpxp (even) interior and the full xm (odd) rows and
+    interleaved once (:func:`_interleave_zm_zt`).
     """
-    ngrdcol = lhs_diff_zm.shape[1]
-    nzm = lhs_diff_zm.shape[2]
-    ndim = 2 * nzm - 1
     invrs_dt = 1.0 / dt
     g = _GAMMA
-    lhs = jnp.zeros((5, ngrdcol, ndim), dtype=lhs_diff_zm.dtype)
-
     # xm rows (odd global indices 1,3,..): mean advection (upwind) + xm<->wpxp TA.
-    lhs = lhs.at[0, :, 1::2].set(lhs_ma_zt[0])          # super2: xm[k+1]
-    lhs = lhs.at[1, :, 1::2].set(lhs_ta_xm[0])          # super1: wpxp[k+1]
-    lhs = lhs.at[2, :, 1::2].set(invrs_dt + lhs_ma_zt[1])  # diag
-    lhs = lhs.at[3, :, 1::2].set(lhs_ta_xm[1])          # sub1: wpxp[k]
-    lhs = lhs.at[4, :, 1::2].set(lhs_ma_zt[2])          # sub2: xm[k-1]
-
+    xm_rows = [
+        lhs_ma_zt[0],           # super2: xm[k+1]
+        lhs_ta_xm[0],           # super1: wpxp[k+1]
+        invrs_dt + lhs_ma_zt[1],  # diag
+        lhs_ta_xm[1],           # sub1: wpxp[k]
+        lhs_ma_zt[2],           # sub2: xm[k-1]
+    ]
     # wpxp interior rows (even global indices 2..2*(nzm-2)).
-    sl = slice(2, 2 * nzm - 2, 2)
-    lhs = lhs.at[0, :, sl].set(lhs_ma_zm[0, :, 1:-1] + lhs_diff_zm[0, :, 1:-1]
-                              + g * lhs_ta_wpxp[0, :, 1:-1])
-    lhs = lhs.at[1, :, sl].set(lhs_tp[0, :, 1:-1])      # super1: xm[k]
-    lhs = lhs.at[2, :, sl].set(
-        lhs_ma_zm[1, :, 1:-1] + lhs_diff_zm[1, :, 1:-1] + lhs_ac_pr2[:, 1:-1]
-        + g * (lhs_ta_wpxp[1, :, 1:-1] + lhs_pr1[:, 1:-1]) + invrs_dt)
-    lhs = lhs.at[3, :, sl].set(lhs_tp[1, :, 1:-1])      # sub1: xm[k-1]
-    lhs = lhs.at[4, :, sl].set(lhs_ma_zm[2, :, 1:-1] + lhs_diff_zm[2, :, 1:-1]
-                              + g * lhs_ta_wpxp[2, :, 1:-1])
-
-    # wpxp lower (j=0) and upper (j=ndim-1) identity BC rows.
-    lhs = lhs.at[2, :, 0].set(1.0)
-    lhs = lhs.at[2, :, -1].set(1.0)
-    return lhs
+    wpxp_rows = [
+        (lhs_ma_zm[0, :, 1:-1] + lhs_diff_zm[0, :, 1:-1]
+         + g * lhs_ta_wpxp[0, :, 1:-1]),
+        lhs_tp[0, :, 1:-1],     # super1: xm[k]
+        (lhs_ma_zm[1, :, 1:-1] + lhs_diff_zm[1, :, 1:-1] + lhs_ac_pr2[:, 1:-1]
+         + g * (lhs_ta_wpxp[1, :, 1:-1] + lhs_pr1[:, 1:-1]) + invrs_dt),
+        lhs_tp[1, :, 1:-1],     # sub1: xm[k-1]
+        (lhs_ma_zm[2, :, 1:-1] + lhs_diff_zm[2, :, 1:-1]
+         + g * lhs_ta_wpxp[2, :, 1:-1]),
+    ]
+    # wpxp lower (j=0) and upper (j=ndim-1) identity BC rows on the main band.
+    bands = []
+    for b in range(5):
+        corner = 1.0 if b == 2 else 0.0
+        bands.append(_interleave_zm_zt(_edge_rows(wpxp_rows[b], corner, corner),
+                                       xm_rows[b]))
+    return jnp.stack(bands, axis=0).astype(lhs_diff_zm.dtype)
 
 
 def xm_wpxp_rhs(wpxp, xm, wpxp_forcing, xm_forcing, rhs_bp_pr3, rhs_ta,
@@ -5255,15 +5346,8 @@ def xm_wpxp_rhs(wpxp, xm, wpxp_forcing, xm_forcing, rhs_bp_pr3, rhs_ta,
     contributions + ``wpxp/dt``. wpxp lower BC carries the current value, upper BC
     is 0. Returns ``(ncol, 2*nzm-1)``.
     """
-    ngrdcol, nzm = wpxp.shape
-    ndim = 2 * nzm - 1
     invrs_dt = 1.0 / dt
     g = _GAMMA
-    rhs = jnp.zeros((ngrdcol, ndim), dtype=wpxp.dtype)
-
-    rhs = rhs.at[:, 0].set(wpxp[:, k_lb_zm])
-    rhs = rhs.at[:, 1::2].set(xm * invrs_dt + xm_forcing)
-
     ta = lhs_ta_wpxp[:, :, 1:-1]
     pr1 = lhs_pr1[:, 1:-1]
     rhs_int = (
@@ -5271,9 +5355,9 @@ def xm_wpxp_rhs(wpxp, xm, wpxp_forcing, xm_forcing, rhs_bp_pr3, rhs_ta,
         + (1.0 - g) * (-ta[0] * wpxp[:, 2:] - ta[1] * wpxp[:, 1:-1]
                        - ta[2] * wpxp[:, :-2] - pr1 * wpxp[:, 1:-1])
         + wpxp[:, 1:-1] * invrs_dt)
-    rhs = rhs.at[:, 2:-1:2].set(rhs_int)
-    rhs = rhs.at[:, -1].set(0.0)
-    return rhs
+    even = _edge_rows(rhs_int, wpxp[:, k_lb_zm], 0.0)
+    odd = xm * invrs_dt + xm_forcing
+    return _interleave_zm_zt(even, odd).astype(wpxp.dtype)
 
 
 def xm_wpxp_solve(lhs, rhs):
@@ -5293,17 +5377,25 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
                     wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm,
                     invrs_rho_ds_zt, w_1_zm, w_2_zm, varnce_w_1_zm,
                     varnce_w_2_zm, mixt_frac_zm, dt, gr: CLUBBGrid, config,
-                    l_implemented=False):
+                    l_implemented=False, routec=None):
     """Advance the coupled xm/w'x' scalar pairs one step (``advance_xm_wpxp``).
+
+    ``routec`` (optional): the dict of
+    :func:`legoesm.atmosphere.physics.turbulence.routec.clubb_routec_terms`;
+    each solve's two flux rows at the subgrid inversion are blended toward
+    GB01's constraints (:func:`~legoesm.atmosphere.physics.turbulence.routec.routec_constrain_rows`).
+    None (default) is the unchanged path.
 
     Faithful port of the core (CAM-default) path of
     ``advance_xm_wpxp_module.F90:advance_xm_wpxp``: advances rtm/wprtp and
     thlm/wpthlp. CAM ``l_predict_upwp_vpwp = .false.`` so the wind fluxes
     upwp/vpwp are NOT advanced here (they are diagnosed; um/vm go through
     ``advance_windm_edsclrm``). Builds the shared ADG1 TA + LHS operators once
-    (:func:`calc_xm_wpxp_ta_terms` / :func:`calc_xm_wpxp_lhs_terms`), then for
-    each scalar: solve (:func:`solve_xm_wpxp_with_single_lhs`) → per-field
-    clipping (:func:`xm_wpxp_clipping_and_stats`: MFL → fill_holes → clip_covar).
+    (:func:`calc_xm_wpxp_ta_terms` / :func:`calc_xm_wpxp_lhs_terms`), assembles
+    each scalar's system (:func:`assemble_xm_wpxp_system`), solves rt and thl in
+    one batched penta solve (:func:`_batched_penta_solve`; the per-scalar path
+    is :func:`solve_xm_wpxp_with_single_lhs`), then per-field clipping
+    (:func:`xm_wpxp_clipping_and_stats`: MFL → fill_holes → clip_covar).
 
     The skewness-dependent coefficients ``C6rt_Skw_fnc``/``C6thl_Skw_fnc``/
     ``C7_Skw_fnc`` and ``invrs_tau_C6_zm`` come from the orchestration (CAM
@@ -5332,25 +5424,40 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
     lo, hi = calc_turb_adv_range(w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm,
                                  mixt_frac_zm, gr, dt)
 
-    def _advance(wpxp, xm, wpxp_forcing, xm_forcing, C6, xpthvp, xp2, xp2_clip,
-                 mfl_id, xm_tol, tol_mfl, field_tol, l_mfl):
-        wpxp_pre, xm_new = solve_xm_wpxp_with_single_lhs(
+    def _system(wpxp, xm, wpxp_forcing, xm_forcing, C6, xpthvp, F_rc=None):
+        lhs, rhs = assemble_xm_wpxp_system(
             wpxp, xm, wpxp_forcing, xm_forcing, C6, C7_Skw_fnc, invrs_tau_C6_zm,
             lhs_ta, sh["lhs_diff_zm"], sh["lhs_ma_zm"], sh["lhs_ma_zt"],
-            sh["lhs_ta_xm"], sh["lhs_tp"], sh["lhs_ac_pr2"], thv_ds_zm, xpthvp,
-            wm_zt, dt, gr)
+            sh["lhs_ta_xm"], sh["lhs_tp"], sh["lhs_ac_pr2"], thv_ds_zm, xpthvp, dt)
+        if routec is not None:
+            from legoesm.atmosphere.physics.turbulence.routec import routec_constrain_rows
+            lhs, rhs = routec_constrain_rows(lhs, rhs, routec, F_rc)
+        return lhs, rhs
+
+    # The rt and thl systems are independent: one batched penta solve
+    # (:func:`_batched_penta_solve`, per-column arithmetic unchanged), then
+    # the per-field clipping in the Fortran's order.
+    soln_rt, soln_thl = _batched_penta_solve([
+        _system(wprtp, rtm, wprtp_forcing, rtm_forcing, C6rt_Skw_fnc, rtpthvp,
+                None if routec is None else routec["F_rt"]),
+        _system(wpthlp, thlm, wpthlp_forcing, thlm_forcing, C6thl_Skw_fnc, thlpthvp,
+                None if routec is None else routec["F_thl"])])
+
+    def _clip(soln, xm, xm_forcing, xp2, xp2_clip, mfl_id, xm_tol, tol_mfl,
+              field_tol, l_mfl):
+        wpxp_pre, xm_new = soln[:, 0::2], soln[:, 1::2]
         return xm_wpxp_clipping_and_stats(
             mfl_id, xm_new, wpxp_pre, xm, xp2, xp2_clip, wp2, wm_zt, xm_forcing,
             rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
             xm_tol ** 2, tol_mfl, lo, hi, field_tol, fht, l_mfl, dt, gr,
             l_implemented)
 
-    rtm_new, wprtp_new = _advance(
-        wprtp, rtm, wprtp_forcing, rtm_forcing, C6rt_Skw_fnc, rtpthvp, rtp2,
-        rtp2_clip, MFL_RTM, rt_tol, _RT_TOL_MFL, rt_tol, True)  # CAM l_mono_flux_lim_rtm
-    thlm_new, wpthlp_new = _advance(
-        wpthlp, thlm, wpthlp_forcing, thlm_forcing, C6thl_Skw_fnc, thlpthvp, thlp2,
-        thlp2_clip, MFL_THLM, thl_tol, _THL_TOL_MFL, thl_tol, True)  # CAM l_mono_flux_lim_thlm
+    rtm_new, wprtp_new = _clip(
+        soln_rt, rtm, rtm_forcing, rtp2, rtp2_clip, MFL_RTM, rt_tol,
+        _RT_TOL_MFL, rt_tol, True)  # CAM l_mono_flux_lim_rtm
+    thlm_new, wpthlp_new = _clip(
+        soln_thl, thlm, thlm_forcing, thlp2, thlp2_clip, MFL_THLM, thl_tol,
+        _THL_TOL_MFL, thl_tol, True)  # CAM l_mono_flux_lim_thlm
 
     return wprtp_new, rtm_new, wpthlp_new, thlm_new
 
@@ -5827,8 +5934,9 @@ def expldiff_rtm_thlm(rtm, thlm, Kh_zm, c_K10h, wm_zt, rho_ds_zm,
     lhs = windm_edsclrm_lhs(lhs_diff, _xm_lhs_ma_zt(wm_zt, gr, l_implemented), dt,
                             invrs_rho_ds_zt, rho_ds_zm, zeros,
                             jnp.ones_like(rtm), gr)   # no implicit sfc flux
-    thl_ed = tridiag_solve(lhs, windm_edsclrm_rhs(lhs_diff, thlm, jnp.zeros_like(thlm), dt))
-    rt_ed = tridiag_solve(lhs, windm_edsclrm_rhs(lhs_diff, rtm, jnp.zeros_like(rtm), dt))
+    thl_ed, rt_ed = _batched_tridiag_solve([
+        (lhs, windm_edsclrm_rhs(lhs_diff, thlm, jnp.zeros_like(thlm), dt)),
+        (lhs, windm_edsclrm_rhs(lhs_diff, rtm, jnp.zeros_like(rtm), dt))])
     weak = (pvertinterp(p_in_Pa_zt, _EXPLDIFF_P_UPPER_PA, thlm)
             - pvertinterp(p_in_Pa_zt, _EXPLDIFF_P_LOWER_PA, thlm)
             < _EXPLDIFF_DTHL_MAX_K)[:, None]
@@ -5854,7 +5962,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                        p_sfc, thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
                        invrs_rho_ds_zm, invrs_rho_ds_zt, wm_zt, wm_zm,
                        sfc_elevation, fcor, ug, vg, dt, gr: CLUBBGrid, config,
-                       l_implemented, radht_zt=None, vector_sfc_stress=False):
+                       l_implemented, radht_zt=None, vector_sfc_stress=False,
+                       routec_inversion=False):
     """One prognostic CLUBB step (the CAM-default ``advance_clubb_core`` core).
 
     Runs, in the CAM order, ``compute_clubb_diagnostics`` -> the pre-advance ADG1
@@ -5967,6 +6076,16 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                                coef_rad)
         forcing = forcing._replace(thlp2=forcing.thlp2 + src)
 
+    # ---- (2d) route C: the subgrid inversion and its entrainment fluxes on
+    # the start-of-step state (routec.py; static switch, off by default) ----
+    rc = None
+    if routec_inversion:
+        from legoesm.atmosphere.physics.turbulence.routec import (
+            clubb_routec_terms, widths_from_config)
+        rc = clubb_routec_terms(
+            state.thlm, state.rtm, pdf["rcm"], diag["em"], thv_ds_zm, rho_ds_zm,
+            rho_ds_zt, p_sfc, gr, widths_from_config(config))
+
     # ---- (3) advance_xm_wpxp: rtm/wprtp + thlm/wpthlp ----
     wprtp, rtm, wpthlp, thlm = advance_xm_wpxp(
         state.rtm, state.thlm, state.wprtp, state.wpthlp, forcing.rtm,
@@ -5976,7 +6095,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         state.rtp2, state.thlp2, pdf["rtpthvp"], pdf["thlpthvp"], thv_ds_zm,
         wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
         pdf["w_1_zm"], pdf["w_2_zm"], pdf["varnce_w_1_zm"], pdf["varnce_w_2_zm"],
-        pdf["mixt_frac_zm"], dt, gr, config, l_implemented=l_implemented)
+        pdf["mixt_frac_zm"], dt, gr, config, l_implemented=l_implemented,
+        routec=rc)
     # CAM's rcm_out: the pre-advance in-layer rcm clipped against the advanced
     # rtm (advance_clubb_core_module.F90 clip_rcm after advance_xm_wpxp);
     # clubb_intr pairs it with qclvar in relvar (:2424).
@@ -6025,7 +6145,10 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         vector_sfc_stress=vector_sfc_stress, l_implemented=l_implemented)
     # CAM l_do_expldiff_rtm_thlm = True (fixed): at the end of
     # advance_windm_edsclrm, with the same start-of-step Kh_zm.
-    rtm, thlm = expldiff_rtm_thlm(rtm, thlm, diag["Kh_zm"], p.c_K10h, wm_zt,
+    # Route C: no eddy diffusivity at the two flux levels where the entrainment
+    # flux is specified (Lock 2001 section 4), by the constraint weight.
+    Kh_ed = diag["Kh_zm"] if rc is None else diag["Kh_zm"] * (1.0 - rc["W_zm"])
+    rtm, thlm = expldiff_rtm_thlm(rtm, thlm, Kh_ed, p.c_K10h, wm_zt,
                                   rho_ds_zm, invrs_rho_ds_zt, p_in_Pa_zt, dt, gr,
                                   l_implemented=l_implemented)
 
@@ -6057,6 +6180,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         rcp2_zt=pdf["rcp2_zt"],
         rcm_out=rcm_out,
         wpthvp=pdf_post["wpthvp"], Kh_zt=diag["Kh_zt"], Kh_zm=diag["Kh_zm"])
+    if rc is not None:
+        diagnostics["routec"] = {k: v for k, v in rc.items() if k != "cand"}
     return new_state, diagnostics
 
 
@@ -6555,6 +6680,7 @@ def clubb_step(
     q_c: jax.Array | None = None,
     troplev: jax.Array | None = None,
     omega: jax.Array | None = None,
+    routec_inversion: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6786,6 +6912,7 @@ def clubb_step(
         wm_zt=wm_zt, wm_zm=wm_zm, sfc_elevation=sfc_elevation,
         fcor=jnp.zeros((ncol,), dtype=T.dtype), ug=um, vg=vm, dt=dt, gr=gr,
         config=config, l_implemented=True, radht_zt=radht_zt,
+        routec_inversion=routec_inversion,
         # A PRESCRIBED surface stress is a vector boundary condition, so it is
         # applied as one. A stress the scheme computed itself from this wind is
         # already antiparallel to it, and takes the reference path unchanged.
@@ -6913,6 +7040,7 @@ def clubb_turbulence_prognostic(
     q_c: jax.Array | None = None,
     lat: jax.Array | None = None,
     omega: jax.Array | None = None,
+    routec_inversion: bool = False,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -6983,8 +7111,37 @@ def clubb_turbulence_prognostic(
             "q_flux_scale is a diagnostic-CLUBB mechanism probe; the prognostic "
             "closure transports rtm inside its own solver and does not read it "
             f"(got {config.q_flux_scale}).")
-    moments = unpack_clubb_moments(clubb_moments)
+    # Working dtype = the moment carry's dtype (the lax.scan carry below must
+    # come back in it).  Every float array input is cast to it (downcast
+    # included): under JAX_ENABLE_X64 an fp32 run hands this function some
+    # float64 inputs, which promoted the float32 carry and made the scan raise.
+    # All-float64 inputs: every cast is a no-op, so fp64 runs are bitwise
+    # unchanged.  Same pattern as compute_mixing_length.
+    _wd = clubb_moments.dtype
+    # sub-step count from the caller's dt, before any rounding by the cast
     n_sub = max(1, math.ceil(dt / config.clubb_dt))
+
+    def _to_wd(x):
+        # jax AND numpy float arrays/scalars (numpy ones are strong-typed)
+        if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating):
+            return jnp.asarray(x, dtype=_wd)
+        return x
+
+    def _traced_to_wd(x):
+        # config: only traced (trained) leaves; static Python/numpy fields
+        # stay concrete so the Python branches on them keep working
+        if isinstance(x, jax.core.Tracer) and jnp.issubdtype(x.dtype, jnp.floating):
+            return x.astype(_wd)
+        return x
+
+    config = jax.tree.map(_traced_to_wd, config)
+    (u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho, dt,
+     sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp, surface_flux, rad_dT_dt, q_c,
+     lat, omega) = jax.tree.map(_to_wd, (
+        u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho, dt,
+        sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp, surface_flux, rad_dT_dt,
+        q_c, lat, omega))
+    moments = unpack_clubb_moments(clubb_moments)
     _top_kw = {}
     if config.trop_cloud_top_press > 0.0:
         if lat is None:
@@ -7056,7 +7213,8 @@ def clubb_turbulence_prognostic(
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
-            radht_zt=radht_zt, omega=omega, **_liq_kw, **_top_kw)
+            radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
+            **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         sfc_energy_in = diags["sfc_energy_in"]
         clubbtop = diags.get("clubbtop")
@@ -7089,8 +7247,8 @@ def clubb_turbulence_prognostic(
             du, dv, dT, dq, m_new, diag = clubb_step(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
-                radht_zt=radht_zt, omega=omega, **_top_kw,
-                **({"q_c": ql_c} if _liq_on else {}))
+                radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
+                **_top_kw, **({"q_c": ql_c} if _liq_on else {}))
             ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c
             carry = (u_c + dt_sub * du, v_c + dt_sub * dv, T_c + dt_sub * dT,
                      q_c_col + dt_sub * dq, ql_new, m_new)

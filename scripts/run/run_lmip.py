@@ -167,7 +167,16 @@ def _build_surface_scheme(args: argparse.Namespace):
     if name == "simple_seb":
         return SimpleSEBConfig()
     if name == "two_leaf":
-        return TwoLeafCanopyConfig()
+        # A namespace saved before the flag existed carries no value: use the
+        # scheme's own default (codex + GLM vote, author dissenting).
+        _bools = {k: v for k in ("implicit_ground_flux", "fallback_from_last_iterate")
+                  if (v := getattr(args, f"land_canopy_{k}", None)) is not None}
+        return TwoLeafCanopyConfig(solve_group=getattr(
+            args, "land_canopy_solve_group",
+            TwoLeafCanopyConfig._field_defaults["solve_group"]),
+            sw_scheme=getattr(args, "land_canopy_sw_scheme",
+                              TwoLeafCanopyConfig._field_defaults["sw_scheme"]),
+            **_bools).validate()
     if name == "clm_ml":
         from legoesm.land.canopy.config import CLMMLCanopyConfig
         cfg = CLMMLCanopyConfig()
@@ -730,6 +739,31 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "upstream design value). num_ml_steps is derived from it, "
                         "so the canopy air budget stays at its design sub-step "
                         "whatever host --dt is used.")
+    p.add_argument("--land-canopy-solve-group", type=int, default=0,
+                   dest="land_canopy_solve_group",
+                   help="Two-leaf canopy: columns per batch of the Newton solve, "
+                        "0 = one batch per GPU (the AMIP production value). "
+                        "Read only with --land-surface-scheme two_leaf.")
+    p.add_argument("--land-canopy-implicit-ground-flux",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   dest="land_canopy_implicit_ground_flux",
+                   help="Two-leaf canopy: semi-implicit ground heat flux (CLM5 "
+                        "eqs. 2.5.123-2.5.124, 2.6.15). Default: the CanopyConfig "
+                        "value (on). Read only with --land-surface-scheme two_leaf.")
+    p.add_argument("--land-canopy-fallback-from-last-iterate",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   dest="land_canopy_fallback_from_last_iterate",
+                   help="Two-leaf canopy: a column stopped at the iteration cap "
+                        "keeps its last admissible iterate (CLM5 2.5.3.2). Default: "
+                        "the CanopyConfig value (on). Read only with "
+                        "--land-surface-scheme two_leaf.")
+    p.add_argument("--land-canopy-sw-scheme", choices=("ryu", "two_stream"), default="ryu",
+                   dest="land_canopy_sw_scheme",
+                   help="Two-leaf canopy shortwave partition: ryu (default, Ryu 2011 "
+                        "closed forms) or two_stream (Sellers two-stream, CLM5 per-PFT "
+                        "leaf optics; needs per-column leaf optics, which only the "
+                        "EC-site driver builds today). Read only with "
+                        "--land-surface-scheme two_leaf.")
     p.add_argument("--output", default="lmip_output",
                    help="Output directory")
     p.add_argument("--checkpoint-days", type=int, default=100,

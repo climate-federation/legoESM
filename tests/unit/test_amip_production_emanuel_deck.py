@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pathlib
 
-from legoesm.driver.config import ZM_SCALAR_FIELDS, ZM_WIDTH_FIELDS
+from legoesm.driver.config import ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS, ZM_WIDTH_FIELDS
 from legoesm.driver.physics_pipeline import convection_config_for
 from legoesm.driver.run_config_yaml import load_yaml_config, read_yaml_with_includes
 
@@ -43,11 +43,12 @@ def test_deck_differs_from_production_only_in_convection_rows():
     prod, deck = read_yaml_with_includes(_PROD), read_yaml_with_includes(_DECK)
     diff = {k for k in prod.keys() | deck.keys() if prod.get(k) != deck.get(k)}
     assert diff == {"convection", "emanuel_enable_cmt",
-                    *ZM_SCALAR_FIELDS, *ZM_WIDTH_FIELDS}
+                    *ZM_SCALAR_FIELDS, *ZM_WIDTH_FIELDS, *ZM_TRIGGER_FIELDS}
     assert prod["convection"] == "zhang_mcfarlane"
     assert deck["convection"] == "emanuel"
     assert deck["emanuel_enable_cmt"] is False
-    assert all(deck[f] is None for f in (*ZM_SCALAR_FIELDS, *ZM_WIDTH_FIELDS))
+    assert all(deck[f] is None
+               for f in (*ZM_SCALAR_FIELDS, *ZM_WIDTH_FIELDS, *ZM_TRIGGER_FIELDS))
 
 
 def test_deck_adds_no_validation_error_on_the_production_lane():

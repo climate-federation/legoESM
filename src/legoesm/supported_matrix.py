@@ -43,23 +43,6 @@ class SolverEntry(NamedTuple):
 # =====================================================================
 
 ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
-    # -- Cubed-sphere C-D grid (FV3-style) --
-    SolverEntry(
-        "atmosphere", "shallow_water", "cubed_sphere_cdgrid",
-        "cdgrid_shallow_water", "CDGridShallowWaterModel",
-        "legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid",
-    ),
-    SolverEntry(
-        "atmosphere", "hydrostatic", "cubed_sphere_cdgrid",
-        "cdgrid_primitive_equations", "CDGridPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid",
-    ),
-    SolverEntry(
-        "atmosphere", "nonhydrostatic", "cubed_sphere_cdgrid",
-        "cdgrid_compressible_euler", "CDGridCompressibleEulerModel",
-        "legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid",
-    ),
-
     # -- Spectral (Gaussian grid) --
     SolverEntry(
         "atmosphere", "shallow_water", "spectral_gaussian",
@@ -210,15 +193,6 @@ SUPPORTED_MATRIX = ATMOSPHERE_MATRIX + OCEAN_MATRIX
 
 #: Flat solver names that are aliases.
 ATMOSPHERE_DEPRECATED_SOLVER_NAMES: dict[str, str] = {
-    "shallow_water": "cdgrid_shallow_water",
-    "primitive_equations": "cdgrid_primitive_equations",
-    "compressible_euler": "cdgrid_compressible_euler",
-    "fv_shallow_water": "cdgrid_shallow_water",
-    "fv_primitive_equations": "cdgrid_primitive_equations",
-    "fv_compressible_euler": "cdgrid_compressible_euler",
-    "cgrid_shallow_water": "cdgrid_shallow_water",
-    "cgrid_primitive_equations": "cdgrid_primitive_equations",
-    "cgrid_compressible_euler": "cdgrid_compressible_euler",
 }
 
 

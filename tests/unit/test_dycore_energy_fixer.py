@@ -259,8 +259,7 @@ def test_unwired_lanes_refuse_the_fixer():
     duo_col = on._replace(dycore=on.dycore._replace(
         discretization="fv3_duo", column_lane=True))
     assert energy_fixer_wired(duo_col, "fv3_duo_primitive_equations")
-    for solver in ("cdgrid_primitive_equations",
-                   "latlon_cgrid_primitive_equations"):     # F15b
+    for solver in ("latlon_cgrid_primitive_equations",):     # F15b
         assert energy_fixer_wired(on, solver)
         refuse_unwired_energy_fixer(on, solver)
     for solver in ("spectral_primitive_equations",
@@ -502,91 +501,8 @@ def test_gridded_fixer_gradient_matches_finite_differences(fp64_policy):
 CUBE_N, CUBE_NLEV = 8, 5
 
 
-def _cube_setup(fixer):
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationConfig, CDGridPrimitiveEquationModel,
-        FV3HydrostaticState)
-    from legoesm.core.field import Field
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.vertical import create_sigma_coordinate
-    grid = create_cubed_sphere(CUBE_N)
-    sigma = create_sigma_coordinate(CUBE_NLEV)
-    # viscosity + hyperdiffusion + default sponge ON; no mass fixer
-    cfg = CDGridPrimitiveEquationConfig(
-        A_h=1.0e6, hyperdiff_coeff=1.0e16, use_conservation_fixer=False,
-        fix_mass=False, energy_fixer=fixer)
-    model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
-    rng = np.random.default_rng(3)
-    d = (6, CUBE_N + 1, CUBE_N + 1, CUBE_NLEV)
-    c = (6, CUBE_N, CUBE_N, CUBE_NLEV)
-    s2 = (6, CUBE_N, CUBE_N)
-    dd, d2 = ("face", "x", "y", "level"), ("face", "x", "y")
-    st = FV3HydrostaticState(
-        u_d=Field(data=jnp.asarray(8.0 * rng.standard_normal(d)), name="u_d",
-                  dims=dd, units="m/s"),
-        v_d=Field(data=jnp.asarray(8.0 * rng.standard_normal(d)), name="v_d",
-                  dims=dd, units="m/s"),
-        T=Field(data=jnp.asarray(260.0 + rng.standard_normal(c)), name="T",
-                dims=dd, units="K"),
-        p_s=Field(data=jnp.asarray(1e5 + 300.0 * rng.standard_normal(s2)),
-                  name="p_s", dims=d2, units="Pa"),
-        phis=Field(data=jnp.zeros(s2), name="phis", dims=d2, units="m^2/s^2"))
-    return model, st
-
-
-def _cube_energy(model, st):
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        fv3_to_hydrostatic)
-    h = fv3_to_hydrostatic(st, model.cdgrid)
-    return _gridded_energy(h.T.data, h.u.data, h.v.data, h.p_s.data,
-                           h.phis.data, model.sigma_coord, model.grid.area)
-
-
-def test_cube_step_conserves_total_energy_with_the_fixer(fp64_policy):
-    m_off, s0 = _cube_setup(False)
-    m_on, _ = _cube_setup(True)
-    e0 = _cube_energy(m_on, s0)
-    off, on = m_off.step(s0, DT), m_on.step(s0, DT)
-    rel_off = (_cube_energy(m_off, off) - e0) / e0
-    rel_on = (_cube_energy(m_on, on) - e0) / e0
-    assert on.T.data.dtype == jnp.float64, on.T.data.dtype
-    assert abs(rel_off) > 1e-10, rel_off       # non-vacuous
-    assert abs(rel_on) < 1e-13, rel_on
-    dT = np.asarray(on.T.data - off.T.data)
-    assert np.ptp(dT) < 1e-12 and dT.flat[0] != 0.0
-    np.testing.assert_array_equal(np.asarray(on.u_d.data),
-                                  np.asarray(off.u_d.data))
-
-
-def test_cube_cell_centre_step_closes_the_driver_view(fp64_policy):
-    """The driver's compiled / per-step lanes hand the cube a CELL-CENTRE
-    state (cc -> D -> cc each step): the closed window is that cc state, so
-    the round trip's own KE change is fixed too."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-        fv3_to_hydrostatic)
-    m_off, s_d = _cube_setup(False)
-    m_on, _ = _cube_setup(True)
-    s0 = fv3_to_hydrostatic(s_d, m_on.cdgrid)
-
-    def E(h):
-        return _gridded_energy(h.T.data, h.u.data, h.v.data, h.p_s.data,
-                               h.phis.data, m_on.sigma_coord, m_on.grid.area)
-    e0 = E(s0)
-    rel_off = (E(m_off.step(s0, DT)) - e0) / e0
-    rel_on = (E(m_on.step(s0, DT)) - e0) / e0
-    assert abs(rel_off) > 1e-10, rel_off       # non-vacuous
-    assert abs(rel_on) < 1e-13, rel_on
-
-
-def test_cube_refuses_physics_inside_the_rk_window(fp64_policy):
-    model, s0 = _cube_setup(True)
-    with pytest.raises(ValueError, match="dynamics-only"):
-        model.step(s0, DT, physics_fn=lambda s, g, c: None)
-
-
 @pytest.mark.parametrize("grid_type,disc,solver_cfg", [
     ("latlon", "latlon_cgrid", "CGridLatLonPrimitiveEquationConfig"),
-    ("cubed_sphere", "cdgrid", "CDGridPrimitiveEquationConfig"),
 ])
 def test_factory_hands_the_switch_to_the_core(grid_type, disc, solver_cfg):
     """The DEFAULT driver config builds the core with the fixer ON (RULE 3),
@@ -612,17 +528,3 @@ def test_factory_hands_the_switch_to_the_core(grid_type, disc, solver_cfg):
         assert type(model.config).__name__ == solver_cfg
         assert model.config.energy_fixer is flag
     assert DycoreConfig().energy_fixer is True
-
-
-def test_tiled_cube_lanes_refuse_the_fixer():
-    """The sub-face-tiled dynamics do not run the cube step: both driver
-    entries refuse energy_fixer=True before building anything."""
-    from types import SimpleNamespace
-    from legoesm.driver.config import DycoreConfig
-    from legoesm.driver.model_driver import ModelDriver
-    stub = SimpleNamespace(config=SimpleNamespace(
-        enable_tiled_dycore=True, dycore=DycoreConfig()))
-    with pytest.raises(ValueError, match="TILED"):
-        ModelDriver._maybe_build_tiled_step(stub, 300.0)
-    with pytest.raises(ValueError, match="TILED"):
-        ModelDriver._run_tiled_cube_spmd(stub)

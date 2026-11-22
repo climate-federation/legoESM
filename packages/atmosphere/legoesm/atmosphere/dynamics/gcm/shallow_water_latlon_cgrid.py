@@ -39,12 +39,8 @@ import jax.numpy as jnp
 from legoesm.grids.operator_adapters import latlon_cgrid_operators
 from legoesm.grids.operators_latlon_cgrid import (
     get_band_mpi_cut_layout,
-    vector_laplacian_cgrid,
-    interp_cell_to_uface,
-    interp_cell_to_vface,
     pad_lon_cgrid,
 )
-from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
 from legoesm.core.williamson_sw_analytic import (
     W5_H0_M,
     W5_UBAR_MS,
@@ -57,6 +53,7 @@ from legoesm.grids.polar_filter import (
     compute_polar_filter_mask,
     fourier_filter,
 )
+from legoesm.atmosphere.dynamics.gcm.shallow_water_generic import cgrid_latlon_sw_tendencies
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.core.precision import cast_pytree
@@ -117,6 +114,50 @@ class CGridLatLonShallowWaterConfig(NamedTuple):
 # C-grid interpolation helpers
 # ==============================================================================
 
+def latlon_coriolis_is_rotated(grid: LatLonGrid) -> bool:
+    """Whether the planetary vorticity comes from the rotated-planet formula.
+
+    A Python ``0``/``0.0`` tilt (every existing grid) keeps the historical
+    per-row path, bit-identically.  Any other tilt -- concrete or traced (grid
+    passed as a dynamic JIT argument) -- takes the rotated formula, which is
+    exact for every value (and equals the historical rows at 0) on the serial
+    AND band-decomposed lanes: each band evaluates it on its own vertex rows.
+    """
+    a = getattr(grid, "coriolis_alpha", 0.0)
+    return not (isinstance(a, (int, float)) and a == 0.0)
+
+
+def latlon_rotated_rows(grid: LatLonGrid, lat_rows: jnp.ndarray) -> jnp.ndarray:
+    """``rotated_coriolis`` on vertex rows ``lat_rows`` x the u-face longitudes
+    ``lon[j] - dlon/2``, shape ``(len(lat_rows), n_lon+1)``; column ``n_lon``
+    is an exact copy of column 0 (periodic seam).  Pole rows are NOT clamped
+    here -- callers set them to the exact scalars ``-+2 omega cos(alpha)``."""
+    from legoesm.core.williamson_sw_analytic import rotated_coriolis
+    # Evaluate in the widest available float, then round once to the grid
+    # dtype, so the result does not depend on how XLA fuses the transcendentals.
+    wide = jnp.result_type(float)
+    lon_v = grid.lon.astype(wide) - 0.5 * grid.dlon
+    f = rotated_coriolis(lon_v[None, :], lat_rows.astype(wide)[:, None],
+                         omega=grid.omega, alpha=grid.coriolis_alpha,
+                         xp=jnp).astype(lat_rows.dtype)
+    return jnp.concatenate([f, f[:, :1]], axis=1)
+
+
+def latlon_coriolis_pole_value(grid: LatLonGrid):
+    """Exact north-pole planetary vorticity ``2 omega cos(alpha)``."""
+    return 2.0 * grid.omega * jnp.cos(grid.coriolis_alpha)
+
+
+def latlon_vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
+    """Serial-grid rotated planetary vorticity at all C-grid vertices,
+    ``(n_lat+1, n_lon+1)``: interior rows at the latitude interfaces, pole rows
+    the exact scalars ``-+2 omega cos(alpha)``."""
+    lat = grid.lat
+    f = latlon_rotated_rows(grid, 0.5 * (lat[:-1] + lat[1:]))
+    pole = jnp.full((1, f.shape[1]), latlon_coriolis_pole_value(grid), dtype=f.dtype)
+    return jnp.concatenate([-pole, f, pole], axis=0)
+
+
 def absolute_vorticity_coriolis(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -169,6 +210,7 @@ def absolute_vorticity_coriolis(
     # Mirrors curl_vertex_cgrid's SPMD pole handling.
     from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
     _spmd_pm = spmd_pole_end_masks()
+    _rotated = latlon_coriolis_is_rotated(grid)
 
     # --- Relative vorticity at vertices (via the B2 operator interface) ---
     # ``u_lat_pad`` (optional, exactly pad_with_pole_bc_lat(u, halo=1,
@@ -204,6 +246,8 @@ def absolute_vorticity_coriolis(
             twoOmega * jnp.sin(lat_int),
             (1, 1), constant_values=(-twoOmega, twoOmega),
         )  # (n_lat+1,)
+        if _rotated:
+            f_vert_2d = latlon_vertex_coriolis(grid)
     else:
         # Band-decomposed (MPI or single-program SPMD): end vertex rows at
         # interior cuts sit at the midpoint latitude ACROSS the cut.  Pad
@@ -233,12 +277,28 @@ def absolute_vorticity_coriolis(
                 f_vert = f_vert.at[0].set(-twoOmega)
             if _band.north_rank is None:
                 f_vert = f_vert.at[-1].set(twoOmega)
+        if _rotated:
+            # Rotated planet on a band: the formula on THIS band's vertex rows
+            # (interior cuts are not poles), with the exact pole scalars
+            # restored under the same physical-pole conditions as above.
+            f_vert_2d = latlon_rotated_rows(grid, lat_vert)
+            _fp = latlon_coriolis_pole_value(grid).astype(f_vert_2d.dtype)
+            if _spmd_pm is not None:
+                f_vert_2d = jnp.where(_south_m, f_vert_2d.at[0].set(-_fp), f_vert_2d)
+                f_vert_2d = jnp.where(_north_m, f_vert_2d.at[-1].set(_fp), f_vert_2d)
+            else:
+                if _band.south_rank is None:
+                    f_vert_2d = f_vert_2d.at[0].set(-_fp)
+                if _band.north_rank is None:
+                    f_vert_2d = f_vert_2d.at[-1].set(_fp)
 
     # Absolute vorticity at vertices
     if is_3d:
         eta = zeta + f_vert[:, jnp.newaxis, jnp.newaxis]
     else:
         eta = zeta + f_vert[:, jnp.newaxis]
+    if _rotated:
+        eta = zeta + (f_vert_2d[..., jnp.newaxis] if is_3d else f_vert_2d)
 
     # --- Average η to u-faces ---
     # u-face[i, j] is flanked by vertex[i, j] (south) and vertex[i+1, j] (north)
@@ -308,28 +368,6 @@ def absolute_vorticity_coriolis(
     return cor_u, cor_v
 
 
-def _kinetic_energy_cgrid(
-    u: jnp.ndarray,
-    v: jnp.ndarray,
-) -> jnp.ndarray:
-    """Kinetic energy at cell centers from C-grid face velocities.
-
-    KE = 0.5 * (ū² + v̄²) where ū, v̄ are averaged to cell centers.
-
-    Parameters
-    ----------
-    u : (n_lat, n_lon+1)  -- zonal velocity at lon interfaces
-    v : (n_lat+1, n_lon)  -- meridional velocity at lat interfaces
-
-    Returns
-    -------
-    KE : (n_lat, n_lon)
-    """
-    u_c = 0.5 * (u[:, :-1] + u[:, 1:])   # (n_lat, n_lon)
-    v_c = 0.5 * (v[:-1, :] + v[1:, :])   # (n_lat, n_lon)
-    return 0.5 * (u_c**2 + v_c**2)
-
-
 # ==============================================================================
 # Tendency computation
 # ==============================================================================
@@ -379,106 +417,6 @@ def nu_del4_row_profiles(
     nu_u = jnp.minimum(nu_del4, cfl_frac / (dt * lam_u ** 2))
     nu_v = jnp.minimum(nu_del4, cfl_frac / (dt * lam_v ** 2))
     return nu_u[:, None], nu_v[:, None]
-
-
-def cgrid_latlon_sw_tendencies(
-    state: CGridLatLonShallowWaterState,
-    grid: LatLonGrid,
-    config: CGridLatLonShallowWaterConfig = CGridLatLonShallowWaterConfig(),
-    dt=None,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Compute C-grid shallow water tendencies on the lat-lon grid.
-
-    Equations (vector-invariant form):
-        dh/dt = -∇·(h v)                           (mass conservation)
-        du/dt = -∂B/∂x + f v̄  + viscosity          (zonal momentum)
-        dv/dt = -∂B/∂y - f ū  + viscosity          (meridional momentum)
-
-    where B = g(h + h_s) + KE is the Bernoulli function.
-
-    Parameters
-    ----------
-    state : CGridLatLonShallowWaterState
-    grid : LatLonGrid
-    config : CGridLatLonShallowWaterConfig
-
-    Returns
-    -------
-    (dh_dt, du_dt, dv_dt) : tuple of jax.Array
-        Tendencies at (cell centers, lon faces, lat faces).
-    """
-    h, u, v, h_s = state
-    g = config.g
-
-    # The grid-dispatched operator interface (B2): the differential operators flow
-    # through ``ops.divergence``/``gradient``/``vorticity`` rather than the bare free
-    # functions, so the core calls operators without naming the grid (design L2).
-    # The adapter delegates to the same lat-lon C-grid operators, so this is
-    # byte-identical to the direct calls.  The cell->face interpolations stay direct:
-    # the adapter's ``interpolate(.., "vface")`` uses the grid-aware ``pad_ns_scalar``
-    # north/south form, whereas this SW dycore uses the legacy ``grid=None`` (pole-
-    # inert) form, so routing it would change the north-fold value on a tripolar grid.
-    ops = latlon_cgrid_operators(grid)
-
-    # --- 1. Mass flux divergence ---
-    if config.use_ppm_transport:
-        # PPM (4th-order) reconstruction of h at faces for upwind flux
-        dh_dt = cgrid_fv_flux_divergence_latlon(h, u, v, grid)
-    else:
-        # Simple 2nd-order averaging of h to faces (legacy grid=None pole handling)
-        h_u = interp_cell_to_uface(h)
-        h_v = interp_cell_to_vface(h)
-        F_u = h_u * u
-        F_v = h_v * v
-        dh_dt = -ops.divergence(F_u, F_v)
-
-    # --- 2. Bernoulli function at cell centers ---
-    KE = _kinetic_energy_cgrid(u, v)   # (n_lat, n_lon)
-    B = g * (h + h_s) + KE             # (n_lat, n_lon)
-
-    # --- 3. Pressure gradient + KE gradient (Bernoulli gradient) ---
-    grad_x, grad_y = ops.gradient(B)
-    du_dt = -grad_x   # (n_lat, n_lon+1)
-    dv_dt = -grad_y   # (n_lat+1, n_lon)
-
-    # --- 4. Coriolis using absolute vorticity (ζ+f) ---
-    cor_u, cor_v = absolute_vorticity_coriolis(u, v, grid)
-    du_dt = du_dt + cor_u
-    dv_dt = dv_dt + cor_v
-
-    # --- 5. Laplacian viscosity (optional) ---
-    # Sign convention: viscosity enters as +A_h*lap(u) (Laplacian of a
-    # local extremum is negative -> damping).
-    if config.A_h > 0.0:
-        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
-        du_dt = du_dt + config.A_h * lap_u
-        dv_dt = dv_dt + config.A_h * lap_v
-
-    # --- 5b. Biharmonic (del-4) viscosity (optional) ---
-    # Sign convention: biharmonic damping is -nu4*lap(lap(u)) — for a
-    # Fourier mode e^{ikx}, lap^2 -> +k^4, so the term is -nu4*k^4*u
-    # (decay).  A "+" here would be anti-diffusive and blow up at the
-    # grid scale.  Static Python branch on the config float (feature
-    # gating exception — not jnp.where).
-    if config.nu_del4 > 0.0:
-        if dt is None:
-            raise ValueError(
-                "cgrid_latlon_sw_tendencies: nu_del4 > 0 requires the "
-                "dt argument (per-row pole stability cap needs it).")
-        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
-        lap2_u, lap2_v = vector_laplacian_cgrid(lap_u, lap_v, grid)
-        nu_u, nu_v = nu_del4_row_profiles(
-            grid, config.nu_del4, config.nu_del4_cfl_frac, dt)
-        du_dt = du_dt - nu_u * lap2_u
-        dv_dt = dv_dt - nu_v * lap2_v
-
-    # Enforce zero tendency at poles (wall BC) so intermediate RK
-    # stages never see nonzero v at poles feeding into divergence/Coriolis.
-    # Single ``Pad`` HLO op replaces two ``ScatterUpdate`` ops on the
-    # lat axis — same per-RK-stage pattern as the lat-lon C-grid PE.
-    dv_dt = jnp.pad(dv_dt[1:-1, :], ((1, 1), (0, 0)))
-
-    return dh_dt, du_dt, dv_dt
 
 
 # ==============================================================================

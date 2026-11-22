@@ -158,7 +158,6 @@ def test_uncoupled_segment_callback_does_not_trigger_refusal():
     # not at the dispatch, which cannot tell them apart.  The cube lane has no
     # such split and stays guarded at the dispatch.
     "physics_fn = self._latlon_spmd_physics_fn()",
-    "status = self._run_tiled_cube_spmd(start_step, start_day)",
 ])
 def test_dispatch_branches_are_guarded(lane_call):
     """Mirrors the project's dispatch-hardening ratchets -- an existing

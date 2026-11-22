@@ -531,6 +531,21 @@ HORIZONTAL_ADVECTION_HALO_REQUIREMENT: dict[str, int] = {
 }
 
 
+def horizontal_advection_halo_width(config) -> int:
+    """Halo width the MPI path needs for ``config``: the wider of the scalar
+    scheme and the momentum scheme (ADV-SPLIT; ``None`` = scalar scheme)."""
+    scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
+    mscheme = getattr(
+        config, "horizontal_momentum_advection_scheme", None) or scheme
+    for s in (scheme, mscheme):
+        if s not in HORIZONTAL_ADVECTION_HALO_REQUIREMENT:
+            raise ValueError(
+                f"Unknown horizontal advection scheme: {s!r}. Expected one of "
+                f"{sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}.")
+    return max(HORIZONTAL_ADVECTION_HALO_REQUIREMENT[scheme],
+               HORIZONTAL_ADVECTION_HALO_REQUIREMENT[mscheme])
+
+
 # --------------------------------------------------------------------- #
 # First-order upwind on the Arakawa-C grid                              #
 # --------------------------------------------------------------------- #
@@ -626,7 +641,7 @@ _van_leer_advection_x = functools.partial(_van_leer_advection, axis=1)
 _van_leer_advection_y = functools.partial(_van_leer_advection, axis=0)
 
 
-def _centered_advection(
+def centered_advection(
     field_yxz: jax.Array, u_at_field: jax.Array, dx: float, axis: int,
 ) -> jax.Array:
     """2nd-order CENTERED flux-form advection ``-u df/dx`` = gSAM `advect2_mom`
@@ -659,8 +674,8 @@ def _centered_advection(
     return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
 
 
-_centered_advection_x = functools.partial(_centered_advection, axis=1)
-_centered_advection_y = functools.partial(_centered_advection, axis=0)
+centered_advection_x = functools.partial(centered_advection, axis=1)
+centered_advection_y = functools.partial(centered_advection, axis=0)
 
 
 # --------------------------------------------------------------------- #
@@ -771,7 +786,7 @@ def _variable_K_diffusion_vlast(
     ) / (grid.dy ** 2)
 
 
-def _vertical_K_diffusion_full(
+def vertical_K_diffusion_full(
     field_yxz: jax.Array, K_yxz: jax.Array, height_coord: HeightCoordinate,
 ) -> jax.Array:
     """Conservative vertical SGS flux ``∂_z(K ∂_z field)`` for FULL-level fields.
@@ -803,30 +818,54 @@ def _vertical_K_diffusion_full(
     F_bot = 0``. Dissipative: ``Σ_k f_k·tend_k·ρ_ref[k]·dz_full[k] = −Σ ρ_w·K·
     (f_{k+1}−f_k)²/dz_half ≤ 0`` for K≥0. (Uses the anelastic reference density
     ρ₀(z) like SAM; the ρ' part is second-order and absent from SAM's anelastic
-    SGS.) ``field_yxz``/``K_yxz`` are full-level ``(ny, nx, nlev)``.
+    SGS.) ``K_yxz`` is full-level ``(ny, nx, nlev)``; ``field_yxz`` is either
+    the same shape or carries extra TRAILING axes after ``nlev`` (e.g. the
+    tracer stack ``(ny, nx, nlev, n_tracers)``), all diffused with the same K.
+    Calling once on the stack replaces a ``vmap`` over the trailing axis, which
+    XLA compiled into a slow, materialised padded copy.
     """
-    dz_full = height_coord.dz                       # (nlev,) cell thickness
-    dz_half = height_coord.dz_half                  # (nlev-1,) full→full dist
-    rho_full = height_coord.rho_ref                 # (nlev,) cell ρ₀
+    n_extra = field_yxz.ndim - K_yxz.ndim
+    if n_extra < 0 or field_yxz.shape[:K_yxz.ndim] != K_yxz.shape:
+        raise ValueError(
+            f"field_yxz.shape={field_yxz.shape} must start with "
+            f"K_yxz.shape={K_yxz.shape}")
+    vert = K_yxz.ndim - 1                           # vertical axis of field
+
+    def col(a):  # (nlev or nlev-1,) profile -> broadcast over trailing axes
+        return a.reshape(a.shape + (1,) * n_extra)
+
+    def lev(a, sl):  # slice the vertical axis of field
+        return a[(slice(None),) * vert + (sl,)]
+
+    dz_full = col(height_coord.dz)                  # (nlev,) cell thickness
+    dz_half = col(height_coord.dz_half)             # (nlev-1,) full→full dist
+    rho_full = col(height_coord.rho_ref)            # (nlev,) cell ρ₀
     # interior interfaces sit at z_half[1..nlev-1] ⇒ rho_ref_half[1:-1].
-    rho_iface = height_coord.rho_ref_half[1:-1]     # (nlev-1,) interface ρ₀
+    rho_iface = col(height_coord.rho_ref_half[1:-1])  # (nlev-1,) interface ρ₀
     # K at the nlev-1 interior interfaces (average adjacent full-level K).
     K_iface = 0.5 * (K_yxz[..., :-1] + K_yxz[..., 1:])          # (..., nlev-1)
+    K_iface = K_iface.reshape(K_iface.shape + (1,) * n_extra)
     flux = rho_iface * K_iface * (
-        field_yxz[..., 1:] - field_yxz[..., :-1]) / dz_half
-    # No-flux at the top + bottom domain interfaces ⇒ pad the interface flux
-    # with a zero at each end before differencing back to full levels.
-    pad_axes = ((0, 0),) * (flux.ndim - 1)
-    flux_padded = jnp.pad(flux, (*pad_axes, (1, 1)))           # (..., nlev+1)
-    return (flux_padded[..., 1:] - flux_padded[..., :-1]) / (rho_full * dz_full)
+        lev(field_yxz, slice(1, None)) - lev(field_yxz, slice(None, -1))
+    ) / dz_half
+    # No-flux at the top + bottom domain interfaces: the divergence of the
+    # zero-padded flux, written without materialising the padded array
+    # (0 - F and F - 0 are exact, so the boundary levels equal the padded
+    # form in value; signed zeros may differ).
+    div = jnp.concatenate([
+        lev(flux, slice(None, 1)),
+        lev(flux, slice(1, None)) - lev(flux, slice(None, -1)),
+        -lev(flux, slice(-1, None)),
+    ], axis=vert)                                               # nlev levels
+    return div / (rho_full * dz_full)
 
 
-def _vertical_K_diffusion_w(
+def vertical_K_diffusion_w(
     w_yxz: jax.Array, K_full: jax.Array, height_coord: HeightCoordinate,
 ) -> jax.Array:
     """Vertical SGS flux ``∂_z(K ∂_z w)`` for the HALF-level ``w`` (SGS-VERT #81).
 
-    Dual-grid counterpart of :func:`_vertical_K_diffusion_full`: ``w`` lives at
+    Dual-grid counterpart of :func:`vertical_K_diffusion_full`: ``w`` lives at
     the ``nlev+1`` interfaces (``z_half``), ``K_m`` at the ``nlev`` cell centres
     (``z_full``). The vertical w-gradient and its flux therefore live at the
     CELL CENTRES, and the flux divergence returns to the interfaces. MASS-WEIGHTED
@@ -1992,7 +2031,7 @@ def plane_compressible_euler_slow_tendencies(
     _ADV_PAIRS = {
         "weno5": (_weno5_advection_x, _weno5_advection_y),
         "van_leer": (_van_leer_advection_x, _van_leer_advection_y),
-        "centered": (_centered_advection_x, _centered_advection_y),
+        "centered": (centered_advection_x, centered_advection_y),
         "upwind1": (_upwind_advection_x, _upwind_advection_y),
     }
     scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
@@ -2294,9 +2333,9 @@ def plane_compressible_euler_slow_tendencies(
         # no-flux scalar BC + rigid-w BC live inside the helpers (surface
         # fluxes are applied separately by the surface scheme).
         if config.sgs_vertical_diffusion:
-            du_dt = du_dt + _vertical_K_diffusion_full(u, K_m_xface, height_coord)
-            dv_dt = dv_dt + _vertical_K_diffusion_full(v, K_m_yface, height_coord)
-            dtheta_p_dt = dtheta_p_dt + _vertical_K_diffusion_full(
+            du_dt = du_dt + vertical_K_diffusion_full(u, K_m_xface, height_coord)
+            dv_dt = dv_dt + vertical_K_diffusion_full(v, K_m_yface, height_coord)
+            dtheta_p_dt = dtheta_p_dt + vertical_K_diffusion_full(
                 theta_p, K_h, height_coord,
             )
         # SGS-SCALAR (iter-60): SAM `sgs.f90:664-675` SGS-diffuses EVERY scalar
@@ -2317,10 +2356,9 @@ def plane_compressible_euler_slow_tendencies(
                 in_axes=-1, out_axes=-1,
             )(state.tracers.data)
             if config.sgs_vertical_diffusion:
-                tracer_sgs_tend = tracer_sgs_tend + jax.vmap(
-                    lambda q: _vertical_K_diffusion_full(q, K_h, height_coord),
-                    in_axes=-1, out_axes=-1,
-                )(state.tracers.data)
+                tracer_sgs_tend = tracer_sgs_tend + vertical_K_diffusion_full(
+                    state.tracers.data, K_h, height_coord,
+                )
         # ``K_m`` at full levels; interpolate to half levels for w
         # (rigid boundary K stays zero — no spurious tendency at top
         # / bottom interfaces).
@@ -2331,7 +2369,7 @@ def plane_compressible_euler_slow_tendencies(
         )
         dw_dt = dw_dt + _variable_K_diffusion_vlast(w, K_m_half, grid)
         if config.sgs_vertical_diffusion:
-            dw_dt = dw_dt + _vertical_K_diffusion_w(w, K_m, height_coord)
+            dw_dt = dw_dt + vertical_K_diffusion_w(w, K_m, height_coord)
 
     # 12. Tracer advection. Advective form via upwind on cell-centre
     #     velocities (face-averaged from ``u``, ``v`` — the C-grid

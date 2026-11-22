@@ -191,7 +191,7 @@ def test_precomputed_pads_are_consumed(monkeypatch):
     only 1-D pads in the step are the three stage-invariant geometry pads;
     all state pads are >= 2-D).  Fails if any ``geom_pads`` hand-off in
     the chain _make_band_step_body -> _step_cgrid_impl ->
-    cgrid_latlon_hydrostatic_tendencies -> operators is removed."""
+    latlon_legacy_pe_tendencies -> operators is removed."""
     n_dev = 2
     mesh = _mesh(n_dev)
 

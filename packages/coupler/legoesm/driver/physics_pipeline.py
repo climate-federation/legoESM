@@ -41,8 +41,7 @@ from legoesm.forcing.surface_utils import (
     blend_surface_temperature,
     blended_surface_albedo,
 )
-from legoesm.core.bulk_flux import (LARGE_YEAGER_WIDTH_DEFAULTS, NCAR_CD_CUTOFF_WIDTH,
-                                    NCAR_DTHV_WIDTH, NCAR_NEUTRAL_WIDTH)
+from legoesm.core.bulk_flux import SURFACE_FLUX_WIDTH_DEFAULTS
 from legoesm.core.grid_adapters import SingleColumnGrid, make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
@@ -3862,7 +3861,7 @@ def _build_gray_radiation_fn(config):
     from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation,
-        earth_orbit, earth_sun_distance_factor,
+        earth_sun_distance_factor,
     )
     from legoesm.driver.kernel_registry import (
         RADIATION_REGISTRY, resolve_kernel,
@@ -3873,7 +3872,8 @@ def _build_gray_radiation_fn(config):
     S_0 = config.S_0
     # Realistic (Berger 1978) orbit for AMIP-II/CMIP; None ⇒ circular orbit,
     # so idealized runs are bit-for-bit unchanged.
-    orbit = earth_orbit() if getattr(config, "orbital_insolation", False) else None
+    from legoesm.driver.orbit import experiment_orbit
+    orbit = experiment_orbit(config)
 
     gray_config = GrayRadiationConfig(
         tau_equator=config.tau_equator,
@@ -3954,7 +3954,11 @@ def rrtmgp_config_from_experiment(config, **lane_fields):
     ``use_scan`` None defers to ``rte_utils.recurrent_op_with_halos``, which
     picks scan on GPU/TPU and the unrolled loop on CPU/Metal (issue #273)."""
     from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import gas_table_files
+    lw_gas, sw_gas = gas_table_files(getattr(config, 'rrtmgp_gas_tables', 'reduced'))
     return RRTMGPConfig(
+        lw_gas_file=lw_gas,
+        sw_gas_file=sw_gas,
         co2_ppmv=config.co2_ppmv,
         ch4_ppbv=config.ch4_ppbv,
         n2o_ppbv=config.n2o_ppbv,
@@ -3968,12 +3972,28 @@ def rrtmgp_config_from_experiment(config, **lane_fields):
     )
 
 
+def solar_config_from_experiment(config):
+    """The external-solar config for a run.  Its per-band spectrum is expanded
+    to the g-points of the SW table the radiation runs (``rrtmgp_gas_tables``),
+    taken from the same map the RRTMGP builder above uses."""
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import gas_table_files
+    from legoesm.forcing.external import SolarConfig
+    return SolarConfig(
+        S_0=config.S_0, source=config.solar_source,
+        path=config.solar_file, tsi_var=config.solar_tsi_var,
+        spectral_var=config.solar_spectral_var,
+        spectral_band_order=getattr(config, "solar_spectral_band_order", "auto"),
+        start_year=config.start_year,
+        sw_gas_file=gas_table_files(getattr(config, "rrtmgp_gas_tables", "reduced"))[1],
+    )
+
+
 def _build_rrtmgp_radiation_fn(config):
     """Build a JIT-compiled RRTMGP radiation wrapper from config."""
     from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation, daylight_fraction,
-        earth_orbit, earth_sun_distance_factor,
+        earth_sun_distance_factor,
     )
     from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 
@@ -3981,7 +4001,8 @@ def _build_rrtmgp_radiation_fn(config):
     S_0 = config.S_0
     # Realistic (Berger 1978) orbit for AMIP-II/CMIP; None ⇒ circular orbit,
     # so idealized runs are bit-for-bit unchanged.
-    orbit = earth_orbit() if getattr(config, "orbital_insolation", False) else None
+    from legoesm.driver.orbit import experiment_orbit
+    orbit = experiment_orbit(config)
 
     rrtmg_config = rrtmgp_config_from_experiment(
         config,
@@ -4317,9 +4338,11 @@ def mean_grid_spacing_m(grid):
 def _zm_overrides(config):
     """ZM leaf overrides from the flat zm_* scalars; refuses them when the run
     does not select zhang_mcfarlane (they would be silently inert)."""
-    from legoesm.driver.config import ZM_SCALAR_FIELDS, ZM_WIDTH_FIELDS
+    from legoesm.driver.config import (
+        ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS, ZM_WIDTH_FIELDS,
+    )
 
-    table = {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS}
+    table = {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS}
     given = [f for f in table if getattr(config, f, None) is not None]
     if given and config.convection != "zhang_mcfarlane":
         raise ValueError(
@@ -4340,6 +4363,14 @@ def _zm_overrides(config):
         validate_detrain_widths(*(widths.get(leaf, getattr(
             ZhangMcFarlaneConfig(), leaf)) for leaf in ZM_WIDTH_FIELDS.values()))
         out.update({k: float(v) for k, v in widths.items()})
+    for f in given:
+        if f in ZM_TRIGGER_FIELDS:
+            from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+                validate_trigger_width,
+            )
+            v = getattr(config, f)
+            validate_trigger_width(v)
+            out[ZM_TRIGGER_FIELDS[f]] = float(v)
     return out
 
 
@@ -4465,6 +4496,7 @@ def _resolve_convection(config):
             use_ifs_capdcycl=getattr(
                 config, 'bechtold_use_ifs_capdcycl', True),
             ifs_shallow_nosupply=config.bechtold_ifs_shallow_nosupply,
+            ifs_hard_switches=config.bechtold_ifs_hard_switches,
             use_ifs_land_rhebc=getattr(
                 config, 'bechtold_use_ifs_land_rhebc', True),
             use_ifs_snow_melt=getattr(
@@ -4472,6 +4504,11 @@ def _resolve_convection(config):
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
+        _w = config.bechtold_snow_refill_width_kg_m2_s
+        if _w is not None:
+            from legoesm.core.smooth import validate_smoothing_width
+            validate_smoothing_width("bechtold_snow_refill_width_kg_m2_s", _w)
+            _bechtold_kwargs["snow_refill_width_kg_m2_s"] = float(_w)
         conv_config = BechtoldConfig(**_bechtold_kwargs)
     else:
         cc = ConvectionConfig(scheme=scheme)
@@ -4499,6 +4536,7 @@ def _resolve_convection(config):
             conv_config = conv_config._replace(
                 land_fraction=config.zm_land_fraction,
                 transport_cloud_tracers=config.zm_transport_cloud_tracers,
+                positivity_after_zm=config.positivity_after_zm,
                 **_zm_set)
 
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
@@ -4722,6 +4760,12 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_mg2_drop_early_reset_log_width", None)),
         ("morrison_mg2_drop_sed_reset_log_width", "mg2_drop_sed_reset_log_width",
          getattr(config, "morrison_mg2_drop_sed_reset_log_width", None)),
+        ("morrison_qsfm_freeze_ramp_K", "qsfm_freeze_ramp_K",
+         getattr(config, "morrison_qsfm_freeze_ramp_K", None)),
+        ("morrison_cirrus_T_width_K", "cirrus_T_width_K",
+         getattr(config, "morrison_cirrus_T_width_K", None)),
+        ("morrison_cirrus_rel_width", "cirrus_rel_width",
+         getattr(config, "morrison_cirrus_rel_width", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),
@@ -4753,11 +4797,15 @@ def thread_morrison_scalars(config, scheme, micro_config):
                        _ExpCfg._field_defaults["morrison_warm_rain_incloud"])
     _prog_nc = getattr(config, "morrison_prognostic_droplet_number",
                        _ExpCfg._field_defaults["morrison_prognostic_droplet_number"])
+    _sed_spec = getattr(config, "morrison_specified_nc_droplet_sedimentation",
+                        _ExpCfg._field_defaults[
+                            "morrison_specified_nc_droplet_sedimentation"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
                     ("morrison_sed_cfl_substeps_strict", _sed_strict),
                     ("morrison_do_graupel", _graupel),
                     ("morrison_warm_rain_incloud", _incloud),
-                    ("morrison_prognostic_droplet_number", _prog_nc)):
+                    ("morrison_prognostic_droplet_number", _prog_nc),
+                    ("morrison_specified_nc_droplet_sedimentation", _sed_spec)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
     if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
@@ -4782,9 +4830,16 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _prog_nc = (None if _prog_nc
                 is _ExpCfg._field_defaults["morrison_prognostic_droplet_number"]
                 else _prog_nc)
+    _sed_spec = (None if _sed_spec is _ExpCfg._field_defaults[
+        "morrison_specified_nc_droplet_sedimentation"] else _sed_spec)
+    _cirrus = getattr(config, "morrison_cirrus_nucleation",
+                      _ExpCfg._field_defaults["morrison_cirrus_nucleation"])
+    _cirrus = (None if _cirrus == _ExpCfg._field_defaults["morrison_cirrus_nucleation"]
+               else _cirrus)
     if (not _touched and _flavor is None and _sed_sub is None
             and _sed_strict is None and _sed_max is None and _graupel is None
-            and _wrs is None and _incloud is None and _prog_nc is None):
+            and _wrs is None and _incloud is None and _prog_nc is None
+            and _sed_spec is None and _cirrus is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4796,7 +4851,9 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_sed_cfl_substeps_strict=_sed_strict,
         morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs,
         morrison_warm_rain_incloud=_incloud,
-        morrison_prognostic_droplet_number=_prog_nc)
+        morrison_prognostic_droplet_number=_prog_nc,
+        morrison_specified_nc_droplet_sedimentation=_sed_spec,
+        morrison_cirrus_nucleation=_cirrus)
 
 
 def _resolve_microphysics(config):
@@ -4823,7 +4880,12 @@ def _resolve_microphysics(config):
     )
 
     scheme = config.microphysics
-    micro_fn = resolve_kernel(MICROPHYSICS_REGISTRY, scheme)
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MICROPHYSICS_PRECISION_MODULE,
+    )
+    from legoesm.core.precision import with_precision_override
+    micro_fn = with_precision_override(MICROPHYSICS_PRECISION_MODULE)(
+        resolve_kernel(MICROPHYSICS_REGISTRY, scheme))
     mc = MicrophysicsConfig(scheme=scheme)
     micro_config = getattr(mc, scheme)
     required_microphysics_tracer_slots(scheme, micro_config)
@@ -4970,18 +5032,25 @@ def apply_surface_flux_config(tc, config):
     gzi = getattr(config, "surface_gustiness_zi", None)
     stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
+    sus = getattr(config, "surface_unstable_scheme", "native")
     zml = getattr(config, "surface_z_ref_model_level", None)
-    # Large-Yeager smooth-switch widths (#2241): only values that differ from
-    # the shared default are injected, so a default run keeps the fast path.
+    # RULE 5 surface-flux widths (Large-Yeager #2241, zeta cap, GFS join): only
+    # values that differ from the shared default are injected, so a default run
+    # keeps the fast path.
+    wd = SURFACE_FLUX_WIDTH_DEFAULTS
     lyw = {
         "large_yeager_neutral_width": getattr(
-            config, "surface_large_yeager_neutral_width", NCAR_NEUTRAL_WIDTH),
+            config, "surface_large_yeager_neutral_width", wd["large_yeager_neutral_width"]),
         "large_yeager_dthv_width": getattr(
-            config, "surface_large_yeager_dthv_width", NCAR_DTHV_WIDTH),
+            config, "surface_large_yeager_dthv_width", wd["large_yeager_dthv_width"]),
         "large_yeager_cd_cutoff_width": getattr(
-            config, "surface_large_yeager_cd_cutoff_width", NCAR_CD_CUTOFF_WIDTH),
+            config, "surface_large_yeager_cd_cutoff_width", wd["large_yeager_cd_cutoff_width"]),
+        "most_zeta_cap_width": getattr(
+            config, "surface_most_zeta_cap_width", wd["most_zeta_cap_width"]),
+        "gfs_unstable_join_width": getattr(
+            config, "surface_gfs_unstable_join_width", wd["gfs_unstable_join_width"]),
     }
-    lyw = {k: v for k, v in lyw.items() if v != LARGE_YEAGER_WIDTH_DEFAULTS[k]}
+    lyw = {k: v for k, v in lyw.items() if v != SURFACE_FLUX_WIDTH_DEFAULTS[k]}
 
     _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
     # None = "on wherever the lane can honour it".  CAPABILITY, not grid: the
@@ -5009,7 +5078,8 @@ def apply_surface_flux_config(tc, config):
             "mosaic surface); this run has neither. Grid is "
             f"{getattr(getattr(config, 'grid', None), 'grid_type', '?')!r}")
     if (sbs == "constant" and gzi is None and stc == "legoesm"
-            and sss == "dyer1974" and zml is None and _qsal_req is None
+            and sss == "dyer1974" and sus == "native" and zml is None
+            and _qsal_req is None
             and not qsal and not lyw):
         # The two surface switches gate this fast path on whether they have
         # anything to SAY, not on whether they are true:
@@ -5071,6 +5141,9 @@ def apply_surface_flux_config(tc, config):
         # driven by the one --surface-stability-scheme flag) so the
         # interface cannot split Dyer-vs-SHEBA across its two sides.
         surf = surf._replace(stability_scheme=sss)
+    if sus != "native":
+        # Unstable-regime MOST form, same single flag for both interface sides.
+        surf = surf._replace(unstable_scheme=sus)
     if lyw:
         surf = surf._replace(**lyw)
     return tc._replace(**{tc.scheme: sub._replace(surface=surf)})
@@ -5740,9 +5813,8 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
     pipeline.rrtmgp_radiation = rad_scheme in ("rrtmgp", "rrtmg")
     pipeline.cesm_ocean_albedo = (bool(config.dynamic_albedo)
                                   and pipeline.rrtmgp_radiation)
-    from legoesm.atmosphere.physics.radiation.solar import earth_orbit
-    pipeline.orbit = (earth_orbit()
-                      if getattr(config, 'orbital_insolation', False) else None)
+    from legoesm.driver.orbit import experiment_orbit
+    pipeline.orbit = experiment_orbit(config)
     # Slab-land interface flux law (see _step_slab_land).  Checked here so a
     # config that dodged validate_strict (direct pipeline builders) still
     # fails at BUILD time — not at trace time inside the compiled step — when

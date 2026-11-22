@@ -133,6 +133,107 @@ def _ocean_matrix_spec():
                             valid_grids=_MATRIX_GRIDS)
 
 
+# BENCH harness route (#2113): a ``setup: {name: bench, ...}`` that carries any
+# of these runner-only keys goes to the standalone BENCH harness
+# (``run_bench.py``: resolution presets, step budget, tripole fold lane, timing
+# JSONL) instead of the fixed CI-sized matrix case.  ``(setup_key, flag)``.
+_BENCH_RUNNER = "scripts/run/run_bench.py"
+_BENCH_HARNESS_KEYS = (
+    ("preset", "--preset"), ("steps", "--steps"),
+    ("warmup_steps", "--warmup-steps"), ("n_lat", "--n-lat"),
+    ("timing_jsonl", "--timing-jsonl"),
+)
+
+
+def _bench_harness_spec():
+    """MatrixRunnerSpec for ``run_bench.py`` (#2113).
+
+    No case filter (it runs only BENCH), no days / resolution / quick / output
+    flags; ``levels`` -> ``--nlev`` and ``dt_seconds`` -> ``--dt`` override the
+    preset.  ``valid_grids`` mirrors its ``--grid`` choices.
+    """
+    from legoesm.core.setup_selector import MatrixRunnerSpec
+    return MatrixRunnerSpec(
+        runner_path=_BENCH_RUNNER, valid_grids=("latlon", "tripole"),
+        case_flag=None, levels_flag="--nlev", dt_flag="--dt", days_flag=None,
+        resolution_flag=None, output_flag=None, quick_flag=None,
+        extra_keys=_BENCH_HARNESS_KEYS,
+    )
+
+
+def _is_bench_harness(setup) -> bool:
+    return (isinstance(setup, dict) and setup.get("name") == "bench"
+            and any(k in setup for k, _ in _BENCH_HARNESS_KEYS))
+
+
+# Single-column route (#2103): ``setup.grid: column`` names an ocean case of the
+# SCM matrix runner (a positional subcommand; no grid / override flags).  Kept
+# in step with that runner's ``CASES`` by tests/unit/test_ocean_setup_templates.py.
+_SCM_RUNNER = "scripts/matrix/run_scm_test_matrix.py"
+_OCEAN_SCM_CASES = ("ocean_convective_deepening",)
+
+
+def _ocean_scm_spec():
+    """MatrixRunnerSpec for the single-column runner (#2103)."""
+    from legoesm.core.setup_selector import MatrixRunnerSpec
+    return MatrixRunnerSpec(
+        runner_path=_SCM_RUNNER, valid_grids=("column",), case_flag="",
+        exact_prefix="", grid_flag=None, levels_flag=None, dt_flag=None,
+        days_flag=None, resolution_flag=None, output_flag=None,
+        quick_flag=None,
+    )
+
+
+def _is_column(setup) -> bool:
+    return isinstance(setup, dict) and setup.get("grid") == "column"
+
+
+def _setup_spec(setup):
+    """The runner spec a ``setup:`` block routes to."""
+    if _is_column(setup):
+        return _ocean_scm_spec()
+    return _bench_harness_spec() if _is_bench_harness(setup) \
+        else _ocean_matrix_spec()
+
+
+def _validate_bench_harness(setup) -> None:
+    """Value checks for the BENCH harness keys (#2113); raises on invalid."""
+    from legoesm.ocean.experiments.bench import (
+        BENCH_DEFAULT_STEPS, BENCH_DEFAULT_WARMUP_STEPS, BENCH_PRESETS,
+    )
+
+    def _int(key, lo):
+        v = setup.get(key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int)
+                              or v < lo):
+            raise ValueError(f"setup.{key} must be an int >= {lo}, got {v!r}")
+
+    preset = setup.get("preset")
+    if preset is not None and (not isinstance(preset, str)
+                               or preset not in BENCH_PRESETS):
+        raise ValueError(f"setup.preset={preset!r} is not a BENCH preset; "
+                         f"choose one of {sorted(BENCH_PRESETS)}")
+    _int("steps", 1)
+    _int("warmup_steps", 0)
+    _int("n_lat", 1)
+    # Unset keys take run_bench.py's defaults (same constants).
+    steps = setup.get("steps")
+    steps = BENCH_DEFAULT_STEPS if steps is None else steps
+    warm = setup.get("warmup_steps")
+    warm = BENCH_DEFAULT_WARMUP_STEPS if warm is None else warm
+    if warm >= steps:
+        raise ValueError(f"setup.warmup_steps={warm} must be < steps={steps} "
+                         "(no steady-state steps would be timed)")
+    if setup.get("n_lat") is not None and setup.get("grid") != "tripole":
+        raise ValueError("setup.n_lat applies to grid: tripole only (the "
+                         "latlon lane derives its rows from the preset and "
+                         "would silently ignore it)")
+    tj = setup.get("timing_jsonl")
+    if tj is not None and not (isinstance(tj, str) and tj.strip()):
+        raise ValueError(
+            f"setup.timing_jsonl must be a non-empty string, got {tj!r}")
+
+
 def _resolve_target(grid_type: str):
     """Return ``(ConfigClass, ModelClass)`` for *grid_type* (deferred imports)."""
     if grid_type == "latlon_cgrid":
@@ -431,8 +532,16 @@ class OceanExperimentConfig:
         # Shape / keys / grid-set / run-control validation + registry membership
         # via the shared selector (single source of truth, used by every
         # component adapter).
-        validate_setup(setup, _ocean_matrix_spec(),
-                       known_names=AVAILABLE_EXPERIMENTS)
+        column = _is_column(setup)
+        validate_setup(setup, _setup_spec(setup),
+                       known_names=_OCEAN_SCM_CASES if column
+                       else AVAILABLE_EXPERIMENTS)
+        if column:
+            # Single-column case (#2103): not a 3-D registry experiment, so no
+            # ``grid_support`` gate.
+            return
+        if _is_bench_harness(setup):
+            _validate_bench_harness(setup)
         # Ocean-specific: the experiment's own ``grid_support`` gate — the grid
         # must be one it actually supports, not merely a valid matrix grid.
         name, grid = setup["name"], setup["grid"]
@@ -547,7 +656,7 @@ class OceanExperimentConfig:
         setup = self.get("setup")
         if setup is not None:
             from legoesm.core.setup_selector import build_matrix_command
-            return build_matrix_command(_ocean_matrix_spec(), setup,
+            return build_matrix_command(_setup_spec(setup), setup,
                                         output_path=self.get("output.path"))
 
         grid_type = self.get("grid.type", "latlon_cgrid")

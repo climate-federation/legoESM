@@ -36,7 +36,8 @@ from legoesm.land.canopy.config import (
 )
 from legoesm.land.canopy.photosynthesis import co2_compensation_point
 from legoesm.land.canopy.radiative_transfer import (
-    split_sw_components, canopy_shortwave_rt,
+    split_sw_components, canopy_shortwave_rt, canopy_shortwave_two_stream,
+    TwoStreamLeafOptics,
 )
 from legoesm.land.canopy.sif import two_leaf_canopy_sif
 from legoesm.land.canopy.stability import (
@@ -44,7 +45,7 @@ from legoesm.land.canopy.stability import (
 )
 from legoesm.land.canopy.solver import (
     CanopyForcingBundle, solve_canopy_closure_diag, canopy_forward,
-    canopy_state_admissible,
+    canopy_state_admissible, ground_heat_conductance,
 )
 from legoesm.land.canopy.energy_balance import soil_surface_evap_resistance
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
@@ -197,6 +198,10 @@ def static_canopy_roughness(lp, ncol):
         _get(lp, "hc", jnp.full(ncol, _DEFAULT_HC)), LAI,
         _get(lp, "rz0m", jnp.full(ncol, _DEFAULT_RZ0M)),
         _get(lp, "rd", jnp.full(ncol, _DEFAULT_RD)))
+
+
+_TWO_STREAM_OPTICS_FIELDS = ("rho_vis", "tau_vis", "rho_nir", "tau_nir",
+                             "phi1", "phi2", "kd", "cos2_theta")
 
 
 def _get(lp, name: str, fallback):
@@ -424,10 +429,26 @@ def compute_two_leaf_canopy_fluxes(
     PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV = split_sw_components(
         forcing.sw_down, cos_zenith)
 
-    sw_rt = canopy_shortwave_rt(
-        PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
-        SZA, LAI, CI, ALB_VIS, ALB_NIR,
-        Vc3_leaf_stressed, Vc4_leaf_stressed, kn)
+    if cc.sw_scheme == "ryu":
+        sw_rt = canopy_shortwave_rt(
+            PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
+            SZA, LAI, CI, ALB_VIS, ALB_NIR,
+            Vc3_leaf_stressed, Vc4_leaf_stressed, kn)
+    elif cc.sw_scheme == "two_stream":
+        _optics = [_get(lp, f"leaf_{n}", None) for n in _TWO_STREAM_OPTICS_FIELDS]
+        if any(o is None for o in _optics):
+            raise ValueError(
+                "sw_scheme='two_stream' needs per-column leaf optics (CanopyLandParams "
+                f"leaf_{'/'.join(_TWO_STREAM_OPTICS_FIELDS)}); this driver does not build "
+                "them (fill them with radiative_transfer.two_stream_leaf_optics(pft))")
+        sw_rt = canopy_shortwave_two_stream(
+            PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
+            SZA, LAI, CI, ALB_VIS, ALB_NIR,
+            Vc3_leaf_stressed, Vc4_leaf_stressed, kn,
+            TwoStreamLeafOptics(*_optics), cc.two_stream_clip_width)
+    else:
+        raise ValueError(f"unknown sw_scheme {cc.sw_scheme!r}; must be one of "
+                         "('ryu', 'two_stream')")
 
     # ---- Thermodynamic / atmosphere variables ----
     Ps    = forcing.p_surface
@@ -543,21 +564,28 @@ def compute_two_leaf_canopy_fluxes(
     # it held desert columns at their start-of-step soil.  Acceptance stays tied
     # to the LAST pass.
     x_conv = jnp.full_like(initial_state, jnp.nan)
+    # Columns per batch (0 = all of them in one vmap): a batch iterates until
+    # its slowest column stops; see CanopyConfig.solve_group.
+    def _solve_all(args):
+        if cc.solve_group == 0:
+            return jax.vmap(_solve_one_col)(*args)
+        return jax.lax.map(lambda a: _solve_one_col(*a), args,
+                           batch_size=cc.solve_group)
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
         _fallback = initial_state if _picard_iter % 2 == 0 else retry_state
         _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
                             jnp.nan_to_num(x_conv), _fallback)
-        # One batch over every column (user choice 2026-11-09, replacing the
-        # 64-column groups chosen 2026-11-03).  Once the LM step stopped forming
-        # explicit Q (PR 2398) the solve is launch-bound, so one wide batch
-        # beats many narrow ones: AMIP production deck, 4 A100, fp64, 1 day,
+        # One batch over every column by default (solve_group 0; user choice
+        # 2026-11-09, replacing the 64-column groups chosen 2026-11-03).  Once
+        # the LM step stopped forming explicit Q (PR 2398) the solve is
+        # launch-bound, so one wide batch beats many narrow ones: AMIP production deck, 4 A100, fp64, 1 day,
         # 0.242 s/step with groups of 64 vs 0.138 s/step with one batch.
         # Pure performance: same per-column solve, answers differ by rounding.
         # Cost: the batch iterates until the rank's slowest column stops, so a
         # column stuck at the iteration cap holds every column to the cap.
-        (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
-         hit_cap) = jax.vmap(_solve_one_col)(_seed_k, bundles_k)
+        _out = _solve_all((_seed_k, bundles_k))
+        (x_final, n_iters, converged, resid_sq, resid_rel, lam_f, hit_cap) = _out
         x_conv = jnp.where(converged[:, None], x_final, x_conv)
         # A rejected iterate may be non-finite: evaluate the fluxes of a failed
         # column at the (finite) cold state instead, so no NaN enters a
@@ -565,7 +593,14 @@ def compute_two_leaf_canopy_fluxes(
         # root: it reports converged=False, and the multilayer land step closes
         # their energy into sensible heat and accepts the column (or reverts it
         # if non-finite or beyond the fallback guards).
-        x_final = jnp.where(converged[:, None], x_final, cold_state)
+        if cc.fallback_from_last_iterate:
+            # CLM5 2.5.3.2: an unconverged column keeps its last iterate when
+            # that is an admissible canopy state; otherwise the cold state.
+            _fb_state = jnp.where(
+                canopy_state_admissible(x_final)[:, None], x_final, cold_state)
+        else:
+            _fb_state = cold_state
+        x_final = jnp.where(converged[:, None], x_final, _fb_state)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
@@ -689,6 +724,21 @@ def compute_two_leaf_canopy_fluxes(
     # Safety clamp on G: extreme non-converged values corrupt T_soil.
     G_clamped = jnp.clip(G, -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
 
+    # Semi-implicit ground flux (CanopyConfig.implicit_ground_flux; CLM5 eqs.
+    # 2.5.123-2.5.124 into 2.6.15).  G above was evaluated at the last Picard
+    # pass's ground temperature ``bundles_k.Ts_bc``; the soil solve linearises
+    # about it.  Where the clamp binds G no longer depends on the ground
+    # temperature, so lambda is 0 there (the explicit clamped flux, as before).
+    if cc.implicit_ground_flux:
+        lam_g = jax.vmap(
+            lambda x_, b_, c_: ground_heat_conductance(x_, b_, cc, c_))(
+                x_final, bundles_k, converged)
+        surface_conductance = jnp.where(G == G_clamped, jnp.maximum(lam_g, 0.0), 0.0)
+        surface_conductance_T_ref = bundles_k.Ts_bc
+    else:
+        surface_conductance = None
+        surface_conductance_T_ref = None
+
     # ---- Wind stress from MOST ustar ----
     # Sign: stress ON THE AIR (opposes the wind), the convention of the ocean
     # bulk and SimpleSEB stresses this vector is tile-blended with (#2031).
@@ -756,4 +806,6 @@ def compute_two_leaf_canopy_fluxes(
         tau_mag=tau_mag,
         L_soil=L_cond,
         condensation=condensation,
+        surface_conductance=surface_conductance,
+        surface_conductance_T_ref=surface_conductance_T_ref,
     )

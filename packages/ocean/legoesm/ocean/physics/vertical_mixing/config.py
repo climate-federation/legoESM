@@ -37,6 +37,8 @@ __param_spec__ = {
             "smooth_energy_sharpness_m2j": "RULE 5 smoothing sharpness of the ePBL energy switches; a numerics regulariser, not physics",
             "smooth_colht_sharpness_per_m": "RULE 5 smoothing sharpness of the ePBL column-height switches; a numerics regulariser, not physics",
             "smooth_ratio_sharpness": "RULE 5 smoothing sharpness of the ePBL nondimensional caps; a numerics regulariser, not physics",
+            "smooth_velocity_sharpness_s_m": "RULE 5 smoothing sharpness of the ePBL velocity caps; a numerics regulariser, not physics",
+            "smooth_slope_sharpness": "RULE 5 smoothing sharpness of the ePBL column-height slope switches; a numerics regulariser, not physics",
         },
         "params": {
             "nstar": {"units": "1", "bounds": (0.02, 0.4), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) NSTAR: fraction of released PE available to drive entrainment", "shape": None},
@@ -80,6 +82,7 @@ __param_spec__ = {
         "scheme_key": "ocean.vm.richardson",
         "excluded": {
             "Pr_t": "dead field: the Pr-Ri scaling is built into the K formula; richardson.py only warns when Pr_t != default and never reads it — phantom trainable",
+            "ri_clip_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
         },
         "params": {
             "A_bg": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
@@ -172,6 +175,8 @@ __param_spec__ = {
             "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "crossing_sharpness": "numerics: solver/CFL/smoothing parameter",
             "crossing_threshold": "numerics: solver/CFL/smoothing parameter",
+            "surrogate_width_sigma": "numerics: backward-pass surrogate width (gradients only, never fitted)",
+            "surrogate_width_n2": "numerics: backward-pass surrogate width (gradients only, never fitted)",
             "epsilon_lmd": "numerics: floor/cap",
             "gamma_S": "Large 1994 fixed nondim constant",
             "gamma_T": "Large 1994 fixed nondim constant",
@@ -240,7 +245,7 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     # ----- Static-stability N^2 mode for the gradient Richardson number -----
     # ``"insitu"`` (default, BIT-IDENTICAL legacy) / ``"insitu_signed"``: N^2
     #   from the in-situ density difference (``eos.compute_buoyancy_frequency``,
-    #   already signed/unclipped here — the downstream ``richardson_number``
+    #   already signed/unclipped here — ``_pp81_diffusivities``
     #   clips Ri>=0), which carries the compressibility bias (~too stable).
     # ``"adiabatic"``: PP81's TRUE static stability via adiabatic parcel
     #   displacement to the upper cell's pressure
@@ -249,6 +254,8 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     #   ``richardson_vertical_mixing``. Both integration factory and the
     #   implicit k_profiles path supply it when this is selected.
     n2_mode: str = "insitu"
+    # RULE 5 width [1] of the C1 Ri >= 0 clip (0 = CVMix's hard clip).
+    ri_clip_width: float = 0.01
 
 
 class TKEConfig(NamedTuple):
@@ -708,6 +715,14 @@ class TKEConfig(NamedTuple):
     # order, including the per-column mbkt+1 no-crossing fallback. Only the
     # complete DINO NEMO cards select it; all other cards remain vectorized.
     tke_langmuir_evaluation: str = "vectorized"
+    # Langmuir source vs NEMO's explicit dissipation add-back.  NEMO adds the
+    # Langmuir increment to en BEFORE the matrix (zdftke.F90:367), so the RHS
+    # add-back zfact3*dissl*en (:419) multiplies the post-Langmuir en.
+    # ``separate`` (historical): Langmuir is a plain RHS source and the
+    # add-back uses the pre-Langmuir e_old.  ``nemo_pre_solve``: the add-back
+    # also acts on dt*source, as in NEMO (factored matrix + nemo_1p5_split
+    # only; the literal matrix already assembles it that way).
+    tke_langmuir_rhs_coupling: str = "separate"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
     # NEMO cards instead freeze p_sh2 from selected step-entry face levels and
@@ -1016,6 +1031,36 @@ class KPPConfig(NamedTuple):
     #   Siberian salty — that TKEConfig.eice fixed on the TKE grid but never
     #   reached the KPP grids).
     eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
+    # N^2 for V_t^2, the interior Richardson number and the convective trigger (ENSO core-0030).
+    # "adiabatic": the local buoyancy gradient (both cells of an interface at one pressure), as LMD94,
+    # CVMix/MOM6, MITgcm and POP.  "insitu_signed": the earlier difference of in-situ densities at each
+    # cell's own pressure (biased by g^2/c_s^2, about +4e-5 s^-2), kept bit for bit.  User-approved default 2026-11-20 (published form).
+    n2_mode: str = "adiabatic"
+    # Velocity scale w_s inside the unresolved shear V_t^2 of the bulk Richardson
+    # number.  "column" (default, unchanged behaviour): w_s at each depth d for a
+    # boundary layer of depth h_bl_prev, or of the full column when the caller
+    # passes no h_bl_prev (the lat-lon K-profile path), so the surface-layer cap
+    # d_eff = min(d, epsilon*h) does not act.  "candidate": the CVMix / MOM6 form,
+    # each candidate depth d is its own boundary-layer depth and w_s is taken at
+    # sigma = epsilon of it, d_eff = epsilon*d, in stable and unstable forcing
+    # (CVMix cvmix_kpp_compute_turbulent_scales_1d_OBL with l_LMD_ws = .false.,
+    # its default; MOM6 MOM_CVMix_KPP.F90 KPP_compute_BLD, Vt_layer = 1.0 and
+    # OBL_depth = cell-centre depth).
+    vt2_velocity_scale: str = "column"
+    # Surface buoyancy flux in the KPP velocity scales.  False (default, unchanged
+    # behaviour): |B_f| below float32 machine epsilon (1.19e-7 m^2/s^3) is replaced by
+    # that floor with the same sign, which covers most tropical fluxes.  True: the actual
+    # flux, with zeta = d_eff kappa B_f / u*^3 written without a division by B_f, as
+    # LMD94 and CVMix (cvmix_kpp_compute_turbulent_scales_1d_OBL) use it.
+    actual_buoyancy_flux: bool = False
+    # Gradient surrogates (docs/88 6.12 (a2)): the boundary-layer base switch (K_bl inside, interior K below
+    # sigma = 1) and the convective switch (K_conv where N2 < Ri_conv) keep their exact forward values but
+    # take the derivative of a logistic blend in the backward pass, with these widths (numerical, stated
+    # before use, never fitted).  False (default): exact gradients of the step functions.
+    gradient_surrogates: bool = False
+    surrogate_switches: str = "bl_base,convective"   # which switches get a surrogate (comma list)
+    surrogate_width_sigma: float = 0.1     # in sigma = depth / h_bl
+    surrogate_width_n2: float = 1.0e-6     # in N2 [s^-2]
 
 
 class CATKEConfig(NamedTuple):
@@ -1043,11 +1088,15 @@ class CATKEConfig(NamedTuple):
 
     Field names map 1:1 to Oceananigans ``CATKEMixingLength`` / ``CATKEEquation``
     (Cˢ→c_surface_shear, Cᶜc→c_conv_c, CʰⁱD→c_hi_diss, ...); defaults are the
-    LES-calibrated values from Wagner et al. (2025).
+    LES-calibrated values from Wagner et al. (2025), except ``c_bottom_shear``, which
+    the LES do not constrain and Oceananigans sets so the bottom von Kármán constant is 0.4.
     """
     # --- stable (shear) mixing length: surface/bottom + stratification ---
     c_surface_shear: float = 1.131       # Cˢ  surface-distance coefficient
-    c_bottom_shear: float = 0.28         # Cᵇ  bottom-distance coefficient
+    # Cᵇ bottom-distance coefficient. Oceananigans CATKEMixingLength (main, 8e4f98d, 5 November 2026): Cᵇ = 0.967,
+    # chosen so that the near-bottom similarity constant Cᵇ (Cˡᵒu^3 / CˡᵒD)^(1/4) is 0.4, because Cᵇ is not
+    # constrained by the surface-forced calibration LES (Wagner et al. 2025, section 3.1.3). Was 0.28 (ENSO core-0026).
+    c_bottom_shear: float = 0.967
     c_ri_lower: float = 0.254            # CRi⁰ stability-function lower Ri
     c_ri_width: float = 1.02             # CRiᵟ stability-function width
     c_sheared_plume: float = 0.505       # Cˢᵖ sheared-convective-plume coefficient
@@ -1087,6 +1136,23 @@ class CATKEConfig(NamedTuple):
     maximum_viscosity: float = float("inf")           # K_u cap [m^2/s]
     maximum_tracer_diffusivity: float = float("inf")  # K_c cap [m^2/s]
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
+    # Shortwave in CATKE's surface buoyancy flux Jb (ENSO core-0027). Oceananigans' CATKE takes Jb from the top boundary
+    # fluxes of T and S only (catke_vertical_diffusivity.jl, top_buoyancy_flux of the top tracer BCs); with
+    # penetrating radiation (NumericalEarth/ClimaOcean TwoColorRadiation) the whole shortwave is a body forcing and
+    # shortwave_radiative_forcing returns zero for the top flux (radiative_forcing.jl, apply_air_sea_radiative_fluxes.jl),
+    # so Jb is formed from the non-solar flux. "exclude" (default) does the same here when the surface forcing
+    # carries sw_down: Jb uses q_net - sw_down. "include" keeps the earlier behaviour (Jb from the full q_net).
+    # With a skin fraction above 0 (the "auto" or default jerlov_2band path, or sweeney_2band) part of sw_down is
+    # absorbed at the top and still sits in the tracer surface flux; it is left out of Jb all the same, as
+    # NumericalEarth leaves all shortwave out even where most is absorbed in the top cell. The regional driver uses
+    # skin fraction 0, where the split is exact.
+    surface_buoyancy_flux_shortwave: str = "exclude"
+    # N^2 for CATKE (ENSO core-0029). Oceananigans' CATKE uses the local buoyancy gradient ∂z_b = g (alpha ∂zT - beta ∂zS)
+    # (SeawaterBuoyancy), with no compressibility term. "adiabatic" (default) evaluates both cells of an interface
+    # at the upper cell's pressure (eos.compute_buoyancy_frequency_adiabatic), which is that local gradient for any
+    # EOS. "insitu_signed" keeps the earlier behaviour: the difference of in-situ densities, biased stable by the
+    # compressibility of seawater (about +4e-5 s^-2 near the surface with Wright).
+    n2_mode: str = "adiabatic"
 
 
 class EPBLConfig(NamedTuple):
@@ -1181,6 +1247,8 @@ class EPBLConfig(NamedTuple):
     smooth_energy_sharpness_m2j: float = 1.0e6    # [m^2/J] TKE / PE per area
     smooth_colht_sharpness_per_m: float = 1.0e10  # [1/m] column-height change
     smooth_ratio_sharpness: float = 1.0e3         # [1] nondimensional ratios
+    smooth_velocity_sharpness_s_m: float = 1.0e6  # [s/m] velocity scales
+    smooth_slope_sharpness: float = 1.0e10        # [1] d(ColHt)/d(Kddt_h), ~1e-5
 
     # --- background floors added to the ePBL diffusivity ---
     K_bg: float = 1.0e-5               # KD   [m^2/s]

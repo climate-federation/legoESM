@@ -77,6 +77,35 @@ LEGACY_TABLE_ALIASES: Dict[str, str] = {
 # compliance test refuses to certify them.  ``dimensions`` uses legoESM's
 # internal axis names directly.
 NON_CMIP6_VARIABLES: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "Amon": {
+        "o3_ifs": {
+            "standard_name": "mass_fraction_of_ozone_in_air",
+            "long_name": "IFS Cariolle Prognostic Ozone (tracer only)",
+            "units": "kg kg-1",
+            "cell_methods": "area: time: mean",
+            "cell_measures": "area: areacella",
+            "positive": "",
+            "type": "real",
+            "dimensions": ("time", "plev", "lat", "lon"),
+            "comment": (
+                "NOT a CMIP6 variable; legoESM diagnostic only. Radiation "
+                "uses the prescribed input4MIPs ozone, not this tracer."
+            ),
+        },
+        "toz_ifs": {
+            "standard_name": (
+                "equivalent_thickness_at_stp_of_atmosphere_ozone_content"
+            ),
+            "long_name": "IFS Cariolle Prognostic Total Column Ozone",
+            "units": "DU",
+            "cell_methods": "area: time: mean",
+            "cell_measures": "area: areacella",
+            "positive": "",
+            "type": "real",
+            "dimensions": ("time", "lat", "lon"),
+            "comment": "NOT a CMIP6 variable; legoESM diagnostic only.",
+        },
+    },
     "Lmon": {
         "nee": {
             "standard_name": (

@@ -1,0 +1,26 @@
+# legoESM experiment template — ocean free-convective mixed-layer deepening.
+#
+# Single-column ocean case (#2103): a resting, linearly stratified column
+# (Gamma = 0.01 K/m) under constant surface cooling (250 W/m2), on the ocean
+# column model (constant vertical mixing + enhanced-diffusion convection).
+# Checked against an analytic oracle: column heat change equals the heat
+# removed at the surface, and the mixed layer deepens like sqrt(t)
+# (non-penetrative encroachment). Routed to scripts/matrix/run_scm_test_matrix.py
+# (case `ocean_convective_deepening`, case defaults, no per-run overrides).
+experiment:
+  tier: tier1
+  complexity: column
+  extent: column
+  maturity: run_tested
+  description: >
+    Ocean free-convective mixed-layer deepening into a linear stratification
+    under constant surface cooling, on the ocean single-column model; checked
+    against heat conservation and the analytic sqrt(t) encroachment law.
+  data: []
+  conservation_gates: [energy]
+model:
+  name: "ocean-scm-convective-deepening"
+  type: ocean_only
+setup:
+  name: ocean_convective_deepening
+  grid: column

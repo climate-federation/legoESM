@@ -30,6 +30,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.core.profile_metrics import safe_sqrt
+from legoesm.core.smooth import max_rel, min_rel, sqrt_c1, stable_div, step_rel
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
 from legoesm.grids.halo_latlon import (
@@ -1677,6 +1678,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     vertex_mask: jnp.ndarray | None = None,
+    h_vtx: jnp.ndarray | None = None,
     thickness_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
                               jnp.ndarray, jnp.ndarray, jnp.ndarray] | None = None,
     metric_reciprocal_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
@@ -1811,14 +1813,24 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     # Historical single-thickness path remains unchanged for non-WS callers.
     # The NEMO identity path supplies the six distinct operands read by
     # dynldf_lev.f90:123,127-129,135,139.
+    # ``h_vtx`` override: the min-rule gives e3f = 0 at every coastal F point
+    # (a dry neighbour has h = 0), which silently zeroes zcur there and turns a
+    # no-slip fmask (rn_shlat=2) back into free-slip. NEMO's e3f_0 at a coastal
+    # F point is the min of the four e3t_0 INCLUDING the land cells' filled
+    # values (domain_cfg: 389099/389099 coastal F points), so a caller running
+    # no-slip passes that thickness here.
     if thickness_operands is None:
         e3t_kbb = h_k
         e3u_kbb = min_cell_to_uface(h_k)
         e3v_kbb = min_cell_to_vface(h_k, grid)
-        e3f_live = min_cell_to_vertex(h_k, grid)
+        e3f_live = (min_cell_to_vertex(h_k, grid) if h_vtx is None
+                    else h_vtx)
         e3u_kmm = e3u_kbb
         e3v_kmm = e3v_kbb
     else:
+        if h_vtx is not None:
+            raise ValueError(
+                "h_vtx and thickness_operands both supply e3f; pass one")
         (e3t_kbb, e3u_kbb, e3v_kbb, e3f_live,
          e3u_kmm, e3v_kmm) = thickness_operands
 
@@ -3439,6 +3451,14 @@ def om4p25_lateral_friction_tendency_cgrid(
     mask: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
+    Kh_sin_lat: float = 0.0,
+    Kh_sin_power: float = 4.0,
+    bound_coriolis_vel: float = 0.0,
+    resolution_fn: tuple | None = None,
+    bound_coef: float = 0.0,
+    dt: float | None = None,
+    nu2_sponge_h: jnp.ndarray | None = None,
+    smooth_width: float = 0.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """OM4p25 lateral-friction closure (GFDL OM4.0, Adcroft et al. 2019) — the
     Silvestri et al. 2024 "SM2" comparison case. A Laplacian + biharmonic
@@ -3466,9 +3486,46 @@ def om4p25_lateral_friction_tendency_cgrid(
     for the idealised baroclinic jet it is ~uniform (~6.75 km). A spatially-
     varying L_d from the local N² is a faithfulness refinement.
 
+    The OM4p5 parameter file (MOM6-examples OM4_05, MOM_hor_visc.F90) adds,
+    each off by default here so the call above is unchanged:
+    ``Kh_sin_lat`` (KH_SIN_LAT, 2000 m2/s in OM4p5): a third Laplacian
+    background ``Kh_sin_lat |sin(lat)|^Kh_sin_power`` inside the maximum;
+    ``bound_coriolis_vel`` (BOUND_CORIOLIS_VEL, 6 m/s): the biharmonic
+    Smagorinsky becomes ``Δ⁴|D| (C4 + Δ² f_max |D| / (5 V²))``;
+    ``resolution_fn`` = (R_h, R_q), MOM6's resolution function at h and q
+    points (``om4_resolution_function``), which then replaces the scalar
+    taper F; ``bound_coef`` (HORVISC_BOUND_COEF, 0.8) with ``dt``: MOM6's
+    BOUND_KH and BOUND_AH caps, ``bound_coef min(dx,dy)² / (8 dt)`` and
+    ``bound_coef min(dx,dy)⁴ / (64 dt)`` (MOM6's metric expressions reduced
+    to rectangular cells).  With ``resolution_fn`` given, the Smagorinsky and
+    static terms use MOM6's grid spacing Δ² = 2 dx² dy² / (dx² + dy²).
+
+    ``smooth_width`` (OM4p5 form only): the RULE 5 width of its viscosity
+    maxima and BOUND caps (``OMp25Config.smooth_width``); 0 is MOM6's hard form.
+
+    ``nu2_sponge_h`` (n_lat, n_lon) [m²/s], OM4p5 form only: a sponge
+    viscosity next to open sides (CROCO SPONGE_VIS2, set_nudgcof.F), ADDED
+    to the Laplacian after the bound caps and not scaled by the resolution
+    function (CROCO has neither); q points take the mean of the four cells
+    around them (CROCO's psi points), zonally periodic as the strain-rate
+    corners (``jnp.roll``), the edge rows repeated meridionally.
+
     Returns ``(tend_u, tend_v)`` already combining Laplacian (added) and
     biharmonic (subtracted); the caller ADDS these to du/dt.
     """
+    if resolution_fn is not None:
+        return _om4_mom6_tendency(
+            u, v, grid, C2=C2, Cu2=Cu2, C4=C4, Cu4=Cu4, Kh_sin_lat=Kh_sin_lat,
+            Kh_sin_power=Kh_sin_power, bound_coriolis_vel=bound_coriolis_vel,
+            resolution_fn=resolution_fn, bound_coef=bound_coef, dt=dt,
+            mask=mask, u_mask=u_mask, v_mask=v_mask, nu2_sponge_h=nu2_sponge_h,
+            width=smooth_width)
+    if nu2_sponge_h is not None:
+        raise ValueError("nu2_sponge_h needs resolution_fn (the OM4p5 form of "
+                         "om4p25_lateral_friction_tendency_cgrid)")
+    if Kh_sin_lat != 0.0 or bound_coriolis_vel != 0.0 or bound_coef != 0.0:
+        raise ValueError("Kh_sin_lat, bound_coriolis_vel and bound_coef need resolution_fn "
+                         "(the OM4p5 form of om4p25_lateral_friction_tendency_cgrid)")
     # Δ²·|D| at h- and q-points via the Smagorinsky helpers with unit
     # coefficient (smagorinsky_viscosity_cgrid returns (C·Δ)²·|D| = Δ²·|D| at C=1).
     S_h = smagorinsky_viscosity_cgrid(
@@ -3505,6 +3562,148 @@ def om4p25_lateral_friction_tendency_cgrid(
     bih_u, bih_v = viscous_tendency_cgrid(
         u_star, v_star, grid, c4_h, c4_q,
         mask=mask, u_mask=u_mask, v_mask=v_mask)
+    return lap_u - bih_u, lap_v - bih_v
+
+
+def _h_q_spacings(grid):
+    """dx, dy at h points (n_lat, 1) and q points (n_lat+1, 1) of a lat-lon grid [m]."""
+    R = grid.radius
+    dx_h = (R * jnp.asarray(grid.cos_lat) * grid.dlon)[:, jnp.newaxis]
+    dy_h = jnp.asarray(grid.area) / dx_h                       # exact cell height from the cell area
+    dy_h = dy_h[:, :1]
+    lat = jnp.asarray(grid.lat)
+    dlat = jnp.diff(lat)
+    dy_q = R * jnp.concatenate([dlat[:1], dlat, dlat[-1:]])[:, jnp.newaxis]   # centre to centre; edges copied
+    dx_q = (R * jnp.asarray(grid.cos_lat_v) * grid.dlon)[:, jnp.newaxis]
+    return dx_h, dy_h, dx_q, dy_q
+
+
+def wkb_first_baroclinic_wave_speed(T, S, h_k, active, eos_fn, rho0, g, *, width):
+    """First baroclinic gravity wave speed by the WKB estimate c1 = (1/pi) * integral of N dz
+    (Chelton et al. 1998, J. Phys. Oceanogr. 28, 433), per column [m/s].
+
+    N^2 at each interior interface from the locally referenced density difference of the two
+    adjacent cells at the interface pressure rho0 g z (so compressibility does not enter):
+    N^2 = (g / rho0) (rho(T_k+1, S_k+1, p) - rho(T_k, S_k, p)) / dz, dz the distance between
+    the cell centres.  Unstable or inactive interfaces contribute nothing.  MOM6's OM4 solves
+    the vertical eigenproblem instead (wave_speed); the WKB value differs from it by about
+    10 to 20 percent (Chelton et al. 1998).
+
+    ``width`` (RULE 5, dimensionless, static): N is a C1 ``sqrt(max(N^2, 0))``
+    with its bridge over N^2 below ``width`` times the column's mean |N^2|
+    (MOM6: hard, ``width = 0``).
+    """
+    z_int = jnp.cumsum(h_k, axis=-1)[..., :-1]
+    p = rho0 * g * z_int
+    drho = eos_fn(T[..., 1:], S[..., 1:], p) - eos_fn(T[..., :-1], S[..., :-1], p)
+    dz = 0.5 * (h_k[..., 1:] + h_k[..., :-1])
+    both = (active[..., 1:] & active[..., :-1]).astype(h_k.dtype)
+    N2 = g / rho0 * drho / max_rel(dz, 1.0e-6, width)
+    if width == 0:
+        N = jnp.sqrt(jnp.maximum(N2, 1.0e-30)) * (N2 > 0.0).astype(h_k.dtype)
+    else:
+        ref = (jnp.sum(jnp.abs(N2) * both, axis=-1, keepdims=True)
+               / (jnp.sum(both, axis=-1, keepdims=True) + 1.0))
+        ok = ref > 0                      # an unstratified column has N = 0, as the hard form
+        ref1 = jnp.where(ok, ref, 1.0)
+        N = jnp.where(ok, jnp.sqrt(ref1) * sqrt_c1(stable_div(N2, ref1), width), 0.0)
+    return jnp.sum(N * both * dz, axis=-1) / jnp.pi
+
+
+def om4_resolution_function(c1, grid, mask=None, coef=1.0, gill_equatorial=True, *, width):
+    """MOM6's resolution function with VISC_RES_FN_POWER >= 100 (a step), as in OM4p5
+    (MOM_lateral_mixing_coeffs.F90, calc_resoln_function; Hallberg 2013): R = 0 where
+    (coef c1)^2 > (dx^2 + dy^2)(f^2 + c1 beta*), R = 1 elsewhere, with beta* = 2 |grad f|
+    when ``gill_equatorial`` (GILL_EQUATORIAL_LD), else |grad f|.  c1 at h points; at q
+    points the mean of the wet neighbours, as MOM6.  Returns (R_h (n_lat, n_lon),
+    R_q (n_lat+1, n_lon+1)).  ``width`` (RULE 5): the step is a C1 ramp over
+    ``|A - B| < width (A + B) / 2``, A = (coef c1)^2, B = (dx^2 + dy^2)(f^2 + c1 beta*);
+    ``width = 0`` is MOM6's hard step."""
+    om = grid.omega
+    lat, lat_v = jnp.asarray(grid.lat), jnp.asarray(grid.lat_v)
+    dx_h, dy_h, dx_q, dy_q = _h_q_spacings(grid)
+    k = 2.0 if gill_equatorial else 1.0
+    f_h = (2 * om * jnp.sin(lat))[:, jnp.newaxis]
+    b_h = (k * 2 * om * jnp.cos(lat) / grid.radius)[:, jnp.newaxis]
+    f_q = (2 * om * jnp.sin(lat_v))[:, jnp.newaxis]
+    b_q = (k * 2 * om * jnp.cos(lat_v) / grid.radius)[:, jnp.newaxis]
+    m = jnp.ones_like(c1) if mask is None else mask.astype(c1.dtype)
+    def step(c, dx, dy, f, b):
+        A, B = (coef * c) ** 2, (dx ** 2 + dy ** 2) * (f ** 2 + c * b)
+        return 1.0 - step_rel(A - B, A + B, width)
+    R_h = step(c1, dx_h, dy_h, f_h, b_h) * m
+    cp = jnp.pad(c1 * m, 1, mode="edge")
+    mp = jnp.pad(m, 1, mode="edge")
+    num = cp[:-1, :-1] + cp[1:, :-1] + cp[:-1, 1:] + cp[1:, 1:]
+    den = mp[:-1, :-1] + mp[1:, :-1] + mp[:-1, 1:] + mp[1:, 1:]
+    c1_q = num / jnp.maximum(den, 1.0)
+    R_q = step(c1_q, dx_q, dy_q, f_q, b_q)
+    return R_h, R_q
+
+
+def _om4_mom6_tendency(u, v, grid, *, C2, Cu2, C4, Cu4, Kh_sin_lat, Kh_sin_power, bound_coriolis_vel,
+                       resolution_fn, bound_coef, dt, mask=None, u_mask=None, v_mask=None,
+                       nu2_sponge_h=None, width):
+    """OM4p5 lateral friction with MOM6's definitions (see om4p25_lateral_friction_tendency_cgrid)."""
+    S_h = smagorinsky_viscosity_cgrid(u, v, grid, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask)  # area_h |D|
+    D_T, D_S = strain_rate_cgrid(u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    S_q = smagorinsky_viscosity_q_cgrid(D_T, D_S, grid, 1.0, mask=mask)                          # area_q |D|
+    A_h = jnp.asarray(grid.area)
+    A_q = vertex_area_1d(grid)
+    nd = S_h.ndim
+
+    def col(x):                       # (n,) or (n, m) -> broadcast against S_h / S_q
+        x = x if x.ndim == 2 else x[:, jnp.newaxis]
+        return x[..., jnp.newaxis] if nd == 3 else x
+
+    D_h = S_h / col(A_h)
+    D_q = S_q / col(A_q)
+    dx_h, dy_h, dx_q, dy_q = _h_q_spacings(grid)
+    d2_h = col(2.0 * dx_h ** 2 * dy_h ** 2 / (dx_h ** 2 + dy_h ** 2))       # MOM6 grid_sp_h2
+    d2_q = col(2.0 * dx_q ** 2 * dy_q ** 2 / (dx_q ** 2 + dy_q ** 2))
+    sin_h = col(jnp.abs(jnp.asarray(grid.sin_lat)))
+    sin_q = col(jnp.abs(jnp.sin(jnp.asarray(grid.lat_v))))
+    R_h, R_q = (col(r) for r in resolution_fn)
+    nu2_h = R_h * max_rel(max_rel(Cu2 * jnp.sqrt(d2_h), Kh_sin_lat * sin_h ** Kh_sin_power, width),
+                          C2 * d2_h * D_h, width)
+    nu2_q = R_q * max_rel(max_rel(Cu2 * jnp.sqrt(d2_q), Kh_sin_lat * sin_q ** Kh_sin_power, width),
+                          C2 * d2_q * D_q, width)
+    sm_h, sm_q = C4 * jnp.ones_like(D_h), C4 * jnp.ones_like(D_q)
+    if bound_coriolis_vel > 0.0:
+        om = grid.omega
+        lat_v = jnp.asarray(grid.lat_v)
+        fq = jnp.abs(2 * om * jnp.sin(lat_v))
+        fmax_h = col(jnp.maximum(fq[:-1], fq[1:]))
+        fmax_q = col(fq)
+        k = 1.0 / (5.0 * bound_coriolis_vel ** 2)
+        sm_h = sm_h + d2_h * fmax_h * k * D_h
+        sm_q = sm_q + d2_q * fmax_q * k * D_q
+    nu4_h = max_rel(Cu4 * d2_h ** 1.5, d2_h ** 2 * D_h * sm_h, width)
+    nu4_q = max_rel(Cu4 * d2_q ** 1.5, d2_q ** 2 * D_q * sm_q, width)
+    if bound_coef > 0.0:
+        if dt is None:
+            raise ValueError("bound_coef needs dt")
+        dmin_h = col(jnp.minimum(dx_h, dy_h)) ** 2
+        dmin_q = col(jnp.minimum(dx_q, dy_q)) ** 2
+        nu2_h = min_rel(nu2_h, bound_coef * dmin_h / (8.0 * dt), width)
+        nu2_q = min_rel(nu2_q, bound_coef * dmin_q / (8.0 * dt), width)
+        nu4_h = min_rel(nu4_h, bound_coef * dmin_h ** 2 / (64.0 * dt), width)
+        nu4_q = min_rel(nu4_q, bound_coef * dmin_q ** 2 / (64.0 * dt), width)
+    if nu2_sponge_h is not None:      # CROCO SPONGE_VIS2: added after the caps, no resolution function
+        sp = jnp.asarray(nu2_sponge_h, dtype=nu2_h.dtype)
+        spp = jnp.pad(jnp.pad(sp, ((1, 1), (0, 0)), mode="edge"), ((0, 0), (1, 1)), mode="wrap")
+        sp_q = 0.25 * (spp[:-1, :-1] + spp[:-1, 1:] + spp[1:, :-1] + spp[1:, 1:])   # (n_lat+1, n_lon+1)
+        nu2_h = nu2_h + (sp[..., jnp.newaxis] if nd == 3 else sp)
+        nu2_q = nu2_q + (sp_q[..., jnp.newaxis] if nd == 3 else sp_q)
+    if mask is not None:
+        nu2_h = nu2_h * (mask[..., jnp.newaxis] if nd == 3 else mask)
+        nu4_h = nu4_h * (mask[..., jnp.newaxis] if nd == 3 else mask)
+    lap_u, lap_v = viscous_tendency_cgrid(u, v, grid, nu2_h, nu2_q, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    u_star, v_star = viscous_tendency_cgrid(u, v, grid, 1.0, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask,
+                                            normalize=False)
+    # the two-pass biharmonic has effective coefficient c * area, so c = nu4 / area realises nu4
+    bih_u, bih_v = viscous_tendency_cgrid(u_star, v_star, grid, nu4_h / col(A_h), nu4_q / col(A_q),
+                                          mask=mask, u_mask=u_mask, v_mask=v_mask)
     return lap_u - bih_u, lap_v - bih_v
 
 

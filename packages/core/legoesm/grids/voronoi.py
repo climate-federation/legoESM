@@ -109,6 +109,9 @@ class VoronoiMesh(NamedTuple):
     # ``_f_land``); ``None`` = legacy behaviour, byte-identical.
     subgrid_topo_stddev: jnp.ndarray | None = None   # (nCells,) [m]
     land_frac: jnp.ndarray | None = None             # (nCells,) [0-1]
+    # filtered subgrid-orography std (IFS sigflt, ERA5 SSO_STDH_FILT) for the
+    # IFS VDF turbulent orographic form drag; loaded only for turbulence=ifs_vdf
+    subgrid_topo_filt_stddev: jnp.ndarray | None = None   # (nCells,) [m]
 
     # ------------------------------------------------------------------
     # GridProtocol properties
@@ -1257,12 +1260,31 @@ def prewarm_voronoi_cache(
     return path
 
 
+def _apply_coriolis_alpha(mesh: VoronoiMesh, omega: float,
+                          alpha: float) -> VoronoiMesh:
+    """Replace ``fEdge``/``fVertex`` with the alpha-rotated planet's Coriolis
+    (``rotated_coriolis``); ``alpha == 0`` returns the mesh unchanged."""
+    if alpha == 0.0:
+        return mesh
+    from legoesm.core.williamson_sw_analytic import rotated_coriolis
+
+    def f_at(lon, lat, like):
+        return jnp.asarray(rotated_coriolis(
+            np.asarray(lon, np.float64), np.asarray(lat, np.float64),
+            omega=float(omega), alpha=float(alpha)), dtype=like.dtype)
+
+    return mesh._replace(
+        fEdge=f_at(mesh.lonEdge, mesh.latEdge, mesh.fEdge),
+        fVertex=f_at(mesh.lonVertex, mesh.latVertex, mesh.fVertex))
+
+
 def create_voronoi_mesh(
     subdivision_level: int,
     radius: float = constants.R_earth,
     lloyd_iterations: int = 50,
     omega: float = constants.Omega,
     density_fn=None,
+    coriolis_alpha: float = 0.0,
 ) -> VoronoiMesh:
     """Create a centroidal Voronoi tessellation (SCVT) on the sphere.
 
@@ -1281,6 +1303,10 @@ def create_voronoi_mesh(
         Number of Lloyd relaxation iterations. Default: 50.
     omega : float
         Rotation rate [rad/s]. Default: Earth rotation.
+    coriolis_alpha : float
+        Rotation-axis tilt [rad] for the DCMIP 2008 / Williamson-1992 rotated
+        tests (``fEdge``/``fVertex`` = ``2 omega S``, see ``rotated_coriolis``).
+        Default ``0.0`` leaves the mesh bit-identical.
     density_fn : callable(lat, lon) -> float, optional
         Relative mesh-density function (``lat``, ``lon`` in radians; larger =>
         finer cells).  When provided, the Lloyd relaxation is **density-weighted**
@@ -1325,7 +1351,7 @@ def create_voronoi_mesh(
             subdivision_level, radius, lloyd_iterations, omega)
         cached = _load_voronoi_cache(cache_path)
         if cached is not None:
-            return cached
+            return _apply_coriolis_alpha(cached, omega, coriolis_alpha)
 
     _lock_path = None
     if _big:
@@ -1413,7 +1439,7 @@ def create_voronoi_mesh(
             os.unlink(_lock_path)
         except FileNotFoundError:
             pass
-    return mesh
+    return _apply_coriolis_alpha(mesh, omega, coriolis_alpha)
 
 
 # ============================================================================
@@ -2204,6 +2230,21 @@ def reconstruct_cell_velocity_wet(u_edge, mesh, wet_edge):
     return u_east, v_north
 
 
+def _owner_cell_values(mesh, *fields):
+    """Halo rows replaced by their owners' values, under an armed multi-rank
+    Voronoi MPI layout whose local mesh is ``mesh``; ``None`` entries pass
+    through, and without such a layout (serial, one rank, a global mesh) the
+    fields are returned unchanged.  docs/85 13.34: the physics of a halo copy
+    of a column can differ from its owner's in the last bits, and the cut edges
+    then carried that difference into the surface winds."""
+    from legoesm.parallel.voronoi_mpi import get_matching_voronoi_layout
+    lay = get_matching_voronoi_layout(mesh)
+    if lay is None or lay.n_ranks < 2:
+        return fields
+    ex = lay.halo_exchange.exchange_cell_field
+    return tuple(None if f is None else ex(f) for f in fields)
+
+
 def cell_vector_to_edge_normal(du_cell, dv_cell, mesh, dp_cell=None):
     """Project cell-centred vector components onto the MPAS edge normals.
 
@@ -2219,7 +2260,14 @@ def cell_vector_to_edge_normal(du_cell, dv_cell, mesh, dp_cell=None):
     (exact on hybrid levels with differing surface pressures; the plain
     average only conserves on pure sigma).  ``None`` keeps the plain average
     bit for bit.
+
+    Under a multi-rank Voronoi MPI layout whose local mesh is ``mesh``, the
+    halo rows of the inputs are first replaced by the owning rank's values
+    (:func:`_owner_cell_values`), so an edge on the partition cut averages the
+    owners' tendencies (and layer masses) exactly as the serial projection
+    does, whatever the physics computed on the halo copy of a column.
     """
+    du_cell, dv_cell, dp_cell = _owner_cell_values(mesh, du_cell, dv_cell, dp_cell)
     c0 = mesh.cellsOnEdge[0]  # (nEdges,)
     c1 = mesh.cellsOnEdge[1]  # (nEdges,)
     if dp_cell is None:

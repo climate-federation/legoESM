@@ -26,37 +26,6 @@ def _rel_drift(m0: float, m1: float) -> float:
     return abs(m1 - m0) / max(abs(m0), 1.0)
 
 
-def test_nh_mass_conservation_cubed_sphere():
-    """Cubed-sphere NH (iter-7): anchored dry-mass via
-    ``CompressibleEulerConfig.fix_mass=True, anchor_mass_to_initial=True``.
-    """
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
-        CDGridCompressibleEulerModel,
-        CDGridCompressibleEulerConfig,
-    )
-    from tests.test_cases.dcmip2025 import dcmip25_tc1_init
-    from legoesm.core.conservation import compute_nh_dry_mass
-
-    grid = create_cubed_sphere(12)
-    state, hcoord, tmetric = dcmip25_tc1_init(grid, n_levels=10)
-    cfg = CDGridCompressibleEulerConfig(
-        n_acoustic_substeps=10, semi_implicit_acoustic=True,
-        fix_mass=True, anchor_mass_to_initial=True,
-    )
-    model = CDGridCompressibleEulerModel(grid, hcoord, tmetric, cfg)
-
-    def _mass(s):
-        return float(compute_nh_dry_mass(
-            s.rho_prime.data, hcoord, tmetric, grid,
-        ))
-
-    m0 = _mass(state)
-    for _ in range(N_STEPS):
-        state = model.step(state, 5.0)
-    assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
-
-
 def test_nh_mass_conservation_mpas():
     """MPAS NH (iter-8): new ``compute_nh_dry_mass_mpas`` +
     ``fix_mass_nonhydrostatic_mpas`` in ``core/conservation.py``.
@@ -117,36 +86,6 @@ def test_nh_mass_conservation_spectral():
 # ---------------------------------------------------------------------------
 # iter-34: long-run drift check (parallel to iter-33 hydro PE / iter-34 SW).
 # ---------------------------------------------------------------------------
-
-def test_long_run_nh_mass_conservation_cubed_sphere():
-    """100-step cube NH: anchored dry mass must NOT random-walk."""
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
-        CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
-    )
-    from tests.test_cases.dcmip2025 import dcmip25_tc1_init
-    from legoesm.core.conservation import compute_nh_dry_mass
-
-    grid = create_cubed_sphere(12)
-    state, hcoord, tmetric = dcmip25_tc1_init(grid, n_levels=10)
-    cfg = CDGridCompressibleEulerConfig(
-        n_acoustic_substeps=10, semi_implicit_acoustic=True,
-        fix_mass=True, anchor_mass_to_initial=True,
-    )
-    model = CDGridCompressibleEulerModel(grid, hcoord, tmetric, cfg)
-
-    def _mass(s):
-        return float(compute_nh_dry_mass(
-            s.rho_prime.data, hcoord, tmetric, grid,
-        ))
-
-    m0 = _mass(state)
-    for _ in range(100):
-        state = model.step(state, 5.0)
-    drift = _rel_drift(m0, _mass(state))
-    assert drift < 1e-12, (
-        f"cube NH 100-step dry-mass drift {drift:.2e} exceeds 1e-12"
-    )
 
 
 def test_long_run_nh_mass_conservation_mpas():

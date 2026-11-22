@@ -69,13 +69,13 @@ def lat_v_interfaces(grid):
 # PPM reconstruction for lat-lon grid
 # ==============================================================================
 
-def _ppm_reconstruct_lon(q_pad_h2, limiter=True):
+def _ppm_reconstruct_lon(q_pad_h3, limiter=True):
     """PPM reconstruction in the longitude direction.
 
     Parameters
     ----------
-    q_pad_h2 : jax.Array, shape (n_lat+4, n_lon+4)
-        Scalar padded with halo=2.
+    q_pad_h3 : jax.Array, shape (n_lat+6, n_lon+6)
+        Scalar padded with halo=3.
     limiter : bool
         Apply Colella-Woodward limiter.
 
@@ -85,18 +85,20 @@ def _ppm_reconstruct_lon(q_pad_h2, limiter=True):
         Left and right states at longitude interfaces.
     """
     # Strip latitude halo, keep longitude halo
-    q = q_pad_h2[2:-2, :]  # (n_lat, n_lon+4)
+    q = q_pad_h3[3:-3, :]  # (n_lat, n_lon+6)
 
-    # Transpose so axis=-2 is the longitude direction: (n_lon+4, n_lat)
-    q_t = q.T  # (n_lon+4, n_lat)
+    # Transpose so axis=-2 is the longitude direction.
+    q_t = q.T  # (n_lon+6, n_lat)
 
-    # Edge values: (n_lon+3, n_lat)
-    q_hat_t = ppm_edge_values(q_t)
+    # halo=3: the outermost edges are 2nd-order and are dropped, so every face
+    # state (incl. the limiter on the outermost used cells) is 4th-order and
+    # identical on both sides of the periodic seam and of any parallel cut.
+    q_hat_t = ppm_edge_values(q_t)[1:-1, :]  # (n_lon+3, n_lat)
 
     # Parabola for interior cells
     a_L_t = q_hat_t[:-1, :]   # (n_lon+2, n_lat)
     a_R_t = q_hat_t[1:, :]
-    q_c_t = q_t[1:-1, :]      # (n_lon+2, n_lat)
+    q_c_t = q_t[2:-2, :]      # (n_lon+2, n_lat)
 
     if limiter:
         a_L_t, a_R_t = ppm_limit(q_c_t, a_L_t, a_R_t)
@@ -108,13 +110,13 @@ def _ppm_reconstruct_lon(q_pad_h2, limiter=True):
     return q_left_t.T, q_right_t.T  # each (n_lat, n_lon+1)
 
 
-def _ppm_reconstruct_lat(q_pad_h2, limiter=True):
+def _ppm_reconstruct_lat(q_pad_h3, limiter=True):
     """PPM reconstruction in the latitude direction.
 
     Parameters
     ----------
-    q_pad_h2 : jax.Array, shape (n_lat+4, n_lon+4)
-        Scalar padded with halo=2.
+    q_pad_h3 : jax.Array, shape (n_lat+6, n_lon+6)
+        Scalar padded with halo=3.
     limiter : bool
         Apply Colella-Woodward limiter.
 
@@ -124,14 +126,17 @@ def _ppm_reconstruct_lat(q_pad_h2, limiter=True):
         Left and right states at latitude interfaces.
     """
     # Strip longitude halo, keep latitude halo
-    q = q_pad_h2[:, 2:-2]  # (n_lat+4, n_lon)
+    q = q_pad_h3[:, 3:-3]  # (n_lat+6, n_lon)
 
-    # axis=-2 is already latitude: (n_lat+4, n_lon)
-    q_hat = ppm_edge_values(q)  # (n_lat+3, n_lon)
+    # axis=-2 is already latitude.
+    # halo=3: the outermost edges are 2nd-order and are dropped, so every face
+    # state (incl. the limiter on the outermost used cells) is 4th-order and
+    # identical on both sides of the periodic seam and of any parallel cut.
+    q_hat = ppm_edge_values(q)[1:-1, :]  # (n_lat+3, n_lon)
 
     a_L = q_hat[:-1, :]   # (n_lat+2, n_lon)
     a_R = q_hat[1:, :]
-    q_c = q[1:-1, :]      # (n_lat+2, n_lon)
+    q_c = q[2:-2, :]      # (n_lat+2, n_lon)
 
     if limiter:
         a_L, a_R = ppm_limit(q_c, a_L, a_R)
@@ -170,8 +175,10 @@ def fv_flux_divergence_latlon(q, u, v, grid, limiter=True):
     R = grid.radius
     dlon = grid.dlon
 
-    # Pad with halo=2
-    q_pad = pad_halo_latlon(q, halo=2)
+    if q.shape[0] < 3:
+        raise ValueError(f"lat-lon PPM needs n_lat >= 3 (halo=3); got {q.shape[0]}.")
+    # Scalar halo=3 for PPM (see _ppm_reconstruct_lon); velocities need 2.
+    q_pad = pad_halo_latlon(q, halo=3)
     u_pad, v_pad = pad_halo_vector_latlon(u, v, halo=2)
 
     # --- Longitude flux ---
@@ -337,8 +344,10 @@ def cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter=True):
     R = grid.radius
     dlon = grid.dlon
 
-    # Pad scalar with halo=2 for PPM reconstruction
-    q_pad = pad_halo_latlon(q, halo=2)
+    if q.shape[0] < 3:
+        raise ValueError(f"lat-lon PPM needs n_lat >= 3 (halo=3); got {q.shape[0]}.")
+    # Pad scalar with halo=3 for PPM reconstruction (see _ppm_reconstruct_lon)
+    q_pad = pad_halo_latlon(q, halo=3)
 
     # --- Longitude flux ---
     q_L_lon, q_R_lon = _ppm_reconstruct_lon(q_pad, limiter)  # (n_lat, n_lon+1)

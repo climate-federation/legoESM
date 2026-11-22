@@ -84,6 +84,7 @@ import numpy as np
 # OMIP ran unconditional fp64).  x64 is enabled at import (above) so the
 # fp64/mixed accumulate+control roles stay exact regardless of mode;
 # apply_precision installs the per-module mixed overrides when requested.
+from legoesm.core.bulk_flux import VALID_UNSTABLE_SCHEMES  # noqa: E402
 from legoesm.ocean.physics.lateral_mixing.config import (
     GMRediConfig,
     VisbeckConfig,
@@ -221,6 +222,9 @@ def build_vertical_mixing_config_from_args(
             enable_langmuir=args.langmuir,
             langmuir_coeff=args.langmuir_coeff,
             langmuir_number_default=args.langmuir_number_default,
+            vt2_velocity_scale=args.kpp_vt2_velocity_scale,
+            actual_buoyancy_flux=args.kpp_actual_buoyancy_flux,
+            gradient_surrogates=args.kpp_gradient_surrogates,
         ),
         iwm=build_iwm_config_from_args(args),
         ddm=build_ddm_config_from_args(args),
@@ -271,6 +275,8 @@ def build_iwm_config_from_args(args) -> "IWMConfig":
         power_sho_wm2=args.iwm_power_sho,
         scale_bot_m=args.iwm_scale_bot,
         scale_cri_m=args.iwm_scale_cri,
+        n2_mode=getattr(args, "iwm_n2_mode", None) or _DEFAULT_IWM_CONFIG.n2_mode,
+        n2_eos_form=getattr(args, "iwm_n2_eos_form", None) or _DEFAULT_IWM_CONFIG.n2_eos_form,
     )
 
 
@@ -527,7 +533,8 @@ def parse_args(argv: list[str] | None = None):
                         "mixing configs, e.g. KPPConfig). (issue #691)")
     p.add_argument("--surface-stability-scheme", default="dyer1974",
                    choices=["dyer1974", "beljaars_holtslag1991",
-                            "grachev2007_sheba", "gryanik2020"],
+                            "grachev2007_sheba", "gryanik2020", "gfs",
+                            "wrf_revmm5", "mynn_sfc", "most_revisit_j3"],
                    help="Stable-regime (zeta>0) MOST similarity functions for "
                         "the air-sea (CouplerConfig, LY09 bulk) AND air-ice "
                         "(SeaIceConfig) turbulent fluxes. 'dyer1974' (default) "
@@ -537,7 +544,17 @@ def parse_args(argv: list[str] | None = None):
                         "SHEBA; 'beljaars_holtslag1991' avoids stable flux "
                         "collapse. Unstable branch stays Businger-Dyer "
                         "(heat scaled by Pr0 = 0.98 for gryanik2020, as in "
-                        "SurfaceFluxes.jl).")
+                        "SurfaceFluxes.jl) unless --surface-unstable-scheme "
+                        "is set.")
+    p.add_argument("--surface-unstable-scheme", default="native",
+                   choices=list(VALID_UNSTABLE_SCHEMES),
+                   help="Unstable-regime (zeta<0) MOST form for the air-sea "
+                        "and air-ice fluxes, independent of "
+                        "--surface-stability-scheme. 'native' (default, "
+                        "byte-identical) = the bulk scheme's own form; "
+                        "'businger_dyer' or 'coare3' force that form (with "
+                        "gryanik2020 an explicit choice scales the unstable "
+                        "heat function by Pr0=0.98 so phi_h is continuous).")
     p.add_argument("--grid", type=str, default="all",
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,
@@ -773,7 +790,7 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--water-type", type=str, default="II",
                    choices=["I", "IA", "IB", "II", "III"])
     p.add_argument("--sw-penetration", type=str, default="auto",
-                   choices=["auto", "jerlov_2band", "sweeney_2band"],
+                   choices=["auto", "jerlov_2band", "sweeney_2band", "ohlmann_2003"],
                    help=("Column shortwave scheme on the JRA55 MPAS/tripole lanes: "
                          "'auto' = the lanes' historical two-band type-II with the "
                          "0.94 skin split (byte-identical); 'jerlov_2band' = two-band "
@@ -781,7 +798,13 @@ def parse_args(argv: list[str] | None = None):
                          "two-band (needs --chl-clim; 0.54 of the NET shortwave "
                          "penetrates). Explicit schemes hand the forcing the "
                          "post-albedo shortwave, as FESOM2 does; sweeney_2band "
-                         "also deposits the surface part on the live top thickness."))
+                         "also deposits the surface part on the live top thickness; "
+                         "'ohlmann_2003' = Ohlmann (2003) chlorophyll double "
+                         "exponential (tripole lane; needs --chl-clim)."))
+    p.add_argument("--sw-skin-fraction", type=float, default=None,
+                   help=("Tripole lane: fraction of the net shortwave 'jerlov_2band' keeps in the "
+                         "surface cell (default: the kernel's 0.06; 0 = all through "
+                         "the two-band profile, as ROMS/CROCO)."))
     p.add_argument("--chl-clim", type=str, default=None,
                    help=("Monthly surface chlorophyll climatology (Sweeney 2005 "
                          "NetCDF, variable 'chl', 12 x 180 x 360 on the forcing-cache "
@@ -811,6 +834,18 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--langmuir-number-default", type=float,
                    default=_DEFAULT_KPP_CONFIG.langmuir_number_default,
                    help="Fallback turbulent Langmuir number (no Stokes-drift input)")
+    p.add_argument("--kpp-vt2-velocity-scale", type=str,
+                   default=_DEFAULT_KPP_CONFIG.vt2_velocity_scale,
+                   choices=["column", "candidate"],
+                   help="KPP velocity scale inside the unresolved shear V_t^2: "
+                        "'column' (default) or 'candidate' (CVMix/MOM6 form)")
+    p.add_argument("--kpp-actual-buoyancy-flux", action="store_true",
+                   help="KPP velocity scales from the actual surface buoyancy "
+                        "flux (no float32-epsilon floor; CVMix form)")
+    p.add_argument("--kpp-gradient-surrogates", action="store_true",
+                   help="KPP: logistic-blend backward pass through the "
+                        "boundary-layer-base and convective switches (forward "
+                        "unchanged; gradient is a surrogate, not the exact derivative)")
     p.add_argument("--kpp-k-max", type=float,
                    default=_DEFAULT_KPP_CONFIG.K_max,
                    help="KPP maximum diffusivity [m^2/s]")
@@ -871,6 +906,12 @@ def parse_args(argv: list[str] | None = None):
                    help="Enable internal wave-driven mixing (NEMO zdfiwm; "
                         "additive avt/avm through the implicit vertical "
                         "solve; requires implicit vertical mixing).")
+    p.add_argument("--iwm-n2-mode", choices=("insitu", "nemo_bn2"), default=None,
+                   help="N^2 the zdfiwm formula reads: nemo_bn2 (default since "
+                        "2026-10-06; NEMO rn2, zdfiwm.F90:185-211) or insitu "
+                        "(old behaviour).")
+    p.add_argument("--iwm-n2-eos-form", choices=("seos", "teos10"), default=None,
+                   help="alpha/beta for nemo_bn2 (default teos10 = ORCA1).")
     p.add_argument("--iwm-mevar", action="store_true",
                    help="zdfiwm ln_mevar: variable mixing efficiency "
                         "(ORCA1 oracle: off).")
@@ -1356,7 +1397,7 @@ def _build_runoff_map_for_run(args, grid, grid_type, ocean_mask):
 
     # Build with a REAL record so ``unrouted_fraction`` is the discharge this
     # run actually fails to place, not the 0.0 a missing reference returns.
-    ref = _mean_runoff_record(args)
+    ref = _mean_runoff_record(args, grid if grid_type == "latlon" else None)
     rmap = build_runoff_map(
         mask, area, lat_c, lon_c,
         radius_m=float(args.runoff_radius_km) * 1.0e3,
@@ -1381,7 +1422,7 @@ def _build_runoff_map_for_run(args, grid, grid_type, ocean_mask):
     return rmap
 
 
-def _mean_runoff_record(args):
+def _mean_runoff_record(args, latlon_grid=None):
     """TIME-MEAN ``friver`` over the whole JRA55-do cache, or ``None``.
 
     Used only to report how much discharge the routing radius fails to place;
@@ -1410,9 +1451,20 @@ def _mean_runoff_record(args):
                 ds["friver"].isel(time=slice(i0, min(i0 + chunk, n_rec)
                                              )).values,
                 dtype=np.float64).sum(axis=0)
+        lat_src, lon_src = np.asarray(ds["lat"]), np.asarray(ds["lon"])
     finally:
         ds.close()
-    return acc / n_rec
+    acc = acc / n_rec
+    if latlon_grid is not None:
+        # the same remap the forcing loaders apply, so the routing budget describes the
+        # discharge the model actually receives
+        rw = latlon_forcing_regrid_weights(
+            lat_src, lon_src, np.rad2deg(np.asarray(latlon_grid.lat, dtype=np.float64)),
+            np.rad2deg(np.asarray(latlon_grid.lon, dtype=np.float64)), what="JRA55-do cache")
+        if rw is not None:
+            from legoesm.grids.regridding import regrid_scalar
+            acc = np.asarray(regrid_scalar(jnp.asarray(acc), rw))
+    return acc
 
 
 def _load_core2_runoff_static(path, regrid_weights, cache_lat, cache_lon) -> np.ndarray:
@@ -1751,11 +1803,13 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   forcing_mode: str = "restoring",
                   use_conservation_fixer: bool = True,
                   dz_ref_override=None, t_depth_ref_override=None,
+                  attach_nemo_ladders=False,
                   spmd_n_devices: int = 0,
                   mpas_lloyd: int = 50,
                   mpas_k_zeta_bih: float | None = None,
                   sw_scheme: str = "auto",
-                  B_h_gamma0: float | None = None):
+                  B_h_gamma0: float | None = None,
+                  sw_skin_fraction: float | None = None):
     """Create grid, z_coord, config, model for any grid type.
 
     ``spmd_n_devices > 1`` (MPAS only, ``--enable-mpas-spmd``) reorders + pads
@@ -1793,6 +1847,23 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         z_coord = create_z_star_from_thicknesses(
             dz_ref_override, t_depth_ref_override,
             nemo_e3w_source="depth_difference")
+        if attach_nemo_ladders:
+            # The literal zdftke step reads raw NEMO gdept_0/gdepw_0/e3t_0 at
+            # step entry. Attach the coordinate's OWN 1-D ladders as those
+            # fields (T depths as built, W depths with the surface zero, the
+            # reference thicknesses) so the run's geometry is unchanged: the
+            # only difference from the same card without the flag is the TKE
+            # step. The vertical file carries no gdepw_1d, and reading the
+            # mesh's ladders instead would move every T point by 1-7 cm.
+            _t_ref = z_coord.t_depth_ref
+            _gdept = np.asarray(-z_coord.z_full_ref if _t_ref is None else _t_ref,
+                                dtype=np.float64)
+            z_coord = create_z_star_from_thicknesses(
+                dz_ref_override, t_depth_ref_override,
+                nemo_e3w_source="depth_difference",
+                nemo_gdept_0_m=_gdept,
+                nemo_gdepw_0_m=np.asarray(-z_coord.z_half_ref[:-1], dtype=np.float64),
+                nemo_e3t_0_m=np.asarray(z_coord.dz_ref, dtype=np.float64))
     elif use_bathymetry:
         # Partial cells with ETOPO: use the same vertical stretching
         # as the global-overturning production scripts (dz_surface=20,
@@ -2075,7 +2146,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         if forcing_mode == "jra55_do_tropical":
             sf_config = SurfaceForcingConfig(
                 scheme="none", shortwave_scheme=sw_scheme,
-                shortwave_water_type=water_type)
+                shortwave_water_type=water_type,
+                shortwave_skin_fraction=sw_skin_fraction)
         else:
             sf_config = SurfaceForcingConfig(
                 scheme="combined",
@@ -2205,7 +2277,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         if forcing_mode == "jra55_do_tropical":
             sf_config = SurfaceForcingConfig(
                 scheme="none", shortwave_scheme=sw_scheme,
-                shortwave_water_type=water_type)
+                shortwave_water_type=water_type,
+                shortwave_skin_fraction=sw_skin_fraction)
         else:
             sf_config = SurfaceForcingConfig(
                 scheme="restoring",
@@ -2488,6 +2561,53 @@ def _apply_restoring(state, grid_type, grid, T_target, S_target, dt, tau_s,
 # Tropical OMIP — JRA55-do forcing path (Item 4 of tropical_omip_plan.md)
 # ===========================================================================
 
+COORD_MATCH_TOL_DEG = 1e-6     # vote 2026-11-11 (author/codex/GLM 3-0)
+
+
+def latlon_forcing_regrid_weights(src_lat, src_lon, mdl_lat, mdl_lon, *, what="forcing",
+                                  tol_deg=COORD_MATCH_TOL_DEG):
+    """``None`` if a lat-lon forcing grid already sits on the model's cell centres, else
+    conservative :class:`RegridWeights` onto them.  Refuses (``ValueError``) a source that is
+    not a regular global lat-lon grid of the model's size, so a mislocated forcing can never be
+    accepted on size alone (resolution changes still need a rebuilt cache, as before)."""
+    from legoesm.grids.regridding import conservative_latlon_regrid_weights
+
+    src_lat = np.asarray(src_lat, np.float64).ravel()
+    src_lon = np.mod(np.asarray(src_lon, np.float64).ravel(), 360.0)
+    mdl_lat = np.asarray(mdl_lat, np.float64).ravel()
+    mdl_lon = np.mod(np.asarray(mdl_lon, np.float64).ravel(), 360.0)
+    if (src_lat.size, src_lon.size) != (mdl_lat.size, mdl_lon.size):
+        raise ValueError(
+            f"{what} grid ({src_lat.size}×{src_lon.size}) does not match model grid "
+            f"({mdl_lat.size}×{mdl_lon.size}). Rebuild the cache with prepare_omip_forcing.py "
+            "at the matching resolution.")
+    for name, c in (("latitude", src_lat), ("longitude", src_lon)):
+        d = np.diff(c)
+        if c.size < 2 or not (np.all(d > 0) and np.allclose(d, d[0], rtol=1e-6, atol=tol_deg)):
+            raise ValueError(f"{what}: {name} is not a regular increasing axis "
+                             f"(first {c[:3].tolist()}, last {c[-2:].tolist()}); refusing it")
+    for name, c in (("model latitude", mdl_lat), ("model longitude", mdl_lon)):
+        if c.size > 1 and not np.all(np.diff(c) > 0):
+            raise ValueError(f"{what}: {name} is not increasing; the lat-lon forcing remap "
+                             "needs increasing model axes")
+    dlon = src_lon[1] - src_lon[0]
+    dlat = src_lat[1] - src_lat[0]
+    if (abs(dlon * src_lon.size - 360.0) > 1e-6 * 360.0
+            or abs(src_lat[0] - 0.5 * dlat + 90.0) > 1e-6
+            or abs(src_lat[-1] + 0.5 * dlat - 90.0) > 1e-6):
+        raise ValueError(f"{what}: not a global lat-lon grid (lon spacing {dlon} x "
+                         f"{src_lon.size}; lat cells {src_lat[0] - 0.5 * dlat}.."
+                         f"{src_lat[-1] + 0.5 * dlat} must span -90..90); refusing it")
+    if (src_lat.shape == mdl_lat.shape and src_lon.shape == mdl_lon.shape
+            and np.abs(src_lat - mdl_lat).max() <= tol_deg
+            and np.abs(((src_lon - mdl_lon + 180.0) % 360.0) - 180.0).max() <= tol_deg):
+        return None
+    rw = conservative_latlon_regrid_weights(src_lat, src_lon, mdl_lat, mdl_lon)
+    if tuple(rw.target_shape) != (mdl_lat.size, mdl_lon.size):
+        raise ValueError(f"{what}: regrid target {rw.target_shape} is not the model grid")
+    return rw
+
+
 def _setup_jra55_forcing_state(args, grid, grid_type,
                                z_coord=None, T_woa=None, S_woa=None):
     """Open the JRA55-do cache and pre-compute per-step constants.
@@ -2576,18 +2696,23 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         lat_2d = jnp.asarray(tgt_lat_rad_2d)
         lon_2d = jnp.asarray(tgt_lon_rad_2d)
     else:
-        # lat-lon: validate cache matches model grid
-        model_n_lat = int(grid.lat.shape[0])
-        model_n_lon = int(grid.lon.shape[0])
-        if (cache_n_lat, cache_n_lon) != (model_n_lat, model_n_lon):
-            raise ValueError(
-                f"JRA55-do cache grid ({cache_n_lat}×{cache_n_lon}) does not "
-                f"match model grid ({model_n_lat}×{model_n_lon}). Rebuild the "
-                "cache with prepare_omip_forcing.py at the matching resolution."
-            )
-        # Build 2-D lat/lon (in radians) for cos_zenith / atm_to_surface.
-        lat_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lat))[:, None])
-        lon_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lon))[None, :])
+        # lat-lon: compare COORDINATES, not just sizes.  The 1-degree caches built by
+        # prepare_omip_forcing.py are centred at lon 0.5..359.5 while the model's cells are
+        # centred at 0..359; matching sizes alone let every lat-lon OMIP run before this check
+        # carry the forcing 0.5 deg east of its true position.  An offset regular global cache
+        # is now regridded conservatively onto the model centres; anything else is refused.
+        regrid_weights = latlon_forcing_regrid_weights(
+            np.asarray(ds["lat"]), np.asarray(ds["lon"]),
+            np.rad2deg(np.asarray(grid.lat, dtype=np.float64)),
+            np.rad2deg(np.asarray(grid.lon, dtype=np.float64)), what="JRA55-do cache")
+        if regrid_weights is not None:
+            print(f"  JRA55 regrid: {cache_n_lat}×{cache_n_lon} cache → model cell centres "
+                  "(conservative; cache centres are offset from the model's)")
+        # 2-D lat/lon in radians for cos_zenith / atm_to_surface.  ``grid.lat``/``grid.lon``
+        # are ALREADY radians (create_latlon_grid); converting them again put every lat-lon
+        # cell inside 1.6 deg of the equator and 6.3 deg east of Greenwich for the sun angle.
+        lat_2d = jnp.asarray(np.asarray(grid.lat, dtype=np.float64)[:, None])
+        lon_2d = jnp.asarray(np.asarray(grid.lon, dtype=np.float64)[None, :])
 
     # Coupler config: LY09 bulk flux with ALL THREE reference heights at 10 m
     # -- the JRA55-do convention.  ``tas``, ``huss`` and ``uas`` in the
@@ -2610,6 +2735,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         z_t_atm=10.0,
         z_q_atm=10.0,
         stability_scheme=args.surface_stability_scheme,
+        unstable_scheme=args.surface_unstable_scheme,
         ocean_albedo=float(getattr(args, "ocean_albedo", 0.06)),
     )
 
@@ -2673,11 +2799,12 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         and S_woa is not None
         and z_coord is not None
     )
-    if getattr(args, "sw_penetration", "auto") == "sweeney_2band":
+    _chl_sw = getattr(args, "sw_penetration", "auto")
+    if _chl_sw in ("sweeney_2band", "ohlmann_2003"):
         if not getattr(args, "chl_clim", None):
-            raise ValueError("--sw-penetration sweeney_2band needs --chl-clim <Sweeney_2005.nc>")
-        if regrid_weights is None:
-            raise ValueError("--sw-penetration sweeney_2band needs the JRA55 regrid "
+            raise ValueError(f"--sw-penetration {_chl_sw} needs --chl-clim <Sweeney_2005.nc>")
+        if regrid_weights is None or grid_type == "latlon":
+            raise ValueError(f"--sw-penetration {_chl_sw} needs the JRA55 regrid "
                              "weights (MPAS / tripole lanes).")
         state["chl_monthly"] = jnp.asarray(_load_monthly_clim_target(
             args.chl_clim, "chl", regrid_weights,
@@ -2686,7 +2813,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
     if getattr(args, "runoff_source", "jra55_friver") == "core2_climatology":
         if not getattr(args, "runoff_file", None):
             raise ValueError("--runoff-source core2_climatology needs --runoff-file <CORE2_runoff.nc>")
-        if regrid_weights is None:
+        if regrid_weights is None or grid_type == "latlon":
             raise ValueError("--runoff-source core2_climatology needs the JRA55 regrid "
                              "weights (MPAS / tripole lanes).")
         state["runoff_static"] = jnp.asarray(_load_core2_runoff_static(
@@ -2700,7 +2827,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         if _sss_kind == "woa_winter":
             pass
         elif _sss_kind == "phc2_monthly":
-            if regrid_weights is None:
+            if regrid_weights is None or grid_type == "latlon":
                 raise ValueError("--sss-restoring-target phc2_monthly needs the "
                                  "JRA55 regrid weights (MPAS / tripole lanes).")
             _monthly = _load_phc2_monthly_sss_target(
@@ -2769,6 +2896,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
             )
         _ice_kw = dict(
             stability_scheme=args.surface_stability_scheme,
+            unstable_scheme=args.surface_unstable_scheme,
             dynamics=_ice_dynamics,
             n_categories=_ice_ncat,
         )
@@ -3020,6 +3148,11 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         - tile_resp.lhflx
     )
 
+    # Route runoff exactly as the block / scan lanes do (static replacement, then the dry-to-wet
+    # plan): this single-step path used to hand the raw cache runoff to the ocean.
+    slc = slc._replace(friver=_route_runoff_stack(
+        slc.friver[None], jra55_state.get("runoff_map"),
+        static=jra55_state.get("runoff_static"))[0])
     fw = jra55_to_freshwater(slc, tile_resp.lhflx, evap=tile_resp.surface_mass_flux)
     sf = OceanSurfaceForcing(
         sw_down=atm.sw_down,
@@ -4835,7 +4968,7 @@ def _join_restart_writer():
 # ``_SLOT_POLICY`` (PR #1444, ``mass_flux_u``/``mass_flux_v`` -> DIAGNOSTIC);
 # this is the older npz lane, which has no such policy table.
 _RESTART_DIAGNOSTIC_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w",
-                             "salt_flux_u_int", "salt_flux_v_int")
+                             "salt_flux_u_int", "salt_flux_v_int", "tbudget")
 
 
 # Restart provenance for the MPAS SPMD lane (module slot: the loop's restart
@@ -5997,6 +6130,20 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
 # Single-grid runner
 # ===========================================================================
 
+def check_shortwave_options(args, grid_type: str) -> None:
+    """Refuse shortwave options the selected lane would never read."""
+    tripole_jra55 = (grid_type == "tripole"
+                     and getattr(args, "forcing_mode", "restoring") == "jra55_do_tropical")
+    sw = getattr(args, "sw_penetration", "auto")
+    if getattr(args, "sw_skin_fraction", None) is not None and (
+            sw != "jerlov_2band" or not tripole_jra55):
+        raise ValueError("--sw-skin-fraction is read only by --sw-penetration "
+                         "jerlov_2band on the tripole lane with jra55_do_tropical forcing")
+    if sw == "ohlmann_2003" and not tripole_jra55:
+        raise ValueError("--sw-penetration ohlmann_2003 is implemented on the "
+                         "tripole lane with jra55_do_tropical forcing only")
+
+
 def run_omip_single(grid_type: str, args) -> dict:
     """Run OMIP simulation on a single grid type."""
     # Apply precision BEFORE any model state is built. Idempotent + safe for
@@ -6117,6 +6264,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     # Restart provenance for THIS run (0 = serial cell order): set for every
     # run so an earlier SPMD run in the same interpreter cannot leak its count.
     _MPAS_SPMD_N_DEVICES[0] = int(_mpas_spmd_nd) if _mpas_spmd_nd > 1 else 0
+    check_shortwave_options(args, grid_type)
     if getattr(args, "B_h_gamma0", None) is not None and grid_type != "tripole":
         raise SystemExit(
             f"--B-h-gamma0 is wired for --grid tripole only (2-D face metrics); "
@@ -6125,6 +6273,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
         sw_scheme=getattr(args, "sw_penetration", "auto"),
+        sw_skin_fraction=getattr(args, "sw_skin_fraction", None),
         B_h_gamma0=getattr(args, "B_h_gamma0", None),
         spmd_n_devices=_mpas_spmd_nd,
         mpas_lloyd=int(getattr(args, "mpas_lloyd", 50)),
@@ -7502,6 +7651,8 @@ def print_summary():
 
 def main():
     args = parse_args()
+    if (getattr(args, "iwm_n2_mode", None) or getattr(args, "iwm_n2_eos_form", None)) and not args.iwm:
+        raise SystemExit("--iwm-n2-mode/--iwm-n2-eos-form need --iwm")
 
     # Route-B multicontroller (jax.distributed cross-process NCCL): initialize
     # the federation BEFORE any device work (model build / device query), or

@@ -404,9 +404,15 @@ alpha_ice_broadband_warm = 0.45     # [-] melting sea-ice broadband (phase-2 ble
 M_dry = M_air * 1e-3            # [kg/mol] = 0.02896546 (CODATA dry air)
 M_o3 = 0.0479982                # [kg/mol] ozone (NIST CODATA / IUPAC)
 M_h2o = M_H2O * 1e-3            # [kg/mol] = 0.01801528 (water)
+M_ch4 = 0.01604246              # [kg/mol] methane (NIST, 16.04246 g/mol)
 
 # Avogadro's number (CODATA 2019 SI redefinition — exact value).
 N_A = 6.02214076e23             # [1/mol] particles per mole
+
+# Dobson unit: molecules per m2 in a 10 um layer at 273.15 K / 101325 Pa
+# (Loschmidt 2.6867811e25 m-3 x 1e-5 m, WMO); kg/m2 per DU of ozone is
+# DU_molec_m2 * M_o3 / N_A (= 2.1415e-5).
+DU_molec_m2 = 2.6867811e20      # [1/m2] per Dobson unit
 
 # Universal gas constant (CODATA 2018 / SI redefinition — exact).
 # Used by biochemistry / photosynthesis (Arrhenius temperature factors)

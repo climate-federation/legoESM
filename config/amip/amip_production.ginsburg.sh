@@ -194,7 +194,7 @@ fi
 # Subgrid orography (see AMIP_SSO above, #1514).  Appended like the Levante
 # twin so an empty AMIP_SSO is an explicit opt-out rather than a silent drop.
 if [[ -n "${AMIP_SSO}" ]]; then
-  AMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
+  AMIP_PATH_FLAGS+=( --default-subgrid-orography-file "${AMIP_SSO}" )
 fi
 if [[ -n "${AMIP_LAND_MASK}" ]]; then
   AMIP_PATH_FLAGS+=( --land-mask-file "${AMIP_LAND_MASK}" )

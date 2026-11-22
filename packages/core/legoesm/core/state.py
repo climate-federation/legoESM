@@ -193,6 +193,29 @@ class HydrostaticTendencies(NamedTuple):
     # when a precipitating module does not (the sum would be incomplete).
     # Appended LAST so no field index moves.
     precip_frozen: Field | None = None
+    # Open-water share of the surface turbulent exchange when the coupler's
+    # ice/lake handback is consumed (P5c): f_ow x the bulk law on the SST,
+    # per grid cell area -- SH/LH [W/m2, +up], water [kg/m2/s, +up], stress
+    # [Pa, on the atmosphere].  The ocean's forcing.  None otherwise.
+    shflx_ow: Field | None = None
+    lhflx_ow: Field | None = None
+    evap_ow: Field | None = None
+    taux_ow: Field | None = None
+    tauy_ow: Field | None = None
+    # Ice tile of the split non-land turbulent exchange (sea_ice_flux_split,
+    # #2573): the bulk law on the prognostic ice skin, per unit ICE area,
+    # SH/LH [W/m2, +up].  The ice skin is charged these.  None otherwise.
+    shflx_ice: Field | None = None
+    lhflx_ice: Field | None = None
+    # Surface stress ON THE SURFACE [Pa, +eastward/northward, CMOR tauu/tauv]:
+    # -(1/g) sum(du/dt dp) of the turbulence momentum tendency, i.e. the
+    # surface flux the scheme applied (no momentum flux at the model top).
+    # Set by the MPAS turbulence bridge only.  Appended LAST.
+    taux_sfc: Field | None = None
+    tauy_sfc: Field | None = None
+    # Convective part of ``precip`` [kg/m^2/s, +into surface] (CMOR prc), set
+    # by the hydrostatic convection bridge.  Appended LAST.
+    precip_conv_sfc: Field | None = None
 
 
 # Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
@@ -231,6 +254,15 @@ MPAS_SFC_DIAG_EXTRA_KEYS = (
     # slot 14: the FROZEN part of the slot-2 precip [kg/m2/s] (F29): the
     # interactive land's snowfall.  Appended at the END, no index moves.
     "precip_frozen",
+    # slots 15-19: the open-water share of the turbulent exchange under the
+    # coupler ice/lake handback (P5c), None otherwise.  Appended at the END.
+    "shflx_ow", "lhflx_ow", "evap_ow", "taux_ow", "tauy_ow",
+    # slots 20-21: the ice tile's turbulent heat fluxes under
+    # sea_ice_flux_split (#2573), None otherwise.  Appended at the END.
+    "shflx_ice", "lhflx_ice",
+    # slots 22-24: surface stress (CMOR tauu/tauv) and convective precip
+    # (CMOR prc).  Appended at the END, no index moves.
+    "taux_sfc", "tauy_sfc", "precip_conv_sfc",
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their

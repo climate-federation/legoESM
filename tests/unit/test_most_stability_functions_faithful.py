@@ -288,8 +288,9 @@ def test_zeta_clip_saturates():
     # otherwise pass unnoticed).
     for sc in _SCHEMES:
         for fn in (psi_m, psi_h):
-            _close(float(fn(_a([50.0]), sc)[0]), float(fn(_a([10.0]), sc)[0]))
-            _close(float(fn(_a([-50.0]), sc)[0]), float(fn(_a([-10.0]), sc)[0]))
+            for w in (0.0, 2.0):  # hard clip and default smooth cap saturate alike
+                _close(float(fn(_a([50.0]), sc, zeta_cap_width=w)[0]), float(fn(_a([10.0]), sc, zeta_cap_width=0.0)[0]))
+                _close(float(fn(_a([-50.0]), sc, zeta_cap_width=w)[0]), float(fn(_a([-10.0]), sc, zeta_cap_width=0.0)[0]))
     # AeroBulk's psi_m_coare/psi_h_coare carry no clip (TURB_COARE3P0 clips
     # zeta at +-50 before calling them): beyond 10 they keep changing.
     for fn in (psi_m_coare, psi_h_coare):
@@ -319,3 +320,11 @@ def test_differentiable_both_branches_all_schemes():
             gh = float(jax.grad(lambda z: psi_h(_a([z]), sc)[0])(z0))
             assert np.isfinite(gm) and abs(gm) > 0.0
             assert np.isfinite(gh) and abs(gh) > 0.0
+
+
+def test_bh91_check_grads_order2_stable():
+    from jax.test_util import check_grads
+    z = _a([0.05, 0.5, 2.0, 6.0])
+    for fn in (psi_m, psi_h):
+        check_grads(lambda x: fn(x, "beljaars_holtslag1991"), (z,), order=2,
+                    modes=("fwd", "rev"))

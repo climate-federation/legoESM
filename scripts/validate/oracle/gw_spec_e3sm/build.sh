@@ -28,7 +28,12 @@ for f in stubs interpolate_data gw_utils vdiff_lu_solver gw_diffusion gw_common 
 done
 gfortran $FF -o gw_spec_oracle stubs.o interpolate_data.o gw_utils.o vdiff_lu_solver.o \
   gw_diffusion.o gw_common.o gw_front.o gw_convect.o gw_oro.o driver.o
+# #2567 negative-divergence probe (neg_div_probe.py): gw_drag_prof called directly.
+cp -f "$HERE/neg_div_driver.F90" .
+gfortran $FF -c neg_div_driver.F90
+gfortran $FF -o gw_neg_div_oracle stubs.o gw_utils.o vdiff_lu_solver.o gw_diffusion.o \
+  gw_common.o neg_div_driver.o
 md5sum gw_utils.F90 gw_common.F90 gw_diffusion.F90 vdiff_lu_solver.F90 gw_front.F90 \
-  gw_convect.F90 gw_oro.F90 interpolate_data.F90 alpha_table.inc oro_closure.inc
+  gw_convect.F90 gw_oro.F90 interpolate_data.F90 alpha_table.inc oro_closure.inc neg_div_driver.F90
 gfortran --version | head -1
 echo BUILD_OK

@@ -39,7 +39,8 @@ _KEYS = ("u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho", "lat", "s
 def _hard_config():
     return LindzenConfig()._replace(
         Fr_sharpness=_HARD, crit_level_sharpness=_HARD, crit_level_floor=0.0,
-        oro_wind_ramp_width=0.0)
+        oro_wind_ramp_width=0.0, umcfac_abs_width=0.0,
+        umcfac_sign_width=0.0, taumin_ramp_width=0.0)
 
 
 def _run(f, cfg, dtype=jnp.float64):
@@ -87,12 +88,14 @@ def test_matches_e3sm_oracle_at_hard_limit(fx):
 # Fr_sharpness=20, crit_level_sharpness=10, crit_level_floor=0.5) vs the E3SM
 # oracle, metric = per-column max|ours - oracle| / max|oracle| (absolute where
 # the oracle column is zero).  Re-measured 2026-10-28 when the smooth min became
-# the p-norm (was the not-C1 sigmoid blend; max du/dt gap 8.2e-4 -> 6.3e-2); a change
+# the p-norm (was the not-C1 sigmoid blend; max du/dt gap 8.2e-4 -> 6.3e-2), and
+# 2026-11-12 when the tendency limiters, dscal, the diffusivity max and the
+# launch Froude cap took the same p (#2241; max du/dt 6.3e-2 -> 6.9e-2); a change
 # to the smooth form or its default widths re-measures these (CLAUDE.md RULE 5).
 _DEFAULT_GAP = {
-    "du_dt": [0.00025224682324714886, 1.2941923183954375e-08, 1.4293265782121547e-06, 6.216649127933697e-14, 0.000996002325335458, 0.0, 0.0, 0.0, 0.002379059227918465, 2.681305787889771e-15, 1.6894567113997192e-13, 6.51031633455175e-08, 0.0, 1.2084562729151554e-15, 0.0, 0.06338664129210661, 0.0],
-    "dv_dt": [0.00025224682324715217, 1.294192319320891e-08, 1.4293265782121543e-06, 6.18279029292457e-14, 0.0009960023253355, 0.0, 0.0, 0.0, 0.002379059227918476, 0.0, 1.6877154494650366e-13, 6.510316334525447e-08, 0.0, 1.1374254150811316e-15, 0.0, 0.0, 0.0],
-    "dT_dt": [0.0001373964283423139, 1.3210267007324489e-08, 5.152346447776124e-07, 6.08111710180267e-14, 0.0009572062091794744, 0.0, 0.0, 0.0, 0.0024931222954599048, 2.8898984562349595e-15, 1.5250742928782515e-13, 2.926512821452726e-08, 0.0, 1.2686059996896405e-15, 0.0, 0.036186619191781795, 0.0],
+    "du_dt": [0.0015308306015508228, 2.7880091882676565e-07, 1.4293265782121547e-06, 1.954518934229601e-12, 0.002770090696297156, 0.0, 0.0, 0.0, 0.043710624954961606, 0.06926269876112019, 0.008008037184430562, 2.3103990138268632e-08, 1.951585698779889e-16, 1.2084562729151554e-15, 0.0, 0.0616808852638401, 0.0],
+    "dv_dt": [0.0015308306015508262, 2.7880091876727905e-07, 1.4293265782121543e-06, 1.9549339344412613e-12, 0.0027700906962970706, 0.0, 0.0, 0.0, 0.04371062495496164, 0.0, 0.00800803718443045, 2.310399017313129e-08, 2.3591933851240266e-16, 1.1374254150811316e-15, 0.0, 0.0, 0.0],
+    "dT_dt": [0.0007020357623388606, 2.8389161866806286e-07, 5.152346447776124e-07, 1.9114121594633273e-12, 0.0028365615668682074, 0.0, 0.0, 0.0, 0.04557777684003496, 0.07284595972826535, 0.007417717791869975, 1.3990818202734741e-08, 1.6835446233617726e-16, 1.2686059996896405e-15, 0.0, 0.035192897961796706, 0.0],
 }
 
 
@@ -145,7 +148,14 @@ def test_gradient_finite_on_oracle_columns(fx, dtype, hard):
 # where the former sigmoid-blend smooth min also failed (non-vacuity of the
 # p-norm form); columns 4 and 8: hard-only kinks.
 _KINKS = ((0, 0.9206140787969848), (4, 1.0525168220622896),
-          (8, 0.984170443965446), (15, 1.1074788765920371))
+          (8, 0.984170443965446), (15, 1.1074788765920371),
+          # #2241 (2026-11-12): hard-limit kinks found by the same scan (all
+          # columns scaled together, bisected) after the limiters, dscal, the
+          # diffusivity max and the launch Froude cap took the p-norm;
+          # check_grads fails at each at the hard limit.
+          (0, 0.8714968467437403), (8, 0.8073682039725143),
+          (8, 0.9555933580154037), (8, 0.974224125668478),
+          (10, 0.8416507585599422), (10, 1.008245370326374))
 
 
 @pytest.mark.parametrize("col,s_star", _KINKS)

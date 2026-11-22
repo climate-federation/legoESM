@@ -117,6 +117,10 @@ class AMIPExperimentConfig(NamedTuple):
     # Faithful CUMASTRN path (BechtoldConfig.use_ifs_ascent); flat schema so
     # the AMIP round-trip carries it across a restart.
     bechtold_use_ifs_ascent: bool = False
+    # OpenIFS 49r1 methane oxidation water source (flat schema, round-trip).
+    ifs_methox: bool = False
+    # OpenIFS 49r1 Cariolle ozone tracer (flat schema, round-trip).
+    ifs_ozone_chem: bool = False
     # IFS Kessler sub-cloud rain evaporation (cuflxn.F90; default ON
     # 2026-07-16) — in the flat schema so round-trips cannot drop it.
     bechtold_use_ifs_subcloud_evap: bool = True
@@ -133,6 +137,7 @@ class AMIPExperimentConfig(NamedTuple):
     bechtold_use_ifs_land_rhebc: bool = True
     bechtold_use_ifs_snow_melt: bool = True
     bechtold_ifs_shallow_nosupply: str = "zero"
+    bechtold_ifs_hard_switches: bool = False
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
     convective_precip_efficiency: float = 0.0
@@ -234,6 +239,7 @@ class AMIPExperimentConfig(NamedTuple):
     zm_land_fraction: str = "required"  # ZM land mask policy: "required" | "none" (aquaplanet)
     zm_transport_cloud_tracers: bool = True  # ZM convtran of carried cloud/precip tracers (CAM6)
     kain_fritsch_variant: str = "smooth"  # KF: "smooth" (default) | "wrf_kfeta" (opt-in WRF port, #2280)
+    positivity_after_zm: bool = False  # column-conserving water borrow right after ZM (where CAM6 runs qneg3)
 
 
 def config_to_dict(config) -> dict:

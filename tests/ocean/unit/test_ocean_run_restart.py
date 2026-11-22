@@ -127,6 +127,8 @@ _SLOT_KIND = {
     "psi": "array", "dpsi": "array", "dpsi_prev": "array",
     "dpsin": "array", "dpsin_prev": "array",
     "bt_hist": "tuple",
+    # store_tracer_budget record: a dict, DIAGNOSTIC by policy, never written.
+    "tbudget": "dict",
 }
 
 
@@ -319,7 +321,7 @@ def _fill_all_slots(state):
         # not written, so a filled one comes back empty and the round-trip
         # would be comparing a state against a different pytree rather than
         # against a lost carry.
-        if name in _CAPTURED_FLUX_SLOTS:
+        if name in _CAPTURED_FLUX_SLOTS or name == "tbudget":
             continue
         kind = _SLOT_KIND[name]
         if kind == "field":
