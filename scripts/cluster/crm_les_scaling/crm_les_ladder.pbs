@@ -38,6 +38,7 @@ set -uo pipefail
 : "${MODES:=strong weak}"
 : "${BOUNDS:=1}"
 : "${CRM_EXTRA:=}"
+: "${TIME_PHYSICS:=1}"  # 0 = weak runs time the dycore only (physics/rank is tile-only)
 : "${PPN_MAX:=128}"   # ranks per node cap (fp64/mixed 64x64x64 tiles need ~5.2 GB/rank)
 : "${LES_DECOMPS:=slab pencil}"
 : "${STRONG_NX:=512}" "${WEAK_NX:=64}" "${CRM_NLEV:=64}" "${LES_NZ:=128}"
@@ -63,7 +64,7 @@ CORES=128
 echo "[ladder] sha=$(git rev-parse HEAD) dirty=$(git status --porcelain --untracked-files=no | wc -l) nodes=$NODES"
 echo "[ladder] RANKS=[$RANKS] MODELS=[$MODELS] PRECISIONS=[$PRECISIONS] MODES=[$MODES]"
 echo "[ladder] LES_DECOMPS=$LES_DECOMPS STRONG_NX=$STRONG_NX WEAK_NX=$WEAK_NX CRM_NLEV=$CRM_NLEV LES_NZ=$LES_NZ"
-echo "[ladder] PPN_MAX=$PPN_MAX WARMUP=$WARMUP TIME_STEPS=$TIME_STEPS WINDOWS=$WINDOWS CRM_EXTRA=[$CRM_EXTRA]"
+echo "[ladder] TIME_PHYSICS=$TIME_PHYSICS PPN_MAX=$PPN_MAX WARMUP=$WARMUP TIME_STEPS=$TIME_STEPS WINDOWS=$WINDOWS CRM_EXTRA=[$CRM_EXTRA]"
 echo "[ladder] XLA_FLAGS=$XLA_FLAGS OUT=$OUT"
 
 # run N PPN CMD... : N ranks, PPN per node, each pinned to one core spread
@@ -112,6 +113,7 @@ for N in $RANKS; do
      for PREC in $PRECISIONS; do
       for MODE in $MODES; do
         if [ "$MODE" = strong ]; then NXY=$STRONG_NX; PHYS=""; else NXY=$WEAK_NX; PHYS=--time-physics; fi
+        [ "$TIME_PHYSICS" = 1 ] || PHYS=""
         COMMON=(--mode "$MODE" --precision "$PREC" --nx "$NXY" --ny "$NXY"
                 --warmup-steps "$WARMUP" --time-steps "$TIME_STEPS"
                 --windows "$WINDOWS")
