@@ -276,4 +276,4 @@ def test_a_file_with_the_legacy_key_gives_the_same_leak(tmp_path, capsys):
     old = _leak_values(mod, _series(old_dir, leak=7.0, key="energy_residual"))
     np.testing.assert_array_equal(old, new)
     np.testing.assert_allclose(new, 7.0, atol=1e-6)
-    assert "legacy key 'energy_residual'" in capsys.readouterr().out
+    assert "legacy key 'energy_residual'" in capsys.readouterr().err

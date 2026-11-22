@@ -22,6 +22,7 @@ References
 
 from __future__ import annotations
 
+import sys
 from typing import NamedTuple
 
 import jax
@@ -47,7 +48,7 @@ def read_toa_minus_dE_dt(series, source: str = "input"):
     if LEGACY_TOA_MINUS_DE_DT_KEY in series:
         print(f"note: {source} uses the legacy key "
               f"'{LEGACY_TOA_MINUS_DE_DT_KEY}' = TOA net minus atmospheric "
-              "dE/dt (not a closure residual)")
+              "dE/dt (not a closure residual)", file=sys.stderr)
         return np.asarray(series[LEGACY_TOA_MINUS_DE_DT_KEY], dtype=float)
     return None
 

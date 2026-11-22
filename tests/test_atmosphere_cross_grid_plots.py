@@ -1305,7 +1305,7 @@ class TestAmipToMatrixFormat:
         header = (tmp_path / "mean_timeseries.csv").read_text().splitlines()[0]
         assert "energy_toa_minus_dE_dt" in header.split(",")
         assert "energy_residual" not in header
-        assert "legacy key 'energy_residual'" in capsys.readouterr().out
+        assert "legacy key 'energy_residual'" in capsys.readouterr().err
 
     def test_converter_produces_matrix_format_files(self, tmp_path):
         """End-to-end: synthetic AMIP outputs → matrix-format outputs."""

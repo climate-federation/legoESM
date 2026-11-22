@@ -720,8 +720,8 @@ def test_read_toa_minus_dE_dt_new_key_legacy_key_and_absent(capsys):
     v = _np.array([0.0, 20.2])
     _np.testing.assert_array_equal(
         read_toa_minus_dE_dt({"energy_toa_minus_dE_dt": v}), v)
-    assert capsys.readouterr().out == ""
+    assert capsys.readouterr().err == ""
     _np.testing.assert_array_equal(
         read_toa_minus_dE_dt({"energy_residual": v}, source="old.npz"), v)
-    assert "old.npz uses the legacy key 'energy_residual'" in capsys.readouterr().out
+    assert "old.npz uses the legacy key 'energy_residual'" in capsys.readouterr().err
     assert read_toa_minus_dE_dt({"energy_dE_dt": v}) is None

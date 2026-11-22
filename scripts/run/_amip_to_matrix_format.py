@@ -254,7 +254,7 @@ def main(out_dir: Path) -> int:
                 and _LEGACY_KEYS.get(src_key) in data.files):
             read_key = _LEGACY_KEYS[src_key]
             print(f"  [_amip_to_matrix_format] note: {npz_path} uses the "
-                  f"legacy key '{read_key}' for '{src_key}'")
+                  f"legacy key '{read_key}' for '{src_key}'", file=sys.stderr)
         if read_key not in data.files:
             continue
         arr = data[read_key]

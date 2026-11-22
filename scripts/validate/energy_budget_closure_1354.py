@@ -37,6 +37,7 @@ the MPAS diagnostic path (or a manual budget built from MPAS CMOR fluxes).
 import argparse
 import glob
 import os
+import sys
 
 import numpy as np
 
@@ -56,7 +57,8 @@ def load_energy_chunks(run_dir):
             src = k
             if k == "toa_minus_dE_dt" and k not in z.files and "residual" in z.files:
                 # Chunks written before the rename stored it as "residual".
-                print(f"note: {f} uses the legacy key 'residual' for {k}")
+                print(f"note: {f} uses the legacy key 'residual' for {k}",
+                      file=sys.stderr)
                 src = "residual"
             if src in z.files:
                 out[k].append(np.asarray(z[src], dtype=np.float64))
