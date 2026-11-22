@@ -23,6 +23,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
     edge_damping_scales,
 )
 from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
+    fct_in_out_sums,
     tracer_horizontal_flux_fct,
 )
 from legoesm.core.field import Field
@@ -106,10 +107,11 @@ def _fct(case, width=1.0e-4, upwind=1.0e-3):
 # relative to max q) at the default.
 _CASES = {"r0": dict(seed=0), "r1": dict(seed=1), "b2": dict(seed=2, band=True),
           "b3": dict(seed=3, band=True)}
-_FCT_GAPS = {"r0": 0.003462651114538273, "r1": 0.0034495215921320995,
-             "b2": 0.006897834757732284, "b3": 0.0037766774293431374}
-_FCT_UNDERSHOOT = {"r0": -1.2379200473059927e-18, "r1": -5.716276279202889e-19,
-                   "b2": -1.9647838550133503e-08, "b3": -2.0417052776945792e-08}
+_FCT_GAPS = {"r0": 0.003462604087337507, "r1": 0.003449479153346413,
+             "b2": 0.00689659509245864, "b3": 0.0037763303124857556}
+# all from the smooth upwind: the smooth limiter with the hard upwind gives 0.0
+_FCT_UNDERSHOOT = {"r0": -8.097241276928989e-19, "r1": -5.697561895741597e-19,
+                   "b2": -1.9647838550013313e-08, "b3": -2.0417052776945792e-08}
 
 
 def _rel_gap(name):
@@ -165,28 +167,51 @@ def test_fct_gradient_at_the_default(kw):
                         eps=1e-11, atol=1e-6, rtol=1e-4)
 
 
-def test_fct_one_sided_derivatives_agree_where_a_flux_reverses():
-    """An antidiffusive flux crossing zero (q2 = q1 on an edge) while the
-    cell's other fluxes sit inside their bands: left and right derivatives of
-    the tendency must agree (an L1 band scale kinked here, codex review)."""
-    q, u, dp, dpe = _fct_case(3, nlev=2, ntr=1, band=True)
-    q = np.asarray(jnp.maximum(q, 1e-4)).copy()
-    patch = np.flatnonzero(np.asarray(MESH.latCell) > 0.6)
-    e = int(np.flatnonzero(np.isin(np.asarray(C1), patch) & np.isin(np.asarray(C2), patch))[0])
-    a, b = int(C1[e]), int(C2[e])
-    q[b] = q[a]                                          # anti_e = 0 on every level
-    q = jnp.asarray(q)
-    t = jnp.zeros_like(q).at[b].set(q[a])                # move q2 through q1
-    r = jnp.asarray(np.random.default_rng(9).standard_normal(q.shape))
+def test_fct_in_out_sums_bound_the_hard_sums_from_above():
+    rng = np.random.default_rng(11)
+    out = jnp.asarray(rng.standard_normal((6, 50)) * np.where(rng.random((6, 50)) < 0.5, 1.0, 1e-5))
+    p_in, p_out = fct_in_out_sums(out, 1.0e-4)
+    h_in, h_out = fct_in_out_sums(out, 0.0)
+    assert bool(jnp.all(p_in >= h_in)) and bool(jnp.all(p_out >= h_out))
+    assert bool(jnp.any(p_in > h_in))                                    # the band acts
+    np.testing.assert_array_equal(h_in, jnp.sum(jnp.maximum(-out, 0.0), axis=0))
+    # codex's case: out = [1, 5e-5, -1e-5] has inflow 1e-5, never less
+    p_in, _ = fct_in_out_sums(jnp.asarray([[1.0], [5e-5], [-1e-5]]), 1.0e-4)
+    assert float(p_in[0]) >= 1e-5
 
-    def f(h):
-        return jnp.sum(r * tracer_horizontal_flux_fct(q + h * t, u, dp, dpe, MESH, DT))
 
-    h = 1e-9
-    right = (float(f(h)) - float(f(0.0))) / h
-    left = (float(f(0.0)) - float(f(-h))) / h
-    assert abs(right - left) <= 1e-3 * max(abs(right), abs(left)), (left, right)
-    assert right != 0.0
+def test_fct_in_out_sums_are_c1_where_a_flux_reverses():
+    """One flux crosses zero while another sits inside its band: left and right
+    derivatives agree (an L1 band scale sum |out| kinks here, codex review)."""
+    base = jnp.asarray([[1.0], [3e-5], [0.0]])
+    t = jnp.asarray([[0.0], [0.0], [1.0]])
+
+    def f(h, sums=fct_in_out_sums):
+        return float(sums(base + h * t, 1.0e-4)[0][0])
+
+    def kink(sums):
+        h = 1e-11
+        right, left = (f(h, sums) - f(0.0, sums)) / h, (f(0.0, sums) - f(-h, sums)) / h
+        return abs(right - left) / max(abs(right), abs(left))
+
+    assert kink(fct_in_out_sums) < 1e-5
+
+    def l1_sums(out, width):            # planted regression: L1 band scale
+        band = width * jnp.sum(jnp.abs(out), axis=0)
+        inside = jnp.abs(-out) < band
+        wb = jnp.where(inside, band, 1.0)
+        part = jnp.where(inside, (-out + wb) ** 2 / (4.0 * wb), jnp.maximum(-out, 0.0))
+        return jnp.sum(part, axis=0), None
+
+    assert kink(l1_sums) > 1e-5
+
+
+def test_fct_smooth_limiter_only_limits_more():
+    """Each smooth piece of the limiter errs toward limiting: with the hard
+    upwind, the default widths keep the update inside the hard bounds."""
+    for name in ("b2", "b3"):
+        q, u, dp, dpe = case = _fct_case(**_CASES[name])
+        assert float((q + DT * _fct(case, 1.0e-4, 0.0)).min()) >= -1e-15 * float(q.max())
 
 
 def test_fct_uniform_stays_uniform_and_mass_closes():

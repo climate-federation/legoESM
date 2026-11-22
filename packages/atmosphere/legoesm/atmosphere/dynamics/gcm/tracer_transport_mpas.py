@@ -242,6 +242,23 @@ class TracerTransportMPASModel(IntegrationMixin):
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
 
+def fct_in_out_sums(out, width):
+    """FCT antidiffusive in/out sums over a cell's edges (axis 0; ``out > 0``
+    leaves the cell) as a C1 positive part from ABOVE: ``(x + W)^2 / 4W`` on
+    ``|x| < W``, exact ``max(x, 0)`` outside, ``W = width`` times the L2 norm of
+    the cell's ``out`` (smooth away from all-zero, where an L1 sum ``|out|``
+    kinks as one flux reverses).  ``width = 0`` is the hard sum."""
+    s2 = jnp.sum(out * out, axis=0)
+    band = width * jnp.where(s2 > 0, jnp.sqrt(jnp.where(s2 > 0, s2, 1.0)), 0.0)
+
+    def part_up(x):
+        inside = jnp.abs(x) < band
+        wb = jnp.where(inside, band, 1.0)
+        return jnp.where(inside, (x + wb) ** 2 / (4.0 * wb), jnp.maximum(x, 0.0))
+
+    return jnp.sum(part_up(-out), axis=0), jnp.sum(part_up(out), axis=0)
+
+
 def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
                                upwind_width_ms=1.0e-3):
     """Flux-form, mass-consistent horizontal tracer tendency with Zalesak FCT.
@@ -265,8 +282,8 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
     ``min(1, R)`` are ``core.smooth`` min/max with a band ``width`` relative
     to the operands (the smooth max is never below the hard one, the min
     never above); the inflow/outflow sums are a C1 positive part from above
-    (``x + positive_part_rel(-x)``, band relative to the L2 norm of the
-    cell's fluxes)
+    (``(x + W)^2 / 4W`` on ``|x| < W``, ``W`` = width times the L2 norm of
+    the cell's fluxes)
     so they over-count; the donor/acceptor factor ramps (``step_rel``,
     ``|anti| < width * a (|q1| + |q2|)/2``) above the smaller of the two
     directions' factors on each side of ``anti = 0``.  Each smooth piece errs
@@ -284,7 +301,7 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
     nlev) and ``dp_edge`` (nEdges, nlev) [Pa]; ``dt`` [s] the step the limiter
     guards (> 0).  Returns (nCells, nlev, ntr).
     """
-    from legoesm.core.smooth import max_rel, min_rel, positive_part_rel, step_rel
+    from legoesm.core.smooth import max_rel, min_rel, step_rel
 
     if isinstance(dt, (int, float)) and not dt > 0:
         raise ValueError(f"tracer_horizontal_flux_fct needs dt > 0 (got {dt!r})")
@@ -323,16 +340,7 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
          * mesh.dvEdge[jnp.maximum(eoc, 0)].astype(q.dtype)
          / mesh.areaCell[None, :].astype(q.dtype))[..., None, None]
     out = w * anti[jnp.maximum(eoc, 0)]
-    # band scale: the cell's L2 norm of its fluxes, smooth away from all-zero
-    # (an L1 sum |out| kinks where one flux crosses zero)
-    s2 = jnp.sum(out * out, axis=0)
-    scale = jnp.where(s2 > 0, jnp.sqrt(jnp.where(s2 > 0, s2, 1.0)), 0.0)
-
-    def part_up(x):   # C1 max(x, 0) from above, x + ppart(-x): over-counts, so limits more
-        return x + positive_part_rel(-x, scale, width)
-
-    p_in = jnp.sum(part_up(-out), axis=0)
-    p_out = jnp.sum(part_up(out), axis=0)
+    p_in, p_out = fct_in_out_sums(out, width)
     # rooms are >= 0: the bounds include q_td and the smooth max (min) is
     # never below (above) the hard one
     room_in = (q_max - q_td) * dp_c / dt
