@@ -439,35 +439,40 @@ def pencil_zwhole_to_spec(fz_local, *, ny_global, n_ranks_x, comm_row):
 def planes_from_blocks(f, *, n_ranks_y, n_ranks_x, comm):
     """One real all-to-all over all ``P = n_ranks_y * n_ranks_x`` ranks:
     physical block ``(ny/Py, nx/Px, nz)`` of rank ``r = ry * Px + rx`` →
-    whole horizontal planes ``(ny, nx, nzl)`` of z-chunk ``r``
+    whole horizontal planes of z-chunk ``r``, LEVEL-MAJOR ``(nzl, ny, nx)``
     (``nzl = ceil(nz / P)``, z zero-padded to ``P * nzl``). The horizontal
-    FFTs never transform z, so after this every 2-D transform is local."""
+    FFTs never transform z, so after this every 2-D transform is local.
+
+    Memory order: the z-minor → level-major change is one plain 2-D
+    transpose of the local block before the exchange; the block shuffle on
+    the receiving side then moves contiguous x-runs only."""
     P = n_ranks_y * n_ranks_x
     nyl, nxl, nz = f.shape
     nzl = -(-nz // P)
     if P * nzl != nz:
         f = jnp.pad(f, ((0, 0), (0, 0), (0, P * nzl - nz)))
-    blocks = jnp.moveaxis(f.reshape(nyl, nxl, P, nzl), 2, 0)  # chunk j -> rank j
-    recv = ad_alltoall(blocks, comm)                          # [i] = rank i's yx block
-    a = recv.reshape(n_ranks_y, n_ranks_x, nyl, nxl, nzl).transpose(0, 2, 1, 3, 4)
-    return a.reshape(n_ranks_y * nyl, n_ranks_x * nxl, nzl)
+    blocks = jnp.transpose(f.reshape(nyl, nxl, P, nzl), (2, 3, 0, 1))  # (P, nzl, nyl, nxl)
+    recv = ad_alltoall(blocks, comm)                  # [i] = rank i's yx block, my z-chunk
+    a = recv.reshape(n_ranks_y, n_ranks_x, nzl, nyl, nxl).transpose(2, 0, 3, 1, 4)
+    return a.reshape(nzl, n_ranks_y * nyl, n_ranks_x * nxl)
 
 
 def blocks_from_planes(p, *, n_ranks_y, n_ranks_x, comm, nz_out):
-    """Inverse of :func:`planes_from_blocks` at any plane size: planes
-    ``(ny, nx, nzl)`` of this rank's z-chunk → block ``(ny/Py, nx/Px,
-    nz_out)`` (z padding dropped)."""
+    """Inverse of :func:`planes_from_blocks` at any plane size: level-major
+    planes ``(nzl, ny, nx)`` of this rank's z-chunk → block
+    ``(ny/Py, nx/Px, nz_out)`` (z padding dropped)."""
     P = n_ranks_y * n_ranks_x
-    ny, nx, nzl = p.shape
+    nzl, ny, nx = p.shape
     if ny % n_ranks_y or nx % n_ranks_x:
         raise ValueError(f"planes {ny}x{nx} not divisible by mesh {n_ranks_y}x{n_ranks_x}")
     if -(-nz_out // P) != nzl:
         raise ValueError(f"nz_out={nz_out} inconsistent with {nzl} planes/rank at P={P}")
     nyl, nxl = ny // n_ranks_y, nx // n_ranks_x
-    blocks = (p.reshape(n_ranks_y, nyl, n_ranks_x, nxl, nzl)
-              .transpose(0, 2, 1, 3, 4).reshape(P, nyl, nxl, nzl))
-    recv = ad_alltoall(blocks, comm)                          # [i] = my block, z-chunk i
-    return jnp.moveaxis(recv, 0, 2).reshape(nyl, nxl, P * nzl)[..., :nz_out]
+    blocks = (p.reshape(nzl, n_ranks_y, nyl, n_ranks_x, nxl)
+              .transpose(1, 3, 0, 2, 4).reshape(P, nzl, nyl, nxl))
+    recv = ad_alltoall(blocks, comm)                  # [i] = my block, z-chunk i
+    out = jnp.transpose(recv, (2, 3, 0, 1)).reshape(nyl, nxl, P * nzl)
+    return out[..., :nz_out]
 
 
 def layout_is_planes(layout):
@@ -507,7 +512,7 @@ def layout_rfft2(f, layout):
                       layout.n_ranks_x)
         p = planes_from_blocks(f, n_ranks_y=layout.n_ranks_y,
                                n_ranks_x=layout.n_ranks_x, comm=layout.comm)
-        return jnp.fft.rfft2(p, axes=(0, 1))
+        return jnp.moveaxis(jnp.fft.rfft2(p, axes=(1, 2)), 0, 2)
     if not layout_is_pencil(layout):
         return distributed_rfft2(f, ny_global=layout.ny_global, nx=layout.nx,
                                  n_ranks=layout.n_ranks, comm=layout.comm)
@@ -521,7 +526,8 @@ def layout_irfft2(fh, layout, nz_out):
     if layout_is_planes(layout):
         if nz_out is None:
             raise ValueError("planes inverse FFT needs the field's nz_out")
-        p = jnp.fft.irfft2(fh, axes=(0, 1), s=(layout.ny_global, layout.nx))
+        p = jnp.fft.irfft2(jnp.moveaxis(fh, 2, 0), axes=(1, 2),
+                           s=(layout.ny_global, layout.nx))
         return blocks_from_planes(p, n_ranks_y=layout.n_ranks_y,
                                   n_ranks_x=layout.n_ranks_x, comm=layout.comm,
                                   nz_out=nz_out)

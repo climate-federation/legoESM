@@ -512,7 +512,9 @@ def _via_planes(op, f, L):
                          f"the 3/2 fine global grid")
     p = planes_from_blocks(f, n_ranks_y=L.n_ranks_y, n_ranks_x=L.n_ranks_x,
                            comm=L.comm)
-    return blocks_from_planes(op(p), n_ranks_y=L.n_ranks_y,
+    # The serial operators take (ny, nx, nz); the planes are level-major.
+    q = jnp.moveaxis(op(jnp.moveaxis(p, 0, 2)), 2, 0)
+    return blocks_from_planes(q, n_ranks_y=L.n_ranks_y,
                               n_ranks_x=L.n_ranks_x, comm=L.comm,
                               nz_out=f.shape[-1])
 
