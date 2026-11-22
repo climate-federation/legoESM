@@ -27,7 +27,7 @@ def countmin(x, mask):
     return int(vals.size), float(vals.min()) if vals.size else None
 
 
-def main():
+def smoothing_main():
     if hasattr(os, "sched_setaffinity") and hasattr(os, "sched_getaffinity"):
         os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:8])
     import jax
@@ -367,6 +367,348 @@ def main():
     (OUT / "probe_sha256.txt").write_text(
         hashlib.sha256(Path(__file__).read_bytes()).hexdigest() + "\n"
     )
+
+
+def paired_column_budget(m, q, dq, dm):
+    """Per-column instantaneous product rule, without a denominator floor."""
+    import numpy as np
+    a, b = np.asarray(m) * np.asarray(dq), np.asarray(q) * np.asarray(dm)
+    if not (np.isfinite(a).all() and np.isfinite(b).all()):
+        raise ValueError("nonfinite model budget; no conservation verdict")
+    numerator = np.abs(np.sum(a + b, axis=-1))
+    denominator = np.sum(np.abs(a) + np.abs(b), axis=-1)
+    relative = np.divide(numerator, denominator, out=np.zeros_like(numerator),
+                         where=denominator != 0)
+    relative = np.where((denominator == 0) & (numerator != 0), np.inf, relative)
+    return {"numerator": numerator.tolist(), "denominator": denominator.tolist(),
+            "max_relative": float(relative.max()),
+            "verdict": "CONSERVES" if np.all(relative <= 1e-12) else "LEAKS"}
+
+
+def all_vertical_paths(out):
+    """T24 preregistered vertical-subsystem census; PBS CPU only.
+
+    Closed lids throughout. Pressure F is positive down; height w positive up.
+    Instantaneous and finite product increments are separate statistics.
+    Native caller observations are made with debug callbacks inside live vmap
+    traces, so no traced arrays are converted to NumPy during tracing.
+    """
+    import inspect
+    import contextlib
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.core.field import Field
+    from legoesm.core.state import TracerState
+    from legoesm.grids import vertical as v
+    from legoesm.grids.gaussian import create_gaussian_grid, sh_analysis_3d
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_mpas as mp
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as ll
+    from legoesm.atmosphere.dynamics.gcm import spectral_pe as sp
+    from legoesm.atmosphere.dynamics.gcm import tracer_transport_mpas as tm
+    from legoesm.atmosphere.dynamics.gcm import tracer_transport_latlon as tl
+    from legoesm.atmosphere.dynamics.gcm import tracer_transport_spectral as ts
+    from legoesm.atmosphere.dynamics.shared import tracer_transport as tc
+
+    assert os.environ.get("PBS_JOBID"), "PBS required"
+    set_policy(PrecisionPolicy.fp64())
+    assert jax.config.x64_enabled and all(d.platform == "cpu" for d in jax.devices())
+    out.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parents[2]
+    modules = (v, mp, ll, sp, tm, tl, ts, tc)
+    sources = {mod.__name__: str(Path(mod.__file__).resolve()) for mod in modules}
+    assert all(Path(path).is_relative_to(root) for path in sources.values()), sources
+    rows = []
+    provenance = {"commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+                  "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                  "PBS_JOBID": os.environ["PBS_JOBID"], "precision": "fp64", "device": "cpu",
+                  "tolerance": 1e-12, "complete": False, "module_sources": sources,
+                  "finite_scale_note": "sum absolute per-layer finite mass increments; exact product difference"}
+    (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+
+    def record(path, scheme, m, q, dq, dm, statistic="instantaneous"):
+        r = paired_column_budget(m, q, dq, dm)
+        assert np.any(np.asarray(r["denominator"]) > 0), f"vacuous route {path}"
+        r.update(path=path, scheme=scheme, statistic=statistic,
+                 boundary_budget=0.0, scope="vertical subsystem; per column")
+        rows.append(r)
+        print(path, scheme, statistic, r["max_relative"], r["verdict"], flush=True)
+        (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
+
+    @contextlib.contextmanager
+    def observe(module, name, path, kind, rho=None, density_mass_tendency=None, tracer_only=False):
+        real = getattr(module, name)
+        sig = inspect.signature(real)
+        observed = []
+
+        def spy(*args, **kwargs):
+            result = real(*args, **kwargs)
+            if tracer_only and not any(f.function in ("_vert_one", "_tracer_tend_one", "<lambda>") for f in inspect.stack()):
+                return result
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            a = list(bound.arguments.values())
+            q = a[0]
+            if kind == "hybrid":
+                F, ps, coord = a[1:4]
+                m, dm = v.dp_from_hybrid(coord, ps), -jnp.diff(F, axis=-1)
+            elif kind == "sigma":
+                F, coord = a[1:3]
+                m, dm = coord.dsigma, -jnp.diff(F, axis=-1)
+            else:
+                w = a[1]
+                if kind == "height":
+                    dz, J = a[2], a[4]
+                else:
+                    dz, J = a[2].dz, a[3]
+                m = rho * dz * J[..., None]
+                F = w
+                dm = density_mass_tendency
+            scheme = kwargs.get("scheme", name)
+
+            def capture(m_, q_, dq_, dm_, flux_):
+                assert np.all(np.asarray(flux_)[..., (0, -1)] == 0), "nonzero boundary flux"
+                observed.append(True)
+                record(path, scheme, m_, q_, dq_, dm_)
+            jax.debug.callback(capture, m, q, result, dm, F, ordered=True)
+            return result
+
+        setattr(module, name, spy)
+        try:
+            yield
+            jax.effects_barrier()
+            assert observed, f"unexecuted route {path}/{name}"
+        finally:
+            setattr(module, name, real)
+
+    h = runpy.run_path(str(root / "tests/unit/test_mpas_atmosphere.py"))
+    mesh = h["_make_mesh"](level=2)
+    coord, ps, F, q = runpy.run_path(str(root / "tests/unit/test_vertical_advection_hybrid_van_leer.py"))["_column"]()
+    dp = v.dp_from_hybrid(coord, ps)
+    for op in (v.vertical_advection_hybrid_sb, v.vertical_advection_hybrid_van_leer,
+               v.vertical_advection_hybrid):
+        record("control", op.__name__, dp, q, op(q, F, ps, coord), -jnp.diff(F))
+    rate = jnp.max(jnp.abs(F[..., 1:-1]) / jnp.minimum(dp[..., :-1], dp[..., 1:]), axis=-1)
+    assert float(jnp.min(rate)) > 0 and float(jnp.min(q[..., 24])) > 0
+    planted = v.vertical_advection_hybrid_sb(q, F, ps, coord).at[..., 24].add(0.01 * q[..., 24] * rate)
+    record("control", "planted", dp, q, planted, -jnp.diff(F))
+    assert [r["verdict"] for r in rows] == ["CONSERVES", "CONSERVES", "LEAKS", "LEAKS"]
+
+    # Hydrostatic native model callers generate their own continuity flux.
+    for c in (coord, v.create_sigma_coordinate(32)):
+        hybrid = isinstance(c, v.HybridSigmaPressureCoordinate)
+        label = "hybrid" if hybrid else "sigma"
+        state = h["_add_perturbation_hydro"](h["_make_hydrostatic_state"](mesh, 32), mesh, 32)
+        T = __import__("legoesm.atmosphere.standard_atmosphere", fromlist=["standard_atmosphere_temperature"]).standard_atmosphere_temperature(mesh.latCell, c.sigma_full)
+        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.driver.config import ExperimentConfig
+        qv = ExperimentConfig().rh_init * saturation_mixing_ratio(T, state.p_s.data[:, None] * c.sigma_full) * c.sigma_full**2
+        state = state._replace(T=state.T.replace(data=T), tracers={"q_v": Field(qv)})
+        name = "vertical_advection_hybrid_van_leer" if hybrid else "vertical_advection"
+        # Observe tracer-only entry: momentum and T use the same sigma binding.
+        real_tracer = mp.mpas_tracer_tendencies
+        def tracer_spy(*a, **kw):
+            with observe(mp, name, "MPAS/" + label, label):
+                return real_tracer(*a, **kw)
+        mp.mpas_tracer_tendencies = tracer_spy
+        try:
+            mp.mpas_model_tendencies(state, mesh, c, mp.MPASPrimitiveEquationConfig())
+        finally:
+            mp.mpas_tracer_tendencies = real_tracer
+
+        grid = create_latlon_grid(8)
+        shape = (grid.n_lat, grid.n_lon, 32)
+        # Existing seeded CAM columns, broadcast over horizontal grid; zero
+        # horizontal winds isolate exactly the vertical subsystem of the caller.
+        ql = jnp.broadcast_to(q[0], shape)
+        fl = jnp.broadcast_to(F[0] if hybrid else F[0] / ps[0], shape[:-1] + (33,))
+        pl = jnp.full(shape[:-1], ps[0])
+        ml = c.layer_thickness_dp(pl)
+        for scheme in ("sb", "van_leer"):
+            name = "vertical_advection_hybrid_" + scheme if hybrid else "vertical_advection"
+            with observe(ll, name, "latlon/" + label + "/" + scheme, label):
+                ll.latlon_tracer_tendencies({"q_v": ql},
+                    jnp.zeros((8, grid.n_lon + 1, 32)), jnp.zeros((9, grid.n_lon, 32)),
+                    jnp.zeros(shape), jnp.zeros(shape), jnp.ones((8, grid.n_lon + 1, 32)),
+                    jnp.ones((9, grid.n_lon, 32)), jnp.zeros(shape), ml, fl, pl,
+                    grid, c, ll.CGridLatLonPrimitiveEquationConfig(tracer_vertical_scheme=scheme), hybrid)
+        gg = create_gaussian_grid(10)
+        sg = (gg.n_lat, gg.n_lon, 32)
+        qg = jnp.broadcast_to(q[0], sg)
+        fs = jnp.broadcast_to(F[0] / ps[0], sg[:-1] + (33,))
+        if not hybrid:
+            with observe(mp, "vertical_advection", "MPAS/sigma/van_leer", "sigma"):
+                mp.mpas_tracer_tendencies(state.tracers, state.u.data, mesh, c,
+                    mp.MPASPrimitiveEquationConfig(vert_advection_scheme="van_leer"),
+                    False, None, jnp.broadcast_to(F[0] / ps[0], (mesh.nCells, 33)),
+                    state.p_s.data, None, None)
+        state_s = sp.isothermal_rest_state_spectral(gg, c, tracers={"q_v": Field(qg)})
+        # Nonzero, vertically varying resolved divergence builds live F.
+        divg = jnp.cos(gg.lat)[:, None, None] * jnp.cos(gg.lon)[None, :, None] * jnp.arange(1, 33)[None, None, :] * 1e-6
+        state_s = state_s._replace(div_hat=state_s.div_hat.replace(data=sh_analysis_3d(gg, divg)))
+        with observe(sp, "vertical_advection_hybrid" if hybrid else "vertical_advection",
+                     "spectral PE/" + label, label):
+            sp.spectral_pe_tendencies(state_s, gg, c, sp.SpectralPEConfig())
+
+    c = v.create_sigma_coordinate(32)
+    def state_q(data):
+        return TracerState(tracers=Field(data[..., None]), time=Field(jnp.array(0.0)))
+    qm = jnp.broadcast_to(q[0], (mesh.nCells, 32))
+    fm = jnp.broadcast_to(F[0] / ps[0], (mesh.nCells, 33))
+    with observe(tm, "vertical_advection", "standalone MPAS/sigma", "sigma"):
+        tm.tracer_advection_tendency(qm[..., None], jnp.zeros((mesh.nEdges, 32)), fm, mesh, c)
+    with observe(tl, "vertical_advection", "standalone latlon/sigma", "sigma"):
+        def wind(t, lon, lat, c):
+            return jnp.zeros(lon.shape + (32,)), jnp.zeros(lon.shape + (32,)), jnp.broadcast_to(F[0] / ps[0], lon.shape + (33,))
+        tl.tracer_tendencies_latlon(state_q(ql), grid, c, wind)
+    with observe(ts, "vertical_advection", "standalone spectral/sigma", "sigma"):
+        def swind(t, g, c):
+            return jnp.zeros(sg), jnp.zeros(sg), fs
+        ts.tracer_tendencies_spectral(state_q(sh_analysis_3d(gg, qg)), gg, c, swind)
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    cg = create_cubed_sphere(4)
+    qc = jnp.broadcast_to(q[0], (6, 4, 4, 32))
+    with observe(tc, "vertical_advection", "standalone cube/sigma", "sigma"):
+        def cwind(t, g, c):
+            return jnp.zeros_like(qc), jnp.zeros_like(qc), jnp.broadcast_to(F[0] / ps[0], (6, 4, 4, 33))
+        tc.tracer_tendencies(state_q(qc), cg, c, cwind)
+
+    # Height native slow caller and full model step (finite product increment).
+    from legoesm.atmosphere.dynamics.gcm import compressible_euler_mpas as nh
+    from legoesm.atmosphere.dynamics.gcm import spectral_nh as sn
+    from legoesm.atmosphere.dynamics.les import compressible_euler_plane as plane
+    from legoesm.atmosphere.dynamics.les import compressible_euler_plane_halo as halo
+    hc = v.create_height_coordinate(10, 30000.0)
+    metric = v.compute_terrain_metric(jnp.zeros(mesh.nCells), hc)
+    ns = h["_make_nh_state"](mesh, hc, metric, 10)
+    profile = q[0, :10] + q[0, 20:30]
+    ww = jnp.sin(jnp.linspace(0, jnp.pi, 11)).at[-1].set(0.0)
+    ns = ns._replace(w=ns.w.replace(data=jnp.broadcast_to(ww, (mesh.nCells, 11))), tracers=ns.tracers.replace(data=jnp.broadcast_to(profile, (mesh.nCells, 10))[..., None]))
+    rho = jnp.broadcast_to(hc.rho_ref, (mesh.nCells, 10))
+    from legoesm.timestepping.split_explicit import SplitExplicitConfig
+    nhcfg = nh.MPASCompressibleEulerConfig()
+    def native_acoustic_mp(dt):
+        return nh.mpas_acoustic_substeps(ns, None, dt, 1, SplitExplicitConfig(), hc, metric, nhcfg)
+    drho = jax.jvp(lambda dt: native_acoustic_mp(dt).rho_prime.data,
+                   (jnp.array(0.0),), (jnp.array(1.0),))[1]
+    dm_nh = drho * hc.dz * metric.jacobian[..., None]
+    with observe(nh, "_vertical_advection_height_1d", "MPAS NH/height", "height", rho, dm_nh, True):
+        nh.mpas_compressible_euler_slow_tendencies(ns, mesh, hc, metric, nh.MPASCompressibleEulerConfig())
+    acoustic = native_acoustic_mp(jnp.array(1.0))
+    assert np.array_equal(acoustic.tracers.data, ns.tracers.data)
+    record("MPAS NH/height", "acoustic-only step; tracers unchanged", 1.0, ns.tracers.data[..., 0],
+           acoustic.rho_prime.data * hc.dz * metric.jacobian[..., None] * ns.tracers.data[..., 0], 0.0, "finite product increment")
+    # Full step is evaluated outside spies; only the native tracer call above
+    # is attributed. No semidiscrete result is promoted to a time-step claim.
+    nn = nh.MPASCompressibleEulerModel(mesh, hc, metric, nh.MPASCompressibleEulerConfig(fix_mass=False)).step(ns, 1.0)
+    m0 = rho * hc.dz * metric.jacobian[..., None]
+    m1 = (hc.rho_ref + nn.rho_prime.data) * hc.dz * metric.jacobian[..., None]
+    record("MPAS NH/height", "full split step", 1.0, ns.tracers.data[..., 0],
+           m1 * nn.tracers.data[..., 0] - m0 * ns.tracers.data[..., 0], 0.0, "finite product increment")
+
+    # Same physical vertical profiles on a Gaussian grid; invoke the real
+    # spectral slow caller and separately its full split step.
+    from legoesm.grids.gaussian import sh_synthesis_3d
+    hcg = hc
+    gm = v.compute_terrain_metric(jnp.zeros((gg.n_lat, gg.n_lon)), hcg)
+    ss = sn.nh_rest_state_spectral(gg, hcg, n_tracers=1)
+    qh = jnp.broadcast_to(profile, (gg.n_lat, gg.n_lon, 10))
+    wh = jnp.broadcast_to(ww, (gg.n_lat, gg.n_lon, 11))
+    ss = ss._replace(w_hat=ss.w_hat.replace(data=sh_analysis_3d(gg, wh)),
+                     tracers_hat=ss.tracers_hat.replace(data=sh_analysis_3d(gg, qh)[..., None]))
+    rh = jnp.broadcast_to(hcg.rho_ref, qh.shape)
+    def native_acoustic_sp(dt):
+        return sn._acoustic_substeps_grid(wh, jnp.zeros_like(qh), jnp.zeros_like(qh),
+                                         dt, 1, hcg, gm, sn.SpectralNHConfig())
+    drho = jax.jvp(lambda dt: native_acoustic_sp(dt)[2],
+                   (jnp.array(0.0),), (jnp.array(1.0),))[1]
+    dm_sn = drho * hcg.dz * gm.jacobian[..., None]
+    with observe(sn, "vertical_advection_height", "spectral NH/height", "height", rh, dm_sn, True):
+        sn.spectral_nh_slow_tendencies(ss, gg, hcg, gm, sn.SpectralNHConfig())
+    record("spectral NH/height", "acoustic-only step; tracers unchanged", 1.0, qh,
+           native_acoustic_sp(jnp.array(1.0))[2] * hcg.dz * gm.jacobian[..., None] * qh, 0.0, "finite product increment")
+    nsn = sn.SpectralCompressibleEulerModel(gg, hcg, gm, sn.SpectralNHConfig()).step(ss, 1.0)
+    qn = sh_synthesis_3d(gg, nsn.tracers_hat.data[..., 0]).real
+    rn = hcg.rho_ref + sh_synthesis_3d(gg, nsn.rho_prime_hat.data).real
+    record("spectral NH/height", "full split step", 1.0, qh,
+           (rn * hcg.dz * qn - rh * hcg.dz * qh) * gm.jacobian[..., None], 0.0, "finite product increment")
+
+    # Native LES local operators are also used on halo columns. Their scope
+    # here is explicitly local, not an MPI horizontal conservation claim.
+    model, ns, pg, hc, metric = runpy.run_path(str(root / "tests/unit/test_plane_nh_tracers.py"))["_setup_with_tracers"](1)
+    qp = jnp.broadcast_to(q[0, 22:26], ns.tracers.data.shape[:-1])
+    wp = jnp.broadcast_to(jnp.sin(jnp.linspace(0, jnp.pi, 5)).at[-1].set(0.0), ns.w.data.shape)
+    ns = ns._replace(w=ns.w.replace(data=wp), tracers=ns.tracers.replace(data=qp[..., None]))
+    rp = jnp.broadcast_to(hc.rho_ref, qp.shape)
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import acoustic_column_kernel
+    def native_acoustic_plane(dt):
+        return acoustic_column_kernel(wp, ns.theta_prime.data, ns.rho_prime.data,
+                    hc, metric.jacobian, dt, model.config.acoustic_off_centering, model.config.g)
+    drho = jax.jvp(lambda dt: native_acoustic_plane(dt)[2],
+                   (jnp.array(0.0),), (jnp.array(1.0),))[1]
+    dm_plane = drho * hc.dz * metric.jacobian[..., None]
+    for mod, label in ((plane, "LES serial"), (halo, "LES halo local")):
+        for name in ("_vertical_advection_plane", "vertical_advection_van_leer_plane"):
+            with observe(mod, name, label, "plane", rp, dm_plane):
+                getattr(mod, name)(qp, wp, hc, metric.jacobian)
+    record("LES serial/height", "acoustic-only step; tracers unchanged", 1.0, qp,
+           native_acoustic_plane(jnp.array(1.0))[2] * hc.dz * metric.jacobian[..., None] * qp, 0.0, "finite product increment")
+    from legoesm.parallel.plane_mpi import make_plane_pencil_layout
+    layout = make_plane_pencil_layout(rank=0, n_ranks=1, n_ranks_y=1, n_ranks_x=1,
+                                      ny_global=pg.ny, nx_global=pg.nx, halo=1)
+    for scheme, name in (("centered", "_vertical_advection_plane"),
+                         ("van_leer", "vertical_advection_van_leer_plane")):
+        cfg = model.config._replace(vertical_tracer_advection=scheme)
+        with observe(plane, name, "LES serial native caller/" + scheme, "plane", rp, dm_plane, True):
+            plane.plane_compressible_euler_slow_tendencies(ns, pg, hc, metric, cfg)
+        with observe(halo, name, "LES halo native caller/" + scheme, "plane", rp, dm_plane, True):
+            halo.plane_compressible_euler_slow_tendencies_halo(ns, pg, hc, metric, cfg, layout)
+    nn = model.step(ns, 1.0)
+    record("LES serial/height", "full split step", 1.0, qp,
+           ((hc.rho_ref + nn.rho_prime.data) * hc.dz * nn.tracers.data[..., 0] - rp * hc.dz * qp) * metric.jacobian[..., None],
+           0.0, "finite product increment")
+
+    # Finite remap: the live FV3 Lagrangian-to-Eulerian kernel, fixture and
+    # physical window used by its existing per-tracer conservation gate.
+    f = runpy.run_path(str(root / "tests/grids/test_fv3_mapz.py"))
+    face = f["_face"]()[0]
+    qs = f["_tracers"](face)
+    from legoesm.core.fv3_mapz import lagrangian_to_eulerian
+    remap = lagrangian_to_eulerian(**{k: jnp.asarray(x) if isinstance(x, np.ndarray) else x for k, x in face.items()}, q=[jnp.asarray(x) for x in qs])
+    ng, n = face["ng"], face["n"]
+    window = (slice(ng, ng+n), slice(ng, ng+n))
+    for i, qi in enumerate(qs):
+        before = face["delp"][window] * qi[window]
+        after = np.asarray(remap.delp)[window] * np.asarray(remap.q[i])[window]
+        record("FV3 remap", str(i), 1.0, qi[window], after - before, 0.0, "finite product increment")
+
+    # Ocean report only. z-star mass derivative sign follows positive-up w.
+    from legoesm.ocean import vertical as ov
+    from legoesm.ocean.dynamics import spectral_ocean_pe as so
+    qo, wo, m = runpy.run_path(str(root / "tests/ocean/unit/test_adaptive_implicit_vertadv.py"))["_column"](32, seed=0)
+    zc = ov.create_z_star_from_thicknesses(np.asarray(m[0]))
+    J = jnp.ones(1)
+    for op in (ov.vertical_advection_ocean, so._vertical_advection_spectral):
+        record("ocean variable-thickness subsystem", op.__name__, m, qo, op(qo, wo, zc, J), jnp.diff(wo))
+    qnew = ov.implicit_vertical_advection_ocean(qo, wo, m, 600.0)
+    record("ocean", "implicit flux form fixed thickness", 1.0, qo,
+           m * qnew-m * qo, 0.0, "finite product increment")
+    provenance["complete"] = True
+    (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+
+
+def main():
+    import sys
+    if "--all-vertical-paths" in sys.argv:
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument("--all-vertical-paths", action="store_true")
+        parser.add_argument("--out", type=Path, required=True)
+        args = parser.parse_args()
+        all_vertical_paths(args.out)
+    else:
+        smoothing_main()
 
 
 if __name__ == "__main__":
