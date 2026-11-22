@@ -1,0 +1,3 @@
+Finding 1 is resolved: there is no `simple_lw` radiation pipeline builder in `physics_pipeline.py`, and the only `simple_lw` path in `integration._call_radiation_backend` now raises before it can silently return/drop `aerosol_sw_volc_col`; the `none` and `gray` paths also reject a non-`None` volcanic aerosol column, while `rrtmgp`/`rrtmg` consume it. The production mapping of driver `radiation="rrtmg"` to `RadiationConfig.scheme="rrtmgp"` avoids being caught by the backend-specific guard, and the remaining `ecrad_ifs` failure is loud rather than a silent aerosol-drop path. I do not see a remaining BLOCKER/MAJOR from the reviewed findings.
+
+VERDICT: APPROVE

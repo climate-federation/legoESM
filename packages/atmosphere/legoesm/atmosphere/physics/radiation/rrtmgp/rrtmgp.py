@@ -617,6 +617,7 @@ class RRTMGP:
       cloud_d_eff_snow: jnp.ndarray | None = None,
       snow_optics=None,
       cloud_snow_weight: jnp.ndarray | None = None,
+      aerosol_volcanic_moments_sw: jnp.ndarray | None = None,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -678,6 +679,12 @@ class RRTMGP:
           byte-identical.
       solar_spectral_fraction : jnp.ndarray | None
           Per-g-point solar source weights (ngpt_sw,).
+      aerosol_volcanic_moments_sw : jnp.ndarray | None
+          Shortwave aerosol with its OWN per-band optics (CMIP6 volcanic
+          sulfate), ``(ncol, nlev, 3, n_bnd_sw)`` per-layer moments
+          ``(tau, tau*ssa, tau*ssa*g)``, bands in ascending wavenumber (the
+          SW gas-optics band order).  Mixed with the grey
+          ``aerosol_optical_depth`` as a second component.  ``None`` = absent.
       ghg_vmr_override : dict | None
           Runtime GHG VMR overrides (e.g. ``{"co2": 4.15e-4}``).
       mcica_cloud_fraction : jnp.ndarray | None
@@ -757,6 +764,9 @@ class RRTMGP:
       if aerosol_absorption_optical_depth_lw is not None:
           aerosol_absorption_optical_depth_lw = jnp.asarray(
               aerosol_absorption_optical_depth_lw).astype(_table_dtype)
+      if aerosol_volcanic_moments_sw is not None:
+          aerosol_volcanic_moments_sw = jnp.asarray(
+              aerosol_volcanic_moments_sw).astype(_table_dtype)
       if cloud_path_liq is not None:
           cloud_path_liq = jnp.asarray(cloud_path_liq).astype(_table_dtype)
       if cloud_path_ice is not None:
@@ -868,6 +878,10 @@ class RRTMGP:
           aerosol_optical_depth = _zero(aerosol_optical_depth)
           aerosol_absorption_optical_depth_lw = _zero(
               aerosol_absorption_optical_depth_lw)
+          if aerosol_volcanic_moments_sw is not None:
+              aerosol_volcanic_moments_sw = jnp.concatenate(
+                  [jnp.zeros_like(aerosol_volcanic_moments_sw[:, :1]),
+                   aerosol_volcanic_moments_sw], axis=1)
           if cloud_r_eff_liq is not None:
               cloud_r_eff_liq = _top(cloud_r_eff_liq, cloud_r_eff_liq[:, :1])
           if cloud_r_eff_ice is not None:
@@ -1117,6 +1131,25 @@ class RRTMGP:
       # full SW solve so the per-band selection is defined in exactly one place.
       aer_ssa, aer_g = _resolve_aerosol_sw_optics(config, optics_lib)
 
+      # Per-band aerosol component (volcanic): (ncol, nlev, 3, n_bnd) ->
+      # (3, n_bnd, ncol, 1, nlev+2), the same halo / bottom-first layout as
+      # the grey aerosol OD; the moments are linear in OD, so the linear halo
+      # extrapolation + clip is the treatment the grey OD gets.
+      if aerosol_volcanic_moments_sw is not None:
+          n_bnd = int(optics_lib.gas_optics_sw.n_bnd)
+          if aerosol_volcanic_moments_sw.shape[-2:] != (3, n_bnd):
+              raise ValueError(
+                  "aerosol_volcanic_moments_sw trailing shape "
+                  f"{aerosol_volcanic_moments_sw.shape[-2:]}, expected (3, "
+                  f"{n_bnd}) for this SW gas-optics table.")
+          _nc, _nl = aerosol_volcanic_moments_sw.shape[:2]
+          _vm = jnp.moveaxis(aerosol_volcanic_moments_sw, (2, 3), (0, 1))
+          _vm = _add_halos(_vm[..., ::-1].reshape(3 * n_bnd * _nc, 1, _nl))
+          volc_moments_3d = jnp.clip(
+              _vm.reshape(3, n_bnd, _nc, 1, _nl + 2), 0.0, None)
+      else:
+          volc_moments_3d = None
+
       # Optional aerosol optical depth (longwave, pure absorber)
       if aerosol_absorption_optical_depth_lw is not None:
           aerosol_od_lw_3d = jnp.clip(
@@ -1157,6 +1190,7 @@ class RRTMGP:
               aerosol_optical_depth=aerosol_od_3d,
               aerosol_single_scattering_albedo=aer_ssa,
               aerosol_asymmetry_factor=aer_g,
+              aerosol_volcanic_moments=volc_moments_3d,
           )
           # Strip the singleton Y axis + vertical halos, flip back to the
           # legoESM TOA-first convention -> (n_gpt, ncol, nlev).
@@ -1257,6 +1291,7 @@ class RRTMGP:
           aerosol_optical_depth=aerosol_od_3d,
           aerosol_single_scattering_albedo=aer_ssa,
           aerosol_asymmetry_factor=aer_g,
+          aerosol_volcanic_moments=volc_moments_3d,
           solar_fraction_by_gpt=solar_weights,
           use_scan=config.use_scan,
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
