@@ -45,6 +45,46 @@ atm_owns_surface: true
 # surfdata).  The land FRACTION is the atmosphere's (land mask), shared by the
 # coupler tiles (f_land_mode analytical reads the atmosphere's mask).
 
+# ---- turbulence: verbatim from config/amip/amip_production.yaml (its
+# "turbulence" block, the scheme the lat-lon AMIP production run resolves to;
+# user 2026-11-22).  The base's Holtslag-Boville refuses the land model's
+# solved surface fluxes (land_beta_soil) ----
+turbulence: clubb
+clubb_prognostic: true
+clubb_liquid_partition: true       # CAM6 clubb_intr: the closure's diagnosed
+                                   # cloud liquid is handed to the host as a
+                                   # tendency, and the Morrison saturation
+                                   # adjustment is switched off, both
+                                   # condensation and (since 2026-10-19, user
+                                   # decision) cloud-water evaporation (MG2
+                                   # allow_sed_supersat = .false. under CLUBB,
+                                   # micro_mg_cam.F90:668-672).  One flag,
+                                   # both halves.  User table row 1.
+# The partition REFUSES an active radiative condensate floor (it would be
+# imposed on top of the liquid the closure now supplies, making clouds opaque
+# twice).  Both floors default to a non-zero scheme value when unset, so they
+# are pinned to 0 here.  Not in the user's three-row table: REQUIRED BY ROW 1.
+cloud_q_c_diagnostic: 0.0
+conv_cloud_condensate: 0.0
+# CLUBB upper domain limit = CAM6's trop_cloud_top_press 1.D2 (100 Pa;
+# cam_cesm2_1_rel_60 namelist_defaults_cam.xml:1295).  User decision
+# 2026-10-20 ("use cam6 rule"), was 15000 Pa.  Offline 1/3-day A/B on a
+# day-105 production checkpoint: stable, sparse stratospheric CLUBB cloud
+# (scripts/validate/oracle/clubb_glue/top_press_scm_ab.py).
+clubb_trop_cloud_top_press: 100.0
+# CLUBB tunables written explicitly (values = the port's CLUBBParams defaults,
+# the CAM6 clubb namelist).  clubb_c_K10h (0.3) is read by the eddy-scalar
+# rtm/thlm diffusion (CAM l_do_expldiff_rtm_thlm) but has no deck key, so the
+# CLUBBParams default applies.
+clubb_c14: 2.2
+clubb_c8: 4.2
+clubb_c11: 0.7
+clubb_c11b: 0.35
+clubb_gamma_coef: 0.308
+clubb_gamma_coefb: 0.32
+clubb_beta: 2.4
+clubb_c_k10: 0.5
+
 # ---- land: verbatim from config/amip/amip_production.yaml (its "land" block,
 # without the two surface-coupling rows ocean_flux_on_ocean_surface and
 # sea_ice_flux_split, which are not land setup) ----
