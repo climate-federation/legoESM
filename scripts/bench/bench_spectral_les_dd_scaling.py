@@ -17,7 +17,9 @@ The case's cell size (dx, dy, dz) is kept; the bench sets the cell COUNTS:
   ``(ny * n_y / N) x (nx * n_x)`` and so changes with N; part of the weak
   "efficiency" is that shape change, not communication.
 
-N = 1 runs the serial spectral core (no layout); N > 1 runs the y-slab layout
+N = 1 runs the serial spectral core (no layout) for slab/pencil, and a 1-rank
+planes layout for ``--decomp planes`` (the default), so the 1-rank reference
+runs the same FFT layout as N > 1; N > 1 runs the chosen layout
 (global ny must divide by N). Each rank builds its own slab of the initial
 state; the theta noise is drawn per GLOBAL row, so the IC does not depend on N.
 
@@ -45,6 +47,12 @@ from bench_plane_crm_dd_scaling import (  # noqa: E402
 )
 
 
+def builds_layout(decomp: str, n: int) -> bool:
+    """Whether the bench runs a distributed layout: always for planes (so the
+    1-rank reference uses the planes FFT layout), else only for N > 1."""
+    return decomp == "planes" or n > 1
+
+
 def bench_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--mode", choices=["strong", "weak"], default="strong")
@@ -52,7 +60,7 @@ def bench_parser() -> argparse.ArgumentParser:
                    default="float64")
     p.add_argument("--case", default="cbl_nieuwstadt")
     p.add_argument("--decomp", choices=["slab", "pencil", "planes"],
-                   default="slab",
+                   default="planes",
                    help="slab = y-slabs over all ranks; pencil = most-square "
                         "y x x rank mesh; planes = the pencil mesh with the "
                         "planes FFT mode (one all-to-all per transform)")
@@ -159,7 +167,7 @@ def main(argv=None):
     cfg = les.cbl_les_config(grid, args, sgs)
     layout = (sl.make_spectral_les_pencil_layout(
         comm, p_y, p_x, ny_g, nx_g, planes=bargs.decomp == "planes")
-              if n > 1 else None)
+              if builds_layout(bargs.decomp, n) else None)
     g = sl.make_grid(cfg, dtype=dtype, layout=layout)
     ry, rx = divmod(rank, p_x)
     st = local_cbl_state(sl, g, args, ry * ny_l, ny_l, u_geo, dtype,

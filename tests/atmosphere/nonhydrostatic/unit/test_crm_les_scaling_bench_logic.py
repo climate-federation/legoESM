@@ -172,3 +172,12 @@ def test_crm_bench_defaults_are_the_rcemip1_production_deck():
             a.smag_cs) == (1.0e7, 6, 0.1, 0.19)
     assert cfg.semi_implicit_acoustic and cfg.substep_horizontal_acoustic
     assert rcp.parse_args([*crm.RCEMIP1_DECK_ARGV, "--nlev", "8"]).nlev == 8
+
+
+def test_les_bench_planes_is_default_and_builds_layout_at_one_rank():
+    import bench_spectral_les_dd_scaling as les_b
+    assert les_b.bench_parser().get_default("decomp") == "planes"
+    assert les_b.builds_layout("planes", 1)
+    assert not les_b.builds_layout("pencil", 1)
+    assert not les_b.builds_layout("slab", 1)
+    assert les_b.builds_layout("slab", 2)
