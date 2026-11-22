@@ -24,10 +24,11 @@ Everything below is energy INTO THE ATMOSPHERIC COLUMN, positive:
 
   dE/dt = toa_net - (sw_net_sfc + lw_net_sfc) + hfss + hfls + LEAK
 
-The tracker also reports ``residual = toa_net - dE/dt`` directly.  Substituting
-dE/dt = toa_net - residual and cancelling ``toa_net``:
+The tracker also reports ``toa_minus_dE_dt = toa_net - dE/dt`` (saved key
+``energy_toa_minus_dE_dt``; legacy files: ``energy_residual``) directly.  Substituting
+dE/dt = toa_net - toa_minus_dE_dt and cancelling ``toa_net``:
 
-  LEAK = (sw_net_sfc + lw_net_sfc) - hfss - hfls - residual
+  LEAK = (sw_net_sfc + lw_net_sfc) - hfss - hfls - toa_minus_dE_dt
 
 NB the #1354 run card stated this as ``residual - sfc_net_rad_up - SH - LH``,
 which has the radiation term the wrong way round; the derivation above is the
@@ -66,7 +67,7 @@ spurious energy SOURCE of
     L_f * (frozen precipitation rate)  =  3.87 W/m^2 per mm/day
 
 (L_f from ``legoesm.constants``; 1 mm/day = 1/86400 kg/m^2/s).  Sign: dE/dt too HIGH by X
-makes ``residual = toa_net - dE/dt`` too low by X, hence LEAK too HIGH by X --
+makes ``toa_minus_dE_dt`` too low by X, hence LEAK too HIGH by X --
 a POSITIVE apparent leak, which is the sign observed.
 
 The ``L_f*precip`` column below is the UPPER BOUND on that term (every
@@ -105,8 +106,11 @@ import pathlib
 import numpy as np
 
 from legoesm import constants
+from legoesm.diagnostics.energy_budget import (
+    TOA_MINUS_DE_DT_KEY, read_toa_minus_dE_dt,
+)
 
-_NEEDED = ("energy_toa_net", "energy_dE_dt", "energy_residual",
+_NEEDED = ("energy_toa_net", "energy_dE_dt", TOA_MINUS_DE_DT_KEY,
            "sw_net_sfc", "lw_net_sfc", "hfss", "hfls")
 # Present on the MPAS lightweight series; used for the thermal/latent split and
 # the water budget. Absent -> those columns are simply not printed.
@@ -120,7 +124,10 @@ _OPTIONAL = ("CWV", "moisture_residual", "days",
 
 
 def load(path: pathlib.Path) -> dict[str, np.ndarray]:
-    d = np.load(path, allow_pickle=True)
+    d = dict(np.load(path, allow_pickle=True))
+    _toa_minus = read_toa_minus_dE_dt(d, source=str(path))
+    if _toa_minus is not None:
+        d[TOA_MINUS_DE_DT_KEY] = _toa_minus
     missing = [k for k in _NEEDED if k not in d]
     if missing:
         raise SystemExit(
@@ -220,7 +227,7 @@ def main(argv=None) -> int:
             "whose dE_dt is zero by construction)")
 
     sfc_rad = t["sw_net_sfc"] + t["lw_net_sfc"]
-    leak = sfc_rad - t["hfss"] - t["hfls"] - t["energy_residual"]
+    leak = sfc_rad - t["hfss"] - t["hfls"] - t[TOA_MINUS_DE_DT_KEY]
 
     print(provenance)
     print(f"{args.timeseries}  ({int(keep.sum())} samples after day "
@@ -232,7 +239,7 @@ def main(argv=None) -> int:
     print("-" * len(hdr))
     for i in np.flatnonzero(keep):
         print(f"{days[i]:7.2f} {t['energy_toa_net'][i]:9.3f} "
-              f"{t['energy_dE_dt'][i]:9.3f} {t['energy_residual'][i]:9.3f} "
+              f"{t['energy_dE_dt'][i]:9.3f} {t[TOA_MINUS_DE_DT_KEY][i]:9.3f} "
               f"{sfc_rad[i]:9.3f} {t['hfss'][i]:8.3f} {t['hfls'][i]:8.3f} "
               f"{leak[i]:9.3f}")
     # Thermal / latent split of dE/dt (GLM): distinguishes "energy arrived

@@ -1293,6 +1293,20 @@ class TestAmipToMatrixFormat:
             "Final <CWV>: 25.25 kg/m2\n"
         )
 
+    def test_converter_reads_the_legacy_energy_key(self, tmp_path, capsys):
+        """Old runs saved TOA - dE/dt as ``energy_residual``; the CSV column
+        is the new name either way."""
+        mod = self._import_converter()
+        self._write_synthetic_amip_outputs(tmp_path, n=6)
+        d = dict(np.load(tmp_path / "timeseries.npz"))
+        d["energy_residual"] = np.full(6, 20.2)
+        np.savez(tmp_path / "timeseries.npz", **d)
+        assert mod.main(tmp_path) == 0
+        header = (tmp_path / "mean_timeseries.csv").read_text().splitlines()[0]
+        assert "energy_toa_minus_dE_dt" in header.split(",")
+        assert "energy_residual" not in header
+        assert "legacy key 'energy_residual'" in capsys.readouterr().out
+
     def test_converter_produces_matrix_format_files(self, tmp_path):
         """End-to-end: synthetic AMIP outputs → matrix-format outputs."""
         mod = self._import_converter()

@@ -325,7 +325,7 @@ class TestEnergyBudgetTracker:
             elapsed_seconds=0.0,
         )
         assert budget.dE_dt == 0.0
-        assert budget.residual == 0.0
+        assert budget.toa_minus_dE_dt == 0.0
 
     def test_two_updates_computes_tendency(self):
         """After two updates with different T, dE/dt should be nonzero."""
@@ -384,7 +384,7 @@ class TestEnergyBudgetTracker:
 
         # No change in energy → dE/dt = 0, residual = R_TOA = 0
         npt.assert_allclose(budget.dE_dt, 0.0, atol=1e-10)
-        npt.assert_allclose(budget.residual, 0.0, atol=1e-10)
+        npt.assert_allclose(budget.toa_minus_dE_dt, 0.0, atol=1e-10)
 
     def test_toa_net_correct(self):
         """TOA net should match SW_down - SW_up - LW_up."""
@@ -428,7 +428,7 @@ class TestEnergyBudgetTracker:
 
         assert len(tracker.times) == 5
         assert len(tracker.toa_net) == 5
-        assert len(tracker.residual) == 5
+        assert len(tracker.toa_minus_dE_dt) == 5
 
     def test_column_energy_realistic_magnitude(self):
         """Column energy should be O(10^9) J/m² for a realistic atmosphere."""
@@ -630,9 +630,9 @@ def test_tracker_is_grid_agnostic(shape_h, area_shape):
         )
     # finite, scalar budget on every grid
     assert _np.isfinite(b.toa_net) and _np.isfinite(b.dE_dt)
-    assert _np.isfinite(b.residual) and _np.isfinite(b.column_energy)
+    assert _np.isfinite(b.toa_minus_dE_dt) and _np.isfinite(b.column_energy)
     # the closed-budget identity the #1354 probe relies on
-    npt.assert_allclose(b.residual, b.toa_net - b.dE_dt, rtol=0, atol=1e-6)
+    npt.assert_allclose(b.toa_minus_dE_dt, b.toa_net - b.dE_dt, rtol=0, atol=1e-6)
     # warming (T rose 2 K between the two calls) => column energy went up
     assert b.dE_dt > 0.0
     # toa_net here is 340 - 100 - 240 = 0 W/m^2 by construction
@@ -713,3 +713,15 @@ def test_frozen_mse_is_phase_complete_under_deposition():
 
     # q_frozen=None is byte-identical to the pre-fix vapor-only energy.
     npt.assert_array_equal(E(T0, qv0, qf0, False), E(T0, qv0, None, False))
+
+
+def test_read_toa_minus_dE_dt_new_key_legacy_key_and_absent(capsys):
+    from legoesm.diagnostics.energy_budget import read_toa_minus_dE_dt
+    v = _np.array([0.0, 20.2])
+    _np.testing.assert_array_equal(
+        read_toa_minus_dE_dt({"energy_toa_minus_dE_dt": v}), v)
+    assert capsys.readouterr().out == ""
+    _np.testing.assert_array_equal(
+        read_toa_minus_dE_dt({"energy_residual": v}, source="old.npz"), v)
+    assert "old.npz uses the legacy key 'energy_residual'" in capsys.readouterr().out
+    assert read_toa_minus_dE_dt({"energy_dE_dt": v}) is None

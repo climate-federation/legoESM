@@ -5,7 +5,8 @@ The EnergyBudgetTracker records, per diag step, the global area-weighted:
   toa_net = sw_down_toa - sw_up_toa - lw_up_toa      [positive down]
   sw_net_sfc, lw_net_sfc                             [positive INTO surface]
   dE_dt   = d/dt (column moist static energy)
-  residual = toa_net - dE_dt
+  toa_minus_dE_dt = toa_net - dE_dt   (saved as energy_toa_minus_dE_dt;
+                                      legacy files: energy_residual)
 and the driver records hfss (SH), hfls (LH)          [positive UP into atm].
 
 The code's own surface_energy_flux gives the net flux FROM atmosphere TO
@@ -14,7 +15,7 @@ atmospheric budget is  dE_dt = toa_net - F_sfc_net.  So the numerical LEAK is
 
     LEAK = dE_dt - (toa_net - F_sfc_net)
          = F_sfc_net - (toa_net - dE_dt)
-         = (sw_net_sfc + lw_net_sfc - hfss - hfls) - residual        [W/m^2]
+         = (sw_net_sfc + lw_net_sfc - hfss - hfls) - toa_minus_dE_dt [W/m^2]
 
 VERDICT: LEAK ~ 0 = the budget closes (warming, if any, is a genuine flux
 imbalance).  A large LEAK is NOT automatically a bookkeeping bug -- see caveat.
@@ -39,19 +40,26 @@ import os
 
 import numpy as np
 
+from legoesm.diagnostics.energy_budget import read_toa_minus_dE_dt
+
 
 def load_energy_chunks(run_dir):
     incr = os.path.join(run_dir, "timeseries_incremental")
     efiles = sorted(glob.glob(os.path.join(incr, "energy_chunk_*.npz")))
     if not efiles:
         raise SystemExit(f"no energy_chunk_*.npz under {incr} — did the diag path run?")
-    keys = ("toa_net", "dE_dt", "residual", "sfc_sw_net", "sfc_lw_net")
+    keys = ("toa_net", "dE_dt", "toa_minus_dE_dt", "sfc_sw_net", "sfc_lw_net")
     out = {k: [] for k in keys}
     for f in efiles:
         z = np.load(f)
         for k in keys:
-            if k in z.files:
-                out[k].append(np.asarray(z[k], dtype=np.float64))
+            src = k
+            if k == "toa_minus_dE_dt" and k not in z.files and "residual" in z.files:
+                # Chunks written before the rename stored it as "residual".
+                print(f"note: {f} uses the legacy key 'residual' for {k}")
+                src = "residual"
+            if src in z.files:
+                out[k].append(np.asarray(z[src], dtype=np.float64))
     return {k: (np.concatenate(v) if v else np.array([])) for k, v in out.items()}
 
 
@@ -85,7 +93,10 @@ def main(argv=None):
         def _g(k):
             return (np.asarray(z[k], dtype=np.float64).ravel()
                     if k in z.files else np.array([]))
-        toa, dEdt, resid = _g("energy_toa_net"), _g("energy_dE_dt"), _g("energy_residual")
+        toa, dEdt = _g("energy_toa_net"), _g("energy_dE_dt")
+        resid = read_toa_minus_dE_dt(z, source=ts_path)
+        resid = (np.array([]) if resid is None
+                 else np.asarray(resid, dtype=np.float64).ravel())
         sws, lws = _g("sw_net_sfc"), _g("lw_net_sfc")
         hfss, hfls = _g("hfss"), _g("hfls")
         # residual is stored, dE_dt too; reconstruct residual if only one path
@@ -94,7 +105,7 @@ def main(argv=None):
     else:
         e = load_energy_chunks(a.run_dir)
         hfss, hfls = load_sh_lh(a.run_dir)
-        toa = e["toa_net"]; dEdt = e["dE_dt"]; resid = e["residual"]
+        toa = e["toa_net"]; dEdt = e["dE_dt"]; resid = e["toa_minus_dE_dt"]
         sws = e["sfc_sw_net"]; lws = e["sfc_lw_net"]
     # drop leading NaN samples (diag steps before the tracker had fluxes)
     if toa.size:

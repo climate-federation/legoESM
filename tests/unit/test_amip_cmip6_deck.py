@@ -1741,7 +1741,7 @@ class TestValidator:
             energy_toa_net=np.full(n_samples, 0.0),
             energy_column=np.full(n_samples, 1e7),
             energy_dE_dt=np.zeros(n_samples),
-            energy_residual=residuals,
+            energy_toa_minus_dE_dt=residuals,
             moisture_column_water=np.full(n_samples, 50.0),
             moisture_precip_rate=np.full(n_samples, 3.0),
             moisture_residual=np.full(n_samples, 0.5),
