@@ -685,8 +685,6 @@ def _si3_o17_through_update_flx(
 
     if card.core2_precipitation_closure is not False:
         raise ValueError("O17 freezes core2_precipitation_closure=False")
-    if card.state.nn_fsbc != 1:
-        raise ValueError("O17 freezes the ORCA2_SAS_ICE nn_fsbc=1 cadence")
     if not (card.state.ln_icedyn and card.state.ln_icethd and card.state.ln_dynadv_pra):
         raise ValueError(
             "O17 requires explicit live dynamics, Prather advection, and thermodynamics"
@@ -1277,6 +1275,10 @@ def si3_o17_step(
 ) -> tuple[SI3O17StepState, SI3O17Trace]:
     """One exact production call graph in NEMO ``ice_stp`` order."""
 
+    if type(card.state.nn_fsbc) is not int:
+        raise TypeError("O17 step nn_fsbc must be a static Python integer")
+    if card.state.nn_fsbc != 1:
+        raise ValueError("O17 step freezes the ORCA2_SAS_ICE nn_fsbc=1 cadence")
     core = _si3_o17_through_update_flx(entry, forcing, card)
     stress = si3_ice_update_tau(
         core.stress_inputs,

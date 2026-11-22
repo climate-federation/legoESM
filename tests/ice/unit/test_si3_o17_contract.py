@@ -155,6 +155,8 @@ def test_o17_step_refuses_a_card_outside_its_contract_before_computing() -> None
             si3_o17_step(entry, forcing, off)
     with pytest.raises(ValueError, match="nn_fsbc=1"):
         si3_o17_step(entry, forcing, card._replace(state=card.state._replace(nn_fsbc=2)))
+    with pytest.raises(TypeError, match="static Python integer"):
+        si3_o17_step(entry, forcing, card._replace(state=card.state._replace(nn_fsbc=True)))
 
 
 def test_step_sea_ice_dispatches_live_forcing_to_the_o17_step(monkeypatch) -> None:

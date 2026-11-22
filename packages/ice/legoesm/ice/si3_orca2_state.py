@@ -29,6 +29,7 @@ from pathlib import Path
 import re
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -3318,10 +3319,15 @@ def si3_dyn_adv_pra_orca2(
 
     zudy = sr(u_ice * grid.e2u)
     zvdx = sr(v_ice * grid.e1v)
-    kt_parity = (
-        ((jnp.asarray(kt, dtype=jnp.int32) - 1) // int(cfg.nn_fsbc)) % 2
-        if traced_kt else ((int(kt) - 1) // int(cfg.nn_fsbc)) % 2
-    )
+    if traced_kt:
+        kt_checked = eqx.error_if(
+            jnp.asarray(kt),
+            kt <= 0,
+            "si3_dyn_adv_pra_orca2 requires kt >= 1",
+        )
+        kt_parity = ((kt_checked - 1) // int(cfg.nn_fsbc)) % 2
+    else:
+        kt_parity = ((int(kt) - 1) // int(cfg.nn_fsbc)) % 2
 
     init_carry = (
         ato_i,
