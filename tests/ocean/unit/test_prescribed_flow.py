@@ -329,6 +329,11 @@ def test_positional_construction_unshifted_by_tail_field():
         "runoff_temperature_floor_sharpness",
         "lateral_viscosity_file_coastal",
         "store_tracer_budget",
+        # appended by the ENSO-fork Pacific zoom port (default off)
+        "momentum_face_mask",
+        "coriolis_time_scheme",
+        "coriolis_baroclinic_operator",
+        "open_boundary_smooth_width",
     )
     # Head layout unchanged — the slots any positional caller binds first.
     assert f[:9] == (
