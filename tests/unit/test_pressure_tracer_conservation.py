@@ -175,6 +175,6 @@ def test_production_fixture_step_bitwise(lane):
 @pytest.mark.parametrize("scheme", ["sb", "van_leer"])
 def test_unsupported_lane_refuses_explicit_selection(solver, scheme):
     from legoesm.driver.config import resolve_tracer_vertical_scheme
-    assert resolve_tracer_vertical_scheme(None, solver, hybrid=False) is None
+    assert resolve_tracer_vertical_scheme(None, solver) is None
     with pytest.raises(ValueError, match="silently inert"):
-        resolve_tracer_vertical_scheme(scheme, solver, hybrid=False)
+        resolve_tracer_vertical_scheme(scheme, solver)

@@ -695,7 +695,7 @@ CLUBB_PROGNOSTIC_ONLY = frozenset({
     "clubb_c_k10"})
 
 
-def resolve_tracer_vertical_scheme(value, solver_name, *, hybrid: bool) -> str | None:
+def resolve_tracer_vertical_scheme(value, solver_name) -> str | None:
     """Resolve the pressure-coordinate tracer operator; None on lanes retaining their operator.
 
     An explicit selection must be honored by the lane, including direct factory
@@ -4519,8 +4519,7 @@ class ExperimentConfig(NamedTuple):
         else:
             try:
                 resolve_tracer_vertical_scheme(
-                    d.tracer_vertical_scheme, driver_solver_name(self),
-                    hybrid=g.vertical_coord in ("hybrid", "cam_l32"))
+                    d.tracer_vertical_scheme, driver_solver_name(self))
             except ValueError as exc:
                 errors.append(str(exc))
         for name in ("tracer_van_leer_width", "tracer_van_leer_flux_width"):

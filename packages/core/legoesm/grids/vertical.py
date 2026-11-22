@@ -2640,7 +2640,7 @@ def vertical_advection_hybrid_sb(
     with ``mdot`` the interface mass flux from
     :func:`compute_mass_flux_hybrid` (zero at top and surface) and ``dp_k``
     the LAYER thickness (half-level differences) — the conservation weight.
-    Identical structure to the pure-sigma ``_vertical_advection_sigma_sb``:
+    Identical structure to the pure-sigma ``vertical_advection_sigma_sb``:
     ``adv_k - f_k * (mdot_{k+1/2} - mdot_{k-1/2})/dp_k`` is a flux-form
     divergence whose dp-weighted column sum telescopes to the (zero)
     boundary fluxes, so ``sum(dp * f)`` is conserved in pairing with

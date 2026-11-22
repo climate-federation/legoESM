@@ -993,10 +993,9 @@ def test_tracer_vertical_lane_default_and_refusal(grid_type, discretization, ver
     cfg = _make_config(grid_type=grid_type, discretization=discretization, nlev=32)
     cfg = cfg._replace(grid=cfg.grid._replace(vertical_coord=vertical_coord),
                        dycore=cfg.dycore._replace(tracer_vertical_scheme=scheme))
-    hybrid = vertical_coord != "sigma"
     cfg.validate_strict()
     expected = scheme or ("van_leer" if discretization == "mpas" else "sb")
-    assert resolve_tracer_vertical_scheme(scheme, driver_solver_name(cfg), hybrid=hybrid) == expected
+    assert resolve_tracer_vertical_scheme(scheme, driver_solver_name(cfg)) == expected
 
 
 

@@ -867,10 +867,8 @@ def create_atmosphere_dycore(
     if solver_name is None:
         _fail_unsupported(model_type, discretization, grid_type)
     from legoesm.driver.config import resolve_tracer_vertical_scheme
-    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     tracer_scheme = resolve_tracer_vertical_scheme(
-        dc.tracer_vertical_scheme, solver_name,
-        hybrid=isinstance(sigma, HybridSigmaPressureCoordinate))
+        dc.tracer_vertical_scheme, solver_name)
     logger.info("Tracer vertical scheme: %s", tracer_scheme or "lane existing operator")
     refuse_unwired_energy_fixer(config, solver_name)
     warn_if_vapour_floor_creates_water(config, solver_name)

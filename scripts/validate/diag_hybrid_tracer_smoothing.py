@@ -68,7 +68,7 @@ def smoothing_main():
         tracers={"q_v": Field(data=qv, name="q_v", dims=("nCells", "nlev"), units="kg/kg")},
     )
     calls = []
-    real = pe.vertical_advection_hybrid_van_leer
+    real = v.vertical_advection_hybrid_van_leer
 
 
     def spy(*a, **kw):
@@ -76,9 +76,9 @@ def smoothing_main():
         return real(*a, **kw)
 
 
-    pe.vertical_advection_hybrid_van_leer = spy
+    v.vertical_advection_hybrid_van_leer = spy
     smooth = pe.mpas_model_tendencies(state, mesh, coord, pe.MPASPrimitiveEquationConfig(nu_del2=1e5))
-    pe.vertical_advection_hybrid_van_leer = real
+    v.vertical_advection_hybrid_van_leer = real
     hard = pe.mpas_model_tendencies(
         state,
         mesh,
@@ -514,7 +514,7 @@ def all_vertical_paths(out, *, pressure_only=False):
         qv = ExperimentConfig().rh_init * saturation_mixing_ratio(T, state.p_s.data[:, None] * c.sigma_full) * c.sigma_full**2
         state = state._replace(T=state.T.replace(data=T), tracers={"q_v": Field(qv)})
         for scheme in ("sb", "van_leer"):
-            name = "vertical_advection_hybrid_" + scheme if hybrid else "vertical_advection_tracer"
+            name = "vertical_advection_tracer"
             # Scope observation to the native tracer callback only.
             real_tracer = mp.mpas_tracer_tendencies
             def tracer_spy(*a, **kw):

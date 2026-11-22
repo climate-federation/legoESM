@@ -66,11 +66,10 @@ def main(argv=None):
     ra = _load_run_aimip()
     from evaluations.wb_era5_cases import build_forecast_cases
     from legoesm import constants
-    from legoesm.grids.vertical import vertical_advection
+    from legoesm.grids.vertical import vertical_advection, vertical_advection_sigma_sb
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         _compute_omega_gaussian,
         _compute_sigma_dot_gaussian,
-        _vertical_advection_sigma_sb,
         spectral_pe_tendencies,
     )
     from legoesm.grids.gaussian import (
@@ -167,7 +166,7 @@ def main(argv=None):
         # advection' row was a scheme the model never integrated, and the
         # difference leaked into 'horizontal_residual').
         _vadv = {"upwind": vertical_advection,
-                 "sb_centered": _vertical_advection_sigma_sb}[
+                 "sb_centered": vertical_advection_sigma_sb}[
                      pe_config.vertical_advection_scheme]
         vert = np.asarray(_vadv(jnp.asarray(T), sigma_dot, sigma))
         omega = np.asarray(_compute_omega_gaussian(

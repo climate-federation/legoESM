@@ -356,7 +356,7 @@ class SpectralPEConfig(NamedTuple):
     energy_fixer: bool = False
     # Vertical advection for u, v, T on BOTH vertical coordinates (sigma and
     # hybrid): "sb_centered" (DEFAULT — Simmons-Burridge energy-conserving
-    # pairing; sigma via _vertical_advection_sigma_sb, hybrid via
+    # pairing; sigma via vertical_advection_sigma_sb, hybrid via
     # vertical_advection_hybrid_sb) or "upwind" (legacy, NOT recommended:
     # measured -0.48 K/day mass-weighted global-mean T leak at T63L8 and it
     # destroys 62% of the atmosphere's vertical T structure in 5 days).
@@ -462,9 +462,6 @@ def _warn_non_conserving_numerics(scheme: str, frictional_heating: bool):
         + ". Defaults are sb_centered + frictional_heating=True; keep the "
           "legacy settings only to reproduce a pre-2026-08-11 run.",
         RuntimeWarning, stacklevel=3)
-
-
-_vertical_advection_sigma_sb = vertical_advection_sigma_sb
 
 
 def _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt, sigma_coord):
@@ -607,7 +604,7 @@ def spectral_pe_tendencies(
         if not config.frictional_heating:
             _warn_non_conserving_numerics(
                 _vadv_scheme, config.frictional_heating)
-        _vadv_sigma = _vertical_advection_sigma_sb
+        _vadv_sigma = vertical_advection_sigma_sb
         from legoesm.grids.vertical import vertical_advection_hybrid_sb
         _vadv_hybrid = vertical_advection_hybrid_sb
     else:

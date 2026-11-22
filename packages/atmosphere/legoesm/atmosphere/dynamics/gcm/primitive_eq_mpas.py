@@ -75,9 +75,7 @@ from legoesm.grids.vertical import (
     VERTICAL_ADVECTION_SCHEMES,
     vertical_advection,
     vertical_advection_tracer,
-    vertical_advection_hybrid_sb,
     vertical_advection_hybrid,
-    vertical_advection_hybrid_van_leer,
     vertical_advection_theta,
     vertical_advection_theta_hybrid,
 )
@@ -567,25 +565,13 @@ def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
         _tnames = list(tracers.keys())
         q = jnp.stack([tracers[k].data for k in _tnames], axis=-1)
         dq = tracer_horizontal_advection(q, u_3d, mesh)
-        if _hybrid and config.tracer_vertical_scheme == "sb":
-            dq = dq + jax.vmap(
-                lambda qk: vertical_advection_hybrid_sb(qk, mass_flux, p_s, sigma_coord),
-                in_axes=-1, out_axes=-1)(q)
-        elif _hybrid:
-            dq = dq + jax.vmap(
-                lambda qk: vertical_advection_hybrid_van_leer(
-                    qk, mass_flux, p_s, sigma_coord,
-                    flux_smoothing_width=config.tracer_van_leer_flux_width,
-                    smoothing_width=config.tracer_van_leer_width),
-                in_axes=-1, out_axes=-1)(q)
-        else:
-            dq = dq + jax.vmap(
-                lambda qk: vertical_advection_tracer(
-                    qk, sigma_dot, sigma_coord, p_s,
-                    scheme=config.tracer_vertical_scheme,
-                    smoothing_width=config.tracer_van_leer_width,
-                    flux_smoothing_width=config.tracer_van_leer_flux_width),
-                in_axes=-1, out_axes=-1)(q)
+        dq = dq + jax.vmap(
+            lambda qk: vertical_advection_tracer(
+                qk, mass_flux if _hybrid else sigma_dot, sigma_coord, p_s,
+                scheme=config.tracer_vertical_scheme,
+                smoothing_width=config.tracer_van_leer_width,
+                flux_smoothing_width=config.tracer_van_leer_flux_width),
+            in_axes=-1, out_axes=-1)(q)
         if _dps_del4 is not None:
             # The p_s hyperdiffusion moves layer mass dB_k * _dps_del4 that no
             # tracer flux accompanies; count it as dry air so each tracer's
