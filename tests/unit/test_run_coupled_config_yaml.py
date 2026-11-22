@@ -270,3 +270,31 @@ def test_params_clobber_guard():
         {"ice.sea_ice.albedo_ice": 0.7,
          "coupler.surface.ocean_albedo": 0.08,
          "atm.clouds.CloudConfig.q_c_diagnostic": 3.0e-4}, "clm")
+
+
+@pytest.mark.parametrize("owned, expected", [(False, False), (True, True)])
+def test_snow_albedo_reaches_the_atmosphere_land_only_when_it_owns_land(
+        owned, expected):
+    """The coupler's land tile owns snow albedo on the coupled lane, so the
+    atmosphere config gets the default (off); with --atm-owns-surface the
+    atmosphere's own land owns land and keeps the deck's value."""
+    flags = ["--snow-albedo-feedback"] + (["--atm-owns-surface"] if owned else [])
+    cfg = mod._coupled_atm_config(mod.build_parser().parse_args(flags))
+    assert cfg.snow_albedo_feedback is expected
+
+
+def test_slab_deck_runs_the_atmosphere_owned_column_lane():
+    """config/cmip/cmip_ocean_slab.yaml (user 2026-11-21): lat-lon column lane,
+    atmosphere owns land and open water with its own land model, snow albedo
+    on, the 24-latitude soil start.  The 3-D ocean deck keeps the coupler's
+    land and the classic lane."""
+    parser = mod.build_parser()
+    slab = load_yaml_config(str(CMIP_CONFIGS[0]), parser)
+    assert slab["column_lane"] is True
+    assert slab["atm_owns_surface"] is True
+    assert slab["use_multilayer_land"] is True
+    assert slab["snow_albedo_feedback"] is True
+    assert slab["land_ic"].endswith("soil_ic_latlon24_era5T_19790101_v3.npz")
+    d3 = load_yaml_config(str(CMIP_CONFIGS[1]), parser)
+    assert not d3.get("column_lane") and not d3.get("atm_owns_surface")
+    assert not d3.get("use_multilayer_land")
