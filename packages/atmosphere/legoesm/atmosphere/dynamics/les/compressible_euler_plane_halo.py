@@ -622,9 +622,14 @@ def plane_compressible_euler_slow_tendencies_halo(
             f"Unknown vertical_tracer_advection: {_vert_tracer_scheme!r}. "
             f"Expected 'centered' or 'van_leer'."
         )
+    # Advect θ′ (not θ_ref + θ′), exactly as the serial dycore does: the
+    # horizontal operators are invariant to the horizontally uniform θ_ref,
+    # but differencing ~300 K totals throws away ~9 bits of θ′ in float32
+    # (halo-vs-serial dθ′/dt gap was 4.8e-5 relative vs a 1.4e-5 fp32
+    # truncation gap; 9e-14 vs 2e-16 in float64).
     dtheta_p_dt = (
-        adv_x(theta_total_pad, u_center_pad, grid.dx, h)
-        + adv_y(theta_total_pad, v_center_pad, grid.dy, h)
+        adv_x(theta_p_pad, u_center_pad, grid.dx, h)
+        + adv_y(theta_p_pad, v_center_pad, grid.dy, h)
     )
 
     # 6. Horizontal momentum advection — u advected by (u, v_at_xface),
@@ -1004,7 +1009,6 @@ def _slow_tendency_phase2_jit(
     cfg = config
     u_pad = state_pad["u_pad"]
     v_pad = state_pad["v_pad"]
-    theta_total_pad = state_pad["theta_total_pad"]
     w = state_pad["w"]
     u = state_pad["u"]
     v = state_pad["v"]
@@ -1017,13 +1021,13 @@ def _slow_tendency_phase2_jit(
         inter_pad["flux_u_pad"], inter_pad["flux_v_pad"], grid, h,
     )
 
-    # Theta advection (cell-centred).
+    # Theta advection (cell-centred): θ′, as serial (see the main path).
     dtheta_p_dt = (
         oh.upwind_advection_x_halo(
-            theta_total_pad, inter_pad["u_center_pad"], grid.dx, h,
+            state_pad["theta_p_pad"], inter_pad["u_center_pad"], grid.dx, h,
         )
         + oh.upwind_advection_y_halo(
-            theta_total_pad, inter_pad["v_center_pad"], grid.dy, h,
+            state_pad["theta_p_pad"], inter_pad["v_center_pad"], grid.dy, h,
         )
     )
 
