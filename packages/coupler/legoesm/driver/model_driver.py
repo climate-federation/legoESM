@@ -16256,11 +16256,29 @@ class ModelDriver:
         # One compiled call per step (sponge multiply + q_v smoothing) instead
         # of one eager dispatch per operation.
         from functools import partial as _partial_poststep
-        _poststep_state = jax.jit(_partial_poststep(
+        _qv_poststep = (_qv_smooth_jit if (_qv_smooth_nu > 0.0
+                                           or _qv_smooth_nu4 > 0.0
+                                           or _qv_ll_nu4 > 0.0) else None)
+        _poststep_jit = jax.jit(_partial_poststep(
             mpas_poststep, sponge_decay=_sponge_decay,
-            qv_smooth_fn=(_qv_smooth_jit if (_qv_smooth_nu > 0.0
-                                             or _qv_smooth_nu4 > 0.0
-                                             or _qv_ll_nu4 > 0.0) else None)))
+            qv_smooth_fn=_qv_poststep))
+
+        def _poststep_state(state):
+            # The compiled call returns a rebuilt pytree; write only its edited
+            # leaves back so the rest of the state (a column lane's native
+            # view, which the column models check by identity) is the object
+            # the step returned.
+            if _sponge_decay is None and _qv_poststep is None:
+                return state
+            new = _poststep_jit(state)
+            if _sponge_decay is not None:
+                state = state._replace(u=state.u.replace(data=new.u.data))
+            if _qv_poststep is not None:
+                state = state._replace(tracers={
+                    **state.tracers,
+                    "q_v": state.tracers["q_v"].replace(
+                        data=new.tracers["q_v"].data)})
+            return state
 
         # Profiling windows, off unless LEGOESM_TRACE_STEPS="first:count:dir"
         # (loop-step indices; see ``trace_windows`` for LEGOESM_TRACE_WINDOWS /

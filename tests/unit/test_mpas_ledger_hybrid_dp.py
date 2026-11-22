@@ -96,7 +96,17 @@ def test_hybrid_ledger_closes_with_true_layer_masses():
     assert np.abs(actual_old - actual_true).max() > 1e3 * np.abs(rows - actual_true).max()
 
 
-def test_physics_module_rows_use_true_layer_masses(monkeypatch):
+_ZM_POS = ConvectionConfig(
+    scheme="zhang_mcfarlane",
+    zhang_mcfarlane=ConvectionConfig().zhang_mcfarlane._replace(
+        positivity_after_zm=True, land_fraction="none"))
+
+
+@pytest.mark.parametrize("convection, n_macmic", [
+    (ConvectionConfig(scheme="kuo"), 1),
+    (_ZM_POS, 2),   # + the positivity-after-ZM correction row
+])
+def test_physics_module_rows_use_true_layer_masses(monkeypatch, convection, n_macmic):
     """Every per-module physics row is weighted with the column's true layer
     masses: each ledger_entry_column call from the physics carries
     dp == layer_thickness_dp(p_s).  The step-total test above cannot see
@@ -119,9 +129,13 @@ def test_physics_module_rows_use_true_layer_masses(monkeypatch):
     physics = make_physics(
         PhysicsConfig(radiation=RadiationConfig(scheme="gray"),
                       turbulence=TurbulenceConfig(scheme="louis"),
-                      convection=ConvectionConfig(scheme="kuo")),
-        model_type="mpas", dt=DT, budget_ledger=True)
-    model.step(state, DT, physics_fn=physics, phys_state=None)
+                      convection=convection),
+        model_type="mpas", dt=DT, budget_ledger=True, cld_macmic_num_steps=n_macmic)
+    ps = None
+    if getattr(physics, "_requires_phys_state", False):
+        from legoesm.atmosphere.physics.physics_state import init_physics_state
+        ps = init_physics_state(*state.T.data.shape, PhysicsConfig(convection=convection))
+    model.step(state, DT, physics_fn=physics, phys_state=ps)
     jax.effects_barrier()
     assert len(has_dp) >= 3 and all(has_dp)   # radiation, turbulence, convection
     assert diffs and max(diffs) == 0.0
