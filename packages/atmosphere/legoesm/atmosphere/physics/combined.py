@@ -377,6 +377,16 @@ def make_physics(
     if config.cariolle.enabled and model_type != "mpas":
         raise ValueError("ifs_ozone_chem runs only on the MPAS column lane; "
                          f"got model_type={model_type!r}")
+    if five is not None and five.enabled:
+        # Refused before the host build (votes: GLM/Claude refuse, codex allow).
+        if config.convection.zhang_mcfarlane.positivity_after_zm:
+            raise ValueError("FIVE is not built with positivity_after_zm (the fine "
+                             "grid replays the host ZM tendency)")
+        if getattr(config.microphysics.morrison, "cirrus_nucleation",
+                   "fixed") != "fixed":
+            raise ValueError("FIVE is not built with cirrus_nucleation="
+                             f"{config.microphysics.morrison.cirrus_nucleation!r} "
+                             "(the cirrus aerosol is on the host levels)")
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(
             config, dt, column_mesh=column_mesh, need_rad=need_rad,
