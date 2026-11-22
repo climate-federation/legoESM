@@ -54,7 +54,6 @@ LAT = (45.0, 70.0)
 MIN_FSNO = 0.9
 MIN_LANDFRAC = 0.5
 MAX_SWE = 1000.0          # kg/m2 per cell-month: drops ice-sheet / glacier-capped columns
-SOIL_DZ = 0.1             # m, must equal col%dz(1, nsoil) in clm50_snicar_oracle.F90
 RHO_SNOW = 250.0          # kg/m3, sets layer dz only (CLM aging reads density from it)
 DT = 1800.0
 COSZ = (0.3, 0.45, 0.6)
@@ -187,12 +186,12 @@ def build_oracle(work: Path) -> Path:
 def layer_temps(T_top, g, swe_top, swe_low):
     """Layer-centre temperatures [top, lower, soil] such that CLM5.0 SnowAge_grain's
     diagnosed top-layer gradient |t1 - (t2 dz1 + t1 dz2)/(dz1+dz2)| / dz1 equals g
-    (it reduces to |t1 - t2| / (dz1 + dz2)); the same rule one layer down for the soil.
-    Dry segments must stay below freezing."""
+    (it reduces to |t1 - t2| / (dz1 + dz2)).  The soil node sits at the lower-layer
+    temperature: the gradient is imposed inside the snow only (vote 2026-11-22, a/a/a).
+    Dry segments must keep the snow layers below freezing."""
     dz1, dz2 = swe_top / RHO_SNOW, swe_low / RHO_SNOW
     t2 = T_top + g * (dz1 + dz2)
-    ts = t2 + g * (dz2 + SOIL_DZ)
-    return T_top, t2, ts
+    return T_top, t2, t2
 
 
 def run_oracle(exe: Path, swe_top: float, swe_low: float, cases: list) -> np.ndarray:
@@ -282,7 +281,7 @@ def main() -> int:
         raise SystemExit(f"non-positive layer mass: top {swe_top}, lower {swe_low}")
     for nd, T, g, lq, ft in SCHEDULE:
         t = layer_temps(T, g, swe_top, swe_low)
-        if lq == 0.0 and max(t) >= constants.T_freeze:
+        if lq == 0.0 and max(t[:2]) >= constants.T_freeze:
             raise SystemExit(f"dry segment reaches freezing: {t}")
     phi = sp["bc_phi_frac"]
 
