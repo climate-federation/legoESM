@@ -523,7 +523,8 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
     if config.K_h_pressure_surfaces and not config.K_h > 0:
         raise ValueError("K_h_pressure_surfaces needs K_h > 0 (it corrects the K_h "
                          "temperature diffusion; inert otherwise)")
-    if config.tracer_horizontal_scheme == "flux_fct" and not dt > 0:
+    if (config.tracer_horizontal_scheme == "flux_fct" and isinstance(dt, (int, float))
+            and not dt > 0):
         raise ValueError(f"tracer_horizontal_scheme='flux_fct' needs dt > 0 (got {dt!r})")
 
     def dissipation(ctx, dvel, dT):

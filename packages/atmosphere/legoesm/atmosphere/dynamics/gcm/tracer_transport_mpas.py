@@ -242,7 +242,8 @@ class TracerTransportMPASModel(IntegrationMixin):
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
 
-def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, sharpness):
+def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
+                               upwind_width_ms=1.0e-3):
     """Flux-form, mass-consistent horizontal tracer tendency with Zalesak FCT.
 
     The layer tracer mass ``q dp`` obeys ``d(q dp)/dt = -div(u dp_e q_e)``,
@@ -256,23 +257,34 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, sharpness):
     low-order update over the cell and its neighbours.  Port of the ENSO fork
     (Di Carlo, e0226a4a8b) onto the shared PE core.
 
-    KNOWN DIFFERENCE (RULE 5): the two dimensionless clips of the limiter,
-    ``min(1, room/inflow)`` and the edge's ``min`` of its two cell ratios, are
-    C1 (``core.smooth.min_c1``) at finite ``sharpness``; ``inf`` is the hard
-    Zalesak limiter.  Inside the band (ratio within ``1/sharpness`` of the
-    clip) the smooth value is above the hard one, so the update can leave the
-    bounds by at most that fraction of the antidiffusive flux.  The upwind
-    selection, the sign split of the antidiffusive fluxes, the neighbour
-    minimum/maximum bounds and the zero-inflow test stay hard: each is
-    continuous in the state, so the gradient is exact almost everywhere.
+    KNOWN DIFFERENCE (RULE 5): every switch on the state is C1 or smooth, with
+    ``width = upwind_width_ms = 0`` the fork's hard limiter: the upwind
+    selection is ``|F| -> F tanh(F / (upwind_width_ms dp_e))`` (no flux at
+    rest, less upwind diffusion for ``|u| < ~upwind_width_ms``); the neighbour
+    bounds, the clips ``min(1, R)`` and the edge's ``min`` of its two cell
+    ratios are ``core.smooth`` min/max with a band ``width`` relative to the
+    operands; the inflow/outflow sign split is ``positive_part_rel`` against
+    the cell's total ``sum |out|``; the edge's donor/acceptor choice blends
+    over ``|q2 - q1| < ~width (|q1| + |q2|)``.  Inside these bands the update
+    can leave the low-order bounds by a fraction of order ``width`` of the
+    antidiffusive flux, and ``q_td`` can leave positivity by the reduced
+    upwind diffusion; conservation is exact (one limited flux per edge).
+    The relative bands vanish with their operands, so a comparison against an
+    exactly zero value (an empty cell beside an empty one, ``q_td = q = 0``)
+    stays the hard one.  Measured at the defaults on the unit-test fixtures:
+    0.35-0.69 % of the largest tendency, undershoot down to -1.0e-7 of the
+    largest q (tests/unit/test_mpas_terrain_damping.py).
+    A cell with no antidiffusive inflow (outflow) takes ratio 1, the limit of
+    ``min(1, room/p)`` as ``p -> 0+`` (the fork took 0; the limited flux is
+    zero there either way at the hard limit).
 
     ``q`` (nCells, nlev, ntr); ``u_edge`` (nEdges, nlev); ``dp`` (nCells,
     nlev) and ``dp_edge`` (nEdges, nlev) [Pa]; ``dt`` [s] the step the limiter
     guards (> 0).  Returns (nCells, nlev, ntr).
     """
-    from legoesm.core.smooth import min_c1
+    from legoesm.core.smooth import max_rel, min_rel, positive_part_rel
 
-    if not dt > 0:
+    if isinstance(dt, (int, float)) and not dt > 0:
         raise ValueError(f"tracer_horizontal_flux_fct needs dt > 0 (got {dt!r})")
     nC, nlev, ntr = q.shape
     nE = u_edge.shape[0]
@@ -283,18 +295,25 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, sharpness):
     c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
     dp_c = jnp.where(dp != 0, dp, 1.0)[..., None]        # halo padding (p_s = 0)
     fm = (u_edge * dp_edge)[..., None]                   # (nE, nlev, 1)
+    if upwind_width_ms == 0:
+        a = jnp.abs(fm)
+    else:
+        wa = (upwind_width_ms * jnp.where(dp_edge > 0, dp_edge, 1.0))[..., None]
+        a = fm * jnp.tanh(fm / wa)
     q1, q2 = q[c1], q[c2]
-    f_low = fm * jnp.where(fm >= 0, q1, q2)
-    anti = fm * (0.5 * (q1 + q2)) - f_low
+    f_low = 0.5 * fm * (q1 + q2) - 0.5 * a * (q2 - q1)   # upwind at a = |fm|
+    anti = 0.5 * a * (q2 - q1)                           # centred minus low order
     div_fm = div(fm)
     q_td = q + dt * (q * div_fm - div(f_low)) / dp_c
     # bounds: q and the low-order update over the cell and its neighbours
     coc = mesh.cellsOnCell
     ok = (coc >= 0)[..., None, None]
     coc_s = jnp.maximum(coc, 0)
-    lo, hi = jnp.minimum(q, q_td), jnp.maximum(q, q_td)
-    q_min = jnp.minimum(jnp.min(jnp.where(ok, lo[coc_s], jnp.inf), axis=0), lo)
-    q_max = jnp.maximum(jnp.max(jnp.where(ok, hi[coc_s], -jnp.inf), axis=0), hi)
+    lo, hi = min_rel(q, q_td, width), max_rel(q, q_td, width)
+    nb_lo, nb_hi = jnp.where(ok, lo[coc_s], lo), jnp.where(ok, hi[coc_s], hi)
+    q_min, q_max = lo, hi
+    for k in range(coc.shape[0]):
+        q_min, q_max = min_rel(q_min, nb_lo[k], width), max_rel(q_max, nb_hi[k], width)
     # antidiffusive in/out per cell area (> 0 leaves the cell)
     eoc = mesh.edgesOnCell
     # in the state's precision: a mesh may store its geometry in float32
@@ -302,16 +321,24 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, sharpness):
          * mesh.dvEdge[jnp.maximum(eoc, 0)].astype(q.dtype)
          / mesh.areaCell[None, :].astype(q.dtype))[..., None, None]
     out = w * anti[jnp.maximum(eoc, 0)]
-    p_in = jnp.sum(jnp.maximum(-out, 0.0), axis=0)
-    p_out = jnp.sum(jnp.maximum(out, 0.0), axis=0)
-    # q_max >= q_td >= q_min by construction, so the rooms are >= 0
+    scale = jnp.sum(jnp.abs(out), axis=0)
+    p_in = jnp.sum(positive_part_rel(-out, scale, width), axis=0)
+    p_out = jnp.sum(positive_part_rel(out, scale, width), axis=0)
+    # rooms are >= 0: the bounds include q_td and the smooth max (min) is
+    # never below (above) the hard one
     room_in = (q_max - q_td) * dp_c / dt
     room_out = (q_td - q_min) * dp_c / dt
 
     def ratio(room, p):
-        return jnp.where(p > 0, min_c1(1.0, room / jnp.where(p > 0, p, 1.0), sharpness), 0.0)
+        return jnp.where(p > 0, min_rel(1.0, room / jnp.where(p > 0, p, 1.0), width), 1.0)
 
     r_plus, r_minus = ratio(room_in, p_in), ratio(room_out, p_out)
-    lim = jnp.where(anti >= 0, min_c1(r_minus[c1], r_plus[c2], sharpness),
-                    min_c1(r_plus[c1], r_minus[c2], sharpness))
+    if width == 0:
+        acc = (anti >= 0).astype(q.dtype)
+    else:
+        se = width * 0.5 * a * (jnp.abs(q1) + jnp.abs(q2))
+        pos = se > 0
+        acc = jnp.where(pos, 0.5 * (1.0 + jnp.tanh(anti / jnp.where(pos, se, 1.0))), 0.5)
+    lim = (acc * min_rel(r_minus[c1], r_plus[c2], width)
+           + (1.0 - acc) * min_rel(r_plus[c1], r_minus[c2], width))
     return (q * div_fm - div(f_low + lim * anti)) / dp_c

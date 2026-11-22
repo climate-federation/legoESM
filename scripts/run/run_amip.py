@@ -610,11 +610,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="MPAS horizontal tracer transport (shared PE core): "
                              "'advective' (centred) or 'flux_fct' (flux form + "
                              "Zalesak FCT)")
-    parser.add_argument("--mpas-fct-limiter-sharpness", type=float,
-                        default=_DYCORE_DEFAULTS.mpas_fct_limiter_sharpness,
-                        dest="mpas_fct_limiter_sharpness",
-                        help="C1 sharpness of the flux_fct limiter clips; inf = "
-                             "the hard Zalesak limiter")
+    parser.add_argument("--mpas-fct-smoothing-width", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_fct_smoothing_width,
+                        dest="mpas_fct_smoothing_width",
+                        help="relative band of the flux_fct limiter's smooth "
+                             "min/max and sign splits; 0 = hard Zalesak")
+    parser.add_argument("--mpas-fct-upwind-width-ms", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_fct_upwind_width_ms,
+                        dest="mpas_fct_upwind_width_ms",
+                        help="speed scale [m/s] of the flux_fct smooth upwind "
+                             "selection; 0 = hard upwind")
     parser.add_argument("--mpas-kh-pressure-surfaces",
                         action=argparse.BooleanOptionalAction,
                         default=_DYCORE_DEFAULTS.mpas_kh_pressure_surfaces,
@@ -3274,7 +3279,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
         mpas_vert_ppm_limiter_sharpness=args.mpas_vert_ppm_limiter_sharpness,
         mpas_tracer_horizontal_scheme=args.mpas_tracer_horizontal_scheme,
-        mpas_fct_limiter_sharpness=args.mpas_fct_limiter_sharpness,
+        mpas_fct_smoothing_width=args.mpas_fct_smoothing_width,
+        mpas_fct_upwind_width_ms=args.mpas_fct_upwind_width_ms,
         mpas_kh_pressure_surfaces=args.mpas_kh_pressure_surfaces,
         mpas_edge_scaled_damping=args.mpas_edge_scaled_damping,
         mpas_damping_exp_del2=args.mpas_damping_exp_del2,

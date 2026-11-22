@@ -263,8 +263,11 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # (flux form on the continuity's layer mass flux, upwind + Zalesak FCT,
     # ``tracer_transport_mpas.tracer_horizontal_flux_fct``).
     tracer_horizontal_scheme: str = "advective"
-    # C1 width of the FCT limiter clips (RULE 5): inf = hard Zalesak.
-    fct_limiter_sharpness: float = 1.0e4
+    # RULE 5 widths of the FCT switches: relative band of its min/max, sign
+    # splits and donor/acceptor blend (dimensionless), and the upwind
+    # selection's speed scale [m/s]; both 0 = the hard Zalesak limiter.
+    fct_smoothing_width: float = 1.0e-4
+    fct_upwind_width_ms: float = 1.0e-3
     # K_h temperature diffusion on pressure surfaces, leading term (CAM3,
     # Collins et al. 2004, eq. 3.84): lap_p T = lap T - (dT/dp) B lap(p_s).
     K_h_pressure_surfaces: bool = False
@@ -659,7 +662,8 @@ def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
         q = jnp.stack([tracers[k].data for k in _tnames], axis=-1)
         if config.tracer_horizontal_scheme == "flux_fct":
             dq = tracer_horizontal_flux_fct(q, u_3d, dp, dp_edge, mesh, dt,
-                                            config.fct_limiter_sharpness)
+                                            config.fct_smoothing_width,
+                                            config.fct_upwind_width_ms)
         elif config.tracer_horizontal_scheme == "advective":
             dq = tracer_horizontal_advection(q, u_3d, mesh)
         else:

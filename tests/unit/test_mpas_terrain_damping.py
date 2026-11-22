@@ -74,74 +74,113 @@ def _her_fct(q, u_edge, dp, dp_edge, mesh, dt):
     return (q * divFm - cell_net_outflow(F_low + C * A)) / m
 
 
-def _fct_case(seed, nlev=4, ntr=2):
+def _fct_case(seed, nlev=4, ntr=2, band=False, rest=False):
+    """Random tracer (30 % empty cells), winds and layer thicknesses.
+    ``band``: a third of the edges at |u| ~ the upwind width and a patch of
+    near-equal tracer (relative spread 1e-5 < the default width), so the
+    smooth switches act; ``rest``: u = 0."""
     rng = np.random.default_rng(seed)
     q = rng.uniform(0.0, 1e-2, (MESH.nCells, nlev, ntr))
     q[rng.random(q.shape) < 0.3] = 0.0                      # empty cells next to full
     u = 30.0 * rng.standard_normal((MESH.nEdges, nlev))
+    if band:
+        slow = rng.random(MESH.nEdges) < 0.33
+        u[slow] = 2e-3 * rng.standard_normal((int(slow.sum()), nlev))
+        patch = np.asarray(MESH.latCell) > 0.6
+        q[patch] = 5e-3 * (1.0 + 1e-5 * rng.standard_normal(q[patch].shape))
+    if rest:
+        u[:] = 0.0
     dp = 1000.0 + 200.0 * rng.random((MESH.nCells, nlev))
     dp, q, u = jnp.asarray(dp), jnp.asarray(q), jnp.asarray(u)
     return q, u, dp, 0.5 * (dp[C1] + dp[C2])
 
 
-# Measured relative gap max|dq(s) - dq(inf)| / max|dq(inf)| per case (RULE 5;
-# re-measure if the C1 form or the default changes).  At the default s = 1e4
-# no limiter ratio of these cases falls inside the C1 band (within 1e-4 of the
-# clip), so the gap is exactly 0; s = 10 enters the band and shows the form acts.
-_FCT_GAPS = {0: 0.0, 1: 0.0, 2: 0.0}
-_FCT_GAPS_S10 = {0: 0.00660164566447836, 1: 0.003870589070275595, 2: 0.006329594718702451}
+def _fct(case, width=1.0e-4, upwind=1.0e-3):
+    q, u, dp, dpe = case
+    return tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, DT, width, upwind)
 
 
-def _rel_gap(seed, sharpness=1.0e4):
-    q, u, dp, dpe = _fct_case(seed)
-    hard = tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, DT, float("inf"))
-    soft = tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, DT, sharpness)
-    return float(jnp.max(jnp.abs(soft - hard)) / jnp.max(jnp.abs(hard)))
+# Measured relative gap max|dq(default) - dq(hard)| / max|dq(hard)| per case
+# (RULE 5; re-measure if a smooth form or a default width changes), and the
+# measured bound excursion (min of q_new - q_min_hard_global, below 0 = undershoot,
+# relative to max q) at the default.
+_CASES = {"r0": dict(seed=0), "r1": dict(seed=1), "b2": dict(seed=2, band=True),
+          "b3": dict(seed=3, band=True)}
+_FCT_GAPS = {"r0": 0.003462651114538273, "r1": 0.0034495215921320995,
+             "b2": 0.006897876748284032, "b3": 0.0037767372250137837}
+_FCT_UNDERSHOOT = {"r0": -1.2379200473059927e-18, "r1": -2.748431301399831e-12,
+                   "b2": -1.0254275332828464e-07, "b3": -4.8660095403649204e-08}
+
+
+def _rel_gap(name):
+    case = _fct_case(**_CASES[name])
+    hard = _fct(case, 0.0, 0.0)
+    return float(jnp.max(jnp.abs(_fct(case) - hard)) / jnp.max(jnp.abs(hard)))
+
+
+def _undershoot(name):
+    case = _fct_case(**_CASES[name])
+    q = case[0]
+    return float((q + DT * _fct(case)).min() / q.max())
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_fct_hard_limit_matches_the_fork(seed):
-    q, u, dp, dpe = _fct_case(seed)
-    ours = tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, DT, float("inf"))
+    q, u, dp, dpe = case = _fct_case(seed, band=seed == 2)
+    ours = _fct(case, 0.0, 0.0)
     ref = _her_fct(q, u, dp, dpe, MESH, DT)
     # same arithmetic up to the order of the divisions: 6.3e-15 of the largest
     # tendency measured on case 0
     np.testing.assert_allclose(ours, ref, rtol=1e-10, atol=1e-12 * float(jnp.max(jnp.abs(ref))))
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
-def test_fct_default_gap_per_case(seed):
-    assert _rel_gap(seed) == pytest.approx(_FCT_GAPS[seed], rel=1e-6, abs=1e-12)
-    assert _rel_gap(seed, 10.0) == pytest.approx(_FCT_GAPS_S10[seed], rel=1e-6, abs=1e-12)
-    assert _FCT_GAPS_S10[seed] > 0.0
+@pytest.mark.parametrize("name", list(_CASES))
+def test_fct_default_gap_per_case(name):
+    assert _rel_gap(name) == pytest.approx(_FCT_GAPS[name], rel=1e-6, abs=1e-12)
+    assert _undershoot(name) == pytest.approx(_FCT_UNDERSHOOT[name], rel=1e-6, abs=1e-12)
 
 
-def test_fct_gradient_at_the_default():
-    q, u, dp, dpe = _fct_case(3, nlev=2, ntr=1)
+@pytest.mark.parametrize("kw", [dict(seed=3, band=True), dict(seed=4, rest=True)])
+def test_fct_gradient_at_the_default(kw):
+    q, u, dp, dpe = _fct_case(nlev=2, ntr=1, **kw)
+    # strictly positive: at an exactly zero operand the relative bands vanish
+    # and the switch is the hard one (KNOWN DIFFERENCE in the docstring)
+    q = jnp.maximum(q, 1e-4)
+    r = jnp.asarray(np.random.default_rng(9).standard_normal(q.shape))
 
-    def f(q, u):
-        return jnp.sum(tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, DT, 1.0e4) ** 2)
+    def f(q, v, width=1.0e-4, upwind=1.0e-3):   # v = u / 1e4: a 1e-6 m/s step at eps 1e-10
+        return jnp.sum(r * tracer_horizontal_flux_fct(q, 1e4 * v, dp, dpe, MESH, DT, width, upwind))
 
-    g = jax.grad(f)(q, u)
-    assert float(jnp.abs(g).max()) > 0.0
-    check_grads(f, (q, u), order=1, modes=("fwd", "rev"), eps=1e-7, atol=1e-6, rtol=1e-4)
+    u = u / 1e4
+
+    assert float(jnp.abs(jax.grad(f, argnums=1)(q, u)).max()) > 0.0
+    # the step must stay inside the bands (relative 1e-4 of q ~ 5e-7, upwind
+    # 1e-3 m/s) for the difference quotient to resolve the C1 forms
+    check_grads(f, (q, u), order=1, modes=("fwd", "rev"), eps=1e-11, atol=1e-6, rtol=1e-4)
+    if kw.get("band"):
+        # non-vacuous: the hard limiter's kinks inside the step fail it here
+        # (measured: AD 0.0256 vs difference quotient 0.0336)
+        with pytest.raises(AssertionError):
+            check_grads(lambda q, u: f(q, u, 0.0, 0.0), (q, u), order=1, modes=("fwd",),
+                        eps=1e-11, atol=1e-6, rtol=1e-4)
 
 
 def test_fct_uniform_stays_uniform_and_mass_closes():
-    q, u, dp, dpe = _fct_case(4)
+    q, u, dp, dpe = case = _fct_case(4, band=True)
     one = jnp.full_like(q, 3.0e-3)
-    assert float(jnp.abs(tracer_horizontal_flux_fct(one, u, dp, dpe, MESH, DT, 1.0e4)).max()) < 1e-18
-    dq = tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, DT, 1.0e4)
+    assert float(jnp.abs(_fct((one, u, dp, dpe))).max()) < 1e-18
+    dq = _fct(case)
     div_fm = divergence_cell_3d(u * dpe, MESH)[..., None]
     # d(q dp)/dt = dp dq/dt + q d(dp)/dt, d(dp)/dt = -div(u dp_e): sums to 0
     total = jnp.sum(MESH.areaCell[:, None, None] * (dp[..., None] * dq - q * div_fm), axis=0)
     scale = jnp.sum(MESH.areaCell[:, None, None] * jnp.abs(dp[..., None] * dq), axis=0)
     assert float(jnp.max(jnp.abs(total) / scale)) < 1e-12
+    assert float(jnp.abs(_fct((q, 0.0 * u, dp, dpe))).max()) == 0.0   # no flux at rest
 
 
 def test_fct_hard_limit_keeps_the_low_order_bounds():
-    q, u, dp, dpe = _fct_case(5)
-    q_new = q + DT * tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, DT, float("inf"))
+    q, u, dp, dpe = case = _fct_case(5)
+    q_new = q + DT * _fct(case, 0.0, 0.0)
     assert float(q_new.min()) >= -1e-15 and float(q_new.max()) <= float(q.max()) + 1e-15
     # non-vacuous: the unlimited centred flux form undershoots on this case
     fm = u * dpe
@@ -153,10 +192,39 @@ def test_fct_hard_limit_keeps_the_low_order_bounds():
     assert float(centred.min()) < -1e-12
 
 
+@pytest.mark.parametrize("depth,match", [(3, True), (2, False)])
+def test_fct_partition_parity_needs_two_complete_rings(depth, match):
+    from legoesm.parallel.voronoi_mpi import make_voronoi_partition_layout
+    # sparse spikes: a halo cell's low-order update is an extremum of its
+    # neighbour's bounds only next to an isolated value (measured: depth 2 off
+    # by 2.8e-4 of the largest tendency at 16 ranks, 0 at 4 and 8)
+    q, u, dp, dpe = _fct_case(6)
+    q = jnp.asarray(1e-2 * (np.random.default_rng(6).random(q.shape) < 0.08))
+    case = (q, u, dp, dpe)
+    glob = _fct(case)
+    worst = 0.0
+    for rank in range(16):
+        lay = make_voronoi_partition_layout(MESH, rank, 16, halo_depth=depth)
+        lc, le = np.asarray(lay.partition.local_cells), np.asarray(lay.partition.local_edges)
+        loc = tracer_horizontal_flux_fct(q[lc], u[le], dp[lc], dpe[le], lay.local_mesh, DT)
+        own = np.asarray(lay.owned_mask_cells)
+        worst = max(worst, float(jnp.abs(loc[own] - glob[lc][own]).max()))
+    scale = float(jnp.abs(glob).max())
+    assert (worst <= 1e-12 * scale) == match, worst / scale
+
+
+def test_fct_jitted_model_step():
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationModel
+    cfg = MPASPrimitiveEquationConfig(vertical_form="as83", tracer_horizontal_scheme="flux_fct")
+    model = MPASPrimitiveEquationModel(MESH, SIGMA, cfg)
+    st = model.step(_state(), dt=DT)
+    assert bool(jnp.all(jnp.isfinite(st.tracers["q_v"].data)))
+
+
 def test_fct_refuses_nonpositive_dt():
     q, u, dp, dpe = _fct_case(0)
     with pytest.raises(ValueError, match="dt > 0"):
-        tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, 0.0, 1.0e4)
+        tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, 0.0)
 
 
 # ---------------------------------------------------------------- shared core
@@ -346,7 +414,8 @@ def test_deck_reaches_the_dycore_and_validates(name):
     m = create_atmosphere_dycore(cfg, MESH, SIGMA).config
     assert m.vertical_form == "as83"
     if "mpas_tracer_horizontal_scheme" in rows:
-        assert m.tracer_horizontal_scheme == "flux_fct" and m.fct_limiter_sharpness == 1.0e4
+        assert m.tracer_horizontal_scheme == "flux_fct"
+        assert (m.fct_smoothing_width, m.fct_upwind_width_ms) == (1.0e-4, 1.0e-3)
     elif "mpas_kh_pressure_surfaces" in rows:
         assert m.K_h_pressure_surfaces and m.K_h > 0.0
     else:
@@ -360,7 +429,8 @@ def test_validate_strict_refuses_bad_settings():
     prod = _cfg(_AMIP / "amip_production.yaml")
     d = prod.dycore
     for repl, word in (({"mpas_tracer_horizontal_scheme": "fct"}, "mpas_tracer_horizontal_scheme"),
-                       ({"mpas_fct_limiter_sharpness": 0.0}, "mpas_fct_limiter_sharpness"),
+                       ({"mpas_fct_smoothing_width": -1.0}, "mpas_fct_smoothing_width"),
+                       ({"mpas_fct_upwind_width_ms": float("nan")}, "mpas_fct_upwind_width_ms"),
                        ({"mpas_damping_exp_del4": -1.0}, "mpas_damping_exp_del4"),
                        ({"mpas_kh_pressure_surfaces": True, "vertical_form": "legacy"},
                         "shared PE core only")):
@@ -372,11 +442,13 @@ def test_cli_flags_round_trip():
     from scripts.run import run_amip
     p = run_amip.build_arg_parser()
     cfg = run_amip.build_config_from_args(p.parse_args([
-        "--mpas-tracer-horizontal-scheme", "flux_fct", "--mpas-fct-limiter-sharpness", "inf",
+        "--mpas-tracer-horizontal-scheme", "flux_fct", "--mpas-fct-smoothing-width", "0",
+        "--mpas-fct-upwind-width-ms", "0.01",
         "--mpas-kh-pressure-surfaces", "--mpas-edge-scaled-damping",
         "--mpas-damping-exp-del2", "1.5", "--mpas-damping-exp-del4", "3.0"]))
     d = cfg.dycore
-    assert (d.mpas_tracer_horizontal_scheme, d.mpas_fct_limiter_sharpness,
+    assert d.mpas_fct_upwind_width_ms == 0.01
+    assert (d.mpas_tracer_horizontal_scheme, d.mpas_fct_smoothing_width,
             d.mpas_kh_pressure_surfaces, d.mpas_edge_scaled_damping,
             d.mpas_damping_exp_del2, d.mpas_damping_exp_del4) == (
-        "flux_fct", float("inf"), True, True, 1.5, 3.0)
+        "flux_fct", 0.0, True, True, 1.5, 3.0)

@@ -475,12 +475,14 @@ class DycoreConfig(NamedTuple):
     # ``component_factory`` into MPASPrimitiveEquationConfig fields of the
     # same name without the ``mpas_`` prefix:
     # horizontal tracer transport "advective" (centred) or "flux_fct" (flux
-    # form + Zalesak FCT); the FCT limiter clips' C1 sharpness (inf = hard);
+    # form + Zalesak FCT); the FCT switches' RULE 5 widths (relative, and the
+    # upwind speed scale in m/s; 0 = hard);
     # K_h temperature diffusion on pressure surfaces (CAM3 eq. 3.84 leading
     # term); per-edge damping scaled by meshDensity with exponents for the
     # del2 (and K_h) and del4 (and ps del4, ldiv4) terms.  All off = unchanged.
     mpas_tracer_horizontal_scheme: str = "advective"
-    mpas_fct_limiter_sharpness: float = 1.0e4
+    mpas_fct_smoothing_width: float = 1.0e-4
+    mpas_fct_upwind_width_ms: float = 1.0e-3
     mpas_kh_pressure_surfaces: bool = False
     mpas_edge_scaled_damping: bool = False
     mpas_damping_exp_del2: float = 2.0
@@ -4764,12 +4766,8 @@ class ExperimentConfig(NamedTuple):
         if d.mpas_tracer_horizontal_scheme not in ("advective", "flux_fct"):
             errors.append("dycore.mpas_tracer_horizontal_scheme must be 'advective' "
                           f"or 'flux_fct'; got {d.mpas_tracer_horizontal_scheme!r}.")
-        _fcts = d.mpas_fct_limiter_sharpness
-        if (isinstance(_fcts, bool) or not isinstance(_fcts, (int, float))
-                or not (_fcts > 0)):
-            errors.append("dycore.mpas_fct_limiter_sharpness must be a number > 0 "
-                          f"(inf = hard Zalesak limiter); got {_fcts!r}.")
-        for _ek in ("mpas_damping_exp_del2", "mpas_damping_exp_del4"):
+        for _ek in ("mpas_fct_smoothing_width", "mpas_fct_upwind_width_ms",
+                    "mpas_damping_exp_del2", "mpas_damping_exp_del4"):
             _ev = getattr(d, _ek)
             if (isinstance(_ev, bool) or not isinstance(_ev, (int, float))
                     or not (math.isfinite(_ev) and _ev >= 0.0)):
