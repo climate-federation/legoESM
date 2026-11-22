@@ -185,8 +185,14 @@ def make_physics(
     cam6_activation=None,
     mynn_initflag=None,
     cirrus_aerosol=None,
+    five=None,
+    five_host_coord=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
+
+    ``five``: a :class:`~legoesm.atmosphere.physics.five.FiveConfig`; None or
+    ``enabled=False`` (default) returns exactly the function built without it.
+    ``five_host_coord``: the host hybrid coordinate FIVE nests its fine grid in.
 
     The returned function calls each enabled physics module and sums
     their tendencies.
@@ -373,6 +379,16 @@ def make_physics(
     if config.cariolle.enabled and model_type != "mpas":
         raise ValueError("ifs_ozone_chem runs only on the MPAS column lane; "
                          f"got model_type={model_type!r}")
+    if five is not None and five.enabled:
+        # Refused before the host build (votes: GLM/Claude refuse, codex allow).
+        if config.convection.zhang_mcfarlane.positivity_after_zm:
+            raise ValueError("FIVE is not built with positivity_after_zm (the fine "
+                             "grid replays the host ZM tendency)")
+        if getattr(config.microphysics.morrison, "cirrus_nucleation",
+                   "fixed") != "fixed":
+            raise ValueError("FIVE is not built with cirrus_nucleation="
+                             f"{config.microphysics.morrison.cirrus_nucleation!r} "
+                             "(the cirrus aerosol is on the host levels)")
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(
             config, dt, column_mesh=column_mesh, need_rad=need_rad,
@@ -413,7 +429,53 @@ def make_physics(
     fn._mynn_initflag = mynn_initflag
     fn._requires_phys_state = (physics_config_requires_phys_state(config)
                                or physics_cadence != "off")
+    if five is not None and five.enabled:
+        fn = _wrap_five(fn, config, five, model_type, dt, column_mesh, need_rad,
+                        f_land, land_beta, budget_ledger, physics_cadence,
+                        cld_macmic_num_steps, surface_bulk_coeffs,
+                        cam6_activation, mynn_initflag, five_host_coord)
     return fn
+
+
+def _wrap_five(host_fn, config, five, model_type, dt, column_mesh, need_rad,
+               f_land, land_beta, budget_ledger, physics_cadence,
+               cld_macmic_num_steps, surface_bulk_coeffs, cam6_activation,
+               mynn_initflag, host_coord):
+    """Build the FIVE fine physics beside ``host_fn`` (docs/85 13.24)."""
+    from legoesm.atmosphere.physics.convection.integration import make_convection_physics
+    from legoesm.atmosphere.physics import five as five_mod
+    five_mod.validate_five_config(five)
+    if model_type != "mpas" or int(cld_macmic_num_steps) < 2:
+        raise ValueError("FIVE runs on the MPAS lane with cld_macmic_num_steps >= 2")
+    if budget_ledger or physics_cadence != "off":
+        raise ValueError("FIVE is not built with the budget ledger or the physics cadence cache")
+    if config.turbulence.scheme != "clubb":
+        raise ValueError("FIVE needs CLUBB turbulence (the fine moments are CLUBB's)")
+    if getattr(config.turbulence, "host_omega", False):
+        raise ValueError("FIVE does not pass the host omega to the fine CLUBB yet")
+    if config.microphysics.scheme == "ifs_cloudsc":
+        raise ValueError("FIVE is not built with ifs_cloudsc (no convection replay hand-off)")
+    if host_coord is None:
+        raise ValueError("FIVE needs the host vertical coordinate (five_host_coord), "
+                         "a hybrid sigma-pressure coordinate")
+    G = five_mod.build_five_grid(host_coord, five)
+    replay = (five_mod.make_conv_replay(G, config, dt, five)
+              if config.convection.scheme != "none" else None)
+    fine_fn = _make_hydrostatic_combined(
+        config, dt, model_type="mpas", column_mesh=column_mesh,
+        need_rad=need_rad, f_land=f_land, land_beta=land_beta,
+        cld_macmic_num_steps=cld_macmic_num_steps,
+        surface_bulk_coeffs=surface_bulk_coeffs,
+        cam6_activation=cam6_activation, mynn_initflag=mynn_initflag,
+        convection_override=replay)
+    zm_fn = None
+    if replay is not None:
+        defer = (config.convection.scheme == "zhang_mcfarlane")
+        zm_fn = make_convection_physics(config.convection, "mpas", dt,
+                                        defer_detrainment=defer)
+    fn = five_mod.make_five_physics(host_fn, fine_fn, zm_fn, G, five, config, dt)
+    return _attach_lifecycle_hooks(
+        fn, [(f, None, None) for f in (host_fn, fine_fn, zm_fn) if f is not None])
 
 
 def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
@@ -751,8 +813,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                surface_bulk_coeffs=None,
                                cam6_activation=None,
                                mynn_initflag=None,
+                               convection_override=None,
                                cirrus_aerosol=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
+
+    ``convection_override``: a module used in place of the configured
+    convection (FIVE's replay of the host ZM on the fine grid); None (default)
+    builds the configured one.
 
     ``surface_bulk_coeffs`` ``(C_H, C_E, latent)``: the constant-coefficient surface
     exchange (:func:`~legoesm.atmosphere.physics.turbulence.integration.make_surface_bulk_physics`)
@@ -918,7 +985,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(
             config.convection, model_type, dt,
-            defer_detrainment=_defer_dlf, defer_to_cloudsc=_cloudsc),
+            defer_detrainment=_defer_dlf, defer_to_cloudsc=_cloudsc)
+            if convection_override is None else convection_override,
             True, "conv_prog_profile"))
     _turb_entry = None
     _micro_entry = None
@@ -1073,7 +1141,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     from legoesm.diagnostics.process_ledger import LEDGER_WATER_SPECIES
     _LEDGER_WATER = LEDGER_WATER_SPECIES
 
-    def _module_ledger_row(t, p_s, dsigma):
+    def _module_ledger_row(t, p_s, dsigma, dp=None):
         """One module's per-column ``[water, energy]`` from its OWN tendency.
 
         Simpler than the FV capture, which must reach into intermediate
@@ -1090,7 +1158,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             for _k in _LEDGER_WATER:
                 if _k in tt:
                     dq = tt[_k].data if dq is None else dq + tt[_k].data
-        return ledger_entry_column(dq, t.dT_dt.data, p_s, dsigma,
+        return ledger_entry_column(dq, t.dT_dt.data, p_s, dsigma, dp=dp,
                                    level_weight=_ledger_level_weight)
 
     def _zero_tendencies(state, has_v):
@@ -1185,6 +1253,15 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             from legoesm.diagnostics.process_ledger import zero_ledger_column
             _bl_dsigma = sigma_coord.dsigma
             _bl_ps = state.p_s.data
+            # The column's true layer masses: on a hybrid grid p_s*dsigma is
+            # off over terrain (0.25 percent of the physics rows at MPAS level
+            # 1 with CAM L32), and the ledger must match the column store.
+            # p_s in the conservation accumulator's precision first, as the
+            # p_s*dsigma path did: a float32 dp would put rounding of order
+            # 1e-7 of the column store into a one-step budget difference.
+            from legoesm.core.conservation import conservation_accumulator
+            _bl_dp = sigma_coord.layer_thickness_dp(
+                _bl_ps.astype(conservation_accumulator()))
             # Budget accumulator in the WIDEST available float (f64 under
             # x64, f32 otherwise — canonicalize_dtype respects the setting):
             # per-module rows arrive in MIXED precision (f32 radiation, f64
@@ -1196,7 +1273,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             _led_dtype = canonicalize_dtype(jnp.float64)
             _led = zero_ledger_column(_bl_ps.shape[0], dtype=_led_dtype)
             _led = _led.at[:, ledger_rows[0], :].add(
-                _module_ledger_row(first, _bl_ps, _bl_dsigma)
+                _module_ledger_row(first, _bl_ps, _bl_dsigma, _bl_dp)
                 .astype(_led_dtype))
 
         # Accumulate tracer tendencies from all physics modules
@@ -1234,7 +1311,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 # the same row (e.g. GWD and any future module on
                 # other_physics), and a set would silently discard the first.
                 _led = _led.at[:, ledger_rows[_i_mod], :].add(
-                    _module_ledger_row(t, _bl_ps, _bl_dsigma)
+                    _module_ledger_row(t, _bl_ps, _bl_dsigma, _bl_dp)
                     .astype(_led.dtype))
             du_dt = du_dt + t.du_dt.data
             if dv_dt is not None and t.dv_dt is not None:
@@ -1462,8 +1539,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     from legoesm.diagnostics.process_ledger import ledger_entry_column
                     _dq_fix = sum((_tr_out[k] - _tr_in[k]) / dt
                                   for k in _LEDGER_WATER if k in _tr_out)
+                    from legoesm.core.conservation import conservation_accumulator
                     _led = _led.at[:, sel["pre"][0][1], :].add(ledger_entry_column(
                         _dq_fix, _dT_fix, state.p_s.data, sigma_coord.dsigma,
+                        dp=sigma_coord.layer_thickness_dp(
+                            state.p_s.data.astype(conservation_accumulator())),
                         level_weight=_ledger_level_weight).astype(_led.dtype))
                 r_pre = (r_pre[:2] + (r_pre[2] + _dT_fix,)
                          + r_pre[3:5] + (_tr_t,) + r_pre[6:10] + (_led,) + r_pre[11:])
@@ -1565,6 +1645,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     # without this the radiation row would read zero on every
                     # held step and the ledger would not sum to the applied
                     # total.  Pinned by a held-step closure test.
+                    from legoesm.core.conservation import conservation_accumulator
                     from legoesm.diagnostics.process_ledger import (
                         ROW_RADIATION, ledger_entry_column,
                     )
@@ -1572,6 +1653,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                         ledger_entry_column(
                             None, cached_rad.reshape(dT_dt.shape),
                             state.p_s.data, sigma_coord.dsigma,
+                            dp=sigma_coord.layer_thickness_dp(
+                                state.p_s.data.astype(conservation_accumulator())),
                             level_weight=_ledger_level_weight)
                         .astype(_led.dtype))
             combined = _build_combined(

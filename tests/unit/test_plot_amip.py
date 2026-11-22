@@ -37,7 +37,7 @@ def fake_run_dir(tmp_path):
         "energy_toa_net": np.zeros(n),
         "dry_mass_ps": 101325.0 * np.ones(n),
         "moisture_residual": np.zeros(n),
-        "energy_residual": np.zeros(n),
+        "energy_toa_minus_dE_dt": np.zeros(n),
         "sigma": np.linspace(0.05, 0.95, 10),
         "profiles_T": np.tile(np.linspace(200, 300, 10), (n, 1)),
         "profiles_qv": np.tile(np.linspace(0.1, 10, 10), (n, 1)),

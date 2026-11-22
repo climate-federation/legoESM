@@ -27,6 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
+from legoesm.diagnostics.energy_budget import read_toa_minus_dE_dt
+
 
 # Tripwire ceiling for the per-cell TIME-MEAN surface latent heat flux.
 # Earth's strongest climatological cell means (western boundary currents,
@@ -200,8 +202,8 @@ def validate(run_dir: Path, *, strict: bool = False) -> int:
     # ``n`` keeps a year-long run inside the cold-start band and would
     # mask a divergent imbalance.  The right gate is elapsed simulated
     # time, which is what the radiative-equilibrium argument cares about.
-    if "energy_residual" in ts:
-        res = ts["energy_residual"]
+    res = read_toa_minus_dE_dt(ts, source=str(ts_path))
+    if res is not None:
         rmax = float(np.nanmax(np.abs(res))) if res.size else 0.0
         sim_days = float(days[-1]) if days.size > 0 else 0.0
         # Tighten the bound as the simulation progresses (in days, not
@@ -213,7 +215,7 @@ def validate(run_dir: Path, *, strict: bool = False) -> int:
         else:
             bound, warn_thr = 50.0, 5.0      # production
         if not _check(
-            f"|TOA energy residual| max [W/m²] "
+            f"|TOA - atmospheric dE/dt| max [W/m²] "
             f"(sim_days={sim_days:.1f}, bound={bound})",
             rmax, lambda x: x < bound, fatal=True, skip_if_nan=True,
         ):

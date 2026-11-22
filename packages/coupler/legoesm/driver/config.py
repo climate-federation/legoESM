@@ -462,6 +462,14 @@ class DycoreConfig(NamedTuple):
     tracer_vertical_scheme: Literal["sb", "van_leer"] | None = None
     tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
     tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
+    # Rate [1/s] of the MPAS vertical del4 filter on tracers.  None = follow
+    # ``mpas_nu_vert4_T`` (bit-identical); 0.0 leaves tracers unfiltered while
+    # T keeps ``mpas_nu_vert4_T``.  Threaded by ``component_factory``.
+    mpas_nu_vert4_tracer: float | None = None
+    # Sharpness of the PPM limiter's branch decisions under
+    # mpas_vert_advection_scheme = "ppm" (RULE 5): inf = CAM-FV's ppm2m
+    # exactly.  Unused by every other scheme.
+    mpas_vert_ppm_limiter_sharpness: float = 1.0e4
 
 
 class EvaluationConfig(NamedTuple):
@@ -4551,7 +4559,7 @@ class ExperimentConfig(NamedTuple):
                     "Unset it or use the MPAS lane.")
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
-        _vert_adv_options = ("upwind", "van_leer", "sb")
+        _vert_adv_options = ("upwind", "van_leer", "sb", "ppm")
         _snu = d.spectral_sponge_nu_top_m2s
         if not (isinstance(_snu, (int, float)) and not isinstance(_snu, bool)
                 and math.isfinite(_snu) and _snu >= 0.0):
@@ -4696,10 +4704,12 @@ class ExperimentConfig(NamedTuple):
             # 'van_leer' is sigma-only; 'sb' (conservative Simmons-Burridge
             # flux form) is HYBRID-only.  Each lane refuses the other's scheme
             # rather than run it silently inert.
-            _sb = d.mpas_vert_advection_scheme == "sb"
+            # 'ppm' (CAM-FV parabolas in that flux form) is hybrid-only too.
+            _sb = d.mpas_vert_advection_scheme in ("sb", "ppm")
             if _sb and g.vertical_coord == "sigma":
                 errors.append(
-                    "dycore.mpas_vert_advection_scheme='sb' is the conservative "
+                    f"dycore.mpas_vert_advection_scheme="
+                    f"{d.mpas_vert_advection_scheme!r} is a conservative "
                     "flux form of the HYBRID vertical transport; on "
                     "vertical_coord='sigma' it would be silently inert. "
                     "Use a hybrid vertical_coord, or 'upwind'/'van_leer'.")
@@ -4717,6 +4727,25 @@ class ExperimentConfig(NamedTuple):
                     f"{d.mpas_vert_advection_scheme!r} needs at least 4 "
                     f"vertical levels for its 4-cell stencil; grid.nlev="
                     f"{g.nlev}.")
+        _nu4t = d.mpas_nu_vert4_tracer
+        if _nu4t is not None and (
+                isinstance(_nu4t, bool) or not isinstance(_nu4t, (int, float))
+                or not (math.isfinite(_nu4t) and _nu4t >= 0.0)):
+            errors.append(
+                "dycore.mpas_nu_vert4_tracer must be None or a finite number "
+                f">= 0 [1/s]; got {_nu4t!r}.")
+        if d.mpas_vert_advection_scheme == "ppm" and d.vertical_form != "legacy":
+            errors.append(
+                "dycore.mpas_vert_advection_scheme='ppm' is wired into the MPAS "
+                "legacy vertical form only; with dycore.vertical_form="
+                f"{d.vertical_form!r} the shared PE core refuses it. Set "
+                "vertical_form: legacy.")
+        _ppms = d.mpas_vert_ppm_limiter_sharpness
+        if (isinstance(_ppms, bool) or not isinstance(_ppms, (int, float))
+                or not (_ppms > 0)):
+            errors.append(
+                "dycore.mpas_vert_ppm_limiter_sharpness must be a number > 0 "
+                f"(inf = CAM-FV's hard limiter); got {_ppms!r}.")
         # Free-atmosphere diffusivity-floor override: None, or finite in
         # (0, 10] m^2/s (the not(lo<x<=hi) form also rejects NaN/Inf).
         if self.hb_kvf_min is not None and (
