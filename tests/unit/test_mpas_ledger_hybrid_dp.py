@@ -98,7 +98,8 @@ def test_hybrid_ledger_closes_with_true_layer_masses():
 
 _ZM_POS = ConvectionConfig(
     scheme="zhang_mcfarlane",
-    zhang_mcfarlane=ConvectionConfig().zhang_mcfarlane._replace(positivity_after_zm=True))
+    zhang_mcfarlane=ConvectionConfig().zhang_mcfarlane._replace(
+        positivity_after_zm=True, land_fraction="none"))
 
 
 @pytest.mark.parametrize("convection, n_macmic", [
