@@ -700,7 +700,65 @@ def grad_diff(got, ref):
     return out
 
 
-def window_check(exps, g_batch, losses_batch, n, kw, ids):
+def _tdot(a, b):
+    return float(sum(np.vdot(np.asarray(a[k], np.float64),
+                             np.asarray(b[k], np.float64)) for k in b))
+
+
+def check_directions(x):
+    """The probe's random direction, whole and one variable at a time."""
+    v = _direction(x)
+    return dict({"both": v}, **{
+        k: {j: (a if j == k else jnp.zeros_like(a)) for j, a in v.items()}
+        for k in v})
+
+
+def gap_direction(x, gap):
+    """Along a gradient gap, each variable on :func:`_direction`'s scale (0.1
+    K in T, 1e-3 relative in a tracer) and at most that scale in any cell:
+    two gradients that differ predict different derivatives here, so a
+    central difference tells which one is right.  None without a gap."""
+    s = {k: (0.1 if k == "T" else 1e-3 * jnp.abs(x[k])) for k in gap}
+    top = max(float(jnp.max(jnp.abs(s[k] * gap[k]))) for k in gap)
+    if not (np.isfinite(top) and top > 0.0):
+        return None
+    return {k: s[k] * s[k] * gap[k] / top for k in gap}
+
+
+def fd_sweep(f, x, v, h):
+    """Central differences of ``f`` along ``v`` at each step of ``H_SWEEP *
+    h``; ``f`` returns one loss or one loss per window."""
+    def at(hh):
+        return np.asarray(f(jax.tree_util.tree_map(
+            lambda a, b: a + hh * b, x, v)), np.float64)
+    return {f"{h * m:.0e}": (at(h * m) - at(-h * m)) / (2.0 * h * m)
+            for m in H_SWEEP}
+
+
+def print_fd_check(path, window, direction, ad, ad_other, fds):
+    print("FD_CHECK " + json.dumps(dict(
+        path=path, window=window, direction=direction, ad=ad,
+        ad_other_path=ad_other, fd={h: float(x) for h, x in fds.items()},
+        fd_over_ad_minus_1={h: (float(x) / ad - 1.0 if ad else float("nan"))
+                            for h, x in fds.items()})), flush=True)
+
+
+def gap_concentration(gap, k=10):
+    """Per leaf: the share of the squared gap held by its ``k`` largest
+    entries and the largest one's index."""
+    out = {}
+    for name, d in gap.items():
+        a = np.square(np.asarray(d, np.float64))
+        tot = float(a.sum())
+        out[name] = dict(
+            top_share=(float(np.sort(a, axis=None)[-k:].sum()) / tot
+                       if tot else 0.0),
+            at=[int(i) for i in np.unravel_index(int(np.argmax(a)), a.shape)])
+    return out
+
+
+def window_check(exps, g_batch, losses_batch, n, kw, ids, fwd_batch=None,
+                 h=1e-3):
     """Windows ``ids`` from a true standalone run (each its OWN export: own
     physics closures, forcing, clock built inside; no vmap; one compile per
     window) against the batched run: the forward loss (batched per-window
@@ -708,8 +766,30 @@ def window_check(exps, g_batch, losses_batch, n, kw, ids):
     first id's standalone gradient is also compiled a second way (jax.vmap
     over a batch of one, same export): the gap between the two is the
     rounding noise of the gradient itself, the floor any batched-vs-alone
-    difference is read against.  Numbers only, no tolerance."""
+    difference is read against.  Each standalone gradient is also repeated
+    (same executable: determinism) and taken again one rounding unit away in
+    x (same executable: conditioning).  Numbers only, no tolerance.
+
+    With ``fwd_batch`` (stacked x -> one loss per window) each path is held
+    against its OWN central difference (FD_CHECK lines, steps ``H_SWEEP *
+    h``): every window of the batch and each standalone window along the
+    probe's random directions, and each checked window of both paths along
+    the batched-minus-standalone gradient gap (:func:`gap_direction`)."""
     from legoesm.driver.mpas_diff_step import mpas_segment
+    tm = jax.tree_util.tree_map
+    if fwd_batch is not None:
+        xs = [_state_x(e["state"]) for e in exps]
+        dirs = [check_directions(x_) for x_ in xs]
+        xb = tm(lambda *t: jnp.stack(t), *xs)
+        for name in dirs[0]:
+            fds = fd_sweep(fwd_batch, xb,
+                           tm(lambda *t: jnp.stack(t), *[d[name] for d in dirs]),
+                           h)
+            for b, d in enumerate(dirs):
+                print_fd_check(
+                    "batched", b, name,
+                    _tdot({k: v[b] for k, v in g_batch.items()}, d[name]),
+                    None, {m: f[b] for m, f in fds.items()})
     for i, b in enumerate(ids):
         e = exps[b]
 
@@ -719,12 +799,36 @@ def window_check(exps, g_batch, losses_batch, n, kw, ids):
             return _proj_loss(out)
         x = _state_x(e["state"])
         t0 = time.time()
-        loss, gb = jax.block_until_ready(jax.jit(jax.value_and_grad(one))(x))
+        vg = jax.jit(jax.value_and_grad(one))
+        loss, gb = jax.block_until_ready(vg(x))
         row = dict(window=b, seconds=time.time() - t0,
                    loss_alone=float(loss), loss_batched=float(losses_batch[b]),
                    alone_finite=bool(all(np.all(np.isfinite(np.asarray(v)))
                                          for v in gb.values())),
                    batched_vs_alone=grad_diff({k: g_batch[k][b] for k in gb}, gb))
+        g_b = {k: g_batch[k][b] for k in gb}
+        gap = {k: g_b[k] - gb[k] for k in gb}
+        row["gap_top10"] = gap_concentration(gap)
+        row["repeat_vs_alone"] = grad_diff(vg(x)[1], gb)
+        x_ulp = {k: a * (1.0 + jnp.finfo(a.dtype).eps * jax.random.rademacher(
+            jax.random.PRNGKey(j), a.shape, a.dtype))
+            for j, (k, a) in enumerate(sorted(x.items()))}
+        row["ulp_vs_alone"] = grad_diff(vg(x_ulp)[1], gb)
+        if fwd_batch is not None:
+            f1 = jax.jit(one)
+            row["loss_alone_fwd"] = float(f1(x))
+            todo = dict(dirs[b])
+            w = gap_direction(x, gap)
+            if w is not None:
+                todo["gap"] = w
+            for name, d in todo.items():
+                print_fd_check("alone", b, name, _tdot(gb, d), _tdot(g_b, d),
+                               fd_sweep(f1, x, d, h))
+            if w is not None:
+                wb = {k: jnp.zeros_like(xb[k]).at[b].set(w[k]) for k in w}
+                fds = fd_sweep(fwd_batch, xb, wb, h)
+                print_fd_check("batched", b, "gap", _tdot(g_b, w),
+                               _tdot(gb, w), {m: f[b] for m, f in fds.items()})
         if i == 0:
             xb = jax.tree_util.tree_map(lambda t: t[None], x)
             g1 = jax.block_until_ready(jax.jit(jax.grad(
@@ -838,7 +942,9 @@ def build_parser():
     ap.add_argument("--check-windows", action="store_true",
                     help="timing stage with --batch: also take the first and "
                          "last window's gradient from a standalone run and "
-                         "print its difference from the batched slice")
+                         "print its difference from the batched slice; "
+                         "hold both paths against their own central "
+                         "differences (--h, --h-sweep)")
     ap.add_argument("--repeats", type=int, default=3,
                     help="timing stage: steady-state calls timed per window")
     ap.add_argument("--stash-modules", action="store_true",
@@ -1010,10 +1116,13 @@ def main(argv=None):
                 grad_over_fwd=med_g / med_f, grad_finite=fin,
                 peak_gib=peak_gib())), flush=True)
             if a.check_windows and nb > 1:
-                losses = np.asarray(jax.jit(jax.vmap(one_b))(*args))
+                losses_fn = jax.jit(jax.vmap(one_b))
+                losses = np.asarray(losses_fn(*args))
                 ids = ([int(t) for t in a.check_window_ids.split(",")]
                        if a.check_window_ids else sorted({0, nb - 1}))
-                window_check(exps, g, losses, n, kw, ids)
+                window_check(exps, g, losses, n, kw, ids,
+                             fwd_batch=lambda x: losses_fn(x, *args[1:]),
+                             h=a.h)
     elif a.stage == "loops":
         # trace-only: which loops stack per-iteration residuals in the
         # gradient of one full-physics step (no compile, no device run)

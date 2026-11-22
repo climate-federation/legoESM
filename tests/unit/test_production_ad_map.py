@@ -401,6 +401,59 @@ def test_window_check_compares_chosen_windows_with_their_own_export(
     assert rows[0]["vmap1_vs_alone"]["T"]["max_rel"] == 0.0
 
 
+@pytest.mark.parametrize("bad_window", [None, 1])
+def test_window_check_holds_each_path_against_its_own_fd(
+        monkeypatch, capsys, bad_window):
+    """Quadratic fake segment (central differences exact): both paths match
+    their own FD in every direction; a batched gradient corrupted in one
+    window fails its FD there and only there, and along the gap direction
+    the standalone gradient is the one the FD confirms."""
+    import json
+    import numpy as np
+    import legoesm.driver.mpas_diff_step as mds
+    monkeypatch.setattr(mds, "mpas_segment", lambda e, s, p, n, **kw: (
+        {k: v * e["fac"] * n for k, v in s.items()}, p))
+    monkeypatch.setattr(pam, "_with_x", lambda s, x: x)
+    monkeypatch.setattr(pam, "_state_x", lambda s: s)
+    monkeypatch.setattr(pam, "_proj_loss",
+                        lambda s: sum(jnp.sum(v ** 2) for v in s.values()))
+    monkeypatch.setattr(pam, "H_SWEEP", (10.0, 1.0, 0.1))
+    xb = {"T": jnp.arange(6.0).reshape(2, 3) + 1.0,
+          "q_v": jnp.arange(6.0).reshape(2, 3) * 0.1 + 0.2}
+    exps = [dict(fac=float(b + 1), phys_state=None,
+                 state={k: v[b] for k, v in xb.items()}) for b in range(2)]
+    fac = jnp.asarray([4.0, 8.0])[:, None]
+
+    def fwd(z):
+        return sum(jnp.sum((v * fac) ** 2, axis=1) for v in z.values())
+    g = {k: 2.0 * v * fac ** 2 for k, v in xb.items()}
+    if bad_window is not None:
+        g["T"] = g["T"].at[bad_window].multiply(1.02)
+    pam.window_check(exps, g, np.asarray(fwd(xb)), 4, {}, [0, 1],
+                     fwd_batch=fwd, h=1e-2)
+    out = capsys.readouterr().out.splitlines()
+    fd = [json.loads(ln[len("FD_CHECK "):]) for ln in out
+          if ln.startswith("FD_CHECK ")]
+    seen = {(r["path"], r["window"], r["direction"]) for r in fd}
+    for path in ("batched", "alone"):
+        for b in (0, 1):
+            for d in ("both", "T", "q_v"):
+                assert (path, b, d) in seen
+    if bad_window is not None:
+        assert {("alone", 1, "gap"), ("batched", 1, "gap")} <= seen
+    for r in fd:
+        err = max(abs(e) for e in r["fd_over_ad_minus_1"].values())
+        wrong = (r["path"] == "batched" and r["window"] == bad_window
+                 and r["direction"] != "q_v")
+        assert (err > 1e-3) if wrong else (err < 1e-7), r
+    rows = [json.loads(ln[len("WINDOW_CHECK "):]) for ln in out
+            if ln.startswith("WINDOW_CHECK ")]
+    for r in rows:
+        assert r["repeat_vs_alone"]["T"]["max_rel"] == 0.0
+        assert r["ulp_vs_alone"]["T"]["max_rel"] < 1e-14
+        assert r["loss_alone_fwd"] == pytest.approx(r["loss_alone"], rel=1e-12)
+
+
 def test_grad_diff_metrics():
     import numpy as np
     d = pam.grad_diff({"a": np.array([1.0, 2.0])}, {"a": np.array([1.0, 1.0])})["a"]
