@@ -832,6 +832,13 @@ class TurbulenceConfig(NamedTuple):
     update_interval_steps: int = 1
     # appended last (positional ABI)
     ifs_vdf: IFSVDFLaneConfig | None = None
+    # Route C (turbulence/routec.py): Grenier and Bretherton (2001) subgrid
+    # inversion with its explicit entrainment flux imposed inside prognostic
+    # CLUBB's xm/w'x' solve (Lock 2001 diagnosis).  A dispatch switch, so it
+    # lives here like ``liquid_partition``, not among CLUBBConfig's leaves;
+    # False (default) leaves every path unchanged.  Single-column use: the
+    # GCM's host advection lacks GB01's corrected faces.
+    clubb_routec_inversion: bool = False
     # appended last (positional ABI).  CAM6 hands CLUBB the host's large-scale
     # pressure velocity (clubb_intr.F90:1654-1656, 1677-1679, 1778
     # cam_cesm2_1_rel_60).  On, the MPAS bridge passes omega to prognostic

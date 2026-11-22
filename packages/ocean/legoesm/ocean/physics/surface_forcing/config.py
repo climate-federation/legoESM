@@ -301,10 +301,19 @@ class SurfaceForcingConfig(NamedTuple):
     # supplied), "jerlov_2band" = the two-band kernel with THIS config's
     # ``shortwave_water_type`` (routes the run_omip --water-type flag),
     # "sweeney_2band" = FESOM2's chlorophyll two-band (Sweeney 2005; needs
-    # ``OceanSurfaceForcing.chl``).  ``penetrating_fraction`` sets how much of
+    # ``OceanSurfaceForcing.chl``), "ohlmann_2003" = Ohlmann (2003) Table 1a
+    # chlorophyll double exponential (lat-lon lane only; needs
+    # ``OceanSurfaceForcing.chl``; the whole net shortwave goes through the
+    # profile).  ``penetrating_fraction`` sets how much of
     # the net shortwave enters the column; the rest heats the surface cell.
     shortwave_scheme: str = "auto"
     # Jerlov water type used by "jerlov_2band" ("II" = the lanes' historical
     # kernel default; "I" is the Veros flux_feedback literal, which lives on
     # FluxFeedbackConfig.shortwave_water_type).
     shortwave_water_type: str = "II"
+    # Fraction of the net shortwave that "jerlov_2band" keeps out of the column
+    # and deposits in the surface cell.  None keeps the 0.94 / 0.06 split of
+    # ``penetrating_fraction``; 0.0 sends all of it through the two-band
+    # profile, as ROMS and CROCO (lmd_swfrac) and the Paulson and Simpson
+    # (1977) fits themselves do.
+    shortwave_skin_fraction: float | None = None

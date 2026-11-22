@@ -10,6 +10,7 @@ import math as _math
 from pathlib import Path
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 
 from legoesm.core.bulk_flux import GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH
@@ -44,6 +45,20 @@ def _frozen_condensate(state):
             d = tr[k].data
             total = d if total is None else total + d
     return total
+
+
+def _most_2m_impl(*args, **kwargs):
+    from legoesm.core.bulk_flux import compute_most_fluxes
+    return compute_most_fluxes(*args, return_2m=True, **kwargs)
+
+
+# The 2 m diagnostic runs on the host every interval.  Called eagerly, the
+# Obukhov loop inside was traced with a fresh closure and recompiled at every
+# call, and each executable kept its code mapping until a long MPAS run failed
+# with LLVM "Cannot allocate memory".  One cached jit, options static.
+_most_2m_jit = jax.jit(_most_2m_impl, static_argnames=(
+    "scheme", "stability_scheme", "unstable_scheme", "most_zeta_cap_width",
+    "gfs_unstable_join_width"))
 
 
 # Sidecar key carrying the CMOR lat sampling stamp (see CFWriter append guard).
@@ -848,7 +863,6 @@ class DiagnosticCollector:
         import jax.numpy as jnp
         from legoesm import constants
         from legoesm.thermo import saturation_mixing_ratio
-        from legoesm.core.bulk_flux import compute_most_fluxes
         u_low = state.u.data[..., -1] if u_low is None else u_low
         v_low = state.v.data[..., -1] if v_low is None else v_low
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
@@ -903,13 +917,12 @@ class DiagnosticCollector:
                     t_bot=T_low, zeta_cap_width=self.surface_most_zeta_cap_width,
                 )
                 return T_2m
-            *_, T_2m = compute_most_fluxes(
+            *_, T_2m = _most_2m_jit(
                 u_low, v_low, theta_low, q_low, T_sfc, q_sfc, rho_low,
                 z_ref=z_low,
                 scheme=(self.tas_profile_scheme
                         if self.tas_profile_scheme != "large_yeager_cesm"
                         else "large_yeager"),
-                return_2m=True,
                 stability_scheme=self.surface_stability_scheme,
                 unstable_scheme=self.surface_unstable_scheme,
                 most_zeta_cap_width=self.surface_most_zeta_cap_width,
@@ -1778,6 +1791,9 @@ class DiagnosticCollector:
         hfls=None,
         evspsbl=None,
         prsn=None,
+        tauu=None,
+        tauv=None,
+        prc=None,
         rsutcs=None,
         rlutcs=None,
         rsds=None,
@@ -1978,7 +1994,7 @@ class DiagnosticCollector:
         # the PHASE-2 commits between the two calendar bins.
         _FLUX_2D = ("pr", "prsn", "rlut", "rsut", "rsdt", "hfss", "hfls",
                     "evspsbl", "rsutcs", "rlutcs", "rsds", "rsus", "rlds", "rlus",
-                    "rtmt")
+                    "rtmt", "tauu", "tauv", "prc")
         # Daily copies of fed 2-D fields (CMIP6 ``day``/``CFday``/``Oday``,
         # placed by ``_DAILY_VARIABLE_REMAP``); the flux ones are the
         # ``_FLUX_2D`` members, binned at the interval midpoint like monthly.
@@ -2029,6 +2045,9 @@ class DiagnosticCollector:
         hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
         evspsbl_np = None if evspsbl is None else np.asarray(evspsbl, dtype=_f64)
         prsn_np = None if prsn is None else np.asarray(prsn, dtype=_f64)
+        tauu_np = None if tauu is None else np.asarray(tauu, dtype=_f64)
+        tauv_np = None if tauv is None else np.asarray(tauv, dtype=_f64)
+        prc_np = None if prc is None else np.asarray(prc, dtype=_f64)
         rsutcs_np = None if rsutcs is None else np.asarray(rsutcs, dtype=_f64)
         rlutcs_np = None if rlutcs is None else np.asarray(rlutcs, dtype=_f64)
         rsds_np = None if rsds is None else np.asarray(rsds, dtype=_f64)
@@ -2067,6 +2086,9 @@ class DiagnosticCollector:
             ("hfls", hfls_np, (_ncol,)),
             ("evspsbl", evspsbl_np, (_ncol,)),
             ("prsn", prsn_np, (_ncol,)),
+            ("tauu", tauu_np, (_ncol,)),
+            ("tauv", tauv_np, (_ncol,)),
+            ("prc", prc_np, (_ncol,)),
             ("rsutcs", rsutcs_np, (_ncol,)),
             ("rlutcs", rlutcs_np, (_ncol,)),
             ("rsds", rsds_np, (_ncol,)),
@@ -2125,6 +2147,9 @@ class DiagnosticCollector:
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
                 ('prsn', prsn_np),   # CMOR kg/m2/s — the frozen part of pr
+                ('tauu', tauu_np),   # CMOR Pa, positive down (stress on the surface)
+                ('tauv', tauv_np),
+                ('prc', prc_np),     # CMOR kg/m2/s — the convective part of pr
                 ('psl', psl),
                 ('rlut', rlut_np),
                 ('rsut', rsut_np),

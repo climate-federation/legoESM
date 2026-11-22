@@ -1300,6 +1300,9 @@ def _make_hydrostatic_convection(
             tracer_tendencies=tracer_tends,
             precip=_precip_conv,
             precip_frozen=_precip_conv_frozen,
+            # the same flux under its own name: the lean MPAS loop publishes
+            # it as CMOR prc after the modules' precip are summed
+            precip_conv_sfc=_precip_conv,
         )
         return tendencies, conv_prog_out
 

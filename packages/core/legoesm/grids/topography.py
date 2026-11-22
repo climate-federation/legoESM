@@ -11,6 +11,7 @@ All topography generators return surface elevation z_s in meters.
 from __future__ import annotations
 
 import logging
+import os
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -673,6 +674,100 @@ def bin_latlon_to_cells(lat_src_deg, lon_src_deg, fields, cell_lat_rad, cell_lon
                 "or the cell centres do not describe this grid")
     return [np.bincount(owner, weights=w * np.asarray(f, dtype=np.float64).ravel(),
                         minlength=n) / denom for f in fields]
+
+
+def subgrid_orography_per_cell(cell_lat_rad, cell_lon_rad, lat_src_deg, lon_src_deg,
+                               read_rows, *, rows_per_chunk: int = 200):
+    """Per-cell subgrid orography ``sgh`` [m] over each cell's own footprint.
+
+    ``sgh`` of a cell is the area-weighted standard deviation of
+    ``max(z, 0)`` over the source points the cell owns, the same quantity
+    the block files of ``prep_subgrid_orography`` hold (std of max(z, 0)
+    in blocks), with the cell's Voronoi footprint as the block.  Ownership
+    and weights are those of :func:`bin_latlon_to_cells` (nearest cell
+    centre, exact on a Voronoi mesh whose centres are its generators; each
+    source point weighted by its spherical area); the source is read in
+    latitude chunks so a 1 minute global field never sits in memory at once.
+
+    ``read_rows(i0, i1)`` returns rows ``i0:i1`` of the elevation as a
+    ``(i1 - i0, n_lon)`` array (metres, ocean negative); ``lat_src_deg``
+    must be increasing and ``lon_src_deg`` equally spaced.  Returns
+    ``(sgh, mean, n_src)`` per cell: the standard deviation, the mean of
+    max(z, 0), and the number of source points owned.  A cell that owns no
+    source point is an error (the source must be finer than every cell).
+    The variance is accumulated in one pass in float64 (E[h^2] - mean^2), so
+    a cell of near-constant elevation h carries an error of order
+    1e-16 h^2 / sgh (about 1e-3 m for a constant 4,000 m plateau); ocean
+    cells (h = 0) are exact.
+    """
+    from scipy.spatial import cKDTree
+    lat_src_deg = np.asarray(lat_src_deg, dtype=np.float64)
+    lon_src_deg = np.asarray(lon_src_deg, dtype=np.float64)
+    if not np.all(np.diff(lat_src_deg) > 0):
+        raise ValueError("subgrid_orography_per_cell: source latitudes must increase")
+    n_lon = lon_src_deg.size
+    xyz_c = _xyz(cell_lat_rad, cell_lon_rad)
+    n = xyz_c.shape[0]
+    tree = cKDTree(xyz_c)
+    # row weights: the spherical area of one source cell in each row
+    w_row = _source_cell_areas(lat_src_deg, np.zeros(1))[:, 0] / n_lon
+    lon_r = np.deg2rad(lon_src_deg)
+    s0 = np.zeros(n)
+    s1 = np.zeros(n)
+    s2 = np.zeros(n)
+    cnt = np.zeros(n, dtype=np.int64)
+    for i0 in range(0, lat_src_deg.size, int(rows_per_chunk)):
+        i1 = min(i0 + int(rows_per_chunk), lat_src_deg.size)
+        h = np.asarray(read_rows(i0, i1), dtype=np.float64)
+        if h.shape != (i1 - i0, n_lon):
+            raise ValueError(f"read_rows({i0}, {i1}) returned {h.shape}")
+        if not np.all(np.isfinite(h)):
+            raise ValueError(f"subgrid_orography_per_cell: non-finite elevation in "
+                             f"rows {i0}:{i1}")
+        h = np.maximum(h, 0.0)
+        lon2, lat2 = np.meshgrid(lon_r, np.deg2rad(lat_src_deg[i0:i1]))
+        owner = tree.query(_xyz(lat2.ravel(), lon2.ravel()), k=1)[1].astype(np.int64)
+        w = np.repeat(w_row[i0:i1], n_lon)
+        hv = h.ravel()
+        s0 += np.bincount(owner, weights=w, minlength=n)
+        s1 += np.bincount(owner, weights=w * hv, minlength=n)
+        s2 += np.bincount(owner, weights=w * hv * hv, minlength=n)
+        cnt += np.bincount(owner, minlength=n)
+    if np.any(s0 <= 0.0):
+        raise ValueError(
+            f"subgrid_orography_per_cell: {int(np.sum(s0 <= 0.0))} cells own no "
+            "source point -- the source is coarser than the mesh")
+    mean = s1 / s0
+    var = np.maximum(s2 / s0 - mean * mean, 0.0)
+    return np.sqrt(var), mean, cnt
+
+
+def load_subgrid_orography_cells(path, n_cells: int, mesh_sha256: str,
+                                 cells=None) -> np.ndarray:
+    """Per-cell ``sgh`` [m] from a file written for one saved MPAS mesh.
+
+    The file (``scripts/data/build_subgrid_orography_cells.py``) holds
+    ``sgh`` ``(nCells,)`` in the mesh's cell order and the SHA-256 of that
+    mesh; it is refused unless the hash equals ``mesh_sha256`` (the run's
+    pinned mesh) and the length equals ``n_cells``.  ``cells`` (global cell
+    indices, e.g. an MPI rank's owned-then-halo cells) selects those entries.
+    """
+    with np.load(os.fspath(path), allow_pickle=False) as d:
+        if "sgh" not in d.files or "mesh_sha256" not in d.files:
+            raise ValueError(f"{path}: not a per-cell subgrid orography file "
+                             "(needs sgh and mesh_sha256)")
+        sgh = np.asarray(d["sgh"], dtype=np.float64)
+        sha = str(d["mesh_sha256"][()]).strip().lower()
+    want = str(mesh_sha256 or "").strip().lower()
+    if not want or sha != want:
+        raise ValueError(
+            f"{path}: built for mesh {sha}, the run's mesh is {want or '(unpinned)'}; "
+            "a per-cell file is only valid on the mesh it was built on")
+    if sgh.shape != (int(n_cells),):
+        raise ValueError(f"{path}: sgh has shape {sgh.shape}, the mesh has {n_cells} cells")
+    if not np.all(np.isfinite(sgh)) or np.any(sgh < 0.0):
+        raise ValueError(f"{path}: sgh must be finite and >= 0")
+    return sgh if cells is None else sgh[np.asarray(cells)]
 
 
 def neighbour_table(grid):

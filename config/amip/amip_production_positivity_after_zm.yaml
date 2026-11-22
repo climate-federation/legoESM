@@ -1,0 +1,6 @@
+# Production deck + water positivity right after Zhang-McFarlane in the macmic
+# loop (where CAM6 runs qneg3; here column-conserving), non-default arm.
+# Ported from the ENSO fork (Isma Di Carlo).  Everything else is
+# amip_production.yaml.
+include: amip_production.yaml
+positivity_after_zm: true

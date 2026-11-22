@@ -327,6 +327,12 @@ __param_spec__ = {
             "rt_tol": "numerics: total-water mixing-ratio tolerance [kg/kg]",
             "thl_tol": "numerics: liquid-water potential-temperature tolerance [K]",
             "tke_min": "numerics: carried-TKE/wp2 state floor [m^2/s^2]",
+            "routec_ql_width_kg_kg": "numerics: route C (RULE 5) ramp width [kg/kg] of the cloudy-layer liquid test and the saturation positive part (value voted 2026-11-21)",
+            "routec_p_top_width_pa": "numerics: route C (RULE 5) ramp width [Pa] of the below-700-hPa tests (value voted 2026-11-21)",
+            "routec_jump_width_k": "numerics: route C (RULE 5) ramp width [K] of the theta_vl inequalities, D0 branch and buoyancy gate (value voted 2026-11-21)",
+            "routec_m_width": "numerics: route C (RULE 5) ramp width [1] of the mass-fraction bounds and slope-pair choice (value voted 2026-11-21)",
+            "routec_lock_m_width": "numerics: route C (RULE 5) ramp width [1] in m of Lock's double-jump switch at m = 0.1 (value voted 2026-11-21)",
+            "routec_E_width": "numerics: route C (RULE 5) width [1] of the smooth [0, 1] clip of the evaporative enhancement (value voted 2026-11-21)",
             "trop_cloud_top_press": "domain definition [Pa]: CAM ref_pres trop_cloud_top_press — where the scheme runs, not a closure coefficient",
             "trop_cloud_taper_lnp_width": "numerics: smooth log-pressure taper width replacing CAM's hard top_lev slice",
             "w_tol": "numerics: w-moment tolerance/floor [m/s]",
@@ -743,6 +749,16 @@ class CLUBBConfig(NamedTuple):
     q_flux_scale: float = 1.0
     q_flux_scale_sigma_lo: float = 0.0
     q_flux_scale_sigma_hi: float = 1.0
+    # RULE 5 widths of route C's switches on traced state (0 = the published
+    # hard form; KNOWN DIFFERENCE in routec.py): cloudy test in liquid and in
+    # pressure, theta_vl inequalities, m and slope-pair choice, Lock's double
+    # jump in m, and the [0, 1] clip of E.
+    routec_ql_width_kg_kg: float = 1.0e-7
+    routec_p_top_width_pa: float = 500.0
+    routec_jump_width_k: float = 0.01
+    routec_m_width: float = 0.01
+    routec_lock_m_width: float = 0.005
+    routec_E_width: float = 0.01
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -5361,8 +5377,14 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
                     wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm,
                     invrs_rho_ds_zt, w_1_zm, w_2_zm, varnce_w_1_zm,
                     varnce_w_2_zm, mixt_frac_zm, dt, gr: CLUBBGrid, config,
-                    l_implemented=False):
+                    l_implemented=False, routec=None):
     """Advance the coupled xm/w'x' scalar pairs one step (``advance_xm_wpxp``).
+
+    ``routec`` (optional): the dict of
+    :func:`legoesm.atmosphere.physics.turbulence.routec.clubb_routec_terms`;
+    each solve's two flux rows at the subgrid inversion are blended toward
+    GB01's constraints (:func:`~legoesm.atmosphere.physics.turbulence.routec.routec_constrain_rows`).
+    None (default) is the unchanged path.
 
     Faithful port of the core (CAM-default) path of
     ``advance_xm_wpxp_module.F90:advance_xm_wpxp``: advances rtm/wprtp and
@@ -5402,18 +5424,24 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
     lo, hi = calc_turb_adv_range(w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm,
                                  mixt_frac_zm, gr, dt)
 
-    def _system(wpxp, xm, wpxp_forcing, xm_forcing, C6, xpthvp):
-        return assemble_xm_wpxp_system(
+    def _system(wpxp, xm, wpxp_forcing, xm_forcing, C6, xpthvp, F_rc=None):
+        lhs, rhs = assemble_xm_wpxp_system(
             wpxp, xm, wpxp_forcing, xm_forcing, C6, C7_Skw_fnc, invrs_tau_C6_zm,
             lhs_ta, sh["lhs_diff_zm"], sh["lhs_ma_zm"], sh["lhs_ma_zt"],
             sh["lhs_ta_xm"], sh["lhs_tp"], sh["lhs_ac_pr2"], thv_ds_zm, xpthvp, dt)
+        if routec is not None:
+            from legoesm.atmosphere.physics.turbulence.routec import routec_constrain_rows
+            lhs, rhs = routec_constrain_rows(lhs, rhs, routec, F_rc)
+        return lhs, rhs
 
     # The rt and thl systems are independent: one batched penta solve
     # (:func:`_batched_penta_solve`, per-column arithmetic unchanged), then
     # the per-field clipping in the Fortran's order.
     soln_rt, soln_thl = _batched_penta_solve([
-        _system(wprtp, rtm, wprtp_forcing, rtm_forcing, C6rt_Skw_fnc, rtpthvp),
-        _system(wpthlp, thlm, wpthlp_forcing, thlm_forcing, C6thl_Skw_fnc, thlpthvp)])
+        _system(wprtp, rtm, wprtp_forcing, rtm_forcing, C6rt_Skw_fnc, rtpthvp,
+                None if routec is None else routec["F_rt"]),
+        _system(wpthlp, thlm, wpthlp_forcing, thlm_forcing, C6thl_Skw_fnc, thlpthvp,
+                None if routec is None else routec["F_thl"])])
 
     def _clip(soln, xm, xm_forcing, xp2, xp2_clip, mfl_id, xm_tol, tol_mfl,
               field_tol, l_mfl):
@@ -5934,7 +5962,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                        p_sfc, thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
                        invrs_rho_ds_zm, invrs_rho_ds_zt, wm_zt, wm_zm,
                        sfc_elevation, fcor, ug, vg, dt, gr: CLUBBGrid, config,
-                       l_implemented, radht_zt=None, vector_sfc_stress=False):
+                       l_implemented, radht_zt=None, vector_sfc_stress=False,
+                       routec_inversion=False):
     """One prognostic CLUBB step (the CAM-default ``advance_clubb_core`` core).
 
     Runs, in the CAM order, ``compute_clubb_diagnostics`` -> the pre-advance ADG1
@@ -6047,6 +6076,16 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                                coef_rad)
         forcing = forcing._replace(thlp2=forcing.thlp2 + src)
 
+    # ---- (2d) route C: the subgrid inversion and its entrainment fluxes on
+    # the start-of-step state (routec.py; static switch, off by default) ----
+    rc = None
+    if routec_inversion:
+        from legoesm.atmosphere.physics.turbulence.routec import (
+            clubb_routec_terms, widths_from_config)
+        rc = clubb_routec_terms(
+            state.thlm, state.rtm, pdf["rcm"], diag["em"], thv_ds_zm, rho_ds_zm,
+            rho_ds_zt, p_sfc, gr, widths_from_config(config))
+
     # ---- (3) advance_xm_wpxp: rtm/wprtp + thlm/wpthlp ----
     wprtp, rtm, wpthlp, thlm = advance_xm_wpxp(
         state.rtm, state.thlm, state.wprtp, state.wpthlp, forcing.rtm,
@@ -6056,7 +6095,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         state.rtp2, state.thlp2, pdf["rtpthvp"], pdf["thlpthvp"], thv_ds_zm,
         wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
         pdf["w_1_zm"], pdf["w_2_zm"], pdf["varnce_w_1_zm"], pdf["varnce_w_2_zm"],
-        pdf["mixt_frac_zm"], dt, gr, config, l_implemented=l_implemented)
+        pdf["mixt_frac_zm"], dt, gr, config, l_implemented=l_implemented,
+        routec=rc)
     # CAM's rcm_out: the pre-advance in-layer rcm clipped against the advanced
     # rtm (advance_clubb_core_module.F90 clip_rcm after advance_xm_wpxp);
     # clubb_intr pairs it with qclvar in relvar (:2424).
@@ -6105,7 +6145,10 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         vector_sfc_stress=vector_sfc_stress, l_implemented=l_implemented)
     # CAM l_do_expldiff_rtm_thlm = True (fixed): at the end of
     # advance_windm_edsclrm, with the same start-of-step Kh_zm.
-    rtm, thlm = expldiff_rtm_thlm(rtm, thlm, diag["Kh_zm"], p.c_K10h, wm_zt,
+    # Route C: no eddy diffusivity at the two flux levels where the entrainment
+    # flux is specified (Lock 2001 section 4), by the constraint weight.
+    Kh_ed = diag["Kh_zm"] if rc is None else diag["Kh_zm"] * (1.0 - rc["W_zm"])
+    rtm, thlm = expldiff_rtm_thlm(rtm, thlm, Kh_ed, p.c_K10h, wm_zt,
                                   rho_ds_zm, invrs_rho_ds_zt, p_in_Pa_zt, dt, gr,
                                   l_implemented=l_implemented)
 
@@ -6137,6 +6180,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         rcp2_zt=pdf["rcp2_zt"],
         rcm_out=rcm_out,
         wpthvp=pdf_post["wpthvp"], Kh_zt=diag["Kh_zt"], Kh_zm=diag["Kh_zm"])
+    if rc is not None:
+        diagnostics["routec"] = {k: v for k, v in rc.items() if k != "cand"}
     return new_state, diagnostics
 
 
@@ -6635,6 +6680,7 @@ def clubb_step(
     q_c: jax.Array | None = None,
     troplev: jax.Array | None = None,
     omega: jax.Array | None = None,
+    routec_inversion: bool = False,
     omega_cam_layer_density: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
@@ -6884,6 +6930,7 @@ def clubb_step(
         wm_zt=wm_zt, wm_zm=wm_zm, sfc_elevation=sfc_elevation,
         fcor=jnp.zeros((ncol,), dtype=T.dtype), ug=um, vg=vm, dt=dt, gr=gr,
         config=config, l_implemented=True, radht_zt=radht_zt,
+        routec_inversion=routec_inversion,
         # A PRESCRIBED surface stress is a vector boundary condition, so it is
         # applied as one. A stress the scheme computed itself from this wind is
         # already antiparallel to it, and takes the reference path unchanged.
@@ -7011,6 +7058,7 @@ def clubb_turbulence_prognostic(
     q_c: jax.Array | None = None,
     lat: jax.Array | None = None,
     omega: jax.Array | None = None,
+    routec_inversion: bool = False,
     omega_cam_layer_density: bool = False,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
@@ -7184,7 +7232,7 @@ def clubb_turbulence_prognostic(
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
-            radht_zt=radht_zt, omega=omega,
+            radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
             omega_cam_layer_density=omega_cam_layer_density, **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         sfc_energy_in = diags["sfc_energy_in"]
@@ -7218,7 +7266,7 @@ def clubb_turbulence_prognostic(
             du, dv, dT, dq, m_new, diag = clubb_step(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
-                radht_zt=radht_zt, omega=omega,
+                radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
                 omega_cam_layer_density=omega_cam_layer_density, **_top_kw,
                 **({"q_c": ql_c} if _liq_on else {}))
             ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c

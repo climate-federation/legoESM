@@ -15,6 +15,7 @@ Supported model types:
 
 from __future__ import annotations
 
+import functools
 import inspect
 from typing import Callable, NamedTuple
 
@@ -248,7 +249,13 @@ def get_turbulence_fn(config: TurbulenceConfig):
             from legoesm.atmosphere.physics.turbulence.clubb import (
                 clubb_turbulence_prognostic,
             )
-            return "clubb", clubb_turbulence_prognostic, clubb_cfg
+            fn = clubb_turbulence_prognostic
+            if config.clubb_routec_inversion:
+                fn = functools.partial(fn, routec_inversion=True)
+            return "clubb", fn, clubb_cfg
+        if config.clubb_routec_inversion:
+            raise ValueError("TurbulenceConfig.clubb_routec_inversion needs prognostic "
+                             "CLUBB: the diagnostic path has no xm/w'x' solve to constrain")
         return "clubb", clubb_turbulence, clubb_cfg
     elif config.scheme == "holtslag_boville":
         return "holtslag_boville", holtslag_boville_turbulence, config.holtslag_boville
@@ -1740,6 +1747,13 @@ def _make_mpas_turbulence(
         _shf = getattr(turb_out, "shflx", None)
         _lhf = getattr(turb_out, "lhflx", None)
         _evp = getattr(turb_out, "evap_sfc", None)
+        # Surface stress on the surface [Pa, +east/north]: minus the column
+        # integral of the momentum tendency (flux form, no flux at the top),
+        # i.e. all the stress this scheme applied, form drag included (as
+        # CAM's TAUX includes its turbulent mountain stress).
+        _dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]          # top-first, Pa
+        _taux = -jnp.sum(du_cell * _dp_col, axis=-1) / constants.g
+        _tauy = -jnp.sum(dv_cell * _dp_col, axis=-1) / constants.g
         tendencies = HydrostaticTendencies(
             du_dt=state.u.replace(data=du_edge_normal, name="du_dt_turb"),
             dv_dt=(None if _dv_leaf is None
@@ -1759,6 +1773,10 @@ def _make_mpas_turbulence(
             evap_sfc=None if _evp is None else state.p_s.replace(
                 data=_evp.reshape(p_s.shape), name="evap_sfc_turb",
                 units="kg/m^2/s"),
+            taux_sfc=state.p_s.replace(
+                data=_taux.reshape(p_s.shape), name="taux_sfc_turb", units="Pa"),
+            tauy_sfc=state.p_s.replace(
+                data=_tauy.reshape(p_s.shape), name="tauy_sfc_turb", units="Pa"),
             **({} if _ow_flux is None else {
                 _k: state.p_s.replace(data=_v.reshape(p_s.shape),
                                       name=f"{_k}_turb", units=_u)

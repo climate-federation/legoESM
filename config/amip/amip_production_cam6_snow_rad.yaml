@@ -1,0 +1,15 @@
+# Production deck + CAM6 snow in the radiation, non-default arm.
+#
+# CAM6 cldfsnow / icswp / des (micro_mg_cam.F90) through the Mitchell ice
+# optics, combined with the cloud by fraction under McICA (production's
+# overlap).  Ported from the ENSO fork (Isma Di Carlo).  The Mitchell table is
+# CESM inputdata atm/cam/physprops/iceoptics_c080917.nc (sha256 pinned in
+# mitchell_ice_optics.ICEOPTICS_SHA256); the path below is relative to the run
+# directory, as in the fork's decks, and the file is NOT staged on Ginsburg.
+# Everything else is amip_production.yaml.
+include: amip_production.yaml
+cloud_cam6_snow_in_rad: true
+cloud_cam6_snow_optics_file: inputs/legoesm/physprops/iceoptics_c080917.nc
+cloud_cam6_rad_gate_log_width: 0.01     # NAMED, equals the code default: RULE 5
+                                        # width of the CAM6 thresholds (0 = CAM6's
+                                        # hard switches)
