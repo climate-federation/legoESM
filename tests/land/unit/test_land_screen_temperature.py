@@ -29,19 +29,33 @@ def _psi_h(zeta):
             - b * (zeta - c / d) * math.exp(-d * zeta) - b * c / d + 1.0)
 
 
+ZETAT = 0.465   # CLM5 heat free-convection transition (FrictionVelocityMod)
+
+
+def _F(z, L, z0h):
+    """Integrated heat similarity function, CLM5 FrictionVelocityMod regimes."""
+    if z / L < -ZETAT:
+        return (math.log(-ZETAT * L / z0h) - _psi_h(-ZETAT) + _psi_h(z0h / L)
+                + 0.8 * (ZETAT ** (-1.0 / 3.0) - (-z / L) ** (-1.0 / 3.0)))
+    return math.log(z / z0h) - _psi_h(z / L) + _psi_h(z0h / L)
+
+
 def _oracle(theta, Tc, zl, zeta, z0h, zs=2.0):
     L = zl / zeta
-    F = lambda z: math.log(z / z0h) - _psi_h(z / L) + _psi_h(z0h / L)
-    return Tc + (theta - Tc) * F(zs + z0h) / F(zl)
+    return Tc + (theta - Tc) * _F(zs + z0h, L, z0h) / _F(zl, L, z0h)
 
 
-@pytest.mark.parametrize("zeta", [-0.3, -0.05, 0.05, 0.3])
+def _screen(theta, Tc, zl, zeta, z0h):
+    return float(screen_level_temperature(
+        jnp.asarray(theta), jnp.asarray(Tc), jnp.asarray(zl),
+        jnp.asarray(zl / zeta), jnp.asarray(z0h)))
+
+
+@pytest.mark.parametrize("zeta", [-20.0, -2.0, -0.3, -0.05, 0.05, 0.3])
 @pytest.mark.parametrize("z0h", [0.05, 1.5])
 def test_profile_matches_independent_most(zeta, z0h):
     theta, Tc, zl = 270.0, 262.0, 55.0
-    got = float(screen_level_temperature(jnp.asarray(theta), jnp.asarray(Tc),
-                                         jnp.asarray(zl), jnp.asarray(zeta),
-                                         jnp.asarray(z0h)))
+    got = _screen(theta, Tc, zl, zeta, z0h)
     np.testing.assert_allclose(got, _oracle(theta, Tc, zl, zeta, z0h),
                                rtol=0.0, atol=1e-9)
     assert min(theta, Tc) <= got <= max(theta, Tc)
@@ -49,28 +63,42 @@ def test_profile_matches_independent_most(zeta, z0h):
 
 def test_neutral_limit_is_log_law():
     theta, Tc, zl, z0h = 285.0, 289.0, 60.0, 0.8
-    got = float(screen_level_temperature(jnp.asarray(theta), jnp.asarray(Tc),
-                                         jnp.asarray(zl), jnp.asarray(1e-6),
-                                         jnp.asarray(z0h)))
+    got = _screen(theta, Tc, zl, 1e-6, z0h)
     log_law = Tc + (theta - Tc) * math.log((2.0 + z0h) / z0h) / math.log(zl / z0h)
     np.testing.assert_allclose(got, log_law, rtol=0.0, atol=1e-5)
 
 
 def test_reference_at_screen_height_returns_reference():
     z0h = 0.3
-    got = screen_level_temperature(jnp.asarray(271.0), jnp.asarray(260.0),
-                                   jnp.asarray(2.0 + z0h), jnp.asarray(0.2),
-                                   jnp.asarray(z0h))
-    np.testing.assert_allclose(float(got), 271.0, rtol=0.0, atol=1e-12)
+    got = _screen(271.0, 260.0, 2.0 + z0h, 0.2, z0h)
+    np.testing.assert_allclose(got, 271.0, rtol=0.0, atol=1e-12)
 
 
 def test_gradient_finite_and_nonzero():
     f = lambda th, tc, zeta: screen_level_temperature(
-        th, tc, jnp.asarray(50.0), zeta, jnp.asarray(0.5))
+        th, tc, jnp.asarray(50.0), 50.0 / zeta, jnp.asarray(0.5))
     for zeta in (-0.3, 0.3):
         g = jax.grad(f, argnums=(0, 1, 2))(jnp.asarray(270.0), jnp.asarray(262.0),
                                           jnp.asarray(zeta))
         assert all(np.isfinite(float(x)) and abs(float(x)) > 1e-8 for x in g), g
+
+
+@pytest.mark.parametrize("dT", [-6.0, 4.0])
+def test_screen_profile_uses_the_flux_obukhov_length(dT):
+    """temp1 of the screen profile IS the flux solve's heat coefficient:
+    1 / (rah * ustar) at the Obukhov length the solve returns for its flux
+    (not the post-update stability; few iterations so the two differ)."""
+    from legoesm.land.canopy.stability import (
+        _temperature_humidity_relation, monin_obukhov_stability)
+    zl, z0m, Ta = 45.0, 0.9, 275.0
+    ustar, rah, _raw, _uav, zeta, obu = monin_obukhov_stability(
+        jnp.asarray(3.0), jnp.asarray(Ta), jnp.asarray(Ta), jnp.asarray(Ta + dT),
+        jnp.asarray(3e-3), jnp.asarray(3e-3), jnp.asarray(zl), jnp.asarray(z0m),
+        n_iters=2, zeta_cap_width=0.05, return_flux_obu=True)
+    ch = float(_temperature_humidity_relation(jnp.asarray(zl), obu, jnp.asarray(z0m)))
+    np.testing.assert_allclose(ch * float(ustar), 1.0 / float(rah), rtol=1e-12)
+    if dT > 0:   # unstable: the flux and the post-update stability differ
+        assert abs(float(zl / obu) - float(zeta)) > 1e-6
 
 
 def _two_leaf(sw, lw, T_soil):
@@ -102,7 +130,8 @@ def test_two_leaf_exports_screen_temperature_between_air_and_canopy(sw, lw, T_so
     theta = 270.0 + constants.g / constants.c_pd * 60.0
     t2, tc = float(out.T_2m[0]), float(out.T_canopy_air[0])
     assert np.isfinite(t2)
-    assert min(theta, tc) - 1e-9 <= t2 <= max(theta, tc) + 1e-9, (t2, tc, theta)
+    assert abs(theta - tc) > 1.0
+    assert min(theta, tc) + 1e-3 < t2 < max(theta, tc) - 1e-3, (t2, tc, theta)
 
 
 def test_tas_land_leg_takes_the_land_screen_temperature():

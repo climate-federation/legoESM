@@ -288,23 +288,22 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
 
 
 def screen_level_temperature(theta_ref: jax.Array, T_canopy_air: jax.Array,
-                             zldis: jax.Array, zeta: jax.Array,
+                             zldis: jax.Array, obu: jax.Array,
                              z0h: jax.Array,
                              z_screen: float = _SCREEN_HEIGHT_M) -> jax.Array:
     """CLM5 ``t_ref2m``: air temperature ``z_screen`` above the displacement
     height plus ``z0h``, interpolated between the reference-height potential
     temperature ``theta_ref`` and the canopy-air (aerodynamic surface)
-    temperature with this module's heat similarity relation at the solve's
-    Obukhov length ``obu = zldis / zeta``
+    temperature with this module's heat similarity relation at the Obukhov
+    length ``obu`` the solve's heat flux was evaluated with
     (CanopyFluxesMod.F90:1182, FrictionVelocityMod.F90:636-652)::
 
         t_ref2m = thm + temp1 * dth * (1/temp12m - 1/temp1),  dth = thm - taf
 
     ``temp1`` and ``temp12m`` are evaluated at the SAME ``obu`` (as CLM does
-    within one FrictionVelocity call).  Stable side: Beljaars & Holtslag (1991),
+    within one FrictionVelocity call), so ``temp1`` is the flux's own ``ch``.  Stable side: Beljaars & Holtslag (1991),
     as in the solve (module docstring).  Output is in the same frame as
     ``theta_ref`` (surface-referenced potential temperature, CLM ``thm``)."""
-    obu = zldis / zeta
     temp1 = _temperature_humidity_relation(zldis, obu, z0h)
     temp12m = _temperature_humidity_relation(z_screen + z0h, obu, z0h)
     dth = theta_ref - T_canopy_air
@@ -352,7 +351,8 @@ def _stability_step(carry: jax.Array, _xs: None,
 
     carry : [z0h, obu, um]
     forcing: [Ta, Tv_atm, q_atm, q_atm, zldis, z0m, dq, dth, ur]
-    output : [ustar, tstar, qstar, thvstar, ch, zeta]
+    output : [ustar, tstar, qstar, thvstar, ch, zeta, obu]  (``obu`` = the
+             Obukhov length ``ch`` was evaluated with, i.e. the incoming one)
     """
     z0h, obu, um = carry[0], carry[1], carry[2]
     Ta, Tv_atm, q_atm, _q2, zldis, z0m, dq, dth, ur = (
@@ -385,7 +385,7 @@ def _stability_step(carry: jax.Array, _xs: None,
     obu_new  = zldis / zeta_new
 
     new_carry = jnp.array([z0h, obu_new, um_new])
-    output    = jnp.array([ustar, tstar, qstar, thvstar, ch, zeta_new])
+    output    = jnp.array([ustar, tstar, qstar, thvstar, ch, zeta_new, obu])
     return new_carry, output
 
 
@@ -401,7 +401,8 @@ def monin_obukhov_stability(
     n_iters: int = 5,
     *,
     zeta_cap_width: float,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    return_flux_obu: bool = False,
+) -> tuple[jax.Array, ...]:
     """Above-canopy MOST iteration via jax.lax.scan.
 
     Parameters
@@ -425,6 +426,9 @@ def monin_obukhov_stability(
     raw      : aerodynamic resistance to water vapour [s/m]
     uav      : mean wind speed within canopy (used for Rb) [m/s]
     zeta     : stability parameter [-]
+    obu      : (only with ``return_flux_obu``) the Obukhov length [m] the
+               returned ``rah``/``raw`` were evaluated with (the last
+               iteration's INCOMING one; ``zeta`` is the updated stability)
     """
     # Heat roughness length.  CLM5 vegetation uses kB^-1 = 0 (z0h = z0m); the
     # earlier BESS default kB^-1 = 2 (z0h = z0m / e^2) over-suppressed heat
@@ -468,6 +472,8 @@ def monin_obukhov_stability(
     ram      = jnp.maximum(um_final / ustar**2, 1e-9)
     uav      = jnp.sqrt(um_final / ram)
 
+    if return_flux_obu:
+        return ustar, rah, raw, uav, zeta, last[6]
     return ustar, rah, raw, uav, zeta
 
 

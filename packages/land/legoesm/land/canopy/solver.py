@@ -435,9 +435,10 @@ def canopy_forward(
     Ts = b.Ts_bc
     zldis = b.z0 - b.displa
 
-    ustar, rah_above, raw_above, uav, zeta = monin_obukhov_stability(
+    ustar, rah_above, raw_above, uav, zeta, obu = monin_obukhov_stability(
         b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m,
-        n_iters=most_n_iters, zeta_cap_width=zeta_cap_width)
+        n_iters=most_n_iters, zeta_cap_width=zeta_cap_width,
+        return_flux_obu=True)
 
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
@@ -549,7 +550,7 @@ def canopy_forward(
         G=G, Ls=Ls, Lcanopy_up=Lcanopy_up, gap_LW=gap_LW, LW_out=LW_out,
         eps_col=eps_col, LW_emit=LW_emit,
         gs_Sun=gs_Sun, gs_Sh=gs_Sh,
-        ustar=ustar, zeta=zeta,
+        ustar=ustar, zeta=zeta, obu=obu,
         rah_above=rah_above, rah_below=rah_below,
         Rb_Sun=Rb_Sun, Rb_Sh=Rb_Sh,
         ALW_Sun=ALW_Sun, ALW_Sh=ALW_Sh, ALW_Soil=ALW_Soil,

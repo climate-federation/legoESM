@@ -731,7 +731,7 @@ def compute_two_leaf_canopy_fluxes(
         Tf_Sh=Tf_Sh,
         T_canopy_air=Tc_cvg,
         T_2m=screen_level_temperature(Ta, Tc_cvg, z_ref - displa,
-                                      fluxes_per_col["zeta"], z0m),
+                                      fluxes_per_col["obu"], z0m),
         gs_Sun=gs_Sun,
         gs_Sh=gs_Sh,
         n_iters=n_iters,
