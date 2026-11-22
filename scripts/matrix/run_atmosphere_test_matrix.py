@@ -4226,8 +4226,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         _ll_kwargs = {}
         if _omega_override is not None:
             _ll_kwargs["omega"] = _omega_override
+        if _rotated:
+            # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
+            # with the flow, else the rotated JW state is not steady.
+            _ll_kwargs["coriolis_alpha"] = _rot_alpha
         grid = create_latlon_grid(n_lat, n_lon, **_ll_kwargs)
-        sigma_for_init = create_sigma_coordinate(nlev)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         ah = _laplacian_visc_latlon(n_lat)
         import math as _m
@@ -4308,8 +4311,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         _vor_kwargs = {}
         if _omega_override is not None:
             _vor_kwargs["omega"] = _omega_override
+        if _rotated:
+            # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
+            # with the flow, else the rotated JW state is not steady.
+            _vor_kwargs["coriolis_alpha"] = _rot_alpha
         mesh = create_voronoi_mesh(level, **_vor_kwargs)
-        sigma_for_init = create_sigma_coordinate(nlev)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
@@ -4386,8 +4392,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         _gauss_kwargs = {}
         if _omega_override is not None:
             _gauss_kwargs["omega"] = _omega_override
+        if _rotated:
+            # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
+            # with the flow, else the rotated JW state is not steady.
+            _gauss_kwargs["coriolis_alpha"] = _rot_alpha
         grid = create_gaussian_grid(n_max, **_gauss_kwargs)
-        sigma_for_init = create_sigma_coordinate(nlev)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 600.0
         pe_config = SpectralPEConfig(

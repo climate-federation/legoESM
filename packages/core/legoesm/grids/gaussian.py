@@ -342,6 +342,7 @@ def create_gaussian_grid(
     allow_unsupported_backend: bool = False,
     legoesm_config=None,
     run_dtype=jnp.float64,
+    coriolis_alpha: float = 0.0,
 ) -> GaussianGrid:
     """Create a Gaussian grid with precomputed SH transform matrices.
 
@@ -357,6 +358,11 @@ def create_gaussian_grid(
         to ``0.0`` for the canonical DCMIP 2008 §3-1 non-rotating
         gravity-wave test, or to ``constants.Omega · X`` for the
         Wedi-Smolarkiewicz 2009 small-planet framework.
+    coriolis_alpha : float
+        Tilt [rad] of the planet's rotation axis for the DCMIP 2008 /
+        Williamson-1992 rotated tests: ``f = 2 omega S`` with
+        ``S = -cos(lon) cos(lat) sin(alpha) + sin(lat) cos(alpha)``.
+        Default ``0.0`` keeps ``f = 2 omega sin(lat)`` bit-identically.
     dealiasing : str
         Dealiasing rule for the transform grid size:
         - ``"quadratic"`` (default): n_lat = 3*(n_max+1)//2.
@@ -496,6 +502,10 @@ def create_gaussian_grid(
     # Build 2D grids
     lon2d_np, lat2d_np = np.meshgrid(lon_np, lat_np)
     f_np = 2.0 * float(omega) * sin_lat_np[:, None] * np.ones((1, n_lon))
+    if coriolis_alpha != 0.0:
+        from legoesm.core.williamson_sw_analytic import rotated_coriolis
+        f_np = rotated_coriolis(lon2d_np, lat2d_np, omega=float(omega),
+                                alpha=float(coriolis_alpha))
 
     target_device = jax.devices("cpu")[0] if backend == "mps" else None
 
