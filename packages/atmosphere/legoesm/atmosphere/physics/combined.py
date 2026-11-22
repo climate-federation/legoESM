@@ -1531,8 +1531,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     from legoesm.diagnostics.process_ledger import ledger_entry_column
                     _dq_fix = sum((_tr_out[k] - _tr_in[k]) / dt
                                   for k in _LEDGER_WATER if k in _tr_out)
+                    from legoesm.core.conservation import conservation_accumulator
                     _led = _led.at[:, sel["pre"][0][1], :].add(ledger_entry_column(
                         _dq_fix, _dT_fix, state.p_s.data, sigma_coord.dsigma,
+                        dp=sigma_coord.layer_thickness_dp(
+                            state.p_s.data.astype(conservation_accumulator())),
                         level_weight=_ledger_level_weight).astype(_led.dtype))
                 r_pre = (r_pre[:2] + (r_pre[2] + _dT_fix,)
                          + r_pre[3:5] + (_tr_t,) + r_pre[6:10] + (_led,) + r_pre[11:])
