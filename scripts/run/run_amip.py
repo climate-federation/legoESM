@@ -1391,6 +1391,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "increment only, no canopy snow). Default off. "
                              "Requires the two-leaf multilayer land with snow "
                              "albedo feedback.")
+    parser.add_argument("--land-canopy-snow",
+                        dest="land_canopy_snow",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow,
+                        help="Intercepted canopy snow (CLM5 snowveg_flag ON_RAD): "
+                             "canopy snow store, unloading, sublimation and "
+                             "snow-whitened canopy albedo. Default off. Requires "
+                             "--land-canopy-snow-masking and the bulk snowpack.")
+    parser.add_argument("--land-canopy-snow-temperature-width-K",
+                        dest="land_canopy_snow_temperature_width_K", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_temperature_width_K,
+                        help="RULE 5 width [K] of the canopy-snow temperature "
+                             "switches (0 = CLM5 hard). Default: CanopySnowConfig.")
+    parser.add_argument("--land-canopy-snow-relative-width",
+                        dest="land_canopy_snow_relative_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_relative_width,
+                        help="RULE 5 relative width of the canopy-snow caps "
+                             "(0 = CLM5 hard, <= 1). Default: CanopySnowConfig.")
+    parser.add_argument("--land-canopy-snow-fcansno-ramp",
+                        dest="land_canopy_snow_fcansno_ramp", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_fcansno_ramp,
+                        help="RULE 5 store fraction below which the canopy snow "
+                             "fraction's 0.15 power is a C1 quadratic (0 = CLM5 "
+                             "hard, <= 1). Default: CanopySnowConfig.")
     parser.add_argument("--land-canopy-rh-cap-smoothing-width",
                         dest="land_canopy_rh_cap_smoothing_width", type=float,
                         default=_EXPERIMENT_DEFAULTS.land_canopy_rh_cap_smoothing_width,
@@ -3429,6 +3453,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
         land_canopy_snow_masking=args.land_canopy_snow_masking,
+        land_canopy_snow=args.land_canopy_snow,
+        land_canopy_snow_temperature_width_K=args.land_canopy_snow_temperature_width_K,
+        land_canopy_snow_relative_width=args.land_canopy_snow_relative_width,
+        land_canopy_snow_fcansno_ramp=args.land_canopy_snow_fcansno_ramp,
         land_snow_insulation=args.land_snow_insulation,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,

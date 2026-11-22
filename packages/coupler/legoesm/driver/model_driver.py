@@ -1789,8 +1789,11 @@ _LAND_STRESS_CKPT_KEYS = ("land_taumag", "land_taumag_valid", "land_taumag_fresh
 _LAND_ML_CACHE_FIELDS = ("canopy_x",)
 # Prognostic fields a checkpoint written WITHOUT them may lack: the restore
 # initialises them from the restored state instead of refusing.  ``T_snow``
-# (the opt-in snow thermal node) -> ``init_snow_temperature`` (user 2026-10-03).
-_LAND_ML_INIT_ON_RESTORE = ("T_snow",)
+# (the opt-in snow thermal node) -> ``init_snow_temperature`` (user 2026-10-03);
+# ``W_canopy_snow`` (opt-in canopy snow) -> the template's empty store (no mass;
+# vote 2026-11-22).  A checkpoint CARRYING either into a run without the
+# feature still refuses (unexpected field).
+_LAND_ML_INIT_ON_RESTORE = ("T_snow", "W_canopy_snow")
 # Restart-exactness payload of the column loop (R-ex), beyond the land
 # cadence window below (which carries the land boundary outputs the loop
 # holds between land steps).  The held RADIATION slots are NOT persisted
@@ -2303,6 +2306,20 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     cfg = cfg._replace(canopy_snow_masking=_csm)
     logger.info("  land canopy snow masking (trees hide snow): %s",
                 "ON" if _csm else "off")
+    if getattr(config, "land_canopy_snow", False):
+        from legoesm.land.canopy.interception import CanopySnowConfig
+        _cs = CanopySnowConfig()._replace(**{k: float(v) for k, v in (
+            ("temperature_width_K",
+             getattr(config, "land_canopy_snow_temperature_width_K", None)),
+            ("relative_width",
+             getattr(config, "land_canopy_snow_relative_width", None)),
+            ("fcansno_ramp",
+             getattr(config, "land_canopy_snow_fcansno_ramp", None)),
+        ) if v is not None})
+        cfg = cfg._replace(canopy_snow=_cs)
+        logger.info("  land canopy snow (CLM5 ON_RAD): ON, widths %g K / %g / "
+                    "fcansno ramp %g", _cs.temperature_width_K, _cs.relative_width,
+                    _cs.fcansno_ramp)
     # Snowpack scheme + snow emissivity, same placement (after the bake).
     cfg = cfg._replace(
         snow_scheme=str(config.land_snow_scheme),
@@ -3332,6 +3349,9 @@ class ModelDriver:
                 "min(top soil T, freezing), density %.0f kg/m3) -- a seeded, not "
                 "spun-up, pack", _land_cfg.snow_column.n_layers,
                 _land_cfg.snow_column.seed_density)
+        if "W_canopy_snow" in _init_missing:
+            logger.info("  land_ml restore: checkpoint has no canopy snow store; "
+                        "starting it empty (no mass)")
         if "T_snow" in _init_missing:
             from legoesm.land.multilayer_land import init_snow_temperature
             self._land_ml_state = init_snow_temperature(self._land_ml_state)
