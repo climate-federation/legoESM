@@ -1,7 +1,8 @@
 # Canonical coupled CMIP run — SLAB (two-layer) ocean.
 #
 #   source config/amip/amip_production.ginsburg.sh
-#   run_coupled.py "${CMIP_PATH_FLAGS[@]}" --config config/cmip/cmip_ocean_slab.yaml
+#   run_coupled.py "${CMIP_PATH_FLAGS[@]}" "${CMIP_LAND_PATH_FLAGS[@]}" \
+#       --config config/cmip/cmip_ocean_slab.yaml
 #
 # Inherits the tuned ("trained") atmosphere + air-sea physics from
 # cmip_tuned_physics.yaml (the single source of truth for the converged values);
@@ -29,10 +30,92 @@ ic: standard
 days: 240
 diag_days: 10                  # atm<->ocean coupling cadence
 
-# --- land: the coupler's land tile takes its land FRACTION from the terrain
-# product the launcher passes (--topography, F36).  With flat terrain (no
-# --topography) it falls back to the analytic 50%-poleward-of-25-deg band,
-# which has no tropical continents.
+# --- atmosphere owns land and open water (P5c, user 2026-11-21) ---
+# The lat-lon C-grid runs as the dynamics of the column loop, the lane of the
+# lat-lon AMIP production deck (config/amip/amip_production_latlon48.yaml), and
+# the atmosphere's own land model and open-water exchange force the slab ocean;
+# the coupler steps only sea ice and lakes.  The preset's Richards land tile is
+# built but never stepped in this mode (coupler._step_owned advances ice and
+# lake only).  Water/energy closure on this lane: 2-day ERA5 runs close to
+# <=1.6e-8 of precipitation (PR #2624).
+column_lane: true
+atm_owns_surface: true
+# Land data paths come from the launcher: CMIP_LAND_PATH_FLAGS in
+# config/amip/amip_production.ginsburg.sh (land mask, CLM surfdata, canopy
+# surfdata).  The land FRACTION is the atmosphere's (land mask), shared by the
+# coupler tiles (f_land_mode analytical reads the atmosphere's mask).
+
+# ---- land: verbatim from config/amip/amip_production.yaml (its "land" block,
+# without the two surface-coupling rows ocean_flux_on_ocean_surface and
+# sea_ice_flux_split, which are not land setup) ----
+use_multilayer_land: true
+land_update_seconds: 1800.0  # CAM6: CLM steps once per 1800 s coupling
+                             # interval (user 2026-09-25).  = 16 x 112.5 s,
+                             # forced with the interval-mean atmosphere; the
+                             # offline LMIP driver also runs the tile at 1800 s.
+                             # Was 300 (-> 337.5 s actual, every 3 steps).
+multilayer_n_layers: 10
+multilayer_soil_depth: 3.0
+# Soil freeze/thaw ON (user 2026-09-26), as in CLM5 and as the land IC spin-up
+# ran; the land calibration's tables were fitted with it off.
+land_soil_freeze_thaw: true
+# Snowpack: explicit bulk (one SWE reservoir), as every prior production run.
+# Moving production to the layered pack (bulk -> layered) is an OPEN user decision.
+land_snow_scheme: bulk
+# Frozen soil impedes water flow, CLM5 form 10**(-e * ice fraction), e = 6
+# (user 2026-09-28).  Active because freeze/thaw is on.
+land_soil_ice_impedance_exponent: 6.0
+# Soil-water numerics (user 2026-10-14): modified van Genuchten air-entry head [m].
+land_soil_vg_air_entry_m: -0.02
+# One-layer snow thermal node OFF (record only; A/B switch added 2026-10-03,
+# user decision: off until the Sep-Dec arm verdict).
+land_snow_insulation: false
+land_soil_moisture_init_frac: 0.25
+land_stomatal_beta: false
+land_calibrated_physics: true
+land_surface_scheme: two_leaf
+land_canopy_max_iters: 10   # NEW BASELINE 2026-10-05 (user): A/B vs 60 = 4.2x/2.7x faster, land LH -1.5/-3.4 %; see fv3_duo_gaps/q_review/deck_ledgers.md
+# Pinned at the current values (b0 stressed, no interception) so the deck
+# records them; changing either is a labelled land baseline, not a default flip.
+land_canopy_stress_b0: true
+land_canopy_interception: false
+# Two-leaf canopy solver smoothing widths, named so every run records them
+# (user 2026-09-30): canopy-air RH <= 1 cap and stable zeta <= 0.5 cap.
+land_canopy_rh_cap_smoothing_width: 0.01
+land_canopy_zeta_cap_smoothing_width: 0.05
+# Above-canopy Monin-Obukhov fixed-point iterations: 5 -> 10 (user 2026-09-30;
+# 5 left unstable columns up to 11% off in aerodynamic resistance).
+land_canopy_most_n_iters: 10
+# Canopy Newton solve columns per batch: 64 -> 0 = one batch per GPU (user
+# 2026-11-07; AMIP 4 A100 step 0.242 -> 0.138 s, answers equal to rounding).
+land_canopy_solve_group: 0
+# Two-leaf canopy fixes from I. Di Carlo's legoESM-enso fork (user 2026-11-20:
+# fixed value is the default): semi-implicit ground heat flux (CLM5 eqs.
+# 2.5.123-2.5.124, 2.6.15; explicit flux heated the 2.9 mm top soil layer
+# 17-43 K in one step under sparse dry canopy) and unconverged columns keep
+# their last admissible iterate (CLM5 2.5.3.2; the cold-state fallback gave
+# 1,100-1,430 W/m2 sensible heat and was held).  NEW BASELINE.
+land_canopy_implicit_ground_flux: true
+land_canopy_fallback_from_last_iterate: true
+mpas_land_beta_soil: true
+# Surface drag over land from the land model's own roughness / canopy drag, not
+# the ocean bulk law (user 2026-10-03: "a major default"; Dec 2001 45-70N land:
+# the boundary layer received 0.04 Pa vs land model 0.23 vs ERA5 0.26).
+mpas_land_stress_from_land: true
+mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
+                                # albedo rebuilt every land step, as the
+                                # offline calibration runs the tables (user
+                                # 2026-09-29; before, January LAI all year)
+land_soil_init: aridity
+# Land starting state: same builder, inputs and options as the lat-lon AMIP
+# production file soil_ic_latlon48_era5T_19790101_v3.npz (two passes of
+# scripts/data/regrid_land_ic.py from the Zenodo LMIP restart
+# restart_1985_d000h00.npz, md5 e619b555cf6bd018a19ac8a52f77b52a: relative-wetness
+# soil water on the CLM surfdata soil with --vg-air-entry-m -0.02, then ERA5
+# 1979-01-01 00 UTC stl1-4), target grid latlon 24 only (user 2026-11-21);
+# provenance is in the file's metadata.  data/ is gitignored: stage the file in
+# the launch directory.
+land_ic: data/lmip_soil_ic/soil_ic_latlon24_era5T_19790101_v3.npz
 
 # --- ocean: two-layer thermodynamic slab ---
 ocean: two_layer
