@@ -15,6 +15,7 @@ Supported model types:
 
 from __future__ import annotations
 
+import functools
 import inspect
 from typing import Callable, NamedTuple
 
@@ -199,7 +200,13 @@ def get_turbulence_fn(config: TurbulenceConfig):
             from legoesm.atmosphere.physics.turbulence.clubb import (
                 clubb_turbulence_prognostic,
             )
-            return "clubb", clubb_turbulence_prognostic, clubb_cfg
+            fn = clubb_turbulence_prognostic
+            if config.clubb_routec_inversion:
+                fn = functools.partial(fn, routec_inversion=True)
+            return "clubb", fn, clubb_cfg
+        if config.clubb_routec_inversion:
+            raise ValueError("TurbulenceConfig.clubb_routec_inversion needs prognostic "
+                             "CLUBB: the diagnostic path has no xm/w'x' solve to constrain")
         return "clubb", clubb_turbulence, clubb_cfg
     elif config.scheme == "holtslag_boville":
         return "holtslag_boville", holtslag_boville_turbulence, config.holtslag_boville
