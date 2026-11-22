@@ -93,3 +93,14 @@ def test_bench_halo_exchange_cubed_sphere_single_rank_smoke(tmp_path):
         f"Driver stdout missing 'cubed-sphere' marker. "
         f"stdout: {result.stdout[-500:]}"
     )
+
+
+def test_bench_halo_exchange_state_payload_needs_tracer_count(tmp_path):
+    """--payload state refuses to run without an explicit tracer count (the
+    payload is a deck property, never a silent default)."""
+    result = run_bench(SCRIPT, [
+        "--grid", "voronoi", "--payload", "state", "--level", "2",
+        "--nlev", "3", "--n-iters", "1",
+    ])
+    assert result.returncode != 0
+    assert "--n-tracers" in (result.stderr + result.stdout)

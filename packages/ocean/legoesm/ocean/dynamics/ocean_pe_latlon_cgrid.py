@@ -5104,7 +5104,7 @@ def _bc_external_surface_forcing(
     du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k,
     z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False,
     withhold_stress=False, shortwave_scheme="auto", shortwave_water_type="II",
-    shortwave_time_step_s=None, c_sw=None,
+    shortwave_time_step_s=None, c_sw=None, shortwave_skin_fraction=None,
 ):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
@@ -5191,14 +5191,42 @@ def _bc_external_surface_forcing(
             # default-off path); the implicit branch starts from zeros.
             dT_target = dT_surf if route_heat_to_implicit else dT_dt
             if shortwave_scheme not in (
-                "auto", "jerlov_2band", "sweeney_2band",
+                "auto", "jerlov_2band", "sweeney_2band", "ohlmann_2003",
                 "nemo_qsr_2bd", "nemo_qsr_rgb",
             ):
                 raise ValueError(
                     f"unknown surface_forcing.shortwave_scheme {shortwave_scheme!r}; "
-                    "expected 'auto', 'jerlov_2band', 'sweeney_2band', "
+                    "expected 'auto', 'jerlov_2band', 'sweeney_2band', 'ohlmann_2003', "
                     "'nemo_qsr_2bd' or 'nemo_qsr_rgb'")
-            if shortwave_scheme == "sweeney_2band" and _sf_sw is not None:
+            if shortwave_scheme == "ohlmann_2003" and _sf_sw is not None:
+                # Ohlmann (2003) chlorophyll double exponential (Table 1a, transmission relative to the net
+                # shortwave just beneath the surface): the whole net shortwave goes through the profile, the
+                # non-solar flux heats the surface cell; column total stays q_net.
+                if _sf_chl is None:
+                    raise ValueError(
+                        "surface_forcing.shortwave_scheme='ohlmann_2003' requires "
+                        "OceanSurfaceForcing.chl; got None")
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    shortwave_penetration_ohlmann_tendency,
+                )
+                sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
+                q_nonsolar = q_net_T - sw_T
+                # the model's heat capacity (as the jerlov branch), so the column gains exactly q_net under any
+                # constants preset
+                _inv_rho_csw_h0 = 1.0 / (
+                    jnp.asarray(rho_0, dtype=T.dtype)
+                    * jnp.asarray(_heat_capacity, dtype=T.dtype)
+                    * jnp.maximum(jnp.asarray(h_k[..., 0], dtype=T.dtype), 1e-10))
+                dT_target = dT_target.at[..., 0].add(
+                    q_nonsolar * _inv_rho_csw_h0 * mask
+                )
+                wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
+                sw_tend = shortwave_penetration_ohlmann_tendency(
+                    sw_T, jnp.asarray(_sf_chl, dtype=T.dtype), dz_live=h_k, wet_cell=wet_cell,
+                    rho_0=float(rho_0), c_sw=_heat_capacity,
+                )
+                dT_target = dT_target + sw_tend * mask_3d
+            elif shortwave_scheme == "sweeney_2band" and _sf_sw is not None:
                 # FESOM2 chlorophyll two-band: the visible fraction of the net
                 # shortwave penetrates on the live partial-cell thickness, the
                 # rest heats the surface cell; column total stays q_net.
@@ -5242,7 +5270,9 @@ def _bc_external_surface_forcing(
                 _sw_cfg = ShortwavePenetrationConfig(
                     scheme="jerlov_2band", water_type=shortwave_water_type)
                 sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
-                sw_absorbed = sw_T * jnp.asarray(penetrating_fraction(_sw_cfg), dtype=T.dtype)
+                _pen = (penetrating_fraction(_sw_cfg) if shortwave_skin_fraction is None
+                        else 1.0 - float(shortwave_skin_fraction))
+                sw_absorbed = sw_T * jnp.asarray(_pen, dtype=T.dtype)
                 q_nonsolar = q_net_T - sw_absorbed
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * inv_rho_csw_dz * mask
@@ -5718,6 +5748,20 @@ def _bc_surface_forcing_stage(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v,
                 "external-forcing shortwave path; leave "
                 "surface_forcing.shortwave_scheme='auto' on a NEMO qsr card.")
         _sw_scheme = _sw_pen_scheme
+    elif (_sw_pen_scheme is not None
+          and surface_forcing is not None
+          and getattr(surface_forcing, "sw_down", None) is not None
+          and getattr(surface_forcing, "q_net", None) is not None):
+        # One owner for the shortwave deposit: with q_net and sw_down the
+        # external stage below removes sw_down from q_net and puts it down its
+        # own profile, and the shared physics pipeline would deposit 100% of the
+        # same sw_down again (column gains q_net + sw).
+        raise ValueError(
+            f"physics.shortwave_penetration.scheme={_sw_pen_scheme!r} and the "
+            "external surface forcing (q_net and sw_down given) would both deposit the "
+            "shortwave. Set physics.shortwave_penetration=None and choose the "
+            "profile with surface_forcing.shortwave_scheme / "
+            "shortwave_water_type / shortwave_skin_fraction.")
     (du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat,
      diag_surface_stress_u, diag_surface_stress_v) = (
         _bc_external_surface_forcing(
@@ -5727,6 +5771,7 @@ def _bc_surface_forcing_stage(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v,
             withhold_stress=_stress_implicit,
             shortwave_scheme=_sw_scheme,
             shortwave_water_type=getattr(_sf_cfg, "shortwave_water_type", "II"),
+            shortwave_skin_fraction=getattr(_sf_cfg, "shortwave_skin_fraction", None),
             shortwave_time_step_s=getattr(
                 getattr(getattr(config, "physics", None),
                         "shortwave_penetration", None),
@@ -6628,12 +6673,16 @@ def _latlon_tendencies_outside_core(
         dv_diss_raw = None
 
     # --- Stage 10b: physics-pipeline tendencies. ---
+    _tbud = bool(getattr(config, "store_tracer_budget", False))
+    _tb_snap = [dT_dt] if _tbud else None
     (du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u,
      diag_phys_v) = _bc_physics_tendencies(
         du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, z_coord,
         surface_forcing, u, v,
     )
 
+    if _tbud:
+        _tb_snap.append(dT_dt)
     # --- Stage 10b': external surface forcing (wind stress / heat / shortwave). ---
     # ``surface_forcing_implicit`` (the ACC recipe): WITHHOLD the surface TRACER
     # heat (q_net + penetrating shortwave) from the explicit ``dT_dt`` and route
@@ -6674,6 +6723,8 @@ def _latlon_tendencies_outside_core(
                         dims=("lat", "lon", "level"), units="PSU/s"),
         )
 
+    if _tbud:
+        _tb_snap.append(dT_dt)
     # --- Stage 10c: sponge-layer relaxation. ---
     # ``sponge_forcing_implicit`` (EXT-N2, Veros tempsalt_sources placement):
     # the TRACER sponge rates are WITHHELD from the explicit (AB2'd)
@@ -6696,6 +6747,8 @@ def _latlon_tendencies_outside_core(
         include_tracers=not (_sponge_implicit or _sponge_stage3_damping),
         active=_sponge_active,
     )
+    if _tbud:
+        _tb_snap.append(dT_dt)
     tracer_source = None
     if _sponge_implicit:
         # Same kernel as the explicit path (rate evaluated on the PRE-STEP
@@ -6740,6 +6793,14 @@ def _latlon_tendencies_outside_core(
             dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)
     dT_dt = dT_dt * mask_3d
     dS_dt = dS_dt * mask_3d
+    dT_budget = None
+    if _tbud:
+        dT_budget = {
+            "pre": _tb_snap[0] * mask_3d,
+            "physics": (_tb_snap[1] - _tb_snap[0]) * mask_3d,
+            "surface": (_tb_snap[2] - _tb_snap[1]) * mask_3d,
+            "sponge": (_tb_snap[3] - _tb_snap[2]) * mask_3d,
+        }
 
     # --- 12. Free-surface tendency ---
     deta_dt = -jnp.sum(flux_div_k, axis=-1) * mask
@@ -6848,6 +6909,7 @@ def _latlon_tendencies_outside_core(
         dT_diss=dT_diss,
         dS_diss=dS_diss,
         tracer_source=tracer_source,
+        dT_budget=dT_budget,
     )
 
     if not diagnose_momentum:

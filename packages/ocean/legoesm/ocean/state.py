@@ -887,6 +887,10 @@ class LatLonCGridOceanState(NamedTuple):
     # (config-enforced: store_salt_flux rejects AB2/RK3/FCT/SOM).
     salt_flux_u_int: object = None
     salt_flux_v_int: object = None
+    # store_tracer_budget: per step record of every change of the
+    # temperature content h*T (a dict of arrays, see
+    # LatLonCGridOceanConfig.store_tracer_budget); None otherwise.
+    tbudget: object = None
 
 
 class SurfaceTracerForcing(NamedTuple):
@@ -1007,6 +1011,10 @@ class LatLonCGridOceanTendencies(NamedTuple):
     # (default), keeping the tendency pytree + every existing path
     # bit-identical.
     tracer_source: object = None
+    # store_tracer_budget: the explicit temperature tendency split by stage,
+    # a dict of (lat, lon, level) rates [degC/s] ("pre", "physics",
+    # "surface", "sponge"), masked like dT_dt; None otherwise.
+    dT_budget: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):
@@ -3546,6 +3554,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # coefficient (no scalar side drag: it needs A_h > 0).  Raises on others.
     # Appended to preserve positional callers.
     lateral_viscosity_file_coastal: str = "four_cell"
+    # Exact online temperature budget (static Python bool, default off).  The
+    # step stores in ``state.tbudget`` the quantities from which every change
+    # of the layer heat content h*T in one step is booked exactly once: the
+    # entry and final T, the layer thickness before (h0) and after (h1) the
+    # barotropic step, the explicit tendency by stage (h0 weighted), the
+    # zonal, meridional and vertical advective flux divergences (from the
+    # face fluxes the update used), and T just before and after the implicit
+    # vertical solve (h1 weighted).  Supported for the forward Euler outer
+    # integrator with the euler tracer integrator and an exposed-flux tracer
+    # scheme (as store_salt_flux); prognostic state is unchanged.  The record
+    # turns ``state.tbudget`` from None into a dict, so with the flag on the
+    # step runs in a Python loop only (a lax.scan / jitted multi-step carry
+    # fails loudly on the changed treedef; no zero seed as for store_salt_flux).
+    # Appended to preserve positional callers.
+    store_tracer_budget: bool = False
 
     # Face mask of the prognostic velocity on partial cells.
     # "2d" (default, bit-identical): the step masks u, v with the 2-D face

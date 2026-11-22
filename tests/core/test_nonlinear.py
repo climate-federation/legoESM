@@ -205,6 +205,37 @@ def test_nonconverged_root_has_zero_parameter_gradient():
     assert float(jax.grad(objective)(jnp.array([4.0]))[0]) == 0.0
 
 
+
+def test_adjoint_unconverged_gives_implicit_gradient_at_the_last_iterate(x64):
+    """``adjoint_unconverged``: a non-converged x carries -(df/dx)^-1 df/dp at x."""
+    from jax.test_util import check_grads
+
+    def residual(x, parameter):
+        return x * x - parameter
+
+    one_step = _solver(residual, x_scale=[1.0], f_scale=[1.0], max_iters=1,
+                       adjoint_unconverged=True)
+    x1, _, converged, *_ = one_step(jnp.array([0.1]), jnp.array([4.0]))
+    assert not bool(converged)
+    g = jax.grad(lambda p: one_step(jnp.array([0.1]), p)[0][0])(jnp.array([4.0]))
+    np.testing.assert_allclose(float(g[0]), 1.0 / (2.0 * float(x1[0])), rtol=1e-12)
+
+    # an unreachable ceiling: the loop stops at the cap on the root, never
+    # "converged"
+    near_root = _solver(residual, x_scale=[1.0], f_scale=[1.0], max_iters=60,
+                        n_sq_max=-1.0, adjoint_unconverged=True)
+
+    def root(p):
+        return near_root(jnp.array([1.0]), p)[0]
+
+    assert not bool(near_root(jnp.array([1.0]), jnp.array([4.0]))[2])
+    np.testing.assert_allclose(
+        float(jax.grad(lambda p: root(p)[0])(jnp.array([4.0]))[0]), 0.25, rtol=1e-10)
+    # order 1 only: the forward solve's raw QR (geqrf) has no differentiation
+    # rule, so no column of this solver, converged or not, has a second
+    # reverse derivative.
+    check_grads(root, (jnp.array([4.0]),), order=1, modes=["rev"])
+
 @pytest.fixture
 def x64():
     prev = jax.config.jax_enable_x64
