@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Score 12 C4 monthly carry checkpoints with Decision 188 plus SI3 totals."""
+"""Score 12 C4 monthly carry checkpoints with Decisions 235 and 233."""
 
 from __future__ import annotations
 
@@ -241,6 +241,148 @@ def _score_ice_month(
     return rows
 
 
+def _score_ocean_month_decision235(
+    candidate: dict[str, Any],
+    envelope: dict[str, Any],
+    decision188_month: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply the C4-only D235 twin envelope to D188's fixed ocean bars."""
+
+    rows = copy.deepcopy(decision188_month["metrics"])
+    candidate_metrics = candidate["metrics"]
+    envelope_metrics = envelope["metrics"]
+    for key, fixed_bar in decision188.FIXED_RMS_BARS.items():
+        require(key in candidate_metrics,
+                f"{candidate['label']}: candidate metrics missing {key}")
+        require(key in envelope_metrics, f"{candidate['label']}: twin metrics missing {key}")
+        twin_value = _finite(
+            envelope_metrics[key].get("rms"),
+            f"{candidate['label']} {key} twin RMS",
+        )
+        require(twin_value >= 0.0,
+                f"{candidate['label']}: {key} twin RMS is negative")
+        scaled_twin = decision188.KE_ENVELOPE_MULTIPLIER * twin_value
+        applied_bar = max(fixed_bar, scaled_twin)
+        binding_side = (
+            "twin" if scaled_twin > fixed_bar
+            else "fixed" if scaled_twin < fixed_bar
+            else "fixed_and_twin"
+        )
+        candidate_value = rows[key]["value"]
+        rows[key].update({
+            "candidate_value": candidate_value,
+            "fixed_bar": fixed_bar,
+            "twin_value": twin_value,
+            "applied_bar": applied_bar,
+            "binding_side": binding_side,
+            "fraction_of_applied_bar": candidate_value / applied_bar,
+            "bar": applied_bar,
+            "pass": candidate_value <= applied_bar,
+        })
+
+    require("PSI" in envelope_metrics,
+            f"{candidate['label']}: twin metrics missing PSI")
+    require("rms_sv" in candidate_metrics["PSI"],
+            f"{candidate['label']}: candidate PSI missing rms_sv")
+    require("rms_sv" in envelope_metrics["PSI"],
+            f"{candidate['label']}: twin PSI missing rms_sv")
+    twin_psi_rms = _finite(
+        envelope_metrics["PSI"]["rms_sv"],
+        f"{candidate['label']} PSI twin RMS",
+    )
+    require(twin_psi_rms >= 0.0,
+            f"{candidate['label']}: PSI twin RMS is negative")
+    scaled_twin_psi_rms = decision188.KE_ENVELOPE_MULTIPLIER * twin_psi_rms
+    applied_psi_rms_bar = max(decision188.PSI_RMS_BAR_SV, scaled_twin_psi_rms)
+    twin_psi_corr = _finite(
+        envelope_metrics["PSI"].get("pattern_corr"),
+        f"{candidate['label']} PSI twin pattern correlation",
+    )
+    twin_psi_decorrelation = 1.0 - twin_psi_corr
+    require(twin_psi_decorrelation >= 0.0,
+            f"{candidate['label']}: PSI twin pattern decorrelation is negative")
+    fixed_psi_decorrelation_bar = 1.0 - decision188.PSI_PATTERN_CORR_MIN
+    scaled_twin_psi_decorrelation = (
+        decision188.KE_ENVELOPE_MULTIPLIER * twin_psi_decorrelation
+    )
+    applied_psi_decorrelation_bar = max(
+        fixed_psi_decorrelation_bar, scaled_twin_psi_decorrelation
+    )
+    candidate_psi_rms = rows["PSI"]["rms_sv"]
+    candidate_psi_decorrelation = 1.0 - rows["PSI"]["pattern_corr"]
+    rows["PSI"].update({
+        "rms_candidate_value_sv": candidate_psi_rms,
+        "rms_fixed_bar_sv": decision188.PSI_RMS_BAR_SV,
+        "rms_twin_value_sv": twin_psi_rms,
+        "rms_applied_bar_sv": applied_psi_rms_bar,
+        "rms_binding_side": (
+            "twin" if scaled_twin_psi_rms > decision188.PSI_RMS_BAR_SV
+            else "fixed" if scaled_twin_psi_rms < decision188.PSI_RMS_BAR_SV
+            else "fixed_and_twin"
+        ),
+        "rms_fraction_of_applied_bar": candidate_psi_rms / applied_psi_rms_bar,
+        "pattern_decorrelation": candidate_psi_decorrelation,
+        "pattern_decorrelation_candidate_value": candidate_psi_decorrelation,
+        "pattern_decorrelation_fixed_bar": fixed_psi_decorrelation_bar,
+        "pattern_decorrelation_twin_value": twin_psi_decorrelation,
+        "pattern_decorrelation_applied_bar": applied_psi_decorrelation_bar,
+        "pattern_decorrelation_binding_side": (
+            "twin"
+            if scaled_twin_psi_decorrelation > fixed_psi_decorrelation_bar
+            else "fixed"
+            if scaled_twin_psi_decorrelation < fixed_psi_decorrelation_bar
+            else "fixed_and_twin"
+        ),
+        "pattern_decorrelation_fraction_of_applied_bar": (
+            candidate_psi_decorrelation / applied_psi_decorrelation_bar
+        ),
+        "rms_bar_sv": applied_psi_rms_bar,
+        "pattern_corr_min": 1.0 - applied_psi_decorrelation_bar,
+        "pass": (
+            candidate_psi_rms <= applied_psi_rms_bar
+            and candidate_psi_decorrelation <= applied_psi_decorrelation_bar
+        ),
+    })
+
+    require("DRAKE" in envelope_metrics,
+            f"{candidate['label']}: twin metrics missing DRAKE")
+    require("abs_mean_diff_sv" in candidate_metrics["DRAKE"],
+            f"{candidate['label']}: candidate DRAKE missing abs_mean_diff_sv")
+    require("abs_mean_diff_sv" in envelope_metrics["DRAKE"],
+            f"{candidate['label']}: twin DRAKE missing abs_mean_diff_sv")
+    twin_drake = _finite(
+        envelope_metrics["DRAKE"]["abs_mean_diff_sv"],
+        f"{candidate['label']} DRAKE twin absolute mean difference",
+    )
+    require(twin_drake >= 0.0,
+            f"{candidate['label']}: DRAKE twin value is negative")
+    scaled_twin_drake = decision188.KE_ENVELOPE_MULTIPLIER * twin_drake
+    applied_drake_bar = max(decision188.DRAKE_BAR_SV, scaled_twin_drake)
+    candidate_drake = rows["DRAKE"]["value_sv"]
+    rows["DRAKE"].update({
+        "candidate_value_sv": candidate_drake,
+        "fixed_bar_sv": decision188.DRAKE_BAR_SV,
+        "twin_value_sv": twin_drake,
+        "applied_bar_sv": applied_drake_bar,
+        "binding_side": (
+            "twin" if scaled_twin_drake > decision188.DRAKE_BAR_SV
+            else "fixed" if scaled_twin_drake < decision188.DRAKE_BAR_SV
+            else "fixed_and_twin"
+        ),
+        "fraction_of_applied_bar": candidate_drake / applied_drake_bar,
+        "bar_sv": applied_drake_bar,
+        "pass": candidate_drake <= applied_drake_bar,
+    })
+
+    passed = all(bool(row["pass"]) for row in rows.values())
+    return {
+        "label": decision188_month["label"],
+        "status": decision188_month["status"],
+        "metrics": rows,
+        "verdict": "PASS" if passed else "FAIL",
+    }
+
+
 def score_c4(
     candidate_report: dict[str, Any],
     envelope_report: dict[str, Any],
@@ -248,7 +390,7 @@ def score_c4(
     *,
     envelope_metrics_digest: str | None = None,
 ) -> dict[str, Any]:
-    """Apply D188 to ocean and D233 to four SI3 quantities in every month."""
+    """Apply D235 to ocean and D233 to four SI3 quantities in every month."""
 
     math_mode = candidate_report.get("math")
     require(math_mode in runner.MATH_CHOICES,
@@ -283,6 +425,9 @@ def score_c4(
     for ocean_month, candidate, envelope in zip(
         ocean["months"], candidate_months, envelope_months, strict=True
     ):
+        ocean_month = _score_ocean_month_decision235(
+            candidate, envelope, ocean_month
+        )
         ice = _score_ice_month(candidate, envelope)
         quantities = copy.deepcopy(ocean_month["metrics"])
         quantities.update(ice)
@@ -315,6 +460,28 @@ def score_c4(
         "math": math_mode,
         "decision": 228,
         "ocean_card": "DECISION_188",
+        "ocean_bar_decision": 235,
+        "ocean_bar": {
+            "formula": (
+                "applied_bar = max(Decision-188 fixed bar, "
+                "KE_ENVELOPE_MULTIPLIER * admitted coupled NEMO twin value "
+                "for the same month and metric)"
+            ),
+            "psi_pattern_formula": (
+                "allowed_decorrelation = max(1 - PSI_PATTERN_CORR_MIN, "
+                "KE_ENVELOPE_MULTIPLIER * "
+                "(1 - admitted coupled NEMO twin pattern_corr))"
+            ),
+            "fixed_bar_source_decision": 188,
+            "envelope_multiplier": decision188.KE_ENVELOPE_MULTIPLIER,
+            "verdict_bearing_quantities": [
+                *decision188.FIXED_RMS_BARS,
+                "PSI",
+                "DRAKE",
+                "KE",
+            ],
+            "unchanged_quantities": ["KE"],
+        },
         "ocean_reference_only_metrics": {
             "ICE_SST": {
                 "verdict_bearing": False,
@@ -348,7 +515,9 @@ def score_c4(
         },
         "months": months,
         "ocean_d188": {
-            "verdict": ocean["verdict"],
+            "fixed_bar_source_decision": 188,
+            "bar_decision": 235,
+            "verdict": "PASS" if first_ocean_failure is None else "FAIL",
             "months_passed": sum(
                 month["ocean_d188_verdict"] == "PASS" for month in months
             ),
@@ -402,6 +571,69 @@ def run_plants() -> dict[str, str]:
             == {"month": "M04_Apr", "quantity": "SST"},
             "one-month ocean plant did not fail C4")
 
+    adaptive_envelope = copy.deepcopy(envelope)
+    adaptive_envelope["months"][1]["metrics"]["SST"]["rms"] = 0.007
+    adaptive_admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=adaptive_envelope
+    )
+    between = copy.deepcopy(candidate)
+    between["months"][1]["metrics"]["SST"]["rms"] = 0.02
+    between_result = score_c4(between, adaptive_envelope, adaptive_admission)
+    require(between_result["status"] == "PASS_C4_12_OF_12",
+            "value between the fixed and twin-bound bars did not pass")
+    between_row = between_result["months"][1]["quantities"]["SST"]
+    require(
+        between_row["fixed_bar"] == decision188.FIXED_RMS_BARS["SST"]
+        and between_row["twin_value"] == 0.007
+        and between_row["applied_bar"]
+        == decision188.KE_ENVELOPE_MULTIPLIER * 0.007
+        and between_row["binding_side"] == "twin",
+        "twin-bound pass plant did not report its bar inputs",
+    )
+
+    above_applied = copy.deepcopy(between)
+    above_applied["months"][1]["metrics"]["SST"]["rms"] = math.nextafter(
+        between_row["applied_bar"], math.inf
+    )
+    above_applied_result = score_c4(
+        above_applied, adaptive_envelope, adaptive_admission
+    )
+    require(above_applied_result["status"] == "FAIL_C4",
+            "value above the applied ocean bar passed")
+    require(
+        above_applied_result["first_failure"]
+        == {"month": "M02_Feb", "quantity": "SST"},
+        "above-applied-bar plant did not name M02 SST",
+    )
+
+    fixed_envelope = copy.deepcopy(envelope)
+    fixed_envelope["months"][2]["metrics"]["SST"]["rms"] = 0.001
+    fixed_admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=fixed_envelope
+    )
+    fixed_candidate = copy.deepcopy(candidate)
+    fixed_candidate["months"][2]["metrics"]["SST"]["rms"] = 0.009
+    fixed_result = score_c4(fixed_candidate, fixed_envelope, fixed_admission)
+    fixed_row = fixed_result["months"][2]["quantities"]["SST"]
+    require(
+        fixed_result["status"] == "PASS_C4_12_OF_12"
+        and fixed_row["binding_side"] == "fixed"
+        and fixed_row["applied_bar"] == decision188.FIXED_RMS_BARS["SST"],
+        "fixed-bound ocean plant did not use the Decision-188 bar",
+    )
+
+    corrupt_envelope = copy.deepcopy(envelope)
+    corrupt_envelope["months"][3]["metrics"]["SST"]["rms"] = -0.001
+    corrupt_admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=corrupt_envelope
+    )
+    corrupt_caught = False
+    try:
+        score_c4(candidate, corrupt_envelope, corrupt_admission)
+    except C4ScoreError:
+        corrupt_caught = True
+    require(corrupt_caught, "negative ocean twin value was not refused")
+
     ice_bar = max(
         ICE_RELATIVE_FLOOR,
         ICE_ENVELOPE_MULTIPLIER * 0.001,
@@ -450,6 +682,10 @@ def run_plants() -> dict[str, str]:
         "control": "PASS_C4_12_OF_12",
         "ocean_control": control["ocean_d188"]["verdict"],
         "one_month_ocean_quantity_plant": "FAIL_C4_M04_Apr_SST",
+        "ocean_between_fixed_and_twin_bound_plant": "PASS_C4_12_OF_12",
+        "ocean_above_applied_bar_plant": "FAIL_C4_M02_Feb_SST",
+        "ocean_fixed_bound_plant": "PASS_C4_12_OF_12",
+        "corrupt_ocean_twin_refusal_plant": "PASS",
         "ice_above_bar_plant": "FAIL_C4_M08_Aug_ICE_AREA_NH",
         "ice_below_bar_plant": "PASS_C4_12_OF_12",
         "daily_cancellation_plant": "FAIL_C4_M08_Aug_ICE_AREA_NH",
