@@ -107,9 +107,9 @@ def _fct(case, width=1.0e-4, upwind=1.0e-3):
 _CASES = {"r0": dict(seed=0), "r1": dict(seed=1), "b2": dict(seed=2, band=True),
           "b3": dict(seed=3, band=True)}
 _FCT_GAPS = {"r0": 0.003462651114538273, "r1": 0.0034495215921320995,
-             "b2": 0.006897876748284032, "b3": 0.0037767372250137837}
-_FCT_UNDERSHOOT = {"r0": -1.2379200473059927e-18, "r1": -2.748431301399831e-12,
-                   "b2": -1.0254275332828464e-07, "b3": -4.8660095403649204e-08}
+             "b2": 0.006897834757732284, "b3": 0.0037766774293431374}
+_FCT_UNDERSHOOT = {"r0": -1.2379200473059927e-18, "r1": -5.716276279202889e-19,
+                   "b2": -1.9647838550133503e-08, "b3": -2.0417052776945792e-08}
 
 
 def _rel_gap(name):
@@ -163,6 +163,30 @@ def test_fct_gradient_at_the_default(kw):
         with pytest.raises(AssertionError):
             check_grads(lambda q, u: f(q, u, 0.0, 0.0), (q, u), order=1, modes=("fwd",),
                         eps=1e-11, atol=1e-6, rtol=1e-4)
+
+
+def test_fct_one_sided_derivatives_agree_where_a_flux_reverses():
+    """An antidiffusive flux crossing zero (q2 = q1 on an edge) while the
+    cell's other fluxes sit inside their bands: left and right derivatives of
+    the tendency must agree (an L1 band scale kinked here, codex review)."""
+    q, u, dp, dpe = _fct_case(3, nlev=2, ntr=1, band=True)
+    q = np.asarray(jnp.maximum(q, 1e-4)).copy()
+    patch = np.flatnonzero(np.asarray(MESH.latCell) > 0.6)
+    e = int(np.flatnonzero(np.isin(np.asarray(C1), patch) & np.isin(np.asarray(C2), patch))[0])
+    a, b = int(C1[e]), int(C2[e])
+    q[b] = q[a]                                          # anti_e = 0 on every level
+    q = jnp.asarray(q)
+    t = jnp.zeros_like(q).at[b].set(q[a])                # move q2 through q1
+    r = jnp.asarray(np.random.default_rng(9).standard_normal(q.shape))
+
+    def f(h):
+        return jnp.sum(r * tracer_horizontal_flux_fct(q + h * t, u, dp, dpe, MESH, DT))
+
+    h = 1e-9
+    right = (float(f(h)) - float(f(0.0))) / h
+    left = (float(f(0.0)) - float(f(-h))) / h
+    assert abs(right - left) <= 1e-3 * max(abs(right), abs(left)), (left, right)
+    assert right != 0.0
 
 
 def test_fct_uniform_stays_uniform_and_mass_closes():

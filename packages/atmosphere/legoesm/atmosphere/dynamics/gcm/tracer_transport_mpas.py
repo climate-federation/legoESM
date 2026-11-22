@@ -260,20 +260,22 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
     KNOWN DIFFERENCE (RULE 5): every switch on the state is C1 or smooth, with
     ``width = upwind_width_ms = 0`` the fork's hard limiter: the upwind
     selection is ``|F| -> F tanh(F / (upwind_width_ms dp_e))`` (no flux at
-    rest, less upwind diffusion for ``|u| < ~upwind_width_ms``); the neighbour
-    bounds, the clips ``min(1, R)`` and the edge's ``min`` of its two cell
-    ratios are ``core.smooth`` min/max with a band ``width`` relative to the
-    operands; the inflow/outflow sign split is ``positive_part_rel`` against
-    the cell's total ``sum |out|``; the edge's donor/acceptor choice blends
-    over ``|q2 - q1| < ~width (|q1| + |q2|)``.  Inside these bands the update
-    can leave the low-order bounds by a fraction of order ``width`` of the
-    antidiffusive flux, and ``q_td`` can leave positivity by the reduced
-    upwind diffusion; conservation is exact (one limited flux per edge).
+    rest, less upwind diffusion for ``|u| < ~upwind_width_ms``, so ``q_td``
+    can leave the range of ``q`` there); the neighbour bounds and the clips
+    ``min(1, R)`` are ``core.smooth`` min/max with a band ``width`` relative
+    to the operands (the smooth max is never below the hard one, the min
+    never above); the inflow/outflow sums are a C1 positive part from above
+    (``x + positive_part_rel(-x)``, band relative to the L2 norm of the
+    cell's fluxes)
+    so they over-count; the donor/acceptor factor ramps (``step_rel``,
+    ``|anti| < width * a (|q1| + |q2|)/2``) above the smaller of the two
+    directions' factors on each side of ``anti = 0``.  Each smooth piece errs
+    toward more limiting, so the update stays inside the bounds built from
+    ``q_td``; conservation is exact (one limited flux per edge).
     The relative bands vanish with their operands, so a comparison against an
     exactly zero value (an empty cell beside an empty one, ``q_td = q = 0``)
-    stays the hard one.  Measured at the defaults on the unit-test fixtures:
-    0.35-0.69 % of the largest tendency, undershoot down to -1.0e-7 of the
-    largest q (tests/unit/test_mpas_terrain_damping.py).
+    stays the hard one.  Measured gaps and bound excursions at the defaults
+    are stored per case in tests/unit/test_mpas_terrain_damping.py.
     A cell with no antidiffusive inflow (outflow) takes ratio 1, the limit of
     ``min(1, room/p)`` as ``p -> 0+`` (the fork took 0; the limited flux is
     zero there either way at the hard limit).
@@ -282,7 +284,7 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
     nlev) and ``dp_edge`` (nEdges, nlev) [Pa]; ``dt`` [s] the step the limiter
     guards (> 0).  Returns (nCells, nlev, ntr).
     """
-    from legoesm.core.smooth import max_rel, min_rel, positive_part_rel
+    from legoesm.core.smooth import max_rel, min_rel, positive_part_rel, step_rel
 
     if isinstance(dt, (int, float)) and not dt > 0:
         raise ValueError(f"tracer_horizontal_flux_fct needs dt > 0 (got {dt!r})")
@@ -321,9 +323,16 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
          * mesh.dvEdge[jnp.maximum(eoc, 0)].astype(q.dtype)
          / mesh.areaCell[None, :].astype(q.dtype))[..., None, None]
     out = w * anti[jnp.maximum(eoc, 0)]
-    scale = jnp.sum(jnp.abs(out), axis=0)
-    p_in = jnp.sum(positive_part_rel(-out, scale, width), axis=0)
-    p_out = jnp.sum(positive_part_rel(out, scale, width), axis=0)
+    # band scale: the cell's L2 norm of its fluxes, smooth away from all-zero
+    # (an L1 sum |out| kinks where one flux crosses zero)
+    s2 = jnp.sum(out * out, axis=0)
+    scale = jnp.where(s2 > 0, jnp.sqrt(jnp.where(s2 > 0, s2, 1.0)), 0.0)
+
+    def part_up(x):   # C1 max(x, 0) from above, x + ppart(-x): over-counts, so limits more
+        return x + positive_part_rel(-x, scale, width)
+
+    p_in = jnp.sum(part_up(-out), axis=0)
+    p_out = jnp.sum(part_up(out), axis=0)
     # rooms are >= 0: the bounds include q_td and the smooth max (min) is
     # never below (above) the hard one
     room_in = (q_max - q_td) * dp_c / dt
@@ -333,12 +342,17 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
         return jnp.where(p > 0, min_rel(1.0, room / jnp.where(p > 0, p, 1.0), width), 1.0)
 
     r_plus, r_minus = ratio(room_in, p_in), ratio(room_out, p_out)
+    # donor/acceptor pair by the flux direction: c1 -> c2 for anti > 0.  Each
+    # direction's factor only ramps in on its own side of anti = 0 above the
+    # common lower bound, so the factor never exceeds the bound of the side
+    # the flux actually takes.
+    fwd = min_rel(r_minus[c1], r_plus[c2], width)
+    bwd = min_rel(r_plus[c1], r_minus[c2], width)
     if width == 0:
-        acc = (anti >= 0).astype(q.dtype)
+        lim = jnp.where(anti >= 0, fwd, bwd)
     else:
-        se = width * 0.5 * a * (jnp.abs(q1) + jnp.abs(q2))
-        pos = se > 0
-        acc = jnp.where(pos, 0.5 * (1.0 + jnp.tanh(anti / jnp.where(pos, se, 1.0))), 0.5)
-    lim = (acc * min_rel(r_minus[c1], r_plus[c2], width)
-           + (1.0 - acc) * min_rel(r_plus[c1], r_minus[c2], width))
+        se = 0.5 * a * (jnp.abs(q1) + jnp.abs(q2))
+        both = min_rel(fwd, bwd, width)
+        lim = (both + step_rel(anti, se, width) * (fwd - both)
+               + step_rel(-anti, se, width) * (bwd - both))
     return (q * div_fm - div(f_low + lim * anti)) / dp_c
