@@ -50,8 +50,12 @@ refused at export.
 """
 from __future__ import annotations
 
+import hashlib
+
 import jax
 import jax.numpy as jnp
+
+from legoesm.parallel.geometry_consistency import in_jax_trace
 
 __all__ = ["mpas_cadence", "pick_physics_fn", "mpas_branch_index", "mpas_step",
            "mpas_segment", "stack_windows"]
@@ -134,6 +138,17 @@ _CADENCE_KEYS = ("dt", "subcycle_rad", "rad_update_steps", "hold_phys",
                  "phys_update_steps")
 
 
+def _step_program(exp: dict, args, n_steps: int) -> str:
+    """Digest of the lowered program of ``exp``'s segment on ``args``: its
+    operations with every value the closures captured (coefficients, mesh,
+    vertical coordinate, post-step edits), and none of the argument values."""
+    def segment(state, phys_state, forcing, clock):
+        return mpas_segment(exp, state, phys_state, n_steps, forcing=forcing,
+                            schedule="uniform", clock=clock)
+    text = jax.jit(segment).lower(*args).as_text()
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def stack_windows(exps, n_steps: int):
     """Batch windows that each come from their OWN export: ``exps[b]`` is the
     driver exported at window b's start date (started there from its config
@@ -146,11 +161,28 @@ def stack_windows(exps, n_steps: int):
     ``mpas_segment(exps[0], s, p, n_steps, forcing=f, clock=c)`` (job-local
     step 0 in every export, so one cadence phase).
 
-    ``exps[0]``'s physics closures serve every window: they must not depend
-    on the date (the date reaches the step through the stacked arrays only).
+    ``jax.vmap`` maps ONE function over arrays, so ``exps[0]``'s closures
+    serve every window and only the stacked arrays differ between windows.
+    That is valid only if every export computes the same function of those
+    arrays, which is checked: each export's segment is lowered on export 0's
+    arguments and must give the identical program (:func:`_step_program`).
+    Comparing configs would not do: the post-step edits are outside the
+    physics config, and a physics function rebuilt with ``build_physics``
+    leaves the export's config stale.  The check costs one trace + lowering
+    per distinct export (no compile; about half a minute each on the
+    production deck), so stack once, outside any jax transformation.
+
+    The check is of the primal program over steps ``0..n_steps-1``, and it
+    is conservative: a captured constant that differs but is later
+    overwritten (the config's fixed CO2 under external GHG forcing) is still
+    refused.  It cannot see a value read only by a custom derivative rule
+    or inside a host callback.
+
     Refused: an export without forcing, cadence or time-step settings that
-    differ between exports, and states / forcing whose pytree structure,
-    shapes or dtypes differ."""
+    differ between exports, states / forcing whose pytree structure, shapes
+    or dtypes differ, distinct exports stacked inside a jax transformation
+    (a traced value captured by a closure is invisible to the check), and an
+    export whose program differs from export 0's."""
     exps = list(exps)
     if not exps:
         raise ValueError("stack_windows: no exports")
@@ -179,6 +211,22 @@ def stack_windows(exps, n_steps: int):
                 raise ValueError(
                     f"stack_windows: export {b}'s {name} differs from export "
                     "0's in pytree structure, shape or dtype")
+    others = [b for b, e in enumerate(exps) if e is not exps[0]]
+    if others:
+        if in_jax_trace():
+            raise ValueError(
+                "stack_windows: call it outside jit/grad/vmap; whether the "
+                "exports share their physics cannot be checked under a trace")
+        ref_program = _step_program(exps[0], trees[0], n_steps)
+        for b in others:
+            if _step_program(exps[b], trees[0], n_steps) != ref_program:
+                raise ValueError(
+                    f"stack_windows: export {b} computes a different step "
+                    "from export 0 on the same state, forcing and clock (a "
+                    "physics, dycore or post-step setting, the mesh, the "
+                    "vertical coordinate, or a constant fixed from that "
+                    "export's own start); batched windows all run export "
+                    "0's, so batch only exports that share them")
     return tuple(jax.tree_util.tree_map(lambda *x: jnp.stack(x), *parts)
                  for parts in zip(*trees))
 

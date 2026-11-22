@@ -485,6 +485,44 @@ def test_stack_windows_refusals(two_windows):
         stack_windows([], 3)
 
 
+def test_stack_windows_refuses_another_post_step_coefficient(
+        two_windows, tmp_path):
+    """A changed q_v smoothing coefficient leaves the physics config, mesh
+    and vertical coordinate identical, yet export 0's would silently be used
+    for that window."""
+    e0, e1 = two_windows
+    other = _driver(tmp_path, "nu", start_day=10.25,
+                    mpas_qv_smooth_del2_m2s=2.0e5).export_mpas_step()
+    assert other["phys_cfg"] == e0["phys_cfg"]
+    with pytest.raises(ValueError, match="export 2 computes a different step"):
+        stack_windows([e0, e1, other], N_SCHED)
+
+
+def test_stack_windows_refuses_another_physics_coefficient(two_windows):
+    """A coefficient changed through build_physics, as a calibration loop
+    does: the export's phys_cfg is stale, its closures are not."""
+    e0, e1 = two_windows
+    cfg = e1["phys_cfg"]
+    gray = cfg.radiation.gray
+    changed = cfg._replace(radiation=cfg.radiation._replace(
+        gray=gray._replace(tau_equator=gray.tau_equator * (1.0 + 1e-6))))
+    rebuilt = dict(e1, physics_fn=e1["build_physics"](changed))
+    with pytest.raises(ValueError, match="export 1 computes a different step"):
+        stack_windows([e0, rebuilt], N_SCHED)
+
+
+@pytest.mark.parametrize("transform", [jax.jit, jax.grad])
+def test_stack_windows_refuses_distinct_exports_under_a_trace(two_windows,
+                                                              transform):
+    e0, e1 = two_windows
+
+    def f(a):
+        stack_windows([e0, e1], 3)
+        return a
+    with pytest.raises(ValueError, match="outside jit/grad/vmap"):
+        transform(f)(1.0)
+
+
 def test_segment_refuses_a_malformed_clock(runs):
     _, exp = runs
     s0, ps0 = exp["state"], exp["phys_state"]
