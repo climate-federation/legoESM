@@ -295,6 +295,11 @@ def test_slab_deck_runs_the_atmosphere_owned_column_lane():
     assert slab["use_multilayer_land"] is True
     assert slab["snow_albedo_feedback"] is True
     assert slab["land_ic"].endswith("soil_ic_latlon24_era5T_19790101_v3.npz")
+    # the lat-lon AMIP production turbulence (Holtslag-Boville refuses the
+    # land model's solved surface fluxes)
+    assert slab["turbulence"] == "clubb" and slab["clubb_prognostic"] is True
+    assert slab["clubb_liquid_partition"] is True
+    assert slab["cloud_q_c_diagnostic"] == 0.0
     d3 = load_yaml_config(str(CMIP_CONFIGS[1]), parser)
     assert not d3.get("column_lane") and not d3.get("atm_owns_surface")
     assert not d3.get("use_multilayer_land")
