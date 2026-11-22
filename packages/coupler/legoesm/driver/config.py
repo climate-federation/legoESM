@@ -1546,6 +1546,18 @@ class ExperimentConfig(NamedTuple):
     # bare-branch bound). Two-leaf canopy on the multilayer land only. Off by
     # default pending the A/B (user 2026-10-03).
     land_canopy_snow_masking: bool = False
+    # Intercepted canopy snow, CLM5.0 snowveg_flag ON_RAD (MultiLayerLandConfig.
+    # canopy_snow = CanopySnowConfig): a prognostic canopy snow store that
+    # intercepts snowfall, sheds and unloads it, sublimates and whitens the
+    # masked canopy.  Needs land_canopy_snow_masking and the bulk snowpack
+    # without the snow thermal node.  Default off.  The three RULE 5 widths
+    # (temperature switches [K], relative caps [-], fcansno ramp [-]; 0 =
+    # CLM5's hard form) keep CanopySnowConfig's value when None; one legal
+    # range: interception.validate_canopy_snow_config.
+    land_canopy_snow: bool = False
+    land_canopy_snow_temperature_width_K: float | None = None
+    land_canopy_snow_relative_width: float | None = None
+    land_canopy_snow_fcansno_ramp: float | None = None
     # One-layer snow thermal node (SoilThermalConfig.snow_insulation): the
     # snowpack gets a temperature, ice heat capacity and Jordan (1991)
     # insulation between its surface and the soil, solved with the soil as in
@@ -3041,6 +3053,28 @@ class ExperimentConfig(NamedTuple):
                 "land_canopy_snow_masking requires use_multilayer_land, "
                 "snow_albedo_feedback and land_surface_scheme='two_leaf': it is "
                 "implemented only there and would be silently inert elsewhere.")
+        if self.land_canopy_snow and not (
+                self.land_canopy_snow_masking and self.land_snow_scheme == "bulk"
+                and not self.land_snow_insulation):
+            errors.append(
+                "land_canopy_snow requires land_canopy_snow_masking, "
+                "land_snow_scheme='bulk' and land_snow_insulation off: the canopy "
+                "snow feeds the albedo through the masking and unloads into the "
+                "heat-free bulk snow bucket.")
+        _cs_over = {k: getattr(self, f"land_canopy_snow_{k}") for k in (
+            "temperature_width_K", "relative_width", "fcansno_ramp")
+            if getattr(self, f"land_canopy_snow_{k}") is not None}
+        if _cs_over and not self.land_canopy_snow:
+            errors.append(
+                f"land_canopy_snow_{sorted(_cs_over)} set but land_canopy_snow "
+                "is off: the width would be silently inert.")
+        if _cs_over:
+            from legoesm.land.canopy.interception import (
+                CanopySnowConfig, validate_canopy_snow_config)
+            try:
+                validate_canopy_snow_config(CanopySnowConfig()._replace(**_cs_over))
+            except ValueError as exc:
+                errors.append(f"land_canopy_snow_*: {exc}")
         if self.land_canopy_snow_masking and self.land_snow_scheme == "layered":
             errors.append(
                 "land_canopy_snow_masking is not supported with land_snow_scheme="

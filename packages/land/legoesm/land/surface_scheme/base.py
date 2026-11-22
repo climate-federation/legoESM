@@ -238,3 +238,8 @@ class SurfaceFluxOutput(NamedTuple):
     # and returns the difference to sensible heat (appended last, same
     # positional reason).  None otherwise.
     surface_conductance_T_ref: jax.Array | None = None
+    # Canopy snow sublimation [kg m-2 s-1] drawn from the intercepted canopy
+    # snow store (CLM5 ON_RAD, ``MultiLayerLandConfig.canopy_snow``), charged
+    # L_s; included in the surface mass flux.  Filled in by the land step
+    # (appended last, same positional reason).  None when canopy snow is off.
+    canopy_snow_sublimation: jax.Array | None = None
