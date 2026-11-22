@@ -395,12 +395,15 @@ def fix_mass_nonhydrostatic_plane_mpi(
             state, target_anomaly, grid, height_coord, terrain_metric,
             background_mass=jnp.zeros((), state.rho_prime.data.dtype),
         )
-    current = compute_rho_prime_mass_plane_mpi(
-        state, grid, height_coord, terrain_metric, layout, owned_mask,
-    )
-    volume = _plane_volume_weight_mpi(
-        grid, height_coord, terrain_metric, layout, owned_mask,
-    )
+    from legoesm.parallel.reductions import global_sum_mpi
+
+    # A and V in ONE allreduce (same per-rank partial sums as
+    # compute_rho_prime_mass_plane_mpi / _plane_volume_weight_mpi).
+    w_col = (terrain_metric.jacobian * grid.area_T * owned_mask)[:, :, None]
+    current, volume = global_sum_mpi(jnp.stack([
+        jnp.sum(state.rho_prime.data * w_col * height_coord.dz),
+        jnp.sum(w_col * height_coord.dz),
+    ]))
     return state._replace(rho_prime=state.rho_prime.replace(
         data=state.rho_prime.data + (target_anomaly - current) / volume))
 
