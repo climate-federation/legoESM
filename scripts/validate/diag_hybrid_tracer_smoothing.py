@@ -766,7 +766,12 @@ def production_step_snapshot(out):
             state = state._replace(tracers={"q_v": jnp.broadcast_to(q[0], state.T.shape)})
         before_q = state.tracers["q_v"]
         before_q = before_q.data if hasattr(before_q, "data") and not isinstance(before_q, jax.Array) else before_q
-        after = model.step(state, 30.0)
+        if kind == "latlon":
+            # The production deck selects the column adapter: honor its native
+            # bundle -> column view -> step -> native bundle contract.
+            after = model.to_bundle(model.step(model.from_bundle(state), 30.0))
+        else:
+            after = model.step(state, 30.0)
         after_q = after.tracers["q_v"]
         after_q = after_q.data if hasattr(after_q, "data") and not isinstance(after_q, jax.Array) else after_q
         results[kind + "_initial_q_v"] = np.asarray(before_q)
