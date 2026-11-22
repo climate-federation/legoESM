@@ -1473,6 +1473,9 @@ def _load_core2_runoff_static(path, regrid_weights, cache_lat, cache_lon) -> np.
         tuple(regrid_weights.target_shape))
 
 
+_RUNOFF_SPARSE_CACHE: dict = {}
+
+
 def _route_runoff_stack(runoff_stack, rmap, static=None):
     """Apply the routing plan to a stacked runoff field, or pass it through.
 
@@ -1492,11 +1495,31 @@ def _route_runoff_stack(runoff_stack, rmap, static=None):
     if rmap is None:
         return runoff_stack
     from legoesm.ocean.forcing.runoff_mapper import apply_runoff_map
-    # lax.map, not vmap: vmap gathers all records at once, an
-    # (n_pairs, n_records) array (4.8M pairs x 288 records = 10 GiB at
-    # 1/4 deg with 'spread_all').  lax.map routes one record at a time;
-    # the result is identical.
-    return jax.lax.map(lambda r: apply_runoff_map(r, rmap), runoff_stack)
+    if isinstance(runoff_stack, jax.core.Tracer):
+        # Traced (jit/grad training paths): stay in JAX, one record at a time.
+        return jax.lax.map(lambda r: apply_runoff_map(r, rmap), runoff_stack)
+    # Host path: one sparse matrix product per forcing block.  On device, the
+    # 1/4 deg 'spread_all' map (4.8M pairs) either exhausts GPU memory (vmap
+    # gathers an (n_pairs, n_records) array, 10 GiB) or, as a lax.map with the
+    # map embedded as constants, did not get past compilation in 3 hours.
+    # Same arithmetic as apply_runoff_map: keep wet cells, add w * donor.
+    import scipy.sparse as sp
+    key = id(rmap)
+    if _RUNOFF_SPARSE_CACHE.get("key") != key:
+        n_cells = int(np.asarray(rmap.wet_mask_flat).size)
+        _RUNOFF_SPARSE_CACHE.clear()
+        _RUNOFF_SPARSE_CACHE.update(
+            key=key, rmap=rmap,
+            keep=np.asarray(rmap.wet_mask_flat, dtype=bool),
+            M=sp.csr_matrix(
+                (np.asarray(rmap.weight, dtype=np.float64),
+                 (np.asarray(rmap.dst_idx), np.asarray(rmap.src_idx))),
+                shape=(n_cells, n_cells)))
+    keep, M = _RUNOFF_SPARSE_CACHE["keep"], _RUNOFF_SPARSE_CACHE["M"]
+    stack = np.asarray(runoff_stack, dtype=np.float64)
+    flat = stack.reshape(stack.shape[0], -1)
+    out = np.where(keep[None, :], flat, 0.0) + np.asarray((M @ flat.T).T)
+    return jnp.asarray(out.reshape(stack.shape), dtype=runoff_stack.dtype)
 
 
 def load_dz_ref_file(path: str | None):
