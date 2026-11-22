@@ -45,6 +45,17 @@ atm_owns_surface: true
 # surfdata).  The land FRACTION is the atmosphere's (land mask), shared by the
 # coupler tiles (f_land_mode analytical reads the atmosphere's mask).
 
+# ---- physics schedule: the lat-lon AMIP production schedule (user
+# 2026-11-22): physics every 1800 s, CLUBB + microphysics sub-cycled 3 x 600 s
+# (CAM6 namelist_defaults_cam.xml:1254; required by clubb_liquid_partition),
+# radiation hourly.  The knobs count STEPS of the step the model actually takes:
+# the driver clamps this deck's dt 300 s to 60 s (pole CFL + generic check, an
+# open item), so 30 x 60 s = 1800 s and 60 x 60 s = 3600 s.  Re-derive both if
+# that clamp changes (vote author/GLM/codex b/b/b, 2026-11-22). ----
+physics_update_steps: 30
+rad_update_steps: 60
+cld_macmic_num_steps: 3
+
 # ---- turbulence: verbatim from config/amip/amip_production.yaml (its
 # "turbulence" block, the scheme the lat-lon AMIP production run resolves to;
 # user 2026-11-22).  The base's Holtslag-Boville refuses the land model's

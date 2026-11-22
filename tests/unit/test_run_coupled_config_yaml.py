@@ -51,7 +51,9 @@ def test_configs_carry_the_tuned_parameters():
     assert slab["radiation"] == "rrtmgp"
     assert slab["surface_bulk_scheme"] == "coare3"       # from the base
     assert slab["surface_gustiness_zi"] == 300.0         # from the base
-    assert slab["cloud_q_c_diagnostic"] == pytest.approx(3.0e-4)  # from the base
+    # the slab deck overrides the base's 3e-4 floor: CLUBB's liquid partition
+    # requires 0 (user 2026-11-22, production turbulence copied)
+    assert slab["cloud_q_c_diagnostic"] == 0.0
     assert slab["convective_cloud"] is True
     assert slab["snow_albedo_feedback"] is True
     assert slab["ocean"] == "two_layer"                  # slab's own
@@ -299,7 +301,8 @@ def test_slab_deck_runs_the_atmosphere_owned_column_lane():
     # land model's solved surface fluxes)
     assert slab["turbulence"] == "clubb" and slab["clubb_prognostic"] is True
     assert slab["clubb_liquid_partition"] is True
-    assert slab["cloud_q_c_diagnostic"] == 0.0
+    assert (slab["physics_update_steps"], slab["rad_update_steps"],
+            slab["cld_macmic_num_steps"]) == (30, 60, 3)
     d3 = load_yaml_config(str(CMIP_CONFIGS[1]), parser)
     assert not d3.get("column_lane") and not d3.get("atm_owns_surface")
     assert not d3.get("use_multilayer_land")
