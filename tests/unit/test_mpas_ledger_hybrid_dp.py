@@ -130,7 +130,11 @@ def test_physics_module_rows_use_true_layer_masses(monkeypatch, convection, n_ma
                       turbulence=TurbulenceConfig(scheme="louis"),
                       convection=convection),
         model_type="mpas", dt=DT, budget_ledger=True, cld_macmic_num_steps=n_macmic)
-    model.step(state, DT, physics_fn=physics, phys_state=None)
+    ps = None
+    if getattr(physics, "_requires_phys_state", False):
+        from legoesm.atmosphere.physics.physics_state import init_physics_state
+        ps = init_physics_state(*state.T.data.shape, PhysicsConfig(convection=convection))
+    model.step(state, DT, physics_fn=physics, phys_state=ps)
     jax.effects_barrier()
     assert len(has_dp) >= 3 and all(has_dp)   # radiation, turbulence, convection
     assert diffs and max(diffs) == 0.0
