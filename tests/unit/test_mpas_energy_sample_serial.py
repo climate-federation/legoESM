@@ -56,7 +56,7 @@ def test_serial_sample_equals_direct_tracker_update(drv):
     assert want.dE_dt != 0.0
     assert got["energy_toa_net"] == float(want.toa_net)
     assert got["energy_dE_dt"] == float(want.dE_dt)
-    assert got["energy_residual"] == float(want.residual)
+    assert got["energy_toa_minus_dE_dt"] == float(want.toa_minus_dE_dt)
     assert got["sw_net_sfc"] == float(want.sfc_sw_net)
     assert got["lw_net_sfc"] == float(want.sfc_lw_net)
     assert got["energy_flux_interval_mean"] == 0.0

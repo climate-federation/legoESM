@@ -67,8 +67,11 @@ def _rotate_to_rotated_frame(
     """Rotate geographic (lon, lat) into the rotated test-frame.
 
     Rotation is about the y-axis (i.e. the axis through (lon=π/2, lat=0)
-    and (lon=3π/2, lat=0)). The rotation matrix maps the original North
-    Pole (0,0,1) to (sin(α), 0, cos(α)).
+    and (lon=3π/2, lat=0)). The rotated frame's North Pole sits at
+    (-sin(α), 0, cos(α)), i.e. (lon=π, lat=π/2-α): the DCMIP 2008 / JW06 /
+    Williamson-1992 convention, so ``sin(lat_r)`` equals
+    ``legoesm.core.williamson_sw_analytic.rotated_sin_lat`` and the
+    rotated-planet Coriolis ``rotated_coriolis`` balances this state.
 
     Returns
     -------
@@ -80,10 +83,10 @@ def _rotate_to_rotated_frame(
     y = jnp.cos(lat) * jnp.sin(lon)
     z = jnp.sin(lat)
 
-    # Rotation about y-axis by -alpha (we rotate the FRAME by +alpha,
-    # which is equivalent to rotating points by -alpha)
+    # Geographic -> rotated frame: rotation about the y-axis with sin_a =
+    # -sin(alpha), i.e. z_r = -sin(alpha) x + cos(alpha) z (DCMIP pole).
     cos_a = math.cos(alpha)
-    sin_a = math.sin(alpha)
+    sin_a = -math.sin(alpha)  # DCMIP pole at (lon=π, lat=π/2-α)
     xr = cos_a * x - sin_a * z
     yr = y
     zr = sin_a * x + cos_a * z
@@ -106,10 +109,10 @@ def _wind_rotation_factors(
 
     Given a vector u_r * e_hat_rotated_east at the rotated-frame point
     (lon_r, lat_r), return scalar projection coefficients (cos_gamma,
-    -sin_gamma) such that:
+    sin_gamma) such that:
 
         u_east_geo  = u_r * cos_gamma
-        v_north_geo =-u_r * sin_gamma
+        v_north_geo = u_r * sin_gamma
 
     The local angle ``gamma`` satisfies::
 
@@ -117,10 +120,10 @@ def _wind_rotation_factors(
         sin(gamma) = e_hat_rotated_east(P_r) · n_hat_geo_north(P)
 
     Both unit vectors are evaluated in the original (unrotated) frame
-    via the inverse rotation matrix (a rotation by +α about y-axis).
+    via the inverse rotation matrix (the transpose of the frame rotation above).
     """
     cos_a = math.cos(alpha)
-    sin_a = math.sin(alpha)
+    sin_a = -math.sin(alpha)  # DCMIP pole at (lon=π, lat=π/2-α)
 
     # Rotated-frame east unit vector at (lon_r, lat_r), expressed in the
     # rotated coordinate basis: (-sin(lon_r), cos(lon_r), 0).
@@ -128,7 +131,7 @@ def _wind_rotation_factors(
     er_y = jnp.cos(lon_r)
     er_z = jnp.zeros_like(lon_r)
 
-    # Inverse rotation (rotated → original): rotation by +alpha about y.
+    # Inverse rotation (rotated → original): transpose of the frame rotation (same sin_a).
     e_x = cos_a * er_x + sin_a * er_z
     e_y = er_y
     e_z = -sin_a * er_x + cos_a * er_z
@@ -144,8 +147,11 @@ def _wind_rotation_factors(
     geo_n_z = jnp.cos(lat)
 
     cos_gamma = e_x * geo_e_x + e_y * geo_e_y + e_z * geo_e_z
-    sin_gamma_neg_v = -(e_x * geo_n_x + e_y * geo_n_y + e_z * geo_n_z)
-    return cos_gamma, sin_gamma_neg_v
+    # The north component of u_r * e_rot is u_r * (e_rot . n_geo); the
+    # previous leading minus flipped v, so the rotated jet blew across its own
+    # pressure gradient (v . grad sin(lat_r) != 0) and was never steady.
+    sin_gamma = e_x * geo_n_x + e_y * geo_n_y + e_z * geo_n_z
+    return cos_gamma, sin_gamma
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +175,7 @@ def _build_rotated_state_dense_grid(
     sigma_full = sigma_coord.sigma_full
 
     lon_r, lat_r = _rotate_to_rotated_frame(lon, lat, alpha)
-    cos_gamma, sin_gamma_neg_v = _wind_rotation_factors(
+    cos_gamma, sin_gamma = _wind_rotation_factors(
         lon, lat, lon_r, lat_r, alpha,
     )
 
@@ -194,7 +200,7 @@ def _build_rotated_state_dense_grid(
 
         # Project rotated-frame zonal wind onto geographic axes
         u_e_k = u_r * cos_gamma
-        v_n_k = u_r * sin_gamma_neg_v
+        v_n_k = u_r * sin_gamma
 
         u_east = u_east.at[..., k].set(u_e_k)
         v_north = v_north.at[..., k].set(v_n_k)
@@ -328,7 +334,7 @@ def rotated_baroclinic_init_mpas(
     lat_e = mesh.latEdge
     lon_e = mesh.lonEdge
     lon_e_r, lat_e_r = _rotate_to_rotated_frame(lon_e, lat_e, float(alpha))
-    cos_gamma, sin_gamma_neg_v = _wind_rotation_factors(
+    cos_gamma, sin_gamma = _wind_rotation_factors(
         lon_e, lat_e, lon_e_r, lat_e_r, float(alpha),
     )
     cos_angle = jnp.cos(mesh.angleEdge)
@@ -346,7 +352,7 @@ def rotated_baroclinic_init_mpas(
 
         # Geographic (east, north) at the edge midpoint
         u_e_geo = u_r * cos_gamma
-        v_n_geo = u_r * sin_gamma_neg_v
+        v_n_geo = u_r * sin_gamma
         # Project onto edge normal (TRiSK convention: angleEdge is the
         # angle of the normal away from local east)
         u_normal = u_e_geo * cos_angle + v_n_geo * sin_angle

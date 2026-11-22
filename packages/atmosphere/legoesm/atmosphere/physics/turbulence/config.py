@@ -832,6 +832,13 @@ class TurbulenceConfig(NamedTuple):
     update_interval_steps: int = 1
     # appended last (positional ABI)
     ifs_vdf: IFSVDFLaneConfig | None = None
+    # Route C (turbulence/routec.py): Grenier and Bretherton (2001) subgrid
+    # inversion with its explicit entrainment flux imposed inside prognostic
+    # CLUBB's xm/w'x' solve (Lock 2001 diagnosis).  A dispatch switch, so it
+    # lives here like ``liquid_partition``, not among CLUBBConfig's leaves;
+    # False (default) leaves every path unchanged.  Single-column use: the
+    # GCM's host advection lacks GB01's corrected faces.
+    clubb_routec_inversion: bool = False
 
 
 CLUBB_LITE_STANDIN_NOTE = (

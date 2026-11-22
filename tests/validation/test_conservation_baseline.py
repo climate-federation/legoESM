@@ -66,8 +66,8 @@ class TestConservationBaseline:
         """Energy budget residual is finite and bounded."""
         driver, _, _, _ = run_result
         tracker = driver.diagnostics.energy_tracker
-        assert len(tracker.residual) >= 2
-        res = np.array(tracker.residual[1:])
+        assert len(tracker.toa_minus_dE_dt) >= 2
+        res = np.array(tracker.toa_minus_dE_dt[1:])
         assert np.all(np.isfinite(res)), "Energy residual has non-finite values"
         # Relaxed threshold for short gray-radiation spinup from isothermal rest.
         # During spinup, the atmosphere is adjusting from T=300K isothermal to
@@ -103,7 +103,7 @@ class TestConservationBaseline:
         ts = np.load(out / "timeseries.npz")
         expected = [
             "days", "T_atm", "max_wind", "precip", "CWV",
-            "energy_residual", "moisture_column_water", "moisture_residual",
+            "energy_toa_minus_dE_dt", "moisture_column_water", "moisture_residual",
         ]
         for key in expected:
             assert key in ts.files, f"Missing key {key} in timeseries.npz"

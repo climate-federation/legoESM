@@ -907,7 +907,8 @@ def cam6_ice_stratus_fraction(
     *,
     trop_cloud_top_press: float,
     trop_cloud_taper_lnp_width: float,
-) -> jnp.ndarray:
+    return_qsatfac: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     """CAM6 ice-stratus fraction ``aist`` (cldfrc2m.F90 aist_vector, iceopt=5).
 
     cldfrc2m.F90:846-856: ``rhi = (qv+qi)/qs * esl/esi``, ``rhdif =
@@ -918,8 +919,20 @@ def cam6_ice_stratus_fraction(
     TOP interface first satisfies ``tP >= pint(k)`` scanning upward
     (tropopause.F90:398-403), and ``k <= troplev`` (clubb_intr.F90) is every
     layer whose top-interface pressure ``p_top <= tP`` -- the layer that
-    straddles the tropopause counts as stratosphere.  ``qsatfac`` (do_subgrid_growth) is not returned: its only
-    CAM consumer is MG2's in-cloud saturation, which is not ported.
+    straddles the tropopause counts as stratosphere.
+
+    ``return_qsatfac=True`` (CloudConfig.cam6_do_subgrid_growth) also returns
+    the ramp term of cldfrc2m.F90:1116-1117 ``qsatfac = max(min(qv/qs, 1),
+    (1 - aist)*rhmini + aist*rhmaxi)``, i.e. ``(1 - aist)*rhmini +
+    aist*rhmaxi`` on the RAW ramp aist (before the minice/qist limiters, as in
+    the Fortran).  MG2 completes qsatfac with ``min(qv/qs, 1)`` on its own
+    saturation curve (:func:`legoesm.atmosphere.physics.microphysics.morrison.
+    mg2_qsfm`): in CAM both ``qs`` are the same Goff-Gratch ``qsat_water``, so
+    where that branch wins MG2's scaled qvl equals qv exactly, which the aist
+    curves here would not give.  In the stratosphere rhminis = rhmaxis = 1
+    gives 1.  Above CLUBB's top CAM sets qsatfac = 0 where MG2 does not run
+    (clubb_intr.F90:2536); legoESM's MG2 runs on every level, so there the
+    term is blended to 1 (qsfm = 1) by the same top taper as aist.
 
     DEPARTURE (curves): CAM's ``qs`` is Goff-Gratch liquid (``qsat_water``)
     and ``esi`` Goff-Gratch ice; here ``qs``/``esl`` are the shared Goff
@@ -963,6 +976,8 @@ def cam6_ice_stratus_fraction(
         (rhi - rhmini) / jnp.where(degenerate, 1.0, ramp),
     )
     aist = jnp.minimum(1.0, jnp.maximum(rhdif, 0.0) ** 2)
+    if return_qsatfac:
+        qsatfac = (1.0 - aist) * rhmini + aist * rhmaxi
     has_ice = q_i >= _CAM6_AIST_MINICE
     aist = jnp.where(has_ice, jnp.maximum(_CAM6_AIST_MINCLD, aist), 0.0)
     icimr = q_i / jnp.where(has_ice, aist, 1.0)
@@ -972,8 +987,13 @@ def cam6_ice_stratus_fraction(
                      jnp.clip(q_i / _CAM6_QIST_MAX, 0.0, 1.0), aist)
     aist = jnp.clip(aist, 0.0, _CAM6_AIST_MAX)
     if trop_cloud_top_press > 0.0:
-        aist = aist * trop_cloud_top_taper(p_full, trop_cloud_top_press,
-                                           trop_cloud_taper_lnp_width)
+        _w = trop_cloud_top_taper(p_full, trop_cloud_top_press,
+                                  trop_cloud_taper_lnp_width)
+        aist = aist * _w
+        if return_qsatfac:
+            qsatfac = 1.0 + _w * (qsatfac - 1.0)
+    if return_qsatfac:
+        return aist, qsatfac
     return aist
 
 
