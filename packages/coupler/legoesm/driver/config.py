@@ -4766,6 +4766,11 @@ class ExperimentConfig(NamedTuple):
         if d.mpas_tracer_horizontal_scheme not in ("advective", "flux_fct"):
             errors.append("dycore.mpas_tracer_horizontal_scheme must be 'advective' "
                           f"or 'flux_fct'; got {d.mpas_tracer_horizontal_scheme!r}.")
+        _fw = d.mpas_fct_smoothing_width
+        if (isinstance(_fw, (int, float)) and not isinstance(_fw, bool)
+                and math.isfinite(_fw) and _fw > 5.0 ** 0.5 - 1.0):
+            errors.append("dycore.mpas_fct_smoothing_width must be <= sqrt(5)-1 "
+                          f"(limiter factors stay >= 0); got {_fw!r}.")
         for _ek in ("mpas_fct_smoothing_width", "mpas_fct_upwind_width_ms",
                     "mpas_damping_exp_del2", "mpas_damping_exp_del4"):
             _ev = getattr(d, _ek)

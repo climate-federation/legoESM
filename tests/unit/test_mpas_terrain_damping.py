@@ -274,6 +274,11 @@ def test_fct_refuses_nonpositive_dt():
     q, u, dp, dpe = _fct_case(0)
     with pytest.raises(ValueError, match="dt > 0"):
         tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, 0.0)
+    for w in (1.25, 8.0, -1e-4):
+        with pytest.raises(ValueError, match="sqrt"):
+            tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, DT, w)
+    q_new = q + DT * tracer_horizontal_flux_fct(q, u, dp, dpe, MESH, DT, 5.0 ** 0.5 - 1.0, 0.0)
+    assert float(q_new.min()) >= -1e-15 * float(q.max())     # widest allowed: no reversal
 
 
 # ---------------------------------------------------------------- shared core
@@ -479,6 +484,7 @@ def test_validate_strict_refuses_bad_settings():
     d = prod.dycore
     for repl, word in (({"mpas_tracer_horizontal_scheme": "fct"}, "mpas_tracer_horizontal_scheme"),
                        ({"mpas_fct_smoothing_width": -1.0}, "mpas_fct_smoothing_width"),
+                       ({"mpas_fct_smoothing_width": 8.0}, "sqrt(5)-1"),
                        ({"mpas_fct_upwind_width_ms": float("nan")}, "mpas_fct_upwind_width_ms"),
                        ({"mpas_damping_exp_del4": -1.0}, "mpas_damping_exp_del4"),
                        ({"mpas_kh_pressure_surfaces": True, "vertical_form": "legacy"},

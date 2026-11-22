@@ -242,6 +242,12 @@ class TracerTransportMPASModel(IntegrationMixin):
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
 
+# Largest fct_smoothing_width keeping every limiter factor >= 0: the relative
+# min of (1, R) stays >= 0 for every R >= 0 iff width <= sqrt(5) - 1 (GLM
+# derivation; codex reproduced reversed antidiffusive fluxes at width 8).
+FCT_MAX_SMOOTHING_WIDTH = 5.0 ** 0.5 - 1.0
+
+
 def fct_in_out_sums(out, width):
     """FCT antidiffusive in/out sums over a cell's edges (axis 0; ``out > 0``
     leaves the cell) as a C1 positive part from ABOVE: ``(x + W)^2 / 4W`` on
@@ -305,6 +311,9 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
 
     if isinstance(dt, (int, float)) and not dt > 0:
         raise ValueError(f"tracer_horizontal_flux_fct needs dt > 0 (got {dt!r})")
+    if not 0.0 <= width <= FCT_MAX_SMOOTHING_WIDTH:
+        raise ValueError(f"tracer_horizontal_flux_fct width must be in [0, sqrt(5)-1] "
+                         f"(limiter factors stay >= 0); got {width!r}")
     nC, nlev, ntr = q.shape
     nE = u_edge.shape[0]
 
