@@ -4,7 +4,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).parents[2] / "scripts/validate/most_revisit"))
-import unstable_heat_gap as uh  # noqa: E402
+import heat_gap as uh  # noqa: E402
 
 
 def test_ratio_is_unstable_heat_against_dyer_on_even_days():
@@ -51,3 +51,29 @@ def test_oracle_scale_gain_uses_odd_days_to_fit_and_even_days_to_score():
     assert abs(g["a"] - (rmse(1.5 * wiggle / c_a) - rmse(1.5 * wiggle))) < 1e-12 and g["a"] < -0.3
     c_b = np.exp(np.mean(np.log(wiggle)))
     assert abs(g["b"] - (rmse(2.0 * wiggle / c_b) - rmse(2.0 * wiggle))) < 1e-12
+
+
+def test_stable_side_and_reference_are_honoured():
+    z = np.repeat([0.3, 0.4], 15)
+    ref = lambda x: 2.0 + x  # noqa: E731
+    data = {"a": {"h": {0: (np.r_[z, -z], np.r_[1.25 * ref(z), np.full(30, 9.0)]), 1: (z, ref(z) * 0.5)},
+                  "m": {0: (z, z), 1: (z, z)}}}
+    med, rows, _ = uh.ratio(data, 1, ref)
+    i = np.searchsorted(uh.EDGES, 0.3) - 1
+    assert abs(med[i] - 1.25) < 1e-12 and np.isfinite(rows).sum() == 1
+    w = np.exp(0.1 * np.sin(np.arange(30)))
+    g = uh.oracle_scale_gain({"a": {"h": {1: (np.r_[z, -z], np.r_[ref(z) * w, np.full(30, 9.0)]),
+                                          0: (np.r_[z, -z], np.r_[2 * ref(z) * w, np.full(30, 9.0)])}}}, 1, ref)
+    c = np.exp(np.mean(np.log(w)))
+    rmse = lambda r: np.sqrt(np.mean(np.log(r) ** 2))  # noqa: E731
+    assert abs(g["a"] - (rmse(2 * w / c) - rmse(2 * w))) < 1e-12
+
+
+def test_reference_j3_reads_the_benchmark_global_fit(tmp_path):
+    import json
+    (tmp_path / "b.json").write_text(json.dumps({"global_fit": {"J3": {"a0": 4.0, "a_inf": 0.5, "zc": 1.2, "pr0": 0.9}}}))
+    f = uh.reference("j3", str(tmp_path / "b.json"))
+    z = np.array([-0.5, 0.3, 2.0])
+    st = 0.9 + 0.5 * z + 3.5 * z / (1 + z / 1.2)
+    assert np.allclose(f(z), np.where(z > 0, st, 0.9 * (1 - 16 * z) ** -0.5))
+    assert uh.reference("dyer") is uh.dyer
