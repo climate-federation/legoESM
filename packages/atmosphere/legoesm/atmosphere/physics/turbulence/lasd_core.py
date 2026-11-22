@@ -109,36 +109,51 @@ def spectral_test_filter(field_yxz: jax.Array, cut_y: int, cut_x: int,
     (oracle ``Filtering_Level1/2``): zero every mode with ``|k_y| ≥ cut_y`` or
     ``k_x ≥ cut_x``. Vertical left unfiltered (ABL LES is homogeneous in (x,y)).
 
-    ``layout`` (a ``SpectralLESLayout``) selects the y-slab distributed FFT; the
-    kx cutoff is applied on this rank's kx-column slab via the columns' GLOBAL
+    ``layout`` (a ``SpectralLESLayout``) selects the distributed FFT; the kx
+    cutoff is applied on the kx columns this rank holds via their GLOBAL
     indices. ``None`` ⇒ serial ``jnp.fft.rfft2``. ``level_major=True`` takes and
     returns ``(nz, ny, nx)`` instead of ``(ny, nx, nz)`` (same values)."""
+    return spectral_test_filters(field_yxz, ((cut_y, cut_x),), layout,
+                                 level_major)[0]
+
+
+def spectral_test_filters(field_yxz: jax.Array, cuts, layout=None,
+                          level_major: bool = False):
+    """:func:`spectral_test_filter` at several ``cuts = ((cut_y, cut_x), ...)``
+    from ONE forward transform (one inverse per cut); returns a tuple, one
+    filtered field per cut, each equal to the single-cut filter."""
     if layout is None:
         ay, ax = (1, 2) if level_major else (0, 1)
         ny, nx = field_yxz.shape[ay], field_yxz.shape[ax]
         fh = jnp.fft.rfft2(field_yxz, axes=(ay, ax))
         iy = jnp.arange(ny)
         fold_y = jnp.minimum(iy, ny - iy)
-        mask = ((fold_y < cut_y)[:, None]
-                & (jnp.arange(fh.shape[ax]) < cut_x)[None, :])   # (ny, nkx)
-        mask = mask[None] if level_major else mask[:, :, None]
-        fh = jnp.where(mask, fh, 0.0)
-        return jnp.fft.irfft2(fh, axes=(ay, ax), s=(ny, nx))
+        out = []
+        for cut_y, cut_x in cuts:
+            mask = ((fold_y < cut_y)[:, None]
+                    & (jnp.arange(fh.shape[ax]) < cut_x)[None, :])   # (ny, nkx)
+            mask = mask[None] if level_major else mask[:, :, None]
+            out.append(jnp.fft.irfft2(jnp.where(mask, fh, 0.0),
+                                      axes=(ay, ax), s=(ny, nx)))
+        return tuple(out)
     if level_major:
-        return jnp.moveaxis(spectral_test_filter(
-            jnp.moveaxis(field_yxz, 0, 2), cut_y, cut_x, layout), 2, 0)
+        return tuple(jnp.moveaxis(f, 2, 0) for f in spectral_test_filters(
+            jnp.moveaxis(field_yxz, 0, 2), cuts, layout))
     from legoesm.parallel.distributed_fft import (
         layout_irfft2, layout_kx_slice, layout_rfft2)
     ny, nx = layout.ny_global, layout.nx
     fh = layout_rfft2(field_yxz, layout)
     iy = jnp.arange(ny)
     fold_y = jnp.minimum(iy, ny - iy)
-    mask_y = (fold_y < cut_y)[:, None, None]
     # kx columns this rank holds (slab/pencil chunk; all of them in planes mode).
     lo, hi = layout_kx_slice(layout, nx)
-    mask_x = (jnp.arange(lo, hi) < cut_x)[None, :, None]   # GLOBAL kx index
-    fh = jnp.where(mask_y & mask_x, fh, 0.0)
-    return layout_irfft2(fh, layout, field_yxz.shape[-1])
+    out = []
+    for cut_y, cut_x in cuts:
+        mask_y = (fold_y < cut_y)[:, None, None]
+        mask_x = (jnp.arange(lo, hi) < cut_x)[None, :, None]   # GLOBAL kx index
+        out.append(layout_irfft2(jnp.where(mask_y & mask_x, fh, 0.0), layout,
+                                 field_yxz.shape[-1]))
+    return tuple(out)
 
 
 def _ring_halo(f, axis, n, r, comm, tag):
@@ -310,8 +325,9 @@ def lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag,
     L2 = (jnp.asarray(delta) ** 2).reshape(nz, 1, 1)               # Δ² (nz,1,1)
     cut1y, cut1x = round(ny_g / (2 * _TFR)), round(nx_g / (2 * _TFR))            # 2Δ
     cut2y, cut2x = round(ny_g / (2 * _TFR * _TFR)), round(nx_g / (2 * _TFR * _TFR))  # 4Δ
-    F1 = lambda f: spectral_test_filter(f, cut1y, cut1x, layout, True)  # noqa: E731
-    F2 = lambda f: spectral_test_filter(f, cut2y, cut2x, layout, True)  # noqa: E731
+    # F1 (2Δ) and F2 (4Δ) of the same field share one forward transform.
+    F12 = lambda f: spectral_test_filters(                              # noqa: E731
+        f, ((cut1y, cut1x), (cut2y, cut2x)), layout, True)
     box3 = lambda f: imfilter_box3(f, layout, True)                     # noqa: E731
     if layout is None:
         pm = lambda f: jnp.mean(f, axis=(1, 2))                   # noqa: E731
@@ -323,23 +339,21 @@ def lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag,
         pm = lambda f: (global_sum_mpi(jnp.sum(f, axis=(1, 2)),  # noqa: E731
                                        comm=layout.comm) / _pden)
 
-    u_h, v_h, w_h = F1(uc), F1(vc), F1(wc)
-    u_d, v_d, w_d = F2(uc), F2(vc), F2(wc)
-    L11, L22, L33 = F1(uc*uc)-u_h*u_h, F1(vc*vc)-v_h*v_h, F1(wc*wc)-w_h*w_h
-    L12, L13, L23 = F1(uc*vc)-u_h*v_h, F1(uc*wc)-u_h*w_h, F1(vc*wc)-v_h*w_h
-    Q11, Q22, Q33 = F2(uc*uc)-u_d*u_d, F2(vc*vc)-v_d*v_d, F2(wc*wc)-w_d*w_d
-    Q12, Q13, Q23 = F2(uc*vc)-u_d*v_d, F2(uc*wc)-u_d*w_d, F2(vc*wc)-v_d*w_d
+    (u_h, u_d), (v_h, v_d), (w_h, w_d) = F12(uc), F12(vc), F12(wc)
+    (uu_h, uu_d), (vv_h, vv_d), (ww_h, ww_d) = F12(uc*uc), F12(vc*vc), F12(wc*wc)
+    (uv_h, uv_d), (uw_h, uw_d), (vw_h, vw_d) = F12(uc*vc), F12(uc*wc), F12(vc*wc)
+    L11, L22, L33 = uu_h-u_h*u_h, vv_h-v_h*v_h, ww_h-w_h*w_h
+    L12, L13, L23 = uv_h-u_h*v_h, uw_h-u_h*w_h, vw_h-v_h*w_h
+    Q11, Q22, Q33 = uu_d-u_d*u_d, vv_d-v_d*v_d, ww_d-w_d*w_d
+    Q12, Q13, Q23 = uv_d-u_d*v_d, uw_d-u_d*w_d, vw_d-v_d*w_d
 
-    S11h, S22h, S33h = F1(S11), F1(S22), F1(S33)
-    S12h, S13h, S23h = F1(S12), F1(S13), F1(S23)
-    S11d, S22d, S33d = F2(S11), F2(S22), F2(S33)
-    S12d, S13d, S23d = F2(S12), F2(S13), F2(S23)
+    (S11h, S11d), (S22h, S22d), (S33h, S33d) = F12(S11), F12(S22), F12(S33)
+    (S12h, S12d), (S13h, S13d), (S23h, S23d) = F12(S12), F12(S13), F12(S23)
     S_h = jnp.sqrt(2.0*(S11h**2+S22h**2+S33h**2+2.0*(S12h**2+S13h**2+S23h**2)))
     S_d = jnp.sqrt(2.0*(S11d**2+S22d**2+S33d**2+2.0*(S12d**2+S13d**2+S23d**2)))
-    SS11h, SS22h, SS33h = F1(Smag*S11), F1(Smag*S22), F1(Smag*S33)
-    SS12h, SS13h, SS23h = F1(Smag*S12), F1(Smag*S13), F1(Smag*S23)
-    SS11d, SS22d, SS33d = F2(Smag*S11), F2(Smag*S22), F2(Smag*S33)
-    SS12d, SS13d, SS23d = F2(Smag*S12), F2(Smag*S13), F2(Smag*S23)
+    (SS11h, SS11d), (SS22h, SS22d) = F12(Smag*S11), F12(Smag*S22)
+    (SS33h, SS33d), (SS12h, SS12d) = F12(Smag*S33), F12(Smag*S12)
+    (SS13h, SS13d), (SS23h, SS23d) = F12(Smag*S13), F12(Smag*S23)
 
     a1 = pm(2.0*L2*(L11*SS11h+L22*SS22h+L33*SS33h
                     + 2.0*(L12*SS12h+L13*SS13h+L23*SS23h)))
