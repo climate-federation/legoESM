@@ -159,7 +159,7 @@ def test_partitioned_tracker_matches_serial_including_dE_dt():
     want1 = ref._mpas_energy_sample(ref.state.p_s.data, 1.0)
     got1 = d._mpas_energy_sample(d.state.p_s.data, 1.0)
     assert abs(want1["energy_dE_dt"]) > 1.0, "control: dE/dt must be nonzero"
-    _assert_close(got1, want1, KEYS + ("energy_dE_dt", "energy_residual"))
+    _assert_close(got1, want1, KEYS + ("energy_dE_dt", "energy_toa_minus_dE_dt"))
 
 
 def test_stale_halo_edges_are_refreshed_before_the_ke_term():
