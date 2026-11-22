@@ -333,6 +333,15 @@ class OceanSurfaceForcing(NamedTuple):
                                        # attenuation of the lc/etau wave-TKE
                                        # sources (TKEConfig.eice=1; NEMO
                                        # nn_eice).  None ⇒ no attenuation.
+    tau_u_face: object = None          # jnp.ndarray | None [Pa], on-ocean,
+                                       # grid-native stress AT the u faces
+                                       # (n_lat, n_lon+1), and tau_v_face at the
+                                       # v faces (n_lat+1, n_lon): taken as the
+                                       # momentum stress without interpolation
+                                       # (ROMS and CROCO sustr/svstr).  tau_x and
+                                       # tau_y stay the T-point fields of the
+                                       # friction velocity.  Both or neither.
+    tau_v_face: object = None
     tau_i_native: object = None        # jnp.ndarray | None [Pa], on-ocean i
     tau_j_native: object = None        # jnp.ndarray | None [Pa], on-ocean j
     runoff_tracer_content: object = None
@@ -1118,14 +1127,32 @@ class OMp25Config(NamedTuple):
     """OM4p25 lateral-friction closure coefficients (GFDL OM4.0, Adcroft et al.
     2019; Silvestri et al. 2024 "SM2"). Laplacian + biharmonic, each the max of
     a Smagorinsky term and a static grid-scale term, with the Laplacian tapered
-    by the deformation-radius factor F = 1/(1+0.25·(L_d/Δ)⁴). Defaults are the
-    published OM4p25 values."""
+    by the deformation-radius factor F = 1/(1+0.25·(L_d/Δ)⁴). The Laplacian defaults
+    (C2, Cu2) are OM4p5's: the OM4_025 parameter file has no Laplacian viscosity
+    (KH = KH_VEL_SCALE = 0, SMAGORINSKY_KH False); the biharmonic values are both."""
     C2: float = 0.15      # Laplacian Smagorinsky coefficient
     Cu2: float = 0.01     # Laplacian static-viscosity coefficient
     C4: float = 0.06      # biharmonic Smagorinsky coefficient
     Cu4: float = 0.01     # biharmonic static-viscosity coefficient
     deformation_radius_m: float = 6.75e3  # L_d for the F taper [m]; ~uniform for
     #   the idealised baroclinic jet. Spatially-varying L_d (from N²) is a refinement.
+    # The OM4p5 form (MOM6-examples OM4_05 parameter file, MOM_hor_visc.F90): each
+    # default keeps the closure above unchanged.  OM4p5 values in brackets.
+    Kh_sin_lat: float = 0.0          # [m2/s] Laplacian background Kh_sin_lat |sin(lat)|^p (2000)
+    Kh_sin_power: float = 4.0        # p (4)
+    bound_coriolis_vel: float = 0.0  # [m/s] BOUND_CORIOLIS_VEL of the biharmonic Smagorinsky (6); 0 off
+    # "taper": F = 1/(1 + 0.25 (L_d/Δ)⁴) with the scalar L_d above (legacy).
+    # "mom6_step_wkb": MOM6's resolution function with VISC_RES_FN_POWER >= 100, a
+    #   step at L_d² = c1² / (f² + c1 beta*) = dx² + dy², c1 the first baroclinic wave
+    #   speed by WKB from the model density each step, MOM6's Δ² = 2dx²dy²/(dx²+dy²).
+    resolution_function: str = "taper"
+    res_coef: float = 1.0            # VISC_RES_SCALE_COEF (1)
+    gill_equatorial_ld: bool = True  # GILL_EQUATORIAL_LD (True): beta* = 2 |grad f|
+    bound_coef: float = 0.0          # HORVISC_BOUND_COEF for the BOUND_KH, BOUND_AH caps (0.8); 0 off
+    # RULE 5 smoothing width (dimensionless) of the OM4p5 form's switches: the
+    # resolution-function step, the stable-interface mask and sqrt of the WKB N2,
+    # the maxima of the viscosity terms and the BOUND caps.  0 = MOM6's hard form.
+    smooth_width: float = 0.01
 
 
 class DynBottomDragConfig(NamedTuple):
@@ -3543,6 +3570,57 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Appended to preserve positional callers.
     store_tracer_budget: bool = False
 
+    # Face mask of the prognostic velocity on partial cells.
+    # "2d" (default, bit-identical): the step masks u, v with the 2-D face
+    #   masks.  A face whose neighbour column ends above level k has zero
+    #   thickness there (min rule) and is closed for the tracers
+    #   (compute_face_masks_3d), but it keeps a velocity: it receives every
+    #   depth-uniform increment of the step (slow-forcing removal, barotropic
+    #   correction, Coriolis) and nothing damps it.  No transport or kinetic
+    #   energy sees it, yet the horizontal momentum stencils (viscosity, KE
+    #   gradient, vorticity flux, Coriolis averages) read it as water.
+    # "3d": u, v are zeroed at those faces on entry to and on exit from the
+    #   step, as NEMO's per-level umask/vmask (tmask(i)*tmask(i+1) at level k)
+    #   and MITgcm's maskW/maskS (hFacW = 0) do.  Acts only on a partial-cell
+    #   coordinate (pure z* has no such faces).  Tested with the forward
+    #   Euler outer integrator.
+    momentum_face_mask: str = "2d"
+    # Time scheme of the baroclinic Coriolis rotation of the matsuno_split
+    # path (_forward_backward_coriolis_3d).
+    # "forward_backward" (default, bit-identical): u' with the old v', then
+    #   v' with the new u', in that order every step.  For collocated
+    #   velocities one step changes the kinetic energy by (1/2)(f dt)^2
+    #   (u'^2 - v'^2) to leading order, so zonal flow gains energy every step
+    #   (Sielecki 1968); with the pressure gradient applied before the
+    #   rotation a zonal geostrophic jet keeps growing (1.2 percent of the
+    #   energy of a zonal flow per step at 20N to 32N with dt = 1800 s,
+    #   tests/ocean/unit/test_coriolis_time_scheme.py).
+    # "trapezoidal": Crank-Nicolson rotation, x1 = x0 + dt L((x0 + x1)/2),
+    #   with the same spatial operator L, solved by fixed-point iteration.
+    #   Exactly energy neutral for any dt when L is (as here, to the
+    #   residual of the metric terms) skew in the kinetic energy norm.
+    # "trapezoidal_step": the same rotation centred on the whole step,
+    #   u1 = u0 + dt T + dt L((u0 + u1)/2), u0 the velocity before the explicit
+    #   tendency T.  The energy change is exactly dt times the work of T on the
+    #   centred velocity, so a forward pressure gradient balanced by Coriolis
+    #   adds no (1/2) dt^2 |T|^2 (about (f dt)^2 of the energy of geostrophic
+    #   flow per step with "trapezoidal"; docs/88 5.5 of the ENSO project).
+    coriolis_time_scheme: str = "forward_backward"
+    # Spatial operator of that rotation.
+    # "four_point" (default, bit-identical): f at the face times the 4-point
+    #   average of the other component.  Not exactly energy neutral on the
+    #   sphere or at partial cells (f_u differs from f_v, face areas and
+    #   thicknesses differ): the residual rate does not vanish as dt -> 0.
+    # "energy_conserving": the cell-centre pair form of CROCO's rhs3d.F
+    #   (_coriolis_pair_operator), equal and opposite coefficients for every
+    #   u face / v face pair, energy neutral to round-off for any flow; with
+    #   coriolis_time_scheme="trapezoidal" the whole rotation is.
+    coriolis_baroclinic_operator: str = "four_point"
+    # RULE 5 smoothing width (dimensionless) of the open-boundary radiation
+    # switches (inflow/outflow, upstream pick, cy clip, rx cap; see
+    # open_boundary_latlon._orlanski).  0 = CROCO/MOM6's hard switches.
+    # Read only when SpongeForcing.open_boundary is given.
+    open_boundary_smooth_width: float = 0.01
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

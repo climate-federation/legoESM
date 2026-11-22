@@ -28,7 +28,8 @@ def _load():
     return mod
 
 
-def _series(tmp_path, *, leak, n=6, dt_days=1.0):
+def _series(tmp_path, *, leak, n=6, dt_days=1.0,
+            key="energy_toa_minus_dE_dt"):
     """A synthetic run built from an ENERGY TRAJECTORY, not from the algebra.
 
     Codex, reviewing the first version: building `dE_dt` straight from the
@@ -70,7 +71,7 @@ def _series(tmp_path, *, leak, n=6, dt_days=1.0):
 
     path = tmp_path / "timeseries.npz"
     np.savez(path, days=np.arange(n, dtype=float) * dt_days,
-             energy_toa_net=toa, energy_dE_dt=dedt, energy_residual=residual,
+             energy_toa_net=toa, energy_dE_dt=dedt, **{key: residual},
              sw_net_sfc=sw, lw_net_sfc=lw, hfss=sh, hfls=lh,
              # Interval means unless a test says otherwise: the probe refuses
              # snapshot-sourced series outright.
@@ -83,7 +84,7 @@ def _leak_values(mod, path, drop_first=True):
     """Leak per sample, with the first dropped the way the probe drops it."""
     t = mod.load(path)
     v = (t["sw_net_sfc"] + t["lw_net_sfc"] - t["hfss"] - t["hfls"]
-         - t["energy_residual"])
+         - t["energy_toa_minus_dE_dt"])
     return v[1:] if drop_first else v
 
 
@@ -264,3 +265,15 @@ def test_the_frozen_precipitation_bound_is_the_predicted_size(tmp_path):
 def test_runs_end_to_end(tmp_path):
     mod = _load()
     assert mod.main([str(_series(tmp_path, leak=12.0)), "--skip-days", "1"]) == 0
+
+
+def test_a_file_with_the_legacy_key_gives_the_same_leak(tmp_path, capsys):
+    """Runs written before the rename stored TOA - dE/dt as energy_residual."""
+    mod = _load()
+    new = _leak_values(mod, _series(tmp_path, leak=7.0))
+    old_dir = tmp_path / "old"
+    old_dir.mkdir()
+    old = _leak_values(mod, _series(old_dir, leak=7.0, key="energy_residual"))
+    np.testing.assert_array_equal(old, new)
+    np.testing.assert_allclose(new, 7.0, atol=1e-6)
+    assert "legacy key 'energy_residual'" in capsys.readouterr().err

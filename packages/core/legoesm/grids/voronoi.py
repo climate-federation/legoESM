@@ -1260,12 +1260,31 @@ def prewarm_voronoi_cache(
     return path
 
 
+def _apply_coriolis_alpha(mesh: VoronoiMesh, omega: float,
+                          alpha: float) -> VoronoiMesh:
+    """Replace ``fEdge``/``fVertex`` with the alpha-rotated planet's Coriolis
+    (``rotated_coriolis``); ``alpha == 0`` returns the mesh unchanged."""
+    if alpha == 0.0:
+        return mesh
+    from legoesm.core.williamson_sw_analytic import rotated_coriolis
+
+    def f_at(lon, lat, like):
+        return jnp.asarray(rotated_coriolis(
+            np.asarray(lon, np.float64), np.asarray(lat, np.float64),
+            omega=float(omega), alpha=float(alpha)), dtype=like.dtype)
+
+    return mesh._replace(
+        fEdge=f_at(mesh.lonEdge, mesh.latEdge, mesh.fEdge),
+        fVertex=f_at(mesh.lonVertex, mesh.latVertex, mesh.fVertex))
+
+
 def create_voronoi_mesh(
     subdivision_level: int,
     radius: float = constants.R_earth,
     lloyd_iterations: int = 50,
     omega: float = constants.Omega,
     density_fn=None,
+    coriolis_alpha: float = 0.0,
 ) -> VoronoiMesh:
     """Create a centroidal Voronoi tessellation (SCVT) on the sphere.
 
@@ -1284,6 +1303,10 @@ def create_voronoi_mesh(
         Number of Lloyd relaxation iterations. Default: 50.
     omega : float
         Rotation rate [rad/s]. Default: Earth rotation.
+    coriolis_alpha : float
+        Rotation-axis tilt [rad] for the DCMIP 2008 / Williamson-1992 rotated
+        tests (``fEdge``/``fVertex`` = ``2 omega S``, see ``rotated_coriolis``).
+        Default ``0.0`` leaves the mesh bit-identical.
     density_fn : callable(lat, lon) -> float, optional
         Relative mesh-density function (``lat``, ``lon`` in radians; larger =>
         finer cells).  When provided, the Lloyd relaxation is **density-weighted**
@@ -1328,7 +1351,7 @@ def create_voronoi_mesh(
             subdivision_level, radius, lloyd_iterations, omega)
         cached = _load_voronoi_cache(cache_path)
         if cached is not None:
-            return cached
+            return _apply_coriolis_alpha(cached, omega, coriolis_alpha)
 
     _lock_path = None
     if _big:
@@ -1416,7 +1439,7 @@ def create_voronoi_mesh(
             os.unlink(_lock_path)
         except FileNotFoundError:
             pass
-    return mesh
+    return _apply_coriolis_alpha(mesh, omega, coriolis_alpha)
 
 
 # ============================================================================

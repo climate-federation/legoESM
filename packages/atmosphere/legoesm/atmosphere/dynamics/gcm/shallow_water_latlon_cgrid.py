@@ -114,6 +114,50 @@ class CGridLatLonShallowWaterConfig(NamedTuple):
 # C-grid interpolation helpers
 # ==============================================================================
 
+def latlon_coriolis_is_rotated(grid: LatLonGrid) -> bool:
+    """Whether the planetary vorticity comes from the rotated-planet formula.
+
+    A Python ``0``/``0.0`` tilt (every existing grid) keeps the historical
+    per-row path, bit-identically.  Any other tilt -- concrete or traced (grid
+    passed as a dynamic JIT argument) -- takes the rotated formula, which is
+    exact for every value (and equals the historical rows at 0) on the serial
+    AND band-decomposed lanes: each band evaluates it on its own vertex rows.
+    """
+    a = getattr(grid, "coriolis_alpha", 0.0)
+    return not (isinstance(a, (int, float)) and a == 0.0)
+
+
+def latlon_rotated_rows(grid: LatLonGrid, lat_rows: jnp.ndarray) -> jnp.ndarray:
+    """``rotated_coriolis`` on vertex rows ``lat_rows`` x the u-face longitudes
+    ``lon[j] - dlon/2``, shape ``(len(lat_rows), n_lon+1)``; column ``n_lon``
+    is an exact copy of column 0 (periodic seam).  Pole rows are NOT clamped
+    here -- callers set them to the exact scalars ``-+2 omega cos(alpha)``."""
+    from legoesm.core.williamson_sw_analytic import rotated_coriolis
+    # Evaluate in the widest available float, then round once to the grid
+    # dtype, so the result does not depend on how XLA fuses the transcendentals.
+    wide = jnp.result_type(float)
+    lon_v = grid.lon.astype(wide) - 0.5 * grid.dlon
+    f = rotated_coriolis(lon_v[None, :], lat_rows.astype(wide)[:, None],
+                         omega=grid.omega, alpha=grid.coriolis_alpha,
+                         xp=jnp).astype(lat_rows.dtype)
+    return jnp.concatenate([f, f[:, :1]], axis=1)
+
+
+def latlon_coriolis_pole_value(grid: LatLonGrid):
+    """Exact north-pole planetary vorticity ``2 omega cos(alpha)``."""
+    return 2.0 * grid.omega * jnp.cos(grid.coriolis_alpha)
+
+
+def latlon_vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
+    """Serial-grid rotated planetary vorticity at all C-grid vertices,
+    ``(n_lat+1, n_lon+1)``: interior rows at the latitude interfaces, pole rows
+    the exact scalars ``-+2 omega cos(alpha)``."""
+    lat = grid.lat
+    f = latlon_rotated_rows(grid, 0.5 * (lat[:-1] + lat[1:]))
+    pole = jnp.full((1, f.shape[1]), latlon_coriolis_pole_value(grid), dtype=f.dtype)
+    return jnp.concatenate([-pole, f, pole], axis=0)
+
+
 def absolute_vorticity_coriolis(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -166,6 +210,7 @@ def absolute_vorticity_coriolis(
     # Mirrors curl_vertex_cgrid's SPMD pole handling.
     from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
     _spmd_pm = spmd_pole_end_masks()
+    _rotated = latlon_coriolis_is_rotated(grid)
 
     # --- Relative vorticity at vertices (via the B2 operator interface) ---
     # ``u_lat_pad`` (optional, exactly pad_with_pole_bc_lat(u, halo=1,
@@ -201,6 +246,8 @@ def absolute_vorticity_coriolis(
             twoOmega * jnp.sin(lat_int),
             (1, 1), constant_values=(-twoOmega, twoOmega),
         )  # (n_lat+1,)
+        if _rotated:
+            f_vert_2d = latlon_vertex_coriolis(grid)
     else:
         # Band-decomposed (MPI or single-program SPMD): end vertex rows at
         # interior cuts sit at the midpoint latitude ACROSS the cut.  Pad
@@ -230,12 +277,28 @@ def absolute_vorticity_coriolis(
                 f_vert = f_vert.at[0].set(-twoOmega)
             if _band.north_rank is None:
                 f_vert = f_vert.at[-1].set(twoOmega)
+        if _rotated:
+            # Rotated planet on a band: the formula on THIS band's vertex rows
+            # (interior cuts are not poles), with the exact pole scalars
+            # restored under the same physical-pole conditions as above.
+            f_vert_2d = latlon_rotated_rows(grid, lat_vert)
+            _fp = latlon_coriolis_pole_value(grid).astype(f_vert_2d.dtype)
+            if _spmd_pm is not None:
+                f_vert_2d = jnp.where(_south_m, f_vert_2d.at[0].set(-_fp), f_vert_2d)
+                f_vert_2d = jnp.where(_north_m, f_vert_2d.at[-1].set(_fp), f_vert_2d)
+            else:
+                if _band.south_rank is None:
+                    f_vert_2d = f_vert_2d.at[0].set(-_fp)
+                if _band.north_rank is None:
+                    f_vert_2d = f_vert_2d.at[-1].set(_fp)
 
     # Absolute vorticity at vertices
     if is_3d:
         eta = zeta + f_vert[:, jnp.newaxis, jnp.newaxis]
     else:
         eta = zeta + f_vert[:, jnp.newaxis]
+    if _rotated:
+        eta = zeta + (f_vert_2d[..., jnp.newaxis] if is_3d else f_vert_2d)
 
     # --- Average η to u-faces ---
     # u-face[i, j] is flanked by vertex[i, j] (south) and vertex[i+1, j] (north)

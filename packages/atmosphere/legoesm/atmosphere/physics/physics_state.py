@@ -319,6 +319,10 @@ class PhysicsState(NamedTuple):
     # znt, hfx, qfx, pblh), seeded at WRF's cold start; None for every other
     # scheme.  Appended LAST with a default.
     sfclay: jnp.ndarray = None
+    # FIVE fine layers (legoesm.atmosphere.physics.five): the fine state, the
+    # fine physics carry and the column selection, as one dict pytree.  None
+    # unless FIVE is switched on (existing pytrees unchanged).
+    five_carry: object = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -669,6 +673,7 @@ def update_physics_state(phys_state, updates):
         zc_q_v_prev=updates.get("zc_q_v_prev", phys_state.zc_q_v_prev),
         zc_p_s_prev=updates.get("zc_p_s_prev", phys_state.zc_p_s_prev),
         sfclay=updates.get("sfclay", phys_state.sfclay),
+        five_carry=updates.get("five_carry", phys_state.five_carry),
     )
 
 

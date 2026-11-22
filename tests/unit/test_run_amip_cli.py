@@ -3198,6 +3198,31 @@ def test_mpas_nu_vert4_t_flag_flows_to_dycore_config():
     assert cfg_set.dycore.mpas_nu_vert4_T == pytest.approx(5e-6)
 
 
+def test_mpas_nu_vert4_tracer_flag_flows_to_dycore_config():
+    """--mpas-nu-vert4-tracer reaches DycoreConfig.mpas_nu_vert4_tracer (the
+    factory threads it into MPASPrimitiveEquationConfig.nu_vert4_tracer).
+    Absent = None (tracers follow the T rate); 0 leaves the T rate alone."""
+    from legoesm.driver.config import DycoreConfig
+    assert DycoreConfig().mpas_nu_vert4_tracer is None
+    parser = build_arg_parser()
+    assert parser.parse_args([]).mpas_nu_vert4_tracer is None
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_nu_vert4_tracer is None
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-t", "2e-6",
+        "--mpas-nu-vert4-tracer", "0",
+    ]), parser))
+    assert cfg_off.dycore.mpas_nu_vert4_tracer == 0.0
+    assert cfg_off.dycore.mpas_nu_vert4_T == pytest.approx(2e-6)
+    cfg_off.validate_strict()
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-tracer", "5e-6",
+    ]), parser))
+    assert cfg_set.dycore.mpas_nu_vert4_tracer == pytest.approx(5e-6)
+    assert cfg_set.dycore.mpas_nu_vert4_T == cfg_default.dycore.mpas_nu_vert4_T
+
+
 def test_multicontroller_coordinator_flags_parse():
     """Route-B flags round-trip through the parser (they are RUN args consumed
     in main() for the jax.distributed bootstrap, not ExperimentConfig fields)."""
@@ -6637,3 +6662,43 @@ def test_positivity_condensate_from_vapour_flag_flows_to_config():
         "--dataset", "analytical", "--no-positivity-condensate-from-vapour",
     ]), parser))
     assert cfg_no.dycore.positivity_condensate_from_vapour is False
+
+
+def test_mpas_vert_ppm_flags_flow_to_config():
+    """--mpas-vert-advection-scheme ppm and --mpas-vert-ppm-limiter-sharpness
+    round-trip into DycoreConfig; ppm is accepted on the hybrid lane only and
+    the sharpness must be > 0 (inf = CAM-FV's hard limiter)."""
+    parser = build_arg_parser()
+    hyb = ["--dataset", "analytical", "--grid-type", "voronoi",
+           "--discretization", "mpas", "--vertical-coord", "hybrid"]
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        hyb + ["--mpas-vert-advection-scheme", "ppm"]), parser))
+    assert cfg.dycore.mpas_vert_advection_scheme == "ppm"
+    assert cfg.dycore.mpas_vert_ppm_limiter_sharpness == 1.0e4
+    cfg.validate_strict()
+    cfg_inf = build_config_from_args(_postprocess_args(parser.parse_args(
+        hyb + ["--mpas-vert-advection-scheme", "ppm",
+               "--mpas-vert-ppm-limiter-sharpness", "inf"]), parser))
+    assert cfg_inf.dycore.mpas_vert_ppm_limiter_sharpness == float("inf")
+    cfg_inf.validate_strict()
+    cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args(
+        hyb + ["--mpas-vert-advection-scheme", "ppm",
+               "--mpas-vert-ppm-limiter-sharpness", "0"]), parser))
+    with pytest.raises(ValueError, match="mpas_vert_ppm_limiter_sharpness"):
+        cfg_bad.validate_strict()
+    cfg_sig = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--grid-type", "voronoi",
+         "--discretization", "mpas", "--vertical-coord", "sigma",
+         "--mpas-vert-advection-scheme", "ppm"]), parser))
+    with pytest.raises(ValueError, match="HYBRID vertical transport"):
+        cfg_sig.validate_strict()
+
+
+@pytest.mark.parametrize("bad", ["-1", "nan", "inf"])
+def test_mpas_nu_vert4_tracer_rejects_invalid(bad):
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--grid-type", "voronoi",
+         "--discretization", "mpas", "--mpas-nu-vert4-tracer", bad]), parser))
+    with pytest.raises(ValueError, match="mpas_nu_vert4_tracer"):
+        cfg.validate_strict()

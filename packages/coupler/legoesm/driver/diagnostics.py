@@ -2738,7 +2738,7 @@ class DiagnosticCollector:
             energy_toa_net=np.array(self.energy_tracker.toa_net),
             energy_column=np.array(self.energy_tracker.column_energy),
             energy_dE_dt=np.array(self.energy_tracker.dE_dt),
-            energy_residual=np.array(self.energy_tracker.residual),
+            energy_toa_minus_dE_dt=np.array(self.energy_tracker.toa_minus_dE_dt),
             moisture_column_water=np.array(self.moisture_tracker.column_water),
             moisture_precip_rate=np.array(self.moisture_tracker.precip_rate),
             moisture_evap_rate=np.array(self.moisture_tracker.evap_rate),

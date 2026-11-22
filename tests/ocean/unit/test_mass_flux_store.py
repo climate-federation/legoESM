@@ -1439,6 +1439,11 @@ def test_store_mass_flux_is_the_last_config_field():
             "lateral_viscosity_file_coastal",
             # ENSO-fork port: per-step temperature budget record (diagnostic, default off)
             "store_tracer_budget",
+            # appended by the ENSO-fork Pacific zoom port (default off)
+            "momentum_face_mask",
+            "coriolis_time_scheme",
+            "coriolis_baroclinic_operator",
+            "open_boundary_smooth_width",
             )
     assert fields[-len(tail):] == tail, (
         f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "

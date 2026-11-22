@@ -18,6 +18,8 @@ from typing import NamedTuple
 
 import numpy as np
 
+from legoesm.diagnostics.energy_budget import read_toa_minus_dE_dt
+
 
 class ValidationResult(NamedTuple):
     """Result of a single validation check."""
@@ -116,13 +118,14 @@ def validate_amip_diagnostics(
         ))
 
     # --- Energy budget ---
-    if "energy_residual" in ts.files:
-        res = ts["energy_residual"][half:]
+    res = read_toa_minus_dE_dt(ts, source=str(path / "timeseries.npz"))
+    if res is not None:
+        res = res[half:]
         res = res[res != 0]  # skip initial zeros
         if len(res) > 0:
             mean_res = np.mean(np.abs(res))
             results.append(ValidationResult(
-                name="Energy residual |R|", value=mean_res, target=0.0,
+                name="|TOA - atmospheric dE/dt|", value=mean_res, target=0.0,
                 tolerance=500.0,
                 passed=mean_res < 500.0, units="W/m²",
             ))

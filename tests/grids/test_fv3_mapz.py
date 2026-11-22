@@ -2571,3 +2571,15 @@ def test_driver_fill_binds_on_both_lanes_and_both_arms(nq):
     for iq in range(nq):
         gate_scalar(f"fill nq={nq} q[{iq}]",
                     _rel(outs[True][1][iq], outs[True][0][iq]), 5.5e-15)
+
+
+def test_rezone_scans_take_the_remap_unroll_setting(monkeypatch):
+    import legoesm.core.fv3_mapz as mapz_mod
+    im, km = 3, KMP
+    pe1, _, _, _ = _lagrangian_edges(im=im, km=km)
+    pe2 = _midpoint_targets(pe1, km)
+    q1 = _smooth_column(im=im, km=km, edges=pe1[:, 1:])
+    monkeypatch.setattr(mapz_mod, "remap_kscan_unroll", lambda: 7)
+    text = str(jax.make_jaxpr(lambda q: map1_ppm_j(
+        jnp.asarray(pe1), q, jnp.asarray(pe2), km, km, 1, 9))(jnp.asarray(q1)))
+    assert text.count("unroll=7") == 2
