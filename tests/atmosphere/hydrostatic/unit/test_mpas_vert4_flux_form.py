@@ -185,9 +185,9 @@ def test_new_fields_are_appended_last():
     and this branch's tracer scheme and smoothing widths."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
     from legoesm.driver.config import DycoreConfig
-    assert MPASPrimitiveEquationConfig._fields[-5:] == (
+    assert MPASPrimitiveEquationConfig._fields[-6:] == (
         "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form",
-        "tracer_van_leer_width", "tracer_van_leer_flux_width")
+        "tracer_van_leer_width", "tracer_van_leer_flux_width", "tracer_vertical_scheme")
     assert DycoreConfig._fields[-7:] == (
         "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers", "vertical_form",
         "spectral_sponge_nu_top_m2s",

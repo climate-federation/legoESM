@@ -6531,3 +6531,14 @@ def test_no_deck_can_set_ml_pipeline(tmp_path):
     deck.write_text("ml_pipeline: true\n")
     with pytest.raises((SystemExit, ValueError, KeyError)):
         load_yaml_config(str(deck), build_arg_parser())
+
+
+def test_spectral_production_selects_continuity_paired_sb():
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    rows = load_yaml_config(str(_repo_root() / "config/amip/amip_production_spectral_t31.yaml"), parser)
+    assert rows["tracer_vertical_scheme"] == "sb"
+    parser.set_defaults(**rows)
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    cfg.validate_strict()
+    assert cfg.dycore.tracer_vertical_scheme == "sb"

@@ -135,8 +135,15 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        ("packages/core/legoesm/grids/vertical.py", "vertical_advection_tracer"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "mpas_tracer_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py",
          "latlon_tracer_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/tracer_transport_spectral.py", "tracer_tendencies_spectral"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/tracer_transport_latlon.py", "tracer_tendencies_latlon"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/tracer_transport_mpas.py", "tracer_advection_tendency"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/shared/tracer_transport.py", "tracer_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_pe.py", "spectral_pe_tendencies"),
         # RRTMGP gas-table set: an unknown name must raise, never fall back
         # to the reduced tables.
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py",

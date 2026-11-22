@@ -23,7 +23,7 @@ each Runge-Kutta stage.
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable, NamedTuple
+from typing import Literal, Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -34,7 +34,7 @@ from legoesm.core.operators_voronoi import (
     cell_to_edge_avg_3d,
 )
 from legoesm.grids.voronoi import VoronoiMesh
-from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
+from legoesm.grids.vertical import SigmaCoordinate, vertical_advection_tracer
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 
@@ -53,6 +53,9 @@ class TracerTransportMPASConfig(NamedTuple):
     """Configuration for MPAS tracer transport model."""
     hyperdiff_coeff: float = 0.0
     time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
+    tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
 
 
 def tracer_horizontal_advection(q, u_edge, mesh):
@@ -62,8 +65,7 @@ def tracer_horizontal_advection(q, u_edge, mesh):
     SHARED, vertical-coordinate-INDEPENDENT kernel: reused by BOTH the sigma
     standalone ``tracer_advection_tendency`` AND the hybrid coupled PE
     (``primitive_eq_mpas.mpas_legacy_pe_tendencies``), each of which then
-    adds its OWN matching vertical advection (``vertical_advection`` for
-    sigma, ``vertical_advection_hybrid_van_leer`` for the hybrid dycore).  Keeping the
+    adds its OWN matching selected continuity-paired vertical advection.  Keeping the
     horizontal numerics in one place avoids duplicating the gather +
     divergence across the two paths.
 
@@ -107,18 +109,24 @@ def tracer_horizontal_advection(q, u_edge, mesh):
     return -(div_qu - q * div_u_3d[..., None])
 
 
-def tracer_advection_tendency(q, u_edge, sigma_dot, mesh, sigma_coord):
+def tracer_advection_tendency(q, u_edge, sigma_dot, mesh, sigma_coord,
+                               config=TracerTransportMPASConfig()):
     """Full sigma-coordinate advective tracer tendency = shared horizontal
     (:func:`tracer_horizontal_advection`) + sigma vertical advection.  Used by
     the standalone prescribed-wind model; the hybrid PE builds its own
     (horizontal + ``vertical_advection_hybrid_van_leer``)."""
+    if config.tracer_vertical_scheme not in ("sb", "van_leer"):
+        raise ValueError(f"unknown tracer vertical scheme {config.tracer_vertical_scheme!r}")
     horiz_adv = tracer_horizontal_advection(q, u_edge, mesh)
 
     # Vertical advection — local stencil along axis -1, no halo cost.
-    # ``vertical_advection`` hard-codes axis -1 as nlev, so vmap over
+    # ``vertical_advection_tracer`` uses axis -1 as nlev, so vmap over
     # the trailing tracer axis (with sigma_dot/sigma_coord captured).
     def _vert_one(q_one):
-        return vertical_advection(q_one, sigma_dot, sigma_coord)
+        return vertical_advection_tracer(
+            q_one, sigma_dot, sigma_coord, scheme=config.tracer_vertical_scheme,
+            smoothing_width=config.tracer_van_leer_width,
+            flux_smoothing_width=config.tracer_van_leer_flux_width)
 
     vert_adv = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(q)
 
@@ -164,7 +172,7 @@ def tracer_tendencies_mpas(
     # Get prescribed winds at current time
     u_edge, sigma_dot = wind_fn(t, mesh, sigma_coord)  # (nEdges, nlev), (nCells, nlev+1)
 
-    dq_dt = tracer_advection_tendency(q, u_edge, sigma_dot, mesh, sigma_coord)
+    dq_dt = tracer_advection_tendency(q, u_edge, sigma_dot, mesh, sigma_coord, config)
 
     # Hyperdiffusion placeholder — MPAS scalar hyperdiffusion is not yet
     # available in operators_voronoi; tendency contribution is zero.
