@@ -177,8 +177,10 @@ def test_substeps_off_is_one_pass():
     n_pre = fx["col_nc_kg"] + np.asarray(out.qc_budget["autoconversion"]) * r / fx["col_rho"] * dt
     fc, _ = W.mg2_droplet_fall_coefficients(q, jnp.asarray(n_pre), jnp.asarray(lcl),
                                             jnp.asarray(fx["col_T"]), rho, presence_top=W.MG2_QSMALL)
-    F = np.asarray(fc * q)
     pdel = np.diff(fx["col_p_half"], axis=1)
+    # one pass never exports more than the level holds (donor bound, vote
+    # 2026-11-20 author/GLM/codex A: an unbounded pass drives q_c negative)
+    F = np.minimum(np.asarray(fc * q), np.maximum(np.asarray(q), 0.0) * pdel / dt)
     d = np.c_[np.zeros((1, 1)), np.minimum(lcl[:, 1:] / lcl[:, :-1], 1.0)]
     Fup = np.c_[np.zeros((1, 1)), F[:, :-1]]
     want = -(F - d * Fup) / pdel

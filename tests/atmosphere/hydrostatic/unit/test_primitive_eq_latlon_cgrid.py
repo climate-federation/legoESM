@@ -1027,7 +1027,11 @@ class TestTracerMassConservation:
     @pytest.mark.skipif(not jax.config.read("jax_enable_x64"), reason="requires fp64")
     @pytest.mark.parametrize("sign", [1.0, -1.0])
     def test_hybrid_tracer_vertical_direction(self, sign):
-        """Positive downward mass flux gives -mdot*dq/dp in the interior."""
+        """Positive downward mass flux gives -mdot*dq/dp in the interior.
+
+        Sign/invariant check only: upwind gives the same answer on this linear
+        profile, so it is not a revert gate (the paired conservation test is).
+        """
         import numpy as np
         from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as pe
         from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -1067,9 +1071,14 @@ class TestTracerMassConservation:
             set_policy(previous)
 
     @pytest.mark.skipif(not jax.config.read("jax_enable_x64"), reason="requires fp64")
+    @pytest.mark.parametrize("vertical_form", ["legacy", "as83"])
     @pytest.mark.parametrize("scheme", ["sb", "van_leer"])
-    def test_hybrid_tracer_paired_conservation(self, hybrid_flow, monkeypatch, scheme):
-        """Vertical budgets close per column; the full budget closes globally."""
+    def test_hybrid_tracer_paired_conservation(self, hybrid_flow, monkeypatch, scheme,
+                                               vertical_form):
+        """Vertical budgets close per column; the full budget closes globally.
+
+        This is the revert gate: the old advective upwind operator fails it.
+        """
         import numpy as np
         from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as pe
         from legoesm.grids.vertical import dp_from_hybrid
@@ -1104,7 +1113,7 @@ class TestTracerMassConservation:
         monkeypatch.setattr(pe, "latlon_tracer_tendencies", observe)
         _, _, _, dps, dq = cgrid_latlon_pe_tendencies(
             state._replace(tracers={"q_v": q}), grid, hybrid, config,
-            vertical_form="legacy")
+            vertical_form=vertical_form)
         if scheme == "van_leer":
             assert captured["width"] == config.tracer_van_leer_width
             assert captured["flux_width"] == config.tracer_van_leer_flux_width
@@ -1138,7 +1147,11 @@ class TestTracerMassConservation:
     @pytest.mark.skipif(not jax.config.read("jax_enable_x64"), reason="requires fp64")
     @pytest.mark.parametrize("scheme", ["sb", "van_leer"])
     def test_hybrid_constant_tracer_preserved(self, hybrid_flow, scheme, monkeypatch):
-        """Regression guard: constant tracers remain constant with either operator."""
+        """Regression guard: constant tracers remain constant with either operator.
+
+        Invariant check only: upwind also preserves constants, so it is not a
+        revert gate (the paired conservation test is).
+        """
         from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid as pe
         calls = []
         real = pe.vertical_advection_hybrid_van_leer

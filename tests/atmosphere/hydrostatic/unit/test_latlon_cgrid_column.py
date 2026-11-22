@@ -660,3 +660,45 @@ def test_driver_checkpoint_div4_stamp_refuses_a_different_scale(tmp_path):
     for f, scale in ((off, 1.0), (old, 1.0), (on, 0.0)):
         with pytest.raises(ValueError, match="div-4 damping scale"):
             resume(f, scale)
+
+
+def test_driver_checkpoint_vertical_form_stamp_refuses_a_different_form(tmp_path):
+    """Checkpoints record the run's vertical form; a file without the stamp
+    counts as legacy; a resume under a different form is refused (#2548)."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    def cfg(d, form, **over):
+        c = _driver_cfg(d, **over)
+        return c._replace(dycore=c.dycore._replace(vertical_form=form))
+
+    def written(form):
+        d = tmp_path / f"w{form}"
+        d.mkdir()
+        c = cfg(d, form, days=1)
+        c = c._replace(output=c.output._replace(checkpoint_days=1))
+        drv = ModelDriver(c, output_dir=d)
+        drv.setup()
+        assert drv.run() == "COMPLETED"
+        f = d / "checkpoint_day_0001.npz"
+        with np.load(f) as z:
+            assert str(z["latloncol_vertical_form"]) == form
+            unstamped = {k: z[k] for k in z.files if k != "latloncol_vertical_form"}
+        old = d / "checkpoint_day_0002.npz"
+        np.savez(old, **unstamped)
+        return f, old
+
+    def resume(f, form):
+        d = tmp_path / f"r{form}_{f.parent.name}_{f.stem}"
+        d.mkdir()
+        drv = ModelDriver(cfg(d, form, days=1), output_dir=d)
+        drv.setup()
+        return drv.load_checkpoint(f)
+
+    leg, old = written("legacy")
+    as83, _ = written("as83")
+    assert resume(leg, "legacy")[1] == pytest.approx(1.0)
+    assert resume(old, "legacy")[1] == pytest.approx(1.0)   # no stamp == legacy
+    assert resume(as83, "as83")[1] == pytest.approx(1.0)
+    for f, form in ((leg, "as83"), (old, "as83"), (as83, "legacy")):
+        with pytest.raises(ValueError, match="vertical_form="):
+            resume(f, form)

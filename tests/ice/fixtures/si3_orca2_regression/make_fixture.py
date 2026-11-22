@@ -52,6 +52,7 @@ from legoesm.ice.si3_finalize import (  # noqa: E402
     si3_o15_step,
     si3_o16_step,
 )
+from legoesm.ice.si3_o17 import si3_icethd_tail  # noqa: E402
 from legoesm.ice.si3_orca2_state import (  # noqa: E402
     SI3ORCA2AdvectionGrid,
     SI3ORCA2StateConfig,
@@ -470,8 +471,23 @@ def rung_finalize(d):
         rn_himin=RN_HIMIN, config=cfg,
     )
     out.update(pack("o15", cor))
+    tailed_cor = cor._replace(
+        state=si3_icethd_tail(
+            cor.state,
+            rDt_ice=cfg.rDt_ice,
+            nn_hls=cfg.nn_hls,
+            ldfull=True,
+        )
+    )
     owned_fluxes = SI3Fluxes(*(_owned(f) for f in cor.fluxes))
-    fin = si3_o16_step(cor.state, owned_fluxes, update, sss_m=j["sss_m"], config=cfg, surface_config=surf)
+    fin = si3_o16_step(
+        tailed_cor.state,
+        owned_fluxes,
+        update,
+        sss_m=j["sss_m"],
+        config=cfg,
+        surface_config=surf,
+    )
     out.update(pack("o16", fin))
     forcing = SI3FinalizeForcing(
         fluxes=fluxes, update=update, stress=stress, sss_m=j["sss_m"], sst_m=j["sst_m"],
@@ -481,11 +497,11 @@ def rung_finalize(d):
     returned, resp = sea_ice_module._si3_orca2_o2_step_with_trace(
         s, forcing, build_si3_orca2_o2_config(cfg), cfg.rDt_ice
     )
-    # The dispatcher's O15/O16 stages are pinned through the direct calls
+    # The dispatcher's O15/tail/O16 stages are pinned through the direct calls
     # above (stored once): they must agree bit for bit, then only the stress
     # stage adds new leaves.
     same = (
-        (pack("o15", resp.correction), pack("o15", cor)),
+        (pack("o15", resp.correction), pack("o15", tailed_cor)),
         (pack("o16", resp.final), pack("o16", fin)),
         (pack("o16.state", returned), pack("o16.state", fin.state)),
     )

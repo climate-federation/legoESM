@@ -181,6 +181,11 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # undershoots left negative water; the borrow moves the deficit between
     # levels (frozen-MSE-neutral for vapour AND condensate).  False = no floor.
     conservative_tracer_clamp: bool = True
+    # Positivity: pay a column's net-negative condensate from the same
+    # column's vapour with its latent heat before the borrow
+    # (``apply_water_positivity(condensate_from_vapour=...)``).  False = the
+    # legacy form, which creates water when the globe cannot repay a deficit.
+    positivity_condensate_from_vapour: bool = True
     # #1354/#1515: hard-floor path only (conservative_tracer_clamp=False): the
     # floor removes the per-species latent heat of the clipped water (vapour
     # cools, ice warms, liquid unchanged) so frozen MSE is conserved.  No-op
@@ -1749,7 +1754,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 state.tracers, state.T, _dp,
                 conservative=self.config.conservative_tracer_clamp,
                 energy_consistent=self.config.energy_consistent_moisture_clip,
-                area=grid.area)
+                area=grid.area,
+                condensate_from_vapour=self.config.positivity_condensate_from_vapour)
             state = state._replace(tracers=_tr_out, T=_T_out)
 
         # #1675: the mass fixer's accumulate-dtype correction promotes ``p_s``

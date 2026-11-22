@@ -1908,14 +1908,14 @@ class CoupledESMDriver:
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import (
-                daily_mean_insolation, earth_orbit, earth_sun_distance_factor,
+                daily_mean_insolation, earth_sun_distance_factor,
             )
             # Solar constant from legoesm.constants per CLAUDE.md.
             # ``acfg.S_0`` allows override for sensitivity studies.
             S_0 = acfg.S_0
             # Realistic orbit (Berger 1978) when enabled; None ⇒ circular.
-            _orbit = (earth_orbit()
-                      if getattr(acfg, "orbital_insolation", False) else None)
+            from legoesm.driver.orbit import experiment_orbit
+            _orbit = experiment_orbit(acfg)
             _eccf = (earth_sun_distance_factor(float(doy), _orbit)
                      if _orbit is not None else 1.0)
             Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0,

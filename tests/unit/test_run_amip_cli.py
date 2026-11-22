@@ -1129,6 +1129,19 @@ def test_mpas_ocean_flux_on_ocean_surface_flag_flows_to_config():
         assert cfg.ocean_flux_on_ocean_surface is want
 
 
+def test_sea_ice_flux_split_flag_flows_to_config():
+    """--sea-ice-flux-split round-trip; unset = auto (None)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.sea_ice_flux_split is None
+    for flag, want in (("--sea-ice-flux-split", True),
+                       ("--no-sea-ice-flux-split", False)):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", flag]), parser))
+        assert cfg.sea_ice_flux_split is want
+
+
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
@@ -1149,6 +1162,27 @@ def test_orbital_insolation_flag_flows_to_config():
         "--dataset", "analytical", "--orbital-insolation",
     ]), parser))
     assert cfg_on.orbital_insolation is True
+
+
+def test_orbit_flags_round_trip_and_validate():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--orbital-insolation",
+        "--orbit-eccentricity", "0.05", "--orbit-obliquity", "60",
+        "--orbit-perihelion", "90",
+    ]), parser))
+    assert (cfg.orbit_eccentricity, cfg.orbit_obliquity_deg,
+            cfg.orbit_long_perihelion_deg, cfg.orbit_year) == (0.05, 60.0, 90.0, None)
+    cfg.validate_strict()
+    cfg_y = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--orbital-insolation", "--orbit-year", "-4050",
+    ]), parser))
+    assert cfg_y.orbit_year == -4050
+    cfg_y.validate_strict()
+    with pytest.raises(ValueError, match="orbital_insolation"):
+        build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--orbit-obliquity", "60",
+        ]), parser)).validate_strict()
 
 
 def test_convective_cloud_boolean_optional_action_can_disable_config_default():
@@ -2515,6 +2549,7 @@ def test_config_yaml_round_trips_authoritative_values():
     # (CESM gust_fac = 0); the coastal ocean-surface flux is on (#1320).
     assert cfg.surface_gustiness_zi is None
     assert cfg.ocean_flux_on_ocean_surface is True
+    assert cfg.sea_ice_flux_split is True        # #2573, user 2026-11-19
     # No convective_precip_efficiency row: ZM has no precip-efficiency field,
     # so the 0.8 the deck carried was read by nothing (oracle audit 2026-10-18).
     assert cfg.convective_precip_efficiency is None
@@ -3282,12 +3317,12 @@ def test_factory_threads_vertical_form_into_the_dycore(grid_type, discretization
 
 @pytest.mark.parametrize("deck,expected_form", [
     ("amip_production.yaml", "as83"),
-    ("amip_production_latlon48.yaml", "legacy"),
+    ("amip_production_latlon48.yaml", "as83"),
     ("amip_production_spectral_t31.yaml", "legacy"),
     ("amip_production_fv3duo_c24.yaml", "legacy"),
 ])
 def test_production_decks_select_vertical_form(deck, expected_form):
-    """Production selects as83 on MPAS and preserves legacy on other grids."""
+    """Production selects as83 on MPAS and lat-lon; legacy on spectral and FV3 duo."""
     from pathlib import Path
 
     from legoesm.driver.run_config_yaml import load_yaml_config
@@ -5398,7 +5433,7 @@ _DUO_DECK_OWN_ROWS = frozenset({
     # switched off because the duo's own sponge / damping replace them
     "grid.grid_type", "grid.resolution",
     "dycore.discretization", "dycore.dt", "dycore.column_lane",
-    "dycore.vertical_form",  # as83 adopted for MPAS only (user 2026-11-11)
+    "dycore.vertical_form",  # as83 on MPAS and lat-lon; the duo keeps legacy
     "dycore.tracer_vertical_scheme",  # F2: FV3 uses its own operator
     "dycore.fv3_duo_sponge_layers", "dycore.fv3_duo_sponge_factor",
     "dycore.fv3_duo_sponge_d2_top", "dycore.fv3_duo_nord",
@@ -6099,6 +6134,7 @@ def test_latlon48_deck_resolves_div4_and_cam_polar_cutoff_into_the_dycore():
                                    latlon_native_grid=grid).dyn
     assert dyn.config.nu_div4_scale == 1.0
     assert dyn.config.use_polar_filter is True
+    assert dyn.config.vertical_form == "as83"
     assert dyn.config.polar_filter_cutoff_deg == 35.9041
     assert dyn.dt == cfg.dycore.dt == 450.0
 def test_mcfarlane_effgw_oro_flag_flows_to_config():
@@ -6542,3 +6578,16 @@ def test_spectral_production_selects_continuity_paired_sb():
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
     cfg.validate_strict()
     assert cfg.dycore.tracer_vertical_scheme == "sb"
+
+
+def test_positivity_condensate_from_vapour_flag_flows_to_config():
+    """--positivity-condensate-from-vapour round-trips to DycoreConfig
+    (default ON, owner decision 2026-11-20; --no- restores the legacy borrow)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg.dycore.positivity_condensate_from_vapour is True
+    cfg_no = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-positivity-condensate-from-vapour",
+    ]), parser))
+    assert cfg_no.dycore.positivity_condensate_from_vapour is False

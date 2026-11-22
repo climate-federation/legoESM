@@ -112,6 +112,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     rain_freezing_bigg_mg2,
     ice_autoconversion_mg2,
     mg2_ice_lambda_bounds,
+    mg2_ice_sedimentation,
     mg2_ice_slope,
     mg2_qi_conservation_ratio,
     div_gated_tangent,
@@ -128,7 +129,10 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     mg2_deposition_limiter,
     mg2_snow_sublimation,
     mg2_instant_snow_melt,
+    mg2_instant_rain_freeze,
+    mg2_rain_size_dist,
     MG2_SNOWMELT_OFFSET_K,
+    MG2_RAINFRZE_OFFSET_K,
     mg2_precip_sublimation_limiter,
     MG2_QSIC_MAX,
     snow_deposition_m2005,
@@ -536,6 +540,22 @@ def morrison_microphysics(
         N_s = jnp.where(_fired, jnp.maximum(N_s - ninstsm, 0.0), N_s)
         q_r = jnp.where(_fired, jnp.maximum(q_r + minstsm, 0.0), q_r)
         N_r = jnp.where(_fired, jnp.maximum(N_r + ninstsm * rho, 0.0), N_r)   # per volume
+        # micro_mg2_0.F90:1182-1212, after the snow melt above: rain below
+        # rainfrze = T_freeze - 40 K freezes INSTANTANEOUSLY, heat-limited so it
+        # cannot warm the air above rainfrze, all of it to snow, on the input
+        # temperature (the heating goes into the tendency, below).  Same
+        # switch-on width and fixed threshold as the post-sedimentation freezing.
+        minstrf, ninstrf = mg2_instant_rain_freeze(
+            T, q_r, N_r / rho,
+            RAMP_WIDTH_PER_SHARPNESS / config.homogeneous_freeze_sharpness)
+        _frz_fired = (T < constants.T_freeze - MG2_RAINFRZE_OFFSET_K) & (q_r > 0.0)
+        _q_r_prefrz = q_r
+        q_r = jnp.where(_frz_fired, jnp.maximum(q_r - minstrf, 0.0), q_r)
+        N_r = jnp.where(_frz_fired, jnp.maximum(N_r - ninstrf * rho, 0.0), N_r)   # per volume
+        q_s = jnp.where(_frz_fired, jnp.maximum(q_s + minstrf, 0.0), q_s)
+        N_s = jnp.where(_frz_fired, jnp.maximum(N_s + ninstrf, 0.0), N_s)
+        # the rain loss, which all goes to snow (MG2 has no ice branch here)
+        _prefrz = jnp.where(_frz_fired, _q_r_prefrz - q_r, 0.0)
     sharpness = config.saturation_sharpness
     # Saturation curves: the CAM6 MG2 mode uses MG2's own qsat_water/qsat_ice,
     # CAM's Goff-Gratch (micro_mg2_0.F90:113-115, :909-916); other modes keep
@@ -1970,6 +1990,8 @@ def morrison_microphysics(
         # 0.54 Heymsfield-Bensemer that rain/snow use (ARN/ASN=DUM·a) — so ice
         # falls slightly SLOWER in thin upper-trop air than the 0.54 form (the
         # 0.54 over-sped the anvil ice ~20-30%; iter-209 fix, pairs with #6).
+        # The CAM6 MG2 mode does not use these: its cloud ice falls at MG2's
+        # speeds in mg2_ice_sedimentation (below).
         dum_i = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXP_ICE)
         cons4 = math.gamma(4.0 + config.fall_b_r) / 6.0
         cons28 = math.gamma(4.0 + config.fall_b_i) / 6.0
@@ -2113,25 +2135,31 @@ def morrison_microphysics(
         dN_r_src = (dN_r_au + dN_r_selfcoll - dN_r_evap - freeze_N_r
                     + melt_N_to_rain)
         q_r_sed = q_r + dq_r_src * dt
-        N_r_sed = jnp.where(q_r_sed < MG2_QSMALL, 0.0,
-                            jnp.maximum(N_r + dN_r_src * dt, 0.0))
+        # MG2 sizes the fall speeds from the in-precip post-process number
+        # dumnr = max((nr + nrtend dt)/precip_frac, 0) (micro_mg2_0.F90:2068,
+        # :2160) and zeroes the number only in the grid-mean copy it
+        # transports, where dumr < qsmall (:2209, :2215).
+        _N_r_post = jnp.maximum(N_r + dN_r_src * dt, 0.0)
+        N_r_sed = jnp.where(q_r_sed < MG2_QSMALL, 0.0, _N_r_post)
         if config.fall_speed_scheme == "m2005_psd":
             # MG2 size_dist_param_basic on the in-precip (dumr, dumnr) and
             # umr/unr = min(arn Gamma(4+br)/6 | Gamma(1+br) lamr^-br,
-            # 9.1 rhof) where lamr >= qsmall (:2185-2200).  N/q is unchanged
+            # 9.1 rhof) where lamr >= qsmall (:2160-2178).  N/q is unchanged
             # by the precip_frac division, so the slope uses the grid ratio.
+            # MG2's rhof = (rhosu/rho)^0.54 has no density floor (:895).
+            _rhof_r = safe_pow(config.rho_su / rho, _FALL_RHO_EXP)
             _in_p = q_r_sed / precip_frac > MG2_QSMALL
             _den = jnp.where(_in_p, rho * q_r_sed, 1.0)
             _lamr_s = jnp.clip(
-                safe_pow(jnp.pi * constants.rho_water * N_r_sed / _den,
+                safe_pow(jnp.pi * constants.rho_water * _N_r_post / _den,
                          1.0 / 3.0),
                 config.lamr_min, config.lamr_max)
             V_t_r = jnp.where(_in_p, jnp.minimum(
                 config.fall_a_r * cons4 * safe_pow(_lamr_s, -config.fall_b_r)
-                * dum, _VT_CAP_RAIN * dum), 0.0)
+                * _rhof_r, _VT_CAP_RAIN * _rhof_r), 0.0)
             V_n_r = jnp.where(_in_p, jnp.minimum(
                 config.fall_a_r * cons6 * safe_pow(_lamr_s, -config.fall_b_r)
-                * dum, _VT_CAP_RAIN * dum), 0.0)
+                * _rhof_r, _VT_CAP_RAIN * _rhof_r), 0.0)
         else:
             V_t_r = config.a_v_r * safe_pow(
                 jnp.clip(q_r_sed, 0.0) * rho_ratio, config.b_v_r)
@@ -2185,17 +2213,43 @@ def morrison_microphysics(
             f"linear in it), got {config.sed_cfl_substeps_max!r}")
     _nsub_max = int(config.sed_cfl_substeps_max)
     _nsub = (_nsub_max if config.sed_cfl_substeps else 1)
+    dN_i_subl = jnp.maximum(-dq_i_dep, 0.0) * _ni_pos / _qi_floor
+    if mg2_snow:
+        dN_i_subl = jnp.zeros_like(dN_i_subl)    # MG2 sublim_factor = 0 (S10.6 4a)
+    _mg2_ice_sed = config.warm_rain_incloud and config.fall_speed_scheme == "m2005_psd"
+    if _mg2_ice_sed:
+        # CAM6 MG2 cloud-ice sedimentation in micro_mg2_0.F90 order: the
+        # POST-PROCESS ice dumi = qi + qitend dt, dumni = max(ni + nitend dt, 0)
+        # is both sized (:2063-2064, :2088-2089, MG2 fall speeds :2119-2147)
+        # and transported (:2206-2214, :2232-2316), no sinks reserved, with
+        # MG2's sub-steps and the sublimation of ice falling into a smaller
+        # cloud fraction (icldm = cf_eff here).  The process terms are those
+        # of dq_i_dt / dN_i_dt below without sedimentation.
+        dq_i_src = (dq_i_dep + dq_i_nuc + bergeron + riming_i - aggregation
+                    - melt_ice + homo_freeze_c + freeze_to_ice)
+        dN_i_src = (dN_i_nuc - dN_i_autoconv + homo_freeze_N - dN_i_melt
+                    - dN_i_subl + freeze_N_to_ice / jnp.clip(rho, _RHO_FLOOR))
+        if mg2_snow:
+            dq_i_src = dq_i_src + msacwi
+            dN_i_src = dN_i_src + nsacwi
+        _q_i_post = q_i + dq_i_src * dt
+        (sed_i, sed_N_i, sed_qv_i, sed_T_i, precip_i,
+         _req_i) = mg2_ice_sedimentation(
+            _q_i_post, jnp.maximum(N_i + dN_i_src * dt, 0.0), cf_eff, rho,
+            p_half, dt, _nsub, config, dcs, presence_top=config.mg2_presence_ramp_top,
+            slope_log_width=config.mg2_ice_slope_log_width)
     sed_r, precip_r, _req_r = sedimentation_tendency(
         q_r_sed, rho, V_t_r, dz, dt=dt,
         return_surface_flux=True,
         extra_sink=rain_sed_reserve,
         n_substeps_max=_nsub, cfl_speed=V_n_r, return_substeps=True,
     )
-    sed_i, precip_i, _req_i = sedimentation_tendency(
-        q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
-        extra_sink=aggregation + melt_ice + jnp.maximum(-dq_i_dep, 0.0),
-        n_substeps_max=_nsub, cfl_speed=V_n_i, return_substeps=True,
-    )
+    if not _mg2_ice_sed:
+        sed_i, precip_i, _req_i = sedimentation_tendency(
+            q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
+            extra_sink=aggregation + melt_ice + jnp.maximum(-dq_i_dep, 0.0),
+            n_substeps_max=_nsub, cfl_speed=V_n_i, return_substeps=True,
+        )
     sed_s, precip_s, _req_s = sedimentation_tendency(
         q_s_sed, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
         extra_sink=snow_sed_reserve,
@@ -2252,14 +2306,13 @@ def morrison_microphysics(
     # would clamp, and the post-step LAMI lower bound would then RECREATE
     # number to match surviving q_i — an artificial ice-number source with
     # no phase-transfer counterpart (codex 2026-07-28 round 2).
-    dN_i_subl = jnp.maximum(-dq_i_dep, 0.0) * _ni_pos / _qi_floor
-    if mg2_snow:
-        dN_i_subl = jnp.zeros_like(dN_i_subl)    # MG2 sublim_factor = 0 (S10.6 4a)
+    # (dN_i_subl: defined before the sedimentation calls, above.)
     # (dN_i_autoconv: defined after the q_i donor clamp, above.)
-    sed_N_i = sedimentation_tendency(
-        jnp.clip(N_i, 0.0), rho, V_n_i, dz, dt=dt,
-        extra_sink=dN_i_melt + dN_i_subl + dN_i_autoconv,
-        n_substeps_max=_nsub, cfl_speed=V_t_i)
+    if not _mg2_ice_sed:
+        sed_N_i = sedimentation_tendency(
+            jnp.clip(N_i, 0.0), rho, V_n_i, dz, dt=dt,
+            extra_sink=dN_i_melt + dN_i_subl + dN_i_autoconv,
+            n_substeps_max=_nsub, cfl_speed=V_t_i)
     if snow_double_moment:
         # N_s is per-mass ⇒ same flux form as q (UNS number-weighted speed).
         sed_N_s = sedimentation_tendency(
@@ -2299,6 +2352,8 @@ def morrison_microphysics(
     if mg2_snow:
         # MG2 instantaneous snow melt at the start of the call (tlat, :1159)
         dT_dt = dT_dt - L_f * minstsm / dt / c_pd
+        # and its rain freezing below -40 C (tlat, :1202-1204)
+        dT_dt = dT_dt + L_f * _prefrz / dt / c_pd
 
     # === COMBINE TENDENCIES ===
     dq_v_dt = -condensation + evaporation - dq_i_dep - dq_i_nuc - prds - prdg
@@ -2396,24 +2451,16 @@ def morrison_microphysics(
     if mg2_snow:
         dN_i_dt = dN_i_dt + nsacwi      # unscaled source, no nimax cap (decision 4a)
 
-    if mg2_snow:
-        dN_s_mg2 = dN_s_src + sed_N_s
-        if config.do_snow_melting:
-            # MG2 melting of snow AFTER sedimentation (micro_mg2_0.F90:2513-
-            # 2566), on the post-step snow and temperature, before the final
-            # size re-adjustments: melted snow -> rain, flakes -> drops.
-            _dums = jnp.maximum(q_s + dq_s_dt * dt, 0.0)
-            _dumns = jnp.where(_dums < MG2_QSMALL, 0.0,
-                               jnp.maximum(N_s + dN_s_mg2 * dt, 0.0))
-            _m2, _n2 = mg2_instant_snow_melt(
-                T + dT_dt * dt, _dums, _dumns,
-                RAMP_WIDTH_PER_SHARPNESS / config.melt_sharpness)
-            dq_s_dt = dq_s_dt - _m2 / dt
-            dN_s_mg2 = dN_s_mg2 - _n2 / dt
-            dq_r_dt = dq_r_dt + _m2 / dt
-            dN_r_dt = dN_r_dt + _n2 * rho / dt          # N_r per-volume
-            dT_dt = dT_dt - L_f * _m2 / dt / c_pd
-
+    # MG2 order (micro_mg2_0.F90:2232-2377, then :2536-2700): the heating of
+    # the ice and droplet sedimentation (the sublimated / evaporated inflow
+    # into a smaller cloud fraction, tlat :2296, :2367) is in t + tlat/cpp
+    # dt before the post-sedimentation snow melt, ice melt and homogeneous
+    # freezing test it, so it is added first.
+    if _mg2_ice_sed:
+        # vapour and latent cooling of the ice that falls into clear air
+        # during the MG2 ice sedimentation above (qvlat, tlat, :2290-2296)
+        dq_v_dt = dq_v_dt + sed_qv_i
+        dT_dt = dT_dt + sed_T_i
     if _prog_nc:
         # MG2 cloud-droplet sedimentation on the post-process state
         # (micro_mg2_0.F90:2056-2377; user decision 9a), sharing the
@@ -2443,6 +2490,62 @@ def morrison_microphysics(
             _nc_terms["sedimentation"] = sed_nc_kg * rho
         dq_v_dt = dq_v_dt + sed_qv
         dT_dt = dT_dt + sed_T
+    if mg2_snow:
+        # MG2's post-sedimentation rain pool (micro_mg2_0.F90:2511-2512, :2527),
+        # taken before the snow melt below adds to it: the rain the freezing at
+        # -40 C acts on.  Number per kg here.
+        _dumr = jnp.maximum(q_r + dq_r_dt * dt, 0.0)
+        _dumnr = jnp.where(_dumr < MG2_QSMALL, 0.0,
+                           jnp.maximum(N_r + dN_r_dt * dt, 0.0) / rho)
+        dN_s_mg2 = dN_s_src + sed_N_s
+        if config.do_snow_melting:
+            # MG2 melting of snow AFTER sedimentation (micro_mg2_0.F90:2536-
+            # 2566), on the post-step snow and temperature, sedimentation
+            # heating included, before the final size re-adjustments: melted
+            # snow -> rain, flakes -> drops.
+            _dums = jnp.maximum(q_s + dq_s_dt * dt, 0.0)
+            _dumns = jnp.where(_dums < MG2_QSMALL, 0.0,
+                               jnp.maximum(N_s + dN_s_mg2 * dt, 0.0))
+            _m2, _n2 = mg2_instant_snow_melt(
+                T + dT_dt * dt, _dums, _dumns,
+                RAMP_WIDTH_PER_SHARPNESS / config.melt_sharpness)
+            dq_s_dt = dq_s_dt - _m2 / dt
+            dN_s_mg2 = dN_s_mg2 - _n2 / dt
+            dq_r_dt = dq_r_dt + _m2 / dt
+            dN_r_dt = dN_r_dt + _n2 * rho / dt          # N_r per-volume
+            dT_dt = dT_dt - L_f * _m2 / dt / c_pd
+        # MG2 freezing of rain below rainfrze = -40 C after sedimentation
+        # (micro_mg2_0.F90:2571-2610) on t + tlat/cpp dt, the sedimentation
+        # heating and the snow-melt cooling included, heat-limited so the air
+        # is not warmed above rainfrze.  The frozen drops go to snow where
+        # lamr < 1/Dcs, the slope of the grid-mean rain, and to cloud ice
+        # otherwise (:2591-2602), so a drop at the slope bound 1/lamr = Dcs
+        # (500 um) goes to ice: the size switch with ice_at_dcs.
+        # Graupel takes none of it, with do_graupel too: the CAM6 reference has
+        # no graupel.  The ice share is added after the instant ice melt below,
+        # which sees MG2's dumi, the ice before this freezing.  The rain loss
+        # is the sum of the two shares, so they add up to it exactly.  The
+        # rain loses the frozen share of its number; snow or ice gains that
+        # share of the number size_dist_param_basic re-adjusted to the slope
+        # bounds (it updates dumnr in place between the two, :2589-2602).
+        _fr_w = RAMP_WIDTH_PER_SHARPNESS / config.homogeneous_freeze_sharpness
+        _fr_m, _fr_n = mg2_instant_rain_freeze(T + dT_dt * dt, _dumr, _dumnr, _fr_w)
+        _dumnr_adj, _lamr_g = mg2_rain_size_dist(_dumr, _dumnr * rho, rho,
+                                                 config.lamr_min, config.lamr_max)
+        _fr_n_dest = mg2_instant_rain_freeze(T + dT_dt * dt, _dumr, _dumnr_adj / rho,
+                                             _fr_w)[1]
+        _to_ice = mg2_frozen_rain_ice_fraction(
+            _lamr_g, config.ice_snow_d_auto, config.mg2_frozen_rain_ice_ramp_frac,
+            ice_at_dcs=True)
+        _postfrz_ice = _to_ice * _fr_m
+        _postfrz_snow = _fr_m - _postfrz_ice
+        _postfrz_N_ice = _to_ice * _fr_n_dest
+        _postfrz = _postfrz_ice + _postfrz_snow
+        dq_r_dt = dq_r_dt - _postfrz / dt
+        dN_r_dt = dN_r_dt - _fr_n * rho / dt          # N_r per-volume
+        dq_s_dt = dq_s_dt + _postfrz_snow / dt
+        dN_s_mg2 = dN_s_mg2 + (_fr_n_dest - _postfrz_N_ice) / dt
+        dT_dt = dT_dt + L_f * _postfrz / dt / c_pd
     if mg2_snow:
         # MG2 instant ice melt -> droplets and homogeneous freezing on the
         # post-sedimentation state (micro_mg2_0.F90:2503-2685; decisions 4b, 1a,
@@ -2474,6 +2577,9 @@ def morrison_microphysics(
         dT_dt = dT_dt + constants.L_f * (_frz - _melt) / (constants.c_pd * dt)  # latent-ok: Morrison/MG2 oracle constant
         _qc_ice_melt = _melt / dt
         _qc_homog = _dqc - _qc_ice_melt
+        # the cloud-ice share of the rain frozen after sedimentation (above)
+        dq_i_dt = dq_i_dt + _postfrz_ice / dt
+        dN_i_dt = dN_i_dt + _postfrz_N_ice / dt
     if _prog_nc:
         # MG2 final droplet mean-size re-adjust (micro_mg2_0.F90:2743-2753,
         # :2812-2830; Q2'a).

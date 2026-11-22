@@ -191,6 +191,7 @@ homogeneous_ice_nucleation: true  # homogeneous freezing source for N_i
 mpas_ice_skin_prognostic: true    # prognostic sea-ice skin temperature
 mpas_conservative_tracer_clamp: true   # positivity fixer that borrows within
                                   # the column instead of creating mass
+positivity_condensate_from_vapour: true  # pay net-negative column condensate from the column's vapour (ENSO-fork port, 2026-11-20)
 mpas_qv_smooth_del2_m2s: 2.0e5    # del2 smoothing on q_v (grid-scale moisture
                                   # noise on the Voronoi mesh)
 

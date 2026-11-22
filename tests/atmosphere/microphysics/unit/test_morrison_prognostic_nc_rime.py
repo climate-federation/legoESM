@@ -281,8 +281,13 @@ def test_splinters_are_wired(monkeypatch):
     """Splinter mass moves from snow to ice, scaled by the cloud-water limiter
     scale s with the rest of riming; splinter number reaches ice UNSCALED (MG2
     :1579-1580); cloud water, heat and droplet number do not see the split.  At
-    5 g/kg snow the limiter binds hard in some cells."""
+    5 g/kg snow the limiter binds hard in some cells.  Cloud ice does not
+    sediment here: MG2 sizes and transports the post-process ice, splinters
+    included (micro_mg2_0.F90:1883-1886, :2063, :2206), so the splinters
+    would also change the ice sedimentation."""
     fx = A._fx()
+    monkeypatch.setattr(W, "mg2_ice_fall_speeds",
+                        lambda lami, rho, cfg: (jnp.zeros_like(lami), jnp.zeros_like(lami)))
     for qs in (2.0e-5, 5.0e-3):
         d, m, n, left, s, _, total = _split_diff(fx, monkeypatch, _cfg(), qs)
         assert (m > 0).all() and (n > 0).all() and (s > 0).all() and (s <= 1).all()

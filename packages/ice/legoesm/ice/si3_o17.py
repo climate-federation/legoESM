@@ -507,15 +507,21 @@ def _scatter(full: jnp.ndarray, interior: jnp.ndarray, h: int) -> jnp.ndarray:
     return full.at[h:-h, h:-h, ...].set(interior)
 
 
-def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
-    """Finish ``ice_thd`` after ``ice_cor(kt, 2)`` (``icethd.F90:185-201``)."""
+def si3_icethd_age_and_lbc(
+    state: SI3State,
+    *,
+    rDt_ice: float,
+    nn_hls: int,
+    ldfull: bool,
+) -> SI3State:
+    """Run the age increment and state LBC after ``ice_cor(kt, 2)``."""
 
-    h = int(card.state.nn_hls)  # icethd.F90:185-201 (A2D(0) and lbc_lnk extents)
+    h = int(nn_hls)  # icethd.F90:185-190 (A2D(0) and lbc_lnk extents)
     owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))  # icethd.F90:185-200
     oa_i = state.oa_i.at[owned].set(  # icethd.F90:185
         nemo_source_round(  # icethd.F90:185; block compiled FMA contraction
             state.oa_i[owned]
-            + nemo_source_round(state.a_i[owned] * card.state.rDt_ice)  # icethd.F90:185
+            + nemo_source_round(state.a_i[owned] * rDt_ice)  # icethd.F90:185
         )
     )
 
@@ -525,10 +531,10 @@ def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
             "T",
             1.0,
             nn_hls=h,
-            ldfull=card.fold.nfd_full_when_absent,  # icethd.F90:188-190
+            ldfull=ldfull,  # icethd.F90:188-190
         )
 
-    linked = state._replace(  # icethd.F90:188-190
+    return state._replace(  # icethd.F90:188-190
         a_i=t_lbc(state.a_i),  # icethd.F90:188
         v_i=t_lbc(state.v_i),  # icethd.F90:188
         v_s=t_lbc(state.v_s),  # icethd.F90:188
@@ -542,25 +548,70 @@ def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
         e_s=t_lbc(state.e_s),  # icethd.F90:190
         szv_i=t_lbc(state.szv_i),  # icethd.F90:190
     )
+
+
+def si3_icethd_tail(
+    state: SI3State,
+    *,
+    rDt_ice: float,
+    nn_hls: int,
+    ldfull: bool,
+) -> SI3State:
+    """Finish ``ice_thd`` after ``ice_cor(kt, 2)`` (``icethd.F90:185-201``)."""
+
+    h = int(nn_hls)  # icethd.F90:185-201 (A2D(0) and lbc_lnk extents)
+    owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))  # icethd.F90:185-200
+    linked = si3_icethd_age_and_lbc(
+        state,
+        rDt_ice=rDt_ice,
+        nn_hls=h,
+        ldfull=ldfull,
+    )  # icethd.F90:185-190
     at_i = fortran_sum_categories(linked.a_i, axis=-1)  # icethd.F90:192
     no_ice = at_i == 0.0  # icethd.F90:194
     if h:
-        east = (slice(h, -h), slice(h, -h))  # icethd.F90:195
-        west = (slice(h - 1, -h - 1), slice(h, -h))  # icethd.F90:196
-        north = (slice(h, -h), slice(h, -h))  # icethd.F90:197
-        south = (slice(h, -h), slice(h - 1, -h - 1))  # icethd.F90:198
-        u_ice = linked.u_ice.at[east].set(jnp.where(no_ice[owned] & no_ice[h + 1 : -h + 1, h:-h], 0.0, linked.u_ice[east]))  # :195
-        u_ice = u_ice.at[west].set(jnp.where(no_ice[owned] & no_ice[h - 1 : -h - 1, h:-h], 0.0, u_ice[west]))  # :196
-        v_ice = linked.v_ice.at[north].set(jnp.where(no_ice[owned] & no_ice[h:-h, h + 1 : -h + 1], 0.0, linked.v_ice[north]))  # :197
-        v_ice = v_ice.at[south].set(jnp.where(no_ice[owned] & no_ice[h:-h, h - 1 : -h - 1], 0.0, v_ice[south]))  # :198
+        i_stop = no_ice.shape[0] - h
+        j_stop = no_ice.shape[1] - h
+        east = (slice(h, i_stop), slice(h, j_stop))  # icethd.F90:195
+        west = (slice(h - 1, i_stop - 1), slice(h, j_stop))  # icethd.F90:196
+        north = (slice(h, i_stop), slice(h, j_stop))  # icethd.F90:197
+        south = (slice(h, i_stop), slice(h - 1, j_stop - 1))  # icethd.F90:198
+        u_ice = linked.u_ice.at[east].set(
+            jnp.where(
+                no_ice[owned] & no_ice[h + 1 : i_stop + 1, h:j_stop],
+                0.0,
+                linked.u_ice[east],
+            )
+        )  # icethd.F90:195
+        u_ice = u_ice.at[west].set(
+            jnp.where(
+                no_ice[owned] & no_ice[h - 1 : i_stop - 1, h:j_stop],
+                0.0,
+                u_ice[west],
+            )
+        )  # icethd.F90:196
+        v_ice = linked.v_ice.at[north].set(
+            jnp.where(
+                no_ice[owned] & no_ice[h:i_stop, h + 1 : j_stop + 1],
+                0.0,
+                linked.v_ice[north],
+            )
+        )  # icethd.F90:197
+        v_ice = v_ice.at[south].set(
+            jnp.where(
+                no_ice[owned] & no_ice[h:i_stop, h - 1 : j_stop - 1],
+                0.0,
+                v_ice[south],
+            )
+        )  # icethd.F90:198
     else:
         u_ice = jnp.where(no_ice & jnp.roll(no_ice, -1, axis=0), 0.0, linked.u_ice)  # icethd.F90:195-196
         v_ice = jnp.where(no_ice & jnp.roll(no_ice, -1, axis=1), 0.0, linked.v_ice)  # icethd.F90:197-198
     u_ice = si3_lbc_lnk_orca2(
-        u_ice, "U", -1.0, nn_hls=h, ldfull=card.fold.nfd_full_when_absent
+        u_ice, "U", -1.0, nn_hls=h, ldfull=ldfull
     )  # icethd.F90:201
     v_ice = si3_lbc_lnk_orca2(
-        v_ice, "V", -1.0, nn_hls=h, ldfull=card.fold.nfd_full_when_absent
+        v_ice, "V", -1.0, nn_hls=h, ldfull=ldfull
     )  # icethd.F90:201
     return linked._replace(  # icethd.F90:192-201
         u_ice=u_ice,  # icethd.F90:195-196,201
@@ -1070,7 +1121,12 @@ def si3_o17_step(
         rn_himin=card.rn_himin,
         config=card.state,
     )
-    corrected_state = _thermodynamic_tail(correction.state, card)  # icethd.F90:183-201
+    corrected_state = si3_icethd_tail(
+        correction.state,
+        rDt_ice=card.state.rDt_ice,
+        nn_hls=card.state.nn_hls,
+        ldfull=card.fold.nfd_full_when_absent,
+    )  # icethd.F90:183-201
     correction = correction._replace(state=corrected_state)  # icethd.F90:183-201
     owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
     owned_fluxes = SI3Fluxes(*(x[owned] for x in correction.fluxes))
@@ -1197,5 +1253,7 @@ __all__ = (
     "SI3O17StepState",
     "SI3O17SurfaceForcing",
     "SI3O17Trace",
+    "si3_icethd_age_and_lbc",
+    "si3_icethd_tail",
     "si3_o17_step",
 )
