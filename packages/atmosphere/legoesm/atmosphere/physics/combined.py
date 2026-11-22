@@ -801,7 +801,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                surface_bulk_coeffs=None,
                                cam6_activation=None,
                                mynn_initflag=None,
-                               convection_override=None) -> Callable:
+                               convection_override=None,
                                cirrus_aerosol=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
