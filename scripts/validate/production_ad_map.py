@@ -717,7 +717,9 @@ def gap_direction(x, gap):
     """Along a gradient gap, each variable on :func:`_direction`'s scale (0.1
     K in T, 1e-3 relative in a tracer) and at most that scale in any cell:
     two gradients that differ predict different derivatives here, so a
-    central difference tells which one is right.  None without a gap."""
+    central difference can tell them apart wherever its rounding error
+    (``fd_rounding``) is below the difference of the two predictions.  None
+    without a gap."""
     s = {k: (0.1 if k == "T" else 1e-3 * jnp.abs(x[k])) for k in gap}
     top = max(float(jnp.max(jnp.abs(s[k] * gap[k]))) for k in gap)
     if not (np.isfinite(top) and top > 0.0):
@@ -735,10 +737,20 @@ def fd_sweep(f, x, v, h):
             for m in H_SWEEP}
 
 
-def print_fd_check(path, window, direction, ad, ad_other, fds):
+def one_ulp(x):
+    """``x`` with every entry moved one rounding unit, random sign."""
+    return {k: a * (1.0 + jnp.finfo(a.dtype).eps * jax.random.rademacher(
+        jax.random.PRNGKey(j), a.shape, a.dtype))
+        for j, (k, a) in enumerate(sorted(x.items()))}
+
+
+def print_fd_check(path, window, direction, ad, ad_other, fds, loss_rounding):
+    """``loss_rounding``: the path's loss change at one rounding unit in x;
+    over 2h it is the resolution of that step's central difference."""
     print("FD_CHECK " + json.dumps(dict(
         path=path, window=window, direction=direction, ad=ad,
         ad_other_path=ad_other, fd={h: float(x) for h, x in fds.items()},
+        fd_rounding={h: float(loss_rounding) / (2.0 * float(h)) for h in fds},
         fd_over_ad_minus_1={h: (float(x) / ad - 1.0 if ad else float("nan"))
                             for h, x in fds.items()})), flush=True)
 
@@ -781,6 +793,8 @@ def window_check(exps, g_batch, losses_batch, n, kw, ids, fwd_batch=None,
         xs = [_state_x(e["state"]) for e in exps]
         dirs = [check_directions(x_) for x_ in xs]
         xb = tm(lambda *t: jnp.stack(t), *xs)
+        noise_b = np.abs(np.asarray(fwd_batch(one_ulp(xb)), np.float64)
+                         - np.asarray(fwd_batch(xb), np.float64))
         for name in dirs[0]:
             fds = fd_sweep(fwd_batch, xb,
                            tm(lambda *t: jnp.stack(t), *[d[name] for d in dirs]),
@@ -789,7 +803,7 @@ def window_check(exps, g_batch, losses_batch, n, kw, ids, fwd_batch=None,
                 print_fd_check(
                     "batched", b, name,
                     _tdot({k: v[b] for k, v in g_batch.items()}, d[name]),
-                    None, {m: f[b] for m, f in fds.items()})
+                    None, {m: f[b] for m, f in fds.items()}, noise_b[b])
     for i, b in enumerate(ids):
         e = exps[b]
 
@@ -810,29 +824,29 @@ def window_check(exps, g_batch, losses_batch, n, kw, ids, fwd_batch=None,
         gap = {k: g_b[k] - gb[k] for k in gb}
         row["gap_top10"] = gap_concentration(gap)
         row["repeat_vs_alone"] = grad_diff(vg(x)[1], gb)
-        x_ulp = {k: a * (1.0 + jnp.finfo(a.dtype).eps * jax.random.rademacher(
-            jax.random.PRNGKey(j), a.shape, a.dtype))
-            for j, (k, a) in enumerate(sorted(x.items()))}
+        x_ulp = one_ulp(x)
         row["ulp_vs_alone"] = grad_diff(vg(x_ulp)[1], gb)
         if fwd_batch is not None:
             f1 = jax.jit(one)
             row["loss_alone_fwd"] = float(f1(x))
+            noise = abs(float(f1(x_ulp)) - row["loss_alone_fwd"])
             todo = dict(dirs[b])
             w = gap_direction(x, gap)
             if w is not None:
                 todo["gap"] = w
             for name, d in todo.items():
                 print_fd_check("alone", b, name, _tdot(gb, d), _tdot(g_b, d),
-                               fd_sweep(f1, x, d, h))
+                               fd_sweep(f1, x, d, h), noise)
             if w is not None:
                 wb = {k: jnp.zeros_like(xb[k]).at[b].set(w[k]) for k in w}
                 fds = fd_sweep(fwd_batch, xb, wb, h)
                 print_fd_check("batched", b, "gap", _tdot(g_b, w),
-                               _tdot(gb, w), {m: f[b] for m, f in fds.items()})
+                               _tdot(gb, w), {m: f[b] for m, f in fds.items()},
+                               noise_b[b])
         if i == 0:
-            xb = jax.tree_util.tree_map(lambda t: t[None], x)
+            x1 = jax.tree_util.tree_map(lambda t: t[None], x)
             g1 = jax.block_until_ready(jax.jit(jax.grad(
-                lambda z: jnp.sum(jax.vmap(one)(z))))(xb))
+                lambda z: jnp.sum(jax.vmap(one)(z))))(x1))
             row["vmap1_vs_alone"] = grad_diff(
                 {k: v[0] for k, v in g1.items()}, gb)
         print("WINDOW_CHECK " + json.dumps(row), flush=True)
@@ -1101,7 +1115,8 @@ def main(argv=None):
                     return jnp.sum(jax.vmap(one_b)(x, s, p, f, c))
                 args = (_state_x(sb), sb, pb, fb, cb)
             tf_c, tf_1, tf_r, _ = time_compiled(fwd, args, a.repeats)
-            tg_c, tg_1, tg_r, g = time_compiled(jax.grad(fwd), args, a.repeats)
+            tg_c, tg_1, tg_r, (loss_g, g) = time_compiled(
+                jax.value_and_grad(fwd), args, a.repeats)
             fin = all(bool(jnp.all(jnp.isfinite(t)))
                       for t in jax.tree_util.tree_leaves(g))
             if not fin:
@@ -1114,6 +1129,7 @@ def main(argv=None):
                 fwd_first_s=tf_1, fwd_s=tf_r, grad_compile_s=tg_c,
                 grad_first_s=tg_1, grad_s=tg_r, grad_per_step_s=med_g / n,
                 grad_over_fwd=med_g / med_f, grad_finite=fin,
+                loss_grad_exec=float(loss_g),
                 peak_gib=peak_gib())), flush=True)
             if a.check_windows and nb > 1:
                 losses_fn = jax.jit(jax.vmap(one_b))

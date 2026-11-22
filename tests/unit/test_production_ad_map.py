@@ -9,6 +9,7 @@ module spies (record the first concrete call, keep the dispatcher markers).
 """
 from __future__ import annotations
 
+import functools
 import sys
 from pathlib import Path
 
@@ -423,9 +424,9 @@ def test_window_check_holds_each_path_against_its_own_fd(
     exps = [dict(fac=float(b + 1), phys_state=None,
                  state={k: v[b] for k, v in xb.items()}) for b in range(2)]
     fac = jnp.asarray([4.0, 8.0])[:, None]
-
-    def fwd(z):
-        return sum(jnp.sum((v * fac) ** 2, axis=1) for v in z.values())
+    # a real vmap: a batch of the wrong size is an error, not a broadcast
+    fwd = jax.vmap(lambda z, f: sum(jnp.sum((v * f) ** 2) for v in z.values()))
+    fwd = functools.partial(lambda f, z: f(z, fac), fwd)
     g = {k: 2.0 * v * fac ** 2 for k, v in xb.items()}
     if bad_window is not None:
         g["T"] = g["T"].at[bad_window].multiply(1.02)
@@ -446,6 +447,11 @@ def test_window_check_holds_each_path_against_its_own_fd(
         wrong = (r["path"] == "batched" and r["window"] == bad_window
                  and r["direction"] != "q_v")
         assert (err > 1e-3) if wrong else (err < 1e-7), r
+        if r["direction"] == "gap":
+            right = r["ad_other_path"] if r["path"] == "batched" else r["ad"]
+            assert right != 0.0
+            for d in r["fd"].values():
+                assert d == pytest.approx(right, rel=1e-7), r
     rows = [json.loads(ln[len("WINDOW_CHECK "):]) for ln in out
             if ln.startswith("WINDOW_CHECK ")]
     for r in rows:

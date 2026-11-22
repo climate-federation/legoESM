@@ -175,8 +175,9 @@ def stack_windows(exps, n_steps: int):
     The check is of the primal program over steps ``0..n_steps-1``, and it
     is conservative: a captured constant that differs but is later
     overwritten (the config's fixed CO2 under external GHG forcing) is still
-    refused.  It cannot see a value read only by a custom derivative rule
-    or inside a host callback.
+    refused.  It cannot see what only the derivative sees
+    (``lax.stop_gradient``, which lowering drops, and values read only by a
+    custom derivative rule) or the inside of a host callback.
 
     Refused: an export without forcing, cadence or time-step settings that
     differ between exports, states / forcing whose pytree structure, shapes
