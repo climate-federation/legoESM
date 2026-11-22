@@ -55,7 +55,10 @@ def load_checkpoint_report(
     math_mode = None
     checkpoint_metadata = []
     for path in paths:
-        metadata, report = runner.inspect_checkpoint(path)
+        try:
+            metadata, report = runner.inspect_checkpoint(path)
+        except RuntimeError as exc:
+            raise C4ScoreError(str(exc)) from exc
         checkpoint_metadata.append((path, metadata))
         try:
             month = runner.validate_month_checkpoint(path, metadata, report)
@@ -101,7 +104,25 @@ def load_checkpoint_report(
             raise C4ScoreError(str(exc)) from exc
     _payload, expected_tree = runner._carry_payload(carry_template)
     for path, metadata in checkpoint_metadata:
-        if metadata.get("input_identity") != runner.IN_FLIGHT_44512_INPUT_IDENTITY:
+        if metadata.get("input_identity") == runner.IN_FLIGHT_44512_INPUT_IDENTITY:
+            leaf_count = runner.IN_FLIGHT_44512_LEAF_COUNT
+            schema = metadata.get("leaf_schema")
+            require(isinstance(schema, list) and len(schema) == leaf_count,
+                    f"{path.name}: in-flight checkpoint must contain exactly "
+                    f"{leaf_count} leaves")
+            require(metadata.get("leaf_count") in (None, leaf_count),
+                    f"{path.name}: in-flight checkpoint must contain exactly "
+                    f"{leaf_count} leaves")
+            require(metadata.get("treedef", "").count("*") == leaf_count,
+                    f"{path.name}: in-flight checkpoint must contain exactly "
+                    f"{leaf_count} leaves")
+            require(
+                [str(row.get("name", "")) for row in schema]
+                == [f"carry_{index:05d}" for index in range(leaf_count)],
+                f"{path.name}: in-flight checkpoint carry layout is not the "
+                f"admitted {leaf_count}-leaf layout",
+            )
+        else:
             require(metadata.get("leaf_schema") == expected_tree["leaf_schema"],
                     f"{path.name}: carry schema differs from the deck template")
             require(metadata.get("leaf_count") == expected_tree["leaf_count"],

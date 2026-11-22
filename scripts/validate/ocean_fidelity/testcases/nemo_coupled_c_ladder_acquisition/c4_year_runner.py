@@ -55,6 +55,7 @@ IN_FLIGHT_44512_INPUT_IDENTITY = {
     "coupled_source_sha256": "a3f93e902b8decb157937989d581497d8b5207339434ff6849e7ee5dc1eb55a6",
     "ice_package_source_sha256": "424362b575d38649a29b1e6fa72837387cf9260b980d813bf36346c58406b0c1",
 }
+IN_FLIGHT_44512_LEAF_COUNT = 179
 PAIRS_PER_DAY = year_metrics.STEPS_PER_DAY // 2
 TOTAL_PAIRS = 1460
 ICE_KEYS = (
@@ -420,13 +421,18 @@ def inspect_checkpoint(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         require(treedef_leaf_count > 0,
                 f"{path.name}: checkpoint carry treedef has no leaves")
         leaf_count = metadata.get("leaf_count")
-        if (leaf_count is None
-                and metadata.get("input_identity") == IN_FLIGHT_44512_INPUT_IDENTITY):
+        if metadata.get("input_identity") == IN_FLIGHT_44512_INPUT_IDENTITY:
+            require(treedef_leaf_count == IN_FLIGHT_44512_LEAF_COUNT,
+                    f"{path.name}: in-flight checkpoint must contain exactly "
+                    f"{IN_FLIGHT_44512_LEAF_COUNT} leaves")
+            require(leaf_count in (None, IN_FLIGHT_44512_LEAF_COUNT),
+                    f"{path.name}: in-flight checkpoint must contain exactly "
+                    f"{IN_FLIGHT_44512_LEAF_COUNT} leaves")
             # The already-running checkpoint format predates the explicit
             # treedef count.  Its exact admitted identity and schema retain the
             # count needed for scoring only; restore still requires the live
             # deck-built treedef below.
-            leaf_count = treedef_leaf_count
+            leaf_count = IN_FLIGHT_44512_LEAF_COUNT
         require(type(leaf_count) is int and leaf_count > 0,
                 f"{path.name}: checkpoint has no valid carry treedef leaf count")
         require(leaf_count == treedef_leaf_count,

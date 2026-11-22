@@ -393,9 +393,16 @@ def test_lowered_sponge_stamp_guard_has_no_host_callback():
     assert "xla_ffi_python_cpu_callback" not in lowered
 
 
-def test_compiled_sponge_stamp_refuses_none_before_execution():
-    with pytest.raises(ValueError, match="target kt=None"):
-        bulk._nemo_checked_sponge(_StampedSponge(None), 1)
+@pytest.mark.parametrize("target", (None, True, 1.0))
+def test_compiled_sponge_stamp_refuses_invalid_target_before_execution(target):
+    @jax.jit
+    def checked(target_kt, requested_kt):
+        return bulk._nemo_checked_sponge(
+            _StampedSponge(target_kt), requested_kt
+        ).nemo_kt
+
+    with pytest.raises(ValueError, match="L6 damping target is stale"):
+        checked(target, jnp.asarray(1))
 
 
 def test_eager_pair_refuses_even_entry_clock_before_physics(monkeypatch):

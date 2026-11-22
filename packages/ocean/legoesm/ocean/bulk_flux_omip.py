@@ -3097,6 +3097,29 @@ def _nemo_checked_sponge(sponge, kt):
     host callback when no local CPU device is registered.
     """
     if isinstance(kt, jax.core.Tracer):
+        target = sponge.nemo_kt
+        target_shape = None if target is None else getattr(target, "shape", None)
+        target_dtype = None if target is None else getattr(target, "dtype", None)
+        if target_shape is None and target is not None:
+            target_array = np.asarray(target)
+            target_shape = target_array.shape
+            target_dtype = target_array.dtype
+        requested_shape = getattr(kt, "shape", None)
+        requested_dtype = getattr(kt, "dtype", None)
+        valid = (
+            target is not None
+            and target_shape == ()
+            and target_dtype is not None
+            and np.dtype(target_dtype).kind in "iu"
+            and requested_shape == ()
+            and requested_dtype is not None
+            and np.dtype(requested_dtype).kind in "iu"
+        )
+        if not valid:
+            raise ValueError(
+                f"L6 damping target is stale: target kt={target!r}, "
+                f"requested kt={kt!r}"
+            )
         return sponge._replace(nemo_kt=kt)
     target = sponge.nemo_kt
     target_scalar = None if target is None else np.asarray(target)

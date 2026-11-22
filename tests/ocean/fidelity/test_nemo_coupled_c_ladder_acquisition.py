@@ -261,7 +261,7 @@ def test_c2_cold_start_restores_global_policy() -> None:
     selected = PrecisionPolicy.fp64(transcendentals="native")
     set_policy(selected)
     try:
-        scorer._c2_cold_start(
+        carry, _forcing, _sponge, _card, _model = scorer._c2_cold_start(
             Path(
                 "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/"
                 "round31/oracle_coupled_c_ladder/REC_C2"
@@ -269,6 +269,7 @@ def test_c2_cold_start_restores_global_policy() -> None:
             n_steps=2,
             math_mode="libm-cpu",
         )
+        assert int(np.asarray(carry.kt)) == 1
         assert get_policy() == selected
     finally:
         set_policy(previous)

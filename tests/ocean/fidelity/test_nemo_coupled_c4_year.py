@@ -565,6 +565,84 @@ def test_scorer_wraps_checkpoint_math_errors(
         scorer.load_checkpoint_report(tmp_path, carry_template=object())
 
 
+def test_scorer_wraps_checkpoint_inspection_errors(
+    monkeypatch, tmp_path: Path
+) -> None:
+    for month in range(1, 13):
+        (tmp_path / f"c4_month{month:02d}_step{month:08d}.npz").touch()
+
+    def invalid_checkpoint(_path):
+        raise RuntimeError("planted checkpoint inspection failure")
+
+    monkeypatch.setattr(runner, "inspect_checkpoint", invalid_checkpoint)
+    with pytest.raises(
+        scorer.C4ScoreError, match="planted checkpoint inspection failure"
+    ):
+        scorer.load_checkpoint_report(tmp_path, carry_template=object())
+
+
+def test_in_flight_identity_refuses_non_179_leaf_checkpoint(tmp_path: Path) -> None:
+    path = tmp_path / runner.checkpoint_name(1, 2)
+    leaf = np.asarray(0.0)
+    metadata = {
+        "format": runner.CHECKPOINT_FORMAT,
+        "input_identity": dict(runner.IN_FLIGHT_44512_INPUT_IDENTITY),
+        "leaf_schema": [{
+            "name": "carry_00000",
+            "shape": list(leaf.shape),
+            "dtype": leaf.dtype.str,
+        }],
+        "treedef": "PyTreeDef(*)",
+    }
+    np.savez(
+        path,
+        __metadata_json__=np.asarray(json.dumps(metadata, sort_keys=True)),
+        __month_report_json__=np.asarray(json.dumps({})),
+        carry_00000=leaf,
+    )
+    with pytest.raises(RuntimeError, match="in-flight.*179 leaves"):
+        runner.inspect_checkpoint(path)
+
+
+def test_scorer_in_flight_identity_requires_179_leaf_layout(
+    monkeypatch, tmp_path: Path
+) -> None:
+    for month in range(1, 13):
+        (tmp_path / f"c4_month{month:02d}_step{month:08d}.npz").touch()
+
+    def one_leaf_checkpoint(path):
+        month = int(path.name[8:10])
+        return (
+            {
+                "month": month,
+                "completed_kt": month,
+                "next_kt": month + 1,
+                "reference_root": str(tmp_path),
+                "input_identity": dict(runner.IN_FLIGHT_44512_INPUT_IDENTITY),
+                "math": MATH,
+                "leaf_count": 1,
+                "leaf_schema": [{"name": "carry_00000"}],
+                "treedef": "PyTreeDef(*)",
+            },
+            {
+                "format": runner.C4_METRIC_FORMAT,
+                "month": month,
+                "status": "EVALUATED_COMPLETE_MONTH",
+            },
+        )
+
+    monkeypatch.setattr(runner, "inspect_checkpoint", one_leaf_checkpoint)
+    monkeypatch.setattr(
+        runner,
+        "validate_month_checkpoint",
+        lambda _path, metadata, _report: metadata["month"],
+    )
+    monkeypatch.setattr(runner, "checkpoint_input_identity", lambda _root: {})
+    monkeypatch.setattr(runner, "checkpoint_identity_is_scorable", lambda *_args: True)
+    with pytest.raises(scorer.C4ScoreError, match="in-flight.*179 leaves"):
+        scorer.load_checkpoint_report(tmp_path, carry_template=jnp.asarray(0.0))
+
+
 def test_real_c4_metrics_evaluator_does_not_clobber_fast_literal_policy() -> None:
     selected = PrecisionPolicy.fp64(transcendentals="native")
     previous = get_policy()
@@ -824,6 +902,7 @@ def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
         ice=SimpleNamespace(state=SimpleNamespace(nn_hls=0)),
     )
     compile_hlo = []
+    validated_clocks = []
 
     class FakeInputs:
         def __init__(self, *_args, **_kwargs):
@@ -875,8 +954,12 @@ def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
     )
     monkeypatch.setattr(runner, "C4InputReader", FakeInputs)
     monkeypatch.setattr(runner, "compile_pair", fake_compile)
+
+    def validate_sponge_steps(sponge, first_kt):
+        validated_clocks.append((tuple(int(np.asarray(x)) for x in sponge), first_kt))
+
     monkeypatch.setattr(
-        runner.c_ladder_scorer, "_validate_sponge_steps", lambda *_args: None
+        runner.c_ladder_scorer, "_validate_sponge_steps", validate_sponge_steps
     )
     monkeypatch.setattr(runner.year_metrics.pilot_metrics, "static_geometry", lambda _r: {})
     monkeypatch.setattr(
@@ -921,3 +1004,52 @@ def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
     assert straight_report["ice_sst_sss_mask_source"] == "Decision-188 ice_cover_clim.nc"
     assert len(compile_hlo) == 2
     assert compile_hlo[0] == compile_hlo[1]
+    assert validated_clocks == [((1, 2), 1), ((3, 4), 3), ((3, 4), 3)]
+
+
+def test_compile_pair_validates_entry_sponge_clock(
+    monkeypatch, real_carry_template
+) -> None:
+    validated = []
+    carry = _carry(real_carry_template, 1.0, 1)
+
+    def validate(sponge, first_kt):
+        validated.append((tuple(int(np.asarray(x)) for x in sponge), first_kt))
+
+    def fake_pair(entry, *_args, **_kwargs):
+        return entry, ()
+
+    monkeypatch.setattr(runner.c_ladder_scorer, "_validate_sponge_steps", validate)
+    monkeypatch.setattr(bulk, "nemo_orca2_si3_coupled_pair", fake_pair)
+    runner.compile_pair(
+        carry,
+        jnp.asarray(0.0),
+        jnp.asarray(0.0),
+        jnp.asarray(1),
+        jnp.asarray(2),
+        object(),
+        object(),
+    )
+    assert validated == [((1, 2), 1)]
+
+
+def test_advance_pairs_validates_each_carried_sponge_clock(
+    monkeypatch, real_carry_template
+) -> None:
+    validated = []
+    carry = _carry(real_carry_template, 1.0, 1)
+
+    def validate(sponge, first_kt):
+        validated.append((tuple(int(np.asarray(x)) for x in sponge), first_kt))
+
+    monkeypatch.setattr(runner.c_ladder_scorer, "_validate_sponge_steps", validate)
+    advanced, _timings = runner._advance_pairs(
+        lambda entry, *_args: _pair(entry),
+        carry,
+        (jnp.asarray(0.0), jnp.asarray(0.0)),
+        (jnp.asarray(1), jnp.asarray(2)),
+        0,
+        1,
+    )
+    assert int(np.asarray(advanced.kt)) == 3
+    assert validated == [((1, 2), 1)]
