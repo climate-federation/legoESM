@@ -174,9 +174,20 @@ def test_crm_bench_defaults_are_the_rcemip1_production_deck():
     assert rcp.parse_args([*crm.RCEMIP1_DECK_ARGV, "--nlev", "8"]).nlev == 8
 
 
-def test_les_bench_planes_is_default_and_builds_layout_at_one_rank():
+@pytest.mark.parametrize("n, want", [(1, "planes"), (32, "planes"),
+                                     (64, "planes"), (65, "pencil"),
+                                     (128, "pencil"), (256, "pencil")])
+def test_les_bench_auto_decomp_follows_measured_crossover(n, want):
     import bench_spectral_les_dd_scaling as les_b
-    assert les_b.bench_parser().get_default("decomp") == "planes"
+    assert les_b.choose_decomp("auto", n) == want
+    for explicit in ("slab", "pencil", "planes"):
+        assert les_b.choose_decomp(explicit, n) == explicit
+
+
+def test_les_bench_auto_is_default_and_planes_builds_layout_at_one_rank():
+    import bench_spectral_les_dd_scaling as les_b
+    assert les_b.bench_parser().get_default("decomp") == "auto"
+    assert les_b.builds_layout(les_b.choose_decomp("auto", 1), 1)
     assert les_b.builds_layout("planes", 1)
     assert not les_b.builds_layout("pencil", 1)
     assert not les_b.builds_layout("slab", 1)

@@ -18,8 +18,8 @@ The case's cell size (dx, dy, dz) is kept; the bench sets the cell COUNTS:
   "efficiency" is that shape change, not communication.
 
 N = 1 runs the serial spectral core (no layout) for slab/pencil, and a 1-rank
-planes layout for ``--decomp planes`` (the default), so the 1-rank reference
-runs the same FFT layout as N > 1; N > 1 runs the chosen layout
+planes layout for ``--decomp planes`` (and ``auto``, the default), so the
+1-rank reference runs the same FFT layout as N > 1; N > 1 runs the chosen layout
 (global ny must divide by N). Each rank builds its own slab of the initial
 state; the theta noise is drawn per GLOBAL row, so the IC does not depend on N.
 
@@ -47,6 +47,19 @@ from bench_plane_crm_dd_scaling import (  # noqa: E402
 )
 
 
+# Voted 2026-11-22 (author b / GLM b / codex d): planes up to 64 ranks, pencil
+# above. Measured weak fp32: planes wins at 32 (1 node) and 64 (1 or 2 nodes),
+# ties at 128 on 4 nodes x 32 and loses at 128 on 2 x 64 and 256 on 4 x 64.
+_AUTO_PLANES_MAX_RANKS = 64
+
+
+def choose_decomp(decomp: str, n: int) -> str:
+    """Resolve ``--decomp auto`` to ``planes`` (N <= 64) or ``pencil``."""
+    if decomp != "auto":
+        return decomp
+    return "planes" if n <= _AUTO_PLANES_MAX_RANKS else "pencil"
+
+
 def builds_layout(decomp: str, n: int) -> bool:
     """Whether the bench runs a distributed layout: always for planes (so the
     1-rank reference uses the planes FFT layout), else only for N > 1."""
@@ -59,9 +72,10 @@ def bench_parser() -> argparse.ArgumentParser:
     p.add_argument("--precision", choices=["float32", "float64"],
                    default="float64")
     p.add_argument("--case", default="cbl_nieuwstadt")
-    p.add_argument("--decomp", choices=["slab", "pencil", "planes"],
-                   default="planes",
-                   help="slab = y-slabs over all ranks; pencil = most-square "
+    p.add_argument("--decomp", choices=["auto", "slab", "pencil", "planes"],
+                   default="auto",
+                   help="auto = planes up to 64 ranks, pencil above; "
+                        "slab = y-slabs over all ranks; pencil = most-square "
                         "y x x rank mesh; planes = the pencil mesh with the "
                         "planes FFT mode (one all-to-all per transform)")
     p.add_argument("--nx", type=int, required=True)
@@ -159,15 +173,16 @@ def main(argv=None):
     rank, n = comm.Get_rank(), comm.Get_size()
     n_y, n_x = most_square_factors(n)
     ny_g, nx_g = global_grid_shape(bargs.mode, bargs.ny, bargs.nx, n_y, n_x)
-    p_y, p_x = (n_y, n_x) if bargs.decomp in ("pencil", "planes") else (n, 1)
+    decomp = choose_decomp(bargs.decomp, n)
+    p_y, p_x = (n_y, n_x) if decomp in ("pencil", "planes") else (n, 1)
     if ny_g % p_y or nx_g % p_x:
         raise SystemExit(f"global {ny_g}x{nx_g} not divisible by mesh {p_y}x{p_x}")
     ny_l, nx_l = ny_g // p_y, nx_g // p_x
     grid = scaled_grid(case.grid, nx_g, ny_g, bargs.nz)
     cfg = les.cbl_les_config(grid, args, sgs)
     layout = (sl.make_spectral_les_pencil_layout(
-        comm, p_y, p_x, ny_g, nx_g, planes=bargs.decomp == "planes")
-              if builds_layout(bargs.decomp, n) else None)
+        comm, p_y, p_x, ny_g, nx_g, planes=decomp == "planes")
+              if builds_layout(decomp, n) else None)
     g = sl.make_grid(cfg, dtype=dtype, layout=layout)
     ry, rx = divmod(rank, p_x)
     st = local_cbl_state(sl, g, args, ry * ny_l, ny_l, u_geo, dtype,
@@ -211,7 +226,7 @@ def main(argv=None):
             "model": "spectral_les", "case": case.name, "sgs": sgs,
             "mode": bargs.mode, "precision": bargs.precision, "n_ranks": n,
             "ny_global": ny_g, "nx_global": nx_g, "nz": bargs.nz,
-            "ny_local": ny_l, "nx_local": nx_l, "decomp": bargs.decomp,
+            "ny_local": ny_l, "nx_local": nx_l, "decomp": decomp,
             "mesh": [p_y, p_x], "dx": g.dx, "dy": g.dy, "dz": g.dz, "dt": dt0,
             "time_steps": bargs.time_steps, "windows": bargs.windows,
             "compile_plus_first_step_s": t_compile,

@@ -24,9 +24,9 @@
 #               substepped horizontal acoustics refuses to run without it, and
 #               every production deck passes it). 1 rank runs the halo core
 #               too (bench --single-rank-path halo, the like-for-like baseline).
-#   LES_DECOMPS "planes"  any of slab / pencil / planes (planes = pencil mesh
-#               with the one-all-to-all planes FFT; its 1-rank point runs the
-#               planes layout too)
+#   LES_DECOMPS "auto"  any of auto / slab / pencil / planes (planes = pencil
+#               mesh with the one-all-to-all planes FFT, its 1-rank point runs
+#               the planes layout too; auto = planes up to 64 ranks, else pencil)
 #   PPN_MAX     ranks per node (default 128 = packed); a divisor of 128. N >
 #               PPN_MAX runs on N/PPN_MAX equally filled nodes (N must be a
 #               multiple), cores at stride 128/PPN_MAX
@@ -43,7 +43,7 @@ set -uo pipefail
 : "${MODES:=strong weak}"
 : "${BOUNDS:=1}"
 : "${CRM_EXTRA:=}"
-: "${LES_DECOMPS:=planes}"
+: "${LES_DECOMPS:=auto}"
 : "${PPN_MAX:=128}"
 : "${STRONG_NX:=512}" "${WEAK_NX:=64}" "${CRM_NLEV:=64}" "${LES_NZ:=128}"
 : "${WARMUP:=3}" "${TIME_STEPS:=5}" "${WINDOWS:=3}"
