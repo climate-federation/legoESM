@@ -1492,7 +1492,11 @@ def _route_runoff_stack(runoff_stack, rmap, static=None):
     if rmap is None:
         return runoff_stack
     from legoesm.ocean.forcing.runoff_mapper import apply_runoff_map
-    return jax.vmap(lambda r: apply_runoff_map(r, rmap))(runoff_stack)
+    # lax.map, not vmap: vmap gathers all records at once, an
+    # (n_pairs, n_records) array (4.8M pairs x 288 records = 10 GiB at
+    # 1/4 deg with 'spread_all').  lax.map routes one record at a time;
+    # the result is identical.
+    return jax.lax.map(lambda r: apply_runoff_map(r, rmap), runoff_stack)
 
 
 def load_dz_ref_file(path: str | None):
