@@ -182,16 +182,19 @@ def test_unknown_tracer_name_raises_with_the_filter_off(names):
 def test_new_fields_are_appended_last():
     """Positional ABI: the new fields sit at the end of both NamedTuples,
     followed by the vertical form, main's spectral sponge (DycoreConfig),
-    and this branch's tracer scheme and smoothing widths."""
+    this branch's tracer scheme and smoothing widths, then the tracer del-4
+    rate and the PPM limiter sharpness."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
     from legoesm.driver.config import DycoreConfig
-    assert MPASPrimitiveEquationConfig._fields[-5:] == (
+    assert MPASPrimitiveEquationConfig._fields[-7:] == (
         "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form",
-        "tracer_van_leer_width", "tracer_van_leer_flux_width")
-    assert DycoreConfig._fields[-7:] == (
+        "tracer_van_leer_width", "tracer_van_leer_flux_width",
+        "nu_vert4_tracer", "vert_ppm_limiter_sharpness")
+    assert DycoreConfig._fields[-9:] == (
         "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers", "vertical_form",
         "spectral_sponge_nu_top_m2s",
-        "tracer_vertical_scheme", "tracer_van_leer_width", "tracer_van_leer_flux_width")
+        "tracer_vertical_scheme", "tracer_van_leer_width", "tracer_van_leer_flux_width",
+        "mpas_nu_vert4_tracer", "mpas_vert_ppm_limiter_sharpness")
 
 
 def test_every_builder_forwarding_the_filter_forwards_the_form():

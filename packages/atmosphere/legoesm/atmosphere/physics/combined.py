@@ -182,9 +182,9 @@ def make_physics(
     surface_bulk_coeffs="default",
     cam6_activation=None,
     mynn_initflag=None,
+    cirrus_aerosol=None,
     five=None,
     five_host_coord=None,
-    cirrus_aerosol=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -377,6 +377,16 @@ def make_physics(
     if config.cariolle.enabled and model_type != "mpas":
         raise ValueError("ifs_ozone_chem runs only on the MPAS column lane; "
                          f"got model_type={model_type!r}")
+    if five is not None and five.enabled:
+        # Refused before the host build (votes: GLM/Claude refuse, codex allow).
+        if config.convection.zhang_mcfarlane.positivity_after_zm:
+            raise ValueError("FIVE is not built with positivity_after_zm (the fine "
+                             "grid replays the host ZM tendency)")
+        if getattr(config.microphysics.morrison, "cirrus_nucleation",
+                   "fixed") != "fixed":
+            raise ValueError("FIVE is not built with cirrus_nucleation="
+                             f"{config.microphysics.morrison.cirrus_nucleation!r} "
+                             "(the cirrus aerosol is on the host levels)")
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(
             config, dt, column_mesh=column_mesh, need_rad=need_rad,
@@ -1521,8 +1531,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     from legoesm.diagnostics.process_ledger import ledger_entry_column
                     _dq_fix = sum((_tr_out[k] - _tr_in[k]) / dt
                                   for k in _LEDGER_WATER if k in _tr_out)
+                    from legoesm.core.conservation import conservation_accumulator
                     _led = _led.at[:, sel["pre"][0][1], :].add(ledger_entry_column(
                         _dq_fix, _dT_fix, state.p_s.data, sigma_coord.dsigma,
+                        dp=sigma_coord.layer_thickness_dp(
+                            state.p_s.data.astype(conservation_accumulator())),
                         level_weight=_ledger_level_weight).astype(_led.dtype))
                 r_pre = (r_pre[:2] + (r_pre[2] + _dT_fix,)
                          + r_pre[3:5] + (_tr_t,) + r_pre[6:10] + (_led,) + r_pre[11:])
