@@ -4766,6 +4766,10 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_cirrus_T_width_K", None)),
         ("morrison_cirrus_rel_width", "cirrus_rel_width",
          getattr(config, "morrison_cirrus_rel_width", None)),
+        ("morrison_boutle_fsd_factor", "boutle_fsd_factor",
+         getattr(config, "morrison_boutle_fsd_factor", None)),
+        ("morrison_boutle_overcast_ramp_width", "boutle_overcast_ramp_width",
+         getattr(config, "morrison_boutle_overcast_ramp_width", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),
@@ -4836,10 +4840,14 @@ def thread_morrison_scalars(config, scheme, micro_config):
                       _ExpCfg._field_defaults["morrison_cirrus_nucleation"])
     _cirrus = (None if _cirrus == _ExpCfg._field_defaults["morrison_cirrus_nucleation"]
                else _cirrus)
+    _relvar = getattr(config, "morrison_relvar_scheme",
+                      _ExpCfg._field_defaults["morrison_relvar_scheme"])
+    _relvar = (None if _relvar == _ExpCfg._field_defaults["morrison_relvar_scheme"]
+               else _relvar)
     if (not _touched and _flavor is None and _sed_sub is None
             and _sed_strict is None and _sed_max is None and _graupel is None
             and _wrs is None and _incloud is None and _prog_nc is None
-            and _sed_spec is None and _cirrus is None):
+            and _sed_spec is None and _cirrus is None and _relvar is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4853,7 +4861,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_warm_rain_incloud=_incloud,
         morrison_prognostic_droplet_number=_prog_nc,
         morrison_specified_nc_droplet_sedimentation=_sed_spec,
-        morrison_cirrus_nucleation=_cirrus)
+        morrison_cirrus_nucleation=_cirrus,
+        morrison_relvar_scheme=_relvar)
 
 
 def _resolve_microphysics(config):
@@ -4982,9 +4991,13 @@ def _resolve_microphysics(config):
         # runs make_physics instead, whose factory applies the same guard.
         from legoesm.atmosphere.physics.microphysics.integration import (
             require_relvar_for_kk2000_cam6,
+            require_relvar_scheme_lane,
         )
         require_relvar_for_kk2000_cam6(
             MicrophysicsConfig(scheme="morrison", morrison=micro_config), False)
+        # no CLUBB cloud fraction either: a non-default relvar_scheme is refused
+        require_relvar_scheme_lane(
+            MicrophysicsConfig(scheme="morrison", morrison=micro_config), "pipeline")
 
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (
@@ -5235,6 +5248,18 @@ def turbulence_config_for(config):
                     "the liquid handed back is the post-advance PDF closure's "
                     "rcm, which the diagnostic path does not produce.")
             tc = tc._replace(liquid_partition=True)
+        # CLUBB's mean vertical velocity from the host omega (CAM
+        # clubb_intr.F90:1677-1679).  Same threading and refusals.
+        if getattr(config, "clubb_host_omega", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_host_omega=True requires turbulence='clubb', got "
+                    f"{tc.scheme!r}. The host omega is CLUBB's wm input.")
+            if not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    "clubb_host_omega=True requires clubb_prognostic=True: only "
+                    "the prognostic closure takes the host omega.")
+            tc = tc._replace(host_omega=True)
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => the scheme's own default stands (CLUBBConfig, CAM6 100 Pa).
@@ -5369,6 +5394,15 @@ def turbulence_config_for(config):
                 f"{getattr(tc, 'liquid_partition', None)!r}). The override is "
                 "authoritative, so set TurbulenceConfig(liquid_partition=True) "
                 "on it rather than relying on the experiment-level flag.")
+    if getattr(config, "clubb_host_omega", False):
+        if tc.scheme != "clubb" or not getattr(tc, "host_omega", False):
+            raise ValueError(
+                "clubb_host_omega=True but an explicit turbulence_override is "
+                "in force and does not select it (override "
+                f"scheme={tc.scheme!r}, host_omega="
+                f"{getattr(tc, 'host_omega', None)!r}). The override is "
+                "authoritative, so set TurbulenceConfig(host_omega=True) on it "
+                "rather than relying on the experiment-level flag.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the

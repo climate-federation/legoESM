@@ -13,8 +13,12 @@ from __future__ import annotations
 
 from typing import Callable
 
+import math
+import numbers
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import with_precision_override
@@ -44,7 +48,9 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.microphysics.config import (
-    MicrophysicsConfig, resolve_warm_rain_scheme)
+    RELVAR_SCHEMES, MicrophysicsConfig, resolve_warm_rain_scheme)
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    boutle2014_relvar, check_boutle2014_cell_size)
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
@@ -320,6 +326,7 @@ def make_microphysics_physics(
             "hydrostatic/mpas lane forwards CLUBB's per-cell relvar to "
             "microphysics; this lane would silently use the constant.")
     require_relvar_for_kk2000_cam6(microphysics_config, relvar_from_clubb)
+    require_relvar_scheme_lane(microphysics_config, model_type)
     if model_type in ("hydrostatic", "mpas"):
         fn = _make_hydrostatic_microphysics(microphysics_config, dt,
                                             cloud_config=cloud_config,
@@ -365,6 +372,48 @@ def require_relvar_for_kk2000_cam6(microphysics_config, relvar_wired: bool):
             "warm_rain_scheme='kk2000' (or another law) here; an unset "
             "warm_rain_scheme resolves to kk2000_cam6 under morrison_flavor="
             "'mg'.")
+
+
+def require_relvar_scheme_lane(microphysics_config, model_type: str):
+    """Refuse a Morrison ``relvar_scheme`` other than the default on any lane
+    but MPAS (the only lane that hands CLUBB's cloud fraction and relvar to
+    MG2), and a ``boutle_fsd_factor`` that is not a positive finite number;
+    otherwise the option would be ignored or replaced silently."""
+    m = getattr(microphysics_config, "morrison", None)
+    if microphysics_config.scheme != "morrison" or m is None:
+        return
+    scheme = getattr(m, "relvar_scheme", "cam6_clubb")
+    if scheme not in RELVAR_SCHEMES:
+        raise ValueError(f"Unknown relvar_scheme {scheme!r}; choose one of {RELVAR_SCHEMES}.")
+    if scheme != "cam6_clubb" and model_type != "mpas":
+        raise ValueError(
+            f"relvar_scheme={scheme!r} is wired on the MPAS lane only; got "
+            f"model_type={model_type!r}.")
+    def _concrete(v):
+        # a concrete array must be a scalar and is checked as its value;
+        # tracers pass
+        if isinstance(v, jax.Array) and not isinstance(v, jax.core.Tracer):
+            if v.size != 1:
+                raise TypeError(f"Boutle knobs must be scalars, got shape {v.shape}.")
+            return float(v)
+        return v
+    f, w = _concrete(m.boutle_fsd_factor), _concrete(m.boutle_overcast_ramp_width)
+    for name, v in (("boutle_fsd_factor", f), ("boutle_overcast_ramp_width", w)):
+        if isinstance(v, bool) or not isinstance(v, (numbers.Real, jax.Array)):
+            raise TypeError(f"{name} must be a real number, got {v!r}.")
+    if scheme == "cam6_clubb":
+        # the Boutle knobs are read by nothing on this path: refuse a set one
+        d = type(m)._field_defaults
+        for name, v in (("boutle_fsd_factor", f), ("boutle_overcast_ramp_width", w)):
+            if isinstance(v, numbers.Real) and v != d[name]:
+                raise ValueError(
+                    f"{name}={v!r} is read only by relvar_scheme='boutle2014'; "
+                    "with 'cam6_clubb' it would be silently inert.")
+        return
+    if isinstance(f, numbers.Real) and not (math.isfinite(f) and f > 0.0):
+        raise ValueError(f"boutle_fsd_factor must be positive and finite, got {f!r}.")
+    if isinstance(w, numbers.Real) and not (0.0 <= w < 1.0):
+        raise ValueError(f"boutle_overcast_ramp_width must lie in [0, 1), got {w!r}.")
 
 
 # ===========================================================================
@@ -557,6 +606,17 @@ def _make_hydrostatic_microphysics(
             f"needs mesh.latCell); got model_type={model_type!r}.")
 
     _cloudsc = scheme_name == "ifs_cloudsc"
+    _relvar_scheme = getattr(scheme_config, "relvar_scheme", "cam6_clubb")
+    if _relvar_scheme not in RELVAR_SCHEMES:
+        raise ValueError(f"Unknown relvar_scheme {_relvar_scheme!r}; choose one of {RELVAR_SCHEMES}.")
+    _boutle = _relvar_scheme == "boutle2014"
+    if _boutle and not (relvar_from_clubb and _incloud):
+        # Boutle's FSD needs CLUBB's PDF cloud fraction (the warm_rain_incloud
+        # carry) and replaces the relvar CLUBB hands to the kk2000_cam6 law.
+        raise ValueError(
+            "relvar_scheme='boutle2014' needs the CLUBB liquid-partition lane with "
+            "warm_rain_scheme='kk2000_cam6' (relvar_from_clubb) and warm_rain_incloud=True.")
+
     _prog_nc = bool(getattr(scheme_config, "prognostic_droplet_number", False))
     if _prog_nc and not _incloud:
         # the scheme refuses this too (morrison.py start-up guard); fail at build
@@ -775,6 +835,20 @@ def _make_hydrostatic_microphysics(
                 # CAM6 MG2 reads pbuf RELVAR, set by clubb_tend_cam in the same
                 # macmic iteration (clubb_intr.F90:2416-2425).
                 _kw["relvar"] = phys_state.relvar.reshape(ncol, nlev)
+                if _boutle:
+                    # Boutle et al. (2014) FSD in CLUBB's PDF cloud fraction and
+                    # the cell size, in place of CLUBB's rcm**2/qclvar.
+                    if not hasattr(grid, "areaCell"):
+                        raise ValueError("relvar_scheme='boutle2014' needs the mesh cell "
+                                         "areas (grid.areaCell).")
+                    _area = grid.areaCell
+                    if not isinstance(_area, jax.core.Tracer):
+                        check_boutle2014_cell_size(np.asarray(_area))
+                    _kw["relvar"] = boutle2014_relvar(
+                        jnp.clip(phys_state.cloud_fraction.reshape(ncol, nlev), 0.0, 1.0),
+                        jnp.asarray(_area).reshape(ncol, 1),
+                        scheme_config.boutle_fsd_factor,
+                        scheme_config.boutle_overcast_ramp_width)
             if _prog_nc:
                 # CAM6 microp_aero_run immediately before micro_mg (user
                 # decision 2026-10-24, 2), on this sub-step's post-CLUBB state.

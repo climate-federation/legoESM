@@ -2393,6 +2393,19 @@ class ExperimentConfig(NamedTuple):
     # land_canopy_most_n_iters; the production deck names both.
     land_canopy_implicit_ground_flux: bool | None = None
     land_canopy_fallback_from_last_iterate: bool | None = None
+    # APPENDED LAST.  CAM6 hands prognostic CLUBB the host's large-scale
+    # pressure velocity (clubb_intr.F90:1654-1656, 1677-1679, 1778
+    # cam_cesm2_1_rel_60), so its flux, variance and wp2/wp3 equations feel
+    # the subsidence.  False (default) = wm 0 (byte-identical).  MPAS lane;
+    # requires turbulence='clubb' and clubb_prognostic=True.
+    clubb_host_omega: bool = False
+    # APPENDED LAST.  MorrisonConfig.relvar_scheme / boutle_fsd_factor /
+    # boutle_overcast_ramp_width: the MG2 relvar source on the CLUBB liquid
+    # partition lane, "cam6_clubb" (default, byte-identical) or "boutle2014"
+    # (Boutle et al. 2014 liquid FSD); MPAS lane.
+    morrison_relvar_scheme: str = "cam6_clubb"
+    morrison_boutle_fsd_factor: float = 1.0
+    morrison_boutle_overcast_ramp_width: float = 0.01
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -4958,6 +4971,11 @@ class ExperimentConfig(NamedTuple):
                 "'kk2000_cam6' "
                 f"(got {self.morrison_warm_rain_scheme!r}); they would be "
                 "silently inert.")
+        from legoesm.atmosphere.physics.microphysics.config import RELVAR_SCHEMES
+        if self.morrison_relvar_scheme not in RELVAR_SCHEMES:
+            raise ValueError(
+                f"morrison_relvar_scheme={self.morrison_relvar_scheme!r} unknown; "
+                f"choose one of {RELVAR_SCHEMES}.")
         if self.morrison_flavor not in ("mg", "sam"):
             raise ValueError(
                 f"morrison_flavor={self.morrison_flavor!r} unknown; choose "

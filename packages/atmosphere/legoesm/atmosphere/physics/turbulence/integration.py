@@ -115,6 +115,55 @@ _ENERGY_FIELD_BY_SCHEME = {
 }
 
 
+# forcing key under which a host hands the CLUBB bridge its pressure velocity
+# [Pa/s, (nCells, nlev), top first] (TurbulenceConfig.host_omega).
+HOST_OMEGA_FORCING_KEY = "clubb_host_omega"
+
+
+def mpas_flux_form_continuity(state, mesh, sigma_coord):
+    """``(omega, dp_s_dt)`` of an MPAS state from the dycore's FLUX-FORM
+    continuity, ``div(u dp_edge)`` with ``dp_edge`` the edge average of the
+    cell layer thickness (primitive_eq_mpas step 4; the advective
+    ``div(u) dp`` differs wherever grad p_s != 0), closed by the shared
+    blocks of ``legoesm.grids.vertical``.  omega [Pa/s, (nCells, nlev)]."""
+    from legoesm.core.operators_voronoi import cell_to_edge_avg_3d, divergence_cell_3d
+    from legoesm.grids.vertical import (
+        HybridSigmaPressureCoordinate, SigmaCoordinate, compute_mass_flux_from_cumsum,
+        compute_omega_hybrid, compute_pressure_velocity, compute_sigma_dot_from_cumsum)
+    p_s = state.p_s.data
+    nlev = state.T.data.shape[-1]
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+    if _hybrid:
+        # the edge average of the cell layer thickness, as the dycore's hybrid branch
+        p_half = sigma_coord.pressure_at_half(p_s).reshape(p_s.shape[0], nlev + 1)
+        dp_edge = cell_to_edge_avg_3d(p_half[:, 1:] - p_half[:, :-1], mesh)
+    else:
+        # p_s_edge * dsigma, as the dycore's sigma branch
+        dp_edge = (cell_to_edge_avg_3d(p_s[:, None], mesh)[:, :1]
+                   * sigma_coord.dsigma.astype(p_s.dtype)[None, :])
+    cum = jnp.cumsum(divergence_cell_3d(state.u.data * dp_edge, mesh), axis=-1)
+    D = cum[..., -1:]
+    if _hybrid:
+        dps = -D[..., 0] / sigma_coord.B_range
+        return compute_omega_hybrid(compute_mass_flux_from_cumsum(cum, D, sigma_coord),
+                                    p_s, dps, sigma_coord), dps
+    if isinstance(sigma_coord, SigmaCoordinate):
+        dps = -D[..., 0] / (1.0 - sigma_coord.sigma_half[0])
+        sd = compute_sigma_dot_from_cumsum(cum, D, p_s, sigma_coord)
+        return compute_pressure_velocity(sd, p_s, dps, sigma_coord), dps
+    raise ValueError(f"no hydrostatic continuity for {type(sigma_coord).__name__}")
+
+
+def mpas_host_omega(state, mesh, sigma_coord):
+    """Large-scale pressure velocity [Pa/s, (nCells, nlev)] of an MPAS state,
+    the dycore's own flux-form continuity omega (:func:`mpas_flux_form_continuity`):
+    the host omega handed to CLUBB (TurbulenceConfig.host_omega).  Needs an
+    edge mesh: a column model with cell winds must supply
+    ``forcing[HOST_OMEGA_FORCING_KEY]`` instead.
+    """
+    return mpas_flux_form_continuity(state, mesh, sigma_coord)[0]
+
+
 def turbulence_scheme_traits(scheme_name: str) -> TurbulenceSchemeTraits:
     """Return the static carry traits for *scheme_name*.
 
@@ -749,6 +798,19 @@ def make_turbulence_physics(
             "TurbulenceConfig.liquid_partition needs prognostic CLUBB "
             "(CLUBBConfig(prognostic=True)); the diagnostic closure does not "
             "advance the total water the exchange partitions.")
+    if getattr(turbulence_config, "host_omega", False):
+        # The host omega reaches only the prognostic CLUBB kernel, and only
+        # the MPAS bridge (GCM and column model) hands it over.
+        if (turbulence_config.scheme != "clubb"
+                or not getattr(turbulence_config.clubb, "prognostic", False)):
+            raise ValueError(
+                "TurbulenceConfig.host_omega hands the host pressure velocity "
+                "to prognostic CLUBB (CLUBBConfig(prognostic=True)); scheme="
+                f"{turbulence_config.scheme!r} would leave it silently inert.")
+        if model_type != "mpas":
+            raise NotImplementedError(
+                "TurbulenceConfig.host_omega is wired on the MPAS turbulence "
+                f"lane only; the {model_type!r} lane would leave it inert.")
     if model_type != "mpas" and zm_config is not None:
         raise ValueError(
             "zm_config feeds the MPAS CLUBB bridge's booking of ZM's detrained "
@@ -1055,6 +1117,9 @@ def _make_mpas_turbulence(
     # the liquid exchange below is absent from the trace entirely.
     _liquid_partition = (bool(turbulence_config.liquid_partition)
                          and scheme_name == "clubb")
+    # Static gate: with it off no omega is computed or traced.
+    _host_omega = (bool(getattr(turbulence_config, "host_omega", False))
+                   and scheme_name == "clubb")
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
         from legoesm.grids.voronoi import (
@@ -1483,6 +1548,23 @@ def _make_mpas_turbulence(
                    if _surface_flux is not None else {})
         if _liquid_partition:
             _sfc_kw = dict(_sfc_kw, q_c=_qc_col)
+        if _host_omega:
+            # CAM6 clubb_intr.F90:1677-1679: CLUBB's wm from state%omega,
+            # the dycore's omega held through the physics.  A host that
+            # supplies it (the combined macmic loop, from the pre-physics
+            # state; a column model, its prescribed subsidence) wins.
+            _om = (forcing.get(HOST_OMEGA_FORCING_KEY)
+                   if forcing is not None else None)
+            if _om is None:
+                if _cell_winds:
+                    raise ValueError(
+                        "TurbulenceConfig.host_omega on a column model with "
+                        "cell winds: there is no edge mesh to diagnose omega "
+                        f"from, so the host must pass forcing[{HOST_OMEGA_FORCING_KEY!r}].")
+                _om = mpas_host_omega(state, mesh, sigma_coord)
+            _sfc_kw = dict(_sfc_kw, omega=jnp.asarray(
+                _om, dtype=_state_dtype).reshape(nCells, nlev),
+                omega_cam_layer_density=True)
 
         # No radiative thlp2 source is handed to CLUBB: CAM6 applies it only
         # under clubb_cloudtop_cooling (do_cldcool), default .false.
