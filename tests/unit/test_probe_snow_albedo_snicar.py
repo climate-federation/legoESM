@@ -46,14 +46,16 @@ def test_check_results_rejects_planted(probe, plant):
         probe.check_results(res, r, ours)
 
 
-def test_layer_temps_give_clm_diagnosed_gradient(probe):
-    swe_top, swe_low, g = 5.0, 120.0, 20.0
-    t1, t2, _ = probe.layer_temps(255.0, g, swe_top, swe_low)
+def test_layer_temps_linear_profile(probe):
+    swe_top, swe_low, g, Ts = 5.0, 120.0, 20.0, 255.0
+    t1, t2, tsoil = probe.layer_temps(Ts, g, swe_top, swe_low)
     dz1, dz2 = swe_top / probe.RHO_SNOW, swe_low / probe.RHO_SNOW
-    # CESM2.1.5 SnowAge_grain top-layer diagnostic
-    t_btm = (t2 * dz1 + t1 * dz2) / (dz1 + dz2)
-    assert abs(abs(t1 - t_btm) / dz1 - g) < 1e-9
-    assert t1 == 255.0
+    assert abs(t1 - (Ts + g * dz1 / 2)) < 1e-12 and tsoil == t2
+    # CLM's interpolated top/lower interface equals the linear-profile interface
+    t_if = (t2 * dz1 + t1 * dz2) / (dz1 + dz2)
+    assert abs(t_if - (Ts + g * dz1)) < 1e-9
+    # and CLM therefore diagnoses half the gradient in the top layer
+    assert abs(probe.clm_top_gradient(t1, t2, swe_top, swe_low) - g / 2) < 1e-9
 
 
 def test_mam_selection(probe):

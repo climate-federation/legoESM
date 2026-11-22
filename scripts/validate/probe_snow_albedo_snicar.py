@@ -59,8 +59,8 @@ DT = 1800.0
 COSZ = (0.3, 0.45, 0.6)
 COSZ_PRIMARY = 0.45
 # (days, T_top [K], dT/dz [K/m], liquid mass fraction, forcing air T [K]).
-# T_top is the top-layer centre temperature AND the temperature our age clock sees;
-# deeper layers are set so CLM's own diagnosed top-layer gradient equals dT/dz.
+# T_top is the snow SURFACE temperature (what our age clock sees); the oracle's layer
+# centres follow a linear profile with dT/dz inside the snow (see layer_temps).
 SCHEDULE = ((60, 255.0, 20.0, 0.0, 255.0),                     # winter, cold, dry
             (30, 265.0, 10.0, 0.0, 265.0),                     # early spring, dry
             (15, constants.T_freeze, 0.0, 0.05, 275.0))        # melting
@@ -183,15 +183,24 @@ def build_oracle(work: Path) -> Path:
     return exe
 
 
-def layer_temps(T_top, g, swe_top, swe_low):
-    """Layer-centre temperatures [top, lower, soil] such that CLM5.0 SnowAge_grain's
-    diagnosed top-layer gradient |t1 - (t2 dz1 + t1 dz2)/(dz1+dz2)| / dz1 equals g
-    (it reduces to |t1 - t2| / (dz1 + dz2)).  The soil node sits at the lower-layer
-    temperature: the gradient is imposed inside the snow only (vote 2026-11-22, a/a/a).
-    Dry segments must keep the snow layers below freezing."""
+def layer_temps(T_sfc, g, swe_top, swe_low):
+    """Layer-centre temperatures [top, lower, soil] on a linear profile with surface
+    temperature ``T_sfc`` (the temperature our age clock sees) and gradient ``g``
+    inside the snow.  CLM's interface interpolation is exact for such a profile, so
+    the gradient CLM diagnoses is ``g`` for interior layers and ``g/2`` for the top
+    layer (its upper value is the top-layer centre) -- CLM's own behaviour on a real
+    linear profile, reported by :func:`clm_top_gradient`.  Soil node at the
+    lower-layer temperature (vote 2026-11-22, a/a/a)."""
     dz1, dz2 = swe_top / RHO_SNOW, swe_low / RHO_SNOW
-    t2 = T_top + g * (dz1 + dz2)
-    return T_top, t2, t2
+    t1 = T_sfc + g * 0.5 * dz1
+    t2 = T_sfc + g * (dz1 + 0.5 * dz2)
+    return t1, t2, t2
+
+
+def clm_top_gradient(t1, t2, swe_top, swe_low):
+    """CESM2.1.5 SnowAge_grain top-layer dT/dz for layer centres t1, t2."""
+    dz1, dz2 = swe_top / RHO_SNOW, swe_low / RHO_SNOW
+    return abs(t1 - (t2 * dz1 + t1 * dz2) / (dz1 + dz2)) / dz1
 
 
 def run_oracle(exe: Path, swe_top: float, swe_low: float, cases: list) -> np.ndarray:
@@ -342,6 +351,8 @@ def main() -> int:
             "years": YEARS, "lat": LAT, "min_fsno": MIN_FSNO, "min_landfrac": MIN_LANDFRAC,
             "max_swe": MAX_SWE, "rho_snow": RHO_SNOW, "dt": DT, "schedule": SCHEDULE,
             "layer_temps_K": [layer_temps(T, g, swe_top, swe_low) for _, T, g, *_ in SCHEDULE],
+            "clm_top_dTdz_K_m": [clm_top_gradient(*layer_temps(T, g, swe_top, swe_low)[:2],
+                                                  swe_top, swe_low) for _, T, g, *_ in SCHEDULE],
             "spring_days": SPRING_DAYS, "cosz_primary": COSZ_PRIMARY, "forc_t0": FORC_T0,
             "ours_cfg": {k: float(getattr(cfg, k)) for k in
                          ("alpha_snow_max", "alpha_snow_min", "tau_snow_decay",
