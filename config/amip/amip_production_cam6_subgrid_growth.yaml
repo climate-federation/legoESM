@@ -1,0 +1,8 @@
+# Production deck + CAM6 do_subgrid_growth, non-default arm.
+#
+# cldfrc2m qsatfac handed to MG2 as its qsfm (micro_mg2_0.F90:880, 922-927):
+# below freezing the liquid and ice saturation humidity every MG2 kernel reads
+# is scaled by the sub-grid saturation factor.  Ported from the ENSO fork
+# (Isma Di Carlo).  Everything else is amip_production.yaml.
+include: amip_production.yaml
+cloud_cam6_do_subgrid_growth: true

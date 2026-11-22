@@ -671,6 +671,7 @@ def solve_canopy_closure(
         most_n_iters=config.most_n_iters,
         max_iters=config.max_iters,
         tol=config.tol,
+        adjoint_unconverged=config.fallback_from_last_iterate,
     )
     return solver(initial_state, bundle)[:3]
 
@@ -715,6 +716,7 @@ def solve_canopy_closure_diag(
         most_n_iters=config.most_n_iters,
         max_iters=config.max_iters,
         tol=config.tol,
+        adjoint_unconverged=config.fallback_from_last_iterate,
     )
     return solver(initial_state, bundle)
 
@@ -733,6 +735,7 @@ def _make_implicit_newton_solver(
     most_n_iters: int,
     max_iters: int,
     tol: float,
+    adjoint_unconverged: bool = False,
 ):
     """Bind the shared implicit root solver to the canopy residual."""
     del tol  # Legacy step tolerance; convergence is the residual contract.
@@ -758,4 +761,5 @@ def _make_implicit_newton_solver(
         atol=_LM_ATOL,
         n_sq_max=_ROOT_NSQ_MAX,
         admissible=canopy_state_admissible,
+        adjoint_unconverged=adjoint_unconverged,
     )

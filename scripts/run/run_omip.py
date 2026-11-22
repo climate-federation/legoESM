@@ -222,6 +222,9 @@ def build_vertical_mixing_config_from_args(
             enable_langmuir=args.langmuir,
             langmuir_coeff=args.langmuir_coeff,
             langmuir_number_default=args.langmuir_number_default,
+            vt2_velocity_scale=args.kpp_vt2_velocity_scale,
+            actual_buoyancy_flux=args.kpp_actual_buoyancy_flux,
+            gradient_surrogates=args.kpp_gradient_surrogates,
         ),
         iwm=build_iwm_config_from_args(args),
         ddm=build_ddm_config_from_args(args),
@@ -787,7 +790,7 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--water-type", type=str, default="II",
                    choices=["I", "IA", "IB", "II", "III"])
     p.add_argument("--sw-penetration", type=str, default="auto",
-                   choices=["auto", "jerlov_2band", "sweeney_2band"],
+                   choices=["auto", "jerlov_2band", "sweeney_2band", "ohlmann_2003"],
                    help=("Column shortwave scheme on the JRA55 MPAS/tripole lanes: "
                          "'auto' = the lanes' historical two-band type-II with the "
                          "0.94 skin split (byte-identical); 'jerlov_2band' = two-band "
@@ -795,7 +798,13 @@ def parse_args(argv: list[str] | None = None):
                          "two-band (needs --chl-clim; 0.54 of the NET shortwave "
                          "penetrates). Explicit schemes hand the forcing the "
                          "post-albedo shortwave, as FESOM2 does; sweeney_2band "
-                         "also deposits the surface part on the live top thickness."))
+                         "also deposits the surface part on the live top thickness; "
+                         "'ohlmann_2003' = Ohlmann (2003) chlorophyll double "
+                         "exponential (tripole lane; needs --chl-clim)."))
+    p.add_argument("--sw-skin-fraction", type=float, default=None,
+                   help=("Tripole lane: fraction of the net shortwave 'jerlov_2band' keeps in the "
+                         "surface cell (default: the kernel's 0.06; 0 = all through "
+                         "the two-band profile, as ROMS/CROCO)."))
     p.add_argument("--chl-clim", type=str, default=None,
                    help=("Monthly surface chlorophyll climatology (Sweeney 2005 "
                          "NetCDF, variable 'chl', 12 x 180 x 360 on the forcing-cache "
@@ -825,6 +834,18 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--langmuir-number-default", type=float,
                    default=_DEFAULT_KPP_CONFIG.langmuir_number_default,
                    help="Fallback turbulent Langmuir number (no Stokes-drift input)")
+    p.add_argument("--kpp-vt2-velocity-scale", type=str,
+                   default=_DEFAULT_KPP_CONFIG.vt2_velocity_scale,
+                   choices=["column", "candidate"],
+                   help="KPP velocity scale inside the unresolved shear V_t^2: "
+                        "'column' (default) or 'candidate' (CVMix/MOM6 form)")
+    p.add_argument("--kpp-actual-buoyancy-flux", action="store_true",
+                   help="KPP velocity scales from the actual surface buoyancy "
+                        "flux (no float32-epsilon floor; CVMix form)")
+    p.add_argument("--kpp-gradient-surrogates", action="store_true",
+                   help="KPP: logistic-blend backward pass through the "
+                        "boundary-layer-base and convective switches (forward "
+                        "unchanged; gradient is a surrogate, not the exact derivative)")
     p.add_argument("--kpp-k-max", type=float,
                    default=_DEFAULT_KPP_CONFIG.K_max,
                    help="KPP maximum diffusivity [m^2/s]")
@@ -1787,7 +1808,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   mpas_lloyd: int = 50,
                   mpas_k_zeta_bih: float | None = None,
                   sw_scheme: str = "auto",
-                  B_h_gamma0: float | None = None):
+                  B_h_gamma0: float | None = None,
+                  sw_skin_fraction: float | None = None):
     """Create grid, z_coord, config, model for any grid type.
 
     ``spmd_n_devices > 1`` (MPAS only, ``--enable-mpas-spmd``) reorders + pads
@@ -2124,7 +2146,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         if forcing_mode == "jra55_do_tropical":
             sf_config = SurfaceForcingConfig(
                 scheme="none", shortwave_scheme=sw_scheme,
-                shortwave_water_type=water_type)
+                shortwave_water_type=water_type,
+                shortwave_skin_fraction=sw_skin_fraction)
         else:
             sf_config = SurfaceForcingConfig(
                 scheme="combined",
@@ -2254,7 +2277,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         if forcing_mode == "jra55_do_tropical":
             sf_config = SurfaceForcingConfig(
                 scheme="none", shortwave_scheme=sw_scheme,
-                shortwave_water_type=water_type)
+                shortwave_water_type=water_type,
+                shortwave_skin_fraction=sw_skin_fraction)
         else:
             sf_config = SurfaceForcingConfig(
                 scheme="restoring",
@@ -2775,11 +2799,12 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         and S_woa is not None
         and z_coord is not None
     )
-    if getattr(args, "sw_penetration", "auto") == "sweeney_2band":
+    _chl_sw = getattr(args, "sw_penetration", "auto")
+    if _chl_sw in ("sweeney_2band", "ohlmann_2003"):
         if not getattr(args, "chl_clim", None):
-            raise ValueError("--sw-penetration sweeney_2band needs --chl-clim <Sweeney_2005.nc>")
+            raise ValueError(f"--sw-penetration {_chl_sw} needs --chl-clim <Sweeney_2005.nc>")
         if regrid_weights is None or grid_type == "latlon":
-            raise ValueError("--sw-penetration sweeney_2band needs the JRA55 regrid "
+            raise ValueError(f"--sw-penetration {_chl_sw} needs the JRA55 regrid "
                              "weights (MPAS / tripole lanes).")
         state["chl_monthly"] = jnp.asarray(_load_monthly_clim_target(
             args.chl_clim, "chl", regrid_weights,
@@ -4943,7 +4968,7 @@ def _join_restart_writer():
 # ``_SLOT_POLICY`` (PR #1444, ``mass_flux_u``/``mass_flux_v`` -> DIAGNOSTIC);
 # this is the older npz lane, which has no such policy table.
 _RESTART_DIAGNOSTIC_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w",
-                             "salt_flux_u_int", "salt_flux_v_int")
+                             "salt_flux_u_int", "salt_flux_v_int", "tbudget")
 
 
 # Restart provenance for the MPAS SPMD lane (module slot: the loop's restart
@@ -6105,6 +6130,20 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
 # Single-grid runner
 # ===========================================================================
 
+def check_shortwave_options(args, grid_type: str) -> None:
+    """Refuse shortwave options the selected lane would never read."""
+    tripole_jra55 = (grid_type == "tripole"
+                     and getattr(args, "forcing_mode", "restoring") == "jra55_do_tropical")
+    sw = getattr(args, "sw_penetration", "auto")
+    if getattr(args, "sw_skin_fraction", None) is not None and (
+            sw != "jerlov_2band" or not tripole_jra55):
+        raise ValueError("--sw-skin-fraction is read only by --sw-penetration "
+                         "jerlov_2band on the tripole lane with jra55_do_tropical forcing")
+    if sw == "ohlmann_2003" and not tripole_jra55:
+        raise ValueError("--sw-penetration ohlmann_2003 is implemented on the "
+                         "tripole lane with jra55_do_tropical forcing only")
+
+
 def run_omip_single(grid_type: str, args) -> dict:
     """Run OMIP simulation on a single grid type."""
     # Apply precision BEFORE any model state is built. Idempotent + safe for
@@ -6225,6 +6264,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     # Restart provenance for THIS run (0 = serial cell order): set for every
     # run so an earlier SPMD run in the same interpreter cannot leak its count.
     _MPAS_SPMD_N_DEVICES[0] = int(_mpas_spmd_nd) if _mpas_spmd_nd > 1 else 0
+    check_shortwave_options(args, grid_type)
     if getattr(args, "B_h_gamma0", None) is not None and grid_type != "tripole":
         raise SystemExit(
             f"--B-h-gamma0 is wired for --grid tripole only (2-D face metrics); "
@@ -6233,6 +6273,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
         sw_scheme=getattr(args, "sw_penetration", "auto"),
+        sw_skin_fraction=getattr(args, "sw_skin_fraction", None),
         B_h_gamma0=getattr(args, "B_h_gamma0", None),
         spmd_n_devices=_mpas_spmd_nd,
         mpas_lloyd=int(getattr(args, "mpas_lloyd", 50)),

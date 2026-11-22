@@ -125,6 +125,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     apply_north_fold,
     smagorinsky_biharmonic_tendency_cgrid,
     om4p25_lateral_friction_tendency_cgrid,
+    om4_resolution_function,
+    wkb_first_baroclinic_wave_speed,
     qg_leith_viscosity_tendency_cgrid,
     smagorinsky_viscosity_cgrid,
     smagorinsky_viscosity_q_cgrid,
@@ -3492,6 +3494,9 @@ def _bc_horizontal_viscosity(
     ldf_metric_reciprocal_operands=None,
     nemo_smagorinsky_coefficient_override=None,
     vertex_mask=None,
+    T=None,
+    S=None,
+    sponge_visc2=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
     Smagorinsky + Leith, with cos(lat) / equatorial / polar-cap scaling and the
@@ -3499,6 +3504,9 @@ def _bc_horizontal_viscosity(
     together because the meridional block reuses the slope-foot helper/fields
     defined in stage 10. Pure verbatim extraction (Q8). Returns the momentum
     accumulators plus the per-term viscosity diagnostics."""
+    if sponge_visc2 is not None and config.lateral_friction_scheme != "om4p25":
+        raise ValueError("SpongeForcing.visc2 (sponge viscosity) is applied by the om4p25 lateral "
+                         f"friction only, got lateral_friction_scheme={config.lateral_friction_scheme!r}")
     diag_Ah_lap_u = jnp.zeros_like(du_dt)
     diag_Ah_lap_v = jnp.zeros_like(dv_dt)
     # Cell-centre A_h coefficient field [m²/s] used to build the FAITHFUL
@@ -4331,10 +4339,30 @@ def _bc_horizontal_viscosity(
     # (−biharmonic)); accumulated into the Smagorinsky diagnostic bucket.
     if config.lateral_friction_scheme == "om4p25":
         _om = config.omp25 if config.omp25 is not None else OMp25Config()
+        _res_fn = None
+        if getattr(_om, "resolution_function", "taper") == "mom6_step_wkb":
+            if T is None or S is None or h_k is None:
+                raise ValueError('resolution_function="mom6_step_wkb" needs T, S and h_k')
+            _eos = make_eos_fn(config.eos, getattr(config, "eos_linear", None),
+                               eos_nemo_seos=getattr(config, "eos_nemo_seos", None))
+            _wet = h_k > 0.0 if mask is None else (h_k > 0.0) & (mask[..., jnp.newaxis] > 0.5)
+            _c1 = wkb_first_baroclinic_wave_speed(T, S, h_k, _wet, _eos,
+                                                  config.rho_0, config.g,
+                                                  width=_om.smooth_width)
+            _res_fn = om4_resolution_function(_c1, grid, mask=mask, coef=_om.res_coef,
+                                              gill_equatorial=_om.gill_equatorial_ld,
+                                              width=_om.smooth_width)
+        elif getattr(_om, "resolution_function", "taper") != "taper":
+            raise ValueError(f"omp25.resolution_function must be 'taper' or 'mom6_step_wkb', "
+                             f"got {_om.resolution_function!r}")
         om_u, om_v = om4p25_lateral_friction_tendency_cgrid(
             u, v, grid, C2=_om.C2, Cu2=_om.Cu2, C4=_om.C4, Cu4=_om.Cu4,
             deformation_radius=_om.deformation_radius_m,
-            mask=mask, u_mask=u_mask, v_mask=v_mask)
+            mask=mask, u_mask=u_mask, v_mask=v_mask,
+            Kh_sin_lat=getattr(_om, "Kh_sin_lat", 0.0), Kh_sin_power=getattr(_om, "Kh_sin_power", 4.0),
+            bound_coriolis_vel=getattr(_om, "bound_coriolis_vel", 0.0), resolution_fn=_res_fn,
+            bound_coef=getattr(_om, "bound_coef", 0.0), dt=dt, nu2_sponge_h=sponge_visc2,
+            smooth_width=_om.smooth_width)
         om_u, om_v = _apply_slope_foot(om_u, om_v)
         du_dt = du_dt + om_u
         dv_dt = dv_dt + om_v
@@ -4911,6 +4939,23 @@ def surface_stress_faces(
     _native_j = getattr(surface_forcing, "tau_j_native", None)
     if (_native_i is None) != (_native_j is None):
         raise ValueError("tau_i_native and tau_j_native must be supplied together")
+    _face_u = getattr(surface_forcing, "tau_u_face", None)
+    _face_v = getattr(surface_forcing, "tau_v_face", None)
+    if (_face_u is None) != (_face_v is None):
+        raise ValueError("tau_u_face and tau_v_face must be supplied together")
+    if _face_u is not None:
+        if (_native_i is not None or _native_u is not None or cell_mask is not None
+                or nemo_fold_vector_sign):
+            raise ValueError("tau_u_face/tau_v_face cannot be combined with "
+                             "the native T-point stress or the NEMO identities")
+        dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J
+        dz_0_u = interp_cell_to_uface(dz_0_T)
+        (dz_0_v,) = interp_to_v_points_multi((dz_0_T,), grid=grid, source_round=True)
+        if (jnp.shape(_face_u) != jnp.shape(dz_0_u)
+                or jnp.shape(_face_v) != jnp.shape(dz_0_v)):
+            raise ValueError("tau_u_face/tau_v_face must match the u/v face shapes")
+        return (jnp.asarray(_face_u, dtype=u_dtype),
+                jnp.asarray(_face_v, dtype=u_dtype), dz_0_u, dz_0_v)
     if _native_u is not None and _native_i is not None:
         raise ValueError(
             "utau_u_native/vtau_v_native and tau_i_native/tau_j_native "
@@ -5059,7 +5104,7 @@ def _bc_external_surface_forcing(
     du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k,
     z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False,
     withhold_stress=False, shortwave_scheme="auto", shortwave_water_type="II",
-    shortwave_time_step_s=None, c_sw=None,
+    shortwave_time_step_s=None, c_sw=None, shortwave_skin_fraction=None,
 ):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
@@ -5146,14 +5191,42 @@ def _bc_external_surface_forcing(
             # default-off path); the implicit branch starts from zeros.
             dT_target = dT_surf if route_heat_to_implicit else dT_dt
             if shortwave_scheme not in (
-                "auto", "jerlov_2band", "sweeney_2band",
+                "auto", "jerlov_2band", "sweeney_2band", "ohlmann_2003",
                 "nemo_qsr_2bd", "nemo_qsr_rgb",
             ):
                 raise ValueError(
                     f"unknown surface_forcing.shortwave_scheme {shortwave_scheme!r}; "
-                    "expected 'auto', 'jerlov_2band', 'sweeney_2band', "
+                    "expected 'auto', 'jerlov_2band', 'sweeney_2band', 'ohlmann_2003', "
                     "'nemo_qsr_2bd' or 'nemo_qsr_rgb'")
-            if shortwave_scheme == "sweeney_2band" and _sf_sw is not None:
+            if shortwave_scheme == "ohlmann_2003" and _sf_sw is not None:
+                # Ohlmann (2003) chlorophyll double exponential (Table 1a, transmission relative to the net
+                # shortwave just beneath the surface): the whole net shortwave goes through the profile, the
+                # non-solar flux heats the surface cell; column total stays q_net.
+                if _sf_chl is None:
+                    raise ValueError(
+                        "surface_forcing.shortwave_scheme='ohlmann_2003' requires "
+                        "OceanSurfaceForcing.chl; got None")
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    shortwave_penetration_ohlmann_tendency,
+                )
+                sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
+                q_nonsolar = q_net_T - sw_T
+                # the model's heat capacity (as the jerlov branch), so the column gains exactly q_net under any
+                # constants preset
+                _inv_rho_csw_h0 = 1.0 / (
+                    jnp.asarray(rho_0, dtype=T.dtype)
+                    * jnp.asarray(_heat_capacity, dtype=T.dtype)
+                    * jnp.maximum(jnp.asarray(h_k[..., 0], dtype=T.dtype), 1e-10))
+                dT_target = dT_target.at[..., 0].add(
+                    q_nonsolar * _inv_rho_csw_h0 * mask
+                )
+                wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
+                sw_tend = shortwave_penetration_ohlmann_tendency(
+                    sw_T, jnp.asarray(_sf_chl, dtype=T.dtype), dz_live=h_k, wet_cell=wet_cell,
+                    rho_0=float(rho_0), c_sw=_heat_capacity,
+                )
+                dT_target = dT_target + sw_tend * mask_3d
+            elif shortwave_scheme == "sweeney_2band" and _sf_sw is not None:
                 # FESOM2 chlorophyll two-band: the visible fraction of the net
                 # shortwave penetrates on the live partial-cell thickness, the
                 # rest heats the surface cell; column total stays q_net.
@@ -5197,7 +5270,9 @@ def _bc_external_surface_forcing(
                 _sw_cfg = ShortwavePenetrationConfig(
                     scheme="jerlov_2band", water_type=shortwave_water_type)
                 sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
-                sw_absorbed = sw_T * jnp.asarray(penetrating_fraction(_sw_cfg), dtype=T.dtype)
+                _pen = (penetrating_fraction(_sw_cfg) if shortwave_skin_fraction is None
+                        else 1.0 - float(shortwave_skin_fraction))
+                sw_absorbed = sw_T * jnp.asarray(_pen, dtype=T.dtype)
                 q_nonsolar = q_net_T - sw_absorbed
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * inv_rho_csw_dz * mask
@@ -5673,6 +5748,20 @@ def _bc_surface_forcing_stage(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v,
                 "external-forcing shortwave path; leave "
                 "surface_forcing.shortwave_scheme='auto' on a NEMO qsr card.")
         _sw_scheme = _sw_pen_scheme
+    elif (_sw_pen_scheme is not None
+          and surface_forcing is not None
+          and getattr(surface_forcing, "sw_down", None) is not None
+          and getattr(surface_forcing, "q_net", None) is not None):
+        # One owner for the shortwave deposit: with q_net and sw_down the
+        # external stage below removes sw_down from q_net and puts it down its
+        # own profile, and the shared physics pipeline would deposit 100% of the
+        # same sw_down again (column gains q_net + sw).
+        raise ValueError(
+            f"physics.shortwave_penetration.scheme={_sw_pen_scheme!r} and the "
+            "external surface forcing (q_net and sw_down given) would both deposit the "
+            "shortwave. Set physics.shortwave_penetration=None and choose the "
+            "profile with surface_forcing.shortwave_scheme / "
+            "shortwave_water_type / shortwave_skin_fraction.")
     (du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat,
      diag_surface_stress_u, diag_surface_stress_v) = (
         _bc_external_surface_forcing(
@@ -5682,6 +5771,7 @@ def _bc_surface_forcing_stage(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v,
             withhold_stress=_stress_implicit,
             shortwave_scheme=_sw_scheme,
             shortwave_water_type=getattr(_sf_cfg, "shortwave_water_type", "II"),
+            shortwave_skin_fraction=getattr(_sf_cfg, "shortwave_skin_fraction", None),
             shortwave_time_step_s=getattr(
                 getattr(getattr(config, "physics", None),
                         "shortwave_penetration", None),
@@ -6414,6 +6504,8 @@ def _latlon_tendencies_outside_core(
             nemo_smagorinsky_coefficient_override=(
                 nemo_smagorinsky_coefficient_override),
             vertex_mask=vertex_mask,
+            T=T, S=S,
+            sponge_visc2=getattr(sponge, "visc2", None),
         )
     _nemo_after_ldf_u = du_dt
     _nemo_after_ldf_v = dv_dt
@@ -6581,12 +6673,16 @@ def _latlon_tendencies_outside_core(
         dv_diss_raw = None
 
     # --- Stage 10b: physics-pipeline tendencies. ---
+    _tbud = bool(getattr(config, "store_tracer_budget", False))
+    _tb_snap = [dT_dt] if _tbud else None
     (du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u,
      diag_phys_v) = _bc_physics_tendencies(
         du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, z_coord,
         surface_forcing, u, v,
     )
 
+    if _tbud:
+        _tb_snap.append(dT_dt)
     # --- Stage 10b': external surface forcing (wind stress / heat / shortwave). ---
     # ``surface_forcing_implicit`` (the ACC recipe): WITHHOLD the surface TRACER
     # heat (q_net + penetrating shortwave) from the explicit ``dT_dt`` and route
@@ -6627,6 +6723,8 @@ def _latlon_tendencies_outside_core(
                         dims=("lat", "lon", "level"), units="PSU/s"),
         )
 
+    if _tbud:
+        _tb_snap.append(dT_dt)
     # --- Stage 10c: sponge-layer relaxation. ---
     # ``sponge_forcing_implicit`` (EXT-N2, Veros tempsalt_sources placement):
     # the TRACER sponge rates are WITHHELD from the explicit (AB2'd)
@@ -6649,6 +6747,8 @@ def _latlon_tendencies_outside_core(
         include_tracers=not (_sponge_implicit or _sponge_stage3_damping),
         active=_sponge_active,
     )
+    if _tbud:
+        _tb_snap.append(dT_dt)
     tracer_source = None
     if _sponge_implicit:
         # Same kernel as the explicit path (rate evaluated on the PRE-STEP
@@ -6693,6 +6793,14 @@ def _latlon_tendencies_outside_core(
             dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)
     dT_dt = dT_dt * mask_3d
     dS_dt = dS_dt * mask_3d
+    dT_budget = None
+    if _tbud:
+        dT_budget = {
+            "pre": _tb_snap[0] * mask_3d,
+            "physics": (_tb_snap[1] - _tb_snap[0]) * mask_3d,
+            "surface": (_tb_snap[2] - _tb_snap[1]) * mask_3d,
+            "sponge": (_tb_snap[3] - _tb_snap[2]) * mask_3d,
+        }
 
     # --- 12. Free-surface tendency ---
     deta_dt = -jnp.sum(flux_div_k, axis=-1) * mask
@@ -6801,6 +6909,7 @@ def _latlon_tendencies_outside_core(
         dT_diss=dT_diss,
         dS_diss=dS_diss,
         tracer_source=tracer_source,
+        dT_budget=dT_budget,
     )
 
     if not diagnose_momentum:
