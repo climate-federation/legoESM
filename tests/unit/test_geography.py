@@ -510,6 +510,10 @@ def test_coupled_mpas_ocean_starts_from_qobs(tmp_path):
     z0 = float(d._ocean_z_coord.z_full_ref[0])
     want = 2.0 + (qobs_sst_C(lat) - 2.0) * np.exp(z0 / _SCALE_DEPTH)
     assert np.allclose(np.asarray(d._ocean_state.T.data)[:, 0], want, rtol=1e-6, atol=1e-5)  # float32
+    from legoesm import constants
+    sst_atm = np.asarray(d._atm.get_sst_sic(0.0)[0]).ravel()     # what the atmosphere reads
+    assert np.allclose(sst_atm, np.asarray(d._ocean_surface_KuvC()[0]).ravel(), rtol=0, atol=1e-5)
+    assert np.allclose(sst_atm - constants.T_freeze, want, rtol=1e-6, atol=1e-4)
 
 
 def test_coupled_mpas_ocean_refuses_an_unwired_start(tmp_path):

@@ -1193,6 +1193,8 @@ def main(argv=None, *, build_only=False):
             f"latlon:48). The {args.grid_type} atmosphere couples to the lat-lon 3-D "
             "ocean via the conservative cross-grid remap; a co-located 3-D "
             f"ocean dycore for --grid {args.grid_type} does not exist.")
+    if args.ocean != "dynamic" and args.ocean_ic == "qobs":
+        raise SystemExit("--ocean-ic qobs starts the 3-D ocean; it needs --ocean dynamic.")
     if args.ocean == "dynamic":
         # Prognostic 3D LatLonCGridOceanModel.  Grid configurations:
         #   * SHARED lat-lon (default): the ocean lives on the atmosphere's

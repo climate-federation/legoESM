@@ -1035,7 +1035,7 @@ class CoupledESMDriver:
         self._ocean_S_target = None
         _ocean_frac = float(jnp.mean(self._ocean_land_mask))
         logger.info(
-            "  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic=rest, "
+            f"  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic={cfg.ocean_ic}, "
             f"ocean_frac={_ocean_frac:.2f}, nlev={cfg.ocean_nlev}, "
             f"ocean_dt={cfg.ocean_dt_s}s, surface_forcing=none(coupled), "
             "normalize_freshwater=True")
