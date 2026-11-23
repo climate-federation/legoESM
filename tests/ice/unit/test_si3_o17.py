@@ -517,7 +517,7 @@ def test_o17_kt_enters_prather_parity_and_explicit_stress_cadence() -> None:
     tau = next(node for node in ast.walk(wrapper_tree) if isinstance(node, ast.Call)
                and getattr(node.func, "id", "") == "si3_ice_update_tau")
     keywords = {kw.arg: ast.unparse(kw.value) for kw in tau.keywords}
-    assert keywords["kt"] == "forcing.kt"
+    assert keywords["kt"] == "1"
     assert keywords["nn_fsbc"] == "card.state.nn_fsbc"
     assert [scorer.kt_program(kt, 1) for kt in (1, 2, 3, 4, 99, 100)] == [1, 2, 1, 2, 1, 2]
 

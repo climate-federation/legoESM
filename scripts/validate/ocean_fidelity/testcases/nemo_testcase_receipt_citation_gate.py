@@ -14773,6 +14773,72 @@ for _operation in _LANE_REANCHOR_OPS:
         CITATION_MAP[_new] = _moved
 
 
+# Coupled c24 ports the reviewed SI3 boundary/cadence guards.  Re-pin the
+# historical claims to the same uniquely anchored statements after those
+# insertions; no claim, anchor, or cited quantity changes here.
+_C24_RELINES = (
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:56-67', '57-68', 12),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:2078-2088', '2103-2113', 11),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:1222-1248', '1247-1273', 27),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:1389', '1414', 1),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:367', '368', 1),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3244-3251', '3311-3318', 8),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:1684-1686', '1709-1711', 3),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3055-3125', '3091-3185', 95),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3140-3317', '3200-3388', 189),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3374-3823', '3449-3898', 450),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3826-3979', '3901-4054', 154),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:44', '45', 1),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4046-4831', '4121-4913', 793),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4046-4153', '4121-4233', 113),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4046-4099', '4121-4179', 59),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4102-4136', '4182-4216', 35),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4140-4153', '4220-4233', 14),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4157-4260', '4237-4342', 106),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4225-4260', '4305-4342', 38),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4172-4200', '4252-4280', 29),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4203-4221', '4283-4301', 19),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4547-4831', '4629-4913', 285),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4547-4732', '4629-4814', 186),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4773-4787', '4855-4869', 15),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4561-4742', '4643-4824', 182),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4313-4422', '4395-4504', 110),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4340', '4422', 1),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4429-4543', '4511-4625', 115),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4711-4718', '4793-4800', 8),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4823-4830', '4905-4913', 9),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:941-965', '942-966', 25),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3456-3506', '3531-3581', 51),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3826-3929', '3901-4004', 104),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:92-131', '93-132', 40),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3380-3427,3583-3663', '3455-3502,3658-3738', 129),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3374-3804', '3449-3898', 450),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3450-3500', '3531-3581', 51),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3807-3910', '3901-4004', 104),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3807-3960', '3901-4054', 154),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4027-4080', '4121-4179', 59),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4027-4134', '4121-4233', 113),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4027-4812', '4121-4913', 793),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4083-4117', '4182-4216', 35),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4121-4134', '4220-4233', 14),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4138-4241', '4237-4342', 106),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4153-4181', '4252-4280', 29),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4184-4202', '4283-4301', 19),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4206-4241', '4305-4342', 38),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4294-4403', '4395-4504', 110),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4321', '4422', 1),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4410-4524', '4511-4625', 115),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4528-4713', '4629-4814', 186),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4528-4812', '4629-4913', 285),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4542-4723', '4643-4824', 182),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4692-4699', '4793-4800', 8),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4754-4768', '4855-4869', 15),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4804-4811', '4905-4913', 9),
+    ('packages/ice/legoesm/ice/si3_o17.py:1131-1136', '1179-1237', 59),
+    ('packages/ice/legoesm/ice/si3_o17.py:1138-1152', '1238-1251', 14),
+)
+
+
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm|xml|sh|patch|c)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output\.excerpt|ocean\.output)"
          r"|cfgs/ref_cfgs\.txt"
@@ -18587,6 +18653,18 @@ _merge_resolution_repin(
     ],
     strict_extent=True,
 )
+
+# Apply the c24 shifts only after every historical re-anchor has composed.
+for _key, _lines, _extent in _C24_RELINES:
+    _value = CITATION_MAP[_key]
+    _raw_anchors = _value.get("anchors") if isinstance(_value, dict) else _value
+    _anchors, _ = parse_entry(_raw_anchors, len(group_endpoints(_lines)))
+    _stored_anchors = (
+        [*_anchors, _extent]
+        if _extent > 1
+        else (_anchors if len(_anchors) > 1 else _anchors[0])
+    )
+    _resume3_reline(_key, _lines, _extent, anchors=_stored_anchors)
 
 def audit_map() -> list[dict]:
     """EVERY entry in the map must resolve cleanly, cited this round or not.

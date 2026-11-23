@@ -29,6 +29,7 @@ from pathlib import Path
 import re
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -3285,12 +3286,12 @@ def si3_dyn_adv_pra_orca2(
     cfg = config
     traced_kt = isinstance(kt, jax.core.Tracer)
     concrete_kt = kt if traced_kt else np.asarray(kt)
-    if ((not traced_kt
-         and (isinstance(kt, bool)
-              or concrete_kt.shape != ()
-              or concrete_kt.dtype.kind not in "iu"
-              or int(concrete_kt) < 1))
-            or cfg.nn_fsbc < 1):
+    if (
+        concrete_kt.shape != ()
+        or concrete_kt.dtype.kind not in "iu"
+        or (not traced_kt and int(concrete_kt) < 1)
+        or cfg.nn_fsbc < 1
+    ):
         raise ValueError("si3_dyn_adv_pra_orca2 requires kt >= 1 and nn_fsbc >= 1")
     sr = nemo_source_round
     consts = cfg.ice_constants
@@ -3318,10 +3319,15 @@ def si3_dyn_adv_pra_orca2(
 
     zudy = sr(u_ice * grid.e2u)
     zvdx = sr(v_ice * grid.e1v)
-    kt_parity = (
-        ((jnp.asarray(kt, dtype=jnp.int32) - 1) // int(cfg.nn_fsbc)) % 2
-        if traced_kt else ((int(kt) - 1) // int(cfg.nn_fsbc)) % 2
-    )
+    if traced_kt:
+        kt_checked = eqx.error_if(
+            jnp.asarray(kt),
+            kt <= 0,
+            "si3_dyn_adv_pra_orca2 requires kt >= 1",
+        )
+        kt_parity = ((kt_checked - 1) // int(cfg.nn_fsbc)) % 2
+    else:
+        kt_parity = ((int(kt) - 1) // int(cfg.nn_fsbc)) % 2
 
     init_carry = (
         ato_i,
@@ -4122,6 +4128,7 @@ class SI3O2InitConfig(NamedTuple):
     - `cfgs/SHARED/namelist_ice_ref:65-95`
     """
 
+    ln_teos10: bool
     ln_iceini: bool = True
     nn_iceini_file: int = 0
     rn_thres_sst: float = 2.0
@@ -4149,7 +4156,6 @@ class SI3O2InitConfig(NamedTuple):
     rn_amax_s: float = 0.997
     ln_pnd: bool = True
     ln_pnd_lids: bool = True
-    ln_teos10: bool = True
     ln_ice_embd: bool = False
     ln_rstart: bool = False
     nn_hls: int = 2
@@ -4157,8 +4163,13 @@ class SI3O2InitConfig(NamedTuple):
 
     @classmethod
     def for_orca2_sas_ice(cls, **overrides: Any) -> "SI3O2InitConfig":
-        """Return the NEMO 5.0.2 `ORCA2_SAS_ICE` rung-O2 `&namini` configuration."""
-        base = cls()
+        """Return the NEMO 5.0.2 `ORCA2_SAS_ICE` rung-O2 configuration.
+
+        The resolved ``ln_teos10`` is true:
+        ``cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:144-147`` overrides
+        ``cfgs/SHARED/namelist_ref:878-882``.
+        """
+        base = cls(ln_teos10=True)
         return base._replace(**overrides) if overrides else base
 
     @classmethod
@@ -4306,6 +4317,8 @@ def si3_eos_fzp(
     - `ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:1787-1848`
     - `src/ICE/iceistate.F90:125`, `:263`
     """
+    if type(ln_teos10) is not bool:
+        raise TypeError("si3_eos_fzp ln_teos10 selector must be a static bool")
     sr = nemo_source_round
     sss = jnp.asarray(sss_m, dtype=jnp.float64)
     dtype = sss.dtype

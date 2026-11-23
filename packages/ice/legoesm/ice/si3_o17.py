@@ -1219,13 +1219,20 @@ def si3_o17_step(
 ) -> tuple[SI3O17StepState, SI3O17Trace]:
     """One exact production call graph in NEMO ``ice_stp`` order."""
 
+    if type(card.state.nn_fsbc) is not int:
+        raise TypeError("O17 step nn_fsbc must be a static Python integer")
+    if card.state.nn_fsbc != 1:
+        raise ValueError("O17 step freezes the ORCA2_SAS_ICE nn_fsbc=1 cadence")
     core = _si3_o17_through_update_flx(entry, forcing, card)
     stress = si3_ice_update_tau(
         core.stress_inputs,
         config=card.state,
         ln_drgice_imp=card.ln_drgice_imp,
         nn_fsbc=card.state.nn_fsbc,
-        kt=forcing.kt,
+        # The O17 card freezes nn_fsbc=1, so every ocean step is an ice step.
+        # Keeping that resolved cadence static leaves forcing.kt traceable for
+        # Prather's alternating sweep under jax.jit.
+        kt=1,
     )
     finalize = SI3FinalizeResponse(core.correction, core.final, stress)
     return core.state, SI3O17Trace(
@@ -1253,6 +1260,7 @@ __all__ = (
     "SI3O17SurfaceForcing",
     "SI3O17ThroughUpdateFlux",
     "SI3O17Trace",
+    "si3_teos10_from_resolved_namelist",
     "si3_o17_through_update_flx",
     "si3_o17_step",
 )
