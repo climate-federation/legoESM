@@ -203,6 +203,9 @@ def main(argv=None) -> int:
                     help="save step N's per-column ledger water rows, "
                     "evaporation, precipitation and water species (npz next "
                     "to --json)")
+    ap.add_argument("--trace-positivity", action="store_true",
+                    help="book the water the dycore's positivity stage (and "
+                    "its vapour payment) changes, per call")
     args, deck_argv = ap.parse_known_args(argv)
     if args.windows and not args.deck:
         ap.error("--windows needs --deck")
@@ -503,6 +506,40 @@ def main(argv=None) -> int:
         F["E_land_atm"] += I(e_land) * DT
         F["A_band_land"] += I(band) * DT
 
+    pos_rec = {}
+    if args.trace_positivity:
+        # host-side totals of the water each stage changes, from inside the
+        # jitted dycore step (area x dp x sum of water species)
+        import legoesm.core.conservation as cons
+
+        def _total(tr, dp, area):
+            q = sum((f.data if hasattr(f, "data") else f)
+                    for k_, f in tr.items() if k_ in WATER)
+            return jnp.sum(jnp.asarray(area)[..., None] * dp * q) / constants.g
+
+        def _book(name):
+            def cb(b, a):
+                pos_rec[name] = pos_rec.get(name, 0.0) + float(a) - float(b)
+            return cb
+
+        def _wrap(fn, name, area_of):
+            def w(tracers, T, dp, *a, **kw):
+                area = area_of(kw)          # before: the inner stage reads it
+                out = fn(tracers, T, dp, *a, **kw)
+                jax.debug.callback(_book(name), _total(tracers, dp, area),
+                                   _total(out[0], dp, area))
+                return out
+            return w
+        _awp, _pay = cons.apply_water_positivity, cons.pay_condensate_deficit_from_vapour
+        _area2d = [None]
+
+        def _area_kw(kw):
+            _area2d[0] = kw["area"]
+            return kw["area"]
+        mp.setattr(cons, "apply_water_positivity",
+                   _wrap(_awp, "positivity", _area_kw))
+        mp.setattr(cons, "pay_condensate_deficit_from_vapour",
+                   _wrap(_pay, "pay_from_vapour", lambda kw: _area2d[0]))
     model, orig = atm.model, atm.model.step
     n_steps = [0]
     dyn_dw = [np.zeros(2)]
@@ -765,6 +802,8 @@ def main(argv=None) -> int:
     for sp in carried:
         print(f"SPECIES {sp:4s} {sp0[sp]: .9e} -> {sp1[sp]: .9e}")
     print("NULL", {r: v for r, v in null.items()})
+    if args.trace_positivity:
+        print("POSITIVITY", {kk: f"{v:.6e}" for kk, v in pos_rec.items()})
     print("INJECT rel_err", ctrl)
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=1))
