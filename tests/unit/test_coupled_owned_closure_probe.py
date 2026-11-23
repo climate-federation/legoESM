@@ -328,3 +328,14 @@ def test_water_bar_verdict_is_na_only_for_zero_precipitation():
     assert probe.water_bar_verdict(ok, 1.0e9) == []
     assert probe.water_bar_verdict(ok, float("nan")) == ["precipitation"]
     assert probe.water_bar_verdict(ok, float("inf")) == ["precipitation"]
+
+
+def test_first_nonfinite_names_the_leaf_and_skips_the_canopy_cache():
+    tree = {"land": {"canopy_x": np.full((3, 6), np.nan),
+                     "theta": np.ones((3, 2))},
+            "atm": {"u": np.array([[1.0, np.inf], [np.nan, 2.0]])}}
+    hit = probe.first_nonfinite(tree, "entering")
+    assert hit["field"] == "['atm']['u']" and hit["n_bad"] == 2
+    assert hit["first_idx"] == [[0, 1], [1, 0]]
+    tree["atm"]["u"] = np.zeros((2, 2))
+    assert probe.first_nonfinite(tree, "entering") is None

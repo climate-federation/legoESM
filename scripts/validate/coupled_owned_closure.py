@@ -85,6 +85,26 @@ def water_bar_verdict(rel: dict, p_atm: float) -> list | None:
     return water_bar_failures(rel)
 
 
+def first_nonfinite(tree, where: str):
+    """First leaf of ``tree`` holding a non-finite value (path, shape, count,
+    first indices), or None.  The land's canopy warm-start cache is NaN by
+    design and is skipped, as the land's own check does."""
+    import jax
+    for pth, x in jax.tree_util.tree_flatten_with_path(tree)[0]:
+        if "canopy_x" in jax.tree_util.keystr(pth):
+            continue
+        try:
+            x = np.asarray(x)
+        except Exception:
+            continue
+        if x.dtype.kind in "fc" and not np.all(np.isfinite(x)):
+            bad = np.argwhere(~np.isfinite(x))
+            return dict(where=where, field=jax.tree_util.keystr(pth),
+                        shape=list(x.shape), n_bad=int(len(bad)),
+                        first_idx=bad[:8].tolist())
+    return None
+
+
 def budget_rows(s0: dict, s1: dict, f: dict) -> dict:
     """Residual rows from start/end storages ``s0``/``s1`` (keys ``STORES``)
     and run-integrated fluxes ``f`` (keys as the module docstring).  Pure."""
@@ -799,22 +819,6 @@ def main(argv=None) -> int:
                      **{sp: _np(atm.current_tracer(sp)).reshape(n, -1)
                         for sp in carried})
 
-    def nan_scan(tree, where):
-        """First leaf of ``tree`` holding a non-finite value, or None."""
-        for pth, x in jax.tree_util.tree_flatten_with_path(tree)[0]:
-            try:
-                x = np.asarray(x)
-            except Exception:
-                continue
-            if "canopy_x" in jax.tree_util.keystr(pth):
-                continue   # canopy warm-start cache: NaN by design
-            if x.dtype.kind in "fc" and not np.all(np.isfinite(x)):
-                bad = np.argwhere(~np.isfinite(x))
-                return dict(where=where, field=jax.tree_util.keystr(pth),
-                            shape=list(x.shape), n_bad=int(len(bad)),
-                            first_idx=bad[:8].tolist())
-        return None
-
     def nan_hit(hit, origin):
         if nan_stage:
             hit["stages"] = nan_stage
@@ -854,17 +858,17 @@ def main(argv=None) -> int:
             entering = dict(arrays=arrays(), land=atm._land_ml_state,
                             ocean=d._ocean_state, sfc=d._sfc_state,
                             args=a, kw=kw)
-            hit = (nan_scan(entering["arrays"], "entering")
-                   or nan_scan(entering["land"], "entering_land_state")
-                   or nan_scan(entering["ocean"], "entering_ocean_state")
-                   or nan_scan(entering["sfc"], "entering_surface_state")
-                   or nan_scan((a, kw), "entering_step_args"))
+            hit = (first_nonfinite(entering["arrays"], "entering")
+                   or first_nonfinite(entering["land"], "entering_land_state")
+                   or first_nonfinite(entering["ocean"], "entering_ocean_state")
+                   or first_nonfinite(entering["sfc"], "entering_surface_state")
+                   or first_nonfinite((a, kw), "entering_step_args"))
             if hit:
                 nan_hit(hit, entering)
         out = orig(*a, **kw)
         sd = model._sfc_diag
         if args.nan_trap:
-            hit = nan_scan(out, "step_output") or nan_scan(
+            hit = first_nonfinite(out, "step_output") or first_nonfinite(
                 sd, "step_surface_diag")
             if hit:
                 nan_hit(hit, entering)
