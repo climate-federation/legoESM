@@ -18967,9 +18967,37 @@ for _citation in (
     )
 
 _D239_PRE_MERGE = "e9d9b55d38"
-for _citation in (
+
+# Main only inserted code outside these historical spans.  Keep their claims
+# live, with every disjoint-range endpoint and exact extent pinned explicitly;
+# the occurrence counts changed because main added matching lines earlier in
+# each file.
+_merge_resolution_repin(
     'packages/ocean/legoesm/ocean/restart.py:322-329,382-392,859-861',
+    '322-329,385-395,862-864',
+    anchors=[
+        '# --- sea ice (SeaIceState + the 13-field DynamicSeaIceState) -----------',
+        '"h_il": _SLOT_PROGNOSTIC,',
+        'def _iter_state_fields(state) -> list[str]:',
+        ('', 395),
+        'declared = getattr(state, "_fields", None) or _iter_state_fields(state)',
+        'if n not in _SLOT_POLICY)',
+        22,
+    ],
+    strict_extent=True,
+)
+_merge_resolution_repin(
     'packages/ice/legoesm/ice/sea_ice.py:3120-3159',
+    '3806-3847',
+    anchors=[
+        ('if config.ponds.enabled and config.ponds.scheme == "si3_lev":', 3),
+        ('            )', 36),
+        42,
+    ],
+    strict_extent=True,
+)
+
+for _citation in (
     'ocean_model_latlon_cgrid.py:11723-11861',
     'ocean_model_latlon_cgrid.py:11854-11995',
     'packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:4808-4833',
