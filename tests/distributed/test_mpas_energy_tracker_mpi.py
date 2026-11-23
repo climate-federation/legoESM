@@ -37,10 +37,13 @@ from legoesm.driver.config import (  # noqa: E402
     GridConfig,
     OutputConfig,
 )
-from legoesm.driver.model_driver import ModelDriver, _evap_sfc_slot  # noqa: E402
+from legoesm.driver.model_driver import (  # noqa: E402
+    ModelDriver,
+    _sfc_diag_slot,
+)
 
 RES, NLEV, DT = 3, 20, 300.0  # level 3 = 642 cells
-N_SLOTS = _evap_sfc_slot() + 1
+N_SLOTS = _sfc_diag_slot("rad_absorbed_above_top") + 1
 
 pytestmark = pytest.mark.skipif(
     MPI.COMM_WORLD.Get_size() < 2, reason="needs mpirun -n >= 2")
@@ -125,7 +128,7 @@ def _serial_and_mpi():
 
 
 KEYS = ("energy_toa_net", "sw_net_sfc", "lw_net_sfc", "hfss", "hfls",
-        "evspsbl")
+        "evspsbl", "energy_rad_above_top", "energy_snowfall_fusion")
 
 
 # Area weights are float32 (grid_area), and the serial mean sums them in a

@@ -10685,8 +10685,16 @@ class ModelDriver:
             _sw_ns, _lw_ns = _slot(0), _slot(1)
             _shf, _lhf = _slot(6), _slot(7)
             _evp = _slot(_evap_sfc_slot())
-            _atop = _slot(_sfc_diag_slot("rad_absorbed_above_top"))
-            _pfz = _slot(_sfc_diag_slot("precip_frozen"))
+            def _closure_slot(i):
+                # A closure term outside ENERGY_SLOTS must cover the SAME
+                # window on its own (a checkpoint written before slot 25
+                # existed resumes it with a post-restart-only count): an
+                # incomplete window gives NaN, never a short mean.
+                if _use_accum and not _facc_e.window_ready((i,)):
+                    return None
+                return _slot(i)
+            _atop = _closure_slot(_sfc_diag_slot("rad_absorbed_above_top"))
+            _pfz = _closure_slot(_sfc_diag_slot("precip_frozen"))
             _lfs = None if _pfz is None else constants.L_f * _pfz
             _rad = (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)
         except Exception as exc:  # noqa: BLE001
