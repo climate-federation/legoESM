@@ -36,15 +36,15 @@ def _ctsm(dry, sat, theta):
     return min(sat + max(0.11 - 0.40 * theta, 0.0), dry)
 
 
-def _forcing():
+def _forcing(sw=SW, cos_zenith=0.5):
     n = NCOL
     return AtmToSurface(
-        sw_down=jnp.full(n, SW), lw_down=jnp.full(n, 350.0),
+        sw_down=jnp.full(n, sw), lw_down=jnp.full(n, 350.0),
         precip_total=jnp.zeros(n), precip_snow=jnp.zeros(n),
         T_lowest=jnp.full(n, 300.0), q_lowest=jnp.full(n, 0.005),
         u_lowest=jnp.full(n, 5.0), v_lowest=jnp.full(n, 2.0),
         p_lowest=jnp.full(n, 95000.0), p_surface=jnp.full(n, 100000.0),
-        rho_lowest=jnp.full(n, 1.2), cos_zenith=jnp.full(n, 0.5),
+        rho_lowest=jnp.full(n, 1.2), cos_zenith=jnp.full(n, cos_zenith),
         co2_ppmv=jnp.full(n, 400.0), has_radiation=jnp.ones(n),
         has_precipitation=jnp.ones(n))
 
@@ -64,7 +64,7 @@ def _params():
         ALB_NIR_DRY=nir_dry, ALB_NIR_SAT=nir_sat)
 
 
-def _run(snow_albedo_feedback):
+def _run(snow_albedo_feedback, forcing=None):
     cfg = MultiLayerLandConfig(snow_albedo_feedback=snow_albedo_feedback,
                                surface_scheme=TwoLeafCanopyConfig())
     state = init_multilayer_land_state(NCOL, cfg, T_init=300.0)
@@ -72,8 +72,8 @@ def _run(snow_albedo_feedback):
     state = state._replace(theta_soil=theta, snow_depth=jnp.zeros(NCOL),
                            snow_age=jnp.zeros(NCOL))
     state_new, resp, _, sfc = step_multilayer_land_with_diagnostics(
-        state, _forcing(), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 0.4),
-        land_params=_params())
+        state, _forcing() if forcing is None else forcing, cfg, 1.0, 600.0,
+        lat=jnp.full(NCOL, 0.4), land_params=_params())
     return state, state_new, resp, sfc
 
 
@@ -109,6 +109,20 @@ def test_absorbed_uses_the_same_wet_soil_albedo():
     np.testing.assert_allclose(
         absorbed, (1.0 - _expected_alpha(state.theta_soil[:, 0])) * SW,
         rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("sw, cos_z", [
+    (40.0, 0.005),    # low sun, below the 0.01 cutoff: was dropped (#2650)
+    (40.0, 0.0101),   # just above the cutoff
+    (0.5, 0.5),       # sub-1 W/m2 light: the exported sw_net was (1-albedo_land)*sw
+])
+def test_low_sun_and_low_light_shortwave_is_absorbed(sw, cos_z):
+    """Shortwave the atmosphere hands down is absorbed by the land at the
+    radiation's albedo, whatever the sun angle or the light level."""
+    state, _, _, sfc = _run(True, _forcing(sw, cos_z))
+    np.testing.assert_allclose(
+        np.asarray(sfc.sw_net), (1.0 - _expected_alpha(state.theta_soil[:, 0])) * sw,
+        rtol=0.0, atol=1e-10)
 
 
 def test_albedo_differentiable_in_soil_water():

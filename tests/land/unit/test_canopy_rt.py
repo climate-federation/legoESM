@@ -2,7 +2,7 @@
 
 Checks:
 - sw decomposition: PAR + NIR + UV ≈ sw_down during day
-- Night guard: all components = 0 when cos_zenith < 0.01
+- Low sun (cos_zenith <= 0.01): sw_down handed on as diffuse, absorbed in full
 - Two-leaf RT: fSun ∈ [0, 1], APAR_Sun + APAR_Sh = total absorbed PAR
 - Energy conservation: ASW_Sun + ASW_Sh + ASW_Soil ≤ sw_down
 - Vcmax25_Sun + Vcmax25_Sh > 0 when LAI > 0
@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
 
 from legoesm import constants
 from legoesm.land.canopy.radiative_transfer import (
+    broadband_albedo,
     canopy_longwave_rt,
     canopy_shortwave_rt,
     split_sw_components,
@@ -30,12 +33,26 @@ def test_split_sw_partitions_daytime():
     assert jnp.allclose(total, sw_down, rtol=1e-5, atol=1e-3)
 
 
-def test_split_sw_night_guard():
-    sw_down = jnp.array([10.0])
-    cos_zenith = jnp.array([0.001])  # below 0.01 night threshold
-    comps = split_sw_components(sw_down, cos_zenith)
-    for c in comps:
-        assert float(c[0]) == 0.0
+@pytest.mark.parametrize("cos_z", [0.0, 0.005, 0.01, 0.0101, 0.015])
+def test_low_sun_shortwave_is_absorbed_or_reflected(cos_z):
+    """At and below the 0.01 cosine cutoff sw_down is handed on as diffuse, not
+    dropped: the components sum to sw_down and the canopy absorbs exactly
+    (1 - band albedo) of it, as above the cutoff (#2650)."""
+    sw = jnp.array([40.0])
+    comps = split_sw_components(sw, jnp.array([cos_z]))
+    np.testing.assert_allclose(float(sum(comps)[0]), 40.0, rtol=0.0, atol=1e-10)
+    if cos_z <= 0.01:
+        assert float(comps[0][0]) == 0.0 and float(comps[2][0]) == 0.0
+    vis, nir = jnp.array([0.08]), jnp.array([0.25])
+    out = canopy_shortwave_rt(
+        *comps, SZA=jnp.degrees(jnp.arccos(jnp.array([cos_z]))),
+        LAI=jnp.array([3.0]), CI=jnp.array([0.75]), ALB_VIS=vis, ALB_NIR=nir,
+        Vcmax25_C3_leaf=jnp.array([60.0]), Vcmax25_C4_leaf=jnp.array([0.0]),
+        kn=jnp.array([0.3]))
+    absorbed = float((out.ASW_Sun + out.ASW_Sh + out.ASW_Soil)[0])
+    np.testing.assert_allclose(
+        absorbed, float((1.0 - broadband_albedo(vis, nir))[0]) * 40.0,
+        rtol=0.0, atol=1e-10)
 
 
 def test_canopy_sw_absorption_bounded():

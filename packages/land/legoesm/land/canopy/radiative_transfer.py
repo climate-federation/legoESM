@@ -41,7 +41,8 @@ as independent oracle literals and canaried against the module constants
 (module == literal == value), so no scheme coefficient is sourced from the SUT;
 S_0 is the shared ``legoesm.constants`` value.  DEPARTURES / numeric guards
 (documented, not the pure closed form; reproduced by the oracle so the pin
-stays exact): the cos Z > 0.01 and SZA > 89 deg night guards with the
+stays exact): the cos Z <= 0.01 low-sun branch of the split (all of sw_down
+handed on as diffuse), the SZA > 89 deg night guard with the
 kb = kk_Pb = 50 night sentinel, the fSun clip to [0, 1] and LAI > 0 zeroing,
 the max(., 0) floors on the scattered-sunlit and shaded down-fluxes, the
 max(kn CI, 1e-6) / max(kn + kb LAI, 1e-6) profile-integral guards, and the
@@ -210,7 +211,8 @@ def split_sw_components(
 
     Direct/diffuse split follows the Liu-Jordan (1960) clearness-index
     approach as adapted for instantaneous radiation (Erbs et al. 1982).
-    All arithmetic is differentiable; the night guard uses jnp.where.
+    All arithmetic is differentiable.  With cos Z <= 0.01 all of sw_down is
+    returned as diffuse, so the five components always sum to sw_down.
 
     Parameters
     ----------
@@ -225,7 +227,7 @@ def split_sw_components(
         Direct and diffuse PAR [W m-2], direct and diffuse NIR [W m-2],
         and total UV [W m-2].
     """
-    # Night guard: avoid division by zero and set all components to zero
+    # Low-sun guard: avoid division by zero (the light is routed diffuse below)
     is_day = cos_zenith > 0.01  # coeff-ok: night guard, cos(zenith) floor to avoid /0
 
     # Extra-terrestrial irradiance (top-of-atmosphere, W m-2)
@@ -244,6 +246,10 @@ def split_sw_components(
     f_d = jnp.where(k_t <= _ERBS_KT_LOW, f_d_low,
           jnp.where(k_t <= _ERBS_KT_HIGH, f_d_mid, f_d_high))
     f_d = jnp.clip(f_d, 0.0, 1.0)
+    # Low sun (cos Z <= 0.01): the clearness index is undefined there, so the
+    # whole of sw_down is handed on as diffuse light rather than dropped -- the
+    # atmosphere has already deposited it at the surface (#2650).
+    f_d = jnp.where(is_day, f_d, 1.0)
 
     # Broadband direct and diffuse
     sw_diff = f_d * sw_down
@@ -255,14 +261,6 @@ def split_sw_components(
     NIR_dir  = _NIR_FRACTION * sw_dir
     NIR_diff = _NIR_FRACTION * sw_diff
     UV       = _UV_FRACTION * sw_down
-
-    # Apply night guard
-    zero = jnp.zeros_like(sw_down)
-    PAR_dir  = jnp.where(is_day, PAR_dir,  zero)
-    PAR_diff = jnp.where(is_day, PAR_diff, zero)
-    NIR_dir  = jnp.where(is_day, NIR_dir,  zero)
-    NIR_diff = jnp.where(is_day, NIR_diff, zero)
-    UV       = jnp.where(is_day, UV,       zero)
 
     return PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV
 

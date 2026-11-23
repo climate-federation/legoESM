@@ -686,13 +686,16 @@ def compute_two_leaf_canopy_fluxes(
     residual_int_d = Rn_int_d - (LE_tot + H_tot + G)
 
     # ---- Canopy albedo diagnosed from SW absorption ----
+    # The absorbed shortwave is linear in sw_down, so the ratio is exact at any
+    # light level; only sw_down == 0 (no light) falls back to albedo_land.  Any
+    # sw_down > 0 thus exports sw_net == sw_absorbed (#2650).
     sw_absorbed = sw_rt.ASW_Sun + sw_rt.ASW_Sh + sw_rt.ASW_Soil
-    sw_down_safe = jnp.maximum(forcing.sw_down, 1.0)
+    _lit = forcing.sw_down > 0.0
+    sw_down_safe = jnp.where(_lit, forcing.sw_down, 1.0)
     alpha_canopy = jnp.clip(1.0 - sw_absorbed / sw_down_safe, 0.0, 1.0)
     alpha_canopy = jnp.where(
-        forcing.sw_down < 1.0,
-        jnp.broadcast_to(jnp.asarray(land_config.albedo_land), T_soil_top.shape),
-        alpha_canopy)
+        _lit, alpha_canopy,
+        jnp.broadcast_to(jnp.asarray(land_config.albedo_land), T_soil_top.shape))
 
     # ---- Surface emissivity + radiometric temperature (atmosphere-equivalent) ----
     # The conservative ``canopy_longwave_rt`` exports the column LW emissivity
