@@ -6736,3 +6736,29 @@ def test_mpas_nu_vert4_tracer_rejects_invalid(bad):
          "--discretization", "mpas", "--mpas-nu-vert4-tracer", bad]), parser))
     with pytest.raises(ValueError, match="mpas_nu_vert4_tracer"):
         cfg.validate_strict()
+
+
+def test_clubb_mf_flag_reaches_the_turbulence_config():
+    """--clubb-mf round-trips to TurbulenceConfig.clubb_mf; default off; refused
+    without prognostic CLUBB."""
+    import pytest
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--turbulence", "clubb",
+            "--clubb-prognostic"]
+    cfg_plain = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser))
+    assert cfg_plain.clubb_mf is False
+    assert materialize_sub_config(turbulence_config_for(cfg_plain)).clubb_mf is False
+    cfg_on = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--clubb-mf"]), parser))
+    assert cfg_on.clubb_mf is True
+    assert turbulence_config_for(cfg_on).clubb_mf is True
+    diag = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb", "--clubb-mf"]), parser))
+    with pytest.raises(ValueError, match="clubb_prognostic"):
+        turbulence_config_for(diag)
