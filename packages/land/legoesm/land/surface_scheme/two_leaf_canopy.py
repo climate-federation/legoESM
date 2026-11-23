@@ -712,7 +712,10 @@ def compute_two_leaf_canopy_fluxes(
     T_surface = (LW_emit / jnp.maximum(eps_eff * constants.sigma_sb, 1e-12)) ** 0.25
 
     # SW_net and the (conservative) external LW_net = La − LW_out.
-    sw_net = (1.0 - alpha_canopy) * forcing.sw_down
+    # Below 1 W/m2 the exported albedo is albedo_land (no ratio of vanishing
+    # fluxes), so sw_net is the absorption itself there (#2650).
+    sw_net = jnp.where(forcing.sw_down < 1.0, sw_absorbed,
+                       (1.0 - alpha_canopy) * forcing.sw_down)
     lw_net = forcing.lw_down - LW_out_col
     lw_up_out = LW_out_col   # true top-of-canopy upward LW (emission + reflection)
 
