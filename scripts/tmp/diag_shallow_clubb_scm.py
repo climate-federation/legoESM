@@ -31,6 +31,10 @@ _spec = importlib.util.spec_from_file_location(
 H = importlib.util.module_from_spec(_spec)
 sys.modules["harness"] = H
 _spec.loader.exec_module(H)
+# run_bomex_les.py labels BOMEX output "bomex_cu" (its --case-label default);
+# the reference guard's alias table lacks it. Same deck (gSAM CASES/BOMEX).
+import legoesm.training.les_reference as _lr  # noqa: E402
+_lr._CASE_ALIASES["bomex"] = frozenset({"bomex", "bomex_cu"})
 
 MOM = ("rtm", "thlm", "um", "vm", "wp2", "wp3", "up2", "vp2", "wprtp",
        "wpthlp", "upwp", "vpwp", "rtp2", "thlp2", "rtpthlp")
