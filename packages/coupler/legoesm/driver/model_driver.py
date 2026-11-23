@@ -303,7 +303,7 @@ def land_radiating_surface(T_sea, f_land, E_sea, T_rad_land, eps_land):
 
 # Per-cell fields of the MPAS land step tuple, after the state: T_sfc, albedo,
 # q_surface, shflx, lhflx, surface_mass_flux, stress, held, T_rad, emissivity.
-_LAND_STEP_N_CELL = 10
+_LAND_STEP_N_CELL = 11
 
 
 def gather_land_step(run, ncol, padded, proc, allgather):
@@ -1792,8 +1792,11 @@ _LAND_STRESS_CKPT_KEYS = ("land_taumag", "land_taumag_valid", "land_taumag_fresh
 _LAND_ML_CACHE_FIELDS = ("canopy_x",)
 # Prognostic fields a checkpoint written WITHOUT them may lack: the restore
 # initialises them from the restored state instead of refusing.  ``T_snow``
-# (the opt-in snow thermal node) -> ``init_snow_temperature`` (user 2026-10-03).
-_LAND_ML_INIT_ON_RESTORE = ("T_snow",)
+# (the opt-in snow thermal node) -> ``init_snow_temperature`` (user 2026-10-03);
+# ``W_canopy_snow`` (opt-in canopy snow) -> the template's empty store (no mass;
+# vote 2026-11-22).  A checkpoint CARRYING either into a run without the
+# feature still refuses (unexpected field).
+_LAND_ML_INIT_ON_RESTORE = ("T_snow", "W_canopy_snow")
 # Restart-exactness payload of the column loop (R-ex), beyond the land
 # cadence window below (which carries the land boundary outputs the loop
 # holds between land steps).  The held RADIATION slots are NOT persisted
@@ -2306,6 +2309,20 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     cfg = cfg._replace(canopy_snow_masking=_csm)
     logger.info("  land canopy snow masking (trees hide snow): %s",
                 "ON" if _csm else "off")
+    if getattr(config, "land_canopy_snow", False):
+        from legoesm.land.canopy.interception import CanopySnowConfig
+        _cs = CanopySnowConfig()._replace(**{k: float(v) for k, v in (
+            ("temperature_width_K",
+             getattr(config, "land_canopy_snow_temperature_width_K", None)),
+            ("relative_width",
+             getattr(config, "land_canopy_snow_relative_width", None)),
+            ("fcansno_ramp",
+             getattr(config, "land_canopy_snow_fcansno_ramp", None)),
+        ) if v is not None})
+        cfg = cfg._replace(canopy_snow=_cs)
+        logger.info("  land canopy snow (CLM5 ON_RAD): ON, widths %g K / %g / "
+                    "fcansno ramp %g", _cs.temperature_width_K, _cs.relative_width,
+                    _cs.fcansno_ramp)
     # Snowpack scheme + snow emissivity, same placement (after the bake).
     cfg = cfg._replace(
         snow_scheme=str(config.land_snow_scheme),
@@ -3335,6 +3352,9 @@ class ModelDriver:
                 "min(top soil T, freezing), density %.0f kg/m3) -- a seeded, not "
                 "spun-up, pack", _land_cfg.snow_column.n_layers,
                 _land_cfg.snow_column.seed_density)
+        if "W_canopy_snow" in _init_missing:
+            logger.info("  land_ml restore: checkpoint has no canopy snow store; "
+                        "starting it empty (no mass)")
         if "T_snow" in _init_missing:
             from legoesm.land.multilayer_land import init_snow_temperature
             self._land_ml_state = init_snow_temperature(self._land_ml_state)
@@ -11298,6 +11318,7 @@ class ModelDriver:
                 # published land tas is not the model's land at all.
                 _tas_land_T = getattr(self, "_land_T_skin_last", None)
                 _tas_land_q = getattr(self, "_land_qsfc_last", None)
+                _tas_land_T2m = getattr(self, "_land_T2m_last", None)
                 _tas_f_land = getattr(self, "_f_land", None)
                 _tas_kw = {}
                 if _tas_land_T is not None and _tas_f_land is not None:
@@ -11305,7 +11326,9 @@ class ModelDriver:
                         T_land=jnp.asarray(_tas_land_T).reshape(-1),
                         q_land=(None if _tas_land_q is None
                                 else jnp.asarray(_tas_land_q).reshape(-1)),
-                        land_fraction=jnp.asarray(_tas_f_land).reshape(-1))
+                        land_fraction=jnp.asarray(_tas_f_land).reshape(-1),
+                        T2m_land=(None if _tas_land_T2m is None
+                                  else jnp.asarray(_tas_land_T2m).reshape(-1)))
                 from legoesm.forcing.surface_utils import blend_surface_temperature
                 ts = blend_surface_temperature(_sst, _sic, _tas_ice)
                 if _tas_land_T is not None and _tas_f_land is not None:
@@ -15242,6 +15265,13 @@ class ModelDriver:
                 _emis = jnp.broadcast_to(
                     jnp.asarray(resp.emissivity, resp.T_rad.dtype),
                     resp.T_rad.shape)
+                # The scheme's own 2 m air temperature (CLM5 t_ref2m) for the
+                # CMOR ``tas`` land leg; NaN where the scheme solves none or the
+                # column was held (no solved surface layer this call).
+                _t2m = (jnp.full_like(resp.T_rad, jnp.nan)
+                        if getattr(_sfc, "T_2m", None) is None
+                        else jnp.asarray(_sfc.T_2m, resp.T_rad.dtype))
+                _t2m = jnp.where(_held_f > 0.5, jnp.nan, _t2m)
                 if _land_pack_on:
                     # Scatter the advanced columns back into the full-grid
                     # state (ocean columns keep their frozen init values,
@@ -15258,11 +15288,15 @@ class ModelDriver:
                                     resp.T_sfc, resp.albedo, resp.q_surface,
                                     resp.shflx, resp.lhflx, resp.surface_mass_flux,
                                     _taumag, _held_f, resp.T_rad, _emis))
+                            # 2 m T: NaN (= no land screen value) off the
+                            # land columns, never a valid-looking 0 K
+                            + (jnp.full((_land_ncol_full,), jnp.nan, _t2m.dtype)
+                               .at[_land_out_idx].set(_t2m.reshape(-1)),)
                             + (_n_held, _n_held_land, _n_fb_land,
                                _n_fb_rej, _n_unconv_land, _n_iter_max))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
                         resp.shflx, resp.lhflx, resp.surface_mass_flux,
-                        _taumag, _held_f, resp.T_rad, _emis,
+                        _taumag, _held_f, resp.T_rad, _emis, _t2m,
                         _n_held, _n_held_land, _n_fb_land, _n_fb_rej,
                         _n_unconv_land, _n_iter_max)
               if not _land_none:
@@ -15275,8 +15309,12 @@ class ModelDriver:
                   # the same message on every rank.
                   out = jax.eval_shape(
                       _land_step, land_state, a2s, doy, lai_doy, lai_year)
+                  # (the 2 m T, last per-cell field, is NaN = none solved)
                   return (land_state,) + tuple(
-                      jnp.zeros(o.shape, o.dtype) for o in out[1:])
+                      jnp.full(o.shape, jnp.nan, o.dtype)
+                      if i == _LAND_STEP_N_CELL - 1
+                      else jnp.zeros(o.shape, o.dtype)
+                      for i, o in enumerate(out[1:]))
               return _land_step_none
 
             _land_step_fn = _make_land_step(DT_LAND)
@@ -17002,7 +17040,7 @@ class ModelDriver:
                      _land_albedo_cells, _land_qsfc_step,
                      _land_shflx_step, _land_lhflx_step, _land_evap_step,
                      _land_taumag_step, _land_held_step,
-                     _land_Trad_cells, _land_emis_cells,
+                     _land_Trad_cells, _land_emis_cells, _land_T2m_step,
                      _land_n_held_step, _land_n_held_land_step,
                      _land_n_fb_step, _land_n_fb_rej_step,
                      _land_n_unconv_step, _land_n_iter_max) = _land_fn(
@@ -17041,6 +17079,7 @@ class ModelDriver:
                     # land and publishes a land temperature the model never had.
                     self._land_T_skin_last = _land_T_skin
                     self._land_qsfc_last = _land_qsfc_step
+                    self._land_T2m_last = _land_T2m_step
                     # Accumulate ON DEVICE and read at the same cadence the
                     # other post-step warnings use: reading it every step
                     # would stall the accelerator once per step for a number

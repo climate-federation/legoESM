@@ -1,0 +1,22 @@
+# A/B arm (user 2026-11-22): production CAM6 deck + CLM5-faithful snow-covered
+# forest albedo -- trees hide ground snow (land_canopy_snow_masking) AND carry
+# intercepted canopy snow (land_canopy_snow, CLM5.0 snowveg_flag ON_RAD, the
+# CLM5.0 default).  The two switches are ONE mechanism here: canopy snow
+# requires the masking, and the masking alone (bare branches) is darker than
+# CLM5 for evergreen forest (~0.14 vs CLM5 0.16-0.30, probe 2026-11-22).
+# Resolved-config diff vs config/amip/amip_production.yaml: these two switches
+# plus the three canopy-snow widths named below (equal to the code defaults,
+# recorded, inert without the switch).  Control = amip_production.yaml itself, same SHA, --days, machine.
+#
+# Pre-registered (1979-01-01 cold start, 151 days, score MAM vs ERA5 /
+# CERES-EBAF, land 45-70N, area-weighted):
+#   CONFIRMS: MAM tas warms > 1 K AND MAM TOA albedo drops > 0.05 vs control.
+#   REFUTES:  |MAM tas change| < 0.3 K.
+# Canopy snow widths are the CanopySnowConfig defaults (0.5 K / 0.05 /
+# fcansno ramp 1e-3; 0 = CLM5's hard switches), named here so the run records them.
+include: amip_production.yaml
+land_canopy_snow_masking: true
+land_canopy_snow: true
+land_canopy_snow_temperature_width_K: 0.5
+land_canopy_snow_relative_width: 0.05
+land_canopy_snow_fcansno_ramp: 0.001

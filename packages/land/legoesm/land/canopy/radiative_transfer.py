@@ -880,7 +880,7 @@ def clm5_exposed_area(LAI, SAI, htop, hbot, pft_index, f_snow, snow_depth):
 
 def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
                               hbot, pft_index, f_snow, snow_depth, cosz,
-                              f_diffuse):
+                              f_diffuse, fcansno=0.0):
     """Column albedo of one band with the canopy hiding the snow (CLM5).
 
     DELTA form: the snow-free column albedo is left exactly as supplied and only
@@ -897,19 +897,23 @@ def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
     snow already blended on (the unmasked model value).  No exposed plant area
     (none, or all of it buried) -> ``alb_snowy`` exactly; no snow ->
     ``alb_snowfree`` exactly.  ``band`` 0 =
-    visible, 1 = near-infrared.  Intercepted canopy snow is not represented
-    (fcansno = 0): a bare-branch bound."""
+    visible, 1 = near-infrared.  ``fcansno`` is the snow-covered canopy
+    fraction of CLM5's intercepted canopy snow (snowveg_flag ON_RAD,
+    SurfaceAlbedoMod.F90 1327-1331), applied to the snowy term only (the
+    snow-free reference has no canopy snow by construction); 0 = bare
+    branches."""
     xl_t, rhol_t, taul_t, rhos_t, taus_t = (jnp.asarray(t) for t in _clm5_pft_optics())
     ip = jnp.clip(jnp.round(pft_index).astype(jnp.int32), 0, _N_CLM_PFT - 1)
     elai, esai = clm5_exposed_area(LAI, SAI, htop, hbot, pft_index, f_snow,
                                    snow_depth)
 
-    def _ts(lai, sai, ground):
+    def _ts(lai, sai, ground, fcs=0.0):
         vai = lai + sai
         f_leaf = lai / jnp.maximum(vai, _CLM_MPE)
         albd, albi = clm5_two_stream_albedo(
             vai, f_leaf, rhol_t[ip, band], taul_t[ip, band], rhos_t[ip, band],
-            taus_t[ip, band], xl_t[ip], cosz, ground)
+            taus_t[ip, band], xl_t[ip], cosz, ground,
+            fcansno=fcs, omega_snow=_CLM_OMEGA_SNOW[band])
         return f_diffuse * albi + (1.0 - f_diffuse) * albd
 
     tlai = jnp.where(LAI < _CLM_VAI_CUT, 0.0, LAI)
@@ -918,7 +922,7 @@ def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
     # EXPOSED plant area (none at all, or all buried) returns alb_snowy
     # bit-exactly, the unmasked model value: CTSM puts elai + esai = 0 in its
     # non-vegetated albedo filter (SurfaceAlbedoMod 805-814).
-    masked = alb_snowfree + (_ts(elai, esai, alb_snowy)
+    masked = alb_snowfree + (_ts(elai, esai, alb_snowy, fcansno)
                              - _ts(tlai, tsai, alb_snowfree))
     return jnp.where(elai + esai > 0.0, masked, alb_snowy)
 
