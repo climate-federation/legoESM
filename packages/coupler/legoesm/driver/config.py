@@ -2423,6 +2423,11 @@ class ExperimentConfig(NamedTuple):
     morrison_relvar_scheme: str = "cam6_clubb"
     morrison_boutle_fsd_factor: float = 1.0
     morrison_boutle_overcast_ramp_width: float = 0.01
+    # APPENDED LAST.  CAM7 CLUBB-MF (TurbulenceConfig.clubb_mf): stochastic
+    # plume mass flux as prognostic CLUBB's thl/qt forcing, reduced setting
+    # (fixed L0 = 200 m, CAM's KISS draws).  False (default) = no mass flux
+    # (byte-identical).  Requires turbulence='clubb' and clubb_prognostic=True.
+    clubb_mf: bool = False
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?

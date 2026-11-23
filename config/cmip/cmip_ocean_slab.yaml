@@ -143,6 +143,41 @@ cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
                                      # per-column scatter ~1.8x the 8-subcolumn one.
 cloud_n_subcolumns: 8                # read only by max_random; inert under mcica
 
+# ---- convection: verbatim from config/amip/amip_production.yaml (its
+# "convection" block, which the lat-lon AMIP production deck includes),
+# replacing the included tuned physics' SBM; its convective_cloud row is
+# already set above (clouds block) ----
+zm_land_fraction: required  # ZM reads the land mask (c0_lnd vs c0_ocn); "none" = aquaplanet only
+convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelist:
+                            # c0_lnd 0.0075, c0_ocn 0.03, ke 5e-6 (dyn=fv),
+                            # tau 3600,
+                            # capelmt 70, tiedke_add 0.5, momcu = momcd = 0.7,
+                            # num_cin 1); scheme defaults carry those values.
+                            # ZM convective momentum transport (momtran) is ON
+                            # and reaches the MPAS winds (mpas_cmt resolves True;
+                            # the Sundqvist/L36 deck's Bechtold runs CMT
+                            # off, lane default)
+convective_rain_to_surface: true
+# Bechtold/IFS settings written explicitly (inert here: convection is ZM).
+bechtold_use_ifs_ascent: false         # faithful OpenIFS chain off
+bechtold_ifs_shallow_nosupply: zero    # no sub-cloud supply -> shallow flux ramps to ~0 (OpenIFS: first_guess)
+# ZM tunables written explicitly (values = the scheme defaults = the CAM6 f09
+# namelist above), so a campaign arm's change is one visible row.
+zm_c0_lnd: 0.0075           # rain conversion over land [1/m]
+zm_c0_ocn: 0.03             # rain conversion over ocean [1/m]
+zm_ke: 5.0e-6               # rain evaporation efficiency
+zm_dmpdz: -1.0e-3           # dilute-plume entrainment [1/m]
+zm_tau: 3600.0              # CAPE consumption timescale [s]
+zm_capelmt: 70.0            # deep-convection CAPE threshold [J/kg]
+# Not copied: production's zm_detrain_phase_width_K: 0.1 and
+# zm_detrain_number_width_kgkg_s: 1.0e-12.  run_coupled refuses them
+# (run_amip-only: read only by the MPAS macmic loop); both equal the scheme
+# defaults, which apply here.
+# ZM trigger width (RULE 5; value = the scheme default; 0 = CAM's hard switch):
+# the closure mass flux ramps from 0 at zm_capelmt to CAM's at zm_capelmt + width.
+zm_trigger_width_J_kg: 10.0
+zm_transport_cloud_tracers: true  # ZM convtran of carried cloud/precip water + numbers (CAM6)
+
 # ---- land: verbatim from config/amip/amip_production.yaml (its "land" block,
 # without the two surface-coupling rows ocean_flux_on_ocean_surface and
 # sea_ice_flux_split, which are not land setup) ----

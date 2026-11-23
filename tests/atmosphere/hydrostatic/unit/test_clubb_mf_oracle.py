@@ -11,7 +11,7 @@ except for making ``poisson`` public (gfortran 11.2, fp64), twice per column
 ``scripts/validate/oracle/clubb_mf/{build.sh,make_fixture.py}`` on the 15
 tier-2 audit columns + 1 stable column.
 
-* Hard limit: the JAX reference (``_clubb_mf_reference``) with every
+* Hard limit: the JAX reference (``turbulence.clubb_mf``) with every
   sharpness at inf matches the oracle to 1e-10 (max |diff| / max |oracle| per
   field over the fixture; the repo oracle tolerance, user 2026-10-19).
 * RULE 5: each smooth switch at its default (others hard), per column and
@@ -38,7 +38,7 @@ from legoesm.atmosphere.physics.turbulence import edmf as E
 from legoesm.atmosphere.physics.turbulence.config import TurbulentEDMFConfig
 
 from legoesm import constants
-from tests.atmosphere.hydrostatic.unit._clubb_mf_reference import (
+from legoesm.atmosphere.physics.turbulence.clubb_mf import (
     HARD,
     KSPAN_MIN,
     LTS_INHIBIT_THRESH,
@@ -331,7 +331,7 @@ def test_check_grads_through_condensation_exit_at_default(fx):
     """RULE 5, switch ``conv`` (V7'): at the condensation call site, on a total water where
     CAM's iteration count flips, check_grads at the default; the derivative differs from the
     same point with the exit hard."""
-    from tests.atmosphere.hydrostatic.unit._clubb_mf_reference import condensation_mf
+    from legoesm.atmosphere.physics.turbulence.clubb_mf import condensation_mf
 
     c = {k: v[0] for k, v in _cols(fx).items()}
     k = 5
