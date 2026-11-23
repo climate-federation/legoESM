@@ -280,9 +280,8 @@ def _fd_checks(loss, x, v, eps=1e-5, tol=1e-6):
     map does not satisfy): ``Σ_r <∇_r L, v_r>`` vs ``(L(x+εv)-L(x-εv))/2ε``.
     ``loss`` maps this rank's block to the replicated scalar
     ``global_sum_mpi(..., final_loss=True)``; ``v`` is this rank's block of a
-    global direction. First order only: second-order (reverse-over-reverse) AD
-    through the raw mpi4jax all-to-all / sendrecv has no differentiation rule
-    (pre-existing, slab and pencil alike)."""
+    global direction. First order here; second order through the all-to-all
+    and sendrecv is checked in ``test_mpi_second_order_ad.py``."""
     g = jax.grad(loss)(x)
     ad1 = COMM.allreduce(float(jnp.vdot(g, v)))
     fd1 = (float(loss(x + eps * v)) - float(loss(x - eps * v))) / (2 * eps)

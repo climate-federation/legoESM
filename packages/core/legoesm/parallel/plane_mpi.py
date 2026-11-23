@@ -14,9 +14,9 @@ Differences from :mod:`legoesm.parallel.latlon_mpi`:
 AD safety
 ---------
 Every ``sendrecv`` call goes through ``get_sendrecv_vjp`` from
-:mod:`legoesm.parallel.halo_exchange` (existing ``@jax.custom_vjp``
-wrapper that swaps source / dest in the backward pass per
-``CLAUDE.md`` "MPI AD compat" rule). ``allreduce(SUM)`` reductions
+:mod:`legoesm.parallel.halo_exchange` (a linear primitive whose
+transpose swaps source / dest and whose JVP is the same sendrecv, so
+forward and reverse AD work at every order). ``allreduce(SUM)`` reductions
 inherit AD via ``global_sum_mpi`` (same module).
 
 Single-rank fallback
