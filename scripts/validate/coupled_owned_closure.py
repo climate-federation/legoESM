@@ -187,6 +187,13 @@ def main(argv=None) -> int:
         ap.error("--energy-terms is not wired for --deck")
     if args.deck and args.days != int(args.days):
         ap.error("--deck needs whole --days (run_coupled takes an int)")
+    own = ("micro", "warm_rain", "land_update_s", "convection", "ic",
+           "ic_path", "vertical_coord", "nlev", "land", "rad_update_steps",
+           "grid", "resolution", "dt")
+    stray = [o for o in own if getattr(args, o) != ap.get_default(o)]
+    if args.deck and stray:
+        ap.error("the deck sets " + ", ".join(
+            "--" + o.replace("_", "-") for o in stray))
     if args.deck:
         pass
     elif args.grid != "mpas" and (args.resolution is None or args.dt is None):
@@ -228,7 +235,9 @@ def main(argv=None) -> int:
     from legoesm.ice.config import SeaIceConfig
 
     mp = MonkeyPatch()
-    if args.land == "synthetic":
+    if args.deck:
+        land_cfg = {}
+    elif args.land == "synthetic":
         lp._patch_land_loaders(mp)
         land_cfg = dict(land_mask_path="synthetic.nc")
     else:
@@ -333,9 +342,9 @@ def main(argv=None) -> int:
                                     vertical_coord=cfg.grid.vertical_coord,
                                     nlev=nlev, land=args.land,
                                     land_cfg=land_cfg,
-                                    land_update_s=args.land_update_s,
+                                    land_update_s=cfg.land_update_seconds,
                                     extra=extra, ncells=n, window=win,
-                                    rad_update_steps=args.rad_update_steps,
+                                    rad_update_steps=cfg.rad_update_steps,
                                     dt=DT, dt_requested=DT_req,
                                     f_lake_max=float(f_lake.max()),
                                     f_land_mean=float(f_land.mean()))))

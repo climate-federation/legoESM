@@ -114,6 +114,7 @@ def test_injected_atmosphere_source_fails_the_bar():
     (["--surfdata-path", "s.nc"], "unrecognized arguments"),
     (["--deck", "d.yaml", "--energy-terms"], "--energy-terms"),
     (["--deck", "d.yaml", "--days", "1.5"], "whole --days"),
+    (["--deck", "d.yaml", "--dt", "300"], "the deck sets --dt"),
 ])
 def test_real_case_options_refuse_missing_or_stray_paths(argv, msg, capsys):
     with pytest.raises(SystemExit):
