@@ -115,3 +115,28 @@ def test_scm_publishes_the_plume_cloud_only_with_the_mass_flux():
         got[on] = (np.asarray(ps.mf_cloudfrac), np.asarray(ps.mf_qc))
     assert np.all(got[False][0] == 0.0) and np.all(got[False][1] == 0.0)
     assert np.max(got[True][0]) > 0.0 and np.max(got[True][1]) > 0.0
+
+
+def test_cam6_cloud_call_adds_the_capped_plume_cloud():
+    """The cam6_clubb cloud call combines the plume cloud with ZM's (larger
+    of two) and adds the 0.8-capped share to the stratus; refuses a missing
+    plume carry when the hookup is on."""
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
+    from legoesm.atmosphere.physics.turbulence.clubb_mf import mf_concld, mf_deep_cloud
+    from tests.unit.test_cam6_cloud_fraction import CLUBB, _column_inputs
+
+    T, p, q_v, dp, q_i, lat, p_half = _column_inputs()
+    alst = jnp.full(T.shape, 0.05)
+    mfcf = jnp.full(T.shape, 0.03).at[:, :2].set(0.2)
+    mfqc = jnp.full(T.shape, 1.0e-3)
+    kw = dict(q_cloud=jnp.full(T.shape, 1.0e-5), q_ice=q_i, cloud_fraction_override=alst,
+              lat=lat, p_half=p_half, clubb_config=CLUBB)
+    on = CloudConfig(scheme="cam6_clubb", clubb_mf_cloud=True)
+    off = compute_cloud_properties(T, p, q_v, dp, CloudConfig(scheme="cam6_clubb"), **kw)
+    got = compute_cloud_properties(T, p, q_v, dp, on, mf_cloudfrac=mfcf, mf_qc=mfqc, **kw)
+    deep, _ = mf_deep_cloud(jnp.zeros_like(T), jnp.zeros_like(T), mfcf, mfqc, on)
+    want = jnp.minimum(off.cloud_fraction + mf_concld(deep, on), 1.0)
+    np.testing.assert_allclose(np.asarray(got.cloud_fraction), np.asarray(want), rtol=1e-12)
+    assert float(jnp.max(got.cloud_fraction - off.cloud_fraction)) > 0.25
+    with pytest.raises(ValueError, match="plume cloud"):
+        compute_cloud_properties(T, p, q_v, dp, on, **kw)
