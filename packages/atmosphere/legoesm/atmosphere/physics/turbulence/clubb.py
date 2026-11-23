@@ -333,6 +333,16 @@ __param_spec__ = {
             "routec_m_width": "numerics: route C (RULE 5) ramp width [1] of the mass-fraction bounds and slope-pair choice (value voted 2026-11-21)",
             "routec_lock_m_width": "numerics: route C (RULE 5) ramp width [1] in m of Lock's double-jump switch at m = 0.1 (value voted 2026-11-21)",
             "routec_E_width": "numerics: route C (RULE 5) width [1] of the smooth [0, 1] clip of the evaporative enhancement (value voted 2026-11-21)",
+            "mf_alive_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/s2/m2] of the plume-alive wn2 > 0 switch (inf = CAM; value voted)",
+            "mf_qc_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/kg/kg] of the cloudy qt - qs > 0 switch (inf = CAM; value voted)",
+            "mf_trig_wthv_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/K m/s] of the trigger w'thv'_sfc > 0 switch (inf = CAM; value voted)",
+            "mf_trig_wqt_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/kg/kg m/s] of the trigger w'qt'_sfc > 0 switch (inf = CAM; value voted)",
+            "mf_trig_lts_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/K] of the trigger LTS < 20 K switch (inf = CAM; value voted)",
+            "mf_wstar_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/m3/s3] of the w* floor switch (inf = CAM; value voted)",
+            "mf_convh_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/m] of the PBL-height floor switch (inf = CAM; value voted)",
+            "mf_kspan_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/level] of the plume cull at >= 4 levels switch (inf = CAM; value voted)",
+            "mf_conv_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/kg/kg] of the condensation fixed-point exit switch (inf = CAM; value voted)",
+            "mf_cfl_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/1] of the Courant limiter switch (inf = CAM; value voted)",
             "trop_cloud_top_press": "domain definition [Pa]: CAM ref_pres trop_cloud_top_press — where the scheme runs, not a closure coefficient",
             "trop_cloud_taper_lnp_width": "numerics: smooth log-pressure taper width replacing CAM's hard top_lev slice",
             "w_tol": "numerics: w-moment tolerance/floor [m/s]",
@@ -759,6 +769,18 @@ class CLUBBConfig(NamedTuple):
     routec_m_width: float = 0.01
     routec_lock_m_width: float = 0.005
     routec_E_width: float = 0.01
+    # RULE 5 sharpness [1/argument unit] of each CLUBB-MF switch on traced
+    # state (clubb_mf.MFSmoothing, same order; inf = CAM's hard form).
+    mf_alive_sharpness: float = 1.0e4
+    mf_qc_sharpness: float = 1.0e5
+    mf_trig_wthv_sharpness: float = 1.0e4
+    mf_trig_wqt_sharpness: float = 1.0e7
+    mf_trig_lts_sharpness: float = 100.0
+    mf_wstar_sharpness: float = 1.0e11
+    mf_convh_sharpness: float = 1.0
+    mf_kspan_sharpness: float = 100.0
+    mf_conv_sharpness: float = 1.0e7
+    mf_cfl_sharpness: float = 100.0
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -6682,6 +6704,8 @@ def clubb_step(
     omega: jax.Array | None = None,
     routec_inversion: bool = False,
     omega_cam_layer_density: bool = False,
+    clubb_mf: bool = False,
+    mf_pblh: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6897,8 +6921,34 @@ def clubb_step(
 
     # ---- Advance the full prognostic moment set ----
     zeros_zm = jnp.zeros((ncol, nlev + 1), dtype=T.dtype)
+    thlm_forcing, rtm_forcing = zeros_zt, zeros_zt
+    if clubb_mf:
+        # CAM7 CLUBB-MF (clubb_mf.py; clubb.F90 compute_mf_plumes): the plume
+        # mass-flux convergence of thl and qt is CLUBB's explicit forcing.
+        # pblh: the host's carried PBL height (CAM pblh_pbuf, previous step);
+        # 0 where none is carried yet (CAM's cold-start pbuf).
+        from legoesm.atmosphere.physics.turbulence.clubb_mf import (
+            MFSmoothing, clubb_mf_forcing, mf_lts)
+        p_zm = flip_vertical(p_half)
+        iex_zm = 1.0 / exner_function(p_zm)
+        dzt = jnp.diff(gr.zm, axis=1)
+        q_liq = jnp.zeros_like(T) if q_c is None else q_c
+        mf_in = dict(
+            zm=gr.zm, dzt=dzt, thl=thlm, qt=rtm, thv=thv_ds_zt, u=um, v=vm,
+            p_zm=p_zm, iex_zm=iex_zm, ths=T_sfc * iex_zm[:, 0],
+            wthl_sfc=wpthlp_sfc * jnp.ones((ncol,), T.dtype),
+            wqt_sfc=wprtp_sfc * jnp.ones((ncol,), T.dtype),
+            pblh=(jnp.zeros((ncol,), T.dtype) if mf_pblh is None
+                  else jnp.reshape(mf_pblh, (ncol,))),
+            lts=jax.vmap(mf_lts)(T, q_liq, p_full, p_half[:, -1]))
+        sm = MFSmoothing(*(getattr(config, f"mf_{f}_sharpness")
+                           for f in MFSmoothing._fields))
+        thlm_forcing, rtm_forcing, _mf_out = jax.vmap(
+            lambda c, rzm, irzt, idz: clubb_mf_forcing(
+                c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness))(
+            mf_in, rho_ds_zm, invrs_rho_ds_zt, 1.0 / dzt)
     forcing = CLUBBForcing(
-        rtm=zeros_zt, thlm=zeros_zt, um=zeros_zt, vm=zeros_zt, wprtp=zeros_zm,
+        rtm=rtm_forcing, thlm=thlm_forcing, um=zeros_zt, vm=zeros_zt, wprtp=zeros_zm,
         wpthlp=zeros_zm, rtp2=zeros_zm, thlp2=zeros_zm, rtpthlp=zeros_zm)
     sfc_elevation = flip_vertical(z_half)[:, 0]
     if omega is None:
@@ -7060,6 +7110,8 @@ def clubb_turbulence_prognostic(
     omega: jax.Array | None = None,
     routec_inversion: bool = False,
     omega_cam_layer_density: bool = False,
+    clubb_mf: bool = False,
+    mf_pblh: jax.Array | None = None,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -7233,6 +7285,7 @@ def clubb_turbulence_prognostic(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
             radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
+            clubb_mf=clubb_mf, mf_pblh=mf_pblh,
             omega_cam_layer_density=omega_cam_layer_density, **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         sfc_energy_in = diags["sfc_energy_in"]
@@ -7267,6 +7320,7 @@ def clubb_turbulence_prognostic(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
                 radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
+            clubb_mf=clubb_mf, mf_pblh=mf_pblh,
                 omega_cam_layer_density=omega_cam_layer_density, **_top_kw,
                 **({"q_c": ql_c} if _liq_on else {}))
             ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c

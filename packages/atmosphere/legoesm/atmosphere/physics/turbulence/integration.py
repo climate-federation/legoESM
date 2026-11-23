@@ -252,7 +252,12 @@ def get_turbulence_fn(config: TurbulenceConfig):
             fn = clubb_turbulence_prognostic
             if config.clubb_routec_inversion:
                 fn = functools.partial(fn, routec_inversion=True)
+            if config.clubb_mf:
+                fn = functools.partial(fn, clubb_mf=True)
             return "clubb", fn, clubb_cfg
+        if config.clubb_mf:
+            raise ValueError("TurbulenceConfig.clubb_mf needs prognostic CLUBB: "
+                             "the plume flux is the prognostic closure's thl/rt forcing")
         if config.clubb_routec_inversion:
             raise ValueError("TurbulenceConfig.clubb_routec_inversion needs prognostic "
                              "CLUBB: the diagnostic path has no xm/w'x' solve to constrain")
@@ -452,6 +457,19 @@ def _check_mynn_initflag(scheme_name, mynn_initflag):
         raise ValueError(
             f"mynn_initflag is the mynn25 cold-start switch; turbulence="
             f"{scheme_name!r} would ignore it")
+
+
+def _clubb_mf_kwargs(turbulence_config, phys_state, ncol):
+    """``{"mf_pblh": carried PBL height (ncol,)}`` when CLUBB-MF is on, else ``{}``.
+
+    CAM's MF reads ``pblh_pbuf``, the PBL height the host diagnosed after the
+    previous step's CLUBB; here ``PhysicsState.pblh``.  None (no carry yet)
+    leaves clubb_step on CAM's cold-start 0.  Static on the config.
+    """
+    if not getattr(turbulence_config, "clubb_mf", False):
+        return {}
+    pblh = getattr(phys_state, "pblh", None) if phys_state is not None else None
+    return {"mf_pblh": None if pblh is None else jnp.reshape(pblh, (ncol,))}
 
 
 def _prognostic_clubb_lat_kwargs(carry_field, lat_fn):
@@ -999,6 +1017,7 @@ def _make_hydrostatic_turbulence(
                 T_sfc, q_sfc, rho, dt, step_config,
                 **_prognostic_clubb_lat_kwargs(
                     carry_field, lambda: jnp.reshape(grid.lat, (ncol,))),
+                **_clubb_mf_kwargs(turbulence_config, phys_state, ncol),
                 **_mynn_kw,
                 **_ysu_lane_kwargs(carry_field, ncol, land_fraction=grid.land_frac,
                                    cell_area=grid.grid_area),
@@ -1608,6 +1627,7 @@ def _make_mpas_turbulence(
                 T_sfc, q_sfc, rho, dt, step_config,
                 **_sfc_kw,
                 **_prognostic_clubb_lat_kwargs(carry_field, _mesh_lat),
+                **_clubb_mf_kwargs(turbulence_config, phys_state, nCells),
                 **_mynn_kw,
                 **_ysu_lane_kwargs(carry_field, nCells, land_fraction=f_land,
                                    cell_area=mesh.grid_area),
@@ -2359,6 +2379,7 @@ def _make_spectral_pe_turbulence(
                 # Gaussian latitudes [rad] (n_lat,), lat-major like the columns.
                 **_prognostic_clubb_lat_kwargs(
                     carry_field, lambda: jnp.repeat(grid.lat, n_lon)),
+                **_clubb_mf_kwargs(turbulence_config, phys_state, ncol),
                 # lat-major (n_lat*n_lon,) like the columns (vote J5)
                 **_ysu_lane_kwargs(carry_field, ncol, land_fraction=grid.land_frac,
                                    cell_area=grid.grid_area),

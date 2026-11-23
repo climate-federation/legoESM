@@ -31,6 +31,7 @@ def _flat(x, prefix=""):
 @pytest.mark.parametrize("deck, rows", [
     ("amip_production_clubb_host_omega.yaml", {"clubb_host_omega": True}),
     ("amip_production_boutle_relvar.yaml", {"morrison_relvar_scheme": "boutle2014"}),
+    ("amip_production_clubb_mf.yaml", {"clubb_mf": True}),
 ])
 def test_arm_differs_from_production_only_in_its_rows(deck, rows):
     prod, arm = _flat(_cfg("amip_production.yaml")), _flat(_cfg(deck))
@@ -42,6 +43,7 @@ def test_arms_build_their_physics():
     from legoesm.driver.physics_pipeline import turbulence_config_for, thread_morrison_scalars
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     assert turbulence_config_for(_cfg("amip_production_clubb_host_omega.yaml")).host_omega is True
+    assert turbulence_config_for(_cfg("amip_production_clubb_mf.yaml")).clubb_mf is True
     m = thread_morrison_scalars(_cfg("amip_production_boutle_relvar.yaml"), "morrison",
                                 MorrisonConfig())
     assert m.relvar_scheme == "boutle2014"

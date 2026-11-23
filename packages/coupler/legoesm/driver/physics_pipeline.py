@@ -5260,6 +5260,16 @@ def turbulence_config_for(config):
                     "clubb_host_omega=True requires clubb_prognostic=True: only "
                     "the prognostic closure takes the host omega.")
             tc = tc._replace(host_omega=True)
+        # CAM7 CLUBB-MF on the prognostic closure.  Same threading and refusals.
+        if getattr(config, "clubb_mf", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_mf=True requires turbulence='clubb', got {tc.scheme!r}.")
+            if not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    "clubb_mf=True requires clubb_prognostic=True: the plume "
+                    "flux is the prognostic closure's thl/rt forcing.")
+            tc = tc._replace(clubb_mf=True)
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => the scheme's own default stands (CLUBBConfig, CAM6 100 Pa).
@@ -5403,6 +5413,13 @@ def turbulence_config_for(config):
                 f"{getattr(tc, 'host_omega', None)!r}). The override is "
                 "authoritative, so set TurbulenceConfig(host_omega=True) on it "
                 "rather than relying on the experiment-level flag.")
+    if getattr(config, "clubb_mf", False):
+        if tc.scheme != "clubb" or not getattr(tc, "clubb_mf", False):
+            raise ValueError(
+                "clubb_mf=True but an explicit turbulence_override is in force "
+                f"and does not select it (override scheme={tc.scheme!r}, "
+                f"clubb_mf={getattr(tc, 'clubb_mf', None)!r}). Set "
+                "TurbulenceConfig(clubb_mf=True) on the override.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the

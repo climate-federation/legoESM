@@ -1,28 +1,37 @@
-"""Test-only JAX reference of CAM's CLUBB-MF plume ensemble, REDUCED setting.
+"""CAM7 CLUBB-MF plume ensemble (opt-in mass flux on prognostic CLUBB), REDUCED setting.
 
 Port of ``integrate_mf`` (ESCOMP/atmospheric_physics atmos_phys0_34_002,
 cec8c93ed2, ``schemes/clubb/clubb_mf.F90``; the tag CAM cam_development
 417212dff0 pins) for ONE column on CLUBB's ascending grid (index 0 = surface
 momentum level ``zm[0]``; thermo level ``zt[k]`` lies between ``zm[k]`` and
-``zm[k+1]``).  It is the oracle our EDMF (``turbulence/edmf.py``) is scored
-against, not a model scheme (user decision 2026-11-19, option 2).
+``zm[k+1]``), its Poisson entrainment draws (``poisson``/``knuth``/``hormann``
+with CESM_share share1.1.22 KISS, seeded from the near-surface wind as CAM
+does), and CAM's coupling (``clubb.F90`` ``compute_mf_plumes``): the
+mass-flux convergence of thl and qt, CFL-limited, as CLUBB's explicit
+``thlm``/``rtm`` forcing.  First scored against our EDMF (user decision
+2026-11-19, option 2); a model option since 2026-11-23 (user: CAM's exact
+generator, fixed L0 = 200 m, no new carried state).
 
 Setting (CAM cam7 namelist defaults except where the user's reduced setting
 says otherwise): ``do_clubb_mf_aloft = F`` and ``clubb_mf_alphturb = 0`` (user:
 no CLUBB inputs), ``do_clubb_mf_precip = F`` (vote V1), ``nup = 25``,
-``do_clubb_mf_invswitch = T``; the fixture runs ``Lopt = 0`` (L0 = 200 m, vote V2b)
-because Lopt 6 from CAM's cold start culls every plume; every other flag at its CAM
-default, which in this setting leaves the following CAM code unreachable or
-inert, so it is not ported (exclusions, each from the source):
+``do_clubb_mf_invswitch = T``; ``Lopt = 0`` (L0 = 200 m: vote V2b, user
+2026-11-23) because Lopt 6 needs plume-top memory carried in the model
+state; every other flag at its CAM default, which in this setting leaves the
+following CAM code unreachable or inert, so it is not ported (exclusions,
+each from the source):
 
 * aloft start, ``w``/``wp*_env`` inputs (aloft off); TKE (``eturb == 1``
   exactly with ``alphturb = 0``, so ``tke`` drops out);
 * precipitation, downdrafts, cold pools: ``supqt = supthl = 0``, no
   downdraft, ``ddcp`` returned 0, hence ``cpfac = 1`` (vote V24, asserted on
-  the fixture);
-* the entrainment length ``dynamic_L0`` enters only the Poisson rate, and the
-  integer draws ``enti`` are an INPUT here (vote V5: replayed from CAM's own
-  KISS generator by the oracle driver), so L0 and the RNG are not ported;
+  the fixture); with ``mf_sqt = 0`` CAM's "MF drying exceeds rtm" abort can
+  never fire, so it is not ported;
+* ``dynamic_L0`` is the fixed L0 (Lopt 0); the plume-top memory ``ztopm1``
+  feeds only ``dynamic_L0`` under other Lopt values and the culled-plume
+  output, so it is not carried (the column always starts from the 500 m
+  memory the fixture's first call uses);
+* convective momentum transport (``do_clubb_mf_cmt`` cam7 default F);
 * ``bsort``/``aspd``/``limarea``/``scalesrf``/``do_implicit``/``fixent`` are
   compile-time ``.false.``; ``rhinv`` is unused (``rhtke`` off, Lopt 0);
 * dry/moist aggregates, mcape, ent/det diagnostics (vote V8).
@@ -31,7 +40,13 @@ RULE 5: every switch on traced state is smooth, sharpness field in
 :class:`MFSmoothing` (``math.inf`` = CAM exactly; defaults voted V15-V22).
 The fixed-point exit inside ``condensation_mf`` (|dqc| < 2e-5) is a switch on
 state too (the iteration count jumps with it), so it is smoothed as a carried
-done-weight; its hard limit is CAM's exit exactly (vote V7').
+done-weight; its hard limit is CAM's exit exactly (vote V7').  The integer
+entrainment draws are piecewise constant in the state that seeds them, so
+they carry no gradient (``stop_gradient``); the fluxes stay differentiable
+given the draws.
+
+KNOWN DIFFERENCES at the smooth defaults are stored per fixture column in
+``tests/atmosphere/oracle_fixtures/clubb_mf_default_gaps.json``.
 """
 
 from __future__ import annotations
@@ -47,6 +62,31 @@ from legoesm.thermo import saturation_specific_humidity_cam_table
 
 from legoesm import constants
 
+__physics_contract__ = {
+    "summary": (
+        "CAM7 CLUBB-MF stochastic plume ensemble (reduced setting) and its "
+        "mass-flux convergence of thl and qt as CLUBB's explicit forcing."
+    ),
+    "inputs": {
+        "thl": "K", "qt": "kg/kg", "thv": "K", "u": "m/s", "v": "m/s",
+        "p_zm": "Pa", "zm": "m", "wthl_sfc": "K m/s", "wqt_sfc": "kg/kg m/s",
+        "pblh": "m", "lts": "K",
+    },
+    "outputs": {"thlflx": "K m/s", "qtflx": "kg/kg m/s",
+                "thlm_forcing": "K/s", "rtm_forcing": "kg/kg/s"},
+    "sign_convention": (
+        "Ascending CLUBB grid; fluxes positive upward on momentum levels, zero "
+        "at the surface and model top; forcing = -(1/rho_ds_zt) d(rho_ds_zm F)/dz."
+    ),
+    "conserves": ["column-integrated thl and qt (flux form, zero boundary fluxes)"],
+    "differentiable": True,
+    "reference": (
+        "Suselj et al. (2019), J. Atmos. Sci. 76, 2373-2395; CAM "
+        "atmos_phys0_34_002 schemes/clubb/clubb_mf.F90 and clubb.F90"
+    ),
+    "idealized_test": "tests/atmosphere/hydrostatic/unit/test_clubb_mf_oracle.py",
+}
+
 # --- clubb_mf.F90 integrate_mf PARAMETERs and cam7 namelist defaults ---
 NUP = 25  # clubb_mf_nup (namelist_defaults_cam.xml)
 ENT0 = 0.2  # clubb_mf_ent0
@@ -59,6 +99,25 @@ ENT_MOM_REDUCTION = 3.0
 KSPAN_MIN = 4
 LTS_INHIBIT_THRESH = 20.0  # [K]
 COND_MAX_ITER, COND_TOL = 50, 2.0e-5  # condensation_mf
+L0 = 200.0  # clubb_mf_L0 [m], Lopt 0 (user 2026-11-23)
+KSEED = 1  # clubb_mf_kseed: offset of the 2nd..4th seed winds
+ZTOPM1_COLD = 500.0  # plume-top memory [m] each call starts from (fixture call 1)
+CFLVAL = 1.0  # clubb.F90 compute_mf_plumes: Courant-number limit
+CFL_SHARPNESS = 100.0  # RULE 5 default of the Courant limiter's max(1, .) [1]^-1 (voted)
+
+# --- CESM_share share1.1.22 kissvec.c (Marsaglia KISS) ---
+_KISS_LCG_A, _KISS_LCG_C = 69069, 1327217885
+_KISS_MWC3, _KISS_MWC4, _KISS_LOW16 = 18000, 30903, 65535
+_KISS_SCALE = 2.328306e-10  # int32 -> (0, 1)
+# --- clubb_mf.F90 poisson / hybridRNG / hormann (PTRS, Hormann 1993) ---
+_SEED_SCALE = 1.0e9
+_KNUTH_MAX_LAMBDA = 10.0
+_H_B = (0.931, 2.53)
+_H_A = (-0.059, 0.02483)
+_H_VR = (0.9277, 3.6224)
+_H_AI = (1.1239, 1.1328)
+_H_SHIFT, _H_US_OK, _H_US_BAD = 0.43, 0.07, 0.013
+_STIRLING_K, _STIRLING_C = 10, 360.0
 
 
 class MFSmoothing(NamedTuple):
@@ -242,3 +301,137 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
         k_: trig * v_ + (1.0 - trig) * (off if k_ in ("ztopm1", "cbm1") else 0.0)
         for k_, v_ in out.items()
     }
+
+
+# ---------------------------------------------------------------------------
+# Poisson entrainment draws: CAM's own generator, bit for bit
+# ---------------------------------------------------------------------------
+def _u32(x):
+    return jnp.uint32(x)
+
+
+def _kiss_next(seeds):
+    """One ``kiss_rng`` step (uint32 wrap-around, as the C source)."""
+    s1, s2, s3, s4 = seeds
+    s1 = s1 * _u32(_KISS_LCG_A) + _u32(_KISS_LCG_C)
+    s2 = s2 ^ (s2 << _u32(13))
+    s2 = s2 ^ (s2 >> _u32(17))
+    s2 = s2 ^ (s2 << _u32(5))
+    s3 = _u32(_KISS_MWC3) * (s3 & _u32(_KISS_LOW16)) + (s3 >> _u32(16))
+    s4 = _u32(_KISS_MWC4) * (s4 & _u32(_KISS_LOW16)) + (s4 >> _u32(16))
+    r = jax.lax.bitcast_convert_type(s1 + s2 + (s3 << _u32(16)) + s4, jnp.int32)
+    return (s1, s2, s3, s4), r.astype(jnp.float64) * _KISS_SCALE + 0.5
+
+
+def kiss_seeds(u_seed):
+    """``poisson``'s seed: int((x - int(x)) * 1e9) per wind (Fortran int
+    truncates toward zero), the int32 bits read as uint32 by ``kiss_rng``."""
+    u_seed = jnp.asarray(u_seed, jnp.float64)
+    frac = u_seed - jnp.trunc(u_seed)
+    i32 = jnp.trunc(frac * _SEED_SCALE).astype(jnp.int32)
+    return tuple(jax.lax.bitcast_convert_type(i32[n], jnp.uint32) for n in range(4))
+
+
+def _knuth(seeds, lam):
+    explam = jnp.exp(-1.0 * lam)
+
+    def cond(c):
+        return c[2] > explam
+
+    def body(c):
+        sd, k, puni = c
+        sd, u = _kiss_next(sd)
+        return sd, k + 1, puni * u
+
+    sd, k, _ = jax.lax.while_loop(cond, body, (seeds, jnp.int32(0), jnp.float64(1.0)))
+    return sd, k - 1
+
+
+def _loggam(k):
+    kf = k.astype(jnp.float64)
+
+    def small(_):
+        return jax.lax.fori_loop(
+            1, _STIRLING_K, lambda i, a: a + jnp.where(i <= k, jnp.log(1.0 * i), 0.0),
+            jnp.float64(0.0))
+
+    def big(_):
+        return (jnp.log(jnp.sqrt(2.0 * math.pi)) + (kf + 0.5) * jnp.log(1.0 * kf) - kf
+                + (1.0 / 12.0 - 1.0 / (_STIRLING_C * kf * kf)) / kf)
+
+    return jax.lax.cond(k < _STIRLING_K, small, big, None)
+
+
+def _hormann(seeds, lam):
+    b = _H_B[0] + _H_B[1] * jnp.sqrt(lam)
+    a = _H_A[0] + _H_A[1] * b
+    vr = _H_VR[0] - _H_VR[1] / (b - 2.0)
+    alphinv = _H_AI[0] + _H_AI[1] / (b - 3.4)
+
+    def body(c):
+        sd, _, _ = c
+        sd, U = _kiss_next(sd)
+        sd, V = _kiss_next(sd)
+        U = U - 0.5
+        us = 0.5 - jnp.abs(U)
+        k = jnp.floor((2.0 * a / us + b) * U + lam + _H_SHIFT).astype(jnp.int32)
+        quick = (us >= _H_US_OK) & (V <= vr)
+        skip = (k <= 0) | ((us < _H_US_BAD) & (V > us))
+        kp = jnp.maximum(k, 1)  # log(k) is only read when k > 0
+        lhs = jnp.log(V * alphinv / (a / (us * us) + b))
+        rhs = -1.0 * lam + kp.astype(jnp.float64) * jnp.log(lam) - _loggam(kp)
+        done = quick | (~skip & (lhs <= rhs))
+        return sd, k, done
+
+    sd, k, _ = jax.lax.while_loop(lambda c: ~c[2], body,
+                                  (seeds, jnp.int32(0), jnp.bool_(False)))
+    return sd, k
+
+
+def entrainment_draws(lam, u_seed):
+    """``poisson`` (ksfc = 1 to ktop = nzt, ascending): integer draws
+    ``(nzt, NUP)`` at rates ``lam``, levels outer and plumes inner, one KISS
+    stream seeded from ``u_seed`` (4,).  CAM's ``lam = 0`` level gives -1."""
+    lam = jax.lax.stop_gradient(jnp.asarray(lam, jnp.float64))
+    seeds = kiss_seeds(jax.lax.stop_gradient(u_seed))
+
+    def one(sd, l_):
+        return jax.lax.cond(l_ < _KNUTH_MAX_LAMBDA, _knuth, _hormann, sd, l_)
+
+    _, draws = jax.lax.scan(one, seeds, lam.reshape(-1))
+    return draws.reshape(lam.shape)
+
+
+# ---------------------------------------------------------------------------
+# Host coupling (clubb.F90 compute_mf_plumes, reduced setting)
+# ---------------------------------------------------------------------------
+def mf_lts(T, q_liq, p_full, p_sfc):
+    """CAM's host LTS: thl(700 hPa) - thl(1000 hPa), thl = (T - L/cp q_l)
+    (p_s/p)^kappa, ``mf_pinterp`` = linear in p, end values held (one
+    column, top-down)."""
+    thl = (T - constants.L_v / constants.c_pd * q_liq) * (p_sfc / p_full) ** constants.kappa
+    return (jnp.interp(70000.0, p_full, thl) - jnp.interp(100000.0, p_full, thl))
+
+
+def clubb_mf_forcing(c, dt, rho_ds_zm, invrs_rho_ds_zt, invrs_dzt,
+                     sm: MFSmoothing = MFSmoothing(), cfl_sharpness: float = CFL_SHARPNESS):
+    """One column: the plumes, then CAM's explicit forcing on CLUBB's thermo
+    levels, ``-(1/rho_ds_zt) d(rho_ds_zm F)/dz * cflfac`` for thl and qt.
+    ``c`` as :func:`integrate_mf` (plus ``u`` for the seed); returns
+    ``(thlm_forcing, rtm_forcing, out)``.  CAM's limiter ``cflfac =
+    cflval/max_cfl if max_cfl > cflval`` is ``cflval/max(cflval, max_cfl)``,
+    smoothed with ``cfl_sharpness`` (inf = CAM)."""
+    nzt = c["dzt"].shape[0]
+    lam = (c["dzt"] / L0).at[nzt - 1].set(0.0)[:, None] * jnp.ones((1, NUP))
+    u = c["u"]
+    enti = entrainment_draws(lam, jnp.stack([u[0], u[KSEED], u[1 + KSEED], u[2 + KSEED]]))
+    out = integrate_mf(c, enti, jnp.full((NUP,), ZTOPM1_COLD), sm)
+    aw = jnp.sum(out["upa"] * out["upw"], axis=1).at[0].set(0.0)
+    max_cfl = jnp.max(dt * invrs_dzt * jnp.maximum(jnp.abs(aw[:-1]), jnp.abs(aw[1:])))
+    cflfac = CFLVAL / smooth_max(jnp.asarray(CFLVAL), max_cfl, cfl_sharpness)
+
+    def conv(f):
+        rf = rho_ds_zm * f
+        return -invrs_rho_ds_zt * invrs_dzt * cflfac * (rf[1:] - rf[:-1])
+
+    return conv(out["thlflx"]), conv(out["qtflx"]), dict(out, cflfac=cflfac)
