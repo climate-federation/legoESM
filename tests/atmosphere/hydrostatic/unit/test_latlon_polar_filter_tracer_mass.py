@@ -36,8 +36,22 @@ def _tracer_mass(nat, s, area):
             for k, q in nat.tracers.items()}
 
 
+@pytest.fixture
+def fp64():
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    if not jax.config.jax_enable_x64:
+        pytest.skip("needs JAX_ENABLE_X64=1")
+    prev = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(prev)
+
+
 @pytest.mark.parametrize("coord", ["sigma", "hybrid"])
-def test_polar_filtered_transport_conserves_tracer_mass(coord):
+def test_polar_filtered_transport_conserves_tracer_mass(coord, fp64):
     from legoesm.atmosphere.forcing.idealized.held_suarez import (
         held_suarez_init_latlon)
     from legoesm.grids.factory import create_grid
@@ -45,14 +59,15 @@ def test_polar_filtered_transport_conserves_tracer_mass(coord):
     s = _coords()[coord]
     nat = hydrostatic_to_cgrid(held_suarez_init_latlon(g, s, T_init=280.0), g)
     lat, lon = jnp.asarray(g.lat2d), jnp.asarray(g.lon2d)
-    # zonal structure in p_s and in the tracers where the filter acts
-    wave = (jnp.sin(lat) ** 4 * jnp.cos(3.0 * lon))
+    # zonal structure in p_s and in the tracers at wavenumbers the filter
+    # removes poleward of the cutoff (it keeps only the lowest few there)
+    wave = (jnp.sin(lat) ** 4 * jnp.cos(9.0 * lon))
     nat = nat._replace(
         p_s=nat.p_s + 800.0 * wave,
         u=nat.u + 5.0,
         tracers={"q_v": 5e-3 * (1.0 + 0.5 * wave)[..., None]
                  * jnp.ones_like(nat.T),
-                 "q_c": 1e-4 * (1.0 + jnp.sin(5.0 * lon))[..., None]
+                 "q_c": 1e-4 * (1.0 + jnp.sin(11.0 * lon))[..., None]
                  * jnp.ones_like(nat.T)})
     cfg = CGridLatLonPrimitiveEquationConfig(use_polar_filter=True)
     model = CGridLatLonPrimitiveEquationModel(g, s, cfg, dt=DT)
@@ -61,5 +76,6 @@ def test_polar_filtered_transport_conserves_tracer_mass(coord):
     for _ in range(4):
         nat = model.step(nat, DT)
     m1 = _tracer_mass(nat, s, area)
+    assert nat.p_s.dtype == jnp.float64
     for k in m0:
         assert abs(m1[k] - m0[k]) <= 1e-12 * m0[k], (k, m0[k], m1[k])
