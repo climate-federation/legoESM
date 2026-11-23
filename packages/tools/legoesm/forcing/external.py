@@ -979,9 +979,10 @@ _RRTMGP_SW_BAND_LIMITS_CM1 = (
 )
 # The CMIP6 file is on the RRTMG-SW grid, whose one differing edge is
 # 2600 cm-1 where RRTMGP has 2680 cm-1 (RRTMG band 29 is 820-2600, band 16
-# 2600-3250); every other edge must agree to this relative tolerance.
+# 2600-3250); every other edge must agree, in wavelength, to half the last
+# digit the ETH/IACETH file stores (3 decimals in um: 0.442 for 22650 cm-1).
 _RRTMG_RRTMGP_EDGE_DIFF_CM1 = ((2680.0, 2600.0),)
-_VOLC_SW_EDGE_RTOL = 1.0e-3
+_VOLC_SW_EDGE_ATOL_UM = 5.0e-4
 
 
 @lru_cache(maxsize=4)
@@ -1067,7 +1068,7 @@ def _load_volcanic_sw_optics_profile(path: str):
     for a, b in _RRTMG_RRTMGP_EDGE_DIFF_CM1:
         ref = np.where(ref == a, b, ref)
     if band_wn.shape != ref.shape or not np.allclose(
-            band_wn, ref, rtol=_VOLC_SW_EDGE_RTOL, atol=0.0):
+            1.0e4 / band_wn, 1.0e4 / ref, rtol=0.0, atol=_VOLC_SW_EDGE_ATOL_UM):
         raise ValueError(
             f"Volcanic file {path!r} solar bands {band_wn.tolist()} [cm-1] do "
             "not map 1:1 onto the RRTMGP shortwave bands.")
