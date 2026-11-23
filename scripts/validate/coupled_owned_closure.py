@@ -216,6 +216,11 @@ def main(argv=None) -> int:
                     "increment, safety rails) and name the first stage whose "
                     "output is non-finite from finite inputs, with the "
                     "non-finite count per latitude row")
+    ap.add_argument("--replay-copy-col", type=int, nargs=2, default=None,
+                    metavar=("SRC", "DST"),
+                    help="--nan-stages replay: overwrite column DST of every "
+                    "per-column physics input with column SRC first (to look "
+                    "past a known first NaN source)")
     ap.add_argument("--trace-positivity", action="store_true",
                     help="book the water the dycore's positivity stage (and "
                     "its vapour payment) changes, per call")
@@ -685,6 +690,10 @@ def main(argv=None) -> int:
         vals = list(phys_in["static"])
         for i, x in zip(phys_in["arr"], phys_in["leaves"]):
             vals[i] = jnp.asarray(x)
+        if args.replay_copy_col:
+            src, dst = args.replay_copy_col
+            vals = [v.at[dst].set(v[src]) if hasattr(v, "shape")
+                    and v.ndim >= 1 and v.shape[0] == n else v for v in vals]
         cols, ps, fo = jax.tree_util.tree_unflatten(phys_in["treedef"], vals)
         pf0 = next(iter(pf_wrappers.values()))._orig
         jax.config.update("jax_debug_nans", True)
