@@ -195,7 +195,11 @@ def main(argv=None) -> int:
         ap.error("--ic era5 needs --ic-path")
     real_paths = ("land_mask_file", "clm_surfdata_path", "surfdata",
                   "topography")
-    if args.land == "real":
+    if args.deck:   # the same flags, the deck's own data paths
+        for p in real_paths:
+            if getattr(args, p):
+                deck_argv += ["--" + p.replace("_", "-"), getattr(args, p)]
+    elif args.land == "real":
         missing = [p for p in real_paths if not getattr(args, p)]
         if missing:
             ap.error("--land real needs " + ", ".join(
