@@ -77,6 +77,8 @@ _HARD_SAT_MASK_SHARPNESS = 30.0
 # q_sat underflows (very cold cells); the bisection solve itself uses the true
 # (unfloored) q_sat.  A safety floor (<= 1e-6), not a physical scale.
 _HARD_SAT_QSAT_FLOOR = 1.0e-12
+# Sub-steps per remat chunk of mg2_cloud_fallout (as output.py's _SED_CHUNK).
+_FALLOUT_CHUNK = 8
 
 
 def safe_pow(x, p):
@@ -1339,9 +1341,24 @@ def mg2_cloud_fallout(c0, n0, f, fn, cldm, p_half, dt, n_substeps_max):
         return (c - tend_c * dt * w, n - tend_n * dt * w, dqc - tend_c * w,
                 dn - tend_n * w, dqv + evap * w, sfc + F[:, -1] / g * w[:, 0])
 
+    # Remat per chunk of sub-steps, as sedimentation_tendency: reverse mode
+    # stores each chunk's input carry and recomputes its sub-steps instead of
+    # every sub-step's residuals up to the cap (forward unchanged).  Static
+    # bounds throughout, and the same sub-step sequence 0..n_max-1.
+    n_max = int(n_substeps_max)
+    n_full, n_rem = divmod(n_max, _FALLOUT_CHUNK)
+
+    @jax.checkpoint
+    def chunk(k, carry):
+        return jax.lax.fori_loop(
+            0, _FALLOUT_CHUNK, lambda j, x: body(k * _FALLOUT_CHUNK + j, x), carry)
+
     z = jnp.zeros_like(q_c)
-    _, _, dqc, dn, dqv, sfc = jax.lax.fori_loop(
-        0, int(n_substeps_max), body, (c0, n0, z, z, z, jnp.zeros_like(q_c[:, 0])))
+    carry = jax.lax.fori_loop(0, n_full, chunk, (c0, n0, z, z, z, jnp.zeros_like(q_c[:, 0])))
+    if n_rem:
+        carry = jax.checkpoint(lambda cr: jax.lax.fori_loop(
+            n_max - n_rem, n_max, body, cr))(carry)
+    _, _, dqc, dn, dqv, sfc = carry
     return dqc, dn, dqv, sfc, nstep_req
 
 
