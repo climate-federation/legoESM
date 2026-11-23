@@ -85,6 +85,9 @@ def main():
     p.add_argument("--nlev", type=int, default=64)
     p.add_argument("--dt", type=float, default=None)
     p.add_argument("--surface-flux-to-closure", action="store_true")
+    p.add_argument("--prod-liquid", action="store_true",
+                   help="production CLUBB liquid coupling: liquid_partition + "
+                        "liquid_from_closure + cld_macmic_num_steps=3 (shim)")
     p.add_argument("--out", required=True)
     a = p.parse_args()
     hargs = ["--case", a.case, "--les-dir", a.les_dir, "--schemes", "clubb",
@@ -97,8 +100,22 @@ def main():
     args.scored_override = None
     arm = H._build_arms(args, [a.case], {a.case: Path(a.les_dir)})[0]
     cfg = H._arm_config("clubb", arm, args)
+    if a.prod_liquid:
+        import functools
+        import legoesm.atmosphere.forcing.scm.scm as _scm
+        from legoesm.atmosphere.physics.microphysics.config import (
+            apply_microphysics_experiment_flags)
+        # SingleColumnModel exposes no macmic count; production runs 3.
+        _scm.make_physics = functools.partial(_scm.make_physics,
+                                              cld_macmic_num_steps=3)
+        cfg = cfg._replace(
+            turbulence=cfg.turbulence._replace(liquid_partition=True),
+            microphysics=apply_microphysics_experiment_flags(
+                cfg.microphysics, cfg.microphysics.scheme,
+                liquid_from_closure=True))
     print(f"ARM case={a.case} nlev={arm.case.nlev} dt={arm.dt} hours={arm.hours} "
-          f"window={arm.analysis_hours} h flux_to_closure={a.surface_flux_to_closure}",
+          f"window={arm.analysis_hours} h flux_to_closure={a.surface_flux_to_closure} "
+          f"prod_liquid={a.prod_liquid}",
           flush=True)
     m, ql_hist = rollout(cfg, arm)
     les, nprof = les_window(a.les_dir, arm.hours, arm.analysis_hours)
