@@ -39,6 +39,7 @@ _lr._CASE_ALIASES["bomex"] = frozenset({"bomex", "bomex_cu"})
 # so the SCM crashes. Alias for this probe only (same value).
 from legoesm.atmosphere.forcing.scm.scm import SCMGrid  # noqa: E402
 SCMGrid.lat = property(lambda g: g.grid_lat)
+SCMGrid.latCell = property(lambda g: g.grid_lat)
 
 MOM = ("rtm", "thlm", "um", "vm", "wp2", "wp3", "up2", "vp2", "wprtp",
        "wpthlp", "upwp", "vpwp", "rtp2", "thlp2", "rtpthlp")
