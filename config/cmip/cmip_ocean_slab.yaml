@@ -18,6 +18,10 @@ include: cmip_tuned_physics.yaml
 # --- run orchestration ---
 preset: slab_richards          # Richards multilayer soil -> water-limited ET
 grid_type: latlon
+vertical_form: as83         # Arakawa-Suarez, as MPAS (user 2026-11-19, overturns the
+                            # 2026-11-11 keep-legacy ruling): legacy runs a jet away over
+                            # terrain near day 108 (#2548)
+tracer_vertical_scheme: sb
 energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
 resolution: 24
 nlev: 20
