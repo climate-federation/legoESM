@@ -172,3 +172,23 @@ def test_crm_bench_defaults_are_the_rcemip1_production_deck():
             a.smag_cs) == (1.0e7, 6, 0.1, 0.19)
     assert cfg.semi_implicit_acoustic and cfg.substep_horizontal_acoustic
     assert rcp.parse_args([*crm.RCEMIP1_DECK_ARGV, "--nlev", "8"]).nlev == 8
+
+
+@pytest.mark.parametrize("n, n_nodes, want", [
+    (1, 1, "planes"), (32, 1, "planes"), (64, 1, "planes"), (128, 1, "planes"),
+    (64, 2, "pencil"), (128, 2, "pencil"), (128, 4, "pencil"), (256, 4, "pencil")])
+def test_les_bench_auto_decomp_planes_only_on_one_node(n, n_nodes, want):
+    import bench_spectral_les_dd_scaling as les_b
+    assert les_b.choose_decomp("auto", n_nodes) == want
+    for explicit in ("slab", "pencil", "planes"):
+        assert les_b.choose_decomp(explicit, n_nodes) == explicit
+
+
+def test_les_bench_auto_is_default_and_planes_builds_layout_at_one_rank():
+    import bench_spectral_les_dd_scaling as les_b
+    assert les_b.bench_parser().get_default("decomp") == "auto"
+    assert les_b.builds_layout(les_b.choose_decomp("auto", 1), 1)
+    assert les_b.builds_layout("planes", 1)
+    assert not les_b.builds_layout("pencil", 1)
+    assert not les_b.builds_layout("slab", 1)
+    assert les_b.builds_layout("slab", 2)
