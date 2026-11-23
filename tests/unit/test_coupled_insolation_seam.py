@@ -105,12 +105,16 @@ def test_segment_hands_surface_weighted_sun_or_legacy_daily_mean(
         earth_sun_distance_factor,
     )
     from legoesm.coupler import grid_remap
+    from legoesm.driver.orbit import experiment_orbit
 
     drv = _coupled_driver(244, diurnal=diurnal, orbit_options=orbit_options,
                           output_dir=tmp_path)
-    orbit = earth_orbit() if orbit_options else None
+    # Check orbit resolution independently before using it in the reference.
+    expected_orbit = earth_orbit() if orbit_options else None
     if "orbit_solver" in orbit_options:
-        orbit = orbit._replace(eccentricity=0.2, solver="kepler")
+        expected_orbit = expected_orbit._replace(eccentricity=0.2, solver="kepler")
+    orbit = experiment_orbit(drv.atm_config)
+    assert orbit == expected_orbit
     handed = []
 
     class SurfaceHandoffReachedError(Exception):
@@ -156,14 +160,18 @@ def test_segment_hands_surface_weighted_sun_or_legacy_daily_mean(
 
 
 @pytest.mark.parametrize("precision", [None, "fp64"], ids=["default", "fp64"])
-@pytest.mark.parametrize("daylight_minutes", [20.0, 5.0])
+@pytest.mark.parametrize("peak_cosine", [0.06, 0.0225], ids=["peak_0.06", "peak_0.0225"])
 @pytest.mark.parametrize("terminator", ["sunrise", "sunset"])
 def test_terminator_land_shortwave_budget(tmp_path, record_property, terminator,
-                                          daylight_minutes, precision):
+                                          peak_cosine, precision):
     """A one-hour segment that contains only a few minutes of daylight.
 
-    The segment midpoint is dark, so a midpoint cosine hands the canopy a
-    night sun together with positive shortwave. Fluxes in W/m².
+    The sunlit part ends (sunrise) or starts (sunset) at ``peak_cosine``. Near
+    the horizon the cosine is almost linear in time, so the insolation-weighted
+    cosine is 2/3 of the peak: 0.04 and 0.015, the second 1.5 times the
+    canopy's night cutoff of 0.01 on any grid. The segment midpoint is dark,
+    so a midpoint cosine hands the canopy a night sun together with positive
+    shortwave. Fluxes in W/m².
     """
     from legoesm.land.canopy.radiative_transfer import (
         broadband_albedo,
@@ -179,12 +187,16 @@ def test_terminator_land_shortwave_budget(tmp_path, record_property, terminator,
     from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
     seconds = np.arange(86400.0)
     doy, sod = drv._atm._calendar_for_radiation(seconds / 86400.0)
-    sun = np.asarray(jax.vmap(lambda d, h: cos_zenith_angle(
-        lat[cell], lon[cell], d, h / 3600.0))(doy, sod)) > 0.0
-    rise = seconds[np.flatnonzero(~np.roll(sun, 1) & sun)[0]]
-    fall = seconds[np.flatnonzero(np.roll(sun, 1) & ~sun)[0]]
-    end_seconds = (rise + 60.0 * daylight_minutes if terminator == "sunrise"
-                   else fall + 3600.0 - 60.0 * daylight_minutes)
+    cosine = np.asarray(jax.vmap(lambda d, h: cos_zenith_angle(
+        lat[cell], lon[cell], d, h / 3600.0))(doy, sod))
+    sun = cosine > 0.0
+    rise = np.flatnonzero(~np.roll(sun, 1) & sun)[0]
+    fall = np.flatnonzero(np.roll(sun, 1) & ~sun)[0]
+    # The sunlit part of the segment reaches ``peak_cosine`` at its sunny end.
+    if terminator == "sunrise":
+        end_seconds = seconds[rise + np.flatnonzero(cosine[rise:] >= peak_cosine)[0]]
+    else:
+        end_seconds = seconds[np.flatnonzero(cosine[:fall] >= peak_cosine)[-1]] + 3600.0
     end_day = end_seconds / 86400.0
     dt = 3600.0
 
@@ -202,6 +214,7 @@ def test_terminator_land_shortwave_budget(tmp_path, record_property, terminator,
     handed, mu = forcing.sw_down[cell], forcing.cos_zenith[cell]
     exact = np.asarray(handed).dtype == np.float64
     np.testing.assert_allclose(handed, down, rtol=1e-12 if exact else 1e-6)
+    np.testing.assert_allclose(mu, 2.0 / 3.0 * peak_cosine, rtol=1e-2)
     # The canopy treats a cosine at or below 0.01 as night.
     assert mu > 0.01
 
@@ -216,6 +229,34 @@ def test_terminator_land_shortwave_budget(tmp_path, record_property, terminator,
         record_property(name, float(value))
     # Roundoff only: the land partition must account for the prescribed net SW.
     np.testing.assert_allclose(absorbed, net, rtol=1e-12 if exact else 1e-6)
+
+
+@pytest.mark.parametrize("segment_seconds, end_day", [
+    pytest.param(1000.0, 0.3, id="not_a_multiple_of_300_s"),
+    pytest.param(3600.0, 365.02, id="across_the_year_boundary"),
+])
+def test_weighted_sun_for_other_segment_lengths_and_the_year_boundary(
+        tmp_path, segment_seconds, end_day):
+    """Segment lengths that are not a multiple of the 300 s node spacing, and a
+    segment that runs across the end of the 365-day calendar year."""
+    from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
+    from legoesm.driver.orbit import experiment_orbit
+
+    drv = _coupled_driver(None, diurnal=True, output_dir=tmp_path)
+    lat, lon = drv._atm._grid_lat, drv._atm._grid_lon
+    actual = np.asarray(drv._build_atm_forcing(end_day, segment_seconds=segment_seconds).cos_zenith)
+    days = end_day - (np.arange(int(segment_seconds)) + 0.5) / 86400.0
+    doy, seconds = drv._atm._calendar_for_radiation(days)
+    if end_day > 365.0:
+        assert doy[0] < 2.0 and doy[-1] > 365.0     # the window holds both sides of the wrap
+    orbit = experiment_orbit(drv.atm_config)
+    mu = np.maximum(np.asarray(jax.vmap(lambda d, s: cos_zenith_angle(
+        lat, lon, d, s / 3600.0, orbit=orbit))(doy, seconds)), 0.0)
+    energy = mu.sum(axis=0)
+    expected = (mu * mu).sum(axis=0) / np.where(energy > 0.0, energy, 1.0)
+    assert np.any(energy == 0.0) and np.any(energy > 0.0)
+    np.testing.assert_array_equal(actual[energy == 0.0], 0.0)
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=6e-5)
 
 
 def _earth_system_driver(insolation_start_doy, tmp_path):
