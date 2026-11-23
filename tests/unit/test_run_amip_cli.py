@@ -5946,6 +5946,52 @@ def test_land_canopy_snow_masking_round_trip_and_refusal():
         bad.validate_strict()
 
 
+def test_land_canopy_snow_round_trip_widths_and_refusal():
+    """Canopy snow (CLM5 ON_RAD): off by default and absent from the production
+    deck; the switch and both widths reach ExperimentConfig and the land
+    config; it is refused without the masking, and a width without the switch
+    or outside the RULE 5 range is refused."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land",
+            "--snow-albedo-feedback", "--land-surface-scheme", "two_leaf"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_canopy_snow is False
+    assert cfg0.land_canopy_snow_temperature_width_K is None
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-canopy-snow-masking", "--land-canopy-snow",
+                "--land-canopy-snow-temperature-width-K", "0",
+                "--land-canopy-snow-relative-width", "0.02"]), parser))
+    assert cfg1.land_canopy_snow is True
+    assert cfg1.land_canopy_snow_temperature_width_K == 0.0
+    assert cfg1.land_canopy_snow_relative_width == 0.02
+    p = build_arg_parser()
+    rows = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert "land_canopy_snow" not in rows
+    p.set_defaults(**rows)
+
+    def prod(*flags):
+        return build_config_from_args(_postprocess_args(
+            p.parse_args(_AMIP_DUMMY_PATHS + list(flags)), p))
+
+    prod("--land-canopy-snow-masking", "--land-canopy-snow").validate_strict()
+    with pytest.raises(ValueError, match="land_canopy_snow requires"):
+        prod("--land-canopy-snow").validate_strict()
+    with pytest.raises(ValueError, match="land_canopy_snow is off"):
+        prod("--land-canopy-snow-relative-width", "0.02").validate_strict()
+    with pytest.raises(ValueError, match="relative_width"):
+        prod("--land-canopy-snow-masking", "--land-canopy-snow",
+             "--land-canopy-snow-relative-width", "1e-30").validate_strict()
+    with pytest.raises(ValueError, match="relative_width must be <= 1"):
+        prod("--land-canopy-snow-masking", "--land-canopy-snow",
+             "--land-canopy-snow-relative-width", "3").validate_strict()
+    ramp = prod("--land-canopy-snow-masking", "--land-canopy-snow",
+                "--land-canopy-snow-fcansno-ramp", "0")
+    assert ramp.land_canopy_snow_fcansno_ramp == 0.0
+    ramp.validate_strict()
+
+
 def test_land_canopy_smoothing_widths_round_trip_and_validate():
     parser = build_arg_parser()
     cfg0 = build_config_from_args(_postprocess_args(
