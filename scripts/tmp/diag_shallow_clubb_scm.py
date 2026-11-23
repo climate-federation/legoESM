@@ -86,6 +86,7 @@ def main():
     if a.surface_flux_to_closure:
         hargs += ["--surface-flux-to-closure"]
     args = H.parse_args(hargs)
+    args.scored_override = None
     arm = H._build_arms(args, [a.case], {a.case: Path(a.les_dir)})[0]
     cfg = H._arm_config("clubb", arm, args)
     print(f"ARM case={a.case} nlev={arm.case.nlev} dt={arm.dt} hours={arm.hours} "
