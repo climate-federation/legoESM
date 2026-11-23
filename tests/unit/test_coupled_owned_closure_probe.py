@@ -258,3 +258,19 @@ def test_stale_emission_term_is_the_one_call_lag(capsys):
     assert abs(float(lines["stale"][2])) > 1e-6 * e_atm   # non-vacuous
     assert abs(float(lines["stale_minus_lag"][2])) < 1e-12 * e_atm, (
         lines["stale_minus_lag"])
+
+
+def test_held_evaporation_in_flight_follows_the_physics_schedule():
+    """The atmosphere first applies a land call's held evaporation at the next
+    physics step: with physics every 6 steps a call at the end of step 7 is
+    still wholly in flight at step 12 (measured on the CMIP slab deck: debit
+    minus receipt = 6 steps of the last call's rate)."""
+    assert probe.steps_applied(7, 12, 6) == 0
+    assert probe.steps_applied(1, 12, 6) == 6
+    assert probe.steps_applied(10, 12, 1) == 2       # physics every step: n
+    fl, area, ev, dt, K = np.ones(2), np.ones(2), np.full(2, 1e-5), 300.0, 6
+    full = float(np.sum(fl * ev * area)) * K * dt
+    assert np.isclose(probe.land_in_flight(fl, area, 0.0, ev, 5, K, dt,
+                                           n_applied=0), full)
+    assert np.isclose(probe.land_in_flight(fl, area, 0.0, ev, 5, K, dt),
+                      full / K)

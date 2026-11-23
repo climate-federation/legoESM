@@ -98,15 +98,28 @@ def land_emission_terms(f_land, eps_land, T_land, eps_eff, T_rad, lw_down,
     return e_land, share * (eps_eff * lw_down - lw_net - emit_bb)
 
 
-def land_in_flight(f_land, area, win_sum_precip, held_evap, n, K, dt):
+def land_in_flight(f_land, area, win_sum_precip, held_evap, n, K, dt,
+                   n_applied=None):
     """Water between land and atmosphere at a land-cadence phase [kg]: the
     ``n`` rain samples (``win_sum_precip``, sum of per-cell rates) the land
     has not consumed yet, plus the held land evaporation the land already
-    debited for its ``K``-step interval but the atmosphere still applies for
-    ``K - n`` steps.  Both are owed to the land side.  Pure."""
+    debited for its ``K``-step interval but the atmosphere has applied for
+    only ``n_applied`` steps (default ``n``: physics every step).  Both are
+    owed to the land side.  Pure."""
     rain = (np.sum(f_land * win_sum_precip * area) * dt
             if n > 0 else 0.0)
-    return float(rain + np.sum(f_land * held_evap * area) * (K - n) * dt)
+    m = n if n_applied is None else n_applied
+    return float(rain + np.sum(f_land * held_evap * area) * max(0, K - m)
+                 * dt)
+
+
+def steps_applied(call_step, n_steps, physics_every):
+    """Steps the atmosphere has applied a land call's held evaporation by the
+    end of step ``n_steps``: from the first physics step (``(s - 1) %
+    physics_every == 0``) after the call's step on.  Pure."""
+    s = call_step + 1
+    s += (-(s - 1)) % physics_every
+    return max(0, n_steps - s + 1)
 
 
 def stores(a: dict, k: dict) -> dict:
@@ -528,13 +541,25 @@ def main(argv=None) -> int:
         he = (atm._land_window or {}).get("land_held_evap")
         if he is not None and he is not land_seen.get("held_obj"):
             land_seen["held_obj"] = he
+            land_seen["call_step"] = n_steps[0] + 1
             F["E_land_debit"] += I(f_land * _np(he).reshape(-1)) * max(
                 1, int(round(cfg.land_update_seconds / DT))) * DT
         if args.trace_atm_steps:
             w_now = stores(arrays(), k)["W_atm"]
-            atm_steps.append(dict(
-                step=n_steps[0] + 1, dW=w_now - atm_prev[0],
-                EmP=(I(sd[SL["evap_sfc"]]) - I(sd[SL["precip"]])) * DT))
+            rec = dict(step=n_steps[0] + 1, dW=w_now - atm_prev[0],
+                       EmP=(I(sd[SL["evap_sfc"]]) - I(sd[SL["precip"]])) * DT,
+                       E=I(sd[SL["evap_sfc"]]) * DT,
+                       P=I(sd[SL["precip"]]) * DT)
+            if "precip_conv_sfc" in SL and sd[SL["precip_conv_sfc"]] is not None:
+                rec["P_conv"] = I(sd[SL["precip_conv_sfc"]]) * DT
+            led = getattr(model, "_step_ledger", None)
+            if led is not None:   # the physics' per-process water rows
+                from legoesm.diagnostics.process_ledger import (
+                    LEDGER_PROCESSES)
+                lw_ = _np(led)[:, :, 0]
+                rec["ledger"] = {pn: I(lw_[:, i]) * DT
+                                 for i, pn in enumerate(LEDGER_PROCESSES)}
+            atm_steps.append(rec)
             atm_prev[0] = w_now
         L = atm._land_ml_state   # land's own runoff rate x f_land, per step
         F["R_state"] += float(np.sum(f_land * _np(
@@ -653,7 +678,10 @@ def main(argv=None) -> int:
     F["pend_land"] = land_in_flight(
         f_land, area,
         _np(lw["land_win_sum_precip_total"]).reshape(-1) if n_w > 0 else 0.0,
-        _np(lw["land_held_evap"]).reshape(-1), n_w, K, DT)
+        _np(lw["land_held_evap"]).reshape(-1), n_w, K, DT,
+        n_applied=steps_applied(
+            land_seen["call_step"], n_steps[0],
+            max(1, int(getattr(cfg, "physics_update_steps", 1) or 1))))
     print(f"PENDING land samples n={n_w} K={K} pend_land={F['pend_land']:.6e} kg")
     cw = getattr(atm, "_cpl_window", None) or {}
     if int(cw.get("cpl_win_n", 0)) != 0:
