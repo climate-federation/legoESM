@@ -53,7 +53,8 @@ from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
-    upwind_vertical_gradient,
+    vertical_advection_ocean,
+    advective_vertical_momentum_ocean,
 )
 from legoesm.ocean.state import SpectralOceanState, SpectralOceanConfig
 from legoesm.ocean.physics.mixing import vertical_diffusion
@@ -384,8 +385,8 @@ def spectral_ocean_tendencies(
     A_vor = abs_vor * u_cos * mask_3d
     B_vor = abs_vor * v_cos * mask_3d
 
-    vert_adv_u = _vertical_advection_spectral(u.real, w, z_coord, J.real)
-    vert_adv_v = _vertical_advection_spectral(v.real, w, z_coord, J.real)
+    vert_adv_u = advective_vertical_momentum_ocean(u.real, w, z_coord, J.real)
+    vert_adv_v = advective_vertical_momentum_ocean(v.real, w, z_coord, J.real)
     vert_u_cos = vert_adv_u * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
     vert_v_cos = vert_adv_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
 
@@ -496,7 +497,7 @@ def spectral_ocean_tendencies(
         tracers_t * (div.real * mask_3d)[..., jnp.newaxis]
     )  # (n_lat, n_lon, nlev, n_tr)
     tracer_vert_adv = jax.vmap(
-        lambda q: _vertical_advection_spectral(q, w, z_coord, J.real),
+        lambda q: vertical_advection_ocean(q, w, z_coord, J.real),
         in_axes=-1,
         out_axes=-1,
     )(tracers_t) * mask_3d[..., jnp.newaxis]
@@ -652,21 +653,6 @@ def spectral_ocean_tendencies(
             data=jnp.zeros_like(state.land_mask_grid.data),
         ),
     )
-
-
-def _vertical_advection_spectral(
-    field: jnp.ndarray,
-    w_half: jnp.ndarray,
-    z_coord: OceanZStarCoordinate,
-    jacobian: jnp.ndarray,
-) -> jnp.ndarray:
-    """Vertical advection -w * d(field)/dz with upwind scheme (momentum)."""
-    w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
-    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
-
-    dz_half = z_coord.dz_half_ref * jac_safe
-    grad = upwind_vertical_gradient(field, dz_half, w_full)
-    return -w_full * grad
 
 
 # ==============================================================================
