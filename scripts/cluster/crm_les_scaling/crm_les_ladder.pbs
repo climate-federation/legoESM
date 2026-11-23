@@ -26,7 +26,8 @@
 #               too (bench --single-rank-path halo, the like-for-like baseline).
 #   LES_DECOMPS "auto"  any of auto / slab / pencil / planes (planes = pencil
 #               mesh with the one-all-to-all planes FFT, its 1-rank point runs
-#               the planes layout too; auto = planes up to 64 ranks, else pencil)
+#               the planes layout too; auto = planes when all ranks share one node,
+#               else pencil)
 #   PPN_MAX     ranks per node (default 128 = packed); a divisor of 128. N >
 #               PPN_MAX runs on N/PPN_MAX equally filled nodes (N must be a
 #               multiple), cores at stride 128/PPN_MAX

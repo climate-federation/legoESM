@@ -47,17 +47,26 @@ from bench_plane_crm_dd_scaling import (  # noqa: E402
 )
 
 
-# Voted 2026-11-22 (author b / GLM b / codex d): planes up to 64 ranks, pencil
-# above. Measured weak fp32: planes wins at 32 (1 node) and 64 (1 or 2 nodes),
-# ties at 128 on 4 nodes x 32 and loses at 128 on 2 x 64 and 256 on 4 x 64.
-_AUTO_PLANES_MAX_RANKS = 64
-
-
-def choose_decomp(decomp: str, n: int) -> str:
-    """Resolve ``--decomp auto`` to ``planes`` (N <= 64) or ``pencil``."""
+# Voted 2026-11-22, revised after the same-code rerun at e55ef4b (a/a/a):
+# planes only when every rank shares one node, else pencil. Measured weak
+# fp32: planes wins at 32 and 64 ranks on 1 node; pencil wins on 2+ nodes from
+# 64 ranks (64 on 2 x 32: 35% vs 30%; 256 on 4 x 64: 17% vs 6%) - the planes
+# all-to-all over every rank does not scale across nodes.
+def choose_decomp(decomp: str, n_nodes: int) -> str:
+    """Resolve ``--decomp auto`` to ``planes`` (one node) or ``pencil``."""
     if decomp != "auto":
         return decomp
-    return "planes" if n <= _AUTO_PLANES_MAX_RANKS else "pencil"
+    return "planes" if n_nodes == 1 else "pencil"
+
+
+def count_nodes(comm) -> int:
+    """Number of shared-memory nodes the communicator spans (MPI
+    ``COMM_TYPE_SHARED`` split: one local root per node)."""
+    from mpi4py import MPI
+    local = comm.Split_type(MPI.COMM_TYPE_SHARED)
+    roots = comm.allreduce(1 if local.Get_rank() == 0 else 0)
+    local.Free()
+    return roots
 
 
 def builds_layout(decomp: str, n: int) -> bool:
@@ -74,7 +83,7 @@ def bench_parser() -> argparse.ArgumentParser:
     p.add_argument("--case", default="cbl_nieuwstadt")
     p.add_argument("--decomp", choices=["auto", "slab", "pencil", "planes"],
                    default="auto",
-                   help="auto = planes up to 64 ranks, pencil above; "
+                   help="auto = planes when all ranks share one node, else pencil; "
                         "slab = y-slabs over all ranks; pencil = most-square "
                         "y x x rank mesh; planes = the pencil mesh with the "
                         "planes FFT mode (one all-to-all per transform)")
@@ -173,7 +182,8 @@ def main(argv=None):
     rank, n = comm.Get_rank(), comm.Get_size()
     n_y, n_x = most_square_factors(n)
     ny_g, nx_g = global_grid_shape(bargs.mode, bargs.ny, bargs.nx, n_y, n_x)
-    decomp = choose_decomp(bargs.decomp, n)
+    n_nodes = count_nodes(comm)
+    decomp = choose_decomp(bargs.decomp, n_nodes)
     p_y, p_x = (n_y, n_x) if decomp in ("pencil", "planes") else (n, 1)
     if ny_g % p_y or nx_g % p_x:
         raise SystemExit(f"global {ny_g}x{nx_g} not divisible by mesh {p_y}x{p_x}")
@@ -226,7 +236,7 @@ def main(argv=None):
             "model": "spectral_les", "case": case.name, "sgs": sgs,
             "mode": bargs.mode, "precision": bargs.precision, "n_ranks": n,
             "ny_global": ny_g, "nx_global": nx_g, "nz": bargs.nz,
-            "ny_local": ny_l, "nx_local": nx_l, "decomp": decomp,
+            "ny_local": ny_l, "nx_local": nx_l, "decomp": decomp, "n_nodes": n_nodes,
             "mesh": [p_y, p_x], "dx": g.dx, "dy": g.dy, "dz": g.dz, "dt": dt0,
             "time_steps": bargs.time_steps, "windows": bargs.windows,
             "compile_plus_first_step_s": t_compile,
