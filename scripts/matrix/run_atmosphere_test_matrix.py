@@ -4743,18 +4743,15 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
                         radiation: str = "gray") -> tuple[str, float, str]:
     """Run DCMIP-2012 transport test cases (Tests 1-1, 1-2, 1-3).
 
-    Supports cubed-sphere, lat-lon, and icosahedral grids.
-    Spectral grids are skipped (no tracer advection infrastructure).
+    Supports cubed-sphere, lat-lon, icosahedral and spectral (Gaussian)
+    grids.  The spectral row uses ``SpectralTracerTransportModel`` with the
+    same geographic winds and analytic initial tracers as the lat-lon row
+    (sampled on the Gaussian grid's ``lon2d``/``lat2d``).
 
     Produces tracer snapshots, lat/lon cross-sections, and vertical profiles
     via _save_case_diagnostics.
     """
     test_num = tc.run_kwargs["test_num"]
-
-    if tc.grid_type == "spectral":
-        record(tc, "SKIP", 0.0,
-               "DCMIP transport not implemented for spectral grid")
-        return "SKIP", 0.0, ""
 
     # --- Shared imports (grid-independent IC/wind helpers) ---
     from tests.test_cases.dcmip_transport import (
@@ -4786,6 +4783,12 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         elif tc.grid_type == "icosahedral":
             dt = 600.0   # reduce dispersion errors in centered scheme
     sigma_coord = create_dcmip_sigma(nlev)
+
+    # Grid-space view of a state.  Identity on the grid-point models; the
+    # spectral branch overrides it with the SH synthesis.  ``state_init_grid``
+    # is the analytic IC on the grid (the "exact" field for the norms).
+    def to_grid(s):
+        return s
 
     # --- Grid-specific setup ---
     if tc.grid_type == "cubed_sphere":
@@ -4879,16 +4882,58 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         coord_kind = "icosa"
         lon_deg = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_spectral import (
+            SpectralTracerTransportModel, TracerTransportSpectralConfig,
+            spectral_tracer_grid_values, spectral_tracer_state)
+        from tests.test_cases.dcmip_transport import (
+            dcmip11_init_latlon, dcmip12_init_latlon, dcmip13_init_latlon)
+
+        n_max = int(tc.resolution.replace("T", ""))
+        wind_geo_fn = cfg["wind_geo"]
+
+        def spectral_wind(t, g, sc):
+            return wind_geo_fn(t, g.lon2d, g.lat2d, sc)
+
+        model = SpectralTracerTransportModel(
+            create_gaussian_grid(n_max), sigma_coord, spectral_wind,
+            TracerTransportSpectralConfig())
+        grid = model.grid
+        # The lat-lon init helpers read only lon2d/lat2d/n_lat/n_lon, which
+        # the Gaussian grid exposes too: same analytic IC as the lat-lon row.
+        init_fns = {
+            11: dcmip11_init_latlon,
+            12: dcmip12_init_latlon,
+            13: dcmip13_init_latlon,
+        }
+        state_init_grid = init_fns[test_num](grid, sigma_coord)
+        # Start from the Orszag-band state the model carries (the model
+        # would otherwise drop the upper band only after the first step).
+        state_init = model._truncate(spectral_tracer_state(
+            grid, state_init_grid.tracers.data))
+
+        def to_grid(s):
+            return s._replace(tracers=s.tracers.replace(
+                data=spectral_tracer_grid_values(grid, s)))
+
+        coord_kind = "gaussian"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
     else:
         record(tc, "SKIP", 0.0,
                f"DCMIP transport not implemented for grid '{tc.grid_type}'")
         return "SKIP", 0.0, ""
 
+    if tc.grid_type != "spectral":
+        state_init_grid = state_init
+
     # --- Extract function for tracer snapshots ---
     n_tracers = cfg["n_tracers"]
 
     def extract_fn(s):
-        q = np.asarray(s.tracers.data, dtype=np.float64)
+        q = np.asarray(to_grid(s).tracers.data, dtype=np.float64)
         out = {}
         # Surface-level (bottom) tracer for 2D map snapshots
         for i in range(min(n_tracers, 4)):
@@ -4901,13 +4946,14 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         return model.step(s, dt_)
 
     def check_fn(s):
-        return (check_finite({"tracers": s.tracers.data}),
-                float(jnp.max(jnp.abs(s.tracers.data))))
+        q = to_grid(s).tracers.data
+        return (check_finite({"tracers": q}),
+                float(jnp.max(jnp.abs(q))))
 
     _area_for_mean = _grid_cell_area(grid)
 
     def scalar_fn(s):
-        q = s.tracers.data
+        q = to_grid(s).tracers.data
         return {
             "q1_min": float(jnp.min(q[..., 0])),
             "q1_max": float(jnp.max(q[..., 0])),
@@ -4928,13 +4974,29 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         label=f"DCMIP transport {test_num} ({tc.grid_type})",
         total_days=period)
 
-    # --- Error norms (for flow-reversal tests on cubed-sphere) ---
-    notes = ""
-    if test_num in (11, 12) and tc.grid_type == "cubed_sphere":
-        norms = compute_tracer_error_norms(state_final, state_init, grid)
-        norm_strs = [f"q{i + 1} L2={norms['l2'][i]:.4e}"
-                     for i in range(n_tracers)]
-        notes = ", ".join(norm_strs)
+    # --- Error norms (flow-reversal tests 1-1 / 1-2, every grid) ---
+    # Exact solution at t = T is the analytic IC on the grid, so the norms
+    # are reported only when the run reached the full period T.
+    from tests.test_cases.dcmip_transport import compute_tracer_error_norms
+    _area_ns = SimpleNamespace(area=_area_for_mean)
+    notes_parts = []
+    if (test_num in (11, 12) and ok
+            and n_steps * dt == cfg["period"] * 86400.0):
+        norms = compute_tracer_error_norms(
+            to_grid(state_final), state_init_grid, _area_ns)
+        notes_parts += [
+            f"q{i + 1} L1={norms['l1'][i]:.4e} "
+            f"L2={norms['l2'][i]:.4e} Linf={norms['linf'][i]:.4e}"
+            for i in range(n_tracers)]
+    if test_num in (11, 12) and tc.grid_type == "spectral":
+        # Initialization (projection + Orszag truncation) error alone, so
+        # the transport error can be separated from it.
+        ic_norms = compute_tracer_error_norms(
+            to_grid(state_init), state_init_grid, _area_ns)
+        notes_parts.append("IC-projection " + ", ".join(
+            f"q{i + 1} L2={ic_norms['l2'][i]:.4e}"
+            for i in range(n_tracers)))
+    notes = ", ".join(notes_parts)
 
     # --- Diagnostics output ---
     level_values = np.asarray(sigma_coord.sigma_full, dtype=np.float64)
