@@ -121,6 +121,7 @@ L0 = 200.0  # clubb_mf_L0 [m], Lopt 0 (user 2026-11-23)
 KSEED = 1  # clubb_mf_kseed: offset of the 2nd..4th seed winds
 ZTOPM1_COLD = 500.0  # plume-top memory [m] each call starts from (fixture call 1)
 CFLVAL = 1.0  # clubb.F90 compute_mf_plumes: Courant-number limit
+_MOIST_A_FLOOR = 1.0e-30  # division floor: moist_qc numerator is 0 wherever moist_a is
 CFL_SHARPNESS = 100.0  # RULE 5 default of the Courant limiter's max(1, .) [1]^-1 (voted)
 
 # --- CESM_share share1.1.22 kissvec.c (Marsaglia KISS) ---
@@ -311,9 +312,16 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
     cb = jnp.sum(first_cl * zm[:, None], axis=0) + (1.0 - jnp.sum(first_cl, axis=0)) * (
         jnp.sum(first_dead * zm[:, None], axis=0) + jnp.prod(on, axis=0) * zm[-1]
     )
+    # moist-plume aggregates (CAM "updraft properties for output"): plumes
+    # with upqc > 0 (the qc switch); in-cloud condensate = area-weighted mean
+    moist = up["upa"] * _strict_pos(ex, sm.qc)
+    moist_a = jnp.sum(moist, axis=1)
+    moist_qc = jnp.sum(moist * up["upqc"], axis=1) / jnp.maximum(moist_a, _MOIST_A_FLOOR)
     out = dict(
         up,
         **flux,
+        moist_a=moist_a,
+        moist_qc=moist_qc,
         ztopm1=ztop,
         cbm1=(1.0 - early) * jnp.mean(cb) + early * zm[0],
         n_alive=jnp.sum(alive, axis=0),
@@ -458,3 +466,38 @@ def clubb_mf_forcing(c, dt, rho_ds_zm, invrs_rho_ds_zt, invrs_dzt,
         return -invrs_rho_ds_zt * invrs_dzt * cflfac * (rf[1:] - rf[:-1])
 
     return conv(out["thlflx"]), conv(out["qtflx"]), dict(out, cflfac=cflfac)
+
+
+# ---------------------------------------------------------------------------
+# Deep-cloud hookup (atmos_phys clubb.F90 clubb3_run, do_clubb_mf_rad)
+# ---------------------------------------------------------------------------
+MF_CONCLD_MAX = 0.8  # clubb3_run: concld = min(deepcu, 0.80)
+
+
+def _select(a, b, sharpness):
+    """Weight of ``a`` in the larger-of-two choice: exactly ``a > b`` at inf;
+    a convex blend otherwise, so two zero clouds stay exactly zero."""
+    return _strict_pos(a - b, sharpness)
+
+
+def mf_deep_cloud(deepcu_zm, icwmr_zm, mf_cloudfrac, mf_qc, cfg):
+    """ZM's deep cloud combined with the plume cloud, top-down (ncol, nlev).
+
+    CAM7 sets ``deepcu = clubb_mf_cldfrac_fac * mf_cloudfrac``, ``dp_icwmr =
+    mf_qc``, zeroed where ``deepcu <= frac_limit`` or ``dp_icwmr < ic_limit``
+    (layers 1..pver-1); here that cloud and ZM's are combined as the larger
+    fraction per level, with that cloud's in-cloud water (user 2026-11-23).
+    Returns ``(deepcu, icwmr)``; the 0.8 cap is :func:`mf_concld`."""
+    dc = cfg.mf_cldfrac_fac * mf_cloudfrac
+    keep = (_strict_pos(dc - cfg.cam6_deepcu_frac_limit, cfg.mf_deepcu_frac_gate_sharpness)
+            * sigmoid_switch(mf_qc - cfg.cam6_deepcu_ic_limit,
+                             cfg.mf_deepcu_ic_gate_sharpness))  # kept iff qc >= ic_limit
+    dc = (dc * keep).at[:, -1].set(0.0)
+    w = _select(dc, deepcu_zm, cfg.mf_deepcu_select_sharpness)
+    return w * dc + (1.0 - w) * deepcu_zm, w * mf_qc + (1.0 - w) * icwmr_zm
+
+
+def mf_concld(deepcu, cfg):
+    """``min(deepcu, 0.8)`` (CAM concld, the cloud-fraction share), smooth."""
+    w = _select(deepcu, jnp.asarray(MF_CONCLD_MAX), cfg.mf_deepcu_cap_sharpness)
+    return w * MF_CONCLD_MAX + (1.0 - w) * deepcu

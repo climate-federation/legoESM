@@ -753,6 +753,9 @@ def _carry_update_with_cloud_fraction(carry_field, carry_val, turb_out):
         updates["clubb_wp2_iface"] = turb_out.wp2_iface
     if turb_out.Kh_iface is not None:
         updates["clubb_kh_iface"] = turb_out.Kh_iface
+    if turb_out.mf_cloudfrac is not None:
+        updates["mf_cloudfrac"] = turb_out.mf_cloudfrac
+        updates["mf_qc"] = turb_out.mf_qc
     if carry_field is not None and carry_val is not None:
         updates[carry_field] = carry_val
     return updates
