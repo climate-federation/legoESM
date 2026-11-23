@@ -70,7 +70,6 @@ from legoesm import constants
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     vertical_advection_ocean as _vertical_advection_ocean,
-    advective_vertical_momentum_ocean,
 )
 from legoesm.ocean.dynamics.barotropic import fill_land_cells
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d, vertical_diffusion
@@ -615,14 +614,10 @@ def ocean_baroclinic_tendencies_cdgrid(
     du_dt, dv_dt = dgrid_to_center_vector(du_d_dt, dv_d_dt)
 
     # --- 15. Vertical advection of u, v (cell-centre) ---
-    # Batch the two advective momentum calls by stacking
-    # (u_a, v_a) along a new leading axis.  ``w_full`` / ``jac_safe`` /
-    # ``dz_half`` depend only on (w, z_coord, J), so they are
-    # computed once and the trailing-axis ``[..., :-1] - [..., 1:]``
-    # upwind gradient broadcasts across the new axis.  Same
-    # leading-axis batching as Loop 142 in CD-grid CE / PE.
+    # Same continuity-paired operator as the tracers (u, v, w and h are all
+    # cell-centred here), so column h*u closes in the vertical split (#2662).
     _uv_a_va = jnp.stack([u_a, v_a], axis=0)
-    _uv_a_va_adv = advective_vertical_momentum_ocean(_uv_a_va, w, z_coord, J)
+    _uv_a_va_adv = _vertical_advection_ocean(_uv_a_va, w, z_coord, J)
     du_dt = du_dt + _uv_a_va_adv[0]
     dv_dt = dv_dt + _uv_a_va_adv[1]
 

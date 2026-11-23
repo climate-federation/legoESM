@@ -111,21 +111,36 @@ def test_census_known_budgets():
         paired_column_budget(1.0, q, [[np.nan, 0.0]], 0.0)
 
 
-@pytest.mark.parametrize("module,fn,momentum,tracer", [
-    (cd, cd.ocean_baroclinic_tendencies_cdgrid, "advective_vertical_momentum_ocean", "_vertical_advection_ocean"),
-    (so, so.spectral_ocean_tendencies, "advective_vertical_momentum_ocean", "vertical_advection_ocean"),
+@pytest.mark.parametrize("profile", ["ekman", "jet"])
+def test_paired_column_momentum_conservation(operator, profile):
+    # Velocity-shaped profiles: the old cell-upwind momentum operator leaked
+    # 6e-2 / 2.5e-2 relative on these (#2662); momentum now shares this operator.
+    zc, J, h, T, S, w = _census["realistic_ocean_columns"]()
+    depth = -zc.z_full_ref * J[:, None]
+    u = (0.2 * jnp.exp(-depth / 50.0) if profile == "ekman"
+         else 0.1 * jnp.exp(-((depth - 200.0) / 150.0) ** 2))
+    uv = jnp.stack([u, -0.5 * u], axis=0)  # CD-grid stacks (u_a, v_a) on a leading axis
+    duv = operator(uv, w, zc, J)
+    for k in range(2):
+        r = paired_column_budget(h, uv[k], duv[k], jnp.diff(w))
+        assert r["max_relative"] <= 1e-12, r
+        np.testing.assert_array_equal(duv[k], operator(uv[k], w, zc, J))
+
+
+@pytest.mark.parametrize("module,fn,op,n_calls", [
+    (cd, cd.ocean_baroclinic_tendencies_cdgrid, "_vertical_advection_ocean", 2),
+    (so, so.spectral_ocean_tendencies, "vertical_advection_ocean", 3),
 ])
-def test_production_wiring(module, fn, momentum, tracer):
-    # Inspect the actual tendency function, including nested vmap bodies.
+def test_production_wiring(module, fn, op, n_calls):
+    # Tracers AND u/v use the paired operator: CD-grid = (u_a,v_a) stack + T/S vmap,
+    # spectral = u, v, tracer vmap. Inspect the tendency function incl. nested bodies.
     tree = ast.parse(inspect.getsource(fn))
     calls = [n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-    assert calls.count(momentum) == (1 if module is cd else 2)
-    assert calls.count(tracer) == 1
-    # Also refuse any additional caller elsewhere in either backend module.
+    assert calls.count(op) == n_calls
+    assert "advective_vertical_momentum_ocean" not in calls
     module_tree = ast.parse(inspect.getsource(module))
     module_calls = [n.func.id for n in ast.walk(module_tree)
                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-    assert module_calls.count(momentum) == calls.count(momentum)
-    assert module_calls.count(tracer) == calls.count(tracer)
-    assert getattr(module, momentum) is ov.advective_vertical_momentum_ocean
-    assert getattr(module, tracer) is ov.vertical_advection_ocean
+    assert module_calls.count(op) == n_calls
+    assert getattr(module, op) is ov.vertical_advection_ocean
+    assert not hasattr(ov, "advective_vertical_momentum_ocean")
