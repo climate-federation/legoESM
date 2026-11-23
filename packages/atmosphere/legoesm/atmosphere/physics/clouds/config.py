@@ -592,6 +592,10 @@ def build_cloud_config(
                         ("cap_floor_q_c", cap_floor_q_c)):
         if _val is not None:
             overrides[_name] = _val
+    if overrides.get("clubb_mf_cloud") and scheme != "cam6_clubb":
+        raise ValueError(
+            "clubb_mf (CAM7 CLUBB-MF) hands its plume cloud to the cam6_clubb "
+            f"deep cloud; cloud scheme {scheme!r} has none to combine it with.")
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )
