@@ -2340,6 +2340,36 @@ def sb81_full_level_ln_p(
     return jnp.log(p_half_safe[..., 1:]) - alpha
 
 
+def cam_pi_B_dT_dp(
+    T: jax.Array,
+    p_s: jax.Array,
+    coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """``(pi B dT/dp)_k`` of the CAM3 partial correction of horizontal
+    temperature diffusion to pressure surfaces (Collins et al. 2004,
+    NCAR/TN-464+STR, eqs. 3.194-3.196), shape ``(..., nlev)``:
+
+        k interior: pi/(2 dp_k) [B_{k+1/2}(T_{k+1}-T_k) + B_{k-1/2}(T_k-T_{k-1})]
+        top / bottom: the single interior-interface term of the same form.
+
+    ``pi = p_s``; ``B`` the half-level B (sigma: ``sigma_half``); ``dp_k`` the
+    layer thickness.  The corrected harmonic diffusion is (eq. 3.80)
+    ``lap_p T = lap_eta T - (pi B dT/dp) lap(ln pi)``.  Zero for an
+    isothermal column.
+    """
+    if isinstance(coord, HybridSigmaPressureCoordinate):
+        B = coord.B_half.astype(T.dtype)
+        dp = dp_from_hybrid(coord, p_s)
+    else:
+        B = coord.sigma_half.astype(T.dtype)
+        dp = p_s[..., None] * coord.dsigma.astype(T.dtype)
+    jump = B[1:-1] * (T[..., 1:] - T[..., :-1])          # B_{k+1/2}(T_{k+1}-T_k)
+    pad = ((0, 0),) * (T.ndim - 1)
+    below = jnp.pad(jump, (*pad, (0, 1)))                # interface k+1/2
+    above = jnp.pad(jump, (*pad, (1, 0)))                # interface k-1/2
+    return p_s[..., None] * (below + above) / (2.0 * dp)
+
+
 def compute_geopotential_hybrid(
     T: jax.Array,
     p_s: jax.Array,

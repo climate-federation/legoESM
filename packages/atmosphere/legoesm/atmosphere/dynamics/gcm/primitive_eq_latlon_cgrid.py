@@ -77,6 +77,7 @@ from legoesm.grids.vertical import (
     pressure_from_sigma,
     pressure_from_hybrid,
     dp_from_hybrid,
+    cam_pi_B_dT_dp,
     compute_geopotential,
     compute_geopotential_hybrid,
     vertical_advection,
@@ -558,7 +559,16 @@ def latlon_dissipation(du_dt, dv_dt, dT_dt, u, v, T, p_s, grid, sigma_coord,
         lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
         du_dt = du_dt + config.A_h * lap_u
         dv_dt = dv_dt + config.A_h * lap_v
+        # T diffusion partially corrected to pressure surfaces (CAM3,
+        # Collins et al. 2004, eq. 3.80 with the eq. 3.194-3.196 vertical
+        # differences): lap_p T = lap_eta T - (pi B dT/dp) lap(ln pi).
+        # Without it a stratified atmosphere at rest over terrain is heated /
+        # cooled along the sloping eta surfaces (~160 K/day at the lowest level
+        # of DCMIP 2012 2-0-0 on 72x144) and the winds grow without bound.
+        # Isothermal columns: dT/dp = 0, unchanged.
         lap_T = laplacian_cgrid(T, grid)
+        lap_lnps = laplacian_cgrid(jnp.log(p_s)[..., jnp.newaxis], grid)
+        lap_T = lap_T - cam_pi_B_dT_dp(T, p_s, sigma_coord) * lap_lnps
         dT_dt = dT_dt + config.A_h * lap_T
 
     # --- 13a. Biharmonic hyperdiffusion (optional) ---
