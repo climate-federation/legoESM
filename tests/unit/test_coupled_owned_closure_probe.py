@@ -274,3 +274,26 @@ def test_held_evaporation_in_flight_follows_the_physics_schedule():
                                            n_applied=0), full)
     assert np.isclose(probe.land_in_flight(fl, area, 0.0, ev, 5, K, dt),
                       full / K)
+
+
+@pytest.mark.slow
+def test_step_trace_pairs_each_step_with_the_state_it_made(tmp_path):
+    """The driver installs a step's state only after the probe's hook
+    returns, so each record is completed on the next call: the per-step
+    water changes then sum to the run's whole change, and the first step is
+    not the identity.  A dump needs no trace."""
+    import json
+    base = ["--grid", "latlon", "--resolution", "12", "--dt", "600",
+            "--vertical-coord", "cam_l32", "--nlev", "32", "--days", "0.0625"]
+    out = tmp_path / "trace.json"
+    assert probe.main(base + ["--trace-atm-steps", "--json", str(out)]) == 0
+    res = json.loads(out.read_text())
+    steps = res["atm_steps"]
+    assert [r["step"] for r in steps] == list(range(1, res["steps"] + 1))
+    total = res["stores1"]["W_atm"] - res["stores0"]["W_atm"]
+    assert np.isclose(sum(r["dW"] for r in steps), total,
+                      rtol=1e-9, atol=1.0), (sum(r["dW"] for r in steps), total)
+    assert steps[0]["dW"] != 0.0
+    out2 = tmp_path / "dump.json"
+    assert probe.main(base + ["--dump-step", "2", "--json", str(out2)]) == 0
+    assert (tmp_path / "dump.step2.npz").exists()

@@ -566,7 +566,7 @@ def main(argv=None) -> int:
             r = (r + jnp.sum(area2 * jnp.sum(qs * dB, -1) * dps)) / constants.g
             jax.debug.callback(_cb("transport_raw_rate"), r)
             ctx.update(dp=dp, area=area2, qdB=jnp.sum(qs * dB, -1),
-                       names=list(dq), n=0, water=set(names))
+                       names=list(dq), n=0, water=set(names), in_tend=True)
             return out
 
         def ff3_w(field, grid_, mask):
@@ -574,6 +574,8 @@ def main(argv=None) -> int:
             i = ctx.get("n", 99)
             ctx["n"] = i + 1
             j = i - 3                      # dT, du, dv come first
+            if j >= len(ctx.get("names", ())) - 1:
+                ctx["in_tend"] = False     # past this stage's last tracer
             if 0 <= j < len(ctx.get("names", ())) and \
                     ctx["names"][j] in ctx["water"]:
                 jax.debug.callback(_cb("polar_filter_dq_rate"), jnp.sum(
@@ -583,7 +585,9 @@ def main(argv=None) -> int:
 
         def ff2_w(field, grid_, mask):
             out = _ff2(field, grid_, mask)
-            if "qdB" in ctx and field.shape == ctx["qdB"].shape:
+            # dynamics stages only: the physics increment's dps filter is
+            # an increment [Pa], not a stage rate
+            if ctx.get("in_tend") and field.shape == ctx["qdB"].shape:
                 jax.debug.callback(_cb("polar_filter_dps_rate"), jnp.sum(
                     ctx["area"] * ctx["qdB"] * (out - field)) / constants.g)
             return out
@@ -613,7 +617,38 @@ def main(argv=None) -> int:
             return out_b
         dyn.step = traced_dyn_step
 
+    pend_rec = [None]
+
+    def finish_rec():
+        """Complete the last step's record on the state it produced."""
+        rec, pend_rec[0] = pend_rec[0], None
+        if rec is None:
+            return
+        lw_, (ev_, pr_) = rec.pop("_led"), rec.pop("_sd")
+        if args.trace_atm_steps:
+            w_now = stores(arrays(), k)["W_atm"]
+            rec["dW"] = w_now - atm_prev[0]
+            atm_prev[0] = w_now
+            rec["species"] = species_totals()
+            if lw_ is not None:   # the physics' per-process water rows
+                from legoesm.diagnostics.process_ledger import (
+                    LEDGER_PROCESSES)
+                rec["ledger"] = {pn: I(lw_[:, i]) * DT
+                                 for i, pn in enumerate(LEDGER_PROCESSES)}
+            atm_steps.append(rec)
+        if rec["step"] in args.dump_step and args.json:
+            np.savez(str(Path(args.json).with_suffix(
+                f".step{rec['step']}.npz")),
+                     ledger_water=(np.full((n, 1), np.nan) if lw_ is None
+                                   else lw_),
+                     evap=ev_, precip=pr_, area=area, f_land=f_land,
+                     lat=_np(model.mesh.latCell).reshape(-1),
+                     dp=layer_dp(),
+                     **{sp: _np(atm.current_tracer(sp)).reshape(n, -1)
+                        for sp in carried})
+
     def step(*a, **kw):
+        finish_rec()
         out = orig(*a, **kw)
         sd = model._sfc_diag
         F["P_atm"] += I(sd[SL["precip"]]) * DT
@@ -637,37 +672,18 @@ def main(argv=None) -> int:
             land_seen["call_step"] = n_steps[0]
             F["E_land_debit"] += I(f_land * _np(he).reshape(-1)) * max(
                 1, int(round(cfg.land_update_seconds / DT))) * DT
-        if args.trace_atm_steps:
-            w_now = stores(arrays(), k)["W_atm"]
-            rec = dict(step=n_steps[0] + 1, dW=w_now - atm_prev[0],
-                       EmP=(I(sd[SL["evap_sfc"]]) - I(sd[SL["precip"]])) * DT,
-                       E=I(sd[SL["evap_sfc"]]) * DT,
-                       P=I(sd[SL["precip"]]) * DT)
-            if "precip_conv_sfc" in SL and sd[SL["precip_conv_sfc"]] is not None:
-                rec["P_conv"] = I(sd[SL["precip_conv_sfc"]]) * DT
-            rec["species"] = species_totals()
-            led = getattr(model, "_step_ledger", None)
-            if led is not None:   # the physics' per-process water rows
-                from legoesm.diagnostics.process_ledger import (
-                    LEDGER_PROCESSES)
-                lw_ = _np(led)[:, :, 0]
-                rec["ledger"] = {pn: I(lw_[:, i]) * DT
-                                 for i, pn in enumerate(LEDGER_PROCESSES)}
-            atm_steps.append(rec)
-        if n_steps[0] + 1 in args.dump_step and args.json:
-            led = getattr(model, "_step_ledger", None)
-            np.savez(str(Path(args.json).with_suffix(
-                f".step{n_steps[0] + 1}.npz")),
-                     ledger_water=(np.full((n, 1), np.nan) if led is None
-                                   else _np(led)[:, :, 0]),
-                     evap=_np(sd[SL["evap_sfc"]]).reshape(-1),
-                     precip=_np(sd[SL["precip"]]).reshape(-1),
-                     area=area, f_land=f_land,
-                     lat=_np(model.mesh.latCell).reshape(-1),
-                     dp=layer_dp(),
-                     **{sp: _np(atm.current_tracer(sp)).reshape(n, -1)
-                        for sp in carried})
-            atm_prev[0] = w_now
+        # this step's fluxes; its state is read at the next call (the driver
+        # installs the returned state only after this hook returns)
+        rec = dict(step=n_steps[0] + 1,
+                   EmP=(I(sd[SL["evap_sfc"]]) - I(sd[SL["precip"]])) * DT,
+                   E=I(sd[SL["evap_sfc"]]) * DT, P=I(sd[SL["precip"]]) * DT)
+        if "precip_conv_sfc" in SL and sd[SL["precip_conv_sfc"]] is not None:
+            rec["P_conv"] = I(sd[SL["precip_conv_sfc"]]) * DT
+        led = getattr(model, "_step_ledger", None)
+        rec["_led"] = None if led is None else _np(led)[:, :, 0]
+        rec["_sd"] = (_np(sd[SL["evap_sfc"]]).reshape(-1),
+                      _np(sd[SL["precip"]]).reshape(-1))
+        pend_rec[0] = rec
         L = atm._land_ml_state   # land's own runoff rate x f_land, per step
         F["R_state"] += float(np.sum(f_land * _np(
             L.runoff_surface + L.runoff_subsurface).reshape(-1) * area)) * DT
@@ -727,6 +743,7 @@ def main(argv=None) -> int:
     pend0 = (I(prev["H"].evap) * win
              + I(prev["O"].ice_lake_freshwater_flux) * win)
     status = d.run(segment_callback=sample)
+    finish_rec()
     if abs(n_steps[0] * DT - args.days * 86400.0) > 1e-6 * DT:
         raise SystemExit(
             f"steps x dt = {n_steps[0]} x {DT:g} s != {args.days} d: the "
