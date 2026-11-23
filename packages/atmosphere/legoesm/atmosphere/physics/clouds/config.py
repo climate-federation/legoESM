@@ -15,6 +15,11 @@ __param_spec__ = {
     "CloudConfig": {
         "scheme_key": "atm.clouds.CloudConfig",
         "excluded": {
+            "mf_cldfrac_fac": "structural: CAM7 clubb_mf_cldfrac_fac (plume-area to cloud-fraction factor of the deep-cloud hookup, atmos_phys clubb_mf.F90:48), fixed with the port",
+            "mf_deepcu_select_sharpness": "numerics: RULE 5 sharpness of the larger-of-two ZM/plume deep cloud (inf = hard max), value voted",
+            "mf_deepcu_cap_sharpness": "numerics: RULE 5 sharpness of CAM's concld <= 0.8 cap (inf = hard min), value voted",
+            "mf_deepcu_frac_gate_sharpness": "numerics: RULE 5 sharpness of the deepcu > frac_limit gate (inf = CAM), value voted",
+            "mf_deepcu_ic_gate_sharpness": "numerics: RULE 5 sharpness of the in-cloud water >= ic_limit gate (inf = CAM), value voted",
             "cloud_subcolumn_mask_width": "numerics: RULE 5 smoothing width of the maximum-random subcolumn mask (0 = CAM's hard switch), not a tunable",
             # Lower clip on the Martin gamma-PSD shape (1/PGAM^2 - 1 clipped to
             # [pgam_min, pgam_max]); a numerics regulariser/cap on the droplet

@@ -100,7 +100,9 @@ def test_check_grads_through_each_switch_at_default(case, which):
         deep, icw = mf_deep_cloud(zm, zi, cf_, qc_, cfg)
         return jnp.sum(mf_concld(deep, cfg)) + jnp.sum(icw)
 
-    check_grads(f, (cf, qc), order=1, modes=("fwd", "rev"), eps=1e-9 if which == "ic" else 1e-6)
+    # eps well inside each switch's width (centred FD truncation stays < 1e-6)
+    eps = {"select": 1e-7, "cap": 1e-7, "frac": 1e-8, "ic": 1e-16}[which]
+    check_grads(f, (cf, qc), order=1, modes=("fwd", "rev"), eps=eps)
     g = jax.grad(f, argnums=(0, 1))(cf, qc)
     assert all(np.all(np.isfinite(np.asarray(x))) for x in g)
     assert any(np.any(np.asarray(x) != 0.0) for x in g)
