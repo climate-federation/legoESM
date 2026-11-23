@@ -110,7 +110,8 @@ def test_scm_publishes_the_plume_cloud_only_with_the_mass_flux():
         scm = SingleColumnModel.create(
             physics_config=cfg, nlev=_RCE_NLEV, dt=_RCE_DT, T_profile=_tropical_T_profile(),
             q_v_profile=_tropical_qv_profile(), latitude_deg=0.0)
-        _, ps = scm.run(nsteps=4)
+        scm.run(nsteps=4)
+        ps = scm.phys_state
         got[on] = (np.asarray(ps.mf_cloudfrac), np.asarray(ps.mf_qc))
     assert np.all(got[False][0] == 0.0) and np.all(got[False][1] == 0.0)
     assert np.max(got[True][0]) > 0.0 and np.max(got[True][1]) > 0.0
