@@ -162,7 +162,7 @@ RUNG_SPECS: tuple[dict[str, Any], ...] = (
     {
         "k": 12,
         "name": "thermo_tail",
-        "funcs": ("_thermodynamic_tail",),
+        "funcs": ("si3_icethd_tail",),
         "description": "Post-ice_cor(kt, 2) ageing, 14 LBC calls, category sum, velocity zeroing",
     },
     {

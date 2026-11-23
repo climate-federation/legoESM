@@ -1181,7 +1181,7 @@ def test_o17_full_step_code_revert_plants_fail(plant, mixed, full_baseline, monk
     entry, forcing, card = mixed
     baseline = _scorer_projection(full_baseline[0])
     if plant == "thermodynamic_tail":  # skip the icethd.F90:183-201 tail call
-        monkeypatch.setattr(o17_mod, "_thermodynamic_tail", lambda state, card: state)
+        monkeypatch.setattr(o17_mod, "si3_icethd_tail", lambda state, **kwargs: state)
     elif plant == "icethd_tail_lbc":  # skip the tail's lbc_lnk (icethd.F90:188-190,201)
         monkeypatch.setattr(o17_mod, "si3_lbc_lnk_orca2", lambda field, *a, **k: field)
     else:  # gather over the full jpi x jpj grid instead of DO_2D(0,0,0,0)

@@ -128,6 +128,16 @@ CASES: tuple[dict, ...] = (
              _r("latlon_cgrid (tripole)", "omip_nemo_match_tripole_v1", TODO, "tripole eORCA025 NEMO-climate-match (SST RMSE ~1.15)"),
              _r("mpas (ico6)", "omip_nemo_match_mpas_v1", TODO, "MPAS ico6 NEMO-climate-match (SST RMSE ~0.84, best grid)"),
          ]),
+    dict(case="nemo_orca2",
+         aliases=(),
+         tests="realistic global ORCA2 (2°, tripolar, 31 z-levels, partial cells), one forced year; ocean alone and coupled to SI3 sea ice",
+         ref_kind=ORACLE, ref="NEMO 5.0.2 ORCA2_ICE (shipped cfg, built and run locally)",
+         results=[
+             _r("ORCA2 tripolar (zps)", "NEMO ORCA2 literal card", VERIFIED,
+                "ocean-only year (no sea-ice model, nn_ice=1 as in NEMO's standalone run): 12/12 months within the Decision 188 monthly bars"),
+             _r("ORCA2 tripolar (zps)", "NEMO ORCA2 literal card + SI3", VERIFIED,
+                "coupled ocean + sea-ice year: 12/12 months; ocean bars max(fixed, 3x NEMO twin), ice area/volume and daily ice-map placement per hemisphere"),
+         ]),
 
     # ---- ANALYTIC cases (closed-form / exact solution) ----
     dict(case="rest_state",
