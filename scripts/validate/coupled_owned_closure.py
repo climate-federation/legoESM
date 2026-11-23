@@ -670,6 +670,8 @@ def main(argv=None) -> int:
                 x = np.asarray(x)
             except Exception:
                 continue
+            if "canopy_x" in jax.tree_util.keystr(pth):
+                continue   # canopy warm-start cache: NaN by design
             if x.dtype.kind in "fc" and not np.all(np.isfinite(x)):
                 bad = np.argwhere(~np.isfinite(x))
                 return dict(where=where, field=jax.tree_util.keystr(pth),
@@ -692,9 +694,11 @@ def main(argv=None) -> int:
             keep = {}
             for pth, x in leaves:
                 try:
-                    keep[jax.tree_util.keystr(pth)] = np.asarray(x)
+                    x = np.asarray(x)
                 except Exception:
-                    pass
+                    continue
+                if x.dtype.kind in "biufc":
+                    keep[jax.tree_util.keystr(pth)] = x
             np.savez(str(Path(args.json).with_suffix(".nantrap_origin.npz")),
                      **keep)
         raise SystemExit(2)
