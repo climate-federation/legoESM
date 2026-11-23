@@ -70,9 +70,13 @@ Interface notes
   ``T_moist >= T`` layer mask, which the oracle does not have; it is inert and
   a non-default value raises.
 * KNOWN DIFFERENCE: an unsaturated surface parcel so dry that its LCL lies
-  below the lookup table (LCL temperature < 173 K) is treated as no
-  convection for that column, as a parcel with no vapour is; the oracle stops
-  with FATAL 'get_lcl_temp: value to low'.  Such parcels occur over the
+  below the lookup table (LCL temperature < 173 K) does not convect: it is
+  evaluated at the table edge and its column's outputs are multiplied by
+  ``sigmoid((v - v_min) / SBMConfig.dry_parcel_gate_width)`` in the lookup
+  value ``v`` (default width 0.1; 0 = the hard step, no convection below the
+  edge); the oracle stops with FATAL 'get_lcl_temp: value to low'.  At the
+  default the gate is exactly 1 on every oracle fixture column (gap 0, the
+  per-case gaps below are unchanged).  Such parcels occur over the
   Antarctic plateau in coupled runs (surface mixing ratio 5.8e-8 at 247 K,
   659 hPa), where the NaN this used to return ended the run.
 * Conditions on which the oracle stops with FATAL (LCL lookup value above the
@@ -250,10 +254,11 @@ def _seq_cumsum(init, terms):
     return jax.lax.scan(f, init, terms)[1]
 
 
-def _cape_calculation(T, r, pf, ph, table_vals):
+def _cape_calculation(T, r, pf, ph, table_vals, dry_gate_width=0.0):
     """qe ``CAPE_calculation`` (+ ``CAPE_below_LCL`` / ``CAPE_above_LCL``) for
     one column.  Returns parcel ``Tp``, ``rp``, ``CAPE``, ``kLZB`` (1-based,
-    0 = none, as in the oracle) and the FATAL flag."""
+    0 = none, as in the oracle), the FATAL flag and the dry-parcel gate
+    (1 = convect as the oracle; see ``SBMConfig.dry_parcel_gate_width``)."""
     val_min, val_max, table = table_vals
     Rd, Rv, cp, Lv = constants.R_d, constants.R_v, constants.c_pd, constants.L_v
     kappa, pref = constants.kappa, constants.p_ref
@@ -271,10 +276,17 @@ def _cape_calculation(T, r, pf, ph, table_vals):
     theta0 = T[ks] * (pref / pf[ks]) ** kappa
     r0_safe = jnp.where(r0 > 0.0, r0, 1.0)
     value = jnp.log(theta0 ** (-1.0 / kappa) * pref * r0_safe / (Rd / Rv + r0_safe))
-    tlcl_tab, lut_bad = _get_lcl_temp(value, val_min, val_max, table)
-    # no vapour, or so little that the LCL lies below the table's coldest
-    # entry (the oracle's FATAL 'value to low'): no convection
-    skip = (~saturated) & ((r0 <= 0.0) | (value < val_min))
+    # a parcel so dry that its LCL lies below the table's coldest entry (the
+    # oracle's FATAL 'value to low') is evaluated at the table edge and gated
+    # off smoothly in the lookup value (hard step at width 0)
+    tlcl_tab, lut_bad = _get_lcl_temp(jnp.maximum(value, val_min), val_min,
+                                      val_max, table)
+    skip = (~saturated) & (r0 <= 0.0)
+    w = jnp.asarray(dry_gate_width, T.dtype)
+    gate = jnp.where(w > 0, jax.nn.sigmoid((value - val_min)
+                                           / jnp.where(w > 0, w, 1.0)),
+                     (value >= val_min).astype(T.dtype))
+    gate = jnp.where(saturated | skip, jnp.ones((), T.dtype), gate)
     plcl_tab = pref * (tlcl_tab / theta0) ** (1.0 / kappa)
     lcl_above_top = plcl_tab < pf[0]
     pLCL = jnp.where(lcl_above_top, pf[0], plcl_tab)
@@ -338,10 +350,10 @@ def _cape_calculation(T, r, pf, ph, table_vals):
     cape = jnp.where(none, zero, cape)
     klzb = jnp.where(none, 0, klzb)
     fatal = (~saturated) & (~skip) & lut_bad
-    return Tp, rp, cape, klzb, fatal
+    return Tp, rp, cape, klzb, fatal, gate
 
 
-def _sbm_column(T, q, pf, ph, dt, tau_bm, rhbm, table_vals):
+def _sbm_column(T, q, pf, ph, dt, tau_bm, rhbm, table_vals, dry_gate_width=0.0):
     """qe ``SBM_convection_scheme`` for one column: increments over ``dt``,
     precipitation ``Pq`` [kg/m2 per step] and CAPE."""
     Rd, Rv, cp, Lv, g = (constants.R_d, constants.R_v, constants.c_pd,
@@ -351,7 +363,8 @@ def _sbm_column(T, q, pf, ph, dt, tau_bm, rhbm, table_vals):
     lev = jnp.arange(nlev, dtype=jnp.int32)
     zero = jnp.zeros((), T.dtype)
     r = q / (1.0 - q)
-    Tp, rp, cape, klzb, fatal = _cape_calculation(T, r, pf, ph, table_vals)
+    Tp, rp, cape, klzb, fatal, gate = _cape_calculation(
+        T, r, pf, ph, table_vals, dry_gate_width)
     conv = cape > 0
     kl0 = klzb - 1                                # 0-based LZB level
     in_layer = conv & (lev >= kl0)
@@ -410,6 +423,8 @@ def _sbm_column(T, q, pf, ph, dt, tau_bm, rhbm, table_vals):
     dq_out = jnp.where(qts, dq_qts, jnp.where(tsh, dq, jnp.where(
         shallow, jnp.where(found, dq_f, dq_nf), zero)))
     precip = jnp.where(qts, Pt, jnp.where(tsh, Pq, zero))
+    dT_out, dq_out, precip, cape = (gate * x for x in (dT_out, dq_out, precip,
+                                                       cape))
     # the oracle stops (FATAL) or reads outside its arrays: NaN, not a value
     poison = fatal | (conv & (klzb == 0))
     nan = jnp.asarray(jnp.nan, T.dtype)
@@ -466,9 +481,12 @@ def sbm_convection(
     val_min, val_max, table = _lcl_temp_table()
     table_vals = (jnp.asarray(val_min, dtype), jnp.asarray(val_max, dtype),
                   jnp.asarray(table, dtype))
+    wd = jnp.broadcast_to(jnp.asarray(config.dry_parcel_gate_width, dtype),
+                          (ncol,))
     dT, dq, precip, cape = jax.vmap(
-        lambda t, qq, pf, ph, ta, rr: _sbm_column(t, qq, pf, ph, dt, ta, rr, table_vals)
-    )(T, q_v, p_full, p_half, tau, rh)
+        lambda t, qq, pf, ph, ta, rr, ww: _sbm_column(t, qq, pf, ph, dt, ta, rr,
+                                                      table_vals, ww)
+    )(T, q_v, p_full, p_half, tau, rh, wd)
     if isinstance(sharp, jax.core.Tracer):
         # traced config (jit argument): the check above cannot raise, so a
         # non-default value poisons the outputs instead of being ignored
