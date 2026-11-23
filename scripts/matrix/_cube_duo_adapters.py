@@ -313,6 +313,23 @@ DUO_HYDRO_KM = 32
 DUO_HYDRO_ETA = "cam6_l32"
 
 
+def _cam6_l32_coord(model, what: str):
+    """The CAM6 L32 ``HybridSigmaPressureCoordinate`` the shared analytic
+    builders run on, after checking it IS the model's eta table."""
+    from legoesm.grids.vertical import CAM6_L32_P0, make_cam6_l32_levels
+    coord = make_cam6_l32_levels()
+    if coord.n_levels != model.config.km or not (
+            # the two tables round differently at ~1e-8 relative
+            # (measured max 6.7e-4 Pa in ak); a different table is O(1)
+            np.allclose(np.asarray(coord.A_half) * CAM6_L32_P0, model.ak,
+                        rtol=1e-6, atol=1e-2)
+            and np.allclose(np.asarray(coord.B_half), model.bk,
+                            rtol=1e-6, atol=1e-12)):
+        raise ValueError(f"{what}: the model's eta table is not the CAM6 "
+                         f"L32 coordinate the IC is built on")
+    return coord
+
+
 def rotated_jw_bundle(model, *, perturbed: bool, alpha: float) -> dict:
     """DCMIP 2008 4-1/4-2 rotated baroclinic-wave bundle on the duo grid.
 
@@ -331,21 +348,11 @@ def rotated_jw_bundle(model, *, perturbed: bool, alpha: float) -> dict:
     """
     import jax.numpy as jnp
     from legoesm.grids.fv3_native_gridstruct import analytic_swcore_state
-    from legoesm.grids.vertical import CAM6_L32_P0, make_cam6_l32_levels
     from tests.test_cases.dcmip2008.jablonowski_rotated import (
         _build_rotated_state_dense_grid)
 
-    coord = make_cam6_l32_levels()
+    coord = _cam6_l32_coord(model, "rotated JW duo IC")
     km = model.config.km
-    if coord.n_levels != km or not (
-            # the two tables round differently at ~1e-8 relative
-            # (measured max 6.7e-4 Pa in ak); a different table is O(1)
-            np.allclose(np.asarray(coord.A_half) * CAM6_L32_P0, model.ak,
-                        rtol=1e-6, atol=1e-2)
-            and np.allclose(np.asarray(coord.B_half), model.bk,
-                            rtol=1e-6, atol=1e-12)):
-        raise ValueError("rotated JW duo IC: the model's eta table is not "
-                         "the CAM6 L32 coordinate the IC is built on")
     ctx = model.grid.ctx_np
     n, ng = ctx["n"], ctx["ng"]
     sl = _compute_window(ctx)
@@ -417,10 +424,202 @@ def held_suarez_rest_bundle(model, *, T_init: float = 300.0,
     return {**bundle, "state": st}
 
 
+# ---------------------------------------------------------------------------
+# rows whose IC is a shared cube builder (DCMIP 2012 2-0-0, HS-topo,
+# DCMIP 2008 3-1 / 3-2 / 5-0 / 6-0)
+# ---------------------------------------------------------------------------
+
+def _mountain_2_0_0_phis(h_0: float):
+    """``phis(lon, lat)`` of the DCMIP 2012 2-0-0 ridged mountain, the
+    composition both shared builders (``rest_state_topography_init`` and
+    ``held_suarez_topo._phis_cube``) use: ``constants.g * z_s``."""
+    from legoesm import constants
+    from legoesm.atmosphere.idealized.topography import dcmip_2_0_0_mountain
+    from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+
+    def fn(lon, lat):
+        return constants.g * np.asarray(dcmip_2_0_0_mountain(
+            lon, lat, FV3_RADIUS_M, h_0=h_0))
+    return fn
+
+
+def _solid_body_winds(u_0: float):
+    """``wind_fn(ll)`` of the DCMIP 2008 isothermal base flow
+    ``(u_0 cos(lat), 0)`` (``dcmip2008._shared.isothermal_state_*``)."""
+    def fn(ll):
+        u = u_0 * np.cos(ll[..., 1])
+        return u, np.zeros_like(u)
+    return fn
+
+
+def duo_shared_ic_spec(case: str, ic_kwargs: dict | None = None):
+    """Per-row recipe for a cube row whose IC is a SHARED cube builder.
+
+    Returns a namespace with ``builder(grid, coord) -> HydrostaticState``
+    (the very ``*_init`` the legacy cube / every grid's dispatch names),
+    ``phis_fn(lon, lat)`` for the duo grid's terrain (``None`` = flat),
+    ``wind_fn(ll)`` for the geographic winds at D-edge midpoints (``None``
+    = rest), ``omega`` for the grid (``None`` = FV3_OMEGA) and a ``label``.
+    The terrain and winds the builder itself produces at the cell centres
+    are checked against ``phis_fn`` / ``wind_fn`` in
+    :func:`shared_ic_bundle`, so a recipe that drifted from its builder
+    fails loudly.
+    """
+    kw = dict(ic_kwargs or {})
+    if case == "rest_state_topo":
+        from tests.test_cases.dcmip2012.rest_state_topography import (
+            rest_state_topography_init as init)
+        h_0 = float(kw.get("h_0", 2000.0))
+        return SimpleNamespace(
+            builder=lambda g, c: init(g, c, **kw),
+            phis_fn=_mountain_2_0_0_phis(h_0), wind_fn=None, omega=None,
+            label=f"DCMIP 2012 2-0-0 rest state, h_0={h_0:g} m")
+    if case == "held_suarez_topo":
+        from legoesm.atmosphere.idealized.held_suarez_topo import (
+            DEFAULT_H_0, held_suarez_topo_init as init)
+        h_0 = float(kw.get("h_0", DEFAULT_H_0))
+        return SimpleNamespace(
+            builder=lambda g, c: init(g, c, **kw),
+            phis_fn=_mountain_2_0_0_phis(h_0), wind_fn=None, omega=None,
+            label=(f"held_suarez_topo_init (h_0={h_0:g} m, "
+                   f"seed={kw.get('seed', 'default')})"))
+    if case in ("gravity_wave_3_1", "inertio_gravity_3_2",
+                "mountain_rossby_5_0"):
+        from tests.test_cases.dcmip2008._shared import U0_DEFAULT
+        if kw:
+            raise ValueError(f"{case}: no IC kwargs, got {sorted(kw)}")
+        if case == "gravity_wave_3_1":
+            from tests.test_cases.dcmip2008.gravity_wave_3_1 import (
+                gravity_wave_init as init)
+            phis_fn, omega = None, 0.0   # DCMIP 2008 3-1: non-rotating
+        elif case == "inertio_gravity_3_2":
+            from tests.test_cases.dcmip2008.inertio_gravity_3_2 import (
+                inertio_gravity_init as init)
+            phis_fn, omega = None, None
+        else:
+            from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+            from tests.test_cases.dcmip2008.mountain_rossby_5_0 import (
+                _phis, mountain_rossby_init as init)
+
+            def phis_fn(lon, lat):
+                return np.array(_phis(lon, lat, FV3_RADIUS_M), dtype=np.float64)
+            omega = None
+        return SimpleNamespace(
+            builder=init, phis_fn=phis_fn,
+            wind_fn=_solid_body_winds(U0_DEFAULT), omega=omega,
+            label=f"DCMIP 2008 {case} ({init.__name__})")
+    if case == "rossby_haurwitz_6_0":
+        from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+        from tests.test_cases.dcmip2008.rossby_haurwitz_6_0 import (
+            _w6_winds_geo, rossby_haurwitz_init as init)
+        if kw:
+            raise ValueError(f"{case}: no IC kwargs, got {sorted(kw)}")
+
+        def wind_fn(ll):
+            u, v = _w6_winds_geo(ll[..., 0], ll[..., 1], FV3_RADIUS_M)
+            return np.asarray(u), np.asarray(v)
+        return SimpleNamespace(
+            builder=init, phis_fn=None, wind_fn=wind_fn, omega=None,
+            label=f"DCMIP 2008 {case} ({init.__name__})")
+    raise NotImplementedError(
+        f"{case} on cube: no fv3_duo shared-IC recipe for this case")
+
+
+def shared_ic_bundle(model, spec) -> dict:
+    """The row's shared cube builder evaluated on the duo grid.
+
+    The builder runs on a duck-typed cube grid whose cells are the duo
+    A-grid compute cells (``n``, ``lon``/``lat`` (6, n, n) [rad], the duo
+    ``radius``, ``angle = 0`` so its winds come back geographic) and on
+    the run's own CAM6 L32 coordinate.  Its ``T`` fills ``pt``; its
+    ``p_s`` (hydrostatic over ``phis`` with ``constants.R_d`` ==
+    ``FV3_RDGAS``) sets ``delp = diff(ak + bk p_s)`` and the pressure
+    bundle (``p_var_hydrostatic``, as ``era5_to_fv3_duo_bundle``); winds
+    are ``spec.wind_fn`` projected onto the D-edge tangents by the
+    certified ``analytic_swcore_state``.  Everything else (``w``, the
+    passive humidity passenger, ``omga``, halos -- the step's entry
+    exchanges fill them) is the model's own DCMIP16 bundle.
+
+    Refuses (no silent substitution) when the builder's ``phis`` is not
+    the grid's terrain or its centre winds are not ``spec.wind_fn``.
+    """
+    import jax.numpy as jnp
+    from legoesm.core.fv3_dynamics import p_var_hydrostatic
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_KAPPA, FV3_RADIUS_M, analytic_swcore_state)
+
+    coord = _cam6_l32_coord(model, "duo shared IC")
+    ctx = model.grid.ctx_np
+    n, ng, km = ctx["n"], ctx["ng"], model.config.km
+    sl = _compute_window(ctx)
+    gs6 = ctx["gs6"]
+    lon = np.stack([np.asarray(g["agrid_lon"])[sl, sl] for g in gs6])
+    lat = np.stack([np.asarray(g["agrid_lat"])[sl, sl] for g in gs6])
+    cells = SimpleNamespace(n=n, lon=jnp.asarray(lon), lat=jnp.asarray(lat),
+                            radius=FV3_RADIUS_M, angle=jnp.zeros_like(lat))
+    hst = spec.builder(cells, coord)
+
+    hs6 = ctx.get("hs6")
+    grid_phis = (np.zeros((6, n, n)) if hs6 is None
+                 else np.stack([np.asarray(h)[sl, sl] for h in hs6]))
+    # the builder stores phis at the active precision policy's dtype
+    # (held_suarez_init: storage dtype, fp32 by default), so compare it
+    # with the grid's terrain rounded to THAT dtype
+    ic_dtype = np.asarray(hst.phis.data).dtype
+    ic_phis = np.asarray(hst.phis.data, dtype=np.float64)
+    grid_phis = grid_phis.astype(ic_dtype).astype(np.float64)
+    if (spec.phis_fn is None) != (hs6 is None) or not np.allclose(
+            ic_phis, grid_phis, rtol=1e-12, atol=1e-9):
+        raise ValueError("duo shared IC: the builder's phis is not the "
+                         "grid's terrain (max diff "
+                         f"{np.max(np.abs(ic_phis - grid_phis)):.3e})")
+    u_c = np.asarray(hst.u.data, dtype=np.float64)
+    v_c = np.asarray(hst.v.data, dtype=np.float64)
+    if spec.wind_fn is None:
+        ue, vn = np.zeros_like(lon), np.zeros_like(lon)
+    else:
+        ue, vn = spec.wind_fn(np.stack([lon, lat], axis=-1))
+    scale = max(1.0, float(np.max(np.abs(u_c))))
+    if not (np.allclose(u_c, np.asarray(ue)[..., None], rtol=0,
+                        atol=1e-12 * scale)
+            and np.allclose(v_c, np.asarray(vn)[..., None], rtol=0,
+                            atol=1e-12 * scale)):
+        raise ValueError("duo shared IC: the builder's winds are not the "
+                         "recipe's wind_fn (or not depth-independent)")
+
+    bundle = model.dcmip16_initial_state(do_pert=False)
+    st = dict(bundle["state"])
+    pt = np.array(st["pt"])
+    delp = np.array(st["delp"])
+    u = np.zeros_like(np.asarray(st["u"]))
+    v = np.zeros_like(np.asarray(st["v"]))
+    ps = np.asarray(hst.p_s.data, dtype=np.float64)
+    ak, bk = np.asarray(model.ak), np.asarray(model.bk)
+    pt[:, sl, sl, :] = np.asarray(hst.T.data, dtype=np.float64)
+    delp[:, sl, sl, :] = (np.diff(ak)[None, None, None, :]
+                          + np.diff(bk)[None, None, None, :] * ps[..., None])
+    if spec.wind_fn is not None:
+        # depth-independent: one projection per face, broadcast over km
+        for t, gs in enumerate(gs6):
+            d = analytic_swcore_state(gs, wind_fn=spec.wind_fn)
+            u[t, sl, ng:ng + n + 1, :] = d["u"][sl, ng:ng + n + 1, None]
+            v[t, ng:ng + n + 1, sl, :] = d["v"][ng:ng + n + 1, sl, None]
+    st.update(pt=jnp.asarray(pt), delp=jnp.asarray(delp),
+              u=jnp.asarray(u), v=jnp.asarray(v))
+    press = p_var_hydrostatic(st["delp"], ptop=model.ptop, akap=FV3_KAPPA,
+                              n=n, ng=ng, km=km)
+    if not np.allclose(np.asarray(press["ps"])[:, sl, sl], ps, rtol=1e-12,
+                       atol=0.0):
+        raise ValueError("duo shared IC: p_var ps != the builder's p_s")
+    return {**bundle, "state": st, "press": press}
+
+
 def build_duo_hydro(n: int, *, perturbed: bool = True,
                     held_suarez: bool = False, km: int = DUO_HYDRO_KM,
                     eta: str = DUO_HYDRO_ETA,
-                    rotated_alpha: float | None = None):
+                    rotated_alpha: float | None = None,
+                    shared_case: str | None = None,
+                    ic_kwargs: dict | None = None):
     """FV3DuoDynamicsModel (production deck defaults) on C``n``.
 
     ``dt`` follows the driver lane: the deck dt 1920 s clamped by the
@@ -428,6 +627,10 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     ``rotated_alpha`` (not None): DCMIP 2008 rotated JW -- the planet's
     rotation axis tilted by alpha (``create_fv3_duo_grid(rotation_alpha)``)
     and :func:`rotated_jw_bundle` as the IC.
+    ``shared_case`` (not None): the row's IC is its shared cube builder
+    (:func:`duo_shared_ic_spec`, ``ic_kwargs`` passed through), with the
+    recipe's terrain (``phis_fn``, unfiltered like every other grid's) and
+    rotation rate on the grid; combines with ``held_suarez`` for HS-topo.
     """
     import jax
     jax.config.update("jax_enable_x64", True)
@@ -436,11 +639,29 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     from legoesm.core.cfl import cfl_check_and_adjust
     from legoesm.grids.factory import create_fv3_duo_grid
 
+    spec = None
+    grid_kw = {}
+    if shared_case is not None:
+        if rotated_alpha is not None:
+            raise ValueError("shared_case and rotated_alpha are exclusive")
+        if held_suarez != (shared_case == "held_suarez_topo"):
+            raise ValueError("held_suarez forcing goes with shared_case="
+                             "'held_suarez_topo' only")
+        spec = duo_shared_ic_spec(shared_case, ic_kwargs)
+        if spec.phis_fn is not None:
+            grid_kw["phis_fn"] = spec.phis_fn
+        if spec.omega is not None:
+            grid_kw["omega"] = spec.omega
+    elif ic_kwargs:
+        raise ValueError("ic_kwargs needs shared_case")
     grid = create_fv3_duo_grid(
-        n, rotation_alpha=0.0 if rotated_alpha is None else rotated_alpha)
+        n, rotation_alpha=0.0 if rotated_alpha is None else rotated_alpha,
+        **grid_kw)
     cfg = FV3DuoConfig(km=km, eta=eta, hydrostatic=True)
     model = FV3DuoDynamicsModel(grid, cfg)
-    if held_suarez:
+    if spec is not None:
+        bundle = shared_ic_bundle(model, spec)
+    elif held_suarez:
         bundle = held_suarez_rest_bundle(model)
     elif rotated_alpha is None:
         bundle = model.dcmip16_initial_state(do_pert=perturbed)
@@ -502,6 +723,12 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
             f"nord={cfg.nord} d4_bg={cfg.d4_bg} sponge={cfg.sponge_del2_top_layers}"
             f"L, n_split={cfg.n_split}, dt={dt:g}s (deck 1920 s + driver "
             f"CFL clamp); " + (
+                f"shared cube IC {spec.label} on the duo cells + CAM6 L32"
+                + ("" if spec.phis_fn is None else
+                   ", grid terrain = the IC's phis (unfiltered)")
+                + ("" if spec.omega is None else
+                   f", omega={spec.omega:g} (non-rotating)")
+                if spec is not None else
                 "Held-Suarez IC: isothermal 300 K at rest, ps = p_ref, "
                 "1 K lowest-level perturbation (seed 42), as every grid"
                 if held_suarez else

@@ -3817,10 +3817,6 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         return kw
 
     if tc.grid_type == "cubed_sphere":
-        if _topo:
-            raise NotImplementedError(
-                "held_suarez_topo on cube: fv3_duo matrix adapter covers flat "
-                "Held-Suarez only (no duo terrain IC for this case)")
         if radiation != "gray":
             raise NotImplementedError(
                 f"held_suarez radiation={radiation!r} on cube: the fv3_duo lane "
@@ -3829,7 +3825,10 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # scripts/matrix/_cube_duo_adapters.py.
         from scripts.matrix._cube_duo_adapters import build_duo_hydro
         n = int(tc.resolution[1:])
-        duo = build_duo_hydro(n, perturbed=True, held_suarez=True)
+        duo = (build_duo_hydro(n, held_suarez=True,
+                               shared_case="held_suarez_topo",
+                               ic_kwargs=_topo_init_kwargs()) if _topo
+               else build_duo_hydro(n, perturbed=True, held_suarez=True))
         state = duo.state
         dt = duo.dt
         nlev = duo.km
@@ -4377,16 +4376,25 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 
     if tc.grid_type == "cubed_sphere":
         if tc.case not in ("baroclinic", "baroclinic_steady",
-                           "rotated_baroclinic", "rotated_steady"):
+                           "rotated_baroclinic", "rotated_steady") and not (
+                               _rest or _dcmip2008_dry):
             raise NotImplementedError(
                 f"{tc.case} on cube: no fv3_duo matrix adapter for this IC")
         # FV3 duo (sole cube core): FV3DuoDynamicsModel, DCMIP16 IC; see
         # scripts/matrix/_cube_duo_adapters.py.
         from scripts.matrix._cube_duo_adapters import build_duo_hydro
         n = int(tc.resolution[1:])
-        duo = (build_duo_hydro(n, perturbed=_rot_perturbed,
-                               rotated_alpha=_rot_alpha) if _rotated
-               else build_duo_hydro(n, perturbed=_perturbed))
+        if _rest or _dcmip2008_dry:
+            # the SAME cube IC builder as the other grids' dispatch, on the
+            # duo cells; terrain and omega (3-1: 0) from its recipe
+            duo = build_duo_hydro(
+                n, shared_case=tc.case,
+                ic_kwargs={"h_0": _rest_h0} if _rest else None)
+        elif _rotated:
+            duo = build_duo_hydro(n, perturbed=_rot_perturbed,
+                                  rotated_alpha=_rot_alpha)
+        else:
+            duo = build_duo_hydro(n, perturbed=_perturbed)
         state = duo.state
         dt = duo.dt
         nlev = duo.km
