@@ -4471,8 +4471,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
             from tests.test_cases.dcmip2012.rest_state_topography import (
-                rest_state_topography_init_latlon)
-            state_cc = rest_state_topography_init_latlon(
+                lapse_rate_state_topography_init_latlon)
+            state_cc = lapse_rate_state_topography_init_latlon(
                 grid, sigma, h_0=_rest_h0)
         elif _dcmip2008_dry:
             state_cc = _build_dcmip2008_state(
@@ -4550,8 +4550,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
             from tests.test_cases.dcmip2012.rest_state_topography import (
-                rest_state_topography_init_mpas)
-            state = rest_state_topography_init_mpas(
+                lapse_rate_state_topography_init_mpas)
+            state = lapse_rate_state_topography_init_mpas(
                 mesh, sigma, h_0=_rest_h0)
         elif _dcmip2008_dry:
             state = _build_dcmip2008_state(tc.case, "mpas", mesh, sigma)
@@ -4632,8 +4632,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
             from tests.test_cases.dcmip2012.rest_state_topography import (
-                rest_state_topography_init_spectral)
-            state = rest_state_topography_init_spectral(
+                lapse_rate_state_topography_init_spectral)
+            state = lapse_rate_state_topography_init_spectral(
                 grid, sigma, h_0=_rest_h0)
         elif _dcmip2008_dry:
             state = _build_dcmip2008_state(

@@ -74,19 +74,34 @@ def test_rest_states_over_the_2_0_0_mountain(case, kw):
     zs = np.asarray(dcmip_2_0_0_mountain(f.lon, f.lat, FV3_RADIUS_M, h_0=2000.0))
     np.testing.assert_allclose(f.phis, constants.g * zs, rtol=1e-12, atol=1e-9)
     assert f.phis.max() > 0.5 * constants.g * 2000.0
-    # hydrostatic surface pressure over THAT terrain, isothermal 300 K
-    # (rtol 1e-6: held_suarez_init stores at the fp32 policy dtype)
-    np.testing.assert_allclose(
-        f.ps, constants.p_ref * np.exp(-f.phis / (constants.R_d * 300.0)),
-        rtol=1e-6)
-    assert f.ps.min() < 0.85 * constants.p_ref
     assert np.all(f.ue == 0.0) and np.all(f.vn == 0.0)
     assert np.all(np.isfinite(f.pt))
     if case == "rest_state_topo":
-        assert np.all(f.pt == 300.0)
-    else:   # HS: 1 K-scale noise on the lowest level only (FV3 k = km-1)
+        # DCMIP 2012 2-0-0 as specified: constant lapse rate 6.5 K/km,
+        # p_s = p0 (1 - gamma zs / T0)^(g / (Rd gamma)), T(p) on the run's
+        # own L32 full levels (the shared lapse_rate_columns)
+        gamma = 0.0065                       # DCMIP 2012 2-0-0 lapse rate [K/m]
+        ps_ref = constants.p_ref * (1.0 - gamma * zs / 300.0) ** (
+            constants.g / (constants.R_d * gamma))
+        np.testing.assert_allclose(f.ps, ps_ref, rtol=1e-6)
+        # independent T: the model's own interface table ak/bk, full level =
+        # arithmetic mid-point of its interfaces, T = T0 (p/p0)^(Rd gamma/g)
+        ak, bk = np.asarray(model.ak), np.asarray(model.bk)
+        p_full = (0.5 * (ak[:-1] + ak[1:])
+                  + 0.5 * (bk[:-1] + bk[1:]) * ps_ref[..., None])
+        T_ref = 300.0 * (p_full / constants.p_ref) ** (
+            constants.R_d * gamma / constants.g)
+        np.testing.assert_allclose(f.pt, T_ref, rtol=1e-6)
+        assert f.pt.max() - f.pt.min() > 50.0     # stratified, not isothermal
+    else:   # HS: hydrostatic isothermal 300 K over the terrain, 1 K-scale
+        # noise on the lowest level only (FV3 k = km-1); rtol 1e-6:
+        # held_suarez_init stores at the fp32 policy dtype
+        np.testing.assert_allclose(
+            f.ps, constants.p_ref * np.exp(-f.phis / (constants.R_d * 300.0)),
+            rtol=1e-6)
         np.testing.assert_allclose(f.pt[..., :-1], 300.0, rtol=0, atol=1e-4)
         assert 0.5 < np.abs(f.pt[..., -1] - 300.0).max() < 6.0
+    assert f.ps.min() < 0.85 * constants.p_ref
 
 
 def test_gravity_wave_3_1_non_rotating_with_theta_bubble():
