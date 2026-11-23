@@ -180,7 +180,15 @@ def main(argv=None) -> int:
                     "run_coupled (unknown flags go to it, e.g. data paths) "
                     "instead of the probe's own config; the slab heat row is "
                     "N/A unless the deck's ocean is the one-layer slab")
+    ap.add_argument("--windows", type=int, default=0,
+                    help="--deck: stop after this many coupling windows "
+                    "(instead of --days)")
+    ap.add_argument("--trace-atm-steps", action="store_true",
+                    help="record the atmosphere's water change and E-P of "
+                    "every step in the JSON (atm_steps)")
     args, deck_argv = ap.parse_known_args(argv)
+    if args.windows and not args.deck:
+        ap.error("--windows needs --deck")
     if deck_argv and not args.deck:
         ap.error(f"unrecognized arguments: {' '.join(deck_argv)}")
     if args.deck and args.energy_terms:
@@ -307,6 +315,9 @@ def main(argv=None) -> int:
     else:
         d = CoupledESMDriver(cfg, cc, output_dir=tempfile.mkdtemp())
     d.setup()
+    if args.windows:
+        args.days = args.windows * win / 86400.0
+        d._atm.config = d._atm.config._replace(days=args.days)
     if not args.deck:   # a deck keeps its own ice
         ice = d._sfc_state.ice
         d._sfc_state = d._sfc_state._replace(ice=ice._replace(
@@ -411,7 +422,9 @@ def main(argv=None) -> int:
         "q_flux", "q_freeze", "ocean_heat_extr", "pend_H", "pend_fw",
         "R_state", "pend_land", "boot_excess")}
     I = lambda x: float(np.sum(_np(x).reshape(-1) * area))  # noqa: E731
-    F.update(E_land_atm=0.0, A_band_land=0.0, E_land_charged=0.0)
+    F.update(E_land_atm=0.0, A_band_land=0.0, E_land_charged=0.0,
+             E_land_debit=0.0)
+    atm_steps, atm_prev = [], [0.0]
     hb_rec, solve, land_seen = {}, {}, {}
     if args.energy_terms:
         import legoesm.forcing.surface_utils as su
@@ -510,6 +523,19 @@ def main(argv=None) -> int:
                 F["boot_excess"] = I(f_land * _np(hb).reshape(-1)) * (
                     max(1, int(round(cfg.land_update_seconds / DT))) - 1
                 ) * DT
+        # the land's own evaporation debit: each land call debits its held
+        # rate ahead for the K steps the atmosphere then applies it
+        he = (atm._land_window or {}).get("land_held_evap")
+        if he is not None and he is not land_seen.get("held_obj"):
+            land_seen["held_obj"] = he
+            F["E_land_debit"] += I(f_land * _np(he).reshape(-1)) * max(
+                1, int(round(cfg.land_update_seconds / DT))) * DT
+        if args.trace_atm_steps:
+            w_now = stores(arrays(), k)["W_atm"]
+            atm_steps.append(dict(
+                step=n_steps[0] + 1, dW=w_now - atm_prev[0],
+                EmP=(I(sd[SL["evap_sfc"]]) - I(sd[SL["precip"]])) * DT))
+            atm_prev[0] = w_now
         L = atm._land_ml_state   # land's own runoff rate x f_land, per step
         F["R_state"] += float(np.sum(f_land * _np(
             L.runoff_surface + L.runoff_subsurface).reshape(-1) * area)) * DT
@@ -562,6 +588,7 @@ def main(argv=None) -> int:
 
     a0 = arrays()
     s0 = stores(a0, k)
+    atm_prev[0] = s0["W_atm"]
     sp0 = species_totals()
     trace = dict(W=s0["W_land"], E=0.0, P=0.0, R=0.0, WA=s0["W_atm"], EP=0.0,
                  DY=np.zeros(2))
@@ -637,6 +664,18 @@ def main(argv=None) -> int:
     # H_{-1}..H_{N-1}; the difference is the pending term.
     print("status", status, "steps", n_steps[0], "exchanges", n_ex[0])
     rows = budget_rows(s0, s1, F)
+    # the land row on the land's own evaporation debits (not on the
+    # atmosphere's receipt); its in-flight term is the unconsumed rain only
+    rain_fl = land_in_flight(
+        f_land, area,
+        _np(lw["land_win_sum_precip_total"]).reshape(-1) if n_w > 0 else 0.0,
+        np.zeros(n), n_w, K, DT)
+    rows["land_water_debit"] = (s1["W_land"] - s0["W_land"] + rain_fl
+                                - (F["P_land"] - F["E_land_debit"]
+                                   - F["R_land"]))
+    print(f"ROW land_water_debit abs={rows['land_water_debit']: .6e} "
+          f"rel={rows['land_water_debit'] / (abs(F['P_atm']) or np.nan): .3e}"
+          f" (rain in flight {rain_fl:.6e} kg)")
 
     # Controls: (1) null run: same state both ends -> every storage row 0.
     null = budget_rows(s0, s0, {key: 0.0 for key in F})
@@ -663,7 +702,7 @@ def main(argv=None) -> int:
     scale_e = abs(F["q_ow"]) or float("nan")
     out = dict(status=status, steps=n_steps[0], exchanges=n_ex[0],
                stores0=s0, stores1=s1, fluxes=F, rows=rows,
-               null=null, inject_rel_err=ctrl,
+               null=null, inject_rel_err=ctrl, atm_steps=atm_steps,
                species0=sp0, species1=sp1,
                rel={r: rows[r] / (scale_e if r == "slab_heat" else scale_w)
                     for r in ("precip_split", "land_water", "slab_heat",
