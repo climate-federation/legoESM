@@ -85,10 +85,19 @@ def test_loader_sorts_bands_and_builds_moments(tmp_path):
     ({"g": np.full(14, -0.1)}, "Negative"),
     ({"wl": (_WL1[:13], _WL2[:13])}, "map 1:1"),
     ({"wl": (_WL1 * 1.05, _WL2 * 1.05)}, "map 1:1"),
+    ({"wl": (_WL1, np.where(_WL2 == 0.441501, 0.4428, _WL2))}, "map 1:1"),
 ])
 def test_loader_refuses(tmp_path, kw, match):
     with pytest.raises(ValueError, match=match):
         _load(volc_sw_file(tmp_path / "v.nc", **kw))
+
+
+def test_loader_accepts_the_files_three_decimal_wavelengths(tmp_path):
+    """The ETH/IACETH v4 file stores edges to 3 decimals in um (0.442 for
+    22650 cm-1, 1.13e-3 off in wavenumber); that rounding must load."""
+    _, _, _, _, _, band_wn = _load(volc_sw_file(
+        tmp_path / "v.nc", wl=(np.round(_WL1, 3), np.round(_WL2, 3))))
+    assert band_wn.shape == (14, 2)
 
 
 def test_legacy_column_file_is_not_an_optics_source(tmp_path):
