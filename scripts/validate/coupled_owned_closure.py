@@ -199,7 +199,7 @@ def main(argv=None) -> int:
     ap.add_argument("--trace-atm-steps", action="store_true",
                     help="record the atmosphere's water change and E-P of "
                     "every step in the JSON (atm_steps)")
-    ap.add_argument("--dump-step", type=int, default=0,
+    ap.add_argument("--dump-step", type=int, nargs="+", default=[],
                     help="save step N's per-column ledger water rows, "
                     "evaporation, precipitation and water species (npz next "
                     "to --json)")
@@ -604,9 +604,10 @@ def main(argv=None) -> int:
                 rec["ledger"] = {pn: I(lw_[:, i]) * DT
                                  for i, pn in enumerate(LEDGER_PROCESSES)}
             atm_steps.append(rec)
-        if args.dump_step and n_steps[0] + 1 == args.dump_step and args.json:
+        if n_steps[0] + 1 in args.dump_step and args.json:
             led = getattr(model, "_step_ledger", None)
-            np.savez(str(Path(args.json).with_suffix(".step.npz")),
+            np.savez(str(Path(args.json).with_suffix(
+                f".step{n_steps[0] + 1}.npz")),
                      ledger_water=(np.full((n, 1), np.nan) if led is None
                                    else _np(led)[:, :, 0]),
                      evap=_np(sd[SL["evap_sfc"]]).reshape(-1),
