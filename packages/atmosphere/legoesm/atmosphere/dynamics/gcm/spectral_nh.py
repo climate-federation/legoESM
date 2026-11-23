@@ -64,6 +64,7 @@ from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     sponge_profile,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
+from legoesm.timestepping.integration import refuse_unthreaded_stateful_physics
 from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
@@ -837,12 +838,31 @@ class SpectralCompressibleEulerModel:
             rho_prime_hat=state.rho_prime_hat.replace(data=rho_hat_new),
         )
 
-    def _build_se_functions(self):
-        """Build slow tendency and acoustic update functions for split-explicit."""
+    def _build_se_functions(self, physics_fn=None):
+        """Build slow tendency and acoustic update functions for split-explicit.
+
+        ``physics_fn(state, grid, height_coord, terrain_metric)`` (optional)
+        returns a :class:`SpectralNHState` of SPECTRAL tendencies; it is
+        evaluated at every RK stage and passed to
+        :func:`spectral_nh_slow_tendencies` as ``physics_tendency`` (so the
+        Orszag de-aliasing mask applies to it too).  Same contract as the
+        MPAS NH ``step(physics_fn=...)``, including the plain
+        ``(tendencies, diagnostics)`` tuple return.  Only the ``vor_hat``,
+        ``div_hat``, ``theta_prime_hat``, ``rho_prime_hat`` and
+        ``tracers_hat`` tendencies are applied; ``w_hat`` and ``phis_hat``
+        of the returned state are not read.
+        """
         def slow_tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                _phys_result = physics_fn(
+                    s, self.grid, self.height_coord, self.terrain_metric,
+                )
+                phys = (_phys_result[0] if type(_phys_result) is tuple
+                        else _phys_result)
             return spectral_nh_slow_tendencies(
                 s, self.grid, self.height_coord,
-                self.terrain_metric, self.config,
+                self.terrain_metric, self.config, phys,
             )
 
         def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
@@ -903,17 +923,27 @@ class SpectralCompressibleEulerModel:
 
         return slow_tendency_fn, acoustic_update_fn
 
-    def step(self, state: SpectralNHState, dt: float) -> SpectralNHState:
+    def step(self, state: SpectralNHState, dt: float,
+             physics_fn=None) -> SpectralNHState:
         """Outer wrapper: snapshots dry mass on first call when
-        ``anchor_mass_to_initial`` is on (fp64, outside JIT)."""
+        ``anchor_mass_to_initial`` is on (fp64, outside JIT).
+
+        ``physics_fn`` (optional, static under JIT): see
+        :meth:`_build_se_functions`.  ``None`` = dynamics only.
+        """
+        # No PhysicsState carry is threaded here — refuse a stateful
+        # physics_fn rather than silently reseeding it every step.
+        refuse_unthreaded_stateful_physics(
+            physics_fn, None, where="spectral NH step()")
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
             self._target_mass = self.compute_dry_mass(state)
-        return self._step_jit(state, dt)
+        return self._step_jit(state, dt, physics_fn)
 
-    @partial(jax.jit, static_argnums=(0,))
-    def _step_jit(self, state: SpectralNHState, dt: float) -> SpectralNHState:
+    @partial(jax.jit, static_argnums=(0, 3))
+    def _step_jit(self, state: SpectralNHState, dt: float,
+                  physics_fn=None) -> SpectralNHState:
         """Advance one time step using split-explicit RK3.
 
         Slow tendencies use spectral horizontal operators.
@@ -922,7 +952,8 @@ class SpectralCompressibleEulerModel:
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
         )
-        slow_tendency_fn, acoustic_update_fn = self._build_se_functions()
+        slow_tendency_fn, acoustic_update_fn = self._build_se_functions(
+            physics_fn)
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
