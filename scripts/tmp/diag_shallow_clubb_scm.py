@@ -110,9 +110,10 @@ def main():
                                               cld_macmic_num_steps=3)
         cfg = cfg._replace(
             turbulence=cfg.turbulence._replace(liquid_partition=True),
-            microphysics=apply_microphysics_experiment_flags(
-                cfg.microphysics, cfg.microphysics.scheme,
-                liquid_from_closure=True))
+            microphysics=cfg.microphysics._replace(
+                morrison=apply_microphysics_experiment_flags(
+                    cfg.microphysics.morrison, cfg.microphysics.scheme,
+                    liquid_from_closure=True)))
     print(f"ARM case={a.case} nlev={arm.case.nlev} dt={arm.dt} hours={arm.hours} "
           f"window={arm.analysis_hours} h flux_to_closure={a.surface_flux_to_closure} "
           f"prod_liquid={a.prod_liquid}",
