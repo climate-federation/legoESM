@@ -2,7 +2,8 @@
 
 Checks:
 - sw decomposition: PAR + NIR + UV ≈ sw_down during day
-- Low sun (cos_zenith <= 0.01): sw_down handed on as diffuse, absorbed in full
+- Low sun (cos_zenith <= 0.01): sw_down handed on as diffuse and absorbed or
+  reflected at the band albedo
 - Two-leaf RT: fSun ∈ [0, 1], APAR_Sun + APAR_Sh = total absorbed PAR
 - Energy conservation: ASW_Sun + ASW_Sh + ASW_Soil ≤ sw_down
 - Vcmax25_Sun + Vcmax25_Sh > 0 when LAI > 0

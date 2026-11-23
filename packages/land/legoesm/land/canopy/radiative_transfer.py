@@ -228,7 +228,7 @@ def split_sw_components(
         and total UV [W m-2].
     """
     # Low-sun guard: avoid division by zero (the light is routed diffuse below)
-    is_day = cos_zenith > 0.01  # coeff-ok: night guard, cos(zenith) floor to avoid /0
+    is_day = cos_zenith > 0.01  # coeff-ok: low-sun guard, cos(zenith) floor to avoid /0
 
     # Extra-terrestrial irradiance (top-of-atmosphere, W m-2)
     I0 = constants.S_0  # total solar irradiance

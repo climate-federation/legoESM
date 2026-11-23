@@ -125,6 +125,24 @@ def test_low_sun_and_low_light_shortwave_is_absorbed(sw, cos_z):
         rtol=0.0, atol=1e-10)
 
 
+def test_low_light_shortwave_gradient_is_finite():
+    """No ratio of vanishing fluxes: the gradient of the absorbed shortwave in
+    sw_down stays finite down to vanishing light."""
+    cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
+                               surface_scheme=TwoLeafCanopyConfig())
+    state = init_multilayer_land_state(NCOL, cfg, T_init=300.0)
+
+    @jax.jit
+    def f(sw):
+        _, _, _, sfc = step_multilayer_land_with_diagnostics(
+            state, _forcing(sw, 0.005), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 0.4),
+            land_params=_params())
+        return jnp.sum(sfc.sw_net)
+    for sw in (1e-200, 0.5):
+        g = float(jax.grad(f)(sw))
+        assert np.isfinite(g) and g > 0.0, (sw, g)
+
+
 def test_albedo_differentiable_in_soil_water():
     from legoesm.land.soil_albedo import wet_soil_albedo
     g = jax.grad(lambda th: wet_soil_albedo(DRY_VIS, SAT_VIS, th))(0.1)
