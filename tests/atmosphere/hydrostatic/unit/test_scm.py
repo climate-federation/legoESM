@@ -442,6 +442,14 @@ def test_swap_turbulence_schemes(turb_scheme):
     _run_and_assert_stable(cfg)
 
 
+def test_prognostic_clubb_runs_in_the_scm():
+    # prognostic CLUBB reads the column latitude (its tropopause cutoff)
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    cfg = _baseline_cfg(turbulence=TurbulenceConfig(
+        scheme="clubb", clubb=CLUBBConfig(prognostic=True)))
+    _run_and_assert_stable(cfg)
+
+
 @pytest.mark.parametrize(
     "micro_scheme",
     ["kessler", "sundqvist", "seifert_beheng", "morrison", "thompson"],
