@@ -379,6 +379,44 @@ def rotated_jw_bundle(model, *, perturbed: bool, alpha: float) -> dict:
     return {**bundle, "state": st}
 
 
+def held_suarez_rest_bundle(model, *, T_init: float = 300.0,
+                            perturbation_amplitude: float = 1.0,
+                            seed: int = 42) -> dict:
+    """Held-Suarez initial state on the duo grid, identical in definition to
+    every other matrix grid's (``held_suarez_init_latlon`` / ``_mpas`` /
+    ``isothermal_rest_state_spectral``): isothermal ``T_init`` at rest,
+    ``p_s = p_ref``, plus a ``N(0, 1) * perturbation_amplitude`` temperature
+    perturbation (``jax.random.PRNGKey(seed)``) on the LOWEST level only.
+
+    Built on the model's own DCMIP16 bundle, whose ``ps`` is the uniform
+    1000 hPa = ``p_ref`` (so delp/press are the rest state's), with ``pt``
+    (temperature in the bundle; the first step converts it) and the D-grid
+    winds overwritten.  FV3's level index runs top -> bottom, so the lowest
+    level is ``km - 1``.
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm import constants
+
+    bundle = model.dcmip16_initial_state(do_pert=False)
+    ps = np.asarray(bundle["press"]["ps"])
+    sl = _compute_window(model.grid.ctx_np)
+    if not np.allclose(ps[:, sl, sl], constants.p_ref, rtol=0, atol=1e-6):
+        raise ValueError("Held-Suarez duo IC needs the DCMIP16 bundle's "
+                         "uniform ps == p_ref")
+    st = dict(bundle["state"])
+    pt = np.array(st["pt"])
+    km = pt.shape[-1]
+    pt[:, sl, sl, :] = T_init
+    n = model.grid.n
+    pert = np.asarray(jax.random.normal(jax.random.PRNGKey(seed), (6, n, n),
+                                        dtype=jnp.float64)) * perturbation_amplitude
+    pt[:, sl, sl, km - 1] += pert
+    st.update(pt=jnp.asarray(pt), u=jnp.zeros_like(st["u"]),
+              v=jnp.zeros_like(st["v"]))
+    return {**bundle, "state": st}
+
+
 def build_duo_hydro(n: int, *, perturbed: bool = True,
                     held_suarez: bool = False, km: int = DUO_HYDRO_KM,
                     eta: str = DUO_HYDRO_ETA,
@@ -402,7 +440,9 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
         n, rotation_alpha=0.0 if rotated_alpha is None else rotated_alpha)
     cfg = FV3DuoConfig(km=km, eta=eta, hydrostatic=True)
     model = FV3DuoDynamicsModel(grid, cfg)
-    if rotated_alpha is None:
+    if held_suarez:
+        bundle = held_suarez_rest_bundle(model)
+    elif rotated_alpha is None:
         bundle = model.dcmip16_initial_state(do_pert=perturbed)
     else:
         bundle = rotated_jw_bundle(model, perturbed=perturbed,
@@ -462,6 +502,9 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
             f"nord={cfg.nord} d4_bg={cfg.d4_bg} sponge={cfg.sponge_del2_top_layers}"
             f"L, n_split={cfg.n_split}, dt={dt:g}s (deck 1920 s + driver "
             f"CFL clamp); " + (
+                "Held-Suarez IC: isothermal 300 K at rest, ps = p_ref, "
+                "1 K lowest-level perturbation (seed 42), as every grid"
+                if held_suarez else
                 f"DCMIP16 baroclinic-wave IC (do_pert={perturbed})"
                 if rotated_alpha is None else
                 f"rotated JW IC (jablonowski_rotated builder on CAM6 L32, "
