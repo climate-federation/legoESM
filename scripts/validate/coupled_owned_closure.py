@@ -266,6 +266,11 @@ def main(argv=None) -> int:
     ap.add_argument("--require-water-bar", action="store_true",
                     help="exit 1 when a water row misses the bar "
                     "(WATER_BAR_REL of the run's precipitation)")
+    ap.add_argument("--trace-water-stages", action="store_true",
+                    help="lat-lon lane: book the total atmospheric water each "
+                    "dycore stage changes (physics increment application, "
+                    "safety rails); the rest of a step's change is the "
+                    "dynamics")
     ap.add_argument("--trace-positivity", action="store_true",
                     help="book the water the dycore's positivity stage (and "
                     "its vapour payment) changes, per call")
@@ -607,6 +612,37 @@ def main(argv=None) -> int:
                    _wrap(_awp, "positivity", _area_kw))
         mp.setattr(cons, "pay_condensate_deficit_from_vapour",
                    _wrap(_pay, "pay_from_vapour", lambda kw: _area2d[0]))
+    wst = {}
+    if args.trace_water_stages and args.grid == "latlon":
+        import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as llm
+        from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+
+        def _water(s_, grid_, sig):
+            if isinstance(sig, HybridSigmaPressureCoordinate):
+                dp = llm.dp_from_hybrid(sig, s_.p_s)
+            else:
+                dp = s_.p_s[..., None] * sig.dsigma
+            q = sum((s_.tracers[k_].data if hasattr(s_.tracers[k_], "data")
+                     else s_.tracers[k_]) for k_ in s_.tracers if k_ in WATER)
+            return jnp.sum(jnp.asarray(grid_.area)[..., None] * dp * q) / constants.g
+
+        def _wbook(name):
+            def cb(b, a_):
+                wst[name] = wst.get(name, 0.0) + float(a_) - float(b)
+            return cb
+
+        dcls = type(atm.model.dyn)
+        for nm in ("_apply_physics_increment", "_apply_safety_rails"):
+            def _mk(m, nm=nm):
+                def w(self, state, *a_, **kw):
+                    out = m(self, state, *a_, **kw)
+                    g_ = kw.get("grid") or self.grid
+                    sg = kw.get("sigma_coord") or self.sigma_coord
+                    jax.debug.callback(_wbook(nm), _water(state, g_, sg),
+                                       _water(out, g_, sg), ordered=True)
+                    return out
+                return w
+            mp.setattr(dcls, nm, _mk(getattr(dcls, nm)))
     if args.trace_positivity and args.grid == "latlon":
         # lat-lon dycore: the dp-weighted water each transport stage changes
         # (raw flux-form tendency, the polar filter on the tracer tendencies
@@ -1105,6 +1141,10 @@ def main(argv=None) -> int:
     print("NULL", {r: v for r, v in null.items()})
     if args.trace_positivity:
         print("POSITIVITY", {kk: f"{v:.6e}" for kk, v in pos_rec.items()})
+    if args.trace_water_stages:
+        print("WATERSTAGES " + json.dumps(dict(
+            wst, total_dW_atm=s1["W_atm"] - s0["W_atm"],
+            E_minus_P=F["E_atm"] - F["P_atm"])))
     print("INJECT rel_err", ctrl)
     bad = water_bar_verdict(out["rel"], F["P_atm"])
     print(f"BAR water |rel| <= {WATER_BAR_REL:g}:",
