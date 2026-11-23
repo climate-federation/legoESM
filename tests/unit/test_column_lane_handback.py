@@ -302,6 +302,9 @@ def _driver(tmp_path, monkeypatch, radiation="rrtmgp", days=None, **extra):
         land_beta_soil=True, land_surface_scheme="simple_seb",
         land_params_refresh=False, **extra)
     d = ModelDriver(cfg, output_dir=str(tmp_path))
+    # Marked coupled before setup, as CoupledESMDriver does, so the coupled
+    # sea-ice model (not the atmosphere's ice skin) owns the ice tile.
+    d._requires_surface_flux_export = True
     d.setup()
     return d
 
