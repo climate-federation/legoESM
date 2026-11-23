@@ -344,9 +344,12 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
     def kinetic_energy_dual(vel):
         """K_c = sum_f A_f u_f^2 / (4 A_c) (the TRiSK form)."""
         u, v = vel
-        ku = A_u[:, None, None] * (u[:, :-1] ** 2 + u[:, 1:] ** 2)
-        kv = A_v[:-1, None, None] * v[:-1] ** 2 + A_v[1:, None, None] * v[1:] ** 2
-        return (ku + kv) / (4.0 * area[..., None])
+        # Metrics are built in the default float (fp64 under x64): cast to the
+        # wind dtype so an fp32 state stays fp32 (no-op for fp64 states).
+        A_u_, A_v_ = A_u.astype(u.dtype), A_v.astype(u.dtype)
+        ku = A_u_[:, None, None] * (u[:, :-1] ** 2 + u[:, 1:] ** 2)
+        kv = A_v_[:-1, None, None] * v[:-1] ** 2 + A_v_[1:, None, None] * v[1:] ** 2
+        return (ku + kv) / (4.0 * area.astype(u.dtype)[..., None])
 
     def vorticity_term_energy(ctx, dvel):
         """Vertex-PV Coriolis on mass transports U = l dp u, V = l dp v:
@@ -355,17 +358,18 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
         u, v = ctx["vel"]
         dp_u, dp_v = ctx["dp_face"]
         dp = ctx["dp"]
-        U = l_u[:, None, None] * dp_u * u
-        V = l_v[:, None, None] * dp_v * v
+        dt_ = u.dtype  # metrics -> wind dtype (no-op for fp64 states)
+        U = l_u.astype(dt_)[:, None, None] * dp_u * u
+        V = l_v.astype(dt_)[:, None, None] * dp_v * v
         zeta = gops_ll.vorticity(u, v)                            # (n_lat+1, n_lon+1, nlev)
         dpx = 0.5 * (dp[:, west] + dp[:, east])                   # (n_lat, n_lon+1, nlev)
         dpv = jnp.concatenate([dpx[:1], 0.5 * (dpx[:-1] + dpx[1:]), dpx[-1:]], axis=0)
-        Q = (zeta + f_vert[..., None]) / dpv
+        Q = (zeta + f_vert.astype(dt_)[..., None]) / dpv
         sV = V[:, west] + V[:, east]                              # (n_lat+1, n_lon+1, nlev)
-        cor_u = (Q[:-1] * sV[:-1] + Q[1:] * sV[1:]) / (4.0 * d_u[:, None, None])
+        cor_u = (Q[:-1] * sV[:-1] + Q[1:] * sV[1:]) / (4.0 * d_u.astype(dt_)[:, None, None])
         Up = jnp.pad(U, ((1, 1), (0, 0), (0, 0)))
         sU = Up[:-1] + Up[1:]                                     # (n_lat+1, n_lon+1, nlev)
-        cor_v = -(Q[:, :-1] * sU[:, :-1] + Q[:, 1:] * sU[:, 1:]) * (inv_dv[:, None, None] / 4.0)
+        cor_v = -(Q[:, :-1] * sU[:, :-1] + Q[:, 1:] * sU[:, 1:]) * (inv_dv.astype(dt_)[:, None, None] / 4.0)
         return (dvel[0] + cor_u, dvel[1] + cor_v)
 
     as83 = vertical_form != "sb81_theta"

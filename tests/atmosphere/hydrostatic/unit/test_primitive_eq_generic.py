@@ -993,3 +993,24 @@ def test_mpas_pv_fence_is_value_neutral(form):
         st, mesh, coord, cfg, dt=600.0, vertical_form=form, fence_pv_flux=fence))(s)
     for a, b in zip(jax.tree_util.tree_leaves(f(True)), jax.tree_util.tree_leaves(f(False))):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+@pytest.mark.parametrize("form", ["legacy", "sb81_theta", "as83", "as83_logmean"])
+def test_latlon_fp32_state_gives_fp32_tendencies(form):
+    """An fp32 lat-lon state keeps fp32 tendencies in every vertical form even
+    with x64 enabled (the AS83 face metrics are built in the default float and
+    used to promote du, dv to fp64)."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationConfig,
+    )
+    set_policy(PrecisionPolicy.fp32())  # the autouse fixture restores the policy
+    grid, coord = _ll_grid(), _coord("hybrid")
+    s = _ll_state(grid)
+    s32 = s._replace(u=s.u.astype(jnp.float32), v=s.v.astype(jnp.float32),
+                     T=s.T.astype(jnp.float32), p_s=s.p_s.astype(jnp.float32),
+                     phis=s.phis.astype(jnp.float32),
+                     tracers={k: q.astype(jnp.float32) for k, q in s.tracers.items()})
+    out = cgrid_latlon_pe_tendencies(s32, grid, coord, CGridLatLonPrimitiveEquationConfig(),
+                                     dt=600.0, vertical_form=form)
+    assert [str(x.dtype) for x in out[:4]] == ["float32"] * 4
