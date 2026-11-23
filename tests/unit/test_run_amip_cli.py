@@ -2498,7 +2498,8 @@ def test_config_yaml_round_trips_authoritative_values():
 
     Re-baselined 2026-09-23 (user decision): the production atmospheric physics
     suite is CAM6 -- the CAM 32-level hybrid table, CLUBB cloud fraction,
-    the Zhang-McFarlane convection port, orographic-only gravity waves, the
+    the Zhang-McFarlane convection port, orographic + spectral non-orographic
+    gravity waves (2026-11-23), the
     CESM Large-Yeager surface fluxes and the 1800 s physics step with three
     macro/micro sub-steps.  The outgoing Sundqvist/L36 deck is asserted
     separately below so both remain pinned.
@@ -2522,9 +2523,14 @@ def test_config_yaml_round_trips_authoritative_values():
     assert args.dt == 112.5
     cfg = build_config_from_args(args)
     assert cfg.convection == "zhang_mcfarlane"   # CAM6 zm_conv port
-    # CAM6 f09 L32 (non-WACCM) runs OROGRAPHIC drag only: build-namelist sets
-    # use_gw_front and use_gw_convect_dp false below 60 levels.
-    assert cfg.gravity_wave_drag == "mcfarlane"
+    # CAM6 f09 L32 (non-WACCM) runs OROGRAPHIC drag only; legoESM adds the
+    # E3SM/CAM spectral non-orographic member with a uniform background source
+    # (user decision 2026-11-19 / 2026-11-23), pinned as in the L36 deck.
+    assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
+    assert (args.e3sm_cam_source, args.e3sm_cam_pgwv, args.e3sm_cam_effgw,
+            args.e3sm_cam_taubgnd, args.e3sm_cam_c0, args.e3sm_cam_launch_p,
+            args.e3sm_cam_latitude_taper) == ("background", 32, 1.0, 0.7e-3,
+                                              30.0, 50000.0, False)
     assert cfg.microphysics == "morrison"        # MG2 port is run 2
     assert cfg.cloud_scheme == "cam6_clubb"
     assert cfg.use_clubb_cloud_fraction is True

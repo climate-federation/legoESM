@@ -375,10 +375,14 @@ clubb_c_k10: 0.5
 # CAM6 f09 L32 (non-WACCM, nlev < 60) runs OROGRAPHIC drag ONLY: build-namelist
 # sets use_gw_front=false and use_gw_convect_dp=false (bld/build-namelist ~3230;
 # the f09 frontal/Beres coefficient rows apply to WACCM / >=60-level builds).
-# So no non-orographic member here (the Sundqvist/L36 deck carries the
-# e3sm_cam
-# background source; that row is dropped on purpose).
-gravity_wave_drag: mcfarlane            # orographic member = CAM6 gw_oro port
+# legoESM DEPARTS from CAM6 here (user decision 2026-11-19, production since
+# 2026-11-23): a non-orographic member is added to every AMIP run.  It is the
+# E3SM/CAM spectral solver with a uniform background source, pinned exactly as in
+# amip_sundqvist_l36.yaml (adopted there 2026-09-17: with the bulk Hines heuristic
+# the Arctic polar-night jet vanished).  Hines was measured on a 2-deg 1979 year
+# against orographic-only (100-10 hPa u RMS 8.40 -> 7.10 m/s, score 1.288 -> 1.317);
+# the spectral member's year on this L32 grid is running (2026-11-23).
+gravity_wave_drag: mcfarlane+e3sm_cam   # orographic member = CAM6 gw_oro port
                                         # (cam_cesm2_1_rel_60, oracle-matched;
                                         # user decision 2026-10-19): effgw_oro
                                         # 0.125 x landfrac, sgh/sqrt(landfrac),
@@ -400,12 +404,16 @@ mcfarlane_effgw_oro: 0.125              # CAM6 effgw_oro (namelist_defaults_cam
                                         # non-WACCM L32); explicit so the run
                                         # records it (#1712).
 hines_launch_p: 70000.0                 # inert (hines not selected); kept equal
-                                        # to the Sundqvist/L36 deck.  The e3sm_cam_*
-                                        # rows
-                                        # also resolve (to run_amip defaults) but
-                                        # are dead while e3sm_cam is not in the
-                                        # selector; re-pin them from the CAM6
-                                        # namelist before any run that adds it.
+                                        # to the Sundqvist/L36 deck.
+e3sm_cam_source: background             # E3SM/CAM background non-orographic source;
+e3sm_cam_pgwv: 32                       # values pinned from amip_sundqvist_l36.yaml
+e3sm_cam_effgw: 1.0                     # (phase speeds -80..80 m/s, CAM5 effgw_cm,
+e3sm_cam_taubgnd: 0.7e-3                # 0.7 mPa background stress, CAM spectrum
+e3sm_cam_c0: 30.0                       # width 30 m/s, launch at 500 hPa, no
+e3sm_cam_launch_p: 50000.0              # cos-lat taper as E3SM on unstructured
+e3sm_cam_latitude_taper: false          # grids).
+                                        # The other e3sm_cam_* rows resolve to the
+                                        # run_amip defaults, as in the L36 deck.
 
 # ---- surface ------------------------------------------------------------------
 surface_bulk_scheme: large_yeager_cesm  # CAM6/CESM shr_flux_atmOcn (LY04)
