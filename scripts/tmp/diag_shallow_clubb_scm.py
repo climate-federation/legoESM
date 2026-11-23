@@ -35,6 +35,10 @@ _spec.loader.exec_module(H)
 # the reference guard's alias table lacks it. Same deck (gSAM CASES/BOMEX).
 import legoesm.training.les_reference as _lr  # noqa: E402
 _lr._CASE_ALIASES["bomex"] = frozenset({"bomex", "bomex_cu"})
+# Since b024f1c706 prognostic CLUBB reads grid.lat; SCMGrid names it grid_lat,
+# so the SCM crashes. Alias for this probe only (same value).
+from legoesm.atmosphere.forcing.scm.scm import SCMGrid  # noqa: E402
+SCMGrid.lat = property(lambda g: g.grid_lat)
 
 MOM = ("rtm", "thlm", "um", "vm", "wp2", "wp3", "up2", "vp2", "wprtp",
        "wpthlp", "upwp", "vpwp", "rtp2", "thlp2", "rtpthlp")
