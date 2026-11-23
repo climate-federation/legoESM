@@ -314,3 +314,9 @@ def test_a_land_call_after_the_last_step_is_booked(tmp_path):
     res = json.loads(out.read_text())
     assert abs(res["rows"]["land_water"]) < 1.0e3, res["rows"]["land_water"]
     assert abs(res["rows"]["land_water_debit"]) < 1.0e3
+
+
+def test_water_bar_fails_rows_past_the_bar_and_nan_but_not_slab_heat():
+    rel = {"atm_water": -3.2e-4, "system_water": 2e-3,
+           "land_water": float("nan"), "slab_heat": 0.5}
+    assert probe.water_bar_failures(rel) == ["system_water", "land_water"]

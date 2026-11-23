@@ -61,6 +61,17 @@ from pathlib import Path
 import numpy as np
 
 STORES = ("W_atm", "W_land", "W_ice", "H_slab")
+# Water rows pass at |residual| <= this fraction of the run's precipitation.
+# fp32 rounding alone leaves ~3e-4 (atm), so the bar is 1e-3 (vote
+# 2026-11-23: author 1e-3, GLM 1e-3, codex 5e-4).
+WATER_BAR_REL = 1.0e-3
+
+
+def water_bar_failures(rel: dict) -> list:
+    """Water rows of ``rel`` (residual / precipitation) outside the bar;
+    a NaN row fails.  Pure."""
+    return [r for r, v in rel.items()
+            if r != "slab_heat" and not abs(v) <= WATER_BAR_REL]
 
 
 def budget_rows(s0: dict, s1: dict, f: dict) -> dict:
@@ -890,10 +901,13 @@ def main(argv=None) -> int:
     if args.trace_positivity:
         print("POSITIVITY", {kk: f"{v:.6e}" for kk, v in pos_rec.items()})
     print("INJECT rel_err", ctrl)
+    bad = water_bar_failures(out["rel"])
+    print(f"BAR water |rel| <= {WATER_BAR_REL:g}:",
+          "PASS" if not bad else f"FAIL {bad}")
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=1))
     mp.undo()
-    return 0
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
