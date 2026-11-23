@@ -412,8 +412,9 @@ class SBMConfig(NamedTuple):
     cloud_mask_sharpness: float = 5.0
     # RULE 5 width of the dry-parcel gate in the LCL lookup value
     # log(e / T**(1/kappa)) (dimensionless, natural-log units): a parcel whose
-    # value lies below the table (LCL T < 173 K, the oracle's FATAL) is gated
-    # off by sigmoid((v - v_min) / width); 0 = the hard step.
+    # value lies below the table (LCL T < 173 K, the oracle's FATAL) does not
+    # convect; above it the outputs ramp in with sigmoid((v - v_min)/width - 4).
+    # 0 = the hard step.  Numerics, excluded from __param_spec__.
     dry_parcel_gate_width: float = 0.1
 
 

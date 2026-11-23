@@ -70,11 +70,14 @@ Interface notes
   ``T_moist >= T`` layer mask, which the oracle does not have; it is inert and
   a non-default value raises.
 * KNOWN DIFFERENCE: an unsaturated surface parcel so dry that its LCL lies
-  below the lookup table (LCL temperature < 173 K) does not convect: it is
-  evaluated at the table edge and its column's outputs are multiplied by
-  ``sigmoid((v - v_min) / SBMConfig.dry_parcel_gate_width)`` in the lookup
-  value ``v`` (default width 0.1; 0 = the hard step, no convection below the
-  edge); the oracle stops with FATAL 'get_lcl_temp: value to low'.  At the
+  below the lookup table (LCL temperature < 173 K) does not convect, as a
+  parcel with no vapour does not; the oracle stops with FATAL 'get_lcl_temp:
+  value to low'.  Above the edge the column's outputs are multiplied by
+  ``sigmoid((v - v_min) / SBMConfig.dry_parcel_gate_width - 4)`` in the
+  lookup value ``v`` (about 0.02 at the edge, default width 0.1; width 0 is
+  the hard step).  The ungated outputs are zero near the edge (measured to
+  ~2x the edge mixing ratio) but not everywhere above it (CAPE ~84 J/kg at
+  10x the edge in a dry-adiabatic column at 500 hPa).  At the
   default the gate is exactly 1 on every oracle fixture column (gap 0, the
   per-case gaps below are unchanged).  Such parcels occur over the
   Antarctic plateau in coupled runs (surface mixing ratio 5.8e-8 at 247 K,
@@ -276,16 +279,16 @@ def _cape_calculation(T, r, pf, ph, table_vals, dry_gate_width=0.0):
     theta0 = T[ks] * (pref / pf[ks]) ** kappa
     r0_safe = jnp.where(r0 > 0.0, r0, 1.0)
     value = jnp.log(theta0 ** (-1.0 / kappa) * pref * r0_safe / (Rd / Rv + r0_safe))
-    # a parcel so dry that its LCL lies below the table's coldest entry (the
-    # oracle's FATAL 'value to low') is evaluated at the table edge and gated
-    # off smoothly in the lookup value (hard step at width 0)
-    tlcl_tab, lut_bad = _get_lcl_temp(jnp.maximum(value, val_min), val_min,
-                                      val_max, table)
-    skip = (~saturated) & (r0 <= 0.0)
+    tlcl_tab, lut_bad = _get_lcl_temp(value, val_min, val_max, table)
+    # no vapour, or so little that the LCL lies below the table's coldest
+    # entry (the oracle's FATAL 'value to low'): no convection.  Above that
+    # edge the column's outputs ramp in with sigmoid((v - v_min)/w - 4)
+    # (about 0.02 at the edge; w = 0 is the hard step).
+    skip = (~saturated) & ((r0 <= 0.0) | (value < val_min))
     w = jnp.asarray(dry_gate_width, T.dtype)
     gate = jnp.where(w > 0, jax.nn.sigmoid((value - val_min)
-                                           / jnp.where(w > 0, w, 1.0)),
-                     (value >= val_min).astype(T.dtype))
+                                           / jnp.where(w > 0, w, 1.0) - 4.0),
+                     jnp.ones((), T.dtype))
     gate = jnp.where(saturated | skip, jnp.ones((), T.dtype), gate)
     plcl_tab = pref * (tlcl_tab / theta0) ** (1.0 / kappa)
     lcl_above_top = plcl_tab < pf[0]

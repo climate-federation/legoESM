@@ -201,36 +201,37 @@ def _near_edge_convecting_column(factor):
 
 
 def test_dry_parcel_gate_is_smooth_at_the_default_and_a_step_at_zero():
-    """Gate value one width below the edge: sigmoid(-1) at the default 0.1,
-    0 at the hard limit; 1 well inside the table."""
+    """Gate 4 widths above the edge: 0.5 at the default width 0.1, 1 at the
+    hard limit; 1 for a moist parcel."""
     from legoesm.atmosphere.physics.convection.sbm import (
         _cape_calculation, _lcl_temp_table)
-    vmin = float(_lcl_temp_table()[0])
     tv = tuple(jnp.asarray(x) for x in _lcl_temp_table())
-    T, q, pf, ph = _near_edge_convecting_column(np.exp(-0.1))
-    r = q[0] / (1.0 - q[0])
-    args = (T[0], r, pf[0], ph[0], tv)
-    g_def = float(_cape_calculation(*args, 0.1)[-1])
-    g_hard = float(_cape_calculation(*args, 0.0)[-1])
-    np.testing.assert_allclose(g_def, 1.0 / (1.0 + np.e), rtol=1e-6)
-    assert g_hard == 0.0
-    T, q, pf, ph = _near_edge_convecting_column(10.0)
-    r = q[0] / (1.0 - q[0])
-    assert float(_cape_calculation(T[0], r, pf[0], ph[0], tv, 0.0)[-1]) == 1.0
-    assert vmin < 0.0
+
+    def gate(factor, width):
+        T, q, pf, ph = _near_edge_convecting_column(factor)
+        r = q[0] / (1.0 - q[0])
+        return float(_cape_calculation(T[0], r, pf[0], ph[0], tv, width)[-1])
+    np.testing.assert_allclose(gate(np.exp(0.4), 0.1), 0.5, atol=1e-6)
+    assert gate(np.exp(0.4), 0.0) == 1.0
+    np.testing.assert_allclose(gate(1.0e4, 0.1), 1.0, rtol=1e-12)
 
 
 def test_gradient_through_the_dry_parcel_gate_at_the_default():
-    """RULE 5 gradient check at the default width: finite and non-zero."""
+    """RULE 5 gradient check at the default width: finite and non-zero.  The
+    gate's own derivative is on the path: a wide gate changes the gradient."""
     from jax.test_util import check_grads
     T, q, pf, ph = _near_edge_convecting_column(10.0)
 
-    def f(s):
-        o = sbm_convection(T, q * s, pf, ph, 1800.0, SBMConfig())
+    def f(s, width=0.1):
+        o = sbm_convection(T, q * s, pf, ph, 1800.0,
+                           SBMConfig(dry_parcel_gate_width=width))
         return jnp.sum(o.dT_dt) + jnp.sum(o.cape) * 1.0e-6
     s0 = jnp.asarray(1.0)
     check_grads(f, (s0,), order=1, modes=["rev"], eps=1.0e-6)
-    assert float(jnp.abs(jax.grad(f)(s0))) > 0.0
+    g_def = float(jax.grad(f)(s0))
+    assert g_def != 0.0 and np.isfinite(g_def)
+    assert float(jax.grad(lambda s: f(s, 1.0))(s0)) != float(
+        jax.grad(lambda s: f(s, 0.0))(s0))
 
 
 def test_parcel_just_inside_the_lcl_table_does_not_convect_either():
