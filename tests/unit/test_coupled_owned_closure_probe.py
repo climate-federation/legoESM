@@ -297,3 +297,20 @@ def test_step_trace_pairs_each_step_with_the_state_it_made(tmp_path):
     out2 = tmp_path / "dump.json"
     assert probe.main(base + ["--dump-step", "2", "--json", str(out2)]) == 0
     assert (tmp_path / "dump.step2.npz").exists()
+
+
+@pytest.mark.slow
+def test_a_land_call_after_the_last_step_is_booked(tmp_path):
+    """With the land called every step (K=1) the run ends on a land call
+    made after the last dycore step; its debit and its whole interval in
+    flight must be booked, or the land row is off by one step of land
+    evaporation."""
+    import json
+    out = tmp_path / "k1.json"
+    assert probe.main(["--grid", "latlon", "--resolution", "12", "--dt",
+                       "600", "--vertical-coord", "cam_l32", "--nlev", "32",
+                       "--days", "0.0625", "--land-update-s", "300",
+                       "--json", str(out)]) == 0
+    res = json.loads(out.read_text())
+    assert abs(res["rows"]["land_water"]) < 1.0e3, res["rows"]["land_water"]
+    assert abs(res["rows"]["land_water_debit"]) < 1.0e3

@@ -619,6 +619,16 @@ def main(argv=None) -> int:
 
     pend_rec = [None]
 
+    def land_check(call_step):
+        """Book a new land call: the land's own evaporation debit (its held
+        rate, debited ahead for the K steps the atmosphere then applies)."""
+        he = (atm._land_window or {}).get("land_held_evap")
+        if he is not None and he is not land_seen.get("held_obj"):
+            land_seen["held_obj"] = he
+            land_seen["call_step"] = call_step
+            F["E_land_debit"] += I(f_land * _np(he).reshape(-1)) * max(
+                1, int(round(cfg.land_update_seconds / DT))) * DT
+
     def finish_rec():
         """Complete the last step's record on the state it produced."""
         rec, pend_rec[0] = pend_rec[0], None
@@ -662,16 +672,9 @@ def main(argv=None) -> int:
                 F["boot_excess"] = I(f_land * _np(hb).reshape(-1)) * (
                     max(1, int(round(cfg.land_update_seconds / DT))) - 1
                 ) * DT
-        # the land's own evaporation debit: each land call debits its held
-        # rate ahead for the K steps the atmosphere then applies it
-        he = (atm._land_window or {}).get("land_held_evap")
-        if he is not None and he is not land_seen.get("held_obj"):
-            land_seen["held_obj"] = he
-            # the land call runs after the dycore step, outside this
-            # hook: a call first seen in step n+1 was made at the end of n
-            land_seen["call_step"] = n_steps[0]
-            F["E_land_debit"] += I(f_land * _np(he).reshape(-1)) * max(
-                1, int(round(cfg.land_update_seconds / DT))) * DT
+        # the land call runs after the dycore step, outside this hook: a
+        # call first seen in step n+1 was made at the end of step n
+        land_check(n_steps[0])
         # this step's fluxes; its state is read at the next call (the driver
         # installs the returned state only after this hook returns)
         rec = dict(step=n_steps[0] + 1,
@@ -744,6 +747,7 @@ def main(argv=None) -> int:
              + I(prev["O"].ice_lake_freshwater_flux) * win)
     status = d.run(segment_callback=sample)
     finish_rec()
+    land_check(n_steps[0])   # a land call after the last step
     if abs(n_steps[0] * DT - args.days * 86400.0) > 1e-6 * DT:
         raise SystemExit(
             f"steps x dt = {n_steps[0]} x {DT:g} s != {args.days} d: the "
