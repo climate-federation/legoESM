@@ -136,7 +136,7 @@ CASES: tuple[dict, ...] = (
              _r("ORCA2 tripolar (zps)", "NEMO ORCA2 literal card", VERIFIED,
                 "ocean-only year (no sea-ice model, nn_ice=1 as in NEMO's standalone run): 12/12 months within the Decision 188 monthly bars"),
              _r("ORCA2 tripolar (zps)", "NEMO ORCA2 literal card + SI3", VERIFIED,
-                "coupled ocean + sea-ice year: 12/12 months; ocean bars max(fixed, 3x NEMO twin), ice area/volume and daily ice-map placement per hemisphere"),
+                "coupled ocean + sea-ice year: 12/12 months; ocean bars max(fixed, 3x NEMO twin), ice area/volume and monthly-mean ice-map placement per hemisphere"),
          ]),
 
     # ---- ANALYTIC cases (closed-form / exact solution) ----
