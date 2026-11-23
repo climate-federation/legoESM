@@ -67,7 +67,7 @@ def test_polar_filtered_transport_conserves_tracer_mass(coord, fp64):
         u=nat.u + 5.0,
         tracers={"q_v": 5e-3 * (1.0 + 0.5 * wave)[..., None]
                  * jnp.ones_like(nat.T),
-                 "q_c": 1e-4 * (1.0 + jnp.sin(11.0 * lon))[..., None]
+                 "q_c": 1e-4 * (1.0 + 0.5 * jnp.sin(11.0 * lon))[..., None]
                  * jnp.ones_like(nat.T)})
     cfg = CGridLatLonPrimitiveEquationConfig(use_polar_filter=True)
     model = CGridLatLonPrimitiveEquationModel(g, s, cfg, dt=DT)
