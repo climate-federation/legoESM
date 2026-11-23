@@ -48,7 +48,7 @@ def test_configs_carry_the_tuned_parameters():
     the run configs inherit the physics from the shared base."""
     parser = mod.build_parser()
     slab = load_yaml_config(str(CMIP_CONFIGS[0]), parser)
-    assert slab["radiation"] == "rrtmgp"
+    assert slab["radiation"] == "rrtmg"                   # production copied
     assert slab["surface_bulk_scheme"] == "coare3"       # from the base
     assert slab["surface_gustiness_zi"] == 300.0         # from the base
     # the slab deck overrides the base's 3e-4 floor: CLUBB's liquid partition

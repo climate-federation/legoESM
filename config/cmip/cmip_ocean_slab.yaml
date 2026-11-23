@@ -185,6 +185,7 @@ zm_transport_cloud_tracers: true  # ZM convtran of carried cloud/precip water + 
 # ---- remaining production rows: verbatim from config/amip/amip_production.yaml
 # and amip_production_latlon48.yaml (resolved-config diff, vote 2026-11-23).
 # Not copied, pending the user: a_h_scale, polar_filter_cutoff_deg, the
+# div-4 damping scale (below),
 # surface-flux scheme rows, precision and the sea-ice skin rows below; production's microphysics rows
 # stay excluded (earlier user decision) ----
 radiation: rrtmg            # rrtmgp builder (CAM6 uses RRTMG; same k-lineage)
@@ -212,7 +213,10 @@ gravity_wave_drag: mcfarlane            # orographic member = CAM6 gw_oro port
                                         # smooth the umcfac |u|, its sign and
                                         # the taumin zeroing (widths 0.01 m/s,
                                         # 1e-3 m/s, 1e-10 Pa; RULE 5).
-mpas_div_damp4_scale: 1.0
+# Not copied: production's mpas_div_damp4_scale: 1.0.  On this grid (24x48,
+# dt 300, polar filter from 60 deg) it blew the run up within 9 steps
+# (measured 2026-11-23: p_s at the 100 Pa floor, T ~1e25 K); production pairs
+# it with its own polar cutoff and a_h_scale, both open for the user.
 mpas_land_lapse_K_per_km: 6.5
 mpas_land_beta: 0.6
 # Not copied: production's mpas_ice_skin_prognostic: true and the
