@@ -1426,7 +1426,10 @@ class _MPASSfcFluxAccum:
     # windows are complete.
     # 22-24 = taux_sfc / tauy_sfc / precip_conv_sfc (CMOR tauu, tauv, prc),
     # with the same mid-window-restart behaviour as slot 14 above.
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 22, 23, 24)
+    # 25 = rad_absorbed_above_top (energy-budget sink), averaged like the
+    # TOA fluxes; NOT in ENERGY_SLOTS, so a backend that does not publish it
+    # leaves the energy sample's interval means intact (the term is NaN).
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 22, 23, 24, 25)
     #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
     #: sw_dn, hfss, hfls).  After the first radiation call every one of them
     #: is non-None on EVERY step (the MPAS model holds the last radiation
@@ -10607,9 +10610,16 @@ class ModelDriver:
     # MPAS execution path (uses unified physics pipeline)
     # ==================================================================
 
+    # Optional area-mean terms of the energy sample, in the order the serial
+    # and partitioned paths carry them.  The last two close the atmospheric
+    # budget: net radiation absorbed ABOVE the model top (the CAM overhead
+    # layer's discarded heating, a sink) and L_f x frozen surface precip (the
+    # tracker's column energy carries -L_f*q_frozen, which snowfall removes).
+    _ENERGY_OPT_KEYS = ("hfss", "hfls", "evspsbl",
+                        "energy_rad_above_top", "energy_snowfall_fusion")
     _ENERGY_SERIES_KEYS = ("energy_toa_net", "energy_dE_dt",
                            "energy_toa_minus_dE_dt", "sw_net_sfc", "lw_net_sfc",
-                           "hfss", "hfls", "evspsbl")
+                           ) + _ENERGY_OPT_KEYS
 
     def _mpas_energy_sample(self, p_s_data, elapsed_day: float) -> dict:
         """One energy-budget tracker sample on the MPAS lane (#1354/#1515).
@@ -10675,6 +10685,9 @@ class ModelDriver:
             _sw_ns, _lw_ns = _slot(0), _slot(1)
             _shf, _lhf = _slot(6), _slot(7)
             _evp = _slot(_evap_sfc_slot())
+            _atop = _slot(_sfc_diag_slot("rad_absorbed_above_top"))
+            _pfz = _slot(_sfc_diag_slot("precip_frozen"))
+            _lfs = None if _pfz is None else constants.L_f * _pfz
             _rad = (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)
         except Exception as exc:  # noqa: BLE001
             if not _partitioned:
@@ -10686,11 +10699,13 @@ class ModelDriver:
                          "rank.", getattr(self, "_mpi_rank", -1),
                          type(exc).__name__, exc)
             return self._mpas_energy_partitioned(
-                None, None, None, (None,) * 5, (None,) * 3, False,
+                None, None, None, (None,) * 5,
+                (None,) * len(self._ENERGY_OPT_KEYS), False,
                 p_s_data, elapsed_day)
+        _opt = (_shf, _lhf, _evp, _atop, _lfs)
         if _partitioned:
             return self._mpas_energy_partitioned(
-                _ebd, _qv_e, _qfrz_e, _rad, (_shf, _lhf, _evp), _use_accum,
+                _ebd, _qv_e, _qfrz_e, _rad, _opt, _use_accum,
                 p_s_data, elapsed_day)
         if _ebd is None or _qv_e is None or None in _rad:
             return {k: float("nan") for k in self._ENERGY_SERIES_KEYS}
@@ -10728,8 +10743,8 @@ class ModelDriver:
                      if _shf is not None else float("nan")),
             "hfls": (float(_awm(_lhf, _awt))
                      if _lhf is not None else float("nan")),
-            "evspsbl": (float(_awm(_evp, _awt))
-                        if _evp is not None else float("nan")),
+            **{k: (float(_awm(f, _awt)) if f is not None else float("nan"))
+               for k, f in zip(self._ENERGY_OPT_KEYS, _opt)},
         }
 
     def _mpas_energy_partitioned(self, tracker, q_v, q_frozen, rad, opt,
@@ -10790,9 +10805,10 @@ class ModelDriver:
             raise
 
         # --- C: local sums, no collectives.
-        # flags = [no_error, interval_mean, has_hfss, has_hfls, has_evspsbl]
-        flags = np.zeros(5)
-        sums = np.zeros(10)   # E, 5 radiation, 3 optional, sum(w)
+        # flags = [no_error, interval_mean, has_<each optional term>]
+        n_opt = len(self._ENERGY_OPT_KEYS)
+        flags = np.zeros(2 + n_opt)
+        sums = np.zeros(7 + n_opt)   # E, 5 radiation, optional terms, sum(w)
         try:
             owned = vl.owned_mask_cells
             n_loc = int(owned.shape[0])
@@ -10824,8 +10840,8 @@ class ModelDriver:
             logger.error("  energy tracker: local sums failed on rank %d "
                          "(%s: %s); this sample is NaN on every rank.",
                          comm.Get_rank(), type(exc).__name__, exc)
-            flags = np.zeros(5)
-            sums = np.zeros(10)
+            flags = np.zeros(2 + n_opt)
+            sums = np.zeros(7 + n_opt)
 
         # --- D: every rank, unconditionally.
         comm.Allreduce(_MPI.IN_PLACE, sums, op=_MPI.SUM)
@@ -10841,7 +10857,7 @@ class ModelDriver:
                     "(interval mean on some, snapshot on others); this "
                     "sample is NaN rather than a mixture.")
             return nan_out
-        means = sums[:9] / sums[9]
+        means = sums[:-1] / sums[-1]
         eb = tracker.record(*(float(m) for m in means[:6]),
                             elapsed_seconds=elapsed_day * 86400.0)
         out = {
@@ -10852,7 +10868,7 @@ class ModelDriver:
             "lw_net_sfc": float(eb.sfc_lw_net),
             "energy_flux_interval_mean": float(fmin[1]),
         }
-        for j, key in enumerate(("hfss", "hfls", "evspsbl")):
+        for j, key in enumerate(self._ENERGY_OPT_KEYS):
             out[key] = (float(means[6 + j]) if fmin[2 + j] > 0.5
                         else float("nan"))
         return out
@@ -15511,7 +15527,8 @@ class ModelDriver:
             # EnergyBudgetTracker per diag step from self.model._sfc_diag.
             "energy_toa_net": [], "energy_dE_dt": [], "energy_toa_minus_dE_dt": [],
             "sw_net_sfc": [], "lw_net_sfc": [], "hfss": [], "hfls": [],
-            "evspsbl": [],
+            "evspsbl": [], "energy_rad_above_top": [],
+            "energy_snowfall_fusion": [],
             # 1.0 = the seven energy channels above (and evspsbl) are diagnostic-INTERVAL
             # MEANS; 0.0 = end-of-interval snapshots, which alias the diurnal
             # cycle of the land-dominated turbulent fluxes (#1354/#1353).
@@ -18810,6 +18827,12 @@ class ModelDriver:
             hfss=_arr("hfss") if "hfss" in ts else nan,
             hfls=_arr("hfls") if "hfls" in ts else nan,
             evspsbl=_arr("evspsbl") if "evspsbl" in ts else nan,
+            # Closure terms: radiation absorbed above the model top (sink)
+            # and L_f x frozen precip (scripts/validate/mpas_energy_budget_leak.py).
+            energy_rad_above_top=(_arr("energy_rad_above_top")
+                                  if "energy_rad_above_top" in ts else nan),
+            energy_snowfall_fusion=(_arr("energy_snowfall_fusion")
+                                    if "energy_snowfall_fusion" in ts else nan),
             # Flux-timing provenance for the seven channels above and evspsbl. WITHOUT
             # this the closure probe refuses every real series as "timing
             # unknown" -- which is the correct refusal, and exactly what

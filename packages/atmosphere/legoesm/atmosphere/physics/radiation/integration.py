@@ -760,7 +760,8 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                  sw_up_toa=None, lw_up_toa=None,
                                  sw_down_toa=None,
                                  sw_down_sfc=None, lw_down_sfc=None,
-                                 sw_up_toa_clr=None, lw_up_toa_clr=None):
+                                 sw_up_toa_clr=None, lw_up_toa_clr=None,
+                                 rad_absorbed_above_top=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
@@ -843,6 +844,10 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
         # sw_up_toa/lw_up_toa above).  None (the default) => leaf absent.
         sw_up_toa_clr=_toa_field(sw_up_toa_clr, "sw_up_toa_clr_rad"),
         lw_up_toa_clr=_toa_field(lw_up_toa_clr, "lw_up_toa_clr_rad"),
+        # Net radiation absorbed above the model top [W/m^2] (energy-budget
+        # sink, CAM overhead layer); None when the backend does not compute it.
+        rad_absorbed_above_top=_toa_field(rad_absorbed_above_top,
+                                          "rad_absorbed_above_top"),
     )
 
 
@@ -1380,6 +1385,9 @@ def _call_radiation_backend(
             lw_flux_up_toa_clr=result.lw_flux_up_toa_clr,
             sw_flux_up_toa_clr=(None if result.sw_flux_up_toa_clr is None
                                 else result.sw_flux_up_toa_clr * _sw_scale),
+            sw_absorbed_above_top=(None if result.sw_absorbed_above_top is None
+                                   else result.sw_absorbed_above_top * _sw_scale),
+            lw_absorbed_above_top=result.lw_absorbed_above_top,
         )
 
     # Carry the prescribed TOA insolation (this scope's per-column
@@ -2250,7 +2258,12 @@ def _make_hydrostatic_radiation(
             sw_down_sfc=rad_out.sw_flux_down[:, -1],
             lw_down_sfc=rad_out.lw_flux_down[:, -1],
             sw_up_toa_clr=sw_up_toa_clr,
-            lw_up_toa_clr=lw_up_toa_clr)
+            lw_up_toa_clr=lw_up_toa_clr,
+            rad_absorbed_above_top=(
+                None if (rad_out.sw_absorbed_above_top is None
+                         or rad_out.lw_absorbed_above_top is None)
+                else rad_out.sw_absorbed_above_top
+                + rad_out.lw_absorbed_above_top))
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override

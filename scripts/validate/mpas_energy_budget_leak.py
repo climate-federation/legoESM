@@ -116,11 +116,36 @@ _NEEDED = ("energy_toa_net", "energy_dE_dt", TOA_MINUS_DE_DT_KEY,
 # the water budget. Absent -> those columns are simply not printed.
 _OPTIONAL = ("CWV", "moisture_residual", "days",
              "energy_flux_interval_mean",
+             # Closure terms (absent in runs written before they existed):
+             # net radiation absorbed above the model top (sink) and L_f x
+             # frozen surface precip, both area means [W/m^2].
+             "energy_rad_above_top", "energy_snowfall_fusion",
              # `precip` feeds the frozen-precipitation energy bound. Omitting
              # it here silently disabled that whole block -- the same
              # collected-but-not-delivered failure codex found for the
              # interval-mean flag, caught this time by its own test.
              "precip")
+
+
+_CLOSURE_TERMS = ("energy_rad_above_top", "energy_snowfall_fusion")
+
+
+def closure_leak(t):
+    """(LEAK, LEAK_new) per sample [W/m^2, positive = energy created].
+
+    LEAK closes the atmosphere between the reported TOA and surface fluxes.
+    LEAK_new also books the two terms that flux list misses: net radiation
+    absorbed above the model top (the CAM overhead layer, whose heating is
+    discarded -- energy that enters the reported TOA but never the column)
+    and L_f x frozen surface precip (snowfall removes -L_f*q_frozen from the
+    column energy with no flux term).  LEAK_new is None when either term is
+    absent (files written before they existed).
+    """
+    leak = (t["sw_net_sfc"] + t["lw_net_sfc"] - t["hfss"] - t["hfls"]
+            - t[TOA_MINUS_DE_DT_KEY])
+    if not all(k in t for k in _CLOSURE_TERMS):
+        return leak, None
+    return leak, leak + t["energy_rad_above_top"] - t["energy_snowfall_fusion"]
 
 
 def load(path: pathlib.Path) -> dict[str, np.ndarray]:
@@ -227,7 +252,7 @@ def main(argv=None) -> int:
             "whose dE_dt is zero by construction)")
 
     sfc_rad = t["sw_net_sfc"] + t["lw_net_sfc"]
-    leak = sfc_rad - t["hfss"] - t["hfls"] - t[TOA_MINUS_DE_DT_KEY]
+    leak, leak_new = closure_leak(t)
 
     print(provenance)
     print(f"{args.timeseries}  ({int(keep.sum())} samples after day "
@@ -278,13 +303,26 @@ def main(argv=None) -> int:
                   f"{latent[i]:9.3f} {thermal[i]:9.3f} "
                   f"{t['CWV'][i]:8.3f} {mr:10.3f}")
 
-    L = leak[keep]
-    finite = np.isfinite(L)
+    def _summary(label, v):
+        L = v[keep]
+        finite = np.isfinite(L)
+        if not finite.any():
+            print(f"{label}: no finite samples")
+            return
+        print(f"{label}: mean={L[finite].mean():.3f} "
+              f"median={np.median(L[finite]):.3f} sd={L[finite].std():.3f} "
+              f"min={L[finite].min():.3f} max={L[finite].max():.3f} "
+              f"(non-finite {int((~finite).sum())}/{finite.size})")
     print()
-    print(f"LEAK over the kept window [W/m^2]: mean={L[finite].mean():.3f} "
-          f"median={np.median(L[finite]):.3f} sd={L[finite].std():.3f} "
-          f"min={L[finite].min():.3f} max={L[finite].max():.3f} "
-          f"(non-finite {int((~finite).sum())}/{finite.size})")
+    _summary("LEAK over the kept window [W/m^2]", leak)
+    if leak_new is None:
+        print("closure terms (radiation absorbed above the model top, L_f x "
+              "frozen precip) are not in this file: LEAK_new unavailable")
+    else:
+        for k in _CLOSURE_TERMS:
+            _summary(f"  {k} [W/m^2]", t[k])
+        _summary("LEAK_new = LEAK - L_f*S + A_top over the kept window [W/m^2]",
+                 leak_new)
     return 0
 
 
