@@ -852,18 +852,19 @@ def main(argv=None) -> int:
           f"{rows['land_water'] - F['boot_excess']: .6e} kg")
     for sp in carried:
         print(f"SPECIES {sp:4s} {sp0[sp]: .9e} -> {sp1[sp]: .9e}")
-    lat_c = _np(model.mesh.latCell).reshape(-1)
-    cap = np.abs(lat_c) > np.deg2rad(60.0)
-    uu = _np(atm.state.u.data).reshape(n, -1)
-    vv = _np(atm.state.v.data).reshape(n, -1)
-    print("STATE " + json.dumps(dict(
-        max_abs_u=float(np.max(np.abs(uu))), max_abs_v=float(np.max(np.abs(vv))),
-        polar_cap_qv_mean=float(np.sum(a1["q_tot"][cap] * a1["dp"][cap]
-                                       * area[cap, None])
-                                / np.sum(a1["dp"][cap] * area[cap, None])),
-        finite=bool(np.all(np.isfinite(uu)) and np.all(np.isfinite(vv))),
-        min_species={sp: float(np.min(_np(atm.current_tracer(sp))))
-                     for sp in carried})))
+    if args.grid == "latlon":   # cell winds on the lat-lon column lane
+        lat_c = _np(model.mesh.latCell).reshape(-1)
+        cap = np.abs(lat_c) > np.deg2rad(60.0)
+        uu = _np(atm.state.u.data).reshape(n, -1)
+        vv = _np(atm.state.v.data).reshape(n, -1)
+        print("STATE " + json.dumps(dict(
+            max_abs_u=float(np.max(np.abs(uu))), max_abs_v=float(np.max(np.abs(vv))),
+            polar_cap_qv_mean=float(np.sum(a1["q_tot"][cap] * a1["dp"][cap]
+                                           * area[cap, None])
+                                    / np.sum(a1["dp"][cap] * area[cap, None])),
+            finite=bool(np.all(np.isfinite(uu)) and np.all(np.isfinite(vv))),
+            min_species={sp: float(np.min(_np(atm.current_tracer(sp))))
+                         for sp in carried})))
     print("NULL", {r: v for r, v in null.items()})
     if args.trace_positivity:
         print("POSITIVITY", {kk: f"{v:.6e}" for kk, v in pos_rec.items()})
