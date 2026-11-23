@@ -554,6 +554,7 @@ def main(argv=None) -> int:
                        P=I(sd[SL["precip"]]) * DT)
             if "precip_conv_sfc" in SL and sd[SL["precip_conv_sfc"]] is not None:
                 rec["P_conv"] = I(sd[SL["precip_conv_sfc"]]) * DT
+            rec["species"] = species_totals()
             led = getattr(model, "_step_ledger", None)
             if led is not None:   # the physics' per-process water rows
                 from legoesm.diagnostics.process_ledger import (
