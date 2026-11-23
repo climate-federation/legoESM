@@ -6706,6 +6706,7 @@ def clubb_step(
     omega_cam_layer_density: bool = False,
     clubb_mf: bool = False,
     mf_pblh: jax.Array | None = None,
+    mf_lts: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6926,13 +6927,22 @@ def clubb_step(
         # CAM7 CLUBB-MF (clubb_mf.py; clubb.F90 compute_mf_plumes): the plume
         # mass-flux convergence of thl and qt is CLUBB's explicit forcing.
         # pblh: the host's carried PBL height (CAM pblh_pbuf, previous step);
-        # 0 where none is carried yet (CAM's cold-start pbuf).
+        # 0 where none is carried yet (CAM's cold-start pbuf).  LTS is the
+        # caller's, taken once before the CLUBB sub-cycle as CAM does
+        # (clubb.F90:999-1007); computed here only for a direct call.
+        # KNOWN DIFFERENCE: thl is this bridge's CLUBB thlm (CAM6 host
+        # convention, T/exner - (L/cp) qc with the liquid partition); CAM7's
+        # host thl is (T - (L/cpv) qc)/exner (clubb.F90:1460).
         from legoesm.atmosphere.physics.turbulence.clubb_mf import (
-            MFSmoothing, clubb_mf_forcing, mf_lts)
+            MFSmoothing, clubb_mf_forcing)
+        from legoesm.atmosphere.physics.turbulence.clubb_mf import (
+            mf_lts as _mf_lts_col)
         p_zm = flip_vertical(p_half)
         iex_zm = 1.0 / exner_function(p_zm)
         dzt = jnp.diff(gr.zm, axis=1)
-        q_liq = jnp.zeros_like(T) if q_c is None else q_c
+        if mf_lts is None:
+            q_liq = jnp.zeros_like(T) if q_c is None else q_c
+            mf_lts = jax.vmap(_mf_lts_col)(T, q_liq, p_full, p_half[:, -1])
         mf_in = dict(
             zm=gr.zm, dzt=dzt, thl=thlm, qt=rtm, thv=thv_ds_zt, u=um, v=vm,
             p_zm=p_zm, iex_zm=iex_zm, ths=T_sfc * iex_zm[:, 0],
@@ -6940,7 +6950,7 @@ def clubb_step(
             wqt_sfc=wprtp_sfc * jnp.ones((ncol,), T.dtype),
             pblh=(jnp.zeros((ncol,), T.dtype) if mf_pblh is None
                   else jnp.reshape(mf_pblh, (ncol,))),
-            lts=jax.vmap(mf_lts)(T, q_liq, p_full, p_half[:, -1]))
+            lts=jnp.reshape(mf_lts, (ncol,)))
         sm = MFSmoothing(*(getattr(config, f"mf_{f}_sharpness")
                            for f in MFSmoothing._fields))
         thlm_forcing, rtm_forcing, _mf_out = jax.vmap(
@@ -7279,13 +7289,20 @@ def clubb_turbulence_prognostic(
     # The liquid exchange is on iff the factory supplied the host's q_c
     # (TurbulenceConfig.liquid_partition); forwarded only then.
     _liq_kw = {"q_c": q_c} if q_c is not None else {}
+    # CLUBB-MF's LTS: once, from the host state, before the sub-cycle
+    # (clubb.F90:999-1007 precedes the do tt loop).
+    _mf_lts_host = None
+    if clubb_mf:
+        from legoesm.atmosphere.physics.turbulence.clubb_mf import mf_lts as _mf_lts_col
+        _mf_lts_host = jax.vmap(_mf_lts_col)(
+            T, jnp.zeros_like(T) if q_c is None else q_c, p_full, p_half[:, -1])
 
     if n_sub == 1:
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
             radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
-            clubb_mf=clubb_mf, mf_pblh=mf_pblh,
+            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
             omega_cam_layer_density=omega_cam_layer_density, **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         sfc_energy_in = diags["sfc_energy_in"]
@@ -7320,7 +7337,7 @@ def clubb_turbulence_prognostic(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
                 radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
-            clubb_mf=clubb_mf, mf_pblh=mf_pblh,
+            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
                 omega_cam_layer_density=omega_cam_layer_density, **_top_kw,
                 **({"q_c": ql_c} if _liq_on else {}))
             ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c

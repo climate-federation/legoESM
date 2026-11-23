@@ -233,6 +233,9 @@ def _smagorinsky_condensate_kwargs(scheme_name, tracers, shape) -> dict:
 
 def get_turbulence_fn(config: TurbulenceConfig):
     """Select the turbulence backend based on config.scheme."""
+    if getattr(config, "clubb_mf", False) and config.scheme != "clubb":
+        raise ValueError(f"TurbulenceConfig.clubb_mf is CLUBB's mass flux; "
+                         f"scheme={config.scheme!r} has no CLUBB closure to force")
     if config.scheme == "smagorinsky":
         return "smagorinsky", smagorinsky_turbulence, config.smagorinsky
     elif config.scheme == "louis":

@@ -89,6 +89,30 @@ def test_forcing_is_flux_form_and_conserves_the_column(fx):
     assert any_on
 
 
+def test_forcing_is_cams_flux_divergence(fx):
+    """Independent numpy recomputation of CAM's forcing from the returned plume
+    fluxes (clubb.F90 compute_mf_plumes): -(1/rho_ds_zt)(1/dz) cflfac
+    (rho_ds_zm F(k+1) - rho_ds_zm F(k)); a flipped sign or index fails.  At the
+    lowest level an upward flux above must dry the layer."""
+    for i in range(fx["c_dzt"].shape[0]):
+        fthl, fqt, out = _forcing(fx, i, DT_ON_LIMITER)
+        rzm, rzt, dz = fx["c_rho_zm"][i], fx["c_rho_zt"][i], fx["c_dzt"][i]
+        for got, flx in ((fqt, out["qtflx"]), (fthl, out["thlflx"])):
+            F = np.asarray(flx) * float(out["cflfac"])
+            want = -(1.0 / rzt) * (1.0 / dz) * (rzm[1:] * F[1:] - rzm[:-1] * F[:-1])
+            np.testing.assert_allclose(np.asarray(got), want, rtol=1e-12,
+                                       atol=1e-12 * (np.max(np.abs(want)) or 1.0))
+        if float(out["qtflx"][1]) > 0.0:
+            assert float(fqt[0]) < 0.0
+
+
+def test_mf_refused_off_clubb():
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
+    with pytest.raises(ValueError, match="clubb_mf"):
+        get_turbulence_fn(TurbulenceConfig(scheme="louis", clubb_mf=True))
+
+
 def _max_cfl(fx, i, dt):
     _, _, out = _forcing(fx, i, dt, math.inf)
     aw = np.sum(np.asarray(out["upa"]) * np.asarray(out["upw"]), axis=1)
