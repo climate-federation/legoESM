@@ -540,6 +540,56 @@ def main(argv=None) -> int:
                    _wrap(_awp, "positivity", _area_kw))
         mp.setattr(cons, "pay_condensate_deficit_from_vapour",
                    _wrap(_pay, "pay_from_vapour", lambda kw: _area2d[0]))
+    if args.trace_positivity and args.grid == "latlon":
+        # lat-lon dycore: the dp-weighted water each transport stage changes
+        # (raw flux-form tendency, the polar filter on the tracer tendencies
+        # and on dps), summed over every RK stage call [kg/s]
+        import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as llm
+        _tend0, _ff3, _ff2 = (llm.cgrid_latlon_pe_tendencies,
+                              llm.fourier_filter_3d, llm.fourier_filter)
+        ctx = {}
+
+        def _cb(name):
+            def cb(v):
+                pos_rec[name] = pos_rec.get(name, 0.0) + float(v)
+            return cb
+
+        def tend_w(s_, grid_, sig, cfg_, **kw):
+            out = _tend0(s_, grid_, sig, cfg_, **kw)
+            dps, dq = out[3], out[4]
+            area2 = jnp.asarray(grid_.area)
+            dp = llm.dp_from_hybrid(sig, s_.p_s)
+            dB = llm.dp_from_hybrid(sig, s_.p_s + 1.0) - dp
+            names = [k_ for k_ in dq if k_ in WATER]
+            qs = sum(s_.tracers[k_] for k_ in names)
+            r = sum(jnp.sum(area2[..., None] * dq[k_] * dp) for k_ in names)
+            r = (r + jnp.sum(area2 * jnp.sum(qs * dB, -1) * dps)) / constants.g
+            jax.debug.callback(_cb("transport_raw_rate"), r)
+            ctx.update(dp=dp, area=area2, qdB=jnp.sum(qs * dB, -1),
+                       names=list(dq), n=0, water=set(names))
+            return out
+
+        def ff3_w(field, grid_, mask):
+            out = _ff3(field, grid_, mask)
+            i = ctx.get("n", 99)
+            ctx["n"] = i + 1
+            j = i - 3                      # dT, du, dv come first
+            if 0 <= j < len(ctx.get("names", ())) and \
+                    ctx["names"][j] in ctx["water"]:
+                jax.debug.callback(_cb("polar_filter_dq_rate"), jnp.sum(
+                    ctx["area"][..., None] * (out - field) * ctx["dp"])
+                    / constants.g)
+            return out
+
+        def ff2_w(field, grid_, mask):
+            out = _ff2(field, grid_, mask)
+            if "qdB" in ctx and field.shape == ctx["qdB"].shape:
+                jax.debug.callback(_cb("polar_filter_dps_rate"), jnp.sum(
+                    ctx["area"] * ctx["qdB"] * (out - field)) / constants.g)
+            return out
+        mp.setattr(llm, "cgrid_latlon_pe_tendencies", tend_w)
+        mp.setattr(llm, "fourier_filter_3d", ff3_w)
+        mp.setattr(llm, "fourier_filter", ff2_w)
     model, orig = atm.model, atm.model.step
     n_steps = [0]
     dyn_dw = [np.zeros(2)]
