@@ -474,9 +474,9 @@ def all_vertical_paths(out):
     leak = jnp.zeros_like(T).at[:, 0].set(1e-3)
     control = record("planted leak", "surface source 1e-3 K/s", h, T, dq+leak, jnp.diff(w))
     assert control["verdict"] == "LEAKS"
-    # Golden primitive momentum arrays; production wiring is checked separately.
-    momentum_op = cd.advective_vertical_momentum_ocean
-    spectral_momentum = so.advective_vertical_momentum_ocean
+    # Momentum shares the paired tracer operator (#2662); wiring is checked separately.
+    momentum_op = cd._vertical_advection_ocean
+    spectral_momentum = so.vertical_advection_ocean
     provenance["momentum_operators"] = {"CD-grid": momentum_op.__module__ + "." + momentum_op.__qualname__,
                                         "spectral": spectral_momentum.__module__ + "." + spectral_momentum.__qualname__}
     np.savez(out / "momentum.npz", cd=momentum_op(T,w,zc,J), spectral=spectral_momentum(T,w,zc,J))
