@@ -220,9 +220,10 @@ gravity_wave_drag: mcfarlane            # orographic member = CAM6 gw_oro port
                                         # smooth the umcfac |u|, its sign and
                                         # the taumin zeroing (widths 0.01 m/s,
                                         # 1e-3 m/s, 1e-10 Pa; RULE 5).
-mpas_div_damp4_scale: 1.0   # production's nondimensional CAM rate 0.01*area^2/dt per
-                            # row; blew up within 9 steps with the filter from 60 deg,
-                            # stable with the derived 35.9041 cutoff above (5-day smoke)
+mpas_div_damp4_scale: 0.0   # NOT production's 1.0 (vote 2026-11-23, fallback agreed in
+                            # advance): at 1.0 this grid (24x48, dt 300) blows up at
+                            # step 9 with the filter from 60 deg AND from the derived
+                            # 35.9041 (measured 2026-11-23, T NaN); 0.0 runs clean
 mpas_land_lapse_K_per_km: 6.5
 mpas_land_beta: 0.6
 # Not copied: production's mpas_ice_skin_prognostic: true and the
