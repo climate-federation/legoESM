@@ -166,6 +166,69 @@ _HALL_ECOLL = np.array([
 ])
 
 
+# --- McSnow Hall (1980) + Beheng (1994) collision efficiency ----------------
+# The table McSnow ships (src/mo_colleffi.f90 :: ecollBeheng, file
+# colleff_HallBeheng.dat; gitlab.dkrz.de/mcsnow/mcsnow), with McSnow's node
+# layout and interpolation: rows are r_small/r_large = 0.025, 0.05, 0.10, ...,
+# 1.00; columns are collector radii 10, 20, ..., 70, 100, 150, 200, 300 um; the
+# r=0 column and ratio=0 row are padded with the 1e-3 floor that every entry is
+# also floored at; collectors above 300 um reuse the 300 um column (NOT capped
+# at 1); bilinear in (radius, ratio).  This is the kernel of the McSnow / PySDM
+# box-model data the esm-co-scientist warm-rain closures are fitted to
+# (esm-co-scientist scripts/datagen/hall_kernel.py), so an LES run with it shares
+# that data's collision physics.  Pair with the Beard (1976) terminal velocity.
+_HALL_BEHENG_R_UM = np.array(
+    [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 100.0, 150.0, 200.0, 300.0])
+_HALL_BEHENG_RAT = np.concatenate([[0.0, 0.025], np.arange(0.05, 1.0 + 1.0e-9, 0.05)])
+_HALL_BEHENG_FLOOR = 1.0e-3
+_HALL_BEHENG_DATA = np.array([
+    [0.00160, 0.00170, 0.00190, 0.00280, 0.00430, 0.00600, 0.01600, 0.20000, 0.30000, 0.50000, 0.70000],
+    [0.00240, 0.00290, 0.00340, 0.00750, 0.02000, 0.02200, 0.16000, 0.55000, 0.76000, 0.87000, 0.96000],
+    [0.00440, 0.00570, 0.00800, 0.05400, 0.28500, 0.36000, 0.62000, 0.79300, 0.91000, 0.97700, 1.00000],
+    [0.00700, 0.01000, 0.01900, 0.19500, 0.56000, 0.66000, 0.76000, 0.88000, 0.95000, 1.00000, 1.00000],
+    [0.01050, 0.01600, 0.04050, 0.37000, 0.74700, 0.78900, 0.84500, 0.93500, 0.99100, 1.00000, 1.00000],
+    [0.01500, 0.02200, 0.08100, 0.52000, 0.81000, 0.86000, 0.87500, 0.95000, 0.99500, 1.00000, 1.00000],
+    [0.02000, 0.03000, 0.15000, 0.64000, 0.86300, 0.89300, 0.90300, 0.97000, 1.00000, 1.00000, 1.00000],
+    [0.02350, 0.03900, 0.24000, 0.70000, 0.86300, 0.89900, 0.92500, 0.98500, 1.00000, 1.00000, 1.00000],
+    [0.02750, 0.05000, 0.35000, 0.75500, 0.86300, 0.90300, 0.94500, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03000, 0.06000, 0.42000, 0.76500, 0.86300, 0.90300, 0.94500, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03200, 0.06900, 0.48000, 0.77600, 0.86300, 0.90300, 0.94500, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03350, 0.07600, 0.53000, 0.78800, 0.87500, 0.91800, 0.94500, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03500, 0.08200, 0.54500, 0.79800, 0.88700, 0.93400, 0.94500, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03670, 0.08100, 0.53000, 0.79800, 0.88900, 0.93900, 0.96000, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03650, 0.07720, 0.50000, 0.79800, 0.89000, 0.94500, 0.97200, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03650, 0.07050, 0.44000, 0.82000, 0.90200, 0.96500, 0.98600, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03650, 0.06100, 0.36000, 0.84000, 0.92600, 0.98700, 1.00000, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03550, 0.05100, 0.23000, 0.87000, 1.02000, 1.10000, 1.15000, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03450, 0.04150, 0.12700, 0.89800, 1.24200, 1.35000, 1.45000, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.03050, 0.03300, 0.06500, 1.03000, 1.65000, 1.95000, 2.15000, 1.00000, 1.00000, 1.00000, 1.00000],
+    [0.02700, 0.02700, 0.02700, 1.12000, 2.40000, 3.00000, 4.00000, 1.00000, 1.00000, 1.00000, 1.00000],
+])
+_HALL_BEHENG_E = np.maximum(
+    np.pad(_HALL_BEHENG_DATA, ((1, 0), (1, 0)), constant_values=_HALL_BEHENG_FLOOR),
+    _HALL_BEHENG_FLOOR)
+
+# Beard (1976) terminal velocity as McSnow's vterm_beard (src/mo_velocity.f90):
+# CGS, FIXED air properties (sea level, 20 C), diameter capped at 0.7 cm.
+_BEARD_B2 = np.array([-0.318657e1, 0.992696, -0.153193e-2, -0.987059e-3,
+                      -0.578878e-3, 0.855176e-4, -0.327815e-5])
+_BEARD_B3 = np.array([-0.500015e1, 0.523778e1, -0.204914e1, 0.475294,
+                      -0.542819e-1, 0.238449e-2])
+_BEARD_G_CGS = 980.665          # [cm/s^2]
+_BEARD_ETA0_CGS = 1.818e-4      # air dynamic viscosity [g/(cm s)]
+_BEARD_L0_CGS = 6.62e-6         # mean free path [cm]
+_BEARD_RHOW_CGS = 1.0           # [g/cm^3]
+_BEARD_RHOA_CGS = 1.225e-3      # [g/cm^3]
+_BEARD_SLIP = 2.51
+_BEARD_D_MIN_CM = 1.0e-12
+_BEARD_D1_CM = 1.9e-3           # Stokes / Davies regime edge
+_BEARD_D2_CM = 0.107            # Davies / Bond regime edge
+_BEARD_D_CAP_CM = 0.7
+_BEARD_SIGMA_CGS = 76.1 - 0.155 * 20.0   # surface tension at 20 C [dyn/cm]
+_BEARD_M_TO_CM_DIAM = 2.0e2     # radius [m] -> diameter [cm]
+_CM_TO_M = 0.01
+
+
 # ==========================================================================
 # Collision kernels  K(R_i, R_j[, Δv])  [m^3/s]
 # ==========================================================================
@@ -374,6 +437,30 @@ def brownian_kernel(
     return jnp.where(valid, K12, 0.0).astype(dtype)
 
 
+def hall_beheng_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.Array:
+    """McSnow Hall (1980) + Beheng (1994) kernel ``π(R_i+R_j)²·E·|Δv|`` [m³/s].
+
+    ``E(R_l, R_s/R_l)`` bilinear on McSnow's table (see ``_HALL_BEHENG_E``),
+    collector radius clamped to [0, 300] µm, floored at 1e-3.  ``dv`` is the
+    relative speed (non-negative magnitude the caller computes).
+    """
+    r_l = jnp.maximum(r_i, r_j)
+    r_s = jnp.minimum(r_i, r_j)
+    ratio = jnp.clip(safe_divide(r_s, r_l, 1.0e-30), 0.0, 1.0)
+    r0 = jnp.asarray(_HALL_BEHENG_R_UM, dtype=r_l.dtype)
+    rat = jnp.asarray(_HALL_BEHENG_RAT, dtype=r_l.dtype)
+    table = jnp.asarray(_HALL_BEHENG_E, dtype=r_l.dtype)
+    R = jnp.clip(r_l * 1.0e6, r0[0], r0[-1])
+    ri = jnp.clip(jnp.searchsorted(r0, R) - 1, 0, r0.size - 2)
+    pi = jnp.clip(jnp.searchsorted(rat, ratio) - 1, 0, rat.size - 2)
+    wr = (R - r0[ri]) / (r0[ri + 1] - r0[ri])
+    wp = (ratio - rat[pi]) / (rat[pi + 1] - rat[pi])
+    E = ((1.0 - wp) * (1.0 - wr) * table[pi, ri] + (1.0 - wp) * wr * table[pi, ri + 1]
+         + wp * (1.0 - wr) * table[pi + 1, ri] + wp * wr * table[pi + 1, ri + 1])
+    E = jnp.maximum(E, _HALL_BEHENG_FLOOR)
+    return jnp.pi * (r_i + r_j) ** 2 * E * jnp.abs(dv)
+
+
 def collision_kernel(
     r_i: jax.Array,
     r_j: jax.Array,
@@ -393,10 +480,12 @@ def collision_kernel(
         return long_kernel(r_i, r_j, dv)
     elif cfg.collision_kernel == "hall":
         return hall_kernel(r_i, r_j, dv)
+    elif cfg.collision_kernel == "hall_beheng":
+        return hall_beheng_kernel(r_i, r_j, dv)
     else:
         raise ValueError(
             f"Unknown SDM collision_kernel: {cfg.collision_kernel!r} "
-            "(expected 'golovin', 'sedimentation', 'long', or 'hall')"
+            "(expected 'golovin', 'sedimentation', 'long', 'hall', or 'hall_beheng')"
         )
 
 
@@ -488,6 +577,27 @@ def terminal_velocity_cloud_rain_shima(
     return jnp.where(r > 0.0, v_cgs / 100.0, 0.0)
 
 
+def terminal_velocity_beard1976(r: jax.Array) -> jax.Array:
+    """Beard (1976) terminal velocity [m/s] as McSnow's ``vterm_beard``: fixed
+    sea-level air, three regimes (Stokes + slip / Davies-number polynomial /
+    Bond-number polynomial), diameter capped at 0.7 cm."""
+    d = jnp.maximum(_BEARD_M_TO_CM_DIAM * r, _BEARD_D_MIN_CM)
+    csc = 1.0 + _BEARD_SLIP * _BEARD_L0_CGS / d
+    drho = _BEARD_RHOW_CGS - _BEARD_RHOA_CGS
+    v1 = _BEARD_G_CGS * drho / (18.0 * _BEARD_ETA0_CGS) * csc * d ** 2  # coeff-ok: Stokes 18
+    n_da = 4.0 * _BEARD_RHOA_CGS * drho * _BEARD_G_CGS / (3.0 * _BEARD_ETA0_CGS ** 2)  # coeff-ok: Davies number 4/3
+    y2 = jnp.polyval(jnp.asarray(_BEARD_B2[::-1], dtype=d.dtype), jnp.log(n_da * d ** 3))
+    v2 = _BEARD_ETA0_CGS * csc * jnp.exp(y2) / (_BEARD_RHOA_CGS * d)
+    dc = jnp.minimum(d, _BEARD_D_CAP_CM)
+    bo = 4.0 * drho * _BEARD_G_CGS / (3.0 * _BEARD_SIGMA_CGS) * dc ** 2  # coeff-ok: Bond number 4/3
+    npn = _BEARD_SIGMA_CGS ** 3 * _BEARD_RHOA_CGS ** 2 / (_BEARD_ETA0_CGS ** 4 * drho * _BEARD_G_CGS)
+    y3 = jnp.polyval(jnp.asarray(_BEARD_B3[::-1], dtype=d.dtype),
+                     jnp.log(bo * npn ** (1.0 / 6.0)))  # coeff-ok: Beard physical-property number exponent
+    v3 = _BEARD_ETA0_CGS * npn ** (1.0 / 6.0) * jnp.exp(y3) / (_BEARD_RHOA_CGS * dc)  # coeff-ok: same exponent
+    vt = jnp.where(d <= _BEARD_D1_CM, v1, jnp.where(d <= _BEARD_D2_CM, v2, v3))
+    return _CM_TO_M * vt
+
+
 def terminal_velocity(
     r: jax.Array,
     rho: jax.Array,
@@ -506,8 +616,10 @@ def terminal_velocity(
         return terminal_velocity_atlas_ulbrich(r)
     elif cfg.terminal_velocity == "cloud_rain_shima":
         return terminal_velocity_cloud_rain_shima(r, rho, p, T)
+    elif cfg.terminal_velocity == "beard1976":
+        return terminal_velocity_beard1976(r)
     else:
         raise ValueError(
             f"Unknown SDM terminal_velocity: {cfg.terminal_velocity!r} "
-            "(expected 'rogers_yau', 'atlas_ulbrich', or 'cloud_rain_shima')"
+            "(expected 'rogers_yau', 'atlas_ulbrich', 'cloud_rain_shima', or 'beard1976')"
         )
