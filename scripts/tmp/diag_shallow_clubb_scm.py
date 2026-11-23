@@ -111,7 +111,7 @@ def main():
     dz = zi[:-1] - zi[1:]
     lwp_scm = float(np.sum(rho * m["ql"] * dz)) * 1e3
     rho_les = np.interp(les["z"], z[::-1], rho[::-1])
-    lwp_les = float(np.trapz(rho_les * les["qc"], les["z"])) * 1e3
+    lwp_les = float(np.trapezoid(rho_les * les["qc"], les["z"])) * 1e3
     thr = 1e-6
     top_scm = float(z[m["ql"] > thr].max()) if np.any(m["ql"] > thr) else np.nan
     top_les = float(les["z"][les["qc"] > thr].max()) if np.any(les["qc"] > thr) else np.nan
