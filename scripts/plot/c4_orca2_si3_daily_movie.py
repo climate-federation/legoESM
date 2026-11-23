@@ -24,7 +24,7 @@ _POLAR_EDGE_DEG = 45.0
 _POINT_AREA_PT2 = 4.0
 
 _ROWS = (
-    ("sst_global", "Sea surface temperature (K)", "global", "RdYlBu_r"),
+    ("sst_global", "Sea surface temperature (°C)", "global", "RdYlBu_r"),
     ("ice_area_north", "Arctic ice concentration", "north", "Blues"),
     ("ice_thickness_north", "Arctic ice thickness (m)", "north", "viridis"),
     ("ice_area_south", "Antarctic ice concentration", "south", "Blues"),
@@ -311,7 +311,14 @@ def render_frame(
 
     rows = _row_fields(fields, geometry)
     figure = plt.figure(figsize=(14.4, 12.8), dpi=100)
-    grid = figure.add_gridspec(len(_ROWS), 3)
+    height_ratios = [1.0, 0.035, 0.16] * (len(_ROWS) - 1) + [1.0, 0.035]
+    grid = figure.add_gridspec(
+        len(height_ratios), 3, height_ratios=height_ratios,
+        hspace=0.08, wspace=0.04,
+    )
+    figure.subplots_adjust(
+        left=0.055, right=0.99, bottom=0.035, top=0.95
+    )
     axes = np.empty((len(_ROWS), 3), dtype=object)
     for row_index, (key, label, view, cmap) in enumerate(_ROWS):
         if view == "global":
@@ -323,7 +330,9 @@ def render_frame(
         artists = []
         nemo, candidate, difference, region_mask = rows[key]
         for column, field in enumerate((nemo, candidate, difference)):
-            axis = figure.add_subplot(grid[row_index, column], projection=projection)
+            axis = figure.add_subplot(
+                grid[3 * row_index, column], projection=projection
+            )
             axes[row_index, column] = axis
             if view == "global":
                 axis.set_global()
@@ -348,19 +357,12 @@ def render_frame(
             -0.08, 0.5, label, rotation=90, va="center", ha="center",
             transform=axes[row_index, 0].transAxes, fontsize=9,
         )
-        figure.colorbar(
-            artists[1], ax=[axes[row_index, 0], axes[row_index, 1]],
-            orientation="horizontal", fraction=0.045, pad=0.025, aspect=35,
-        )
-        figure.colorbar(
-            artists[2], ax=axes[row_index, 2], orientation="horizontal",
-            fraction=0.045, pad=0.025, aspect=18,
-        )
+        shared_bar = figure.add_subplot(grid[3 * row_index + 1, :2])
+        difference_bar = figure.add_subplot(grid[3 * row_index + 1, 2])
+        figure.colorbar(artists[1], cax=shared_bar, orientation="horizontal")
+        figure.colorbar(artists[2], cax=difference_bar, orientation="horizontal")
     figure.suptitle(f"Daily NEMO and legoESM fields · {_day_label(day)}", fontsize=14)
     figure.text(0.5, 0.008, caption, ha="center", va="bottom", fontsize=8)
-    figure.subplots_adjust(
-        left=0.055, right=0.99, bottom=0.035, top=0.95, hspace=0.25, wspace=0.04
-    )
     figure.canvas.draw()
     rgb = np.asarray(figure.canvas.buffer_rgba())[..., :3].copy()
     plt.close(figure)

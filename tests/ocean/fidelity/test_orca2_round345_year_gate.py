@@ -471,6 +471,7 @@ def test_coupled_ice_map_report_writes_new_admitted_names_without_mutating_sourc
     admitted = json.loads(admission.read_text(encoding="utf-8"))
     assert result["status"] == "PASS_R345_COUPLED_C4_ICE_MAP_ENVELOPE_REPORT_ONLY"
     assert admitted["envelope_metrics"]["sha256"] == ulp_gate.common.sha256(metrics)
+    assert admitted["envelope_metrics"]["path"] == metrics.name
     assert admitted["envelope_metrics"]["ice_map_quantities"] == list(
         ulp_gate.COUPLED_ICE_MAP_KEYS
     )

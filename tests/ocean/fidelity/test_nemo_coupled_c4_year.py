@@ -904,27 +904,38 @@ def test_monthly_ice_metrics_preserve_opposite_sign_daily_error() -> None:
 
 def test_monthly_ice_map_misplacement_uses_monthly_mean_and_exact_hemispheres() -> None:
     shape = (148, 180)
+    area_t = np.full(shape, runner.ICE_UNIT_SCALE, dtype=np.float64)
+    area_t[0, 1] = 2.0 * runner.ICE_UNIT_SCALE
+    area_t[74, 2] = 3.0 * runner.ICE_UNIT_SCALE
     geo = {
-        "area_t": np.full(shape, runner.ICE_UNIT_SCALE, dtype=np.float64),
+        "area_t": area_t,
         "gphit": np.broadcast_to(
             np.linspace(80.0, -80.0, shape[0])[:, None], shape
-        ),
+        ).copy(),
     }
+    geo["gphit"][74, 2] = 0.0
     nemo = {
-        name: np.ones(shape, dtype=np.float64)
+        name: np.full(shape, 10.0, dtype=np.float64)
         for name in ("area", "volume", "snow_volume")
     }
     first = {name: value.copy() for name, value in nemo.items()}
     second = {name: value.copy() for name, value in nemo.items()}
-    first["area"][0, 0] += 1.0
-    second["area"][0, 0] += 3.0
-    first["volume"][-1, 0] += 2.0
-    second["volume"][-1, 0] += 2.0
+    # Monthly-mean NH errors are +2 and -1 on weights 1 and 2: their
+    # hemisphere total cancels, but the weighted map misplacement is 4.
+    first["area"][0, 0] += 4.0
+    first["area"][0, 1] += 1.0
+    second["area"][0, 1] -= 3.0
+    # The equator belongs to SH and carries a non-unit area weight.
+    first["area"][74, 2] += 1.0
+    second["area"][74, 2] += 1.0
     metrics = runner.monthly_ice_map_metrics(
         [first, second], [nemo, nemo], geo
     )
-    assert metrics["ICE_MISPLACED_AREA_NH"]["candidate_value"] == 2.0
-    assert metrics["ICE_MISPLACED_VOLUME_SH"]["candidate_value"] == 2.0
+    assert metrics["ICE_MISPLACED_AREA_NH"]["candidate_value"] == 4.0
+    assert metrics["ICE_MISPLACED_AREA_NH"][
+        "candidate_monthly_mean_hemisphere_total"
+    ] == metrics["ICE_MISPLACED_AREA_NH"]["nemo_monthly_mean_hemisphere_total"]
+    assert metrics["ICE_MISPLACED_AREA_SH"]["candidate_value"] == 3.0
     assert metrics["SNOW_MISPLACED_VOLUME_NH"]["candidate_value"] == 0.0
     assert metrics["SNOW_MISPLACED_VOLUME_NH"]["verdict_bearing"] is False
 
@@ -939,6 +950,7 @@ def test_daily_map_writer_has_exact_float32_schema_and_refuses_overwrite(
         "area_t": np.full(shape, 2.0),
         "tmask": np.ones((*shape, 1)),
     }
+    geo["area_t"][-1, 117:152] = 0.0
     records = []
     for day in range(1, 32):
         record = {"day": day}
@@ -961,6 +973,8 @@ def test_daily_map_writer_has_exact_float32_schema_and_refuses_overwrite(
         assert archive["day"].shape == (31,)
         assert archive["nemo_sst"].shape == (31, *shape)
         assert archive["gphit"].shape == shape
+        assert not archive["wet"][-1, 117:152].any()
+        assert int((archive["area_t"] == 0.0).sum()) == 35
     assert written["dtype"] == "float32"
     with pytest.raises(RuntimeError, match="refusing to overwrite C4 daily maps"):
         runner.write_daily_maps(path, 1, records, geo)
@@ -1021,6 +1035,20 @@ def test_ice_units_must_match_between_candidate_and_envelope() -> None:
     candidate, envelope, admission = _synthetic_reports()
     candidate["months"][0]["metrics"]["ICE_VOLUME_NH"]["units"] = "km3"
     with pytest.raises(scorer.C4ScoreError, match="candidate units are not 1e3 km3"):
+        scorer.score_c4(candidate, envelope, admission)
+
+
+def test_snow_map_envelope_nemo_total_must_equal_scored_nemo_total() -> None:
+    candidate, envelope, admission = _synthetic_reports()
+    envelope["months"][4]["metrics"]["SNOW_MISPLACED_VOLUME_SH"][
+        "nemo_monthly_mean_hemisphere_total"
+    ] = 10.1
+    admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=envelope
+    )
+    with pytest.raises(
+        scorer.C4ScoreError, match="envelope and scored NEMO totals differ"
+    ):
         scorer.score_c4(candidate, envelope, admission)
 
 

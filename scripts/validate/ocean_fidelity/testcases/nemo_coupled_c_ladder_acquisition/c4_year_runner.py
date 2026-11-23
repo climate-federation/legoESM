@@ -393,11 +393,13 @@ def write_daily_maps(
     days = [int(record["day"]) for record in records]
     require(days == window["available_days"],
             f"{window['label']}: daily-map accumulator does not cover its calendar window")
+    area_t = np.asarray(geo["area_t"])
+    unique_wet = (np.asarray(geo["tmask"])[..., 0] > 0) & (area_t > 0.0)
     static = {
         "gphit": np.asarray(geo["gphit"]),
         "glamt": np.asarray(geo["glamt"]),
-        "area_t": np.asarray(geo["area_t"]),
-        "wet": np.asarray(geo["tmask"])[..., 0] > 0,
+        "area_t": area_t,
+        "wet": unique_wet,
     }
     for name, value in static.items():
         require(value.shape == (148, 180),

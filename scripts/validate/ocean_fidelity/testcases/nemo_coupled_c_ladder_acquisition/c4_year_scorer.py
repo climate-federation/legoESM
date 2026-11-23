@@ -327,8 +327,18 @@ def _report_snow_misplacement_month(
             source.get("nemo_monthly_mean_hemisphere_total"),
             f"{key} NEMO monthly-mean hemisphere total",
         )
-        require(candidate_value >= 0.0 and twin_value >= 0.0 and nemo_total > 0.0,
+        envelope_nemo_total = _finite(
+            envelope_source.get("nemo_monthly_mean_hemisphere_total"),
+            f"{key} envelope NEMO monthly-mean hemisphere total",
+        )
+        require(
+            candidate_value >= 0.0
+            and twin_value >= 0.0
+            and nemo_total > 0.0
+            and envelope_nemo_total > 0.0,
                 f"{candidate['label']}: {key} contains a negative value or nonpositive total")
+        require(nemo_total == envelope_nemo_total,
+                f"{candidate['label']}: {key} envelope and scored NEMO totals differ")
         rows[key] = {
             "candidate_value": candidate_value,
             "nemo_monthly_mean_hemisphere_total": nemo_total,

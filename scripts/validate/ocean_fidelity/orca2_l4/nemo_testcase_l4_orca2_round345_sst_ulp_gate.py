@@ -1414,7 +1414,7 @@ def write_coupled_c4_ice_map_envelope_report(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     admission["envelope_metrics"] = {
-        "path": str(metrics_path),
+        "path": metrics_path.name,
         "sha256": common.sha256(metrics_path),
         "format": report["format"],
         "months": 12,
