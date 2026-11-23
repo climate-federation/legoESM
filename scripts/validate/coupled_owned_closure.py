@@ -203,6 +203,12 @@ def main(argv=None) -> int:
                     help="save step N's per-column ledger water rows, "
                     "evaporation, precipitation and water species (npz next "
                     "to --json)")
+    ap.add_argument("--nan-trap", action="store_true",
+                    help="check every array for non-finite values every "
+                    "step (state entering the step, incl. land and slab; the "
+                    "step's output; its surface diagnostics); at the first "
+                    "hit print NANTRAP and save the ORIGIN state (entering "
+                    "that step) next to --json, then stop")
     ap.add_argument("--trace-positivity", action="store_true",
                     help="book the water the dycore's positivity stage (and "
                     "its vapour payment) changes, per call")
@@ -657,10 +663,62 @@ def main(argv=None) -> int:
                      **{sp: _np(atm.current_tracer(sp)).reshape(n, -1)
                         for sp in carried})
 
+    def nan_scan(tree, where):
+        """First leaf of ``tree`` holding a non-finite value, or None."""
+        for pth, x in jax.tree_util.tree_flatten_with_path(tree)[0]:
+            try:
+                x = np.asarray(x)
+            except Exception:
+                continue
+            if x.dtype.kind in "fc" and not np.all(np.isfinite(x)):
+                bad = np.argwhere(~np.isfinite(x))
+                return dict(where=where, field=jax.tree_util.keystr(pth),
+                            shape=list(x.shape), n_bad=int(len(bad)),
+                            first_idx=bad[:8].tolist())
+        return None
+
+    def nan_hit(hit, origin):
+        hit.update(step=n_steps[0] + 1,
+                   last_land_call_step=land_seen.get("call_step"))
+        if hit["where"] == "entering":
+            col = hit["first_idx"][0][0] if hit["first_idx"][0] else None
+            if col is not None and col < n:
+                hit["first_col_lat_lon_deg"] = [
+                    float(np.rad2deg(_np(model.mesh.latCell).reshape(-1)[col])),
+                    float(np.rad2deg(_np(model.mesh.lonCell).reshape(-1)[col]))]
+        print("NANTRAP " + json.dumps(hit))
+        if args.json:
+            leaves = jax.tree_util.tree_flatten_with_path(origin)[0]
+            keep = {}
+            for pth, x in leaves:
+                try:
+                    keep[jax.tree_util.keystr(pth)] = np.asarray(x)
+                except Exception:
+                    pass
+            np.savez(str(Path(args.json).with_suffix(".nantrap_origin.npz")),
+                     **keep)
+        raise SystemExit(2)
+
     def step(*a, **kw):
         finish_rec()
+        if args.nan_trap:
+            entering = dict(arrays=arrays(), land=atm._land_ml_state,
+                            ocean=d._ocean_state, sfc=d._sfc_state,
+                            args=a, kw=kw)
+            hit = (nan_scan(entering["arrays"], "entering")
+                   or nan_scan(entering["land"], "entering_land_state")
+                   or nan_scan(entering["ocean"], "entering_ocean_state")
+                   or nan_scan(entering["sfc"], "entering_surface_state")
+                   or nan_scan((a, kw), "entering_step_args"))
+            if hit:
+                nan_hit(hit, entering)
         out = orig(*a, **kw)
         sd = model._sfc_diag
+        if args.nan_trap:
+            hit = nan_scan(out, "step_output") or nan_scan(
+                sd, "step_surface_diag")
+            if hit:
+                nan_hit(hit, entering)
         F["P_atm"] += I(sd[SL["precip"]]) * DT
         F["E_atm"] += I(sd[SL["evap_sfc"]]) * DT
         if n_steps[0] == 1:
