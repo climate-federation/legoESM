@@ -175,8 +175,21 @@ def main(argv=None) -> int:
     ap.add_argument("--dt", type=float, default=None,
                     help="dynamics step [s] (mpas default 300)")
     ap.add_argument("--json", default=None)
-    args = ap.parse_args(argv)
-    if args.grid != "mpas" and (args.resolution is None or args.dt is None):
+    ap.add_argument("--deck", default="",
+                    help="build the run from this coupled deck through "
+                    "run_coupled (unknown flags go to it, e.g. data paths) "
+                    "instead of the probe's own config; the slab heat row is "
+                    "N/A unless the deck's ocean is the one-layer slab")
+    args, deck_argv = ap.parse_known_args(argv)
+    if deck_argv and not args.deck:
+        ap.error(f"unrecognized arguments: {' '.join(deck_argv)}")
+    if args.deck and args.energy_terms:
+        ap.error("--energy-terms is not wired for --deck")
+    if args.deck and args.days != int(args.days):
+        ap.error("--deck needs whole --days (run_coupled takes an int)")
+    if args.deck:
+        pass
+    elif args.grid != "mpas" and (args.resolution is None or args.dt is None):
         ap.error(f"--grid {args.grid} needs --resolution and --dt")
     if args.ic == "era5" and not args.ic_path:
         ap.error("--ic era5 needs --ic-path")
@@ -263,16 +276,33 @@ def main(argv=None) -> int:
         rad_update_steps=args.rad_update_steps, **extra)
     cc = PRESETS["aquaplanet"]()._replace(
         coupling_dt=win, atm_owns_surface=True, f_land_mode="analytical")
-    d = CoupledESMDriver(cfg, cc, output_dir=tempfile.mkdtemp())
+    if args.deck:
+        from scripts.run.run_coupled import main as run_coupled_main
+        d = run_coupled_main(
+            ["--config", args.deck, "--days", str(int(args.days)),
+             "--output", tempfile.mkdtemp(), *deck_argv], build_only=True)
+        cfg, cc = d._atm.config, d.coupled_cfg
+        if not cc.atm_owns_surface:
+            raise SystemExit("--deck: the probe books the owned surface only")
+        win = float(cc.coupling_dt)
+        disc = cfg.dycore.discretization
+        args.grid = ("fv3duo" if disc == "fv3_duo" else
+                     "latlon" if cfg.grid.grid_type == "latlon" else "mpas")
+        nlev = cfg.grid.nlev
+        DT = float(cfg.dycore.dt)
+        land_cfg, extra = {"deck": args.deck, "deck_argv": deck_argv}, {}
+    else:
+        d = CoupledESMDriver(cfg, cc, output_dir=tempfile.mkdtemp())
     d.setup()
-    ice = d._sfc_state.ice
-    d._sfc_state = d._sfc_state._replace(ice=ice._replace(
-        h_ice=ice.h_ice.replace(data=jnp.full_like(ice.h_ice.data, 0.8)),
-        concentration=ice.concentration.replace(
-            data=jnp.full_like(ice.concentration.data, 0.3))))
-    d._surface_handback = initial_handback(
-        d._sfc_state, d._tile_config, d._ice_config or SeaIceConfig(),
-        d._lake_config or LakeConfig())
+    if not args.deck:   # a deck keeps its own ice
+        ice = d._sfc_state.ice
+        d._sfc_state = d._sfc_state._replace(ice=ice._replace(
+            h_ice=ice.h_ice.replace(data=jnp.full_like(ice.h_ice.data, 0.8)),
+            concentration=ice.concentration.replace(
+                data=jnp.full_like(ice.concentration.data, 0.3))))
+        d._surface_handback = initial_handback(
+            d._sfc_state, d._tile_config, d._ice_config or SeaIceConfig(),
+            d._lake_config or LakeConfig())
     atm = d._atm
     # the driver's CFL clamps can shorten the step (the lat-lon pole cell):
     # every per-step sum below is over the step the model actually took
@@ -285,7 +315,10 @@ def main(argv=None) -> int:
     f_lake = _np(tc.f_lake).reshape(-1)
     k = dict(area=area, f_land=f_land, f_water=1.0 - f_land - f_lake,
              dz=np.asarray(atm._land_soil_dz(), dtype=np.float64),
-             C_mix=ocfg.rho_ocean * ocfg.c_ocean * ocfg.h_mix,
+             # one-layer slab only: the two-layer slab's deep layer and its
+             # restoring are not booked, so its heat row is N/A (NaN)
+             C_mix=(ocfg.rho_ocean * ocfg.c_ocean * ocfg.h_mix
+                    if ocfg.mode == "slab" else float("nan")),
              g=constants.g, rho_water=constants.rho_water,
              rho_ice=constants.rho_ice)
     print("CONFIG", json.dumps(dict(grid=args.grid,

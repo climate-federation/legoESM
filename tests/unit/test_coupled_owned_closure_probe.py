@@ -111,6 +111,9 @@ def test_injected_atmosphere_source_fails_the_bar():
     (["--grid", "fv3duo", "--resolution", "12"], "--resolution and --dt"),
     (["--grid", "latlon", "--dt", "300"], "--resolution and --dt"),
     (["--grid", "latlon", "--resolution", "12"], "--resolution and --dt"),
+    (["--surfdata-path", "s.nc"], "unrecognized arguments"),
+    (["--deck", "d.yaml", "--energy-terms"], "--energy-terms"),
+    (["--deck", "d.yaml", "--days", "1.5"], "whole --days"),
 ])
 def test_real_case_options_refuse_missing_or_stray_paths(argv, msg, capsys):
     with pytest.raises(SystemExit):
