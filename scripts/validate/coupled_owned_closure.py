@@ -650,6 +650,58 @@ def main(argv=None) -> int:
                    "_apply_safety_rails"):
             mp.setattr(dcls, nm, _wrap_fn(getattr(dcls, nm), nm,
                                           skip_self=True))
+    phys_in, pf_wrappers = {}, {}
+
+    def _replay_wrapper(pf0):
+        """``pf0`` with its inputs copied to the host every call (the last
+        call's inputs are replayed op-by-op at a NaN hit)."""
+        import functools
+        w = pf_wrappers.get(pf0)
+        if w is not None:
+            return w
+
+        @functools.wraps(pf0)
+        def w(cols, mesh, sigma, phys_state=None, forcing=None):
+            leaves, tdef = jax.tree_util.tree_flatten(
+                (cols, phys_state, forcing))
+            arr = [i for i, x in enumerate(leaves) if hasattr(x, "dtype")]
+            phys_in["treedef"], phys_in["arr"] = tdef, arr
+            phys_in["static"] = [None if i in arr else x
+                                 for i, x in enumerate(leaves)]
+
+            def cb(*xs):
+                phys_in["leaves"] = [np.asarray(x) for x in xs]
+            jax.debug.callback(cb, *[leaves[i] for i in arr], ordered=True)
+            return pf0(cols, mesh, sigma, phys_state=phys_state,
+                       forcing=forcing)
+        pf_wrappers[pf0] = w
+        w._orig = pf0
+        return w
+
+    def replay_physics():
+        """Re-run the last physics call op-by-op with NaN debugging: the
+        traceback names the first primitive that makes a NaN."""
+        import traceback
+        vals = list(phys_in["static"])
+        for i, x in zip(phys_in["arr"], phys_in["leaves"]):
+            vals[i] = jnp.asarray(x)
+        cols, ps, fo = jax.tree_util.tree_unflatten(phys_in["treedef"], vals)
+        pf0 = next(iter(pf_wrappers.values()))._orig
+        jax.config.update("jax_debug_nans", True)
+        try:
+            with jax.disable_jit():
+                pf0(cols, model.mesh, model.sigma_coord, phys_state=ps,
+                    forcing=fo)
+            print("REPLAY no NaN raised")
+        except FloatingPointError:
+            print("REPLAY " + traceback.format_exc()[-6000:])
+        finally:
+            jax.config.update("jax_debug_nans", False)
+        if args.json:
+            np.savez(str(Path(args.json).with_suffix(".physics_input.npz")),
+                     **{f"leaf{i}": x for i, x in zip(phys_in["arr"],
+                                                       phys_in["leaves"])})
+
     model, orig = atm.model, atm.model.step
     n_steps = [0]
     dyn_dw = [np.zeros(2)]
@@ -743,6 +795,9 @@ def main(argv=None) -> int:
                     float(np.rad2deg(_np(model.mesh.latCell).reshape(-1)[col])),
                     float(np.rad2deg(_np(model.mesh.lonCell).reshape(-1)[col]))]
         print("NANTRAP " + json.dumps(hit))
+        if nan_stage.get("first_stage") == "_call_physics_raw" and \
+                phys_in.get("leaves") is not None:
+            replay_physics()
         if args.json:
             leaves = jax.tree_util.tree_flatten_with_path(origin)[0]
             keep = {}
@@ -759,6 +814,8 @@ def main(argv=None) -> int:
 
     def step(*a, **kw):
         finish_rec()
+        if args.nan_stages and kw.get("physics_fn") is not None:
+            kw = dict(kw, physics_fn=_replay_wrapper(kw["physics_fn"]))
         if args.nan_trap:
             entering = dict(arrays=arrays(), land=atm._land_ml_state,
                             ocean=d._ocean_state, sfc=d._sfc_state,
