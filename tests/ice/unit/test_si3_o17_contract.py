@@ -116,8 +116,12 @@ def test_eos_fzp_refuses_every_non_python_bool(selector) -> None:
         si3_eos_fzp(jnp.full((2, 2), 35.0), ln_teos10=selector)
 
 
-def test_o2_eos_default_and_its_factory_callers_remain_explicitly_pinned() -> None:
-    assert SI3O2InitConfig._field_defaults["ln_teos10"] is True
+def test_o2_eos_selector_must_be_explicit() -> None:
+    with pytest.raises(TypeError, match="ln_teos10"):
+        SI3O2InitConfig()
+
+
+def test_o2_eos_factories_match_nemo_namelists() -> None:
     assert SI3O2InitConfig.for_orca2_sas_ice().ln_teos10 is True
     assert SI3O2InitConfig.for_orca2_omip_l4().ln_teos10 is False
 

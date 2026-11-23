@@ -4128,6 +4128,7 @@ class SI3O2InitConfig(NamedTuple):
     - `cfgs/SHARED/namelist_ice_ref:65-95`
     """
 
+    ln_teos10: bool
     ln_iceini: bool = True
     nn_iceini_file: int = 0
     rn_thres_sst: float = 2.0
@@ -4155,7 +4156,6 @@ class SI3O2InitConfig(NamedTuple):
     rn_amax_s: float = 0.997
     ln_pnd: bool = True
     ln_pnd_lids: bool = True
-    ln_teos10: bool = True
     ln_ice_embd: bool = False
     ln_rstart: bool = False
     nn_hls: int = 2
@@ -4163,8 +4163,13 @@ class SI3O2InitConfig(NamedTuple):
 
     @classmethod
     def for_orca2_sas_ice(cls, **overrides: Any) -> "SI3O2InitConfig":
-        """Return the NEMO 5.0.2 `ORCA2_SAS_ICE` rung-O2 `&namini` configuration."""
-        base = cls()
+        """Return the NEMO 5.0.2 `ORCA2_SAS_ICE` rung-O2 configuration.
+
+        The resolved ``ln_teos10`` is true:
+        ``cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:144-147`` overrides
+        ``cfgs/SHARED/namelist_ref:878-882``.
+        """
+        base = cls(ln_teos10=True)
         return base._replace(**overrides) if overrides else base
 
     @classmethod
