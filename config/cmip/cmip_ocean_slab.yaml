@@ -4,12 +4,12 @@
 #   run_coupled.py "${CMIP_PATH_FLAGS[@]}" "${CMIP_LAND_PATH_FLAGS[@]}" \
 #       --config config/cmip/cmip_ocean_slab.yaml
 #
-# Inherits the tuned ("trained") atmosphere + air-sea physics from
-# cmip_tuned_physics.yaml (the single source of truth for the converged values);
-# this file adds only the run orchestration + the ocean choice.  The two-layer
-# slab (mixed + deep restoring layer) is the cheap, stable, energy-balanced
-# Earth-like reference (R_TOA ~-0.7 W/m2 at 180 d); the dynamic-3D-ocean twin is
-# config/cmip/cmip_ocean_3D.yaml (same physics base, only the ocean differs).
+# Inherits the tuned atmosphere + air-sea physics from cmip_tuned_physics.yaml,
+# then overrides it with the lat-lon AMIP production land, turbulence (CLUBB)
+# and cloud (cam6_clubb) blocks and physics schedule, under an atmosphere-owned
+# surface on the column lane.  The two-layer slab (mixed + deep restoring
+# layer) is the ocean.  The dynamic-3D-ocean deck config/cmip/cmip_ocean_3D.yaml
+# keeps the base physics, so the two decks now differ in more than the ocean.
 #
 # Precedence: an explicit CLI flag > this file > the included base > parser default.
 
