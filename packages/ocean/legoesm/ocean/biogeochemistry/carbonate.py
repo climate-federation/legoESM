@@ -178,12 +178,20 @@ def borate_equilibrium(T_degC: jnp.ndarray, S_psu: jnp.ndarray) -> jnp.ndarray:
     return jnp.exp(ln_KB)
 
 
+# --- Total boron, Uppström (1974), as in mocsy v2.4.1 optB='u74' and OCMIP-2 ---
+# B_T = (B/Cl) * Cl / M_B with Cl = S / 1.80655.  The often-quoted 0.000416*S/35
+# is a 3-significant-figure rounding of this (5.8e-4 relative high).
+_UPPSTROM_B_PER_CL = 0.000232      # g B / g chlorinity
+_S_PER_CHLORINITY = 1.80655        # S = 1.80655 * Cl
+_BORON_MOLAR_MASS = 10.811         # g/mol
+
+
 def total_borate(S_psu: jnp.ndarray) -> jnp.ndarray:
     """Total dissolved boron concentration [mol/kg].
 
-    Uppström (1974): B_T = 0.000416 * S / 35.
+    Uppström (1974): B_T = 0.000232 / 10.811 * S / 1.80655 (mocsy ``u74``).
     """
-    return 0.000416 * S_psu / 35.0
+    return _UPPSTROM_B_PER_CL / _BORON_MOLAR_MASS * S_psu / _S_PER_CHLORINITY
 
 
 # ============================================================================

@@ -42,7 +42,14 @@ WIDTH = 0.01
 # column 5 by 4e-4 relative, frz column 2 by 3.8e-4 and column 0 by 2.9e-6;
 # every other entry moved by less than 1e-6 relative, or below the 1e-12 floor.
 # (The melt and icelim columns 8-9 gaps come from the other approved
-# smoothings, not the readjust: its GAP there is <= 7e-6.)
+# smoothings, not the readjust: its GAP there is <= 1.1e-14; the melt
+# column 0 residual 0.45 is the cost of the approved smoothings.)
+# Re-measured 2026-11-20 after the ENSO-fork MG2 port (ice sedimented from
+# the post-process pool, snow melt after the sedimentation heating, -40 C
+# rain freezing): the port moves these columns toward the running MG2 --
+# icelim columns 8-9 0.457 -> 0.049 and 0.358 -> 0.017, melt column 0
+# 1.10 -> 0.45 (column 1 in the 7th digit); the readjust-only GAP of icelim
+# columns 8-9 fell from 6.8e-6 / 1.3e-7 to round-off.
 ARM_GAP = {
     "mg2_prognostic_nc": [2.837937896417557e-16, 6.502802590835931e-14, 1.546676106662368e-16,
                          2.877001770591271e-16, 1.1553350560029991e-10, 0.0],
@@ -55,12 +62,12 @@ ARM_GAP = {
                              2.6139676646330366e-10, 0.0, 1.922456754670477e-16,
                              3.954884734458624e-14, 0.0017009230792667833, 0.0016965082452150327,
                              1.2833761767092315e-16],
-    "mg2_prognostic_nc_melt": [1.1029928257250563, 0.1733159638831987],
+    "mg2_prognostic_nc_melt": [0.4470056916310955, 0.17331604983869803],
     "mg2_prognostic_nc_icelim": [0.015747026523859654, 2.200600984794053e-06,
                                 5.437369304914632e-07, 7.014162717927606e-07,
                                 0.0004168671711452365, 2.6768813002128014e-08,
                                 3.259730304140352e-08, 4.331625567139087e-08,
-                                0.45653134092247827, 0.35822587760631697, 0.0, 0.0],
+                                0.048893868118185795, 0.016768653388051457, 0.0, 0.0],
     "mg2_prognostic_nc_frz": [0.0008640828714004535, 0.0033183731458311513,
                              0.00040413815305175943, 1.4759385063413541e-06,
                              5.860854300625975e-05, 5.755777299422316e-05],
@@ -80,8 +87,8 @@ GAP = {
     "mg2_prognostic_nc_icelim": [0.00965331904124295, 2.2006009849294657e-06, 5.881128078786946e-12,
                                  7.014162698487991e-07, 0.00041646053027353885,
                                  2.675838499926385e-08, 2.210631004355063e-10,
-                                 4.3316256796771135e-08, 6.797747339418225e-06,
-                                 1.3183745953741097e-07, 0.0, 0.0],
+                                 4.3316256796771135e-08, 3.196192419445262e-15,
+                                 8.939711279053833e-15, 0.0, 0.0],
     "mg2_prognostic_nc_frz": [0.0008640803562600605, 0.0033183731458318773, 0.00040398555129459286,
                               3.658033878895597e-08, 1.3316515416457637e-14, 5.7557773001394866e-05],
 }

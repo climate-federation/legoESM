@@ -1,0 +1,11 @@
+# Production deck + the radiation reading MG2's specified droplet number,
+# non-default arm.
+#
+# CAM6 micro_mg_nccons: the radiation takes MG2's Nc_0 in cloud over ast
+# instead of the N_c tracer.  Needs SPECIFIED droplets, so the aerosol-
+# diagnosed droplet number of production is switched off here (the second
+# row below is required by the first, not a separate change).  Ported from
+# the ENSO fork (Isma Di Carlo).  Everything else is amip_production.yaml.
+include: amip_production.yaml
+cloud_cam6_rad_specified_nc: true
+aerosol_ccn: false

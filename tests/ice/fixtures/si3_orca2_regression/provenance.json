@@ -2,7 +2,7 @@
   "kind": "self-referenced regression pin, NOT an oracle",
   "generator": "tests/ice/fixtures/si3_orca2_regression/make_fixture.py",
   "origin_main_sha": "7e36b69fe775e5110e338fb07aa45e89fa6f6003",
-  "generator_blob_sha": "e2699b3314b72713fdca0aaefa2ceeee8a6845ab",
+  "generator_blob_sha": "6b866a2ba1d7c6d30b6e67c27e6af4fd17d0ea9e",
   "seed": 20261108,
   "grid": [
     12,

@@ -48,6 +48,9 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm import constants
+from legoesm.core.smooth import min_rel, positive_part_c1, positive_part_rel, smoothstep_cubic
+
 __physics_contract__ = {
     "units": {
         "W_canopy": "kg m-2",
@@ -98,7 +101,19 @@ __param_spec__ = {
             "fwet_exponent": {"units": "1", "bounds": (0.3, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "canopy_hydrology", "reference": "CLM5 wetted-fraction exponent (0.667)", "shape": None},
             "maximum_leaf_wetted_fraction": {"units": "1", "bounds": (0.01, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "canopy_hydrology", "reference": "CLM5 cap on the wet leaf fraction (0.05)", "shape": None},
         },
-    }
+    },
+    "CanopySnowConfig": {
+        "scheme_key": "land.canopy.canopy_snow",
+        "excluded": {
+            "temperature_width_K": "RULE 5 smoothing width of the CLM5 "
+                                   "temperature switches (numerics, not physics).",
+            "relative_width": "RULE 5 smoothing width of the CLM5 caps "
+                              "(numerics, not physics).",
+            "fcansno_ramp": "RULE 5 C1 ramp of fcansno's 0.15 power at an "
+                            "empty store (numerics, not physics).",
+        },
+        "params": {},
+    },
 }
 
 
@@ -254,3 +269,160 @@ def water_balance_residual(W_old: jnp.ndarray, W_new: jnp.ndarray,
     the store is bounded in ``[0, h2ocanmx]`` each step).
     """
     return precip - throughfall - (W_new - W_old) / dt - wet_evap
+
+
+# ---------------------------------------------------------------------------
+# Canopy snow (CLM5.0 snowveg_flag = 'ON_RAD', the CLM5.0 default)
+# ---------------------------------------------------------------------------
+# Fixed published coefficients of CLM5.0 CanopyHydrologyMod.F90 (release-
+# clm5.0.34), not tunables.
+_SNOCANMX_FACTOR = 60.0        # snocanmx = 60 dewmx (elai + esai)       (:329)
+_FPISNOW_K = 0.5               # fpisnow = 1 - exp(-0.5 (elai + esai))     (:332)
+_UNLOAD_T_BELOW_FREEZE_K = 3.0  # unloading starts at 270.15 K = tfrz - 3 K (:426)
+_UNLOAD_T_SCALE = 1.87e5       # [K s] temperature unloading scale          (:426)
+_UNLOAD_WIND_COEF = 0.5        # wind unloading coefficient                 (:427)
+_UNLOAD_WIND_SCALE = 1.56e5    # [m] wind unloading length                  (:427)
+_FCANSNO_EXPONENT = 0.15       # fcansno = (snocan / snocanmx)**0.15        (:726)
+
+
+# CLM5.0 CanopyHydrologyMod canopy-water constants (dewmx 0.1, fwet exponent
+# 0.666666666666 at :719, maximum_leaf_wetted_fraction 0.05): what the canopy
+# snow store reads when liquid interception is off.  The liquid store's own
+# default exponent is 0.667 (clm-ml-jax MLclm_varcon), used when it is on.
+CLM5_CANOPY_WATER = InterceptionConfig(fwet_exponent=0.666666666666)
+
+
+class CanopySnowConfig(NamedTuple):
+    """CLM5 intercepted canopy snow: RULE 5 widths of its state switches.
+
+    ``temperature_width_K`` smooths the three temperature switches (snow
+    fall-off only at or below freezing, the 270.15 K unloading ramp, and the
+    leaf-phase split of the wet-leaf evaporation); ``relative_width`` the caps
+    (fall-off of the excess over ``snocanmx``, unloading at most the store,
+    ``fcansno <= 1``, store draws); ``fcansno_ramp`` the store fraction
+    ``snocan/snocanmx`` below which ``fcansno``'s 0.15 power (infinite slope at
+    an empty store) is replaced by its C1 quadratic continuation from 0.
+    0 = CLM5's hard form.  Legal ranges: :func:`validate_canopy_snow_config`.
+    """
+    temperature_width_K: float = 0.5
+    relative_width: float = 0.05
+    fcansno_ramp: float = 1.0e-3
+
+
+def validate_canopy_snow_config(cfg: CanopySnowConfig) -> None:
+    """One legal range per width: each is 0 (CLM5's hard switch) or a RULE 5
+    width; ``relative_width <= 1`` (above it a smooth min of non-negative
+    operands can go negative, e.g. unloading turns into loading) and
+    ``fcansno_ramp <= 1``."""
+    from legoesm.core.smooth import validate_smoothing_width
+    for name in cfg._fields:
+        validate_smoothing_width(f"canopy_snow.{name}", getattr(cfg, name))
+    for name in ("relative_width", "fcansno_ramp"):
+        if getattr(cfg, name) > 1.0:
+            raise ValueError(f"canopy_snow.{name} must be <= 1 (got "
+                             f"{getattr(cfg, name)!r}): a larger width breaks "
+                             "the non-negativity of the store transfers.")
+
+
+def canopy_cold_weight(T, T_switch, width):
+    """Weight of ``T <= T_switch``: exactly 1 at and below, exactly 0 from
+    ``T_switch + width`` (C1); ``width = 0`` is the hard test."""
+    if width == 0:
+        return (T <= T_switch).astype(jnp.result_type(T, float))
+    return 1.0 - smoothstep_cubic((T - T_switch) / width)
+
+
+def canopy_snow_capacity(vai, ic: InterceptionConfig):
+    """``snocanmx = 60 dewmx (elai + esai)`` [kg m-2] (CLM5 :329)."""
+    return _SNOCANMX_FACTOR * ic.dewmx * jnp.maximum(vai, 0.0)
+
+
+def canopy_snow_step(snocan, snow_rate, T_air, wind, vai, dt,
+                     ic: InterceptionConfig, cfg: CanopySnowConfig):
+    """Intercept snowfall, shed the excess below freezing, unload (CLM5 ON_RAD).
+
+    CLM5.0 CanopyHydrologyMod.F90 :328-347 (interception ``fpisnow``), :361-378
+    (below-freezing fall-off of the excess over ``snocanmx``) and :421-437
+    (temperature and wind unloading, limited to the store), in that order.
+    ``vai`` is the exposed plant area ``elai + esai``.  Returns ``(snocan_new,
+    ground_snow_rate)``; every kilogram that leaves the store reaches the
+    ground snow, so ``snow_rate = ground_snow_rate + (snocan_new - snocan)/dt``
+    exactly (sublimation is drawn later, by the caller).
+
+    KNOWN DIFFERENCES vs CLM5.0 (recorded, not hidden):
+    * smooth defaults (RULE 5): the three switches carry ``cfg`` widths
+      (0 = CLM5); per-case gaps at the default are pinned by
+      tests/land/unit/oracle_fixtures/clm5_canopy_snow_gaps.json;
+    * CLM5 skips the whole block where ``frac_veg_nosno = 0`` (canopy buried),
+      freezing ``snocan``; here a buried canopy (``vai = 0``) intercepts
+      nothing and its store still unloads;
+    * CLM5 sheds the excess over ``snocanmx`` only in a step with
+      precipitation; here it is shed in any step below freezing (same mass,
+      reaches the ground snow at most one dry spell earlier);
+    * the land step (not this function): CLM5's one ``t_veg`` picks the
+      evaporation phase; the two-leaf canopy uses its sunlit-fraction-weighted
+      leaf temperature; canopy frost/dew keeps the land's existing routing
+      (CLM5 deposits it into ``snocan`` below freezing); canopy sublimation
+      pays L_s (CLM5 charges hvap, dropping L_f -- RULE 0);
+    * an evaporation demand above both stores (CLM5 caps it upstream, then
+      drives ``liqcan`` negative on an over-draw) empties both stores here.
+    """
+    vai = jnp.maximum(vai, 0.0)
+    fpisnow = 1.0 - jnp.exp(-_FPISNOW_K * vai)
+    through = snow_rate * (1.0 - fpisnow)
+    s1 = snocan + dt * snow_rate * fpisnow
+    cap = canopy_snow_capacity(vai, ic)
+    cold = canopy_cold_weight(T_air, constants.T_freeze, cfg.temperature_width_K)
+    falloff = cold * positive_part_rel(s1 - cap, cap, cfg.relative_width)
+    s2 = s1 - falloff
+    w = cfg.temperature_width_K
+    dT = T_air - (constants.T_freeze - _UNLOAD_T_BELOW_FREEZE_K)
+    warm = jnp.maximum(dT, 0.0) if w == 0 else positive_part_c1(dT, 1.0 / w)
+    k = warm / _UNLOAD_T_SCALE + _UNLOAD_WIND_COEF * wind / _UNLOAD_WIND_SCALE
+    frac = min_rel(k * dt, 1.0, cfg.relative_width)
+    unload = frac * s2
+    s3 = s2 - unload
+    return s3, through + (falloff + unload) / dt
+
+
+def canopy_snow_fraction(snocan, vai, ic: InterceptionConfig,
+                         cfg: CanopySnowConfig):
+    """Snow-covered canopy fraction ``fcansno = min(1, (snocan/snocanmx)**0.15)``
+    (CLM5 :723-729); 0 for an empty store or no exposed plant area.  At
+    ``cfg.fcansno_ramp = 0`` (CLM5's form) the power's infinite slope at an
+    empty store is guarded by a double ``where`` (zero gradient there); the
+    default ramp makes it C1 with a finite positive slope from 0."""
+    cap = canopy_snow_capacity(vai, ic)
+    p, x0 = _FCANSNO_EXPONENT, cfg.fcansno_ramp
+    if x0 > 0.0:
+        # C1 quadratic g(x) = a x + b x^2 on [0, x0] matching x**p and its slope
+        # at x0 (a = (2 - p) x0**(p-1), b = (p - 1) x0**(p-2)): monotone, 0 at
+        # an empty store with the finite slope a (so the empty store is not a
+        # gradient dead end).  The power only sees x >= x0 (no infinite slope).
+        on = cap > 0.0
+        base = snocan / jnp.where(on, cap, 1.0)     # snocan >= 0 by construction
+        xs = jnp.minimum(base, x0)
+        quad = (2.0 - p) * x0 ** (p - 1.0) * xs + (p - 1.0) * x0 ** (p - 2.0) * xs * xs
+        power = jnp.where(base < x0, quad, jnp.where(base < x0, x0, base) ** p)
+    else:
+        on = (snocan > 0.0) & (cap > 0.0)
+        base = jnp.where(on, snocan / jnp.where(on, cap, 1.0), 1.0)
+        power = base ** p
+    f = min_rel(power, 1.0, cfg.relative_width)
+    return jnp.where(on, f, 0.0)
+
+
+def split_wet_evap(demand_cold, demand_warm, snow_avail, liq_avail,
+                   relative_width):
+    """Draw the wet-leaf evaporation from the two canopy stores, CLM5 order
+    (CanopyFluxesMod.F90 :1257-1272): leaves at or below freezing take snow
+    first then liquid, warmer leaves liquid first then snow.  All arguments
+    are masses per step [kg m-2] (>= 0).  Returns ``(from_snow, from_liq)``;
+    their sum is the demand capped by the two stores together.
+    """
+    rw = relative_width
+    s_cold = min_rel(demand_cold, snow_avail, rw)
+    l_cold = min_rel(demand_cold - s_cold, liq_avail, rw)
+    l_warm = min_rel(demand_warm, liq_avail - l_cold, rw)
+    s_warm = min_rel(demand_warm - l_warm, snow_avail - s_cold, rw)
+    return s_cold + s_warm, l_cold + l_warm

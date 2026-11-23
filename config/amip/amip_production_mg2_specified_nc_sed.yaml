@@ -1,0 +1,5 @@
+# Production deck + MG2 cloud-droplet sedimentation under the specified droplet
+# number (MG2 nccons, micro_mg2_0.F90:2056-2377), non-default arm.  Ported from
+# the ENSO fork (Isma Di Carlo).  Everything else is amip_production.yaml.
+include: amip_production.yaml
+morrison_specified_nc_droplet_sedimentation: true

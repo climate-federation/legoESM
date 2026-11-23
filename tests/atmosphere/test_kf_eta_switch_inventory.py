@@ -64,8 +64,8 @@ _TAG = re.compile(r"kfsw:\s*([A-Za-z0-9\-]+(?:\s*,\s*[A-Za-z0-9\-]+)*)")
 # or frees switches edits its row here.
 BASELINE = {
     "A0": ("hard", 44), "A1": ("hard", 7), "A2": ("hard", 2), "A3": ("hard", 2),
-    "A4": ("hard", 5), "A5": ("hard", 3), "A6": ("hard", 10), "B1": ("hard", 18),
-    "B2": ("hard", 29), "B3": ("hard", 74), "B4": ("hard", 33), "B5": ("hard", 4),
+    "A4": ("hard", 5), "A5": ("hard", 3), "A5s": ("smooth", 5), "A6": ("hard", 10), "B1": ("hard", 18),
+    "B2": ("hard", 29), "B3": ("hard", 74), "B4": ("hard", 33), "B4s": ("smooth", 25), "B5": ("hard", 4),
     "C-KCHECK": ("hard", 41), "C-KLCL": ("hard", 73), "C-KLCLg": ("smooth", 11),
     "C-KLCL2": ("hard", 34),
     "C-KPBL": ("hard", 67), "C-L5": ("hard", 6),
@@ -76,13 +76,14 @@ BASELINE = {
     "D4": ("smooth", 19), "D5": ("hard", 2), "D6": ("hard", 4), "D7a": ("smooth", 18),
     "D7b": ("smooth", 2), "D7c": ("hard", 2), "D7d": ("smooth", 5), "D7e": ("smooth", 7),
     "D7f": ("hard", 8), "D7g": ("smooth", 21), "D7h": ("hard", 6), "D7i": ("hard", 15),
-    "D7j": ("hard", 4), "D7k": ("hard", 3), "E1": ("smooth", 2), "E2": ("smooth", 2),
+    "D7j": ("hard", 4), "D7js": ("smooth", 1), "D7k": ("hard", 3), "E1": ("smooth", 2), "E2": ("smooth", 2),
     "E3": ("smooth", 3), "E4": ("smooth", 2), "E5": ("smooth", 8), "E6": ("smooth", 5),
     "E7": ("smooth", 4), "E8": ("smooth", 2), "E9": ("smooth", 8), "E10": ("hard", 5),
     "E11": ("hard", 12), "E11c": ("smooth", 4), "E12": ("hard", 5), "E13": ("hard", 2),
-    "E14": ("hard", 1), "E15": ("hard", 9), "E16": ("hard", 5), "E17": ("hard", 1),
-    "E18": ("hard", 1), "E19": ("hard", 1), "F1": ("smooth", 19), "F2": ("smooth", 40),
-    "S": ("static", 286), "H": ("static", 17),
+    "E14": ("hard", 1), "E15": ("hard", 9), "E15s": ("smooth", 3), "E16": ("hard", 5), "E17": ("hard", 1), "E17s": ("smooth", 2),
+    "E18": ("hard", 1), "E18s": ("smooth", 1), "E19": ("hard", 1),
+    "E19s": ("smooth", 2), "F1": ("smooth", 19), "F2": ("smooth", 40),
+    "S": ("static", 299), "H": ("static", 17),
 }
 
 

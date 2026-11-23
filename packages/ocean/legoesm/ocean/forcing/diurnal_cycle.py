@@ -33,7 +33,9 @@ import math
 
 import jax.numpy as jnp
 
-# NEMO sbcdcy hard-wired orbit constants (sbcdcy.F90:190-193)
+# NEMO sbcdcy hard-wired orbit constants (sbcdcy.F90:190-193).  Deliberate
+# NEMO-matching choice (user 2026-11-19): this lane does NOT read the run's
+# shared orbit (legoesm.driver.orbit); it reproduces NEMO's 23.5 deg circle.
 _OBLIQUITY_DEG = 23.5          # orbit declination amplitude
 _SOLSTICE_OFFSET_DAYS = 11.0   # days from 21 Dec to 1 Jan
 _MIN_DAYLIGHT_FRAC = 0.001     # NEMO ticket #1040 short-daylight guard

@@ -75,7 +75,7 @@ def _patch_readers(monkeypatch):
         assert np.shape(lon_grid) == np.shape(lat_grid)
         return _aod(np.asarray(lat_grid), day, ccn)
     monkeypatch.setattr(ext, "get_aerosol_at_time", _aer)
-    monkeypatch.setattr(ext, "get_aerosol_sw_volcanic_at_time", lambda c, day, lat_grid=None: None)
+    monkeypatch.setattr(ext, "get_aerosol_sw_volcanic_optics_at_time", lambda c, day, lat_grid=None: None)
     monkeypatch.setattr(ext, "get_aerosol_lw_at_time", lambda c, day, lat_grid=None: (
         np.full((np.size(lat_grid), 2), 0.01), np.array([2000.0, 3000.0, 4000.0])))
     monkeypatch.setattr(ext, "get_ghg_at_time", lambda c, day: dict(GHG))

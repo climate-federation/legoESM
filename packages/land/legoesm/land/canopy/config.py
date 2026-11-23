@@ -315,6 +315,38 @@ class CanopyConfig(NamedTuple):
     # absorption (sunlit / canopy absorbed) to [0, 1] (upstream clips hard).  0 =
     # the reference's hard clip.  Read only by sw_scheme="two_stream".
     two_stream_clip_width: float = 0.01
+    # Hand the soil the ground heat flux together with its derivative with
+    # respect to the ground temperature, so the final soil solve treats the
+    # top boundary semi-implicitly (CLM5 Technical Description, eqs. 2.5.123
+    # and 2.5.124 for the derivative, 2.6.15 for the linearised flux in the
+    # soil solve).  False = the explicit Neumann flux: a converged midday solve
+    # over sparse dry canopy then put 290-390 W/m2 into the 2.9 mm top layer
+    # and raised it 17-43 K in one 1800 s step (I. Di Carlo, legoESM-enso
+    # 16f7ac09a7).  Default False -> True (user 2026-11-20: fixed value is the
+    # default).  Bulk snowpack without the snow thermal node only.  Appended.
+    implicit_ground_flux: bool = True
+    # A column whose canopy solve stops at the iteration cap takes the fluxes
+    # of its LAST iterate (when that iterate is an admissible state), as CLM5
+    # does after its forty iterations (Technical Description 2.5.3.2, step 12;
+    # the energy error goes to sensible heat, eqs. 2.5.135, 2.5.138-2.5.139,
+    # which the multilayer land's fallback closure already does).  False = the
+    # cold state (canopy at air temperature), whose sensible heat reached
+    # 1,100-1,430 W/m2 over hot dry soil and was then rejected and held
+    # (legoESM-enso 9b70a0f84b).  Default True (user 2026-11-20).  Appended.
+    # Gradient: such a column carries the implicit-function adjoint at its last
+    # iterate (core.nonlinear adjoint_unconverged), the root's gradient as the
+    # residual left there goes to zero.  KNOWN DIFFERENCE from d(last
+    # iterate)/d(input), measured d(SH+LE)/d(T_air) AD/FD: 1.000 at residual
+    # 7e-15 of the seed's, 0.988 at 1e-7, 0.655 one step from the cold seed
+    # (4.8e-4); over 64 random columns one step from the cold seed, median
+    # 0.968, range -0.13 to 14.7, max |AD| 18 W/m2/K against max |FD| 1.3e3:
+    # in that sample it did not blow up where it is least exact
+    # (scripts/validate/canopy_fallback_gradient_fd.py [--sweep]).  Like a
+    # converged root, the last iterate carries no gradient to its seed, so the
+    # dependence on the previous pass's state is dropped.  The forward output
+    # jumps between last iterate and cold state at the admissibility boundary.
+    # False = cold state, whose gradient is exact.
+    fallback_from_last_iterate: bool = True
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -360,6 +392,9 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 "two_stream_clip_width must be <= 1 (the smoothing bands at 0 and 1 of "
                 f"the sunlit share would overlap), got {self.two_stream_clip_width!r}")
+        for _f in ("implicit_ground_flux", "fallback_from_last_iterate"):
+            if not isinstance(getattr(self, _f), bool):
+                raise ValueError(f"{_f} must be a bool, got {getattr(self, _f)!r}")
         return self
 
 
@@ -660,6 +695,11 @@ class CanopyLandParams(NamedTuple):
 # CLMMLCanopyConfig — configuration for the CLM-ML-JAX multilayer canopy
 # ---------------------------------------------------------------------------
 
+# CLM's shr_orb_decl (Berger cubic series): 0.008 deg true-anomaly error at
+# e=0.1, 0.68 deg at e=0.3 vs exact Kepler.
+CLM_ML_MAX_ECCENTRICITY = 0.1
+
+
 class CLMMLCanopyConfig(NamedTuple):
     """Configuration for the CLM-ML-JAX multilayer canopy surface scheme.
 
@@ -957,6 +997,16 @@ class CLMMLCanopyConfig(NamedTuple):
     # into the process-global backend control (one width per process).
     dew_limit_smoothing_mol: float = 1e-6
 
+    # The coupled run's orbit and solar constant (legoesm.driver.orbit, set by
+    # the coupled driver).  None (land-only runs) = CLM's year-2001 Berger
+    # orbit and constants.S_0.  Perihelion longitude is from the moving vernal
+    # equinox (radiation convention, = CESM mvelp + 180).  CLM's shr_orb_decl
+    # is Berger's cubic series, so eccentricity above 0.1 is refused.
+    orbit_eccentricity: float | None = None
+    orbit_obliquity_deg: float | None = None
+    orbit_long_perihelion_deg: float | None = None
+    solar_s0: float | None = None
+
     def validate(self) -> "CLMMLCanopyConfig":
         """Fail-early check of the static string-dispatch fields.
 
@@ -965,6 +1015,16 @@ class CLMMLCanopyConfig(NamedTuple):
         setup instead of silently running the default RSL physics.  Returns
         ``self`` for chaining.
         """
+        _orb = (self.orbit_eccentricity, self.orbit_obliquity_deg,
+                self.orbit_long_perihelion_deg)
+        if any(v is None for v in _orb) and any(v is not None for v in _orb):
+            raise ValueError(
+                f"CLM-ML orbit needs all three elements or none; got {_orb}")
+        if (self.orbit_eccentricity is not None
+                and not 0.0 <= self.orbit_eccentricity <= CLM_ML_MAX_ECCENTRICITY):
+            raise ValueError(
+                f"CLM-ML orbit_eccentricity={self.orbit_eccentricity}: CLM's "
+                f"shr_orb_decl series is only accurate to e={CLM_ML_MAX_ECCENTRICITY}")
         if self.turbulence_scheme not in VALID_CLM_ML_TURBULENCE_SCHEMES:
             raise ValueError(
                 f"unknown turbulence_scheme {self.turbulence_scheme!r}; the "

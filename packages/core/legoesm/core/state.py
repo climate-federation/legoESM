@@ -207,6 +207,19 @@ class HydrostaticTendencies(NamedTuple):
     # SH/LH [W/m2, +up].  The ice skin is charged these.  None otherwise.
     shflx_ice: Field | None = None
     lhflx_ice: Field | None = None
+    # Surface stress ON THE SURFACE [Pa, +eastward/northward, CMOR tauu/tauv]:
+    # -(1/g) sum(du/dt dp) of the turbulence momentum tendency, i.e. the
+    # surface flux the scheme applied (no momentum flux at the model top).
+    # Set by the MPAS turbulence bridge only.  Appended LAST.
+    taux_sfc: Field | None = None
+    tauy_sfc: Field | None = None
+    # Convective part of ``precip`` [kg/m^2/s, +into surface] (CMOR prc), set
+    # by the hydrostatic convection bridge.  Appended LAST.
+    precip_conv_sfc: Field | None = None
+    # Net radiation absorbed ABOVE the model top [W/m^2] (RRTMGP overhead
+    # layer, heating discarded as in CAM): the energy budget's explicit sink.
+    # Set by the radiation bridge only; None otherwise.  Appended LAST.
+    rad_absorbed_above_top: Field | None = None
 
 
 # Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
@@ -251,6 +264,12 @@ MPAS_SFC_DIAG_EXTRA_KEYS = (
     # slots 20-21: the ice tile's turbulent heat fluxes under
     # sea_ice_flux_split (#2573), None otherwise.  Appended at the END.
     "shflx_ice", "lhflx_ice",
+    # slots 22-24: surface stress (CMOR tauu/tauv) and convective precip
+    # (CMOR prc).  Appended at the END, no index moves.
+    "taux_sfc", "tauy_sfc", "precip_conv_sfc",
+    # slot 25: net radiation absorbed above the model top [W/m^2] (energy
+    # budget sink).  Appended at the END, no index moves.
+    "rad_absorbed_above_top",
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their

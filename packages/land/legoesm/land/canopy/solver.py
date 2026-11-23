@@ -435,9 +435,10 @@ def canopy_forward(
     Ts = b.Ts_bc
     zldis = b.z0 - b.displa
 
-    ustar, rah_above, raw_above, uav, zeta = monin_obukhov_stability(
+    ustar, rah_above, raw_above, uav, zeta, obu = monin_obukhov_stability(
         b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m,
-        n_iters=most_n_iters, zeta_cap_width=zeta_cap_width)
+        n_iters=most_n_iters, zeta_cap_width=zeta_cap_width,
+        return_flux_obu=True)
 
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
@@ -549,11 +550,68 @@ def canopy_forward(
         G=G, Ls=Ls, Lcanopy_up=Lcanopy_up, gap_LW=gap_LW, LW_out=LW_out,
         eps_col=eps_col, LW_emit=LW_emit,
         gs_Sun=gs_Sun, gs_Sh=gs_Sh,
-        ustar=ustar, zeta=zeta,
+        ustar=ustar, zeta=zeta, obu=obu,
         rah_above=rah_above, rah_below=rah_below,
         Rb_Sun=Rb_Sun, Rb_Sh=Rb_Sh,
         ALW_Sun=ALW_Sun, ALW_Sh=ALW_Sh, ALW_Soil=ALW_Soil,
     )
+
+
+def ground_heat_conductance(
+    x: jax.Array,
+    bundle: CanopyForcingBundle,
+    config,
+    converged: jax.Array,
+) -> jax.Array:
+    """lambda = -dG/dTs [W m-2 K-1] of ONE column, CLM5's linearisation.
+
+    ``G = Rn_soil - LE_soil - H_soil`` is the ground heat flux of
+    :func:`canopy_forward` and ``Ts`` the ground temperature (``bundle.Ts_bc``).
+    As in the CLM5 Technical Description (eqs. 2.5.123, 2.5.124 and 2.6.24) the
+    leaf temperatures are held fixed and the canopy air (``Tc``, ``q_c``) is
+    allowed to follow the ground: with ``xa = (Tc, q_c)`` and ``F_a`` the canopy
+    air rows of the closure residual,
+
+        dxa/dTs = -(dF_a/dxa)^-1 dF_a/dTs,
+        dG/dTs  = dG/dTs|x + dG/dxa . dxa/dTs.
+
+    That is the factor (c_a + c_v)/(c_a + c_v + c_g) of eq. 2.5.123 for the
+    sensible flux, the matching factor of eq. 2.5.124 for the latent flux, and
+    the ground's longwave emission derivative, all from this model's own
+    equations.  An unconverged column (``x`` not a root) takes the partial
+    derivative at fixed ``x``.  A non-finite result is replaced by the partial
+    one and, if that is non-finite too, by 0 (the explicit flux).
+    """
+    def _residual(xa, ts):
+        return _canopy_residual(
+            x.at[4:6].set(xa), bundle._replace(Ts_bc=ts),
+            LE_module=config.LE_module,
+            stomatal_model=config.stomatal_model,
+            le_cap_mode=config.le_cap_mode,
+            use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
+            rh_cap_width=config.rh_cap_smoothing_width,
+            zeta_cap_width=config.zeta_cap_smoothing_width,
+            most_n_iters=config.most_n_iters)[4:6]
+
+    def _ground_flux(xa, ts):
+        return canopy_forward(
+            x.at[4:6].set(xa), bundle._replace(Ts_bc=ts),
+            config.LE_module, config.stomatal_model, config.le_cap_mode,
+            config.use_ta_for_photosynthesis, config.rh_cap_smoothing_width,
+            config.zeta_cap_smoothing_width, config.most_n_iters)["G"]
+
+    xa, ts = x[4:6], bundle.Ts_bc
+    J_a = jax.jacfwd(_residual, 0)(xa, ts)
+    F_t = jax.jacfwd(_residual, 1)(xa, ts)
+    g_a, g_t = jax.grad(_ground_flux, (0, 1))(xa, ts)
+    # Double where: a singular J_a would put inf/NaN in the unselected branch,
+    # which reaches the reverse-mode cotangent through the select.
+    ok = converged & jnp.all(jnp.isfinite(J_a)) & (jnp.linalg.det(J_a) != 0.0)
+    dxa = -jnp.linalg.solve(jnp.where(ok, J_a, jnp.eye(2, dtype=J_a.dtype)), F_t)
+    lam_full = -(g_t + g_a @ dxa)
+    lam_part = -g_t
+    lam = jnp.where(ok & jnp.isfinite(lam_full), lam_full, lam_part)
+    return jnp.where(jnp.isfinite(lam), lam, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +672,7 @@ def solve_canopy_closure(
         most_n_iters=config.most_n_iters,
         max_iters=config.max_iters,
         tol=config.tol,
+        adjoint_unconverged=config.fallback_from_last_iterate,
     )
     return solver(initial_state, bundle)[:3]
 
@@ -658,6 +717,7 @@ def solve_canopy_closure_diag(
         most_n_iters=config.most_n_iters,
         max_iters=config.max_iters,
         tol=config.tol,
+        adjoint_unconverged=config.fallback_from_last_iterate,
     )
     return solver(initial_state, bundle)
 
@@ -676,6 +736,7 @@ def _make_implicit_newton_solver(
     most_n_iters: int,
     max_iters: int,
     tol: float,
+    adjoint_unconverged: bool = False,
 ):
     """Bind the shared implicit root solver to the canopy residual."""
     del tol  # Legacy step tolerance; convergence is the residual contract.
@@ -701,4 +762,5 @@ def _make_implicit_newton_solver(
         atol=_LM_ATOL,
         n_sq_max=_ROOT_NSQ_MAX,
         admissible=canopy_state_admissible,
+        adjoint_unconverged=adjoint_unconverged,
     )
