@@ -382,9 +382,58 @@ def test_builtin_plants_name_ocean_and_ice_failures() -> None:
     assert plants["control"] == "PASS_C4_12_OF_12"
     assert plants["ocean_control"] == "PASS"
     assert plants["one_month_ocean_quantity_plant"] == "FAIL_C4_M04_Apr_SST"
+    assert plants["psi_rms_above_applied_bar_plant"] == "FAIL_C4_M05_May_PSI"
+    assert plants["psi_pattern_above_applied_bar_plant"] == "FAIL_C4_M06_Jun_PSI"
+    assert plants["drake_above_applied_bar_plant"] == "FAIL_C4_M07_Jul_DRAKE"
+    assert plants["negative_candidate_rms_refusal_plant"] == "PASS"
+    assert plants["negative_candidate_psi_rms_refusal_plant"] == "PASS"
+    assert plants["negative_candidate_drake_refusal_plant"] == "PASS"
+    assert plants["candidate_psi_correlation_refusal_plant"] == "PASS"
+    assert plants["twin_psi_correlation_refusal_plant"] == "PASS"
+    assert plants["boolean_numeric_refusal_plant"] == "PASS"
     assert plants["ice_above_bar_plant"] == "FAIL_C4_M08_Aug_ICE_AREA_NH"
     assert plants["ice_below_bar_plant"] == "PASS_C4_12_OF_12"
     assert plants["daily_cancellation_plant"] == "FAIL_C4_M08_Aug_ICE_AREA_NH"
+
+
+@pytest.mark.parametrize(
+    ("source", "quantity", "metric", "value", "message"),
+    [
+        ("candidate", "SST", "rms", -0.001, "SST candidate RMS is negative"),
+        (
+            "candidate", "PSI", "rms_sv", -0.001,
+            "PSI candidate RMS is negative",
+        ),
+        (
+            "candidate", "DRAKE", "abs_mean_diff_sv", -0.001,
+            "DRAKE candidate value is negative",
+        ),
+        (
+            "candidate", "PSI", "pattern_corr", 1.001,
+            r"PSI candidate pattern correlation must be in \[-1, 1\]",
+        ),
+        (
+            "envelope", "PSI", "pattern_corr", -1.001,
+            r"PSI twin pattern correlation must be in \[-1, 1\]",
+        ),
+        (
+            "candidate", "SST", "rms", True,
+            "SST candidate RMS is boolean, not numeric",
+        ),
+    ],
+)
+def test_impossible_ocean_numeric_inputs_are_refused(
+    source: str, quantity: str, metric: str, value: object, message: str
+) -> None:
+    candidate, envelope, admission = _synthetic_reports()
+    report = candidate if source == "candidate" else envelope
+    report["months"][0]["metrics"][quantity][metric] = value
+    if source == "envelope":
+        admission = decision188.minimal_coupled_c4_envelope_admission(
+            envelope_report=envelope
+        )
+    with pytest.raises(scorer.C4ScoreError, match=message):
+        scorer.score_c4(candidate, envelope, admission)
 
 
 def test_ice_envelope_nemo_mean_must_equal_scored_nemo_mean() -> None:

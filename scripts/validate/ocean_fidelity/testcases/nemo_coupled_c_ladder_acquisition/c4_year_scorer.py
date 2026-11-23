@@ -32,6 +32,8 @@ def require(condition: bool, message: str) -> None:
 
 
 def _finite(value: Any, label: str) -> float:
+    require(not isinstance(value, bool),
+            f"{label} is boolean, not numeric: {value!r}")
     try:
         output = float(value)
     except (TypeError, ValueError) as exc:
@@ -261,6 +263,12 @@ def _score_ocean_month_decision235(
         )
         require(twin_value >= 0.0,
                 f"{candidate['label']}: {key} twin RMS is negative")
+        candidate_value = _finite(
+            candidate_metrics[key].get("rms"),
+            f"{candidate['label']} {key} candidate RMS",
+        )
+        require(candidate_value >= 0.0,
+                f"{candidate['label']}: {key} candidate RMS is negative")
         scaled_twin = decision188.KE_ENVELOPE_MULTIPLIER * twin_value
         applied_bar = max(fixed_bar, scaled_twin)
         binding_side = (
@@ -268,7 +276,6 @@ def _score_ocean_month_decision235(
             else "fixed" if scaled_twin < fixed_bar
             else "fixed_and_twin"
         )
-        candidate_value = rows[key]["value"]
         rows[key].update({
             "candidate_value": candidate_value,
             "fixed_bar": fixed_bar,
@@ -292,15 +299,21 @@ def _score_ocean_month_decision235(
     )
     require(twin_psi_rms >= 0.0,
             f"{candidate['label']}: PSI twin RMS is negative")
+    candidate_psi_rms = _finite(
+        candidate_metrics["PSI"]["rms_sv"],
+        f"{candidate['label']} PSI candidate RMS",
+    )
+    require(candidate_psi_rms >= 0.0,
+            f"{candidate['label']}: PSI candidate RMS is negative")
     scaled_twin_psi_rms = decision188.KE_ENVELOPE_MULTIPLIER * twin_psi_rms
     applied_psi_rms_bar = max(decision188.PSI_RMS_BAR_SV, scaled_twin_psi_rms)
     twin_psi_corr = _finite(
         envelope_metrics["PSI"].get("pattern_corr"),
         f"{candidate['label']} PSI twin pattern correlation",
     )
+    require(-1.0 <= twin_psi_corr <= 1.0,
+            f"{candidate['label']}: PSI twin pattern correlation must be in [-1, 1]")
     twin_psi_decorrelation = 1.0 - twin_psi_corr
-    require(twin_psi_decorrelation >= 0.0,
-            f"{candidate['label']}: PSI twin pattern decorrelation is negative")
     fixed_psi_decorrelation_bar = 1.0 - decision188.PSI_PATTERN_CORR_MIN
     scaled_twin_psi_decorrelation = (
         decision188.KE_ENVELOPE_MULTIPLIER * twin_psi_decorrelation
@@ -308,8 +321,15 @@ def _score_ocean_month_decision235(
     applied_psi_decorrelation_bar = max(
         fixed_psi_decorrelation_bar, scaled_twin_psi_decorrelation
     )
-    candidate_psi_rms = rows["PSI"]["rms_sv"]
-    candidate_psi_decorrelation = 1.0 - rows["PSI"]["pattern_corr"]
+    candidate_psi_corr = _finite(
+        candidate_metrics["PSI"].get("pattern_corr"),
+        f"{candidate['label']} PSI candidate pattern correlation",
+    )
+    require(
+        -1.0 <= candidate_psi_corr <= 1.0,
+        f"{candidate['label']}: PSI candidate pattern correlation must be in [-1, 1]",
+    )
+    candidate_psi_decorrelation = 1.0 - candidate_psi_corr
     rows["PSI"].update({
         "rms_candidate_value_sv": candidate_psi_rms,
         "rms_fixed_bar_sv": decision188.PSI_RMS_BAR_SV,
@@ -356,9 +376,14 @@ def _score_ocean_month_decision235(
     )
     require(twin_drake >= 0.0,
             f"{candidate['label']}: DRAKE twin value is negative")
+    candidate_drake = _finite(
+        candidate_metrics["DRAKE"]["abs_mean_diff_sv"],
+        f"{candidate['label']} DRAKE candidate absolute mean difference",
+    )
+    require(candidate_drake >= 0.0,
+            f"{candidate['label']}: DRAKE candidate value is negative")
     scaled_twin_drake = decision188.KE_ENVELOPE_MULTIPLIER * twin_drake
     applied_drake_bar = max(decision188.DRAKE_BAR_SV, scaled_twin_drake)
-    candidate_drake = rows["DRAKE"]["value_sv"]
     rows["DRAKE"].update({
         "candidate_value_sv": candidate_drake,
         "fixed_bar_sv": decision188.DRAKE_BAR_SV,
@@ -622,6 +647,148 @@ def run_plants() -> dict[str, str]:
         "fixed-bound ocean plant did not use the Decision-188 bar",
     )
 
+    adaptive_other_envelope = copy.deepcopy(envelope)
+    adaptive_other_envelope["months"][4]["metrics"]["PSI"]["rms_sv"] = 0.05
+    adaptive_other_envelope["months"][5]["metrics"]["PSI"]["pattern_corr"] = 0.9
+    adaptive_other_envelope["months"][6]["metrics"]["DRAKE"][
+        "abs_mean_diff_sv"
+    ] = 0.2
+    adaptive_other_admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=adaptive_other_envelope
+    )
+
+    psi_rms_between = copy.deepcopy(candidate)
+    psi_rms_between["months"][4]["metrics"]["PSI"]["rms_sv"] = 0.125
+    psi_rms_between_result = score_c4(
+        psi_rms_between, adaptive_other_envelope, adaptive_other_admission
+    )
+    psi_rms_between_row = psi_rms_between_result["months"][4]["quantities"]["PSI"]
+    require(
+        psi_rms_between_result["status"] == "PASS_C4_12_OF_12"
+        and psi_rms_between_row["rms_binding_side"] == "twin",
+        "PSI RMS value between the fixed and twin-bound bars did not pass",
+    )
+    psi_rms_above = copy.deepcopy(psi_rms_between)
+    psi_rms_above["months"][4]["metrics"]["PSI"]["rms_sv"] = math.nextafter(
+        psi_rms_between_row["rms_applied_bar_sv"], math.inf
+    )
+    psi_rms_above_result = score_c4(
+        psi_rms_above, adaptive_other_envelope, adaptive_other_admission
+    )
+    require(
+        psi_rms_above_result["status"] == "FAIL_C4"
+        and psi_rms_above_result["first_failure"]
+        == {"month": "M05_May", "quantity": "PSI"},
+        "above-applied-bar PSI RMS plant did not name M05 PSI",
+    )
+
+    psi_pattern_between = copy.deepcopy(candidate)
+    psi_pattern_between["months"][5]["metrics"]["PSI"]["pattern_corr"] = 0.8
+    psi_pattern_between_result = score_c4(
+        psi_pattern_between, adaptive_other_envelope, adaptive_other_admission
+    )
+    psi_pattern_between_row = psi_pattern_between_result["months"][5][
+        "quantities"
+    ]["PSI"]
+    require(
+        psi_pattern_between_result["status"] == "PASS_C4_12_OF_12"
+        and psi_pattern_between_row["pattern_decorrelation_binding_side"] == "twin",
+        "PSI decorrelation between the fixed and twin-bound bars did not pass",
+    )
+    psi_pattern_above = copy.deepcopy(psi_pattern_between)
+    psi_pattern_above_value = math.nextafter(
+        psi_pattern_between_row["pattern_decorrelation_applied_bar"], math.inf
+    )
+    psi_pattern_above["months"][5]["metrics"]["PSI"]["pattern_corr"] = (
+        1.0 - psi_pattern_above_value
+    )
+    psi_pattern_above_result = score_c4(
+        psi_pattern_above, adaptive_other_envelope, adaptive_other_admission
+    )
+    require(
+        psi_pattern_above_result["status"] == "FAIL_C4"
+        and psi_pattern_above_result["first_failure"]
+        == {"month": "M06_Jun", "quantity": "PSI"},
+        "above-applied-bar PSI decorrelation plant did not name M06 PSI",
+    )
+
+    drake_between = copy.deepcopy(candidate)
+    drake_between["months"][6]["metrics"]["DRAKE"]["abs_mean_diff_sv"] = 0.55
+    drake_between_result = score_c4(
+        drake_between, adaptive_other_envelope, adaptive_other_admission
+    )
+    drake_between_row = drake_between_result["months"][6]["quantities"]["DRAKE"]
+    require(
+        drake_between_result["status"] == "PASS_C4_12_OF_12"
+        and drake_between_row["binding_side"] == "twin",
+        "DRAKE value between the fixed and twin-bound bars did not pass",
+    )
+    drake_above = copy.deepcopy(drake_between)
+    drake_above["months"][6]["metrics"]["DRAKE"][
+        "abs_mean_diff_sv"
+    ] = math.nextafter(drake_between_row["applied_bar_sv"], math.inf)
+    drake_above_result = score_c4(
+        drake_above, adaptive_other_envelope, adaptive_other_admission
+    )
+    require(
+        drake_above_result["status"] == "FAIL_C4"
+        and drake_above_result["first_failure"]
+        == {"month": "M07_Jul", "quantity": "DRAKE"},
+        "above-applied-bar DRAKE plant did not name M07 DRAKE",
+    )
+
+    refusal_cases = []
+    negative_rms = copy.deepcopy(candidate)
+    negative_rms["months"][0]["metrics"]["SST"]["rms"] = -0.001
+    refusal_cases.append((
+        "negative candidate RMS", negative_rms, envelope, admission,
+        "SST candidate RMS is negative",
+    ))
+    negative_psi_rms = copy.deepcopy(candidate)
+    negative_psi_rms["months"][0]["metrics"]["PSI"]["rms_sv"] = -0.001
+    refusal_cases.append((
+        "negative candidate PSI RMS", negative_psi_rms, envelope, admission,
+        "PSI candidate RMS is negative",
+    ))
+    negative_drake = copy.deepcopy(candidate)
+    negative_drake["months"][0]["metrics"]["DRAKE"]["abs_mean_diff_sv"] = -0.001
+    refusal_cases.append((
+        "negative candidate DRAKE", negative_drake, envelope, admission,
+        "DRAKE candidate value is negative",
+    ))
+    candidate_corr = copy.deepcopy(candidate)
+    candidate_corr["months"][0]["metrics"]["PSI"]["pattern_corr"] = 1.001
+    refusal_cases.append((
+        "candidate PSI correlation outside [-1, 1]",
+        candidate_corr, envelope, admission,
+        "PSI candidate pattern correlation must be in [-1, 1]",
+    ))
+    twin_corr = copy.deepcopy(envelope)
+    twin_corr["months"][0]["metrics"]["PSI"]["pattern_corr"] = -1.001
+    twin_corr_admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=twin_corr
+    )
+    refusal_cases.append((
+        "twin PSI correlation outside [-1, 1]",
+        candidate, twin_corr, twin_corr_admission,
+        "PSI twin pattern correlation must be in [-1, 1]",
+    ))
+    boolean_number = copy.deepcopy(candidate)
+    boolean_number["months"][0]["metrics"]["SST"]["rms"] = True
+    refusal_cases.append((
+        "boolean numeric value", boolean_number, envelope, admission,
+        "SST candidate RMS is boolean, not numeric",
+    ))
+    refusal_results = {}
+    for name, refusal_candidate, refusal_envelope, refusal_admission, message in refusal_cases:
+        caught = False
+        try:
+            score_c4(refusal_candidate, refusal_envelope, refusal_admission)
+        except C4ScoreError as exc:
+            caught = message in str(exc)
+        require(caught, f"{name} was not refused with the expected error")
+        refusal_results[name] = "PASS"
+
     corrupt_envelope = copy.deepcopy(envelope)
     corrupt_envelope["months"][3]["metrics"]["SST"]["rms"] = -0.001
     corrupt_admission = decision188.minimal_coupled_c4_envelope_admission(
@@ -685,6 +852,28 @@ def run_plants() -> dict[str, str]:
         "ocean_between_fixed_and_twin_bound_plant": "PASS_C4_12_OF_12",
         "ocean_above_applied_bar_plant": "FAIL_C4_M02_Feb_SST",
         "ocean_fixed_bound_plant": "PASS_C4_12_OF_12",
+        "psi_rms_between_fixed_and_twin_bound_plant": "PASS_C4_12_OF_12",
+        "psi_rms_above_applied_bar_plant": "FAIL_C4_M05_May_PSI",
+        "psi_pattern_between_fixed_and_twin_bound_plant": "PASS_C4_12_OF_12",
+        "psi_pattern_above_applied_bar_plant": "FAIL_C4_M06_Jun_PSI",
+        "drake_between_fixed_and_twin_bound_plant": "PASS_C4_12_OF_12",
+        "drake_above_applied_bar_plant": "FAIL_C4_M07_Jul_DRAKE",
+        "negative_candidate_rms_refusal_plant": refusal_results[
+            "negative candidate RMS"
+        ],
+        "negative_candidate_psi_rms_refusal_plant": refusal_results[
+            "negative candidate PSI RMS"
+        ],
+        "negative_candidate_drake_refusal_plant": refusal_results[
+            "negative candidate DRAKE"
+        ],
+        "candidate_psi_correlation_refusal_plant": refusal_results[
+            "candidate PSI correlation outside [-1, 1]"
+        ],
+        "twin_psi_correlation_refusal_plant": refusal_results[
+            "twin PSI correlation outside [-1, 1]"
+        ],
+        "boolean_numeric_refusal_plant": refusal_results["boolean numeric value"],
         "corrupt_ocean_twin_refusal_plant": "PASS",
         "ice_above_bar_plant": "FAIL_C4_M08_Aug_ICE_AREA_NH",
         "ice_below_bar_plant": "PASS_C4_12_OF_12",
