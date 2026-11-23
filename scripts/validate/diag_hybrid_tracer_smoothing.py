@@ -385,6 +385,158 @@ def paired_column_budget(m, q, dq, dm):
             "verdict": "CONSERVES" if np.all(relative <= 1e-12) else "LEAKS"}
 
 
+def global_inventory_budget(volume, rho_old, q_old, rho_new, q_new, boundary_budget):
+    """Signed domain inventory change per tracer; boundary content is positive in.
+
+    Host-side diagnostic only. All inputs must be fp64; no implicit broadcasting,
+    masking, denominator floor or conversion from fp32 is permitted.
+    """
+    import numpy as np
+
+    volume, rho_old, q_old, rho_new, q_new, boundary_budget = arrays = [
+        np.asarray(a) for a in (volume, rho_old, q_old, rho_new, q_new, boundary_budget)
+    ]
+    if any(a.dtype != np.float64 for a in arrays):
+        raise ValueError("fp64 arrays required")
+    if (not volume.size or rho_old.shape != volume.shape or rho_new.shape != volume.shape
+            or q_old.ndim != volume.ndim + 1 or q_old.shape[:-1] != volume.shape
+            or q_new.shape != q_old.shape or q_old.shape[-1] == 0
+            or boundary_budget.shape != (q_old.shape[-1],)):
+        raise ValueError("incompatible or empty inventory shapes")
+    if not all(np.isfinite(a).all() for a in arrays):
+        raise ValueError("nonfinite inventory input")
+    if any(np.any(a <= 0) for a in (volume, rho_old, rho_new)):
+        raise ValueError("volume and density must be positive")
+    old = (volume * rho_old)[..., None] * q_old
+    new = (volume * rho_new)[..., None] * q_new
+    axes = tuple(range(volume.ndim))
+    initial = np.sum(old, axis=axes)
+    final = np.sum(new, axis=axes)
+    scale = np.sum(np.abs(old), axis=axes)
+    if not (np.isfinite(initial).all() and np.isfinite(final).all()
+            and np.isfinite(scale).all() and np.all(scale > 0)):
+        raise ValueError("nonfinite or zero initial inventory")
+    residual = final - initial - boundary_budget
+    relative = np.abs(residual) / scale
+    if not (np.isfinite(residual).all() and np.isfinite(relative).all()):
+        raise ValueError("nonfinite inventory residual")
+    return dict(initial_inventory=initial.tolist(), final_inventory=final.tolist(),
+                initial_abs_inventory=scale.tolist(), boundary_budget=boundary_budget.tolist(),
+                signed_residual=residual.tolist(), relative_residual=relative.tolist(),
+                verdicts=np.where(relative <= 1e-12, "CONSERVES", "LEAKS").tolist())
+
+
+def inventory_controls(volume, rho, q):
+    """Identity, weighted internal transfer and the same amount added as a source."""
+    import numpy as np
+
+    zero = np.zeros(q.shape[-1], dtype=np.float64)
+    identity = global_inventory_budget(volume, rho, q, rho, q, zero)
+    mass = (np.asarray(volume) * np.asarray(rho)).reshape(-1)
+    content = mass[:, None] * np.asarray(q).reshape(-1, q.shape[-1])
+    transfer, source = np.array(q, copy=True), np.array(q, copy=True)
+    expected, donors, receivers = [], [], []
+    for tracer in range(q.shape[-1]):
+        positive = np.flatnonzero(content[:, tracer] > 0)
+        if positive.size < 2:
+            raise ValueError("control requires two positive tracer contents")
+        donor = int(positive[np.argmax(content[positive, tracer])])
+        remaining = positive[positive != donor]
+        receiver = int(remaining[np.argmax(content[remaining, tracer])])
+        amount = 0.01 * content[donor, tracer]
+        if not np.isfinite(amount) or amount <= 0:
+            raise ValueError("nonfinite or zero control amount")
+        if amount / identity["initial_abs_inventory"][tracer] <= 1e-12:
+            raise ValueError("planted source below inventory bar")
+        transfer.reshape(-1, q.shape[-1])[donor, tracer] -= amount / mass[donor]
+        transfer.reshape(-1, q.shape[-1])[receiver, tracer] += amount / mass[receiver]
+        source.reshape(-1, q.shape[-1])[receiver, tracer] += amount / mass[receiver]
+        expected.append(float(amount))
+        donors.append(donor)
+        receivers.append(receiver)
+    results = []
+    for name, final_q, target in (("identity", q, zero), ("conservative transfer", transfer, zero),
+                                   ("planted source", source, expected)):
+        result = global_inventory_budget(volume, rho, q, rho, final_q, zero)
+        error = np.abs(np.asarray(result["signed_residual"]) - target)
+        assert np.all(error / result["initial_abs_inventory"] <= 1e-12), name
+        assert result["verdicts"] == ["LEAKS" if name == "planted source" else "CONSERVES"] * q.shape[-1]
+        if name == "planted source":
+            assert np.all(np.asarray(result["signed_residual"]) > 0)
+        result.update(control=name, expected_signed_residual=np.asarray(target).tolist(),
+                      donor_indices=donors, receiver_indices=receivers, amount=expected)
+        results.append(result)
+    return results
+
+
+def height_les_fixture(root, q):
+    """Exact T24 passive LES fixture and its copied q/w profiles."""
+    import jax.numpy as jnp
+
+    model, ns, pg, hc, metric = runpy.run_path(
+        str(root / "tests/unit/test_plane_nh_tracers.py"))["_setup_with_tracers"](1)
+    qp = jnp.broadcast_to(q[0, 22:26], ns.tracers.data.shape[:-1])
+    wp = jnp.broadcast_to(jnp.sin(jnp.linspace(0, jnp.pi, 5)).at[-1].set(0.0), ns.w.data.shape)
+    ns = ns._replace(w=ns.w.replace(data=wp), tracers=ns.tracers.replace(data=qp[..., None]))
+    return model, ns, pg, hc, metric
+
+
+def height_artifacts(out, provenance, datasets, objects, configs):
+    """Persist the measured height arrays, geometry and complete resolved configs."""
+    import jax
+    import numpy as np
+
+    arrays = dict(datasets)
+    for name, obj in objects.items():
+        for path, leaf in jax.tree_util.tree_flatten_with_path(obj)[0]:
+            arrays[name + jax.tree_util.keystr(path)] = np.asarray(leaf)
+    np.savez(out / "height_inputs.npz", **arrays)
+    provenance["height_inputs"] = dict(
+        sha256=hashlib.sha256((out / "height_inputs.npz").read_bytes()).hexdigest(),
+        members={key: dict(shape=list(np.shape(a)), dtype=str(np.asarray(a).dtype))
+                 for key, a in arrays.items()})
+    provenance["height_configs"] = {key: value._asdict() for key, value in configs.items()}
+    # Pin actual imported legoESM source files, including indirect helper imports.
+    import sys
+    root = Path(__file__).resolve().parents[2]
+    for name, module in tuple(sys.modules.items()):
+        filename = getattr(module, "__file__", None)
+        if name.startswith("legoesm.") and filename and filename.endswith(".py"):
+            path = Path(filename).resolve()
+            assert path.is_relative_to(root), (name, path)
+            provenance["module_sources"][name] = str(path)
+            provenance["source_sha256"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    fixture_paths = ("tests/unit/test_mpas_atmosphere.py",
+                     "tests/unit/test_vertical_advection_hybrid_van_leer.py",
+                     "tests/unit/test_plane_nh_tracers.py")
+    provenance["height_fixture_sources"] = {
+        str(root / name): hashlib.sha256((root / name).read_bytes()).hexdigest()
+        for name in fixture_paths}
+    provenance["height_dt"] = 1.0
+    provenance["height_boundary"] = "closed lids, sphere or doubly periodic plane; net boundary content=0"
+    (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+
+
+def record_height_inventory(rows, path, area, hc, metric, rho_old, q_old, rho_new, q_new, datasets):
+    """Measure full-step inventory separately from the legacy gross-increment scale."""
+    import numpy as np
+
+    area, dz, jacobian = map(np.asarray, (area, hc.dz, metric.jacobian))
+    volume = area[..., None] * jacobian[..., None] * dz
+    rho_old, q_old, rho_new, q_new = map(np.asarray, (rho_old, q_old, rho_new, q_new))
+    zero = np.zeros(q_old.shape[-1], dtype=np.float64)
+    result = global_inventory_budget(volume, rho_old, q_old, rho_new, q_new, zero)
+    result.update(path=path, scheme="full split step", statistic="global inventory budget", scope="full domain")
+    rows.append(result)
+    print(path, result["statistic"], result["relative_residual"], result["verdicts"], flush=True)
+    for control in inventory_controls(volume, rho_old, q_old):
+        control.update(path=path, scheme=control["control"], statistic="global inventory budget", scope="full domain instrument control")
+        rows.append(control)
+    for name, a in dict(area=area, dz=dz, jacobian=jacobian, volume=volume,
+                        rho_old=rho_old, q_old=q_old, rho_new=rho_new, q_new=q_new).items():
+        datasets[path + "/" + name] = a
+
+
 def realistic_ocean_columns():
     """32 layers, 5--300 m, temperature/salinity, varying column stretch."""
     import jax.numpy as jnp
@@ -403,8 +555,208 @@ def realistic_ocean_columns():
     return zc, J, h, T, S, w
 
 
+def height_vertical_paths(out, rows, provenance, record):
+    """Port T24 height rows verbatim; add distinct whole-domain inventory rows."""
+    import contextlib
+    import inspect
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.grids import vertical as v
+    from legoesm.grids.gaussian import create_gaussian_grid, sh_analysis_3d, sh_synthesis_3d
+
+    root = Path(__file__).resolve().parents[2]
+    datasets, objects, configs = {}, {}, {}
+
+    @contextlib.contextmanager
+    def observe(module, name, path, kind, rho, density_mass_tendency, tracer_only=False):
+        real = getattr(module, name)
+        sig = inspect.signature(real)
+        observed = []
+
+        def spy(*args, **kwargs):
+            result = real(*args, **kwargs)
+            if tracer_only and not any(f.function in ("_vert_one", "_tracer_tend_one", "<lambda>") for f in inspect.stack()):
+                return result
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            a = list(bound.arguments.values())
+            q, w = a[:2]
+            dz, J = (a[2], a[4]) if kind == "height" else (a[2].dz, a[3])
+            m = rho * dz * J[..., None]
+
+            def capture(m_, q_, dq_, dm_, flux_):
+                assert np.all(np.asarray(flux_)[..., (0, -1)] == 0), "nonzero boundary flux"
+                observed.append(True)
+                record(path, kwargs.get("scheme", name), m_, q_, dq_, dm_)
+            jax.debug.callback(capture, m, q, result, density_mass_tendency, w, ordered=True)
+            return result
+
+        setattr(module, name, spy)
+        try:
+            yield
+            jax.effects_barrier()
+            assert observed, f"unexecuted route {path}/{name}"
+        finally:
+            setattr(module, name, real)
+
+    h = runpy.run_path(str(root / "tests/unit/test_mpas_atmosphere.py"))
+    mesh = h["_make_mesh"](level=2)
+    _, _, _, q = runpy.run_path(str(root / "tests/unit/test_vertical_advection_hybrid_van_leer.py"))["_column"]()
+    from legoesm.atmosphere.dynamics.gcm import compressible_euler_mpas as nh
+    from legoesm.atmosphere.dynamics.gcm import spectral_nh as sn
+    from legoesm.atmosphere.dynamics.les import compressible_euler_plane as plane
+    from legoesm.atmosphere.dynamics.les import compressible_euler_plane_halo as halo
+    hc = v.create_height_coordinate(10, 30000.0)
+    metric = v.compute_terrain_metric(jnp.zeros(mesh.nCells), hc)
+    ns = h["_make_nh_state"](mesh, hc, metric, 10)
+    profile = q[0, :10] + q[0, 20:30]
+    ww = jnp.sin(jnp.linspace(0, jnp.pi, 11)).at[-1].set(0.0)
+    ns = ns._replace(w=ns.w.replace(data=jnp.broadcast_to(ww, (mesh.nCells, 11))), tracers=ns.tracers.replace(data=jnp.broadcast_to(profile, (mesh.nCells, 10))[..., None]))
+    objects.update(mpas_mesh=mesh, mpas_hc=hc, mpas_metric=metric, mpas_initial=ns)
+    rho = jnp.broadcast_to(hc.rho_ref, (mesh.nCells, 10))
+    from legoesm.timestepping.split_explicit import SplitExplicitConfig
+    nhcfg = nh.MPASCompressibleEulerConfig()
+    def native_acoustic_mp(dt):
+        return nh.mpas_acoustic_substeps(ns, None, dt, 1, SplitExplicitConfig(), hc, metric, nhcfg)
+    drho = jax.jvp(lambda dt: native_acoustic_mp(dt).rho_prime.data,
+                   (jnp.array(0.0),), (jnp.array(1.0),))[1]
+    dm_nh = drho * hc.dz * metric.jacobian[..., None]
+    with observe(nh, "_vertical_advection_height_1d", "MPAS NH/height", "height", rho, dm_nh, True):
+        nh.mpas_compressible_euler_slow_tendencies(ns, mesh, hc, metric, nh.MPASCompressibleEulerConfig())
+    acoustic = native_acoustic_mp(jnp.array(1.0))
+    assert np.array_equal(acoustic.tracers.data, ns.tracers.data)
+    record("MPAS NH/height", "acoustic-only step; tracers unchanged", 1.0, ns.tracers.data[..., 0],
+           acoustic.rho_prime.data * hc.dz * metric.jacobian[..., None] * ns.tracers.data[..., 0], 0.0, "finite product increment")
+    # Full step is evaluated outside spies; only the native tracer call above
+    # is attributed. No semidiscrete result is promoted to a time-step claim.
+    nn = nh.MPASCompressibleEulerModel(mesh, hc, metric, nh.MPASCompressibleEulerConfig(fix_mass=False)).step(ns, 1.0)
+    m0 = rho * hc.dz * metric.jacobian[..., None]
+    m1 = (hc.rho_ref + nn.rho_prime.data) * hc.dz * metric.jacobian[..., None]
+    record("MPAS NH/height", "full split step", 1.0, ns.tracers.data[..., 0],
+           m1 * nn.tracers.data[..., 0] - m0 * ns.tracers.data[..., 0], 0.0, "finite product increment")
+
+    objects["mpas_final"] = nn
+    configs.update(mpas_slow=nhcfg, mpas_acoustic=nhcfg,
+                   mpas_full=nh.MPASCompressibleEulerConfig(fix_mass=False),
+                   mpas_acoustic_split=SplitExplicitConfig())
+    record_height_inventory(rows, "MPAS NH/height", mesh.areaCell, hc, metric,
+                            hc.rho_ref + ns.rho_prime.data, ns.tracers.data,
+                            hc.rho_ref + nn.rho_prime.data, nn.tracers.data, datasets)
+
+    # Same physical vertical profiles on a Gaussian grid; invoke the real
+    # spectral slow caller and separately its full split step.
+    from legoesm.grids.gaussian import sh_synthesis_3d
+    gg = create_gaussian_grid(10)
+    hcg = hc
+    gm = v.compute_terrain_metric(jnp.zeros((gg.n_lat, gg.n_lon)), hcg)
+    ss = sn.nh_rest_state_spectral(gg, hcg, n_tracers=1)
+    qh = jnp.broadcast_to(profile, (gg.n_lat, gg.n_lon, 10))
+    wh = jnp.broadcast_to(ww, (gg.n_lat, gg.n_lon, 11))
+    ss = ss._replace(w_hat=ss.w_hat.replace(data=sh_analysis_3d(gg, wh)),
+                     tracers_hat=ss.tracers_hat.replace(data=sh_analysis_3d(gg, qh)[..., None]))
+    objects.update(spectral_grid=gg, spectral_hc=hcg, spectral_metric=gm, spectral_initial=ss)
+    rh = jnp.broadcast_to(hcg.rho_ref, qh.shape)
+    def native_acoustic_sp(dt):
+        return sn._acoustic_substeps_grid(wh, jnp.zeros_like(qh), jnp.zeros_like(qh),
+                                         dt, 1, hcg, gm, sn.SpectralNHConfig())
+    drho = jax.jvp(lambda dt: native_acoustic_sp(dt)[2],
+                   (jnp.array(0.0),), (jnp.array(1.0),))[1]
+    dm_sn = drho * hcg.dz * gm.jacobian[..., None]
+    with observe(sn, "vertical_advection_height", "spectral NH/height", "height", rh, dm_sn, True):
+        sn.spectral_nh_slow_tendencies(ss, gg, hcg, gm, sn.SpectralNHConfig())
+    record("spectral NH/height", "acoustic-only step; tracers unchanged", 1.0, qh,
+           native_acoustic_sp(jnp.array(1.0))[2] * hcg.dz * gm.jacobian[..., None] * qh, 0.0, "finite product increment")
+    nsn = sn.SpectralCompressibleEulerModel(gg, hcg, gm, sn.SpectralNHConfig()).step(ss, 1.0)
+    qn = sh_synthesis_3d(gg, nsn.tracers_hat.data[..., 0]).real
+    rn = hcg.rho_ref + sh_synthesis_3d(gg, nsn.rho_prime_hat.data).real
+    record("spectral NH/height", "full split step", 1.0, qh,
+           (rn * hcg.dz * qn - rh * hcg.dz * qh) * gm.jacobian[..., None], 0.0, "finite product increment")
+
+    objects["spectral_final"] = nsn
+    configs["spectral"] = sn.SpectralNHConfig()
+    initial_q = sh_synthesis_3d(gg, ss.tracers_hat.data[..., 0]).real[..., None]
+    initial_rho = hcg.rho_ref + sh_synthesis_3d(gg, ss.rho_prime_hat.data).real
+    record_height_inventory(rows, "spectral NH/height", gg.grid_area, hcg, gm,
+                            initial_rho, initial_q, rn, qn[..., None], datasets)
+
+    # Native LES local operators are also used on halo columns. Their scope
+    # here is explicitly local, not an MPI horizontal conservation claim.
+    model, ns, pg, hc, metric = height_les_fixture(root, q)
+    qp, wp = ns.tracers.data[..., 0], ns.w.data
+    objects.update(les_grid=pg, les_hc=hc, les_metric=metric, les_initial=ns)
+    configs["les"] = model.config
+    rp = jnp.broadcast_to(hc.rho_ref, qp.shape)
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import acoustic_column_kernel
+    def native_acoustic_plane(dt):
+        return acoustic_column_kernel(wp, ns.theta_prime.data, ns.rho_prime.data,
+                    hc, metric.jacobian, dt, model.config.acoustic_off_centering, model.config.g)
+    drho = jax.jvp(lambda dt: native_acoustic_plane(dt)[2],
+                   (jnp.array(0.0),), (jnp.array(1.0),))[1]
+    dm_plane = drho * hc.dz * metric.jacobian[..., None]
+    for mod, label in ((plane, "LES serial"), (halo, "LES halo local")):
+        for name in ("_vertical_advection_plane", "vertical_advection_van_leer_plane"):
+            with observe(mod, name, label, "plane", rp, dm_plane):
+                getattr(mod, name)(qp, wp, hc, metric.jacobian)
+    record("LES serial/height", "acoustic-only step; tracers unchanged", 1.0, qp,
+           native_acoustic_plane(jnp.array(1.0))[2] * hc.dz * metric.jacobian[..., None] * qp, 0.0, "finite product increment")
+    from legoesm.parallel.plane_mpi import make_plane_pencil_layout
+    layout = make_plane_pencil_layout(rank=0, n_ranks=1, n_ranks_y=1, n_ranks_x=1,
+                                      ny_global=pg.ny, nx_global=pg.nx, halo=1)
+    for scheme, name in (("centered", "_vertical_advection_plane"),
+                         ("van_leer", "vertical_advection_van_leer_plane")):
+        cfg = model.config._replace(vertical_tracer_advection=scheme)
+        configs["les_slow_" + scheme] = cfg
+        with observe(plane, name, "LES serial native caller/" + scheme, "plane", rp, dm_plane, True):
+            plane.plane_compressible_euler_slow_tendencies(ns, pg, hc, metric, cfg)
+        with observe(halo, name, "LES halo native caller/" + scheme, "plane", rp, dm_plane, True):
+            halo.plane_compressible_euler_slow_tendencies_halo(ns, pg, hc, metric, cfg, layout)
+    nn = model.step(ns, 1.0)
+    record("LES serial/height", "full split step", 1.0, qp,
+           ((hc.rho_ref + nn.rho_prime.data) * hc.dz * nn.tracers.data[..., 0] - rp * hc.dz * qp) * metric.jacobian[..., None],
+           0.0, "finite product increment")
+
+    objects["les_final"] = nn
+    record_height_inventory(rows, "LES serial/height", pg.grid_area, hc, metric,
+                            hc.rho_ref + ns.rho_prime.data, ns.tracers.data,
+                            hc.rho_ref + nn.rho_prime.data, nn.tracers.data, datasets)
+    # Saved initial/final states include the actual lid velocities.
+    for name in ("mpas_initial", "mpas_final", "les_initial", "les_final"):
+        assert np.all(np.asarray(objects[name].w.data)[..., (0, -1)] == 0), name
+    for state in (ss, nsn):
+        assert np.all(np.asarray(sh_synthesis_3d(gg, state.w_hat.data).real)[..., (0, -1)] == 0)
+    # Two-significant-digit reproduction is ONLY for the legacy T24 statistic.
+    expected = {
+        ("MPAS NH/height", "_vertical_advection_height_1d"): 2.6e-2,
+        ("MPAS NH/height", "acoustic-only step; tracers unchanged"): 4.5e-1,
+        ("MPAS NH/height", "full split step"): 3.3e-2,
+        ("spectral NH/height", "vertical_advection_height"): 4.9e-2,
+        ("spectral NH/height", "acoustic-only step; tracers unchanged"): 4.5e-1,
+        ("spectral NH/height", "full split step"): 5.8e-2,
+        ("LES serial", "_vertical_advection_plane"): 2.9e-2,
+        ("LES serial", "vertical_advection_van_leer_plane"): 1.7e-3,
+        ("LES serial/height", "acoustic-only step; tracers unchanged"): 8.5e-2,
+        ("LES serial/height", "full split step"): 2.4e-2,
+    }
+    for label in ("LES halo local", "LES serial native caller/centered", "LES halo native caller/centered"):
+        expected[label, "_vertical_advection_plane"] = 2.9e-2
+    for label in ("LES serial native caller/van_leer", "LES halo native caller/van_leer"):
+        expected[label, "vertical_advection_van_leer_plane"] = 1.7e-3
+    expected["LES halo local", "vertical_advection_van_leer_plane"] = 1.7e-3
+    legacy = {(r["path"], r["scheme"]): r for r in rows if "max_relative" in r}
+    reproduction = []
+    for key, target in expected.items():
+        value = legacy[key]["max_relative"]
+        reproduction.append(dict(path=key[0], scheme=key[1], measured=value,
+                                 issue2641=target, agrees=float(format(value, ".2g")) == target))
+    provenance["issue2641_reproduction"] = reproduction
+    height_artifacts(out, provenance, datasets, objects, configs)
+    (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
+    assert all(r["agrees"] for r in reproduction), "STOP: T24 issue2641 reproduction mismatch; inspect artifacts"
+
+
 def all_vertical_paths(out):
-    """Reuse the original paired statistic and ocean controls only."""
+    """Preserve ocean census and append the T29 height-core measurements."""
     import jax
     import jax.numpy as jnp
     import numpy as np
@@ -480,16 +832,119 @@ def all_vertical_paths(out):
     provenance["momentum_operators"] = {"CD-grid": momentum_op.__module__ + "." + momentum_op.__qualname__,
                                         "spectral": spectral_momentum.__module__ + "." + spectral_momentum.__qualname__}
     np.savez(out / "momentum.npz", cd=momentum_op(T,w,zc,J), spectral=spectral_momentum(T,w,zc,J))
+    provenance["lane"] = "serial vertical census"
+    height_vertical_paths(out, rows, provenance, record)
     provenance["complete"] = True
     (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+
+
+def height_halo_mpi(out):
+    """Genuine two-rank T24 full step; MPI failures abort the whole lane."""
+    from mpi4py import MPI
+
+    comm = MPI.COMM_WORLD
+    try:
+        if comm.Get_size() != 2:
+            raise ValueError("--height-halo-mpi requires exactly two MPI ranks")
+        # Rank-count check deliberately precedes JAX, mpi4jax and collectives.
+        import mpi4jax  # noqa: F401
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.precision import PrecisionPolicy, set_policy
+        set_policy(PrecisionPolicy.fp64())
+        from legoesm.atmosphere.dynamics.les import compressible_euler_plane as plane
+        from legoesm.grids.plane import create_plane_grid
+        from legoesm.parallel.plane_mpi import (
+            gather_plane_field, make_plane_pencil_layout, scatter_plane_field,
+        )
+
+        assert os.environ.get("PBS_JOBID"), "PBS required"
+        assert jax.config.x64_enabled and all(d.platform == "cpu" for d in jax.devices())
+        root = Path(__file__).resolve().parents[2]
+        _, _, _, q = runpy.run_path(str(root / "tests/unit/test_vertical_advection_hybrid_van_leer.py"))["_column"]()
+        model, ns, pg, hc, metric = height_les_fixture(root, q)
+        fields = ("u", "v", "w", "theta_prime", "rho_prime", "tracers", "phis")
+        layout = make_plane_pencil_layout(
+            rank=comm.Get_rank(), n_ranks=2, n_ranks_y=2, n_ranks_x=1,
+            ny_global=pg.ny, nx_global=pg.nx,
+            halo=plane.horizontal_advection_halo_width(model.config))
+        assert layout.n_ranks == 2
+        local_grid = create_plane_grid(nx=layout.nx_local, ny=layout.ny_local, nlev=pg.nlev,
+                                       dx=pg.dx, dy=pg.dy, dtype=jnp.float64)
+        local_metric = plane.make_flat_plane_terrain_metric(local_grid, hc)
+        local_model = plane.PlaneCompressibleEulerModel(local_grid, hc, local_metric, model.config)
+        local_state = ns._replace(**{name: getattr(ns, name).replace(
+            data=scatter_plane_field(getattr(ns, name).data, layout)) for name in fields})
+        provenance = dict(
+            commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+            script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            PBS_JOBID=os.environ["PBS_JOBID"], precision="fp64", device="cpu",
+            tolerance=1e-12, complete=False, lane="height halo MPI",
+            module_sources={}, source_sha256={})
+        rank_provenance = dict(provenance, rank=layout.rank, layout=layout._asdict(),
+                               global_initial_sha256={name: hashlib.sha256(
+                                   np.ascontiguousarray(np.asarray(getattr(ns, name).data)).tobytes()).hexdigest()
+                                   for name in fields})
+        # Source hashes must be collected independently on every rank.
+        import sys
+        for name, module in tuple(sys.modules.items()):
+            filename = getattr(module, "__file__", None)
+            if name.startswith("legoesm.") and filename and filename.endswith(".py"):
+                path = Path(filename).resolve()
+                assert path.is_relative_to(root), (name, path)
+                rank_provenance["module_sources"][name] = str(path)
+                rank_provenance["source_sha256"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        rank_provenance["fixture_sha256"] = {
+            str(root / name): hashlib.sha256((root / name).read_bytes()).hexdigest()
+            for name in ("tests/unit/test_vertical_advection_hybrid_van_leer.py",
+                         "tests/unit/test_plane_nh_tracers.py")}
+        ranks = comm.gather(rank_provenance, root=0)
+        if layout.rank == 0:
+            assert ranks[0]["global_initial_sha256"] == ranks[1]["global_initial_sha256"], "rank fixture mismatch"
+            provenance["ranks"] = ranks
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+            (out / "measured_source.patch").write_text(subprocess.check_output(["git", "diff", "HEAD"], cwd=root, text=True))
+        # Root assertion failures above reach comm.Abort via the handler below.
+        rho_old = gather_plane_field(hc.rho_ref + local_state.rho_prime.data, layout)
+        q_old = gather_plane_field(local_state.tracers.data, layout)
+        final = local_model.step_halo(local_state, dt=1.0, layout=layout)
+        jax.effects_barrier()
+        assert np.all(np.asarray(local_state.w.data)[..., (0, -1)] == 0)
+        assert np.all(np.asarray(final.w.data)[..., (0, -1)] == 0)
+        rho_new = gather_plane_field(hc.rho_ref + final.rho_prime.data, layout)
+        q_new = gather_plane_field(final.tracers.data, layout)
+        w_new = gather_plane_field(final.w.data, layout)
+        if layout.rank == 0:
+            np.testing.assert_array_equal(rho_old, hc.rho_ref + ns.rho_prime.data)
+            np.testing.assert_array_equal(q_old, ns.tracers.data)
+            rows, datasets = [], {"halo_final_w": np.asarray(w_new)}
+            record_height_inventory(rows, "LES halo full/height", pg.grid_area, hc, metric,
+                                    rho_old, q_old, rho_new, q_new, datasets)
+            objects = dict(les_grid=pg, les_hc=hc, les_metric=metric, les_initial=ns)
+            height_artifacts(out, provenance, datasets, objects, {"les": model.config})
+            (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
+            provenance["complete"] = True
+            (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        comm.Abort(1)
+        raise
 
 
 if __name__ == "__main__":
     import sys
     if "--all-vertical-paths" in sys.argv:
-        parser = argparse.ArgumentParser(description="Ocean-only vertical census (T28)")
+        parser = argparse.ArgumentParser(description="Ocean and height-coordinate vertical census (T28/T29)")
         parser.add_argument("--all-vertical-paths", action="store_true", required=True)
         parser.add_argument("--out", type=Path, required=True)
-        all_vertical_paths(parser.parse_args().out)
+        parser.add_argument("--height-halo-mpi", action="store_true")
+        args = parser.parse_args()
+        if args.height_halo_mpi:
+            height_halo_mpi(args.out)
+        else:
+            all_vertical_paths(args.out)
     else:
         main()
