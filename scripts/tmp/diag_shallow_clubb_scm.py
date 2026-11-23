@@ -89,6 +89,8 @@ def main():
     p.add_argument("--prod-liquid", action="store_true",
                    help="production CLUBB liquid coupling: liquid_partition + "
                         "liquid_from_closure + cld_macmic_num_steps=3 (shim)")
+    p.add_argument("--lib-params", action="store_true",
+                   help="CLUBB library defaults for every coefficient CAM6 overrides")
     p.add_argument("--out", required=True)
     a = p.parse_args()
     hargs = ["--case", a.case, "--les-dir", a.les_dir, "--schemes", "clubb",
@@ -116,7 +118,21 @@ def main():
                 morrison=apply_microphysics_experiment_flags(
                     cfg.microphysics.morrison, cfg.microphysics.scheme,
                     liquid_from_closure=True)))
-    print(f"ARM case={a.case} nlev={arm.case.nlev} dt={arm.dt} hours={arm.hours} "
+    if a.lib_params:
+        lib = dict(C2rt=2.0, C2thl=2.0, C2rtthl=2.0, C4=2.0, C_uu_shr=0.4,
+                   C6rt=2.0, C6rtb=2.0, C6thl=2.0, C6thlb=2.0, C8=0.5, C8b=0.02,
+                   C11=0.4, C11b=0.4, C14=1.0, C_wp3_pr_turb=0.0,
+                   C_wp2_splat=2.0, c_K1=0.2, c_K2=0.025, nu2=1.0, c_K8=5.0,
+                   c_K9=0.1, nu9=10.0, c_K10=1.0, c_K10h=1.0, gamma_coef=0.25,
+                   gamma_coefb=0.25, Skw_denom_coef=4.0, Skw_max_mag=10.0,
+                   beta=1.0, lmin_coef=0.5, lambda0_stability_coef=0.03,
+                   mult_coef=0.5, C_invrs_tau_bkgnd=1.1, C_invrs_tau_shear=0.15,
+                   C_invrs_tau_N2=0.4, C_invrs_tau_N2_xp2=0.05,
+                   C_invrs_tau_N2_clear_wp3=1.0, up2_sfc_coef=4.0)
+        cl = cfg.turbulence.clubb
+        cfg = cfg._replace(turbulence=cfg.turbulence._replace(
+            clubb=cl._replace(params=cl.params._replace(**lib))))
+    print(f"ARM lib_params={a.lib_params} case={a.case} nlev={arm.case.nlev} dt={arm.dt} hours={arm.hours} "
           f"window={arm.analysis_hours} h flux_to_closure={a.surface_flux_to_closure} "
           f"prod_liquid={a.prod_liquid}",
           flush=True)
