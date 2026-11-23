@@ -69,7 +69,13 @@ Interface notes
 * ``SBMConfig.cloud_mask_sharpness`` belonged to the replaced per-level
   ``T_moist >= T`` layer mask, which the oracle does not have; it is inert and
   a non-default value raises.
-* Conditions on which the oracle stops with FATAL (LCL lookup value outside the
+* KNOWN DIFFERENCE: an unsaturated surface parcel so dry that its LCL lies
+  below the lookup table (LCL temperature < 173 K) is treated as no
+  convection for that column, as a parcel with no vapour is; the oracle stops
+  with FATAL 'get_lcl_temp: value to low'.  Such parcels occur over the
+  Antarctic plateau in coupled runs (surface mixing ratio 5.8e-8 at 247 K,
+  659 hPa), where the NaN this used to return ended the run.
+* Conditions on which the oracle stops with FATAL (LCL lookup value above the
   table) or indexes outside its arrays (a parcel still buoyant at the model
   top, ``kLZB = 0`` with CAPE > 0) return NaN for that column.
 * CIN, ``kLZBs``, ``convflag`` and the relaxation-timescale diagnostics of the
@@ -263,10 +269,12 @@ def _cape_calculation(T, r, pf, ph, table_vals):
     rp_sat = _mixing_ratio(saturation_vapor_pressure(Tp_sat), pf[ks])
     # unsaturated: LCL from the lookup table
     theta0 = T[ks] * (pref / pf[ks]) ** kappa
-    skip = (~saturated) & (r0 <= 0.0)
     r0_safe = jnp.where(r0 > 0.0, r0, 1.0)
     value = jnp.log(theta0 ** (-1.0 / kappa) * pref * r0_safe / (Rd / Rv + r0_safe))
     tlcl_tab, lut_bad = _get_lcl_temp(value, val_min, val_max, table)
+    # no vapour, or so little that the LCL lies below the table's coldest
+    # entry (the oracle's FATAL 'value to low'): no convection
+    skip = (~saturated) & ((r0 <= 0.0) | (value < val_min))
     plcl_tab = pref * (tlcl_tab / theta0) ** (1.0 / kappa)
     lcl_above_top = plcl_tab < pf[0]
     pLCL = jnp.where(lcl_above_top, pf[0], plcl_tab)

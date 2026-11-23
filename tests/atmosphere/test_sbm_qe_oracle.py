@@ -152,20 +152,50 @@ def test_inert_cloud_mask_sharpness_rejects_non_default(fx):
     assert bool(jnp.all(jnp.isfinite(f(SBMConfig(cloud_mask_sharpness=jnp.asarray(5.0))).dT_dt)))
 
 
-def test_column_the_oracle_rejects_is_nan():
-    """Isca stops with FATAL 'get_lcl_temp: value to low' on a parcel whose LCL
-    lies below the lookup table (here q = 1e-12 at 250 K; the oracle binary
-    was run on this column, 2026-10-19); the port returns NaN for that column
-    instead of a value, and leaves the other column alone."""
+def _dry_parcel_columns(q_surface):
     nlev = 12
     sh = jnp.linspace(0.0, 1.0, nlev + 1)
     ph = jnp.stack([sh * 1.0e5] * 2)
     pf = 0.5 * (ph[:, 1:] + ph[:, :-1])
     T = jnp.full((2, nlev), 250.0)
-    q = jnp.stack([jnp.full(nlev, 1.0e-12), jnp.zeros(nlev)])
+    q = jnp.stack([jnp.full(nlev, q_surface), jnp.zeros(nlev)])
+    return T, q, pf, ph
+
+
+def test_parcel_below_the_lcl_table_does_not_convect():
+    """KNOWN DIFFERENCE: Isca stops with FATAL 'get_lcl_temp: value to low' on
+    a parcel whose LCL lies below the lookup table (here q = 1e-12 at 250 K;
+    the oracle binary was run on this column, 2026-10-19).  The port treats
+    that parcel as one with no vapour: no convection, finite output."""
+    T, q, pf, ph = _dry_parcel_columns(1.0e-12)
     out = sbm_convection(T, q, pf, ph, 1800.0, SBMConfig())
-    assert bool(jnp.all(jnp.isnan(out.dT_dt[0])))
-    assert bool(jnp.all(out.dT_dt[1] == 0.0))
+    for f in (out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt, out.cape):
+        assert bool(jnp.all(f == 0.0)), f
+
+
+def test_parcel_just_inside_the_lcl_table_does_not_convect_either():
+    """The no-convection switch at the table edge is continuous: a parcel 1 %
+    moister than the edge is evaluated (not skipped) and convects nowhere."""
+    from legoesm.atmosphere.physics.convection.sbm import _lcl_temp_table
+    val_min = float(_lcl_temp_table()[0])
+    T, q, pf, ph = _dry_parcel_columns(0.0)
+    kap, pref = constants.kappa, constants.p_ref
+    theta0 = 250.0 * (pref / float(pf[0, -1])) ** kap
+    x = np.exp(val_min) * theta0 ** (1.0 / kap) / pref      # r / (eps + r)
+    r_edge = x * (constants.R_d / constants.R_v) / (1.0 - x)
+    q_in = 1.01 * r_edge / (1.0 + 1.01 * r_edge)
+    out = sbm_convection(T, q.at[0].set(q_in), pf, ph, 1800.0, SBMConfig())
+    for f in (out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt, out.cape):
+        assert bool(jnp.all(f == 0.0)), f
+
+
+def test_gradient_finite_through_a_below_table_parcel():
+    T, q, pf, ph = _dry_parcel_columns(1.0e-12)
+
+    def loss(T_):
+        o = sbm_convection(T_, q, pf, ph, 1800.0, SBMConfig())
+        return jnp.sum(o.dT_dt) + jnp.sum(o.dq_c_conv_dt)
+    assert bool(jnp.all(jnp.isfinite(jax.grad(loss)(T))))
 
 
 # KNOWN DIFFERENCE (user decided 2026-10-28: keep the default
