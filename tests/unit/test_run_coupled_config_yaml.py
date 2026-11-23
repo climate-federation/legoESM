@@ -54,7 +54,8 @@ def test_configs_carry_the_tuned_parameters():
     # the slab deck overrides the base's 3e-4 floor: CLUBB's liquid partition
     # requires 0 (user 2026-11-22, production turbulence copied)
     assert slab["cloud_q_c_diagnostic"] == 0.0
-    assert slab["convective_cloud"] is True
+    # production's clouds (cam6_clubb refuses the convective cloud source)
+    assert slab["convective_cloud"] is False
     assert slab["snow_albedo_feedback"] is True
     assert slab["ocean"] == "two_layer"                  # slab's own
 
@@ -301,6 +302,18 @@ def test_slab_deck_runs_the_atmosphere_owned_column_lane():
     # land model's solved surface fluxes)
     assert slab["turbulence"] == "clubb" and slab["clubb_prognostic"] is True
     assert slab["clubb_liquid_partition"] is True
+    # the lat-lon AMIP production clouds, verbatim
+    prod = load_yaml_config(
+        str(REPO / "config" / "amip" / "amip_production.yaml"), parser)
+    cloud_rows = ("clouds", "use_clubb_cloud_fraction", "convective_cloud",
+                  "cloud_saturation_scheme", "cloud_cam6_rhmini",
+                  "cloud_cam6_rhmaxi", "cloud_cam6_rhminis",
+                  "cloud_cam6_rhmaxis", "cloud_partial_coverage_optics",
+                  "cloud_optics_inhomogeneity", "cloud_inhomogeneity_factor",
+                  "cloud_fsd", "cloud_vertical_overlap_optics",
+                  "cloud_n_subcolumns")
+    assert {r: slab[r] for r in cloud_rows} == {r: prod[r] for r in cloud_rows}
+    assert slab["clouds"] == "cam6_clubb"
     assert (slab["physics_update_steps"], slab["rad_update_steps"],
             slab["cld_macmic_num_steps"]) == (6, 12, 3)
     d3 = load_yaml_config(str(CMIP_CONFIGS[1]), parser)
