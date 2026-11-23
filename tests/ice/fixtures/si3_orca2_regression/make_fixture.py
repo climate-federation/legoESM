@@ -30,6 +30,7 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants  # noqa: E402
+from legoesm.core.nemo_namelist import overlay, parse_namelist  # noqa: E402
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy  # noqa: E402
 from legoesm.ice import sea_ice as sea_ice_module  # noqa: E402
 from legoesm.ice.config import build_si3_orca2_o2_config  # noqa: E402
@@ -52,7 +53,13 @@ from legoesm.ice.si3_finalize import (  # noqa: E402
     si3_o15_step,
     si3_o16_step,
 )
-from legoesm.ice.si3_o17 import si3_icethd_tail  # noqa: E402
+from legoesm.ice.si3_o17 import (  # noqa: E402
+    SI3O17LiveForcing,
+    SI3O17StepState,
+    SI3O17SurfaceForcing,
+    build_orca2_sas_ice_o17_card,
+    si3_icethd_tail,
+)
 from legoesm.ice.si3_orca2_state import (  # noqa: E402
     SI3ORCA2AdvectionGrid,
     SI3ORCA2StateConfig,
@@ -120,6 +127,34 @@ def surface_config() -> SI3SurfaceConfig:
         NAMELISTS / "namelist_ice_ref",
         NAMELISTS / "namelist_ice_cfg",
     )
+
+
+def thermo_namelist() -> dict:
+    """Flatten the committed ORCA2_SAS_ICE thermodynamic deck."""
+
+    values = overlay(
+        parse_namelist(NAMELISTS / "namelist_ice_ref", "ice"),
+        parse_namelist(NAMELISTS / "namelist_ice_cfg", "ice"),
+    )
+    out = {
+        key: tokens[0]
+        for (_, _, key), tokens in values.items()
+        if len(tokens) == 1
+    }
+    out.update(
+        {
+            key: int(value)
+            for key, value in out.items()
+            if key.startswith(("nn_", "jpl", "nlay"))
+            and float(value).is_integer()
+        }
+    )
+    for model_name in (
+        "ln_icedA", "ln_icedH", "ln_cndi_P07", "ln_pnd_LEV",
+        "ln_pnd_CST", "ln_pnd_TOPO", "rn_alpha_RJW", "rn_Rc_RJW",
+    ):
+        out[model_name] = out.pop(model_name.lower())
+    return out
 
 
 def aevp_config(n_subcycles: int) -> SI3CGridAEVPConfig:
@@ -332,6 +367,119 @@ def _grid(d) -> SI3ORCA2AdvectionGrid:
         e1u=j["e1u"], e2v=j["e2v"], e2u=j["e2u"], e1v=j["e1v"], e1e2t=j["e1t"] * j["e2t"],
         tmask=j["tmask"], umask=j["umask"], vmask=j["vmask"],
     )
+
+
+def build_o17_case(kt=1):
+    """Build a deterministic, self-contained full-O17 numerical case."""
+
+    rng = np.random.default_rng(SEED)
+    base = build_inputs(rng)
+    surface_cfg = surface_config()
+    card = build_orca2_sas_ice_o17_card(
+        surface=surface_cfg,
+        thermo_namelist=thermo_namelist(),
+        ln_teos10=True,
+    )
+    state = base_state(base, card.state)
+    j = {name: jnp.asarray(value) for name, value in base.items()}
+    full_shape = (JPI, JPJ)
+    owned_shape = (JPI - 2 * NN_HLS, JPJ - 2 * NN_HLS)
+    full_zero = jnp.zeros(full_shape, dtype=jnp.float64)
+
+    metrics = SI3CGridMetrics(
+        e1t=j["e1t"], e2t=j["e2t"], e1u=j["e1u"], e2u=j["e2u"],
+        e1v=j["e1v"], e2v=j["e2v"], e1f=j["e1f"], e2f=j["e2f"],
+        area_t=j["e1t"] * j["e2t"], area_u=j["e1u"] * j["e2u"],
+        area_v=j["e1v"] * j["e2v"], area_f=j["e1f"] * j["e2f"],
+    )
+    aevp_forcing = SI3CGridAEVPForcing(
+        concentration_t=state.aggregated.at_i,
+        ice_volume_t=state.aggregated.vt_i,
+        snow_volume_t=state.aggregated.vt_s,
+        pond_volume_t=state.aggregated.vt_ip,
+        lid_volume_t=state.aggregated.vt_il,
+        air_stress_u_t=j["air_u_t"],
+        air_stress_v_t=j["air_v_t"],
+        drag_io_t=jnp.full(full_shape, RN_CD_IO),
+        ocean_u_u=j["ocean_u_u"],
+        ocean_v_v=j["ocean_v_v"],
+        ssh_t=None,
+        coriolis_t=j["coriolis_t"], tmask_t=j["tmask"],
+        umask_u=j["umask"], vmask_v=j["vmask"],
+        fast_tmask=full_zero,
+        depth_t=full_zero,
+        depth_u=full_zero,
+        depth_v=full_zero,
+        iceberg_tmask=full_zero,
+        iceberg_umask=full_zero,
+        iceberg_vmask=full_zero,
+    )
+    aevp_state = SI3CGridAEVPState(
+        u_ice_u=j["u_ice_entry"],
+        v_ice_v=j["v_ice_entry"],
+        stress1_t=j["stress1_t"],
+        stress2_t=j["stress2_t"],
+        stress12_f=j["stress12_f"],
+    )
+
+    def owned(value):
+        return jnp.full(owned_shape, value, dtype=jnp.float64)
+
+    surface = SI3O17SurfaceForcing(
+        wndi=owned(5.0),
+        wndj=owned(-2.0),
+        theta_air_zt=owned(260.0),
+        q_air_zt=owned(1.0e-3),
+        slp=owned(1.0e5),
+        rhoa=owned(1.3),
+        cloud_fra=owned(0.5),
+        smask0=_owned(j["tmask"]),
+        qlw=owned(250.0),
+        precip=owned(1.0e-5),
+        snow=owned(5.0e-6),
+        qsr=owned(170.0),
+        emp=owned(0.0),
+        qns_oce=owned(-70.0),
+        qsr_oce=owned(150.0),
+        ssu_m=j["ocean_u_u"],
+        ssv_m=j["ocean_v_v"],
+        utau=owned(0.0),
+        vtau=owned(0.0),
+        frq_m=owned(0.58),
+        e3t_m=owned(10.0),
+    )
+    stress = SI3StressInputs(
+        uu_kbb=j["str_uu_kbb"],
+        vv_kbb=j["str_vv_kbb"],
+        umask_k1=j["umask"],
+        vmask_k1=j["vmask"],
+        u_ice=j["str_u_ice"],
+        v_ice=j["str_v_ice"],
+        u_oce=j["str_u_oce"],
+        v_oce=j["str_v_oce"],
+        drag_io=jnp.full(full_shape, RN_CD_IO),
+        at_i=state.aggregated.at_i,
+        utau=j["str_utau"],
+        vtau=j["str_vtau"],
+        tmod_io=j["str_tmod_io"],
+        taum=j["str_taum"],
+        utau_oce=j["str_utau_oce"],
+        vtau_oce=j["str_vtau_oce"],
+        tmask_k1=j["tmask"],
+    )
+    forcing = SI3O17LiveForcing(
+        kt=kt,
+        sss_m=j["sss_m"],
+        sst_m=j["sst_m"],
+        rn_amax_2d=j["rn_amax_2d"],
+        advection_grid=_grid(base),
+        aevp_forcing=aevp_forcing,
+        aevp_metrics=metrics,
+        ssh_m=j["ssh_m"],
+        surface=surface,
+        stress=stress,
+    )
+    return SI3O17StepState(state, aevp_state), forcing, card
 
 
 def rung_lbc(d):

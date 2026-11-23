@@ -1,17 +1,16 @@
 """Self-contained contract and dispatch tests for the O17 full SI3 step (``si3_o17``).
 
-The O17 numerical tests (full step against NEMO records, compiled and eager) live on
-the SI3 fidelity lane with the records they need.  These tests need only model code
-and the NEMO reference namelists shipped under ``tests/ice/unit/data``: they pin the
-frozen ORCA2_SAS_ICE card, the explicit O17 config, and how ``step_sea_ice`` reaches
-the step.
+The full numerical-body regression lives in ``test_si3_orca2_regression_pin``.
+These tests need only model code and the NEMO reference namelists shipped under
+``tests/ice/unit/data``: they pin the frozen ORCA2_SAS_ICE card, the explicit O17
+config, and how ``step_sea_ice`` reaches the step.
 """
 
 from pathlib import Path
 
 import jax.numpy as jnp
 import pytest
-from legoesm.ice import sea_ice
+from legoesm.ice import sea_ice, si3_o17 as si3_o17_module
 from legoesm.ice.config import (
     SI3_HARD_SWITCHES,
     SeaIceConfig,
@@ -24,9 +23,15 @@ from legoesm.ice.si3_o17 import (
     SI3O17LiveForcing,
     SI3O17StepState,
     build_orca2_sas_ice_o17_card,
+    si3_teos10_from_resolved_namelist,
     si3_o17_step,
 )
-from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig, SI3State
+from legoesm.ice.si3_orca2_state import (
+    SI3O2InitConfig,
+    SI3ORCA2StateConfig,
+    SI3State,
+    si3_eos_fzp,
+)
 from legoesm.ice.si3_surface import SI3SurfaceConfig
 
 EXPREF = Path(__file__).parent / "data" / "orca2_sas_ice_expref"
@@ -44,6 +49,7 @@ def _card(surface=None) -> SI3O17Card:
     return build_orca2_sas_ice_o17_card(
         surface=_surface(SI3_HARD_SWITCHES) if surface is None else surface,
         thermo_namelist={"ln_icedA": True},
+        ln_teos10=True,
     )
 
 
@@ -76,9 +82,48 @@ def test_card_freezes_the_orca2_sas_ice_deck_and_keeps_the_callers_surface() -> 
 
 def test_card_builder_refuses_untyped_inputs() -> None:
     with pytest.raises(TypeError, match="resolved SI3SurfaceConfig"):
-        build_orca2_sas_ice_o17_card(surface=object(), thermo_namelist={})
+        build_orca2_sas_ice_o17_card(
+            surface=object(), thermo_namelist={}, ln_teos10=True
+        )
     with pytest.raises(TypeError, match="thermodynamic namelist"):
-        build_orca2_sas_ice_o17_card(surface=_surface(), thermo_namelist=None)
+        build_orca2_sas_ice_o17_card(
+            surface=_surface(), thermo_namelist=None, ln_teos10=True
+        )
+    with pytest.raises(TypeError, match="resolved EOS selector"):
+        build_orca2_sas_ice_o17_card(
+            surface=_surface(), thermo_namelist={}, ln_teos10=None
+        )
+
+
+@pytest.mark.parametrize(
+    ("teos10", "eos80", "expected"),
+    ((True, False, True), (False, True, False)),
+)
+def test_card_eos_selector_comes_from_resolved_nameos(
+    tmp_path, teos10, eos80, expected
+) -> None:
+    path = tmp_path / "output.namelist.dyn"
+    path.write_text(
+        f"&nameos\n ln_teos10={'.true.' if teos10 else '.false.'},\n"
+        f" ln_eos80={'.true.' if eos80 else '.false.'},\n ln_seos=.false.\n/\n"
+    )
+    assert si3_teos10_from_resolved_namelist(path) is expected
+
+
+@pytest.mark.parametrize("selector", (None, "false", 0, 1, jnp.bool_(True)))
+def test_eos_fzp_refuses_every_non_python_bool(selector) -> None:
+    with pytest.raises(TypeError, match="static bool"):
+        si3_eos_fzp(jnp.full((2, 2), 35.0), ln_teos10=selector)
+
+
+def test_o2_eos_default_and_its_factory_callers_remain_explicitly_pinned() -> None:
+    assert SI3O2InitConfig._field_defaults["ln_teos10"] is True
+    assert SI3O2InitConfig.for_orca2_sas_ice().ln_teos10 is True
+    assert SI3O2InitConfig.for_orca2_omip_l4().ln_teos10 is False
+
+
+def test_resolved_eos_helper_is_publicly_exported() -> None:
+    assert "si3_teos10_from_resolved_namelist" in si3_o17_module.__all__
 
 
 def test_o17_config_is_explicit_and_reports_the_cards_switches() -> None:
@@ -108,6 +153,10 @@ def test_o17_step_refuses_a_card_outside_its_contract_before_computing() -> None
         off = card._replace(state=card.state._replace(**{field: False}))
         with pytest.raises(ValueError, match="explicit live dynamics"):
             si3_o17_step(entry, forcing, off)
+    with pytest.raises(ValueError, match="nn_fsbc=1"):
+        si3_o17_step(entry, forcing, card._replace(state=card.state._replace(nn_fsbc=2)))
+    with pytest.raises(TypeError, match="static Python integer"):
+        si3_o17_step(entry, forcing, card._replace(state=card.state._replace(nn_fsbc=True)))
 
 
 def test_step_sea_ice_dispatches_live_forcing_to_the_o17_step(monkeypatch) -> None:
