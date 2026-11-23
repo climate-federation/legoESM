@@ -1370,6 +1370,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             # tolerate) would crash on the unfiltered transport.
             # Codex review of Stage 3-E BLOCK #1 + #2 caught this.
             if polar_mask is not None:
+                dps_raw = dps
                 dT = fourier_filter_3d(dT, grid, polar_mask)
                 dps = fourier_filter(dps, grid, polar_mask)
 
@@ -1403,9 +1404,24 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 # applies directly.  Without this loop, the lifted
                 # equatorial-CFL dt would race the (un-filtered)
                 # polar tracer advection past its CFL.
+                # Filtered as layer-MASS tendencies, dp*dq + q*dB*dps, and
+                # rebuilt with the filtered dps: the filter keeps each row's
+                # zonal sum, so the tracer mass sum(q dp) is conserved;
+                # filtering dq and dps separately keeps neither weighted sum.
                 if dq:
+                    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+                        dp_t = dp_from_hybrid(sigma_coord, s.p_s)
+                        dB = sigma_coord.dB
+                    else:
+                        dB = sigma_coord.dsigma
+                        dp_t = s.p_s[..., jnp.newaxis] * dB
                     dq = {
-                        name: fourier_filter_3d(dq_field, grid, polar_mask)
+                        name: (fourier_filter_3d(
+                            dp_t * dq_field
+                            + s.tracers[name] * dB * dps_raw[..., jnp.newaxis],
+                            grid, polar_mask)
+                            - s.tracers[name] * dB * dps[..., jnp.newaxis]
+                        ) / dp_t
                         for name, dq_field in dq.items()
                     }
 
