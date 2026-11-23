@@ -339,3 +339,44 @@ def test_first_nonfinite_names_the_leaf_and_skips_the_canopy_cache():
     assert hit["first_idx"] == [[0, 1], [1, 0]]
     tree["zatm"]["u"] = np.zeros((2, 2))
     assert probe.first_nonfinite(tree, "entering") is None
+
+
+def test_stage_flags_need_the_trap():
+    with pytest.raises(SystemExit):
+        probe.main(["--nan-stages"])
+    with pytest.raises(SystemExit):
+        probe.main(["--nan-trap", "--replay-copy-col", "1", "0"])
+
+
+@pytest.mark.slow
+def test_nan_trap_names_a_planted_stage_and_saves_the_origin(
+        tmp_path, capsys, monkeypatch):
+    """A NaN planted in the dynamics tendency is caught at step 1 in that
+    stage from finite inputs; the entering state is saved finite and every
+    patch the trap installed is removed."""
+    import json
+    import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as llm
+    real = llm.cgrid_latlon_pe_tendencies
+
+    def planted(*a, **kw):
+        du, *rest = real(*a, **kw)
+        return (du * float("nan"), *rest)
+    monkeypatch.setattr(llm, "cgrid_latlon_pe_tendencies", planted)
+    out = tmp_path / "trap.json"
+    with pytest.raises(SystemExit) as e:
+        probe.main(["--grid", "latlon", "--resolution", "12", "--dt", "600",
+                    "--vertical-coord", "cam_l32", "--nlev", "32",
+                    "--days", "0.0625", "--nan-trap", "--nan-stages",
+                    "--json", str(out)])
+    assert e.value.code == 2
+    hit = json.loads(next(ln[len("NANTRAP "):] for ln in capsys.readouterr()
+                          .out.splitlines() if ln.startswith("NANTRAP ")))
+    assert hit["step"] == 1 and hit["where"] == "step_output"
+    assert hit["stages"]["first_stage"] == "cgrid_latlon_pe_tendencies"
+    origin = np.load(out.with_suffix(".nantrap_origin.npz"))
+    assert origin.files and all(np.all(np.isfinite(origin[k]))
+                                for k in origin.files
+                                if origin[k].dtype.kind == "f"
+                                and "canopy_x" not in k)
+    assert llm.cgrid_latlon_pe_tendencies is planted
+    assert llm.fourier_filter_3d.__module__ != probe.__name__

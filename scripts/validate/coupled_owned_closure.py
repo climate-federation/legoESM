@@ -272,6 +272,10 @@ def main(argv=None) -> int:
     args, deck_argv = ap.parse_known_args(argv)
     if args.windows and not args.deck:
         ap.error("--windows needs --deck")
+    if (args.nan_stages or args.replay_copy_col) and not args.nan_trap:
+        ap.error("--nan-stages / --replay-copy-col need --nan-trap")
+    if args.replay_copy_col and not args.nan_stages:
+        ap.error("--replay-copy-col needs --nan-stages")
     if deck_argv and not args.deck:
         ap.error(f"unrecognized arguments: {' '.join(deck_argv)}")
     if args.deck and args.energy_terms:
@@ -848,6 +852,7 @@ def main(argv=None) -> int:
                     keep[jax.tree_util.keystr(pth)] = x
             np.savez(str(Path(args.json).with_suffix(".nantrap_origin.npz")),
                      **keep)
+        mp.undo()
         raise SystemExit(2)
 
     def step(*a, **kw):
