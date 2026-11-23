@@ -2119,9 +2119,7 @@ def upwind_vertical_gradient(
 
     # Pad along trailing axis instead of allocating a fresh ``zeros``
     # buffer + concatenate.  Single Pad HLO op each.  This helper
-    # fires once per scan step inside ``vertical_advection_ocean`` for
-    # u, v, T, S, and every tracer — so 4-6 zero-broadcast concats
-    # per RHS evaluation in the hot loop.
+    # is used by ``advective_vertical_momentum_ocean`` for u and v.
     pad_axes = ((0, 0),) * (df.ndim - 1)
     # Upward flow (w>0): donor is deeper cell -> (f[k] - f[k+1]) / dz.
     grad_up = jnp.pad(df, (*pad_axes, (0, 1)))
@@ -2218,6 +2216,28 @@ def diagnose_w_from_flux_div(flux_div_k, z_coord=None,
 
 
 def vertical_advection_ocean(field, w_half, z_coord, jacobian):
+    """Continuity-paired upwind vertical tracer tendency on z-star layers.
+
+    Levels run surface to bottom; w is positive upward. The shared flux
+    helper closes surface/bottom faces and gates partial-cell rock faces.
+    With its upward flux divergence D, dh/dt = -D(1) = diff(w) on wet
+    closed columns, and h*dq/dt + q*dh/dt = -D(q) telescopes exactly.
+    This is the vertical split only, not a full-model transport budget.
+    Pairing assumes healthy layer thickness above the existing 1e-10 floor.
+    """
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        h_ref = z_coord.h_partial
+        active = z_coord.is_active
+    else:
+        h_ref = z_coord.dz_ref
+        active = None
+    h = h_ref * jacobian[..., jnp.newaxis]
+    tracer_div = flux_form_vertical_tracer_advection(field, w_half, active)
+    volume_div = flux_form_vertical_tracer_advection(jnp.ones_like(field), w_half, active)
+    return (-tracer_div + field * volume_div) / jnp.maximum(h, 1.0e-10)
+
+
+def advective_vertical_momentum_ocean(field, w_half, z_coord, jacobian):
     """Vertical advection ``-w * d(field)/dz`` with upwind scheme.
 
     Parameters
@@ -2271,7 +2291,7 @@ def flux_form_vertical_momentum_advection(
     2. Rigid-lid boundary by construction: ``F[0] = F[nlev] = 0``.
        No artificial momentum injection from the boundary via the
        "hard zero at k=0 and k=nlev-1" pathology that the old
-       ``vertical_advection_ocean`` cell-upwind gradient has.
+       ``advective_vertical_momentum_ocean`` cell-upwind gradient has.
     3. Column momentum flux identity: for any ``w_half`` with
        ``w_half[0] = w_half[nlev] = 0`` (closed column), the sum of
        ``(tendency * h_u)`` over the column is exactly zero.

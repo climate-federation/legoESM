@@ -850,6 +850,12 @@ class TurbulenceConfig(NamedTuple):
     # not the pre-physics one CAM6 holds.  Off (default): wm = 0.
     # Selected by ExperimentConfig.clubb_host_omega.
     host_omega: bool = False
+    # appended last.  CAM7 CLUBB-MF (turbulence/clubb_mf.py): stochastic
+    # plume ensemble whose mass-flux convergence of thl and qt is prognostic
+    # CLUBB's explicit forcing (reduced setting, fixed L0 = 200 m, CAM's KISS
+    # draws).  False (default) leaves every path unchanged.  Selected by
+    # ExperimentConfig.clubb_mf.
+    clubb_mf: bool = False
 
 
 CLUBB_LITE_STANDIN_NOTE = (

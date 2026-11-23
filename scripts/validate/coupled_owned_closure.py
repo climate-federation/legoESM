@@ -61,6 +61,28 @@ from pathlib import Path
 import numpy as np
 
 STORES = ("W_atm", "W_land", "W_ice", "H_slab")
+# Water rows pass at |residual| <= this fraction of the run's precipitation.
+# fp32 rounding alone leaves ~3e-4 (atm), so the bar is 1e-3 (vote
+# 2026-11-23: author 1e-3, GLM 1e-3, codex 5e-4).  The exit code follows it
+# only under --require-water-bar.
+WATER_BAR_REL = 1.0e-3
+
+
+def water_bar_failures(rel: dict) -> list:
+    """Water rows of ``rel`` (residual / precipitation) outside the bar;
+    a NaN row fails.  Pure."""
+    return [r for r, v in rel.items()
+            if r != "slab_heat" and not abs(v) <= WATER_BAR_REL]
+
+
+def water_bar_verdict(rel: dict, p_atm: float) -> list | None:
+    """Failing water rows, or None (N/A) when the run has exactly zero
+    precipitation to scale by; a non-finite precipitation fails.  Pure."""
+    if p_atm == 0.0:
+        return None
+    if not np.isfinite(p_atm):
+        return ["precipitation"]
+    return water_bar_failures(rel)
 
 
 def budget_rows(s0: dict, s1: dict, f: dict) -> dict:
@@ -221,6 +243,9 @@ def main(argv=None) -> int:
                     help="--nan-stages replay: overwrite column DST of every "
                     "per-column physics input with column SRC first (to look "
                     "past a known first NaN source)")
+    ap.add_argument("--require-water-bar", action="store_true",
+                    help="exit 1 when a water row misses the bar "
+                    "(WATER_BAR_REL of the run's precipitation)")
     ap.add_argument("--trace-positivity", action="store_true",
                     help="book the water the dycore's positivity stage (and "
                     "its vapour payment) changes, per call")
@@ -1072,10 +1097,14 @@ def main(argv=None) -> int:
     if args.trace_positivity:
         print("POSITIVITY", {kk: f"{v:.6e}" for kk, v in pos_rec.items()})
     print("INJECT rel_err", ctrl)
+    bad = water_bar_verdict(out["rel"], F["P_atm"])
+    print(f"BAR water |rel| <= {WATER_BAR_REL:g}:",
+          "N/A (no precipitation)" if bad is None
+          else ("PASS" if not bad else f"FAIL {bad}"))
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=1))
     mp.undo()
-    return 0
+    return 1 if bad and args.require_water_bar else 0
 
 
 if __name__ == "__main__":

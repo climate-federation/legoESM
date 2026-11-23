@@ -1362,6 +1362,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "the subsidence. MPAS lane. Requires --turbulence "
                              "clubb and --clubb-prognostic. Default off = wm 0, "
                              "the historical bridge (byte-identical).")
+    parser.add_argument("--clubb-mf", dest="clubb_mf",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM7 CLUBB-MF: a stochastic plume ensemble whose "
+                             "mass-flux convergence of thl and qt forces "
+                             "prognostic CLUBB (fixed L0 = 200 m, CAM's random "
+                             "draws). Requires --turbulence clubb and "
+                             "--clubb-prognostic. Default off = no mass flux.")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -3430,6 +3437,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_prognostic=args.clubb_prognostic,
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_host_omega=args.clubb_host_omega,
+        clubb_mf=args.clubb_mf,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
            for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS,
