@@ -901,9 +901,13 @@ def main(argv=None) -> int:
     if args.trace_positivity:
         print("POSITIVITY", {kk: f"{v:.6e}" for kk, v in pos_rec.items()})
     print("INJECT rel_err", ctrl)
-    bad = water_bar_failures(out["rel"])
-    print(f"BAR water |rel| <= {WATER_BAR_REL:g}:",
-          "PASS" if not bad else f"FAIL {bad}")
+    if np.isfinite(scale_w):
+        bad = water_bar_failures(out["rel"])
+        print(f"BAR water |rel| <= {WATER_BAR_REL:g}:",
+              "PASS" if not bad else f"FAIL {bad}")
+    else:
+        bad = []
+        print("BAR water N/A: no precipitation to scale the rows by")
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=1))
     mp.undo()
