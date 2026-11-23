@@ -5851,6 +5851,7 @@ class ModelDriver:
             and bool(cfg.volcanic_aerosol_file)
         )
         self._aerosol_lw_od = None
+        self._aerosol_sw_volc = None
         self._o3_top_vmr = None
         self._aerosol_ccn_aod = None
         self._aerosol_config = AerosolConfig(
@@ -6158,7 +6159,8 @@ class ModelDriver:
         # (tracer_data.F90 bilinear lon/lat lininterp).
         lon_col = (jnp.asarray(self._owned_lon() if lon is None else lon)
                    .reshape(ncol) if self._aerosol_active else None)
-        aerosol_od, _ccn_aod, self._aerosol_lw_od = aerosol_layer_fields(
+        (aerosol_od, _ccn_aod, self._aerosol_lw_od,
+         self._aerosol_sw_volc) = aerosol_layer_fields(
             self._aerosol_config, day, lat_col, p_half_col, w_strat,
             active=self._aerosol_active, lw_active=self._aerosol_lw_active,
             dtype=p_s.dtype, lon_col=lon_col)
@@ -16487,6 +16489,10 @@ class ModelDriver:
                         _aer_lw = getattr(self, "_aerosol_lw_od", None)
                         if self._aerosol_lw_active and _aer_lw is not None:
                             _forcing_daily["aerosol_lw_od"] = _aer_lw
+                        # Volcanic SW with its own per-band optics (None =>
+                        # absent; the volcanic SW is then in aerosol_od).
+                        if getattr(self, "_aerosol_sw_volc", None) is not None:
+                            _forcing_daily["aerosol_sw_volc"] = self._aerosol_sw_volc
                         # Tropospheric visible-band CCN AOD (absent => sum(aerosol_od)).
                         if getattr(self, "_aerosol_ccn_aod", None) is not None:
                             _forcing_daily["aerosol_ccn_aod"] = self._aerosol_ccn_aod
@@ -18471,6 +18477,8 @@ class ModelDriver:
                         _aer_lw = getattr(self, "_aerosol_lw_od", None)
                         if self._aerosol_lw_active and _aer_lw is not None:
                             _ext_daily["aerosol_lw_od"] = _aer_lw
+                        if getattr(self, "_aerosol_sw_volc", None) is not None:
+                            _ext_daily["aerosol_sw_volc"] = self._aerosol_sw_volc
                         # Tropospheric visible-band CCN AOD (absent => sum(aerosol_od)).
                         if getattr(self, "_aerosol_ccn_aod", None) is not None:
                             _ext_daily["aerosol_ccn_aod"] = self._aerosol_ccn_aod
@@ -19444,6 +19452,7 @@ class ModelDriver:
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                aerosol_sw_volc=getattr(self, "_aerosol_sw_volc", None),
                 aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
                 o3_top_vmr=getattr(self, "_o3_top_vmr", None),
                 ghg_vmr=ghg_vmr,
@@ -20283,6 +20292,7 @@ class ModelDriver:
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
             o3_top_vmr=getattr(self, "_o3_top_vmr", None),
+            aerosol_sw_volc=getattr(self, "_aerosol_sw_volc", None),
             ghg_vmr=ctx["ghg_vmr"],
             # NOTE: transient cover is deliberately NOT injected here.  The training
             # segment returns run_segment.raw (un-jitted), so the land calibration
@@ -20659,6 +20669,7 @@ class ModelDriver:
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                aerosol_sw_volc=getattr(self, "_aerosol_sw_volc", None),
                 aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
                 o3_top_vmr=getattr(self, "_o3_top_vmr", None),
                 ghg_vmr=ghg_vmr,
@@ -21548,6 +21559,7 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                aerosol_sw_volc=getattr(self, "_aerosol_sw_volc", None),
                 aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
                 o3_top_vmr=getattr(self, "_o3_top_vmr", None),
                 land_ml=(self._land_ml_state
@@ -21693,6 +21705,7 @@ class ModelDriver:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
                     aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                    aerosol_sw_volc=getattr(self, "_aerosol_sw_volc", None),
                     aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
                     o3_top_vmr=getattr(self, "_o3_top_vmr", None),
                     land_ml=(self._land_ml_state
