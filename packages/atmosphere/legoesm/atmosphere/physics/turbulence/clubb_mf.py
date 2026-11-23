@@ -78,13 +78,31 @@ __physics_contract__ = {
         "Ascending CLUBB grid; fluxes positive upward on momentum levels, zero "
         "at the surface and model top; forcing = -(1/rho_ds_zt) d(rho_ds_zm F)/dz."
     ),
-    "conserves": ["column-integrated thl and qt (flux form, zero boundary fluxes)"],
+    "conserves": ["moisture", "energy"],  # flux form, zero boundary fluxes: column thl and qt
     "differentiable": True,
     "reference": (
         "Suselj et al. (2019), J. Atmos. Sci. 76, 2373-2395; CAM "
         "atmos_phys0_34_002 schemes/clubb/clubb_mf.F90 and clubb.F90"
     ),
     "idealized_test": "tests/atmosphere/hydrostatic/unit/test_clubb_mf_oracle.py",
+}
+
+__param_spec__ = {
+    "MFSmoothing": {
+        "scheme_key": "atm.turb.MFSmoothing",
+        "params": {},
+        "excluded": {
+            "alive": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
+            "qc": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
+            "trig_wthv": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
+            "trig_wqt": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
+            "trig_lts": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
+            "wstar": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
+            "convh": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
+            "kspan": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
+            "conv": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
+        },
+    },
 }
 
 # --- clubb_mf.F90 integrate_mf PARAMETERs and cam7 namelist defaults ---
@@ -117,7 +135,11 @@ _H_A = (-0.059, 0.02483)
 _H_VR = (0.9277, 3.6224)
 _H_AI = (1.1239, 1.1328)
 _H_SHIFT, _H_US_OK, _H_US_BAD = 0.43, 0.07, 0.013
-_STIRLING_K, _STIRLING_C = 10, 360.0
+_H_B_POLE = 3.4  # alphinv = 1.1239 + 1.1328/(b - 3.4)
+_STIRLING_K, _STIRLING_C, _STIRLING_A = 10, 360.0, 12.0
+_KISS_SHIFTS = (13, 17, 5, 16)  # kissvec.c xorshift and MWC shifts
+# --- clubb.F90 host LTS (mf_pinterp targets) ---
+P_LTS_TOP, P_LTS_BOT = 70000.0, 100000.0  # [Pa]
 
 
 class MFSmoothing(NamedTuple):
@@ -314,12 +336,13 @@ def _kiss_next(seeds):
     """One ``kiss_rng`` step (uint32 wrap-around, as the C source)."""
     s1, s2, s3, s4 = seeds
     s1 = s1 * _u32(_KISS_LCG_A) + _u32(_KISS_LCG_C)
-    s2 = s2 ^ (s2 << _u32(13))
-    s2 = s2 ^ (s2 >> _u32(17))
-    s2 = s2 ^ (s2 << _u32(5))
-    s3 = _u32(_KISS_MWC3) * (s3 & _u32(_KISS_LOW16)) + (s3 >> _u32(16))
-    s4 = _u32(_KISS_MWC4) * (s4 & _u32(_KISS_LOW16)) + (s4 >> _u32(16))
-    r = jax.lax.bitcast_convert_type(s1 + s2 + (s3 << _u32(16)) + s4, jnp.int32)
+    a, b, c, h = (_u32(x) for x in _KISS_SHIFTS)
+    s2 = s2 ^ (s2 << a)
+    s2 = s2 ^ (s2 >> b)
+    s2 = s2 ^ (s2 << c)
+    s3 = _u32(_KISS_MWC3) * (s3 & _u32(_KISS_LOW16)) + (s3 >> h)
+    s4 = _u32(_KISS_MWC4) * (s4 & _u32(_KISS_LOW16)) + (s4 >> h)
+    r = jax.lax.bitcast_convert_type(s1 + s2 + (s3 << h) + s4, jnp.int32)
     return (s1, s2, s3, s4), r.astype(jnp.float64) * _KISS_SCALE + 0.5
 
 
@@ -357,7 +380,7 @@ def _loggam(k):
 
     def big(_):
         return (jnp.log(jnp.sqrt(2.0 * math.pi)) + (kf + 0.5) * jnp.log(1.0 * kf) - kf
-                + (1.0 / 12.0 - 1.0 / (_STIRLING_C * kf * kf)) / kf)
+                + (1.0 / _STIRLING_A - 1.0 / (_STIRLING_C * kf * kf)) / kf)
 
     return jax.lax.cond(k < _STIRLING_K, small, big, None)
 
@@ -366,7 +389,7 @@ def _hormann(seeds, lam):
     b = _H_B[0] + _H_B[1] * jnp.sqrt(lam)
     a = _H_A[0] + _H_A[1] * b
     vr = _H_VR[0] - _H_VR[1] / (b - 2.0)
-    alphinv = _H_AI[0] + _H_AI[1] / (b - 3.4)
+    alphinv = _H_AI[0] + _H_AI[1] / (b - _H_B_POLE)
 
     def body(c):
         sd, _, _ = c
@@ -410,7 +433,7 @@ def mf_lts(T, q_liq, p_full, p_sfc):
     (p_s/p)^kappa, ``mf_pinterp`` = linear in p, end values held (one
     column, top-down)."""
     thl = (T - constants.L_v / constants.c_pd * q_liq) * (p_sfc / p_full) ** constants.kappa
-    return (jnp.interp(70000.0, p_full, thl) - jnp.interp(100000.0, p_full, thl))
+    return jnp.interp(P_LTS_TOP, p_full, thl) - jnp.interp(P_LTS_BOT, p_full, thl)
 
 
 def clubb_mf_forcing(c, dt, rho_ds_zm, invrs_rho_ds_zt, invrs_dzt,
