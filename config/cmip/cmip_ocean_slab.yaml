@@ -96,6 +96,53 @@ clubb_gamma_coefb: 0.32
 clubb_beta: 2.4
 clubb_c_k10: 0.5
 
+# ---- clouds: verbatim from config/amip/amip_production.yaml (its cloud-
+# fraction rows, the convective_cloud row cam6_clubb requires, and its cloud-
+# optics rows), replacing the base's Sundqvist (user 2026-11-23).  Not
+# copied: production's microphysics rows ----
+# Saturation curve the cloud-cover diagnosis measures RH against.  NAMED, not
+# inherited: the code default is "mixed_phase" and that is the value this deck
+# wants, but the default moved on 2026-09-17 and a default is not a record.
+# The preserved pre-CAM6 deck pins "liquid" for the same reason.
+cloud_saturation_scheme: mixed_phase
+clouds: cam6_clubb          # CAM6: liquid = CLUBB PDF fraction, ice = CAM aist,
+                            # deep-convective = clubb_intr deepcu from the
+                            # scheme's updraft mass flux + in-cloud condensate
+use_clubb_cloud_fraction: true   # routes the CLUBB cloud-fraction carry to
+                                 # radiation (required by cam6_clubb)
+cloud_cam6_rhmini: 0.80     # CAM6 aist ramp (cldfrc2m.F90:846-856), namelist
+cloud_cam6_rhmaxi: 1.0      # cldfrc2m_rhmini/rhmaxi/rhminis/rhmaxis under
+cloud_cam6_rhminis: 1.0     # clubb_sgs (namelist_defaults_cam.xml:1521-1533);
+cloud_cam6_rhmaxis: 1.0     # = the code defaults, now recorded (user 2026-09-30)
+convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
+cloud_partial_coverage_optics: none
+cloud_optics_inhomogeneity: constant  # CAM6: RRTMG applies NO in-cloud
+                                       # inhomogeneity factor (none anywhere
+                                       # in src/physics/rrtmg/).  "constant"
+                                       # with factor 1.0 is the no-thinning
+                                       # path (chi = 1, byte-identical).  Was
+                                       # two_region: on day-15 states it
+                                       # removed 52% of the liquid in run 1
+                                       # and 42% in run 3, so the water
+                                       # reaching radiation stayed ~14.5 g/m2
+                                       # across the liquid hand-off.  User
+                                       # decision 2026-09-25, for run 4.
+cloud_inhomogeneity_factor: 1.0        # the "constant" scheme's scalar: 1.0
+                                       # = homogeneous, no reduction.  Set
+                                       # explicitly so the no-thinning row
+                                       # rests on no default.
+cloud_fsd: 1.0                         # INERT under "constant" (consumed by
+                                       # two_region only); kept explicit so
+                                       # the old value is on record.
+cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
+                                     # g-point sees its own max-random cloud
+                                     # subcolumn in ONE solve (was max_random:
+                                     # 8 full solves, ~8.5x the radiation cost).
+                                     # Synthetic 512-column check vs a 64-subcolumn
+                                     # reference: bias within sampling noise,
+                                     # per-column scatter ~1.8x the 8-subcolumn one.
+cloud_n_subcolumns: 8                # read only by max_random; inert under mcica
+
 # ---- land: verbatim from config/amip/amip_production.yaml (its "land" block,
 # without the two surface-coupling rows ocean_flux_on_ocean_surface and
 # sea_ice_flux_split, which are not land setup) ----
