@@ -101,13 +101,14 @@ def main():
     arm = H._build_arms(args, [a.case], {a.case: Path(a.les_dir)})[0]
     cfg = H._arm_config("clubb", arm, args)
     if a.prod_liquid:
-        import functools
         import legoesm.atmosphere.forcing.scm.scm as _scm
         from legoesm.atmosphere.physics.microphysics.config import (
             apply_microphysics_experiment_flags)
         # SingleColumnModel exposes no macmic count; production runs 3.
-        _scm.make_physics = functools.partial(_scm.make_physics,
-                                              cld_macmic_num_steps=3)
+        # and only the MPAS lane routes CLUBB's liquid tendency.
+        _orig = _scm.make_physics
+        _scm.make_physics = lambda c, **kw: _orig(
+            c, **{**kw, "model_type": "mpas", "cld_macmic_num_steps": 3})
         cfg = cfg._replace(
             turbulence=cfg.turbulence._replace(liquid_partition=True),
             microphysics=cfg.microphysics._replace(
