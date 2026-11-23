@@ -2761,7 +2761,9 @@ class ExperimentConfig(NamedTuple):
                         "device: no MPI (distributed) and no ensemble axis")
                 # the column loop's MPAS q_v smoother is a Voronoi
                 # operator; the lat-lon lane's is latlon_qv_smooth_del4_m4s
-                if self.output.budget_ledger:
+                # the lat-lon column model publishes the physics' rows
+                if (self.output.budget_ledger
+                        and d.discretization != "latlon_cgrid"):
                     errors.append(
                         f"output.budget_ledger on the {d.discretization} "
                         "column lane: its dycore publishes no per-step ledger, "

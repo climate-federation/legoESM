@@ -541,7 +541,9 @@ def main(argv=None) -> int:
         he = (atm._land_window or {}).get("land_held_evap")
         if he is not None and he is not land_seen.get("held_obj"):
             land_seen["held_obj"] = he
-            land_seen["call_step"] = n_steps[0] + 1
+            # the land call runs after the dycore step, outside this
+            # hook: a call first seen in step n+1 was made at the end of n
+            land_seen["call_step"] = n_steps[0]
             F["E_land_debit"] += I(f_land * _np(he).reshape(-1)) * max(
                 1, int(round(cfg.land_update_seconds / DT))) * DT
         if args.trace_atm_steps:
