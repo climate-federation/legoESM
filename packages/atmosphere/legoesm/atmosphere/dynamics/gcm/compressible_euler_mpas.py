@@ -91,8 +91,13 @@ def mpas_compressible_euler_slow_tendencies(
     terrain_metric: TerrainMetric,
     config: MPASCompressibleEulerConfig,
     physics_tendency: MPASNonHydrostaticTendencies | None = None,
+    *, include_tracer_advection: bool = True, return_mass_flux: bool = False,
 ) -> MPASNonHydrostaticTendencies:
     """Compute slow (advective) tendencies for the MPAS compressible Euler equations.
+
+    Internal ``return_mass_flux=True`` returns ``(tendency, horizontal_flux)``
+    from the continuity assembly. ``include_tracer_advection=False`` leaves
+    existing tracer sources only; the full-step mass adapter replaces transport.
 
     These are evaluated once per RK3 stage and held constant during
     acoustic substeps.
@@ -321,7 +326,7 @@ def mpas_compressible_euler_slow_tendencies(
 
     # --- 5. Tracer advection ---
     n_tracers = tracers.shape[-1] if tracers.ndim > 1 else 0
-    if n_tracers > 0:
+    if n_tracers > 0 and include_tracer_advection:
         dtracers_dt = _tracer_tendencies(
             tracers, u_3d, w, dz, dz_half, J, mesh, c1, c2,
         )
@@ -344,7 +349,7 @@ def mpas_compressible_euler_slow_tendencies(
         drho_p_dt = drho_p_dt + physics_tendency.drho_prime_dt.data
         dtracers_dt = dtracers_dt + physics_tendency.dtracers_dt.data
 
-    return MPASNonHydrostaticTendencies(
+    result = MPASNonHydrostaticTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",
                     dims=("nEdges", "nlev"), units="m/s²"),
         dw_dt=Field(data=dw_dt, name="dw_dt",
@@ -358,6 +363,10 @@ def mpas_compressible_euler_slow_tendencies(
         dtracers_dt=Field(data=dtracers_dt, name="dtracers_dt",
                           dims=("nCells", "nlev", "tracer"), units="1/s"),
     )
+
+    if return_mass_flux:
+        return result, _div_inputs[..., 0]
+    return result
 
 
 def _vertical_advection_height_1d(field_3d, w, dz, dz_half, J):
@@ -451,8 +460,14 @@ def mpas_acoustic_substeps(
     height_coord: HeightCoordinate,
     terrain_metric: TerrainMetric,
     euler_config: MPASCompressibleEulerConfig,
+    *, return_mass_flux: bool = False,
 ) -> MPASNonHydrostaticState:
     """Forward-backward acoustic substeps on MPAS.
+
+    Internal ``return_mass_flux=True`` returns ``(state, integrated_fluxes)``
+    consumed by the full-step tracer-mass adapter after this acoustic loop.
+    These are the exact positive-up / native-horizontal continuity fluxes,
+    including existing off-centering; no tracer update occurs per substep.
 
     Each substep:
     1. Forward: update w using vertical Exner gradient + buoyancy
@@ -472,7 +487,7 @@ def mpas_acoustic_substeps(
     nlev = theta_p.shape[-1]
 
     def substep_body(i, carry):
-        w_c, theta_p_c, rho_p_c = carry
+        w_c, theta_p_c, rho_p_c, flux_sum = carry
 
         theta_total, rho_total = sanitize_theta_rho(
             theta_0 + theta_p_c, rho_0 + rho_p_c,
@@ -523,13 +538,13 @@ def mpas_acoustic_substeps(
 
         theta_p_new = theta_p_c - dt_s * w_full / J[:, None] * dtheta_dz
 
-        return (w_new, theta_p_new, rho_p_new)
+        return (w_new, theta_p_new, rho_p_new, flux_sum + dt_s * rho_w)
 
-    w_final, theta_p_final, rho_p_final = jax.lax.fori_loop(
-        0, n_substeps, substep_body, (w, theta_p, rho_p),
+    w_final, theta_p_final, rho_p_final, flux_sum = jax.lax.fori_loop(
+        0, n_substeps, substep_body, (w, theta_p, rho_p, jnp.zeros_like(w)),
     )
 
-    return MPASNonHydrostaticState(
+    result = MPASNonHydrostaticState(
         u=state.u,
         w=state.w.replace(data=w_final),
         theta_prime=state.theta_prime.replace(data=theta_p_final),
@@ -537,6 +552,10 @@ def mpas_acoustic_substeps(
         phis=state.phis,
         tracers=state.tracers,
     )
+
+    if return_mass_flux:
+        return result, flux_sum
+    return result
 
 
 # ============================================================================
@@ -641,6 +660,8 @@ class MPASCompressibleEulerModel(IntegrationMixin):
             outer_integrator=self.config.outer_integrator,
         )
 
+        paired = state.tracers.data.shape[-1] > 0
+
         def slow_tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -650,9 +671,12 @@ class MPASCompressibleEulerModel(IntegrationMixin):
                 phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
             tend = mpas_compressible_euler_slow_tendencies(
                 s, self.mesh, self.height_coord, self.terrain_metric,
-                self.config, phys,
+                self.config, phys, include_tracer_advection=not paired,
+                return_mass_flux=paired,
             )
-            return MPASNonHydrostaticState(
+            if paired:
+                tend, mass_flux = tend
+            result = MPASNonHydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),
                 w=s.w.replace(data=tend.dw_dt.data),
                 theta_prime=s.theta_prime.replace(data=tend.dtheta_prime_dt.data),
@@ -661,15 +685,52 @@ class MPASCompressibleEulerModel(IntegrationMixin):
                 tracers=s.tracers.replace(data=tend.dtracers_dt.data),
             )
 
+            if paired:
+                q = s.tracers.data
+                c1, c2 = self.mesh.cellsOnEdge
+                q_edge = 0.5 * (q[c1] + q[c2])
+                flux = mass_flux[..., None] * q_edge
+                nc, nz, nt = q.shape
+                horizontal = -divergence_cell_3d(
+                    flux.reshape(flux.shape[0], nz * nt), self.mesh,
+                ).reshape(nc, nz, nt) / self.terrain_metric.jacobian[:, None, None]
+                rho = self.height_coord.rho_ref + s.rho_prime.data
+                return result, horizontal + rho[..., None] * tend.dtracers_dt.data
+            return result
+
         def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
             return mpas_acoustic_substeps(
                 s, slow_tend, dt_s, n_sub, cfg,
                 self.height_coord, self.terrain_metric, self.config,
+                return_mass_flux=paired,
             )
 
-        state_new = split_explicit_step(
-            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-        )
+        if paired:
+            from legoesm.atmosphere.dynamics.shared.flux_form_tracer_transport import (
+                split_explicit_tracer_mass_step,
+            )
+            from legoesm.atmosphere.dynamics.les.plane_fd_advection import (
+                height_tracer_face_values, tracer_mass_flux,
+            )
+
+            def reconstruct(q):
+                # MPAS has no vertical tracer selector: retain native centred faces.
+                return height_tracer_face_values(q, "centered")
+
+            def flux_tendency(integrated_flux, faces):
+                flux = tracer_mass_flux(integrated_flux, faces)
+                return (flux[..., 1:, :] - flux[..., :-1, :]) / (
+                    self.height_coord.dz[:, None]
+                    * self.terrain_metric.jacobian[:, None, None])
+
+            state_new = split_explicit_tracer_mass_step(
+                state, slow_tendency_fn, acoustic_update_fn, reconstruct,
+                flux_tendency, self.height_coord.rho_ref, dt, se_config,
+            )
+        else:
+            state_new = split_explicit_step(
+                state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+            )
 
         # iter-8: anchored dry-mass fixer (opt-in via fix_mass +
         # anchor_mass_to_initial).  Uniform additive correction to

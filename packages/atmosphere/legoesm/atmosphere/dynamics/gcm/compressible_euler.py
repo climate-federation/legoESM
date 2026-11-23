@@ -628,8 +628,13 @@ def acoustic_column_kernel(
     beta: float,
     g: float,
     theta_vert_van_leer: bool = False,
+    return_mass_flux: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Single forward-backward acoustic substep (column-local algebra).
+
+    Internal ``return_mass_flux=True`` returns ``(updated_triplet, rho_w)``.
+    The exported positive-up flux includes continuity off-centering (1+beta),
+    before any caller's subsequent buoyancy update to w.
 
     This kernel encapsulates the vertical-only update of ``(w, theta',
     rho')`` for one acoustic substep. It is grid-agnostic in the
@@ -734,6 +739,8 @@ def acoustic_column_kernel(
             dtheta_dz = jnp.zeros_like(theta_total)
         theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
 
+    if return_mass_flux:
+        return (w_new, theta_p_new, rho_p_new), (1.0 + beta) * rho_w
     return (w_new, theta_p_new, rho_p_new)
 
 
@@ -926,8 +933,13 @@ def semi_implicit_acoustic_column_kernel(
     precomputed_tridiag: tuple[jax.Array, jax.Array, jax.Array] | None = None,
     si_w_vertical_filter_nu: float = 0.0,
     theta_vert_van_leer: bool = False,
+    return_mass_flux: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Single semi-implicit acoustic substep (column-local algebra).
+
+    Internal ``return_mass_flux=True`` returns ``(updated_triplet, rho_w)``.
+    The exported positive-up flux includes continuity off-centering (1+beta),
+    before any caller's subsequent buoyancy update to w.
 
     Layout-agnostic counterpart of :func:`acoustic_column_kernel`.
     Treats the vertical pressure-gradient term in the w equation
@@ -1088,6 +1100,8 @@ def semi_implicit_acoustic_column_kernel(
         else:
             dtheta_dz = jnp.zeros_like(theta_total)
         theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
+    if return_mass_flux:
+        return (w_new, theta_p_new, rho_p_new), (1.0 + beta) * rho_w
     return (w_new, theta_p_new, rho_p_new)
 
 

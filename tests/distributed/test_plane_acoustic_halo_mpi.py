@@ -255,3 +255,66 @@ def test_step_halo_substep_horizontal_multirank(mpi_layout):
                 rtol=1.0e-11, atol=1.0e-11,
                 err_msg=f"{fld} full-step multi-rank mismatch",
             )
+
+
+@pytest.mark.parametrize("integrator", ["ssp_rk3", "ssp_rk34", "ssp_rk54"])
+@pytest.mark.parametrize("acoustic", ["explicit", "semi_implicit", "si_horizontal"])
+@pytest.mark.parametrize("vertical", ["centered", "van_leer"])
+def test_t29_tracer_mass_constant_and_serial_parity(integrator, acoustic, vertical):
+    """Genuine two-rank y exchange, with nonzero tracer transfer at both seams."""
+    from tests.unit.test_compressible_euler_plane import (
+        t29_assert_inventory, t29_plane_fixture,
+    )
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        horizontal_advection_halo_width,
+    )
+    comm = MPI.COMM_WORLD
+    try:
+        assert comm.Get_size() == 2, "T29 requires exactly two MPI ranks"
+        model, initial = t29_plane_fixture(integrator, acoustic, vertical)
+        grid, hc, metric = model.grid, model.height_coord, model.terrain_metric
+        yphase = 2 * jnp.pi * jnp.arange(grid.ny) / grid.ny
+        initial = initial._replace(
+            v=initial.v.replace(data=jnp.broadcast_to(
+                jnp.cos(yphase)[:, None, None], initial.v.data.shape)),
+            rho_prime=initial.rho_prime.replace(data=initial.rho_prime.data
+                + 0.01 * hc.rho_ref * jnp.cos(yphase)[:, None, None]),
+            tracers=initial.tracers.replace(data=initial.tracers.data
+                * (1 + 0.1 * jnp.sin(yphase))[:, None, None, None]))
+        layout = make_plane_pencil_layout(
+            rank=comm.Get_rank(), n_ranks=2, n_ranks_y=2, n_ranks_x=1,
+            ny_global=grid.ny, nx_global=grid.nx,
+            halo=horizontal_advection_halo_width(model.config))
+        # Check the seam really carries tracer mass; sin(y) velocity would be
+        # zero here and would fail this control before stepping.
+        assert np.all(np.abs(np.asarray(initial.v.data[layout.iy_start])) > 0)
+        seam_mass = ((hc.rho_ref + initial.rho_prime.data[layout.iy_start])[..., None]
+                     * initial.tracers.data[layout.iy_start])
+        assert np.all(np.asarray(seam_mass) > 0)
+        local_grid = create_plane_grid(
+            nx=layout.nx_local, ny=layout.ny_local, nlev=grid.nlev,
+            dx=grid.dx, dy=grid.dy, dtype=jnp.float64)
+        local_model = PlaneCompressibleEulerModel(
+            local_grid, hc, make_flat_plane_terrain_metric(local_grid, hc), model.config)
+        volume = grid.grid_area[..., None] * metric.jacobian[..., None] * hc.dz
+        for constant in (False, True):
+            state = (initial._replace(tracers=initial.tracers.replace(
+                data=jnp.full_like(initial.tracers.data, 0.01))) if constant else initial)
+            serial = model.step(state, 1.0)
+            local = local_model.step_halo(_slice_state_to_rank(state, layout), 1.0, layout=layout)
+            assert np.all(np.asarray(local.w.data)[..., (0, -1)] == 0)
+            rho = gather_plane_field(local.rho_prime.data, layout)
+            q = gather_plane_field(local.tracers.data, layout)
+            if layout.rank == 0:
+                np.testing.assert_allclose(rho, serial.rho_prime.data, rtol=1e-12, atol=1e-12)
+                np.testing.assert_allclose(q, serial.tracers.data, rtol=1e-12, atol=1e-12)
+                gathered = state._replace(rho_prime=state.rho_prime.replace(data=rho),
+                                          tracers=state.tracers.replace(data=q))
+                t29_assert_inventory(state, gathered, hc.rho_ref, volume)
+                if constant:
+                    np.testing.assert_allclose(q, 0.01, rtol=0, atol=1e-12)
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        comm.Abort(1)
+        raise

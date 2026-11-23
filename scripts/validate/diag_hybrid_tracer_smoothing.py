@@ -537,6 +537,19 @@ def record_height_inventory(rows, path, area, hc, metric, rho_old, q_old, rho_ne
         datasets[path + "/" + name] = a
 
 
+def assert_height_inventory_conserves(rows, paths):
+    """Require full-step inventory rows for every named fixed path."""
+    assert paths, "STOP: no fixed inventory paths requested"
+    for path in paths:
+        matched = [r for r in rows if r.get("path") == path
+                   and r.get("scheme") == "full split step"
+                   and r.get("statistic") == "global inventory budget"
+                   and r.get("scope") == "full domain"]
+        assert matched, ("STOP: missing full-step inventory row", path)
+        for row in matched:
+            assert row["verdicts"] and all(v == "CONSERVES" for v in row["verdicts"]), row
+
+
 def realistic_ocean_columns():
     """32 layers, 5--300 m, temperature/salinity, varying column stretch."""
     import jax.numpy as jnp
@@ -725,18 +738,18 @@ def height_vertical_paths(out, rows, provenance, record):
         assert np.all(np.asarray(objects[name].w.data)[..., (0, -1)] == 0), name
     for state in (ss, nsn):
         assert np.all(np.asarray(sh_synthesis_3d(gg, state.w_hat.data).real)[..., (0, -1)] == 0)
-    # Two-significant-digit reproduction is ONLY for the legacy T24 statistic.
+    # Reproduce retained standalone T24 diagnostics only. MPAS/LES full-step
+    # transport now changes by design; their legacy paired rows remain reported,
+    # but acceptance belongs to the distinct global inventory budget below.
     expected = {
         ("MPAS NH/height", "_vertical_advection_height_1d"): 2.6e-2,
         ("MPAS NH/height", "acoustic-only step; tracers unchanged"): 4.5e-1,
-        ("MPAS NH/height", "full split step"): 3.3e-2,
         ("spectral NH/height", "vertical_advection_height"): 4.9e-2,
         ("spectral NH/height", "acoustic-only step; tracers unchanged"): 4.5e-1,
         ("spectral NH/height", "full split step"): 5.8e-2,
         ("LES serial", "_vertical_advection_plane"): 2.9e-2,
         ("LES serial", "vertical_advection_van_leer_plane"): 1.7e-3,
         ("LES serial/height", "acoustic-only step; tracers unchanged"): 8.5e-2,
-        ("LES serial/height", "full split step"): 2.4e-2,
     }
     for label in ("LES halo local", "LES serial native caller/centered", "LES halo native caller/centered"):
         expected[label, "_vertical_advection_plane"] = 2.9e-2
@@ -753,6 +766,8 @@ def height_vertical_paths(out, rows, provenance, record):
     height_artifacts(out, provenance, datasets, objects, configs)
     (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
     assert all(r["agrees"] for r in reproduction), "STOP: T24 issue2641 reproduction mismatch; inspect artifacts"
+    assert_height_inventory_conserves(rows, ("MPAS NH/height", "LES serial/height"))
+
 
 
 def all_vertical_paths(out):
@@ -925,6 +940,7 @@ def height_halo_mpi(out):
             objects = dict(les_grid=pg, les_hc=hc, les_metric=metric, les_initial=ns)
             height_artifacts(out, provenance, datasets, objects, {"les": model.config})
             (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
+            assert_height_inventory_conserves(rows, ("LES halo full/height",))
             provenance["complete"] = True
             (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
     except Exception:

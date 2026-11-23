@@ -720,3 +720,115 @@ class TestMPASConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# T29 full-step NH tracer-mass regression matrix.
+import numpy as np
+import pytest
+
+
+def t29_mpas_fixture(integrator, *, stretched=False):
+    from tests.unit.test_vertical_advection_hybrid_van_leer import _column
+    from legoesm.grids.vertical import create_stretched_height_coordinate
+    mesh = _make_mesh(level=2)
+    nz = 20 if stretched else 10
+    hc = (create_stretched_height_coordinate(20, H=20000.0, dz_sfc=50.0)
+          if stretched else create_height_coordinate(10, 30000.0))
+    metric = compute_terrain_metric(jnp.zeros(mesh.nCells), hc)
+    state = _make_nh_state(mesh, hc, metric, nz)
+    phase = 2 * jnp.pi * jnp.arange(mesh.nCells) / mesh.nCells
+    if stretched:
+        profile = 0.01 * (1 + 0.1 * jnp.arange(nz) / nz)
+        w = state.w.data.at[mesh.nCells // 2, -2].set(0.5)
+    else:
+        _, _, _, q = _column()
+        profile = q[0, :10] + q[0, 20:30]
+        w = jnp.broadcast_to(jnp.sin(jnp.linspace(0, jnp.pi, nz + 1)).at[-1].set(0),
+                             state.w.data.shape)
+    state = state._replace(
+        w=state.w.replace(data=w),
+        u=state.u.replace(data=jnp.broadcast_to(jnp.sin(
+            2 * jnp.pi * jnp.arange(mesh.nEdges) / mesh.nEdges)[:, None], state.u.data.shape)),
+        rho_prime=state.rho_prime.replace(data=0.01 * hc.rho_ref * jnp.sin(phase)[:, None]),
+        tracers=state.tracers.replace(data=(profile[None, :] * (
+            1 + 0.1 * jnp.cos(phase))[:, None])[..., None]))
+    config = MPASCompressibleEulerConfig(
+        outer_integrator=integrator, sponge_coeff=0.0, use_coriolis=False,
+        fix_mass=False, n_acoustic_substeps=6)
+    return MPASCompressibleEulerModel(mesh, hc, metric, config), state
+
+
+@pytest.mark.parametrize("integrator", ["ssp_rk3", "ssp_rk34", "ssp_rk54"])
+@pytest.mark.parametrize("stretched", [False, True])
+def test_t29_mpas_full_step_mass_and_constant(integrator, stretched):
+    from tests.unit.test_compressible_euler_plane import t29_assert_inventory
+    model, state = t29_mpas_fixture(integrator, stretched=stretched)
+    final = model.step(state, 1.0)
+    volume = (model.mesh.areaCell * model.terrain_metric.jacobian)[:, None] * model.height_coord.dz
+    t29_assert_inventory(state, final, model.height_coord.rho_ref, volume)
+    constant = state._replace(tracers=state.tracers.replace(data=jnp.full_like(state.tracers.data, 0.01)))
+    final_constant = model.step(constant, 1.0)
+    np.testing.assert_allclose(final_constant.tracers.data, 0.01, rtol=0, atol=1e-12)
+    t29_assert_inventory(constant, final_constant, model.height_coord.rho_ref, volume)
+
+
+def test_t29_mpas_jit_eager_parity():
+    model, state = t29_mpas_fixture("ssp_rk3")
+    compiled = model.step(state, 1.0)
+    with jax.disable_jit():
+        eager = model.step(state, 1.0)
+    for a, b in zip(jax.tree.leaves(compiled), jax.tree.leaves(eager)):
+        np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12)
+
+
+def test_t29_mpas_fp32_gradient_q_and_w():
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    previous = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp32())
+        model, state = t29_mpas_fixture("ssp_rk3")
+        cast = lambda a: a.astype(jnp.float32) if hasattr(a, "dtype") and jnp.issubdtype(a.dtype, jnp.floating) else a
+        state, mesh, hc, metric = jax.tree.map(cast, (
+            state, model.mesh, model.height_coord, model.terrain_metric))
+        model = MPASCompressibleEulerModel(mesh, hc, metric, model.config)
+
+        def loss(q, w):
+            s = state._replace(tracers=state.tracers.replace(data=q), w=state.w.replace(data=w))
+            out = model.step(s, jnp.float32(1.0))
+            return jnp.sum(out.tracers.data ** 2)
+
+        for grad in jax.grad(loss, argnums=(0, 1))(state.tracers.data, state.w.data):
+            assert grad.dtype == jnp.float32
+            assert np.isfinite(grad).all() and np.any(np.asarray(grad) != 0)
+    finally:
+        set_policy(previous)
+
+
+@pytest.mark.parametrize("integrator", ["ssp_rk3", "ssp_rk34", "ssp_rk54"])
+def test_t29_mpas_acoustic_export_pairs_density(integrator):
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import mpas_acoustic_substeps
+    from legoesm.timestepping.split_explicit import SplitExplicitConfig
+    model, state = t29_mpas_fixture(integrator)
+    cfg = SplitExplicitConfig(n_substeps=6, outer_integrator=integrator)
+    final, flux = mpas_acoustic_substeps(
+        state, None, 1.0 / 6, 6, cfg, model.height_coord,
+        model.terrain_metric, model.config, return_mass_flux=True)
+    divergence = (flux[..., :-1] - flux[..., 1:]) / (
+        model.height_coord.dz * model.terrain_metric.jacobian[:, None])
+    np.testing.assert_allclose(final.rho_prime.data - state.rho_prime.data,
+                               -divergence, rtol=1e-12, atol=1e-12)
+    np.testing.assert_array_equal(flux[..., (0, -1)], 0.0)
+    assert float(jnp.max(jnp.abs(flux))) > 0
+
+
+def test_t29_mpas_fp64_check_grads_q_and_w():
+    from jax.test_util import check_grads
+    model, state = t29_mpas_fixture("ssp_rk3")
+
+    def loss(q, w):
+        s = state._replace(tracers=state.tracers.replace(data=q),
+                           w=state.w.replace(data=w))
+        return jnp.sum(model.step(s, 1.0).tracers.data ** 2)
+
+    check_grads(loss, (state.tracers.data, state.w.data), order=1,
+                modes=["rev"], rtol=1e-3, atol=1e-6)

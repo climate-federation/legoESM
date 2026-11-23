@@ -184,3 +184,55 @@ def flux_form_tracer_step(
     delp_safe = jnp.maximum(delp_new, jnp.asarray(1e-30, delp_new.dtype))
     q_new = qmass_new / delp_safe[..., None]
     return q_new, delp_new
+
+
+
+def split_explicit_tracer_mass_step(
+    state, slow_fn, acoustic_fn, reconstruct_fn, flux_tendency_fn,
+    rho_ref, dt, config,
+):
+    """Pair height-coordinate tracer mass with unchanged dynamics RK blends.
+
+    ``slow_fn`` returns (state-shaped tendency, conservative horizontal/source
+    mass RHS). ``acoustic_fn`` exports the time-integrated continuity fluxes.
+    Reconstruction coefficients are captured at the RHS evaluation state,
+    which can differ from the RK base. All extra leaves are transient.
+    No floor, clipping, fixer, or new time-integration coefficients are used.
+    """
+    from legoesm.timestepping.split_explicit import split_explicit_step
+
+    def with_q(s, mass, rho):
+        return s._replace(tracers=s.tracers.replace(data=mass / rho[..., None]))
+
+    def zero_q(s):
+        return s._replace(tracers=s.tracers.replace(data=jnp.zeros_like(s.tracers.data)))
+
+    rho = rho_ref + state.rho_prime.data
+    mass = rho[..., None] * state.tracers.data
+    zero_recon = jax.tree.map(jnp.zeros_like, reconstruct_fn(state.tracers.data))
+    zero_norm = jnp.zeros((), dtype=mass.dtype)
+    initial = (zero_q(state), mass, zero_recon, zero_norm)
+
+    def slow(carry):
+        s, mq, _, _ = carry
+        physical = with_q(s, mq, rho_ref + s.rho_prime.data)
+        tend, mass_rhs = slow_fn(physical)
+        tend = tend._replace(tracers=tend.tracers.replace(data=mass_rhs))
+        return (tend, jnp.zeros_like(mq), reconstruct_fn(physical.tracers.data),
+                jnp.ones((), dtype=mq.dtype))
+
+    def acoustic(carry, slow_carry, dt_s, n_sub, cfg):
+        s, mq, _, _ = carry
+        tend, _, reconstruction, norm = slow_carry
+        stage_dt = dt_s * n_sub
+        # The incoming mass belongs to the RK BASE before its slow axpy.
+        rho_base = rho_ref + s.rho_prime.data - stage_dt * tend.rho_prime.data
+        physical = with_q(s, mq, rho_base)
+        updated, integrated_fluxes = acoustic_fn(physical, tend, dt_s, n_sub, cfg)
+        reconstruction = jax.tree.map(lambda x: x / norm, reconstruction)
+        mq = (mq + stage_dt * tend.tracers.data
+              + flux_tendency_fn(integrated_fluxes, reconstruction))
+        return zero_q(updated), mq, zero_recon, zero_norm
+
+    updated, mq, _, _ = split_explicit_step(initial, slow, acoustic, dt, config)
+    return with_q(updated, mq, rho_ref + updated.rho_prime.data)

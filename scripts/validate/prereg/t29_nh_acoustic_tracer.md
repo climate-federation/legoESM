@@ -1,8 +1,9 @@
 # T29: height-coordinate acoustic tracer mass, phase 0 preregistration
 
-Status: preregistration, no model edits, no baseline run. Phase-0 probe must
-receive GLM full-diff review and Claude SHIP, then be committed before running.
-No push, PR, issue edit or merge. Phase 1 requires a separate full-diff gate.
+Status: phase 0 completed at ccd817f21c (artifacts in
+`/glade/derecho/scratch/pg2328/t29_phase0/retry_import`); the phase-1 diff is
+uncommitted and runtime UNVERIFIED. Phase 1 requires GLM full-diff review and
+Claude SHIP before runtime or commit. No push, PR, issue edit or merge.
 
 ## Claims and distinct statistics
 
@@ -103,10 +104,95 @@ intentionally wrong equal-delta-q transfer (donor2, receiver1, delta_q=.01*q[2])
 that must classify LEAKS with independently signed expected content change.
 Reject invalid inputs as above. Controls fail hard before any model claim.
 
-Phase 1 remains unimplemented: reference method uses acoustic-averaged
-continuity fluxes for once-per-large-step m*q transport at final RK stage,
-all applicable variants, remove duplicated slow vertical transport, preserve
-existing face selectors. Unsupported core/variant design: STOP with evidence.
-Separate fix preregistration, variant/AD/JIT/parity/reversion tests and required
-ratchets follow measured baseline. No phase-0 number claimed before controls
-and reproduction pass on the committed instrument.
+## Phase 1 corrected design and pre-runtime registration (2026-11-23)
+
+The authoritative corrected reference is WRF Fig 3.1 step 7: in EVERY existing
+selected dynamics RK stage, after its acoustic loop, advance rho*q with that
+stage's exact time-integrated continuity mass flux, then recover q with the
+resulting actual rho. Not one Euler update per large step and not per acoustic
+substep. Existing SSP3/34/54 density and tracer-mass leaves use identical
+coefficients. No generic integrator coefficient or production config changes.
+Spectral remains operational HOLD3-0 until its separate quadrature measurement;
+no spectral code or claim in this implementation.
+
+Predictions BEFORE runtime: MPAS explicit and LES explicit/SI/SI-horizontal,
+serial and genuine 2-rank halo, have each closed-domain full-step tracer inventory
+residual <=1e-12 relative initial absolute inventory (each tracer separately).
+Greater residual REFUTES closure; no tolerance relaxation. Constant q=0.01 stays
+constant to absolute1e-12; JIT/eager and halo/serial rho/q match rtol/atol1e-12.
+Only source-free/fixer-free budgets carry these invariant claims: existing SGS
+and physics tendencies retain their evaluation-state q-source semantics, using
+ACTUAL rho (SD1 decided2-1); density sponge/hyperdiff and post-step fixer keep
+existing order and are outside this source-free invariant claim.
+
+For SSP54 composite RHS, reconstructions alone divide by the carried sum of RHS
+weights; mass/source tendencies retain their b weights. Reconstructions come
+from the RHS evaluation q, not the independently blended RK base. All transient
+reconstruction/normalizer/scratch leaves reset to zero at stage boundaries.
+Vertical/horizontal exports include (1+beta) wherever continuity does, and export
+before subsequent moist-buoyancy changes to returned w. Test nonzero beta0.1.
+MPAS native centred reconstruction has no vertical selector; LES retains both
+centered/van_leer vertical and upwind1/centered/van_leer horizontal, with existing
+weno5 tracer->van_leer mapping. No new smoothing, floor, clamp or limiter.
+
+Frozen phase-0 census geometry/profiles/dt1 remain unchanged. Retire ONLY the two
+pre-fix MPAS/LES full-step paired reproduction targets; report those rows without
+pretending their per-column statistic is a global budget. Keep the other14
+legacy reproduction checks, original ocean rows, spectral rows, all12 inventory
+controls, original provenance. Global inventory acceptance now asserts the fixed
+MPAS/LES serial and genuine-MPI paths CONSERVE at the existing1e-12 bar.
+
+Tests add nonuniform rho/q/horizontal winds to the exact T24 passive fixtures;
+separately reuse existing stretched geometry4x4x20,H20000,dz_sfc50,dxdy2000,w0.5.
+Mass/constant matrices span every selected RK and acoustic mode and both LES
+vertical selectors. Frozen horizontally uniform rho/u periodic smooth-q transport
+must match the selected existing RK applied to the SAME discrete operator at
+rtol/atol1e-12, except SSP54/SI-horizontal as disposed below. Planted Euler must
+differ by >1e-12; if insensitive, STOP rather than silently changing dt. This is
+a discrete update check, not an assertion about the vertical acoustics' temporal
+order. There is no frozen/source-corrected MPAS polynomial surrogate (F2). Source-only sub-floor actual rho
+1e-10, nonzero S0.01, identity dynamics must produce q+dt*S for every RK.
+FP32 gradients through nonzero q and w must be finite AND nonzero; fp64 finite
+ differences reuse existing NH check_grads tolerances1e-3/1e-6 where affordable.
+
+All runs PBS CPU develop@desched1,UCLB0017 after full-diff GLM+Claude SHIP. Required
+checks: touched MPAS NH and LES unit suites, genuine2-rank closure/parity matrix,
+census serial+MPI, named task ratchets. Run only full-step closure test selections
+against phase0 committed code in separate temporary checkout to show reversion
+FAILS; source-only/new-helper ImportError is NOT counted as non-vacuity evidence.
+Record actual summary lines and source hashes. No test/model execution has yet
+occurred on this phase1 diff; this registration does not claim a passing result.
+
+
+## Claude SSP54/SI-horizontal disposition, before any phase-1 runtime
+
+KEEP normalized final reconstruction; no held MPAS/LES variant. For uniform
+rho/u periodic centered advection, first four independent scalar SSP54 stages
+supply q2/q3/q4. The expected final tracer is
+`a52*q2+a53*q3+a54*q4 + dt*L((b53*q3+b54*q4)/B)`, B=b53+b54.
+Read coefficients from the existing SSP54 table, not a copied new table.
+This must pass the same1e-12 comparison and reject single-evaluation Euler.
+All other RK/acoustic combinations retain the ordinary scalar SSP comparison.
+The existing DYNAMICS advances the last acoustic loop over dt with B-weighted
+slow forcing; tracer follows that same continuity flux, preserving the pairing.
+This source-confirmed discrepancy from ordinary SSP54 is a separate follow-up,
+not fixed here. Its size/order in nonuniform density is UNMEASURED/PLAUSIBLE;
+the constant-density uniform-flow fixture cannot quantify that density error.
+
+F1 genuine-MPI fixture adds y-face v=cos(2*pi*y/ny), rho_prime increment
+0.01*rho_ref*cos(2*pi*y/ny), and q factor(1+0.1*sin(2*pi*y/ny)) to the same
+T24/E3 fixture. Decompose exactly2x1 and assert nonzero seam v/tracer mass.
+Matrix all3 RK/all3 acoustics/both vertical selectors, dt1. For each case,
+measure nonconstant inventory and constant-q inventory plus serial rho/q parity
+with the already approved bars. Exceptions Abort(1) rather than hanging peers.
+FP32 nonzero q/w gradients span all LES acoustic modes/both vertical selectors;
+cheap fp64 reverse check_grads reuses existing1e-3/1e-6 tolerances, no new bar.
+
+
+Full-diff review hardening (GLM Vote A): acceptance requires at least one
+matching full-step global-inventory/full-domain row for EACH fixed path, and
+nonempty per-tracer verdicts all CONSERVES; neither absent rows nor an empty
+requested-path set can pass. Serial/MPI use the same helper. Planted controls
+remove/mislabel a row, insert one leaking tracer, or empty the verdict/path list;
+each must fail. MPI exceptions print traceback, Abort(1), then re-raise; the
+original handler already makes failure fatal, never a swallowed success.

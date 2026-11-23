@@ -200,3 +200,80 @@ def _centre_to_face_z(fc):
 def _face_to_centre_z(ff):
     """Average a face ``(…,nz+1)`` field to centres ``(…,nz)``."""
     return 0.5 * (ff[..., :-1] + ff[..., 1:])
+
+
+
+def tracer_mass_flux(mass_flux, face_values):
+    """Multiply an aligned continuity flux by its upwind tracer reconstruction."""
+    positive, negative = face_values
+    return mass_flux[..., None] * jnp.where(
+        mass_flux[..., None] >= 0.0, positive, negative)
+
+
+def height_tracer_face_values(q, scheme):
+    """Reconstruct packed tracers at height faces (positive flux is upward).
+
+    Vertical is the penultimate axis. Reuse the existing LES van-Leer
+    edge padding and its nlev<=2 centred fallback; no new limiter settings.
+    """
+    nz = q.shape[-2]
+    pad = [(0, 0)] * q.ndim
+    pad[-2] = (2, 2)
+    qp = jnp.pad(q, pad, mode="edge")
+    stencil = [qp[..., i:i + nz + 1, :] for i in range(4)]
+    if scheme == "centered" or (scheme == "van_leer" and nz <= 2):
+        face = 0.5 * (stencil[1] + stencil[2])
+        return face, face
+    if scheme == "van_leer":
+        downward, upward = van_leer_face_values(*stencil)
+        return upward, downward
+    raise ValueError(f"Unknown vertical_tracer_advection: {scheme!r}")
+
+
+def plane_tracer_face_values(q, scheme, *, halo=0):
+    """Packed horizontal reconstructions at C-grid i-1/2 and j-1/2 faces.
+
+    For a halo slab reconstruct before cropping. The van-Leer stencil reaches
+    two cells, as in the existing serial/halo advection selectors. WENO5 keeps
+    the existing tracer mapping to van Leer.
+    """
+    faces = []
+    for axis in (_AX, _AY):
+        prev = jnp.roll(q, 1, axis=axis)
+        if scheme == "centered":
+            positive = negative = 0.5 * (prev + q)
+        elif scheme == "upwind1":
+            positive, negative = prev, q
+        elif scheme in ("van_leer", "weno5"):
+            positive, negative = van_leer_face_values(
+                jnp.roll(q, 2, axis=axis), prev, q,
+                jnp.roll(q, -1, axis=axis))
+        else:
+            raise ValueError(f"Unknown horizontal_advection_scheme: {scheme!r}")
+        if halo:
+            positive = positive[halo:-halo, halo:-halo]
+            negative = negative[halo:-halo, halo:-halo]
+        faces.append((positive, negative))
+    return tuple(faces)
+
+
+def plane_tracer_flux_tendency(mass_fluxes, faces, grid, *, layout=None):
+    """Negative horizontal divergence of continuity-paired tracer fluxes.
+
+    Face i is between cells i-1 and i. Halo fluxes are exchanged after
+    multiplication so adjacent ranks consume the same boundary transfer.
+    """
+    fx, fy = [tracer_mass_flux(f, q) for f, q in zip(mass_fluxes, faces)]
+    if layout is None:
+        return -((jnp.roll(fx, -1, axis=_AX) - fx) / grid.dx
+                 + (jnp.roll(fy, -1, axis=_AY) - fy) / grid.dy)
+    from legoesm.parallel.plane_mpi import packed_exchange_halo_plane_yxz
+    ny, nx, nz, nt = fx.shape
+    fxp, fyp = packed_exchange_halo_plane_yxz(
+        fx.reshape(ny, nx, nz * nt), fy.reshape(ny, nx, nz * nt), layout=layout)
+    h = layout.halo
+    dx = (fxp[h:-h, h+1:fxp.shape[1]-h+1]
+          - fxp[h:-h, h:-h]) / grid.dx
+    dy = (fyp[h+1:fyp.shape[0]-h+1, h:-h]
+          - fyp[h:-h, h:-h]) / grid.dy
+    return -(dx + dy).reshape(ny, nx, nz, nt)

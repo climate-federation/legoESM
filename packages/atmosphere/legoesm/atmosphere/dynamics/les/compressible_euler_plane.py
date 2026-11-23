@@ -1894,8 +1894,13 @@ def plane_compressible_euler_slow_tendencies(
     height_coord: HeightCoordinate,
     terrain_metric: TerrainMetric,
     config: CompressibleEulerConfig,
+    *, include_tracer_advection: bool = True, return_mass_flux: bool = False,
 ) -> PlaneNonHydrostaticTendencies:
     """Slow (advective + PG + Coriolis) tendencies for the plane NH dycore.
+
+    Internal ``return_mass_flux=True`` returns ``(tendency, horizontal_flux)``
+    from the continuity assembly. ``include_tracer_advection=False`` leaves
+    existing tracer sources only; the full-step mass adapter replaces transport.
 
     Evaluated once per outer SSP-RK3 stage and held constant for the
     acoustic substeps. See the module docstring for the equations
@@ -2011,11 +2016,14 @@ def plane_compressible_euler_slow_tendencies(
     # acoustic substep, so the slow tendency contributes no continuity
     # term here (only sponge/hyperdiff on rho' below).
     if substep_horiz:
+        flux_u = jnp.zeros_like(rho_p)
+        flux_v = jnp.zeros_like(rho_p)
         drho_p_dt = jnp.zeros_like(rho_p)
     else:
         rho_xface = interp_cell_to_xface_vlast(rho_total, grid)
         rho_yface = interp_cell_to_yface_vlast(rho_total, grid)
-        drho_p_dt = -divergence_vlast(rho_xface * u, rho_yface * v, grid)
+        flux_u, flux_v = rho_xface * u, rho_yface * v
+        drho_p_dt = -divergence_vlast(flux_u, flux_v, grid)
 
     # 5. Theta advection (advective form). Theta at cell centre;
     #    advect with the cell-centre velocity formed by face→cell
@@ -2389,7 +2397,7 @@ def plane_compressible_euler_slow_tendencies(
             f"Expected 'centered' or 'van_leer'."
         )
     tracers = state.tracers.data
-    if tracers.shape[-1] > 0:
+    if tracers.shape[-1] > 0 and include_tracer_advection:
         def _tracer_tend_one(q):
             # tadv_* = van_leer under weno5 (positivity guard above);
             # == adv_* for every monotone scheme.
@@ -2411,7 +2419,7 @@ def plane_compressible_euler_slow_tendencies(
         dtracers_dt = dtracers_dt + tracer_sgs_tend
     zero_phis = jnp.zeros_like(state.phis.data)
 
-    return PlaneNonHydrostaticTendencies(
+    result = PlaneNonHydrostaticTendencies(
         du_dt=state.u.replace(data=du_dt),
         dv_dt=state.v.replace(data=dv_dt),
         dw_dt=state.w.replace(data=dw_dt),
@@ -2420,6 +2428,10 @@ def plane_compressible_euler_slow_tendencies(
         dphis_dt=state.phis.replace(data=zero_phis),
         dtracers_dt=state.tracers.replace(data=dtracers_dt),
     )
+
+    if return_mass_flux:
+        return result, (flux_u, flux_v)
+    return result
 
 
 def _c_pd_constant() -> float:
@@ -2448,8 +2460,14 @@ def plane_acoustic_substeps(
     terrain_metric: TerrainMetric,
     euler_config: CompressibleEulerConfig,
     layout=None,
+    *, return_mass_flux: bool = False,
 ) -> PlaneNonHydrostaticState:
     """Run ``n_substeps`` forward-backward acoustic substeps on the plane.
+
+    Internal ``return_mass_flux=True`` returns ``(state, integrated_fluxes)``
+    consumed by the full-step tracer-mass adapter after this acoustic loop.
+    These are the exact positive-up / native-horizontal continuity fluxes,
+    including existing off-centering; no tracer update occurs per substep.
 
     Thin wrapper around
     :func:`compressible_euler.acoustic_column_kernel` — no duplicated
@@ -2499,19 +2517,22 @@ def plane_acoustic_substeps(
     # Python-loop unroll (n_substeps is compile-time static via
     # SplitExplicitConfig). See semi-implicit variant for full rationale.
     b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
+    flux_z = jnp.zeros_like(w)
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _ in range(int(n_substeps)):
-        w_final, theta_p_final, rho_p_final = acoustic_column_kernel(
+        (w_final, theta_p_final, rho_p_final), flux = acoustic_column_kernel(
             w_final, theta_p_final, rho_p_final,
             height_coord, J, dt_s, beta, g,
             theta_vert_van_leer=(
                 getattr(euler_config, "acoustic_theta_advection", "centered")
                 == "van_leer"),
+            return_mass_flux=True,
         )
+        flux_z = flux_z + dt_s * flux
         if b_moist is not None:  # frozen moist buoyancy each substep (see si_horizontal)
             w_final = (w_final + dt_s * b_moist).at[..., 0].set(0.0).at[..., -1].set(0.0)
 
-    return PlaneNonHydrostaticState(
+    result = PlaneNonHydrostaticState(
         u=state.u,
         v=state.v,
         w=state.w.replace(data=w_final),
@@ -2520,6 +2541,10 @@ def plane_acoustic_substeps(
         phis=state.phis,
         tracers=state.tracers,
     )
+
+    if return_mass_flux:
+        return result, (jnp.zeros_like(state.u.data), jnp.zeros_like(state.v.data), flux_z)
+    return result
 
 
 def plane_acoustic_substeps_semi_implicit(
@@ -2532,8 +2557,14 @@ def plane_acoustic_substeps_semi_implicit(
     terrain_metric: TerrainMetric,
     euler_config: CompressibleEulerConfig,
     layout=None,
+    *, return_mass_flux: bool = False,
 ) -> PlaneNonHydrostaticState:
     """Semi-implicit acoustic substeps on the plane via per-column
+
+    Internal ``return_mass_flux=True`` returns ``(state, integrated_fluxes)``
+    consumed by the full-step tracer-mass adapter after this acoustic loop.
+    These are the exact positive-up / native-horizontal continuity fluxes,
+    including existing off-centering; no tracer update occurs per substep.
     Thomas tridiagonal solve.
 
     Lifts the vertical acoustic CFL constraint that limits the
@@ -2571,9 +2602,10 @@ def plane_acoustic_substeps_semi_implicit(
         euler_config, "si_w_vertical_filter_nu", 0.0,
     ))
     b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
+    flux_z = jnp.zeros_like(w)
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _ in range(int(n_substeps)):
-        w_final, theta_p_final, rho_p_final = (
+        (w_final, theta_p_final, rho_p_final), flux = (
             semi_implicit_acoustic_column_kernel(
                 w_final, theta_p_final, rho_p_final,
                 height_coord, J, dt_s, beta, g,
@@ -2583,12 +2615,14 @@ def plane_acoustic_substeps_semi_implicit(
                 theta_vert_van_leer=(
                     getattr(euler_config, "acoustic_theta_advection", "centered")
                     == "van_leer"),
+                return_mass_flux=True,
             )
         )
+        flux_z = flux_z + dt_s * flux
         if b_moist is not None:  # frozen moist buoyancy each substep (see si_horizontal)
             w_final = (w_final + dt_s * b_moist).at[..., 0].set(0.0).at[..., -1].set(0.0)
 
-    return PlaneNonHydrostaticState(
+    result = PlaneNonHydrostaticState(
         u=state.u,
         v=state.v,
         w=state.w.replace(data=w_final),
@@ -2597,6 +2631,10 @@ def plane_acoustic_substeps_semi_implicit(
         phis=state.phis,
         tracers=state.tracers,
     )
+
+    if return_mass_flux:
+        return result, (jnp.zeros_like(state.u.data), jnp.zeros_like(state.v.data), flux_z)
+    return result
 
 
 def plane_acoustic_substeps_si_horizontal(
@@ -2610,8 +2648,14 @@ def plane_acoustic_substeps_si_horizontal(
     euler_config: CompressibleEulerConfig,
     grid: PlaneGrid,
     layout=None,
+    *, return_mass_flux: bool = False,
 ) -> PlaneNonHydrostaticState:
     """Full Skamarock-Klemp split-explicit acoustic substep on the plane.
+
+    Internal ``return_mass_flux=True`` returns ``(state, integrated_fluxes)``
+    consumed by the full-step tracer-mass adapter after this acoustic loop.
+    These are the exact positive-up / native-horizontal continuity fluxes,
+    including existing off-centering; no tracer update occurs per substep.
 
     Unlike :func:`plane_acoustic_substeps_semi_implicit` (vertical-only),
     this integrates BOTH the horizontal and vertical acoustic terms on the
@@ -2665,6 +2709,7 @@ def plane_acoustic_substeps_si_horizontal(
     )
 
     b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
+    flux_x, flux_y, flux_z = jnp.zeros_like(u), jnp.zeros_like(v), jnp.zeros_like(w)
     u_c, v_c, w_c, theta_p_c, rho_p_c = u, v, w, theta_p, rho_p
     for _ in range(int(n_substeps)):
         theta_total, rho_total = sanitize_theta_rho(
@@ -2687,7 +2732,7 @@ def plane_acoustic_substeps_si_horizontal(
         #    below, so both legs receive consistent acoustic damping
         #    (cavecrew review: asymmetric off-centering between the
         #    vertical and horizontal continuity breaks the f-b stencil).
-        w_new, theta_p_new, rho_p_vert = semi_implicit_acoustic_column_kernel(
+        (w_new, theta_p_new, rho_p_vert), vertical_flux = semi_implicit_acoustic_column_kernel(
             w_c, theta_p_c, rho_p_c,
             height_coord, J, dt_s, 0.0, g,
             implicit_buoyancy=implicit_buoyancy,
@@ -2696,6 +2741,7 @@ def plane_acoustic_substeps_si_horizontal(
             theta_vert_van_leer=(
                 getattr(euler_config, "acoustic_theta_advection", "centered")
                 == "van_leer"),
+            return_mass_flux=True,
         )
         # 3b. Frozen SAM moist buoyancy (vapour-virtual + condensate loading) on
         #     w, applied EACH substep so the condensate-loading drag balances the
@@ -2720,11 +2766,16 @@ def plane_acoustic_substeps_si_horizontal(
         if beta != 0.0:
             rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
+        # Both legs see exactly the same off-centering as density.
+        flux_x = flux_x + dt_s * (1.0 + beta) * rho_xface * u_new
+        flux_y = flux_y + dt_s * (1.0 + beta) * rho_yface * v_new
+        flux_z = flux_z + dt_s * (1.0 + beta) * vertical_flux
+
         u_c, v_c, w_c, theta_p_c, rho_p_c = (
             u_new, v_new, w_new, theta_p_new, rho_p_new,
         )
 
-    return PlaneNonHydrostaticState(
+    result = PlaneNonHydrostaticState(
         u=state.u.replace(data=u_c),
         v=state.v.replace(data=v_c),
         w=state.w.replace(data=w_c),
@@ -2733,6 +2784,10 @@ def plane_acoustic_substeps_si_horizontal(
         phis=state.phis,
         tracers=state.tracers,
     )
+
+    if return_mass_flux:
+        return result, (flux_x, flux_y, flux_z)
+    return result
 
 
 def plane_acoustic_substeps_si_horizontal_halo(
@@ -2746,8 +2801,14 @@ def plane_acoustic_substeps_si_horizontal_halo(
     euler_config: CompressibleEulerConfig,
     grid: PlaneGrid,
     layout,
+    *, return_mass_flux: bool = False,
 ) -> PlaneNonHydrostaticState:
     """Halo-aware full Skamarock-Klemp split-explicit acoustic substep.
+
+    Internal ``return_mass_flux=True`` returns ``(state, integrated_fluxes)``
+    consumed by the full-step tracer-mass adapter after this acoustic loop.
+    These are the exact positive-up / native-horizontal continuity fluxes,
+    including existing off-centering; no tracer update occurs per substep.
 
     Multi-rank counterpart of
     :func:`plane_acoustic_substeps_si_horizontal`: same forward-backward
@@ -2806,6 +2867,7 @@ def plane_acoustic_substeps_si_horizontal_halo(
     )
 
     b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
+    flux_x, flux_y, flux_z = jnp.zeros_like(u), jnp.zeros_like(v), jnp.zeros_like(w)
     u_c, v_c, w_c, theta_p_c, rho_p_c = u, v, w, theta_p, rho_p
     for _ in range(int(n_substeps)):
         # Exchange 1: θ', ρ'. sanitize + Exner are pointwise, so the
@@ -2839,7 +2901,7 @@ def plane_acoustic_substeps_si_horizontal_halo(
         #    Klemp off-centering is applied ONCE on the combined
         #    vertical+horizontal divergence below, exactly like the
         #    serial si_horizontal substep.
-        w_new, theta_p_new, rho_p_vert = semi_implicit_acoustic_column_kernel(
+        (w_new, theta_p_new, rho_p_vert), vertical_flux = semi_implicit_acoustic_column_kernel(
             w_c, theta_p_c, rho_p_c,
             height_coord, J, dt_s, 0.0, g,
             implicit_buoyancy=implicit_buoyancy,
@@ -2848,6 +2910,7 @@ def plane_acoustic_substeps_si_horizontal_halo(
             theta_vert_van_leer=(
                 getattr(euler_config, "acoustic_theta_advection", "centered")
                 == "van_leer"),
+            return_mass_flux=True,
         )
         # 3b. Frozen SAM moist buoyancy on w, each substep (layout-aware
         #     global mean inside the helper when configured).
@@ -2874,11 +2937,16 @@ def plane_acoustic_substeps_si_horizontal_halo(
         if beta != 0.0:
             rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
+        # Both legs see exactly the same off-centering as density.
+        flux_x = flux_x + dt_s * (1.0 + beta) * rho_xface * u_new
+        flux_y = flux_y + dt_s * (1.0 + beta) * rho_yface * v_new
+        flux_z = flux_z + dt_s * (1.0 + beta) * vertical_flux
+
         u_c, v_c, w_c, theta_p_c, rho_p_c = (
             u_new, v_new, w_new, theta_p_new, rho_p_new,
         )
 
-    return PlaneNonHydrostaticState(
+    result = PlaneNonHydrostaticState(
         u=state.u.replace(data=u_c),
         v=state.v.replace(data=v_c),
         w=state.w.replace(data=w_c),
@@ -2889,10 +2957,69 @@ def plane_acoustic_substeps_si_horizontal_halo(
     )
 
 
+    if return_mass_flux:
+        return result, (flux_x, flux_y, flux_z)
+    return result
+
+
+def plane_split_explicit_tracer_step(
+    state, slow_fn, acoustic_fn, dt, split_config, grid, height_coord,
+    terrain_metric, config, *, layout=None,
+):
+    """Use each RK stage's continuity flux to transport packed tracer mass.
+
+    The existing source tendencies (SGS/physics) use actual evaluation-state
+    density. Density sponge/diffusion and the opt-in post-step mass fixer keep
+    their existing ordering; source-free closure claims exclude those sources.
+    """
+    from legoesm.atmosphere.dynamics.shared.flux_form_tracer_transport import (
+        split_explicit_tracer_mass_step,
+    )
+    from legoesm.atmosphere.dynamics.les.plane_fd_advection import (
+        height_tracer_face_values, plane_tracer_face_values,
+        plane_tracer_flux_tendency, tracer_mass_flux,
+    )
+
+    def reconstruct(q):
+        q_horizontal = q
+        h = 0
+        if layout is not None:
+            from legoesm.parallel.plane_mpi import packed_exchange_halo_plane_yxz
+            ny, nx, nz, nt = q.shape
+            padded, = packed_exchange_halo_plane_yxz(
+                q.reshape(ny, nx, nz * nt), layout=layout)
+            q_horizontal = padded.reshape(*padded.shape[:2], nz, nt)
+            h = layout.halo
+        return (plane_tracer_face_values(
+                    q_horizontal, config.horizontal_advection_scheme, halo=h),
+                height_tracer_face_values(q, config.vertical_tracer_advection))
+
+    def slow(s):
+        tend, horizontal_flux = slow_fn(s)
+        horizontal_faces, _ = reconstruct(s.tracers.data)
+        horizontal = plane_tracer_flux_tendency(
+            horizontal_flux, horizontal_faces, grid, layout=layout)
+        rho = height_coord.rho_ref + s.rho_prime.data
+        return tend, horizontal + rho[..., None] * tend.tracers.data
+
+    def flux_tendency(fluxes, faces):
+        fx, fy, fz = fluxes
+        horizontal_faces, vertical_faces = faces
+        horizontal = plane_tracer_flux_tendency(
+            (fx, fy), horizontal_faces, grid, layout=layout)
+        vertical_flux = tracer_mass_flux(fz, vertical_faces)
+        vertical = (vertical_flux[..., 1:, :] - vertical_flux[..., :-1, :]) / (
+            height_coord.dz[:, None] * terrain_metric.jacobian[..., None, None])
+        return horizontal + vertical
+
+    return split_explicit_tracer_mass_step(
+        state, slow, acoustic_fn, reconstruct, flux_tendency,
+        height_coord.rho_ref, dt, split_config)
+
+
 # --------------------------------------------------------------------- #
 # Config validation                                                     #
 # --------------------------------------------------------------------- #
-
 
 def validate_plane_config(config: CompressibleEulerConfig) -> None:
     """Reject ``CompressibleEulerConfig`` flags unsupported in PR2b.
@@ -3269,13 +3396,18 @@ class PlaneCompressibleEulerModel:
             outer_integrator=self.config.outer_integrator,
         )
 
+        paired = state_local.tracers.data.shape[-1] > 0
+
         def slow_tendency_fn(s):
             tend = plane_compressible_euler_slow_tendencies_halo(
                 s, self.grid, self.height_coord, self.terrain_metric,
                 self.config, layout, f_pad_cached=f_pad_cached,
+                include_tracer_advection=not paired, return_mass_flux=paired,
             )
+            if paired:
+                tend, mass_fluxes = tend
             # Wrap as state for split_explicit_step (same pytree shape).
-            return PlaneNonHydrostaticState(
+            result = PlaneNonHydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),
                 v=s.v.replace(data=tend.dv_dt.data),
                 w=s.w.replace(data=tend.dw_dt.data),
@@ -3287,27 +3419,29 @@ class PlaneCompressibleEulerModel:
                 tracers=s.tracers.replace(data=tend.dtracers_dt.data),
             )
 
+            return (result, mass_fluxes) if paired else result
+
         if self.config.semi_implicit_acoustic:
             if substep_horiz:
                 def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
                     return plane_acoustic_substeps_si_horizontal_halo(
                         s, slow_tend, dt_s, n_sub, cfg,
                         self.height_coord, self.terrain_metric, self.config,
-                        self.grid, layout,
+                        self.grid, layout, return_mass_flux=paired,
                     )
             else:
                 def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
                     return plane_acoustic_substeps_semi_implicit(
                         s, slow_tend, dt_s, n_sub, cfg,
                         self.height_coord, self.terrain_metric, self.config,
-                        layout=layout,  # enables exact global moist-mean when configured
+                        return_mass_flux=paired, layout=layout,  # enables exact global moist-mean when configured
                     )
         else:
             def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
                 return plane_acoustic_substeps(
                     s, slow_tend, dt_s, n_sub, cfg,
                     self.height_coord, self.terrain_metric, self.config,
-                    layout=layout,  # enables exact global moist-mean when configured
+                    return_mass_flux=paired, layout=layout,  # enables exact global moist-mean when configured
                 )
 
         # Build + cache a JIT'd split-explicit core.  The eager multi-rank
@@ -3331,11 +3465,16 @@ class PlaneCompressibleEulerModel:
             layout,
             float(dt), self.config.n_acoustic_substeps,
             bool(self.config.semi_implicit_acoustic),
-            bool(substep_horiz), id(f_pad_cached),
+            bool(substep_horiz), bool(paired), id(f_pad_cached),
         )
         if (getattr(self, "_jit_halo_core", None) is None
                 or getattr(self, "_jit_halo_key", None) != _jit_key):
             def _halo_core(s):
+                if paired:
+                    return plane_split_explicit_tracer_step(
+                        s, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+                        self.grid, self.height_coord, self.terrain_metric,
+                        self.config, layout=layout)
                 return split_explicit_step(
                     s, slow_tendency_fn, acoustic_update_fn, dt, se_config,
                 )
@@ -3388,11 +3527,16 @@ class PlaneCompressibleEulerModel:
             outer_integrator=self.config.outer_integrator,
         )
 
+        paired = state.tracers.data.shape[-1] > 0
+
         def slow_tendency_fn(s: PlaneNonHydrostaticState):
             tend = plane_compressible_euler_slow_tendencies(
                 s, self.grid, self.height_coord, self.terrain_metric,
-                self.config,
+                self.config, include_tracer_advection=not paired,
+                return_mass_flux=paired,
             )
+            if paired:
+                tend, mass_fluxes = tend
             if physics_fn is not None:
                 phys = physics_fn(
                     s, self.grid, self.height_coord, self.terrain_metric,
@@ -3419,12 +3563,9 @@ class PlaneCompressibleEulerModel:
             # Rewrap as ``PlaneNonHydrostaticState`` so the shared
             # ``pytree_axpy`` inside ``split_explicit_step`` can align
             # the leaves — it requires matching NamedTuple types
-            # between state and tendency. Same pattern as the MPAS NH
-            # dycore. ``phis`` tendency is zero (static surface);
-            # ``tracers`` tendency is a zero array of the right shape
-            # (PR2b only supports ``n_tracers == 0`` so this is just
-            # the empty-trailing-axis array).
-            return PlaneNonHydrostaticState(
+            # between state and tendency. The paired path converts the
+            # source-only tracer tendency to mass before its stage update.
+            result = PlaneNonHydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),
                 v=s.v.replace(data=tend.dv_dt.data),
                 w=s.w.replace(data=tend.dw_dt.data),
@@ -3436,30 +3577,39 @@ class PlaneCompressibleEulerModel:
                 tracers=s.tracers.replace(data=tend.dtracers_dt.data),
             )
 
+            return (result, mass_fluxes) if paired else result
+
         if self.config.semi_implicit_acoustic:
             if getattr(self.config, "substep_horizontal_acoustic", False):
                 def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
                     return plane_acoustic_substeps_si_horizontal(
                         s, slow_tend, dt_s, n_sub, cfg,
                         self.height_coord, self.terrain_metric, self.config,
-                        self.grid,
+                        self.grid, return_mass_flux=paired,
                     )
             else:
                 def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
                     return plane_acoustic_substeps_semi_implicit(
                         s, slow_tend, dt_s, n_sub, cfg,
                         self.height_coord, self.terrain_metric, self.config,
+                        return_mass_flux=paired,
                     )
         else:
             def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
                 return plane_acoustic_substeps(
                     s, slow_tend, dt_s, n_sub, cfg,
                     self.height_coord, self.terrain_metric, self.config,
+                    return_mass_flux=paired,
                 )
 
-        state_new = split_explicit_step(
-            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-        )
+        if paired:
+            state_new = plane_split_explicit_tracer_step(
+                state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+                self.grid, self.height_coord, self.terrain_metric, self.config)
+        else:
+            state_new = split_explicit_step(
+                state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+            )
 
         if self.config.fix_mass and target_mass is not None:
             state_new = fix_mass_nonhydrostatic_plane(

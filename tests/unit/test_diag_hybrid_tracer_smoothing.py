@@ -109,3 +109,27 @@ def test_inventory_rejects_invalid_inputs(inventory_probe, inventory_arrays, bad
         args[{"volume": 0, "rho_old": 1, "rho_new": 3}[bad]][0] = 0.0
     with pytest.raises(ValueError):
         inventory_probe.global_inventory_budget(*args)
+
+
+@pytest.mark.parametrize("violation", [None, "missing", "path", "scheme", "statistic",
+                                      "scope", "leak", "empty_verdicts", "empty_paths"])
+def test_full_step_inventory_acceptance_is_nonvacuous(inventory_probe, violation):
+    row = dict(path="fixed", scheme="full split step", statistic="global inventory budget",
+               scope="full domain", verdicts=["CONSERVES", "CONSERVES"])
+    paths = ("fixed",)
+    rows = [row]
+    if violation in ("path", "scheme", "statistic", "scope"):
+        row[violation] = "wrong"
+    elif violation == "missing":
+        rows = []
+    elif violation == "leak":
+        row["verdicts"][1] = "LEAKS"
+    elif violation == "empty_verdicts":
+        row["verdicts"] = []
+    elif violation == "empty_paths":
+        paths = ()
+    if violation is None:
+        inventory_probe.assert_height_inventory_conserves(rows, paths)
+    else:
+        with pytest.raises(AssertionError):
+            inventory_probe.assert_height_inventory_conserves(rows, paths)

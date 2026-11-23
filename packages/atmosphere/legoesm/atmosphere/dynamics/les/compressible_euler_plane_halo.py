@@ -389,8 +389,13 @@ def plane_compressible_euler_slow_tendencies_halo(
     config: CompressibleEulerConfig,
     layout: PlanePencilLayout,
     f_pad_cached: jax.Array | None = None,
+    *, include_tracer_advection: bool = True, return_mass_flux: bool = False,
 ) -> PlaneNonHydrostaticTendencies:
     """Halo-aware slow-tendency for the plane NH dycore.
+
+    Internal ``return_mass_flux=True`` returns ``(tendency, horizontal_flux)``
+    from the continuity assembly. ``include_tracer_advection=False`` leaves
+    existing tracer sources only; the full-step mass adapter replaces transport.
 
     Inputs: rank-local slabs. Output: rank-local interior-shape
     tendencies. Single packed MPI round per call covers all
@@ -532,6 +537,8 @@ def plane_compressible_euler_slow_tendencies_halo(
     #    tendency contributes no continuity term (only sponge/hyperdiff
     #    on rho' below) — and the flux re-pad MPI round is skipped.
     if substep_horiz:
+        flux_u_int = jnp.zeros_like(rho_p)
+        flux_v_int = jnp.zeros_like(rho_p)
         drho_p_dt = jnp.zeros_like(rho_p)
     else:
         rho_xface_int = oh.interp_cell_to_xface_vlast_halo(
@@ -858,9 +865,12 @@ def plane_compressible_euler_slow_tendencies_halo(
                 + tadv_y(q_pad, v_center_pad, grid.dy, h)
                 + _vertical_tracer_adv(q_int, w, height_coord, J)
             )
-        dtracers_dt = jax.vmap(
-            _tracer_tend_one, in_axes=(-1, -1), out_axes=-1,
-        )(tracers_pad, tracers)
+        if include_tracer_advection:
+            dtracers_dt = jax.vmap(
+                _tracer_tend_one, in_axes=(-1, -1), out_axes=-1,
+            )(tracers_pad, tracers)
+        else:
+            dtracers_dt = jnp.zeros_like(tracers)
         # SGS-SCALAR (#80): SAM `sgs.f90:664-675` SGS-diffuses EVERY scalar
         # (q_v + all hydrometeors) with K_h, like θ'. The serial dycore does
         # this; the MPI halo path previously diffused θ'/u/v/w but NOT the
@@ -884,7 +894,7 @@ def plane_compressible_euler_slow_tendencies_halo(
         dtracers_dt = jnp.zeros_like(tracers)
     zero_phis = jnp.zeros_like(state.phis.data)
 
-    return PlaneNonHydrostaticTendencies(
+    result = PlaneNonHydrostaticTendencies(
         du_dt=state.u.replace(data=du_dt),
         dv_dt=state.v.replace(data=dv_dt),
         dw_dt=state.w.replace(data=dw_dt),
@@ -893,6 +903,10 @@ def plane_compressible_euler_slow_tendencies_halo(
         dphis_dt=state.phis.replace(data=zero_phis),
         dtracers_dt=state.tracers.replace(data=dtracers_dt),
     )
+
+    if return_mass_flux:
+        return result, (flux_u_int, flux_v_int)
+    return result
 
 
 def _re_pad_halo(arr_int, layout, halo):
