@@ -20,6 +20,7 @@ from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.atmosphere.physics.turbulence.clubb_mf import (
     HARD,
     MF_CONCLD_MAX,
+    MFSmoothing,
     integrate_mf,
     mf_concld,
     mf_deep_cloud,
@@ -137,6 +138,24 @@ def test_moist_aggregates_follow_cams_loop():
                      / np.where(a > 0.0, a, 1.0), 0.0)
         np.testing.assert_allclose(np.asarray(o["moist_a"]), a, rtol=1e-12, atol=0.0)
         np.testing.assert_allclose(np.asarray(o["moist_qc"]), q, rtol=1e-12, atol=1e-300)
+
+
+def test_fp32_gradient_is_finite_at_zero_moist_area():
+    """Reverse-mode gradient through the moist-plume mean stays finite in
+    fp32 on a fixture column (the zero-area plumes must not leak NaN)."""
+    fx = dict(np.load(FIXTURE, allow_pickle=True))
+    keys = ("zt", "dzt", "rho_zt", "p_zt", "u", "v", "thl", "qt", "thv", "zm", "p_zm",
+            "iex_zm", "rho_zm", "wthl_sfc", "wqt_sfc", "ths", "pblh", "lts")
+    c = {k: jnp.asarray(fx[f"c_{k}"][0], jnp.float32) for k in keys}
+    ent = jnp.asarray(fx["ora1_enti"][0], jnp.float32)
+    zt1 = jnp.asarray(fx["ora1_ztopm1_in"][0], jnp.float32)
+
+    def f(qt):
+        o = integrate_mf(dict(c, qt=qt), ent, zt1, MFSmoothing())
+        return jnp.sum(o["moist_qc"]) + jnp.sum(o["moist_a"])
+
+    g = np.asarray(jax.grad(f)(c["qt"]))
+    assert np.all(np.isfinite(g)) and np.any(g != 0.0)
 
 
 if __name__ == "__main__":

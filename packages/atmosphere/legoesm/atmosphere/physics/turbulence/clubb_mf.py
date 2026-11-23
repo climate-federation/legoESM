@@ -121,7 +121,6 @@ L0 = 200.0  # clubb_mf_L0 [m], Lopt 0 (user 2026-11-23)
 KSEED = 1  # clubb_mf_kseed: offset of the 2nd..4th seed winds
 ZTOPM1_COLD = 500.0  # plume-top memory [m] each call starts from (fixture call 1)
 CFLVAL = 1.0  # clubb.F90 compute_mf_plumes: Courant-number limit
-_MOIST_A_FLOOR = 1.0e-30  # division floor: moist_qc numerator is 0 wherever moist_a is
 CFL_SHARPNESS = 100.0  # RULE 5 default of the Courant limiter's max(1, .) [1]^-1 (voted)
 
 # --- CESM_share share1.1.22 kissvec.c (Marsaglia KISS) ---
@@ -316,7 +315,10 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
     # with upqc > 0 (the qc switch); in-cloud condensate = area-weighted mean
     moist = up["upa"] * _strict_pos(ex, sm.qc)
     moist_a = jnp.sum(moist, axis=1)
-    moist_qc = jnp.sum(moist * up["upqc"], axis=1) / jnp.maximum(moist_a, _MOIST_A_FLOOR)
+    # double where: finite reverse-mode gradient at zero moist area (fp32 too)
+    _has = moist_a > 0.0
+    moist_qc = jnp.where(
+        _has, jnp.sum(moist * up["upqc"], axis=1) / jnp.where(_has, moist_a, 1.0), 0.0)
     out = dict(
         up,
         **flux,

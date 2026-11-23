@@ -243,7 +243,8 @@ def make_physics(
     _cc = getattr(getattr(config, "radiation", None), "cloud_config", None)
     _mf_on = bool(getattr(getattr(config, "turbulence", None), "clubb_mf", False))
     _mf_cloud = bool(getattr(_cc, "clubb_mf_cloud", False))
-    _cam6 = getattr(_cc, "scheme", None) == "cam6_clubb"
+    _cam6 = (getattr(_cc, "scheme", None) if _cc is not None else
+             getattr(getattr(config, "radiation", None), "cloud_scheme", None)) == "cam6_clubb"
     if _mf_cloud and not (_mf_on and _cam6):
         raise ValueError(
             "CloudConfig.clubb_mf_cloud needs TurbulenceConfig.clubb_mf and the "

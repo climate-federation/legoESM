@@ -94,6 +94,9 @@ def test_factory_refuses_a_producer_consumer_mismatch():
     for t, r in ((turb(True), _rad(False, "gray")), (turb(False), _rad(True, "gray"))):
         with pytest.raises(ValueError, match="clubb_mf"):
             make_physics(PhysicsConfig(radiation=r, turbulence=t), model_type="mpas")
+    with pytest.raises(ValueError, match="clubb_mf"):  # un-nested cam6_clubb fallback
+        make_physics(PhysicsConfig(radiation=_rad(False, "gray")._replace(cloud_config=None),
+                                   turbulence=turb(True)), model_type="mpas")
     assert callable(make_physics(PhysicsConfig(radiation=_rad(True, "gray"),
                                                turbulence=turb(True)), model_type="mpas"))
 
