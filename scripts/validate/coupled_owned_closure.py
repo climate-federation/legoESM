@@ -199,6 +199,10 @@ def main(argv=None) -> int:
     ap.add_argument("--trace-atm-steps", action="store_true",
                     help="record the atmosphere's water change and E-P of "
                     "every step in the JSON (atm_steps)")
+    ap.add_argument("--dump-step", type=int, default=0,
+                    help="save step N's per-column ledger water rows, "
+                    "evaporation, precipitation and water species (npz next "
+                    "to --json)")
     args, deck_argv = ap.parse_known_args(argv)
     if args.windows and not args.deck:
         ap.error("--windows needs --deck")
@@ -563,6 +567,18 @@ def main(argv=None) -> int:
                 rec["ledger"] = {pn: I(lw_[:, i]) * DT
                                  for i, pn in enumerate(LEDGER_PROCESSES)}
             atm_steps.append(rec)
+        if args.dump_step and n_steps[0] + 1 == args.dump_step and args.json:
+            led = getattr(model, "_step_ledger", None)
+            np.savez(str(Path(args.json).with_suffix(".step.npz")),
+                     ledger_water=(np.full((n, 1), np.nan) if led is None
+                                   else _np(led)[:, :, 0]),
+                     evap=_np(sd[SL["evap_sfc"]]).reshape(-1),
+                     precip=_np(sd[SL["precip"]]).reshape(-1),
+                     area=area, f_land=f_land,
+                     lat=_np(model.mesh.latCell).reshape(-1),
+                     dp=layer_dp(),
+                     **{sp: _np(atm.current_tracer(sp)).reshape(n, -1)
+                        for sp in carried})
             atm_prev[0] = w_now
         L = atm._land_ml_state   # land's own runoff rate x f_land, per step
         F["R_state"] += float(np.sum(f_land * _np(
