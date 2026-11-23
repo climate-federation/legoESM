@@ -49,8 +49,8 @@ def test_configs_carry_the_tuned_parameters():
     parser = mod.build_parser()
     slab = load_yaml_config(str(CMIP_CONFIGS[0]), parser)
     assert slab["radiation"] == "rrtmg"                   # production copied
-    assert slab["surface_bulk_scheme"] == "coare3"       # from the base
-    assert slab["surface_gustiness_zi"] == 300.0         # from the base
+    assert slab["surface_bulk_scheme"] == "large_yeager_cesm"  # production
+    assert slab["surface_gustiness_zi"] is None          # production: unset
     # the slab deck overrides the base's 3e-4 floor: CLUBB's liquid partition
     # requires 0 (user 2026-11-22, production turbulence copied)
     assert slab["cloud_q_c_diagnostic"] == 0.0
@@ -164,7 +164,7 @@ def test_config_sets_defaults_cli_overrides():
     parser = mod.build_parser()
     parser.set_defaults(**load_yaml_config(str(CMIP_CONFIGS[0]), parser))
     args = parser.parse_args(["--days", "90"])
-    assert args.surface_bulk_scheme == "coare3"   # from the base via include
+    assert args.surface_bulk_scheme == "large_yeager_cesm"  # run config overrides base
     assert args.ocean == "two_layer"              # from the run config
     assert args.days == 90                        # explicit CLI overrides config
 
