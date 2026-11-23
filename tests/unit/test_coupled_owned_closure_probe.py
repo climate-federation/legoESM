@@ -320,3 +320,4 @@ def test_water_bar_fails_rows_past_the_bar_and_nan_but_not_slab_heat():
     rel = {"atm_water": -3.2e-4, "system_water": 2e-3,
            "land_water": float("nan"), "slab_heat": 0.5}
     assert probe.water_bar_failures(rel) == ["system_water", "land_water"]
+
