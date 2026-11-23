@@ -75,6 +75,16 @@ def water_bar_failures(rel: dict) -> list:
             if r != "slab_heat" and not abs(v) <= WATER_BAR_REL]
 
 
+def water_bar_verdict(rel: dict, p_atm: float) -> list | None:
+    """Failing water rows, or None (N/A) when the run has exactly zero
+    precipitation to scale by; a non-finite precipitation fails.  Pure."""
+    if p_atm == 0.0:
+        return None
+    if not np.isfinite(p_atm):
+        return ["precipitation"]
+    return water_bar_failures(rel)
+
+
 def budget_rows(s0: dict, s1: dict, f: dict) -> dict:
     """Residual rows from start/end storages ``s0``/``s1`` (keys ``STORES``)
     and run-integrated fluxes ``f`` (keys as the module docstring).  Pure."""
@@ -905,13 +915,10 @@ def main(argv=None) -> int:
     if args.trace_positivity:
         print("POSITIVITY", {kk: f"{v:.6e}" for kk, v in pos_rec.items()})
     print("INJECT rel_err", ctrl)
-    if np.isfinite(scale_w):
-        bad = water_bar_failures(out["rel"])
-        print(f"BAR water |rel| <= {WATER_BAR_REL:g}:",
-              "PASS" if not bad else f"FAIL {bad}")
-    else:
-        bad = []
-        print("BAR water N/A: no precipitation to scale the rows by")
+    bad = water_bar_verdict(out["rel"], F["P_atm"])
+    print(f"BAR water |rel| <= {WATER_BAR_REL:g}:",
+          "N/A (no precipitation)" if bad is None
+          else ("PASS" if not bad else f"FAIL {bad}"))
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=1))
     mp.undo()

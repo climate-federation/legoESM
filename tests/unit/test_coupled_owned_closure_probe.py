@@ -321,3 +321,10 @@ def test_water_bar_fails_rows_past_the_bar_and_nan_but_not_slab_heat():
            "land_water": float("nan"), "slab_heat": 0.5}
     assert probe.water_bar_failures(rel) == ["system_water", "land_water"]
 
+
+def test_water_bar_verdict_is_na_only_for_zero_precipitation():
+    ok = {"atm_water": 1e-4, "slab_heat": 0.5}
+    assert probe.water_bar_verdict(ok, 0.0) is None
+    assert probe.water_bar_verdict(ok, 1.0e9) == []
+    assert probe.water_bar_verdict(ok, float("nan")) == ["precipitation"]
+    assert probe.water_bar_verdict(ok, float("inf")) == ["precipitation"]
