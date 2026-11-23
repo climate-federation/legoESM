@@ -111,6 +111,10 @@ def test_injected_atmosphere_source_fails_the_bar():
     (["--grid", "fv3duo", "--resolution", "12"], "--resolution and --dt"),
     (["--grid", "latlon", "--dt", "300"], "--resolution and --dt"),
     (["--grid", "latlon", "--resolution", "12"], "--resolution and --dt"),
+    (["--surfdata-path", "s.nc"], "unrecognized arguments"),
+    (["--deck", "d.yaml", "--energy-terms"], "--energy-terms"),
+    (["--deck", "d.yaml", "--days", "1.5"], "whole --days"),
+    (["--deck", "d.yaml", "--dt", "300"], "the deck sets --dt"),
 ])
 def test_real_case_options_refuse_missing_or_stray_paths(argv, msg, capsys):
     with pytest.raises(SystemExit):
@@ -254,3 +258,59 @@ def test_stale_emission_term_is_the_one_call_lag(capsys):
     assert abs(float(lines["stale"][2])) > 1e-6 * e_atm   # non-vacuous
     assert abs(float(lines["stale_minus_lag"][2])) < 1e-12 * e_atm, (
         lines["stale_minus_lag"])
+
+
+def test_held_evaporation_in_flight_follows_the_physics_schedule():
+    """The atmosphere first applies a land call's held evaporation at the next
+    physics step: with physics every 6 steps a call at the end of step 7 is
+    still wholly in flight at step 12 (measured on the CMIP slab deck: debit
+    minus receipt = 6 steps of the last call's rate)."""
+    assert probe.steps_applied(7, 12, 6) == 0
+    assert probe.steps_applied(1, 12, 6) == 6
+    assert probe.steps_applied(10, 12, 1) == 2       # physics every step: n
+    fl, area, ev, dt, K = np.ones(2), np.ones(2), np.full(2, 1e-5), 300.0, 6
+    full = float(np.sum(fl * ev * area)) * K * dt
+    assert np.isclose(probe.land_in_flight(fl, area, 0.0, ev, 5, K, dt,
+                                           n_applied=0), full)
+    assert np.isclose(probe.land_in_flight(fl, area, 0.0, ev, 5, K, dt),
+                      full / K)
+
+
+@pytest.mark.slow
+def test_step_trace_pairs_each_step_with_the_state_it_made(tmp_path):
+    """The driver installs a step's state only after the probe's hook
+    returns, so each record is completed on the next call: the per-step
+    water changes then sum to the run's whole change, and the first step is
+    not the identity.  A dump needs no trace."""
+    import json
+    base = ["--grid", "latlon", "--resolution", "12", "--dt", "600",
+            "--vertical-coord", "cam_l32", "--nlev", "32", "--days", "0.0625"]
+    out = tmp_path / "trace.json"
+    assert probe.main(base + ["--trace-atm-steps", "--json", str(out)]) == 0
+    res = json.loads(out.read_text())
+    steps = res["atm_steps"]
+    assert [r["step"] for r in steps] == list(range(1, res["steps"] + 1))
+    total = res["stores1"]["W_atm"] - res["stores0"]["W_atm"]
+    assert np.isclose(sum(r["dW"] for r in steps), total,
+                      rtol=1e-9, atol=1.0), (sum(r["dW"] for r in steps), total)
+    assert steps[0]["dW"] != 0.0
+    out2 = tmp_path / "dump.json"
+    assert probe.main(base + ["--dump-step", "2", "--json", str(out2)]) == 0
+    assert (tmp_path / "dump.step2.npz").exists()
+
+
+@pytest.mark.slow
+def test_a_land_call_after_the_last_step_is_booked(tmp_path):
+    """With the land called every step (K=1) the run ends on a land call
+    made after the last dycore step; its debit and its whole interval in
+    flight must be booked, or the land row is off by one step of land
+    evaporation."""
+    import json
+    out = tmp_path / "k1.json"
+    assert probe.main(["--grid", "latlon", "--resolution", "12", "--dt",
+                       "600", "--vertical-coord", "cam_l32", "--nlev", "32",
+                       "--days", "0.0625", "--land-update-s", "300",
+                       "--json", str(out)]) == 0
+    res = json.loads(out.read_text())
+    assert abs(res["rows"]["land_water"]) < 1.0e3, res["rows"]["land_water"]
+    assert abs(res["rows"]["land_water_debit"]) < 1.0e3

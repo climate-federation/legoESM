@@ -2,8 +2,9 @@
 
 - solar-weighted gray / 550 nm band from the file's own ``wl1_sun``/``wl2_sun``
   (order-independent; no edges -> old flat mean);
-- volcanic SW (``ext_sun``) placed at its stratospheric pressure, not spread
-  through the troposphere, and excluded from ``aerosol_ccn_aod``;
+- volcanic SW (``ext_sun`` + own optics) placed at its stratospheric pressure,
+  not spread through the troposphere, kept out of the grey ``aerosol_od`` and
+  excluded from ``aerosol_ccn_aod``;
 - ``aerosol_ccn_aod`` drives the AOD->CCN proxy when present, byte-identical
   sum(aerosol_od) when absent;
 - ``--aerosol-ccn-file`` -> ExperimentConfig -> AerosolConfig.ccn_path -> CCN.
@@ -59,16 +60,10 @@ def _kinne_file(path, band_aod, edges=True, lon=False):
 
 
 def _volc_file(path, ext=0.01, alt=(18.0, 20.0, 22.0, 24.0)):
-    """CMIP6-shaped ``ext_sun(solar_bands, lat, altitude, month)`` [1/km]."""
-    with netCDF4.Dataset(path, "w") as ds:
-        for d, n in (("solar_bands", 3), ("lat", _LAT.size), ("altitude", len(alt)), ("month", 12)):
-            ds.createDimension(d, n)
-        ds.createVariable("lat", "f8", ("lat",))[:] = _LAT
-        ds.createVariable("altitude", "f8", ("altitude",))[:] = np.asarray(alt)
-        ds.createVariable("ext_sun", "f8", ("solar_bands", "lat", "altitude", "month"))[:] = ext
-        ds.createVariable("wl1_sun", "f8", ("solar_bands",))[:] = _WL1
-        ds.createVariable("wl2_sun", "f8", ("solar_bands",))[:] = _WL2
-    return str(path)
+    """CMIP6-shaped volcanic file with its own solar-band optics (14 RRTMG
+    bands, see ``test_volcanic_sw_optics.volc_sw_file``)."""
+    from tests.unit.test_volcanic_sw_optics import volc_sw_file
+    return volc_sw_file(path, ext=ext, alt=alt)
 
 
 def test_solar_weighted_and_visible_band_collapse(tmp_path):
@@ -139,9 +134,14 @@ def test_volcanic_sw_above_tropopause_and_out_of_ccn(tmp_path):
     volc = _volc_file(tmp_path / "v.nc")  # 17-25 km, column ~0.08
     f0, aer0, _ = _driver_forcing(_cfg(aerosol_file=trop))
     f1, aer1, p_full = _driver_forcing(_cfg(aerosol_file=trop, volcanic_aerosol_file=volc))
-    dv = aer1 - aer0
-    np.testing.assert_allclose(dv.sum(-1), 0.01 * 8.0, rtol=1e-6)  # all of it lands
-    assert np.abs(dv[p_full > 3.0e4]).max() < 1e-12  # none below 300 hPa
+    assert f0._aerosol_sw_volc is None
+    # Volcanic SW is carried with its own optics, NOT in the grey field.
+    np.testing.assert_array_equal(aer1, aer0)
+    mom = np.asarray(f1._aerosol_sw_volc)            # (ncol, nlev, 3, 14)
+    assert mom.shape == aer0.shape + (3, 14)
+    np.testing.assert_allclose(mom[..., 0, :].sum(1), 0.01 * 8.0, rtol=1e-6)  # all lands
+    np.testing.assert_allclose(mom[..., 1, :], 0.99 * mom[..., 0, :], rtol=1e-6)
+    assert np.abs(mom[p_full > 3.0e4]).max() < 1e-12  # none below 300 hPa
     # CCN: tropospheric 550 nm column, volcanic excluded.
     np.testing.assert_allclose(np.asarray(f1._aerosol_ccn_aod), 0.20, rtol=1e-12)
     np.testing.assert_array_equal(np.asarray(f1._aerosol_ccn_aod),
@@ -268,19 +268,23 @@ def test_driver_volcanic_cut_at_state_tropopause(tmp_path):
     volc = _volc_file(tmp_path / "v.nc")
     trop = _kinne_file(tmp_path / "t.nc", [0.05, 0.20, 0.40], lon=True)
     cfg = _cfg(aerosol_file=trop, volcanic_aerosol_file=volc)
-    _, aer0, _ = _driver_forcing(_cfg(aerosol_file=trop))
-    _, aer_c, _ = _driver_forcing(cfg)
-    _, aer_w, p_full = _driver_forcing(
+
+    def vtau(f):  # per-layer volcanic tau of one band (all bands equal here)
+        return np.asarray(f._aerosol_sw_volc)[..., 0, 0]
+
+    f_c, _, _ = _driver_forcing(cfg)
+    f_w, _, p_full = _driver_forcing(
         cfg, temp_fn=lambda p: _std_temp(p, z_tp_m=19.0e3, t0=300.0)[0])
-    np.testing.assert_allclose((aer_c - aer0).sum(-1), 0.01 * 8.0, rtol=1e-6)
-    dv = aer_w - aer0
+    np.testing.assert_allclose(vtau(f_c).sum(-1), 0.01 * 8.0, rtol=1e-6)
+    dv = vtau(f_w)
     assert (dv.sum(-1) < 0.99 * 0.08).all() and (dv.sum(-1) > 0.0).all()
     p_tp = _std_temp(1.0e5, z_tp_m=19.0e3, t0=300.0)[1]
     assert np.abs(dv[p_full > 2.0 * p_tp]).max() < 1e-12
     # Explicit ``temp=`` (spectral caller) == state T; off-grid shape -> climatology.
     tp = _std_temp(jnp.asarray(p_full), z_tp_m=19.0e3, t0=300.0)[0]
-    np.testing.assert_array_equal(_driver_forcing(cfg, temp=tp)[1], aer_w)
-    np.testing.assert_array_equal(_driver_forcing(cfg, temp=tp[:, :-1])[1], aer_c)
+    np.testing.assert_array_equal(vtau(_driver_forcing(cfg, temp=tp)[0]), dv)
+    np.testing.assert_array_equal(
+        vtau(_driver_forcing(cfg, temp=tp[:, :-1])[0]), vtau(f_c))
 
 
 def test_owned_temp_selects_owned_faces():

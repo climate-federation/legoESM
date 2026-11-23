@@ -977,6 +977,7 @@ def _call_radiation_backend(
     o3_top_vmr: jnp.ndarray | None = None,
     aerosol_od: jnp.ndarray | None = None,
     aerosol_lw_od: jnp.ndarray | None = None,
+    aerosol_sw_volc: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
     eccf: float | jnp.ndarray = 1.0,
     tsi: jnp.ndarray | None = None,
@@ -1045,6 +1046,10 @@ def _call_radiation_backend(
         ``aerosol_absorption_optical_depth_lw``.  ``None`` (default) is a
         no-op in the solver — byte-identical to no volcanic LW aerosol.
         Ignored by gray radiation.
+    aerosol_sw_volc : jnp.ndarray or None
+        Volcanic SHORTWAVE aerosol with its own per-band optics from the
+        CMIP6 file, (ncol, nlev, 3, n_bnd_sw) moments (tau, tau*ssa,
+        tau*ssa*g), passed to the solver as ``aerosol_volcanic_moments_sw``.
     solar_spectral_fraction : jnp.ndarray or None
         Per-g-point solar weights for spectral solar-cycle forcing,
         passed through to ``solve_columns``.
@@ -1061,6 +1066,11 @@ def _call_radiation_backend(
             "open_ocean_frac (direct/diffuse ocean albedo split) is wired for "
             f"the rrtmgp solver only; scheme {radiation_config.scheme!r} has a "
             "single surface albedo and would silently drop the direct beam.")
+    if aerosol_sw_volc is not None and radiation_config.scheme != "rrtmgp":
+        raise ValueError(
+            "aerosol_sw_volc (volcanic SW per-band optics) is wired for the "
+            f"rrtmgp solver only; scheme {radiation_config.scheme!r} would "
+            "silently drop the volcanic shortwave aerosol.")
     if radiation_config.scheme == "simple_lw":
         return _simple_lw_radiation(
             T=T, p_half=p_half, q_v=q_v, q_cloud=q_cloud, q_ice=q_ice,
@@ -1225,6 +1235,8 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    if aerosol_sw_volc is not None:
+        _rad_kwargs["aerosol_volcanic_moments_sw"] = aerosol_sw_volc
     if cloud_config is not None:
         # One bulk ice density for the PSD radius and the optics size (CAM6).
         _rad_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
@@ -1814,6 +1826,9 @@ def _make_hydrostatic_radiation(
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
         )
+        _aer_volc_ext = (
+            forcing.get("aerosol_sw_volc") if forcing is not None else None
+        )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
         # Tile-blended SURFACE SHORTWAVE ALBEDO as a per-step TRACED forcing
         # (same channel as T_sfc / o3 / ghg above, so the JIT'd step never
@@ -2088,6 +2103,8 @@ def _make_hydrostatic_radiation(
                 _aer_ext = shard_columns(_aer_ext, column_mesh)
             if _aer_lw_ext is not None:
                 _aer_lw_ext = shard_columns(_aer_lw_ext, column_mesh)
+            if _aer_volc_ext is not None:
+                _aer_volc_ext = shard_columns(_aer_volc_ext, column_mesh)
             if _cf_ovr is not None:
                 _cf_ovr = shard_columns(_cf_ovr, column_mesh)
             if q_snow_col is not None:
@@ -2133,6 +2150,7 @@ def _make_hydrostatic_radiation(
             o3_top_vmr=_o3_top_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
+            aerosol_sw_volc=_aer_volc_ext,
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
             conv_precip=_conv_precip_col,
@@ -2193,6 +2211,7 @@ def _make_hydrostatic_radiation(
                 o3_top_vmr=_o3_top_ext,
                 aerosol_od=_aer_ext,
                 aerosol_lw_od=_aer_lw_ext,
+                aerosol_sw_volc=_aer_volc_ext,
                 ghg_vmr_override=_ghg_ext,
                 cloud_fraction_override=None,
                 conv_precip=None,
@@ -3264,6 +3283,9 @@ def _make_spectral_pe_radiation(
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
         )
+        _aer_volc_ext = (
+            forcing.get("aerosol_sw_volc") if forcing is not None else None
+        )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
 
         # Surface albedo / emissivity overrides: a per-step TRACED
@@ -3427,6 +3449,7 @@ def _make_spectral_pe_radiation(
             tsi=_tsi_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
+            aerosol_sw_volc=_aer_volc_ext,
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
             conv_mass_flux_up=_conv_mf_col,

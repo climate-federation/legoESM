@@ -98,15 +98,28 @@ def land_emission_terms(f_land, eps_land, T_land, eps_eff, T_rad, lw_down,
     return e_land, share * (eps_eff * lw_down - lw_net - emit_bb)
 
 
-def land_in_flight(f_land, area, win_sum_precip, held_evap, n, K, dt):
+def land_in_flight(f_land, area, win_sum_precip, held_evap, n, K, dt,
+                   n_applied=None):
     """Water between land and atmosphere at a land-cadence phase [kg]: the
     ``n`` rain samples (``win_sum_precip``, sum of per-cell rates) the land
     has not consumed yet, plus the held land evaporation the land already
-    debited for its ``K``-step interval but the atmosphere still applies for
-    ``K - n`` steps.  Both are owed to the land side.  Pure."""
+    debited for its ``K``-step interval but the atmosphere has applied for
+    only ``n_applied`` steps (default ``n``: physics every step).  Both are
+    owed to the land side.  Pure."""
     rain = (np.sum(f_land * win_sum_precip * area) * dt
             if n > 0 else 0.0)
-    return float(rain + np.sum(f_land * held_evap * area) * (K - n) * dt)
+    m = n if n_applied is None else n_applied
+    return float(rain + np.sum(f_land * held_evap * area) * max(0, K - m)
+                 * dt)
+
+
+def steps_applied(call_step, n_steps, physics_every):
+    """Steps the atmosphere has applied a land call's held evaporation by the
+    end of step ``n_steps``: from the first physics step (``(s - 1) %
+    physics_every == 0``) after the call's step on.  Pure."""
+    s = call_step + 1
+    s += (-(s - 1)) % physics_every
+    return max(0, n_steps - s + 1)
 
 
 def stores(a: dict, k: dict) -> dict:
@@ -175,14 +188,53 @@ def main(argv=None) -> int:
     ap.add_argument("--dt", type=float, default=None,
                     help="dynamics step [s] (mpas default 300)")
     ap.add_argument("--json", default=None)
-    args = ap.parse_args(argv)
-    if args.grid != "mpas" and (args.resolution is None or args.dt is None):
+    ap.add_argument("--deck", default="",
+                    help="build the run from this coupled deck through "
+                    "run_coupled (unknown flags go to it, e.g. data paths) "
+                    "instead of the probe's own config; the slab heat row is "
+                    "N/A unless the deck's ocean is the one-layer slab")
+    ap.add_argument("--windows", type=int, default=0,
+                    help="--deck: stop after this many coupling windows "
+                    "(instead of --days)")
+    ap.add_argument("--trace-atm-steps", action="store_true",
+                    help="record the atmosphere's water change and E-P of "
+                    "every step in the JSON (atm_steps)")
+    ap.add_argument("--dump-step", type=int, nargs="+", default=[],
+                    help="save step N's per-column ledger water rows, "
+                    "evaporation, precipitation and water species (npz next "
+                    "to --json)")
+    ap.add_argument("--trace-positivity", action="store_true",
+                    help="book the water the dycore's positivity stage (and "
+                    "its vapour payment) changes, per call")
+    args, deck_argv = ap.parse_known_args(argv)
+    if args.windows and not args.deck:
+        ap.error("--windows needs --deck")
+    if deck_argv and not args.deck:
+        ap.error(f"unrecognized arguments: {' '.join(deck_argv)}")
+    if args.deck and args.energy_terms:
+        ap.error("--energy-terms is not wired for --deck")
+    if args.deck and args.days != int(args.days):
+        ap.error("--deck needs whole --days (run_coupled takes an int)")
+    own = ("micro", "warm_rain", "land_update_s", "convection", "ic",
+           "ic_path", "vertical_coord", "nlev", "land", "rad_update_steps",
+           "grid", "resolution", "dt")
+    stray = [o for o in own if getattr(args, o) != ap.get_default(o)]
+    if args.deck and stray:
+        ap.error("the deck sets " + ", ".join(
+            "--" + o.replace("_", "-") for o in stray))
+    if args.deck:
+        pass
+    elif args.grid != "mpas" and (args.resolution is None or args.dt is None):
         ap.error(f"--grid {args.grid} needs --resolution and --dt")
     if args.ic == "era5" and not args.ic_path:
         ap.error("--ic era5 needs --ic-path")
     real_paths = ("land_mask_file", "clm_surfdata_path", "surfdata",
                   "topography")
-    if args.land == "real":
+    if args.deck:   # the same flags, the deck's own data paths
+        for p in real_paths:
+            if getattr(args, p):
+                deck_argv += ["--" + p.replace("_", "-"), getattr(args, p)]
+    elif args.land == "real":
         missing = [p for p in real_paths if not getattr(args, p)]
         if missing:
             ap.error("--land real needs " + ", ".join(
@@ -211,7 +263,9 @@ def main(argv=None) -> int:
     from legoesm.ice.config import SeaIceConfig
 
     mp = MonkeyPatch()
-    if args.land == "synthetic":
+    if args.deck:
+        land_cfg = {}
+    elif args.land == "synthetic":
         lp._patch_land_loaders(mp)
         land_cfg = dict(land_mask_path="synthetic.nc")
     else:
@@ -263,16 +317,36 @@ def main(argv=None) -> int:
         rad_update_steps=args.rad_update_steps, **extra)
     cc = PRESETS["aquaplanet"]()._replace(
         coupling_dt=win, atm_owns_surface=True, f_land_mode="analytical")
-    d = CoupledESMDriver(cfg, cc, output_dir=tempfile.mkdtemp())
+    if args.deck:
+        from scripts.run.run_coupled import main as run_coupled_main
+        d = run_coupled_main(
+            ["--config", args.deck, "--days", str(int(args.days)),
+             "--output", tempfile.mkdtemp(), *deck_argv], build_only=True)
+        cfg, cc = d._atm.config, d.coupled_cfg
+        if not cc.atm_owns_surface:
+            raise SystemExit("--deck: the probe books the owned surface only")
+        win = float(cc.coupling_dt)
+        disc = cfg.dycore.discretization
+        args.grid = ("fv3duo" if disc == "fv3_duo" else
+                     "latlon" if cfg.grid.grid_type == "latlon" else "mpas")
+        nlev = cfg.grid.nlev
+        DT = float(cfg.dycore.dt)
+        land_cfg, extra = {"deck": args.deck, "deck_argv": deck_argv}, {}
+    else:
+        d = CoupledESMDriver(cfg, cc, output_dir=tempfile.mkdtemp())
     d.setup()
-    ice = d._sfc_state.ice
-    d._sfc_state = d._sfc_state._replace(ice=ice._replace(
-        h_ice=ice.h_ice.replace(data=jnp.full_like(ice.h_ice.data, 0.8)),
-        concentration=ice.concentration.replace(
-            data=jnp.full_like(ice.concentration.data, 0.3))))
-    d._surface_handback = initial_handback(
-        d._sfc_state, d._tile_config, d._ice_config or SeaIceConfig(),
-        d._lake_config or LakeConfig())
+    if args.windows:
+        args.days = args.windows * win / 86400.0
+        d._atm.config = d._atm.config._replace(days=args.days)
+    if not args.deck:   # a deck keeps its own ice
+        ice = d._sfc_state.ice
+        d._sfc_state = d._sfc_state._replace(ice=ice._replace(
+            h_ice=ice.h_ice.replace(data=jnp.full_like(ice.h_ice.data, 0.8)),
+            concentration=ice.concentration.replace(
+                data=jnp.full_like(ice.concentration.data, 0.3))))
+        d._surface_handback = initial_handback(
+            d._sfc_state, d._tile_config, d._ice_config or SeaIceConfig(),
+            d._lake_config or LakeConfig())
     atm = d._atm
     # the driver's CFL clamps can shorten the step (the lat-lon pole cell):
     # every per-step sum below is over the step the model actually took
@@ -285,20 +359,23 @@ def main(argv=None) -> int:
     f_lake = _np(tc.f_lake).reshape(-1)
     k = dict(area=area, f_land=f_land, f_water=1.0 - f_land - f_lake,
              dz=np.asarray(atm._land_soil_dz(), dtype=np.float64),
-             C_mix=ocfg.rho_ocean * ocfg.c_ocean * ocfg.h_mix,
+             # one-layer slab only: the two-layer slab's deep layer and its
+             # restoring are not booked, so its heat row is N/A (NaN)
+             C_mix=(ocfg.rho_ocean * ocfg.c_ocean * ocfg.h_mix
+                    if ocfg.mode == "slab" else float("nan")),
              g=constants.g, rho_water=constants.rho_water,
              rho_ice=constants.rho_ice)
     print("CONFIG", json.dumps(dict(grid=args.grid,
                                     resolution=cfg.grid.resolution,
-                                    days=args.days, micro=args.micro,
-                                    convection=args.convection,
-                                    ic=args.ic, ic_path=args.ic_path,
-                                    vertical_coord=args.vertical_coord,
+                                    days=args.days, micro=cfg.microphysics,
+                                    convection=cfg.convection,
+                                    ic=cfg.ic, ic_path=cfg.ic_path,
+                                    vertical_coord=cfg.grid.vertical_coord,
                                     nlev=nlev, land=args.land,
                                     land_cfg=land_cfg,
-                                    land_update_s=args.land_update_s,
+                                    land_update_s=cfg.land_update_seconds,
                                     extra=extra, ncells=n, window=win,
-                                    rad_update_steps=args.rad_update_steps,
+                                    rad_update_steps=cfg.rad_update_steps,
                                     dt=DT, dt_requested=DT_req,
                                     f_lake_max=float(f_lake.max()),
                                     f_land_mean=float(f_land.mean()))))
@@ -365,7 +442,9 @@ def main(argv=None) -> int:
         "q_flux", "q_freeze", "ocean_heat_extr", "pend_H", "pend_fw",
         "R_state", "pend_land", "boot_excess")}
     I = lambda x: float(np.sum(_np(x).reshape(-1) * area))  # noqa: E731
-    F.update(E_land_atm=0.0, A_band_land=0.0, E_land_charged=0.0)
+    F.update(E_land_atm=0.0, A_band_land=0.0, E_land_charged=0.0,
+             E_land_debit=0.0)
+    atm_steps, atm_prev = [], [0.0]
     hb_rec, solve, land_seen = {}, {}, {}
     if args.energy_terms:
         import legoesm.forcing.surface_utils as su
@@ -427,6 +506,94 @@ def main(argv=None) -> int:
         F["E_land_atm"] += I(e_land) * DT
         F["A_band_land"] += I(band) * DT
 
+    pos_rec = {}
+    if args.trace_positivity:
+        # host-side totals of the water each stage changes, from inside the
+        # jitted dycore step (area x dp x sum of water species)
+        import legoesm.core.conservation as cons
+
+        def _total(tr, dp, area):
+            q = sum((f.data if hasattr(f, "data") else f)
+                    for k_, f in tr.items() if k_ in WATER)
+            return jnp.sum(jnp.asarray(area)[..., None] * dp * q) / constants.g
+
+        def _book(name):
+            def cb(b, a):
+                pos_rec[name] = pos_rec.get(name, 0.0) + float(a) - float(b)
+            return cb
+
+        def _wrap(fn, name, area_of):
+            def w(tracers, T, dp, *a, **kw):
+                area = area_of(kw)          # before: the inner stage reads it
+                out = fn(tracers, T, dp, *a, **kw)
+                jax.debug.callback(_book(name), _total(tracers, dp, area),
+                                   _total(out[0], dp, area))
+                return out
+            return w
+        _awp, _pay = cons.apply_water_positivity, cons.pay_condensate_deficit_from_vapour
+        _area2d = [None]
+
+        def _area_kw(kw):
+            _area2d[0] = kw["area"]
+            return kw["area"]
+        mp.setattr(cons, "apply_water_positivity",
+                   _wrap(_awp, "positivity", _area_kw))
+        mp.setattr(cons, "pay_condensate_deficit_from_vapour",
+                   _wrap(_pay, "pay_from_vapour", lambda kw: _area2d[0]))
+    if args.trace_positivity and args.grid == "latlon":
+        # lat-lon dycore: the dp-weighted water each transport stage changes
+        # (raw flux-form tendency, the polar filter on the tracer tendencies
+        # and on dps), summed over every RK stage call [kg/s]
+        import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as llm
+        _tend0, _ff3, _ff2 = (llm.cgrid_latlon_pe_tendencies,
+                              llm.fourier_filter_3d, llm.fourier_filter)
+        ctx = {}
+
+        def _cb(name):
+            def cb(v):
+                pos_rec[name] = pos_rec.get(name, 0.0) + float(v)
+            return cb
+
+        def tend_w(s_, grid_, sig, cfg_, **kw):
+            out = _tend0(s_, grid_, sig, cfg_, **kw)
+            dps, dq = out[3], out[4]
+            area2 = jnp.asarray(grid_.area)
+            dp = llm.dp_from_hybrid(sig, s_.p_s)
+            dB = llm.dp_from_hybrid(sig, s_.p_s + 1.0) - dp
+            names = [k_ for k_ in dq if k_ in WATER]
+            qs = sum(s_.tracers[k_] for k_ in names)
+            r = sum(jnp.sum(area2[..., None] * dq[k_] * dp) for k_ in names)
+            r = (r + jnp.sum(area2 * jnp.sum(qs * dB, -1) * dps)) / constants.g
+            jax.debug.callback(_cb("transport_raw_rate"), r)
+            ctx.update(dp=dp, area=area2, qdB=jnp.sum(qs * dB, -1),
+                       names=list(dq), n=0, water=set(names), in_tend=True)
+            return out
+
+        def ff3_w(field, grid_, mask):
+            out = _ff3(field, grid_, mask)
+            i = ctx.get("n", 99)
+            ctx["n"] = i + 1
+            j = i - 3                      # dT, du, dv come first
+            if j >= len(ctx.get("names", ())) - 1:
+                ctx["in_tend"] = False     # past this stage's last tracer
+            if 0 <= j < len(ctx.get("names", ())) and \
+                    ctx["names"][j] in ctx["water"]:
+                jax.debug.callback(_cb("polar_filter_dq_rate"), jnp.sum(
+                    ctx["area"][..., None] * (out - field) * ctx["dp"])
+                    / constants.g)
+            return out
+
+        def ff2_w(field, grid_, mask):
+            out = _ff2(field, grid_, mask)
+            # dynamics stages only: the physics increment's dps filter is
+            # an increment [Pa], not a stage rate
+            if ctx.get("in_tend") and field.shape == ctx["qdB"].shape:
+                jax.debug.callback(_cb("polar_filter_dps_rate"), jnp.sum(
+                    ctx["area"] * ctx["qdB"] * (out - field)) / constants.g)
+            return out
+        mp.setattr(llm, "cgrid_latlon_pe_tendencies", tend_w)
+        mp.setattr(llm, "fourier_filter_3d", ff3_w)
+        mp.setattr(llm, "fourier_filter", ff2_w)
     model, orig = atm.model, atm.model.step
     n_steps = [0]
     dyn_dw = [np.zeros(2)]
@@ -450,7 +617,48 @@ def main(argv=None) -> int:
             return out_b
         dyn.step = traced_dyn_step
 
+    pend_rec = [None]
+
+    def land_check(call_step):
+        """Book a new land call: the land's own evaporation debit (its held
+        rate, debited ahead for the K steps the atmosphere then applies)."""
+        he = (atm._land_window or {}).get("land_held_evap")
+        if he is not None and he is not land_seen.get("held_obj"):
+            land_seen["held_obj"] = he
+            land_seen["call_step"] = call_step
+            F["E_land_debit"] += I(f_land * _np(he).reshape(-1)) * max(
+                1, int(round(cfg.land_update_seconds / DT))) * DT
+
+    def finish_rec():
+        """Complete the last step's record on the state it produced."""
+        rec, pend_rec[0] = pend_rec[0], None
+        if rec is None:
+            return
+        lw_, (ev_, pr_) = rec.pop("_led"), rec.pop("_sd")
+        if args.trace_atm_steps:
+            w_now = stores(arrays(), k)["W_atm"]
+            rec["dW"] = w_now - atm_prev[0]
+            atm_prev[0] = w_now
+            rec["species"] = species_totals()
+            if lw_ is not None:   # the physics' per-process water rows
+                from legoesm.diagnostics.process_ledger import (
+                    LEDGER_PROCESSES)
+                rec["ledger"] = {pn: I(lw_[:, i]) * DT
+                                 for i, pn in enumerate(LEDGER_PROCESSES)}
+            atm_steps.append(rec)
+        if rec["step"] in args.dump_step and args.json:
+            np.savez(str(Path(args.json).with_suffix(
+                f".step{rec['step']}.npz")),
+                     ledger_water=(np.full((n, 1), np.nan) if lw_ is None
+                                   else lw_),
+                     evap=ev_, precip=pr_, area=area, f_land=f_land,
+                     lat=_np(model.mesh.latCell).reshape(-1),
+                     dp=layer_dp(),
+                     **{sp: _np(atm.current_tracer(sp)).reshape(n, -1)
+                        for sp in carried})
+
     def step(*a, **kw):
+        finish_rec()
         out = orig(*a, **kw)
         sd = model._sfc_diag
         F["P_atm"] += I(sd[SL["precip"]]) * DT
@@ -464,6 +672,21 @@ def main(argv=None) -> int:
                 F["boot_excess"] = I(f_land * _np(hb).reshape(-1)) * (
                     max(1, int(round(cfg.land_update_seconds / DT))) - 1
                 ) * DT
+        # the land call runs after the dycore step, outside this hook: a
+        # call first seen in step n+1 was made at the end of step n
+        land_check(n_steps[0])
+        # this step's fluxes; its state is read at the next call (the driver
+        # installs the returned state only after this hook returns)
+        rec = dict(step=n_steps[0] + 1,
+                   EmP=(I(sd[SL["evap_sfc"]]) - I(sd[SL["precip"]])) * DT,
+                   E=I(sd[SL["evap_sfc"]]) * DT, P=I(sd[SL["precip"]]) * DT)
+        if "precip_conv_sfc" in SL and sd[SL["precip_conv_sfc"]] is not None:
+            rec["P_conv"] = I(sd[SL["precip_conv_sfc"]]) * DT
+        led = getattr(model, "_step_ledger", None)
+        rec["_led"] = None if led is None else _np(led)[:, :, 0]
+        rec["_sd"] = (_np(sd[SL["evap_sfc"]]).reshape(-1),
+                      _np(sd[SL["precip"]]).reshape(-1))
+        pend_rec[0] = rec
         L = atm._land_ml_state   # land's own runoff rate x f_land, per step
         F["R_state"] += float(np.sum(f_land * _np(
             L.runoff_surface + L.runoff_subsurface).reshape(-1) * area)) * DT
@@ -516,12 +739,15 @@ def main(argv=None) -> int:
 
     a0 = arrays()
     s0 = stores(a0, k)
+    atm_prev[0] = s0["W_atm"]
     sp0 = species_totals()
     trace = dict(W=s0["W_land"], E=0.0, P=0.0, R=0.0, WA=s0["W_atm"], EP=0.0,
                  DY=np.zeros(2))
     pend0 = (I(prev["H"].evap) * win
              + I(prev["O"].ice_lake_freshwater_flux) * win)
     status = d.run(segment_callback=sample)
+    finish_rec()
+    land_check(n_steps[0])   # a land call after the last step
     if abs(n_steps[0] * DT - args.days * 86400.0) > 1e-6 * DT:
         raise SystemExit(
             f"steps x dt = {n_steps[0]} x {DT:g} s != {args.days} d: the "
@@ -580,7 +806,10 @@ def main(argv=None) -> int:
     F["pend_land"] = land_in_flight(
         f_land, area,
         _np(lw["land_win_sum_precip_total"]).reshape(-1) if n_w > 0 else 0.0,
-        _np(lw["land_held_evap"]).reshape(-1), n_w, K, DT)
+        _np(lw["land_held_evap"]).reshape(-1), n_w, K, DT,
+        n_applied=steps_applied(
+            land_seen["call_step"], n_steps[0],
+            max(1, int(getattr(cfg, "physics_update_steps", 1) or 1))))
     print(f"PENDING land samples n={n_w} K={K} pend_land={F['pend_land']:.6e} kg")
     cw = getattr(atm, "_cpl_window", None) or {}
     if int(cw.get("cpl_win_n", 0)) != 0:
@@ -591,6 +820,18 @@ def main(argv=None) -> int:
     # H_{-1}..H_{N-1}; the difference is the pending term.
     print("status", status, "steps", n_steps[0], "exchanges", n_ex[0])
     rows = budget_rows(s0, s1, F)
+    # the land row on the land's own evaporation debits (not on the
+    # atmosphere's receipt); its in-flight term is the unconsumed rain only
+    rain_fl = land_in_flight(
+        f_land, area,
+        _np(lw["land_win_sum_precip_total"]).reshape(-1) if n_w > 0 else 0.0,
+        np.zeros(n), n_w, K, DT)
+    rows["land_water_debit"] = (s1["W_land"] - s0["W_land"] + rain_fl
+                                - (F["P_land"] - F["E_land_debit"]
+                                   - F["R_land"]))
+    print(f"ROW land_water_debit abs={rows['land_water_debit']: .6e} "
+          f"rel={rows['land_water_debit'] / (abs(F['P_atm']) or np.nan): .3e}"
+          f" (rain in flight {rain_fl:.6e} kg)")
 
     # Controls: (1) null run: same state both ends -> every storage row 0.
     null = budget_rows(s0, s0, {key: 0.0 for key in F})
@@ -617,7 +858,7 @@ def main(argv=None) -> int:
     scale_e = abs(F["q_ow"]) or float("nan")
     out = dict(status=status, steps=n_steps[0], exchanges=n_ex[0],
                stores0=s0, stores1=s1, fluxes=F, rows=rows,
-               null=null, inject_rel_err=ctrl,
+               null=null, inject_rel_err=ctrl, atm_steps=atm_steps,
                species0=sp0, species1=sp1,
                rel={r: rows[r] / (scale_e if r == "slab_heat" else scale_w)
                     for r in ("precip_split", "land_water", "slab_heat",
@@ -632,7 +873,22 @@ def main(argv=None) -> int:
           f"{rows['land_water'] - F['boot_excess']: .6e} kg")
     for sp in carried:
         print(f"SPECIES {sp:4s} {sp0[sp]: .9e} -> {sp1[sp]: .9e}")
+    if args.grid == "latlon":   # cell winds on the lat-lon column lane
+        lat_c = _np(model.mesh.latCell).reshape(-1)
+        cap = np.abs(lat_c) > np.deg2rad(60.0)
+        uu = _np(atm.state.u.data).reshape(n, -1)
+        vv = _np(atm.state.v.data).reshape(n, -1)
+        print("STATE " + json.dumps(dict(
+            max_abs_u=float(np.max(np.abs(uu))), max_abs_v=float(np.max(np.abs(vv))),
+            polar_cap_qv_mean=float(np.sum(a1["q_tot"][cap] * a1["dp"][cap]
+                                           * area[cap, None])
+                                    / np.sum(a1["dp"][cap] * area[cap, None])),
+            finite=bool(np.all(np.isfinite(uu)) and np.all(np.isfinite(vv))),
+            min_species={sp: float(np.min(_np(atm.current_tracer(sp))))
+                         for sp in carried})))
     print("NULL", {r: v for r, v in null.items()})
+    if args.trace_positivity:
+        print("POSITIVITY", {kk: f"{v:.6e}" for kk, v in pos_rec.items()})
     print("INJECT rel_err", ctrl)
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=1))

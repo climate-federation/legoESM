@@ -824,11 +824,8 @@ def _load_volcanic_profile(
 ) -> tuple[np.ndarray, object, np.ndarray, np.ndarray, np.ndarray]:
     """CMIP6 volcanic LW aerosol as a PRESSURE-RESOLVED absorption-OD profile.
 
-    ``kind="sw"`` returns the SHORTWAVE ``ext_sun`` EXTINCTION profile instead
-    (the SW slot takes extinction; SSA/g come from the radiation config), with
-    the solar bands collapsed solar-weighted via :func:`_collapse_sw_bands`
-    (flat mean if the file has no ``wl1_sun``/``wl2_sun``).  The B1/B3 notes
-    below are LW-only; B2 (stratospheric placement) applies to both.
+    The shortwave counterpart, with the file's own per-band optics, is
+    :func:`_load_volcanic_sw_optics_profile`.
 
     Fixes three defects in feeding ``bc_aeropt_cmip6_volc_lw_b16`` to the
     RRTMGP longwave ABSORPTION optical-depth slot:
@@ -865,10 +862,12 @@ def _load_volcanic_profile(
       = top / lowest pressure), aligned so ``aod_profile[..., j]`` occupies
       ``[p_edges[j], p_edges[j+1]]``.
 
-    Raises ``ValueError`` if the file lacks ``ext_earth`` (``ext_sun`` for
-    SW; caller treats as no profile source and stays byte-identical).
+    Raises ``ValueError`` if the file lacks ``ext_earth`` (caller treats as no
+    profile source and stays byte-identical).
     """
-    ext_name = "ext_sun" if kind == "sw" else "ext_earth"
+    if kind != "lw":
+        raise ValueError(f"_load_volcanic_profile: unknown kind {kind!r}")
+    ext_name = "ext_earth"
     ds = _open_forcing_dataset(path)
     if ext_name not in ds.data_vars:
         ds.close()
@@ -880,9 +879,7 @@ def _load_volcanic_profile(
     dims = list(var.dims)
 
     # B1: single-scattering albedo -> absorption fraction (1-omega) per band.
-    if kind == "sw":
-        omega = 0.0  # SW slot wants extinction, not absorption
-    elif "omega_earth" in ds.data_vars:
+    if "omega_earth" in ds.data_vars:
         omega = np.clip(
             np.asarray(ds["omega_earth"].values, dtype=np.float64), 0.0, 1.0,
         )
@@ -926,12 +923,7 @@ def _load_volcanic_profile(
          if d not in (time_name, lat_name, alt_name)),
         None,
     )
-    if band_name is not None and kind == "sw":
-        collapsed = _collapse_sw_bands(ds, abs_ext, dims, band_name)
-        abs_ext = (np.nanmean(abs_ext, axis=dims.index(band_name))
-                   if collapsed is None else collapsed)
-        dims = [d for d in dims if d != band_name]
-    elif band_name is not None:
+    if band_name is not None:
         band_axis = dims.index(band_name)
         if "wl1_earth" in ds and "wl2_earth" in ds:
             weights = _planck_band_weights(
@@ -952,22 +944,135 @@ def _load_volcanic_profile(
     order = [dims.index(time_name), dims.index(lat_name), dims.index(alt_name)]
     prof = np.transpose(abs_ext, order)  # (ntime, nlat, nalt) [1/km]
 
-    # Altitude layer edges (midpoints, outer half-steps) and thickness [km].
+    dz_km, p_edges = _volcanic_layer_geometry(alt_km)
+    # Per-layer AOD [-] = absorption extinction [1/km] * dz [km]; layer axis
+    # flipped to ASCENDING pressure (top first) to match ``p_edges``.
+    aod_profile = (prof * dz_km[None, None, :])[..., ::-1]
+    return mid_days, first_date, lat, aod_profile, p_edges
+
+
+def _volcanic_layer_geometry(alt_km: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Layer thickness ``dz_km`` (nalt,) [km] in file (altitude-ascending)
+    order, and the US-Std-Atm-1976 layer pressure edges (nalt+1,) [Pa] in
+    ASCENDING pressure (top first) -- the caller flips its layer axis to
+    match.  Edges are altitude midpoints with outer half-steps."""
     edges_km = np.empty(alt_km.size + 1, dtype=np.float64)
     edges_km[1:-1] = 0.5 * (alt_km[:-1] + alt_km[1:])
     edges_km[0] = alt_km[0] - 0.5 * (alt_km[1] - alt_km[0])
     edges_km[-1] = alt_km[-1] + 0.5 * (alt_km[-1] - alt_km[-2])
-    dz_km = np.abs(np.diff(edges_km))  # (nalt,)
+    dz_km = np.abs(np.diff(edges_km))
+    p_edges = _ussa1976_pressure(edges_km * 1000.0)[::-1]
+    return dz_km, p_edges
 
-    # Per-layer AOD [-] = absorption extinction [1/km] * dz [km].
-    aod_profile = prof * dz_km[None, None, :]
-    p_edges = _ussa1976_pressure(edges_km * 1000.0)  # [Pa]
 
-    # Return ASCENDING pressure (top first): altitude ascending -> pressure
-    # descending, so flip the layer axis and the edges together.
-    aod_profile = aod_profile[..., ::-1]
-    p_edges = p_edges[::-1]
-    return mid_days, first_date, lat, aod_profile, p_edges
+# Solar-band optics variables of the CMIP6 volcanic file that give the
+# stratospheric aerosol its OWN shortwave single-scattering properties.
+_VOLC_SW_OPTICS_VARS = ("ext_sun", "omega_sun", "g_sun", "wl1_sun", "wl2_sun")
+# RRTMGP shortwave band limits [cm-1], ascending (``bnd_limits_wavenumber`` of
+# rrtmgp-gas-sw-g112/g224; a test pins this table to both files).  The volcanic
+# file's bands are mapped 1:1 onto these in ascending-wavenumber order.
+_RRTMGP_SW_BAND_LIMITS_CM1 = (
+    (820.0, 2680.0), (2680.0, 3250.0), (3250.0, 4000.0), (4000.0, 4650.0),
+    (4650.0, 5150.0), (5150.0, 6150.0), (6150.0, 7700.0), (7700.0, 8050.0),
+    (8050.0, 12850.0), (12850.0, 16000.0), (16000.0, 22650.0),
+    (22650.0, 29000.0), (29000.0, 38000.0), (38000.0, 50000.0),
+)
+# The CMIP6 file is on the RRTMG-SW grid, whose one differing edge is
+# 2600 cm-1 where RRTMGP has 2680 cm-1 (RRTMG band 29 is 820-2600, band 16
+# 2600-3250); every other edge must agree to this relative tolerance.
+_RRTMG_RRTMGP_EDGE_DIFF_CM1 = ((2680.0, 2600.0),)
+_VOLC_SW_EDGE_RTOL = 1.0e-3
+
+
+@lru_cache(maxsize=4)
+def _load_volcanic_sw_optics_profile(path: str):
+    """CMIP6 volcanic SHORTWAVE optics as per-band scattering MOMENTS.
+
+    Returns ``(mid_days, first_date, lat, moments, p_edges, band_wn)``:
+
+    * ``moments`` ``(ntime, nlat, nlayer, 3, nband)`` float32, per file layer
+      and solar band: ``(tau, tau*omega, tau*omega*g)`` with
+      ``tau = ext_sun*dz``.  Moments (not tau/omega/g) because the layer remap
+      and the tropopause weight are linear in them, so remapping each moment
+      and mixing afterwards is exact.
+    * layer axis ASCENDING pressure (top first) aligned with ``p_edges``
+      ``(nlayer+1,)`` [Pa] (same geometry as the LW profile);
+    * bands sorted to ASCENDING wavenumber (the file ships RRTMG/E3SM order,
+      820-2600 cm-1 last; RRTMGP orders 820-2680 cm-1 first), with
+      ``band_wn`` ``(nband, 2)`` [cm-1] the sorted band edges so the radiation
+      can check the 1:1 band match against its own gas-optics table.
+
+    Returns None when the file has no ``ext_sun`` (a legacy column ``aod``
+    file, which stays in the column path).  A file with ``ext_sun`` but
+    without the other ``_VOLC_SW_OPTICS_VARS``, with bands that do not match
+    :data:`_RRTMGP_SW_BAND_LIMITS_CM1`, with non-finite values, or with a
+    negative asymmetry factor (the layer remap is for non-negative optical
+    depths) raises.
+    """
+    ds = _open_forcing_dataset(path)
+    if "ext_sun" not in ds:
+        ds.close()
+        return None
+    missing = [v for v in _VOLC_SW_OPTICS_VARS if v not in ds]
+    if missing:
+        ds.close()
+        raise ValueError(
+            f"Volcanic file {path!r} has ext_sun but no {missing}: the "
+            "stratospheric aerosol needs its own solar-band optics.")
+    var = ds["ext_sun"]
+    dims = list(var.dims)
+    alt_name = next((v for v in ("altitude", "alt", "height", "lev") if v in dims),
+                    None)
+    lat_name = next((v for v in ("lat", "latitude") if v in dims), None)
+    time_name = next((v for v in ("time", "month") if v in dims), None)
+    band_name = ds["wl1_sun"].dims[0]
+    if None in (alt_name, lat_name, time_name) or band_name not in dims:
+        ds.close()
+        raise ValueError(
+            f"CMIP6 volcanic file {path!r}: ext_sun dims {dims} lack an "
+            "altitude/latitude/time/solar-band axis.")
+    order = [dims.index(n) for n in (time_name, lat_name, alt_name, band_name)]
+    ext, omega, g = (
+        np.transpose(np.asarray(ds[v].values, dtype=np.float64), order)
+        for v in ("ext_sun", "omega_sun", "g_sun"))
+    for name, a in (("ext_sun", ext), ("omega_sun", omega), ("g_sun", g)):
+        if not np.all(np.isfinite(a)):
+            ds.close()
+            raise ValueError(f"Non-finite {name} in volcanic file {path!r}.")
+    if np.any(g < 0.0) or np.any(ext < 0.0):
+        ds.close()
+        raise ValueError(f"Negative ext_sun or g_sun in volcanic file {path!r}.")
+    if time_name == "time":
+        mid_days, first_date = _read_time_axis(ds)
+    else:
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(ext.shape[0])])
+        first_date = None
+    lat = np.asarray(ds[lat_name].values, dtype=np.float64)
+    alt_km = np.asarray(ds[alt_name].values, dtype=np.float64)
+    wl1 = np.asarray(ds["wl1_sun"].values, dtype=np.float64)
+    wl2 = np.asarray(ds["wl2_sun"].values, dtype=np.float64)
+    ds.close()
+
+    dz_km, p_edges = _volcanic_layer_geometry(alt_km)
+    tau = ext * dz_km[None, None, :, None]
+    ssa = np.clip(omega, 0.0, 1.0)
+    moments = np.stack([tau, tau * ssa, tau * ssa * np.clip(g, -1.0, 1.0)],
+                       axis=-2)                       # (t, lat, alt, 3, band)
+    # um -> cm-1: wn = 1e4 / wl.
+    band_wn = np.stack([1.0e4 / np.maximum(wl1, wl2),
+                        1.0e4 / np.minimum(wl1, wl2)], axis=-1)
+    srt = np.argsort(band_wn[:, 0])
+    band_wn = band_wn[srt]
+    ref = np.asarray(_RRTMGP_SW_BAND_LIMITS_CM1)
+    for a, b in _RRTMG_RRTMGP_EDGE_DIFF_CM1:
+        ref = np.where(ref == a, b, ref)
+    if band_wn.shape != ref.shape or not np.allclose(
+            band_wn, ref, rtol=_VOLC_SW_EDGE_RTOL, atol=0.0):
+        raise ValueError(
+            f"Volcanic file {path!r} solar bands {band_wn.tolist()} [cm-1] do "
+            "not map 1:1 onto the RRTMGP shortwave bands.")
+    moments = moments[..., srt][:, :, ::-1].astype(np.float32)
+    return mid_days, first_date, lat, moments, p_edges, band_wn
 
 
 @lru_cache(maxsize=16)
@@ -2341,29 +2446,40 @@ def get_aerosol_lw_at_time(config: AerosolConfig, day: float,
     return _volcanic_profile_at_time(config, day, lat_grid, "lw")
 
 
-def get_aerosol_sw_volcanic_at_time(config: AerosolConfig, day: float,
-                                    lat_grid: jnp.ndarray | None = None):
-    """SHORTWAVE volcanic extinction as a pressure-resolved profile.
+def get_aerosol_sw_volcanic_optics_at_time(config: AerosolConfig, day: float,
+                                           lat_grid: jnp.ndarray):
+    """SHORTWAVE volcanic aerosol with its OWN per-band optics from the file.
 
-    Same contract as :func:`get_aerosol_lw_at_time` but for ``ext_sun``
-    (solar-weighted gray band collapse), gated on ``volcanic_enabled``.  None
-    for a legacy column ``aod(time, lat)`` volcanic file (no profile) -- the
-    caller then keeps that column inside :func:`get_aerosol_at_time`.
+    Returns ``(moments_col, p_edges, band_wn)``: ``moments_col``
+    ``(ncol, nsrc, 3, nband)`` per-file-layer ``(tau, tau*omega,
+    tau*omega*g)`` (see :func:`_load_volcanic_sw_optics_profile`), ``p_edges``
+    ``(nsrc+1,)`` [Pa] ascending, ``band_wn`` ``(nband, 2)`` [cm-1].  None
+    when volcanic forcing is off or the file carries no ``omega_sun`` /
+    ``g_sun`` / band edges (the caller then keeps the gray path).
     """
     if not config.volcanic_enabled or not config.volcanic_path:
         return None
-    return _volcanic_profile_at_time(config, day, lat_grid, "sw")
-
-
-def _volcanic_profile_at_time(config, day, lat_grid, kind):
-    """Shared body of the LW / SW volcanic profile samplers."""
-    try:
-        mid_days_v, first_date_v, lat_v, prof_v, p_edges = (
-            _load_volcanic_profile(config.volcanic_path, kind)
-        )
-    except ValueError:
-        # File has no ext_earth / ext_sun band — treat as "no source".
+    loaded = _load_volcanic_sw_optics_profile(config.volcanic_path)
+    if loaded is None:
         return None
+    out = _volcanic_profile_at_time(config, day, lat_grid, "sw_optics",
+                                    loaded=loaded[:5])
+    return out[0], out[1], loaded[5]
+
+
+def _volcanic_profile_at_time(config, day, lat_grid, kind, loaded=None):
+    """Shared body of the LW / SW volcanic profile samplers.  Trailing axes
+    after the layer axis (the SW-optics moment/band axes) are carried along."""
+    if loaded is not None:
+        mid_days_v, first_date_v, lat_v, prof_v, p_edges = loaded
+    else:
+        try:
+            mid_days_v, first_date_v, lat_v, prof_v, p_edges = (
+                _load_volcanic_profile(config.volcanic_path, kind)
+            )
+        except ValueError:
+            # File has no ext_earth / ext_sun band — treat as "no source".
+            return None
 
     # Interpolate the (ntime, nlat, nlayer) profile in time -> (nlat, nlayer).
     if len(mid_days_v) > 12:
@@ -2385,7 +2501,7 @@ def _volcanic_profile_at_time(config, day, lat_grid, kind):
         # intentionally NOT summed away (unlike the gray SW/column path).
         prof_col = _interp_zonal_to_grid(lat_v, prof_t, lat_grid)
         prof_col = jnp.reshape(
-            jnp.clip(prof_col, 0.0, None), (-1, prof_t.shape[-1]),
+            jnp.clip(prof_col, 0.0, None), (-1, *prof_t.shape[1:]),
         )
         return prof_col, jnp.asarray(p_edges)
 

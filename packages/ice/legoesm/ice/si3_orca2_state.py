@@ -29,6 +29,7 @@ from pathlib import Path
 import re
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -3162,7 +3163,7 @@ def _si3_pra_subcycle_cond_dispatch(
         jnp.int32(max(0, nn_hls - 1)),
     )
     if any(isinstance(leaf, jax.core.Tracer)
-           for leaf in jax.tree_util.tree_leaves((init_ops, icycle_arr))):
+           for leaf in jax.tree_util.tree_leaves((init_ops, icycle_arr, kt_parity))):
         # DECISION 198: traced callers run `DO jt = 1, icycle` (`:156-498`) as one
         # three-step lax.scan with the same per-jt ihls, sweep parity and
         # `icycle >= jt` selection as the unrolled calls below; the body is
@@ -3197,7 +3198,7 @@ def _si3_pra_subcycle_cond_dispatch(
 
 
 def si3_dyn_adv_pra_orca2(
-    kt: int,
+    kt: int | Field,
     u_ice: Field,
     v_ice: Field,
     h_i: Field,
@@ -3283,7 +3284,14 @@ def si3_dyn_adv_pra_orca2(
     if not isinstance(config, SI3ORCA2StateConfig):
         raise ValueError("si3_dyn_adv_pra_orca2 requires an explicit SI3ORCA2StateConfig")
     cfg = config
-    if kt < 1 or cfg.nn_fsbc < 1:
+    traced_kt = isinstance(kt, jax.core.Tracer)
+    concrete_kt = kt if traced_kt else np.asarray(kt)
+    if (
+        concrete_kt.shape != ()
+        or concrete_kt.dtype.kind not in "iu"
+        or (not traced_kt and int(concrete_kt) < 1)
+        or cfg.nn_fsbc < 1
+    ):
         raise ValueError("si3_dyn_adv_pra_orca2 requires kt >= 1 and nn_fsbc >= 1")
     sr = nemo_source_round
     consts = cfg.ice_constants
@@ -3311,7 +3319,15 @@ def si3_dyn_adv_pra_orca2(
 
     zudy = sr(u_ice * grid.e2u)
     zvdx = sr(v_ice * grid.e1v)
-    kt_parity = ((int(kt) - 1) // int(cfg.nn_fsbc)) % 2
+    if traced_kt:
+        kt_checked = eqx.error_if(
+            jnp.asarray(kt),
+            kt <= 0,
+            "si3_dyn_adv_pra_orca2 requires kt >= 1",
+        )
+        kt_parity = ((kt_checked - 1) // int(cfg.nn_fsbc)) % 2
+    else:
+        kt_parity = ((int(kt) - 1) // int(cfg.nn_fsbc)) % 2
 
     init_carry = (
         ato_i,
@@ -4284,7 +4300,7 @@ def si3_glob_2dsum_ddpdd(
 def si3_eos_fzp(
     sss_m: Field,
     *,
-    ln_teos10: bool = True,
+    ln_teos10: bool,
     kbnd: int = 2,
     nn_hls: int = 2,
     _plant_wrong_eos: bool = False,
@@ -4296,6 +4312,8 @@ def si3_eos_fzp(
     - `ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:1787-1848`
     - `src/ICE/iceistate.F90:125`, `:263`
     """
+    if type(ln_teos10) is not bool:
+        raise TypeError("si3_eos_fzp ln_teos10 selector must be a static bool")
     sr = nemo_source_round
     sss = jnp.asarray(sss_m, dtype=jnp.float64)
     dtype = sss.dtype
@@ -4656,10 +4674,10 @@ def si3_o2_scalar_initial_state(
             "O2 requires ORCA2_SAS_ICE namelist initialization "
             "(ln_iceini=True, nn_iceini_file=0)"
         )
-    if not cfg.ln_teos10:
-        raise ValueError("O2 ORCA2_SAS_ICE requires ln_teos10=True")
+    if type(cfg.ln_teos10) is not bool:
+        raise TypeError("O2 ln_teos10 selector must be a static bool")
     if cfg.ln_ice_embd:
-        raise ValueError("O2 owns only ORCA2_SAS_ICE's levitating-ice branch")
+        raise ValueError("O2 owns only the ORCA2 levitating-ice branch")
     if cfg.ln_rstart:
         raise ValueError("O2 ice_istate is not entered on a restart")
     nn_hls = int(cfg.nn_hls)

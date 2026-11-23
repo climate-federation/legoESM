@@ -252,6 +252,9 @@ class LatLonCGridColumnModel:
                         return self._tend_to_grid(tend), out
                 new, _ = self.dyn._step_cgrid_impl(nat, dt_, tm, bridge, ps)
                 tend, ps_out = box.get("tend"), box.get("out", ps)
+                # the physics' per-process ledger rows (budget_ledger on)
+                led = (None if tend is None
+                       else getattr(tend, "ledger_rows", None))
                 sfc = None
                 if tend is not None:
                     sfc = (getattr(tend, "sw_net_sfc", None),
@@ -260,11 +263,11 @@ class LatLonCGridColumnModel:
                         getattr(tend, k, None) for k in MPAS_SFC_DIAG_EXTRA_KEYS)
                     if all(s is None for s in sfc):
                         sfc = None
-                return self._view(new), ps_out, sfc
+                return self._view(new), ps_out, sfc, led
             fn = jax.jit(_step)
             self._fns[physics_fn] = fn
-        state_new, phys_out, sfc_diag = fn(native, float(dt), target, forcing,
-                                           phys_state)
+        state_new, phys_out, sfc_diag, self._step_ledger = fn(
+            native, float(dt), target, forcing, phys_state)
         self._last = state_new
         if physics_fn is not None:
             self._phys_state = phys_out
