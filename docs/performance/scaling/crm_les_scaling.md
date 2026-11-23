@@ -563,3 +563,88 @@ biggest software gap). All genuinely-remaining levers are hardware-bound
 (multi-node/multi-GPU, consumer-fp64 1/64, single-socket bandwidth) or
 deep-low-ROI (CRM N256 GPU L2 tiling). No distributed operator remains
 unimplemented or unvalidated.
+
+## Derecho CPU campaign 2026-11 (spectral LES, final — optimisation stopped)
+
+Spectral plane LES, production LES-suite config (dry CBL, dynamic LASD SGS,
+3/2 de-aliasing, RK3), Derecho CPU nodes (128 cores, one single-threaded rank
+per core), branch `perf/les-plane-fft` at `e55ef4b4` (`8248140b` only changes
+the bench's layout selection). Weak: 64x64x128 per rank. Strong: 512x512x128
+total. Efficiency = T1 / T(N) (weak) or T1 / (N T(N)) (strong) against the
+1-rank run of the same code in the planes layout (the fastest 1-rank path;
+pencil at 1 rank runs the serial core), for both columns: weak fp32 1197 ms, fp64
+1998 ms; strong fp32 81.9 s, fp64 142.3 s per step. "Ceiling" = packed-node
+control (independent 1-rank copies, no communication) at the same ranks per
+node: it is the memory-bandwidth limit of the 1-rank workload.
+
+Layouts: *pencil* (two all-to-alls per transform on row / column
+sub-communicators) and *planes* (one all-to-all over all ranks to whole
+horizontal planes of a z-chunk). The bench default `--decomp auto` picks
+planes when every rank shares one node, else pencil (the faster one at every
+point below).
+
+Weak efficiency, flat time / judged against N log N FFT growth
+(`x log2(4096 N)/12`, generous: only ~half the step is FFTs):
+
+| ranks / per node / nodes | pencil fp32 | pencil fp64 | planes fp32 | planes fp64 | ceiling fp32 / fp64 |
+|---|---|---|---|---|---|
+| 32 / 32 / 1 | 42 / 60% | 37 / 52% | **54 / 77%** | **47 / 67%** | 95 / 88% |
+| 64 / 32 / 2 | **35 / 53%** | **31 / 46%** | 30 / 45% | 27 / 40% | 95 / 88% |
+| 128 / 32 / 4 | **29 / 45%** | **25 / 40%** | 22 / 34% | 20 / 31% | 95 / 88% |
+| 64 / 64 / 1 | 24 / 36% | 19 / 29% | **32 / 47%** | **26 / 39%** | 81 / 59% |
+| 128 / 64 / 2 | **21 / 33%** | **16 / 26%** | 14 / 23% | 13 / 20% | 81 / 59% |
+| 256 / 64 / 4 | **17 / 29%** | **13 / 22%** | 6 / 9% | 4 / 7% | 81 / 59% |
+
+Strong efficiency:
+
+| ranks / per node / nodes | pencil fp32 | pencil fp64 | planes fp32 | planes fp64 |
+|---|---|---|---|---|
+| 32 / 32 / 1 | 35% | 34% | **45%** | **45%** |
+| 64 / 32 / 2 | **38%** | **34%** | 32% | 30% |
+| 128 / 32 / 4 | **34%** | **32%** | 22% | 23% |
+| 64 / 64 / 1 | 26% | 22% | **34%** | **29%** |
+| 128 / 64 / 2 | **25%** | **22%** | 14% | 15% |
+| 256 / 64 / 4 | **21%** | **19%** | 4% | 4% |
+
+Where the time goes (all-rank traces, weak fp32, 64 ranks per node, ms/step;
+slowest and fastest rank within ~0.4 s, so not load imbalance). "step" is the
+untraced wall time; the components are summed per-op trace times, which run
+~4-9% longer under the profiler, so they add up to slightly more:
+
+| run | step | FFT | local copies | all-to-all | rest |
+|---|---|---|---|---|---|
+| 1 rank, planes | 1061 | 589 | ~260 | 53 (self copy) | ~200 |
+| 1 node, planes | 3713 | 1152 | 911 | 1439 | 550 |
+| 1 node, pencil | 4677 | 1032 | 1186 | 1996 | 671 |
+| 2 nodes, pencil | 5455 | 1044 | 1144 | 2968 | 640 |
+| 2 nodes, planes | 8195 | 1374 | 999 | 5589 | 690 |
+
+Bandwidth-limit estimate (PLAUSIBLE: node memory 230 GB/s measured, NIC
+25 GB/s per node nominal, all-to-all send ~1.0 GB/rank/step planes, ~1.9 GB
+pencil): compute at the packed ceiling plus the all-to-all volume at those
+limits gives a best reachable weak fp32 efficiency of ~59% (1 node, planes),
+~47% (1 node, pencil) and ~34% (2 nodes, pencil) at 64 ranks per node. On
+this estimate (same PLAUSIBLE label) the all-to-all volume per step is the
+binding term, and 90% would need fewer all-to-all bytes per step (an
+algorithm change), which was not pursued. A byte count
+from the compiled HLO shapes was rejected as an instrument (it implied
+24 GB/s per core with 64 ranks sharing a node).
+
+What moved the numbers (same exclusive node, before -> after):
+- level-major LASD body + spectral divergence (c180b86): 1-rank fp64 step
+  4811 -> 2612 ms, fp32 3733 -> 1943 ms (pinned weak bench).
+- planes FFT mode + level-major packing (6d9e51d, aa638c1): 1-node weak fp32
+  at 32 ranks ~4230 ms (pencil, 2e94c07) -> 2665 ms; the packing alone took a
+  4-rank planes step 6038 -> 2079 ms.
+- shared forward FFT for the 2-delta / 4-delta LASD filters (d9d3904):
+  1-rank -6% fp32, -5% fp64.
+- horizontal velocity gradients computed once per rhs (e80dfe7): 1-rank fp32
+  1262 -> 1059 ms, fp64 1788 -> 1560 ms.
+- level-major pencil transforms (e55ef4b): 64 ranks on 1 node pencil
+  5780 -> 4652 ms.
+
+Known limits: planes mode at 128 ranks per node fp64 runs out of memory
+(cgroup 230 GB/node; full-spectrum wavenumber constants per rank). LASD
+serial / distributed parity is round-off (1e-12 x64; the earlier 1e-4 was
+only the tolerance). Every result row is stamped with git SHA and clean-tree
+flag in `/glade/derecho/scratch/pg2328/crm_les_scaling/les_cmp_*/les.jsonl`.
