@@ -11,13 +11,13 @@ the same analytic IC as the lat-lon row).
 
 from __future__ import annotations
 
-import os
 import re
 
+import jax
 import numpy as np
 import pytest
 
-os.environ.setdefault("JAX_ENABLE_X64", "1")
+jax.config.update("jax_enable_x64", True)
 
 from scripts.matrix.run_atmosphere_test_matrix import (  # noqa: E402
     TestCase as MatrixCase,

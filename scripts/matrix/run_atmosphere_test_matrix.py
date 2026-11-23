@@ -5290,8 +5290,12 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 # ===========================================================================
 
 
-def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
-    """Return a physics_fn suitable for the NH solver that wraps Kessler.
+def _make_kessler_nh_grid_fn(height_coord, dt_phys):
+    """Grid-space Kessler core shared by every NH grid's physics_fn.
+
+    Returns ``fn(theta_prime, rho_prime, tracers) -> (dtheta_prime_dt,
+    dtracers_dt)`` on grid-point arrays ``(..., nlev)`` /
+    ``(..., nlev, 3)`` with tracers ordered (q_v, q_c, q_r).
 
     DCMIP TC3 (squall line) requires warm-rain microphysics to bound the
     convective instability from the warm bubble perturbations.
@@ -5302,8 +5306,6 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
         Vertical coordinate with reference profiles.
     dt_phys : float
         Outer time step [s] used for Kessler saturation adjustment rate.
-    tendencies_cls : type
-        NonHydrostaticTendencies or MPASNonHydrostaticTendencies.
     """
     from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         compute_exner_perturbation,
@@ -5311,13 +5313,11 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
     from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
     from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
     from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-    from legoesm.core.field import Field
     from legoesm import constants as _c
 
     p_ref = _c.p_ref
     c_pd = _c.c_pd
     R_d = _c.R_d
-    L_v = _c.L_v
 
     theta_ref = height_coord.theta_ref   # (nlev,)
     rho_ref = height_coord.rho_ref       # (nlev,)
@@ -5325,16 +5325,14 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
     dz = height_coord.dz                 # (nlev,)
     nlev = int(dz.shape[0])
     config = KesslerConfig()
-    # Cubed-sphere tendencies have dv_dt; MPAS does not
-    has_dv = "dv_dt" in tendencies_cls._fields
 
-    def physics_fn(state, grid, hcoord, tmetric):
+    def grid_fn(theta_prime, rho_prime, tr):
         # Recover thermodynamic fields from perturbation state
-        theta_total = theta_ref + state.theta_prime.data
-        rho_total = rho_ref + state.rho_prime.data
+        theta_total = theta_ref + theta_prime
+        rho_total = rho_ref + rho_prime
 
         pi_prime = compute_exner_perturbation(
-            state.rho_prime.data, state.theta_prime.data, hcoord,
+            rho_prime, theta_prime, height_coord,
         )
         exner_total = exner_ref + pi_prime
         T = theta_total * exner_total
@@ -5348,7 +5346,6 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
         ncol = T_flat.shape[0]
 
         # Tracers: (..., nlev, 3) → separate (ncol, nlev)
-        tr = state.tracers.data
         q_v = tr[..., 0].reshape(flat_shape)
         q_c = tr[..., 1].reshape(flat_shape)
         q_r = tr[..., 2].reshape(flat_shape)
@@ -5385,6 +5382,78 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
             out.dq_c_dt.reshape(T.shape),
             out.dq_r_dt.reshape(T.shape),
         ], axis=-1)
+        return dtheta_dt, dtracers
+
+    return grid_fn
+
+
+def _make_kessler_spectral_nh_physics_fn(height_coord, dt_phys):
+    """Kessler physics_fn for the spectral NH dycore.
+
+    Synthesizes theta', rho' and the (q_v, q_c, q_r) tracers to the
+    Gaussian grid, runs the shared grid-space Kessler core
+    (:func:`_make_kessler_nh_grid_fn`), and analyses the theta' and tracer
+    tendencies back to spectral space.  All other tendencies are zero,
+    exactly as in the grid-point wrapper.
+    """
+    from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
+
+    grid_fn = _make_kessler_nh_grid_fn(height_coord, dt_phys)
+
+    def physics_fn(state, grid, hcoord, tmetric):
+        n_sh, nlev, n_tr = state.tracers_hat.data.shape
+        theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
+        rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data)
+        tr = sh_synthesis_3d(
+            grid, state.tracers_hat.data.reshape(n_sh, nlev * n_tr),
+        ).reshape(grid.n_lat, grid.n_lon, nlev, n_tr)
+        dtheta_dt, dtracers = grid_fn(theta_p, rho_p, tr)
+        dtheta_hat = sh_analysis_3d(grid, dtheta_dt)
+        dtr_hat = sh_analysis_3d(
+            grid, dtracers.reshape(grid.n_lat, grid.n_lon, nlev * n_tr),
+        ).reshape(n_sh, nlev, n_tr)
+
+        def _zero(f):
+            return f.replace(data=jnp.zeros_like(f.data))
+
+        return state._replace(
+            vor_hat=_zero(state.vor_hat),
+            div_hat=_zero(state.div_hat),
+            w_hat=_zero(state.w_hat),
+            theta_prime_hat=state.theta_prime_hat.replace(data=dtheta_hat),
+            rho_prime_hat=_zero(state.rho_prime_hat),
+            phis_hat=_zero(state.phis_hat),
+            tracers_hat=state.tracers_hat.replace(data=dtr_hat),
+        )
+
+    return physics_fn
+
+
+def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
+    """Return a physics_fn suitable for the grid-point NH solvers (Kessler).
+
+    Wraps :func:`_make_kessler_nh_grid_fn` into the tendency NamedTuple of
+    the NH dycore.
+
+    Parameters
+    ----------
+    height_coord : HeightCoordinate
+        Vertical coordinate with reference profiles.
+    dt_phys : float
+        Outer time step [s] used for Kessler saturation adjustment rate.
+    tendencies_cls : type
+        NonHydrostaticTendencies or MPASNonHydrostaticTendencies.
+    """
+    from legoesm.core.field import Field
+
+    grid_fn = _make_kessler_nh_grid_fn(height_coord, dt_phys)
+    # Cubed-sphere tendencies have dv_dt; MPAS does not
+    has_dv = "dv_dt" in tendencies_cls._fields
+
+    def physics_fn(state, grid, hcoord, tmetric):
+        dtheta_dt, dtracers = grid_fn(
+            state.theta_prime.data, state.rho_prime.data,
+            state.tracers.data)
 
         z3d = jnp.zeros_like(state.theta_prime.data)
         z_w = jnp.zeros_like(state.w.data)
@@ -5568,14 +5637,6 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         return "SKIP", 0.0, ""
 
     elif tc.grid_type == "spectral":
-        # TC3 requires Kessler microphysics; the spectral solver does not
-        # yet support a physics_fn callback (state is in spectral space).
-        if test_case == "tc3":
-            record(tc, "SKIP", 0.0,
-                   "Spectral NH TC3 requires Kessler microphysics; "
-                   "physics_fn not yet wired for spectral solver")
-            return "SKIP", 0.0, ""
-
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis_3d,
         )
@@ -5659,8 +5720,16 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         model = SpectralCompressibleEulerModel(
             grid, hcoord, tmetric, nh_config)
 
-        def step_fn(s, dt_):
-            return model.step(s, dt_)
+        if test_case == "tc3":
+            # Same Kessler warm-rain physics as the MPAS arm, evaluated at
+            # every RK stage through the dycore's physics_fn hook.
+            _kessler_fn = _make_kessler_spectral_nh_physics_fn(hcoord, dt)
+
+            def step_fn(s, dt_):
+                return model.step(s, dt_, physics_fn=_kessler_fn)
+        else:
+            def step_fn(s, dt_):
+                return model.step(s, dt_)
 
         def check_fn(s):
             w = sh_synthesis_3d(grid, s.w_hat.data)
