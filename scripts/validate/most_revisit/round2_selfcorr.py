@@ -68,7 +68,7 @@ def permute(rawd, var, rng):
                 v = rawd.get((s, k, par))
                 if v is None:
                     continue
-                j = np.array([new.get(x, -1) for x in v["time"]])
+                j = np.array([new.get(x, -1) for x in v["time"]], dtype=int)
                 ok = j >= 0
                 jj = np.where(ok, j, 0)
                 u0, h0, il0 = v["ustar"], v["h"], v["inv_l"]

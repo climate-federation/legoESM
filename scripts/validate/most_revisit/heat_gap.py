@@ -10,6 +10,7 @@ under four checks:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 
 import matplotlib
@@ -42,9 +43,10 @@ def reference(name, bench=None):
 
 
 def ratio(data, sign=-1, fn=dyer):
-    """(median over sites, per-site matrix, site-median |zeta| median over sites) of phi_h/fn on one side."""
+    """(median over sites, per-site matrix, site-median |zeta| median over sites, per-site |zeta| matrix) of
+    phi_h/fn on one side."""
     rows, zr = per_site(data, "h", sign, fn)
-    return np.nanmedian(rows, 0), rows, np.nanmedian(zr, 0)
+    return np.nanmedian(rows, 0), rows, np.nanmedian(zr, 0), zr
 
 
 def oracle_scale_gain(data, sign=-1, fn=dyer, min_count=30):
@@ -65,10 +67,66 @@ def paired(x, y):
     """Both ratio() results restricted to (site, bin) cells finite in both, so the arms compare like with like."""
     ok = np.isfinite(x[1]) & np.isfinite(y[1])
     out = []
-    for med, rows, zm in (x, y):
-        r = np.where(ok, rows, np.nan)
-        out.append((np.nanmedian(r, 0), r, zm))
+    for _, rows, _, zr in (x, y):
+        r, z = np.where(ok, rows, np.nan), np.where(ok, zr, np.nan)
+        out.append((np.nanmedian(r, 0), r, np.nanmedian(z, 0), z))
     return out
+
+
+def _keys(v):
+    """Observation key per sample: end time and the pair's two heights (stable across caches, unlike pair numbers)."""
+    return list(zip(v["time"], np.round(v["z1"], 4), np.round(v["z2"], 4)))
+
+
+def check_caches(path_corr, path_plain):
+    """The two caches must come from the same tables and settings and differ only in the offset correction."""
+    m = [json.load(open(p + ".json")) for p in (path_corr, path_plain)]
+    for p, meta in zip((path_corr, path_plain), m):
+        if hashlib.sha256(open(p, "rb").read()).hexdigest() != meta["sha256"]:
+            raise SystemExit(f"{p} does not match its provenance record")
+    if not all(meta.get("table_sha256") for meta in m):
+        raise SystemExit("cache records lack input table hashes")
+    if not (m[0]["offset_correct"] and not m[1]["offset_correct"]):
+        raise SystemExit("--samples must be offset-corrected and --samples-raw not")
+    other = [k for k in m[0] if k not in ("offset_correct", "sha256") and m[0][k] != m[1].get(k)]
+    if other:
+        raise SystemExit(f"caches differ in {other}")
+
+
+def matched(raw_a, raw_b):
+    """Both caches restricted to observations present in both with phi > 0 in both, shaped like r2.load, so the two
+    arms differ only in the offset correction."""
+    out = ({}, {})
+    for (s, k, par), w in raw_b.items():
+        v = raw_a.get((s, k, par))
+        pos_a = {key for key, ph in zip(_keys(v), v["phi"]) if ph > 0} if v is not None else set()
+        pos_b = {key for key, ph in zip(_keys(w), w["phi"]) if ph > 0}
+        both = pos_a & pos_b
+        for o, x in zip(out, (v, w)):
+            keep = np.array([key in both for key in _keys(x)], bool) if x is not None else np.zeros(0, bool)
+            zeta, phi = (x["zeta"][keep], x["phi"][keep]) if x is not None else (np.empty(0), np.empty(0))
+            o.setdefault(s, {kk: {pp: (np.empty(0), np.empty(0)) for pp in (0, 1)} for kk in "mh"})[k][par] = (zeta, phi)
+    return out
+
+
+def sign_flips(raw_corr, raw_plain, sign):
+    """Even-day heat samples on one side present in both caches (joined on time and pair heights): how many reverse
+    the sign of phi_h when the neutral offset is removed, and how many become or stop being zero.
+    Returns (n_reversed, n_zero_change, n_joined)."""
+    flipped = zero = joined = 0
+    for (s, k, par), v in raw_corr.items():
+        w = raw_plain.get((s, k, par))
+        if k != "h" or par != 0 or w is None:
+            continue
+        key_v = {key: i for i, key in enumerate(_keys(v)) if sign * v["zeta"][i] > 0}
+        for j, key in enumerate(_keys(w)):
+            i = key_v.get(key)
+            if i is not None:
+                joined += 1
+                a, b = np.sign(v["phi"][i]), np.sign(w["phi"][j])
+                flipped += a * b < 0
+                zero += (a == 0) != (b == 0)
+    return int(flipped), int(zero), int(joined)
 
 
 def fixed_site_set(sites, rows):
@@ -94,47 +152,55 @@ def main():
 
     def rat(d):
         return ratio(d, sign, ref)
-    corr, raw_ = r2.load(a.samples), r2.load(a.samples_raw)
+    check_caches(a.samples, a.samples_raw)
+    corr = r2.load(a.samples)
+    raw_corr, raw_plain = rs.raw(a.samples), rs.raw(a.samples_raw)
+    both_corr, both_plain = matched(raw_corr, raw_plain)
     sites = sorted(corr)
     res = {"edges": EDGES.tolist(), "sites": sites, "side": a.side, "ref": a.ref}
     arms = {"offset_corrected": rat(corr)}
-    arms["uncorrected"], arms["corrected_same_sites"] = paired(rat({s: raw_[s] for s in sites}), arms["offset_corrected"])
+    arms["uncorrected"], arms["corrected_same_sites"] = paired(rat({s: both_plain[s] for s in sites}), rat({s: both_corr[s] for s in sites}))
     rows = arms["offset_corrected"][1]
     fixed = fixed_site_set(sites, rows)
-    arms["fixed_sites"] = rat({s: corr[s] for s in fixed})
+    if fixed:
+        span = (EDGES[:-1] >= FIXED_BINS[0]) & (EDGES[1:] <= FIXED_BINS[1])
+        arms["fixed_sites"] = tuple(np.where(span, x, np.nan) for x in rat({s: corr[s] for s in fixed}))
     res["fixed_sites"] = fixed
-    own, split, _ = rs.split_second_level(rs.raw(a.samples))
+    own, split, _ = rs.split_second_level(raw_corr)
     arms["split_subset_own_zeta"], arms["split_subset_split_zeta"] = paired(rat(own), rat(split))
-    rawd = rs.raw(a.samples)
-    perm = np.array([rat(rs.permute(rawd, "h", np.random.default_rng(s)))[0] for s in range(N_SEEDS)])
-    for k, (med, rows, zm) in arms.items():
+    perm_runs = [rat(rs.permute(raw_corr, "h", np.random.default_rng(s))) for s in range(N_SEEDS)]
+    perm, perm_z = np.array([r[0] for r in perm_runs]), np.nanmedian(np.array([r[2] for r in perm_runs]), 0)
+    res["sign_flips_offset"] = dict(zip(("reversed", "zero_change", "joined"), sign_flips(raw_corr, raw_plain, sign)))
+    for k, (med, rows, zm, _) in arms.items():
         res[k] = {"median": med.tolist(), "zeta": zm.tolist(), "n_sites": np.isfinite(rows).sum(0).tolist()}
     res["per_site"] = dict(zip(sites, arms["offset_corrected"][1].tolist()))
     res["per_site_uncorrected"] = dict(zip(sites, arms["uncorrected"][1].tolist()))
-    res["perm_h"] = {"median_of_seeds": np.nanmedian(perm, 0).tolist(), "q05": np.nanpercentile(perm, 5, 0).tolist(),
+    res["perm_h"] = {"zeta": perm_z.tolist(), "median_of_seeds": np.nanmedian(perm, 0).tolist(), "q05": np.nanpercentile(perm, 5, 0).tolist(),
                      "q95": np.nanpercentile(perm, 95, 0).tolist()}
     res["oracle_scale_gain"] = oracle_scale_gain(corr, sign, ref)
     res["oracle_scale_gain_median"] = float(np.median(list(res["oracle_scale_gain"].values())))
     json.dump(res, open(a.out, "w"), indent=1)
 
     fig, (ax, axs) = plt.subplots(1, 2, figsize=(15, 6))
-    med, rows, zm = arms["offset_corrected"]
-    for s, row in zip(sites, rows):
+    med, rows, zm, zrows = arms["offset_corrected"]
+    for s, row, zs in zip(sites, rows, zrows):
         ok = np.isfinite(row)
         if ok.any():
-            ax.plot(zm[ok], row[ok], color="0.8", lw=0.8)
-            ax.annotate(s, (zm[ok][-1], row[ok][-1]), fontsize=6, color="0.5")
+            ax.plot(zs[ok], row[ok], color="0.8", lw=0.8)
+            ax.annotate(s, (zs[ok][-1], row[ok][-1]), fontsize=6, color="0.5")
     styles = {"offset_corrected": (0, "-"), "uncorrected": (2, "--"), "split_subset_own_zeta": (6, "-."),
-              "split_subset_split_zeta": (5, ":"), "fixed_sites": (7, "-")}
+              "split_subset_split_zeta": (5, ":"), "fixed_sites": (7, "-"), "corrected_same_sites": (3, ":")}
     for k, (ci, ls) in styles.items():
-        m, _, z = arms[k]
+        if k not in arms:
+            continue
+        m, _, z, _ = arms[k]
         ok = np.isfinite(m)
         ax.plot(z[ok], m[ok], color=OKABE_ITO[ci], ls=ls, marker="o", lw=2, label=k.replace("_", " ") + (f" ({len(fixed)} sites, all bins {FIXED_BINS[0]:g}-{FIXED_BINS[1]:g})" if k == "fixed_sites" else ""))
-    ok = np.isfinite(med) & (EDGES[:-1] >= (PERM_FROM if sign < 0 else 0))
+    ok = np.isfinite(med) & np.isfinite(perm_z) & (EDGES[:-1] >= (PERM_FROM if sign < 0 else 0))
     pm = np.array(res["perm_h"]["median_of_seeds"])
-    ax.fill_between(zm[ok], np.array(res["perm_h"]["q05"])[ok], np.array(res["perm_h"]["q95"])[ok], color=OKABE_ITO[1],
+    ax.fill_between(perm_z[ok], np.array(res["perm_h"]["q05"])[ok], np.array(res["perm_h"]["q95"])[ok], color=OKABE_ITO[1],
                     alpha=0.3, label=f"H permuted ({N_SEEDS} seeds, 5-95%)" + (f", -z/L >= {PERM_FROM:g}" if sign < 0 else ""))
-    ax.plot(zm[ok], pm[ok], color=OKABE_ITO[1], lw=1.5)
+    ax.plot(perm_z[ok], pm[ok], color=OKABE_ITO[1], lw=1.5)
     n = np.isfinite(rows).sum(0)
     axs.bar(np.arange(len(n)), n, color="0.6")
     axs.set_xticks(np.arange(len(n)), [f"{lo:g}-{hi:g}" for lo, hi in zip(EDGES[:-1], EDGES[1:])], rotation=45)
@@ -155,6 +221,7 @@ def main():
     for k in arms:
         print(k, np.round(res[k]["median"], 2).tolist(), res[k]["n_sites"])
     print(f"oracle per-site scale gain vs {a.ref}, median", round(res["oracle_scale_gain_median"], 4), len(res["oracle_scale_gain"]))
+    print("sign flips from offset:", res["sign_flips_offset"])
     print("perm_h", np.round(res["perm_h"]["median_of_seeds"], 2).tolist())
     for s, row in res["per_site"].items():
         print(f"{s:20s}", np.round(row, 2).tolist())

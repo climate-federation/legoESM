@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
+import json
 import os
 
 import numpy as np
@@ -39,6 +41,8 @@ def main():
     ap.add_argument("--max-zg", type=float, required=True)
     ap.add_argument("--no-offset-correct", action="store_true", help="heat differences without the neutral offset")
     a = ap.parse_args()
+    if not a.out.endswith(".npz"):
+        ap.error("--out must end in .npz (numpy appends it otherwise)")
     np.seterr(all="ignore")
     arrays = {}
     for path in sorted(glob.glob(f"{a.tables}/*.nc")):
@@ -61,6 +65,10 @@ def main():
                 arrays[f"{name}|{kind}|{parity}|pair"] = np.concatenate([np.full(int(p["keep"].sum()), k) for k, p in enumerate(plist)])
         print(name, flush=True)
     np.savez_compressed(a.out, **arrays)
+    json.dump({"sha256": hashlib.sha256(open(a.out, "rb").read()).hexdigest(), "offset_correct": not a.no_offset_correct, "tables": os.path.abspath(a.tables), "min_ustar": a.min_ustar,
+               "max_zg": a.max_zg, "sites": sorted({k.split("|")[0] for k in arrays}),
+               "table_sha256": {os.path.basename(t): hashlib.sha256(open(t, "rb").read()).hexdigest()
+                                for t in sorted(glob.glob(f"{a.tables}/*.nc"))}}, open(a.out + ".json", "w"), indent=1)
     print("WROTE", a.out, len(arrays))
 
 

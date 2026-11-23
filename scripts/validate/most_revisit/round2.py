@@ -30,6 +30,7 @@ FAIL_RESIDUAL = 1e3
 MAX_PARAMS_PER_SIDE = 3
 N_START_FRACTIONS = (0.25, 0.5, 0.75)
 N_BOOT = 2000
+SCORE_TIE = 1e-9  # log-RMSE differences below this are rounding, not a win
 DYER = {"m": {"stable": "1 + 5*z", "unstable": "(1 + 16*x)**-0.25", "params": {}},
         "h": {"stable": "1 + 5*z", "unstable": "(1 + 16*x)**-0.5", "params": {}}}
 
@@ -104,6 +105,10 @@ def fit(spec, kind, data, min_count, restrict=None):
     f, names, used = build(spec)
     if not names:
         return np.zeros(0), {"status": "no params"}
+    if restrict is not None:
+        idle = [n for n in names if n not in used[restrict]]
+        if idle:
+            raise ValueError(f"parameters {idle} are not used on the fitted {restrict} side")
     blocks = []
     for s, v in data.items():
         z, ph = v[kind][1]
@@ -179,7 +184,7 @@ def rank(scores, bench):
             ci = lambda v: np.percentile([np.median(rng.choice(v, len(v))) for _ in range(N_BOOT)], [2.5, 97.5]).tolist()  # noqa: E731
             out[panel] = {"median_rank": float(np.median(ranks)), "mean_rank": float(np.mean(ranks)), "wins": wins, "n": len(ranks),
                           "med_vs_dyer": float(np.median(vd)), "med_vs_J3g": float(np.median(vj)),
-                          "frac_sites_better_than_dyer": float(np.mean(np.array(vd) < 0)),
+                          "frac_sites_better_than_dyer": float(np.mean(np.array(vd) < -SCORE_TIE)),
                           "ci95_vs_dyer": ci(np.array(vd)), "ci95_vs_J3g": ci(np.array(vj))}
     return out
 
@@ -191,11 +196,12 @@ def check(data, bench, min_count):
            "params": {"a0": [j3["a0"], 0, 99], "a_inf": [j3["a_inf"], 0, 99], "zc": [j3["zc"], 0, 99]}}
     j3h = {"stable": "pr0 + a_inf*z + (a0 - a_inf)*z/(1 + z/zc)", "unstable": "pr0*(1 + 16*x)**-0.5",
            "params": {**j3m["params"], "pr0": [j3["pr0"], 0, 9]}}
-    worst, n = 0.0, 0
+    worst, n, seen = 0.0, 0, set()
     for name, kind, spec in (("dyer1974", "m", DYER["m"]), ("dyer1974", "h", DYER["h"]), ("J3_global", "m", j3m), ("J3_global", "h", j3h)):
         p = [spec["params"][n][0] for n in spec["params"]]
         for panel, per_site in score(spec, p, kind, data, min_count).items():
             for s, v in per_site.items():
+                seen.add((name, panel, s))
                 ref = bench["sites"][s]["offset_corrected"].get(panel, {}).get(name, {}).get("gradient", {}).get("log_rmse", np.nan)
                 if np.isfinite(ref) or np.isfinite(v):
                     d = abs(v - ref) / max(abs(ref), 1e-12)
@@ -203,6 +209,13 @@ def check(data, bench, min_count):
                     n += 1
                     if not abs(v - ref) <= 1e-6 * abs(ref):
                         print("MISMATCH", name, panel, s, v, ref)
+    for s, v in bench["sites"].items():  # a benchmark score the cache never produced also fails
+        for panel in PANELS:
+            for name in ("dyer1974", "J3_global"):
+                ref = v.get("offset_corrected", {}).get(panel, {}).get(name, {}).get("gradient", {}).get("log_rmse", np.nan)
+                if np.isfinite(ref) and (name, panel, s) not in seen:
+                    print("MISSING", name, panel, s)
+                    worst = np.inf
     print(f"CHECK worst relative difference vs v5 json: {worst:.2e} over {n} scores")
     return worst if n else np.inf
 
@@ -219,8 +232,9 @@ def main():
     np.seterr(all="ignore")
     data = load(a.samples)
     bench = json.load(open(a.bench))
-    if a.check:
-        assert check(data, bench, a.min_count) <= 1e-6, "cache does not reproduce v5"
+    if a.check or a.candidates:  # ranking reads the benchmark's scores, so the cache must reproduce them first
+        if not check(data, bench, a.min_count) <= 1e-6:
+            raise SystemExit("cache does not reproduce v5")
     if not a.candidates:
         return
     cands = json.load(open(a.candidates))
