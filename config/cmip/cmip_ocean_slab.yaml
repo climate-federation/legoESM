@@ -39,7 +39,10 @@ nlev: 20
 # mass below ~658 hPa, i.e. over Tibet, once real terrain is on; F36, vote
 # 2026-10-10).
 transition_exponent: 2
-dt: 300.0
+dt: 900.0                      # the deck timestep rule (user): largest 1800-s divisor
+                               # stable for 5 days below the driver's printed CFL limit
+                               # (1210 s; CFL 0.60, not clamped).  600 and 450 also run
+                               # 5 days clean; at 300 production's div-4 (below) NaNs.
 ic: standard
 days: 240
 diag_days: 10                  # atm<->ocean coupling cadence
@@ -63,11 +66,11 @@ atm_owns_surface: true
 # 2026-11-22): physics every 1800 s, CLUBB + microphysics sub-cycled 3 x 600 s
 # (CAM6 namelist_defaults_cam.xml:1254; required by clubb_liquid_partition),
 # radiation hourly.  The knobs count STEPS of the step the model takes: dt
-# 300 s (run_coupled turns the lat-lon polar filter on, and the driver's CFL
-# check keeps 300 s), so 6 x 300 s = 1800 s and 12 x 300 s = 3600 s; one day =
-# 288 steps, a multiple of both. ----
-physics_update_steps: 6
-rad_update_steps: 12
+# 900 s (run_coupled turns the lat-lon polar filter on, and the driver's CFL
+# check keeps 900 s), so 2 x 900 s = 1800 s and 4 x 900 s = 3600 s; one day =
+# 96 steps, a multiple of both. ----
+physics_update_steps: 2
+rad_update_steps: 4
 cld_macmic_num_steps: 3
 
 # ---- turbulence: verbatim from config/amip/amip_production.yaml (its
@@ -221,10 +224,14 @@ gravity_wave_drag: mcfarlane            # orographic member = CAM6 gw_oro port
                                         # smooth the umcfac |u|, its sign and
                                         # the taumin zeroing (widths 0.01 m/s,
                                         # 1e-3 m/s, 1e-10 Pa; RULE 5).
-mpas_div_damp4_scale: 0.0   # NOT production's 1.0 (vote 2026-11-23, fallback agreed in
-                            # advance): at 1.0 this grid (24x48, dt 300) blows up at
-                            # step 9 with the filter from 60 deg AND from the derived
-                            # 35.9041 (measured 2026-11-23, T NaN); 0.0 runs clean
+mpas_div_damp4_scale: 1.0   # production's.  KNOWN DIFFERENCE in how it is reached: the
+                            # coefficient 0.01*area^2/dt scales with the grid, but the
+                            # polar filter's kept zonal wavenumbers depend on dt only
+                            # (gravity-wave CFL), not on resolution.  At 24 lat, dt 300
+                            # the filter keeps 20 of 24 waves at 79 deg: worst eig*dt
+                            # -3.96 past the RK3 limit -2.51 (production -0.76); runs
+                            # NaN at step 9.  dt 450 gives -1.82; dt 900 (above) is
+                            # stabler still (the filter tightens as dt grows).
 mpas_land_lapse_K_per_km: 6.5
 mpas_land_beta: 0.6
 # Not copied: production's mpas_ice_skin_prognostic: true and the
