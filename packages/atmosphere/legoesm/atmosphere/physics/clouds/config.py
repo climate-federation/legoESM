@@ -476,8 +476,8 @@ class CloudConfig(NamedTuple):
     # RULE 5 sharpness [1/unit] of the hookup's switches on traced state
     # (inf = the hard form): larger-of-two selection and the 0.8 cap [1/frac],
     # the frac_limit gate [1/frac], the ic_limit gate [1/(kg/kg)].
-    mf_deepcu_select_sharpness: float = 100.0
-    mf_deepcu_cap_sharpness: float = 100.0
+    mf_deepcu_select_sharpness: float = 1000.0
+    mf_deepcu_cap_sharpness: float = 1000.0
     mf_deepcu_frac_gate_sharpness: float = 1000.0
     mf_deepcu_ic_gate_sharpness: float = 1.0e13
 
