@@ -15,7 +15,7 @@
 #
 # Every run setting is an explicit variable recorded in the job log:
 #   RANKS       rank counts to run in this job (each <= nodes*128)
-#   MODELS      "crm les"          PRECISIONS "float32 float64"
+#   MODELS      "crm les"          PRECISIONS "float32 float64 mixed"
 #   MODES       "strong weak"      BOUNDS     1 = run the bound probes first
 #   Column physics is timed (separately) on CRM WEAK runs only: its cost per
 #   rank depends only on the tile, and strong-mode 1-rank tiles are 512^2.
@@ -40,12 +40,13 @@ set -uo pipefail
 : "${REPO:=${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/../../.." && pwd)}}"
 : "${RANKS:=1 2 4 8 16 32 64 128}"
 : "${MODELS:=crm les}"
-: "${PRECISIONS:=float32 float64}"
+: "${PRECISIONS:=float32 float64 mixed}"
 : "${MODES:=strong weak}"
 : "${BOUNDS:=1}"
 : "${CRM_EXTRA:=}"
+: "${TIME_PHYSICS:=1}"  # 0 = weak runs time the dycore only (physics/rank is tile-only)
+: "${PPN_MAX:=128}"   # ranks per node cap (fp64/mixed 64x64x64 tiles need ~5.2 GB/rank)
 : "${LES_DECOMPS:=auto}"
-: "${PPN_MAX:=128}"
 : "${STRONG_NX:=512}" "${WEAK_NX:=64}" "${CRM_NLEV:=64}" "${LES_NZ:=128}"
 : "${WARMUP:=3}" "${TIME_STEPS:=5}" "${WINDOWS:=3}"
 : "${OUT:=/glade/derecho/scratch/${USER}/crm_les_scaling/${PBS_JOBID:-local}}"
@@ -72,8 +73,8 @@ NODES=$(sort -u "${PBS_NODEFILE:-/dev/null}" 2>/dev/null | wc -l)
 CORES=128
 echo "[ladder] sha=$(git rev-parse HEAD) dirty=$(git status --porcelain --untracked-files=no | wc -l) nodes=$NODES"
 echo "[ladder] RANKS=[$RANKS] MODELS=[$MODELS] PRECISIONS=[$PRECISIONS] MODES=[$MODES]"
-echo "[ladder] PPN_MAX=$PPN_MAX LES_DECOMPS=$LES_DECOMPS STRONG_NX=$STRONG_NX WEAK_NX=$WEAK_NX CRM_NLEV=$CRM_NLEV LES_NZ=$LES_NZ"
-echo "[ladder] WARMUP=$WARMUP TIME_STEPS=$TIME_STEPS WINDOWS=$WINDOWS CRM_EXTRA=[$CRM_EXTRA]"
+echo "[ladder] LES_DECOMPS=$LES_DECOMPS STRONG_NX=$STRONG_NX WEAK_NX=$WEAK_NX CRM_NLEV=$CRM_NLEV LES_NZ=$LES_NZ"
+echo "[ladder] TIME_PHYSICS=$TIME_PHYSICS PPN_MAX=$PPN_MAX WARMUP=$WARMUP TIME_STEPS=$TIME_STEPS WINDOWS=$WINDOWS CRM_EXTRA=[$CRM_EXTRA]"
 echo "[ladder] XLA_FLAGS=$XLA_FLAGS OUT=$OUT"
 
 # run N PPN CMD... : N ranks, PPN per node, each pinned to one core spread
@@ -125,6 +126,7 @@ for N in $RANKS; do
      for PREC in $PRECISIONS; do
       for MODE in $MODES; do
         if [ "$MODE" = strong ]; then NXY=$STRONG_NX; PHYS=""; else NXY=$WEAK_NX; PHYS=--time-physics; fi
+        [ "$TIME_PHYSICS" = 1 ] || PHYS=""
         COMMON=(--mode "$MODE" --precision "$PREC" --nx "$NXY" --ny "$NXY"
                 --warmup-steps "$WARMUP" --time-steps "$TIME_STEPS"
                 --windows "$WINDOWS")
@@ -135,6 +137,8 @@ for N in $RANKS; do
                 "${COMMON[@]}" --nlev "$CRM_NLEV" --semi-implicit $PHYS $CRM_EXTRA \
                 --output "$OUT/crm.jsonl" || { echo "FAILED crm $MODE $PREC n=$N"; rc_all=1; } ;;
           les)
+            # mixed precision is a CRM mode only
+            [ "$PREC" = mixed ] && continue
             for DEC in $LES_DECOMPS; do
             run "$N" "$PPN" scripts/bench/bench_spectral_les_dd_scaling.py \
                 "${COMMON[@]}" --nz "$LES_NZ" --decomp "$DEC" \

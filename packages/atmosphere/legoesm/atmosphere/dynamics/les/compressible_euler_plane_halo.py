@@ -27,7 +27,8 @@ Coverage (matches the original):
 * Vertical advection (column-local, no halo needed)
 * Rayleigh sponge (column-local, no halo)
 * Biharmonic hyperdiffusion (`laplacian²`)
-* Tracer advective transport (vmap over tracer axis)
+* Tracer advective transport + SGS diffusion (one fused function per
+  tracer, run with ``jax.lax.map`` over the tracer axis)
 
 Smagorinsky LES + vertical-θ diffusion (R4/R5)
 ----------------------------------------------
@@ -621,9 +622,14 @@ def plane_compressible_euler_slow_tendencies_halo(
             f"Unknown vertical_tracer_advection: {_vert_tracer_scheme!r}. "
             f"Expected 'centered' or 'van_leer'."
         )
+    # Advect θ′ (not θ_ref + θ′), exactly as the serial dycore does: the
+    # horizontal operators are invariant to the horizontally uniform θ_ref,
+    # but differencing ~300 K totals throws away ~9 bits of θ′ in float32
+    # (halo-vs-serial dθ′/dt gap was 4.8e-5 relative vs a 1.4e-5 fp32
+    # truncation gap; 9e-14 vs 2e-16 in float64).
     dtheta_p_dt = (
-        adv_x(theta_total_pad, u_center_pad, grid.dx, h)
-        + adv_y(theta_total_pad, v_center_pad, grid.dy, h)
+        adv_x(theta_p_pad, u_center_pad, grid.dx, h)
+        + adv_y(theta_p_pad, v_center_pad, grid.dy, h)
     )
 
     # 6. Horizontal momentum advection — u advected by (u, v_at_xface),
@@ -851,35 +857,34 @@ def plane_compressible_euler_slow_tendencies_halo(
         ny_p, nx_p = tracers_flat_pad.shape[:2]
         tracers_pad = tracers_flat_pad.reshape(ny_p, nx_p, nlev, n_tr)
 
+        _tracer_sgs = _use_smag or _use_mol
+
         def _tracer_tend_one(q_pad, q_int):
+            # One fused function per tracer: advection then (as in the serial
+            # grouping) + (horizontal SGS + vertical SGS), reading q_pad once.
             # tadv_* = van_leer under weno5 (positivity guard); == adv_* else.
-            return (
+            tend = (
                 tadv_x(q_pad, u_center_pad, grid.dx, h)
                 + tadv_y(q_pad, v_center_pad, grid.dy, h)
                 + _vertical_tracer_adv(q_int, w, height_coord, J)
             )
-        dtracers_dt = jax.vmap(
-            _tracer_tend_one, in_axes=(-1, -1), out_axes=-1,
-        )(tracers_pad, tracers)
-        # SGS-SCALAR (#80): SAM `sgs.f90:664-675` SGS-diffuses EVERY scalar
-        # (q_v + all hydrometeors) with K_h, like θ'. The serial dycore does
-        # this; the MPI halo path previously diffused θ'/u/v/w but NOT the
-        # tracers ⇒ silent serial≠MPI divergence (caught by
-        # test_halo_equiv_with_smagorinsky_and_tracers). Mirror the serial
-        # leg here so the two stay bit-identical (K_h_pad is in scope only
-        # inside the closure block above — Smagorinsky OR molecular/DNS).
-        if _use_smag or _use_mol:
-            # Serial grouping: adv + (horizontal SGS + vertical SGS).
-            tracer_sgs = jax.vmap(
-                lambda q_pad: oh.variable_K_diffusion_vlast_halo(
-                    q_pad, K_h_pad, grid, h),
-                in_axes=-1, out_axes=-1,
-            )(tracers_pad)
-            if _sgs_vert:
-                tracer_sgs = tracer_sgs + vertical_K_diffusion_full(
-                    tracers, K_h_int, height_coord,
-                )
-            dtracers_dt = dtracers_dt + tracer_sgs
+            # SGS-SCALAR (#80): SAM `sgs.f90:664-675` SGS-diffuses EVERY
+            # scalar with K_h, like theta'; mirrors the serial leg so the two
+            # stay bit-identical (test_halo_equiv_with_smagorinsky_and_tracers).
+            if _tracer_sgs:
+                sgs = oh.variable_K_diffusion_vlast_halo(q_pad, K_h_pad, grid, h)
+                if _sgs_vert:
+                    sgs = sgs + vertical_K_diffusion_full(
+                        q_int[..., None], K_h_int, height_coord)[..., 0]
+                tend = tend + sgs
+            return tend
+        # One tracer at a time (lax.map) instead of a vmap over the tracer
+        # axis: measured 34% (fp32) / 29% (fp64) faster at 128 ranks/node,
+        # bitwise-identical results.
+        dtracers_dt = jnp.moveaxis(jax.lax.map(
+            lambda qq: _tracer_tend_one(*qq),
+            (jnp.moveaxis(tracers_pad, -1, 0), jnp.moveaxis(tracers, -1, 0)),
+        ), 0, -1)
     else:
         dtracers_dt = jnp.zeros_like(tracers)
     zero_phis = jnp.zeros_like(state.phis.data)
@@ -1004,7 +1009,6 @@ def _slow_tendency_phase2_jit(
     cfg = config
     u_pad = state_pad["u_pad"]
     v_pad = state_pad["v_pad"]
-    theta_total_pad = state_pad["theta_total_pad"]
     w = state_pad["w"]
     u = state_pad["u"]
     v = state_pad["v"]
@@ -1017,13 +1021,13 @@ def _slow_tendency_phase2_jit(
         inter_pad["flux_u_pad"], inter_pad["flux_v_pad"], grid, h,
     )
 
-    # Theta advection (cell-centred).
+    # Theta advection (cell-centred): θ′, as serial (see the main path).
     dtheta_p_dt = (
         oh.upwind_advection_x_halo(
-            theta_total_pad, inter_pad["u_center_pad"], grid.dx, h,
+            state_pad["theta_p_pad"], inter_pad["u_center_pad"], grid.dx, h,
         )
         + oh.upwind_advection_y_halo(
-            theta_total_pad, inter_pad["v_center_pad"], grid.dy, h,
+            state_pad["theta_p_pad"], inter_pad["v_center_pad"], grid.dy, h,
         )
     )
 

@@ -113,6 +113,7 @@ def _layout_or_skip(nry, nrx, halo):
 
 
 DECOMPS = [(2, 1), (1, 2), (2, 2), (4, 2), (2, 4)]
+MIXED_HALO_RTOL = 1e-5   # measured max 5.3e-7 (voted 2-1)
 
 
 def _run(model, state, dt, lay, owned):
@@ -222,3 +223,51 @@ def test_production_step_halo_gradient_matches_single_rank(nry, nrx):
     assert np.isfinite(g_multi) and g_multi != 0.0
     np.testing.assert_allclose(g_multi, g_ref, rtol=1e-9)
     np.testing.assert_allclose(g_multi, g_fd, rtol=1e-5)
+
+
+@pytest.mark.parametrize("nry,nrx", [(2, 1), (1, 2), (2, 2)])
+def test_mixed_precision_step_halo_matches_single_rank(nry, nrx):
+    """--precision mixed (fp32 state, fp64 acoustic substeps and fixer sums):
+    the halo path keeps every leaf's dtype and matches the serial step."""
+    rargs = rcp.parse_args([*bench.RCEMIP1_DECK_ARGV, "--nx", str(NX),
+                            "--ny", str(NY), "--nlev", str(NLEV),
+                            "--precision", "mixed"])
+    hc, _, _ = rcp.build_rcemip_height_coord(rargs, rcp.P_SFC_RCEMIP,
+                                             jnp.float32)
+    cfg = rcp.build_dycore_config(rargs)._replace(
+        acoustic_moist_global_mean=True, fix_mass=True)
+    assert cfg.mixed_precision
+    halo = horizontal_advection_halo_width(cfg)
+    lay = _layout_or_skip(nry, nrx, halo)
+    g_glob = create_plane_grid(nx=NX, ny=NY, nlev=NLEV, dx=rargs.dx,
+                               dy=rargs.dx, dtype=jnp.float32)
+    s64 = _global_state(create_plane_grid(nx=NX, ny=NY, nlev=NLEV, dx=rargs.dx,
+                                          dy=rargs.dx, dtype=jnp.float64),
+                        hc)
+    s_glob = jax.tree.map(lambda a: a.astype(jnp.float32)
+                          if jnp.issubdtype(a.dtype, jnp.floating) else a, s64)
+    lay1 = make_plane_pencil_layout(rank=0, n_ranks=1, n_ranks_y=1,
+                                    n_ranks_x=1, ny_global=NY, nx_global=NX,
+                                    halo=halo)
+    m_ref = PlaneCompressibleEulerModel(
+        g_glob, hc, make_flat_plane_terrain_metric(g_glob, hc), cfg)
+    ref = _run(m_ref, s_glob, rargs.dt, lay1, None)
+    g_loc = create_plane_grid(nx=lay.nx_local, ny=lay.ny_local, nlev=NLEV,
+                              dx=rargs.dx, dy=rargs.dx, dtype=jnp.float32)
+    m_loc = PlaneCompressibleEulerModel(
+        g_loc, hc, make_flat_plane_terrain_metric(g_loc, hc), cfg)
+    owned = jnp.ones((lay.ny_local, lay.nx_local), jnp.float32)
+    loc = _run(m_loc, _slice(s_glob, lay), rargs.dt, lay, owned)
+    for f in FIELDS:
+        assert getattr(loc[-1], f).data.dtype == jnp.float32, f
+    gathered = [{f: gather_plane_field(getattr(s, f).data, lay)
+                 for f in FIELDS} for s in loc]
+    if lay.rank != 0:
+        return
+    for n in range(1, N_STEPS + 1):
+        for f in FIELDS:
+            a = np.asarray(gathered[n][f], np.float64)
+            b = np.asarray(getattr(ref[n], f).data, np.float64)
+            rel = np.max(np.abs(a - b)) / max(np.max(np.abs(b)), 1e-300)
+            print(f"MIXED_HALO {nry}x{nrx} {f} step {n} rel={rel:.3e}")
+            assert rel <= MIXED_HALO_RTOL, (f, n, rel)

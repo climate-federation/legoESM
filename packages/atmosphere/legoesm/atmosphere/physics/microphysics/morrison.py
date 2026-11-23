@@ -555,6 +555,7 @@ def morrison_microphysics(
             p_min_width_pa=config.gsam_satadj_p_min_width_pa)
         hydrometeors = hydrometeors._replace(q_c=q_c_adj)
         hyd_in = hydrometeors
+        T_sa, q_v_sa = T, q_v
         # then gSAM M2005's sub-saturation small-condensate removal
         # (module_mp_graupel.f90:1453-1488), on the adjusted state.
         T, q_v, hydrometeors = _gsam_small_removal(
@@ -2993,10 +2994,23 @@ def morrison_microphysics(
     if gsam_satadj:
         # The pre-rate saturation adjustment, as a tendency (enthalpy
         # c_pd*T + L_v*q_v and q_v + q_c conserved by construction).
-        condensation = (hydrometeors.q_c - q_c_in) / dt
-        dT_dt = dT_dt + (T - T_in) / dt
-        dq_v_dt = dq_v_dt + (q_v - q_v_in) / dt
+        # One exchange amount for q_v, q_c and the latent heat, so the water
+        # and energy budgets close in any precision (the state differences
+        # q_v - q_v_in, T - T_in round at the vapour / temperature scale).
+        condensation = (q_c_adj - q_c_in) / dt
+        dT_dt = dT_dt + (constants.L_v / constants.c_pd) * condensation  # latent-ok: matches satadj
+        dq_v_dt = dq_v_dt - condensation
         dq_c_dt = dq_c_dt + condensation
+        # The start-of-call small-condensate removal, relative to the adjusted
+        # state (difference form, as before; its fp32 residual is reported in
+        # the commit, not changed here).
+        dT_dt = dT_dt + (T - T_sa) / dt
+        dq_v_dt = dq_v_dt + (q_v - q_v_sa) / dt
+        _pre_removal_c = (hydrometeors.q_c - q_c_adj) / dt
+        dq_c_dt = dq_c_dt + _pre_removal_c
+        # The published q_c budget lists the preamble removal inside
+        # "condensation" (relative to the input q_c), as before.
+        condensation = condensation + _pre_removal_c
         # The removal's increments (relative to the adjusted state; its T,
         # q_v, q_c parts are already in the two lines above).
         dq_r_dt = dq_r_dt + (hydrometeors.q_r - hyd_in.q_r) / dt

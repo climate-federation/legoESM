@@ -171,6 +171,10 @@ def test_crm_bench_defaults_are_the_rcemip1_production_deck():
     assert (a.hyperdiff, a.n_acoustic_substeps, a.off_centering,
             a.smag_cs) == (1.0e7, 6, 0.1, 0.19)
     assert cfg.semi_implicit_acoustic and cfg.substep_horizontal_acoustic
+    assert a.radiation_column_chunk == 128
+    deck = (_REPO / "scripts/run/run_rcemip1_crm.sh").read_text()
+    assert "RAD_CHUNK=${RAD_CHUNK:-128}" in deck
+    assert '--radiation-column-chunk "$RAD_CHUNK"' in deck
     assert rcp.parse_args([*crm.RCEMIP1_DECK_ARGV, "--nlev", "8"]).nlev == 8
 
 
@@ -192,3 +196,19 @@ def test_les_bench_auto_is_default_and_planes_builds_layout_at_one_rank():
     assert not les_b.builds_layout("pencil", 1)
     assert not les_b.builds_layout("slab", 1)
     assert les_b.builds_layout("slab", 2)
+
+
+def test_rank_stats_reports_per_rank_median_and_slowest():
+    # 3 windows x 4 ranks of seconds for 2 steps each
+    windows = [[1.0, 2.0, 3.0, 4.0], [1.2, 2.0, 2.0, 8.0], [1.1, 2.2, 3.0, 4.2]]
+    out = crm._rank_stats(windows, 2)
+    assert out["slowest_rank"] == 3
+    assert out["min"] == pytest.approx(550.0)
+    assert out["max"] == pytest.approx(2100.0)
+    assert out["median"] == pytest.approx((1000.0 + 1500.0) / 2)
+
+
+def test_bench_parser_has_profile_and_ablation_flags():
+    a = crm.bench_parser().parse_known_args(
+        ["--profile-dir", "/tmp/x", "--ablate-fix-mass"])[0]
+    assert a.profile_dir == "/tmp/x" and a.ablate_fix_mass

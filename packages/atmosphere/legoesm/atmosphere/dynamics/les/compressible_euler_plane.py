@@ -360,6 +360,40 @@ def _plane_background_mass(
     )
 
 
+def _cast_like(tree, like):
+    """Cast each array leaf of ``tree`` to the dtype of the matching leaf of ``like``."""
+    return jax.tree.map(
+        lambda a, b: a if a.dtype == b.dtype else a.astype(b.dtype), tree, like)
+
+
+def _to_fp64(tree):
+    """Float leaves of ``tree`` in fp64 (mixed-precision mode needs x64 on)."""
+    return jax.tree.map(
+        lambda a: a.astype(jnp.float64)
+        if hasattr(a, "dtype") and jnp.issubdtype(a.dtype, jnp.floating) else a, tree)
+
+
+def _acoustic_fp64(acoustic_update_fn):
+    """Mixed precision: acoustic substeps on fp64 copies of the state and slow
+    tendency, result stored back in the state's dtypes. fp32 acoustics miss the
+    1 h RCEMIP1 acceptance (w 4.6e-3, rho' 1.7e-4 vs fp64); fp64 passes."""
+    def wrapped(state, slow_tend, *rest):
+        return _cast_like(
+            acoustic_update_fn(_to_fp64(state), _to_fp64(slow_tend), *rest), state)
+    return wrapped
+
+
+def _fix_mass_fp64(fixer):
+    """Run a dry-mass fixer on fp64 copies of the state and target; return the
+    state in its own storage dtypes. The global sums are the fp32 weak point:
+    an fp32 total carries ~1e-6 relative error, re-injected every step."""
+    def wrapped(state, target, *rest, **kw):
+        # geometry too, so the volume and background sums accumulate in fp64
+        return _cast_like(fixer(_to_fp64(state), _to_fp64(target),
+                                *_to_fp64(rest), **kw), state)
+    return wrapped
+
+
 def fix_mass_nonhydrostatic_plane(
     state: PlaneNonHydrostaticState,
     target_mass: jax.Array,
@@ -3089,6 +3123,9 @@ class PlaneCompressibleEulerModel:
         if config is None:
             config = CompressibleEulerConfig()
         validate_plane_config(config)
+        if config.mixed_precision and not jax.config.jax_enable_x64:
+            raise ValueError("mixed_precision needs jax_enable_x64=True: its fp64 "
+                             "acoustic substeps and fixer sums would silently run fp32")
         self.grid = grid
         self.height_coord = height_coord
         self.terrain_metric = terrain_metric
@@ -3107,7 +3144,11 @@ class PlaneCompressibleEulerModel:
         # feature-gate Python `if`, not jnp.where). The fixer itself
         # tolerates None (computes inline), so this never traps.
         self._background_mass: jax.Array | None = (
-            _plane_background_mass(grid, height_coord, terrain_metric)
+            _plane_weighted_mass_sum(
+                height_coord.rho_ref.astype(jnp.float64), grid, height_coord,
+                terrain_metric)
+            if config.fix_mass and config.mixed_precision
+            else _plane_background_mass(grid, height_coord, terrain_metric)
             if config.fix_mass else None
         )
 
@@ -3139,8 +3180,37 @@ class PlaneCompressibleEulerModel:
         """
         if self.config.fix_mass:
             self._target_mass = compute_dry_mass_plane(
-                state, self.grid, self.height_coord, self.terrain_metric,
+                _to_fp64(state) if self.config.mixed_precision else state,
+                self.grid, self.height_coord, self.terrain_metric,
             )
+            self._cache_target_anomaly(
+                _to_fp64(state) if self.config.mixed_precision else state)
+
+    def _cache_target_anomaly(self, state) -> None:
+        """Cache the anchor's rho' integral next to the total it belongs to.
+
+        The fixer works in anomaly form; handing it ``target - B`` instead
+        carries the rounding of the ~1e14 total (float32: 2e-6 kg/m3 off,
+        a one-time ~6e-6 relative dry-mass jump at the first fixer call).
+        """
+        self._target_anomaly = (self._target_mass, _plane_weighted_mass_sum(
+            state.rho_prime.data, self.grid, self.height_coord,
+            self.terrain_metric,
+        ))
+
+    def _fixer_target(self, target, state):
+        """Anomaly-form fixer target: the cached anchor anomaly when it
+        belongs to ``target``; the pre-step anomaly when not anchoring;
+        else (``_target_mass`` set by a caller) ``target - B``."""
+        cached = getattr(self, "_target_anomaly", None)
+        if cached is not None and cached[0] is target:
+            return cached[1]
+        if not self.config.anchor_mass_to_initial:
+            return _plane_weighted_mass_sum(
+                state.rho_prime.data, self.grid, self.height_coord,
+                self.terrain_metric,
+            )
+        return target - self._background_mass
 
     def step(
         self,
@@ -3174,16 +3244,20 @@ class PlaneCompressibleEulerModel:
         # make_physics fn rather than silently reseed (#405/#413).
         refuse_unthreaded_stateful_physics(
             physics_fn, None, where="NH plane step()")
+        mass_state = _to_fp64(state) if self.config.mixed_precision else state
         if self.config.fix_mass and self.config.anchor_mass_to_initial:
             if self._target_mass is None:
                 self._target_mass = compute_dry_mass_plane(
-                    state, self.grid, self.height_coord, self.terrain_metric,
+                    mass_state, self.grid, self.height_coord, self.terrain_metric,
                 )
+                self._cache_target_anomaly(mass_state)
         target = self._target_mass
         if target is None and self.config.fix_mass:
             target = compute_dry_mass_plane(
-                state, self.grid, self.height_coord, self.terrain_metric,
+                mass_state, self.grid, self.height_coord, self.terrain_metric,
             )
+        if self.config.fix_mass:
+            target = self._fixer_target(target, mass_state)
         return self._step_jit(state, dt, target, physics_fn)
 
     def step_halo(
@@ -3267,6 +3341,7 @@ class PlaneCompressibleEulerModel:
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
             outer_integrator=self.config.outer_integrator,
+            rounding_safe_combinations=self.config.mixed_precision,
         )
 
         def slow_tendency_fn(s):
@@ -3332,13 +3407,21 @@ class PlaneCompressibleEulerModel:
             float(dt), self.config.n_acoustic_substeps,
             bool(self.config.semi_implicit_acoustic),
             bool(substep_horiz), id(f_pad_cached),
+            bool(self.config.mixed_precision),
         )
         if (getattr(self, "_jit_halo_core", None) is None
                 or getattr(self, "_jit_halo_key", None) != _jit_key):
-            def _halo_core(s):
-                return split_explicit_step(
-                    s, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-                )
+            if self.config.mixed_precision:
+                def _halo_core(s):
+                    return _cast_like(split_explicit_step(
+                        s, lambda x: _cast_like(slow_tendency_fn(x), x),
+                        _acoustic_fp64(acoustic_update_fn), dt, se_config,
+                    ), s)
+            else:
+                def _halo_core(s):
+                    return split_explicit_step(
+                        s, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+                    )
             self._jit_halo_core = jax.jit(_halo_core)
             self._jit_halo_key = _jit_key
         stepped = self._jit_halo_core(state_local)
@@ -3349,23 +3432,46 @@ class PlaneCompressibleEulerModel:
         if self.config.fix_mass and owned_mask is not None:
             from legoesm.atmosphere.dynamics.crm.rce_mpi import (
                 compute_dry_mass_plane_mpi,
+                compute_rho_prime_mass_plane_mpi,
                 fix_mass_nonhydrostatic_plane_mpi,
             )
+            mass_state = (_to_fp64(state_local) if self.config.mixed_precision
+                          else state_local)
+            mass_args = (self.grid, self.height_coord, self.terrain_metric,
+                         layout, owned_mask)
             if self.config.anchor_mass_to_initial:
                 if self._target_mass is None:
                     # Initial reduction across all ranks so every rank
-                    # captures the same anchor.
+                    # captures the same anchor (total + its rho' anomaly).
                     self._target_mass = compute_dry_mass_plane_mpi(
-                        state_local, self.grid, self.height_coord,
-                        self.terrain_metric, layout, owned_mask,
-                    )
+                        mass_state, *mass_args)
+                    self._target_anomaly = (
+                        self._target_mass,
+                        compute_rho_prime_mass_plane_mpi(mass_state, *mass_args))
                 target = self._target_mass
             else:
-                target = compute_dry_mass_plane_mpi(
-                    state_local, self.grid, self.height_coord,
-                    self.terrain_metric, layout, owned_mask,
-                )
-            stepped = fix_mass_nonhydrostatic_plane_mpi(
+                target = None
+            # Anomaly-form target, as in ``_fixer_target`` (serial). A
+            # caller-replaced ``_target_mass`` total is converted once by
+            # subtracting the global background (carries that total's
+            # rounding, as the serial fallback does).
+            cached = getattr(self, "_target_anomaly", None)
+            if target is None:
+                target = compute_rho_prime_mass_plane_mpi(
+                    mass_state, *mass_args)
+            elif cached is not None and cached[0] is target:
+                target = cached[1]
+            else:
+                rest = mass_state._replace(rho_prime=mass_state.rho_prime.replace(
+                    data=jnp.zeros_like(mass_state.rho_prime.data)))
+                total = target
+                target = total - compute_dry_mass_plane_mpi(rest, *mass_args)
+                if not isinstance(target, jax.core.Tracer):
+                    self._target_anomaly = (total, target)  # convert once
+            mpi_fixer = (_fix_mass_fp64(fix_mass_nonhydrostatic_plane_mpi)
+                         if self.config.mixed_precision
+                         else fix_mass_nonhydrostatic_plane_mpi)
+            stepped = mpi_fixer(
                 stepped, target, self.grid, self.height_coord,
                 self.terrain_metric, layout, owned_mask,
             )
@@ -3386,6 +3492,7 @@ class PlaneCompressibleEulerModel:
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
             outer_integrator=self.config.outer_integrator,
+            rounding_safe_combinations=self.config.mixed_precision,
         )
 
         def slow_tendency_fn(s: PlaneNonHydrostaticState):
@@ -3457,16 +3564,25 @@ class PlaneCompressibleEulerModel:
                     self.height_coord, self.terrain_metric, self.config,
                 )
 
-        state_new = split_explicit_step(
-            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-        )
+        if self.config.mixed_precision:
+            state_new = _cast_like(split_explicit_step(
+                state, lambda s: _cast_like(slow_tendency_fn(s), s),
+                _acoustic_fp64(acoustic_update_fn), dt, se_config,
+            ), state)
+        else:
+            state_new = split_explicit_step(
+                state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+            )
 
         if self.config.fix_mass and target_mass is not None:
-            state_new = fix_mass_nonhydrostatic_plane(
+            # ``target_mass`` is already the anomaly target (see
+            # ``_fixer_target``): delta = (target - sum(rho' w)) / V.
+            fixer = (_fix_mass_fp64(fix_mass_nonhydrostatic_plane)
+                     if self.config.mixed_precision
+                     else fix_mass_nonhydrostatic_plane)
+            state_new = fixer(
                 state_new, target_mass, self.grid, self.height_coord,
                 self.terrain_metric,
-                # Concrete eager constant read off the static ``self``
-                # at trace time — bit-preserved as a jaxpr literal.
-                background_mass=self._background_mass,
+                background_mass=jnp.zeros((), target_mass.dtype),
             )
         return state_new
