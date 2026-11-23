@@ -315,7 +315,7 @@ def test_slab_deck_runs_the_atmosphere_owned_column_lane():
     assert {r: slab[r] for r in cloud_rows} == {r: prod[r] for r in cloud_rows}
     assert slab["clouds"] == "cam6_clubb"
     assert (slab["physics_update_steps"], slab["rad_update_steps"],
-            slab["cld_macmic_num_steps"]) == (6, 12, 3)
+            slab["cld_macmic_num_steps"]) == (2, 4, 3)
     d3 = load_yaml_config(str(CMIP_CONFIGS[1]), parser)
     assert not d3.get("column_lane") and not d3.get("atm_owns_surface")
     assert not d3.get("use_multilayer_land")
