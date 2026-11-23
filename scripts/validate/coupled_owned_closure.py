@@ -209,6 +209,13 @@ def main(argv=None) -> int:
                     "step's output; its surface diagnostics); at the first "
                     "hit print NANTRAP and save the ORIGIN state (entering "
                     "that step) next to --json, then stop")
+    ap.add_argument("--nan-stages", action="store_true",
+                    help="--nan-trap on the lat-lon lane: also check every "
+                    "stage inside the atmosphere step (dynamics tendency, "
+                    "polar filters, energy fixer, physics, physics "
+                    "increment, safety rails) and name the first stage whose "
+                    "output is non-finite from finite inputs, with the "
+                    "non-finite count per latitude row")
     ap.add_argument("--trace-positivity", action="store_true",
                     help="book the water the dycore's positivity stage (and "
                     "its vapour payment) changes, per call")
@@ -600,6 +607,49 @@ def main(argv=None) -> int:
         mp.setattr(llm, "cgrid_latlon_pe_tendencies", tend_w)
         mp.setattr(llm, "fourier_filter_3d", ff3_w)
         mp.setattr(llm, "fourier_filter", ff2_w)
+    stage_log, nan_stage = [], {}
+    if args.nan_stages:
+        import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as llm
+
+        def _bad_profile(tree):
+            out = []
+            for x in jax.tree_util.tree_leaves(tree):
+                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype,
+                                                          jnp.inexact):
+                    b = ~jnp.isfinite(x)
+                    out.append(b if b.ndim < 2 else jnp.sum(
+                        b, axis=tuple(range(1, b.ndim))))
+            return out
+
+        def _stage_cb(name):
+            def cb(bin_, bout):
+                nin = int(sum(int(np.sum(np.asarray(b))) for b in bin_))
+                nout = [np.asarray(b) for b in bout]
+                tot = int(sum(int(np.sum(b)) for b in nout))
+                stage_log.append((n_steps[0] + 1, name, nin, tot))
+                if tot and not nin and "first_stage" not in nan_stage:
+                    rows = sorted({int(i) for b in nout if b.ndim == 1
+                                   for i in np.nonzero(b)[0]})
+                    nan_stage.update(first_stage=name, step=n_steps[0] + 1,
+                                     bad_index_axis0=rows[:48])
+            return cb
+
+        def _wrap_fn(fn, name, skip_self=False):
+            def w(*a, **kw):
+                ins = (a[1:] if skip_self else a, kw)
+                out = fn(*a, **kw)
+                jax.debug.callback(_stage_cb(name), _bad_profile(ins),
+                                   _bad_profile(out), ordered=True)
+                return out
+            return w
+        for nm in ("cgrid_latlon_pe_tendencies", "fourier_filter_3d",
+                   "fourier_filter", "gridded_energy_fixer_dT"):
+            mp.setattr(llm, nm, _wrap_fn(getattr(llm, nm), nm))
+        dcls = type(atm.model.dyn)
+        for nm in ("_call_physics_raw", "_apply_physics_increment",
+                   "_apply_safety_rails"):
+            mp.setattr(dcls, nm, _wrap_fn(getattr(dcls, nm), nm,
+                                          skip_self=True))
     model, orig = atm.model, atm.model.step
     n_steps = [0]
     dyn_dw = [np.zeros(2)]
@@ -680,6 +730,10 @@ def main(argv=None) -> int:
         return None
 
     def nan_hit(hit, origin):
+        if nan_stage:
+            hit["stages"] = nan_stage
+            hit["stage_log_this_step"] = [
+                r for r in stage_log if r[0] == n_steps[0] + 1][-60:]
         hit.update(step=n_steps[0] + 1,
                    last_land_call_step=land_seen.get("call_step"))
         if hit["where"] == "entering":
