@@ -190,6 +190,8 @@ def flux_form_tracer_step(
 def split_explicit_tracer_mass_step(
     state, slow_fn, acoustic_fn, reconstruct_fn, flux_tendency_fn,
     rho_ref, dt, config,
+    *, tracer_field="tracers", rho_prime_fn=None,
+    tracer_mass_fn=None, recover_tracer_fn=None,
 ):
     """Pair height-coordinate tracer mass with unchanged dynamics RK blends.
 
@@ -198,41 +200,57 @@ def split_explicit_tracer_mass_step(
     Reconstruction coefficients are captured at the RHS evaluation state,
     which can differ from the RK base. All extra leaves are transient.
     No floor, clipping, fixer, or new time-integration coefficients are used.
+
+    Optional representation callbacks let spectral callers carry mass
+    coefficients while retaining their public mixing-ratio coefficients.
+    Grid callers retain their original arithmetic when callbacks are omitted.
     """
     from legoesm.timestepping.split_explicit import split_explicit_step
 
+    def q_data(s):
+        return getattr(s, tracer_field).data
+
+    def set_q(s, q):
+        return s._replace(**{tracer_field: getattr(s, tracer_field).replace(data=q)})
+
+    def rho_prime(s):
+        return s.rho_prime.data if rho_prime_fn is None else rho_prime_fn(s)
+
     def with_q(s, mass, rho):
-        return s._replace(tracers=s.tracers.replace(data=mass / rho[..., None]))
+        q = (mass / rho[..., None] if recover_tracer_fn is None
+             else recover_tracer_fn(mass, rho))
+        return set_q(s, q)
 
     def zero_q(s):
-        return s._replace(tracers=s.tracers.replace(data=jnp.zeros_like(s.tracers.data)))
+        return set_q(s, jnp.zeros_like(q_data(s)))
 
-    rho = rho_ref + state.rho_prime.data
-    mass = rho[..., None] * state.tracers.data
-    zero_recon = jax.tree.map(jnp.zeros_like, reconstruct_fn(state.tracers.data))
-    zero_norm = jnp.zeros((), dtype=mass.dtype)
+    rho = rho_ref + rho_prime(state)
+    mass = (rho[..., None] * q_data(state) if tracer_mass_fn is None
+            else tracer_mass_fn(q_data(state), rho))
+    zero_recon = jax.tree.map(jnp.zeros_like, reconstruct_fn(q_data(state)))
+    zero_norm = jnp.zeros((), dtype=mass.real.dtype)
     initial = (zero_q(state), mass, zero_recon, zero_norm)
 
     def slow(carry):
         s, mq, _, _ = carry
-        physical = with_q(s, mq, rho_ref + s.rho_prime.data)
+        physical = with_q(s, mq, rho_ref + rho_prime(s))
         tend, mass_rhs = slow_fn(physical)
-        tend = tend._replace(tracers=tend.tracers.replace(data=mass_rhs))
-        return (tend, jnp.zeros_like(mq), reconstruct_fn(physical.tracers.data),
-                jnp.ones((), dtype=mq.dtype))
+        tend = set_q(tend, mass_rhs)
+        return (tend, jnp.zeros_like(mq), reconstruct_fn(q_data(physical)),
+                jnp.ones((), dtype=mq.real.dtype))
 
     def acoustic(carry, slow_carry, dt_s, n_sub, cfg):
         s, mq, _, _ = carry
         tend, _, reconstruction, norm = slow_carry
         stage_dt = dt_s * n_sub
         # The incoming mass belongs to the RK BASE before its slow axpy.
-        rho_base = rho_ref + s.rho_prime.data - stage_dt * tend.rho_prime.data
+        rho_base = rho_ref + rho_prime(s) - stage_dt * rho_prime(tend)
         physical = with_q(s, mq, rho_base)
         updated, integrated_fluxes = acoustic_fn(physical, tend, dt_s, n_sub, cfg)
         reconstruction = jax.tree.map(lambda x: x / norm, reconstruction)
-        mq = (mq + stage_dt * tend.tracers.data
+        mq = (mq + stage_dt * q_data(tend)
               + flux_tendency_fn(integrated_fluxes, reconstruction))
         return zero_q(updated), mq, zero_recon, zero_norm
 
     updated, mq, _, _ = split_explicit_step(initial, slow, acoustic, dt, config)
-    return with_q(updated, mq, rho_ref + updated.rho_prime.data)
+    return with_q(updated, mq, rho_ref + rho_prime(updated))

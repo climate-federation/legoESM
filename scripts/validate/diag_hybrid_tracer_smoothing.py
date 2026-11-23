@@ -611,7 +611,8 @@ def height_artifacts(out, provenance, datasets, objects, configs):
     fixture_paths = ("tests/unit/test_mpas_atmosphere.py",
                      "tests/unit/test_vertical_advection_hybrid_van_leer.py",
                      "tests/unit/test_plane_nh_tracers.py",
-                     "tests/unit/test_spectral_dealiasing.py")
+                     "tests/unit/test_spectral_dealiasing.py",
+                     "tests/atmosphere/nonhydrostatic/unit/test_spectral_nh.py")
     provenance["height_fixture_sources"] = {
         str(root / name): hashlib.sha256((root / name).read_bytes()).hexdigest()
         for name in fixture_paths}
@@ -810,6 +811,56 @@ def height_vertical_paths(out, rows, provenance, record):
     (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
     assert all(row["accepted"] for row in quadrature), "spectral horizontal quadrature REFUTED"
 
+    # Projection/recovery is a distinct finite-step question. Keep the exact
+    # census state above and separately label the nonuniform supplemental states.
+    spectral_fixture = runpy.run_path(str(root /
+        "tests/atmosphere/nonhydrostatic/unit/test_spectral_nh.py"))
+    from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import TC2_PARAMS
+    provenance["spectral_nonflat_fixture"] = dict(
+        name="supplemental_TC2a_metric", state="rough seed1 + positive packed q + census sine w",
+        scope="same supplemental Earth-grid state, only terrain metric replaced; not a TC2a integration",
+        metric_parameters={k: np.asarray(value).item() for k, value in TC2_PARAMS.items()},
+        terrain_lanes=["matrix spectral TC1 mountain", "matrix spectral TC2a gap mountain",
+                       "bench_spectral_nh TC1 mountain (existing flat fallback on initialization error)",
+                       "factory with supplied nonflat terrain metric"],
+        inactive_lane="matrix spectral TC3 skipped before initialization",
+        dispatch="construction-time exact J == 1 everywhere: paired; otherwise legacy",
+        acceptance_scope="flat conservation required; nonflat legacy report only",
+        known_difference="RULE 0 debt: nonflat legacy inventory leak; option 2 deferred",
+    )
+    for nonflat in (False, True):
+        for semi_implicit in (False, True):
+            label = ("spectral supplemental/" + ("TC2a metric" if nonflat else "flat")
+                     + ("/semi_implicit" if semi_implicit else "/explicit"))
+            supplemental_model, supplemental_state = spectral_fixture["t29_spectral_fixture"](
+                semi_implicit, nonflat=nonflat)
+            supplemental_final = supplemental_model.step(supplemental_state, 1.0)
+            old_rho, old_q = spectral_fixture["t29_spectral_grid_state"](supplemental_model, supplemental_state)
+            new_rho, new_q = spectral_fixture["t29_spectral_grid_state"](supplemental_model, supplemental_final)
+            budget_index = len(rows)
+            record_height_inventory(
+                rows, label, supplemental_model.grid.grid_area, supplemental_model.height_coord,
+                supplemental_model.terrain_metric, old_rho, old_q, new_rho, new_q, datasets)
+            rows[budget_index].update(
+                acceptance_scope=("report_only_nonflat_legacy" if nonflat
+                                  else "required_flat_conservation"),
+                method="legacy" if nonflat else "paired",
+            )
+            if nonflat:
+                rows[budget_index]["known_difference"] = "RULE 0 debt; option 2"
+            objects[label + "/initial"] = supplemental_state
+            objects[label + "/final"] = supplemental_final
+            objects[label + "/metric"] = supplemental_model.terrain_metric
+            objects[label + "/grid"] = supplemental_model.grid
+            objects[label + "/height"] = supplemental_model.height_coord
+            configs[label] = supplemental_model.config
+            # Persist measured rows/arrays before flat acceptance. Nonflat
+            # legacy rows retain their measured verdicts and report-only debt.
+            height_artifacts(out, provenance, datasets, objects, configs)
+            (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
+            if not nonflat:
+                assert_height_inventory_conserves(rows, (label,))
+
     # Native LES local operators are also used on halo columns. Their scope
     # here is explicitly local, not an MPI horizontal conservation claim.
     model, ns, pg, hc, metric = height_les_fixture(root, q)
@@ -855,7 +906,7 @@ def height_vertical_paths(out, rows, provenance, record):
         assert np.all(np.asarray(objects[name].w.data)[..., (0, -1)] == 0), name
     for state in (ss, nsn):
         assert np.all(np.asarray(sh_synthesis_3d(gg, state.w_hat.data).real)[..., (0, -1)] == 0)
-    # Reproduce retained standalone T24 diagnostics only. MPAS/LES full-step
+    # Reproduce retained standalone T24 diagnostics only. Fixed-core full-step
     # transport now changes by design; their legacy paired rows remain reported,
     # but acceptance belongs to the distinct global inventory budget below.
     expected = {
@@ -863,7 +914,6 @@ def height_vertical_paths(out, rows, provenance, record):
         ("MPAS NH/height", "acoustic-only step; tracers unchanged"): 4.5e-1,
         ("spectral NH/height", "vertical_advection_height"): 4.9e-2,
         ("spectral NH/height", "acoustic-only step; tracers unchanged"): 4.5e-1,
-        ("spectral NH/height", "full split step"): 5.8e-2,
         ("LES serial", "_vertical_advection_plane"): 2.9e-2,
         ("LES serial", "vertical_advection_van_leer_plane"): 1.7e-3,
         ("LES serial/height", "acoustic-only step; tracers unchanged"): 8.5e-2,
@@ -883,7 +933,7 @@ def height_vertical_paths(out, rows, provenance, record):
     height_artifacts(out, provenance, datasets, objects, configs)
     (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
     assert all(r["agrees"] for r in reproduction), "STOP: T24 issue2641 reproduction mismatch; inspect artifacts"
-    assert_height_inventory_conserves(rows, ("MPAS NH/height", "LES serial/height"))
+    assert_height_inventory_conserves(rows, ("MPAS NH/height", "LES serial/height", "spectral NH/height"))
 
 
 

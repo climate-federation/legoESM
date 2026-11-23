@@ -4,7 +4,10 @@ Status: phase 0 completed at ccd817f21c (artifacts in
 `/glade/derecho/scratch/pg2328/t29_phase0/retry_import`); MPAS/LES phase 1
 completed locally at 52b658b634 after full-diff GLM/Claude SHIP and PBS checks
 (receipts in `/glade/derecho/scratch/pg2328/t29_phase1`). Spectral quadrature
-instrument below awaits full-diff SHIP, commit, then PBS measurement.
+instrument committed at 3dfbd2623f and measured on PBS. The spectral fix draft
+passed flat checks, then stopped at the nonflat gate; the 2026-11-23 user
+option-1 disposition below restricts pairing to exact flat J. This revised
+snapshot awaits full-diff SHIP and PBS validation; prior passes are historical.
 No push, PR, issue edit or merge.
 
 ## Claims and distinct statistics
@@ -245,3 +248,174 @@ both weighted sums zero, unweighted sums nonzero; constant perturbation fails.
 Exact-zero norms return relative=null; invalid shape/fp32/nonfinite/nonpositive
 area are rejected. No empirical quadrature result yet. This is not finite-step
 rho*q closure, aliasing accuracy or spectral-method SHIP.
+
+## Spectral phase-1 OPTION1, pre-runtime registration (2026-11-23)
+
+Claude `claude_answer_specdesign.md` selected OPTION1: transport M=J*rho*q
+with the SAME native projection P=S*A as density, recover q_hat=A(PM/(J*rho)),
+keep the public q_hat state. P1-P6 and amendments P7-P11 have Codex+GLM YES;
+full-diff GLM and Claude SHIP are still required. No new prognostic state,
+production config, RK coefficients, limiter, floor or inventory correction.
+Native horizontal quadrature prerequisite already passed at instrument commit
+3dfbd2623f: `/glade/derecho/scratch/pg2328/t29_spectral_instrument/measurement_receipt.json`.
+That result certifies horizontal quadrature, not this finite-step fix.
+
+The shared split-explicit adapter uses optional representation callbacks;
+existing grid callers retain their arithmetic. Spectral transient mass is SH
+coefficients A(J*rho*S(q_hat)), so mass and density use identical SSP3 blends.
+The reconstruction normalizer is REAL even when mass coefficients are complex.
+Each RK stage transports q with the pre-mask horizontal continuity fluxes and
+its exact time-integrated vertical acoustic rho*w flux, then recovers the
+existing public q coefficients. Both explicit and semi-implicit acoustic
+variants export the exact flux used by their backward density update. Flux is
+positive upward on top-to-bottom levels, giving bottom minus top in mass RHS.
+Use density continuity's exact native oc2/dmu divergence (A1 amendment,
+Codex+GLM YES; Claude required) and the existing horizontal tendency mask; vertical
+mass and q recovery use full native P, not an extra tendency mask. No spectral
+vertical selector exists; reuse centered height faces. Standalone old slow and
+acoustic diagnostics retain their defaults; the active paired model suppresses
+all old slow tracer advection. Sources use ACTUAL evaluation-state density;
+source/fixer-free invariant scope and the anchored fixer ordering stay unchanged.
+
+KNOWN DIFFERENCE: final SH q projection generally loses pointwise/local mass
+agreement. Certify GLOBAL inventory <=1e-12 relative per tracer and constant
+q=0.01 to absolute1e-12 on flat J. Never claim local equality or a nonflat-J
+invariant from that flat result. Public rest initializer still allocates a zero
+dummy tracer for n_tracers=0; do not change its state. Truly empty tracer axes
+retain the original integrator path. Check empty-axis bytes and zero-dummy
+nontracer-field bytes against pre-fix3dfbd2623f; no state-dependent zero switch.
+
+Tests and supplemental census reuse the existing rough NH seed1 fixture on the
+exact census Gaussian truncation10 / hc10 / H30000 grid. Add0.01 to synthesized
+q before analysis and require positivity; pack q and2q. Add the original census
+sine w with exact zero lids; require nonzero horizontal density variation,
+vor/div and w. Config explicitly sets g=constants.g, hyperdiff0/order2,
+sponge0/width10000, n_acoustic_substeps6, small_earth1, rotatingTrue,
+semi_implicitFalse/True, dealiasing0.667, fix_massFalse, anchorFalse; dt1.
+Measure actual represented initial/final rho and q with native area*J*dz.
+Reuse existing global_inventory_budget and controls, no surrogate mass statistic.
+Keep the original census fixture and resolved default config unchanged; it now
+also must CONSERVE. Retire ONLY its superseded spectral full-step legacy5.8e-2
+target; retain the old standalone spectral slow/acoustic reproduction targets.
+
+Test native orthogonality per level/tracer:
+`sum(area*f*P(g)) = sum(area*P(f)*P(g))`, with g=J*rho*q, f=actual rho AND
+f=J*rho*q0 (require maxabs(f-Pf)>1e-12 for the second case). Normalize by
+sum(area*abs(f*Pg)), strictly positive before division; require <=1e-12.
+Plant +0.01*maxabs(Pg) in ONLY lhs Pg; amplitude must be nonzero and the SAME
+predicate must fail at EVERY level/tracer. No aggregate cancellation verdict.
+
+Observe the actual shared helper through unchanged SSP3: all3 acoustic stage
+mass budgets, both existing RK blends, and all7 native mass-to-q recoveries
+must close1e-12 on flat J. Check stage/blend recon/normalizer reset to zero.
+Retain mass leaves and signed per-tracer budgets in the test observations;
+print signed stage/blend/recovery inventory pairs in test output. Instrument
+module-local split_explicit aliases before invoking the helper, under disable_jit
+for Python observations only. Separately require JIT/eager and _step_on_cpu vs
+_step_jit rho/q parity at rtol/atol1e-12 for both acoustic variants. Verify raw
+acoustic density increment from exported flux at rtol/atol1e-12, exact zero lid
+flux, nonzero interior flux. Reversion selects ONLY full-step inventory tests
+against3dfbd2623f plus the reviewed test file; each must fail the INVENTORY
+assertion, never count imports/helper absence as evidence.
+
+Native spectral transforms retain fp64/complex128 as required by the existing
+backend contract. Test finite/nonzero FP32 INPUT gradients in q/w amplitudes
+through the actual new full step; do not call that fully-fp32 spectral arithmetic.
+Both variants also get cheap scalar FP64 check_grads order1/reverse using the
+existing1e-3/1e-6 tolerances and squared synthesized-q loss. No backend or
+precision-policy default changes. Unsupported gradient behavior is a gate.
+
+Nonflat J: the exact same supplemental state/grid/hc changes ONLY the metric to
+that returned by existing dcmip25_tc2_init_spectral(grid,n_levels10,subcase'a').
+Label 'supplemental_TC2a_metric', not a TC2a integration; save source parameters,
+metric, full initial/final states, resolved configs and actual inventory arrays.
+Require finite J>0, maxabs(J-1)>1e-12 and ptp(J)>1e-12; never substitute a fixture
+if that guard fails. This supersedes the initially proposed low-resolution TC1
+metric before any implementation/run; the TC1 lane remains in the report.
+Historical nonflat gate (superseded by the user disposition below): measure
+EACH tracer at the SAME1e-12 bar, both acoustic variants subject to immediate
+STOP on the first failure. Persist each budget and arrays BEFORE its assertion.
+That gate fired on the draft explicit case; the subsequent authorized old/new
+comparison measured both acoustic variants. It did not authorize a correction.
+The user then selected the flat-only option below; preserve that failure as
+evidence, not as an acceptance assertion for the unchanged legacy terrain path.
+
+Static results-change/terrain inventory: matrix spectral TC1 mountain and TC2a
+gap mountain; bench_spectral_nh TC1 mountain (existing flat fallback on initializer
+exception, unchanged); supplied nonflat metrics in the component factory. The
+spectral-vs-C-grid comparison benchmark uses flat terrain. Matrix spectral TC3
+is explicitly skipped before initialization for missing microphysics callback;
+do not list it as an active terrain integration. Factory defaults to flat if no
+metric supplied. Initializers TC1/TC2 carry a zero dummy tracer; field impact is
+not measured. Existing post-step dry-mass fixers remain outside closure claims.
+
+After exact full-diff GLM+Claude SHIP, run on the authorized PBS CPU protocol:
+spectral unit/dealiasing suites, census/direct helper tests, touched shared-helper
+MPAS/LES regressions and genuine2-rank matrix, task ratchets, spectral reversion,
+tracer-free cross-snapshot byte comparisons with planted controls. Keep the
+already confirmed exact pre-existing hydrostatic-MPAS deselection explicit;
+new model failures/disagreements/nonflat debt require fresh ask_claude and STOP.
+Local fix commit only after runtime evidence and required final-diff SHIP.
+No spectral fix runtime evidence exists at this registration.
+
+A1 source qualification: physics mass sources are re-projected and masked;
+source-only q+dt*S holds up to projection, preserving the global (n=0,m=0) mode.
+
+
+## User option 1: exact flat dispatch; terrain debt deferred (2026-11-23)
+
+This disposition supersedes only the historical nonflat conservation STOP above.
+It keeps every conservation bar, fixture, control and flat acceptance predicate.
+The paired spectral tracer-mass method runs only if J == 1 everywhere, checked
+once by exact NumPy comparison at model construction and stored as a Python
+bool. There is no new config/default or traced geometry branch. Nonflat J uses
+the existing unfixed spectral tracer method; option 2 is a separate research
+step. Empty tracer axes retain the legacy integrator on either geometry.
+
+KNOWN DIFFERENCE / RULE 0 debt: on the SAME supplemental TC2a-metric fixture,
+the legacy explicit relative residual was 6.9208461950594359e-7 and the legacy
+semi-implicit residual was 6.9398988303003302e-7, each for q and 2q. Signed
+residuals were [80486342064, 160972684128] and [80707915680, 161415831360].
+The all-terrain draft instead gave 1.6751283622535413e-5 explicit and
+1.6751283343384507e-5 semi-implicit. These are prior-snapshot measurements,
+not results from the new geometry dispatch. Receipt:
+`/glade/derecho/scratch/pg2328/t29_terrain_compare/comparison_receipt.json`.
+The q/2q relative residuals are not independent evidence. No physical cause or
+terrain-integration impact has been established. This is not a TC2a integration.
+
+Keep BOTH nonflat acoustic census inventory rows, using the SAME statistic and
+1e-12 bar and retaining their measured signed/relative residuals and verdicts.
+Annotate them report_only_nonflat_legacy, method legacy, RULE 0 debt; option 2.
+Flat supplemental rows are required_flat_conservation, method paired, and must
+CONSERVE as before. Save arrays/rows before any acceptance assertion. All
+instrument controls, quadrature, reproduction and other fixed-path inventory
+assertions remain required. No assertion of nonflat conservation, no rescale,
+no correction, no dropped terrain lane. Terrain lanes above are retained legacy
+behavior; flat spectral-vs-C-grid and factory-flat lanes select the new method.
+Numerical impact and current-snapshot byte equality still require measurement.
+
+O1-O4: Codex YES + GLM YES, VOTED 2-0 + Claude pending; exact detail proposal and
+vote are in the T29 scratch handoff. O2 dispatch tests patch the actual module
+integrator aliases with distinct sentinels for both acoustics, flat/TC2a metrics,
+and a single native-fp64 ULP departure from J=1. Call _split_step eagerly and
+through fresh jax.jit closures; require exact Python bool and correct selection.
+Invert the cached bool as a planted violation and require the SAME dispatch
+assertion to fail in both modes. The ULP metric is selection-only, not integrated.
+
+After full-diff GLM review and fresh Claude SHIP, run the existing PBS CPU checks
+including reversion, full regressions/ratchets, and guarded byte comparisons.
+O4 uses a separate detached HEAD3dfbd2623f baseline with only the reviewed test
+file overlay, exact source/fixture/arm/import pins and PBS3.12 AST pins. Reuse
+repository _same_bytes and the existing tracer-free collector/checker pattern;
+review the exact adapted scratch source before execution. Compare ALL seven
+SpectralNHState input/output leaves for nonflat packed positive q on BOTH
+acoustics and step/_step_on_cpu, including shapes, dtypes and bytes. Require
+identical inputs/configs/geometry; changed-model-hash, wrong-root, same-source,
+and nonzero one-ULP payload controls must fire. Flat positive q must differ from
+baseline in tracer output as a nonvacuity control. Truly empty tracer axes on
+flat/nonflat require full-leaf equality; zero-dummy q requires all NONTRACER
+leaves equal and exact zero q in each arm. No requirement of signed-zero byte
+equality for the dummy q leaf. Current-snapshot shared-helper MPAS/LES byte and
+regression checks are still required. Prior passes do not discharge new checks.
+Any model failure/disagreement triggers the standing Claude gate; no local
+commit until the required review/runtime checks pass. No outward actions.
