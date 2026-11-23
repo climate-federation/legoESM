@@ -15,6 +15,11 @@ __param_spec__ = {
     "CloudConfig": {
         "scheme_key": "atm.clouds.CloudConfig",
         "excluded": {
+            "mf_cldfrac_fac": "structural: CAM7 clubb_mf_cldfrac_fac (plume-area to cloud-fraction factor of the deep-cloud hookup, atmos_phys clubb_mf.F90:48), fixed with the port",
+            "mf_deepcu_select_sharpness": "numerics: RULE 5 sharpness of the larger-of-two ZM/plume deep cloud (inf = hard max), value voted",
+            "mf_deepcu_cap_sharpness": "numerics: RULE 5 sharpness of CAM's concld <= 0.8 cap (inf = hard min), value voted",
+            "mf_deepcu_frac_gate_sharpness": "numerics: RULE 5 sharpness of the deepcu > frac_limit gate (inf = CAM), value voted",
+            "mf_deepcu_ic_gate_sharpness": "numerics: RULE 5 sharpness of the in-cloud water >= ic_limit gate (inf = CAM), value voted",
             "cloud_subcolumn_mask_width": "numerics: RULE 5 smoothing width of the maximum-random subcolumn mask (0 = CAM's hard switch), not a tunable",
             # Lower clip on the Martin gamma-PSD shape (1/PGAM^2 - 1 clipped to
             # [pgam_min, pgam_max]); a numerics regulariser/cap on the droplet
@@ -459,6 +464,22 @@ class CloudConfig(NamedTuple):
     # is only partly switched.  0 = CAM6's hard switches (oracle tests).
     # User-approved default 0.01 (2026-10-27).
     cam6_rad_gate_log_width: float = 0.01
+    # CAM7 CLUBB-MF deep-cloud hookup (clubb3_run, do_clubb_mf_rad): the
+    # plume cloud (PhysicsState.mf_cloudfrac / mf_qc, one step lagged) enters
+    # cam6_clubb's deep convective cloud as deepcu_mf = mf_cldfrac_fac *
+    # mf_cloudfrac, zeroed below cam6_deepcu_frac_limit / ic_limit, combined
+    # with ZM's deepcu as the larger of the two per level (user 2026-11-23;
+    # CAM7 runs no ZM beside it), and capped at 0.8 in the cloud fraction
+    # (CAM concld).  Static switch, set from ExperimentConfig.clubb_mf.
+    clubb_mf_cloud: bool = False
+    mf_cldfrac_fac: float = 10.0  # clubb_mf_cldfrac_fac (atmos_phys clubb_mf.F90:48)
+    # RULE 5 sharpness [1/unit] of the hookup's switches on traced state
+    # (inf = the hard form): larger-of-two selection and the 0.8 cap [1/frac],
+    # the frac_limit gate [1/frac], the ic_limit gate [1/(kg/kg)].
+    mf_deepcu_select_sharpness: float = 1000.0
+    mf_deepcu_cap_sharpness: float = 1000.0
+    mf_deepcu_frac_gate_sharpness: float = 1000.0
+    mf_deepcu_ic_gate_sharpness: float = 1.0e13
 
 
 def build_cloud_config(
@@ -501,6 +522,7 @@ def build_cloud_config(
     cam6_snow_optics_file: str | None = None,
     cam6_rad_specified_nc: bool | None = None,
     cam6_rad_gate_log_width: float | None = None,
+    clubb_mf_cloud: bool | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -561,7 +583,8 @@ def build_cloud_config(
                         ("cam6_snow_in_rad", cam6_snow_in_rad),
                         ("cam6_snow_optics_file", cam6_snow_optics_file),
                         ("cam6_rad_specified_nc", cam6_rad_specified_nc),
-                        ("cam6_rad_gate_log_width", cam6_rad_gate_log_width)):
+                        ("cam6_rad_gate_log_width", cam6_rad_gate_log_width),
+                        ("clubb_mf_cloud", clubb_mf_cloud)):
         if _val is not None:
             overrides[_name] = _val
     for _name, _val in (("cap_floor_on", cap_floor_on), ("cap_floor_lat_deg", cap_floor_lat_deg),
@@ -569,6 +592,10 @@ def build_cloud_config(
                         ("cap_floor_q_c", cap_floor_q_c)):
         if _val is not None:
             overrides[_name] = _val
+    if overrides.get("clubb_mf_cloud") and scheme != "cam6_clubb":
+        raise ValueError(
+            "clubb_mf (CAM7 CLUBB-MF) hands its plume cloud to the cam6_clubb "
+            f"deep cloud; cloud scheme {scheme!r} has none to combine it with.")
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )
