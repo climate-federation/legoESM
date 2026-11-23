@@ -371,13 +371,33 @@ def test_coupled_envelope_report_exposes_d188_and_ice_fields(
         "ice_day_metrics",
         lambda _candidate, _nemo, _geo: daily_ice,
     )
+    map_metrics = {
+        key: {
+            "candidate_value": 0.001,
+            "nemo_monthly_mean_hemisphere_total": 1.0,
+            "units": "1e6 km2" if "AREA" in key else "1e3 km3",
+        }
+        for key in (*ulp_gate.COUPLED_ICE_MAP_KEYS, *ulp_gate.COUPLED_SNOW_MAP_KEYS)
+    }
+    monkeypatch.setattr(
+        c4_year_runner,
+        "monthly_ice_map_metrics",
+        lambda *_args: map_metrics,
+    )
 
     result = ulp_gate.build_coupled_c4_envelope_report(
         tmp_path / "REF_C4", tmp_path / "perturbed"
     )
-    required = set(ulp_gate.decision188_metric_keys()) | set(ulp_gate.COUPLED_ICE_KEYS)
+    required = (
+        set(ulp_gate.decision188_metric_keys())
+        | set(ulp_gate.COUPLED_ICE_KEYS)
+        | set(ulp_gate.COUPLED_ICE_MAP_KEYS)
+        | set(ulp_gate.COUPLED_SNOW_MAP_KEYS)
+    )
     assert result["envelope_profile"] == ulp_gate.COUPLED_C4_PROFILE
     assert result["ice_metric_keys"] == list(ulp_gate.COUPLED_ICE_KEYS)
+    assert result["ice_map_metric_keys"] == list(ulp_gate.COUPLED_ICE_MAP_KEYS)
+    assert result["snow_map_reference_keys"] == list(ulp_gate.COUPLED_SNOW_MAP_KEYS)
     assert all(required <= set(month["metrics"]) for month in result["months"])
     assert all(
         month["ice_sst_sss_mask_source"] == "Decision-188 ice_cover_clim.nc"
@@ -419,6 +439,44 @@ def test_coupled_envelope_report_only_refreshes_metrics_digest(
         metrics_path
     )
     assert refreshed["envelope_metrics"]["sha256"] != "stale"
+
+
+def test_coupled_ice_map_report_writes_new_admitted_names_without_mutating_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "coupled"
+    perturbed = run_root / ulp_gate.COUPLED_C4_PERTURBED_ARM_NAME
+    perturbed.mkdir(parents=True)
+    source_admission = run_root / ulp_gate.COUPLED_C4_ADMISSION_NAME
+    original = {
+        "status": "PASS_R345_COUPLED_C4_YEAR_SST_PLUS_ONE_ULP_ARM",
+        "admitted": True,
+        "profile": ulp_gate.COUPLED_C4_PROFILE,
+        "baseline_arm": str(ulp_gate.COUPLED_C4_BASELINE_ARM),
+        "run_dir": str(perturbed),
+        "envelope_metrics": {"sha256": "original"},
+    }
+    source_admission.write_text(json.dumps(original) + "\n", encoding="utf-8")
+    report = decision188.minimal_coupled_c4_year_report(sst=0.0, ke=0.001)
+    monkeypatch.setattr(
+        ulp_gate, "build_coupled_c4_envelope_report", lambda *_args: report
+    )
+    output_dir = tmp_path / "new_artifacts"
+    result = ulp_gate.write_coupled_c4_ice_map_envelope_report(
+        run_root, output_dir
+    )
+    metrics = output_dir / ulp_gate.COUPLED_C4_ICE_MAP_METRICS_NAME
+    admission = output_dir / ulp_gate.COUPLED_C4_ICE_MAP_ADMISSION_NAME
+    admitted = json.loads(admission.read_text(encoding="utf-8"))
+    assert result["status"] == "PASS_R345_COUPLED_C4_ICE_MAP_ENVELOPE_REPORT_ONLY"
+    assert admitted["envelope_metrics"]["sha256"] == ulp_gate.common.sha256(metrics)
+    assert admitted["envelope_metrics"]["ice_map_quantities"] == list(
+        ulp_gate.COUPLED_ICE_MAP_KEYS
+    )
+    assert json.loads(source_admission.read_text(encoding="utf-8")) == original
+    with pytest.raises(ulp_gate.GateError, match="refusing to overwrite"):
+        ulp_gate.write_coupled_c4_ice_map_envelope_report(run_root, output_dir)
 
 
 def test_coupled_envelope_report_only_cli_dispatches_without_nemo(

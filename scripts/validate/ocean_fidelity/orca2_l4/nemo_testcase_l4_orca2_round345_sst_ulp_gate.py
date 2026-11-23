@@ -55,6 +55,13 @@ ICE_CONTINUATION_BASELINE_ONLY_VARIABLES = DELAY_RESTART_VARIABLES
 COUPLED_ICE_KEYS = (
     "ICE_AREA_NH", "ICE_AREA_SH", "ICE_VOLUME_NH", "ICE_VOLUME_SH",
 )
+COUPLED_ICE_MAP_KEYS = (
+    "ICE_MISPLACED_AREA_NH", "ICE_MISPLACED_AREA_SH",
+    "ICE_MISPLACED_VOLUME_NH", "ICE_MISPLACED_VOLUME_SH",
+)
+COUPLED_SNOW_MAP_KEYS = (
+    "SNOW_MISPLACED_VOLUME_NH", "SNOW_MISPLACED_VOLUME_SH",
+)
 BASELINE_ARM = (
     Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds")
     / "round342/s4_year/orca2_k0_year1_a_np2"
@@ -83,6 +90,8 @@ COUPLED_C4_RUN_ROOT = Path(
 COUPLED_C4_EVIDENCE_DIR = COUPLED_C4_RUN_ROOT / "evidence"
 COUPLED_C4_ADMISSION_NAME = "round345_coupled_c4_sst_ulp_admission.json"
 COUPLED_C4_METRICS_NAME = "round345_coupled_c4_sst_ulp_metrics.json"
+COUPLED_C4_ICE_MAP_ADMISSION_NAME = "round345_coupled_c4_ice_map_admission.json"
+COUPLED_C4_ICE_MAP_METRICS_NAME = "round345_coupled_c4_ice_map_metrics.json"
 COUPLED_C4_PROFILE = "COUPLED_C_LADDER_REF_C4"
 
 
@@ -1280,7 +1289,7 @@ def build_coupled_c4_envelope_report(
     baseline_root: Path,
     perturbed_root: Path,
 ) -> dict[str, Any]:
-    """Build the D188 ocean metrics plus four monthly hemispheric SI3 totals."""
+    """Build D188 ocean, D233 ice-total, and D238 ice-map twin metrics."""
     # Keep the coupled runner import local: its JAX model dependencies are not
     # needed by the standalone acquisition, staging, or admission checks.
     from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition import (
@@ -1294,25 +1303,30 @@ def build_coupled_c4_envelope_report(
         candidate_is_nemo_restart=True,
     )
     geo = year_metrics.pilot_metrics.static_geometry(baseline_root)
-    ice_by_day = {
-        day: c4_year_runner.ice_day_metrics(
-            c4_year_runner.read_nemo_ice_day(perturbed_root, day),
-            c4_year_runner.read_nemo_ice_day(baseline_root, day),
-            geo,
-        )
-        for day in range(1, 366)
-    }
     for month in report["months"]:
         require(month["status"] == "EVALUATED_COMPLETE_MONTH",
                 f"{month['label']}: coupled envelope month is not complete")
         month["ice_sst_sss_mask_source"] = "Decision-188 ice_cover_clim.nc"
-        ice_rows = [ice_by_day[day] for day in month["available_days"]]
+        candidate_days = []
+        nemo_days = []
+        ice_rows = []
+        for day in month["available_days"]:
+            candidate = c4_year_runner.read_nemo_ice_day(perturbed_root, day)
+            nemo = c4_year_runner.read_nemo_ice_day(baseline_root, day)
+            candidate_days.append(candidate)
+            nemo_days.append(nemo)
+            ice_rows.append(c4_year_runner.ice_day_metrics(candidate, nemo, geo))
         month["metrics"].update(c4_year_runner.monthly_ice_metrics(ice_rows))
+        month["metrics"].update(c4_year_runner.monthly_ice_map_metrics(
+            candidate_days, nemo_days, geo
+        ))
     report.update({
         "round": "orca2_r345_coupled_c4",
         "envelope_profile": COUPLED_C4_PROFILE,
         "required_admission_status": "PASS_R345_COUPLED_C4_YEAR_SST_PLUS_ONE_ULP_ARM",
         "ice_metric_keys": list(COUPLED_ICE_KEYS),
+        "ice_map_metric_keys": list(COUPLED_ICE_MAP_KEYS),
+        "snow_map_reference_keys": list(COUPLED_SNOW_MAP_KEYS),
         "ice_hemispheres": {"NH": "gphit > 0", "SH": "gphit <= 0"},
     })
     return report
@@ -1364,6 +1378,63 @@ def write_coupled_c4_envelope_report(run_root: Path) -> dict[str, Any]:
         "admission_path": str(admission_path),
         "months": 12,
         "ice_sst_sss_mask_source": "Decision-188 ice_cover_clim.nc",
+    }
+
+
+def write_coupled_c4_ice_map_envelope_report(
+    run_root: Path, output_dir: Path
+) -> dict[str, Any]:
+    """Build newly named D238 twin artifacts without mutating the admitted pair."""
+
+    run_root = run_root.resolve()
+    source_admission_path = run_root / COUPLED_C4_ADMISSION_NAME
+    require(source_admission_path.is_file(),
+            f"missing passed coupled C4 admission: {source_admission_path}")
+    admission = json.loads(source_admission_path.read_text(encoding="utf-8"))
+    require(
+        admission.get("status") == "PASS_R345_COUPLED_C4_YEAR_SST_PLUS_ONE_ULP_ARM"
+        and admission.get("admitted") is True
+        and admission.get("profile") == COUPLED_C4_PROFILE,
+        "coupled C4 ice-map rebuild requires a passed full-year admission",
+    )
+    baseline_root = Path(str(admission.get("baseline_arm", ""))).resolve()
+    perturbed_root = Path(str(admission.get("run_dir", ""))).resolve()
+    require(baseline_root == COUPLED_C4_BASELINE_ARM.resolve(),
+            "coupled C4 admission baseline is not REF_C4")
+    require(perturbed_root == (run_root / COUPLED_C4_PERTURBED_ARM_NAME).resolve(),
+            "coupled C4 admission perturbed arm is not under the requested run root")
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = output_dir / COUPLED_C4_ICE_MAP_METRICS_NAME
+    admission_path = output_dir / COUPLED_C4_ICE_MAP_ADMISSION_NAME
+    require(not metrics_path.exists(), f"refusing to overwrite {metrics_path}")
+    require(not admission_path.exists(), f"refusing to overwrite {admission_path}")
+    report = build_coupled_c4_envelope_report(baseline_root, perturbed_root)
+    metrics_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    admission["envelope_metrics"] = {
+        "path": str(metrics_path),
+        "sha256": common.sha256(metrics_path),
+        "format": report["format"],
+        "months": 12,
+        "d188_ocean_quantities": [*decision188_metric_keys()],
+        "ice_quantities": list(COUPLED_ICE_KEYS),
+        "ice_map_quantities": list(COUPLED_ICE_MAP_KEYS),
+        "snow_map_reference_quantities": list(COUPLED_SNOW_MAP_KEYS),
+    }
+    admission_path.write_text(
+        json.dumps(admission, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return {
+        "status": "PASS_R345_COUPLED_C4_ICE_MAP_ENVELOPE_REPORT_ONLY",
+        "nemo_rerun": False,
+        "metrics_path": str(metrics_path),
+        "metrics_sha256": admission["envelope_metrics"]["sha256"],
+        "admission_path": str(admission_path),
+        "months": 12,
+        "ice_map_quantities": list(COUPLED_ICE_MAP_KEYS),
+        "snow_map_reference_quantities": list(COUPLED_SNOW_MAP_KEYS),
     }
 
 
@@ -2471,6 +2542,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--admit-run-dir", type=Path)
     parser.add_argument("--admit-existing", type=Path)
     parser.add_argument("--build-coupled-c4-envelope-report", type=Path)
+    parser.add_argument("--build-coupled-c4-ice-map-envelope-report", type=Path)
+    parser.add_argument("--artifact-output-dir", type=Path)
     parser.add_argument("--write-run-manifest", type=Path)
     parser.add_argument("--verify-perturbation", type=Path)
     parser.add_argument("--act-as-nemo-binary", action="store_true")
@@ -2488,6 +2561,7 @@ def main(argv: list[str] | None = None) -> int:
     selected = sum(value is not None and value is not False for value in (
         args.stage_run_dir, args.stage_control_run_dir, args.admit_run_dir,
         args.admit_existing, args.build_coupled_c4_envelope_report,
+        args.build_coupled_c4_ice_map_envelope_report,
         args.write_run_manifest,
         args.verify_perturbation, args.preflight_only, args.act_as_nemo_binary,
     ))
@@ -2540,6 +2614,15 @@ def main(argv: list[str] | None = None) -> int:
                 "--build-coupled-c4-envelope-report requires --coupled-c4")
         result = write_coupled_c4_envelope_report(
             args.build_coupled_c4_envelope_report
+        )
+    elif args.build_coupled_c4_ice_map_envelope_report is not None:
+        require(args.coupled_c4,
+                "--build-coupled-c4-ice-map-envelope-report requires --coupled-c4")
+        require(args.artifact_output_dir is not None,
+                "--build-coupled-c4-ice-map-envelope-report requires --artifact-output-dir")
+        result = write_coupled_c4_ice_map_envelope_report(
+            args.build_coupled_c4_ice_map_envelope_report,
+            args.artifact_output_dir,
         )
     elif args.write_run_manifest is not None:
         result = write_run_manifest(args.write_run_manifest)

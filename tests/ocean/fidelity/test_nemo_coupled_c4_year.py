@@ -254,7 +254,7 @@ def test_c4_control_passes_all_ocean_and_ice_rows() -> None:
         row["pass"]
         for month in result["months"]
         for name, row in month["quantities"].items()
-        if name not in runner.ICE_KEYS
+        if name not in runner.ICE_KEYS and row.get("verdict_bearing") is not False
     )
     assert set(runner.ICE_KEYS) <= set(result["months"][0]["quantities"])
     assert result["ocean_reference_only_metrics"]["reason"] == (
@@ -285,6 +285,27 @@ def test_c4_control_passes_all_ocean_and_ice_rows() -> None:
         decision188.KE_ENVELOPE_MULTIPLIER
     )
     assert "KE_FLOOR_FRACTION" in result["ice_bar"]["formula"]
+    misplaced = result["months"][0]["quantities"]["ICE_MISPLACED_AREA_NH"]
+    assert misplaced == {
+        "candidate_value": 0.0,
+        "nemo_monthly_mean_hemisphere_total": 10.0,
+        "units": "1e6 km2",
+        "floor_fraction": decision188.KE_FLOOR_FRACTION,
+        "fixed_floor": decision188.KE_FLOOR_FRACTION * 10.0,
+        "twin_value": 0.001,
+        "envelope_multiplier": decision188.KE_ENVELOPE_MULTIPLIER,
+        "applied_bar": decision188.KE_FLOOR_FRACTION * 10.0,
+        "binding_side": "fixed",
+        "fraction_of_applied_bar": 0.0,
+        "operator": "<=",
+        "pass": True,
+        "verdict": "PASS",
+        "verdict_bearing": True,
+    }
+    snow = result["months"][0]["quantities"]["SNOW_MISPLACED_VOLUME_NH"]
+    assert snow["verdict_bearing"] is False
+    assert snow["verdict"] is None
+    assert result["ice_map_bar_decision"] == 238
 
 
 @pytest.mark.parametrize("math_mode", runner.MATH_CHOICES)
@@ -399,6 +420,31 @@ def test_builtin_plants_name_ocean_and_ice_failures() -> None:
     assert plants["ice_above_bar_plant"] == "FAIL_C4_M08_Aug_ICE_AREA_NH"
     assert plants["ice_below_bar_plant"] == "PASS_C4_12_OF_12"
     assert plants["daily_cancellation_plant"] == "FAIL_C4_M08_Aug_ICE_AREA_NH"
+    assert plants["ice_map_between_floor_and_twin_bound_plant"] == "PASS_C4_12_OF_12"
+    assert plants["ice_map_above_applied_bar_plant"] == (
+        "FAIL_C4_M09_Sep_ICE_MISPLACED_AREA_NH"
+    )
+    assert plants["ice_map_fixed_floor_plant"] == "PASS_C4_12_OF_12"
+    assert plants["ice_map_boolean_refusal_plant"] == "PASS"
+    assert plants["ice_map_negative_refusal_plant"] == "PASS"
+    assert plants["ice_map_nan_refusal_plant"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (True, "candidate value is boolean, not numeric"),
+        (-0.01, "candidate value is negative"),
+        (math.nan, "candidate value is not finite"),
+    ],
+)
+def test_impossible_ice_map_values_are_refused(value: object, message: str) -> None:
+    candidate, envelope, admission = _synthetic_reports()
+    candidate["months"][0]["metrics"]["ICE_MISPLACED_AREA_NH"][
+        "candidate_value"
+    ] = value
+    with pytest.raises(scorer.C4ScoreError, match=message):
+        scorer.score_c4(candidate, envelope, admission)
 
 
 @pytest.mark.parametrize(
@@ -805,7 +851,7 @@ def test_nemo_ice_reader_rejects_wrong_clock_and_fill_values(tmp_path: Path) -> 
             dataset.createDimension("x", 90)
             kt_ice = dataset.createVariable("kt_ice", "i8")
             kt_ice.assignValue(expected_kt + 1)
-            for name in ("a_i", "v_i"):
+            for name in ("a_i", "v_i", "v_s"):
                 field = dataset.createVariable(
                     name, "f8", ("time", "cat", "y", "x"), fill_value=1.0e20
                 )
@@ -854,6 +900,121 @@ def test_monthly_ice_metrics_preserve_opposite_sign_daily_error() -> None:
     for metric in monthly.values():
         assert metric["relative_abs_difference"] == 0.0
         assert metric["mean_daily_relative_abs_difference"] == 0.1
+
+
+def test_monthly_ice_map_misplacement_uses_monthly_mean_and_exact_hemispheres() -> None:
+    shape = (148, 180)
+    geo = {
+        "area_t": np.full(shape, runner.ICE_UNIT_SCALE, dtype=np.float64),
+        "gphit": np.broadcast_to(
+            np.linspace(80.0, -80.0, shape[0])[:, None], shape
+        ),
+    }
+    nemo = {
+        name: np.ones(shape, dtype=np.float64)
+        for name in ("area", "volume", "snow_volume")
+    }
+    first = {name: value.copy() for name, value in nemo.items()}
+    second = {name: value.copy() for name, value in nemo.items()}
+    first["area"][0, 0] += 1.0
+    second["area"][0, 0] += 3.0
+    first["volume"][-1, 0] += 2.0
+    second["volume"][-1, 0] += 2.0
+    metrics = runner.monthly_ice_map_metrics(
+        [first, second], [nemo, nemo], geo
+    )
+    assert metrics["ICE_MISPLACED_AREA_NH"]["candidate_value"] == 2.0
+    assert metrics["ICE_MISPLACED_VOLUME_SH"]["candidate_value"] == 2.0
+    assert metrics["SNOW_MISPLACED_VOLUME_NH"]["candidate_value"] == 0.0
+    assert metrics["SNOW_MISPLACED_VOLUME_NH"]["verdict_bearing"] is False
+
+
+def test_daily_map_writer_has_exact_float32_schema_and_refuses_overwrite(
+    tmp_path: Path,
+) -> None:
+    shape = (148, 180)
+    geo = {
+        "gphit": np.zeros(shape),
+        "glamt": np.ones(shape),
+        "area_t": np.full(shape, 2.0),
+        "tmask": np.ones((*shape, 1)),
+    }
+    records = []
+    for day in range(1, 32):
+        record = {"day": day}
+        for field in runner.DAILY_MAP_FIELDS:
+            record[f"nemo_{field}"] = np.full(shape, day, dtype=np.float64)
+            record[f"candidate_{field}"] = np.full(
+                shape, day + 0.5, dtype=np.float64
+            )
+        records.append(record)
+    path = tmp_path / runner.daily_maps_name(1)
+    written = runner.write_daily_maps(path, 1, records, geo)
+    expected = {
+        "day", "gphit", "glamt", "area_t", "wet",
+        *(f"{side}_{field}" for field in runner.DAILY_MAP_FIELDS
+          for side in ("nemo", "candidate")),
+    }
+    with np.load(path, allow_pickle=False) as archive:
+        assert set(archive.files) == expected
+        assert all(archive[key].dtype == np.dtype("float32") for key in archive.files)
+        assert archive["day"].shape == (31,)
+        assert archive["nemo_sst"].shape == (31, *shape)
+        assert archive["gphit"].shape == shape
+    assert written["dtype"] == "float32"
+    with pytest.raises(RuntimeError, match="refusing to overwrite C4 daily maps"):
+        runner.write_daily_maps(path, 1, records, geo)
+
+
+def test_ice_reader_and_candidate_observer_share_rank_stitch_and_transpose(
+    tmp_path: Path,
+) -> None:
+    import netCDF4
+
+    kt = runner.year_metrics.STEPS_PER_DAY
+    stitched = {}
+    for field_index, (source, output) in enumerate((
+        ("a_i", "area"), ("v_i", "volume"), ("v_s", "snow_volume")
+    ), start=1):
+        rank_arrays = []
+        for rank in (0, 1):
+            y, x = np.indices((148, 90))
+            rank_arrays.append(field_index + rank * 1000.0 + y + x / 1000.0)
+        stitched[output] = np.concatenate(rank_arrays, axis=1)
+    for rank in (0, 1):
+        path = tmp_path / f"ORCA2_{kt:08d}_restart_ice_{rank:04d}.nc"
+        with netCDF4.Dataset(path, "w") as dataset:
+            dataset.createDimension("time", 1)
+            dataset.createDimension("cat", 2)
+            dataset.createDimension("y", 148)
+            dataset.createDimension("x", 90)
+            dataset.createVariable("kt_ice", "i8").assignValue(kt)
+            for source, output in (("a_i", "area"), ("v_i", "volume"), ("v_s", "snow_volume")):
+                field = dataset.createVariable(
+                    source, "f8", ("time", "cat", "y", "x")
+                )
+                half = stitched[output][:, rank * 90:(rank + 1) * 90]
+                field[0, 0] = half * 0.25
+                field[0, 1] = half * 0.75
+    nemo = runner.read_nemo_ice_day(tmp_path, 1)
+    aggregated = SimpleNamespace(
+        at_i=SimpleNamespace(data=stitched["area"].T),
+        vt_i=SimpleNamespace(data=stitched["volume"].T),
+        vt_s=SimpleNamespace(data=stitched["snow_volume"].T),
+    )
+    carry = SimpleNamespace(
+        ice=SimpleNamespace(ice=SimpleNamespace(aggregated=aggregated))
+    )
+    candidate = runner.candidate_ice_fields(carry, 0)
+    for key in ("area", "volume", "snow_volume"):
+        np.testing.assert_array_equal(nemo[key], stitched[key])
+        np.testing.assert_array_equal(candidate[key], stitched[key])
+    geo = {
+        "area_t": np.ones((148, 180)),
+        "gphit": np.broadcast_to(np.linspace(1.0, -1.0, 148)[:, None], (148, 180)),
+    }
+    metrics = runner.monthly_ice_map_metrics([candidate], [nemo], geo)
+    assert all(row["candidate_value"] == 0.0 for row in metrics.values())
 
 
 def test_ice_units_must_match_between_candidate_and_envelope() -> None:
@@ -1039,6 +1200,13 @@ def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
     monkeypatch.setattr(runner, "candidate_ice_fields", lambda *_a: {})
     monkeypatch.setattr(runner, "read_nemo_ice_day", lambda *_a: {})
     monkeypatch.setattr(runner, "ice_day_metrics", lambda *_a: {})
+    monkeypatch.setattr(runner, "daily_map_record", lambda *_a: {})
+
+    def fake_write_daily_maps(path, month, *_args):
+        path.write_bytes(b"synthetic daily maps")
+        return {"path": path.name, "month": month}
+
+    monkeypatch.setattr(runner, "write_daily_maps", fake_write_daily_maps)
     monkeypatch.setattr(runner, "build_month_report", fake_month_report)
 
     straight = runner.run_c4(reference, straight_dir, math_mode=MATH)
@@ -1046,6 +1214,8 @@ def test_run_c4_resume_matches_straight_bitwise_on_real_carry_schema(
     resumed_dir.mkdir()
     first_name = runner.checkpoint_name(1, 2)
     shutil.copy2(straight_dir / first_name, resumed_dir / first_name)
+    first_maps = runner.daily_maps_name(1)
+    shutil.copy2(straight_dir / first_maps, resumed_dir / first_maps)
     assert runner.main([
         "--reference", str(reference),
         "--output-dir", str(resumed_dir),

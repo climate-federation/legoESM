@@ -47,8 +47,9 @@ from scripts.validate.ocean_fidelity.testcases.nemo_coupled_c_ladder_acquisition
 )
 
 CHECKPOINT_FORMAT = "nemo-coupled-c4-month-checkpoint-v1"
-C4_METRIC_FORMAT = "nemo-coupled-c4-month-metrics-v2"
-SUPPORTED_C4_METRIC_FORMATS = (C4_METRIC_FORMAT,)
+C4_METRIC_FORMAT = "nemo-coupled-c4-month-metrics-v3"
+LEGACY_C4_METRIC_FORMAT = "nemo-coupled-c4-month-metrics-v2"
+SUPPORTED_C4_METRIC_FORMATS = (LEGACY_C4_METRIC_FORMAT, C4_METRIC_FORMAT)
 IN_FLIGHT_44512_INPUT_IDENTITY = {
     "deck_receipt_sha256": "8b916b74567cd0495a0dce986f1bd77ef281e7984aa1bbdd26a1537dc9a21254",
     "runner_sha256": "7d675a75cd32d71f7d1e8d3b9bb236af09a23652229429d274d146ad75e76495",
@@ -58,12 +59,24 @@ IN_FLIGHT_44512_INPUT_IDENTITY = {
 IN_FLIGHT_44512_LEAF_COUNT = 179
 PAIRS_PER_DAY = year_metrics.STEPS_PER_DAY // 2
 TOTAL_PAIRS = 1460
+ICE_UNIT_SCALE = 1.0e12
 ICE_KEYS = (
     "ICE_AREA_NH",
     "ICE_AREA_SH",
     "ICE_VOLUME_NH",
     "ICE_VOLUME_SH",
 )
+ICE_MISPLACEMENT_KEYS = (
+    "ICE_MISPLACED_AREA_NH",
+    "ICE_MISPLACED_AREA_SH",
+    "ICE_MISPLACED_VOLUME_NH",
+    "ICE_MISPLACED_VOLUME_SH",
+)
+SNOW_MISPLACEMENT_KEYS = (
+    "SNOW_MISPLACED_VOLUME_NH",
+    "SNOW_MISPLACED_VOLUME_SH",
+)
+DAILY_MAP_FIELDS = ("sst", "ice_area", "ice_volume", "snow_volume")
 MATH_CHOICES = c_ladder_scorer.COUPLED_MATH_CHOICES
 
 
@@ -341,6 +354,79 @@ def checkpoint_name(month: int, completed_kt: int) -> str:
     return f"c4_month{month:02d}_step{completed_kt:08d}.npz"
 
 
+def daily_maps_name(month: int) -> str:
+    require(1 <= month <= 12, f"invalid C4 daily-map month {month}")
+    return f"c4_daily_maps_month{month:02d}.npz"
+
+
+def _write_npz_exclusive(path: Path, payload: dict[str, np.ndarray], label: str) -> None:
+    """Atomically write one NPZ while refusing an existing destination."""
+
+    require(not path.exists(), f"refusing to overwrite C4 {label} {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with temporary.open("xb") as stream:
+            np.savez(stream, **payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def write_daily_maps(
+    path: Path,
+    month: int,
+    records: list[dict[str, Any]],
+    geo: dict[str, np.ndarray],
+) -> dict[str, Any]:
+    """Write Decision-237 float32 daily surface maps for one complete month."""
+
+    window = year_metrics.calendar_month_day_ranges()[month - 1]
+    days = [int(record["day"]) for record in records]
+    require(days == window["available_days"],
+            f"{window['label']}: daily-map accumulator does not cover its calendar window")
+    static = {
+        "gphit": np.asarray(geo["gphit"]),
+        "glamt": np.asarray(geo["glamt"]),
+        "area_t": np.asarray(geo["area_t"]),
+        "wet": np.asarray(geo["tmask"])[..., 0] > 0,
+    }
+    for name, value in static.items():
+        require(value.shape == (148, 180),
+                f"Decision-237 {name} shape {value.shape} != (148, 180)")
+        require(bool(np.isfinite(value).all()),
+                f"Decision-237 {name} contains non-finite values")
+    payload: dict[str, np.ndarray] = {
+        "day": np.asarray(days, dtype=np.float32),
+        **{name: np.asarray(value, dtype=np.float32) for name, value in static.items()},
+    }
+    for field in DAILY_MAP_FIELDS:
+        for side in ("nemo", "candidate"):
+            key = f"{side}_{field}"
+            values = np.asarray([record[key] for record in records], dtype=np.float32)
+            require(values.shape == (len(days), 148, 180),
+                    f"Decision-237 {key} shape {values.shape} is invalid")
+            require(bool(np.isfinite(values).all()),
+                    f"Decision-237 {key} contains non-finite values")
+            payload[key] = values
+    _write_npz_exclusive(path, payload, "daily maps")
+    return {
+        "path": path.name,
+        "month": month,
+        "days": days,
+        "dtype": "float32",
+        "sha256": common.sha256(path),
+    }
+
+
 def write_checkpoint(
     path: Path,
     carry: Any,
@@ -522,6 +608,15 @@ def validate_checkpoint_prefix(
     return identities[0], metric_formats[0], math_modes[0]
 
 
+def validate_daily_map_prefix(output_dir: Path, through_month: int) -> None:
+    """Require one immutable Decision-237 map file per resumed month."""
+
+    paths = sorted(output_dir.glob("c4_daily_maps_month??.npz"))
+    expected = [daily_maps_name(month) for month in range(1, through_month + 1)]
+    require([path.name for path in paths] == expected,
+            f"resume daily-map files are {[path.name for path in paths]}, expected {expected}")
+
+
 def restore_checkpoint(
     path: Path,
     template: Any,
@@ -569,7 +664,7 @@ def restore_checkpoint(
 
 
 def read_nemo_ice_day(reference_root: Path, day: int) -> dict[str, np.ndarray]:
-    """Read category-summed SI3 ``a_i`` and ``v_i`` from both NEMO ranks."""
+    """Read category-summed SI3 area, ice volume, and snow volume by rank."""
 
     import netCDF4
 
@@ -587,7 +682,11 @@ def read_nemo_ice_day(reference_root: Path, day: int) -> dict[str, np.ndarray]:
             require(math.isfinite(kt_value) and kt_value == float(kt),
                     f"{path.name}: SI3 kt_ice {kt_value} != restart kt {kt}")
             fields = {}
-            for output, source in (("area", "a_i"), ("volume", "v_i")):
+            for output, source in (
+                ("area", "a_i"),
+                ("volume", "v_i"),
+                ("snow_volume", "v_s"),
+            ):
                 require(source in dataset.variables, f"{path.name}: missing SI3 {source}")
                 raw = np.ma.asarray(dataset.variables[source][0])
                 require(int(np.ma.count_masked(raw)) == 0,
@@ -596,7 +695,7 @@ def read_nemo_ice_day(reference_root: Path, day: int) -> dict[str, np.ndarray]:
             rank_fields.append(fields)
     out = {
         name: np.concatenate((rank_fields[0][name], rank_fields[1][name]), axis=1)
-        for name in ("area", "volume")
+        for name in ("area", "volume", "snow_volume")
     }
     for name, value in out.items():
         require(value.shape == (148, 180),
@@ -610,7 +709,11 @@ def candidate_ice_fields(carry: Any, nn_hls: int) -> dict[str, np.ndarray]:
 
     aggregated = carry.ice.ice.aggregated
     result = {}
-    for output, source in (("area", aggregated.at_i), ("volume", aggregated.vt_i)):
+    for output, source in (
+        ("area", aggregated.at_i),
+        ("volume", aggregated.vt_i),
+        ("snow_volume", aggregated.vt_s),
+    ):
         value = np.asarray(getattr(source, "data", source), dtype=np.float64)
         if nn_hls:
             value = value[nn_hls:-nn_hls, nn_hls:-nn_hls]
@@ -631,8 +734,8 @@ def ice_day_metrics(
     latitude = np.asarray(geo["gphit"], dtype=np.float64)
     rows = {}
     for field, label, scale, units in (
-        ("area", "ICE_AREA", 1.0e12, "1e6 km2"),
-        ("volume", "ICE_VOLUME", 1.0e12, "1e3 km3"),
+        ("area", "ICE_AREA", ICE_UNIT_SCALE, "1e6 km2"),
+        ("volume", "ICE_VOLUME", ICE_UNIT_SCALE, "1e3 km3"),
     ):
         # NEMO icewri.F90:222-241 assigns ff_t > 0 to NH and ELSEWHERE to SH,
         # and reports both area and volume after multiplying by 1.e-12.
@@ -678,11 +781,95 @@ def monthly_ice_metrics(daily_rows: list[dict[str, dict[str, float]]]) -> dict[s
     return output
 
 
+def monthly_ice_map_metrics(
+    candidate_days: list[dict[str, np.ndarray]],
+    nemo_days: list[dict[str, np.ndarray]],
+    geo: dict[str, np.ndarray],
+) -> dict[str, dict[str, Any]]:
+    """Area-weight monthly-mean ice/snow map displacement for Decision 238."""
+
+    require(bool(candidate_days) and len(candidate_days) == len(nemo_days),
+            "cannot aggregate empty or unequal C4 SI3 map windows")
+    area_weight = np.asarray(geo["area_t"], dtype=np.float64)
+    latitude = np.asarray(geo["gphit"], dtype=np.float64)
+    require(area_weight.shape == latitude.shape == (148, 180),
+            "C4 SI3 map geometry is not the owned (148, 180) T-point layout")
+    output: dict[str, dict[str, Any]] = {}
+    for field, label, units, verdict_bearing in (
+        ("area", "ICE_MISPLACED_AREA", "1e6 km2", True),
+        ("volume", "ICE_MISPLACED_VOLUME", "1e3 km3", True),
+        ("snow_volume", "SNOW_MISPLACED_VOLUME", "1e3 km3", False),
+    ):
+        candidate = np.asarray([day[field] for day in candidate_days], dtype=np.float64)
+        nemo = np.asarray([day[field] for day in nemo_days], dtype=np.float64)
+        expected_shape = (len(candidate_days), 148, 180)
+        require(candidate.shape == nemo.shape == expected_shape,
+                f"{label}: daily map shape is not {expected_shape}")
+        require(bool(np.isfinite(candidate).all() and np.isfinite(nemo).all()),
+                f"{label}: daily map contains non-finite values")
+        require(bool((candidate >= 0.0).all() and (nemo >= 0.0).all()),
+                f"{label}: daily map contains negative values")
+        candidate_mean = np.mean(candidate, axis=0)
+        nemo_mean = np.mean(nemo, axis=0)
+        for hemisphere, mask in (("NH", latitude > 0.0), ("SH", latitude <= 0.0)):
+            nemo_total = float(np.sum(area_weight * nemo_mean * mask) / ICE_UNIT_SCALE)
+            candidate_total = float(
+                np.sum(area_weight * candidate_mean * mask) / ICE_UNIT_SCALE
+            )
+            misplaced = float(
+                np.sum(area_weight * np.abs(candidate_mean - nemo_mean) * mask)
+                / ICE_UNIT_SCALE
+            )
+            require(nemo_total > 0.0, f"{label}_{hemisphere}: NEMO total is not positive")
+            output[f"{label}_{hemisphere}"] = {
+                "metric": "area_weighted_abs_difference_of_monthly_mean_maps",
+                "candidate_value": misplaced,
+                "nemo_monthly_mean_hemisphere_total": nemo_total,
+                "candidate_monthly_mean_hemisphere_total": candidate_total,
+                "units": units,
+                "verdict_bearing": verdict_bearing,
+            }
+    return output
+
+
+def daily_map_record(
+    day: int,
+    candidate_ocean: dict[str, np.ndarray],
+    nemo_ocean: dict[str, np.ndarray],
+    candidate_ice: dict[str, np.ndarray],
+    nemo_ice: dict[str, np.ndarray],
+) -> dict[str, Any]:
+    """Collect one Decision-237 map row on the shared owned T-point layout."""
+
+    record: dict[str, Any] = {
+        "day": day,
+        "candidate_sst": np.asarray(candidate_ocean["T"])[..., 0],
+        "nemo_sst": np.asarray(nemo_ocean["T"])[..., 0],
+    }
+    for output, source in (
+        ("ice_area", "area"),
+        ("ice_volume", "volume"),
+        ("snow_volume", "snow_volume"),
+    ):
+        record[f"candidate_{output}"] = np.asarray(candidate_ice[source])
+        record[f"nemo_{output}"] = np.asarray(nemo_ice[source])
+    for key, value in record.items():
+        if key == "day":
+            continue
+        require(value.shape == (148, 180),
+                f"day {day}: Decision-237 {key} shape {value.shape} != (148, 180)")
+        require(bool(np.isfinite(value).all()),
+                f"day {day}: Decision-237 {key} contains non-finite values")
+    return record
+
+
 def build_month_report(
     month_index: int,
     daily_rows: list[dict[str, Any]],
     daily_maps: list[dict[str, np.ndarray]],
     ice_rows: list[dict[str, dict[str, float]]],
+    candidate_ice_maps: list[dict[str, np.ndarray]],
+    nemo_ice_maps: list[dict[str, np.ndarray]],
     geo: dict[str, np.ndarray],
     *,
     metric_format: str = C4_METRIC_FORMAT,
@@ -695,6 +882,7 @@ def build_month_report(
     summary = year_metrics.pilot_metrics.monthly(daily_rows, daily_maps, geo)
     metrics = year_metrics._attach_decision185_reference(summary, daily_rows)
     metrics.update(monthly_ice_metrics(ice_rows))
+    metrics.update(monthly_ice_map_metrics(candidate_ice_maps, nemo_ice_maps, geo))
     return {
         **window,
         "format": metric_format,
@@ -922,6 +1110,7 @@ def _run_c4(
         prefix_identity, prefix_metric_format, prefix_math = validate_checkpoint_prefix(
             output_dir, reference_root, resumed_month
         )
+        validate_daily_map_prefix(output_dir, resumed_month)
         require(prefix_identity == metadata.get("input_identity"),
                 "terminal resume checkpoint identity differs from its prefix")
         require(prefix_metric_format == resumed_report.get("format"),
@@ -937,6 +1126,8 @@ def _run_c4(
     elif not profile_only:
         require(not list(output_dir.glob("c4_month??_step*.npz")),
                 f"refusing a cold C4 run in nonempty checkpoint directory {output_dir}")
+        require(not list(output_dir.glob("c4_daily_maps_month??.npz")),
+                f"refusing a cold C4 run with existing daily maps in {output_dir}")
     start_pair = (int(np.asarray(carry.kt)) - 1) // 2
     stop_pair = pair_limit if profile_only else TOTAL_PAIRS
     expected_months = len(year_metrics.calendar_month_day_ranges())
@@ -963,6 +1154,7 @@ def _run_c4(
             "resolved_controls": controls,
             "metric_format": metric_format,
             "checkpoints": [],
+            "daily_maps": [],
         }
 
     inputs = C4InputReader(reference_root, n_steps, seed_forcing[0], card)
@@ -991,7 +1183,11 @@ def _run_c4(
     month_rows: list[dict[str, Any]] = []
     month_maps: list[dict[str, np.ndarray]] = []
     month_ice: list[dict[str, dict[str, float]]] = []
+    month_candidate_ice_maps: list[dict[str, np.ndarray]] = []
+    month_nemo_ice_maps: list[dict[str, np.ndarray]] = []
+    month_daily_maps: list[dict[str, Any]] = []
     checkpoints = []
+    daily_map_outputs = []
     pair_seconds = []
     nn_hls = int(card.ice.state.nn_hls)
     for pair_index in range(start_pair, stop_pair):
@@ -1027,10 +1223,13 @@ def _run_c4(
         year_metrics._augment_day_single_arm_stats(row, candidate, nemo, geo, cover, maps)
         month_rows.append({"day": day, "kt": completed_kt, **row})
         month_maps.append(maps)
-        month_ice.append(ice_day_metrics(
-            candidate_ice_fields(carry, nn_hls),
-            read_nemo_ice_day(reference_root, day),
-            geo,
+        candidate_ice = candidate_ice_fields(carry, nn_hls)
+        nemo_ice = read_nemo_ice_day(reference_root, day)
+        month_ice.append(ice_day_metrics(candidate_ice, nemo_ice, geo))
+        month_candidate_ice_maps.append(candidate_ice)
+        month_nemo_ice_maps.append(nemo_ice)
+        month_daily_maps.append(daily_map_record(
+            day, candidate, nemo, candidate_ice, nemo_ice
         ))
 
         month_number = next(
@@ -1047,10 +1246,18 @@ def _run_c4(
             month_rows,
             month_maps,
             month_ice,
+            month_candidate_ice_maps,
+            month_nemo_ice_maps,
             geo,
             metric_format=metric_format,
             ice_sst_sss_mask_source=mask_source,
         )
+        daily_map_outputs.append(write_daily_maps(
+            output_dir / daily_maps_name(month_number),
+            month_number,
+            month_daily_maps,
+            geo,
+        ))
         path = output_dir / checkpoint_name(month_number, completed_kt)
         checkpoints.append(write_checkpoint(
             path,
@@ -1063,6 +1270,7 @@ def _run_c4(
             input_identity=run_input_identity,
         ))
         month_rows, month_maps, month_ice = [], [], []
+        month_candidate_ice_maps, month_nemo_ice_maps, month_daily_maps = [], [], []
 
     require(compile_count() == 1,
             f"C4 pair retraced {compile_count()} times; expected exactly 1")
@@ -1093,6 +1301,7 @@ def _run_c4(
         "mean_pair_wall_seconds": float(np.mean(pair_seconds)),
         "resumed_month": resumed_month,
         "checkpoints": checkpoints,
+        "daily_maps": daily_map_outputs,
     }
 
 

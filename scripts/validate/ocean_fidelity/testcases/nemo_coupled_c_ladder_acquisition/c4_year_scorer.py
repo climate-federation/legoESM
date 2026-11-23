@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Score 12 C4 monthly carry checkpoints with Decisions 235 and 233."""
+"""Score 12 C4 monthly carry checkpoints with Decisions 235, 233, and 238."""
 
 from __future__ import annotations
 
@@ -243,6 +243,103 @@ def _score_ice_month(
     return rows
 
 
+def _score_ice_misplacement_month(
+    candidate: dict[str, Any], envelope: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Apply Decision 238's fixed-total/twin bar to four ice map quantities."""
+
+    rows: dict[str, dict[str, Any]] = {}
+    expected_units = {
+        "ICE_MISPLACED_AREA_NH": "1e6 km2",
+        "ICE_MISPLACED_AREA_SH": "1e6 km2",
+        "ICE_MISPLACED_VOLUME_NH": "1e3 km3",
+        "ICE_MISPLACED_VOLUME_SH": "1e3 km3",
+    }
+    for key in runner.ICE_MISPLACEMENT_KEYS:
+        require(key in candidate["metrics"], f"{candidate['label']}: missing candidate {key}")
+        require(key in envelope["metrics"], f"{candidate['label']}: missing envelope {key}")
+        source = candidate["metrics"][key]
+        envelope_source = envelope["metrics"][key]
+        require(source.get("units") == expected_units[key],
+                f"{candidate['label']}: {key} candidate units are not {expected_units[key]}")
+        require(envelope_source.get("units") == expected_units[key],
+                f"{candidate['label']}: {key} envelope units are not {expected_units[key]}")
+        nemo_total = _finite(
+            source.get("nemo_monthly_mean_hemisphere_total"),
+            f"{key} NEMO monthly-mean hemisphere total",
+        )
+        envelope_nemo_total = _finite(
+            envelope_source.get("nemo_monthly_mean_hemisphere_total"),
+            f"{key} envelope NEMO monthly-mean hemisphere total",
+        )
+        candidate_value = _finite(source.get("candidate_value"), f"{key} candidate value")
+        twin_value = _finite(envelope_source.get("candidate_value"), f"{key} twin value")
+        require(nemo_total > 0.0 and envelope_nemo_total > 0.0,
+                f"{candidate['label']}: {key} NEMO monthly-mean total is not positive")
+        require(nemo_total == envelope_nemo_total,
+                f"{candidate['label']}: {key} envelope and scored NEMO totals differ")
+        require(candidate_value >= 0.0, f"{candidate['label']}: {key} candidate value is negative")
+        require(twin_value >= 0.0, f"{candidate['label']}: {key} twin value is negative")
+        fixed_floor = ICE_RELATIVE_FLOOR * nemo_total
+        scaled_twin = ICE_ENVELOPE_MULTIPLIER * twin_value
+        applied_bar = max(fixed_floor, scaled_twin)
+        binding_side = (
+            "twin" if scaled_twin > fixed_floor
+            else "fixed" if scaled_twin < fixed_floor
+            else "fixed_and_twin"
+        )
+        passed = candidate_value <= applied_bar
+        rows[key] = {
+            "candidate_value": candidate_value,
+            "nemo_monthly_mean_hemisphere_total": nemo_total,
+            "units": expected_units[key],
+            "floor_fraction": ICE_RELATIVE_FLOOR,
+            "fixed_floor": fixed_floor,
+            "twin_value": twin_value,
+            "envelope_multiplier": ICE_ENVELOPE_MULTIPLIER,
+            "applied_bar": applied_bar,
+            "binding_side": binding_side,
+            "fraction_of_applied_bar": candidate_value / applied_bar,
+            "operator": "<=",
+            "pass": passed,
+            "verdict": "PASS" if passed else "FAIL",
+            "verdict_bearing": True,
+        }
+    return rows
+
+
+def _report_snow_misplacement_month(
+    candidate: dict[str, Any], envelope: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Validate and report Decision 238 snow map quantities without a verdict."""
+
+    rows = {}
+    for key in runner.SNOW_MISPLACEMENT_KEYS:
+        require(key in candidate["metrics"], f"{candidate['label']}: missing candidate {key}")
+        require(key in envelope["metrics"], f"{candidate['label']}: missing envelope {key}")
+        source = candidate["metrics"][key]
+        envelope_source = envelope["metrics"][key]
+        require(source.get("units") == "1e3 km3" and envelope_source.get("units") == "1e3 km3",
+                f"{candidate['label']}: {key} units are not 1e3 km3")
+        candidate_value = _finite(source.get("candidate_value"), f"{key} candidate value")
+        twin_value = _finite(envelope_source.get("candidate_value"), f"{key} twin value")
+        nemo_total = _finite(
+            source.get("nemo_monthly_mean_hemisphere_total"),
+            f"{key} NEMO monthly-mean hemisphere total",
+        )
+        require(candidate_value >= 0.0 and twin_value >= 0.0 and nemo_total > 0.0,
+                f"{candidate['label']}: {key} contains a negative value or nonpositive total")
+        rows[key] = {
+            "candidate_value": candidate_value,
+            "nemo_monthly_mean_hemisphere_total": nemo_total,
+            "twin_value": twin_value,
+            "units": "1e3 km3",
+            "verdict_bearing": False,
+            "verdict": None,
+        }
+    return rows
+
+
 def _score_ocean_month_decision235(
     candidate: dict[str, Any],
     envelope: dict[str, Any],
@@ -415,7 +512,7 @@ def score_c4(
     *,
     envelope_metrics_digest: str | None = None,
 ) -> dict[str, Any]:
-    """Apply D235 to ocean and D233 to four SI3 quantities in every month."""
+    """Apply D235 ocean, D233 ice-total, and D238 ice-map scoring."""
 
     math_mode = candidate_report.get("math")
     require(math_mode in runner.MATH_CHOICES,
@@ -469,8 +566,12 @@ def score_c4(
             candidate, envelope, ocean_month
         )
         ice = _score_ice_month(candidate, envelope)
+        ice_misplacement = _score_ice_misplacement_month(candidate, envelope)
+        snow_misplacement = _report_snow_misplacement_month(candidate, envelope)
         quantities = copy.deepcopy(ocean_month["metrics"])
         quantities.update(ice)
+        quantities.update(ice_misplacement)
+        quantities.update(snow_misplacement)
         failed_ocean = next(
             (name for name, row in ocean_month["metrics"].items() if not bool(row["pass"])),
             None,
@@ -483,7 +584,16 @@ def score_c4(
             (name for name in runner.ICE_KEYS if not bool(ice[name]["pass"])),
             None,
         )
-        failed = failed_ocean if failed_ocean is not None else failed_ice
+        failed_ice_map = next(
+            (name for name in runner.ICE_MISPLACEMENT_KEYS
+             if not bool(ice_misplacement[name]["pass"])),
+            None,
+        )
+        failed = (
+            failed_ocean if failed_ocean is not None
+            else failed_ice if failed_ice is not None
+            else failed_ice_map
+        )
         if first_failure is None and failed is not None:
             first_failure = {"month": candidate["label"], "quantity": failed}
         months.append({
@@ -492,11 +602,12 @@ def score_c4(
             "quantities": quantities,
             "ocean_d188_verdict": ocean_month["verdict"],
             "ice_d233_verdict": "PASS" if failed_ice is None else "FAIL",
+            "ice_map_d238_verdict": "PASS" if failed_ice_map is None else "FAIL",
             "verdict": "PASS" if failed is None else "FAIL",
         })
     passed = first_failure is None
     return {
-        "format": "nemo-coupled-c4-score-v2",
+        "format": "nemo-coupled-c4-score-v3",
         "math": math_mode,
         "decision": 228,
         "ocean_card": "DECISION_188",
@@ -549,6 +660,19 @@ def score_c4(
             "envelope_multiplier": ICE_ENVELOPE_MULTIPLIER,
         },
         "monthly_mean_relative_difference_verdict_bearing": False,
+        "ice_map_bar_decision": 238,
+        "ice_map_bar": {
+            "formula": (
+                "applied_bar = max(ICE_RELATIVE_FLOOR * NEMO monthly-mean "
+                "hemisphere total, ICE_ENVELOPE_MULTIPLIER * admitted coupled "
+                "NEMO twin misplacement for the same month/hemisphere/field)"
+            ),
+            "constants_source": "Decision 188",
+            "floor_fraction": ICE_RELATIVE_FLOOR,
+            "envelope_multiplier": ICE_ENVELOPE_MULTIPLIER,
+            "verdict_bearing_quantities": list(runner.ICE_MISPLACEMENT_KEYS),
+            "reference_only_quantities": list(runner.SNOW_MISPLACEMENT_KEYS),
+        },
         "hemispheres": {
             "NH": "gphit > 0 degrees",
             "SH": "gphit <= 0 degrees",
@@ -581,6 +705,15 @@ def _add_synthetic_ice(report: dict[str, Any], relative_error: float) -> dict[st
                 "relative_abs_difference": relative_error,
                 "mean_daily_relative_abs_difference": relative_error,
                 "units": "1e6 km2" if "AREA" in key else "1e3 km3",
+            }
+        for key in (*runner.ICE_MISPLACEMENT_KEYS, *runner.SNOW_MISPLACEMENT_KEYS):
+            month["metrics"][key] = {
+                "metric": "area_weighted_abs_difference_of_monthly_mean_maps",
+                "candidate_value": relative_error,
+                "nemo_monthly_mean_hemisphere_total": 10.0,
+                "candidate_monthly_mean_hemisphere_total": 10.0,
+                "units": "1e6 km2" if "AREA" in key else "1e3 km3",
+                "verdict_bearing": key in runner.ICE_MISPLACEMENT_KEYS,
             }
     return output
 
@@ -914,6 +1047,75 @@ def run_plants() -> dict[str, str]:
         == {"month": "M08_Aug", "quantity": "ICE_AREA_NH"},
         "daily cancellation plant did not name M08 ICE_AREA_NH",
     )
+
+    map_key = "ICE_MISPLACED_AREA_NH"
+    adaptive_map_envelope = copy.deepcopy(envelope)
+    adaptive_map_envelope["months"][8]["metrics"][map_key]["candidate_value"] = 0.08
+    adaptive_map_admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=adaptive_map_envelope
+    )
+    map_between = copy.deepcopy(candidate)
+    map_between["months"][8]["metrics"][map_key]["candidate_value"] = 0.20
+    map_between_result = score_c4(
+        map_between, adaptive_map_envelope, adaptive_map_admission
+    )
+    map_between_row = map_between_result["months"][8]["quantities"][map_key]
+    require(
+        map_between_result["status"] == "PASS_C4_12_OF_12"
+        and map_between_row["fixed_floor"] == ICE_RELATIVE_FLOOR * 10.0
+        and map_between_row["twin_value"] == 0.08
+        and map_between_row["applied_bar"] == ICE_ENVELOPE_MULTIPLIER * 0.08
+        and map_between_row["binding_side"] == "twin",
+        "ice-map value between the floor and twin-bound bar did not pass",
+    )
+
+    map_above = copy.deepcopy(map_between)
+    map_above["months"][8]["metrics"][map_key]["candidate_value"] = math.nextafter(
+        map_between_row["applied_bar"], math.inf
+    )
+    map_above_result = score_c4(
+        map_above, adaptive_map_envelope, adaptive_map_admission
+    )
+    require(
+        map_above_result["status"] == "FAIL_C4"
+        and map_above_result["first_failure"]
+        == {"month": "M09_Sep", "quantity": map_key},
+        "above-applied-bar ice-map plant did not name M09 ICE_MISPLACED_AREA_NH",
+    )
+
+    fixed_map_envelope = copy.deepcopy(envelope)
+    fixed_map_envelope["months"][9]["metrics"][map_key]["candidate_value"] = 0.01
+    fixed_map_admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=fixed_map_envelope
+    )
+    fixed_map_candidate = copy.deepcopy(candidate)
+    fixed_map_candidate["months"][9]["metrics"][map_key]["candidate_value"] = 0.09
+    fixed_map_result = score_c4(
+        fixed_map_candidate, fixed_map_envelope, fixed_map_admission
+    )
+    fixed_map_row = fixed_map_result["months"][9]["quantities"][map_key]
+    require(
+        fixed_map_result["status"] == "PASS_C4_12_OF_12"
+        and fixed_map_row["binding_side"] == "fixed"
+        and fixed_map_row["applied_bar"] == ICE_RELATIVE_FLOOR * 10.0,
+        "floor-bound ice-map plant did not use the relative floor",
+    )
+
+    map_refusals = {}
+    for label, value, message in (
+        ("boolean", True, "candidate value is boolean, not numeric"),
+        ("negative", -0.01, "candidate value is negative"),
+        ("nan", math.nan, "candidate value is not finite"),
+    ):
+        corrupt = copy.deepcopy(candidate)
+        corrupt["months"][0]["metrics"][map_key]["candidate_value"] = value
+        caught = False
+        try:
+            score_c4(corrupt, envelope, admission)
+        except C4ScoreError as exc:
+            caught = message in str(exc)
+        require(caught, f"{label} ice-map value was not refused")
+        map_refusals[label] = "PASS"
     return {
         "control": "PASS_C4_12_OF_12",
         "ocean_control": control["ocean_d188"]["verdict"],
@@ -954,6 +1156,14 @@ def run_plants() -> dict[str, str]:
         "ice_above_bar_plant": "FAIL_C4_M08_Aug_ICE_AREA_NH",
         "ice_below_bar_plant": "PASS_C4_12_OF_12",
         "daily_cancellation_plant": "FAIL_C4_M08_Aug_ICE_AREA_NH",
+        "ice_map_between_floor_and_twin_bound_plant": "PASS_C4_12_OF_12",
+        "ice_map_above_applied_bar_plant": (
+            "FAIL_C4_M09_Sep_ICE_MISPLACED_AREA_NH"
+        ),
+        "ice_map_fixed_floor_plant": "PASS_C4_12_OF_12",
+        "ice_map_boolean_refusal_plant": map_refusals["boolean"],
+        "ice_map_negative_refusal_plant": map_refusals["negative"],
+        "ice_map_nan_refusal_plant": map_refusals["nan"],
     }
 
 
