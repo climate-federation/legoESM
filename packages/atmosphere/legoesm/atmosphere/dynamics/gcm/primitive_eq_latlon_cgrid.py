@@ -1751,12 +1751,12 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # Borrow (default) is frozen-MSE-neutral for vapour AND condensate; the
         # hard-floor fallback adds the per-species latent-heat T correction incl
         # ice.  dp = TRUE layer mass from the FINAL (post-mass-fix) p_s.
-        # ponytail: the borrow's GLOBAL net-negative-column residual uses
-        # jnp.sum; under lat-band SPMD that reduces per-band, not globally — a
-        # tiny correction that only fires on fully net-negative columns (rare on
-        # smooth water fields).  A band-aware psum sum_fn is the SPMD upgrade.
+        # The borrow's GLOBAL net-negative-column residual reduces with
+        # latlon_decomposition_sum: across bands (SPMD psum) / ranks (MPI), so
+        # water is conserved globally, not per band; serial is jnp.sum.
         if state.tracers:
-            from legoesm.core.conservation import apply_water_positivity
+            from legoesm.core.conservation import (
+                apply_water_positivity, latlon_decomposition_sum)
             _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
             if _hybrid:
                 _dp = jnp.maximum(dp_from_hybrid(sigma_coord, state.p_s), 0.0)  # +weight
@@ -1766,7 +1766,10 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 state.tracers, state.T, _dp,
                 conservative=self.config.conservative_tracer_clamp,
                 energy_consistent=self.config.energy_consistent_moisture_clip,
-                area=grid.area,
+                area=grid.area, sum_fn=latlon_decomposition_sum,
+                # partition-independent reference: the GLOBAL mean cell area
+                area_ref=(latlon_decomposition_sum(grid.area)
+                          / latlon_decomposition_sum(jnp.ones_like(grid.area))),
                 condensate_from_vapour=self.config.positivity_condensate_from_vapour)
             state = state._replace(tracers=_tr_out, T=_T_out)
 

@@ -868,6 +868,23 @@ class tiled_reduction_scope:
         return False
 
 
+def latlon_decomposition_sum(x: jax.Array) -> jax.Array:
+    """Global SUM of ``x`` over every cell of a (possibly decomposed) lat-lon
+    run: lat-band SPMD ``psum`` across ``"lat"``, MPI ``allreduce(SUM)``, else
+    the plain serial ``jnp.sum`` (bit-identical).  The ``sum_fn`` hook for
+    global closures such as :func:`apply_water_positivity`'s net-negative
+    residual, so they do not silently reduce per band/rank.  Bands/ranks must
+    own disjoint rows (the lat-lon band slicers do)."""
+    local = jnp.sum(x)
+    spmd = _spmd_lat_psum_or_none([local])
+    if spmd is not None:
+        return spmd[0]
+    if is_distributed():
+        from legoesm.parallel.reductions import global_sum_mpi
+        return global_sum_mpi(local)
+    return local
+
+
 def batch_global_area_sums(
     arrays: list[jax.Array],
     grid,
