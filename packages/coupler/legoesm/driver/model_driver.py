@@ -13933,6 +13933,11 @@ class ModelDriver:
                 float(_ledger_band[0]), float(_ledger_band[1]),
                 100.0 * float(jnp.sum(_ledger_weight * self.sigma.dsigma)
                               / jnp.sum(self.sigma.dsigma)))
+        if (_budget_ledger_on
+                and cfg.dycore.discretization == "latlon_cgrid"):
+            logger.info(
+                "  budget ledger on the lat-lon column lane: physics rows "
+                "only; its clips and dynamics rows are NOT computed (zero)")
         # ---- Physics cadence (CAM6 suite) ----
         # ``physics_update_steps > 1``: the full physics runs every
         # PHYS_UPDATE_STEPS-th step with physics timestep PHYS_UPDATE_STEPS*DT
