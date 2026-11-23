@@ -481,6 +481,108 @@ def height_les_fixture(root, q):
     return model, ns, pg, hc, metric
 
 
+def spectral_level_quadrature_budget(area, field):
+    """Signed horizontal integral at each level, using native Gaussian areas.
+
+    Exact-zero fields are unscored identities, never a conservation verdict.
+    This host-side instrument does not average levels or floor denominators.
+    """
+    import numpy as np
+
+    area, field = np.asarray(area), np.asarray(field)
+    if (area.dtype != np.float64 or field.dtype != np.float64
+            or area.ndim != 2 or field.ndim != 3
+            or field.shape[:2] != area.shape or not field.size
+            or not np.isfinite(area).all() or not np.isfinite(field).all()
+            or not np.all(area > 0)):
+        raise ValueError("finite fp64 field(lat,lon,level) and positive native area required")
+    signed = np.sum(area[..., None] * field, axis=(0, 1))
+    absolute = np.sum(area[..., None] * np.abs(field), axis=(0, 1))
+    relative = [None if norm == 0 else float(abs(value) / norm)
+                for value, norm in zip(signed, absolute)]
+    return dict(signed_integral=signed.tolist(), abs_integral=absolute.tolist(),
+                relative=relative,
+                verdicts=["ZERO_UNSCORED" if r is None else
+                          "AT_BAR" if r <= 1e-12 else "DEBT" for r in relative])
+
+
+def spectral_horizontal_quadrature_probe(grid, hc, metric, state, label, datasets):
+    """Compare actual horizontal continuity with the canonical flux divergence.
+
+    Horizontal divergence is positive out; density tendency is its negative / J.
+    No acoustic step, tracer-mass closure or temporal-order claim is made here.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.atmosphere.dynamics.gcm import spectral_nh as sn
+    from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
+    from legoesm.grids.gaussian import (
+        dealiasing_mask, sh_analysis_3d, sh_synthesis_3d,
+        uv_from_vordiv_3d, vordiv_from_uv_3d,
+    )
+
+    cfg = sn.SpectralNHConfig()
+    tendency = sn.spectral_nh_slow_tendencies(
+        state, grid, hc, metric, cfg, physics_tendency=None)
+    theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
+    rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data)
+    _, rho = sanitize_theta_rho(hc.theta_ref + theta_p, hc.rho_ref + rho_p)
+    u_cos, v_cos = uv_from_vordiv_3d(grid, state.vor_hat.data, state.div_hat.data)
+    cos_lat = jnp.clip(grid.cos_lat[:, None, None], sn._COS_LAT_MIN, None)
+    u, vv = u_cos / cos_lat, v_cos / cos_lat
+    jac = metric.jacobian[..., None]
+    div_hat = vordiv_from_uv_3d(grid, jac * rho * u, jac * rho * vv)[1]
+    divergence = sh_synthesis_3d(grid, div_hat)
+    # Match the actual caller's grid->spectral projection and final de-aliasing.
+    expected_hat = sh_analysis_3d(grid, -divergence / jac)
+    expected_hat = expected_hat * dealiasing_mask(grid, cfg.dealiasing_fraction)[:, None]
+    expected = sh_synthesis_3d(grid, expected_hat)
+    actual = sh_synthesis_3d(grid, tendency.rho_prime_hat.data)
+    area = np.asarray(grid.grid_area)
+    idx00 = np.flatnonzero((np.asarray(grid.ls) == 0) & (np.asarray(grid.ms) == 0))
+    assert len(idx00) == 1
+    for key, value in dict(area=area, rho=rho, u=u, v=vv, divergence=divergence,
+                           divergence_hat=div_hat, actual_drho=actual,
+                           expected_drho=expected).items():
+        datasets[f"spectral_quadrature/{label}/{key}"] = np.asarray(value)
+    result = dict(
+        path="spectral NH/height", statistic="horizontal quadrature per level",
+        fixture=label, config=cfg._asdict(), scope="horizontal continuity only; no time step",
+        actual=spectral_level_quadrature_budget(area, np.asarray(jac * actual)),
+        canonical=spectral_level_quadrature_budget(area, np.asarray(divergence)),
+        divergence_mode00_real=np.asarray(div_hat[idx00[0]].real).tolist(),
+        divergence_mode00_imag=np.asarray(div_hat[idx00[0]].imag).tolist(),
+        continuity_matches=bool(np.allclose(actual, expected, rtol=1e-12, atol=1e-12)),
+    )
+    if label == "census_identity":
+        result["accepted"] = (result["continuity_matches"] and all(
+            verdict == "ZERO_UNSCORED" for key in ("actual", "canonical")
+            for verdict in result[key]["verdicts"]))
+        return result
+
+    amplitude = np.max(np.abs(np.asarray(divergence)), axis=(0, 1))
+    assert np.all(np.isfinite(amplitude) & (amplitude > 0)), "vacuous supplemental divergence"
+    offset = 0.01 * amplitude
+    planted = np.asarray(divergence) + offset[None, None, :]
+    datasets[f"spectral_quadrature/{label}/planted_divergence"] = planted
+    result["planted"] = spectral_level_quadrature_budget(area, planted)
+    expected_added = offset * np.sum(area)
+    actual_added = (np.asarray(result["planted"]["signed_integral"])
+                    - np.asarray(result["canonical"]["signed_integral"]))
+    result["expected_added_integral"] = expected_added.tolist()
+    result["actual_added_integral"] = actual_added.tolist()
+    result["control_matches"] = bool(np.allclose(
+        actual_added, expected_added, rtol=1e-12, atol=0.0))
+    result["accepted"] = (result["continuity_matches"] and result["control_matches"]
+        and all(np.all(np.isfinite(result[key]["abs_integral"]))
+                and np.all(np.asarray(result[key]["abs_integral"]) > 0)
+                for key in ("actual", "canonical"))
+        and all(verdict == "AT_BAR" for key in ("actual", "canonical")
+                for verdict in result[key]["verdicts"])
+        and all(verdict == "DEBT" for verdict in result["planted"]["verdicts"]))
+    return result
+
+
 def height_artifacts(out, provenance, datasets, objects, configs):
     """Persist the measured height arrays, geometry and complete resolved configs."""
     import jax
@@ -508,7 +610,8 @@ def height_artifacts(out, provenance, datasets, objects, configs):
             provenance["source_sha256"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
     fixture_paths = ("tests/unit/test_mpas_atmosphere.py",
                      "tests/unit/test_vertical_advection_hybrid_van_leer.py",
-                     "tests/unit/test_plane_nh_tracers.py")
+                     "tests/unit/test_plane_nh_tracers.py",
+                     "tests/unit/test_spectral_dealiasing.py")
     provenance["height_fixture_sources"] = {
         str(root / name): hashlib.sha256((root / name).read_bytes()).hexdigest()
         for name in fixture_paths}
@@ -692,6 +795,20 @@ def height_vertical_paths(out, rows, provenance, record):
     initial_rho = hcg.rho_ref + sh_synthesis_3d(gg, ss.rho_prime_hat.data).real
     record_height_inventory(rows, "spectral NH/height", gg.grid_area, hcg, gm,
                             initial_rho, initial_q, rn, qn[..., None], datasets)
+
+    # Keep the exact T24 identity separate from a nonzero existing rough fixture.
+    rough = runpy.run_path(str(root / "tests/unit/test_spectral_dealiasing.py"))[
+        "TestAliasingStabilityNH"]()._rough_nh_state(gg, hcg, n_tracers=1, seed=1)
+    objects["spectral_quadrature_rough_initial"] = rough
+    quadrature = [spectral_horizontal_quadrature_probe(
+        gg, hcg, gm, state, label, datasets) for label, state in
+        (("census_identity", ss), ("supplemental_rough_seed1", rough))]
+    rows.extend(quadrature)
+    provenance["spectral_quadrature"] = quadrature
+    # Save even refuting evidence before the mandatory failure stop.
+    height_artifacts(out, provenance, datasets, objects, configs)
+    (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
+    assert all(row["accepted"] for row in quadrature), "spectral horizontal quadrature REFUTED"
 
     # Native LES local operators are also used on halo columns. Their scope
     # here is explicitly local, not an MPI horizontal conservation claim.

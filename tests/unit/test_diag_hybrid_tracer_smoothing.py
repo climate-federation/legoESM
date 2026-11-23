@@ -52,6 +52,46 @@ def inventory_arrays():
             np.array([[.001, .004], [.002, .002], [.004, .001]]))
 
 
+def test_spectral_quadrature_zero_is_unscored(inventory_probe):
+    result = inventory_probe.spectral_level_quadrature_budget(
+        np.array([[2., 3., 5.]]), np.zeros((1, 3, 2)))
+    assert result == dict(signed_integral=[0., 0.], abs_integral=[0., 0.],
+                          relative=[None, None], verdicts=["ZERO_UNSCORED"] * 2)
+
+
+def test_spectral_quadrature_native_weights_and_planted_source(inventory_probe):
+    area = np.array([[2., 3., 5.]])
+    field = np.array([[[1., 2.], [1., 2.], [-1., -2.]]])
+    result = inventory_probe.spectral_level_quadrature_budget(area, field)
+    assert result["signed_integral"] == [0., 0.]
+    assert result["abs_integral"] == [10., 20.]
+    assert result["relative"] == [0., 0.]
+    assert result["verdicts"] == ["AT_BAR"] * 2
+    # Unweighted sums are nonzero: a uniform-area proxy cannot pass this case.
+    assert np.all(np.sum(field, axis=(0, 1)) != 0)
+    offset = 0.01 * np.max(np.abs(field), axis=(0, 1))
+    planted = inventory_probe.spectral_level_quadrature_budget(area, field + offset)
+    assert planted["verdicts"] == ["DEBT"] * 2
+    np.testing.assert_allclose(planted["signed_integral"], offset * np.sum(area),
+                               rtol=1e-12, atol=0.)
+
+
+@pytest.mark.parametrize("violation", ["shape", "fp32", "nonfinite", "nonpositive"])
+def test_spectral_quadrature_rejects_invalid(inventory_probe, violation):
+    area = np.array([[2., 3., 5.]])
+    field = np.ones((1, 3, 2))
+    if violation == "shape":
+        area = area.ravel()
+    elif violation == "fp32":
+        field = field.astype(np.float32)
+    elif violation == "nonfinite":
+        field[0, 0, 0] = np.nan
+    elif violation == "nonpositive":
+        area[0, 0] = 0.
+    with pytest.raises(ValueError):
+        inventory_probe.spectral_level_quadrature_budget(area, field)
+
+
 def test_inventory_controls_and_unequal_weights(inventory_probe, inventory_arrays):
     """Internal transfers close; the planted missing weight must be detected."""
     volume, rho, q = inventory_arrays

@@ -1,9 +1,11 @@
 # T29: height-coordinate acoustic tracer mass, phase 0 preregistration
 
 Status: phase 0 completed at ccd817f21c (artifacts in
-`/glade/derecho/scratch/pg2328/t29_phase0/retry_import`); the phase-1 diff is
-uncommitted and runtime UNVERIFIED. Phase 1 requires GLM full-diff review and
-Claude SHIP before runtime or commit. No push, PR, issue edit or merge.
+`/glade/derecho/scratch/pg2328/t29_phase0/retry_import`); MPAS/LES phase 1
+completed locally at 52b658b634 after full-diff GLM/Claude SHIP and PBS checks
+(receipts in `/glade/derecho/scratch/pg2328/t29_phase1`). Spectral quadrature
+instrument below awaits full-diff SHIP, commit, then PBS measurement.
+No push, PR, issue edit or merge.
 
 ## Claims and distinct statistics
 
@@ -196,3 +198,50 @@ requested-path set can pass. Serial/MPI use the same helper. Planted controls
 remove/mislabel a row, insert one leaking tracer, or empty the verdict/path list;
 each must fail. MPI exceptions print traceback, Abort(1), then re-raise; the
 original handler already makes failure fatal, never a swallowed success.
+
+## Spectral horizontal quadrature instrument, before measurement
+
+Votes Q1-Q3 YES3-0 (Codex/GLM/Claude); Q4 YES Codex/GLM, Claude pending.
+This additive instrument changes no model, config, CLI, legacy census fixture,
+baseline target or acceptance threshold. Commit only after complete-diff GLM
+and Claude SHIP; then run existing `--all-vertical-paths` on PBS CPU fp64.
+
+Measure horizontal continuity only on the SAME Gaussian truncation10 grid,
+10-level height coordinate and flat terrain used by the existing T24 census.
+The exact census initial state has zero horizontal winds: label it
+`census_identity`, require exact-zero norms and report ZERO_UNSCORED with
+relative=null. It cannot support a nonvacuous quadrature conclusion.
+Separately use the unmodified existing
+`TestAliasingStabilityNH()._rough_nh_state(grid,hc,n_tracers=1,seed=1)` from
+`tests/unit/test_spectral_dealiasing.py`, labelled `supplemental_rough_seed1`.
+Pin that fixture source and store its complete initial state, grid/metric,
+native areas, density, velocities, actual/expected tendencies and divergence
+in the existing hashed height_inputs artifact pipeline; retain resolved config.
+
+Evaluate actual `spectral_nh_slow_tendencies` with unchanged SpectralNHConfig
+and physics_tendency=None. Read current source: horizontal density continuity
+is flux form; sponge/hyperdiffusion do not change density; final de-aliasing
+retains n=0. Independently call existing `vordiv_from_uv_3d` on J*rho*u/v,
+using the model's sanitized rho and exact velocity/cosine clipping convention.
+Compare actual density tendency to canonical negative divergence/J projected
+back through analysis, the existing de-aliasing mask and synthesis, at existing
+rtol/atol1e-12. No copied divergence formula or claim of bitwise identity.
+
+For EACH level, record signed sum(area*J*actual_drho), its denominator
+sum(area*abs(J*actual_drho)), and their absolute ratio; also record canonical
+raw sum(area*div), sum(area*abs(div)), ratio, and complex n=m=0 coefficient.
+Use native Gaussian grid_area, no cosine proxy, denominator floor or vertical
+averaging. Supplemental norms must be finite and strictly positive at EVERY
+level. CONFIRMS horizontal quadrature iff every actual/canonical relative
+residual <=1e-12 and the continuity comparison passes; otherwise REFUTES and
+STOP with partial artifacts. Zero identity is never scored as AT_BAR.
+
+Control on each nonzero supplemental divergence level: add spatial constant
+0.01*max(abs(div)); verify seed amplitude finite/nonzero before perturbation.
+The SAME predicate must classify EVERY planted level DEBT (>1e-12), and the
+signed added integral must equal offset*sum(area) at rtol1e-12, atol0.
+Direct helper tests use unequal area[[2,3,5]], field[[[1,2],[1,2],[-1,-2]]]:
+both weighted sums zero, unweighted sums nonzero; constant perturbation fails.
+Exact-zero norms return relative=null; invalid shape/fp32/nonfinite/nonpositive
+area are rejected. No empirical quadrature result yet. This is not finite-step
+rho*q closure, aliasing accuracy or spectral-method SHIP.
