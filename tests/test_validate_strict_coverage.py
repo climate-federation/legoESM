@@ -84,6 +84,7 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         # nested dycore.mpas_vert_advection_scheme — sigma-lane vertical
         # advection ("upwind" | "van_leer"); membership + silently-inert refusal.
         "mpas_vert_advection_scheme",
+        "mpas_tracer_horizontal_scheme",
         "tracer_vertical_scheme",
         # External-forcing source selectors (2026-07-21 AMIP/CMIP audit):
         # the driver gates each channel with an equality test, so a typo
@@ -307,6 +308,7 @@ def _bogus_is_rejected(field: str) -> bool:
         "grid": (GridConfig, ("grid_type", "vertical_coord")),
         "dycore": (DycoreConfig, ("model_type", "discretization",
                                   "time_integrator", "mpas_vert_advection_scheme",
+                                  "mpas_tracer_horizontal_scheme",
                                   "tracer_vertical_scheme")),
         "output": (OutputConfig, ("checkpoint_format",)),
     }
@@ -337,7 +339,8 @@ def test_default_config_is_valid() -> None:
     sorted(
         EXPECTED_VALIDATED
         # nested DycoreConfig / GridConfig fields; tested separately below
-        - {"model_type", "discretization", "mpas_vert_advection_scheme", "tracer_vertical_scheme", "vertical_coord"}
+        - {"model_type", "discretization", "mpas_vert_advection_scheme",
+           "mpas_tracer_horizontal_scheme", "tracer_vertical_scheme", "vertical_coord"}
         | EQUALITY_VALIDATED
     ),
 )
@@ -353,6 +356,7 @@ def test_validate_strict_rejects_bogus_nested_dycore() -> None:
     assert _bogus_raises(dycore=DycoreConfig(model_type=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(discretization=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(mpas_vert_advection_scheme=_BOGUS))
+    assert _bogus_raises(dycore=DycoreConfig(mpas_tracer_horizontal_scheme=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(tracer_vertical_scheme=_BOGUS))
 
 

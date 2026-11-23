@@ -3809,8 +3809,11 @@ class ModelDriver:
             if (gc.grid_type == "mpas" and self.config.distributed
                     and self._device_config is not None
                     and self._device_config.is_distributed):
-                from legoesm.parallel.voronoi_mpi import initialize_voronoi_mpi
-                rank, n_ranks, vlayout = initialize_voronoi_mpi(global_grid)
+                from legoesm.parallel.voronoi_mpi import (
+                    initialize_voronoi_mpi, required_halo_depth)
+                rank, n_ranks, vlayout = initialize_voronoi_mpi(
+                    global_grid, halo_depth=required_halo_depth(
+                        self.config.dycore.mpas_tracer_horizontal_scheme))
                 self._grid_global = global_grid
                 self._voronoi_layout = vlayout
                 self._mpi_rank = rank

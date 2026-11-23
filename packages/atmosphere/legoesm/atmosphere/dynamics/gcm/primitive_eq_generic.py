@@ -456,6 +456,7 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
     puts the value-neutral optimization barrier of the sharded step on the
     energy-conserving PV flux, as the legacy body does."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        edge_damping_scales,
         mpas_momentum_dissipation,
         mpas_tracer_tendencies,
         validate_vert4_flux_form_tracers,
@@ -513,11 +514,36 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
         L = ctx["L"]
         return gops.divergence(ctx["vel"][0] * cell_to_edge_avg_3d(L, mesh)) - L * ctx["div_u"]
 
+    scales = edge_damping_scales(mesh, config)
+    def edge_scale(i):   # per-edge factor on an (nEdges, ...) field
+        if scales is None:
+            return lambda x: x
+        return lambda x: scales[i].reshape((-1,) + (1,) * (x.ndim - 1)).astype(x.dtype) * x
+    s2, s4 = edge_scale(0), edge_scale(1)
+    if config.K_h_pressure_surfaces and not config.K_h > 0:
+        raise ValueError("K_h_pressure_surfaces needs K_h > 0 (it corrects the K_h "
+                         "temperature diffusion; inert otherwise)")
+    if (config.tracer_horizontal_scheme == "flux_fct" and isinstance(dt, (int, float))
+            and not dt > 0):
+        raise ValueError(f"tracer_horizontal_scheme='flux_fct' needs dt > 0 (got {dt!r})")
+
     def dissipation(ctx, dvel, dT):
-        du = mpas_momentum_dissipation(dvel[0], ctx["vel"][0], mesh, config)
+        du = mpas_momentum_dissipation(dvel[0], ctx["vel"][0], mesh, config, scales)
         T = ctx["T"]
         if config.K_h > 0:
-            dT = dT + config.K_h * gops.divergence(gops.gradient(T))
+            dT = dT + config.K_h * gops.divergence(s2(gops.gradient(T)))
+        if config.K_h_pressure_surfaces:
+            # lap_p T = lap_eta T - (dT/dp) lap_eta p, lap_eta p = B lap(p_s)
+            # (sigma: B = sigma); dT/dp centred, one-sided at top and bottom.
+            pf = ctx["p_full"]
+            dTdp = jnp.concatenate([
+                (T[:, 1:2] - T[:, 0:1]) / (pf[:, 1:2] - pf[:, 0:1]),
+                (T[:, 2:] - T[:, :-2]) / (pf[:, 2:] - pf[:, :-2]),
+                (T[:, -1:] - T[:, -2:-1]) / (pf[:, -1:] - pf[:, -2:-1])], axis=-1)
+            sc = ctx["sigma_coord"]
+            Bk = sc.B_full if ctx["hybrid"] else sc.sigma_full
+            lap_ps = gops.divergence(s2(gops.gradient(ctx["p_s"][:, None])))
+            dT = dT - config.K_h * dTdp * (Bk[None, :] * lap_ps)
         if config.nu_vert4_T > 0.0 and T.shape[-1] > 2:
             w = ctx["dp"] if ctx["hybrid"] else ctx["sigma_coord"].dsigma
             dT = dT + vertical_del4_T_tendency(T, config.nu_vert4_T, w)
@@ -528,7 +554,7 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
             return None
         if "dps_del4" not in ctx:
             del2 = gops.divergence(gops.gradient(ctx["p_s"]))
-            ctx["dps_del4"] = -config.nu_del4_ps * gops.divergence(gops.gradient(del2))
+            ctx["dps_del4"] = -config.nu_del4_ps * gops.divergence(s4(gops.gradient(del2)))
         return ctx["dps_del4"]
 
     def tracer_fn(ctx):
@@ -537,7 +563,7 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
         return mpas_tracer_tendencies(
             tracers, ctx["vel"][0], mesh, ctx["sigma_coord"], config, hybrid,
             ctx["vert_vel"] if hybrid else None, None if hybrid else ctx["vert_vel"],
-            ctx["p_s"], ps_del4(ctx), w)
+            ctx["p_s"], ps_del4(ctx), w, dt=dt, dp=ctx["dp"], dp_edge=ctx["dp_face"][0])
 
     def ps_post(ctx, dps):
         d4 = ps_del4(ctx)

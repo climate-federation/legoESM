@@ -470,6 +470,23 @@ class DycoreConfig(NamedTuple):
     # mpas_vert_advection_scheme = "ppm" (RULE 5): inf = CAM-FV's ppm2m
     # exactly.  Unused by every other scheme.
     mpas_vert_ppm_limiter_sharpness: float = 1.0e4
+    # MPAS hydrostatic lane, terrain and variable meshes (ENSO fork port,
+    # shared PE core only: vertical_form != "legacy").  Threaded by
+    # ``component_factory`` into MPASPrimitiveEquationConfig fields of the
+    # same name without the ``mpas_`` prefix:
+    # horizontal tracer transport "advective" (centred) or "flux_fct" (flux
+    # form + Zalesak FCT); the FCT switches' RULE 5 widths (relative, and the
+    # upwind speed scale in m/s; 0 = hard);
+    # K_h temperature diffusion on pressure surfaces (CAM3 eq. 3.84 leading
+    # term); per-edge damping scaled by meshDensity with exponents for the
+    # del2 (and K_h) and del4 (and ps del4, ldiv4) terms.  All off = unchanged.
+    mpas_tracer_horizontal_scheme: str = "advective"
+    mpas_fct_smoothing_width: float = 1.0e-4
+    mpas_fct_upwind_width_ms: float = 1.0e-3
+    mpas_kh_pressure_surfaces: bool = False
+    mpas_edge_scaled_damping: bool = False
+    mpas_damping_exp_del2: float = 2.0
+    mpas_damping_exp_del4: float = 4.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -4746,6 +4763,32 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "dycore.mpas_vert_ppm_limiter_sharpness must be a number > 0 "
                 f"(inf = CAM-FV's hard limiter); got {_ppms!r}.")
+        if d.mpas_tracer_horizontal_scheme not in ("advective", "flux_fct"):
+            errors.append("dycore.mpas_tracer_horizontal_scheme must be 'advective' "
+                          f"or 'flux_fct'; got {d.mpas_tracer_horizontal_scheme!r}.")
+        _fw = d.mpas_fct_smoothing_width
+        if (isinstance(_fw, (int, float)) and not isinstance(_fw, bool)
+                and math.isfinite(_fw) and _fw > 5.0 ** 0.5 - 1.0):
+            errors.append("dycore.mpas_fct_smoothing_width must be <= sqrt(5)-1 "
+                          f"(limiter factors stay >= 0); got {_fw!r}.")
+        for _ek in ("mpas_fct_smoothing_width", "mpas_fct_upwind_width_ms",
+                    "mpas_damping_exp_del2", "mpas_damping_exp_del4"):
+            _ev = getattr(d, _ek)
+            if (isinstance(_ev, bool) or not isinstance(_ev, (int, float))
+                    or not (math.isfinite(_ev) and _ev >= 0.0)):
+                errors.append(f"dycore.{_ek} must be a finite number >= 0; got {_ev!r}.")
+        _terrain = [k for k, on in (
+            ("mpas_tracer_horizontal_scheme='flux_fct'",
+             d.mpas_tracer_horizontal_scheme == "flux_fct"),
+            ("mpas_kh_pressure_surfaces", bool(d.mpas_kh_pressure_surfaces)),
+            ("mpas_edge_scaled_damping", bool(d.mpas_edge_scaled_damping))) if on]
+        if _terrain and (d.discretization != "mpas" or d.model_type != "hydrostatic"
+                         or d.vertical_form == "legacy"):
+            errors.append(
+                f"dycore.{', '.join(_terrain)} is wired into the hydrostatic MPAS "
+                "dycore's shared PE core only; with discretization="
+                f"{d.discretization!r}, model_type={d.model_type!r}, vertical_form="
+                f"{d.vertical_form!r} it would be refused or silently inert.")
         # Free-atmosphere diffusivity-floor override: None, or finite in
         # (0, 10] m^2/s (the not(lo<x<=hi) form also rejects NaN/Inf).
         if self.hb_kvf_min is not None and (

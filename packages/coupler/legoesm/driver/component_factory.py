@@ -1056,6 +1056,13 @@ def create_atmosphere_dycore(
             # Tracer rate of the same filter (None = follow nu_vert4_T).
             nu_vert4_tracer=dc.mpas_nu_vert4_tracer,
             vert_ppm_limiter_sharpness=float(dc.mpas_vert_ppm_limiter_sharpness),
+            tracer_horizontal_scheme=dc.mpas_tracer_horizontal_scheme,
+            fct_smoothing_width=float(dc.mpas_fct_smoothing_width),
+            fct_upwind_width_ms=float(dc.mpas_fct_upwind_width_ms),
+            K_h_pressure_surfaces=bool(dc.mpas_kh_pressure_surfaces),
+            edge_scaled_damping=bool(dc.mpas_edge_scaled_damping),
+            damping_exp_del2=float(dc.mpas_damping_exp_del2),
+            damping_exp_del4=float(dc.mpas_damping_exp_del4),
             vert4_flux_form_tracers=tuple(dc.mpas_vert4_flux_form_tracers),
             vert4_log_form_tracers=tuple(dc.mpas_vert4_log_form_tracers),
             # Mass-conserving tracer positivity clamp (see DycoreConfig).
@@ -1084,6 +1091,22 @@ def create_atmosphere_dycore(
             # free-troposphere and a boundary-layer run.
             budget_ledger_level_weight=_ledger_level_weight(config, sigma),
         )
+        if cfg.edge_scaled_damping:
+            # The scalar coefficients are the finest cells' (compute_diffusion
+            # uses dx_min), so meshDensity must peak at 1; padded cells carry 0.
+            # The stiffness cap reference comes from the GLOBAL mesh so every
+            # rank of a cell partition caps alike.
+            import numpy as np
+            from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+                damping_reference_stiffness)
+            _rho = np.asarray(coeff_grid.meshDensity)
+            _rho = _rho[_rho > 0.0]
+            if _rho.size == 0 or abs(float(_rho.max()) - 1.0) > 1e-12:
+                raise ValueError(
+                    "mpas_edge_scaled_damping needs a meshDensity whose maximum is 1 "
+                    "at the finest cells; got max "
+                    f"{(float(_rho.max()) if _rho.size else float('nan')):.6g}")
+            cfg = cfg._replace(damping_ref_stiffness=damping_reference_stiffness(coeff_grid))
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
     if solver_name == "mpas_compressible_euler":
