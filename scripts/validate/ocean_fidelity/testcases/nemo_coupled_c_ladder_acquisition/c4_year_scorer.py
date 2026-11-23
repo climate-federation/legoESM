@@ -432,14 +432,29 @@ def score_c4(
         for month in envelope_report.get("months", [])
     })
     try:
+        candidate_months = decision188.normalize_months(candidate_report)
+        envelope_months = decision188.normalize_months(envelope_report)
+        for candidate, envelope in zip(
+            candidate_months, envelope_months, strict=False
+        ):
+            candidate_ke = candidate.get("metrics", {}).get("KE", {})
+            if "relative_rms_fraction" in candidate_ke:
+                _finite(
+                    candidate_ke["relative_rms_fraction"],
+                    f"{candidate['label']} KE candidate relative RMS",
+                )
+            envelope_ke = envelope.get("metrics", {}).get("KE", {})
+            if "relative_rms_fraction" in envelope_ke:
+                _finite(
+                    envelope_ke["relative_rms_fraction"],
+                    f"{candidate['label']} KE twin relative RMS",
+                )
         ocean = decision188.evaluate_decision188(
             candidate_report,
             envelope_report,
             envelope_admission,
             envelope_metrics_digest=envelope_metrics_digest,
         )
-        candidate_months = decision188.normalize_months(candidate_report)
-        envelope_months = decision188.normalize_months(envelope_report)
     except decision188.GateError as exc:
         raise C4ScoreError(str(exc)) from exc
     require(len(ocean["months"]) == 12, "C4 D188 result did not evaluate 12 months")
@@ -578,6 +593,12 @@ def run_plants() -> dict[str, str]:
     envelope = _add_synthetic_ice(
         decision188.minimal_coupled_c4_year_report(sst=0.0, ke=0.001), 0.001
     )
+    for month in envelope["months"]:
+        for key, fixed_bar in decision188.FIXED_RMS_BARS.items():
+            month["metrics"][key]["rms"] = fixed_bar / 10.0
+        month["metrics"]["PSI"]["rms_sv"] = 0.02
+        month["metrics"]["PSI"]["pattern_corr"] = 0.9998
+        month["metrics"]["DRAKE"]["abs_mean_diff_sv"] = 0.1
     admission = decision188.minimal_coupled_c4_envelope_admission(
         envelope_report=envelope
     )
@@ -645,6 +666,35 @@ def run_plants() -> dict[str, str]:
         and fixed_row["binding_side"] == "fixed"
         and fixed_row["applied_bar"] == decision188.FIXED_RMS_BARS["SST"],
         "fixed-bound ocean plant did not use the Decision-188 bar",
+    )
+
+    fixed_other_envelope = copy.deepcopy(envelope)
+    fixed_other_envelope["months"][8]["metrics"]["PSI"]["rms_sv"] = 0.02
+    fixed_other_envelope["months"][9]["metrics"]["PSI"]["pattern_corr"] = 0.9998
+    fixed_other_envelope["months"][10]["metrics"]["DRAKE"][
+        "abs_mean_diff_sv"
+    ] = 0.1
+    fixed_other_admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=fixed_other_envelope
+    )
+    fixed_other_candidate = copy.deepcopy(candidate)
+    fixed_other_candidate["months"][8]["metrics"]["PSI"]["rms_sv"] = 0.08
+    fixed_other_candidate["months"][9]["metrics"]["PSI"]["pattern_corr"] = 0.9992
+    fixed_other_candidate["months"][10]["metrics"]["DRAKE"][
+        "abs_mean_diff_sv"
+    ] = 0.4
+    fixed_other_result = score_c4(
+        fixed_other_candidate, fixed_other_envelope, fixed_other_admission
+    )
+    fixed_psi_rms_row = fixed_other_result["months"][8]["quantities"]["PSI"]
+    fixed_psi_pattern_row = fixed_other_result["months"][9]["quantities"]["PSI"]
+    fixed_drake_row = fixed_other_result["months"][10]["quantities"]["DRAKE"]
+    require(
+        fixed_other_result["status"] == "PASS_C4_12_OF_12"
+        and fixed_psi_rms_row["rms_binding_side"] == "fixed"
+        and fixed_psi_pattern_row["pattern_decorrelation_binding_side"] == "fixed"
+        and fixed_drake_row["binding_side"] == "fixed",
+        "fixed-bound PSI/DRAKE plants did not use the Decision-188 bars",
     )
 
     adaptive_other_envelope = copy.deepcopy(envelope)
@@ -779,6 +829,25 @@ def run_plants() -> dict[str, str]:
         "boolean numeric value", boolean_number, envelope, admission,
         "SST candidate RMS is boolean, not numeric",
     ))
+    candidate_ke_boolean = copy.deepcopy(candidate)
+    candidate_ke_boolean["months"][0]["metrics"]["KE"][
+        "relative_rms_fraction"
+    ] = False
+    refusal_cases.append((
+        "candidate KE boolean", candidate_ke_boolean, envelope, admission,
+        "KE candidate relative RMS is boolean, not numeric",
+    ))
+    twin_ke_boolean = copy.deepcopy(envelope)
+    twin_ke_boolean["months"][0]["metrics"]["KE"][
+        "relative_rms_fraction"
+    ] = True
+    twin_ke_boolean_admission = decision188.minimal_coupled_c4_envelope_admission(
+        envelope_report=twin_ke_boolean
+    )
+    refusal_cases.append((
+        "twin KE boolean", candidate, twin_ke_boolean, twin_ke_boolean_admission,
+        "KE twin relative RMS is boolean, not numeric",
+    ))
     refusal_results = {}
     for name, refusal_candidate, refusal_envelope, refusal_admission, message in refusal_cases:
         caught = False
@@ -852,6 +921,9 @@ def run_plants() -> dict[str, str]:
         "ocean_between_fixed_and_twin_bound_plant": "PASS_C4_12_OF_12",
         "ocean_above_applied_bar_plant": "FAIL_C4_M02_Feb_SST",
         "ocean_fixed_bound_plant": "PASS_C4_12_OF_12",
+        "psi_rms_fixed_bound_plant": "PASS_C4_12_OF_12",
+        "psi_pattern_fixed_bound_plant": "PASS_C4_12_OF_12",
+        "drake_fixed_bound_plant": "PASS_C4_12_OF_12",
         "psi_rms_between_fixed_and_twin_bound_plant": "PASS_C4_12_OF_12",
         "psi_rms_above_applied_bar_plant": "FAIL_C4_M05_May_PSI",
         "psi_pattern_between_fixed_and_twin_bound_plant": "PASS_C4_12_OF_12",
@@ -874,6 +946,10 @@ def run_plants() -> dict[str, str]:
             "twin PSI correlation outside [-1, 1]"
         ],
         "boolean_numeric_refusal_plant": refusal_results["boolean numeric value"],
+        "candidate_ke_boolean_refusal_plant": refusal_results[
+            "candidate KE boolean"
+        ],
+        "twin_ke_boolean_refusal_plant": refusal_results["twin KE boolean"],
         "corrupt_ocean_twin_refusal_plant": "PASS",
         "ice_above_bar_plant": "FAIL_C4_M08_Aug_ICE_AREA_NH",
         "ice_below_bar_plant": "PASS_C4_12_OF_12",

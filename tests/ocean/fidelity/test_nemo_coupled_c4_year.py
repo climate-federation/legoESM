@@ -382,6 +382,9 @@ def test_builtin_plants_name_ocean_and_ice_failures() -> None:
     assert plants["control"] == "PASS_C4_12_OF_12"
     assert plants["ocean_control"] == "PASS"
     assert plants["one_month_ocean_quantity_plant"] == "FAIL_C4_M04_Apr_SST"
+    assert plants["psi_rms_fixed_bound_plant"] == "PASS_C4_12_OF_12"
+    assert plants["psi_pattern_fixed_bound_plant"] == "PASS_C4_12_OF_12"
+    assert plants["drake_fixed_bound_plant"] == "PASS_C4_12_OF_12"
     assert plants["psi_rms_above_applied_bar_plant"] == "FAIL_C4_M05_May_PSI"
     assert plants["psi_pattern_above_applied_bar_plant"] == "FAIL_C4_M06_Jun_PSI"
     assert plants["drake_above_applied_bar_plant"] == "FAIL_C4_M07_Jul_DRAKE"
@@ -391,6 +394,8 @@ def test_builtin_plants_name_ocean_and_ice_failures() -> None:
     assert plants["candidate_psi_correlation_refusal_plant"] == "PASS"
     assert plants["twin_psi_correlation_refusal_plant"] == "PASS"
     assert plants["boolean_numeric_refusal_plant"] == "PASS"
+    assert plants["candidate_ke_boolean_refusal_plant"] == "PASS"
+    assert plants["twin_ke_boolean_refusal_plant"] == "PASS"
     assert plants["ice_above_bar_plant"] == "FAIL_C4_M08_Aug_ICE_AREA_NH"
     assert plants["ice_below_bar_plant"] == "PASS_C4_12_OF_12"
     assert plants["daily_cancellation_plant"] == "FAIL_C4_M08_Aug_ICE_AREA_NH"
@@ -419,6 +424,14 @@ def test_builtin_plants_name_ocean_and_ice_failures() -> None:
         (
             "candidate", "SST", "rms", True,
             "SST candidate RMS is boolean, not numeric",
+        ),
+        (
+            "candidate", "KE", "relative_rms_fraction", False,
+            "KE candidate relative RMS is boolean, not numeric",
+        ),
+        (
+            "envelope", "KE", "relative_rms_fraction", True,
+            "KE twin relative RMS is boolean, not numeric",
         ),
     ],
 )
