@@ -354,6 +354,7 @@ __param_spec__ = {
             "q_flux_scale_sigma_lo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "lower sigma of the face band q_flux_scale acts on", "shape": None},
             "q_flux_scale_sigma_hi": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "upper sigma of the face band q_flux_scale acts on", "shape": None},
             "pdf_variance_scale": {"units": "1", "bounds": (0.25, 8.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_pdf", "reference": "multiplier on the DIAGNOSED sub-grid variance entering the PDF closure; 1.0 is the closure's own mixing-length estimate", "shape": None},
+            "mf_alphturb": {"units": "1", "bounds": (0.0, 6.0), "tunable_tier": 2, "transform": "softplus", "category": "clubb_mf_entrainment", "reference": "CAM7 atmos_phys clubb_mf.F90:1113 clubb_mf_alphturb (CAM7 3.0); 0 = off; bounds/tier/transform voted 2026-11-24", "shape": None},
         },
     },
 }
@@ -781,6 +782,9 @@ class CLUBBConfig(NamedTuple):
     mf_kspan_sharpness: float = 100.0
     mf_conv_sharpness: float = 1.0e7
     mf_cfl_sharpness: float = 100.0
+    # CAM7 CLUBB-MF TKE-enhanced entrainment clubb_mf_alphturb (eturb = 1 +
+    # alphturb*sqrt(tke)/w); 0 = off (default, vote 2026-11-24), CAM7 = 3.
+    mf_alphturb: float = 0.0
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -6945,6 +6949,9 @@ def clubb_step(
             mf_lts = jax.vmap(_mf_lts_col)(T, q_liq, p_full, p_half[:, -1])
         mf_in = dict(
             zm=gr.zm, dzt=dzt, thl=thlm, qt=rtm, thv=thv_ds_zt, u=um, v=vm,
+            # CAM's tke_zm = 0.5 (up2 + vp2 + wp2) of the moments the call
+            # starts from (clubb.F90:2836, the previous call's end state)
+            tke=0.5 * (moments.up2 + moments.vp2 + moments.wp2),
             p_zm=p_zm, iex_zm=iex_zm, ths=T_sfc * iex_zm[:, 0],
             wthl_sfc=wpthlp_sfc * jnp.ones((ncol,), T.dtype),
             wqt_sfc=wprtp_sfc * jnp.ones((ncol,), T.dtype),
@@ -6955,7 +6962,8 @@ def clubb_step(
                            for f in MFSmoothing._fields))
         thlm_forcing, rtm_forcing, _mf_out = jax.vmap(
             lambda c, rzm, irzt, idz: clubb_mf_forcing(
-                c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness))(
+                c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness,
+                config.mf_alphturb))(
             mf_in, rho_ds_zm, invrs_rho_ds_zt, 1.0 / dzt)
     mf_cloud = {}
     if clubb_mf:

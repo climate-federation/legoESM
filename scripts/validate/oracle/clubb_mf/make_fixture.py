@@ -185,7 +185,10 @@ def main():
     ap.add_argument("--columns", required=True)
     ap.add_argument("--driver", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--alphturb", type=float, default=0.0,
+                    help="clubb_mf_alphturb (REALS[4]); the committed clubb_mf.npz uses 0")
     a = ap.parse_args()
+    REALS[4] = a.alphturb
     raw = np.load(a.columns, allow_pickle=True)
     c = {k: np.asarray(raw[k]) for k in ("T", "q", "u", "v", "p_full", "p_half")}
     c["q"] = np.maximum(c["q"], 0.0)

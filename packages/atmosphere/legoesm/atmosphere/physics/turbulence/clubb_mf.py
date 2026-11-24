@@ -118,6 +118,7 @@ KSPAN_MIN = 4
 LTS_INHIBIT_THRESH = 20.0  # [K]
 COND_MAX_ITER, COND_TOL = 50, 2.0e-5  # condensation_mf
 L0 = 200.0  # clubb_mf_L0 [m], Lopt 0 (user 2026-11-23)
+MAX_L0 = 1.0e3  # clubb_mf_max_L0 [m]: TKE entrainment off when dynamic_L0 >= this
 KSEED = 1  # clubb_mf_kseed: offset of the 2nd..4th seed winds
 ZTOPM1_COLD = 500.0  # plume-top memory [m] each call starts from (fixture call 1)
 CFLVAL = 1.0  # clubb.F90 compute_mf_plumes: Courant-number limit
@@ -197,10 +198,12 @@ def condensation_mf(qt, thl, p, iex, sm: MFSmoothing):
     return thv, qc, t * iex, excess, n_iter
 
 
-def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
+def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing(), alphturb: float = 0.0):
     """One column.  ``c``: CLUBB-grid inputs (keys as the fixture's ``c_*``
     arrays without the prefix, one column); ``enti`` (nzt, NUP) int draws;
-    ``ztopm1_in`` (NUP,) plume-top memory.  Returns the compared outputs."""
+    ``ztopm1_in`` (NUP,) plume-top memory.  ``alphturb`` = CAM's
+    clubb_mf_alphturb (TKE-enhanced entrainment, reads ``c["tke"]`` on zm);
+    0 skips it.  Returns the compared outputs."""
     g, zvir = constants.g, constants.R_v / constants.R_d - 1.0
     zm, dzt = c["zm"], c["dzt"]
     nzm = zm.shape[0]
@@ -236,11 +239,24 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
     u0 = jnp.full((NUP,), c["u"][0])
     v0 = jnp.full((NUP,), c["v"][0])
 
+    # TKE-enhanced entrainment (clubb_mf.F90:1113-1123): eturb = 1 +
+    # alphturb*sqrt(tke)/w, off when dynamic_L0 >= max_L0 (static: L0 fixed).
+    # CAM applies eturb to entn AND again in entexp and wp (eturb**2 there).
+    # A static 0 skips the branch; a traced alphturb (trainable leaf) always
+    # takes it (eturb is then exactly 1 at alphturb = 0).
+    turb = (not isinstance(alphturb, (int, float)) or alphturb != 0.0) and L0 < MAX_L0
+
     def step(carry, xk):
         w, thl, qt, thv, u, v = carry
-        dz, qt_e, thl_e, thv_e, u_e, v_e, p_n, iex_n, ent_k = xk
+        dz, qt_e, thl_e, thv_e, u_e, v_e, p_n, iex_n, tke_k, ent_k = xk
         entn = ent_k * ENT0 / dz
-        entexp = jnp.exp(-entn * dz)
+        eturb = 1.0
+        if turb:
+            # CAM integrates live plumes only; a dead plume (w = 0) is masked
+            w_ok = w > 0.0
+            eturb = jnp.where(w_ok, 1.0 + alphturb * jnp.sqrt(tke_k) / jnp.where(w_ok, w, 1.0), 1.0)
+            entn = entn * eturb
+        entexp = jnp.exp(-entn * eturb * dz)
         entexpu = jnp.exp(-entn * dz / ENT_MOM_REDUCTION)
         qtn = qt_e * (1.0 - entexp) + qt * entexp
         thln = thl_e * (1.0 - entexp) + thl * entexp
@@ -248,7 +264,7 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
         vn = v_e * (1.0 - entexpu) + v * entexpu
         thvn, qcn, _, exn, _ = condensation_mf(qtn, thln, p_n, iex_n, sm)
         b = g * (0.5 * (thvn + thv) / thv_e - 1.0)
-        wp = WB * entn
+        wp = WB * entn * eturb
         noent = ent_k == 0
         wp_safe = jnp.where(noent, 1.0, wp)
         entw = jnp.exp(-2.0 * wp_safe * dz)
@@ -262,7 +278,8 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
         return new, (gate, wn, thln, qtn, thvn, qcn, un, vn, exn)
 
     k = slice(0, nzm - 1)
-    xs = (dzt, c["qt"], c["thl"], c["thv"], c["u"], c["v"], c["p_zm"][1:], c["iex_zm"][1:])
+    tke = c["tke"] if turb else jnp.zeros_like(zm)
+    xs = (dzt, c["qt"], c["thl"], c["thv"], c["u"], c["v"], c["p_zm"][1:], c["iex_zm"][1:], tke)
     xs = tuple(jnp.broadcast_to(x[k][:, None], (nzm - 1, NUP)) for x in xs) + (
         enti[k].astype(zm.dtype),
     )
@@ -455,7 +472,8 @@ def mf_lts(T, q_liq, p_full, p_sfc):
 
 
 def clubb_mf_forcing(c, dt, rho_ds_zm, invrs_rho_ds_zt, invrs_dzt,
-                     sm: MFSmoothing = MFSmoothing(), cfl_sharpness: float = CFL_SHARPNESS):
+                     sm: MFSmoothing = MFSmoothing(), cfl_sharpness: float = CFL_SHARPNESS,
+                     alphturb: float = 0.0):
     """One column: the plumes, then CAM's explicit forcing on CLUBB's thermo
     levels, ``-(1/rho_ds_zt) d(rho_ds_zm F)/dz * cflfac`` for thl and qt.
     ``c`` as :func:`integrate_mf` (plus ``u`` for the seed); returns
@@ -466,7 +484,7 @@ def clubb_mf_forcing(c, dt, rho_ds_zm, invrs_rho_ds_zt, invrs_dzt,
     lam = (c["dzt"] / L0).at[nzt - 1].set(0.0)[:, None] * jnp.ones((1, NUP))
     u = c["u"]
     enti = entrainment_draws(lam, jnp.stack([u[0], u[KSEED], u[1 + KSEED], u[2 + KSEED]]))
-    out = integrate_mf(c, enti, jnp.full((NUP,), ZTOPM1_COLD), sm)
+    out = integrate_mf(c, enti, jnp.full((NUP,), ZTOPM1_COLD), sm, alphturb)
     aw = jnp.sum(out["upa"] * out["upw"], axis=1).at[0].set(0.0)
     max_cfl = jnp.max(dt * invrs_dzt * jnp.maximum(jnp.abs(aw[:-1]), jnp.abs(aw[1:])))
     cflfac = CFLVAL / smooth_max(jnp.asarray(CFLVAL), max_cfl, cfl_sharpness)
