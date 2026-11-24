@@ -1562,6 +1562,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=None,
                         help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
                              "None = 0.01 (CAM6 namelist)")
+    parser.add_argument("--cloud-clubb-mf-cldfrac-fac",
+                        dest="cloud_clubb_mf_cldfrac_fac", type=float,
+                        default=None,
+                        help="CAM7 CLUBB-MF plume-area to deep-cloud-fraction "
+                             "factor (bounds 1..20); None = 10 (CAM7). Needs "
+                             "--clubb-mf and cloud_scheme cam6_clubb.")
     parser.add_argument("--cloud-cam6-do-subgrid-growth",
                         dest="cloud_cam6_do_subgrid_growth",
                         action=argparse.BooleanOptionalAction, default=False,
@@ -3520,6 +3526,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_do_subgrid_growth=args.cloud_cam6_do_subgrid_growth,
         cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
         cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
+        cloud_clubb_mf_cldfrac_fac=args.cloud_clubb_mf_cldfrac_fac,
         cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,
         cloud_cam6_snow_optics_file=args.cloud_cam6_snow_optics_file,
         cloud_cam6_rad_specified_nc=args.cloud_cam6_rad_specified_nc,

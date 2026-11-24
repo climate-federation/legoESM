@@ -6808,3 +6808,29 @@ def test_clubb_mf_flag_reaches_the_turbulence_config():
         "--dataset", "analytical", "--turbulence", "clubb", "--clubb-mf"]), parser))
     with pytest.raises(ValueError, match="clubb_prognostic"):
         turbulence_config_for(diag)
+
+
+def test_clubb_mf_cldfrac_fac_flag_reaches_the_cloud_config():
+    """--cloud-clubb-mf-cldfrac-fac round-trips to CloudConfig.mf_cldfrac_fac
+    (unset = CAM7's 10); refused without clubb_mf + cam6_clubb and outside the
+    spec bounds 1..20 (vote 2026-11-24)."""
+    import pytest
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import _standalone_cloud_config
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--turbulence", "clubb", "--clubb-prognostic",
+            "--clubb-mf"]
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--cloud-clubb-mf-cldfrac-fac", "3.5"]), parser))
+    assert cfg.cloud_clubb_mf_cldfrac_fac == 3.5
+    assert build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser)).cloud_clubb_mf_cldfrac_fac is None
+    assert _standalone_cloud_config(cfg, "cam6_clubb").mf_cldfrac_fac == 3.5
+    assert _standalone_cloud_config(
+        cfg._replace(cloud_clubb_mf_cldfrac_fac=None), "cam6_clubb").mf_cldfrac_fac == 10.0
+    for bad in (dict(cloud_clubb_mf_cldfrac_fac=3.5),
+                dict(cloud_clubb_mf_cldfrac_fac=25.0, clubb_mf=True,
+                     cloud_scheme="cam6_clubb")):
+        with pytest.raises(ValueError, match="cloud_clubb_mf_cldfrac_fac"):
+            ExperimentConfig()._replace(**bad).validate_strict()
