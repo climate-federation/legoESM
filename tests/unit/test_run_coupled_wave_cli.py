@@ -70,6 +70,35 @@ def test_coupled_config_defaults_keep_waves_off():
     assert config.kpp_langmuir is False
 
 
+def test_wave_off_cli_preserves_prescribed_langmuir(tmp_path):
+    import jax.numpy as jnp
+
+    from legoesm.ocean.physics.vertical_mixing.kpp import _kpp_langmuir_enhancement
+
+    args = [
+        "--grid", "latlon", "--ocean", "dynamic", "--resolution", "8",
+        "--output", str(tmp_path),
+    ]
+    baseline = run_coupled.main(args, build_only=True)
+    driver = run_coupled.main([*args, "--kpp-langmuir"], build_only=True)
+    baseline_card = baseline._build_latlon_ocean_config()
+    card = driver._build_latlon_ocean_config()
+
+    assert baseline_card.physics is None
+    assert card._replace(physics=baseline_card.physics) == baseline_card
+    assert card.physics.vertical_mixing.scheme == "kpp"
+    assert card.physics.convection.scheme == "enhanced_diffusion"
+    assert driver.coupled_cfg.wave_mode == "off"
+    driver._init_wave()
+    assert driver._wave_stokes is None
+    kpp = card.physics.vertical_mixing.kpp
+    assert kpp.enable_langmuir
+    u_star = jnp.array(0.01)
+    assert float(_kpp_langmuir_enhancement(u_star, driver._wave_stokes, kpp)) == (
+        pytest.approx(1.51703464, rel=1e-6))
+    assert float(_kpp_langmuir_enhancement(u_star, jnp.zeros_like(u_star), kpp)) == 1
+
+
 @pytest.mark.parametrize("neural", [False, True])
 def test_wave_weights_required_only_for_neural_config(tmp_path, capsys, neural):
     import json

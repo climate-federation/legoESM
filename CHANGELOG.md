@@ -11,8 +11,9 @@ All notable changes to legoESM. Format roughly follows
   package with WADEN dynamics, NeuralSWM parameterization interfaces,
   atmosphere/ocean coupling, Stokes-drift feedback to KPP Langmuir mixing,
   and checkpoint continuation support. Coupled wave execution is opt-in.
-  The regular latitude–longitude CLI selects KPP with `--kpp-langmuir`;
-  Wave supplies Stokes from initialization onward and requires the
+  The regular latitude–longitude CLI selects the coupled KPP physics stack
+  with `--kpp-langmuir`. With Wave active, a calm initial spectrum supplies
+  zero Stokes on the first ocean sub-step. Active Wave requires the
   coupler-owned surface exchange.
 
 - **ePBL vertical mixing (`VerticalMixingConfig(scheme="epbl")`).** A JAX

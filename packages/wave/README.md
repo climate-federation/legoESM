@@ -61,11 +61,21 @@ For a regular latitude–longitude ocean, use the coupled CLI with
 `--grid latlon --ocean dynamic --wave-mode active --wave-config wave.json --kpp-langmuir`.
 The wave deck's global time step must match the coupling interval (3600 s by
 default). Add a converted `--wave-weights` file for a neural source term.
-`--kpp-langmuir` explicitly selects KPP with Langmuir enhancement; without
-that flag the regular latitude–longitude CLI retains its existing mixing
-configuration. Wave starts with zero Stokes on the ocean grid and thereafter
-supplies the previous coupling step's diagnostic. With Wave off and Langmuir
-explicitly enabled, KPP instead uses its configured prescribed Langmuir number.
+On the regular latitude–longitude CLI, `--kpp-langmuir` selects the same ocean
+physics stack as the tripole recipe: KPP with Langmuir enhancement and
+enhanced-diffusion convection. The coupler provides surface fluxes, and this
+stack adds no separate lateral-mixing or bottom-drag closure or shortwave
+penetration module. The ocean dynamics' own lateral mixing and bottom-drag
+settings are preserved. Omitting the flag retains the regular ocean's
+constant-diffusion configuration.
+
+With Wave active, a calm initial spectrum gives zero Stokes on the ocean grid
+and a Langmuir multiplier of one on the first ocean sub-step. Subsequent
+sub-steps use the diagnostic from the previous coupling step. Restart
+reconstructs Stokes from the saved spectrum, including when the driver reads
+an older initial v4 checkpoint with its readiness marker set to false. With
+Wave off and Langmuir explicitly enabled, KPP uses the configured prescribed
+Langmuir number.
 The coupled Wave path requires the coupler-owned surface exchange and excludes
 Voronoi atmosphere or ocean grids.
 

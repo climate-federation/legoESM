@@ -3454,8 +3454,9 @@ class CoupledESMDriver:
 
         # Wave spectrum (ckpt v4).  Depth and mask come from the ocean setup;
         # only the prognostic spectrum, its persistent phase and provenance
-        # are saved. The shape pin catches a changed grid. Keep the
-        # stokes-ready marker for readers of the existing v4 format.
+        # are saved. The shape pin catches a changed grid. Older v4 readers
+        # consult the readiness marker. The current reader always derives
+        # Stokes from the restored spectrum.
         if self._wave_state is not None:
             arrays["_ckpt_wave_shape"] = np.asarray(
                 self._wave_state.spectra.shape, dtype=np.int64)

@@ -755,10 +755,12 @@ def build_parser():
                              "scripts/data/convert_neuralswm_checkpoint.py. Required "
                              "when the wave configuration enables neural networks.")
     parser.add_argument("--kpp-langmuir", action="store_true",
-                        help="Select KPP with Langmuir enhancement for "
-                             "--ocean dynamic. Uses surface Stokes drift when "
-                             "Wave is active and a prescribed Langmuir number "
-                             "otherwise.")
+                        help="Select the coupled KPP physics stack with "
+                             "Langmuir enhancement for --ocean dynamic. "
+                             "The regular lat-lon card uses the tripole "
+                             "recipe's enhanced-diffusion convection. Uses "
+                             "surface Stokes drift when Wave is active and "
+                             "a prescribed Langmuir number otherwise.")
     parser.add_argument("--atm-owns-surface",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="The atmosphere owns the land and open-water "
