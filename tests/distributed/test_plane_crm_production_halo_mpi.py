@@ -274,26 +274,29 @@ def test_mixed_precision_step_halo_matches_single_rank(nry, nrx):
             assert rel <= MIXED_HALO_RTOL, (f, n, rel)
     # RULE 0 on the multi-rank mixed run (fp32 storage, fp64 sums). Dry mass:
     # the fp64 fixer sets the fp64 sum to the anchor every step, then storing
-    # rho' in fp32 moves it by at most sum_i ulp32(rho'_i)/2 dz_i (vote B16:
-    # this derived bound, for the multi-rank and the single-rank change
-    # alike). Tracer mass: fp32 storage round-off (serial tolerance).
+    # rho' in fp32 moves it by at most sum_i ulp32(rho'_i)/2 dz_i (vote
+    # B16-revised: this derived bound, for the multi-rank and the single-rank
+    # run, each against its own initial mass). hc is the mixed run's stored
+    # fp32 geometry, the one the fixer's fp64 sums use. Tracer mass: fp32
+    # storage round-off (serial tolerance).
     dz = np.asarray(hc.dz, np.float64)
     rho_ref = np.asarray(hc.rho_ref, np.float64)
 
     def masses(g):
-        rho_p = np.asarray(g["rho_prime"])
+        rho_p = np.asarray(g["rho_prime"], np.float32)
         rho = rho_ref + rho_p.astype(np.float64)
         q = np.asarray(g["tracers"], np.float64)
         bound = (0.5 * np.spacing(np.abs(rho_p)).astype(np.float64) * dz).sum()
         return ((rho * dz).sum(), (rho[..., None] * q * dz[:, None]).sum((0, 1, 2)),
                 bound)
     d0, t0, _ = masses(gathered[0])
+    d0s = masses({f: getattr(ref[0], f).data for f in FIELDS})[0]
     for n in range(1, N_STEPS + 1):
         d, t, bound = masses(gathered[n])
         ds, _, bound_s = masses({f: getattr(ref[n], f).data for f in FIELDS})
         print(f"MIXED_HALO {nry}x{nrx} step {n} dry={abs(d - d0) / d0:.3e} "
-              f"serial_dry={abs(ds - d0) / d0:.3e} bound={bound / d0:.3e} "
+              f"serial_dry={abs(ds - d0s) / d0s:.3e} bound={bound / d0:.3e} "
               f"tracer={np.max(np.abs(t - t0) / t0):.3e}")
         assert abs(d - d0) <= bound + 1e-14 * d0, (n, d, d0, bound)
-        assert abs(ds - d0) <= bound_s + 1e-14 * d0, (n, ds, d0, bound_s)
+        assert abs(ds - d0s) <= bound_s + 1e-14 * d0s, (n, ds, d0s, bound_s)
         assert np.max(np.abs(t - t0) / t0) <= MIXED_HALO_TRACER_TOL, (n, t, t0)
