@@ -75,7 +75,8 @@ def test_tc3_uniform_mixing_ratio_stays_uniform():
     model, state = _tc3_model()
     g, hc = model.grid, model.height_coord
     q0s = (0.01, 0.002, 0.0005)          # every tracer, distinct values
-    rq = jnp.broadcast_to(hc.rho_ref, (g.n_lat, g.n_lon, _NLEV))
+    # Total rho of the (balanced, rho' != 0) IC; flat, so J = 1.
+    rq = hc.rho_ref + sh_synthesis_3d(g, state.rho_prime_hat.data)
     tr = jnp.stack([sh_analysis_3d(g, q0 * rq) for q0 in q0s], axis=-1)
     state = state._replace(tracers_hat=state.tracers_hat.replace(data=tr))
     end = _run(model, state)
@@ -228,17 +229,16 @@ def test_horizontal_tracer_tendency_manufactured_solid_body():
         assert float(jnp.max(jnp.abs(got - exact))) < 1e-9 * scale, t
 
 
-_TERRAIN_DEFECT = (
-    "KNOWN DEFECT shared with rho': over terrain the grid-space 1/J before "
-    "the spectral projection breaks the J-weighted integral (TC2a T21: "
-    "tracer AND dry mass both +7.6e-10 in 10 steps, fixer off).  Needs a "
-    "J-weighted prognostic (J rho', J rho q); design question, not fixed.")
+def test_tc2a_terrain_dry_and_tracer_mass_close_without_fixer():
+    """Rule 0 over terrain (TC2a, J 0.93-1.0), mass fixer OFF: dry mass and
+    tracer mass both close to round-off; a uniform q is represented to the
+    projection of J*rho_ref*q0 (3.8e-3) and drifts only boundedly from that
+    projected initial field.
 
-
-def test_tc2a_terrain_tracer_mass_closes_without_fixer():
-    """Tracks the terrain Rule 0 gap.  Setup / stepping errors and
-    non-finite results FAIL normally; only the finite budget residual is
-    xfailed, and the test FAILS once the residual closes (stale marker)."""
+    Before the J-weighted prognostics (J rho', J rho q) the grid-space 1/J
+    ahead of the spectral projection broke the J-weighted integral: dry and
+    tracer mass both drifted +1.887e-10 in these 5 steps (+4.5e-11 per
+    step, all from the horizontal slow-tendency projection)."""
     from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import TC2_PARAMS
     from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
         dcmip25_tc2_init_spectral,
@@ -246,11 +246,13 @@ def test_tc2a_terrain_tracer_mass_closes_without_fixer():
     x = float(TC2_PARAMS["small_earth_factor"])
     state, hc, tm = dcmip25_tc2_init_spectral(
         create_gaussian_grid(_N_MAX), n_levels=_NLEV, subcase="a")
-    assert float(tm.jacobian.min()) < 0.95          # terrain is present
+    J = tm.jacobian
+    assert float(J.min()) < 0.95                    # terrain is present
     g = create_gaussian_grid(_N_MAX, radius=c.R_earth / x)
-    rq = jnp.broadcast_to(hc.rho_ref, (g.n_lat, g.n_lon, _NLEV)) * 0.01
+    q0 = 0.01
+    jrq = J[..., None] * jnp.broadcast_to(hc.rho_ref, (g.n_lat, g.n_lon, _NLEV)) * q0
     state = state._replace(tracers_hat=state.tracers_hat.replace(
-        data=sh_analysis_3d(g, rq)[..., None]))
+        data=sh_analysis_3d(g, jrq)[..., None]))
     cfg = SpectralNHConfig(
         n_acoustic_substeps=20, semi_implicit_acoustic=True,
         sponge_width=15000.0, sponge_coeff=1.0 / (0.1 * 86400.0),
@@ -259,17 +261,24 @@ def test_tc2a_terrain_tracer_mass_closes_without_fixer():
     model = SpectralCompressibleEulerModel(g, hc, tm, cfg)
     t0 = float(model.compute_tracer_mass(state)[0])
     m0 = float(model.compute_dry_mass(state))
+    end = state
     for _ in range(5):
-        state = model.step(state, 6.0)
-    rel = float(model.compute_tracer_mass(state)[0]) / t0 - 1.0
-    dry = float(model.compute_dry_mass(state)) / m0 - 1.0
-    assert np.isfinite(rel) and np.isfinite(dry)
-    if abs(rel) >= 1e-12:
-        # Pinned to the measured gap (+1.887e-10 at 5 steps, same sign for
-        # tracer and dry mass) so a continuity regression cannot hide here.
-        assert 1.5e-10 < rel < 2.3e-10, f"terrain residual left the known gap: {rel:.3e}"
-        # The gap is the rho' one, inherited exactly (same flux, uniform q).
-        assert abs(rel - dry) < 1e-12, (rel, dry)
-        pytest.xfail(f"{_TERRAIN_DEFECT} residual {rel:.3e}")
-    pytest.fail(f"terrain residual now closes ({rel:.3e}): remove the xfail "
-                "and make this a plain budget assertion")
+        end = model.step(end, 6.0)
+    # Non-vacuous: the flow over the terrain really moves mass around.
+    d_jrho = sh_synthesis_3d(g, end.rho_prime_hat.data - state.rho_prime_hat.data)
+    assert float(jnp.max(jnp.abs(d_jrho))) > 1e-6
+    rel = float(model.compute_tracer_mass(end)[0]) / t0 - 1.0
+    dry = float(model.compute_dry_mass(end)) / m0 - 1.0
+    assert abs(dry) < 1e-13, f"terrain dry-mass residual {dry:.3e}"
+    assert abs(rel) < 1e-13, f"terrain tracer residual {rel:.3e}"
+    # Uniform q over terrain: J*rho_ref*q0 is not band-limited (J is the
+    # untruncated grid terrain), so its T21 projection already makes the
+    # recovered q non-uniform by 3.8e-3 at t=0 (a representation error of
+    # the J-weighted prognostic, not transport).  Transport then keeps that
+    # q nearly fixed: measured max|q_end/q_start - 1| = 7.8e-7 in 5 steps.
+    def _q(s):
+        rho = hc.rho_ref + sh_synthesis_3d(g, s.rho_prime_hat.data) / J[..., None]
+        return sh_synthesis_3d(g, s.tracers_hat.data[..., 0]) / J[..., None] / rho
+    q_start, q_end = _q(state), _q(end)
+    assert float(jnp.max(jnp.abs(q_start / q0 - 1.0))) < 5e-3
+    assert float(jnp.max(jnp.abs(q_end / q_start - 1.0))) < 5e-6

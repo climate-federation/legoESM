@@ -9,9 +9,21 @@ Prognostic variables (spectral):
     div_hat         : Spectral divergence, (n_sh, nlev)
     w_hat           : Spectral vertical velocity, (n_sh, nlev+1)
     theta_prime_hat : Spectral pot. temp. perturbation, (n_sh, nlev)
-    rho_prime_hat   : Spectral density perturbation, (n_sh, nlev)
-    tracers_hat     : Spectral tracer DENSITY rho*q [kg/m^3],
-                      (n_sh, nlev, n_tracers) -- flux-form, mass-conserving
+    rho_prime_hat   : Spectral JACOBIAN-WEIGHTED density perturbation
+                      J*rho' [kg/m^3], (n_sh, nlev)
+    tracers_hat     : Spectral JACOBIAN-WEIGHTED tracer density
+                      J*rho*q [kg/m^3], (n_sh, nlev, n_tracers)
+
+The two mass variables are carried J-weighted (J = terrain Jacobian
+dz/dz*) so that their global integrals, ``sum (J rho_ref + J rho') dz dA``
+and ``sum (J rho q) dz dA``, are the UNWEIGHTED integrals of spectral
+fields: the spectral projection preserves those exactly and the n=0 mode
+of a spectral flux divergence vanishes, so dry and tracer mass close to
+round-off over terrain too (Rule 0).  Carrying rho' and rho*q unweighted
+needed a grid-space 1/J before the projection, which does not preserve the
+J-weighted integral (TC2a T21: +4.5e-11 of the dry mass per 6 s step).
+Grid-space rho' and rho*q are recovered by dividing by J; for flat terrain
+(J = 1) everything is bit-identical to the unweighted form.
 
 Time integration: split-explicit RK3.
     Slow mode  : spectral horizontal operators (SSP-RK3 outer)
@@ -85,8 +97,9 @@ class SpectralNHState(NamedTuple):
     3D spectral full-level: (n_sh, nlev) complex128
     3D spectral half-level: (n_sh, nlev+1) complex128  (for w)
     2D spectral:            (n_sh,) complex128
-    Tracers:                (n_sh, nlev, n_tracers) complex128, tracer
-                            density rho*q [kg/m^3] (q = tracers / rho)
+    Tracers:                (n_sh, nlev, n_tracers) complex128,
+                            J-weighted tracer density J*rho*q [kg/m^3]
+    ``rho_prime_hat`` is J*rho' (J-weighted); see the module docstring.
     """
     vor_hat: Field
     div_hat: Field
@@ -162,8 +175,9 @@ def spectral_nh_slow_tendencies(
 
     Horizontal operations use spectral transforms; vertical operations
     are done in grid space. Returns tendencies in the same pytree
-    structure as state.  ``state.tracers_hat`` must be tracer density
-    rho*q (units ``kg/m^3``).
+    structure as state.  ``state.rho_prime_hat`` / ``state.tracers_hat``
+    are the J-weighted J*rho' / J*rho*q (units ``kg/m^3``); so are the
+    returned tendencies.
     """
     _require_tracer_density(state)
     a = grid.radius
@@ -206,7 +220,7 @@ def spectral_nh_slow_tendencies(
     vor = _vdtr_grid[..., 0]
     div = _vdtr_grid[..., 1]
     theta_p = _vdtr_grid[..., 2]
-    rho_p = _vdtr_grid[..., 3]
+    rho_p = _vdtr_grid[..., 3] / J[..., None]     # prognostic is J*rho'
     w = _vdtrw_grid_flat[..., nlev_t * 4:]              # (n_lat, n_lon, nlev+1)
 
     n_tracers = state.tracers_hat.data.shape[-1] if state.tracers_hat.data.ndim >= 3 else 0
@@ -360,7 +374,9 @@ def spectral_nh_slow_tendencies(
     # (``nlev*2 + nlev*n_tracers``) all flow through the same
     # ``segment_sum + projection`` machinery.  2 SH analyses → 1 when
     # tracers are active.  Same exploit as Loops 184/185.
-    rho_horiz_tend_grid = -sh_synthesis_3d(grid, flux_rho_div) / J[..., None]
+    # Tendency of the J-weighted J*rho': -div_h(rho v J), NO 1/J before
+    # the projection (that 1/J broke the J-weighted mass integral).
+    rho_horiz_tend_grid = -sh_synthesis_3d(grid, flux_rho_div)
     _theta_div_grid = theta_total * div
     n_lat_p2, n_lon_p2, nlev_p2 = _theta_div_grid.shape
 
@@ -370,10 +386,10 @@ def spectral_nh_slow_tendencies(
     dw_hat = jnp.zeros_like(state.w_hat.data)
 
     # --- 15. Tracer transport (horizontal, flux form) ---
-    # ``tracers_hat`` carries the tracer DENSITY rho*q [kg/m^3] (Rule 0):
-    # its horizontal tendency is -(1/J) div_h(rho q v J), built with the
-    # SAME spectral flux-divergence, synthesis, 1/J and analysis path as
-    # the rho' continuity tendency above, so the global integral of the
+    # ``tracers_hat`` carries the J-weighted tracer density J*rho*q
+    # [kg/m^3] (Rule 0): its horizontal tendency is -div_h(rho q v J),
+    # built with the SAME spectral flux-divergence, synthesis and analysis
+    # path as the J*rho' continuity tendency above, so the global integral of the
     # tendency is zero (the n=0 mode of a spectral divergence vanishes)
     # and a uniform mixing ratio q gives exactly q times the rho'
     # tendency.  The VERTICAL tracer flux is applied in the acoustic
@@ -381,12 +397,6 @@ def spectral_nh_slow_tendencies(
     # (``_tracer_vertical_transport``), as in WRF/MPAS.  The former
     # advective form (q prognostic, -v.grad q, upwind -w dq/dz) is not
     # conservative: it lost 3.4e-4 of the TC3 total water in 4 min.
-    # KNOWN DEFECT (shared with rho'): closure is to round-off only for flat
-    # terrain (J = 1).  Over terrain the grid-space 1/J before the spectral
-    # projection breaks the J-weighted integral: TC2a (J 0.93-1.0), T21, 50
-    # steps of 6 s -> tracer mass +1.85e-8 and, without the fixer, dry mass
-    # +1.86e-8 (the anchored mass fixer hides the latter).  Tracked by the
-    # strict xfail test_tc2a_terrain_tracer_mass_closes_without_fixer.
     if n_tracers > 0:
         # Fold the tracer dimension into the trailing level axis so all
         # SH transforms in the tracer block run ONCE on a thicker
@@ -397,7 +407,8 @@ def spectral_nh_slow_tendencies(
         tracers_hat_flat = tracers_hat_data.reshape(
             n_sh_t, nlev_tr * n_tracers,
         )
-        rq_grid_flat = sh_synthesis_3d(grid, tracers_hat_flat)  # rho*q
+        rq_grid_flat = (sh_synthesis_3d(grid, tracers_hat_flat)
+                        / J[..., None])                  # rho*q
 
         if n_tracers == 1:
             u_cos_b = u_cos
@@ -412,9 +423,7 @@ def spectral_nh_slow_tendencies(
             im_over_a[:, None] * sh_analysis_oc2_3d(grid, rq_u_cos_flat)
             - one_over_a * sh_analysis_dmu_3d(grid, rq_v_cos_flat)
         )
-        dq_grid_sum_flat = (
-            -sh_synthesis_3d(grid, flux_q_div_flat) / J[..., None]
-        )
+        dq_grid_sum_flat = -sh_synthesis_3d(grid, flux_q_div_flat)
         # One analysis serves (theta_div, rho_horiz, tracers): concatenate
         # along the trailing axis (Loop 187).
         _all_an_input = jnp.concatenate(
@@ -703,13 +712,36 @@ def _acoustic_substeps_grid_semi_implicit(
     )
 
 
+# Encoding markers (Field.name) of the J-weighted mass prognostics.  States
+# from the former encodings -- mixing ratio q (units kg/kg), or unweighted
+# rho' / rho*q (Field names "rho_prime_hat" / "tracers_hat") -- carry the
+# same shapes and units, so the name is what tells them apart.
+_JRHO_NAME = "J_rho_prime_hat"
+_JRQ_NAME = "J_rho_q_hat"
+
+
 def _require_tracer_density(state) -> None:
-    """Refuse a state built with the former mixing-ratio tracer convention:
-    ``tracers_hat`` is the tracer DENSITY rho*q (units ``kg/m^3``)."""
+    """Refuse a state not in the current mass encoding: ``rho_prime_hat`` =
+    J*rho' and ``tracers_hat`` = J*rho*q (units ``kg/m^3``), marked by their
+    Field names.  A state from an older encoding is refused rather than
+    silently mis-read (over terrain an unweighted rho' would be divided by J
+    again); migrate it by synthesizing rho' and rho*q to the grid,
+    multiplying by J and analysing back."""
+    if state.rho_prime_hat.units != "kg/m^3":
+        raise ValueError(
+            "spectral NH rho_prime_hat must be J*rho' in 'kg/m^3', got "
+            f"units {state.rho_prime_hat.units!r}")
     if state.tracers_hat.units != "kg/m^3":
         raise ValueError(
-            "spectral NH tracers_hat must be tracer density rho*q "
-            f"(units 'kg/m^3'), got units {state.tracers_hat.units!r}")
+            "spectral NH tracers_hat must be the J-weighted tracer density "
+            f"J*rho*q (units 'kg/m^3'), got units {state.tracers_hat.units!r}")
+    if (state.rho_prime_hat.name != _JRHO_NAME
+            or state.tracers_hat.name != _JRQ_NAME):
+        raise ValueError(
+            "spectral NH state is not in the J-weighted mass encoding "
+            f"(Field names {_JRHO_NAME!r}, {_JRQ_NAME!r}); got "
+            f"{state.rho_prime_hat.name!r}, {state.tracers_hat.name!r}.  "
+            "Migrate: grid rho' and rho*q times J, analysed back.")
 
 
 def _tracer_vertical_transport(rq, rho_total, mass_flux, dz, jacobian):
@@ -746,6 +778,75 @@ def _tracer_vertical_transport(rq, rho_total, mass_flux, dz, jacobian):
     fq = jnp.pad(f * q_up, (*pad, (1, 1), (0, 0)))
     return rq - (fq[..., :-1, :] - fq[..., 1:, :]) / (
         dz[:, None] * jacobian[..., None, None])
+
+
+def mixing_ratio_physics_adapter(legacy_physics_fn):
+    """Explicit opt-in wrapper for a ``physics_fn`` written for the former
+    spectral-NH convention: it receives a state whose ``rho_prime_hat`` is
+    the UNWEIGHTED rho' and whose ``tracers_hat`` are mixing ratios q
+    (units ``kg/kg``), and returns ``drho'/dt`` and ``dq/dt``.
+
+    The wrapper builds that view from the J-weighted prognostics
+    (rho' = (J rho')/J, q = (J rho q)/(J rho) on the Gaussian grid, analysed
+    back to spectral; the view's q is therefore the spectral projection of
+    the grid q), calls the legacy function, and converts its tendencies to
+    the prognostic ones using the CURRENT rho and q:
+
+        d(J rho')/dt  = J * drho'/dt
+        d(J rho q)/dt = J * (rho * dq/dt + q * drho'/dt)
+
+    Vorticity, divergence and theta' tendencies pass through unchanged; a
+    ``(tendencies, diagnostics)`` tuple return is preserved.  The
+    ``_requires_phys_state`` tag of a stateful legacy function is still
+    found through ``__wrapped__`` (``functools.wraps``).
+    """
+    import functools
+
+    @functools.wraps(legacy_physics_fn)
+    def physics_fn(state, grid, height_coord, terrain_metric):
+        _require_tracer_density(state)      # decode only the current encoding
+        J = terrain_metric.jacobian
+        n_sh, nlev, n_tr = state.tracers_hat.data.shape
+        theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
+        rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data) / J[..., None]
+        _, rho = sanitize_theta_rho(height_coord.theta_ref + theta_p,
+                                    height_coord.rho_ref + rho_p)
+        rq = sh_synthesis_3d(
+            grid, state.tracers_hat.data.reshape(n_sh, nlev * n_tr),
+        ).reshape(grid.n_lat, grid.n_lon, nlev, n_tr) / J[..., None, None]
+        q = rq / rho[..., None]
+        view = state._replace(           # legacy encoding + metadata
+            rho_prime_hat=state.rho_prime_hat.replace(
+                data=sh_analysis_3d(grid, rho_p), name="rho_prime_hat"),
+            tracers_hat=state.tracers_hat.replace(
+                data=sh_analysis_3d(
+                    grid, q.reshape(grid.n_lat, grid.n_lon, nlev * n_tr),
+                ).reshape(n_sh, nlev, n_tr),
+                name="tracers_hat", units="kg/kg"),
+        )
+        result = legacy_physics_fn(view, grid, height_coord, terrain_metric)
+        is_tuple = (not isinstance(result, SpectralNHState)
+                    and isinstance(result, tuple))
+        tend = result[0] if is_tuple else result
+        drho = sh_synthesis_3d(grid, tend.rho_prime_hat.data)
+        dq = sh_synthesis_3d(
+            grid, tend.tracers_hat.data.reshape(n_sh, nlev * n_tr),
+        ).reshape(grid.n_lat, grid.n_lon, nlev, n_tr)
+        d_jrq = J[..., None, None] * (rho[..., None] * dq
+                                      + q * drho[..., None])
+        tend = tend._replace(            # back to the J-weighted encoding
+            rho_prime_hat=tend.rho_prime_hat.replace(
+                data=sh_analysis_3d(grid, J[..., None] * drho),
+                name=_JRHO_NAME, units="kg/m^3"),
+            tracers_hat=tend.tracers_hat.replace(
+                data=sh_analysis_3d(
+                    grid, d_jrq.reshape(grid.n_lat, grid.n_lon, nlev * n_tr),
+                ).reshape(n_sh, nlev, n_tr),
+                name=_JRQ_NAME, units="kg/m^3"),
+        )
+        return (tend,) + tuple(result[1:]) if is_tuple else tend
+
+    return physics_fn
 
 
 # =============================================================================
@@ -832,13 +933,15 @@ class SpectralCompressibleEulerModel:
         self._target_mass = target_mass
 
     def compute_dry_mass(self, state) -> jax.Array:
-        """Global dry mass ``∫ J · (rho_ref + rho') · dz · dA`` (fp64)."""
-        rho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)
-        rho_total = self.height_coord.rho_ref + rho_p_grid  # (n_lat, n_lon, nlev)
+        """Global dry mass ``∫ (J · rho_ref + J rho') · dz · dA`` (fp64);
+        ``rho_prime_hat`` is the J-weighted J*rho'."""
+        _require_tracer_density(state)
+        jrho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)
         J = self.terrain_metric.jacobian                    # (n_lat, n_lon)
         dz = self.height_coord.dz                           # (nlev,)
         col_mass = jnp.sum(
-            J[..., None] * rho_total * dz[None, None, :], axis=-1,
+            (J[..., None] * self.height_coord.rho_ref + jrho_p_grid)
+            * dz[None, None, :], axis=-1,
         )                                                   # (n_lat, n_lon)
         acc = jnp.float64
         return jnp.sum(
@@ -846,34 +949,36 @@ class SpectralCompressibleEulerModel:
         )
 
     def compute_tracer_mass(self, state) -> jax.Array:
-        """Global tracer mass ``∫ J · (rho q) · dz · dA`` per tracer (fp64).
+        """Global tracer mass ``∫ (J rho q) · dz · dA`` per tracer (fp64).
 
-        ``tracers_hat`` is the tracer density, so this is the conserved
-        budget quantity (e.g. total water = sum over q_v, q_c, q_r).
+        ``tracers_hat`` is the J-weighted tracer density J*rho*q, so this
+        is the conserved budget quantity (e.g. total water = sum over q_v,
+        q_c, q_r).
         """
         _require_tracer_density(state)
         n_sh, nlev, n_tr = state.tracers_hat.data.shape
-        rq = sh_synthesis_3d(
+        jrq = sh_synthesis_3d(
             self.grid, state.tracers_hat.data.reshape(n_sh, nlev * n_tr),
         ).reshape(self.grid.n_lat, self.grid.n_lon, nlev, n_tr)
-        w = (self.terrain_metric.jacobian[..., None]
-             * self.height_coord.dz[None, None, :])
+        w = jnp.broadcast_to(self.height_coord.dz,
+                             (self.grid.n_lat, self.grid.n_lon, nlev))
         acc = jnp.float64
         return jnp.einsum(
-            "ijkt,ijk,ij->t", rq.astype(acc), w.astype(acc),
+            "ijkt,ijk,ij->t", jrq.astype(acc), w.astype(acc),
             self.grid.grid_area.astype(acc),
         )
 
     def _apply_mass_fixer(self, state, target_mass=None):
-        """Anchor ``∫ J · (rho_ref + rho') · dz · dA`` to ``target_mass``
+        """Anchor ``∫ (J · rho_ref + J rho') · dz · dA`` to ``target_mass``
         (falls back to ``self._target_mass`` for the eager call sites).
 
-        Uniform additive correction in physical space (matches the
-        cubed-sphere / MPAS ``fix_mass_nonhydrostatic`` convention):
-        ``Δρ = (target − current) / (∫ J · dz · dA)``.  Adding ``Δρ`` to
-        ``rho'`` in physical space is equivalent to adding
-        ``Δρ · sqrt(4π)`` to ``rho_prime_hat[0, :]`` (the (n=0,m=0) row),
-        broadcast across all vertical levels.
+        Uniform additive correction of the J-weighted prognostic J*rho':
+        ``Δ = (target − current) / (∫ dz · dA)``.  Adding ``Δ`` to J*rho'
+        in physical space is equivalent to adding ``Δ · sqrt(4π)`` to
+        ``rho_prime_hat[0, :]`` (the (n=0,m=0) row), broadcast across all
+        vertical levels (rho' itself changes by Δ/J; flat terrain: the
+        former cubed-sphere / MPAS ``fix_mass_nonhydrostatic`` convention,
+        bit-identically).
 
         Only rho' is corrected: the tracer DENSITY (tracer mass) is left
         untouched, so tracer mass stays conserved and the recovered mixing
@@ -881,19 +986,19 @@ class SpectralCompressibleEulerModel:
         fixer applies a finite correction (rescaling rho*q with it would
         create or destroy tracer mass).
         """
-        rho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)
-        rho_total = self.height_coord.rho_ref + rho_p_grid
+        jrho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)
         J = self.terrain_metric.jacobian
         dz = self.height_coord.dz
         col_mass = jnp.sum(
-            J[..., None] * rho_total * dz[None, None, :], axis=-1,
+            (J[..., None] * self.height_coord.rho_ref + jrho_p_grid)
+            * dz[None, None, :], axis=-1,
         )
         if target_mass is None:
             target_mass = self._target_mass
         acc = jnp.float64
         area_acc = self.grid.grid_area.astype(acc)
         current_mass = jnp.sum(col_mass.astype(acc) * area_acc)
-        total_vol = jnp.sum(J.astype(acc) * area_acc) * jnp.sum(dz.astype(acc))
+        total_vol = jnp.sum(area_acc) * jnp.sum(dz.astype(acc))
         delta_rho = (target_mass - current_mass) / total_vol
         sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
         rho_hat = state.rho_prime_hat.data
@@ -916,9 +1021,13 @@ class SpectralCompressibleEulerModel:
         ``(tendencies, diagnostics)`` tuple return.  Only the ``vor_hat``,
         ``div_hat``, ``theta_prime_hat``, ``rho_prime_hat`` and
         ``tracers_hat`` tendencies are applied; ``w_hat`` and ``phis_hat``
-        of the returned state are not read.  The ``tracers_hat`` tendency is
-        the tracer-DENSITY tendency ``d(rho q)/dt`` [kg/m^3/s] (for physics
-        that leaves rho unchanged, ``rho * dq/dt``), not ``dq/dt``.
+        of the returned state are not read.  Tendencies are for the
+        PROGNOSTIC variables: ``rho_prime_hat`` -> ``d(J rho')/dt`` and
+        ``tracers_hat`` -> ``d(J rho q)/dt`` [kg/m^3/s] (for physics that
+        leaves rho unchanged, ``J * rho * dq/dt``), not ``dq/dt``; the
+        state it receives is J-weighted too.  Physics written for the
+        former convention (q and unweighted rho' in, ``dq/dt`` out) is run
+        through :func:`mixing_ratio_physics_adapter`.
         """
         def slow_tendency_fn(s):
             phys = None
@@ -949,8 +1058,10 @@ class SpectralCompressibleEulerModel:
                 axis=-1,
             )  # (n_sh, 2*nlev + (nlev+1))
             theta_rho_w_grid = sh_synthesis_3d(self.grid, theta_rho_w_hat)
+            J = self.terrain_metric.jacobian
             theta_p_grid = theta_rho_w_grid[..., :nlev_a]
-            rho_p_grid = theta_rho_w_grid[..., nlev_a:2 * nlev_a]
+            # Prognostic is J*rho'; the acoustic solver works on rho'.
+            rho_p_grid = theta_rho_w_grid[..., nlev_a:2 * nlev_a] / J[..., None]
             w_grid = theta_rho_w_grid[..., 2 * nlev_a:]
 
             # Run acoustic substeps in grid space
@@ -974,7 +1085,8 @@ class SpectralCompressibleEulerModel:
             n_tr = tr_hat.shape[-1]
             rq = sh_synthesis_3d(
                 self.grid, tr_hat.reshape(n_sh_a, nlev_a * n_tr),
-            ).reshape(self.grid.n_lat, self.grid.n_lon, nlev_a, n_tr)
+            ).reshape(self.grid.n_lat, self.grid.n_lon, nlev_a, n_tr) / J[
+                ..., None, None]                               # rho*q
             _, rho_stage = sanitize_theta_rho(
                 self.height_coord.theta_ref + theta_p_grid,
                 self.height_coord.rho_ref + rho_p_grid,
@@ -985,15 +1097,15 @@ class SpectralCompressibleEulerModel:
             )
             tr_hat_new = sh_analysis_3d(
                 self.grid,
-                rq_new.reshape(self.grid.n_lat, self.grid.n_lon,
-                               nlev_a * n_tr),
+                (rq_new * J[..., None, None]).reshape(
+                    self.grid.n_lat, self.grid.n_lon, nlev_a * n_tr),
             ).reshape(n_sh_a, nlev_a, n_tr)
 
             # Convert back to spectral via the same concat trick — 3 SH
             # analyses → 1.  Slot order matches the synthesis so we can
             # slice the result back into (theta_hat, rho_hat, w_hat).
             theta_rho_w_new = jnp.concatenate(
-                [theta_p_new, rho_p_new, w_new], axis=-1,
+                [theta_p_new, rho_p_new * J[..., None], w_new], axis=-1,
             )  # (n_lat, n_lon, 2*nlev + (nlev+1))
             theta_rho_w_new_hat = sh_analysis_3d(self.grid, theta_rho_w_new)
             theta_p_new_hat = theta_rho_w_new_hat[..., :nlev_a]
@@ -1278,11 +1390,11 @@ def dcmip25_tc1_init_spectral(
             data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K",
         ),
         rho_prime_hat=Field(
-            data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3",
+            data=rho_p_hat, name=_JRHO_NAME, dims=dims_3d, units="kg/m^3",
         ),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
         tracers_hat=Field(
-            data=tracers_hat, name="tracers_hat", dims=dims_tr, units="kg/m^3",
+            data=tracers_hat, name=_JRQ_NAME, dims=dims_tr, units="kg/m^3",
         ),
     )
 
@@ -1322,11 +1434,11 @@ def nh_rest_state_spectral(
             data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K",
         ),
         rho_prime_hat=Field(
-            data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3",
+            data=rho_p_hat, name=_JRHO_NAME, dims=dims_3d, units="kg/m^3",
         ),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
         tracers_hat=Field(
-            data=tracers_hat, name="tracers_hat", dims=dims_tr, units="kg/m^3",
+            data=tracers_hat, name=_JRQ_NAME, dims=dims_tr, units="kg/m^3",
         ),
     )
 
@@ -1434,9 +1546,9 @@ def dcmip25_tc2_init_spectral(
         div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
         w_hat=Field(data=w_hat, name="w_hat", dims=dims_w, units="m/s"),
         theta_prime_hat=Field(data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K"),
-        rho_prime_hat=Field(data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3"),
+        rho_prime_hat=Field(data=rho_p_hat, name=_JRHO_NAME, dims=dims_3d, units="kg/m^3"),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
-        tracers_hat=Field(data=tracers_hat, name="tracers_hat", dims=dims_tr, units="kg/m^3"),
+        tracers_hat=Field(data=tracers_hat, name=_JRQ_NAME, dims=dims_tr, units="kg/m^3"),
     ), height_coord, terrain_metric
 
 
@@ -1444,11 +1556,24 @@ def dcmip25_tc3_init_spectral(
     grid: GaussianGrid,
     n_levels: int = 40,
     params: dict | None = None,
+    balanced: bool = True,
 ) -> tuple['SpectralNHState', HeightCoordinate, 'TerrainMetric']:
     """Initialize DCMIP-2025 TC3 (squall line) on Gaussian grid.
 
     Wind shear, moisture, and warm bubbles on a small Earth (radius/60).
     Transforms to spectral space.
+
+    ``balanced=True`` (default): the Klemp et al. (2015) / DCMIP2016
+    reduced-radius construction -- zonal wind ``u = u_eq(z) cos(lat)`` and
+    theta', rho' in hydrostatic + cyclostrophic balance
+    (:func:`~legoesm.atmosphere.dynamics.gcm.dcmip2025_ic.cyclostrophic_balance_theta_exner`),
+    with the sounding as the equatorial profile.  ``balanced=False``: the
+    former IC shared with the cube / MPAS arms -- latitude-independent
+    ``u = u_eq(z)`` with rho' = theta' = 0, which no pressure field can
+    balance near the poles (u^2 tan(lat)/a diverges) and on the radius/60
+    sphere drove polar |w| to 3.3 m/s in 4 min at T21 (vs <0.1 m/s at the
+    bubbles).  The warm bubbles are added to theta' at fixed rho' in both
+    cases (as in the other arms).
 
     Parameters
     ----------
@@ -1487,6 +1612,8 @@ def dcmip25_tc3_init_spectral(
 
     u_profile = p["U_c"] + p["U_s"] * jnp.minimum(z_full / p["z_s"], 1.0)
     u_grid = jnp.ones((n_lat, n_lon, nlev), dtype=jnp.float64) * u_profile[None, None, :]
+    if balanced:
+        u_grid = u_grid * small_grid.cos_lat[:, None, None]
     v_grid = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)
 
     a_rad = small_grid.radius
@@ -1503,7 +1630,31 @@ def dcmip25_tc3_init_spectral(
 
     n_sh = small_grid.n_sh
     w_hat = jnp.zeros((n_sh, nlev + 1), dtype=jnp.complex128)
-    rho_p_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
+    if balanced:
+        from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (
+            cyclostrophic_balance_theta_exner,
+        )
+        th_bal, ex_bal = cyclostrophic_balance_theta_exner(
+            small_grid.lat, z_full, height_coord.theta_ref,
+            height_coord.exner_ref, u_profile)
+        th_bal = jnp.asarray(th_bal)                     # (n_lat, nlev)
+        ex_bal = jnp.asarray(ex_bal)
+        theta_bal_p = th_bal - height_coord.theta_ref[None, :]
+        # rho from the equation of state exner = (R_d rho theta/p0)^(R_d/c_v),
+        # as a ratio to the reference (exact zero at the equator).
+        rho_bal_p = height_coord.rho_ref[None, :] * (
+            (ex_bal / height_coord.exner_ref[None, :])
+            ** (constants.c_vd / constants.R_d)
+            * height_coord.theta_ref[None, :] / th_bal - 1.0)
+        ones = jnp.ones((1, n_lon, 1))
+        theta_bal_p = theta_bal_p[:, None, :] * ones     # (n_lat, n_lon, nlev)
+        rho_bal_p = rho_bal_p[:, None, :] * ones
+    else:
+        theta_bal_p = jnp.zeros((n_lat, n_lon, nlev))
+        rho_bal_p = jnp.zeros((n_lat, n_lon, nlev))
+    # Prognostic is J*rho' (flat here, J = 1).
+    rho_p_hat = sh_analysis_3d(
+        small_grid, terrain_metric.jacobian[..., None] * rho_bal_p)
 
     RH_profile = jnp.clip(
         p["RH_low"] * jnp.exp(-z_full / p["RH_transition_z"]),
@@ -1531,13 +1682,14 @@ def dcmip25_tc3_init_spectral(
         theta_pert = theta_pert + p["bubble_dtheta"] * jnp.where(
             r_norm <= 1.0, jnp.cos(0.5 * jnp.pi * r_norm) ** 2, 0.0)
 
-    theta_p_hat = sh_analysis_3d(small_grid, theta_pert)
-    # Prognostic tracer = density rho*q; rho' = 0 here so rho = rho_ref.
-    rho_ref_3d = height_coord.rho_ref[None, None, :]
+    theta_p_hat = sh_analysis_3d(small_grid, theta_bal_p + theta_pert)
+    # Prognostic tracer = J * rho * q with the (balanced) total rho; J = 1.
+    jrho_3d = terrain_metric.jacobian[..., None] * (
+        height_coord.rho_ref[None, None, :] + rho_bal_p)
     tracers_hat = jnp.stack([
-        sh_analysis_3d(small_grid, rho_ref_3d * q_v_grid),
-        sh_analysis_3d(small_grid, rho_ref_3d * q_c_grid),
-        sh_analysis_3d(small_grid, rho_ref_3d * q_r_grid),
+        sh_analysis_3d(small_grid, jrho_3d * q_v_grid),
+        sh_analysis_3d(small_grid, jrho_3d * q_c_grid),
+        sh_analysis_3d(small_grid, jrho_3d * q_r_grid),
     ], axis=-1)
     phis_hat = jnp.zeros(n_sh, dtype=jnp.complex128)
 
@@ -1551,7 +1703,7 @@ def dcmip25_tc3_init_spectral(
         div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
         w_hat=Field(data=w_hat, name="w_hat", dims=dims_w, units="m/s"),
         theta_prime_hat=Field(data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K"),
-        rho_prime_hat=Field(data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3"),
+        rho_prime_hat=Field(data=rho_p_hat, name=_JRHO_NAME, dims=dims_3d, units="kg/m^3"),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
-        tracers_hat=Field(data=tracers_hat, name="tracers_hat", dims=dims_tr, units="kg/m^3"),
+        tracers_hat=Field(data=tracers_hat, name=_JRQ_NAME, dims=dims_tr, units="kg/m^3"),
     ), height_coord, terrain_metric
