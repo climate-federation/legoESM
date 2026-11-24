@@ -55,3 +55,25 @@ def test_nonfinite_run_fails():
 def test_zero_reference_field_raises():
     with pytest.raises(ValueError, match="identically zero"):
         acc.relative_rms(np.ones(3), np.zeros(3))
+
+
+def test_budget_violations_fail_even_with_matching_fields():
+    """Planted violations: fields within thresholds, but water removed or dry
+    mass shifted beyond the budget bars must fail."""
+    rho_ref, dz = np.array([1.0, 0.8, 0.6]), np.array([100.0, 100.0, 100.0])
+    ref = _ckpt()
+    dry = dict(ref, tracers=np.zeros_like(ref["tracers"]))
+    res = acc.compare(ref, dry, rho_ref, dz)
+    assert res["water_rel_diff"] == pytest.approx(-1.0) and not res["pass"]
+    wet = dict(ref, tracers=ref["tracers"] * (1.0 + 1e-7))
+    assert not acc.compare(ref, wet, rho_ref, dz)["pass"]
+    shifted = dict(ref, rho_prime=ref["rho_prime"] + 1e-9)
+    res = acc.compare(ref, shifted, rho_ref, dz)
+    assert abs(res["dry_mass_rel_diff"]) > 1e-11 and not res["pass"]
+
+
+def test_run_geometry_is_used_for_the_run_budgets():
+    rho_ref, dz = np.array([1.0, 0.8, 0.6]), np.array([100.0, 100.0, 100.0])
+    ref = _ckpt()
+    res = acc.compare(ref, ref, rho_ref, dz, run_geometry=(rho_ref * 2.0, dz))
+    assert res["dry_mass_rel_diff"] > 0.5
