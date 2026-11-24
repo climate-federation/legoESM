@@ -256,6 +256,49 @@ def tracer_tendencies_spectral(
     )
 
 
+def tracer_tendencies_spectral_mass_flux(
+    state: TracerState,
+    grid: GaussianGrid,
+    mass_flux,
+    mask: jax.Array,
+) -> TracerState:
+    """Flux-form tendency of the layer tracer mass ``Q = dp q`` (state
+    coefficients, Orszag band) on the steady band-limited air mass ``dp`` of
+    :func:`legoesm.atmosphere.dynamics.gcm.consistent_mass_flux.
+    consistent_mass_flux_spectral`::
+
+        dQ_hat/dt = mask (-div_hat(F q) - analysis(g_{k+1/2} - g_{k-1/2}))
+
+    ``q = Q / dp`` on the grid, ``div_hat`` the same Bourke transform
+    divergence as the advective path, ``g`` the donor-cell vertical flux of
+    the interface air flux ``W`` (positive down; nonzero at the top/surface = open).  With
+    ``mask (div_hat F + analysis(delta W)) = 0`` a uniform ``q`` stays
+    uniform; the global tracer mass is the (0,0) coefficient, which the
+    divergence never changes, so ``sum area dp q`` changes only by the
+    tracer flux through an open top or surface."""
+    from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+        donor_cell_vertical_flux, spectral_flux_divergence_hat)
+    t = state.time.data
+    q_hat = state.tracers.data
+    n_sh, nlev, ntr = q_hat.shape
+    qm = sh_synthesis_3d(grid, q_hat.reshape(n_sh, nlev * ntr)).reshape(
+        grid.n_lat, grid.n_lon, nlev, ntr)
+    q = qm / mass_flux.dp[..., None]
+    fu, fv = mass_flux.flux_h
+    q_flat = q.reshape(grid.n_lat, grid.n_lon, nlev * ntr)
+    if ntr > 1:
+        fu, fv = jnp.repeat(fu, ntr, axis=-1), jnp.repeat(fv, ntr, axis=-1)
+    div_hat = spectral_flux_divergence_hat(grid, q_flat * fu, q_flat * fv)
+    g = donor_cell_vertical_flux(q, mass_flux.w)
+    vert_hat = sh_analysis_3d(grid, (g[..., 1:, :] - g[..., :-1, :]).reshape(
+        grid.n_lat, grid.n_lon, nlev * ntr))
+    dq_hat = -(div_hat + vert_hat) * mask[:, None]
+    return TracerState(
+        tracers=state.tracers.replace(data=dq_hat.reshape(n_sh, nlev, ntr)),
+        time=state.time.replace(data=jnp.ones_like(t)),
+    )
+
+
 class SpectralTracerTransportModel(IntegrationMixin):
     """Prescribed-wind tracer transport on the spectral Gaussian grid.
 
@@ -283,6 +326,14 @@ class SpectralTracerTransportModel(IntegrationMixin):
     config : TracerTransportSpectralConfig, optional
     allow_unsupported_backend : bool
         Forwarded to ``place_spectral_grid`` (Metal opt-out escape hatch).
+    mass_flux : PrescribedMassFlux, optional
+        Steady consistent air fluxes (``consistent_mass_flux_spectral`` with
+        this model's dealiasing mask): the state then carries the layer
+        tracer MASS ``dp q`` (use :meth:`state_from_grid` /
+        :meth:`grid_values`) and steps
+        :func:`tracer_tendencies_spectral_mass_flux` (``wind_fn`` unused);
+        needs ``vertical_scheme="upwind"``, no hyperdiffusion and a
+        dealiasing mask.  ``None`` (default): unchanged.
     """
 
     def __init__(
@@ -293,9 +344,19 @@ class SpectralTracerTransportModel(IntegrationMixin):
         config: TracerTransportSpectralConfig | None = None,
         *,
         allow_unsupported_backend: bool = False,
+        mass_flux=None,
     ):
         self.config = config or TracerTransportSpectralConfig()
         check_tracer_vertical_scheme(self.config.vertical_scheme)
+        if mass_flux is not None and (self.config.vertical_scheme != "upwind"
+                                      or self.config.hyperdiff_coeff != 0.0
+                                      or self.config.dealiasing_fraction <= 0.0):
+            raise ValueError("mass_flux needs vertical_scheme='upwind', "
+                             "hyperdiff_coeff=0 and dealiasing_fraction > 0")
+        self.mass_flux = mass_flux
+        # (after the grid placement below) the fluxes must close THIS model's
+        # band: a builder mask differing from the model's leaves an unbalanced
+        # divergence that moves a uniform tracer
         # step() is not jitted (Metal CPU routing); jit the remap once so
         # its k-scans are not re-traced every step.
         self._remap_jit = jax.jit(
@@ -315,8 +376,47 @@ class SpectralTracerTransportModel(IntegrationMixin):
             )
         else:
             self._dealias_state = None
+        if mass_flux is not None:
+            from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+                continuity_residual_spectral)
+            if not bool(jnp.all(jnp.isfinite(mass_flux.dp)) and jnp.all(mass_flux.dp > 0)):
+                raise ValueError("mass_flux.dp must be finite and strictly positive")
+            rate = jnp.max(jnp.abs(continuity_residual_spectral(
+                mass_flux, self.grid, self._dealias_state)) / mass_flux.dp)
+            # 1e-15 /s: q = 1 kept to <= 1e-12 over a 1000 s step
+            if not float(rate) <= 1.0e-15:
+                raise ValueError(f"mass_flux does not close this model's spectral band "
+                                 f"(relative air-mass tendency {float(rate):.2e} /s): build "
+                                 "it with the model's dealiasing mask")
+            # and its air mass must lie in the band (q = 1 representable)
+            dp_band = sh_synthesis_3d(self.grid, self._dealias_state[:, None]
+                                      * sh_analysis_3d(self.grid, mass_flux.dp))
+            off = float(jnp.max(jnp.abs(dp_band - mass_flux.dp) / mass_flux.dp))
+            if not off <= 1.0e-12:
+                raise ValueError(f"mass_flux.dp is not in this model's spectral band "
+                                 f"(relative out-of-band part {off:.2e}): build it with "
+                                 "the model's dealiasing mask")
+
+    def state_from_grid(self, q_grid: jax.Array, time: float = 0.0) -> TracerState:
+        """Truncated model state from grid tracers ``q`` (n_lat, n_lon, nlev,
+        ntr): the coefficients of ``q`` (default) or, with ``mass_flux``, of
+        the layer tracer mass ``dp q``."""
+        if self.mass_flux is not None:
+            q_grid = q_grid * self.mass_flux.dp[..., None]
+        return self._truncate(spectral_tracer_state(self.grid, q_grid, time))
+
+    def grid_values(self, state: TracerState) -> jax.Array:
+        """Grid tracers ``q`` of a state (the grid values of the retained,
+        truncated state built by :meth:`state_from_grid`)."""
+        q = spectral_tracer_grid_values(self.grid, state)
+        if self.mass_flux is not None:
+            q = q / self.mass_flux.dp[..., None]
+        return q
 
     def tendencies(self, state: TracerState) -> TracerState:
+        if self.mass_flux is not None:
+            return tracer_tendencies_spectral_mass_flux(
+                state, self.grid, self.mass_flux, self._dealias_state)
         return tracer_tendencies_spectral(
             state, self.grid, self.sigma_coord, self.wind_fn, self.config,
         )
@@ -334,6 +434,9 @@ class SpectralTracerTransportModel(IntegrationMixin):
         """Advance one time step (CPU-routed on Metal, then truncated)."""
 
         def tendency_fn(s):
+            if self.mass_flux is not None:
+                return tracer_tendencies_spectral_mass_flux(
+                    s, self.grid, self.mass_flux, self._dealias_state)
             return tracer_tendencies_spectral(
                 s, self.grid, self.sigma_coord, self.wind_fn, self.config,
             )

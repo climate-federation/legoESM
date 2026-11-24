@@ -4747,6 +4747,154 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 # Runner: DCMIP Transport
 # ===========================================================================
 
+# DCMIP 1-3 acceptance criteria (codex-voted user decision 2026-11-24):
+# thresholds of the per-row audit below.
+_DCMIP13_CLOSURE_TOL = 1.0e-6    # max |continuity residual| * period / dp
+_DCMIP13_UNIFORM_TOL = 1.0e-12   # max |q - 1| after one step from q = 1
+_DCMIP13_MASS_TOL = 1.0e-12      # |global tracer mass rel change| (RULE 0)
+_DCMIP13_CROSS_TOL = 0.5         # cloud height shift / terrain shift under it
+_DCMIP13_TERRAIN_MIN_M = 50.0    # terrain shift below which crossing is untested
+
+
+def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
+                   snapshots, to_grid, area, dt, period_s, mass_samples=(),
+                   full_period=False):
+    """DCMIP 1-3 acceptance criteria with the row's own discrete fluxes.
+
+    Returns ``(notes, failed)``.  The analytic 1-3 atmosphere has ``p_s =
+    p0 exp(-z_s/H)`` and ``z = z_s - H ln(sigma)``; its flow is horizontal
+    at fixed HEIGHT, so tracers must cross sigma surfaces over the terrain.
+    Every 1-3 row (lat-lon, MPAS, spectral) transports in flux form on the
+    steady air mass ``dp`` with the consistent air fluxes
+    ``model.mass_flux`` (``consistent_mass_flux``).
+
+    * local air-mass closure: ``max |div F_k + delta W_k| / dp * period``
+      with the core's own divergence (the relative layer-mass drift those
+      fluxes would accumulate).
+    * uniform-tracer preservation: one model step from q = 1 (a round-off
+      check).
+    * global tracer conservation: ``sum area dp q`` with the model's own
+      air mass (lat-lon/MPAS ``p_s(z_s) dsigma``, spectral its Orszag-band
+      ``p_s``; MPAS the state's prognostic ``dp``), every tracer at every
+      diagnostic sample.
+    * terrain crossing: q1-weighted mean height ``z`` of the cloud and mean
+      terrain ``z_s`` under it at every saved snapshot; at the snapshot of
+      largest terrain shift the ratio (cloud height shift / terrain shift)
+      is ~0 when the cloud keeps its height (crosses sigma surfaces, the
+      DCMIP design) and ~1 when it follows sigma surfaces.
+
+    A measured failure is returned in ``failed`` (the caller fails the
+    row); a run whose cloud has not met the terrain (shift under 50 m) gets
+    an "AUDIT INCOMPLETE" note instead, and fails only if it covered the
+    ``full_period``."""
+    from legoesm.atmosphere.dynamics.gcm import consistent_mass_flux as cmf
+    from tests.test_cases.dcmip_transport import _H, _mountain_height
+    notes, failed = [], []
+    mf = model.mass_flux
+    if tc.grid_type == "icosahedral":
+        lon, lat = grid.lonCell, grid.latCell
+        resid = cmf.continuity_residual_mpas(mf, grid)
+    elif tc.grid_type == "latlon":
+        lon, lat = grid.lon2d, grid.lat2d
+        resid = cmf.continuity_residual_latlon(mf, grid)
+    else:
+        lon, lat = grid.lon2d, grid.lat2d
+        resid = cmf.continuity_residual_spectral(mf, grid, model._dealias_state)
+    zs = np.asarray(_mountain_height(lon, lat), np.float64)
+    sig = np.asarray(sigma_coord.sigma_full, np.float64)
+    w = np.asarray(area, np.float64)[..., None] * np.asarray(mf.dp, np.float64)
+
+    # local air-mass closure
+    drift = float(np.max(np.abs(np.asarray(resid, np.float64))
+                         / np.asarray(mf.dp, np.float64)) * period_s)
+    notes.append(f"air-mass closure drift {drift:.3e} (|W| mean removed "
+                 f"{float(np.max(np.abs(np.asarray(mf.w_mean_removed)))):.2e} Pa/s)")
+    if not drift <= _DCMIP13_CLOSURE_TOL:          # NaN fails too
+        failed.append(f"local air-mass closure (drift {drift:.3e} > {_DCMIP13_CLOSURE_TOL:g})")
+
+    # uniform-tracer preservation (one step from q = 1)
+    ones = jnp.ones_like(to_grid(state_init).tracers.data)
+    if tc.grid_type == "spectral":
+        st_u = model.state_from_grid(ones)
+    else:
+        st_u = state_init._replace(tracers=state_init.tracers.replace(data=ones))
+    q_u = np.asarray(to_grid(model.step(st_u, dt)).tracers.data, np.float64)
+    unif = float(np.max(np.abs(q_u - 1.0))) if np.all(np.isfinite(q_u)) else float("nan")
+    notes.append(f"uniform-tracer max|q-1| {unif:.3e}")
+    if not unif <= _DCMIP13_UNIFORM_TOL:              # NaN fails too
+        failed.append(f"uniform-tracer preservation (max|q-1| {unif:.3e})")
+
+    # global tracer conservation with the model's air mass, every tracer at
+    # every diagnostic sample (mass_samples, recorded during the run)
+    def _m(s):
+        q = np.asarray(to_grid(s).tracers.data, np.float64)
+        ww = (np.asarray(area, np.float64)[..., None] * np.asarray(s.air_mass.data, np.float64)
+              if hasattr(s, "air_mass") else w)
+        return (ww[..., None] * q).reshape(-1, q.shape[-1]).sum(axis=0)
+    m0, m1 = _m(state_init), _m(state_final)
+    rel = np.where(m0 != 0, (m1 - m0) / np.where(m0 != 0, m0, 1.0), np.nan)
+    samp = np.asarray(list(mass_samples), np.float64).reshape(-1, m0.size)
+    if samp.size and np.all(m0 != 0) and np.all(np.isfinite(samp)):
+        dev = np.abs(samp / m0 - 1.0)
+        k_w, t_w = np.unravel_index(int(np.argmax(dev)), dev.shape)
+        peak, peak_txt = float(dev[k_w, t_w]), (
+            f"peak over {samp.shape[0]} samples q{t_w + 1} {dev[k_w, t_w]:.3e} "
+            f"(sample {k_w})")
+    else:
+        peak, peak_txt = float("nan"), "peak over samples unavailable"
+    worst = float(np.max(np.abs(np.append(rel, peak))))
+    notes.append("mass[q dp] rel " + ", ".join(
+        f"q{i + 1} {r:+.3e}" for i, r in enumerate(rel)) + ", " + peak_txt)
+    if not worst <= _DCMIP13_MASS_TOL:            # NaN (zero mass) fails too
+        failed.append(f"global tracer conservation (max |rel| {worst:.3e})")
+    # tracer that numerical mixing carried into the top / surface layers
+    # (the analytic clouds never reach them; with the h0 <= z <= z_top flow
+    # no air crosses those boundaries, so it cannot leave)
+    qf = np.asarray(to_grid(state_final).tracers.data, np.float64)
+    wf = (np.asarray(area, np.float64)[..., None] * np.asarray(state_final.air_mass.data, np.float64)
+          if hasattr(state_final, "air_mass") else w)
+    edge = (wf[..., [0, -1], None] * qf[..., [0, -1], :]).reshape(-1, qf.shape[-1]).sum(axis=0)
+    notes.append("final tracer mass in the top+surface layers / M0 " + ", ".join(
+        f"q{i + 1} {e:.2e}" for i, e in enumerate(edge / np.where(m0 != 0, m0, np.nan))))
+
+    # terrain crossing from the saved q1 snapshots
+    z = zs[..., None] - _H * np.log(sig)
+    zbar, zsbar = [], []
+    for step in sorted(snapshots):
+        qq = np.asarray(snapshots[step]["q1_3d"], np.float64) * w     # signed q1 weights
+        tot = qq.sum() if qq.sum() > 0 else np.nan     # empty cloud -> non-finite
+        zbar.append(float((qq * z).sum() / tot))
+        zsbar.append(float((qq * zs[..., None]).sum() / tot))
+    dz = np.asarray(zbar) - zbar[0]
+    dzs = np.asarray(zsbar) - zsbar[0]
+    qual = np.abs(dzs) >= _DCMIP13_TERRAIN_MIN_M
+    if not np.all(np.isfinite(dz)) or not np.all(np.isfinite(dzs)):
+        notes.append("terrain crossing: non-finite cloud moments")
+        failed.append("terrain crossing (non-finite measurement)")
+    elif not qual.any():
+        # a run too short to reach the mountain: reported, not failed; over
+        # the full period the cloud must have crossed it, so a failure
+        notes.append("AUDIT INCOMPLETE: terrain crossing untested (max terrain shift "
+                     f"under the cloud {float(np.max(np.abs(dzs))):.1f} m)")
+        if full_period:
+            failed.append("terrain crossing untested over the full period")
+    else:
+        # gate at the snapshot of largest terrain shift (the ratio is noisy
+        # where the shift is small); the worst ratio over all qualifying
+        # snapshots is reported alongside
+        i = int(np.argmax(np.abs(dzs)))
+        ratio = float(dz[i] / dzs[i])
+        worst_r = float(np.max(np.abs(dz[qual] / dzs[qual])))
+        notes.append(f"terrain crossing: cloud height shift {dz[i]:.1f} m at the largest "
+                     f"terrain shift {dzs[i]:.1f} m (ratio {ratio:.3f}; 0 = keeps height, "
+                     f"1 = sigma-following; max |ratio| over {int(qual.sum())} snapshots "
+                     f"with shift >= {_DCMIP13_TERRAIN_MIN_M:g} m: {worst_r:.3f})")
+        if abs(ratio) > _DCMIP13_CROSS_TOL:
+            failed.append(f"terrain crossing (signed ratio {ratio:.3f}, |ratio| > "
+                          f"{_DCMIP13_CROSS_TOL:g}: the cloud height does not stay fixed)")
+    return notes, failed
+
+
 def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
                         radiation: str = "gray") -> tuple[str, float, str]:
     """Run DCMIP-2012 transport test cases (Tests 1-1, 1-2, 1-3).
@@ -4773,11 +4921,19 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     # explicitly per test.  1-1/1-2 use the FV3 Lagrangian remap (split,
     # horizontal step then remap, as FV3); 1-3 stays upwind because its
     # terrain-crossing sigma_dot is nonzero at the top and surface, which
-    # the remap refuses (mass would leave the column).  The cube rows of
-    # 1-1/1-2 run FV3 duo's own transport (``build_duo_dcmip_transport``:
-    # flux-form horizontal tracer_2d_1L, vertical motion implicit through
-    # the Lagrangian delp + map1_q2 remap, p_s evolving); cube 1-3 still
-    # runs the legacy cube model (terrain: out of the duo port's scope).
+    # the remap refuses (mass would leave the column).  On lat-lon, MPAS and
+    # spectral, 1-3 runs flux form on the steady 1-3 air mass with the
+    # discretely consistent air fluxes (``consistent_mass_flux``: analytic
+    # vertical air flux kept, minimal horizontal correction closing the
+    # discrete continuity; user decision 2026-11-24) of the flow restricted to
+    # h0 <= z <= z_top (``dcmip13_flow_fraction``; Kent et al. 2014 Sec. 5,
+    # codex vote), so no air or tracer crosses the top or the surface.  The
+    # cube rows of 1-1/1-2 run FV3 duo's own transport
+    # (``build_duo_dcmip_transport``: flux-form horizontal tracer_2d_1L,
+    # vertical motion implicit through the Lagrangian delp + map1_q2 remap,
+    # p_s evolving); cube 1-3 still runs the legacy cube model (terrain: out
+    # of the duo port's scope; no remap option).  The icosahedral (MPAS) rows
+    # select their own vertical transport in their branch.
     TC_CFGS = {
         11: {"wind_geo": dcmip11_wind_geo, "period": 12.0,
              "dt": 1800.0, "n_tracers": 4, "vertical": "fv3_remap"},
@@ -4908,9 +5064,25 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             13: dcmip13_init_latlon,
         }
         state_init = init_fns[test_num](grid, sigma_coord)
+        mass_flux = None
+        if test_num == 13:
+            from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+                consistent_mass_flux_latlon)
+            # benchmark state in fp64, as the MPAS row (user decision
+            # 2026-11-24): fp32 storage alone breaks q = 1 / the mass at 1e-8
+            if not jax.config.jax_enable_x64:
+                raise ValueError("DCMIP 1-3 lat-lon runs in float64: enable JAX x64")
+            state_init = state_init._replace(tracers=state_init.tracers.replace(
+                data=state_init.tracers.data.astype(jnp.float64)))
+            from tests.test_cases.dcmip_transport import (
+                _H, _mountain_height, _p0, dcmip13_wind_geo_banded)
+            mass_flux = consistent_mass_flux_latlon(
+                grid, sigma_coord, dcmip13_wind_geo_banded,
+                _p0 * jnp.exp(-_mountain_height(grid.lon2d, grid.lat2d) / _H))
         model = TracerTransportLatLonModel(
             grid, sigma_coord, latlon_wind,
-            TracerTransportLatLonConfig(vertical_scheme=cfg["vertical"]))
+            TracerTransportLatLonConfig(vertical_scheme=cfg["vertical"]),
+            mass_flux=mass_flux)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -4925,34 +5097,51 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         level = int(tc.resolution.replace("ico", ""))
         grid = create_voronoi_mesh(level)
 
-        # Wind wrapper: convert geographic (u_east, v_north) to edge-normal.
-        wind_geo_fn = cfg["wind_geo"]
+        # MPAS-A scalar transport (user decision 2026-11-23): edge-normal
+        # winds whose rotational part is the TRiSK curl of the DCMIP
+        # streamfunction (discretely non-divergent) plus the projected
+        # divergent part; flux form on a prognostic air mass, Skamarock-
+        # Gassmann 3rd/4th-order reconstruction, RK3 with the monotonic
+        # limiter on the last stage.  Vertical (user decision 2026-11-24):
+        # "mpas_flux" = MPAS-A flux-form vertical transport inside the 3-D
+        # monotone limiter, the vertical air-mass flux diagnosed from the
+        # discrete column continuity (the analytic sigma_dot is not used);
+        # "fv3_remap" is the opt-in comparison.  Benchmark state fp64.
+        from tests.test_cases.dcmip_transport import (
+            dcmip_wind_mpas, dcmip_air_mass_state_mpas)
 
         def mpas_wind(t, mesh, sc):
-            u_east, v_north, sigma_dot = wind_geo_fn(
-                t, mesh.lonCell, mesh.latCell, sc)
-            # Project geographic winds to edge-normal at each level.
-            # u_edge = u_east(cell) * cos(angleEdge) + v_north(cell) * sin(angleEdge)
-            # Average the two cells straddling each edge.
-            c1 = mesh.cellsOnEdge[0]  # (nEdges,)
-            c2 = mesh.cellsOnEdge[1]
-            cos_a = jnp.cos(mesh.angleEdge)  # (nEdges,)
-            sin_a = jnp.sin(mesh.angleEdge)
-            ue_c1 = u_east[c1] * cos_a[:, None] + v_north[c1] * sin_a[:, None]
-            ue_c2 = u_east[c2] * cos_a[:, None] + v_north[c2] * sin_a[:, None]
-            u_edge = 0.5 * (ue_c1 + ue_c2)  # (nEdges, nlev)
-            return u_edge, sigma_dot
+            return dcmip_wind_mpas(test_num, t, mesh, sc)
 
         init_fns = {
             11: dcmip11_init_mpas,
             12: dcmip12_init_mpas,
             13: dcmip13_init_mpas,
         }
-        state_init = init_fns[test_num](grid, sigma_coord)
+        state_init = dcmip_air_mass_state_mpas(
+            test_num, init_fns[test_num](grid, sigma_coord), grid, sigma_coord)
+        mass_flux = None
+        if test_num == 13:
+            # 1-3: steady consistent air fluxes (analytic vertical air flux
+            # of the h0 <= z <= z_top flow, closed at top/surface; horizontal
+            # flux corrected) on the state's steady air mass dp = p_s dsigma
+            from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+                consistent_mass_flux_mpas)
+            from tests.test_cases.dcmip_transport import dcmip13_flow_fraction
+            u_e13, sd13 = mpas_wind(0.0, grid, sigma_coord)
+            frac_e = dcmip13_flow_fraction(grid.lonEdge, grid.latEdge, sigma_coord)[0]
+            mask_c = dcmip13_flow_fraction(grid.lonCell, grid.latCell, sigma_coord)[1]
+            mass_flux = consistent_mass_flux_mpas(
+                grid, sigma_coord, u_e13 * frac_e, sd13 * mask_c,
+                state_init.air_mass.data[:, -1] / sigma_coord.dsigma[-1])
         model = TracerTransportMPASModel(
             grid, sigma_coord, mpas_wind,
-            TracerTransportMPASConfig(hyperdiff_coeff=0.0,
-                                      vertical_scheme=cfg["vertical"]))
+            TracerTransportMPASConfig(
+                hyperdiff_coeff=0.0, time_integrator="mpas_rk3", vertical_scheme="mpas_flux",
+                fct_vertical_upwind_width_pas=1.0e-5,
+                horizontal_scheme="mpas_fct", coef_3rd_order=0.25,
+                fct_smoothing_width=1.0e-4, fct_upwind_width_ms=1.0e-3),
+            mass_flux=mass_flux)
         coord_kind = "icosa"
         lon_deg = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
@@ -4960,8 +5149,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import create_gaussian_grid
         from legoesm.atmosphere.dynamics.gcm.tracer_transport_spectral import (
-            SpectralTracerTransportModel, TracerTransportSpectralConfig,
-            spectral_tracer_grid_values, spectral_tracer_state)
+            SpectralTracerTransportModel, TracerTransportSpectralConfig)
         from tests.test_cases.dcmip_transport import (
             dcmip11_init_latlon, dcmip12_init_latlon, dcmip13_init_latlon)
 
@@ -4971,9 +5159,22 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         def spectral_wind(t, g, sc):
             return wind_geo_fn(t, g.lon2d, g.lat2d, sc)
 
+        spec_cfg = TracerTransportSpectralConfig(vertical_scheme=cfg["vertical"])
+        mass_flux = None
+        if test_num == 13:
+            from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+                consistent_mass_flux_spectral)
+            from legoesm.grids.gaussian import dealiasing_mask
+            from tests.test_cases.dcmip_transport import (
+                _H, _mountain_height, _p0, dcmip13_wind_geo_banded)
+            g13 = create_gaussian_grid(n_max)
+            mass_flux = consistent_mass_flux_spectral(
+                g13, sigma_coord, dcmip13_wind_geo_banded,
+                _p0 * jnp.exp(-_mountain_height(g13.lon2d, g13.lat2d) / _H),
+                dealiasing_mask(g13, spec_cfg.dealiasing_fraction))
         model = SpectralTracerTransportModel(
-            create_gaussian_grid(n_max), sigma_coord, spectral_wind,
-            TracerTransportSpectralConfig(vertical_scheme=cfg["vertical"]))
+            create_gaussian_grid(n_max), sigma_coord, spectral_wind, spec_cfg,
+            mass_flux=mass_flux)
         grid = model.grid
         # The lat-lon init helpers read only lon2d/lat2d/n_lat/n_lon, which
         # the Gaussian grid exposes too: same analytic IC as the lat-lon row.
@@ -4985,12 +5186,10 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         state_init_grid = init_fns[test_num](grid, sigma_coord)
         # Start from the Orszag-band state the model carries (the model
         # would otherwise drop the upper band only after the first step).
-        state_init = model._truncate(spectral_tracer_state(
-            grid, state_init_grid.tracers.data))
+        state_init = model.state_from_grid(state_init_grid.tracers.data)
 
         def to_grid(s):
-            return s._replace(tracers=s.tracers.replace(
-                data=spectral_tracer_grid_values(grid, s)))
+            return s._replace(tracers=s.tracers.replace(data=model.grid_values(s)))
 
         coord_kind = "gaussian"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -5021,13 +5220,28 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
 
     def check_fn(s):
         q = to_grid(s).tracers.data
-        return (check_finite({"tracers": q}),
-                float(jnp.max(jnp.abs(q))))
+        ok_ = check_finite({"tracers": q})
+        if hasattr(s, "air_mass"):    # mpas_fct: prognostic layer air mass
+            ok_ = ok_ and check_finite({"air_mass": s.air_mass.data}) and bool(
+                jnp.min(s.air_mass.data) > 0)
+        return (ok_, float(jnp.max(jnp.abs(q))))
 
     _area_for_mean = _grid_cell_area(grid)
 
+    # DCMIP 1-3 audit: per-tracer global mass sum(area dp q) with the
+    # model's own air mass at every diagnostic sample
+    _m13_samples: list = []
+    _w13 = None
+    if test_num == 13 and tc.grid_type in ("latlon", "spectral", "icosahedral"):
+        _w13 = np.asarray(_area_for_mean, np.float64)[..., None]
+
     def scalar_fn(s):
         q = to_grid(s).tracers.data
+        if _w13 is not None:
+            qq = np.asarray(q, np.float64)
+            dp13 = (s.air_mass.data if hasattr(s, "air_mass") else model.mass_flux.dp)
+            _m13_samples.append((_w13[..., None] * np.asarray(dp13, np.float64)[..., None]
+                                 * qq).reshape(-1, qq.shape[-1]).sum(axis=0))
         return {
             "q1_min": float(jnp.min(q[..., 0])),
             "q1_max": float(jnp.max(q[..., 0])),
@@ -5056,21 +5270,34 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         label=f"DCMIP transport {test_num} ({tc.grid_type})",
         total_days=period)
 
-    # --- Error norms (flow-reversal tests 1-1 / 1-2, every grid) ---
+    # --- Error norms (1-1 / 1-2 flow reversal, 1-3 one revolution; every grid) ---
     # Exact solution at t = T is the analytic IC on the grid, so the norms
     # are reported only when the run reached the full period T.
     from tests.test_cases.dcmip_transport import compute_tracer_error_norms
     _area_ns = SimpleNamespace(area=_area_for_mean)
     notes_parts = []
-    if (test_num in (11, 12) and ok
-            and n_steps * dt == cfg["period"] * 86400.0):
+    # 1-1/1-2 keep the exact gate; 1-3 (new) tolerates round-off in n_steps*dt
+    full_period = bool(np.isclose(n_steps * dt, cfg["period"] * 86400.0, rtol=1e-12, atol=0.0))
+    if ok and ((test_num in (11, 12) and n_steps * dt == cfg["period"] * 86400.0)
+               or (test_num == 13 and tc.grid_type != "cubed_sphere" and full_period)):
         norms = compute_tracer_error_norms(
             to_grid(state_final), state_init_grid, _area_ns)
         notes_parts += [
             f"q{i + 1} L1={norms['l1'][i]:.4e} "
             f"L2={norms['l2'][i]:.4e} Linf={norms['linf'][i]:.4e}"
             for i in range(n_tracers)]
-    if test_num in (11, 12) and tc.grid_type == "spectral":
+    if ok and hasattr(state_final, "air_mass"):
+        # RULE 0 record: global air mass sum(area dp); the per-tracer mass
+        # sum(area q dp) is the audit below.
+        def _air(s):
+            if s.air_mass.data.shape != (np.asarray(_area_for_mean).shape[0], nlev):
+                raise RuntimeError(f"DCMIP air-mass audit: air_mass shape "
+                                   f"{s.air_mass.data.shape} != (nCells, {nlev})")
+            return float((np.asarray(_area_for_mean, np.float64)[:, None]
+                          * np.asarray(s.air_mass.data, np.float64)).sum())
+        am0, am1 = _air(state_init), _air(state_final)
+        notes_parts.append(f"air-mass rel change {am1 / am0 - 1.0:.3e}")
+    if test_num in (11, 12, 13) and tc.grid_type == "spectral":
         # Initialization (projection + Orszag truncation) error alone, so
         # the transport error can be separated from it.
         ic_norms = compute_tracer_error_norms(
@@ -5079,9 +5306,11 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             f"q{i + 1} L2={ic_norms['l2'][i]:.4e}"
             for i in range(n_tracers)))
     # RULE 0 audit, every grid/test/scheme: per-tracer global tracer mass
-    # sum(area * sum_k q dsigma) (uniform p_s, so dsigma ~ dp/p_s) at the
-    # start and end, and its relative residual.  The advective-form
-    # prescribed-wind models do NOT conserve it (declared, not hidden).
+    # at the start and end and its relative residual.  Models without a
+    # prognostic air mass: sum(area * sum_k q dsigma) (uniform p_s, so
+    # dsigma ~ dp/p_s; "mass[q dsigma]"); the MPAS mpas_fct state carries
+    # dp: sum(area * sum_k q dp) [Pa m^2] ("mass[q dp]").  The
+    # advective-form prescribed-wind models do NOT conserve it (declared).
     _q0 = np.asarray(to_grid(state_init).tracers.data, dtype=np.float64)
     _q1 = np.asarray(to_grid(state_final).tracers.data, dtype=np.float64)
     _ar = np.asarray(_area_for_mean, dtype=np.float64)
@@ -5098,15 +5327,25 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     if not (np.all(np.isfinite(_q0)) and np.all(np.isfinite(_q1))):
         notes_parts.append("mass audit unavailable: non-finite tracer state")
     else:
-        def _mass(q, w):
-            col = np.sum(q * w[..., None], axis=-2)    # (..., ntr)
+        def _mass(q, s, w_layer):
+            # prognostic layer air mass (MPAS mpas_fct): the conserved
+            # tracer mass is sum(area q dp) [Pa m^2]; else the row's
+            # layer weight (dsigma, or the duo rows' evolving delp/p0)
+            w = (np.asarray(s.air_mass.data, np.float64)
+                 if hasattr(s, "air_mass") else w_layer)
+            if hasattr(s, "air_mass") and w.shape != _want[:-1]:
+                raise RuntimeError(f"DCMIP mass audit: air_mass shape {w.shape}"
+                                   f" != {_want[:-1]}")
+            col = np.sum(q * w[..., None], axis=-2)   # (..., ntr)
             return np.sum(col * _ar[..., None],
                           axis=tuple(range(col.ndim - 1)))
-        _m0, _m1 = _mass(_q0, _w0), _mass(_q1, _w1)
+        _m0, _m1 = (_mass(_q0, state_init, _w0),
+                    _mass(_q1, state_final, _w1))
         if not (np.all(np.isfinite(_m0)) and np.all(np.isfinite(_m1))):
             raise RuntimeError(f"DCMIP mass audit: non-finite budget "
                                f"M0={_m0} M1={_m1}")
-        notes_parts.append("mass " + ", ".join(
+        notes_parts.append(("mass[q dp] " if hasattr(state_final, "air_mass")
+                            else "mass[q dsigma] ") + ", ".join(
             f"q{i + 1} M0={_m0[i]:.15e} M1={_m1[i]:.15e} "
             f"rel={(_m1[i] - _m0[i]) / _m0[i]:+.6e}"
             if _m0[i] != 0.0 else f"q{i + 1} M0=0 M1={_m1[i]:.15e}"
@@ -5140,6 +5379,21 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             f"{_elapsed / 86400.0:g} d")
         notes_parts.append(f"n_sub {duo.n_sub_fn()}, max sub-step Courant "
                            f"{duo.courant_max():.3f}")
+    status = "PASS" if ok else "FAIL"
+    if test_num == 13 and tc.grid_type in ("latlon", "spectral", "icosahedral"):
+        if ok:
+            a_notes, a_failed = _dcmip13_audit(
+                tc, grid, sigma_coord, model, state_init, state_final, snapshots,
+                to_grid, _area_for_mean, dt, cfg["period"] * 86400.0, _m13_samples,
+                full_period)
+            notes_parts += a_notes
+            if a_failed:
+                # a measured acceptance failure fails the row (codex vote
+                # 2026-11-24); an untested criterion is only reported
+                notes_parts.append("CRITERION FAIL: " + "; ".join(a_failed))
+                status = "FAIL"
+        else:
+            notes_parts.append("1-3 audit not run: the run failed")
     notes = ", ".join(notes_parts)
 
     # --- Diagnostics output ---
@@ -5154,12 +5408,14 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             "fv3_duo Lagrangian (implicit omega) + map1_q2"
             if duo is not None else
             "upwind (legacy cube model)"
-            if tc.grid_type == "cubed_sphere" else cfg["vertical"]),
+            if tc.grid_type == "cubed_sphere" else
+            model.config.vertical_scheme
+            if tc.grid_type == "icosahedral" else cfg["vertical"]),
         **({"duo": duo.note,
             "accepted_steps": int(round(float(state_final[1]) / dt)),
             "elapsed_days": float(state_final[1]) / 86400.0}
            if duo is not None else {}),
-        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "status": status, "notes": notes,
         "wall_time": f"{wall:.1f}s"},
         diag=diag)  # iter-99: surface BLOWUP info if any
     _save_case_diagnostics(
@@ -5172,7 +5428,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         scalar_units={"q1_min": "kg/kg", "q1_max": "kg/kg",
                       "q1_mean": "kg/kg"})
 
-    return "PASS" if ok else "FAIL", wall, notes
+    return status, wall, notes
 
 
 # ===========================================================================
@@ -6405,6 +6661,10 @@ def _collect_grid_results_atmosphere(
                     if ":" in line:
                         k, v = line.split(":", 1)
                         metadata[k.strip()] = v.strip()
+            if metadata.get("status") == "SKIP":
+                # a SKIP row's artifacts never enter a cross-grid
+                # comparison
+                continue
             grid_results[grid_dir.name] = {
                 "timeseries": timeseries_df,
                 "snapshots":  snapshots,

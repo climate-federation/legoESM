@@ -232,11 +232,13 @@ def test_spectral_model_step_conserves_global_column_integral():
 @pytest.mark.parametrize("tn,dt", [(11, 1800.0), (12, 600.0)])
 def test_dcmip_matrix_winds_are_admissible(tn, dt):
     """The matrix's 1-1/1-2 sigma_dot, at EVERY step midpoint of one period
-    at the configured dt, on the three matrix grids that run the remap
-    (lat-lon 72x144 C-grid centres, MPAS ico5 cell centres, Gaussian T21),
+    at the configured dt, on the lat-lon 72x144 C-grid and Gaussian T21
+    centres (the grids whose rows run the remap) and the MPAS ico5 centres,
     has exact boundary zeros and keeps every Lagrangian thickness positive
     in the remap's OWN interface arithmetic (pe1 = s_half + dt*sd in the
-    tracer dtype, then differenced)."""
+    tracer dtype, then differenced).  (The MPAS rows run their own
+    mpas_fct coupling, not the analytic-sigma_dot remap; their cell centres
+    stay in the sweep as a geometry check of the wind.)"""
     from tests.test_cases.dcmip_transport import (
         create_dcmip_sigma, dcmip11_wind_geo, dcmip12_wind_geo)
     from legoesm.grids.voronoi import create_voronoi_mesh
@@ -491,14 +493,14 @@ def test_nan_boundary_sigma_dot_reports_nonfinite():
 @x64
 @pytest.mark.parametrize("grid_type,res,test_num,scheme", [
     ("latlon", "18x36", 12, "fv3_remap"),
-    ("icosahedral", "ico2", 11, "fv3_remap"),
+    ("icosahedral", "ico2", 11, "mpas_flux"),   # MPAS rows: MPAS-A 3-D flux form
     ("latlon", "18x36", 13, "upwind"),
     ("spectral", "T10", 12, "fv3_remap"),
 ])
 def test_matrix_runner_selects_scheme_and_audits_mass(
         tmp_path, monkeypatch, grid_type, res, test_num, scheme):
     """Runner level: the matrix row selects the vertical scheme explicitly
-    (1-1/1-2 remap, 1-3 upwind) through its own wind adapter -- the model
+    (lat-lon/spectral 1-1/1-2 remap, 1-3 upwind; MPAS mpas_flux) through its own wind adapter -- the model
     really calls (or skips) the remap -- and writes a per-tracer global mass
     audit that matches an independent recomputation."""
     import re
@@ -550,9 +552,19 @@ def test_matrix_runner_selects_scheme_and_audits_mass(
         np.testing.assert_allclose([float(x[1]) for x in got], m0_ref,
                                    rtol=1e-6)
         wind = {12: D.dcmip12_wind_geo, 13: D.dcmip13_wind_geo}[test_num]
-        m = TracerTransportLatLonModel(
-            g, sc, wind, TracerTransportLatLonConfig(vertical_scheme=scheme))
+        mass_flux = None
         st = init(g, sc)
+        if test_num == 13:   # the row's 1-3 model: consistent air fluxes, fp64
+            from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+                consistent_mass_flux_latlon)
+            mass_flux = consistent_mass_flux_latlon(
+                g, sc, D.dcmip13_wind_geo_banded,
+                D._p0 * jnp.exp(-D._mountain_height(g.lon2d, g.lat2d) / D._H))
+            st = st._replace(tracers=st.tracers.replace(
+                data=st.tracers.data.astype(jnp.float64)))
+        m = TracerTransportLatLonModel(
+            g, sc, wind, TracerTransportLatLonConfig(vertical_scheme=scheme),
+            mass_flux=mass_flux)
         dt_run = 120.0 if test_num == 13 else dt   # the row's lat-lon 1-3 dt
         for _ in range(int(2 * dt / 86400.0 * 86400.0 / dt_run)):
             st = m.step(st, dt_run)
@@ -570,34 +582,32 @@ def test_matrix_runner_selects_scheme_and_audits_mass(
             TracerTransportMPASConfig, TracerTransportMPASModel)
         sc = D.create_dcmip_sigma(30)
         me = create_voronoi_mesh(int(res.replace("ico", "")))
-        geo = D.dcmip11_wind_geo
-
-        def mw(t, mesh, s_):
-            u, v, sd = geo(t, mesh.lonCell, mesh.latCell, s_)
-            c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
-            ca = jnp.cos(mesh.angleEdge)[:, None]
-            sa = jnp.sin(mesh.angleEdge)[:, None]
-            return 0.5 * (u[c1] * ca + v[c1] * sa
-                          + u[c2] * ca + v[c2] * sa), sd
+        # the row's model: MPAS-A scalar transport on the streamfunction
+        # edge winds and the prognostic air mass
         m = TracerTransportMPASModel(
-            me, sc, mw, TracerTransportMPASConfig(vertical_scheme=scheme))
-        st = D.dcmip11_init_mpas(me, sc)
-        dsg = np.diff(np.asarray(sc.sigma_half, np.float64))
+            me, sc, lambda t, mesh, s_: D.dcmip_wind_mpas(11, t, mesh, s_),
+            TracerTransportMPASConfig(hyperdiff_coeff=0.0, time_integrator="mpas_rk3",
+                                      horizontal_scheme="mpas_fct", coef_3rd_order=0.25,
+                                      fct_smoothing_width=1.0e-4, fct_upwind_width_ms=1.0e-3,
+                                      vertical_scheme=scheme))
+        st = D.dcmip_air_mass_state_mpas(11, D.dcmip11_init_mpas(me, sc), me, sc)
         ar = np.asarray(me.areaCell, np.float64)
-        mass = lambda q: np.einsum("ckt,k,c->t", np.asarray(q, np.float64),  # noqa: E731
-                                   dsg, ar)
-        m0_ref = mass(st.tracers.data)
+        # the prognostic tracer mass sum(area q dp)
+        mass = lambda s_: np.einsum("ckt,ck,c->t", np.asarray(s_.tracers.data, np.float64),  # noqa: E731
+                                    np.asarray(s_.air_mass.data, np.float64), ar)
+        m0_ref = mass(st)
         for _ in range(2):
             st = m.step(st, dt)
-        m1_ref = mass(st.tracers.data)
+        m1_ref = mass(st)
         np.testing.assert_allclose([float(x[1]) for x in got], m0_ref,
                                    rtol=1e-10)
         # the runner's jitted MPAS step and this eager one differ in
-        # summation order (measured 3.7e-10 relative); the drift being
-        # audited is far larger (non-vacuity below)
+        # summation order; the masses are recomputed independently here
         np.testing.assert_allclose([float(x[2]) for x in got], m1_ref,
                                    rtol=1e-8)
-        assert np.max(np.abs(m1_ref - m0_ref) / np.abs(m0_ref)) > 1e-7
+        # RULE 0: the MPAS-A flux form conserves sum(area q dp) to round-off
+        np.testing.assert_allclose(m1_ref, m0_ref, rtol=1e-12)
+        np.testing.assert_allclose([float(x[3]) for x in got], 0.0, atol=1e-12)
     else:
         # spectral: independent M1/M0 per tracer with the Gaussian
         # quadrature weights (normalization-free ratio)
