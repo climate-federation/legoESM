@@ -141,7 +141,8 @@ def _worker(args):
 
     set_policy(PrecisionPolicy.fp64())
     jax.config.update("jax_enable_x64", True)
-    cfg = json.loads((INPUTS / "config.json").read_text())
+    config_path = Path(args.config) if args.config else INPUTS / "config.json"
+    cfg = json.loads(config_path.read_text())
     origins = {}
     for mod in (scm_module, kpp_module):
         path = Path(mod.__file__).resolve()
@@ -336,7 +337,7 @@ def _worker(args):
         ),
         input_sha256={
             p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in (INPUTS / "config.json", INPUTS / "tprof_file.dat", INPUTS / "sprof_file.dat")
+            for p in (config_path, INPUTS / "tprof_file.dat", INPUTS / "sprof_file.dat")
         },
         stokes=stokes_info,
         budgets=budgets,
@@ -389,13 +390,15 @@ def plot_results(output_dir):
     })
 
     out = Path(output_dir)
-    cfg = json.loads((INPUTS / "config.json").read_text())
+    first_report = json.loads((out / "A_0.json").read_text())
+    cfg = first_report["config"]
+    current_main = cfg.get("comparison_kind") == "current_main"
     cases = [
-        ("A_0", "A: upstream KPP", "#333333"),
-        ("B_0", "B: corrected KPP", "#D55E00"),
-        ("C_0.4", "C: Wave, A=0.40 m", "#56B4E9"),
-        ("C_0.53", "C: Wave, A=0.53 m", "#0072B2"),
-        ("C_0.8", "C: Wave, A=0.80 m", "#009E73"),
+        ("A_0", "A: main, Wave off" if current_main else "A: historical upstream KPP", "#333333"),
+        ("B_0", "B: PR, Wave off" if current_main else "B: corrected KPP", "#D55E00"),
+        ("C_0.4", "C: Wave, a=0.40 m", "#56B4E9"),
+        ("C_0.53", "C: Wave, a=0.53 m", "#0072B2"),
+        ("C_0.8", "C: Wave, a=0.80 m", "#009E73"),
     ]
     line_styles = {"A_0": "-", "B_0": "--", "C_0.4": ":",
                    "C_0.53": "-.", "C_0.8": (0, (5, 1, 1, 1, 1, 1))}
@@ -429,7 +432,7 @@ def plot_results(output_dir):
         xlabel="Temperature difference from A [K]",
         ylabel="Depth [m]",
         ylim=(-90, 0),
-        title="Total contribution relative to upstream",
+        title="Total response relative to main" if current_main else "Total response relative to historical upstream",
     )
     for panel, ax in zip("abcd", axes.flat):
         title = ax.get_title()
@@ -444,15 +447,16 @@ def plot_results(output_dir):
     plt.close(fig)
     la = np.geomspace(0.1, 3, 300)
     fig, (ax, stokes_ax) = plt.subplots(1, 2, figsize=(11, 4.5))
-    ax.loglog(la, np.sqrt(1 + 0.08 / la**2), color="#333333", linestyle=":",
-              label="Upstream legacy enhancement")
+    upstream_coeff = reports[0]["active_kpp_config"]["langmuir_coeff"]
+    ax.loglog(la, np.sqrt(1 + upstream_coeff / la**2), color="#333333", linestyle=":",
+              label="main option (off by default)" if current_main else "Historical upstream enhancement")
     ax.loglog(la, np.sqrt(1 + 0.08 / la**4), color="#D55E00", linestyle="--", label="MS00")
     ax.loglog(la, np.sqrt(1 + (3.1 * la) ** -2 + (5.4 * la) ** -4),
-              color="#0072B2", label="VR12-AL")
+              color="#0072B2", label="PR option: VR12-AL" if current_main else "VR12-AL")
     ax.set(
         xlabel="Turbulent Langmuir number",
         ylabel="Velocity multiplier",
-        title="Analytic closure comparison",
+        title="Enhancement options when enabled" if current_main else "Analytic closure comparison",
     )
     ax.legend()
     ax.grid(linestyle=":", linewidth=0.6, alpha=0.35)
@@ -491,7 +495,8 @@ def plot_results(output_dir):
     final_peak = [float(data[stem]["max_n2_depth_m"][-1]) for stem, _, _ in cases]
     final_mld = [r["final_mld_m"] for r in reports]
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    labels = ["A", "B", "C .40", "C .53", "C .80"]
+    labels = ["A: main" if current_main else "A", "B: PR" if current_main else "B",
+              "C .40", "C .53", "C .80"]
     axes[0].plot(labels, final_mld, "o-", color="#0072B2", label="Density-threshold MLD")
     axes[0].plot(labels, final_peak, "s--", color="#D55E00", label="Maximum-stratification depth")
     axes[0].set(ylabel="Final diagnostic depth [m]", title="Two distinct depth definitions at 48 h")
@@ -561,8 +566,11 @@ def plot_results(output_dir):
     return summary
 
 
-def run_suite(output_dir, upstream_root, *, plot=True):
-    cfg = json.loads((INPUTS / "config.json").read_text())
+def run_suite(output_dir, upstream_root, *, plot=True, config_path=None):
+    config_path = Path(config_path).resolve() if config_path else INPUTS / "config.json"
+    if config_path.parent != INPUTS.resolve():
+        raise ValueError("comparison config must be in the committed wave_kpp_s_l2 directory")
+    cfg = json.loads(config_path.read_text())
     if _git("status", "--porcelain", "--untracked-files=no"):
         raise RuntimeError("commit the preregistration and instrument before integration")
     _require_committed_instrument()
@@ -596,6 +604,8 @@ def run_suite(output_dir, upstream_root, *, plot=True):
                 str(source),
                 "--output-dir",
                 str(out),
+                "--config",
+                str(config_path),
             ],
             env=env,
             check=False,
@@ -632,6 +642,7 @@ if __name__ == "__main__":
     parser.add_argument("--label", choices=["A", "B", "C"])
     parser.add_argument("--amplitude", type=float, default=0.0)
     parser.add_argument("--source-root", type=Path)
+    parser.add_argument("--config", type=Path, help="committed comparison configuration")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.plot_existing:

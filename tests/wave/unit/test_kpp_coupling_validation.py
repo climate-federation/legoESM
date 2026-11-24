@@ -143,3 +143,35 @@ def test_failed_cases_are_retained_without_hiding_fatal_errors(tmp_path, monkeyp
         instrument.run_suite(tmp_path / "results", tmp_path / "upstream")
     assert len(calls) == 5  # collecting all outcomes never changes the gate
     assert len(plots) == (1 if first_status == 1 else 0)
+
+
+def test_comparison_config_selects_pinned_baseline_and_is_forwarded(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts.validate import wave_kpp_coupling as instrument
+
+    protocol = tmp_path / "protocol"
+    protocol.mkdir()
+    config = protocol / "current_main.json"
+    config.write_text(json.dumps({"wave_amplitudes_m": [0.4, 0.53, 0.8]}))
+    monkeypatch.setattr(instrument, "INPUTS", protocol)
+    monkeypatch.setattr(instrument, "_git", lambda *args: "")
+    monkeypatch.setattr(instrument, "_require_committed_instrument", lambda: None)
+    commands = []
+
+    def worker(command, **kwargs):
+        assert command[command.index("--config") + 1] == str(config)
+        label = command[command.index("--label") + 1]
+        source = command[command.index("--source-root") + 1]
+        assert source == str(tmp_path / "upstream") if label == "A" else source == str(instrument.ROOT)
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(instrument.subprocess, "run", worker)
+    instrument.run_suite(tmp_path / "results", tmp_path / "upstream", plot=False,
+                         config_path=config)
+    assert len(commands) == 5
+    # A config outside the committed protocol directory cannot select a lane.
+    with pytest.raises(ValueError, match="committed wave_kpp_s_l2"):
+        instrument.run_suite(tmp_path / "other", tmp_path / "upstream", plot=False,
+                             config_path=tmp_path / "untracked.json")
