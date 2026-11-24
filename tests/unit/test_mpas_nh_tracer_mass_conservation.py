@@ -26,6 +26,11 @@ def _setup(n_tracers_q, **cfg):
         dcmip25_tc1_init_mpas)
 
     mesh = create_voronoi_mesh(3)
+    # The builder returns float32 geometry, whose area/edge-length mismatch
+    # (~3e-12 of a flux sum) would set the floor; test the scheme in fp64.
+    mesh = mesh._replace(**{
+        f: getattr(mesh, f).astype(jnp.float64) for f in mesh._fields
+        if getattr(getattr(mesh, f), "dtype", None) == jnp.float32})
     state, hc, tm = dcmip25_tc1_init_mpas(mesh, n_levels=8, params=HILL)
     cfg = {"n_acoustic_substeps": 6, "fix_mass": False, **cfg}
     model = MPASCompressibleEulerModel(mesh, hc, tm, MPASCompressibleEulerConfig(**cfg))
@@ -42,7 +47,7 @@ def _setup(n_tracers_q, **cfg):
 def _varying(lat, lon, z, dtype):
     q1 = 1e-2 * (1.0 + 0.3 * jnp.sin(lat) * jnp.cos(2 * lon) + 0.2 * z)
     q2 = 1e-4 * jnp.exp(-((z - 0.3) ** 2) / 0.01) * (1.0 + jnp.cos(lon))
-    return jnp.stack([q1, q2], axis=-1).astype(dtype)
+    return jnp.stack([q1, q2], axis=-1).astype(jnp.float64)
 
 
 def _tracer_mass(model, state):
@@ -66,7 +71,7 @@ def test_tracer_mass_conserved_over_hill(cfg):
 
 def test_uniform_tracer_stays_uniform_over_hill():
     model, state = _setup(lambda lat, lon, z, dt: jnp.full(
-        (lat.shape[0], 8, 1), 7e-3, dt))
+        (lat.shape[0], 8, 1), 7e-3, jnp.float64))
     for _ in range(20):
         state = model.step(state, 60.0)
     assert float(jnp.max(jnp.abs(state.tracers.data / 7e-3 - 1.0))) < 1e-12
