@@ -60,6 +60,7 @@ from legoesm.timestepping.integration import (
 from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
+    TracerMassHooks,
 )
 from legoesm import constants
 
@@ -91,11 +92,14 @@ def mpas_compressible_euler_slow_tendencies(
     terrain_metric: TerrainMetric,
     config: MPASCompressibleEulerConfig,
     physics_tendency: MPASNonHydrostaticTendencies | None = None,
+    conservative_tracers: bool = False,
 ) -> MPASNonHydrostaticTendencies:
     """Compute slow (advective) tendencies for the MPAS compressible Euler equations.
 
     These are evaluated once per RK3 stage and held constant during
-    acoustic substeps.
+    acoustic substeps. ``conservative_tracers=True`` (the model step,
+    #2641) leaves tracer advection to :func:`mpas_conservative_tracer_stage`
+    and returns only the physics tracer tendency.
     """
     u_3d = state.u.data           # (nEdges, nlev)
     w = state.w.data              # (nCells, nlev+1)
@@ -321,7 +325,7 @@ def mpas_compressible_euler_slow_tendencies(
 
     # --- 5. Tracer advection ---
     n_tracers = tracers.shape[-1] if tracers.ndim > 1 else 0
-    if n_tracers > 0:
+    if n_tracers > 0 and not conservative_tracers:
         dtracers_dt = _tracer_tendencies(
             tracers, u_3d, w, dz, dz_half, J, mesh, c1, c2,
         )
@@ -436,6 +440,66 @@ def _tracer_tendencies(tracers, u_3d, w, dz, dz_half, J, mesh, c1, c2):
 
     vert = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(tracers)
     return horiz + vert
+
+
+def mpas_conservative_tracer_stage(
+    base: MPASNonHydrostaticState,
+    eval_state: MPASNonHydrostaticState,
+    state_slow: MPASNonHydrostaticState,
+    acoustic_out: MPASNonHydrostaticState,
+    slow_tend: MPASNonHydrostaticState,
+    dt_eff: float,
+    mesh: VoronoiMesh,
+    height_coord: HeightCoordinate,
+    terrain_metric: TerrainMetric,
+) -> MPASNonHydrostaticState:
+    """Mass-conserving tracer update of one split-explicit RK stage (#2641).
+
+    MPAS-A: tracers ride the mass flux continuity used over the stage, in
+    flux form on the pseudo-density ``J*rho``. Horizontal flux is the slow
+    continuity flux ``dt_eff * J_edge * rho_edge * u`` at the evaluation
+    state; the time-integrated upward flux ``G`` is recovered exactly from
+    the acoustic density change (vertical acoustic continuity is a pure flux
+    divergence between rigid lids). Edge and interface tracer values are
+    the 2-point averages the advective scheme used. ``dq_slow`` carries
+    physics. ``sum(area*J*dz*rho*q)`` is conserved to round-off; a uniform
+    ``q`` stays uniform unless a rho-only term (sponge, physics, mass fixer)
+    changes ``rho``.
+    """
+    rho_0 = height_coord.rho_ref
+    dz = height_coord.dz
+    J = terrain_metric.jacobian[:, None]                  # (nCells, 1)
+    c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
+    q_e = eval_state.tracers.data                         # (nCells, nlev, n_tr)
+    n_cells, nlev, n_tr = q_e.shape
+
+    _, rho_e_flux = sanitize_theta_rho(
+        height_coord.theta_ref + eval_state.theta_prime.data,
+        rho_0 + eval_state.rho_prime.data,
+    )
+    rho_edge = cell_to_edge_avg_3d(rho_e_flux, mesh)
+    flux = (dt_eff * 0.5 * (J[c1] + J[c2]) * rho_edge
+            * eval_state.u.data)[..., None]               # (nEdges, nlev, 1)
+    tracer_flux = flux * 0.5 * (q_e[c1] + q_e[c2])
+    div_h = divergence_cell_3d(
+        tracer_flux.reshape(-1, nlev * n_tr), mesh,
+    ).reshape(n_cells, nlev, n_tr)
+
+    # Upward mass through interface j (0 = top) = column gain above it.
+    drho_vert = acoustic_out.rho_prime.data - state_slow.rho_prime.data
+    g_inner = jnp.cumsum(J * dz * drho_vert, axis=-1)[:, :-1]
+    g_flux = jnp.pad(g_inner, ((0, 0), (1, 1)))[..., None]  # (nCells, nlev+1, 1)
+    q_pad = jnp.pad(q_e, ((0, 0), (1, 1), (0, 0)), mode="edge")
+    gq = g_flux * 0.5 * (q_pad[:, :-1] + q_pad[:, 1:])
+    gain_z = (gq[:, 1:] - gq[:, :-1]) / dz[:, None]
+
+    rho_b = (rho_0 + base.rho_prime.data)[..., None]
+    rho_e = (rho_0 + eval_state.rho_prime.data)[..., None]
+    rho_o = (rho_0 + acoustic_out.rho_prime.data)[..., None]
+    mq = (rho_b * base.tracers.data + (gain_z - div_h) / J[..., None]
+          + dt_eff * rho_e * slow_tend.tracers.data)
+    return acoustic_out._replace(
+        tracers=acoustic_out.tracers.replace(data=mq / rho_o))
 
 
 # ============================================================================
@@ -640,6 +704,7 @@ class MPASCompressibleEulerModel(IntegrationMixin):
             n_substeps=self.config.n_acoustic_substeps,
             outer_integrator=self.config.outer_integrator,
         )
+        conservative = state.tracers.data.shape[-1] > 0
 
         def slow_tendency_fn(s):
             phys = None
@@ -650,7 +715,7 @@ class MPASCompressibleEulerModel(IntegrationMixin):
                 phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
             tend = mpas_compressible_euler_slow_tendencies(
                 s, self.mesh, self.height_coord, self.terrain_metric,
-                self.config, phys,
+                self.config, phys, conservative_tracers=conservative,
             )
             return MPASNonHydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),
@@ -667,8 +732,22 @@ class MPASCompressibleEulerModel(IntegrationMixin):
                 self.height_coord, self.terrain_metric, self.config,
             )
 
+        tracer_mass = None
+        if conservative:
+            rho_ref = self.height_coord.rho_ref
+            tracer_mass = TracerMassHooks(
+                density=lambda s: rho_ref + s.rho_prime.data,
+                tracers=lambda s: s.tracers.data,
+                with_tracers=lambda s, q: s._replace(
+                    tracers=s.tracers.replace(data=q)),
+                finish_stage=partial(
+                    mpas_conservative_tracer_stage, mesh=self.mesh,
+                    height_coord=self.height_coord,
+                    terrain_metric=self.terrain_metric),
+            )
         state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+            tracer_mass=tracer_mass,
         )
 
         # iter-8: anchored dry-mass fixer (opt-in via fix_mass +
@@ -676,10 +755,17 @@ class MPASCompressibleEulerModel(IntegrationMixin):
         # ``rho_prime``; preserves rho gradients (same property as
         # cubed-sphere ``fix_mass_nonhydrostatic``).
         if (self.config.fix_mass and target_mass is not None):
+            rho_before = self.height_coord.rho_ref + state_new.rho_prime.data
             state_new = fix_mass_nonhydrostatic_mpas(
                 state_new, target_mass,
                 self.height_coord, self.terrain_metric, self.mesh,
             )
+            if conservative:
+                # The fixer shifts dry density only; hold rho*q fixed.
+                rho_after = self.height_coord.rho_ref + state_new.rho_prime.data
+                state_new = state_new._replace(tracers=state_new.tracers.replace(
+                    data=state_new.tracers.data
+                    * (rho_before / rho_after)[..., None]))
 
         return state_new
 
