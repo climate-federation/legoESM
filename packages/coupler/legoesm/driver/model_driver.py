@@ -655,6 +655,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
             cfg, "cloud_clubb_cf_override_floor", None),
         saturation_scheme=getattr(cfg, "cloud_saturation_scheme", None),
         cover_condensate_q_ref=getattr(cfg, "cloud_cover_condensate_q_ref", None),
+        clubb_mf_cloud=bool(getattr(cfg, "clubb_mf", False)) or None,
         cam6_rhmini=getattr(cfg, "cloud_cam6_rhmini", None),
         cam6_rhmaxi=getattr(cfg, "cloud_cam6_rhmaxi", None),
         cam6_rhminis=getattr(cfg, "cloud_cam6_rhminis", None),
@@ -15809,6 +15810,11 @@ class ModelDriver:
                 "zc_T_prev",
                 "zc_q_v_prev",
                 "zc_p_s_prev",
+                # mf_cloudfrac / mf_qc (2026-11-23, vote): CAM7 CLUBB-MF
+                # plume cloud lag carry; zero = no plume cloud, the state of
+                # any run before the option (MF off writes nothing else).
+                "mf_cloudfrac",
+                "mf_qc",
             })
             if _any_physstate:
                 from legoesm.atmosphere.physics.physics_state import (

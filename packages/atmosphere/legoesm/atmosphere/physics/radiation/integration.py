@@ -990,6 +990,8 @@ def _call_radiation_backend(
     conv_precip: jnp.ndarray | None = None,
     conv_mass_flux_up: jnp.ndarray | None = None,
     conv_icwmr: jnp.ndarray | None = None,
+    mf_cloudfrac: jnp.ndarray | None = None,
+    mf_qc: jnp.ndarray | None = None,
     clear_sky_toa: bool = False,
     column_mesh=None,
     clubb_config=None,
@@ -1196,6 +1198,8 @@ def _call_radiation_backend(
             lat=lat,
             conv_mass_flux_up=conv_mass_flux_up,
             conv_icwmr=conv_icwmr,
+            mf_cloudfrac=mf_cloudfrac,
+            mf_qc=mf_qc,
             p_half=p_half,
             clubb_config=clubb_config,
             subcolumn_inhomogeneity=(getattr(cloud_config, "cloud_vertical_overlap_optics",
@@ -2051,6 +2055,7 @@ def _make_hydrostatic_radiation(
         # CAM6 deepcu inputs (lagged carry, same convention as conv_precip).
         _conv_mf_col = None
         _conv_icwmr_col = None
+        _mf_cf_col = _mf_qc_col = None
         if _cam6_cf_active and phys_state is not None:
             _conv_mf_col = getattr(phys_state, "conv_mass_flux_up", None)
             _conv_icwmr_col = getattr(phys_state, "conv_icwmr", None)
@@ -2058,6 +2063,11 @@ def _make_hydrostatic_radiation(
                 _conv_mf_col = _conv_mf_col.reshape(ncol, nlev + 1)
             if _conv_icwmr_col is not None:
                 _conv_icwmr_col = _conv_icwmr_col.reshape(T_col.shape)
+            # CAM7 CLUBB-MF plume cloud (lagged carry, read only when the
+            # cloud config's hookup is on).
+            if getattr(radiation_config.cloud_config, "clubb_mf_cloud", False):
+                _mf_cf_col = phys_state.mf_cloudfrac.reshape(T_col.shape)
+                _mf_qc_col = phys_state.mf_qc.reshape(T_col.shape)
 
         # Issue #273 follow-up: optionally shard the per-column radiation
         # workload across ``column_mesh`` so a 4×A100 (or any device
@@ -2164,6 +2174,8 @@ def _make_hydrostatic_radiation(
             conv_precip=_conv_precip_col,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            mf_cloudfrac=_mf_cf_col,
+            mf_qc=_mf_qc_col,
             solar_spectral_fraction=_ssf_ext,
             tsi=_tsi_ext,
             clear_sky_toa=_clr_sky_fused,
@@ -3427,6 +3439,7 @@ def _make_spectral_pe_radiation(
                 _cf_ovr = _cf_ovr.reshape(T_col.shape)
         _conv_mf_col = None
         _conv_icwmr_col = None
+        _mf_cf_col = _mf_qc_col = None
         if _cam6_cf_active and phys_state is not None:
             _conv_mf_col = getattr(phys_state, "conv_mass_flux_up", None)
             _conv_icwmr_col = getattr(phys_state, "conv_icwmr", None)
@@ -3434,6 +3447,11 @@ def _make_spectral_pe_radiation(
                 _conv_mf_col = _conv_mf_col.reshape(ncol, nlev + 1)
             if _conv_icwmr_col is not None:
                 _conv_icwmr_col = _conv_icwmr_col.reshape(T_col.shape)
+            # CAM7 CLUBB-MF plume cloud (lagged carry, read only when the
+            # cloud config's hookup is on).
+            if getattr(radiation_config.cloud_config, "clubb_mf_cloud", False):
+                _mf_cf_col = phys_state.mf_cloudfrac.reshape(T_col.shape)
+                _mf_qc_col = phys_state.mf_qc.reshape(T_col.shape)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -3467,6 +3485,8 @@ def _make_spectral_pe_radiation(
             cloud_fraction_override=_cf_ovr,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            mf_cloudfrac=_mf_cf_col,
+            mf_qc=_mf_qc_col,
             column_mesh=column_mesh,
             clubb_config=clubb_config,
         )

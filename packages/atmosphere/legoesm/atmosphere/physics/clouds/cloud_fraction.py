@@ -1183,6 +1183,8 @@ def compute_cloud_properties(
     conv_icwmr: jnp.ndarray | None = None,
     p_half: jnp.ndarray | None = None,
     clubb_config=None,
+    mf_cloudfrac: jnp.ndarray | None = None,
+    mf_qc: jnp.ndarray | None = None,
     n_cloud_in_cloud: bool = False,
     mg2_ice_dcs_m: float | None = None,
     mg2_ice_slope_log_width: float | None = None,
@@ -1373,8 +1375,21 @@ def compute_cloud_properties(
                 conv_mass_flux_up, conv_icwmr, config)
         _ast_cam6 = jnp.maximum(alst, aist)
         _alst_cam6 = alst
-        _deepcu_cam6 = deepcu
-        cf = jnp.minimum(_ast_cam6 + deepcu, 1.0)
+        if config.clubb_mf_cloud:
+            if mf_cloudfrac is None or mf_qc is None:
+                raise ValueError(
+                    "CloudConfig.clubb_mf_cloud needs the plume cloud "
+                    "(PhysicsState.mf_cloudfrac / mf_qc); got None.")
+            from legoesm.atmosphere.physics.turbulence.clubb_mf import (
+                mf_concld, mf_deep_cloud)
+            deepcu, conv_icwmr = mf_deep_cloud(
+                deepcu, jnp.zeros_like(T) if conv_icwmr is None else conv_icwmr,
+                mf_cloudfrac, mf_qc, config)
+            _deepcu_cam6 = deepcu
+            cf = jnp.minimum(_ast_cam6 + mf_concld(deepcu, config), 1.0)
+        else:
+            _deepcu_cam6 = deepcu
+            cf = jnp.minimum(_ast_cam6 + deepcu, 1.0)
     else:
         raise ValueError(
             f"Unknown cloud scheme: {config.scheme!r}. "

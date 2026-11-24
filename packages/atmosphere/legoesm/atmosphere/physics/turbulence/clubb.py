@@ -8,7 +8,7 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 7571)
+Table of contents (sections, in order; flag reference table at line 7586)
 -----------------------------------------------------------------------------
   1. [line  371] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
   2. [line  492] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
@@ -6957,6 +6957,13 @@ def clubb_step(
             lambda c, rzm, irzt, idz: clubb_mf_forcing(
                 c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness))(
             mf_in, rho_ds_zm, invrs_rho_ds_zt, 1.0 / dzt)
+    mf_cloud = {}
+    if clubb_mf:
+        # CAM7 clubb.F90:2566-2568: plume cloud from zm to zt (mf_cloudfrac_zt,
+        # mf_qc_zt), returned top-down for the cloud lane.
+        mf_cloud = dict(
+            mf_cloudfrac=flip_vertical(zm2zt(_mf_out["moist_a"], gr)),
+            mf_qc=flip_vertical(zm2zt(_mf_out["moist_qc"], gr)))
     forcing = CLUBBForcing(
         rtm=rtm_forcing, thlm=thlm_forcing, um=zeros_zt, vm=zeros_zt, wprtp=zeros_zm,
         wpthlp=zeros_zm, rtp2=zeros_zm, thlp2=zeros_zm, rtpthlp=zeros_zm)
@@ -7090,6 +7097,7 @@ def clubb_step(
                                + constants.L_v * wprtp_sfc)  # latent-ok: CAM6 clubb_intr energy-fix reference constant
     diags = dict(diags, ustar=ustar, shflx=shflx, lhflx=lhflx,
                  sfc_energy_in=sfc_energy_in)
+    diags.update(mf_cloud)
     return du_dt, dv_dt, dT_dt, dq_v_dt, new_state, diags
 
 
@@ -7313,6 +7321,7 @@ def clubb_turbulence_prognostic(
         rcp2_a = diags["rcp2_zt"]
         rcm_relvar_a = diags.get("rcm_relvar")
         dq_c_dt = diags.get("dq_c_dt")
+        mf_cf_a, mf_qc_a = diags.get("mf_cloudfrac"), diags.get("mf_qc")
     else:
         dt_sub = dt / n_sub
 
@@ -7371,6 +7380,11 @@ def clubb_turbulence_prognostic(
         rcp2_a = diag_stk["rcp2_zt"][-1]
         rcm_relvar_a = (diag_stk["rcm_relvar"][-1] if "rcm_relvar" in diag_stk
                         else None)
+        # CAM7 averages the plume cloud over the sub-cycle (clubb.F90:2489-2491)
+        mf_cf_a = (jnp.mean(diag_stk["mf_cloudfrac"], axis=0)
+                   if "mf_cloudfrac" in diag_stk else None)
+        mf_qc_a = (jnp.mean(diag_stk["mf_qc"], axis=0)
+                   if "mf_qc" in diag_stk else None)
 
     # With an injected tiled flux, report the surface diagnostics as the INJECTED
     # dynamic values directly (Louis-equivalent), rather than clubb_step's
@@ -7436,7 +7450,8 @@ def clubb_turbulence_prognostic(
         # CAM6 activation inputs (microp_aero/dropmixnuc): khzm_out of the LAST
         # sub-step's advance (clubb_intr.F90:1915, :1997, surface interface
         # included) and the end-of-sub-cycle wp2 left in WP2_nadv (:1987).
-        Kh_iface=Kh_iface, wp2_iface=flip_vertical(new_moments.wp2))
+        Kh_iface=Kh_iface, wp2_iface=flip_vertical(new_moments.wp2),
+        mf_cloudfrac=mf_cf_a, mf_qc=mf_qc_a)
     return output, pack_clubb_moments(new_moments)
 
 
