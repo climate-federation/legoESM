@@ -291,4 +291,3 @@ def test_single_rank_anomaly_integral_ignores_mask_like_the_fixer():
     np.testing.assert_allclose(np.asarray(fixed.rho_prime.data),
                                np.asarray(state.rho_prime.data),
                                rtol=0, atol=1e-15)
-

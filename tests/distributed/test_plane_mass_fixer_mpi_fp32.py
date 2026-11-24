@@ -92,14 +92,12 @@ from legoesm.atmosphere.dynamics.crm.rce_mpi import compute_dry_mass_plane_mpi
 from legoesm.atmosphere.dynamics.gcm.compressible_euler import CompressibleEulerConfig
 from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel, make_flat_plane_terrain_metric, make_rest_state)
-from legoesm.grids.plane import create_plane_grid
 from legoesm.grids.vertical import create_height_coordinate
 from legoesm.parallel.plane_mpi import make_plane_pencil_grid, make_plane_pencil_layout
 comm = MPI.COMM_WORLD
 N, NL = 16, 8
 lay = make_plane_pencil_layout(rank=comm.Get_rank(), n_ranks=2, n_ranks_y=1,
                                n_ranks_x=2, ny_global=N, nx_global=N, halo=1)
-gg = create_plane_grid(nx=N, ny=N, nlev=NL, dx=4.0e3, dy=4.0e3, dtype=jnp.float64)
 gl = make_plane_pencil_grid(lay, dx=4.0e3, dy=4.0e3, nlev=NL, dtype=jnp.float64)
 hc = create_height_coordinate(NL, H=20.0e3)
 rho = 1e-3 * np.random.RandomState(7).standard_normal((N, N, NL))
