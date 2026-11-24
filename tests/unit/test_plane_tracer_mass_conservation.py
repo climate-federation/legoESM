@@ -57,9 +57,11 @@ def _perturbed(model, state, q):
     bubble = (1e-3 * jnp.exp(-((x - 0.5) ** 2) / 0.02)[None, :, None]
               * jnp.sin(jnp.pi * z)[None, None, :] * rho_ref)
     u = 2.0 + jnp.cos(2 * jnp.pi * y)[:, None, None] * jnp.ones((1, nx, nl))
+    v = -1.5 + jnp.sin(2 * jnp.pi * x)[None, :, None] * jnp.ones((ny, 1, nl))
     w = 0.5 * jnp.cos(2 * jnp.pi * x)[None, :, None] * jnp.ones((ny, 1, nl - 1))
     return state._replace(
         u=state.u.replace(data=u),
+        v=state.v.replace(data=v),
         tracers=state.tracers.replace(data=q),
         rho_prime=state.rho_prime.replace(data=jnp.broadcast_to(bubble, (ny, nx, nl))),
         w=state.w.replace(data=state.w.data.at[:, :, 1:-1].set(w)),
@@ -70,7 +72,9 @@ def _varying_q(shape):
     ny, nx, nl = shape
     x = jnp.arange(nx) / nx
     z = (jnp.arange(nl) + 0.5) / nl
-    q1 = 1.0 + 0.3 * jnp.cos(2 * jnp.pi * x)[None, :, None] * jnp.sin(jnp.pi * z)
+    y = jnp.arange(ny) / ny
+    q1 = (1.0 + 0.3 * jnp.cos(2 * jnp.pi * x)[None, :, None] * jnp.sin(jnp.pi * z)
+          + 0.2 * jnp.sin(2 * jnp.pi * y)[:, None, None])
     q2 = 1e-3 * jnp.exp(-((z - 0.3) ** 2) / 0.01) * jnp.ones((ny, nx, 1))
     return jnp.stack([jnp.broadcast_to(q1, shape), q2], axis=-1)
 
@@ -100,15 +104,31 @@ def test_tracer_mass_conserved_every_acoustic_method(method, schemes):
 
 @pytest.mark.parametrize("overrides", [
     {"outer_integrator": "ssp_rk34"},
-    {"fix_mass": True},
+    {"smagorinsky_cs": 0.17, "sgs_vertical_diffusion": True},
 ])
-def test_tracer_mass_conserved_rk34_and_mass_fixer(overrides):
+def test_tracer_mass_conserved_rk34_and_sgs(overrides):
     model, state = _model(**overrides)
     state = _perturbed(model, state, _varying_q(state.u.data.shape))
     m0 = _tracer_mass(model, state)
     for _ in range(50):
         state = model.step(state, dt=2.0)
     assert float(jnp.max(jnp.abs(_tracer_mass(model, state) - m0) / m0)) < 1e-13
+
+
+def test_mass_fixer_holds_tracer_mass():
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        compute_dry_mass_plane)
+    model, state = _model(fix_mass=True, anchor_mass_to_initial=True)
+    state = _perturbed(model, state, _varying_q(state.u.data.shape))
+    dry0 = compute_dry_mass_plane(state, model.grid, model.height_coord,
+                                  model.terrain_metric)
+    model._target_mass = dry0 * (1.0 + 1e-4)     # force a real correction
+    m0 = _tracer_mass(model, state)
+    out = model.step(state, dt=2.0)
+    dry1 = compute_dry_mass_plane(out, model.grid, model.height_coord,
+                                  model.terrain_metric)
+    assert abs(float(dry1 / dry0) - 1.0 - 1e-4) < 1e-12
+    assert float(jnp.max(jnp.abs(_tracer_mass(model, out) - m0) / m0)) < 1e-13
 
 
 @pytest.mark.parametrize("method", sorted(METHODS))

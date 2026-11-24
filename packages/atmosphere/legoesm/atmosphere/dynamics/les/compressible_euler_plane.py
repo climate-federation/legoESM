@@ -2774,8 +2774,9 @@ def _tracer_face_value(f, flux, axis, scheme):
 
 
 def _tracer_vertical_face_value(f, flux, scheme):
-    """Tracer value at the ``nlev+1`` interfaces (index 0 = top), upwinded by
-    the upward mass ``flux``. Lid values are unused (zero flux there)."""
+    """Tracer value at the ``nlev+1`` interfaces (index 0 = top). ``flux`` is
+    the upward mass flux; its sign picks the donor cell. Lid values are unused
+    (zero flux there)."""
     nlev = f.shape[-2]
     pad = ((0, 0),) * (f.ndim - 2) + ((2, 2), (0, 0))
     fp = jnp.pad(f, pad, mode="edge")
@@ -2807,8 +2808,8 @@ def plane_conservative_tracer_stage(
     MPAS-A / WRF: tracers ride the mass flux continuity used over the stage,
     reconstructed from the evaluation state, in flux form::
 
-        (rho q)_out = rho_base q_base - div_h(F_h q_f) - d_z(G q_f)
-                      + dt_eff rho_eval dq_slow
+        (rho q)_out = rho_base q_base - div_h(F_h q_f)
+                      + [G q_f]_below - [G q_f]_above + dt_eff rho_eval dq_slow
 
     ``F_h`` is ``dt_eff * rho_face * u`` at the evaluation state (the slow
     continuity flux), or the acoustic accumulation ``(Fx, Fy)`` returned
@@ -2868,6 +2869,11 @@ def plane_conservative_tracer_stage(
     scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
     h_scheme = "van_leer" if scheme == "weno5" else scheme
     v_scheme = getattr(config, "vertical_tracer_advection", "centered")
+    if h_scheme == "van_leer" and h < 2:
+        # A narrower halo would give the two ranks of a seam face different
+        # face values, and tracer mass would leak at rank boundaries.
+        raise ValueError(
+            f"van_leer tracer faces need a halo of 2; layout.halo={h}.")
     q_pad = q_pad.reshape(q_pad.shape[:2] + (nlev, n_tr))
     fx = fx_pad[..., None]
     fy = fy_pad[..., None]
