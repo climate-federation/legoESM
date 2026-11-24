@@ -57,13 +57,33 @@ area cap replace CAM's hard switches. The root sign and its reciprocal
 are regularised by ``bsort_root`` (inf recovers CAM's stable quadratic). ``bsort_sat`` extends the two-segment
 formula smoothly using regularised absolute water excesses (CAM's ratio
 when the excesses have opposite signs). This keeps the otherwise inactive
-same-sign and endpoint evaluations finite. Defaults and denominator guards
-are TODO-VOTE; ``HARD`` recovers CAM. Per-column/per-call gaps belong in
+same-sign and endpoint evaluations finite. Voted 2026-11-24 (3-0 each):
+sharpness defaults case=1e10, sat=1e5, xc=disc=root=equal=area=100;
+Gaussian equality kernel; xsat=0.5 at both-zero excess and finite endpoint
+slopes; regularised c*q/(q**2 + width**2); old-checkpoint zero memory seed.
+``HARD`` recovers CAM. Per-column/per-call gaps belong in
 ``tests/atmosphere/oracle_fixtures/clubb_mf_bsort_default_gaps.json``; run the
 new test module as a script on a compute node to measure them. No measured
 default gap is claimed before that generator has run. The cap rescales the
 fluxes before convergence, retaining zero boundary fluxes and column thl/qt
 conservation; it does not discard prognostic water or energy.
+
+VOTE A = A, voted 3-0 (codex/GLM/Claude), 2026-11-24: at finite alive
+sharpness, update mass in log space and smoothly bound pre-survival lane
+area by 1/dtype epsilon using bsort_area sharpness. The ensemble area cap
+still acts before flux convergence; hard-limit mass arithmetic is unchanged.
+VOTE B = A, voted 3-0 (codex/GLM/Claude), 2026-11-24: mask the large
+quadratic root before division when its soft-min weight underflows (dtype
+tiny), with exact winner selection at the hard limit and no floor on a.
+
+User-supplied compute-node finding (2026-11-24): combined bsort+alphturb=3
+hard limit matches compiled CAM to 3.1e-9 per column, not 1e-10. A one-ulp
+input perturbation moves upa by up to 1.45e-9 in those same columns, consistent
+with CAM's own conditioning. VOTE E = A, voted 3-0 (codex/GLM/Claude),
+2026-11-24: retain 1e-10 except recorded step/field/column HARD gaps in
+``tests/atmosphere/oracle_fixtures/clubb_mf_bsort_alphturb3_hard_gaps.json``.
+Match recorded gaps to rtol=1e-6, atol=1e-12 and bound each above-tolerance
+gap by 10 times that column's measured one-ulp thl/qt sensitivity in upa/fluxes.
 
 """
 
@@ -182,13 +202,13 @@ class MFSmoothing(NamedTuple):
     convh: float = 1.0  # max(pblh, pblhmin) [1/m]                    V20
     kspan: float = 100.0  # alive-level count >= kspan_min [1/level]    V22'
     conv: float = 1.0e7  # condensation exit |dqc| < 2e-5 [kg/kg]^-1   V7'
-    # TODO-VOTE defaults: case=1e10 [(kg/kg)^-2], sat=1e5 [(kg/kg)^-1],
+    # Defaults voted 3-0 on 2026-11-24: case=1e10 [(kg/kg)^-2], sat=1e5 [(kg/kg)^-1],
     # xc=100 [1], disc=100 [s4/m4], root=100 [s2/m2], equal=100 [1], area=100 [1].
     bsort_case: float = 1.0e10
     bsort_sat: float = 1.0e5
     bsort_xc: float = 100.0
     bsort_disc: float = 100.0
-    bsort_root: float = 100.0  # stable-root sign choice [s2/m2], TODO-VOTE
+    bsort_root: float = 100.0  # stable-root sign choice [s2/m2], voted 3-0
     bsort_equal: float = 100.0
     bsort_area: float = 100.0
 
@@ -238,7 +258,7 @@ def bsort_roots(a, b, c, sm):
     """CAM roots :2497-2538, general quadratic on the alive ``a=wn**2>0`` branch.
 
     b==0 uses the same general formula (Fortran sign(1,0)=1). The sign is
-    smooth by default; TODO-VOTE: regularise c/q with q/(q*q + width*width),
+    smooth by default; voted 3-0 on 2026-11-24: regularise c/q with q/(q*q + width*width),
     width=1/bsort_root, since smoothing sign makes q cross zero. At inf the
     only q==0 case with a real root is b=c=0; its double root is zero.
     """
@@ -247,12 +267,19 @@ def bsort_roots(a, b, c, sm):
     rootdisc = jnp.where(rd > 0.0, jnp.sqrt(jnp.where(rd > 0.0, rd, 1.0)), 0.0)
     sign = 2.0 * sigmoid_switch(b, sm.bsort_root) - 1.0
     q = -0.5 * (b + sign * rootdisc)
-    r1 = q / a
     if math.isinf(sm.bsort_root):
         r2 = c / jnp.where(q != 0.0, q, 1.0)
     else:
         r2 = c * q / (q**2 + (1.0 / sm.bsort_root)**2)
-    return smooth_min(r1, r2, sm.bsort_xc), disc
+    # The discarded q/a can have a finite value but an overflowing reverse
+    # reciprocal-square in fp32. Decide its negligible tail BEFORE division.
+    # a is positive on the alive branch; no lower bound is imposed on it.
+    margin = (0.0 if math.isinf(sm.bsort_xc)
+              else -math.log(jnp.finfo(a.dtype).tiny) / sm.bsort_xc)
+    discard = (a >= 0.0) & (q - a * r2 > a * margin)
+    r1 = jnp.where(discard, 0.0, q) / jnp.where(discard, 1.0, a)
+    small = smooth_min(jnp.where(discard, r2, r1), r2, sm.bsort_xc)
+    return jnp.where(discard, r2, small), disc
 
 
 def bsort_clip(x, sharpness):
@@ -276,7 +303,7 @@ def buoyancy_sort_mixfrac(qtn, thln, wn, thl_e, qt_e, thv_e, iex, p, ztopm1, sm)
     CAM's stable general quadratic is used (see :func:`bsort_roots`);
     no a==0/b==0 branch is needed on the alive branch.
     Safe exact-zero denominators protect inactive endpoint evaluations only.
-    TODO-VOTE: at the degenerate both-zero excess, use xsat=1/2, and at
+    Voted 3-0 on 2026-11-24: at the degenerate both-zero excess, use xsat=1/2, and at
     endpoint xsat=0/1 use zero segment slope (CAM itself divides by zero).
     """
     hard_sat = math.isinf(sm.bsort_sat)
@@ -429,13 +456,24 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing(),
         new = (wn, thln, qtn, thvn, un, vn)
         prof = (gate, wn, thln, qtn, thvn, qcn, un, vn, exn)
         if bsort:
-            # CAM has exited exactly-zero-survival lanes. Avoid evaluating
-            # their exponential (0*inf in tall fp32 columns); fractional
-            # survival is applied only through cumulative alive below.
+            # CAM exits zero-survival lanes; never evaluate their growth.
             live = (gate > 0.0) & (carry[6] != 0.0)
-            mfn = carry[6] * jnp.exp(jnp.where(live, dz * (entn - detn), 0.0))
-            mfn = jnp.where(live, mfn, 0.0)
-            area = mfn / (jnp.where(wn > 0.0, wn, 1.0) * xk[13])
+            growth = jnp.where(live, dz * (entn - detn), 0.0)
+            scale = jnp.where(wn > 0.0, wn, 1.0) * xk[13]
+            if math.isinf(sm.alive):
+                # Preserve CAM's operation order, including the area division.
+                mfn = jnp.where(live, carry[6] * jnp.exp(growth), 0.0)
+                area = mfn / scale
+            else:
+                # VOTE A: forming m*exp(growth) first can overflow in lanes
+                # with tiny positive smooth survival and eturb proportional
+                # to 1/w. Bound log(area), rather than just one growth step:
+                # this also protects repeated growth and division by tiny w.
+                logarea = (jnp.log(jnp.where(live, carry[6], 1.0))
+                           + growth - jnp.log(scale))
+                logarea = smooth_min(logarea, -math.log(jnp.finfo(zm.dtype).eps), sm.bsort_area)
+                area = jnp.where(live, jnp.exp(logarea), 0.0)
+                mfn = area * scale
             new += (mfn,)
             prof += (area,)
         return new, prof

@@ -2,7 +2,7 @@
 
 Pinned cec8c93ed2 oracle: poisson public + bsort=.true.; same fixture layout
 as test_clubb_mf_oracle, including two calls with call 1's memory in call 2.
-Run on a COMPUTE NODE only. To record RULE 5 per-column gaps:
+Run on a COMPUTE NODE only. To record default and combined HARD per-column gaps:
     python -m tests.atmosphere.hydrostatic.unit.test_clubb_mf_bsort --write-gaps
 No values are invented when that measurement has not run.
 """
@@ -27,12 +27,14 @@ from legoesm.atmosphere.physics.turbulence.clubb_mf import (
 from legoesm.core.smooth import expm1_over_x
 
 from tests.atmosphere.hydrostatic.unit.test_clubb_mf_oracle import (
-    C_KEYS, FIELDS, TOL, _rel,
+    C_KEYS, FIELDS, FLUX, TOL, _rel,
 )
 
 jax.config.update("jax_enable_x64", True)
 FIXTURE = Path(__file__).resolve().parents[2] / "oracle_fixtures" / "clubb_mf_bsort.npz"
 GAPS = FIXTURE.with_name("clubb_mf_bsort_default_gaps.json")
+COMBINED_FIXTURE = FIXTURE.with_name("clubb_mf_bsort_alphturb3.npz")
+HARD_GAPS = FIXTURE.with_name("clubb_mf_bsort_alphturb3_hard_gaps.json")
 REPO = Path(__file__).resolve().parents[4]
 EXTRA = ("thl_zm", "qt_zm", "thv_zm")
 SWITCHES = tuple(f for f in MFSmoothing._fields if f.startswith("bsort_"))
@@ -92,11 +94,81 @@ def test_hard_limit_matches_cam_oracle(fx, step):
 
 @pytest.mark.parametrize("step", [1, 2])
 def test_bsort_alphturb3_hard_limit_matches_cam_oracle(step):
-    fx = dict(np.load(FIXTURE.with_name("clubb_mf_bsort_alphturb3.npz"), allow_pickle=True))
+    fx = dict(np.load(COMBINED_FIXTURE, allow_pickle=True))
     assert json.loads(str(fx["meta"]))["init_reals"][4] == 3.0
+    assert HARD_GAPS.exists(), "Measure on a compute node: python -m tests.atmosphere.hydrostatic.unit.test_clubb_mf_bsort --write-gaps"
+    stored = json.loads(HARD_GAPS.read_text())
+    assert stored["fixture_sha256"] == hashlib.sha256(COMBINED_FIXTURE.read_bytes()).hexdigest()
+    assert stored["gaps"].keys() == {"1", "2"}
+    exceptions = stored["gaps"][str(step)]
+    assert exceptions.keys() == set(FIELDS)
     got = _run(fx, HARD, step, alphturb=3.0)
     errors = {k: _rel_columns(np.asarray(got[k]), fx[f"ora{step}_{k}"]) for k in FIELDS}
-    assert max(max(values) for values in errors.values()) <= TOL, errors
+    sensitivity = _hard_ulp_sensitivity(fx, step, got)
+    for field, values in errors.items():
+        assert exceptions[field].keys() <= {str(i) for i in range(len(values))}
+        for column, value in enumerate(values):
+            label = f"step{step}/{field}/{column}"
+            if str(column) in exceptions[field]:
+                expected = exceptions[field][str(column)]
+                assert TOL < expected <= 10 * sensitivity[column], label
+                np.testing.assert_allclose(value, expected, rtol=1e-6, atol=1e-12,
+                                           err_msg=label)
+            else:
+                assert value <= TOL, (label, value)
+
+
+def _hard_ulp_sensitivity(fx, step, baseline):
+    """Max per-column relative upa/flux change under separate thl/qt perturbations."""
+    changes = []
+    for field in ("thl", "qt"):
+        perturbed = dict(fx)
+        perturbed[f"c_{field}"] = fx[f"c_{field}"] * (1.0 + 2**-52)
+        assert np.any(perturbed[f"c_{field}"] != fx[f"c_{field}"]), field
+        got = _run(perturbed, HARD, step, alphturb=3.0)
+        changes.extend(_rel_columns(np.asarray(got[k]), np.asarray(baseline[k]))
+                       for k in ("upa",) + FLUX)
+    return np.max(changes, axis=0)
+
+
+def _hard_gaps(fx):
+    """Only above-TOL exceptions; unlisted columns retain the strict oracle bar."""
+    gaps = {}
+    for step in (1, 2):
+        got = _run(fx, HARD, step, alphturb=3.0)
+        gaps[str(step)] = {
+            k: {str(i): value for i, value in enumerate(
+                _rel_columns(np.asarray(got[k]), fx[f"ora{step}_{k}"]))
+                if value > TOL}
+            for k in FIELDS
+        }
+    return gaps
+
+
+@pytest.mark.parametrize("memory_m", [0.0, 500.0])
+def test_bsort_alphturb3_smooth_values_and_reverse_gradients_are_finite(memory_m):
+    """Measured near-dead-lane overflow: all 20 columns, both memory seeds.
+
+    Differentiate through the plume velocities/root coefficients via the
+    surface heat flux and environmental thl, rather than a detached output.
+    """
+    fx = dict(np.load(FIXTURE.with_name("clubb_mf_bsort_alphturb3.npz"), allow_pickle=True))
+    memory = jnp.full((NUP,), memory_m)
+
+    def evaluate(c, draws):
+        def loss(thl, heat_flux):
+            out = integrate_mf(dict(c, thl=thl, wthl_sfc=heat_flux), draws,
+                               memory, MFSmoothing(), alphturb=3.0, bsort=True)
+            return sum(jnp.sum(out[k]) for k in FIELDS), out
+        return jax.value_and_grad(loss, argnums=(0, 1), has_aux=True)(c["thl"], c["wthl_sfc"])
+
+    (values, outputs), grads = jax.jit(jax.vmap(evaluate))(
+        _cols(fx), jnp.asarray(fx["ora1_enti"]))
+    for name, value in dict(outputs, loss=values).items():
+        assert np.all(np.isfinite(np.asarray(value))), (memory_m, name)
+    for grad in grads:
+        assert np.all(np.isfinite(np.asarray(grad))), memory_m
+        assert np.any(np.asarray(grad) != 0.0), "detached regression observable"
 
 
 def test_second_call_uses_first_calls_memory(fx):
@@ -179,6 +251,20 @@ def test_stable_roots_near_stopping_plume_and_zero_b():
 
 
 @pytest.mark.parametrize("sm", [HARD, MFSmoothing()])
+@pytest.mark.parametrize("a", [1e-16, 1e-20, 1e-25, 1e-30, 1e-37])
+def test_stable_roots_fp32_reverse_gradient_has_no_discarded_division_nan(sm, a):
+    def root(aa):
+        return bsort_roots(aa, jnp.float32(-1.0), jnp.float32(0.5), sm)[0]
+    value, grad = jax.jit(jax.value_and_grad(root))(jnp.float32(a))
+    assert value.dtype == grad.dtype == jnp.float32
+    assert np.isfinite(np.asarray(value)) and np.isfinite(np.asarray(grad))
+    # The finite root retains a nonzero derivative through the discriminant.
+    assert float(grad) != 0.0
+    expected = 0.5 if math.isinf(sm.bsort_root) else 0.5 / (1.0 + (1.0 / sm.bsort_root)**2)
+    np.testing.assert_allclose(value, expected, rtol=4 * np.finfo(np.float32).eps)
+
+
+@pytest.mark.parametrize("sm", [HARD, MFSmoothing()])
 def test_dead_scan_lanes_do_not_evaluate_overflowing_mass_growth(fx, sm):
     c = {k: v[0].astype(jnp.float32) for k, v in _cols(fx).items()}
     c["thv"] = c["thv"] + 100.0  # force negative acceleration and immediate death
@@ -248,18 +334,21 @@ def test_check_grads_through_each_new_switch_at_default(switch):
 
 
 @pytest.mark.parametrize("sm", [HARD, MFSmoothing()])
-def test_column_budgets_close_with_bsort(fx, sm):
+@pytest.mark.parametrize("alphturb,memory_m", [(0.0, 0.0), (3.0, 0.0), (3.0, 500.0)])
+def test_column_budgets_close_with_bsort(fx, sm, alphturb, memory_m):
     c = _cols(fx)
     rho = jnp.asarray(fx["c_rho_zt"])
     # Reuse the host divergence and CFL limiter, rather than reimplementing a budget.
     dt = float(json.loads(str(fx["meta"]))["dt"])
     heat, water, _ = jax.jit(jax.vmap(lambda col, rz, rzt, dz: clubb_mf_forcing(
         col, dt, rz, 1.0 / rzt, 1.0 / dz, sm, math.inf,
-        bsort=True, ztopm1=jnp.zeros(NUP))))(c, c["rho_zm"], rho, c["dzt"])
+        alphturb=alphturb, bsort=True, ztopm1=jnp.full((NUP,), memory_m))))(
+            c, c["rho_zm"], rho, c["dzt"])
     for tendency in (heat, water):
         terms = np.asarray(tendency * rho * c["dzt"])
         err = np.abs(np.sum(terms, axis=1))
         scale = np.sum(np.abs(terms), axis=1)
+        assert np.all(np.isfinite(terms))
         assert np.all(err <= 32 * np.finfo(terms.dtype).eps * scale), (err, scale)
     # Planted nonzero boundary flux/tendency breaks the column budget.
     assert np.any(np.asarray(water) != 0.0)
@@ -298,34 +387,66 @@ def test_carry_wiring_step_to_step_only_when_on(on):
         np.testing.assert_array_equal(ps.mf_ztopm1, top if on else np.zeros((2, NUP)))
 
 
-def test_bsort_top_is_carried_between_clubb_substeps(monkeypatch):
-    from legoesm.atmosphere.physics.turbulence import clubb as cb
-    from tests.unit.test_clubb_clubbtop import _column, _ON, _DT, _spun_up_moments, _args
-    c = _column(0.0)
-    cfg = _ON._replace(clubb_dt=_DT / 2.0)
-    carry = cb.pack_clubb_moments(_spun_up_moments(c))
-    seen = []
-    original = cb.clubb_step
+@pytest.mark.parametrize("n_sub", [1, 2])
+def test_real_bsort_bridge_returns_kernel_top_and_carries_memory(fx, monkeypatch, n_sub):
+    """No fabricated plume outputs: real bridge, real forcing, real kernel.
 
-    def step(*a, **kw):
-        seen.append(np.asarray(kw["mf_ztopm1"]))
-        # Keep the full real CLUBB bridge but replace the expensive plume
-        # producer, isolating carry order from plume thermodynamics.
-        kw = dict(kw, clubb_mf_bsort=False, clubb_mf=False)
-        *state, diag = original(*a, **kw)
-        diag = dict(diag, mf_ztopm1=jnp.asarray(seen[-1]) + 1.0)
-        return (*state, diag)
-    monkeypatch.setattr(cb, "clubb_step", step)
-    z0 = jnp.full((c["T"].shape[0], NUP), 100.0)
-    with jax.disable_jit():
-        out, _ = cb.clubb_turbulence_prognostic(
-            *_args(c), carry, c["p_full"], c["p_half"], c["z_full"], c["z_half"],
-            c["T_sfc"], c["q_sfc"], c["rho"], _DT, cfg, q_c=c["q_c"], lat=c["lat"],
-            clubb_mf=True, clubb_mf_bsort=True, mf_ztopm1=z0)
-    assert len(seen) == 2
-    np.testing.assert_array_equal(seen[0], z0)
-    np.testing.assert_array_equal(seen[1], z0 + 1.0)
-    np.testing.assert_array_equal(out.mf_ztopm1, z0 + 2.0)
+    Explicitly requiring bsort=True is the omission control; the comparisons
+    also require nonzero plumes and physical sensitivity to incoming memory.
+    """
+    from legoesm.atmosphere.physics.turbulence import clubb as cb
+    from legoesm.atmosphere.physics.turbulence import clubb_mf as mf
+
+    # One 32-level monsoon fixture column, including its production host grid.
+    i = 11
+    assert json.loads(str(fx["meta"]))["names"][i] == "monsoon_land"
+    c = {k[3:]: jnp.asarray(v[i:i + 1]) for k, v in fx.items() if k.startswith("in_")}
+    dt = 60.0
+    cfg = cb.CLUBBConfig(prognostic=True, clubb_dt=dt / n_sub)
+    carry = cb.pack_clubb_moments(cb.init_clubb_moments(1, c["T"].shape[1], cfg))
+    seen = []
+    original = mf.clubb_mf_forcing
+
+    def spy(col, *args, **kw):
+        assert kw.get("bsort") is True, "production bridge omitted bsort=True"
+        result = original(col, *args, **kw)
+        out = result[2]
+        jax.debug.callback(
+            lambda z, top, area, heat, water: seen.append(tuple(
+                np.asarray(x).copy() for x in (z, top, area, heat, water))),
+            kw["ztopm1"], out["ztopm1"], out["upa"], out["thlflx"], out["qtflx"],
+            ordered=True)
+        return result
+
+    monkeypatch.setattr(mf, "clubb_mf_forcing", spy)
+    runs, kernels = [], []
+    for memory_m in (0.0, 500.0):
+        seen.clear()
+        z0 = jnp.full((1, NUP), memory_m)
+        with jax.disable_jit():
+            out, _ = cb.clubb_turbulence_prognostic(
+                c["u"], c["v"], c["T"], c["q_v"], carry,
+                c["p_full"], c["p_half"], c["z_full"], c["z_half"],
+                c["T_sfc"], c["q_sfc"], c["rho"], dt, cfg,
+                sfc_wpthlp=jnp.asarray(fx["c_wthl_sfc"][i:i + 1]),
+                sfc_wprtp=jnp.asarray(fx["c_wqt_sfc"][i:i + 1]),
+                lat=jnp.zeros(1), mf_pblh=jnp.asarray(fx["c_pblh"][i:i + 1]),
+                clubb_mf=True, clubb_mf_bsort=True, mf_ztopm1=z0)
+        jax.block_until_ready(out)
+        assert len(seen) == n_sub
+        np.testing.assert_array_equal(seen[0][0], np.asarray(z0)[0])
+        for previous, current in zip(seen, seen[1:]):
+            np.testing.assert_array_equal(current[0], previous[1])
+        np.testing.assert_array_equal(np.asarray(out.mf_ztopm1)[0], seen[-1][1])
+        assert np.any(seen[0][2] > 0.0), "all plumes dead: memory check is vacuous"
+        for x in (out.mf_ztopm1, out.dT_dt, out.dq_v_dt):
+            assert np.all(np.isfinite(np.asarray(x)))
+        runs.append(out)
+        kernels.append(list(seen))
+    assert not np.array_equal(kernels[0][0][2], kernels[1][0][2]), "memory did not change kernel area"
+    assert any(not np.array_equal(kernels[0][0][k], kernels[1][0][k]) for k in (3, 4)), "memory did not change fluxes"
+    assert any(not np.array_equal(np.asarray(getattr(runs[0], k)), np.asarray(getattr(runs[1], k)))
+               for k in ("dT_dt", "dq_v_dt")), "memory did not reach production tendencies"
 
 
 if __name__ == "__main__":
@@ -341,3 +462,11 @@ if __name__ == "__main__":
         "gaps": _gaps(fixture),
     }, indent=1) + "\n")
     print("wrote", GAPS)
+    combined = dict(np.load(COMBINED_FIXTURE, allow_pickle=True))
+    HARD_GAPS.write_text(json.dumps({
+        "fixture_sha256": hashlib.sha256(COMBINED_FIXTURE.read_bytes()).hexdigest(),
+        "source_sha256": hashlib.sha256((REPO / SOURCE).read_bytes()).hexdigest(),
+        "names": json.loads(str(combined["meta"]))["names"],
+        "gaps": _hard_gaps(combined),
+    }, indent=1) + "\n")
+    print("wrote", HARD_GAPS)

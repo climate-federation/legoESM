@@ -792,7 +792,7 @@ class CLUBBConfig(NamedTuple):
     # CAM7 CLUBB-MF TKE-enhanced entrainment clubb_mf_alphturb (eturb = 1 +
     # alphturb*sqrt(tke)/w); 0 = off (default, vote 2026-11-24), CAM7 = 3.
     mf_alphturb: float = 0.0
-    # TODO-VOTE: same defaults/units as MFSmoothing.bsort_* (clubb_mf.py).
+    # Voted 3-0 on 2026-11-24; same defaults/units as MFSmoothing.bsort_*.
     mf_bsort_case_sharpness: float = 1.0e10
     mf_bsort_sat_sharpness: float = 1.0e5
     mf_bsort_xc_sharpness: float = 100.0
